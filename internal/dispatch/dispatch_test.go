@@ -1152,6 +1152,74 @@ func TestClaimTimeoutForReviewing(t *testing.T) {
 	}
 }
 
+// TestTickUsesInjectedClock proves step 5's own "now" (PKG9-PLAN.md section
+// 17.1) comes from cfg.Now, not a bare time.Now() Tick reads itself: a
+// ticket whose next_poll_at sits two hours past real wall-clock time is
+// skipped by a Tick with no injected clock (cfg.Now defaults to time.Now in
+// dispatch.New), but picked by a Tick whose cfg.Now reports a time already
+// past that poll schedule -- the fake clock selftest's own 17.1 wiring
+// needs to drive a babysit poll's backoff without a real wait.
+func TestTickUsesInjectedClock(t *testing.T) {
+	t.Parallel()
+
+	s := newDispatchTestStore(t)
+	ticketID := seedQueuedTicket(t, s, testFixtureRef)
+
+	seedOwner := "seed-shipping-owner"
+	seedExpires := time.Now().Add(10 * time.Minute).UTC().Truncate(time.Second)
+	claimed, err := s.Claim(t.Context(), ticketID, seedOwner, seedExpires)
+	if err != nil || !claimed {
+		t.Fatalf("seed claim: claimed=%v err=%v", claimed, err)
+	}
+	applied, err := s.CommitHandlerResult(t.Context(), store.HandlerCommit{
+		TicketID: ticketID, Owner: seedOwner, Expires: seedExpires, Next: testStateShipping, Reason: testSeedReason,
+	})
+	if err != nil || !applied {
+		t.Fatalf("seed commit: applied=%v err=%v", applied, err)
+	}
+
+	farFuture := time.Now().Add(2 * time.Hour).UTC().Truncate(time.Second)
+	pollOwner := "seed-poll-owner"
+	pollExpires := time.Now().Add(10 * time.Minute).UTC().Truncate(time.Second)
+	claimed, err = s.Claim(t.Context(), ticketID, pollOwner, pollExpires)
+	if err != nil || !claimed {
+		t.Fatalf("seed poll claim: claimed=%v err=%v", claimed, err)
+	}
+	applied, err = s.CommitHandlerResult(t.Context(), store.HandlerCommit{
+		TicketID: ticketID, Owner: pollOwner, Expires: pollExpires,
+		Poll: &store.PollUpdate{NextAt: farFuture, IntervalS: 300, Fingerprint: strings.Repeat("a", 64)},
+	})
+	if err != nil || !applied {
+		t.Fatalf("seed poll commit: applied=%v err=%v", applied, err)
+	}
+
+	spy := &spyHandler{next: testStateDone, reason: testSpyReason}
+	reg := job.Registry()
+	reg[testStateShipping] = spy
+
+	// The real clock: the poll is not due for another two hours, so this
+	// tick must not pick the ticket.
+	dReal := newDispatcher(t, s, newFixtureTracker(t), bus.New(), fakeRuntime(t), reg, nil, dispatch.Config{MaxParallel: 2, Owner: testOwner})
+	if err := dReal.Tick(t.Context()); err != nil {
+		t.Fatalf("Tick (real clock): %v", err)
+	}
+	if spy.calls != 0 {
+		t.Fatalf("spy.calls = %d after a real-clock tick, want 0 (the poll is not due yet)", spy.calls)
+	}
+
+	// An injected clock past the poll time: this tick must pick it up.
+	injected := farFuture.Add(time.Minute)
+	dFake := newDispatcher(t, s, newFixtureTracker(t), bus.New(), fakeRuntime(t), reg, nil, dispatch.Config{
+		MaxParallel: 2, Owner: testOwner, Now: func() time.Time { return injected },
+	})
+	if err := dFake.Tick(t.Context()); err != nil {
+		t.Fatalf("Tick (injected clock): %v", err)
+	}
+	if spy.calls != 1 {
+		t.Fatalf("spy.calls = %d after an injected-clock tick past the poll time, want 1", spy.calls)
+	}
+}
+
 // TestClaimTimeoutForJudging proves claimTimeoutFor's own "judging" row
 // (PKG9-PLAN.md section 17.1): the real machine.toml gives jobs.judge and
 // jobs.build both 45 minutes and jobs.perimeter 3, so

@@ -1,7 +1,9 @@
 package job_test
 
 import (
+	"strings"
 	"testing"
+	"time"
 
 	zing "zing"
 	"zing/internal/job"
@@ -213,6 +215,34 @@ func TestValidateCommitCountsSessions(t *testing.T) {
 	commit := store.HandlerCommit{TicketID: 1, Sessions: []store.SessionUpsert{{ID: &sessionID}}}
 	if err := job.ValidateCommit(ticket, commit); err != nil {
 		t.Errorf("ValidateCommit(Sessions only): %v, want nil", err)
+	}
+}
+
+// TestValidateCommitCountsPollFields proves the emptiness check (design
+// section 4.2, D8) grew to cover SetPRURL, Poll, PollSchedule, and
+// ClearPoll: a commit that sets only one of them is not the wholly empty
+// case ValidateCommit rejects.
+func TestValidateCommitCountsPollFields(t *testing.T) {
+	t.Parallel()
+
+	ticket := store.Ticket{ID: 1, State: testStatePlanning}
+	url := "https://github.com/x/zing/pull/1"
+
+	if err := job.ValidateCommit(ticket, store.HandlerCommit{TicketID: 1, SetPRURL: &url}); err != nil {
+		t.Errorf("ValidateCommit(SetPRURL only): %v, want nil", err)
+	}
+	if err := job.ValidateCommit(ticket, store.HandlerCommit{TicketID: 1, Poll: &store.PollUpdate{
+		NextAt: time.Now(), IntervalS: 30, Fingerprint: strings.Repeat("a", 64),
+	}}); err != nil {
+		t.Errorf("ValidateCommit(Poll only): %v, want nil", err)
+	}
+	if err := job.ValidateCommit(ticket, store.HandlerCommit{TicketID: 1, PollSchedule: &store.PollSchedule{
+		NextAt: time.Now(), IntervalS: 30,
+	}}); err != nil {
+		t.Errorf("ValidateCommit(PollSchedule only): %v, want nil", err)
+	}
+	if err := job.ValidateCommit(ticket, store.HandlerCommit{TicketID: 1, ClearPoll: true}); err != nil {
+		t.Errorf("ValidateCommit(ClearPoll only): %v, want nil", err)
 	}
 }
 

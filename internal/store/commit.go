@@ -34,6 +34,11 @@ const (
 	questionStateResolved = "resolved"
 
 	waitingFlagQuestions = "questions"
+
+	// nullDisplay is the "have" side of a same-to-same conflict message
+	// (setKindTx, setBranchTx, setPRURLTx) when the column's current value
+	// is NULL, so the three share one literal (goconst).
+	nullDisplay = "null"
 )
 
 // errRunNeedsSession is returned when a HandlerCommit carries a Run but no
@@ -82,6 +87,23 @@ type HandlerCommit struct {
 	// that same value; any other current value is a conflict. Applied after
 	// SetKind.
 	SetBranch *string
+	// SetPRURL sets tickets.pr_url when it is currently NULL or already
+	// that same value; any other current value is the conflict "pr url
+	// conflict: have <x>, want <y>" (design section 4.2, 8.2). Applied after
+	// SetBranch.
+	SetPRURL *string
+	// Poll sets all three poll columns together (design section 4.2, D8).
+	// PollSchedule moves next_poll_at and poll_interval_s only, leaving
+	// poll_fingerprint as it is (used when a poll's GitHub reads failed,
+	// 8.3, so no fingerprint can be computed). ClearPoll sets all three to
+	// NULL. At most one of Poll, PollSchedule, and ClearPoll may be set in
+	// a single commit; more than one is the error "commit handler result:
+	// at most one poll update per commit". All three are applied in the
+	// same fenced ticket UPDATE that carries Next, Waiting, and the claim
+	// clear.
+	Poll         *PollUpdate
+	PollSchedule *PollSchedule
+	ClearPoll    bool
 	// Artifacts is inserted after Runs and SetKind: TicketID is forced to
 	// this commit's ticket, a non-nil RunID must belong to it, and
 	// Version == 0 becomes one past that (ticket, type)'s current maximum.
@@ -178,17 +200,33 @@ type SessionUpsert struct {
 //
 // Order inside the transaction (section 6.3, 4.5): verify the fence; upsert
 // the session and learn its id; update every further session Sessions
-// names; insert or update the runs and learn their ids; set kind; insert
-// the artifacts; seal the cohort when Seal is set;
-// record the escalation and its linked question when Escalation is set;
-// resolve every question when ResolveAll is set; insert the messages,
+// names; insert or update the runs and learn their ids; set kind; set
+// branch; set pr url; insert the artifacts; seal the cohort when Seal is
+// set; record the escalation and its linked question when Escalation is
+// set; resolve every question when ResolveAll is set; insert the messages,
 // attaching the single run's id when AttachRunToMsgs is set; resolve each
 // ResolveQuestions id and insert its resolved message; write the state
-// message; then apply Next, Waiting, and the claim clear in the one fenced
-// ticket UPDATE that also serves as the final fence check.
+// message; then apply Next, Waiting, the three poll columns (Poll,
+// PollSchedule, or ClearPoll, design section 4.2, D8), and the claim clear
+// in the one fenced ticket UPDATE that also serves as the final fence
+// check.
 func (s *Store) CommitHandlerResult(ctx context.Context, c HandlerCommit) (bool, error) {
 	if c.AttachRunToMsgs && len(c.Runs) != 1 {
 		return false, errors.New("commit handler result: attach needs exactly one run")
+	}
+	if pollUpdateCount(c) > 1 {
+		return false, errors.New("commit handler result: at most one poll update per commit")
+	}
+	if c.Poll != nil {
+		if !isHex64Lower(c.Poll.Fingerprint) {
+			return false, errors.New("commit handler result: poll fingerprint must be 64 lowercase hex characters")
+		}
+		if c.Poll.IntervalS < 30 || c.Poll.IntervalS > 300 {
+			return false, errors.New("commit handler result: poll interval must be 30 to 300")
+		}
+	}
+	if c.PollSchedule != nil && (c.PollSchedule.IntervalS < 30 || c.PollSchedule.IntervalS > 300) {
+		return false, errors.New("commit handler result: poll interval must be 30 to 300")
 	}
 	if c.Next != "" && c.Reason == "" {
 		return false, fmt.Errorf("commit handler result: reason is required when transitioning to %s", c.Next)
@@ -275,6 +313,12 @@ func (s *Store) CommitHandlerResult(ctx context.Context, c HandlerCommit) (bool,
 
 	if c.SetBranch != nil {
 		if err = setBranchTx(ctx, tx, c.TicketID, *c.SetBranch); err != nil {
+			return false, fmt.Errorf("commit handler result: %w", err)
+		}
+	}
+
+	if c.SetPRURL != nil {
+		if err = setPRURLTx(ctx, tx, c.TicketID, *c.SetPRURL); err != nil {
 			return false, fmt.Errorf("commit handler result: %w", err)
 		}
 	}
@@ -380,15 +424,41 @@ func (s *Store) CommitHandlerResult(ctx context.Context, c HandlerCommit) (bool,
 		}
 	}
 
+	// nextPollAt, pollIntervalS, and pollFingerprint default to the ticket's
+	// own current values (read at the top of this transaction), so a commit
+	// that sets none of Poll, PollSchedule, or ClearPoll leaves all three
+	// poll columns untouched (design section 4.2, D8).
+	nextPollAt := formatTimePtr(ticket.NextPollAt)
+	pollIntervalS := ticket.PollIntervalS
+	pollFingerprint := ticket.PollFingerprint
+	switch {
+	case c.ClearPoll:
+		nextPollAt, pollIntervalS, pollFingerprint = nil, nil, nil
+	case c.Poll != nil:
+		at := formatTime(c.Poll.NextAt)
+		iv := c.Poll.IntervalS
+		fp := c.Poll.Fingerprint
+		nextPollAt, pollIntervalS, pollFingerprint = &at, &iv, &fp
+	case c.PollSchedule != nil:
+		at := formatTime(c.PollSchedule.NextAt)
+		iv := c.PollSchedule.IntervalS
+		nextPollAt, pollIntervalS = &at, &iv
+		// pollFingerprint stays the ticket's own current value: a
+		// schedule-only commit never touches it (design section 4.2, 8.3).
+	}
+
 	var res sql.Result
 	res, err = tx.ExecContext(ctx,
 		`UPDATE tickets SET
 			state = CASE WHEN ? <> '' THEN ? ELSE state END,
 			waiting_on = ?,
+			next_poll_at = ?,
+			poll_interval_s = ?,
+			poll_fingerprint = ?,
 			claim_owner = NULL,
 			claim_expires_at = NULL
 		 WHERE id = ? AND claim_owner = ? AND claim_expires_at = ?`,
-		c.Next, c.Next, c.Waiting, c.TicketID, c.Owner, formatTime(expires),
+		c.Next, c.Next, c.Waiting, nextPollAt, pollIntervalS, pollFingerprint, c.TicketID, c.Owner, formatTime(expires),
 	)
 	if err != nil {
 		return false, fmt.Errorf("commit handler result: update ticket: %w", err)
@@ -618,7 +688,7 @@ func setKindTx(ctx context.Context, tx *sql.Tx, ticketID int64, kind string) err
 	if have.Valid && have.String == kind {
 		return nil // same-to-same: the driver reported zero rows for a no-op write
 	}
-	haveStr := "null"
+	haveStr := nullDisplay
 	if have.Valid {
 		haveStr = have.String
 	}
@@ -654,11 +724,76 @@ func setBranchTx(ctx context.Context, tx *sql.Tx, ticketID int64, branch string)
 	if have.Valid && have.String == branch {
 		return nil // same-to-same: the driver reported zero rows for a no-op write
 	}
-	haveStr := "null"
+	haveStr := nullDisplay
 	if have.Valid {
 		haveStr = have.String
 	}
 	return fmt.Errorf("branch conflict: have %s, want %s", haveStr, branch)
+}
+
+// setPRURLTx sets tickets.pr_url to url when it is currently NULL or
+// already that same value, mirroring setKindTx's and setBranchTx's
+// same-to-same and conflict handling (design section 4.2, 8.2).
+func setPRURLTx(ctx context.Context, tx *sql.Tx, ticketID int64, url string) error {
+	res, err := tx.ExecContext(ctx,
+		`UPDATE tickets SET pr_url = ? WHERE id = ? AND (pr_url IS NULL OR pr_url = ?)`,
+		url, ticketID, url,
+	)
+	if err != nil {
+		return fmt.Errorf("set pr url: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("set pr url: %w", err)
+	}
+	if n > 0 {
+		return nil
+	}
+
+	var have sql.NullString
+	if err := tx.QueryRowContext(ctx, `SELECT pr_url FROM tickets WHERE id = ?`, ticketID).Scan(&have); err != nil {
+		return fmt.Errorf("read pr url for conflict: %w", err)
+	}
+	if have.Valid && have.String == url {
+		return nil // same-to-same: the driver reported zero rows for a no-op write
+	}
+	haveStr := nullDisplay
+	if have.Valid {
+		haveStr = have.String
+	}
+	return fmt.Errorf("pr url conflict: have %s, want %s", haveStr, url)
+}
+
+// pollUpdateCount reports how many of c's three poll-update fields are set,
+// the input to CommitHandlerResult's "at most one poll update per commit"
+// rule (design section 4.2, D8).
+func pollUpdateCount(c HandlerCommit) int {
+	n := 0
+	if c.Poll != nil {
+		n++
+	}
+	if c.PollSchedule != nil {
+		n++
+	}
+	if c.ClearPoll {
+		n++
+	}
+	return n
+}
+
+// isHex64Lower reports whether s is exactly 64 lowercase hexadecimal
+// characters (design section 4.2's ^[0-9a-f]{64}$ rule for a poll
+// fingerprint).
+func isHex64Lower(s string) bool {
+	if len(s) != 64 {
+		return false
+	}
+	for _, r := range s {
+		if (r < '0' || r > '9') && (r < 'a' || r > 'f') {
+			return false
+		}
+	}
+	return true
 }
 
 // insertArtifactTx is InsertArtifact (store.go), tx-scoped: it validates

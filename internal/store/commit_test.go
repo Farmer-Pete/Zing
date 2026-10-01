@@ -1742,6 +1742,435 @@ func TestCommitSetBranch(t *testing.T) {
 	})
 }
 
+// --- CommitHandlerResult: SetPRURL ------------------------------------------
+
+func TestCommitSetPRURL(t *testing.T) {
+	t.Parallel()
+	const prURL1, prURL2 = "https://github.com/x/zing/pull/1", "https://github.com/x/zing/pull/2"
+
+	t.Run("null to a url succeeds", func(t *testing.T) {
+		t.Parallel()
+		s := newTestStore(t)
+		ctx := t.Context()
+		_, ticketID := seedQueuedTicket(t, s, "1")
+		owner, expires := claimForCommit(t, s, ticketID)
+
+		applied, err := s.CommitHandlerResult(ctx, HandlerCommit{
+			TicketID: ticketID, Owner: owner, Expires: expires, SetPRURL: new(prURL1),
+		})
+		if err != nil {
+			t.Fatalf("CommitHandlerResult: %v", err)
+		}
+		if !applied {
+			t.Fatal("CommitHandlerResult: applied = false, want true")
+		}
+
+		got, getErr := s.GetTicket(ctx, ticketID)
+		if getErr != nil {
+			t.Fatalf("GetTicket: %v", getErr)
+		}
+		if got.PRURL == nil || *got.PRURL != prURL1 {
+			t.Errorf("ticket.PRURL = %v, want %s", got.PRURL, prURL1)
+		}
+	})
+
+	t.Run("same value succeeds", func(t *testing.T) {
+		t.Parallel()
+		s := newTestStore(t)
+		ctx := t.Context()
+		_, ticketID := seedQueuedTicket(t, s, "1")
+
+		owner1, expires1 := claimForCommit(t, s, ticketID)
+		if _, err := s.CommitHandlerResult(ctx, HandlerCommit{
+			TicketID: ticketID, Owner: owner1, Expires: expires1, SetPRURL: new(prURL1),
+		}); err != nil {
+			t.Fatalf("seed SetPRURL(%s): %v", prURL1, err)
+		}
+
+		owner2, expires2 := claimForCommit(t, s, ticketID)
+		applied, err := s.CommitHandlerResult(ctx, HandlerCommit{
+			TicketID: ticketID, Owner: owner2, Expires: expires2, SetPRURL: new(prURL1),
+		})
+		if err != nil {
+			t.Fatalf("CommitHandlerResult(same url): %v, want nil", err)
+		}
+		if !applied {
+			t.Fatal("CommitHandlerResult: applied = false, want true")
+		}
+
+		got, getErr := s.GetTicket(ctx, ticketID)
+		if getErr != nil {
+			t.Fatalf("GetTicket: %v", getErr)
+		}
+		if got.PRURL == nil || *got.PRURL != prURL1 {
+			t.Errorf("ticket.PRURL = %v, want unchanged %s", got.PRURL, prURL1)
+		}
+	})
+
+	t.Run("a different value conflicts", func(t *testing.T) {
+		t.Parallel()
+		s := newTestStore(t)
+		ctx := t.Context()
+		_, ticketID := seedQueuedTicket(t, s, "1")
+
+		owner1, expires1 := claimForCommit(t, s, ticketID)
+		if _, err := s.CommitHandlerResult(ctx, HandlerCommit{
+			TicketID: ticketID, Owner: owner1, Expires: expires1, SetPRURL: new(prURL1),
+		}); err != nil {
+			t.Fatalf("seed SetPRURL(%s): %v", prURL1, err)
+		}
+
+		owner2, expires2 := claimForCommit(t, s, ticketID)
+		applied, err := s.CommitHandlerResult(ctx, HandlerCommit{
+			TicketID: ticketID, Owner: owner2, Expires: expires2, SetPRURL: new(prURL2),
+		})
+		wantErr := "pr url conflict: have " + prURL1 + ", want " + prURL2
+		if err == nil || !strings.Contains(err.Error(), wantErr) {
+			t.Fatalf("err = %v, want containing %q", err, wantErr)
+		}
+		if applied {
+			t.Error("applied = true, want false")
+		}
+
+		got, getErr := s.GetTicket(ctx, ticketID)
+		if getErr != nil {
+			t.Fatalf("GetTicket: %v", getErr)
+		}
+		if got.PRURL == nil || *got.PRURL != prURL1 {
+			t.Errorf("ticket.PRURL after a rejected conflicting SetPRURL = %v, want unchanged %s", got.PRURL, prURL1)
+		}
+	})
+}
+
+// --- CommitHandlerResult: Poll, PollSchedule, ClearPoll ---------------------
+
+// testFingerprint is the one 64-lowercase-hex fingerprint value this
+// section's commit tests share (goconst).
+const testFingerprint = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+
+func TestCommitPoll(t *testing.T) {
+	t.Parallel()
+	s := newTestStore(t)
+	ctx := t.Context()
+	_, ticketID := seedQueuedTicket(t, s, "1")
+	owner, expires := claimForCommit(t, s, ticketID)
+
+	nextAt := time.Now().Add(30 * time.Second).UTC().Truncate(time.Second)
+	applied, err := s.CommitHandlerResult(ctx, HandlerCommit{
+		TicketID: ticketID, Owner: owner, Expires: expires,
+		Poll: &PollUpdate{NextAt: nextAt, IntervalS: 30, Fingerprint: testFingerprint},
+	})
+	if err != nil {
+		t.Fatalf("CommitHandlerResult: %v", err)
+	}
+	if !applied {
+		t.Fatal("CommitHandlerResult: applied = false, want true")
+	}
+
+	got, getErr := s.GetTicket(ctx, ticketID)
+	if getErr != nil {
+		t.Fatalf("GetTicket: %v", getErr)
+	}
+	if got.NextPollAt == nil || !got.NextPollAt.Equal(nextAt) {
+		t.Errorf("ticket.NextPollAt = %v, want %v", got.NextPollAt, nextAt)
+	}
+	if got.PollIntervalS == nil || *got.PollIntervalS != 30 {
+		t.Errorf("ticket.PollIntervalS = %v, want 30", got.PollIntervalS)
+	}
+	if got.PollFingerprint == nil || *got.PollFingerprint != testFingerprint {
+		t.Errorf("ticket.PollFingerprint = %v, want %q", got.PollFingerprint, testFingerprint)
+	}
+}
+
+// TestCommitPollSchedule proves PollSchedule moves next_poll_at and
+// poll_interval_s but leaves poll_fingerprint exactly as it is (design
+// section 4.2, 8.3): still NULL when nothing set it yet, and still whatever
+// a previous Poll commit wrote when one did.
+func TestCommitPollSchedule(t *testing.T) {
+	t.Parallel()
+
+	t.Run("fingerprint NULL stays NULL", func(t *testing.T) {
+		t.Parallel()
+		s := newTestStore(t)
+		ctx := t.Context()
+		_, ticketID := seedQueuedTicket(t, s, "1")
+		owner, expires := claimForCommit(t, s, ticketID)
+
+		nextAt := time.Now().Add(30 * time.Second).UTC().Truncate(time.Second)
+		applied, err := s.CommitHandlerResult(ctx, HandlerCommit{
+			TicketID: ticketID, Owner: owner, Expires: expires,
+			PollSchedule: &PollSchedule{NextAt: nextAt, IntervalS: 30},
+		})
+		if err != nil {
+			t.Fatalf("CommitHandlerResult: %v", err)
+		}
+		if !applied {
+			t.Fatal("CommitHandlerResult: applied = false, want true")
+		}
+
+		got, getErr := s.GetTicket(ctx, ticketID)
+		if getErr != nil {
+			t.Fatalf("GetTicket: %v", getErr)
+		}
+		if got.NextPollAt == nil || !got.NextPollAt.Equal(nextAt) {
+			t.Errorf("ticket.NextPollAt = %v, want %v", got.NextPollAt, nextAt)
+		}
+		if got.PollIntervalS == nil || *got.PollIntervalS != 30 {
+			t.Errorf("ticket.PollIntervalS = %v, want 30", got.PollIntervalS)
+		}
+		if got.PollFingerprint != nil {
+			t.Errorf("ticket.PollFingerprint = %v, want nil", *got.PollFingerprint)
+		}
+	})
+
+	t.Run("fingerprint stays untouched", func(t *testing.T) {
+		t.Parallel()
+		s := newTestStore(t)
+		ctx := t.Context()
+		_, ticketID := seedQueuedTicket(t, s, "1")
+
+		owner1, expires1 := claimForCommit(t, s, ticketID)
+		firstAt := time.Now().Add(30 * time.Second).UTC().Truncate(time.Second)
+		if _, err := s.CommitHandlerResult(ctx, HandlerCommit{
+			TicketID: ticketID, Owner: owner1, Expires: expires1,
+			Poll: &PollUpdate{NextAt: firstAt, IntervalS: 30, Fingerprint: testFingerprint},
+		}); err != nil {
+			t.Fatalf("seed Poll: %v", err)
+		}
+
+		owner2, expires2 := claimForCommit(t, s, ticketID)
+		secondAt := time.Now().Add(60 * time.Second).UTC().Truncate(time.Second)
+		applied, err := s.CommitHandlerResult(ctx, HandlerCommit{
+			TicketID: ticketID, Owner: owner2, Expires: expires2,
+			PollSchedule: &PollSchedule{NextAt: secondAt, IntervalS: 60},
+		})
+		if err != nil {
+			t.Fatalf("CommitHandlerResult: %v", err)
+		}
+		if !applied {
+			t.Fatal("CommitHandlerResult: applied = false, want true")
+		}
+
+		got, getErr := s.GetTicket(ctx, ticketID)
+		if getErr != nil {
+			t.Fatalf("GetTicket: %v", getErr)
+		}
+		if got.NextPollAt == nil || !got.NextPollAt.Equal(secondAt) {
+			t.Errorf("ticket.NextPollAt = %v, want %v", got.NextPollAt, secondAt)
+		}
+		if got.PollIntervalS == nil || *got.PollIntervalS != 60 {
+			t.Errorf("ticket.PollIntervalS = %v, want 60", got.PollIntervalS)
+		}
+		if got.PollFingerprint == nil || *got.PollFingerprint != testFingerprint {
+			t.Errorf("ticket.PollFingerprint = %v, want unchanged %q", got.PollFingerprint, testFingerprint)
+		}
+	})
+}
+
+// TestCommitClearPoll proves ClearPoll sets all three poll columns to NULL
+// (design section 4.2, D8).
+func TestCommitClearPoll(t *testing.T) {
+	t.Parallel()
+	s := newTestStore(t)
+	ctx := t.Context()
+	_, ticketID := seedQueuedTicket(t, s, "1")
+
+	owner1, expires1 := claimForCommit(t, s, ticketID)
+	nextAt := time.Now().Add(30 * time.Second).UTC().Truncate(time.Second)
+	if _, err := s.CommitHandlerResult(ctx, HandlerCommit{
+		TicketID: ticketID, Owner: owner1, Expires: expires1,
+		Poll: &PollUpdate{NextAt: nextAt, IntervalS: 30, Fingerprint: testFingerprint},
+	}); err != nil {
+		t.Fatalf("seed Poll: %v", err)
+	}
+
+	owner2, expires2 := claimForCommit(t, s, ticketID)
+	applied, err := s.CommitHandlerResult(ctx, HandlerCommit{
+		TicketID: ticketID, Owner: owner2, Expires: expires2, ClearPoll: true,
+	})
+	if err != nil {
+		t.Fatalf("CommitHandlerResult: %v", err)
+	}
+	if !applied {
+		t.Fatal("CommitHandlerResult: applied = false, want true")
+	}
+
+	got, getErr := s.GetTicket(ctx, ticketID)
+	if getErr != nil {
+		t.Fatalf("GetTicket: %v", getErr)
+	}
+	if got.NextPollAt != nil {
+		t.Errorf("ticket.NextPollAt = %v, want nil", *got.NextPollAt)
+	}
+	if got.PollIntervalS != nil {
+		t.Errorf("ticket.PollIntervalS = %v, want nil", *got.PollIntervalS)
+	}
+	if got.PollFingerprint != nil {
+		t.Errorf("ticket.PollFingerprint = %v, want nil", *got.PollFingerprint)
+	}
+}
+
+// TestCommitOnePollUpdateOnly proves CommitHandlerResult refuses a commit
+// that sets more than one of Poll, PollSchedule, and ClearPoll (design
+// section 4.2), rejecting it before the transaction opens (no ticket row
+// changes).
+func TestCommitOnePollUpdateOnly(t *testing.T) {
+	t.Parallel()
+	wantErr := "commit handler result: at most one poll update per commit"
+	nextAt := time.Now().Add(30 * time.Second).UTC().Truncate(time.Second)
+
+	cases := map[string]HandlerCommit{
+		"Poll and PollSchedule": {
+			Poll:         &PollUpdate{NextAt: nextAt, IntervalS: 30, Fingerprint: testFingerprint},
+			PollSchedule: &PollSchedule{NextAt: nextAt, IntervalS: 30},
+		},
+		"Poll and ClearPoll": {
+			Poll:      &PollUpdate{NextAt: nextAt, IntervalS: 30, Fingerprint: testFingerprint},
+			ClearPoll: true,
+		},
+		"PollSchedule and ClearPoll": {
+			PollSchedule: &PollSchedule{NextAt: nextAt, IntervalS: 30},
+			ClearPoll:    true,
+		},
+	}
+	for name, partial := range cases {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			s := newTestStore(t)
+			ctx := t.Context()
+			_, ticketID := seedQueuedTicket(t, s, "1")
+			owner, expires := claimForCommit(t, s, ticketID)
+
+			commit := partial
+			commit.TicketID, commit.Owner, commit.Expires = ticketID, owner, expires
+			applied, err := s.CommitHandlerResult(ctx, commit)
+			if err == nil || !strings.Contains(err.Error(), wantErr) {
+				t.Fatalf("err = %v, want containing %q", err, wantErr)
+			}
+			if applied {
+				t.Error("applied = true, want false")
+			}
+		})
+	}
+}
+
+// TestCommitFingerprintUppercaseRefused proves Poll.Fingerprint's validation
+// (design section 4.2) refuses an uppercase character, even at the right
+// length.
+func TestCommitFingerprintUppercaseRefused(t *testing.T) {
+	t.Parallel()
+	s := newTestStore(t)
+	ctx := t.Context()
+	_, ticketID := seedQueuedTicket(t, s, "1")
+	owner, expires := claimForCommit(t, s, ticketID)
+
+	uppercase := "A" + testFingerprint[1:]
+	applied, err := s.CommitHandlerResult(ctx, HandlerCommit{
+		TicketID: ticketID, Owner: owner, Expires: expires,
+		Poll: &PollUpdate{NextAt: time.Now(), IntervalS: 30, Fingerprint: uppercase},
+	})
+	wantErr := "commit handler result: poll fingerprint must be 64 lowercase hex characters"
+	if err == nil || !strings.Contains(err.Error(), wantErr) {
+		t.Fatalf("err = %v, want containing %q", err, wantErr)
+	}
+	if applied {
+		t.Error("applied = true, want false")
+	}
+}
+
+// TestCommitFingerprintNonHexRefused proves Poll.Fingerprint's validation
+// (design section 4.2) refuses a 64-character value that is not hex.
+func TestCommitFingerprintNonHexRefused(t *testing.T) {
+	t.Parallel()
+	s := newTestStore(t)
+	ctx := t.Context()
+	_, ticketID := seedQueuedTicket(t, s, "1")
+	owner, expires := claimForCommit(t, s, ticketID)
+
+	nonHex := "g" + testFingerprint[1:]
+	applied, err := s.CommitHandlerResult(ctx, HandlerCommit{
+		TicketID: ticketID, Owner: owner, Expires: expires,
+		Poll: &PollUpdate{NextAt: time.Now(), IntervalS: 30, Fingerprint: nonHex},
+	})
+	wantErr := "commit handler result: poll fingerprint must be 64 lowercase hex characters"
+	if err == nil || !strings.Contains(err.Error(), wantErr) {
+		t.Fatalf("err = %v, want containing %q", err, wantErr)
+	}
+	if applied {
+		t.Error("applied = true, want false")
+	}
+}
+
+// TestCommitPollIntervalBounds proves IntervalS's 30-to-300 validation
+// (design section 4.2) on both Poll and PollSchedule: 29 and 301 are
+// refused, 30 and 300 are accepted.
+func TestCommitPollIntervalBounds(t *testing.T) {
+	t.Parallel()
+	wantErr := "commit handler result: poll interval must be 30 to 300"
+	nextAt := time.Now().Add(30 * time.Second)
+
+	for _, iv := range []int{29, 301} {
+		t.Run(fmt.Sprintf("Poll refuses %d", iv), func(t *testing.T) {
+			t.Parallel()
+			s := newTestStore(t)
+			ctx := t.Context()
+			_, ticketID := seedQueuedTicket(t, s, "1")
+			owner, expires := claimForCommit(t, s, ticketID)
+
+			applied, err := s.CommitHandlerResult(ctx, HandlerCommit{
+				TicketID: ticketID, Owner: owner, Expires: expires,
+				Poll: &PollUpdate{NextAt: nextAt, IntervalS: iv, Fingerprint: testFingerprint},
+			})
+			if err == nil || !strings.Contains(err.Error(), wantErr) {
+				t.Fatalf("err = %v, want containing %q", err, wantErr)
+			}
+			if applied {
+				t.Error("applied = true, want false")
+			}
+		})
+
+		t.Run(fmt.Sprintf("PollSchedule refuses %d", iv), func(t *testing.T) {
+			t.Parallel()
+			s := newTestStore(t)
+			ctx := t.Context()
+			_, ticketID := seedQueuedTicket(t, s, "1")
+			owner, expires := claimForCommit(t, s, ticketID)
+
+			applied, err := s.CommitHandlerResult(ctx, HandlerCommit{
+				TicketID: ticketID, Owner: owner, Expires: expires,
+				PollSchedule: &PollSchedule{NextAt: nextAt, IntervalS: iv},
+			})
+			if err == nil || !strings.Contains(err.Error(), wantErr) {
+				t.Fatalf("err = %v, want containing %q", err, wantErr)
+			}
+			if applied {
+				t.Error("applied = true, want false")
+			}
+		})
+	}
+
+	for _, iv := range []int{30, 300} {
+		t.Run(fmt.Sprintf("Poll accepts %d", iv), func(t *testing.T) {
+			t.Parallel()
+			s := newTestStore(t)
+			ctx := t.Context()
+			_, ticketID := seedQueuedTicket(t, s, "1")
+			owner, expires := claimForCommit(t, s, ticketID)
+
+			applied, err := s.CommitHandlerResult(ctx, HandlerCommit{
+				TicketID: ticketID, Owner: owner, Expires: expires,
+				Poll: &PollUpdate{NextAt: nextAt, IntervalS: iv, Fingerprint: testFingerprint},
+			})
+			if err != nil {
+				t.Fatalf("CommitHandlerResult: %v, want nil", err)
+			}
+			if !applied {
+				t.Error("applied = false, want true")
+			}
+		})
+	}
+}
+
 // --- CommitHandlerResult: Sessions ------------------------------------------
 
 // TestCommitExtraSessions proves HandlerCommit.Sessions updates further

@@ -128,6 +128,13 @@ type Config struct {
 	// runjob.go's own applySandbox step reads it for a job whose profile is
 	// "judge".
 	JudgeCodexHome string
+	// Now is the clock Tick reads "the current instant" from for picking
+	// ready candidates (PKG9-PLAN.md section 17.1): serve leaves it nil, so
+	// New defaults it to time.Now; selftest injects a fake clock that
+	// advances to a ticket's own next_poll_at whenever a tick finds nothing
+	// due (section 17.1), so a babysit poll's backoff can be driven without
+	// a real wall-clock wait.
+	Now func() time.Time
 }
 
 // Dispatcher ticks: reconcile, intake, count, pick, claim, run, commit
@@ -165,6 +172,9 @@ func New(
 ) (*Dispatcher, error) {
 	if err := job.Validate(m, reg); err != nil {
 		return nil, fmt.Errorf("dispatch: %w", err)
+	}
+	if cfg.Now == nil {
+		cfg.Now = time.Now
 	}
 	slog.Info("deferred section 10 mechanics are explicit no-ops in this package",
 		"mechanics", deferredMechanics, "owner", "Package 7")
@@ -236,8 +246,12 @@ func (d *Dispatcher) Tick(ctx context.Context) error {
 		return nil
 	}
 
-	// 5. Pick.
-	candidates, err := d.store.ListReadyCandidates(ctx, d.machine.States.Terminal)
+	// 5. Pick. cfg.Now() (defaulted to time.Now in New when serve leaves it
+	// nil), not the tick-start now above (which only bounds ExpireClaims'
+	// own reconcile pass), is what ListReadyCandidates compares next_poll_at
+	// against, so selftest's injected fake clock governs candidacy the same
+	// way a real poll schedule would (PKG9-PLAN.md section 17.1).
+	candidates, err := d.store.ListReadyCandidates(ctx, d.machine.States.Terminal, d.cfg.Now())
 	if err != nil {
 		return fmt.Errorf("dispatch: list ready candidates: %w", err)
 	}
