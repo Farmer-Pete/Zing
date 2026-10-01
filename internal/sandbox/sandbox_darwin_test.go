@@ -940,6 +940,30 @@ func TestJudgeDeniesDatabase(t *testing.T) {
 	}
 }
 
+// TestJudgeDeniesClaudeJSON proves the judge profile denies
+// ~/.claude.json, using a temp HOME rather than the owner's real one: a
+// live probe (TestProbeJudgeDeniesClaudeAndCodexState) found this file
+// readable despite judge.sb's own deny, because that deny named only
+// file-read*, which does not out-order the file-read-data allow build.sb's
+// shared block carries for the same path -- seatbelt does not apply
+// "later wins" between a wildcard op and the specific op a competing rule
+// names; only a rule naming the same op can out-order another. The fix
+// names file-read-data on the judge's own deny too.
+func TestJudgeDeniesClaudeJSON(t *testing.T) {
+	t.Parallel()
+	sb := newLoadedJudgeSandbox(t)
+	dirs := newTestDirs(t)
+	p := dirs.judgeParams(t)
+
+	claudeJSON := filepath.Join(p.Home, ".claude.json")
+	if err := os.WriteFile(claudeJSON, []byte(`{"marker":"not for the judge"}`), 0o600); err != nil {
+		t.Fatalf("write %s: %v", claudeJSON, err)
+	}
+	if exitCode, out := runSandboxed(t, sb, p, "/bin/cat", claudeJSON); exitCode == 0 {
+		t.Errorf("cat ~/.claude.json under the judge profile: want a non-zero exit, got 0 (output %q)", out)
+	}
+}
+
 // TestJudgeDeniesZingToml proves the judge profile denies zing.toml the
 // same way (section 4.7: "Nothing else in DATA_DIR is readable: ... not
 // zing.toml (the GitHub token)").

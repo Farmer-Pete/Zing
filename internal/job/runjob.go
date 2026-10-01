@@ -269,6 +269,12 @@ func applySandbox(sb sandbox.Sandbox, d Deps, t store.Ticket, profileName, workD
 			return noopCleanup, fmt.Errorf("%w: judge codex home is not configured", ErrConfig)
 		}
 		p.CodexHome = d.JudgeCodexHome
+		// Codex's own TLS stack needs com.apple.SecurityServer unless told
+		// to use rustls and a CA bundle instead; D26 denies that Mach
+		// service, so CODEX_CA_CERTIFICATE must point codex at one (M1 task
+		// 7's host probes: without it, Codex under the judge profile fails
+		// TLS with "SecurityServer" denied).
+		req.Env = append(req.Env, "CODEX_CA_CERTIFICATE=/etc/ssl/cert.pem")
 	}
 
 	prefix, err := sb.Prefix(p)

@@ -466,6 +466,39 @@ func shortHex(sum []byte) string {
 	return hex.EncodeToString(sum)[:12]
 }
 
+// Command returns the exact argv Run would execute for req -- ExecPrefix
+// applied the same way commandNameArgs applies it in run -- and the
+// session id Run would use (req.SessionID echoed back on a resume, a fresh
+// one minted on a first turn). Exported for the sandbox package's own host
+// credential probes (PKG9-PLAN.md section 7.3, M1 task 7): a probe that
+// hand-rolls its own claude argv can silently drift from what production
+// actually runs, so it builds the command through this instead.
+func (c Claude) Command(req RunRequest) (name string, args []string, sessionID string, err error) {
+	sessionID = req.SessionID
+	var newUUID string
+	if sessionID == "" {
+		newUUID, err = newSessionUUID()
+		if err != nil {
+			return "", nil, "", fmt.Errorf("runtime: claude: new session uuid: %w", err)
+		}
+		sessionID = newUUID
+	}
+	argv, err := claudeArgv(req, newUUID)
+	if err != nil {
+		return "", nil, "", err
+	}
+	name, args = c.commandNameArgs(req, argv)
+	return name, args, sessionID, nil
+}
+
+// Env returns the exact child environment Run would use for req: the
+// filtered parent allowlist plus req.Env (agentEnv), with the configured
+// oauth token appended last, matching run's own cmd.Env construction.
+// Exported for the same reason as Command.
+func (c Claude) Env(req RunRequest) []string {
+	return append(agentEnv(req), "CLAUDE_CODE_OAUTH_TOKEN="+c.oauthToken)
+}
+
 // version runs `claude --version` and returns its trimmed output, for the
 // smoke test that skips when the binary is not on PATH.
 func (c Claude) version(ctx context.Context) (string, error) {

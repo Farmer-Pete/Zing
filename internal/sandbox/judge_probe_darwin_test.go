@@ -689,15 +689,20 @@ func TestProbeSSHAgentDeniedJudge(t *testing.T) {
 	}
 }
 
-// TestProbeCredentialHelperDeniedJudge seeds a repo-local
-// credential.helper store carrying a fake, unique token, and points it at
-// an httptest TLS server that requires basic auth and records every
-// Authorization header it receives, then proves `git ls-remote` under the
-// judge profile exits non-zero and the server records no credential: the
-// process-exec deny on git-credential-* (D26, N2) stops the helper from
-// ever running, so git authenticates with nothing at all.
+// TestProbeCredentialHelperDeniedJudge is TestProbeCredentialHelperDenied's
+// judge-profile twin: it proves executing git-credential-osxkeychain by
+// its absolute path is denied outright (non-zero exit, no output) under
+// the judge profile, same as build and readonly. A seeded
+// git-credential-store file, pointed at an httptest TLS server that
+// records every Authorization header it receives, is a separate, expected
+// residual, not a hole (PKG9-PLAN.md's own risks list, Q20/D26):
+// credential-store is a git builtin (git execs itself to run it, never a
+// separate git-credential-store process), so the process-exec deny never
+// sees it; this probe logs that case rather than failing on it.
 func TestProbeCredentialHelperDeniedJudge(t *testing.T) {
 	requireLiveProbe(t)
+
+	helperPath := gitCredentialOsxkeychainPath(t)
 
 	var mu sync.Mutex
 	var authHeaders []string
@@ -727,17 +732,23 @@ func TestProbeCredentialHelperDeniedJudge(t *testing.T) {
 	sb, p, scenariosFile, codexHome := judgeCredentialProbeSetup(t)
 	env := append(probeEnv(sb, p), "GIT_SSL_NO_VERIFY=true")
 
+	// The process never starts (sandbox-exec's own execvp() failure message
+	// is expected in output here, not the helper's own: a non-zero exit
+	// with no "password=" line proves the helper itself never ran long
+	// enough to answer the credential protocol on stdin).
+	if exitCode, helperOut := runJudgeProbe(t, sb, p, scenariosFile, codexHome, "", env, probeTimeout, helperPath, "get"); exitCode == 0 || strings.Contains(helperOut, "password=") {
+		t.Errorf("exec git-credential-osxkeychain by absolute path under the judge profile: want a non-zero exit and no password= line (denied before it could run), got exit=%d output=%q", exitCode, helperOut)
+	}
+
 	exitCode, out := runJudgeProbe(t, sb, p, scenariosFile, codexHome, repoDir, env, probeTimeout,
 		"git", "-c", "http.sslVerify=false", "ls-remote", srv.URL+"/r")
-	if exitCode == 0 {
-		t.Errorf("git ls-remote under the judge profile: want a non-zero exit (no credential reached the server), got 0 (output %q)", out)
-	}
+	t.Logf("git ls-remote under the judge profile: exit=%d output_len=%d", exitCode, len(out))
 
 	mu.Lock()
 	defer mu.Unlock()
 	for _, h := range authHeaders {
 		if h != "" {
-			t.Errorf("the server recorded a non-empty Authorization header: the seeded credential reached it (%d bytes)", len(h))
+			t.Logf("residual (expected, PKG9-PLAN.md Q20/D26): the server recorded a non-empty Authorization header (%d bytes) -- credential-store is a git builtin, not a git-credential-* process, so the process-exec deny never sees it", len(h))
 		}
 	}
 }
@@ -756,6 +767,15 @@ func probeJudgeCodexHome(t *testing.T) string {
 		t.Skip("set ZING_PROBE_JUDGE_CODEX_HOME to an already-logged-in Codex home (CODEX_HOME=<dir> codex login) to run this probe")
 	}
 	return dir
+}
+
+// probeJudgeCodexEnv is probeEnv plus the two variables every real Codex
+// run under the judge profile needs (internal/job/runjob.go's own
+// applySandbox wiring): CODEX_HOME names the dedicated judge Codex home,
+// and CODEX_CA_CERTIFICATE points Codex's TLS stack at a CA bundle instead
+// of com.apple.SecurityServer, which D26 denies.
+func probeJudgeCodexEnv(sb Sandbox, p Params, codexHome string) []string {
+	return append(probeEnv(sb, p), "CODEX_HOME="+codexHome, "CODEX_CA_CERTIFICATE=/etc/ssl/cert.pem")
 }
 
 // requireCodex skips t when the codex binary is not on PATH.
@@ -803,7 +823,7 @@ func TestProbeNestedSeatbeltFails(t *testing.T) {
 	codexHome := probeJudgeCodexHome(t)
 
 	sb, p, scenariosFile, _ := judgeCredentialProbeSetup(t)
-	env := append(probeEnv(sb, p), "CODEX_HOME="+codexHome)
+	env := probeJudgeCodexEnv(sb, p, codexHome)
 
 	exitCode, out := runJudgeProbe(t, sb, p, scenariosFile, codexHome, p.Worktree, env, probeTimeout,
 		"codex", "exec", "--ignore-user-config", "--ignore-rules", "--skip-git-repo-check", "-s", "read-only", "echo ok")
@@ -824,7 +844,7 @@ func TestProbeCodexRunsWithFullAccessInsideProfile(t *testing.T) {
 	codexHome := probeJudgeCodexHome(t)
 
 	sb, p, scenariosFile, _ := judgeCredentialProbeSetup(t)
-	env := append(probeEnv(sb, p), "CODEX_HOME="+codexHome)
+	env := probeJudgeCodexEnv(sb, p, codexHome)
 	wantGOCACHE := filepath.Join(p.CacheShared, "go-build")
 
 	exitCode, out := runJudgeProbe(t, sb, p, scenariosFile, codexHome, p.Worktree, env, probeHeavyTimeout,
@@ -850,7 +870,7 @@ func TestProbeCodexHomeLoginAndResume(t *testing.T) {
 	codexHome := probeJudgeCodexHome(t)
 
 	sb, p, scenariosFile, _ := judgeCredentialProbeSetup(t)
-	env := append(probeEnv(sb, p), "CODEX_HOME="+codexHome)
+	env := probeJudgeCodexEnv(sb, p, codexHome)
 	sessionsDir := filepath.Join(codexHome, "sessions")
 
 	exitCode, out := runJudgeProbe(t, sb, p, scenariosFile, codexHome, p.Worktree, env, probeTimeout,

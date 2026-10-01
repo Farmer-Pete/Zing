@@ -22,9 +22,13 @@
 ; No other session's transcript, the planning session's above all (N6): the
 ; planning transcript holds the sealed scenarios, so the judge must not
 ; read any transcript folder but its own (PKG9-PLAN.md section 7.3, a
-; Package 8 holdout fix). The judge-only block below denies file-read* on
-; the whole of ~/.claude anyway (N6), which wins over the file-read-data
-; allow above because it comes later in this file.
+; Package 8 holdout fix). The judge-only block below denies the whole of
+; ~/.claude anyway (N6), naming file-read-data explicitly (not just
+; file-read*) so it wins over the file-read-data allow above by coming
+; later in this file -- seatbelt does not apply "later wins" between a
+; wildcard op (file-read*) and the specific op a competing rule names
+; (file-read-data); only a rule that names the same op can out-order
+; another.
 (deny file-read-data (subpath (string-append (param "HOME") "/.claude/projects")))
 (allow file-read-data (subpath (param "TRANSCRIPTS")))
 ;;READ_PATHS;;
@@ -36,16 +40,15 @@
 ; No system service may act for the judge outside the sandbox. No profile
 ; allows com.apple.SecurityServer any more (D26, N2): that Mach service is
 ; how a process reaches the keychain, and the Claude CLI's login no longer
-; lives there. com.apple.trustd.agent stays only if M1 task 7's host probe
-; (TestProbeTLSWithoutSecurityServer) shows TLS verification fails without
-; it once SecurityServer is gone; the probe's own result belongs in this
-; comment once it has run.
+; lives there. com.apple.trustd.agent is not allowed either: M1 task 7's
+; host probe (TestProbeTLSWithoutSecurityServer) ran `go mod download` and
+; curl against a fresh TLS connection with and without it, both clean, so
+; TLS verification does not need it.
 (deny appleevent-send)
 (deny mach-lookup)
 (allow mach-lookup
   (global-name "com.apple.system.opendirectoryd.membership")
-  (global-name "com.apple.system.opendirectoryd.libinfo")
-  (global-name "com.apple.trustd.agent"))
+  (global-name "com.apple.system.opendirectoryd.libinfo"))
 
 ; No connection to the owner's ssh-agent: an agent process must never be
 ; able to sign for the owner's SSH key (D26, N2). This is the first of
@@ -61,24 +64,49 @@
 ; depth, not a guarantee (D26): a "!" shell helper is not caught by this.
 (deny process-exec (regex #"/git-credential-[^/]*$"))
 
-; The Zing data directory holds the sealed scenarios.
-(deny file-read* file-write* (subpath (param "DATA_DIR")))
-(allow file-read* process-exec (literal (param "ZING_BIN")))
+; The Zing data directory holds the sealed scenarios. file-read-data is
+; named here too, not just file-read*: CODEX_HOME and DATA_DIR usually sit
+; under HOME (judge_codex_home is itself required to be inside DATA_DIR,
+; serve.go's own resolveJudgeCodexHome check), so this must be
+; self-contained rather than lean on the earlier HOME-wide file-read-data
+; deny above, in case an operator ever points DATA_DIR somewhere else.
+(deny file-read* file-read-data file-write* (subpath (param "DATA_DIR")))
+; file-read-data is named here too: ZING_BIN can itself sit inside DATA_DIR
+; (TestRunsZingBinFromDataDir's own case for build.sb), and naming only
+; file-read* here would leave it unable to out-order the DATA_DIR deny
+; just above, which now names file-read-data as well.
+(allow file-read* file-read-data process-exec (literal (param "ZING_BIN")))
 
 ; The judge reads the sealed scenarios from one file Zing wrote for this
 ; run (D19). Nothing else under DATA_DIR, the database included.
-(allow file-read* (literal (param "SCENARIOS_FILE")))
+; file-read-data is named alongside file-read*: seatbelt does not apply
+; "later wins" between a wildcard op and the specific op a competing rule
+; names, so an allow that names only file-read* cannot override the
+; file-read-data deny above (or the HOME-wide one near the top of this
+; file) for the actual read of this file's bytes -- proven on this host
+; with bare cat profiles (deny file-read-data P; allow file-read* P/a is
+; still denied; naming file-read-data on the allow is what makes it win).
+(allow file-read* file-read-data (literal (param "SCENARIOS_FILE")))
 
 ; Codex keeps its login and sessions in the dedicated judge Codex home
-; (judge_codex_home, D27), not in the owner's ~/.codex.
-(allow file-read* (subpath (param "CODEX_HOME")))
+; (judge_codex_home, D27), not in the owner's ~/.codex. file-read-data is
+; named for the same reason as the SCENARIOS_FILE allow above: without it,
+; Codex cannot read its own home under the HOME-wide file-read-data deny
+; and fails to start ("failed to initialize in-process app-server client:
+; Operation not permitted").
+(allow file-read* file-read-data (subpath (param "CODEX_HOME")))
 
 ; The judge reads no agent transcript and no Codex state of the owner's
-; (N6). These come after the home read allow above, so they win over its
-; ~/.claude allow.
-(deny file-read* (subpath (string-append (param "HOME") "/.claude")))
-(deny file-read* (literal (string-append (param "HOME") "/.claude.json")))
-(deny file-read* (subpath (string-append (param "HOME") "/.codex")))
+; (N6). file-read-data is named here too: without it, this deny only beats
+; other file-read* rules, never the file-read-data allow for ~/.claude and
+; ~/.claude.json build.sb's own shared block carries near the top of this
+; file (a real hole this task's own TestProbeJudgeDeniesClaudeAndCodexState
+; caught: `cat ~/.claude.json` succeeded under this profile). Naming
+; file-read-data here makes this deny compete on the same op as that
+; allow, and it wins by coming later.
+(deny file-read* file-read-data (subpath (string-append (param "HOME") "/.claude")))
+(deny file-read* file-read-data (literal (string-append (param "HOME") "/.claude.json")))
+(deny file-read* file-read-data (subpath (string-append (param "HOME") "/.codex")))
 
 ; Writes are denied everywhere, then allowed by name. This replaces
 ; build.sb's own write block: the judge writes no Claude transcript, so

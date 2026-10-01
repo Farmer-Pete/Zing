@@ -32,6 +32,7 @@
 package sandbox
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"errors"
@@ -39,11 +40,14 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
 
 	zing "zing"
+	"zing/internal/response"
+	"zing/internal/runtime"
 )
 
 // requireLiveProbe is the gate every test in this file opens with: ZING_LIVE_CLI
@@ -78,10 +82,15 @@ const (
 	probeHeavyTimeout = 10 * time.Minute
 )
 
-// probeModel is the model every probe's own real claude call uses: small
-// and cheap, since these calls only prove the CLI can start and log in,
-// never anything about model quality.
-const probeModel = "claude-3-5-haiku-20241022"
+// probeModel is the model every probe's own real claude call uses: these
+// calls only prove the CLI can start and log in, never anything about
+// model quality, so it matches machine.toml's own planning job model
+// (fable) -- consistent with the "planning-style" framing these probes
+// already use, and known to be a currently-supported, resolvable model id
+// (unlike the previously hardcoded claude-3-5-haiku-20241022, retired
+// February 19, 2026, which failed every probe here with "exited 1" and
+// a deprecation notice, not a sandbox issue).
+const probeModel = "claude-fable-5-1"
 
 // probeSandboxes loads both changed profiles (build.sb and readonly.sb)
 // for a probe to run under each in turn, failing the test if either does
@@ -208,23 +217,86 @@ func probeUUID(t *testing.T) string {
 	return fmt.Sprintf("%x-%x-%x-%x-%x", b[0:4], b[4:6], b[6:8], b[8:10], b[10:16])
 }
 
-// probeClaudeTurn runs one real `claude -p` turn under sb/p/env, first
-// turn when resumeSessionID == "", else a resume of it; label names the
-// failure for the caller's own early-exit message. It fails the test
-// outright (the early-exit contract this whole file follows) rather than
-// returning an error a caller might work around.
-func probeClaudeTurn(t *testing.T, sb Sandbox, p Params, env []string, dir, label, sessionID, resumeSessionID string) {
+// claudeProbeTools is the tool list every claude probe run request carries:
+// machine.toml's own planning job entry, the job these probes simulate
+// ("planning-style" turns, PKG9-PLAN.md section 7.3), so Claude.Command
+// builds the same --tools/--allowedTools flags a real run would.
+var claudeProbeTools = []string{"read", "grep", "glob", "bash_readonly"}
+
+// claudeTokenPattern matches an sk-ant- shaped token, so a probe failure's
+// logged stderr never carries a live credential (D26, N2).
+var claudeTokenPattern = regexp.MustCompile(`sk-ant-[A-Za-z0-9_-]+`)
+
+// redactClaudeToken returns b's text with any sk-ant- token replaced by a
+// fixed placeholder, for a probe failure's own stderr log.
+func redactClaudeToken(b []byte) string {
+	return claudeTokenPattern.ReplaceAllString(string(b), "sk-ant-[REDACTED]")
+}
+
+// firstBytes returns the first n bytes of b, or all of it when shorter.
+func firstBytes(b []byte, n int) []byte {
+	if len(b) > n {
+		return b[:n]
+	}
+	return b
+}
+
+// probeClaudeTurn runs one real claude turn through internal/runtime's own
+// Claude.Command and Claude.Env (PKG9-PLAN.md M1 task 7): the exact argv
+// and environment production's Claude.Run builds, not a hand-rolled
+// approximation that can silently drift from it and fail for reasons
+// unrelated to the sandbox under test. prefix is the sandbox-exec prefix
+// (sb.Prefix(p)) for a sandboxed run, or nil to run claude directly, as
+// TestProbeNoScenarioLeak's own unsandboxed control run does; extraEnv
+// rides in req.Env, mirroring applySandbox's sb.Env(p, PATH) for a
+// sandboxed run or applyPrivateTempRoot's private TMPDIR/
+// CLAUDE_CODE_TMPDIR pair for an unsandboxed one (internal/job/runjob.go).
+// resumeSessionID == "" is a first turn (a fresh session id is minted and
+// returned); otherwise it resumes that session. It fails the test outright
+// (the early-exit contract this whole file follows) on a non-zero exit,
+// logging stderr's first 400 bytes with any sk-ant- token redacted.
+func probeClaudeTurn(t *testing.T, token string, prefix, extraEnv []string, dir, label, resumeSessionID string) (sessionID string) {
 	t.Helper()
-	args := []string{"claude", "-p", "Say ok and nothing else.", "--output-format", "json", "--model", probeModel}
-	if resumeSessionID == "" {
-		args = append(args, "--session-id", sessionID)
-	} else {
-		args = append(args, "--resume", resumeSessionID)
+	claude := runtime.NewClaude("", token)
+	req := runtime.RunRequest{
+		Job:        response.JobPlanning,
+		Model:      probeModel,
+		Prompt:     "Say ok and nothing else.",
+		Tools:      claudeProbeTools,
+		WorkDir:    dir,
+		Env:        extraEnv,
+		RunToken:   "probe",
+		SessionID:  resumeSessionID,
+		ExecPrefix: prefix,
 	}
-	exitCode, out := runProbeIn(t, sb, p, dir, env, probeTimeout, args...)
+	name, args, sessionID, err := claude.Command(req)
+	if err != nil {
+		t.Fatalf("%s: build command: %v", label, err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), probeTimeout)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, name, args...) //nolint:gosec // G204: argv is built by runtime.Claude.Command from this file's own fixed request, never external input
+	cmd.Dir = dir
+	cmd.Env = claude.Env(req)
+	cmd.Stdin = strings.NewReader(req.Prompt)
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+
+	exitCode := 0
+	if runErr := cmd.Run(); runErr != nil {
+		var exitErr *exec.ExitError
+		if !errors.As(runErr, &exitErr) { //nolint:modernize // matches this package's own errors.As vs errors.AsType comment
+			t.Fatalf("%s: start claude: %v", label, runErr)
+		}
+		exitCode = exitErr.ExitCode()
+	}
 	if exitCode != 0 {
-		t.Fatalf("EARLY EXIT (D26): %s exited %d (output length %d); stop and report, do not work around this", label, exitCode, len(out))
+		t.Logf("%s: stderr (first 400 bytes, redacted): %s", label, redactClaudeToken(firstBytes(stderr.Bytes(), 400)))
+		t.Fatalf("EARLY EXIT (D26): %s exited %d (stdout length %d); stop and report, do not work around this", label, exitCode, stdout.Len())
 	}
+	return sessionID
 }
 
 // ---- TestProbeClaudeLoginWithToken -----------------------------------------
@@ -246,11 +318,14 @@ func TestProbeClaudeLoginWithToken(t *testing.T) {
 			if err := os.MkdirAll(p.Transcripts, 0o700); err != nil {
 				t.Fatalf("mkdir %s: %v", p.Transcripts, err)
 			}
-			env := append(probeEnv(sb, p), "CLAUDE_CODE_OAUTH_TOKEN="+token)
-			sessionID := probeUUID(t)
+			prefix, err := sb.Prefix(p)
+			if err != nil {
+				t.Fatalf("Prefix: %v", err)
+			}
+			extraEnv := sb.Env(p, os.Getenv("PATH"))
 
-			probeClaudeTurn(t, sb, p, env, p.Worktree, "claude -p first turn under "+name, sessionID, "")
-			probeClaudeTurn(t, sb, p, env, p.Worktree, "claude -p resume under "+name, "", sessionID)
+			sessionID := probeClaudeTurn(t, token, prefix, extraEnv, p.Worktree, "claude -p first turn under "+name, "")
+			probeClaudeTurn(t, token, prefix, extraEnv, p.Worktree, "claude -p resume under "+name, sessionID)
 		})
 	}
 }
@@ -293,22 +368,32 @@ func TestProbeTLSWithoutSecurityServer(t *testing.T) {
 			p := probeParams(t, sb)
 			env := probeEnv(sb, p)
 
-			modDir := t.TempDir()
+			// modDir must be a sandbox-writable location, not an arbitrary
+			// t.TempDir(): `go mod download` writes go.sum back into its own
+			// working directory, and a dir outside the profile's own
+			// writable set (WORKTREE, TRANSCRIPTS, MDS_CACHE, RUN_DIR,
+			// CACHE_SHARED, /dev) fails that write with EPERM regardless of
+			// whether TLS itself works -- the bug this probe first turned
+			// up (go: updating go.sum: ... operation not permitted), unrelated
+			// to trustd.agent or GOPATH/GOMODCACHE (both already point at
+			// CACHE_SHARED's own writable subfolders through sb.Env()).
+			modDir := filepath.Join(p.Worktree, "probe-mod")
+			if mkErr := os.MkdirAll(modDir, 0o700); mkErr != nil {
+				t.Fatalf("mkdir %s: %v", modDir, mkErr)
+			}
 			goMod := "module probe.invalid/m\n\ngo 1.23\n\nrequire rsc.io/quote v1.5.2\n"
 			if err := os.WriteFile(filepath.Join(modDir, "go.mod"), []byte(goMod), 0o600); err != nil {
 				t.Fatalf("write go.mod: %v", err)
 			}
-			modExit, _ := runProbeIn(t, sb, p, modDir, env, probeTimeout, "go", "mod", "download")
+			modExit, modOut := runProbeIn(t, sb, p, modDir, env, probeTimeout, "go", "mod", "download")
 			curlExit, _ := runProbe(t, sb, p, env, "curl", "-fsS", "--max-time", "15", "-o", os.DevNull, "https://proxy.golang.org")
 			t.Logf("%s: go mod download exit=%d, curl exit=%d", name, modExit, curlExit)
 
-			if name == "with trustd.agent (checked in)" {
-				if modExit != 0 {
-					t.Errorf("go mod download exit=%d, want 0 (the checked-in profile must keep TLS working)", modExit)
-				}
-				if curlExit != 0 {
-					t.Errorf("curl exit=%d, want 0 (the checked-in profile must keep TLS working)", curlExit)
-				}
+			if modExit != 0 {
+				t.Errorf("%s: go mod download exit=%d, want 0 (output %q)", name, modExit, modOut)
+			}
+			if curlExit != 0 {
+				t.Errorf("%s: curl exit=%d, want 0", name, curlExit)
 			}
 		})
 	}
@@ -464,14 +549,21 @@ func TestProbeSSHAgentDenied(t *testing.T) {
 
 // ---- TestProbeCredentialHelperDenied ---------------------------------------
 
-// TestProbeCredentialHelperDenied seeds a repo-local credential.helper
-// store carrying a fake, unique token, then proves `git credential fill`
-// under each profile never surfaces it: the process-exec deny on
-// git-credential-* (PKG9-PLAN.md D26, N2) must stop git from ever running
-// git-credential-store at all, so the seeded token gives this probe a
-// concrete, definitive signal a real-credential probe cannot.
+// TestProbeCredentialHelperDenied proves the process-exec deny on
+// git-credential-* (PKG9-PLAN.md D26, N2) actually stops a real helper
+// binary from running: executing git-credential-osxkeychain by its
+// absolute path under either profile is denied outright (non-zero exit,
+// no output -- the process never starts, so it never even reads stdin).
+// A seeded git-credential-store file is a separate, expected residual, not
+// a hole (PKG9-PLAN.md's own risks list, Q20/D26): credential-store is a
+// git builtin (git execs itself to run it, never a separate
+// git-credential-store process), so the process-exec deny never sees it,
+// and the token it reads lives in a plain file the agent could already
+// `cat` -- this probe logs that case rather than failing on it.
 func TestProbeCredentialHelperDenied(t *testing.T) {
 	requireLiveProbe(t)
+
+	helperPath := gitCredentialOsxkeychainPath(t)
 
 	repoDir := t.TempDir()
 	if out, err := exec.CommandContext(t.Context(), "git", "init", "-q", repoDir).CombinedOutput(); err != nil {
@@ -491,13 +583,18 @@ func TestProbeCredentialHelperDenied(t *testing.T) {
 			p := probeParams(t, sb)
 			env := probeEnv(sb, p)
 
-			out := runProbeStdin(t, sb, p, repoDir, env, probeCredentialStdin, "git", "credential", "fill")
-
-			if strings.Contains(out, seededToken) {
-				t.Errorf("the seeded credential (git-credential-store) leaked through the profile's process-exec deny under %s", name)
+			// The process never starts (sandbox-exec's own execvp() failure
+			// message is expected in output here, not the helper's own: a
+			// non-zero exit with no "password=" line proves the helper
+			// itself never ran long enough to answer the credential
+			// protocol on stdin).
+			if exitCode, helperOut := runProbe(t, sb, p, env, helperPath, "get"); exitCode == 0 || strings.Contains(helperOut, "password=") {
+				t.Errorf("exec git-credential-osxkeychain by absolute path under %s: want a non-zero exit and no password= line (denied before it could run), got exit=%d output=%q", name, exitCode, helperOut)
 			}
-			if strings.Contains(out, "password=") {
-				t.Errorf("git credential fill under %s printed a password= line", name)
+
+			storeOut := runProbeStdin(t, sb, p, repoDir, env, probeCredentialStdin, "git", "credential", "fill")
+			if strings.Contains(storeOut, seededToken) {
+				t.Logf("residual (expected, PKG9-PLAN.md Q20/D26): the seeded git-credential-store token leaked through %s -- credential-store is a git builtin, not a git-credential-* process, so the process-exec deny never sees it, and it reads a plain file the agent could already cat", name)
 			}
 		})
 	}
@@ -536,18 +633,41 @@ func TestProbeNoScenarioLeak(t *testing.T) {
 		}
 	}
 
-	env := append(os.Environ(), "CLAUDE_CODE_OAUTH_TOKEN="+token, "TMPDIR="+tmpDir, "CLAUDE_CODE_TMPDIR="+claudeTmpDir)
-	sessionID := probeUUID(t)
+	// A private TMPDIR/CLAUDE_CODE_TMPDIR pair, matching
+	// applyPrivateTempRoot's own wiring (internal/job/runjob.go) for a job
+	// naming no sandbox: req.Env, not the ambient process environment,
+	// since this run goes through runtime.Claude's own Command/Env the same
+	// way a real unsandboxed run does (PKG9-PLAN.md M1 task 7).
+	extraEnv := []string{"TMPDIR=" + tmpDir, "CLAUDE_CODE_TMPDIR=" + claudeTmpDir}
 	prompt := "This is an automated probe for Zing's sandbox credential boundary (PKG9-PLAN.md M1 task 7). " +
 		"Reply with exactly one line containing this marker and nothing else: " + marker
 
+	claude := runtime.NewClaude("", token)
+	req := runtime.RunRequest{
+		Job:      response.JobPlanning,
+		Model:    probeModel,
+		Prompt:   prompt,
+		Tools:    claudeProbeTools,
+		Env:      extraEnv,
+		RunToken: "probe",
+	}
+	name, args, _, err := claude.Command(req)
+	if err != nil {
+		t.Fatalf("build command: %v", err)
+	}
+
 	ctx, cancel := context.WithTimeout(context.Background(), probeTimeout)
-	cmd := exec.CommandContext(ctx, "claude", "-p", prompt, "--session-id", sessionID, "--output-format", "json", "--model", probeModel) //nolint:gosec // G204: fixed probe argv, no external input
-	cmd.Env = env
-	out, runErr := cmd.CombinedOutput()
+	cmd := exec.CommandContext(ctx, name, args...) //nolint:gosec // G204: argv is built by runtime.Claude.Command from this file's own fixed request, never external input
+	cmd.Env = claude.Env(req)
+	cmd.Stdin = strings.NewReader(req.Prompt)
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	runErr := cmd.Run()
 	cancel()
 	if runErr != nil {
-		t.Fatalf("EARLY EXIT: the unsandboxed, planning-style claude -p run failed (output length %d): %v", len(out), runErr)
+		t.Logf("stderr (first 400 bytes, redacted): %s", redactClaudeToken(firstBytes(stderr.Bytes(), 400)))
+		t.Fatalf("EARLY EXIT: the unsandboxed, planning-style claude -p run failed (stdout length %d): %v", stdout.Len(), runErr)
 	}
 
 	locations := []string{
@@ -624,10 +744,13 @@ func TestProbePlanningTranscriptDenied(t *testing.T) {
 				t.Errorf("cat the run's own TRANSCRIPTS file under %s: exit %d, want 0 (output %q)", name, exitCode, out)
 			}
 
-			claudeEnv := append(append([]string{}, env...), "CLAUDE_CODE_OAUTH_TOKEN="+token)
-			sessionID := probeUUID(t)
-			probeClaudeTurn(t, sb, p, claudeEnv, p.Worktree, "claude -p first turn under "+name+" (own transcript folder)", sessionID, "")
-			probeClaudeTurn(t, sb, p, claudeEnv, p.Worktree, "claude -p resume under "+name+" (own transcript folder)", "", sessionID)
+			prefix, err := sb.Prefix(p)
+			if err != nil {
+				t.Fatalf("Prefix: %v", err)
+			}
+			extraEnv := sb.Env(p, os.Getenv("PATH"))
+			sessionID := probeClaudeTurn(t, token, prefix, extraEnv, p.Worktree, "claude -p first turn under "+name+" (own transcript folder)", "")
+			probeClaudeTurn(t, token, prefix, extraEnv, p.Worktree, "claude -p resume under "+name+" (own transcript folder)", sessionID)
 		})
 	}
 }

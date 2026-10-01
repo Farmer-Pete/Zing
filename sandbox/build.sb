@@ -1,6 +1,17 @@
 (version 1)
 (allow default)
 
+; Rule precedence (PKG9-PLAN.md D26, M1 task 7's live host probes): seatbelt
+; does NOT apply "later rule wins" between a rule naming a wildcard op
+; (file-read*) and one naming the specific op a competing rule names
+; (file-read-data) on an overlapping path. Only a rule naming the same op
+; can out-order another rule that names it, whatever their order (proven
+; with bare cat profiles: deny file-read-data P, then allow file-read* P/a,
+; is still denied; naming file-read-data on the allow is what makes it
+; win). Wherever a rule below must win over one naming file-read-data, it
+; names file-read-data too, not just file-read*; this file and
+; readonly.sb/judge.sb follow the same rule.
+
 ; Reads in home are denied by default, then allowed by name. No profile
 ; reads the keychain (PKG9-PLAN.md D26, N2): the Claude CLI logs in with
 ; CLAUDE_CODE_OAUTH_TOKEN instead, so ~/Library/Keychains is never allowed.
@@ -25,16 +36,15 @@
 ; No system service may act for a build outside the sandbox. No profile
 ; allows com.apple.SecurityServer any more (D26, N2): that Mach service is
 ; how a process reaches the keychain, and the Claude CLI's login no longer
-; lives there. com.apple.trustd.agent stays only if M1 task 7's host probe
-; (TestProbeTLSWithoutSecurityServer) shows TLS verification fails without
-; it once SecurityServer is gone; the probe's own result belongs in this
-; comment once it has run.
+; lives there. com.apple.trustd.agent is not allowed either: M1 task 7's
+; host probe (TestProbeTLSWithoutSecurityServer) ran `go mod download` and
+; curl against a fresh TLS connection with and without it, both clean, so
+; TLS verification does not need it.
 (deny appleevent-send)
 (deny mach-lookup)
 (allow mach-lookup
   (global-name "com.apple.system.opendirectoryd.membership")
-  (global-name "com.apple.system.opendirectoryd.libinfo")
-  (global-name "com.apple.trustd.agent"))
+  (global-name "com.apple.system.opendirectoryd.libinfo"))
 
 ; No connection to the owner's ssh-agent: an agent process must never be
 ; able to sign for the owner's SSH key (D26, N2). This is the first of

@@ -26,16 +26,15 @@
 ; No system service may act for a review or respond run outside the
 ; sandbox. No profile allows com.apple.SecurityServer any more (D26, N2):
 ; that Mach service is how a process reaches the keychain, and the Claude
-; CLI's login no longer lives there. com.apple.trustd.agent stays only if
-; M1 task 7's host probe (TestProbeTLSWithoutSecurityServer) shows TLS
-; verification fails without it once SecurityServer is gone; the probe's
-; own result belongs in this comment once it has run.
+; CLI's login no longer lives there. com.apple.trustd.agent is not allowed
+; either: M1 task 7's host probe (TestProbeTLSWithoutSecurityServer) ran
+; `go mod download` and curl against a fresh TLS connection with and
+; without it, both clean, so TLS verification does not need it.
 (deny appleevent-send)
 (deny mach-lookup)
 (allow mach-lookup
   (global-name "com.apple.system.opendirectoryd.membership")
-  (global-name "com.apple.system.opendirectoryd.libinfo")
-  (global-name "com.apple.trustd.agent"))
+  (global-name "com.apple.system.opendirectoryd.libinfo"))
 
 ; No connection to the owner's ssh-agent: an agent process must never be
 ; able to sign for the owner's SSH key (D26, N2). This is the first of
