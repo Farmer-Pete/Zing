@@ -624,3 +624,105 @@ func TestRespondEmptyThreadID(t *testing.T) {
 		}
 	})
 }
+
+// replyQuestionPresent returns a presence map marking every reply[i]/question
+// attribute present, for n replies, the same convention
+// respondThreadIDPresent uses for threads.
+func replyQuestionPresent(n int) map[string]bool {
+	m := make(map[string]bool, n)
+	for i := range n {
+		m[replyPath(i, "question")] = true
+	}
+	return m
+}
+
+// TestRepliesDecisionRequiredWhenSettled proves a settled reply with no
+// decision fails, and a settled reply that carries one passes (design
+// section 22.2, D31).
+func TestRepliesDecisionRequiredWhenSettled(t *testing.T) {
+	t.Parallel()
+
+	t.Run("settled with no decision", func(t *testing.T) {
+		t.Parallel()
+		present := replyQuestionPresent(1)
+		replies := []Reply{{Question: "Q1", Settled: true, Text: "ok"}}
+		errs := checkReplies(replies, present)
+		want := `replies/reply[0]/decision: required when settled="true"`
+		if !containsErr(errs, want) {
+			t.Fatalf("checkReplies = %v, want to contain %q", dumpErrs(errs), want)
+		}
+	})
+
+	t.Run("settled with a decision passes", func(t *testing.T) {
+		t.Parallel()
+		present := replyQuestionPresent(1)
+		present[replyPath(0, "decision")] = true
+		replies := []Reply{{Question: "Q1", Settled: true, Decision: "Agreed, no ldflags.", Text: "ok"}}
+		errs := checkReplies(replies, present)
+		if len(errs) != 0 {
+			t.Fatalf("checkReplies = %v, want no errors", dumpErrs(errs))
+		}
+	})
+}
+
+// TestRepliesDecisionOnlyWhenSettled proves a decision on a reply that does
+// not settle its thread fails, and an unsettled reply with no decision
+// passes (design section 22.2, D31).
+func TestRepliesDecisionOnlyWhenSettled(t *testing.T) {
+	t.Parallel()
+
+	t.Run("decision present without settled", func(t *testing.T) {
+		t.Parallel()
+		present := replyQuestionPresent(1)
+		present[replyPath(0, "decision")] = true
+		replies := []Reply{{Question: "Q1", Decision: "Agreed, no ldflags.", Text: "ok"}}
+		errs := checkReplies(replies, present)
+		want := `replies/reply[0]/decision: only allowed with settled="true"`
+		if !containsErr(errs, want) {
+			t.Fatalf("checkReplies = %v, want to contain %q", dumpErrs(errs), want)
+		}
+	})
+
+	t.Run("no decision, not settled passes", func(t *testing.T) {
+		t.Parallel()
+		present := replyQuestionPresent(1)
+		replies := []Reply{{Question: "Q1", Text: "ok"}}
+		errs := checkReplies(replies, present)
+		if len(errs) != 0 {
+			t.Fatalf("checkReplies = %v, want no errors", dumpErrs(errs))
+		}
+	})
+}
+
+// TestRepliesDuplicateQuestion proves two replies naming the same question
+// key fail, while distinct keys pass (design section 22.2, D31).
+func TestRepliesDuplicateQuestion(t *testing.T) {
+	t.Parallel()
+
+	t.Run("duplicate question key", func(t *testing.T) {
+		t.Parallel()
+		present := replyQuestionPresent(2)
+		replies := []Reply{
+			{Question: "Q1", Text: "earlier reply"},
+			{Question: "Q1", Text: "later reply"},
+		}
+		errs := checkReplies(replies, present)
+		want := "replies/reply[1]/question: duplicate reply to Q1; one reply per question"
+		if !containsErr(errs, want) {
+			t.Fatalf("checkReplies = %v, want to contain %q", dumpErrs(errs), want)
+		}
+	})
+
+	t.Run("distinct questions pass", func(t *testing.T) {
+		t.Parallel()
+		present := replyQuestionPresent(2)
+		replies := []Reply{
+			{Question: "Q1", Text: "earlier reply"},
+			{Question: "Q2", Text: "later reply"},
+		}
+		errs := checkReplies(replies, present)
+		if len(errs) != 0 {
+			t.Fatalf("checkReplies = %v, want no errors", dumpErrs(errs))
+		}
+	})
+}

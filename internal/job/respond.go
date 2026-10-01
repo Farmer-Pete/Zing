@@ -834,7 +834,7 @@ func (h shipHandler) respondRunAndRouteRaw(
 		c, err := onOk(rr, sessionCommit)
 		return c, err
 	case *response.QuestionResponse:
-		return questionOutcomeCommit(t, d, rr, resp, sessionCommit, resolveIDs)
+		return questionOutcomeCommit(t, d, rr, resp.Questions, sessionCommit, resolveIDs)
 	case *response.ErrorResponse:
 		return errorOutcomeCommit(t, d, rr, resp, sessionCommit, resolveIDs, response.EscalationOriginRespond), nil
 	default:

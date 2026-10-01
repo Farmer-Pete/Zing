@@ -115,20 +115,33 @@ func claimWithFloor(t *testing.T, s *store.Store, rt runtime.Runtime, ticketID i
 	return deps
 }
 
-// questionResult builds a scriptedStep whose Response is a minimal
-// QuestionResponse: enough for questionOutcomeCommit to post one message,
-// the shape the handler itself never re-validates at runtime (design
-// section 6.6, the same rule the skeleton always followed).
+// questionResult builds a scriptedStep whose Response is a minimal question
+// document: enough for questionOutcomeCommit to post one message, the shape
+// the handler itself never re-validates at runtime (design section 6.6,
+// the same rule the skeleton always followed). Planning's own question
+// outcome decodes to *response.PlanningQuestionsResponse, not the universal
+// *response.QuestionResponse every other job uses (design section 22.2,
+// D31), so forJob picks which concrete type this scripted step carries.
 func questionResult(forJob response.Job, sessionID string) scriptedStep {
-	return scriptedStep{res: runtime.RunResult{
-		Response: &response.QuestionResponse{
+	questions := []response.Question{{
+		Key: "q1", Title: "A question", Body: "Body.",
+		Options:     []response.Option{{Key: "a", Text: "Option A"}, {Key: "b", Text: "Option B"}},
+		Recommended: "a",
+	}}
+	var resp response.Response
+	if forJob == response.JobPlanning {
+		resp = &response.PlanningQuestionsResponse{
 			Job: forJob, Outcome: response.OutcomeQuestion,
-			Questions: []response.Question{{
-				Key: "q1", Title: "A question", Body: "Body.",
-				Options:     []response.Option{{Key: "a", Text: "Option A"}, {Key: "b", Text: "Option B"}},
-				Recommended: "a",
-			}},
-		},
+			Questions: questions,
+		}
+	} else {
+		resp = &response.QuestionResponse{
+			Job: forJob, Outcome: response.OutcomeQuestion,
+			Questions: questions,
+		}
+	}
+	return scriptedStep{res: runtime.RunResult{
+		Response:  resp,
 		SessionID: sessionID, ExitCode: 0, AgentTime: time.Second,
 	}}
 }
@@ -1622,7 +1635,7 @@ func TestPlanningHandler_Step5_LiveValidationMarkerResumesWithFencedErrorsThenDe
 	apply(t, s, getTicket(t, s, ticketID), mustPlanning(t, s, claim(t, s, fake, ticketID), ticketID)) // classify
 
 	badResp := readyResponse(validPlan("Store the ready cohort."), validClaims(), validScenarios(1, "bad"))
-	goodResp := &response.QuestionResponse{
+	goodResp := &response.PlanningQuestionsResponse{
 		Job: response.JobPlanning, Outcome: response.OutcomeQuestion,
 		Questions: []response.Question{{
 			Key: "q1", Title: "Continue?", Body: "Body.",
@@ -2132,7 +2145,7 @@ func TestPlanningHandler_QuestionKeys_GateSharesAllocationWithPlanningQuestions(
 	s := newJobTestStore(t)
 	ticketID := seedFeatureTicketInPlanning(t, s)
 
-	batch := &response.QuestionResponse{
+	batch := &response.PlanningQuestionsResponse{
 		Job: response.JobPlanning, Outcome: response.OutcomeQuestion,
 		Questions: []response.Question{
 			{Key: "Q2", Title: "First", Body: "first body.", Options: []response.Option{{Key: "a", Text: "A"}}, Recommended: "a"},

@@ -19,6 +19,8 @@ func (h Head) Header() Head {
 var (
 	_ Response = (*ClassifyResponse)(nil)
 	_ Response = (*QuestionResponse)(nil)
+	_ Response = (*PlanningQuestionsResponse)(nil)
+	_ Response = (*RepliesResponse)(nil)
 	_ Response = (*ReadyResponse)(nil)
 	_ Response = (*ChildrenResponse)(nil)
 	_ Response = (*NothingToDoResponse)(nil)

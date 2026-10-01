@@ -1,4 +1,4 @@
-<zing job="perimeter" outcome="question"> <!-- job: Job, one of: classify | planning | planreview | build | perimeter | review | judge | respond | side, the running job; must match; outcome: Outcome, one of: bug | feature | questions | ready | children | nothing_to_do | ok | question | error, one of this job's outcomes, or question, or error -->
+<zing job="perimeter" outcome="question"> <!-- job: Job, one of: classify | planning | planreview | build | perimeter | review | judge | respond | side, the running job; must match; outcome: Outcome, one of: bug | feature | questions | replies | ready | children | nothing_to_do | ok | question | error, one of this job's outcomes, or question, or error -->
   <question key="..."> <!-- Question, one or more, one per decision you need; key: string -->
     <title>...</title> <!-- string, short -->
     <body>...</body> <!-- string, what you need to know and why, markdown -->

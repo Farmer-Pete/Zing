@@ -845,7 +845,7 @@ func judgeRunAndRoute(
 		c, err := onOk(rr, sessionCommit)
 		return c, rr, err
 	case *response.QuestionResponse:
-		c, err := questionOutcomeCommit(t, d, rr, resp, sessionCommit, resolveIDs)
+		c, err := questionOutcomeCommit(t, d, rr, resp.Questions, sessionCommit, resolveIDs)
 		return c, rr, err
 	case *response.ErrorResponse:
 		return errorOutcomeCommit(t, d, rr, resp, sessionCommit, resolveIDs, response.EscalationOriginJudge), rr, nil

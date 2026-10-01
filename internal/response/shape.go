@@ -39,6 +39,8 @@ type node struct {
 
 	HasMinLength bool
 	MinLength    int
+	HasMaxLength bool
+	MaxLength    int
 	HasMaxItems  bool
 	MaxItems     int
 	HasMinItems  bool
@@ -69,7 +71,6 @@ type node struct {
 var (
 	shapeMu    sync.RWMutex
 	shapeCache = map[reflect.Type]*node{}
-	headType   = reflect.TypeFor[Head]()
 	valuesType = reflect.TypeFor[interface{ Values() []string }]()
 )
 
@@ -97,8 +98,10 @@ func shapeOf(t reflect.Type) *node {
 // buildChildren reflects t's exported fields into shape nodes, in
 // declaration order but with every attribute ahead of every chardata,
 // element, or wrapper child (design section 6.4). It drops xml:"-" fields,
-// skips XMLName (decoder metadata), and flattens an embedded Head so job
-// and outcome become attributes on the caller's own node.
+// skips XMLName (decoder metadata), and flattens any embedded struct field
+// (Head, so job and outcome become attributes on the caller's own node; and,
+// since D31, Conversation, so replies joins a planning outcome's own
+// elements) rather than special-casing Head alone.
 func buildChildren(t reflect.Type) []*node {
 	var attrs, rest []*node
 
@@ -107,7 +110,7 @@ func buildChildren(t reflect.Type) []*node {
 		idx := i
 		get := func(v reflect.Value) reflect.Value { return v.Field(idx) }
 
-		if f.Anonymous && f.Type == headType {
+		if f.Anonymous && f.Type.Kind() == reflect.Struct {
 			for _, c := range buildChildren(f.Type) {
 				flattened := composeGet(get, c)
 				if flattened.Kind == kindAttr {
@@ -238,6 +241,10 @@ func applyConstraints(n *node, f reflect.StructField) {
 		case "minLength":
 			if v, err := strconv.Atoi(val); err == nil {
 				n.MinLength, n.HasMinLength = v, true
+			}
+		case "maxLength":
+			if v, err := strconv.Atoi(val); err == nil {
+				n.MaxLength, n.HasMaxLength = v, true
 			}
 		case "maxItems":
 			if v, err := strconv.Atoi(val); err == nil {

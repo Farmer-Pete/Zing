@@ -56,6 +56,7 @@ const (
 	OutcomeBug         Outcome = "bug"
 	OutcomeFeature     Outcome = "feature"
 	OutcomeQuestions   Outcome = "questions"
+	OutcomeReplies     Outcome = "replies"
 	OutcomeReady       Outcome = "ready"
 	OutcomeChildren    Outcome = "children"
 	OutcomeNothingToDo Outcome = "nothing_to_do"
@@ -67,9 +68,9 @@ const (
 // Values returns every valid Outcome.
 func (Outcome) Values() []string {
 	return []string{
-		string(OutcomeBug), string(OutcomeFeature), string(OutcomeQuestions), string(OutcomeReady),
-		string(OutcomeChildren), string(OutcomeNothingToDo), string(OutcomeOk), string(OutcomeQuestion),
-		string(OutcomeError),
+		string(OutcomeBug), string(OutcomeFeature), string(OutcomeQuestions), string(OutcomeReplies),
+		string(OutcomeReady), string(OutcomeChildren), string(OutcomeNothingToDo), string(OutcomeOk),
+		string(OutcomeQuestion), string(OutcomeError),
 	}
 }
 

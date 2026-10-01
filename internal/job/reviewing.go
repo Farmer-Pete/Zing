@@ -763,7 +763,7 @@ func (h reviewingHandler) discussRunAndRoute(
 	case *response.FindingsResponse:
 		return onOk(rr, sessionCommit)
 	case *response.QuestionResponse:
-		return questionOutcomeCommit(t, d, rr, resp, sessionCommit, resolveIDs)
+		return questionOutcomeCommit(t, d, rr, resp.Questions, sessionCommit, resolveIDs)
 	case *response.ErrorResponse:
 		return errorOutcomeCommit(t, d, rr, resp, sessionCommit, resolveIDs, response.EscalationOriginReview), nil
 	default:

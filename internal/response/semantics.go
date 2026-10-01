@@ -378,6 +378,46 @@ func checkJudgeDuplicateVerdicts(verdicts []Verdict, present map[string]bool) []
 // layer.
 const zingReplyMarker = "<!-- zing:"
 
+// replyPath builds one reply's own element path, e.g.
+// replyPath(0, "decision") -> "replies/reply[0]/decision" (claims.go's
+// claimPath, the same convention for the other wrapped-list type).
+func replyPath(i int, field string) string {
+	base := joinPath("replies", indexedName("reply", i))
+	if field == "" {
+		return base
+	}
+	return joinPath(base, field)
+}
+
+// checkReplies enforces replies' own Layer 2 rules (design section 22.2,
+// D31), beyond what Layer 1's presence and pattern checks already catch:
+// a settled reply must carry a decision, a decision is only legal on a
+// settled reply, and no two replies in one turn answer the same question
+// twice. present gates the decision-presence checks the same discipline
+// every other Layer 2 check in this file uses: decision is an optional
+// attribute (omitempty), so its absence from the document, not merely an
+// empty Go zero value, is what each rule tests.
+func checkReplies(replies []Reply, present map[string]bool) []*PathError {
+	var errs []*PathError
+	seen := make(map[string]bool, len(replies))
+	for i, r := range replies {
+		decisionPath := replyPath(i, "decision")
+		switch {
+		case r.Settled && !present[decisionPath]:
+			errs = append(errs, &PathError{Path: decisionPath, Msg: `required when settled="true"`})
+		case !r.Settled && present[decisionPath]:
+			errs = append(errs, &PathError{Path: decisionPath, Msg: `only allowed with settled="true"`})
+		}
+
+		questionPath := replyPath(i, "question")
+		if seen[r.Question] {
+			errs = append(errs, &PathError{Path: questionPath, Msg: "duplicate reply to " + r.Question + "; one reply per question"})
+		}
+		seen[r.Question] = true
+	}
+	return errs
+}
+
 // checkRespondThreadsShape enforces the respond job's own thread rules
 // (design section 4.1's table): no duplicate thread id, no empty thread id,
 // and no thread text carrying the reserved zingReplyMarker sequence.

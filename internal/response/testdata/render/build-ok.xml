@@ -1,4 +1,4 @@
-<zing job="build" outcome="ok"> <!-- job: Job, one of: classify | planning | planreview | build | perimeter | review | judge | respond | side, the running job; must match; outcome: Outcome, one of: bug | feature | questions | ready | children | nothing_to_do | ok | question | error, one of this job's outcomes, or question, or error -->
+<zing job="build" outcome="ok"> <!-- job: Job, one of: classify | planning | planreview | build | perimeter | review | judge | respond | side, the running job; must match; outcome: Outcome, one of: bug | feature | questions | replies | ready | children | nothing_to_do | ok | question | error, one of this job's outcomes, or question, or error -->
   <claims> <!-- BuildClaims -->
     <files_changed>
       <path>...</path> <!-- string, one or more, every changed path; the program diffs the tree -->

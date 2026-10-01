@@ -381,7 +381,7 @@ func classifySuccessCommit(t store.Ticket, d Deps, rr runResult, sessionCommit *
 		c.ResolveQuestions = resolveIDs
 		return c, nil
 	case *response.QuestionResponse:
-		return questionOutcomeCommit(t, d, rr, resp, sessionCommit, resolveIDs)
+		return questionOutcomeCommit(t, d, rr, resp.Questions, sessionCommit, resolveIDs)
 	case *response.ErrorResponse:
 		return errorOutcomeCommit(t, d, rr, resp, sessionCommit, resolveIDs, response.EscalationOriginClassify), nil
 	default:
@@ -481,8 +481,8 @@ func runPlanningResume(ctx context.Context, t store.Ticket, d Deps, sess store.S
 // check (task 8).
 func planningSuccessCommit(ctx context.Context, t store.Ticket, d Deps, rr runResult, sessionCommit *store.SessionUpsert, resolveIDs []int64, origin response.EscalationOrigin) (store.HandlerCommit, error) {
 	switch resp := rr.Res.Response.(type) {
-	case *response.QuestionResponse:
-		return questionOutcomeCommit(t, d, rr, resp, sessionCommit, resolveIDs)
+	case *response.PlanningQuestionsResponse:
+		return questionOutcomeCommit(t, d, rr, resp.Questions, sessionCommit, resolveIDs)
 	case *response.ReadyResponse:
 		return readyCommit(ctx, t, d, rr, resp, sessionCommit, resolveIDs)
 	case *response.ChildrenResponse:
@@ -998,7 +998,7 @@ func runPlanReview(ctx context.Context, t store.Ticket, d Deps, extra []prompt.N
 func planReviewSuccessCommit(t store.Ticket, d Deps, rr runResult, cohort store.Cohort, plan response.Plan, planXML string, sessionCommit *store.SessionUpsert, resolveIDs []int64) (store.HandlerCommit, error) {
 	switch resp := rr.Res.Response.(type) {
 	case *response.QuestionResponse:
-		return questionOutcomeCommit(t, d, rr, resp, sessionCommit, resolveIDs)
+		return questionOutcomeCommit(t, d, rr, resp.Questions, sessionCommit, resolveIDs)
 	case *response.ErrorResponse:
 		return errorOutcomeCommit(t, d, rr, resp, sessionCommit, resolveIDs, response.EscalationOriginPlanreview), nil
 	case *response.FindingsResponse:
@@ -1834,10 +1834,14 @@ func invalidOutputCommit(t store.Ticket, d Deps, rr runResult, invErr *runtime.I
 }
 
 // questionOutcomeCommit is the universal question outcome (design section
-// 6.8), shared by classify and planning: one question message per
-// qr.Questions, attached to the terminalized run, waiting on "questions".
-func questionOutcomeCommit(t store.Ticket, d Deps, rr runResult, qr *response.QuestionResponse, sessionCommit *store.SessionUpsert, resolveIDs []int64) (store.HandlerCommit, error) {
-	msgs, err := questionMessagesFor(t.ID, qr.Questions)
+// 6.8), shared by classify, planreview, and planning: one question message
+// per questions, attached to the terminalized run, waiting on "questions".
+// It takes the question slice itself, not a response type, because
+// planning's own question outcome decodes to *response.PlanningQuestionsResponse
+// (design section 22.2, D31) while every other job's still decodes to
+// *response.QuestionResponse; both carry the same Questions shape.
+func questionOutcomeCommit(t store.Ticket, d Deps, rr runResult, questions []response.Question, sessionCommit *store.SessionUpsert, resolveIDs []int64) (store.HandlerCommit, error) {
+	msgs, err := questionMessagesFor(t.ID, questions)
 	if err != nil {
 		return store.HandlerCommit{}, err
 	}

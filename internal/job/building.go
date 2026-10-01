@@ -1687,7 +1687,7 @@ func buildSuccessCommit(t store.Ticket, d Deps, rr runResult, sessionCommit *sto
 		c.Artifacts = []store.Artifact{{Type: artifactTypeBuildReport, RunID: &rr.Reserved.RunID, Payload: payload}}
 		return c, nil
 	case *response.QuestionResponse:
-		return questionOutcomeCommit(t, d, rr, resp, sessionCommit, resolveIDs)
+		return questionOutcomeCommit(t, d, rr, resp.Questions, sessionCommit, resolveIDs)
 	case *response.ErrorResponse:
 		return errorOutcomeCommit(t, d, rr, resp, sessionCommit, resolveIDs, originFor(u)), nil
 	default:
@@ -2041,7 +2041,7 @@ func perimeterSuccessCommit(t store.Ticket, d Deps, rr runResult, extra orchestr
 		return c, nil
 
 	case *response.QuestionResponse:
-		c, err := questionOutcomeCommit(t, d, rr, resp, freshSessionRecord(rr), nil)
+		c, err := questionOutcomeCommit(t, d, rr, resp.Questions, freshSessionRecord(rr), nil)
 		if err != nil {
 			return store.HandlerCommit{}, err
 		}

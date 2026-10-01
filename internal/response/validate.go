@@ -118,18 +118,29 @@ func mustLoadChecklists() Checklists {
 func layer2(doc *Document, ctx ValidateContext, present map[string]bool) []*PathError {
 	switch r := doc.Response.(type) {
 	case *ReadyResponse:
-		return layer2Ready(r, ctx, present)
+		return append(layer2Ready(r, ctx, present), checkReplies(r.Replies, present)...)
 	case *NothingToDoResponse:
 		// filterPresent drops a claim's "nothing_to_do needs every code
 		// claim false" when that same claim's verdict never decoded
 		// (Layer 1 already reports claims/claim[i]/verdict missing), so a
 		// missing verdict does not also draw a Layer 2 error at the same
 		// path.
-		return filterPresent(CheckNothingToDoClaims(r.Claims), present)
+		errs := filterPresent(CheckNothingToDoClaims(r.Claims), present)
+		return append(errs, checkReplies(r.Replies, present)...)
 	case *ChildrenResponse:
-		return checkChildrenDAG(r.Children, present)
+		errs := checkChildrenDAG(r.Children, present)
+		return append(errs, checkReplies(r.Replies, present)...)
 	case *QuestionResponse:
 		return checkQuestionCardinality(r.Questions)
+	case *PlanningQuestionsResponse:
+		// D31: planning's own question spellings (questions, question)
+		// carry Conversation too, so a reply riding along with a fresh
+		// batch or a lone close is checked the same way ready/children/
+		// nothing_to_do are.
+		errs := checkQuestionCardinality(r.Questions)
+		return append(errs, checkReplies(r.Replies, present)...)
+	case *RepliesResponse:
+		return checkReplies(r.Replies, present)
 	case *BuildResponse:
 		return checkBuildShape(r, present)
 	case *FindingsResponse:
@@ -319,6 +330,9 @@ func checkConstraints(n *node, path string, v reflect.Value) []*PathError {
 		s := v.String()
 		if n.HasMinLength && len([]rune(s)) < n.MinLength {
 			errs = append(errs, &PathError{Path: path, Msg: msgEmpty})
+		}
+		if n.HasMaxLength && len([]rune(s)) > n.MaxLength {
+			errs = append(errs, &PathError{Path: path, Msg: fmt.Sprintf("must be at most %d characters", n.MaxLength)})
 		}
 		if n.HasPattern {
 			if msg, bad := checkPattern(n.Pattern, s); bad {

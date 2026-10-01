@@ -111,6 +111,17 @@ func TestEscalationCode_Values_IncludesPRClosed(t *testing.T) {
 	}
 }
 
+// TestOutcome_Values_IncludesReplies proves replies, the new outcome D31
+// adds (design section 22.2), appears in Outcome's own Values().
+func TestOutcome_Values_IncludesReplies(t *testing.T) {
+	t.Parallel()
+
+	values := Outcome("").Values()
+	if !slices.Contains(values, string(OutcomeReplies)) {
+		t.Errorf("Outcome.Values() = %v, want it to contain %q", values, OutcomeReplies)
+	}
+}
+
 // TestEscalationOrigin_Values_IncludesPackage9Origins proves the four
 // origins Package 9 adds (design section 4.1), review, judge, shipping, and
 // respond, appear in EscalationOrigin's own Values().

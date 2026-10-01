@@ -968,3 +968,68 @@ func TestReadyTaskNumbering(t *testing.T) {
 		}
 	})
 }
+
+// repliesXML builds a minimal planning/replies document with one reply,
+// attrs merged in verbatim (design section 22.2, D31).
+func repliesXML(replyAttrs, replyText string) string {
+	return `<zing job="planning" outcome="replies">` +
+		`<replies><reply ` + replyAttrs + `>` + replyText + `</reply></replies>` +
+		`<progress>progress</progress></zing>`
+}
+
+// TestDecisionMaxLength proves a reply's decision attribute accepts exactly
+// 500 runes and refuses 501 (design section 22.2, D31).
+func TestDecisionMaxLength(t *testing.T) {
+	t.Parallel()
+
+	t.Run("500 runes passes", func(t *testing.T) {
+		t.Parallel()
+		decision := strings.Repeat("d", 500)
+		doc := mustParse(t, repliesXML(`question="Q1" settled="true" decision="`+decision+`"`, "ok"))
+		errs := Validate(doc, ValidateContext{})
+		const bad = "replies/reply[0]/decision: must be at most 500 characters"
+		if containsErr(errs, bad) {
+			t.Fatalf("Validate = %v, want no %q", dumpErrs(errs), bad)
+		}
+	})
+
+	t.Run("501 runes fails", func(t *testing.T) {
+		t.Parallel()
+		decision := strings.Repeat("d", 501)
+		doc := mustParse(t, repliesXML(`question="Q1" settled="true" decision="`+decision+`"`, "ok"))
+		errs := Validate(doc, ValidateContext{})
+		want := "replies/reply[0]/decision: must be at most 500 characters"
+		if !containsErr(errs, want) {
+			t.Fatalf("Validate = %v, want to contain %q", dumpErrs(errs), want)
+		}
+	})
+}
+
+// TestReplyQuestionPattern proves a reply's question attribute must match
+// ^Q[0-9]+$: the model's own lowercase wire key fails (design section 22.2,
+// D31, the key-confusion risk).
+func TestReplyQuestionPattern(t *testing.T) {
+	t.Parallel()
+
+	doc := mustParse(t, repliesXML(`question="q1"`, "ok"))
+	errs := Validate(doc, ValidateContext{})
+	want := `replies/reply[0]/question: must match ^Q[0-9]+$`
+	if !containsErr(errs, want) {
+		t.Fatalf("Validate = %v, want to contain %q", dumpErrs(errs), want)
+	}
+}
+
+// TestRepliesOutcomeNeedsOneReply proves the replies outcome refuses an
+// empty <replies> block (design section 22.2, D31: "replies outcome with
+// none").
+func TestRepliesOutcomeNeedsOneReply(t *testing.T) {
+	t.Parallel()
+
+	xmlDoc := `<zing job="planning" outcome="replies"><progress>progress</progress></zing>`
+	doc := mustParse(t, xmlDoc)
+	errs := Validate(doc, ValidateContext{})
+	want := "replies/reply: need at least 1"
+	if !containsErr(errs, want) {
+		t.Fatalf("Validate = %v, want to contain %q", dumpErrs(errs), want)
+	}
+}

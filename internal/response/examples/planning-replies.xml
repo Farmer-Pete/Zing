@@ -1,0 +1,4 @@
+<zing job="planning" outcome="replies">
+  <replies><reply question="Q1" settled="true" decision="Read the version from runtime/debug.ReadBuildInfo only.">Agreed, no ldflags.</reply></replies>
+  <progress>Answered Q1 about the version source; still waiting on Q2 before the plan can continue.</progress>
+</zing>

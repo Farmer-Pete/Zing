@@ -72,12 +72,14 @@ type NothingToDoResponse struct {
 	Head
 	Claims []Claim `xml:"claims>claim" json:"claims" jsonschema:"minItems=1" doc:"every code claim is false"`
 	Notes  string  `xml:"notes"        json:"notes"  doc:"why there is nothing to build"`
+	Conversation
 }
 
 type ChildrenResponse struct {
 	Head
 	Children []Child `xml:"child" json:"children" jsonschema:"minItems=2" doc:"tickets that can each be built and verified alone"`
 	Notes    string  `xml:"notes" json:"notes"    doc:"the shared architecture, markdown"`
+	Conversation
 }
 
 type Child struct {
@@ -92,6 +94,7 @@ type ReadyResponse struct {
 	Claims    []Claim    `xml:"claims>claim"       json:"claims"    jsonschema:"minItems=1"`
 	Scenarios []Scenario `xml:"scenarios>scenario" json:"scenarios" jsonschema:"minItems=2,maxItems=30"`
 	Plan      Plan       `xml:"plan"               json:"plan"`
+	Conversation
 }
 
 // The plan. Four parts. The console shows each part as a heading and each child as a sub-heading.
@@ -232,6 +235,40 @@ type Review struct {
 	Alternatives []string `xml:"alternatives>alternative"  json:"alternatives" jsonschema:"minItems=1" doc:"an approach that was on the table, and why the plan does not use it"`
 	Risks        []string `xml:"risks>risk"                json:"risks"        jsonschema:"minItems=1" doc:"a risk or open question"`
 }
+
+// ---- planning conversation (D31) -------------------------------------
+
+// Conversation is embedded in every planning outcome that can answer the
+// owner: questions (and planning's universal question), ready, children,
+// and nothing_to_do. error carries none.
+type Conversation struct {
+	Replies []Reply `xml:"replies>reply" json:"replies" doc:"none, or one per question thread you answer this turn"`
+}
+
+// ReplyList returns the replies, the one accessor internal/job reads.
+func (c Conversation) ReplyList() []Reply { return c.Replies }
+
+type Reply struct {
+	Question string `xml:"question,attr"           json:"question"           jsonschema:"pattern=^Q[0-9]+$"            doc:"the question's key as Zing showed it, such as Q7, never your own q1"`
+	Settled  bool   `xml:"settled,attr,omitempty"  json:"settled,omitempty"  doc:"write settled=\"true\" to close the thread with decision"`
+	Decision string `xml:"decision,attr,omitempty" json:"decision,omitempty" jsonschema:"minLength=1,maxLength=500" doc:"required when settled: the decision taken, one sentence"`
+	Text     string `xml:",chardata"               json:"text"               jsonschema:"minLength=1"                  doc:"your reply to the owner, markdown"`
+}
+
+type PlanningQuestionsResponse struct { // outcome: questions | question (planning only)
+	Head
+	Questions []Question `xml:"question" json:"questions" jsonschema:"minItems=1" doc:"one per decision you need"`
+	Progress  string     `xml:"progress" json:"progress"  doc:"what is done so far, so the resumed run can continue"`
+	Conversation
+}
+
+type RepliesResponse struct { // outcome: replies (planning only)
+	Head
+	Replies  []Reply `xml:"replies>reply" json:"replies"  jsonschema:"minItems=1" doc:"one per question thread you answer this turn"`
+	Progress string  `xml:"progress"      json:"progress" doc:"what is done so far, so the resumed run can continue"`
+}
+
+func (r *RepliesResponse) ReplyList() []Reply { return r.Replies }
 
 // ---- plan review and code review -----------------------------------------
 
