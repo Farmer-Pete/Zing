@@ -222,6 +222,8 @@ func TestCommandRunnerFilteredEnv(t *testing.T) {
 // runShellCommand uses, drops every *_TOKEN-shaped name and the claude
 // runtime alone ever appends the real one, after FilteredEnv, never
 // through it.
+//
+// Not parallel: it calls t.Setenv("CLAUDE_CODE_OAUTH_TOKEN", ...) below.
 func TestCommandRunnerEnvHasNoOAuthToken(t *testing.T) {
 	t.Setenv("CLAUDE_CODE_OAUTH_TOKEN", "should-not-reach-a-command-rerun")
 	r := NewCommandRunner(sandbox.Off(), false)

@@ -131,6 +131,7 @@ func countRows(t *testing.T, s *Store, query string, args ...any) int {
 // same way this test arranges it. Before the fix, scanning straight into
 // row.Body (a string) failed on a NULL row.
 func TestGetMessage_NullBodyReadsBackAsEmptyString(t *testing.T) {
+	t.Parallel()
 	s := newTestStore(t)
 	ctx := t.Context()
 	_, ticketID := seedQueuedTicket(t, s, "1")
@@ -158,6 +159,7 @@ func TestGetMessage_NullBodyReadsBackAsEmptyString(t *testing.T) {
 // --- CommitHandlerResult ----------------------------------------------------
 
 func TestCommitHandlerResult_FirstEntryPlanningAppliesAtomically(t *testing.T) {
+	t.Parallel()
 	s := newTestStore(t)
 	ctx := t.Context()
 	_, ticketID := seedQueuedTicket(t, s, "1")
@@ -243,6 +245,7 @@ func TestCommitHandlerResult_FirstEntryPlanningAppliesAtomically(t *testing.T) {
 // matches, because each store method truncates its own incoming expires the
 // same way.
 func TestCommitHandlerResult_TruncatesExpiresLikeClaim(t *testing.T) {
+	t.Parallel()
 	s := newTestStore(t)
 	ctx := t.Context()
 	_, ticketID := seedQueuedTicket(t, s, "1")
@@ -279,6 +282,7 @@ func TestCommitHandlerResult_TruncatesExpiresLikeClaim(t *testing.T) {
 }
 
 func TestCommitHandlerResult_StaleOwnerAppliesNothing(t *testing.T) {
+	t.Parallel()
 	s := newTestStore(t)
 	ctx := t.Context()
 	_, ticketID := seedQueuedTicket(t, s, "1")
@@ -312,6 +316,7 @@ func TestCommitHandlerResult_StaleOwnerAppliesNothing(t *testing.T) {
 }
 
 func TestCommitHandlerResult_ChangedExpiryAppliesNothing(t *testing.T) {
+	t.Parallel()
 	s := newTestStore(t)
 	ctx := t.Context()
 	_, ticketID := seedQueuedTicket(t, s, "1")
@@ -343,6 +348,7 @@ func TestCommitHandlerResult_ChangedExpiryAppliesNothing(t *testing.T) {
 }
 
 func TestCommitHandlerResult_AttachRunToMsgsRejectsNonSingleRun(t *testing.T) {
+	t.Parallel()
 	s := newTestStore(t)
 	ctx := t.Context()
 	_, ticketID := seedQueuedTicket(t, s, "1")
@@ -380,6 +386,7 @@ func TestCommitHandlerResult_AttachRunToMsgsRejectsNonSingleRun(t *testing.T) {
 }
 
 func TestCommitHandlerResult_ResumeClearsWaitAndTransitions(t *testing.T) {
+	t.Parallel()
 	s := newTestStore(t)
 	ctx := t.Context()
 	_, ticketID := seedQueuedTicket(t, s, "1")
@@ -472,6 +479,7 @@ func TestCommitHandlerResult_ResumeClearsWaitAndTransitions(t *testing.T) {
 // and this terminalizing commit is the first to learn the runtime's session
 // id -- and BumpResumes still increments alongside it.
 func TestCommitHandlerResult_SessionUpsertFillsNullExternalID(t *testing.T) {
+	t.Parallel()
 	s := newTestStore(t)
 	ctx := t.Context()
 	_, ticketID := seedQueuedTicket(t, s, "1")
@@ -512,6 +520,7 @@ func TestCommitHandlerResult_SessionUpsertFillsNullExternalID(t *testing.T) {
 // commit on the same session (a second resume, say) cannot clobber the id
 // the runtime returned on the first turn.
 func TestCommitHandlerResult_SessionUpsertDoesNotOverwriteSetExternalID(t *testing.T) {
+	t.Parallel()
 	s := newTestStore(t)
 	ctx := t.Context()
 	_, ticketID := seedQueuedTicket(t, s, "1")
@@ -549,6 +558,7 @@ func TestCommitHandlerResult_SessionUpsertDoesNotOverwriteSetExternalID(t *testi
 // whole commit rather than storing an empty external_id (which is not a
 // valid runtime id and not "no id yet" -- that is NULL).
 func TestCommitHandlerResult_RejectsEmptyExternalID(t *testing.T) {
+	t.Parallel()
 	s := newTestStore(t)
 	ctx := t.Context()
 	_, ticketID := seedQueuedTicket(t, s, "1")
@@ -581,6 +591,7 @@ func TestCommitHandlerResult_RejectsEmptyExternalID(t *testing.T) {
 // another ticket's session errors and writes nothing, rather than silently
 // updating a session that belongs to a different ticket.
 func TestCommitHandlerResult_RejectsSessionFromAnotherTicket(t *testing.T) {
+	t.Parallel()
 	s := newTestStore(t)
 	ctx := t.Context()
 	_, ticketA := seedQueuedTicket(t, s, "1")
@@ -630,6 +641,7 @@ func TestCommitHandlerResult_RejectsSessionFromAnotherTicket(t *testing.T) {
 // another ticket's question id errors and writes nothing, including no
 // partial resolution of the question it did not own.
 func TestCommitHandlerResult_RejectsResolveQuestionFromAnotherTicket(t *testing.T) {
+	t.Parallel()
 	s := newTestStore(t)
 	ctx := t.Context()
 	_, ticketA := seedQueuedTicket(t, s, "1")
@@ -681,6 +693,7 @@ func TestCommitHandlerResult_RejectsResolveQuestionFromAnotherTicket(t *testing.
 // the whole commit -- including its state transition and message -- rolls
 // back rather than partially applying.
 func TestCommitHandlerResult_ResolveQuestionRejectsStillOpenQuestion(t *testing.T) {
+	t.Parallel()
 	s := newTestStore(t)
 	ctx := t.Context()
 	_, ticketID := seedQueuedTicket(t, s, "1")
@@ -732,6 +745,7 @@ func TestCommitHandlerResult_ResolveQuestionRejectsStillOpenQuestion(t *testing.
 // commit whose message links onto another ticket's message errors and writes
 // nothing.
 func TestCommitHandlerResult_RejectsMessageParentFromAnotherTicket(t *testing.T) {
+	t.Parallel()
 	s := newTestStore(t)
 	ctx := t.Context()
 	_, ticketA := seedQueuedTicket(t, s, "1")
@@ -777,6 +791,7 @@ func TestCommitHandlerResult_RejectsMessageParentFromAnotherTicket(t *testing.T)
 // (section 6.3): every inserted message lands under c.TicketID regardless of
 // what the commit's Messages carried.
 func TestCommitHandlerResult_ForcesMessageTicketID(t *testing.T) {
+	t.Parallel()
 	s := newTestStore(t)
 	ctx := t.Context()
 	_, ticketA := seedQueuedTicket(t, s, "1")
@@ -815,6 +830,7 @@ func TestCommitHandlerResult_ForcesMessageTicketID(t *testing.T) {
 }
 
 func TestCommitHandlerResult_CodeHandlerTransitionWritesStateMessage(t *testing.T) {
+	t.Parallel()
 	s := newTestStore(t)
 	ctx := t.Context()
 	_, ticketID := seedQueuedTicket(t, s, "1")
@@ -852,6 +868,7 @@ func TestCommitHandlerResult_CodeHandlerTransitionWritesStateMessage(t *testing.
 // --- AnswerQuestion ----------------------------------------------------------
 
 func TestAnswerQuestion_AcceptsValidAnswerAndClearsWaitOnLastOfBatch(t *testing.T) {
+	t.Parallel()
 	s := newTestStore(t)
 	ctx := t.Context()
 	_, ticketID := seedQueuedTicket(t, s, "1")
@@ -933,6 +950,7 @@ func TestAnswerQuestion_AcceptsValidAnswerAndClearsWaitOnLastOfBatch(t *testing.
 // ticket happens to carry, and WaitCleared reports that it did not clear
 // anything.
 func TestAnswerQuestion_LeavesANonQuestionsWaitUntouched(t *testing.T) {
+	t.Parallel()
 	s := newTestStore(t)
 	ctx := t.Context()
 	_, ticketID := seedQueuedTicket(t, s, "1")
@@ -968,6 +986,7 @@ func TestAnswerQuestion_LeavesANonQuestionsWaitUntouched(t *testing.T) {
 }
 
 func TestAnswerQuestion_RejectsWrongTicket(t *testing.T) {
+	t.Parallel()
 	s := newTestStore(t)
 	ctx := t.Context()
 	_, ticketA := seedQueuedTicket(t, s, "1")
@@ -999,6 +1018,7 @@ func TestAnswerQuestion_RejectsWrongTicket(t *testing.T) {
 }
 
 func TestAnswerQuestion_RejectsMissingOption(t *testing.T) {
+	t.Parallel()
 	s := newTestStore(t)
 	ctx := t.Context()
 	_, ticketID := seedQueuedTicket(t, s, "1")
@@ -1029,6 +1049,7 @@ func TestAnswerQuestion_RejectsMissingOption(t *testing.T) {
 }
 
 func TestAnswerQuestion_RejectsClosedQuestion(t *testing.T) {
+	t.Parallel()
 	s := newTestStore(t)
 	ctx := t.Context()
 	_, ticketID := seedQueuedTicket(t, s, "1")
@@ -1054,6 +1075,7 @@ func TestAnswerQuestion_RejectsClosedQuestion(t *testing.T) {
 }
 
 func TestAnswerQuestion_IdempotentOnRepeat(t *testing.T) {
+	t.Parallel()
 	s := newTestStore(t)
 	ctx := t.Context()
 	_, ticketID := seedQueuedTicket(t, s, "1")
@@ -1089,6 +1111,7 @@ func TestAnswerQuestion_IdempotentOnRepeat(t *testing.T) {
 }
 
 func TestAnswerQuestion_RejectsZeroOptionQuestion(t *testing.T) {
+	t.Parallel()
 	s := newTestStore(t)
 	ctx := t.Context()
 	_, ticketID := seedQueuedTicket(t, s, "1")
@@ -1204,6 +1227,7 @@ func planPayload() []byte {
 // exit_code, and agent_seconds on the run Reserve already placed, and never
 // touches model, which Reserve set at reserve time.
 func TestCommitHandlerResult_RunUpdateWritesOutcomeAndLeavesModelUntouched(t *testing.T) {
+	t.Parallel()
 	s := newTestStore(t)
 	ctx := t.Context()
 	_, ticketID := seedQueuedTicket(t, s, "1")
@@ -1247,6 +1271,7 @@ func TestCommitHandlerResult_RunUpdateWritesOutcomeAndLeavesModelUntouched(t *te
 // session on a different ticket is rejected with the exact text, and the
 // run's own row is left untouched.
 func TestCommitHandlerResult_RunUpdateRejectsRunFromAnotherTicketsSession(t *testing.T) {
+	t.Parallel()
 	s := newTestStore(t)
 	ctx := t.Context()
 	_, ticketA := seedQueuedTicket(t, s, "1")
@@ -1289,6 +1314,7 @@ func TestCommitHandlerResult_RunUpdateRejectsRunFromAnotherTicketsSession(t *tes
 // AttachRunToMsgs extension (design section 4.5): the attach id comes from a
 // Run.ID > 0 update just as it would from a Run.ID == 0 insert.
 func TestCommitHandlerResult_AttachRunToMsgsAttachesUpdatedRunID(t *testing.T) {
+	t.Parallel()
 	s := newTestStore(t)
 	ctx := t.Context()
 	_, ticketID := seedQueuedTicket(t, s, "1")
@@ -1334,6 +1360,7 @@ func TestCommitHandlerResult_AttachRunToMsgsAttachesUpdatedRunID(t *testing.T) {
 // AttachRunToMsgsRejectsNonSingleRun's sibling for the other non-single
 // count: two Runs entries is rejected the same way zero is.
 func TestCommitHandlerResult_AttachRunToMsgsRejectsTwoRuns(t *testing.T) {
+	t.Parallel()
 	s := newTestStore(t)
 	ctx := t.Context()
 	_, ticketID := seedQueuedTicket(t, s, "1")
@@ -1363,6 +1390,7 @@ func TestCommitHandlerResult_AttachRunToMsgsRejectsTwoRuns(t *testing.T) {
 // (design section 4.5): 0 is never a real run id, so a handler that sends
 // one made a mistake worth failing loudly on.
 func TestCommitHandlerResult_AttachRunToMsgsRejectsMessageRunIDZero(t *testing.T) {
+	t.Parallel()
 	s := newTestStore(t)
 	ctx := t.Context()
 	_, ticketID := seedQueuedTicket(t, s, "1")
@@ -1400,6 +1428,7 @@ func TestCommitHandlerResult_AttachRunToMsgsRejectsMessageRunIDZero(t *testing.T
 // that already carries a non-zero RunID is left alone even when
 // AttachRunToMsgs is set: only a nil RunID is filled in.
 func TestCommitHandlerResult_AttachRunToMsgsKeepsExplicitRunID(t *testing.T) {
+	t.Parallel()
 	s := newTestStore(t)
 	ctx := t.Context()
 	_, ticketID := seedQueuedTicket(t, s, "1")
@@ -1467,6 +1496,7 @@ func TestCommitHandlerResult_AttachRunToMsgsKeepsExplicitRunID(t *testing.T) {
 // --- CommitHandlerResult: SetKind -------------------------------------------
 
 func TestCommitHandlerResult_SetKindNullToBugSucceeds(t *testing.T) {
+	t.Parallel()
 	s := newTestStore(t)
 	ctx := t.Context()
 	_, ticketID := seedQueuedTicket(t, s, "1")
@@ -1498,6 +1528,7 @@ func TestCommitHandlerResult_SetKindNullToBugSucceeds(t *testing.T) {
 // is not a conflict, whether or not the driver reports it as zero rows
 // affected.
 func TestCommitHandlerResult_SetKindSameToSameSucceeds(t *testing.T) {
+	t.Parallel()
 	s := newTestStore(t)
 	ctx := t.Context()
 	_, ticketID := seedQueuedTicket(t, s, "1")
@@ -1531,6 +1562,7 @@ func TestCommitHandlerResult_SetKindSameToSameSucceeds(t *testing.T) {
 }
 
 func TestCommitHandlerResult_SetKindConflictErrors(t *testing.T) {
+	t.Parallel()
 	s := newTestStore(t)
 	ctx := t.Context()
 	_, ticketID := seedQueuedTicket(t, s, "1")
@@ -1569,6 +1601,7 @@ func TestCommitHandlerResult_SetKindConflictErrors(t *testing.T) {
 // message in the same commit, the whole commit rolls back rather than
 // partially applying.
 func TestCommitHandlerResult_SetKindRejectsUnknownValueBeforeSQL(t *testing.T) {
+	t.Parallel()
 	s := newTestStore(t)
 	ctx := t.Context()
 	_, ticketID := seedQueuedTicket(t, s, "1")
@@ -1608,9 +1641,11 @@ func TestCommitHandlerResult_SetKindRejectsUnknownValueBeforeSQL(t *testing.T) {
 // (same-to-same, whether or not the driver reports it as zero rows
 // affected), and a different branch is a conflict naming both values.
 func TestCommitSetBranch(t *testing.T) {
+	t.Parallel()
 	const zingBranch1, zingBranch2 = "zing/1", "zing/2"
 
 	t.Run("null to a branch succeeds", func(t *testing.T) {
+		t.Parallel()
 		s := newTestStore(t)
 		ctx := t.Context()
 		_, ticketID := seedQueuedTicket(t, s, "1")
@@ -1638,6 +1673,7 @@ func TestCommitSetBranch(t *testing.T) {
 	})
 
 	t.Run("same value succeeds", func(t *testing.T) {
+		t.Parallel()
 		s := newTestStore(t)
 		ctx := t.Context()
 		_, ticketID := seedQueuedTicket(t, s, "1")
@@ -1671,6 +1707,7 @@ func TestCommitSetBranch(t *testing.T) {
 	})
 
 	t.Run("a different value conflicts", func(t *testing.T) {
+		t.Parallel()
 		s := newTestStore(t)
 		ctx := t.Context()
 		_, ticketID := seedQueuedTicket(t, s, "1")
@@ -1713,7 +1750,9 @@ func TestCommitSetBranch(t *testing.T) {
 // in one commit (design section 4.2) -- and that an entry with a nil ID is
 // refused before anything commits.
 func TestCommitExtraSessions(t *testing.T) {
+	t.Parallel()
 	t.Run("seven sessions updated", func(t *testing.T) {
+		t.Parallel()
 		s := newTestStore(t)
 		ctx := t.Context()
 		_, ticketID := seedQueuedTicket(t, s, "1")
@@ -1753,6 +1792,7 @@ func TestCommitExtraSessions(t *testing.T) {
 	})
 
 	t.Run("a nil id is refused, and nothing commits", func(t *testing.T) {
+		t.Parallel()
 		s := newTestStore(t)
 		ctx := t.Context()
 		_, ticketID := seedQueuedTicket(t, s, "1")
@@ -1791,6 +1831,7 @@ func TestCommitExtraSessions(t *testing.T) {
 // inserted artifact lands under c.TicketID regardless of what the commit's
 // Artifacts carried.
 func TestCommitHandlerResult_ArtifactTicketIDForced(t *testing.T) {
+	t.Parallel()
 	s := newTestStore(t)
 	ctx := t.Context()
 	_, ticketA := seedQueuedTicket(t, s, "1")
@@ -1824,6 +1865,7 @@ func TestCommitHandlerResult_ArtifactTicketIDForced(t *testing.T) {
 // Artifact.RunID that belongs to another ticket is rejected, and nothing is
 // inserted.
 func TestCommitHandlerResult_ArtifactRejectsRunFromAnotherTicket(t *testing.T) {
+	t.Parallel()
 	s := newTestStore(t)
 	ctx := t.Context()
 	_, ticketA := seedQueuedTicket(t, s, "1")
@@ -1855,6 +1897,7 @@ func TestCommitHandlerResult_ArtifactRejectsRunFromAnotherTicket(t *testing.T) {
 // == 0 becomes one past (ticket, type)'s current maximum, computed inside
 // the transaction, for a whole-document type ("plan").
 func TestCommitHandlerResult_ArtifactZeroVersionAutoIncrements(t *testing.T) {
+	t.Parallel()
 	s := newTestStore(t)
 	ctx := t.Context()
 	_, ticketID := seedQueuedTicket(t, s, "1")
@@ -1903,6 +1946,7 @@ func TestCommitHandlerResult_ArtifactZeroVersionAutoIncrements(t *testing.T) {
 // type, version) collides against artifacts_whole_doc_uk with the exact
 // text.
 func TestCommitHandlerResult_ArtifactExplicitVersionCollisionErrors(t *testing.T) {
+	t.Parallel()
 	s := newTestStore(t)
 	ctx := t.Context()
 	_, ticketID := seedQueuedTicket(t, s, "1")
@@ -1948,6 +1992,7 @@ func TestCommitHandlerResult_ArtifactExplicitVersionCollisionErrors(t *testing.T
 // and a validation failure rolls the whole commit back, including an
 // otherwise-valid message in the same commit.
 func TestCommitHandlerResult_ArtifactInvalidPayloadRollsBackWholeCommit(t *testing.T) {
+	t.Parallel()
 	s := newTestStore(t)
 	ctx := t.Context()
 	_, ticketID := seedQueuedTicket(t, s, "1")
@@ -1983,6 +2028,7 @@ func TestCommitHandlerResult_ArtifactInvalidPayloadRollsBackWholeCommit(t *testi
 // already-"resolved" question is untouched, and a non-question message is
 // untouched.
 func TestCommitHandlerResult_ResolveAllResolvesOpenAndAnsweredQuestionsOnly(t *testing.T) {
+	t.Parallel()
 	s := newTestStore(t)
 	ctx := t.Context()
 	_, ticketID := seedQueuedTicket(t, s, "1")
@@ -2112,6 +2158,7 @@ func assertSealMismatch(t *testing.T, err error, stage string, expected, affecte
 // one of its scenario rows with sealed_at and never touches another run's
 // cohort on the same ticket.
 func TestCommitHandlerResult_SealSealsExactlyTheCohortAndLeavesOthersUntouched(t *testing.T) {
+	t.Parallel()
 	s := newTestStore(t)
 	ctx := t.Context()
 	_, ticketID := seedQueuedTicket(t, s, "1")
@@ -2154,6 +2201,7 @@ func TestCommitHandlerResult_SealSealsExactlyTheCohortAndLeavesOthersUntouched(t
 // PlanVersion does not match the ticket's max-version plan artifact fails at
 // stage "plan" (design D16, section 4.5 check 1).
 func TestCommitHandlerResult_SealPlanVersionMismatch(t *testing.T) {
+	t.Parallel()
 	s := newTestStore(t)
 	ctx := t.Context()
 	_, ticketID := seedQueuedTicket(t, s, "1")
@@ -2174,6 +2222,7 @@ func TestCommitHandlerResult_SealPlanVersionMismatch(t *testing.T) {
 // of 1 or 31 rows fails at stage "count" (design D16, section 4.5 check 2:
 // the count must lie in [2,30]).
 func TestCommitHandlerResult_SealCohortCountOutOfRange(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name string
 		n    int
@@ -2183,6 +2232,7 @@ func TestCommitHandlerResult_SealCohortCountOutOfRange(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
 			s := newTestStore(t)
 			ctx := t.Context()
 			_, ticketID := seedQueuedTicket(t, s, "1")
@@ -2207,6 +2257,7 @@ func TestCommitHandlerResult_SealCohortCountOutOfRange(t *testing.T) {
 // touches rows still sealed_at IS NULL, so it affects one row fewer than
 // ExpectedCount.
 func TestCommitHandlerResult_SealPartiallySealedCohortStageUpdate(t *testing.T) {
+	t.Parallel()
 	s := newTestStore(t)
 	ctx := t.Context()
 	_, ticketID := seedQueuedTicket(t, s, "1")
@@ -2240,6 +2291,7 @@ func TestCommitHandlerResult_SealPartiallySealedCohortStageUpdate(t *testing.T) 
 // ran), and an otherwise-valid message in the same commit was never inserted
 // (design D16).
 func TestCommitHandlerResult_SealMismatchRollsBackWholeCommit(t *testing.T) {
+	t.Parallel()
 	s := newTestStore(t)
 	ctx := t.Context()
 	_, ticketID := seedQueuedTicket(t, s, "1")
@@ -2305,6 +2357,7 @@ var wantEscalationOptions = []response.Option{
 // recommended "b", offering the fixed three options, and both bodies exactly
 // as design section 6.7 specifies.
 func TestCommitHandlerResult_EscalationCapHasNilRunID(t *testing.T) {
+	t.Parallel()
 	s := newTestStore(t)
 	ctx := t.Context()
 	_, ticketID := seedQueuedTicket(t, s, "1")
@@ -2387,6 +2440,7 @@ func TestCommitHandlerResult_EscalationCapHasNilRunID(t *testing.T) {
 // owned escalation (a run caused it) ties both the escalation message and
 // its linked question to that same run id.
 func TestCommitHandlerResult_EscalationWithRunIDTiesBothMessagesToIt(t *testing.T) {
+	t.Parallel()
 	s := newTestStore(t)
 	ctx := t.Context()
 	_, ticketID := seedQueuedTicket(t, s, "1")
@@ -2426,6 +2480,7 @@ func TestCommitHandlerResult_EscalationWithRunIDTiesBothMessagesToIt(t *testing.
 // question would route through the other ticket's session and job (design
 // section 4.5, 6.7; PR #23 review).
 func TestCommitHandlerResult_EscalationRejectsForeignRunID(t *testing.T) {
+	t.Parallel()
 	s := newTestStore(t)
 	ctx := t.Context()
 
@@ -2468,6 +2523,7 @@ func TestCommitHandlerResult_EscalationRejectsForeignRunID(t *testing.T) {
 // Q1 then Q2 (design section 6.7): the allocation counts every "question"
 // message the ticket already carries, escalation or otherwise.
 func TestCommitHandlerResult_EscalationAllocatesSequentialQuestionKeys(t *testing.T) {
+	t.Parallel()
 	s := newTestStore(t)
 	ctx := t.Context()
 	_, ticketID := seedQueuedTicket(t, s, "1")
@@ -2511,6 +2567,7 @@ func TestCommitHandlerResult_EscalationAllocatesSequentialQuestionKeys(t *testin
 // (design D12): a commit with and without an identical TrackerEffect writes
 // the same rows either way.
 func TestCommitHandlerResult_TrackerEffectDoesNotChangeTheTransactionsWrites(t *testing.T) {
+	t.Parallel()
 	s := newTestStore(t)
 	ctx := t.Context()
 	_, ticketA := seedQueuedTicket(t, s, "1")
@@ -2565,6 +2622,7 @@ func TestCommitHandlerResult_TrackerEffectDoesNotChangeTheTransactionsWrites(t *
 // validates against the messages/question schema (insertMessageTx's own
 // check, run after the key is filled in).
 func TestCommitHandlerResult_MessageQuestionAllocatesKeyWhenPayloadKeyIsEmpty(t *testing.T) {
+	t.Parallel()
 	s := newTestStore(t)
 	ctx := t.Context()
 	_, ticketID := seedQueuedTicket(t, s, "1")

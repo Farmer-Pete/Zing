@@ -375,6 +375,7 @@ func TestCapResumesRetryCarriesAnswers(t *testing.T) {
 // originFor derive it from the unit (u.TaskN != 0) rather than the
 // constant every one of these call sites hardcoded before task 2.
 func TestTaskEscalationOriginStillBuild(t *testing.T) {
+	t.Parallel()
 	assertBuildOrigin := func(t *testing.T, commit store.HandlerCommit) {
 		t.Helper()
 		if commit.Escalation == nil {
@@ -386,6 +387,7 @@ func TestTaskEscalationOriginStillBuild(t *testing.T) {
 	}
 
 	t.Run("CHECK command failure", func(t *testing.T) {
+		t.Parallel()
 		s, rt, ticketID := buildTicketInBuilding(t)
 		deps := claimForBuild(t, s, rt, ticketID)
 		commit, err := runBuilding(t, s, deps, ticketID) // RUN task 1
@@ -408,6 +410,7 @@ func TestTaskEscalationOriginStillBuild(t *testing.T) {
 	})
 
 	t.Run("LAND signing failure", func(t *testing.T) {
+		t.Parallel()
 		s, rt, ticketID := buildTicketInBuilding(t)
 		deps := claimForBuild(t, s, rt, ticketID)
 		commit, err := runBuilding(t, s, deps, ticketID) // RUN task 1 (the fake runtime writes hello.txt)
@@ -435,6 +438,7 @@ func TestTaskEscalationOriginStillBuild(t *testing.T) {
 	})
 
 	t.Run("DESCRIBE unclaimed extra", func(t *testing.T) {
+		t.Parallel()
 		s, ticketID, _, scriptRT := perimeterScenario(t, map[string]string{testExtraPath: testExtraReason})
 
 		ticket := getTicket(t, s, ticketID)
@@ -453,6 +457,7 @@ func TestTaskEscalationOriginStillBuild(t *testing.T) {
 	})
 
 	t.Run("RESOLVE revert failure", func(t *testing.T) {
+		t.Parallel()
 		s, ticketID, _, scriptRT := perimeterScenario(t, map[string]string{testExtraPath: testExtraReason})
 		scriptRT.steps = append(scriptRT.steps, perimeterStep("Adds a small helper.", "task-resolve-perim-sess"))
 		describeTick(t, s, scriptRT, ticketID) // DESCRIBE + ASK
@@ -480,6 +485,7 @@ func TestTaskEscalationOriginStillBuild(t *testing.T) {
 	})
 
 	t.Run("build run error outcome", func(t *testing.T) {
+		t.Parallel()
 		s, _, ticketID := buildTicketInBuilding(t)
 		ticket := getTicket(t, s, ticketID)
 
@@ -494,6 +500,7 @@ func TestTaskEscalationOriginStillBuild(t *testing.T) {
 	})
 
 	t.Run("resume exec failure", func(t *testing.T) {
+		t.Parallel()
 		s, _, ticketID := buildTicketInBuilding(t)
 
 		scriptRT := &scriptedRuntime{t: t, steps: []scriptedStep{buildStep([]string{helloTxt}, 0, 0, nil, "task-exec-fail-sess")}}

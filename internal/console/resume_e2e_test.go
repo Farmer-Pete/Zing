@@ -96,6 +96,7 @@ const resumeE2EBudget = 240 * time.Minute
 // TestResumeE2E_AnswerViaConsoleAdvancesTicketToDoneWithNoLeak is the
 // verify-by. See the file doc comment above.
 func TestResumeE2E_AnswerViaConsoleAdvancesTicketToDoneWithNoLeak(t *testing.T) {
+	t.Parallel()
 	ctx := t.Context()
 
 	st, err := store.Open(ctx, t.TempDir()+"/zing.db")

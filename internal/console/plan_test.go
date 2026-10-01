@@ -134,9 +134,11 @@ func renderPlanToString(t *testing.T, plan response.Plan, events []store.FileEve
 // map: the four parts as <h2>, their children as <h3>, and recognizable
 // output for every field, not only the headings.
 func TestRenderPlanEveryField(t *testing.T) {
+	t.Parallel()
 	got := renderPlanToString(t, fixturePlan(), nil)
 
 	t.Run("four parts as h2", func(t *testing.T) {
+		t.Parallel()
 		for _, want := range []string{"<h2>Overview</h2>", "<h2>Design</h2>", "<h2>Delivery</h2>", "<h2>Review</h2>"} {
 			if !strings.Contains(got, want) {
 				t.Errorf("missing %q", want)
@@ -145,6 +147,7 @@ func TestRenderPlanEveryField(t *testing.T) {
 	})
 
 	t.Run("overview children as h3", func(t *testing.T) {
+		t.Parallel()
 		for _, want := range []string{"<h3>Objective</h3>", "<h3>Context</h3>", "<h3>Problem</h3>", "<h3>Goals</h3>", "<h3>Non-goals</h3>"} {
 			if !strings.Contains(got, want) {
 				t.Errorf("missing %q", want)
@@ -153,24 +156,28 @@ func TestRenderPlanEveryField(t *testing.T) {
 	})
 
 	t.Run("objective renders as plain text", func(t *testing.T) {
+		t.Parallel()
 		if !strings.Contains(got, "Ship a plan renderer that drops nothing.") {
 			t.Error("missing the objective text")
 		}
 	})
 
 	t.Run("context renders through the markdown helper", func(t *testing.T) {
+		t.Parallel()
 		if !strings.Contains(got, "<strong>internal/console</strong>") {
 			t.Errorf("context did not render as markdown; got:\n%s", got)
 		}
 	})
 
 	t.Run("problem text renders through the markdown helper", func(t *testing.T) {
+		t.Parallel()
 		if !strings.Contains(got, "The gate question shows a placeholder instead of the stored plan.") {
 			t.Error("missing the problem text")
 		}
 	})
 
 	t.Run("bug loop renders as cmd plus text", func(t *testing.T) {
+		t.Parallel()
 		if !strings.Contains(got, "go test ./internal/console/... -run TestRenderPlan") {
 			t.Error("missing the loop cmd")
 		}
@@ -180,12 +187,14 @@ func TestRenderPlanEveryField(t *testing.T) {
 	})
 
 	t.Run("repro renders", func(t *testing.T) {
+		t.Parallel()
 		if !strings.Contains(got, "seed a gate question") {
 			t.Error("missing the repro text")
 		}
 	})
 
 	t.Run("hypotheses render as a rank/cause/prediction table", func(t *testing.T) {
+		t.Parallel()
 		for _, want := range []string{
 			"<td>1</td>", "no RenderPlan function exists", "adding one replaces the placeholder",
 			"<td>2</td>", "the gate context never calls it", "wiring it in fixes the region",
@@ -197,6 +206,7 @@ func TestRenderPlanEveryField(t *testing.T) {
 	})
 
 	t.Run("goals and non-goals render as lists", func(t *testing.T) {
+		t.Parallel()
 		for _, want := range []string{
 			"<li>Render every Plan field</li>", "<li>Reuse the Task 5 markdown helper</li>",
 			"<li>Recomputing files or tasks into rows of their own</li>",
@@ -208,6 +218,7 @@ func TestRenderPlanEveryField(t *testing.T) {
 	})
 
 	t.Run("design children as h3", func(t *testing.T) {
+		t.Parallel()
 		for _, want := range []string{"<h3>Demo</h3>", "<h3>Shape</h3>", "<h3>Changes</h3>", "<h3>Types</h3>", "<h3>Migrations</h3>"} {
 			if !strings.Contains(got, want) {
 				t.Errorf("missing %q", want)
@@ -216,6 +227,7 @@ func TestRenderPlanEveryField(t *testing.T) {
 	})
 
 	t.Run("design demo renders as cmd plus text", func(t *testing.T) {
+		t.Parallel()
 		if !strings.Contains(got, "go test ./internal/console/... -run TestRenderPlanEveryField") {
 			t.Error("missing the demo cmd")
 		}
@@ -225,6 +237,7 @@ func TestRenderPlanEveryField(t *testing.T) {
 	})
 
 	t.Run("shape renders through the markdown helper with a mermaid block", func(t *testing.T) {
+		t.Parallel()
 		if !strings.Contains(got, "<pre class=\"mermaid\">") {
 			t.Errorf("shape did not draw its mermaid block; got:\n%s", got)
 		}
@@ -237,6 +250,7 @@ func TestRenderPlanEveryField(t *testing.T) {
 	})
 
 	t.Run("changes render as a table", func(t *testing.T) {
+		t.Parallel()
 		for _, want := range []string{
 			planChangePath, "RenderPlan", "new",
 			"views.go&#39;s threadComponent", "Render, templates.PlanView",
@@ -250,6 +264,7 @@ func TestRenderPlanEveryField(t *testing.T) {
 	})
 
 	t.Run("types render name/file/kind, a fields table, and a transitions sub-table", func(t *testing.T) {
+		t.Parallel()
 		for _, want := range []string{
 			"RenderedPlan", "internal/console/templates/plan.go",
 			"Overview", "RenderedOverview", "true",
@@ -262,6 +277,7 @@ func TestRenderPlanEveryField(t *testing.T) {
 	})
 
 	t.Run("migrations render each field", func(t *testing.T) {
+		t.Parallel()
 		for _, want := range []string{
 			planMigrationFile,
 			"CREATE INDEX idx_artifacts_plan ON artifacts(ticket_id, type);",
@@ -277,6 +293,7 @@ func TestRenderPlanEveryField(t *testing.T) {
 	})
 
 	t.Run("delivery children as h3", func(t *testing.T) {
+		t.Parallel()
 		for _, want := range []string{"<h3>Files</h3>", "<h3>Deletions</h3>", "<h3>Tests</h3>", "<h3>Tasks</h3>"} {
 			if !strings.Contains(got, want) {
 				t.Errorf("missing %q", want)
@@ -285,6 +302,7 @@ func TestRenderPlanEveryField(t *testing.T) {
 	})
 
 	t.Run("files render as a table", func(t *testing.T) {
+		t.Parallel()
 		for _, want := range []string{
 			planChangePath, "create", "builds RenderedPlan from a stored Plan",
 			"internal/console/templates/plan.templ", "renders RenderedPlan",
@@ -296,6 +314,7 @@ func TestRenderPlanEveryField(t *testing.T) {
 	})
 
 	t.Run("deletions render as a table", func(t *testing.T) {
+		t.Parallel()
 		for _, want := range []string{
 			"internal/console/templates/thread.templ", "gateContext placeholder",
 			"existed because Task 8 had not landed yet",
@@ -307,6 +326,7 @@ func TestRenderPlanEveryField(t *testing.T) {
 	})
 
 	t.Run("tests render as a table", func(t *testing.T) {
+		t.Parallel()
 		for _, want := range []string{
 			planTestName, "console.RenderPlan", "unit", "every field renders recognizably",
 		} {
@@ -317,6 +337,7 @@ func TestRenderPlanEveryField(t *testing.T) {
 	})
 
 	t.Run("tasks render as a table with text through the markdown helper", func(t *testing.T) {
+		t.Parallel()
 		if !strings.Contains(got, "<td>1</td>") {
 			t.Error("missing task n")
 		}
@@ -329,6 +350,7 @@ func TestRenderPlanEveryField(t *testing.T) {
 	})
 
 	t.Run("review children as h3", func(t *testing.T) {
+		t.Parallel()
 		for _, want := range []string{"<h3>Trust root</h3>", "<h3>Alternatives</h3>", "<h3>Risks</h3>"} {
 			if !strings.Contains(got, want) {
 				t.Errorf("missing %q", want)
@@ -337,6 +359,7 @@ func TestRenderPlanEveryField(t *testing.T) {
 	})
 
 	t.Run("review fields render", func(t *testing.T) {
+		t.Parallel()
 		if !strings.Contains(got, "internal/console/render.go, the audited markdown boundary") {
 			t.Error("missing trust root")
 		}
@@ -353,6 +376,7 @@ func TestRenderPlanEveryField(t *testing.T) {
 // Deletions.None renders the "none" lines rather than an empty table
 // (design section 6.9: "or a 'none' line").
 func TestRenderPlanNoneLines(t *testing.T) {
+	t.Parallel()
 	plan := fixturePlan()
 	plan.Design.Migrations = response.Migrations{None: true}
 	plan.Delivery.Deletions = response.Deletions{None: true}
@@ -389,6 +413,7 @@ const (
 // older row for the same path (no decision yet) proves the reduction reads
 // the newest row, not every row.
 func TestPlanListsDecidedFiles(t *testing.T) {
+	t.Parallel()
 	accept := response.PerimeterAccept
 	events := []store.FileEventRow{
 		{
@@ -430,6 +455,7 @@ func TestPlanListsDecidedFiles(t *testing.T) {
 // decisions yet renders no "Decided during build" heading at all (design
 // section 9.2: "It renders nothing when empty").
 func TestPlanOmitsDecidedListWhenEmpty(t *testing.T) {
+	t.Parallel()
 	got := renderPlanToString(t, fixturePlan(), nil)
 
 	if strings.Contains(got, "Decided during build") {

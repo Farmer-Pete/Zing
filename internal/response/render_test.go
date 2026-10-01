@@ -23,6 +23,7 @@ func goldenPath(job Job, outcome Outcome) string {
 // exactly. It enumerates the same registry task 1 built (registry.go), so a
 // pair added there gets a golden here without this test changing.
 func TestRenderTemplate_MatchesGolden(t *testing.T) {
+	t.Parallel()
 	if *update {
 		for key := range registry {
 			out, err := RenderTemplate(key.Job, key.Outcome)
@@ -41,6 +42,7 @@ func TestRenderTemplate_MatchesGolden(t *testing.T) {
 
 	for key := range registry {
 		t.Run(string(key.Job)+"/"+string(key.Outcome), func(t *testing.T) {
+			t.Parallel()
 			got, err := RenderTemplate(key.Job, key.Outcome)
 			if err != nil {
 				t.Fatalf("RenderTemplate(%s, %s): %v", key.Job, key.Outcome, err)

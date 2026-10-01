@@ -63,7 +63,9 @@ Binary files a/image.png and b/image.png differ
 `
 
 func TestParseDiff(t *testing.T) {
+	t.Parallel()
 	t.Run("modified file: 6.3's worked example ranges", func(t *testing.T) {
+		t.Parallel()
 		idx := ParseDiff(modifiedFileDiff)
 		want := DiffIndex{
 			nestedAGoPath: {{From: 10, To: 15}, {From: 43, To: 45}},
@@ -74,6 +76,7 @@ func TestParseDiff(t *testing.T) {
 	})
 
 	t.Run("added file: new-side range from -0,0", func(t *testing.T) {
+		t.Parallel()
 		idx := ParseDiff(addedFileDiff)
 		want := DiffIndex{"new.go": {{From: 1, To: 5}}}
 		if diff := cmp.Diff(want, idx); diff != "" {
@@ -82,6 +85,7 @@ func TestParseDiff(t *testing.T) {
 	})
 
 	t.Run("deleted file: old-side range, new side +0,0 ignored", func(t *testing.T) {
+		t.Parallel()
 		idx := ParseDiff(deletedFileDiff)
 		want := DiffIndex{oldGoPath: {{From: 1, To: 20}}}
 		if diff := cmp.Diff(want, idx); diff != "" {
@@ -90,6 +94,7 @@ func TestParseDiff(t *testing.T) {
 	})
 
 	t.Run("binary file: path recorded, no range", func(t *testing.T) {
+		t.Parallel()
 		idx := ParseDiff(binaryFileDiff)
 		want := DiffIndex{"image.png": nil}
 		if diff := cmp.Diff(want, idx); diff != "" {
@@ -101,6 +106,7 @@ func TestParseDiff(t *testing.T) {
 	})
 
 	t.Run("omitted counts default to 1", func(t *testing.T) {
+		t.Parallel()
 		diff := `diff --git a/one.go b/one.go
 --- a/one.go
 +++ b/one.go
@@ -116,6 +122,7 @@ func TestParseDiff(t *testing.T) {
 	})
 
 	t.Run("zero-length new-side hunk contributes no range", func(t *testing.T) {
+		t.Parallel()
 		diff := `diff --git a/two.go b/two.go
 --- a/two.go
 +++ b/two.go
@@ -137,6 +144,7 @@ func TestParseDiff(t *testing.T) {
 	})
 
 	t.Run("a malformed hunk header is skipped, not fatal", func(t *testing.T) {
+		t.Parallel()
 		diff := `diff --git a/three.go b/three.go
 --- a/three.go
 +++ b/three.go
@@ -155,6 +163,7 @@ func TestParseDiff(t *testing.T) {
 	})
 
 	t.Run("empty diff is an empty index", func(t *testing.T) {
+		t.Parallel()
 		idx := ParseDiff("")
 		if len(idx) != 0 {
 			t.Errorf("ParseDiff(\"\") = %v, want empty", idx)
@@ -167,6 +176,7 @@ func TestParseDiff(t *testing.T) {
 // -----------------------------------------------------------------------
 
 func TestDiffIndexContains(t *testing.T) {
+	t.Parallel()
 	idx := DiffIndex{
 		nestedAGoPath: {{From: 10, To: 15}, {From: 43, To: 45}},
 		oldGoPath:     {{From: 1, To: 20}},
@@ -189,6 +199,7 @@ func TestDiffIndexContains(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
 			if got := idx.Contains(tc.path, tc.line); got != tc.want {
 				t.Errorf("Contains(%q, %d) = %v, want %v", tc.path, tc.line, got, tc.want)
 			}

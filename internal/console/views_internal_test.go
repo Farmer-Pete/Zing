@@ -25,6 +25,7 @@ func updateRow(body string) *store.MessageRow {
 // renders as-is, and instead reads as the owner-facing sentence explaining
 // that planning is about to resume on its own.
 func TestDisplayBody_PlanreviewPendingMarkerIsHumanReadable(t *testing.T) {
+	t.Parallel()
 	got := displayBody(updateRow("planreview v3 pending"))
 	if got == "planreview v3 pending" {
 		t.Fatalf("displayBody returned the raw marker unchanged: %q", got)
@@ -37,6 +38,7 @@ func TestDisplayBody_PlanreviewPendingMarkerIsHumanReadable(t *testing.T) {
 // TestDisplayBody_PlanreviewDeliveredMarkerIsHumanReadable proves a
 // "planreview vN delivered" marker renders as a plain sentence too.
 func TestDisplayBody_PlanreviewDeliveredMarkerIsHumanReadable(t *testing.T) {
+	t.Parallel()
 	const want = "Planning resumed with the review findings."
 	if got := displayBody(updateRow("planreview v3 delivered")); got != want {
 		t.Errorf("displayBody(%q) = %q, want %q", "planreview v3 delivered", got, want)
@@ -49,6 +51,7 @@ func TestDisplayBody_PlanreviewDeliveredMarkerIsHumanReadable(t *testing.T) {
 // <message>" lines under the explanatory sentence, rather than the raw
 // path syntax the owner has no reason to parse.
 func TestDisplayBody_ValidationErrorsPendingRendersFieldLines(t *testing.T) {
+	t.Parallel()
 	body := "validation errors pending run 7\n" +
 		"scenarios/scenario[0]/then: then must not be empty\n" +
 		"plan/overview/problem: problem is required"
@@ -69,6 +72,7 @@ func TestDisplayBody_ValidationErrorsPendingRendersFieldLines(t *testing.T) {
 // "validation errors delivered run <id>" marker renders as a plain
 // sentence.
 func TestDisplayBody_ValidationErrorsDeliveredIsHumanReadable(t *testing.T) {
+	t.Parallel()
 	const want = "The agent received the check results."
 	if got := displayBody(updateRow("validation errors delivered run 7")); got != want {
 		t.Errorf("displayBody(%q) = %q, want %q", "validation errors delivered run 7", got, want)
@@ -79,6 +83,7 @@ func TestDisplayBody_ValidationErrorsDeliveredIsHumanReadable(t *testing.T) {
 // run <id>" marker (invalidOutputCommit) renders as a plain sentence, its
 // invErr.Reason line dropped rather than shown raw.
 func TestDisplayBody_ResponseInvalidIsHumanReadable(t *testing.T) {
+	t.Parallel()
 	const want = "The agent's last response could not be used. Zing retries once."
 	body := "response invalid run 9\nmissing required field \"plan\""
 	if got := displayBody(updateRow(body)); got != want {
@@ -90,6 +95,7 @@ func TestDisplayBody_ResponseInvalidIsHumanReadable(t *testing.T) {
 // cohort <runID>" marker (store.CountSealMismatches) renders as a plain
 // sentence.
 func TestDisplayBody_SealMismatchIsHumanReadable(t *testing.T) {
+	t.Parallel()
 	const want = "The scenario set changed before approval. Zing re-reads it on the next tick."
 	if got := displayBody(updateRow("seal mismatch cohort 4")); got != want {
 		t.Errorf("displayBody(%q) = %q, want %q", "seal mismatch cohort 4", got, want)
@@ -102,6 +108,7 @@ func TestDisplayBody_SealMismatchIsHumanReadable(t *testing.T) {
 // stateLine, escalationLine, and answerLine already use for a payload
 // they cannot decode.
 func TestDisplayBody_UnknownUpdateBodyIsUnchanged(t *testing.T) {
+	t.Parallel()
 	const body = "some future bookkeeping marker nobody recognizes yet"
 	if got := displayBody(updateRow(body)); got != body {
 		t.Errorf("displayBody(%q) = %q, want it unchanged", body, got)
@@ -115,6 +122,7 @@ func TestDisplayBody_UnknownUpdateBodyIsUnchanged(t *testing.T) {
 // "perimeter resolved run <rid>", "retry requested" (no run id), and
 // "perimeter question dropped run <rid>".
 func TestUpdateLineBuildMarkers(t *testing.T) {
+	t.Parallel()
 	cases := []struct {
 		name, body, want string
 	}{
@@ -131,6 +139,7 @@ func TestUpdateLineBuildMarkers(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
 			if got := displayBody(updateRow(tc.body)); got != tc.want {
 				t.Errorf("displayBody(%q) = %q, want %q", tc.body, got, tc.want)
 			}
@@ -145,6 +154,7 @@ func TestUpdateLineBuildMarkers(t *testing.T) {
 // asked; failed; void), "review discussed <id>", and "review note <id>"
 // (with an owner's note, and with none).
 func TestUpdateLineReviewMarkers(t *testing.T) {
+	t.Parallel()
 	cases := []struct{ name, body, want string }{
 		{
 			"round done",
@@ -168,6 +178,7 @@ func TestUpdateLineReviewMarkers(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
 			if got := displayBody(updateRow(tc.body)); got != tc.want {
 				t.Errorf("displayBody(%q) = %q, want %q", tc.body, got, tc.want)
 			}

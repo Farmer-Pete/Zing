@@ -60,6 +60,7 @@ func readInitialFrames(t *testing.T, r *bufio.Reader) (nav, main, rail, alerts s
 }
 
 func TestStreamPatchesAllFourRegionsOnConnect(t *testing.T) {
+	t.Parallel()
 	s := newConsoleTestStore(t)
 	ticketID := seedTicket(t, s, "fake#1", "Add a hello endpoint")
 	seedOpenQuestion(t, s, ticketID)
@@ -94,6 +95,7 @@ func TestStreamPatchesAllFourRegionsOnConnect(t *testing.T) {
 }
 
 func TestStreamReRendersOnPublish(t *testing.T) {
+	t.Parallel()
 	s := newConsoleTestStore(t)
 	seedTicket(t, s, "fake#1", "Ticket one")
 	b := bus.New()
@@ -134,6 +136,7 @@ func TestStreamReRendersOnPublish(t *testing.T) {
 // 3 introduced -- so navigating away from a thread clears whatever the rail
 // held before, rather than stranding it.
 func TestStreamLeavingAThreadPatchesAnEmptyRail(t *testing.T) {
+	t.Parallel()
 	s := newConsoleTestStore(t)
 	ticketID := seedTicket(t, s, "fake#1", "Add a hello endpoint")
 
@@ -168,6 +171,7 @@ func TestStreamLeavingAThreadPatchesAnEmptyRail(t *testing.T) {
 // subscriber promptly, proving the departed one is really gone rather than
 // still holding a slot.
 func TestStreamDisconnectUnsubscribesWithNoGoroutineLeak(t *testing.T) {
+	t.Parallel()
 	s := newConsoleTestStore(t)
 	seedTicket(t, s, "fake#1", "Add a hello endpoint")
 	b := bus.New()
@@ -231,6 +235,7 @@ func TestStreamDisconnectUnsubscribesWithNoGoroutineLeak(t *testing.T) {
 // publish reaches it, and the goroutine count settles back to "only the
 // second stream's handler still running" rather than "both still running."
 func TestStreamRapidReopenLeavesOneSubscriber(t *testing.T) {
+	t.Parallel()
 	s := newConsoleTestStore(t)
 	seedTicket(t, s, "fake#1", "Add a hello endpoint")
 	b := bus.New()
@@ -283,6 +288,7 @@ func TestStreamRapidReopenLeavesOneSubscriber(t *testing.T) {
 }
 
 func TestStreamRejectsMalformedSignalsWith400(t *testing.T) {
+	t.Parallel()
 	s := newConsoleTestStore(t)
 	srv := newTestServer(t, s, bus.New(), nil, newTestLogHandler(t))
 
@@ -365,6 +371,7 @@ func expectNoMoreFrames(t *testing.T, r *bufio.Reader, wait time.Duration) {
 // not) or a patch failure's own slog.Warn re-triggered the wake loop on a
 // healthy connection (it should not, since every patch here succeeds).
 func TestStreamAlertsPatchesOnceOnAWarningNoCascade(t *testing.T) {
+	t.Parallel()
 	s := newConsoleTestStore(t)
 	b := bus.New()
 	log := newTestLogHandlerWithBus(t, b)

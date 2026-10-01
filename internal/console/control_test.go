@@ -23,6 +23,7 @@ import (
 // at once and persists to settings.log_level in the same call, 204 on
 // success.
 func TestLogLevel_ChangesLiveAndWritesSetting(t *testing.T) {
+	t.Parallel()
 	s := newConsoleTestStore(t)
 	lv := new(slog.LevelVar)
 	lv.Set(slog.LevelInfo)
@@ -52,6 +53,7 @@ func TestLogLevel_ChangesLiveAndWritesSetting(t *testing.T) {
 // (design section 6.12: "debug/info/warn/error"): a level outside it is
 // rejected with 400, and neither the LevelVar nor the setting changes.
 func TestLogLevel_RejectsAnUnknownLevel(t *testing.T) {
+	t.Parallel()
 	s := newConsoleTestStore(t)
 	lv := new(slog.LevelVar)
 	lv.Set(slog.LevelInfo)
@@ -89,6 +91,7 @@ func TestLogLevel_RejectsAnUnknownLevel(t *testing.T) {
 // it is run with -race and enough iterations that an unsynchronized
 // version fails it reliably in practice.
 func TestLogLevel_ConcurrentRequestsStayConsistent(t *testing.T) {
+	t.Parallel()
 	s := newConsoleTestStore(t)
 	lv := new(slog.LevelVar)
 	lv.Set(slog.LevelInfo)
@@ -143,6 +146,7 @@ func TestLogLevel_ConcurrentRequestsStayConsistent(t *testing.T) {
 // debug-level line carrying that ticket_id, which the level alone would
 // gate out, is now emitted -- and the second call turns it back off.
 func TestDebug_TogglesPerTicketDebugSet(t *testing.T) {
+	t.Parallel()
 	s := newConsoleTestStore(t)
 	ticketID := seedTicket(t, s, "fake#1", "Add a hello endpoint")
 
@@ -187,6 +191,7 @@ func TestDebug_TogglesPerTicketDebugSet(t *testing.T) {
 // (design section 7.1: 400 on a bad body), matching every other mutation
 // handler's decodeStrict use.
 func TestDebug_RejectsMalformedBody(t *testing.T) {
+	t.Parallel()
 	s := newConsoleTestStore(t)
 	srv, _ := newMutationTestServer(t, s, bus.New(), newTestLogHandler(t))
 
@@ -202,6 +207,7 @@ func TestDebug_RejectsMalformedBody(t *testing.T) {
 // only those -- a line carrying a different ticket's run_id must not leak
 // into this ticket's rail.
 func TestLogTail_FiltersByOpenTicketRunIDs(t *testing.T) {
+	t.Parallel()
 	s := newConsoleTestStore(t)
 	ticketA := seedTicket(t, s, "fake#1", "Ticket A")
 	ticketB := seedTicket(t, s, "fake#2", "Ticket B")
@@ -244,6 +250,7 @@ func TestLogTail_FiltersByOpenTicketRunIDs(t *testing.T) {
 // (design section 6.12, §16): the Task 5 coverage (log_test.go) proves this
 // against a bare Handler; this proves the wiring did not change it.
 func TestFencedAttrThroughTheWiredHandler(t *testing.T) {
+	t.Parallel()
 	buf := &bytes.Buffer{}
 	lv := new(slog.LevelVar)
 	lv.Set(slog.LevelDebug)

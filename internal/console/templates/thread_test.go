@@ -23,7 +23,9 @@ func renderItemRow(t *testing.T, item ThreadItem) string {
 // format renders unchanged, in one <span class="item-text">, exactly as
 // before Task 11b -- the stored text is never touched, only how it renders.
 func TestPerimeterRowRendersParts(t *testing.T) {
+	t.Parallel()
 	t.Run("a trust root item renders the pill, the reason, and the change in separate elements", func(t *testing.T) {
+		t.Parallel()
 		got := renderItemRow(t, ThreadItem{
 			Ref:  "machine.toml",
 			Text: "[trust root] Builder: the build needed the sandbox allowlist updated Change: added the hello package test command",
@@ -44,6 +46,7 @@ func TestPerimeterRowRendersParts(t *testing.T) {
 	})
 
 	t.Run("a plain item renders no marker pill", func(t *testing.T) {
+		t.Parallel()
 		got := renderItemRow(t, ThreadItem{
 			Ref:  "internal/hello/handler.go",
 			Text: "Builder: the handler needed a small helper Change: added a formatGreeting helper",
@@ -62,6 +65,7 @@ func TestPerimeterRowRendersParts(t *testing.T) {
 	})
 
 	t.Run("a text outside the format renders unchanged", func(t *testing.T) {
+		t.Parallel()
 		const text = "new HTTP handler for GET /hello"
 		got := renderItemRow(t, ThreadItem{Ref: "internal/hello/handler.go", Text: text})
 		if !strings.Contains(got, `<span class="item-text">`+text+`</span>`) {

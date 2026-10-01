@@ -73,6 +73,9 @@ func TestSchemagenDiff_CatchesTamperedSchema(t *testing.T) {
 // (reasonSandboxExecNotFound), the same closed reason a laptop missing
 // Xcode's command line tools would hit for real, so this proves the failure
 // path without touching the checked-in profile.
+//
+// Not parallel: both of its own subtests below call t.Setenv("PATH", ...),
+// so neither the parent nor its subtests can call t.Parallel.
 func TestSelftestChecksProfileOnDarwin(t *testing.T) {
 	if runtime.GOOS != "darwin" {
 		t.Skip("checkSandboxProfile is a no-op off darwin")

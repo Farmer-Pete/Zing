@@ -126,6 +126,7 @@ func mustMarshalEscalation(t *testing.T, p response.EscalationPayload) []byte {
 // --- CurrentCohort (design section 4.5, 6.6 step 1) -------------------------
 
 func TestCurrentCohort_NoPlanReturnsFalse(t *testing.T) {
+	t.Parallel()
 	s := newTestStore(t)
 	ctx := t.Context()
 	_, ticketID := seedQueuedTicket(t, s, "1")
@@ -140,6 +141,7 @@ func TestCurrentCohort_NoPlanReturnsFalse(t *testing.T) {
 }
 
 func TestCurrentCohort_MaxVersionWins(t *testing.T) {
+	t.Parallel()
 	s := newTestStore(t)
 	ctx := t.Context()
 	_, ticketID := seedQueuedTicket(t, s, "1")
@@ -165,6 +167,7 @@ func TestCurrentCohort_MaxVersionWins(t *testing.T) {
 }
 
 func TestCurrentCohort_LegacyPlanNullRunIDReturnsNilRunID(t *testing.T) {
+	t.Parallel()
 	s := newTestStore(t)
 	ctx := t.Context()
 	_, ticketID := seedQueuedTicket(t, s, "1")
@@ -185,6 +188,7 @@ func TestCurrentCohort_LegacyPlanNullRunIDReturnsNilRunID(t *testing.T) {
 // --- CohortSealState (design D16, section 4.5, 6.6 step 3) ------------------
 
 func TestCohortSealState_NoneSealedCommonAtNil(t *testing.T) {
+	t.Parallel()
 	s := newTestStore(t)
 	ctx := t.Context()
 	_, ticketID := seedQueuedTicket(t, s, "1")
@@ -206,6 +210,7 @@ func TestCohortSealState_NoneSealedCommonAtNil(t *testing.T) {
 }
 
 func TestCohortSealState_AllSealedSameInstantReturnsCommonAt(t *testing.T) {
+	t.Parallel()
 	s := newTestStore(t)
 	ctx := t.Context()
 	_, ticketID := seedQueuedTicket(t, s, "1")
@@ -228,6 +233,7 @@ func TestCohortSealState_AllSealedSameInstantReturnsCommonAt(t *testing.T) {
 }
 
 func TestCohortSealState_SealedAtTwoInstantsReturnsNilCommonAt(t *testing.T) {
+	t.Parallel()
 	s := newTestStore(t)
 	ctx := t.Context()
 	_, ticketID := seedQueuedTicket(t, s, "1")
@@ -251,6 +257,7 @@ func TestCohortSealState_SealedAtTwoInstantsReturnsNilCommonAt(t *testing.T) {
 }
 
 func TestCohortSealState_DifferentCohortNotCounted(t *testing.T) {
+	t.Parallel()
 	s := newTestStore(t)
 	ctx := t.Context()
 	_, ticketID := seedQueuedTicket(t, s, "1")
@@ -273,6 +280,7 @@ func TestCohortSealState_DifferentCohortNotCounted(t *testing.T) {
 // --- ScenariosForRun / AllScenarios (design section 7, 8) -------------------
 
 func TestScenariosForRun_OrderedByIDAndSealedOnlyFilters(t *testing.T) {
+	t.Parallel()
 	s := newTestStore(t)
 	ctx := t.Context()
 	_, ticketID := seedQueuedTicket(t, s, "1")
@@ -310,6 +318,7 @@ func TestScenariosForRun_OrderedByIDAndSealedOnlyFilters(t *testing.T) {
 }
 
 func TestAllScenarios_OrderedByIDAcrossRunsAndLegacyRows(t *testing.T) {
+	t.Parallel()
 	s := newTestStore(t)
 	ctx := t.Context()
 	_, ticketID := seedQueuedTicket(t, s, "1")
@@ -341,6 +350,7 @@ func TestAllScenarios_OrderedByIDAcrossRunsAndLegacyRows(t *testing.T) {
 // --- AnsweredRounds (design section 4.5, 5.1 step 1) ------------------------
 
 func TestAnsweredRounds_TwoRoundsNewestFirst(t *testing.T) {
+	t.Parallel()
 	s := newTestStore(t)
 	ctx := t.Context()
 	_, ticketID := seedQueuedTicket(t, s, "1")
@@ -383,6 +393,7 @@ func TestAnsweredRounds_TwoRoundsNewestFirst(t *testing.T) {
 }
 
 func TestAnsweredRounds_RepliesWithNoAnswer(t *testing.T) {
+	t.Parallel()
 	s := newTestStore(t)
 	ctx := t.Context()
 	_, ticketID := seedQueuedTicket(t, s, "1")
@@ -410,6 +421,7 @@ func TestAnsweredRounds_RepliesWithNoAnswer(t *testing.T) {
 }
 
 func TestAnsweredRounds_UnrelatedReplyToAnotherParentExcluded(t *testing.T) {
+	t.Parallel()
 	s := newTestStore(t)
 	ctx := t.Context()
 	_, ticketID := seedQueuedTicket(t, s, "1")
@@ -437,6 +449,7 @@ func TestAnsweredRounds_UnrelatedReplyToAnotherParentExcluded(t *testing.T) {
 }
 
 func TestAnsweredRounds_ParentKeyedRoundFromEscalation(t *testing.T) {
+	t.Parallel()
 	s := newTestStore(t)
 	ctx := t.Context()
 	_, ticketID := seedQueuedTicket(t, s, "1")
@@ -501,6 +514,7 @@ func TestAnsweredRounds_ParentKeyedRoundFromEscalation(t *testing.T) {
 }
 
 func TestAnsweredRounds_ResolvedQuestionExcluded(t *testing.T) {
+	t.Parallel()
 	s := newTestStore(t)
 	ctx := t.Context()
 	_, ticketID := seedQueuedTicket(t, s, "1")
@@ -527,6 +541,7 @@ func TestAnsweredRounds_ResolvedQuestionExcluded(t *testing.T) {
 // --- RunContext (design section 4.5) ----------------------------------------
 
 func TestRunContext_ReturnsJobAndTicket(t *testing.T) {
+	t.Parallel()
 	s := newTestStore(t)
 	ctx := t.Context()
 	_, ticketID := seedQueuedTicket(t, s, "1")
@@ -546,6 +561,7 @@ func TestRunContext_ReturnsJobAndTicket(t *testing.T) {
 }
 
 func TestRunContext_UnknownRunWrapsErrNoRows(t *testing.T) {
+	t.Parallel()
 	s := newTestStore(t)
 	ctx := t.Context()
 
@@ -558,6 +574,7 @@ func TestRunContext_UnknownRunWrapsErrNoRows(t *testing.T) {
 // --- ProjectForTicket --------------------------------------------------------
 
 func TestProjectForTicket_ReturnsTheTicketsProject(t *testing.T) {
+	t.Parallel()
 	s := newTestStore(t)
 	ctx := t.Context()
 	projectID, ticketID := seedQueuedTicket(t, s, "1")
@@ -577,6 +594,7 @@ func TestProjectForTicket_ReturnsTheTicketsProject(t *testing.T) {
 // --- AgentSecondsForTicket (design section 4.6's budget check) --------------
 
 func TestAgentSecondsForTicket_SumsAcrossSessionsAndExcludesOtherTickets(t *testing.T) {
+	t.Parallel()
 	s := newTestStore(t)
 	ctx := t.Context()
 	_, ticketA := seedQueuedTicket(t, s, "1")
@@ -599,6 +617,7 @@ func TestAgentSecondsForTicket_SumsAcrossSessionsAndExcludesOtherTickets(t *test
 }
 
 func TestAgentSecondsForTicket_ZeroWhenNone(t *testing.T) {
+	t.Parallel()
 	s := newTestStore(t)
 	ctx := t.Context()
 	_, ticketID := seedQueuedTicket(t, s, "1")
@@ -615,6 +634,7 @@ func TestAgentSecondsForTicket_ZeroWhenNone(t *testing.T) {
 // --- CountDeliveredReviews (design section 5.1 step 7, 5.3) -----------------
 
 func TestCountDeliveredReviews_CountsOnlyDeliveredMarkers(t *testing.T) {
+	t.Parallel()
 	s := newTestStore(t)
 	ctx := t.Context()
 	_, ticketID := seedQueuedTicket(t, s, "1")
@@ -636,6 +656,7 @@ func TestCountDeliveredReviews_CountsOnlyDeliveredMarkers(t *testing.T) {
 // --- ConsecutiveInvalidOutputs (design D14, section 4.5, 5.4) ---------------
 
 func TestConsecutiveInvalidOutputs_ZeroWhenNoErrorRuns(t *testing.T) {
+	t.Parallel()
 	s := newTestStore(t)
 	ctx := t.Context()
 	_, ticketID := seedQueuedTicket(t, s, "1")
@@ -653,6 +674,7 @@ func TestConsecutiveInvalidOutputs_ZeroWhenNoErrorRuns(t *testing.T) {
 }
 
 func TestConsecutiveInvalidOutputs_OneWithReason(t *testing.T) {
+	t.Parallel()
 	s := newTestStore(t)
 	ctx := t.Context()
 	_, ticketID := seedQueuedTicket(t, s, "1")
@@ -674,6 +696,7 @@ func TestConsecutiveInvalidOutputs_OneWithReason(t *testing.T) {
 }
 
 func TestConsecutiveInvalidOutputs_Two(t *testing.T) {
+	t.Parallel()
 	s := newTestStore(t)
 	ctx := t.Context()
 	_, ticketID := seedQueuedTicket(t, s, "1")
@@ -698,6 +721,7 @@ func TestConsecutiveInvalidOutputs_Two(t *testing.T) {
 }
 
 func TestConsecutiveInvalidOutputs_InvalidValidInvalidGivesOne(t *testing.T) {
+	t.Parallel()
 	s := newTestStore(t)
 	ctx := t.Context()
 	_, ticketID := seedQueuedTicket(t, s, "1")
@@ -724,6 +748,7 @@ func TestConsecutiveInvalidOutputs_InvalidValidInvalidGivesOne(t *testing.T) {
 }
 
 func TestConsecutiveInvalidOutputs_EscalatedRunStopsTheWalk(t *testing.T) {
+	t.Parallel()
 	s := newTestStore(t)
 	ctx := t.Context()
 	_, ticketID := seedQueuedTicket(t, s, "1")
@@ -752,6 +777,7 @@ func TestConsecutiveInvalidOutputs_EscalatedRunStopsTheWalk(t *testing.T) {
 }
 
 func TestConsecutiveInvalidOutputs_SessionFilterExcludesOtherSessionsRuns(t *testing.T) {
+	t.Parallel()
 	s := newTestStore(t)
 	ctx := t.Context()
 	_, ticketID := seedQueuedTicket(t, s, "1")
@@ -774,6 +800,7 @@ func TestConsecutiveInvalidOutputs_SessionFilterExcludesOtherSessionsRuns(t *tes
 }
 
 func TestConsecutiveInvalidOutputs_NullOutcomeRunsAreSkipped(t *testing.T) {
+	t.Parallel()
 	s := newTestStore(t)
 	ctx := t.Context()
 	_, ticketID := seedQueuedTicket(t, s, "1")
@@ -795,6 +822,7 @@ func TestConsecutiveInvalidOutputs_NullOutcomeRunsAreSkipped(t *testing.T) {
 // --- HasEscalation (design D17, section 5.1 step 3) -------------------------
 
 func TestHasEscalation_TrueForMatchingOriginAndSession(t *testing.T) {
+	t.Parallel()
 	s := newTestStore(t)
 	ctx := t.Context()
 	_, ticketID := seedQueuedTicket(t, s, "1")
@@ -819,6 +847,7 @@ func TestHasEscalation_TrueForMatchingOriginAndSession(t *testing.T) {
 }
 
 func TestHasEscalation_FalseByOrigin(t *testing.T) {
+	t.Parallel()
 	s := newTestStore(t)
 	ctx := t.Context()
 	_, ticketID := seedQueuedTicket(t, s, "1")
@@ -843,6 +872,7 @@ func TestHasEscalation_FalseByOrigin(t *testing.T) {
 }
 
 func TestHasEscalation_FalseBySession(t *testing.T) {
+	t.Parallel()
 	s := newTestStore(t)
 	ctx := t.Context()
 	_, ticketID := seedQueuedTicket(t, s, "1")
@@ -870,6 +900,7 @@ func TestHasEscalation_FalseBySession(t *testing.T) {
 // --- LiveMarker (design section 5.1 steps 5 and 7) --------------------------
 
 func TestLiveMarker_PendingOnlyIsLive(t *testing.T) {
+	t.Parallel()
 	s := newTestStore(t)
 	ctx := t.Context()
 	_, ticketID := seedQueuedTicket(t, s, "1")
@@ -888,6 +919,7 @@ func TestLiveMarker_PendingOnlyIsLive(t *testing.T) {
 }
 
 func TestLiveMarker_PendingThenDeliveredIsNotLive(t *testing.T) {
+	t.Parallel()
 	s := newTestStore(t)
 	ctx := t.Context()
 	_, ticketID := seedQueuedTicket(t, s, "1")
@@ -904,6 +936,7 @@ func TestLiveMarker_PendingThenDeliveredIsNotLive(t *testing.T) {
 }
 
 func TestLiveMarker_DeliveredThenNewerPendingIsLive(t *testing.T) {
+	t.Parallel()
 	s := newTestStore(t)
 	ctx := t.Context()
 	_, ticketID := seedQueuedTicket(t, s, "1")
@@ -920,6 +953,7 @@ func TestLiveMarker_DeliveredThenNewerPendingIsLive(t *testing.T) {
 }
 
 func TestLiveMarker_OlderDeliveredDoesNotCloseNewerPendingOfDifferentRun(t *testing.T) {
+	t.Parallel()
 	s := newTestStore(t)
 	ctx := t.Context()
 	_, ticketID := seedQueuedTicket(t, s, "1")
@@ -940,6 +974,7 @@ func TestLiveMarker_OlderDeliveredDoesNotCloseNewerPendingOfDifferentRun(t *test
 }
 
 func TestLiveMarker_DeliveredForSameRunClosesPending(t *testing.T) {
+	t.Parallel()
 	s := newTestStore(t)
 	ctx := t.Context()
 	_, ticketID := seedQueuedTicket(t, s, "1")

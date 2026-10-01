@@ -172,6 +172,7 @@ func moveLiveReviewTicketToReviewing(t *testing.T, st *store.Store, ticketID int
 //
 //	ZING_LIVE_CLI=1 go test ./cmd/zing -run TestLiveReview -v -timeout 20m
 func TestLiveReview(t *testing.T) {
+	t.Parallel()
 	if reason := liveBuildSkipReason(goruntime.GOOS, os.Getenv("ZING_LIVE_CLI")); reason != "" {
 		t.Skip(reason)
 	}

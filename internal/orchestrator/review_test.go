@@ -52,6 +52,7 @@ func commitFile(ctx context.Context, t *testing.T, dir, relPath, content, messag
 // -----------------------------------------------------------------------
 
 func TestHeadSHA(t *testing.T) {
+	t.Parallel()
 	o, wt, ctx := preparePerimeterWorktree(t, 901)
 
 	want := commitFile(ctx, t, wt.Dir(), "head.txt", "content\n", "add head.txt")
@@ -74,6 +75,7 @@ func TestHeadSHA(t *testing.T) {
 // commit made to main after the ticket branch diverged must not appear in
 // the result, even though it is main's current HEAD.
 func TestDiffAgainstMergeBase(t *testing.T) {
+	t.Parallel()
 	o, wt, ctx := preparePerimeterWorktree(t, 902)
 	root := repoRootFor(wt)
 
@@ -97,6 +99,7 @@ func TestDiffAgainstMergeBase(t *testing.T) {
 // configured for the changed path's extension, with a command that writes
 // a marker file, leaves no marker after Diff.
 func TestDiffIgnoresTextconv(t *testing.T) {
+	t.Parallel()
 	o, wt, ctx := preparePerimeterWorktree(t, 903)
 	root := repoRootFor(wt)
 
@@ -121,6 +124,7 @@ func TestDiffIgnoresTextconv(t *testing.T) {
 // -----------------------------------------------------------------------
 
 func TestChangedFilesBetween(t *testing.T) {
+	t.Parallel()
 	o, wt, ctx := preparePerimeterWorktree(t, 904)
 
 	sha0, err := o.HeadSHA(ctx, wt)
@@ -145,6 +149,7 @@ func TestChangedFilesBetween(t *testing.T) {
 // to): main's own later, independent change must not appear, only the
 // ticket branch's own changed files, sorted.
 func TestChangedFilesSinceBase(t *testing.T) {
+	t.Parallel()
 	o, wt, ctx := preparePerimeterWorktree(t, 905)
 	root := repoRootFor(wt)
 
@@ -168,6 +173,7 @@ func TestChangedFilesSinceBase(t *testing.T) {
 // -----------------------------------------------------------------------
 
 func TestIsAncestor(t *testing.T) {
+	t.Parallel()
 	o, wt, ctx := preparePerimeterWorktree(t, 906)
 	root := repoRootFor(wt)
 
@@ -180,6 +186,7 @@ func TestIsAncestor(t *testing.T) {
 	ticketSHA := commitFile(ctx, t, wt.Dir(), "feature.go", "package feature\n", "add feature.go")
 
 	t.Run("the branch point is an ancestor of the ticket branch", func(t *testing.T) {
+		t.Parallel()
 		ok, err := o.IsAncestor(ctx, wt, base, ticketSHA)
 		if err != nil {
 			t.Fatalf("IsAncestor: %v", err)
@@ -190,6 +197,7 @@ func TestIsAncestor(t *testing.T) {
 	})
 
 	t.Run("a divergent main-only commit is not an ancestor of the ticket branch", func(t *testing.T) {
+		t.Parallel()
 		ok, err := o.IsAncestor(ctx, wt, mainOnly, ticketSHA)
 		if err != nil {
 			t.Fatalf("IsAncestor: %v", err)

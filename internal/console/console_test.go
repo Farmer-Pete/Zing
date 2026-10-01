@@ -395,6 +395,7 @@ func assertExactSSEFraming(t *testing.T, frame string) {
 }
 
 func TestIndexRendersShellRegionsAndScript(t *testing.T) {
+	t.Parallel()
 	s := newConsoleTestStore(t)
 	ticketID := seedTicket(t, s, "fake#1", "Add a hello endpoint")
 	seedOpenQuestion(t, s, ticketID) // blocking, so it shows in #nav's thread list
@@ -435,6 +436,7 @@ func TestIndexRendersShellRegionsAndScript(t *testing.T) {
 }
 
 func TestStaticServesDatastarBundle(t *testing.T) {
+	t.Parallel()
 	s := newConsoleTestStore(t)
 	srv := newTestServer(t, s, bus.New(), nil, newTestLogHandler(t))
 
@@ -466,6 +468,7 @@ func TestStaticServesDatastarBundle(t *testing.T) {
 // generic body, logging the detail server-side instead (design section
 // "Console" fix 10).
 func TestIndexReturns500WithGenericBodyOnStoreError(t *testing.T) {
+	t.Parallel()
 	s := newConsoleTestStore(t)
 	srv := newTestServer(t, s, bus.New(), nil, newTestLogHandler(t))
 
@@ -500,6 +503,7 @@ func TestIndexReturns500WithGenericBodyOnStoreError(t *testing.T) {
 // only that its presence leaves a normal response intact; answer_test.go
 // covers the same guard on the mutation routes.
 func TestNonStreamingRoutesSucceedUnderWriteDeadline(t *testing.T) {
+	t.Parallel()
 	s := newConsoleTestStore(t)
 
 	srv := newTestServer(t, s, bus.New(), nil, newTestLogHandler(t))
@@ -529,6 +533,7 @@ func TestNonStreamingRoutesSucceedUnderWriteDeadline(t *testing.T) {
 // section 9.2, Task 15): with a non-empty sandboxReason, GET / renders the
 // closed span with the reason as its title.
 func TestNavShowsSandboxOff(t *testing.T) {
+	t.Parallel()
 	s := newConsoleTestStore(t)
 	srv := newTestServerSandbox(t, s, bus.New(), nil, newTestLogHandler(t), response.SeverityMinor, "sandbox-exec not found")
 
@@ -553,6 +558,7 @@ func TestNavShowsSandboxOff(t *testing.T) {
 // indicator when sandboxReason is empty (design section 9.2: "empty means
 // available").
 func TestNavHidesSandboxWhenLoaded(t *testing.T) {
+	t.Parallel()
 	s := newConsoleTestStore(t)
 	srv := newTestServerSandbox(t, s, bus.New(), nil, newTestLogHandler(t), response.SeverityMinor, "")
 

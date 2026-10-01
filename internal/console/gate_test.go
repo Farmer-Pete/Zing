@@ -114,6 +114,7 @@ func seedPlanReviewArtifact(t *testing.T, s *store.Store, ticketID, runID int64,
 }
 
 func TestGateScenariosTable_CurrentCohortOnly(t *testing.T) {
+	t.Parallel()
 	s := newConsoleTestStore(t)
 	ticketID := seedTicket(t, s, "fake#1", "Add a hello endpoint")
 
@@ -167,6 +168,7 @@ func TestGateScenariosTable_CurrentCohortOnly(t *testing.T) {
 }
 
 func TestGateFindingsTable_FloorMinorShowsBlockerAndMajorOnly(t *testing.T) {
+	t.Parallel()
 	s := newConsoleTestStore(t)
 	ticketID := seedTicket(t, s, "fake#1", "Add a hello endpoint")
 	runID := seedRun(t, s, ticketID)
@@ -194,6 +196,7 @@ func TestGateFindingsTable_FloorMinorShowsBlockerAndMajorOnly(t *testing.T) {
 }
 
 func TestGateFindingsTable_FloorNitShowsBlockerMajorAndMinor(t *testing.T) {
+	t.Parallel()
 	s := newConsoleTestStore(t)
 	ticketID := seedTicket(t, s, "fake#1", "Add a hello endpoint")
 	runID := seedRun(t, s, ticketID)
@@ -230,6 +233,8 @@ func fourSeverityFindings() []response.Finding {
 	}
 }
 
+// Not parallel: it calls slog.SetDefault below to capture a log line, which
+// swaps the process-wide default logger.
 func TestGateScenariosTable_LegacyNullCohortRendersAllAndLogsDebug(t *testing.T) {
 	s := newConsoleTestStore(t)
 	ticketID := seedTicket(t, s, "fake#1", "Add a hello endpoint")
@@ -272,6 +277,7 @@ func TestGateScenariosTable_LegacyNullCohortRendersAllAndLogsDebug(t *testing.T)
 }
 
 func TestGateContext_NoCohortRendersNeitherTable(t *testing.T) {
+	t.Parallel()
 	s := newConsoleTestStore(t)
 	ticketID := seedTicket(t, s, "fake#1", "Add a hello endpoint")
 	seedGateQuestion(t, s, ticketID)

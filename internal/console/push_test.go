@@ -125,6 +125,7 @@ func newPushTestServerWithToken(t *testing.T, pushToken string) (srv *httptest.S
 // value rather than omitted outright -- the digest-collision case the
 // prefix check alone would not exercise.
 func TestPushKey_EmptyConfiguredTokenAlwaysRejects(t *testing.T) {
+	t.Parallel()
 	srv := newPushTestServerWithToken(t, "")
 
 	req, err := http.NewRequestWithContext(t.Context(), http.MethodGet, srv.URL+"/push/key", http.NoBody)
@@ -144,6 +145,7 @@ func TestPushKey_EmptyConfiguredTokenAlwaysRejects(t *testing.T) {
 // wrong token with 401 and returns the VAPID public key with 200 once the
 // right token is presented (design section 6.13, 7.1, 9).
 func TestPushKey_RequiresBearerToken(t *testing.T) {
+	t.Parallel()
 	srv := newPushTestServer(t)
 
 	noAuth := doRequest(t, pushRequest(t, srv, http.MethodGet, "/push/key", "", ""))
@@ -177,6 +179,7 @@ func TestPushKey_RequiresBearerToken(t *testing.T) {
 // TestPushKey_IsStableAcrossCalls proves the VAPID keypair generates once:
 // two GET /push/key calls against the same server return the same key.
 func TestPushKey_IsStableAcrossCalls(t *testing.T) {
+	t.Parallel()
 	srv := newPushTestServer(t)
 
 	first := doRequest(t, pushRequest(t, srv, http.MethodGet, "/push/key", testPushToken2, ""))
@@ -206,6 +209,7 @@ func TestPushKey_IsStableAcrossCalls(t *testing.T) {
 // rejects a missing token with 401, even though the request otherwise
 // carries every header the mutation guard requires.
 func TestPushSubscribe_RequiresBearerToken(t *testing.T) {
+	t.Parallel()
 	srv := newPushTestServer(t)
 
 	body := `{"endpoint":"https://push.example/abc","keys":{"p256dh":"a-key","auth":"a-secret"}}`
@@ -220,6 +224,7 @@ func TestPushSubscribe_RequiresBearerToken(t *testing.T) {
 // design section 6.13 requires the handler (not the keys_json schema) to
 // make: a non-https endpoint is rejected with 400 and writes nothing.
 func TestPushSubscribe_RejectsNonHTTPSEndpoint(t *testing.T) {
+	t.Parallel()
 	srv := newPushTestServer(t)
 
 	body := `{"endpoint":"http://push.example/abc","keys":{"p256dh":"a-key","auth":"a-secret"}}`
@@ -233,6 +238,7 @@ func TestPushSubscribe_RejectsNonHTTPSEndpoint(t *testing.T) {
 // TestPushSubscribe_RejectsBadBody proves a malformed JSON body is rejected
 // with 400.
 func TestPushSubscribe_RejectsBadBody(t *testing.T) {
+	t.Parallel()
 	srv := newPushTestServer(t)
 
 	resp := doRequest(t, pushRequest(t, srv, http.MethodPost, "/push/subscribe", testPushToken2, `{not json`))
@@ -246,6 +252,7 @@ func TestPushSubscribe_RejectsBadBody(t *testing.T) {
 // schema validation (missing p256dh or auth) surfaces as 400 through the
 // handler, matching design section 7.1's "204, 401, or 400" for this route.
 func TestPushSubscribe_RejectsKeysMissingRequiredFields(t *testing.T) {
+	t.Parallel()
 	srv := newPushTestServer(t)
 
 	body := `{"endpoint":"https://push.example/incomplete","keys":{"p256dh":"a-key"}}`
@@ -264,6 +271,7 @@ func TestPushSubscribe_RejectsKeysMissingRequiredFields(t *testing.T) {
 // phone subscribing is authenticated by that token, not by browser
 // same-origin, and a phone's MagicDNS host need not be in allowed_hosts.
 func TestPushSubscribe_SucceedsWithoutSameOriginHeaders(t *testing.T) {
+	t.Parallel()
 	srv := newPushTestServer(t)
 
 	body := `{"endpoint":"https://push.example/no-guard","keys":{"p256dh":"a-key","auth":"a-secret"}}`
@@ -286,6 +294,7 @@ func TestPushSubscribe_SucceedsWithoutSameOriginHeaders(t *testing.T) {
 // (design section 6.13: "It replaces by endpoint, so a re-subscribe is
 // idempotent"), both calls returning 204 rather than the second conflicting.
 func TestPushSubscribe_SucceedsAndIsIdempotentOnReSubscribe(t *testing.T) {
+	t.Parallel()
 	srv := newPushTestServer(t)
 
 	body := `{"endpoint":"https://push.example/repeat","keys":{"p256dh":"a-key","auth":"a-secret"}}`
@@ -309,6 +318,7 @@ func TestPushSubscribe_SucceedsAndIsIdempotentOnReSubscribe(t *testing.T) {
 // an unexpected third property is rejected with 400, the same as a missing
 // required one (TestPushSubscribe_RejectsKeysMissingRequiredFields above).
 func TestPushSubscribe_RejectsKeysWithExtraProperty(t *testing.T) {
+	t.Parallel()
 	srv := newPushTestServer(t)
 
 	body := `{"endpoint":"https://push.example/extra","keys":{"p256dh":"a-key","auth":"a-secret","extra":"nope"}}`
@@ -328,6 +338,7 @@ func TestPushSubscribe_RejectsKeysWithExtraProperty(t *testing.T) {
 // fix, handlePushSubscribe treated every Subscribe error as a bad payload
 // and answered 400 even here.
 func TestPushSubscribe_StoreFailureReturns500NotBadRequest(t *testing.T) {
+	t.Parallel()
 	s := newConsoleTestStore(t)
 
 	var lc net.ListenConfig

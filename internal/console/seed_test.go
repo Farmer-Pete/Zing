@@ -31,6 +31,7 @@ var seedDemoQuestionKinds = []response.QuestionKind{
 // names: one project, one ticket, one plan artifact, a scenario set, a
 // finding set, and one open question of each of the six closed-set kinds.
 func TestSeedDemo_SeedsOneProjectAndTicketWithEveryArtifactAndQuestionKind(t *testing.T) {
+	t.Parallel()
 	s := newConsoleTestStore(t)
 	ctx := t.Context()
 
@@ -50,6 +51,7 @@ func TestSeedDemo_SeedsOneProjectAndTicketWithEveryArtifactAndQuestionKind(t *te
 // picks up and advances into real planning, overwriting the fixture (design
 // section 6.6, 6.15; PR #23 review).
 func TestSeedDemo_SeededTicketWaitsOnItsGateNotQueued(t *testing.T) {
+	t.Parallel()
 	s := newConsoleTestStore(t)
 	ctx := t.Context()
 
@@ -195,6 +197,7 @@ func assertSeedDemoQuestions(ctx context.Context, t *testing.T, s *store.Store, 
 // inserts nothing new: the same project, the same ticket, and the same
 // artifact and message counts as the first call.
 func TestSeedDemo_IsIdempotent(t *testing.T) {
+	t.Parallel()
 	s := newConsoleTestStore(t)
 	ctx := t.Context()
 
@@ -249,6 +252,7 @@ func TestSeedDemo_IsIdempotent(t *testing.T) {
 // package's own wiring (console.New, the stream, the mutation routes) ever
 // calls SeedDemo on its own.
 func TestSeedDemo_NormalServeDoesNotSeed(t *testing.T) {
+	t.Parallel()
 	s := newConsoleTestStore(t)
 	ctx := t.Context()
 
@@ -271,6 +275,7 @@ func TestSeedDemo_NormalServeDoesNotSeed(t *testing.T) {
 // artifact renders through the same review.floor every other ticket's gate
 // uses, over the live GET /stream a browser itself reads.
 func TestSeedDemo_GateRendersScenariosAndFindings(t *testing.T) {
+	t.Parallel()
 	s := newConsoleTestStore(t)
 	ctx := t.Context()
 
@@ -358,6 +363,7 @@ func demoPerimeterQuestion(ctx context.Context, t *testing.T, s *store.Store, ti
 // in brackets when set, then "Builder: <reason> ", then
 // "Change: <description>" (design section 6.5, 6.15).
 func TestSeedDemoPerimeterItemsUseTheBuildFormat(t *testing.T) {
+	t.Parallel()
 	s := newConsoleTestStore(t)
 	ctx := t.Context()
 
@@ -453,6 +459,7 @@ func demoDecidedFileEvents(ctx context.Context, t *testing.T, s *store.Store, ti
 // description, and neither sharing a path with the perimeter question's
 // three items.
 func TestSeedDemoStoresDecidedFiles(t *testing.T) {
+	t.Parallel()
 	s := newConsoleTestStore(t)
 	ctx := t.Context()
 
@@ -519,6 +526,7 @@ func TestSeedDemoStoresDecidedFiles(t *testing.T) {
 // TestSeedDemoDecidedFilesAreIdempotent proves a second SeedDemo call stores
 // no additional "file" artifact: still the same two decided rows.
 func TestSeedDemoDecidedFilesAreIdempotent(t *testing.T) {
+	t.Parallel()
 	s := newConsoleTestStore(t)
 	ctx := t.Context()
 
@@ -549,6 +557,7 @@ func TestSeedDemoDecidedFilesAreIdempotent(t *testing.T) {
 // the owner can see and try every perimeter feature from the seeded demo
 // alone (design section 9.2, 6.5, 6.15).
 func TestSeedDemo_ThreadRendersDecidedFilesAndPerimeterMarker(t *testing.T) {
+	t.Parallel()
 	s := newConsoleTestStore(t)
 	ctx := t.Context()
 
@@ -587,6 +596,7 @@ func TestSeedDemo_ThreadRendersDecidedFilesAndPerimeterMarker(t *testing.T) {
 // the rendered thread (views.go's updateLine) shows the claims-ok marker as
 // its owner-facing sentence.
 func TestSeedDemoStoresBuildMarkers(t *testing.T) {
+	t.Parallel()
 	s := newConsoleTestStore(t)
 	ctx := t.Context()
 

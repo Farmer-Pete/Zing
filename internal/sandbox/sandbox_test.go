@@ -53,6 +53,7 @@ func testParams() Params {
 // TestPrefixOrder proves Prefix emits the ten -D flags in section 5.2's
 // table order, followed by -p <profile>, with "sandbox-exec" as argv[0].
 func TestPrefixOrder(t *testing.T) {
+	t.Parallel()
 	sb := Sandbox{renderedProfile: testMinimalRenderedProfile}
 	p := testParams()
 
@@ -84,6 +85,7 @@ func TestPrefixOrder(t *testing.T) {
 // containing a double quote) is refused with the exact error text section
 // 5.2 gives, naming the offending param.
 func TestPrefixRejectsUnsafeParam(t *testing.T) {
+	t.Parallel()
 	sb := Sandbox{renderedProfile: testMinimalRenderedProfile}
 	p := testParams()
 	p.RepoGit = `/Users/test/repo"; rm -rf /`
@@ -101,6 +103,7 @@ func TestPrefixRejectsUnsafeParam(t *testing.T) {
 // TestPrefixRejectsRelativeParam proves a relative param value is refused
 // the same way (every param value must be absolute, section 5.2).
 func TestPrefixRejectsRelativeParam(t *testing.T) {
+	t.Parallel()
 	sb := Sandbox{renderedProfile: testMinimalRenderedProfile}
 	p := testParams()
 	p.Worktree = "relative/path"
@@ -121,6 +124,7 @@ func TestPrefixRejectsRelativeParam(t *testing.T) {
 // allow-file-read-data line per entry, and an empty string for an empty
 // list (section 5.1).
 func TestRenderReadPaths(t *testing.T) {
+	t.Parallel()
 	if got := renderReadPaths(nil); got != "" {
 		t.Errorf("renderReadPaths(nil) = %q, want empty", got)
 	}
@@ -137,6 +141,7 @@ func TestRenderReadPaths(t *testing.T) {
 // fixed-host deny rule with the decimal port, and an error for a port
 // outside 1-65535 (section 5.1).
 func TestRenderConsoleDeny(t *testing.T) {
+	t.Parallel()
 	got, err := renderConsoleDeny(7420)
 	if err != nil {
 		t.Fatalf("renderConsoleDeny(7420): %v", err)
@@ -159,6 +164,7 @@ func TestRenderConsoleDeny(t *testing.T) {
 // 65535 makes Load record the sandbox as unavailable with the reason
 // 'profile rejected'").
 func TestLoadRejectsBadPort(t *testing.T) {
+	t.Parallel()
 	if runtime.GOOS != testGOOSDarwin {
 		sb := Load([]byte("(version 1)\n;;READ_PATHS;;\n;;CONSOLE_DENY;;\n"), t.TempDir(), nil, 0)
 		if sb.Available() {
@@ -183,6 +189,7 @@ func TestLoadRejectsBadPort(t *testing.T) {
 // TestEnvValues proves Env renders section 5.3's ten variables, in table
 // order, from RunDir, CacheShared, ZingBin, and parentPath.
 func TestEnvValues(t *testing.T) {
+	t.Parallel()
 	sb := Sandbox{}
 	p := testParams()
 
@@ -211,6 +218,7 @@ func TestEnvValues(t *testing.T) {
 // directory (with its two children) each call, and that cleanup removes it
 // and is safe to call twice.
 func TestNewRunDirIsPrivate(t *testing.T) {
+	t.Parallel()
 	sb := Sandbox{host: Host{CacheRoot: t.TempDir()}}
 
 	dir1, cleanup1, err := sb.NewRunDir()
@@ -249,6 +257,7 @@ func TestNewRunDirIsPrivate(t *testing.T) {
 // dataDir is empty (review F044: resolveHost must fail closed rather than
 // let filepath.EvalSymlinks("") silently resolve to the current directory).
 func TestLoadRejectsEmptyDataDir(t *testing.T) {
+	t.Parallel()
 	profile := []byte("(version 1)\n;;READ_PATHS;;\n;;CONSOLE_DENY;;\n")
 	if runtime.GOOS != testGOOSDarwin {
 		sb := Load(profile, "", nil, 7420)
@@ -275,6 +284,7 @@ func TestLoadRejectsEmptyDataDir(t *testing.T) {
 // skips on darwin, where GOOS really is "darwin" and this branch cannot be
 // observed.
 func TestReasonNotMacOS(t *testing.T) {
+	t.Parallel()
 	if runtime.GOOS == testGOOSDarwin {
 		t.Skip("this machine's GOOS is darwin; the not-macOS reason cannot be observed here")
 	}
@@ -290,6 +300,7 @@ func TestReasonNotMacOS(t *testing.T) {
 // TestOffIsNeverAvailable proves Off's own contract: never available, for
 // suites on the fake runtime.
 func TestOffIsNeverAvailable(t *testing.T) {
+	t.Parallel()
 	sb := Off()
 	if sb.Available() {
 		t.Error("Off(): Available() = true, want false")
@@ -309,6 +320,7 @@ func TestOffIsNeverAvailable(t *testing.T) {
 // (TestParamsForRejectsMissingPath), so a path that does not exist on this
 // machine, such as the plan's own literal example, is now an error.
 func TestParamsForTranscriptsWorkedExample(t *testing.T) {
+	t.Parallel()
 	home := t.TempDir()
 	worktree := filepath.Join(t.TempDir(), "zing", ".zing", "wt", "12")
 	if err := os.MkdirAll(worktree, 0o700); err != nil {
@@ -341,6 +353,7 @@ func TestParamsForTranscriptsWorkedExample(t *testing.T) {
 // not the one ParamsFor was given, since the CLI names its transcript
 // folder after the working directory it sees.
 func TestParamsForResolvesSymlinks(t *testing.T) {
+	t.Parallel()
 	base := t.TempDir()
 	realDir := filepath.Join(base, "real")
 	if err := os.Mkdir(realDir, 0o700); err != nil {
@@ -380,6 +393,7 @@ func TestParamsForResolvesSymlinks(t *testing.T) {
 // text this task adds, naming the offending param, rather than silently
 // carrying a path no rule will ever match.
 func TestParamsForRejectsMissingPath(t *testing.T) {
+	t.Parallel()
 	sb := Sandbox{host: Host{Home: testHomeDir}}
 	missing := filepath.Join(t.TempDir(), "does-not-exist")
 
@@ -410,6 +424,8 @@ func shouldSkipSandboxed() bool {
 // exactly when ZING_SANDBOXED is set (section 5.3): a sandboxed process
 // cannot itself start sandbox-exec, so every darwin test that does must skip
 // rather than fail when it is already running inside the sandbox.
+//
+// Not parallel: it calls t.Setenv("ZING_SANDBOXED", ...) below.
 func TestDarwinTestsSkipWhenSandboxed(t *testing.T) {
 	if os.Getenv("ZING_SANDBOXED") != "" {
 		t.Skip("already running under ZING_SANDBOXED; the unset case cannot be observed here")
@@ -429,6 +445,7 @@ func TestDarwinTestsSkipWhenSandboxed(t *testing.T) {
 // realistic profile untouched, guarding the two strings.Replace calls
 // against a typo in the placeholder constants.
 func TestRenderProfilePlaceholders(t *testing.T) {
+	t.Parallel()
 	base := "(version 1)\n(allow default)\n;;READ_PATHS;;\n;;CONSOLE_DENY;;\n(deny mach-lookup)\n"
 	got, err := renderProfile([]byte(base), []string{testReadPathEntry}, 7420)
 	if err != nil {
@@ -454,6 +471,7 @@ func TestRenderProfilePlaceholders(t *testing.T) {
 // silently no-op the replacement and render a profile with no console
 // deny), on every platform.
 func TestLoadRejectsMissingPlaceholder(t *testing.T) {
+	t.Parallel()
 	base := []byte("(version 1)\n;;READ_PATHS;;\n")
 	if runtime.GOOS != testGOOSDarwin {
 		sb := Load(base, t.TempDir(), nil, 7420)
@@ -477,6 +495,7 @@ func TestLoadRejectsMissingPlaceholder(t *testing.T) {
 // TestLoadRejectsRepeatedPlaceholder proves the same for a base that carries
 // ;;CONSOLE_DENY;; twice (review F024).
 func TestLoadRejectsRepeatedPlaceholder(t *testing.T) {
+	t.Parallel()
 	base := []byte("(version 1)\n;;READ_PATHS;;\n;;CONSOLE_DENY;;\n;;CONSOLE_DENY;;\n")
 	if runtime.GOOS != testGOOSDarwin {
 		sb := Load(base, t.TempDir(), nil, 7420)
@@ -502,6 +521,7 @@ func TestLoadRejectsRepeatedPlaceholder(t *testing.T) {
 // TestSetFor proves Set.For's own three-name lookup, and that any other
 // name reports ok=false.
 func TestSetFor(t *testing.T) {
+	t.Parallel()
 	build := Sandbox{reason: "build-reason"}
 	readonly := Sandbox{reason: "readonly-reason"}
 	judge := Sandbox{reason: "judge-reason"}
@@ -533,6 +553,7 @@ func TestSetFor(t *testing.T) {
 // TestOffSet proves OffSet returns three unavailable sandboxes, each one
 // Off's own contract.
 func TestOffSet(t *testing.T) {
+	t.Parallel()
 	s := OffSet()
 	for name, sb := range map[string]Sandbox{"Build": s.Build, "ReadOnly": s.ReadOnly, "Judge": s.Judge} {
 		if sb.Available() {
@@ -549,11 +570,13 @@ func TestOffSet(t *testing.T) {
 // when every used profile is available: an unused, unloaded judge (M1's
 // own Set.Judge, NotLoaded()) is never reported, since no M1 job names it.
 func TestFirstUnavailable(t *testing.T) {
+	t.Parallel()
 	available := Sandbox{available: true}
 	unavailableBuild := Sandbox{reason: "build broke"}
 	unavailableReadonly := Sandbox{reason: "readonly broke"}
 
 	t.Run("every used profile available", func(t *testing.T) {
+		t.Parallel()
 		s := Set{Build: available, ReadOnly: available, Judge: NotLoaded()}
 		if got := s.FirstUnavailable([]string{profileNameBuild, profileNameReadOnly}); got != "" {
 			t.Errorf("FirstUnavailable() = %q, want empty", got)
@@ -561,6 +584,7 @@ func TestFirstUnavailable(t *testing.T) {
 	})
 
 	t.Run("an unused unloaded judge is not reported", func(t *testing.T) {
+		t.Parallel()
 		s := Set{Build: available, ReadOnly: available, Judge: NotLoaded()}
 		if got := s.FirstUnavailable([]string{profileNameBuild, profileNameReadOnly}); got != "" {
 			t.Errorf("FirstUnavailable() = %q, want empty (judge is unused)", got)
@@ -568,6 +592,7 @@ func TestFirstUnavailable(t *testing.T) {
 	})
 
 	t.Run("build unavailable and used", func(t *testing.T) {
+		t.Parallel()
 		s := Set{Build: unavailableBuild, ReadOnly: available, Judge: NotLoaded()}
 		want := "build: build broke"
 		if got := s.FirstUnavailable([]string{profileNameBuild, profileNameReadOnly}); got != want {
@@ -576,6 +601,7 @@ func TestFirstUnavailable(t *testing.T) {
 	})
 
 	t.Run("build and readonly both unavailable reports build first", func(t *testing.T) {
+		t.Parallel()
 		s := Set{Build: unavailableBuild, ReadOnly: unavailableReadonly, Judge: NotLoaded()}
 		want := "build: build broke"
 		if got := s.FirstUnavailable([]string{profileNameReadOnly, profileNameBuild}); got != want {
@@ -584,6 +610,7 @@ func TestFirstUnavailable(t *testing.T) {
 	})
 
 	t.Run("judge used and unavailable", func(t *testing.T) {
+		t.Parallel()
 		s := Set{Build: available, ReadOnly: available, Judge: NotLoaded()}
 		want := "judge: not loaded"
 		if got := s.FirstUnavailable([]string{profileNameBuild, profileNameReadOnly, "judge"}); got != want {
@@ -597,6 +624,7 @@ func TestFirstUnavailable(t *testing.T) {
 // build.sb already does (section 4.7: "Both files carry the two
 // placeholder lines of build.sb, each exactly once").
 func TestRenderReadonlyPlaceholders(t *testing.T) {
+	t.Parallel()
 	profile, err := zing.Assets.ReadFile("sandbox/readonly.sb")
 	if err != nil {
 		t.Fatalf("read sandbox/readonly.sb: %v", err)
@@ -611,6 +639,7 @@ func TestRenderReadonlyPlaceholders(t *testing.T) {
 // renderReadPaths and renderConsoleDeny byte-for-byte (review F024's
 // require-exactly-one check must not change the successful-render output).
 func TestRenderProfileEachPlaceholderOnce(t *testing.T) {
+	t.Parallel()
 	base := "(version 1)\n;;READ_PATHS;;\n;;CONSOLE_DENY;;\n"
 	got, err := renderProfile([]byte(base), []string{testReadPathEntry}, 7420)
 	if err != nil {
@@ -638,6 +667,7 @@ func testJudgeParams() Params {
 // SCENARIOS_FILE=..." and "-D CODEX_HOME=..." after the fixed paramOrder
 // flags, in that order, only for a Sandbox loaded under the judge name.
 func TestPrefixEmitsScenariosFileForJudge(t *testing.T) {
+	t.Parallel()
 	sb := Sandbox{renderedProfile: testMinimalRenderedProfile, name: profileNameJudge}
 	p := testJudgeParams()
 
@@ -671,6 +701,7 @@ func TestPrefixEmitsScenariosFileForJudge(t *testing.T) {
 // fields stay their zero value (section 4.7: "empty for the other two
 // profiles").
 func TestPrefixOmitsUnsetJudgeParams(t *testing.T) {
+	t.Parallel()
 	sb := Sandbox{renderedProfile: testMinimalRenderedProfile, name: profileNameBuild}
 	argv, err := sb.Prefix(testParams())
 	if err != nil {
@@ -691,6 +722,7 @@ func TestPrefixOmitsUnsetJudgeParams(t *testing.T) {
 // against a Sandbox loaded under a different name, without also having to
 // wire a scenarios file that task belongs to a later task).
 func TestPrefixEmitsCodexHomeAloneOutsideJudge(t *testing.T) {
+	t.Parallel()
 	sb := Sandbox{renderedProfile: testMinimalRenderedProfile, name: profileNameBuild}
 	p := testParams()
 	p.CodexHome = "/Users/test/codex-judge"
@@ -715,11 +747,13 @@ func TestPrefixEmitsCodexHomeAloneOutsideJudge(t *testing.T) {
 // CODEX_HOME is empty, rather than silently omitting the missing one
 // (section 4.7, D19, D27).
 func TestJudgeWithoutScenariosFileIsConfigError(t *testing.T) {
+	t.Parallel()
 	for name, mutate := range map[string]func(*Params){
 		"empty ScenariosFile": func(p *Params) { p.ScenariosFile = "" },
 		"empty CodexHome":     func(p *Params) { p.CodexHome = "" },
 	} {
 		t.Run(name, func(t *testing.T) {
+			t.Parallel()
 			sb := Sandbox{renderedProfile: testMinimalRenderedProfile, name: profileNameJudge}
 			p := testJudgeParams()
 			mutate(&p)
@@ -735,9 +769,11 @@ func TestJudgeWithoutScenariosFileIsConfigError(t *testing.T) {
 // through the same checkParamValue safety rule as every other param: an
 // unsafe or relative value is refused, naming the offending param.
 func TestScenariosFileParamIsChecked(t *testing.T) {
+	t.Parallel()
 	sb := Sandbox{renderedProfile: testMinimalRenderedProfile, name: profileNameJudge}
 
 	t.Run("relative ScenariosFile", func(t *testing.T) {
+		t.Parallel()
 		p := testJudgeParams()
 		p.ScenariosFile = "relative/scenarios.xml"
 		_, err := sb.Prefix(p)
@@ -748,6 +784,7 @@ func TestScenariosFileParamIsChecked(t *testing.T) {
 	})
 
 	t.Run("unsafe CodexHome", func(t *testing.T) {
+		t.Parallel()
 		p := testJudgeParams()
 		p.CodexHome = `/Users/test/codex"; rm -rf /`
 		_, err := sb.Prefix(p)
@@ -765,6 +802,7 @@ func TestScenariosFileParamIsChecked(t *testing.T) {
 // live under runDir, so NewRunDir's own cleanup -- not judgeProof itself --
 // is what removes them once the proof returns.
 func TestJudgeProofWritesTempScenariosFile(t *testing.T) {
+	t.Parallel()
 	sb := Sandbox{name: profileNameJudge}
 	runDir := t.TempDir()
 	var p Params

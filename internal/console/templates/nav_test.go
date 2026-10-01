@@ -7,6 +7,7 @@ import "testing"
 // out-of-set view (below) cannot silently change what the current literal
 // callers render.
 func TestZingNavExpr_KnownViewsUnchanged(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		view          string
 		open, project int64
@@ -20,6 +21,7 @@ func TestZingNavExpr_KnownViewsUnchanged(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.view, func(t *testing.T) {
+			t.Parallel()
 			if got := zingNavExpr(tt.view, tt.open, tt.project); got != tt.want {
 				t.Errorf("zingNavExpr(%q, %d, %d) = %q, want %q", tt.view, tt.open, tt.project, got, tt.want)
 			}
@@ -34,6 +36,7 @@ func TestZingNavExpr_KnownViewsUnchanged(t *testing.T) {
 // out of the JS string literal or inject script, since the whole
 // expression comes back empty instead.
 func TestZingNavExpr_RejectsOutOfSetView(t *testing.T) {
+	t.Parallel()
 	tests := []string{
 		"",
 		"unknown",
@@ -42,6 +45,7 @@ func TestZingNavExpr_RejectsOutOfSetView(t *testing.T) {
 	}
 	for _, view := range tests {
 		t.Run(view, func(t *testing.T) {
+			t.Parallel()
 			if got := zingNavExpr(view, 1, 2); got != "" {
 				t.Errorf("zingNavExpr(%q, 1, 2) = %q, want \"\" for an out-of-set view", view, got)
 			}

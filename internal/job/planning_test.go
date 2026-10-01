@@ -1889,6 +1889,7 @@ func TestPlanningHandler_ReviewTick_StoresFindingsAtCohortVersionAndFencesInputs
 // even when Deps.JudgeCodexHome is configured for the judge job elsewhere
 // on the same process.
 func TestPlanReviewHasNoCodexHome(t *testing.T) {
+	t.Parallel()
 	s := newJobTestStore(t)
 	ticketID := seedFeatureTicketInPlanning(t, s)
 	seedCohort(t, s, ticketID, validPlan("No CODEX_HOME leaks into planreview."), validScenarios(2, "no-codex-home"))

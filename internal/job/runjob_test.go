@@ -701,6 +701,7 @@ func TestRunJobUsesResolvedWorkDir(t *testing.T) {
 // Sandboxes.Build is off and required, which would refuse the run outright
 // if runJob ever picked the wrong profile.
 func TestRunJobPicksProfileByName(t *testing.T) {
+	t.Parallel()
 	readonlySB := loadTestSandboxOrSkip(t)
 
 	s := newRunJobTestStore(t)
@@ -775,6 +776,7 @@ func newJudgeProfileJob(t *testing.T) *machine.Machine {
 // "judge" (PKG9-PLAN.md section 7.3, D27): the sandbox-exec prefix carries
 // "-D CODEX_HOME=<value>".
 func TestRunJobJudgeParamsCodexHome(t *testing.T) {
+	t.Parallel()
 	judgeSB := loadTestSandboxOrSkip(t)
 
 	s := newRunJobTestStore(t)
@@ -816,6 +818,7 @@ func TestRunJobJudgeParamsCodexHome(t *testing.T) {
 // with an empty Deps.JudgeCodexHome refuses to run at all, before any
 // reserve, with the exact error text (PKG9-PLAN.md section 7.3, D27).
 func TestRunJobJudgeEmptyCodexHomeIsConfigError(t *testing.T) {
+	t.Parallel()
 	judgeSB := loadTestSandboxOrSkip(t)
 
 	s := newRunJobTestStore(t)
@@ -865,6 +868,7 @@ func TestRunJobJudgeEmptyCodexHomeIsConfigError(t *testing.T) {
 // own validateJob already refuses any other value), so this test builds
 // its own machine.Machine to reach runJob's own defensive check directly.
 func TestRunJobUnknownProfileIsConfigError(t *testing.T) {
+	t.Parallel()
 	s := newRunJobTestStore(t)
 	ticketID := seedRunJobTicket(t, s)
 	ticket := getRunJobTicket(t, s, ticketID)
@@ -912,6 +916,7 @@ func TestRunJobUnknownProfileIsConfigError(t *testing.T) {
 // reserve (PKG9-PLAN.md section 7.3): a private temp root needs somewhere
 // to live.
 func TestRunJobEmptyDataDirIsConfigError(t *testing.T) {
+	t.Parallel()
 	s := newRunJobTestStore(t)
 	ticketID := seedRunJobTicket(t, s)
 	ticket := getRunJobTicket(t, s, ticketID)
@@ -944,6 +949,7 @@ func TestRunJobEmptyDataDirIsConfigError(t *testing.T) {
 // <DataDir>/tmp/run/ in its request env, and that the private temp root is
 // removed once runJob returns (PKG9-PLAN.md section 7.3).
 func TestUnsandboxedRunGetsPrivateTemp(t *testing.T) {
+	t.Parallel()
 	s := newRunJobTestStore(t)
 	ticketID := seedRunJobTicket(t, s)
 	ticket := getRunJobTicket(t, s, ticketID)

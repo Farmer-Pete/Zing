@@ -269,6 +269,7 @@ func findingArtifactsByRound(t *testing.T, s *store.Store, ticketID int64) []res
 // ---- TestRoundRunsSevenLensesInParallel ------------------------------------
 
 func TestRoundRunsSevenLensesInParallel(t *testing.T) {
+	t.Parallel()
 	s, ticket, before := reviewTicketReady(t)
 	deps := pbClaim(t, s, runtime.NewFake(reviewScriptsFS(nil)), ticket.ID)
 
@@ -348,6 +349,11 @@ func (c *concurrencyTracker) Run(ctx context.Context, req runtime.RunRequest) (r
 	return res, err
 }
 
+// Not parallel: it measures real wall-clock concurrency (peak simultaneous
+// lens runs, via concurrencyTracker's 20ms sleep) against the rest of the
+// suite's own goroutines competing for GOMAXPROCS; under load from sibling
+// parallel tests this flaked, observing a peak of 1 instead of 2 (seen under
+// go test -race ./internal/job/...), not a bug in runLensesParallel itself.
 func TestRoundRespectsMaxLensesParallel(t *testing.T) {
 	s, ticket, before := reviewTicketReady(t)
 	tracker := &concurrencyTracker{inner: runtime.NewFake(reviewScriptsFS(nil)), sleep: 20 * time.Millisecond}
@@ -388,11 +394,13 @@ func TestRoundRespectsMaxLensesParallel(t *testing.T) {
 // refuse any value outside [1,7] with ErrConfig, before build is ever
 // called and before any lens ever reserves a run.
 func TestRunLensesParallelRejectsOutOfRangeConfig(t *testing.T) {
+	t.Parallel()
 	s, ticket, before := reviewTicketReady(t)
 	deps := pbClaim(t, s, runtime.NewFake(reviewScriptsFS(nil)), ticket.ID)
 
 	for _, n := range []int{-1, 0, 8, 100} {
 		t.Run(strconv.Itoa(n), func(t *testing.T) {
+			t.Parallel()
 			deps.LensesParallel = n
 			called := false
 			// build's own SessionUpsert and RunRequest returns are always the
@@ -437,6 +445,7 @@ func TestRunLensesParallelRejectsOutOfRangeConfig(t *testing.T) {
 // ---- TestRoundCleanMovesToJudging -------------------------------------------
 
 func TestRoundCleanMovesToJudging(t *testing.T) {
+	t.Parallel()
 	s, ticket, _ := reviewTicketReady(t)
 	deps := pbClaim(t, s, runtime.NewFake(reviewScriptsFS(nil)), ticket.ID)
 
@@ -463,6 +472,7 @@ func TestRoundCleanMovesToJudging(t *testing.T) {
 // (pbFloor is minor) opens a fix request in the same commit as the round's
 // own "done" marker, and the ticket stays in reviewing.
 func TestRoundBelowFloorRequestsFix(t *testing.T) {
+	t.Parallel()
 	s, ticket, _ := reviewTicketReady(t)
 	scripts := reviewScriptsFS(map[string]string{
 		reviewScriptKey("correctness", 1): findingScript("correctness", "minor", "the return could be a constant", "extract a const"),
@@ -507,6 +517,7 @@ func TestRoundBelowFloorRequestsFix(t *testing.T) {
 // floor (pbFloor is minor; major is above it) posts the review question,
 // waiting on "review", its payload carrying the finding's own text.
 func TestRoundAboveFloorAsks(t *testing.T) {
+	t.Parallel()
 	s, ticket, _ := reviewTicketReady(t)
 	const findingText = "this branch never returns an error"
 	scripts := reviewScriptsFS(map[string]string{
@@ -556,6 +567,7 @@ func TestRoundAboveFloorAsks(t *testing.T) {
 // already-exhausted budget fails every lens's own runJob call before any of
 // them ever reserves a run.
 func TestRoundBudgetEscalates(t *testing.T) {
+	t.Parallel()
 	s, ticket, before := reviewTicketReady(t)
 	deps := pbClaim(t, s, runtime.NewFake(reviewScriptsFS(nil)), ticket.ID)
 	deps.Budget = 0
@@ -588,6 +600,7 @@ func TestRoundBudgetEscalates(t *testing.T) {
 // call returns store.ErrClaimLost (the claim already moved on), and the
 // round returns that wrapped error with no commit at all.
 func TestRoundClaimLostAfterOneReservation(t *testing.T) {
+	t.Parallel()
 	s, ticket, before := reviewTicketReady(t)
 	deps := pbClaim(t, s, runtime.NewFake(reviewScriptsFS(nil)), ticket.ID)
 	// Serialized on purpose: with every lens racing the semaphore at once
@@ -651,6 +664,7 @@ func (m *movingHeadRuntime) Run(ctx context.Context, req runtime.RunRequest) (ru
 }
 
 func TestRoundVoidWhenHeadMoves(t *testing.T) {
+	t.Parallel()
 	s, ticket, _ := reviewTicketReady(t)
 	deps := pbClaim(t, s, runtime.NewFake(reviewScriptsFS(nil)), ticket.ID)
 	proj := deps.Projects[ticket.ProjectID]
@@ -696,6 +710,7 @@ func TestRoundVoidWhenHeadMoves(t *testing.T) {
 // TestRoundRefusesDirtyTree proves design section 6.2 step 4: an uncommitted
 // change in the worktree escalates before any lens ever runs.
 func TestRoundRefusesDirtyTree(t *testing.T) {
+	t.Parallel()
 	s, ticket, before := reviewTicketReady(t)
 	deps := pbClaim(t, s, runtime.NewFake(reviewScriptsFS(nil)), ticket.ID)
 	proj := deps.Projects[ticket.ProjectID]
@@ -737,6 +752,7 @@ func TestRoundRefusesDirtyTree(t *testing.T) {
 // commit on the ticket branch that Zing never recorded escalates before any
 // lens ever runs (with no fix open, an unrecorded commit is not Zing's).
 func TestRoundRefusesUnrecordedCommit(t *testing.T) {
+	t.Parallel()
 	s, ticket, before := reviewTicketReady(t)
 	deps := pbClaim(t, s, runtime.NewFake(reviewScriptsFS(nil)), ticket.ID)
 	proj := deps.Projects[ticket.ProjectID]
@@ -775,6 +791,7 @@ func TestRoundRefusesUnrecordedCommit(t *testing.T) {
 // skips Held rows, except CONTINUE." acceptedRoundFindings is enterFromDone's
 // own reader.
 func TestHeldRowsNeverRouted(t *testing.T) {
+	t.Parallel()
 	accept := response.FindingAccept
 	rows := []store.FindingRow{
 		{Finding: response.FindingArtifact{ID: "r1h1", Round: 1, Held: true, Decision: &accept}},
@@ -794,6 +811,7 @@ func TestHeldRowsNeverRouted(t *testing.T) {
 // straight through to the escalation, tagged origin review, and the round
 // writes its own "review round 1 failed" marker in the same commit.
 func TestRoundLensErrorEscalates(t *testing.T) {
+	t.Parallel()
 	s, ticket, _ := reviewTicketReady(t)
 	scripts := reviewScriptsFS(map[string]string{
 		reviewScriptKey("quality", 1): reviewErrorScript("other", "could not review the diff", "the tool crashed", "re-read the file"),
@@ -878,6 +896,7 @@ func (r *firstCallFailsRuntime) Run(ctx context.Context, req runtime.RunRequest)
 // at a time, so at most one lens can ever be mid-flight when the first
 // call's own failure fires the cancellation.
 func TestRoundLensFailureCancelsOthers(t *testing.T) {
+	t.Parallel()
 	s, ticket, before := reviewTicketReady(t)
 	rt := &firstCallFailsRuntime{inner: runtime.NewFake(reviewScriptsFS(nil))}
 	deps := pbClaim(t, s, rt, ticket.ID)
@@ -928,6 +947,7 @@ func (r *labelResultRuntime) Run(ctx context.Context, req runtime.RunRequest) (r
 // (the same round number, since a "failed" marker never advances n)
 // escalates on the second attempt, where the first attempt only marked it.
 func TestRoundSecondFailureEscalates(t *testing.T) {
+	t.Parallel()
 	s, ticket, _ := reviewTicketReady(t)
 	invalidFn := func() (runtime.RunResult, error) {
 		return runtime.RunResult{SessionID: "invalid-sess", ExitCode: 1, AgentTime: time.Second},
@@ -977,6 +997,7 @@ func TestRoundSecondFailureEscalates(t *testing.T) {
 // row: one lens asking, every other lens ok, posts that lens's own question
 // with its run's own id and waits on "questions", without advancing state.
 func TestRoundLensQuestionPostsAndStops(t *testing.T) {
+	t.Parallel()
 	s, ticket, _ := reviewTicketReady(t)
 	scripts := reviewScriptsFS(map[string]string{
 		reviewScriptKey(lensFidelity, 1): reviewQuestionScript("Which style?", "please pick a or b"),
@@ -1037,6 +1058,7 @@ func TestRoundLensQuestionPostsAndStops(t *testing.T) {
 // (r1h1..r1h6), and the marker's own "done" line names all six, in lens
 // order.
 func TestRoundLensQuestionHoldsOthers(t *testing.T) {
+	t.Parallel()
 	s, ticket, _ := reviewTicketReady(t)
 	overrides := map[string]string{
 		reviewScriptKey(lensFidelity, 1): reviewQuestionScript("Which style?", "please pick a or b"),
@@ -1100,6 +1122,7 @@ func TestRoundLensQuestionHoldsOthers(t *testing.T) {
 // same session (same external id, one more resume charged), and no other
 // lens gets a second run.
 func TestContinueResumesAskingSession(t *testing.T) {
+	t.Parallel()
 	s, ticket, before := reviewTicketReady(t)
 	scripts := reviewScriptsFS(map[string]string{
 		reviewScriptKey(lensFidelity, 1): reviewQuestionScript("Which style?", "please pick a or b"),
@@ -1173,6 +1196,7 @@ func TestContinueResumesAskingSession(t *testing.T) {
 // precondition: "once every question of the newest asked marker M is
 // answered; while any is still open, ErrNoAction."
 func TestContinueTwoAskersWaitForBoth(t *testing.T) {
+	t.Parallel()
 	s, ticket, _ := reviewTicketReady(t)
 	overrides := map[string]string{
 		reviewScriptKey(lensFidelity, 1): reviewQuestionScript("Q-fidelity", "pick one"),
@@ -1212,6 +1236,7 @@ func TestContinueTwoAskersWaitForBoth(t *testing.T) {
 // adds no new held rows of its own (fidelity returns no finding either
 // time).
 func TestContinueAsksAgainCarriesHeld(t *testing.T) {
+	t.Parallel()
 	s, ticket, _ := reviewTicketReady(t)
 	overrides := map[string]string{
 		reviewScriptKey(lensFidelity, 1): reviewQuestionScript("Q1", "first ask"),
@@ -1299,6 +1324,7 @@ func (r *labelStepsRuntime) Run(ctx context.Context, req runtime.RunRequest) (ru
 // left in storage, unrouted (6.2a: "held rows never reach routing ...
 // except CONTINUE" -- and this round never reaches a clean CONTINUE).
 func TestContinueFailureDropsHeld(t *testing.T) {
+	t.Parallel()
 	s, ticket, _ := reviewTicketReady(t)
 	fake := runtime.NewFake(reviewScriptsFS(map[string]string{
 		reviewScriptKey(lensFidelity, 1): reviewQuestionScript("Q1", "first ask"),
@@ -1356,6 +1382,7 @@ func TestContinueFailureDropsHeld(t *testing.T) {
 // same asking session finds it exhausted and escalates resumes_exhausted,
 // origin cap_resumes, with no run started at all.
 func TestContinueCapExhaustedEscalates(t *testing.T) {
+	t.Parallel()
 	s, ticket, _ := reviewTicketReady(t)
 	scripts := reviewScriptsFS(map[string]string{
 		reviewScriptKey(lensFidelity, 1): reviewQuestionScript("Q1", "ask 1"),
@@ -1579,6 +1606,7 @@ func discussGroupReady(t *testing.T, note string) (s *store.Store, ticket store.
 // ---- TestTriageStoresDecisions ----------------------------------------------
 
 func TestTriageStoresDecisions(t *testing.T) {
+	t.Parallel()
 	s, ticket, _ := reviewTicketReady(t)
 	scripts := reviewScriptsFS(map[string]string{
 		reviewScriptKey("security", 1): findingScriptAt("security", "major", greetGoLine5, "unchecked input", "validate it"),
@@ -1659,6 +1687,7 @@ func TestTriageStoresDecisions(t *testing.T) {
 // section 14 names: "the console marks the question answered only when
 // every item has a decision" -- a reply is the other one).
 func TestTriageDefaultsToAccept(t *testing.T) {
+	t.Parallel()
 	s, ticket, _ := reviewTicketReady(t)
 	scripts := reviewScriptsFS(map[string]string{
 		reviewScriptKey("security", 1): findingScriptAt("security", "major", greetGoLine5, "unchecked input", "validate it"),
@@ -1710,7 +1739,9 @@ func TestTriageDefaultsToAccept(t *testing.T) {
 // replies on the round, or the fixed "(the owner gave no note)" text when
 // there are none.
 func TestTriageWritesNotes(t *testing.T) {
+	t.Parallel()
 	t.Run("with a reply", func(t *testing.T) {
+		t.Parallel()
 		s, ticket, _ := reviewTicketReady(t)
 		scripts := reviewScriptsFS(map[string]string{
 			reviewScriptKey("security", 1): findingScript("security", "major", "unchecked input", "validate it"),
@@ -1748,6 +1779,7 @@ func TestTriageWritesNotes(t *testing.T) {
 	})
 
 	t.Run("with none", func(t *testing.T) {
+		t.Parallel()
 		s, ticket, _ := reviewTicketReady(t)
 		scripts := reviewScriptsFS(map[string]string{
 			reviewScriptKey("security", 1): findingScript("security", "major", "unchecked input", "validate it"),
@@ -1792,6 +1824,7 @@ func TestTriageWritesNotes(t *testing.T) {
 // label, with the finding and the owner's note as inputs, charging one
 // resume.
 func TestDiscussResumesLensSession(t *testing.T) {
+	t.Parallel()
 	s, ticket, rt, scripts, findingID := discussGroupReady(t, "please check the error path again")
 	scripts[reviewScriptKey("security", 2)] = &fstest.MapFile{Data: []byte(reviewOKScript)}
 
@@ -1853,6 +1886,7 @@ func TestDiscussResumesLensSession(t *testing.T) {
 // resume, charging one resume, and each writes its own "review discussed
 // <id>" marker naming the same batch; a merged successor supersedes both.
 func TestDiscussBatchesOneSession(t *testing.T) {
+	t.Parallel()
 	s, ticket, _ := reviewTicketReady(t)
 	scripts := reviewScriptsFS(map[string]string{
 		reviewScriptKey("security", 1): twoFindingScript(
@@ -1964,6 +1998,7 @@ func TestDiscussBatchesOneSession(t *testing.T) {
 // Run tick resolves only the lowest-id one, leaving the other pending for
 // the next tick.
 func TestDiscussTwoSessionsTwoTicks(t *testing.T) {
+	t.Parallel()
 	s, ticket, _ := reviewTicketReady(t)
 	scripts := reviewScriptsFS(map[string]string{
 		reviewScriptKey("correctness", 1): findingScriptAt("correctness", "major", greetGoLine2, "first lens finding", "fix the first"),
@@ -2046,6 +2081,7 @@ func TestDiscussTwoSessionsTwoTicks(t *testing.T) {
 // stored and no new question follows, only the group's own "review
 // discussed <id>" marker, kept 0.
 func TestDiscussWithdrawn(t *testing.T) {
+	t.Parallel()
 	s, ticket, rt, scripts, findingID := discussGroupReady(t, "")
 	scripts[reviewScriptKey("security", 2)] = &fstest.MapFile{Data: []byte(reviewOKScript)}
 
@@ -2078,6 +2114,7 @@ func TestDiscussWithdrawn(t *testing.T) {
 // a new row at the round's own next free id, superseding the discussed one,
 // and a new review question follows.
 func TestDiscussRevisedAsksAgain(t *testing.T) {
+	t.Parallel()
 	s, ticket, rt, scripts, findingID := discussGroupReady(t, "")
 	scripts[reviewScriptKey("security", 2)] = &fstest.MapFile{Data: []byte(findingScript("security", "blocker", "still unchecked, worse than thought", "validate it properly"))}
 
@@ -2125,6 +2162,7 @@ func TestDiscussRevisedAsksAgain(t *testing.T) {
 // Decision accept directly, posts no question, and joins the round's own
 // fix list on the next tick.
 func TestDiscussBelowFloorJoinsFixList(t *testing.T) {
+	t.Parallel()
 	s, ticket, rt, scripts, _ := discussGroupReady(t, "")
 	scripts[reviewScriptKey("security", 2)] = &fstest.MapFile{Data: []byte(findingScript("security", "minor", "a small nit now", "small fix"))}
 
@@ -2165,6 +2203,7 @@ func TestDiscussBelowFloorJoinsFixList(t *testing.T) {
 // session is exhausted; the escalation fires once, and a repeat before the
 // owner retries finds it already escalated (ErrNoAction).
 func TestDiscussExhaustedEscalatesOnce(t *testing.T) {
+	t.Parallel()
 	s, ticket, rt, scripts, _ := discussGroupReady(t, "")
 	scripts[reviewScriptKey("security", 2)] = &fstest.MapFile{Data: []byte(reviewQuestionScript("Q1", "which way?"))}
 	scripts[reviewScriptKey("security", 3)] = &fstest.MapFile{Data: []byte(reviewQuestionScript("Q2", "which way now?"))}
@@ -2217,6 +2256,7 @@ func TestDiscussExhaustedEscalatesOnce(t *testing.T) {
 // worktree's own HeadSHA must equal the round's own frozen sha before any
 // discuss resume runs, else it escalates environment.
 func TestDiscussHeadMovedEscalates(t *testing.T) {
+	t.Parallel()
 	s, ticket, rt, _, _ := discussGroupReady(t, "")
 
 	deps := pbClaim(t, s, rt, ticket.ID)
@@ -2251,6 +2291,7 @@ func TestDiscussHeadMovedEscalates(t *testing.T) {
 // of the round has a decision (here, accept and drop, no discuss), the next
 // tick opens a fix request with the accepted finding's own fix text.
 func TestDecidedRoundRequestsFix(t *testing.T) {
+	t.Parallel()
 	s, ticket, _ := reviewTicketReady(t)
 	scripts := reviewScriptsFS(map[string]string{
 		reviewScriptKey("security", 1): findingScriptAt("security", "major", greetGoLine5, "unchecked input", "validate it"),
@@ -2312,6 +2353,7 @@ func TestDecidedRoundRequestsFix(t *testing.T) {
 // path when every above-floor finding is dropped: the accepted list is
 // empty, so the next tick moves straight to judging.
 func TestAllDroppedMovesToJudging(t *testing.T) {
+	t.Parallel()
 	s, ticket, _ := reviewTicketReady(t)
 	scripts := reviewScriptsFS(map[string]string{
 		reviewScriptKey("security", 1): findingScript("security", "major", "unchecked input", "validate it"),
@@ -2434,6 +2476,7 @@ func driveReviewFixToLanding(t *testing.T, s *store.Store, ticketID int64, rt ru
 // discuss), the exact duplicated-row shape a lensesForRound reading raw
 // rows instead of the newest one per id would have to get right by luck.
 func TestReReviewRunsSelectedLenses(t *testing.T) {
+	t.Parallel()
 	s, ticket, _ := reviewTicketReady(t)
 	scripts := reviewScriptsFS(map[string]string{
 		reviewScriptKey("correctness", 1): findingScriptAt("correctness", "minor", greetGoLine5, "nil map write", "validate it"),
@@ -2541,6 +2584,7 @@ func TestReReviewRunsSelectedLenses(t *testing.T) {
 // keeps it a third time, k = 2 = max_loops, so FIXREQ escalates
 // loops_exhausted instead of opening a third request.
 func TestLoopGateEscalatesAfterTwoFixes(t *testing.T) {
+	t.Parallel()
 	const loopLens = "quality"
 	s, ticket, _ := reviewTicketReady(t)
 	scripts := reviewScriptsFS(map[string]string{
@@ -2608,6 +2652,7 @@ func TestLoopGateEscalatesAfterTwoFixes(t *testing.T) {
 // review writes the plain "retry requested" marker and resolves the round,
 // exactly as every other job's own infra retry does.
 func TestReviewInfraRetryWritesMarker(t *testing.T) {
+	t.Parallel()
 	s, ticket, _ := reviewTicketReady(t)
 
 	qID := pbEscalateDirect(t, s, ticket.ID, nil, nil, response.EscalationCodeEnvironment, response.EscalationOriginReview)
@@ -2633,6 +2678,7 @@ func TestReviewInfraRetryWritesMarker(t *testing.T) {
 // straight from the escalation's own Tried text, bypassing FIXREQ's own
 // max_loops gate entirely -- the one request 5.6 says to skip it for.
 func TestReviewLoopsRetryRequestsFix(t *testing.T) {
+	t.Parallel()
 	s, ticket, _ := reviewTicketReady(t)
 
 	qID := pbEscalateDirect(t, s, ticket.ID, nil, nil, response.EscalationCodeLoopsExhausted, response.EscalationOriginReview)
@@ -2664,6 +2710,7 @@ func TestReviewLoopsRetryRequestsFix(t *testing.T) {
 // own notes appended to its fix text -- and resolves the escalation's own
 // round.
 func TestReviewCapResumesRetryAccepts(t *testing.T) {
+	t.Parallel()
 	s, ticket, rt, scripts, findingID := discussGroupReady(t, "")
 	scripts[reviewScriptKey(discussLens, 2)] = &fstest.MapFile{Data: []byte(reviewQuestionScript("Q1", "which way?"))}
 	scripts[reviewScriptKey(discussLens, 3)] = &fstest.MapFile{Data: []byte(reviewQuestionScript("Q2", "which way now?"))}

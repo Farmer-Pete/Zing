@@ -15,6 +15,7 @@ import (
 // {"all": true} sets the store's persisted "stopped" flag and answers 204
 // (design section 6.11, 7.1).
 func TestStop_AllSetsStoppedFlagAndReturnsNoContent(t *testing.T) {
+	t.Parallel()
 	s := newConsoleTestStore(t)
 	srv, _ := newMutationTestServer(t, s, bus.New(), newTestLogHandler(t))
 
@@ -47,6 +48,7 @@ func TestStop_AllSetsStoppedFlagAndReturnsNoContent(t *testing.T) {
 // Package 5's orchestrator), so claiming success for that request would
 // misreport a no-op. The "stopped" flag stays untouched either way.
 func TestStop_TicketReturnsNotImplementedAndDoesNotTouchStoppedFlag(t *testing.T) {
+	t.Parallel()
 	s := newConsoleTestStore(t)
 	ticketID := seedTicket(t, s, "fake#1", "Add a hello endpoint")
 	srv, _ := newMutationTestServer(t, s, bus.New(), newTestLogHandler(t))
@@ -71,6 +73,7 @@ func TestStop_TicketReturnsNotImplementedAndDoesNotTouchStoppedFlag(t *testing.T
 // and a positive ticket is rejected with 400 rather than silently taking the
 // all-branch (review fix, package 4 re-review: "exactly one of all/ticket").
 func TestStop_RejectsAmbiguousBodyNamingBoth(t *testing.T) {
+	t.Parallel()
 	s := newConsoleTestStore(t)
 	ticketID := seedTicket(t, s, "fake#1", "Add a hello endpoint")
 	srv, _ := newMutationTestServer(t, s, bus.New(), newTestLogHandler(t))
@@ -95,6 +98,7 @@ func TestStop_RejectsAmbiguousBodyNamingBoth(t *testing.T) {
 // a positive ticket is rejected with 400 (design section 6.11: "Reject a
 // body naming neither").
 func TestStop_RejectsBodyNamingNeither(t *testing.T) {
+	t.Parallel()
 	s := newConsoleTestStore(t)
 	srv, _ := newMutationTestServer(t, s, bus.New(), newTestLogHandler(t))
 
@@ -108,6 +112,7 @@ func TestStop_RejectsBodyNamingNeither(t *testing.T) {
 // TestStop_RejectsMalformedBody proves a malformed JSON body is rejected
 // with 400, matching every other mutation handler's decodeStrict use.
 func TestStop_RejectsMalformedBody(t *testing.T) {
+	t.Parallel()
 	s := newConsoleTestStore(t)
 	srv, _ := newMutationTestServer(t, s, bus.New(), newTestLogHandler(t))
 

@@ -96,6 +96,7 @@ func conflictReason(t *testing.T, err error) string {
 // ---- SaveDraft: option answers -------------------------------------------
 
 func TestSaveDraft_OptionUpsertsAndIsIdempotent(t *testing.T) {
+	t.Parallel()
 	s := newTestStore(t)
 	_, ticketID := seedQueuedTicket(t, s, "1")
 	qID := insertQuestionOption(t, s, ticketID, "Q1")
@@ -144,6 +145,7 @@ func TestSaveDraft_OptionUpsertsAndIsIdempotent(t *testing.T) {
 // ---- SaveDraft: item answers ----------------------------------------------
 
 func TestSaveDraft_ItemMergesFirstPickThenReplacesOne(t *testing.T) {
+	t.Parallel()
 	s := newTestStore(t)
 	_, ticketID := seedQueuedTicket(t, s, "1")
 	items := []response.Item{{Ref: testRefAGo, Text: "a"}, {Ref: testRefBGo, Text: "b"}}
@@ -200,6 +202,7 @@ func TestSaveDraft_ItemMergesFirstPickThenReplacesOne(t *testing.T) {
 // takes accept, drop, or discuss; reject is refused with the conflict "a
 // review item takes accept, drop, or discuss".
 func TestSaveDraftReviewDecision(t *testing.T) {
+	t.Parallel()
 	s := newTestStore(t)
 	_, ticketID := seedQueuedTicket(t, s, "1")
 	items := []response.Item{{Ref: testRefAGo, Text: "a"}}
@@ -217,6 +220,7 @@ func TestSaveDraftReviewDecision(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
 			qID := insertQuestionOfKind(t, s, ticketID, tc.key, response.QuestionKindReview, nil, items)
 			_, err := s.SaveDraft(t.Context(), DraftInput{
 				TicketID: ticketID, QuestionID: &qID, Item: &ItemDecision{Ref: testRefAGo, Decision: tc.decision},
@@ -241,6 +245,7 @@ func TestSaveDraftReviewDecision(t *testing.T) {
 // item takes accept or reject; accept and reject save, drop and discuss
 // return the conflict "a perimeter item takes accept or reject".
 func TestSaveDraftPerimeterDecision(t *testing.T) {
+	t.Parallel()
 	s := newTestStore(t)
 	_, ticketID := seedQueuedTicket(t, s, "1")
 	items := []response.Item{{Ref: testRefAGo, Text: "a"}}
@@ -258,6 +263,7 @@ func TestSaveDraftPerimeterDecision(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
 			qID := insertQuestionOfKind(t, s, ticketID, tc.key, response.QuestionKindPerimeter, nil, items)
 			_, err := s.SaveDraft(t.Context(), DraftInput{
 				TicketID: ticketID, QuestionID: &qID, Item: &ItemDecision{Ref: testRefAGo, Decision: tc.decision},
@@ -281,6 +287,7 @@ func TestSaveDraftPerimeterDecision(t *testing.T) {
 // ---- SaveDraft: replies ----------------------------------------------------
 
 func TestSaveDraft_QuestionReplyAndThreadReply(t *testing.T) {
+	t.Parallel()
 	s := newTestStore(t)
 	_, ticketID := seedQueuedTicket(t, s, "1")
 	qID := insertQuestionOption(t, s, ticketID, "Q1")
@@ -316,6 +323,7 @@ func TestSaveDraft_QuestionReplyAndThreadReply(t *testing.T) {
 // ---- SaveDraft: conflicts ---------------------------------------------------
 
 func TestSaveDraft_Conflicts(t *testing.T) {
+	t.Parallel()
 	s := newTestStore(t)
 	_, ticketA := seedQueuedTicket(t, s, "a")
 	_, ticketB := seedQueuedTicket(t, s, "b")
@@ -348,6 +356,7 @@ func TestSaveDraft_Conflicts(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
 			_, err := s.SaveDraft(t.Context(), tc.in)
 			if err == nil {
 				t.Fatal("SaveDraft: err = nil, want a ConflictError")
@@ -362,6 +371,7 @@ func TestSaveDraft_Conflicts(t *testing.T) {
 // ---- SendBatch --------------------------------------------------------------
 
 func TestSendBatch_EmptyIsSafe(t *testing.T) {
+	t.Parallel()
 	s := newTestStore(t)
 	_, ticketID := seedQueuedTicket(t, s, "1")
 
@@ -375,6 +385,7 @@ func TestSendBatch_EmptyIsSafe(t *testing.T) {
 }
 
 func TestSendBatch_LocksAllocatesOneBatchIDAndClearsAQuestionsWait(t *testing.T) {
+	t.Parallel()
 	s := newTestStore(t)
 	_, ticketID := seedQueuedTicket(t, s, "1")
 	setTicketWaiting(t, s, ticketID, testWaitingQuestions)
@@ -413,10 +424,17 @@ func TestSendBatch_LocksAllocatesOneBatchIDAndClearsAQuestionsWait(t *testing.T)
 	}
 }
 
+// TestSendBatch_ClearsAGateWaitButNeverErrorOrChildren's three subtests each
+// open their own store rather than share one across t.Parallel() siblings:
+// each seeds a ticket under the same fixed testProject name, and
+// EnsureProject's own check-then-insert is not safe for two goroutines
+// racing on the same project row.
 func TestSendBatch_ClearsAGateWaitButNeverErrorOrChildren(t *testing.T) {
-	s := newTestStore(t)
+	t.Parallel()
 
 	t.Run("gate wait cleared by a gate answer", func(t *testing.T) {
+		t.Parallel()
+		s := newTestStore(t)
 		_, ticketID := seedQueuedTicket(t, s, "gate")
 		setTicketWaiting(t, s, ticketID, "gate")
 		qID := insertQuestionOfKind(t, s, ticketID, "Q1", response.QuestionKindGate, optionsAB, nil)
@@ -441,6 +459,8 @@ func TestSendBatch_ClearsAGateWaitButNeverErrorOrChildren(t *testing.T) {
 	})
 
 	t.Run("a reply-only batch never clears an error wait", func(t *testing.T) {
+		t.Parallel()
+		s := newTestStore(t)
 		_, ticketID := seedQueuedTicket(t, s, "err")
 		setTicketWaiting(t, s, ticketID, "error")
 		items := []response.Item{{Ref: "f1", Text: "finding"}}
@@ -473,6 +493,8 @@ func TestSendBatch_ClearsAGateWaitButNeverErrorOrChildren(t *testing.T) {
 	})
 
 	t.Run("children wait is never cleared by SendBatch", func(t *testing.T) {
+		t.Parallel()
+		s := newTestStore(t)
 		_, ticketID := seedQueuedTicket(t, s, "children")
 		setTicketWaiting(t, s, ticketID, "children")
 		qID := insertQuestionOption(t, s, ticketID, "Q1")
@@ -491,6 +513,7 @@ func TestSendBatch_ClearsAGateWaitButNeverErrorOrChildren(t *testing.T) {
 }
 
 func TestSendBatch_IncompleteItemAnswerLeavesQuestionOpen(t *testing.T) {
+	t.Parallel()
 	s := newTestStore(t)
 	_, ticketID := seedQueuedTicket(t, s, "1")
 	items := []response.Item{{Ref: testRefAGo, Text: "a"}, {Ref: testRefBGo, Text: "b"}}
@@ -526,6 +549,7 @@ func TestSendBatch_IncompleteItemAnswerLeavesQuestionOpen(t *testing.T) {
 // all-or-nothing revalidateBatchTx did. SendBatch instead discards the one
 // stale draft outright and sends every other draft in the batch.
 func TestSendBatch_DiscardsStaleDraftAndSendsTheRest(t *testing.T) {
+	t.Parallel()
 	s := newTestStore(t)
 	_, ticketID := seedQueuedTicket(t, s, "1")
 	setTicketWaiting(t, s, ticketID, testWaitingQuestions)
@@ -596,6 +620,7 @@ func TestSendBatch_DiscardsStaleDraftAndSendsTheRest(t *testing.T) {
 // discards it and finds nothing to send, yet must still clear a now-obsolete
 // wait so the ticket is not left blocked with no run to resume it.
 func TestSendBatch_AllStaleDiscardsAndClearsWait(t *testing.T) {
+	t.Parallel()
 	s := newTestStore(t)
 	_, ticketID := seedQueuedTicket(t, s, "1")
 	setTicketWaiting(t, s, ticketID, testWaitingQuestions)
@@ -635,6 +660,7 @@ func TestSendBatch_AllStaleDiscardsAndClearsWait(t *testing.T) {
 }
 
 func TestSendBatch_CommitsOnceUnderAConcurrentSend(t *testing.T) {
+	t.Parallel()
 	s := newTestStore(t)
 	_, ticketID := seedQueuedTicket(t, s, "1")
 	qID := insertQuestionOption(t, s, ticketID, "Q1")
@@ -685,6 +711,7 @@ func TestSendBatch_CommitsOnceUnderAConcurrentSend(t *testing.T) {
 // calls is marked answered, and its wait clears, once every item has a
 // decision from any send, not only the batch just sent.
 func TestSendBatch_ItemCompletenessAccumulatesAcrossSends(t *testing.T) {
+	t.Parallel()
 	s := newTestStore(t)
 	_, ticketID := seedQueuedTicket(t, s, "1")
 	setTicketWaiting(t, s, ticketID, string(response.QuestionKindPerimeter))
@@ -757,6 +784,7 @@ func TestSendBatch_ItemCompletenessAccumulatesAcrossSends(t *testing.T) {
 // update one draft row in place rather than accumulating a second row that
 // would send twice.
 func TestSaveDraft_QuestionReplyIsIdempotentOnRepeatedEnter(t *testing.T) {
+	t.Parallel()
 	s := newTestStore(t)
 	_, ticketID := seedQueuedTicket(t, s, "1")
 	qID := insertQuestionOption(t, s, ticketID, "Q1")
@@ -813,6 +841,7 @@ func TestSaveDraft_QuestionReplyIsIdempotentOnRepeatedEnter(t *testing.T) {
 // thread reply (QuestionID nil), which dedupes by (ticket, thread) instead
 // of (ticket, question).
 func TestSaveDraft_ThreadReplyIsIdempotentOnRepeatedEnter(t *testing.T) {
+	t.Parallel()
 	s := newTestStore(t)
 	_, ticketID := seedQueuedTicket(t, s, "1")
 
@@ -844,6 +873,7 @@ func TestSaveDraft_ThreadReplyIsIdempotentOnRepeatedEnter(t *testing.T) {
 // ---- MarkRead ---------------------------------------------------------------
 
 func TestMarkRead_SetsReadAt(t *testing.T) {
+	t.Parallel()
 	s := newTestStore(t)
 	_, ticketID := seedQueuedTicket(t, s, "1")
 	msgID := insertZingUpdate(t, s, ticketID)
@@ -870,6 +900,7 @@ func TestMarkRead_SetsReadAt(t *testing.T) {
 }
 
 func TestMarkRead_MissingMessageErrors(t *testing.T) {
+	t.Parallel()
 	s := newTestStore(t)
 	if err := s.MarkRead(t.Context(), 999999); err == nil {
 		t.Error("MarkRead on a missing message: err = nil, want an error")
@@ -882,6 +913,7 @@ func TestMarkRead_MissingMessageErrors(t *testing.T) {
 // and inserts a brand-new key (the shape Task 11's VAPID pair needs) in the
 // same transaction.
 func TestSetSettings_UpdatesExistingAndInsertsNew(t *testing.T) {
+	t.Parallel()
 	s := newTestStore(t)
 
 	if err := s.SetSettings(t.Context(), "log_level", "debug", "vapid_public", "pub-key"); err != nil {
@@ -909,6 +941,7 @@ func TestSetSettings_UpdatesExistingAndInsertsNew(t *testing.T) {
 // value is rejected before any write happens, rather than silently dropping
 // the dangling key.
 func TestSetSettings_RejectsOddArgumentCount(t *testing.T) {
+	t.Parallel()
 	s := newTestStore(t)
 	if err := s.SetSettings(t.Context(), "log_level"); err == nil {
 		t.Error("SetSettings with an odd argument count: err = nil, want an error")
@@ -926,6 +959,7 @@ func pushKeysJSON(p256dh, auth string) []byte {
 // endpoint replaces its keys_json in place, so a re-subscribe is idempotent
 // rather than leaving two rows.
 func TestUpsertPushSubscription_InsertsThenReplacesByEndpoint(t *testing.T) {
+	t.Parallel()
 	s := newTestStore(t)
 	const endpoint = "https://push.example/abc"
 
@@ -958,6 +992,7 @@ func TestUpsertPushSubscription_InsertsThenReplacesByEndpoint(t *testing.T) {
 // keys_json is validated against the push_subscriptions/keys schema: a
 // payload missing p256dh or auth is rejected and writes nothing.
 func TestUpsertPushSubscription_RejectsKeysMissingRequiredFields(t *testing.T) {
+	t.Parallel()
 	s := newTestStore(t)
 
 	tests := []struct {
@@ -970,6 +1005,7 @@ func TestUpsertPushSubscription_RejectsKeysMissingRequiredFields(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
 			err := s.UpsertPushSubscription(t.Context(), PushSubscription{
 				Endpoint: "https://push.example/" + tc.name, KeysJSON: tc.keys,
 			})

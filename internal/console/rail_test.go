@@ -102,6 +102,7 @@ func railPlanPayload(t *testing.T) json.RawMessage {
 // Worktree and Branch, which this package cannot supply (design section
 // 6.11: "arrive with Package 5").
 func TestRail_PhaseArtifactsAndRun(t *testing.T) {
+	t.Parallel()
 	s := newConsoleTestStore(t)
 	ticketID := seedTicket(t, s, "fake#1", "Add a hello endpoint")
 
@@ -178,6 +179,7 @@ func TestRail_PhaseArtifactsAndRun(t *testing.T) {
 // (every field this package cannot supply) renders every Run field as "-"
 // rather than panicking on an empty SessionsForTicket result.
 func TestRail_NoSessionRendersAllDashes(t *testing.T) {
+	t.Parallel()
 	s := newConsoleTestStore(t)
 	ticketID := seedTicket(t, s, "fake#1", "Add a hello endpoint")
 
@@ -220,6 +222,7 @@ func logLine(t *testing.T, h *console.Handler, at time.Time, msg string, runID i
 // (rail.go's slices.SortStableFunc), not the unspecified order a plain,
 // non-stable sort would allow.
 func TestBuildLogRail_TiesKeepRunAppendOrder(t *testing.T) {
+	t.Parallel()
 	s := newConsoleTestStore(t)
 	ticketID := seedTicket(t, s, "fake#1", "Add a hello endpoint")
 
@@ -309,6 +312,7 @@ func TestBuildLogRail_TiesKeepRunAppendOrder(t *testing.T) {
 // mutation guard like every other state-changing route, and it writes no
 // message row -- the side agent is Package 10's job, not this one's.
 func TestPostSide_ReturnsTheFixedReplyAndWritesNoMessage(t *testing.T) {
+	t.Parallel()
 	s := newConsoleTestStore(t)
 	ticketID := seedTicket(t, s, "fake#1", "Add a hello endpoint")
 
@@ -351,6 +355,7 @@ func TestPostSide_ReturnsTheFixedReplyAndWritesNoMessage(t *testing.T) {
 // "Apply the mutation middleware to /side" is this package's own hard
 // constraint, not a design section quote).
 func TestPostSide_RejectsCrossOrigin(t *testing.T) {
+	t.Parallel()
 	s := newConsoleTestStore(t)
 	ticketID := seedTicket(t, s, "fake#1", "Add a hello endpoint")
 

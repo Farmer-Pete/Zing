@@ -53,6 +53,7 @@ func findGroup(t *testing.T, groups []string, title string) string {
 // real validated inserts, no hand-built payload -- then reads them back
 // over the live /stream the browser itself uses.
 func TestQuestionKindsRenderTheirControls(t *testing.T) {
+	t.Parallel()
 	s := newConsoleTestStore(t)
 	ticketID := seedTicket(t, s, "fake#1", "Add a hello endpoint")
 	if err := console.SeedQuestionFixtures(t.Context(), s, ticketID); err != nil {
@@ -76,6 +77,7 @@ func TestQuestionKindsRenderTheirControls(t *testing.T) {
 	ticketAttr := `data-draft-ticket="` + strconv.FormatInt(ticketID, 10) + `"`
 
 	t.Run("question kind renders two numbered chips and a free reply", func(t *testing.T) {
+		t.Parallel()
 		g := findGroup(t, groups, "How should the greeting read?")
 		assertChip(t, g, 1, "a")
 		assertChip(t, g, 2, "b")
@@ -84,6 +86,7 @@ func TestQuestionKindsRenderTheirControls(t *testing.T) {
 	})
 
 	t.Run("gate kind renders its placeholder context plus chips", func(t *testing.T) {
+		t.Parallel()
 		g := findGroup(t, groups, "Approve the plan?")
 		if !strings.Contains(g, `class="q-context gate-context"`) {
 			t.Errorf("gate group missing its gate-context placeholder; got:\n%s", g)
@@ -94,6 +97,7 @@ func TestQuestionKindsRenderTheirControls(t *testing.T) {
 	})
 
 	t.Run("split kind renders its placeholder context plus chips", func(t *testing.T) {
+		t.Parallel()
 		g := findGroup(t, groups, "Split this ticket?")
 		if !strings.Contains(g, `class="q-context split-context"`) {
 			t.Errorf("split group missing its split-context placeholder; got:\n%s", g)
@@ -104,6 +108,7 @@ func TestQuestionKindsRenderTheirControls(t *testing.T) {
 	})
 
 	t.Run("merge kind renders its PR-link context plus chips", func(t *testing.T) {
+		t.Parallel()
 		g := findGroup(t, groups, "Merge the PR?")
 		if !strings.Contains(g, `class="q-context merge-context"`) {
 			t.Errorf("merge group missing its merge-context region; got:\n%s", g)
@@ -117,6 +122,7 @@ func TestQuestionKindsRenderTheirControls(t *testing.T) {
 	})
 
 	t.Run("perimeter kind renders one row per item with accept and reject only", func(t *testing.T) {
+		t.Parallel()
 		g := findGroup(t, groups, "Confirm the file perimeter")
 		assertItemRowDecisions(t, g, "internal/hello/handler.go", "accept", "reject")
 		assertItemRowDecisions(t, g, "internal/hello/handler_test.go", "accept", "reject")
@@ -128,6 +134,7 @@ func TestQuestionKindsRenderTheirControls(t *testing.T) {
 	})
 
 	t.Run("review kind renders one row per item with accept, drop, and discuss", func(t *testing.T) {
+		t.Parallel()
 		g := findGroup(t, groups, "Triage the review findings")
 		assertItemRowDecisions(t, g, "F1", reviewItemDecisions...)
 		assertItemRowDecisions(t, g, "F2", reviewItemDecisions...)
@@ -242,6 +249,7 @@ func perimeterAndReviewGroups(t *testing.T) (perimeter, review string) {
 // narrowing (Task 10): a perimeter question's item rows carry accept and
 // reject only, never drop or discuss.
 func TestPerimeterRendersAcceptAndReject(t *testing.T) {
+	t.Parallel()
 	perimeter, _ := perimeterAndReviewGroups(t)
 	assertItemRowDecisions(t, perimeter, "internal/hello/handler.go", "accept", "reject")
 	assertItemRowDecisions(t, perimeter, "internal/hello/handler_test.go", "accept", "reject")
@@ -252,6 +260,7 @@ func TestPerimeterRendersAcceptAndReject(t *testing.T) {
 // decision set (accept, drop, discuss): a review question's item rows carry
 // exactly those three controls, never perimeter's reject.
 func TestReviewRendersThreeDecisions(t *testing.T) {
+	t.Parallel()
 	_, review := perimeterAndReviewGroups(t)
 	assertItemRowDecisions(t, review, "F1", reviewItemDecisions...)
 	assertItemRowDecisions(t, review, "F2", reviewItemDecisions...)

@@ -204,6 +204,7 @@ func tcpPort(t *testing.T, addr net.Addr) int {
 // ---- profile load and the two directory-scoped denials ---------------
 
 func TestProfileLoads(t *testing.T) {
+	t.Parallel()
 	sb := newLoadedSandbox(t, nil, 7420)
 	if !sb.Available() {
 		t.Fatalf("sandbox unavailable: %s", sb.Reason())
@@ -211,6 +212,7 @@ func TestProfileLoads(t *testing.T) {
 }
 
 func TestDeniesHomeRead(t *testing.T) {
+	t.Parallel()
 	sb := newLoadedSandbox(t, nil, 7420)
 	dirs := newTestDirs(t)
 	secret := filepath.Join(dirs.home, "secret.txt")
@@ -225,6 +227,7 @@ func TestDeniesHomeRead(t *testing.T) {
 }
 
 func TestDeniesDataDir(t *testing.T) {
+	t.Parallel()
 	sb := newLoadedSandbox(t, nil, 7420)
 	dirs := newTestDirs(t)
 	f := filepath.Join(dirs.dataDir, "zing.db")
@@ -253,6 +256,7 @@ func TestDeniesDataDir(t *testing.T) {
 // this one drives Load itself (not a hand-built Params), since the fix
 // under test lives in resolveHost.
 func TestDeniesDataDirThroughSymlink(t *testing.T) {
+	t.Parallel()
 	requireNotSandboxed(t)
 
 	base := t.TempDir()
@@ -303,6 +307,7 @@ func TestDeniesDataDirThroughSymlink(t *testing.T) {
 // file-read*/file-write* deny (section 5.1's "allow file-read*
 // process-exec (literal (param \"ZING_BIN\"))").
 func TestRunsZingBinFromDataDir(t *testing.T) {
+	t.Parallel()
 	sb := newLoadedSandbox(t, nil, 7420)
 	dirs := newTestDirs(t)
 
@@ -321,6 +326,7 @@ func TestRunsZingBinFromDataDir(t *testing.T) {
 // ---- writes: denied by default, allowed by name -----------------------
 
 func TestDeniesHomeWrite(t *testing.T) {
+	t.Parallel()
 	sb := newLoadedSandbox(t, nil, 7420)
 	dirs := newTestDirs(t)
 	target := filepath.Join(dirs.home, "canary.txt")
@@ -334,6 +340,7 @@ func TestDeniesHomeWrite(t *testing.T) {
 }
 
 func TestDeniesHostTempWrite(t *testing.T) {
+	t.Parallel()
 	sb := newLoadedSandbox(t, nil, 7420)
 	dirs := newTestDirs(t)
 	canary := filepath.Join(os.TempDir(), fmt.Sprintf("zing-sandbox-test-canary-%d.txt", os.Getpid()))
@@ -348,6 +355,7 @@ func TestDeniesHostTempWrite(t *testing.T) {
 }
 
 func TestDeniesGitPointerWrite(t *testing.T) {
+	t.Parallel()
 	sb := newLoadedSandbox(t, nil, 7420)
 	dirs := newTestDirs(t)
 	gitPointer := filepath.Join(dirs.worktree, ".git")
@@ -365,6 +373,7 @@ func TestDeniesGitPointerWrite(t *testing.T) {
 // including config and a worktree's own config.worktree, is refused by the
 // same blanket write deny that covers everywhere outside the allow list.
 func TestDeniesGitConfigWrite(t *testing.T) {
+	t.Parallel()
 	sb := newLoadedSandbox(t, nil, 7420)
 	dirs := newTestDirs(t)
 
@@ -380,6 +389,7 @@ func TestDeniesGitConfigWrite(t *testing.T) {
 }
 
 func TestAllowsWorktreeWrite(t *testing.T) {
+	t.Parallel()
 	sb := newLoadedSandbox(t, nil, 7420)
 	dirs := newTestDirs(t)
 	target := filepath.Join(dirs.worktree, "hello.txt")
@@ -400,6 +410,7 @@ func TestAllowsWorktreeWrite(t *testing.T) {
 // resolves WORKTREE before Prefix ever builds a rule from it, so this test
 // fails before that fix and passes after.
 func TestAllowsWorktreeWriteThroughSymlink(t *testing.T) {
+	t.Parallel()
 	sb := newLoadedSandbox(t, nil, 7420)
 	dirs := newTestDirs(t)
 
@@ -434,6 +445,7 @@ func TestAllowsWorktreeWriteThroughSymlink(t *testing.T) {
 }
 
 func TestAllowsRunDirWrite(t *testing.T) {
+	t.Parallel()
 	sb := newLoadedSandbox(t, nil, 7420)
 	dirs := newTestDirs(t)
 	target := filepath.Join(dirs.runDir, "hello.txt")
@@ -449,6 +461,7 @@ func TestAllowsRunDirWrite(t *testing.T) {
 // TestChildSeesSandboxTmpdir proves a sandboxed child actually observes the
 // TMPDIR value Env computes, not merely that the write-allow rule covers it.
 func TestChildSeesSandboxTmpdir(t *testing.T) {
+	t.Parallel()
 	sb := newLoadedSandbox(t, nil, 7420)
 	dirs := newTestDirs(t)
 	p := dirs.params()
@@ -468,6 +481,7 @@ func TestChildSeesSandboxTmpdir(t *testing.T) {
 // readable despite HOME's own blanket deny (section 5.4: "It exists for a
 // toolchain installed under home").
 func TestReadPathsAllowsExtra(t *testing.T) {
+	t.Parallel()
 	dirs := newTestDirs(t)
 	extra := filepath.Join(dirs.home, ".local", "share", "mise")
 	if err := os.MkdirAll(extra, 0o755); err != nil {
@@ -487,6 +501,7 @@ func TestReadPathsAllowsExtra(t *testing.T) {
 // ---- the console port -------------------------------------------------
 
 func TestDeniesConsolePort(t *testing.T) {
+	t.Parallel()
 	ln := listenLoopback(t)
 	defer func() { _ = ln.Close() }()
 	go acceptAndDiscard(ln)
@@ -504,6 +519,7 @@ func TestDeniesConsolePort(t *testing.T) {
 }
 
 func TestAllowsOtherLocalPort(t *testing.T) {
+	t.Parallel()
 	blocked := listenLoopback(t)
 	defer func() { _ = blocked.Close() }()
 	other := listenLoopback(t)
@@ -526,6 +542,7 @@ func TestAllowsOtherLocalPort(t *testing.T) {
 // ---- no hand-off to an unsandboxed process -----------------------------
 
 func TestDeniesOpen(t *testing.T) {
+	t.Parallel()
 	sb := newLoadedSandbox(t, nil, 7420)
 	dirs := newTestDirs(t)
 	dir := t.TempDir()
@@ -545,6 +562,7 @@ func TestDeniesOpen(t *testing.T) {
 }
 
 func TestDeniesOsascriptToApplication(t *testing.T) {
+	t.Parallel()
 	sb := newLoadedSandbox(t, nil, 7420)
 	dirs := newTestDirs(t)
 	dir := t.TempDir()
@@ -561,6 +579,7 @@ func TestDeniesOsascriptToApplication(t *testing.T) {
 }
 
 func TestDeniesLaunchctlSubmit(t *testing.T) {
+	t.Parallel()
 	sb := newLoadedSandbox(t, nil, 7420)
 	dirs := newTestDirs(t)
 	dir := t.TempDir()
@@ -606,6 +625,7 @@ func newLoadedReadonlySandbox(t *testing.T) Sandbox {
 }
 
 func TestReadonlyProfileLoads(t *testing.T) {
+	t.Parallel()
 	sb := newLoadedReadonlySandbox(t)
 	if !sb.Available() {
 		t.Fatalf("sandbox unavailable: %s", sb.Reason())
@@ -616,6 +636,7 @@ func TestReadonlyProfileLoads(t *testing.T) {
 // carries no WORKTREE allow at all (section 7.3: "A review or respond run
 // writes nothing in the worktree, D4"), unlike build.sb.
 func TestReadonlyDeniesWorktreeWrite(t *testing.T) {
+	t.Parallel()
 	sb := newLoadedReadonlySandbox(t)
 	dirs := newTestDirs(t)
 	target := filepath.Join(dirs.worktree, "hello.txt")
@@ -631,6 +652,7 @@ func TestReadonlyDeniesWorktreeWrite(t *testing.T) {
 // TestReadonlyAllowsRunDirWrite proves the readonly profile still allows a
 // write into RUN_DIR (section 7.3's own write block).
 func TestReadonlyAllowsRunDirWrite(t *testing.T) {
+	t.Parallel()
 	sb := newLoadedReadonlySandbox(t)
 	dirs := newTestDirs(t)
 	target := filepath.Join(dirs.runDir, "hello.txt")
@@ -647,6 +669,7 @@ func TestReadonlyAllowsRunDirWrite(t *testing.T) {
 // write into TRANSCRIPTS (section 7.3's own write block: the Claude CLI
 // must still be able to write its own transcript).
 func TestReadonlyAllowsTranscriptWrite(t *testing.T) {
+	t.Parallel()
 	sb := newLoadedReadonlySandbox(t)
 	dirs := newTestDirs(t)
 	p := dirs.params()
@@ -666,6 +689,7 @@ func TestReadonlyAllowsTranscriptWrite(t *testing.T) {
 // TestReadonlyDeniesDataDir proves the readonly profile denies DATA_DIR
 // whole, the same as build.sb (section 7.3: "No profile reads zing.db").
 func TestReadonlyDeniesDataDir(t *testing.T) {
+	t.Parallel()
 	sb := newLoadedReadonlySandbox(t)
 	dirs := newTestDirs(t)
 	f := filepath.Join(dirs.dataDir, "zing.db")
@@ -682,6 +706,7 @@ func TestReadonlyDeniesDataDir(t *testing.T) {
 // allows ~/Library/Keychains (PKG9-PLAN.md D26, N2): the Claude CLI logs in
 // with CLAUDE_CODE_OAUTH_TOKEN instead.
 func TestReadonlyDeniesKeychainRead(t *testing.T) {
+	t.Parallel()
 	sb := newLoadedReadonlySandbox(t)
 	dirs := newTestDirs(t)
 	keychainFile := filepath.Join(dirs.home, "Library", "Keychains", "login.keychain-db")
@@ -701,6 +726,7 @@ func TestReadonlyDeniesKeychainRead(t *testing.T) {
 // ~/Library/Keychains (PKG9-PLAN.md D26, N2), mirroring
 // TestReadonlyDeniesKeychainRead for the build profile.
 func TestBuildDeniesKeychainRead(t *testing.T) {
+	t.Parallel()
 	sb := newLoadedSandbox(t, nil, 7420)
 	dirs := newTestDirs(t)
 	keychainFile := filepath.Join(dirs.home, "Library", "Keychains", "login.keychain-db")
@@ -720,6 +746,7 @@ func TestBuildDeniesKeychainRead(t *testing.T) {
 // deny on git-credential-* helpers (D26, N2): a fake helper script that
 // would otherwise print a password is refused before it can ever run.
 func TestBuildDeniesGitCredentialHelperExec(t *testing.T) {
+	t.Parallel()
 	sb := newLoadedSandbox(t, nil, 7420)
 	dirs := newTestDirs(t)
 
@@ -743,6 +770,7 @@ func TestBuildDeniesGitCredentialHelperExec(t *testing.T) {
 // 12), skipping when this machine has no route to the public internet
 // rather than failing the suite over an environment limitation.
 func TestAllowsTLSDownload(t *testing.T) {
+	t.Parallel()
 	sb := newLoadedSandbox(t, nil, 7420)
 	dirs := newTestDirs(t)
 
@@ -810,6 +838,7 @@ func (d testDirs) judgeParams(t *testing.T) Params {
 }
 
 func TestJudgeProfileLoads(t *testing.T) {
+	t.Parallel()
 	sb := newLoadedJudgeSandbox(t)
 	if !sb.Available() {
 		t.Fatalf("sandbox unavailable: %s", sb.Reason())
@@ -821,6 +850,7 @@ func TestJudgeProfileLoads(t *testing.T) {
 // allow sits after the global write deny"), while the same write under the
 // real ~/.codex stays denied, the same as build.sb.
 func TestJudgeAllowsCodexHomeWrite(t *testing.T) {
+	t.Parallel()
 	sb := newLoadedJudgeSandbox(t)
 	dirs := newTestDirs(t)
 	p := dirs.judgeParams(t)
@@ -847,6 +877,7 @@ func TestJudgeAllowsCodexHomeWrite(t *testing.T) {
 // \"/\"))", the ordering section 7.3 requires for it to win (seatbelt:
 // later rules win).
 func TestJudgeCodexHomeRuleAfterDeny(t *testing.T) {
+	t.Parallel()
 	profile, err := zing.Assets.ReadFile("sandbox/judge.sb")
 	if err != nil {
 		t.Fatalf("read sandbox/judge.sb: %v", err)
@@ -873,6 +904,7 @@ func TestJudgeCodexHomeRuleAfterDeny(t *testing.T) {
 // SCENARIOS_FILE allow reaches the one file it names and nothing else in
 // the same directory (section 4.7, D19).
 func TestJudgeAllowsScenariosFileRead(t *testing.T) {
+	t.Parallel()
 	sb := newLoadedJudgeSandbox(t)
 	dirs := newTestDirs(t)
 	p := dirs.judgeParams(t)
@@ -894,6 +926,7 @@ func TestJudgeAllowsScenariosFileRead(t *testing.T) {
 // DATA_DIR whole, the same as build.sb and readonly.sb (section 4.7, N6:
 // "No profile reads zing.db").
 func TestJudgeDeniesDatabase(t *testing.T) {
+	t.Parallel()
 	sb := newLoadedJudgeSandbox(t)
 	dirs := newTestDirs(t)
 	p := dirs.judgeParams(t)
@@ -911,6 +944,7 @@ func TestJudgeDeniesDatabase(t *testing.T) {
 // same way (section 4.7: "Nothing else in DATA_DIR is readable: ... not
 // zing.toml (the GitHub token)").
 func TestJudgeDeniesZingToml(t *testing.T) {
+	t.Parallel()
 	sb := newLoadedJudgeSandbox(t)
 	dirs := newTestDirs(t)
 	p := dirs.judgeParams(t)

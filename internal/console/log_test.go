@@ -51,6 +51,7 @@ func newTestHandlerWithOnWarn(t *testing.T, onWarn func()) (*console.Handler, *b
 }
 
 func TestLevelVarSetChangesLevelLive(t *testing.T) {
+	t.Parallel()
 	h, buf, lv := newTestHandler(t)
 	logger := slog.New(h)
 
@@ -73,6 +74,7 @@ func TestLevelVarSetChangesLevelLive(t *testing.T) {
 }
 
 func TestPerTicketDebugRaisesLevel_DirectAttribute(t *testing.T) {
+	t.Parallel()
 	h, buf, _ := newTestHandler(t) // levelVar stays at info
 	logger := slog.New(h)
 	const ticketID = int64(42)
@@ -96,6 +98,7 @@ func TestPerTicketDebugRaisesLevel_DirectAttribute(t *testing.T) {
 }
 
 func TestPerTicketDebugRaisesLevel_LoggerWith(t *testing.T) {
+	t.Parallel()
 	h, buf, _ := newTestHandler(t)
 	const ticketID = int64(7)
 	h.SetDebug(ticketID, true)
@@ -109,6 +112,7 @@ func TestPerTicketDebugRaisesLevel_LoggerWith(t *testing.T) {
 }
 
 func TestPerTicketDebugRaisesLevel_ChildHandler(t *testing.T) {
+	t.Parallel()
 	h, buf, _ := newTestHandler(t)
 	const ticketID = int64(99)
 	h.SetDebug(ticketID, true)
@@ -131,6 +135,7 @@ func TestPerTicketDebugRaisesLevel_ChildHandler(t *testing.T) {
 // blind the per-ticket override (design section 6.12: "resolves ticket_id
 // ... from attributes accumulated through WithAttrs and WithGroup").
 func TestPerTicketDebugThroughWithGroup(t *testing.T) {
+	t.Parallel()
 	h, buf, _ := newTestHandler(t)
 	const ticketID = int64(13)
 	h.SetDebug(ticketID, true)
@@ -144,6 +149,7 @@ func TestPerTicketDebugThroughWithGroup(t *testing.T) {
 }
 
 func TestRingKeepsLastNAndFiltersByRunID(t *testing.T) {
+	t.Parallel()
 	h, _, lv := newTestHandler(t)
 	lv.Set(slog.LevelDebug)
 	logger := slog.New(h)
@@ -173,6 +179,7 @@ func TestRingKeepsLastNAndFiltersByRunID(t *testing.T) {
 }
 
 func TestFencedAttrLogsLengthAndHashNotRaw(t *testing.T) {
+	t.Parallel()
 	h, buf, lv := newTestHandler(t)
 	lv.Set(slog.LevelDebug)
 	logger := slog.New(h)
@@ -196,6 +203,7 @@ func TestFencedAttrLogsLengthAndHashNotRaw(t *testing.T) {
 // from many goroutines at once; run under `go test -race` (design section
 // 6.12, 11: "concurrent toggles are safe").
 func TestConcurrentTogglesAreSafe(t *testing.T) {
+	t.Parallel()
 	h, _, lv := newTestHandler(t)
 	logger := slog.New(h)
 
@@ -245,6 +253,7 @@ func TestConcurrentTogglesAreSafe(t *testing.T) {
 // ticket could both read "off" and both write "on", losing one flip and
 // leaving the ticket on instead of off. Run under `go test -race`.
 func TestToggleDebug_ConcurrentTogglesLandOnDeterministicNetResult(t *testing.T) {
+	t.Parallel()
 	h, _, _ := newTestHandler(t)
 	const ticketID = int64(55)
 	const goroutines = 64 // even: every flip must net back to "off"
@@ -269,6 +278,7 @@ func TestToggleDebug_ConcurrentTogglesLandOnDeterministicNetResult(t *testing.T)
 // first, and honors the limit even though more qualifying entries exist in
 // the ring.
 func TestWarnings_OnlyWarnAndAboveNewestFirstCapped(t *testing.T) {
+	t.Parallel()
 	h, _, lv := newTestHandler(t)
 	lv.Set(slog.LevelDebug)
 	logger := slog.New(h)
@@ -307,6 +317,7 @@ func TestWarnings_OnlyWarnAndAboveNewestFirstCapped(t *testing.T) {
 // ring's own guarded slice (design section 6a: "never the guarded slice"):
 // mutating what Warnings returns must not corrupt a later call.
 func TestWarnings_ReturnsAFreshCopy(t *testing.T) {
+	t.Parallel()
 	h, _, _ := newTestHandler(t)
 	slog.New(h).Warn("the only warning")
 
@@ -329,6 +340,7 @@ func TestWarnings_ReturnsAFreshCopy(t *testing.T) {
 // otherwise fresh): mutating a snapshot's *TicketID must not be visible in a
 // later snapshot.
 func TestWarnings_ReturnsOwnIDPointersNotAliasingTheRing(t *testing.T) {
+	t.Parallel()
 	h, _, _ := newTestHandler(t)
 	slog.New(h).Warn("first warning", "ticket_id", int64(1))
 
@@ -349,6 +361,7 @@ func TestWarnings_ReturnsOwnIDPointersNotAliasingTheRing(t *testing.T) {
 // the same aliasing bug affects both snapshot methods, since both, before
 // the fix, appended the ring's own LogEntry value, id pointers included.
 func TestTail_ReturnsOwnIDPointersNotAliasingTheRing(t *testing.T) {
+	t.Parallel()
 	h, _, lv := newTestHandler(t)
 	lv.Set(slog.LevelDebug)
 	slog.New(h).Debug("a run-scoped line", "run_id", int64(5), "ticket_id", int64(1))
@@ -369,6 +382,7 @@ func TestTail_ReturnsOwnIDPointersNotAliasingTheRing(t *testing.T) {
 // it fires exactly once per WARN-or-above record and never for INFO or
 // DEBUG.
 func TestOnWarn_FiresOnWarnAndAboveNotBelow(t *testing.T) {
+	t.Parallel()
 	var mu sync.Mutex
 	var fired int
 	onWarn := func() {
@@ -400,6 +414,7 @@ func TestOnWarn_FiresOnWarnAndAboveNotBelow(t *testing.T) {
 // still have logged everywhere else. Handle must still return the wrapped
 // sink error, but only after the ring and onWarn have both run.
 func TestHandle_SinkErrorStillRingsAndFiresOnWarn(t *testing.T) {
+	t.Parallel()
 	var mu sync.Mutex
 	var fired int
 	onWarn := func() {
@@ -441,6 +456,7 @@ func TestHandle_SinkErrorStillRingsAndFiresOnWarn(t *testing.T) {
 // onWarn, even though the text sink omits it because it never clears the
 // level-or-debug gate.
 func TestHandle_WarnAlwaysRingsAndFiresOnWarnAtAnyLevelVar(t *testing.T) {
+	t.Parallel()
 	var mu sync.Mutex
 	var fired int
 	onWarn := func() {

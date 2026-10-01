@@ -29,6 +29,7 @@ func renderToString(t *testing.T, md string) string {
 }
 
 func TestRenderMarkdown(t *testing.T) {
+	t.Parallel()
 	got := renderToString(t, "hello **world**")
 	if !strings.Contains(got, "<strong>world</strong>") {
 		t.Errorf("Render(%q) = %q, want it to contain <strong>world</strong>", "hello **world**", got)
@@ -39,6 +40,7 @@ func TestRenderMarkdown(t *testing.T) {
 }
 
 func TestRenderReturnsTemplComponent(t *testing.T) {
+	t.Parallel()
 	// console.Render's signature already guarantees a templ.Component at
 	// compile time; what this test proves is that the value is a real,
 	// usable one, not a nil interface wrapping nothing.
@@ -63,6 +65,7 @@ func TestRenderReturnsTemplComponent(t *testing.T) {
 // directly): the design requires the classic <script src="/static/
 // mermaid.js"> in shell.templ's head to be the only mermaid load.
 func TestRenderMermaidFenceBecomesClientSideBlock(t *testing.T) {
+	t.Parallel()
 	md := "```mermaid\ngraph TD\nA-->B\n```"
 	got := renderToString(t, md)
 
@@ -84,6 +87,7 @@ func TestRenderMermaidFenceBecomesClientSideBlock(t *testing.T) {
 // rather than passing it through, so this also pins that specific, safe
 // behavior against a future accidental html.WithUnsafe(( )) regression.
 func TestRenderEscapesRawHTML(t *testing.T) {
+	t.Parallel()
 	got := renderToString(t, "before\n\n<script>alert(1)</script>\n\nafter")
 
 	if strings.Contains(got, "<script>alert(1)</script>") {
@@ -98,6 +102,7 @@ func TestRenderEscapesRawHTML(t *testing.T) {
 // the output as a live href (design section 9: "a dangerous link is
 // neutralized").
 func TestRenderNeutralizesDangerousLink(t *testing.T) {
+	t.Parallel()
 	got := renderToString(t, "[click me](javascript:alert(1))")
 
 	if strings.Contains(got, "javascript:") {
@@ -118,6 +123,7 @@ func TestRenderNeutralizesDangerousLink(t *testing.T) {
 // plantuml-error placeholder (the shape NewPlantUMLRenderer emits on a
 // failed exec), only the escaped source as plain code.
 func TestRenderPlantUMLNeverShellsOut(t *testing.T) {
+	t.Parallel()
 	md := "```plantuml\n@startuml\nA -> B\n@enduml\n```"
 	got := renderToString(t, md)
 

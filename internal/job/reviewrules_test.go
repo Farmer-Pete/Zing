@@ -37,6 +37,7 @@ const (
 // -----------------------------------------------------------------------
 
 func TestParseLocation(t *testing.T) {
+	t.Parallel()
 	cases := []struct {
 		name     string
 		loc      string
@@ -58,6 +59,7 @@ func TestParseLocation(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
 			path, line, ok := ParseLocation(tc.loc)
 			if ok != tc.wantOK {
 				t.Fatalf("ParseLocation(%q) ok = %v, want %v", tc.loc, ok, tc.wantOK)
@@ -88,6 +90,7 @@ func reviewDiffIndex() orchestrator.DiffIndex {
 // TestFilterFindings drives 6.3's own worked-example table, plus the
 // fidelity-only plan_ref rule.
 func TestFilterFindings(t *testing.T) {
+	t.Parallel()
 	idx := reviewDiffIndex()
 
 	cases := []struct {
@@ -120,6 +123,7 @@ func TestFilterFindings(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
 			if got := survived[tc.f]; got != tc.want {
 				t.Errorf("FilterFindings: survived = %v, want %v for %+v", got, tc.want, tc.f)
 			}
@@ -141,6 +145,7 @@ var reviewLensOrder = []response.Lens{
 // security both report a.go:12 (merged, highest severity, lens-ordered
 // text); tests alone reports a.go:44 (merged count 1 overall).
 func TestDedupFindings(t *testing.T) {
+	t.Parallel()
 	findings := []response.Finding{
 		{Lens: response.LensSecurity, Severity: response.SeverityMajor, Location: aGoLine12, Text: "unchecked input", Fix: "validate input"},
 		{Lens: response.LensCorrectness, Severity: response.SeverityMinor, Location: aGoLine12, Text: "nil map write", Fix: "add nil check"},
@@ -171,6 +176,7 @@ func TestDedupFindings(t *testing.T) {
 // TestDedupFindingsPlanRef proves PlanRef carries the fidelity lens's own
 // value, and stays empty when fidelity did not report that location.
 func TestDedupFindingsPlanRef(t *testing.T) {
+	t.Parallel()
 	findings := []response.Finding{
 		{Lens: response.LensFidelity, Severity: response.SeverityMajor, Location: aGoLine1, PlanRef: "plan/delivery/tasks/task[1]", Text: "drifted", Fix: "match the plan"},
 		{Lens: response.LensCorrectness, Severity: response.SeverityMinor, Location: aGoLine1, Text: "also here", Fix: "fix it"},
@@ -200,6 +206,7 @@ func severityRow(id string, sev response.Severity) response.FindingArtifact {
 // TestSplitByFloor drives 6.3's floor table across the three floors the
 // plan names: minor (the default), nit, and blocker.
 func TestSplitByFloor(t *testing.T) {
+	t.Parallel()
 	rows := []response.FindingArtifact{
 		severityRow(findingID1, response.SeverityNit),
 		severityRow(findingID2, response.SeverityMinor),
@@ -228,6 +235,7 @@ func TestSplitByFloor(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
 			atOrBelow, above := splitByFloor(rows, tc.floor)
 
 			if gotIDs := idsOf(atOrBelow); !equalStrings(gotIDs, tc.wantAtOrBelow) {
@@ -271,7 +279,9 @@ func equalStrings(a, b []string) bool {
 // because its finding was dropped, quality is out because b.go did not
 // change).
 func TestSelectLenses(t *testing.T) {
+	t.Parallel()
 	t.Run("round 1 is all seven, in machine.toml order", func(t *testing.T) {
+		t.Parallel()
 		got := selectLenses(1, reviewLensOrder, nil, nil)
 		if diff := cmp.Diff(reviewLensOrder, got); diff != "" {
 			t.Errorf("selectLenses(1, ...) mismatch (-want +got):\n%s", diff)
@@ -279,6 +289,7 @@ func TestSelectLenses(t *testing.T) {
 	})
 
 	t.Run("round 2: 6.7's worked example", func(t *testing.T) {
+		t.Parallel()
 		accept := response.FindingAccept
 		drop := response.FindingDrop
 		prev := []response.FindingArtifact{
@@ -313,6 +324,7 @@ func TestSelectLenses(t *testing.T) {
 // non-accept row is skipped, and that ordering is numeric id order (r1f10
 // sorts after r1f2, not before it as a lexical string sort would place it).
 func TestRenderFixFindings(t *testing.T) {
+	t.Parallel()
 	accept := response.FindingAccept
 	drop := response.FindingDrop
 
@@ -337,6 +349,7 @@ func TestRenderFixFindings(t *testing.T) {
 // TestRenderFixFindingsAllDropped proves an empty result when nothing was
 // accepted.
 func TestRenderFixFindingsAllDropped(t *testing.T) {
+	t.Parallel()
 	drop := response.FindingDrop
 	rows := []response.FindingArtifact{
 		{ID: findingID1, Severity: response.SeverityNit, Lens: response.LensTests, Location: aGoLine1, Text: "t", Fix: "f", Decision: &drop},
@@ -354,6 +367,7 @@ func TestRenderFixFindingsAllDropped(t *testing.T) {
 // with the right singular or plural noun (design section 6.4's review
 // question, which uses it for finding/findings).
 func TestCountNoun(t *testing.T) {
+	t.Parallel()
 	many := string(FixKindFindings)
 	cases := []struct {
 		n    int

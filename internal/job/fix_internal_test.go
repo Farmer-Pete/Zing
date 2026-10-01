@@ -52,6 +52,7 @@ func seedFixTestTicket(t *testing.T, s *store.Store) store.Ticket {
 // validation (design section 5.2): a kind outside FixKind.Values returns
 // the fixed error, before anything is written.
 func TestFixRequestMessageRejectsUnknownKind(t *testing.T) {
+	t.Parallel()
 	_, err := fixRequestMessage(store.Ticket{ID: 1}, FixKind("bogus"), "x", 0)
 	if err == nil || err.Error() != "job: unknown fix kind bogus" {
 		t.Fatalf("fixRequestMessage error = %v, want %q", err, "job: unknown fix kind bogus")
@@ -62,6 +63,7 @@ func TestFixRequestMessageRejectsUnknownKind(t *testing.T) {
 // validation (design section 5.2): text that is empty after
 // strings.TrimSpace returns the fixed error.
 func TestFixRequestMessageRejectsEmptyText(t *testing.T) {
+	t.Parallel()
 	_, err := fixRequestMessage(store.Ticket{ID: 1}, FixKindFindings, "   \n\t ", 0)
 	if err == nil || err.Error() != "job: fix input is empty" {
 		t.Fatalf("fixRequestMessage error = %v, want %q", err, "job: fix input is empty")
@@ -73,6 +75,7 @@ func TestFixRequestMessageRejectsEmptyText(t *testing.T) {
 // ..." marker exists is not open; a second, later request with no landed
 // marker of its own is.
 func TestOpenFixRequestSkipsLanded(t *testing.T) {
+	t.Parallel()
 	s := newFixTestStore(t)
 	ticket := seedFixTestTicket(t, s)
 	d := Deps{Store: s}
@@ -128,6 +131,7 @@ func TestOpenFixRequestSkipsLanded(t *testing.T) {
 // is open, so two unlanded requests on the same ticket is a bug, reported
 // rather than silently resolved.
 func TestOpenFixRequestTwoOpenIsError(t *testing.T) {
+	t.Parallel()
 	s := newFixTestStore(t)
 	ticket := seedFixTestTicket(t, s)
 	d := Deps{Store: s}

@@ -577,12 +577,14 @@ func pbRunPrelude(t *testing.T, s *store.Store, deps Deps, ticketID int64) (stor
 // 5.4 change 3): in "building", the plan's lowest unlanded task; in
 // "reviewing", the open fix request's own unit; with neither, ok is false.
 func TestUnitInFlightByState(t *testing.T) {
+	t.Parallel()
 	plan := response.Plan{Delivery: response.Delivery{Tasks: []response.Task{
 		{N: 1, Test: "t1", Text: "do a"},
 		{N: 2, Test: "t2", Text: "do b"},
 	}}}
 
 	t.Run("building", func(t *testing.T) {
+		t.Parallel()
 		sha := "a"
 		reports := []store.BuildReportRow{{Report: response.BuildReport{TaskN: 1, CommitSHA: &sha}}}
 		ticket := store.Ticket{ID: 1, State: stateBuilding}
@@ -599,6 +601,7 @@ func TestUnitInFlightByState(t *testing.T) {
 	})
 
 	t.Run("reviewing", func(t *testing.T) {
+		t.Parallel()
 		s := newFixTestStore(t)
 		ticket := seedFixTestTicket(t, s)
 		ticket.State = stateReviewing
@@ -629,6 +632,7 @@ func TestUnitInFlightByState(t *testing.T) {
 	})
 
 	t.Run("none", func(t *testing.T) {
+		t.Parallel()
 		s := newFixTestStore(t)
 		ticket := seedFixTestTicket(t, s)
 		ticket.State = stateReviewing
@@ -652,6 +656,7 @@ func TestUnitInFlightByState(t *testing.T) {
 // rounds and an open fix request, postBuildPrelude runs the fix driver's own
 // first turn.
 func TestPreludeRunsFixDriver(t *testing.T) {
+	t.Parallel()
 	s, ticketID := pbTicketInReviewing(t)
 	pbOpenFixRequest(t, s, ticketID)
 
@@ -680,6 +685,7 @@ func TestPreludeRunsFixDriver(t *testing.T) {
 // (postBuildRoundOwnedByOpenFix) confirming the round belongs to the
 // currently open fix request.
 func TestPreludeRoutesFixAnswerRound(t *testing.T) {
+	t.Parallel()
 	s, ticketID := pbTicketInReviewing(t)
 	pbOpenFixRequest(t, s, ticketID)
 
@@ -721,6 +727,7 @@ func TestPreludeRoutesFixAnswerRound(t *testing.T) {
 // against the fix's own build run -- belongs to the currently open fix
 // request (SessionAfter(req.AfterRunID)).
 func TestPreludeRoutesPerimeterRound(t *testing.T) {
+	t.Parallel()
 	s, ticketID := pbTicketInReviewing(t)
 	pbOpenFixRequest(t, s, ticketID)
 
@@ -842,6 +849,7 @@ func pbAnswerEscalation(t *testing.T, s *store.Store, ticketID, questionID int64
 // escalates origin fix with a run; the owner's retry restarts the fix with a
 // fresh session (runFixFirst), notes and error fenced, the round resolved.
 func TestPreludeFixRetryRestartsFix(t *testing.T) {
+	t.Parallel()
 	s, ticketID := pbTicketInReviewing(t)
 	pbOpenFixRequest(t, s, ticketID)
 
@@ -920,6 +928,7 @@ func assertFencedPB(t *testing.T, prompt, label, text string) {
 // failure) retries by writing the "retry requested" marker, no run
 // attempted, the round resolved.
 func TestPreludeFixRetryWithoutRunWritesMarker(t *testing.T) {
+	t.Parallel()
 	s, ticketID := pbTicketInReviewing(t)
 	pbOpenFixRequest(t, s, ticketID)
 
@@ -948,6 +957,7 @@ func TestPreludeFixRetryWithoutRunWritesMarker(t *testing.T) {
 // with the fix unit -- a fresh fix session, notes and the preserved round's
 // own answers.
 func TestPreludeCapResumesRetryFix(t *testing.T) {
+	t.Parallel()
 	s, ticketID := pbTicketInReviewing(t)
 	pbOpenFixRequest(t, s, ticketID)
 
@@ -1026,6 +1036,7 @@ func TestPreludeCapResumesRetryFix(t *testing.T) {
 // abandon resolves every open question and transitions straight to
 // abandoned, in every post-build state alike.
 func TestPreludeAbandon(t *testing.T) {
+	t.Parallel()
 	s := newFixTestStore(t)
 	ticket := pbSeedTicketInState(t, s, stateReviewing)
 
@@ -1055,6 +1066,7 @@ func TestPreludeAbandon(t *testing.T) {
 // choice b, or a reply with no option, re-escalates replan_unsupported with
 // the origin unchanged.
 func TestPreludeBackToPlanningReplanUnsupported(t *testing.T) {
+	t.Parallel()
 	s := newFixTestStore(t)
 	ticket := pbSeedTicketInState(t, s, stateReviewing)
 

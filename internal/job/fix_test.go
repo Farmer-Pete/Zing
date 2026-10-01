@@ -102,6 +102,7 @@ func writeFixRequestMarker(t *testing.T, s *store.Store, ticketID int64, kind jo
 // the landed build_report's Title is the kind's own commit subject with
 // TaskN 0.
 func TestFixKindThreadsSubject(t *testing.T) {
+	t.Parallel()
 	for _, tc := range []struct {
 		kind    job.FixKind
 		subject string
@@ -112,6 +113,7 @@ func TestFixKindThreadsSubject(t *testing.T) {
 		{job.FixKindCILog, "Fix the failing check", "ci_log"},
 	} {
 		t.Run(string(tc.kind), func(t *testing.T) {
+			t.Parallel()
 			s, _, ticketID := buildTicketInBuilding(t)
 			mid := writeFixRequestMarker(t, s, ticketID, tc.kind, "do the thing", 0)
 			ticket := getTicket(t, s, ticketID)
@@ -153,6 +155,7 @@ func TestFixKindThreadsSubject(t *testing.T) {
 // carries a nil task_n (design section 8's own storage rule, never 0, even
 // though its build_report's own TaskN field is 0).
 func TestDriveFixRunsFirstTurn(t *testing.T) {
+	t.Parallel()
 	s, _, ticketID := buildTicketInBuilding(t)
 	mid := writeFixRequestMarker(t, s, ticketID, job.FixKindCILog, testFixCILogText, 0)
 	ticket := getTicket(t, s, ticketID)
@@ -200,6 +203,7 @@ func TestDriveFixRunsFirstTurn(t *testing.T) {
 // owner's answer text in the prompt -- unlike the old AdvanceFix, which
 // left this resume path out of its own scope entirely.
 func TestDriveFixResumesAfterAnswer(t *testing.T) {
+	t.Parallel()
 	s, _, ticketID := buildTicketInBuilding(t)
 	mid := writeFixRequestMarker(t, s, ticketID, job.FixKindCILog, testFixCILogText, 0)
 	ticket := getTicket(t, s, ticketID)
@@ -245,6 +249,7 @@ func TestDriveFixResumesAfterAnswer(t *testing.T) {
 // pending marker and the next DriveFix tick resumes it, still labeled
 // "fix" and still carrying a nil task_n.
 func TestDriveFixResumesClaimErrors(t *testing.T) {
+	t.Parallel()
 	s, _, ticketID := buildTicketInBuilding(t)
 	mid := writeFixRequestMarker(t, s, ticketID, job.FixKindCILog, testFixCILogText, 0)
 	ticket := getTicket(t, s, ticketID)
@@ -311,6 +316,7 @@ func TestDriveFixResumesClaimErrors(t *testing.T) {
 // the next DriveFix tick resumes the same session with the invalid reason
 // in the prompt.
 func TestDriveFixResumesInvalidOutput(t *testing.T) {
+	t.Parallel()
 	s, _, ticketID := buildTicketInBuilding(t)
 	mid := writeFixRequestMarker(t, s, ticketID, job.FixKindCILog, testFixCILogText, 0)
 	ticket := getTicket(t, s, ticketID)
@@ -353,6 +359,7 @@ func TestDriveFixResumesInvalidOutput(t *testing.T) {
 // stays open, ready for the next DriveFix tick to resume with the raw
 // "interrupted" input.
 func TestDriveFixResumesInterrupted(t *testing.T) {
+	t.Parallel()
 	s, _, ticketID := buildTicketInBuilding(t)
 	mid := writeFixRequestMarker(t, s, ticketID, job.FixKindCILog, testFixCILogText, 0)
 	ticket := getTicket(t, s, ticketID)
@@ -423,6 +430,7 @@ func TestDriveFixResumesInterrupted(t *testing.T) {
 // "fix landed <req.MessageID> sha <sha>" -- the marker openFixRequest
 // reads to know this request's own unit has landed.
 func TestDriveFixLandWritesLandedMarker(t *testing.T) {
+	t.Parallel()
 	s, _, ticketID := buildTicketInBuilding(t)
 	mid := writeFixRequestMarker(t, s, ticketID, job.FixKindFailure, "scenario 2 failed: timeout", 0)
 	ticket := getTicket(t, s, ticketID)
@@ -481,6 +489,7 @@ func TestDriveFixLandWritesLandedMarker(t *testing.T) {
 // first turn and lands under its own message id, proving the two units
 // are never confused.
 func TestSecondFixAdvancesAfterFirstLanded(t *testing.T) {
+	t.Parallel()
 	s, _, ticketID := buildTicketInBuilding(t)
 	mid1 := writeFixRequestMarker(t, s, ticketID, job.FixKindCILog, testFixCILogText, 0)
 	ticket := getTicket(t, s, ticketID)
@@ -573,6 +582,7 @@ func withTouchCmd(deps job.Deps, ticket store.Ticket, paths ...string) job.Deps 
 // test's mirror for a task unit: the same call sites still escalate origin
 // "build" now that they derive it from the unit instead of a constant.
 func TestFixEscalationOriginFix(t *testing.T) {
+	t.Parallel()
 	assertFixOrigin := func(t *testing.T, commit store.HandlerCommit) {
 		t.Helper()
 		if commit.Escalation == nil {
@@ -584,6 +594,7 @@ func TestFixEscalationOriginFix(t *testing.T) {
 	}
 
 	t.Run("CHECK command failure", func(t *testing.T) {
+		t.Parallel()
 		s, _, ticketID := buildTicketInBuilding(t)
 		mid := writeFixRequestMarker(t, s, ticketID, job.FixKindCILog, testFixCILogText, 0)
 		ticket := getTicket(t, s, ticketID)
@@ -613,6 +624,7 @@ func TestFixEscalationOriginFix(t *testing.T) {
 	})
 
 	t.Run("LAND signing failure", func(t *testing.T) {
+		t.Parallel()
 		s, _, ticketID := buildTicketInBuilding(t)
 		mid := writeFixRequestMarker(t, s, ticketID, job.FixKindFailure, "scenario 2 failed: timeout", 0)
 		ticket := getTicket(t, s, ticketID)
@@ -647,6 +659,7 @@ func TestFixEscalationOriginFix(t *testing.T) {
 	})
 
 	t.Run("DESCRIBE unclaimed extra", func(t *testing.T) {
+		t.Parallel()
 		s, _, ticketID := buildTicketInBuilding(t)
 		mid := writeFixRequestMarker(t, s, ticketID, job.FixKindCILog, testFixCILogText, 0)
 		ticket := getTicket(t, s, ticketID)
@@ -687,6 +700,7 @@ func TestFixEscalationOriginFix(t *testing.T) {
 	})
 
 	t.Run("RESOLVE revert failure", func(t *testing.T) {
+		t.Parallel()
 		s, _, ticketID := buildTicketInBuilding(t)
 		mid := writeFixRequestMarker(t, s, ticketID, job.FixKindCILog, testFixCILogText, 0)
 		ticket := getTicket(t, s, ticketID)
@@ -749,6 +763,7 @@ func TestFixEscalationOriginFix(t *testing.T) {
 	})
 
 	t.Run("build run error outcome", func(t *testing.T) {
+		t.Parallel()
 		s, _, ticketID := buildTicketInBuilding(t)
 		mid := writeFixRequestMarker(t, s, ticketID, job.FixKindCILog, testFixCILogText, 0)
 		ticket := getTicket(t, s, ticketID)
@@ -765,6 +780,7 @@ func TestFixEscalationOriginFix(t *testing.T) {
 	})
 
 	t.Run("resume exec failure", func(t *testing.T) {
+		t.Parallel()
 		s, _, ticketID := buildTicketInBuilding(t)
 		mid := writeFixRequestMarker(t, s, ticketID, job.FixKindCILog, testFixCILogText, 0)
 		ticket := getTicket(t, s, ticketID)
@@ -928,6 +944,7 @@ func assertFixAdoptionFails(t *testing.T, s *store.Store, ticketID int64, deps j
 // commit's own sha, writing "fix landed <id> sha <sha>", and never calling
 // CommitTask again.
 func TestDriveFixAdoptsVerifiedCommit(t *testing.T) {
+	t.Parallel()
 	s, ticketID, _, wt, req := prepareUnrecordedFixCommit(t, []string{helloTxt}, 0, nil, "", map[string]string{helloTxt: helloWorldContent}, true)
 
 	sha, err := orchestratorHeadSHA(t, wt.Dir())
@@ -975,7 +992,9 @@ func TestDriveFixAdoptsVerifiedCommit(t *testing.T) {
 // (design section 5.4 change 4): one case per row, each escalating with
 // that row's own Tried name.
 func TestDriveFixAdoptionChecks(t *testing.T) {
+	t.Parallel()
 	t.Run("commands failed", func(t *testing.T) {
+		t.Parallel()
 		s, ticketID, deps, _, req := prepareUnrecordedFixCommit(t, []string{helloTxt}, 0, nil, "", map[string]string{helloTxt: helloWorldContent}, true)
 		ticket := getTicket(t, s, ticketID)
 		badProj := deps.Projects[ticket.ProjectID]
@@ -985,6 +1004,7 @@ func TestDriveFixAdoptionChecks(t *testing.T) {
 	})
 
 	t.Run("tree not clean", func(t *testing.T) {
+		t.Parallel()
 		s, ticketID, deps, wt, req := prepareUnrecordedFixCommit(t, []string{helloTxt}, 0, nil, "", map[string]string{helloTxt: helloWorldContent}, true)
 		if writeErr := os.WriteFile(filepath.Join(wt.Dir(), "untracked.txt"), []byte("x"), 0o600); writeErr != nil {
 			t.Fatalf("write untracked file: %v", writeErr)
@@ -993,16 +1013,19 @@ func TestDriveFixAdoptionChecks(t *testing.T) {
 	})
 
 	t.Run("unsigned", func(t *testing.T) {
+		t.Parallel()
 		s, ticketID, deps, _, req := prepareUnrecordedFixCommit(t, []string{helloTxt}, 0, nil, "", map[string]string{helloTxt: helloWorldContent}, false)
 		assertFixAdoptionFails(t, s, ticketID, deps, req, "unsigned")
 	})
 
 	t.Run("subject mismatch", func(t *testing.T) {
+		t.Parallel()
 		s, ticketID, deps, _, req := prepareUnrecordedFixCommit(t, []string{helloTxt}, 0, nil, "a subject the report never gave", map[string]string{helloTxt: helloWorldContent}, true)
 		assertFixAdoptionFails(t, s, ticketID, deps, req, "subject mismatch")
 	})
 
 	t.Run("claims failed", func(t *testing.T) {
+		t.Parallel()
 		// The run claims lint_exit 1; the fixture project's real lint
 		// command ("true") always exits 0, so the adoption re-run
 		// disagrees with the stored claim.
@@ -1011,6 +1034,7 @@ func TestDriveFixAdoptionChecks(t *testing.T) {
 	})
 
 	t.Run("undeclared path", func(t *testing.T) {
+		t.Parallel()
 		extras := []response.ExtraClaim{{Path: extraTxt, Reason: "needed it"}}
 		files := map[string]string{helloTxt: helloWorldContent, extraTxt: "extra\n"}
 		s, ticketID, deps, _, req := prepareUnrecordedFixCommit(t, []string{helloTxt, extraTxt}, 0, extras, "", files, true)
@@ -1024,6 +1048,7 @@ func TestDriveFixAdoptionChecks(t *testing.T) {
 // environment/"the ticket branch holds commits Zing did not record",
 // origin fix.
 func TestDriveFixEscalatesForeignCommits(t *testing.T) {
+	t.Parallel()
 	s, _, ticketID := buildTicketInBuilding(t)
 	mid := writeFixRequestMarker(t, s, ticketID, job.FixKindCILog, testFixCILogText, 0)
 	req := job.FixRequest{MessageID: mid, Kind: job.FixKindCILog, Text: testFixCILogText, AfterRunID: 0}
@@ -1063,6 +1088,7 @@ func TestDriveFixEscalatesForeignCommits(t *testing.T) {
 // recorded", origin fix, instead of running CHECK or LAND against a branch
 // it can no longer trust.
 func TestDriveFixEscalatesMissingRecorded(t *testing.T) {
+	t.Parallel()
 	s, _, ticketID := buildTicketInBuilding(t)
 	mid := writeFixRequestMarker(t, s, ticketID, job.FixKindCILog, testFixCILogText, 0)
 	req := job.FixRequest{MessageID: mid, Kind: job.FixKindCILog, Text: testFixCILogText, AfterRunID: 0}

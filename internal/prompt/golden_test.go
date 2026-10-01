@@ -272,6 +272,7 @@ func goldenCases() []goldenCase {
 // case's assembled bytes must equal its committed golden exactly. Every
 // case uses the fixed-nonce testFence, so the fenced bytes are pinned too.
 func TestAssemble_MatchesGolden(t *testing.T) {
+	t.Parallel()
 	cases := goldenCases()
 
 	if *update {
@@ -288,6 +289,7 @@ func TestAssemble_MatchesGolden(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
 			in := tc.in(t)
 			in.Fence = testFence
 			got := Assemble(in)

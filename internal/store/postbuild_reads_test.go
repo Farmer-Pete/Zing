@@ -84,6 +84,7 @@ func reserveAndCommitArtifacts(t *testing.T, s *Store, ticketID int64, artifactT
 // TestFindingsOrder proves Findings returns every finding artifact of the
 // ticket, decoded, ORDER BY artifacts.id (design section 4.2).
 func TestFindingsOrder(t *testing.T) {
+	t.Parallel()
 	s := newTestStore(t)
 	ctx := t.Context()
 	_, ticketID := seedQueuedTicket(t, s, "1")
@@ -114,6 +115,7 @@ func TestFindingsOrder(t *testing.T) {
 // TestVerdictsOrder proves Verdicts returns every judge verdict artifact of
 // the ticket, decoded, ORDER BY artifacts.id (design section 4.2).
 func TestVerdictsOrder(t *testing.T) {
+	t.Parallel()
 	s := newTestStore(t)
 	ctx := t.Context()
 	_, ticketID := seedQueuedTicket(t, s, "1")
@@ -145,6 +147,7 @@ func TestVerdictsOrder(t *testing.T) {
 // artifact of the ticket, decoded, ORDER BY artifacts.id (design section
 // 4.2).
 func TestRespondBatchesOrder(t *testing.T) {
+	t.Parallel()
 	s := newTestStore(t)
 	ctx := t.Context()
 	_, ticketID := seedQueuedTicket(t, s, "1")
@@ -176,6 +179,7 @@ func TestRespondBatchesOrder(t *testing.T) {
 // (design section 4.2): not scoped to a caller-known ticket, unlike every
 // other run read in this package.
 func TestRunByID(t *testing.T) {
+	t.Parallel()
 	s := newTestStore(t)
 	ctx := t.Context()
 	_, ticketID := seedQueuedTicket(t, s, "1")
@@ -213,6 +217,7 @@ func TestRunByID(t *testing.T) {
 // differently-worded marker is not, and two matches come back in id order
 // (oldest first).
 func TestMarkersWithPrefix(t *testing.T) {
+	t.Parallel()
 	s := newTestStore(t)
 	ctx := t.Context()
 	_, ticketID := seedQueuedTicket(t, s, "1")
@@ -248,10 +253,16 @@ func TestMarkersWithPrefix(t *testing.T) {
 
 // TestMaxRunID proves MaxRunID returns the ticket's highest run id, or 0
 // when it has none yet (design D18, section 5.1).
+// TestMaxRunID's two subtests each open their own store rather than share
+// one across t.Parallel() siblings: both seed a ticket under the same
+// fixed testProject name, and EnsureProject's own check-then-insert is not
+// safe for two goroutines racing on the same project row.
 func TestMaxRunID(t *testing.T) {
-	s := newTestStore(t)
+	t.Parallel()
 
 	t.Run("no runs yet", func(t *testing.T) {
+		t.Parallel()
+		s := newTestStore(t)
 		ctx := t.Context()
 		_, ticketID := seedQueuedTicket(t, s, "1")
 		got, err := s.MaxRunID(ctx, ticketID)
@@ -264,6 +275,8 @@ func TestMaxRunID(t *testing.T) {
 	})
 
 	t.Run("the highest run id across sessions", func(t *testing.T) {
+		t.Parallel()
+		s := newTestStore(t)
 		ctx := t.Context()
 		_, ticketID := seedQueuedTicket(t, s, "2")
 		setTicketState(t, s, ticketID, testStatePlanning)
@@ -297,10 +310,16 @@ func TestMaxRunID(t *testing.T) {
 // there is exactly one, the newest of several after the watermark, a
 // session started before the watermark ignored entirely, and the three
 // SessionState classifications.
+// TestSessionAfter's four subtests each open their own store rather than
+// share one across t.Parallel() siblings: each seeds a ticket under the
+// same fixed testProject name, and EnsureProject's own check-then-insert is
+// not safe for two goroutines racing on the same project row.
 func TestSessionAfter(t *testing.T) {
-	s := newTestStore(t)
+	t.Parallel()
 
 	t.Run("none for a ticket with no session", func(t *testing.T) {
+		t.Parallel()
+		s := newTestStore(t)
 		ctx := t.Context()
 		_, ticketID := seedQueuedTicket(t, s, "1")
 		_, _, _, ok, err := s.SessionAfter(ctx, ticketID, testJobBuild, 0, 3)
@@ -313,6 +332,8 @@ func TestSessionAfter(t *testing.T) {
 	})
 
 	t.Run("one session after the watermark", func(t *testing.T) {
+		t.Parallel()
+		s := newTestStore(t)
 		ctx := t.Context()
 		_, ticketID := seedQueuedTicket(t, s, "2")
 		setTicketState(t, s, ticketID, testStatePlanning)
@@ -347,6 +368,8 @@ func TestSessionAfter(t *testing.T) {
 	})
 
 	t.Run("the newest of several sessions after the watermark; an earlier one is ignored", func(t *testing.T) {
+		t.Parallel()
+		s := newTestStore(t)
 		ctx := t.Context()
 		_, ticketID := seedQueuedTicket(t, s, "3")
 		setTicketState(t, s, ticketID, testStatePlanning)
@@ -387,6 +410,8 @@ func TestSessionAfter(t *testing.T) {
 	})
 
 	t.Run("open and exhausted states", func(t *testing.T) {
+		t.Parallel()
+		s := newTestStore(t)
 		ctx := t.Context()
 		_, ticketID := seedQueuedTicket(t, s, "4")
 		setTicketState(t, s, ticketID, testStatePlanning)
@@ -440,6 +465,7 @@ func TestSessionAfter(t *testing.T) {
 // turn order (design section 5.3): the identity a fix unit's build reports
 // are scoped against.
 func TestSessionRunIDs(t *testing.T) {
+	t.Parallel()
 	s := newTestStore(t)
 	ctx := t.Context()
 	_, ticketID := seedQueuedTicket(t, s, "1")

@@ -21,6 +21,7 @@ func reserveInput(t *testing.T, s *Store, ticketID int64) (owner string, expires
 // first reservation gets turn 0, and a second reservation against the same
 // session id gets turn 1.
 func TestReserve_TwoReservesOnOneSessionYieldSequentialTurns(t *testing.T) {
+	t.Parallel()
 	s := newTestStore(t)
 	ctx := t.Context()
 	_, ticketID := seedQueuedTicket(t, s, "1")
@@ -56,6 +57,7 @@ func TestReserve_TwoReservesOnOneSessionYieldSequentialTurns(t *testing.T) {
 // live claim_owner returns ErrClaimLost and leaves no session or run row
 // behind, even though the ticket really is claimed (just not by this owner).
 func TestReserve_WrongOwnerReturnsErrClaimLostAndWritesNothing(t *testing.T) {
+	t.Parallel()
 	s := newTestStore(t)
 	ctx := t.Context()
 	_, ticketID := seedQueuedTicket(t, s, "1")
@@ -81,6 +83,7 @@ func TestReserve_WrongOwnerReturnsErrClaimLostAndWritesNothing(t *testing.T) {
 // matches the ticket's live claim_expires_at (for example, a stale lease
 // after a renewal) also returns ErrClaimLost.
 func TestReserve_WrongExpiryReturnsErrClaimLost(t *testing.T) {
+	t.Parallel()
 	s := newTestStore(t)
 	ctx := t.Context()
 	_, ticketID := seedQueuedTicket(t, s, "1")
@@ -104,6 +107,7 @@ func TestReserve_WrongExpiryReturnsErrClaimLost(t *testing.T) {
 // row whose external_id is NULL, leaving SessionUpsert's own commit to fill
 // it in once the runtime call returns one.
 func TestReserve_NilSessionIDCreatesSessionWithNullExternalID(t *testing.T) {
+	t.Parallel()
 	s := newTestStore(t)
 	ctx := t.Context()
 	_, ticketID := seedQueuedTicket(t, s, "1")
@@ -136,6 +140,7 @@ func TestReserve_NilSessionIDCreatesSessionWithNullExternalID(t *testing.T) {
 // makes): a su.ID that names a real session, but on a different ticket,
 // errors rather than reserving a run under it.
 func TestReserve_SessionIDForAnotherTicketErrors(t *testing.T) {
+	t.Parallel()
 	s := newTestStore(t)
 	ctx := t.Context()
 	_, ticketA := seedQueuedTicket(t, s, "1")
@@ -163,6 +168,7 @@ func TestReserve_SessionIDForAnotherTicketErrors(t *testing.T) {
 // exit_code, and agent_seconds all NULL until something terminalizes it, with
 // only model set at reserve time.
 func TestReserve_InsertsRunWithNullOutcomeExitCodeAndSetModel(t *testing.T) {
+	t.Parallel()
 	s := newTestStore(t)
 	ctx := t.Context()
 	_, ticketID := seedQueuedTicket(t, s, "1")
@@ -215,10 +221,16 @@ func sessionResumes(t *testing.T, s *Store, sessionID int64) int {
 // TestReserveWritesTaskN proves RunSeed.TaskN lands on the reserved run's
 // own task_n column (design section 4.2): nil for every job but a build or
 // perimeter task unit, and the exact task number when one is given.
+// TestReserveWritesTaskN's two subtests each open their own store rather
+// than share one across t.Parallel() siblings: both seed a ticket under the
+// same fixed testProject name, and EnsureProject's own check-then-insert is
+// not safe for two goroutines racing on the same project row.
 func TestReserveWritesTaskN(t *testing.T) {
-	s := newTestStore(t)
+	t.Parallel()
 
 	t.Run("nil for a non-build job", func(t *testing.T) {
+		t.Parallel()
+		s := newTestStore(t)
 		ctx := t.Context()
 		_, ticketID := seedQueuedTicket(t, s, "1")
 		setTicketState(t, s, ticketID, testStatePlanning)
@@ -239,6 +251,8 @@ func TestReserveWritesTaskN(t *testing.T) {
 	})
 
 	t.Run("set for a build task unit", func(t *testing.T) {
+		t.Parallel()
+		s := newTestStore(t)
 		ctx := t.Context()
 		_, ticketID := seedQueuedTicket(t, s, "2")
 		setTicketState(t, s, ticketID, testStatePlanning)
@@ -264,10 +278,16 @@ func TestReserveWritesTaskN(t *testing.T) {
 // lens column (design section 4.2): nil when the seed carries none, and the
 // exact lens name when one is given, the review round's own per-lens run
 // identity (runs.lens, design section 5.2).
+// TestReserveWritesLens's two subtests each open their own store rather
+// than share one across t.Parallel() siblings: both seed a ticket under the
+// same fixed testProject name, and EnsureProject's own check-then-insert is
+// not safe for two goroutines racing on the same project row.
 func TestReserveWritesLens(t *testing.T) {
-	s := newTestStore(t)
+	t.Parallel()
 
 	t.Run("nil for a seed with no lens", func(t *testing.T) {
+		t.Parallel()
+		s := newTestStore(t)
 		ctx := t.Context()
 		_, ticketID := seedQueuedTicket(t, s, "1")
 		setTicketState(t, s, ticketID, testStatePlanning)
@@ -288,6 +308,8 @@ func TestReserveWritesLens(t *testing.T) {
 	})
 
 	t.Run("set for a review lens run", func(t *testing.T) {
+		t.Parallel()
+		s := newTestStore(t)
 		ctx := t.Context()
 		_, ticketID := seedQueuedTicket(t, s, "2")
 		setTicketState(t, s, ticketID, testStatePlanning)
@@ -313,6 +335,7 @@ func TestReserveWritesLens(t *testing.T) {
 // section 4.2): a first turn (su.ID nil) never bumps resumes, and a
 // reserved resume (su.ID set, BumpResumes true) raises it by exactly one.
 func TestReserveChargesResume(t *testing.T) {
+	t.Parallel()
 	s := newTestStore(t)
 	ctx := t.Context()
 	_, ticketID := seedQueuedTicket(t, s, "1")
@@ -343,6 +366,7 @@ func TestReserveChargesResume(t *testing.T) {
 // ExpireClaims's reconcile, the same path a crash or a shutdown takes
 // (design section 14).
 func TestInterruptedResumeStaysCharged(t *testing.T) {
+	t.Parallel()
 	s := newTestStore(t)
 	ctx := t.Context()
 	_, ticketID := seedQueuedTicket(t, s, "1")
@@ -374,6 +398,7 @@ func TestInterruptedResumeStaysCharged(t *testing.T) {
 // the terminalizing commit, so CommitHandlerResult does not charge it
 // again.
 func TestCommittedResumeChargedOnce(t *testing.T) {
+	t.Parallel()
 	s := newTestStore(t)
 	ctx := t.Context()
 	_, ticketID := seedQueuedTicket(t, s, "1")

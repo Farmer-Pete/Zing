@@ -54,6 +54,7 @@ func mustIndex(t *testing.T, haystack, needle string) int {
 // "acme"), and ticketA2 (project "acme", unread only) sorts last of the
 // three but still lands in the "acme" group opened by ticketA1.
 func TestInboxGroupsByProjectBlockingFirst(t *testing.T) {
+	t.Parallel()
 	s := newConsoleTestStore(t)
 
 	ticketA1 := seedTicketIn(t, s, testProject, "acme#1", "A1 blocking")
@@ -99,6 +100,7 @@ func TestInboxGroupsByProjectBlockingFirst(t *testing.T) {
 // newest message id descending, a ticket with no message sorting last
 // (design section 7.2).
 func TestRecentOrdersByNewestMessageThenNoMessageLast(t *testing.T) {
+	t.Parallel()
 	s := newConsoleTestStore(t)
 
 	seedTicket(t, s, "r#1", "Ticket X no messages")
@@ -122,6 +124,7 @@ func TestRecentOrdersByNewestMessageThenNoMessageLast(t *testing.T) {
 // TestFeedOrdersNewestMessageFirst proves Feed renders the newest messages
 // across every ticket, newest first by id (design section 7.2).
 func TestFeedOrdersNewestMessageFirst(t *testing.T) {
+	t.Parallel()
 	s := newConsoleTestStore(t)
 
 	ticketID := seedTicket(t, s, "f#1", "Feed ticket")
@@ -147,6 +150,7 @@ func TestFeedOrdersNewestMessageFirst(t *testing.T) {
 // state row's Body (the transition lives in Payload) and SaveDraft/
 // SendBatch never set an answer row's Body (the choice lives in Payload).
 func TestFeedRendersStateAndAnswerContentNotBlank(t *testing.T) {
+	t.Parallel()
 	s := newConsoleTestStore(t)
 
 	ticketID := seedTicket(t, s, "f#3", "Feed decode ticket")
@@ -182,6 +186,7 @@ func TestFeedRendersStateAndAnswerContentNotBlank(t *testing.T) {
 // of insertion order (design section 6.5, 7.2), and that a ticket from a
 // different project never appears.
 func TestProjectScopesAndOrdersByTrackerRef(t *testing.T) {
+	t.Parallel()
 	s := newConsoleTestStore(t)
 
 	// Inserted out of tracker_ref order (b before a) so the assertion below
@@ -232,6 +237,7 @@ func TestProjectScopesAndOrdersByTrackerRef(t *testing.T) {
 // the surrounding non-question rows are undisturbed by the switch to an
 // interactive question group.
 func TestThreadRendersMessagesAndInteractiveQuestionControls(t *testing.T) {
+	t.Parallel()
 	s := newConsoleTestStore(t)
 
 	ticketID := seedTicket(t, s, "t#1", "Thread ticket")
@@ -282,6 +288,7 @@ func TestThreadRendersMessagesAndInteractiveQuestionControls(t *testing.T) {
 // pill (design section 6.6, 6.7; code review fix, PR #16: questionGroup
 // used to render those controls for every question regardless of state).
 func TestThreadAnsweredAndResolvedQuestionsRenderReadOnly(t *testing.T) {
+	t.Parallel()
 	s := newConsoleTestStore(t)
 	ticketID := seedTicket(t, s, "t#5", "Thread answered/resolved ticket")
 
@@ -316,6 +323,7 @@ func TestThreadAnsweredAndResolvedQuestionsRenderReadOnly(t *testing.T) {
 		{resolvedState, "Resolved question", resolvedState},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
 			g := findGroup(t, groups, tc.title)
 			if strings.Contains(g, "data-chip-index") {
 				t.Errorf("%s question still renders option chips; got:\n%s", tc.name, g)
@@ -335,6 +343,7 @@ func TestThreadAnsweredAndResolvedQuestionsRenderReadOnly(t *testing.T) {
 // ticket's stored plan artifact in full, through the same RenderPlan path
 // plan_test.go proves field by field, rather than the Task 6 placeholder.
 func TestThreadGateContextRendersStoredPlan(t *testing.T) {
+	t.Parallel()
 	s := newConsoleTestStore(t)
 	ticketID := seedTicket(t, s, "gate#1", "Gate ticket")
 	if err := console.SeedQuestionFixtures(t.Context(), s, ticketID); err != nil {
@@ -380,6 +389,7 @@ func TestThreadGateContextRendersStoredPlan(t *testing.T) {
 // posted messages: a queued-but-unsent draft answer or reply must not
 // appear (design section 6.6, 6.7, code review fix 2).
 func TestThreadExcludesDraftRows(t *testing.T) {
+	t.Parallel()
 	s := newConsoleTestStore(t)
 	ticketID := seedTicket(t, s, "t#2", "Thread draft ticket")
 	questionID := seedOpenQuestion(t, s, ticketID)
@@ -414,6 +424,7 @@ func TestThreadExcludesDraftRows(t *testing.T) {
 // activation posts), then SendBatch -- rendering something visible, not
 // the blank row the bug left behind.
 func TestThreadRendersSentAnswerFromPayload(t *testing.T) {
+	t.Parallel()
 	s := newConsoleTestStore(t)
 	ticketID := seedTicket(t, s, "t#3", "Thread sent answer ticket")
 	questionID := seedOpenQuestion(t, s, ticketID)
@@ -440,6 +451,7 @@ func TestThreadRendersSentAnswerFromPayload(t *testing.T) {
 // 7.2) shows only sent messages, not a queued-but-unsent draft (code review
 // fix 2).
 func TestFeedExcludesDraftMessages(t *testing.T) {
+	t.Parallel()
 	s := newConsoleTestStore(t)
 	ticketID := seedTicket(t, s, "f#2", "Feed draft ticket")
 	seedUnreadUpdate(t, s, ticketID, "a real feed update")
@@ -469,6 +481,7 @@ func TestFeedExcludesDraftMessages(t *testing.T) {
 // has the greatest id of all three; without the fix that draft would make
 // ticketA sort as the newest.
 func TestInboxOrdersByNewestSentMessageIgnoringDrafts(t *testing.T) {
+	t.Parallel()
 	s := newConsoleTestStore(t)
 
 	ticketA := seedTicket(t, s, "d#1", "Ticket A older real update")
@@ -499,6 +512,7 @@ func TestInboxOrdersByNewestSentMessageIgnoringDrafts(t *testing.T) {
 // both render the empty placeholder rather than erroring (design section
 // 6.6, carried over from Package 3's patchThread guard).
 func TestThreadOpenZeroOrMissingRendersEmptyThread(t *testing.T) {
+	t.Parallel()
 	s := newConsoleTestStore(t)
 	srv := newTestServer(t, s, bus.New(), nil, newTestLogHandler(t))
 
@@ -511,6 +525,7 @@ func TestThreadOpenZeroOrMissingRendersEmptyThread(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
 			main := mainFrame(t, srv.URL, "thread", tc.open, 0)
 			if !strings.Contains(main, `id="main"`) {
 				t.Errorf("GET /stream(view=thread,open=%d) frame missing #main; got:\n%s", tc.open, main)

@@ -63,6 +63,7 @@ func questionPayload(key string) []byte {
 }
 
 func TestTicketByRef_FindsAnExistingTicket(t *testing.T) {
+	t.Parallel()
 	s := newTestStore(t)
 	ctx := t.Context()
 	projectID, ticketID := seedQueuedTicket(t, s, "42")
@@ -80,6 +81,7 @@ func TestTicketByRef_FindsAnExistingTicket(t *testing.T) {
 }
 
 func TestTicketByRef_AbsentRefReturnsFalseNoError(t *testing.T) {
+	t.Parallel()
 	s := newTestStore(t)
 	ctx := t.Context()
 	projectID, _ := seedQueuedTicket(t, s, "42")
@@ -94,6 +96,7 @@ func TestTicketByRef_AbsentRefReturnsFalseNoError(t *testing.T) {
 }
 
 func TestListAllTickets_OrderedByID(t *testing.T) {
+	t.Parallel()
 	s := newTestStore(t)
 	ctx := t.Context()
 	projectID, err := s.EnsureProject(ctx, testProject)
@@ -127,6 +130,7 @@ func TestListAllTickets_OrderedByID(t *testing.T) {
 }
 
 func TestListReadyCandidates_ExcludesClaimedWaitingAndTerminal(t *testing.T) {
+	t.Parallel()
 	s := newTestStore(t)
 	ctx := t.Context()
 	projectID, err := s.EnsureProject(ctx, testProject)
@@ -168,6 +172,7 @@ func TestListReadyCandidates_ExcludesClaimedWaitingAndTerminal(t *testing.T) {
 }
 
 func TestListReadyCandidates_EmptyTerminalStillFilters(t *testing.T) {
+	t.Parallel()
 	s := newTestStore(t)
 	ctx := t.Context()
 	_, ticketID := seedQueuedTicket(t, s, "1")
@@ -190,6 +195,7 @@ func ticketIDs(ts []Ticket) []int64 {
 }
 
 func TestListMessages_OrderedByID(t *testing.T) {
+	t.Parallel()
 	s := newTestStore(t)
 	ctx := t.Context()
 	_, ticketID := seedQueuedTicket(t, s, "1")
@@ -223,6 +229,7 @@ func TestListMessages_OrderedByID(t *testing.T) {
 }
 
 func TestListMessages_ScopedToOneTicket(t *testing.T) {
+	t.Parallel()
 	s := newTestStore(t)
 	ctx := t.Context()
 	_, ticketA := seedQueuedTicket(t, s, "1")
@@ -245,6 +252,7 @@ func TestListMessages_ScopedToOneTicket(t *testing.T) {
 }
 
 func TestQuestionsByState_FiltersByLifecycleState(t *testing.T) {
+	t.Parallel()
 	s := newTestStore(t)
 	ctx := t.Context()
 	_, ticketID := seedQueuedTicket(t, s, "1")
@@ -299,6 +307,7 @@ func TestQuestionsByState_FiltersByLifecycleState(t *testing.T) {
 }
 
 func TestOpenSession_ReturnsNewestForTicketAndJob(t *testing.T) {
+	t.Parallel()
 	s := newTestStore(t)
 	ctx := t.Context()
 	_, ticketID := seedQueuedTicket(t, s, "1")
@@ -323,6 +332,7 @@ func TestOpenSession_ReturnsNewestForTicketAndJob(t *testing.T) {
 }
 
 func TestOpenSession_NoneForJobReturnsFalse(t *testing.T) {
+	t.Parallel()
 	s := newTestStore(t)
 	ctx := t.Context()
 	_, ticketID := seedQueuedTicket(t, s, "1")
@@ -359,6 +369,7 @@ func setSessionResumes(t *testing.T, s *Store, sessionID int64, resumes int) {
 // (design D17, section 4.5): a ticket with no session at all for the job
 // gets SessionNone, not an error.
 func TestLatestSession_NoneReturnsSessionNone(t *testing.T) {
+	t.Parallel()
 	s := newTestStore(t)
 	ctx := t.Context()
 	_, ticketID := seedQueuedTicket(t, s, "1")
@@ -378,6 +389,7 @@ func TestLatestSession_NoneReturnsSessionNone(t *testing.T) {
 // echo one back -- classifies as SessionIdless, the same as no session at
 // all for step 3's purposes.
 func TestLatestSession_NewestNullExternalIDReturnsIdless(t *testing.T) {
+	t.Parallel()
 	s := newTestStore(t)
 	ctx := t.Context()
 	_, ticketID := seedQueuedTicket(t, s, "1")
@@ -399,6 +411,7 @@ func TestLatestSession_NewestNullExternalIDReturnsIdless(t *testing.T) {
 // (design D17): the newest session with an external_id and resumes below
 // maxResumes classifies as SessionOpen.
 func TestLatestSession_NewestOpenBelowCapReturnsOpen(t *testing.T) {
+	t.Parallel()
 	s := newTestStore(t)
 	ctx := t.Context()
 	_, ticketID := seedQueuedTicket(t, s, "1")
@@ -422,6 +435,7 @@ func TestLatestSession_NewestOpenBelowCapReturnsOpen(t *testing.T) {
 // (design D17): the newest session with an external_id and resumes at or
 // past maxResumes classifies as SessionExhausted.
 func TestLatestSession_NewestAtCapReturnsExhausted(t *testing.T) {
+	t.Parallel()
 	s := newTestStore(t)
 	ctx := t.Context()
 	_, ticketID := seedQueuedTicket(t, s, "1")
@@ -442,6 +456,7 @@ func TestLatestSession_NewestAtCapReturnsExhausted(t *testing.T) {
 // highest id, not "the one still open": an older, still-open session must
 // not shadow a newer session that has since gone idless.
 func TestLatestSession_NewestByIDEvenWhenOlderIsOpen(t *testing.T) {
+	t.Parallel()
 	s := newTestStore(t)
 	ctx := t.Context()
 	_, ticketID := seedQueuedTicket(t, s, "1")
@@ -470,6 +485,7 @@ func TestLatestSession_NewestByIDEvenWhenOlderIsOpen(t *testing.T) {
 // 0003's BEFORE INSERT trigger on sessions rejects the raw INSERT before
 // LatestSession ever gets a chance to read such a row back.
 func TestLatestSession_EmptyExternalIDIsAnError(t *testing.T) {
+	t.Parallel()
 	s := newTestStore(t)
 	ctx := t.Context()
 	_, ticketID := seedQueuedTicket(t, s, "1")
@@ -490,6 +506,7 @@ func TestLatestSession_EmptyExternalIDIsAnError(t *testing.T) {
 // existing session (NULL going in, same as a first-turn session before the
 // runtime has echoed one back) is rejected the same way an insert is.
 func TestLatestSession_UpdateToEmptyExternalIDIsAnError(t *testing.T) {
+	t.Parallel()
 	s := newTestStore(t)
 	ctx := t.Context()
 	_, ticketID := seedQueuedTicket(t, s, "1")
@@ -510,6 +527,7 @@ func TestLatestSession_UpdateToEmptyExternalIDIsAnError(t *testing.T) {
 // round.SessionID directly, not necessarily the ticket's newest session for
 // the job).
 func TestSessionByID_OpenReturnsSessionOpen(t *testing.T) {
+	t.Parallel()
 	s := newTestStore(t)
 	ctx := t.Context()
 	_, ticketID := seedQueuedTicket(t, s, "1")
@@ -532,6 +550,7 @@ func TestSessionByID_OpenReturnsSessionOpen(t *testing.T) {
 // TestSessionByID_ExhaustedReturnsSessionExhausted proves the exhausted
 // case: resumes at or past maxResumes classifies as SessionExhausted.
 func TestSessionByID_ExhaustedReturnsSessionExhausted(t *testing.T) {
+	t.Parallel()
 	s := newTestStore(t)
 	ctx := t.Context()
 	_, ticketID := seedQueuedTicket(t, s, "1")
@@ -551,6 +570,7 @@ func TestSessionByID_ExhaustedReturnsSessionExhausted(t *testing.T) {
 // TestSessionByID_IdlessReturnsSessionIdless proves the idless case: a
 // session whose external_id is still NULL classifies as SessionIdless.
 func TestSessionByID_IdlessReturnsSessionIdless(t *testing.T) {
+	t.Parallel()
 	s := newTestStore(t)
 	ctx := t.Context()
 	_, ticketID := seedQueuedTicket(t, s, "1")
@@ -568,6 +588,7 @@ func TestSessionByID_IdlessReturnsSessionIdless(t *testing.T) {
 // TestSessionByID_UnknownIDIsAnError proves an id naming no session returns
 // a wrapped sql.ErrNoRows, not a zero-value SessionNone success.
 func TestSessionByID_UnknownIDIsAnError(t *testing.T) {
+	t.Parallel()
 	s := newTestStore(t)
 	ctx := t.Context()
 
@@ -578,6 +599,7 @@ func TestSessionByID_UnknownIDIsAnError(t *testing.T) {
 }
 
 func TestFirstRun_ReturnsLowestTurnForSession(t *testing.T) {
+	t.Parallel()
 	s := newTestStore(t)
 	ctx := t.Context()
 	_, ticketID := seedQueuedTicket(t, s, "1")
@@ -607,6 +629,7 @@ func TestFirstRun_ReturnsLowestTurnForSession(t *testing.T) {
 }
 
 func TestFirstRun_NoRunsReturnsFalse(t *testing.T) {
+	t.Parallel()
 	s := newTestStore(t)
 	ctx := t.Context()
 	_, ticketID := seedQueuedTicket(t, s, "1")
@@ -622,6 +645,7 @@ func TestFirstRun_NoRunsReturnsFalse(t *testing.T) {
 }
 
 func TestQuestionsByRun_ScopedToOneRun(t *testing.T) {
+	t.Parallel()
 	s := newTestStore(t)
 	ctx := t.Context()
 	_, ticketID := seedQueuedTicket(t, s, "1")
@@ -662,6 +686,7 @@ func TestQuestionsByRun_ScopedToOneRun(t *testing.T) {
 }
 
 func TestGetMessage_RoundTrips(t *testing.T) {
+	t.Parallel()
 	s := newTestStore(t)
 	ctx := t.Context()
 	_, ticketID := seedQueuedTicket(t, s, "1")
@@ -687,6 +712,7 @@ func TestGetMessage_RoundTrips(t *testing.T) {
 }
 
 func TestCountActiveRuns_CountsClaimedNotWaiting(t *testing.T) {
+	t.Parallel()
 	s := newTestStore(t)
 	ctx := t.Context()
 	projectID, err := s.EnsureProject(ctx, testProject)

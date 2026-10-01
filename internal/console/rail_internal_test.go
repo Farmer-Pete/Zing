@@ -20,6 +20,7 @@ import (
 // RingCapacity entries, keeping the newest ones (the tail of an
 // oldest-first slice) and dropping the oldest excess from the front.
 func TestCapLogEntries_KeepsNewestAndDropsOldestExcess(t *testing.T) {
+	t.Parallel()
 	const over = 37
 	base := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
 
@@ -50,6 +51,7 @@ func TestCapLogEntries_KeepsNewestAndDropsOldestExcess(t *testing.T) {
 // TestCapLogEntries_NoOpAtOrUnderCapacity proves a merge already at or under
 // capacity comes back unchanged, not trimmed or reordered.
 func TestCapLogEntries_NoOpAtOrUnderCapacity(t *testing.T) {
+	t.Parallel()
 	entries := []LogEntry{{Message: "a"}, {Message: "b"}, {Message: "c"}}
 
 	got := capLogEntries(entries, RingCapacity)
