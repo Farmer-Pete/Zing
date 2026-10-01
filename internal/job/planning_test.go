@@ -2042,6 +2042,12 @@ func TestPlanningHandler_ReviewTick_StoresFindingsAtCohortVersionAndFencesInputs
 	if !strings.Contains(prompt, "## In a plan") {
 		t.Errorf("review prompt is missing a lens's \"## In a plan\" section:\n%s", prompt)
 	}
+	// The lenses carry "For a bug:" rules, so the reviewer must be told the
+	// classified kind; without it, a live review read a feature ticket as a
+	// bug and demanded a reproduction.
+	if !strings.Contains(prompt, "kind:\nfeature") {
+		t.Errorf("review prompt does not carry the ticket's kind:\n%s", prompt)
+	}
 	if strings.Contains(prompt, "## In code") {
 		t.Errorf("review prompt carries an \"## In code\" section, want only \"## In a plan\":\n%s", prompt)
 	}

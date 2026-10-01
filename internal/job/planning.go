@@ -1039,6 +1039,12 @@ func runPlanReview(ctx context.Context, t store.Ticket, d Deps, extra []prompt.N
 		return store.HandlerCommit{}, fmt.Errorf("job: planreview: consecutive invalid outputs: %w", err)
 	}
 	inputs := append([]prompt.NamedInput{}, extra...)
+	// The lenses' "For a bug:" rules need the classified kind; without it
+	// the reviewer guesses from the ticket text. Kind comes from classify's
+	// own closed vocabulary, so it is trusted.
+	if t.Kind != nil {
+		inputs = append(inputs, prompt.NamedInput{Label: "kind", Text: *t.Kind})
+	}
 	if n == 1 {
 		inputs = append(inputs, prompt.Invalid(invalidRetryText(reason)))
 	}
