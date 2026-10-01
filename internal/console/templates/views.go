@@ -104,10 +104,21 @@ type ThreadQuestion struct {
 	// context region and lifecycle pill still show, but console.SaveDraft
 	// already refuses a draft against a closed question (openQuestionForTicketTx),
 	// so a control that let a visitor try anyway was misleading, not just
-	// inert.
+	// inert. As of D30, Interactive is also true for a question already
+	// answered while the ticket still waits on this round (Revisable
+	// below): the owner can still change their pick before Zing resumes the
+	// agent with it.
 	Interactive bool
-	PRURL       string        // merge kind only; empty when the ticket has no PR link yet
-	Plan        *RenderedPlan // gate kind only; nil when the ticket has no stored plan artifact yet
+
+	// Revisable is D30's own narrower flag: true only for a question
+	// state=answered whose ticket still waits on this round. questionGroup
+	// shows its revise note ("Answered. You can change this until Zing
+	// resumes the agent.") only then, distinguishing it from an ordinary
+	// still-open (never answered) question, which Interactive alone cannot.
+	Revisable bool
+
+	PRURL string        // merge kind only; empty when the ticket has no PR link yet
+	Plan  *RenderedPlan // gate kind only; nil when the ticket has no stored plan artifact yet
 
 	// Scenarios and Findings are the gate kind's other two context regions
 	// (design section 7, D8, Task 11), rendered before Plan inside

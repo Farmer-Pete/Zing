@@ -208,8 +208,15 @@ func logSaveDraftOutcome(ctx context.Context, in DraftInput, result DraftResult,
 // openQuestionForTicketTx reads questionID and returns its parsed payload,
 // after checking every question-targeted conflict SaveDraft and SendBatch's
 // re-validation share (design section 6.7): the question exists, is a
-// "question" message, belongs to ticketID, and is still open. A missing
-// question is reported as a ConflictError ("question not found"), unlike
+// "question" message, belongs to ticketID, and is still draftable (D30): a
+// question in state=open always is; one already state=answered still is,
+// but only while ticketID's own waiting_on is still "questions" -- the
+// agent has not yet been resumed with that round's answers, so a revised
+// pick before then still lands where the resume prompt will read it
+// (planning_reads.go's AnsweredRounds). Once the wait clears (every
+// question of the round answered; clearMatchingWaitTx), or for any other
+// state (resolved, or gone), the conflict applies. A missing question is
+// reported as a ConflictError ("question not found"), unlike
 // AnswerQuestion's raw sql.ErrNoRows, because a stale or mistyped question
 // id arriving from a client is an ordinary 409, not a 500 (design section
 // 6.7's own conflict list names it alongside the others).
@@ -227,7 +234,11 @@ func openQuestionForTicketTx(ctx context.Context, tx *sql.Tx, questionID, ticket
 	if q.TicketID != ticketID {
 		return response.QuestionPayload{}, conflict("wrong ticket")
 	}
-	if q.State == nil || *q.State != questionStateOpen {
+	draftable, err := questionDraftableTx(ctx, tx, q, ticketID)
+	if err != nil {
+		return response.QuestionPayload{}, err
+	}
+	if !draftable {
 		return response.QuestionPayload{}, conflict("question closed")
 	}
 
@@ -236,6 +247,40 @@ func openQuestionForTicketTx(ctx context.Context, tx *sql.Tx, questionID, ticket
 		return response.QuestionPayload{}, fmt.Errorf("save draft: unmarshal question %d payload: %w", questionID, err)
 	}
 	return payload, nil
+}
+
+// questionDraftableTx reports whether q still takes a draft (D30): true for
+// state=open always, true for state=answered only while ticketID's own
+// waiting_on is still "questions" (the agent has not resumed with this
+// round yet, so a revised pick still lands before it is read), false for
+// every other state or once the wait has cleared.
+func questionDraftableTx(ctx context.Context, tx *sql.Tx, q MessageRow, ticketID int64) (bool, error) {
+	if q.State == nil {
+		return false, nil
+	}
+	switch *q.State {
+	case questionStateOpen:
+		return true, nil
+	case questionStateAnswered:
+		waitingOn, err := ticketWaitingOnTx(ctx, tx, ticketID)
+		if err != nil {
+			return false, err
+		}
+		return waitingOn == waitingFlagQuestions, nil
+	default:
+		return false, nil
+	}
+}
+
+// ticketWaitingOnTx reads ticketID's own waiting_on, "" when NULL (D30,
+// questionDraftableTx's own read; clearMatchingWaitTx keeps its own query,
+// which also needs NULL vs "" told apart).
+func ticketWaitingOnTx(ctx context.Context, tx *sql.Tx, ticketID int64) (string, error) {
+	var waitingOn sql.NullString
+	if err := tx.QueryRowContext(ctx, `SELECT waiting_on FROM tickets WHERE id = ?`, ticketID).Scan(&waitingOn); err != nil {
+		return "", fmt.Errorf("ticket %d waiting_on: %w", ticketID, err)
+	}
+	return waitingOn.String, nil
 }
 
 // lastInsertIDTx returns the id insertMessageTx (commit.go) just gave its

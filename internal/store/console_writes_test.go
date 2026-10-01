@@ -368,6 +368,53 @@ func TestSaveDraft_Conflicts(t *testing.T) {
 	}
 }
 
+// TestSaveDraft_AnsweredQuestionDraftableWhileWaitingOnQuestions proves D30:
+// a draft against a question already state=answered is allowed, not
+// "question closed", while its ticket's waiting_on is still "questions" --
+// the agent has not yet resumed with that round, so a revised pick still
+// lands where the resume prompt will read it.
+func TestSaveDraft_AnsweredQuestionDraftableWhileWaitingOnQuestions(t *testing.T) {
+	t.Parallel()
+	s := newTestStore(t)
+	_, ticketID := seedQueuedTicket(t, s, "1")
+	setTicketWaiting(t, s, ticketID, testWaitingQuestions)
+	qID := insertQuestionOption(t, s, ticketID, "Q1")
+	closeQuestion(t, s, qID, questionStateAnswered)
+
+	opt := "b"
+	result, err := s.SaveDraft(t.Context(), DraftInput{TicketID: ticketID, QuestionID: &qID, Option: &opt})
+	if err != nil {
+		t.Fatalf("SaveDraft against an answered question while still waiting: %v", err)
+	}
+	if ap := draftPayloadOf(t, s, result.MessageID); ap.Option == nil || *ap.Option != "b" {
+		t.Errorf("draft option = %v, want \"b\"", ap.Option)
+	}
+}
+
+// TestSaveDraft_AnsweredQuestionConflictsOnceWaitCleared proves D30's other
+// half: the same draft, once the ticket's wait has cleared (the agent was
+// already resumed with this round), is an ordinary "question closed"
+// conflict, same as any other closed question.
+func TestSaveDraft_AnsweredQuestionConflictsOnceWaitCleared(t *testing.T) {
+	t.Parallel()
+	s := newTestStore(t)
+	_, ticketID := seedQueuedTicket(t, s, "1")
+	qID := insertQuestionOption(t, s, ticketID, "Q1")
+	closeQuestion(t, s, qID, questionStateAnswered)
+	// ticketID's waiting_on is left nil (seedQueuedTicket's own default):
+	// the wait has already cleared, as it would once SendBatch resumes the
+	// agent with every question of the round answered.
+
+	opt := "b"
+	_, err := s.SaveDraft(t.Context(), DraftInput{TicketID: ticketID, QuestionID: &qID, Option: &opt})
+	if err == nil {
+		t.Fatal("SaveDraft: err = nil, want a ConflictError")
+	}
+	if got := conflictReason(t, err); got != "question closed" {
+		t.Errorf("conflict reason = %q, want %q", got, "question closed")
+	}
+}
+
 // ---- SendBatch --------------------------------------------------------------
 
 func TestSendBatch_EmptyIsSafe(t *testing.T) {
@@ -775,6 +822,98 @@ func TestSendBatch_ItemCompletenessAccumulatesAcrossSends(t *testing.T) {
 	if ticket.WaitingOn != nil {
 		t.Errorf("ticket.WaitingOn = %q, want nil", *ticket.WaitingOn)
 	}
+}
+
+// TestSendBatch_RevisedAnswerStaysAnsweredAndDoesNotClearAnEarlyWait proves
+// D30: sending a revised draft against a question already state=answered
+// (SaveDraft allowed it while the ticket still waits, the test above) keeps
+// it answered -- markAnsweredQuestionsTx's own UPDATE only ever matches
+// state=open, so re-marking an already-answered question is a no-op, not a
+// second transition -- and, with a second question of the same round still
+// open, does not clear the ticket's wait early.
+func TestSendBatch_RevisedAnswerStaysAnsweredAndDoesNotClearAnEarlyWait(t *testing.T) {
+	t.Parallel()
+	s := newTestStore(t)
+	_, ticketID := seedQueuedTicket(t, s, "1")
+	setTicketWaiting(t, s, ticketID, testWaitingQuestions)
+	q1ID := insertQuestionOption(t, s, ticketID, "Q1")
+	q2ID := insertQuestionOption(t, s, ticketID, "Q2")
+
+	// Answer and send Q1 alone: Q2 is still open, so the wait must not clear
+	// yet (ordinary behavior, not D30's own concern).
+	opt := "a"
+	if _, err := s.SaveDraft(t.Context(), DraftInput{TicketID: ticketID, QuestionID: &q1ID, Option: &opt}); err != nil {
+		t.Fatalf("SaveDraft(Q1, first answer): %v", err)
+	}
+	first, err := s.SendBatch(t.Context(), ticketID)
+	if err != nil {
+		t.Fatalf("SendBatch (first): %v", err)
+	}
+	if first.Sent != 1 || first.WaitCleared {
+		t.Fatalf("first SendBatch = %+v, want Sent=1 WaitCleared=false (Q2 still open)", first)
+	}
+
+	// Revise Q1's answer while the ticket still waits (D30: allowed since
+	// Q1 is answered, not resolved, and waiting_on is still "questions"),
+	// then send again.
+	revised := "b"
+	if _, saveErr := s.SaveDraft(t.Context(), DraftInput{TicketID: ticketID, QuestionID: &q1ID, Option: &revised}); saveErr != nil {
+		t.Fatalf("SaveDraft(Q1, revised answer): %v", saveErr)
+	}
+	second, err := s.SendBatch(t.Context(), ticketID)
+	if err != nil {
+		t.Fatalf("SendBatch (second, revised): %v", err)
+	}
+	if second.Sent != 1 {
+		t.Errorf("second SendBatch.Sent = %d, want 1", second.Sent)
+	}
+	if second.WaitCleared {
+		t.Error("second SendBatch.WaitCleared = true, want false: Q2 is still open")
+	}
+
+	q1, err := s.GetMessage(t.Context(), q1ID)
+	if err != nil {
+		t.Fatalf("GetMessage(Q1): %v", err)
+	}
+	if q1.State == nil || *q1.State != questionStateAnswered {
+		t.Errorf("Q1 state = %v, want unchanged %q", q1.State, questionStateAnswered)
+	}
+
+	ticket, err := s.GetTicket(t.Context(), ticketID)
+	if err != nil {
+		t.Fatalf("GetTicket: %v", err)
+	}
+	if ticket.WaitingOn == nil || *ticket.WaitingOn != testWaitingQuestions {
+		t.Errorf("ticket.WaitingOn = %v, want still %q (Q2 open)", ticket.WaitingOn, testWaitingQuestions)
+	}
+
+	q2, err := s.GetMessage(t.Context(), q2ID)
+	if err != nil {
+		t.Fatalf("GetMessage(Q2): %v", err)
+	}
+	if q2.State == nil || *q2.State != questionStateOpen {
+		t.Errorf("Q2 state = %v, want unchanged %q", q2.State, questionStateOpen)
+	}
+
+	// The revised answer is what the round reader now sees for Q1.
+	if ap := draftPayloadOf(t, s, mustLatestAnswerID(t, s, q1ID)); ap.Option == nil || *ap.Option != "b" {
+		t.Errorf("Q1's sent answer option = %v, want \"b\" (the revision)", ap.Option)
+	}
+}
+
+// mustLatestAnswerID returns the highest-id "answer" message whose parent is
+// questionID -- the most recently sent one, since SendBatch only ever
+// inserts higher ids -- for a D30 test to read the round's latest pick back.
+func mustLatestAnswerID(t *testing.T, s *Store, questionID int64) int64 {
+	t.Helper()
+	var id int64
+	if err := s.db.QueryRowContext(t.Context(),
+		`SELECT id FROM messages WHERE parent_id = ? AND type = ? ORDER BY id DESC LIMIT 1`,
+		questionID, msgTypeAnswer,
+	).Scan(&id); err != nil {
+		t.Fatalf("mustLatestAnswerID(%d): %v", questionID, err)
+	}
+	return id
 }
 
 // ---- SaveDraft: reply dedupe on repeated Enter ------------------------------

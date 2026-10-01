@@ -42,6 +42,13 @@ const msgStateOpen = "open"
 // separate terminal state the gate step (not SendBatch) sets.
 const msgStateAnswered = "answered"
 
+// waitReasonQuestions is store's own waitingFlagQuestions (commit.go),
+// kept as a package-local literal the same way msgStateOpen is (D30):
+// ticketStillWaitingOnQuestions (views.go) reads it to decide whether an
+// answered question is still revisable, mirroring console_writes.go's
+// questionDraftableTx on the server side.
+const waitReasonQuestions = "questions"
+
 // helloHandlerPath is the one fixture path both SeedQuestionFixtures'
 // perimeter question and SeedDemo's plan artifact name, named once so
 // goconst's repeated-literal guard has one definition to point at.

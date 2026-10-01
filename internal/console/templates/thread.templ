@@ -128,6 +128,9 @@ templ questionGroup(ticketID int64, row ThreadRow) {
 				@mergeContext(row.Question.PRURL)
 		}
 		if row.Question.Interactive {
+			if row.Question.Revisable {
+				@reviseNote()
+			}
 			switch row.Question.Kind {
 				case string(response.QuestionKindPerimeter):
 					@itemRows(ticketID, row.ID, row.Question.Items, itemDecisionsPerimeter, row.Question.DraftItems)
@@ -141,6 +144,14 @@ templ questionGroup(ticketID int64, row ThreadRow) {
 			@answeredLocked(row.Question.AnsweredText)
 		}
 	</details>
+}
+
+// reviseNote is a revisable (D30), already-answered question's own note,
+// shown above its still-live controls: the question is answered, but the
+// ticket still waits on this round, so a pick here still reaches the agent
+// instead of being locked out the way bug 7's answeredLocked note is.
+templ reviseNote() {
+	<p class="q-revisable">Answered. You can change this until Zing resumes the agent.</p>
 }
 
 // answeredLocked is a closed, state=answered question's locked note (bug

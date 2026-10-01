@@ -292,6 +292,14 @@ templ palette() {
 			font-size: 0.85rem;
 			margin: 0.5rem 0 0;
 		}
+		/* .q-revisable (D30, thread.templ's reviseNote): an already-answered
+		   question whose controls are still live, since the ticket still
+		   waits on this round -- distinct from .q-answered's locked note. */
+		.q-revisable {
+			color: var(--zing-accent);
+			font-size: 0.8rem;
+			margin: 0 0 0.5rem;
+		}
 
 		/* #send-result (bug fix, console.js's showSendResult): a client-owned
 		   banner reporting POST /send's own result line ("Sent N answer(s)."

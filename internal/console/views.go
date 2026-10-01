@@ -711,23 +711,31 @@ func buildThreadQuestion(ticket *store.Ticket, m *store.MessageRow, messageCount
 		items = append(items, templates.ThreadItem{Ref: it.Ref, Text: it.Text})
 	}
 
+	revisable := m.State != nil && *m.State == msgStateAnswered && ticketStillWaitingOnQuestions(ticket)
 	q := &templates.ThreadQuestion{
 		Key: payload.Key, Title: title, Kind: string(payload.Kind),
 		BodyHTML: bodyHTML, Recommended: payload.Recommended, RecommendedHTML: recommendedHTML,
 		Options: options, Items: items, StateLabel: questionStateLabel(m.State),
 		MessageCount: messageCount,
-		// Interactive is true only for a still-open question (code review
-		// fix, PR #16): questionGroup (thread.templ) used to render option
-		// chips, item rows, and the free reply input for every question
-		// regardless of state, so an answered or resolved question -- whose
-		// draft SaveDraft would refuse anyway (openQuestionForTicketTx) --
-		// still looked editable.
-		Interactive: m.State != nil && *m.State == msgStateOpen,
+		// Interactive is true for a still-open question (code review fix, PR
+		// #16: questionGroup (thread.templ) used to render option chips,
+		// item rows, and the free reply input for every question regardless
+		// of state, so an answered or resolved question -- whose draft
+		// SaveDraft would refuse anyway (openQuestionForTicketTx) -- still
+		// looked editable), and, as of D30, also for a question already
+		// answered while the ticket still waits on this round: the owner can
+		// still revise a pick before Zing resumes the agent with it
+		// (console_writes.go's questionDraftableTx carries the same rule
+		// server-side; this is the rendering half).
+		Interactive: (m.State != nil && *m.State == msgStateOpen) || revisable,
+		Revisable:   revisable,
 	}
 	// AnsweredText (bug fix): a closed question's locked note, shown instead
-	// of its now-hidden controls, only for state=answered -- not resolved, a
-	// later terminal state a reader has already moved past.
-	if m.State != nil && *m.State == msgStateAnswered {
+	// of its now-hidden controls, only for state=answered and no longer
+	// revisable -- not resolved, a later terminal state a reader has
+	// already moved past, and not a still-revisable one, which keeps its
+	// live controls (Revisable above) rather than locking.
+	if m.State != nil && *m.State == msgStateAnswered && !revisable {
 		if ap, ok := sentAnswers[m.ID]; ok {
 			q.AnsweredText = sentAnswerText(ap, options)
 		}
@@ -747,7 +755,30 @@ func buildThreadQuestion(ticket *store.Ticket, m *store.MessageRow, messageCount
 		}
 		q.DraftItems = draft.Answer.Items
 	}
+	// A revisable question with no unsent draft yet still shows its last
+	// sent pick, chip-picked the same way an unsent draft would, so the
+	// owner sees what they are revising rather than a group that looks
+	// freshly blank (D30).
+	if revisable && q.DraftOption == "" && len(q.DraftItems) == 0 {
+		if ap, ok := sentAnswers[m.ID]; ok {
+			if ap.Option != nil {
+				q.DraftOption = *ap.Option
+			}
+			if len(ap.Items) > 0 {
+				q.DraftItems = ap.Items
+			}
+		}
+	}
 	return q, nil
+}
+
+// ticketStillWaitingOnQuestions reports whether ticket's own waiting_on is
+// still "questions" (D30, mirrors console_writes.go's questionDraftableTx):
+// false for a nil ticket (never happens for a real question render, but
+// buildThreadQuestion's own ticket param is itself nilable) or any other
+// wait reason, including none.
+func ticketStillWaitingOnQuestions(ticket *store.Ticket) bool {
+	return ticket != nil && ticket.WaitingOn != nil && *ticket.WaitingOn == waitReasonQuestions
 }
 
 // splitQuestionBody splits a question message's Body into its heading (the

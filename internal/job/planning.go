@@ -1925,13 +1925,24 @@ func optionTextFor(options []response.Option, key string) string {
 // renderAnswerText renders one question's key, stored body (title then
 // body), every sent answer's chosen option and its text, and every sent
 // reply, the shape section 6.3's per-question resume input describes.
+// answers arrives in id order (store.messagesByParent); D30: the console
+// now lets an already-answered question take a revised draft while the
+// ticket still waits, so a question can carry more than one sent answer
+// here. The first stays "chose ..."; every later one -- the current pick,
+// since SendBatch only ever appends -- is marked "(revised)" so the model
+// reads it as superseding the one(s) before it, not as a second, unrelated
+// choice.
 func renderAnswerText(q store.MessageRow, qp response.QuestionPayload, answers, replies []store.MessageRow) string {
 	var sb strings.Builder
 	fmt.Fprintf(&sb, "%s: %s\n", qp.Key, q.Body)
 	for i := range answers {
 		var ap response.AnswerPayload
 		if err := json.Unmarshal(answers[i].Payload, &ap); err == nil && ap.Option != nil {
-			fmt.Fprintf(&sb, "chose %s: %s\n", *ap.Option, optionTextFor(qp.Options, *ap.Option))
+			if i == 0 {
+				fmt.Fprintf(&sb, "chose %s: %s\n", *ap.Option, optionTextFor(qp.Options, *ap.Option))
+			} else {
+				fmt.Fprintf(&sb, "chose %s: %s (revised)\n", *ap.Option, optionTextFor(qp.Options, *ap.Option))
+			}
 		}
 	}
 	for i := range replies {

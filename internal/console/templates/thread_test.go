@@ -25,6 +25,14 @@ func renderItemRow(t *testing.T, item ThreadItem) string {
 // (goconst).
 const testWaitingOnYou = "waiting on you"
 
+// testApprovePlanTitle and testSplitTicketTitle are two question titles
+// repeated across this file's fixtures (goconst), named once rather than
+// retyped.
+const (
+	testApprovePlanTitle = "Approve the plan?"
+	testSplitTicketTitle = "Split this ticket?"
+)
+
 // emptyBodyHTML is a minimal templ.Component for a ThreadQuestion.BodyHTML
 // test stand-in: questionGroup renders it unconditionally, and its own
 // content is not what these tests assert on.
@@ -134,7 +142,7 @@ func TestQuestionGroupLabelsMessageCount(t *testing.T) {
 		got := renderQuestionGroup(t, ThreadRow{
 			ID: 2,
 			Question: &ThreadQuestion{
-				Key: "Q2", Title: "Approve the plan?",
+				Key: "Q2", Title: testApprovePlanTitle,
 				StateLabel: testWaitingOnYou, BodyHTML: emptyBodyHTML, MessageCount: 3,
 			},
 		})
@@ -148,7 +156,7 @@ func TestQuestionGroupLabelsMessageCount(t *testing.T) {
 		got := renderQuestionGroup(t, ThreadRow{
 			ID: 3,
 			Question: &ThreadQuestion{
-				Key: "Q3", Title: "Split this ticket?",
+				Key: "Q3", Title: testSplitTicketTitle,
 				StateLabel: testWaitingOnYou, BodyHTML: emptyBodyHTML, MessageCount: 1,
 			},
 		})
@@ -189,7 +197,7 @@ func TestQuestionGroupLocksAnAnsweredQuestion(t *testing.T) {
 		got := renderQuestionGroup(t, ThreadRow{
 			ID: 1,
 			Question: &ThreadQuestion{
-				Key: "Q1", Title: "Approve the plan?", StateLabel: "resuming",
+				Key: "Q1", Title: testApprovePlanTitle, StateLabel: "resuming",
 				BodyHTML: emptyBodyHTML, MessageCount: 1,
 				Interactive: false, AnsweredText: "a",
 			},
@@ -222,7 +230,7 @@ func TestQuestionGroupLocksAnAnsweredQuestion(t *testing.T) {
 		got := renderQuestionGroup(t, ThreadRow{
 			ID: 3,
 			Question: &ThreadQuestion{
-				Key: "Q3", Title: "Split this ticket?", StateLabel: testWaitingOnYou,
+				Key: "Q3", Title: testSplitTicketTitle, StateLabel: testWaitingOnYou,
 				BodyHTML: emptyBodyHTML, MessageCount: 1,
 				Interactive: true,
 			},
@@ -232,6 +240,51 @@ func TestQuestionGroupLocksAnAnsweredQuestion(t *testing.T) {
 		}
 		if strings.Contains(got, "q-answered") {
 			t.Errorf("rendered question group has a locked note on an open question; got:\n%s", got)
+		}
+	})
+}
+
+// TestQuestionGroupShowsReviseNoteWhileStillRevisable proves D30: an
+// answered question the owner can still revise (its ticket still waits on
+// this round) keeps its live controls and shows reviseNote's own note, not
+// bug 7's locked answeredLocked note -- the two are mutually exclusive.
+func TestQuestionGroupShowsReviseNoteWhileStillRevisable(t *testing.T) {
+	t.Parallel()
+
+	t.Run("a revisable question keeps its chips and shows the revise note", func(t *testing.T) {
+		t.Parallel()
+		got := renderQuestionGroup(t, ThreadRow{
+			ID: 1,
+			Question: &ThreadQuestion{
+				Key: "Q1", Title: testApprovePlanTitle, StateLabel: "resuming",
+				BodyHTML: emptyBodyHTML, MessageCount: 1,
+				Options:     []ThreadOption{{Key: "a", Text: "Approve"}, {Key: "b", Text: "Reject"}},
+				Interactive: true, Revisable: true, DraftOption: "a",
+			},
+		})
+		if !strings.Contains(got, `<p class="q-revisable">Answered. You can change this until Zing resumes the agent.</p>`) {
+			t.Errorf("rendered question group missing the revise note; got:\n%s", got)
+		}
+		if !strings.Contains(got, `class="chips"`) {
+			t.Errorf("rendered question group missing its live chips while still revisable; got:\n%s", got)
+		}
+		if strings.Contains(got, "q-answered") {
+			t.Errorf("rendered question group carries the locked note while still revisable; got:\n%s", got)
+		}
+	})
+
+	t.Run("an ordinary open question shows no revise note", func(t *testing.T) {
+		t.Parallel()
+		got := renderQuestionGroup(t, ThreadRow{
+			ID: 2,
+			Question: &ThreadQuestion{
+				Key: "Q2", Title: testSplitTicketTitle, StateLabel: testWaitingOnYou,
+				BodyHTML: emptyBodyHTML, MessageCount: 1,
+				Interactive: true, Revisable: false,
+			},
+		})
+		if strings.Contains(got, "q-revisable") {
+			t.Errorf("rendered question group has a revise note on a never-answered open question; got:\n%s", got)
 		}
 	})
 }
