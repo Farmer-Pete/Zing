@@ -437,6 +437,26 @@ export function stepComposerIndex(count, index, delta) {
 }
 
 /**
+ * unsavedReplyBody builds POST /draft's JSON body for text the owner typed
+ * into a reply box but has not saved with Enter (bug fix: the hint under
+ * every box reads "Saved as a draft. Cmd+Enter sends.", but a draft saved
+ * only on Enter, so typing then pressing Cmd+Enter sent nothing and showed
+ * "Nothing to send."). sendBatch saves this body before it sends. Null when
+ * the element is not a reply box or holds no text.
+ *
+ * @param {{dataset?: {draftTicket?: string, draftQuestion?: string}, value?: unknown} | null | undefined} el
+ * @returns {{ticket: number, question: number | null, text: string} | null}
+ */
+export function unsavedReplyBody(el) {
+	const ticket = el?.dataset?.draftTicket;
+	const question = el?.dataset?.draftQuestion;
+	if (!ticket || typeof el.value !== 'string' || el.value === '') {
+		return null;
+	}
+	return { ticket: Number(ticket), question: question ? Number(question) : null, text: el.value };
+}
+
+/**
  * buildChipDraftBody builds POST /draft's JSON body for an option chip's
  * activation (design section 6.6, 6.7, code review fix 1): the chip's
  * data-draft-ticket, data-draft-question, and data-option, read off its

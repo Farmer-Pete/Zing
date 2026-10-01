@@ -34,6 +34,7 @@ import {
 	stepComposerIndex,
 	buildChipDraftBody,
 	buildItemDraftBody,
+	unsavedReplyBody,
 	describeAction,
 	ACTION_LABELS,
 } from './keyboard.mjs';
@@ -520,4 +521,18 @@ test('describeAction returns the mapped label for a known action', () => {
 
 test('describeAction falls back to the raw action name for one outside ACTION_LABELS', () => {
 	assert.equal(describeAction('some-future-action'), 'some-future-action');
+});
+
+// unsavedReplyBody: Cmd+Enter saves the focused reply box's typed text
+// before it sends, so typing then sending without Enter still sends.
+
+test('unsavedReplyBody: a reply box with text yields its draft body', () => {
+	const el = { dataset: { draftTicket: '7', draftQuestion: '9' }, value: 'why?' };
+	assert.deepEqual(unsavedReplyBody(el), { ticket: 7, question: 9, text: 'why?' });
+});
+
+test('unsavedReplyBody: an empty box, a non-reply element, or nothing focused yields null', () => {
+	assert.equal(unsavedReplyBody({ dataset: { draftTicket: '7', draftQuestion: '9' }, value: '' }), null);
+	assert.equal(unsavedReplyBody({ dataset: {}, value: 'text' }), null);
+	assert.equal(unsavedReplyBody(null), null);
 });

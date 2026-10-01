@@ -29,6 +29,7 @@ import {
 	stepComposerIndex,
 	buildChipDraftBody,
 	buildItemDraftBody,
+	unsavedReplyBody,
 	collectPatchWork,
 	describeAction,
 	nextPendingNav,
@@ -378,22 +379,21 @@ function showDraftSaved(inputEl, message) {
 // and the next patch renders the box empty.
 function postDraft() {
 	const el = document.activeElement;
-	const ticket = el?.dataset?.draftTicket;
-	const question = el?.dataset?.draftQuestion;
-	if (!ticket || typeof el.value !== 'string' || el.value === '') {
+	const body = unsavedReplyBody(el);
+	if (!body) {
 		return false;
 	}
-	const text = el.value;
 	showDraftConflict(el, '');
 	showDraftSaved(el, '');
-	postDraftRequest(el, Number(ticket), question ? Number(question) : null, text);
+	postDraftRequest(el, body.ticket, body.question, body.text);
 	return true;
 }
 
 // postDraftRequest reports its outcome only if el still holds the same text
 // it was sent with: the owner may have kept typing while the request was in
 // flight, and a stale "Saved."/conflict for text that is no longer in the
-// box would be as misleading as the bug this fixes.
+// box would be as misleading as the bug this fixes. It resolves true when
+// the draft saved, so sendBatch can wait for the save before it sends.
 async function postDraftRequest(el, ticket, question, text) {
 	try {
 		const resp = await fetch('/draft', {
@@ -402,17 +402,19 @@ async function postDraftRequest(el, ticket, question, text) {
 			body: JSON.stringify({ ticket, question, text }),
 		});
 		if (el.value !== text) {
-			return;
+			return resp.ok;
 		}
 		if (resp.ok) {
 			showDraftSaved(el, 'Saved.');
-			return;
+			return true;
 		}
 		console.error('console.js: POST /draft', resp.status);
 		const reason = (await resp.text()).trim();
 		showDraftConflict(el, draftConflictMessage(reason));
+		return false;
 	} catch (err) {
 		console.error('console.js: POST /draft', err);
+		return false;
 	}
 }
 
@@ -507,15 +509,28 @@ function showSendResult(text) {
 // shows its plain-text result (sendResultText, answer.go) via
 // showSendResult -- "Sent N answer(s)." on 200, or the 409 body ("Nothing
 // to send.") otherwise -- so Cmd+Enter is never silent.
+//
+// Text typed into the focused reply box but not yet saved with Enter is
+// saved first (unsavedReplyBody), so typing then pressing Cmd+Enter sends
+// it. A failed save shows its conflict beside the box and sends nothing.
 function sendBatch() {
 	if (!state.nav.open) {
 		return false;
 	}
-	postSendBatch(state.nav.open);
+	postSendBatch(state.nav.open, document.activeElement);
 	return true;
 }
 
-async function postSendBatch(ticket) {
+async function postSendBatch(ticket, focusedEl) {
+	const unsaved = unsavedReplyBody(focusedEl);
+	if (unsaved) {
+		showDraftConflict(focusedEl, '');
+		showDraftSaved(focusedEl, '');
+		const saved = await postDraftRequest(focusedEl, unsaved.ticket, unsaved.question, unsaved.text);
+		if (!saved) {
+			return;
+		}
+	}
 	try {
 		const resp = await fetch('/send', {
 			method: 'POST',
