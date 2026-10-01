@@ -113,29 +113,24 @@ func TestRenderNeutralizesDangerousLink(t *testing.T) {
 	}
 }
 
-// TestRenderRecoversParserPanic proves a markdown shape that panics inside
-// goldmark's own list parser (reproduced from a real plan artifact: three
-// tight bullet-list items is enough, see render.go's markdownParser doc
-// comment for the double-registered-CommonMark root cause) never crashes
-// Render: it comes back as a normal, error-free templ.Component, with md
-// escaped verbatim inside a <pre class="render-failed"> and a note above
-// it, not as the live list markup.
-func TestRenderRecoversParserPanic(t *testing.T) {
+// TestRenderThreeItemTightListNoLongerPanics is the regression test for the
+// double-registered-CommonMark bug markdownParser's doc comment describes
+// (render.go): a tight bullet list of three or more items, with no other
+// content involved, used to panic inside goldmark's own list parser.
+// "- a\n- b\n- c\n" is the minimised input, reproduced from a real plan
+// artifact's Design.Shape field (ticket 1, plan version 2, a much longer
+// "Decision rules" list with this same shape). It must render as a real
+// list now, not fall back to Render's panic recovery.
+func TestRenderThreeItemTightListNoLongerPanics(t *testing.T) {
 	t.Parallel()
 	md := "- a\n- b\n- c\n"
 	got := renderToString(t, md)
 
-	if !strings.Contains(got, `<p class="render-failed-note">`) {
-		t.Errorf("Render(%q) = %q, want a render-failed-note", md, got)
+	if !strings.Contains(got, "<li>a</li>") || !strings.Contains(got, "<li>b</li>") || !strings.Contains(got, "<li>c</li>") {
+		t.Errorf("Render(%q) = %q, want a real <li> for each item", md, got)
 	}
-	if !strings.Contains(got, `<pre class="render-failed">`) {
-		t.Errorf("Render(%q) = %q, want a <pre class=\"render-failed\"> block", md, got)
-	}
-	if strings.Contains(got, "<li>") {
-		t.Errorf("Render(%q) = %q, want the source escaped as plain text, not rendered as a list", md, got)
-	}
-	if !strings.Contains(got, "- a\n- b\n- c") {
-		t.Errorf("Render(%q) = %q, want the original source preserved, escaped", md, got)
+	if strings.Contains(got, "render-failed") {
+		t.Errorf("Render(%q) = %q, want no render-failed fallback", md, got)
 	}
 }
 

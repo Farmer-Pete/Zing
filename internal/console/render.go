@@ -73,8 +73,22 @@ var diagramExtension = diagram.NewHTMLRenderer(
 	diagram.WithRenderer(diagram.LanguageMermaid, diagram.RendererFunc(renderMermaidBlock)),
 )
 
+// markdownParser is parser.New() with no explicit extensions: New already
+// applies parser.CommonMark's block parsers, inline parsers, and paragraph
+// transformers by default (goldmark/v2/parser.New, parser.go), so passing
+// parser.WithExtensions(parser.CommonMark) here, as an earlier version of
+// this file did, registered every one of them a second time. Two
+// *ListParser and *ListItemParser instances at the same priority is what
+// produced the panic this package's Render used to need its recover()
+// fallback for (render_test.go's TestRenderThreeItemTightListNoLongerPanics
+// is the regression test): with both
+// registered, a tight bullet list of three or more items can open a new
+// *ast.List as a direct child of the list already open, where goldmark's
+// own list parser (list.go's lastOffset) always expects an *ast.ListItem,
+// and the type assertion panics. "- a\n- b\n- c\n" is enough; no Zing
+// content, inline code, or the diagram extension is involved.
 var (
-	markdownParser   = parser.New(parser.WithExtensions(parser.CommonMark))
+	markdownParser   = parser.New()
 	markdownRenderer = html.New(html.WithExtensions(diagramExtension))
 )
 
