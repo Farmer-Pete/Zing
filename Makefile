@@ -38,8 +38,15 @@ test:
 	go test ./...
 
 # The race detector is the only guard for data races; static linting cannot see them.
+# internal/job runs as RACE_SHARDS concurrent processes, because one process is
+# bound by Go's fork lock while its tests spawn git; scripts/test-race.sh checks
+# that every test lands in exactly one shard. RACE_TIMEOUT bounds each go test
+# process: the slowest shard takes under 4m on a 14-core Mac, and 15m leaves room
+# for CI's 4-core runner.
+RACE_SHARDS ?= 4
+RACE_TIMEOUT ?= 15m
 test-race:
-	go test -race ./...
+	./scripts/test-race.sh $(RACE_SHARDS) $(RACE_TIMEOUT)
 
 # Fail if go.mod or go.sum are not tidy. Read-only: it never rewrites the module files,
 # so it also catches a go.sum that go mod tidy would create but git has never tracked.
