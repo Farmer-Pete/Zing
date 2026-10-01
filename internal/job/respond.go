@@ -6,8 +6,9 @@
 // (section 8.5, starting a batch), and the respond rows of
 // resolvePostBuildEscalation (section 5.6, postbuild.go). M4 task 5 adds
 // APPLY (9.3): the decision tree's own step (3), applyArtifact's selection
-// rule, and shipHandler.apply. FIX-REPLIES and RE-REQUEST (9.4) are M4 task
-// 6's.
+// rule, and shipHandler.apply. M4 task 6 adds FIX-REPLIES and RE-REQUEST
+// (9.4), POLL's own rows 1 and 2 (section 8.5), wired in from shipping.go's
+// own poll.
 package job
 
 import (
@@ -16,11 +17,14 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net/http"
 	"regexp"
 	"slices"
 	"sort"
 	"strconv"
 	"strings"
+
+	"github.com/google/go-github/v92/github"
 
 	"zing/internal/orchestrator"
 	"zing/internal/prompt"
@@ -1278,6 +1282,325 @@ func (h shipHandler) apply(ctx context.Context, t store.Ticket, d Deps, a store.
 	} else {
 		c.Messages = []store.Message{appliedMsg}
 	}
+	c.ClearPoll = true
+	return c, nil
+}
+
+// ---- FIX-REPLIES and RE-REQUEST (design section 9.4, POLL rows 1 and 2 of
+// 8.5, wired in from shipping.go's own poll) ---------------------------------
+
+// respondAppliedFixRequestLine matches "fix request after run <R>", the
+// third line a "respond applied <aid>" marker carries only when APPLY's own
+// step 3 (9.3, apply above) or 5.6's own "shipping, loops_exhausted" retry
+// row (shipping.go's retryShippingLoopsExhausted) wrote a consolidated fix
+// request for that batch's own collected fix actions.
+var respondAppliedFixRequestLine = regexp.MustCompile(`^fix request after run (\d+)$`)
+
+// fixLandedLine matches "fix landed <mid> sha <sha>" (fix.go's own marker
+// shape, design section 5.1, D22): fix.go itself only ever needs the
+// message id back (parseFixLandedMessageID), since DriveFix never reads the
+// landed sha; FIX-REPLIES does, so this file parses both out of the same
+// marker family.
+var fixLandedLine = regexp.MustCompile(`^fix landed (\d+) sha ([0-9a-f]{40})$`)
+
+// fixRepliesPostedMarkerFor is "fix replies posted <aid>", FIX-REPLIES' own
+// closing marker (design section 9.4): once written, that respond
+// artifact's own fix threads are never revisited.
+func fixRepliesPostedMarkerFor(aid int64) string {
+	return fmt.Sprintf("fix replies posted %d", aid)
+}
+
+// respondFixLandedSHA is design section 9.4's own chain from a respond
+// artifact's own "respond applied <aid>" marker to the sha its collected
+// fix actions landed at: line 3 "fix request after run <R>" names the
+// request's own watermark; "fix requested threads after run <R>" is that
+// request's own marker, whose message id is the request's own identity
+// (fix.go's openFixRequest gives the same identity rule); "fix landed <mid>
+// sha <S>" is that request's own landing marker. ok is false when the
+// applied marker carries no such line 3 (this batch collected no fix
+// action), the request marker cannot be found, or the request has not
+// landed yet -- none of these are errors, only "not yet".
+func respondFixLandedSHA(ctx context.Context, t store.Ticket, d Deps, aid int64) (sha string, ok bool, err error) {
+	applied, found, err := d.Store.Marker(ctx, t.ID, fmt.Sprintf("respond applied %d", aid))
+	if err != nil {
+		return "", false, fmt.Errorf("job: shipping: respond applied marker: %w", err)
+	}
+	if !found {
+		return "", false, nil
+	}
+	lines := strings.SplitN(applied.Body, "\n", 3)
+	if len(lines) < 3 {
+		return "", false, nil
+	}
+	sub := respondAppliedFixRequestLine.FindStringSubmatch(lines[2])
+	if sub == nil {
+		return "", false, nil
+	}
+	r, err := strconv.ParseInt(sub[1], 10, 64)
+	if err != nil {
+		return "", false, fmt.Errorf("job: shipping: parse %q: %w", lines[2], err)
+	}
+
+	reqMarker, found, err := d.Store.Marker(ctx, t.ID, fmt.Sprintf("fix requested threads after run %d", r))
+	if err != nil {
+		return "", false, fmt.Errorf("job: shipping: fix requested threads marker: %w", err)
+	}
+	if !found {
+		return "", false, nil
+	}
+
+	landed, err := d.Store.MarkersWithPrefix(ctx, t.ID, fixLandedPrefix)
+	if err != nil {
+		return "", false, fmt.Errorf("job: shipping: fix landed markers: %w", err)
+	}
+	for i := range landed {
+		firstLine, _, _ := strings.Cut(landed[i].Body, "\n")
+		landedSub := fixLandedLine.FindStringSubmatch(firstLine)
+		if landedSub == nil {
+			continue
+		}
+		mid, convErr := strconv.ParseInt(landedSub[1], 10, 64)
+		if convErr != nil {
+			continue
+		}
+		if mid == reqMarker.ID {
+			return landedSub[2], true, nil
+		}
+	}
+	return "", false, nil
+}
+
+// fixRepliesPending is design section 8.5 row 1's own entry condition: the
+// oldest respond artifact (store order, ascending by artifact id --
+// Store.RespondBatches' own ORDER BY artifacts.id) with no
+// "fix replies posted <aid>" marker and no "respond batch <n> stale" marker
+// for its own batch (applyArtifact's own exact rule: a batch that has gone
+// stale is abandoned, never retried, through APPLY or FIX-REPLIES alike),
+// whose collected fix actions landed and are now an ancestor of the pull
+// request's own head. ok is false when no artifact qualifies, so POLL's own
+// row 2 (RE-REQUEST) or a later row reads this tick's own state instead.
+func (h shipHandler) fixRepliesPending(ctx context.Context, t store.Ticket, d Deps, proj Project, wt orchestrator.Worktree, rows []store.RespondRow, prHeadSHA string) (a store.RespondRow, sha string, ok bool, err error) {
+	for _, row := range rows {
+		_, posted, postedErr := d.Store.Marker(ctx, t.ID, fixRepliesPostedMarkerFor(row.ArtifactID))
+		if postedErr != nil {
+			return store.RespondRow{}, "", false, fmt.Errorf("job: shipping: fix replies posted marker: %w", postedErr)
+		}
+		if posted {
+			continue
+		}
+		_, staleMarked, staleErr := d.Store.Marker(ctx, t.ID, fmt.Sprintf("respond batch %d stale", row.Respond.Batch))
+		if staleErr != nil {
+			return store.RespondRow{}, "", false, fmt.Errorf("job: shipping: respond batch stale marker: %w", staleErr)
+		}
+		if staleMarked {
+			continue
+		}
+
+		s, landed, lerr := respondFixLandedSHA(ctx, t, d, row.ArtifactID)
+		if lerr != nil {
+			return store.RespondRow{}, "", false, lerr
+		}
+		if !landed {
+			continue
+		}
+		anc, ancErr := proj.Orch.IsAncestor(ctx, wt, s, prHeadSHA)
+		if ancErr != nil {
+			return store.RespondRow{}, "", false, fmt.Errorf("job: shipping: fix replies pending: is ancestor: %w", ancErr)
+		}
+		if !anc {
+			continue
+		}
+		return row, s, true, nil
+	}
+	return store.RespondRow{}, "", false, nil
+}
+
+// fixReplies is FIX-REPLIES (design section 9.4, POLL row 1 of 8.5): a's own
+// freshness check against the landed fix -- a.Respond.SHA must be an
+// ancestor of sha, and every one of a's own fix threads that still exists
+// in threads and is unresolved must keep its own last human comment digest
+// (respondStaleReason, the same shared helper APPLY's own freshness fence,
+// 9.3 step 1a, reuses) -- then, for each fix thread not resolved, with no
+// "<!-- zing:fixed a<aid> <tid> -->" marker from login yet
+// (ThreadCommentsContain pages every comment), replyBody(login, "Fixed in
+// <sha7>.", marker) -- every body built before the first write, 9.3 step
+// 1b's own rule, reused here too -- then resolve. Marker
+// "fix replies posted <aid>". A mismatch writes "respond batch <n> stale"
+// instead and posts nothing, same as 9.3 step 1a: the closing marker is
+// never written, so fixRepliesPending's own stale check retires this batch
+// for good, and its threads are answered by a fresh batch instead (design
+// section 9.2, 9.4).
+func (h shipHandler) fixReplies(ctx context.Context, t store.Ticket, d Deps, proj Project, wt orchestrator.Worktree, threads []orchestrator.Thread, login string, a store.RespondRow, sha string) (store.HandlerCommit, error) {
+	anc, ancErr := proj.Orch.IsAncestor(ctx, wt, a.Respond.SHA, sha)
+	if ancErr != nil {
+		return store.HandlerCommit{}, fmt.Errorf("job: shipping: fix replies: is ancestor: %w", ancErr)
+	}
+	if !anc {
+		return respondStaleCommit(t, d, a.Respond.Batch, respondStaleHeadMovedReason), nil
+	}
+
+	var fixTIDs []string
+	for _, action := range a.Respond.Threads {
+		if action.Action == response.ThreadVerbFix {
+			fixTIDs = append(fixTIDs, action.ID)
+		}
+	}
+	seen := make(map[string]string, len(a.Respond.Seen))
+	for _, s := range a.Respond.Seen {
+		seen[s.TID] = s.LastComment
+	}
+	byTID := threadsByTID(threads)
+	if stale, reason := respondStaleReason(fixTIDs, seen, byTID, login); stale {
+		return respondStaleCommit(t, d, a.Respond.Batch, reason), nil
+	}
+
+	var replies []applyPendingReply
+	for _, id := range fixTIDs {
+		th, exists := byTID[id]
+		if !exists || th.IsResolved {
+			continue
+		}
+		marker := fmt.Sprintf("<!-- zing:fixed a%d %s -->", a.ArtifactID, id)
+		body, bodyErr := replyBody(login, fmt.Sprintf("Fixed in %s.", sha[:7]), marker)
+		if bodyErr != nil {
+			return store.HandlerCommit{}, fmt.Errorf("job: shipping: fix replies: reply body: %w", bodyErr)
+		}
+		replies = append(replies, applyPendingReply{rawID: th.ID, marker: marker, body: body})
+	}
+
+	for _, rep := range replies {
+		contains, containsErr := proj.Threads.ThreadCommentsContain(ctx, rep.rawID, rep.marker, login)
+		if containsErr != nil {
+			return store.HandlerCommit{}, fmt.Errorf("job: shipping: fix replies: thread comments contain: %w", containsErr)
+		}
+		if !contains {
+			if replyErr := proj.Threads.ReplyToThread(ctx, rep.rawID, rep.body); replyErr != nil {
+				return store.HandlerCommit{}, fmt.Errorf("job: shipping: fix replies: reply to thread: %w", replyErr)
+			}
+		}
+		if resolveErr := proj.Threads.ResolveThread(ctx, rep.rawID); resolveErr != nil {
+			return store.HandlerCommit{}, fmt.Errorf("job: shipping: fix replies: resolve thread: %w", resolveErr)
+		}
+	}
+
+	c := baseCommit(t, d)
+	c.Messages = []store.Message{{
+		TicketID: t.ID, Type: msgTypeUpdate, Author: authorSystem,
+		Body: fixRepliesPostedMarkerFor(a.ArtifactID),
+	}}
+	c.ClearPoll = true
+	return c, nil
+}
+
+// reRequestedMarkerFor is "reviewers re-requested <headSHA>", the marker
+// RE-REQUEST writes once per head (design section 9.4): Store.Marker's own
+// exact first-line match means a different head's own marker never matches
+// this one, so each head is handled once.
+func reRequestedMarkerFor(headSHA string) string {
+	return "reviewers re-requested " + headSHA
+}
+
+// fixLandedAfterPROpened is design section 8.5 row 2's own first clause: has
+// any "fix landed " marker (fix.go's own family, any FixKind) landed after
+// "pr opened <number>" (design section 8.2 step 6, shipping.go's own
+// publish) -- i.e. its own message id is newer, messages being an
+// append-only, strictly increasing log. ok is false, with no error, when
+// "pr opened" itself cannot be found, which never happens once t.PRURL is
+// non-nil (PUBLISH always writes it in the same commit as pr_url).
+func fixLandedAfterPROpened(ctx context.Context, t store.Ticket, d Deps, number int) (bool, error) {
+	opened, found, err := d.Store.Marker(ctx, t.ID, fmt.Sprintf("pr opened %d", number))
+	if err != nil {
+		return false, fmt.Errorf("job: shipping: pr opened marker: %w", err)
+	}
+	if !found {
+		return false, nil
+	}
+	landed, err := d.Store.MarkersWithPrefix(ctx, t.ID, fixLandedPrefix)
+	if err != nil {
+		return false, fmt.Errorf("job: shipping: fix landed markers: %w", err)
+	}
+	for i := range landed {
+		if landed[i].ID > opened.ID {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+// staleReviewers is design section 9.4's own RE-REQUEST selection: distinct
+// logins, in first-seen order, whose newest review (the last one reviews
+// carries for that login -- ListReviews is paginated to completion in
+// GitHub's own submission order, oldest first) has state APPROVED,
+// CHANGES_REQUESTED, or COMMENTED, a commit id other than headSHA, user
+// type "User" (never a bot), and a login other than viewer's own.
+func staleReviewers(reviews []orchestrator.Review, headSHA, viewer string) []string {
+	var order []string
+	newest := make(map[string]orchestrator.Review, len(reviews))
+	for _, r := range reviews {
+		if _, seen := newest[r.Login]; !seen {
+			order = append(order, r.Login)
+		}
+		newest[r.Login] = r
+	}
+
+	var stale []string
+	for _, login := range order {
+		r := newest[login]
+		if r.UserType != "User" || login == viewer || r.CommitID == headSHA {
+			continue
+		}
+		switch r.State {
+		case "APPROVED", "CHANGES_REQUESTED", "COMMENTED":
+			stale = append(stale, login)
+		}
+	}
+	return stale
+}
+
+// is422 reports whether err is the one GitHub validation refusal
+// RequestReviewers can carry (classifyGitHubErr,
+// internal/orchestrator/githuberr.go, leaves 405/409/422 unclassified, each
+// caller's own to interpret): a 422 means GitHub refused that one login --
+// not a collaborator, already a requested reviewer, or the pull request's
+// own author -- and RE-REQUEST logs it and moves on to the next login
+// (design section 9.4) instead of failing the whole commit.
+func is422(err error) bool {
+	ere, ok := errors.AsType[*github.ErrorResponse](err)
+	return ok && ere.Response != nil && ere.Response.StatusCode == http.StatusUnprocessableEntity
+}
+
+// reRequest is RE-REQUEST (design section 9.4, POLL row 2 of 8.5): headSHA's
+// own stale reviewers (staleReviewers), RequestReviewers one login per call
+// -- GitHub ignores an already-requested reviewer (design section 11), so a
+// repeated request after a crash is harmless, and a 422 (is422) is logged
+// and skipped rather than failing the commit -- then the closing
+// "reviewers re-requested <headSHA>" marker naming every login this commit
+// actually requested (possibly none), so this exact head is only ever
+// handled once.
+func (h shipHandler) reRequest(ctx context.Context, t store.Ticket, d Deps, proj Project, number int, headSHA, login string) (store.HandlerCommit, error) {
+	reviews, err := proj.Threads.ListReviews(ctx, proj.Owner, proj.Repo, number)
+	if err != nil {
+		return store.HandlerCommit{}, fmt.Errorf("job: shipping: re-request: list reviews: %w", err)
+	}
+	stale := staleReviewers(reviews, headSHA, login)
+
+	requested := make([]string, 0, len(stale))
+	for _, l := range stale {
+		if reqErr := proj.Threads.RequestReviewers(ctx, proj.Owner, proj.Repo, number, l); reqErr != nil {
+			if is422(reqErr) {
+				slog.Info("reviewer request skipped", "ticket_id", t.ID, "login", l, "error", reqErr)
+				continue
+			}
+			return store.HandlerCommit{}, fmt.Errorf("job: shipping: re-request: request reviewers: %w", reqErr)
+		}
+		requested = append(requested, l)
+	}
+
+	c := baseCommit(t, d)
+	c.Messages = []store.Message{{
+		TicketID: t.ID, Type: msgTypeUpdate, Author: authorSystem,
+		Body: reRequestedMarkerFor(headSHA) + "\n" + strings.Join(requested, ","),
+	}}
 	c.ClearPoll = true
 	return c, nil
 }

@@ -23,11 +23,14 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/http"
 	"sort"
 	"strings"
 	"testing"
 	"testing/fstest"
 	"time"
+
+	"github.com/google/go-github/v92/github"
 
 	"zing/internal/gitfixture"
 	"zing/internal/orchestrator"
@@ -1289,6 +1292,30 @@ func shipFailedCI() (runs []orchestrator.CheckRun, required []orchestrator.Requi
 		[]orchestrator.RequiredCheck{{Context: "ci"}}
 }
 
+// seedReReqHandled writes "reviewers re-requested <headSHA>" directly
+// through CommitHandlerResult, the shape RE-REQUEST itself writes (design
+// section 9.4, respond.go's reRequestedMarkerFor) -- standing in for a
+// RE-REQUEST tick this test does not otherwise care about, so a pre-M4-task-6
+// test whose own seeded fix landings also satisfy POLL row 2's entry
+// condition (M4 task 6, design section 8.5) can isolate the row it exists
+// to prove.
+func seedReReqHandled(t *testing.T, s *store.Store, ticketID int64, headSHA string) {
+	t.Helper()
+	owner := "seed-rereq-handled"
+	expires := time.Now().Add(10 * time.Minute).UTC().Truncate(time.Second)
+	claimed, err := s.Claim(t.Context(), ticketID, owner, expires)
+	if err != nil || !claimed {
+		t.Fatalf("seedReReqHandled: claim: claimed=%v err=%v", claimed, err)
+	}
+	applied, err := s.CommitHandlerResult(t.Context(), store.HandlerCommit{
+		TicketID: ticketID, Owner: owner, Expires: expires,
+		Messages: []store.Message{{TicketID: ticketID, Type: msgTypeUpdate, Author: authorSystem, Body: reRequestedMarkerFor(headSHA)}},
+	})
+	if err != nil || !applied {
+		t.Fatalf("seedReReqHandled: commit: applied=%v err=%v", applied, err)
+	}
+}
+
 // seedLandedFixRequests writes n complete "fix requested <kind> after run
 // 0" / "fix landed <mid> sha <fakesha>" marker pairs directly through
 // CommitHandlerResult, each in its own two commits (the landed marker's own
@@ -1575,6 +1602,11 @@ func TestPollCIFailedRequestsFix(t *testing.T) {
 // TestPollSharedGateEscalates proves design section 8.7's shared gate: with
 // jobs.respond.max_loops (3) ci_log fix requests already landed, the next
 // CI failure escalates loops_exhausted instead of requesting a fourth fix.
+// The 3 landed fixes also satisfy POLL row 2's own entry condition (M4 task
+// 6, design section 8.5): this test seeds the head's own "reviewers
+// re-requested" marker up front, so RE-REQUEST does not claim the one tick
+// this test drives, keeping its own assertion about the shared gate
+// isolated from RE-REQUEST's.
 func TestPollSharedGateEscalates(t *testing.T) {
 	t.Parallel()
 	s, ticket, gh, tr := shipPublished(t)
@@ -1585,6 +1617,7 @@ func TestPollSharedGateEscalates(t *testing.T) {
 	runs, required := shipFailedCI()
 	gh.runs, gh.required = runs, required
 	gh.prState = orchestrator.PRState{Draft: true, HeadSHA: local, BaseRef: pbFixtureDefaultBranch}
+	seedReReqHandled(t, s, ticket.ID, local)
 
 	commit, err := shipPollRun(t, s, pbGetTicket(t, s, ticket.ID), gh, tr)
 	if err != nil {
@@ -3154,4 +3187,359 @@ func mustNewestMarker(t *testing.T, s *store.Store, ticketID int64, prefix strin
 		t.Fatalf("MarkersWithPrefix(%q): rows=%d err=%v", prefix, len(rows), err)
 	}
 	return rows[len(rows)-1].Body
+}
+
+// -----------------------------------------------------------------------
+// FIX-REPLIES and RE-REQUEST (design section 9.4, M4 task 6)
+// -----------------------------------------------------------------------
+
+// shipFixThreadLandedText is the one fix text every shipFixThreadLanded
+// caller needs (design section 9.4's own tests never vary it): a plain,
+// single-sentence instruction a fix unit can act on.
+const shipFixThreadLandedText = "Validate the input before using it"
+
+// shipFixLanding is shipFixThreadLanded's own result, bundled (gocritic's
+// own too-many-results guard): the store and ticket a caller drives further
+// polls through, the fake GitHub and tracker, the fixed respond artifact's
+// own id, and the branch's sha before and after the fix landed.
+type shipFixLanding struct {
+	s                     *store.Store
+	ticket                store.Ticket
+	gh                    *shipGitHub
+	tr                    *shipTracker
+	aid                   int64
+	preFixSHA, postFixSHA string
+}
+
+// shipFixThreadLanded publishes a ticket, seeds one "fix" action respond
+// batch over thread (shipApplySeeded), runs APPLY to collect the resulting
+// fix request, and drives that fix unit to landing (driveShipFixToLanding).
+// It leaves gh.prState.HeadSHA at the pre-fix sha, exactly the state POLL
+// sees the instant after the fix lands locally but before anything has told
+// GitHub about it: row 1's own entry condition (fixRepliesPending's
+// "IsAncestor(S, pr.HeadSHA)") cannot hold yet. The caller advances
+// gh.prState.HeadSHA to postFixSHA (and reruns POLL) to simulate the push
+// landing on GitHub, the same two-step TestPollPushesLocalAhead already
+// drives.
+func shipFixThreadLanded(t *testing.T, thread orchestrator.Thread) shipFixLanding {
+	t.Helper()
+	s, ticket, gh, tr, aid := shipApplySeeded(t, []orchestrator.Thread{thread}, []response.ThreadAction{
+		{ID: tid(thread.ID), Action: response.ThreadVerbFix, Text: shipFixThreadLandedText},
+	})
+	preFixSHA := shipHeadSHA(t, s, ticket)
+
+	commit, err := shipPollRun(t, s, ticket, gh, tr)
+	if err != nil {
+		t.Fatalf("shipFixThreadLanded: apply: %v", err)
+	}
+	if commit.Escalation != nil {
+		t.Fatalf("shipFixThreadLanded: apply escalated: %+v", commit.Escalation.Payload)
+	}
+	pbApply(t, s, ticket, commit)
+
+	rt := runtime.NewFake(fstest.MapFS{shipFixBuildScriptPath: &fstest.MapFile{Data: []byte(judgeFixBuildScript)}})
+	driveShipFixToLanding(t, s, ticket.ID, rt)
+
+	ticket = pbGetTicket(t, s, ticket.ID)
+	postFixSHA := shipHeadSHA(t, s, ticket)
+	return shipFixLanding{s: s, ticket: ticket, gh: gh, tr: tr, aid: aid, preFixSHA: preFixSHA, postFixSHA: postFixSHA}
+}
+
+// shipPollUntilMarker drives shipPollRun, applying every commit, until one
+// carries a message whose body starts with prefix or maxTicks is
+// exhausted: design section 8.5's own "one row per tick" rule means an
+// unrelated row -- RE-REQUEST, most often, once M4 task 6 wires it in --
+// can legitimately claim an earlier tick than the one a test is after.
+func shipPollUntilMarker(t *testing.T, s *store.Store, ticket store.Ticket, gh *shipGitHub, tr *shipTracker, prefix string, maxTicks int) store.HandlerCommit {
+	t.Helper()
+	for i := range maxTicks {
+		commit, err := shipPollRun(t, s, pbGetTicket(t, s, ticket.ID), gh, tr)
+		if err != nil {
+			t.Fatalf("shipPollUntilMarker: Run (tick %d): %v", i, err)
+		}
+		pbApply(t, s, ticket, commit)
+		for _, m := range commit.Messages {
+			if strings.HasPrefix(m.Body, prefix) {
+				return commit
+			}
+		}
+	}
+	t.Fatalf("shipPollUntilMarker: %q not seen within %d ticks", prefix, maxTicks)
+	return store.HandlerCommit{}
+}
+
+// TestFixRepliesAfterPush proves design section 8.5 row 1's own entry
+// condition: FIX-REPLIES does not fire while GitHub still reports the
+// pre-fix head (POLL instead takes the ordinary push branch, design section
+// 8.3 step 4), and does fire once GitHub reports the landed fix's own sha
+// -- a disclosed "Fixed in <sha7>." reply, the thread resolved, and the
+// closing "fix replies posted <aid>" marker.
+func TestFixRepliesAfterPush(t *testing.T) {
+	t.Parallel()
+	when := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	thread := shipThread(shipApplyThreadA, "greet.go", 3, shipHumanComment("c1", "reviewer1", "please address this properly", when))
+	landing := shipFixThreadLanded(t, thread)
+	s, ticket, gh, tr := landing.s, landing.ticket, landing.gh, landing.tr
+
+	gh.prState = orchestrator.PRState{Draft: true, HeadSHA: landing.preFixSHA, BaseRef: pbFixtureDefaultBranch}
+	commit, err := shipPollRun(t, s, pbGetTicket(t, s, ticket.ID), gh, tr)
+	if err != nil {
+		t.Fatalf("Run (before push): %v", err)
+	}
+	if commit.Escalation != nil {
+		t.Fatalf("got an escalation before push: %+v", commit.Escalation.Payload)
+	}
+	if len(gh.replies) != 0 || len(gh.resolves) != 0 {
+		t.Fatalf("replies/resolves before push = %+v/%+v, want none", gh.replies, gh.resolves)
+	}
+	pbApply(t, s, ticket, commit)
+
+	gh.prState = orchestrator.PRState{Draft: true, HeadSHA: landing.postFixSHA, BaseRef: pbFixtureDefaultBranch}
+	commit2, err := shipPollRun(t, s, pbGetTicket(t, s, ticket.ID), gh, tr)
+	if err != nil {
+		t.Fatalf("Run (after push): %v", err)
+	}
+	if commit2.Escalation != nil {
+		t.Fatalf("got an escalation after push: %+v", commit2.Escalation.Payload)
+	}
+	if len(gh.replies) != 1 || !strings.HasPrefix(gh.replies[0], shipApplyThreadA+"|") {
+		t.Fatalf("replies = %+v, want exactly one for %q", gh.replies, shipApplyThreadA)
+	}
+	if !strings.Contains(gh.replies[0], "Fixed in "+landing.postFixSHA[:7]+".") {
+		t.Errorf("reply body = %q, want it to mention %q", gh.replies[0], "Fixed in "+landing.postFixSHA[:7])
+	}
+	if len(gh.resolves) != 1 || gh.resolves[0] != shipApplyThreadA {
+		t.Fatalf("resolves = %+v, want exactly [%q]", gh.resolves, shipApplyThreadA)
+	}
+	want := fmt.Sprintf("fix replies posted %d", landing.aid)
+	if len(commit2.Messages) != 1 || commit2.Messages[0].Body != want {
+		t.Errorf("commit2.Messages = %+v, want exactly %q", commit2.Messages, want)
+	}
+	if !commit2.ClearPoll {
+		t.Error("ClearPoll = false, want true")
+	}
+}
+
+// TestFixRepliesStaleNewComment proves design section 9.4's own freshness
+// check: a human comments on the fixed thread before FIX-REPLIES' own tick,
+// so it writes "respond batch 1 stale" and posts nothing, and (since
+// "fix replies posted <aid>" is never written) the thread -- now actionable
+// again -- is answered by a fresh batch instead.
+func TestFixRepliesStaleNewComment(t *testing.T) {
+	t.Parallel()
+	when := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	thread := shipThread(shipApplyThreadA, "greet.go", 3, shipHumanComment("c1", "reviewer1", "please address this properly", when))
+	landing := shipFixThreadLanded(t, thread)
+	s, ticket, gh, tr := landing.s, landing.ticket, landing.gh, landing.tr
+
+	gh.prState = orchestrator.PRState{Draft: true, HeadSHA: landing.postFixSHA, BaseRef: pbFixtureDefaultBranch}
+	gh.threads[0].Comments = append(gh.threads[0].Comments,
+		shipHumanComment("c2", "reviewer1", "actually, this still isn't right", when.Add(time.Hour)))
+
+	commit, err := shipPollRun(t, s, pbGetTicket(t, s, ticket.ID), gh, tr)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	want := "respond batch 1 stale\nthread " + tid(shipApplyThreadA) + " has a new comment"
+	if len(commit.Messages) != 1 || commit.Messages[0].Body != want {
+		t.Errorf("commit.Messages = %+v, want exactly %q", commit.Messages, want)
+	}
+	if len(gh.replies) != 0 || len(gh.resolves) != 0 {
+		t.Errorf("replies/resolves = %+v/%+v, want none", gh.replies, gh.resolves)
+	}
+	postedRows, err := s.MarkersWithPrefix(t.Context(), ticket.ID, fixRepliesPostedMarkerFor(landing.aid))
+	if err != nil {
+		t.Fatalf("MarkersWithPrefix: %v", err)
+	}
+	if len(postedRows) != 0 {
+		t.Errorf("fix replies posted markers = %d, want none", len(postedRows))
+	}
+	pbApply(t, s, ticket, commit)
+
+	shipPollUntilMarker(t, s, pbGetTicket(t, s, ticket.ID), gh, tr, "respond batch 2 started sha ", 4)
+}
+
+// TestFixRepliesIdempotent proves design section 11's own reply-to-a-thread
+// guard, reused by FIX-REPLIES: a crash that already posted the "fixed"
+// marker but never reached the commit is found by ThreadCommentsContain, so
+// the retry posts no second reply, still resolves the thread, and still
+// writes the closing marker.
+func TestFixRepliesIdempotent(t *testing.T) {
+	t.Parallel()
+	when := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	thread := shipThread(shipApplyThreadA, "greet.go", 3, shipHumanComment("c1", "reviewer1", "please address this properly", when))
+	landing := shipFixThreadLanded(t, thread)
+	s, ticket, gh, tr := landing.s, landing.ticket, landing.gh, landing.tr
+
+	marker := fmt.Sprintf("<!-- zing:fixed a%d %s -->", landing.aid, tid(shipApplyThreadA))
+	gh.markerAuthors = map[string]string{shipApplyThreadA + "|" + marker: shipViewerLogin}
+	gh.prState = orchestrator.PRState{Draft: true, HeadSHA: landing.postFixSHA, BaseRef: pbFixtureDefaultBranch}
+
+	commit, err := shipPollRun(t, s, pbGetTicket(t, s, ticket.ID), gh, tr)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if len(gh.replies) != 0 {
+		t.Errorf("replies = %+v, want none -- the marker is already posted", gh.replies)
+	}
+	if len(gh.resolves) != 1 || gh.resolves[0] != shipApplyThreadA {
+		t.Errorf("resolves = %+v, want exactly [%q]", gh.resolves, shipApplyThreadA)
+	}
+	want := fmt.Sprintf("fix replies posted %d", landing.aid)
+	if len(commit.Messages) != 1 || commit.Messages[0].Body != want {
+		t.Errorf("commit.Messages = %+v, want exactly %q", commit.Messages, want)
+	}
+}
+
+// TestFixRepliesSpoofedMarkerStillPosts proves design section 9.1's own
+// author-gate, reused by FIX-REPLIES (deferred here from M4 task 5): a
+// stranger's comment that copies the exact "fixed" marker text never
+// satisfies ThreadCommentsContain (author-gated to the viewer), so
+// FIX-REPLIES still posts its own disclosed reply.
+func TestFixRepliesSpoofedMarkerStillPosts(t *testing.T) {
+	t.Parallel()
+	when := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	thread := shipThread(shipApplyThreadA, "greet.go", 3, shipHumanComment("c1", "reviewer1", "please address this properly", when))
+	landing := shipFixThreadLanded(t, thread)
+	s, ticket, gh, tr := landing.s, landing.ticket, landing.gh, landing.tr
+
+	marker := fmt.Sprintf("<!-- zing:fixed a%d %s -->", landing.aid, tid(shipApplyThreadA))
+	gh.markerAuthors = map[string]string{shipApplyThreadA + "|" + marker: "attacker"}
+	gh.prState = orchestrator.PRState{Draft: true, HeadSHA: landing.postFixSHA, BaseRef: pbFixtureDefaultBranch}
+
+	commit, err := shipPollRun(t, s, pbGetTicket(t, s, ticket.ID), gh, tr)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if len(gh.replies) != 1 || !strings.HasPrefix(gh.replies[0], shipApplyThreadA+"|") {
+		t.Fatalf("replies = %+v, want exactly one for %q -- a spoofed marker from another author never satisfies the guard", gh.replies, shipApplyThreadA)
+	}
+	if len(gh.resolves) != 1 || gh.resolves[0] != shipApplyThreadA {
+		t.Errorf("resolves = %+v, want exactly [%q]", gh.resolves, shipApplyThreadA)
+	}
+	want := fmt.Sprintf("fix replies posted %d", landing.aid)
+	if len(commit.Messages) != 1 || commit.Messages[0].Body != want {
+		t.Errorf("commit.Messages = %+v, want exactly %q", commit.Messages, want)
+	}
+}
+
+// shipStaleReviewLogin, shipReviewUserType, shipReviewApproved,
+// shipReviewChangesRequested, and shipStaleReviewCommitID are
+// TestReRequest*'s own shared review fixture literals (goconst): one stale
+// login and the fields a stale review's own newest row carries.
+const (
+	shipStaleReviewLogin       = "alice"
+	shipReviewUserType         = "User"
+	shipReviewApproved         = "APPROVED"
+	shipReviewChangesRequested = "CHANGES_REQUESTED"
+	shipStaleReviewCommitID    = "deadbeef"
+)
+
+// shipReReqReady publishes a ticket, seeds one landed ci_log fix request
+// (seedLandedFixRequests -- RE-REQUEST's own entry condition, design
+// section 8.5 row 2, reads only the marker order, never a real git
+// ancestor relationship, unlike row 1's), and configures green CI so POLL
+// reaches row 2 cleanly.
+func shipReReqReady(t *testing.T) (s *store.Store, ticket store.Ticket, gh *shipGitHub, tr *shipTracker, local string) {
+	t.Helper()
+	s, ticket, gh, tr = shipPublished(t)
+	seedLandedFixRequests(t, s, ticket.ID, FixKindCILog, 1)
+	runs, required := shipGreenCI()
+	gh.runs, gh.required = runs, required
+	local = shipHeadSHA(t, s, pbGetTicket(t, s, ticket.ID))
+	gh.prState = orchestrator.PRState{Draft: true, HeadSHA: local, BaseRef: pbFixtureDefaultBranch}
+	return s, pbGetTicket(t, s, ticket.ID), gh, tr, local
+}
+
+// TestReRequestStaleReviewers proves design section 9.4's own RE-REQUEST
+// selection: a login whose newest review names an older commit is stale; a
+// review on the current head, a bot's review, and the viewer's own review
+// are all excluded.
+func TestReRequestStaleReviewers(t *testing.T) {
+	t.Parallel()
+	s, ticket, gh, tr, local := shipReReqReady(t)
+	gh.reviews = []orchestrator.Review{
+		{Login: shipStaleReviewLogin, UserType: shipReviewUserType, State: shipReviewApproved, CommitID: shipStaleReviewCommitID},
+		{Login: "bob", UserType: shipReviewUserType, State: shipReviewChangesRequested, CommitID: local},
+		{Login: "carol-bot", UserType: "Bot", State: shipReviewApproved, CommitID: shipStaleReviewCommitID},
+		{Login: shipViewerLogin, UserType: shipReviewUserType, State: shipReviewApproved, CommitID: shipStaleReviewCommitID},
+		{Login: "dave", UserType: shipReviewUserType, State: "DISMISSED", CommitID: shipStaleReviewCommitID},
+	}
+
+	commit, err := shipPollRun(t, s, ticket, gh, tr)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if len(gh.requestedReviewers) != 1 || gh.requestedReviewers[0] != shipStaleReviewLogin {
+		t.Errorf("requestedReviewers = %+v, want exactly [%s]", gh.requestedReviewers, shipStaleReviewLogin)
+	}
+	want := "reviewers re-requested " + local + "\n" + shipStaleReviewLogin
+	if len(commit.Messages) != 1 || commit.Messages[0].Body != want {
+		t.Errorf("commit.Messages = %+v, want exactly %q", commit.Messages, want)
+	}
+	if !commit.ClearPoll {
+		t.Error("ClearPoll = false, want true")
+	}
+}
+
+// TestReRequestOncePerHead proves design section 9.4's own closing marker:
+// once "reviewers re-requested <head>" lands, a second poll at the same
+// head calls RequestReviewers no further times and writes no second
+// marker.
+func TestReRequestOncePerHead(t *testing.T) {
+	t.Parallel()
+	s, ticket, gh, tr, _ := shipReReqReady(t)
+	gh.reviews = []orchestrator.Review{
+		{Login: shipStaleReviewLogin, UserType: shipReviewUserType, State: shipReviewApproved, CommitID: shipStaleReviewCommitID},
+	}
+
+	commit, err := shipPollRun(t, s, ticket, gh, tr)
+	if err != nil {
+		t.Fatalf("Run (first): %v", err)
+	}
+	pbApply(t, s, ticket, commit)
+	if len(gh.requestedReviewers) != 1 {
+		t.Fatalf("requestedReviewers after the first poll = %+v, want exactly one request", gh.requestedReviewers)
+	}
+
+	commit2, err := shipPollRun(t, s, pbGetTicket(t, s, ticket.ID), gh, tr)
+	if err != nil {
+		t.Fatalf("Run (second): %v", err)
+	}
+	if len(gh.requestedReviewers) != 1 {
+		t.Errorf("requestedReviewers after the second poll = %+v, want still exactly one -- this head is already handled", gh.requestedReviewers)
+	}
+	for _, m := range commit2.Messages {
+		if strings.HasPrefix(m.Body, "reviewers re-requested ") {
+			t.Errorf("commit2.Messages = %+v, want no second reviewers re-requested marker", commit2.Messages)
+		}
+	}
+}
+
+// TestReRequestSkipsUnrequestable proves design section 9.4's own 422
+// handling: GitHub refusing one login (not a collaborator, say) is logged
+// and skipped, and every other stale login is still requested in the same
+// commit.
+func TestReRequestSkipsUnrequestable(t *testing.T) {
+	t.Parallel()
+	s, ticket, gh, tr, local := shipReReqReady(t)
+	gh.reviews = []orchestrator.Review{
+		{Login: shipStaleReviewLogin, UserType: shipReviewUserType, State: shipReviewApproved, CommitID: shipStaleReviewCommitID},
+		{Login: "ex-collaborator", UserType: shipReviewUserType, State: shipReviewChangesRequested, CommitID: shipStaleReviewCommitID},
+	}
+	gh.requestReviewersErr = map[string]error{
+		"ex-collaborator": &github.ErrorResponse{Response: &http.Response{StatusCode: http.StatusUnprocessableEntity}},
+	}
+
+	commit, err := shipPollRun(t, s, ticket, gh, tr)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if len(gh.requestedReviewers) != 1 || gh.requestedReviewers[0] != shipStaleReviewLogin {
+		t.Errorf("requestedReviewers = %+v, want exactly [%s] -- ex-collaborator's 422 is skipped", gh.requestedReviewers, shipStaleReviewLogin)
+	}
+	want := "reviewers re-requested " + local + "\n" + shipStaleReviewLogin
+	if len(commit.Messages) != 1 || commit.Messages[0].Body != want {
+		t.Errorf("commit.Messages = %+v, want exactly %q", commit.Messages, want)
+	}
 }

@@ -17,12 +17,13 @@
 // fingerprint and its row 5 (an actionable thread starts a respond batch),
 // decision tree step (1)'s "job respond" branch, step (2) (RESPOND's first
 // turn and every resume), and the respond rows of resolvePostBuildEscalation.
-// M4 task 5 (respond.go) adds decision tree step (3), APPLY (9.3). 8.5's
-// rows 1 to 3, 6, 6a, 8, and 9 (FIX-REPLIES, RE-REQUEST, the draft/ready
-// flip, the leftover resolve, the unclassified blocking marker, and MERGE)
-// stay later M4 tasks'. Reaching one of those unbuilt rows is ErrNoAction,
-// not a silent no-op, since nothing before them can write the marker or
-// round shape that would route there.
+// M4 task 5 (respond.go) adds decision tree step (3), APPLY (9.3). M4 task 6
+// (respond.go) adds rows 1 and 2, FIX-REPLIES and RE-REQUEST, wired into
+// poll below. 8.5's rows 3, 6, 6a, 8, and 9 (the draft/ready flip, the
+// leftover resolve, the unclassified blocking marker, and MERGE) stay later
+// M4 tasks'. Reaching one of those unbuilt rows is ErrNoAction, not a
+// silent no-op, since nothing before them can write the marker or round
+// shape that would route there.
 package job
 
 import (
@@ -557,6 +558,40 @@ func (h shipHandler) poll(ctx context.Context, t store.Ticket, d Deps) (store.Ha
 		}
 		return store.HandlerCommit{}, fmt.Errorf("job: shipping: poll: viewer: %w", err)
 	}
+
+	// Rows 1 and 2 of design section 8.5 (M4 task 6, respond.go): a past
+	// respond batch's own collected fix landed and is now in this head
+	// (FIX-REPLIES), or some fix landed since the pull request opened and
+	// this head's own stale reviewers have not been re-requested yet
+	// (RE-REQUEST). Both outrank every row below, including CIUnprotected's
+	// own escalation: neither reads CI at all, and a thread already fixed or
+	// a stale reviewer is worth acting on whatever this tick's own CI result
+	// turns out to be.
+	respondRows, err := d.Store.RespondBatches(ctx, t.ID)
+	if err != nil {
+		return store.HandlerCommit{}, fmt.Errorf("job: shipping: poll: respond batches: %w", err)
+	}
+	fixA, fixSHA, fixOK, fixErr := h.fixRepliesPending(ctx, t, d, proj, wt, respondRows, pr.HeadSHA)
+	if fixErr != nil {
+		return store.HandlerCommit{}, fixErr
+	}
+	if fixOK {
+		return h.fixReplies(ctx, t, d, proj, wt, threadsRaw, login, fixA, fixSHA)
+	}
+	landedSincePROpened, err := fixLandedAfterPROpened(ctx, t, d, number)
+	if err != nil {
+		return store.HandlerCommit{}, err
+	}
+	if landedSincePROpened {
+		_, reRequested, markerErr := d.Store.Marker(ctx, t.ID, reRequestedMarkerFor(pr.HeadSHA))
+		if markerErr != nil {
+			return store.HandlerCommit{}, fmt.Errorf("job: shipping: poll: reviewers re-requested marker: %w", markerErr)
+		}
+		if !reRequested {
+			return h.reRequest(ctx, t, d, proj, number, pr.HeadSHA, login)
+		}
+	}
+
 	// classifyThreads and pollThreadsFrom are threadrules.go's and respond.go's
 	// own pure helpers (design section 9.1, 8.3): every class feeds the
 	// fingerprint (pollThreadsFrom), but only actionable threads drive row 5
