@@ -2057,11 +2057,32 @@ func isExecFailure(err error) bool {
 // Reserve terminalizes (design section 4.6, 6.8): the reserved run, its
 // outcome, its real exit code, and its agent seconds (runtime.Seconds,
 // rounded up, minimum 1).
+//
+// runs.outcome has no "replies" or "confirmed" value (section 22.2,
+// 22.12.3), so storedRunOutcome maps those two to the values their own
+// commits store. A path that passes a response's own outcome through, such
+// as conversationValidationErrorCommit, would otherwise fail the CHECK and
+// stop the dispatcher.
 func terminalRuns(rr runResult, outcome string) []store.Run {
 	exitCode := rr.Res.ExitCode
 	agentSeconds := runtime.Seconds(rr.Res.AgentTime)
-	o := outcome
+	o := storedRunOutcome(outcome)
 	return []store.Run{{ID: rr.Reserved.RunID, Turn: rr.Reserved.Turn, Outcome: &o, ExitCode: &exitCode, AgentSeconds: &agentSeconds}}
+}
+
+// storedRunOutcome is the runs.outcome value for a response outcome:
+// replies stores "question" (repliesOutcomeCommit), confirmed stores "ok"
+// (the confirming turn's own commit), and every other outcome stores
+// itself.
+func storedRunOutcome(outcome string) string {
+	switch response.Outcome(outcome) {
+	case response.OutcomeReplies:
+		return string(response.OutcomeQuestion)
+	case response.OutcomeConfirmed:
+		return string(response.OutcomeOk)
+	default:
+		return outcome
+	}
 }
 
 // freshSessionRecord is the Session field a fresh (non-resume) terminalizing

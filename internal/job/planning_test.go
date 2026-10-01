@@ -2774,3 +2774,34 @@ func TestPlanningHandler_Budget_ExhaustedBeforeResumeResolvesTheAnsweredRound(t 
 		t.Errorf("commit.ResolveQuestions = %v, want none (Q1 is a planning question; it stays open, not resolved by this escalation)", commit.ResolveQuestions)
 	}
 }
+
+// TestPlanningHandler_RepliesFailingConversationCheckTerminalizesRun is a
+// regression test for a live crash: a replies response that fails
+// checkConversation (here, it settles the only open thread, so "replies
+// needs a question left open") went to conversationValidationErrorCommit,
+// which stored the response's own outcome, "replies". runs.outcome's CHECK
+// has no such value, so the commit failed and the dispatcher stopped. The
+// run must store "question", as repliesOutcomeCommit does, and the commit
+// must apply.
+func TestPlanningHandler_RepliesFailingConversationCheckTerminalizesRun(t *testing.T) {
+	t.Parallel()
+	s := newJobTestStore(t)
+	ticketID := seedQueuedTicket(t, s)
+	answeredRoundReadyForResume(t, s, ticketID)
+
+	resp := &response.RepliesResponse{}
+	resp.Job = response.JobPlanning
+	resp.Outcome = response.OutcomeReplies
+	resp.Replies = []response.Reply{{Question: "Q1", Settled: true, Decision: testQ1SettledDecision, Text: "Settled."}}
+	resp.Progress = "Answered Q1."
+	resumeRT := readyScriptedRuntime(t, readyStep(resp, "replies-invalid-sess"))
+
+	commit, err := runPlanning(t, s, claimWithRuntimes(t, s, resumeRT, ticketID), ticketID)
+	if err != nil {
+		t.Fatalf("planning resume (invalid replies) Run: %v", err)
+	}
+	if len(commit.Runs) != 1 || commit.Runs[0].Outcome == nil || *commit.Runs[0].Outcome != string(response.OutcomeQuestion) {
+		t.Fatalf("commit.Runs = %+v, want one run with outcome %q", commit.Runs, response.OutcomeQuestion)
+	}
+	apply(t, s, getTicket(t, s, ticketID), commit)
+}
