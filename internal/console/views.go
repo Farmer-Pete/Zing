@@ -1046,7 +1046,17 @@ func buildThreadRows(ticket *store.Ticket, rows []store.MessageRow, plan *templa
 		row := &rows[i]
 
 		// A question or escalation row always opens its own thread, whatever
-		// its own parent_id: type decides before parent_id gets a turn.
+		// its own parent_id: type decides before parent_id gets a turn. The
+		// one exception (bug fix, ticket 1's duplicate card: escalation 48,
+		// parent_id NULL, and question 49, parent_id 48, whose body repeats
+		// the escalation's own summary text): an escalation with a question
+		// child renders no row of its own -- the question already carries
+		// that text, so the escalation would otherwise stack a second,
+		// identical card directly above it. An escalation with no question
+		// child yet (the owner has not been asked) keeps today's own card.
+		if row.Type == msgTypeEscalation && escalationHasQuestionChild(sentChildren[row.ID]) {
+			continue
+		}
 		if row.Type == msgTypeQuestion || row.Type == msgTypeEscalation {
 			convThread := convThreadForQuestion(conv, row.ID)
 			question, err := buildThreadQuestion(ticket, row, messageCounts[row.ID]+1, plan, scenarios, findings, drafts, sentAnswers, sentChildren[row.ID], convThread, conv, agent, gateOpen)
@@ -1088,6 +1098,23 @@ func buildThreadRows(ticket *store.Ticket, rows []store.MessageRow, plan *templa
 		})
 	}
 	return out, nil
+}
+
+// escalationHasQuestionChild reports whether children (buildThreadRows' own
+// precomputed sentChildren[row.ID]) names a question among them: an
+// escalation always gets a question child when the owner is actually asked
+// about it (design/threading-design.md's "an escalation-linked question's
+// parent is the escalation it belongs to"), and that question's own Body
+// repeats the escalation's summary text, so the escalation itself would
+// otherwise render as a duplicate card directly above it (bug fix, ticket
+// 1's escalation 48 / question 49).
+func escalationHasQuestionChild(children []store.MessageRow) bool {
+	for i := range children {
+		if children[i].Type == msgTypeQuestion {
+			return true
+		}
+	}
+	return false
 }
 
 // dividerLine computes an unparented, non-root row's one-line timeline text

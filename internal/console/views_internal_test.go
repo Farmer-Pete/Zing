@@ -37,6 +37,13 @@ const testBodyConversationPending = "conversation pending run 31 batch 4"
 // TestUnknownMarkerIsADivider, and TestMarkerRecognized (goconst).
 const testBodyUnknownMarker = "some future bookkeeping marker nobody recognizes yet"
 
+// testEscalationBody is one escalation row's own Body, shared by
+// TestNoMessageKindRendersOutsideItsThread,
+// TestEscalationWithQuestionChildRendersNoCard, and
+// TestEscalationWithNoQuestionChildKeepsItsCard (goconst: three literal
+// copies of the same string is one too many).
+const testEscalationBody = "escalation summary"
+
 // TestDisplayBody_PlanreviewPendingMarkerIsHumanReadable proves a
 // "planreview vN pending" marker (job.planreviewPendingMarker) no longer
 // renders as-is, and instead reads as the owner-facing sentence explaining
@@ -852,7 +859,7 @@ func TestNoMessageKindRendersOutsideItsThread(t *testing.T) {
 							// escalationLine prefers a non-empty Body over
 							// decoding Payload, so a bare escalation row
 							// still renders without a payload.
-							row.Body = "escalation summary"
+							row.Body = testEscalationBody
 						case msgTypeQuestion:
 							// A second, distinct question row, so
 							// buildThreadQuestion decodes a valid payload and
@@ -957,6 +964,58 @@ func TestNoMessageKindRendersOutsideItsThread(t *testing.T) {
 			})
 		}
 	})
+}
+
+// TestEscalationWithQuestionChildRendersNoCard proves the bug fix for
+// ticket 1's duplicate card (escalation 48, parent_id NULL; question 49,
+// parent_id 48, whose body repeats the escalation's own summary text):
+// buildThreadRows' own rule ("a question or escalation row always opens
+// its own thread, whatever its own parent_id") used to give the escalation
+// a full card of its own even when its question child already carries the
+// same text, so the owner saw it twice, stacked right above the question.
+// An escalation with a question child now renders no row of its own; the
+// question alone carries the thread, same as any other escalation-linked
+// question (design/threading-design.md (d)).
+func TestEscalationWithQuestionChildRendersNoCard(t *testing.T) {
+	t.Parallel()
+	escalation := store.MessageRow{ID: 48, Message: store.Message{Type: msgTypeEscalation, Author: authorZing, Body: testEscalationBody}} //nolint:modernize // keyed on purpose
+	payload, err := json.Marshal(response.QuestionPayload{Key: "Q7", Kind: response.QuestionKindQuestion})
+	if err != nil {
+		t.Fatalf("marshal question payload: %v", err)
+	}
+	parentID := escalation.ID
+	question := store.MessageRow{ID: 49, Message: store.Message{Type: msgTypeQuestion, Author: authorZing, Payload: payload, ParentID: &parentID, Body: testEscalationBody + "\n\nHow should Zing proceed?"}} //nolint:modernize // keyed on purpose
+
+	got, err := buildThreadRows(&store.Ticket{}, []store.MessageRow{escalation, question}, nil, nil, nil, store.PlanningConversation{}, "The agent")
+	if err != nil {
+		t.Fatalf("buildThreadRows: %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("buildThreadRows returned %d rows, want 1 (the question alone, no separate escalation card): %+v", len(got), got)
+	}
+	if got[0].ID != question.ID || got[0].Question == nil {
+		t.Errorf("buildThreadRows' one row = %+v, want the question's own interactive group", got[0])
+	}
+}
+
+// TestEscalationWithNoQuestionChildKeepsItsCard proves the fix above is
+// scoped to an escalation with a question child: an escalation the owner
+// has not yet been asked a question about (no child row at all) keeps
+// today's behavior, its own full card.
+func TestEscalationWithNoQuestionChildKeepsItsCard(t *testing.T) {
+	t.Parallel()
+	escalation := store.MessageRow{ID: 1, Message: store.Message{Type: msgTypeEscalation, Author: authorZing, Body: testEscalationBody}} //nolint:modernize // keyed on purpose
+
+	got, err := buildThreadRows(&store.Ticket{}, []store.MessageRow{escalation}, nil, nil, nil, store.PlanningConversation{}, "The agent")
+	if err != nil {
+		t.Fatalf("buildThreadRows: %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("buildThreadRows returned %d rows, want 1 (the escalation's own card): %+v", len(got), got)
+	}
+	if got[0].ID != escalation.ID || got[0].Question != nil {
+		t.Errorf("buildThreadRows' one row = %+v, want the escalation's own plain card", got[0])
+	}
 }
 
 // TestUnknownMarkerIsADivider proves the default fallback for an "update"
