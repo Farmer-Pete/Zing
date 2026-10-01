@@ -1211,14 +1211,17 @@ func turnContent(m *store.MessageRow, options []templates.ThreadOption, key, age
 // mergeThreadOrder reorders children (buildThreadRows' own generic
 // parent_id fold, which includes every child row regardless of type or
 // author) to match turns' own order (store.PlanningConversation's turn
-// order, design section 22.3), appending any row turns has no place for --
-// a system-authored resolved row the owner-abandon path writes, which
-// store's agentRowsByQuestion (author zing only) never reads back -- after
-// it, in their own original order (bug 14 fix: a loose, empty "resolved
-// system" card is fixed by placement alone, task D31-4a, but still needs a
-// turn of its own inside the thread, not silence). It never changes which
-// rows belong to the question -- only their display order -- so a row
-// store.PlanningConversation does not recognize is never dropped.
+// order, design section 22.3), inserting any row turns has no place for --
+// a system-authored resolved row ResolveQuestions or withdraw writes
+// (internal/store/commit.go), which store's agentRowsByQuestion (author
+// zing only) never reads back, so threadTurns never sees it -- by id: each
+// such row goes in just before the first turn whose id is greater, or at
+// the end if none is greater (live console bug, ticket 1: a settle's
+// "Resolved." row must render in its chronological place, not always
+// last). It never changes which rows belong to the question -- only their
+// display order -- so a row store.PlanningConversation does not recognize
+// is never dropped. This is the one place that placement happens; nothing
+// else re-derives it.
 func mergeThreadOrder(children, turns []store.MessageRow) []store.MessageRow {
 	if len(turns) == 0 {
 		return children
@@ -1227,12 +1230,22 @@ func mergeThreadOrder(children, turns []store.MessageRow) []store.MessageRow {
 	for i := range turns {
 		inTurns[turns[i].ID] = true
 	}
-	out := make([]store.MessageRow, 0, len(children))
-	out = append(out, turns...)
+	out := append([]store.MessageRow(nil), turns...)
 	for i := range children {
-		if !inTurns[children[i].ID] {
-			out = append(out, children[i])
+		c := children[i]
+		if inTurns[c.ID] {
+			continue
 		}
+		pos := len(out)
+		for j := range out {
+			if out[j].ID > c.ID {
+				pos = j
+				break
+			}
+		}
+		out = append(out, store.MessageRow{})
+		copy(out[pos+1:], out[pos:])
+		out[pos] = c
 	}
 	return out
 }

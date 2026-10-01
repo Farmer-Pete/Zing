@@ -1185,6 +1185,71 @@ func TestBuildThreadRowsInterleavesConversation(t *testing.T) {
 	}
 }
 
+// TestBuildThreadRowsPlacesSystemResolvedRowByID proves the bug fix (live
+// console, ticket 1, Q1): store.agentRowsByQuestion reads only
+// zing-authored reply and resolved rows, so a system-authored resolved row
+// (ResolveQuestions or withdraw, internal/store/commit.go) never reaches
+// PlanningConversation's own Turns -- conv.Threads[0].Turns below stands in
+// for that gap, carrying ids 5, 7, 15, and 16 but not 9. mergeThreadOrder
+// must still place row 9 inside the thread, by id, between the owner
+// answer (7) and the next owner reply (15), rather than after every turn
+// (which used to put "Resolved." last, after "You reopened Q1.").
+func TestBuildThreadRowsPlacesSystemResolvedRowByID(t *testing.T) {
+	t.Parallel()
+	qid := int64(1)
+	questionPayload, err := json.Marshal(response.QuestionPayload{Key: "Q1", Kind: response.QuestionKindQuestion})
+	if err != nil {
+		t.Fatalf("marshal question payload: %v", err)
+	}
+	question := store.MessageRow{ID: qid, Message: store.Message{Type: msgTypeQuestion, Payload: questionPayload}} //nolint:modernize // keyed on purpose
+
+	reply5 := store.MessageRow{ID: 5, Message: store.Message{ //nolint:modernize // keyed on purpose
+		Type: msgTypeReply, Author: authorYou, ParentID: &qid, Body: "owner reply",
+	}}
+	answer7 := store.MessageRow{ID: 7, Message: store.Message{ //nolint:modernize // keyed on purpose
+		Type: msgTypeReply, Author: authorZing, ParentID: &qid, Body: "owner answer",
+	}}
+	resolved9 := store.MessageRow{ID: 9, Message: store.Message{ //nolint:modernize // keyed on purpose
+		Type: msgTypeResolved, Author: authorSystem, ParentID: &qid,
+	}}
+	reply15 := store.MessageRow{ID: 15, Message: store.Message{ //nolint:modernize // keyed on purpose
+		Type: msgTypeReply, Author: authorYou, ParentID: &qid, Body: "owner reopen reply",
+	}}
+	followup16 := store.MessageRow{ID: 16, Message: store.Message{ //nolint:modernize // keyed on purpose
+		Type: msgTypeFollowup, Author: authorYou, ParentID: &qid, Body: "reopened",
+	}}
+
+	// rows carries every child in id order, the same order the store's own
+	// id-ordered query returns them in; conv's Turns is store's
+	// PlanningConversation output today -- missing row 9, the bug this test
+	// pins.
+	rows := []store.MessageRow{question, reply5, answer7, resolved9, reply15, followup16}
+	conv := store.PlanningConversation{
+		Threads: []store.Thread{{
+			Question: question,
+			Turns:    []store.MessageRow{reply5, answer7, reply15, followup16},
+		}},
+	}
+
+	got, err := buildThreadRows(&store.Ticket{}, rows, nil, nil, nil, conv, "The agent")
+	if err != nil {
+		t.Fatalf("buildThreadRows: %v", err)
+	}
+	if len(got) != 1 || got[0].Question == nil {
+		t.Fatalf("buildThreadRows returned %+v, want one question row", got)
+	}
+	texts := renderTurnBodies(t, got[0].Question.Turns)
+	want := []string{"owner reply", "owner answer", "Resolved.", "owner reopen reply", "You reopened Q1."}
+	if len(texts) != len(want) {
+		t.Fatalf("question.Turns rendered = %v, want %v", texts, want)
+	}
+	for i, w := range want {
+		if !strings.Contains(texts[i], w) {
+			t.Errorf("question.Turns[%d] = %q, want it to contain %q (chronological order by id)", i, texts[i], w)
+		}
+	}
+}
+
 // gatePayload marshals a gate-kind question payload for the reopen-box
 // tests below (hasOpenGateQuestion, gateApprovalInProgress): the only
 // field those two read is Kind.
