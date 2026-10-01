@@ -24,7 +24,11 @@ func TestRunSelftest_ReturnsZeroOnEmptyMachine(t *testing.T) {
 // TestSelftestE2E_TicketReachesDoneWithOneQuestionAnswered isolates the
 // section 11 end-to-end suite from the rest of selftest, so a failure here
 // names the e2e path specifically rather than surfacing only as
-// runSelftest's generic non-zero exit.
+// runSelftest's generic non-zero exit. The path it drives now runs all the
+// way through shipping too (PKG9-PLAN.md section 19.4 task 8):
+// selftestShipGH scripts a CI failure, a landed ci_log fix, the push that
+// follows, and the merge GitHub reports once the pushed commit's checks
+// read green, verified by verifySelftestShipCILogFixedThenMerged.
 func TestSelftestE2E_TicketReachesDoneWithOneQuestionAnswered(t *testing.T) {
 	t.Parallel()
 	if err := selftestE2E(t.Context()); err != nil {

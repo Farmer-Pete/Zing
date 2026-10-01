@@ -10,6 +10,7 @@ import (
 	"io/fs"
 	"log/slog"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -555,6 +556,314 @@ func TestJudgeFailureFixThenPass(t *testing.T) {
 	}
 	if !sawPassed {
 		t.Error(`no "judge round 2 passed" marker, want round 2 to pass after the fix landed`)
+	}
+}
+
+// testShipGitHubOwner is the placeholder owner and repo name
+// dispatchShipGitHub's own test uses: it never calls the real GitHub API,
+// so the exact value only has to be non-empty.
+const testShipGitHubOwner = "zing-fixture"
+
+// dispatchShipPR is one pull request dispatchShipGitHub has created.
+type dispatchShipPR struct {
+	url, head, base string
+	number          int
+}
+
+// dispatchShipGitHub is a stateful, scripted orchestrator.GitHub double
+// this file's own shipping e2e test needs (PKG9-PLAN.md section 19.4 task
+// 8), unlike dispatchTestGitHub above (never called): CreateDraftPR,
+// FindPRByHead, GetPR, and ListCheckRuns here are real enough to carry one
+// pull request through a CI failure, a landed ci_log fix, the push that
+// follows, and the merge GitHub reports once the pushed commit's checks
+// have read green -- the same "the owner merged once CI went green" shape
+// cmd/zing/selftest.go's own selftestShipGitHub scripts, since M3 builds
+// neither the ready flip nor MERGE itself (shipping.go's own header
+// comment). redSHA is the commit PUBLISH first pushed, read straight off
+// the real bare origin remoteDir rather than a canned field this double
+// would otherwise have to be told about, so a real git push is what
+// actually moves what GetPR reports: every check run on redSHA always
+// fails; every other sha (the one the landed fix later pushes) always
+// succeeds, and GetPR reports the pull request merged starting on its own
+// second read of that other sha, so one CI-green poll is actually observed
+// before done.
+type dispatchShipGitHub struct {
+	mu          sync.Mutex
+	remoteDir   string
+	pr          *dispatchShipPR
+	nextNum     int
+	redSHA      string
+	callsForSHA map[string]int
+}
+
+func newDispatchShipGitHub(remoteDir string) *dispatchShipGitHub {
+	return &dispatchShipGitHub{remoteDir: remoteDir, callsForSHA: map[string]int{}}
+}
+
+// headSHA reads branch's current commit straight off g's own real bare
+// origin.
+func (g *dispatchShipGitHub) headSHA(ctx context.Context, branch string) (string, error) {
+	out, err := exec.CommandContext(ctx, "git", "-C", g.remoteDir, "rev-parse", "refs/heads/"+branch).Output()
+	if err != nil {
+		return "", fmt.Errorf("dispatchShipGitHub: rev-parse %s: %w", branch, err)
+	}
+	return strings.TrimSpace(string(out)), nil
+}
+
+func (g *dispatchShipGitHub) RepoDefaultBranch(context.Context, string, string) (string, error) {
+	return "", errors.New("dispatchShipGitHub: not implemented")
+}
+
+func (g *dispatchShipGitHub) RequiredChecks(context.Context, string, string, string) ([]string, error) {
+	return nil, errors.New("dispatchShipGitHub: not implemented")
+}
+
+func (g *dispatchShipGitHub) CreateDraftPR(ctx context.Context, _, _, head, base, _, _ string) (prURL string, number int, err error) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if g.pr != nil {
+		return "", 0, errors.New("dispatchShipGitHub: a pull request already exists for this head")
+	}
+	sha, err := g.headSHA(ctx, head)
+	if err != nil {
+		return "", 0, err
+	}
+	g.nextNum++
+	g.pr = &dispatchShipPR{
+		url:  fmt.Sprintf("https://github.com/%s/%s/pull/%d", testShipGitHubOwner, testShipGitHubOwner, g.nextNum),
+		head: head, base: base, number: g.nextNum,
+	}
+	g.redSHA = sha
+	return g.pr.url, g.pr.number, nil
+}
+
+func (g *dispatchShipGitHub) FindPRByHead(_ context.Context, _, _, head, base string) (prURL string, number int, ok bool, err error) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if g.pr == nil || g.pr.head != head || g.pr.base != base {
+		return "", 0, false, nil
+	}
+	return g.pr.url, g.pr.number, true, nil
+}
+
+func (g *dispatchShipGitHub) GetPR(ctx context.Context, _, _ string, _ int) (orchestrator.PRState, error) {
+	g.mu.Lock()
+	pr := g.pr
+	redSHA := g.redSHA
+	g.mu.Unlock()
+	if pr == nil {
+		return orchestrator.PRState{}, errors.New("dispatchShipGitHub: GetPR before CreateDraftPR")
+	}
+	sha, err := g.headSHA(ctx, pr.head)
+	if err != nil {
+		return orchestrator.PRState{}, err
+	}
+	g.mu.Lock()
+	g.callsForSHA[sha]++
+	n := g.callsForSHA[sha]
+	g.mu.Unlock()
+	return orchestrator.PRState{
+		Number: pr.number, State: "open", Draft: true, HeadSHA: sha, BaseRef: pr.base,
+		Merged: sha != redSHA && n >= 2,
+	}, nil
+}
+
+func (g *dispatchShipGitHub) Merge(context.Context, string, string, int, string, string, string) (string, error) {
+	return "", errors.New("dispatchShipGitHub: Merge not implemented (M4)")
+}
+
+func (g *dispatchShipGitHub) ListCheckRuns(_ context.Context, _, _, sha string) ([]orchestrator.CheckRun, error) {
+	g.mu.Lock()
+	redSHA := g.redSHA
+	g.mu.Unlock()
+	conclusion := "success"
+	if sha == redSHA {
+		conclusion = "failure"
+	}
+	return []orchestrator.CheckRun{{ID: 1, Name: "ci", Status: "completed", Conclusion: conclusion, AppSlug: "github-actions"}}, nil
+}
+
+func (g *dispatchShipGitHub) ListStatuses(context.Context, string, string, string) ([]orchestrator.CommitStatus, error) {
+	return nil, nil
+}
+
+func (g *dispatchShipGitHub) RequiredCheckRules(context.Context, string, string, string) ([]orchestrator.RequiredCheck, error) {
+	return []orchestrator.RequiredCheck{{Context: "ci"}}, nil
+}
+
+func (g *dispatchShipGitHub) JobLogTail(context.Context, string, string, int64, int) (string, error) {
+	return "", nil
+}
+
+var (
+	_ orchestrator.GitHub = (*dispatchShipGitHub)(nil)
+	_ job.PullRequests    = (*dispatchShipGitHub)(nil)
+	_ job.Checks          = (*dispatchShipGitHub)(nil)
+)
+
+// dispatchShipTracker is a minimal job.ShipTracker double for this file's
+// own direct-handler shipping e2e: it only counts calls, since this test
+// cares about the ticket's own state and markers, not what the tracker
+// posts (shipTrackerDouble, above, already covers PostPRLink/PostDone's
+// own marker and ordering rules against the real Dispatcher).
+type dispatchShipTracker struct {
+	mu             sync.Mutex
+	prLinks, dones int
+}
+
+func (tr *dispatchShipTracker) PostPRLink(context.Context, int64, string, string) error {
+	tr.mu.Lock()
+	defer tr.mu.Unlock()
+	tr.prLinks++
+	return nil
+}
+
+func (tr *dispatchShipTracker) PostDone(context.Context, int64, string, string) error {
+	tr.mu.Lock()
+	defer tr.mu.Unlock()
+	tr.dones++
+	return nil
+}
+
+var _ job.ShipTracker = (*dispatchShipTracker)(nil)
+
+// advanceShippingMaxCalls bounds advanceShipping's own handler-call loop:
+// PUBLISH, one failed POLL (fix request), RUN, CHECK-then-LAND, one POLL
+// that pushes, one POLL that reads CI green (idle), and one POLL that finds
+// the pull request merged is seven calls; the headroom catches a stuck
+// handler instead of hanging the test.
+const advanceShippingMaxCalls = 16
+
+// advanceShipping drives the real shipping handler through as many calls as
+// it now takes to open a draft pull request, land a ci_log fix once GitHub
+// reports its checks failed, push the fix, and reach "done" once GitHub
+// reports the pull request merged (PKG9-PLAN.md section 19.4 task 8).
+// Unlike advanceJudging's own fixed-shape round, POLL's own idle commit
+// (design section 8.3) sets a real Poll{NextAt}, but this loop drives the
+// handler directly, never through the dispatcher's own
+// ListReadyCandidates, so that backoff is never actually waited out. Each
+// call rebuilds the project's own *orchestrator.Orchestrator over gh, the
+// same way shipClaim (internal/job/shipping_test.go) rebuilds Deps on every
+// claim.
+func advanceShipping(t *testing.T, s *store.Store, rt runtime.Runtime, ticketID int64, gh *dispatchShipGitHub, tr job.ShipTracker) {
+	t.Helper()
+	for range advanceShippingMaxCalls {
+		ticket := getTicket(t, s, ticketID)
+		owner := fmt.Sprintf("advance-%d-shipping", ticketID)
+		expires := time.Now().Add(10 * time.Minute).UTC().Truncate(time.Second)
+		claimed, err := s.Claim(t.Context(), ticketID, owner, expires)
+		if err != nil || !claimed {
+			t.Fatalf("advanceShipping: claim: claimed=%v err=%v", claimed, err)
+		}
+
+		proj, err := s.ProjectForTicket(t.Context(), ticketID)
+		if err != nil {
+			t.Fatalf("advanceShipping: ProjectForTicket: %v", err)
+		}
+		orch, err := orchestrator.New(
+			orchestrator.Project{Owner: testShipGitHubOwner, Repo: testShipGitHubOwner, LocalPath: proj.LocalPath, DefaultBranch: "main"},
+			gh, orchestrator.NewRunner(), nil)
+		if err != nil {
+			t.Fatalf("advanceShipping: orchestrator.New: %v", err)
+		}
+		repoGit, err := orch.GitCommonDir(t.Context())
+		if err != nil {
+			t.Fatalf("advanceShipping: GitCommonDir: %v", err)
+		}
+
+		deps := testDeps(t, s, rt, owner, expires)
+		deps.Projects = map[int64]job.Project{
+			ticket.ProjectID: {
+				Orch: orch, RepoGit: repoGit, TestCmd: "test -f hello.txt", LintCmd: "true",
+				Owner: testShipGitHubOwner, Repo: testShipGitHubOwner, PullRequests: gh, Checks: gh,
+			},
+		}
+		deps.Tracker = tr
+
+		commit, err := job.Registry()[testStateShipping].Run(t.Context(), ticket, deps)
+		if err != nil {
+			t.Fatalf("advanceShipping: Run: %v", err)
+		}
+		if err = job.ValidateCommit(ticket, commit); err != nil {
+			t.Fatalf("advanceShipping: ValidateCommit: %v", err)
+		}
+		applied, err := s.CommitHandlerResult(t.Context(), commit)
+		if err != nil || !applied {
+			t.Fatalf("advanceShipping: CommitHandlerResult: applied=%v err=%v", applied, err)
+		}
+		if getTicket(t, s, ticketID).State != testStateShipping {
+			return
+		}
+	}
+	t.Fatalf("advanceShipping: still in shipping after %d handler calls", advanceShippingMaxCalls)
+}
+
+// TestShipCIFailThenFixThenMergeGoesDone proves the shipping state machine
+// end to end, at this package's own cut point (PKG9-PLAN.md section 19.4
+// task 8): PUBLISH opens a draft pull request, POLL finds its checks
+// failed and requests a ci_log fix, the fix lands, POLL pushes it, POLL
+// finds the pushed commit's checks green, and POLL finds the pull request
+// merged -- the "the owner merged once CI went green" shape M3 scripts,
+// since the ready flip and MERGE itself are M4's own (shipping.go's own
+// header comment).
+func TestShipCIFailThenFixThenMergeGoesDone(t *testing.T) {
+	t.Parallel()
+	s := newDispatchTestStore(t)
+	rt := fakeRuntime(t)
+	ticketID := seedQueuedGitBackedTicket(t, s, testFixtureRef)
+
+	advanceTicket(t, s, rt, ticketID, testStateQueued, testStatePlanning, testStateBuilding, testStateReviewing)
+	advanceJudging(t, s, rt, ticketID)
+
+	ticket := getTicket(t, s, ticketID)
+	if ticket.State != testStateShipping {
+		t.Fatalf("ticket state = %q, want %q (the judge round must pass before shipping)", ticket.State, testStateShipping)
+	}
+
+	proj, err := s.ProjectForTicket(t.Context(), ticketID)
+	if err != nil {
+		t.Fatalf("ProjectForTicket: %v", err)
+	}
+	remoteDir, err := gitfixture.WithBareOrigin(t.Context(), proj.LocalPath)
+	if err != nil {
+		t.Fatalf("gitfixture.WithBareOrigin: %v", err)
+	}
+
+	gh := newDispatchShipGitHub(remoteDir)
+	tr := &dispatchShipTracker{}
+	advanceShipping(t, s, rt, ticketID, gh, tr)
+
+	ticket = getTicket(t, s, ticketID)
+	if ticket.State != testStateDone {
+		t.Fatalf("ticket state = %q, want %q", ticket.State, testStateDone)
+	}
+
+	bodies := judgeRoundMarkerBodies(t, s, ticketID)
+	var sawPROpened, sawFixRequested, sawFixLanded bool
+	for _, body := range bodies {
+		switch {
+		case strings.HasPrefix(body, "pr opened "):
+			sawPROpened = true
+		case strings.HasPrefix(body, "fix requested ci_log after run ") && sawPROpened:
+			sawFixRequested = true
+		case strings.HasPrefix(body, "fix landed ") && sawFixRequested && !sawFixLanded:
+			sawFixLanded = true
+		}
+	}
+	if !sawPROpened {
+		t.Error(`no "pr opened" marker, want PUBLISH to open a draft pull request`)
+	}
+	if !sawFixRequested {
+		t.Error(`no "fix requested ci_log" marker after the pull request opened, want POLL to request a fix once CI failed`)
+	}
+	if !sawFixLanded {
+		t.Error(`no "fix landed" marker after the ci_log fix request, want the fix to land`)
+	}
+	if tr.dones != 1 {
+		t.Errorf("PostDone calls = %d, want 1", tr.dones)
+	}
+	if gh.pr == nil || gh.pr.number != 1 {
+		t.Errorf("gh.pr = %+v, want exactly one pull request", gh.pr)
 	}
 }
 

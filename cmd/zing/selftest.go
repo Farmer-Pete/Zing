@@ -14,6 +14,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"os"
+	"os/exec"
 	"path/filepath"
 	goruntime "runtime"
 	"slices"
@@ -63,25 +64,54 @@ func (selftestGitHub) FindPRByHead(context.Context, string, string, string, stri
 }
 
 // selftestShipGitHub is selftestResumeE2E's own working GitHub double (M3
-// tasks 6, 7): unlike selftestGitHub above, PUBLISH and POLL both reach it
-// for real, so CreateDraftPR and FindPRByHead actually track one pull
-// request, and GetPR reports it merged from the very first read -- the
-// same state POLL would see if the owner had merged it by hand on GitHub
-// while the loop was still open (design section 14's own "the owner
-// merges on GitHub while the ticket waits on merge" row), since M3 builds
-// PUBLISH and POLL but not the ready flip or MERGE itself (M4). ListCheckRuns
-// and RequiredCheckRules report one green "ci" check, matching required,
-// so EvaluateCI's own green branch is realistic even though POLL's
-// "pr.Merged" row (checked first) never actually needs it to reach done.
+// tasks 6, 7, 8): unlike selftestGitHub above, PUBLISH and POLL both reach
+// it for real, so CreateDraftPR and FindPRByHead actually track one pull
+// request. GetPR, ListCheckRuns, and ListStatuses are scripted to carry
+// that pull request through a CI failure, a landed ci_log fix, the push
+// that follows, and the merge GitHub reports once the pushed commit's own
+// checks have been read green -- the same "the owner merged once CI went
+// green" shape design section 14's own "the owner merges on GitHub while
+// the ticket waits on merge" row already describes, since M3 builds
+// PUBLISH and POLL but not the ready flip or MERGE itself (M4). redSHA is
+// the commit PUBLISH first pushed, read straight off the real bare origin
+// remoteDir rather than a canned field this double would otherwise have to
+// be told about, so a real git push -- not a call back into this double --
+// is what actually moves what GetPR next reports: every check run on
+// redSHA always fails; every other sha (the one the landed fix later
+// pushes) always succeeds, and GetPR reports the pull request merged
+// starting on its own second read of that other sha, so one CI-green poll
+// is actually observed before done.
 type selftestShipGitHub struct {
-	mu      sync.Mutex
-	pr      *selftestShipPR
-	nextNum int
+	mu          sync.Mutex
+	remoteDir   string
+	pr          *selftestShipPR
+	nextNum     int
+	redSHA      string
+	callsForSHA map[string]int
 }
 
 type selftestShipPR struct {
 	url, head, base string
 	number          int
+}
+
+// newSelftestShipGitHub returns a selftestShipGitHub reading branch heads
+// off remoteDir, the gitfixture bare origin selftestResumeE2E adds to the
+// fixture project (gitfixture.WithBareOrigin).
+func newSelftestShipGitHub(remoteDir string) *selftestShipGitHub {
+	return &selftestShipGitHub{remoteDir: remoteDir, callsForSHA: map[string]int{}}
+}
+
+// headSHA reads branch's own current commit straight off g's real bare
+// origin ("git rev-parse refs/heads/<branch>"), so a real git push is what
+// moves what GetPR and ListCheckRuns see, not a field this double would
+// otherwise have to be told to update.
+func (g *selftestShipGitHub) headSHA(ctx context.Context, branch string) (string, error) {
+	out, err := exec.CommandContext(ctx, "git", "-C", g.remoteDir, "rev-parse", "refs/heads/"+branch).Output() //nolint:gosec // argv-only, no shell; remoteDir is this suite's own gitfixture bare origin and branch is git's own zing/<id>-<slug> branch name, never outside input
+	if err != nil {
+		return "", fmt.Errorf("selftestShipGitHub: rev-parse %s: %w", branch, err)
+	}
+	return strings.TrimSpace(string(out)), nil
 }
 
 func (*selftestShipGitHub) RepoDefaultBranch(context.Context, string, string) (string, error) {
@@ -92,14 +122,19 @@ func (*selftestShipGitHub) RequiredChecks(context.Context, string, string, strin
 	return nil, errors.New("selftestShipGitHub: not implemented")
 }
 
-func (g *selftestShipGitHub) CreateDraftPR(_ context.Context, _, _, head, base, _, _ string) (prURL string, number int, err error) {
+func (g *selftestShipGitHub) CreateDraftPR(ctx context.Context, _, _, head, base, _, _ string) (prURL string, number int, err error) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	if g.pr != nil {
 		return "", 0, errors.New("selftestShipGitHub: a pull request already exists for this head")
 	}
+	sha, shaErr := g.headSHA(ctx, head)
+	if shaErr != nil {
+		return "", 0, shaErr
+	}
 	g.nextNum++
-	g.pr = &selftestShipPR{url: fmt.Sprintf("https://github.com/zing-fixture/zing-fixture/pull/%d", g.nextNum), head: head, base: base, number: g.nextNum}
+	g.pr = &selftestShipPR{url: fmt.Sprintf("https://github.com/%s/%s/pull/%d", e2eFixtureGitHubOwner, e2eFixtureGitHubOwner, g.nextNum), head: head, base: base, number: g.nextNum}
+	g.redSHA = sha
 	return g.pr.url, g.pr.number, nil
 }
 
@@ -112,16 +147,41 @@ func (g *selftestShipGitHub) FindPRByHead(_ context.Context, _, _, head, base st
 	return g.pr.url, g.pr.number, true, nil
 }
 
-func (*selftestShipGitHub) GetPR(context.Context, string, string, int) (orchestrator.PRState, error) {
-	return orchestrator.PRState{Merged: true, Draft: true}, nil
+func (g *selftestShipGitHub) GetPR(ctx context.Context, _, _ string, _ int) (orchestrator.PRState, error) {
+	g.mu.Lock()
+	pr := g.pr
+	redSHA := g.redSHA
+	g.mu.Unlock()
+	if pr == nil {
+		return orchestrator.PRState{}, errors.New("selftestShipGitHub: GetPR before CreateDraftPR")
+	}
+	sha, err := g.headSHA(ctx, pr.head)
+	if err != nil {
+		return orchestrator.PRState{}, err
+	}
+	g.mu.Lock()
+	g.callsForSHA[sha]++
+	n := g.callsForSHA[sha]
+	g.mu.Unlock()
+	return orchestrator.PRState{
+		Number: pr.number, State: "open", Draft: true, HeadSHA: sha, BaseRef: pr.base,
+		Merged: sha != redSHA && n >= 2,
+	}, nil
 }
 
 func (*selftestShipGitHub) Merge(context.Context, string, string, int, string, string, string) (string, error) {
 	return "", errors.New("selftestShipGitHub: Merge not implemented (M4)")
 }
 
-func (*selftestShipGitHub) ListCheckRuns(context.Context, string, string, string) ([]orchestrator.CheckRun, error) {
-	return []orchestrator.CheckRun{{ID: 1, Name: "ci", Status: "completed", Conclusion: "success", AppSlug: "github-actions", AppID: 1}}, nil
+func (g *selftestShipGitHub) ListCheckRuns(_ context.Context, _, _, sha string) ([]orchestrator.CheckRun, error) {
+	g.mu.Lock()
+	redSHA := g.redSHA
+	g.mu.Unlock()
+	conclusion := "success"
+	if sha == redSHA {
+		conclusion = "failure"
+	}
+	return []orchestrator.CheckRun{{ID: 1, Name: "ci", Status: "completed", Conclusion: conclusion, AppSlug: "github-actions", AppID: 1}}, nil
 }
 
 func (*selftestShipGitHub) ListStatuses(context.Context, string, string, string) ([]orchestrator.CommitStatus, error) {
@@ -525,8 +585,10 @@ func selftestResumeE2E(ctx context.Context) error {
 	// A bare origin remote, so shipping's own PUBLISH (M3 task 6) has
 	// somewhere real to push the ticket branch before OpenDraftPR asks
 	// selftestShipGH to open the draft pull request (PKG9-PLAN.md section
-	// 8.2).
-	if _, wboErr := gitfixture.WithBareOrigin(ctx, projDir); wboErr != nil {
+	// 8.2), and selftestShipGH itself (task 8) a real ref to read PR heads
+	// and pushes off of.
+	remoteDir, wboErr := gitfixture.WithBareOrigin(ctx, projDir)
+	if wboErr != nil {
 		return fmt.Errorf("add bare origin to gitfixture repo: %w", wboErr)
 	}
 
@@ -537,7 +599,7 @@ func selftestResumeE2E(ctx context.Context) error {
 		return err
 	}
 
-	selftestShipGH := &selftestShipGitHub{}
+	selftestShipGH := newSelftestShipGitHub(remoteDir)
 	orch, err := orchestrator.New(
 		orchestrator.Project{Owner: e2eFixtureGitHubOwner, Repo: e2eFixtureGitHubOwner, LocalPath: projDir, DefaultBranch: "main"},
 		selftestShipGH, orchestrator.NewRunner(), nil)
@@ -548,6 +610,13 @@ func selftestResumeE2E(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("git common dir: %w", err)
 	}
+
+	// clock is the fake clock design section 17.1 names: the babysit poll's
+	// own backoff (section 8.3) schedules a real Poll{NextAt} up to 300s
+	// out, and driveToDone (below) advances clock straight to a waiting
+	// ticket's own next_poll_at instead of ever letting Tick's own
+	// candidate pick actually wait that out.
+	clock := newSelftestClock()
 
 	b := bus.New()
 	d, err := zdispatch.New(st, tr, b, m, job.Registry(),
@@ -563,6 +632,7 @@ func selftestResumeE2E(ctx context.Context) error {
 			Commands:       newSelftestCommands(job.NewCommandRunner(sandbox.Off(), false)),
 			DataDir:        dir,
 			LensesParallel: e2eLensesParallel,
+			Now:            clock.Now,
 			// Projects carries what the real building handler needs for
 			// this one project (PKG8-PLAN.md section 4.3): the fixture
 			// project's own test and lint commands (section 9.4). Owner,
@@ -621,7 +691,7 @@ func selftestResumeE2E(ctx context.Context) error {
 		return err
 	}
 
-	if err := driveToDone(ctx, d, st, srv.URL, ticketID); err != nil {
+	if err := driveToDone(ctx, d, st, clock, srv.URL, ticketID); err != nil {
 		closeStream()
 		return err
 	}
@@ -740,8 +810,12 @@ func answerFixtureQuestion(ctx context.Context, st *store.Store, base string, ti
 // 6.6, task 7c), it answers that the same console way answerFixtureQuestion
 // answered Q1 -- a draft with option "a" then /send, which SendBatch's own
 // kindForWaitReason maps straight to the gate kind -- so the dispatcher can
-// seal the cohort and carry the ticket the rest of the way.
-func driveToDone(ctx context.Context, d *zdispatch.Dispatcher, st *store.Store, base string, ticketID int64) error {
+// seal the cohort and carry the ticket the rest of the way. After every
+// tick it also advances clock to the ticket's own next_poll_at (design
+// section 17.1, task 8): shipping's own babysit poll (section 8.3) can
+// leave the ticket waiting on a real backoff up to 300s out, and this is
+// what keeps that wait from ever actually happening.
+func driveToDone(ctx context.Context, d *zdispatch.Dispatcher, st *store.Store, clock *selftestClock, base string, ticketID int64) error {
 	answeredGate := false
 	for i := range e2eMaxTicks {
 		if err := d.Tick(ctx); err != nil {
@@ -763,8 +837,43 @@ func driveToDone(ctx context.Context, d *zdispatch.Dispatcher, st *store.Store, 
 			}
 			answeredGate = true
 		}
+		if ticket.NextPollAt != nil {
+			clock.advanceTo(*ticket.NextPollAt)
+		}
 	}
 	return fmt.Errorf("e2e: ticket did not reach done within %d ticks", e2eMaxTicks)
+}
+
+// selftestClock is the fake clock cmd/zing/selftest.go injects into
+// dispatch.Config.Now (PKG9-PLAN.md section 17.1): it starts at the real
+// wall-clock instant and only ever moves forward, through advanceTo, so
+// driveToDone can skip a babysit poll's own real backoff wait (design
+// section 8.3) without pretending any other part of the suite runs at
+// anything but the real time.
+type selftestClock struct {
+	mu  sync.Mutex
+	now time.Time
+}
+
+func newSelftestClock() *selftestClock {
+	return &selftestClock{now: time.Now()}
+}
+
+// Now is dispatch.Config.Now.
+func (c *selftestClock) Now() time.Time {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.now
+}
+
+// advanceTo moves the clock forward to at least t; it never moves it
+// backward.
+func (c *selftestClock) advanceTo(t time.Time) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if t.After(c.now) {
+		c.now = t
+	}
 }
 
 // newSelftestConsoleServer builds a real console.New handler bound to a
@@ -1032,6 +1141,9 @@ func verifySelftestE2E(ctx context.Context, st *store.Store, ticketID int64) err
 	if err := verifySelftestJudgeFailedFixedThenPassed(msgs); err != nil {
 		return err
 	}
+	if err := verifySelftestShipCILogFixedThenMerged(msgs); err != nil {
+		return err
+	}
 	return verifySelftestCohortSealed(ctx, st, ticketID)
 }
 
@@ -1063,6 +1175,43 @@ func verifySelftestJudgeFailedFixedThenPassed(msgs []store.MessageRow) error {
 		return errors.New(`e2e: no "fix landed" marker after judge round 1 failed, want the fix request to land`)
 	case !sawPassed:
 		return errors.New(`e2e: no "judge round 2 passed" marker, want round 2 to pass after the fix landed`)
+	}
+	return nil
+}
+
+// verifySelftestShipCILogFixedThenMerged asserts msgs (ticketID's own, in
+// id order) actually walked the path PKG9-PLAN.md section 19.4 task 8
+// names -- PUBLISH opens a draft pull request, POLL sees the pushed
+// commit's checks fail and requests a ci_log fix, and the fix lands --
+// rather than reaching done some other way: a "pr opened" marker, a "fix
+// requested ci_log" marker after it, and a "fix landed" marker after that.
+// Done itself (and its own "merged" reason) is proved by e2eWantStates and
+// driveToDone's own answeredGate check above; selftestShipGH's own GetPR
+// is what actually required POLL to see the pushed commit's checks read
+// green before it ever reported the pull request merged (its own doc
+// comment).
+func verifySelftestShipCILogFixedThenMerged(msgs []store.MessageRow) error {
+	var sawPROpened, sawFixRequested, sawFixLanded bool
+	for i := range msgs {
+		if msgs[i].Type != "update" {
+			continue
+		}
+		switch {
+		case strings.HasPrefix(msgs[i].Body, "pr opened "):
+			sawPROpened = true
+		case strings.HasPrefix(msgs[i].Body, "fix requested ci_log after run ") && sawPROpened:
+			sawFixRequested = true
+		case strings.HasPrefix(msgs[i].Body, "fix landed ") && sawFixRequested && !sawFixLanded:
+			sawFixLanded = true
+		}
+	}
+	switch {
+	case !sawPROpened:
+		return errors.New(`e2e: no "pr opened" marker, want PUBLISH to open a draft pull request (PKG9-PLAN.md section 19.4 task 8)`)
+	case !sawFixRequested:
+		return errors.New(`e2e: no "fix requested ci_log" marker after the pull request opened, want POLL to request a fix once CI failed`)
+	case !sawFixLanded:
+		return errors.New(`e2e: no "fix landed" marker after the ci_log fix request, want the fix to land`)
 	}
 	return nil
 }
