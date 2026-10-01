@@ -759,3 +759,167 @@ func TestAllowsTLSDownload(t *testing.T) {
 		t.Errorf("curl https://proxy.golang.org under the profile: exit %d, want 0 (output %q)", exitCode, out)
 	}
 }
+
+// ---- the judge profile (PKG9-PLAN.md section 4.7, 7.3, D19, D27; M2 task 2) ----
+
+// newLoadedJudgeSandbox reads the real, checked-in sandbox/judge.sb through
+// zing.Assets and loads it with no extra read paths, on port 7422 (distinct
+// from newLoadedSandbox's 7420 and newLoadedReadonlySandbox's 7421, so a
+// test using more than one profile at once never collides), failing the
+// test if the profile does not load on this machine.
+func newLoadedJudgeSandbox(t *testing.T) Sandbox {
+	t.Helper()
+	requireNotSandboxed(t)
+
+	profile, err := zing.Assets.ReadFile("sandbox/judge.sb")
+	if err != nil {
+		t.Fatalf("read sandbox/judge.sb: %v", err)
+	}
+	sb := LoadProfile(profileNameJudge, profile, t.TempDir(), nil, 7422)
+	if !sb.Available() {
+		t.Fatalf("LoadProfile(judge): unavailable, reason %q", sb.Reason())
+	}
+	return sb
+}
+
+// judgeParams returns dirs' own Params with the judge profile's two extra
+// fields filled (section 4.7): a scenarios file under DATA_DIR, at the
+// same "judge/<run_id>/scenarios.xml" shape a real run uses (section 7.3),
+// so a test actually exercises the literal carve-out against DATA_DIR's
+// own blanket deny -- RUN_DIR itself sits under CACHE_ROOT, which build.sb
+// already allows reading whole, so a scenarios file placed there would
+// prove nothing about the literal rule. CodexHome is a directory distinct
+// from both, so a CODEX_HOME write test and a RUN_DIR write test can never
+// be confused for each other.
+func (d testDirs) judgeParams(t *testing.T) Params {
+	t.Helper()
+	p := d.params()
+	scenariosDir := filepath.Join(d.dataDir, "judge", "1")
+	if err := os.MkdirAll(scenariosDir, 0o700); err != nil {
+		t.Fatalf("mkdir %s: %v", scenariosDir, err)
+	}
+	p.ScenariosFile = filepath.Join(scenariosDir, "scenarios.xml")
+	if err := os.WriteFile(p.ScenariosFile, []byte("<scenarios/>\n"), 0o600); err != nil {
+		t.Fatalf("write %s: %v", p.ScenariosFile, err)
+	}
+	p.CodexHome = filepath.Join(filepath.Dir(d.runDir), "codex-home")
+	if err := os.MkdirAll(p.CodexHome, 0o700); err != nil {
+		t.Fatalf("mkdir %s: %v", p.CodexHome, err)
+	}
+	return p
+}
+
+func TestJudgeProfileLoads(t *testing.T) {
+	sb := newLoadedJudgeSandbox(t)
+	if !sb.Available() {
+		t.Fatalf("sandbox unavailable: %s", sb.Reason())
+	}
+}
+
+// TestJudgeAllowsCodexHomeWrite proves the judge profile allows a write
+// under its own CODEX_HOME parameter (section 7.3: "the CODEX_HOME write
+// allow sits after the global write deny"), while the same write under the
+// real ~/.codex stays denied, the same as build.sb.
+func TestJudgeAllowsCodexHomeWrite(t *testing.T) {
+	sb := newLoadedJudgeSandbox(t)
+	dirs := newTestDirs(t)
+	p := dirs.judgeParams(t)
+
+	target := filepath.Join(p.CodexHome, "auth.json")
+	if exitCode, out := runSandboxed(t, sb, p, "/usr/bin/touch", target); exitCode != 0 {
+		t.Fatalf("touch a CODEX_HOME file under the judge profile: exit %d, want 0 (output %q)", exitCode, out)
+	}
+	if _, err := os.Stat(target); err != nil {
+		t.Errorf("CODEX_HOME file was not created: %v", err)
+	}
+
+	realCodexHome := filepath.Join(p.Home, ".codex", "auth.json")
+	if err := os.MkdirAll(filepath.Dir(realCodexHome), 0o700); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if exitCode, out := runSandboxed(t, sb, p, "/usr/bin/touch", realCodexHome); exitCode == 0 {
+		t.Errorf("touch a file under the real ~/.codex under the judge profile: want a non-zero exit, got 0 (output %q)", out)
+	}
+}
+
+// TestJudgeCodexHomeRuleAfterDeny proves the rendered judge profile's
+// CODEX_HOME write allow line comes after "(deny file-write* (subpath
+// \"/\"))", the ordering section 7.3 requires for it to win (seatbelt:
+// later rules win).
+func TestJudgeCodexHomeRuleAfterDeny(t *testing.T) {
+	profile, err := zing.Assets.ReadFile("sandbox/judge.sb")
+	if err != nil {
+		t.Fatalf("read sandbox/judge.sb: %v", err)
+	}
+	text := string(profile)
+
+	denyIdx := strings.Index(text, `(deny file-write* (subpath "/"))`)
+	// LastIndex, not Index: judge.sb also allows reading CODEX_HOME (section
+	// 7.3's read block, before the write block this test cares about), so
+	// the write-allow's own CODEX_HOME line is the later of the two.
+	allowIdx := strings.LastIndex(text, `(subpath (param "CODEX_HOME"))`)
+	if denyIdx == -1 {
+		t.Fatal(`judge.sb does not carry (deny file-write* (subpath "/"))`)
+	}
+	if allowIdx == -1 {
+		t.Fatal(`judge.sb does not carry a (subpath (param "CODEX_HOME")) line`)
+	}
+	if allowIdx < denyIdx {
+		t.Errorf("the CODEX_HOME write allow (offset %d) comes before the global write deny (offset %d), want after", allowIdx, denyIdx)
+	}
+}
+
+// TestJudgeAllowsScenariosFileRead proves the judge profile's literal
+// SCENARIOS_FILE allow reaches the one file it names and nothing else in
+// the same directory (section 4.7, D19).
+func TestJudgeAllowsScenariosFileRead(t *testing.T) {
+	sb := newLoadedJudgeSandbox(t)
+	dirs := newTestDirs(t)
+	p := dirs.judgeParams(t)
+
+	if exitCode, out := runSandboxed(t, sb, p, "/bin/cat", p.ScenariosFile); exitCode != 0 {
+		t.Fatalf("cat SCENARIOS_FILE under the judge profile: exit %d, want 0 (output %q)", exitCode, out)
+	}
+
+	sibling := filepath.Join(filepath.Dir(p.ScenariosFile), "other.xml")
+	if err := os.WriteFile(sibling, []byte("not the scenarios file\n"), 0o600); err != nil {
+		t.Fatalf("write %s: %v", sibling, err)
+	}
+	if exitCode, out := runSandboxed(t, sb, p, "/bin/cat", sibling); exitCode == 0 {
+		t.Errorf("cat a sibling file next to SCENARIOS_FILE: want a non-zero exit, got 0 (output %q)", out)
+	}
+}
+
+// TestJudgeDeniesDatabase proves the judge profile denies zing.db under
+// DATA_DIR whole, the same as build.sb and readonly.sb (section 4.7, N6:
+// "No profile reads zing.db").
+func TestJudgeDeniesDatabase(t *testing.T) {
+	sb := newLoadedJudgeSandbox(t)
+	dirs := newTestDirs(t)
+	p := dirs.judgeParams(t)
+
+	f := filepath.Join(dirs.dataDir, "zing.db")
+	if err := os.WriteFile(f, []byte("scenario data"), 0o600); err != nil {
+		t.Fatalf("write %s: %v", f, err)
+	}
+	if exitCode, out := runSandboxed(t, sb, p, "/bin/cat", f); exitCode == 0 {
+		t.Errorf("cat zing.db under the judge profile: want a non-zero exit, got 0 (output %q)", out)
+	}
+}
+
+// TestJudgeDeniesZingToml proves the judge profile denies zing.toml the
+// same way (section 4.7: "Nothing else in DATA_DIR is readable: ... not
+// zing.toml (the GitHub token)").
+func TestJudgeDeniesZingToml(t *testing.T) {
+	sb := newLoadedJudgeSandbox(t)
+	dirs := newTestDirs(t)
+	p := dirs.judgeParams(t)
+
+	f := filepath.Join(dirs.dataDir, "zing.toml")
+	if err := os.WriteFile(f, []byte("github_token = \"secret\"\n"), 0o600); err != nil {
+		t.Fatalf("write %s: %v", f, err)
+	}
+	if exitCode, out := runSandboxed(t, sb, p, "/bin/cat", f); exitCode == 0 {
+		t.Errorf("cat zing.toml under the judge profile: want a non-zero exit, got 0 (output %q)", out)
+	}
+}

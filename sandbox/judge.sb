@@ -1,14 +1,13 @@
 (version 1)
 (allow default)
 
-; DRAFT (PKG9-PLAN.md section 7.3, M2 task 1). This is build.sb's own
-; rules plus the judge-only block below (SCENARIOS_FILE, CODEX_HOME, and
-; the ~/.claude / ~/.codex denies) and a replaced write block. M2 task 1's
-; own judge_probe_darwin_test.go is what proves this file: a failing probe
-; is the early exit of section 19.1 and 19.3, and the owner decides (D19,
-; D20) before M2 task 2 wires LoadProfile, Params, and Prefix to pass
-; SCENARIOS_FILE and CODEX_HOME for real. Do not load this profile for a
-; real judge run before that task lands.
+; PKG9-PLAN.md section 7.3. This is build.sb's own rules plus the
+; judge-only block below (SCENARIOS_FILE, CODEX_HOME, and the ~/.claude /
+; ~/.codex denies) and a replaced write block. M2 task 1's own
+; judge_probe_darwin_test.go proves this file on the host (D19, D20); M2
+; task 2 wires LoadProfile, Params, and Prefix to pass SCENARIOS_FILE and
+; CODEX_HOME for real (internal/sandbox) and loads it from serve
+; (cmd/zing/serve.go).
 
 ; Reads in home are denied by default, then allowed by name. No profile
 ; reads the keychain (PKG9-PLAN.md D26, N2): the Claude CLI logs in with

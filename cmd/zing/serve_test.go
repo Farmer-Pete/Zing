@@ -122,10 +122,31 @@ func newTestGitRepo(t *testing.T) string {
 	return dir
 }
 
+// writeTestJudgeCodexHome creates a judge_codex_home folder, with an
+// auth.json inside, under dataDir (PKG9-PLAN.md section 4.5, 7.3, D27): a
+// sibling of dbPath, never under dataDir/tmp or dataDir/judge, so
+// resolveJudgeCodexHome and checkJudgeCodexLogin both accept it.
+func writeTestJudgeCodexHome(t *testing.T, dataDir string) string {
+	t.Helper()
+	dir := filepath.Join(dataDir, "codex-judge")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatalf("mkdir judge_codex_home: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "auth.json"), []byte("{}"), 0o600); err != nil {
+		t.Fatalf("write judge_codex_home/auth.json: %v", err)
+	}
+	return dir
+}
+
 // writeZingTOML writes a zing.toml built from opts to path, quoting each
 // Bind entry into a TOML array (an empty or nil Bind writes bind = []). The
 // one configured project's path is a fresh, real git repository
 // (newTestGitRepo), since serve now resolves its git common dir at startup.
+// judge_codex_home is set to a folder under path's own directory (every
+// caller's dataDir, since cfgPath and dbPath always share one t.TempDir()),
+// holding an auth.json, so checkJudgeCodexLogin passes and every existing
+// serve() test here stays green now that machine.toml's own judge job
+// needs it (PKG9-PLAN.md section 4.5, 7.3, D27).
 func writeZingTOML(t *testing.T, path string, opts zingTOMLOpts) {
 	t.Helper()
 
@@ -133,11 +154,13 @@ func writeZingTOML(t *testing.T, path string, opts zingTOMLOpts) {
 	for i, b := range opts.Bind {
 		bindItems[i] = strconv.Quote(b)
 	}
+	judgeCodexHome := writeTestJudgeCodexHome(t, filepath.Dir(path))
 
 	doc := fmt.Sprintf(`
 user = "test-user"
 github_token = "test-github-token"
 claude_oauth_token = "test-claude-oauth-token"
+judge_codex_home = %q
 
 [console]
 bind = [%s]
@@ -153,7 +176,7 @@ repo = "x/zing"
 path = %q
 tracker = "github"
 commands = { test = "go test ./...", lint = "golangci-lint run" }
-`, strings.Join(bindItems, ", "), opts.Port, opts.IntervalSeconds, opts.MaxParallel, newTestGitRepo(t))
+`, judgeCodexHome, strings.Join(bindItems, ", "), opts.Port, opts.IntervalSeconds, opts.MaxParallel, newTestGitRepo(t))
 
 	if err := os.WriteFile(path, []byte(doc), 0o600); err != nil {
 		t.Fatalf("write zing.toml: %v", err)
@@ -558,6 +581,246 @@ func TestServeRequiresClaudeOAuthToken(t *testing.T) {
 		}}
 		if err := checkClaudeOAuthToken(m, ""); err != nil {
 			t.Errorf("checkClaudeOAuthToken() = %v, want nil (no job uses the claude runtime)", err)
+		}
+	})
+}
+
+// ---- judge_codex_home (PKG9-PLAN.md section 4.5, 7.3, D27; M2 task 2) -----
+
+// resolvedTestDataDir returns dir's own symlink-resolved form, the same
+// way resolveJudgeCodexHome resolves dataDir before comparing: macOS's own
+// /var -> /private/var means t.TempDir() itself needs this before a test
+// builds its own "want" error text around it.
+func resolvedTestDataDir(t *testing.T, dir string) string {
+	t.Helper()
+	resolved, err := filepath.EvalSymlinks(dir)
+	if err != nil {
+		t.Fatalf("EvalSymlinks(%s): %v", dir, err)
+	}
+	return resolved
+}
+
+// TestJudgeCodexHomeEqualsDataDir proves judge_codex_home resolving to
+// DATA_DIR itself is refused with the exact error text (section 4.5's own
+// table).
+func TestJudgeCodexHomeEqualsDataDir(t *testing.T) {
+	t.Parallel()
+
+	dataDir := resolvedTestDataDir(t, t.TempDir())
+	_, err := resolveJudgeCodexHome(dataDir, dataDir)
+	if err == nil {
+		t.Fatal("resolveJudgeCodexHome: want an error, got nil")
+	}
+	want := fmt.Sprintf("serve: judge_codex_home %s must be a folder inside the data directory %s, not the data directory itself", dataDir, dataDir)
+	if err.Error() != want {
+		t.Errorf("resolveJudgeCodexHome() = %q, want %q", err.Error(), want)
+	}
+}
+
+// TestJudgeCodexHomeOutsideDataDir proves a judge_codex_home outside
+// DATA_DIR entirely is refused with the exact error text.
+func TestJudgeCodexHomeOutsideDataDir(t *testing.T) {
+	t.Parallel()
+
+	base := t.TempDir()
+	rawDataDir := filepath.Join(base, "data")
+	if err := os.MkdirAll(rawDataDir, 0o700); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	dataDir := resolvedTestDataDir(t, rawDataDir)
+	rawOutside := filepath.Join(base, "elsewhere")
+	if err := os.MkdirAll(rawOutside, 0o700); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	outside := resolvedTestDataDir(t, rawOutside)
+
+	_, err := resolveJudgeCodexHome(dataDir, rawOutside)
+	if err == nil {
+		t.Fatal("resolveJudgeCodexHome: want an error, got nil")
+	}
+	want := fmt.Sprintf("serve: judge_codex_home %s must be inside the data directory %s", outside, dataDir)
+	if err.Error() != want {
+		t.Errorf("resolveJudgeCodexHome() = %q, want %q", err.Error(), want)
+	}
+}
+
+// TestJudgeCodexHomePrefixSibling proves a judge_codex_home that merely
+// shares DATA_DIR's own name as a string prefix (".zing-other" beside
+// ".zing") is still refused, because filepath.Rel, not a string-prefix
+// check, is what decides this (section 4.5's own worked example).
+func TestJudgeCodexHomePrefixSibling(t *testing.T) {
+	t.Parallel()
+
+	base := resolvedTestDataDir(t, t.TempDir())
+	dataDir := filepath.Join(base, ".zing")
+	sibling := filepath.Join(base, ".zing-other")
+	if err := os.MkdirAll(dataDir, 0o700); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if err := os.MkdirAll(sibling, 0o700); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+
+	_, err := resolveJudgeCodexHome(dataDir, sibling)
+	if err == nil {
+		t.Fatal("resolveJudgeCodexHome: want an error, got nil")
+	}
+	want := fmt.Sprintf("serve: judge_codex_home %s must be inside the data directory %s", sibling, dataDir)
+	if err.Error() != want {
+		t.Errorf("resolveJudgeCodexHome() = %q, want %q", err.Error(), want)
+	}
+}
+
+// TestJudgeCodexHomeSymlinkOutside proves a judge_codex_home reached
+// through a symlink that really points outside DATA_DIR is refused: the
+// check runs against the kernel-resolved path, not the one zing.toml wrote
+// (mirroring internal/sandbox's own TestDeniesDataDirThroughSymlink).
+func TestJudgeCodexHomeSymlinkOutside(t *testing.T) {
+	t.Parallel()
+
+	base := resolvedTestDataDir(t, t.TempDir())
+	dataDir := filepath.Join(base, "data")
+	if err := os.MkdirAll(dataDir, 0o700); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	outside := filepath.Join(base, "outside")
+	if err := os.MkdirAll(outside, 0o700); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	link := filepath.Join(dataDir, "codex-judge-link")
+	if err := os.Symlink(outside, link); err != nil {
+		t.Fatalf("symlink: %v", err)
+	}
+
+	_, err := resolveJudgeCodexHome(dataDir, link)
+	if err == nil {
+		t.Fatal("resolveJudgeCodexHome: want an error, got nil")
+	}
+	want := fmt.Sprintf("serve: judge_codex_home %s must be inside the data directory %s", outside, dataDir)
+	if err.Error() != want {
+		t.Errorf("resolveJudgeCodexHome() = %q, want %q", err.Error(), want)
+	}
+}
+
+// TestJudgeCodexHomeUnderTmp proves a judge_codex_home under
+// <DATA_DIR>/tmp is refused: removeStartupTempRoots clears that folder
+// whole at startup.
+func TestJudgeCodexHomeUnderTmp(t *testing.T) {
+	t.Parallel()
+
+	dataDir := resolvedTestDataDir(t, t.TempDir())
+	// The "tmp" folder itself must exist for evalSymlinksAllowMissing to
+	// resolve underTmp's own parent; codex-judge, the folder
+	// judge_codex_home would actually name, is deliberately left
+	// uncreated, matching the "owner has not logged in yet" case.
+	if err := os.MkdirAll(filepath.Join(dataDir, "tmp"), 0o700); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	underTmp := filepath.Join(dataDir, "tmp", "codex-judge")
+
+	_, err := resolveJudgeCodexHome(dataDir, underTmp)
+	if err == nil {
+		t.Fatal("resolveJudgeCodexHome: want an error, got nil")
+	}
+	want := fmt.Sprintf("serve: judge_codex_home %s must not be inside %s, which serve clears at startup", underTmp, filepath.Join(dataDir, "tmp"))
+	if err.Error() != want {
+		t.Errorf("resolveJudgeCodexHome() = %q, want %q", err.Error(), want)
+	}
+}
+
+// TestJudgeCodexHomeUnderJudge proves a judge_codex_home under
+// <DATA_DIR>/judge is refused the same way: that is the per-run scenarios
+// folder serve also clears at startup (section 7.3).
+func TestJudgeCodexHomeUnderJudge(t *testing.T) {
+	t.Parallel()
+
+	dataDir := resolvedTestDataDir(t, t.TempDir())
+	if err := os.MkdirAll(filepath.Join(dataDir, "judge"), 0o700); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	underJudge := filepath.Join(dataDir, "judge", "codex-judge")
+
+	_, err := resolveJudgeCodexHome(dataDir, underJudge)
+	if err == nil {
+		t.Fatal("resolveJudgeCodexHome: want an error, got nil")
+	}
+	want := fmt.Sprintf("serve: judge_codex_home %s must not be inside %s, which serve clears at startup", underJudge, filepath.Join(dataDir, "judge"))
+	if err.Error() != want {
+		t.Errorf("resolveJudgeCodexHome() = %q, want %q", err.Error(), want)
+	}
+}
+
+// TestServeSetsJudgeCodexHome proves a valid judge_codex_home -- a real
+// folder inside DATA_DIR, not under tmp or judge -- resolves cleanly to
+// its own symlink-resolved path, the value serve threads into
+// dispatch.Config.JudgeCodexHome.
+func TestServeSetsJudgeCodexHome(t *testing.T) {
+	t.Parallel()
+
+	dataDir := resolvedTestDataDir(t, t.TempDir())
+	judgeCodexHome := filepath.Join(dataDir, "codex-judge")
+	if err := os.MkdirAll(judgeCodexHome, 0o700); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+
+	got, err := resolveJudgeCodexHome(dataDir, judgeCodexHome)
+	if err != nil {
+		t.Fatalf("resolveJudgeCodexHome: %v", err)
+	}
+	if got != judgeCodexHome {
+		t.Errorf("resolveJudgeCodexHome() = %q, want %q", got, judgeCodexHome)
+	}
+}
+
+// TestServeRequiresJudgeCodexLogin proves checkJudgeCodexLogin requires
+// <judge_codex_home>/auth.json to exist when jobs.judge's runtime is
+// codex, with the exact error naming the missing file and the login
+// command to run; a job named "judge" with another runtime, or no judge
+// job at all, needs no login.
+func TestServeRequiresJudgeCodexLogin(t *testing.T) {
+	t.Parallel()
+
+	t.Run("not logged in", func(t *testing.T) {
+		t.Parallel()
+		m, err := machine.Load(zing.Assets, "machine.toml")
+		if err != nil {
+			t.Fatalf("machine.Load: %v", err)
+		}
+		judgeCodexHome := t.TempDir()
+
+		err = checkJudgeCodexLogin(m, judgeCodexHome)
+		if err == nil {
+			t.Fatal("checkJudgeCodexLogin: want an error, got nil")
+		}
+		want := fmt.Sprintf("serve: judge Codex is not logged in: %s not found; run CODEX_HOME=%s codex login",
+			filepath.Join(judgeCodexHome, "auth.json"), judgeCodexHome)
+		if err.Error() != want {
+			t.Errorf("checkJudgeCodexLogin() = %q, want %q", err.Error(), want)
+		}
+	})
+
+	t.Run("logged in", func(t *testing.T) {
+		t.Parallel()
+		m, err := machine.Load(zing.Assets, "machine.toml")
+		if err != nil {
+			t.Fatalf("machine.Load: %v", err)
+		}
+		judgeCodexHome := t.TempDir()
+		if err := os.WriteFile(filepath.Join(judgeCodexHome, "auth.json"), []byte("{}"), 0o600); err != nil {
+			t.Fatalf("write auth.json: %v", err)
+		}
+		if err := checkJudgeCodexLogin(m, judgeCodexHome); err != nil {
+			t.Errorf("checkJudgeCodexLogin() = %v, want nil", err)
+		}
+	})
+
+	t.Run("no judge job needs no login", func(t *testing.T) {
+		t.Parallel()
+		m := &machine.Machine{Jobs: map[string]machine.Job{
+			"build": {Runtime: runtimeNameClaude},
+		}}
+		if err := checkJudgeCodexLogin(m, filepath.Join(t.TempDir(), "never-created")); err != nil {
+			t.Errorf("checkJudgeCodexLogin() = %v, want nil (no judge job at all)", err)
 		}
 	})
 }

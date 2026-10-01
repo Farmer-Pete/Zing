@@ -30,15 +30,23 @@ type Config struct {
 	// rule (non-empty, no minimum length). serve requires it, right after
 	// machine.toml loads, when any job's runtime is "claude"; config.Load
 	// itself cannot enforce that, since it never reads machine.toml.
-	ClaudeOAuthToken string    `toml:"claude_oauth_token"`
-	Console          Console   `toml:"console"`
-	Models           Models    `toml:"models"`
-	Dispatch         Dispatch  `toml:"dispatch"`
-	Budget           Budget    `toml:"budget"`
-	Review           Review    `toml:"review"`
-	Merge            Merge     `toml:"merge"`
-	Sandbox          Sandbox   `toml:"sandbox"`
-	Projects         []Project `toml:"projects"`
+	ClaudeOAuthToken string `toml:"claude_oauth_token"`
+	// JudgeCodexHome is judge_codex_home (PKG9-PLAN.md section 4.5, D27):
+	// the judge's own persistent Codex home, so its login and session
+	// files survive across runs instead of a fresh home each time. `~`
+	// expanded here; default "~/.zing/codex-judge", also expanded. Must be
+	// absolute after expansion. serve alone checks it sits inside DATA_DIR
+	// and holds auth.json (config.Load never reads machine.toml or
+	// DATA_DIR, so it cannot make either check itself).
+	JudgeCodexHome string    `toml:"judge_codex_home"`
+	Console        Console   `toml:"console"`
+	Models         Models    `toml:"models"`
+	Dispatch       Dispatch  `toml:"dispatch"`
+	Budget         Budget    `toml:"budget"`
+	Review         Review    `toml:"review"`
+	Merge          Merge     `toml:"merge"`
+	Sandbox        Sandbox   `toml:"sandbox"`
+	Projects       []Project `toml:"projects"`
 }
 
 // Sandbox is the [sandbox] table (PKG8-PLAN.md section 5.4): ReadPaths
@@ -209,6 +217,13 @@ func load(path string, allowEmptyProjects bool) (*Config, error) {
 	if err := checkRequiredKeys(cfg, allowEmptyProjects); err != nil {
 		return nil, err
 	}
+	// Resolved before checkValues, which needs to see judge_codex_home
+	// already ~-expanded: an explicit "~/..." value must be checked for
+	// being absolute only after expansion, and the error it reports should
+	// name the expanded path, not the literal "~" zing.toml wrote.
+	if err := resolveJudgeCodexHome(md, &cfg); err != nil {
+		return nil, err
+	}
 	if err := checkValues(md, cfg); err != nil {
 		return nil, err
 	}
@@ -216,6 +231,51 @@ func load(path string, allowEmptyProjects bool) (*Config, error) {
 	applyDefaults(md, &cfg)
 
 	return &cfg, nil
+}
+
+// defaultJudgeCodexHomeRel is judge_codex_home's own default, relative to
+// the user's home directory (PKG9-PLAN.md section 4.5, D27): "~/.zing/codex-judge".
+const defaultJudgeCodexHomeRel = ".zing/codex-judge"
+
+// resolveJudgeCodexHome fills cfg.JudgeCodexHome: an explicit value gets
+// its leading "~" expanded (expandHome), the default
+// "~/.zing/codex-judge" otherwise, already expanded, so both land
+// absolute (PKG9-PLAN.md section 4.5). checkValues' own absolute check
+// below only ever sees an explicit value, since the default is
+// constructed absolute here.
+func resolveJudgeCodexHome(md toml.MetaData, cfg *Config) error {
+	if md.IsDefined("judge_codex_home") {
+		expanded, err := expandHome(cfg.JudgeCodexHome)
+		if err != nil {
+			return fmt.Errorf("zing.toml: judge_codex_home: %w", err)
+		}
+		cfg.JudgeCodexHome = expanded
+		return nil
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return fmt.Errorf("zing.toml: judge_codex_home: resolve home directory: %w", err)
+	}
+	cfg.JudgeCodexHome = filepath.Join(home, filepath.FromSlash(defaultJudgeCodexHomeRel))
+	return nil
+}
+
+// expandHome replaces a leading "~" (exactly "~", or "~/..." ) in path with
+// the user's home directory, the one tilde-expansion shape zing.toml ever
+// needs (no "~user" form). A path with no leading "~" is returned
+// unchanged.
+func expandHome(path string) (string, error) {
+	if path != "~" && !strings.HasPrefix(path, "~/") {
+		return path, nil
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", fmt.Errorf("resolve home directory: %w", err)
+	}
+	if path == "~" {
+		return home, nil
+	}
+	return filepath.Join(home, path[2:]), nil
 }
 
 // permissiveMode is the bit set that makes a file group- or other-readable.
@@ -421,6 +481,11 @@ func checkValues(md toml.MetaData, cfg Config) error {
 	if md.IsDefined("review", "max_lenses_parallel") &&
 		(cfg.Review.MaxLensesParallel < minLensesParallel || cfg.Review.MaxLensesParallel > maxLensesParallel) {
 		return fmt.Errorf("zing.toml: review.max_lenses_parallel: must be %d to %d", minLensesParallel, maxLensesParallel)
+	}
+	// Only when explicit: resolveJudgeCodexHome already built an absolute
+	// default (PKG9-PLAN.md section 4.5, D27).
+	if md.IsDefined("judge_codex_home") && !filepath.IsAbs(cfg.JudgeCodexHome) {
+		return errors.New("zing.toml: judge_codex_home must be an absolute path")
 	}
 	for i := range cfg.Projects {
 		if p := &cfg.Projects[i]; p.Tracker != "github" {

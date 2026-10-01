@@ -735,6 +735,118 @@ func TestRunJobPicksProfileByName(t *testing.T) {
 	}
 }
 
+// testJudgeTestJob is the machine.toml job name TestRunJobJudgeParamsCodexHome
+// and TestRunJobJudgeEmptyCodexHomeIsConfigError both register, a copy of
+// the build job with its own Sandbox set to "judge" (goconst: shared by
+// both).
+const testJudgeTestJob = "judge-test-job"
+
+// newJudgeProfileJob returns a machine.Machine whose own testJudgeTestJob
+// entry is a copy of testJobBuild with Sandbox set to "judge", for a test
+// that exercises runJob's own CODEX_HOME wiring (PKG9-PLAN.md section 7.3,
+// D27) without needing the real judge.sb profile or a scenarios file: the
+// Sandbox this test slots into Deps.Sandboxes.Judge is loaded under the
+// name "build" (loadTestSandboxOrSkip), so sandbox.Prefix's own
+// judge-name-keyed "SCENARIOS_FILE and CODEX_HOME together" rule never
+// triggers, the same way TestRunJobPicksProfileByName reuses a sandbox
+// loaded under one name for a different Deps.Sandboxes slot.
+func newJudgeProfileJob(t *testing.T) *machine.Machine {
+	t.Helper()
+	m := runJobTestMachine(t)
+	judgeJob := m.Jobs[testJobBuild]
+	judgeJob.Sandbox = sandboxProfileJudge
+	m.Jobs[testJudgeTestJob] = judgeJob
+	return m
+}
+
+// TestRunJobJudgeParamsCodexHome proves runJob's applySandbox step fills
+// Params.CodexHome from Deps.JudgeCodexHome for a job whose profile is
+// "judge" (PKG9-PLAN.md section 7.3, D27): the sandbox-exec prefix carries
+// "-D CODEX_HOME=<value>".
+func TestRunJobJudgeParamsCodexHome(t *testing.T) {
+	judgeSB := loadTestSandboxOrSkip(t)
+
+	s := newRunJobTestStore(t)
+	ticketID := seedRunJobTicket(t, s)
+	ticket := getRunJobTicket(t, s, ticketID)
+	owner, expires := claimRunJobTicket(t, s, ticketID)
+
+	m := newJudgeProfileJob(t)
+	scripts := fstest.MapFS{testBuildScriptKey: &fstest.MapFile{Data: []byte(buildOkXML)}}
+	counting := &countingRuntime{rt: runtime.NewFake(scripts)}
+	set, err := runtime.NewSet(map[string]runtime.Runtime{testRuntimeClaude: counting, testRuntimeCodex: counting, runtimeFake: counting})
+	if err != nil {
+		t.Fatalf("runtime.NewSet: %v", err)
+	}
+
+	const wantJudgeCodexHome = "/test/judge/codex/home"
+	deps := Deps{
+		Store: s, Runtimes: set, Machine: m,
+		Models: map[string]string{testModelAlias: testModelExact, testModelAliasOpus: testModelExact, testModelAliasFable: testModelExact, testRuntimeCodex: testModelExact},
+		Budget: time.Hour, Owner: owner, Expires: expires, Reserve: realReserve(s, owner, expires),
+		Projects:       map[int64]Project{ticket.ProjectID: {RepoGit: t.TempDir()}},
+		Sandboxes:      sandbox.Set{Build: sandbox.Off(), Judge: judgeSB},
+		RequireSandbox: true,
+		JudgeCodexHome: wantJudgeCodexHome,
+	}
+
+	_, err = runJob(t.Context(), deps, ticket, testJudgeTestJob, store.SessionUpsert{Job: testJudgeTestJob, Runtime: testRuntimeCodex},
+		runtime.RunRequest{Job: response.JobBuild, Label: testBuildLabel, WorkDir: t.TempDir()}, nil, nil)
+	if err != nil {
+		t.Fatalf("runJob: %v", err)
+	}
+	wantFlag := "CODEX_HOME=" + wantJudgeCodexHome
+	if !slices.Contains(counting.lastReq.ExecPrefix, wantFlag) {
+		t.Errorf("ExecPrefix = %v, want it to contain %q", counting.lastReq.ExecPrefix, wantFlag)
+	}
+}
+
+// TestRunJobJudgeEmptyCodexHomeIsConfigError proves a judge-profile job
+// with an empty Deps.JudgeCodexHome refuses to run at all, before any
+// reserve, with the exact error text (PKG9-PLAN.md section 7.3, D27).
+func TestRunJobJudgeEmptyCodexHomeIsConfigError(t *testing.T) {
+	judgeSB := loadTestSandboxOrSkip(t)
+
+	s := newRunJobTestStore(t)
+	ticketID := seedRunJobTicket(t, s)
+	ticket := getRunJobTicket(t, s, ticketID)
+	owner, expires := claimRunJobTicket(t, s, ticketID)
+
+	m := newJudgeProfileJob(t)
+	counting := &countingRuntime{rt: runtime.NewFake(fstest.MapFS{})}
+	set, err := runtime.NewSet(map[string]runtime.Runtime{testRuntimeClaude: counting, testRuntimeCodex: counting, runtimeFake: counting})
+	if err != nil {
+		t.Fatalf("runtime.NewSet: %v", err)
+	}
+
+	rec := &recordingReserve{fn: realReserve(s, owner, expires)}
+	deps := Deps{
+		Store: s, Runtimes: set, Machine: m,
+		Models: map[string]string{testModelAlias: testModelExact, testModelAliasOpus: testModelExact, testModelAliasFable: testModelExact, testRuntimeCodex: testModelExact},
+		Budget: time.Hour, Owner: owner, Expires: expires, Reserve: rec.Reserve,
+		Projects:       map[int64]Project{ticket.ProjectID: {RepoGit: t.TempDir()}},
+		Sandboxes:      sandbox.Set{Build: sandbox.Off(), Judge: judgeSB},
+		RequireSandbox: true,
+		// JudgeCodexHome left empty.
+	}
+
+	_, err = runJob(t.Context(), deps, ticket, testJudgeTestJob, store.SessionUpsert{Job: testJudgeTestJob, Runtime: testRuntimeCodex},
+		runtime.RunRequest{Job: response.JobBuild, Label: testBuildLabel, WorkDir: t.TempDir()}, nil, nil)
+	if !errors.Is(err, ErrConfig) {
+		t.Fatalf("err = %v, want errors.Is(err, ErrConfig)", err)
+	}
+	want := "job: configuration error: judge codex home is not configured"
+	if err.Error() != want {
+		t.Errorf("err = %q, want %q", err.Error(), want)
+	}
+	if rec.calls != 0 {
+		t.Errorf("Reserve calls = %d, want 0", rec.calls)
+	}
+	if counting.calls != 0 {
+		t.Errorf("runtime Run calls = %d, want 0", counting.calls)
+	}
+}
+
 // TestRunJobUnknownProfileIsConfigError proves a job whose machine.toml
 // sandbox name Set.For does not recognize is ErrConfig, with nothing
 // reserved and the runtime never called (PKG9-PLAN.md section 4.7): this

@@ -68,6 +68,8 @@ tools = ["read", "grep", "glob", "bash"]
 prompt = "prompts/judge.md"
 timeout_minutes = 45
 max_loops = 2
+max_resumes = 2
+sandbox = "judge"
 
 [jobs.respond]
 model = "sonnet"

@@ -83,6 +83,12 @@ type Deps struct {
 	// flight at once (PKG9-PLAN.md section 4.3, 6.2): config.Review's own
 	// max_lenses_parallel, 1..7. Wired by dispatch.Config.LensesParallel.
 	LensesParallel int
+	// JudgeCodexHome is the resolved judge_codex_home (PKG9-PLAN.md section
+	// 4.3, 4.5, D27): the judge's own persistent Codex home, copied into
+	// the sandbox's CODEX_HOME parameter for any job whose profile is
+	// "judge" (runjob.go). Empty for a judge run is ErrConfig. Wired by
+	// dispatch.Config.JudgeCodexHome.
+	JudgeCodexHome string
 }
 
 // Project is what building needs to know about one store project (design

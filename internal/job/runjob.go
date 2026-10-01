@@ -104,7 +104,7 @@ func runJob(
 		if !ok {
 			return runResult{}, fmt.Errorf("%w: job %s: unknown sandbox profile %q", ErrConfig, jobName, jobCfg.Sandbox)
 		}
-		cleanup, sandboxErr := applySandbox(sb, d, t, req.WorkDir, &req)
+		cleanup, sandboxErr := applySandbox(sb, d, t, jobCfg.Sandbox, req.WorkDir, &req)
 		// Deferred unconditionally, even on a returned error: applySandbox
 		// never returns a nil cleanup (noopCleanup stands in when there is
 		// nothing to remove). Runs after rt.Run has returned, below: the run
@@ -206,26 +206,40 @@ const fixRunLabel = "fix"
 // the (nil, nil) shape (nilnil), and runJob can defer it unconditionally.
 func noopCleanup() {}
 
+// sandboxProfileJudge is the one machine.toml job.sandbox value that takes
+// Deps.JudgeCodexHome (PKG9-PLAN.md section 4.3, 4.7, 7.3, D27):
+// machine.go's own validateJob already refuses any job.sandbox value but
+// "", "build", "readonly", or "judge", so this is the one of those four
+// applySandbox ever treats specially.
+const sandboxProfileJudge = "judge"
+
 // applySandbox is design section 5.5's sandbox step, run after WorkDir,
 // Tools, and Timeout are filled and before Reserve, for any job whose
-// machine.toml entry names a sandbox. With the sandbox available, it
-// reserves a fresh run directory, builds req's ExecPrefix and appends its
-// Env, all from d.Projects[t.ProjectID]'s own RepoGit, and returns the run
-// directory's cleanup for the caller to defer (nothing is reserved yet, so
-// runJob's own defer chain, not this function, decides when it runs). It
-// also overwrites req.WorkDir with the sandbox's own resolved worktree
-// (ParamsFor's Worktree), so the CLI runs with its working directory equal
-// to the path the profile's WORKTREE rule and TRANSCRIPTS folder actually
-// name, not a path that reaches the same directory through a symlink (task
-// 16a: a worktree under macOS's own /var -> /private/var symlink otherwise
-// fails every write with EPERM, since seatbelt matches subpath against the
-// resolved path). With the sandbox unavailable, it returns ErrSandbox when
-// d.RequireSandbox, or noopCleanup and no error for a suite on the fake
-// runtime. Every failure short of an unavailable-and-required sandbox is a
-// configuration error (design section 5.5): a job named a sandbox but this
-// process has no Project row for the ticket, or the sandbox's own run-dir,
-// param, or prefix calls failed.
-func applySandbox(sb sandbox.Sandbox, d Deps, t store.Ticket, workDir string, req *runtime.RunRequest) (cleanup func(), err error) {
+// machine.toml entry names a sandbox (profileName, jobCfg.Sandbox). With
+// the sandbox available, it reserves a fresh run directory, builds req's
+// ExecPrefix and appends its Env, all from d.Projects[t.ProjectID]'s own
+// RepoGit, and returns the run directory's cleanup for the caller to defer
+// (nothing is reserved yet, so runJob's own defer chain, not this
+// function, decides when it runs). It also overwrites req.WorkDir with
+// the sandbox's own resolved worktree (ParamsFor's Worktree), so the CLI
+// runs with its working directory equal to the path the profile's
+// WORKTREE rule and TRANSCRIPTS folder actually name, not a path that
+// reaches the same directory through a symlink (task 16a: a worktree
+// under macOS's own /var -> /private/var symlink otherwise fails every
+// write with EPERM, since seatbelt matches subpath against the resolved
+// path). For profileName == "judge" (PKG9-PLAN.md section 7.3, D27), it
+// also fills Params.CodexHome from d.JudgeCodexHome, itself ErrConfig
+// ("job: judge codex home is not configured") when empty, checked before
+// Prefix's own deeper, profile-agnostic "both or neither" rule
+// (sandbox.errJudgeParamsIncomplete) so a misconfigured zing.toml is
+// reported with this clearer text. With the sandbox unavailable, it
+// returns ErrSandbox when d.RequireSandbox, or noopCleanup and no error
+// for a suite on the fake runtime. Every failure short of an
+// unavailable-and-required sandbox is a configuration error (design
+// section 5.5): a job named a sandbox but this process has no Project row
+// for the ticket, or the sandbox's own run-dir, param, or prefix calls
+// failed.
+func applySandbox(sb sandbox.Sandbox, d Deps, t store.Ticket, profileName, workDir string, req *runtime.RunRequest) (cleanup func(), err error) {
 	if !sb.Available() {
 		if d.RequireSandbox {
 			return noopCleanup, ErrSandbox
@@ -248,6 +262,15 @@ func applySandbox(sb sandbox.Sandbox, d Deps, t store.Ticket, workDir string, re
 		cleanup()
 		return noopCleanup, fmt.Errorf("%w: sandbox params: %v", ErrConfig, err) //nolint:errorlint // see above
 	}
+
+	if profileName == sandboxProfileJudge {
+		if d.JudgeCodexHome == "" {
+			cleanup()
+			return noopCleanup, fmt.Errorf("%w: judge codex home is not configured", ErrConfig)
+		}
+		p.CodexHome = d.JudgeCodexHome
+	}
+
 	prefix, err := sb.Prefix(p)
 	if err != nil {
 		cleanup()

@@ -15,8 +15,10 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strconv"
+	"strings"
 	"syscall"
 	"time"
 
@@ -203,6 +205,22 @@ func serve(ctx context.Context, cfgPath, dbPath string, seedDemo bool) error {
 		return err
 	}
 
+	// judge_codex_home (PKG9-PLAN.md section 4.5, 7.3, D27): resolved and
+	// checked right here too, before the sandbox set loads, so the judge
+	// profile never loads against a CODEX_HOME that cannot possibly be
+	// right. dataDir is computed here, ahead of its other use further
+	// down, because this check needs it too.
+	dataDir := filepath.Dir(dbPath)
+	judgeCodexHome, err := resolveJudgeCodexHome(dataDir, cfg.JudgeCodexHome)
+	if err != nil {
+		_ = st.Close()
+		return err
+	}
+	if err = checkJudgeCodexLogin(m, judgeCodexHome); err != nil {
+		_ = st.Close()
+		return err
+	}
+
 	// Production wires the two real runtimes, claude and codex, and nothing
 	// else: no fake in production (design D2, section 4.1; task 14).
 	// selftest and the dispatch/console e2e suites are the only remaining
@@ -236,7 +254,6 @@ func serve(ctx context.Context, cfgPath, dbPath string, seedDemo bool) error {
 	// (serveRequireSandbox, N9): an unavailable sandbox never runs a real
 	// build or review unwrapped, it fails every sandboxed tick closed
 	// instead (routeFailure's own ErrSandbox case).
-	dataDir := filepath.Dir(dbPath)
 	sbSet, err := serveSandbox(cfg, dataDir) //nolint:contextcheck // sandbox.Load's signature is fixed by PKG8-PLAN.md section 5.4 and carries no context.Context; the one exec.CommandContext call in its call chain (host_darwin.go) is bounded by its own fixed timeout instead
 	if err != nil {
 		_ = st.Close()
@@ -285,6 +302,7 @@ func serve(ctx context.Context, cfgPath, dbPath string, seedDemo bool) error {
 		Commands:       job.NewCommandRunner(sbSet.Build, serveRequireSandbox),
 		DataDir:        dataDir,
 		LensesParallel: cfg.Review.MaxLensesParallel,
+		JudgeCodexHome: judgeCodexHome,
 	}, rts)
 	if err != nil {
 		_ = st.Close()
@@ -370,12 +388,12 @@ const serveRequireSandbox = true
 
 // serveSandbox loads the seatbelt profile set every sandboxed job's run is
 // wrapped in (design section 5.1, 5.5, 10; PKG9-PLAN.md section 4.7): the
-// checked-in, embedded sandbox/build.sb and sandbox/readonly.sb, each with
-// cfg.Sandbox.ReadPaths and cfg.Console.Port. LoadProfile never errors -- a
-// failure is recorded as unavailable, with one of section 5.4's four closed
-// reasons -- so the only error this can return is reading an embedded
-// profile itself, which would mean the binary was built without it. Judge
-// is NotLoaded() in M1: M2 task 2 adds judge.sb and its own load.
+// checked-in, embedded sandbox/build.sb, sandbox/readonly.sb, and
+// sandbox/judge.sb, each with cfg.Sandbox.ReadPaths and cfg.Console.Port.
+// LoadProfile never errors -- a failure is recorded as unavailable, with
+// one of section 5.4's four closed reasons -- so the only error this can
+// return is reading an embedded profile itself, which would mean the
+// binary was built without it.
 func serveSandbox(cfg *config.Config, dataDir string) (sandbox.Set, error) {
 	buildProfile, err := zing.Assets.ReadFile("sandbox/build.sb")
 	if err != nil {
@@ -385,16 +403,21 @@ func serveSandbox(cfg *config.Config, dataDir string) (sandbox.Set, error) {
 	if err != nil {
 		return sandbox.Set{}, fmt.Errorf("serve: read embedded sandbox profile: %w", err)
 	}
+	judgeProfile, err := zing.Assets.ReadFile("sandbox/judge.sb")
+	if err != nil {
+		return sandbox.Set{}, fmt.Errorf("serve: read embedded sandbox profile: %w", err)
+	}
 
 	build := loadNamedSandbox("build", buildProfile, cfg, dataDir)
 	readonly := loadNamedSandbox("readonly", readonlyProfile, cfg, dataDir)
+	judge := loadNamedSandbox("judge", judgeProfile, cfg, dataDir)
 
-	return sandbox.Set{Build: build, ReadOnly: readonly, Judge: sandbox.NotLoaded()}, nil
+	return sandbox.Set{Build: build, ReadOnly: readonly, Judge: judge}, nil
 }
 
 // loadNamedSandbox loads one profile through sandbox.LoadProfile and logs
-// whether it came up, naming the profile so serveSandbox's two calls (and,
-// from M2 on, a third for judge) are told apart in the log.
+// whether it came up, naming the profile so serveSandbox's three calls are
+// told apart in the log.
 func loadNamedSandbox(name string, profile []byte, cfg *config.Config, dataDir string) sandbox.Sandbox {
 	sb := sandbox.LoadProfile(name, profile, dataDir, cfg.Sandbox.ReadPaths, cfg.Console.Port)
 	if sb.Available() {
@@ -448,6 +471,94 @@ func checkClaudeOAuthToken(m *machine.Machine, token string) error {
 		if m.Jobs[name].Runtime == runtimeNameClaude {
 			return fmt.Errorf("serve: zing.toml: missing required key claude_oauth_token (machine.toml job %s uses the claude runtime)", name)
 		}
+	}
+	return nil
+}
+
+// judgeDataDirSweptFolders are the two folders under DATA_DIR serve clears
+// at startup (removeStartupTempRoots's own "tmp", and
+// removeStartupJudgeDir's own "judge", PKG9-PLAN.md section 4.5, 7.3): a
+// judge_codex_home under either would be removed out from under a running
+// judge the moment serve restarts, so resolveJudgeCodexHome refuses both.
+var judgeDataDirSweptFolders = []string{"tmp", "judge"}
+
+// resolveJudgeCodexHome resolves judgeCodexHome's own symlinks (a missing
+// folder -- the owner has not logged in there yet -- resolves its parent
+// instead, then appends the folder's own base name back, since
+// filepath.EvalSymlinks fails outright on a path that does not exist) and
+// checks it names a real subfolder of dataDir (PKG9-PLAN.md section 4.5,
+// D27): not dataDir itself, not a path outside it (a sibling whose name
+// merely shares a prefix included, since filepath.Rel is what actually
+// decides this, not a string-prefix check), and not inside either folder
+// serve sweeps at startup. dataDir is serve's own resolved data directory
+// (filepath.Dir(dbPath)); every build and readonly profile denies it
+// whole, so a judge home anywhere else could leak the sealed scenarios a
+// judge's own Codex session can quote to a build or review run.
+func resolveJudgeCodexHome(dataDir, judgeCodexHome string) (string, error) {
+	// dataDir is resolved too, not just judgeCodexHome: macOS's own /var ->
+	// /private/var symlink (task 16a's own lesson, internal/sandbox) means
+	// an unresolved dataDir and a resolved judgeCodexHome would otherwise
+	// compare unequal paths that are really the same directory. dataDir
+	// already exists (it is where zing.db lives), so a resolve failure
+	// here is a real error, unlike judgeCodexHome's own "not logged in
+	// yet" allowance below.
+	resolvedDataDir, err := filepath.EvalSymlinks(dataDir)
+	if err != nil {
+		return "", fmt.Errorf("serve: resolve data directory %s: %w", dataDir, err)
+	}
+
+	resolved, err := evalSymlinksAllowMissing(judgeCodexHome)
+	if err != nil {
+		return "", fmt.Errorf("serve: judge_codex_home %s: %w", judgeCodexHome, err)
+	}
+
+	rel, err := filepath.Rel(resolvedDataDir, resolved)
+	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return "", fmt.Errorf("serve: judge_codex_home %s must be inside the data directory %s", resolved, resolvedDataDir)
+	}
+	if rel == "." {
+		return "", fmt.Errorf("serve: judge_codex_home %s must be a folder inside the data directory %s, not the data directory itself", resolved, resolvedDataDir)
+	}
+	first, _, _ := strings.Cut(rel, string(filepath.Separator))
+	if slices.Contains(judgeDataDirSweptFolders, first) {
+		return "", fmt.Errorf("serve: judge_codex_home %s must not be inside %s, which serve clears at startup", resolved, filepath.Join(resolvedDataDir, first))
+	}
+	return resolved, nil
+}
+
+// evalSymlinksAllowMissing resolves path's symlinks like
+// filepath.EvalSymlinks, except that a path which does not exist yet is
+// not an error: its parent directory is resolved instead, and path's own
+// base name is appended back. judge_codex_home's folder need not exist
+// before this check runs (PKG9-PLAN.md section 4.5): the owner may not
+// have run "codex login" there yet on a fresh install.
+func evalSymlinksAllowMissing(path string) (string, error) {
+	resolved, err := filepath.EvalSymlinks(path)
+	if err == nil {
+		return resolved, nil
+	}
+	if !errors.Is(err, os.ErrNotExist) {
+		return "", err
+	}
+	parent, parentErr := filepath.EvalSymlinks(filepath.Dir(path))
+	if parentErr != nil {
+		return "", parentErr
+	}
+	return filepath.Join(parent, filepath.Base(path)), nil
+}
+
+// checkJudgeCodexLogin requires judgeCodexHome/auth.json to exist when
+// machine.toml's own jobs.judge uses the codex runtime (PKG9-PLAN.md
+// section 4.5): the owner logs in once with "CODEX_HOME=<judge_codex_home>
+// codex login" before serve ever starts a real judge run.
+func checkJudgeCodexLogin(m *machine.Machine, judgeCodexHome string) error {
+	j, ok := m.Jobs["judge"]
+	if !ok || j.Runtime != runtimeNameCodex {
+		return nil
+	}
+	authPath := filepath.Join(judgeCodexHome, "auth.json")
+	if _, err := os.Stat(authPath); err != nil {
+		return fmt.Errorf("serve: judge Codex is not logged in: %s not found; run CODEX_HOME=%s codex login", authPath, judgeCodexHome)
 	}
 	return nil
 }

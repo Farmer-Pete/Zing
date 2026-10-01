@@ -118,6 +118,11 @@ type Config struct {
 	// job.Deps runAndCommit builds (PKG9-PLAN.md section 4.3, 6.2): the
 	// bound ROUND's own semaphore uses.
 	LensesParallel int
+	// JudgeCodexHome is the resolved judge_codex_home (PKG9-PLAN.md section
+	// 4.3, 4.5, D27), copied into every job.Deps runAndCommit builds:
+	// runjob.go's own applySandbox step reads it for a job whose profile is
+	// "judge".
+	JudgeCodexHome string
 }
 
 // Dispatcher ticks: reconcile, intake, count, pick, claim, run, commit
@@ -415,7 +420,7 @@ func (d *Dispatcher) runAndCommit(ctx context.Context, ticket store.Ticket, time
 		Models: d.cfg.Models, Budget: d.cfg.Budget, Floor: d.cfg.Floor,
 		Owner: d.cfg.Owner, Expires: expires,
 		Projects: d.cfg.Projects, Sandboxes: d.cfg.Sandboxes, RequireSandbox: d.cfg.RequireSandbox, Commands: d.cfg.Commands,
-		DataDir: d.cfg.DataDir, LensesParallel: d.cfg.LensesParallel,
+		DataDir: d.cfg.DataDir, LensesParallel: d.cfg.LensesParallel, JudgeCodexHome: d.cfg.JudgeCodexHome,
 		// Reserve closes over this tick's own owner and expires (the same
 		// lease Claim above just took out), so a handler's runJob call never
 		// sees either directly (design D13, section 4.4, 4.6).

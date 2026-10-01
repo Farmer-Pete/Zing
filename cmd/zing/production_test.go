@@ -173,10 +173,12 @@ func TestServeRequiresSandbox(t *testing.T) {
 	}
 }
 
-// TestServeLoadsBuildAndReadonly proves serveSandbox loads both the build
-// and readonly profiles (PKG9-PLAN.md section 4.7) and leaves Judge
-// NotLoaded, with reason "not loaded": no M1 job names it, and M2 task 2 is
-// what actually loads judge.sb.
+// TestServeLoadsBuildAndReadonly proves serveSandbox loads the build and
+// readonly profiles (PKG9-PLAN.md section 4.7). Build and readonly are
+// really attempted here (sandbox.LoadProfile), proving the wiring reaches
+// them at all; whether this host can run sandbox-exec at all is
+// internal/sandbox's own suite's concern, not this one's, so an
+// unavailable result only needs a non-empty reason.
 func TestServeLoadsBuildAndReadonly(t *testing.T) {
 	t.Parallel()
 
@@ -187,21 +189,32 @@ func TestServeLoadsBuildAndReadonly(t *testing.T) {
 	if err != nil {
 		t.Fatalf("serveSandbox: %v", err)
 	}
-	if sbSet.Judge.Available() {
-		t.Error("Judge.Available() = true, want false: M1 loads no judge profile")
-	}
-	if got := sbSet.Judge.Reason(); got != "not loaded" {
-		t.Errorf("Judge.Reason() = %q, want %q", got, "not loaded")
-	}
-	// Build and readonly are really attempted here (sandbox.LoadProfile),
-	// proving the wiring reaches them at all; whether this host can run
-	// sandbox-exec at all is internal/sandbox's own suite's concern, not
-	// this one's, so an unavailable result only needs a non-empty reason.
 	if !sbSet.Build.Available() && sbSet.Build.Reason() == "" {
 		t.Error("Build.Reason() is empty for an unavailable sandbox")
 	}
 	if !sbSet.ReadOnly.Available() && sbSet.ReadOnly.Reason() == "" {
 		t.Error("ReadOnly.Reason() is empty for an unavailable sandbox")
+	}
+}
+
+// TestServeLoadsJudge proves serveSandbox also loads the judge profile
+// (PKG9-PLAN.md section 4.7; M2 task 2 adds judge.sb and its own load, in
+// place of M1's Set.Judge, which was sandbox.NotLoaded()). Judge's own
+// proof needs a real scenarios-file read and a real CODEX_HOME write
+// (section 4.7's own worked example), so this only needs a non-empty
+// reason on an unavailable result, the same as Build and ReadOnly above.
+func TestServeLoadsJudge(t *testing.T) {
+	t.Parallel()
+
+	cfg := &config.Config{}
+	dataDir := t.TempDir()
+
+	sbSet, err := serveSandbox(cfg, dataDir)
+	if err != nil {
+		t.Fatalf("serveSandbox: %v", err)
+	}
+	if !sbSet.Judge.Available() && sbSet.Judge.Reason() == "" {
+		t.Error("Judge.Reason() is empty for an unavailable sandbox")
 	}
 }
 

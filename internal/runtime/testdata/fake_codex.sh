@@ -5,9 +5,12 @@
 # env var the test sets and passes through RunRequest.Env, so it survives
 # Codex's own environment filter -- then self-checks the host-isolation
 # flags (D18) before doing anything else, so a Run that ever builds argv
-# without them fails loudly here, not just in a Go assertion. It then
-# behaves per $FAKE_CODEX_MODE, so one script drives every process-lifecycle
-# test, the same way fake_claude.sh does for Claude.
+# without them fails loudly here, not just in a Go assertion. The sandbox
+# flag check accepts either read-only or danger-full-access (PKG9-PLAN.md
+# section 4.6, D20: the judge job's own full-access mode), not just
+# read-only. It then behaves per $FAKE_CODEX_MODE, so one script drives
+# every process-lifecycle test, the same way fake_claude.sh does for
+# Claude.
 set -u
 
 dir="${FAKE_CODEX_DIR:?FAKE_CODEX_DIR not set}"
@@ -36,10 +39,10 @@ for a in "$@"; do
   if [ "$prev" = "-o" ]; then
     outfile="$a"
   fi
-  if [ "$prev" = "-c" ] && [ "$a" = 'sandbox_mode="read-only"' ]; then
+  if [ "$prev" = "-c" ] && { [ "$a" = 'sandbox_mode="read-only"' ] || [ "$a" = 'sandbox_mode="danger-full-access"' ]; }; then
     have_sandbox_config=true
   fi
-  if [ "$prev" = "-s" ] && [ "$a" = "read-only" ]; then
+  if [ "$prev" = "-s" ] && { [ "$a" = "read-only" ] || [ "$a" = "danger-full-access" ]; }; then
     have_sandbox_flag=true
   fi
   prev="$a"
@@ -54,11 +57,11 @@ if ! $has_ignore_rules; then
   exit 9
 fi
 if $is_resume && ! $have_sandbox_config; then
-  echo 'fake_codex: -c sandbox_mode="read-only" missing from resume argv' >&2
+  echo 'fake_codex: -c sandbox_mode="read-only" or "danger-full-access" missing from resume argv' >&2
   exit 9
 fi
 if ! $is_resume && ! $have_sandbox_flag; then
-  echo "fake_codex: -s read-only missing from first-turn argv" >&2
+  echo "fake_codex: -s read-only or danger-full-access missing from first-turn argv" >&2
   exit 9
 fi
 if [ -z "$outfile" ]; then

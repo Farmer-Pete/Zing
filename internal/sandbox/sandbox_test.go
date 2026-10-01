@@ -1,6 +1,7 @@
 package sandbox
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -619,5 +620,189 @@ func TestRenderProfileEachPlaceholderOnce(t *testing.T) {
 		`(deny network-outbound (remote tcp "*:7420"))` + "\n"
 	if got != want {
 		t.Errorf("renderProfile() =\n%q\nwant\n%q", got, want)
+	}
+}
+
+// ---- the judge profile's two extra parameters (PKG9-PLAN.md section 4.7, D27) ----
+
+// testJudgeParams returns testParams with the judge profile's own two
+// extra fields filled, for a Prefix test that expects them to succeed.
+func testJudgeParams() Params {
+	p := testParams()
+	p.ScenariosFile = "/Users/test/data/judge/1/scenarios.xml"
+	p.CodexHome = "/Users/test/codex-judge"
+	return p
+}
+
+// TestPrefixEmitsScenariosFileForJudge proves Prefix appends "-D
+// SCENARIOS_FILE=..." and "-D CODEX_HOME=..." after the fixed paramOrder
+// flags, in that order, only for a Sandbox loaded under the judge name.
+func TestPrefixEmitsScenariosFileForJudge(t *testing.T) {
+	sb := Sandbox{renderedProfile: testMinimalRenderedProfile, name: profileNameJudge}
+	p := testJudgeParams()
+
+	argv, err := sb.Prefix(p)
+	if err != nil {
+		t.Fatalf("Prefix: %v", err)
+	}
+	want := []string{
+		"sandbox-exec",
+		"-D", "HOME=" + p.Home,
+		"-D", "WORKTREE=" + p.Worktree,
+		"-D", "REPO_GIT=" + p.RepoGit,
+		"-D", "DATA_DIR=" + p.DataDir,
+		"-D", "ZING_BIN=" + p.ZingBin,
+		"-D", "CACHE_ROOT=" + p.CacheRoot,
+		"-D", "CACHE_SHARED=" + p.CacheShared,
+		"-D", "RUN_DIR=" + p.RunDir,
+		"-D", "MDS_CACHE=" + p.MDSCache,
+		"-D", "TRANSCRIPTS=" + p.Transcripts,
+		"-D", "SCENARIOS_FILE=" + p.ScenariosFile,
+		"-D", "CODEX_HOME=" + p.CodexHome,
+		"-p", sb.renderedProfile,
+	}
+	if !slices.Equal(argv, want) {
+		t.Errorf("Prefix() =\n%v\nwant\n%v", argv, want)
+	}
+}
+
+// TestPrefixOmitsUnsetJudgeParams proves Prefix emits no SCENARIOS_FILE or
+// CODEX_HOME flag for a build- or readonly-shaped Params, where both
+// fields stay their zero value (section 4.7: "empty for the other two
+// profiles").
+func TestPrefixOmitsUnsetJudgeParams(t *testing.T) {
+	sb := Sandbox{renderedProfile: testMinimalRenderedProfile, name: profileNameBuild}
+	argv, err := sb.Prefix(testParams())
+	if err != nil {
+		t.Fatalf("Prefix: %v", err)
+	}
+	for _, a := range argv {
+		if strings.Contains(a, "SCENARIOS_FILE") || strings.Contains(a, "CODEX_HOME") {
+			t.Errorf("Prefix() with both judge params unset carries one anyway: %v", argv)
+		}
+	}
+}
+
+// TestPrefixEmitsCodexHomeAloneOutsideJudge proves Prefix emits just the
+// one judge-only flag a caller set, with no "both or neither" requirement,
+// for a Sandbox not loaded under the judge name (internal/job's own
+// TestRunJobJudgeParamsCodexHome relies on exactly this: it tests
+// Deps.JudgeCodexHome's own wiring into Params.CodexHome in isolation,
+// against a Sandbox loaded under a different name, without also having to
+// wire a scenarios file that task belongs to a later task).
+func TestPrefixEmitsCodexHomeAloneOutsideJudge(t *testing.T) {
+	sb := Sandbox{renderedProfile: testMinimalRenderedProfile, name: profileNameBuild}
+	p := testParams()
+	p.CodexHome = "/Users/test/codex-judge"
+
+	argv, err := sb.Prefix(p)
+	if err != nil {
+		t.Fatalf("Prefix: %v", err)
+	}
+	wantFlag := "CODEX_HOME=" + p.CodexHome
+	if !slices.Contains(argv, wantFlag) {
+		t.Errorf("Prefix() = %v, want it to contain %q", argv, wantFlag)
+	}
+	for _, a := range argv {
+		if strings.Contains(a, "SCENARIOS_FILE") {
+			t.Errorf("Prefix() carries a SCENARIOS_FILE flag with ScenariosFile unset: %v", argv)
+		}
+	}
+}
+
+// TestJudgeWithoutScenariosFileIsConfigError proves Prefix refuses to
+// build a prefix for the judge profile when either SCENARIOS_FILE or
+// CODEX_HOME is empty, rather than silently omitting the missing one
+// (section 4.7, D19, D27).
+func TestJudgeWithoutScenariosFileIsConfigError(t *testing.T) {
+	for name, mutate := range map[string]func(*Params){
+		"empty ScenariosFile": func(p *Params) { p.ScenariosFile = "" },
+		"empty CodexHome":     func(p *Params) { p.CodexHome = "" },
+	} {
+		t.Run(name, func(t *testing.T) {
+			sb := Sandbox{renderedProfile: testMinimalRenderedProfile, name: profileNameJudge}
+			p := testJudgeParams()
+			mutate(&p)
+
+			if _, err := sb.Prefix(p); !errors.Is(err, errJudgeParamsIncomplete) {
+				t.Errorf("Prefix() err = %v, want errJudgeParamsIncomplete", err)
+			}
+		})
+	}
+}
+
+// TestScenariosFileParamIsChecked proves SCENARIOS_FILE and CODEX_HOME go
+// through the same checkParamValue safety rule as every other param: an
+// unsafe or relative value is refused, naming the offending param.
+func TestScenariosFileParamIsChecked(t *testing.T) {
+	sb := Sandbox{renderedProfile: testMinimalRenderedProfile, name: profileNameJudge}
+
+	t.Run("relative ScenariosFile", func(t *testing.T) {
+		p := testJudgeParams()
+		p.ScenariosFile = "relative/scenarios.xml"
+		_, err := sb.Prefix(p)
+		want := "sandbox: param SCENARIOS_FILE has an unsafe value"
+		if err == nil || err.Error() != want {
+			t.Errorf("Prefix() err = %v, want %q", err, want)
+		}
+	})
+
+	t.Run("unsafe CodexHome", func(t *testing.T) {
+		p := testJudgeParams()
+		p.CodexHome = `/Users/test/codex"; rm -rf /`
+		_, err := sb.Prefix(p)
+		want := "sandbox: param CODEX_HOME has an unsafe value"
+		if err == nil || err.Error() != want {
+			t.Errorf("Prefix() err = %v, want %q", err, want)
+		}
+	})
+}
+
+// TestJudgeProofWritesTempScenariosFile proves judgeProof (the judge
+// profile's own LoadProfile proof step, section 4.7) writes a temp
+// scenarios file at mode 0600 under runDir, with its literal path passed
+// as p.ScenariosFile, and a temp Codex home directory as p.CodexHome; both
+// live under runDir, so NewRunDir's own cleanup -- not judgeProof itself --
+// is what removes them once the proof returns.
+func TestJudgeProofWritesTempScenariosFile(t *testing.T) {
+	sb := Sandbox{name: profileNameJudge}
+	runDir := t.TempDir()
+	var p Params
+
+	cmd, err := sb.judgeProof(runDir, &p)
+	if err != nil {
+		t.Fatalf("judgeProof: %v", err)
+	}
+
+	if p.ScenariosFile == "" || filepath.Dir(p.ScenariosFile) != runDir {
+		t.Errorf("p.ScenariosFile = %q, want a file under %q", p.ScenariosFile, runDir)
+	}
+	info, statErr := os.Stat(p.ScenariosFile)
+	if statErr != nil {
+		t.Fatalf("stat %s: %v", p.ScenariosFile, statErr)
+	}
+	if perm := info.Mode().Perm(); perm != 0o600 {
+		t.Errorf("mode of %s = %o, want 0600", p.ScenariosFile, perm)
+	}
+	wantCmd := []string{"/bin/cat", p.ScenariosFile}
+	if !slices.Equal(cmd, wantCmd) {
+		t.Errorf("judgeProof command = %v, want %v", cmd, wantCmd)
+	}
+
+	if p.CodexHome == "" || filepath.Dir(p.CodexHome) != runDir {
+		t.Errorf("p.CodexHome = %q, want a directory under %q", p.CodexHome, runDir)
+	}
+	if info, statErr := os.Stat(p.CodexHome); statErr != nil || !info.IsDir() {
+		t.Errorf("stat %s: info=%v err=%v, want an existing directory", p.CodexHome, info, statErr)
+	}
+
+	// The scenarios file and codex home both live under runDir, so removing
+	// runDir (NewRunDir's own cleanup, which proves calls after judgeProof)
+	// removes them too; judgeProof itself never removes anything.
+	if err := os.RemoveAll(runDir); err != nil {
+		t.Fatalf("RemoveAll(runDir): %v", err)
+	}
+	if _, err := os.Stat(p.ScenariosFile); !os.IsNotExist(err) {
+		t.Errorf("scenarios file still exists after runDir is removed (stat err = %v)", err)
 	}
 }

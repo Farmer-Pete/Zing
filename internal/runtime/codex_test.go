@@ -25,11 +25,20 @@ const (
 	fakeCodexDefaultThread = "fake-codex-default-thread-id"
 )
 
+// judgeOkResultXML is a minimal, valid response.JudgeResponse "ok" document
+// (one verdict, matching Verdicts' own jsonschema:"minItems=1"), for the
+// full-access tests below: the fake script's own default -o content embeds
+// job="planreview", which req.Job's judge value would otherwise reject as
+// reasonWrongJob.
+const judgeOkResultXML = `<zing job="judge" outcome="ok"><verdict scenario="s1" result="pass"><evidence>ok</evidence></verdict></zing>`
+
 // newFakeCodexRequest builds a RunRequest that points a fake codex
 // invocation at dir for its recorded argv, stdin, and environment, running
-// mode, plus any extra KEY=VALUE pairs the mode itself reads. Job is always
-// planreview: the codex runtime only ever serves the plan-review job
-// (design section 6.5).
+// mode, plus any extra KEY=VALUE pairs the mode itself reads. Job defaults
+// to planreview: of the codex runtime's two jobs (planreview and, from
+// PKG9-PLAN.md section 4.6 on, judge), every test in this file except the
+// full-access ones below (which set Job to response.JobJudge directly)
+// never needs anything but Codex's own ordinary read-only path.
 func newFakeCodexRequest(dir, mode string, extra ...string) RunRequest {
 	env := append([]string{"FAKE_CODEX_DIR=" + dir, "FAKE_CODEX_MODE=" + mode}, extra...)
 	return RunRequest{
@@ -683,5 +692,182 @@ func TestCodex_MissingOutputFileIsInvalidOutput(t *testing.T) {
 	}
 	if res.Log == "" {
 		t.Error("Log is empty, want the read-output-file error detail")
+	}
+}
+
+// ---- the judge job's full access (PKG9-PLAN.md section 4.6, D20) ----------
+
+// judgeExecPrefix is a real prefix a sandbox could plausibly build, using
+// only a POSIX-standard binary (mirroring claude_test.go's own
+// TestClaudeArgvWithExecPrefix): "env PREFIX_MARKER=1 <fake_codex.sh>
+// <argv...>". It also satisfies codexWantsFullAccess's own precondition --
+// a non-empty ExecPrefix -- for every test below that needs one.
+var judgeExecPrefix = []string{"env", "PREFIX_MARKER=1"}
+
+// newFakeJudgeRequest is newFakeCodexRequest with Job set to
+// response.JobJudge and FAKE_CODEX_RESULT_FILE pointed at judgeOkResultXML,
+// so a full-access test's own c.Run call parses cleanly end to end instead
+// of failing reasonWrongJob against the fake script's own default
+// planreview document. ExecPrefix is left for the caller to set (empty for
+// TestCodexRefusesFullAccessWithoutPrefix, judgeExecPrefix for everything
+// else).
+func newFakeJudgeRequest(t *testing.T, dir string) RunRequest {
+	t.Helper()
+	req := newFakeCodexRequest(dir, "success", "FAKE_CODEX_RESULT_FILE="+writeCodexResultFile(t, judgeOkResultXML))
+	req.Job = response.JobJudge
+	return req
+}
+
+// TestCodexArgvFullAccessOnlyWithPrefix proves a judge-job request with a
+// non-empty ExecPrefix gets "-s danger-full-access" on a first turn and
+// "-c sandbox_mode=\"danger-full-access\"" on a resume (PKG9-PLAN.md
+// section 4.6, D20), in place of the ordinary read-only pair every other
+// job still gets (TestCodex_ArgvFirstTurn, TestCodex_ArgvResume).
+func TestCodexArgvFullAccessOnlyWithPrefix(t *testing.T) {
+	t.Parallel()
+	requireUnix(t)
+
+	t.Run("first turn", func(t *testing.T) {
+		t.Parallel()
+		dir := t.TempDir()
+		req := newFakeJudgeRequest(t, dir)
+		req.ExecPrefix = judgeExecPrefix
+		c := NewCodex(fakeCodexScript)
+		if _, err := c.Run(context.Background(), req); err != nil {
+			t.Fatalf("Run: %v", err)
+		}
+
+		argv := readArgv(t, dir)
+		outPath := outfileFromArgv(t, argv)
+		want := wantCodexArgv(outPath, []string{"-s", "danger-full-access"}, []string{"-"})
+		if !slices.Equal(argv, want) {
+			t.Errorf("argv =\n%v\nwant\n%v", argv, want)
+		}
+	})
+
+	t.Run("resume", func(t *testing.T) {
+		t.Parallel()
+		dir := t.TempDir()
+		req := newFakeJudgeRequest(t, dir)
+		req.ExecPrefix = judgeExecPrefix
+		req.SessionID = testCodexResumeID
+		c := NewCodex(fakeCodexScript)
+		if _, err := c.Run(context.Background(), req); err != nil {
+			t.Fatalf("Run: %v", err)
+		}
+
+		argv := readArgv(t, dir)
+		outPath := outfileFromArgv(t, argv)
+		want := wantCodexArgv(outPath, []string{"-c", `sandbox_mode="danger-full-access"`}, []string{"resume", testCodexResumeID, "-"})
+		if !slices.Equal(argv, want) {
+			t.Errorf("argv =\n%v\nwant\n%v", argv, want)
+		}
+	})
+}
+
+// TestCodexRefusesFullAccessWithoutPrefix proves a judge-job request with
+// no ExecPrefix fails closed before the process ever starts (PKG9-PLAN.md
+// section 4.6, D20): Codex must never run with no containment at all.
+func TestCodexRefusesFullAccessWithoutPrefix(t *testing.T) {
+	t.Parallel()
+	requireUnix(t)
+
+	dir := t.TempDir()
+	req := newFakeJudgeRequest(t, dir)
+
+	c := NewCodex(fakeCodexScript)
+	_, err := c.Run(context.Background(), req)
+	if !errors.Is(err, ErrCodexFullAccessNeedsExecPrefix) {
+		t.Fatalf("err = %v, want ErrCodexFullAccessNeedsExecPrefix", err)
+	}
+	if _, statErr := os.Stat(filepath.Join(dir, "argv")); !os.IsNotExist(statErr) {
+		t.Error("the fake CLI recorded an argv: want it never started")
+	}
+}
+
+// TestCodexArgvNeverBypassFlag proves the forbidden
+// --dangerously-bypass-approvals-and-sandbox flag never appears even under
+// the judge's own full-access mode (TestCodex_ForbiddenFlagAbsent already
+// covers the ordinary read-only path).
+func TestCodexArgvNeverBypassFlag(t *testing.T) {
+	t.Parallel()
+	requireUnix(t)
+
+	for _, resume := range []bool{false, true} {
+		dir := t.TempDir()
+		req := newFakeJudgeRequest(t, dir)
+		req.ExecPrefix = judgeExecPrefix
+		if resume {
+			req.SessionID = testCodexResumeID
+		}
+		c := NewCodex(fakeCodexScript)
+		if _, err := c.Run(context.Background(), req); err != nil {
+			t.Fatalf("Run: %v", err)
+		}
+
+		argv := strings.Join(readArgv(t, dir), " ")
+		if strings.Contains(argv, forbiddenCodexBypass) {
+			t.Errorf("argv contains forbidden flag %q: %s", forbiddenCodexBypass, argv)
+		}
+	}
+}
+
+// TestCodexHonorsExecPrefix proves Codex.run's own commandNameArgs honors
+// ExecPrefix exactly as Claude.run's does (PKG9-PLAN.md section 4.6):
+// name = ExecPrefix[0], args = ExecPrefix[1:] + resolveBin() + argv, with
+// the fake script still recording the normal argv unchanged.
+func TestCodexHonorsExecPrefix(t *testing.T) {
+	t.Parallel()
+	requireUnix(t)
+
+	dir := t.TempDir()
+	req := newFakeJudgeRequest(t, dir)
+	req.ExecPrefix = judgeExecPrefix
+	c := NewCodex(fakeCodexScript)
+	if _, err := c.Run(context.Background(), req); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	argv := readArgv(t, dir)
+	outPath := outfileFromArgv(t, argv)
+	want := wantCodexArgv(outPath, []string{"-s", "danger-full-access"}, []string{"-"})
+	if !slices.Equal(argv, want) {
+		t.Errorf("argv (after the prefix) =\n%v\nwant\n%v", argv, want)
+	}
+
+	env := readRecordedEnv(t, dir)
+	if v, ok := env["PREFIX_MARKER"]; !ok || v != "1" {
+		t.Errorf("PREFIX_MARKER = %q, ok=%v, want \"1\" (proves env ran ahead of the fake script)", v, ok)
+	}
+}
+
+// ---- the -o file's own directory (PKG9-PLAN.md section 4.6) ---------------
+
+// TestCodexOutputDirUnderRunTmp proves codexOutputDir creates its -o
+// directory under the run's own TMPDIR (req.Env), not the host's shared
+// os.TempDir(): a sandboxed Codex can write only its own run directory, so
+// the -o file must live there.
+func TestCodexOutputDirUnderRunTmp(t *testing.T) {
+	t.Parallel()
+	requireUnix(t)
+
+	dir := t.TempDir()
+	runTmp := filepath.Join(t.TempDir(), "run-tmp")
+	if err := os.MkdirAll(runTmp, 0o700); err != nil {
+		t.Fatalf("mkdir %s: %v", runTmp, err)
+	}
+
+	req := newFakeCodexRequest(dir, "success", "TMPDIR="+runTmp)
+	c := NewCodex(fakeCodexScript)
+	if _, err := c.Run(context.Background(), req); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	argv := readArgv(t, dir)
+	outPath := outfileFromArgv(t, argv)
+	// outPath is <base>/zing-codex-out-<rand>/output-<rand>: its
+	// directory's own parent must be runTmp.
+	if got := filepath.Dir(filepath.Dir(outPath)); got != runTmp {
+		t.Errorf("-o file's directory's parent = %q, want %q (TMPDIR)", got, runTmp)
 	}
 }

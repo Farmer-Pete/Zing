@@ -1855,6 +1855,42 @@ func TestPlanningHandler_ReviewTick_StoresFindingsAtCohortVersionAndFencesInputs
 	_ = runID
 }
 
+// TestPlanReviewHasNoCodexHome proves a planreview run never carries
+// CODEX_HOME in its environment (PKG9-PLAN.md section 7.3, D27): planreview
+// names no sandbox in machine.toml, so it is one of runJob's unsandboxed
+// jobs (applyPrivateTempRoot, not applySandbox's own judge-profile wiring),
+// even when Deps.JudgeCodexHome is configured for the judge job elsewhere
+// on the same process.
+func TestPlanReviewHasNoCodexHome(t *testing.T) {
+	s := newJobTestStore(t)
+	ticketID := seedFeatureTicketInPlanning(t, s)
+	seedCohort(t, s, ticketID, validPlan("No CODEX_HOME leaks into planreview."), validScenarios(2, "no-codex-home"))
+
+	f := finding(response.SeverityMinor, "plan/design/shape", "no codex home check", "name it")
+	rt := &scriptedRuntime{t: t, steps: []scriptedStep{readyStep(findingsResponse(f), "no-codex-home-sess")}}
+	rec := &recordingRuntime{rt: rt}
+
+	deps := claim(t, s, rec, ticketID)
+	deps.JudgeCodexHome = "/test/judge/codex/home"
+
+	commit, err := runPlanning(t, s, deps, ticketID)
+	if err != nil {
+		t.Fatalf("review tick Run: %v", err)
+	}
+	if len(commit.Artifacts) != 1 {
+		t.Fatalf("commit.Artifacts = %d entries, want 1", len(commit.Artifacts))
+	}
+
+	if len(rec.lastReq.ExecPrefix) != 0 {
+		t.Errorf("ExecPrefix = %v, want empty: planreview is unsandboxed", rec.lastReq.ExecPrefix)
+	}
+	for _, kv := range rec.lastReq.Env {
+		if strings.HasPrefix(kv, "CODEX_HOME=") {
+			t.Errorf("planreview's env carries %q, want no CODEX_HOME entry", kv)
+		}
+	}
+}
+
 // TestPlanningHandler_ReviewTick_DropsUnresolvedLocationFindings proves
 // section 6.5's drop rule: a finding whose Location does not resolve as an
 // element path in the stored plan (response.ResolvesInPlan) is dropped from

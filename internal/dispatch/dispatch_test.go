@@ -964,6 +964,48 @@ func TestClaimTimeoutForReviewing(t *testing.T) {
 	}
 }
 
+// TestRunAndCommitCopiesJudgeCodexHome proves runAndCommit copies
+// dispatch.Config.JudgeCodexHome into every job.Deps it builds
+// (PKG9-PLAN.md section 4.3, 7.3, D27), the same way it already threads
+// DataDir and LensesParallel.
+func TestRunAndCommitCopiesJudgeCodexHome(t *testing.T) {
+	t.Parallel()
+
+	s := newDispatchTestStore(t)
+	ticketID := seedQueuedTicket(t, s, testFixtureRef)
+
+	seedOwner := "seed-judging-owner"
+	seedExpires := time.Now().Add(10 * time.Minute).UTC().Truncate(time.Second)
+	claimed, err := s.Claim(t.Context(), ticketID, seedOwner, seedExpires)
+	if err != nil || !claimed {
+		t.Fatalf("seed claim: claimed=%v err=%v", claimed, err)
+	}
+	applied, err := s.CommitHandlerResult(t.Context(), store.HandlerCommit{
+		TicketID: ticketID, Owner: seedOwner, Expires: seedExpires, Next: testStateJudging, Reason: "test setup",
+	})
+	if err != nil || !applied {
+		t.Fatalf("seed commit: applied=%v err=%v", applied, err)
+	}
+
+	spy := &spyHandler{next: testStateShipping, reason: "test"}
+	reg := job.Registry()
+	reg[testStateJudging] = spy
+
+	const wantJudgeCodexHome = "/test/judge/codex/home"
+	d := newDispatcher(t, s, newFixtureTracker(t), bus.New(), fakeRuntime(t), reg, nil,
+		dispatch.Config{MaxParallel: 2, Owner: testOwner, JudgeCodexHome: wantJudgeCodexHome})
+
+	if err := d.Tick(t.Context()); err != nil {
+		t.Fatalf("Tick: %v", err)
+	}
+	if spy.calls != 1 {
+		t.Fatalf("spy.calls = %d, want 1", spy.calls)
+	}
+	if spy.judgeCodexHome != wantJudgeCodexHome {
+		t.Errorf("Deps.JudgeCodexHome = %q, want %q", spy.judgeCodexHome, wantJudgeCodexHome)
+	}
+}
+
 // TestTick_HandlerDeadlineSurvivesSlowIntakeNotEatenByIt proves the run
 // deadline is computed from a fresh time.Now() taken right before running
 // the handler (after the claim), not the tick-start now (design section
@@ -1656,6 +1698,11 @@ type spyHandler struct {
 	hasDeadline bool
 	deadline    time.Time
 	expires     time.Time
+	// judgeCodexHome records d.JudgeCodexHome (PKG9-PLAN.md section 4.3,
+	// 7.3, D27), so TestRunAndCommitCopiesJudgeCodexHome can assert
+	// runAndCommit copied dispatch.Config.JudgeCodexHome into the Deps a
+	// handler actually sees.
+	judgeCodexHome string
 
 	next, reason string
 	err          error
@@ -1664,6 +1711,7 @@ type spyHandler struct {
 func (h *spyHandler) Run(ctx context.Context, t store.Ticket, d job.Deps) (store.HandlerCommit, error) {
 	h.calls++
 	h.expires = d.Expires
+	h.judgeCodexHome = d.JudgeCodexHome
 	if dl, ok := ctx.Deadline(); ok {
 		h.hasDeadline = true
 		h.deadline = dl

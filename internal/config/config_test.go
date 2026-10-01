@@ -15,6 +15,19 @@ import (
 
 const testUser = "peter"
 
+// defaultTestJudgeCodexHome returns judge_codex_home's own default,
+// expanded against this test process's real home directory (PKG9-PLAN.md
+// section 4.5, D27): every Load test whose zing.toml omits the key wants
+// this value back.
+func defaultTestJudgeCodexHome(t *testing.T) string {
+	t.Helper()
+	home, err := os.UserHomeDir()
+	if err != nil {
+		t.Fatalf("os.UserHomeDir: %v", err)
+	}
+	return filepath.Join(home, ".zing", "codex-judge")
+}
+
 // testGitHubToken is the github_token value every valid fixture below uses,
 // so a fixture missing it is unambiguously testing that absence.
 const testGitHubToken = "ghp_test_token_0123456789"
@@ -81,8 +94,9 @@ func TestLoad_MinimalConfigGetsEveryDefault(t *testing.T) {
 	}
 
 	want := &Config{
-		User:        testUser,
-		GitHubToken: testGitHubToken,
+		User:           testUser,
+		GitHubToken:    testGitHubToken,
+		JudgeCodexHome: defaultTestJudgeCodexHome(t),
 		Console: Console{
 			Bind: []string{"127.0.0.1", "tailscale"},
 			Port: 7420,
@@ -183,8 +197,9 @@ lint = "golangci-lint run"
 	}
 
 	want := &Config{
-		User:        testUser,
-		GitHubToken: testGitHubToken,
+		User:           testUser,
+		GitHubToken:    testGitHubToken,
+		JudgeCodexHome: defaultTestJudgeCodexHome(t),
 		Console: Console{
 			Bind:         []string{"127.0.0.1"},
 			Port:         8080,
@@ -415,6 +430,76 @@ func TestReviewMaxLensesParallel(t *testing.T) {
 				t.Errorf("Load() = %q, want %q", err.Error(), want)
 			}
 		})
+	}
+}
+
+// TestJudgeCodexHomeDefault proves judge_codex_home's own default
+// (PKG9-PLAN.md section 4.5, D27): absent from zing.toml, it resolves to
+// "~/.zing/codex-judge", expanded against this process's real home
+// directory.
+func TestJudgeCodexHomeDefault(t *testing.T) {
+	t.Parallel()
+
+	cfg, err := Load(writeTOML(t, minimalValidTOML))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if want := defaultTestJudgeCodexHome(t); cfg.JudgeCodexHome != want {
+		t.Errorf("JudgeCodexHome = %q, want %q", cfg.JudgeCodexHome, want)
+	}
+}
+
+// TestJudgeCodexHomeExpandsTilde proves an explicit "~/..." value expands
+// against the real home directory, the same as the default (section 4.5:
+// "~ expanded").
+func TestJudgeCodexHomeExpandsTilde(t *testing.T) {
+	t.Parallel()
+
+	body := "judge_codex_home = \"~/custom-codex-judge\"\n" + minimalValidTOML
+	cfg, err := Load(writeTOML(t, body))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		t.Fatalf("os.UserHomeDir: %v", err)
+	}
+	want := filepath.Join(home, "custom-codex-judge")
+	if cfg.JudgeCodexHome != want {
+		t.Errorf("JudgeCodexHome = %q, want %q", cfg.JudgeCodexHome, want)
+	}
+}
+
+// TestJudgeCodexHomeExplicitAbsolute proves an explicit, already-absolute
+// value loads unchanged.
+func TestJudgeCodexHomeExplicitAbsolute(t *testing.T) {
+	t.Parallel()
+
+	const explicit = "/opt/zing/codex-judge"
+	body := fmt.Sprintf("judge_codex_home = %q\n", explicit) + minimalValidTOML
+	cfg, err := Load(writeTOML(t, body))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.JudgeCodexHome != explicit {
+		t.Errorf("JudgeCodexHome = %q, want %q", cfg.JudgeCodexHome, explicit)
+	}
+}
+
+// TestJudgeCodexHomeMustBeAbsolute proves an explicit relative value (after
+// expansion -- no leading "~", so expandHome leaves it unchanged) is
+// refused with the exact error text (section 4.5).
+func TestJudgeCodexHomeMustBeAbsolute(t *testing.T) {
+	t.Parallel()
+
+	body := "judge_codex_home = \"relative/codex-judge\"\n" + minimalValidTOML
+	_, err := Load(writeTOML(t, body))
+	if err == nil {
+		t.Fatal("Load: want an error, got nil")
+	}
+	want := "zing.toml: judge_codex_home must be an absolute path"
+	if err.Error() != want {
+		t.Errorf("Load() = %q, want %q", err.Error(), want)
 	}
 }
 
