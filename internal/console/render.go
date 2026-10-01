@@ -24,6 +24,8 @@ package console
 import (
 	"bytes"
 	"fmt"
+	stdhtml "html"
+	"log/slog"
 
 	"github.com/a-h/templ"
 	diagram "github.com/yuin/goldmark-diagram"
@@ -98,7 +100,23 @@ func renderMermaidBlock(w util.BufWriter, source []byte, n *ast.CodeBlock, rc re
 // the one audited boundary (design section 6.10) where already-escaped
 // goldmark output is trusted verbatim, so no caller needs its own
 // html/template import or its own escaping judgment call.
-func Render(md string) (templ.Component, error) {
+//
+// A panic inside goldmark's own Parse or Render (observed: a list-parser
+// bug tripped by certain markdown shapes) is recovered here rather than
+// left to crash the whole page a caller is building: md renders as
+// escaped plain text inside a <pre class="render-failed"> block instead,
+// with a short note above it, and the panic is logged at WARN (the
+// recovered value only, never request state or a secret). One bad
+// markdown field must never take down a render that has other, perfectly
+// fine content on it.
+func Render(md string) (comp templ.Component, err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			slog.Warn("console: render markdown panic recovered", "panic", fmt.Sprint(r))
+			comp, err = renderFailed(md), nil
+		}
+	}()
+
 	source := util.StringToReadOnlyBytes(md)
 	doc := markdownParser.Parse(source)
 
@@ -107,4 +125,13 @@ func Render(md string) (templ.Component, error) {
 		return nil, fmt.Errorf("console: render markdown: %w", err)
 	}
 	return templ.Raw(buf.String()), nil
+}
+
+// renderFailed is Render's panic fallback: md escaped verbatim inside a
+// <pre class="render-failed">, with a short note above it so the page
+// shows why the block looks like raw markdown instead of silently eating
+// the content.
+func renderFailed(md string) templ.Component {
+	return templ.Raw(`<p class="render-failed-note">This block failed to render and is shown as plain text.</p>` +
+		`<pre class="render-failed">` + stdhtml.EscapeString(md) + `</pre>`)
 }

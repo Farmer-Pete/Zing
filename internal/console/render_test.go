@@ -113,6 +113,32 @@ func TestRenderNeutralizesDangerousLink(t *testing.T) {
 	}
 }
 
+// TestRenderRecoversParserPanic proves a markdown shape that panics inside
+// goldmark's own list parser (reproduced from a real plan artifact: three
+// tight bullet-list items is enough, see render.go's markdownParser doc
+// comment for the double-registered-CommonMark root cause) never crashes
+// Render: it comes back as a normal, error-free templ.Component, with md
+// escaped verbatim inside a <pre class="render-failed"> and a note above
+// it, not as the live list markup.
+func TestRenderRecoversParserPanic(t *testing.T) {
+	t.Parallel()
+	md := "- a\n- b\n- c\n"
+	got := renderToString(t, md)
+
+	if !strings.Contains(got, `<p class="render-failed-note">`) {
+		t.Errorf("Render(%q) = %q, want a render-failed-note", md, got)
+	}
+	if !strings.Contains(got, `<pre class="render-failed">`) {
+		t.Errorf("Render(%q) = %q, want a <pre class=\"render-failed\"> block", md, got)
+	}
+	if strings.Contains(got, "<li>") {
+		t.Errorf("Render(%q) = %q, want the source escaped as plain text, not rendered as a list", md, got)
+	}
+	if !strings.Contains(got, "- a\n- b\n- c") {
+		t.Errorf("Render(%q) = %q, want the original source preserved, escaped", md, got)
+	}
+}
+
 // TestRenderPlantUMLNeverShellsOut proves a ```plantuml fence never reaches
 // goldmark-diagram's server-side PlantUML renderer (design section 0: "Never
 // use the default HTMLRenderer; it seeds a PlantUML server-side
