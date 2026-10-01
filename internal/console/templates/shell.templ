@@ -269,6 +269,16 @@ templ palette() {
 			font-size: 0.85rem;
 			margin: 0.5rem 0;
 		}
+		/* .wait-progress (bug fix, thread.templ's waitProgressBanner): the
+		   current round's answered-vs-total count, e.g. "Answered 1 of 2.
+		   Zing resumes the agent when every question is answered." --
+		   correct design (every question of a round must be answered before
+		   Zing resumes), but previously unexplained. */
+		.wait-progress {
+			color: var(--zing-text-dim);
+			font-size: 0.85rem;
+			margin: 0 0 0.75rem;
+		}
 		.reply-hint {
 			color: var(--zing-text-dim);
 			font-size: 0.75rem;

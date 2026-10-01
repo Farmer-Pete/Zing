@@ -158,6 +158,16 @@ func (q *ThreadQuestion) HasDraft() bool {
 	return q.DraftReply != "" || q.DraftOption != "" || len(q.DraftItems) > 0
 }
 
+// WaitProgress is the current round's answered-vs-total count (bug fix:
+// "After a partial batch, Zing keeps the ticket waiting until every open
+// question is answered, which is correct design, but nothing says so").
+// console.buildWaitProgress computes it from the ticket's own waiting_on and
+// its questions' states; Total == 0 means nothing to show (Thread,
+// thread.templ) -- the ticket is not currently question-blocked.
+type WaitProgress struct {
+	Answered, Total int
+}
+
 // ThreadRow is one message the read-only Thread view renders: a state
 // separator (Type == "state"), or a plain row (update, escalation, or any
 // other type) with Body as its already-decoded display text, or, when

@@ -206,7 +206,7 @@ func displayFeedMessages(messages []store.MessageRow) []store.MessageRow {
 // 6.6, carried over from Package 3's patchThread guard).
 func (c *console) threadComponent(ctx context.Context, open int64) (templ.Component, error) {
 	if open <= 0 {
-		return templates.Thread(nil, nil), nil
+		return templates.Thread(nil, nil, templates.WaitProgress{}), nil
 	}
 	ticket, err := c.store.GetTicket(ctx, open)
 	switch {
@@ -231,9 +231,9 @@ func (c *console) threadComponent(ctx context.Context, open int64) (templ.Compon
 		if buildErr != nil {
 			return nil, buildErr
 		}
-		return templates.Thread(&ticket, threadRows), nil
+		return templates.Thread(&ticket, threadRows, buildWaitProgress(&ticket, rows)), nil
 	case errors.Is(err, sql.ErrNoRows):
-		return templates.Thread(nil, nil), nil
+		return templates.Thread(nil, nil, templates.WaitProgress{}), nil
 	default:
 		return nil, err
 	}
@@ -531,6 +531,65 @@ func questionStateLabel(state *string) string {
 // visibleRows drops them (bug fix: a draft answers or replies to a
 // question, which this function still needs to find below, even though the
 // draft row itself never becomes its own ThreadRow).
+// waitRoundKind maps ticket.WaitingOn to the response.QuestionKind its
+// current round's questions share, mirroring store's own unexported
+// kindForWaitReason (console_writes.go): console cannot import it, so this
+// is a package-local copy of the same five-plus-one mapping (bug fix,
+// buildWaitProgress below).
+func waitRoundKind(waitingOn string) (response.QuestionKind, bool) {
+	if waitingOn == waitReasonQuestions {
+		return response.QuestionKindQuestion, true
+	}
+	switch response.QuestionKind(waitingOn) {
+	case response.QuestionKindGate, response.QuestionKindSplit,
+		response.QuestionKindPerimeter, response.QuestionKindReview, response.QuestionKindMerge:
+		return response.QuestionKind(waitingOn), true
+	default:
+		return "", false // "error" and "children": not question-backed
+	}
+}
+
+// buildWaitProgress counts the current round's questions (bug fix: "After a
+// partial batch, Zing keeps the ticket waiting until every open question is
+// answered, which is correct design, but nothing says so"): every "question"
+// message whose own Kind matches ticket.WaitingOn's round and whose state is
+// still open or already answered (a resolved or otherwise-closed question
+// belongs to an earlier, already-cleared round, and never counts). Zero
+// Total -- a ticket not currently question-blocked, or one whose
+// waiting_on names a reason no question Kind backs ("error", "children") --
+// renders no progress line at all (Thread, thread.templ).
+func buildWaitProgress(ticket *store.Ticket, rows []store.MessageRow) templates.WaitProgress {
+	if ticket == nil || ticket.WaitingOn == nil {
+		return templates.WaitProgress{}
+	}
+	kind, ok := waitRoundKind(*ticket.WaitingOn)
+	if !ok {
+		return templates.WaitProgress{}
+	}
+	var progress templates.WaitProgress
+	for i := range rows {
+		m := &rows[i]
+		if m.Type != msgTypeQuestion || m.State == nil {
+			continue
+		}
+		if *m.State != msgStateOpen && *m.State != msgStateAnswered {
+			continue
+		}
+		var payload response.QuestionPayload
+		if err := json.Unmarshal(m.Payload, &payload); err != nil {
+			continue
+		}
+		if payload.Kind != kind {
+			continue
+		}
+		progress.Total++
+		if *m.State == msgStateAnswered {
+			progress.Answered++
+		}
+	}
+	return progress
+}
+
 func buildThreadRows(ticket *store.Ticket, rows []store.MessageRow, plan *templates.RenderedPlan, scenarios []templates.ScenarioRow, findings []templates.FindingRow) ([]templates.ThreadRow, error) {
 	drafts := collectQuestionDrafts(rows)
 	rows = visibleRows(rows)

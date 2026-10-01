@@ -8,6 +8,7 @@
 package console
 
 import (
+	"encoding/json"
 	"strings"
 	"testing"
 
@@ -358,4 +359,60 @@ func TestCollectSentAnswers(t *testing.T) {
 	if ap.Option == nil || *ap.Option != "a" {
 		t.Errorf("collectSentAnswers[%d].Option = %v, want \"a\"", questionID, ap.Option)
 	}
+}
+
+// questionRowForWait builds a "question" message row for buildWaitProgress
+// tests: state and kind are the two fields it reads, plus a minimal valid
+// QuestionPayload so json.Unmarshal succeeds.
+func questionRowForWait(t *testing.T, state string, kind response.QuestionKind) store.MessageRow {
+	t.Helper()
+	payload, err := json.Marshal(response.QuestionPayload{Key: "Q", Kind: kind, Options: []response.Option{}})
+	if err != nil {
+		t.Fatalf("marshal question payload: %v", err)
+	}
+	return store.MessageRow{Message: store.Message{Type: msgTypeQuestion, State: &state, Payload: payload}} //nolint:modernize // keyed on purpose: MessageRow's ID and CreatedAt fields precede the embedded Message, so the key cannot be dropped
+}
+
+// TestBuildWaitProgress proves the bug fix for a silent partial-batch wait:
+// buildWaitProgress counts only the current round's questions -- those
+// whose own Kind matches ticket.WaitingOn's round and whose state is still
+// open or already answered -- and reports nothing (Total == 0) for a
+// ticket that is not currently question-blocked, or whose waiting_on names
+// a reason no question Kind backs.
+func TestBuildWaitProgress(t *testing.T) {
+	t.Parallel()
+
+	t.Run("counts answered and total within the current round, ignoring other kinds and closed rounds", func(t *testing.T) {
+		t.Parallel()
+		waiting := waitReasonQuestions
+		ticket := &store.Ticket{WaitingOn: &waiting}
+		rows := []store.MessageRow{
+			questionRowForWait(t, msgStateAnswered, response.QuestionKindQuestion),
+			questionRowForWait(t, msgStateOpen, response.QuestionKindQuestion),
+			questionRowForWait(t, "resolved", response.QuestionKindQuestion), // an earlier, already-cleared round
+			questionRowForWait(t, msgStateOpen, response.QuestionKindGate),   // a different kind's round
+		}
+		got := buildWaitProgress(ticket, rows)
+		if got.Answered != 1 || got.Total != 2 {
+			t.Errorf("buildWaitProgress = %+v, want {Answered:1 Total:2}", got)
+		}
+	})
+
+	t.Run("a ticket not waiting on anything reports no progress", func(t *testing.T) {
+		t.Parallel()
+		got := buildWaitProgress(&store.Ticket{}, []store.MessageRow{questionRowForWait(t, msgStateOpen, response.QuestionKindQuestion)})
+		if got.Total != 0 {
+			t.Errorf("buildWaitProgress = %+v, want Total=0 (not waiting)", got)
+		}
+	})
+
+	t.Run("a non-question-backed wait reason reports no progress", func(t *testing.T) {
+		t.Parallel()
+		waiting := "error"
+		ticket := &store.Ticket{WaitingOn: &waiting}
+		got := buildWaitProgress(ticket, []store.MessageRow{questionRowForWait(t, msgStateOpen, response.QuestionKindQuestion)})
+		if got.Total != 0 {
+			t.Errorf("buildWaitProgress = %+v, want Total=0 (\"error\" is not question-backed)", got)
+		}
+	})
 }

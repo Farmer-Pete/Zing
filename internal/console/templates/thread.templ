@@ -1,6 +1,7 @@
 package templates
 
 import (
+	"fmt"
 	"strconv"
 	"strings"
 
@@ -11,11 +12,17 @@ import (
 // Thread renders the #main region for view=thread (design section 6.6):
 // the ticket's messages in id order, read only except for the question
 // groups, which dispatch on QuestionPayload.Kind into interactive controls
-// (Task 6). ticket is nil when open is 0 or names no ticket.
-templ Thread(ticket *store.Ticket, rows []ThreadRow) {
+// (Task 6). ticket is nil when open is 0 or names no ticket. wait is the
+// current round's answered-vs-total count (bug fix: console.buildWaitProgress);
+// its own Total == 0 means the ticket is not currently question-blocked, so
+// waitProgressBanner renders nothing.
+templ Thread(ticket *store.Ticket, rows []ThreadRow, wait WaitProgress) {
 	<main id="main" class="view-thread">
 		if ticket != nil {
 			<h2>{ ticket.Title }</h2>
+			if wait.Total > 0 {
+				@waitProgressBanner(wait)
+			}
 			if len(rows) == 0 {
 				<p class="empty">No messages yet.</p>
 			} else {
@@ -36,6 +43,15 @@ templ Thread(ticket *store.Ticket, rows []ThreadRow) {
 			<p class="empty">Select a ticket.</p>
 		}
 	</main>
+}
+
+// waitProgressBanner is the current round's progress line (bug fix: "After
+// a partial batch, Zing keeps the ticket waiting until every open question
+// is answered, which is correct design, but nothing says so"), e.g.
+// "Answered 1 of 2. Zing resumes the agent when every question is
+// answered."
+templ waitProgressBanner(wait WaitProgress) {
+	<p class="wait-progress">{ fmt.Sprintf("Answered %d of %d.", wait.Answered, wait.Total) } Zing resumes the agent when every question is answered.</p>
 }
 
 // threadHasDraft reports whether any question in rows carries an unsent

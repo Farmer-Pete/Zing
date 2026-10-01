@@ -7,6 +7,8 @@ import (
 	"testing"
 
 	"github.com/a-h/templ"
+
+	"zing/internal/store"
 )
 
 // renderItemRow renders itemRow(1, 2, item, itemDecisionsPerimeter) to a
@@ -285,6 +287,40 @@ func TestQuestionGroupShowsReviseNoteWhileStillRevisable(t *testing.T) {
 		})
 		if strings.Contains(got, "q-revisable") {
 			t.Errorf("rendered question group has a revise note on a never-answered open question; got:\n%s", got)
+		}
+	})
+}
+
+// TestThreadShowsWaitProgress proves the bug fix for a silent partial-batch
+// wait: Thread renders waitProgressBanner's own line only when wait.Total >
+// 0, with the exact "Answered X of Y." count views.go's buildWaitProgress
+// computed, and renders nothing extra when the ticket is not currently
+// question-blocked.
+func TestThreadShowsWaitProgress(t *testing.T) {
+	t.Parallel()
+	ticket := &store.Ticket{ID: 1, Title: "Add a hello endpoint"}
+
+	t.Run("a blocked ticket shows the progress line", func(t *testing.T) {
+		t.Parallel()
+		var sb strings.Builder
+		if err := Thread(ticket, nil, WaitProgress{Answered: 1, Total: 2}).Render(t.Context(), &sb); err != nil {
+			t.Fatalf("Thread.Render: %v", err)
+		}
+		got := sb.String()
+		want := `<p class="wait-progress">Answered 1 of 2. Zing resumes the agent when every question is answered.</p>`
+		if !strings.Contains(got, want) {
+			t.Errorf("rendered thread missing the wait progress line; want %q; got:\n%s", want, got)
+		}
+	})
+
+	t.Run("an unblocked ticket shows no progress line", func(t *testing.T) {
+		t.Parallel()
+		var sb strings.Builder
+		if err := Thread(ticket, nil, WaitProgress{}).Render(t.Context(), &sb); err != nil {
+			t.Fatalf("Thread.Render: %v", err)
+		}
+		if strings.Contains(sb.String(), "wait-progress") {
+			t.Errorf("rendered thread has a wait progress line for an unblocked ticket; got:\n%s", sb.String())
 		}
 	})
 }
