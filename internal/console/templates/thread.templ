@@ -87,12 +87,27 @@ templ threadMessageRow(row ThreadRow) {
 // every control's data-draft-ticket attribute, so each carries what Task
 // 7's POST /draft needs without this package reaching back into the store
 // itself.
+// messageCountLabel labels row.Question.MessageCount plainly (bug fix: the
+// summary line rendered this as a bare digit with no indication of what it
+// counted, reading like stray noise after the title, e.g. "Q1 Where does
+// the version string come from? 1 [waiting on you]"). The count is
+// meaningful -- the question's own message plus every reply, answer,
+// followup, or resolved row that names it as a parent (views.go's
+// buildThreadQuestion) -- so it earns a label rather than removal, singular
+// for the common one-message case a fresh, unanswered question starts at.
+func messageCountLabel(n int) string {
+	if n == 1 {
+		return "1 message"
+	}
+	return strconv.Itoa(n) + " messages"
+}
+
 templ questionGroup(ticketID int64, row ThreadRow) {
 	<details class="q" data-focus-id={ fmtFocusID("question", row.ID) }>
 		<summary>
 			<span class="q-key">{ row.Question.Key }</span>
 			<span class="q-title">{ row.Question.Title }</span>
-			<span class="q-count">{ strconv.Itoa(row.Question.MessageCount) }</span>
+			<span class="q-count">{ messageCountLabel(row.Question.MessageCount) }</span>
 			<span class="pill">{ row.Question.StateLabel }</span>
 		</summary>
 		<div class="q-body">
