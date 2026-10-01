@@ -99,6 +99,14 @@ type console struct {
 	// POST /projects/{id}/pickup passes nil and "".
 	tracker tracker.Tracker
 	user    string
+
+	// startedAt is when New built this console (bug fix: the Log rail's
+	// empty state read as "No log lines yet." after every `zing serve`
+	// restart, since log.go's ring is in memory and a restart always starts
+	// it empty, which looked broken rather than merely quiet. The ring
+	// itself is not persisted -- buildLogRail (rail.go) uses startedAt only
+	// to say since when there is nothing to show).
+	startedAt time.Time
 }
 
 // New builds the console and returns it as an http.Handler:
@@ -165,6 +173,7 @@ func New(st *store.Store, b *bus.Broker, m *machine.Machine, hosts []string, por
 	c := &console{
 		store: st, bus: b, machine: m, log: log, push: push, pushToken: pushToken,
 		floor: floor, sandboxReason: sandboxReason, tracker: tr, user: user,
+		startedAt: time.Now(),
 	}
 	guard := newMutationGuard(port, append(append([]string{}, hosts...), "localhost", "127.0.0.1")...)
 

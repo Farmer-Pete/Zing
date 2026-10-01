@@ -212,6 +212,14 @@ type LogRail struct {
 	Level string
 	Debug bool
 	Lines []LogLine
+
+	// StartedAt is the server's own start time, pre-formatted HH:MM (bug
+	// fix, console.buildLogRail): Lines is empty both when the ring
+	// genuinely holds nothing yet and right after a `zing serve` restart,
+	// since the ring lives in memory and a restart always starts it empty.
+	// logRail's empty state names StartedAt so the second case reads as
+	// "quiet since the restart", not "broken".
+	StartedAt string
 }
 
 // AlertLine is one row the #alerts region renders (design section 6a, D8):

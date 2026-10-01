@@ -124,7 +124,7 @@ templ logRail(log LogRail) {
 			</button>
 		</div>
 		if len(log.Lines) == 0 {
-			<p class="empty">No log lines yet.</p>
+			<p class="empty">No log lines since Zing started at { log.StartedAt }.</p>
 		} else {
 			<ul class="log-lines">
 				for _, line := range log.Lines {

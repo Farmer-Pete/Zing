@@ -267,6 +267,11 @@ func (c *console) buildRunRail(ctx context.Context, ticketID int64) (templates.R
 // is enough.
 const logLineTimeFormat = "15:04:05.000"
 
+// railStartedAtFormat is LogRail.StartedAt's own format (bug fix): plain
+// HH:MM is enough for "quiet since the server started at", not the
+// sub-second precision a log line's own timestamp needs.
+const railStartedAtFormat = "15:04"
+
 // buildLogRail renders the Log section (design section 6.11, 6.12): the
 // current settings.log_level, whether ticketID's per-ticket debug override
 // is on, and the ring buffer's entries for every run on ticketID
@@ -318,7 +323,10 @@ func (c *console) buildLogRail(ctx context.Context, ticketID int64) (templates.L
 		})
 	}
 
-	return templates.LogRail{Level: level, Debug: c.log.IsDebug(ticketID), Lines: lines}, nil
+	return templates.LogRail{
+		Level: level, Debug: c.log.IsDebug(ticketID), Lines: lines,
+		StartedAt: c.startedAt.Format(railStartedAtFormat),
+	}, nil
 }
 
 // capLogEntries trims a slice already sorted oldest-first down to at most

@@ -9,6 +9,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"regexp"
 	"strconv"
 	"strings"
 	"testing"
@@ -367,5 +368,33 @@ func TestPostSide_RejectsCrossOrigin(t *testing.T) {
 
 	if resp.StatusCode != http.StatusForbidden {
 		t.Errorf("POST /side cross-origin status = %d, want 403", resp.StatusCode)
+	}
+}
+
+// TestBuildLogRail_EmptyStateNamesServerStart proves the bug fix for the
+// Log rail reading "No log lines yet." after every `zing serve` restart
+// (log.go's ring lives in memory, so a restart always starts it empty,
+// which looked broken rather than merely quiet): with no log entries at
+// all, the empty state instead names when the server started, computed
+// from console.New's own startedAt (server.go), not from the ring.
+func TestBuildLogRail_EmptyStateNamesServerStart(t *testing.T) {
+	t.Parallel()
+	s := newConsoleTestStore(t)
+	ticketID := seedTicket(t, s, "fake#1", "Add a hello endpoint")
+
+	srv := newTestServer(t, s, bus.New(), nil, newTestLogHandler(t))
+
+	resp, r, cancel := openStream(t, srv.URL, "thread", ticketID, 0)
+	defer cancel()
+	defer func() { _ = resp.Body.Close() }()
+
+	_, _, rail, _ := readInitialFrames(t, r)
+
+	if strings.Contains(rail, "No log lines yet.") {
+		t.Errorf("rail log section still renders the old, unexplained empty state; got:\n%s", rail)
+	}
+	want := regexp.MustCompile(`No log lines since Zing started at \d{2}:\d{2}\.`)
+	if !want.MatchString(rail) {
+		t.Errorf("rail log section missing the server-start empty state; got:\n%s", rail)
 	}
 }
