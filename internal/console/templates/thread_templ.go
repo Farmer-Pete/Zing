@@ -739,10 +739,12 @@ func optionChips(ticketID, questionID int64, options []ThreadOption) templ.Compo
 	})
 }
 
-// itemDecisionsReview is the design section 8 closed set of item decisions,
-// in the order their controls render: the review kind keeps all four.
+// itemDecisionsReview is the review kind's own closed set of item decisions,
+// in the order their controls render (design section 6.5, 9.2, Task 11):
+// accept, drop, and discuss, matching response.FindingDecision -- never
+// reject, which is perimeter's own decision alone.
 var itemDecisionsReview = []response.Decision{
-	response.DecisionAccept, response.DecisionReject, response.DecisionDrop, response.DecisionDiscuss,
+	response.DecisionAccept, response.DecisionDrop, response.DecisionDiscuss,
 }
 
 // itemDecisionsPerimeter is the perimeter kind's own narrower set (design
@@ -888,7 +890,7 @@ func itemRow(ticketID, questionID int64, item ThreadItem, decisions []response.D
 		var templ_7745c5c3_Var32 string
 		templ_7745c5c3_Var32, templ_7745c5c3_Err = templ.ResolveAttributeValue(item.Ref)
 		if templ_7745c5c3_Err != nil {
-			return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/console/templates/thread.templ`, Line: 279, Col: 47}
+			return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/console/templates/thread.templ`, Line: 281, Col: 47}
 		}
 		_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ_7745c5c3_Var32)
 		if templ_7745c5c3_Err != nil {
@@ -901,7 +903,7 @@ func itemRow(ticketID, questionID int64, item ThreadItem, decisions []response.D
 		var templ_7745c5c3_Var33 string
 		templ_7745c5c3_Var33, templ_7745c5c3_Err = templ.JoinStringErrs(item.Ref)
 		if templ_7745c5c3_Err != nil {
-			return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/console/templates/thread.templ`, Line: 280, Col: 35}
+			return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/console/templates/thread.templ`, Line: 282, Col: 35}
 		}
 		_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ.EscapeString(templ_7745c5c3_Var33))
 		if templ_7745c5c3_Err != nil {
@@ -920,7 +922,7 @@ func itemRow(ticketID, questionID int64, item ThreadItem, decisions []response.D
 				var templ_7745c5c3_Var34 string
 				templ_7745c5c3_Var34, templ_7745c5c3_Err = templ.JoinStringErrs(parts.Marker)
 				if templ_7745c5c3_Err != nil {
-					return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/console/templates/thread.templ`, Line: 283, Col: 49}
+					return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/console/templates/thread.templ`, Line: 285, Col: 49}
 				}
 				_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ.EscapeString(templ_7745c5c3_Var34))
 				if templ_7745c5c3_Err != nil {
@@ -938,7 +940,7 @@ func itemRow(ticketID, questionID int64, item ThreadItem, decisions []response.D
 			var templ_7745c5c3_Var35 string
 			templ_7745c5c3_Var35, templ_7745c5c3_Err = templ.JoinStringErrs(parts.Reason)
 			if templ_7745c5c3_Err != nil {
-				return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/console/templates/thread.templ`, Line: 285, Col: 43}
+				return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/console/templates/thread.templ`, Line: 287, Col: 43}
 			}
 			_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ.EscapeString(templ_7745c5c3_Var35))
 			if templ_7745c5c3_Err != nil {
@@ -951,7 +953,7 @@ func itemRow(ticketID, questionID int64, item ThreadItem, decisions []response.D
 			var templ_7745c5c3_Var36 string
 			templ_7745c5c3_Var36, templ_7745c5c3_Err = templ.JoinStringErrs(parts.Change)
 			if templ_7745c5c3_Err != nil {
-				return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/console/templates/thread.templ`, Line: 286, Col: 43}
+				return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/console/templates/thread.templ`, Line: 288, Col: 43}
 			}
 			_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ.EscapeString(templ_7745c5c3_Var36))
 			if templ_7745c5c3_Err != nil {
@@ -969,7 +971,7 @@ func itemRow(ticketID, questionID int64, item ThreadItem, decisions []response.D
 			var templ_7745c5c3_Var37 string
 			templ_7745c5c3_Var37, templ_7745c5c3_Err = templ.JoinStringErrs(item.Text)
 			if templ_7745c5c3_Err != nil {
-				return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/console/templates/thread.templ`, Line: 288, Col: 38}
+				return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/console/templates/thread.templ`, Line: 290, Col: 38}
 			}
 			_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ.EscapeString(templ_7745c5c3_Var37))
 			if templ_7745c5c3_Err != nil {
@@ -992,7 +994,7 @@ func itemRow(ticketID, questionID int64, item ThreadItem, decisions []response.D
 			var templ_7745c5c3_Var38 string
 			templ_7745c5c3_Var38, templ_7745c5c3_Err = templ.ResolveAttributeValue(strconv.FormatInt(ticketID, 10))
 			if templ_7745c5c3_Err != nil {
-				return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/console/templates/thread.templ`, Line: 292, Col: 115}
+				return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/console/templates/thread.templ`, Line: 294, Col: 115}
 			}
 			_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ_7745c5c3_Var38)
 			if templ_7745c5c3_Err != nil {
@@ -1005,7 +1007,7 @@ func itemRow(ticketID, questionID int64, item ThreadItem, decisions []response.D
 			var templ_7745c5c3_Var39 string
 			templ_7745c5c3_Var39, templ_7745c5c3_Err = templ.ResolveAttributeValue(strconv.FormatInt(questionID, 10))
 			if templ_7745c5c3_Err != nil {
-				return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/console/templates/thread.templ`, Line: 292, Col: 173}
+				return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/console/templates/thread.templ`, Line: 294, Col: 173}
 			}
 			_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ_7745c5c3_Var39)
 			if templ_7745c5c3_Err != nil {
@@ -1018,7 +1020,7 @@ func itemRow(ticketID, questionID int64, item ThreadItem, decisions []response.D
 			var templ_7745c5c3_Var40 string
 			templ_7745c5c3_Var40, templ_7745c5c3_Err = templ.ResolveAttributeValue(item.Ref)
 			if templ_7745c5c3_Err != nil {
-				return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/console/templates/thread.templ`, Line: 292, Col: 200}
+				return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/console/templates/thread.templ`, Line: 294, Col: 200}
 			}
 			_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ_7745c5c3_Var40)
 			if templ_7745c5c3_Err != nil {
@@ -1031,7 +1033,7 @@ func itemRow(ticketID, questionID int64, item ThreadItem, decisions []response.D
 			var templ_7745c5c3_Var41 string
 			templ_7745c5c3_Var41, templ_7745c5c3_Err = templ.ResolveAttributeValue(string(d))
 			if templ_7745c5c3_Err != nil {
-				return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/console/templates/thread.templ`, Line: 292, Col: 228}
+				return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/console/templates/thread.templ`, Line: 294, Col: 228}
 			}
 			_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ_7745c5c3_Var41)
 			if templ_7745c5c3_Err != nil {
@@ -1044,7 +1046,7 @@ func itemRow(ticketID, questionID int64, item ThreadItem, decisions []response.D
 			var templ_7745c5c3_Var42 string
 			templ_7745c5c3_Var42, templ_7745c5c3_Err = templ.ResolveAttributeValue(pickToggleExpr)
 			if templ_7745c5c3_Err != nil {
-				return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/console/templates/thread.templ`, Line: 292, Col: 261}
+				return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/console/templates/thread.templ`, Line: 294, Col: 261}
 			}
 			_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ_7745c5c3_Var42)
 			if templ_7745c5c3_Err != nil {
@@ -1057,7 +1059,7 @@ func itemRow(ticketID, questionID int64, item ThreadItem, decisions []response.D
 			var templ_7745c5c3_Var43 string
 			templ_7745c5c3_Var43, templ_7745c5c3_Err = templ.JoinStringErrs(string(d))
 			if templ_7745c5c3_Err != nil {
-				return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/console/templates/thread.templ`, Line: 292, Col: 275}
+				return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/console/templates/thread.templ`, Line: 294, Col: 275}
 			}
 			_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ.EscapeString(templ_7745c5c3_Var43))
 			if templ_7745c5c3_Err != nil {
@@ -1110,7 +1112,7 @@ func freeReply(ticketID, questionID int64) templ.Component {
 		var templ_7745c5c3_Var45 string
 		templ_7745c5c3_Var45, templ_7745c5c3_Err = templ.ResolveAttributeValue(strconv.FormatInt(ticketID, 10))
 		if templ_7745c5c3_Err != nil {
-			return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/console/templates/thread.templ`, Line: 306, Col: 134}
+			return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/console/templates/thread.templ`, Line: 308, Col: 134}
 		}
 		_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ_7745c5c3_Var45)
 		if templ_7745c5c3_Err != nil {
@@ -1123,7 +1125,7 @@ func freeReply(ticketID, questionID int64) templ.Component {
 		var templ_7745c5c3_Var46 string
 		templ_7745c5c3_Var46, templ_7745c5c3_Err = templ.ResolveAttributeValue(strconv.FormatInt(questionID, 10))
 		if templ_7745c5c3_Err != nil {
-			return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/console/templates/thread.templ`, Line: 306, Col: 192}
+			return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/console/templates/thread.templ`, Line: 308, Col: 192}
 		}
 		_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ_7745c5c3_Var46)
 		if templ_7745c5c3_Err != nil {

@@ -1,12 +1,15 @@
 // reviewing_test.go tests task 10: ROUND (design section 6.2), ASKED and
-// CONTINUE (6.2a), and FIXREQ (6.8), through the real reviewingHandler.
-// It reuses postbuild_test.go's own harness (newPostbuildTestStore, pbClaim,
-// pbTicketInReviewing, pbApply, pbGetTicket, pbMachine), package job
-// (unreachable from job_test), plus its own small fixture-script builder: a
-// review round's seven lens turns, served from an in-memory fs.FS rather
-// than the checked-in fixtures/scripts/review tree (selftest's and the
-// console e2e's own demo, task 10's Files list), so each test scripts
-// exactly the lens outcomes it needs.
+// CONTINUE (6.2a), and FIXREQ (6.8); and task 11: TRIAGE (6.5) and DISCUSS
+// (6.6), plus the Task 10 handoff's own runLensesParallel deadlock fix
+// (TestRunLensesParallelRejectsOutOfRangeConfig) -- all through the real
+// reviewingHandler. It reuses postbuild_test.go's own harness
+// (newPostbuildTestStore, pbClaim, pbTicketInReviewing, pbApply,
+// pbGetTicket, pbMachine), package job (unreachable from job_test), plus
+// its own small fixture-script builder: a review round's seven lens turns,
+// served from an in-memory fs.FS rather than the checked-in
+// fixtures/scripts/review tree (selftest's and the console e2e's own demo,
+// task 10's Files list), so each test scripts exactly the lens outcomes it
+// needs.
 package job
 
 import (
@@ -16,6 +19,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -80,12 +85,21 @@ func reviewScriptsFS(overrides map[string]string) fstest.MapFS {
 // in-diff location uses that same one, so this builds it directly rather
 // than taking a location no caller varies.
 func findingScript(lens, severity, text, fix string) string {
+	return findingScriptAt(lens, severity, greetGoLine5, text, fix)
+}
+
+// findingScriptAt is findingScript with an explicit location: task 11's own
+// tests that need two findings of two different lenses in one round use
+// this with greetGoLine5 and greetGoLine2, so DedupFindings (6.3) keeps
+// them as two separate rows rather than merging same-location reports from
+// different lenses into one.
+func findingScriptAt(lens, severity, location, text, fix string) string {
 	return fmt.Sprintf(`<zing job="review" outcome="ok">
 <finding lens="%s" severity="%s" location="%s">
 <text>%s</text>
 <fix>%s</fix>
 </finding>
-</zing>`, lens, severity, greetGoLine5, text, fix)
+</zing>`, lens, severity, location, text, fix)
 }
 
 // reviewQuestionScript is one review lens's own "question" document: a
@@ -126,6 +140,28 @@ func reviewErrorScript(code, what, why, tried string) string {
 // opening line, a safe in-diff finding location every finding-bearing test
 // below uses.
 const greetGoLine5 = "greet.go:5"
+
+// greetGoLine2 is a second, distinct location inside the same diff (greet.go's
+// own package line): the task 11 tests that need two findings at two
+// locations in one round use this one and greetGoLine5, so DedupFindings
+// (6.3) never merges them into one row.
+const greetGoLine2 = "greet.go:2"
+
+// twoFindingScript is one lens's own "ok" document carrying two findings at
+// two distinct locations (design section 6.6's own batching tests: two
+// findings of one lens, both discussed, carried in one resume).
+func twoFindingScript(lens, sev1, loc1, text1, fix1, sev2, loc2, text2, fix2 string) string {
+	return fmt.Sprintf(`<zing job="review" outcome="ok">
+<finding lens="%s" severity="%s" location="%s">
+<text>%s</text>
+<fix>%s</fix>
+</finding>
+<finding lens="%s" severity="%s" location="%s">
+<text>%s</text>
+<fix>%s</fix>
+</finding>
+</zing>`, lens, sev1, loc1, text1, fix1, lens, sev2, loc2, text2, fix2)
+}
 
 // reviewTicketReady is pbTicketInReviewing plus the ticket and the run id
 // watermark just before review's own first round: reviewing_test.go's own
@@ -340,6 +376,64 @@ func TestRoundRespectsMaxLensesParallel(t *testing.T) {
 	}
 }
 
+// ---- TestRunLensesParallelRejectsOutOfRangeConfig ---------------------------
+
+// TestRunLensesParallelRejectsOutOfRangeConfig proves the handoff fix for
+// Package 9 Task 10's own bug: runLensesParallel used to size its semaphore
+// channel at make(chan struct{}, d.LensesParallel) with no floor, so
+// LensesParallel == 0 -- the zero value a Deps literal that forgot to set
+// it carries -- made a capacity-0 channel every goroutine's own "case sem
+// <- struct{}{}" blocks on forever, since nothing ever reads from a channel
+// no send has completed on: a deadlock, not an error. It must instead
+// refuse any value outside [1,7] with ErrConfig, before build is ever
+// called and before any lens ever reserves a run.
+func TestRunLensesParallelRejectsOutOfRangeConfig(t *testing.T) {
+	s, ticket, before := reviewTicketReady(t)
+	deps := pbClaim(t, s, runtime.NewFake(reviewScriptsFS(nil)), ticket.ID)
+
+	for _, n := range []int{-1, 0, 8, 100} {
+		t.Run(strconv.Itoa(n), func(t *testing.T) {
+			deps.LensesParallel = n
+			called := false
+			// build's own SessionUpsert and RunRequest returns are always the
+			// zero value: this case proves build is never even called, so
+			// what it would have returned never matters (unparam).
+			build := func(response.Lens) (store.SessionUpsert, runtime.RunRequest, func(runResult) *store.SessionUpsert) { //nolint:unparam // see above
+				called = true
+				return store.SessionUpsert{}, runtime.RunRequest{}, freshSessionRecord
+			}
+
+			done := make(chan struct{})
+			var attempts []lensAttempt
+			var err error
+			go func() {
+				attempts, err = runLensesParallel(t.Context(), deps, ticket, reviewLenses(deps), build)
+				close(done)
+			}()
+			select {
+			case <-done:
+			case <-time.After(5 * time.Second):
+				t.Fatal("runLensesParallel did not return within 5s: it deadlocked")
+			}
+
+			if !errors.Is(err, ErrConfig) {
+				t.Fatalf("err = %v, want errors.Is(err, ErrConfig)", err)
+			}
+			if called {
+				t.Error("build was called; want no lens ever started")
+			}
+			if attempts != nil {
+				t.Errorf("attempts = %v, want nil", attempts)
+			}
+		})
+	}
+
+	runs := reviewRunsSince(t, s, ticket.ID, before)
+	if len(runs) != 0 {
+		t.Errorf("reserved runs = %d, want 0 (the range check runs before any reserve)", len(runs))
+	}
+}
+
 // ---- TestRoundCleanMovesToJudging -------------------------------------------
 
 func TestRoundCleanMovesToJudging(t *testing.T) {
@@ -431,7 +525,7 @@ func TestRoundAboveFloorAsks(t *testing.T) {
 
 	open := newestOpenQuestion(t, s, ticket.ID)
 	var payload response.QuestionPayload
-	if err := json.Unmarshal(open.Payload, &payload); err != nil {
+	if err = json.Unmarshal(open.Payload, &payload); err != nil {
 		t.Fatalf("unmarshal question payload: %v", err)
 	}
 	if payload.Kind != response.QuestionKindReview {
@@ -1326,5 +1420,937 @@ func TestContinueCapExhaustedEscalates(t *testing.T) {
 	}
 	if afterThird != beforeThird {
 		t.Errorf("MaxRunID changed from %d to %d, want unchanged (no run started)", beforeThird, afterThird)
+	}
+}
+
+// ---- task 11: TRIAGE (6.5) and DISCUSS (6.6) -------------------------------
+
+// recordingRuntime wraps another Runtime and records every RunRequest it
+// receives, in call order: this file's own way to assert a resume's own
+// Label and Prompt directly (the resume charge and session identity are
+// asserted through the store's own Session and Run rows instead, the same
+// pattern TestContinueResumesAskingSession already uses).
+type recordingRuntime struct {
+	inner runtime.Runtime
+
+	mu   sync.Mutex
+	reqs []runtime.RunRequest
+}
+
+func (r *recordingRuntime) Run(ctx context.Context, req runtime.RunRequest) (runtime.RunResult, error) {
+	r.mu.Lock()
+	r.reqs = append(r.reqs, req)
+	r.mu.Unlock()
+	return r.inner.Run(ctx, req)
+}
+
+// lastRequest returns the most recent RunRequest r has served.
+func (r *recordingRuntime) lastRequest(t *testing.T) runtime.RunRequest {
+	t.Helper()
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if len(r.reqs) == 0 {
+		t.Fatal("recordingRuntime: no request recorded")
+	}
+	return r.reqs[len(r.reqs)-1]
+}
+
+// itemRefByText returns the Ref of payload's own item whose Text contains
+// want, failing the test if none or more than one does: reviewing_test.go's
+// own way to find a finding's own stored id when a test cannot assume which
+// of two findings DedupFindings' own (path, line) order gave the lower id.
+func itemRefByText(t *testing.T, payload response.QuestionPayload, want string) string {
+	t.Helper()
+	var ref string
+	matches := 0
+	for _, it := range payload.Items {
+		if strings.Contains(it.Text, want) {
+			ref = it.Ref
+			matches++
+		}
+	}
+	if matches != 1 {
+		t.Fatalf("itemRefByText(%q): matched %d items, want exactly 1", want, matches)
+	}
+	return ref
+}
+
+// answerReviewItems drives the real console draft/send path (SaveDraft,
+// then SendBatch) against questionID: one item draft per entry of
+// decisions, a free-text reply when note != "", all sent in one batch
+// (design section 6.5's own precondition: every item decided, or a reply
+// alone, either of which markAnsweredQuestionsTx marks answered).
+func answerReviewItems(t *testing.T, s *store.Store, ticketID, questionID int64, decisions map[string]response.Decision, note string) {
+	t.Helper()
+	for ref, d := range decisions {
+		if _, err := s.SaveDraft(t.Context(), store.DraftInput{TicketID: ticketID, QuestionID: &questionID, Item: &store.ItemDecision{Ref: ref, Decision: d}}); err != nil {
+			t.Fatalf("SaveDraft(item %s): %v", ref, err)
+		}
+	}
+	if note != "" {
+		if _, err := s.SaveDraft(t.Context(), store.DraftInput{TicketID: ticketID, QuestionID: &questionID, Text: note}); err != nil {
+			t.Fatalf("SaveDraft(text): %v", err)
+		}
+	}
+	if _, err := s.SendBatch(t.Context(), ticketID); err != nil {
+		t.Fatalf("SendBatch: %v", err)
+	}
+}
+
+// runByFindingID returns the run that produced findingID's own newest
+// stored row: DISCUSS's own session-grouping key (nextPendingDiscussGroup),
+// read back the same way for a test's own assertions.
+func runByFindingID(t *testing.T, s *store.Store, ticketID int64, findingID string) store.Run {
+	t.Helper()
+	findings, err := s.Findings(t.Context(), ticketID)
+	if err != nil {
+		t.Fatalf("Findings: %v", err)
+	}
+	newest := newestFindingRowPerID(findings)
+	row, ok := newest[findingID]
+	if !ok || row.RunID == nil {
+		t.Fatalf("runByFindingID(%q): no stored row with a run id", findingID)
+	}
+	run, err := s.RunByID(t.Context(), *row.RunID)
+	if err != nil {
+		t.Fatalf("RunByID: %v", err)
+	}
+	return run
+}
+
+// discussLens, discussSeverity, discussText, and discussFix are
+// discussGroupReady's own fixed scenario: every one of this file's own
+// discuss tests needs the same single above-floor finding, varying only
+// its own note, so these are named constants rather than parameters no
+// caller actually varies (unparam).
+const (
+	discussLens     = "security"
+	discussSeverity = "major"
+	discussText     = "unchecked input"
+	discussFix      = "validate it"
+)
+
+// discussGroupReady drives reviewTicketReady's own ticket through ROUND 1
+// (discussLens finds one above-floor finding at greetGoLine5) and TRIAGE
+// (decision discuss, with note when note != ""), leaving exactly one
+// pending discuss group, ready for reviewingHandler.Run to enter DISCUSS.
+// scripts is the live (mutable) fs.FS backing rt, so a caller can add the
+// resume's own next-turn script before driving DISCUSS. findingID is round
+// 1's own only stored finding id (r1f1).
+func discussGroupReady(t *testing.T, note string) (s *store.Store, ticket store.Ticket, rt *recordingRuntime, scripts fstest.MapFS, findingID string) {
+	t.Helper()
+	s, ticket0, _ := reviewTicketReady(t)
+	scripts = reviewScriptsFS(map[string]string{
+		reviewScriptKey(discussLens, 1): findingScript(discussLens, discussSeverity, discussText, discussFix),
+	})
+	rt = &recordingRuntime{inner: runtime.NewFake(scripts)}
+	deps := pbClaim(t, s, rt, ticket0.ID)
+
+	commit, err := (reviewingHandler{}).Run(t.Context(), ticket0, deps)
+	if err != nil {
+		t.Fatalf("Run (round): %v", err)
+	}
+	pbApply(t, s, ticket0, commit)
+
+	q := newestOpenQuestion(t, s, ticket0.ID)
+	var payload response.QuestionPayload
+	if err = json.Unmarshal(q.Payload, &payload); err != nil {
+		t.Fatalf("unmarshal question payload: %v", err)
+	}
+	if len(payload.Items) != 1 {
+		t.Fatalf("payload.Items = %d, want 1", len(payload.Items))
+	}
+	findingID = payload.Items[0].Ref
+
+	answerReviewItems(t, s, ticket0.ID, q.ID, map[string]response.Decision{findingID: response.DecisionDiscuss}, note)
+
+	ticket1 := pbGetTicket(t, s, ticket0.ID)
+	deps1 := pbClaim(t, s, rt, ticket0.ID)
+	commit1, err := (reviewingHandler{}).Run(t.Context(), ticket1, deps1)
+	if err != nil {
+		t.Fatalf("Run (triage): %v", err)
+	}
+	pbApply(t, s, ticket0, commit1)
+
+	ticket = pbGetTicket(t, s, ticket0.ID)
+	return s, ticket, rt, scripts, findingID
+}
+
+// ---- TestTriageStoresDecisions ----------------------------------------------
+
+func TestTriageStoresDecisions(t *testing.T) {
+	s, ticket, _ := reviewTicketReady(t)
+	scripts := reviewScriptsFS(map[string]string{
+		reviewScriptKey("security", 1): findingScriptAt("security", "major", greetGoLine5, "unchecked input", "validate it"),
+		reviewScriptKey("quality", 1):  findingScriptAt("quality", "blocker", greetGoLine2, "breaks the build", "fix the build"),
+	})
+	deps := pbClaim(t, s, runtime.NewFake(scripts), ticket.ID)
+
+	commit, err := (reviewingHandler{}).Run(t.Context(), ticket, deps)
+	if err != nil {
+		t.Fatalf("Run (round): %v", err)
+	}
+	pbApply(t, s, ticket, commit)
+
+	q := newestOpenQuestion(t, s, ticket.ID)
+	var payload response.QuestionPayload
+	if err = json.Unmarshal(q.Payload, &payload); err != nil {
+		t.Fatalf("unmarshal question payload: %v", err)
+	}
+	accepted := itemRefByText(t, payload, "unchecked input")
+	dropped := itemRefByText(t, payload, "breaks the build")
+
+	answerReviewItems(t, s, ticket.ID, q.ID, map[string]response.Decision{
+		accepted: response.DecisionAccept,
+		dropped:  response.DecisionDrop,
+	}, "")
+
+	ticket2 := pbGetTicket(t, s, ticket.ID)
+	deps2 := pbClaim(t, s, runtime.NewFake(scripts), ticket.ID)
+	commit2, err := (reviewingHandler{}).Run(t.Context(), ticket2, deps2)
+	if err != nil {
+		t.Fatalf("Run (triage): %v", err)
+	}
+	if commit2.Next != "" {
+		t.Errorf("commit2.Next = %q, want empty (no state transition in TRIAGE)", commit2.Next)
+	}
+	if len(commit2.ResolveQuestions) != 1 || commit2.ResolveQuestions[0] != q.ID {
+		t.Errorf("commit2.ResolveQuestions = %v, want [%d]", commit2.ResolveQuestions, q.ID)
+	}
+	pbApply(t, s, ticket, commit2)
+
+	findings, err := s.Findings(t.Context(), ticket.ID)
+	if err != nil {
+		t.Fatalf("Findings: %v", err)
+	}
+	newest := newestFindingRowPerID(findings)
+	if d := newest[accepted].Finding.Decision; d == nil || *d != response.FindingAccept {
+		t.Errorf("accepted finding %s decision = %v, want accept", accepted, d)
+	}
+	if d := newest[dropped].Finding.Decision; d == nil || *d != response.FindingDrop {
+		t.Errorf("dropped finding %s decision = %v, want drop", dropped, d)
+	}
+
+	resolved, err := s.QuestionsByState(t.Context(), ticket.ID, "resolved")
+	if err != nil {
+		t.Fatalf("QuestionsByState(resolved): %v", err)
+	}
+	found := false
+	for _, r := range resolved {
+		if r.ID == q.ID {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("question %d not resolved after TRIAGE", q.ID)
+	}
+	if ticket2 := pbGetTicket(t, s, ticket.ID); ticket2.WaitingOn != nil {
+		t.Errorf("ticket.WaitingOn = %v, want nil (cleared)", *ticket2.WaitingOn)
+	}
+}
+
+// ---- TestTriageDefaultsToAccept ----------------------------------------------
+
+// TestTriageDefaultsToAccept proves design section 6.5 step 2 and section
+// 14's own edge case: an item the owner leaves undecided defaults to
+// accept. The owner decides only one of the round's two above-floor
+// findings and sends a free reply on the question, which
+// markAnsweredQuestionsTx marks answered on its own (the other path design
+// section 14 names: "the console marks the question answered only when
+// every item has a decision" -- a reply is the other one).
+func TestTriageDefaultsToAccept(t *testing.T) {
+	s, ticket, _ := reviewTicketReady(t)
+	scripts := reviewScriptsFS(map[string]string{
+		reviewScriptKey("security", 1): findingScriptAt("security", "major", greetGoLine5, "unchecked input", "validate it"),
+		reviewScriptKey("quality", 1):  findingScriptAt("quality", "blocker", greetGoLine2, "breaks the build", "fix the build"),
+	})
+	deps := pbClaim(t, s, runtime.NewFake(scripts), ticket.ID)
+
+	commit, err := (reviewingHandler{}).Run(t.Context(), ticket, deps)
+	if err != nil {
+		t.Fatalf("Run (round): %v", err)
+	}
+	pbApply(t, s, ticket, commit)
+
+	q := newestOpenQuestion(t, s, ticket.ID)
+	var payload response.QuestionPayload
+	if err = json.Unmarshal(q.Payload, &payload); err != nil {
+		t.Fatalf("unmarshal question payload: %v", err)
+	}
+	decided := itemRefByText(t, payload, "unchecked input")
+	undecided := itemRefByText(t, payload, "breaks the build")
+
+	answerReviewItems(t, s, ticket.ID, q.ID, map[string]response.Decision{decided: response.DecisionDrop}, "going with the recommendation for the rest")
+
+	ticket2 := pbGetTicket(t, s, ticket.ID)
+	deps2 := pbClaim(t, s, runtime.NewFake(scripts), ticket.ID)
+	commit2, err := (reviewingHandler{}).Run(t.Context(), ticket2, deps2)
+	if err != nil {
+		t.Fatalf("Run (triage): %v", err)
+	}
+	pbApply(t, s, ticket, commit2)
+
+	findings, err := s.Findings(t.Context(), ticket.ID)
+	if err != nil {
+		t.Fatalf("Findings: %v", err)
+	}
+	newest := newestFindingRowPerID(findings)
+	if d := newest[decided].Finding.Decision; d == nil || *d != response.FindingDrop {
+		t.Errorf("decided finding %s decision = %v, want drop (unaffected by the default)", decided, d)
+	}
+	if d := newest[undecided].Finding.Decision; d == nil || *d != response.FindingAccept {
+		t.Errorf("undecided finding %s decision = %v, want accept (the safe default)", undecided, d)
+	}
+}
+
+// ---- TestTriageWritesNotes ---------------------------------------------------
+
+// TestTriageWritesNotes proves design section 6.5 step 4 and D24: a
+// discussed item's own "review note <id>" marker carries the owner's
+// replies on the round, or the fixed "(the owner gave no note)" text when
+// there are none.
+func TestTriageWritesNotes(t *testing.T) {
+	t.Run("with a reply", func(t *testing.T) {
+		s, ticket, _ := reviewTicketReady(t)
+		scripts := reviewScriptsFS(map[string]string{
+			reviewScriptKey("security", 1): findingScript("security", "major", "unchecked input", "validate it"),
+		})
+		deps := pbClaim(t, s, runtime.NewFake(scripts), ticket.ID)
+		commit, err := (reviewingHandler{}).Run(t.Context(), ticket, deps)
+		if err != nil {
+			t.Fatalf("Run (round): %v", err)
+		}
+		pbApply(t, s, ticket, commit)
+
+		q := newestOpenQuestion(t, s, ticket.ID)
+		var payload response.QuestionPayload
+		if err = json.Unmarshal(q.Payload, &payload); err != nil {
+			t.Fatalf("unmarshal question payload: %v", err)
+		}
+		ref := payload.Items[0].Ref
+		answerReviewItems(t, s, ticket.ID, q.ID, map[string]response.Decision{ref: response.DecisionDiscuss}, "take another look at the error path")
+
+		ticket2 := pbGetTicket(t, s, ticket.ID)
+		deps2 := pbClaim(t, s, runtime.NewFake(scripts), ticket.ID)
+		commit2, err := (reviewingHandler{}).Run(t.Context(), ticket2, deps2)
+		if err != nil {
+			t.Fatalf("Run (triage): %v", err)
+		}
+		pbApply(t, s, ticket, commit2)
+
+		marker, ok := reviewMarker(t, s, ticket.ID, "review note "+ref)
+		if !ok {
+			t.Fatalf("no %q marker", "review note "+ref)
+		}
+		if !strings.Contains(marker.Body, "take another look at the error path") {
+			t.Errorf("note marker body = %q, want it to contain the owner's reply", marker.Body)
+		}
+	})
+
+	t.Run("with none", func(t *testing.T) {
+		s, ticket, _ := reviewTicketReady(t)
+		scripts := reviewScriptsFS(map[string]string{
+			reviewScriptKey("security", 1): findingScript("security", "major", "unchecked input", "validate it"),
+		})
+		deps := pbClaim(t, s, runtime.NewFake(scripts), ticket.ID)
+		commit, err := (reviewingHandler{}).Run(t.Context(), ticket, deps)
+		if err != nil {
+			t.Fatalf("Run (round): %v", err)
+		}
+		pbApply(t, s, ticket, commit)
+
+		q := newestOpenQuestion(t, s, ticket.ID)
+		var payload response.QuestionPayload
+		if err = json.Unmarshal(q.Payload, &payload); err != nil {
+			t.Fatalf("unmarshal question payload: %v", err)
+		}
+		ref := payload.Items[0].Ref
+		answerReviewItems(t, s, ticket.ID, q.ID, map[string]response.Decision{ref: response.DecisionDiscuss}, "")
+
+		ticket2 := pbGetTicket(t, s, ticket.ID)
+		deps2 := pbClaim(t, s, runtime.NewFake(scripts), ticket.ID)
+		commit2, err := (reviewingHandler{}).Run(t.Context(), ticket2, deps2)
+		if err != nil {
+			t.Fatalf("Run (triage): %v", err)
+		}
+		pbApply(t, s, ticket, commit2)
+
+		marker, ok := reviewMarker(t, s, ticket.ID, "review note "+ref)
+		if !ok {
+			t.Fatalf("no %q marker", "review note "+ref)
+		}
+		if !strings.Contains(marker.Body, reviewNoteNone) {
+			t.Errorf("note marker body = %q, want it to contain %q", marker.Body, reviewNoteNone)
+		}
+	})
+}
+
+// ---- TestDiscussResumesLensSession -------------------------------------------
+
+// TestDiscussResumesLensSession proves design section 6.6 steps 1-3: DISCUSS
+// resumes the discussed finding's own lens session, under its own original
+// label, with the finding and the owner's note as inputs, charging one
+// resume.
+func TestDiscussResumesLensSession(t *testing.T) {
+	s, ticket, rt, scripts, findingID := discussGroupReady(t, "please check the error path again")
+	scripts[reviewScriptKey("security", 2)] = &fstest.MapFile{Data: []byte(reviewOKScript)}
+
+	run0 := runByFindingID(t, s, ticket.ID, findingID)
+
+	deps := pbClaim(t, s, rt, ticket.ID)
+	commit, err := (reviewingHandler{}).Run(t.Context(), ticket, deps)
+	if err != nil {
+		t.Fatalf("Run (discuss): %v", err)
+	}
+	pbApply(t, s, ticket, commit)
+
+	req := rt.lastRequest(t)
+	if req.Label != "1-security" {
+		t.Errorf("label = %q, want %q", req.Label, "1-security")
+	}
+	if !strings.Contains(req.Prompt, findingID) {
+		t.Errorf("prompt missing finding id %q; got:\n%s", findingID, req.Prompt)
+	}
+	if !strings.Contains(req.Prompt, "unchecked input") {
+		t.Errorf("prompt missing the finding's own text; got:\n%s", req.Prompt)
+	}
+	if !strings.Contains(req.Prompt, "please check the error path again") {
+		t.Errorf("prompt missing the owner's note; got:\n%s", req.Prompt)
+	}
+
+	maxResumes := deps.Machine.Jobs[jobReviewName].MaxResumes
+	sess, _, err := s.SessionByID(t.Context(), run0.SessionID, maxResumes)
+	if err != nil {
+		t.Fatalf("SessionByID: %v", err)
+	}
+	if sess.Resumes != 1 {
+		t.Errorf("session resumes = %d, want 1", sess.Resumes)
+	}
+
+	newestRunID, err := s.MaxRunID(t.Context(), ticket.ID)
+	if err != nil {
+		t.Fatalf("MaxRunID: %v", err)
+	}
+	resumed, err := s.RunByID(t.Context(), newestRunID)
+	if err != nil {
+		t.Fatalf("RunByID: %v", err)
+	}
+	if resumed.SessionID != run0.SessionID {
+		t.Errorf("resumed run session = %d, want %d (the same session)", resumed.SessionID, run0.SessionID)
+	}
+	if resumed.Turn != 1 {
+		t.Errorf("resumed run turn = %d, want 1", resumed.Turn)
+	}
+	if resumed.Lens == nil || *resumed.Lens != "security" {
+		t.Errorf("resumed run lens = %v, want security", resumed.Lens)
+	}
+}
+
+// ---- TestDiscussBatchesOneSession --------------------------------------------
+
+// TestDiscussBatchesOneSession proves design section 6.6's own batching
+// rule: two findings of one lens, both discussed, are carried by one
+// resume, charging one resume, and each writes its own "review discussed
+// <id>" marker naming the same batch; a merged successor supersedes both.
+func TestDiscussBatchesOneSession(t *testing.T) {
+	s, ticket, _ := reviewTicketReady(t)
+	scripts := reviewScriptsFS(map[string]string{
+		reviewScriptKey("security", 1): twoFindingScript(
+			"security", "major", greetGoLine2, "first finding", "fix the first",
+			"major", greetGoLine5, "second finding", "fix the second",
+		),
+	})
+	rt := &recordingRuntime{inner: runtime.NewFake(scripts)}
+	deps := pbClaim(t, s, rt, ticket.ID)
+
+	commit, err := (reviewingHandler{}).Run(t.Context(), ticket, deps)
+	if err != nil {
+		t.Fatalf("Run (round): %v", err)
+	}
+	pbApply(t, s, ticket, commit)
+
+	q := newestOpenQuestion(t, s, ticket.ID)
+	var payload response.QuestionPayload
+	if err = json.Unmarshal(q.Payload, &payload); err != nil {
+		t.Fatalf("unmarshal question payload: %v", err)
+	}
+	if len(payload.Items) != 2 {
+		t.Fatalf("payload.Items = %d, want 2", len(payload.Items))
+	}
+	ref1 := itemRefByText(t, payload, "first finding")
+	ref2 := itemRefByText(t, payload, "second finding")
+
+	answerReviewItems(t, s, ticket.ID, q.ID, map[string]response.Decision{
+		ref1: response.DecisionDiscuss,
+		ref2: response.DecisionDiscuss,
+	}, "")
+
+	ticket2 := pbGetTicket(t, s, ticket.ID)
+	deps2 := pbClaim(t, s, rt, ticket.ID)
+	commit2, err := (reviewingHandler{}).Run(t.Context(), ticket2, deps2)
+	if err != nil {
+		t.Fatalf("Run (triage): %v", err)
+	}
+	pbApply(t, s, ticket, commit2)
+
+	run1 := runByFindingID(t, s, ticket.ID, ref1)
+	run2 := runByFindingID(t, s, ticket.ID, ref2)
+	if run1.SessionID != run2.SessionID {
+		t.Fatalf("finding sessions = %d, %d, want the same (one lens)", run1.SessionID, run2.SessionID)
+	}
+
+	scripts[reviewScriptKey("security", 2)] = &fstest.MapFile{Data: []byte(findingScript("security", "minor", "revised, combined finding", "combined fix"))}
+
+	ticket3 := pbGetTicket(t, s, ticket.ID)
+	deps3 := pbClaim(t, s, rt, ticket.ID)
+	commit3, err := (reviewingHandler{}).Run(t.Context(), ticket3, deps3)
+	if err != nil {
+		t.Fatalf("Run (discuss): %v", err)
+	}
+	pbApply(t, s, ticket, commit3)
+
+	req := rt.lastRequest(t)
+	if !strings.Contains(req.Prompt, "first finding") || !strings.Contains(req.Prompt, "second finding") {
+		t.Errorf("prompt missing one of the group's own findings; got:\n%s", req.Prompt)
+	}
+
+	maxResumes := deps.Machine.Jobs[jobReviewName].MaxResumes
+	sess, _, err := s.SessionByID(t.Context(), run1.SessionID, maxResumes)
+	if err != nil {
+		t.Fatalf("SessionByID: %v", err)
+	}
+	if sess.Resumes != 1 {
+		t.Errorf("session resumes = %d, want 1 (one resume for the whole batch)", sess.Resumes)
+	}
+
+	m1, ok1 := reviewMarker(t, s, ticket.ID, reviewDiscussedMarker(ref1))
+	m2, ok2 := reviewMarker(t, s, ticket.ID, reviewDiscussedMarker(ref2))
+	if !ok1 || !ok2 {
+		t.Fatalf("discussed markers ok = %v, %v, want both true", ok1, ok2)
+	}
+	if !strings.Contains(m1.Body, "kept 1") || !strings.Contains(m2.Body, "kept 1") {
+		t.Errorf("discussed markers = %q, %q, want both to report kept 1", m1.Body, m2.Body)
+	}
+	_, batch1, _ := strings.Cut(m1.Body, "\n")
+	_, batch2, _ := strings.Cut(m2.Body, "\n")
+	if batch1 != batch2 {
+		t.Errorf("discussed markers name different batches: %q vs %q", batch1, batch2)
+	}
+
+	findings, err := s.Findings(t.Context(), ticket.ID)
+	if err != nil {
+		t.Fatalf("Findings: %v", err)
+	}
+	var survivor *response.FindingArtifact
+	for i := range findings {
+		f := &findings[i].Finding
+		if f.ID != ref1 && f.ID != ref2 && !f.Held {
+			survivor = f
+		}
+	}
+	if survivor == nil {
+		t.Fatal("no survivor finding stored")
+	}
+	if len(survivor.Supersedes) != 2 || !slices.Contains(survivor.Supersedes, ref1) || !slices.Contains(survivor.Supersedes, ref2) {
+		t.Errorf("survivor.Supersedes = %v, want [%s %s] (in some order)", survivor.Supersedes, ref1, ref2)
+	}
+}
+
+// ---- TestDiscussTwoSessionsTwoTicks -------------------------------------------
+
+// TestDiscussTwoSessionsTwoTicks proves design section 6.6's own "take the
+// group whose lowest finding id is lowest" rule: two findings of two
+// different lenses, both discussed, are two separate sessions, and one
+// Run tick resolves only the lowest-id one, leaving the other pending for
+// the next tick.
+func TestDiscussTwoSessionsTwoTicks(t *testing.T) {
+	s, ticket, _ := reviewTicketReady(t)
+	scripts := reviewScriptsFS(map[string]string{
+		reviewScriptKey("correctness", 1): findingScriptAt("correctness", "major", greetGoLine2, "first lens finding", "fix the first"),
+		reviewScriptKey("security", 1):    findingScriptAt("security", "major", greetGoLine5, "second lens finding", "fix the second"),
+	})
+	rt := &recordingRuntime{inner: runtime.NewFake(scripts)}
+	deps := pbClaim(t, s, rt, ticket.ID)
+
+	commit, err := (reviewingHandler{}).Run(t.Context(), ticket, deps)
+	if err != nil {
+		t.Fatalf("Run (round): %v", err)
+	}
+	pbApply(t, s, ticket, commit)
+
+	q := newestOpenQuestion(t, s, ticket.ID)
+	var payload response.QuestionPayload
+	if err = json.Unmarshal(q.Payload, &payload); err != nil {
+		t.Fatalf("unmarshal question payload: %v", err)
+	}
+	refFirst := itemRefByText(t, payload, "first lens finding")
+	refSecond := itemRefByText(t, payload, "second lens finding")
+
+	answerReviewItems(t, s, ticket.ID, q.ID, map[string]response.Decision{
+		refFirst:  response.DecisionDiscuss,
+		refSecond: response.DecisionDiscuss,
+	}, "")
+
+	ticket2 := pbGetTicket(t, s, ticket.ID)
+	deps2 := pbClaim(t, s, rt, ticket.ID)
+	commit2, err := (reviewingHandler{}).Run(t.Context(), ticket2, deps2)
+	if err != nil {
+		t.Fatalf("Run (triage): %v", err)
+	}
+	pbApply(t, s, ticket, commit2)
+
+	runFirst := runByFindingID(t, s, ticket.ID, refFirst)
+	runSecond := runByFindingID(t, s, ticket.ID, refSecond)
+	if runFirst.Lens == nil || runSecond.Lens == nil {
+		t.Fatal("both findings' own runs must carry a lens")
+	}
+	scripts[reviewScriptKey(*runFirst.Lens, 2)] = &fstest.MapFile{Data: []byte(reviewOKScript)}
+	scripts[reviewScriptKey(*runSecond.Lens, 2)] = &fstest.MapFile{Data: []byte(reviewOKScript)}
+
+	// Tick 1: the lowest finding id's own group resolves; the other stays
+	// pending.
+	ticket3 := pbGetTicket(t, s, ticket.ID)
+	deps3 := pbClaim(t, s, rt, ticket.ID)
+	commit3, err := (reviewingHandler{}).Run(t.Context(), ticket3, deps3)
+	if err != nil {
+		t.Fatalf("Run (discuss 1): %v", err)
+	}
+	pbApply(t, s, ticket, commit3)
+
+	_, refFirstDone := reviewMarker(t, s, ticket.ID, reviewDiscussedMarker(refFirst))
+	_, refSecondDone := reviewMarker(t, s, ticket.ID, reviewDiscussedMarker(refSecond))
+	if refFirstDone == refSecondDone {
+		t.Fatalf("exactly one of the two findings should be discussed after tick 1; refFirst done=%v refSecond done=%v", refFirstDone, refSecondDone)
+	}
+
+	// Tick 2: the remaining group resolves.
+	ticket4 := pbGetTicket(t, s, ticket.ID)
+	deps4 := pbClaim(t, s, rt, ticket.ID)
+	commit4, err := (reviewingHandler{}).Run(t.Context(), ticket4, deps4)
+	if err != nil {
+		t.Fatalf("Run (discuss 2): %v", err)
+	}
+	pbApply(t, s, ticket, commit4)
+
+	_, refFirstDone = reviewMarker(t, s, ticket.ID, reviewDiscussedMarker(refFirst))
+	_, refSecondDone = reviewMarker(t, s, ticket.ID, reviewDiscussedMarker(refSecond))
+	if !refFirstDone || !refSecondDone {
+		t.Errorf("both findings should be discussed after tick 2; refFirst done=%v refSecond done=%v", refFirstDone, refSecondDone)
+	}
+}
+
+// ---- TestDiscussWithdrawn -----------------------------------------------------
+
+// TestDiscussWithdrawn proves design section 6.6 step 4's own "zero
+// survivors" case: the lens returns no finding at all, so no new row is
+// stored and no new question follows, only the group's own "review
+// discussed <id>" marker, kept 0.
+func TestDiscussWithdrawn(t *testing.T) {
+	s, ticket, rt, scripts, findingID := discussGroupReady(t, "")
+	scripts[reviewScriptKey("security", 2)] = &fstest.MapFile{Data: []byte(reviewOKScript)}
+
+	deps := pbClaim(t, s, rt, ticket.ID)
+	commit, err := (reviewingHandler{}).Run(t.Context(), ticket, deps)
+	if err != nil {
+		t.Fatalf("Run (discuss): %v", err)
+	}
+	if len(commit.Artifacts) != 0 {
+		t.Errorf("commit.Artifacts = %d, want 0 (withdrawn)", len(commit.Artifacts))
+	}
+	if commit.Waiting != nil {
+		t.Errorf("commit.Waiting = %v, want nil (no new question)", *commit.Waiting)
+	}
+	pbApply(t, s, ticket, commit)
+
+	marker, ok := reviewMarker(t, s, ticket.ID, reviewDiscussedMarker(findingID))
+	if !ok {
+		t.Fatal("no discussed marker written")
+	}
+	if !strings.Contains(marker.Body, "kept 0") {
+		t.Errorf("discussed marker = %q, want it to report kept 0", marker.Body)
+	}
+}
+
+// ---- TestDiscussRevisedAsksAgain ----------------------------------------------
+
+// TestDiscussRevisedAsksAgain proves design section 6.6 step 4's own
+// survivor case: the lens revises the finding, above the floor again, into
+// a new row at the round's own next free id, superseding the discussed one,
+// and a new review question follows.
+func TestDiscussRevisedAsksAgain(t *testing.T) {
+	s, ticket, rt, scripts, findingID := discussGroupReady(t, "")
+	scripts[reviewScriptKey("security", 2)] = &fstest.MapFile{Data: []byte(findingScript("security", "blocker", "still unchecked, worse than thought", "validate it properly"))}
+
+	deps := pbClaim(t, s, rt, ticket.ID)
+	commit, err := (reviewingHandler{}).Run(t.Context(), ticket, deps)
+	if err != nil {
+		t.Fatalf("Run (discuss): %v", err)
+	}
+	if commit.Waiting == nil || *commit.Waiting != waitingFlagReview {
+		t.Fatalf("commit.Waiting = %v, want %q", commit.Waiting, waitingFlagReview)
+	}
+	pbApply(t, s, ticket, commit)
+
+	open := newestOpenQuestion(t, s, ticket.ID)
+	var payload response.QuestionPayload
+	if err = json.Unmarshal(open.Payload, &payload); err != nil {
+		t.Fatalf("unmarshal question payload: %v", err)
+	}
+	if len(payload.Items) != 1 {
+		t.Fatalf("payload.Items = %d, want 1", len(payload.Items))
+	}
+	newID := payload.Items[0].Ref
+	if newID == findingID {
+		t.Fatalf("new item id = %q, want a fresh id distinct from %q", newID, findingID)
+	}
+
+	findings, err := s.Findings(t.Context(), ticket.ID)
+	if err != nil {
+		t.Fatalf("Findings: %v", err)
+	}
+	newest := newestFindingRowPerID(findings)
+	row, ok := newest[newID]
+	if !ok {
+		t.Fatalf("no stored row for the new id %q", newID)
+	}
+	if len(row.Finding.Supersedes) != 1 || row.Finding.Supersedes[0] != findingID {
+		t.Errorf("Supersedes = %v, want [%s]", row.Finding.Supersedes, findingID)
+	}
+}
+
+// ---- TestDiscussBelowFloorJoinsFixList -----------------------------------------
+
+// TestDiscussBelowFloorJoinsFixList proves design section 6.6 step 4's own
+// at-or-below-floor case: a revised survivor at or below the floor gets
+// Decision accept directly, posts no question, and joins the round's own
+// fix list on the next tick.
+func TestDiscussBelowFloorJoinsFixList(t *testing.T) {
+	s, ticket, rt, scripts, _ := discussGroupReady(t, "")
+	scripts[reviewScriptKey("security", 2)] = &fstest.MapFile{Data: []byte(findingScript("security", "minor", "a small nit now", "small fix"))}
+
+	deps := pbClaim(t, s, rt, ticket.ID)
+	commit, err := (reviewingHandler{}).Run(t.Context(), ticket, deps)
+	if err != nil {
+		t.Fatalf("Run (discuss): %v", err)
+	}
+	if commit.Waiting != nil {
+		t.Errorf("commit.Waiting = %v, want nil (at or below the floor posts no question)", *commit.Waiting)
+	}
+	pbApply(t, s, ticket, commit)
+
+	ticket2 := pbGetTicket(t, s, ticket.ID)
+	deps2 := pbClaim(t, s, rt, ticket.ID)
+	commit2, err := (reviewingHandler{}).Run(t.Context(), ticket2, deps2)
+	if err != nil {
+		t.Fatalf("Run (fixreq): %v", err)
+	}
+	found := false
+	for _, m := range commit2.Messages {
+		if strings.HasPrefix(m.Body, fixRequestedFindingsPrefix) {
+			found = true
+			if !strings.Contains(m.Body, "a small nit now") {
+				t.Errorf("fix request body = %q, want it to quote the revised finding", m.Body)
+			}
+		}
+	}
+	if !found {
+		t.Fatal("no fix requested findings message after the below-floor discuss revision")
+	}
+}
+
+// ---- TestDiscussExhaustedEscalatesOnce -----------------------------------------
+
+// TestDiscussExhaustedEscalatesOnce proves design section 6.6 step 2's own
+// cap gate: jobs.review.max_resumes is 2, so after two discuss resumes the
+// session is exhausted; the escalation fires once, and a repeat before the
+// owner retries finds it already escalated (ErrNoAction).
+func TestDiscussExhaustedEscalatesOnce(t *testing.T) {
+	s, ticket, rt, scripts, _ := discussGroupReady(t, "")
+	scripts[reviewScriptKey("security", 2)] = &fstest.MapFile{Data: []byte(reviewQuestionScript("Q1", "which way?"))}
+	scripts[reviewScriptKey("security", 3)] = &fstest.MapFile{Data: []byte(reviewQuestionScript("Q2", "which way now?"))}
+
+	deps := pbClaim(t, s, rt, ticket.ID)
+	commit, err := (reviewingHandler{}).Run(t.Context(), ticket, deps)
+	if err != nil {
+		t.Fatalf("Run (discuss 1): %v", err)
+	}
+	pbApply(t, s, ticket, commit)
+	answerReviewQuestion(t, s, ticket.ID, newestOpenQuestion(t, s, ticket.ID).ID)
+
+	ticket = pbGetTicket(t, s, ticket.ID)
+	deps = pbClaim(t, s, rt, ticket.ID)
+	commit, err = (reviewingHandler{}).Run(t.Context(), ticket, deps)
+	if err != nil {
+		t.Fatalf("Run (discuss 2): %v", err)
+	}
+	pbApply(t, s, ticket, commit)
+	answerReviewQuestion(t, s, ticket.ID, newestOpenQuestion(t, s, ticket.ID).ID)
+
+	ticket = pbGetTicket(t, s, ticket.ID)
+	deps = pbClaim(t, s, rt, ticket.ID)
+	commit, err = (reviewingHandler{}).Run(t.Context(), ticket, deps)
+	if err != nil {
+		t.Fatalf("Run (cap): %v", err)
+	}
+	if commit.Escalation == nil {
+		t.Fatal("commit.Escalation = nil, want set")
+	}
+	if commit.Escalation.Payload.Code != string(response.EscalationCodeResumesExhausted) {
+		t.Errorf("escalation code = %q, want %q", commit.Escalation.Payload.Code, response.EscalationCodeResumesExhausted)
+	}
+	if commit.Escalation.Payload.Origin != string(response.EscalationOriginCapResumes) {
+		t.Errorf("escalation origin = %q, want %q", commit.Escalation.Payload.Origin, response.EscalationOriginCapResumes)
+	}
+	pbApply(t, s, ticket, commit)
+
+	ticket = pbGetTicket(t, s, ticket.ID)
+	deps = pbClaim(t, s, rt, ticket.ID)
+	_, err = (reviewingHandler{}).Run(t.Context(), ticket, deps)
+	if !errors.Is(err, ErrNoAction) {
+		t.Fatalf("err = %v, want ErrNoAction (already escalated once)", err)
+	}
+}
+
+// ---- TestDiscussHeadMovedEscalates ----------------------------------------------
+
+// TestDiscussHeadMovedEscalates proves design section 6.6 step 1: the
+// worktree's own HeadSHA must equal the round's own frozen sha before any
+// discuss resume runs, else it escalates environment.
+func TestDiscussHeadMovedEscalates(t *testing.T) {
+	s, ticket, rt, _, _ := discussGroupReady(t, "")
+
+	deps := pbClaim(t, s, rt, ticket.ID)
+	proj := deps.Projects[ticket.ProjectID]
+	wt, _, err := proj.Orch.EnsureWorktree(t.Context(), ticket.ID, ticket.Title)
+	if err != nil {
+		t.Fatalf("EnsureWorktree: %v", err)
+	}
+	if addErr := gitfixture.AddFile(t.Context(), wt.Dir(), "late.txt", []byte("late\n")); addErr != nil {
+		t.Fatalf("add late commit: %v", addErr)
+	}
+
+	commit, err := (reviewingHandler{}).Run(t.Context(), ticket, deps)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if commit.Escalation == nil {
+		t.Fatal("commit.Escalation = nil, want set")
+	}
+	if commit.Escalation.Payload.What != discussHeadMovedWhat {
+		t.Errorf("escalation What = %q, want %q", commit.Escalation.Payload.What, discussHeadMovedWhat)
+	}
+	if commit.Escalation.Payload.Origin != string(response.EscalationOriginReview) {
+		t.Errorf("escalation origin = %q, want %q", commit.Escalation.Payload.Origin, response.EscalationOriginReview)
+	}
+}
+
+// ---- TestDecidedRoundRequestsFix ----------------------------------------------
+
+// TestDecidedRoundRequestsFix proves the ordinary path from TRIAGE to
+// FIXREQ (design section 6.1 step 3, 6.8): once every above-floor finding
+// of the round has a decision (here, accept and drop, no discuss), the next
+// tick opens a fix request with the accepted finding's own fix text.
+func TestDecidedRoundRequestsFix(t *testing.T) {
+	s, ticket, _ := reviewTicketReady(t)
+	scripts := reviewScriptsFS(map[string]string{
+		reviewScriptKey("security", 1): findingScriptAt("security", "major", greetGoLine5, "unchecked input", "validate it"),
+		reviewScriptKey("quality", 1):  findingScriptAt("quality", "blocker", greetGoLine2, "breaks the build", "fix the build"),
+	})
+	deps := pbClaim(t, s, runtime.NewFake(scripts), ticket.ID)
+	commit, err := (reviewingHandler{}).Run(t.Context(), ticket, deps)
+	if err != nil {
+		t.Fatalf("Run (round): %v", err)
+	}
+	pbApply(t, s, ticket, commit)
+
+	q := newestOpenQuestion(t, s, ticket.ID)
+	var payload response.QuestionPayload
+	if err = json.Unmarshal(q.Payload, &payload); err != nil {
+		t.Fatalf("unmarshal question payload: %v", err)
+	}
+	accepted := itemRefByText(t, payload, "unchecked input")
+	dropped := itemRefByText(t, payload, "breaks the build")
+	answerReviewItems(t, s, ticket.ID, q.ID, map[string]response.Decision{
+		accepted: response.DecisionAccept,
+		dropped:  response.DecisionDrop,
+	}, "")
+
+	ticket2 := pbGetTicket(t, s, ticket.ID)
+	deps2 := pbClaim(t, s, runtime.NewFake(scripts), ticket.ID)
+	commit2, err := (reviewingHandler{}).Run(t.Context(), ticket2, deps2)
+	if err != nil {
+		t.Fatalf("Run (triage): %v", err)
+	}
+	pbApply(t, s, ticket, commit2)
+
+	ticket3 := pbGetTicket(t, s, ticket.ID)
+	deps3 := pbClaim(t, s, runtime.NewFake(scripts), ticket.ID)
+	commit3, err := (reviewingHandler{}).Run(t.Context(), ticket3, deps3)
+	if err != nil {
+		t.Fatalf("Run (fixreq): %v", err)
+	}
+	found := false
+	for _, m := range commit3.Messages {
+		if strings.HasPrefix(m.Body, fixRequestedFindingsPrefix) {
+			found = true
+			if !strings.Contains(m.Body, "unchecked input") {
+				t.Errorf("fix request body = %q, want it to quote the accepted finding", m.Body)
+			}
+			if strings.Contains(m.Body, "breaks the build") {
+				t.Errorf("fix request body = %q, want it to exclude the dropped finding", m.Body)
+			}
+		}
+	}
+	if !found {
+		t.Fatal("no fix requested findings message")
+	}
+}
+
+// ---- TestAllDroppedMovesToJudging ----------------------------------------------
+
+// TestAllDroppedMovesToJudging proves design section 6.1 step 3's own clean
+// path when every above-floor finding is dropped: the accepted list is
+// empty, so the next tick moves straight to judging.
+func TestAllDroppedMovesToJudging(t *testing.T) {
+	s, ticket, _ := reviewTicketReady(t)
+	scripts := reviewScriptsFS(map[string]string{
+		reviewScriptKey("security", 1): findingScript("security", "major", "unchecked input", "validate it"),
+	})
+	deps := pbClaim(t, s, runtime.NewFake(scripts), ticket.ID)
+	commit, err := (reviewingHandler{}).Run(t.Context(), ticket, deps)
+	if err != nil {
+		t.Fatalf("Run (round): %v", err)
+	}
+	pbApply(t, s, ticket, commit)
+
+	q := newestOpenQuestion(t, s, ticket.ID)
+	var payload response.QuestionPayload
+	if err = json.Unmarshal(q.Payload, &payload); err != nil {
+		t.Fatalf("unmarshal question payload: %v", err)
+	}
+	if len(payload.Items) != 1 {
+		t.Fatalf("payload.Items = %d, want 1", len(payload.Items))
+	}
+	answerReviewItems(t, s, ticket.ID, q.ID, map[string]response.Decision{payload.Items[0].Ref: response.DecisionDrop}, "")
+
+	ticket2 := pbGetTicket(t, s, ticket.ID)
+	deps2 := pbClaim(t, s, runtime.NewFake(scripts), ticket.ID)
+	commit2, err := (reviewingHandler{}).Run(t.Context(), ticket2, deps2)
+	if err != nil {
+		t.Fatalf("Run (triage): %v", err)
+	}
+	pbApply(t, s, ticket, commit2)
+
+	ticket3 := pbGetTicket(t, s, ticket.ID)
+	deps3 := pbClaim(t, s, runtime.NewFake(scripts), ticket.ID)
+	commit3, err := (reviewingHandler{}).Run(t.Context(), ticket3, deps3)
+	if err != nil {
+		t.Fatalf("Run (route): %v", err)
+	}
+	if commit3.Next != stateJudging {
+		t.Fatalf("commit3.Next = %q, want judging", commit3.Next)
+	}
+	if commit3.Reason != reasonReviewClean {
+		t.Errorf("commit3.Reason = %q, want %q", commit3.Reason, reasonReviewClean)
 	}
 }

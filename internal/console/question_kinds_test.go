@@ -45,9 +45,10 @@ func findGroup(t *testing.T, groups []string, title string) string {
 // TestQuestionKindsRenderTheirControls proves the Task 6 dispatch table
 // (design section 6.6): the four option kinds (question, gate, split,
 // merge) render numbered option chips, the two item kinds (perimeter,
-// review) render one row per item with all four decision controls and the
-// item's ref, and every kind renders a free reply input wired to
-// console.js's postDraft contract (data-draft-ticket, data-draft-question).
+// review) render one row per item with their own decision controls and the
+// item's ref (perimeter: accept, reject; review: accept, drop, discuss --
+// design section 6.5, 9.2), and every kind renders a free reply input wired
+// to console.js's postDraft contract (data-draft-ticket, data-draft-question).
 // It seeds all six kinds through SeedQuestionFixtures -- the real store, the
 // real validated inserts, no hand-built payload -- then reads them back
 // over the live /stream the browser itself uses.
@@ -126,10 +127,10 @@ func TestQuestionKindsRenderTheirControls(t *testing.T) {
 		}
 	})
 
-	t.Run("review kind renders one row per item with all four decisions", func(t *testing.T) {
+	t.Run("review kind renders one row per item with accept, drop, and discuss", func(t *testing.T) {
 		g := findGroup(t, groups, "Triage the review findings")
-		assertItemRow(t, g, "F1")
-		assertItemRow(t, g, "F2")
+		assertItemRowDecisions(t, g, "F1", reviewItemDecisions...)
+		assertItemRowDecisions(t, g, "F2", reviewItemDecisions...)
 		assertFreeReply(t, g, ticketAttr)
 		if strings.Contains(g, `class="chips"`) {
 			t.Errorf("review (an item kind) must not render option chips; got:\n%s", g)
@@ -164,22 +165,29 @@ func assertFreeReply(t *testing.T, group, ticketAttr string) {
 	}
 }
 
+// The design section 8 closed set's own four decision strings, named once
+// (goconst) since allItemDecisions and reviewItemDecisions both spell them.
+const (
+	decisionAccept  = "accept"
+	decisionReject  = "reject"
+	decisionDrop    = "drop"
+	decisionDiscuss = "discuss"
+)
+
 // allItemDecisions is the design section 8 closed set, in the order the
 // controls render.
-var allItemDecisions = []string{"accept", "reject", "drop", "discuss"}
+var allItemDecisions = []string{decisionAccept, decisionReject, decisionDrop, decisionDiscuss}
 
-// assertItemRow fails the test unless group contains an item row for ref,
-// carrying its ref and all four closed-set decision controls (the review
-// kind's own set).
-func assertItemRow(t *testing.T, group, ref string) {
-	t.Helper()
-	assertItemRowDecisions(t, group, ref, allItemDecisions...)
-}
+// reviewItemDecisions is the review kind's own closed set (design section
+// 6.5, 9.2, Task 11): accept, drop, and discuss, matching
+// response.FindingDecision -- never reject, which stays perimeter's alone.
+var reviewItemDecisions = []string{decisionAccept, decisionDrop, decisionDiscuss}
 
 // assertItemRowDecisions fails the test unless group contains an item row
 // for ref carrying exactly want's decision controls: every one of want
 // present, and every closed-set decision not in want absent (design section
-// 9.2: perimeter renders accept and reject only; review keeps all four).
+// 9.2: perimeter renders accept and reject only; review renders accept,
+// drop, and discuss).
 func assertItemRowDecisions(t *testing.T, group, ref string, want ...string) {
 	t.Helper()
 	if !strings.Contains(group, `data-item-ref="`+ref+`"`) {
@@ -240,11 +248,11 @@ func TestPerimeterRendersAcceptAndReject(t *testing.T) {
 	assertItemRowDecisions(t, perimeter, "cmd/zing/main.go", "accept", "reject")
 }
 
-// TestReviewRendersFourDecisions proves design section 9.2's own contrast
-// case: a review question keeps all four decisions, unaffected by
-// perimeter's narrowing.
-func TestReviewRendersFourDecisions(t *testing.T) {
+// TestReviewRendersThreeDecisions proves design section 6.5's own review
+// decision set (accept, drop, discuss): a review question's item rows carry
+// exactly those three controls, never perimeter's reject.
+func TestReviewRendersThreeDecisions(t *testing.T) {
 	_, review := perimeterAndReviewGroups(t)
-	assertItemRowDecisions(t, review, "F1", allItemDecisions...)
-	assertItemRowDecisions(t, review, "F2", allItemDecisions...)
+	assertItemRowDecisions(t, review, "F1", reviewItemDecisions...)
+	assertItemRowDecisions(t, review, "F2", reviewItemDecisions...)
 }

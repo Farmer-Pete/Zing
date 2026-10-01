@@ -185,10 +185,12 @@ templ optionChips(ticketID, questionID int64, options []ThreadOption) {
 	}
 }
 
-// itemDecisionsReview is the design section 8 closed set of item decisions,
-// in the order their controls render: the review kind keeps all four.
+// itemDecisionsReview is the review kind's own closed set of item decisions,
+// in the order their controls render (design section 6.5, 9.2, Task 11):
+// accept, drop, and discuss, matching response.FindingDecision -- never
+// reject, which is perimeter's own decision alone.
 var itemDecisionsReview = []response.Decision{
-	response.DecisionAccept, response.DecisionReject, response.DecisionDrop, response.DecisionDiscuss,
+	response.DecisionAccept, response.DecisionDrop, response.DecisionDiscuss,
 }
 
 // itemDecisionsPerimeter is the perimeter kind's own narrower set (design

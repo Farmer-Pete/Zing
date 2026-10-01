@@ -137,3 +137,40 @@ func TestUpdateLineBuildMarkers(t *testing.T) {
 		})
 	}
 }
+
+// TestUpdateLineReviewMarkers proves the six review markers reviewing.go
+// writes (design section 5.1, 6.2, 6.2a, 6.5, 6.6) each render as their own
+// owner-facing sentence: the four "review round <n> ..." round markers
+// (done, with its own kept/dropped/merged line kept below the header;
+// asked; failed; void), "review discussed <id>", and "review note <id>"
+// (with an owner's note, and with none).
+func TestUpdateLineReviewMarkers(t *testing.T) {
+	cases := []struct{ name, body, want string }{
+		{
+			"round done",
+			"review round 1 done sha abc123 lenses correctness,security\nkept 2 dropped 1 merged 1",
+			"Review round 1 finished.\nkept 2 dropped 1 merged 1",
+		},
+		{"round asked", "review round 2 asked\nruns 5,6\ndone correctness", "Review round 2 is waiting on a lens question."},
+		{"round failed", "review round 1 failed\nlens security: timed out", "Review round 1 failed. Zing retries the round."},
+		{"round void", "review round 1 void\nhead moved from a to b", "Review round 1 restarted: the branch moved during the round."},
+		{"discussed", "review discussed r1f2\nrun 12 batch r1f2 kept 1", "Finding r1f2 discussed with the lens."},
+		{
+			"note with text",
+			"review note r1f2\nb.go:3 is generated, see the header",
+			"Owner's note on r1f2:\nb.go:3 is generated, see the header",
+		},
+		{
+			"note with none",
+			"review note r1f2\n(the owner gave no note)",
+			"Owner's note on r1f2:\n(the owner gave no note)",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := displayBody(updateRow(tc.body)); got != tc.want {
+				t.Errorf("displayBody(%q) = %q, want %q", tc.body, got, tc.want)
+			}
+		})
+	}
+}

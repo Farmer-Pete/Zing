@@ -407,11 +407,12 @@ const msgTypeUpdate = "update"
 // and building.go's own markerClaimsOkFmt, markerClaimErrorsPendingFmt,
 // markerClaimErrorsDeliveredFmt, markerPerimeterResolvedFmt, the escalation
 // resolution's "retry requested", and markerPerimeterQuestionDroppedFmt --
-// so displayBody can recognize them and render an owner-facing sentence
-// instead of the raw bookkeeping body (F012, design section 9.2). console
-// cannot import job's own unexported literals -- there is no shared
-// package for the two to depend on -- so this copy and its originals must
-// change together.
+// and reviewing.go's own "review round <n> done/asked/failed/void", "review
+// discussed <id>", and "review note <id>" -- so displayBody can recognize
+// them and render an owner-facing sentence instead of the raw bookkeeping
+// body (F012, design section 9.2). console cannot import job's own
+// unexported literals -- there is no shared package for the two to depend
+// on -- so this copy and its originals must change together.
 const (
 	updateMarkerPlanreviewPrefix               = "planreview v"
 	updateMarkerPlanreviewPendingSuffix        = " pending"
@@ -426,6 +427,9 @@ const (
 	updateMarkerPerimeterResolvedPrefix        = "perimeter resolved run "
 	updateMarkerRetryRequested                 = "retry requested"
 	updateMarkerPerimeterQuestionDroppedPrefix = "perimeter question dropped run "
+	updateMarkerReviewRoundPrefix              = "review round "
+	updateMarkerReviewDiscussedPrefix          = "review discussed "
+	updateMarkerReviewNotePrefix               = "review note "
 )
 
 // draftMessageState mirrors store's own unexported draft-state literal
@@ -643,8 +647,81 @@ func updateLine(m *store.MessageRow) string {
 		return "Retry requested."
 	case strings.HasPrefix(body, updateMarkerPerimeterQuestionDroppedPrefix):
 		return "Perimeter question dropped for run " + strings.TrimPrefix(body, updateMarkerPerimeterQuestionDroppedPrefix) + "."
+	case isReviewMarker(body):
+		if line, ok := reviewUpdateLine(body); ok {
+			return line
+		}
+		return body
 	default:
 		return body
+	}
+}
+
+// isReviewMarker reports whether body carries one of reviewing.go's own
+// "review round ", "review discussed ", or "review note " prefixes (design
+// section 5.1, 6.2-6.6): the gate reviewUpdateLine's own exact-shape parse
+// runs behind, the same two-step prefix-then-parse pattern
+// claimErrorsPendingLine and validationErrorsLine already use.
+func isReviewMarker(body string) bool {
+	return strings.HasPrefix(body, updateMarkerReviewRoundPrefix) ||
+		strings.HasPrefix(body, updateMarkerReviewDiscussedPrefix) ||
+		strings.HasPrefix(body, updateMarkerReviewNotePrefix)
+}
+
+// reviewUpdateLine renders one of reviewing.go's own six review marker
+// shapes (design section 5.1) as an owner-facing sentence: the four "review
+// round <n> ..." round markers (done, asked, failed, void), "review
+// discussed <id>" (6.6 step 4), and "review note <id>" (6.5 step 4, D24).
+// ok is false when body's prefix matched but the rest of its shape did not
+// (a future marker shape this view does not know yet), the same defensive
+// fallback updateLine's other cases use.
+func reviewUpdateLine(body string) (string, bool) {
+	first, rest, hasRest := strings.Cut(body, "\n")
+	switch {
+	case strings.HasPrefix(first, updateMarkerReviewDiscussedPrefix):
+		id := strings.TrimPrefix(first, updateMarkerReviewDiscussedPrefix)
+		return "Finding " + id + " discussed with the lens.", true
+	case strings.HasPrefix(first, updateMarkerReviewNotePrefix):
+		id := strings.TrimPrefix(first, updateMarkerReviewNotePrefix)
+		header := "Owner's note on " + id + ":"
+		if hasRest {
+			return header + "\n" + rest, true
+		}
+		return header, true
+	case strings.HasPrefix(first, updateMarkerReviewRoundPrefix):
+		return reviewRoundLine(first, rest, hasRest)
+	default:
+		return "", false
+	}
+}
+
+// reviewRoundLine renders one "review round <n> done/asked/failed/void"
+// marker's first line (design section 5.1, 6.2, 6.2a): n is read
+// generically, rather than hardcoded, since a ticket can run any number of
+// rounds. "done"'s own second line (the "kept N dropped N merged N" summary)
+// is kept under the header sentence, the same claimErrorsPendingLine
+// pattern.
+func reviewRoundLine(first, rest string, hasRest bool) (string, bool) {
+	tail := strings.TrimPrefix(first, updateMarkerReviewRoundPrefix)
+	n, after, ok := strings.Cut(tail, " ")
+	if !ok {
+		return "", false
+	}
+	switch {
+	case strings.HasPrefix(after, "done sha "):
+		header := "Review round " + n + " finished."
+		if hasRest {
+			return header + "\n" + rest, true
+		}
+		return header, true
+	case after == "asked":
+		return "Review round " + n + " is waiting on a lens question.", true
+	case after == "failed":
+		return "Review round " + n + " failed. Zing retries the round.", true
+	case after == "void":
+		return "Review round " + n + " restarted: the branch moved during the round.", true
+	default:
+		return "", false
 	}
 }
 

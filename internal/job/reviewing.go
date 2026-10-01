@@ -5,13 +5,15 @@
 // own findings and the round waits (6.2a, ASKED); once the owner has
 // answered every asking lens, CONTINUE resumes them (6.2a); a clean round
 // with only at-or-below-floor findings requests a fix (FIXREQ, 6.8); one
-// with findings above the floor posts the review question (6.4). It
-// replaces the skeleton's reviewingHandler, which advanced straight to
-// judging with no review job at all.
+// with findings above the floor posts the review question (6.4), which
+// TRIAGE (6.5) resolves into one decision per item, defaulting an
+// undecided or out-of-set one to accept; a discussed item with no "review
+// discussed <id>" marker of its own runs DISCUSS (6.6), batching every
+// pending item of its own lens session into one resume, routing its
+// survivors back through FilterFindings and DedupFindings (6.3) the same
+// way a fresh round does. It replaces the skeleton's reviewingHandler,
+// which advanced straight to judging with no review job at all.
 //
-// TRIAGE (6.5) and DISCUSS (6.6) are task 11's own work: a round whose
-// newest question is kind "review" (the 6.4 question, once answered) is not
-// yet handled here and errors loudly rather than silently doing nothing.
 // Re-review's own lens selection (6.7) and the loop gate escalations are
 // wired (selectLenses already exists, task 8), but the two-in-a-row and
 // loop-exhaustion escalations (6.8, 6.9) this task's own named tests do not
@@ -27,6 +29,7 @@ import (
 	"log/slog"
 	"regexp"
 	"slices"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -125,12 +128,41 @@ func (h reviewingHandler) Run(ctx context.Context, t store.Ticket, d Deps) (stor
 		}
 		switch kind {
 		case response.QuestionKindReview:
-			return store.HandlerCommit{}, errors.New("job: reviewing: TRIAGE is not implemented yet (task 11)")
+			return h.triage(ctx, t, d, round)
 		case response.QuestionKindQuestion:
+			// A plain agent question answered on this round is either a
+			// discuss resume's own generic question (6.6 step 5: "the answer
+			// comes back through step (1) and resumes this session with
+			// answers"), when the round's session is the one a pending
+			// discuss group is still waiting on, or an asking lens's own
+			// question from the round itself (6.2a CONTINUE). The two never
+			// overlap: a lens session belongs to exactly one of ROUND's own
+			// asking set or a discuss group at a time.
+			if round.SessionID != nil {
+				group, found, groupErr := h.nextPendingDiscussGroup(ctx, t, d)
+				if groupErr != nil {
+					return store.HandlerCommit{}, groupErr
+				}
+				if found && group.sessionID == *round.SessionID {
+					return h.discuss(ctx, t, d, group, &round)
+				}
+			}
 			return h.continueRound(ctx, t, d, rounds)
 		default:
 			return store.HandlerCommit{}, fmt.Errorf("job: reviewing: unexpected question kind %q", kind)
 		}
+	}
+
+	// Decision tree step (2): a finding with decision discuss and no "review
+	// discussed <id>" marker runs DISCUSS directly, ahead of step (3)'s own
+	// round-marker read, whenever no answered round is waiting on a route of
+	// its own.
+	group, found, err := h.nextPendingDiscussGroup(ctx, t, d)
+	if err != nil {
+		return store.HandlerCommit{}, err
+	}
+	if found {
+		return h.discuss(ctx, t, d, group, nil)
 	}
 
 	return h.enterRound(ctx, t, d)
@@ -204,6 +236,13 @@ func (h reviewingHandler) enterRound(ctx context.Context, t store.Ticket, d Deps
 // empty fix list moves to judging and a non-empty one calls fixreq (FIXREQ,
 // 6.8); otherwise a fix has already landed (or the post-build prelude would
 // have run it), so round n runs again with 6.7's lens selection.
+//
+// The undecided check reads the newest row per finding id (newestFindingRow
+// PerID), not every row raw: TRIAGE (6.5) and DISCUSS (6.6) both append a
+// new row for an id that already has one (the original above-floor row, a
+// discuss survivor's own supersede), so an id's own first, Decision-nil row
+// can outlive its own decision being taken; skipping that dedup here would
+// see it forever and never leave ErrNoAction.
 func (h reviewingHandler) enterFromDone(ctx context.Context, t store.Ticket, d Deps, n int) (store.HandlerCommit, error) {
 	prevRound := n - 1
 
@@ -211,20 +250,25 @@ func (h reviewingHandler) enterFromDone(ctx context.Context, t store.Ticket, d D
 	if err != nil {
 		return store.HandlerCommit{}, fmt.Errorf("job: reviewing: findings: %w", err)
 	}
-	for i := range findings {
-		f := &findings[i].Finding
+	for _, row := range newestFindingRowPerID(findings) {
+		f := row.Finding
 		if f.Round == prevRound && !f.Held && f.Decision == nil {
 			return store.HandlerCommit{}, ErrNoAction
 		}
 	}
 
-	doneMarker, ok, err := d.Store.Marker(ctx, t.ID, fmt.Sprintf("review round %d done", prevRound))
+	// Marker's own exact-first-line match cannot find this one: the "done"
+	// marker's first line carries the round's own sha and lens list after
+	// "review round <n> done" (successCommit), not that text alone, so this
+	// reads it the same way reviewRoundDoneCount does, by prefix.
+	doneMarkers, err := d.Store.MarkersWithPrefix(ctx, t.ID, fmt.Sprintf("review round %d done", prevRound))
 	if err != nil {
 		return store.HandlerCommit{}, fmt.Errorf("job: reviewing: done marker: %w", err)
 	}
-	if !ok {
+	if len(doneMarkers) == 0 {
 		return store.HandlerCommit{}, fmt.Errorf("job: reviewing: round %d has no done marker", prevRound)
 	}
+	doneMarker := doneMarkers[len(doneMarkers)-1]
 
 	fixReqs, err := d.Store.MarkersWithPrefix(ctx, t.ID, fixRequestedFindingsPrefix)
 	if err != nil {
@@ -249,6 +293,24 @@ func (h reviewingHandler) enterFromDone(ctx context.Context, t store.Ticket, d D
 	}
 
 	return h.round(ctx, t, d, n, "", false)
+}
+
+// newestFindingRowPerID reduces findings (Findings' own artifact-id order,
+// every row ever written) to the newest row per finding id, the same
+// newestFileEventPerPath pattern building.go already uses for a path:
+// findings are append-only, so a later row for the same id always
+// supersedes an earlier one (TRIAGE's own decided row over ROUND's
+// undecided one; a discuss revision keeps its own id distinct instead, so
+// it never collides with the row it supersedes). The map holds pointers
+// into findings itself, never copied again, since FindingRow is large
+// enough that every other range over it would otherwise copy it uselessly
+// (gocritic rangeValCopy).
+func newestFindingRowPerID(findings []store.FindingRow) map[string]*store.FindingRow {
+	out := make(map[string]*store.FindingRow, len(findings))
+	for i := range findings {
+		out[findings[i].Finding.ID] = &findings[i]
+	}
+	return out
 }
 
 // acceptedRoundFindings returns every finding of round with Decision accept,
@@ -309,6 +371,493 @@ func reviewLoopsExhausted(t store.Ticket, d Deps, what, why, tried string) store
 	return escalationCommit(t, d, nil, nil, code, what, why, tried, response.EscalationOriginReview)
 }
 
+// ---- TRIAGE (design section 6.5) ------------------------------------------
+
+// reviewNoteNone is TRIAGE's own text for a discussed item whose answer
+// carried no free reply (design section 6.5 step 4, D24).
+const reviewNoteNone = "(the owner gave no note)"
+
+// reviewFindingDecision maps one item's answered response.Decision to its
+// FindingDecision counterpart (design section 6.5 step 2): review items
+// take accept, drop, or discuss only -- reject is perimeter's own decision
+// -- so ok is false for reject, an unanswered item's zero Decision, or any
+// other value; the caller then applies the safe default (accept).
+func reviewFindingDecision(d response.Decision) (response.FindingDecision, bool) {
+	switch d {
+	case response.DecisionAccept:
+		return response.FindingAccept, true
+	case response.DecisionDrop:
+		return response.FindingDrop, true
+	case response.DecisionDiscuss:
+		return response.FindingDiscuss, true
+	default:
+		return "", false
+	}
+}
+
+// replyTexts returns each reply's own Body, in replies' own order
+// (AnsweredRounds' own ascending id order).
+func replyTexts(replies []store.MessageRow) []string {
+	out := make([]string, len(replies))
+	for i := range replies {
+		out[i] = replies[i].Body
+	}
+	return out
+}
+
+// triage is TRIAGE (design section 6.5): entry is decision tree step (1)'s
+// own "newest question kind review" branch, once the owner has answered the
+// review question (6.4). It stores one new finding row per item, carrying
+// the owner's own decision or the safe default accept (a missing or
+// out-of-set decision, logged at warn), writes one "review note <id>"
+// marker per discussed item (D24: the owner's reply on the question applies
+// to every finding discussed in that answer), and resolves the round's own
+// question. No state transition and no new Waiting (baseCommit's own nil
+// clears it): the next tick's decision tree step (2) or (3) routes the
+// ticket on from the decisions this commit just stored.
+func (h reviewingHandler) triage(ctx context.Context, t store.Ticket, d Deps, round store.Round) (store.HandlerCommit, error) {
+	if len(round.Questions) != 1 {
+		return store.HandlerCommit{}, fmt.Errorf("job: reviewing: triage: review round carries %d questions, want 1", len(round.Questions))
+	}
+	q := round.Questions[0]
+	var qp response.QuestionPayload
+	if err := json.Unmarshal(q.Payload, &qp); err != nil {
+		return store.HandlerCommit{}, fmt.Errorf("job: reviewing: triage: unmarshal question %d payload: %w", q.ID, err)
+	}
+
+	findings, err := d.Store.Findings(ctx, t.ID)
+	if err != nil {
+		return store.HandlerCommit{}, fmt.Errorf("job: reviewing: triage: findings: %w", err)
+	}
+	newest := newestFindingRowPerID(findings)
+	decisions := mergedItemDecisions(round.Answers)
+	note := strings.Join(replyTexts(round.Replies), "\n")
+
+	c := baseCommit(t, d)
+	c.ResolveQuestions = questionIDs(round)
+
+	for _, item := range qp.Items {
+		row, ok := newest[item.Ref]
+		if !ok {
+			return store.HandlerCommit{}, fmt.Errorf("job: reviewing: triage: no stored finding for item %q", item.Ref)
+		}
+		fd, validDecision := reviewFindingDecision(decisions[item.Ref])
+		if !validDecision {
+			slog.Warn("review decision defaulted to accept", "ticket_id", t.ID, "finding_id", item.Ref)
+			fd = response.FindingAccept
+		}
+
+		finding := row.Finding
+		finding.Decision = &fd
+		payload, marshalErr := json.Marshal(finding)
+		if marshalErr != nil {
+			return store.HandlerCommit{}, fmt.Errorf("job: reviewing: triage: marshal finding %s: %w", finding.ID, marshalErr)
+		}
+		c.Artifacts = append(c.Artifacts, store.Artifact{Type: artifactTypeFinding, RunID: row.RunID, Payload: payload})
+
+		if fd == response.FindingDiscuss {
+			body := "review note " + finding.ID + "\n"
+			if note == "" {
+				body += reviewNoteNone
+			} else {
+				body += note
+			}
+			c.Messages = append(c.Messages, store.Message{TicketID: t.ID, Type: msgTypeUpdate, Author: authorSystem, Body: body})
+		}
+	}
+	return c, nil
+}
+
+// ---- DISCUSS (design section 6.6) -----------------------------------------
+
+// pendingDiscussGroup is P's own batch for one lens session (design section
+// 6.6): every still-pending discussed finding of that session, ID order,
+// plus the session's own lens, round, and frozen sha (every row of one
+// session's own group shares them, since a lens session belongs to exactly
+// one round: round() always reserves a fresh session per lens, never
+// resuming a prior round's).
+type pendingDiscussGroup struct {
+	sessionID int64
+	lens      response.Lens
+	round     int
+	sha       string
+	findings  []response.FindingArtifact
+}
+
+// reviewDiscussedMarker and reviewNoteMarker are the "review discussed <id>"
+// and "review note <id>" marker heads (design section 6.5 step 4, 6.6 step
+// 4): Marker's own exact-first-line match, keyed by id.
+func reviewDiscussedMarker(id string) string { return "review discussed " + id }
+func reviewNoteMarker(id string) string      { return "review note " + id }
+
+// nextPendingDiscussGroup finds P, the ticket's own still-pending discussed
+// findings (design section 6.6: decision discuss, no "review discussed
+// <id>" marker), grouped by the lens session that produced them, and
+// returns the group whose lowest finding id is lowest. found is false when
+// the ticket carries no pending discuss at all.
+func (h reviewingHandler) nextPendingDiscussGroup(ctx context.Context, t store.Ticket, d Deps) (pendingDiscussGroup, bool, error) {
+	findings, err := d.Store.Findings(ctx, t.ID)
+	if err != nil {
+		return pendingDiscussGroup{}, false, fmt.Errorf("job: reviewing: discuss: findings: %w", err)
+	}
+
+	var pendingIDs []string
+	pendingRows := make(map[string]*store.FindingRow)
+	for id, row := range newestFindingRowPerID(findings) {
+		f := row.Finding
+		if f.Held || f.Decision == nil || *f.Decision != response.FindingDiscuss {
+			continue
+		}
+		_, marked, markerErr := d.Store.Marker(ctx, t.ID, reviewDiscussedMarker(id))
+		if markerErr != nil {
+			return pendingDiscussGroup{}, false, fmt.Errorf("job: reviewing: discuss: discussed marker %s: %w", id, markerErr)
+		}
+		if marked {
+			continue
+		}
+		pendingIDs = append(pendingIDs, id)
+		pendingRows[id] = row
+	}
+	if len(pendingIDs) == 0 {
+		return pendingDiscussGroup{}, false, nil
+	}
+
+	sort.Slice(pendingIDs, func(i, j int) bool {
+		ri, ki, _ := findingIDKey(pendingIDs[i])
+		rj, kj, _ := findingIDKey(pendingIDs[j])
+		if ri != rj {
+			return ri < rj
+		}
+		return ki < kj
+	})
+
+	groups := make(map[int64]*pendingDiscussGroup)
+	var order []int64
+	for _, id := range pendingIDs {
+		row := pendingRows[id]
+		if row.RunID == nil {
+			return pendingDiscussGroup{}, false, fmt.Errorf("job: reviewing: discuss: finding %s carries no run id", id)
+		}
+		run, runErr := d.Store.RunByID(ctx, *row.RunID)
+		if runErr != nil {
+			return pendingDiscussGroup{}, false, fmt.Errorf("job: reviewing: discuss: run by id: %w", runErr)
+		}
+		if run.Lens == nil {
+			return pendingDiscussGroup{}, false, fmt.Errorf("job: reviewing: discuss: run %d carries no lens", run.ID)
+		}
+		g, ok := groups[run.SessionID]
+		if !ok {
+			g = &pendingDiscussGroup{sessionID: run.SessionID, lens: response.Lens(*run.Lens), round: row.Finding.Round, sha: row.Finding.SHA}
+			groups[run.SessionID] = g
+			order = append(order, run.SessionID)
+		}
+		g.findings = append(g.findings, row.Finding)
+	}
+
+	// pendingIDs is sorted ascending, so the first session order names owns
+	// the globally lowest pending finding id: "the group whose lowest
+	// finding id is lowest" (design section 6.6).
+	return *groups[order[0]], true, nil
+}
+
+// renderDiscussFindings renders every finding of rows, in ID order, each as
+// 6.3's own fix-text block (findingBlock, reviewrules.go) with no decision
+// filter: every finding DISCUSS resumes with carries decision discuss, so
+// renderFixFindings' own accept-only filter would drop them all.
+func renderDiscussFindings(rows []response.FindingArtifact) string {
+	sorted := sortByID(rows)
+	blocks := make([]string, len(sorted))
+	for i := range sorted {
+		blocks[i] = findingBlock(sorted[i])
+	}
+	return strings.Join(blocks, "\n\n")
+}
+
+// discussNotesInput renders design section 6.6 step 3's own "notes" input:
+// one "<id>: <review note text>" line per finding of rows, in ID order,
+// reviewNoteNone when that finding's own "review note <id>" marker carries
+// none (TRIAGE always writes one, so its absence names a bug, not a valid
+// state this falls back on quietly).
+func discussNotesInput(ctx context.Context, d Deps, ticketID int64, rows []response.FindingArtifact) (string, error) {
+	sorted := sortByID(rows)
+	lines := make([]string, len(sorted))
+	for i := range sorted {
+		m, ok, err := d.Store.Marker(ctx, ticketID, reviewNoteMarker(sorted[i].ID))
+		if err != nil {
+			return "", fmt.Errorf("job: reviewing: discuss: review note marker %s: %w", sorted[i].ID, err)
+		}
+		text := reviewNoteNone
+		if ok {
+			_, rest, hasRest := strings.Cut(m.Body, "\n")
+			if hasRest {
+				text = rest
+			}
+		}
+		lines[i] = sorted[i].ID + ": " + text
+	}
+	return strings.Join(lines, "\n"), nil
+}
+
+// nextFindingK returns the next free per-round sequence number for a new
+// "r<round>f<k>" id (design section 6.2, 6.6): one past the highest k any
+// unheld finding of round already carries. Held rows (r<round>h<k>) keep
+// their own separate counter (askedCommit's heldSoFar) and are excluded.
+func nextFindingK(findings []store.FindingRow, round int) int {
+	maxK := 0
+	for i := range findings {
+		f := findings[i].Finding
+		if f.Held || f.Round != round {
+			continue
+		}
+		if _, k, ok := findingIDKey(f.ID); ok && k > maxK {
+			maxK = k
+		}
+	}
+	return maxK + 1
+}
+
+// discussHeadMovedWhat and discussHeadMovedWhy are DISCUSS's own step 1
+// environment escalation (design section 6.6): "the ticket branch moved
+// during triage", byte for byte from the plan.
+const (
+	discussHeadMovedWhat = "the ticket branch moved during triage"
+	discussHeadMovedWhy  = "HeadSHA no longer matches the sha the discussed finding's own round was read at"
+)
+
+// discuss is DISCUSS (design section 6.6): group is nextPendingDiscussGroup's
+// own pick (P's lowest-id group). round is nil for a fresh discuss resume,
+// entered from decision tree step (2) (inputs: every finding of the group,
+// and the owner's notes); non-nil when the discuss session's own generic
+// question has just been answered (step (1)'s "session of a pending
+// discuss"), which resumes with the owner's answers like any other agent
+// question (7.2, N1) instead of starting a new discuss turn, and whose
+// question ids this commit also resolves.
+func (h reviewingHandler) discuss(ctx context.Context, t store.Ticket, d Deps, group pendingDiscussGroup, round *store.Round) (store.HandlerCommit, error) {
+	maxResumes := d.Machine.Jobs[jobReviewName].MaxResumes
+	sess, state, err := d.Store.SessionByID(ctx, group.sessionID, maxResumes)
+	if err != nil {
+		return store.HandlerCommit{}, fmt.Errorf("job: reviewing: discuss: session by id: %w", err)
+	}
+
+	proj, wt, escalation, err := ensureWorktreeOrEscalate(ctx, t, d, func(errText string) store.HandlerCommit {
+		return reviewEscalation(t, d, worktreeNotPreparedWhat, worktreeNotPreparedWhy, errText)
+	})
+	if err != nil {
+		return store.HandlerCommit{}, err
+	}
+	if escalation != nil {
+		return *escalation, nil
+	}
+
+	headSHA, err := proj.Orch.HeadSHA(ctx, wt)
+	if err != nil {
+		return store.HandlerCommit{}, fmt.Errorf("job: reviewing: discuss: head sha: %w", err)
+	}
+	if headSHA != group.sha {
+		return reviewEscalation(t, d, discussHeadMovedWhat, discussHeadMovedWhy, ""), nil
+	}
+
+	var resolveIDs []int64
+	if round != nil {
+		resolveIDs = questionIDs(*round)
+	}
+
+	if state == store.SessionExhausted {
+		has, hasErr := d.Store.HasEscalation(ctx, t.ID, string(response.EscalationOriginCapResumes), sess.ID)
+		if hasErr != nil {
+			return store.HandlerCommit{}, fmt.Errorf("job: reviewing: discuss: has escalation: %w", hasErr)
+		}
+		if has {
+			return store.HandlerCommit{}, ErrNoAction
+		}
+		c := reviewCapResumesEscalation(t, d, sess.ID)
+		c.ResolveQuestions = resolveIDs
+		return c, nil
+	}
+
+	schemas, err := renderSchemas(response.JobReview, response.OutcomeOk)
+	if err != nil {
+		return store.HandlerCommit{}, fmt.Errorf("job: reviewing: discuss: %w", err)
+	}
+
+	var in prompt.Input
+	if round != nil {
+		answers, ansErr := renderRoundAnswers(*round)
+		if ansErr != nil {
+			return store.HandlerCommit{}, ansErr
+		}
+		in = prompt.ForReviewResume([]prompt.NamedInput{prompt.Answers(answers)})
+	} else {
+		notesText, notesErr := discussNotesInput(ctx, d, t.ID, group.findings)
+		if notesErr != nil {
+			return store.HandlerCommit{}, notesErr
+		}
+		in = prompt.ForReviewDiscuss([]prompt.NamedInput{
+			prompt.Findings(renderDiscussFindings(group.findings)),
+			prompt.Notes(notesText),
+		})
+	}
+	in.Schemas = schemas
+
+	req := runtime.RunRequest{
+		Job: response.JobReview, Label: fmt.Sprintf("%d-%s", group.round, group.lens), WorkDir: wt.Dir(),
+		SessionID: derefString(sess.ExternalID), Prompt: prompt.Assemble(in),
+	}
+	su := store.SessionUpsert{ID: &sess.ID, BumpResumes: true}
+
+	priorInvalid, _, invErr := d.Store.ConsecutiveInvalidOutputs(ctx, t.ID, jobReviewName, &sess.ID)
+	if invErr != nil {
+		return store.HandlerCommit{}, fmt.Errorf("job: reviewing: discuss: consecutive invalid outputs: %w", invErr)
+	}
+
+	return h.discussRunAndRoute(ctx, t, d, su, req, group.lens, priorInvalid, sess.ID, resolveIDs,
+		func(rr runResult, sessionCommit *store.SessionUpsert) (store.HandlerCommit, error) {
+			return h.discussOkCommit(ctx, t, d, proj, wt, group, rr, sessionCommit)
+		})
+}
+
+// discussRunAndRoute runs one discuss resume (runJob) and routes its result
+// exactly as every other job's universal outcome table does (design section
+// 6.8), with review's own readonly sandbox reason in place of build's:
+// onOk handles the review job's own ok outcome (a *response.FindingsResponse),
+// a plain agent question is questionOutcomeCommit, an agent error is
+// errorOutcomeCommit (origin review), and every runtime failure short of
+// that -- budget, sandbox, config, claim lost, canceled, invalid output, or
+// exec failure -- is the same universal handling runAndRoute (planning.go)
+// gives classify and planning; this file does not call runAndRoute directly
+// because that seam passes runJob a nil lens, and a discuss resume's own run
+// must carry its lens the same way every other review run does.
+func (h reviewingHandler) discussRunAndRoute(
+	ctx context.Context, t store.Ticket, d Deps, su store.SessionUpsert, req runtime.RunRequest,
+	lens response.Lens, priorInvalid int, sessionID int64, resolveIDs []int64,
+	onOk func(rr runResult, sessionCommit *store.SessionUpsert) (store.HandlerCommit, error),
+) (store.HandlerCommit, error) {
+	lensStr := string(lens)
+	rr, runErr := runJob(ctx, d, t, jobReviewName, su, req, nil, &lensStr)
+	sessionCommit := resumeSessionRecord(sessionID, rr)
+
+	if runErr != nil {
+		switch {
+		case errors.Is(runErr, runtime.ErrCanceled), errors.Is(runErr, ErrConfig), errors.Is(runErr, store.ErrClaimLost):
+			return store.HandlerCommit{}, runErr
+		case errors.Is(runErr, ErrBudget):
+			return budgetEscalationCommit(t, d, resolveIDs), nil
+		case errors.Is(runErr, ErrSandbox):
+			return sandboxEscalationCommit(t, d, resolveIDs, response.EscalationOriginReview, d.Sandboxes.ReadOnly.Reason()), nil
+		}
+		var invErr *runtime.InvalidOutputError
+		if errors.As(runErr, &invErr) { //nolint:modernize // errors.AsType discards its bool via _, which errcheck flags
+			return invalidOutputCommit(t, d, rr, invErr, priorInvalid, sessionCommit, resolveIDs, response.EscalationOriginReview), nil
+		}
+		if isExecFailure(runErr) {
+			return execFailureCommit(t, d, rr, sessionCommit, resolveIDs, response.EscalationOriginReview), nil
+		}
+		wrapped := fmt.Errorf("job: reviewing: discuss: unrecognized runJob error: %w", runErr)
+		if rr.Reserved.RunID != 0 {
+			return postRunFailure(t, d, rr, sessionCommit, resolveIDs, response.EscalationOriginReview, wrapped), nil
+		}
+		return store.HandlerCommit{}, wrapped
+	}
+
+	switch resp := rr.Res.Response.(type) {
+	case *response.FindingsResponse:
+		return onOk(rr, sessionCommit)
+	case *response.QuestionResponse:
+		return questionOutcomeCommit(t, d, rr, resp, sessionCommit, resolveIDs)
+	case *response.ErrorResponse:
+		return errorOutcomeCommit(t, d, rr, resp, sessionCommit, resolveIDs, response.EscalationOriginReview), nil
+	default:
+		return store.HandlerCommit{}, fmt.Errorf("job: reviewing: discuss: outcome %s not handled", rr.Res.Response.Header().Outcome)
+	}
+}
+
+// discussOkCommit is DISCUSS's own ok outcome (design section 6.6 step 4):
+// survivors := FilterFindings(fr.Findings, idx) against the round's own
+// frozen diff, then DedupFindings; each survivor becomes a new row at the
+// round's own next free k, Supersedes every id of the group, SHA and Round
+// the group's own. One "review discussed <id>" marker per finding of the
+// group (design section 6.6: "One marker ... per finding of the group"),
+// each carrying the same run id, batch, and kept count. Survivors above the
+// floor post a new review question (6.4); zero survivors means the lens
+// withdrew every finding of the group, and no question follows.
+func (h reviewingHandler) discussOkCommit(
+	ctx context.Context, t store.Ticket, d Deps, proj Project, wt orchestrator.Worktree,
+	group pendingDiscussGroup, rr runResult, sessionCommit *store.SessionUpsert,
+) (store.HandlerCommit, error) {
+	fr, ok := rr.Res.Response.(*response.FindingsResponse)
+	if !ok {
+		return store.HandlerCommit{}, errors.New("job: reviewing: discuss: expected a findings document")
+	}
+
+	diff, err := proj.Orch.Diff(ctx, wt, group.sha)
+	if err != nil {
+		return store.HandlerCommit{}, fmt.Errorf("job: reviewing: discuss: diff: %w", err)
+	}
+	idx := orchestrator.ParseDiff(diff)
+
+	survivors := FilterFindings(fr.Findings, idx)
+	merged := DedupFindings(survivors, reviewLenses(d))
+
+	findings, err := d.Store.Findings(ctx, t.ID)
+	if err != nil {
+		return store.HandlerCommit{}, fmt.Errorf("job: reviewing: discuss: findings: %w", err)
+	}
+	k := nextFindingK(findings, group.round)
+
+	groupSorted := sortByID(group.findings)
+	groupIDs := make([]string, len(groupSorted))
+	for i := range groupSorted {
+		groupIDs[i] = groupSorted[i].ID
+	}
+
+	for i := range merged {
+		merged[i].ID = fmt.Sprintf("r%df%d", group.round, k+i)
+		merged[i].Round = group.round
+		merged[i].SHA = group.sha
+		merged[i].Supersedes = groupIDs
+	}
+	atOrBelow, above := splitByFloor(merged, d.Floor)
+	stored := sortByID(append(append([]response.FindingArtifact{}, atOrBelow...), above...))
+
+	c := baseCommit(t, d)
+	c.Runs = terminalRuns(rr, string(response.OutcomeOk))
+	c.Session = sessionCommit
+
+	runIDStr := strconv.FormatInt(rr.Reserved.RunID, 10)
+	batchStr := strings.Join(groupIDs, ",")
+	kept := len(merged)
+	for _, id := range groupIDs {
+		c.Messages = append(c.Messages, store.Message{
+			TicketID: t.ID, Type: msgTypeUpdate, Author: authorSystem,
+			Body: fmt.Sprintf("%s\nrun %s batch %s kept %d", reviewDiscussedMarker(id), runIDStr, batchStr, kept),
+		})
+	}
+
+	if len(stored) > 0 {
+		artifacts := make([]store.Artifact, len(stored))
+		for i := range stored {
+			payload, marshalErr := json.Marshal(stored[i])
+			if marshalErr != nil {
+				return store.HandlerCommit{}, fmt.Errorf("job: reviewing: discuss: marshal finding %s: %w", stored[i].ID, marshalErr)
+			}
+			runID := rr.Reserved.RunID
+			artifacts[i] = store.Artifact{Type: artifactTypeFinding, RunID: &runID, Payload: payload}
+		}
+		c.Artifacts = artifacts
+	}
+
+	if len(above) > 0 {
+		qMsg, qErr := reviewQuestionMessage(t, d, group.round, rr.Reserved.RunID, above)
+		if qErr != nil {
+			return store.HandlerCommit{}, qErr
+		}
+		c.Messages = append(c.Messages, qMsg)
+		waiting := waitingFlagReview
+		c.Waiting = &waiting
+	}
+	return c, nil
+}
+
 // ---- ROUND (design section 6.2) -------------------------------------------
 
 // lensAttempt is one lens's own runJob result, plus its position in the
@@ -357,6 +906,15 @@ func (a lensAttempt) isGood() bool {
 	}
 }
 
+// errLensesParallelRange is runLensesParallel's own config error (a
+// Package 9 handoff bug fix): d.LensesParallel sizes the semaphore channel
+// below, and a value less than 1 -- the zero value a test helper or a caller
+// forgot to set -- makes that channel capacity 0, which every goroutine's
+// own "case sem <- struct{}{}" then blocks on forever, since nothing ever
+// receives from a channel no send has yet completed on. review.max_lenses_
+// parallel's own range (design D3) is 1 to 7.
+var errLensesParallelRange = fmt.Errorf("%w: lenses parallel must be 1 to 7", ErrConfig)
+
 // runLensesParallel runs one runtime turn per lens, bounded by
 // d.LensesParallel in flight at once (design section 6.2 step 7): a
 // semaphore channel sized to it gates each goroutine's own runJob call, and
@@ -365,12 +923,17 @@ func (a lensAttempt) isGood() bool {
 // build is called once per lens, inside its own goroutine, to assemble that
 // lens's own SessionUpsert and RunRequest; it must not block. The returned
 // attempts are sorted by idx (lens order), regardless of the order they
-// actually finished in.
+// actually finished in. d.LensesParallel outside [1,7] is refused before any
+// goroutine starts and before any run reserves (errLensesParallelRange).
 func runLensesParallel(
 	ctx context.Context, d Deps, t store.Ticket,
 	lenses []response.Lens,
 	build func(lens response.Lens) (store.SessionUpsert, runtime.RunRequest, func(runResult) *store.SessionUpsert),
-) []lensAttempt {
+) ([]lensAttempt, error) {
+	if d.LensesParallel < 1 || d.LensesParallel > 7 {
+		return nil, errLensesParallelRange
+	}
+
 	roundCtx, cancel := context.WithCancelCause(ctx)
 	defer cancel(nil)
 
@@ -407,7 +970,7 @@ func runLensesParallel(
 	wg.Wait()
 
 	slices.SortFunc(attempts, func(a, b lensAttempt) int { return a.idx - b.idx })
-	return attempts
+	return attempts, nil
 }
 
 // terminalizeAttempts builds the Runs, Session, and Sessions a commit
@@ -557,7 +1120,7 @@ func (h reviewingHandler) round(ctx context.Context, t store.Ticket, d Deps, n i
 		extra = append(extra, prompt.Notes(notes))
 	}
 
-	attempts := runLensesParallel(ctx, d, t, lenses, func(lens response.Lens) (store.SessionUpsert, runtime.RunRequest, func(runResult) *store.SessionUpsert) {
+	attempts, lensesErr := runLensesParallel(ctx, d, t, lenses, func(lens response.Lens) (store.SessionUpsert, runtime.RunRequest, func(runResult) *store.SessionUpsert) {
 		codeSection, csErr := lensCodeSection(lens)
 		if csErr != nil {
 			return store.SessionUpsert{Job: jobReviewName, Runtime: jobCfg.Runtime}, runtime.RunRequest{}, freshSessionRecord
@@ -573,6 +1136,9 @@ func (h reviewingHandler) round(ctx context.Context, t store.Ticket, d Deps, n i
 		}
 		return store.SessionUpsert{Job: jobReviewName, Runtime: jobCfg.Runtime}, req, freshSessionRecord
 	})
+	if lensesErr != nil {
+		return store.HandlerCommit{}, lensesErr
+	}
 
 	return h.roundCommit(ctx, t, d, proj, wt, n, sha, idx, attempts, priorFailedOrVoid)
 }
@@ -1267,7 +1833,7 @@ func (h reviewingHandler) continueRound(ctx context.Context, t store.Ticket, d D
 		byLens[askers[i].lens] = askers[i]
 	}
 
-	attempts := runLensesParallel(ctx, d, t, lenses, func(lens response.Lens) (store.SessionUpsert, runtime.RunRequest, func(runResult) *store.SessionUpsert) {
+	attempts, lensesErr := runLensesParallel(ctx, d, t, lenses, func(lens response.Lens) (store.SessionUpsert, runtime.RunRequest, func(runResult) *store.SessionUpsert) {
 		a := byLens[lens]
 		in := prompt.ForReviewResume([]prompt.NamedInput{prompt.Answers(a.answers)})
 		in.Schemas = schemas
@@ -1279,6 +1845,9 @@ func (h reviewingHandler) continueRound(ctx context.Context, t store.Ticket, d D
 		sessionID := a.sess.ID
 		return su, req, func(rr runResult) *store.SessionUpsert { return resumeSessionRecord(sessionID, rr) }
 	})
+	if lensesErr != nil {
+		return store.HandlerCommit{}, lensesErr
+	}
 
 	return h.tableCommit(ctx, t, d, proj, wt, n, sha, idx, attempts, false, resolveIDs, heldFindings, priorDone)
 }
