@@ -1,6 +1,61 @@
 package templates
 
-import "testing"
+import (
+	"strings"
+	"testing"
+
+	"zing/internal/store"
+)
+
+// renderNav renders Nav(nil, threads, "", openTicketID) to a string,
+// failing the test on a render error.
+func renderNav(t *testing.T, threads []NavThread, openTicketID int64) string {
+	t.Helper()
+	var sb strings.Builder
+	if err := Nav(nil, threads, "", openTicketID).Render(t.Context(), &sb); err != nil {
+		t.Fatalf("Nav.Render: %v", err)
+	}
+	return sb.String()
+}
+
+// TestNavThreadSelected proves the bug fix for the Threads sidebar losing
+// its selected highlight once the thread view patches in: a server-rendered
+// "selected" class on the open ticket's row survives every #nav patch (it
+// is part of the HTML #nav renders, not a client-only focus ring that a
+// morph can drop), so the open thread's row stays marked regardless of
+// which SSE frame last touched #nav.
+func TestNavThreadSelected(t *testing.T) {
+	t.Parallel()
+
+	threads := []NavThread{
+		{Ticket: store.Ticket{ID: 5, Title: "Add a hello endpoint"}},
+		{Ticket: store.Ticket{ID: 9, Title: "Fix the flaky test"}},
+	}
+
+	t.Run("the open ticket's row carries the selected class", func(t *testing.T) {
+		t.Parallel()
+		got := renderNav(t, threads, 5)
+		if !strings.Contains(got, `class="nav-link nav-thread selected"`) {
+			t.Errorf("rendered nav missing the selected row; got:\n%s", got)
+		}
+	})
+
+	t.Run("every other row stays unselected", func(t *testing.T) {
+		t.Parallel()
+		got := renderNav(t, threads, 5)
+		if !strings.Contains(got, `class="nav-link nav-thread"`) {
+			t.Errorf("rendered nav missing the unselected row; got:\n%s", got)
+		}
+	})
+
+	t.Run("no open ticket selects nothing", func(t *testing.T) {
+		t.Parallel()
+		got := renderNav(t, threads, 0)
+		if strings.Contains(got, "selected") {
+			t.Errorf("rendered nav selected a row with no ticket open; got:\n%s", got)
+		}
+	})
+}
 
 // TestZingNavExpr_KnownViewsUnchanged pins zingNavExpr's exact output for
 // every view name a real caller passes today, so hardening it against an

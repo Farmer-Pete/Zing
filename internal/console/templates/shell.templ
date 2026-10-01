@@ -147,6 +147,14 @@ templ palette() {
 			text-decoration: none;
 		}
 		.nav-link:hover { border-color: var(--zing-accent); }
+		/* threadLink's own "selected" class (bug fix, nav.templ): the open
+		   thread's row stays visibly marked across every #nav patch, since
+		   it is server-rendered HTML rather than the clicked anchor's
+		   native focus outline a patch is not guaranteed to preserve. */
+		.nav-thread.selected {
+			border-color: var(--zing-accent);
+			background: var(--zing-picked-soft);
+		}
 		.badge, .pill, .item-marker {
 			font-size: 0.75rem;
 			padding: 0.125rem 0.5rem;

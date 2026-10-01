@@ -86,7 +86,10 @@ func buildAlertLines(entries []LogEntry) []templates.AlertLine {
 // navComponent builds the #nav region: every project, and the per-thread
 // blocking/unread badge list built from store.InboxItems, the same
 // blocking-or-unread predicate section 6.8 defines (design section 6.3).
-func (c *console) navComponent(ctx context.Context) (templ.Component, error) {
+// open is the thread view's own open ticket, 0 when none is open (bug fix:
+// nav.templ's threadLink renders "selected" on this one row, so the
+// sidebar's highlight is part of #nav's own HTML and survives every patch).
+func (c *console) navComponent(ctx context.Context, open int64) (templ.Component, error) {
 	projects, err := c.store.ListProjects(ctx)
 	if err != nil {
 		return nil, err
@@ -95,7 +98,7 @@ func (c *console) navComponent(ctx context.Context) (templ.Component, error) {
 	if err != nil {
 		return nil, err
 	}
-	return templates.Nav(projects, buildNavThreads(items), c.sandboxReason), nil
+	return templates.Nav(projects, buildNavThreads(items), c.sandboxReason, open), nil
 }
 
 // buildNavThreads turns InboxItems into #nav's badge rows, preserving their

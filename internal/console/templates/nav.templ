@@ -22,7 +22,16 @@ import (
 // Task 15): empty when the sandbox is available, in which case this renders
 // no indicator at all; otherwise the closed span shows in red (shell.templ)
 // with the reason as its title.
-templ Nav(projects []store.Project, threads []NavThread, sandboxReason string) {
+//
+// openTicketID is the thread view's own open ticket, 0 when none is open
+// (bug fix: the Threads sidebar lost its selected highlight the moment the
+// thread view patched in, because the only thing marking a row "selected"
+// was the clicked anchor's native browser focus outline, which a #nav
+// patch -- sent on every /stream frame, regardless of view -- is not
+// guaranteed to carry across. threadLink below renders "selected" as part
+// of #nav's own HTML instead, so it survives every patch the same as the
+// row's title or badge does).
+templ Nav(projects []store.Project, threads []NavThread, sandboxReason string, openTicketID int64) {
 	<nav id="nav">
 		if sandboxReason != "" {
 			<span class="sandbox-off" role="status" title={ sandboxReason }>sandbox: off</span>
@@ -48,7 +57,7 @@ templ Nav(projects []store.Project, threads []NavThread, sandboxReason string) {
 				<p class="empty">All clear.</p>
 			} else {
 				for _, th := range threads {
-					@threadLink(th)
+					@threadLink(th, openTicketID)
 				}
 			}
 		</section>
@@ -63,9 +72,12 @@ templ navLink(view string, open, project int64, label string) {
 
 // threadLink is one nav-threads row: the ticket's title, opening it on
 // click, with a badge showing the waiting flag when blocking or an unread
-// dot otherwise (design section 6.8).
-templ threadLink(th NavThread) {
-	<a href="#" class="nav-link nav-thread" data-on:click__prevent={ zingNavExpr("thread", th.Ticket.ID, 0) }>
+// dot otherwise (design section 6.8). It carries "selected" (bug fix,
+// threadRowClass below) when it is the thread view's own open ticket, so
+// the sidebar's highlight is part of #nav's rendered HTML rather than a
+// client-only focus ring a later patch can drop.
+templ threadLink(th NavThread, openTicketID int64) {
+	<a href="#" class={ threadRowClass(th.Ticket.ID, openTicketID) } data-on:click__prevent={ zingNavExpr("thread", th.Ticket.ID, 0) }>
 		<span class="title">{ th.Ticket.Title }</span>
 		if th.Blocking {
 			<span class="badge badge-blocking">
@@ -79,6 +91,17 @@ templ threadLink(th NavThread) {
 			<span class="badge badge-unread">unread</span>
 		}
 	</a>
+}
+
+// threadRowClass is threadLink's own class attribute (bug fix): "selected"
+// added when ticketID is the thread view's own open ticket (openTicketID,
+// 0 when no thread is open, matching the shell's own data-signals default
+// and every other view's zero open).
+func threadRowClass(ticketID, openTicketID int64) string {
+	if openTicketID != 0 && ticketID == openTicketID {
+		return "nav-link nav-thread selected"
+	}
+	return "nav-link nav-thread"
 }
 
 // validNavViews is the closed set of view names every call site in this
