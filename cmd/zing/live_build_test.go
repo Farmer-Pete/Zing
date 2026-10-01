@@ -1020,6 +1020,9 @@ func newLiveFakeRunRoot(t *testing.T) string {
 // question all land, and the ticket reaches "reviewing" with three signed
 // commits.
 func TestLiveBuildHarnessOnFake(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow end-to-end flow; runs in the full suite")
+	}
 	t.Parallel()
 	st := newLiveStore(t)
 	projDir := newLiveFixtureRepo(t)
@@ -1232,6 +1235,9 @@ func runLiveBuildHarnessExpectingFatal(t *testing.T, st *store.Store, projDir st
 // and the newest escalation's own What text -- and no fourth run is ever
 // reserved.
 func TestLiveBuildHarnessCapsRepeatedEscalations(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow end-to-end flow; runs in the full suite")
+	}
 	t.Parallel()
 	st := newLiveStore(t)
 	projDir := newLiveFixtureRepo(t)
@@ -1305,6 +1311,9 @@ func TestLiveBuildHarnessCapsRepeatedEscalations(t *testing.T) {
 //
 // Not parallel: it calls t.Setenv(liveOwnerAnswerEnv, ...) below.
 func TestLiveBuildHarnessOwnerModeAnswersNothing(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow end-to-end flow; runs in the full suite")
+	}
 	t.Setenv(liveOwnerAnswerEnv, liveOwnerAnswerValue)
 
 	st := newLiveStore(t)
@@ -1377,6 +1386,9 @@ func TestLiveBuildHarnessOwnerModeAnswersNothing(t *testing.T) {
 // TestLiveBuildHarnessOnFake drives, logging the pre-existing entry's name
 // once, and must not fail over it.
 func TestLiveBuildHarnessIgnoresStaleRunDir(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow end-to-end flow; runs in the full suite")
+	}
 	t.Parallel()
 	st := newLiveStore(t)
 	projDir := newLiveFixtureRepo(t)

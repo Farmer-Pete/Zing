@@ -522,6 +522,9 @@ func getTicket(t *testing.T, s *store.Store, ticketID int64) store.Ticket {
 // calls write no state message, since none of them carries a Next; only the
 // review tick's clean shortcut does.
 func TestRing_QueuedToDoneAnsweringOneQuestion(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow end-to-end flow; runs in the full suite")
+	}
 	t.Parallel()
 	s := newJobTestStore(t)
 	rt := fakeRuntime(t)
@@ -963,6 +966,9 @@ func answerGateApprove(t *testing.T, s *store.Store, ticketID int64) {
 // multi-state test in this file now uses to reach "shipping" for real.
 
 func TestReviewingHandler_TransitionsToJudging(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow end-to-end flow; runs in the full suite")
+	}
 	t.Parallel()
 	s := newJobTestStore(t)
 	ticketID := seedQueuedGitBackedTicket(t, s)

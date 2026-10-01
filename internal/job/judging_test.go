@@ -412,6 +412,9 @@ func judgeAnswerOpenQuestion(t *testing.T, s *store.Store, ticketID int64, optio
 // transition, one update message, exactly "judge round 1 started sha
 // <HeadSHA> after run <MaxRunID>" read back at the moment START ran.
 func TestJudgeStartWritesWatermark(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow end-to-end flow; runs in the full suite")
+	}
 	t.Parallel()
 	s, ticket := judgeTicketReady(t)
 	deps := pbClaim(t, s, pbFakeRuntime(t), ticket.ID)
@@ -476,6 +479,9 @@ func judgeAdvanceStart(t *testing.T, s *store.Store, rt runtime.Runtime, ticket 
 // matching the cohort and the round, and the "judge round 1 verdicts run
 // <rid>" marker.
 func TestJudgeRunStoresVerdicts(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow end-to-end flow; runs in the full suite")
+	}
 	t.Parallel()
 	s, ticket := judgeTicketReady(t)
 	rt := runtime.NewFake(judgeScriptsFS(judgeOkBothScript))
@@ -597,6 +603,9 @@ func TestJudgeRunRemovesWorktree(t *testing.T) {
 // and also writes "judge coverage delivered run <rid1>" (rid1 the first
 // turn's own run id) in the same commit.
 func TestJudgeCoverageFailureResumes(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow end-to-end flow; runs in the full suite")
+	}
 	t.Parallel()
 	s, ticket := judgeTicketReady(t)
 	incomplete := judgeOkScript(judgeVerdictXML("s1", "ran it"))
@@ -660,6 +669,9 @@ func TestJudgeCoverageFailureResumes(t *testing.T) {
 // still incomplete terminalizes ok and escalates response_invalid, origin
 // judge, instead of writing a second "coverage failed" marker.
 func TestJudgeSecondCoverageFailureEscalates(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow end-to-end flow; runs in the full suite")
+	}
 	t.Parallel()
 	s, ticket := judgeTicketReady(t)
 	incomplete := judgeOkScript(judgeVerdictXML("s1", "ran it"))
@@ -706,6 +718,9 @@ func TestJudgeSecondCoverageFailureEscalates(t *testing.T) {
 // session resumes with an "answers" input and a fully-covered second turn
 // stores both verdicts and resolves the question.
 func TestJudgeQuestionResumes(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow end-to-end flow; runs in the full suite")
+	}
 	t.Parallel()
 	s, ticket := judgeTicketReady(t)
 	rt := runtime.NewFake(judgeScriptsFS(judgeQuestionScript, judgeOkBothScript))
@@ -766,6 +781,9 @@ func TestJudgeQuestionResumes(t *testing.T) {
 // (design section 6.8, 7.2 step 6): the agent's own error document
 // escalates with origin judge, its own code, what, why, and tried.
 func TestJudgeErrorEscalatesOriginJudge(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow end-to-end flow; runs in the full suite")
+	}
 	t.Parallel()
 	s, ticket := judgeTicketReady(t)
 	rt := runtime.NewFake(judgeScriptsFS(judgeErrorScript))
@@ -803,6 +821,9 @@ func TestJudgeErrorEscalatesOriginJudge(t *testing.T) {
 // run <rid>" and stays (no escalation, no transition); a second consecutive
 // invalid output on the resume it triggers escalates response_invalid.
 func TestJudgeInvalidOutputChain(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow end-to-end flow; runs in the full suite")
+	}
 	t.Parallel()
 	s, ticket := judgeTicketReady(t)
 	const invalidReason = "no zing element in final message"
@@ -926,6 +947,9 @@ func TestJudgeNoSealedScenariosEscalates(t *testing.T) {
 // carries none of fixtures/scripts/planning/2.xml's own distinguishing
 // plan text.
 func TestJudgePromptCarriesNoPlan(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow end-to-end flow; runs in the full suite")
+	}
 	t.Parallel()
 	s, ticket := judgeTicketReady(t)
 	rec := &recordingRuntime{inner: runtime.NewFake(judgeScriptsFS(judgeOkBothScript))}
@@ -950,6 +974,9 @@ func TestJudgePromptCarriesNoPlan(t *testing.T) {
 // judge run, first turn and resume alike, carries CODEX_HOME=
 // <Deps.JudgeCodexHome> in req.Env.
 func TestJudgeRunsWithJudgeCodexHome(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow end-to-end flow; runs in the full suite")
+	}
 	t.Parallel()
 	const wantHome = "/test/judge/codex/home"
 
@@ -1126,6 +1153,9 @@ func (c *judgeScriptedCheckCommands) Run(ctx context.Context, dir, repoGit, shel
 // scenario's newest verdict row becomes fail, CheckExit 1, with the
 // re-run note appended to the judge's own evidence.
 func TestJudgeCheckOverridesVerdict(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow end-to-end flow; runs in the full suite")
+	}
 	t.Parallel()
 	s, ticket := judgeTicketReady(t)
 	rt := runtime.NewFake(judgeScriptsFS(judgeOkBothScript))
@@ -1191,6 +1221,9 @@ func TestJudgeCheckOverridesVerdict(t *testing.T) {
 // 7.5 step 3): ErrCommandTimeout becomes exit -1, CheckExit -1, and the
 // evidence's own re-run note names the timeout, not an exit code.
 func TestJudgeCheckTimeout(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow end-to-end flow; runs in the full suite")
+	}
 	t.Parallel()
 	s, ticket := judgeTicketReady(t)
 	rt := runtime.NewFake(judgeScriptsFS(judgeOkBothScript))
@@ -1239,6 +1272,9 @@ func TestJudgeCheckTimeout(t *testing.T) {
 // section 7.5 step 1), independent of RUN's own checkout, already removed
 // by the time CHECK runs.
 func TestJudgeCheckRunsInFreshCheckout(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow end-to-end flow; runs in the full suite")
+	}
 	t.Parallel()
 	s, ticket := judgeTicketReady(t)
 	rt := runtime.NewFake(judgeScriptsFS(judgeOkBothScript))
@@ -1272,6 +1308,9 @@ func TestJudgeCheckRunsInFreshCheckout(t *testing.T) {
 // ticket to shipping with the "judge passed" reason and writes "judge
 // round 1 passed".
 func TestJudgePassMovesToShipping(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow end-to-end flow; runs in the full suite")
+	}
 	t.Parallel()
 	s, ticket := judgeTicketReady(t)
 	rt := runtime.NewFake(judgeScriptsFS(judgeOkBothScript))
@@ -1322,6 +1361,9 @@ func TestJudgePassMovesToShipping(t *testing.T) {
 // commit, not just the already-proven JudgePasses rule (judgerules_test.go's
 // own TestJudgePasses).
 func TestJudgePerformanceNeverBlocks(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow end-to-end flow; runs in the full suite")
+	}
 	t.Parallel()
 	s, ticket := judgeTicketReady(t)
 	deps := pbClaim(t, s, pbFakeRuntime(t), ticket.ID)
@@ -1347,6 +1389,9 @@ func TestJudgePerformanceNeverBlocks(t *testing.T) {
 // reused here through renderFixFailures), so a fix run never sees what
 // the scenario actually checks.
 func TestJudgeFailRequestsFixWithoutScenarioText(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow end-to-end flow; runs in the full suite")
+	}
 	t.Parallel()
 	s, ticket := judgeTicketReady(t)
 	deps := pbClaim(t, s, pbFakeRuntime(t), ticket.ID)
@@ -1403,6 +1448,9 @@ func judgeSeedFixRequestedFailureMarkers(t *testing.T, s *store.Store, ticket st
 // requested failure" markers, a further failing round escalates
 // loops_exhausted instead of opening a third request.
 func TestJudgeLoopGate(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow end-to-end flow; runs in the full suite")
+	}
 	t.Parallel()
 	s, ticket := judgeTicketReady(t)
 	judgeSeedFixRequestedFailureMarkers(t, s, ticket, 2)
@@ -1436,6 +1484,9 @@ func TestJudgeLoopGate(t *testing.T) {
 // "failure" fix request carrying the escalation's own Tried text, the loop
 // gate skipped for this one request, with no fresh judge run.
 func TestJudgeLoopsRetry(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow end-to-end flow; runs in the full suite")
+	}
 	t.Parallel()
 	s, ticket := judgeTicketReady(t)
 
@@ -1468,6 +1519,9 @@ func TestJudgeLoopsRetry(t *testing.T) {
 // fresh start of round n at that round's own sha, reserving a brand-new
 // session rather than resuming the exhausted one.
 func TestJudgeCapResumesRetryStartsFresh(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow end-to-end flow; runs in the full suite")
+	}
 	t.Parallel()
 	s, ticket := judgeTicketReady(t)
 	rt := runtime.NewFake(judgeScriptsFS(judgeOkBothScript))
@@ -1583,6 +1637,9 @@ func driveJudgeFixToLanding(t *testing.T, s *store.Store, ticketID int64, rt run
 // "failure" fix, the fix driver lands it, round 2 starts fresh, and its
 // own CHECK passes s1, so EVALUATE moves the ticket to shipping.
 func TestJudgeFixThenPass(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow end-to-end flow; runs in the full suite")
+	}
 	t.Parallel()
 	s, ticket := judgeTicketReady(t)
 

@@ -101,6 +101,9 @@ func TestCommandName(t *testing.T) {
 }
 
 func TestDispatch_Selftest(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow end-to-end flow; runs in the full suite")
+	}
 	t.Parallel()
 
 	if got := dispatch([]string{argv0, cmdSelftest}); got != 0 {

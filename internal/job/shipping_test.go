@@ -697,6 +697,9 @@ func driveShipFixToLanding(t *testing.T, s *store.Store, ticketID int64, rt runt
 // section 8.2): the ticket branch actually lands on the bare remote, and
 // OpenDraftPR's own CreateDraftPR is called exactly once.
 func TestPublishPushesAndOpensDraft(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow end-to-end flow; runs in the full suite")
+	}
 	t.Parallel()
 	s, ticket, remoteDir := shipTicketReady(t)
 
@@ -726,6 +729,9 @@ func TestPublishPushesAndOpensDraft(t *testing.T) {
 // section 8.2): the tracker's PR-link comment posts exactly once, and the
 // commit sets pr_url, the "pr opened <n>" marker, and ClearPoll.
 func TestPublishStoresURLAndComment(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow end-to-end flow; runs in the full suite")
+	}
 	t.Parallel()
 	s, ticket, _ := shipTicketReady(t)
 
@@ -772,6 +778,9 @@ func TestPublishStoresURLAndComment(t *testing.T) {
 // FindPRByHead fallback find the very same PR, so the retried tick stores
 // the same URL rather than opening a second one.
 func TestPublishFindsExistingPRAfterCrash(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow end-to-end flow; runs in the full suite")
+	}
 	t.Parallel()
 	s, ticket, _ := shipTicketReady(t)
 
@@ -818,6 +827,9 @@ func TestPublishFindsExistingPRAfterCrash(t *testing.T) {
 // OpenDraftPR succeeds but before PostPRLink ever ran leaves no marker, so
 // the next tick posts the comment exactly once and commits.
 func TestPublishCrashBeforePRComment(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow end-to-end flow; runs in the full suite")
+	}
 	t.Parallel()
 	s, ticket, _ := shipTicketReady(t)
 
@@ -860,6 +872,9 @@ func TestPublishCrashBeforePRComment(t *testing.T) {
 // landed leaves the marker behind, so the next tick finds it, posts
 // nothing a second time, and still commits.
 func TestPublishCrashAfterPRComment(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow end-to-end flow; runs in the full suite")
+	}
 	t.Parallel()
 	s, ticket, _ := shipTicketReady(t)
 
@@ -903,6 +918,9 @@ func TestPublishCrashAfterPRComment(t *testing.T) {
 // rule: a PostPRLink error returns with no commit, so a retried tick
 // repeats PUBLISH from scratch.
 func TestPublishPRCommentErrorNoCommit(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow end-to-end flow; runs in the full suite")
+	}
 	t.Parallel()
 	s, ticket, _ := shipTicketReady(t)
 
@@ -928,6 +946,9 @@ func TestPublishPRCommentErrorNoCommit(t *testing.T) {
 // environment, origin shipping, What pushFailedWhat, Tried the error text,
 // and never reaches CreateDraftPR.
 func TestPublishPushErrorEscalates(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow end-to-end flow; runs in the full suite")
+	}
 	t.Parallel()
 	s, ticket, _ := shipTicketReady(t)
 
@@ -968,6 +989,9 @@ func TestPublishPushErrorEscalates(t *testing.T) {
 // ErrGitHubAuth row: escalates environment, origin shipping, What
 // prOpenRefusedWhat.
 func TestPublishAuthErrorEscalates(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow end-to-end flow; runs in the full suite")
+	}
 	t.Parallel()
 	s, ticket, _ := shipTicketReady(t)
 
@@ -995,6 +1019,9 @@ func TestPublishAuthErrorEscalates(t *testing.T) {
 // commit, so the dispatcher releases the claim and the next tick tries
 // again.
 func TestPublishUnavailableRetries(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow end-to-end flow; runs in the full suite")
+	}
 	t.Parallel()
 	s, ticket, _ := shipTicketReady(t)
 
@@ -1020,6 +1047,9 @@ func TestPublishUnavailableRetries(t *testing.T) {
 // shipping is never re-judged), so PUBLISH escalates judgeNotPassedWhat
 // rather than opening a pull request for an unverified commit.
 func TestPublishRequiresJudgePassOnHead(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow end-to-end flow; runs in the full suite")
+	}
 	t.Parallel()
 	s, ticket, _ := shipTicketReady(t)
 
@@ -1076,6 +1106,9 @@ func TestPublishRequiresJudgePassOnHead(t *testing.T) {
 // still on the ticket (Verdicts is append-only): the rendered pull request
 // body is judged on round 2's own sha, never round 1's.
 func TestFinalVerdictsAfterFailFixPass(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow end-to-end flow; runs in the full suite")
+	}
 	t.Parallel()
 	s, ticket := judgeTicketReady(t)
 
@@ -1185,6 +1218,9 @@ func TestFinalVerdictsAfterFailFixPass(t *testing.T) {
 // under the passing round escalates environment, origin shipping, What
 // "the passing judge round has no verdict for scenario <id>".
 func TestFinalVerdictsMissingScenario(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow end-to-end flow; runs in the full suite")
+	}
 	t.Parallel()
 	s, ticket := judgeTicketReady(t)
 	sha := shipHeadSHA(t, s, ticket)
@@ -1223,6 +1259,9 @@ func TestFinalVerdictsMissingScenario(t *testing.T) {
 // sealed cohort escalates environment, origin shipping, What "the passing
 // judge round has a verdict for unknown scenario <id>".
 func TestFinalVerdictsUnknownScenario(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow end-to-end flow; runs in the full suite")
+	}
 	t.Parallel()
 	s, ticket := judgeTicketReady(t)
 	sha := shipHeadSHA(t, s, ticket)
@@ -1263,6 +1302,9 @@ func TestFinalVerdictsUnknownScenario(t *testing.T) {
 // since EVALUATE writes exactly one -- escalates environment, origin
 // shipping, What "judge round <n> passed twice".
 func TestFinalVerdictsPassedTwice(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow end-to-end flow; runs in the full suite")
+	}
 	t.Parallel()
 	s, ticket := judgeTicketReady(t)
 	sha := shipHeadSHA(t, s, ticket)
@@ -1492,6 +1534,9 @@ func seedLandedFixRequests(t *testing.T, s *store.Store, ticketID int64, kind Fi
 // a merged PR moves the ticket straight to done, posting the done comment
 // and closing the issue before the commit.
 func TestPollMergedGoesDone(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow end-to-end flow; runs in the full suite")
+	}
 	t.Parallel()
 	s, ticket, gh, tr := shipPublished(t)
 	gh.prState = orchestrator.PRState{Merged: true, Draft: true}
@@ -1525,6 +1570,9 @@ func TestPollMergedGoesDone(t *testing.T) {
 // the tracker directly) but no commit ever landed; the next tick finds the
 // marker, posts nothing a second time, and still commits done.
 func TestDoneCrashBeforeCommitConverges(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow end-to-end flow; runs in the full suite")
+	}
 	t.Parallel()
 	s, ticket, gh, tr := shipPublished(t)
 	gh.prState = orchestrator.PRState{Merged: true, Draft: true}
@@ -1553,6 +1601,9 @@ func TestDoneCrashBeforeCommitConverges(t *testing.T) {
 // TestShipTrackerDoneErrorNoCommit proves design section 8.6 step 2: a
 // PostDone error returns with no commit, so a retried tick repeats step 1.
 func TestShipTrackerDoneErrorNoCommit(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow end-to-end flow; runs in the full suite")
+	}
 	t.Parallel()
 	s, ticket, gh, tr := shipPublished(t)
 	gh.prState = orchestrator.PRState{Merged: true, Draft: true}
@@ -1574,6 +1625,9 @@ func TestShipTrackerDoneErrorNoCommit(t *testing.T) {
 // TestPollClosedEscalatesPRClosed proves design section 8.6's CLOSED row:
 // a closed, unmerged PR escalates pr_closed, origin shipping.
 func TestPollClosedEscalatesPRClosed(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow end-to-end flow; runs in the full suite")
+	}
 	t.Parallel()
 	s, ticket, gh, tr := shipPublished(t)
 	gh.prState = orchestrator.PRState{State: "closed", Merged: false}
@@ -1603,6 +1657,9 @@ func TestPollClosedEscalatesPRClosed(t *testing.T) {
 // row: the PR head is an ancestor of the local branch (a landed fix has not
 // been pushed yet), so POLL pushes and clears the poll, with no escalation.
 func TestPollPushesLocalAhead(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow end-to-end flow; runs in the full suite")
+	}
 	t.Parallel()
 	s, ticket, gh, tr := shipPublished(t)
 	oldSHA := shipHeadSHA(t, s, ticket)
@@ -1653,6 +1710,9 @@ func TestPollPushesLocalAhead(t *testing.T) {
 // non-ancestor row: a PR head that is not an ancestor of the local branch
 // (a human pushed to or rewrote the pull request branch) escalates.
 func TestPollForeignHeadEscalates(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow end-to-end flow; runs in the full suite")
+	}
 	t.Parallel()
 	s, ticket, gh, tr := shipPublished(t)
 
@@ -1688,6 +1748,9 @@ func TestPollForeignHeadEscalates(t *testing.T) {
 // TestPollCIFailedRequestsFix proves design section 8.5 row 4: a failed
 // required check writes a ci_log fix request carrying the log tail.
 func TestPollCIFailedRequestsFix(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow end-to-end flow; runs in the full suite")
+	}
 	t.Parallel()
 	s, ticket, gh, tr := shipPublished(t)
 	local := shipHeadSHA(t, s, ticket)
@@ -1726,6 +1789,9 @@ func TestPollCIFailedRequestsFix(t *testing.T) {
 // this test drives, keeping its own assertion about the shared gate
 // isolated from RE-REQUEST's.
 func TestPollSharedGateEscalates(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow end-to-end flow; runs in the full suite")
+	}
 	t.Parallel()
 	s, ticket, gh, tr := shipPublished(t)
 	maxLoops := pbMachine(t).Jobs[jobRespondName].MaxLoops
@@ -1761,6 +1827,9 @@ func TestPollSharedGateEscalates(t *testing.T) {
 // reply actually posted to a thread, since nothing in M3 implements
 // FIX-REPLIES yet (shipping.go's own file comment).
 func TestThreadsGateRetryKeepsCheckpoint(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow end-to-end flow; runs in the full suite")
+	}
 	t.Parallel()
 	s, ticket, _ := shipTicketReady(t)
 
@@ -1838,6 +1907,9 @@ func TestThreadsGateRetryKeepsCheckpoint(t *testing.T) {
 // pending CI commits Poll with interval 30 on the first poll, doubling to
 // 60 on the next poll with the same fingerprint.
 func TestPollPendingBacksOff(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow end-to-end flow; runs in the full suite")
+	}
 	t.Parallel()
 	s, ticket, gh, tr := shipPublished(t)
 	local := shipHeadSHA(t, s, ticket)
@@ -1873,6 +1945,9 @@ func TestPollPendingBacksOff(t *testing.T) {
 // schedule-only rule: a RateLimitedError schedules the next poll at
 // max(now+iv, resetAt+5s), picking the later reset time when it wins.
 func TestPollRateLimitWaitsForReset(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow end-to-end flow; runs in the full suite")
+	}
 	t.Parallel()
 	s, ticket, gh, tr := shipPublished(t)
 	resetAt := time.Now().Add(10 * time.Minute).UTC().Truncate(time.Second)
@@ -1976,6 +2051,9 @@ func TestPollFailureDoublesInterval(t *testing.T) {
 // itself succeeded; only the commit confirming it was lost), takes no push
 // branch and no escalation.
 func TestPushCrashConverges(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow end-to-end flow; runs in the full suite")
+	}
 	t.Parallel()
 	s, ticket, gh, tr := shipPublished(t)
 	local := shipHeadSHA(t, s, ticket)
@@ -1994,6 +2072,9 @@ func TestPushCrashConverges(t *testing.T) {
 // TestPollUnprotectedEscalates proves design section 8.4's own unprotected
 // row: no required check at all escalates environment.
 func TestPollUnprotectedEscalates(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow end-to-end flow; runs in the full suite")
+	}
 	t.Parallel()
 	s, ticket, gh, tr := shipPublished(t)
 	local := shipHeadSHA(t, s, ticket)
@@ -2022,6 +2103,9 @@ func TestPollUnprotectedEscalates(t *testing.T) {
 // empty Missing, design section 8.4 rule 3), so this is the strongest
 // Missing-shrinks case row 7 can exercise on its own.
 func TestPollCIWaitingMarkerOnChange(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow end-to-end flow; runs in the full suite")
+	}
 	t.Parallel()
 	s, ticket, gh, tr := shipPublished(t)
 	local := shipHeadSHA(t, s, ticket)
@@ -2307,6 +2391,9 @@ func shipApplySeeded(t *testing.T, threads []orchestrator.Thread, actions []resp
 // thread writes "respond batch 1 started sha <local> after run <R>", its
 // own tids sorted on line 2 and their seen digests on line 3, and no run.
 func TestPollStartsRespondBatch(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow end-to-end flow; runs in the full suite")
+	}
 	t.Parallel()
 	when := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
 	s, ticket, _, _, local := shipRespondReady(t, when)
@@ -2338,6 +2425,9 @@ func TestPollStartsRespondBatch(t *testing.T) {
 // and ok outcome: one "respond" artifact {threads, batch 1, sha, seen}, its
 // own seen copied from the batch marker, never the model.
 func TestRespondRunStoresArtifact(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow end-to-end flow; runs in the full suite")
+	}
 	t.Parallel()
 	when := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
 	s, ticket, gh, tr, local := shipRespondReady(t, when)
@@ -2380,6 +2470,9 @@ func TestRespondRunStoresArtifact(t *testing.T) {
 // "respond coverage failed run <rid>"; the resume, answering correctly,
 // stores the artifact and writes "respond coverage delivered run <rid>".
 func TestRespondCoverageResumes(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow end-to-end flow; runs in the full suite")
+	}
 	t.Parallel()
 	when := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
 	s, ticket, gh, tr, _ := shipRespondReady(t, when)
@@ -2433,6 +2526,9 @@ func TestRespondCoverageResumes(t *testing.T) {
 // branch: a coverage resume whose own ok outcome is incomplete too
 // escalates response_invalid instead of resuming a third time.
 func TestRespondSecondCoverageEscalates(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow end-to-end flow; runs in the full suite")
+	}
 	t.Parallel()
 	when := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
 	s, ticket, gh, tr, _ := shipRespondReady(t, when)
@@ -2467,6 +2563,9 @@ func TestRespondSecondCoverageEscalates(t *testing.T) {
 // (shipHandler.resumeRespondAnswered) and the next ok outcome stores the
 // artifact.
 func TestRespondQuestionResumes(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow end-to-end flow; runs in the full suite")
+	}
 	t.Parallel()
 	when := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
 	s, ticket, gh, tr, _ := shipRespondReady(t, when)
@@ -2512,6 +2611,9 @@ func TestRespondQuestionResumes(t *testing.T) {
 // none of a batch's own tids still match a thread GitHub returns, RESPOND
 // writes "respond batch 1 skipped" and starts no run.
 func TestRespondBatchSkippedWhenThreadsGone(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow end-to-end flow; runs in the full suite")
+	}
 	t.Parallel()
 	when := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
 	s, ticket, gh, tr, _ := shipRespondReady(t, when)
@@ -2538,6 +2640,9 @@ func TestRespondBatchSkippedWhenThreadsGone(t *testing.T) {
 // decision tree step (2) again (design section 8.1): it falls through to
 // POLL.
 func TestSkippedBatchIsClosed(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow end-to-end flow; runs in the full suite")
+	}
 	t.Parallel()
 	when := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
 	s, ticket, gh, tr, local := shipRespondReady(t, when)
@@ -2572,6 +2677,9 @@ func TestSkippedBatchIsClosed(t *testing.T) {
 // requested" marker plus ClearPoll, the same shape shipRetryMarkerCommit
 // gives every other no-run retry.
 func TestRespondErrorRetry(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow end-to-end flow; runs in the full suite")
+	}
 	t.Parallel()
 	when := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
 	s, ticket, gh, tr, _ := shipRespondReady(t, when)
@@ -2604,6 +2712,9 @@ func TestRespondErrorRetry(t *testing.T) {
 // into "respond batch 1 retry sha <sha> after run <R>"; the next tick runs
 // a first turn in a brand-new session, not the exhausted one.
 func TestRespondCapResumesRetryStartsFresh(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow end-to-end flow; runs in the full suite")
+	}
 	t.Parallel()
 	when := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
 	s, ticket, gh, tr, local := shipRespondReady(t, when)
@@ -2700,6 +2811,9 @@ func TestRespondCapResumesRetryStartsFresh(t *testing.T) {
 // human comments on the batch's own thread before the retry's own tick
 // runs, so the next tick writes "respond batch 1 stale" instead of a run.
 func TestRespondRetryStaleOnNewComment(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow end-to-end flow; runs in the full suite")
+	}
 	t.Parallel()
 	when := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
 	s, ticket, gh, tr, local := shipRespondReady(t, when)
@@ -2753,6 +2867,9 @@ func TestRespondRetryStaleOnNewComment(t *testing.T) {
 // the pull request head moves before the retry's own tick runs, so the
 // next tick writes "respond batch 1 stale" with the head-moved reason.
 func TestRespondRetryStaleOnHeadMoved(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow end-to-end flow; runs in the full suite")
+	}
 	t.Parallel()
 	when := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
 	s, ticket, gh, tr, local := shipRespondReady(t, when)
@@ -2804,6 +2921,9 @@ func TestRespondRetryStaleOnHeadMoved(t *testing.T) {
 // resolves, and the closing "respond applied <aid>" marker reports what
 // this commit did.
 func TestApplyRepliesAndResolves(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow end-to-end flow; runs in the full suite")
+	}
 	t.Parallel()
 	when := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
 	thread := shipThread(shipApplyThreadA, "greet.go", 3, shipHumanComment("c1", "reviewer1", "please fix this", when))
@@ -2846,6 +2966,9 @@ func TestApplyRepliesAndResolves(t *testing.T) {
 // with the batch's own seen snapshot, and APPLY writes "respond batch 1
 // stale" instead of posting.
 func TestApplyStaleEditedComment(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow end-to-end flow; runs in the full suite")
+	}
 	t.Parallel()
 	when := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
 	thread := shipThread(shipApplyThreadA, "greet.go", 3, shipHumanComment("c1", "reviewer1", "please fix this", when))
@@ -2877,6 +3000,9 @@ func TestApplyStaleEditedComment(t *testing.T) {
 // and the next poll starts batch 2 from the threads as they now are
 // (design section 9.2).
 func TestApplyStaleNewComment(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow end-to-end flow; runs in the full suite")
+	}
 	t.Parallel()
 	when := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
 	thread := shipThread(shipApplyThreadA, "greet.go", 3, shipHumanComment("c1", "reviewer1", "please fix this", when))
@@ -2920,6 +3046,9 @@ func TestApplyStaleNewComment(t *testing.T) {
 // APPLY writes "respond batch 1 stale" with the head-moved reason and
 // posts nothing.
 func TestApplyStaleHeadMoved(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow end-to-end flow; runs in the full suite")
+	}
 	t.Parallel()
 	when := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
 	thread := shipThread(shipApplyThreadA, "greet.go", 3, shipHumanComment("c1", "reviewer1", "please fix this", when))
@@ -2950,6 +3079,9 @@ func TestApplyStaleHeadMoved(t *testing.T) {
 // returns that error with no write at all, not even for the thread that
 // would otherwise have been fine.
 func TestApplyChecksEveryBodyBeforeWriting(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow end-to-end flow; runs in the full suite")
+	}
 	t.Parallel()
 	when := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
 	threadA := shipThread(shipApplyThreadA, "greet.go", 3, shipHumanComment("ca", "reviewer1", "please fix a", when))
@@ -2976,6 +3108,9 @@ func TestApplyChecksEveryBodyBeforeWriting(t *testing.T) {
 // longer exists both skip without a GitHub write, and the closing marker's
 // own skipped count reports both.
 func TestApplySkipsResolvedAndMissing(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow end-to-end flow; runs in the full suite")
+	}
 	t.Parallel()
 	when := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
 	threadA := shipThread(shipApplyThreadA, "greet.go", 3, shipHumanComment("ca", "reviewer1", "please fix a", when))
@@ -3018,6 +3153,9 @@ func TestApplySkipsResolvedAndMissing(t *testing.T) {
 // in the thread's own recent comments, authored by the viewer), so this
 // attempt posts no second comment and still resolves the thread.
 func TestApplyIsIdempotentAfterCrash(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow end-to-end flow; runs in the full suite")
+	}
 	t.Parallel()
 	when := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
 	thread := shipThread(shipApplyThreadA, "greet.go", 3, shipHumanComment("c1", "reviewer1", "please fix this", when))
@@ -3057,6 +3195,9 @@ func TestApplyIsIdempotentAfterCrash(t *testing.T) {
 // walk, which this test's own markerAuthors stands in for (design section
 // 10.4: "pages every comment of the thread, not only the last 100").
 func TestApplyFindsMarkerOlderThan100Comments(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow end-to-end flow; runs in the full suite")
+	}
 	t.Parallel()
 	when := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
 	thread := shipThread(shipApplyThreadA, "greet.go", 3, shipHumanComment("c1", "reviewer1", "please fix this", when))
@@ -3091,6 +3232,9 @@ func TestApplyFindsMarkerOlderThan100Comments(t *testing.T) {
 // text never satisfies ThreadCommentsContain (author-gated to the viewer),
 // so APPLY still posts its own reply.
 func TestApplySpoofedMarkerStillPosts(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow end-to-end flow; runs in the full suite")
+	}
 	t.Parallel()
 	when := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
 	thread := shipThread(shipApplyThreadA, "greet.go", 3, shipHumanComment("c1", "reviewer1", "please fix this", when))
@@ -3125,6 +3269,9 @@ func TestApplySpoofedMarkerStillPosts(t *testing.T) {
 // either thread (the first is skipped as already resolved, the second's
 // own marker is already there) and finishes the batch.
 func TestApplyCrashBetweenReplyAndResolve(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow end-to-end flow; runs in the full suite")
+	}
 	t.Parallel()
 	when := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
 	threadA := shipThread(shipApplyThreadA, "greet.go", 3, shipHumanComment("ca", "reviewer1", "please fix a", when))
@@ -3187,6 +3334,9 @@ func TestApplyCrashBetweenReplyAndResolve(t *testing.T) {
 // naming the thread's own tid, location, and text, with the closing marker
 // pointing at it by its own watermark run id.
 func TestApplyFixThreadsRequestFix(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow end-to-end flow; runs in the full suite")
+	}
 	t.Parallel()
 	when := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
 	thread := shipThread(shipApplyThreadA, "greet.go", 3, shipHumanComment("c1", "reviewer1", "please address this properly", when))
@@ -3231,6 +3381,9 @@ func TestApplyFixThreadsRequestFix(t *testing.T) {
 // and no "respond applied <aid>" marker lands -- but the batch's own reply
 // action, already decided before the gate, still posts and resolves.
 func TestApplyFixThreadsHitGate(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow end-to-end flow; runs in the full suite")
+	}
 	t.Parallel()
 	when := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
 	threadFix := shipThread("RT_fix", "greet.go", 3, shipHumanComment("cf", "reviewer1", "please address this", when))
@@ -3281,6 +3434,9 @@ func TestApplyFixThreadsHitGate(t *testing.T) {
 // prefix, and a real APPLY run's own reply -- built through replyBody --
 // passes it.
 func TestEveryReplyGoesThroughReplyBody(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow end-to-end flow; runs in the full suite")
+	}
 	t.Parallel()
 	gh := &shipGitHub{}
 	if err := gh.ReplyToThread(t.Context(), "RT_x", "not disclosed"); err == nil {
@@ -3401,6 +3557,9 @@ func shipPollUntilMarker(t *testing.T, s *store.Store, ticket store.Ticket, gh *
 // -- a disclosed "Fixed in <sha7>." reply, the thread resolved, and the
 // closing "fix replies posted <aid>" marker.
 func TestFixRepliesAfterPush(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow end-to-end flow; runs in the full suite")
+	}
 	t.Parallel()
 	when := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
 	thread := shipThread(shipApplyThreadA, "greet.go", 3, shipHumanComment("c1", "reviewer1", "please address this properly", when))
@@ -3452,6 +3611,9 @@ func TestFixRepliesAfterPush(t *testing.T) {
 // "fix replies posted <aid>" is never written) the thread -- now actionable
 // again -- is answered by a fresh batch instead.
 func TestFixRepliesStaleNewComment(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow end-to-end flow; runs in the full suite")
+	}
 	t.Parallel()
 	when := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
 	thread := shipThread(shipApplyThreadA, "greet.go", 3, shipHumanComment("c1", "reviewer1", "please address this properly", when))
@@ -3491,6 +3653,9 @@ func TestFixRepliesStaleNewComment(t *testing.T) {
 // the retry posts no second reply, still resolves the thread, and still
 // writes the closing marker.
 func TestFixRepliesIdempotent(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow end-to-end flow; runs in the full suite")
+	}
 	t.Parallel()
 	when := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
 	thread := shipThread(shipApplyThreadA, "greet.go", 3, shipHumanComment("c1", "reviewer1", "please address this properly", when))
@@ -3523,6 +3688,9 @@ func TestFixRepliesIdempotent(t *testing.T) {
 // satisfies ThreadCommentsContain (author-gated to the viewer), so
 // FIX-REPLIES still posts its own disclosed reply.
 func TestFixRepliesSpoofedMarkerStillPosts(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow end-to-end flow; runs in the full suite")
+	}
 	t.Parallel()
 	when := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
 	thread := shipThread(shipApplyThreadA, "greet.go", 3, shipHumanComment("c1", "reviewer1", "please address this properly", when))
@@ -3582,6 +3750,9 @@ func shipReReqReady(t *testing.T) (s *store.Store, ticket store.Ticket, gh *ship
 // review on the current head, a bot's review, and the viewer's own review
 // are all excluded.
 func TestReRequestStaleReviewers(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow end-to-end flow; runs in the full suite")
+	}
 	t.Parallel()
 	s, ticket, gh, tr, local := shipReReqReady(t)
 	gh.reviews = []orchestrator.Review{
@@ -3613,6 +3784,9 @@ func TestReRequestStaleReviewers(t *testing.T) {
 // head calls RequestReviewers no further times and writes no second
 // marker.
 func TestReRequestOncePerHead(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow end-to-end flow; runs in the full suite")
+	}
 	t.Parallel()
 	s, ticket, gh, tr, _ := shipReReqReady(t)
 	gh.reviews = []orchestrator.Review{
@@ -3647,6 +3821,9 @@ func TestReRequestOncePerHead(t *testing.T) {
 // and skipped, and every other stale login is still requested in the same
 // commit.
 func TestReRequestSkipsUnrequestable(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow end-to-end flow; runs in the full suite")
+	}
 	t.Parallel()
 	s, ticket, gh, tr, local := shipReReqReady(t)
 	gh.reviews = []orchestrator.Review{
@@ -3726,6 +3903,9 @@ func shipSeedMergeAsked(t *testing.T, s *store.Store, ticketID int64, sha string
 // pull request with CI green and no threads at all is marked ready, and
 // the informational "pr ready <sha>" marker names the head.
 func TestReadyWhenGreenAndNoThreads(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow end-to-end flow; runs in the full suite")
+	}
 	t.Parallel()
 	s, ticket, gh, tr := shipPublished(t)
 	local := shipHeadSHA(t, s, ticket)
@@ -3756,6 +3936,9 @@ func TestReadyWhenGreenAndNoThreads(t *testing.T) {
 // threads" guard: an actionable thread takes row 5 instead (starting a
 // respond batch), and the ready flip never fires.
 func TestNoReadyWithUnresolvedThread(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow end-to-end flow; runs in the full suite")
+	}
 	t.Parallel()
 	when := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
 	s, ticket, gh, tr := shipPublished(t)
@@ -3837,6 +4020,9 @@ func TestNoReadyWithUnclassifiedThread(t *testing.T) {
 // marker, so this fires exactly the same way whether Zing's own row 8
 // marked it ready earlier or the owner did it by hand on GitHub.
 func TestDraftWhenLoopReopens(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow end-to-end flow; runs in the full suite")
+	}
 	t.Parallel()
 	s, ticket, gh, tr := shipPublished(t)
 	local := shipHeadSHA(t, s, ticket)
@@ -3929,11 +4115,17 @@ func testReadyPRFlipsBackOnUnclassified(t *testing.T, thread orchestrator.Thread
 }
 
 func TestReadyPRFlipsBackOnZeroCommentThread(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow end-to-end flow; runs in the full suite")
+	}
 	t.Parallel()
 	testReadyPRFlipsBackOnUnclassified(t, orchestrator.Thread{ID: "RT_flipback_zero_comments"})
 }
 
 func TestReadyPRFlipsBackOnUnclassifiedThread(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow end-to-end flow; runs in the full suite")
+	}
 	t.Parallel()
 	testReadyPRFlipsBackOnUnclassified(t, orchestrator.Thread{ID: "", Comments: []orchestrator.ThreadComment{shipHumanComment("c1", "reviewer1", "???", time.Now())}})
 }
@@ -3945,6 +4137,9 @@ func TestReadyPRFlipsBackOnUnclassifiedThread(t *testing.T) {
 // already ready and calls MarkReady no further times -- and a later red
 // CI still flips it to draft.
 func TestReadyCrashConverges(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow end-to-end flow; runs in the full suite")
+	}
 	t.Parallel()
 	s, ticket, gh, tr := shipPublished(t)
 	local := shipHeadSHA(t, s, ticket)
@@ -4015,6 +4210,9 @@ func TestReadyCrashConverges(t *testing.T) {
 // 9.5): a thread whose last comment is Zing's own disclosed reply resolves
 // every poll, with no marker of its own.
 func TestLeftoverResolvedEachPoll(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow end-to-end flow; runs in the full suite")
+	}
 	t.Parallel()
 	when := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
 	s, ticket, gh, tr := shipPublished(t)
@@ -4049,6 +4247,9 @@ func TestLeftoverResolvedEachPoll(t *testing.T) {
 // resolves it again, exactly 9.5's own "sees it resolved again"
 // convergence.
 func TestLeftoverCrashConverges(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow end-to-end flow; runs in the full suite")
+	}
 	t.Parallel()
 	when := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
 	s, ticket, gh, tr := shipPublished(t)
@@ -4089,6 +4290,9 @@ func TestLeftoverCrashConverges(t *testing.T) {
 // marker, the same shape ciWaitingPrefix already gives row 7 (
 // TestPollCIWaitingMarkerOnChange, above).
 func TestThreadsBlockingMarkerOnChange(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow end-to-end flow; runs in the full suite")
+	}
 	t.Parallel()
 	s, ticket, gh, tr := shipPublished(t)
 	local := shipHeadSHA(t, s, ticket)
@@ -4169,6 +4373,9 @@ func shipQuestionMessage(t *testing.T, commit store.HandlerCommit) store.Message
 // options and recommendation, Waiting "merge", the 30s backoff Poll
 // commit, and the "merge asked <sha>" marker.
 func TestMergeQuestionPosted(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow end-to-end flow; runs in the full suite")
+	}
 	t.Parallel()
 	s, ticket, gh, tr := shipPublished(t)
 	local := shipHeadSHA(t, s, ticket)
@@ -4216,6 +4423,9 @@ func TestMergeQuestionPosted(t *testing.T) {
 // that sha -- "pr merged <sha>", ClearPoll, and the round resolved through
 // WithdrawQuestions.
 func TestMergeNowMerges(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow end-to-end flow; runs in the full suite")
+	}
 	t.Parallel()
 	s, ticket, gh, tr := shipPublished(t)
 	local := shipHeadSHA(t, s, ticket)
@@ -4263,6 +4473,9 @@ func TestMergeNowMerges(t *testing.T) {
 // the sha the question was actually asked about, not the new head; "merge
 // withdrawn <sha>" lands in the same commit, and the round still resolves.
 func TestMergeNowRefusedWhenHeadMoved(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow end-to-end flow; runs in the full suite")
+	}
 	t.Parallel()
 	s, ticket, gh, tr := shipPublished(t)
 	local := shipHeadSHA(t, s, ticket)
@@ -4303,6 +4516,9 @@ func TestMergeNowRefusedWhenHeadMoved(t *testing.T) {
 // an actionable thread reappeared between the ask and the answer, so MERGE
 // refuses with "a review thread is open".
 func TestMergeNowRefusedWhenThreadOpen(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow end-to-end flow; runs in the full suite")
+	}
 	t.Parallel()
 	s, ticket, gh, tr := shipPublished(t)
 	local := shipHeadSHA(t, s, ticket)
@@ -4366,11 +4582,17 @@ func testMergeGateBlockedByUnclassified(t *testing.T, thread orchestrator.Thread
 }
 
 func TestMergeGateBlockedByZeroCommentThread(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow end-to-end flow; runs in the full suite")
+	}
 	t.Parallel()
 	testMergeGateBlockedByUnclassified(t, orchestrator.Thread{ID: "RT_gate_zero_comments"})
 }
 
 func TestMergeGateBlockedByOddThreadID(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow end-to-end flow; runs in the full suite")
+	}
 	t.Parallel()
 	testMergeGateBlockedByUnclassified(t, orchestrator.Thread{ID: "", Comments: []orchestrator.ThreadComment{shipHumanComment("c1", "reviewer1", "???", time.Now())}})
 }
@@ -4381,6 +4603,9 @@ func TestMergeGateBlockedByOddThreadID(t *testing.T) {
 // reappears between the ask and the answer (a spoof), so the required
 // check reads as missing and MERGE refuses with "CI is not green".
 func TestMergeGateBlockedBySpoofedCheck(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow end-to-end flow; runs in the full suite")
+	}
 	t.Parallel()
 	s, ticket, gh, tr := shipPublished(t)
 	local := shipHeadSHA(t, s, ticket)
@@ -4415,6 +4640,9 @@ func TestMergeGateBlockedBySpoofedCheck(t *testing.T) {
 // GetPR already reports the pull request merged, so it runs DONE -- Merge
 // is not called a second time.
 func TestMergeCrashConverges(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow end-to-end flow; runs in the full suite")
+	}
 	t.Parallel()
 	s, ticket, gh, tr := shipPublished(t)
 	local := shipHeadSHA(t, s, ticket)
@@ -4455,6 +4683,9 @@ func TestMergeCrashConverges(t *testing.T) {
 // no GitHub call, the informational "merge held <sha>" marker, the round
 // resolved, ClearPoll.
 func TestMergeHold(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow end-to-end flow; runs in the full suite")
+	}
 	t.Parallel()
 	s, ticket, gh, tr := shipPublished(t)
 	local := shipHeadSHA(t, s, ticket)
@@ -4491,6 +4722,9 @@ func TestMergeHold(t *testing.T) {
 // not asked about again": after Hold, a clean poll on the same head is
 // row 10's own idle wait, not a fresh ask.
 func TestHeldShaNotAskedAgain(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow end-to-end flow; runs in the full suite")
+	}
 	t.Parallel()
 	s, ticket, gh, tr := shipPublished(t)
 	local := shipHeadSHA(t, s, ticket)
@@ -4532,6 +4766,9 @@ func TestHeldShaNotAskedAgain(t *testing.T) {
 // design section 8.5 row 3), then a clean poll re-marks it ready (row 8)
 // and asks again (row 9) once the head is askable again.
 func TestMergeAskedAgainAfterReopenSameHead(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow end-to-end flow; runs in the full suite")
+	}
 	t.Parallel()
 	s, ticket, gh, tr := shipPublished(t)
 	local := shipHeadSHA(t, s, ticket)
@@ -4588,6 +4825,9 @@ func TestMergeAskedAgainAfterReopenSameHead(t *testing.T) {
 // applied, the open merge question itself ends "resolved", not left
 // dangling.
 func TestLoopReopenWithdrawsMergeQuestion(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow end-to-end flow; runs in the full suite")
+	}
 	t.Parallel()
 	s, ticket, gh, tr := shipPublished(t)
 	local := shipHeadSHA(t, s, ticket)
@@ -4632,6 +4872,9 @@ func TestLoopReopenWithdrawsMergeQuestion(t *testing.T) {
 // own message>", waiting "merge"; polling continues, and the next tick
 // does not call Merge again (the head is not askable until answered).
 func TestRefusedAutoMergeAsks(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow end-to-end flow; runs in the full suite")
+	}
 	t.Parallel()
 	s, ticket, gh, tr := shipPublished(t)
 	local := shipHeadSHA(t, s, ticket)
@@ -4680,6 +4923,9 @@ func TestRefusedAutoMergeAsks(t *testing.T) {
 // same way, and the next unanswered poll does not call Merge a second
 // time.
 func TestRefusedMergeNowAsksAgain(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow end-to-end flow; runs in the full suite")
+	}
 	t.Parallel()
 	s, ticket, gh, tr := shipPublished(t)
 	local := shipHeadSHA(t, s, ticket)
@@ -4776,6 +5022,9 @@ func testMergeNowWithdraws(t *testing.T, reason string, arrange, undo func(gh *s
 }
 
 func TestMergeNowCIPendingWithdraws(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow end-to-end flow; runs in the full suite")
+	}
 	t.Parallel()
 	pendingRuns := []orchestrator.CheckRun{{ID: 1, Name: "ci", Status: "in_progress", AppSlug: ghGitHubActions}}
 	var greenRuns []orchestrator.CheckRun
@@ -4785,6 +5034,9 @@ func TestMergeNowCIPendingWithdraws(t *testing.T) {
 }
 
 func TestMergeNowDraftWithdraws(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow end-to-end flow; runs in the full suite")
+	}
 	t.Parallel()
 	testMergeNowWithdraws(t, mergeReasonDraft,
 		func(gh *shipGitHub) { gh.prState.Draft = true },
@@ -4796,6 +5048,9 @@ func TestMergeNowDraftWithdraws(t *testing.T) {
 // (withdrawMergeQuestionIfAsked's own "asked" or "held" switch) once the
 // loop reopens, and asked again once it closes clean.
 func TestHeldAskedAgainAfterReopen(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow end-to-end flow; runs in the full suite")
+	}
 	t.Parallel()
 	s, ticket, gh, tr := shipPublished(t)
 	local := shipHeadSHA(t, s, ticket)
@@ -4856,6 +5111,9 @@ func TestHeldAskedAgainAfterReopen(t *testing.T) {
 // merge.auto on, no manual-deploy or dependency path in the diff, so row 9
 // merges directly with no question asked at all.
 func TestAutoMergeWhenAllowed(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow end-to-end flow; runs in the full suite")
+	}
 	t.Parallel()
 	s, ticket, gh, tr := shipPublished(t)
 	local := shipHeadSHA(t, s, ticket)
@@ -4884,6 +5142,9 @@ func TestAutoMergeWhenAllowed(t *testing.T) {
 // as a dependency file, so row 9 asks instead of merging, naming the path
 // in its own reason.
 func TestAutoMergeBlockedByDependencyFile(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow end-to-end flow; runs in the full suite")
+	}
 	t.Parallel()
 	s, ticket, gh, tr := shipPublished(t)
 	local := shipHeadSHA(t, s, ticket)
@@ -4910,6 +5171,9 @@ func TestAutoMergeBlockedByDependencyFile(t *testing.T) {
 // owner merged it there directly, with the question still open and
 // unanswered -- is seen on the next poll and moves the ticket to done.
 func TestMergeWaitPollsAndSeesMerge(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow end-to-end flow; runs in the full suite")
+	}
 	t.Parallel()
 	s, ticket, gh, tr := shipPublished(t)
 	local := shipHeadSHA(t, s, ticket)

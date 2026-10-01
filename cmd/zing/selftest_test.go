@@ -17,6 +17,9 @@ import (
 // 11 dispatcher-to-done e2e suite (selftestE2E) included: runSelftest
 // prints "selftest: OK" and exits 0.
 func TestRunSelftest_ReturnsZeroOnEmptyMachine(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow end-to-end flow; runs in the full suite")
+	}
 	t.Parallel()
 	if got := runSelftest(); got != 0 {
 		t.Errorf("runSelftest() = %d, want 0", got)

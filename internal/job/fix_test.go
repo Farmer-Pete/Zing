@@ -155,6 +155,9 @@ func TestFixKindThreadsSubject(t *testing.T) {
 // carries a nil task_n (design section 8's own storage rule, never 0, even
 // though its build_report's own TaskN field is 0).
 func TestDriveFixRunsFirstTurn(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow end-to-end flow; runs in the full suite")
+	}
 	t.Parallel()
 	s, _, ticketID := buildTicketInBuilding(t)
 	mid := writeFixRequestMarker(t, s, ticketID, job.FixKindCILog, testFixCILogText, 0)
@@ -203,6 +206,9 @@ func TestDriveFixRunsFirstTurn(t *testing.T) {
 // owner's answer text in the prompt -- unlike the old AdvanceFix, which
 // left this resume path out of its own scope entirely.
 func TestDriveFixResumesAfterAnswer(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow end-to-end flow; runs in the full suite")
+	}
 	t.Parallel()
 	s, _, ticketID := buildTicketInBuilding(t)
 	mid := writeFixRequestMarker(t, s, ticketID, job.FixKindCILog, testFixCILogText, 0)
@@ -249,6 +255,9 @@ func TestDriveFixResumesAfterAnswer(t *testing.T) {
 // pending marker and the next DriveFix tick resumes it, still labeled
 // "fix" and still carrying a nil task_n.
 func TestDriveFixResumesClaimErrors(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow end-to-end flow; runs in the full suite")
+	}
 	t.Parallel()
 	s, _, ticketID := buildTicketInBuilding(t)
 	mid := writeFixRequestMarker(t, s, ticketID, job.FixKindCILog, testFixCILogText, 0)
@@ -316,6 +325,9 @@ func TestDriveFixResumesClaimErrors(t *testing.T) {
 // the next DriveFix tick resumes the same session with the invalid reason
 // in the prompt.
 func TestDriveFixResumesInvalidOutput(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow end-to-end flow; runs in the full suite")
+	}
 	t.Parallel()
 	s, _, ticketID := buildTicketInBuilding(t)
 	mid := writeFixRequestMarker(t, s, ticketID, job.FixKindCILog, testFixCILogText, 0)
@@ -359,6 +371,9 @@ func TestDriveFixResumesInvalidOutput(t *testing.T) {
 // stays open, ready for the next DriveFix tick to resume with the raw
 // "interrupted" input.
 func TestDriveFixResumesInterrupted(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow end-to-end flow; runs in the full suite")
+	}
 	t.Parallel()
 	s, _, ticketID := buildTicketInBuilding(t)
 	mid := writeFixRequestMarker(t, s, ticketID, job.FixKindCILog, testFixCILogText, 0)
@@ -430,6 +445,9 @@ func TestDriveFixResumesInterrupted(t *testing.T) {
 // "fix landed <req.MessageID> sha <sha>" -- the marker openFixRequest
 // reads to know this request's own unit has landed.
 func TestDriveFixLandWritesLandedMarker(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow end-to-end flow; runs in the full suite")
+	}
 	t.Parallel()
 	s, _, ticketID := buildTicketInBuilding(t)
 	mid := writeFixRequestMarker(t, s, ticketID, job.FixKindFailure, "scenario 2 failed: timeout", 0)
@@ -489,6 +507,9 @@ func TestDriveFixLandWritesLandedMarker(t *testing.T) {
 // first turn and lands under its own message id, proving the two units
 // are never confused.
 func TestSecondFixAdvancesAfterFirstLanded(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow end-to-end flow; runs in the full suite")
+	}
 	t.Parallel()
 	s, _, ticketID := buildTicketInBuilding(t)
 	mid1 := writeFixRequestMarker(t, s, ticketID, job.FixKindCILog, testFixCILogText, 0)
@@ -944,6 +965,9 @@ func assertFixAdoptionFails(t *testing.T, s *store.Store, ticketID int64, deps j
 // commit's own sha, writing "fix landed <id> sha <sha>", and never calling
 // CommitTask again.
 func TestDriveFixAdoptsVerifiedCommit(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow end-to-end flow; runs in the full suite")
+	}
 	t.Parallel()
 	s, ticketID, _, wt, req := prepareUnrecordedFixCommit(t, []string{helloTxt}, 0, nil, "", map[string]string{helloTxt: helloWorldContent}, true)
 
@@ -1048,6 +1072,9 @@ func TestDriveFixAdoptionChecks(t *testing.T) {
 // environment/"the ticket branch holds commits Zing did not record",
 // origin fix.
 func TestDriveFixEscalatesForeignCommits(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow end-to-end flow; runs in the full suite")
+	}
 	t.Parallel()
 	s, _, ticketID := buildTicketInBuilding(t)
 	mid := writeFixRequestMarker(t, s, ticketID, job.FixKindCILog, testFixCILogText, 0)
@@ -1088,6 +1115,9 @@ func TestDriveFixEscalatesForeignCommits(t *testing.T) {
 // recorded", origin fix, instead of running CHECK or LAND against a branch
 // it can no longer trust.
 func TestDriveFixEscalatesMissingRecorded(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow end-to-end flow; runs in the full suite")
+	}
 	t.Parallel()
 	s, _, ticketID := buildTicketInBuilding(t)
 	mid := writeFixRequestMarker(t, s, ticketID, job.FixKindCILog, testFixCILogText, 0)

@@ -1,6 +1,6 @@
 # Single source of truth for checks. The git hooks (lefthook.yml) and CI
 # (.github/workflows/ci.yml) both call these targets, so they cannot drift.
-.PHONY: fmt fmt-staged fmt-check lint build vet test test-race tidy-check vuln secrets-staged \
+.PHONY: fmt fmt-staged fmt-check lint build vet test test-short test-race tidy-check vuln secrets-staged \
 	hooks-install pre-commit pre-push ci templ-generate templ-check test-js
 
 # Regenerates every *_templ.go from its .templ source, mutating files in
@@ -36,6 +36,11 @@ vet:
 
 test:
 	go test ./...
+
+# Skips the slow end-to-end flows (testing.Short()-gated) for fast local
+# iteration; every other target above still runs the full suite.
+test-short:
+	go test -short ./...
 
 # The race detector is the only guard for data races; static linting cannot see them.
 # internal/job runs as RACE_SHARDS concurrent processes, because one process is

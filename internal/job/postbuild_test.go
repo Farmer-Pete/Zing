@@ -708,6 +708,9 @@ func TestUnitInFlightByState(t *testing.T) {
 // rounds and an open fix request, postBuildPrelude runs the fix driver's own
 // first turn.
 func TestPreludeRunsFixDriver(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow end-to-end flow; runs in the full suite")
+	}
 	t.Parallel()
 	s, ticketID := pbTicketInReviewing(t)
 	pbOpenFixRequest(t, s, ticketID)
@@ -737,6 +740,9 @@ func TestPreludeRunsFixDriver(t *testing.T) {
 // (postBuildRoundOwnedByOpenFix) confirming the round belongs to the
 // currently open fix request.
 func TestPreludeRoutesFixAnswerRound(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow end-to-end flow; runs in the full suite")
+	}
 	t.Parallel()
 	s, ticketID := pbTicketInReviewing(t)
 	pbOpenFixRequest(t, s, ticketID)
@@ -779,6 +785,9 @@ func TestPreludeRoutesFixAnswerRound(t *testing.T) {
 // against the fix's own build run -- belongs to the currently open fix
 // request (SessionAfter(req.AfterRunID)).
 func TestPreludeRoutesPerimeterRound(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow end-to-end flow; runs in the full suite")
+	}
 	t.Parallel()
 	s, ticketID := pbTicketInReviewing(t)
 	pbOpenFixRequest(t, s, ticketID)
@@ -901,6 +910,9 @@ func pbAnswerEscalation(t *testing.T, s *store.Store, ticketID, questionID int64
 // escalates origin fix with a run; the owner's retry restarts the fix with a
 // fresh session (runFixFirst), notes and error fenced, the round resolved.
 func TestPreludeFixRetryRestartsFix(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow end-to-end flow; runs in the full suite")
+	}
 	t.Parallel()
 	s, ticketID := pbTicketInReviewing(t)
 	pbOpenFixRequest(t, s, ticketID)
@@ -980,6 +992,9 @@ func assertFencedPB(t *testing.T, prompt, label, text string) {
 // failure) retries by writing the "retry requested" marker, no run
 // attempted, the round resolved.
 func TestPreludeFixRetryWithoutRunWritesMarker(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow end-to-end flow; runs in the full suite")
+	}
 	t.Parallel()
 	s, ticketID := pbTicketInReviewing(t)
 	pbOpenFixRequest(t, s, ticketID)
@@ -1009,6 +1024,9 @@ func TestPreludeFixRetryWithoutRunWritesMarker(t *testing.T) {
 // with the fix unit -- a fresh fix session, notes and the preserved round's
 // own answers.
 func TestPreludeCapResumesRetryFix(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow end-to-end flow; runs in the full suite")
+	}
 	t.Parallel()
 	s, ticketID := pbTicketInReviewing(t)
 	pbOpenFixRequest(t, s, ticketID)

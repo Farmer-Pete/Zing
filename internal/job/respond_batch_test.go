@@ -67,6 +67,9 @@ func seedRespondSkippedBatches(t *testing.T, s *store.Store, ticketID int64, n i
 // it stores -- that call succeeding against a real batch number of 101 is
 // what "validates" means here, not a separate check.
 func TestRespondBatch101(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow end-to-end flow; runs in the full suite")
+	}
 	t.Parallel()
 	when := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
 	s, ticket, gh, tr := shipPublished(t)
@@ -143,6 +146,9 @@ func shipManyThreads(n int, at time.Time) []orchestrator.Thread {
 // several smaller batches, and RESPOND's own ok outcome, once every tid has
 // an action, stores exactly one artifact carrying all 101.
 func TestRespondBatchOf101Threads(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow end-to-end flow; runs in the full suite")
+	}
 	t.Parallel()
 	when := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
 	s, ticket, gh, tr := shipPublished(t)
