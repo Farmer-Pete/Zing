@@ -1718,3 +1718,43 @@ func TestIsSupersededGate(t *testing.T) {
 		})
 	}
 }
+
+// TestGateVerdict proves the bug fix for ticket 1's question 44 (gate,
+// resolved, answer row 45 picking option "b"): a gate that closed neither
+// withdrawn nor superseded used to fall through to questionStateLabel's
+// plain "resolved" pill, which does not say which way it went. It now
+// reads "approved" or "rejected" off the owner's chosen option, matched by
+// the payload's own option text (job's own gateOptionApprove/
+// gateOptionReject key letters, internal/job/planning.go, are unexported,
+// so this reads "Approve"/"Reject" instead of hard-coding "a"/"b").
+func TestGateVerdict(t *testing.T) {
+	t.Parallel()
+	resolved, open := msgStateResolved, msgStateOpen
+	options := []response.Option{{Key: "a", Text: "Approve"}, {Key: "b", Text: "Reject"}}
+	approve, reject := "a", "b"
+	tests := []struct {
+		name     string
+		kind     response.QuestionKind
+		state    *string
+		answered bool
+		ap       response.AnswerPayload
+		options  []response.Option
+		want     string
+		wantOK   bool
+	}{
+		{"resolved gate approved", response.QuestionKindGate, &resolved, true, response.AnswerPayload{Option: &approve}, options, "approved", true},
+		{"resolved gate rejected", response.QuestionKindGate, &resolved, true, response.AnswerPayload{Option: &reject}, options, "rejected", true},
+		{"resolved gate with no sent answer", response.QuestionKindGate, &resolved, false, response.AnswerPayload{}, options, "", false},
+		{"open gate is not a verdict yet", response.QuestionKindGate, &open, true, response.AnswerPayload{Option: &approve}, options, "", false},
+		{"resolved question is not a gate", response.QuestionKindQuestion, &resolved, true, response.AnswerPayload{Option: &approve}, options, "", false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got, ok := gateVerdict(tc.kind, tc.state, tc.answered, tc.ap, tc.options)
+			if got != tc.want || ok != tc.wantOK {
+				t.Errorf("gateVerdict = (%q, %v), want (%q, %v)", got, ok, tc.want, tc.wantOK)
+			}
+		})
+	}
+}

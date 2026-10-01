@@ -724,6 +724,40 @@ func isSupersededGate(kind response.QuestionKind, state *string, children []stor
 	return false
 }
 
+// gateVerdict reports the pill text for a gate that is resolved, answered,
+// and neither withdrawn (isWithdrawnGate) nor superseded (isSupersededGate,
+// D32): "approved" when the owner's sent answer picked the gate's "Approve"
+// option -- job's own gateApprove then ran the seal pre-check (design
+// section 6.6) -- "rejected" when it picked "Reject" -- job's own reject
+// path resumes or restarts planning. It is bug fix: ticket 1's question 44,
+// answer row 45 with payload option "b", used to fall through
+// questionStateLabel's plain "resolved" pill, which does not say which way
+// the gate went. The match is read off payload's own option text, not a
+// hard-coded "a"/"b": job's own gateOptionApprove/gateOptionReject key
+// letters (internal/job/planning.go) are unexported, so console cannot
+// import them, and a hard-coded letter would silently stop matching if the
+// gate's own option order or keys ever changed. ok is false for anything
+// this doesn't cover (not a gate, not resolved, not answered, or an option
+// whose text names neither), which leaves the caller's existing
+// questionStateLabel result in place rather than guessing.
+func gateVerdict(kind response.QuestionKind, state *string, answered bool, ap response.AnswerPayload, options []response.Option) (string, bool) {
+	if kind != response.QuestionKindGate || state == nil || *state != msgStateResolved || !answered || ap.Option == nil {
+		return "", false
+	}
+	for _, o := range options {
+		if o.Key != *ap.Option {
+			continue
+		}
+		switch o.Text {
+		case "Approve":
+			return "approved", true
+		case "Reject":
+			return "rejected", true
+		}
+	}
+	return "", false
+}
+
 // msgStateResolved mirrors store's own unexported questionStateResolved
 // (internal/store/commit.go), the same package-local-copy pattern
 // msgStateOpen and msgStateAnswered (seed.go) already use: console cannot
@@ -1478,12 +1512,16 @@ func buildThreadQuestion(ticket *store.Ticket, m *store.MessageRow, messageCount
 		interactive = (m.State != nil && *m.State == msgStateOpen) || revisable
 		stateLabel = questionStateLabel(m.State, revisable)
 	}
-	_, answered := sentAnswers[m.ID]
+	gateAnswer, answered := sentAnswers[m.ID]
 	switch {
 	case isSupersededGate(payload.Kind, m.State, children):
 		stateLabel = "superseded"
 	case isWithdrawnGate(payload.Kind, m.State, answered):
 		stateLabel = "withdrawn"
+	default:
+		if verdict, ok := gateVerdict(payload.Kind, m.State, answered, gateAnswer, payload.Options); ok {
+			stateLabel = verdict
+		}
 	}
 
 	q := &templates.ThreadQuestion{
