@@ -432,6 +432,40 @@ const (
 	updateMarkerReviewNotePrefix               = "review note "
 )
 
+// updateMarker* mirror the literal prefixes design section 5.1's table
+// names for judging.go, shipping.go, and respond.go (sections 7, 8, 9):
+// judging.go already writes the four "judge round <n> ..." shapes
+// (judgeRoundStartedLine, judgeRoundRetryLine, judgeRoundFailedLine,
+// judgeRoundVerdictsLine, and the EVALUATE "passed" shape), "judge coverage
+// failed/delivered run <rid>" (judgeCoverageFailedFmt,
+// judgeCoverageDeliveredFmt), and "judge check <n> <id> exit <code>"
+// (judgeCheckLine). shipping.go and respond.go do not write their marker
+// shapes yet (M4 tasks 4-8), so this copy and those originals must change
+// together once they do, the same constraint the block above already
+// states for planning.go, building.go, and reviewing.go.
+const (
+	updateMarkerJudgeRoundPrefix               = "judge round "
+	updateMarkerJudgeCoverageFailedPrefix      = "judge coverage failed run "
+	updateMarkerJudgeCoverageDeliveredPrefix   = "judge coverage delivered run "
+	updateMarkerJudgeCheckPrefix               = "judge check "
+	updateMarkerPrOpenedPrefix                 = "pr opened "
+	updateMarkerCIWaitingPrefix                = "ci waiting "
+	updateMarkerReviewersReRequestedPrefix     = "reviewers re-requested "
+	updateMarkerPrReadyPrefix                  = "pr ready "
+	updateMarkerPrDraftPrefix                  = "pr draft "
+	updateMarkerThreadsBlockingPrefix          = "threads blocking "
+	updateMarkerMergeAskedPrefix               = "merge asked "
+	updateMarkerMergeHeldPrefix                = "merge held "
+	updateMarkerMergeWithdrawnPrefix           = "merge withdrawn "
+	updateMarkerMergeRefusedPrefix             = "merge refused "
+	updateMarkerPrMergedPrefix                 = "pr merged "
+	updateMarkerRespondBatchPrefix             = "respond batch "
+	updateMarkerRespondCoverageFailedPrefix    = "respond coverage failed run "
+	updateMarkerRespondCoverageDeliveredPrefix = "respond coverage delivered run "
+	updateMarkerRespondAppliedPrefix           = "respond applied "
+	updateMarkerFixRepliesPostedPrefix         = "fix replies posted "
+)
+
 // draftMessageState mirrors store's own unexported draft-state literal
 // (store.DraftInput's SaveDraft writes state="draft", console_writes.go);
 // this package needs its own copy of that one literal to recognize an
@@ -652,6 +686,21 @@ func updateLine(m *store.MessageRow) string {
 			return line
 		}
 		return body
+	case isJudgeMarker(body):
+		if line, ok := judgeUpdateLine(body); ok {
+			return line
+		}
+		return body
+	case isShippingMarker(body):
+		if line, ok := shippingUpdateLine(body); ok {
+			return line
+		}
+		return body
+	case isRespondMarker(body):
+		if line, ok := respondUpdateLine(body); ok {
+			return line
+		}
+		return body
 	default:
 		return body
 	}
@@ -723,6 +772,282 @@ func reviewRoundLine(first, rest string, hasRest bool) (string, bool) {
 	default:
 		return "", false
 	}
+}
+
+// sha7 returns the first seven characters of a 40-character lowercase hex
+// sha, the short form design section 5.1's console sentences show (for
+// example "Judge round <n> started on <sha7>."). A shorter input is
+// returned unchanged rather than panicking on a slice out of range; only a
+// malformed marker or a test fixture would be shorter than seven
+// characters, since every real sha this view reads is 40 hex characters
+// (section 5.1).
+func sha7(sha string) string {
+	if len(sha) < 7 {
+		return sha
+	}
+	return sha[:7]
+}
+
+// isJudgeMarker reports whether body carries one of judging.go's own
+// "judge round ", "judge coverage failed/delivered run ", or "judge check "
+// prefixes (design section 5.1, 7.1, 7.2, 7.5-7.7): judgeUpdateLine's own
+// exact-shape parse runs behind, the same two-step prefix-then-parse
+// pattern isReviewMarker and reviewUpdateLine already use.
+func isJudgeMarker(body string) bool {
+	return strings.HasPrefix(body, updateMarkerJudgeRoundPrefix) ||
+		strings.HasPrefix(body, updateMarkerJudgeCoverageFailedPrefix) ||
+		strings.HasPrefix(body, updateMarkerJudgeCoverageDeliveredPrefix) ||
+		strings.HasPrefix(body, updateMarkerJudgeCheckPrefix)
+}
+
+// judgeUpdateLine renders one of judging.go's own marker shapes (design
+// section 5.1) as an owner-facing sentence: the five "judge round <n> ..."
+// shapes (started, verdicts, passed, failed, retry; judgeRoundLine),
+// "judge coverage failed/delivered run <rid>" (7.2 step 5), and "judge
+// check <n> <scenario_id> exit <code>" (7.5 step 4; judgeCheckLine). ok is
+// false when body's prefix matched but the rest of its shape did not, the
+// same defensive fallback reviewUpdateLine's own default case uses.
+func judgeUpdateLine(body string) (string, bool) {
+	first, rest, hasRest := strings.Cut(body, "\n")
+	switch {
+	case strings.HasPrefix(first, updateMarkerJudgeCoverageFailedPrefix):
+		rid := strings.TrimPrefix(first, updateMarkerJudgeCoverageFailedPrefix)
+		header := "Judge verdicts incomplete for run " + rid + ":"
+		if hasRest {
+			return header + "\n" + rest, true
+		}
+		return header, true
+	case strings.HasPrefix(first, updateMarkerJudgeCoverageDeliveredPrefix):
+		rid := strings.TrimPrefix(first, updateMarkerJudgeCoverageDeliveredPrefix)
+		return "Coverage errors sent back to run " + rid + ".", true
+	case strings.HasPrefix(first, updateMarkerJudgeCheckPrefix):
+		return judgeCheckLine(first)
+	case strings.HasPrefix(first, updateMarkerJudgeRoundPrefix):
+		return judgeRoundLine(first, rest, hasRest)
+	default:
+		return "", false
+	}
+}
+
+// judgeCheckLine renders "judge check <n> <scenario_id> exit <code>" (7.5
+// step 4) as its own sentence: the round number n plays no part in it, the
+// same elision judgeRoundLine's "verdicts" case uses for the run id.
+func judgeCheckLine(first string) (string, bool) {
+	fields := strings.Fields(strings.TrimPrefix(first, updateMarkerJudgeCheckPrefix))
+	if len(fields) != 4 || fields[2] != "exit" {
+		return "", false
+	}
+	scenarioID, code := fields[1], fields[3]
+	return "Check for " + scenarioID + " exited " + code + ".", true
+}
+
+// judgeRoundLine renders one "judge round <n> started/verdicts/passed/
+// failed/retry" marker's first line (design section 5.1, 7.2, 7.6): n is
+// read generically, rather than hardcoded, the same reviewRoundLine
+// pattern.
+func judgeRoundLine(first, rest string, hasRest bool) (string, bool) {
+	tail := strings.TrimPrefix(first, updateMarkerJudgeRoundPrefix)
+	n, after, ok := strings.Cut(tail, " ")
+	if !ok {
+		return "", false
+	}
+	switch {
+	case strings.HasPrefix(after, "started sha "):
+		sha, _, _ := strings.Cut(strings.TrimPrefix(after, "started sha "), " ")
+		return "Judge round " + n + " started on " + sha7(sha) + ".", true
+	case strings.HasPrefix(after, "verdicts run "):
+		return "Judge round " + n + " returned its verdicts.", true
+	case after == "passed":
+		return "Judge round " + n + " passed.", true
+	case after == "failed":
+		header := "Judge round " + n + " failed:"
+		if hasRest {
+			return header + " " + rest + ".", true
+		}
+		return header + ".", true
+	case strings.HasPrefix(after, "retry after run "):
+		return "Judge round " + n + " restarted.", true
+	default:
+		return "", false
+	}
+}
+
+// isShippingMarker reports whether body carries one of shipping.go's own
+// "pr opened/ready/draft/merged ", "ci waiting ", "reviewers re-requested
+// ", "threads blocking ", or "merge asked/held/withdrawn/refused " prefixes
+// (design section 5.1, 8.2-8.9): shippingUpdateLine's own exact-shape parse
+// runs behind, the same two-step pattern isReviewMarker uses.
+func isShippingMarker(body string) bool {
+	return strings.HasPrefix(body, updateMarkerPrOpenedPrefix) ||
+		strings.HasPrefix(body, updateMarkerCIWaitingPrefix) ||
+		strings.HasPrefix(body, updateMarkerReviewersReRequestedPrefix) ||
+		strings.HasPrefix(body, updateMarkerPrReadyPrefix) ||
+		strings.HasPrefix(body, updateMarkerPrDraftPrefix) ||
+		strings.HasPrefix(body, updateMarkerThreadsBlockingPrefix) ||
+		strings.HasPrefix(body, updateMarkerMergeAskedPrefix) ||
+		strings.HasPrefix(body, updateMarkerMergeHeldPrefix) ||
+		strings.HasPrefix(body, updateMarkerMergeWithdrawnPrefix) ||
+		strings.HasPrefix(body, updateMarkerMergeRefusedPrefix) ||
+		strings.HasPrefix(body, updateMarkerPrMergedPrefix)
+}
+
+// shippingUpdateLine renders one of shipping.go's own marker shapes (design
+// section 5.1) as an owner-facing sentence: "pr opened <number>" (8.2 step
+// 6), "ci waiting <names>" (8.4), "reviewers re-requested <sha>" with its
+// own logins line (9.4), "pr ready/draft <sha>" (8.5 rows 3 and 8, 8.9),
+// "threads blocking <tids>" (8.5 row 6a), "merge asked/held/withdrawn
+// <sha>" and "merge refused <sha>" with its own reason line (8.8), and "pr
+// merged <sha>" (8.8). ok is false when body's prefix matched but the rest
+// of its shape did not, the same defensive fallback reviewUpdateLine's own
+// default case uses.
+func shippingUpdateLine(body string) (string, bool) {
+	first, rest, hasRest := strings.Cut(body, "\n")
+	switch {
+	case strings.HasPrefix(first, updateMarkerPrOpenedPrefix):
+		number := strings.TrimPrefix(first, updateMarkerPrOpenedPrefix)
+		return "Draft pull request #" + number + " opened.", true
+	case strings.HasPrefix(first, updateMarkerCIWaitingPrefix):
+		names := strings.TrimPrefix(first, updateMarkerCIWaitingPrefix)
+		return "CI is waiting for " + names + ".", true
+	case strings.HasPrefix(first, updateMarkerReviewersReRequestedPrefix):
+		logins := ""
+		if hasRest {
+			logins = rest
+		}
+		return "Review re-requested from " + logins + ".", true
+	case strings.HasPrefix(first, updateMarkerPrReadyPrefix):
+		sha := strings.TrimPrefix(first, updateMarkerPrReadyPrefix)
+		return "Pull request marked ready at " + sha7(sha) + ".", true
+	case strings.HasPrefix(first, updateMarkerPrDraftPrefix):
+		sha := strings.TrimPrefix(first, updateMarkerPrDraftPrefix)
+		return "Pull request moved back to draft at " + sha7(sha) + ".", true
+	case strings.HasPrefix(first, updateMarkerThreadsBlockingPrefix):
+		tids := strings.TrimPrefix(first, updateMarkerThreadsBlockingPrefix)
+		return "Review threads Zing cannot read are blocking the merge: " + tids + ".", true
+	case strings.HasPrefix(first, updateMarkerMergeAskedPrefix):
+		sha := strings.TrimPrefix(first, updateMarkerMergeAskedPrefix)
+		return "Asked whether to merge " + sha7(sha) + ".", true
+	case strings.HasPrefix(first, updateMarkerMergeHeldPrefix):
+		sha := strings.TrimPrefix(first, updateMarkerMergeHeldPrefix)
+		return "Merge held at " + sha7(sha) + ".", true
+	case strings.HasPrefix(first, updateMarkerMergeWithdrawnPrefix):
+		return "The merge question was withdrawn; the loop reopened.", true
+	case strings.HasPrefix(first, updateMarkerMergeRefusedPrefix):
+		header := "Merge refused:"
+		if hasRest {
+			return header + " " + rest, true
+		}
+		return header, true
+	case strings.HasPrefix(first, updateMarkerPrMergedPrefix):
+		sha := strings.TrimPrefix(first, updateMarkerPrMergedPrefix)
+		return "Pull request merged at " + sha7(sha) + ".", true
+	default:
+		return "", false
+	}
+}
+
+// isRespondMarker reports whether body carries one of respond.go's own
+// "respond batch ", "respond coverage failed/delivered run ", "respond
+// applied ", or "fix replies posted " prefixes (design section 5.1,
+// 9.2-9.4, 5.6): respondUpdateLine's own exact-shape parse runs behind, the
+// same two-step pattern isReviewMarker uses.
+func isRespondMarker(body string) bool {
+	return strings.HasPrefix(body, updateMarkerRespondBatchPrefix) ||
+		strings.HasPrefix(body, updateMarkerRespondCoverageFailedPrefix) ||
+		strings.HasPrefix(body, updateMarkerRespondCoverageDeliveredPrefix) ||
+		strings.HasPrefix(body, updateMarkerRespondAppliedPrefix) ||
+		strings.HasPrefix(body, updateMarkerFixRepliesPostedPrefix)
+}
+
+// respondUpdateLine renders one of respond.go's own marker shapes (design
+// section 5.1) as an owner-facing sentence: the four "respond batch <n>
+// ..." shapes (started, stale, skipped, retry; respondBatchLine), "respond
+// coverage failed/delivered run <rid>" (9.2), "respond applied <aid>" with
+// its own replied/fixing/skipped counts line (9.3 step 4;
+// respondAppliedLine), and "fix replies posted <aid>" (9.4). ok is false
+// when body's prefix matched but the rest of its shape did not, the same
+// defensive fallback reviewUpdateLine's own default case uses.
+func respondUpdateLine(body string) (string, bool) {
+	first, rest, hasRest := strings.Cut(body, "\n")
+	switch {
+	case strings.HasPrefix(first, updateMarkerRespondCoverageFailedPrefix):
+		rid := strings.TrimPrefix(first, updateMarkerRespondCoverageFailedPrefix)
+		header := "Thread actions incomplete for run " + rid + ":"
+		if hasRest {
+			return header + "\n" + rest, true
+		}
+		return header, true
+	case strings.HasPrefix(first, updateMarkerRespondCoverageDeliveredPrefix):
+		rid := strings.TrimPrefix(first, updateMarkerRespondCoverageDeliveredPrefix)
+		return "Thread errors sent back to run " + rid + ".", true
+	case strings.HasPrefix(first, updateMarkerRespondAppliedPrefix):
+		return respondAppliedLine(rest, hasRest)
+	case strings.HasPrefix(first, updateMarkerFixRepliesPostedPrefix):
+		return "Replied to the fixed threads.", true
+	case strings.HasPrefix(first, updateMarkerRespondBatchPrefix):
+		return respondBatchLine(first, rest, hasRest)
+	default:
+		return "", false
+	}
+}
+
+// respondAppliedLine renders "respond applied <aid>" (design section 5.1,
+// 9.3 step 4) from its own line 2, "replied <r> fixing <f> skipped <s>",
+// the source of the counts the sentence reports; an optional line 3 ("fix
+// request after run <R>") plays no part in it. The batch id plays no part
+// in it either, the same elision judgeRoundLine's "verdicts" case uses for
+// the run id.
+func respondAppliedLine(rest string, hasRest bool) (string, bool) {
+	if !hasRest {
+		return "", false
+	}
+	line2, _, _ := strings.Cut(rest, "\n")
+	fields := strings.Fields(line2)
+	if len(fields) != 6 || fields[0] != "replied" || fields[2] != "fixing" || fields[4] != "skipped" {
+		return "", false
+	}
+	return "Replied to " + fields[1] + " threads; " + fields[3] + " go to a fix run.", true
+}
+
+// respondBatchLine renders one "respond batch <n> started/stale/skipped/
+// retry" marker's first line (design section 5.1, 8.5 row 5, 9.2, 9.3,
+// 5.6): n plays no part in any of the four sentences, the same elision
+// judgeRoundLine's "verdicts" and "retry" cases use.
+func respondBatchLine(first, rest string, hasRest bool) (string, bool) {
+	tail := strings.TrimPrefix(first, updateMarkerRespondBatchPrefix)
+	_, after, ok := strings.Cut(tail, " ")
+	if !ok {
+		return "", false
+	}
+	switch {
+	case strings.HasPrefix(after, "started sha "):
+		return respondBatchStartedLine(rest, hasRest)
+	case after == "stale":
+		return "Review threads changed; Zing will read them again.", true
+	case after == "skipped":
+		return "Review threads were resolved before Zing answered.", true
+	case strings.HasPrefix(after, "retry sha "):
+		return "Answering the review threads again.", true
+	default:
+		return "", false
+	}
+}
+
+// respondBatchStartedLine counts the tids on a "respond batch <n> started
+// sha <sha> after run <R>" marker's own line 2 (design section 5.1, 8.5 row
+// 5): an empty line 2 is zero threads, not one, so the count comes from
+// strings.Split only when the line is non-empty.
+func respondBatchStartedLine(rest string, hasRest bool) (string, bool) {
+	if !hasRest {
+		return "", false
+	}
+	tidLine, _, _ := strings.Cut(rest, "\n")
+	tidLine = strings.TrimSpace(tidLine)
+	count := 0
+	if tidLine != "" {
+		count = len(strings.Split(tidLine, ","))
+	}
+	return fmt.Sprintf("Answering %d review threads.", count), true
 }
 
 // claimErrorsPendingLine renders a "claim errors pending run <rid>" body's

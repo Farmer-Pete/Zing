@@ -185,3 +185,102 @@ func TestUpdateLineReviewMarkers(t *testing.T) {
 		})
 	}
 }
+
+// TestUpdateLineJudgeShippingRespondMarkers proves every judge, shipping,
+// and respond marker of design section 5.1's table (sections 7, 8, 9) each
+// render as their own owner-facing sentence, the same way
+// TestUpdateLineReviewMarkers proves reviewing.go's markers do. judging.go
+// already writes the eight judge marker shapes this test covers (verified
+// against its judgeRoundStartedLine, judgeRoundRetryLine,
+// judgeRoundFailedLine, judgeRoundVerdictsLine, judgeCheckLine,
+// judgeCoverageFailedFmt, and judgeCoverageDeliveredFmt); shipping.go and
+// respond.go do not yet write the shipping and respond marker shapes this
+// test covers, so those cases are built from the plan's literal marker
+// text (section 5.1's table, 8.2-8.9, 9.2-9.4) rather than read back from a
+// producer.
+func TestUpdateLineJudgeShippingRespondMarkers(t *testing.T) {
+	t.Parallel()
+	const sha = "0123456789abcdef0123456789abcdef01234567"
+	cases := []struct{ name, body, want string }{
+		// judge round markers (design section 5.1, 7.2, 7.6).
+		{"judge round started", "judge round 1 started sha " + sha + " after run 5", "Judge round 1 started on 0123456."},
+		{"judge round verdicts", "judge round 1 verdicts run 7", "Judge round 1 returned its verdicts."},
+		{"judge round passed", "judge round 1 passed", "Judge round 1 passed."},
+		{"judge round failed", "judge round 1 failed\ns2,s3", "Judge round 1 failed: s2,s3."},
+		{"judge round retry", "judge round 2 retry after run 9", "Judge round 2 restarted."},
+		// judge coverage and check markers (design section 5.1, 7.2 step 5, 7.5).
+		{
+			"judge coverage failed",
+			"judge coverage failed run 12\nmissing verdict for scenario s2",
+			"Judge verdicts incomplete for run 12:\nmissing verdict for scenario s2",
+		},
+		{"judge coverage delivered", "judge coverage delivered run 12", "Coverage errors sent back to run 12."},
+		{"judge check pass", "judge check 1 s2 exit 0", "Check for s2 exited 0."},
+		{"judge check timeout", "judge check 1 s3 exit -1", "Check for s3 exited -1."},
+		// shipping markers (design section 5.1, 8.2-8.9).
+		{"pr opened", "pr opened 42", "Draft pull request #42 opened."},
+		{"ci waiting", "ci waiting ci,lint", "CI is waiting for ci,lint."},
+		{
+			"reviewers re-requested",
+			"reviewers re-requested " + sha + "\nalice,bob",
+			"Review re-requested from alice,bob.",
+		},
+		{"reviewers re-requested none", "reviewers re-requested " + sha + "\n", "Review re-requested from ."},
+		{"pr ready", "pr ready " + sha, "Pull request marked ready at 0123456."},
+		{"pr draft", "pr draft " + sha, "Pull request moved back to draft at 0123456."},
+		{
+			"threads blocking",
+			"threads blocking t3f9a0c1b2d4e5f60,t1a2b3c4d5e6f7081",
+			"Review threads Zing cannot read are blocking the merge: t3f9a0c1b2d4e5f60,t1a2b3c4d5e6f7081.",
+		},
+		{"merge asked", "merge asked " + sha, "Asked whether to merge 0123456."},
+		{"merge held", "merge held " + sha, "Merge held at 0123456."},
+		{"merge withdrawn", "merge withdrawn " + sha, "The merge question was withdrawn; the loop reopened."},
+		{"merge refused", "merge refused " + sha + "\nthe head moved", "Merge refused: the head moved"},
+		{"pr merged", "pr merged " + sha, "Pull request merged at 0123456."},
+		// respond markers (design section 5.1, 9.2-9.4, 5.6).
+		{
+			"respond batch started",
+			"respond batch 1 started sha " + sha + " after run 5\n" +
+				"t3f9a0c1b2d4e5f60,t1a2b3c4d5e6f7081\n" +
+				"seen t3f9a0c1b2d4e5f60=d1,t1a2b3c4d5e6f7081=d2",
+			"Answering 2 review threads.",
+		},
+		{
+			"respond coverage failed",
+			"respond coverage failed run 9\nthread t3f9a0c1b2d4e5f60 is not in this batch",
+			"Thread actions incomplete for run 9:\nthread t3f9a0c1b2d4e5f60 is not in this batch",
+		},
+		{"respond coverage delivered", "respond coverage delivered run 9", "Thread errors sent back to run 9."},
+		{
+			"respond batch stale",
+			"respond batch 2 stale\nthe pull request head moved",
+			"Review threads changed; Zing will read them again.",
+		},
+		{"respond batch skipped", "respond batch 3 skipped", "Review threads were resolved before Zing answered."},
+		{
+			"respond batch retry",
+			"respond batch 4 retry sha " + sha + " after run 11\nt3f9a0c1b2d4e5f60\nseen t3f9a0c1b2d4e5f60=d1",
+			"Answering the review threads again.",
+		},
+		{
+			"respond applied",
+			"respond applied 7\nreplied 3 fixing 1 skipped 0",
+			"Replied to 3 threads; 1 go to a fix run.",
+		},
+		{
+			"respond applied with fix request",
+			"respond applied 8\nreplied 2 fixing 1 skipped 0\nfix request after run 14",
+			"Replied to 2 threads; 1 go to a fix run.",
+		},
+		{"fix replies posted", "fix replies posted 8", "Replied to the fixed threads."},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := displayBody(updateRow(tc.body)); got != tc.want {
+				t.Errorf("displayBody(%q) = %q, want %q", tc.body, got, tc.want)
+			}
+		})
+	}
+}
