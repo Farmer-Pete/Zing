@@ -608,16 +608,34 @@ func buildThreadRows(ticket *store.Ticket, rows []store.MessageRow, plan *templa
 	// <details> summary shows "the message count"). Precomputed once over
 	// every row rather than per question, so counting stays O(n) instead of
 	// O(n*questions).
+	//
+	// sentChildren holds, per question message id, its own sent (never
+	// draft, visibleRows already dropped those) reply and answer rows, in
+	// message order (bug fix 10): a sent reply or answer used to also get
+	// its own standalone ThreadRow below, rendering as a thread-level "reply
+	// you"/"answer you" card detached from the question it actually
+	// answered. buildThreadQuestion formats these into SentReplies instead,
+	// and the main loop below skips emitting a second row for them. A
+	// thread-level reply (ParentID nil) names no question here and keeps
+	// its own row, unaffected.
 	messageCounts := make(map[int64]int, len(rows))
+	sentChildren := make(map[int64][]store.MessageRow, len(rows))
 	for i := range rows {
-		if rows[i].ParentID != nil {
-			messageCounts[*rows[i].ParentID]++
+		if rows[i].ParentID == nil {
+			continue
+		}
+		messageCounts[*rows[i].ParentID]++
+		if rows[i].Type == msgTypeReply || rows[i].Type == msgTypeAnswer {
+			sentChildren[*rows[i].ParentID] = append(sentChildren[*rows[i].ParentID], rows[i])
 		}
 	}
 
 	out := make([]templates.ThreadRow, 0, len(rows))
 	for i := range rows {
-		question, err := buildThreadQuestion(ticket, &rows[i], messageCounts[rows[i].ID]+1, plan, scenarios, findings, drafts, sentAnswers)
+		if (rows[i].Type == msgTypeReply || rows[i].Type == msgTypeAnswer) && rows[i].ParentID != nil {
+			continue
+		}
+		question, err := buildThreadQuestion(ticket, &rows[i], messageCounts[rows[i].ID]+1, plan, scenarios, findings, drafts, sentAnswers, sentChildren[rows[i].ID])
 		if err != nil {
 			return nil, err
 		}
@@ -684,6 +702,27 @@ func sentAnswerText(payload response.AnswerPayload, options []templates.ThreadOp
 	return strings.Join(parts, ", ")
 }
 
+// sentChildText formats one sent reply or answer row that names a question
+// as its parent, for that question's own SentReplies (bug fix 10): a plain
+// reply's own Body, or an answer's payload run through sentAnswerText, the
+// same formatting its locked note already uses. Any other type, or an
+// answer whose payload fails to decode, renders empty, which the caller
+// skips rather than adding a blank line.
+func sentChildText(m *store.MessageRow, options []templates.ThreadOption) string {
+	switch m.Type {
+	case msgTypeReply:
+		return m.Body
+	case msgTypeAnswer:
+		var ap response.AnswerPayload
+		if err := json.Unmarshal(m.Payload, &ap); err != nil {
+			return ""
+		}
+		return sentAnswerText(ap, options)
+	default:
+		return ""
+	}
+}
+
 // questionDraft is one question's in-progress, unsent draft (bug fix): at
 // most one draft reply and at most one draft answer can exist per question
 // at a time (SaveDraft's insertReplyDraftTx and upsertOptionDraftTx/
@@ -745,8 +784,11 @@ func collectQuestionDrafts(rows []store.MessageRow) map[int64]questionDraft {
 // the whole thread render, since the commit that wrote it already validated
 // it against the messages/question schema; a markdown render failure, by
 // contrast, is a real error (design section 6.10: Render can fail), and is
-// returned rather than silently dropping the question's body.
-func buildThreadQuestion(ticket *store.Ticket, m *store.MessageRow, messageCount int, plan *templates.RenderedPlan, scenarios []templates.ScenarioRow, findings []templates.FindingRow, drafts map[int64]questionDraft, sentAnswers map[int64]response.AnswerPayload) (*templates.ThreadQuestion, error) {
+// returned rather than silently dropping the question's body. children is
+// this question's own sent reply and answer rows, in message order (bug fix
+// 10), formatted into ThreadQuestion.SentReplies below rather than left for
+// buildThreadRows to render a second time as standalone rows.
+func buildThreadQuestion(ticket *store.Ticket, m *store.MessageRow, messageCount int, plan *templates.RenderedPlan, scenarios []templates.ScenarioRow, findings []templates.FindingRow, drafts map[int64]questionDraft, sentAnswers map[int64]response.AnswerPayload, children []store.MessageRow) (*templates.ThreadQuestion, error) {
 	if m.Type != msgTypeQuestion {
 		return nil, nil //nolint:nilnil // "no question" is a legitimate result, not an error
 	}
@@ -796,6 +838,14 @@ func buildThreadQuestion(ticket *store.Ticket, m *store.MessageRow, messageCount
 		// server-side; this is the rendering half).
 		Interactive: (m.State != nil && *m.State == msgStateOpen) || revisable,
 		Revisable:   revisable,
+	}
+	if len(children) > 0 {
+		q.SentReplies = make([]string, 0, len(children))
+		for i := range children {
+			if text := sentChildText(&children[i], options); text != "" {
+				q.SentReplies = append(q.SentReplies, text)
+			}
+		}
 	}
 	// AnsweredText (bug fix): a closed question's locked note, shown instead
 	// of its now-hidden controls, only for state=answered and no longer

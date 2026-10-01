@@ -148,6 +148,15 @@ type ThreadQuestion struct {
 	// decided). questionGroup renders it as a locked note instead of
 	// optionChips/itemRows/freeReply when !Interactive.
 	AnsweredText string
+
+	// SentReplies is every sent (never draft) reply or answer naming this
+	// question as its parent, plainly formatted and in message order (bug
+	// fix 10): each used to also get its own standalone ThreadRow, so a
+	// typed reply like "Explain these three options in more detail" showed
+	// up as a "reply you" card at the bottom of the thread, detached from
+	// the question it was actually about. questionGroup renders each line
+	// under this question's own controls instead, prefixed "You: ".
+	SentReplies []string
 }
 
 // HasDraft reports whether this question carries any unsent draft -- a

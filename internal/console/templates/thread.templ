@@ -159,7 +159,26 @@ templ questionGroup(ticketID int64, row ThreadRow) {
 		} else if row.Question.AnsweredText != "" {
 			@answeredLocked(row.Question.AnsweredText)
 		}
+		@sentReplies(row.Question.SentReplies)
 	</details>
+}
+
+// sentReplies renders a question's own sent replies and answers (bug fix
+// 10): each used to also get its own standalone ThreadRow, rendering as a
+// "reply you"/"answer you" card at the bottom of the thread, detached from
+// the question it actually answered (views.go's buildThreadRows,
+// sentChildText). It renders after both the live controls and the locked
+// note -- "under its options" -- regardless of which of those two rendered
+// above it, or neither, since a question can carry sent replies from while
+// it was still open even once it is answered or locked.
+templ sentReplies(lines []string) {
+	if len(lines) > 0 {
+		<div class="q-sent-replies">
+			for _, line := range lines {
+				<p class="q-sent-reply">You: { line }</p>
+			}
+		</div>
+	}
 }
 
 // reviseNote is a revisable (D30), already-answered question's own note,

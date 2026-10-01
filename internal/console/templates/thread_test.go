@@ -346,3 +346,52 @@ func TestThreadShowsWaitProgress(t *testing.T) {
 		}
 	})
 }
+
+// TestQuestionGroupRendersSentRepliesUnderItsOptions proves bug fix 10: a
+// question's own sent replies and answers (views.go's buildThreadRows, now
+// folded into SentReplies instead of their own standalone ThreadRow) render
+// inside this question's own <details> block, under its options, each
+// prefixed "You: " -- not as a separate, detached message card. A question
+// with no sent replies renders no ".q-sent-replies" region at all.
+func TestQuestionGroupRendersSentRepliesUnderItsOptions(t *testing.T) {
+	t.Parallel()
+
+	t.Run("sent replies and answers render in order, each prefixed You:", func(t *testing.T) {
+		t.Parallel()
+		got := renderQuestionGroup(t, ThreadRow{
+			ID: 1,
+			Question: &ThreadQuestion{
+				Key: "Q1", Title: testApprovePlanTitle, StateLabel: testWaitingOnYou,
+				BodyHTML: emptyBodyHTML, MessageCount: 3, Interactive: true,
+				SentReplies: []string{"Explain these three options in more detail", "Keep it simple"},
+			},
+		})
+		optionsIdx := strings.Index(got, `class="reply"`)
+		repliesIdx := strings.Index(got, `class="q-sent-replies"`)
+		if optionsIdx < 0 || repliesIdx < 0 || repliesIdx < optionsIdx {
+			t.Errorf("rendered question group does not show sent replies under its options; got:\n%s", got)
+		}
+		for _, want := range []string{
+			`<p class="q-sent-reply">You: Explain these three options in more detail</p>`,
+			`<p class="q-sent-reply">You: Keep it simple</p>`,
+		} {
+			if !strings.Contains(got, want) {
+				t.Errorf("rendered question group missing %q; got:\n%s", want, got)
+			}
+		}
+	})
+
+	t.Run("no sent replies renders no sent-replies region", func(t *testing.T) {
+		t.Parallel()
+		got := renderQuestionGroup(t, ThreadRow{
+			ID: 2,
+			Question: &ThreadQuestion{
+				Key: "Q2", Title: testSplitTicketTitle, StateLabel: testWaitingOnYou,
+				BodyHTML: emptyBodyHTML, MessageCount: 1, Interactive: true,
+			},
+		})
+		if strings.Contains(got, "q-sent-replies") {
+			t.Errorf("rendered question group has a sent-replies region with nothing sent; got:\n%s", got)
+		}
+	})
+}

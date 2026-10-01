@@ -361,6 +361,62 @@ func TestCollectSentAnswers(t *testing.T) {
 	}
 }
 
+// TestBuildThreadRowsNestsSentRepliesAndAnswersUnderTheirQuestion proves the
+// bug fix for F10: a sent reply or answer naming a question as its parent
+// used to also get its own standalone ThreadRow, rendering as a
+// thread-level "reply you"/"answer you" card at the bottom of the thread,
+// detached from the question it actually answered. buildThreadRows now
+// folds both into that question's own SentReplies instead of emitting a
+// second, separate row for them; a thread-level reply (ParentID nil) is
+// unaffected and keeps its own top-level row.
+func TestBuildThreadRowsNestsSentRepliesAndAnswersUnderTheirQuestion(t *testing.T) {
+	t.Parallel()
+	questionID := int64(1)
+	questionPayload, err := json.Marshal(response.QuestionPayload{
+		Key: "Q1", Kind: response.QuestionKindQuestion,
+		Options: []response.Option{{Key: "a", Text: "Pick the terse option"}},
+	})
+	if err != nil {
+		t.Fatalf("marshal question payload: %v", err)
+	}
+	answerPayload := []byte(`{"option":"a"}`)
+
+	rows := []store.MessageRow{
+		//nolint:modernize // keyed on purpose: MessageRow's ID and CreatedAt fields precede the embedded Message, so the key cannot be dropped
+		{ID: questionID, Message: store.Message{Type: msgTypeQuestion, Payload: questionPayload}},
+		//nolint:modernize // keyed on purpose: MessageRow's ID and CreatedAt fields precede the embedded Message, so the key cannot be dropped
+		{ID: 2, Message: store.Message{
+			Type: msgTypeReply, ParentID: &questionID, Body: "Explain these three options in more detail",
+		}},
+		//nolint:modernize // keyed on purpose: MessageRow's ID and CreatedAt fields precede the embedded Message, so the key cannot be dropped
+		{ID: 3, Message: store.Message{Type: msgTypeAnswer, ParentID: &questionID, Payload: answerPayload}},
+		//nolint:modernize // keyed on purpose: MessageRow's ID and CreatedAt fields precede the embedded Message, so the key cannot be dropped
+		{ID: 4, Message: store.Message{Type: msgTypeReply, Body: "a thread-level note"}},
+	}
+
+	got, err := buildThreadRows(&store.Ticket{}, rows, nil, nil, nil)
+	if err != nil {
+		t.Fatalf("buildThreadRows: %v", err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("buildThreadRows returned %d rows, want 2 (the question and the thread-level reply); got %+v", len(got), got)
+	}
+
+	question := got[0]
+	if question.Question == nil {
+		t.Fatalf("got[0] is not the question row: %+v", question)
+	}
+	want := []string{"Explain these three options in more detail", "Pick the terse option"}
+	if strings.Join(question.Question.SentReplies, "|") != strings.Join(want, "|") {
+		t.Errorf("question.SentReplies = %v, want %v", question.Question.SentReplies, want)
+	}
+
+	threadLevel := got[1]
+	if threadLevel.Question != nil || threadLevel.Body != "a thread-level note" {
+		t.Errorf("got[1] = %+v, want the unaffected thread-level reply", threadLevel)
+	}
+}
+
 // questionRowForWait builds a "question" message row for buildWaitProgress
 // tests: state and kind are the two fields it reads, plus a minimal valid
 // QuestionPayload so json.Unmarshal succeeds.

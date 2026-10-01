@@ -424,7 +424,9 @@ func TestThreadExcludesDraftRows(t *testing.T) {
 // Payload, since AnswerPayload messages never carry a Body: this is the
 // "pick then send" path -- SaveDraft's option mode (what a fixed chip
 // activation posts), then SendBatch -- rendering something visible, not
-// the blank row the bug left behind.
+// the blank row the bug left behind. As of bug fix 10, that something is
+// nested inside the question's own block (its locked note and its own
+// "You: " line), never a second, detached "answer you" card.
 func TestThreadRendersSentAnswerFromPayload(t *testing.T) {
 	t.Parallel()
 	s := newConsoleTestStore(t)
@@ -444,8 +446,18 @@ func TestThreadRendersSentAnswerFromPayload(t *testing.T) {
 	srv := newTestServer(t, s, bus.New(), nil, newTestLogHandler(t))
 	main := mainFrame(t, srv.URL, "thread", ticketID, 0)
 
-	if !strings.Contains(main, "Option: b") {
-		t.Errorf("thread frame missing the sent answer's chosen option; got:\n%s", main)
+	// The sent answer's chosen option shows nested in the question's own
+	// block twice over (bug fix 10): once as its locked note's plain text,
+	// and once as its own "You: " line, matching the option's text rather
+	// than answerLine's bare "Option: b" the old detached card showed.
+	if !strings.Contains(main, `<p class="q-answered">Answered: hello, world</p>`) {
+		t.Errorf("thread frame missing the sent answer's locked note; got:\n%s", main)
+	}
+	if !strings.Contains(main, `<p class="q-sent-reply">You: hello, world</p>`) {
+		t.Errorf("thread frame missing the sent answer's own nested line; got:\n%s", main)
+	}
+	if strings.Contains(main, "message-answer") {
+		t.Errorf("thread frame still renders the sent answer as its own detached card; got:\n%s", main)
 	}
 }
 

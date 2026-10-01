@@ -321,6 +321,14 @@ templ palette() {
 			font-size: 0.8rem;
 			margin: 0 0 0.5rem;
 		}
+		/* .q-sent-reply (bug fix 10, thread.templ's sentReplies): a question's
+		   own sent reply or answer, shown under its options instead of as a
+		   detached "reply you" card at the bottom of the thread. */
+		.q-sent-reply {
+			color: var(--zing-text-dim);
+			font-size: 0.85rem;
+			margin: 0.35rem 0 0;
+		}
 
 		/* #send-result (bug fix, console.js's showSendResult): a client-owned
 		   banner reporting POST /send's own result line ("Sent N answer(s)."
