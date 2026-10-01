@@ -2354,3 +2354,384 @@ func TestAllDroppedMovesToJudging(t *testing.T) {
 		t.Errorf("commit3.Reason = %q, want %q", commit3.Reason, reasonReviewClean)
 	}
 }
+
+// ---- task 12: re-review, the loop gate, and review escalation retries ----
+
+// reviewRoundScriptKey is reviewScriptKey generalized to any round (design
+// section 6.7): "review/<round>-<lens>/1.xml", a round's own first turn --
+// every lens round 2 or 3 selects here runs once, fresh, never resumed.
+// Every test above this one drives round 1 only; the re-review tests below
+// need round 2 and 3's own keys too.
+func reviewRoundScriptKey(round int, lens string) string {
+	return fmt.Sprintf("review/%d-%s/1.xml", round, lens)
+}
+
+// reReviewFixCmd stands in for the fix agent's own edit: CHECK re-runs the
+// project's real test command (building.go), so the edit has to be real,
+// not merely claimed by the scripted response below, the same technique
+// postbuild_test.go's own pbFixTestCmd uses for hello.txt.
+const reReviewFixCmd = "printf '\\n// reviewed\\n' >> greet.go && test -f greet.go"
+
+// reReviewFixScript is the fix driver's own RUN turn (job "build", label
+// "fix", design section 5.1): one claimed file change, greet.go, matching
+// reReviewFixCmd's own edit, so CHECK's own cross-check of claimed against
+// real changed paths agrees.
+const reReviewFixScript = `<zing job="build" outcome="ok">
+  <claims>
+    <files_changed>
+      <path>greet.go</path>
+    </files_changed>
+    <test_exit>0</test_exit>
+    <lint_exit>0</lint_exit>
+  </claims>
+  <report>Reviewed and touched up greet.go.</report>
+  <notes></notes>
+</zing>`
+
+// driveReviewFixToLanding drives an already-open fix request (FIXREQ's own
+// "fix requested findings" marker, already applied) through the fix
+// driver's own RUN then CHECK-and-LAND ticks (fix.go's own DriveFix,
+// reached through reviewingHandler.Run's own postBuildPrelude): one tick
+// reserves the fix's first run, the next checks it clean and lands it in
+// the same commit (fix_test.go's own TestDriveFixLandWritesLandedMarker,
+// package job_test, unreachable from here, proves that same two-tick
+// shape). It stops as soon as a commit carries a "fix landed" marker, and
+// fails if four ticks never produce one.
+func driveReviewFixToLanding(t *testing.T, s *store.Store, ticketID int64, rt runtime.Runtime, testCmd string) {
+	t.Helper()
+	for i := range 4 {
+		ticket := pbGetTicket(t, s, ticketID)
+		deps := pbWithTestCmd(pbClaim(t, s, rt, ticketID), ticket, testCmd)
+		commit, err := (reviewingHandler{}).Run(t.Context(), ticket, deps)
+		if err != nil {
+			t.Fatalf("driveReviewFixToLanding: Run (step %d): %v", i, err)
+		}
+		pbApply(t, s, ticket, commit)
+		for _, m := range commit.Messages {
+			if strings.HasPrefix(m.Body, "fix landed ") {
+				return
+			}
+		}
+	}
+	t.Fatal("driveReviewFixToLanding: fix did not land after 4 ticks")
+}
+
+// ---- TestReReviewRunsSelectedLenses ----------------------------------------
+
+// TestReReviewRunsSelectedLenses proves design section 13.1's own worked
+// example end to end, adapted to this file's own fixture tree (greet.go
+// and hello.txt standing in for 13.1's a.go and b.go): round 1 merges
+// correctness and security's own two reports of greet.go:5 into one
+// above-floor finding, accepted; quality's own above-floor finding at
+// hello.txt:1 is discussed and withdrawn; the fix lands on greet.go; round
+// 2 runs only correctness, security (greet.go changed, and the accepted
+// finding's own row lists them, 6.7), and fidelity (always) -- quality is
+// out (hello.txt never changed), and so is every lens round 1 never ran.
+//
+// This is also the task 12 handoff's own regression for lensesForRound's
+// dedup (newestFindingRowPerID): round 1 ends with two rows for each
+// finding id (the accepted one nil then accept; the discussed one nil then
+// discuss), the exact duplicated-row shape a lensesForRound reading raw
+// rows instead of the newest one per id would have to get right by luck.
+func TestReReviewRunsSelectedLenses(t *testing.T) {
+	s, ticket, _ := reviewTicketReady(t)
+	scripts := reviewScriptsFS(map[string]string{
+		reviewScriptKey("correctness", 1): findingScriptAt("correctness", "minor", greetGoLine5, "nil map write", "validate it"),
+		reviewScriptKey(discussLens, 1):   findingScriptAt(discussLens, "major", greetGoLine5, "unchecked input", "validate it"),
+		reviewScriptKey("quality", 1):     findingScriptAt("quality", "major", pbHelloTxt+":1", "breaks the build", "fix the build"),
+	})
+	rt := runtime.NewFake(scripts)
+
+	deps := pbClaim(t, s, rt, ticket.ID)
+	commit, err := (reviewingHandler{}).Run(t.Context(), ticket, deps) // ROUND 1
+	if err != nil {
+		t.Fatalf("Run (round 1): %v", err)
+	}
+	pbApply(t, s, ticket, commit)
+
+	q := newestOpenQuestion(t, s, ticket.ID)
+	var payload response.QuestionPayload
+	if err = json.Unmarshal(q.Payload, &payload); err != nil {
+		t.Fatalf("unmarshal question payload: %v", err)
+	}
+	acceptID := itemRefByText(t, payload, "unchecked input")
+	discussID := itemRefByText(t, payload, "breaks the build")
+	answerReviewItems(t, s, ticket.ID, q.ID, map[string]response.Decision{
+		acceptID:  response.DecisionAccept,
+		discussID: response.DecisionDiscuss,
+	}, "hello.txt is generated, see the header")
+
+	ticket1 := pbGetTicket(t, s, ticket.ID)
+	deps1 := pbClaim(t, s, rt, ticket.ID)
+	commit1, err := (reviewingHandler{}).Run(t.Context(), ticket1, deps1) // TRIAGE
+	if err != nil {
+		t.Fatalf("Run (triage): %v", err)
+	}
+	pbApply(t, s, ticket, commit1)
+
+	scripts[reviewScriptKey("quality", 2)] = &fstest.MapFile{Data: []byte(reviewOKScript)}
+	ticket2 := pbGetTicket(t, s, ticket.ID)
+	deps2 := pbClaim(t, s, rt, ticket.ID)
+	commit2, err := (reviewingHandler{}).Run(t.Context(), ticket2, deps2) // DISCUSS: quality withdraws
+	if err != nil {
+		t.Fatalf("Run (discuss): %v", err)
+	}
+	if len(commit2.Artifacts) != 0 {
+		t.Errorf("commit2.Artifacts = %d, want 0 (quality withdrew)", len(commit2.Artifacts))
+	}
+	pbApply(t, s, ticket, commit2)
+
+	ticket3 := pbGetTicket(t, s, ticket.ID)
+	deps3 := pbClaim(t, s, rt, ticket.ID)
+	commit3, err := (reviewingHandler{}).Run(t.Context(), ticket3, deps3) // decided round -> FIXREQ
+	if err != nil {
+		t.Fatalf("Run (fixreq): %v", err)
+	}
+	if len(commit3.Messages) != 1 || !strings.HasPrefix(commit3.Messages[0].Body, fixRequestedFindingsPrefix) {
+		t.Fatalf("commit3.Messages = %+v, want one %q message", commit3.Messages, fixRequestedFindingsPrefix)
+	}
+	pbApply(t, s, ticket, commit3)
+
+	scripts["build/fix/1.xml"] = &fstest.MapFile{Data: []byte(reReviewFixScript)}
+	driveReviewFixToLanding(t, s, ticket.ID, rt, reReviewFixCmd)
+
+	beforeRound2, err := s.MaxRunID(t.Context(), ticket.ID)
+	if err != nil {
+		t.Fatalf("MaxRunID: %v", err)
+	}
+	scripts[reviewRoundScriptKey(2, "correctness")] = &fstest.MapFile{Data: []byte(reviewOKScript)}
+	scripts[reviewRoundScriptKey(2, discussLens)] = &fstest.MapFile{Data: []byte(reviewOKScript)}
+	scripts[reviewRoundScriptKey(2, lensFidelity)] = &fstest.MapFile{Data: []byte(reviewOKScript)}
+
+	ticket4 := pbGetTicket(t, s, ticket.ID)
+	deps4 := pbClaim(t, s, rt, ticket.ID)
+	commit4, err := (reviewingHandler{}).Run(t.Context(), ticket4, deps4) // ROUND 2
+	if err != nil {
+		t.Fatalf("Run (round 2): %v", err)
+	}
+	if commit4.Next != stateJudging {
+		t.Fatalf("commit4.Next = %q, want %q (round 2 clean)", commit4.Next, stateJudging)
+	}
+	pbApply(t, s, ticket, commit4)
+
+	runs := reviewRunsSince(t, s, ticket.ID, beforeRound2)
+	if len(runs) != 3 {
+		t.Fatalf("round 2 runs = %d, want 3", len(runs))
+	}
+	seen := make(map[string]bool, 3)
+	for _, r := range runs {
+		if r.Lens == nil {
+			t.Fatalf("run %d: Lens = nil, want set", r.ID)
+		}
+		seen[*r.Lens] = true
+	}
+	for _, want := range []string{"correctness", discussLens, lensFidelity} {
+		if !seen[want] {
+			t.Errorf("round 2 never ran lens %s", want)
+		}
+	}
+}
+
+// ---- TestLoopGateEscalatesAfterTwoFixes ------------------------------------
+
+// TestLoopGateEscalatesAfterTwoFixes proves design section 6.8's own worked
+// example: round 1 keeps a minor finding -- at or below the floor, so it
+// routes straight to FIXREQ with no question -- request 1; the fix lands
+// but leaves the same defect; round 2 keeps it again, request 2; round 3
+// keeps it a third time, k = 2 = max_loops, so FIXREQ escalates
+// loops_exhausted instead of opening a third request.
+func TestLoopGateEscalatesAfterTwoFixes(t *testing.T) {
+	const loopLens = "quality"
+	s, ticket, _ := reviewTicketReady(t)
+	scripts := reviewScriptsFS(map[string]string{
+		reviewScriptKey(loopLens, 1): findingScript(loopLens, "minor", "needs a comment", "add a comment"),
+	})
+	rt := runtime.NewFake(scripts)
+
+	deps := pbClaim(t, s, rt, ticket.ID)
+	commit, err := (reviewingHandler{}).Run(t.Context(), ticket, deps) // round 1
+	if err != nil {
+		t.Fatalf("Run (round 1): %v", err)
+	}
+	if len(commit.Messages) != 2 || !strings.HasPrefix(commit.Messages[1].Body, fixRequestedFindingsPrefix) {
+		t.Fatalf("round 1 commit.Messages = %+v, want [done marker, %q message]", commit.Messages, fixRequestedFindingsPrefix)
+	}
+	pbApply(t, s, ticket, commit)
+
+	scripts["build/fix/1.xml"] = &fstest.MapFile{Data: []byte(reReviewFixScript)}
+	driveReviewFixToLanding(t, s, ticket.ID, rt, reReviewFixCmd)
+
+	scripts[reviewRoundScriptKey(2, lensFidelity)] = &fstest.MapFile{Data: []byte(reviewOKScript)}
+	scripts[reviewRoundScriptKey(2, loopLens)] = &fstest.MapFile{Data: []byte(findingScript(loopLens, "minor", "still needs a comment", "add a comment"))}
+
+	ticket2 := pbGetTicket(t, s, ticket.ID)
+	deps2 := pbClaim(t, s, rt, ticket.ID)
+	commit2, err := (reviewingHandler{}).Run(t.Context(), ticket2, deps2) // round 2
+	if err != nil {
+		t.Fatalf("Run (round 2): %v", err)
+	}
+	if len(commit2.Messages) != 2 || !strings.HasPrefix(commit2.Messages[1].Body, fixRequestedFindingsPrefix) {
+		t.Fatalf("round 2 commit.Messages = %+v, want [done marker, %q message]", commit2.Messages, fixRequestedFindingsPrefix)
+	}
+	pbApply(t, s, ticket, commit2)
+
+	scripts["build/fix/1.xml"] = &fstest.MapFile{Data: []byte(reReviewFixScript)}
+	driveReviewFixToLanding(t, s, ticket.ID, rt, reReviewFixCmd)
+
+	scripts[reviewRoundScriptKey(3, lensFidelity)] = &fstest.MapFile{Data: []byte(reviewOKScript)}
+	scripts[reviewRoundScriptKey(3, loopLens)] = &fstest.MapFile{Data: []byte(findingScript(loopLens, "minor", "still not fixed", "add a comment"))}
+
+	ticket3 := pbGetTicket(t, s, ticket.ID)
+	deps3 := pbClaim(t, s, rt, ticket.ID)
+	commit3, err := (reviewingHandler{}).Run(t.Context(), ticket3, deps3) // round 3: gate reached
+	if err != nil {
+		t.Fatalf("Run (round 3): %v", err)
+	}
+	if commit3.Escalation == nil {
+		t.Fatal("commit3.Escalation = nil, want set (the loop gate)")
+	}
+	if commit3.Escalation.Payload.Code != string(response.EscalationCodeLoopsExhausted) {
+		t.Errorf("escalation code = %q, want %q", commit3.Escalation.Payload.Code, response.EscalationCodeLoopsExhausted)
+	}
+	if commit3.Escalation.Payload.Origin != string(response.EscalationOriginReview) {
+		t.Errorf("escalation origin = %q, want %q", commit3.Escalation.Payload.Origin, response.EscalationOriginReview)
+	}
+	if !strings.Contains(commit3.Escalation.Payload.What, "2 fix runs") {
+		t.Errorf("escalation What = %q, want it to name 2 fix runs", commit3.Escalation.Payload.What)
+	}
+}
+
+// ---- TestReviewInfraRetryWritesMarker ---------------------------------------
+
+// TestReviewInfraRetryWritesMarker proves design section 5.6's own "review,
+// any other" retry row: a retry on an environment escalation of origin
+// review writes the plain "retry requested" marker and resolves the round,
+// exactly as every other job's own infra retry does.
+func TestReviewInfraRetryWritesMarker(t *testing.T) {
+	s, ticket, _ := reviewTicketReady(t)
+
+	qID := pbEscalateDirect(t, s, ticket.ID, nil, nil, response.EscalationCodeEnvironment, response.EscalationOriginReview)
+	pbAnswerEscalation(t, s, ticket.ID, qID, escalationChoiceRetry)
+
+	deps := pbClaim(t, s, runtime.NewFake(reviewScriptsFS(nil)), ticket.ID)
+	commit, handled := pbRunPrelude(t, s, deps, ticket.ID)
+	if !handled {
+		t.Fatal("handled = false, want true")
+	}
+	if len(commit.Messages) != 1 || commit.Messages[0].Body != markerRetryRequested {
+		t.Fatalf("commit.Messages = %+v, want one %q marker", commit.Messages, markerRetryRequested)
+	}
+	if len(commit.ResolveQuestions) != 1 || commit.ResolveQuestions[0] != qID {
+		t.Errorf("commit.ResolveQuestions = %v, want [%d]", commit.ResolveQuestions, qID)
+	}
+}
+
+// ---- TestReviewLoopsRetryRequestsFix ----------------------------------------
+
+// TestReviewLoopsRetryRequestsFix proves design section 5.6's own "review,
+// loops_exhausted" retry row: a retry writes a fix request of kind findings
+// straight from the escalation's own Tried text, bypassing FIXREQ's own
+// max_loops gate entirely -- the one request 5.6 says to skip it for.
+func TestReviewLoopsRetryRequestsFix(t *testing.T) {
+	s, ticket, _ := reviewTicketReady(t)
+
+	qID := pbEscalateDirect(t, s, ticket.ID, nil, nil, response.EscalationCodeLoopsExhausted, response.EscalationOriginReview)
+	pbAnswerEscalation(t, s, ticket.ID, qID, escalationChoiceRetry)
+
+	deps := pbClaim(t, s, runtime.NewFake(reviewScriptsFS(nil)), ticket.ID)
+	commit, handled := pbRunPrelude(t, s, deps, ticket.ID)
+	if !handled {
+		t.Fatal("handled = false, want true")
+	}
+	if len(commit.Messages) != 1 || !strings.HasPrefix(commit.Messages[0].Body, fixRequestedFindingsPrefix) {
+		t.Fatalf("commit.Messages = %+v, want one %q message", commit.Messages, fixRequestedFindingsPrefix)
+	}
+	if !strings.Contains(commit.Messages[0].Body, "what was tried") {
+		t.Errorf("fix request body = %q, want the escalation's own Tried text", commit.Messages[0].Body)
+	}
+	if len(commit.ResolveQuestions) != 1 || commit.ResolveQuestions[0] != qID {
+		t.Errorf("commit.ResolveQuestions = %v, want [%d]", commit.ResolveQuestions, qID)
+	}
+}
+
+// ---- TestReviewCapResumesRetryAccepts ---------------------------------------
+
+// TestReviewCapResumesRetryAccepts proves design section 5.6's own
+// "cap_resumes, exhausted session of job review, from DISCUSS" row: once
+// the discussed finding's own lens session is exhausted
+// (TestDiscussExhaustedEscalatesOnce's own setup), a retry turns the still-
+// pending finding into decision accept, in place -- same id, the owner's
+// own notes appended to its fix text -- and resolves the escalation's own
+// round.
+func TestReviewCapResumesRetryAccepts(t *testing.T) {
+	s, ticket, rt, scripts, findingID := discussGroupReady(t, "")
+	scripts[reviewScriptKey(discussLens, 2)] = &fstest.MapFile{Data: []byte(reviewQuestionScript("Q1", "which way?"))}
+	scripts[reviewScriptKey(discussLens, 3)] = &fstest.MapFile{Data: []byte(reviewQuestionScript("Q2", "which way now?"))}
+
+	deps := pbClaim(t, s, rt, ticket.ID)
+	commit, err := (reviewingHandler{}).Run(t.Context(), ticket, deps)
+	if err != nil {
+		t.Fatalf("Run (discuss 1): %v", err)
+	}
+	pbApply(t, s, ticket, commit)
+	answerReviewQuestion(t, s, ticket.ID, newestOpenQuestion(t, s, ticket.ID).ID)
+
+	ticket = pbGetTicket(t, s, ticket.ID)
+	deps = pbClaim(t, s, rt, ticket.ID)
+	commit, err = (reviewingHandler{}).Run(t.Context(), ticket, deps)
+	if err != nil {
+		t.Fatalf("Run (discuss 2): %v", err)
+	}
+	pbApply(t, s, ticket, commit)
+	answerReviewQuestion(t, s, ticket.ID, newestOpenQuestion(t, s, ticket.ID).ID)
+
+	ticket = pbGetTicket(t, s, ticket.ID)
+	deps = pbClaim(t, s, rt, ticket.ID)
+	commit, err = (reviewingHandler{}).Run(t.Context(), ticket, deps)
+	if err != nil {
+		t.Fatalf("Run (cap): %v", err)
+	}
+	if commit.Escalation == nil {
+		t.Fatal("commit.Escalation = nil, want set")
+	}
+	pbApply(t, s, ticket, commit)
+
+	qID := newestOpenQuestion(t, s, ticket.ID).ID
+	const note = "owner says accept it as is"
+	option := escalationChoiceRetry
+	if _, draftErr := s.SaveDraft(t.Context(), store.DraftInput{TicketID: ticket.ID, QuestionID: &qID, Option: &option}); draftErr != nil {
+		t.Fatalf("SaveDraft(option): %v", draftErr)
+	}
+	if _, draftErr := s.SaveDraft(t.Context(), store.DraftInput{TicketID: ticket.ID, QuestionID: &qID, Text: note}); draftErr != nil {
+		t.Fatalf("SaveDraft(text): %v", draftErr)
+	}
+	if _, sendErr := s.SendBatch(t.Context(), ticket.ID); sendErr != nil {
+		t.Fatalf("SendBatch: %v", sendErr)
+	}
+
+	ticket = pbGetTicket(t, s, ticket.ID)
+	deps = pbClaim(t, s, rt, ticket.ID)
+	retryCommit, handled := pbRunPrelude(t, s, deps, ticket.ID)
+	if !handled {
+		t.Fatal("handled = false, want true")
+	}
+	if len(retryCommit.Artifacts) != 1 {
+		t.Fatalf("retryCommit.Artifacts = %+v, want exactly one (the pending finding, now accepted)", retryCommit.Artifacts)
+	}
+	var finding response.FindingArtifact
+	if err := json.Unmarshal(retryCommit.Artifacts[0].Payload, &finding); err != nil {
+		t.Fatalf("unmarshal finding artifact: %v", err)
+	}
+	if finding.ID != findingID {
+		t.Errorf("finding.ID = %q, want %q", finding.ID, findingID)
+	}
+	if finding.Decision == nil || *finding.Decision != response.FindingAccept {
+		t.Errorf("finding.Decision = %v, want accept", finding.Decision)
+	}
+	if !strings.Contains(finding.Fix, discussFix) || !strings.Contains(finding.Fix, note) {
+		t.Errorf("finding.Fix = %q, want it to carry both the original fix text and the owner's own note", finding.Fix)
+	}
+	if len(retryCommit.ResolveQuestions) != 1 || retryCommit.ResolveQuestions[0] != qID {
+		t.Errorf("retryCommit.ResolveQuestions = %v, want [%d]", retryCommit.ResolveQuestions, qID)
+	}
+}

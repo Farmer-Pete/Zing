@@ -1154,12 +1154,20 @@ func lensCodeSection(lens response.Lens) (string, error) {
 }
 
 // lensesForRound is design section 6.7's own lens set: every lens for round
-// 1; for round n >= 2, selectLenses over round n-1's own rows and the paths
-// that changed between its own frozen sha and the current one. Round n-1's
-// own frozen sha is read from any one of its own finding rows (kept or
-// held: every row of a round carries that round's own SHA); a round with
-// none at all (every lens clean with zero findings) has nothing to compare
-// against, so the full lens set runs again rather than guessing.
+// 1; for round n >= 2, selectLenses over round n-1's own rows (newest per
+// id, as selectLenses' own doc comment requires) and the paths that changed
+// between its own frozen sha and the current one. Round n-1's own frozen
+// sha is read from any one of its own finding rows (kept or held: every row
+// of a round carries that round's own SHA); a round with none at all (every
+// lens clean with zero findings) has nothing to compare against, so the
+// full lens set runs again rather than guessing. The dedup matters once a
+// round's own id has more than one row: TRIAGE (6.5) appends a decided row
+// over ROUND's own undecided one, and a withdrawn discuss leaves the
+// original "discuss" row as an id's own newest with no accept ever
+// following it. Without the dedup, every one of an id's own rows is read
+// independently, which happens to land on the same lens set today (an id
+// never carries two rows both decided accept), but that is selectLenses'
+// own invariant to rely on, not lensesForRound's to assume twice.
 func (h reviewingHandler) lensesForRound(ctx context.Context, t store.Ticket, d Deps, wt orchestrator.Worktree, n int, sha string) ([]response.Lens, error) {
 	all := reviewLenses(d)
 	if n <= 1 {
@@ -1173,8 +1181,8 @@ func (h reviewingHandler) lensesForRound(ctx context.Context, t store.Ticket, d 
 	prevRound := n - 1
 	var prevRows []response.FindingArtifact
 	prevSHA := ""
-	for i := range findings {
-		f := findings[i].Finding
+	for _, row := range newestFindingRowPerID(findings) {
+		f := row.Finding
 		if f.Round != prevRound {
 			continue
 		}
@@ -1850,6 +1858,177 @@ func (h reviewingHandler) continueRound(ctx context.Context, t store.Ticket, d D
 	}
 
 	return h.tableCommit(ctx, t, d, proj, wt, n, sha, idx, attempts, false, resolveIDs, heldFindings, priorDone)
+}
+
+// ---- review escalation retries (design section 5.6) -----------------------
+
+// reviewCapResumesContinueReason is CONTINUE's own cap_resumes retry marker
+// reason (design section 5.6's "cap_resumes, exhausted session of job
+// review, from CONTINUE" row), byte for byte from the plan.
+const reviewCapResumesContinueReason = "a lens question could not be answered"
+
+// retryReviewLoopsExhausted is design section 5.6's "review, loops_exhausted"
+// retry row: a fix request of kind findings, built from the escalation's own
+// Tried text (the fix text FIXREQ had already rendered, 6.3) with the
+// owner's own notes appended, written straight through fixRequestMessage --
+// bypassing fixreq's own max_loops gate entirely, the one request 5.6 says
+// to skip it for.
+func (h reviewingHandler) retryReviewLoopsExhausted(ctx context.Context, t store.Ticket, d Deps, resolveIDs []int64, notes, tried string) (store.HandlerCommit, error) {
+	text := tried
+	if notes != "" {
+		text = strings.TrimRight(text, "\n") + "\n\n" + notes
+	}
+	maxRunID, err := d.Store.MaxRunID(ctx, t.ID)
+	if err != nil {
+		return store.HandlerCommit{}, fmt.Errorf("job: reviewing: loops_exhausted retry: max run id: %w", err)
+	}
+	msg, msgErr := fixRequestMessage(t, FixKindFindings, text, maxRunID)
+	if msgErr != nil {
+		return store.HandlerCommit{}, fmt.Errorf("job: reviewing: loops_exhausted retry: fix request message: %w", msgErr)
+	}
+	c := baseCommit(t, d)
+	c.ResolveQuestions = resolveIDs
+	c.Messages = []store.Message{msg}
+	return c, nil
+}
+
+// retryCapResumesReview is design section 5.6's own cap_resumes recovery for
+// a job "review" session: the only two places a review session ever
+// resumes are DISCUSS (6.6) and CONTINUE (6.2a), so the exhausted session
+// belongs to exactly one of them. A session some finding's decision
+// "discuss" is still waiting on (no "review discussed <id>" marker of its
+// own) is DISCUSS's; otherwise it is CONTINUE's own asking session.
+func (h reviewingHandler) retryCapResumesReview(ctx context.Context, t store.Ticket, d Deps, resolveIDs []int64, notes string, sessionID int64) (store.HandlerCommit, int, error) {
+	pending, err := h.sessionPendingDiscuss(ctx, t, d, sessionID)
+	if err != nil {
+		return store.HandlerCommit{}, 0, err
+	}
+	if len(pending) > 0 {
+		return h.retryCapResumesDiscuss(t, d, resolveIDs, notes, pending)
+	}
+	return h.retryCapResumesContinue(ctx, t, d, resolveIDs, sessionID)
+}
+
+// sessionPendingDiscuss returns sessionID's own still-pending discussed
+// findings (design section 6.6's own entry condition: decision discuss, no
+// "review discussed <id>" marker of its own), newest row per id, in id
+// order: empty when sessionID belongs to no open discuss group, the signal
+// retryCapResumesReview reads to tell a DISCUSS session from a CONTINUE one.
+func (h reviewingHandler) sessionPendingDiscuss(ctx context.Context, t store.Ticket, d Deps, sessionID int64) ([]store.FindingRow, error) {
+	findings, err := d.Store.Findings(ctx, t.ID)
+	if err != nil {
+		return nil, fmt.Errorf("job: reviewing: cap_resumes retry: findings: %w", err)
+	}
+	var out []store.FindingRow
+	for id, row := range newestFindingRowPerID(findings) {
+		f := row.Finding
+		if f.Held || f.Decision == nil || *f.Decision != response.FindingDiscuss || row.RunID == nil {
+			continue
+		}
+		_, marked, markErr := d.Store.Marker(ctx, t.ID, reviewDiscussedMarker(id))
+		if markErr != nil {
+			return nil, fmt.Errorf("job: reviewing: cap_resumes retry: discussed marker %s: %w", id, markErr)
+		}
+		if marked {
+			continue
+		}
+		run, runErr := d.Store.RunByID(ctx, *row.RunID)
+		if runErr != nil {
+			return nil, fmt.Errorf("job: reviewing: cap_resumes retry: run by id: %w", runErr)
+		}
+		if run.SessionID == sessionID {
+			out = append(out, *row)
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Finding.ID < out[j].Finding.ID })
+	return out, nil
+}
+
+// retryCapResumesDiscuss is design section 5.6's own "cap_resumes, exhausted
+// session of job review, from DISCUSS" row: every pending finding of the
+// session becomes decision accept, one new row per id (same id, TRIAGE's
+// own nil-to-decided shape), the owner's own notes appended to its fix
+// text, and the escalation's own round resolves.
+func (h reviewingHandler) retryCapResumesDiscuss(t store.Ticket, d Deps, resolveIDs []int64, notes string, pending []store.FindingRow) (store.HandlerCommit, int, error) {
+	accept := response.FindingAccept
+	artifacts := make([]store.Artifact, len(pending))
+	for i := range pending {
+		row := &pending[i]
+		finding := row.Finding
+		finding.Decision = &accept
+		if notes != "" {
+			finding.Fix = strings.TrimRight(finding.Fix, "\n") + "\n\n" + notes
+		}
+		payload, marshalErr := json.Marshal(finding)
+		if marshalErr != nil {
+			return store.HandlerCommit{}, 0, fmt.Errorf("job: reviewing: cap_resumes retry: marshal finding %s: %w", finding.ID, marshalErr)
+		}
+		artifacts[i] = store.Artifact{Type: artifactTypeFinding, RunID: row.RunID, Payload: payload}
+	}
+	c := baseCommit(t, d)
+	c.ResolveQuestions = resolveIDs
+	c.Artifacts = artifacts
+	return c, len(pending), nil
+}
+
+// retryCapResumesContinue is design section 5.6's own "cap_resumes,
+// exhausted session of job review, from CONTINUE" row: the newest "review
+// round <n> asked" marker names the round; this writes "review round <n>
+// failed" with CONTINUE's own cap reason (the held rows go unread from then
+// on, same as any other failed round) and resolves every answered question
+// of the asked set. The next tick's decision tree reads the "failed" marker
+// and starts a fresh ROUND n (6.1), the same lens set it would have had
+// (6.7's own repeat rule).
+func (h reviewingHandler) retryCapResumesContinue(ctx context.Context, t store.Ticket, d Deps, resolveIDs []int64, sessionID int64) (store.HandlerCommit, int, error) {
+	markers, err := d.Store.MarkersWithPrefix(ctx, t.ID, reviewRoundMarkerPrefix)
+	if err != nil {
+		return store.HandlerCommit{}, 0, fmt.Errorf("job: reviewing: cap_resumes retry: review round markers: %w", err)
+	}
+	if len(markers) == 0 {
+		return store.HandlerCommit{}, 0, fmt.Errorf("job: reviewing: cap_resumes retry: ticket %d: no review round marker", t.ID)
+	}
+	newest := markers[len(markers)-1]
+	if !reviewRoundAskedLine.MatchString(strings.SplitN(newest.Body, "\n", 2)[0]) {
+		return store.HandlerCommit{}, 0, fmt.Errorf("job: reviewing: cap_resumes retry: newest review round marker is not asked: %q", newest.Body)
+	}
+	n, runIDs, _, err := parseAskedMarker(newest)
+	if err != nil {
+		return store.HandlerCommit{}, 0, err
+	}
+
+	rounds, err := d.Store.AnsweredRounds(ctx, t.ID)
+	if err != nil {
+		return store.HandlerCommit{}, 0, fmt.Errorf("job: reviewing: cap_resumes retry: answered rounds: %w", err)
+	}
+	byRunID := make(map[int64]store.Round, len(rounds))
+	for _, r := range rounds {
+		if r.RunID != nil {
+			byRunID[*r.RunID] = r
+		}
+	}
+
+	allResolveIDs := append([]int64{}, resolveIDs...)
+	preserved := 0
+	sessionFound := false
+	for _, rid := range runIDs {
+		r, ok := byRunID[rid]
+		if !ok {
+			continue
+		}
+		allResolveIDs = append(allResolveIDs, questionIDs(r)...)
+		preserved++
+		if r.SessionID != nil && *r.SessionID == sessionID {
+			sessionFound = true
+		}
+	}
+	if !sessionFound {
+		return store.HandlerCommit{}, 0, fmt.Errorf("job: reviewing: cap_resumes retry: session %d is not an asker of the newest asked round", sessionID)
+	}
+
+	c := baseCommit(t, d)
+	c.ResolveQuestions = allResolveIDs
+	c.Messages = []store.Message{reviewRoundFailedMarker(t.ID, n, reviewCapResumesContinueReason)}
+	return c, preserved, nil
 }
 
 // derefString returns *s, or "" for a nil s: a resumed session's own

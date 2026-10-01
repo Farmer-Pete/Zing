@@ -146,12 +146,12 @@ func postBuildRoundOwnedByOpenFix(ctx context.Context, t store.Ticket, d Deps, r
 // or a reply with no option, re-escalates replan_unsupported with the
 // origin unchanged (D14 of Package 8), exactly as building's own
 // enterFromEscalationRound resolves the same two choices. Choice a (retry)
-// follows design section 5.6's own choice-by-origin table -- this task's own
-// slice of it: fix (with and without a run), perimeter, cap_resumes on a
-// build or perimeter session, cap_budget, and sandbox_unavailable. A row
-// this task does not yet cover (review, judge, shipping, respond, or
-// cap_resumes on one of their own sessions) is a loud, named error: later
-// tasks add those rows.
+// follows design section 5.6's own choice-by-origin table: fix (with and
+// without a run), perimeter, cap_resumes on a build, perimeter, or review
+// session (retryCapResumes' own job switch), cap_budget, sandbox_unavailable,
+// and review (loops_exhausted's own fix request, any other code's own
+// "retry requested" marker). A row this task does not yet cover (judge,
+// shipping, respond) is a loud, named error: later tasks add those rows.
 func resolvePostBuildEscalation(ctx context.Context, t store.Ticket, d Deps, round store.Round, escID int64) (store.HandlerCommit, error) {
 	h := buildingHandler{}
 	escMsg, payload, err := d.Store.EscalationByID(ctx, escID)
@@ -190,6 +190,12 @@ func resolvePostBuildEscalation(ctx context.Context, t store.Ticket, d Deps, rou
 		commit, err = h.retryFreshRun(ctx, t, d, resolveIDs, notes, errorText)
 
 	case origin == response.EscalationOriginFix:
+		commit = h.retryMarkerCommit(t, d, resolveIDs)
+
+	case origin == response.EscalationOriginReview && payload.Code == string(response.EscalationCodeLoopsExhausted):
+		commit, err = reviewingHandler{}.retryReviewLoopsExhausted(ctx, t, d, resolveIDs, notes, payload.Tried)
+
+	case origin == response.EscalationOriginReview:
 		commit = h.retryMarkerCommit(t, d, resolveIDs)
 
 	default:

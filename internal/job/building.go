@@ -894,10 +894,14 @@ func (h buildingHandler) retryCapResumes(ctx context.Context, t store.Ticket, d 
 		}
 	}
 
-	if exhausted.Job == jobPerimeterName {
+	switch exhausted.Job {
+	case jobPerimeterName:
 		return h.retryCapResumesPerimeter(ctx, t, d, resolveIDs, notes, preservedRounds)
+	case jobReviewName:
+		return reviewingHandler{}.retryCapResumesReview(ctx, t, d, resolveIDs, notes, sessionID)
+	default:
+		return h.retryCapResumesBuild(ctx, t, d, resolveIDs, notes, preservedRounds)
 	}
-	return h.retryCapResumesBuild(ctx, t, d, resolveIDs, notes, preservedRounds)
 }
 
 // sessionByID finds id among sessions (design section 6.9's own "the
