@@ -8,9 +8,11 @@ import (
 
 // ResumeHeader replaces the prompt file on a planning resume turn: there
 // is no fresh job prompt to load, only this fixed instruction to continue
-// the open session (plan section 6.3), byte-for-byte from the plan.
-const ResumeHeader = "Continue this planning session. The owner's answers, the review findings, " +
-	"or the errors follow. Recompute the frontier or revise the plan, and return the next document."
+// the open session (plan section 6.3, design section 22.6), byte-for-byte
+// from the plan.
+const ResumeHeader = "Continue this planning session. The owner's messages, the review findings, " +
+	"or the errors follow. Answer every owner message, recompute the frontier or revise the plan, " +
+	"and return the next document."
 
 // labelTicket is the ticket input's label, shared by every constructor
 // that carries one (ForClassify, ForPlanningFirst, ForPlanReview).

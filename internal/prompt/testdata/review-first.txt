@@ -32,7 +32,7 @@ diff --git a/internal/health/ping.go b/internal/health/ping.go
 
 <<<END abcdef>>>
 
-<zing job="review" outcome="ok"> <!-- job: Job, one of: classify | planning | planreview | build | perimeter | review | judge | respond | side, the running job; must match; outcome: Outcome, one of: bug | feature | questions | replies | ready | children | nothing_to_do | ok | question | error, one of this job's outcomes, or question, or error -->
+<zing job="review" outcome="ok"> <!-- job: Job, one of: classify | planning | planreview | build | perimeter | review | judge | respond | side, the running job; must match; outcome: Outcome, one of: ok | question | error, one of this job's outcomes, or question, or error -->
   <finding lens="..." severity="..." location="..."> <!-- Finding, optional, zero or more; lens: Lens, one of: problem | simplification | correctness | security | fidelity | tests | quality | observability; severity: Severity, one of: blocker | major | minor | nit; location: string, plan: an element path such as plan/delivery/tasks/task[3]; code: path:line inside the diff -->
     <text>...</text> <!-- string, what is wrong or unanswered -->
     <fix>...</fix> <!-- string, what to change -->
@@ -40,7 +40,7 @@ diff --git a/internal/health/ping.go b/internal/health/ping.go
   </finding>
 </zing>
 
-<zing job="review" outcome="question"> <!-- job: Job, one of: classify | planning | planreview | build | perimeter | review | judge | respond | side, the running job; must match; outcome: Outcome, one of: bug | feature | questions | replies | ready | children | nothing_to_do | ok | question | error, one of this job's outcomes, or question, or error -->
+<zing job="review" outcome="question"> <!-- job: Job, one of: classify | planning | planreview | build | perimeter | review | judge | respond | side, the running job; must match; outcome: Outcome, one of: ok | question | error, one of this job's outcomes, or question, or error -->
   <question key="..."> <!-- Question, one or more, one per decision you need; key: string -->
     <title>...</title> <!-- string, short -->
     <body>...</body> <!-- string, what you need to know and why, markdown -->
@@ -50,7 +50,7 @@ diff --git a/internal/health/ping.go b/internal/health/ping.go
   <progress>...</progress> <!-- string, what is done so far, so the resumed run can continue -->
 </zing>
 
-<zing job="review" outcome="error"> <!-- job: Job, one of: classify | planning | planreview | build | perimeter | review | judge | respond | side, the running job; must match; outcome: Outcome, one of: bug | feature | questions | replies | ready | children | nothing_to_do | ok | question | error, one of this job's outcomes, or question, or error -->
+<zing job="review" outcome="error"> <!-- job: Job, one of: classify | planning | planreview | build | perimeter | review | judge | respond | side, the running job; must match; outcome: Outcome, one of: ok | question | error, one of this job's outcomes, or question, or error -->
   <error code="..."> <!-- RunError; code: ErrorCode, one of: plan_gap | cannot_run | environment | other -->
     <what>...</what> <!-- string, what could not be done -->
     <why>...</why> <!-- string, why, with evidence -->

@@ -19,11 +19,12 @@ func RenderTemplate(job Job, outcome Outcome) (string, error) {
 	}
 	root := shapeOf(reflect.TypeOf(r).Elem())
 	override := map[string]string{attrJob: string(job), attrOutcome: string(outcome)}
+	jobOutcomes := outcomesForJob(job)
 
 	attrs, chardata, children := splitChildren(root.Children)
 
 	var buf strings.Builder
-	tag, comment := startTagAndComment(&node{Name: zingElementName}, attrs, override, true)
+	tag, comment := startTagAndComment(&node{Name: zingElementName}, attrs, override, jobOutcomes, true)
 	buf.WriteString(tag + ">")
 	writeComment(&buf, comment)
 	buf.WriteByte('\n')
@@ -31,11 +32,26 @@ func RenderTemplate(job Job, outcome Outcome) (string, error) {
 		buf.WriteString("  ...\n")
 	}
 	for _, c := range children {
-		renderChild(&buf, c, 1, override)
+		renderChild(&buf, c, 1, override, jobOutcomes)
 	}
 	buf.WriteString("</" + zingElementName + ">\n")
 
 	return buf.String(), nil
+}
+
+// outcomesForJob returns the Outcome values registered to job, in
+// Outcome.Values()'s own order (design section 22.6, the D31-4 fix): the
+// outcome attribute's render note lists only these, plus question and
+// error, which the registry already carries for every job, so a job such
+// as build never shows planning's own OutcomeReplies.
+func outcomesForJob(job Job) []string {
+	var out []string
+	for _, v := range Outcome("").Values() {
+		if _, ok := registry[registryKey{job, Outcome(v)}]; ok {
+			out = append(out, v)
+		}
+	}
+	return out
 }
 
 // ---- one XML line per shape node ------------------------------------------
@@ -45,19 +61,19 @@ func RenderTemplate(job Job, outcome Outcome) (string, error) {
 // passed here). It intercepts the two none-union types (Migrations,
 // Deletions) before the generic path, since they render two example lines
 // instead of one (design section 6.8).
-func renderChild(buf *strings.Builder, n *node, depth int, override map[string]string) {
+func renderChild(buf *strings.Builder, n *node, depth int, override map[string]string, jobOutcomes []string) {
 	switch n.Kind {
 	case kindWrapper:
 		indent := strings.Repeat("  ", depth)
 		buf.WriteString(indent + "<" + n.Name + ">\n")
-		renderChild(buf, n.Children[0], depth+1, override)
+		renderChild(buf, n.Children[0], depth+1, override, jobOutcomes)
 		buf.WriteString(indent + "</" + n.Name + ">\n")
 	case kindElement:
 		if isNoneUnion(n) {
-			renderNoneUnion(buf, n, depth)
+			renderNoneUnion(buf, n, depth, jobOutcomes)
 			return
 		}
-		renderElement(buf, n, depth, override, false)
+		renderElement(buf, n, depth, override, jobOutcomes, false)
 	case kindAttr, kindChardata:
 		// unreachable: a struct's own attrs and chardata are consumed by
 		// splitChildren in renderElement/RenderTemplate before reaching
@@ -72,11 +88,11 @@ func renderChild(buf *strings.Builder, n *node, depth int, override map[string]s
 // an open tag, its content, and a close tag. skipOwnNote is true only for
 // the synthetic root call, whose node carries no field of its own to
 // describe.
-func renderElement(buf *strings.Builder, n *node, depth int, override map[string]string, skipOwnNote bool) {
+func renderElement(buf *strings.Builder, n *node, depth int, override map[string]string, jobOutcomes []string, skipOwnNote bool) {
 	indent := strings.Repeat("  ", depth)
 
 	if !isStructType(n) {
-		tag, comment := startTagAndComment(n, nil, override, skipOwnNote)
+		tag, comment := startTagAndComment(n, nil, override, jobOutcomes, skipOwnNote)
 		buf.WriteString(indent + tag + ">...</" + n.Name + ">")
 		writeComment(buf, comment)
 		buf.WriteByte('\n')
@@ -84,7 +100,7 @@ func renderElement(buf *strings.Builder, n *node, depth int, override map[string
 	}
 
 	attrs, chardata, children := splitChildren(n.Children)
-	tag, comment := startTagAndComment(n, attrs, override, skipOwnNote)
+	tag, comment := startTagAndComment(n, attrs, override, jobOutcomes, skipOwnNote)
 
 	switch {
 	case chardata == nil && len(children) == 0:
@@ -103,7 +119,7 @@ func renderElement(buf *strings.Builder, n *node, depth int, override map[string
 			buf.WriteString(indent + "  ...\n")
 		}
 		for _, c := range children {
-			renderChild(buf, c, depth+1, override)
+			renderChild(buf, c, depth+1, override, jobOutcomes)
 		}
 		buf.WriteString(indent + "</" + n.Name + ">\n")
 	}
@@ -122,7 +138,7 @@ func isNoneUnion(n *node) bool {
 // doc tag, and the list line, commented as one-or-more (the semantic the
 // none union enforces: present means non-empty) plus the item slice's own
 // doc tag.
-func renderNoneUnion(buf *strings.Builder, n *node, depth int) {
+func renderNoneUnion(buf *strings.Builder, n *node, depth int, jobOutcomes []string) {
 	indent := strings.Repeat("  ", depth)
 	attrs, _, children := splitChildren(n.Children)
 
@@ -148,7 +164,7 @@ func renderNoneUnion(buf *strings.Builder, n *node, depth int) {
 	if items != nil {
 		oneOrMore := *items
 		oneOrMore.HasMinItems, oneOrMore.MinItems, oneOrMore.HasMaxItems = true, 1, false
-		renderChild(buf, &oneOrMore, depth+1, nil)
+		renderChild(buf, &oneOrMore, depth+1, nil, jobOutcomes)
 	}
 	buf.WriteString(indent + "</" + n.Name + ">\n")
 }
@@ -160,7 +176,7 @@ func renderNoneUnion(buf *strings.Builder, n *node, depth int) {
 // skipOwnNote), then each attribute's own note, joined in encounter order
 // (design section 6.8: "attributes render inside their element's start
 // tag, with their notes joined into that element's trailing comment").
-func startTagAndComment(n *node, attrs []*node, override map[string]string, skipOwnNote bool) (tag, comment string) {
+func startTagAndComment(n *node, attrs []*node, override map[string]string, jobOutcomes []string, skipOwnNote bool) (tag, comment string) {
 	var tagBuf strings.Builder
 	tagBuf.WriteString("<" + n.Name)
 	for _, a := range attrs {
@@ -170,12 +186,12 @@ func startTagAndComment(n *node, attrs []*node, override map[string]string, skip
 
 	var frags []string
 	if !skipOwnNote {
-		if own := noteParts(n); len(own) > 0 {
+		if own := noteParts(n, jobOutcomes); len(own) > 0 {
 			frags = append(frags, strings.Join(own, ", "))
 		}
 	}
 	for _, a := range attrs {
-		if parts := noteParts(a); len(parts) > 0 {
+		if parts := noteParts(a, jobOutcomes); len(parts) > 0 {
 			frags = append(frags, a.Name+": "+strings.Join(parts, ", "))
 		}
 	}
@@ -205,7 +221,12 @@ func writeComment(buf *strings.Builder, comment string) {
 // apply. A doc identical to the immediately preceding piece (Question.
 // Options' own doc tag literally reads "none, or two to four", the same
 // text as its hardcoded cardinality note) is dropped rather than repeated.
-func noteParts(n *node) []string {
+// The outcome attribute is the one field whose allowed values are not its
+// Go enum type's full Values(): jobOutcomes (the rendering job's own
+// registered outcomes, outcomesForJob) replaces it there, so a job such
+// as build never lists planning's own OutcomeReplies (design section
+// 22.6, the D31-4 fix).
+func noteParts(n *node, jobOutcomes []string) []string {
 	var parts []string
 	if t := typeName(n); t != "" {
 		parts = append(parts, t)
@@ -217,7 +238,11 @@ func noteParts(n *node) []string {
 		parts = append(parts, cardinalityNote(n))
 	}
 	if n.Enum {
-		if values := enumValues(n); len(values) > 0 {
+		values := enumValues(n)
+		if n.Name == attrOutcome {
+			values = jobOutcomes
+		}
+		if len(values) > 0 {
 			parts = append(parts, "one of: "+strings.Join(values, " | "))
 		}
 	}

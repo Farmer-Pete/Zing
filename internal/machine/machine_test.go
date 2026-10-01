@@ -14,6 +14,11 @@ const (
 	// testJobNameBuild is the real machine.toml's "build" job name
 	// (goconst): both this file and prompts_test.go repeat it.
 	testJobNameBuild = "build"
+	// planningFeaturePromptPath and planningBugPromptPath are the real
+	// machine.toml's planning prompt paths (goconst): this file and
+	// prompts_test.go both repeat them.
+	planningFeaturePromptPath = "prompts/planning-feature.md"
+	planningBugPromptPath     = "prompts/planning-bug.md"
 )
 
 func TestLoad_RealMachineTOMLLoadsClean(t *testing.T) {
@@ -38,7 +43,7 @@ func TestLoad_RealMachineTOMLLoadsClean(t *testing.T) {
 
 	// planning's prompt is a {feature, bug} pair.
 	planning := m.Jobs["planning"]
-	if planning.Prompt.Feature != "prompts/planning-feature.md" || planning.Prompt.Bug != "prompts/planning-bug.md" {
+	if planning.Prompt.Feature != planningFeaturePromptPath || planning.Prompt.Bug != planningBugPromptPath {
 		t.Errorf("planning.Prompt = %+v, want the feature/bug pair", planning.Prompt)
 	}
 

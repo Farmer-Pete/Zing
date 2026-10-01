@@ -27,13 +27,13 @@ func TestPrompts_MatchThePinnedDesignText(t *testing.T) {
 		},
 		{
 			name:   "planning-feature",
-			path:   "prompts/planning-feature.md",
-			sha256: "fa7c4e234296affb0efbce560bb0557524d22413fa9d2d37043c4d271ed33698",
+			path:   planningFeaturePromptPath,
+			sha256: "7e2f9577094c21d75b8ae97e893817b04d4bdc20cda6ae8192d68712e89a6c5d",
 		},
 		{
 			name:   "planning-bug",
-			path:   "prompts/planning-bug.md",
-			sha256: "541217a029c67cd28c06c956c8829e9455e034d2bbda50077d5cd7ca5d8f78c2",
+			path:   planningBugPromptPath,
+			sha256: "6a1b42de7e161c154d5856f76e79082777ad33cd15b20315a37a9dd16e82c139",
 		},
 		{
 			name:   "planreview",
@@ -83,6 +83,57 @@ func TestPrompts_MatchThePinnedDesignText(t *testing.T) {
 			sum := sha256.Sum256(got)
 			if gotHex := hex.EncodeToString(sum[:]); gotHex != tc.sha256 {
 				t.Errorf("%s sha256 = %s, want %s", tc.path, gotHex, tc.sha256)
+			}
+		})
+	}
+}
+
+// conversationsSection is the exact text design section 22.6 requires
+// verbatim in both planning prompts, the D31 teaching text for the
+// conversation model: question keys, the replies element, settling a
+// thread, and the rule that every thread must be settled before ready,
+// children, or nothing_to_do.
+const conversationsSection = `Conversations. Zing gives every question you ask a key, Q and a number,
+such as Q7. It can differ from the key you wrote. Use only keys Zing
+has shown you. Each question is a thread between you and the owner.
+When the owner writes, you are resumed with a conversation input: for
+each thread with something new, the owner's messages oldest first, each
+a picked option or text. A later pick replaces an earlier one.
+
+Answer every owner message you receive, in that same turn, with one
+reply per thread inside replies:
+<replies><reply question="Q7">your answer</reply></replies>.
+Every outcome except error can carry replies. When replies are all you
+have this turn, return outcome replies.
+
+Settle a thread once the owner's messages give you its decision:
+<reply question="Q7" settled="true" decision="...">...</reply>.
+The decision is one sentence, at most 500 characters, saying what was
+decided. Only you settle a thread. A settled thread takes no more
+replies from you. Until the owner approves the gate, the owner can
+reopen it by writing in it (D32, 22.12.2).
+
+Settle every thread before you return ready, children, or
+nothing_to_do, in that response or an earlier one. Zing rejects any of
+the three while a thread is open, and resumes you with the error.`
+
+// TestPlanningPromptsTeachConversations asserts both planning prompts
+// carry design section 22.6's Conversations. section byte for byte
+// (task D31-4): the agent's only teaching on question keys, replies, and
+// settling a thread.
+func TestPlanningPromptsTeachConversations(t *testing.T) {
+	t.Parallel()
+
+	for _, path := range []string{planningFeaturePromptPath, planningBugPromptPath} {
+		t.Run(path, func(t *testing.T) {
+			t.Parallel()
+
+			got, err := zing.Assets.ReadFile(path)
+			if err != nil {
+				t.Fatalf("ReadFile(%s): %v", path, err)
+			}
+			if !strings.Contains(string(got), conversationsSection) {
+				t.Errorf("%s is missing the Conversations. section verbatim (design section 22.6)", path)
 			}
 		})
 	}

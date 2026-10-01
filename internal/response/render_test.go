@@ -240,6 +240,34 @@ func TestRenderTemplate_EachFieldShowsItsType(t *testing.T) {
 	}
 }
 
+// TestRenderTemplate_OutcomeNoteIsJobScoped asserts the root outcome
+// attribute's "one of: ..." note lists only the rendering job's own
+// registered outcomes plus the two universal ones, question and error
+// (design section 22.6, the D31-4 fix): OutcomeReplies sits in the shared
+// Outcome.Values() text, so without this, every job's schema would list
+// "replies" even though only planning ever returns it.
+func TestRenderTemplate_OutcomeNoteIsJobScoped(t *testing.T) {
+	t.Parallel()
+
+	for _, job := range []Job{JobBuild, JobReview, JobJudge, JobRespond} {
+		out, err := RenderTemplate(job, OutcomeOk)
+		if err != nil {
+			t.Fatalf("RenderTemplate(%s, ok): %v", job, err)
+		}
+		if strings.Contains(out, "replies") {
+			t.Errorf("%s/ok template mentions replies; a non-planning agent must never see it:\n%s", job, out)
+		}
+	}
+
+	out, err := RenderTemplate(JobPlanning, OutcomeReady)
+	if err != nil {
+		t.Fatalf("RenderTemplate(planning, ready): %v", err)
+	}
+	if !strings.Contains(out, "one of: questions | replies | ready | children | nothing_to_do | question | error") {
+		t.Errorf("planning/ready template's outcome note does not list replies among planning's own outcomes:\n%s", out)
+	}
+}
+
 // TestRenderTemplate_EndsWithOneTrailingNewline pins the exact
 // end-of-output whitespace design section 6.8 requires.
 func TestRenderTemplate_EndsWithOneTrailingNewline(t *testing.T) {
