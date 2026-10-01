@@ -100,12 +100,14 @@ type Project struct {
 	LintCmd string // config projects[i].commands.lint
 	Owner   string // the GitHub repository owner serve fills every project with (PKG9-PLAN.md section 10.3)
 	Repo    string // the GitHub repository name serve fills every project with (PKG9-PLAN.md section 10.3)
-	// PullRequests and Checks are the shipping handler's own window onto
-	// GitHub (PKG9-PLAN.md section 10.3): serve fills both from one shared
-	// *orchestrator.GitHubClient; a test fake implements only the interface
-	// its test needs.
+	// PullRequests, Flips, Checks, and Threads are the shipping and respond
+	// handlers' own window onto GitHub (PKG9-PLAN.md section 10.3): serve
+	// fills all four from one shared *orchestrator.GitHubClient; a test fake
+	// implements only the interface its test needs.
 	PullRequests PullRequests
+	Flips        DraftFlips
 	Checks       Checks
+	Threads      ReviewThreads
 }
 
 // CommandRunner runs one shell command in dir, in its own process group, and

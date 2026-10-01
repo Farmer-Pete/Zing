@@ -312,6 +312,44 @@ func TestServeProjectsHaveM3Interfaces(t *testing.T) {
 	}
 }
 
+// TestServeProjectsHaveM4Interfaces proves buildJobProjects fills every
+// job.Project's Flips and Threads from the one shared
+// *orchestrator.GitHubClient (PKG9-PLAN.md section 10.3, M4 task 1), ahead
+// of RESPOND (task 4) or the ready flip (task 7) ever reading them.
+func TestServeProjectsHaveM4Interfaces(t *testing.T) {
+	t.Parallel()
+
+	const deltaProject = "delta"
+
+	repoA := newTestGitRepo(t)
+	cfgProjects := []config.Project{
+		{Name: deltaProject, Repo: "acme/" + deltaProject, Path: repoA, Tracker: testServeTracker},
+	}
+	bindings := []zdispatch.Binding{
+		{StoreProjectID: 10, TrackerProject: deltaProject},
+	}
+	gh, err := orchestrator.NewGitHubClient("test-github-token")
+	if err != nil {
+		t.Fatalf("orchestrator.NewGitHubClient: %v", err)
+	}
+
+	projects, err := buildJobProjects(t.Context(), cfgProjects, bindings, gh, sandbox.Off())
+	if err != nil {
+		t.Fatalf("buildJobProjects: %v", err)
+	}
+
+	p, ok := projects[10]
+	if !ok {
+		t.Fatal("projects[10] missing")
+	}
+	if p.Flips == nil {
+		t.Error("Flips is nil")
+	}
+	if p.Threads == nil {
+		t.Error("Threads is nil")
+	}
+}
+
 // productionTestModels is the job.Deps.Models alias table the tests below
 // wire every claim/run with: the exact model ids do not matter, since every
 // runtime here is a *runtime.Fake or a spy.

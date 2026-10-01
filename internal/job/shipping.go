@@ -1,12 +1,12 @@
 // shipping.go declares the consumer-side interfaces the shipping state
-// machine needs from GitHub, over orchestrator.GitHubClient's REST surface
-// (PKG9-PLAN.md section 10.3). Declaring them here, not widening
-// orchestrator.GitHub, keeps every existing fake of that four-method
-// interface (cmd/zing/selftest.go, internal/dispatch/dispatch_test.go,
+// machine needs from GitHub, over orchestrator.GitHubClient's REST and
+// GraphQL surface (PKG9-PLAN.md section 10.3). Declaring them here, not
+// widening orchestrator.GitHub, keeps every existing fake of that
+// four-method interface (cmd/zing/selftest.go, internal/dispatch/dispatch_test.go,
 // internal/console/resume_e2e_test.go, the orchestrator tests) valid: a test
-// of a handler that needs PullRequests or Checks implements only the small
-// interface it uses. M3 task 6 adds PUBLISH, POLL, and the rest of the
-// shipping handler to this file.
+// of a handler that needs PullRequests, DraftFlips, or Checks implements
+// only the small interface it uses. M3 task 6 adds PUBLISH, POLL, and the
+// rest of the shipping handler to this file.
 package job
 
 import (
@@ -23,6 +23,17 @@ type PullRequests interface {
 	// Merge merges the pull request with sha pinning its head
 	// (orchestrator.GitHubClient.Merge, called with sha set).
 	Merge(ctx context.Context, owner, repo string, number int, sha, method, title string) (string, error)
+}
+
+// DraftFlips is what the shipping handler needs to flip a pull request
+// between draft and ready for review (M4 task 1, task 7 onward).
+type DraftFlips interface {
+	// MarkReady marks the pull request ready for review
+	// (orchestrator.GitHubClient.MarkReady, GraphQL).
+	MarkReady(ctx context.Context, prNodeID string) error
+	// ConvertToDraft converts the pull request back to a draft
+	// (orchestrator.GitHubClient.ConvertToDraft, GraphQL).
+	ConvertToDraft(ctx context.Context, prNodeID string) error
 }
 
 // Checks is what the shipping handler needs to decide CI state and fetch a

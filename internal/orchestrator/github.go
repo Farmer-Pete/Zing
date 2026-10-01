@@ -215,6 +215,148 @@ type Review struct {
 	Login, UserType, State, CommitID string // UserType "User" or "Bot"; State APPROVED | CHANGES_REQUESTED | COMMENTED | DISMISSED | PENDING
 }
 
+// Thread is one pull request review thread GitHub reports (PKG9-PLAN.md
+// section 10.3), as job.ReviewThreads' callers consume it (M4). Comments
+// holds the last 100, oldest first; ThreadCommentsContain reads further
+// back when the reply guard needs more than that.
+type Thread struct {
+	ID         string
+	IsResolved bool
+	IsOutdated bool
+	Path       string
+	Line       int // 0 when GitHub reports null
+	Comments   []ThreadComment
+}
+
+// ThreadComment is one comment of a Thread (PKG9-PLAN.md section 10.3).
+type ThreadComment struct {
+	ID        string // GraphQL id
+	Author    string // login; "ghost" when GitHub reports none
+	Body      string
+	CreatedAt time.Time
+	UpdatedAt time.Time // GitHub's updatedAt; changes when the comment is edited
+}
+
+// ListThreads calls the ZingThreads query, paged with reviewThreads'
+// pageInfo, each node carrying its last 100 comments inline
+// (job.ReviewThreads.ListThreads, M4; PKG9-PLAN.md section 10.3, 10.4). At
+// most 10 pages (1000 threads); an eleventh is the error "orchestrator:
+// graphql threads: more than 1000 review threads", never fetched.
+func (g *GitHubClient) ListThreads(ctx context.Context, owner, repo string, number int) ([]Thread, error) {
+	gql := graphQL{c: g.c}
+
+	var out []Thread
+	var after *string
+	for page := 1; ; page++ {
+		var resp zingThreadsData
+		vars := map[string]any{"owner": owner, "repo": repo, "number": number, "after": after}
+		if err := gql.do(ctx, "threads", qZingThreads, vars, &resp); err != nil {
+			return nil, err
+		}
+
+		rt := resp.Repository.PullRequest.ReviewThreads
+		for _, n := range rt.Nodes {
+			out = append(out, n.toThread())
+		}
+		if !rt.PageInfo.HasNextPage {
+			return out, nil
+		}
+		if page >= maxThreadPages {
+			return nil, errors.New("orchestrator: graphql threads: more than 1000 review threads")
+		}
+		cursor := rt.PageInfo.EndCursor
+		after = &cursor
+	}
+}
+
+// ThreadCommentsContain calls the ZingThreadComments query, paged until
+// GitHub reports no next page (no page limit), and reports whether any
+// comment of the thread -- not only the last 100 -- is authored by author
+// and contains needle (job.ReviewThreads.ThreadCommentsContain, M4;
+// PKG9-PLAN.md section 10.3, 10.4).
+func (g *GitHubClient) ThreadCommentsContain(ctx context.Context, threadID, needle, author string) (bool, error) {
+	gql := graphQL{c: g.c}
+
+	var after *string
+	for {
+		var resp zingThreadCommentsData
+		vars := map[string]any{gqlVarThread: threadID, "after": after}
+		if err := gql.do(ctx, "thread comments", qZingThreadComments, vars, &resp); err != nil {
+			return false, err
+		}
+
+		for _, c := range resp.Node.Comments.Nodes {
+			tc := c.toThreadComment()
+			if tc.Author == author && strings.Contains(tc.Body, needle) {
+				return true, nil
+			}
+		}
+		if !resp.Node.Comments.PageInfo.HasNextPage {
+			return false, nil
+		}
+		cursor := resp.Node.Comments.PageInfo.EndCursor
+		after = &cursor
+	}
+}
+
+// ReplyToThread calls the ZingReply mutation (job.ReviewThreads.ReplyToThread,
+// M4; PKG9-PLAN.md section 10.3, 10.4).
+func (g *GitHubClient) ReplyToThread(ctx context.Context, threadID, body string) error {
+	gql := graphQL{c: g.c}
+	vars := map[string]any{gqlVarThread: threadID, "body": body}
+	return gql.do(ctx, "reply", qZingReply, vars, nil)
+}
+
+// ResolveThread calls the ZingResolve mutation and checks the result's
+// isResolved (job.ReviewThreads.ResolveThread, M4; PKG9-PLAN.md section
+// 10.3, 10.4). A mismatch is "orchestrator: graphql resolve: result did not
+// change state".
+func (g *GitHubClient) ResolveThread(ctx context.Context, threadID string) error {
+	gql := graphQL{c: g.c}
+	var resp zingResolveData
+	vars := map[string]any{gqlVarThread: threadID}
+	if err := gql.do(ctx, "resolve", qZingResolve, vars, &resp); err != nil {
+		return err
+	}
+	if !resp.ResolveReviewThread.Thread.IsResolved {
+		return errors.New("orchestrator: graphql resolve: result did not change state")
+	}
+	return nil
+}
+
+// MarkReady calls the ZingReady mutation and checks the result's isDraft is
+// false (job.DraftFlips.MarkReady, M4; PKG9-PLAN.md section 10.3, 10.4). A
+// mismatch is "orchestrator: graphql ready: result did not change state".
+func (g *GitHubClient) MarkReady(ctx context.Context, prNodeID string) error {
+	gql := graphQL{c: g.c}
+	var resp zingReadyData
+	vars := map[string]any{"pr": prNodeID}
+	if err := gql.do(ctx, "ready", qZingReady, vars, &resp); err != nil {
+		return err
+	}
+	if resp.MarkPullRequestReadyForReview.PullRequest.IsDraft {
+		return errors.New("orchestrator: graphql ready: result did not change state")
+	}
+	return nil
+}
+
+// ConvertToDraft calls the ZingDraft mutation and checks the result's
+// isDraft is true (job.DraftFlips.ConvertToDraft, M4; PKG9-PLAN.md section
+// 10.3, 10.4). A mismatch is "orchestrator: graphql draft: result did not
+// change state".
+func (g *GitHubClient) ConvertToDraft(ctx context.Context, prNodeID string) error {
+	gql := graphQL{c: g.c}
+	var resp zingDraftData
+	vars := map[string]any{"pr": prNodeID}
+	if err := gql.do(ctx, "draft", qZingDraft, vars, &resp); err != nil {
+		return err
+	}
+	if !resp.ConvertPullRequestToDraft.PullRequest.IsDraft {
+		return errors.New("orchestrator: graphql draft: result did not change state")
+	}
+	return nil
+}
+
 // GetPR calls PullRequests.Get and reports the pull request's current
 // state (job.PullRequests.GetPR; PKG9-PLAN.md section 10.3).
 func (g *GitHubClient) GetPR(ctx context.Context, owner, repo string, number int) (PRState, error) {

@@ -611,9 +611,9 @@ func removeStartupJudgeDir(dataDir string) error {
 // project id for each configured project name (ensureBindings, above). gh is
 // the concrete *orchestrator.GitHubClient, not the four-method GitHub
 // interface: every job.Project also carries Owner, Repo, and gh itself as
-// its PullRequests and Checks (PKG9-PLAN.md section 10.3), so the shipping
-// handler reads and writes GitHub through the same client Package 5's git
-// writes use.
+// its PullRequests, Flips, Checks, and Threads (PKG9-PLAN.md section 10.3),
+// so the shipping and respond handlers read and write GitHub through the
+// same client Package 5's git writes use.
 func buildJobProjects(ctx context.Context, projects []config.Project, bindings []zdispatch.Binding, gh *orchestrator.GitHubClient, sb sandbox.Sandbox) (map[int64]job.Project, error) {
 	storeProjectID := make(map[string]int64, len(bindings))
 	for _, b := range bindings {
@@ -647,7 +647,7 @@ func buildJobProjects(ctx context.Context, projects []config.Project, bindings [
 		}
 		out[id] = job.Project{
 			Orch: orch, RepoGit: repoGit, TestCmd: p.Commands.Test, LintCmd: p.Commands.Lint,
-			Owner: owner, Repo: repo, PullRequests: gh, Checks: gh,
+			Owner: owner, Repo: repo, PullRequests: gh, Flips: gh, Checks: gh, Threads: gh,
 		}
 	}
 	return out, nil
