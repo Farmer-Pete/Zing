@@ -234,9 +234,9 @@ func TestServeBuildsOneOrchestratorPerProject(t *testing.T) {
 		{StoreProjectID: 10, TrackerProject: "alpha"},
 		{StoreProjectID: 20, TrackerProject: "beta"},
 	}
-	gh, err := orchestrator.NewGitHub("test-github-token")
+	gh, err := orchestrator.NewGitHubClient("test-github-token")
 	if err != nil {
-		t.Fatalf("orchestrator.NewGitHub: %v", err)
+		t.Fatalf("orchestrator.NewGitHubClient: %v", err)
 	}
 
 	projects, err := buildJobProjects(t.Context(), cfgProjects, bindings, gh, sandbox.Off())
@@ -265,6 +265,50 @@ func TestServeBuildsOneOrchestratorPerProject(t *testing.T) {
 		if p.RepoGit != wantGitDir {
 			t.Errorf("projects[%d].RepoGit = %q, want %q", id, p.RepoGit, wantGitDir)
 		}
+	}
+}
+
+// TestServeProjectsHaveM3Interfaces proves buildJobProjects fills every
+// job.Project's Owner, Repo, PullRequests, and Checks from the configured
+// repo and the one shared *orchestrator.GitHubClient (PKG9-PLAN.md section
+// 10.3, M3 task 2), ahead of shipping's POLL (task 7) ever reading them.
+func TestServeProjectsHaveM3Interfaces(t *testing.T) {
+	t.Parallel()
+
+	const gammaProject = "gamma"
+
+	repoA := newTestGitRepo(t)
+	cfgProjects := []config.Project{
+		{Name: gammaProject, Repo: "acme/" + gammaProject, Path: repoA, Tracker: testServeTracker},
+	}
+	bindings := []zdispatch.Binding{
+		{StoreProjectID: 10, TrackerProject: gammaProject},
+	}
+	gh, err := orchestrator.NewGitHubClient("test-github-token")
+	if err != nil {
+		t.Fatalf("orchestrator.NewGitHubClient: %v", err)
+	}
+
+	projects, err := buildJobProjects(t.Context(), cfgProjects, bindings, gh, sandbox.Off())
+	if err != nil {
+		t.Fatalf("buildJobProjects: %v", err)
+	}
+
+	p, ok := projects[10]
+	if !ok {
+		t.Fatal("projects[10] missing")
+	}
+	if p.Owner != "acme" {
+		t.Errorf("Owner = %q, want %q", p.Owner, "acme")
+	}
+	if p.Repo != gammaProject {
+		t.Errorf("Repo = %q, want %q", p.Repo, gammaProject)
+	}
+	if p.PullRequests == nil {
+		t.Error("PullRequests is nil")
+	}
+	if p.Checks == nil {
+		t.Error("Checks is nil")
 	}
 }
 

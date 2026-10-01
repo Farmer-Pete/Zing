@@ -278,7 +278,7 @@ func serve(ctx context.Context, cfgPath, dbPath string, seedDemo bool) error {
 		return err
 	}
 
-	gh, err := orchestrator.NewGitHub(cfg.GitHubToken)
+	gh, err := orchestrator.NewGitHubClient(cfg.GitHubToken)
 	if err != nil {
 		_ = st.Close()
 		return fmt.Errorf("serve: %w", err)
@@ -608,8 +608,13 @@ func removeStartupJudgeDir(dataDir string) error {
 // the project's own configured path, gh shared by every one of them, and
 // BuildWritableRoots from the sandbox's own cache root and mds folder when
 // it is available (task 8, design section 15). bindings supplies the store
-// project id for each configured project name (ensureBindings, above).
-func buildJobProjects(ctx context.Context, projects []config.Project, bindings []zdispatch.Binding, gh orchestrator.GitHub, sb sandbox.Sandbox) (map[int64]job.Project, error) {
+// project id for each configured project name (ensureBindings, above). gh is
+// the concrete *orchestrator.GitHubClient, not the four-method GitHub
+// interface: every job.Project also carries Owner, Repo, and gh itself as
+// its PullRequests and Checks (PKG9-PLAN.md section 10.3), so the shipping
+// handler reads and writes GitHub through the same client Package 5's git
+// writes use.
+func buildJobProjects(ctx context.Context, projects []config.Project, bindings []zdispatch.Binding, gh *orchestrator.GitHubClient, sb sandbox.Sandbox) (map[int64]job.Project, error) {
 	storeProjectID := make(map[string]int64, len(bindings))
 	for _, b := range bindings {
 		storeProjectID[b.TrackerProject] = b.StoreProjectID
@@ -640,7 +645,10 @@ func buildJobProjects(ctx context.Context, projects []config.Project, bindings [
 		if err != nil {
 			return nil, fmt.Errorf("serve: project %s: git common dir: %w", p.Name, err)
 		}
-		out[id] = job.Project{Orch: orch, RepoGit: repoGit, TestCmd: p.Commands.Test, LintCmd: p.Commands.Lint}
+		out[id] = job.Project{
+			Orch: orch, RepoGit: repoGit, TestCmd: p.Commands.Test, LintCmd: p.Commands.Lint,
+			Owner: owner, Repo: repo, PullRequests: gh, Checks: gh,
+		}
 	}
 	return out, nil
 }

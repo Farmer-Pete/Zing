@@ -1,12 +1,17 @@
 package orchestrator
 
 import (
+	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/google/go-github/v92/github"
 )
@@ -15,14 +20,14 @@ import (
 // so a test can assert the Authorization header it produces.
 const testGHToken = "test-token-123" //nolint:gosec // not a credential, a fixed test fixture value
 
-// newTestGHClient builds a real ghClient whose *github.Client points at an
-// httptest server backed by mux, so github_test.go exercises the real
+// newTestGHClient builds a real *GitHubClient whose *github.Client points at
+// an httptest server backed by mux, so github_test.go exercises the real
 // go-github v92 wiring at the HTTP layer rather than faking the GitHub
 // interface. go-github v92's Client keeps its base URL as an unexported
 // field with no plain setter, so this uses the github.WithURLs client
 // option -- the same mechanism go-github's own tests use to point a Client
 // at an httptest server -- rather than assigning a BaseURL field directly.
-func newTestGHClient(t *testing.T, mux *http.ServeMux) ghClient {
+func newTestGHClient(t *testing.T, mux *http.ServeMux) *GitHubClient {
 	t.Helper()
 
 	server := httptest.NewServer(mux)
@@ -34,7 +39,7 @@ func newTestGHClient(t *testing.T, mux *http.ServeMux) ghClient {
 		t.Fatalf("github.NewClient: %v", err)
 	}
 
-	return ghClient{c: c}
+	return &GitHubClient{c: c}
 }
 
 func TestNewGitHub(t *testing.T) {
@@ -311,6 +316,613 @@ func TestGHClientFindPRByHead(t *testing.T) {
 		}
 		if gotBase != "release" {
 			t.Errorf("base query = %q, want %q", gotBase, "release")
+		}
+	})
+}
+
+// --- PKG9-PLAN.md section 10.3, M3 task 2: GitHub REST reads and writes ---
+
+// TestGitHubClientSatisfiesInterfaces documents the GitHub compile-time
+// assertion next to GitHubClient's own declaration (github.go): GitHubClient
+// keeps satisfying the four-method GitHub interface. The matching
+// assertions for job.PullRequests and job.Checks live in
+// internal/job/shipping_test.go instead of here: internal/job already
+// imports internal/orchestrator in its regular (non-test) code, and an
+// internal (same-package) test file in internal/orchestrator cannot import
+// internal/job without an import cycle, even though an external
+// zing/internal/job test package legitimately imports zing/internal/orchestrator.
+// No GraphQL method exists yet (M4 task 1 adds DraftFlips and ReviewThreads).
+func TestGitHubClientSatisfiesInterfaces(t *testing.T) {
+	t.Parallel()
+}
+
+func TestGetPR(t *testing.T) {
+	t.Parallel()
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/repos/acme/widgets/pulls/42", func(w http.ResponseWriter, _ *http.Request) {
+		fmt.Fprint(w, `{
+			"number": 42,
+			"node_id": "PR_kwABC",
+			"state": "open",
+			"merged": false,
+			"draft": true,
+			"head": {"sha": "deadbeefcafe0000111122223333444455556666"},
+			"base": {"ref": "main"}
+		}`)
+	})
+
+	g := newTestGHClient(t, mux)
+
+	got, err := g.GetPR(t.Context(), "acme", "widgets", 42)
+	if err != nil {
+		t.Fatalf("GetPR: unexpected error: %v", err)
+	}
+	want := PRState{
+		Number:  42,
+		NodeID:  "PR_kwABC",
+		State:   "open",
+		Merged:  false,
+		Draft:   true,
+		HeadSHA: "deadbeefcafe0000111122223333444455556666",
+		BaseRef: "main",
+	}
+	if got != want {
+		t.Errorf("GetPR = %+v, want %+v", got, want)
+	}
+}
+
+func TestListCheckRunsAllPages(t *testing.T) {
+	t.Parallel()
+
+	var gotFilter, gotPerPage string
+	mux := http.NewServeMux()
+	mux.HandleFunc("/repos/acme/widgets/commits/sha1/check-runs", func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Query().Get("page") == "2" {
+			fmt.Fprint(w, `{"total_count": 1, "check_runs": [
+				{"id": 2, "name": "deploy", "status": "completed", "conclusion": "neutral", "app": {"slug": "other-app", "id": 99}, "details_url": "https://x/2"}
+			]}`)
+			return
+		}
+		gotFilter = r.URL.Query().Get("filter")
+		gotPerPage = r.URL.Query().Get("per_page")
+		w.Header().Set("Link", `<`+"http://"+r.Host+`/repos/acme/widgets/commits/sha1/check-runs?page=2>; rel="next"`)
+		fmt.Fprint(w, `{"total_count": 1, "check_runs": [
+			{"id": 1, "name": "ci", "status": "completed", "conclusion": "success", "app": {"slug": "github-actions", "id": 15368}, "details_url": "https://x/1"}
+		]}`)
+	})
+
+	g := newTestGHClient(t, mux)
+
+	got, err := g.ListCheckRuns(t.Context(), "acme", "widgets", "sha1")
+	if err != nil {
+		t.Fatalf("ListCheckRuns: unexpected error: %v", err)
+	}
+	if gotFilter != "latest" {
+		t.Errorf("filter query = %q, want %q", gotFilter, "latest")
+	}
+	if gotPerPage != strconv.Itoa(ghPerPage) {
+		t.Errorf("per_page query = %q, want %q", gotPerPage, strconv.Itoa(ghPerPage))
+	}
+	want := []CheckRun{
+		{ID: 1, Name: "ci", Status: "completed", Conclusion: "success", AppSlug: "github-actions", AppID: 15368, DetailsURL: "https://x/1"},
+		{ID: 2, Name: "deploy", Status: "completed", Conclusion: "neutral", AppSlug: "other-app", AppID: 99, DetailsURL: "https://x/2"},
+	}
+	if len(got) != len(want) {
+		t.Fatalf("ListCheckRuns = %+v, want %+v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("ListCheckRuns[%d] = %+v, want %+v", i, got[i], want[i])
+		}
+	}
+}
+
+func TestListStatusesAllPages(t *testing.T) {
+	t.Parallel()
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/repos/acme/widgets/commits/sha1/status", func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Query().Get("page") == "2" {
+			fmt.Fprint(w, `{"state": "pending", "statuses": [
+				{"context": "deploy/preview", "state": "pending", "target_url": "https://x/deploy"}
+			]}`)
+			return
+		}
+		w.Header().Set("Link", `<`+"http://"+r.Host+`/repos/acme/widgets/commits/sha1/status?page=2>; rel="next"`)
+		fmt.Fprint(w, `{"state": "success", "statuses": [
+			{"context": "ci", "state": "success", "target_url": "https://x/ci"}
+		]}`)
+	})
+
+	g := newTestGHClient(t, mux)
+
+	got, err := g.ListStatuses(t.Context(), "acme", "widgets", "sha1")
+	if err != nil {
+		t.Fatalf("ListStatuses: unexpected error: %v", err)
+	}
+	want := []CommitStatus{
+		{Context: "ci", State: "success", TargetURL: "https://x/ci"},
+		{Context: "deploy/preview", State: "pending", TargetURL: "https://x/deploy"},
+	}
+	if len(got) != len(want) {
+		t.Fatalf("ListStatuses = %+v, want %+v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("ListStatuses[%d] = %+v, want %+v", i, got[i], want[i])
+		}
+	}
+}
+
+func TestRequiredCheckRules(t *testing.T) {
+	t.Parallel()
+
+	t.Run("legacy context, a modern app-bound check, and app id -1 or absent as any source", func(t *testing.T) {
+		t.Parallel()
+		mux := http.NewServeMux()
+		mux.HandleFunc("/repos/acme/widgets/branches/main/protection", func(w http.ResponseWriter, _ *http.Request) {
+			fmt.Fprint(w, `{
+				"required_status_checks": {
+					"contexts": ["legacy-ctx"],
+					"checks": [
+						{"context": "ci", "app_id": 15368},
+						{"context": "format", "app_id": -1},
+						{"context": "build"}
+					]
+				}
+			}`)
+		})
+
+		g := newTestGHClient(t, mux)
+
+		got, err := g.RequiredCheckRules(t.Context(), "acme", "widgets", mainBranch)
+		if err != nil {
+			t.Fatalf("RequiredCheckRules: unexpected error: %v", err)
+		}
+
+		want := map[string]*int64{"ci": new(int64(15368)), "format": nil, "build": nil, "legacy-ctx": nil}
+		if len(got) != len(want) {
+			t.Fatalf("RequiredCheckRules = %+v, want %d entries %v", got, len(want), want)
+		}
+		for _, rc := range got {
+			wantAppID, ok := want[rc.Context]
+			if !ok {
+				t.Errorf("RequiredCheckRules: unexpected context %q", rc.Context)
+				continue
+			}
+			if (rc.AppID == nil) != (wantAppID == nil) {
+				t.Errorf("RequiredCheckRules[%q].AppID = %v, want %v", rc.Context, rc.AppID, wantAppID)
+				continue
+			}
+			if rc.AppID != nil && *rc.AppID != *wantAppID {
+				t.Errorf("RequiredCheckRules[%q].AppID = %d, want %d", rc.Context, *rc.AppID, *wantAppID)
+			}
+		}
+	})
+
+	t.Run("branch not protected yields an empty slice and no error", func(t *testing.T) {
+		t.Parallel()
+		mux := http.NewServeMux()
+		mux.HandleFunc("/repos/acme/widgets/branches/main/protection", func(w http.ResponseWriter, _ *http.Request) {
+			w.WriteHeader(http.StatusNotFound)
+			fmt.Fprint(w, `{"message": "Branch not protected"}`)
+		})
+
+		g := newTestGHClient(t, mux)
+
+		got, err := g.RequiredCheckRules(t.Context(), "acme", "widgets", mainBranch)
+		if err != nil {
+			t.Fatalf("RequiredCheckRules: unexpected error: %v", err)
+		}
+		if len(got) != 0 {
+			t.Errorf("RequiredCheckRules = %+v, want an empty slice", got)
+		}
+	})
+}
+
+func TestListReviews(t *testing.T) {
+	t.Parallel()
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/repos/acme/widgets/pulls/7/reviews", func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Query().Get("page") == "2" {
+			fmt.Fprint(w, `[{"user": {"login": "zing-bot", "type": "Bot"}, "state": "COMMENTED", "commit_id": "sha2"}]`)
+			return
+		}
+		w.Header().Set("Link", `<`+"http://"+r.Host+`/repos/acme/widgets/pulls/7/reviews?page=2>; rel="next"`)
+		fmt.Fprint(w, `[{"user": {"login": "octocat", "type": "User"}, "state": "APPROVED", "commit_id": "sha1"}]`)
+	})
+
+	g := newTestGHClient(t, mux)
+
+	got, err := g.ListReviews(t.Context(), "acme", "widgets", 7)
+	if err != nil {
+		t.Fatalf("ListReviews: unexpected error: %v", err)
+	}
+	want := []Review{
+		{Login: "octocat", UserType: "User", State: "APPROVED", CommitID: "sha1"},
+		{Login: "zing-bot", UserType: "Bot", State: "COMMENTED", CommitID: "sha2"},
+	}
+	if len(got) != len(want) {
+		t.Fatalf("ListReviews = %+v, want %+v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("ListReviews[%d] = %+v, want %+v", i, got[i], want[i])
+		}
+	}
+}
+
+func TestRequestReviewers(t *testing.T) {
+	t.Parallel()
+
+	var gotMethod string
+	var gotBody map[string]any
+	mux := http.NewServeMux()
+	mux.HandleFunc("/repos/acme/widgets/pulls/7/requested_reviewers", func(w http.ResponseWriter, r *http.Request) {
+		gotMethod = r.Method
+		if err := json.NewDecoder(r.Body).Decode(&gotBody); err != nil {
+			t.Errorf("decode request body: %v", err)
+			return
+		}
+		fmt.Fprint(w, `{"number": 7}`)
+	})
+
+	g := newTestGHClient(t, mux)
+
+	if err := g.RequestReviewers(t.Context(), "acme", "widgets", 7, "octocat"); err != nil {
+		t.Fatalf("RequestReviewers: unexpected error: %v", err)
+	}
+	if gotMethod != http.MethodPost {
+		t.Errorf("method = %q, want %q", gotMethod, http.MethodPost)
+	}
+	reviewers, ok := gotBody["reviewers"].([]any)
+	if !ok || len(reviewers) != 1 || reviewers[0] != "octocat" {
+		t.Errorf("request body reviewers = %v, want [\"octocat\"]", gotBody["reviewers"])
+	}
+}
+
+func TestMergePinsSha(t *testing.T) {
+	t.Parallel()
+
+	t.Run("the request carries sha, method, and title; a merged result returns its sha", func(t *testing.T) {
+		t.Parallel()
+		var gotMethod string
+		var gotBody map[string]any
+
+		mux := http.NewServeMux()
+		mux.HandleFunc("/repos/acme/widgets/pulls/7/merge", func(w http.ResponseWriter, r *http.Request) {
+			gotMethod = r.Method
+			if err := json.NewDecoder(r.Body).Decode(&gotBody); err != nil {
+				t.Errorf("decode request body: %v", err)
+				return
+			}
+			fmt.Fprint(w, `{"sha": "merged0000111122223333444455556666deadbe", "merged": true, "message": "Pull Request successfully merged"}`)
+		})
+
+		g := newTestGHClient(t, mux)
+
+		sha, err := g.Merge(t.Context(), "acme", "widgets", 7, "deadbeef", "squash", "A title")
+		if err != nil {
+			t.Fatalf("Merge: unexpected error: %v", err)
+		}
+		if sha != "merged0000111122223333444455556666deadbe" {
+			t.Errorf("Merge sha = %q, want %q", sha, "merged0000111122223333444455556666deadbe")
+		}
+		if gotMethod != http.MethodPut {
+			t.Errorf("method = %q, want %q", gotMethod, http.MethodPut)
+		}
+		if gotBody["sha"] != "deadbeef" {
+			t.Errorf("request body sha = %v, want %q", gotBody["sha"], "deadbeef")
+		}
+		if gotBody["merge_method"] != "squash" {
+			t.Errorf("request body merge_method = %v, want %q", gotBody["merge_method"], "squash")
+		}
+		if gotBody["commit_title"] != "A title" {
+			t.Errorf("request body commit_title = %v, want %q", gotBody["commit_title"], "A title")
+		}
+	})
+
+	t.Run("merged false is ErrMergeRefused", func(t *testing.T) {
+		t.Parallel()
+		mux := http.NewServeMux()
+		mux.HandleFunc("/repos/acme/widgets/pulls/7/merge", func(w http.ResponseWriter, _ *http.Request) {
+			fmt.Fprint(w, `{"merged": false, "message": "Head branch was modified"}`)
+		})
+
+		g := newTestGHClient(t, mux)
+
+		_, err := g.Merge(t.Context(), "acme", "widgets", 7, "deadbeef", "squash", "A title")
+		if !errors.Is(err, ErrMergeRefused) {
+			t.Errorf("Merge error = %v, want errors.Is(err, ErrMergeRefused)", err)
+		}
+	})
+
+	for _, code := range []int{http.StatusMethodNotAllowed, http.StatusConflict} {
+		t.Run(fmt.Sprintf("status %d is ErrMergeRefused", code), func(t *testing.T) {
+			t.Parallel()
+			mux := http.NewServeMux()
+			mux.HandleFunc("/repos/acme/widgets/pulls/7/merge", func(w http.ResponseWriter, _ *http.Request) {
+				w.WriteHeader(code)
+				fmt.Fprint(w, `{"message": "refused"}`)
+			})
+
+			g := newTestGHClient(t, mux)
+
+			_, err := g.Merge(t.Context(), "acme", "widgets", 7, "deadbeef", "squash", "A title")
+			if !errors.Is(err, ErrMergeRefused) {
+				t.Errorf("Merge error = %v, want errors.Is(err, ErrMergeRefused)", err)
+			}
+		})
+	}
+}
+
+func TestViewer(t *testing.T) {
+	t.Parallel()
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/user", func(w http.ResponseWriter, _ *http.Request) {
+		fmt.Fprint(w, `{"login": "farmer-pete"}`)
+	})
+
+	g := newTestGHClient(t, mux)
+
+	got, err := g.Viewer(t.Context())
+	if err != nil {
+		t.Fatalf("Viewer: unexpected error: %v", err)
+	}
+	if got != "farmer-pete" {
+		t.Errorf("Viewer = %q, want %q", got, "farmer-pete")
+	}
+}
+
+// fillerLog writes n bytes of repeated, newline-terminated filler to w, in
+// bulk chunks rather than one byte or line at a time, so TestJobLogTailLast200's
+// 64 MiB case runs fast. A write failure just stops early and logs: t.Logf,
+// not t.Fatalf, because the httptest server runs the handler that calls this
+// on its own goroutine.
+func fillerLog(t *testing.T, w io.Writer, n int) {
+	t.Helper()
+	chunk := bytes.Repeat([]byte("0123456789\n"), 1<<20/11+1)[:1<<20]
+	written := 0
+	for written < n {
+		take := len(chunk)
+		if written+take > n {
+			take = n - written
+		}
+		if _, err := w.Write(chunk[:take]); err != nil {
+			t.Logf("fillerLog: write: %v", err)
+			return
+		}
+		written += take
+	}
+}
+
+func TestJobLogTailLast200(t *testing.T) {
+	t.Parallel()
+
+	t.Run("returns the last n lines, fetched with no Authorization header", func(t *testing.T) {
+		t.Parallel()
+		var gotAuthOnLogFetch string
+		var sawLogFetch bool
+
+		logServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			sawLogFetch = true
+			gotAuthOnLogFetch = r.Header.Get("Authorization")
+			for i := 1; i <= 5; i++ {
+				fmt.Fprintf(w, "line%d\n", i)
+			}
+		}))
+		t.Cleanup(logServer.Close)
+
+		mux := http.NewServeMux()
+		mux.HandleFunc("/repos/acme/widgets/actions/jobs/99/logs", func(w http.ResponseWriter, _ *http.Request) {
+			w.Header().Set("Location", logServer.URL+"/log")
+			w.WriteHeader(http.StatusFound)
+		})
+
+		g := newTestGHClient(t, mux)
+
+		got, err := g.JobLogTail(t.Context(), "acme", "widgets", 99, 3)
+		if err != nil {
+			t.Fatalf("JobLogTail: unexpected error: %v", err)
+		}
+		if !sawLogFetch {
+			t.Fatal("JobLogTail: the signed log URL was never fetched")
+		}
+		if gotAuthOnLogFetch != "" {
+			t.Errorf("Authorization header on the log fetch = %q, want none", gotAuthOnLogFetch)
+		}
+		if want := "line3\nline4\nline5"; got != want {
+			t.Errorf("JobLogTail = %q, want %q", got, want)
+		}
+	})
+
+	t.Run("cuts a line longer than 64 KiB", func(t *testing.T) {
+		t.Parallel()
+		logServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			fmt.Fprint(w, strings.Repeat("a", 70000)+"\nshort-line")
+		}))
+		t.Cleanup(logServer.Close)
+
+		mux := http.NewServeMux()
+		mux.HandleFunc("/repos/acme/widgets/actions/jobs/99/logs", func(w http.ResponseWriter, _ *http.Request) {
+			w.Header().Set("Location", logServer.URL+"/log")
+			w.WriteHeader(http.StatusFound)
+		})
+
+		g := newTestGHClient(t, mux)
+
+		got, err := g.JobLogTail(t.Context(), "acme", "widgets", 99, 10)
+		if err != nil {
+			t.Fatalf("JobLogTail: unexpected error: %v", err)
+		}
+		lines := strings.Split(got, "\n")
+		if len(lines) != 2 {
+			t.Fatalf("JobLogTail lines = %d, want 2 (%q)", len(lines), got)
+		}
+		wantFirst := strings.Repeat("a", maxLogLineBytes) + "[line cut]"
+		if lines[0] != wantFirst {
+			t.Errorf("JobLogTail first line length = %d, want the cut marker ending a %d-byte prefix", len(lines[0]), maxLogLineBytes)
+		}
+		if lines[1] != "short-line" {
+			t.Errorf("JobLogTail second line = %q, want %q", lines[1], "short-line")
+		}
+	})
+
+	t.Run("stops at 64 MiB and ends with the cut marker", func(t *testing.T) {
+		t.Parallel()
+		logServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			fillerLog(t, w, maxLogTotalBytes+50_000)
+		}))
+		t.Cleanup(logServer.Close)
+
+		mux := http.NewServeMux()
+		mux.HandleFunc("/repos/acme/widgets/actions/jobs/99/logs", func(w http.ResponseWriter, _ *http.Request) {
+			w.Header().Set("Location", logServer.URL+"/log")
+			w.WriteHeader(http.StatusFound)
+		})
+
+		g := newTestGHClient(t, mux)
+
+		got, err := g.JobLogTail(t.Context(), "acme", "widgets", 99, 3)
+		if err != nil {
+			t.Fatalf("JobLogTail: unexpected error: %v", err)
+		}
+		lines := strings.Split(got, "\n")
+		if lines[len(lines)-1] != "[log cut at 64 MiB]" {
+			t.Errorf("JobLogTail last line = %q, want %q", lines[len(lines)-1], "[log cut at 64 MiB]")
+		}
+	})
+}
+
+func TestClassifyGitHubErr(t *testing.T) {
+	t.Parallel()
+
+	t.Run("401 is ErrGitHubAuth", func(t *testing.T) {
+		t.Parallel()
+		mux := http.NewServeMux()
+		mux.HandleFunc("/user", func(w http.ResponseWriter, _ *http.Request) {
+			w.WriteHeader(http.StatusUnauthorized)
+			fmt.Fprint(w, `{"message": "Bad credentials"}`)
+		})
+		g := newTestGHClient(t, mux)
+
+		_, err := g.Viewer(t.Context())
+		if !errors.Is(err, ErrGitHubAuth) {
+			t.Errorf("error = %v, want errors.Is(err, ErrGitHubAuth)", err)
+		}
+	})
+
+	t.Run("403 without rate-limit headers is ErrGitHubAuth", func(t *testing.T) {
+		t.Parallel()
+		mux := http.NewServeMux()
+		mux.HandleFunc("/user", func(w http.ResponseWriter, _ *http.Request) {
+			w.WriteHeader(http.StatusForbidden)
+			fmt.Fprint(w, `{"message": "Forbidden"}`)
+		})
+		g := newTestGHClient(t, mux)
+
+		_, err := g.Viewer(t.Context())
+		if !errors.Is(err, ErrGitHubAuth) {
+			t.Errorf("error = %v, want errors.Is(err, ErrGitHubAuth)", err)
+		}
+		if rle, ok := errors.AsType[RateLimitedError](err); ok {
+			t.Errorf("error = %v, want it not to classify as RateLimitedError, got %+v", err, rle)
+		}
+	})
+
+	t.Run("403 with rate-limit headers is RateLimitedError with the reset time", func(t *testing.T) {
+		t.Parallel()
+		resetAt := time.Now().Add(37 * time.Minute).Truncate(time.Second)
+		mux := http.NewServeMux()
+		mux.HandleFunc("/user", func(w http.ResponseWriter, _ *http.Request) {
+			w.Header().Set("X-RateLimit-Remaining", "0")
+			w.Header().Set("X-RateLimit-Reset", strconv.FormatInt(resetAt.Unix(), 10))
+			w.WriteHeader(http.StatusForbidden)
+			fmt.Fprint(w, `{"message": "API rate limit exceeded"}`)
+		})
+		g := newTestGHClient(t, mux)
+
+		_, err := g.Viewer(t.Context())
+		rle, ok := errors.AsType[RateLimitedError](err)
+		if !ok {
+			t.Fatalf("error = %v, want errors.As(err, *RateLimitedError)", err)
+		}
+		if !rle.ResetAt.Equal(resetAt) {
+			t.Errorf("ResetAt = %v, want %v", rle.ResetAt, resetAt)
+		}
+	})
+
+	t.Run("429 is RateLimitedError", func(t *testing.T) {
+		t.Parallel()
+		mux := http.NewServeMux()
+		mux.HandleFunc("/user", func(w http.ResponseWriter, _ *http.Request) {
+			w.Header().Set("Retry-After", "120")
+			w.WriteHeader(http.StatusTooManyRequests)
+			fmt.Fprint(w, `{"message": "too many requests"}`)
+		})
+		g := newTestGHClient(t, mux)
+
+		before := time.Now()
+		_, err := g.Viewer(t.Context())
+		rle, ok := errors.AsType[RateLimitedError](err)
+		if !ok {
+			t.Fatalf("error = %v, want errors.As(err, *RateLimitedError)", err)
+		}
+		wantEarliest := before.Add(119 * time.Second)
+		wantLatest := time.Now().Add(121 * time.Second)
+		if rle.ResetAt.Before(wantEarliest) || rle.ResetAt.After(wantLatest) {
+			t.Errorf("ResetAt = %v, want it within [%v, %v]", rle.ResetAt, wantEarliest, wantLatest)
+		}
+	})
+
+	t.Run("404 is ErrGitHubNotFound", func(t *testing.T) {
+		t.Parallel()
+		mux := http.NewServeMux()
+		mux.HandleFunc("/user", func(w http.ResponseWriter, _ *http.Request) {
+			w.WriteHeader(http.StatusNotFound)
+			fmt.Fprint(w, `{"message": "Not Found"}`)
+		})
+		g := newTestGHClient(t, mux)
+
+		_, err := g.Viewer(t.Context())
+		if !errors.Is(err, ErrGitHubNotFound) {
+			t.Errorf("error = %v, want errors.Is(err, ErrGitHubNotFound)", err)
+		}
+	})
+
+	t.Run("502 is ErrGitHubUnavailable", func(t *testing.T) {
+		t.Parallel()
+		mux := http.NewServeMux()
+		mux.HandleFunc("/user", func(w http.ResponseWriter, _ *http.Request) {
+			w.WriteHeader(http.StatusBadGateway)
+			fmt.Fprint(w, `{"message": "Bad Gateway"}`)
+		})
+		g := newTestGHClient(t, mux)
+
+		_, err := g.Viewer(t.Context())
+		if !errors.Is(err, ErrGitHubUnavailable) {
+			t.Errorf("error = %v, want errors.Is(err, ErrGitHubUnavailable)", err)
+		}
+	})
+
+	t.Run("a network error is ErrGitHubUnavailable", func(t *testing.T) {
+		t.Parallel()
+		server := httptest.NewServer(http.NewServeMux())
+		server.Close() // refuses every connection from here on
+
+		serverURL := server.URL + "/"
+		c, err := github.NewClient(github.WithAuthToken(testGHToken), github.WithURLs(&serverURL, &serverURL))
+		if err != nil {
+			t.Fatalf("github.NewClient: %v", err)
+		}
+		g := &GitHubClient{c: c}
+
+		_, err = g.Viewer(t.Context())
+		if !errors.Is(err, ErrGitHubUnavailable) {
+			t.Errorf("error = %v, want errors.Is(err, ErrGitHubUnavailable)", err)
 		}
 	})
 }

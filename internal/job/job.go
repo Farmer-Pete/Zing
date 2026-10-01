@@ -98,6 +98,14 @@ type Project struct {
 	RepoGit string // the repository's common git dir, absolute; Orch.GitCommonDir at startup
 	TestCmd string // config projects[i].commands.test
 	LintCmd string // config projects[i].commands.lint
+	Owner   string // the GitHub repository owner serve fills every project with (PKG9-PLAN.md section 10.3)
+	Repo    string // the GitHub repository name serve fills every project with (PKG9-PLAN.md section 10.3)
+	// PullRequests and Checks are the shipping handler's own window onto
+	// GitHub (PKG9-PLAN.md section 10.3): serve fills both from one shared
+	// *orchestrator.GitHubClient; a test fake implements only the interface
+	// its test needs.
+	PullRequests PullRequests
+	Checks       Checks
 }
 
 // CommandRunner runs one shell command in dir, in its own process group, and
