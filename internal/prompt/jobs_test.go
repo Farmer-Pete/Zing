@@ -421,6 +421,61 @@ func TestForReviewResumeHeader(t *testing.T) {
 	assertFenced(t, got, "answers", answers)
 }
 
+// TestForJudgeFencesTicket pins the judge job's one input row (plan
+// section 12.2): the ticket arrives fenced, same as every other job's
+// ticket.
+func TestForJudgeFencesTicket(t *testing.T) {
+	t.Parallel()
+
+	in := ForJudge("PROMPT", "ticket body", nil)
+	in.Fence = testFence
+	got := Assemble(in)
+
+	assertFenced(t, got, "ticket", "ticket body")
+}
+
+// TestForJudgeHasNoPlanInput pins the judge's hard rule (N6, plan sections
+// 0 and 7.2): "the judge never receives the plan." ForJudge takes no plan
+// parameter at all, unlike ForReview and ForRespond, so this pins that the
+// assembled prompt never carries a "plan", "diff", "findings" (the
+// review's output), or "threads" (the respond job's input) block — the
+// judge gets only its own ticket and whatever extra the caller passes.
+func TestForJudgeHasNoPlanInput(t *testing.T) {
+	t.Parallel()
+
+	in := ForJudge("PROMPT", "ticket body", nil)
+	in.Fence = testFence
+	got := Assemble(in)
+
+	for _, forbidden := range []string{"plan", "diff", "findings", "threads"} {
+		if strings.Contains(got, forbidden+":\n") {
+			t.Errorf("ForJudge carries a %q input, want none (N6: the judge never receives the plan, the thread, or the review):\n%s",
+				forbidden, got)
+		}
+	}
+	if len(in.Inputs) != 1 {
+		t.Errorf("ForJudge carries %d inputs, want 1 (ticket only)", len(in.Inputs))
+	}
+}
+
+// TestForJudgeResumeHeader pins ForJudgeResume's own fixed header and its
+// answers input (plan section 7.2): a judge resume carries
+// JudgeResumeHeader, not BuildResumeHeader or ReviewResumeHeader, and the
+// answers arrive fenced.
+func TestForJudgeResumeHeader(t *testing.T) {
+	t.Parallel()
+
+	const answers = "Q1: which exit code counts as a pass? -> a: 0 only."
+	in := ForJudgeResume([]NamedInput{Answers(answers)})
+	in.Fence = testFence
+	got := Assemble(in)
+
+	if got[:len(JudgeResumeHeader)] != JudgeResumeHeader {
+		t.Errorf("ForJudgeResume did not lead with JudgeResumeHeader; got:\n%s", got)
+	}
+	assertFenced(t, got, "answers", answers)
+}
+
 // TestForPerimeterResumeHeader pins ForPerimeterResume's own fixed header
 // and its answer input (design section 6.2): the perimeter resume carries
 // PerimeterResumeHeader, not BuildResumeHeader, and the answer arrives

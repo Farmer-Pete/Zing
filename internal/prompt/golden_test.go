@@ -261,6 +261,33 @@ func goldenCases() []goldenCase {
 				return in
 			},
 		},
+		{
+			name: "judge-first",
+			in: func(t *testing.T) Input {
+				t.Helper()
+				jobPrompt := readAsset(t, "prompts/judge.md")
+				ticket := "Title: Add a health check\n\n" +
+					"Body: Add a ping endpoint so uptime monitoring has something to hit."
+				in := ForJudge(jobPrompt, ticket, nil)
+				in.Schemas = schemasFor(t, response.JobJudge,
+					response.OutcomeOk, response.OutcomeQuestion, response.OutcomeError)
+				return in
+			},
+		},
+		{
+			// Carries one answers block (plan section 7.2's resume input for
+			// an answered judge question).
+			name: "judge-resume",
+			in: func(t *testing.T) Input {
+				t.Helper()
+				in := ForJudgeResume([]NamedInput{
+					Answers("Q1: which exit code counts as a pass? -> a: 0 only."),
+				})
+				in.Schemas = schemasFor(t, response.JobJudge,
+					response.OutcomeOk, response.OutcomeQuestion, response.OutcomeError)
+				return in
+			},
+		},
 	}
 }
 

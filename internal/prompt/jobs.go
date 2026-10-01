@@ -394,3 +394,32 @@ const ReviewDiscussHeader = "The owner wants to discuss one of your findings. Th
 func ForReviewDiscuss(inputs []NamedInput) Input {
 	return Input{JobPrompt: ReviewDiscussHeader, Inputs: inputs}
 }
+
+// ForJudge builds the judge job's Input: the ticket fenced, then any
+// carried inputs. Unlike ForReview and ForRespond, it takes no plan, diff,
+// or thread parameter at all — the judge never receives the plan (N6) and
+// reads its scenarios itself with `zing scenarios`, so neither is ever an
+// input (plan section 7.2). Called by internal/job's judging START/RUN
+// first turn; calls Assemble once Schemas is set from
+// response.RenderTemplate(JobJudge, ...) in judge schema order.
+func ForJudge(jobPrompt, ticket string, extra []NamedInput) Input {
+	inputs := make([]NamedInput, 0, 1+len(extra))
+	inputs = append(inputs, NamedInput{Label: labelTicket, Text: ticket, Untrusted: true})
+	inputs = append(inputs, extra...)
+	return Input{JobPrompt: jobPrompt, Inputs: inputs}
+}
+
+// JudgeResumeHeader replaces the prompt file on a judge resume turn: there
+// is no fresh job prompt to load, only this fixed instruction to continue
+// the open judge session (plan section 7.2), byte-for-byte from the plan.
+const JudgeResumeHeader = "Continue judging. The input below says why you were resumed. Return the next document."
+
+// ForJudgeResume builds a judge resume turn's Input: JudgeResumeHeader in
+// place of a prompt file, inputs passed through unchanged -- built by the
+// caller with Answers on an answered question, or a "coverage" input
+// carrying the marker's error lines, fenced (plan section 7.2). Called by
+// internal/job's judging resume turn; calls Assemble once Schemas is set
+// from response.RenderTemplate(JobJudge, ...) in judge schema order.
+func ForJudgeResume(inputs []NamedInput) Input {
+	return Input{JobPrompt: JudgeResumeHeader, Inputs: inputs}
+}
