@@ -19,6 +19,9 @@ templ Thread(ticket *store.Ticket, rows []ThreadRow) {
 			if len(rows) == 0 {
 				<p class="empty">No messages yet.</p>
 			} else {
+				if threadHasDraft(rows) {
+					@draftBanner()
+				}
 				for _, row := range rows {
 					if row.Question != nil {
 						@questionGroup(ticket.ID, row)
@@ -33,6 +36,30 @@ templ Thread(ticket *store.Ticket, rows []ThreadRow) {
 			<p class="empty">Select a ticket.</p>
 		}
 	</main>
+}
+
+// threadHasDraft reports whether any question in rows carries an unsent
+// draft (bug fix): draftBanner renders only when this is true, so a ticket
+// with nothing in progress shows no hint.
+func threadHasDraft(rows []ThreadRow) bool {
+	for _, row := range rows {
+		if row.Question != nil && row.Question.HasDraft() {
+			return true
+		}
+	}
+	return false
+}
+
+// draftBanner is the Thread view's one visible line when the ticket has at
+// least one unsent draft (bug fix: the owner typed a reply, the server
+// saved it, but nothing on screen showed it, so the owner thought it was
+// lost). Sending is keyboard-only by design (Q31, keyboard.mjs's
+// isSendChord) and nothing on screen said so either; sendChordLabel below
+// fills in the platform-correct chord text client-side (console.js's
+// runSendChordHints, since this server-rendered page cannot know the
+// browser's platform).
+templ draftBanner() {
+	<p class="draft-banner">Draft saved. <span class="send-chord">⌘+Enter</span> sends all drafts.</p>
 }
 
 templ stateSeparator(row ThreadRow) {
@@ -88,13 +115,13 @@ templ questionGroup(ticketID int64, row ThreadRow) {
 		if row.Question.Interactive {
 			switch row.Question.Kind {
 				case string(response.QuestionKindPerimeter):
-					@itemRows(ticketID, row.ID, row.Question.Items, itemDecisionsPerimeter)
+					@itemRows(ticketID, row.ID, row.Question.Items, itemDecisionsPerimeter, row.Question.DraftItems)
 				case string(response.QuestionKindReview):
-					@itemRows(ticketID, row.ID, row.Question.Items, itemDecisionsReview)
+					@itemRows(ticketID, row.ID, row.Question.Items, itemDecisionsReview, row.Question.DraftItems)
 				default:
-					@optionChips(ticketID, row.ID, row.Question.Options)
+					@optionChips(ticketID, row.ID, row.Question.Options, row.Question.DraftOption)
 			}
-			@freeReply(ticketID, row.ID)
+			@freeReply(ticketID, row.ID, row.Question.DraftReply)
 		}
 	</details>
 }
@@ -174,15 +201,37 @@ const pickToggleExpr = "el.parentElement.querySelectorAll('.picked').forEach((c)
 // and data-draft-question off the free reply input). Renders nothing when
 // options is empty, so a bare free reply is what a chip-less question shows
 // (design section 6.6: "A question with zero options and no items renders
-// the free reply only").
-templ optionChips(ticketID, questionID int64, options []ThreadOption) {
+// the free reply only"). draftOption, when non-empty, is the ticket's own
+// in-progress draft answer's picked key (bug fix): that chip renders
+// "picked" from the start, the same client-visible state pickToggleExpr
+// would give it on a fresh click, so a saved-but-unsent pick survives a
+// reload or a later patch instead of looking lost.
+templ optionChips(ticketID, questionID int64, options []ThreadOption, draftOption string) {
 	if len(options) > 0 {
 		<div class="chips">
 			for i, opt := range options {
-				<button type="button" class="chip" aria-pressed="false" data-chip-index={ strconv.Itoa(i + 1) } data-draft-ticket={ strconv.FormatInt(ticketID, 10) } data-draft-question={ strconv.FormatInt(questionID, 10) } data-option={ opt.Key } data-on:click={ pickToggleExpr }>{ strconv.Itoa(i+1) + ". " + opt.Text }</button>
+				<button type="button" class={ chipClass(opt.Key, draftOption) } aria-pressed={ pickedAttr(opt.Key == draftOption) } data-chip-index={ strconv.Itoa(i + 1) } data-draft-ticket={ strconv.FormatInt(ticketID, 10) } data-draft-question={ strconv.FormatInt(questionID, 10) } data-option={ opt.Key } data-on:click={ pickToggleExpr }>{ strconv.Itoa(i+1) + ". " + opt.Text }</button>
 			}
 		</div>
 	}
+}
+
+// chipClass and pickedAttr are optionChips' and itemRow's shared
+// server-side rendering of the same "picked" state pickToggleExpr toggles
+// client-side (bug fix): picked reports whether this control's own key
+// matches the ticket's in-progress draft.
+func chipClass(key, draftOption string) string {
+	if draftOption != "" && key == draftOption {
+		return "chip picked"
+	}
+	return "chip"
+}
+
+func pickedAttr(picked bool) string {
+	if picked {
+		return "true"
+	}
+	return "false"
 }
 
 // itemDecisionsReview is the review kind's own closed set of item decisions,
@@ -202,12 +251,15 @@ var itemDecisionsPerimeter = []response.Decision{
 }
 
 // itemRows renders the two item kinds' control (design section 6.6, 9.2):
-// one row per Item, with decisions the allowed set for this question's kind.
-templ itemRows(ticketID, questionID int64, items []ThreadItem, decisions []response.Decision) {
+// one row per Item, with decisions the allowed set for this question's
+// kind. draftItems is the ticket's own in-progress draft answer's
+// ref->decision picks, if any (bug fix); a ref absent from it renders no
+// control picked.
+templ itemRows(ticketID, questionID int64, items []ThreadItem, decisions []response.Decision, draftItems map[string]response.Decision) {
 	if len(items) > 0 {
 		<div class="items">
 			for _, item := range items {
-				@itemRow(ticketID, questionID, item, decisions)
+				@itemRow(ticketID, questionID, item, decisions, draftItems[item.Ref])
 			}
 		</div>
 	}
@@ -276,8 +328,11 @@ func splitItemText(text string) (itemTextParts, bool) {
 // data-decision, the composer contract Task 7's POST /draft reads to merge
 // one ref-to-decision entry into the question's draft (design section 6.7:
 // "An item answer merges one ref->decision into the ... draft's items
-// map").
-templ itemRow(ticketID, questionID int64, item ThreadItem, decisions []response.Decision) {
+// map"). draftDecision, when non-empty, is this ref's own pick in the
+// ticket's in-progress draft answer, if any (bug fix): that decision's
+// button renders "picked" from the start, the same way optionChips' own
+// draftOption does.
+templ itemRow(ticketID, questionID int64, item ThreadItem, decisions []response.Decision, draftDecision response.Decision) {
 	<div class="item-row" data-item-ref={ item.Ref }>
 		<span class="item-ref">{ item.Ref }</span>
 		if parts, ok := splitItemText(item.Text); ok {
@@ -291,10 +346,20 @@ templ itemRow(ticketID, questionID int64, item ThreadItem, decisions []response.
 		}
 		<div class="item-decisions">
 			for _, d := range decisions {
-				<button type="button" class="decision" aria-pressed="false" data-draft-ticket={ strconv.FormatInt(ticketID, 10) } data-draft-question={ strconv.FormatInt(questionID, 10) } data-item-ref={ item.Ref } data-decision={ string(d) } data-on:click={ pickToggleExpr }>{ string(d) }</button>
+				<button type="button" class={ decisionClass(d, draftDecision) } aria-pressed={ pickedAttr(d == draftDecision && draftDecision != "") } data-draft-ticket={ strconv.FormatInt(ticketID, 10) } data-draft-question={ strconv.FormatInt(questionID, 10) } data-item-ref={ item.Ref } data-decision={ string(d) } data-on:click={ pickToggleExpr }>{ string(d) }</button>
 			}
 		</div>
 	</div>
+}
+
+// decisionClass mirrors chipClass for an item row's own decision buttons
+// (bug fix): "decision picked" when d is the ref's in-progress draft pick,
+// "decision" otherwise.
+func decisionClass(d, draftDecision response.Decision) string {
+	if draftDecision != "" && d == draftDecision {
+		return "decision picked"
+	}
+	return "decision"
 }
 
 // freeReply is the free reply input every question kind renders beneath its
@@ -302,10 +367,16 @@ templ itemRow(ticketID, questionID int64, item ThreadItem, decisions []response.
 // reply input"). data-draft-ticket and data-draft-question are exactly what
 // console.js's postDraft (keys.go's Enter-in-input "draft" action) already
 // reads off document.activeElement, so Enter inside this input is wired
-// today; only the server side (POST /draft, Task 7) is missing.
-templ freeReply(ticketID, questionID int64) {
+// today; only the server side (POST /draft, Task 7) is missing. draftReply
+// is the ticket's own in-progress draft reply text against this question,
+// if any (bug fix): rendered as the input's starting value, so a
+// saved-but-unsent reply survives a reload or a later patch instead of
+// looking lost, and reply-hint says what sends it, since sending is
+// keyboard-only (Q31) and nothing on screen said so before this fix.
+templ freeReply(ticketID, questionID int64, draftReply string) {
 	<div class="reply">
-		<input type="text" class="reply-input" placeholder="Reply…" aria-label="Reply" data-draft-ticket={ strconv.FormatInt(ticketID, 10) } data-draft-question={ strconv.FormatInt(questionID, 10) }/>
+		<input type="text" class="reply-input" placeholder="Reply…" aria-label="Reply" value={ draftReply } data-draft-ticket={ strconv.FormatInt(ticketID, 10) } data-draft-question={ strconv.FormatInt(questionID, 10) }/>
+		<p class="reply-hint">Saved as a draft. <span class="send-chord">⌘+Enter</span> sends.</p>
 	</div>
 }
 

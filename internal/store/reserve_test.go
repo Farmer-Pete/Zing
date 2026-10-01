@@ -1,8 +1,11 @@
 package store
 
 import (
+	"bytes"
 	"database/sql"
 	"errors"
+	"log/slog"
+	"strings"
 	"testing"
 	"time"
 )
@@ -389,6 +392,48 @@ func TestInterruptedResumeStaysCharged(t *testing.T) {
 
 	if got := sessionResumes(t, s, first.SessionID); got != 1 {
 		t.Errorf("resumes after an interrupted resume = %d, want 1 (still charged)", got)
+	}
+}
+
+// TestReserve_ResumeLogsExistingSessionJob proves the "run reserved" log
+// line carries the resumed session's own job name (bug fix): a resume's
+// SessionUpsert sets only ID and BumpResumes, never Job (every resume call
+// site in internal/job leaves it unset), so before this fix the line read
+// job="" on every resumed turn instead of the job the first turn logged.
+// Not parallel: it calls slog.SetDefault to capture the line, which swaps
+// the process-wide default logger.
+func TestReserve_ResumeLogsExistingSessionJob(t *testing.T) {
+	s := newTestStore(t)
+	ctx := t.Context()
+	_, ticketID := seedQueuedTicket(t, s, "1")
+	setTicketState(t, s, ticketID, testStatePlanning)
+	owner, expires := reserveInput(t, s, ticketID)
+
+	first, err := s.Reserve(ctx, ticketID, owner, expires,
+		SessionUpsert{Job: testStatePlanning, Runtime: testRuntimeFake}, RunSeed{Model: testModelClaudeX})
+	if err != nil {
+		t.Fatalf("first Reserve: %v", err)
+	}
+
+	var logBuf bytes.Buffer
+	prevDefault := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logBuf, &slog.HandlerOptions{Level: slog.LevelInfo})))
+	t.Cleanup(func() { slog.SetDefault(prevDefault) })
+
+	if _, err = s.Reserve(ctx, ticketID, owner, expires,
+		SessionUpsert{ID: &first.SessionID, BumpResumes: true}, RunSeed{Model: testModelClaudeX}); err != nil {
+		t.Fatalf("resume Reserve: %v", err)
+	}
+
+	logOut := logBuf.String()
+	if !strings.Contains(logOut, "run reserved") {
+		t.Fatalf("missing the \"run reserved\" log line; got:\n%s", logOut)
+	}
+	if !strings.Contains(logOut, "job="+testStatePlanning) {
+		t.Errorf("resume's \"run reserved\" line missing job=%s (want the session's own job, not blank); got:\n%s", testStatePlanning, logOut)
+	}
+	if strings.Contains(logOut, `job=""`) {
+		t.Errorf("resume's \"run reserved\" line still logs job=\"\"; got:\n%s", logOut)
 	}
 }
 

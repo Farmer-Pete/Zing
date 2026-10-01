@@ -19,6 +19,7 @@ import {
 	isInputContext,
 	isSendChord,
 	sendChordToken,
+	sendChordLabel,
 	resolveToken,
 	stepFocus,
 	reconcileFocus,
@@ -156,6 +157,13 @@ test('isSendChord: both Ctrl and Cmd held at once is not the send chord on eithe
 test('sendChordToken names the platform-correct keys.json token', () => {
 	assert.equal(sendChordToken(true), 'Cmd-Enter');
 	assert.equal(sendChordToken(false), 'Ctrl-Enter');
+});
+
+// sendChordLabel (bug fix): the glyph the "saved as a draft" hints show,
+// distinct from sendChordToken's keys.json binding string.
+test('sendChordLabel renders the platform-correct glyph', () => {
+	assert.equal(sendChordLabel(true), '⌘+Enter');
+	assert.equal(sendChordLabel(false), 'Ctrl+Enter');
 });
 
 // resolveToken: outside an input, a single key held with Ctrl, Meta, or Alt

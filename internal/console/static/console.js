@@ -22,6 +22,7 @@ import {
 	isInputContext,
 	isSendChord,
 	sendChordToken,
+	sendChordLabel,
 	resolveToken,
 	stepFocus,
 	reduceNav,
@@ -690,7 +691,8 @@ function onKeyDown(event) {
 	dispatchAction(resolveAction(token, state.bindings), event);
 }
 
-// ---- the patch observer: focus reconcile + (guarded) mermaid ------------
+// ---- the patch observer: focus reconcile, (guarded) mermaid, send-chord
+// hints ------------------------------------------------------------------
 
 // diagramSelector names an unprocessed mermaid fence (design section 6.3,
 // 6.10: goldmark-diagram emits `<pre class="mermaid">`). processedAttr
@@ -751,6 +753,35 @@ function runMermaidGuarded(diagramIDs) {
 		.catch((err) => console.error('console.js: mermaid.run', err));
 }
 
+// sendChordSelector names an unprocessed send-chord placeholder
+// (thread.templ's draftBanner and freeReply, bug fix: the composer saves a
+// draft silently and sends only on a chord, with nothing on screen saying
+// so). sendChordProcessedAttr marks a node once filled, the same guard
+// processedAttr gives mermaid's diagram nodes above, so a later unrelated
+// patch does not re-walk it.
+const sendChordSelector = '.send-chord:not([data-send-chord-processed])';
+const sendChordProcessedAttr = 'data-send-chord-processed';
+
+// runSendChordHints fills every unprocessed ".send-chord" placeholder with
+// the platform-correct glyph (design section 6.4's send-chord check, reused
+// here since this server-rendered page cannot know the browser's platform):
+// "⌘+Enter" on macOS, "Ctrl+Enter" elsewhere (sendChordLabel, keyboard.mjs).
+// Marking each node processed before writing its text avoids reprocessing
+// it on the childList mutation that textContent itself fires, the same
+// bounded-single-extra-pass shape runMermaidGuarded's processedAttr gives
+// mermaid's own diagram nodes.
+function runSendChordHints() {
+	const nodes = document.querySelectorAll(`#main ${sendChordSelector}`);
+	if (nodes.length === 0) {
+		return;
+	}
+	const label = sendChordLabel(isMac());
+	for (const el of nodes) {
+		el.setAttribute(sendChordProcessedAttr, '');
+		el.textContent = label;
+	}
+}
+
 // runPatchWork is the MutationObserver callback's one per-patch step
 // (design section 6.3): collect plain descriptors from the DOM, hand them
 // to the pure collectPatchWork, then apply its result as DOM effects.
@@ -764,6 +795,7 @@ function runPatchWork() {
 	state.previousFocusableIDs = descriptors.focusableIDs;
 	setFocusedID(focusID);
 	runMermaidGuarded(diagramIDs);
+	runSendChordHints();
 }
 
 // installPatchObserver installs the one MutationObserver on #main and

@@ -99,6 +99,7 @@ const (
 	testArtifactTypeScenario = "scenario"
 	testPlanningLiteral      = "planning"
 	testStateQueued          = "queued"
+	testQuestionStateOpen    = "open"
 )
 
 var testProject = store.Project{
@@ -281,7 +282,7 @@ func seedOpenQuestion(t *testing.T, s *store.Store, ticketID int64) int64 {
 	}
 
 	waiting := testWaitingQuestions
-	openState := "open"
+	openState := testQuestionStateOpen
 	payload := []byte(`{"key":"Q1","kind":"question","state":"open","recommended":"a",` +
 		`"options":[{"key":"a","text":"Plain hello"},{"key":"b","text":"hello, world"}]}`)
 

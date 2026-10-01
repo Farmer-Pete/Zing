@@ -136,6 +136,21 @@ export function sendChordToken(isMac) {
 }
 
 /**
+ * sendChordLabel is the human-readable glyph for the platform's send chord
+ * (bug fix: the composer saves a draft silently and sends only on this
+ * chord, Q31, with nothing on screen saying so): "⌘+Enter" on macOS,
+ * "Ctrl+Enter" elsewhere. Distinct from sendChordToken, which names the
+ * keys.json binding string ("Cmd-Enter"/"Ctrl-Enter") rather than what a
+ * reader sees on screen; console.js's runSendChordHints fills this into
+ * every ".send-chord" placeholder thread.templ renders.
+ * @param {boolean} isMac
+ * @returns {string}
+ */
+export function sendChordLabel(isMac) {
+	return isMac ? '⌘+Enter' : 'Ctrl+Enter';
+}
+
+/**
  * resolveToken turns one plain keydown descriptor, plus whether it landed in
  * an input, into the token keys.json binds (design section 6.4, 8; PR review
  * fix: a Ctrl/Meta/Alt-held single key outside an input must not resolve to

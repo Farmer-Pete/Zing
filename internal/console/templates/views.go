@@ -17,6 +17,7 @@ package templates
 import (
 	"github.com/a-h/templ"
 
+	"zing/internal/response"
 	"zing/internal/store"
 )
 
@@ -117,6 +118,25 @@ type ThreadQuestion struct {
 	// region.
 	Scenarios []ScenarioRow
 	Findings  []FindingRow
+
+	// DraftReply, DraftOption, and DraftItems are the ticket's own
+	// in-progress, unsent draft against this question, if any (bug fix: the
+	// owner typed a reply, it saved, but the thread never rendered it back,
+	// so it looked lost). freeReply (thread.templ) renders DraftReply as
+	// the reply box's starting value; optionChips renders the DraftOption
+	// chip picked; itemRows renders each DraftItems ref picked. Every field
+	// is the zero value when this question carries no draft.
+	DraftReply  string
+	DraftOption string
+	DraftItems  map[string]response.Decision
+}
+
+// HasDraft reports whether this question carries any unsent draft -- a
+// reply, an option pick, or at least one item pick (bug fix): Thread's own
+// banner (thread.templ's draftBanner) shows only when some question in the
+// ticket does.
+func (q *ThreadQuestion) HasDraft() bool {
+	return q.DraftReply != "" || q.DraftOption != "" || len(q.DraftItems) > 0
 }
 
 // ThreadRow is one message the read-only Thread view renders: a state

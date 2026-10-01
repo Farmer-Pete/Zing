@@ -70,6 +70,7 @@ func (s *Store) Reserve(ctx context.Context, ticketID int64, owner string, expir
 	}
 
 	var sessionID int64
+	job := su.Job
 	if su.ID != nil {
 		if err = verifySessionForTicket(ctx, tx, ticketID, *su.ID); err != nil {
 			return Reserved{}, fmt.Errorf("reserve: %w", err)
@@ -79,6 +80,17 @@ func (s *Store) Reserve(ctx context.Context, ticketID int64, owner string, expir
 			if _, err = tx.ExecContext(ctx, `UPDATE sessions SET resumes = resumes + 1 WHERE id = ?`, sessionID); err != nil {
 				return Reserved{}, fmt.Errorf("reserve: bump session resumes: %w", err)
 			}
+		}
+		// A resume's own SessionUpsert never carries Job (every resume call
+		// site -- building.go, planning.go, reviewing.go, judging.go,
+		// respond.go -- sets only ID and BumpResumes), so the log line below
+		// would otherwise print job="" on a resumed turn (bug fix: the
+		// owner's serve log showed "run reserved ... job="" turn=1" on a
+		// resume, next to "job=planning" on the turn that started it). The
+		// session's own job column, set once at creation, never changes, so
+		// reading it back here makes the log line accurate on every turn.
+		if job, err = sessionJobTx(ctx, tx, sessionID); err != nil {
+			return Reserved{}, err
 		}
 	} else {
 		var sessRes sql.Result
@@ -118,6 +130,18 @@ func (s *Store) Reserve(ctx context.Context, ticketID int64, owner string, expir
 		return Reserved{}, fmt.Errorf("reserve: commit tx: %w", err)
 	}
 
-	slog.Info("run reserved", "ticket_id", ticketID, "session_id", sessionID, "run_id", runID, "job", su.Job, "turn", turn)
+	slog.Info("run reserved", "ticket_id", ticketID, "session_id", sessionID, "run_id", runID, "job", job, "turn", turn)
 	return Reserved{SessionID: sessionID, RunID: runID, Turn: turn}, nil
+}
+
+// sessionJobTx reads sessionID's own job column: set once when the session
+// is created and never changed by a resume, so a resumed Reserve call can
+// recover the job name its own SessionUpsert leaves unset (bug fix, see
+// Reserve above).
+func sessionJobTx(ctx context.Context, tx *sql.Tx, sessionID int64) (string, error) {
+	var job string
+	if err := tx.QueryRowContext(ctx, `SELECT job FROM sessions WHERE id = ?`, sessionID).Scan(&job); err != nil {
+		return "", fmt.Errorf("reserve: get session %d job: %w", sessionID, err)
+	}
+	return job, nil
 }

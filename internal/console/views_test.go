@@ -2,11 +2,13 @@ package console_test
 
 import (
 	"encoding/json"
+	"strconv"
 	"strings"
 	"testing"
 
 	"zing/internal/bus"
 	"zing/internal/console"
+	"zing/internal/response"
 	"zing/internal/store"
 )
 
@@ -444,6 +446,192 @@ func TestThreadRendersSentAnswerFromPayload(t *testing.T) {
 
 	if !strings.Contains(main, "Option: b") {
 		t.Errorf("thread frame missing the sent answer's chosen option; got:\n%s", main)
+	}
+}
+
+// TestThreadRendersDraftReplyAndHint proves the bug fix at the root of the
+// owner's report: a saved-but-unsent draft reply against an open question
+// renders back as the reply box's own value (not a blank box the owner
+// reads as "the text disappeared"), and the thread shows both the one-line
+// "draft saved" banner (only once a draft exists) and the per-box "saved as
+// a draft" hint, since sending is keyboard-only (Q31) and nothing on screen
+// said so before this fix.
+func TestThreadRendersDraftReplyAndHint(t *testing.T) {
+	t.Parallel()
+	s := newConsoleTestStore(t)
+	ticketID := seedTicket(t, s, "t#6", "Thread draft reply ticket")
+	questionID := seedOpenQuestion(t, s, ticketID)
+
+	if _, err := s.SaveDraft(t.Context(), store.DraftInput{
+		TicketID: ticketID, QuestionID: &questionID, Text: "here is my reply",
+	}); err != nil {
+		t.Fatalf("SaveDraft(text): %v", err)
+	}
+
+	srv := newTestServer(t, s, bus.New(), nil, newTestLogHandler(t))
+	main := mainFrame(t, srv.URL, "thread", ticketID, 0)
+
+	if !strings.Contains(main, `value="here is my reply"`) {
+		t.Errorf("thread frame missing the draft reply as the reply box's value; got:\n%s", main)
+	}
+	if !strings.Contains(main, `class="draft-banner"`) {
+		t.Errorf("thread frame missing the draft banner while a draft exists; got:\n%s", main)
+	}
+	if !strings.Contains(main, "Draft saved.") || !strings.Contains(main, "sends all drafts.") {
+		t.Errorf("draft banner missing its expected wording; got:\n%s", main)
+	}
+	if !strings.Contains(main, `class="reply-hint"`) || !strings.Contains(main, "Saved as a draft.") {
+		t.Errorf("thread frame missing the per-box \"saved as a draft\" hint; got:\n%s", main)
+	}
+}
+
+// TestThreadNoDraftShowsNoBanner proves the banner is conditional (design
+// section 6.7, bug fix): an open question with nothing drafted against it
+// shows neither the banner nor a pre-filled reply box, so a ticket with no
+// draft in progress reads exactly as it did before this fix.
+func TestThreadNoDraftShowsNoBanner(t *testing.T) {
+	t.Parallel()
+	s := newConsoleTestStore(t)
+	ticketID := seedTicket(t, s, "t#7", "Thread no-draft ticket")
+	seedOpenQuestion(t, s, ticketID)
+
+	srv := newTestServer(t, s, bus.New(), nil, newTestLogHandler(t))
+	main := mainFrame(t, srv.URL, "thread", ticketID, 0)
+
+	if strings.Contains(main, `class="draft-banner"`) {
+		t.Errorf("thread frame shows the draft banner with no draft in progress; got:\n%s", main)
+	}
+	if !strings.Contains(main, `value=""`) {
+		t.Errorf("thread frame's reply box should start empty with no draft; got:\n%s", main)
+	}
+}
+
+// TestThreadRendersDraftOptionPicked proves a saved-but-unsent option pick
+// renders its chip "picked" (design section 6.6, 6.7, bug fix): the same
+// client-visible state pickToggleExpr gives a chip on a fresh click, so a
+// pick made, then abandoned mid-session (navigated away, or the tab
+// reloaded) before Enter/the send chord still shows what was chosen.
+func TestThreadRendersDraftOptionPicked(t *testing.T) {
+	t.Parallel()
+	s := newConsoleTestStore(t)
+	ticketID := seedTicket(t, s, "t#8", "Thread draft option ticket")
+	questionID := seedOpenQuestion(t, s, ticketID)
+
+	option := "b"
+	if _, err := s.SaveDraft(t.Context(), store.DraftInput{
+		TicketID: ticketID, QuestionID: &questionID, Option: &option,
+	}); err != nil {
+		t.Fatalf("SaveDraft(option): %v", err)
+	}
+
+	srv := newTestServer(t, s, bus.New(), nil, newTestLogHandler(t))
+	main := mainFrame(t, srv.URL, "thread", ticketID, 0)
+
+	if !strings.Contains(main, `class="chip picked" aria-pressed="true" data-chip-index="2"`) {
+		t.Errorf("thread frame missing the drafted option's chip rendered picked; got:\n%s", main)
+	}
+	if strings.Contains(main, `class="chip picked" aria-pressed="true" data-chip-index="1"`) {
+		t.Errorf("thread frame renders the undrafted chip picked; got:\n%s", main)
+	}
+}
+
+// perimeterQuestionPayload builds a minimal, schema-valid perimeter
+// question payload with two file items, for the item-kind draft tests
+// below: hand-built rather than through console.SeedQuestionFixtures, so
+// the test controls the question's own message id directly instead of
+// reading it back out of ListMessages.
+const perimeterQuestionPayload = `{"key":"Q1","kind":"perimeter","state":"open","recommended":"Accept every file",` +
+	`"options":[],"items":[{"ref":"a.go","text":"Builder: x Change: y"},{"ref":"b.go","text":"Builder: x Change: y"}]}`
+
+// seedOpenPerimeterQuestion inserts one open perimeter-kind question message
+// on ticketID with two items, "a.go" and "b.go" (perimeterQuestionPayload),
+// and returns its message id.
+func seedOpenPerimeterQuestion(t *testing.T, s *store.Store, ticketID int64) int64 {
+	t.Helper()
+	openState := testQuestionStateOpen
+	id, err := s.InsertMessage(t.Context(), store.Message{
+		TicketID: ticketID, Type: testMsgTypeQuestion, Author: testAuthorZing, State: &openState,
+		Body:    "Confirm the file perimeter\n\nReview each file.",
+		Payload: []byte(perimeterQuestionPayload),
+	})
+	if err != nil {
+		t.Fatalf("InsertMessage(perimeter question): %v", err)
+	}
+	return id
+}
+
+// TestThreadRendersDraftItemsPicked proves an item-kind question's own
+// saved-but-unsent decisions render their buttons "picked" (design section
+// 6.6, 9.2, bug fix), the same way optionChips' own draft does, and that a
+// ref with nothing drafted against it renders no control picked.
+func TestThreadRendersDraftItemsPicked(t *testing.T) {
+	t.Parallel()
+	s := newConsoleTestStore(t)
+	ticketID := seedTicket(t, s, "t#9", "Thread draft items ticket")
+	questionID := seedOpenPerimeterQuestion(t, s, ticketID)
+
+	if _, err := s.SaveDraft(t.Context(), store.DraftInput{
+		TicketID: ticketID, QuestionID: &questionID,
+		Item: &store.ItemDecision{Ref: "a.go", Decision: response.DecisionAccept},
+	}); err != nil {
+		t.Fatalf("SaveDraft(item): %v", err)
+	}
+
+	srv := newTestServer(t, s, bus.New(), nil, newTestLogHandler(t))
+	main := mainFrame(t, srv.URL, "thread", ticketID, 0)
+
+	if !strings.Contains(main, `class="decision picked" aria-pressed="true" data-draft-ticket="`+strconv.FormatInt(ticketID, 10)+
+		`" data-draft-question="`+strconv.FormatInt(questionID, 10)+`" data-item-ref="a.go" data-decision="accept"`) {
+		t.Errorf("thread frame missing a.go's drafted accept decision rendered picked; got:\n%s", main)
+	}
+	if strings.Contains(main, `class="decision picked"`+` aria-pressed="true" data-draft-ticket="`+strconv.FormatInt(ticketID, 10)+
+		`" data-draft-question="`+strconv.FormatInt(questionID, 10)+`" data-item-ref="b.go"`) {
+		t.Errorf("thread frame renders b.go (no draft against it) picked; got:\n%s", main)
+	}
+}
+
+// TestThreadDraftItemClearsAfterSend proves a sent draft stops rendering as
+// picked on the next render (design section 6.7, bug fix): a.go's decision
+// is drafted, then sent via SendBatch (the perimeter question stays open,
+// since only one of its two items is decided); b.go is then drafted but
+// left unsent. a.go's control must no longer show picked (its draft row is
+// now state=sent, not state=draft), while b.go's still-unsent draft does.
+func TestThreadDraftItemClearsAfterSend(t *testing.T) {
+	t.Parallel()
+	s := newConsoleTestStore(t)
+	ticketID := seedTicket(t, s, "t#10", "Thread draft clears after send ticket")
+	questionID := seedOpenPerimeterQuestion(t, s, ticketID)
+
+	if _, err := s.SaveDraft(t.Context(), store.DraftInput{
+		TicketID: ticketID, QuestionID: &questionID,
+		Item: &store.ItemDecision{Ref: "a.go", Decision: response.DecisionAccept},
+	}); err != nil {
+		t.Fatalf("SaveDraft(a.go accept): %v", err)
+	}
+	if _, err := s.SendBatch(t.Context(), ticketID); err != nil {
+		t.Fatalf("SendBatch: %v", err)
+	}
+	if _, err := s.SaveDraft(t.Context(), store.DraftInput{
+		TicketID: ticketID, QuestionID: &questionID,
+		Item: &store.ItemDecision{Ref: "b.go", Decision: response.DecisionReject},
+	}); err != nil {
+		t.Fatalf("SaveDraft(b.go reject): %v", err)
+	}
+
+	srv := newTestServer(t, s, bus.New(), nil, newTestLogHandler(t))
+	main := mainFrame(t, srv.URL, "thread", ticketID, 0)
+
+	groups := splitQuestionGroups(t, main)
+	g := findGroup(t, groups, "Confirm the file perimeter")
+
+	if strings.Contains(g, `data-item-ref="a.go" data-decision="accept" data-on:click`) &&
+		strings.Contains(g, `class="decision picked" aria-pressed="true" data-draft-ticket="`+strconv.FormatInt(ticketID, 10)+
+			`" data-draft-question="`+strconv.FormatInt(questionID, 10)+`" data-item-ref="a.go"`) {
+		t.Errorf("a.go's sent decision still renders picked after SendBatch; got:\n%s", g)
+	}
+	if !strings.Contains(g, `class="decision picked" aria-pressed="true" data-draft-ticket="`+strconv.FormatInt(ticketID, 10)+
+		`" data-draft-question="`+strconv.FormatInt(questionID, 10)+`" data-item-ref="b.go" data-decision="reject"`) {
+		t.Errorf("b.go's still-unsent draft decision missing its picked rendering; got:\n%s", g)
 	}
 }
 

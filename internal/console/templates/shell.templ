@@ -250,6 +250,23 @@ templ palette() {
 			font: inherit;
 		}
 
+		/* The draft banner and per-reply hint (bug fix): sending is
+		   keyboard-only by design (Q31), and nothing on screen said so,
+		   which left the owner thinking a saved draft had been lost.
+		   draftBanner (thread.templ) shows once, only while the ticket
+		   carries a draft; reply-hint shows under every reply box, since
+		   it explains what that box does rather than reporting state. */
+		.draft-banner {
+			color: var(--zing-text-dim);
+			font-size: 0.85rem;
+			margin: 0.5rem 0;
+		}
+		.reply-hint {
+			color: var(--zing-text-dim);
+			font-size: 0.75rem;
+			margin: 0.25rem 0 0;
+		}
+
 		/* The rail (design section 6.11): Phase, Artifacts, Run, Log, and the
 		   side box, in the mock's order. */
 		#rail section { margin-bottom: 1.25rem; }

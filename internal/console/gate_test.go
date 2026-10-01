@@ -51,7 +51,7 @@ func seedGateQuestion(t *testing.T, s *store.Store, ticketID int64) {
 	if err != nil {
 		t.Fatalf("marshal gate question payload: %v", err)
 	}
-	openState := "open"
+	openState := testQuestionStateOpen
 	if _, err := s.InsertMessage(t.Context(), store.Message{
 		TicketID: ticketID, Type: testMsgTypeQuestion, Author: testAuthorZing,
 		State:   &openState,

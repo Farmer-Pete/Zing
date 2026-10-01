@@ -10,7 +10,7 @@ import (
 func renderItemRow(t *testing.T, item ThreadItem) string {
 	t.Helper()
 	var sb strings.Builder
-	if err := itemRow(1, 2, item, itemDecisionsPerimeter).Render(t.Context(), &sb); err != nil {
+	if err := itemRow(1, 2, item, itemDecisionsPerimeter, "").Render(t.Context(), &sb); err != nil {
 		t.Fatalf("itemRow.Render: %v", err)
 	}
 	return sb.String()

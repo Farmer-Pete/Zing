@@ -397,6 +397,13 @@ const (
 // so this copy and job's must change together.
 const msgTypeUpdate = "update"
 
+// msgTypeReply mirrors store's own unexported msgTypeReply
+// (internal/store/console_writes.go), the same package-local-copy pattern
+// draftMessageState below uses for store's "draft" state literal:
+// collectQuestionDrafts needs to recognize a draft reply row the same way
+// SaveDraft's own insertReplyDraftTx writes one.
+const msgTypeReply = "reply"
+
 // updateMarker* mirror the literal prefixes internal/job/planning.go and
 // internal/job/building.go write into type="update" message bodies --
 // planreviewPendingMarker and planreviewDeliveredMarker's "planreview v<N>
@@ -517,8 +524,12 @@ func questionStateLabel(state *string) string {
 // (templates.Thread's own nil guard), never when rows is non-empty. plan is
 // nil, and scenarios and findings are both nil, when the ticket carries
 // nothing yet for that region (views.go's loadPlan, loadScenarios,
-// loadFindings).
+// loadFindings). Drafts are collected from the unfiltered rows, before
+// visibleRows drops them (bug fix: a draft answers or replies to a
+// question, which this function still needs to find below, even though the
+// draft row itself never becomes its own ThreadRow).
 func buildThreadRows(ticket *store.Ticket, rows []store.MessageRow, plan *templates.RenderedPlan, scenarios []templates.ScenarioRow, findings []templates.FindingRow) ([]templates.ThreadRow, error) {
+	drafts := collectQuestionDrafts(rows)
 	rows = visibleRows(rows)
 
 	// messageCounts holds, per question message id, how many other messages
@@ -535,7 +546,7 @@ func buildThreadRows(ticket *store.Ticket, rows []store.MessageRow, plan *templa
 
 	out := make([]templates.ThreadRow, 0, len(rows))
 	for i := range rows {
-		question, err := buildThreadQuestion(ticket, &rows[i], messageCounts[rows[i].ID]+1, plan, scenarios, findings)
+		question, err := buildThreadQuestion(ticket, &rows[i], messageCounts[rows[i].ID]+1, plan, scenarios, findings, drafts)
 		if err != nil {
 			return nil, err
 		}
@@ -548,19 +559,69 @@ func buildThreadRows(ticket *store.Ticket, rows []store.MessageRow, plan *templa
 	return out, nil
 }
 
+// questionDraft is one question's in-progress, unsent draft (bug fix): at
+// most one draft reply and at most one draft answer can exist per question
+// at a time (SaveDraft's insertReplyDraftTx and upsertOptionDraftTx/
+// upsertItemDraftTx both update a question's existing draft row in place
+// rather than inserting a second one), so collectQuestionDrafts needs no
+// slice, just these two optional values.
+type questionDraft struct {
+	Reply  string
+	Answer response.AnswerPayload
+}
+
+// collectQuestionDrafts scans every row this ticket carries -- before
+// visibleRows drops the draft ones -- for an unsent (state="draft") reply
+// or answer that targets a question (ParentID != nil), keyed by that
+// question's own message id (bug fix: freeReply, optionChips, and itemRows
+// need this to render a saved-but-unsent draft back instead of leaving the
+// thread looking like it swallowed it). A thread-level reply draft
+// (ParentID == nil) is skipped: there is no composer surface for one
+// (freeReply only ever renders inside a question's own group), so it has
+// nowhere to render back to. An answer draft whose payload fails to decode
+// is skipped rather than erroring the whole thread render, the same
+// defensive choice buildThreadQuestion already makes for a question's own
+// unparseable payload.
+func collectQuestionDrafts(rows []store.MessageRow) map[int64]questionDraft {
+	drafts := make(map[int64]questionDraft)
+	for i := range rows {
+		m := &rows[i]
+		if m.State == nil || *m.State != draftMessageState || m.ParentID == nil {
+			continue
+		}
+		qid := *m.ParentID
+		switch m.Type {
+		case msgTypeReply:
+			d := drafts[qid]
+			d.Reply = m.Body
+			drafts[qid] = d
+		case msgTypeAnswer:
+			var ap response.AnswerPayload
+			if err := json.Unmarshal(m.Payload, &ap); err != nil {
+				continue
+			}
+			d := drafts[qid]
+			d.Answer = ap
+			drafts[qid] = d
+		}
+	}
+	return drafts
+}
+
 // buildThreadQuestion returns the detail a "question" message renders
 // instead of its plain Body, or nil for every other type. messageCount is
 // the question's own message (1) plus every reply, answer, followup, or
 // resolved row that names it as a parent (buildThreadRows). plan,
 // scenarios, and findings are the gate kind's three context regions (design
-// section 6.9, 7, D8), set on q only when payload.Kind is gate. An
-// unparseable payload falls back to nil (renders as a plain row) rather
-// than failing the whole thread render, since the commit that wrote it
-// already validated it against the messages/question schema; a markdown
-// render failure, by contrast, is a real error (design section 6.10: Render
-// can fail), and is returned rather than silently dropping the question's
-// body.
-func buildThreadQuestion(ticket *store.Ticket, m *store.MessageRow, messageCount int, plan *templates.RenderedPlan, scenarios []templates.ScenarioRow, findings []templates.FindingRow) (*templates.ThreadQuestion, error) {
+// section 6.9, 7, D8), set on q only when payload.Kind is gate. drafts is
+// collectQuestionDrafts' own map, keyed by this question's id, carrying its
+// in-progress draft reply and/or answer, if any (bug fix). An unparseable
+// payload falls back to nil (renders as a plain row) rather than failing
+// the whole thread render, since the commit that wrote it already validated
+// it against the messages/question schema; a markdown render failure, by
+// contrast, is a real error (design section 6.10: Render can fail), and is
+// returned rather than silently dropping the question's body.
+func buildThreadQuestion(ticket *store.Ticket, m *store.MessageRow, messageCount int, plan *templates.RenderedPlan, scenarios []templates.ScenarioRow, findings []templates.FindingRow, drafts map[int64]questionDraft) (*templates.ThreadQuestion, error) {
 	if m.Type != msgTypeQuestion {
 		return nil, nil //nolint:nilnil // "no question" is a legitimate result, not an error
 	}
@@ -612,6 +673,13 @@ func buildThreadQuestion(ticket *store.Ticket, m *store.MessageRow, messageCount
 		q.Plan = plan
 		q.Scenarios = scenarios
 		q.Findings = findings
+	}
+	if draft, ok := drafts[m.ID]; ok {
+		q.DraftReply = draft.Reply
+		if draft.Answer.Option != nil {
+			q.DraftOption = *draft.Answer.Option
+		}
+		q.DraftItems = draft.Answer.Items
 	}
 	return q, nil
 }
