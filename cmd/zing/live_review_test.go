@@ -125,6 +125,36 @@ func normalizeLiveReviewPlanArrays(p *response.Plan) {
 	}
 }
 
+// moveLiveReviewTicketToReviewing moves ticketID, freshly inserted queued
+// (store.InsertTicket's own rule, store/spine.go), straight to "reviewing"
+// through Claim and CommitHandlerResult directly -- the same test-only
+// shortcut postbuild_test.go's own pbSeedTicketInState takes (bypassing
+// job.ValidateCommit's legal-edge check): this harness proves ROUND, one
+// handler tick, so it needs a ticket already in "reviewing", not a replay
+// of every stage before it.
+func moveLiveReviewTicketToReviewing(t *testing.T, st *store.Store, ticketID int64) error {
+	t.Helper()
+	const owner = "live-review-seed"
+	expires := time.Now().Add(10 * time.Minute).UTC().Truncate(time.Second)
+	claimed, err := st.Claim(t.Context(), ticketID, owner, expires)
+	if err != nil {
+		return err
+	}
+	if !claimed {
+		return errors.New("claim ticket for seeding: not claimed")
+	}
+	applied, err := st.CommitHandlerResult(t.Context(), store.HandlerCommit{
+		TicketID: ticketID, Owner: owner, Expires: expires, Next: "reviewing", Reason: "live review harness: seed ticket into reviewing",
+	})
+	if err != nil {
+		return err
+	}
+	if !applied {
+		return errors.New("commit ticket to reviewing: not applied")
+	}
+	return nil
+}
+
 // TestLiveReview proves a real review round (design section 6.2) finds a
 // real, planted defect through the real, pinned claude CLI under the
 // readonly sandbox profile (section 19.2 task 12): every lens machine.toml's
@@ -187,10 +217,13 @@ func TestLiveReview(t *testing.T) {
 	const ticketTitle = "Add GreetAll"
 	ticketID, err := st.InsertTicket(t.Context(), store.Ticket{
 		ProjectID: projectID, TrackerRef: "live-review#1", Title: ticketTitle,
-		Body: "Add GreetAll, a batch greeting helper.", State: "reviewing",
+		Body: "Add GreetAll, a batch greeting helper.", State: testServeStateQueued,
 	})
 	if err != nil {
 		t.Fatalf("insert ticket: %v", err)
+	}
+	if moveErr := moveLiveReviewTicketToReviewing(t, st, ticketID); moveErr != nil {
+		t.Fatalf("move ticket to reviewing: %v", moveErr)
 	}
 
 	wt, _, err := orch.EnsureWorktree(t.Context(), ticketID, ticketTitle)
