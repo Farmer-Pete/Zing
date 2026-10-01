@@ -40,29 +40,37 @@ const (
 	FixKindFindings FixKind = "findings"
 	FixKindFailure  FixKind = "failure"
 	FixKindCILog    FixKind = "ci_log"
+	// FixKindThreads is shipping's own fourth kind (design section 4.3, 8.7,
+	// 9.3): a respond batch's collected fix actions, produced by APPLY (M4)
+	// and reconstructed by resolvePostBuildEscalation's own shipping,
+	// loops_exhausted retry row (5.6, postbuild.go) when the shared gate of
+	// 8.7 holds it open across a retry.
+	FixKindThreads FixKind = "threads"
 )
 
-// Values returns the three kinds, in that order.
+// Values returns the four kinds, in that order.
 func (FixKind) Values() []string {
-	return []string{string(FixKindFindings), string(FixKindFailure), string(FixKindCILog)}
+	return []string{string(FixKindFindings), string(FixKindFailure), string(FixKindCILog), string(FixKindThreads)}
 }
 
 // fixSubjectFor and fixInputLabelFor are design section 8's own table: the
 // commit subject a landed fix carries (unit.Title) and the prompt input
 // label its own text carries, one pair per FixKind. The input label
-// happens to equal the kind's own wire value in all three rows, but the
-// two are kept as separate maps since the plan names them as two distinct
-// columns, not one.
+// happens to equal the kind's own wire value in every row, but the two are
+// kept as separate maps since the plan names them as two distinct columns,
+// not one.
 var fixSubjectFor = map[FixKind]string{
 	FixKindFindings: "Fix review findings",
 	FixKindFailure:  "Fix failed scenarios",
 	FixKindCILog:    "Fix the failing check",
+	FixKindThreads:  "Address review comments",
 }
 
 var fixInputLabelFor = map[FixKind]string{
 	FixKindFindings: "findings",
 	FixKindFailure:  "failure",
 	FixKindCILog:    "ci_log",
+	FixKindThreads:  "threads",
 }
 
 // FixRequest is one open fix unit, read back from its marker (design

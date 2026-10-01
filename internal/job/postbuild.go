@@ -149,11 +149,14 @@ func postBuildRoundOwnedByOpenFix(ctx context.Context, t store.Ticket, d Deps, r
 // follows design section 5.6's own choice-by-origin table: fix (with and
 // without a run), perimeter, cap_resumes on a build, perimeter, or review
 // session (retryCapResumes' own job switch), cap_budget, sandbox_unavailable,
-// review, and judge (each with the same loops_exhausted fix request, any
-// other code's own "retry requested" marker, or, judge only, "with a run"'s
-// own fresh round retry -- judging.go's retryFreshRound). A row this task
-// does not yet cover (shipping, respond) is a loud, named error: later
-// tasks add those rows.
+// review, judge, and shipping (each with the same loops_exhausted fix
+// request, any other code's own "retry requested" marker, or, judge only,
+// "with a run"'s own fresh round retry -- judging.go's retryFreshRound).
+// Shipping's own loops_exhausted row is shipHandler.retryShippingLoopsExhausted
+// (shipping.go, task 7); its pr_closed and every other code share
+// shipRetryMarkerCommit, the same "retry requested" marker plus ClearPoll.
+// A row this task does not yet cover (respond, M4) is a loud, named error:
+// a later task adds it.
 func resolvePostBuildEscalation(ctx context.Context, t store.Ticket, d Deps, round store.Round, escID int64) (store.HandlerCommit, error) {
 	h := buildingHandler{}
 	escMsg, payload, err := d.Store.EscalationByID(ctx, escID)
@@ -208,6 +211,12 @@ func resolvePostBuildEscalation(ctx context.Context, t store.Ticket, d Deps, rou
 
 	case origin == response.EscalationOriginJudge:
 		commit = h.retryMarkerCommit(t, d, resolveIDs)
+
+	case origin == response.EscalationOriginShipping && payload.Code == string(response.EscalationCodeLoopsExhausted):
+		commit, err = shipHandler{}.retryShippingLoopsExhausted(ctx, t, d, resolveIDs, notes, payload.Tried)
+
+	case origin == response.EscalationOriginShipping:
+		commit = shipRetryMarkerCommit(t, d, resolveIDs)
 
 	default:
 		return store.HandlerCommit{}, fmt.Errorf("job: postbuild: escalation %d: unrecognized origin %q", escID, payload.Origin)

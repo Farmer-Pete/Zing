@@ -66,6 +66,11 @@ func TestGitHubClientSatisfiesInterfaces(t *testing.T) {
 // title back.
 const shipPreCrashTitle = "pre-crash title"
 
+// shipFixBuildScriptPath is the fake runtime's own path for judgeFixBuildScript
+// (judging_test.go), the one build script every ci_log fix this file lands
+// through driveShipFixToLanding runs.
+const shipFixBuildScriptPath = "build/fix/1.xml"
+
 // shipGitHubPR is one pull request shipGitHub has created, keyed by head
 // and base so FindPRByHead's own filter (PKG9-PLAN.md section 10.3) can be
 // honored for real.
@@ -91,6 +96,24 @@ type shipGitHub struct {
 	creates  int
 	finds    int
 	lastBody string // the body the newest CreateDraftPR call carried
+
+	// The fields below are POLL's own configurable reads (task 7): GetPR,
+	// ListCheckRuns, ListStatuses, and RequiredCheckRules each return their
+	// own *Err when set, instead of the configured value.
+	prState    orchestrator.PRState
+	prErr      error
+	getPRCount int
+
+	runs        []orchestrator.CheckRun
+	runsErr     error
+	statuses    []orchestrator.CommitStatus
+	statusesErr error
+	required    []orchestrator.RequiredCheck
+	requiredErr error
+
+	// logTail, when set, backs JobLogTail; nil returns "", nil (ciLogText's
+	// own tests, shiprules_test.go, cover JobLogTail's real shape).
+	logTail func(ctx context.Context, owner, repo string, jobID int64, lines int) (string, error)
 }
 
 var (
@@ -131,6 +154,51 @@ func (g *shipGitHub) FindPRByHead(_ context.Context, _, _, head, base string) (u
 	return g.pr.url, g.pr.number, true, nil
 }
 
+// GetPR, Merge, ListCheckRuns, ListStatuses, RequiredCheckRules, and
+// JobLogTail give shipGitHub job.PullRequests and job.Checks too (task 7):
+// POLL's own tests configure prState/prErr/runs/statuses/required/logTail
+// directly on the struct literal, the same way PUBLISH's own tests
+// configure createErr/findErr.
+func (g *shipGitHub) GetPR(context.Context, string, string, int) (orchestrator.PRState, error) {
+	g.getPRCount++
+	if g.prErr != nil {
+		return orchestrator.PRState{}, g.prErr
+	}
+	return g.prState, nil
+}
+
+func (g *shipGitHub) Merge(context.Context, string, string, int, string, string, string) (string, error) {
+	return "", errors.New("shipGitHub: Merge not implemented (M4)")
+}
+
+func (g *shipGitHub) ListCheckRuns(context.Context, string, string, string) ([]orchestrator.CheckRun, error) {
+	if g.runsErr != nil {
+		return nil, g.runsErr
+	}
+	return g.runs, nil
+}
+
+func (g *shipGitHub) ListStatuses(context.Context, string, string, string) ([]orchestrator.CommitStatus, error) {
+	if g.statusesErr != nil {
+		return nil, g.statusesErr
+	}
+	return g.statuses, nil
+}
+
+func (g *shipGitHub) RequiredCheckRules(context.Context, string, string, string) ([]orchestrator.RequiredCheck, error) {
+	if g.requiredErr != nil {
+		return nil, g.requiredErr
+	}
+	return g.required, nil
+}
+
+func (g *shipGitHub) JobLogTail(ctx context.Context, owner, repo string, jobID int64, lines int) (string, error) {
+	if g.logTail != nil {
+		return g.logTail(ctx, owner, repo, jobID, lines)
+	}
+	return "", nil
+}
+
 // shipTracker is a configurable ShipTracker double: PostPRLink posts at
 // most once, mirroring the dispatcher's own hidden-marker guard
 // (internal/dispatch/dispatch.go's postMarkedOnce), so a test can call
@@ -140,8 +208,9 @@ type shipTracker struct {
 	prPosted    bool
 	prPostCount int
 
-	doneErr    error
-	donePosted bool
+	doneErr       error
+	donePosted    bool
+	donePostCount int
 }
 
 func (tr *shipTracker) PostPRLink(_ context.Context, _ int64, _, _ string) error {
@@ -159,7 +228,10 @@ func (tr *shipTracker) PostDone(_ context.Context, _ int64, _, _ string) error {
 	if tr.doneErr != nil {
 		return tr.doneErr
 	}
-	tr.donePosted = true
+	if !tr.donePosted {
+		tr.donePosted = true
+		tr.donePostCount++
+	}
 	return nil
 }
 
@@ -183,20 +255,34 @@ func shipOrchestratorFor(t *testing.T, localPath string, gh orchestrator.GitHub)
 }
 
 // shipBuildProjects is pbBuildProjects' own twin, wired to gh instead of
-// pbGitHub{}.
+// pbGitHub{}. When gh also implements job.PullRequests and job.Checks (as
+// *shipGitHub does, task 7), every project's own Owner, Repo, PullRequests,
+// and Checks are filled from it too, exactly as serve's own
+// buildJobProjects fills all three from one *orchestrator.GitHubClient
+// (PKG9-PLAN.md section 10.3) -- so POLL's own tests can share the one
+// *shipGitHub PUBLISH's own OpenDraftPR call already used, and see the
+// very pull request it opened.
 func shipBuildProjects(t *testing.T, s *store.Store, gh orchestrator.GitHub) map[int64]Project {
 	t.Helper()
 	projects, err := s.ListProjects(t.Context())
 	if err != nil {
 		t.Fatalf("ListProjects: %v", err)
 	}
+	prs, hasPRs := gh.(PullRequests)
+	checks, hasChecks := gh.(Checks)
+
 	out := make(map[int64]Project, len(projects))
 	for _, p := range projects {
 		orch, repoGit, ok := shipOrchestratorFor(t, p.LocalPath, gh)
 		if !ok {
 			continue
 		}
-		out[p.ID] = Project{Orch: orch, RepoGit: repoGit, TestCmd: "test -f " + pbHelloTxt, LintCmd: pbNoopShellCmd}
+		proj := Project{Orch: orch, RepoGit: repoGit, TestCmd: "test -f " + pbHelloTxt, LintCmd: pbNoopShellCmd}
+		if hasPRs && hasChecks {
+			proj.Owner, proj.Repo = pbFixtureOwner, pbFixtureOwner
+			proj.PullRequests, proj.Checks = prs, checks
+		}
+		out[p.ID] = proj
 	}
 	return out
 }
@@ -752,7 +838,7 @@ func TestPublishRequiresJudgePassOnHead(t *testing.T) {
 		t.Fatalf("seed fix request: applied=%v err=%v", applied, err)
 	}
 
-	rt := runtime.NewFake(fstest.MapFS{"build/fix/1.xml": &fstest.MapFile{Data: []byte(judgeFixBuildScript)}})
+	rt := runtime.NewFake(fstest.MapFS{shipFixBuildScriptPath: &fstest.MapFile{Data: []byte(judgeFixBuildScript)}})
 	driveShipFixToLanding(t, s, ticket.ID, rt)
 
 	gh := &shipGitHub{}
@@ -789,7 +875,7 @@ func TestFinalVerdictsAfterFailFixPass(t *testing.T) {
 
 	scripts := judgeScriptsFS(judgeOkBothScript)
 	scripts["judge/2/1.xml"] = &fstest.MapFile{Data: []byte(judgeOkBothScript)}
-	scripts["build/fix/1.xml"] = &fstest.MapFile{Data: []byte(judgeFixBuildScript)}
+	scripts[shipFixBuildScriptPath] = &fstest.MapFile{Data: []byte(judgeFixBuildScript)}
 	rt := runtime.NewFake(scripts)
 
 	checks := &judgeScriptedCheckCommands{real: NewCommandRunner(sandbox.Off(), false), steps: []judgeCheckStep{{exit: 1}, {exit: 0}}}
@@ -1015,5 +1101,726 @@ func TestFinalVerdictsPassedTwice(t *testing.T) {
 	want := "judge round 1 passed twice"
 	if commit.Escalation.Payload.What != want {
 		t.Errorf("What = %q, want %q", commit.Escalation.Payload.What, want)
+	}
+}
+
+// -----------------------------------------------------------------------
+// POLL (task 7)
+// -----------------------------------------------------------------------
+
+// shipPublished drives a ticket all the way through PUBLISH (shipTicketReady,
+// then one real shipHandler.Run that opens the draft pull request) so its
+// own tickets.pr_url is set -- the state every POLL test starts from. gh
+// and tr are the same doubles PUBLISH used, so a caller configures gh's own
+// prState, runs, statuses, and required (POLL's own reads, task 7) before
+// claiming the ticket again for a POLL call.
+func shipPublished(t *testing.T) (s *store.Store, ticket store.Ticket, gh *shipGitHub, tr *shipTracker) {
+	t.Helper()
+	s, ticket, _ = shipTicketReady(t)
+	gh = &shipGitHub{}
+	tr = &shipTracker{}
+	deps := shipClaim(t, s, pbFakeRuntime(t), ticket.ID, gh, tr)
+	commit, err := (shipHandler{}).Run(t.Context(), ticket, deps)
+	if err != nil {
+		t.Fatalf("shipPublished: PUBLISH Run: %v", err)
+	}
+	if commit.Escalation != nil {
+		t.Fatalf("shipPublished: PUBLISH escalated: %+v", commit.Escalation.Payload)
+	}
+	pbApply(t, s, ticket, commit)
+	return s, pbGetTicket(t, s, ticket.ID), gh, tr
+}
+
+// shipPollRun claims ticket afresh and runs shipHandler.Run once (POLL,
+// since pr_url is already set by shipPublished).
+func shipPollRun(t *testing.T, s *store.Store, ticket store.Ticket, gh *shipGitHub, tr *shipTracker) (store.HandlerCommit, error) {
+	t.Helper()
+	deps := shipClaim(t, s, pbFakeRuntime(t), ticket.ID, gh, tr)
+	return (shipHandler{}).Run(t.Context(), ticket, deps)
+}
+
+// shipGreenCI is the Checks reads a ticket.ID's own POLL needs to reach
+// EvaluateCI's green branch: one required "ci" context, matched by one
+// completed/success run of the same name. Statuses are never used by any
+// of this file's own cases, so, unlike runs and required, there is no
+// third return here.
+func shipGreenCI() (runs []orchestrator.CheckRun, required []orchestrator.RequiredCheck) {
+	return []orchestrator.CheckRun{{ID: 1, Name: "ci", Status: "completed", Conclusion: "success", AppSlug: "github-actions"}},
+		[]orchestrator.RequiredCheck{{Context: "ci"}}
+}
+
+// shipFailedCI is shipGreenCI's own failed twin: the one required "ci" run
+// completed with conclusion failure.
+func shipFailedCI() (runs []orchestrator.CheckRun, required []orchestrator.RequiredCheck) {
+	return []orchestrator.CheckRun{{
+			ID: 1, Name: "ci", Status: "completed", Conclusion: "failure", AppSlug: "github-actions",
+			DetailsURL: "https://github.com/fixture/fixture/actions/runs/1/job/2",
+		}},
+		[]orchestrator.RequiredCheck{{Context: "ci"}}
+}
+
+// seedLandedFixRequests writes n complete "fix requested <kind> after run
+// 0" / "fix landed <mid> sha <fakesha>" marker pairs directly through
+// CommitHandlerResult, each in its own two commits (the landed marker's own
+// mid is the requested marker's own row id, assigned by the database only
+// once the first commit lands) -- standing in for n real fix cycles without
+// driving the fix unit three times over (design section 8.7's shared gate
+// only ever counts the marker text, never how it got there).
+func seedLandedFixRequests(t *testing.T, s *store.Store, ticketID int64, kind FixKind, n int) {
+	t.Helper()
+	ctx := t.Context()
+	for i := range n {
+		reqOwner := fmt.Sprintf("seed-fix-req-%s-%d", kind, i)
+		expires := time.Now().Add(10 * time.Minute).UTC().Truncate(time.Second)
+		claimed, err := s.Claim(ctx, ticketID, reqOwner, expires)
+		if err != nil || !claimed {
+			t.Fatalf("seedLandedFixRequests: claim %d: claimed=%v err=%v", i, claimed, err)
+		}
+		msg, msgErr := fixRequestMessage(store.Ticket{ID: ticketID}, kind, fmt.Sprintf("log %d", i), 0)
+		if msgErr != nil {
+			t.Fatalf("seedLandedFixRequests: fixRequestMessage: %v", msgErr)
+		}
+		applied, err := s.CommitHandlerResult(ctx, store.HandlerCommit{
+			TicketID: ticketID, Owner: reqOwner, Expires: expires, Messages: []store.Message{msg},
+		})
+		if err != nil || !applied {
+			t.Fatalf("seedLandedFixRequests: request commit %d: applied=%v err=%v", i, applied, err)
+		}
+
+		prefix := fixRequestedCILogPrefix
+		if kind == FixKindThreads {
+			prefix = fixRequestedThreadsPrefix
+		}
+		rows, err := s.MarkersWithPrefix(ctx, ticketID, prefix)
+		if err != nil || len(rows) == 0 {
+			t.Fatalf("seedLandedFixRequests: markers after request %d: rows=%d err=%v", i, len(rows), err)
+		}
+		mid := rows[len(rows)-1].ID
+
+		landOwner := reqOwner + "-land"
+		claimed, err = s.Claim(ctx, ticketID, landOwner, expires)
+		if err != nil || !claimed {
+			t.Fatalf("seedLandedFixRequests: claim land %d: claimed=%v err=%v", i, claimed, err)
+		}
+		landedBody := fmt.Sprintf("fix landed %d sha %040x", mid, i+1)
+		applied, err = s.CommitHandlerResult(ctx, store.HandlerCommit{
+			TicketID: ticketID, Owner: landOwner, Expires: expires,
+			Messages: []store.Message{{TicketID: ticketID, Type: msgTypeUpdate, Author: authorSystem, Body: landedBody}},
+		})
+		if err != nil || !applied {
+			t.Fatalf("seedLandedFixRequests: land commit %d: applied=%v err=%v", i, applied, err)
+		}
+	}
+}
+
+// TestPollMergedGoesDone proves design section 8.3 step 3 and 8.6's DONE:
+// a merged PR moves the ticket straight to done, posting the done comment
+// and closing the issue before the commit.
+func TestPollMergedGoesDone(t *testing.T) {
+	t.Parallel()
+	s, ticket, gh, tr := shipPublished(t)
+	gh.prState = orchestrator.PRState{Merged: true, Draft: true}
+
+	commit, err := shipPollRun(t, s, ticket, gh, tr)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if commit.Next != stateDone || commit.Reason != reasonMerged {
+		t.Errorf("commit = (Next=%q, Reason=%q), want (done, %q)", commit.Next, commit.Reason, reasonMerged)
+	}
+	if !commit.ResolveAll {
+		t.Error("ResolveAll = false, want true")
+	}
+	if !commit.ClearPoll {
+		t.Error("ClearPoll = false, want true")
+	}
+	if !tr.donePosted || tr.donePostCount != 1 {
+		t.Errorf("tr.donePosted = %v, tr.donePostCount = %d, want true and 1", tr.donePosted, tr.donePostCount)
+	}
+
+	pbApply(t, s, ticket, commit)
+	final := pbGetTicket(t, s, ticket.ID)
+	if final.State != stateDone {
+		t.Errorf("final.State = %q, want done", final.State)
+	}
+}
+
+// TestDoneCrashBeforeCommitConverges proves design section 11's own DONE
+// row, "after the post" half: PostDone already posted (simulated by calling
+// the tracker directly) but no commit ever landed; the next tick finds the
+// marker, posts nothing a second time, and still commits done.
+func TestDoneCrashBeforeCommitConverges(t *testing.T) {
+	t.Parallel()
+	s, ticket, gh, tr := shipPublished(t)
+	gh.prState = orchestrator.PRState{Merged: true, Draft: true}
+
+	if err := tr.PostDone(t.Context(), ticket.ProjectID, ticket.TrackerRef, *ticket.PRURL); err != nil {
+		t.Fatalf("PostDone (pre-crash): %v", err)
+	}
+	if tr.donePostCount != 1 {
+		t.Fatalf("tr.donePostCount = %d before the real tick, want 1", tr.donePostCount)
+	}
+
+	commit, err := shipPollRun(t, s, ticket, gh, tr)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if tr.donePostCount != 1 {
+		t.Errorf("tr.donePostCount = %d after the real tick, want still 1 (no duplicate)", tr.donePostCount)
+	}
+	pbApply(t, s, ticket, commit)
+	final := pbGetTicket(t, s, ticket.ID)
+	if final.State != stateDone {
+		t.Errorf("final.State = %q, want done", final.State)
+	}
+}
+
+// TestShipTrackerDoneErrorNoCommit proves design section 8.6 step 2: a
+// PostDone error returns with no commit, so a retried tick repeats step 1.
+func TestShipTrackerDoneErrorNoCommit(t *testing.T) {
+	t.Parallel()
+	s, ticket, gh, tr := shipPublished(t)
+	gh.prState = orchestrator.PRState{Merged: true, Draft: true}
+	tr.doneErr = errors.New("boom: tracker unavailable")
+
+	commit, err := shipPollRun(t, s, ticket, gh, tr)
+	if err == nil {
+		t.Fatal("Run: want an error when PostDone fails, got nil")
+	}
+	if commit.TicketID != 0 || commit.Next != "" {
+		t.Errorf("commit = %+v, want the zero value (no commit on a PostDone error)", commit)
+	}
+	final := pbGetTicket(t, s, ticket.ID)
+	if final.State != stateShipping {
+		t.Errorf("final.State = %q, want still shipping", final.State)
+	}
+}
+
+// TestPollClosedEscalatesPRClosed proves design section 8.6's CLOSED row:
+// a closed, unmerged PR escalates pr_closed, origin shipping.
+func TestPollClosedEscalatesPRClosed(t *testing.T) {
+	t.Parallel()
+	s, ticket, gh, tr := shipPublished(t)
+	gh.prState = orchestrator.PRState{State: "closed", Merged: false}
+
+	commit, err := shipPollRun(t, s, ticket, gh, tr)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if commit.Escalation == nil {
+		t.Fatal("want an escalation")
+	}
+	if commit.Escalation.Payload.Code != string(response.EscalationCodePRClosed) {
+		t.Errorf("Code = %q, want %q", commit.Escalation.Payload.Code, response.EscalationCodePRClosed)
+	}
+	if commit.Escalation.Payload.What != prClosedWhat {
+		t.Errorf("What = %q, want %q", commit.Escalation.Payload.What, prClosedWhat)
+	}
+	if !strings.Contains(commit.Escalation.Payload.Why, "is closed") {
+		t.Errorf("Why = %q, want it to mention the pull request is closed", commit.Escalation.Payload.Why)
+	}
+	if !commit.ClearPoll {
+		t.Error("ClearPoll = false, want true")
+	}
+}
+
+// TestPollPushesLocalAhead proves design section 8.3 step 4's own ancestor
+// row: the PR head is an ancestor of the local branch (a landed fix has not
+// been pushed yet), so POLL pushes and clears the poll, with no escalation.
+func TestPollPushesLocalAhead(t *testing.T) {
+	t.Parallel()
+	s, ticket, gh, tr := shipPublished(t)
+	oldSHA := shipHeadSHA(t, s, ticket)
+
+	maxRunID, err := s.MaxRunID(t.Context(), ticket.ID)
+	if err != nil {
+		t.Fatalf("MaxRunID: %v", err)
+	}
+	msg, msgErr := fixRequestMessage(ticket, FixKindCILog, "check \"ci\" failed: boom", maxRunID)
+	if msgErr != nil {
+		t.Fatalf("fixRequestMessage: %v", msgErr)
+	}
+	owner := "ship-push-ahead-owner"
+	expires := time.Now().Add(10 * time.Minute).UTC().Truncate(time.Second)
+	claimed, err := s.Claim(t.Context(), ticket.ID, owner, expires)
+	if err != nil || !claimed {
+		t.Fatalf("claim: claimed=%v err=%v", claimed, err)
+	}
+	applied, err := s.CommitHandlerResult(t.Context(), store.HandlerCommit{
+		TicketID: ticket.ID, Owner: owner, Expires: expires, Messages: []store.Message{msg},
+	})
+	if err != nil || !applied {
+		t.Fatalf("seed fix request: applied=%v err=%v", applied, err)
+	}
+
+	rt := runtime.NewFake(fstest.MapFS{shipFixBuildScriptPath: &fstest.MapFile{Data: []byte(judgeFixBuildScript)}})
+	driveShipFixToLanding(t, s, ticket.ID, rt)
+
+	newSHA := shipHeadSHA(t, s, pbGetTicket(t, s, ticket.ID))
+	if newSHA == oldSHA {
+		t.Fatal("the landed fix did not move the branch head")
+	}
+
+	gh.prState = orchestrator.PRState{Draft: true, HeadSHA: oldSHA, BaseRef: pbFixtureDefaultBranch}
+	commit, err := shipPollRun(t, s, pbGetTicket(t, s, ticket.ID), gh, tr)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if commit.Escalation != nil {
+		t.Fatalf("got an escalation, want a clean push: %+v", commit.Escalation.Payload)
+	}
+	if !commit.ClearPoll {
+		t.Error("ClearPoll = false, want true")
+	}
+}
+
+// TestPollForeignHeadEscalates proves design section 8.3 step 4's own
+// non-ancestor row: a PR head that is not an ancestor of the local branch
+// (a human pushed to or rewrote the pull request branch) escalates.
+func TestPollForeignHeadEscalates(t *testing.T) {
+	t.Parallel()
+	s, ticket, gh, tr := shipPublished(t)
+
+	proj, err := s.ProjectForTicket(t.Context(), ticket.ID)
+	if err != nil {
+		t.Fatalf("ProjectForTicket: %v", err)
+	}
+	if addErr := gitfixture.AddFile(t.Context(), proj.LocalPath, "unrelated.txt", []byte("x\n")); addErr != nil {
+		t.Fatalf("AddFile: %v", addErr)
+	}
+	out, revErr := gitfixture.Git(t.Context(), proj.LocalPath, "rev-parse", "HEAD")
+	if revErr != nil {
+		t.Fatalf("rev-parse HEAD: %v: %s", revErr, out)
+	}
+	foreignSHA := strings.TrimSpace(string(out))
+
+	gh.prState = orchestrator.PRState{Draft: true, HeadSHA: foreignSHA, BaseRef: pbFixtureDefaultBranch}
+	commit, err := shipPollRun(t, s, ticket, gh, tr)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if commit.Escalation == nil {
+		t.Fatal("want an escalation")
+	}
+	if commit.Escalation.Payload.What != foreignHeadWhat {
+		t.Errorf("What = %q, want %q", commit.Escalation.Payload.What, foreignHeadWhat)
+	}
+	if !strings.Contains(commit.Escalation.Payload.Tried, foreignSHA) {
+		t.Errorf("Tried = %q, want it to mention %q", commit.Escalation.Payload.Tried, foreignSHA)
+	}
+}
+
+// TestPollCIFailedRequestsFix proves design section 8.5 row 4: a failed
+// required check writes a ci_log fix request carrying the log tail.
+func TestPollCIFailedRequestsFix(t *testing.T) {
+	t.Parallel()
+	s, ticket, gh, tr := shipPublished(t)
+	local := shipHeadSHA(t, s, ticket)
+	runs, required := shipFailedCI()
+	gh.runs, gh.required = runs, required
+	gh.prState = orchestrator.PRState{Draft: true, HeadSHA: local, BaseRef: pbFixtureDefaultBranch}
+	gh.logTail = func(context.Context, string, string, int64, int) (string, error) { return "FAIL: boom", nil }
+
+	commit, err := shipPollRun(t, s, ticket, gh, tr)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if commit.Escalation != nil {
+		t.Fatalf("got an escalation, want a fix request: %+v", commit.Escalation.Payload)
+	}
+	found := false
+	for _, m := range commit.Messages {
+		if strings.HasPrefix(m.Body, fixRequestedCILogPrefix) && strings.Contains(m.Body, "FAIL: boom") {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("commit.Messages = %+v, want a %q marker carrying the log tail", commit.Messages, fixRequestedCILogPrefix)
+	}
+	if !commit.ClearPoll {
+		t.Error("ClearPoll = false, want true")
+	}
+}
+
+// TestPollSharedGateEscalates proves design section 8.7's shared gate: with
+// jobs.respond.max_loops (3) ci_log fix requests already landed, the next
+// CI failure escalates loops_exhausted instead of requesting a fourth fix.
+func TestPollSharedGateEscalates(t *testing.T) {
+	t.Parallel()
+	s, ticket, gh, tr := shipPublished(t)
+	maxLoops := pbMachine(t).Jobs[jobRespondName].MaxLoops
+	seedLandedFixRequests(t, s, ticket.ID, FixKindCILog, maxLoops)
+
+	local := shipHeadSHA(t, s, pbGetTicket(t, s, ticket.ID))
+	runs, required := shipFailedCI()
+	gh.runs, gh.required = runs, required
+	gh.prState = orchestrator.PRState{Draft: true, HeadSHA: local, BaseRef: pbFixtureDefaultBranch}
+
+	commit, err := shipPollRun(t, s, pbGetTicket(t, s, ticket.ID), gh, tr)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if commit.Escalation == nil {
+		t.Fatal("want an escalation")
+	}
+	if commit.Escalation.Payload.Code != string(response.EscalationCodeLoopsExhausted) {
+		t.Errorf("Code = %q, want %q", commit.Escalation.Payload.Code, response.EscalationCodeLoopsExhausted)
+	}
+	if commit.Escalation.Payload.Origin != string(response.EscalationOriginShipping) {
+		t.Errorf("Origin = %q, want %q", commit.Escalation.Payload.Origin, response.EscalationOriginShipping)
+	}
+}
+
+// TestThreadsGateRetryKeepsCheckpoint proves design section 5.6's own
+// "shipping, loops_exhausted" retry row for kind threads: the retry writes
+// both the fix request and "respond applied <aid>" with its own watermark
+// in the same commit, and driving that fix to landing lands cleanly, with
+// no second fix request ever written. FIX-REPLIES itself (8.5 row 1) is
+// M4's: this test proves the checkpoint the retry leaves behind, not a
+// reply actually posted to a thread, since nothing in M3 implements
+// FIX-REPLIES yet (shipping.go's own file comment).
+func TestThreadsGateRetryKeepsCheckpoint(t *testing.T) {
+	t.Parallel()
+	s, ticket, _ := shipTicketReady(t)
+
+	payload := response.EscalationPayload{
+		Code:    string(response.EscalationCodeLoopsExhausted),
+		What:    "shipping needed more than 3 fix runs",
+		Why:     "CI fixes and review-thread fixes share a limit of 3",
+		Tried:   "threads\nrespond 42\nAddress the stale comment on greet.go:3",
+		Options: escalationOptions, Origin: string(response.EscalationOriginShipping),
+	}
+	owner := "seed-threads-gate-owner"
+	expires := time.Now().Add(10 * time.Minute).UTC().Truncate(time.Second)
+	claimed, err := s.Claim(t.Context(), ticket.ID, owner, expires)
+	if err != nil || !claimed {
+		t.Fatalf("claim: claimed=%v err=%v", claimed, err)
+	}
+	waiting := waitingFlagQuestions
+	applied, err := s.CommitHandlerResult(t.Context(), store.HandlerCommit{
+		TicketID: ticket.ID, Owner: owner, Expires: expires, Waiting: &waiting,
+		Escalation: &store.EscalationCommit{Body: payload.Code + ": " + payload.What, Payload: payload},
+	})
+	if err != nil || !applied {
+		t.Fatalf("seed escalation: applied=%v err=%v", applied, err)
+	}
+	open, err := s.QuestionsByState(t.Context(), ticket.ID, "open")
+	if err != nil || len(open) == 0 {
+		t.Fatalf("QuestionsByState(open): rows=%d err=%v", len(open), err)
+	}
+	pbAnswerEscalation(t, s, ticket.ID, open[len(open)-1].ID, "a")
+
+	gh := &shipGitHub{}
+	tr := &shipTracker{}
+	deps := shipClaim(t, s, pbFakeRuntime(t), ticket.ID, gh, tr)
+	commit, err := (shipHandler{}).Run(t.Context(), pbGetTicket(t, s, ticket.ID), deps)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	var sawRequest, sawApplied bool
+	for _, m := range commit.Messages {
+		if strings.HasPrefix(m.Body, fixRequestedThreadsPrefix) && strings.Contains(m.Body, "Address the stale comment") {
+			sawRequest = true
+		}
+		if strings.HasPrefix(m.Body, "respond applied 42\n") && strings.Contains(m.Body, "fix request after run ") {
+			sawApplied = true
+		}
+	}
+	if !sawRequest {
+		t.Errorf("commit.Messages = %+v, want a %q marker", commit.Messages, fixRequestedThreadsPrefix)
+	}
+	if !sawApplied {
+		t.Errorf("commit.Messages = %+v, want a \"respond applied 42\" marker naming the fix request's watermark", commit.Messages)
+	}
+	pbApply(t, s, ticket, commit)
+
+	rt := runtime.NewFake(fstest.MapFS{shipFixBuildScriptPath: &fstest.MapFile{Data: []byte(judgeFixBuildScript)}})
+	driveShipFixToLanding(t, s, ticket.ID, rt)
+
+	reqRows, err := s.MarkersWithPrefix(t.Context(), ticket.ID, fixRequestedThreadsPrefix)
+	if err != nil {
+		t.Fatalf("MarkersWithPrefix: %v", err)
+	}
+	if len(reqRows) != 1 {
+		t.Errorf("fix requested threads markers = %d, want exactly 1 (no duplicate request)", len(reqRows))
+	}
+	appliedRows, err := s.MarkersWithPrefix(t.Context(), ticket.ID, "respond applied ")
+	if err != nil {
+		t.Fatalf("MarkersWithPrefix: %v", err)
+	}
+	if len(appliedRows) != 1 {
+		t.Errorf("respond applied markers = %d, want exactly 1", len(appliedRows))
+	}
+}
+
+// TestPollPendingBacksOff proves design section 8.3's own backoff: a
+// pending CI commits Poll with interval 30 on the first poll, doubling to
+// 60 on the next poll with the same fingerprint.
+func TestPollPendingBacksOff(t *testing.T) {
+	t.Parallel()
+	s, ticket, gh, tr := shipPublished(t)
+	local := shipHeadSHA(t, s, ticket)
+	gh.prState = orchestrator.PRState{Draft: true, HeadSHA: local, BaseRef: pbFixtureDefaultBranch}
+	gh.runs = []orchestrator.CheckRun{{ID: 1, Name: "ci", Status: testInProgress}}
+	gh.required = []orchestrator.RequiredCheck{{Context: "ci"}}
+
+	commit, err := shipPollRun(t, s, ticket, gh, tr)
+	if err != nil {
+		t.Fatalf("Run (first poll): %v", err)
+	}
+	if commit.Poll == nil {
+		t.Fatal("commit.Poll is nil, want the backoff commit")
+	}
+	if commit.Poll.IntervalS != 30 {
+		t.Errorf("first poll interval = %d, want 30", commit.Poll.IntervalS)
+	}
+	pbApply(t, s, ticket, commit)
+
+	commit2, err := shipPollRun(t, s, pbGetTicket(t, s, ticket.ID), gh, tr)
+	if err != nil {
+		t.Fatalf("Run (second poll): %v", err)
+	}
+	if commit2.Poll == nil {
+		t.Fatal("commit2.Poll is nil, want the backoff commit")
+	}
+	if commit2.Poll.IntervalS != 60 {
+		t.Errorf("second poll interval = %d, want 60 (doubled)", commit2.Poll.IntervalS)
+	}
+}
+
+// TestPollRateLimitWaitsForReset proves design section 8.3's own
+// schedule-only rule: a RateLimitedError schedules the next poll at
+// max(now+iv, resetAt+5s), picking the later reset time when it wins.
+func TestPollRateLimitWaitsForReset(t *testing.T) {
+	t.Parallel()
+	s, ticket, gh, tr := shipPublished(t)
+	resetAt := time.Now().Add(10 * time.Minute).UTC().Truncate(time.Second)
+	gh.prErr = orchestrator.RateLimitedError{ResetAt: resetAt}
+
+	commit, err := shipPollRun(t, s, ticket, gh, tr)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if commit.PollSchedule == nil {
+		t.Fatal("commit.PollSchedule is nil, want the schedule-only commit")
+	}
+	wantAfter := resetAt.Add(4 * time.Second)
+	if !commit.PollSchedule.NextAt.After(wantAfter) {
+		t.Errorf("PollSchedule.NextAt = %v, want after resetAt+5s (%v)", commit.PollSchedule.NextAt, resetAt.Add(5*time.Second))
+	}
+}
+
+// TestFirstPollFailureSchedules proves design section 8.3's own first-read
+// failure row: 429, 502, and a network error each schedule interval 30 with
+// no stored interval or fingerprint, and the fingerprint stays NULL.
+func TestFirstPollFailureSchedules(t *testing.T) {
+	t.Parallel()
+	for name, prErr := range map[string]error{
+		"429":           orchestrator.RateLimitedError{},
+		"502":           orchestrator.ErrGitHubUnavailable,
+		"network error": fmt.Errorf("dial tcp: connection refused: %w", orchestrator.ErrGitHubUnavailable),
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			s, ticket, gh, tr := shipPublished(t)
+			gh.prErr = prErr
+
+			commit, err := shipPollRun(t, s, ticket, gh, tr)
+			if err != nil {
+				t.Fatalf("Run: %v", err)
+			}
+			if commit.PollSchedule == nil {
+				t.Fatal("commit.PollSchedule is nil, want the schedule-only commit")
+			}
+			if commit.PollSchedule.IntervalS != 30 {
+				t.Errorf("IntervalS = %d, want 30", commit.PollSchedule.IntervalS)
+			}
+			pbApply(t, s, ticket, commit)
+			final := pbGetTicket(t, s, ticket.ID)
+			if final.PollFingerprint != nil {
+				t.Errorf("final.PollFingerprint = %v, want nil (still NULL)", *final.PollFingerprint)
+			}
+		})
+	}
+}
+
+// TestPollFailureDoublesInterval proves the schedule-only rule's own
+// doubling: a stored interval of 120 becomes 240, and a stored interval
+// already at the 300 cap stays there.
+func TestPollFailureDoublesInterval(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name    string
+		stored  int
+		wantNew int
+	}{
+		{"120 doubles to 240", 120, 240},
+		{"300 stays capped at 300", 300, 300},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			s, ticket, gh, tr := shipPublished(t)
+
+			seedOwner := "seed-poll-interval"
+			expires := time.Now().Add(10 * time.Minute).UTC().Truncate(time.Second)
+			claimed, err := s.Claim(t.Context(), ticket.ID, seedOwner, expires)
+			if err != nil || !claimed {
+				t.Fatalf("claim: claimed=%v err=%v", claimed, err)
+			}
+			applied, err := s.CommitHandlerResult(t.Context(), store.HandlerCommit{
+				TicketID: ticket.ID, Owner: seedOwner, Expires: expires,
+				PollSchedule: &store.PollSchedule{NextAt: time.Now().UTC().Truncate(time.Second), IntervalS: tc.stored},
+			})
+			if err != nil || !applied {
+				t.Fatalf("seed poll interval: applied=%v err=%v", applied, err)
+			}
+
+			gh.prErr = orchestrator.ErrGitHubUnavailable
+			commit, err := shipPollRun(t, s, pbGetTicket(t, s, ticket.ID), gh, tr)
+			if err != nil {
+				t.Fatalf("Run: %v", err)
+			}
+			if commit.PollSchedule == nil {
+				t.Fatal("commit.PollSchedule is nil, want the schedule-only commit")
+			}
+			if commit.PollSchedule.IntervalS != tc.wantNew {
+				t.Errorf("IntervalS = %d, want %d", commit.PollSchedule.IntervalS, tc.wantNew)
+			}
+		})
+	}
+}
+
+// TestPushCrashConverges proves design section 11's own push row: the next
+// poll, reading the pull request's head already equal to local (the push
+// itself succeeded; only the commit confirming it was lost), takes no push
+// branch and no escalation.
+func TestPushCrashConverges(t *testing.T) {
+	t.Parallel()
+	s, ticket, gh, tr := shipPublished(t)
+	local := shipHeadSHA(t, s, ticket)
+	gh.prState = orchestrator.PRState{Draft: true, HeadSHA: local, BaseRef: pbFixtureDefaultBranch}
+	gh.runs, gh.required = shipGreenCI()
+
+	commit, err := shipPollRun(t, s, ticket, gh, tr)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if commit.Escalation != nil {
+		t.Fatalf("got an escalation, want convergence: %+v", commit.Escalation.Payload)
+	}
+}
+
+// TestPollUnprotectedEscalates proves design section 8.4's own unprotected
+// row: no required check at all escalates environment.
+func TestPollUnprotectedEscalates(t *testing.T) {
+	t.Parallel()
+	s, ticket, gh, tr := shipPublished(t)
+	local := shipHeadSHA(t, s, ticket)
+	gh.prState = orchestrator.PRState{Draft: true, HeadSHA: local, BaseRef: pbFixtureDefaultBranch}
+	gh.required = nil
+
+	commit, err := shipPollRun(t, s, ticket, gh, tr)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if commit.Escalation == nil {
+		t.Fatal("want an escalation")
+	}
+	if commit.Escalation.Payload.What != unprotectedWhat {
+		t.Errorf("What = %q, want %q", commit.Escalation.Payload.What, unprotectedWhat)
+	}
+}
+
+// TestPollCIWaitingMarkerOnChange proves design section 8.4's own
+// informational marker: an idle poll writes "ci waiting <names>" only when
+// Missing differs from the previous poll's.
+func TestPollCIWaitingMarkerOnChange(t *testing.T) {
+	t.Parallel()
+	s, ticket, gh, tr := shipPublished(t)
+	local := shipHeadSHA(t, s, ticket)
+	gh.prState = orchestrator.PRState{Draft: true, HeadSHA: local, BaseRef: pbFixtureDefaultBranch}
+	gh.required = []orchestrator.RequiredCheck{{Context: "ci"}}
+	gh.runs = nil // nothing reports "ci" yet: Missing = ["ci"]
+
+	commit, err := shipPollRun(t, s, ticket, gh, tr)
+	if err != nil {
+		t.Fatalf("Run (first poll): %v", err)
+	}
+	wantFirst := ciWaitingPrefix + "ci"
+	foundFirst := false
+	for _, m := range commit.Messages {
+		if m.Body == wantFirst {
+			foundFirst = true
+		}
+	}
+	if !foundFirst {
+		t.Errorf("commit.Messages = %+v, want %q", commit.Messages, wantFirst)
+	}
+	pbApply(t, s, ticket, commit)
+
+	// The required check now reports, so Missing becomes empty: a new
+	// marker is written because the set changed.
+	gh.runs, _ = shipGreenCI()
+	commit2, err := shipPollRun(t, s, pbGetTicket(t, s, ticket.ID), gh, tr)
+	if err != nil {
+		t.Fatalf("Run (second poll): %v", err)
+	}
+	wantSecond := ciWaitingPrefix
+	foundSecond := false
+	for _, m := range commit2.Messages {
+		if m.Body == wantSecond {
+			foundSecond = true
+		}
+	}
+	if !foundSecond {
+		t.Errorf("commit2.Messages = %+v, want %q (Missing changed to empty)", commit2.Messages, wantSecond)
+	}
+	pbApply(t, s, ticket, commit2)
+
+	// A third poll with the same (empty) Missing writes no new marker.
+	commit3, err := shipPollRun(t, s, pbGetTicket(t, s, ticket.ID), gh, tr)
+	if err != nil {
+		t.Fatalf("Run (third poll): %v", err)
+	}
+	for _, m := range commit3.Messages {
+		if strings.HasPrefix(m.Body, ciWaitingPrefix) {
+			t.Errorf("commit3.Messages = %+v, want no %q marker (Missing unchanged)", commit3.Messages, ciWaitingPrefix)
+		}
+	}
+}
+
+// TestShippingEscalationRetries proves design section 5.6's own shipping
+// rows for pr_closed and any other code: both write the plain "retry
+// requested" marker plus ClearPoll.
+func TestShippingEscalationRetries(t *testing.T) {
+	t.Parallel()
+	for _, code := range []response.EscalationCode{response.EscalationCodePRClosed, response.EscalationCodeEnvironment} {
+		t.Run(string(code), func(t *testing.T) {
+			t.Parallel()
+			s, ticket, _ := shipTicketReady(t)
+
+			qID := pbEscalateDirect(t, s, ticket.ID, nil, nil, code, response.EscalationOriginShipping)
+			pbAnswerEscalation(t, s, ticket.ID, qID, "a")
+
+			gh := &shipGitHub{}
+			tr := &shipTracker{}
+			deps := shipClaim(t, s, pbFakeRuntime(t), ticket.ID, gh, tr)
+			commit, runErr := (shipHandler{}).Run(t.Context(), pbGetTicket(t, s, ticket.ID), deps)
+			if runErr != nil {
+				t.Fatalf("Run: %v", runErr)
+			}
+			if !commit.ClearPoll {
+				t.Error("ClearPoll = false, want true")
+			}
+			found := false
+			for _, m := range commit.Messages {
+				if m.Body == markerRetryRequested {
+					found = true
+				}
+			}
+			if !found {
+				t.Errorf("commit.Messages = %+v, want a %q marker", commit.Messages, markerRetryRequested)
+			}
+		})
 	}
 }

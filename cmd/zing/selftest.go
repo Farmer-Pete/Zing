@@ -62,6 +62,80 @@ func (selftestGitHub) FindPRByHead(context.Context, string, string, string, stri
 	return "", 0, false, errors.New("selftestGitHub: not implemented")
 }
 
+// selftestShipGitHub is selftestResumeE2E's own working GitHub double (M3
+// tasks 6, 7): unlike selftestGitHub above, PUBLISH and POLL both reach it
+// for real, so CreateDraftPR and FindPRByHead actually track one pull
+// request, and GetPR reports it merged from the very first read -- the
+// same state POLL would see if the owner had merged it by hand on GitHub
+// while the loop was still open (design section 14's own "the owner
+// merges on GitHub while the ticket waits on merge" row), since M3 builds
+// PUBLISH and POLL but not the ready flip or MERGE itself (M4). ListCheckRuns
+// and RequiredCheckRules report one green "ci" check, matching required,
+// so EvaluateCI's own green branch is realistic even though POLL's
+// "pr.Merged" row (checked first) never actually needs it to reach done.
+type selftestShipGitHub struct {
+	mu      sync.Mutex
+	pr      *selftestShipPR
+	nextNum int
+}
+
+type selftestShipPR struct {
+	url, head, base string
+	number          int
+}
+
+func (*selftestShipGitHub) RepoDefaultBranch(context.Context, string, string) (string, error) {
+	return "", errors.New("selftestShipGitHub: not implemented")
+}
+
+func (*selftestShipGitHub) RequiredChecks(context.Context, string, string, string) ([]string, error) {
+	return nil, errors.New("selftestShipGitHub: not implemented")
+}
+
+func (g *selftestShipGitHub) CreateDraftPR(_ context.Context, _, _, head, base, _, _ string) (prURL string, number int, err error) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if g.pr != nil {
+		return "", 0, errors.New("selftestShipGitHub: a pull request already exists for this head")
+	}
+	g.nextNum++
+	g.pr = &selftestShipPR{url: fmt.Sprintf("https://github.com/zing-fixture/zing-fixture/pull/%d", g.nextNum), head: head, base: base, number: g.nextNum}
+	return g.pr.url, g.pr.number, nil
+}
+
+func (g *selftestShipGitHub) FindPRByHead(_ context.Context, _, _, head, base string) (prURL string, number int, ok bool, err error) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if g.pr == nil || g.pr.head != head || g.pr.base != base {
+		return "", 0, false, nil
+	}
+	return g.pr.url, g.pr.number, true, nil
+}
+
+func (*selftestShipGitHub) GetPR(context.Context, string, string, int) (orchestrator.PRState, error) {
+	return orchestrator.PRState{Merged: true, Draft: true}, nil
+}
+
+func (*selftestShipGitHub) Merge(context.Context, string, string, int, string, string, string) (string, error) {
+	return "", errors.New("selftestShipGitHub: Merge not implemented (M4)")
+}
+
+func (*selftestShipGitHub) ListCheckRuns(context.Context, string, string, string) ([]orchestrator.CheckRun, error) {
+	return []orchestrator.CheckRun{{ID: 1, Name: "ci", Status: "completed", Conclusion: "success", AppSlug: "github-actions", AppID: 1}}, nil
+}
+
+func (*selftestShipGitHub) ListStatuses(context.Context, string, string, string) ([]orchestrator.CommitStatus, error) {
+	return nil, nil
+}
+
+func (*selftestShipGitHub) RequiredCheckRules(context.Context, string, string, string) ([]orchestrator.RequiredCheck, error) {
+	return []orchestrator.RequiredCheck{{Context: "ci"}}, nil
+}
+
+func (*selftestShipGitHub) JobLogTail(context.Context, string, string, int64, int) (string, error) {
+	return "", nil
+}
+
 // runSelftest proves the foundation on an empty machine: it migrates a fresh
 // temporary database and checks it. It prints "selftest: OK" and returns 0
 // when every step passes, or prints "selftest: <detail>" for the first
@@ -196,6 +270,12 @@ func (c selftestCommands) Run(ctx context.Context, dir, repoGit, shellCmd string
 // shape is <hostname>-<pid>; a fixed literal is simpler and just as unique
 // within one selftest process, which claims nothing concurrently).
 const e2eOwner = "selftest-e2e"
+
+// e2eFixtureGitHubOwner is the owner and repo name both the orchestrator's
+// own Project and job.Project's own shipping fields (M3 tasks 6, 7) use for
+// this e2e's one fixture project: a placeholder, never a real GitHub
+// repository, since selftestShipGH never calls the real API.
+const e2eFixtureGitHubOwner = "zing-fixture"
 
 // e2eBudget and e2eFloor are the fixture job.Deps.Budget and job.Deps.Floor
 // selftestResumeE2E wires the dispatcher with (design section 4.4): the
@@ -442,6 +522,13 @@ func selftestResumeE2E(ctx context.Context) error {
 	if addErr := gitfixture.AddFile(ctx, projDir, filepath.Join("cmd", "zing", "main.go"), []byte("package main\n")); addErr != nil {
 		return fmt.Errorf("add cmd/zing/main.go to gitfixture repo: %w", addErr)
 	}
+	// A bare origin remote, so shipping's own PUBLISH (M3 task 6) has
+	// somewhere real to push the ticket branch before OpenDraftPR asks
+	// selftestShipGH to open the draft pull request (PKG9-PLAN.md section
+	// 8.2).
+	if _, wboErr := gitfixture.WithBareOrigin(ctx, projDir); wboErr != nil {
+		return fmt.Errorf("add bare origin to gitfixture repo: %w", wboErr)
+	}
 
 	projectID, err := st.EnsureProject(ctx, store.Project{
 		Name: "zing", RepoURL: "https://example.invalid/zing", LocalPath: projDir, Tracker: "github",
@@ -450,9 +537,10 @@ func selftestResumeE2E(ctx context.Context) error {
 		return err
 	}
 
+	selftestShipGH := &selftestShipGitHub{}
 	orch, err := orchestrator.New(
-		orchestrator.Project{Owner: "zing-fixture", Repo: "zing-fixture", LocalPath: projDir, DefaultBranch: "main"},
-		selftestGitHub{}, orchestrator.NewRunner(), nil)
+		orchestrator.Project{Owner: e2eFixtureGitHubOwner, Repo: e2eFixtureGitHubOwner, LocalPath: projDir, DefaultBranch: "main"},
+		selftestShipGH, orchestrator.NewRunner(), nil)
 	if err != nil {
 		return fmt.Errorf("build orchestrator: %w", err)
 	}
@@ -477,9 +565,16 @@ func selftestResumeE2E(ctx context.Context) error {
 			LensesParallel: e2eLensesParallel,
 			// Projects carries what the real building handler needs for
 			// this one project (PKG8-PLAN.md section 4.3): the fixture
-			// project's own test and lint commands (section 9.4).
+			// project's own test and lint commands (section 9.4). Owner,
+			// Repo, PullRequests, and Checks are shipping's own window onto
+			// GitHub (PKG9-PLAN.md section 10.3), all filled from the one
+			// selftestShipGH built above, the same way serve's own
+			// buildJobProjects fills them from one *orchestrator.GitHubClient.
 			Projects: map[int64]job.Project{
-				projectID: {Orch: orch, RepoGit: repoGit, TestCmd: "test -f hello.txt", LintCmd: "true"},
+				projectID: {
+					Orch: orch, RepoGit: repoGit, TestCmd: "test -f hello.txt", LintCmd: "true",
+					Owner: e2eFixtureGitHubOwner, Repo: e2eFixtureGitHubOwner, PullRequests: selftestShipGH, Checks: selftestShipGH,
+				},
 			},
 		}, rts)
 	if err != nil {

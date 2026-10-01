@@ -25,6 +25,7 @@ const (
 	testCheckB     = "typecheck"
 	testStatusA    = "deploy"
 	testStatusB    = "codecov"
+	testInProgress = "in_progress"
 )
 
 // -----------------------------------------------------------------------
@@ -54,7 +55,7 @@ func TestEvaluateCI(t *testing.T) {
 		{
 			name: "still in progress is pending",
 			runs: []orchestrator.CheckRun{
-				{ID: 1, Name: testRequiredCI, Status: "in_progress"},
+				{ID: 1, Name: testRequiredCI, Status: testInProgress},
 			},
 			required:  []orchestrator.RequiredCheck{{Context: testRequiredCI}},
 			wantState: CIPending,
@@ -81,7 +82,7 @@ func TestEvaluateCI(t *testing.T) {
 			name: "one failed run fails the whole set, even with another still running",
 			runs: []orchestrator.CheckRun{
 				{ID: 1, Name: testRequiredCI, Status: ghCompleted, Conclusion: ghFailure},
-				{ID: 2, Name: testCheckB, Status: "in_progress"},
+				{ID: 2, Name: testCheckB, Status: testInProgress},
 			},
 			required:  []orchestrator.RequiredCheck{{Context: testRequiredCI}},
 			wantState: CIFailed,

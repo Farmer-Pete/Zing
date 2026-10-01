@@ -171,10 +171,10 @@ type Handler interface {
 }
 
 // Registry returns the six pipeline-state handlers (design section 6.5),
-// keyed by the state each drives: queued and shipping are still the
-// skeleton's code-only transitions; planning (task 6), building (task 9),
-// reviewing (task 10), and judging (M2 task 8) are the real handlers. done
-// is terminal and carries no handler.
+// keyed by the state each drives: queued is still the skeleton's code-only
+// transition; planning (task 6), building (task 9), reviewing (task 10),
+// judging (M2 task 8), and shipping (M3 task 6, PUBLISH; task 7, POLL) are
+// the real handlers. done is terminal and carries no handler.
 func Registry() map[string]Handler {
 	return map[string]Handler{
 		stateQueued:    queuedHandler{},
@@ -182,7 +182,7 @@ func Registry() map[string]Handler {
 		stateBuilding:  buildingHandler{},
 		stateReviewing: reviewingHandler{},
 		stateJudging:   judgeHandler{},
-		stateShipping:  shippingHandler{},
+		stateShipping:  shipHandler{},
 	}
 }
 

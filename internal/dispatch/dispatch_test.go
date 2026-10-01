@@ -359,6 +359,27 @@ func advanceTicket(t *testing.T, s *store.Store, rt runtime.Runtime, ticketID in
 	}
 }
 
+// seedTicketDirectlyToState drives ticketID straight to state with one
+// claim-then-commit, the same direct-commit shape TestTickUsesInjectedClock
+// already seeds shipping with: no handler runs, so a test that only needs a
+// ticket actually sitting in state (never caring how it got there) skips
+// running the real handler chain for a state it is not itself testing.
+func seedTicketDirectlyToState(t *testing.T, s *store.Store, ticketID int64, state string) {
+	t.Helper()
+	owner := "seed-direct-" + state
+	expires := time.Now().Add(10 * time.Minute).UTC().Truncate(time.Second)
+	claimed, err := s.Claim(t.Context(), ticketID, owner, expires)
+	if err != nil || !claimed {
+		t.Fatalf("seedTicketDirectlyToState(%s): claim: claimed=%v err=%v", state, claimed, err)
+	}
+	applied, err := s.CommitHandlerResult(t.Context(), store.HandlerCommit{
+		TicketID: ticketID, Owner: owner, Expires: expires, Next: state, Reason: testSeedReason,
+	})
+	if err != nil || !applied {
+		t.Fatalf("seedTicketDirectlyToState(%s): commit: applied=%v err=%v", state, applied, err)
+	}
+}
+
 // judgeCheckFixtureCmd and dispatchJudgeCommands mirror cmd/zing/selftest.go's
 // own e2eJudgeCheckCmd and selftestCommands: the fixture cohort's scenario
 // s1 carries "curl -sf localhost:8080/hello" as its check_cmd, and judging's
@@ -952,7 +973,14 @@ func TestTick_PicksTheFurthestAlongTicketOverQueuedOnesAndExcludesTerminal(t *te
 	rt := fakeRuntime(t)
 
 	doneID := seedQueuedGitBackedTicket(t, s, "fake#1")
-	advanceTicket(t, s, rt, doneID, testStateQueued, testStatePlanning, testStateBuilding, testStateReviewing, testStateJudging, testStateShipping)
+	advanceTicket(t, s, rt, doneID, testStateQueued, testStatePlanning, testStateBuilding, testStateReviewing, testStateJudging)
+	// shipping's own real handler (M3 tasks 6, 7) takes a PUBLISH tick and a
+	// POLL tick, neither of which this test cares about (it only needs a
+	// terminal ticket to prove Tick excludes it); seedTicketDirectlyToState
+	// mirrors TestTickUsesInjectedClock's own direct-commit seed, skipping
+	// straight from judging to shipping to done.
+	seedTicketDirectlyToState(t, s, doneID, testStateShipping)
+	seedTicketDirectlyToState(t, s, doneID, testStateDone)
 
 	buildingID := seedQueuedGitBackedTicket(t, s, "fake#2")
 	advanceTicket(t, s, rt, buildingID, testStateQueued, testStatePlanning)

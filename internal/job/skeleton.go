@@ -12,7 +12,6 @@ const (
 	reasonBuildDone   = "build done"
 	reasonReviewClean = "review clean"
 	reasonJudgePassed = "judge passed"
-	reasonShipped     = "shipped"
 	runtimeFake       = "fake"
 	authorZing        = "zing"
 
@@ -38,7 +37,7 @@ func baseCommit(t store.Ticket, d Deps) store.HandlerCommit {
 	return store.HandlerCommit{TicketID: t.ID, Owner: d.Owner, Expires: d.Expires}
 }
 
-// ---- queued, judging, shipping: code-only transitions --------------------
+// ---- queued: the one remaining code-only transition -----------------------
 
 // queuedHandler advances a claimed ticket into planning (design section 6.5).
 type queuedHandler struct{}
@@ -49,20 +48,11 @@ func (queuedHandler) Run(_ context.Context, t store.Ticket, d Deps) (store.Handl
 	return c, nil
 }
 
-// shippingHandler advances a ticket to done; the skeleton does no git, no
-// worktree, and no pull request (design section 4, non-goals).
-type shippingHandler struct{}
-
-func (shippingHandler) Run(_ context.Context, t store.Ticket, d Deps) (store.HandlerCommit, error) {
-	c := baseCommit(t, d)
-	c.Next, c.Reason = stateDone, reasonShipped
-	return c, nil
-}
-
-// building, reviewing, and judging have their own real handlers now
-// (building.go, task 9; reviewing.go, task 10; judging.go, M2 task 8): the
-// skeleton's own buildingHandler, reviewingHandler, and judgingHandler
-// existed because the walking skeleton needed every state to advance on
-// nothing more than a scripted fake run, or, for reviewing and judging, no
-// run at all until each state's own real machine landed; those handlers now
-// run the real state machine (design sections 6, 7) instead.
+// building, reviewing, judging, and shipping have their own real handlers
+// now (building.go, task 9; reviewing.go, task 10; judging.go, M2 task 8;
+// shipping.go, M3 tasks 6 and 7): the skeleton's own buildingHandler,
+// reviewingHandler, judgingHandler, and shippingHandler existed because the
+// walking skeleton needed every state to advance on nothing more than a
+// scripted fake run, or, for reviewing, judging, and shipping, no run at
+// all until each state's own real machine landed; those handlers now run
+// the real state machine (design sections 6, 7, 8) instead.
