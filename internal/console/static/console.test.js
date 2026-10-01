@@ -23,6 +23,7 @@ import {
 	draftConflictMessage,
 	TOAST_DISMISS_MS,
 	scheduleToastDismiss,
+	clearReplyInputs,
 	resolveToken,
 	stepFocus,
 	reconcileFocus,
@@ -180,6 +181,22 @@ test('draftConflictMessage: "question closed" reads as a plain sentence', () => 
 test('draftConflictMessage: any other reason is shown as-is', () => {
 	assert.equal(draftConflictMessage('missing option'), 'missing option');
 	assert.equal(draftConflictMessage('ambiguous draft mode'), 'ambiguous draft mode');
+});
+
+// clearReplyInputs (design section 22.7): a 200 from /send clears every
+// .reply-input inside #main, so a sent draft's own box does not keep
+// showing text the owner just sent.
+test('clearReplyInputs: a 200 from /send clears the reply inputs', () => {
+	const inputs = [{ value: 'already sent text' }, { value: 'another box' }];
+	clearReplyInputs(inputs);
+	assert.deepEqual(
+		inputs.map((i) => i.value),
+		['', ''],
+	);
+});
+
+test('clearReplyInputs: no inputs is a no-op', () => {
+	assert.doesNotThrow(() => clearReplyInputs([]));
 });
 
 // scheduleToastDismiss (bug fix 12): the bottom "Sent N answer(s)."/"Nothing

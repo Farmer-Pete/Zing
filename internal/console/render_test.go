@@ -39,6 +39,47 @@ func TestRenderMarkdown(t *testing.T) {
 	}
 }
 
+// renderInlineToString drives console.RenderInline's returned
+// templ.Component the same way renderToString does for Render.
+func renderInlineToString(t *testing.T, md string) string {
+	t.Helper()
+	comp, err := console.RenderInline(md)
+	if err != nil {
+		t.Fatalf("console.RenderInline(%q): %v", md, err)
+	}
+	var buf strings.Builder
+	if err := comp.Render(context.Background(), &buf); err != nil {
+		t.Fatalf("Render(): %v", err)
+	}
+	return buf.String()
+}
+
+// TestRenderInlineRendersBackticksAsCodeWithNoBlockWrapper proves the bug
+// fix: raw backticks in option chips (design section 22.7's owner-reported
+// locked-view complaint) -- a chip label sits inside a <button>, where the
+// <p> Render's own full markdown path wraps a line in is not legal
+// content, so RenderInline strips it, leaving the inline <code> bare.
+func TestRenderInlineRendersBackticksAsCodeWithNoBlockWrapper(t *testing.T) {
+	t.Parallel()
+	got := renderInlineToString(t, "Use `go version`")
+	if !strings.Contains(got, "<code>go version</code>") {
+		t.Errorf("RenderInline(...) = %q, want it to contain <code>go version</code>", got)
+	}
+	if strings.Contains(got, "<p>") {
+		t.Errorf("RenderInline(...) = %q, want no <p> wrapper", got)
+	}
+}
+
+// TestRenderInlinePlainTextHasNoWrapper proves the common case (no
+// markdown at all) stays a bare string, not a block element.
+func TestRenderInlinePlainTextHasNoWrapper(t *testing.T) {
+	t.Parallel()
+	got := renderInlineToString(t, "zing plus version")
+	if got != "zing plus version" {
+		t.Errorf("RenderInline(%q) = %q, want it unchanged", "zing plus version", got)
+	}
+}
+
 func TestRenderReturnsTemplComponent(t *testing.T) {
 	t.Parallel()
 	// console.Render's signature already guarantees a templ.Component at

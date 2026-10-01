@@ -173,6 +173,24 @@ export function draftConflictMessage(reason) {
 	return reason;
 }
 
+/**
+ * clearReplyInputs sets every given element's value to the empty string
+ * (console.js's postSendBatch, design section 22.7): a 200 from /send
+ * clears the value of every .reply-input inside #main, so a sent draft's
+ * own box does not keep showing text the owner just sent (Datastar's morph
+ * never refills a focused input, bug 11's own reason freeReply already
+ * stopped clearing it on a plain Enter). Pure: it takes the already-queried
+ * elements, or any duck-typed {value} object in a test, not a selector, so
+ * this file stays DOM free.
+ *
+ * @param {{value: string}[]} inputs
+ */
+export function clearReplyInputs(inputs) {
+	for (const el of inputs) {
+		el.value = '';
+	}
+}
+
 // TOAST_DISMISS_MS is how long showSendResult's bottom toast stays on
 // screen before auto-dismissing (bug fix 12): the owner's "Sent 1 answer."
 // or "Nothing to send." line never went away on its own, so it kept

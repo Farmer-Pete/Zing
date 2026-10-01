@@ -21,6 +21,17 @@ import (
 	"zing/internal/store"
 )
 
+// FeedRow is one message the Feed view renders (design section 6.5):
+// console.displayFeedMessages' own decode of its Body (bug fix, PR #16)
+// plus BodyHTML, that decoded text markdown-rendered (bug fix: raw
+// backticks showed literally in the Feed, the owner's locked-view
+// complaint, design section 22.7).
+type FeedRow struct {
+	ID, TicketID int64
+	Type, Author string
+	BodyHTML     templ.Component
+}
+
 // InboxGroup is one project's cluster of inbox cards, the Inbox view's
 // grouping unit (design section 6.5: "grouped by project, blocking first").
 // Groups appear in the order their first item was encountered in
@@ -47,6 +58,12 @@ type NavThread struct {
 // keyboard's chip action.
 type ThreadOption struct {
 	Key, Text string
+
+	// TextHTML is Text run through console.RenderInline (bug fix: raw
+	// backticks in option chips, design section 22.7's owner-reported
+	// locked-view complaint): optionChips renders this, inline-safe markdown,
+	// in place of the plain Text string a <button> used to show verbatim.
+	TextHTML templ.Component
 }
 
 // ThreadItem is one row an item-kind question (perimeter, review) renders:
@@ -134,29 +151,77 @@ type ThreadQuestion struct {
 	// in-progress, unsent draft against this question, if any (bug fix: the
 	// owner typed a reply, it saved, but the thread never rendered it back,
 	// so it looked lost). freeReply (thread.templ) renders DraftReply as
-	// the reply box's starting value; optionChips renders the DraftOption
-	// chip picked; itemRows renders each DraftItems ref picked. Every field
-	// is the zero value when this question carries no draft.
+	// the reply box's starting value. Every field is the zero value when
+	// this question carries no draft. DraftOption and DraftItems feed
+	// optionChips/itemRows only while Interactive (console.effectivePickedOption,
+	// effectivePickedItems); PickedOption and PickedItems below are what
+	// those same controls render once the question is locked.
 	DraftReply  string
 	DraftOption string
 	DraftItems  map[string]response.Decision
 
-	// AnsweredText is a closed, state=answered question's own sent answer,
-	// plainly formatted (console.sentAnswerText), empty otherwise (bug fix:
-	// an answered question's controls disappeared with nothing to show in
-	// their place, so the group looked inert rather than closed and
-	// decided). questionGroup renders it as a locked note instead of
-	// optionChips/itemRows/freeReply when !Interactive.
-	AnsweredText string
+	// PickedOption and PickedItems are this question's own sent answer,
+	// decoded once (console.collectSentAnswers) and kept separate from
+	// DraftOption/DraftItems (bug fix: "options vanish once locked" --
+	// optionChips and itemRows used to render only while Interactive, so a
+	// settled or answered question showed no trace of what was picked).
+	// They are set only once the question is no longer Interactive, so
+	// HasDraft (the draft banner's own guard) never sees a sent answer as
+	// an unsent draft. console.effectivePickedOption/effectivePickedItems
+	// are the one place that reads them, falling back to Draft* while the
+	// question is still open.
+	PickedOption string
+	PickedItems  map[string]response.Decision
 
-	// SentReplies is every sent (never draft) reply or answer naming this
-	// question as its parent, plainly formatted and in message order (bug
-	// fix 10): each used to also get its own standalone ThreadRow, so a
-	// typed reply like "Explain these three options in more detail" showed
-	// up as a "reply you" card at the bottom of the thread, detached from
-	// the question it was actually about. questionGroup renders each line
-	// under this question's own controls instead, prefixed "You: ".
-	SentReplies []string
+	// AnsweredHTML is a closed, state=answered question's own sent answer,
+	// pre-rendered as markdown (bug fix: raw backticks showed literally;
+	// design section 22.7 bug-fix table), nil otherwise. questionGroup
+	// renders it as a locked note instead of optionChips/itemRows/freeReply
+	// when !Interactive and this question carries no SettledHTML (a
+	// planning question's own, differently worded locked note).
+	AnsweredHTML templ.Component
+
+	// Turns is every sent (never draft) reply or answer naming this
+	// question as its parent, each pre-rendered as markdown and labeled by
+	// who wrote it (bug fix 10, extended by D31-5): each used to also get
+	// its own standalone ThreadRow, so a typed reply like "Explain these
+	// three options in more detail" showed up as a "reply you" card at the
+	// bottom of the thread, detached from the question it was actually
+	// about. For a planning question (design section 22.1, 22.7) this is
+	// the whole conversation in turn order -- owner picks and texts, the
+	// agent's own replies, each tagged Queued when the owner sent it but no
+	// run has taken delivery of it yet -- built from
+	// store.PlanningConversation; for every other kind it is each sent
+	// reply (never an answer -- AnsweredHTML already shows the pick, so
+	// repeating it here was the "duplicate Answered: plus You:" bug), in
+	// message order, always labeled "You".
+	Turns []Turn
+
+	// SettledLabel and SettledHTML are a settled planning question's own
+	// closing line (design section 22.7 item 6): "Settled by <agent>:" and
+	// the agent's decision, pre-rendered as markdown. Both are zero for
+	// every other kind, and for a planning question the agent settled with
+	// no decision text to show (the owner-abandoned path, design section
+	// 22.3's resolved/system row): that row renders as an ordinary,
+	// unlabeled Turn ("Resolved.") instead, so a settled thread is never
+	// left with an empty closing line.
+	SettledLabel string
+	SettledHTML  templ.Component
+}
+
+// Turn is one line of a question's own conversation (design section 22.7):
+// an owner pick or text, the agent's reply, or -- unlabeled, Author "" --
+// a bare system note such as "Resolved." (design/threading-design.md (d)'s
+// fallback for a row placement put inside a question but that carries no
+// turn of its own, bug 14). BodyHTML is always markdown-rendered, even for
+// a plain reply, so a backtick in it never shows raw (bug fix). Queued is
+// meaningful only for a planning question's own owner turns: true when the
+// owner sent it but no run has yet taken delivery of it (design section
+// 22.3, 22.7 item 5).
+type Turn struct {
+	Author   string
+	BodyHTML templ.Component
+	Queued   bool
 }
 
 // HasDraft reports whether this question carries any unsent draft -- a
@@ -218,13 +283,18 @@ type PhaseDot struct {
 // payload, shown inline through a <details> disclosure when Present: design
 // section 7.1's route table names no artifact-viewing endpoint, so "links
 // to open it" (design section 6.11) is an in-page disclosure rather than a
-// second page (console.buildArtifactsRail, rail.go).
+// second page (console.buildArtifactsRail, rail.go). RenderedHTML is set
+// only for the Plan slot (bug fix 16: the rail showed the plan artifact as
+// raw indented JSON): console.buildArtifactsRail runs it through the same
+// RenderPlan the gate's own context region uses, and artifactsRail
+// (rail.templ) prefers it over PayloadText when it is non-nil.
 type ArtifactSlot struct {
-	Label       string
-	Present     bool
-	Version     int
-	AfterPhase  string
-	PayloadText string
+	Label        string
+	Present      bool
+	Version      int
+	AfterPhase   string
+	PayloadText  string
+	RenderedHTML templ.Component
 }
 
 // RunRail is the rail's Run section (design section 6.11): the newest

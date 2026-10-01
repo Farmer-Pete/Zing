@@ -15,6 +15,7 @@ import (
 	"testing"
 
 	"zing/internal/console/templates"
+	"zing/internal/machine"
 	"zing/internal/response"
 	"zing/internal/store"
 )
@@ -449,7 +450,7 @@ func TestBuildThreadRowsNestsSentRepliesAndAnswersUnderTheirQuestion(t *testing.
 		{ID: 4, Message: store.Message{Type: msgTypeReply, Body: "a thread-level note"}},
 	}
 
-	got, err := buildThreadRows(&store.Ticket{}, rows, nil, nil, nil)
+	got, err := buildThreadRows(&store.Ticket{}, rows, nil, nil, nil, store.PlanningConversation{}, "The agent")
 	if err != nil {
 		t.Fatalf("buildThreadRows: %v", err)
 	}
@@ -461,15 +462,37 @@ func TestBuildThreadRowsNestsSentRepliesAndAnswersUnderTheirQuestion(t *testing.
 	if question.Question == nil {
 		t.Fatalf("got[0] is not the question row: %+v", question)
 	}
-	want := []string{"Explain these three options in more detail", "Pick the terse option"}
-	if strings.Join(question.Question.SentReplies, "|") != strings.Join(want, "|") {
-		t.Errorf("question.SentReplies = %v, want %v", question.Question.SentReplies, want)
+	// Outside a planning conversation, an answer's own pick is not a turn
+	// of its own -- AnsweredHTML shows it instead (bug fix: "duplicate
+	// Answered: plus You:", design section 22.7) -- so only the reply
+	// shows up here.
+	texts := renderTurnBodies(t, question.Question.Turns)
+	if len(texts) != 1 || !strings.Contains(texts[0], "Explain these three options in more detail") {
+		t.Errorf("question.Turns rendered = %v, want one turn for the reply only", texts)
 	}
 
 	threadLevel := got[1]
 	if threadLevel.Question != nil || threadLevel.Body != "a thread-level note" {
 		t.Errorf("got[1] = %+v, want the unaffected thread-level reply", threadLevel)
 	}
+}
+
+// renderTurnBodies renders each turn's BodyHTML to the post-markdown HTML
+// text Render produces, the same way thread.templ's own template tests
+// read a question's rendered body: this file's tests assert on that text
+// rather than on the pre-render markdown string, since buildTurns never
+// keeps the latter.
+func renderTurnBodies(t *testing.T, turns []templates.Turn) []string {
+	t.Helper()
+	out := make([]string, len(turns))
+	for i, turn := range turns {
+		var sb strings.Builder
+		if err := turn.BodyHTML.Render(t.Context(), &sb); err != nil {
+			t.Fatalf("render turn %d: %v", i, err)
+		}
+		out[i] = sb.String()
+	}
+	return out
 }
 
 // questionRowForWait builds a "question" message row for buildWaitProgress
@@ -503,7 +526,7 @@ func TestBuildWaitProgress(t *testing.T) {
 			questionRowForWait(t, "resolved", response.QuestionKindQuestion), // an earlier, already-cleared round
 			questionRowForWait(t, msgStateOpen, response.QuestionKindGate),   // a different kind's round
 		}
-		got := buildWaitProgress(ticket, rows)
+		got := buildWaitProgress(ticket, rows, store.PlanningConversation{})
 		if got.Answered != 1 || got.Total != 2 {
 			t.Errorf("buildWaitProgress = %+v, want {Answered:1 Total:2}", got)
 		}
@@ -511,7 +534,7 @@ func TestBuildWaitProgress(t *testing.T) {
 
 	t.Run("a ticket not waiting on anything reports no progress", func(t *testing.T) {
 		t.Parallel()
-		got := buildWaitProgress(&store.Ticket{}, []store.MessageRow{questionRowForWait(t, msgStateOpen, response.QuestionKindQuestion)})
+		got := buildWaitProgress(&store.Ticket{}, []store.MessageRow{questionRowForWait(t, msgStateOpen, response.QuestionKindQuestion)}, store.PlanningConversation{})
 		if got.Total != 0 {
 			t.Errorf("buildWaitProgress = %+v, want Total=0 (not waiting)", got)
 		}
@@ -521,7 +544,7 @@ func TestBuildWaitProgress(t *testing.T) {
 		t.Parallel()
 		waiting := "error"
 		ticket := &store.Ticket{WaitingOn: &waiting}
-		got := buildWaitProgress(ticket, []store.MessageRow{questionRowForWait(t, msgStateOpen, response.QuestionKindQuestion)})
+		got := buildWaitProgress(ticket, []store.MessageRow{questionRowForWait(t, msgStateOpen, response.QuestionKindQuestion)}, store.PlanningConversation{})
 		if got.Total != 0 {
 			t.Errorf("buildWaitProgress = %+v, want Total=0 (\"error\" is not question-backed)", got)
 		}
@@ -576,7 +599,7 @@ func TestBuildThreadRowsBadgesRevisableAnsweredDifferentlyFromLocked(t *testing.
 	rows := []store.MessageRow{questionRowForWait(t, msgStateAnswered, response.QuestionKindQuestion)}
 
 	waiting := waitReasonQuestions
-	revisableRows, err := buildThreadRows(&store.Ticket{WaitingOn: &waiting}, rows, nil, nil, nil)
+	revisableRows, err := buildThreadRows(&store.Ticket{WaitingOn: &waiting}, rows, nil, nil, nil, store.PlanningConversation{}, "The agent")
 	if err != nil {
 		t.Fatalf("buildThreadRows (revisable): %v", err)
 	}
@@ -584,7 +607,7 @@ func TestBuildThreadRowsBadgesRevisableAnsweredDifferentlyFromLocked(t *testing.
 		t.Errorf("revisable answered question StateLabel = %q, want %q", got, "answered · can change")
 	}
 
-	lockedRows, err := buildThreadRows(&store.Ticket{}, rows, nil, nil, nil)
+	lockedRows, err := buildThreadRows(&store.Ticket{}, rows, nil, nil, nil, store.PlanningConversation{}, "The agent")
 	if err != nil {
 		t.Fatalf("buildThreadRows (locked): %v", err)
 	}
@@ -795,7 +818,7 @@ func TestNoMessageKindRendersOutsideItsThread(t *testing.T) {
 							row.ParentID = &qid
 						}
 
-						got, err := buildThreadRows(&store.Ticket{}, []store.MessageRow{question, row}, nil, nil, nil)
+						got, err := buildThreadRows(&store.Ticket{}, []store.MessageRow{question, row}, nil, nil, nil, store.PlanningConversation{}, "The agent")
 						if err != nil {
 							t.Fatalf("buildThreadRows: %v", err)
 						}
@@ -851,7 +874,7 @@ func TestNoMessageKindRendersOutsideItsThread(t *testing.T) {
 					row := store.MessageRow{ID: 2, Message: store.Message{ //nolint:modernize // keyed on purpose
 						Type: msgTypeUpdate, Author: authorSystem, Body: tc.body, ParentID: &qid,
 					}}
-					got, err := buildThreadRows(&store.Ticket{}, []store.MessageRow{question, row}, nil, nil, nil)
+					got, err := buildThreadRows(&store.Ticket{}, []store.MessageRow{question, row}, nil, nil, nil, store.PlanningConversation{}, "The agent")
 					if err != nil {
 						t.Fatalf("buildThreadRows: %v", err)
 					}
@@ -864,7 +887,7 @@ func TestNoMessageKindRendersOutsideItsThread(t *testing.T) {
 				t.Run("unparented, never a card", func(t *testing.T) {
 					t.Parallel()
 					row := store.MessageRow{Message: store.Message{Type: msgTypeUpdate, Author: authorSystem, Body: tc.body}} //nolint:modernize // keyed on purpose
-					got, err := buildThreadRows(&store.Ticket{}, []store.MessageRow{row}, nil, nil, nil)
+					got, err := buildThreadRows(&store.Ticket{}, []store.MessageRow{row}, nil, nil, nil, store.PlanningConversation{}, "The agent")
 					if err != nil {
 						t.Fatalf("buildThreadRows: %v", err)
 					}
@@ -894,7 +917,7 @@ func TestUnknownMarkerIsADivider(t *testing.T) {
 	const body = testBodyUnknownMarker
 	row := store.MessageRow{ID: 1, Message: store.Message{Type: msgTypeUpdate, Author: authorSystem, Body: body}} //nolint:modernize // keyed on purpose
 
-	got, err := buildThreadRows(&store.Ticket{}, []store.MessageRow{row}, nil, nil, nil)
+	got, err := buildThreadRows(&store.Ticket{}, []store.MessageRow{row}, nil, nil, nil, store.PlanningConversation{}, "The agent")
 	if err != nil {
 		t.Fatalf("buildThreadRows: %v", err)
 	}
@@ -923,7 +946,7 @@ func TestConversationMarkersHidden(t *testing.T) {
 		{ID: 1, Message: store.Message{Type: msgTypeUpdate, Author: authorSystem, Body: testBodyConversationPending}},             //nolint:modernize // keyed on purpose
 		{ID: 2, Message: store.Message{Type: msgTypeUpdate, Author: authorSystem, Body: "conversation delivered run 31 batch 4"}}, //nolint:modernize // keyed on purpose
 	}
-	got, err := buildThreadRows(&store.Ticket{}, rows, nil, nil, nil)
+	got, err := buildThreadRows(&store.Ticket{}, rows, nil, nil, nil, store.PlanningConversation{}, "The agent")
 	if err != nil {
 		t.Fatalf("buildThreadRows: %v", err)
 	}
@@ -972,5 +995,313 @@ func TestMarkerRecognized(t *testing.T) {
 				t.Errorf("MarkerRecognized(%+v) = %v, want %v", tc.row, got, tc.want)
 			}
 		})
+	}
+}
+
+// TestResolvedSystemRowShowsAsANoteNotAnEmptyCard proves bug 14 (the
+// owner's "empty resolved system cards" report): a resolved/system row
+// (ResolveQuestions or a withdraw, section 22.3 -- its own Body is always
+// empty, the decision text living only on an agent-authored resolved row)
+// folds into its question as an ordinary turn reading "Resolved.", never a
+// loose, empty top-level card. D31-4a's structural placement already fixed
+// the loose card; this is the regression test the task asked for, proving
+// it still holds and that the row reads as something, not nothing.
+func TestResolvedSystemRowShowsAsANoteNotAnEmptyCard(t *testing.T) {
+	t.Parallel()
+	question := seedQuestionRow(t)
+	qid := question.ID
+	resolved := store.MessageRow{ID: 2, Message: store.Message{ //nolint:modernize // keyed on purpose
+		Type: msgTypeResolved, Author: authorSystem, ParentID: &qid,
+	}}
+
+	got, err := buildThreadRows(&store.Ticket{}, []store.MessageRow{question, resolved}, nil, nil, nil, store.PlanningConversation{}, "The agent")
+	if err != nil {
+		t.Fatalf("buildThreadRows: %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("buildThreadRows returned %d rows, want 1 (folded into its question); got %+v", len(got), got)
+	}
+	texts := renderTurnBodies(t, got[0].Question.Turns)
+	if len(texts) != 1 || !strings.Contains(texts[0], "Resolved.") {
+		t.Errorf("question.Turns rendered = %v, want one turn reading \"Resolved.\"", texts)
+	}
+}
+
+// TestAgentNameFromModel proves console.agentName (design section 22.7):
+// the planning job's own model, first letter upper-cased, or "The agent"
+// when there is no machine or no planning model to read one from.
+func TestAgentNameFromModel(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name string
+		m    *machine.Machine
+		want string
+	}{
+		{"a nil machine falls back", nil, "The agent"},
+		{"a machine with no planning job falls back", &machine.Machine{Jobs: map[string]machine.Job{}}, "The agent"},
+		{"a lowercase model is capitalized", &machine.Machine{Jobs: map[string]machine.Job{"planning": {Model: "fable"}}}, "Fable"},
+		{"an already-capitalized model is unchanged", &machine.Machine{Jobs: map[string]machine.Job{"planning": {Model: "Claude"}}}, "Claude"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := agentName(tc.m); got != tc.want {
+				t.Errorf("agentName(...) = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestBuildWaitProgressSkipsPlanningQuestions proves design section 22.7:
+// a planning question shares its payload's Kind with an ordinary
+// classify-round question, so buildWaitProgress must exclude it by id
+// (conv's own thread set) rather than by Kind alone, or a ticket whose
+// waiting_on happens to be "questions" for a planning reason would
+// double-count it against a round it was never part of.
+func TestBuildWaitProgressSkipsPlanningQuestions(t *testing.T) {
+	t.Parallel()
+	waiting := waitReasonQuestions
+	ticket := &store.Ticket{WaitingOn: &waiting}
+
+	planningQ := questionRowForWait(t, msgStateOpen, response.QuestionKindQuestion)
+	planningQ.ID = 1
+	ordinaryQ := questionRowForWait(t, msgStateOpen, response.QuestionKindQuestion)
+	ordinaryQ.ID = 2
+
+	conv := store.PlanningConversation{Threads: []store.Thread{{Question: planningQ}}}
+	got := buildWaitProgress(ticket, []store.MessageRow{planningQ, ordinaryQ}, conv)
+	if got.Total != 1 || got.Answered != 0 {
+		t.Errorf("buildWaitProgress = %+v, want {Answered:0 Total:1} (the planning question excluded)", got)
+	}
+}
+
+// TestBuildThreadRowsInterleavesConversation proves design section 22.7: a
+// planning question's own Turns render in PlanningConversation's own turn
+// order, each labeled by who wrote it (You, or the agent's own display
+// name), and an owner turn whose batch is past the delivery watermark
+// carries the Queued tag.
+func TestBuildThreadRowsInterleavesConversation(t *testing.T) {
+	t.Parallel()
+	qid := int64(10)
+	questionPayload, err := json.Marshal(response.QuestionPayload{
+		Key: "Q1", Kind: response.QuestionKindQuestion,
+		Options: []response.Option{{Key: "a", Text: "ReadBuildInfo only"}},
+	})
+	if err != nil {
+		t.Fatalf("marshal question payload: %v", err)
+	}
+	question := store.MessageRow{ID: qid, Message: store.Message{Type: msgTypeQuestion, Payload: questionPayload}} //nolint:modernize // keyed on purpose
+
+	batch4, batch6 := int64(4), int64(6)
+	ownerText := store.MessageRow{ID: 11, Message: store.Message{ //nolint:modernize // keyed on purpose
+		Type: msgTypeReply, Author: authorYou, ParentID: &qid, Body: "Also print the commit hash.", BatchID: &batch4,
+	}}
+	agentReply := store.MessageRow{ID: 12, Message: store.Message{ //nolint:modernize // keyed on purpose
+		Type: msgTypeReply, Author: authorZing, ParentID: &qid, Body: "Agreed.",
+	}}
+	queuedText := store.MessageRow{ID: 13, Message: store.Message{ //nolint:modernize // keyed on purpose
+		Type: msgTypeReply, Author: authorYou, ParentID: &qid, Body: "One more thing.", BatchID: &batch6,
+	}}
+	rows := []store.MessageRow{question, ownerText, agentReply, queuedText}
+
+	conv := store.PlanningConversation{
+		Delivered: 4,
+		Threads: []store.Thread{{
+			Question: question,
+			Turns:    []store.MessageRow{ownerText, agentReply, queuedText},
+		}},
+	}
+
+	got, err := buildThreadRows(&store.Ticket{}, rows, nil, nil, nil, conv, "Fable")
+	if err != nil {
+		t.Fatalf("buildThreadRows: %v", err)
+	}
+	if len(got) != 1 || got[0].Question == nil {
+		t.Fatalf("buildThreadRows returned %+v, want one question row", got)
+	}
+	turns := got[0].Question.Turns
+	if len(turns) != 3 {
+		t.Fatalf("question.Turns has %d entries, want 3: %+v", len(turns), turns)
+	}
+	if turns[0].Author != "You" || turns[0].Queued {
+		t.Errorf("turns[0] = %+v, want the delivered owner turn, not queued", turns[0])
+	}
+	if turns[1].Author != "Fable" {
+		t.Errorf("turns[1].Author = %q, want the agent's own display name", turns[1].Author)
+	}
+	if turns[2].Author != "You" || !turns[2].Queued {
+		t.Errorf("turns[2] = %+v, want the undelivered owner turn, queued", turns[2])
+	}
+}
+
+// TestConversationPills proves console.planningPill's own four-way split
+// (design section 22.7 item 1): settled always wins; otherwise "with
+// <agent>" when the in-flight run has already taken delivery of an owner
+// message in this thread, "queued" when one is sent but no run has taken
+// delivery of it yet, and "your turn" when nothing is outstanding.
+func TestConversationPills(t *testing.T) {
+	t.Parallel()
+	batch3, batch5 := int64(3), int64(5)
+	ownerDelivered := store.MessageRow{Message: store.Message{Author: authorYou, BatchID: &batch3}}   //nolint:modernize // keyed on purpose
+	ownerUndelivered := store.MessageRow{Message: store.Message{Author: authorYou, BatchID: &batch5}} //nolint:modernize // keyed on purpose
+
+	for _, tc := range []struct {
+		name string
+		th   store.Thread
+		conv store.PlanningConversation
+		want string
+	}{
+		{
+			"settled wins even with an outstanding owner turn",
+			store.Thread{Settled: true, Turns: []store.MessageRow{ownerUndelivered}},
+			store.PlanningConversation{Delivered: 2},
+			"settled",
+		},
+		{
+			"with <agent>: the in-flight run already took delivery",
+			store.Thread{Turns: []store.MessageRow{ownerDelivered}},
+			store.PlanningConversation{Delivered: 2, InFlight: &store.InFlightRun{RunID: 9, ThroughBatch: 4}},
+			"with Fable",
+		},
+		{
+			"queued: sent, but no run has taken delivery of it yet",
+			store.Thread{Turns: []store.MessageRow{ownerUndelivered}},
+			store.PlanningConversation{Delivered: 2, InFlight: &store.InFlightRun{RunID: 9, ThroughBatch: 4}},
+			"queued",
+		},
+		{
+			"queued with no run in flight at all",
+			store.Thread{Turns: []store.MessageRow{ownerUndelivered}},
+			store.PlanningConversation{Delivered: 2},
+			"queued",
+		},
+		{
+			"your turn: nothing outstanding from the owner",
+			store.Thread{},
+			store.PlanningConversation{Delivered: 2},
+			"your turn",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := planningPill(tc.th, tc.conv, "Fable"); got != tc.want {
+				t.Errorf("planningPill(...) = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestAgentStatusBanner proves console.buildAgentStatus's own table
+// (design section 22.7): a run in flight reports it is working plus what
+// is queued for its next turn; no run but undelivered messages reports
+// what the agent gets on its next turn; no run, nothing undelivered, but
+// some thread open names the open threads; every thread settled renders no
+// banner at all.
+func TestAgentStatusBanner(t *testing.T) {
+	t.Parallel()
+
+	questionPayload := func(t *testing.T, key string) json.RawMessage {
+		t.Helper()
+		p, err := json.Marshal(response.QuestionPayload{Key: key, Kind: response.QuestionKindQuestion})
+		if err != nil {
+			t.Fatalf("marshal question payload: %v", err)
+		}
+		return p
+	}
+
+	t.Run("a run in flight: working, plus what is queued for its next turn", func(t *testing.T) {
+		t.Parallel()
+		b3, b5 := int64(3), int64(5)
+		conv := store.PlanningConversation{
+			Delivered: 2,
+			InFlight:  &store.InFlightRun{RunID: 9, ThroughBatch: 4},
+			Threads: []store.Thread{{
+				Question: store.MessageRow{ID: 1, Message: store.Message{Payload: questionPayload(t, "Q1")}}, //nolint:modernize // keyed on purpose
+				Turns: []store.MessageRow{
+					{Message: store.Message{Author: authorYou, BatchID: &b3}}, //nolint:modernize // keyed on purpose
+					{Message: store.Message{Author: authorYou, BatchID: &b5}}, //nolint:modernize // keyed on purpose
+				},
+			}},
+		}
+		const want = "Fable is working. 1 message queued for its next turn."
+		if got := buildAgentStatus(conv, "Fable"); got != want {
+			t.Errorf("buildAgentStatus(...) = %q, want %q", got, want)
+		}
+	})
+
+	t.Run("no run in flight, undelivered owner messages", func(t *testing.T) {
+		t.Parallel()
+		b3, b4 := int64(3), int64(4)
+		conv := store.PlanningConversation{
+			Delivered: 2,
+			Threads: []store.Thread{{
+				Question: store.MessageRow{ID: 1, Message: store.Message{Payload: questionPayload(t, "Q1")}}, //nolint:modernize // keyed on purpose
+				Turns: []store.MessageRow{
+					{Message: store.Message{Author: authorYou, BatchID: &b3}}, //nolint:modernize // keyed on purpose
+					{Message: store.Message{Author: authorYou, BatchID: &b4}}, //nolint:modernize // keyed on purpose
+				},
+			}},
+		}
+		const want = "Fable gets your 2 messages on its next turn."
+		if got := buildAgentStatus(conv, "Fable"); got != want {
+			t.Errorf("buildAgentStatus(...) = %q, want %q", got, want)
+		}
+	})
+
+	t.Run("no run, nothing undelivered, some thread still open", func(t *testing.T) {
+		t.Parallel()
+		conv := store.PlanningConversation{
+			Delivered: 2,
+			Threads: []store.Thread{
+				{Question: store.MessageRow{ID: 1, Message: store.Message{Payload: questionPayload(t, "Q1")}}},                //nolint:modernize // keyed on purpose
+				{Question: store.MessageRow{ID: 2, Message: store.Message{Payload: questionPayload(t, "Q2")}}, Settled: true}, //nolint:modernize // keyed on purpose
+			},
+		}
+		const want = "Waiting on you: Q1."
+		if got := buildAgentStatus(conv, "Fable"); got != want {
+			t.Errorf("buildAgentStatus(...) = %q, want %q", got, want)
+		}
+	})
+
+	t.Run("every thread settled renders no banner", func(t *testing.T) {
+		t.Parallel()
+		conv := store.PlanningConversation{
+			Threads: []store.Thread{{Question: store.MessageRow{ID: 1}, Settled: true}},
+		}
+		if got := buildAgentStatus(conv, "Fable"); got != "" {
+			t.Errorf("buildAgentStatus(...) = %q, want empty (every thread settled)", got)
+		}
+	})
+}
+
+// TestOptionChipTextRendersBackticksAsCode proves the bug fix end to end
+// through buildThreadQuestion (design section 22.7's owner-reported
+// locked-view complaint "raw backticks in option chips"): an option whose
+// own Text carries a backtick renders TextHTML with a <code> span, not the
+// literal backtick optionChips used to print.
+func TestOptionChipTextRendersBackticksAsCode(t *testing.T) {
+	t.Parallel()
+	questionPayload, err := json.Marshal(response.QuestionPayload{
+		Key: "Q1", Kind: response.QuestionKindQuestion,
+		Options: []response.Option{{Key: "a", Text: "Run `zing version`"}},
+	})
+	if err != nil {
+		t.Fatalf("marshal question payload: %v", err)
+	}
+	openState := msgStateOpen
+	rows := []store.MessageRow{{Message: store.Message{Type: msgTypeQuestion, State: &openState, Payload: questionPayload}}} //nolint:modernize // keyed on purpose
+
+	got, err := buildThreadRows(&store.Ticket{}, rows, nil, nil, nil, store.PlanningConversation{}, "The agent")
+	if err != nil {
+		t.Fatalf("buildThreadRows: %v", err)
+	}
+	if len(got) != 1 || got[0].Question == nil || len(got[0].Question.Options) != 1 {
+		t.Fatalf("buildThreadRows returned %+v, want one question with one option", got)
+	}
+	var sb strings.Builder
+	if err := got[0].Question.Options[0].TextHTML.Render(t.Context(), &sb); err != nil {
+		t.Fatalf("render option TextHTML: %v", err)
+	}
+	if !strings.Contains(sb.String(), "<code>zing version</code>") {
+		t.Errorf("option TextHTML = %q, want it to contain <code>zing version</code>", sb.String())
 	}
 }

@@ -26,6 +26,7 @@ import (
 	"fmt"
 	stdhtml "html"
 	"log/slog"
+	"strings"
 
 	"github.com/a-h/templ"
 	diagram "github.com/yuin/goldmark-diagram"
@@ -109,25 +110,28 @@ func renderMermaidBlock(w util.BufWriter, source []byte, n *ast.CodeBlock, rc re
 	return nil
 }
 
-// Render renders md (a message body, or plan prose) to HTML through the
-// shared parser and renderer above, and wraps the result with templ.Raw:
-// the one audited boundary (design section 6.10) where already-escaped
-// goldmark output is trusted verbatim, so no caller needs its own
-// html/template import or its own escaping judgment call.
+// renderMarkdownHTML renders md to an HTML string through the shared parser
+// and renderer above -- already-escaped, goldmark's own output -- the one
+// piece Render and RenderInline below both build on, so the two share
+// exactly one markdown-to-HTML path and one panic-recovery fallback rather
+// than RenderInline re-deriving Render's own HTML by rendering its
+// templ.Component a second time (which would need a context.Context this
+// package otherwise has no reason to thread through every rendering
+// function, design section 6.10, 22.7).
 //
 // A panic inside goldmark's own Parse or Render (observed: a list-parser
 // bug tripped by certain markdown shapes) is recovered here rather than
-// left to crash the whole page a caller is building: md renders as
-// escaped plain text inside a <pre class="render-failed"> block instead,
-// with a short note above it, and the panic is logged at WARN (the
-// recovered value only, never request state or a secret). One bad
-// markdown field must never take down a render that has other, perfectly
-// fine content on it.
-func Render(md string) (comp templ.Component, err error) {
+// left to crash the whole page a caller is building: md renders as escaped
+// plain text inside a <pre class="render-failed"> block instead, with a
+// short note above it, and the panic is logged at WARN (the recovered
+// value only, never request state or a secret). One bad markdown field
+// must never take down a render that has other, perfectly fine content on
+// it.
+func renderMarkdownHTML(md string) (out string, err error) {
 	defer func() {
 		if r := recover(); r != nil {
 			slog.Warn("console: render markdown panic recovered", "panic", fmt.Sprint(r))
-			comp, err = renderFailed(md), nil
+			out, err = renderFailedHTML(md), nil
 		}
 	}()
 
@@ -136,16 +140,51 @@ func Render(md string) (comp templ.Component, err error) {
 
 	var buf bytes.Buffer
 	if err := markdownRenderer.Render(&buf, source, doc); err != nil {
-		return nil, fmt.Errorf("console: render markdown: %w", err)
+		return "", fmt.Errorf("console: render markdown: %w", err)
 	}
-	return templ.Raw(buf.String()), nil
+	return buf.String(), nil
 }
 
-// renderFailed is Render's panic fallback: md escaped verbatim inside a
-// <pre class="render-failed">, with a short note above it so the page
-// shows why the block looks like raw markdown instead of silently eating
-// the content.
-func renderFailed(md string) templ.Component {
-	return templ.Raw(`<p class="render-failed-note">This block failed to render and is shown as plain text.</p>` +
-		`<pre class="render-failed">` + stdhtml.EscapeString(md) + `</pre>`)
+// Render renders md (a message body, or plan prose) to HTML and wraps the
+// result with templ.Raw: the one audited boundary (design section 6.10)
+// where already-escaped goldmark output is trusted verbatim, so no caller
+// needs its own html/template import or its own escaping judgment call.
+func Render(md string) (templ.Component, error) {
+	s, err := renderMarkdownHTML(md)
+	if err != nil {
+		return nil, err
+	}
+	return templ.Raw(s), nil
+}
+
+// RenderInline renders md through the same markdown pipeline as Render, for
+// text that must stay inline rather than block-level: an option chip's own
+// label sits inside a <button>, where a <p> is not legal content (bug fix:
+// raw backticks in option chips, design section 22.7's owner-reported
+// locked-view complaint -- optionChips used to print opt.Text as plain,
+// unescaped-for-markdown text). A one-paragraph input, the common case for
+// a short label, has its single wrapping <p>...</p> stripped, leaving the
+// inline markup (<code>, <strong>, ...) bare; anything with more than one
+// block (unusual for a chip label) keeps its outer tags rather than
+// guessing which to drop.
+func RenderInline(md string) (templ.Component, error) {
+	s, err := renderMarkdownHTML(md)
+	if err != nil {
+		return nil, err
+	}
+	if rest, ok := strings.CutPrefix(s, "<p>"); ok {
+		if body, ok2 := strings.CutSuffix(strings.TrimSuffix(rest, "\n"), "</p>"); ok2 && !strings.Contains(body, "<p>") {
+			s = body
+		}
+	}
+	return templ.Raw(s), nil
+}
+
+// renderFailedHTML is renderMarkdownHTML's panic fallback: md escaped
+// verbatim inside a <pre class="render-failed">, with a short note above
+// it so the page shows why the block looks like raw markdown instead of
+// silently eating the content.
+func renderFailedHTML(md string) string {
+	return `<p class="render-failed-note">This block failed to render and is shown as plain text.</p>` +
+		`<pre class="render-failed">` + stdhtml.EscapeString(md) + `</pre>`
 }

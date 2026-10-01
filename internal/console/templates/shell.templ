@@ -115,7 +115,15 @@ templ palette() {
 			padding: 1rem;
 			overflow-y: auto;
 		}
-		#main { padding: 1.5rem; overflow-y: auto; }
+		#main { padding: 1.5rem; overflow-y: auto; overflow-x: hidden; }
+		/* Bug fix 17: a wide plan table or a long code line used to force a
+		   horizontal scrollbar under the whole thread, because neither a
+		   table nor a pre shrinks to its container on its own. Each gets its
+		   own scroll box instead (display: block turns a table into a
+		   container overflow-x can actually apply to), so the page itself
+		   never scrolls sideways. */
+		#main table { display: block; max-width: 100%; overflow-x: auto; }
+		#main pre { max-width: 100%; overflow-x: auto; }
 		#rail {
 			border-left: 1px solid var(--zing-border);
 			padding: 1rem;
@@ -321,13 +329,51 @@ templ palette() {
 			font-size: 0.8rem;
 			margin: 0 0 0.5rem;
 		}
-		/* .q-sent-reply (bug fix 10, thread.templ's sentReplies): a question's
-		   own sent reply or answer, shown under its options instead of as a
-		   detached "reply you" card at the bottom of the thread. */
-		.q-sent-reply {
+		/* .q-turns and .q-turn (bug fix 10, extended by D31-5, thread.templ's
+		   turnsList): a question's own conversation, shown under its options
+		   instead of as a detached "reply you" card at the bottom of the
+		   thread. .turn-author labels who wrote it; a turn with none (a bare
+		   system note such as "Resolved.") renders unlabeled. .pill-queued
+		   marks an owner turn no run has taken delivery of yet (design
+		   section 22.7). */
+		.q-turn {
 			color: var(--zing-text-dim);
 			font-size: 0.85rem;
 			margin: 0.35rem 0 0;
+		}
+		.turn-author {
+			color: var(--zing-text);
+			font-weight: 600;
+			margin-right: 0.25rem;
+		}
+		.pill-queued {
+			margin-left: 0.5rem;
+			background: var(--zing-border);
+		}
+		/* .q-settled (D31, design section 22.7 item 6, thread.templ's
+		   settledBlock): a planning question's own closing line once the
+		   agent has settled it, in place of .q-answered for every other
+		   kind. */
+		.q-settled {
+			color: var(--zing-text-dim);
+			font-size: 0.85rem;
+			margin: 0.5rem 0 0;
+		}
+		/* .agent-status (design section 22.7, views.go's buildAgentStatus): the
+		   Thread view's own banner for a ticket with at least one planning
+		   question, in place of .wait-progress. */
+		.agent-status {
+			color: var(--zing-text-dim);
+			font-size: 0.85rem;
+			margin: 0 0 0.75rem;
+		}
+		/* .chip.locked and .decision.locked (bug fix: "options vanish once
+		   locked", design section 22.7 item 4): a settled or answered
+		   question's own numbered list, disabled rather than removed, so
+		   what was picked stays visible. */
+		.chip.locked, .decision.locked {
+			opacity: 0.7;
+			cursor: default;
 		}
 
 		/* #send-result (bug fix, console.js's showSendResult): a client-owned

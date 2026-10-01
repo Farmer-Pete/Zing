@@ -13,11 +13,13 @@ import (
 	"fmt"
 	"log/slog"
 	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/a-h/templ"
 
 	"zing/internal/console/templates"
+	"zing/internal/machine"
 	"zing/internal/response"
 	"zing/internal/store"
 )
@@ -137,7 +139,11 @@ func (c *console) mainComponent(ctx context.Context, view string, open, project 
 		if err != nil {
 			return nil, err
 		}
-		return templates.Feed(displayFeedMessages(messages)), nil
+		rows, err := displayFeedMessages(messages)
+		if err != nil {
+			return nil, err
+		}
+		return templates.Feed(rows), nil
 	case viewProject:
 		tickets, err := c.store.TicketsByProject(ctx, project)
 		if err != nil {
@@ -181,24 +187,31 @@ func buildInboxGroups(items []store.InboxItem) []templates.InboxGroup {
 	return groups
 }
 
-// displayFeedMessages returns a copy of messages with each row's Body
+// displayFeedMessages builds the Feed view's own rows, each with its Body
 // replaced by displayBody's decoding (code review fix, PR #16): the Feed
 // view passed store.FeedMessages' raw rows straight to templates.Feed,
-// which renders m.Body verbatim, so a state row (whose Body a commit
+// which rendered m.Body verbatim, so a state row (whose Body a commit
 // leaves empty, the transition living in Payload instead) and a sent
 // answer row (whose Body SaveDraft and SendBatch never set, the choice
 // living in Payload instead) both rendered blank -- only the Thread view,
-// through buildThreadRows, ever ran a row's Body through displayBody. The
-// original rows are left untouched; displayBody reads from the copy still
-// carrying the original Payload and Type, so decoding is unaffected by the
-// Body overwrite.
-func displayFeedMessages(messages []store.MessageRow) []store.MessageRow {
-	out := make([]store.MessageRow, len(messages))
+// through buildThreadRows, ever ran a row's Body through displayBody.
+// BodyHTML is markdown-rendered (bug fix: raw backticks showed literally in
+// the Feed, the owner's locked-view complaint, design section 22.7), the
+// same Render path the Thread view's own turns and bodies use.
+func displayFeedMessages(messages []store.MessageRow) ([]templates.FeedRow, error) {
+	out := make([]templates.FeedRow, len(messages))
 	for i := range messages {
-		out[i] = messages[i]
-		out[i].Body = displayBody(&messages[i])
+		bodyHTML, err := Render(displayBody(&messages[i]))
+		if err != nil {
+			return nil, fmt.Errorf("console: render feed message %d: %w", messages[i].ID, err)
+		}
+		out[i] = templates.FeedRow{
+			ID: messages[i].ID, TicketID: messages[i].TicketID,
+			Type: messages[i].Type, Author: messages[i].Author,
+			BodyHTML: bodyHTML,
+		}
 	}
-	return out
+	return out, nil
 }
 
 // threadComponent builds the read-only Thread view for the open ticket:
@@ -206,7 +219,7 @@ func displayFeedMessages(messages []store.MessageRow) []store.MessageRow {
 // 6.6, carried over from Package 3's patchThread guard).
 func (c *console) threadComponent(ctx context.Context, open int64) (templ.Component, error) {
 	if open <= 0 {
-		return templates.Thread(nil, nil, templates.WaitProgress{}), nil
+		return templates.Thread(nil, nil, templates.WaitProgress{}, ""), nil
 	}
 	ticket, err := c.store.GetTicket(ctx, open)
 	switch {
@@ -227,13 +240,22 @@ func (c *console) threadComponent(ctx context.Context, open int64) (templ.Compon
 		if findingsErr != nil {
 			return nil, findingsErr
 		}
-		threadRows, buildErr := buildThreadRows(&ticket, rows, plan, scenarios, findings)
+		conv, convErr := c.store.PlanningConversation(ctx, open)
+		if convErr != nil {
+			return nil, fmt.Errorf("console: planning conversation for ticket %d: %w", open, convErr)
+		}
+		agent := agentName(c.machine)
+		threadRows, buildErr := buildThreadRows(&ticket, rows, plan, scenarios, findings, conv, agent)
 		if buildErr != nil {
 			return nil, buildErr
 		}
-		return templates.Thread(&ticket, threadRows, buildWaitProgress(&ticket, rows)), nil
+		banner := ""
+		if len(conv.Threads) > 0 {
+			banner = buildAgentStatus(conv, agent)
+		}
+		return templates.Thread(&ticket, threadRows, buildWaitProgress(&ticket, rows, conv), banner), nil
 	case errors.Is(err, sql.ErrNoRows):
-		return templates.Thread(nil, nil, templates.WaitProgress{}), nil
+		return templates.Thread(nil, nil, templates.WaitProgress{}, ""), nil
 	default:
 		return nil, err
 	}
@@ -583,11 +605,144 @@ func questionStateLabel(state *string, revisable bool) string {
 			return "answered · can change"
 		}
 		return "answered"
-	case "resolved":
+	case msgStateResolved:
 		return "resolved"
 	default:
 		return *state
 	}
+}
+
+// msgStateResolved mirrors store's own unexported questionStateResolved
+// (internal/store/commit.go), the same package-local-copy pattern
+// msgStateOpen and msgStateAnswered (seed.go) already use: console cannot
+// import store's unexported constants.
+const msgStateResolved = "resolved"
+
+// agentName returns the planning job's own display name (design section
+// 22.7): its configured model with the first letter upper-cased ("fable"
+// gives "Fable"), or "The agent" when m is nil (every test that does not
+// exercise the rail, and every view built before a machine.toml loads) or
+// the planning job carries no model.
+func agentName(m *machine.Machine) string {
+	const fallback = "The agent"
+	if m == nil {
+		return fallback
+	}
+	model := m.Jobs["planning"].Model
+	if model == "" {
+		return fallback
+	}
+	return strings.ToUpper(model[:1]) + model[1:]
+}
+
+// convThreadForQuestion finds questionID's own thread in conv, if any: nil
+// when the question carries no planning run at all, which is how
+// buildThreadQuestion tells a planning question (design section 22.1) apart
+// from every other kind.
+func convThreadForQuestion(conv store.PlanningConversation, questionID int64) *store.Thread {
+	for i := range conv.Threads {
+		if conv.Threads[i].Question.ID == questionID {
+			return &conv.Threads[i]
+		}
+	}
+	return nil
+}
+
+// planningPill computes a planning question's own summary pill (design
+// section 22.7 item 1): "settled" once the agent has settled it; "with
+// <agent>" when the in-flight run has already taken delivery of an owner
+// message in this thread (a sent row whose batch is above the delivery
+// watermark but at or below that run's own ThroughBatch); "queued" when an
+// owner message is sent but no run has taken delivery of it yet; "your
+// turn" otherwise -- nothing outstanding, so the ball is in the owner's
+// court.
+func planningPill(t store.Thread, conv store.PlanningConversation, agent string) string {
+	if t.Settled {
+		return "settled"
+	}
+	through := conv.Delivered
+	inFlight := conv.InFlight != nil
+	if inFlight {
+		through = conv.InFlight.ThroughBatch
+	}
+	var withAgent, queued bool
+	for i := range t.Turns {
+		row := &t.Turns[i]
+		if row.Author != authorYou || row.BatchID == nil || *row.BatchID <= conv.Delivered {
+			continue
+		}
+		if inFlight && *row.BatchID <= through {
+			withAgent = true
+		} else {
+			queued = true
+		}
+	}
+	switch {
+	case withAgent:
+		return "with " + agent
+	case queued:
+		return "queued"
+	default:
+		return "your turn"
+	}
+}
+
+// messageWord pluralizes "message" (design section 22.7's banner table).
+func messageWord(n int) string {
+	if n == 1 {
+		return "1 message"
+	}
+	return strconv.Itoa(n) + " messages"
+}
+
+// buildAgentStatus computes the Thread view's banner for a ticket that
+// carries at least one planning question (design section 22.7, agentStatus
+// in place of waitProgressBanner): a run in flight reports it is working,
+// plus how many owner messages are queued for its next turn (sent but
+// beyond that run's own delivery); no run in flight but owner messages
+// undelivered reports the agent gets them on its next turn; no run and
+// nothing undelivered, but some thread still open, names the open threads;
+// every thread settled renders no banner at all.
+func buildAgentStatus(conv store.PlanningConversation, agent string) string {
+	undelivered := conv.Undelivered()
+	if conv.InFlight != nil {
+		var queued int
+		for i := range undelivered {
+			if undelivered[i].BatchID != nil && *undelivered[i].BatchID > conv.InFlight.ThroughBatch {
+				queued++
+			}
+		}
+		text := agent + " is working."
+		if queued > 0 {
+			text += " " + messageWord(queued) + " queued for its next turn."
+		}
+		return text
+	}
+	if len(undelivered) > 0 {
+		return agent + " gets your " + messageWord(len(undelivered)) + " on its next turn."
+	}
+	unsettled := conv.Unsettled()
+	if len(unsettled) == 0 {
+		return ""
+	}
+	keys := make([]string, 0, len(unsettled))
+	for i := range unsettled {
+		keys = append(keys, questionPayloadKeyFor(unsettled[i].Question))
+	}
+	return "Waiting on you: " + strings.Join(keys, ", ") + "."
+}
+
+// questionPayloadKeyFor decodes m's QuestionPayload and returns its Key,
+// "" when the payload does not decode (unreachable for a real planning
+// question row, every one validated against messages/question.json at
+// insert; store.PlanningConversation's own questionPayloadKey is
+// unexported, so this is console's copy of the same one-field decode).
+func questionPayloadKeyFor(m store.MessageRow) string {
+	var p response.QuestionPayload
+	if err := json.Unmarshal(m.Payload, &p); err != nil {
+		return ""
+	}
+	return p.Key
 }
 
 // buildThreadRows turns store rows into the Thread view's rows (design
@@ -629,8 +784,14 @@ func waitRoundKind(waitingOn string) (response.QuestionKind, bool) {
 // belongs to an earlier, already-cleared round, and never counts). Zero
 // Total -- a ticket not currently question-blocked, or one whose
 // waiting_on names a reason no question Kind backs ("error", "children") --
-// renders no progress line at all (Thread, thread.templ).
-func buildWaitProgress(ticket *store.Ticket, rows []store.MessageRow) templates.WaitProgress {
+// renders no progress line at all (Thread, thread.templ). A planning
+// question is skipped outright (design section 22.7): it shares its
+// payload's Kind with an ordinary classify-round question, so without this
+// exclusion a ticket whose waiting_on happens to be "questions" for a
+// planning reason (design section 22.4) would double-count it against a
+// round it was never part of. agentStatus (buildAgentStatus), not this
+// count, is that question's own progress line.
+func buildWaitProgress(ticket *store.Ticket, rows []store.MessageRow, conv store.PlanningConversation) templates.WaitProgress {
 	if ticket == nil || ticket.WaitingOn == nil {
 		return templates.WaitProgress{}
 	}
@@ -638,10 +799,17 @@ func buildWaitProgress(ticket *store.Ticket, rows []store.MessageRow) templates.
 	if !ok {
 		return templates.WaitProgress{}
 	}
+	planningIDs := make(map[int64]bool, len(conv.Threads))
+	for i := range conv.Threads {
+		planningIDs[conv.Threads[i].Question.ID] = true
+	}
 	var progress templates.WaitProgress
 	for i := range rows {
 		m := &rows[i]
 		if m.Type != msgTypeQuestion || m.State == nil {
+			continue
+		}
+		if planningIDs[m.ID] {
 			continue
 		}
 		if *m.State != msgStateOpen && *m.State != msgStateAnswered {
@@ -682,8 +850,14 @@ func buildWaitProgress(ticket *store.Ticket, rows []store.MessageRow) templates.
 // a parented row is accounted for under its parent's MessageCount even when
 // sentChildText has nothing to say about its type, and an unparented row
 // always becomes either a divider or the one allowed card -- never an empty
-// top-level row.
-func buildThreadRows(ticket *store.Ticket, rows []store.MessageRow, plan *templates.RenderedPlan, scenarios []templates.ScenarioRow, findings []templates.FindingRow) ([]templates.ThreadRow, error) {
+// top-level row. conv is the ticket's whole planning conversation (design
+// section 22.1, 22.3): a question whose id names one of conv.Threads is a
+// planning question, rendered through buildThreadQuestion's conversation
+// branch (turns in conversation order, the agentName-labeled pill, no
+// AnsweredHTML); every other question kind is unaffected. agent is that
+// conversation's own display name (views.go's agentName), used for a
+// planning question's "with <agent>" pill and "Settled by <agent>" line.
+func buildThreadRows(ticket *store.Ticket, rows []store.MessageRow, plan *templates.RenderedPlan, scenarios []templates.ScenarioRow, findings []templates.FindingRow, conv store.PlanningConversation, agent string) ([]templates.ThreadRow, error) {
 	drafts := collectQuestionDrafts(rows)
 	rows = visibleRows(rows)
 	sentAnswers := collectSentAnswers(rows)
@@ -714,7 +888,8 @@ func buildThreadRows(ticket *store.Ticket, rows []store.MessageRow, plan *templa
 		// A question or escalation row always opens its own thread, whatever
 		// its own parent_id: type decides before parent_id gets a turn.
 		if row.Type == msgTypeQuestion || row.Type == msgTypeEscalation {
-			question, err := buildThreadQuestion(ticket, row, messageCounts[row.ID]+1, plan, scenarios, findings, drafts, sentAnswers, sentChildren[row.ID])
+			convThread := convThreadForQuestion(conv, row.ID)
+			question, err := buildThreadQuestion(ticket, row, messageCounts[row.ID]+1, plan, scenarios, findings, drafts, sentAnswers, sentChildren[row.ID], convThread, conv, agent)
 			if err != nil {
 				return nil, err
 			}
@@ -824,40 +999,131 @@ func sentAnswerText(payload response.AnswerPayload, options []templates.ThreadOp
 	return strings.Join(parts, ", ")
 }
 
-// sentChildText formats one sent row that names a question as its parent,
-// for that question's own SentReplies (bug fix 10, extended by D31 and
-// D31-4a): a plain reply's own Body -- the owner's typed text, or D31's own
-// agent reply, both the same shape -- an answer's payload run through
-// sentAnswerText, the same formatting its locked note already uses, a
-// resolved row (D31, section 22.3: the settling decision when the agent
-// wrote one, or a bare acknowledgement for the owner-abandoned and
-// ResolveQuestions paths, which post with no Body of their own), or a
-// followup row (D32, section 22.12.2: the owner reopening an already-
-// settled thread, not written by any job or store code yet on this
-// branch). Any other type, or an answer whose payload fails to decode,
-// renders empty, which the caller skips rather than adding a blank line --
-// the row is still accounted for in the question's own MessageCount
-// (buildThreadRows), just with nothing of its own to show under SentReplies.
-func sentChildText(m *store.MessageRow, options []templates.ThreadOption, key string) string {
+// pickedAnswerText formats a planning question's own owner pick as a turn
+// (design section 22.7 item 5): "picked <chip number>. <option text>",
+// the same chip number optionChips renders, or "picked <key>" when the key
+// names no option (defensive, mirrors sentAnswerText's own fallback). An
+// item-kind answer -- never written against a planning question in
+// practice, since a planning question's payload carries options, not items
+// (design section 22.1) -- falls back to sentAnswerText's own ref:decision
+// formatting, unprefixed.
+func pickedAnswerText(payload response.AnswerPayload, options []templates.ThreadOption) string {
+	if payload.Option != nil {
+		for i, o := range options {
+			if o.Key == *payload.Option {
+				return "picked " + strconv.Itoa(i+1) + ". " + o.Text
+			}
+		}
+		return "picked " + *payload.Option
+	}
+	return sentAnswerText(payload, options)
+}
+
+// turnContent returns one child row's own turn label and markdown text, for
+// buildTurns below (bug fix 10, extended by D31 and D31-4a, and by D31-5's
+// fix for "duplicate Answered: plus You:"): a plain reply's own Body --
+// the owner's typed text ("You"), or D31's own agent reply (agent) -- an
+// answer's payload run through pickedAnswerText, but only inside a
+// planning question (planning true): every other kind's AnsweredHTML
+// already shows the very same pick, so rendering it here too was the
+// duplicate bug. A resolved row is the settling decision when the agent
+// wrote one (ok false: SettledLabel/SettledHTML show it instead, not a
+// turn) or a bare acknowledgement for the owner-abandoned and
+// ResolveQuestions paths, which post with no Body of their own
+// ("Resolved."). A followup row (D32, section 22.12.2: the owner reopening
+// an already-settled thread, not written by any job or store code yet on
+// this branch) names itself, with no separate author label. Any other
+// type, or an answer whose payload fails to decode, reports ok false,
+// which buildTurns skips rather than adding a blank line -- the row is
+// still accounted for in the question's own MessageCount (buildThreadRows),
+// just with nothing of its own to show as a turn.
+func turnContent(m *store.MessageRow, options []templates.ThreadOption, key, agent string, planning bool) (author, text string, ok bool) {
 	switch m.Type {
 	case msgTypeReply:
-		return m.Body
+		if m.Author == authorYou {
+			return "You", m.Body, true
+		}
+		return agent, m.Body, true
 	case msgTypeAnswer:
+		if !planning {
+			return "", "", false
+		}
 		var ap response.AnswerPayload
 		if err := json.Unmarshal(m.Payload, &ap); err != nil {
-			return ""
+			return "", "", false
 		}
-		return sentAnswerText(ap, options)
+		return "You", pickedAnswerText(ap, options), true
 	case msgTypeResolved:
 		if m.Author == authorZing {
-			return "Settled: " + m.Body
+			return "", "", false // the settling decision: SettledLabel/SettledHTML, not a turn
 		}
-		return "Resolved."
+		return "", "Resolved.", true
 	case msgTypeFollowup:
-		return "You reopened " + key + "."
+		return "", "You reopened " + key + ".", true
 	default:
-		return ""
+		return "", "", false
 	}
+}
+
+// mergeThreadOrder reorders children (buildThreadRows' own generic
+// parent_id fold, which includes every child row regardless of type or
+// author) to match turns' own order (store.PlanningConversation's turn
+// order, design section 22.3), appending any row turns has no place for --
+// a system-authored resolved row the owner-abandon path writes, which
+// store's agentRowsByQuestion (author zing only) never reads back -- after
+// it, in their own original order (bug 14 fix: a loose, empty "resolved
+// system" card is fixed by placement alone, task D31-4a, but still needs a
+// turn of its own inside the thread, not silence). It never changes which
+// rows belong to the question -- only their display order -- so a row
+// store.PlanningConversation does not recognize is never dropped.
+func mergeThreadOrder(children, turns []store.MessageRow) []store.MessageRow {
+	if len(turns) == 0 {
+		return children
+	}
+	inTurns := make(map[int64]bool, len(turns))
+	for i := range turns {
+		inTurns[turns[i].ID] = true
+	}
+	out := make([]store.MessageRow, 0, len(children))
+	out = append(out, turns...)
+	for i := range children {
+		if !inTurns[children[i].ID] {
+			out = append(out, children[i])
+		}
+	}
+	return out
+}
+
+// buildTurns assembles a question's displayed Turns (design section 22.7):
+// convThread's own turn order when this is a planning question (design
+// section 22.1) -- reordering children, never changing which rows belong to
+// it, mergeThreadOrder -- otherwise children in their own (message) order.
+// Each turn's text is rendered through Render (bug fix: raw backticks
+// showed literally), and an owner turn past the delivery watermark is
+// tagged Queued -- meaningful only for a planning question; every other
+// kind's Queued is always false, since store.PlanningConversation never
+// classifies a non-planning row's batch.
+func buildTurns(children []store.MessageRow, convThread *store.Thread, conv store.PlanningConversation, options []templates.ThreadOption, key, agent string) ([]templates.Turn, error) {
+	ordered := children
+	planning := convThread != nil
+	if planning {
+		ordered = mergeThreadOrder(children, convThread.Turns)
+	}
+	turns := make([]templates.Turn, 0, len(ordered))
+	for i := range ordered {
+		m := &ordered[i]
+		author, text, ok := turnContent(m, options, key, agent, planning)
+		if !ok {
+			continue
+		}
+		bodyHTML, err := Render(text)
+		if err != nil {
+			return nil, fmt.Errorf("console: render question %s turn %d: %w", key, m.ID, err)
+		}
+		queued := planning && m.Author == authorYou && m.BatchID != nil && *m.BatchID > conv.Delivered
+		turns = append(turns, templates.Turn{Author: author, BodyHTML: bodyHTML, Queued: queued})
+	}
+	return turns, nil
 }
 
 // questionDraft is one question's in-progress, unsent draft (bug fix): at
@@ -923,9 +1189,14 @@ func collectQuestionDrafts(rows []store.MessageRow) map[int64]questionDraft {
 // contrast, is a real error (design section 6.10: Render can fail), and is
 // returned rather than silently dropping the question's body. children is
 // this question's own sent reply and answer rows, in message order (bug fix
-// 10), formatted into ThreadQuestion.SentReplies below rather than left for
-// buildThreadRows to render a second time as standalone rows.
-func buildThreadQuestion(ticket *store.Ticket, m *store.MessageRow, messageCount int, plan *templates.RenderedPlan, scenarios []templates.ScenarioRow, findings []templates.FindingRow, drafts map[int64]questionDraft, sentAnswers map[int64]response.AnswerPayload, children []store.MessageRow) (*templates.ThreadQuestion, error) {
+// 10), formatted into ThreadQuestion.Turns below (buildTurns) rather than
+// left for buildThreadRows to render a second time as standalone rows.
+// convThread is this question's own entry in the ticket's planning
+// conversation, nil for every kind but a planning question (design section
+// 22.1); conv carries that conversation's delivery watermark and in-flight
+// run, for convThread's own pill and Queued tags; agent is the planning
+// job's own display name (views.go's agentName).
+func buildThreadQuestion(ticket *store.Ticket, m *store.MessageRow, messageCount int, plan *templates.RenderedPlan, scenarios []templates.ScenarioRow, findings []templates.FindingRow, drafts map[int64]questionDraft, sentAnswers map[int64]response.AnswerPayload, children []store.MessageRow, convThread *store.Thread, conv store.PlanningConversation, agent string) (*templates.ThreadQuestion, error) {
 	if m.Type != msgTypeQuestion {
 		return nil, nil //nolint:nilnil // "no question" is a legitimate result, not an error
 	}
@@ -940,58 +1211,108 @@ func buildThreadQuestion(ticket *store.Ticket, m *store.MessageRow, messageCount
 		return nil, fmt.Errorf("console: render question %d body: %w", m.ID, err)
 	}
 
-	var recommendedHTML templ.Component
-	if payload.Recommended != "" {
-		recommendedHTML, err = Render(payload.Recommended)
-		if err != nil {
-			return nil, fmt.Errorf("console: render question %d recommendation: %w", m.ID, err)
-		}
-	}
-
 	options := make([]templates.ThreadOption, 0, len(payload.Options))
 	for _, o := range payload.Options {
-		options = append(options, templates.ThreadOption{Key: o.Key, Text: o.Text})
+		textHTML, optErr := RenderInline(o.Text)
+		if optErr != nil {
+			return nil, fmt.Errorf("console: render question %d option %s: %w", m.ID, o.Key, optErr)
+		}
+		options = append(options, templates.ThreadOption{Key: o.Key, Text: o.Text, TextHTML: textHTML})
 	}
 	items := make([]templates.ThreadItem, 0, len(payload.Items))
 	for _, it := range payload.Items {
 		items = append(items, templates.ThreadItem{Ref: it.Ref, Text: it.Text})
 	}
 
-	revisable := m.State != nil && *m.State == msgStateAnswered && ticketStillWaitingOnQuestions(ticket)
-	q := &templates.ThreadQuestion{
-		Key: payload.Key, Title: title, Kind: string(payload.Kind),
-		BodyHTML: bodyHTML, Recommended: payload.Recommended, RecommendedHTML: recommendedHTML,
-		Options: options, Items: items, StateLabel: questionStateLabel(m.State, revisable),
-		MessageCount: messageCount,
-		// Interactive is true for a still-open question (code review fix, PR
-		// #16: questionGroup (thread.templ) used to render option chips,
+	// RecommendedHTML maps a leading option key to its own chip number and
+	// text before rendering (bug fix: "Recommended: a:" against chips
+	// numbered 1 to 4, design section 22.7 item 3), now that options is
+	// built -- templates.RecommendedDisplayText needs it to look the key up.
+	var recommendedHTML templ.Component
+	if payload.Recommended != "" {
+		recommendedHTML, err = Render(templates.RecommendedDisplayText(payload.Recommended, options))
+		if err != nil {
+			return nil, fmt.Errorf("console: render question %d recommendation: %w", m.ID, err)
+		}
+	}
+
+	// planning is this question's own test for "is this a planning
+	// question" (design section 22.1): convThread is set only when
+	// buildThreadRows found this question's id among the ticket's planning
+	// conversation. A planning question's lifecycle is D31's own (open,
+	// resolved; D31-5 renders through planningPill and Turns/SettledHTML);
+	// every other kind keeps the D30 answered/resolved rendering unchanged.
+	planning := convThread != nil
+	var interactive, revisable bool
+	var stateLabel string
+	switch {
+	case planning:
+		interactive = !convThread.Settled
+		stateLabel = planningPill(*convThread, conv, agent)
+	default:
+		revisable = m.State != nil && *m.State == msgStateAnswered && ticketStillWaitingOnQuestions(ticket)
+		// Interactive is true for a still-open question (code review fix,
+		// PR #16: questionGroup (thread.templ) used to render option chips,
 		// item rows, and the free reply input for every question regardless
 		// of state, so an answered or resolved question -- whose draft
 		// SaveDraft would refuse anyway (openQuestionForTicketTx) -- still
 		// looked editable), and, as of D30, also for a question already
-		// answered while the ticket still waits on this round: the owner can
-		// still revise a pick before Zing resumes the agent with it
+		// answered while the ticket still waits on this round: the owner
+		// can still revise a pick before Zing resumes the agent with it
 		// (console_writes.go's questionDraftableTx carries the same rule
 		// server-side; this is the rendering half).
-		Interactive: (m.State != nil && *m.State == msgStateOpen) || revisable,
-		Revisable:   revisable,
+		interactive = (m.State != nil && *m.State == msgStateOpen) || revisable
+		stateLabel = questionStateLabel(m.State, revisable)
 	}
-	if len(children) > 0 {
-		q.SentReplies = make([]string, 0, len(children))
-		for i := range children {
-			if text := sentChildText(&children[i], options, payload.Key); text != "" {
-				q.SentReplies = append(q.SentReplies, text)
-			}
+
+	q := &templates.ThreadQuestion{
+		Key: payload.Key, Title: title, Kind: string(payload.Kind),
+		BodyHTML: bodyHTML, Recommended: payload.Recommended, RecommendedHTML: recommendedHTML,
+		Options: options, Items: items, StateLabel: stateLabel,
+		MessageCount: messageCount,
+		Interactive:  interactive,
+		Revisable:    revisable,
+	}
+
+	turns, err := buildTurns(children, convThread, conv, options, payload.Key, agent)
+	if err != nil {
+		return nil, err
+	}
+	q.Turns = turns
+
+	// SettledLabel/SettledHTML (design section 22.7 item 6): a planning
+	// question's own closing line, once the agent has settled it with a
+	// decision. A settle with no decision text (the owner-abandoned path,
+	// section 22.3's resolved/system row) renders no closing line here --
+	// that row is instead an ordinary, unlabeled turn ("Resolved.",
+	// turnContent/mergeThreadOrder above), so a settled thread is never
+	// left with an empty one.
+	if planning && convThread.Settled && convThread.Decision != "" {
+		decisionHTML, decErr := Render(convThread.Decision)
+		if decErr != nil {
+			return nil, fmt.Errorf("console: render question %d decision: %w", m.ID, decErr)
 		}
+		q.SettledLabel = "Settled by " + agent
+		q.SettledHTML = decisionHTML
 	}
-	// AnsweredText (bug fix): a closed question's locked note, shown instead
-	// of its now-hidden controls, only for state=answered and no longer
-	// revisable -- not resolved, a later terminal state a reader has
-	// already moved past, and not a still-revisable one, which keeps its
-	// live controls (Revisable above) rather than locking.
-	if m.State != nil && *m.State == msgStateAnswered && !revisable {
+
+	// AnsweredHTML (bug fix): a closed, non-planning question's locked
+	// note, shown instead of its now-hidden controls, only for
+	// state=answered and no longer revisable -- not resolved, a later
+	// terminal state a reader has already moved past, and not a still-
+	// revisable one, which keeps its live controls (Revisable above)
+	// rather than locking. A planning question never reaches this: D31
+	// never sets state=answered (section 22.3), so AnsweredHTML and
+	// SettledHTML are mutually exclusive in practice.
+	if !planning && m.State != nil && *m.State == msgStateAnswered && !revisable {
 		if ap, ok := sentAnswers[m.ID]; ok {
-			q.AnsweredText = sentAnswerText(ap, options)
+			if txt := sentAnswerText(ap, options); txt != "" {
+				answeredHTML, ansErr := Render(txt)
+				if ansErr != nil {
+					return nil, fmt.Errorf("console: render question %d answered text: %w", m.ID, ansErr)
+				}
+				q.AnsweredHTML = answeredHTML
+			}
 		}
 	}
 	if payload.Kind == response.QuestionKindMerge && ticket != nil && ticket.PRURL != nil {
@@ -1020,6 +1341,21 @@ func buildThreadQuestion(ticket *store.Ticket, m *store.MessageRow, messageCount
 			}
 			if len(ap.Items) > 0 {
 				q.DraftItems = ap.Items
+			}
+		}
+	}
+	// PickedOption/PickedItems (bug fix: "options vanish once locked", item
+	// 4): once a question is no longer interactive, optionChips and
+	// itemRows still need to show what was actually picked, every kind
+	// alike -- not just a still-revisable one (DraftOption's own fallback
+	// above).
+	if !interactive {
+		if ap, ok := sentAnswers[m.ID]; ok {
+			if ap.Option != nil {
+				q.PickedOption = *ap.Option
+			}
+			if len(ap.Items) > 0 {
+				q.PickedItems = ap.Items
 			}
 		}
 	}

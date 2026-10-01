@@ -179,14 +179,26 @@ func (c *console) handleSend(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// sendResultText is handleSend's success body (bug fix): "Sent 1 answer."
-// singular, "Sent N answers." plural, read off BatchResult.Sent -- always
-// > 0 here, since handleSend already returned on result.Empty above.
+// sendResultText is handleSend's success body (bug fix, extended by design
+// section 22.7): "Sent 1 message." singular, "Sent N messages." plural,
+// read off BatchResult.Sent -- always > 0 here, since handleSend already
+// returned on result.Empty above -- plus, when the batch also discarded a
+// draft against a question that closed out from under it (SendBatch's own
+// revalidation), " 1 not sent: its question closed first." or " N not
+// sent: its question closed first.", so the owner learns what happened to
+// it rather than finding it silently gone.
 func sendResultText(result store.BatchResult) string {
-	if result.Sent == 1 {
-		return "Sent 1 answer."
+	text := "Sent 1 message."
+	if result.Sent != 1 {
+		text = fmt.Sprintf("Sent %d messages.", result.Sent)
 	}
-	return fmt.Sprintf("Sent %d answers.", result.Sent)
+	switch {
+	case result.Discarded == 1:
+		text += " 1 not sent: its question closed first."
+	case result.Discarded > 1:
+		text += fmt.Sprintf(" %d not sent: its question closed first.", result.Discarded)
+	}
+	return text
 }
 
 // readRequest is POST /read's body (design section 6.4: markRead posts

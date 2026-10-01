@@ -35,6 +35,7 @@ import {
 	draftConflictMessage,
 	TOAST_DISMISS_MS,
 	scheduleToastDismiss,
+	clearReplyInputs,
 } from './keyboard.mjs';
 
 // defaultNav is the shell's own data-signals default (templates/shell.templ:
@@ -523,6 +524,14 @@ async function postSendBatch(ticket) {
 		});
 		const text = await resp.text();
 		showSendResult(text);
+		if (resp.ok) {
+			// A 200 means every open draft just sent, so its own reply box
+			// should not keep showing text the owner just sent (design
+			// section 22.7): Datastar's own morph never refills a focused
+			// input, so this module clears it directly.
+			clearReplyInputs(document.querySelectorAll('#main .reply-input'));
+			document.activeElement?.blur?.();
+		}
 		if (!resp.ok && resp.status !== 409) {
 			console.error('console.js: POST /send', resp.status);
 		}

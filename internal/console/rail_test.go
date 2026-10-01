@@ -176,6 +176,45 @@ func TestRail_PhaseArtifactsAndRun(t *testing.T) {
 	}
 }
 
+// TestRail_PlanArtifactRendersThroughPlanRendererNotRawJSON proves bug fix
+// 16: the rail's Plan slot used to show its stored artifact as raw indented
+// JSON (prettyPayload), the owner's locked-view complaint. It now renders
+// through the same RenderPlan path the gate's own context region uses
+// (views.go's loadPlan, TestThreadGateContextRendersStoredPlan), so the
+// disclosure shows the plan's own headings and prose instead of braces and
+// quoted field names. Every other slot (Scenarios here) is unaffected and
+// still shows its raw payload.
+func TestRail_PlanArtifactRendersThroughPlanRendererNotRawJSON(t *testing.T) {
+	t.Parallel()
+	s := newConsoleTestStore(t)
+	ticketID := seedTicket(t, s, "fake#1", "Add a hello endpoint")
+
+	if _, err := s.InsertArtifact(t.Context(), store.Artifact{TicketID: ticketID, Type: testArtifactTypePlan, Version: 1, Payload: railPlanPayload(t)}); err != nil {
+		t.Fatalf("insert plan artifact: %v", err)
+	}
+	if _, err := s.InsertArtifact(t.Context(), store.Artifact{TicketID: ticketID, Type: testArtifactTypeScenario, Version: 1, Payload: railScenarioPayload("s1")}); err != nil {
+		t.Fatalf("insert scenario artifact: %v", err)
+	}
+
+	srv := newTestServer(t, s, bus.New(), nil, newTestLogHandler(t))
+	resp, r, cancel := openStream(t, srv.URL, "thread", ticketID, 0)
+	defer cancel()
+	defer func() { _ = resp.Body.Close() }()
+	_, _, rail, _ := readInitialFrames(t, r)
+
+	if !strings.Contains(rail, "<h2>Overview</h2>") || !strings.Contains(rail, "Ship a plan renderer that drops nothing.") {
+		t.Errorf("rail's Plan slot did not render through RenderPlan; got:\n%s", rail)
+	}
+	if strings.Contains(rail, `"overview"`) || strings.Contains(rail, `"objective"`) {
+		t.Errorf("rail's Plan slot still shows raw JSON field names; got:\n%s", rail)
+	}
+	// The Scenarios slot, never given a RenderedHTML, still shows its raw
+	// payload: the fix is scoped to the Plan slot alone.
+	if !strings.Contains(rail, `class="artifact-payload"`) || !strings.Contains(rail, "behavior") {
+		t.Errorf("rail's Scenarios slot lost its raw payload view; got:\n%s", rail)
+	}
+}
+
 // TestRail_NoSessionRendersAllDashes proves a ticket with no session yet
 // (every field this package cannot supply) renders every Run field as "-"
 // rather than panicking on an empty SessionsForTicket result.

@@ -8,18 +8,39 @@ import (
 
 	"github.com/a-h/templ"
 
+	"zing/internal/response"
 	"zing/internal/store"
 )
 
-// renderItemRow renders itemRow(1, 2, item, itemDecisionsPerimeter) to a
-// string, failing the test on a render error.
+// renderItemRow renders itemRow(1, 2, item, itemDecisionsPerimeter, "",
+// true) to a string, failing the test on a render error.
 func renderItemRow(t *testing.T, item ThreadItem) string {
 	t.Helper()
 	var sb strings.Builder
-	if err := itemRow(1, 2, item, itemDecisionsPerimeter, "").Render(t.Context(), &sb); err != nil {
+	if err := itemRow(1, 2, item, itemDecisionsPerimeter, "", true).Render(t.Context(), &sb); err != nil {
 		t.Fatalf("itemRow.Render: %v", err)
 	}
 	return sb.String()
+}
+
+// textComponent is a minimal templ.Component test stand-in that renders s
+// verbatim, used for ThreadQuestion.AnsweredHTML, SettledHTML, and
+// Turn.BodyHTML fixtures: this file's tests assert on these fields'
+// rendered text, not on exercising Render's own markdown path (render_test.go
+// already covers that).
+func textComponent(s string) templ.Component {
+	return templ.ComponentFunc(func(_ context.Context, w io.Writer) error {
+		_, err := io.WriteString(w, s)
+		return err
+	})
+}
+
+// threadOption builds a ThreadOption test fixture with TextHTML set to a
+// textComponent of text (console.RenderInline's own job in real code):
+// optionChips always renders TextHTML, so a fixture that leaves it nil
+// panics on render.
+func threadOption(key, text string) ThreadOption {
+	return ThreadOption{Key: key, Text: text, TextHTML: textComponent(text)}
 }
 
 // testWaitingOnYou is the StateLabel string.go's questionStateLabel gives
@@ -27,12 +48,17 @@ func renderItemRow(t *testing.T, item ThreadItem) string {
 // (goconst).
 const testWaitingOnYou = "waiting on you"
 
-// testApprovePlanTitle and testSplitTicketTitle are two question titles
-// repeated across this file's fixtures (goconst), named once rather than
-// retyped.
+// testYouAuthor is Turn.Author for an owner turn (bug fix, design section
+// 22.7), repeated across this file's fixtures (goconst).
+const testYouAuthor = "You"
+
+// testApprovePlanTitle, testSplitTicketTitle, and testVersionQuestionTitle
+// are question titles repeated across this file's fixtures (goconst),
+// named once rather than retyped.
 const (
-	testApprovePlanTitle = "Approve the plan?"
-	testSplitTicketTitle = "Split this ticket?"
+	testApprovePlanTitle     = "Approve the plan?"
+	testSplitTicketTitle     = "Split this ticket?"
+	testVersionQuestionTitle = "Where does the version string come from?"
 )
 
 // emptyBodyHTML is a minimal templ.Component for a ThreadQuestion.BodyHTML
@@ -130,7 +156,7 @@ func TestQuestionGroupLabelsMessageCount(t *testing.T) {
 		got := renderQuestionGroup(t, ThreadRow{
 			ID: 1,
 			Question: &ThreadQuestion{
-				Key: "Q1", Title: "Where does the version string come from?",
+				Key: "Q1", Title: testVersionQuestionTitle,
 				StateLabel: testWaitingOnYou, BodyHTML: emptyBodyHTML, MessageCount: 1,
 			},
 		})
@@ -210,9 +236,9 @@ func TestFreeReplyRendersDraftSavedSpan(t *testing.T) {
 // TestQuestionGroupLocksAnAnsweredQuestion proves the bug fix for "render
 // an answered question's controls as disabled or locked with its answer
 // shown, so you can't type into a closed question at all": a non-interactive
-// question with AnsweredText set renders answeredLocked's note instead of
-// optionChips/itemRows/freeReply, and a non-interactive question with no
-// AnsweredText (nothing decoded, or a reply-only question) renders neither.
+// question with AnsweredHTML set renders answeredLocked's note instead of
+// freeReply, and a non-interactive question with no AnsweredHTML (nothing
+// decoded, or a reply-only question) renders no locked note at all.
 func TestQuestionGroupLocksAnAnsweredQuestion(t *testing.T) {
 	t.Parallel()
 
@@ -223,29 +249,29 @@ func TestQuestionGroupLocksAnAnsweredQuestion(t *testing.T) {
 			Question: &ThreadQuestion{
 				Key: "Q1", Title: testApprovePlanTitle, StateLabel: "answered",
 				BodyHTML: emptyBodyHTML, MessageCount: 1,
-				Interactive: false, AnsweredText: "a",
+				Interactive: false, AnsweredHTML: textComponent("a"),
 			},
 		})
-		if !strings.Contains(got, `<p class="q-answered">Answered: a</p>`) {
+		if !strings.Contains(got, `<div class="q-answered">`) || !strings.Contains(got, "Answered:") || !strings.Contains(got, ">a<") {
 			t.Errorf("rendered question group missing the locked note; got:\n%s", got)
 		}
-		if strings.Contains(got, "reply-input") || strings.Contains(got, `class="chips"`) {
-			t.Errorf("rendered question group still carries live controls on a closed question; got:\n%s", got)
+		if strings.Contains(got, "reply-input") {
+			t.Errorf("rendered question group still carries a live reply box on a closed question; got:\n%s", got)
 		}
 	})
 
-	t.Run("a non-interactive question with no answer text shows no locked note", func(t *testing.T) {
+	t.Run("a non-interactive question with no answer html shows no locked note", func(t *testing.T) {
 		t.Parallel()
 		got := renderQuestionGroup(t, ThreadRow{
 			ID: 2,
 			Question: &ThreadQuestion{
 				Key: "Q2", Title: "Resolved already", StateLabel: "resolved",
 				BodyHTML: emptyBodyHTML, MessageCount: 1,
-				Interactive: false, AnsweredText: "",
+				Interactive: false,
 			},
 		})
 		if strings.Contains(got, "q-answered") {
-			t.Errorf("rendered question group has a locked note with no answer text; got:\n%s", got)
+			t.Errorf("rendered question group has a locked note with no answer html; got:\n%s", got)
 		}
 	})
 
@@ -268,6 +294,58 @@ func TestQuestionGroupLocksAnAnsweredQuestion(t *testing.T) {
 	})
 }
 
+// TestLockedQuestionShowsOptions proves the bug fix for "options vanish
+// once locked" (design section 22.7 item 4, the owner's locked-view
+// complaint): a settled or answered question -- Interactive false -- still
+// renders its numbered option chips and item-decision rows, disabled and
+// marked picked for whatever was actually sent, instead of nothing at all.
+func TestLockedQuestionShowsOptions(t *testing.T) {
+	t.Parallel()
+
+	t.Run("a locked option-kind question still shows its chips, picked and disabled", func(t *testing.T) {
+		t.Parallel()
+		got := renderQuestionGroup(t, ThreadRow{
+			ID: 1,
+			Question: &ThreadQuestion{
+				Key: "Q1", Title: testApprovePlanTitle, StateLabel: "settled",
+				BodyHTML: emptyBodyHTML, MessageCount: 1,
+				Options:      []ThreadOption{threadOption("a", "Approve"), threadOption("b", "Reject")},
+				Interactive:  false,
+				PickedOption: "b",
+			},
+		})
+		if !strings.Contains(got, `class="chips"`) {
+			t.Errorf("rendered question group lost its chips once locked; got:\n%s", got)
+		}
+		if !strings.Contains(got, `class="chip picked locked"`) || !strings.Contains(got, "2. Reject") {
+			t.Errorf("rendered question group does not mark the sent option picked; got:\n%s", got)
+		}
+		if strings.Contains(got, "data-on:click") {
+			t.Errorf("rendered question group's locked chips still carry a click handler; got:\n%s", got)
+		}
+	})
+
+	t.Run("a locked item-kind question still shows its rows, picked and disabled", func(t *testing.T) {
+		t.Parallel()
+		got := renderQuestionGroup(t, ThreadRow{
+			ID: 2,
+			Question: &ThreadQuestion{
+				Key: "Q2", Title: "Review this change", Kind: "review", StateLabel: "resolved",
+				BodyHTML: emptyBodyHTML, MessageCount: 1,
+				Items:       []ThreadItem{{Ref: "a.go", Text: "a change"}},
+				Interactive: false,
+				PickedItems: map[string]response.Decision{"a.go": response.DecisionAccept},
+			},
+		})
+		if !strings.Contains(got, `class="decision picked locked"`) {
+			t.Errorf("rendered question group does not mark the sent decision picked; got:\n%s", got)
+		}
+		if strings.Contains(got, "data-on:click") {
+			t.Errorf("rendered question group's locked item row still carries a click handler; got:\n%s", got)
+		}
+	})
+}
+
 // TestQuestionGroupShowsReviseNoteWhileStillRevisable proves D30: an
 // answered question the owner can still revise (its ticket still waits on
 // this round) keeps its live controls and shows reviseNote's own note, not
@@ -282,7 +360,7 @@ func TestQuestionGroupShowsReviseNoteWhileStillRevisable(t *testing.T) {
 			Question: &ThreadQuestion{
 				Key: "Q1", Title: testApprovePlanTitle, StateLabel: "answered · can change",
 				BodyHTML: emptyBodyHTML, MessageCount: 1,
-				Options:     []ThreadOption{{Key: "a", Text: "Approve"}, {Key: "b", Text: "Reject"}},
+				Options:     []ThreadOption{threadOption("a", "Approve"), threadOption("b", "Reject")},
 				Interactive: true, Revisable: true, DraftOption: "a",
 			},
 		})
@@ -325,7 +403,7 @@ func TestThreadShowsWaitProgress(t *testing.T) {
 	t.Run("a blocked ticket shows the progress line", func(t *testing.T) {
 		t.Parallel()
 		var sb strings.Builder
-		if err := Thread(ticket, nil, WaitProgress{Answered: 1, Total: 2}).Render(t.Context(), &sb); err != nil {
+		if err := Thread(ticket, nil, WaitProgress{Answered: 1, Total: 2}, "").Render(t.Context(), &sb); err != nil {
 			t.Fatalf("Thread.Render: %v", err)
 		}
 		got := sb.String()
@@ -338,7 +416,7 @@ func TestThreadShowsWaitProgress(t *testing.T) {
 	t.Run("an unblocked ticket shows no progress line", func(t *testing.T) {
 		t.Parallel()
 		var sb strings.Builder
-		if err := Thread(ticket, nil, WaitProgress{}).Render(t.Context(), &sb); err != nil {
+		if err := Thread(ticket, nil, WaitProgress{}, "").Render(t.Context(), &sb); err != nil {
 			t.Fatalf("Thread.Render: %v", err)
 		}
 		if strings.Contains(sb.String(), "wait-progress") {
@@ -349,31 +427,34 @@ func TestThreadShowsWaitProgress(t *testing.T) {
 
 // TestQuestionGroupRendersSentRepliesUnderItsOptions proves bug fix 10: a
 // question's own sent replies and answers (views.go's buildThreadRows, now
-// folded into SentReplies instead of their own standalone ThreadRow) render
+// folded into Turns instead of their own standalone ThreadRow) render
 // inside this question's own <details> block, under its options, each
-// prefixed "You: " -- not as a separate, detached message card. A question
-// with no sent replies renders no ".q-sent-replies" region at all.
+// labeled "You:" -- not as a separate, detached message card. A question
+// with no turns renders no ".q-turns" region at all.
 func TestQuestionGroupRendersSentRepliesUnderItsOptions(t *testing.T) {
 	t.Parallel()
 
-	t.Run("sent replies and answers render in order, each prefixed You:", func(t *testing.T) {
+	t.Run("sent replies and answers render in order, each labeled You:", func(t *testing.T) {
 		t.Parallel()
 		got := renderQuestionGroup(t, ThreadRow{
 			ID: 1,
 			Question: &ThreadQuestion{
 				Key: "Q1", Title: testApprovePlanTitle, StateLabel: testWaitingOnYou,
 				BodyHTML: emptyBodyHTML, MessageCount: 3, Interactive: true,
-				SentReplies: []string{"Explain these three options in more detail", "Keep it simple"},
+				Turns: []Turn{
+					{Author: testYouAuthor, BodyHTML: textComponent("Explain these three options in more detail")},
+					{Author: testYouAuthor, BodyHTML: textComponent("Keep it simple")},
+				},
 			},
 		})
 		optionsIdx := strings.Index(got, `class="reply"`)
-		repliesIdx := strings.Index(got, `class="q-sent-replies"`)
+		repliesIdx := strings.Index(got, `class="q-turns"`)
 		if optionsIdx < 0 || repliesIdx < 0 || repliesIdx < optionsIdx {
-			t.Errorf("rendered question group does not show sent replies under its options; got:\n%s", got)
+			t.Errorf("rendered question group does not show its turns under its options; got:\n%s", got)
 		}
 		for _, want := range []string{
-			`<p class="q-sent-reply">You: Explain these three options in more detail</p>`,
-			`<p class="q-sent-reply">You: Keep it simple</p>`,
+			"You:</span>Explain these three options in more detail",
+			"You:</span>Keep it simple",
 		} {
 			if !strings.Contains(got, want) {
 				t.Errorf("rendered question group missing %q; got:\n%s", want, got)
@@ -381,7 +462,7 @@ func TestQuestionGroupRendersSentRepliesUnderItsOptions(t *testing.T) {
 		}
 	})
 
-	t.Run("no sent replies renders no sent-replies region", func(t *testing.T) {
+	t.Run("no turns renders no turns region", func(t *testing.T) {
 		t.Parallel()
 		got := renderQuestionGroup(t, ThreadRow{
 			ID: 2,
@@ -390,8 +471,153 @@ func TestQuestionGroupRendersSentRepliesUnderItsOptions(t *testing.T) {
 				BodyHTML: emptyBodyHTML, MessageCount: 1, Interactive: true,
 			},
 		})
-		if strings.Contains(got, "q-sent-replies") {
-			t.Errorf("rendered question group has a sent-replies region with nothing sent; got:\n%s", got)
+		if strings.Contains(got, "q-turns") {
+			t.Errorf("rendered question group has a turns region with nothing sent; got:\n%s", got)
 		}
 	})
+}
+
+// TestSettledThreadShowsDecisionAndLocks proves design section 22.7 item 6:
+// a settled planning question renders its agent's decision as "Settled by
+// <agent>:", with its options locked (no click handler) and no reply box.
+func TestSettledThreadShowsDecisionAndLocks(t *testing.T) {
+	t.Parallel()
+	got := renderQuestionGroup(t, ThreadRow{
+		ID: 1,
+		Question: &ThreadQuestion{
+			Key: "Q1", Title: testVersionQuestionTitle, StateLabel: "settled",
+			BodyHTML: emptyBodyHTML, MessageCount: 2,
+			Options:      []ThreadOption{threadOption("a", "ReadBuildInfo only")},
+			Interactive:  false,
+			PickedOption: "a",
+			SettledLabel: "Settled by Fable",
+			SettledHTML:  textComponent("Agreed, no ldflags."),
+		},
+	})
+	if !strings.Contains(got, `class="q-settled"`) || !strings.Contains(got, "Settled by Fable:") || !strings.Contains(got, "Agreed, no ldflags.") {
+		t.Errorf("rendered question group missing its settled decision; got:\n%s", got)
+	}
+	if strings.Contains(got, "reply-input") {
+		t.Errorf("rendered question group still carries a reply box once settled; got:\n%s", got)
+	}
+	if strings.Contains(got, "data-on:click") {
+		t.Errorf("rendered question group's chips still carry a click handler once settled; got:\n%s", got)
+	}
+	if !strings.Contains(got, `class="chip picked locked"`) {
+		t.Errorf("rendered question group lost its picked chip once settled; got:\n%s", got)
+	}
+}
+
+// TestOpenThreadKeepsReplyBox proves the other half of item 6: an open
+// (unsettled) planning question keeps its clickable chips and its reply
+// box, and shows no settled line.
+func TestOpenThreadKeepsReplyBox(t *testing.T) {
+	t.Parallel()
+	got := renderQuestionGroup(t, ThreadRow{
+		ID: 1,
+		Question: &ThreadQuestion{
+			Key: "Q1", Title: testVersionQuestionTitle, StateLabel: "your turn",
+			BodyHTML: emptyBodyHTML, MessageCount: 1,
+			Options:     []ThreadOption{threadOption("a", "ReadBuildInfo only")},
+			Interactive: true,
+		},
+	})
+	if !strings.Contains(got, "reply-input") {
+		t.Errorf("rendered question group missing its reply box while open; got:\n%s", got)
+	}
+	if !strings.Contains(got, "data-on:click") {
+		t.Errorf("rendered question group's chips are not clickable while open; got:\n%s", got)
+	}
+	if strings.Contains(got, "q-settled") {
+		t.Errorf("rendered question group shows a settled line while still open; got:\n%s", got)
+	}
+}
+
+// TestLockedQuestionHasNoDuplicateAnswerLine proves the owner's
+// locked-view complaint: a locked, non-planning question's own sent answer
+// shows exactly once (Answered:), never also as a turn -- the duplicate
+// bug ("answeredLocked prints the sent answer, and sentReplies prints it
+// again"), fixed by views.go's buildThreadQuestion never adding an answer
+// row to Turns outside a planning conversation.
+func TestLockedQuestionHasNoDuplicateAnswerLine(t *testing.T) {
+	t.Parallel()
+	got := renderQuestionGroup(t, ThreadRow{
+		ID: 1,
+		Question: &ThreadQuestion{
+			Key: "Q1", Title: testApprovePlanTitle, StateLabel: "answered",
+			BodyHTML: emptyBodyHTML, MessageCount: 1,
+			Interactive: false, AnsweredHTML: textComponent("hello, world"),
+		},
+	})
+	if n := strings.Count(got, "hello, world"); n != 1 {
+		t.Errorf("rendered question group shows the sent answer %d times, want 1; got:\n%s", n, got)
+	}
+}
+
+// TestRecommendedKeyMapsToChipNumber proves design section 22.7 item 3, the
+// owner's locked-view complaint "Recommended: a:" not matching the option
+// numbers: a recommendation whose text opens with a known option's key
+// maps to that option's own chip number and text, and a recommendation
+// that does not open with a key, or names no option, renders unchanged.
+func TestRecommendedKeyMapsToChipNumber(t *testing.T) {
+	t.Parallel()
+	options := []ThreadOption{{Key: "a", Text: "ReadBuildInfo only"}, {Key: "b", Text: "zing plus version"}}
+
+	for _, tc := range []struct {
+		name, text, want string
+	}{
+		{"a bare key maps to its chip number and text", "a", "1. ReadBuildInfo only."},
+		{"a colon-separated key keeps the rest as markdown", "b: zing plus version", "2. zing plus version. zing plus version"},
+		{"a key the options do not name renders unchanged", "c: unknown", "c: unknown"},
+		{"text with no leading key renders unchanged", "ReadBuildInfo seems simplest", "ReadBuildInfo seems simplest"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := RecommendedDisplayText(tc.text, options); got != tc.want {
+				t.Errorf("RecommendedDisplayText(%q) = %q, want %q", tc.text, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestTurnsRenderMarkdown proves the owner's locked-view complaint "raw
+// backticks in option chips and the Feed": a turn's own body is rendered
+// through this package's templ.Component contract (views.go's buildTurns
+// calls console.Render, the markdown path), so questionGroup only ever
+// writes out whatever that component renders -- never the raw markdown
+// string -- for every turn, regardless of kind.
+func TestTurnsRenderMarkdown(t *testing.T) {
+	t.Parallel()
+	got := renderQuestionGroup(t, ThreadRow{
+		ID: 1,
+		Question: &ThreadQuestion{
+			Key: "Q1", Title: testApprovePlanTitle, StateLabel: testWaitingOnYou,
+			BodyHTML: emptyBodyHTML, MessageCount: 2, Interactive: true,
+			Turns: []Turn{{Author: testYouAuthor, BodyHTML: textComponent("<code>zing version</code>")}},
+		},
+	})
+	if !strings.Contains(got, "<code>zing version</code>") {
+		t.Errorf("rendered question group lost the turn's own rendered markdown; got:\n%s", got)
+	}
+}
+
+// TestNoReviseNoteOnPlanningQuestion proves a planning question never shows
+// D30's reviseNote ("Answered. You can change this..."): Revisable is
+// always false for a planning question (views.go's buildThreadQuestion),
+// since D31 never sets state=answered (section 22.3) -- a planning
+// question is only ever open or settled, with its own pill and settled
+// line in place of D30's answered/revisable rendering.
+func TestNoReviseNoteOnPlanningQuestion(t *testing.T) {
+	t.Parallel()
+	got := renderQuestionGroup(t, ThreadRow{
+		ID: 1,
+		Question: &ThreadQuestion{
+			Key: "Q1", Title: testApprovePlanTitle, StateLabel: "your turn",
+			BodyHTML: emptyBodyHTML, MessageCount: 1,
+			Interactive: true, Revisable: false,
+		},
+	})
+	if strings.Contains(got, "q-revisable") {
+		t.Errorf("rendered question group shows the revise note on a planning question; got:\n%s", got)
+	}
 }

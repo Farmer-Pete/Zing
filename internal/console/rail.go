@@ -180,10 +180,37 @@ func (c *console) buildArtifactsRail(ctx context.Context, ticketID int64) ([]tem
 			slot.Present = true
 			slot.Version = a.Version
 			slot.PayloadText = prettyPayload(a.Payload)
+			if def.Type == planArtifactType {
+				rendered, err := c.renderPlanSlot(ctx, ticketID, a.Payload)
+				if err != nil {
+					return nil, err
+				}
+				slot.RenderedHTML = rendered
+			}
 		}
 		slots = append(slots, slot)
 	}
 	return slots, nil
+}
+
+// renderPlanSlot decodes a "plan" artifact's payload and renders it through
+// the same plan renderer the gate's own context region uses (bug fix 16:
+// the rail showed this slot as raw indented JSON, unreadable next to the
+// gate's own fully rendered plan). A malformed payload is unreachable in
+// practice -- every stored artifact already passed InsertArtifact's schema
+// validation -- but is reported rather than silently falling back to raw
+// JSON, the same strictness loadPlan (views.go) already applies to this
+// exact payload shape.
+func (c *console) renderPlanSlot(ctx context.Context, ticketID int64, payload json.RawMessage) (templ.Component, error) {
+	var plan response.Plan
+	if err := json.Unmarshal(payload, &plan); err != nil {
+		return nil, fmt.Errorf("console: rail: unmarshal plan artifact for ticket %d: %w", ticketID, err)
+	}
+	events, err := c.store.FileEvents(ctx, ticketID)
+	if err != nil {
+		return nil, fmt.Errorf("console: rail: file events for ticket %d: %w", ticketID, err)
+	}
+	return RenderPlan(plan, events)
 }
 
 // prettyPayload indents raw's JSON for the artifact disclosure's <pre>

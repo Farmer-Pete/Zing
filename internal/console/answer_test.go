@@ -203,8 +203,8 @@ func TestSend_SucceedsThenConflictsWhenEmpty(t *testing.T) {
 	if sendResp.StatusCode != http.StatusOK {
 		t.Fatalf("first POST /send status = %d, want 200", sendResp.StatusCode)
 	}
-	if got := string(sendRespBody); got != "Sent 1 answer." {
-		t.Errorf("first POST /send body = %q, want %q", got, "Sent 1 answer.")
+	if got := string(sendRespBody); got != "Sent 1 message." {
+		t.Errorf("first POST /send body = %q, want %q", got, "Sent 1 message.")
 	}
 
 	ticket, err := s.GetTicket(t.Context(), ticketID)

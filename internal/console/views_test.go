@@ -183,6 +183,28 @@ func TestFeedRendersStateAndAnswerContentNotBlank(t *testing.T) {
 	}
 }
 
+// TestFeedRendersMarkdown proves the bug fix: raw backticks in the Feed
+// (design section 22.7's owner-reported locked-view complaint) --
+// displayFeedMessages now runs each row's decoded Body through the same
+// Render path the Thread view's own turns use (views.go's FeedRow), so a
+// backtick renders as <code>, not a literal backtick.
+func TestFeedRendersMarkdown(t *testing.T) {
+	t.Parallel()
+	s := newConsoleTestStore(t)
+	ticketID := seedTicket(t, s, "f#4", "Feed markdown ticket")
+	seedUnreadUpdate(t, s, ticketID, "run `zing version` to check")
+
+	srv := newTestServer(t, s, bus.New(), nil, newTestLogHandler(t))
+	main := mainFrame(t, srv.URL, "feed", 0, 0)
+
+	if !strings.Contains(main, "<code>zing version</code>") {
+		t.Errorf("feed did not render the backtick span as code; got:\n%s", main)
+	}
+	if strings.Contains(main, "`zing version`") {
+		t.Errorf("feed still shows the raw backticks; got:\n%s", main)
+	}
+}
+
 // TestProjectScopesAndOrdersByTrackerRef proves Project shows only the
 // requested project's tickets, ordered by tracker_ref then id, regardless
 // of insertion order (design section 6.5, 7.2), and that a ticket from a
@@ -424,9 +446,12 @@ func TestThreadExcludesDraftRows(t *testing.T) {
 // Payload, since AnswerPayload messages never carry a Body: this is the
 // "pick then send" path -- SaveDraft's option mode (what a fixed chip
 // activation posts), then SendBatch -- rendering something visible, not
-// the blank row the bug left behind. As of bug fix 10, that something is
-// nested inside the question's own block (its locked note and its own
-// "You: " line), never a second, detached "answer you" card.
+// the blank row the bug left behind. As of D31-5, this question (no
+// planning run) shows that pick exactly once, as its own locked note: the
+// duplicate "Answered:" plus "You:" the owner reported (bug fix 10 used to
+// also format the very same answer into a turn) is gone, since an answer
+// row is a turn only inside a planning conversation (views.go's
+// turnContent).
 func TestThreadRendersSentAnswerFromPayload(t *testing.T) {
 	t.Parallel()
 	s := newConsoleTestStore(t)
@@ -446,15 +471,11 @@ func TestThreadRendersSentAnswerFromPayload(t *testing.T) {
 	srv := newTestServer(t, s, bus.New(), nil, newTestLogHandler(t))
 	main := mainFrame(t, srv.URL, "thread", ticketID, 0)
 
-	// The sent answer's chosen option shows nested in the question's own
-	// block twice over (bug fix 10): once as its locked note's plain text,
-	// and once as its own "You: " line, matching the option's text rather
-	// than answerLine's bare "Option: b" the old detached card showed.
-	if !strings.Contains(main, `<p class="q-answered">Answered: hello, world</p>`) {
+	if !strings.Contains(main, `class="q-answered"`) || !strings.Contains(main, "Answered:") || !strings.Contains(main, "hello, world") {
 		t.Errorf("thread frame missing the sent answer's locked note; got:\n%s", main)
 	}
-	if !strings.Contains(main, `<p class="q-sent-reply">You: hello, world</p>`) {
-		t.Errorf("thread frame missing the sent answer's own nested line; got:\n%s", main)
+	if strings.Contains(main, "q-turns") {
+		t.Errorf("thread frame still shows the sent answer a second time as a turn (the duplicate bug); got:\n%s", main)
 	}
 	if strings.Contains(main, "message-answer") {
 		t.Errorf("thread frame still renders the sent answer as its own detached card; got:\n%s", main)
