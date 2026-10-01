@@ -1,3 +1,4 @@
 <zing job="respond" outcome="ok">
+  <thread id="t121a2150523f6fa7" action="fix">Validate the input before using it.</thread>
   <thread id="t9d07af1e65f013d5" action="reply">Thanks for flagging this -- fixed as described.</thread>
 </zing>

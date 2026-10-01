@@ -1,47 +1,63 @@
 // live_ship_test.go is the opt-in live harness for the real shipping state
-// machine's own PUBLISH and POLL (PKG9-PLAN.md section 8, 19.4 task 9): the
-// one place this repository proves a real pull request, pushed and polled
-// against real GitHub, rather than the scripted shipGitHub double every
-// other test in internal/job drives.
+// machine's own PUBLISH, POLL, RESPOND, APPLY, the ready flip, and MERGE
+// (PKG9-PLAN.md section 8, 9, 19.4 task 9, 19.5 task 10): the one place
+// this repository proves a real pull request, pushed, reviewed, answered,
+// and merged against real GitHub, rather than the scripted shipGitHub
+// double every other test in internal/job drives.
 //
 // TestLiveShip pushes branches and opens pull requests on the owner's own
 // scratch repository (D2, Q21): Farmer-Pete/zing-sandbox, a public repo
-// whose main is protected by a ruleset requiring the "ci" check from a
-// GitHub Actions workflow (app 15368) that runs "go vet ./... && go test
-// ./...". It never runs by default or in CI: it checks ZING_LIVE_GITHUB and
-// ZING_LIVE_REPO itself and skips unless both are set, matching this
-// milestone's own real-GitHub gate (distinct from ZING_LIVE_CLI, which
-// gates a real claude/codex CLI call -- this harness's own fix run uses the
-// fake runtime, never a real model, so it needs no CLI token at all, only a
-// real GitHub one). Run it explicitly, deliberately:
+// whose main is protected by a ruleset requiring a pull request plus the
+// "ci" check from a GitHub Actions workflow (app 15368) that runs
+// "go vet ./... && go test ./...". It never runs by default or in CI: it
+// checks ZING_LIVE_GITHUB and ZING_LIVE_REPO itself and skips unless both
+// are set (the M3 leg's own gate: PUBLISH and the ci_log fix run on the
+// fake runtime, never a real model, so that leg alone needs no CLI token,
+// only a real GitHub one); the M4 leg added here also needs a real claude
+// CLI call for RESPOND, so it additionally checks ZING_LIVE_CLI through
+// liveBuildSkipReason, the same gate TestLiveReview reuses, and so only
+// runs on macOS (the readonly sandbox is darwin-only). Run it explicitly,
+// deliberately, with every gate open:
 //
-//	ZING_LIVE_GITHUB=1 ZING_LIVE_REPO=Farmer-Pete/zing-sandbox \
+//	ZING_LIVE_GITHUB=1 ZING_LIVE_REPO=Farmer-Pete/zing-sandbox ZING_LIVE_CLI=1 \
 //	  go test ./cmd/zing -run TestLiveShip -v -count=1 -timeout 20m
 //
 // It reads the GitHub token through the config model (liveShipGitHubToken,
-// the same way serve does), never an environment variable, and never prints
-// or logs it. The local clone defaults to ~/Code/personal/<repo>, the
+// the same way serve does) and the claude token through liveClaudeOAuthToken
+// (live_build_test.go), never an environment variable, and never prints or
+// logs either. The local clone defaults to ~/Code/personal/<repo>, the
 // layout this harness's own owner uses; ZING_LIVE_REPO_PATH overrides it.
 //
-// What it proves, in order (design section 8.1 to 8.6): PUBLISH pushes a
-// zing/<id>-<slug> branch and opens a draft pull request with the section
-// 8.10 body, and posts one tracker PR-link comment; POLL then sees the real
-// Actions run go red on a commit this harness deliberately breaks, writes a
-// ci_log fix request carrying the real log tail, drives that fix to landing
-// through fix.go's own DriveFix (job.Registry()["shipping"], the fake
-// runtime scripting the repair under cmd/zing/testdata/live-ship/), and
-// POLL pushes the fix and polls again until the real Actions run goes
-// green. M3 builds no ready flip or merge (design section 8.5 rows 8 and 9
-// are M4's), so green CI only ever leaves the ticket polling: the test
-// stops there, asserting the ticket is still "shipping" and not waiting on
-// a merge question, then closes the pull request and deletes the branch in
-// t.Cleanup so the sandbox repository stays clean for the next run.
+// What it proves, in order (design section 8.1 to 8.9, 9.2 to 9.4): PUBLISH
+// pushes a zing/<id>-<slug> branch and opens a draft pull request with the
+// section 8.10 body, and posts one tracker PR-link comment; POLL then sees
+// the real Actions run go red on a commit this harness deliberately breaks,
+// writes a ci_log fix request carrying the real log tail, drives that fix
+// to landing through fix.go's own DriveFix (job.Registry()["shipping"], the
+// fake runtime scripting the repair under cmd/zing/testdata/live-ship/),
+// and POLL pushes the fix and polls again until the real Actions run goes
+// green. The owner's own token then posts one plain pull request review
+// comment on the fixed line -- no "<!-- zing:" marker, so design section
+// 9.1's own classifyThreads must call it actionable on its own -- and POLL
+// starts a respond batch; RESPOND runs for real, on the pinned claude CLI
+// under the readonly sandbox profile (machine.toml jobs.respond, design
+// D15), and APPLY posts the disclosed reply (D10) and resolves the thread;
+// POLL then marks the pull request ready once CI and every thread read
+// clean (row 8), asks the merge question (row 9), this harness answers
+// "Merge now" the way AnswerQuestion does for a console click, and MERGE
+// merges for real through the sandbox ruleset -- the next POLL reads the
+// pull request merged and reaches done, posting the done comment and
+// closing the tracker issue (design section 8.6). t.Cleanup closes the
+// pull request and deletes the branch, both already safe no-ops once the
+// merge has done so itself, so the sandbox repository stays clean for the
+// next run either way.
 package main
 
 import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -78,6 +94,42 @@ const liveShipPollWait = 15 * time.Second
 // the first (deliberately broken) commit's CI to go red and the wait for
 // the fix commit's CI to go green.
 const liveShipDeadline = 15 * time.Minute
+
+// liveShipM4Deadline bounds the M4 leg this file adds (PKG9-PLAN.md section
+// 19.5 task 10): one real claude call (RESPOND) plus a handful of pure
+// GitHub reads and writes (APPLY, the ready flip, MERGE), none of which
+// waits on a real Actions run the way the M3 leg's own liveShipDeadline
+// does, so five minutes is generous.
+const liveShipM4Deadline = 5 * time.Minute
+
+// liveShipM4MaxTicks bounds the M4 leg's own handler-call loop: RESPOND's
+// first turn, APPLY, RE-REQUEST (a no-op here), the ready flip, the merge
+// question, MERGE-ANSWER, MERGE itself, and DONE is eight ticks; the
+// headroom also covers one RESPOND coverage resume, should the real model
+// need it, and catches a stuck handler instead of hanging the test.
+const liveShipM4MaxTicks = 20
+
+// liveShipM4TickWait is how long the M4 leg sleeps between two handler
+// ticks: short, since nothing in this leg waits on a real Actions run, but
+// long enough for GitHub's GraphQL review-thread read to catch up with a
+// write this harness or APPLY just made (eventual consistency), and to
+// stay polite to the API.
+const liveShipM4TickWait = 3 * time.Second
+
+// liveShipReviewCommentBody is the one plain pull request review comment
+// this harness posts with the owner's own token, deliberately carrying no
+// "<!-- zing:" marker (PKG9-PLAN.md section 19.5 task 10): design section
+// 9.1's own classifyThreads must call this actionable on its own, and a
+// genuine question (not a requested code change) is what should lead the
+// real respond prompt to choose "reply" over "fix" or "addressed".
+const liveShipReviewCommentBody = "Why build the greeting with string concatenation here instead of fmt.Sprintf?"
+
+// liveShipReviewCommentLine is the liveGreetGoFilename line this harness
+// comments on: liveShipBrokenGreetGo's own return statement, the one line
+// breakSHA actually changes, so it is unambiguously part of that commit's
+// own diff (PullRequestsService.CreateComment, go-github v92, needs the
+// line to be part of the diff at CommitID).
+const liveShipReviewCommentLine = 6
 
 // liveShipGreetGo is Farmer-Pete/zing-sandbox's own greet.go, exactly as
 // committed (00d3fa1): the content TestLiveShip's own fix lands back,
@@ -157,11 +209,11 @@ func TestLiveShipFixtureIsValid(t *testing.T) {
 }
 
 // liveShipSkipReason reports why TestLiveShip would skip given
-// ZING_LIVE_GITHUB and ZING_LIVE_REPO, or "" to run it for real. Distinct
-// from liveBuildSkipReason's own ZING_LIVE_CLI gate (see the package doc
-// comment): this harness's fix run never calls a real claude or codex CLI,
-// so it needs no CLI gate and no darwin-only restriction, only a real
-// GitHub token and a repository to push to.
+// ZING_LIVE_GITHUB and ZING_LIVE_REPO, or "" to run it for real. This is the
+// M3 leg's own gate alone: TestLiveShip also checks liveBuildSkipReason
+// (ZING_LIVE_CLI, darwin-only) separately, since the M4 leg this file adds
+// (RESPOND) is the one call here that reaches a real claude CLI; PUBLISH,
+// the ci_log fix, and POLL never do.
 func liveShipSkipReason(liveGitHub, repo string) string {
 	if liveGitHub != "1" {
 		return "set ZING_LIVE_GITHUB=1 to run the live shipping harness against a real GitHub repository"
@@ -407,12 +459,28 @@ type liveShipDeps struct {
 // so rt is always wired in, exactly as shipClaim (internal/job/shipping_test.go)
 // wires its own fake runtime on every claim regardless of which step the
 // coming tick will actually take.
-func liveShipClaim(t *testing.T, d liveShipDeps, ticketID int64, owner string, expires time.Time, rt runtime.Runtime, cmds job.CommandRunner) job.Deps {
+// sandboxes and requireSandbox let the M3 and M4 legs below share this one
+// claim helper while asking for different sandboxing: the M3 legs
+// (PUBLISH, the red/green polls, the ci_log fix driver) run the fake
+// runtime unsandboxed (sandbox.OffSet(), false), the same as before this
+// parameter existed; the M4 leg's RESPOND call is a real claude CLI run
+// that must go through the real readonly profile (sandbox.Set{ReadOnly:
+// ro}, true, design D4, D15), the way TestLiveReview's own deps do.
+// dataDir is the job.Deps.DataDir this claim uses: a fresh t.TempDir() when
+// empty, the same as before this parameter existed, or the caller's own
+// directory when it needs one DataDir held constant across several claims
+// -- the M4 leg's RESPOND run below does, since sandbox.LoadProfile bakes
+// its own dataDir argument straight into the rendered seatbelt profile
+// text, so a run under any other DataDir would be denied by it.
+func liveShipClaim(t *testing.T, d liveShipDeps, ticketID int64, owner string, expires time.Time, rt runtime.Runtime, cmds job.CommandRunner, sandboxes sandbox.Set, requireSandbox bool, dataDir string) job.Deps {
 	t.Helper()
 	ctx := t.Context()
 	claimed, err := d.store.Claim(ctx, ticketID, owner, expires)
 	if err != nil || !claimed {
 		t.Fatalf("liveShipClaim: claim %s: claimed=%v err=%v", owner, claimed, err)
+	}
+	if dataDir == "" {
+		dataDir = t.TempDir()
 	}
 
 	set, err := runtime.NewSet(map[string]runtime.Runtime{runtimeNameClaude: rt, runtimeNameCodex: rt, runtimeNameFake: rt})
@@ -426,21 +494,21 @@ func liveShipClaim(t *testing.T, d liveShipDeps, ticketID int64, owner string, e
 		Reserve: func(ctx context.Context, tID int64, su store.SessionUpsert, seed store.RunSeed) (store.Reserved, error) {
 			return d.store.Reserve(ctx, tID, owner, expires, su, seed)
 		},
-		Sandboxes: sandbox.OffSet(), RequireSandbox: false,
+		Sandboxes: sandboxes, RequireSandbox: requireSandbox,
 		Commands: cmds,
-		// Threads is filled from the same *orchestrator.GitHubClient as
-		// PullRequests and Checks, the way serve.go's own buildJobProjects
-		// fills every job.Project field from its one shared client
-		// (PKG9-PLAN.md section 10.3): since M4 task 4, POLL reads
+		// Threads and Flips are filled from the same *orchestrator.GitHubClient
+		// as PullRequests and Checks, the way serve.go's own buildJobProjects
+		// fills every job.Project field from its one shared client (PKG9-
+		// PLAN.md section 10.3): since M4 task 4, POLL reads
 		// Project.Threads.ListThreads and Viewer on every poll (design
-		// section 8.3 step 5), so a Project missing it would panic on a nil
-		// interface the first time POLL runs. Flips is not filled here: POLL
-		// does not call it yet (M4 task 7 wires MarkReady/ConvertToDraft).
+		// section 8.3 step 5), and since M4 task 7 it calls Project.Flips.MarkReady
+		// and ConvertToDraft (row 3, row 8), so a Project missing either would
+		// panic on a nil interface the first time POLL runs them.
 		Projects: map[int64]job.Project{d.projectID: {
 			Orch: d.orch, RepoGit: d.repoGit, TestCmd: liveShipTestCmd, LintCmd: liveShipLintCmd,
-			Owner: d.owner, Repo: d.repo, PullRequests: d.gh, Checks: d.gh, Threads: d.gh,
+			Owner: d.owner, Repo: d.repo, PullRequests: d.gh, Checks: d.gh, Threads: d.gh, Flips: d.gh,
 		}},
-		DataDir: t.TempDir(), LensesParallel: 7,
+		DataDir: dataDir, LensesParallel: 7,
 		Tracker: d.tracker,
 	}
 }
@@ -487,6 +555,40 @@ func liveShipHasMessagePrefix(msgs []store.Message, prefix string) (store.Messag
 	return store.Message{}, false
 }
 
+// liveShipAnswerMergeIfAsked answers ticketID's own open merge question
+// with "Merge now" (mergeOptions' own closed set, internal/job/shipping.go)
+// the moment POLL's row 9 asks it (design section 8.5, 8.8), the same real
+// write AnswerQuestion (internal/store/commit.go) makes for a console
+// click: this harness drives job.Registry() directly, with no console in
+// front of it, so nothing else would ever answer it. It reports whether it
+// found and answered one.
+func liveShipAnswerMergeIfAsked(t *testing.T, st *store.Store, ticketID int64) bool {
+	t.Helper()
+	open, err := st.QuestionsByState(t.Context(), ticketID, "open")
+	if err != nil {
+		t.Fatalf("liveShipAnswerMergeIfAsked: questions by state: %v", err)
+	}
+	for i := range open {
+		q := &open[i]
+		var payload response.QuestionPayload
+		if unmarshalErr := json.Unmarshal(q.Payload, &payload); unmarshalErr != nil {
+			t.Fatalf("liveShipAnswerMergeIfAsked: unmarshal question %d: %v", q.ID, unmarshalErr)
+		}
+		if payload.Kind != response.QuestionKindMerge {
+			continue
+		}
+		result, answerErr := st.AnswerQuestion(t.Context(), store.AnswerInput{TicketID: ticketID, QuestionID: q.ID, Option: "a"})
+		if answerErr != nil {
+			t.Fatalf("liveShipAnswerMergeIfAsked: answer question %d: %v", q.ID, answerErr)
+		}
+		if result.Conflict != "" {
+			t.Fatalf("liveShipAnswerMergeIfAsked: answer question %d: conflict %q", q.ID, result.Conflict)
+		}
+		return true
+	}
+	return false
+}
+
 // TestLiveShip is PKG9-PLAN.md section 19.4 task 9's own live harness: see
 // the package doc comment for what it proves and how to run it.
 func TestLiveShip(t *testing.T) {
@@ -494,6 +596,16 @@ func TestLiveShip(t *testing.T) {
 	if reason != "" {
 		t.Skip(reason)
 	}
+	// The M4 leg's RESPOND call is the one real claude CLI call this harness
+	// makes (design D15, machine.toml jobs.respond): gated the same way
+	// TestLiveReview gates its own ROUND call, so a run with ZING_LIVE_GITHUB
+	// and ZING_LIVE_REPO set but no ZING_LIVE_CLI skips before touching
+	// GitHub at all, rather than opening a pull request this harness could
+	// then never finish driving to done.
+	if reason := liveBuildSkipReason(os.Getenv("ZING_LIVE_CLI")); reason != "" {
+		t.Skip(reason)
+	}
+	oauthToken := liveClaudeOAuthToken(t)
 	repoSlug := os.Getenv("ZING_LIVE_REPO")
 	ghOwner, ghRepo, err := splitOwnerRepo(repoSlug)
 	if err != nil {
@@ -605,7 +717,7 @@ func TestLiveShip(t *testing.T) {
 
 	// ---- PUBLISH (design section 8.2) --------------------------------
 
-	publishDeps := liveShipClaim(t, deps, ticketID, "live-ship-publish", freshExpires(), fake, cmds)
+	publishDeps := liveShipClaim(t, deps, ticketID, "live-ship-publish", freshExpires(), fake, cmds, sandbox.OffSet(), false, "")
 	publishCommit, err := job.Registry()["shipping"].Run(t.Context(), ticket, publishDeps)
 	if err != nil {
 		t.Fatalf("PUBLISH: %v", err)
@@ -644,7 +756,7 @@ func TestLiveShip(t *testing.T) {
 			t.Fatalf("CI did not fail on the breaking commit %s within the %s deadline", breakSHA, liveShipDeadline)
 		}
 
-		pollDeps := liveShipClaim(t, deps, ticketID, "live-ship-poll-red", freshExpires(), fake, cmds)
+		pollDeps := liveShipClaim(t, deps, ticketID, "live-ship-poll-red", freshExpires(), fake, cmds, sandbox.OffSet(), false, "")
 		commit, runErr := job.Registry()["shipping"].Run(t.Context(), ticket, pollDeps)
 		if runErr != nil {
 			t.Fatalf("POLL while waiting for CI to fail: %v", runErr)
@@ -666,7 +778,7 @@ func TestLiveShip(t *testing.T) {
 
 	var landed bool
 	for i := range 4 {
-		fixDeps := liveShipClaim(t, deps, ticketID, fmt.Sprintf("live-ship-fix-%d", i), freshExpires(), fake, cmds)
+		fixDeps := liveShipClaim(t, deps, ticketID, fmt.Sprintf("live-ship-fix-%d", i), freshExpires(), fake, cmds, sandbox.OffSet(), false, "")
 		commit, runErr := job.Registry()["shipping"].Run(t.Context(), ticket, fixDeps)
 		if runErr != nil {
 			t.Fatalf("fix driver tick %d: %v", i, runErr)
@@ -702,7 +814,7 @@ func TestLiveShip(t *testing.T) {
 			t.Fatalf("CI did not go green on the fix commit %s within the overall %s deadline", fixSHA, liveShipDeadline)
 		}
 
-		pollDeps := liveShipClaim(t, deps, ticketID, "live-ship-poll-green", freshExpires(), fake, cmds)
+		pollDeps := liveShipClaim(t, deps, ticketID, "live-ship-poll-green", freshExpires(), fake, cmds, sandbox.OffSet(), false, "")
 		commit, runErr := job.Registry()["shipping"].Run(t.Context(), ticket, pollDeps)
 		if runErr != nil {
 			t.Fatalf("POLL after the fix: %v", runErr)
@@ -735,22 +847,144 @@ func TestLiveShip(t *testing.T) {
 		time.Sleep(liveShipPollWait)
 	}
 
-	// ---- M3's own stopping point: CI green, still polling (design section 8.5: rows 8 and 9 are M4's) ----
+	// ---- M3's own checkpoint: CI green, still shipping, not yet done ----
+
+	afterGreen, err := st.GetTicket(t.Context(), ticketID)
+	if err != nil {
+		t.Fatalf("get ticket after green CI: %v", err)
+	}
+	if afterGreen.State != stateShippingLiveConst {
+		t.Errorf("ticket state after green CI = %q, want still %q", afterGreen.State, stateShippingLiveConst)
+	}
+	if afterGreen.PRURL == nil || *afterGreen.PRURL != prURL {
+		t.Errorf("ticket pr_url after green CI = %v, want %q", afterGreen.PRURL, prURL)
+	}
+
+	// ---- M4: a real review comment, RESPOND, APPLY, the ready flip, and MERGE (design section 9, 8.5 rows 5 to 9) ----
+
+	viewerLogin, err := ghClient.Viewer(t.Context())
+	if err != nil {
+		t.Fatalf("viewer: %v", err)
+	}
+
+	posted, _, commentErr := rawGH.PullRequests.CreateComment(t.Context(), ghOwner, ghRepo, prNumber, github.CreatePullRequestCommentRequest{
+		Body: liveShipReviewCommentBody, CommitID: breakSHA, Path: liveGreetGoFilename,
+		Line: new(liveShipReviewCommentLine), Side: new("RIGHT"),
+	})
+	if commentErr != nil {
+		t.Fatalf("post review comment: %v", commentErr)
+	}
+	t.Logf("posted review comment %d on %s:%d at commit %s, no zing marker", posted.GetID(), liveGreetGoFilename, liveShipReviewCommentLine, breakSHA)
+	time.Sleep(liveShipM4TickWait) // let the GraphQL read of review threads catch up with the REST write above
+
+	// The readonly sandbox profile, built once and reused by every M4 tick
+	// below through the same respondDataDir and listener port, the way
+	// TestLiveReview's own ro is built once for its one ROUND call: unlike
+	// that harness, this one calls job.Registry()["shipping"].Run several
+	// times, but only the RESPOND tick among them ever actually reserves a
+	// sandboxed run (machine.toml jobs.respond.sandbox, D15); every other
+	// tick here (APPLY, the ready flip, RE-REQUEST, MERGE) makes no runtime
+	// call at all, so sharing this one profile and DataDir across all of
+	// them costs nothing and keeps the loop below to one claim shape.
+	var lc net.ListenConfig
+	ln, err := lc.Listen(t.Context(), "tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("reserve a console listener: %v", err)
+	}
+	defer ln.Close()
+	addr, ok := ln.Addr().(*net.TCPAddr)
+	if !ok {
+		t.Fatalf("unexpected listener address type %T", ln.Addr())
+	}
+	respondDataDir := t.TempDir()
+	readonlyProfile, err := zing.Assets.ReadFile("sandbox/readonly.sb")
+	if err != nil {
+		t.Fatalf("read embedded readonly sandbox profile: %v", err)
+	}
+	ro := sandbox.LoadProfile("readonly", readonlyProfile, respondDataDir, nil, addr.Port)
+	if !ro.Available() {
+		t.Fatalf("readonly sandbox did not load: %s", ro.Reason())
+	}
+	realClaude := runtime.NewClaude("", oauthToken)
+	m4Sandboxes := sandbox.Set{Build: sandbox.Off(), ReadOnly: ro, Judge: sandbox.NotLoaded()}
+
+	m4Deadline := time.Now().Add(liveShipM4Deadline)
+	for i := 0; ticket.State != "done"; i++ {
+		if time.Now().After(m4Deadline) {
+			t.Fatalf("the respond leg did not reach done within the %s deadline", liveShipM4Deadline)
+		}
+		if i >= liveShipM4MaxTicks {
+			t.Fatalf("the respond leg did not reach done within %d handler ticks", liveShipM4MaxTicks)
+		}
+
+		if answered := liveShipAnswerMergeIfAsked(t, st, ticketID); answered {
+			t.Log("answered the merge question: Merge now")
+		}
+
+		m4Deps := liveShipClaim(t, deps, ticketID, fmt.Sprintf("live-ship-m4-%d", i), freshExpires(), realClaude, cmds, m4Sandboxes, true, respondDataDir)
+		commit, runErr := job.Registry()["shipping"].Run(t.Context(), ticket, m4Deps)
+		if runErr != nil {
+			t.Fatalf("M4 tick %d: %v", i, runErr)
+		}
+		if commit.Escalation != nil {
+			t.Fatalf("M4 tick %d escalated: %+v", i, commit.Escalation.Payload)
+		}
+		for _, msg := range commit.Messages {
+			t.Logf("M4 tick %d marker: %s", i, liveShipFirstLine(msg.Body))
+		}
+		ticket = liveShipApply(t, st, ticket, commit)
+		time.Sleep(liveShipM4TickWait)
+	}
+
+	// ---- final state: done, the disclosed reply posted for real, the thread resolved ----
 
 	final, err := st.GetTicket(t.Context(), ticketID)
 	if err != nil {
 		t.Fatalf("final get ticket: %v", err)
 	}
-	if final.State != stateShippingLiveConst {
-		t.Errorf("final ticket state = %q, want still %q", final.State, stateShippingLiveConst)
+	if final.State != "done" {
+		t.Errorf("final ticket state = %q, want %q", final.State, "done")
 	}
 	if final.WaitingOn != nil {
-		t.Errorf("final ticket waiting_on = %q, want nil (still polling, not waiting on a merge question)", *final.WaitingOn)
+		t.Errorf("final ticket waiting_on = %q, want nil", *final.WaitingOn)
 	}
 	if final.PRURL == nil || *final.PRURL != prURL {
 		t.Errorf("final ticket pr_url = %v, want %q", final.PRURL, prURL)
 	}
-	if deps.tracker.doneCount != 0 {
-		t.Errorf("tracker PostDone calls = %d, want 0 (M3 never reaches done)", deps.tracker.doneCount)
+	if deps.tracker.doneCount != 1 {
+		t.Errorf("tracker PostDone calls = %d, want 1", deps.tracker.doneCount)
+	}
+
+	threads, err := ghClient.ListThreads(t.Context(), ghOwner, ghRepo, prNumber)
+	if err != nil {
+		t.Fatalf("list threads after done: %v", err)
+	}
+	wantPrefix := "Zing (an AI agent) replying on behalf of @" + viewerLogin + ":"
+	var sawDisclosedReply, sawResolved bool
+	for _, th := range threads {
+		for _, c := range th.Comments {
+			if c.Author != viewerLogin || !strings.HasPrefix(c.Body, wantPrefix) {
+				continue
+			}
+			sawDisclosedReply = true
+			if th.IsResolved {
+				sawResolved = true
+			}
+			t.Logf("Zing's own reply: %s", liveShipFirstLine(c.Body))
+		}
+	}
+	if !sawDisclosedReply {
+		t.Errorf("no review thread comment from %s starts with the disclosure prefix %q", viewerLogin, wantPrefix)
+	}
+	if !sawResolved {
+		t.Error("the review thread holding Zing's disclosed reply is not resolved")
+	}
+
+	pr, _, prErr := rawGH.PullRequests.Get(t.Context(), ghOwner, ghRepo, prNumber)
+	if prErr != nil {
+		t.Fatalf("get pull request after done: %v", prErr)
+	}
+	if !pr.GetMerged() {
+		t.Error("pull request is not merged after the ticket reached done")
 	}
 }

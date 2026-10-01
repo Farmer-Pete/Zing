@@ -1,6 +1,8 @@
 package main
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"runtime"
 	"strings"
 	"testing"
@@ -24,15 +26,47 @@ func TestRunSelftest_ReturnsZeroOnEmptyMachine(t *testing.T) {
 // TestSelftestE2E_TicketReachesDoneWithOneQuestionAnswered isolates the
 // section 11 end-to-end suite from the rest of selftest, so a failure here
 // names the e2e path specifically rather than surfacing only as
-// runSelftest's generic non-zero exit. The path it drives now runs all the
-// way through shipping too (PKG9-PLAN.md section 19.4 task 8):
-// selftestShipGH scripts a CI failure, a landed ci_log fix, the push that
-// follows, and the merge GitHub reports once the pushed commit's checks
-// read green, verified by verifySelftestShipCILogFixedThenMerged.
+// runSelftest's generic non-zero exit. The path it drives runs all the way
+// through shipping (PKG9-PLAN.md section 19.4 task 8): selftestShipGH
+// scripts a CI failure, a landed ci_log fix, and the push that follows; and
+// through respond (section 19.5 task 10): two seeded review threads, one
+// answered with a disclosed reply and resolved by APPLY, the other
+// collected into a fix request the shared fix driver lands and FIX-REPLIES
+// then closes -- before row 8's ready flip, the merge question, "Merge
+// now", and the real Merge GitHub reports once every check and thread
+// reads clean, verified by verifySelftestShipCILogFixedThenMerged,
+// verifySelftestRespondAnsweredThenReady, and
+// verifySelftestRespondDisclosedReply.
 func TestSelftestE2E_TicketReachesDoneWithOneQuestionAnswered(t *testing.T) {
 	t.Parallel()
 	if err := selftestE2E(t.Context()); err != nil {
 		t.Errorf("selftestE2E() = %v, want nil", err)
+	}
+}
+
+// TestSelftestShipThreadTIDsMatchFixture proves selftestShipReplyThreadID
+// and selftestShipFixThreadID (cmd/zing/selftest.go) still hash, by
+// threadrules.go's own tid function (sha256 of the raw id, "t" plus its
+// first 16 hex characters, PKG9-PLAN.md section 9.1), to the two thread ids
+// fixtures/scripts/respond/1/1.xml answers: a renamed raw id here would
+// otherwise surface only as a cryptic RESPOND coverage failure deep inside
+// the e2e, not at the seam that actually broke.
+func TestSelftestShipThreadTIDsMatchFixture(t *testing.T) {
+	t.Parallel()
+	tid := func(rawID string) string {
+		sum := sha256.Sum256([]byte(rawID))
+		return "t" + hex.EncodeToString(sum[:])[:16]
+	}
+	tests := []struct {
+		rawID, wantTID string
+	}{
+		{selftestShipReplyThreadID, "t9d07af1e65f013d5"},
+		{selftestShipFixThreadID, "t121a2150523f6fa7"},
+	}
+	for _, tt := range tests {
+		if got := tid(tt.rawID); got != tt.wantTID {
+			t.Errorf("tid(%q) = %q, want %q (fixtures/scripts/respond/1/1.xml answers %q)", tt.rawID, got, tt.wantTID, tt.wantTID)
+		}
 	}
 }
 

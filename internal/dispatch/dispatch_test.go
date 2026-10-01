@@ -594,10 +594,46 @@ type dispatchShipGitHub struct {
 	nextNum     int
 	redSHA      string
 	callsForSHA map[string]int
+	threads     []orchestrator.Thread
+	replies     map[string]string // raw thread id -> the body ReplyToThread posted
 }
 
+// dispatchShipReplyThreadID and dispatchShipFixThreadID are the two review
+// threads newDispatchShipGitHub seeds (PKG9-PLAN.md section 19.5 task 10),
+// cmd/zing/selftest.go's own selftestShipReplyThreadID and
+// selftestShipFixThreadID mirrored at this package's own cut point: one a
+// plain "reply" fixtures/scripts/respond/1/1.xml answers, the other a
+// "fix" it collects into a consolidated fix request (design section 9.3
+// step 3), so this test walks RESPOND, APPLY, the shared fix driver, and
+// FIX-REPLIES (design section 9.4), not only PUBLISH and the ci_log fix
+// M3 task 8 already proved here.
+const (
+	dispatchShipReplyThreadID = "RT_thread_1"
+	dispatchShipFixThreadID   = "RT_thread_2"
+	dispatchShipGHViewerLogin = "zing-dispatch-test-bot"
+)
+
 func newDispatchShipGitHub(remoteDir string) *dispatchShipGitHub {
-	return &dispatchShipGitHub{remoteDir: remoteDir, callsForSHA: map[string]int{}}
+	commentAt := time.Now().UTC()
+	return &dispatchShipGitHub{
+		remoteDir: remoteDir, callsForSHA: map[string]int{}, replies: make(map[string]string),
+		threads: []orchestrator.Thread{
+			{
+				ID: dispatchShipReplyThreadID, Path: "cmd/zing/main.go", Line: 1,
+				Comments: []orchestrator.ThreadComment{{
+					ID: "c1", Author: "reviewer-bot", Body: "What does this line do?",
+					CreatedAt: commentAt, UpdatedAt: commentAt,
+				}},
+			},
+			{
+				ID: dispatchShipFixThreadID, Path: "hello.txt", Line: 1,
+				Comments: []orchestrator.ThreadComment{{
+					ID: "c2", Author: "reviewer-bot", Body: "Validate this before using it.",
+					CreatedAt: commentAt, UpdatedAt: commentAt,
+				}},
+			},
+		},
+	}
 }
 
 // headSHA reads branch's current commit straight off g's own real bare
@@ -661,10 +697,24 @@ func (g *dispatchShipGitHub) GetPR(ctx context.Context, _, _ string, _ int) (orc
 	g.mu.Lock()
 	g.callsForSHA[sha]++
 	n := g.callsForSHA[sha]
+	allResolved := true
+	for _, th := range g.threads {
+		if !th.IsResolved {
+			allResolved = false
+			break
+		}
+	}
 	g.mu.Unlock()
 	return orchestrator.PRState{
 		Number: pr.number, State: "open", Draft: true, HeadSHA: sha, BaseRef: pr.base,
-		Merged: sha != redSHA && n >= 2,
+		// allResolved gates the same synthesized merge the package doc
+		// comment on dispatchShipGitHub's own MarkReady/ConvertToDraft
+		// already describes (M3's "the owner merged once CI went green"
+		// shortcut): without it, a stray second GetPR call made while
+		// RESPOND, APPLY, or FIX-REPLIES are still working through the
+		// two seeded threads (M4 task 10) could push n to 2 and report
+		// merged before either thread is actually resolved.
+		Merged: sha != redSHA && n >= 2 && allResolved,
 	}, nil
 }
 
@@ -709,26 +759,51 @@ func (g *dispatchShipGitHub) ConvertToDraft(context.Context, string) error {
 	return nil
 }
 
-// ListThreads, ThreadCommentsContain, ReplyToThread, ResolveThread,
-// ListReviews, RequestReviewers, and Viewer give dispatchShipGitHub
-// job.ReviewThreads too (M4 task 4): this test's own fixture ticket never
-// opens a real review thread, so every read returns empty and every write
-// is unreachable, the same shape ListStatuses and JobLogTail above already
-// give POLL's other unused reads.
+// ListThreads, ThreadCommentsContain, ReplyToThread, and ResolveThread give
+// dispatchShipGitHub job.ReviewThreads too (M4 tasks 4, 10): this test's
+// own fixture ticket does open two real review threads
+// (newDispatchShipGitHub), so these four track and mutate real state the
+// same way GetPR's own callsForSHA bookkeeping does above, mirroring
+// cmd/zing/selftest.go's own selftestShipGitHub at this package's own cut
+// point.
 func (g *dispatchShipGitHub) ListThreads(context.Context, string, string, int) ([]orchestrator.Thread, error) {
-	return nil, nil
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	out := make([]orchestrator.Thread, len(g.threads))
+	copy(out, g.threads)
+	return out, nil
 }
 
-func (g *dispatchShipGitHub) ThreadCommentsContain(context.Context, string, string, string) (bool, error) {
-	return false, errors.New("dispatchShipGitHub: not implemented")
+func (g *dispatchShipGitHub) ThreadCommentsContain(_ context.Context, rawID, needle, _ string) (bool, error) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return strings.Contains(g.replies[rawID], needle), nil
 }
 
-func (g *dispatchShipGitHub) ReplyToThread(context.Context, string, string) error {
-	return errors.New("dispatchShipGitHub: not implemented")
+func (g *dispatchShipGitHub) ReplyToThread(_ context.Context, rawID, body string) error {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	i := slices.IndexFunc(g.threads, func(th orchestrator.Thread) bool { return th.ID == rawID })
+	if i < 0 {
+		return fmt.Errorf("dispatchShipGitHub: ReplyToThread: unknown thread %s", rawID)
+	}
+	g.replies[rawID] = body
+	now := time.Now().UTC()
+	g.threads[i].Comments = append(g.threads[i].Comments, orchestrator.ThreadComment{
+		ID: "zing-reply-" + rawID, Author: dispatchShipGHViewerLogin, Body: body, CreatedAt: now, UpdatedAt: now,
+	})
+	return nil
 }
 
-func (g *dispatchShipGitHub) ResolveThread(context.Context, string) error {
-	return errors.New("dispatchShipGitHub: not implemented")
+func (g *dispatchShipGitHub) ResolveThread(_ context.Context, rawID string) error {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	i := slices.IndexFunc(g.threads, func(th orchestrator.Thread) bool { return th.ID == rawID })
+	if i < 0 {
+		return fmt.Errorf("dispatchShipGitHub: ResolveThread: unknown thread %s", rawID)
+	}
+	g.threads[i].IsResolved = true
+	return nil
 }
 
 func (g *dispatchShipGitHub) ListReviews(context.Context, string, string, int) ([]orchestrator.Review, error) {
@@ -740,7 +815,7 @@ func (g *dispatchShipGitHub) RequestReviewers(context.Context, string, string, i
 }
 
 func (g *dispatchShipGitHub) Viewer(context.Context) (string, error) {
-	return "zing-dispatch-test-bot", nil
+	return dispatchShipGHViewerLogin, nil
 }
 
 var (
@@ -778,11 +853,16 @@ func (tr *dispatchShipTracker) PostDone(context.Context, int64, string, string) 
 var _ job.ShipTracker = (*dispatchShipTracker)(nil)
 
 // advanceShippingMaxCalls bounds advanceShipping's own handler-call loop:
-// PUBLISH, one failed POLL (fix request), RUN, CHECK-then-LAND, one POLL
-// that pushes, one POLL that reads CI green (idle), and one POLL that finds
-// the pull request merged is seven calls; the headroom catches a stuck
-// handler instead of hanging the test.
-const advanceShippingMaxCalls = 16
+// PUBLISH, one failed POLL (ci_log fix request), RUN, CHECK-then-LAND, one
+// POLL that pushes, one POLL that starts a respond batch once CI reads
+// green (design section 19.5 task 10's own two seeded threads), RESPOND,
+// APPLY (posts the plain reply and requests a fix for the other thread),
+// RUN, CHECK-then-LAND for that fix, one POLL that pushes it, one POLL for
+// FIX-REPLIES, one POLL for RE-REQUEST, one POLL that reads every check and
+// thread clean (ready, idle), and one POLL that finds the pull request
+// merged is sixteen calls; the headroom catches a stuck handler instead of
+// hanging the test.
+const advanceShippingMaxCalls = 24
 
 // advanceShipping drives the real shipping handler through as many calls as
 // it now takes to open a draft pull request, land a ci_log fix once GitHub
@@ -891,14 +971,23 @@ func TestShipCIFailThenFixThenMergeGoesDone(t *testing.T) {
 
 	bodies := judgeRoundMarkerBodies(t, s, ticketID)
 	var sawPROpened, sawFixRequested, sawFixLanded bool
+	var sawBatchStarted, sawThreadsRequested, sawRepliesPosted bool
+	landedCount := 0
 	for _, body := range bodies {
 		switch {
 		case strings.HasPrefix(body, "pr opened "):
 			sawPROpened = true
 		case strings.HasPrefix(body, "fix requested ci_log after run ") && sawPROpened:
 			sawFixRequested = true
-		case strings.HasPrefix(body, "fix landed ") && sawFixRequested && !sawFixLanded:
+		case strings.HasPrefix(body, "respond batch 1 started sha ") && sawFixRequested:
+			sawBatchStarted = true
+		case strings.HasPrefix(body, "fix requested threads after run ") && sawBatchStarted:
+			sawThreadsRequested = true
+		case strings.HasPrefix(body, "fix landed "):
+			landedCount++
 			sawFixLanded = true
+		case strings.HasPrefix(body, "fix replies posted ") && sawThreadsRequested && landedCount >= 2:
+			sawRepliesPosted = true
 		}
 	}
 	if !sawPROpened {
@@ -909,6 +998,31 @@ func TestShipCIFailThenFixThenMergeGoesDone(t *testing.T) {
 	}
 	if !sawFixLanded {
 		t.Error(`no "fix landed" marker after the ci_log fix request, want the fix to land`)
+	}
+	if !sawBatchStarted {
+		t.Error(`no "respond batch 1 started" marker after the ci_log fix, want POLL to start a respond batch once an actionable thread exists (PKG9-PLAN.md section 19.5 task 10)`)
+	}
+	if !sawThreadsRequested {
+		t.Error(`no "fix requested threads" marker after the respond batch started, want APPLY to collect the other thread into a fix request`)
+	}
+	if landedCount < 2 {
+		t.Errorf(`%d "fix landed" markers, want at least 2 (the ci_log fix and the threads fix)`, landedCount)
+	}
+	if !sawRepliesPosted {
+		t.Error(`no "fix replies posted" marker after the threads fix landed, want FIX-REPLIES to close the loop`)
+	}
+	reply, posted := gh.replies[dispatchShipReplyThreadID]
+	if !posted {
+		t.Error("no reply recorded for the review thread, want APPLY to post one")
+	}
+	wantPrefix := "Zing (an AI agent) replying on behalf of @" + dispatchShipGHViewerLogin + ":"
+	if !strings.HasPrefix(reply, wantPrefix) {
+		t.Errorf("posted reply = %q, want it to start with the disclosure prefix %q (design D10)", reply, wantPrefix)
+	}
+	for _, th := range gh.threads {
+		if !th.IsResolved {
+			t.Errorf("thread %s is still unresolved, want both seeded threads resolved by the time the ticket reaches done", th.ID)
+		}
 	}
 	if tr.dones != 1 {
 		t.Errorf("PostDone calls = %d, want 1", tr.dones)

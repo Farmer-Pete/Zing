@@ -90,6 +90,8 @@ type selftestShipGitHub struct {
 	redSHA    string
 	draft     bool
 	merged    bool
+	threads   []orchestrator.Thread
+	replies   map[string]string // raw thread id -> the body ReplyToThread posted
 }
 
 type selftestShipPR struct {
@@ -97,11 +99,57 @@ type selftestShipPR struct {
 	number          int
 }
 
+// selftestShipGHViewerLogin is the token owner Viewer reports for this
+// double, reused everywhere a thread comment needs an author (M4 task 10):
+// isZingReply (threadrules.go) and this suite's own verify step both
+// compare a comment's author against exactly this login.
+const selftestShipGHViewerLogin = "zing-selftest-bot"
+
+// selftestShipReplyThreadID and selftestShipFixThreadID are the two review
+// threads newSelftestShipGitHub seeds (M4 task 10, design section 19.5 task
+// 10): one a plain "reply" fixtures/scripts/respond/1/1.xml answers, the
+// other a "fix" it collects into a consolidated fix request (design section
+// 9.3 step 3), so this suite's one fake-runtime e2e walks RESPOND, APPLY,
+// the shared fix driver, and FIX-REPLIES (design section 9.4) in a single
+// pass, not only the one-reply shape M3's own worked example (13.3) shows.
+// Their own tids (threadrules.go's tid, sha256 of the raw id) are what
+// fixtures/scripts/respond/1/1.xml answers; computed once and asserted by
+// TestSelftestShipThreadTIDsMatchFixture so a renamed raw id here is caught
+// at test time, not by a cryptic "no script for respond/1/1.xml" failure.
+const (
+	selftestShipReplyThreadID = "RT_thread_1"
+	selftestShipFixThreadID   = "RT_thread_2"
+)
+
 // newSelftestShipGitHub returns a selftestShipGitHub reading branch heads
 // off remoteDir, the gitfixture bare origin selftestResumeE2E adds to the
-// fixture project (gitfixture.WithBareOrigin).
+// fixture project (gitfixture.WithBareOrigin), seeded with the two review
+// threads above: both unresolved, each with one comment from a reviewer
+// login other than selftestShipGHViewerLogin, so classifyThreads
+// (threadrules.go) counts both as actionable the first time POLL reads
+// them (design section 9.1).
 func newSelftestShipGitHub(remoteDir string) *selftestShipGitHub {
-	return &selftestShipGitHub{remoteDir: remoteDir}
+	commentAt := time.Now().UTC()
+	return &selftestShipGitHub{
+		remoteDir: remoteDir,
+		replies:   make(map[string]string),
+		threads: []orchestrator.Thread{
+			{
+				ID: selftestShipReplyThreadID, Path: "cmd/zing/main.go", Line: 1,
+				Comments: []orchestrator.ThreadComment{{
+					ID: "c1", Author: "reviewer-bot", Body: "What does this line do?",
+					CreatedAt: commentAt, UpdatedAt: commentAt,
+				}},
+			},
+			{
+				ID: selftestShipFixThreadID, Path: "hello.txt", Line: 1,
+				Comments: []orchestrator.ThreadComment{{
+					ID: "c2", Author: "reviewer-bot", Body: "Validate this before using it.",
+					CreatedAt: commentAt, UpdatedAt: commentAt,
+				}},
+			},
+		},
+	}
 }
 
 // headSHA reads branch's own current commit straight off g's real bare
@@ -224,26 +272,65 @@ func (g *selftestShipGitHub) ConvertToDraft(context.Context, string) error {
 	return nil
 }
 
-// ListThreads, ThreadCommentsContain, ReplyToThread, ResolveThread,
-// ListReviews, RequestReviewers, and Viewer give selftestShipGitHub
-// job.ReviewThreads too (M4 task 4): this suite's own fixture ticket never
-// opens a real review thread, so every GET returns empty and every write is
-// unreachable -- the same shape ListStatuses and JobLogTail above already
-// give POLL's other unused reads.
-func (*selftestShipGitHub) ListThreads(context.Context, string, string, int) ([]orchestrator.Thread, error) {
-	return nil, nil
+// ListThreads, ThreadCommentsContain, ReplyToThread, and ResolveThread give
+// selftestShipGitHub job.ReviewThreads too (M4 tasks 4, 10): unlike the
+// stub shape ListStatuses and JobLogTail above still give POLL's other
+// unused reads, this suite's own fixture ticket does open two real review
+// threads (newSelftestShipGitHub), so these four track and mutate real
+// state the same way draft and merged do above -- RESPOND, APPLY, and
+// FIX-REPLIES (design section 9.2 to 9.4) all read back what the others
+// wrote, not a canned answer.
+func (g *selftestShipGitHub) ListThreads(context.Context, string, string, int) ([]orchestrator.Thread, error) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	out := make([]orchestrator.Thread, len(g.threads))
+	copy(out, g.threads)
+	return out, nil
 }
 
-func (*selftestShipGitHub) ThreadCommentsContain(context.Context, string, string, string) (bool, error) {
-	return false, errors.New("selftestShipGitHub: not implemented")
+// ThreadCommentsContain reports whether a reply already posted to rawID
+// carries needle, the same idempotent marker check ReplyToThread's own real
+// GraphQL sibling makes (APPLY's and FIX-REPLIES' own guard, design
+// sections 9.3, 9.4): author is unchecked, since this double only ever
+// posts its own replies under selftestShipGHViewerLogin.
+func (g *selftestShipGitHub) ThreadCommentsContain(_ context.Context, rawID, needle, _ string) (bool, error) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return strings.Contains(g.replies[rawID], needle), nil
 }
 
-func (*selftestShipGitHub) ReplyToThread(context.Context, string, string) error {
-	return errors.New("selftestShipGitHub: not implemented")
+// ReplyToThread records body as rawID's own posted reply and appends it to
+// that thread's own comments, authored by selftestShipGHViewerLogin, so a
+// later ListThreads shows Zing's own reply as the thread's last comment the
+// same way a real GitHub reply would (design section 9.1's own leftover
+// class, had anything in this suite relied on it).
+func (g *selftestShipGitHub) ReplyToThread(_ context.Context, rawID, body string) error {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	i := slices.IndexFunc(g.threads, func(th orchestrator.Thread) bool { return th.ID == rawID })
+	if i < 0 {
+		return fmt.Errorf("selftestShipGitHub: ReplyToThread: unknown thread %s", rawID)
+	}
+	g.replies[rawID] = body
+	now := time.Now().UTC()
+	g.threads[i].Comments = append(g.threads[i].Comments, orchestrator.ThreadComment{
+		ID: "zing-reply-" + rawID, Author: selftestShipGHViewerLogin, Body: body, CreatedAt: now, UpdatedAt: now,
+	})
+	return nil
 }
 
-func (*selftestShipGitHub) ResolveThread(context.Context, string) error {
-	return errors.New("selftestShipGitHub: not implemented")
+// ResolveThread marks rawID resolved, so the next ListThreads a poll makes
+// no longer counts it against row 8's "zero unresolved threads" rule
+// (design section 8.5, 8.9).
+func (g *selftestShipGitHub) ResolveThread(_ context.Context, rawID string) error {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	i := slices.IndexFunc(g.threads, func(th orchestrator.Thread) bool { return th.ID == rawID })
+	if i < 0 {
+		return fmt.Errorf("selftestShipGitHub: ResolveThread: unknown thread %s", rawID)
+	}
+	g.threads[i].IsResolved = true
+	return nil
 }
 
 func (*selftestShipGitHub) ListReviews(context.Context, string, string, int) ([]orchestrator.Review, error) {
@@ -255,7 +342,7 @@ func (*selftestShipGitHub) RequestReviewers(context.Context, string, string, int
 }
 
 func (*selftestShipGitHub) Viewer(context.Context) (string, error) {
-	return "zing-selftest-bot", nil
+	return selftestShipGHViewerLogin, nil
 }
 
 // runSelftest proves the foundation on an empty machine: it migrates a fresh
@@ -763,6 +850,10 @@ func selftestResumeE2E(ctx context.Context) error {
 		closeStream()
 		return err
 	}
+	if err := verifySelftestRespondDisclosedReply(selftestShipGH); err != nil {
+		closeStream()
+		return err
+	}
 
 	// Poll (bounded, not a fixed sleep) until the live stream itself has
 	// shown every state transition, including "done": the ticket reaching
@@ -1225,8 +1316,16 @@ func verifySelftestE2E(ctx context.Context, st *store.Store, ticketID int64) err
 	if err := verifySelftestShipCILogFixedThenMerged(msgs); err != nil {
 		return err
 	}
+	if err := verifySelftestRespondAnsweredThenReady(msgs); err != nil {
+		return err
+	}
 	return verifySelftestCohortSealed(ctx, st, ticketID)
 }
+
+// selftestMsgTypeUpdate is store.MessageRow.Type's own "update" value, the
+// kind every marker this file's verify functions scan for is stored under:
+// named once so goconst has nothing to flag across them.
+const selftestMsgTypeUpdate = "update"
 
 // verifySelftestJudgeFailedFixedThenPassed asserts msgs (ticketID's own, in
 // id order) actually walked the path PKG9-PLAN.md section 19.3 task 9 names
@@ -1237,7 +1336,7 @@ func verifySelftestE2E(ctx context.Context, st *store.Store, ticketID int64) err
 func verifySelftestJudgeFailedFixedThenPassed(msgs []store.MessageRow) error {
 	var sawFailed, sawLanded, sawPassed bool
 	for i := range msgs {
-		if msgs[i].Type != "update" {
+		if msgs[i].Type != selftestMsgTypeUpdate {
 			continue
 		}
 		switch {
@@ -1278,7 +1377,7 @@ func verifySelftestJudgeFailedFixedThenPassed(msgs []store.MessageRow) error {
 func verifySelftestShipCILogFixedThenMerged(msgs []store.MessageRow) error {
 	var sawPROpened, sawFixRequested, sawFixLanded, sawReady, sawAsked, sawMerged bool
 	for i := range msgs {
-		if msgs[i].Type != "update" {
+		if msgs[i].Type != selftestMsgTypeUpdate {
 			continue
 		}
 		switch {
@@ -1309,6 +1408,98 @@ func verifySelftestShipCILogFixedThenMerged(msgs []store.MessageRow) error {
 		return errors.New(`e2e: no "merge asked" marker after the ready flip, want row 9 to ask the merge question (PKG9-PLAN.md section 19.5 task 8)`)
 	case !sawMerged:
 		return errors.New(`e2e: no "pr merged" marker after the merge question was asked, want MERGE-ANSWER's own "Merge now" to merge for real`)
+	}
+	return nil
+}
+
+// verifySelftestRespondAnsweredThenReady asserts msgs (ticketID's own, in id
+// order) walked the M4 task 10 respond leg before the ready flip: RESPOND
+// answers both of newSelftestShipGitHub's own seeded threads (design
+// section 9.2), APPLY posts the plain reply and collects the other into a
+// consolidated fix request (9.3), the shared fix driver lands that request
+// the normal way building's own fix unit already proves (design section
+// 5.3), and FIX-REPLIES posts "Fixed in <sha>." and resolves it (9.4) --
+// each after the one before it, and all before row 8 ever marks the pull
+// request ready -- rather than the respond leg being silently skipped or
+// the ready flip racing ahead of it.
+func verifySelftestRespondAnsweredThenReady(msgs []store.MessageRow) error {
+	var sawBatchStarted, sawApplied, sawThreadsRequested, sawThreadsLanded, sawRepliesPosted, sawReady bool
+	landedCount := 0
+	for i := range msgs {
+		if msgs[i].Type != selftestMsgTypeUpdate {
+			continue
+		}
+		body := msgs[i].Body
+		switch {
+		case strings.HasPrefix(body, "respond batch 1 started sha "):
+			sawBatchStarted = true
+		// APPLY's own commit (respond.go's apply) carries the fix request
+		// message before the closing "respond applied" message in the same
+		// commit (c.Messages = []store.Message{*fixMsg, appliedMsg}), so
+		// "fix requested threads" always reaches store.ListMessages' own id
+		// order first; neither depends on the other here.
+		case strings.HasPrefix(body, "fix requested threads after run ") && sawBatchStarted:
+			sawThreadsRequested = true
+		case strings.HasPrefix(body, "respond applied ") && sawBatchStarted:
+			sawApplied = true
+		case strings.HasPrefix(body, "fix landed "):
+			landedCount++
+			if sawThreadsRequested {
+				sawThreadsLanded = true
+			}
+		case strings.HasPrefix(body, "fix replies posted ") && sawThreadsLanded:
+			sawRepliesPosted = true
+		case strings.HasPrefix(body, "pr ready ") && sawRepliesPosted:
+			sawReady = true
+		}
+	}
+	switch {
+	case !sawBatchStarted:
+		return errors.New(`e2e: no "respond batch 1 started" marker, want POLL to start a respond batch once an actionable thread exists (PKG9-PLAN.md section 19.5 task 10)`)
+	case !sawApplied:
+		return errors.New(`e2e: no "respond applied" marker after the batch started, want RESPOND then APPLY to run`)
+	case !sawThreadsRequested:
+		return errors.New(`e2e: no "fix requested threads" marker after APPLY, want the collected fix action to go through the shared gate`)
+	case landedCount < 2:
+		return fmt.Errorf(`e2e: %d "fix landed" markers, want at least 2 (the ci_log fix and the threads fix)`, landedCount)
+	case !sawThreadsLanded:
+		return errors.New(`e2e: no "fix landed" marker after the threads fix request, want it to land`)
+	case !sawRepliesPosted:
+		return errors.New(`e2e: no "fix replies posted" marker after the threads fix landed, want FIX-REPLIES to close the loop`)
+	case !sawReady:
+		return errors.New(`e2e: no "pr ready" marker after the respond leg closed, want row 8 to mark the pull request ready only once every thread resolved`)
+	}
+	return nil
+}
+
+// verifySelftestRespondDisclosedReply asserts gh's own posted reply to
+// selftestShipReplyThreadID (design section 9.3's own RESPOND answer,
+// fixtures/scripts/respond/1/1.xml) actually carries N3's own disclosure --
+// "Zing (an AI agent) replying on behalf of @<login>:" -- and its own reply
+// marker, and that both of gh's seeded threads ended resolved: the ready
+// flip and the merge that followed it (verifySelftestShipCILogFixedThenMerged)
+// prove something cleared the loop, but only this double's own recorded
+// state proves it was a real disclosed GitHub reply and not some other path.
+func verifySelftestRespondDisclosedReply(gh *selftestShipGitHub) error {
+	gh.mu.Lock()
+	defer gh.mu.Unlock()
+
+	reply, posted := gh.replies[selftestShipReplyThreadID]
+	if !posted {
+		return errors.New("e2e: no reply recorded for the review thread, want APPLY to post one")
+	}
+	wantPrefix := "Zing (an AI agent) replying on behalf of @" + selftestShipGHViewerLogin + ":"
+	if !strings.HasPrefix(reply, wantPrefix) {
+		return fmt.Errorf("e2e: posted reply = %q, want it to start with the disclosure prefix %q (design D10)", reply, wantPrefix)
+	}
+	if !strings.Contains(reply, "<!-- zing:reply a") {
+		return fmt.Errorf("e2e: posted reply = %q, want it to carry a %q marker", reply, "<!-- zing:reply a")
+	}
+
+	for _, th := range gh.threads {
+		if !th.IsResolved {
+			return fmt.Errorf("e2e: thread %s is still unresolved, want both seeded threads resolved by the time the ticket reaches done", th.ID)
+		}
 	}
 	return nil
 }
