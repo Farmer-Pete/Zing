@@ -1147,11 +1147,11 @@ func TestAgentNameFromModel(t *testing.T) {
 
 	// The real machine.toml names the planner after its planning alias:
 	// opus, so the console says "Opus is working." and "Settled by Opus:".
-	real, err := machine.Load(zing.Assets, "machine.toml")
+	realMachine, err := machine.Load(zing.Assets, "machine.toml")
 	if err != nil {
 		t.Fatalf("machine.Load: %v", err)
 	}
-	if got := agentName(real); got != "Opus" {
+	if got := agentName(realMachine); got != "Opus" {
 		t.Errorf("agentName(real machine.toml) = %q, want Opus", got)
 	}
 
