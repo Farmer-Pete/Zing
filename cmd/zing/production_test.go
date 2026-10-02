@@ -354,7 +354,7 @@ func TestServeProjectsHaveM4Interfaces(t *testing.T) {
 // wire every claim/run with: the exact model ids do not matter, since every
 // runtime here is a *runtime.Fake or a spy.
 var productionTestModels = map[string]string{
-	modelAliasSonnet: "claude-sonnet-5", modelAliasOpus: "claude-opus-4-8",
+	modelAliasSonnet: "claude-sonnet-5", modelAliasOpus: "claude-opus-5-5",
 	modelAliasFable: "claude-fable-5-1", modelAliasCodex: "gpt-5.5",
 }
 

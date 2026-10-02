@@ -73,7 +73,7 @@ const (
 )
 
 var pbModels = map[string]string{
-	testModelAlias: "claude-sonnet-5", testModelAliasOpus: "claude-opus-4-8", testModelAliasFable: "claude-fable-5-1", pbRuntimeCodex: "gpt-5.5",
+	testModelAlias: "claude-sonnet-5", testModelAliasOpus: "claude-opus-5-5", testModelAliasFable: "claude-fable-5-1", pbRuntimeCodex: "gpt-5.5",
 }
 
 const pbBudget = 240 * time.Minute
