@@ -189,6 +189,12 @@ func captureStreams(t *testing.T) (read func() (string, string)) {
 		if err != nil {
 			t.Fatal(err)
 		}
+		if err := outR.Close(); err != nil {
+			t.Fatal(err)
+		}
+		if err := errR.Close(); err != nil {
+			t.Fatal(err)
+		}
 		return string(outBytes), string(errBytes)
 	}
 }
