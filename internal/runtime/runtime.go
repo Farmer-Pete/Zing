@@ -58,8 +58,10 @@ type RunRequest struct {
 
 // RunResult is what a Runtime returns for one turn (design section 6.9,
 // 4.1). StderrLen and StderrSHA256 (the first 12 hex characters) are
-// populated on every path once the process has started; raw stderr itself
-// never appears here or anywhere else (design section 4.1, 10).
+// populated on every path once the process has started. Stderr holds the
+// first maxStderrBytes of it, which the job layer saves to a private file
+// and never logs (owner decision: discarding stderr left a failed run
+// impossible to diagnose).
 type RunResult struct {
 	Response     response.Response
 	SessionID    string
@@ -68,7 +70,11 @@ type RunResult struct {
 	ExitCode     int
 	StderrLen    int64
 	StderrSHA256 string
+	Stderr       []byte
 }
+
+// maxStderrBytes caps RunResult.Stderr.
+const maxStderrBytes = 64 << 10
 
 // Seconds rounds d up to a whole second, minimum 1, so every caller that
 // reports agent time -- a Runtime's own logging and the job layer's

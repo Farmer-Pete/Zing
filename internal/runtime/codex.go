@@ -319,7 +319,8 @@ func (c Codex) run(ctx context.Context, req RunRequest, argv []string, outPath s
 
 	var stderrCount countingWriter
 	stderrHash := sha256.New()
-	cmd.Stderr = io.MultiWriter(&stderrCount, stderrHash)
+	stderrCap := &capWriter{limit: maxStderrBytes}
+	cmd.Stderr = io.MultiWriter(&stderrCount, stderrHash, stderrCap)
 
 	if err := cmd.Start(); err != nil {
 		return RunResult{ExitCode: -1, AgentTime: time.Since(start)}, ErrStart
@@ -338,6 +339,7 @@ func (c Codex) run(ctx context.Context, req RunRequest, argv []string, outPath s
 		ExitCode:     exitCodeFrom(waitErr),
 		StderrLen:    stderrCount.n,
 		StderrSHA256: shortHex(stderrHash.Sum(nil)),
+		Stderr:       stderrCap.bytes(),
 	}
 
 	if outcomeErr := classifyProcessOutcome(ctx, stdout.overflowed(), waitErr, res.ExitCode); outcomeErr != nil {

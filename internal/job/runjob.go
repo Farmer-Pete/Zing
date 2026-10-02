@@ -253,6 +253,15 @@ func runJobWith(
 	started := time.Now()
 	res, runErr := rt.Run(runCtx, req)
 
+	stderrFile := ""
+	if len(res.Stderr) > 0 && d.DataDir != "" {
+		path, writeErr := writeStderrFile(d.DataDir, rsv.RunID, res.Stderr)
+		if writeErr != nil {
+			slog.Warn("stderr file not written", "ticket_id", t.ID, "run_id", rsv.RunID, "error", writeErr)
+		}
+		stderrFile = path
+	}
+
 	slog.Info("runJob end",
 		"ticket_id", t.ID,
 		"session_id", rsv.SessionID,
@@ -265,9 +274,26 @@ func runJobWith(
 		"err_kind", errKind(runErr),
 		"stderr_len", res.StderrLen,
 		"stderr_sha256", res.StderrSHA256,
+		"stderr_file", stderrFile,
 	)
 
 	return runResult{Res: res, Reserved: rsv, Started: started}, runErr
+}
+
+// writeStderrFile saves one run's captured stderr to
+// <dataDir>/runs/run-<runID>-stderr.log, mode 0600 in a 0700 directory,
+// and returns the path. The log names the path, never the text, since
+// stderr can echo anything the child saw.
+func writeStderrFile(dataDir string, runID int64, data []byte) (string, error) {
+	dir := filepath.Join(dataDir, "runs")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return "", fmt.Errorf("stderr file: %w", err)
+	}
+	path := filepath.Join(dir, fmt.Sprintf("run-%d-stderr.log", runID))
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		return "", fmt.Errorf("stderr file: %w", err)
+	}
+	return path, nil
 }
 
 // seedTaskN is store.RunSeed.TaskN's own value for a build or perimeter
