@@ -1244,8 +1244,11 @@ func withBranchResult(c store.HandlerCommit, err error, wt orchestrator.Worktree
 func recordedShas(reports []store.BuildReportRow) []string {
 	var out []string
 	for i := range reports {
-		if reports[i].Report.CommitSHA != nil {
-			out = append(out, *reports[i].Report.CommitSHA)
+		sha := reports[i].Report.CommitSHA
+		// A fix that changed nothing lands at the existing HEAD, so its sha
+		// repeats one already recorded; the branch holds it once.
+		if sha != nil && !slices.Contains(out, *sha) {
+			out = append(out, *sha)
 		}
 	}
 	return out
