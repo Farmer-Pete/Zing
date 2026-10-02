@@ -54,6 +54,25 @@ type RunRequest struct {
 	// sandbox package builds it (sandbox.Sandbox.Prefix). The fake runtime
 	// ignores it.
 	ExecPrefix []string
+	// OnStart, when non-nil, is called once, synchronously, right after the
+	// process starts (design section 7.1, #45): Claude and Codex call it
+	// after cmd.Start() succeeds and before the prompt is written to stdin
+	// (the start handshake, below), so a caller can record the process's
+	// identity before any work happens. The fake runtime calls it with PID 0
+	// before running the scripted turn. OnStart must not block
+	// indefinitely; runJobWith's own closure bounds its store write to 10s.
+	OnStart func(StartInfo)
+}
+
+// StartInfo is what a runtime reports to RunRequest.OnStart right after its
+// process starts (design section 7.1, #45): PID is the process group
+// leader (0 for the fake runtime, which has no real process), and
+// SessionID is the agent session id when it is already known at start (the
+// minted or resumed id for Claude; "" for Codex on a first turn, whose
+// session id is not known until the first JSONL event arrives).
+type StartInfo struct {
+	PID       int
+	SessionID string
 }
 
 // RunResult is what a Runtime returns for one turn (design section 6.9,

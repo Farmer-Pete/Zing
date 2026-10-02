@@ -44,7 +44,7 @@ func newFakeCodexRequest(dir, mode string, extra ...string) RunRequest {
 	return RunRequest{
 		Job:      response.JobPlanreview,
 		Model:    testCodexModel,
-		Prompt:   "the assembled prompt",
+		Prompt:   testPrompt,
 		Env:      env,
 		RunToken: "42",
 	}

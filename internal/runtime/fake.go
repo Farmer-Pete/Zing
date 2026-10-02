@@ -68,6 +68,13 @@ func (f *Fake) Run(ctx context.Context, req RunRequest) (RunResult, error) {
 		return RunResult{}, err
 	}
 
+	// The start handshake's fake-runtime twin (design section 7.1, #45):
+	// PID 0 since there is no real process, called while f.mu is held, so
+	// OnStart must never call back into this Fake.
+	if req.OnStart != nil {
+		req.OnStart(StartInfo{PID: 0, SessionID: sessionID})
+	}
+
 	key := scriptKey(req.Job, req.Label, sess.nextTurn)
 	data, err := fs.ReadFile(f.fsys, key)
 	if err != nil {

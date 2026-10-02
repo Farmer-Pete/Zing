@@ -27,6 +27,10 @@ const (
 	// (TestClaude_RefusesEmptyOAuthToken) constructs its Claude with
 	// (PKG9-PLAN.md section 4.6, D26).
 	testOAuthToken = "test-claude-oauth-token"
+	// testPrompt is the RunRequest.Prompt every fake-CLI test in this
+	// package that does not itself care about the prompt's exact text uses
+	// (goconst: four or more call sites compared this literal).
+	testPrompt = "the assembled prompt"
 )
 
 // testTools and its two derived lists (design section 4.1's tool map) are
@@ -59,7 +63,7 @@ func newFakeRequest(dir, mode string, extra ...string) RunRequest {
 	return RunRequest{
 		Job:      response.JobClassify,
 		Model:    testModel,
-		Prompt:   "the assembled prompt",
+		Prompt:   testPrompt,
 		Tools:    testTools,
 		Env:      env,
 		RunToken: "42",

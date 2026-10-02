@@ -395,7 +395,6 @@ func (c Claude) run(ctx context.Context, req RunRequest, argv []string, sessionI
 	// know about it, and only the claude runtime's own configured value
 	// ever reaches a child (PKG9-PLAN.md section 4.6, D26).
 	cmd.Env = append(agentEnv(req), "CLAUDE_CODE_OAUTH_TOKEN="+c.oauthToken)
-	cmd.Stdin = strings.NewReader(req.Prompt)
 	configureProcessGroup(cmd)
 
 	stdout := &capWriter{limit: maxOutputBytes}
@@ -406,9 +405,28 @@ func (c Claude) run(ctx context.Context, req RunRequest, argv []string, sessionI
 	stderrCap := &capWriter{limit: maxStderrBytes}
 	cmd.Stderr = io.MultiWriter(&stderrCount, stderrHash, stderrCap)
 
-	if err := cmd.Start(); err != nil {
+	// The start handshake (design section 7.1, #45): stdin is a pipe, not a
+	// reader handed to cmd.Stdin up front, so nothing reaches the child
+	// until the goroutine below writes it -- after req.OnStart has run and
+	// returned. If serve dies between Start and that write, the child's
+	// stdin simply closes with no prompt and it exits having done no work.
+	stdin, err := cmd.StdinPipe()
+	if err != nil {
 		return RunResult{ExitCode: -1, AgentTime: time.Since(start)}, ErrStart
 	}
+
+	if err = cmd.Start(); err != nil {
+		return RunResult{ExitCode: -1, AgentTime: time.Since(start)}, ErrStart
+	}
+
+	if req.OnStart != nil {
+		req.OnStart(StartInfo{PID: cmd.Process.Pid, SessionID: sessionID})
+	}
+
+	go func() {
+		_, _ = io.WriteString(stdin, req.Prompt) //nolint:errcheck // EPIPE means the agent already exited; cmd.Wait reports the real outcome
+		_ = stdin.Close()                        //nolint:errcheck // same: a close error here never changes the run's outcome
+	}()
 
 	waitErr := cmd.Wait()
 	killProcessGroup(cmd)
