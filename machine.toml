@@ -9,7 +9,7 @@ timeout_minutes = 5
 outcomes = ["bug", "feature"]
 
 [jobs.planning]
-model = "fable"
+model = "opus"
 runtime = "claude"
 session = "long"                     # the one long-lived session
 tools = ["read", "grep", "glob", "bash_readonly"]
