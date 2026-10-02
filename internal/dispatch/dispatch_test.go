@@ -1457,23 +1457,27 @@ func TestTick_IntakeErrorOnOneProjectLogsAndContinuesToTheNext(t *testing.T) {
 	}
 }
 
-// TestTick_RespectsMaxParallel proves the count guard (design section 6.8
-// step 4) blocks picking once active runs reach MaxParallel, leaving an
-// otherwise-ready ticket untouched. Because CommitHandlerResult always
-// clears the claim in the same transaction it applies (design section 6.3),
-// an "active run" here is simulated directly the way a second, concurrent
-// worker's claim would look.
-func TestTick_RespectsMaxParallel(t *testing.T) {
+// TestTick_MaxParallelCountsOwnInflightOnly proves the max-parallel guard
+// (design section 4.1 D1, 4.2 step 5) counts only tickets this process is
+// itself running (d.inflight), never a ticket some other owner holds: with
+// MaxParallel 1 and one ticket already claimed by a foreign owner, fill
+// still has a free slot of its own and claims and launches the other, ready
+// ticket. This replaces the pre-#45 TestTick_RespectsMaxParallel, whose own
+// assertion (a foreign claim blocks picking) was the old CountActiveRuns
+// guard's behavior -- store.CountActiveRuns counted every owner's claims,
+// not only this process's own -- and is no longer true now that the guard
+// is d.inflight's own length.
+func TestTick_MaxParallelCountsOwnInflightOnly(t *testing.T) {
 	t.Parallel()
 
 	s := newDispatchTestStore(t)
-	activeID := seedQueuedTicket(t, s, "fake#1")
+	foreignID := seedQueuedTicket(t, s, "fake#1")
 	readyID := seedQueuedTicket(t, s, "fake#2")
 
 	expires := time.Now().Add(10 * time.Minute).UTC().Truncate(time.Second)
-	claimed, err := s.Claim(t.Context(), activeID, "another-worker", expires)
+	claimed, err := s.Claim(t.Context(), foreignID, "another-worker", expires)
 	if err != nil || !claimed {
-		t.Fatalf("claim activeID: claimed=%v err=%v", claimed, err)
+		t.Fatalf("claim foreignID: claimed=%v err=%v", claimed, err)
 	}
 
 	d := newDispatcher(t, s, newFixtureTracker(t), bus.New(), fakeRuntime(t), nil, nil, dispatch.Config{MaxParallel: 1, Owner: testOwner})
@@ -1482,8 +1486,13 @@ func TestTick_RespectsMaxParallel(t *testing.T) {
 	}
 
 	ready := getTicket(t, s, readyID)
-	if ready.State != testStateQueued || ready.ClaimOwner != nil {
-		t.Errorf("ready ticket = %+v, want untouched (state queued, unclaimed) while MaxParallel blocks", ready)
+	if ready.State != testStatePlanning {
+		t.Errorf("ready ticket state = %q, want planning (the foreign claim on another ticket must not use this process's one slot)", ready.State)
+	}
+
+	foreign := getTicket(t, s, foreignID)
+	if foreign.ClaimOwner == nil || *foreign.ClaimOwner != "another-worker" {
+		t.Errorf("foreign ticket claim owner = %v, want unchanged another-worker", foreign.ClaimOwner)
 	}
 }
 
@@ -1542,8 +1551,13 @@ func TestTick_PicksTheFurthestAlongTicketOverQueuedOnesAndExcludesTerminal(t *te
 
 	queuedID := seedQueuedTicket(t, s, "fake#3")
 
+	// MaxParallel: 1, not 2: with #45's fill filling every free slot, two
+	// free slots would launch both the furthest-along ticket and the
+	// merely-queued one this same Tick, leaving nothing to prove about
+	// pick order (the "lower priority" assertion below needs the queued
+	// ticket to still be untouched after this one Tick call).
 	d := newDispatcher(t, s, newFixtureTracker(t), bus.New(), rt, nil, nil, dispatch.Config{
-		MaxParallel: 2, Owner: testOwner,
+		MaxParallel: 1, Owner: testOwner,
 		Sandboxes: sandbox.OffSet(), RequireSandbox: false, Commands: job.NewCommandRunner(sandbox.Off(), false),
 		Projects: buildTestProjects(t, s),
 	})
@@ -1589,7 +1603,10 @@ func TestTick_NumericExternalIDTieBreak(t *testing.T) {
 	lowID := seedQueuedTicket(t, s, "fake#3")
 	highID := seedQueuedTicket(t, s, "fake#30")
 
-	d := newDispatcher(t, s, newFixtureTracker(t), bus.New(), fakeRuntime(t), nil, nil, dispatch.Config{MaxParallel: 2, Owner: testOwner})
+	// MaxParallel: 1, not 2: with #45's fill filling every free slot, two
+	// free slots would launch both tied tickets this same Tick, leaving
+	// nothing to prove about the tie-break itself.
+	d := newDispatcher(t, s, newFixtureTracker(t), bus.New(), fakeRuntime(t), nil, nil, dispatch.Config{MaxParallel: 1, Owner: testOwner})
 
 	if err := d.Tick(t.Context()); err != nil {
 		t.Fatalf("Tick: %v", err)
@@ -1670,22 +1687,22 @@ func TestTick_ClaimUsesTheJobTimeoutAndRunsUnderThatDeadlineNotTheClaimGrace(t *
 	}
 	after := time.Now()
 
-	if spy.calls != 1 {
-		t.Fatalf("spy.calls = %d, want 1", spy.calls)
+	if spy.Calls() != 1 {
+		t.Fatalf("spy.Calls() = %d, want 1", spy.Calls())
 	}
-	if !spy.hasDeadline {
+	if !spy.HasDeadline() {
 		t.Fatal("the handler's context carried no deadline, want now+timeout")
 	}
 	wantMin := before.Add(59 * time.Minute)
 	wantMax := after.Add(61 * time.Minute)
-	if spy.deadline.Before(wantMin) || spy.deadline.After(wantMax) {
-		t.Errorf("run deadline = %v, want within [%v, %v] (~60m, the planning job timeout, not +65m)", spy.deadline, wantMin, wantMax)
+	if spy.Deadline().Before(wantMin) || spy.Deadline().After(wantMax) {
+		t.Errorf("run deadline = %v, want within [%v, %v] (~60m, the planning job timeout, not +65m)", spy.Deadline(), wantMin, wantMax)
 	}
 
 	claimGraceMin := before.Add(64 * time.Minute)
 	claimGraceMax := after.Add(66 * time.Minute)
-	if spy.expires.Before(claimGraceMin) || spy.expires.After(claimGraceMax) {
-		t.Errorf("claim expiry (Deps.Expires) = %v, want within [%v, %v] (~65m: 60m timeout + 5m grace)", spy.expires, claimGraceMin, claimGraceMax)
+	if spy.Expires().Before(claimGraceMin) || spy.Expires().After(claimGraceMax) {
+		t.Errorf("claim expiry (Deps.Expires) = %v, want within [%v, %v] (~65m: 60m timeout + 5m grace)", spy.Expires(), claimGraceMin, claimGraceMax)
 	}
 }
 
@@ -1731,16 +1748,16 @@ func TestClaimTimeoutForReviewing(t *testing.T) {
 	}
 	after := time.Now()
 
-	if spy.calls != 1 {
-		t.Fatalf("spy.calls = %d, want 1", spy.calls)
+	if spy.Calls() != 1 {
+		t.Fatalf("spy.Calls() = %d, want 1", spy.Calls())
 	}
-	if !spy.hasDeadline {
+	if !spy.HasDeadline() {
 		t.Fatal("the handler's context carried no deadline, want now+timeout")
 	}
 	wantMin := before.Add(29 * time.Minute)
 	wantMax := after.Add(31 * time.Minute)
-	if spy.deadline.Before(wantMin) || spy.deadline.After(wantMax) {
-		t.Errorf("run deadline = %v, want within [%v, %v] (~30m, jobs.review.timeout_minutes, not the 5m defaultCodeTimeout)", spy.deadline, wantMin, wantMax)
+	if spy.Deadline().Before(wantMin) || spy.Deadline().After(wantMax) {
+		t.Errorf("run deadline = %v, want within [%v, %v] (~30m, jobs.review.timeout_minutes, not the 5m defaultCodeTimeout)", spy.Deadline(), wantMin, wantMax)
 	}
 }
 
@@ -1795,8 +1812,8 @@ func TestTickUsesInjectedClock(t *testing.T) {
 	if err := dReal.Tick(t.Context()); err != nil {
 		t.Fatalf("Tick (real clock): %v", err)
 	}
-	if spy.calls != 0 {
-		t.Fatalf("spy.calls = %d after a real-clock tick, want 0 (the poll is not due yet)", spy.calls)
+	if spy.Calls() != 0 {
+		t.Fatalf("spy.Calls() = %d after a real-clock tick, want 0 (the poll is not due yet)", spy.Calls())
 	}
 
 	// An injected clock past the poll time: this tick must pick it up.
@@ -1807,8 +1824,8 @@ func TestTickUsesInjectedClock(t *testing.T) {
 	if err := dFake.Tick(t.Context()); err != nil {
 		t.Fatalf("Tick (injected clock): %v", err)
 	}
-	if spy.calls != 1 {
-		t.Fatalf("spy.calls = %d after an injected-clock tick past the poll time, want 1", spy.calls)
+	if spy.Calls() != 1 {
+		t.Fatalf("spy.Calls() = %d after an injected-clock tick past the poll time, want 1", spy.Calls())
 	}
 }
 
@@ -1849,16 +1866,16 @@ func TestClaimTimeoutForJudging(t *testing.T) {
 	}
 	after := time.Now()
 
-	if spy.calls != 1 {
-		t.Fatalf("spy.calls = %d, want 1", spy.calls)
+	if spy.Calls() != 1 {
+		t.Fatalf("spy.Calls() = %d, want 1", spy.Calls())
 	}
-	if !spy.hasDeadline {
+	if !spy.HasDeadline() {
 		t.Fatal("the handler's context carried no deadline, want now+timeout")
 	}
 	wantMin := before.Add(44 * time.Minute)
 	wantMax := after.Add(46 * time.Minute)
-	if spy.deadline.Before(wantMin) || spy.deadline.After(wantMax) {
-		t.Errorf("run deadline = %v, want within [%v, %v] (~45m, max(judge, build, perimeter, 10))", spy.deadline, wantMin, wantMax)
+	if spy.Deadline().Before(wantMin) || spy.Deadline().After(wantMax) {
+		t.Errorf("run deadline = %v, want within [%v, %v] (~45m, max(judge, build, perimeter, 10))", spy.Deadline(), wantMin, wantMax)
 	}
 }
 
@@ -1899,16 +1916,16 @@ func TestClaimTimeoutForShipping(t *testing.T) {
 	}
 	after := time.Now()
 
-	if spy.calls != 1 {
-		t.Fatalf("spy.calls = %d, want 1", spy.calls)
+	if spy.Calls() != 1 {
+		t.Fatalf("spy.Calls() = %d, want 1", spy.Calls())
 	}
-	if !spy.hasDeadline {
+	if !spy.HasDeadline() {
 		t.Fatal("the handler's context carried no deadline, want now+timeout")
 	}
 	wantMin := before.Add(44 * time.Minute)
 	wantMax := after.Add(46 * time.Minute)
-	if spy.deadline.Before(wantMin) || spy.deadline.After(wantMax) {
-		t.Errorf("run deadline = %v, want within [%v, %v] (~45m, max(respond, build, perimeter))", spy.deadline, wantMin, wantMax)
+	if spy.Deadline().Before(wantMin) || spy.Deadline().After(wantMax) {
+		t.Errorf("run deadline = %v, want within [%v, %v] (~45m, max(respond, build, perimeter))", spy.Deadline(), wantMin, wantMax)
 	}
 }
 
@@ -1946,11 +1963,11 @@ func TestRunAndCommitCopiesJudgeCodexHome(t *testing.T) {
 	if err := d.Tick(t.Context()); err != nil {
 		t.Fatalf("Tick: %v", err)
 	}
-	if spy.calls != 1 {
-		t.Fatalf("spy.calls = %d, want 1", spy.calls)
+	if spy.Calls() != 1 {
+		t.Fatalf("spy.Calls() = %d, want 1", spy.Calls())
 	}
-	if spy.judgeCodexHome != wantJudgeCodexHome {
-		t.Errorf("Deps.JudgeCodexHome = %q, want %q", spy.judgeCodexHome, wantJudgeCodexHome)
+	if spy.JudgeCodexHome() != wantJudgeCodexHome {
+		t.Errorf("Deps.JudgeCodexHome = %q, want %q", spy.JudgeCodexHome(), wantJudgeCodexHome)
 	}
 }
 
@@ -1985,10 +2002,10 @@ func TestTick_HandlerDeadlineSurvivesSlowIntakeNotEatenByIt(t *testing.T) {
 	}
 	afterTick := time.Now()
 
-	if spy.calls != 1 {
-		t.Fatalf("spy.calls = %d, want 1", spy.calls)
+	if spy.Calls() != 1 {
+		t.Fatalf("spy.Calls() = %d, want 1", spy.Calls())
 	}
-	if !spy.hasDeadline {
+	if !spy.HasDeadline() {
 		t.Fatal("the handler's context carried no deadline, want now+timeout")
 	}
 
@@ -1999,13 +2016,13 @@ func TestTick_HandlerDeadlineSurvivesSlowIntakeNotEatenByIt(t *testing.T) {
 	// under intakeDelay so this assertion cannot pass by coincidence.
 	const margin = 100 * time.Millisecond
 	minDeadline := tickStart.Add(60*time.Minute + intakeDelay - margin)
-	if spy.deadline.Before(minDeadline) {
+	if spy.Deadline().Before(minDeadline) {
 		t.Errorf("handler deadline = %v, want at least %v (computed after the %v slow intake, not at tick start)",
-			spy.deadline, minDeadline, intakeDelay)
+			spy.Deadline(), minDeadline, intakeDelay)
 	}
 	maxDeadline := afterTick.Add(61 * time.Minute)
-	if spy.deadline.After(maxDeadline) {
-		t.Errorf("handler deadline = %v, want at most %v", spy.deadline, maxDeadline)
+	if spy.Deadline().After(maxDeadline) {
+		t.Errorf("handler deadline = %v, want at most %v", spy.Deadline(), maxDeadline)
 	}
 }
 
@@ -2042,8 +2059,8 @@ func TestTick_ClaimExpirySurvivesSlowIntakeNotEatenByIt(t *testing.T) {
 	}
 	afterTick := time.Now()
 
-	if spy.calls != 1 {
-		t.Fatalf("spy.calls = %d, want 1", spy.calls)
+	if spy.Calls() != 1 {
+		t.Fatalf("spy.Calls() = %d, want 1", spy.Calls())
 	}
 
 	// Were expires still computed from the tick-start now (the bug), it
@@ -2053,13 +2070,13 @@ func TestTick_ClaimExpirySurvivesSlowIntakeNotEatenByIt(t *testing.T) {
 	// intakeDelay so this assertion cannot pass by coincidence.
 	const margin = 100 * time.Millisecond
 	minExpires := tickStart.Add(65*time.Minute + intakeDelay - margin)
-	if spy.expires.Before(minExpires) {
+	if spy.Expires().Before(minExpires) {
 		t.Errorf("claim expiry = %v, want at least %v (computed after the %v slow intake, not at tick start)",
-			spy.expires, minExpires, intakeDelay)
+			spy.Expires(), minExpires, intakeDelay)
 	}
 	maxExpires := afterTick.Add(66 * time.Minute)
-	if spy.expires.After(maxExpires) {
-		t.Errorf("claim expiry = %v, want at most %v", spy.expires, maxExpires)
+	if spy.Expires().After(maxExpires) {
+		t.Errorf("claim expiry = %v, want at most %v", spy.Expires(), maxExpires)
 	}
 }
 
@@ -2188,7 +2205,17 @@ func TestTick_ReleaseClaimFailsClosedWhenLeaseAlreadyLost(t *testing.T) {
 // commit land, since a cancelled handler context (or the drain sequence's
 // own force-cancel racing the same moment) must not be able to abort
 // recording what the runtime already did.
-func TestTick_PostHandlerCommitSurvivesCancelledTickContext(t *testing.T) {
+// TestTick_HandlerCommitDiscardedAfterCancelledTickContext replaces the
+// pre-#45 TestTick_PostHandlerCommitSurvivesCancelledTickContext, whose own
+// name described the opposite of what #45 section 7.2 now requires: once
+// ctx (the Dispatcher's own long-lived context, standing in here for
+// serve's dispCtx) is cancelled by the time handler.Run returns, the run
+// counts as a shutdown interrupt regardless of what the handler returned --
+// a valid commit included -- so the commit here is discarded rather than
+// applied, and the ticket's claim is cleared through InterruptRuns instead
+// of CommitHandlerResult. The next tick's session resume (a later
+// milestone) is what actually finishes the turn.
+func TestTick_HandlerCommitDiscardedAfterCancelledTickContext(t *testing.T) {
 	t.Parallel()
 
 	s := newDispatchTestStore(t)
@@ -2200,21 +2227,20 @@ func TestTick_PostHandlerCommitSurvivesCancelledTickContext(t *testing.T) {
 	defer cancel()
 
 	reg := job.Registry()
-	// Next is "done", not "building": D32's own seal invariant (design
-	// section 22.12.3a) gates a planning -> building commit on a
-	// GateApproval, which this test has no reason to carry -- it only
-	// cares that a commit lands despite the cancelled tick context.
 	reg[testStatePlanning] = &cancelingHandler{cancel: cancel, next: testStateDone, reason: testReasonPlanReady}
 
 	d := newDispatcher(t, s, newFixtureTracker(t), bus.New(), rt, reg, nil, dispatch.Config{MaxParallel: 2, Owner: testOwner})
 
 	if err := d.Tick(ctx); err != nil {
-		t.Fatalf("Tick: %v, want nil (the commit must still land despite the cancelled tick context)", err)
+		t.Fatalf("Tick: %v, want nil (a shutdown interrupt is not a dispatcher error)", err)
 	}
 
 	final := getTicket(t, s, ticketID)
-	if final.State != testStateDone {
-		t.Errorf("final ticket state = %q, want done (the post-handler commit must survive ctx's own cancellation)", final.State)
+	if final.State != testStatePlanning {
+		t.Errorf("final ticket state = %q, want unchanged planning (the commit must be discarded, not applied, once ctx is cancelled)", final.State)
+	}
+	if final.ClaimOwner != nil {
+		t.Errorf("final ticket claim owner = %v, want nil (InterruptRuns clears it)", *final.ClaimOwner)
 	}
 }
 
@@ -2908,8 +2934,13 @@ func (h *cancelingHandler) Run(_ context.Context, t store.Ticket, d job.Deps) (s
 // spyHandler is a job.Handler test double: it records every call, its
 // context's deadline, and the claim it was handed, and either returns err or
 // a fixed, valid commit built from next/reason (or a fenced no-op when next
-// is empty).
+// is empty). #45 dispatchers can launch more than one ticket's handler at
+// once (design section 4.1), so every recorded field is guarded by mu and
+// read back only through the accessor methods below, never the bare field,
+// so -race never sees a worker goroutine's write race a test goroutine's
+// read (design section 10 item 1: "make spyHandler ... goroutine-safe").
 type spyHandler struct {
+	mu          sync.Mutex
 	calls       int
 	hasDeadline bool
 	deadline    time.Time
@@ -2925,6 +2956,7 @@ type spyHandler struct {
 }
 
 func (h *spyHandler) Run(ctx context.Context, t store.Ticket, d job.Deps) (store.HandlerCommit, error) {
+	h.mu.Lock()
 	h.calls++
 	h.expires = d.Expires
 	h.judgeCodexHome = d.JudgeCodexHome
@@ -2932,10 +2964,48 @@ func (h *spyHandler) Run(ctx context.Context, t store.Ticket, d job.Deps) (store
 		h.hasDeadline = true
 		h.deadline = dl
 	}
-	if h.err != nil {
-		return store.HandlerCommit{}, h.err
+	err := h.err
+	h.mu.Unlock()
+	if err != nil {
+		return store.HandlerCommit{}, err
 	}
 	return store.HandlerCommit{TicketID: t.ID, Owner: d.Owner, Expires: d.Expires, Next: h.next, Reason: h.reason}, nil
+}
+
+// Calls returns the number of times Run has been called so far.
+func (h *spyHandler) Calls() int {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.calls
+}
+
+// HasDeadline reports whether the most recent Run call's context carried a
+// deadline.
+func (h *spyHandler) HasDeadline() bool {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.hasDeadline
+}
+
+// Deadline returns the most recent Run call's context deadline.
+func (h *spyHandler) Deadline() time.Time {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.deadline
+}
+
+// Expires returns the most recent Run call's d.Expires.
+func (h *spyHandler) Expires() time.Time {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.expires
+}
+
+// JudgeCodexHome returns the most recent Run call's d.JudgeCodexHome.
+func (h *spyHandler) JudgeCodexHome() string {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.judgeCodexHome
 }
 
 // countingRuntime wraps a runtime.Runtime and counts every Run call, so a
@@ -3596,12 +3666,22 @@ func (cancelingReserveHandler) Run(ctx context.Context, t store.Ticket, d job.De
 	return store.HandlerCommit{}, runtime.ErrCanceled
 }
 
-// TestTick_ErrCanceledLeavesClaimForExpireClaimsToReconcile proves
-// runtime.ErrCanceled leaves the claim in place -- neither released nor
-// fail-closed -- so the reserved run sits with a NULL outcome until the
-// lease expires, at which point ExpireClaims (already exercised by task 4a)
-// reconciles it to error/-1 (design D13, section 4.5).
-func TestTick_ErrCanceledLeavesClaimForExpireClaimsToReconcile(t *testing.T) {
+// TestTick_ErrCanceledWithLiveContextLeavesClaimForExpireClaimsToReconcile
+// (renamed from the pre-#45 TestTick_ErrCanceledLeavesClaimForExpireClaimsToReconcile
+// to name its own now-narrower scope) proves runtime.ErrCanceled leaves the
+// claim in place -- neither released nor fail-closed -- so the reserved run
+// sits with a NULL outcome until the lease expires, at which point
+// ExpireClaims (already exercised by task 4a) reconciles it to error/-1
+// (design D13, section 4.5), but only while the Tick's own ctx is still
+// live: #45 section 7.2 adds a second case, a run whose runAndCommit ctx
+// (the Dispatcher's own, not the handler's) has itself been cancelled,
+// where any error the handler returns -- runtime.ErrCanceled included --
+// now means a shutdown interrupt instead (see
+// TestTick_HandlerCommitDiscardedAfterCancelledTickContext and
+// TestRun_ForceCancelInterruptsInflight). t.Context() here is never
+// cancelled, so this test still exercises the original, narrower
+// leave-the-claim-in-place path.
+func TestTick_ErrCanceledWithLiveContextLeavesClaimForExpireClaimsToReconcile(t *testing.T) {
 	t.Parallel()
 
 	s := newDispatchTestStore(t)
@@ -4080,5 +4160,575 @@ func TestDispatchShipGitHubHeadSHAIgnoresInheritedGitDir(t *testing.T) {
 	}
 	if got != strings.TrimSpace(string(want)) {
 		t.Errorf("headSHA = %q, want %q", got, strings.TrimSpace(string(want)))
+	}
+}
+
+// --- #45 milestone 4: parallel fill/Tick/Run -------------------------------
+
+// barrierHandler blocks until released, signaling its own arrival on
+// started first, so a test can observe exactly when a worker's handler has
+// started and control exactly when it finishes. ctx.Done() unblocks both
+// selects too, so a force-cancelled dispatcher never leaves this handler
+// stuck. Shared by every #45 test below that needs to hold a worker open
+// to create or close a specific race window.
+type barrierHandler struct {
+	started chan int64
+	release chan struct{}
+	// next and reason, when next is non-empty, make Run return a real
+	// transition commit once released, instead of the default fenced
+	// no-op.
+	next, reason string
+}
+
+func (h *barrierHandler) Run(ctx context.Context, t store.Ticket, d job.Deps) (store.HandlerCommit, error) {
+	select {
+	case h.started <- t.ID:
+	case <-ctx.Done():
+	}
+	select {
+	case <-h.release:
+	case <-ctx.Done():
+	}
+	if ctx.Err() != nil {
+		return store.HandlerCommit{}, ctx.Err()
+	}
+	if h.next == "" {
+		return store.HandlerCommit{TicketID: t.ID, Owner: d.Owner, Expires: d.Expires}, nil
+	}
+	return store.HandlerCommit{TicketID: t.ID, Owner: d.Owner, Expires: d.Expires, Next: h.next, Reason: h.reason}, nil
+}
+
+// reservingBarrierHandler is barrierHandler's twin for a test that needs a
+// real open run recorded first (so a later interrupt has something to mark
+// interrupted), through d.Reserve the same way a real job handler would.
+type reservingBarrierHandler struct {
+	started chan int64
+	release chan struct{}
+	job     string
+}
+
+func (h *reservingBarrierHandler) Run(ctx context.Context, t store.Ticket, d job.Deps) (store.HandlerCommit, error) {
+	if _, err := d.Reserve(ctx, t.ID, store.SessionUpsert{Job: h.job, Runtime: testRuntimeFake}, store.RunSeed{Model: testModelClaudeX}); err != nil {
+		return store.HandlerCommit{}, err
+	}
+	select {
+	case h.started <- t.ID:
+	case <-ctx.Done():
+	}
+	select {
+	case <-h.release:
+	case <-ctx.Done():
+	}
+	if ctx.Err() != nil {
+		return store.HandlerCommit{}, ctx.Err()
+	}
+	return store.HandlerCommit{TicketID: t.ID, Owner: d.Owner, Expires: d.Expires}, nil
+}
+
+// perTicketHandler dispatches to a different job.Handler per ticket id, so
+// two tickets claimed in the same fill pass (same state, same registry
+// entry) can behave completely differently -- one failing closed while the
+// other stays in flight, for instance. byTicket is never written after
+// construction, so concurrent Run calls reading it race nothing.
+type perTicketHandler struct {
+	byTicket map[int64]job.Handler
+}
+
+func (h *perTicketHandler) Run(ctx context.Context, t store.Ticket, d job.Deps) (store.HandlerCommit, error) {
+	return h.byTicket[t.ID].Run(ctx, t, d)
+}
+
+// selfStealingHandler simulates a concurrent release of this exact ticket's
+// own claim -- and only this ticket's -- by committing the same fenced
+// no-op releaseClaim itself uses, before returning what would otherwise be
+// a perfectly legal transition commit. The dispatcher's own commit then
+// finds its fence already gone and fails closed, isolated to this one
+// ticket: safe to run alongside another, unrelated ticket in the same Run
+// pass, unlike staleOwnerHandler's own ExpireClaims("") call, which would
+// expire every claim, not just this one.
+type selfStealingHandler struct{}
+
+func (selfStealingHandler) Run(ctx context.Context, t store.Ticket, d job.Deps) (store.HandlerCommit, error) {
+	if _, err := d.Store.CommitHandlerResult(ctx, store.HandlerCommit{TicketID: t.ID, Owner: d.Owner, Expires: d.Expires}); err != nil {
+		return store.HandlerCommit{}, err
+	}
+	return store.HandlerCommit{TicketID: t.ID, Owner: d.Owner, Expires: d.Expires, Next: testStatePlanning, Reason: testSpyReason}, nil
+}
+
+// TestTick_FillsEveryFreeSlot proves fill claims and launches every ready
+// candidate it has a free slot for, in one pass, not just the single
+// highest-priority one (design section 4.2 step 5, D1): MaxParallel 3 with
+// three ready tickets, one Tick call runs all three.
+func TestTick_FillsEveryFreeSlot(t *testing.T) {
+	t.Parallel()
+
+	s := newDispatchTestStore(t)
+	idA := seedQueuedTicket(t, s, "fake#1")
+	idB := seedQueuedTicket(t, s, "fake#2")
+	idC := seedQueuedTicket(t, s, "fake#3")
+
+	spy := &spyHandler{next: testStatePlanning, reason: testSpyReason}
+	reg := job.Registry()
+	reg[testStateQueued] = spy
+
+	d := newDispatcher(t, s, newFixtureTracker(t), bus.New(), fakeRuntime(t), reg, nil, dispatch.Config{MaxParallel: 3, Owner: testOwner})
+	if err := d.Tick(t.Context()); err != nil {
+		t.Fatalf("Tick: %v", err)
+	}
+
+	if got := spy.Calls(); got != 3 {
+		t.Fatalf("spy.Calls() = %d, want 3 (one Tick fills every free slot)", got)
+	}
+	for _, id := range []int64{idA, idB, idC} {
+		if got := getTicket(t, s, id).State; got != testStatePlanning {
+			t.Errorf("ticket %d state = %q, want planning", id, got)
+		}
+	}
+}
+
+// TestTick_RefusedClaimTriesNext proves a refused claim on one candidate
+// does not end the pass: the next candidate in order is claimed and
+// launched within the same Tick call (design section 4.2 step 5).
+func TestTick_RefusedClaimTriesNext(t *testing.T) {
+	t.Parallel()
+
+	s := newDispatchTestStore(t)
+	firstID := seedQueuedTicket(t, s, "fake#1")
+	secondID := seedQueuedTicket(t, s, "fake#2")
+
+	expires := time.Now().Add(10 * time.Minute).UTC().Truncate(time.Second)
+	claimed, err := s.Claim(t.Context(), firstID, "another-worker", expires)
+	if err != nil || !claimed {
+		t.Fatalf("pre-claim firstID: claimed=%v err=%v", claimed, err)
+	}
+
+	d := newDispatcher(t, s, newFixtureTracker(t), bus.New(), fakeRuntime(t), nil, nil, dispatch.Config{MaxParallel: 1, Owner: testOwner})
+	if err := d.Tick(t.Context()); err != nil {
+		t.Fatalf("Tick: %v", err)
+	}
+
+	if got := getTicket(t, s, secondID).State; got != testStatePlanning {
+		t.Errorf("second ticket state = %q, want planning (a refused claim must try the next candidate in the same pass)", got)
+	}
+}
+
+// TestTick_ConcurrentDriveRefused proves Tick and Run enforce one driver at
+// a time (design section 4.1): a second Tick call while one is still in
+// flight, and a Tick call while Run is driving, both return
+// ErrConcurrentDrive rather than racing fill's own claim-and-launch
+// critical section.
+func TestTick_ConcurrentDriveRefused(t *testing.T) {
+	t.Parallel()
+
+	s := newDispatchTestStore(t)
+	ticketID := seedQueuedTicket(t, s, testFixtureRef)
+
+	started := make(chan int64, 1)
+	release := make(chan struct{})
+	reg := job.Registry()
+	reg[testStateQueued] = &barrierHandler{started: started, release: release}
+
+	d := newDispatcher(t, s, newFixtureTracker(t), bus.New(), fakeRuntime(t), reg, nil, dispatch.Config{MaxParallel: 1, Interval: time.Hour, Owner: testOwner})
+
+	tickErrCh := make(chan error, 1)
+	go func() { tickErrCh <- d.Tick(t.Context()) }()
+
+	select {
+	case <-started:
+	case <-time.After(5 * time.Second):
+		t.Fatal("handler never started")
+	}
+
+	if err := d.Tick(t.Context()); !errors.Is(err, dispatch.ErrConcurrentDrive) {
+		t.Fatalf("second Tick while the first is in flight: err = %v, want ErrConcurrentDrive", err)
+	}
+
+	close(release)
+	select {
+	case err := <-tickErrCh:
+		if err != nil {
+			t.Fatalf("first Tick: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("first Tick never returned")
+	}
+
+	final := getTicket(t, s, ticketID)
+	if final.ClaimOwner != nil {
+		t.Errorf("final ticket claim owner = %v, want nil (released)", *final.ClaimOwner)
+	}
+}
+
+// TestRun_RunsTwoTicketsAtOnce proves this process can have more than one
+// ticket's handler running at the same time (design D1, section 4.4):
+// MaxParallel 2 with two ready tickets, both handlers must be observed
+// running (their own started signal received) before either is released.
+func TestRun_RunsTwoTicketsAtOnce(t *testing.T) {
+	t.Parallel()
+
+	s := newDispatchTestStore(t)
+	seedQueuedTicket(t, s, "fake#1")
+	seedQueuedTicket(t, s, "fake#2")
+
+	started := make(chan int64, 2)
+	release := make(chan struct{})
+	reg := job.Registry()
+	reg[testStateQueued] = &barrierHandler{started: started, release: release}
+
+	d := newDispatcher(t, s, newFixtureTracker(t), bus.New(), fakeRuntime(t), reg, nil, dispatch.Config{MaxParallel: 2, Interval: 5 * time.Millisecond, Owner: testOwner})
+
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	runErrCh := make(chan error, 1)
+	go func() { runErrCh <- d.Run(ctx) }()
+
+	seen := make(map[int64]bool)
+	timeout := time.After(5 * time.Second)
+	for len(seen) < 2 {
+		select {
+		case id := <-started:
+			seen[id] = true
+		case <-timeout:
+			t.Fatalf("only %d of 2 handlers started within the timeout", len(seen))
+		}
+	}
+
+	close(release)
+	cancel()
+	select {
+	case <-runErrCh:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Run never returned")
+	}
+}
+
+// TestRun_DrainWaitsForInflight proves a graceful drain does not return
+// from Run until the in-flight worker has actually finished (design
+// section 4.4, 4.5): NotifyDrain while a handler is still blocked must not
+// make Run return early.
+func TestRun_DrainWaitsForInflight(t *testing.T) {
+	t.Parallel()
+
+	s := newDispatchTestStore(t)
+	ticketID := seedQueuedTicket(t, s, testFixtureRef)
+
+	started := make(chan int64, 1)
+	release := make(chan struct{})
+	reg := job.Registry()
+	reg[testStateQueued] = &barrierHandler{started: started, release: release, next: testStatePlanning, reason: testSpyReason}
+
+	d := newDispatcher(t, s, newFixtureTracker(t), bus.New(), fakeRuntime(t), reg, nil, dispatch.Config{MaxParallel: 1, Interval: 5 * time.Millisecond, Owner: testOwner})
+
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	runErrCh := make(chan error, 1)
+	go func() { runErrCh <- d.Run(ctx) }()
+
+	select {
+	case <-started:
+	case <-time.After(5 * time.Second):
+		t.Fatal("handler never started")
+	}
+
+	if err := s.SetDraining(t.Context(), true); err != nil {
+		t.Fatalf("SetDraining: %v", err)
+	}
+	d.NotifyDrain()
+
+	// Run must not have returned yet: the handler is still blocked.
+	select {
+	case err := <-runErrCh:
+		t.Fatalf("Run returned early (err=%v) while its one worker was still blocked", err)
+	case <-time.After(200 * time.Millisecond):
+	}
+
+	close(release)
+	select {
+	case err := <-runErrCh:
+		if err != nil {
+			t.Fatalf("Run: %v, want nil (a graceful drain is not an error)", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("Run never returned after the worker was released")
+	}
+
+	if got := getTicket(t, s, ticketID).State; got != testStatePlanning {
+		t.Errorf("final ticket state = %q, want planning (the commit must still apply after a graceful drain)", got)
+	}
+}
+
+// TestRun_ForceCancelInterruptsInflight proves a force-cancelled dispatcher
+// context interrupts every in-flight run (design section 4.5, 7.2): the run
+// is recorded interrupted (outcome error, interrupted=1) and its claim is
+// cleared, rather than left for ExpireClaims to reconcile later.
+func TestRun_ForceCancelInterruptsInflight(t *testing.T) {
+	t.Parallel()
+
+	s := newDispatchTestStore(t)
+	ticketID := seedQueuedTicket(t, s, testFixtureRef)
+
+	started := make(chan int64, 1)
+	release := make(chan struct{}) // never closed: only ctx cancellation frees the handler
+	reg := job.Registry()
+	reg[testStateQueued] = &reservingBarrierHandler{started: started, release: release, job: testStatePlanning}
+
+	d := newDispatcher(t, s, newFixtureTracker(t), bus.New(), fakeRuntime(t), reg, nil, dispatch.Config{MaxParallel: 1, Interval: 5 * time.Millisecond, Owner: testOwner})
+
+	ctx, cancel := context.WithCancel(t.Context())
+	runErrCh := make(chan error, 1)
+	go func() { runErrCh <- d.Run(ctx) }()
+
+	select {
+	case <-started:
+	case <-time.After(5 * time.Second):
+		t.Fatal("handler never started")
+	}
+
+	cancel()
+	select {
+	case err := <-runErrCh:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("Run: err = %v, want context.Canceled", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("Run never returned after the force-cancel")
+	}
+
+	final := getTicket(t, s, ticketID)
+	if final.ClaimOwner != nil {
+		t.Errorf("final ticket claim owner = %v, want nil (InterruptRuns clears it)", *final.ClaimOwner)
+	}
+	runs, err := s.RunsForTicket(t.Context(), ticketID)
+	if err != nil {
+		t.Fatalf("RunsForTicket: %v", err)
+	}
+	if len(runs) != 1 {
+		t.Fatalf("runs = %d, want 1", len(runs))
+	}
+	if !runs[0].Interrupted {
+		t.Error("run.Interrupted = false, want true")
+	}
+	if runs[0].Outcome == nil || *runs[0].Outcome != testOutcomeError {
+		t.Errorf("run.Outcome = %v, want error", runs[0].Outcome)
+	}
+	if runs[0].ExitCode == nil || *runs[0].ExitCode != -1 {
+		t.Errorf("run.ExitCode = %v, want -1", runs[0].ExitCode)
+	}
+}
+
+// TestRun_FillErrorRaisesAlerts proves a fill error (not a worker error)
+// raises both D3 alerts, naming it "in a dispatcher pass" since it carries
+// no ticket id (design section 4.6): closing the store out from under a
+// Tick call makes the reconcile step (ExpireClaims) fail for real, no hook
+// needed.
+func TestRun_FillErrorRaisesAlerts(t *testing.T) {
+	s := newDispatchTestStore(t)
+	seedQueuedTicket(t, s, testFixtureRef)
+
+	d := newDispatcher(t, s, newFixtureTracker(t), bus.New(), fakeRuntime(t), nil, nil, dispatch.Config{MaxParallel: 1, Owner: testOwner})
+
+	if err := s.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	var logBuf bytes.Buffer
+	prevDefault := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logBuf, &slog.HandlerOptions{Level: slog.LevelDebug})))
+	t.Cleanup(func() { slog.SetDefault(prevDefault) })
+
+	if err := d.Tick(t.Context()); err == nil {
+		t.Fatal("Tick against a closed store: want an error, got nil")
+	}
+
+	logged := logBuf.String()
+	if !strings.Contains(logged, "in a dispatcher pass") {
+		t.Errorf("log = %q, want alert 1 naming \"in a dispatcher pass\" (no ticket id)", logged)
+	}
+	if !strings.Contains(logged, "dispatcher stopped after") {
+		t.Errorf("log = %q, want alert 2 (\"dispatcher stopped after ...\")", logged)
+	}
+}
+
+// TestRun_FailClosedLetsOthersFinish proves D3 end to end under Run: with
+// two tickets launched in the same pass, one whose commit fails closed
+// (selfStealingHandler) does not stop the other, still in-flight, ticket
+// from finishing and committing normally; Run returns only after both are
+// done, wrapping ErrFailClosed, and the two alerts appear in order.
+func TestRun_FailClosedLetsOthersFinish(t *testing.T) {
+	s := newDispatchTestStore(t)
+	aID := seedQueuedTicket(t, s, "fake#1")
+	bID := seedQueuedTicket(t, s, "fake#2")
+
+	started := make(chan int64, 1)
+	release := make(chan struct{})
+	reg := job.Registry()
+	reg[testStateQueued] = &perTicketHandler{byTicket: map[int64]job.Handler{
+		aID: selfStealingHandler{},
+		bID: &barrierHandler{started: started, release: release, next: testStatePlanning, reason: testSpyReason},
+	}}
+
+	var logBuf bytes.Buffer
+	prevDefault := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logBuf, &slog.HandlerOptions{Level: slog.LevelDebug})))
+	t.Cleanup(func() { slog.SetDefault(prevDefault) })
+
+	d := newDispatcher(t, s, newFixtureTracker(t), bus.New(), fakeRuntime(t), reg, nil, dispatch.Config{MaxParallel: 2, Interval: 5 * time.Millisecond, Owner: testOwner})
+
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	runErrCh := make(chan error, 1)
+	go func() { runErrCh <- d.Run(ctx) }()
+
+	select {
+	case got := <-started:
+		if got != bID {
+			t.Fatalf("started ticket = %d, want %d (B)", got, bID)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("B never started")
+	}
+
+	deadline := time.Now().Add(5 * time.Second)
+	for !dispatch.IsStoppedForTest(d) {
+		if time.Now().After(deadline) {
+			t.Fatal("dispatcher never stopped after A's fail-closed commit")
+		}
+		time.Sleep(time.Millisecond)
+	}
+
+	close(release)
+
+	var runErr error
+	select {
+	case runErr = <-runErrCh:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Run never returned")
+	}
+	if !errors.Is(runErr, dispatch.ErrFailClosed) {
+		t.Fatalf("Run err = %v, want errors.Is(err, dispatch.ErrFailClosed)", runErr)
+	}
+
+	if got := getTicket(t, s, bID).State; got != testStatePlanning {
+		t.Errorf("B's final state = %q, want planning (its own commit must still apply despite A's fail-closed)", got)
+	}
+	if final := getTicket(t, s, aID); final.ClaimOwner != nil {
+		t.Errorf("A's final claim owner = %v, want nil", *final.ClaimOwner)
+	}
+
+	logged := logBuf.String()
+	firstIdx := strings.Index(logged, fmt.Sprintf("fail-closed on ticket %d", aID))
+	secondIdx := strings.Index(logged, "dispatcher stopped after fail-closed")
+	if firstIdx < 0 {
+		t.Errorf("log = %q, want alert 1 naming ticket %d", logged, aID)
+	}
+	if secondIdx < 0 {
+		t.Errorf("log = %q, want alert 2", logged)
+	}
+	if firstIdx >= 0 && secondIdx >= 0 && secondIdx < firstIdx {
+		t.Errorf("alert 2 appeared before alert 1 in the log")
+	}
+}
+
+// TestFill_StopBetweenCheckAndLaunch proves fill's own launch
+// linearization point (design section 4.2 step 5): a stop set between a
+// successful Claim and the critical section that would otherwise launch
+// the worker must prevent that launch, releasing the claim instead. The
+// afterClaimForTest hook (export_test.go) opens this otherwise
+// sub-microsecond window deterministically.
+func TestFill_StopBetweenCheckAndLaunch(t *testing.T) {
+	t.Parallel()
+
+	s := newDispatchTestStore(t)
+	ticketID := seedQueuedTicket(t, s, testFixtureRef)
+
+	spy := &spyHandler{next: testStatePlanning, reason: testSpyReason}
+	reg := job.Registry()
+	reg[testStateQueued] = spy
+
+	d := newDispatcher(t, s, newFixtureTracker(t), bus.New(), fakeRuntime(t), reg, nil, dispatch.Config{MaxParallel: 1, Owner: testOwner})
+	dispatch.SetAfterClaimForTest(d, func(int64) {
+		dispatch.SetStopForTest(d, errors.New("boom: injected stop between claim and launch"))
+	})
+
+	if err := d.Tick(t.Context()); err != nil {
+		t.Fatalf("Tick: %v", err)
+	}
+
+	if got := spy.Calls(); got != 0 {
+		t.Errorf("spy.Calls() = %d, want 0 (the handler must never run once stop was set before launch)", got)
+	}
+	final := getTicket(t, s, ticketID)
+	if final.State != testStateQueued || final.ClaimOwner != nil {
+		t.Errorf("final ticket = %+v, want unchanged queued, claim released", final)
+	}
+}
+
+// TestRun_DrainBetweenClaimAndLaunchReleasesClaim proves the same launch
+// linearization point (design section 4.5) specifically for a real drain,
+// through NotifyDrain: a drain observed between a successful Claim and the
+// launch critical section releases the claim rather than launching the
+// worker. Driven through Tick for determinism (Run shares the identical
+// fill/NotifyDrain/setStop mechanism, section 4.4).
+func TestRun_DrainBetweenClaimAndLaunchReleasesClaim(t *testing.T) {
+	t.Parallel()
+
+	s := newDispatchTestStore(t)
+	ticketID := seedQueuedTicket(t, s, testFixtureRef)
+
+	spy := &spyHandler{next: testStatePlanning, reason: testSpyReason}
+	reg := job.Registry()
+	reg[testStateQueued] = spy
+
+	d := newDispatcher(t, s, newFixtureTracker(t), bus.New(), fakeRuntime(t), reg, nil, dispatch.Config{MaxParallel: 1, Interval: time.Hour, Owner: testOwner})
+	dispatch.SetAfterClaimForTest(d, func(int64) {
+		if err := s.SetDraining(t.Context(), true); err != nil {
+			t.Errorf("SetDraining: %v", err)
+		}
+		d.NotifyDrain()
+	})
+
+	if err := d.Tick(t.Context()); err != nil {
+		t.Fatalf("Tick: %v", err)
+	}
+
+	if got := spy.Calls(); got != 0 {
+		t.Errorf("spy.Calls() = %d, want 0 (a drain observed between claim and launch must release, not run)", got)
+	}
+	final := getTicket(t, s, ticketID)
+	if final.State != testStateQueued || final.ClaimOwner != nil {
+		t.Errorf("final ticket = %+v, want unchanged queued, claim released", final)
+	}
+}
+
+// TestFill_ReleaseAfterCancelStillLands proves the claim-release write
+// fill takes after observing a stop mid-claim still lands even when ctx is
+// already cancelled by the time it runs (design section 4.2 step 5,
+// "dispatch" fix 4): releaseClaimNoStop's own postHandlerContext detaches
+// from ctx, so the cancellation set inside the afterClaimForTest hook must
+// not prevent the release.
+func TestFill_ReleaseAfterCancelStillLands(t *testing.T) {
+	t.Parallel()
+
+	s := newDispatchTestStore(t)
+	ticketID := seedQueuedTicket(t, s, testFixtureRef)
+
+	reg := job.Registry()
+	reg[testStateQueued] = &spyHandler{next: testStatePlanning, reason: testSpyReason}
+
+	d := newDispatcher(t, s, newFixtureTracker(t), bus.New(), fakeRuntime(t), reg, nil, dispatch.Config{MaxParallel: 1, Owner: testOwner})
+
+	ctx, cancel := context.WithCancel(t.Context())
+	dispatch.SetAfterClaimForTest(d, func(int64) {
+		dispatch.SetStopForTest(d, errors.New("boom: injected stop before cancel"))
+		cancel()
+	})
+
+	if err := d.Tick(ctx); err != nil {
+		t.Fatalf("Tick: %v", err)
+	}
+
+	final := getTicket(t, s, ticketID)
+	if final.State != testStateQueued || final.ClaimOwner != nil {
+		t.Errorf("final ticket = %+v, want claim released even though ctx was cancelled before the release write", final)
 	}
 }

@@ -403,15 +403,3 @@ func (s *Store) GetMessage(ctx context.Context, id int64) (MessageRow, error) {
 	}
 	return m, nil
 }
-
-// CountActiveRuns counts tickets that are claimed and not waiting, the
-// max_parallel guard's input.
-func (s *Store) CountActiveRuns(ctx context.Context) (int, error) {
-	var n int
-	err := s.db.QueryRowContext(ctx,
-		`SELECT COUNT(*) FROM tickets WHERE claim_owner IS NOT NULL AND waiting_on IS NULL`).Scan(&n)
-	if err != nil {
-		return 0, fmt.Errorf("count active runs: %w", err)
-	}
-	return n, nil
-}
