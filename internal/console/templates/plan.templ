@@ -31,7 +31,7 @@ templ PlanView(p RenderedPlan) {
 		<h3>Shape</h3>
 		@p.Design.ShapeHTML
 		<h3>Changes</h3>
-		@changesTable(p.Design.Changes)
+		@changeBlocks(p.Design.Changes)
 		<h3>Types</h3>
 		@typesSection(p.Design.Types)
 		<h3>Migrations</h3>
@@ -111,38 +111,39 @@ templ planProblem(p RenderedProblem) {
 	}
 }
 
-// changesTable renders Design.Changes (design section 6.9): a table of
-// path, symbol, kind, callers, callees, before, after, simple_call.
-templ changesTable(changes []response.Change) {
-	if len(changes) > 0 {
-		<table class="changes">
-			<thead>
-				<tr>
-					<th>Path</th>
-					<th>Symbol</th>
-					<th>Kind</th>
-					<th>Callers</th>
-					<th>Callees</th>
-					<th>Before</th>
-					<th>After</th>
-					<th>Simple call</th>
-				</tr>
-			</thead>
-			<tbody>
-				for _, c := range changes {
-					<tr>
-						<td>{ c.Path }</td>
-						<td>{ c.Symbol }</td>
-						<td>{ string(c.Kind) }</td>
-						<td>{ c.Callers }</td>
-						<td>{ c.Callees }</td>
-						<td><pre>{ c.Before }</pre></td>
-						<td><pre>{ c.After }</pre></td>
-						<td>{ c.SimpleCall }</td>
-					</tr>
+// changeBlocks renders Design.Changes (design section 6.9) as one block per
+// change rather than a row of an 8-column table (bug fix): Before and
+// After hold whole source files, so a table row grew hundreds of pixels
+// tall and mostly empty in the ~800px thread column. Each change gets a
+// heading line (path, symbol, kind), a short definition list for Callers,
+// Callees, and Simple call -- each omitted when empty -- then Before
+// (omitted when "none" or empty, the no-code-today case) and After as
+// their own code blocks.
+templ changeBlocks(changes []response.Change) {
+	for _, c := range changes {
+		<div class="change-block">
+			<h4>{ c.Path } { c.Symbol } ({ string(c.Kind) })</h4>
+			<dl class="run-fields">
+				if c.Callers != "" {
+					<dt>Callers</dt>
+					<dd>{ c.Callers }</dd>
 				}
-			</tbody>
-		</table>
+				if c.Callees != "" {
+					<dt>Callees</dt>
+					<dd>{ c.Callees }</dd>
+				}
+				if c.SimpleCall != "" {
+					<dt>Simple call</dt>
+					<dd>{ c.SimpleCall }</dd>
+				}
+			</dl>
+			if c.Before != "" && c.Before != "none" {
+				<p><strong>Before</strong></p>
+				<pre class="change-code">{ c.Before }</pre>
+			}
+			<p><strong>After</strong></p>
+			<pre class="change-code">{ c.After }</pre>
+		</div>
 	}
 }
 

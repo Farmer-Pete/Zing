@@ -124,6 +124,30 @@ templ palette() {
 		   never scrolls sideways. */
 		#main table { display: block; max-width: 100%; overflow-x: auto; }
 		#main pre { max-width: 100%; overflow-x: auto; }
+		/* .change-block (bug fix: the plan's Changes table rendered one row
+		   per change, with Before/After whole source files in a <pre> table
+		   cell; a row grew hundreds of pixels tall and mostly empty in the
+		   ~800px thread column). plan.templ's changeBlocks renders one block
+		   per change instead, reusing .run-fields below for its Callers/
+		   Callees/Simple call list; .change-code is its own scroll box so a
+		   long line never widens the page past #main pre's own rule above. */
+		.change-block {
+			border: 1px solid var(--zing-border);
+			border-radius: 0.5rem;
+			padding: 0.75rem 1rem;
+			margin-bottom: 0.75rem;
+			background: var(--zing-surface);
+		}
+		.change-block h4 { margin: 0 0 0.375rem; }
+		.change-code {
+			margin: 0;
+			max-width: 100%;
+			overflow-x: auto;
+			background: var(--zing-bg);
+			border: 1px solid var(--zing-border);
+			border-radius: 0.375rem;
+			padding: 0.5rem;
+		}
 		#rail {
 			border-left: 1px solid var(--zing-border);
 			padding: 1rem;

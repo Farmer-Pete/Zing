@@ -249,17 +249,27 @@ func TestRenderPlanEveryField(t *testing.T) {
 		}
 	})
 
-	t.Run("changes render as a table", func(t *testing.T) {
+	t.Run("changes render as a block, not a table", func(t *testing.T) {
 		t.Parallel()
+		if strings.Contains(got, `<table class="changes">`) {
+			t.Errorf("changes still render as a table; got:\n%s", got)
+		}
 		for _, want := range []string{
+			`<div class="change-block">`,
 			planChangePath, "RenderPlan", "new",
 			"views.go&#39;s threadComponent", "Render, templates.PlanView",
-			"func RenderPlan(plan response.Plan) (templ.Component, error)",
+			"<pre class=\"change-code\">func RenderPlan(plan response.Plan) (templ.Component, error)</pre>",
 			"console.RenderPlan(plan)",
 		} {
 			if !strings.Contains(got, want) {
-				t.Errorf("changes table missing %q; got:\n%s", want, got)
+				t.Errorf("changes block missing %q; got:\n%s", want, got)
 			}
+		}
+		// fixturePlan's one change has Before == "" (bug fix: an empty or
+		// "none" Before is omitted rather than rendered as an empty code
+		// block under its own label).
+		if strings.Contains(got, "<strong>Before</strong>") {
+			t.Errorf("empty Before still rendered its label; got:\n%s", got)
 		}
 	})
 
@@ -394,6 +404,39 @@ func TestRenderPlanNoneLines(t *testing.T) {
 	}
 	if !strings.Contains(got, "Nothing deleted.") {
 		t.Errorf("Deletions.None did not render a none line; got:\n%s", got)
+	}
+}
+
+// TestRenderPlanChangeFieldsOmitWhenEmpty proves changeBlocks' own omission
+// rules (bug fix: the Changes table's eight columns, Before and After whole
+// source files among them, made each row hundreds of pixels tall and mostly
+// empty in the ~800px thread column): a change with a real Before renders
+// it under its own label, and Callers, Callees, and Simple call each render
+// only when not empty.
+func TestRenderPlanChangeFieldsOmitWhenEmpty(t *testing.T) {
+	t.Parallel()
+	plan := fixturePlan()
+	plan.Design.Changes = []response.Change{
+		{
+			Path: "internal/console/plan.go", Symbol: "buildRenderedPlan", Kind: response.ChangeKindModified,
+			Callers: "RenderPlan, through buildRenderedPlan", Callees: "", Before: "func buildRenderedPlan() {}", After: "func buildRenderedPlan(plan response.Plan) {}",
+			SimpleCall: "",
+		},
+	}
+
+	got := renderPlanToString(t, plan, nil)
+
+	if !strings.Contains(got, `<pre class="change-code">func buildRenderedPlan() {}</pre>`) {
+		t.Errorf("a non-empty Before did not render under its own code block; got:\n%s", got)
+	}
+	if !strings.Contains(got, "<dt>Callers</dt><dd>RenderPlan, through buildRenderedPlan</dd>") {
+		t.Errorf("Callers did not render; got:\n%s", got)
+	}
+	if strings.Contains(got, "<dt>Callees</dt>") {
+		t.Errorf("empty Callees still rendered; got:\n%s", got)
+	}
+	if strings.Contains(got, "<dt>Simple call</dt>") {
+		t.Errorf("empty Simple call still rendered; got:\n%s", got)
 	}
 }
 
