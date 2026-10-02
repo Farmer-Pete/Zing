@@ -404,6 +404,7 @@ func TestRunLensesParallelRejectsOutOfRangeConfig(t *testing.T) {
 	for _, n := range []int{-1, 0, 8, 100} {
 		t.Run(strconv.Itoa(n), func(t *testing.T) {
 			t.Parallel()
+			deps := deps // each parallel subtest gets its own copy to set
 			deps.LensesParallel = n
 			called := false
 			// build's own SessionUpsert and RunRequest returns are always the
