@@ -293,16 +293,22 @@ func (s *Store) QuestionsByState(ctx context.Context, ticketID int64, state stri
 	return out, nil
 }
 
-// runColumns is the runs column list, in table-declaration order.
-const runColumns = `id, session_id, turn, lens, task_n, model, outcome, agent_seconds, exit_code`
+// runColumns is the runs column list, in table-declaration order, including
+// migration 0005's four interrupt/identity columns (design section 5.1).
+const runColumns = `id, session_id, turn, lens, task_n, model, outcome, agent_seconds, exit_code, interrupted, pgid, proc_start, started_at`
 
 // scanRun scans one row of runColumns, in that order, into a Run.
 func scanRun(rs rowScanner) (Run, error) {
 	var r Run
 	var lens, model, outcome sql.NullString
-	var taskN, agentSeconds, exitCode sql.NullInt64
+	var taskN, agentSeconds, exitCode, pgid sql.NullInt64
+	var interrupted int
+	var procStart, startedAt sql.NullString
 
-	if err := rs.Scan(&r.ID, &r.SessionID, &r.Turn, &lens, &taskN, &model, &outcome, &agentSeconds, &exitCode); err != nil {
+	if err := rs.Scan(
+		&r.ID, &r.SessionID, &r.Turn, &lens, &taskN, &model, &outcome, &agentSeconds, &exitCode,
+		&interrupted, &pgid, &procStart, &startedAt,
+	); err != nil {
 		return Run{}, err
 	}
 	if lens.Valid {
@@ -325,6 +331,21 @@ func scanRun(rs rowScanner) (Run, error) {
 	if exitCode.Valid {
 		n := int(exitCode.Int64)
 		r.ExitCode = &n
+	}
+	r.Interrupted = interrupted != 0
+	if pgid.Valid {
+		n := int(pgid.Int64)
+		r.PGID = &n
+	}
+	if procStart.Valid {
+		r.ProcStart = &procStart.String
+	}
+	if startedAt.Valid {
+		ts, err := time.Parse(fixedTimeLayout, startedAt.String)
+		if err != nil {
+			return Run{}, fmt.Errorf("parse started_at: %w", err)
+		}
+		r.StartedAt = &ts
 	}
 	return r, nil
 }

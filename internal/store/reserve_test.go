@@ -387,7 +387,7 @@ func TestInterruptedResumeStaysCharged(t *testing.T) {
 		t.Fatalf("resume Reserve: %v", err)
 	}
 
-	if _, err := s.ExpireClaims(ctx, time.Now().Add(time.Hour)); err != nil {
+	if _, err := s.ExpireClaims(ctx, time.Now().Add(time.Hour), ""); err != nil {
 		t.Fatalf("ExpireClaims: %v", err)
 	}
 

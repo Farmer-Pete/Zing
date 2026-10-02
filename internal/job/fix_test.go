@@ -407,7 +407,7 @@ func TestDriveFixResumesInterrupted(t *testing.T) {
 		t.Fatalf("err = %v, want errors.Is(err, runtime.ErrCanceled)", err)
 	}
 
-	if _, expireErr := s.ExpireClaims(t.Context(), time.Now().Add(20*time.Minute)); expireErr != nil {
+	if _, expireErr := s.ExpireClaims(t.Context(), time.Now().Add(20*time.Minute), ""); expireErr != nil {
 		t.Fatalf("ExpireClaims: %v", expireErr)
 	}
 

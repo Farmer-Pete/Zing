@@ -344,7 +344,7 @@ func TestRunJob_LostClaimWrapsErrClaimLost(t *testing.T) {
 	// Simulate the lease moving on from under this call: expire every claim
 	// as of a moment in the future, then let a different owner claim the
 	// ticket, so (owner, expires) above no longer matches the live row.
-	if _, err := s.ExpireClaims(t.Context(), time.Now().Add(time.Hour)); err != nil {
+	if _, err := s.ExpireClaims(t.Context(), time.Now().Add(time.Hour), ""); err != nil {
 		t.Fatalf("ExpireClaims: %v", err)
 	}
 	otherExpires := time.Now().Add(10 * time.Minute).UTC().Truncate(time.Second)

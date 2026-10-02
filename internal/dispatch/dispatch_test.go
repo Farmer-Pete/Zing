@@ -2968,7 +2968,7 @@ func (staleOwnerHandler) Run(ctx context.Context, t store.Ticket, d job.Deps) (s
 	if _, err := rt.Run(ctx, runtime.RunRequest{Job: response.JobPlanning}); err != nil {
 		return store.HandlerCommit{}, err
 	}
-	if _, err := d.Store.ExpireClaims(ctx, d.Expires.Add(time.Second)); err != nil {
+	if _, err := d.Store.ExpireClaims(ctx, d.Expires.Add(time.Second), ""); err != nil {
 		return store.HandlerCommit{}, err
 	}
 	return store.HandlerCommit{TicketID: t.ID, Owner: d.Owner, Expires: d.Expires, Next: testStateDone, Reason: testReasonPlanReady}, nil
@@ -2992,7 +2992,7 @@ func (staleOwnerReleaseHandler) Run(ctx context.Context, _ store.Ticket, d job.D
 	if _, err := rt.Run(ctx, runtime.RunRequest{Job: response.JobPlanning}); err != nil {
 		return store.HandlerCommit{}, err
 	}
-	if _, err := d.Store.ExpireClaims(ctx, d.Expires.Add(time.Second)); err != nil {
+	if _, err := d.Store.ExpireClaims(ctx, d.Expires.Add(time.Second), ""); err != nil {
 		return store.HandlerCommit{}, err
 	}
 	return store.HandlerCommit{}, errors.New("boom: handler blew up after the runtime already ran, lease now stolen")
@@ -3634,7 +3634,7 @@ func TestTick_ErrCanceledLeavesClaimForExpireClaimsToReconcile(t *testing.T) {
 		t.Errorf("run outcome = %q, want nil before the lease expires", *runs[0].Outcome)
 	}
 
-	if _, expireErr := s.ExpireClaims(t.Context(), claimed.ClaimExpiresAt.Add(time.Second)); expireErr != nil {
+	if _, expireErr := s.ExpireClaims(t.Context(), claimed.ClaimExpiresAt.Add(time.Second), ""); expireErr != nil {
 		t.Fatalf("ExpireClaims: %v", expireErr)
 	}
 
@@ -3764,7 +3764,7 @@ func TestTick_HandlerErrorAfterReserve(t *testing.T) {
 type claimLostBeforeReserveHandler struct{}
 
 func (claimLostBeforeReserveHandler) Run(ctx context.Context, t store.Ticket, d job.Deps) (store.HandlerCommit, error) {
-	if _, err := d.Store.ExpireClaims(ctx, d.Expires.Add(time.Second)); err != nil {
+	if _, err := d.Store.ExpireClaims(ctx, d.Expires.Add(time.Second), ""); err != nil {
 		return store.HandlerCommit{}, err
 	}
 	_, err := d.Reserve(ctx, t.ID, store.SessionUpsert{Job: testStatePlanning, Runtime: testRuntimeFake}, store.RunSeed{Model: testModelClaudeX})

@@ -332,7 +332,7 @@ func TestExpireClaims_ClearsAtOrPastExpiry(t *testing.T) {
 		t.Fatalf("Claim(fresh): %v", err)
 	}
 
-	ids, err := s.ExpireClaims(ctx, now)
+	ids, err := s.ExpireClaims(ctx, now, "")
 	if err != nil {
 		t.Fatalf("ExpireClaims: %v", err)
 	}
@@ -419,7 +419,7 @@ func TestExpireClaims_ReconcilesNullOutcomeRunOnExpiredClaim(t *testing.T) {
 		t.Fatalf("Claim: %v", err)
 	}
 
-	ids, err := s.ExpireClaims(ctx, now)
+	ids, err := s.ExpireClaims(ctx, now, "")
 	if err != nil {
 		t.Fatalf("ExpireClaims: %v", err)
 	}
@@ -434,7 +434,7 @@ func TestExpireClaims_ReconcilesNullOutcomeRunOnExpiredClaim(t *testing.T) {
 	if !ok || run.ID != runID {
 		t.Fatalf("FirstRun = (%+v, %v), want the reserved run %d", run, ok, runID)
 	}
-	if run.Outcome == nil || *run.Outcome != "error" {
+	if run.Outcome == nil || *run.Outcome != testOutcomeError {
 		t.Errorf("run.Outcome = %v, want error", run.Outcome)
 	}
 	if run.ExitCode == nil || *run.ExitCode != -1 {
@@ -463,7 +463,7 @@ func TestExpireClaims_LeavesTerminalOutcomeRunUntouched(t *testing.T) {
 	if _, err := s.Claim(ctx, ticketID, "host-1", now.Add(-time.Minute)); err != nil {
 		t.Fatalf("Claim: %v", err)
 	}
-	if _, err := s.ExpireClaims(ctx, now); err != nil {
+	if _, err := s.ExpireClaims(ctx, now, ""); err != nil {
 		t.Fatalf("ExpireClaims: %v", err)
 	}
 
@@ -501,7 +501,7 @@ func TestExpireClaims_LeavesRunsOfUnexpiredClaimUntouched(t *testing.T) {
 	if _, err := s.Claim(ctx, ticketID, "host-1", now.Add(time.Hour)); err != nil {
 		t.Fatalf("Claim: %v", err)
 	}
-	if _, err := s.ExpireClaims(ctx, now); err != nil {
+	if _, err := s.ExpireClaims(ctx, now, ""); err != nil {
 		t.Fatalf("ExpireClaims: %v", err)
 	}
 
@@ -541,7 +541,7 @@ func TestExpireClaims_LeavesAnotherTicketsRunUntouched(t *testing.T) {
 	// own cleared set; the reconcile scoping is what this test is really
 	// asserting: otherRunID's session hangs off a ticket ExpireClaims never
 	// touches at all.
-	if _, err := s.ExpireClaims(ctx, now); err != nil {
+	if _, err := s.ExpireClaims(ctx, now, ""); err != nil {
 		t.Fatalf("ExpireClaims: %v", err)
 	}
 
@@ -562,12 +562,69 @@ func TestExpireClaims_NoExpiredClaimsReturnsEmpty(t *testing.T) {
 	s := newTestStore(t)
 	ctx := t.Context()
 
-	ids, err := s.ExpireClaims(ctx, time.Now())
+	ids, err := s.ExpireClaims(ctx, time.Now(), "")
 	if err != nil {
 		t.Fatalf("ExpireClaims: %v", err)
 	}
 	if len(ids) != 0 {
 		t.Errorf("ExpireClaims on an empty database = %v, want empty", ids)
+	}
+}
+
+// TestExpireClaims_OnlyOwnerSkipsOtherOwnersClaims proves the new onlyOwner
+// parameter (design section 5.3): with a non-empty onlyOwner, a ticket
+// claimed by a different owner is left alone even though its claim has
+// expired, while a ticket claimed by onlyOwner is still cleared -- the
+// behavior a lock-holding serve's ReclaimForeign path depends on, since a
+// foreign claim must be left for reclaimForeign, never expired here.
+func TestExpireClaims_OnlyOwnerSkipsOtherOwnersClaims(t *testing.T) {
+	t.Parallel()
+	s := newTestStore(t)
+	ctx := t.Context()
+
+	projectID, err := s.EnsureProject(ctx, testProject)
+	if err != nil {
+		t.Fatalf("EnsureProject: %v", err)
+	}
+	mine, err := s.InsertTicket(ctx, Ticket{ProjectID: projectID, TrackerRef: "1", Title: "mine", State: ticketStateQueued})
+	if err != nil {
+		t.Fatalf("InsertTicket(mine): %v", err)
+	}
+	foreign, err := s.InsertTicket(ctx, Ticket{ProjectID: projectID, TrackerRef: "2", Title: "foreign", State: ticketStateQueued})
+	if err != nil {
+		t.Fatalf("InsertTicket(foreign): %v", err)
+	}
+
+	now := time.Now()
+	if _, err = s.Claim(ctx, mine, "self-1", now.Add(-time.Minute)); err != nil {
+		t.Fatalf("Claim(mine): %v", err)
+	}
+	if _, err = s.Claim(ctx, foreign, "other-1", now.Add(-time.Minute)); err != nil {
+		t.Fatalf("Claim(foreign): %v", err)
+	}
+
+	ids, err := s.ExpireClaims(ctx, now, "self-1")
+	if err != nil {
+		t.Fatalf("ExpireClaims: %v", err)
+	}
+	if len(ids) != 1 || ids[0] != mine {
+		t.Fatalf("ExpireClaims(onlyOwner=self-1) = %v, want exactly [%d]", ids, mine)
+	}
+
+	got, err := s.GetTicket(ctx, mine)
+	if err != nil {
+		t.Fatalf("GetTicket(mine): %v", err)
+	}
+	if got.ClaimOwner != nil {
+		t.Error("mine ticket claim was not cleared")
+	}
+
+	stillForeign, err := s.GetTicket(ctx, foreign)
+	if err != nil {
+		t.Fatalf("GetTicket(foreign): %v", err)
+	}
+	if stillForeign.ClaimOwner == nil || *stillForeign.ClaimOwner != "other-1" {
+		t.Errorf("foreign ticket claim = %v, want other-1 (untouched)", stillForeign.ClaimOwner)
 	}
 }
 

@@ -241,7 +241,7 @@ func (d *Dispatcher) Tick(ctx context.Context) error {
 
 	// 1. Reconcile. ExpireClaims logs "claim expired" per id itself
 	// (store/spine.go), so Tick does not repeat that line.
-	if _, err := d.store.ExpireClaims(ctx, now); err != nil {
+	if _, err := d.store.ExpireClaims(ctx, now, ""); err != nil {
 		return fmt.Errorf("dispatch: reconcile: %w", err)
 	}
 

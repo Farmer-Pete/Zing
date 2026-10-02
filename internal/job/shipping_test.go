@@ -3309,7 +3309,7 @@ func TestApplyCrashBetweenReplyAndResolve(t *testing.T) {
 	// claim held: nothing released it. ExpireClaims is the same reconcile a
 	// crash or a dispatcher restart runs for real (building_test.go,
 	// fix_test.go give this same pattern).
-	if _, expireErr := s.ExpireClaims(t.Context(), time.Now().Add(20*time.Minute)); expireErr != nil {
+	if _, expireErr := s.ExpireClaims(t.Context(), time.Now().Add(20*time.Minute), ""); expireErr != nil {
 		t.Fatalf("ExpireClaims: %v", expireErr)
 	}
 
