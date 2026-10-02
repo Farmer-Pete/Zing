@@ -106,7 +106,7 @@ func TestLoad_MinimalConfigGetsEveryDefault(t *testing.T) {
 		},
 		Models: Models{
 			Sonnet: "claude-sonnet-5",
-			Opus:   "claude-opus-4-8",
+			Opus:   "claude-opus-5-5",
 			Fable:  "claude-fable-5-1",
 			Codex:  "gpt-5.5",
 		},

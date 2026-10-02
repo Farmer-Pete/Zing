@@ -654,7 +654,7 @@ func applyDefaults(md toml.MetaData, cfg *Config) {
 		cfg.Models.Sonnet = "claude-sonnet-5"
 	}
 	if !md.IsDefined("models", "opus") {
-		cfg.Models.Opus = "claude-opus-4-8"
+		cfg.Models.Opus = "claude-opus-5-5"
 	}
 	if !md.IsDefined("models", "fable") {
 		cfg.Models.Fable = "claude-fable-5-1"
