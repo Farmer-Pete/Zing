@@ -621,3 +621,25 @@ func TestEvaluateCIReportedGreen(t *testing.T) {
 		t.Error("a running check: ReportedGreen true, want false")
 	}
 }
+
+// TestAttestAppStatuses is a regression test for a live PR: the ruleset
+// required "CodeRabbit" from app 347564, CodeRabbit reports a commit status
+// rather than a check run, and EvaluateCI matches an app-bound check only
+// by a check run, so CI stayed pending forever although GitHub reported
+// the pull request mergeable ("clean"). GitHub enforces the app identity
+// of a required status itself, so once it says clean, a successful status
+// of the same context counts as that app's run. Not clean, it does not.
+func TestAttestAppStatuses(t *testing.T) {
+	t.Parallel()
+	app := int64(347564)
+	required := []orchestrator.RequiredCheck{{Context: testRequiredCI}, {Context: testCheckB, AppID: &app}}
+	runs := []orchestrator.CheckRun{{ID: 1, Name: testRequiredCI, Status: ghCompleted, Conclusion: ghSuccess}}
+	statuses := []orchestrator.CommitStatus{{Context: testCheckB, State: ghSuccess}}
+
+	if got := EvaluateCI(attestAppStatuses(runs, statuses, required, "clean"), statuses, required); got.State != CIGreen {
+		t.Errorf("clean: State = %v (missing %v), want green", got.State, got.Missing)
+	}
+	if got := EvaluateCI(attestAppStatuses(runs, statuses, required, "blocked"), statuses, required); got.State != CIPending {
+		t.Errorf("blocked: State = %v, want pending (a status alone never satisfies an app-bound check)", got.State)
+	}
+}

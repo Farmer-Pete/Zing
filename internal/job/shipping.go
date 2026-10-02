@@ -682,7 +682,7 @@ func (h shipHandler) poll(ctx context.Context, t store.Ticket, d Deps) (store.Ha
 	pollThreads := pollThreadsFrom(threadsRaw)
 
 	fp := pollFingerprint(pr, runs, statuses, required, pollThreads)
-	result := EvaluateCI(runs, statuses, required)
+	result := EvaluateCI(attestAppStatuses(runs, statuses, required, pr.MergeableState), statuses, required)
 	anyUnresolved := len(actionable) > 0 || len(leftover) > 0 || len(unclassified) > 0
 
 	switch {

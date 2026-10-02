@@ -514,3 +514,29 @@ func matchPathSegments(pat, seg []string) bool {
 	}
 	return matchPathSegments(pat[1:], seg[1:])
 }
+
+// attestAppStatuses adds a synthetic successful check run for each required
+// check bound to an app that no check run matches but a successful commit
+// status of the same context does, only when GitHub's own mergeableState is
+// "clean" (bug fix: CodeRabbit reports a status, not a check run, so an
+// app-bound CodeRabbit requirement stayed missing forever). GitHub enforces
+// the app identity of a required status itself, so a spoofed status leaves
+// the pull request "blocked" and gains nothing here.
+func attestAppStatuses(runs []orchestrator.CheckRun, statuses []orchestrator.CommitStatus, required []orchestrator.RequiredCheck, mergeableState string) []orchestrator.CheckRun {
+	if mergeableState != "clean" {
+		return runs
+	}
+	out := runs
+	for _, rc := range required {
+		if rc.AppID == nil || requiredMatched(rc, runs, nil) {
+			continue
+		}
+		for _, st := range statuses {
+			if st.Context == rc.Context && st.State == ghSuccess {
+				out = append(out, orchestrator.CheckRun{Name: rc.Context, AppID: *rc.AppID, Status: ghCompleted, Conclusion: ghSuccess})
+				break
+			}
+		}
+	}
+	return out
+}

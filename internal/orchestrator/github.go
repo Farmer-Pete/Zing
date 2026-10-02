@@ -170,6 +170,10 @@ type PRState struct {
 	Draft   bool
 	HeadSHA string // 40 hex
 	BaseRef string
+	// MergeableState is GitHub's own mergeable_state ("clean", "blocked",
+	// "unstable", ...); "clean" means GitHub has seen every required check
+	// pass, app identities included.
+	MergeableState string
 }
 
 // CheckRun is one check run GitHub reports for a commit (PKG9-PLAN.md
@@ -363,6 +367,8 @@ func (g *GitHubClient) GetPR(ctx context.Context, owner, repo string, number int
 		Draft:   pr.GetDraft(),
 		HeadSHA: pr.GetHead().GetSHA(),
 		BaseRef: pr.GetBase().GetRef(),
+
+		MergeableState: pr.GetMergeableState(),
 	}, nil
 }
 
