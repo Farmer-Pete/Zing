@@ -5229,3 +5229,40 @@ func TestPollDraftReadyWhenOnlyMissing(t *testing.T) {
 		t.Errorf("commit.Messages = %+v, want a \"pr ready\" marker", commit.Messages)
 	}
 }
+
+// TestMergeNowWithAppStatusOnCleanPR is a regression test for a live PR:
+// the poll counted CodeRabbit's app-bound required status once GitHub
+// reported the pull request clean, and asked to merge, but MERGE's own
+// re-check did not, so it refused with "CI is not green" and asked again.
+// Every CI evaluation now shares the same rule.
+func TestMergeNowWithAppStatusOnCleanPR(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow end-to-end flow; runs in the full suite")
+	}
+	t.Parallel()
+	s, ticket, gh, tr := shipPublished(t)
+	local := shipHeadSHA(t, s, ticket)
+	runs, required := shipGreenCI()
+	app := int64(347564)
+	required = append(required, orchestrator.RequiredCheck{Context: "CodeRabbit", AppID: &app})
+	gh.runs, gh.required = runs, required
+	gh.statuses = []orchestrator.CommitStatus{{Context: "CodeRabbit", State: "success"}}
+	pr := shipMergeReadyPR(local, "PR_node_app_status")
+	pr.MergeableState = "clean"
+	gh.prState = pr
+
+	commit1, err := shipPollRun(t, s, ticket, gh, tr)
+	if err != nil {
+		t.Fatalf("Run (ask): %v", err)
+	}
+	pbApply(t, s, ticket, commit1)
+
+	shipAnswerMergeQuestion(t, s, ticket.ID, "a")
+	commit2, err := shipPollRun(t, s, pbGetTicket(t, s, ticket.ID), gh, tr)
+	if err != nil {
+		t.Fatalf("Run (merge now): %v", err)
+	}
+	if !shipHasMessage(commit2, "pr merged "+local) {
+		t.Errorf("commit2.Messages = %+v, want %q", commit2.Messages, "pr merged "+local)
+	}
+}

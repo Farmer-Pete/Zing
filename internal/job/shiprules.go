@@ -293,7 +293,7 @@ func pollFingerprint(pr orchestrator.PRState, runs []orchestrator.CheckRun, stat
 		fmt.Fprintf(&b, "required %s %s\n", rc.Context, requiredAppIDText(rc.AppID))
 	}
 
-	result := EvaluateCI(runs, statuses, required)
+	result := prCI(pr, runs, statuses, required)
 	fmt.Fprintf(&b, "ci %s missing=%s\n", result.State, strings.Join(result.Missing, ","))
 
 	sum := sha256.Sum256([]byte(b.String()))
@@ -539,4 +539,12 @@ func attestAppStatuses(runs []orchestrator.CheckRun, statuses []orchestrator.Com
 		}
 	}
 	return out
+}
+
+// prCI is EvaluateCI for one pull request, with attestAppStatuses applied
+// from its own mergeable state: POLL, MERGE, and the poll fingerprint all
+// call this one function, so they never disagree on whether CI is green
+// (bug fix: POLL asked to merge while MERGE's re-check refused).
+func prCI(pr orchestrator.PRState, runs []orchestrator.CheckRun, statuses []orchestrator.CommitStatus, required []orchestrator.RequiredCheck) CIResult {
+	return EvaluateCI(attestAppStatuses(runs, statuses, required, pr.MergeableState), statuses, required)
 }
