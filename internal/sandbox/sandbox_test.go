@@ -516,6 +516,44 @@ func TestLoadRejectsRepeatedPlaceholder(t *testing.T) {
 	}
 }
 
+// TestLoadRejectsProfileBeforeResolvingHost proves Load reports a profile
+// that does not render as "profile rejected" even when the host cannot be
+// resolved: HOME points at a regular file, so os.UserCacheDir names a path
+// under a file and resolveHost's MkdirAll fails, the same resolveHost
+// failure the build sandbox causes by denying the cache root chmod when
+// zing builds zing. The first call, with a valid profile, proves the
+// forcing works; the second, with a bad port, is the regression.
+//
+// Not parallel: it calls t.Setenv("HOME", ...).
+func TestLoadRejectsProfileBeforeResolvingHost(t *testing.T) {
+	if runtime.GOOS != testGOOSDarwin {
+		t.Skip("off darwin Load returns before either check")
+	}
+	dataDir := t.TempDir()
+	homeFile := filepath.Join(t.TempDir(), "home-is-a-file")
+	if err := os.WriteFile(homeFile, nil, 0o600); err != nil {
+		t.Fatalf("write %s: %v", homeFile, err)
+	}
+	t.Setenv("HOME", homeFile)
+
+	valid := []byte("(version 1)\n;;READ_PATHS;;\n;;CONSOLE_DENY;;\n")
+	sb := Load(valid, dataDir, nil, 7420)
+	if sb.Available() {
+		t.Fatal("Load with an unresolvable home: want unavailable")
+	}
+	if sb.Reason() != reasonUserCacheDirNotFound {
+		t.Fatalf("Reason() = %q, want %q (HOME as a file must make resolveHost fail)", sb.Reason(), reasonUserCacheDirNotFound)
+	}
+
+	sb = Load(valid, dataDir, nil, 0)
+	if sb.Available() {
+		t.Fatal("Load with a bad port: want unavailable")
+	}
+	if sb.Reason() != reasonProfileRejected {
+		t.Errorf("Reason() = %q, want %q (profile is validated before the host is resolved)", sb.Reason(), reasonProfileRejected)
+	}
+}
+
 // ---- Set: For, OffSet, FirstUnavailable (PKG9-PLAN.md section 4.7) --------
 
 // TestSetFor proves Set.For's own three-name lookup, and that any other

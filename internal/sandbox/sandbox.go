@@ -173,8 +173,8 @@ func (s Sandbox) Reason() string { return s.reason }
 // owner, since a sandboxed build's own cache lives here.
 const cacheDirPerm = 0o700
 
-// Load resolves the host values, renders profile with readPaths and
-// consolePort, and proves the result loads by running sandbox-exec against
+// Load renders profile with readPaths and consolePort, then resolves the
+// host values, and proves the result loads by running sandbox-exec against
 // a throwaway run directory (design section 5.4 of PKG8-PLAN.md). It never
 // returns an error: any failure is recorded on the returned Sandbox,
 // unavailable, with one of the four closed reasons. Load is LoadProfile("build",
@@ -184,19 +184,22 @@ func Load(profile []byte, dataDir string, readPaths []string, consolePort int) S
 	return LoadProfile(profileNameBuild, profile, dataDir, readPaths, consolePort)
 }
 
-// LoadProfile resolves the host values, renders profile with readPaths and
-// consolePort, and proves the result loads by running sandbox-exec against
-// a throwaway run directory (PKG9-PLAN.md section 4.7): build and readonly
-// share M1's own proof (a fresh /usr/bin/true under generic parameters);
-// name == "judge" additionally writes a temp scenarios file and a temp
-// Codex home into that same run directory and proves SCENARIOS_FILE's
-// literal allow with "/bin/cat" instead (section 4.7's own worked
-// example), so a judge profile that cannot read its one literal file is
-// caught at load time, not at the judge's first real run. name is kept on
-// the returned Sandbox (Prefix reads it) so every later caller already
-// names which profile it loaded. It never returns an error: any failure is
-// recorded on the returned Sandbox, unavailable, with one of the four
-// closed reasons.
+// LoadProfile renders profile with readPaths and consolePort, then resolves
+// the host values, and proves the result loads by running sandbox-exec
+// against a throwaway run directory (PKG9-PLAN.md section 4.7): build and
+// readonly share M1's own proof (a fresh /usr/bin/true under generic
+// parameters); name == "judge" additionally writes a temp scenarios file
+// and a temp Codex home into that same run directory and proves
+// SCENARIOS_FILE's literal allow with "/bin/cat" instead (section 4.7's own
+// worked example), so a judge profile that cannot read its one literal
+// file is caught at load time, not at the judge's first real run. name is
+// kept on the returned Sandbox (Prefix reads it) so every later caller
+// already names which profile it loaded. It never returns an error: any
+// failure is recorded on the returned Sandbox, unavailable, with one of
+// the four closed reasons. A profile that does not render is reported as
+// rejected before any host directory is touched, so a bad profile is
+// called a bad profile whatever the host state (the build sandbox denies
+// the cache root chmod).
 func LoadProfile(name string, profile []byte, dataDir string, readPaths []string, consolePort int) Sandbox {
 	if runtime.GOOS != "darwin" {
 		return Sandbox{reason: reasonNotMacOS, name: name}
@@ -205,14 +208,14 @@ func LoadProfile(name string, profile []byte, dataDir string, readPaths []string
 		return Sandbox{reason: reasonSandboxExecNotFound, name: name}
 	}
 
+	rendered, err := renderProfile(profile, readPaths, consolePort)
+	if err != nil {
+		return Sandbox{reason: reasonProfileRejected, name: name}
+	}
+
 	host, err := resolveHost(dataDir)
 	if err != nil {
 		return Sandbox{reason: reasonUserCacheDirNotFound, name: name}
-	}
-
-	rendered, err := renderProfile(profile, readPaths, consolePort)
-	if err != nil {
-		return Sandbox{host: host, reason: reasonProfileRejected, name: name}
 	}
 	sb := Sandbox{host: host, renderedProfile: rendered, name: name}
 
