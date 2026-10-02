@@ -1758,3 +1758,27 @@ func TestGateVerdict(t *testing.T) {
 		})
 	}
 }
+
+func TestGateShowsPlan(t *testing.T) {
+	t.Parallel()
+	open, answered, resolved := msgStateOpen, msgStateAnswered, msgStateResolved
+	tests := []struct {
+		name  string
+		kind  response.QuestionKind
+		state *string
+		want  bool
+	}{
+		{"open gate shows the plan", response.QuestionKindGate, &open, true},
+		{"answered gate awaiting its confirming turn shows the plan", response.QuestionKindGate, &answered, true},
+		{"resolved gate does not", response.QuestionKindGate, &resolved, false},
+		{"open question does not", response.QuestionKindQuestion, &open, false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := gateShowsPlan(tc.kind, tc.state); got != tc.want {
+				t.Errorf("gateShowsPlan = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}

@@ -693,6 +693,16 @@ func questionStateLabel(state *string, revisable bool) string {
 	}
 }
 
+// gateShowsPlan reports whether a question renders the plan, scenarios,
+// and findings: only a gate still in play (bug fix: every gate, withdrawn,
+// superseded, or rejected ones too, rendered the current plan, so a ticket
+// with seven gates showed the same document seven times, and an old gate
+// showed a plan it never gated). A resolved gate shows its verdict only;
+// the plan stays in the rail's Plan artifact.
+func gateShowsPlan(kind response.QuestionKind, state *string) bool {
+	return kind == response.QuestionKindGate && (state == nil || *state != msgStateResolved)
+}
+
 // isWithdrawnGate reports whether a question is a gate that closed without
 // an owner answer (bug fix: a gate withdrawn by a reopen showed "resolved",
 // which reads as approved). An approved or rejected gate carries the
@@ -1602,7 +1612,7 @@ func buildThreadQuestion(ticket *store.Ticket, m *store.MessageRow, messageCount
 	if payload.Kind == response.QuestionKindMerge && ticket != nil && ticket.PRURL != nil {
 		q.PRURL = *ticket.PRURL
 	}
-	if payload.Kind == response.QuestionKindGate {
+	if gateShowsPlan(payload.Kind, m.State) {
 		q.Plan = plan
 		q.Scenarios = scenarios
 		q.Findings = findings
