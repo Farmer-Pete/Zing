@@ -758,6 +758,16 @@ func checkScenarioShape(scenarios []response.Scenario) []*response.PathError {
 				Msg:  "then must not be empty",
 			})
 		}
+		// Zing re-runs every check under the build sandbox, which denies
+		// writes to the host /tmp (bug fix: a live judge round failed every
+		// check that built into /tmp, though the judge, which rewrote the
+		// path, saw them pass).
+		if strings.Contains(sc.Check, "/tmp/") {
+			errs = append(errs, &response.PathError{
+				Path: "scenarios/" + indexedScenario(i) + "/check",
+				Msg:  "check must not write under /tmp, which the sandbox denies; use \"$TMPDIR\" instead",
+			})
+		}
 	}
 	return errs
 }
