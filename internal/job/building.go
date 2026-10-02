@@ -1855,12 +1855,15 @@ func (h buildingHandler) land(ctx context.Context, t store.Ticket, d Deps, proj 
 	msg := orchestrator.CommitMessage{Title: report.Report.Title, FuncLines: funcLines(plan, approved), Fences: report.Report.Fences}
 	var sha string
 	var err error
-	if len(approved) == 0 && u.FixRequestID != nil {
-		// A fix that checked clean with nothing changed lands at the current
-		// HEAD (bug fix: the failure came from outside the code, the builder
-		// rightly changed nothing, and a fix could only land through a
-		// commit, so every retry escalated). Review and the judge then run
-		// again at the same sha.
+	if len(approved) == 0 {
+		// A unit that checked clean with nothing changed lands at the
+		// current HEAD. A fix whose failure came from outside the code
+		// rightly changes nothing (bug fix: every retry escalated), and so
+		// does a task whose work an earlier task's builder already did (bug
+		// fix: a live build's task 1 commit also made task 2's change, and
+		// task 2 escalated "approved paths must not be empty"). recordedShas
+		// counts the repeated sha once; review and the judge still check the
+		// result.
 		sha, err = proj.Orch.HeadSHA(ctx, wt)
 	} else {
 		sha, err = proj.Orch.CommitTask(ctx, wt, approved, msg)
