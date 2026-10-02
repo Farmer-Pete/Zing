@@ -86,12 +86,12 @@ const (
 // probeModel is the model every probe's own real claude call uses: these
 // calls only prove the CLI can start and log in, never anything about
 // model quality, so it matches machine.toml's own planning job model
-// (fable) -- consistent with the "planning-style" framing these probes
+// (opus, claude-opus-5-5) -- consistent with the "planning-style" framing these probes
 // already use, and known to be a currently-supported, resolvable model id
 // (unlike the previously hardcoded claude-3-5-haiku-20241022, retired
 // February 19, 2026, which failed every probe here with "exited 1" and
 // a deprecation notice, not a sandbox issue).
-const probeModel = "claude-fable-5-1"
+const probeModel = "claude-opus-5-5"
 
 // probeSandboxes loads both changed profiles (build.sb and readonly.sb)
 // for a probe to run under each in turn, failing the test if either does

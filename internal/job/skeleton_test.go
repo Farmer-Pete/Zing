@@ -406,7 +406,7 @@ func testMachine(t *testing.T) *machine.Machine {
 // the exact ids do not matter beyond matching machine.toml's alias names.
 var testModels = map[string]string{
 	"sonnet":         "claude-sonnet-5",
-	"opus":           "claude-opus-4-8",
+	"opus":           "claude-opus-5-5",
 	"fable":          "claude-fable-5-1",
 	testRuntimeCodex: "gpt-5.5",
 }

@@ -46,6 +46,12 @@ func TestLoad_RealMachineTOMLLoadsClean(t *testing.T) {
 	if planning.Prompt.Feature != planningFeaturePromptPath || planning.Prompt.Bug != planningBugPromptPath {
 		t.Errorf("planning.Prompt = %+v, want the feature/bug pair", planning.Prompt)
 	}
+	if planning.Model != "opus" {
+		t.Errorf("planning.Model = %q, want opus", planning.Model)
+	}
+	if got := m.Jobs["review"].Model; got != "opus" {
+		t.Errorf("review.Model = %q, want opus", got)
+	}
 
 	// side sets no outcomes key, so it defaults to ["ok"].
 	side := m.Jobs["side"]

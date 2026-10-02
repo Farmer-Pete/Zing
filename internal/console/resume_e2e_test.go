@@ -160,7 +160,7 @@ func (c resumeE2ECommands) Run(ctx context.Context, dir, repoGit, shellCmd strin
 // not matter beyond matching machine.toml's own alias names.
 var resumeE2EModels = map[string]string{
 	"sonnet": "claude-sonnet-5",
-	"opus":   "claude-opus-4-8",
+	"opus":   "claude-opus-5-5",
 	"fable":  "claude-fable-5-1",
 	"codex":  "gpt-5.5",
 }

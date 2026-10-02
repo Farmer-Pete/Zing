@@ -514,7 +514,7 @@ const e2eLensesParallel = 7
 // applyDefaults would produce from an empty zing.toml's [models] table.
 var e2eModels = map[string]string{
 	modelAliasSonnet: "claude-sonnet-5",
-	modelAliasOpus:   "claude-opus-4-8",
+	modelAliasOpus:   "claude-opus-5-5",
 	modelAliasFable:  "claude-fable-5-1",
 	modelAliasCodex:  "gpt-5.5",
 }

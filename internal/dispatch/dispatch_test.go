@@ -112,7 +112,7 @@ func testProjectDir(t *testing.T) string {
 // alias names.
 var testModels = map[string]string{
 	"sonnet": "claude-sonnet-5",
-	"opus":   "claude-opus-4-8",
+	"opus":   "claude-opus-5-5",
 	"fable":  "claude-fable-5-1",
 	"codex":  "gpt-5.5",
 }

@@ -310,7 +310,7 @@ func TestLiveReview(t *testing.T) {
 	}
 
 	deps := job.Deps{
-		Store: st, Runtimes: rts, Machine: m, Models: map[string]string{"opus": "claude-opus-4-8"},
+		Store: st, Runtimes: rts, Machine: m, Models: map[string]string{"opus": "claude-opus-5-5"},
 		Budget: 60 * time.Minute, Floor: response.SeverityMinor,
 		Owner: owner, Expires: expires,
 		Reserve: func(ctx context.Context, tID int64, su store.SessionUpsert, seed store.RunSeed) (store.Reserved, error) {

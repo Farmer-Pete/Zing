@@ -14,6 +14,7 @@ import (
 	"strings"
 	"testing"
 
+	zing "zing"
 	"zing/internal/console/templates"
 	"zing/internal/machine"
 	"zing/internal/response"
@@ -1143,6 +1144,17 @@ func TestResolvedSystemRowShowsAsANoteNotAnEmptyCard(t *testing.T) {
 // when there is no machine or no planning model to read one from.
 func TestAgentNameFromModel(t *testing.T) {
 	t.Parallel()
+
+	// The real machine.toml names the planner after its planning alias:
+	// opus, so the console says "Opus is working." and "Settled by Opus:".
+	realMachine, err := machine.Load(zing.Assets, "machine.toml")
+	if err != nil {
+		t.Fatalf("machine.Load: %v", err)
+	}
+	if got := agentName(realMachine); got != "Opus" {
+		t.Errorf("agentName(real machine.toml) = %q, want Opus", got)
+	}
+
 	for _, tc := range []struct {
 		name string
 		m    *machine.Machine
