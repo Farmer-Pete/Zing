@@ -56,7 +56,10 @@ func versionString(info *debug.BuildInfo) string {
 		return versionFallback
 	}
 	v := info.Main.Version
-	if v != "" && v != versionUnset && !strings.HasPrefix(v, versionPseudoPrefix) {
+	hasVersion := v != ""
+	isDevel := v == versionUnset
+	isPseudo := strings.HasPrefix(v, versionPseudoPrefix)
+	if hasVersion && !isDevel && !isPseudo {
 		return v
 	}
 	revision := ""
