@@ -2109,7 +2109,7 @@ func TestPollCIWaitingMarkerOnChange(t *testing.T) {
 	t.Parallel()
 	s, ticket, gh, tr := shipPublished(t)
 	local := shipHeadSHA(t, s, ticket)
-	gh.prState = orchestrator.PRState{Draft: true, HeadSHA: local, BaseRef: pbFixtureDefaultBranch}
+	gh.prState = orchestrator.PRState{Draft: false, HeadSHA: local, BaseRef: pbFixtureDefaultBranch} // not a draft: a draft is marked ready once only missing checks remain (TestPollDraftReadyWhenOnlyMissing)
 	gh.required = []orchestrator.RequiredCheck{{Context: "ci"}, {Context: "deploy"}}
 	gh.runs = nil // neither reports yet: Missing = ["ci","deploy"]
 
@@ -5197,5 +5197,35 @@ func TestMergeWaitPollsAndSeesMerge(t *testing.T) {
 	}
 	if !commit2.ResolveAll {
 		t.Error("ResolveAll = false, want true (the still-open merge question resolves too)")
+	}
+}
+
+// TestPollDraftReadyWhenOnlyMissing proves a draft is marked ready once
+// every check that has reported passed, though a required check has not
+// reported (an AI reviewer that skips drafts): "ci" green, "deploy"
+// missing, so the poll writes the "pr ready" marker.
+func TestPollDraftReadyWhenOnlyMissing(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow end-to-end flow; runs in the full suite")
+	}
+	t.Parallel()
+	s, ticket, gh, tr := shipPublished(t)
+	local := shipHeadSHA(t, s, ticket)
+	gh.prState = orchestrator.PRState{Draft: true, HeadSHA: local, BaseRef: pbFixtureDefaultBranch}
+	gh.required = []orchestrator.RequiredCheck{{Context: "ci"}, {Context: "deploy"}}
+	gh.runs, _ = shipGreenCI()
+
+	commit, err := shipPollRun(t, s, ticket, gh, tr)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	found := false
+	for _, m := range commit.Messages {
+		if strings.HasPrefix(m.Body, "pr ready ") {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("commit.Messages = %+v, want a \"pr ready\" marker", commit.Messages)
 	}
 }

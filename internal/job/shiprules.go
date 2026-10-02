@@ -119,7 +119,7 @@ func EvaluateCI(runs []orchestrator.CheckRun, statuses []orchestrator.CommitStat
 		return CIResult{State: CIFailed, FailedRuns: failedRuns, FailedStatuses: failedStatuses, Missing: missing}
 	}
 
-	reportedGreen := !ciPending(reduced, statuses, nil)
+	reportedGreen := (len(reduced) > 0 || len(statuses) > 0) && !ciPending(reduced, statuses, nil)
 	if ciPending(reduced, statuses, missing) {
 		return CIResult{State: CIPending, Missing: missing, ReportedGreen: reportedGreen}
 	}

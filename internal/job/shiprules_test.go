@@ -610,6 +610,10 @@ func TestEvaluateCIReportedGreen(t *testing.T) {
 		t.Errorf("only a missing check: State %v ReportedGreen %v, want pending and true", onlyMissing.State, onlyMissing.ReportedGreen)
 	}
 
+	if none := EvaluateCI(nil, nil, required); none.ReportedGreen {
+		t.Error("nothing reported yet: ReportedGreen true, want false")
+	}
+
 	running := EvaluateCI([]orchestrator.CheckRun{
 		{ID: 1, Name: testRequiredCI, Status: testInProgress},
 	}, nil, required)
