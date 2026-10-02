@@ -3,6 +3,7 @@ package runtime
 import (
 	"encoding/xml"
 	"strings"
+	"unicode/utf8"
 
 	"zing/internal/response"
 )
@@ -82,7 +83,13 @@ func parseFinalMessage(text string, job response.Job) (response.Response, string
 
 	doc := &response.Document{Response: resp, Elem: []byte(root)}
 	if errs := response.Validate(doc, response.ValidateContext{Job: job}); len(errs) > 0 {
-		return nil, formatValidationErrors(errs), &InvalidOutputError{Reason: reasonFailedValidation}
+		// Detail carries the errors themselves, for the retry prompt (bug
+		// fix: a live planning turn wrote the vague word "large" twice in a
+		// row because the retry said only "zing document failed
+		// validation"). Reason stays closed: Detail can quote the model's
+		// own text, so the job layer fences it.
+		detail := formatValidationErrors(errs)
+		return nil, detail, &InvalidOutputError{Reason: reasonFailedValidation, Detail: capReason(detail)}
 	}
 	return resp, "", nil
 }
@@ -95,4 +102,21 @@ func formatValidationErrors(errs []*response.PathError) string {
 		parts[i] = e.Error()
 	}
 	return strings.Join(parts, "; ")
+}
+
+// maxReasonBytes caps an InvalidOutputError reason, which is stored in a
+// marker and shown in the retry prompt.
+const maxReasonBytes = 2000
+
+// capReason cuts reason to maxReasonBytes on a rune boundary, marking the
+// cut.
+func capReason(reason string) string {
+	if len(reason) <= maxReasonBytes {
+		return reason
+	}
+	cut := maxReasonBytes
+	for cut > 0 && !utf8.RuneStart(reason[cut]) {
+		cut--
+	}
+	return reason[:cut] + " (more errors cut)"
 }

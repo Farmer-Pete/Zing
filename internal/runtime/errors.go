@@ -53,6 +53,10 @@ func (e *ExecError) Error() string {
 // error never lands here, only in RunResult.Log.
 type InvalidOutputError struct {
 	Reason string
+	// Detail is the validator's own error list for reasonFailedValidation,
+	// empty otherwise. It can quote the model's text, so it is never part
+	// of Error() and the job layer fences it before a prompt sees it.
+	Detail string
 }
 
 func (e *InvalidOutputError) Error() string {
