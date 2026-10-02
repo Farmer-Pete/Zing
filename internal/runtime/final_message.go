@@ -51,11 +51,12 @@ func parseFinalMessage(text string, job response.Job) (response.Response, string
 	case len(roots) == 0:
 		// Parse names the XML error when a <zing> header was found but its
 		// body would not decode, so a retry learns what to fix.
-		reason := reasonNoZingElement
+		// The error can quote model text, so it goes in the fenced Detail.
+		var detail string
 		if _, perr := response.Parse([]byte(text)); perr != nil {
-			reason = perr.Error()
+			detail = capDetail(perr.Error())
 		}
-		return nil, "", &InvalidOutputError{Reason: reason}
+		return nil, "", &InvalidOutputError{Reason: reasonNoZingElement, Detail: detail}
 	case len(roots) > 1:
 		return nil, "", &InvalidOutputError{Reason: reasonMultipleZingDocs}
 	}
@@ -89,7 +90,7 @@ func parseFinalMessage(text string, job response.Job) (response.Response, string
 		// validation"). Reason stays closed: Detail can quote the model's
 		// own text, so the job layer fences it.
 		detail := formatValidationErrors(errs)
-		return nil, detail, &InvalidOutputError{Reason: reasonFailedValidation, Detail: capReason(detail)}
+		return nil, detail, &InvalidOutputError{Reason: reasonFailedValidation, Detail: capDetail(detail)}
 	}
 	return resp, "", nil
 }
@@ -104,19 +105,22 @@ func formatValidationErrors(errs []*response.PathError) string {
 	return strings.Join(parts, "; ")
 }
 
-// maxReasonBytes caps an InvalidOutputError reason, which is stored in a
+// maxDetailBytes caps an InvalidOutputError Detail, which is stored in a
 // marker and shown in the retry prompt.
-const maxReasonBytes = 2000
+const maxDetailBytes = 2000
 
-// capReason cuts reason to maxReasonBytes on a rune boundary, marking the
-// cut.
-func capReason(reason string) string {
-	if len(reason) <= maxReasonBytes {
-		return reason
+// detailCutSuffix marks a Detail that capDetail shortened.
+const detailCutSuffix = " (more errors cut)"
+
+// capDetail cuts detail on a rune boundary so the result, suffix included,
+// is at most maxDetailBytes.
+func capDetail(detail string) string {
+	if len(detail) <= maxDetailBytes {
+		return detail
 	}
-	cut := maxReasonBytes
-	for cut > 0 && !utf8.RuneStart(reason[cut]) {
+	cut := maxDetailBytes - len(detailCutSuffix)
+	for cut > 0 && !utf8.RuneStart(detail[cut]) {
 		cut--
 	}
-	return reason[:cut] + " (more errors cut)"
+	return detail[:cut] + detailCutSuffix
 }

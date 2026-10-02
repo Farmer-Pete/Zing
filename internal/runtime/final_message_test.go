@@ -2,7 +2,9 @@ package runtime
 
 import (
 	"errors"
+	"strings"
 	"testing"
+	"unicode/utf8"
 
 	"zing/internal/response"
 )
@@ -95,5 +97,32 @@ func assertReason(t *testing.T, err error, want string) {
 	}
 	if invalid.Reason != want {
 		t.Errorf("Reason = %q, want %q", invalid.Reason, want)
+	}
+}
+
+// TestParseFinalMessage_ParseErrorGoesToDetail checks that the XML error,
+// which can quote model text, lands in the fenced Detail and never in the
+// closed Reason.
+func TestParseFinalMessage_ParseErrorGoesToDetail(t *testing.T) {
+	t.Parallel()
+
+	_, _, err := parseFinalMessage(`<zing job="classify" outcome="bug"><reason>a</zing>`, response.JobClassify)
+	assertReason(t, err, reasonNoZingElement)
+	var invalidErr *InvalidOutputError
+	if !errors.As(err, &invalidErr) || invalidErr.Detail == "" {
+		t.Fatalf("err = %#v, want an InvalidOutputError with the parse error in Detail", err)
+	}
+}
+
+func TestCapDetail_StaysWithinLimit(t *testing.T) {
+	t.Parallel()
+
+	long := strings.Repeat("é", maxDetailBytes)
+	got := capDetail(long)
+	if len(got) > maxDetailBytes {
+		t.Errorf("len = %d, want at most %d", len(got), maxDetailBytes)
+	}
+	if !strings.HasSuffix(got, detailCutSuffix) || !utf8.ValidString(got) {
+		t.Errorf("capDetail result must be valid UTF-8 ending in %q", detailCutSuffix)
 	}
 }

@@ -27,6 +27,12 @@ func TestInvalidRetryCarriesFencedDetail(t *testing.T) {
 			t.Errorf("invalidRetryText = %q, want it to contain %q", got, want)
 		}
 	}
+	open := strings.Index(got, "<<<UNTRUSTED ")
+	detail := strings.Index(got, `vague word "large"`)
+	end := strings.Index(got, "<<<END ")
+	if open < 0 || detail < open || end < detail {
+		t.Errorf("detail must sit between the fence markers, got %q", got)
+	}
 	if strings.Contains(invalidRetryText("no zing element in final message"), "<<<UNTRUSTED") {
 		t.Error("a closed reason with no detail must not add a fence")
 	}

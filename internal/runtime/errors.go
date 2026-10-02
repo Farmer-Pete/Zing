@@ -49,12 +49,12 @@ func (e *ExecError) Error() string {
 
 // InvalidOutputError reports a process that exited, but whose final message
 // failed the document rule (design section 4.1). Reason is one of the five
-// closed constants the final-message rule produces; the detailed validation
-// error never lands here, only in RunResult.Log.
+// closed constants the final-message rule produces. Detail carries the
+// parser's or validator's own error text, capped by capDetail.
 type InvalidOutputError struct {
 	Reason string
-	// Detail is the validator's own error list for reasonFailedValidation,
-	// empty otherwise. It can quote the model's text, so it is never part
+	// Detail is the parser's error for reasonNoZingElement or the
+	// validator's error list for reasonFailedValidation, empty otherwise. It can quote the model's text, so it is never part
 	// of Error() and the job layer fences it before a prompt sees it.
 	Detail string
 }
