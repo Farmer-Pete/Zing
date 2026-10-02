@@ -3,11 +3,13 @@ package main
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"testing"
 	"testing/fstest"
 
+	"zing/internal/gitfixture"
 	"zing/internal/response"
 	"zing/internal/schemagen"
 )
@@ -202,5 +204,46 @@ func TestCheckResponseExamples_CatchesTamperedExample(t *testing.T) {
 	}
 	if !strings.Contains(gotErr.Error(), "reason: missing required element") {
 		t.Errorf("error %q is not the expected missing-reason validation error", gotErr)
+	}
+}
+
+// TestSelftestShipGitHubHeadSHAIgnoresInheritedGitDir reproduces the
+// pre-push failure of the selftest e2e: lefthook's pre-push exports
+// GIT_DIR, which overrides "git -C <origin>", so headSHA read the branch
+// off the repository being pushed, GetPR failed every poll, and the ticket
+// never left shipping. headSHA must read the fixture origin.
+//
+// Not parallel: it calls t.Setenv, which t.Parallel forbids.
+func TestSelftestShipGitHubHeadSHAIgnoresInheritedGitDir(t *testing.T) {
+	ctx := t.Context()
+	repo := filepath.Join(t.TempDir(), "repo")
+	if err := gitfixture.NewSigningRepo(ctx, repo); err != nil {
+		t.Fatalf("NewSigningRepo: %v", err)
+	}
+	remoteDir, err := gitfixture.WithBareOrigin(ctx, repo)
+	if err != nil {
+		t.Fatalf("WithBareOrigin: %v", err)
+	}
+	if out, pushErr := gitfixture.Git(ctx, repo, "push", "-q", "origin", "main"); pushErr != nil {
+		t.Fatalf("push: %v: %s", pushErr, out)
+	}
+	want, err := gitfixture.Git(ctx, repo, "rev-parse", "HEAD")
+	if err != nil {
+		t.Fatalf("rev-parse HEAD: %v", err)
+	}
+
+	// A decoy repository with no "main" branch, exported as a git hook would.
+	decoy := t.TempDir()
+	if out, initErr := gitfixture.Git(ctx, decoy, "init", "-q", "-b", "other"); initErr != nil {
+		t.Fatalf("init decoy: %v: %s", initErr, out)
+	}
+	t.Setenv("GIT_DIR", filepath.Join(decoy, ".git"))
+
+	got, err := newSelftestShipGitHub(remoteDir).headSHA(ctx, "main")
+	if err != nil {
+		t.Fatalf("headSHA: %v", err)
+	}
+	if got != strings.TrimSpace(string(want)) {
+		t.Errorf("headSHA = %q, want %q", got, strings.TrimSpace(string(want)))
 	}
 }

@@ -46,6 +46,7 @@ import (
 	"time"
 
 	zing "zing"
+	"zing/internal/gitfixture"
 	"zing/internal/response"
 	"zing/internal/runtime"
 )
@@ -120,14 +121,16 @@ func probeParams(t *testing.T, sb Sandbox) Params {
 	return p
 }
 
-// probeEnv is os.Environ() (so PATH, HOME, and every ambient credential
+// probeEnv is os.Environ() minus git's repository-location variables
+// (gitfixture.Environ, so a GIT_DIR a git hook exported cannot send a
+// probe's git at the real repository) (so PATH, HOME, and every ambient credential
 // path like SSH_AUTH_SOCK reach the child) plus sb's own Env(p, ...)
 // overrides (TMPDIR, GIT_CONFIG_GLOBAL, ZING_SANDBOXED, and so on),
 // appended last so they win on a duplicate name (os/exec keeps the last
 // value for a repeated name), mirroring sandbox_darwin_test.go's own
 // TestChildSeesSandboxTmpdir.
 func probeEnv(sb Sandbox, p Params) []string {
-	return append(os.Environ(), sb.Env(p, os.Getenv("PATH"))...)
+	return append(gitfixture.Environ(), sb.Env(p, os.Getenv("PATH"))...)
 }
 
 // runProbe runs args under sb's profile with p's params and env, bounded
@@ -566,7 +569,7 @@ func TestProbeCredentialHelperDenied(t *testing.T) {
 	helperPath := gitCredentialOsxkeychainPath(t)
 
 	repoDir := t.TempDir()
-	if out, err := exec.CommandContext(t.Context(), "git", "init", "-q", repoDir).CombinedOutput(); err != nil {
+	if out, err := gitfixture.Git(t.Context(), repoDir, "init", "-q"); err != nil {
 		t.Fatalf("git init: %v (%s)", err, out)
 	}
 	credFile := filepath.Join(repoDir, ".git-credentials")
@@ -574,7 +577,7 @@ func TestProbeCredentialHelperDenied(t *testing.T) {
 	if err := os.WriteFile(credFile, []byte("https://x-access-token:"+seededToken+"@github.com\n"), 0o600); err != nil {
 		t.Fatalf("write seeded credentials file: %v", err)
 	}
-	if out, err := exec.CommandContext(t.Context(), "git", "-C", repoDir, "config", "credential.helper", "store --file="+credFile).CombinedOutput(); err != nil {
+	if out, err := gitfixture.Git(t.Context(), repoDir, "config", "credential.helper", "store --file="+credFile); err != nil {
 		t.Fatalf("git config credential.helper: %v (%s)", err, out)
 	}
 
@@ -763,7 +766,9 @@ func TestProbePlanningTranscriptDenied(t *testing.T) {
 // against it.
 func probeRepoRoot(t *testing.T) string {
 	t.Helper()
-	out, err := exec.CommandContext(t.Context(), "git", "rev-parse", "--show-toplevel").Output()
+	cmd := exec.CommandContext(t.Context(), "git", "rev-parse", "--show-toplevel")
+	cmd.Env = gitfixture.Environ()
+	out, err := cmd.Output()
 	if err != nil {
 		t.Fatalf("git rev-parse --show-toplevel: %v", err)
 	}
@@ -774,7 +779,9 @@ func probeRepoRoot(t *testing.T) string {
 // --path-format=absolute --git-common-dir).
 func probeRepoGitDir(t *testing.T, repoRoot string) string {
 	t.Helper()
-	out, err := exec.CommandContext(t.Context(), "git", "-C", repoRoot, "rev-parse", "--path-format=absolute", "--git-common-dir").Output()
+	cmd := exec.CommandContext(t.Context(), "git", "-C", repoRoot, "rev-parse", "--path-format=absolute", "--git-common-dir")
+	cmd.Env = gitfixture.Environ()
+	out, err := cmd.Output()
 	if err != nil {
 		t.Fatalf("git rev-parse --git-common-dir: %v", err)
 	}

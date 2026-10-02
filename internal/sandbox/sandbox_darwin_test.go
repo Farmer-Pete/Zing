@@ -25,6 +25,7 @@ import (
 	"time"
 
 	zing "zing"
+	"zing/internal/gitfixture"
 )
 
 // requireNotSandboxed skips t when ZING_SANDBOXED is set: a sandboxed
@@ -140,6 +141,9 @@ func runSandboxedWithEnv(t *testing.T, sb Sandbox, p Params, env []string, args 
 	ctx, cancel := context.WithTimeout(context.Background(), sandboxCommandTimeout)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, argv[0], argv[1:]...) //nolint:gosec // G204: fixed test argv built from this test's own temp paths, never external input
+	// A nil env still scrubs git's repository-location variables, so a
+	// GIT_DIR a git hook exported cannot redirect a sandboxed git.
+	cmd.Env = gitfixture.Environ()
 	if env != nil {
 		cmd.Env = env
 	}
@@ -466,7 +470,7 @@ func TestChildSeesSandboxTmpdir(t *testing.T) {
 	dirs := newTestDirs(t)
 	p := dirs.params()
 
-	env := append(os.Environ(), sb.Env(p, os.Getenv("PATH"))...)
+	env := append(gitfixture.Environ(), sb.Env(p, os.Getenv("PATH"))...)
 	exitCode, out := runSandboxedWithEnv(t, sb, p, env, "/bin/sh", "-c", "echo $TMPDIR")
 	if exitCode != 0 {
 		t.Fatalf("echo $TMPDIR: exit %d, want 0 (output %q)", exitCode, out)

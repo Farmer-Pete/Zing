@@ -163,8 +163,16 @@ var gitLocationEnv = []string{
 func Git(ctx context.Context, dir string, args ...string) ([]byte, error) {
 	cmd := exec.CommandContext(ctx, "git", args...)
 	cmd.Dir = dir
-	cmd.Env = scrubGitLocationEnv(os.Environ())
+	cmd.Env = Environ()
 	return cmd.CombinedOutput()
+}
+
+// Environ is os.Environ() with the repository-location variables
+// (gitLocationEnv) removed: the environment for a git child a test builds
+// itself, when it needs more control than Git gives (stdout alone, or a
+// sandboxed argv).
+func Environ() []string {
+	return scrubGitLocationEnv(os.Environ())
 }
 
 // NewSigningRepo makes dir a git repository on branch "main" with one
@@ -261,7 +269,7 @@ func WithBareOrigin(ctx context.Context, dir string) (remoteDir string, err erro
 func runGit(ctx context.Context, dir string, args ...string) error {
 	cmd := exec.CommandContext(ctx, "git", args...)
 	cmd.Dir = dir
-	cmd.Env = scrubGitLocationEnv(os.Environ())
+	cmd.Env = Environ()
 	if out, err := cmd.CombinedOutput(); err != nil {
 		return fmt.Errorf("gitfixture: git %s: %w: %s", strings.Join(args, " "), err, out)
 	}

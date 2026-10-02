@@ -641,7 +641,10 @@ func newDispatchShipGitHub(remoteDir string) *dispatchShipGitHub {
 // headSHA reads branch's current commit straight off g's own real bare
 // origin.
 func (g *dispatchShipGitHub) headSHA(ctx context.Context, branch string) (string, error) {
-	out, err := exec.CommandContext(ctx, "git", "-C", g.remoteDir, "rev-parse", "refs/heads/"+branch).Output()
+	cmd := exec.CommandContext(ctx, "git", "-C", g.remoteDir, "rev-parse", "refs/heads/"+branch)
+	// Scrubbed, so a GIT_DIR a git hook exported cannot redirect "-C".
+	cmd.Env = gitfixture.Environ()
+	out, err := cmd.Output()
 	if err != nil {
 		return "", fmt.Errorf("dispatchShipGitHub: rev-parse %s: %w", branch, err)
 	}
@@ -4036,5 +4039,46 @@ func TestTick_TrackerEffectFailureIsBestEffort(t *testing.T) {
 	final := getTicket(t, s, ticketID)
 	if final.ClaimOwner != nil {
 		t.Errorf("final ticket claim owner = %v, want nil (the ticket's own commit still applied)", *final.ClaimOwner)
+	}
+}
+
+// TestDispatchShipGitHubHeadSHAIgnoresInheritedGitDir reproduces the
+// pre-push failure of TestShipCIFailThenFixThenMergeGoesDone: lefthook's
+// pre-push exports GIT_DIR, which overrides "git -C <origin>", so headSHA
+// read the branch off the repository being pushed, GetPR failed every
+// poll, and shipping never advanced. headSHA must read the fixture origin.
+//
+// Not parallel: it calls t.Setenv, which t.Parallel forbids.
+func TestDispatchShipGitHubHeadSHAIgnoresInheritedGitDir(t *testing.T) {
+	ctx := t.Context()
+	repo := filepath.Join(t.TempDir(), "repo")
+	if err := gitfixture.NewSigningRepo(ctx, repo); err != nil {
+		t.Fatalf("NewSigningRepo: %v", err)
+	}
+	remoteDir, err := gitfixture.WithBareOrigin(ctx, repo)
+	if err != nil {
+		t.Fatalf("WithBareOrigin: %v", err)
+	}
+	if out, pushErr := gitfixture.Git(ctx, repo, "push", "-q", "origin", "main"); pushErr != nil {
+		t.Fatalf("push: %v: %s", pushErr, out)
+	}
+	want, err := gitfixture.Git(ctx, repo, "rev-parse", "HEAD")
+	if err != nil {
+		t.Fatalf("rev-parse HEAD: %v", err)
+	}
+
+	// A decoy repository with no "main" branch, exported as a git hook would.
+	decoy := t.TempDir()
+	if out, initErr := gitfixture.Git(ctx, decoy, "init", "-q", "-b", "other"); initErr != nil {
+		t.Fatalf("init decoy: %v: %s", initErr, out)
+	}
+	t.Setenv("GIT_DIR", filepath.Join(decoy, ".git"))
+
+	got, err := newDispatchShipGitHub(remoteDir).headSHA(ctx, "main")
+	if err != nil {
+		t.Fatalf("headSHA: %v", err)
+	}
+	if got != strings.TrimSpace(string(want)) {
+		t.Errorf("headSHA = %q, want %q", got, strings.TrimSpace(string(want)))
 	}
 }

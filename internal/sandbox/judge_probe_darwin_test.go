@@ -188,6 +188,7 @@ func runJudgeDraftSandboxed(t *testing.T, sb Sandbox, p Params, scenariosFile, c
 	defer cancel()
 	cmd := exec.CommandContext(ctx, argv[0], argv[1:]...) //nolint:gosec // G204: fixed test argv from this file's own temp paths, never external input
 	cmd.Dir = dir
+	cmd.Env = gitfixture.Environ()
 	out, runErr := cmd.CombinedOutput()
 	if runErr == nil {
 		return 0, string(out)
@@ -717,7 +718,7 @@ func TestProbeCredentialHelperDeniedJudge(t *testing.T) {
 	host := strings.TrimPrefix(srv.URL, "https://")
 
 	repoDir := t.TempDir()
-	if out, err := exec.CommandContext(t.Context(), "git", "init", "-q", repoDir).CombinedOutput(); err != nil {
+	if out, err := gitfixture.Git(t.Context(), repoDir, "init", "-q"); err != nil {
 		t.Fatalf("git init: %v (%s)", err, out)
 	}
 	credFile := filepath.Join(repoDir, ".git-credentials")
@@ -725,7 +726,7 @@ func TestProbeCredentialHelperDeniedJudge(t *testing.T) {
 	if err := os.WriteFile(credFile, []byte("https://x-access-token:"+seededToken+"@"+host+"\n"), 0o600); err != nil {
 		t.Fatalf("write seeded credentials file: %v", err)
 	}
-	if out, err := exec.CommandContext(t.Context(), "git", "-C", repoDir, "config", "credential.helper", "store --file="+credFile).CombinedOutput(); err != nil {
+	if out, err := gitfixture.Git(t.Context(), repoDir, "config", "credential.helper", "store --file="+credFile); err != nil {
 		t.Fatalf("git config credential.helper: %v (%s)", err, out)
 	}
 

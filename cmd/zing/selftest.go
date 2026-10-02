@@ -157,7 +157,10 @@ func newSelftestShipGitHub(remoteDir string) *selftestShipGitHub {
 // moves what GetPR and ListCheckRuns see, not a field this double would
 // otherwise have to be told to update.
 func (g *selftestShipGitHub) headSHA(ctx context.Context, branch string) (string, error) {
-	out, err := exec.CommandContext(ctx, "git", "-C", g.remoteDir, "rev-parse", "refs/heads/"+branch).Output() //nolint:gosec // argv-only, no shell; remoteDir is this suite's own gitfixture bare origin and branch is git's own zing/<id>-<slug> branch name, never outside input
+	cmd := exec.CommandContext(ctx, "git", "-C", g.remoteDir, "rev-parse", "refs/heads/"+branch) //nolint:gosec // argv-only, no shell; remoteDir is this suite's own gitfixture bare origin and branch is git's own zing/<id>-<slug> branch name, never outside input
+	// Scrubbed, so a GIT_DIR a git hook exported cannot redirect "-C".
+	cmd.Env = gitfixture.Environ()
+	out, err := cmd.Output()
 	if err != nil {
 		return "", fmt.Errorf("selftestShipGitHub: rev-parse %s: %w", branch, err)
 	}
