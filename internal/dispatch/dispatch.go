@@ -853,7 +853,18 @@ func classifyOpenRun(r store.OpenRun) orphanLiveness {
 		}
 		return orphanDead
 	case errors.Is(err, proc.ErrNoProcess):
-		return orphanLive
+		// The leader (pid == pgid) has exited, but a process group id
+		// cannot be reused while any member is alive -- so this alone does
+		// not prove the group is empty, only that its own leader is gone.
+		// GroupAlive settles it: a live member still in the group (a
+		// descendant the leader spawned before exiting) means the group
+		// is still the same incarnation and verified live; nothing left
+		// means it is dead, reclaimable now rather than waiting for a
+		// deadline that already passed the moment the leader exited.
+		if proc.GroupAlive(pgid) {
+			return orphanLive
+		}
+		return orphanDead
 	default:
 		// StartToken failed for a reason other than "no such process" (for
 		// example ErrUnsupported, or a transient read failure) even though
