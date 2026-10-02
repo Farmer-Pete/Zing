@@ -90,9 +90,12 @@ func TestParse_Missing(t *testing.T) {
 func TestParse_Malformed(t *testing.T) {
 	t.Parallel()
 
-	// unclosed element
+	// unclosed element: the header names a known pair, so the error keeps
+	// the "no zing element" prefix and adds the XML error.
 	_, err := Parse([]byte(`<zing job="classify" outcome="bug"><reason>it crashes</zing>`))
-	assertNoZing(t, err)
+	if err == nil || !strings.HasPrefix(err.Error(), "no zing element in final message: ") || !strings.Contains(err.Error(), "XML syntax error") {
+		t.Errorf("err = %v, want the no-zing prefix plus the XML syntax error", err)
+	}
 }
 
 func TestParse_MissingAttribute(t *testing.T) {
@@ -217,5 +220,24 @@ func assertNoZing(t *testing.T, err error) {
 	want := "no zing element in final message"
 	if err.Error() != want {
 		t.Errorf("err = %q, want %q", err.Error(), want)
+	}
+}
+
+// TestParse_BrokenBodyNamesTheXMLError is a regression test for a live
+// build run: the report quoted `zing validate <file>`, the bare <file>
+// broke the XML, and Parse said only "no zing element in final message",
+// so the retry repeated the mistake. A recognized header whose body fails
+// to decode now names the XML error and the escaping rule.
+func TestParse_BrokenBodyNamesTheXMLError(t *testing.T) {
+	t.Parallel()
+	in := []byte(`<zing job="classify" outcome="bug"><reason>run zing validate <file> first</reason></zing>`)
+	_, err := Parse(in)
+	if err == nil {
+		t.Fatal("Parse succeeded, want an error")
+	}
+	for _, want := range []string{"no zing element in final message", "XML syntax error", "&lt;"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("Parse error = %q, want it to contain %q", err, want)
+		}
 	}
 }

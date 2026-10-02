@@ -21,7 +21,8 @@ const Tail = "Your final message is exactly one <zing> document that follows the
 	"from the owner, return the question outcome. If you cannot continue, return\n" +
 	"the error outcome with what, why, and what you tried. Before you finish,\n" +
 	"run `zing validate -` with the document on standard input, or\n" +
-	"`zing validate <file>` if you can write files. Fix every error it prints\n" +
+	"`zing validate FILE` if you can write files. Inside the document, write a\n" +
+	"literal < as &lt; and & as &amp;, even inside backticks. Fix every error it prints\n" +
 	"and run it again until it prints nothing. If your tools cannot run it,\n" +
 	"return the document anyway: Zing validates every document and sends any\n" +
 	"errors back. Every claim is checked by a program, not a person."
