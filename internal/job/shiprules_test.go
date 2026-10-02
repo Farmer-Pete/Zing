@@ -593,3 +593,27 @@ func TestMergeDecision(t *testing.T) {
 		})
 	}
 }
+
+// TestEvaluateCIReportedGreen is a regression test for a live PR: a
+// required AI-review check (cubic) never reports on a draft, so CI stayed
+// pending and Zing never marked the draft ready, the step that would have
+// let the check run. ReportedGreen is true when every check that has
+// reported passed, whatever is still missing.
+func TestEvaluateCIReportedGreen(t *testing.T) {
+	t.Parallel()
+	required := []orchestrator.RequiredCheck{{Context: testRequiredCI}, {Context: testCheckB}}
+
+	onlyMissing := EvaluateCI([]orchestrator.CheckRun{
+		{ID: 1, Name: testRequiredCI, Status: ghCompleted, Conclusion: ghSuccess},
+	}, nil, required)
+	if onlyMissing.State != CIPending || !onlyMissing.ReportedGreen {
+		t.Errorf("only a missing check: State %v ReportedGreen %v, want pending and true", onlyMissing.State, onlyMissing.ReportedGreen)
+	}
+
+	running := EvaluateCI([]orchestrator.CheckRun{
+		{ID: 1, Name: testRequiredCI, Status: testInProgress},
+	}, nil, required)
+	if running.ReportedGreen {
+		t.Error("a running check: ReportedGreen true, want false")
+	}
+}

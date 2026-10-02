@@ -700,6 +700,10 @@ func (h shipHandler) poll(ctx context.Context, t store.Ticket, d Deps) (store.Ha
 		return h.pollLeftover(ctx, t, d, proj, leftover)
 	case len(unclassified) > 0:
 		return h.pollUnclassifiedBlocking(ctx, t, d, fp, unclassified)
+	case pr.Draft && result.State == CIPending && result.ReportedGreen:
+		// Only checks that have not reported remain; some (AI reviewers)
+		// run only once the pull request is ready, so mark it ready now.
+		return h.pollMarkReady(ctx, t, d, proj, pr, local)
 	case result.State == CIPending:
 		return h.pollIdle(ctx, t, d, fp, result.Missing)
 	case pr.Draft: // CIGreen, zero unresolved threads, still draft: row 8

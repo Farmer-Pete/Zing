@@ -68,6 +68,12 @@ type CIResult struct {
 	FailedRuns     []orchestrator.CheckRun
 	FailedStatuses []orchestrator.CommitStatus
 	Missing        []string
+	// ReportedGreen is true when every run and status that has reported
+	// passed, ignoring required checks that have not reported at all. A
+	// draft is marked ready on it (bug fix: an AI-review check that skips
+	// drafts never reported, so the draft never became ready); the merge
+	// gate still needs State CIGreen.
+	ReportedGreen bool
 }
 
 // goodConclusions is the set of CheckRun.Conclusion values a completed run
@@ -113,10 +119,11 @@ func EvaluateCI(runs []orchestrator.CheckRun, statuses []orchestrator.CommitStat
 		return CIResult{State: CIFailed, FailedRuns: failedRuns, FailedStatuses: failedStatuses, Missing: missing}
 	}
 
+	reportedGreen := !ciPending(reduced, statuses, nil)
 	if ciPending(reduced, statuses, missing) {
-		return CIResult{State: CIPending, Missing: missing}
+		return CIResult{State: CIPending, Missing: missing, ReportedGreen: reportedGreen}
 	}
-	return CIResult{State: CIGreen, Missing: missing}
+	return CIResult{State: CIGreen, Missing: missing, ReportedGreen: reportedGreen}
 }
 
 // newestRunPerNameApp reduces runs to the newest (highest id) per (Name,
