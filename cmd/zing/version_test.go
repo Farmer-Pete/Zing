@@ -16,7 +16,7 @@ import (
 // the stamped binaries judge scenarios s1, s3, and s4 build for real.
 func TestVersionString(t *testing.T) {
 	const (
-		revision     = "abcdef123456789012345678901234567890ab"
+		revision     = "abcdef123456789012345678901234567890abcd"
 		settingTrue  = "true"
 		settingFalse = "false"
 	)
