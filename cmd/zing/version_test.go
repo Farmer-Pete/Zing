@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"io"
 	"os"
 	"runtime/debug"
@@ -173,6 +174,27 @@ func captureStreams(t *testing.T) (read func() (string, string)) {
 	os.Stdout, os.Stderr = outW, errW
 	t.Cleanup(func() { os.Stdout, os.Stderr = origOut, origErr })
 
+	// Drain both pipes in goroutines started before the caller writes to
+	// them. Without a concurrent reader, a write large enough to fill the
+	// OS pipe buffer (~64 KB) would block forever, since read() only
+	// called io.ReadAll after the writers were already closed; matches
+	// captureStderr's pattern in validate_test.go.
+	outCaptured := make(chan string, 1)
+	errCaptured := make(chan string, 1)
+	drain := func(r *os.File, captured chan<- string) {
+		var buf bytes.Buffer
+		if _, err := io.Copy(&buf, r); err != nil {
+			// t.Fatal is unsafe off the test goroutine; surface the
+			// error through the channel so the caller's assertion
+			// fails visibly.
+			captured <- "captureStreams: io.Copy: " + err.Error()
+			return
+		}
+		captured <- buf.String()
+	}
+	go drain(outR, outCaptured)
+	go drain(errR, errCaptured)
+
 	return func() (string, string) {
 		os.Stdout, os.Stderr = origOut, origErr
 		if err := outW.Close(); err != nil {
@@ -181,21 +203,15 @@ func captureStreams(t *testing.T) (read func() (string, string)) {
 		if err := errW.Close(); err != nil {
 			t.Fatal(err)
 		}
-		outBytes, err := io.ReadAll(outR)
-		if err != nil {
-			t.Fatal(err)
-		}
-		errBytes, err := io.ReadAll(errR)
-		if err != nil {
-			t.Fatal(err)
-		}
+		outStr := <-outCaptured
+		errStr := <-errCaptured
 		if err := outR.Close(); err != nil {
 			t.Fatal(err)
 		}
 		if err := errR.Close(); err != nil {
 			t.Fatal(err)
 		}
-		return string(outBytes), string(errBytes)
+		return outStr, errStr
 	}
 }
 
