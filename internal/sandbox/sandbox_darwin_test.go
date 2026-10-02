@@ -1031,3 +1031,28 @@ func TestJudgeDeniesZingToml(t *testing.T) {
 		t.Errorf("cat zing.toml under the judge profile: want a non-zero exit, got 0 (output %q)", out)
 	}
 }
+
+// TestJudgeCanonicalizesCodexHomeInsideDataDir is a regression test for a
+// live judge run: production requires judge_codex_home inside DATA_DIR, and
+// Codex canonicalizes CODEX_HOME at startup, which lstats DATA_DIR itself.
+// The DATA_DIR deny covered that folder, so Codex exited 1 ("failed to
+// canonicalize CODEX_HOME"). judgeParams puts CodexHome outside DATA_DIR,
+// which is why the other judge tests missed it. The fix allows only the
+// folder's metadata: listing it stays denied.
+func TestJudgeCanonicalizesCodexHomeInsideDataDir(t *testing.T) {
+	t.Parallel()
+	sb := newLoadedJudgeSandbox(t)
+	dirs := newTestDirs(t)
+	p := dirs.judgeParams(t)
+	p.CodexHome = filepath.Join(dirs.dataDir, "codex-judge")
+	if err := os.MkdirAll(p.CodexHome, 0o700); err != nil {
+		t.Fatalf("mkdir %s: %v", p.CodexHome, err)
+	}
+
+	if exitCode, out := runSandboxed(t, sb, p, "/bin/realpath", p.CodexHome); exitCode != 0 {
+		t.Errorf("realpath CODEX_HOME inside DATA_DIR under the judge profile: exit %d, want 0 (output %q)", exitCode, out)
+	}
+	if exitCode, out := runSandboxed(t, sb, p, "/bin/ls", dirs.dataDir); exitCode == 0 {
+		t.Errorf("list DATA_DIR under the judge profile: want a non-zero exit, got 0 (output %q)", out)
+	}
+}

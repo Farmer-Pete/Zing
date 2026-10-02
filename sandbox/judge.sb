@@ -96,6 +96,13 @@
 ; Operation not permitted").
 (allow file-read* file-read-data (subpath (param "CODEX_HOME")))
 
+; Codex canonicalizes CODEX_HOME at startup, which lstats every parent
+; folder. DATA_DIR is one of them, and the DATA_DIR deny above covers the
+; folder itself, so Codex failed with "failed to canonicalize CODEX_HOME:
+; Operation not permitted" on a live run. Allow only the metadata of the
+; DATA_DIR folder itself: no listing, and nothing inside it.
+(allow file-read-metadata (literal (param "DATA_DIR")))
+
 ; The judge reads no agent transcript and no Codex state of the owner's
 ; (N6). file-read-data is named here too: without it, this deny only beats
 ; other file-read* rules, never the file-read-data allow for ~/.claude and
