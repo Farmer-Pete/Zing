@@ -9,8 +9,10 @@ import (
 )
 
 // TestNoFixturePinsOpus48 is the repository invariant behind the opus alias
-// move: no Go or TOML file outside internal/store (whose tests store the id
-// as an opaque string) may still carry the retired default. The needle is
+// move: no Go or TOML file outside internal/store may still carry the
+// retired default. internal/store is exempt entirely, not just its tests:
+// its tests store the id as an opaque string and never resolve it, and its
+// production code never embeds a model-id literal at all. The needle is
 // built from two halves so this file never matches itself.
 func TestNoFixturePinsOpus48(t *testing.T) {
 	t.Parallel()
