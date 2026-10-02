@@ -3,6 +3,7 @@ package main
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"os"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -115,7 +116,10 @@ func TestSchemagenDiff_CatchesTamperedSchema(t *testing.T) {
 // forces sandbox.Load's own exec.LookPath("sandbox-exec") to fail
 // (reasonSandboxExecNotFound), the same closed reason a laptop missing
 // Xcode's command line tools would hit for real, so this proves the failure
-// path without touching the checked-in profile.
+// path without touching the checked-in profile. The first subtest skips
+// under ZING_SANDBOXED because it loads the real profile against the real
+// host, which a nested sandbox cannot do (measured on the #32 live run,
+// where it failed with user cache directory not found).
 //
 // Not parallel: both of its own subtests below call t.Setenv("PATH", ...),
 // so neither the parent nor its subtests can call t.Parallel.
@@ -125,6 +129,9 @@ func TestSelftestChecksProfileOnDarwin(t *testing.T) {
 	}
 
 	t.Run("fails with the sandbox's reason when the profile cannot load", func(t *testing.T) {
+		if os.Getenv("ZING_SANDBOXED") != "" {
+			t.Skip("running inside a seatbelt sandbox: cannot load the profile against the real host")
+		}
 		t.Setenv("PATH", "")
 		err := checkSandboxProfile(t.TempDir())
 		if err == nil {
