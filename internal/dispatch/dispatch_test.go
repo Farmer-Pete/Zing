@@ -4178,6 +4178,11 @@ type barrierHandler struct {
 	// transition commit once released, instead of the default fenced
 	// no-op.
 	next, reason string
+	// err, when non-nil, makes Run return it (instead of a commit) once
+	// released, modeling a worker whose own error becomes visible right as
+	// it is released -- the precise moment a test wants to race against a
+	// concurrent drain or stop.
+	err error
 }
 
 func (h *barrierHandler) Run(ctx context.Context, t store.Ticket, d job.Deps) (store.HandlerCommit, error) {
@@ -4191,6 +4196,9 @@ func (h *barrierHandler) Run(ctx context.Context, t store.Ticket, d job.Deps) (s
 	}
 	if ctx.Err() != nil {
 		return store.HandlerCommit{}, ctx.Err()
+	}
+	if h.err != nil {
+		return store.HandlerCommit{}, h.err
 	}
 	if h.next == "" {
 		return store.HandlerCommit{TicketID: t.ID, Owner: d.Owner, Expires: d.Expires}, nil
@@ -4253,6 +4261,31 @@ func (selfStealingHandler) Run(ctx context.Context, t store.Ticket, d job.Deps) 
 		return store.HandlerCommit{}, err
 	}
 	return store.HandlerCommit{TicketID: t.ID, Owner: d.Owner, Expires: d.Expires, Next: testStatePlanning, Reason: testSpyReason}, nil
+}
+
+// barrierSelfStealingHandler is selfStealingHandler's own twin that first
+// blocks until released (signaling its own arrival on started), the same
+// barrierHandler shape, so a test can hold the fail-closed trigger open
+// until a specific moment -- most usefully, to fire it back to back with a
+// concurrent NotifyDrain (design section 4.4, 4.6).
+type barrierSelfStealingHandler struct {
+	started chan int64
+	release chan struct{}
+}
+
+func (h *barrierSelfStealingHandler) Run(ctx context.Context, t store.Ticket, d job.Deps) (store.HandlerCommit, error) {
+	select {
+	case h.started <- t.ID:
+	case <-ctx.Done():
+	}
+	select {
+	case <-h.release:
+	case <-ctx.Done():
+	}
+	if ctx.Err() != nil {
+		return store.HandlerCommit{}, ctx.Err()
+	}
+	return selfStealingHandler{}.Run(ctx, t, d)
 }
 
 // TestTick_FillsEveryFreeSlot proves fill claims and launches every ready
@@ -4730,5 +4763,152 @@ func TestFill_ReleaseAfterCancelStillLands(t *testing.T) {
 	final := getTicket(t, s, ticketID)
 	if final.State != testStateQueued || final.ClaimOwner != nil {
 		t.Errorf("final ticket = %+v, want claim released even though ctx was cancelled before the release write", final)
+	}
+}
+
+// TestRun_AlertNamesTheErrorThatStopped proves reportFirstError always
+// describes d.stopErr -- the error the first setStop(err) call with a
+// non-nil error recorded -- never whichever error a caller's own select
+// happens to observe first (design section 4.6). It drives this through
+// Tick, not Run: Tick raises the same two alerts through the same
+// reportFirstError/logStopAlert calls (section 4.3), and Tick's own
+// synchronous fill-then-collect shape makes the race's two sides -- a
+// worker's own setStop call, and fill's own later claim failure -- land in
+// one deterministic call, with no ticker timing involved at all.
+//
+// The scenario: two ready tickets, A first in pick order, B second.
+// A's handler (selfStealingHandler) fails closed almost immediately once
+// claimed and launched; B's own claim attempt is deliberately blocked,
+// through the beforeClaimForTest hook, until A's worker has actually
+// called setStop -- so by the time fill reaches B, d.stopErr already names
+// A. B's own claim is then made to fail for real (by closing the store
+// from inside that same hook, once unblocked), so fill itself also returns
+// a second, later error with no ticket id of its own. The first error
+// setStop ever recorded must still be the one reportFirstError describes:
+// alert 1 names ticket A and selfStealingHandler's own fail-closed cause,
+// never "in a dispatcher pass" (what a B-authored alert would say).
+func TestRun_AlertNamesTheErrorThatStopped(t *testing.T) {
+	s := newDispatchTestStore(t)
+	aID := seedQueuedTicket(t, s, "fake#1")
+	bID := seedQueuedTicket(t, s, "fake#2")
+
+	reg := job.Registry()
+	reg[testStateQueued] = &perTicketHandler{byTicket: map[int64]job.Handler{
+		aID: selfStealingHandler{},
+		bID: &spyHandler{next: testStatePlanning, reason: testSpyReason},
+	}}
+
+	var logBuf bytes.Buffer
+	prevDefault := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logBuf, &slog.HandlerOptions{Level: slog.LevelDebug})))
+	t.Cleanup(func() { slog.SetDefault(prevDefault) })
+
+	d := newDispatcher(t, s, newFixtureTracker(t), bus.New(), fakeRuntime(t), reg, nil, dispatch.Config{MaxParallel: 2, Owner: testOwner})
+
+	workerAStopped := make(chan struct{})
+	dispatch.SetStopErrRecordedForTest(d, func(error) { close(workerAStopped) })
+	dispatch.SetBeforeClaimForTest(d, func(ticketID int64) {
+		if ticketID != bID {
+			return
+		}
+		<-workerAStopped // B's claim must never be attempted before A's worker has recorded its own error
+		if closeErr := s.Close(); closeErr != nil {
+			t.Errorf("close store ahead of B's claim: %v", closeErr)
+		}
+	})
+
+	err := d.Tick(t.Context())
+	if err == nil {
+		t.Fatal("Tick: want a joined error (A's fail-closed plus B's claim failure), got nil")
+	}
+	if !errors.Is(err, dispatch.ErrFailClosed) {
+		t.Errorf("Tick err = %v, want it to wrap ErrFailClosed (A's own error)", err)
+	}
+
+	logged := logBuf.String()
+	wantAlert1 := fmt.Sprintf("fail-closed on ticket %d:", aID)
+	if !strings.Contains(logged, wantAlert1) {
+		t.Errorf("log = %q, want alert 1 to start %q (A's own ticket and cause)", logged, wantAlert1)
+	}
+	if strings.Contains(logged, "in a dispatcher pass") {
+		t.Errorf("log = %q, want alert 1 to never describe B's fill error (\"in a dispatcher pass\")", logged)
+	}
+	wantAlert2 := fmt.Sprintf("dispatcher stopped after fail-closed on ticket %d", aID)
+	if !strings.Contains(logged, wantAlert2) {
+		t.Errorf("log = %q, want alert 2 %q", logged, wantAlert2)
+	}
+}
+
+// TestRun_DrainRacingWorkerErrorStillAlerts proves alert 1 and alert 2 each
+// appear exactly once, in order, regardless of which side of a genuine
+// race Run's own select resolves first (design section 4.4, 4.6): a
+// worker's own error becoming visible on results at (as close as this
+// process can arrange without a sleep) the same moment NotifyDrain is
+// called. reportFirstError's one-shot guard (firstErrorReported) and
+// setStop's own "first non-nil wins" rule together must make the outcome
+// identical either way: whether Run's select picks the drainCh case (so
+// finish's own results-draining loop is what first sees the worker's
+// error) or the results case directly (handle(r)), d.stopErr ends up the
+// worker's own error in both orderings, since NotifyDrain's own
+// setStop(nil) can never claim that slot ahead of a worker's non-nil one
+// (setStop's "first error wins" rule, not first *call*).
+func TestRun_DrainRacingWorkerErrorStillAlerts(t *testing.T) {
+	s := newDispatchTestStore(t)
+	ticketID := seedQueuedTicket(t, s, testFixtureRef)
+
+	started := make(chan int64, 1)
+	release := make(chan struct{})
+	reg := job.Registry()
+	reg[testStateQueued] = &barrierSelfStealingHandler{started: started, release: release}
+
+	var logBuf bytes.Buffer
+	prevDefault := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logBuf, &slog.HandlerOptions{Level: slog.LevelDebug})))
+	t.Cleanup(func() { slog.SetDefault(prevDefault) })
+
+	d := newDispatcher(t, s, newFixtureTracker(t), bus.New(), fakeRuntime(t), reg, nil, dispatch.Config{MaxParallel: 1, Interval: 5 * time.Millisecond, Owner: testOwner})
+
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	runErrCh := make(chan error, 1)
+	go func() { runErrCh <- d.Run(ctx) }()
+
+	select {
+	case <-started:
+	case <-time.After(5 * time.Second):
+		t.Fatal("handler never started")
+	}
+
+	if err := s.SetDraining(t.Context(), true); err != nil {
+		t.Fatalf("SetDraining: %v", err)
+	}
+	// Release the failing handler and signal the drain back to back, with
+	// no sleep between them: Run's own select must then race its drainCh
+	// case against its results case for real. Whichever it picks, the
+	// assertions below must still hold.
+	close(release)
+	d.NotifyDrain()
+
+	var runErr error
+	select {
+	case runErr = <-runErrCh:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Run never returned")
+	}
+	if !errors.Is(runErr, dispatch.ErrFailClosed) {
+		t.Errorf("Run err = %v, want errors.Is(err, dispatch.ErrFailClosed)", runErr)
+	}
+
+	logged := logBuf.String()
+	alert1 := fmt.Sprintf("fail-closed on ticket %d: %s: ticket %d: the lease was lost", ticketID, dispatch.ErrFailClosed.Error(), ticketID)
+	alert2 := fmt.Sprintf("dispatcher stopped after fail-closed on ticket %d", ticketID)
+	if got := strings.Count(logged, alert1); got != 1 {
+		t.Errorf("alert 1 (%q) appeared %d times, want exactly 1 (log: %s)", alert1, got, logged)
+	}
+	if got := strings.Count(logged, alert2); got != 1 {
+		t.Errorf("alert 2 (%q) appeared %d times, want exactly 1 (log: %s)", alert2, got, logged)
+	}
+	if i1, i2 := strings.Index(logged, alert1), strings.Index(logged, alert2); i1 < 0 || i2 < 0 || i2 < i1 {
+		t.Errorf("alerts out of order (alert1 at %d, alert2 at %d); log: %s", i1, i2, logged)
 	}
 }

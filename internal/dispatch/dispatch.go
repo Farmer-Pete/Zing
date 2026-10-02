@@ -259,6 +259,27 @@ type Dispatcher struct {
 	// only through export_test.go's SetAfterClaimForTest, never in
 	// production code.
 	afterClaimForTest func(ticketID int64)
+
+	// beforeClaimForTest, when non-nil, is called by fill synchronously
+	// right before attempting Claim for ticketID, for each candidate in
+	// pick order (design section 4.2 step 5). It exists only so a test can
+	// block a later candidate's claim attempt in the same pass until a
+	// concurrently running worker (launched for an earlier candidate in
+	// that same pass) has reached a specific point -- most usefully,
+	// stopErrRecordedForTest below firing -- making a race between a
+	// worker's own setStop and fill's own return deterministic instead of
+	// timing-dependent. Set only through export_test.go's
+	// SetBeforeClaimForTest, never in production code.
+	beforeClaimForTest func(ticketID int64)
+
+	// stopErrRecordedForTest, when non-nil, is called by setStop
+	// synchronously, right after it is the first call to record a non-nil
+	// stopErr (design section 4.6), with that same error. It exists only so
+	// a test can learn the exact moment reportFirstError's own eventual
+	// description became fixed, without polling or sleeping. Set only
+	// through export_test.go's SetStopErrRecordedForTest, never in
+	// production code.
+	stopErrRecordedForTest func(err error)
 }
 
 // deferredMechanics names the three section 10 dispatcher mechanics this
@@ -335,11 +356,18 @@ func (d *Dispatcher) NotifyDrain() {
 // set stop, though no caller in this package currently needs that signal.
 func (d *Dispatcher) setStop(err error) bool {
 	d.mu.Lock()
-	defer d.mu.Unlock()
 	first := !d.stop
 	d.stop = true
+	recorded := false
 	if d.stopErr == nil {
 		d.stopErr = err
+		recorded = err != nil
+	}
+	hook := d.stopErrRecordedForTest
+	d.mu.Unlock()
+
+	if recorded && hook != nil {
+		hook(err)
 	}
 	return first
 }
@@ -717,6 +745,9 @@ func (d *Dispatcher) fill(ctx context.Context, results chan<- runResult) (int, e
 		// loop) already spent (design section "dispatch" fix 5, cubic P2).
 		timeout := d.claimTimeoutFor(state)
 		expires := time.Now().Add(timeout + claimGrace)
+		if d.beforeClaimForTest != nil {
+			d.beforeClaimForTest(id)
+		}
 		claimed, err := d.store.Claim(ctx, id, d.cfg.Owner, expires)
 		if err != nil {
 			return launched, fmt.Errorf("dispatch: claim ticket %d: %w", id, err)

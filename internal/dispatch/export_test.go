@@ -24,3 +24,23 @@ func IsStoppedForTest(d *Dispatcher) bool {
 func SetStopForTest(d *Dispatcher, err error) bool {
 	return d.setStop(err)
 }
+
+// SetBeforeClaimForTest installs a hook fill calls synchronously right
+// before attempting Claim for a ticket, for each candidate in pick order
+// (design section 4.2 step 5). It exists only to let a test block a later
+// candidate's claim attempt in the same pass until a concurrently running
+// worker (launched for an earlier candidate in that same pass) has reached
+// a specific point, making a race between that worker and fill's own
+// continued pass deterministic instead of timing-dependent.
+func SetBeforeClaimForTest(d *Dispatcher, f func(ticketID int64)) {
+	d.beforeClaimForTest = f
+}
+
+// SetStopErrRecordedForTest installs a hook setStop calls synchronously,
+// right after it is the first call to record a non-nil stopErr (design
+// section 4.6), with that same error. It exists only to let a test learn
+// the exact moment reportFirstError's own eventual description became
+// fixed, without polling or sleeping.
+func SetStopErrRecordedForTest(d *Dispatcher, f func(err error)) {
+	d.stopErrRecordedForTest = f
+}
