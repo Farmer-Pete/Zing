@@ -1,7 +1,7 @@
 <zing job="build" outcome="ok"> <!-- job: Job, one of: classify | planning | planreview | build | perimeter | review | judge | respond | side, the running job; must match; outcome: Outcome, one of: ok | question | error, one of this job's outcomes, or question, or error -->
   <claims> <!-- BuildClaims -->
     <files_changed>
-      <path>...</path> <!-- string, one or more, every changed path; the program diffs the tree -->
+      <path>...</path> <!-- string, optional, zero or more, every changed path, or none for a fix run whose failure is not in the code; the program diffs the tree -->
     </files_changed>
     <test_exit>...</test_exit> <!-- int, the program re-runs the command -->
     <lint_exit>...</lint_exit> <!-- int, the program re-runs the command -->

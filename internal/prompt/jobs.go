@@ -298,11 +298,16 @@ func ForBuild(jobPrompt string, task BuildTask, testCmd, lintCmd, ticket, planXM
 // fixed error ForBuild returns. Called by internal/job's fix turn (plan
 // section 8); calls Assemble once Schemas is set from
 // response.RenderTemplate(JobBuild, ...) in build schema order.
+// fixNoChangeLine tells a fix run what to do when the failure is not in
+// the code (bug fix: a live fix builder escalated "could not reproduce"
+// three times, since nothing told it a no-change outcome was allowed).
+const fixNoChangeLine = "If the reported failure does not reproduce against the code, change nothing and return outcome ok with an empty files_changed and a report that says why."
+
 func ForFix(jobPrompt, subject, label, text, testCmd, lintCmd, ticket, planXML, approvalNotes string, accepted []string, extra []NamedInput) (Input, error) {
 	if !strings.Contains(jobPrompt, buildTaskLine) {
 		return Input{}, fmt.Errorf("prompt: build prompt lacks placeholder %s", buildTaskLine)
 	}
-	filled := strings.Replace(jobPrompt, buildTaskLine, "Fix run: "+subject, 1)
+	filled := strings.Replace(jobPrompt, buildTaskLine, "Fix run: "+subject+"\n"+fixNoChangeLine, 1)
 
 	filled, err := fillPlaceholders(filled, "build", []placeholderPair{
 		{"{test_cmd}", testCmd},

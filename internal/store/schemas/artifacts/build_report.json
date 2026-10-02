@@ -10,8 +10,7 @@
       "items": {
         "type": "string"
       },
-      "type": "array",
-      "minItems": 1
+      "type": "array"
     },
     "test_exit": {
       "type": "integer"

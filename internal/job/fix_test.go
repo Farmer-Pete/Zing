@@ -1162,3 +1162,60 @@ func TestDriveFixEscalatesMissingRecorded(t *testing.T) {
 		t.Errorf("escalation origin = %q, want %q", commit.Escalation.Payload.Origin, response.EscalationOriginFix)
 	}
 }
+
+// TestDriveFixWithNoChangesLandsAtHead is a regression test for a live
+// ticket: a judge failure came from the sealed check commands, not the
+// code, so the fix builder correctly changed nothing, yet a fix could only
+// land through a commit, and every retry escalated again. A fix unit that
+// checks clean with no changed files now lands at the current HEAD, so the
+// ticket moves on to re-review and re-judge.
+func TestDriveFixWithNoChangesLandsAtHead(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow end-to-end flow; runs in the full suite")
+	}
+	t.Parallel()
+	s, _, ticketID := buildTicketInBuilding(t)
+	mid := writeFixRequestMarker(t, s, ticketID, job.FixKindFailure, "scenario 1 failed in the re-run only", 0)
+	ticket := getTicket(t, s, ticketID)
+
+	scriptRT := &scriptedRuntime{t: t, steps: []scriptedStep{buildStep(nil, 0, 0, nil, "fix-noop-sess")}}
+	deps := withNoopCommands(claimForBuild(t, s, scriptRT, ticketID), ticket)
+	req := job.FixRequest{MessageID: mid, Kind: job.FixKindFailure, Text: "scenario 1 failed in the re-run only", AfterRunID: 0}
+
+	commit, err := job.DriveFix(t.Context(), ticket, deps, req)
+	if err != nil {
+		t.Fatalf("DriveFix (RUN): %v", err)
+	}
+	apply(t, s, ticket, commit)
+
+	ticket = getTicket(t, s, ticketID)
+	deps2 := withNoopCommands(claimForBuild(t, s, scriptRT, ticketID), ticket)
+	landCommit, err := job.DriveFix(t.Context(), ticket, deps2, req)
+	if err != nil {
+		t.Fatalf("DriveFix (CHECK+LAND): %v", err)
+	}
+	if landCommit.Escalation != nil {
+		t.Fatalf("LAND escalated: %+v, want a no-op landing", landCommit.Escalation.Payload)
+	}
+	wantPrefix := "fix landed " + strconv.FormatInt(mid, 10) + " sha "
+	found := false
+	for _, m := range landCommit.Messages {
+		if strings.HasPrefix(m.Body, wantPrefix) {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("LAND commit.Messages = %+v, want one starting with %q", landCommit.Messages, wantPrefix)
+	}
+	apply(t, s, ticket, landCommit)
+}
+
+// withNoopCommands sets both project commands to the no-op, so the fix
+// run's tree stays unchanged.
+func withNoopCommands(deps job.Deps, ticket store.Ticket) job.Deps {
+	proj := deps.Projects[ticket.ProjectID]
+	proj.TestCmd = testNoopShellCmd
+	proj.LintCmd = testNoopShellCmd
+	deps.Projects = map[int64]job.Project{ticket.ProjectID: proj}
+	return deps
+}

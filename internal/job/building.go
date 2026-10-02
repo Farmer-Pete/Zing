@@ -1673,9 +1673,15 @@ func buildSuccessCommit(t store.Ticket, d Deps, rr runResult, sessionCommit *sto
 		if fences == nil {
 			fences = []response.Fence{}
 		}
+		claims := resp.Claims
+		if claims.FilesChanged == nil {
+			// A run that changed nothing decodes to a nil slice, which the
+			// build_report schema refuses as null.
+			claims.FilesChanged = []string{}
+		}
 		report := response.BuildReport{
 			TaskN:       u.TaskN,
-			BuildClaims: resp.Claims,
+			BuildClaims: claims,
 			Extras:      extras,
 			Fences:      fences,
 			Report:      resp.Report,
@@ -1844,7 +1850,18 @@ func (h buildingHandler) check(ctx context.Context, t store.Ticket, d Deps, proj
 // openFixRequest reads to know this request's own unit has landed.
 func (h buildingHandler) land(ctx context.Context, t store.Ticket, d Deps, proj Project, wt orchestrator.Worktree, plan response.Plan, u unit, rid int64, report store.BuildReportRow, approved []string) (store.HandlerCommit, error) {
 	msg := orchestrator.CommitMessage{Title: report.Report.Title, FuncLines: funcLines(plan, approved), Fences: report.Report.Fences}
-	sha, err := proj.Orch.CommitTask(ctx, wt, approved, msg)
+	var sha string
+	var err error
+	if len(approved) == 0 && u.FixRequestID != nil {
+		// A fix that checked clean with nothing changed lands at the current
+		// HEAD (bug fix: the failure came from outside the code, the builder
+		// rightly changed nothing, and a fix could only land through a
+		// commit, so every retry escalated). Review and the judge then run
+		// again at the same sha.
+		sha, err = proj.Orch.HeadSHA(ctx, wt)
+	} else {
+		sha, err = proj.Orch.CommitTask(ctx, wt, approved, msg)
+	}
 	if err != nil {
 		what, why := taskNotCommittedWhat, taskNotCommittedWhy
 		if strings.Contains(err.Error(), "commit signing failed") {
