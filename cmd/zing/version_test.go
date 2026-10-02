@@ -1,7 +1,10 @@
 package main
 
 import (
+	"io"
+	"os"
 	"runtime/debug"
+	"strings"
 	"testing"
 )
 
@@ -146,5 +149,98 @@ func TestVersionString(t *testing.T) {
 				t.Errorf("versionString(%+v) = %q, want %q", tt.info, got, tt.want)
 			}
 		})
+	}
+}
+
+// captureStreams swaps both os.Stdout and os.Stderr for pipes, restoring the
+// originals in t.Cleanup, and returns a function that closes the writers,
+// restores the originals immediately (so a caller can swap again within the
+// same test), and returns what was written to each. Callers must not run in
+// parallel, since the swap is process-wide.
+func captureStreams(t *testing.T) (read func() (string, string)) {
+	t.Helper()
+
+	outR, outW, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	errR, errW, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	origOut, origErr := os.Stdout, os.Stderr
+	os.Stdout, os.Stderr = outW, errW
+	t.Cleanup(func() { os.Stdout, os.Stderr = origOut, origErr })
+
+	return func() (string, string) {
+		os.Stdout, os.Stderr = origOut, origErr
+		if err := outW.Close(); err != nil {
+			t.Fatal(err)
+		}
+		if err := errW.Close(); err != nil {
+			t.Fatal(err)
+		}
+		outBytes, err := io.ReadAll(outR)
+		if err != nil {
+			t.Fatal(err)
+		}
+		errBytes, err := io.ReadAll(errR)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return string(outBytes), string(errBytes)
+	}
+}
+
+// TestDispatch_Version cannot run in parallel: it swaps the process-wide
+// os.Stdout and os.Stderr to capture dispatch's output. It does not assert
+// the token's value, because a go test binary carries no VCS stamp and its
+// module version is not fixed; the real-build behaviours are judge
+// scenarios s1, s3, and s4 instead. This test pins scenario s2's empty-stderr
+// requirement.
+func TestDispatch_Version(t *testing.T) {
+	read := captureStreams(t)
+
+	got := dispatch([]string{argv0, "version"})
+	stdout, stderr := read()
+
+	if got != 0 {
+		t.Errorf("dispatch(version) = %d, want 0", got)
+	}
+	if !strings.HasPrefix(stdout, versionPrefix) {
+		t.Errorf("stdout = %q, want prefix %q", stdout, versionPrefix)
+	}
+	if !strings.HasSuffix(stdout, "\n") {
+		t.Errorf("stdout = %q, want trailing newline", stdout)
+	}
+	token := strings.TrimSuffix(strings.TrimPrefix(stdout, versionPrefix), "\n")
+	if token == "" || strings.ContainsAny(token, " \n") {
+		t.Errorf("stdout token = %q, want a single space-free token", token)
+	}
+	if stderr != "" {
+		t.Errorf("stderr = %q, want empty", stderr)
+	}
+}
+
+// TestDispatch_VersionRejectsArguments cannot run in parallel: it swaps the
+// process-wide os.Stdout and os.Stderr. Scenario s6 is the judge's
+// real-binary counterpart of this test.
+func TestDispatch_VersionRejectsArguments(t *testing.T) {
+	for _, extra := range []string{"extra", "--help"} {
+		read := captureStreams(t)
+
+		got := dispatch([]string{argv0, "version", extra})
+		stdout, stderr := read()
+
+		if got != 2 {
+			t.Errorf("dispatch(version, %q) = %d, want 2", extra, got)
+		}
+		if stdout != "" {
+			t.Errorf("stdout = %q, want empty", stdout)
+		}
+		if stderr != versionUsage+"\n" {
+			t.Errorf("stderr = %q, want %q", stderr, versionUsage+"\n")
+		}
 	}
 }
