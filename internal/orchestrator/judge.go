@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 )
 
 // JudgeTree is one detached checkout prepared for the judge, at
@@ -26,22 +27,28 @@ type JudgeTree struct {
 	repoPath string   // o.proj.LocalPath: where "git worktree remove" runs
 	drivers  []string // this checkout's own filter drivers (PKG8-PLAN.md section 7.2), overridden to empty on every git call JudgeTree itself makes
 	run      Runner   // captured at JudgeWorktree time
+	// commonMu is this repository's shared git-lock mutex (design section
+	// 8, commonlock.go), captured at JudgeWorktree time: Remove's own
+	// "worktree remove --force" is a shared write, and callers (internal/job)
+	// invoke it directly, with no Orchestrator in scope to resolve one.
+	commonMu *sync.Mutex
 }
 
 // Dir returns the checkout's absolute path.
 func (j JudgeTree) Dir() string { return j.dir }
 
-// Remove runs "git worktree remove --force <dir>", then os.RemoveAll(dir).
-// Git's "is not a working tree" failure -- the checkout already fully
-// gone, disk and registration both -- is treated as success rather than
-// propagated, so Remove is safe to call twice and safe to call on a
-// checkout a previous, crashed run already half-removed by hand. Any other
-// "git worktree remove" failure is returned as-is, without running
+// Remove runs "git worktree remove --force <dir>" (a shared write, run
+// under commonMu through runCommonLocked -- design section 8), then
+// os.RemoveAll(dir). Git's "is not a working tree" failure -- the checkout
+// already fully gone, disk and registration both -- is treated as success
+// rather than propagated, so Remove is safe to call twice and safe to call
+// on a checkout a previous, crashed run already half-removed by hand. Any
+// other "git worktree remove" failure is returned as-is, without running
 // RemoveAll: a real failure there (a lock held, a permission error) means
 // git's own worktree administration may still need this directory, so
 // Remove does not also delete it out from under that state.
 func (j JudgeTree) Remove(ctx context.Context) error {
-	out, err := j.run.Run(ctx, j.repoPath, "git", "worktree", "remove", "--force", j.dir)
+	out, err := j.removeLocked(ctx)
 	if err != nil && !isNotAWorkingTreeErrorOutput(out) {
 		return fmt.Errorf("orchestrator: judge worktree: remove: %w: %s", err, strings.TrimSpace(out))
 	}
@@ -49,6 +56,16 @@ func (j JudgeTree) Remove(ctx context.Context) error {
 		return fmt.Errorf("orchestrator: judge worktree: remove dir %s: %w", j.dir, rmErr)
 	}
 	return nil
+}
+
+// removeLocked runs this tree's one shared git call with commonMu held
+// (design section 8): the only place outside commonlock.go's own runCommon
+// and ensureWorktreeExcludeLocked that takes the lock, since JudgeTree has
+// no Orchestrator to call runCommon through.
+func (j JudgeTree) removeLocked(ctx context.Context) (string, error) {
+	j.commonMu.Lock()
+	defer j.commonMu.Unlock()
+	return runCommonLocked(ctx, j.run, j.repoPath, "worktree", "remove", "--force", j.dir)
 }
 
 // judgeGovernanceFiles are the two root files the judge's checkout always
@@ -89,7 +106,12 @@ type governanceFile struct {
 func (o *Orchestrator) JudgeWorktree(ctx context.Context, ticketID int64, sha string) (JudgeTree, error) {
 	dir := filepath.Join(o.proj.LocalPath, ".zing", "judge", strconv.FormatInt(ticketID, 10))
 
-	leftover := JudgeTree{dir: dir, repoPath: o.proj.LocalPath, run: o.run}
+	mu, muErr := o.resolveCommonMu(ctx)
+	if muErr != nil {
+		return JudgeTree{}, fmt.Errorf("orchestrator: judge worktree: %w", muErr)
+	}
+
+	leftover := JudgeTree{dir: dir, repoPath: o.proj.LocalPath, run: o.run, commonMu: mu}
 	if err := leftover.Remove(ctx); err != nil {
 		return JudgeTree{}, fmt.Errorf("orchestrator: judge worktree: remove leftover: %w", err)
 	}
@@ -99,11 +121,11 @@ func (o *Orchestrator) JudgeWorktree(ctx context.Context, ticketID int64, sha st
 		return JudgeTree{}, fmt.Errorf("orchestrator: judge worktree: %w", err)
 	}
 
-	if addOut, addErr := o.run.Run(ctx, o.proj.LocalPath, "git", "worktree", "add", "--detach", "--no-checkout", dir, sha); addErr != nil {
+	if addOut, addErr := o.runCommon(ctx, o.run, o.proj.LocalPath, "worktree", "add", "--detach", "--no-checkout", dir, sha); addErr != nil {
 		return JudgeTree{}, fmt.Errorf("orchestrator: judge worktree: git worktree add: %w: %s", addErr, strings.TrimSpace(addOut))
 	}
 
-	jt := JudgeTree{dir: dir, repoPath: o.proj.LocalPath, run: o.run}
+	jt := JudgeTree{dir: dir, repoPath: o.proj.LocalPath, run: o.run, commonMu: mu}
 
 	drivers, err := o.FilterDrivers(ctx, dir)
 	if err != nil {

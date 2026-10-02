@@ -40,7 +40,7 @@ func (o *Orchestrator) Push(ctx context.Context, wt Worktree) error {
 	o.log.Info("pushing branch", "branch", wt.branch, "commits", len(shas))
 
 	refspec := "refs/heads/" + wt.branch + ":refs/heads/" + wt.branch
-	if out, runErr := o.run.Run(ctx, wt.dir, "git", "push", "-u", "origin", refspec); runErr != nil {
+	if out, runErr := o.runCommon(ctx, o.run, wt.dir, "push", "-u", "origin", refspec); runErr != nil {
 		return fmt.Errorf("orchestrator: push: git push: %w: %s", runErr, strings.TrimSpace(out))
 	}
 
