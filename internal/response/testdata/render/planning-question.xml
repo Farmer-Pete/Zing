@@ -1,12 +1,12 @@
 <zing job="planning" outcome="question"> <!-- job: Job, one of: classify | planning | planreview | build | perimeter | review | judge | respond | side, the running job; must match; outcome: Outcome, one of: questions | replies | confirmed | ready | children | nothing_to_do | question | error, one of this job's outcomes, or question, or error -->
-  <question key="..."> <!-- Question, one or more, one per decision you need; key: string -->
+  <question key="..."> <!-- Question, one or more, one per decision you need; key: string, must match ^[qQ][0-9]+$ -->
     <title>...</title> <!-- string, short -->
     <body>...</body> <!-- string, what you need to know and why, markdown -->
-    <option key="...">...</option> <!-- Option, none, or two to four; key: string -->
+    <option key="...">...</option> <!-- Option, none, or two to four; key: string, must match ^[a-z]$ -->
     <recommended>...</recommended> <!-- string, an option key or free text, with the reason -->
   </question>
   <progress>...</progress> <!-- string, what is done so far, so the resumed run can continue -->
   <replies>
-    <reply question="..." settled="..." decision="...">...</reply> <!-- Reply, optional, zero or more, none, or one per question thread you answer this turn; question: string, the question's key as Zing showed it, such as Q7, never your own q1; settled: bool, optional, write settled="true" to close the thread with decision; decision: string, optional, required when settled: the decision taken, one sentence -->
+    <reply question="..." settled="..." decision="...">...</reply> <!-- Reply, optional, zero or more, none, or one per question thread you answer this turn; question: string, must match ^Q[0-9]+$, the question's key as Zing showed it, such as Q7, never your own q1; settled: bool, optional, write settled="true" to close the thread with decision; decision: string, optional, required when settled: the decision taken, one sentence -->
   </replies>
 </zing>

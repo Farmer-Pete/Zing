@@ -42,6 +42,7 @@ import (
 	"time"
 
 	zing "zing"
+	"zing/internal/fence"
 	"zing/internal/prompt"
 	"zing/internal/response"
 	"zing/internal/runtime"
@@ -2222,7 +2223,7 @@ func invalidOutputCommit(t store.Ticket, d Deps, rr runResult, invErr *runtime.I
 	c.ResolveQuestions = resolveIDs
 	c.Messages = []store.Message{{
 		TicketID: t.ID, Type: msgTypeUpdate, Author: authorSystem,
-		Body: fmt.Sprintf("response invalid run %d\n%s", rr.Reserved.RunID, invErr.Reason),
+		Body: invalidMarkerBody(rr.Reserved.RunID, invErr),
 	}}
 
 	if priorInvalid == 1 {
@@ -2406,7 +2407,27 @@ func renderRoundAnswers(round store.Round) (string, error) {
 // never owner- or model-supplied prose, so prompt.Invalid's "raw, never
 // fenced" rule still holds.
 func invalidRetryText(reason string) string {
-	return "your final message was not a valid zing document: " + reason + "; return exactly one"
+	closed, detail, hasDetail := strings.Cut(reason, "\n")
+	text := "your final message was not a valid zing document: " + closed + "; return exactly one"
+	if hasDetail && detail != "" {
+		// detail is the validator's error list from the marker's third line
+		// (invalidMarkerBody); it can quote the model's own words, so it is
+		// fenced like any other untrusted input.
+		text += "\nThe validator's errors, quoted from your document:\n" + fence.Wrap(detail)
+	}
+	return text
+}
+
+// invalidMarkerBody is the "response invalid run <id>" marker's body: the
+// closed reason on line two and, for a failed validation, the validator's
+// error list on line three, which invalidRetryText fences back into the
+// retry prompt.
+func invalidMarkerBody(runID int64, invErr *runtime.InvalidOutputError) string {
+	body := fmt.Sprintf("response invalid run %d\n%s", runID, invErr.Reason)
+	if invErr.Detail != "" {
+		body += "\n" + strings.ReplaceAll(invErr.Detail, "\n", " ")
+	}
+	return body
 }
 
 // readAsset reads path out of the embedded zing.Assets tree (machine.toml's

@@ -284,3 +284,20 @@ func TestRenderTemplate_EndsWithOneTrailingNewline(t *testing.T) {
 		t.Fatal("output ends with more than one trailing newline")
 	}
 }
+
+// TestRenderTemplate_ShowsKeyPatterns is a regression test for a live
+// planning turn: the template said only "key: string", the model keyed its
+// questions "test-scope", and the validator's ^[qQ][0-9]+$ refused the
+// document twice in a row.
+func TestRenderTemplate_ShowsKeyPatterns(t *testing.T) {
+	t.Parallel()
+	got, err := RenderTemplate(JobPlanning, OutcomeQuestions)
+	if err != nil {
+		t.Fatalf("RenderTemplate: %v", err)
+	}
+	for _, want := range []string{"must match ^[qQ][0-9]+$", "must match ^[a-z]$"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("template lacks %q:\n%s", want, got)
+		}
+	}
+}

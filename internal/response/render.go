@@ -212,15 +212,16 @@ func writeComment(buf *strings.Builder, comment string) {
 	buf.WriteString(" <!-- " + comment + " -->")
 }
 
-// ---- the note: type, optional, cardinality, allowed values, doc -----------
+// ---- the note: type, optional, cardinality, allowed values, pattern, doc --
 
 // noteParts builds n's comment pieces in design section 6.8's fixed order:
 // field type, an optional marker (scalar fields only; a slice folds
 // optionality into its cardinality phrase instead), the cardinality note,
-// the allowed values, then the doc text, skipping any piece that does not
-// apply. A doc identical to the immediately preceding piece (Question.
-// Options' own doc tag literally reads "none, or two to four", the same
-// text as its hardcoded cardinality note) is dropped rather than repeated.
+// the allowed values, the key pattern, then the doc text, skipping any
+// piece that does not apply. A doc identical to the immediately preceding
+// piece (Question.Options' own doc tag literally reads "none, or two to
+// four", the same text as its hardcoded cardinality note) is dropped rather
+// than repeated.
 // The outcome attribute is the one field whose allowed values are not its
 // Go enum type's full Values(): jobOutcomes (the rendering job's own
 // registered outcomes, outcomesForJob) replaces it there, so a job such
@@ -245,6 +246,12 @@ func noteParts(n *node, jobOutcomes []string) []string {
 		if len(values) > 0 {
 			parts = append(parts, "one of: "+strings.Join(values, " | "))
 		}
+	}
+	if n.HasPattern {
+		// The validator enforces the pattern, so the model must see it
+		// (bug fix: a live planning turn keyed its questions "test-scope"
+		// and failed validation twice; the note said only "key: string").
+		parts = append(parts, "must match "+escape(n.Pattern))
 	}
 	if n.Doc != "" {
 		d := escape(n.Doc)

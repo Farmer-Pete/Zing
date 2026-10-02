@@ -243,15 +243,15 @@ Body: Users want a dark theme toggle in settings.
 <<<END abcdef>>>
 
 <zing job="planning" outcome="questions"> <!-- job: Job, one of: classify | planning | planreview | build | perimeter | review | judge | respond | side, the running job; must match; outcome: Outcome, one of: questions | replies | confirmed | ready | children | nothing_to_do | question | error, one of this job's outcomes, or question, or error -->
-  <question key="..."> <!-- Question, one or more, one per decision you need; key: string -->
+  <question key="..."> <!-- Question, one or more, one per decision you need; key: string, must match ^[qQ][0-9]+$ -->
     <title>...</title> <!-- string, short -->
     <body>...</body> <!-- string, what you need to know and why, markdown -->
-    <option key="...">...</option> <!-- Option, none, or two to four; key: string -->
+    <option key="...">...</option> <!-- Option, none, or two to four; key: string, must match ^[a-z]$ -->
     <recommended>...</recommended> <!-- string, an option key or free text, with the reason -->
   </question>
   <progress>...</progress> <!-- string, what is done so far, so the resumed run can continue -->
   <replies>
-    <reply question="..." settled="..." decision="...">...</reply> <!-- Reply, optional, zero or more, none, or one per question thread you answer this turn; question: string, the question's key as Zing showed it, such as Q7, never your own q1; settled: bool, optional, write settled="true" to close the thread with decision; decision: string, optional, required when settled: the decision taken, one sentence -->
+    <reply question="..." settled="..." decision="...">...</reply> <!-- Reply, optional, zero or more, none, or one per question thread you answer this turn; question: string, must match ^Q[0-9]+$, the question's key as Zing showed it, such as Q7, never your own q1; settled: bool, optional, write settled="true" to close the thread with decision; decision: string, optional, required when settled: the decision taken, one sentence -->
   </replies>
 </zing>
 
@@ -260,7 +260,7 @@ Body: Users want a dark theme toggle in settings.
     <claim kind="..." verdict="..." evidence="...">...</claim> <!-- Claim, one or more; kind: ClaimKind, one of: code | env; verdict: ClaimVerdict, one of: true | false | unchecked; evidence: string, for a code claim, a path you read, with a line where one applies -->
   </claims>
   <scenarios>
-    <scenario id="..." kind="..." check="..."> <!-- Scenario, two to 30; id: string; kind: ScenarioKind, one of: behavior | negative | performance; check: string, optional, one command whose exit code decides it -->
+    <scenario id="..." kind="..." check="..."> <!-- Scenario, two to 30; id: string, must match ^s[0-9]+$; kind: ScenarioKind, one of: behavior | negative | performance; check: string, optional, one command whose exit code decides it -->
       <given>...</given> <!-- string, the starting state -->
       <when>...</when> <!-- string, the action -->
       <then>...</then> <!-- string, what a stranger would observe, from outside the code -->
@@ -343,19 +343,19 @@ Body: Users want a dark theme toggle in settings.
     </review>
   </plan>
   <replies>
-    <reply question="..." settled="..." decision="...">...</reply> <!-- Reply, optional, zero or more, none, or one per question thread you answer this turn; question: string, the question's key as Zing showed it, such as Q7, never your own q1; settled: bool, optional, write settled="true" to close the thread with decision; decision: string, optional, required when settled: the decision taken, one sentence -->
+    <reply question="..." settled="..." decision="...">...</reply> <!-- Reply, optional, zero or more, none, or one per question thread you answer this turn; question: string, must match ^Q[0-9]+$, the question's key as Zing showed it, such as Q7, never your own q1; settled: bool, optional, write settled="true" to close the thread with decision; decision: string, optional, required when settled: the decision taken, one sentence -->
   </replies>
 </zing>
 
 <zing job="planning" outcome="children"> <!-- job: Job, one of: classify | planning | planreview | build | perimeter | review | judge | respond | side, the running job; must match; outcome: Outcome, one of: questions | replies | confirmed | ready | children | nothing_to_do | question | error, one of this job's outcomes, or question, or error -->
-  <child key="..."> <!-- Child, at least two, tickets that can each be built and verified alone; key: string -->
+  <child key="..."> <!-- Child, at least two, tickets that can each be built and verified alone; key: string, must match ^c[0-9]+$ -->
     <title>...</title> <!-- string -->
     <body>...</body> <!-- string, specific enough to build alone, markdown -->
     <depends_on>...</depends_on> <!-- string, optional, zero or more, keys of other children; no cycles -->
   </child>
   <notes>...</notes> <!-- string, the shared architecture, markdown -->
   <replies>
-    <reply question="..." settled="..." decision="...">...</reply> <!-- Reply, optional, zero or more, none, or one per question thread you answer this turn; question: string, the question's key as Zing showed it, such as Q7, never your own q1; settled: bool, optional, write settled="true" to close the thread with decision; decision: string, optional, required when settled: the decision taken, one sentence -->
+    <reply question="..." settled="..." decision="...">...</reply> <!-- Reply, optional, zero or more, none, or one per question thread you answer this turn; question: string, must match ^Q[0-9]+$, the question's key as Zing showed it, such as Q7, never your own q1; settled: bool, optional, write settled="true" to close the thread with decision; decision: string, optional, required when settled: the decision taken, one sentence -->
   </replies>
 </zing>
 
@@ -365,20 +365,20 @@ Body: Users want a dark theme toggle in settings.
   </claims>
   <notes>...</notes> <!-- string, why there is nothing to build -->
   <replies>
-    <reply question="..." settled="..." decision="...">...</reply> <!-- Reply, optional, zero or more, none, or one per question thread you answer this turn; question: string, the question's key as Zing showed it, such as Q7, never your own q1; settled: bool, optional, write settled="true" to close the thread with decision; decision: string, optional, required when settled: the decision taken, one sentence -->
+    <reply question="..." settled="..." decision="...">...</reply> <!-- Reply, optional, zero or more, none, or one per question thread you answer this turn; question: string, must match ^Q[0-9]+$, the question's key as Zing showed it, such as Q7, never your own q1; settled: bool, optional, write settled="true" to close the thread with decision; decision: string, optional, required when settled: the decision taken, one sentence -->
   </replies>
 </zing>
 
 <zing job="planning" outcome="question"> <!-- job: Job, one of: classify | planning | planreview | build | perimeter | review | judge | respond | side, the running job; must match; outcome: Outcome, one of: questions | replies | confirmed | ready | children | nothing_to_do | question | error, one of this job's outcomes, or question, or error -->
-  <question key="..."> <!-- Question, one or more, one per decision you need; key: string -->
+  <question key="..."> <!-- Question, one or more, one per decision you need; key: string, must match ^[qQ][0-9]+$ -->
     <title>...</title> <!-- string, short -->
     <body>...</body> <!-- string, what you need to know and why, markdown -->
-    <option key="...">...</option> <!-- Option, none, or two to four; key: string -->
+    <option key="...">...</option> <!-- Option, none, or two to four; key: string, must match ^[a-z]$ -->
     <recommended>...</recommended> <!-- string, an option key or free text, with the reason -->
   </question>
   <progress>...</progress> <!-- string, what is done so far, so the resumed run can continue -->
   <replies>
-    <reply question="..." settled="..." decision="...">...</reply> <!-- Reply, optional, zero or more, none, or one per question thread you answer this turn; question: string, the question's key as Zing showed it, such as Q7, never your own q1; settled: bool, optional, write settled="true" to close the thread with decision; decision: string, optional, required when settled: the decision taken, one sentence -->
+    <reply question="..." settled="..." decision="...">...</reply> <!-- Reply, optional, zero or more, none, or one per question thread you answer this turn; question: string, must match ^Q[0-9]+$, the question's key as Zing showed it, such as Q7, never your own q1; settled: bool, optional, write settled="true" to close the thread with decision; decision: string, optional, required when settled: the decision taken, one sentence -->
   </replies>
 </zing>
 
