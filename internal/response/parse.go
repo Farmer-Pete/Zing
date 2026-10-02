@@ -5,6 +5,7 @@ import (
 	"encoding/xml"
 	"errors"
 	"fmt"
+	"regexp"
 )
 
 // Document is an extracted zing element: its dispatched, decoded Response
@@ -31,6 +32,7 @@ type Document struct {
 // A missing or malformed element both fall through to the same result:
 // Parse returns the exact string "no zing element in final message".
 func Parse(input []byte) (*Document, error) {
+	input = escapeBareAmpersands(input)
 	excluded := excludedRanges(input)
 	var firstLookupErr error
 	var lastBodyErr *bodyDecodeError
@@ -228,4 +230,28 @@ func headerAttrs(attrs []xml.Attr) (job Job, outcome Outcome, ok bool) {
 		}
 	}
 	return job, outcome, haveJob && haveOutcome
+}
+
+// entityAfterAmpersand matches what may follow a & that starts a real XML
+// character or entity reference.
+var entityAfterAmpersand = regexp.MustCompile(`^(#\d+|#x[0-9a-fA-F]+|[A-Za-z][A-Za-z0-9._-]*);`)
+
+// escapeBareAmpersands rewrites each & that does not start a character or
+// entity reference as &amp; (bug fix: a live respond run quoted Go code,
+// "a && b", and the bare && broke the XML twice in a row). A real reference
+// such as &lt; or &#60; is left alone.
+func escapeBareAmpersands(input []byte) []byte {
+	if !bytes.Contains(input, []byte("&")) {
+		return input
+	}
+	var out bytes.Buffer
+	out.Grow(len(input) + 16)
+	for i, b := range input {
+		if b == '&' && !entityAfterAmpersand.Match(input[i+1:]) {
+			out.WriteString("&amp;")
+			continue
+		}
+		out.WriteByte(b)
+	}
+	return out.Bytes()
 }

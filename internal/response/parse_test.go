@@ -241,3 +241,23 @@ func TestParse_BrokenBodyNamesTheXMLError(t *testing.T) {
 		}
 	}
 }
+
+// TestParse_BareAmpersandInTextIsTolerated is a regression test for a live
+// respond run: the reply quoted Go code, `hasVersion && !isDevel`, and the
+// bare && broke the XML twice in a row. A & that does not start a real
+// entity is now read as a literal &, in Parse and ExtractAll alike.
+func TestParse_BareAmpersandInTextIsTolerated(t *testing.T) {
+	t.Parallel()
+	in := []byte(`<zing job="classify" outcome="bug"><reason>if a && b &amp; c &lt; d</reason></zing>`)
+	doc, err := Parse(in)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	cr, ok := doc.Response.(*ClassifyResponse)
+	if !ok || cr.Reason != "if a && b & c < d" {
+		t.Fatalf("Reason = %#v, want the literal text with entities decoded", doc.Response)
+	}
+	if roots := ExtractAll(string(in)); len(roots) != 1 {
+		t.Errorf("ExtractAll found %d roots, want 1", len(roots))
+	}
+}

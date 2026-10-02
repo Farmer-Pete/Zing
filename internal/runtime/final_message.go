@@ -48,7 +48,13 @@ func parseFinalMessage(text string, job response.Job) (response.Response, string
 	roots := response.ExtractAll(text)
 	switch {
 	case len(roots) == 0:
-		return nil, "", &InvalidOutputError{Reason: reasonNoZingElement}
+		// Parse names the XML error when a <zing> header was found but its
+		// body would not decode, so a retry learns what to fix.
+		reason := reasonNoZingElement
+		if _, perr := response.Parse([]byte(text)); perr != nil {
+			reason = perr.Error()
+		}
+		return nil, "", &InvalidOutputError{Reason: reason}
 	case len(roots) > 1:
 		return nil, "", &InvalidOutputError{Reason: reasonMultipleZingDocs}
 	}

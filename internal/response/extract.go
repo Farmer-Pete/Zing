@@ -20,7 +20,7 @@ import (
 // section 4.1) to react to with its own named reason, rather than losing
 // the candidate to a generic "no zing element" result.
 func ExtractAll(text string) []string {
-	input := []byte(text)
+	input := escapeBareAmpersands([]byte(text))
 	excluded := excludedRanges(input)
 
 	var roots []string
