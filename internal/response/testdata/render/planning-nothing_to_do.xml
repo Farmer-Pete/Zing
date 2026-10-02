@@ -4,6 +4,6 @@
   </claims>
   <notes>...</notes> <!-- string, why there is nothing to build -->
   <replies>
-    <reply question="..." settled="..." decision="...">...</reply> <!-- Reply, optional, zero or more, none, or one per question thread you answer this turn; question: string, the question's key as Zing showed it, such as Q7, never your own q1; settled: bool, optional, write settled="true" to close the thread with decision; decision: string, optional, required when settled: the decision taken, one sentence -->
+    <reply question="..." settled="..." decision="...">...</reply> <!-- Reply, optional, zero or more, none, or one per question thread you answer this turn; question: string, must match ^Q[0-9]+$, the question's key as Zing showed it, such as Q7, never your own q1; settled: bool, optional, write settled="true" to close the thread with decision; decision: string, optional, required when settled: the decision taken, one sentence -->
   </replies>
 </zing>

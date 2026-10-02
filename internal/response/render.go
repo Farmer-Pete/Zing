@@ -246,6 +246,12 @@ func noteParts(n *node, jobOutcomes []string) []string {
 			parts = append(parts, "one of: "+strings.Join(values, " | "))
 		}
 	}
+	if n.HasPattern {
+		// The validator enforces the pattern, so the model must see it
+		// (bug fix: a live planning turn keyed its questions "test-scope"
+		// and failed validation twice; the note said only "key: string").
+		parts = append(parts, "must match "+escape(n.Pattern))
+	}
 	if n.Doc != "" {
 		d := escape(n.Doc)
 		if len(parts) == 0 || parts[len(parts)-1] != d {

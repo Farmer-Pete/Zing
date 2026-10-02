@@ -3,7 +3,7 @@
     <claim kind="..." verdict="..." evidence="...">...</claim> <!-- Claim, one or more; kind: ClaimKind, one of: code | env; verdict: ClaimVerdict, one of: true | false | unchecked; evidence: string, for a code claim, a path you read, with a line where one applies -->
   </claims>
   <scenarios>
-    <scenario id="..." kind="..." check="..."> <!-- Scenario, two to 30; id: string; kind: ScenarioKind, one of: behavior | negative | performance; check: string, optional, one command whose exit code decides it -->
+    <scenario id="..." kind="..." check="..."> <!-- Scenario, two to 30; id: string, must match ^s[0-9]+$; kind: ScenarioKind, one of: behavior | negative | performance; check: string, optional, one command whose exit code decides it -->
       <given>...</given> <!-- string, the starting state -->
       <when>...</when> <!-- string, the action -->
       <then>...</then> <!-- string, what a stranger would observe, from outside the code -->
@@ -86,6 +86,6 @@
     </review>
   </plan>
   <replies>
-    <reply question="..." settled="..." decision="...">...</reply> <!-- Reply, optional, zero or more, none, or one per question thread you answer this turn; question: string, the question's key as Zing showed it, such as Q7, never your own q1; settled: bool, optional, write settled="true" to close the thread with decision; decision: string, optional, required when settled: the decision taken, one sentence -->
+    <reply question="..." settled="..." decision="...">...</reply> <!-- Reply, optional, zero or more, none, or one per question thread you answer this turn; question: string, must match ^Q[0-9]+$, the question's key as Zing showed it, such as Q7, never your own q1; settled: bool, optional, write settled="true" to close the thread with decision; decision: string, optional, required when settled: the decision taken, one sentence -->
   </replies>
 </zing>
