@@ -215,6 +215,38 @@ func TestCommandRunnerFilteredEnv(t *testing.T) {
 	}
 }
 
+// TestCommandRunnerEnvHasNoOAuthToken proves a command re-run (the
+// sandboxed CommandRunner's own CHECK/LAND step) never carries
+// CLAUDE_CODE_OAUTH_TOKEN, even when the parent process happens to have one
+// set (PKG9-PLAN.md section 4.6, D26): runtime.FilteredEnv, which
+// runShellCommand uses, drops every *_TOKEN-shaped name and the claude
+// runtime alone ever appends the real one, after FilteredEnv, never
+// through it.
+//
+// Not parallel: it calls t.Setenv("CLAUDE_CODE_OAUTH_TOKEN", ...) below.
+func TestCommandRunnerEnvHasNoOAuthToken(t *testing.T) {
+	t.Setenv("CLAUDE_CODE_OAUTH_TOKEN", "should-not-reach-a-command-rerun")
+	r := NewCommandRunner(sandbox.Off(), false)
+	dir := t.TempDir()
+	out := filepath.Join(dir, "env.txt")
+
+	exitCode, err := r.Run(t.Context(), dir, "", "env >"+out, commandRunnerTimeout)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if exitCode != 0 {
+		t.Fatalf("exitCode = %d, want 0", exitCode)
+	}
+
+	got, readErr := os.ReadFile(out)
+	if readErr != nil {
+		t.Fatalf("read %s: %v", out, readErr)
+	}
+	if strings.Contains(string(got), "CLAUDE_CODE_OAUTH_TOKEN") {
+		t.Error("CLAUDE_CODE_OAUTH_TOKEN reached the command re-run")
+	}
+}
+
 // TestSandboxedCommandsErrSandbox proves the real CommandRunner refuses to
 // run anything when the sandbox is unavailable and required (design section
 // 5.5).

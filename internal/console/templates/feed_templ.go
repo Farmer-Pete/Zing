@@ -10,16 +10,18 @@ import templruntime "github.com/a-h/templ/runtime"
 
 import (
 	"fmt"
-
-	"zing/internal/store"
 )
 
 // Feed renders the #main region for view=feed (design section 6.5): the
 // newest messages across every ticket, newest first by id, read only.
 // data-ticket-id (code review fix) is what console.js's openFocused reads to
 // resolve a focused Feed row's "message:<id>" focus id to the ticket it
-// belongs to, since only a ticket names something 'o'/Enter can open.
-func Feed(messages []store.MessageRow) templ.Component {
+// belongs to, since only a ticket names something 'o'/Enter can open. Each
+// row's body is already markdown-rendered (FeedRow.BodyHTML,
+// console.displayFeedMessages) rather than printed as plain text (bug fix:
+// raw backticks showed literally, the owner's locked-view complaint,
+// design section 22.7).
+func Feed(rows []FeedRow) templ.Component {
 	return templruntime.GeneratedTemplate(func(templ_7745c5c3_Input templruntime.GeneratedComponentInput) (templ_7745c5c3_Err error) {
 		templ_7745c5c3_W, ctx := templ_7745c5c3_Input.Writer, templ_7745c5c3_Input.Context
 		if templ_7745c5c3_CtxErr := ctx.Err(); templ_7745c5c3_CtxErr != nil {
@@ -44,13 +46,13 @@ func Feed(messages []store.MessageRow) templ.Component {
 		if templ_7745c5c3_Err != nil {
 			return templ_7745c5c3_Err
 		}
-		if len(messages) == 0 {
+		if len(rows) == 0 {
 			templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 2, "<p class=\"empty\">No messages yet.</p>")
 			if templ_7745c5c3_Err != nil {
 				return templ_7745c5c3_Err
 			}
 		} else {
-			for _, m := range messages {
+			for _, m := range rows {
 				var templ_7745c5c3_Var2 = []any{"message message-" + m.Type}
 				templ_7745c5c3_Err = templ.RenderCSSItems(ctx, templ_7745c5c3_Buffer, templ_7745c5c3_Var2...)
 				if templ_7745c5c3_Err != nil {
@@ -76,7 +78,7 @@ func Feed(messages []store.MessageRow) templ.Component {
 				var templ_7745c5c3_Var4 string
 				templ_7745c5c3_Var4, templ_7745c5c3_Err = templ.ResolveAttributeValue(fmt.Sprintf("message:%d", m.ID))
 				if templ_7745c5c3_Err != nil {
-					return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/console/templates/feed.templ`, Line: 22, Col: 94}
+					return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/console/templates/feed.templ`, Line: 24, Col: 94}
 				}
 				_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ_7745c5c3_Var4)
 				if templ_7745c5c3_Err != nil {
@@ -89,7 +91,7 @@ func Feed(messages []store.MessageRow) templ.Component {
 				var templ_7745c5c3_Var5 string
 				templ_7745c5c3_Var5, templ_7745c5c3_Err = templ.ResolveAttributeValue(fmt.Sprintf("%d", m.TicketID))
 				if templ_7745c5c3_Err != nil {
-					return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/console/templates/feed.templ`, Line: 22, Col: 143}
+					return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/console/templates/feed.templ`, Line: 24, Col: 143}
 				}
 				_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ_7745c5c3_Var5)
 				if templ_7745c5c3_Err != nil {
@@ -102,7 +104,7 @@ func Feed(messages []store.MessageRow) templ.Component {
 				var templ_7745c5c3_Var6 string
 				templ_7745c5c3_Var6, templ_7745c5c3_Err = templ.JoinStringErrs(m.Type)
 				if templ_7745c5c3_Err != nil {
-					return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/console/templates/feed.templ`, Line: 23, Col: 50}
+					return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/console/templates/feed.templ`, Line: 25, Col: 50}
 				}
 				_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ.EscapeString(templ_7745c5c3_Var6))
 				if templ_7745c5c3_Err != nil {
@@ -115,7 +117,7 @@ func Feed(messages []store.MessageRow) templ.Component {
 				var templ_7745c5c3_Var7 string
 				templ_7745c5c3_Var7, templ_7745c5c3_Err = templ.JoinStringErrs(m.Author)
 				if templ_7745c5c3_Err != nil {
-					return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/console/templates/feed.templ`, Line: 23, Col: 91}
+					return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/console/templates/feed.templ`, Line: 25, Col: 91}
 				}
 				_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ.EscapeString(templ_7745c5c3_Var7))
 				if templ_7745c5c3_Err != nil {
@@ -125,12 +127,7 @@ func Feed(messages []store.MessageRow) templ.Component {
 				if templ_7745c5c3_Err != nil {
 					return templ_7745c5c3_Err
 				}
-				var templ_7745c5c3_Var8 string
-				templ_7745c5c3_Var8, templ_7745c5c3_Err = templ.JoinStringErrs(m.Body)
-				if templ_7745c5c3_Err != nil {
-					return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/console/templates/feed.templ`, Line: 24, Col: 31}
-				}
-				_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ.EscapeString(templ_7745c5c3_Var8))
+				templ_7745c5c3_Err = m.BodyHTML.Render(ctx, templ_7745c5c3_Buffer)
 				if templ_7745c5c3_Err != nil {
 					return templ_7745c5c3_Err
 				}

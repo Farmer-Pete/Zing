@@ -41,7 +41,7 @@ func newMutationTestServer(t *testing.T, s *store.Store, b *bus.Broker, log *con
 	}
 	port = addr.Port
 
-	handler := console.New(s, b, nil, []string{testBindHost}, port, log, nil, testPushToken, response.SeverityMinor, "")
+	handler := console.New(s, b, nil, []string{testBindHost}, port, log, nil, testPushToken, response.SeverityMinor, "", nil, "")
 	srv = httptest.NewUnstartedServer(handler)
 	if err := srv.Listener.Close(); err != nil {
 		t.Fatalf("close the placeholder listener: %v", err)
@@ -72,7 +72,7 @@ func newMutationTestServerWithHosts(t *testing.T, s *store.Store, b *bus.Broker,
 	}
 	port = addr.Port
 
-	handler := console.New(s, b, nil, extraHosts, port, log, nil, testPushToken, response.SeverityMinor, "")
+	handler := console.New(s, b, nil, extraHosts, port, log, nil, testPushToken, response.SeverityMinor, "", nil, "")
 	srv = httptest.NewUnstartedServer(handler)
 	if err := srv.Listener.Close(); err != nil {
 		t.Fatalf("close the placeholder listener: %v", err)
@@ -108,6 +108,7 @@ func sameOriginRequestTo(t *testing.T, srv *httptest.Server, authority string) *
 // only loopback"). 203.0.113.5 is TEST-NET-3 (RFC 5737), reserved for
 // documentation and never actually dialed here.
 func TestMutationGuard_PassesAConfiguredNonLoopbackLiteral(t *testing.T) {
+	t.Parallel()
 	s := newConsoleTestStore(t)
 	srv, port := newMutationTestServerWithHosts(t, s, bus.New(), newTestLogHandler(t), "203.0.113.5")
 
@@ -123,6 +124,7 @@ func TestMutationGuard_PassesAConfiguredNonLoopbackLiteral(t *testing.T) {
 // address in the Host allowlist passes when presented in its bracketed
 // authority form, exactly as a browser sends it (design section 6.14, 11).
 func TestMutationGuard_PassesABracketedIPv6Authority(t *testing.T) {
+	t.Parallel()
 	s := newConsoleTestStore(t)
 	srv, port := newMutationTestServerWithHosts(t, s, bus.New(), newTestLogHandler(t), "2001:db8::1")
 
@@ -139,6 +141,7 @@ func TestMutationGuard_PassesABracketedIPv6Authority(t *testing.T) {
 // passes the guard, the tailnet-DNS-name case design section 6.14
 // introduces allowed_hosts for.
 func TestMutationGuard_PassesAConfiguredDNSAlias(t *testing.T) {
+	t.Parallel()
 	s := newConsoleTestStore(t)
 	srv, port := newMutationTestServerWithHosts(t, s, bus.New(), newTestLogHandler(t), "example.tailnet")
 
@@ -157,6 +160,7 @@ func TestMutationGuard_PassesAConfiguredDNSAlias(t *testing.T) {
 // fully-qualified form still passes when the allowlist holds the plain
 // lowercase form.
 func TestMutationGuard_CanonicalizesDNSNameCaseAndTrailingDot(t *testing.T) {
+	t.Parallel()
 	s := newConsoleTestStore(t)
 	srv, port := newMutationTestServerWithHosts(t, s, bus.New(), newTestLogHandler(t), "example.tailnet")
 
@@ -202,6 +206,7 @@ func doRequest(t *testing.T, req *http.Request) *http.Response {
 // sub-test so one rejected case's side effects (none, here) cannot bleed
 // into the next.
 func TestMutationGuard_RejectsCrossOriginAndMalformedRequests(t *testing.T) {
+	t.Parallel()
 	s := newConsoleTestStore(t)
 	srv, port := newMutationTestServer(t, s, bus.New(), newTestLogHandler(t))
 	authority := "127.0.0.1:" + strconv.Itoa(port)
@@ -290,6 +295,7 @@ func TestMutationGuard_RejectsCrossOriginAndMalformedRequests(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
 			req := mutationRequest(t, srv, "/read", `{"message":1}`)
 			tc.mutate(req)
 			resp := doRequest(t, req)
@@ -309,6 +315,7 @@ func TestMutationGuard_RejectsCrossOriginAndMalformedRequests(t *testing.T) {
 // runs, even though neither route carries an Origin header the way a
 // mutation POST would.
 func TestReadRoutes_RejectOutOfAllowlistHost(t *testing.T) {
+	t.Parallel()
 	s := newConsoleTestStore(t)
 	srv := newTestServer(t, s, bus.New(), nil, newTestLogHandler(t))
 
@@ -330,6 +337,7 @@ func TestReadRoutes_RejectOutOfAllowlistHost(t *testing.T) {
 // which carries no Origin header at all -- so fix 4 closes the rebinding
 // gap without breaking the page load every real client depends on.
 func TestReadRoutes_PassAnInAllowlistHost(t *testing.T) {
+	t.Parallel()
 	s := newConsoleTestStore(t)
 	srv := newTestServer(t, s, bus.New(), nil, newTestLogHandler(t))
 
@@ -370,6 +378,7 @@ func portFromURL(t *testing.T, rawURL string) int {
 // own error path (500) rather than a route-level 403 -- proving the guard,
 // not MarkRead, let it through requires seeing anything but 403.
 func TestMutationGuard_PassesSameOriginThroughLocalhostAnd127AndTheBoundHost(t *testing.T) {
+	t.Parallel()
 	s := newConsoleTestStore(t)
 	_, port := newMutationTestServer(t, s, bus.New(), newTestLogHandler(t))
 	portStr := strconv.Itoa(port)
@@ -377,6 +386,7 @@ func TestMutationGuard_PassesSameOriginThroughLocalhostAnd127AndTheBoundHost(t *
 	hosts := []string{"127.0.0.1", "localhost"}
 	for _, host := range hosts {
 		t.Run(host, func(t *testing.T) {
+			t.Parallel()
 			authority := host + ":" + portStr
 			req, err := http.NewRequestWithContext(t.Context(), http.MethodPost, "http://"+authority+"/read", strings.NewReader(`{"message":1}`))
 			if err != nil {

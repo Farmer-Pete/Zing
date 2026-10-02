@@ -100,6 +100,7 @@ func messageCreatedAt(t *testing.T, s *Store, id int64) time.Time {
 }
 
 func TestListProjects_OrderedByNameThenID(t *testing.T) {
+	t.Parallel()
 	s := newTestStore(t)
 
 	betaID := seedProjectNamed(t, s, testProjectBeta)
@@ -126,6 +127,7 @@ func TestListProjects_OrderedByNameThenID(t *testing.T) {
 // first, by newest message id descending within each group, then ticket id
 // (design section 7.2).
 func TestInboxItems_BlockingFirstThenNewestMessageIDDesc(t *testing.T) {
+	t.Parallel()
 	s := newTestStore(t)
 	projectID := seedProjectNamed(t, s, testProjectAlpha)
 
@@ -172,6 +174,7 @@ func TestInboxItems_BlockingFirstThenNewestMessageIDDesc(t *testing.T) {
 // waiting flag and no unread message is left out of the inbox, and that a
 // message already marked read does not count as unread.
 func TestInboxItems_ExcludesNeitherBlockingNorUnread(t *testing.T) {
+	t.Parallel()
 	s := newTestStore(t)
 	projectID := seedProjectNamed(t, s, testProjectAlpha)
 
@@ -207,6 +210,7 @@ func TestInboxItems_ExcludesNeitherBlockingNorUnread(t *testing.T) {
 // (the body's first line), preview, and time, and excludes a question that
 // is no longer open.
 func TestInboxItems_OpenQuestionSummaries(t *testing.T) {
+	t.Parallel()
 	s := newTestStore(t)
 	projectID := seedProjectNamed(t, s, testProjectAlpha)
 	ticketID := insertWaitingTicket(t, s, projectID, "q")
@@ -254,6 +258,7 @@ func TestInboxItems_OpenQuestionSummaries(t *testing.T) {
 // line even when the question body's first line is long, while Title keeps
 // the full line.
 func TestInboxItems_PreviewTruncatesLongTitle(t *testing.T) {
+	t.Parallel()
 	s := newTestStore(t)
 	projectID := seedProjectNamed(t, s, testProjectAlpha)
 	ticketID := insertWaitingTicket(t, s, projectID, "long")
@@ -282,6 +287,7 @@ func TestInboxItems_PreviewTruncatesLongTitle(t *testing.T) {
 }
 
 func TestTicketsByProject_OrderedByTrackerRefThenID(t *testing.T) {
+	t.Parallel()
 	s := newTestStore(t)
 	projectAID := seedProjectNamed(t, s, testProjectAlpha)
 	projectBID := seedProjectNamed(t, s, testProjectBeta)
@@ -326,6 +332,7 @@ func TestTicketsByProject_OrderedByTrackerRefThenID(t *testing.T) {
 // with messageless tickets sorted last by their own id (design section
 // 7.2).
 func TestRecentTickets_NewestMessageDescNoMessageLast(t *testing.T) {
+	t.Parallel()
 	s := newTestStore(t)
 	projectID := seedProjectNamed(t, s, testProjectAlpha)
 
@@ -374,6 +381,7 @@ func TestRecentTickets_NewestMessageDescNoMessageLast(t *testing.T) {
 // not let ticketOld jump ahead of ticketNew, since a draft is never a real
 // message until POST /send flips it to sent.
 func TestRecentTickets_IgnoresDraftMessages(t *testing.T) {
+	t.Parallel()
 	s := newTestStore(t)
 	projectID := seedProjectNamed(t, s, testProjectAlpha)
 
@@ -409,6 +417,7 @@ func TestRecentTickets_IgnoresDraftMessages(t *testing.T) {
 }
 
 func TestFeedMessages_NewestFirstAndLimitClamped(t *testing.T) {
+	t.Parallel()
 	s := newTestStore(t)
 	_, ticketID := seedQueuedTicket(t, s, "1")
 
@@ -426,6 +435,7 @@ func TestFeedMessages_NewestFirstAndLimitClamped(t *testing.T) {
 	}
 
 	t.Run("normal limit", func(t *testing.T) {
+		t.Parallel()
 		got, err := s.FeedMessages(t.Context(), 2)
 		if err != nil {
 			t.Fatalf("FeedMessages(2): %v", err)
@@ -436,6 +446,7 @@ func TestFeedMessages_NewestFirstAndLimitClamped(t *testing.T) {
 	})
 
 	t.Run("zero clamps to one", func(t *testing.T) {
+		t.Parallel()
 		got, err := s.FeedMessages(t.Context(), 0)
 		if err != nil {
 			t.Fatalf("FeedMessages(0): %v", err)
@@ -446,6 +457,7 @@ func TestFeedMessages_NewestFirstAndLimitClamped(t *testing.T) {
 	})
 
 	t.Run("negative clamps to one", func(t *testing.T) {
+		t.Parallel()
 		got, err := s.FeedMessages(t.Context(), -5)
 		if err != nil {
 			t.Fatalf("FeedMessages(-5): %v", err)
@@ -456,6 +468,7 @@ func TestFeedMessages_NewestFirstAndLimitClamped(t *testing.T) {
 	})
 
 	t.Run("over 200 clamps to 200", func(t *testing.T) {
+		t.Parallel()
 		got, err := s.FeedMessages(t.Context(), 5000)
 		if err != nil {
 			t.Fatalf("FeedMessages(5000): %v", err)
@@ -475,6 +488,7 @@ func messageIDs(rows []MessageRow) []int64 {
 }
 
 func TestGetArtifact_ReturnsGreatestVersion(t *testing.T) {
+	t.Parallel()
 	s := newTestStore(t)
 	_, ticketID := seedQueuedTicket(t, s, "1")
 
@@ -507,6 +521,7 @@ func TestGetArtifact_ReturnsGreatestVersion(t *testing.T) {
 }
 
 func TestGetArtifact_AbsentReturnsFalseNoError(t *testing.T) {
+	t.Parallel()
 	s := newTestStore(t)
 	_, ticketID := seedQueuedTicket(t, s, "1")
 
@@ -523,13 +538,15 @@ func TestGetArtifact_AbsentReturnsFalseNoError(t *testing.T) {
 // type ascending, then version descending, then id ascending as the final
 // tie-break for two rows at the same (type, version).
 func TestListArtifacts_OrderedByTypeVersionDescID(t *testing.T) {
+	t.Parallel()
 	s := newTestStore(t)
 	_, ticketID := seedQueuedTicket(t, s, "1")
 
 	scenario := func(id string) []byte {
 		return []byte(`{"id":"` + id + `","kind":"behavior","check_cmd":"go test","given":"g","when":"w","then":"t"}`)
 	}
-	finding := []byte(`{"lens":"tests","severity":"minor","location":"x:1","text":"y","fix":"z"}`)
+	finding := []byte(`{"lens":"tests","severity":"minor","location":"x:1","text":"y","fix":"z",` +
+		`"id":"r1f1","round":1,"sha":"` + testFortyHexSHA + `","lenses":["tests"]}`)
 
 	// scenarioV1First and scenarioV1Second tie on (type, version); each
 	// carries a distinct payload id so the returned order (Artifact has no
@@ -572,6 +589,7 @@ func TestListArtifacts_OrderedByTypeVersionDescID(t *testing.T) {
 }
 
 func TestSessionsForTicket_OrderedByIDAndScoped(t *testing.T) {
+	t.Parallel()
 	s := newTestStore(t)
 	_, ticketA := seedQueuedTicket(t, s, "1")
 	_, ticketB := seedQueuedTicket(t, s, "2")
@@ -590,6 +608,7 @@ func TestSessionsForTicket_OrderedByIDAndScoped(t *testing.T) {
 }
 
 func TestRunsForTicket_OrderedByIDAndScoped(t *testing.T) {
+	t.Parallel()
 	s := newTestStore(t)
 	_, ticketA := seedQueuedTicket(t, s, "1")
 	_, ticketB := seedQueuedTicket(t, s, "2")
@@ -612,6 +631,7 @@ func TestRunsForTicket_OrderedByIDAndScoped(t *testing.T) {
 }
 
 func TestGetSetting_ExistingMissingAndNullValue(t *testing.T) {
+	t.Parallel()
 	s := newTestStore(t)
 
 	got, ok, err := s.GetSetting(t.Context(), "log_level")

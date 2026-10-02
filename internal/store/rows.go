@@ -11,18 +11,44 @@ import (
 // priority tie-breaks by TrackerRef, the external id (design section 10 step
 // 5). State is one of the nine TicketState values and WaitingOn, when
 // non-nil, is one of the eight waiting flags (migrations/0001_init.sql).
+// NextPollAt, PollIntervalS, and PollFingerprint are migration 0004's three
+// babysit-poll columns (design D8, section 16): nil NextPollAt means due
+// now, or no poll pending; PollIntervalS, when set, is 30 to 300; and
+// PollFingerprint, when set, is 64 lowercase hex characters.
 type Ticket struct {
-	ID             int64
-	ProjectID      int64
-	TrackerRef     string // the external id; also the priority tie-break key
-	Title, Body    string
-	Kind           *string // nil, "bug", or "feature"
-	State          string  // one of the nine TicketState values
-	WaitingOn      *string // nil or one of the eight waiting flags
-	ParentTicketID *int64
-	Branch, PRURL  *string
-	ClaimOwner     *string
-	ClaimExpiresAt *time.Time
+	ID              int64
+	ProjectID       int64
+	TrackerRef      string // the external id; also the priority tie-break key
+	Title, Body     string
+	Kind            *string // nil, "bug", or "feature"
+	State           string  // one of the nine TicketState values
+	WaitingOn       *string // nil or one of the eight waiting flags
+	ParentTicketID  *int64
+	Branch, PRURL   *string
+	ClaimOwner      *string
+	ClaimExpiresAt  *time.Time
+	NextPollAt      *time.Time // nil: due now, or no babysit poll pending
+	PollIntervalS   *int       // 30..300 when set
+	PollFingerprint *string    // 64 lowercase hex when set
+}
+
+// PollUpdate sets a ticket's three poll columns together (design section
+// 4.2, D8): NextAt and IntervalS schedule the next poll, Fingerprint is the
+// CI/thread/head fingerprint that backoff compares against on the next poll
+// (8.3). CommitHandlerResult validates Fingerprint against
+// ^[0-9a-f]{64}$ and IntervalS against 30..300 before any write.
+type PollUpdate struct {
+	NextAt      time.Time // UTC, second precision
+	IntervalS   int       // 30..300
+	Fingerprint string    // 64 lowercase hex; see the validation rule below
+}
+
+// PollSchedule moves next_poll_at and poll_interval_s and leaves
+// poll_fingerprint as it is, possibly NULL. Used when a poll's GitHub reads
+// failed (8.3), so no fingerprint can be computed.
+type PollSchedule struct {
+	NextAt    time.Time // UTC, second precision
+	IntervalS int       // 30..300
 }
 
 // Session is a row in the sessions table.
@@ -73,7 +99,9 @@ const ticketStateQueued = "queued"
 
 // ticketColumns is the tickets column list, in table-declaration order, used
 // by every ticket read so a single scanTicket stays correct for all of them.
-const ticketColumns = `id, project_id, tracker_ref, title, body, kind, state, waiting_on, parent_ticket_id, branch, pr_url, claim_owner, claim_expires_at`
+// The binary before Package 9 names its own columns explicitly here too, so
+// it ignores migration 0004's three trailing poll columns (section 16).
+const ticketColumns = `id, project_id, tracker_ref, title, body, kind, state, waiting_on, parent_ticket_id, branch, pr_url, claim_owner, claim_expires_at, next_poll_at, poll_interval_s, poll_fingerprint`
 
 // messageColumns is the messages column list, id first, then the store's
 // Message (store.go) fields in that struct's order, then created_at
@@ -92,11 +120,14 @@ func scanTicket(rs rowScanner) (Ticket, error) {
 	var t Ticket
 	var kind, waitingOn, branch, prURL, claimOwner, claimExpiresAt sql.NullString
 	var parentTicketID sql.NullInt64
+	var nextPollAt, pollFingerprint sql.NullString
+	var pollIntervalS sql.NullInt64
 
 	if err := rs.Scan(
 		&t.ID, &t.ProjectID, &t.TrackerRef, &t.Title, &t.Body,
 		&kind, &t.State, &waitingOn, &parentTicketID,
 		&branch, &prURL, &claimOwner, &claimExpiresAt,
+		&nextPollAt, &pollIntervalS, &pollFingerprint,
 	); err != nil {
 		return Ticket{}, err
 	}
@@ -125,6 +156,20 @@ func scanTicket(rs rowScanner) (Ticket, error) {
 			return Ticket{}, fmt.Errorf("parse claim_expires_at: %w", err)
 		}
 		t.ClaimExpiresAt = &ts
+	}
+	if nextPollAt.Valid {
+		ts, err := time.Parse(fixedTimeLayout, nextPollAt.String)
+		if err != nil {
+			return Ticket{}, fmt.Errorf("parse next_poll_at: %w", err)
+		}
+		t.NextPollAt = &ts
+	}
+	if pollIntervalS.Valid {
+		n := int(pollIntervalS.Int64)
+		t.PollIntervalS = &n
+	}
+	if pollFingerprint.Valid {
+		t.PollFingerprint = &pollFingerprint.String
 	}
 	return t, nil
 }
@@ -181,11 +226,21 @@ func scanMessage(rs rowScanner) (MessageRow, error) {
 	return row, nil
 }
 
-// formatTime renders t the same way store.go's InsertArtifact and
-// InsertMessage do, so every TEXT timestamp column in the schema uses one
-// format: UTC RFC 3339.
+// fixedTimeLayout is formatTime's one fixed-width UTC timestamp format
+// (design DD1): always 20 characters, truncated to whole seconds, ending
+// "Z". Its output is byte-identical to time.RFC3339's own rendering of a
+// UTC time (no fractional-second field, and "Z07:00" already collapses to a
+// literal "Z" at zero offset), so this changes no byte this package already
+// wrote -- only makes the truncation explicit and gives SQLite's TEXT
+// comparison (next_poll_at <= ?) a format that always orders two values the
+// same way their underlying instants order.
+const fixedTimeLayout = "2006-01-02T15:04:05Z"
+
+// formatTime renders t through fixedTimeLayout (design DD1), the one helper
+// every poll timestamp -- written or compared -- goes through, and every
+// other TEXT timestamp column in the schema already matches byte for byte.
 func formatTime(t time.Time) string {
-	return t.UTC().Format(time.RFC3339)
+	return t.UTC().Truncate(time.Second).Format(fixedTimeLayout)
 }
 
 // formatTimePtr is formatTime for a nullable timestamp field.

@@ -12,7 +12,6 @@ const (
 	reasonBuildDone   = "build done"
 	reasonReviewClean = "review clean"
 	reasonJudgePassed = "judge passed"
-	reasonShipped     = "shipped"
 	runtimeFake       = "fake"
 	authorZing        = "zing"
 
@@ -38,7 +37,7 @@ func baseCommit(t store.Ticket, d Deps) store.HandlerCommit {
 	return store.HandlerCommit{TicketID: t.ID, Owner: d.Owner, Expires: d.Expires}
 }
 
-// ---- queued, reviewing, judging, shipping: code-only transitions --------
+// ---- queued: the one remaining code-only transition -----------------------
 
 // queuedHandler advances a claimed ticket into planning (design section 6.5).
 type queuedHandler struct{}
@@ -49,38 +48,11 @@ func (queuedHandler) Run(_ context.Context, t store.Ticket, d Deps) (store.Handl
 	return c, nil
 }
 
-// reviewingHandler advances straight to judging; the skeleton runs no
-// review job (design section 6.5, the early-exit rule in section 0).
-type reviewingHandler struct{}
-
-func (reviewingHandler) Run(_ context.Context, t store.Ticket, d Deps) (store.HandlerCommit, error) {
-	c := baseCommit(t, d)
-	c.Next, c.Reason = stateJudging, reasonReviewClean
-	return c, nil
-}
-
-// judgingHandler advances straight to shipping; the skeleton runs no judge
-// job (design section 6.5, the early-exit rule in section 0).
-type judgingHandler struct{}
-
-func (judgingHandler) Run(_ context.Context, t store.Ticket, d Deps) (store.HandlerCommit, error) {
-	c := baseCommit(t, d)
-	c.Next, c.Reason = stateShipping, reasonJudgePassed
-	return c, nil
-}
-
-// shippingHandler advances a ticket to done; the skeleton does no git, no
-// worktree, and no pull request (design section 4, non-goals).
-type shippingHandler struct{}
-
-func (shippingHandler) Run(_ context.Context, t store.Ticket, d Deps) (store.HandlerCommit, error) {
-	c := baseCommit(t, d)
-	c.Next, c.Reason = stateDone, reasonShipped
-	return c, nil
-}
-
-// building has its own real handler now (building.go, task 9): the
-// skeleton's buildingHandler, buildLabel, and buildSessionRuntime existed
-// because the walking skeleton needed a building state that advanced on
-// one scripted fake run; that handler now runs the real state machine
-// (design section 6) instead.
+// building, reviewing, judging, and shipping have their own real handlers
+// now (building.go, task 9; reviewing.go, task 10; judging.go, M2 task 8;
+// shipping.go, M3 tasks 6 and 7): the skeleton's own buildingHandler,
+// reviewingHandler, judgingHandler, and shippingHandler existed because the
+// walking skeleton needed every state to advance on nothing more than a
+// scripted fake run, or, for reviewing, judging, and shipping, no run at
+// all until each state's own real machine landed; those handlers now run
+// the real state machine (design sections 6, 7, 8) instead.

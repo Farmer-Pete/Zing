@@ -72,12 +72,14 @@ type NothingToDoResponse struct {
 	Head
 	Claims []Claim `xml:"claims>claim" json:"claims" jsonschema:"minItems=1" doc:"every code claim is false"`
 	Notes  string  `xml:"notes"        json:"notes"  doc:"why there is nothing to build"`
+	Conversation
 }
 
 type ChildrenResponse struct {
 	Head
 	Children []Child `xml:"child" json:"children" jsonschema:"minItems=2" doc:"tickets that can each be built and verified alone"`
 	Notes    string  `xml:"notes" json:"notes"    doc:"the shared architecture, markdown"`
+	Conversation
 }
 
 type Child struct {
@@ -92,6 +94,7 @@ type ReadyResponse struct {
 	Claims    []Claim    `xml:"claims>claim"       json:"claims"    jsonschema:"minItems=1"`
 	Scenarios []Scenario `xml:"scenarios>scenario" json:"scenarios" jsonschema:"minItems=2,maxItems=30"`
 	Plan      Plan       `xml:"plan"               json:"plan"`
+	Conversation
 }
 
 // The plan. Four parts. The console shows each part as a heading and each child as a sub-heading.
@@ -233,6 +236,52 @@ type Review struct {
 	Risks        []string `xml:"risks>risk"                json:"risks"        jsonschema:"minItems=1" doc:"a risk or open question"`
 }
 
+// ---- planning conversation (D31) -------------------------------------
+
+// Conversation is embedded in every planning outcome that can answer the
+// owner: questions (and planning's universal question), ready, children,
+// and nothing_to_do. error carries none.
+type Conversation struct {
+	Replies []Reply `xml:"replies>reply" json:"replies" doc:"none, or one per question thread you answer this turn"`
+}
+
+// ReplyList returns the replies, the one accessor internal/job reads.
+func (c Conversation) ReplyList() []Reply { return c.Replies }
+
+type Reply struct {
+	Question string `xml:"question,attr"           json:"question"           jsonschema:"pattern=^Q[0-9]+$"            doc:"the question's key as Zing showed it, such as Q7, never your own q1"`
+	Settled  bool   `xml:"settled,attr,omitempty"  json:"settled,omitempty"  doc:"write settled=\"true\" to close the thread with decision"`
+	Decision string `xml:"decision,attr,omitempty" json:"decision,omitempty" jsonschema:"minLength=1,maxLength=500" doc:"required when settled: the decision taken, one sentence"`
+	Text     string `xml:",chardata"               json:"text"               jsonschema:"minLength=1"                  doc:"your reply to the owner, markdown"`
+}
+
+type PlanningQuestionsResponse struct { // outcome: questions | question (planning only)
+	Head
+	Questions []Question `xml:"question" json:"questions" jsonschema:"minItems=1" doc:"one per decision you need"`
+	Progress  string     `xml:"progress" json:"progress"  doc:"what is done so far, so the resumed run can continue"`
+	Conversation
+}
+
+type RepliesResponse struct { // outcome: replies (planning only)
+	Head
+	Replies  []Reply `xml:"replies>reply" json:"replies"  jsonschema:"minItems=1" doc:"one per question thread you answer this turn"`
+	Progress string  `xml:"progress"      json:"progress" doc:"what is done so far, so the resumed run can continue"`
+}
+
+func (r *RepliesResponse) ReplyList() []Reply { return r.Replies }
+
+// ConfirmedResponse is the confirming turn's own clean answer (D32, design
+// section 22.12.3): the gate's approval resumes the planning session with a
+// fixed question asking whether anything is still open, and this outcome
+// says no. Notes is the agent's own one-or-two-sentence reason; Conversation
+// rides along like every other planning outcome's (a confirming turn can
+// still receive an owner message, on the rare resume after a crash).
+type ConfirmedResponse struct { // outcome: confirmed (planning only, the confirming turn)
+	Head
+	Notes string `xml:"notes" json:"notes" jsonschema:"minLength=1" doc:"why no question is open, one or two sentences"`
+	Conversation
+}
+
 // ---- plan review and code review -----------------------------------------
 
 type FindingsResponse struct { // planreview and review, outcome ok
@@ -268,7 +317,7 @@ type ExtraClaim struct {
 }
 
 type BuildClaims struct {
-	FilesChanged []string `xml:"files_changed>path" json:"files_changed" jsonschema:"minItems=1" doc:"every changed path; the program diffs the tree"`
+	FilesChanged []string `xml:"files_changed>path" json:"files_changed" doc:"every changed path, or none for a fix run whose failure is not in the code; the program diffs the tree"`
 	TestExit     int      `xml:"test_exit"          json:"test_exit"     doc:"the program re-runs the command"`
 	LintExit     int      `xml:"lint_exit"          json:"lint_exit"     doc:"the program re-runs the command"`
 }
@@ -293,7 +342,7 @@ type Verdict struct {
 
 type RespondResponse struct { // outcome ok
 	Head
-	Threads []ThreadAction `xml:"thread" json:"threads" jsonschema:"minItems=1" doc:"exactly one per unresolved review thread"`
+	Threads []ThreadAction `xml:"thread" json:"threads" jsonschema:"minItems=1,maxItems=1000" doc:"exactly one per unresolved review thread"`
 }
 
 type ThreadAction struct {
@@ -330,13 +379,13 @@ type AnswerPayload struct {
 }
 
 type EscalationPayload struct {
-	Code      string   `json:"code"    jsonschema:"enum=resumes_exhausted,enum=loops_exhausted,enum=wall_clock,enum=usage_hold,enum=plan_gap,enum=cannot_run,enum=environment,enum=other,enum=split_unsupported,enum=nothing_to_do_with_true_claims,enum=runtime_exec_failed,enum=response_invalid,enum=seal_failed,enum=post_run_failed,enum=sandbox_unavailable,enum=replan_unsupported"`
+	Code      string   `json:"code"    jsonschema:"enum=resumes_exhausted,enum=loops_exhausted,enum=wall_clock,enum=usage_hold,enum=plan_gap,enum=cannot_run,enum=environment,enum=other,enum=split_unsupported,enum=nothing_to_do_with_true_claims,enum=runtime_exec_failed,enum=response_invalid,enum=seal_failed,enum=post_run_failed,enum=sandbox_unavailable,enum=replan_unsupported,enum=pr_closed"`
 	What      string   `json:"what"    jsonschema:"minLength=1"`
 	Why       string   `json:"why"     jsonschema:"minLength=1"`
 	Tried     string   `json:"tried"`
 	Options   []string `json:"options" jsonschema:"enum=retry,enum=planning,enum=abandon"`
 	SessionID *int64   `json:"session_id,omitempty" doc:"the session the escalated run belongs to, when a run or session caused it"`
-	Origin    string   `json:"origin"  jsonschema:"enum=classify,enum=planning_first,enum=planning_resume,enum=planreview,enum=gate_approve,enum=seal,enum=cap_resumes,enum=cap_loops,enum=cap_budget,enum=split,enum=nothing_to_do_claims,enum=build,enum=perimeter,enum=fix" doc:"the step that produced this escalation (design section 6.7)"`
+	Origin    string   `json:"origin"  jsonschema:"enum=classify,enum=planning_first,enum=planning_resume,enum=planreview,enum=gate_approve,enum=seal,enum=cap_resumes,enum=cap_loops,enum=cap_budget,enum=split,enum=nothing_to_do_claims,enum=build,enum=perimeter,enum=fix,enum=review,enum=judge,enum=shipping,enum=respond" doc:"the step that produced this escalation (design section 6.7)"`
 }
 
 type StatePayload struct {
@@ -373,4 +422,53 @@ type BuildReport struct {
 	Report    string       `json:"report"`
 	Title     string       `json:"title"                jsonschema:"minLength=1" doc:"the commit subject"`
 	CommitSHA *string      `json:"commit_sha,omitempty" jsonschema:"pattern=^[0-9a-f]{40}$"`
+}
+
+// FindingArtifact is the stored form of one code-review finding (artifact
+// type "finding"). Rows are append-only; the newest row per ID wins.
+type FindingArtifact struct {
+	// The six fields of Finding, copied rather than embedded, so Decision can
+	// have its own narrower type:
+	Lens     Lens             `json:"lens"`
+	Severity Severity         `json:"severity"`
+	Location string           `json:"location" jsonschema:"minLength=1"`
+	Text     string           `json:"text"     jsonschema:"minLength=1"`
+	Fix      string           `json:"fix"      jsonschema:"minLength=1"`
+	PlanRef  string           `json:"plan_ref,omitempty"`
+	Decision *FindingDecision `json:"decision,omitempty" doc:"set when routed: accept at or below the floor, else the owner's triage"`
+
+	Held       bool     `json:"held,omitempty"       doc:"a lens output kept while the round waits on a lens question (6.2a); not yet filtered, never routed"`
+	ID         string   `json:"id"                   jsonschema:"pattern=^r[1-9][0-9]*[fh][1-9][0-9]*$" doc:"r<round>f<k>, or r<round>h<k> for a held row"`
+	Round      int      `json:"round"                jsonschema:"minimum=1" doc:"no maximum: the agent budget bounds rounds"`
+	SHA        string   `json:"sha"                  jsonschema:"pattern=^[0-9a-f]{40}$" doc:"the frozen head the lenses read"`
+	Lenses     []Lens   `json:"lenses"               jsonschema:"minItems=1,maxItems=7" doc:"every lens that reported this location, in lens order"`
+	Supersedes []string `json:"supersedes,omitempty" doc:"the discussed findings of the batch this one revises (6.6); each matches ^r[1-9][0-9]*f[1-9][0-9]*$"`
+}
+
+// VerdictArtifact is the stored form of one judge verdict (artifact type
+// "verdict"). Rows are append-only; the newest row per (Round, Scenario) wins.
+type VerdictArtifact struct {
+	Verdict                // scenario_id, result, evidence
+	Kind      ScenarioKind `json:"kind"`
+	Round     int          `json:"round"                jsonschema:"minimum=1" doc:"no maximum: the agent budget bounds rounds"`
+	SHA       string       `json:"sha"                  jsonschema:"pattern=^[0-9a-f]{40}$"`
+	CheckExit *int         `json:"check_exit,omitempty" jsonschema:"minimum=-1,maximum=255" doc:"set on the row a check re-run wrote; -1 means timed out"`
+}
+
+// RespondArtifact is the stored form of one respond run (artifact type
+// "respond"): one action per thread of the batch.
+type RespondArtifact struct {
+	Threads []ThreadAction `json:"threads" jsonschema:"minItems=1,maxItems=1000"`
+	Batch   int            `json:"batch"   jsonschema:"minimum=1" doc:"no maximum: the number of batches is bounded by the agent budget (section 21)"`
+	SHA     string         `json:"sha"     jsonschema:"pattern=^[0-9a-f]{40}$" doc:"the PR head the batch was sorted against"`
+	Seen    []ThreadSeen   `json:"seen"    jsonschema:"minItems=1,maxItems=1000" doc:"code-read, never model output: each thread's last human comment when the batch started"`
+}
+
+// ThreadSeen is what code read of one thread when its batch started (9.3).
+// commentDigest(c) is the lowercase hex SHA-256 of
+// c.ID + "\n" + c.UpdatedAt.UTC().Format(time.RFC3339Nano) + "\n" +
+// hex(SHA-256(c.Body)), so an edit changes it even when the id does not.
+type ThreadSeen struct {
+	TID         string `json:"tid"          jsonschema:"pattern=^t[0-9a-f]{16}$"`
+	LastComment string `json:"last_comment" jsonschema:"pattern=^[0-9a-f]{64}$" doc:"commentDigest of the last comment that is not a Zing reply"`
 }

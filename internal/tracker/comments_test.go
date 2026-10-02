@@ -113,3 +113,28 @@ func TestComments_DisclosureNamesADifferentOwner(t *testing.T) {
 		}
 	}
 }
+
+// TestReplyPrefix proves ReplyPrefix names the login (design D10, section
+// 9.3) and falls back to the no-owner form, the same empty-owner rule
+// disclosure follows, when login is "".
+func TestReplyPrefix(t *testing.T) {
+	t.Parallel()
+
+	t.Run("login", func(t *testing.T) {
+		t.Parallel()
+		got := tracker.ReplyPrefix(testOwner)
+		want := "Zing (an AI agent) replying on behalf of @peter:"
+		if got != want {
+			t.Errorf("ReplyPrefix(%q) = %q, want %q", testOwner, got, want)
+		}
+	})
+
+	t.Run("empty login", func(t *testing.T) {
+		t.Parallel()
+		got := tracker.ReplyPrefix("")
+		want := "Zing (an AI agent) replying:"
+		if got != want {
+			t.Errorf("ReplyPrefix(\"\") = %q, want %q", got, want)
+		}
+	})
+}

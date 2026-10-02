@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"encoding/xml"
 	"errors"
+	"fmt"
+	"regexp"
 )
 
 // Document is an extracted zing element: its dispatched, decoded Response
@@ -30,8 +32,10 @@ type Document struct {
 // A missing or malformed element both fall through to the same result:
 // Parse returns the exact string "no zing element in final message".
 func Parse(input []byte) (*Document, error) {
+	input = escapeBareAmpersands(input)
 	excluded := excludedRanges(input)
 	var firstLookupErr error
+	var lastBodyErr *bodyDecodeError
 	for _, offset := range candidateOffsets(input) {
 		if inRanges(offset, excluded) {
 			continue
@@ -40,12 +44,18 @@ func Parse(input []byte) (*Document, error) {
 		if doc != nil {
 			return doc, nil
 		}
+		if bodyErr, ok := errors.AsType[*bodyDecodeError](err); ok {
+			lastBodyErr = bodyErr
+		}
 		if err != nil && !errors.Is(err, errMalformedCandidate) && firstLookupErr == nil {
 			firstLookupErr = err
 		}
 	}
 	if firstLookupErr != nil {
 		return nil, firstLookupErr
+	}
+	if lastBodyErr != nil {
+		return nil, fmt.Errorf("no zing element in final message: %w; inside the document write a literal < as &lt; and & as &amp;", lastBodyErr.err)
 	}
 	return nil, errors.New("no zing element in final message")
 }
@@ -150,6 +160,19 @@ func isNameBoundary(b byte) bool {
 // package.
 var errMalformedCandidate = errors.New("malformed zing candidate")
 
+// bodyDecodeError is a malformed candidate whose <zing> header named a
+// known job and outcome but whose body failed to decode, usually a bare <
+// or & in the text. Parse reports its XML error when no candidate
+// succeeds, so a retry learns what to fix (bug fix: it used to say only
+// "no zing element in final message", and a live build repeated the same
+// bare <file> twice).
+type bodyDecodeError struct{ err error }
+
+func (e *bodyDecodeError) Error() string { return e.err.Error() }
+
+// Is keeps a bodyDecodeError a malformed candidate for Parse's scan.
+func (e *bodyDecodeError) Is(target error) bool { return target == errMalformedCandidate }
+
 // tryDecode attempts to extract a Document starting at offset. It returns
 // a non-nil Document only when the start element is exactly "zing" in no
 // namespace, carries both a job and an outcome attribute naming a
@@ -188,7 +211,7 @@ func tryDecode(input []byte, offset int) (*Document, error) {
 	}
 
 	if err := dec.DecodeElement(r, &start); err != nil {
-		return nil, errMalformedCandidate
+		return nil, &bodyDecodeError{err: err}
 	}
 
 	//nolint:gosec // dec.InputOffset() is bounded by len(input[offset:]), which fits in an int already.
@@ -207,4 +230,28 @@ func headerAttrs(attrs []xml.Attr) (job Job, outcome Outcome, ok bool) {
 		}
 	}
 	return job, outcome, haveJob && haveOutcome
+}
+
+// entityAfterAmpersand matches what may follow a & that starts a real XML
+// character or entity reference.
+var entityAfterAmpersand = regexp.MustCompile(`^(#\d+|#x[0-9a-fA-F]+|[A-Za-z][A-Za-z0-9._-]*);`)
+
+// escapeBareAmpersands rewrites each & that does not start a character or
+// entity reference as &amp; (bug fix: a live respond run quoted Go code,
+// "a && b", and the bare && broke the XML twice in a row). A real reference
+// such as &lt; or &#60; is left alone.
+func escapeBareAmpersands(input []byte) []byte {
+	if !bytes.Contains(input, []byte("&")) {
+		return input
+	}
+	var out bytes.Buffer
+	out.Grow(len(input) + 16)
+	for i, b := range input {
+		if b == '&' && !entityAfterAmpersand.Match(input[i+1:]) {
+			out.WriteString("&amp;")
+			continue
+		}
+		out.WriteByte(b)
+	}
+	return out.Bytes()
 }

@@ -27,13 +27,13 @@ func TestPrompts_MatchThePinnedDesignText(t *testing.T) {
 		},
 		{
 			name:   "planning-feature",
-			path:   "prompts/planning-feature.md",
-			sha256: "fa7c4e234296affb0efbce560bb0557524d22413fa9d2d37043c4d271ed33698",
+			path:   planningFeaturePromptPath,
+			sha256: "108dfbe3da5c1b7bb80a56d804ac6bc440dc8a502d6a3cf420e87cbbaff5a5a1",
 		},
 		{
 			name:   "planning-bug",
-			path:   "prompts/planning-bug.md",
-			sha256: "541217a029c67cd28c06c956c8829e9455e034d2bbda50077d5cd7ca5d8f78c2",
+			path:   planningBugPromptPath,
+			sha256: "988ef88900583959df8c32d263b2763f836de198eb3497a2b28c490199900fd0",
 		},
 		{
 			name:   "planreview",
@@ -43,12 +43,27 @@ func TestPrompts_MatchThePinnedDesignText(t *testing.T) {
 		{
 			name:   testJobNameBuild,
 			path:   "prompts/build.md",
-			sha256: "3a88533d216936fba660e84fcf4dea0004f61442b9195b6ee00b3c2428b10fc8",
+			sha256: "10b1fe9b4539a77a4c0fc418364227ec42c425311d27c1284ff4091d26c1c03e",
 		},
 		{
 			name:   "perimeter",
 			path:   "prompts/perimeter.md",
 			sha256: "78b4863acf309085bc37f8f33cfea8f430d08b57d44102023eea1f3c03ef00b6",
+		},
+		{
+			name:   "review",
+			path:   "prompts/review.md",
+			sha256: "d4c75ff8d43b49fd59a273c8b1badc7dec2f2d913851a1a0f7e6ccc0bb725c49",
+		},
+		{
+			name:   "judge",
+			path:   "prompts/judge.md",
+			sha256: "40ba95666f7d24a842b22b061f2f8aeca7b0a13af3aeb48e7f59a0abaf6f9eb6",
+		},
+		{
+			name:   "respond",
+			path:   "prompts/respond.md",
+			sha256: "341e4b2129076565acf85d1a3cbf5b9edaab3918593dbc3bfc9ec96843c9206d",
 		},
 	}
 
@@ -73,6 +88,61 @@ func TestPrompts_MatchThePinnedDesignText(t *testing.T) {
 	}
 }
 
+// conversationsSection is the exact text design section 22.6 requires
+// verbatim in both planning prompts, the D31 teaching text for the
+// conversation model: question keys, the replies element, settling a
+// thread, and the rule that every thread must be settled before ready,
+// children, or nothing_to_do.
+const conversationsSection = `Conversations. Zing gives every question you ask a key, Q and a number,
+such as Q7. It can differ from the key you wrote. Use only keys Zing
+has shown you. Each question is a thread between you and the owner.
+When the owner writes, you are resumed with a conversation input: for
+each thread with something new, the owner's messages oldest first, each
+a picked option or text. A later pick replaces an earlier one.
+
+Answer every owner message you receive, in that same turn, with one
+reply per thread inside replies:
+<replies><reply question="Q7">your answer</reply></replies>.
+Every outcome except error can carry replies. When replies are all you
+have this turn, return outcome replies. Outcome replies needs at least
+one thread left open: if your replies settle every thread, return ready
+(or children, or nothing_to_do) with the replies attached.
+
+Settle a thread once the owner's messages give you its decision:
+<reply question="Q7" settled="true" decision="...">...</reply>.
+The decision is one sentence, at most 500 characters, saying what was
+decided. Only you settle a thread. A settled thread takes no more
+replies from you. Until the owner approves the gate, the owner can
+reopen it by writing in it; you are then told "The owner reopened Q1."
+with your earlier decision. Answer, and settle it again when the
+owner's messages give you the decision.
+
+Settle every thread before you return ready, children, or
+nothing_to_do, in that response or an earlier one. Zing rejects any of
+the three while a thread is open, and resumes you with the error.`
+
+// TestPlanningPromptsTeachConversations asserts both planning prompts
+// carry design section 22.6's Conversations. section byte for byte
+// (task D31-4): the agent's only teaching on question keys, replies, and
+// settling a thread.
+func TestPlanningPromptsTeachConversations(t *testing.T) {
+	t.Parallel()
+
+	for _, path := range []string{planningFeaturePromptPath, planningBugPromptPath} {
+		t.Run(path, func(t *testing.T) {
+			t.Parallel()
+
+			got, err := zing.Assets.ReadFile(path)
+			if err != nil {
+				t.Fatalf("ReadFile(%s): %v", path, err)
+			}
+			if !strings.Contains(string(got), conversationsSection) {
+				t.Errorf("%s is missing the Conversations. section verbatim (design section 22.6)", path)
+			}
+		})
+	}
+}
+
 // TestBuildPromptPlaceholders checks that prompts/build.md carries each of
 // its five placeholders exactly once, so ForBuild's single replacement of
 // each cannot silently miss or double up.
@@ -89,6 +159,26 @@ func TestBuildPromptPlaceholders(t *testing.T) {
 	for _, p := range placeholders {
 		if n := strings.Count(text, p); n != 1 {
 			t.Errorf("prompts/build.md contains %s %d times, want 1", p, n)
+		}
+	}
+}
+
+// TestReviewPromptPlaceholders checks that prompts/review.md carries
+// {lens} and {sha} exactly once each (plan section 12.1), so ForReview's
+// single replacement of each cannot silently miss or double up.
+func TestReviewPromptPlaceholders(t *testing.T) {
+	t.Parallel()
+
+	got, err := zing.Assets.ReadFile("prompts/review.md")
+	if err != nil {
+		t.Fatalf("ReadFile(prompts/review.md): %v", err)
+	}
+	text := string(got)
+
+	placeholders := []string{"{lens}", "{sha}"}
+	for _, p := range placeholders {
+		if n := strings.Count(text, p); n != 1 {
+			t.Errorf("prompts/review.md contains %s %d times, want 1", p, n)
 		}
 	}
 }

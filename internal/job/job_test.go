@@ -1,7 +1,9 @@
 package job_test
 
 import (
+	"strings"
 	"testing"
+	"time"
 
 	zing "zing"
 	"zing/internal/job"
@@ -200,6 +202,64 @@ func TestValidateCommitCountsSetBranch(t *testing.T) {
 	}
 }
 
+// TestValidateCommitCountsSessions proves the emptiness check (design
+// section 4.2) grew to cover Sessions too: a commit that sets only Sessions
+// (the review round terminalizing its seven lens sessions, with no single
+// Session field set) is not the wholly empty case ValidateCommit rejects.
+func TestValidateCommitCountsSessions(t *testing.T) {
+	t.Parallel()
+
+	ticket := store.Ticket{ID: 1, State: testStatePlanning}
+	sessionID := int64(7)
+
+	commit := store.HandlerCommit{TicketID: 1, Sessions: []store.SessionUpsert{{ID: &sessionID}}}
+	if err := job.ValidateCommit(ticket, commit); err != nil {
+		t.Errorf("ValidateCommit(Sessions only): %v, want nil", err)
+	}
+}
+
+// TestValidateCommitCountsPollFields proves the emptiness check (design
+// section 4.2, D8) grew to cover SetPRURL, Poll, PollSchedule, and
+// ClearPoll: a commit that sets only one of them is not the wholly empty
+// case ValidateCommit rejects.
+func TestValidateCommitCountsPollFields(t *testing.T) {
+	t.Parallel()
+
+	ticket := store.Ticket{ID: 1, State: testStatePlanning}
+	url := "https://github.com/x/zing/pull/1"
+
+	if err := job.ValidateCommit(ticket, store.HandlerCommit{TicketID: 1, SetPRURL: &url}); err != nil {
+		t.Errorf("ValidateCommit(SetPRURL only): %v, want nil", err)
+	}
+	if err := job.ValidateCommit(ticket, store.HandlerCommit{TicketID: 1, Poll: &store.PollUpdate{
+		NextAt: time.Now(), IntervalS: 30, Fingerprint: strings.Repeat("a", 64),
+	}}); err != nil {
+		t.Errorf("ValidateCommit(Poll only): %v, want nil", err)
+	}
+	if err := job.ValidateCommit(ticket, store.HandlerCommit{TicketID: 1, PollSchedule: &store.PollSchedule{
+		NextAt: time.Now(), IntervalS: 30,
+	}}); err != nil {
+		t.Errorf("ValidateCommit(PollSchedule only): %v, want nil", err)
+	}
+	if err := job.ValidateCommit(ticket, store.HandlerCommit{TicketID: 1, ClearPoll: true}); err != nil {
+		t.Errorf("ValidateCommit(ClearPoll only): %v, want nil", err)
+	}
+}
+
+// TestValidateCommitCountsConversation proves the emptiness check (design
+// section 22.3, D31) grew to cover Conversation too: a commit that sets
+// only Conversation is not the wholly empty case ValidateCommit rejects.
+func TestValidateCommitCountsConversation(t *testing.T) {
+	t.Parallel()
+
+	ticket := store.Ticket{ID: 1, State: testStatePlanning}
+	commit := store.HandlerCommit{TicketID: 1, Conversation: &store.ConversationCommit{}}
+
+	if err := job.ValidateCommit(ticket, commit); err != nil {
+		t.Errorf("ValidateCommit(Conversation only): %v, want nil", err)
+	}
+}
+
 func TestValidateCommit_RejectsAWaitingValueOutsideTheEightFlags(t *testing.T) {
 	t.Parallel()
 
@@ -257,6 +317,23 @@ func TestValidateCommit_AcceptsBuildingToAbandoned(t *testing.T) {
 	commit := store.HandlerCommit{Next: testStateAbandoned, Reason: "owner abandoned the build"}
 	if err := job.ValidateCommit(ticket, commit); err != nil {
 		t.Errorf("ValidateCommit(building -> abandoned): %v, want nil", err)
+	}
+}
+
+// TestValidateCommit_AcceptsPostBuildStatesToAbandoned proves the legal-edge
+// table grew three more abandon edges (design section 5.5, #28 gap 3): a
+// post-build escalation's abandon choice may transition reviewing, judging,
+// or shipping straight to abandoned, alongside each state's own existing
+// forward edge.
+func TestValidateCommit_AcceptsPostBuildStatesToAbandoned(t *testing.T) {
+	t.Parallel()
+
+	for _, from := range []string{testStateReviewing, testStateJudging, testStateShipping} {
+		ticket := store.Ticket{State: from}
+		commit := store.HandlerCommit{Next: testStateAbandoned, Reason: "owner abandoned"}
+		if err := job.ValidateCommit(ticket, commit); err != nil {
+			t.Errorf("ValidateCommit(%s -> abandoned): %v, want nil", from, err)
+		}
 	}
 }
 

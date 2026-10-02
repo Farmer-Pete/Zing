@@ -1,5 +1,8 @@
 {
   "scenario_id": "s1",
   "result": "pass",
-  "evidence": "go test ./internal/cart/... -run TestEmptyCart: PASS"
+  "evidence": "go test ./internal/cart/... -run TestEmptyCart: PASS",
+  "kind": "behavior",
+  "round": 1,
+  "sha": "0123456789abcdef0123456789abcdef01234567"
 }

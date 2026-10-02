@@ -15,7 +15,9 @@ import (
 // -----------------------------------------------------------------------
 
 func TestPullRequestBody(t *testing.T) {
+	t.Parallel()
 	t.Run("six sections render in order", func(t *testing.T) {
+		t.Parallel()
 		pr := PullRequest{
 			Title:            "Add the perimeter diff",
 			What:             "Adds Perimeter, the classifier for changed paths.",
@@ -44,6 +46,7 @@ func TestPullRequestBody(t *testing.T) {
 	})
 
 	t.Run("an empty section renders its heading followed by None.", func(t *testing.T) {
+		t.Parallel()
 		pr := PullRequest{Title: "A title"}
 
 		got, err := pr.Body()
@@ -64,6 +67,7 @@ func TestPullRequestBody(t *testing.T) {
 	})
 
 	t.Run("empty title is an error", func(t *testing.T) {
+		t.Parallel()
 		pr := PullRequest{What: "something"}
 		if _, err := pr.Body(); err == nil {
 			t.Fatal("Body: expected an error for an empty title, got nil")
@@ -100,7 +104,9 @@ func addOrigin(ctx context.Context, t *testing.T, repoDir, remoteDir string) {
 }
 
 func TestPush(t *testing.T) {
+	t.Parallel()
 	t.Run("a signed branch pushes and the bare remote receives it", func(t *testing.T) {
+		t.Parallel()
 		fixture := newSigningFixture(t, true)
 		repo := newSigningTestRepo(t, fixture)
 		ctx := t.Context()
@@ -131,6 +137,7 @@ func TestPush(t *testing.T) {
 	})
 
 	t.Run("refused for the default branch, before any git command runs", func(t *testing.T) {
+		t.Parallel()
 		o := newTestOrchestrator(t, absLocalPath, noCallRunner{t: t})
 		wt := Worktree{dir: absLocalPath, branch: mainBranch}
 
@@ -140,6 +147,7 @@ func TestPush(t *testing.T) {
 	})
 
 	t.Run("refused for a forged non-zing branch, before any git command runs", func(t *testing.T) {
+		t.Parallel()
 		o := newTestOrchestrator(t, absLocalPath, noCallRunner{t: t})
 		wt := Worktree{dir: absLocalPath, branch: "not-zing/anything"}
 
@@ -239,7 +247,9 @@ func prepareSignedCommit(ctx context.Context, t *testing.T, o *Orchestrator, tic
 }
 
 func TestOpenDraftPR(t *testing.T) {
+	t.Parallel()
 	t.Run("returns the created url and number", func(t *testing.T) {
+		t.Parallel()
 		fixture := newSigningFixture(t, true)
 		repo := newSigningTestRepo(t, fixture)
 		ctx := t.Context()
@@ -280,6 +290,7 @@ func TestOpenDraftPR(t *testing.T) {
 	})
 
 	t.Run("falls back to FindPRByHead when CreateDraftPR errors", func(t *testing.T) {
+		t.Parallel()
 		fixture := newSigningFixture(t, true)
 		repo := newSigningTestRepo(t, fixture)
 		ctx := t.Context()
@@ -331,6 +342,7 @@ func TestOpenDraftPR(t *testing.T) {
 	// and a fourth one here that agrees would trip golangci-lint's unparam
 	// finding on it.
 	t.Run("an empty title errors before any push", func(t *testing.T) {
+		t.Parallel()
 		fixture := newSigningFixture(t, true)
 		repo := newSigningTestRepo(t, fixture)
 		ctx := t.Context()
@@ -359,6 +371,7 @@ func TestOpenDraftPR(t *testing.T) {
 	})
 
 	t.Run("returns the create error when FindPRByHead also fails to find one", func(t *testing.T) {
+		t.Parallel()
 		fixture := newSigningFixture(t, true)
 		repo := newSigningTestRepo(t, fixture)
 		ctx := t.Context()
@@ -386,6 +399,7 @@ func TestOpenDraftPR(t *testing.T) {
 // hooks-disabling prefix: a repo-local pre-push hook that writes a marker
 // file leaves no marker after a successful Push.
 func TestPushArgvDisablesHooks(t *testing.T) {
+	t.Parallel()
 	fixture := newSigningFixture(t, true)
 	repo := newSigningTestRepo(t, fixture)
 	ctx := t.Context()

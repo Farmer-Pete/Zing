@@ -1,8 +1,12 @@
 package store
 
 import (
+	"bytes"
 	"database/sql"
 	"errors"
+	"fmt"
+	"log/slog"
+	"strings"
 	"testing"
 	"time"
 )
@@ -21,6 +25,7 @@ func reserveInput(t *testing.T, s *Store, ticketID int64) (owner string, expires
 // first reservation gets turn 0, and a second reservation against the same
 // session id gets turn 1.
 func TestReserve_TwoReservesOnOneSessionYieldSequentialTurns(t *testing.T) {
+	t.Parallel()
 	s := newTestStore(t)
 	ctx := t.Context()
 	_, ticketID := seedQueuedTicket(t, s, "1")
@@ -56,6 +61,7 @@ func TestReserve_TwoReservesOnOneSessionYieldSequentialTurns(t *testing.T) {
 // live claim_owner returns ErrClaimLost and leaves no session or run row
 // behind, even though the ticket really is claimed (just not by this owner).
 func TestReserve_WrongOwnerReturnsErrClaimLostAndWritesNothing(t *testing.T) {
+	t.Parallel()
 	s := newTestStore(t)
 	ctx := t.Context()
 	_, ticketID := seedQueuedTicket(t, s, "1")
@@ -81,6 +87,7 @@ func TestReserve_WrongOwnerReturnsErrClaimLostAndWritesNothing(t *testing.T) {
 // matches the ticket's live claim_expires_at (for example, a stale lease
 // after a renewal) also returns ErrClaimLost.
 func TestReserve_WrongExpiryReturnsErrClaimLost(t *testing.T) {
+	t.Parallel()
 	s := newTestStore(t)
 	ctx := t.Context()
 	_, ticketID := seedQueuedTicket(t, s, "1")
@@ -104,6 +111,7 @@ func TestReserve_WrongExpiryReturnsErrClaimLost(t *testing.T) {
 // row whose external_id is NULL, leaving SessionUpsert's own commit to fill
 // it in once the runtime call returns one.
 func TestReserve_NilSessionIDCreatesSessionWithNullExternalID(t *testing.T) {
+	t.Parallel()
 	s := newTestStore(t)
 	ctx := t.Context()
 	_, ticketID := seedQueuedTicket(t, s, "1")
@@ -136,6 +144,7 @@ func TestReserve_NilSessionIDCreatesSessionWithNullExternalID(t *testing.T) {
 // makes): a su.ID that names a real session, but on a different ticket,
 // errors rather than reserving a run under it.
 func TestReserve_SessionIDForAnotherTicketErrors(t *testing.T) {
+	t.Parallel()
 	s := newTestStore(t)
 	ctx := t.Context()
 	_, ticketA := seedQueuedTicket(t, s, "1")
@@ -163,6 +172,7 @@ func TestReserve_SessionIDForAnotherTicketErrors(t *testing.T) {
 // exit_code, and agent_seconds all NULL until something terminalizes it, with
 // only model set at reserve time.
 func TestReserve_InsertsRunWithNullOutcomeExitCodeAndSetModel(t *testing.T) {
+	t.Parallel()
 	s := newTestStore(t)
 	ctx := t.Context()
 	_, ticketID := seedQueuedTicket(t, s, "1")
@@ -215,10 +225,16 @@ func sessionResumes(t *testing.T, s *Store, sessionID int64) int {
 // TestReserveWritesTaskN proves RunSeed.TaskN lands on the reserved run's
 // own task_n column (design section 4.2): nil for every job but a build or
 // perimeter task unit, and the exact task number when one is given.
+// TestReserveWritesTaskN's two subtests each open their own store rather
+// than share one across t.Parallel() siblings: both seed a ticket under the
+// same fixed testProject name, and EnsureProject's own check-then-insert is
+// not safe for two goroutines racing on the same project row.
 func TestReserveWritesTaskN(t *testing.T) {
-	s := newTestStore(t)
+	t.Parallel()
 
 	t.Run("nil for a non-build job", func(t *testing.T) {
+		t.Parallel()
+		s := newTestStore(t)
 		ctx := t.Context()
 		_, ticketID := seedQueuedTicket(t, s, "1")
 		setTicketState(t, s, ticketID, testStatePlanning)
@@ -239,6 +255,8 @@ func TestReserveWritesTaskN(t *testing.T) {
 	})
 
 	t.Run("set for a build task unit", func(t *testing.T) {
+		t.Parallel()
+		s := newTestStore(t)
 		ctx := t.Context()
 		_, ticketID := seedQueuedTicket(t, s, "2")
 		setTicketState(t, s, ticketID, testStatePlanning)
@@ -260,10 +278,68 @@ func TestReserveWritesTaskN(t *testing.T) {
 	})
 }
 
+// TestReserveWritesLens proves RunSeed.Lens lands on the reserved run's own
+// lens column (design section 4.2): nil when the seed carries none, and the
+// exact lens name when one is given, the review round's own per-lens run
+// identity (runs.lens, design section 5.2).
+// TestReserveWritesLens's two subtests each open their own store rather
+// than share one across t.Parallel() siblings: both seed a ticket under the
+// same fixed testProject name, and EnsureProject's own check-then-insert is
+// not safe for two goroutines racing on the same project row.
+func TestReserveWritesLens(t *testing.T) {
+	t.Parallel()
+
+	t.Run("nil for a seed with no lens", func(t *testing.T) {
+		t.Parallel()
+		s := newTestStore(t)
+		ctx := t.Context()
+		_, ticketID := seedQueuedTicket(t, s, "1")
+		setTicketState(t, s, ticketID, testStatePlanning)
+		owner, expires := reserveInput(t, s, ticketID)
+
+		reserved, err := s.Reserve(ctx, ticketID, owner, expires,
+			SessionUpsert{Job: testStatePlanning, Runtime: testRuntimeFake}, RunSeed{Model: testModelClaudeX})
+		if err != nil {
+			t.Fatalf("Reserve: %v", err)
+		}
+		run, ok, err := s.FirstRun(ctx, reserved.SessionID)
+		if err != nil || !ok {
+			t.Fatalf("FirstRun: ok=%v err=%v", ok, err)
+		}
+		if run.Lens != nil {
+			t.Errorf("run.Lens = %v, want nil", run.Lens)
+		}
+	})
+
+	t.Run("set for a review lens run", func(t *testing.T) {
+		t.Parallel()
+		s := newTestStore(t)
+		ctx := t.Context()
+		_, ticketID := seedQueuedTicket(t, s, "2")
+		setTicketState(t, s, ticketID, testStatePlanning)
+		owner, expires := reserveInput(t, s, ticketID)
+
+		lens := "problem"
+		reserved, err := s.Reserve(ctx, ticketID, owner, expires,
+			SessionUpsert{Job: testJobBuild, Runtime: testRuntimeFake}, RunSeed{Model: testModelClaudeX, Lens: &lens})
+		if err != nil {
+			t.Fatalf("Reserve: %v", err)
+		}
+		run, ok, err := s.FirstRun(ctx, reserved.SessionID)
+		if err != nil || !ok {
+			t.Fatalf("FirstRun: ok=%v err=%v", ok, err)
+		}
+		if run.Lens == nil || *run.Lens != lens {
+			t.Errorf("run.Lens = %v, want %q", run.Lens, lens)
+		}
+	})
+}
+
 // TestReserveChargesResume proves Reserve itself charges a resume (design
 // section 4.2): a first turn (su.ID nil) never bumps resumes, and a
 // reserved resume (su.ID set, BumpResumes true) raises it by exactly one.
 func TestReserveChargesResume(t *testing.T) {
+	t.Parallel()
 	s := newTestStore(t)
 	ctx := t.Context()
 	_, ticketID := seedQueuedTicket(t, s, "1")
@@ -294,6 +370,7 @@ func TestReserveChargesResume(t *testing.T) {
 // ExpireClaims's reconcile, the same path a crash or a shutdown takes
 // (design section 14).
 func TestInterruptedResumeStaysCharged(t *testing.T) {
+	t.Parallel()
 	s := newTestStore(t)
 	ctx := t.Context()
 	_, ticketID := seedQueuedTicket(t, s, "1")
@@ -319,12 +396,55 @@ func TestInterruptedResumeStaysCharged(t *testing.T) {
 	}
 }
 
+// TestReserve_ResumeLogsExistingSessionJob proves the "run reserved" log
+// line carries the resumed session's own job name (bug fix): a resume's
+// SessionUpsert sets only ID and BumpResumes, never Job (every resume call
+// site in internal/job leaves it unset), so before this fix the line read
+// job="" on every resumed turn instead of the job the first turn logged.
+// Not parallel: it calls slog.SetDefault to capture the line, which swaps
+// the process-wide default logger.
+func TestReserve_ResumeLogsExistingSessionJob(t *testing.T) {
+	s := newTestStore(t)
+	ctx := t.Context()
+	_, ticketID := seedQueuedTicket(t, s, "1")
+	setTicketState(t, s, ticketID, testStatePlanning)
+	owner, expires := reserveInput(t, s, ticketID)
+
+	first, err := s.Reserve(ctx, ticketID, owner, expires,
+		SessionUpsert{Job: testStatePlanning, Runtime: testRuntimeFake}, RunSeed{Model: testModelClaudeX})
+	if err != nil {
+		t.Fatalf("first Reserve: %v", err)
+	}
+
+	var logBuf bytes.Buffer
+	prevDefault := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logBuf, &slog.HandlerOptions{Level: slog.LevelInfo})))
+	t.Cleanup(func() { slog.SetDefault(prevDefault) })
+
+	if _, err = s.Reserve(ctx, ticketID, owner, expires,
+		SessionUpsert{ID: &first.SessionID, BumpResumes: true}, RunSeed{Model: testModelClaudeX}); err != nil {
+		t.Fatalf("resume Reserve: %v", err)
+	}
+
+	logOut := logBuf.String()
+	if !strings.Contains(logOut, "run reserved") {
+		t.Fatalf("missing the \"run reserved\" log line; got:\n%s", logOut)
+	}
+	if !strings.Contains(logOut, "job="+testStatePlanning) {
+		t.Errorf("resume's \"run reserved\" line missing job=%s (want the session's own job, not blank); got:\n%s", testStatePlanning, logOut)
+	}
+	if strings.Contains(logOut, `job=""`) {
+		t.Errorf("resume's \"run reserved\" line still logs job=\"\"; got:\n%s", logOut)
+	}
+}
+
 // TestCommittedResumeChargedOnce proves the charge lands exactly once when
 // the resume does complete and terminalize normally (design section 4.2):
 // Reserve charges it, and resumeSessionRecord no longer sets BumpResumes on
 // the terminalizing commit, so CommitHandlerResult does not charge it
 // again.
 func TestCommittedResumeChargedOnce(t *testing.T) {
+	t.Parallel()
 	s := newTestStore(t)
 	ctx := t.Context()
 	_, ticketID := seedQueuedTicket(t, s, "1")
@@ -357,5 +477,57 @@ func TestCommittedResumeChargedOnce(t *testing.T) {
 
 	if got := sessionResumes(t, s, first.SessionID); got != 1 {
 		t.Errorf("resumes after reserve then commit = %d, want 1 (charged exactly once)", got)
+	}
+}
+
+// --- Reserve: the conversation pending marker (design section 22.3, D31) ---
+
+// TestReserveWritesPendingConversationMarker proves a RunSeed.ThroughBatch
+// above 0 writes "conversation pending run <R> batch <B>" once the run row
+// exists.
+func TestReserveWritesPendingConversationMarker(t *testing.T) {
+	t.Parallel()
+	s := newTestStore(t)
+	ctx := t.Context()
+	_, ticketID := seedQueuedTicket(t, s, "1")
+	setTicketState(t, s, ticketID, testStatePlanning)
+	owner, expires := reserveInput(t, s, ticketID)
+
+	reserved, err := s.Reserve(ctx, ticketID, owner, expires,
+		SessionUpsert{Job: testStatePlanning, Runtime: testRuntimeFake},
+		RunSeed{Model: testModelClaudeX, ThroughBatch: 5})
+	if err != nil {
+		t.Fatalf("Reserve: %v", err)
+	}
+
+	want := fmt.Sprintf("%s%d batch %d", conversationPendingPrefix, reserved.RunID, 5)
+	var body string
+	row := s.db.QueryRowContext(ctx,
+		`SELECT body FROM messages WHERE ticket_id = ? AND type = ? AND author = ?`, ticketID, msgTypeUpdate, authorSystem)
+	if err := row.Scan(&body); err != nil {
+		t.Fatalf("read pending marker: %v", err)
+	}
+	if body != want {
+		t.Errorf("pending marker body = %q, want %q", body, want)
+	}
+}
+
+// TestReserveWritesNoMarkerAtZero proves a RunSeed carrying the zero value
+// of ThroughBatch (every non-planning caller) writes no pending marker.
+func TestReserveWritesNoMarkerAtZero(t *testing.T) {
+	t.Parallel()
+	s := newTestStore(t)
+	ctx := t.Context()
+	_, ticketID := seedQueuedTicket(t, s, "1")
+	setTicketState(t, s, ticketID, testStatePlanning)
+	owner, expires := reserveInput(t, s, ticketID)
+
+	if _, err := s.Reserve(ctx, ticketID, owner, expires,
+		SessionUpsert{Job: testJobBuild, Runtime: testRuntimeFake}, RunSeed{Model: testModelClaudeX}); err != nil {
+		t.Fatalf("Reserve: %v", err)
+	}
+
+	if n := countRows(t, s, `SELECT COUNT(*) FROM messages WHERE ticket_id = ? AND type = ?`, ticketID, msgTypeUpdate); n != 0 {
+		t.Errorf("update messages after Reserve with ThroughBatch 0 = %d, want 0", n)
 	}
 }

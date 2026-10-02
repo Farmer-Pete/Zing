@@ -16,6 +16,7 @@ func TestLookup_RegisteredPairs(t *testing.T) {
 		{JobClassify, OutcomeBug},
 		{JobClassify, OutcomeFeature},
 		{JobPlanning, OutcomeQuestions},
+		{JobPlanning, OutcomeReplies},
 		{JobPlanning, OutcomeReady},
 		{JobPlanning, OutcomeChildren},
 		{JobPlanning, OutcomeNothingToDo},
@@ -51,6 +52,15 @@ func TestLookup_UniversalOutcomes(t *testing.T) {
 			r, err := Lookup(job, OutcomeQuestion)
 			if err != nil {
 				t.Fatalf("Lookup(%s, question) = %v, want no error", job, err)
+			}
+			// Planning's own "question" spelling is overwritten to carry
+			// Conversation too (design section 22.2, D31); every other job
+			// keeps the plain universal QuestionResponse.
+			if job == JobPlanning {
+				if _, ok := r.(*PlanningQuestionsResponse); !ok {
+					t.Errorf("Lookup(planning, question) type = %T, want *PlanningQuestionsResponse", r)
+				}
+				return
 			}
 			if _, ok := r.(*QuestionResponse); !ok {
 				t.Errorf("Lookup(%s, question) type = %T, want *QuestionResponse", job, r)
@@ -95,6 +105,8 @@ func TestRegisteredPairs_MatchesPlanClosedSet(t *testing.T) {
 		{JobClassify, OutcomeBug},
 		{JobClassify, OutcomeFeature},
 		{JobPlanning, OutcomeQuestions},
+		{JobPlanning, OutcomeReplies},
+		{JobPlanning, OutcomeConfirmed},
 		{JobPlanning, OutcomeReady},
 		{JobPlanning, OutcomeChildren},
 		{JobPlanning, OutcomeNothingToDo},
@@ -165,5 +177,79 @@ func TestLookup_FreshPointer(t *testing.T) {
 	}
 	if a == b {
 		t.Error("Lookup returned the same pointer on two calls")
+	}
+}
+
+// TestPlanningQuestionOutcomesCarryReplies proves planning's two question
+// spellings, questions and question, both decode to *PlanningQuestionsResponse
+// (design section 22.2, D31), while every other job's question outcome
+// still decodes to the plain *QuestionResponse.
+func TestPlanningQuestionOutcomesCarryReplies(t *testing.T) {
+	t.Parallel()
+
+	for _, outcome := range []Outcome{OutcomeQuestions, OutcomeQuestion} {
+		r, err := Lookup(JobPlanning, outcome)
+		if err != nil {
+			t.Fatalf("Lookup(planning, %s) = %v, want no error", outcome, err)
+		}
+		if _, ok := r.(*PlanningQuestionsResponse); !ok {
+			t.Errorf("Lookup(planning, %s) type = %T, want *PlanningQuestionsResponse", outcome, r)
+		}
+	}
+
+	r, err := Lookup(JobClassify, OutcomeQuestion)
+	if err != nil {
+		t.Fatalf("Lookup(classify, question) = %v, want no error", err)
+	}
+	if _, ok := r.(*QuestionResponse); !ok {
+		t.Errorf("Lookup(classify, question) type = %T, want *QuestionResponse", r)
+	}
+}
+
+// TestRepliesOutcomeIsPlanningOnly proves replies, the new outcome D31
+// adds, resolves only for planning (to *RepliesResponse) and is not an
+// outcome of any other job.
+func TestRepliesOutcomeIsPlanningOnly(t *testing.T) {
+	t.Parallel()
+
+	r, err := Lookup(JobPlanning, OutcomeReplies)
+	if err != nil {
+		t.Fatalf("Lookup(planning, replies) = %v, want no error", err)
+	}
+	if _, ok := r.(*RepliesResponse); !ok {
+		t.Errorf("Lookup(planning, replies) type = %T, want *RepliesResponse", r)
+	}
+
+	_, err = Lookup(JobBuild, OutcomeReplies)
+	if err == nil {
+		t.Fatal("Lookup(build, replies) = nil error, want an error: replies is not an outcome of build")
+	}
+	want := "no response for job build outcome replies"
+	if got := err.Error(); got != want {
+		t.Errorf("err = %q, want %q", got, want)
+	}
+}
+
+// TestConfirmedIsPlanningOnly proves confirmed, D32's own confirming-turn
+// outcome, resolves only for planning (to *ConfirmedResponse) and is not an
+// outcome of any other job.
+func TestConfirmedIsPlanningOnly(t *testing.T) {
+	t.Parallel()
+
+	r, err := Lookup(JobPlanning, OutcomeConfirmed)
+	if err != nil {
+		t.Fatalf("Lookup(planning, confirmed) = %v, want no error", err)
+	}
+	if _, ok := r.(*ConfirmedResponse); !ok {
+		t.Errorf("Lookup(planning, confirmed) type = %T, want *ConfirmedResponse", r)
+	}
+
+	_, err = Lookup(JobBuild, OutcomeConfirmed)
+	if err == nil {
+		t.Fatal("Lookup(build, confirmed) = nil error, want an error: confirmed is not an outcome of build")
+	}
+	want := "no response for job build outcome confirmed"
+	if got := err.Error(); got != want {
+		t.Errorf("err = %q, want %q", got, want)
 	}
 }

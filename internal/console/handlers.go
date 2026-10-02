@@ -20,7 +20,7 @@ const contentTypeHTML = "text/html; charset=utf-8"
 // regions again -- the same view-building code path this handler already
 // used, so the two never drift.
 func (c *console) handleIndex(w http.ResponseWriter, r *http.Request) {
-	nav, err := c.navComponent(r.Context())
+	nav, err := c.navComponent(r.Context(), 0)
 	if err != nil {
 		slog.Error("console: build nav", "err", err)
 		http.Error(w, genericServerErrorBody, http.StatusInternalServerError)

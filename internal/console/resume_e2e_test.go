@@ -43,25 +43,75 @@ import (
 	"zing/internal/tracker"
 )
 
-// resumeE2EGitHub is a never-called orchestrator.GitHub, enough to satisfy
-// orchestrator.New's required parameter: this e2e never pushes or opens a
-// pull request.
-type resumeE2EGitHub struct{}
-
-func (resumeE2EGitHub) RepoDefaultBranch(context.Context, string, string) (string, error) {
-	return "", errors.New("resumeE2EGitHub: not implemented")
+// resumeE2EShipGitHub is this e2e's own working GitHub double (M3 tasks 6,
+// 7), the one orchestrator.GitHub this e2e wires in: PUBLISH and POLL both
+// reach it for real, so CreateDraftPR and FindPRByHead actually track one
+// pull request, and GetPR reports it merged from the very first read --
+// the same state POLL would see if the owner had merged it by hand on
+// GitHub while the loop was still open (design section 14's own "the owner
+// merges on GitHub while the ticket waits on merge" row), since M3 builds
+// PUBLISH and POLL but not the ready flip or MERGE itself (M4).
+type resumeE2EShipGitHub struct {
+	mu      sync.Mutex
+	pr      *resumeE2EShipPR
+	nextNum int
 }
 
-func (resumeE2EGitHub) RequiredChecks(context.Context, string, string, string) ([]string, error) {
-	return nil, errors.New("resumeE2EGitHub: not implemented")
+type resumeE2EShipPR struct {
+	url, head, base string
+	number          int
 }
 
-func (resumeE2EGitHub) CreateDraftPR(context.Context, string, string, string, string, string, string) (url string, number int, err error) {
-	return "", 0, errors.New("resumeE2EGitHub: not implemented")
+func (*resumeE2EShipGitHub) RepoDefaultBranch(context.Context, string, string) (string, error) {
+	return "", errors.New("resumeE2EShipGitHub: not implemented")
 }
 
-func (resumeE2EGitHub) FindPRByHead(context.Context, string, string, string, string) (prURL string, number int, ok bool, err error) {
-	return "", 0, false, errors.New("resumeE2EGitHub: not implemented")
+func (*resumeE2EShipGitHub) RequiredChecks(context.Context, string, string, string) ([]string, error) {
+	return nil, errors.New("resumeE2EShipGitHub: not implemented")
+}
+
+func (g *resumeE2EShipGitHub) CreateDraftPR(_ context.Context, _, _, head, base, _, _ string) (url string, number int, err error) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if g.pr != nil {
+		return "", 0, errors.New("resumeE2EShipGitHub: a pull request already exists for this head")
+	}
+	g.nextNum++
+	g.pr = &resumeE2EShipPR{url: fmt.Sprintf("https://github.com/fixture/fixture/pull/%d", g.nextNum), head: head, base: base, number: g.nextNum}
+	return g.pr.url, g.pr.number, nil
+}
+
+func (g *resumeE2EShipGitHub) FindPRByHead(_ context.Context, _, _, head, base string) (url string, number int, ok bool, err error) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if g.pr == nil || g.pr.head != head || g.pr.base != base {
+		return "", 0, false, nil
+	}
+	return g.pr.url, g.pr.number, true, nil
+}
+
+func (*resumeE2EShipGitHub) GetPR(context.Context, string, string, int) (orchestrator.PRState, error) {
+	return orchestrator.PRState{Merged: true, Draft: true}, nil
+}
+
+func (*resumeE2EShipGitHub) Merge(context.Context, string, string, int, string, string, string) (string, error) {
+	return "", errors.New("resumeE2EShipGitHub: Merge not implemented (M4)")
+}
+
+func (*resumeE2EShipGitHub) ListCheckRuns(context.Context, string, string, string) ([]orchestrator.CheckRun, error) {
+	return []orchestrator.CheckRun{{ID: 1, Name: "ci", Status: "completed", Conclusion: "success", AppSlug: "github-actions", AppID: 1}}, nil
+}
+
+func (*resumeE2EShipGitHub) ListStatuses(context.Context, string, string, string) ([]orchestrator.CommitStatus, error) {
+	return nil, nil
+}
+
+func (*resumeE2EShipGitHub) RequiredCheckRules(context.Context, string, string, string) ([]orchestrator.RequiredCheck, error) {
+	return []orchestrator.RequiredCheck{{Context: "ci"}}, nil
+}
+
+func (*resumeE2EShipGitHub) JobLogTail(context.Context, string, string, int64, int) (string, error) {
+	return "", nil
 }
 
 // resumeE2EMaxTicks and resumeE2EOwner mirror cmd/zing/selftest.go's own
@@ -71,12 +121,36 @@ func (resumeE2EGitHub) FindPRByHead(context.Context, string, string, string, str
 const (
 	resumeE2EMaxTicks = 50
 	resumeE2EOwner    = "resume-e2e"
+	// resumeE2EFixtureOwner is the owner and repo name both the
+	// orchestrator's own Project and job.Project's own shipping fields (M3
+	// tasks 6, 7) use for this e2e's one fixture project.
+	resumeE2EFixtureOwner = "fixture"
 )
 
 // resumeE2EWantStates is the ordered "to" state of every state message the
 // fixture ticket's full run posts (design section 7.1), the same sequence
 // cmd/zing/selftest.go's e2eWantStates asserts.
 var resumeE2EWantStates = []string{testPlanningLiteral, "building", "reviewing", "judging", "shipping", "done"}
+
+// resumeE2EJudgeCheckCmd and resumeE2ECommands mirror cmd/zing/selftest.go's
+// own e2eJudgeCheckCmd and selftestCommands: the fixture cohort's scenario
+// s1 carries "curl -sf localhost:8080/hello" as its check_cmd, and judging's
+// own CHECK step (design section 7.5) re-runs it for real, but this e2e's
+// fixture project never starts a real HTTP server on port 8080. Every other
+// command (the building state's own "test -f hello.txt" and "true") still
+// runs for real, at the same CommandRunner seam (job.Deps.Commands).
+const resumeE2EJudgeCheckCmd = "curl -sf localhost:8080/hello"
+
+type resumeE2ECommands struct {
+	real job.CommandRunner
+}
+
+func (c resumeE2ECommands) Run(ctx context.Context, dir, repoGit, shellCmd string, timeout time.Duration) (int, error) {
+	if shellCmd == resumeE2EJudgeCheckCmd {
+		return 0, nil
+	}
+	return c.real.Run(ctx, dir, repoGit, shellCmd, timeout)
+}
 
 // resumeE2EModels and resumeE2EBudget mirror cmd/zing/selftest.go's own
 // e2eModels/e2eBudget: the job.Deps.Models alias table and Budget classify
@@ -96,6 +170,7 @@ const resumeE2EBudget = 240 * time.Minute
 // TestResumeE2E_AnswerViaConsoleAdvancesTicketToDoneWithNoLeak is the
 // verify-by. See the file doc comment above.
 func TestResumeE2E_AnswerViaConsoleAdvancesTicketToDoneWithNoLeak(t *testing.T) {
+	t.Parallel()
 	ctx := t.Context()
 
 	st, err := store.Open(ctx, t.TempDir()+"/zing.db")
@@ -142,6 +217,12 @@ func TestResumeE2E_AnswerViaConsoleAdvancesTicketToDoneWithNoLeak(t *testing.T) 
 	if addErr := gitfixture.AddFile(ctx, projectDir, filepath.Join("cmd", "zing", "main.go"), []byte("package main\n")); addErr != nil {
 		t.Fatalf("gitfixture.AddFile: %v", addErr)
 	}
+	// A bare origin remote, so shipping's own PUBLISH (M3 task 6) has
+	// somewhere real to push the ticket branch before OpenDraftPR asks
+	// shipGH to open the draft pull request (PKG9-PLAN.md section 8.2).
+	if _, wboErr := gitfixture.WithBareOrigin(ctx, projectDir); wboErr != nil {
+		t.Fatalf("gitfixture.WithBareOrigin: %v", wboErr)
+	}
 
 	projectID, err := st.EnsureProject(ctx, store.Project{
 		Name: testAuthorZing, RepoURL: "https://example.invalid/zing", LocalPath: projectDir, Tracker: testTrackerGitHub,
@@ -150,9 +231,10 @@ func TestResumeE2E_AnswerViaConsoleAdvancesTicketToDoneWithNoLeak(t *testing.T) 
 		t.Fatalf("EnsureProject: %v", err)
 	}
 
+	shipGH := &resumeE2EShipGitHub{}
 	orch, err := orchestrator.New(
-		orchestrator.Project{Owner: "fixture", Repo: "fixture", LocalPath: projectDir, DefaultBranch: "main"},
-		resumeE2EGitHub{}, orchestrator.NewRunner(), nil)
+		orchestrator.Project{Owner: resumeE2EFixtureOwner, Repo: resumeE2EFixtureOwner, LocalPath: projectDir, DefaultBranch: "main"},
+		shipGH, orchestrator.NewRunner(), nil)
 	if err != nil {
 		t.Fatalf("orchestrator.New: %v", err)
 	}
@@ -169,11 +251,19 @@ func TestResumeE2E_AnswerViaConsoleAdvancesTicketToDoneWithNoLeak(t *testing.T) 
 			Models: resumeE2EModels, Budget: resumeE2EBudget,
 			// This e2e drives the fake runtime, never a real sandboxed
 			// process (design D5, section 10).
-			Sandbox: sandbox.Off(), RequireSandbox: false,
-			Commands: job.NewCommandRunner(sandbox.Off(), false),
+			Sandboxes: sandbox.OffSet(), RequireSandbox: false,
+			Commands: resumeE2ECommands{real: job.NewCommandRunner(sandbox.Off(), false)},
 			Projects: map[int64]job.Project{
-				projectID: {Orch: orch, RepoGit: repoGit, TestCmd: "test -f hello.txt", LintCmd: "true"},
+				projectID: {
+					Orch: orch, RepoGit: repoGit, TestCmd: "test -f hello.txt", LintCmd: "true",
+					Owner: resumeE2EFixtureOwner, Repo: resumeE2EFixtureOwner, PullRequests: shipGH, Checks: shipGH,
+				},
 			},
+			DataDir: t.TempDir(),
+			// LensesParallel bounds ROUND's own semaphore (PKG9-PLAN.md
+			// section 4.3, 6.2): zero would block every lens forever, since
+			// this e2e now drives a real review round on its way to done.
+			LensesParallel: 7,
 		}, rts)
 	if err != nil {
 		t.Fatalf("dispatch.New: %v", err)
@@ -354,8 +444,8 @@ func answerOpenQuestionViaConsole(t *testing.T, st *store.Store, srv *httptest.S
 	sendReq.Close = true
 	sendResp := doRequest(t, sendReq)
 	_ = sendResp.Body.Close()
-	if sendResp.StatusCode != http.StatusNoContent {
-		t.Fatalf("POST /send status = %d, want 204", sendResp.StatusCode)
+	if sendResp.StatusCode != http.StatusOK {
+		t.Fatalf("POST /send status = %d, want 200", sendResp.StatusCode)
 	}
 
 	after, err := st.GetTicket(ctx, ticketID)
@@ -545,9 +635,14 @@ func assertResumeE2EStateSequence(t *testing.T, st *store.Store, ticketID int64)
 }
 
 // assertResumeE2EResumedOnce asserts the ticket's one planning session
-// resumed exactly once (job/skeleton.go bumps Session.Resumes on every
-// resume commit), the "the planning session resumes once" checkpoint
-// design section 12 row 7 and section 14's dispatcher contract both name.
+// resumed, but was never charged for it (D31, design section 22.4): the
+// owner's answer to Q1 (a planning question) delivers through a plain
+// owner-delivery resume, and BumpResumes is false for that resume -- owner
+// deliveries are free, so sessions.resumes stays at its start value even
+// though the session did resume. Three runs are expected on that session:
+// the first turn, the free resume that delivers and settles Q1, and the
+// free confirming turn the owner's gate approval triggers before the seal
+// (D32, design section 22.12.3).
 func assertResumeE2EResumedOnce(t *testing.T, st *store.Store, ticketID int64) {
 	t.Helper()
 	sessions, err := st.SessionsForTicket(t.Context(), ticketID)
@@ -563,7 +658,20 @@ func assertResumeE2EResumedOnce(t *testing.T, st *store.Store, ticketID int64) {
 	if len(planning) != 1 {
 		t.Fatalf("planning sessions for ticket %d = %d, want exactly 1", ticketID, len(planning))
 	}
-	if planning[0].Resumes != 1 {
-		t.Errorf("planning session Resumes = %d, want exactly 1 (one resume, from clearing the questions wait)", planning[0].Resumes)
+	if planning[0].Resumes != 0 {
+		t.Errorf("planning session Resumes = %d, want exactly 0 (an owner-delivery resume is never charged)", planning[0].Resumes)
+	}
+	runs, err := st.RunsForTicket(t.Context(), ticketID)
+	if err != nil {
+		t.Fatalf("RunsForTicket: %v", err)
+	}
+	var planningRuns int
+	for _, r := range runs {
+		if r.SessionID == planning[0].ID {
+			planningRuns++
+		}
+	}
+	if planningRuns != 3 {
+		t.Errorf("planning runs for session %d = %d, want exactly 3 (the first turn, the free resume that delivered and settled Q1, and the free confirming turn before the seal)", planning[0].ID, planningRuns)
 	}
 }

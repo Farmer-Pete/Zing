@@ -1,0 +1,11 @@
+<zing job="build" outcome="ok">
+  <claims>
+    <files_changed>
+      <path>hello.txt</path>
+    </files_changed>
+    <test_exit>0</test_exit>
+    <lint_exit>0</lint_exit>
+  </claims>
+  <report>Appended a line to hello.txt so the failing check GitHub reported passes.</report>
+  <notes></notes>
+</zing>

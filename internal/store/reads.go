@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 )
 
 // GetTicket reads the ticket with id, or a wrapped sql.ErrNoRows if none exists.
@@ -55,14 +56,30 @@ func (s *Store) ListAllTickets(ctx context.Context) ([]Ticket, error) {
 	return out, nil
 }
 
-// ListReadyCandidates returns every unclaimed, non-waiting ticket whose
-// state is not in terminal, ordered by id for a deterministic result. The
-// store applies no priority order: tracker_ref is TEXT, so SQL would sort
+// ListReadyCandidates returns every unclaimed, non-terminal ticket that is
+// dispatchable at now (design section 4.2, D21/OQ7):
+//
+//	(waiting_on IS NULL AND (next_poll_at IS NULL OR next_poll_at <= now))
+//	OR (waiting_on = 'merge' AND next_poll_at IS NOT NULL AND next_poll_at <= now)
+//	OR (waiting_on IS NULL AND EXISTS an answered question of the ticket)
+//
+// ordered by id for a deterministic result. The first clause is the
+// ordinary case: a ticket not waiting on anything is a candidate right away
+// unless it carries a future poll schedule (shipping's own backoff, 8.3).
+// The second clause is what keeps a ticket waiting on merge a candidate
+// while its poll is due, so a merge on GitHub or a reopened loop is still
+// seen (D21). The third clause lets an answered question skip a poll
+// schedule that has not come due yet (merge's own question is answered
+// through SendBatch, which already clears waiting_on itself, design section
+// 6.7) -- without it, the owner's answer would otherwise wait out whatever
+// backoff interval was in force when the question was asked. The store
+// applies no priority order: tracker_ref is TEXT, so SQL would sort
 // "fake#10" before "fake#2"; the dispatcher parses the numeric external id
 // and orders candidates in Go (section 6.2).
-func (s *Store) ListReadyCandidates(ctx context.Context, terminal []string) ([]Ticket, error) {
-	query := `SELECT ` + ticketColumns + ` FROM tickets WHERE claim_owner IS NULL AND waiting_on IS NULL`
-	args := make([]any, 0, len(terminal))
+func (s *Store) ListReadyCandidates(ctx context.Context, terminal []string, now time.Time) ([]Ticket, error) {
+	nowStr := formatTime(now)
+	query := `SELECT ` + ticketColumns + ` FROM tickets WHERE claim_owner IS NULL`
+	args := make([]any, 0, len(terminal)+2)
 	if len(terminal) > 0 {
 		placeholders := make([]string, len(terminal))
 		for i, state := range terminal {
@@ -74,7 +91,15 @@ func (s *Store) ListReadyCandidates(ctx context.Context, terminal []string) ([]T
 		// concatenated into the query text.
 		query += ` AND state NOT IN (` + strings.Join(placeholders, ", ") + `)` //nolint:gosec // G202: placeholders only, values are bind args
 	}
-	query += ` ORDER BY id`
+	query += ` AND (
+		(waiting_on IS NULL AND (next_poll_at IS NULL OR next_poll_at <= ?))
+		OR (waiting_on = 'merge' AND next_poll_at IS NOT NULL AND next_poll_at <= ?)
+		OR (waiting_on IS NULL AND EXISTS (
+			SELECT 1 FROM messages
+			WHERE messages.ticket_id = tickets.id AND messages.type = ? AND messages.state = ?
+		))
+	) ORDER BY id`
+	args = append(args, nowStr, nowStr, msgTypeQuestion, questionStateAnswered)
 
 	rows, err := s.db.QueryContext(ctx, query, args...)
 	if err != nil {

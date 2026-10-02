@@ -75,7 +75,7 @@ func buildTicketInBuilding(t *testing.T) (*store.Store, runtime.Runtime, int64) 
 func claimForBuild(t *testing.T, s *store.Store, rt runtime.Runtime, ticketID int64) job.Deps {
 	t.Helper()
 	deps := claimWithRuntimes(t, s, rt, ticketID)
-	deps.Sandbox = sandbox.Off()
+	deps.Sandboxes = sandbox.OffSet()
 	deps.RequireSandbox = false
 	deps.Commands = job.NewCommandRunner(sandbox.Off(), false)
 	deps.Projects = buildJobTestProjects(t, s)
@@ -156,6 +156,10 @@ func findUnlandedReport(t *testing.T, reports []store.BuildReportRow, taskN int)
 // section 19): the three fixture tasks land as three signed commits and the
 // ticket reaches reviewing.
 func TestBuildThreeTasksThreeSignedCommits(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow end-to-end flow; runs in the full suite")
+	}
+	t.Parallel()
 	s, rt, ticketID := buildTicketInBuilding(t)
 	advanceBuilding(t, s, rt, ticketID)
 
@@ -191,6 +195,53 @@ func TestBuildThreeTasksThreeSignedCommits(t *testing.T) {
 	}
 }
 
+// findConfirmedGateQuestionID returns the gate question id the ticket's own
+// confirming marker names (D32, design section 22.12.1): the marker's own
+// parent_id, the same id confirmedOutcomeCommit (planning.go) attaches it
+// to.
+func findConfirmedGateQuestionID(t *testing.T, s *store.Store, ticketID int64) int64 {
+	t.Helper()
+	msgs, err := s.ListMessages(t.Context(), ticketID)
+	if err != nil {
+		t.Fatalf("ListMessages: %v", err)
+	}
+	for i := range msgs {
+		if msgs[i].Type == "update" && strings.HasPrefix(msgs[i].Body, "gate confirmed run ") && msgs[i].ParentID != nil {
+			return *msgs[i].ParentID
+		}
+	}
+	t.Fatal("findConfirmedGateQuestionID: no confirming marker found")
+	return 0
+}
+
+// TestBuildPromptCarriesApprovalNotes proves design section 22.12.3b end to
+// end: the owner's reply on the gate question, sent alongside Approve,
+// reaches the build turn's own prompt as the fenced "approval" input, right
+// after plan.
+func TestBuildPromptCarriesApprovalNotes(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow end-to-end flow; runs in the full suite")
+	}
+	t.Parallel()
+	s, rt, ticketID := buildTicketInBuilding(t)
+
+	gateQID := findConfirmedGateQuestionID(t, s, ticketID)
+	if _, err := s.InsertMessage(t.Context(), store.Message{
+		TicketID: ticketID, ParentID: &gateQID, Type: "reply", Author: "you",
+		State: new("sent"), Body: "the JSON must stay stable",
+	}); err != nil {
+		t.Fatalf("InsertMessage(approval note): %v", err)
+	}
+
+	rec := &recordingRuntime{rt: rt}
+	ticket := getTicket(t, s, ticketID)
+	deps := claimForBuild(t, s, rec, ticketID)
+	if _, err := job.Registry()[testStateBuilding].Run(t.Context(), ticket, deps); err != nil {
+		t.Fatalf("building Run: %v", err)
+	}
+	assertFenced(t, rec.lastReq.Prompt, "approval", "the JSON must stay stable")
+}
+
 // ---- RUN --------------------------------------------------------------------
 
 // TestBuildRunGoesThroughRunJob proves RUN's first turn goes through runJob
@@ -199,6 +250,10 @@ func TestBuildThreeTasksThreeSignedCommits(t *testing.T) {
 // file effect landed inside the real worktree directory (WorkDir), not
 // wherever else it might have run.
 func TestBuildRunGoesThroughRunJob(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow end-to-end flow; runs in the full suite")
+	}
+	t.Parallel()
 	s, rt, ticketID := buildTicketInBuilding(t)
 
 	ticket := getTicket(t, s, ticketID)
@@ -242,6 +297,10 @@ func TestBuildRunGoesThroughRunJob(t *testing.T) {
 // nothing) makes CHECK write the "claim errors pending" marker rather than
 // landing (design section 6.4).
 func TestBuildClaimMismatchWritesPendingMarker(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow end-to-end flow; runs in the full suite")
+	}
+	t.Parallel()
 	s, rt, ticketID := buildTicketInBuilding(t)
 	ticket := getTicket(t, s, ticketID)
 
@@ -279,6 +338,10 @@ func TestBuildClaimMismatchWritesPendingMarker(t *testing.T) {
 // CheckCommandsPassed doc): the observed re-run's exits, not the claim,
 // decide.
 func TestCheckRejectsTruthfulFailingCommands(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow end-to-end flow; runs in the full suite")
+	}
+	t.Parallel()
 	s, rt, ticketID := buildTicketInBuilding(t)
 	ticket := getTicket(t, s, ticketID)
 
@@ -319,6 +382,10 @@ func TestCheckRejectsTruthfulFailingCommands(t *testing.T) {
 // so there is no seam here to claim what the project commands are about to
 // do): CHECK's job is to diff after running them, not to predict them.
 func TestCheckReadsTreeAfterCommands(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow end-to-end flow; runs in the full suite")
+	}
+	t.Parallel()
 	s, _, ticketID := buildTicketInBuilding(t)
 	ticket := getTicket(t, s, ticketID)
 
@@ -366,6 +433,10 @@ func TestCheckReadsTreeAfterCommands(t *testing.T) {
 // TestBuildLandStagesOnlyChangedPaths proves LAND commits exactly the
 // changed paths CHECK just read, nothing else (design section 6.7 step 1).
 func TestBuildLandStagesOnlyChangedPaths(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow end-to-end flow; runs in the full suite")
+	}
+	t.Parallel()
 	s, rt, ticketID := buildTicketInBuilding(t)
 
 	ticket := getTicket(t, s, ticketID)
@@ -412,6 +483,8 @@ func TestBuildLandStagesOnlyChangedPaths(t *testing.T) {
 // handler invocation, and its created field tells a tick that actually
 // created the worktree apart from a later tick that only reopens it (RUN
 // creates it; the following CHECK+LAND tick must report created=false).
+// Not parallel: it calls slog.SetDefault below to capture a log line,
+// which swaps the process-wide default logger.
 func TestBuildEnsuresWorktreeOncePerTick(t *testing.T) {
 	s, rt, ticketID := buildTicketInBuilding(t)
 
@@ -455,6 +528,7 @@ func TestBuildEnsuresWorktreeOncePerTick(t *testing.T) {
 // ticket that somehow reaches building with no stored plan escalates
 // environment/"no stored plan for this ticket", with no run.
 func TestBuildNoStoredPlanEscalates(t *testing.T) {
+	t.Parallel()
 	s := newJobTestStore(t)
 	ticketID := seedQueuedGitBackedTicket(t, s)
 
@@ -499,6 +573,10 @@ func TestBuildNoStoredPlanEscalates(t *testing.T) {
 // rather than reaching a task lookup that could panic or silently misfile
 // progress.
 func TestBuildRejectsMisnumberedStoredPlan(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow end-to-end flow; runs in the full suite")
+	}
+	t.Parallel()
 	s, rt, ticketID := buildTicketInBuilding(t)
 	ticket := getTicket(t, s, ticketID)
 
@@ -543,6 +621,10 @@ func TestBuildRejectsMisnumberedStoredPlan(t *testing.T) {
 // history) escalates environment/"the ticket branch does not hold the
 // commits Zing recorded".
 func TestBuildEscalatesWhenRecordedCommitMissing(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow end-to-end flow; runs in the full suite")
+	}
+	t.Parallel()
 	s, rt, ticketID := buildTicketInBuilding(t)
 
 	ticket := getTicket(t, s, ticketID)
@@ -586,6 +668,10 @@ func TestBuildEscalatesWhenRecordedCommitMissing(t *testing.T) {
 // hand-made commits) escalates environment/"the ticket branch holds
 // commits Zing did not record".
 func TestBuildEscalatesOnForeignCommits(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow end-to-end flow; runs in the full suite")
+	}
+	t.Parallel()
 	s, rt, ticketID := buildTicketInBuilding(t)
 	ticket := getTicket(t, s, ticketID)
 	deps := claimForBuild(t, s, rt, ticketID)
@@ -694,6 +780,10 @@ func assertAdoptionFails(t *testing.T, s *store.Store, ticketID int64, deps job.
 // landing the build_report with that commit's own sha, without CommitTask
 // ever running again.
 func TestBuildAdoptsVerifiedCommit(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow end-to-end flow; runs in the full suite")
+	}
+	t.Parallel()
 	s, ticketID, _, wt := prepareUnrecordedCommit(t, []string{helloTxt}, 0, nil, "", map[string]string{helloTxt: helloWorldContent}, true)
 
 	sha, err := orchestratorHeadSHA(t, wt.Dir())
@@ -733,7 +823,9 @@ func TestBuildAdoptsVerifiedCommit(t *testing.T) {
 // TestBuildAdoptionChecks proves section 6.1's seven-check adoption table:
 // one case per row, each escalating with that row's own Tried name.
 func TestBuildAdoptionChecks(t *testing.T) {
+	t.Parallel()
 	t.Run("commands failed", func(t *testing.T) {
+		t.Parallel()
 		s, ticketID, deps, _ := prepareUnrecordedCommit(t, []string{helloTxt}, 0, nil, "", map[string]string{helloTxt: helloWorldContent}, true)
 		ticket := getTicket(t, s, ticketID)
 		badProj := deps.Projects[ticket.ProjectID]
@@ -743,6 +835,7 @@ func TestBuildAdoptionChecks(t *testing.T) {
 	})
 
 	t.Run("tree not clean", func(t *testing.T) {
+		t.Parallel()
 		s, ticketID, deps, wt := prepareUnrecordedCommit(t, []string{helloTxt}, 0, nil, "", map[string]string{helloTxt: helloWorldContent}, true)
 		if writeErr := os.WriteFile(filepath.Join(wt.Dir(), "untracked.txt"), []byte("x"), 0o600); writeErr != nil {
 			t.Fatalf("write untracked file: %v", writeErr)
@@ -751,11 +844,13 @@ func TestBuildAdoptionChecks(t *testing.T) {
 	})
 
 	t.Run("unsigned", func(t *testing.T) {
+		t.Parallel()
 		s, ticketID, deps, _ := prepareUnrecordedCommit(t, []string{helloTxt}, 0, nil, "", map[string]string{helloTxt: helloWorldContent}, false)
 		assertAdoptionFails(t, s, ticketID, deps, "unsigned")
 	})
 
 	t.Run("no report", func(t *testing.T) {
+		t.Parallel()
 		s, rt, ticketID := buildTicketInBuilding(t)
 		ticket := getTicket(t, s, ticketID)
 		deps := claimForBuild(t, s, rt, ticketID)
@@ -772,11 +867,13 @@ func TestBuildAdoptionChecks(t *testing.T) {
 	})
 
 	t.Run("subject mismatch", func(t *testing.T) {
+		t.Parallel()
 		s, ticketID, deps, _ := prepareUnrecordedCommit(t, []string{helloTxt}, 0, nil, "a subject the report never gave", map[string]string{helloTxt: helloWorldContent}, true)
 		assertAdoptionFails(t, s, ticketID, deps, "subject mismatch")
 	})
 
 	t.Run("claims failed", func(t *testing.T) {
+		t.Parallel()
 		// The run claims lint_exit 1; the fixture project's real lint
 		// command ("true") always exits 0, so the adoption re-run
 		// disagrees with the stored claim.
@@ -785,6 +882,7 @@ func TestBuildAdoptionChecks(t *testing.T) {
 	})
 
 	t.Run("undeclared path", func(t *testing.T) {
+		t.Parallel()
 		extras := []response.ExtraClaim{{Path: extraTxt, Reason: "needed it"}}
 		files := map[string]string{helloTxt: helloWorldContent, extraTxt: "extra\n"}
 		s, ticketID, deps, _ := prepareUnrecordedCommit(t, []string{helloTxt, extraTxt}, 0, extras, "", files, true)
@@ -798,6 +896,10 @@ func TestBuildAdoptionChecks(t *testing.T) {
 // rather than returning it as a bare Go error. RequireSandbox true with the
 // sandbox off makes every d.Commands.Run call return ErrSandbox.
 func TestBuildAdoptRoutesSandboxUnavailable(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow end-to-end flow; runs in the full suite")
+	}
+	t.Parallel()
 	s, ticketID, deps, _ := prepareUnrecordedCommit(t, []string{helloTxt}, 0, nil, "", map[string]string{helloTxt: helloWorldContent}, true)
 	deps.RequireSandbox = true
 	deps.Commands = job.NewCommandRunner(sandbox.Off(), true)
@@ -943,6 +1045,10 @@ func describeTick(t *testing.T, s *store.Store, scriptRT *scriptedRuntime, ticke
 // exactly one file artifact, and only the second (the last undescribed
 // one) also carries the ASK question.
 func TestPerimeterOneRunPerExtra(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow end-to-end flow; runs in the full suite")
+	}
+	t.Parallel()
 	s, ticketID, _, scriptRT := perimeterScenario(t, map[string]string{
 		testExtraPath: testExtraReason,
 		"extra2.go":   "needed another helper",
@@ -993,6 +1099,10 @@ func TestPerimeterOneRunPerExtra(t *testing.T) {
 // build run's own id, set explicitly (design section 6.5, the "Boundaries"
 // rule that a question always names the build run, never AttachRunToMsgs).
 func TestPerimeterAskInLastDescribeCommit(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow end-to-end flow; runs in the full suite")
+	}
+	t.Parallel()
 	s, ticketID, rid, scriptRT := perimeterScenario(t, map[string]string{testExtraPath: testExtraReason})
 	scriptRT.steps = append(scriptRT.steps, perimeterStep("Adds a small helper.", "perim-sess-1"))
 
@@ -1014,6 +1124,10 @@ func TestPerimeterAskInLastDescribeCommit(t *testing.T) {
 // "Change: <description>" -- covering no marker, trust root, and style
 // guide.
 func TestPerimeterItemText(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow end-to-end flow; runs in the full suite")
+	}
+	t.Parallel()
 	s, ticketID, _, scriptRT := perimeterScenario(t, map[string]string{
 		"extra_plain.go": "a plain reason",
 		"machine.toml":   "a trust root reason",
@@ -1060,6 +1174,10 @@ func TestPerimeterItemText(t *testing.T) {
 // raises a perimeter question (design section 6.5's own precondition: "run
 // only with one or more extras in the tree").
 func TestPerimeterNoAskWithoutExtras(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow end-to-end flow; runs in the full suite")
+	}
+	t.Parallel()
 	s, rt, ticketID := buildTicketInBuilding(t)
 	advanceBuilding(t, s, rt, ticketID)
 
@@ -1080,6 +1198,10 @@ func TestPerimeterNoAskWithoutExtras(t *testing.T) {
 // file artifact with the perimeter run's id, the builder's reason and
 // markers, and no description.
 func TestPerimeterRunQuestionStoresPath(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow end-to-end flow; runs in the full suite")
+	}
+	t.Parallel()
 	s, ticketID, _, scriptRT := perimeterScenario(t, map[string]string{testExtraPath: testExtraReason})
 	scriptRT.steps = append(scriptRT.steps, perimeterQuestionStep("perim-q-sess"))
 
@@ -1118,6 +1240,10 @@ func TestPerimeterRunQuestionStoresPath(t *testing.T) {
 // that marker, so the next DESCRIBE tick finds an extra its own
 // build_report's Extras never claimed.
 func TestDescribeUnclaimedExtraEscalates(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow end-to-end flow; runs in the full suite")
+	}
+	t.Parallel()
 	s, ticketID, _, scriptRT := perimeterScenario(t, map[string]string{testExtraPath: testExtraReason})
 
 	ticket := getTicket(t, s, ticketID)
@@ -1149,6 +1275,7 @@ func TestDescribeUnclaimedExtraEscalates(t *testing.T) {
 // (design section 6.5 step 4's own "every other continuation is a fresh
 // run").
 func TestPerimeterFailureDescribesAgain(t *testing.T) {
+	t.Parallel()
 	cases := []struct {
 		name string
 		step scriptedStep
@@ -1160,6 +1287,7 @@ func TestPerimeterFailureDescribesAgain(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
 			s, ticketID, _, scriptRT := perimeterScenario(t, map[string]string{testExtraPath: testExtraReason})
 			scriptRT.steps = append(scriptRT.steps, tc.step)
 
@@ -1203,6 +1331,10 @@ func TestPerimeterFailureDescribesAgain(t *testing.T) {
 // the second consecutive invalid perimeter output escalates
 // response_invalid.
 func TestPerimeterSecondInvalidEscalates(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow end-to-end flow; runs in the full suite")
+	}
+	t.Parallel()
 	s, ticketID, _, scriptRT := perimeterScenario(t, map[string]string{testExtraPath: testExtraReason})
 	scriptRT.steps = append(scriptRT.steps,
 		invalidResult("not well-formed", "perim-invalid-1"),
@@ -1288,6 +1420,10 @@ func countPerimeterQuestions(t *testing.T, s *store.Store, ticketID int64) int {
 // accepted path along with the declared ones -- the landed build_report
 // keeping its original extra element untouched.
 func TestResolveAllAcceptedLandsWithExtra(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow end-to-end flow; runs in the full suite")
+	}
+	t.Parallel()
 	s, ticketID, rid, scriptRT := perimeterScenario(t, map[string]string{testExtraPath: testExtraReason})
 	scriptRT.steps = append(scriptRT.steps, perimeterStep("Adds a small helper.", "perim-sess-1"))
 	describeTick(t, s, scriptRT, ticketID) // DESCRIBE + ASK
@@ -1348,6 +1484,10 @@ const markerPerimeterResolvedFmtForTest = "perimeter resolved run %d"
 // orchestrator.PerimeterNotice, and the fresh run's own report -- once
 // landed -- excludes the reverted path entirely.
 func TestResolveRejectedIsRevertedAndResumed(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow end-to-end flow; runs in the full suite")
+	}
+	t.Parallel()
 	s, ticketID, _, scriptRT := perimeterScenario(t, map[string]string{testExtraPath: testExtraReason})
 	scriptRT.steps = append(scriptRT.steps,
 		perimeterStep("Adds a small helper.", "perim-sess-1"),
@@ -1413,6 +1553,10 @@ func TestResolveRejectedIsRevertedAndResumed(t *testing.T) {
 // fresh report's own re-check never asks about the accepted path again,
 // even though describeOrAsk runs fresh against a brand-new build_report.
 func TestAcceptedPathAsksOnceOnly(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow end-to-end flow; runs in the full suite")
+	}
+	t.Parallel()
 	const acceptedPath = "extra_ok.go"
 	const rejectedPath = "extra_bad.go"
 	s, ticketID, _, scriptRT := perimeterScenario(t, map[string]string{
@@ -1482,6 +1626,9 @@ func TestAcceptedPathAsksOnceOnly(t *testing.T) {
 // SaveDraft would have refused -- and proves RESOLVE treats it as a reject
 // rather than panicking or silently dropping the path, logging the
 // defaulted warning design section 11 names.
+//
+// Not parallel: it calls slog.SetDefault below to capture a log line,
+// which swaps the process-wide default logger.
 func TestResolveDefaultsUnknownDecisionToReject(t *testing.T) {
 	s, ticketID, rid, scriptRT := perimeterScenario(t, map[string]string{testExtraPath: testExtraReason})
 	scriptRT.steps = append(scriptRT.steps,
@@ -1553,6 +1700,10 @@ func TestResolveDefaultsUnknownDecisionToReject(t *testing.T) {
 // clears the ticket's wait (design section 6.6 step 6: "commit the file
 // artifacts, ResolveQuestions, and the marker ... stay").
 func TestResolveNoEmptyQuestionAfterAccept(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow end-to-end flow; runs in the full suite")
+	}
+	t.Parallel()
 	s, ticketID, _, scriptRT := perimeterScenario(t, map[string]string{testExtraPath: testExtraReason})
 	scriptRT.steps = append(scriptRT.steps, perimeterStep("Adds a small helper.", "perim-sess-1"))
 	describeTick(t, s, scriptRT, ticketID) // DESCRIBE + ASK
@@ -1594,6 +1745,10 @@ func TestResolveNoEmptyQuestionAfterAccept(t *testing.T) {
 // with "fake: session ... resume asked for (perimeter, ...)" rather than
 // silently passing.
 func TestPerimeterRunAnswerResumesItsSession(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow end-to-end flow; runs in the full suite")
+	}
+	t.Parallel()
 	s, ticketID, _, scriptRT := perimeterScenario(t, map[string]string{testExtraPath: testExtraReason})
 	const wantDescription = "Uses a hyphen, matching the style guide."
 
@@ -1666,6 +1821,10 @@ func TestPerimeterRunAnswerResumesItsSession(t *testing.T) {
 // resolves with the "perimeter question dropped" marker and no runtime
 // call at all.
 func TestPerimeterQuestionDroppedWhenPathGone(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow end-to-end flow; runs in the full suite")
+	}
+	t.Parallel()
 	s, ticketID, _, scriptRT := perimeterScenario(t, map[string]string{testExtraPath: testExtraReason})
 	scriptRT.steps = append(scriptRT.steps, perimeterQuestionStep("perim-q-sess"))
 	describeTick(t, s, scriptRT, ticketID) // DESCRIBE returns a question
@@ -1738,6 +1897,10 @@ func withHelloAlwaysProject(deps job.Deps, ticket store.Ticket) job.Deps {
 // charging exactly one resume (design section 4.2's own "a resume is
 // charged in Reserve" rule, task 4).
 func TestBuildQuestionWaitsAndResumes(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow end-to-end flow; runs in the full suite")
+	}
+	t.Parallel()
 	s, _, ticketID := buildTicketInBuilding(t)
 	ticket := getTicket(t, s, ticketID)
 
@@ -1816,6 +1979,10 @@ func TestBuildQuestionWaitsAndResumes(t *testing.T) {
 // newest build-job session (the fix's, already resolved but still on
 // record): only round.SessionID, not LatestSession, resumes the right one.
 func TestBuildRoundResumesItsOwnSession(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow end-to-end flow; runs in the full suite")
+	}
+	t.Parallel()
 	s, _, ticketID := buildTicketInBuilding(t)
 	ticket := getTicket(t, s, ticketID)
 
@@ -1838,11 +2005,17 @@ func TestBuildRoundResumesItsOwnSession(t *testing.T) {
 		t.Fatalf("SendBatch (task): %v", sendErr)
 	}
 
+	watermark, err := s.MaxRunID(t.Context(), ticketID)
+	if err != nil {
+		t.Fatalf("MaxRunID: %v", err)
+	}
+	mid := writeFixRequestMarker(t, s, ticketID, job.FixKindCILog, testFixCILogText, watermark)
 	ticket = getTicket(t, s, ticketID)
 	fixDeps := claimForBuild(t, s, scriptRT, ticketID)
-	fixCommit, err := job.StartFix(t.Context(), ticket, fixDeps, job.FixInput{Kind: job.FixKindCILog, Text: testFixCILogText})
+	fixReq := job.FixRequest{MessageID: mid, Kind: job.FixKindCILog, Text: testFixCILogText, AfterRunID: watermark}
+	fixCommit, err := job.DriveFix(t.Context(), ticket, fixDeps, fixReq)
 	if err != nil {
-		t.Fatalf("StartFix: %v", err)
+		t.Fatalf("DriveFix: %v", err)
 	}
 	apply(t, s, ticket, fixCommit)
 
@@ -1887,6 +2060,10 @@ func TestBuildRoundResumesItsOwnSession(t *testing.T) {
 // the same commit writes "claim errors delivered run <rid>". sessions.
 // resumes goes from 0 to 1.
 func TestClaimErrorsResumeAndDelivered(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow end-to-end flow; runs in the full suite")
+	}
+	t.Parallel()
 	s, rt, ticketID := buildTicketInBuilding(t)
 	ticket := getTicket(t, s, ticketID)
 
@@ -1964,6 +2141,10 @@ func TestClaimErrorsResumeAndDelivered(t *testing.T) {
 // and a second invalid output in a row -- on that same resume -- escalates
 // response_invalid.
 func TestBuildInvalidOutputChain(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow end-to-end flow; runs in the full suite")
+	}
+	t.Parallel()
 	s, _, ticketID := buildTicketInBuilding(t)
 	ticket := getTicket(t, s, ticketID)
 
@@ -2032,6 +2213,10 @@ func TestBuildInvalidOutputChain(t *testing.T) {
 // this one: sessions.resumes ends one higher than a resume that simply
 // completed would have left it, design section 4.2).
 func TestInterruptedRunResumes(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow end-to-end flow; runs in the full suite")
+	}
+	t.Parallel()
 	s, rt, ticketID := buildTicketInBuilding(t)
 	ticket := getTicket(t, s, ticketID)
 
@@ -2161,6 +2346,10 @@ func exhaustBuildResumePool(t *testing.T) (s *store.Store, ticketID int64, maxRe
 // claim-errors resumes exhaust the session, sessions.resumes climbing by
 // exactly one per resume.
 func TestResumePoolExhaustsAtThree(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow end-to-end flow; runs in the full suite")
+	}
+	t.Parallel()
 	s, ticketID, maxResumes, resumes := exhaustBuildResumePool(t)
 	if maxResumes != 3 {
 		t.Fatalf("machine.toml build max_resumes = %d, want 3 (design D15)", maxResumes)
@@ -2190,6 +2379,10 @@ func TestResumePoolExhaustsAtThree(t *testing.T) {
 // (SessionID set, no run), and a second such tick returns job.ErrNoAction
 // rather than escalating again.
 func TestExhaustedEscalatesOnce(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow end-to-end flow; runs in the full suite")
+	}
+	t.Parallel()
 	s, ticketID, _, _ := exhaustBuildResumePool(t)
 
 	// exhaustBuildResumePool's own last resume (the third) is not yet
@@ -2236,6 +2429,10 @@ func TestExhaustedEscalatesOnce(t *testing.T) {
 // last permitted resume is checked and landed like any other, the cap
 // never consulted, even though sessions.resumes now equals max_resumes.
 func TestLastResumeReturningOkLands(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow end-to-end flow; runs in the full suite")
+	}
+	t.Parallel()
 	s, _, ticketID := buildTicketInBuilding(t)
 	ticket := getTicket(t, s, ticketID)
 
@@ -2332,6 +2529,10 @@ func TestLastResumeReturningOkLands(t *testing.T) {
 // nor internal/store). It lives here, in internal/job/building_test.go,
 // alongside its sibling TestPerimeterQuestionExhaustedEscalates.
 func TestResolveExhaustedEscalatesOnceAndKeepsRound(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow end-to-end flow; runs in the full suite")
+	}
+	t.Parallel()
 	s, ticketID, _, scriptRT := perimeterScenario(t, map[string]string{testExtraPath: testExtraReason})
 	scriptRT.steps = append(scriptRT.steps, perimeterStep("Adds a small helper.", "perim-sess-1"))
 	describeTick(t, s, scriptRT, ticketID) // DESCRIBE + ASK
@@ -2392,6 +2593,10 @@ func TestResolveExhaustedEscalatesOnceAndKeepsRound(t *testing.T) {
 // instead proves the half of that story task 12 owns: what RESOLVE itself
 // leaves behind for that later retry to find.
 func TestExhaustedKeepsRejectedDecision(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow end-to-end flow; runs in the full suite")
+	}
+	t.Parallel()
 	s, ticketID, rid, scriptRT := perimeterScenario(t, map[string]string{testExtraPath: testExtraReason})
 	scriptRT.steps = append(scriptRT.steps, perimeterStep("Adds a small helper.", "perim-sess-1"))
 	describeTick(t, s, scriptRT, ticketID) // DESCRIBE + ASK
@@ -2453,6 +2658,10 @@ func TestExhaustedKeepsRejectedDecision(t *testing.T) {
 // perimeter session, with no runtime call, and a second tick returns
 // job.ErrNoAction.
 func TestPerimeterQuestionExhaustedEscalates(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow end-to-end flow; runs in the full suite")
+	}
+	t.Parallel()
 	s, ticketID, _, scriptRT := perimeterScenario(t, map[string]string{testExtraPath: testExtraReason})
 	scriptRT.steps = append(scriptRT.steps, perimeterQuestionStep("perim-q-cap-sess"))
 	describeTick(t, s, scriptRT, ticketID) // DESCRIBE returns a question

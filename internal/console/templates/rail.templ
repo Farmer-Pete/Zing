@@ -49,6 +49,9 @@ templ phaseRail(dots []PhaseDot) {
 // <details> disclosure showing its stored payload (views.go's doc comment
 // on PayloadText explains why this is in-page rather than a link to a
 // dedicated route); an absent slot's "after <phase>" placeholder otherwise.
+// The Plan slot alone shows RenderedHTML instead (bug fix 16): the same
+// plan renderer the gate's own context region uses, rather than the raw
+// indented JSON every other slot still shows.
 templ artifactsRail(slots []ArtifactSlot) {
 	<section class="rail-artifacts">
 		<h3>Artifacts</h3>
@@ -58,7 +61,13 @@ templ artifactsRail(slots []ArtifactSlot) {
 				if slot.Present {
 					<details class="artifact-open">
 						<summary>v{ strconv.Itoa(slot.Version) }</summary>
-						<pre class="artifact-payload">{ slot.PayloadText }</pre>
+						if slot.RenderedHTML != nil {
+							<div class="artifact-rendered">
+								@slot.RenderedHTML
+							</div>
+						} else {
+							<pre class="artifact-payload">{ slot.PayloadText }</pre>
+						}
 					</details>
 				} else {
 					<span class="empty">after { slot.AfterPhase }</span>
@@ -124,7 +133,7 @@ templ logRail(log LogRail) {
 			</button>
 		</div>
 		if len(log.Lines) == 0 {
-			<p class="empty">No log lines yet.</p>
+			<p class="empty">No log lines since Zing started at { log.StartedAt }.</p>
 		} else {
 			<ul class="log-lines">
 				for _, line := range log.Lines {

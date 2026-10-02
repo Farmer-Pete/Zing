@@ -3,6 +3,7 @@ package tracker_test
 import (
 	"bytes"
 	"context"
+	"errors"
 	"log/slog"
 	"strings"
 	"testing"
@@ -13,6 +14,12 @@ import (
 )
 
 const fixtureProject = "zing"
+
+// testFixtureRef1 names fixtures/tickets.toml's one seeded ticket ref
+// ("fake#1"), pulled out so TestFixture_IssueFindsAFiledTicketByRef's two
+// uses are a named identifier, not a third raw string-literal occurrence
+// alongside the two this file already carries (goconst).
+const testFixtureRef1 = "fake#1"
 
 func newFixture(t *testing.T) *tracker.Fixture {
 	t.Helper()
@@ -99,6 +106,37 @@ func TestFixture_FetchFindsAFiledTicketByRef(t *testing.T) {
 
 	if _, err := f.Fetch(context.Background(), fixtureProject, "fake#999"); err == nil {
 		t.Error("Fetch of an unknown ref returned nil error, want one")
+	}
+}
+
+// TestFixture_IssueFindsAFiledTicketByRef proves Issue is the same lookup
+// as Fetch for a ref the fixture carries (PKG9-PLAN.md D29).
+func TestFixture_IssueFindsAFiledTicketByRef(t *testing.T) {
+	t.Parallel()
+
+	f := newFixture(t)
+
+	got, err := f.Issue(context.Background(), fixtureProject, testFixtureRef1)
+	if err != nil {
+		t.Fatalf("Issue: %v", err)
+	}
+	if got.Ref != testFixtureRef1 {
+		t.Errorf("Issue ref = %q, want %s", got.Ref, testFixtureRef1)
+	}
+}
+
+// TestFixture_IssueReturnsErrIssueNotFoundForAnUnknownRef proves Issue
+// returns the typed ErrIssueNotFound sentinel, not a generic error, so a
+// caller (dispatch's pickup handler) can match it with errors.Is
+// (PKG9-PLAN.md D29).
+func TestFixture_IssueReturnsErrIssueNotFoundForAnUnknownRef(t *testing.T) {
+	t.Parallel()
+
+	f := newFixture(t)
+
+	_, err := f.Issue(context.Background(), fixtureProject, "fake#999")
+	if !errors.Is(err, tracker.ErrIssueNotFound) {
+		t.Errorf("Issue err = %v, want errors.Is ErrIssueNotFound", err)
 	}
 }
 
@@ -214,5 +252,76 @@ func TestFixture_CollaboratorsReturnsAFixedName(t *testing.T) {
 	}
 	if len(got) != 1 || got[0] == "" {
 		t.Errorf("Collaborators = %+v, want one fixed name", got)
+	}
+}
+
+// TestFixtureRecordsClose proves Close records ref as closed (design
+// section 10.5): Closed reads that back, and closing it again stays a
+// no-op success, matching the real tracker's own idempotent behavior.
+func TestFixtureRecordsClose(t *testing.T) {
+	t.Parallel()
+
+	f := newFixture(t)
+	ctx := context.Background()
+
+	if f.Closed("fake#1") {
+		t.Fatal("Closed(fake#1) = true before any Close call, want false")
+	}
+	if err := f.Close(ctx, fixtureProject, "fake#1"); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	if !f.Closed("fake#1") {
+		t.Error("Closed(fake#1) = false after Close, want true")
+	}
+	// Closing it again succeeds.
+	if err := f.Close(ctx, fixtureProject, "fake#1"); err != nil {
+		t.Errorf("Close on an already-closed ref: %v, want nil", err)
+	}
+
+	if err := f.Close(ctx, "not-"+fixtureProject, "fake#1"); err == nil {
+		t.Error("Close for an unknown project returned nil error, want one")
+	}
+}
+
+// TestFixtureCommentContains proves CommentContains searches every comment
+// Comment has recorded under ref (design section 10.5): a needle found in
+// a posted body is reported, one not posted is not.
+func TestFixtureCommentContains(t *testing.T) {
+	t.Parallel()
+
+	f := newFixture(t)
+	ctx := context.Background()
+	const marker = "<!-- zing:pr t1 -->"
+
+	found, err := f.CommentContains(ctx, fixtureProject, "fake#1", marker)
+	if err != nil {
+		t.Fatalf("CommentContains before any Comment: %v", err)
+	}
+	if found {
+		t.Error("CommentContains before any Comment = true, want false")
+	}
+
+	if err = f.Comment(ctx, fixtureProject, "fake#1", "Zing opened a draft pull request.\n\n"+marker); err != nil {
+		t.Fatalf("Comment: %v", err)
+	}
+
+	found, err = f.CommentContains(ctx, fixtureProject, "fake#1", marker)
+	if err != nil {
+		t.Fatalf("CommentContains after Comment: %v", err)
+	}
+	if !found {
+		t.Error("CommentContains after Comment = false, want true")
+	}
+
+	found, err = f.CommentContains(ctx, fixtureProject, "fake#1", "<!-- zing:done t1 -->")
+	if err != nil {
+		t.Fatalf("CommentContains for a never-posted needle: %v", err)
+	}
+	if found {
+		t.Error("CommentContains for a never-posted needle = true, want false")
+	}
+
+	if _, err := f.CommentContains(ctx, "not-"+fixtureProject, "fake#1", marker); err == nil {
+		t.Error("CommentContains for an unknown project returned nil error, want one")
 	}
 }

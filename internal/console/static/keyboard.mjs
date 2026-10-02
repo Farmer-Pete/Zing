@@ -136,6 +136,92 @@ export function sendChordToken(isMac) {
 }
 
 /**
+ * sendChordLabel is the human-readable glyph for the platform's send chord
+ * (bug fix: the composer saves a draft silently and sends only on this
+ * chord, Q31, with nothing on screen saying so): "⌘+Enter" on macOS,
+ * "Ctrl+Enter" elsewhere. Distinct from sendChordToken, which names the
+ * keys.json binding string ("Cmd-Enter"/"Ctrl-Enter") rather than what a
+ * reader sees on screen; console.js's runSendChordHints fills this into
+ * every ".send-chord" placeholder thread.templ renders.
+ * @param {boolean} isMac
+ * @returns {string}
+ */
+export function sendChordLabel(isMac) {
+	return isMac ? '⌘+Enter' : 'Ctrl+Enter';
+}
+
+/**
+ * draftConflictMessage maps a POST /draft 409 body (store.ConflictError's
+ * Reason, console_writes.go's own small closed set of conflict() call
+ * sites) to the sentence the reply box shows beside itself (bug fix:
+ * pressing Enter on a question that closed out from under a stale,
+ * still-rendered reply box -- most often a race with the owner's own
+ * just-sent batch answer -- got a raw "question closed" 409 and the typed
+ * text silently vanished, with nothing explaining why). "question closed"
+ * is the one reason a reader hits often enough to need a plain sentence;
+ * every other reason (a bad option or item ref, an ambiguous or missing
+ * draft) is rare enough from the real console UI, which only ever sends
+ * well-formed requests, that its own store wording is shown as-is.
+ *
+ * @param {string} reason
+ * @returns {string}
+ */
+export function draftConflictMessage(reason) {
+	if (reason === 'question closed') {
+		return 'This question is already answered.';
+	}
+	return reason;
+}
+
+/**
+ * clearReplyInputs sets every given element's value to the empty string
+ * (console.js's postSendBatch, design section 22.7): a 200 from /send
+ * clears the value of every .reply-input inside #main, so a sent draft's
+ * own box does not keep showing text the owner just sent (Datastar's morph
+ * never refills a focused input, bug 11's own reason freeReply already
+ * stopped clearing it on a plain Enter). Pure: it takes the already-queried
+ * elements, or any duck-typed {value} object in a test, not a selector, so
+ * this file stays DOM free.
+ *
+ * @param {{value: string}[]} inputs
+ */
+export function clearReplyInputs(inputs) {
+	for (const el of inputs) {
+		el.value = '';
+	}
+}
+
+// TOAST_DISMISS_MS is how long showSendResult's bottom toast stays on
+// screen before auto-dismissing (bug fix 12): the owner's "Sent 1 answer."
+// or "Nothing to send." line never went away on its own, so it kept
+// reporting a send that had happened minutes earlier as if it just had.
+// 4000ms is long enough to read, short enough not to linger into the next
+// action.
+export const TOAST_DISMISS_MS = 4000;
+
+/**
+ * scheduleToastDismiss arms showSendResult's next auto-dismiss, canceling
+ * whatever dismiss it is replacing first (bug fix 12: sending twice in
+ * close succession armed two independent timers, and the first one's firing
+ * could clear a toast the second send had only just shown -- "replace, not
+ * stack"). schedule and clear are the caller's setTimeout/clearTimeout (or a
+ * test's fakes), so the cancel-then-arm decision stays testable without a
+ * real timer.
+ *
+ * @param {number|null} prevTimerID the previous pending dismiss's id, or
+ *   null when none is pending yet
+ * @param {() => number} schedule arms the next dismiss and returns its id
+ * @param {(id: number) => void} clear cancels a pending dismiss by id
+ * @returns {number} the new pending dismiss's id
+ */
+export function scheduleToastDismiss(prevTimerID, schedule, clear) {
+	if (prevTimerID !== null) {
+		clear(prevTimerID);
+	}
+	return schedule();
+}
+
+/**
  * resolveToken turns one plain keydown descriptor, plus whether it landed in
  * an input, into the token keys.json binds (design section 6.4, 8; PR review
  * fix: a Ctrl/Meta/Alt-held single key outside an input must not resolve to
@@ -303,6 +389,29 @@ export function reduceNav(currentNav, history, detail) {
 }
 
 /**
+ * nextPendingNav decides what console.js's zing-nav bridge should remember
+ * as "not yet applied" after reducing one zing-nav event (bug fix: the
+ * first click on a Threads-sidebar row right after a page load could fire
+ * before GET /stream's first frame proves Datastar's own data-on:zing-nav
+ * listener on #stream-ctl is actually wired up, which silently dropped the
+ * nav -- the main pane stayed on the project list until a second click).
+ * console.js's onZingNav calls this after reduceNav on every event,
+ * keyboard- or click-triggered alike; its caller re-dispatches the
+ * returned nav once the stream's first real patch lands (installPatchObserver's
+ * markStreamConnected), so a nav that arrived too early is applied anyway
+ * instead of lost. Once the stream has connected, Datastar's own listener
+ * is known to be live, so there is nothing left to remember.
+ *
+ * @param {boolean} streamConnected
+ * @param {{view: string, open: number, project: number}} nav - reduceNav's
+ *   own result for this event, the destination to re-apply if needed
+ * @returns {{view: string, open: number, project: number}|null}
+ */
+export function nextPendingNav(streamConnected, nav) {
+	return streamConnected ? null : { view: nav.view, open: nav.open, project: nav.project };
+}
+
+/**
  * stepComposerIndex returns the next composer-control index for Tab (delta
  * 1) or Shift-Tab (delta -1) stepping over count controls, given the
  * currently focused control's index or -1 when none of them has focus
@@ -325,6 +434,26 @@ export function stepComposerIndex(count, index, delta) {
 	// come out negative; the extra "+ count) % count" normalizes it back into
 	// [0, count).
 	return ((index + delta) % count + count) % count;
+}
+
+/**
+ * unsavedReplyBody builds POST /draft's JSON body for text the owner typed
+ * into a reply box but has not saved with Enter (bug fix: the hint under
+ * every box reads "Saved as a draft. Cmd+Enter sends.", but a draft saved
+ * only on Enter, so typing then pressing Cmd+Enter sent nothing and showed
+ * "Nothing to send."). sendBatch saves this body before it sends. Null when
+ * the element is not a reply box or holds no text.
+ *
+ * @param {{dataset?: {draftTicket?: string, draftQuestion?: string}, value?: unknown} | null | undefined} el
+ * @returns {{ticket: number, question: number | null, text: string} | null}
+ */
+export function unsavedReplyBody(el) {
+	const ticket = el?.dataset?.draftTicket;
+	const question = el?.dataset?.draftQuestion;
+	if (!ticket || typeof el.value !== 'string' || el.value === '') {
+		return null;
+	}
+	return { ticket: Number(ticket), question: question ? Number(question) : null, text: el.value };
 }
 
 /**

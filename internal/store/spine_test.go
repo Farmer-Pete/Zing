@@ -39,6 +39,7 @@ var testProject = Project{
 }
 
 func TestEnsureProject_InsertsWhenAbsent(t *testing.T) {
+	t.Parallel()
 	s := newTestStore(t)
 	ctx := t.Context()
 
@@ -60,6 +61,7 @@ func TestEnsureProject_InsertsWhenAbsent(t *testing.T) {
 }
 
 func TestEnsureProject_ReturnsExistingIDOnSecondCall(t *testing.T) {
+	t.Parallel()
 	s := newTestStore(t)
 	ctx := t.Context()
 
@@ -90,6 +92,7 @@ func TestEnsureProject_ReturnsExistingIDOnSecondCall(t *testing.T) {
 // EnsureProject updates the stored column rather than leaving it stale
 // (spine.go, PKG5-PLAN.md section 9).
 func TestEnsureProject_ReconcilesChangedDefaultBranch(t *testing.T) {
+	t.Parallel()
 	s := newTestStore(t)
 	ctx := t.Context()
 
@@ -124,6 +127,7 @@ func TestEnsureProject_ReconcilesChangedDefaultBranch(t *testing.T) {
 // -- see config.go's applyDefaults -- so ensureBindings can call
 // EnsureProject with an empty value) never wipes an existing stored value.
 func TestEnsureProject_EmptyDefaultBranchDoesNotOverwrite(t *testing.T) {
+	t.Parallel()
 	s := newTestStore(t)
 	ctx := t.Context()
 
@@ -148,6 +152,7 @@ func TestEnsureProject_EmptyDefaultBranchDoesNotOverwrite(t *testing.T) {
 }
 
 func TestInsertTicket_RequiresQueuedState(t *testing.T) {
+	t.Parallel()
 	s := newTestStore(t)
 	ctx := t.Context()
 
@@ -163,6 +168,7 @@ func TestInsertTicket_RequiresQueuedState(t *testing.T) {
 }
 
 func TestInsertTicket_InsertsAndRoundTrips(t *testing.T) {
+	t.Parallel()
 	s := newTestStore(t)
 	ctx := t.Context()
 
@@ -194,6 +200,7 @@ func TestInsertTicket_InsertsAndRoundTrips(t *testing.T) {
 }
 
 func TestInsertTicket_DuplicateTrackerRefRejected(t *testing.T) {
+	t.Parallel()
 	s := newTestStore(t)
 	ctx := t.Context()
 
@@ -211,6 +218,7 @@ func TestInsertTicket_DuplicateTrackerRefRejected(t *testing.T) {
 }
 
 func TestClaim_ClaimsAnUnclaimedTicket(t *testing.T) {
+	t.Parallel()
 	s := newTestStore(t)
 	ctx := t.Context()
 
@@ -245,6 +253,7 @@ func TestClaim_ClaimsAnUnclaimedTicket(t *testing.T) {
 }
 
 func TestClaim_SecondClaimIsRefused(t *testing.T) {
+	t.Parallel()
 	s := newTestStore(t)
 	ctx := t.Context()
 
@@ -286,6 +295,7 @@ func TestClaim_SecondClaimIsRefused(t *testing.T) {
 // for), and a claim still in the future are all handled correctly in one
 // pass -- the first two cleared, the last one left untouched.
 func TestExpireClaims_ClearsAtOrPastExpiry(t *testing.T) {
+	t.Parallel()
 	s := newTestStore(t)
 	ctx := t.Context()
 
@@ -396,6 +406,7 @@ func insertRunWithOutcome(t *testing.T, s *Store, sessionID int64, outcome *stri
 // terminalized to outcome=error, exit_code=-1, agent_seconds floored at 0,
 // in the same pass that clears the ticket's claim.
 func TestExpireClaims_ReconcilesNullOutcomeRunOnExpiredClaim(t *testing.T) {
+	t.Parallel()
 	s := newTestStore(t)
 	ctx := t.Context()
 	_, ticketID := seedQueuedTicket(t, s, "1")
@@ -439,6 +450,7 @@ func TestExpireClaims_ReconcilesNullOutcomeRunOnExpiredClaim(t *testing.T) {
 // terminal outcome before the claim expired is left exactly as it was, agent
 // seconds included.
 func TestExpireClaims_LeavesTerminalOutcomeRunUntouched(t *testing.T) {
+	t.Parallel()
 	s := newTestStore(t)
 	ctx := t.Context()
 	_, ticketID := seedQueuedTicket(t, s, "1")
@@ -477,6 +489,7 @@ func TestExpireClaims_LeavesTerminalOutcomeRunUntouched(t *testing.T) {
 // step only ever runs for a ticket ExpireClaims is actually clearing: a
 // null-outcome run under a claim that has not expired yet is left alone.
 func TestExpireClaims_LeavesRunsOfUnexpiredClaimUntouched(t *testing.T) {
+	t.Parallel()
 	s := newTestStore(t)
 	ctx := t.Context()
 	_, ticketID := seedQueuedTicket(t, s, "1")
@@ -509,6 +522,7 @@ func TestExpireClaims_LeavesRunsOfUnexpiredClaimUntouched(t *testing.T) {
 // that belongs to a different ticket's session is left alone even though its
 // own claim also expires in the same ExpireClaims pass.
 func TestExpireClaims_LeavesAnotherTicketsRunUntouched(t *testing.T) {
+	t.Parallel()
 	s := newTestStore(t)
 	ctx := t.Context()
 	_, expiring := seedQueuedTicket(t, s, "1")
@@ -544,6 +558,7 @@ func TestExpireClaims_LeavesAnotherTicketsRunUntouched(t *testing.T) {
 }
 
 func TestExpireClaims_NoExpiredClaimsReturnsEmpty(t *testing.T) {
+	t.Parallel()
 	s := newTestStore(t)
 	ctx := t.Context()
 
@@ -557,6 +572,7 @@ func TestExpireClaims_NoExpiredClaimsReturnsEmpty(t *testing.T) {
 }
 
 func TestFlags_DefaultsAndSetters(t *testing.T) {
+	t.Parallel()
 	s := newTestStore(t)
 	ctx := t.Context()
 
@@ -599,6 +615,7 @@ func TestFlags_DefaultsAndSetters(t *testing.T) {
 }
 
 func TestGetTicket_MissingIDReturnsError(t *testing.T) {
+	t.Parallel()
 	s := newTestStore(t)
 	ctx := t.Context()
 

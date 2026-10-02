@@ -17,6 +17,7 @@ import (
 // <n>: ", cut a long subject at a word boundary rather than mid-word, trim
 // trailing punctuation, and fix a stray unbalanced backtick.
 func TestUnitTitle(t *testing.T) {
+	t.Parallel()
 	cases := []struct {
 		name  string
 		taskN int
@@ -77,6 +78,7 @@ func TestUnitTitle(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
 			if got := unitTitle(tc.taskN, tc.text); got != tc.want {
 				t.Errorf("unitTitle(%d, %q) = %q, want %q", tc.taskN, tc.text, got, tc.want)
 			}
@@ -90,7 +92,9 @@ func TestUnitTitle(t *testing.T) {
 // whitespace run in callers and callees collapsed to one space and the
 // whole line cut to 160 runes.
 func TestFuncLines(t *testing.T) {
+	t.Parallel()
 	t.Run("formats and filters by approved path, in plan order", func(t *testing.T) {
+		t.Parallel()
 		const (
 			greetPath = "greet.go"
 			greetTest = "greet_test.go"
@@ -117,6 +121,7 @@ func TestFuncLines(t *testing.T) {
 	})
 
 	t.Run("cuts a long line to 160 runes", func(t *testing.T) {
+		t.Parallel()
 		long := strings.Repeat("caller ", 40)
 		plan := response.Plan{Design: response.Design{Changes: []response.Change{
 			{Path: "p.go", Symbol: "F", Callers: long, Callees: "c"},
@@ -131,6 +136,7 @@ func TestFuncLines(t *testing.T) {
 	})
 
 	t.Run("empty approved set produces no lines", func(t *testing.T) {
+		t.Parallel()
 		plan := response.Plan{Design: response.Design{Changes: []response.Change{
 			{Path: "greet.go", Symbol: "Greet", Callers: "main", Callees: "fmt"},
 		}}}

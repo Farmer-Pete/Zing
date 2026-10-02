@@ -1,15 +1,32 @@
 package config
 
 import (
+	"bytes"
+	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
 )
 
 const testUser = "peter"
+
+// defaultTestJudgeCodexHome returns judge_codex_home's own default,
+// expanded against this test process's real home directory (PKG9-PLAN.md
+// section 4.5, D27): every Load test whose zing.toml omits the key wants
+// this value back.
+func defaultTestJudgeCodexHome(t *testing.T) string {
+	t.Helper()
+	home, err := os.UserHomeDir()
+	if err != nil {
+		t.Fatalf("os.UserHomeDir: %v", err)
+	}
+	return filepath.Join(home, ".zing", "codex-judge")
+}
 
 // testGitHubToken is the github_token value every valid fixture below uses,
 // so a fixture missing it is unambiguously testing that absence.
@@ -77,8 +94,9 @@ func TestLoad_MinimalConfigGetsEveryDefault(t *testing.T) {
 	}
 
 	want := &Config{
-		User:        testUser,
-		GitHubToken: testGitHubToken,
+		User:           testUser,
+		GitHubToken:    testGitHubToken,
+		JudgeCodexHome: defaultTestJudgeCodexHome(t),
 		Console: Console{
 			Bind: []string{"127.0.0.1", "tailscale"},
 			Port: 7420,
@@ -94,7 +112,7 @@ func TestLoad_MinimalConfigGetsEveryDefault(t *testing.T) {
 		},
 		Dispatch: Dispatch{IntervalSeconds: 30, MaxParallel: 2},
 		Budget:   Budget{AgentMinutesPerTicket: 240, UsageHoldPercent: 80},
-		Review:   Review{Floor: "minor"},
+		Review:   Review{Floor: "minor", MaxLensesParallel: 7},
 		Merge: Merge{
 			Auto:            false,
 			Method:          "squash",
@@ -111,7 +129,7 @@ func TestLoad_MinimalConfigGetsEveryDefault(t *testing.T) {
 				// default branch recorded by an earlier "zing project add".
 				DefaultBranch: "",
 				Self:          false,
-				Intake:        Intake{AssignedTo: testUser}, // defaults to the top-level user
+				Intake:        Intake{AssignedTo: testUser, Mode: IntakeModeAuto}, // defaults to the top-level user, mode auto
 				Commands:      Commands{Test: testCommandTest, Lint: testCommandLint},
 			},
 		},
@@ -179,8 +197,9 @@ lint = "golangci-lint run"
 	}
 
 	want := &Config{
-		User:        testUser,
-		GitHubToken: testGitHubToken,
+		User:           testUser,
+		GitHubToken:    testGitHubToken,
+		JudgeCodexHome: defaultTestJudgeCodexHome(t),
 		Console: Console{
 			Bind:         []string{"127.0.0.1"},
 			Port:         8080,
@@ -195,7 +214,7 @@ lint = "golangci-lint run"
 		},
 		Dispatch: Dispatch{IntervalSeconds: 60, MaxParallel: 4},
 		Budget:   Budget{AgentMinutesPerTicket: 120, UsageHoldPercent: 50},
-		Review:   Review{Floor: "blocker"},
+		Review:   Review{Floor: "blocker", MaxLensesParallel: 7},
 		Merge: Merge{
 			Auto:            true,
 			Method:          "merge",
@@ -207,7 +226,7 @@ lint = "golangci-lint run"
 				Name: testZingProjectName, Repo: "git@github.com:x/zing.git", Path: "/home/peter/zing", Tracker: testTracker,
 				DefaultBranch: "develop",
 				Self:          true,
-				Intake:        Intake{AssignedTo: "someone-else"},
+				Intake:        Intake{AssignedTo: "someone-else", Mode: IntakeModeAuto},
 				Commands:      Commands{Test: testCommandTest, Lint: testCommandLint},
 			},
 		},
@@ -303,6 +322,187 @@ read_paths = ["/opt/bad\"path"]
 	})
 }
 
+// TestClaudeOAuthTokenParsed proves claude_oauth_token (design section 4.5,
+// D26) round-trips: absent parses empty (config.Load cannot require it, it
+// never reads machine.toml), set parses back unchanged.
+func TestClaudeOAuthTokenParsed(t *testing.T) {
+	t.Parallel()
+
+	t.Run("absent", func(t *testing.T) {
+		t.Parallel()
+		cfg, err := Load(writeTOML(t, minimalValidTOML))
+		if err != nil {
+			t.Fatalf("Load: %v", err)
+		}
+		if cfg.ClaudeOAuthToken != "" {
+			t.Errorf("ClaudeOAuthToken = %q, want empty", cfg.ClaudeOAuthToken)
+		}
+	})
+
+	t.Run("set", func(t *testing.T) {
+		t.Parallel()
+		const token = "sk-ant-oat01-test-token"
+		// Prepended, not appended: minimalValidTOML ends inside
+		// [[projects]]/[projects.commands], so appending a bare key would
+		// parse as nesting inside that table instead of at the top level.
+		body := "claude_oauth_token = \"" + token + "\"\n" + minimalValidTOML
+		cfg, err := Load(writeTOML(t, body))
+		if err != nil {
+			t.Fatalf("Load: %v", err)
+		}
+		if cfg.ClaudeOAuthToken != token {
+			t.Errorf("ClaudeOAuthToken = %q, want %q", cfg.ClaudeOAuthToken, token)
+		}
+	})
+}
+
+// TestClaudeOAuthTokenNeverLogged proves Load never writes the
+// claude_oauth_token value into a log record, even incidentally: the fixture
+// file here is deliberately left group-readable, so repairFileMode's own
+// "zing.toml is readable by group or other" warning fires, and that warning
+// (the one thing Load logs on this path) is what this test inspects.
+func TestClaudeOAuthTokenNeverLogged(t *testing.T) {
+	const token = "sk-ant-oat01-do-not-log-this-token"
+	// Prepended, not appended: see TestClaudeOAuthTokenParsed's own comment.
+	path := writeTOML(t, "claude_oauth_token = \""+token+"\"\n"+minimalValidTOML)
+	if err := os.Chmod(path, 0o644); err != nil {
+		t.Fatalf("chmod: %v", err)
+	}
+
+	var buf bytes.Buffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, nil)))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.ClaudeOAuthToken != token {
+		t.Fatalf("ClaudeOAuthToken = %q, want %q", cfg.ClaudeOAuthToken, token)
+	}
+	if strings.Contains(buf.String(), token) {
+		t.Errorf("log output contains the claude_oauth_token value: %s", buf.String())
+	}
+}
+
+// TestReviewMaxLensesParallel proves review.max_lenses_parallel (design
+// section 4.5): absent defaults to 7 (the lens count), 1 and 7 both load,
+// and 0 or 8 are refused with the exact error text.
+func TestReviewMaxLensesParallel(t *testing.T) {
+	t.Parallel()
+
+	t.Run("absent", func(t *testing.T) {
+		t.Parallel()
+		cfg, err := Load(writeTOML(t, minimalValidTOML))
+		if err != nil {
+			t.Fatalf("Load: %v", err)
+		}
+		if cfg.Review.MaxLensesParallel != 7 {
+			t.Errorf("MaxLensesParallel = %d, want 7", cfg.Review.MaxLensesParallel)
+		}
+	})
+
+	for _, n := range []int{1, 7} {
+		t.Run(fmt.Sprintf("valid %d", n), func(t *testing.T) {
+			t.Parallel()
+			body := minimalValidTOML + fmt.Sprintf("\n[review]\nmax_lenses_parallel = %d\n", n)
+			cfg, err := Load(writeTOML(t, body))
+			if err != nil {
+				t.Fatalf("Load: %v", err)
+			}
+			if cfg.Review.MaxLensesParallel != n {
+				t.Errorf("MaxLensesParallel = %d, want %d", cfg.Review.MaxLensesParallel, n)
+			}
+		})
+	}
+
+	for _, n := range []int{0, 8} {
+		t.Run(fmt.Sprintf("invalid %d", n), func(t *testing.T) {
+			t.Parallel()
+			body := minimalValidTOML + fmt.Sprintf("\n[review]\nmax_lenses_parallel = %d\n", n)
+			_, err := Load(writeTOML(t, body))
+			if err == nil {
+				t.Fatal("Load: want an error, got nil")
+			}
+			want := "zing.toml: review.max_lenses_parallel: must be 1 to 7"
+			if err.Error() != want {
+				t.Errorf("Load() = %q, want %q", err.Error(), want)
+			}
+		})
+	}
+}
+
+// TestJudgeCodexHomeDefault proves judge_codex_home's own default
+// (PKG9-PLAN.md section 4.5, D27): absent from zing.toml, it resolves to
+// "~/.zing/codex-judge", expanded against this process's real home
+// directory.
+func TestJudgeCodexHomeDefault(t *testing.T) {
+	t.Parallel()
+
+	cfg, err := Load(writeTOML(t, minimalValidTOML))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if want := defaultTestJudgeCodexHome(t); cfg.JudgeCodexHome != want {
+		t.Errorf("JudgeCodexHome = %q, want %q", cfg.JudgeCodexHome, want)
+	}
+}
+
+// TestJudgeCodexHomeExpandsTilde proves an explicit "~/..." value expands
+// against the real home directory, the same as the default (section 4.5:
+// "~ expanded").
+func TestJudgeCodexHomeExpandsTilde(t *testing.T) {
+	t.Parallel()
+
+	body := "judge_codex_home = \"~/custom-codex-judge\"\n" + minimalValidTOML
+	cfg, err := Load(writeTOML(t, body))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		t.Fatalf("os.UserHomeDir: %v", err)
+	}
+	want := filepath.Join(home, "custom-codex-judge")
+	if cfg.JudgeCodexHome != want {
+		t.Errorf("JudgeCodexHome = %q, want %q", cfg.JudgeCodexHome, want)
+	}
+}
+
+// TestJudgeCodexHomeExplicitAbsolute proves an explicit, already-absolute
+// value loads unchanged.
+func TestJudgeCodexHomeExplicitAbsolute(t *testing.T) {
+	t.Parallel()
+
+	const explicit = "/opt/zing/codex-judge"
+	body := fmt.Sprintf("judge_codex_home = %q\n", explicit) + minimalValidTOML
+	cfg, err := Load(writeTOML(t, body))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.JudgeCodexHome != explicit {
+		t.Errorf("JudgeCodexHome = %q, want %q", cfg.JudgeCodexHome, explicit)
+	}
+}
+
+// TestJudgeCodexHomeMustBeAbsolute proves an explicit relative value (after
+// expansion -- no leading "~", so expandHome leaves it unchanged) is
+// refused with the exact error text (section 4.5).
+func TestJudgeCodexHomeMustBeAbsolute(t *testing.T) {
+	t.Parallel()
+
+	body := "judge_codex_home = \"relative/codex-judge\"\n" + minimalValidTOML
+	_, err := Load(writeTOML(t, body))
+	if err == nil {
+		t.Fatal("Load: want an error, got nil")
+	}
+	want := "zing.toml: judge_codex_home must be an absolute path"
+	if err.Error() != want {
+		t.Errorf("Load() = %q, want %q", err.Error(), want)
+	}
+}
+
 func TestLoad_IntakeAssignedToDefaultsWhenExplicitlyEmpty(t *testing.T) {
 	t.Parallel()
 
@@ -329,6 +529,61 @@ lint = "golangci-lint run"
 	}
 	if cfg.Projects[0].Intake.AssignedTo != testUser {
 		t.Errorf("Intake.AssignedTo = %q, want peter (top-level user)", cfg.Projects[0].Intake.AssignedTo)
+	}
+}
+
+// TestLoad_IntakeModeDefaultsToAuto proves an absent intake.mode defaults to
+// "auto" (PKG9-PLAN.md D29), and that auto mode keeps today's
+// assigned_to-defaults-to-user rule.
+func TestLoad_IntakeModeDefaultsToAuto(t *testing.T) {
+	t.Parallel()
+
+	cfg, err := Load(writeTOML(t, minimalValidTOML))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.Projects[0].Intake.Mode != IntakeModeAuto {
+		t.Errorf("Intake.Mode = %q, want %q", cfg.Projects[0].Intake.Mode, IntakeModeAuto)
+	}
+	if cfg.Projects[0].Intake.AssignedTo != testUser {
+		t.Errorf("Intake.AssignedTo = %q, want %q (auto mode defaults it to the top-level user)", cfg.Projects[0].Intake.AssignedTo, testUser)
+	}
+}
+
+// TestLoad_IntakeModeManualLeavesAssignedToEmpty proves manual mode does not
+// apply the assigned_to-defaults-to-user rule (PKG9-PLAN.md D29: "assigned_to
+// is not required (it may be absent)" in manual mode): an explicit manual
+// project with no assigned_to loads with AssignedTo left empty, not
+// defaulted to the top-level user.
+func TestLoad_IntakeModeManualLeavesAssignedToEmpty(t *testing.T) {
+	t.Parallel()
+
+	const body = `
+user = "peter"
+github_token = "ghp_test_token_0123456789"
+
+[[projects]]
+name = "zing"
+repo = "git@github.com:x/zing.git"
+path = "/home/peter/zing"
+tracker = "github"
+
+[projects.intake]
+mode = "manual"
+
+[projects.commands]
+test = "go test ./..."
+lint = "golangci-lint run"
+`
+	cfg, err := Load(writeTOML(t, body))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.Projects[0].Intake.Mode != IntakeModeManual {
+		t.Errorf("Intake.Mode = %q, want %q", cfg.Projects[0].Intake.Mode, IntakeModeManual)
+	}
+	if cfg.Projects[0].Intake.AssignedTo != "" {
+		t.Errorf("Intake.AssignedTo = %q, want empty (manual mode does not default it)", cfg.Projects[0].Intake.AssignedTo)
 	}
 }
 
@@ -449,6 +704,11 @@ test = "go test ./..."
 lint = "golangci-lint run"
 `,
 			want: `zing.toml: duplicate project name "zing": each project's name must be unique`,
+		},
+		{
+			name: "bad project intake.mode",
+			body: minimalValidTOML + "\n[projects.intake]\nmode = \"sometimes\"\n",
+			want: "zing.toml: project zing: intake.mode must be auto or manual",
 		},
 		{
 			name: "bad console.port too high",
@@ -702,11 +962,12 @@ func TestAppendProject_AppendsAndLoadsBack(t *testing.T) {
 	if len(cfg.Projects) != 1 {
 		t.Fatalf("Projects = %+v, want exactly one", cfg.Projects)
 	}
-	// Intake.AssignedTo defaults to the top-level user on Load, since
-	// testAppendedProject leaves it unset; every other field must come back
-	// exactly as appended.
+	// Intake.AssignedTo defaults to the top-level user on Load, and
+	// Intake.Mode defaults to "auto", since testAppendedProject leaves both
+	// unset; every other field must come back exactly as appended.
 	want := testAppendedProject
 	want.Intake.AssignedTo = testUser
+	want.Intake.Mode = IntakeModeAuto
 	if got := cfg.Projects[0]; got != want {
 		t.Errorf("appended project = %+v, want %+v", got, want)
 	}

@@ -29,6 +29,7 @@ func renderToString(t *testing.T, md string) string {
 }
 
 func TestRenderMarkdown(t *testing.T) {
+	t.Parallel()
 	got := renderToString(t, "hello **world**")
 	if !strings.Contains(got, "<strong>world</strong>") {
 		t.Errorf("Render(%q) = %q, want it to contain <strong>world</strong>", "hello **world**", got)
@@ -38,7 +39,49 @@ func TestRenderMarkdown(t *testing.T) {
 	}
 }
 
+// renderInlineToString drives console.RenderInline's returned
+// templ.Component the same way renderToString does for Render.
+func renderInlineToString(t *testing.T, md string) string {
+	t.Helper()
+	comp, err := console.RenderInline(md)
+	if err != nil {
+		t.Fatalf("console.RenderInline(%q): %v", md, err)
+	}
+	var buf strings.Builder
+	if err := comp.Render(context.Background(), &buf); err != nil {
+		t.Fatalf("Render(): %v", err)
+	}
+	return buf.String()
+}
+
+// TestRenderInlineRendersBackticksAsCodeWithNoBlockWrapper proves the bug
+// fix: raw backticks in option chips (design section 22.7's owner-reported
+// locked-view complaint) -- a chip label sits inside a <button>, where the
+// <p> Render's own full markdown path wraps a line in is not legal
+// content, so RenderInline strips it, leaving the inline <code> bare.
+func TestRenderInlineRendersBackticksAsCodeWithNoBlockWrapper(t *testing.T) {
+	t.Parallel()
+	got := renderInlineToString(t, "Use `go version`")
+	if !strings.Contains(got, "<code>go version</code>") {
+		t.Errorf("RenderInline(...) = %q, want it to contain <code>go version</code>", got)
+	}
+	if strings.Contains(got, "<p>") {
+		t.Errorf("RenderInline(...) = %q, want no <p> wrapper", got)
+	}
+}
+
+// TestRenderInlinePlainTextHasNoWrapper proves the common case (no
+// markdown at all) stays a bare string, not a block element.
+func TestRenderInlinePlainTextHasNoWrapper(t *testing.T) {
+	t.Parallel()
+	got := renderInlineToString(t, "zing plus version")
+	if got != "zing plus version" {
+		t.Errorf("RenderInline(%q) = %q, want it unchanged", "zing plus version", got)
+	}
+}
+
 func TestRenderReturnsTemplComponent(t *testing.T) {
+	t.Parallel()
 	// console.Render's signature already guarantees a templ.Component at
 	// compile time; what this test proves is that the value is a real,
 	// usable one, not a nil interface wrapping nothing.
@@ -63,6 +106,7 @@ func TestRenderReturnsTemplComponent(t *testing.T) {
 // directly): the design requires the classic <script src="/static/
 // mermaid.js"> in shell.templ's head to be the only mermaid load.
 func TestRenderMermaidFenceBecomesClientSideBlock(t *testing.T) {
+	t.Parallel()
 	md := "```mermaid\ngraph TD\nA-->B\n```"
 	got := renderToString(t, md)
 
@@ -84,6 +128,7 @@ func TestRenderMermaidFenceBecomesClientSideBlock(t *testing.T) {
 // rather than passing it through, so this also pins that specific, safe
 // behavior against a future accidental html.WithUnsafe(( )) regression.
 func TestRenderEscapesRawHTML(t *testing.T) {
+	t.Parallel()
 	got := renderToString(t, "before\n\n<script>alert(1)</script>\n\nafter")
 
 	if strings.Contains(got, "<script>alert(1)</script>") {
@@ -98,6 +143,7 @@ func TestRenderEscapesRawHTML(t *testing.T) {
 // the output as a live href (design section 9: "a dangerous link is
 // neutralized").
 func TestRenderNeutralizesDangerousLink(t *testing.T) {
+	t.Parallel()
 	got := renderToString(t, "[click me](javascript:alert(1))")
 
 	if strings.Contains(got, "javascript:") {
@@ -105,6 +151,27 @@ func TestRenderNeutralizesDangerousLink(t *testing.T) {
 	}
 	if !strings.Contains(got, `href=""`) {
 		t.Errorf(`Render(javascript: link) = %q, want an emptied href=""`, got)
+	}
+}
+
+// TestRenderThreeItemTightListNoLongerPanics is the regression test for the
+// double-registered-CommonMark bug markdownParser's doc comment describes
+// (render.go): a tight bullet list of three or more items, with no other
+// content involved, used to panic inside goldmark's own list parser.
+// "- a\n- b\n- c\n" is the minimised input, reproduced from a real plan
+// artifact's Design.Shape field (ticket 1, plan version 2, a much longer
+// "Decision rules" list with this same shape). It must render as a real
+// list now, not fall back to Render's panic recovery.
+func TestRenderThreeItemTightListNoLongerPanics(t *testing.T) {
+	t.Parallel()
+	md := "- a\n- b\n- c\n"
+	got := renderToString(t, md)
+
+	if !strings.Contains(got, "<li>a</li>") || !strings.Contains(got, "<li>b</li>") || !strings.Contains(got, "<li>c</li>") {
+		t.Errorf("Render(%q) = %q, want a real <li> for each item", md, got)
+	}
+	if strings.Contains(got, "render-failed") {
+		t.Errorf("Render(%q) = %q, want no render-failed fallback", md, got)
 	}
 }
 
@@ -118,6 +185,7 @@ func TestRenderNeutralizesDangerousLink(t *testing.T) {
 // plantuml-error placeholder (the shape NewPlantUMLRenderer emits on a
 // failed exec), only the escaped source as plain code.
 func TestRenderPlantUMLNeverShellsOut(t *testing.T) {
+	t.Parallel()
 	md := "```plantuml\n@startuml\nA -> B\n@enduml\n```"
 	got := renderToString(t, md)
 

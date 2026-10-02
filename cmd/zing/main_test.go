@@ -101,6 +101,9 @@ func TestCommandName(t *testing.T) {
 }
 
 func TestDispatch_Selftest(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow end-to-end flow; runs in the full suite")
+	}
 	t.Parallel()
 
 	if got := dispatch([]string{argv0, cmdSelftest}); got != 0 {
@@ -125,8 +128,6 @@ func TestDispatch_Validate(t *testing.T) {
 	}
 }
 
-// TestDispatch_UnknownCommand cannot run in parallel: it swaps the process
-// os.Stderr to capture dispatch's error message.
 // TestDispatch_BareInvocationDoesNotPanic proves the args[2:] slice-bounds
 // bug is fixed: commandName defaults a bare `zing` invocation (len(args) ==
 // 1) to "serve", so dispatch must not slice args[2:] unconditionally -- that
@@ -135,6 +136,8 @@ func TestDispatch_Validate(t *testing.T) {
 // is guaranteed absent; serve then fails fast on the missing config (exit 1)
 // rather than opening any real database, so this test never touches
 // ~/.zing/zing.db.
+//
+// Not parallel: it calls t.Setenv("HOME", ...) below.
 func TestDispatch_BareInvocationDoesNotPanic(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 
@@ -171,6 +174,8 @@ func TestDispatch_Project(t *testing.T) {
 	}
 }
 
+// TestDispatch_UnknownCommand cannot run in parallel: it swaps the process
+// os.Stderr to capture dispatch's error message.
 func TestDispatch_UnknownCommand(t *testing.T) {
 	r, w, pipeErr := os.Pipe()
 	if pipeErr != nil {

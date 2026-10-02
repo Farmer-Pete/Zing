@@ -15,7 +15,10 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"slices"
+	"sort"
 	"strconv"
+	"strings"
 	"syscall"
 	"time"
 
@@ -194,11 +197,50 @@ func serve(ctx context.Context, cfgPath, dbPath string, seedDemo bool) error {
 		return err
 	}
 
+	// claude_oauth_token (PKG9-PLAN.md section 4.5, D26): checked right
+	// after machine.toml loads, since config.Load itself never reads
+	// machine.toml and so cannot require this on its own.
+	if err = checkClaudeOAuthToken(m, cfg.ClaudeOAuthToken); err != nil {
+		_ = st.Close()
+		return err
+	}
+
+	// judge_codex_home (PKG9-PLAN.md section 4.5, 7.3, D27): resolved and
+	// checked right here too, before the sandbox set loads, so the judge
+	// profile never loads against a CODEX_HOME that cannot possibly be
+	// right. dataDir is computed here, ahead of its other use further
+	// down, because this check needs it too.
+	//
+	// Symlinks resolved once, right away, and every later use below takes
+	// this same resolved value: sandbox.LoadProfile resolves DATA_DIR
+	// internally for the profile's own literal SCENARIOS_FILE match
+	// (macOS's own /var -> /private/var, review F044), but a judge run's
+	// own writeScenariosFile hook (internal/job/judging.go) builds the file
+	// it writes from Deps.DataDir verbatim; an unresolved dataDir here and
+	// the sandbox's own resolved one would then disagree, and the judge's
+	// own "zing scenarios" would fail inside the sandbox with "operation
+	// not permitted" even though the file genuinely exists.
+	rawDataDir := filepath.Dir(dbPath)
+	dataDir, err := filepath.EvalSymlinks(rawDataDir)
+	if err != nil {
+		_ = st.Close()
+		return fmt.Errorf("serve: resolve data directory %s: %w", rawDataDir, err)
+	}
+	judgeCodexHome, err := resolveJudgeCodexHome(dataDir, cfg.JudgeCodexHome)
+	if err != nil {
+		_ = st.Close()
+		return err
+	}
+	if err = checkJudgeCodexLogin(m, judgeCodexHome); err != nil {
+		_ = st.Close()
+		return err
+	}
+
 	// Production wires the two real runtimes, claude and codex, and nothing
 	// else: no fake in production (design D2, section 4.1; task 14).
 	// selftest and the dispatch/console e2e suites are the only remaining
 	// callers that build a Fake, under all three machine.toml runtime names.
-	rts, err := productionRuntimes()
+	rts, err := productionRuntimes(cfg.ClaudeOAuthToken)
 	if err != nil {
 		_ = st.Close()
 		return err
@@ -220,24 +262,43 @@ func serve(ctx context.Context, cfgPath, dbPath string, seedDemo bool) error {
 		return fmt.Errorf("serve: %w", err)
 	}
 
-	// The seatbelt sandbox every build and perimeter run is wrapped in
-	// (design section 5.5, 10, task 8): loaded once, here, and shared by
-	// every sandboxed job through job.Deps.Sandbox. serve always sets
-	// RequireSandbox true (serveRequireSandbox, N9): an unavailable sandbox
-	// never runs a real build unwrapped, it fails every sandboxed tick
-	// closed instead (routeFailure's own ErrSandbox case).
-	sb, err := serveSandbox(cfg, dbPath) //nolint:contextcheck // sandbox.Load's signature is fixed by PKG8-PLAN.md section 5.4 and carries no context.Context; the one exec.CommandContext call in its call chain (host_darwin.go) is bounded by its own fixed timeout instead
+	// The seatbelt sandbox set every sandboxed job's run is wrapped in
+	// (design section 5.5, 10, task 8; PKG9-PLAN.md section 4.7): loaded
+	// once, here, and shared by every sandboxed job through
+	// job.Deps.Sandboxes. serve always sets RequireSandbox true
+	// (serveRequireSandbox, N9): an unavailable sandbox never runs a real
+	// build or review unwrapped, it fails every sandboxed tick closed
+	// instead (routeFailure's own ErrSandbox case).
+	sbSet, err := serveSandbox(cfg, dataDir) //nolint:contextcheck // sandbox.Load's signature is fixed by PKG8-PLAN.md section 5.4 and carries no context.Context; the one exec.CommandContext call in its call chain (host_darwin.go) is bounded by its own fixed timeout instead
 	if err != nil {
 		_ = st.Close()
 		return err
 	}
 
-	gh, err := orchestrator.NewGitHub(cfg.GitHubToken)
+	// The private temp root of every unsandboxed run (classify, planning,
+	// planreview) lives under <DATA_DIR>/tmp/ (PKG9-PLAN.md section 7.3): a
+	// process that died mid-run leaves its own run directory behind, so
+	// serve sweeps the whole tree once, here, before the dispatcher starts.
+	if err = removeStartupTempRoots(dataDir); err != nil {
+		_ = st.Close()
+		return err
+	}
+
+	// The per-run scenarios file every judge run writes (PKG9-PLAN.md
+	// section 7.3, D19) lives under <DATA_DIR>/judge/: swept the same way,
+	// before the dispatcher starts, since a dead process's own run id
+	// folder is otherwise never cleaned up.
+	if err = removeStartupJudgeDir(dataDir); err != nil {
+		_ = st.Close()
+		return err
+	}
+
+	gh, err := orchestrator.NewGitHubClient(cfg.GitHubToken)
 	if err != nil {
 		_ = st.Close()
 		return fmt.Errorf("serve: %w", err)
 	}
-	projects, err := buildJobProjects(ctx, cfg.Projects, bindings, gh, sb)
+	projects, err := buildJobProjects(ctx, cfg.Projects, bindings, gh, sbSet.Build)
 	if err != nil {
 		_ = st.Close()
 		return err
@@ -260,9 +321,16 @@ func serve(ctx context.Context, cfgPath, dbPath string, seedDemo bool) error {
 		Budget:         time.Duration(cfg.Budget.AgentMinutesPerTicket) * time.Minute,
 		Floor:          floor,
 		Projects:       projects,
-		Sandbox:        sb,
+		Sandboxes:      sbSet,
 		RequireSandbox: serveRequireSandbox,
-		Commands:       job.NewCommandRunner(sb, serveRequireSandbox),
+		Commands:       job.NewCommandRunner(sbSet.Build, serveRequireSandbox),
+		DataDir:        dataDir,
+		LensesParallel: cfg.Review.MaxLensesParallel,
+		JudgeCodexHome: judgeCodexHome,
+		MergeRule: job.MergeRule{
+			Auto: cfg.Merge.Auto, Method: cfg.Merge.Method,
+			ManualPaths: cfg.Merge.ManualPaths, DependencyFiles: cfg.Merge.DependencyFiles,
+		},
 	}, rts)
 	if err != nil {
 		_ = st.Close()
@@ -300,7 +368,7 @@ func serve(ctx context.Context, cfgPath, dbPath string, seedDemo bool) error {
 	allowedHosts = append(allowedHosts, hosts...)
 	allowedHosts = append(allowedHosts, cfg.Console.AllowedHosts...)
 
-	handler := console.New(st, b, m, allowedHosts, cfg.Console.Port, logHandler, push, pushToken, floor, sb.Reason())
+	handler := console.New(st, b, m, allowedHosts, cfg.Console.Port, logHandler, push, pushToken, floor, sbSet.FirstUnavailable(usedSandboxProfiles(m)), tr, cfg.User)
 	srv := newServer(ctx, handler)
 
 	listeners, err := listenOnAll(ctx, hosts, cfg.Console.Port)
@@ -346,24 +414,211 @@ func serve(ctx context.Context, cfgPath, dbPath string, seedDemo bool) error {
 // (cmd/zing/selftest.go), never this constant.
 const serveRequireSandbox = true
 
-// serveSandbox loads the seatbelt profile every build and perimeter run is
-// wrapped in (design section 5.1, 5.5, 10): the checked-in, embedded
-// sandbox/build.sb, cfg.Sandbox.ReadPaths, and cfg.Console.Port. Load never
-// errors -- a failure is recorded as unavailable, with one of section 5.4's
-// four reasons -- so the only error this can return is reading the embedded
-// profile itself, which would mean the binary was built without it.
-func serveSandbox(cfg *config.Config, dbPath string) (sandbox.Sandbox, error) {
-	profile, err := zing.Assets.ReadFile("sandbox/build.sb")
+// serveSandbox loads the seatbelt profile set every sandboxed job's run is
+// wrapped in (design section 5.1, 5.5, 10; PKG9-PLAN.md section 4.7): the
+// checked-in, embedded sandbox/build.sb, sandbox/readonly.sb, and
+// sandbox/judge.sb, each with cfg.Sandbox.ReadPaths and cfg.Console.Port.
+// LoadProfile never errors -- a failure is recorded as unavailable, with
+// one of section 5.4's four closed reasons -- so the only error this can
+// return is reading an embedded profile itself, which would mean the
+// binary was built without it.
+func serveSandbox(cfg *config.Config, dataDir string) (sandbox.Set, error) {
+	buildProfile, err := zing.Assets.ReadFile("sandbox/build.sb")
 	if err != nil {
-		return sandbox.Sandbox{}, fmt.Errorf("serve: read embedded sandbox profile: %w", err)
+		return sandbox.Set{}, fmt.Errorf("serve: read embedded sandbox profile: %w", err)
 	}
-	sb := sandbox.Load(profile, filepath.Dir(dbPath), cfg.Sandbox.ReadPaths, cfg.Console.Port)
+	readonlyProfile, err := zing.Assets.ReadFile("sandbox/readonly.sb")
+	if err != nil {
+		return sandbox.Set{}, fmt.Errorf("serve: read embedded sandbox profile: %w", err)
+	}
+	judgeProfile, err := zing.Assets.ReadFile("sandbox/judge.sb")
+	if err != nil {
+		return sandbox.Set{}, fmt.Errorf("serve: read embedded sandbox profile: %w", err)
+	}
+
+	build := loadNamedSandbox("build", buildProfile, cfg, dataDir)
+	readonly := loadNamedSandbox("readonly", readonlyProfile, cfg, dataDir)
+	judge := loadNamedSandbox("judge", judgeProfile, cfg, dataDir)
+
+	return sandbox.Set{Build: build, ReadOnly: readonly, Judge: judge}, nil
+}
+
+// loadNamedSandbox loads one profile through sandbox.LoadProfile and logs
+// whether it came up, naming the profile so serveSandbox's three calls are
+// told apart in the log.
+func loadNamedSandbox(name string, profile []byte, cfg *config.Config, dataDir string) sandbox.Sandbox {
+	sb := sandbox.LoadProfile(name, profile, dataDir, cfg.Sandbox.ReadPaths, cfg.Console.Port)
 	if sb.Available() {
-		slog.Info("sandbox loaded")
+		slog.Info("sandbox loaded", "profile", name)
 	} else {
-		slog.Error("sandbox unavailable", "reason", sb.Reason())
+		slog.Error("sandbox unavailable", "profile", name, "reason", sb.Reason())
 	}
-	return sb, nil
+	return sb
+}
+
+// usedSandboxProfiles returns the distinct, non-empty job.Sandbox names
+// m.Jobs actually names, for Set.FirstUnavailable: a profile no job uses
+// must never turn the console's sandbox indicator red (PKG9-PLAN.md
+// section 4.7).
+func usedSandboxProfiles(m *machine.Machine) []string {
+	seen := make(map[string]bool, len(m.Jobs))
+	var names []string
+	for _, jobName := range sortedJobNames(m) {
+		name := m.Jobs[jobName].Sandbox
+		if name == "" || seen[name] {
+			continue
+		}
+		seen[name] = true
+		names = append(names, name)
+	}
+	return names
+}
+
+// sortedJobNames returns m.Jobs's keys in sorted order, so
+// usedSandboxProfiles (and checkClaudeOAuthToken, below) walk machine.toml's
+// jobs in a deterministic order rather than Go's randomized map order.
+func sortedJobNames(m *machine.Machine) []string {
+	names := make([]string, 0, len(m.Jobs))
+	for name := range m.Jobs {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return names
+}
+
+// checkClaudeOAuthToken enforces claude_oauth_token's own requirement
+// (PKG9-PLAN.md section 4.5, D26): when any machine.toml job uses the
+// claude runtime and token is empty, it names the first such job in
+// sorted order; nil otherwise. config.Load cannot make this check itself,
+// since it never reads machine.toml.
+func checkClaudeOAuthToken(m *machine.Machine, token string) error {
+	if token != "" {
+		return nil
+	}
+	for _, name := range sortedJobNames(m) {
+		if m.Jobs[name].Runtime == runtimeNameClaude {
+			return fmt.Errorf("serve: zing.toml: missing required key claude_oauth_token (machine.toml job %s uses the claude runtime)", name)
+		}
+	}
+	return nil
+}
+
+// judgeDataDirSweptFolders are the two folders under DATA_DIR serve clears
+// at startup (removeStartupTempRoots's own "tmp", and
+// removeStartupJudgeDir's own "judge", PKG9-PLAN.md section 4.5, 7.3): a
+// judge_codex_home under either would be removed out from under a running
+// judge the moment serve restarts, so resolveJudgeCodexHome refuses both.
+var judgeDataDirSweptFolders = []string{"tmp", "judge"}
+
+// resolveJudgeCodexHome resolves judgeCodexHome's own symlinks (a missing
+// folder -- the owner has not logged in there yet -- resolves its parent
+// instead, then appends the folder's own base name back, since
+// filepath.EvalSymlinks fails outright on a path that does not exist) and
+// checks it names a real subfolder of dataDir (PKG9-PLAN.md section 4.5,
+// D27): not dataDir itself, not a path outside it (a sibling whose name
+// merely shares a prefix included, since filepath.Rel is what actually
+// decides this, not a string-prefix check), and not inside either folder
+// serve sweeps at startup. dataDir is serve's own resolved data directory
+// (filepath.Dir(dbPath)); every build and readonly profile denies it
+// whole, so a judge home anywhere else could leak the sealed scenarios a
+// judge's own Codex session can quote to a build or review run.
+func resolveJudgeCodexHome(dataDir, judgeCodexHome string) (string, error) {
+	// dataDir is resolved too, not just judgeCodexHome: macOS's own /var ->
+	// /private/var symlink (task 16a's own lesson, internal/sandbox) means
+	// an unresolved dataDir and a resolved judgeCodexHome would otherwise
+	// compare unequal paths that are really the same directory. dataDir
+	// already exists (it is where zing.db lives), so a resolve failure
+	// here is a real error, unlike judgeCodexHome's own "not logged in
+	// yet" allowance below.
+	resolvedDataDir, err := filepath.EvalSymlinks(dataDir)
+	if err != nil {
+		return "", fmt.Errorf("serve: resolve data directory %s: %w", dataDir, err)
+	}
+
+	resolved, err := evalSymlinksAllowMissing(judgeCodexHome)
+	if err != nil {
+		return "", fmt.Errorf("serve: judge_codex_home %s: %w", judgeCodexHome, err)
+	}
+
+	rel, err := filepath.Rel(resolvedDataDir, resolved)
+	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return "", fmt.Errorf("serve: judge_codex_home %s must be inside the data directory %s", resolved, resolvedDataDir)
+	}
+	if rel == "." {
+		return "", fmt.Errorf("serve: judge_codex_home %s must be a folder inside the data directory %s, not the data directory itself", resolved, resolvedDataDir)
+	}
+	first, _, _ := strings.Cut(rel, string(filepath.Separator))
+	if slices.Contains(judgeDataDirSweptFolders, first) {
+		return "", fmt.Errorf("serve: judge_codex_home %s must not be inside %s, which serve clears at startup", resolved, filepath.Join(resolvedDataDir, first))
+	}
+	return resolved, nil
+}
+
+// evalSymlinksAllowMissing resolves path's symlinks like
+// filepath.EvalSymlinks, except that a path which does not exist yet is
+// not an error: its parent directory is resolved instead, and path's own
+// base name is appended back. judge_codex_home's folder need not exist
+// before this check runs (PKG9-PLAN.md section 4.5): the owner may not
+// have run "codex login" there yet on a fresh install.
+func evalSymlinksAllowMissing(path string) (string, error) {
+	resolved, err := filepath.EvalSymlinks(path)
+	if err == nil {
+		return resolved, nil
+	}
+	if !errors.Is(err, os.ErrNotExist) {
+		return "", err
+	}
+	parent, parentErr := filepath.EvalSymlinks(filepath.Dir(path))
+	if parentErr != nil {
+		return "", parentErr
+	}
+	return filepath.Join(parent, filepath.Base(path)), nil
+}
+
+// checkJudgeCodexLogin requires judgeCodexHome/auth.json to exist when
+// machine.toml's own jobs.judge uses the codex runtime (PKG9-PLAN.md
+// section 4.5): the owner logs in once with "CODEX_HOME=<judge_codex_home>
+// codex login" before serve ever starts a real judge run.
+func checkJudgeCodexLogin(m *machine.Machine, judgeCodexHome string) error {
+	j, ok := m.Jobs["judge"]
+	if !ok || j.Runtime != runtimeNameCodex {
+		return nil
+	}
+	authPath := filepath.Join(judgeCodexHome, "auth.json")
+	if _, err := os.Stat(authPath); err != nil {
+		return fmt.Errorf("serve: judge Codex is not logged in: %s not found; run CODEX_HOME=%s codex login", authPath, judgeCodexHome)
+	}
+	return nil
+}
+
+// removeStartupTempRoots removes <dataDir>/tmp/ whole, before the
+// dispatcher starts (PKG9-PLAN.md section 7.3): the private temp root an
+// unsandboxed run's TMPDIR and CLAUDE_CODE_TMPDIR point at lives under it,
+// and a process that died mid-run leaves its own run directory behind
+// (runJob's own deferred cleanup only runs when rt.Run actually returns). A
+// missing directory is not an error.
+func removeStartupTempRoots(dataDir string) error {
+	tmpRoot := filepath.Join(dataDir, "tmp")
+	if err := os.RemoveAll(tmpRoot); err != nil {
+		return fmt.Errorf("serve: remove %s: %w", tmpRoot, err)
+	}
+	return nil
+}
+
+// removeStartupJudgeDir removes <dataDir>/judge/ whole, before the
+// dispatcher starts (PKG9-PLAN.md section 7.3, D19): each judge run's own
+// afterReserve hook (internal/job/judging.go's writeScenariosFile) removes
+// its own <run id> folder when rt.Run returns, but a process that dies
+// mid-run skips that, so serve sweeps the whole tree here instead, the same
+// way removeStartupTempRoots clears <dataDir>/tmp/. No judge run exists at
+// startup, so nothing live is ever removed out from under it. A missing
+// directory is not an error.
+func removeStartupJudgeDir(dataDir string) error {
+	judgeRoot := filepath.Join(dataDir, "judge")
+	if err := os.RemoveAll(judgeRoot); err != nil {
+		return fmt.Errorf("serve: remove %s: %w", judgeRoot, err)
+	}
+	return nil
 }
 
 // buildJobProjects builds one orchestrator.Orchestrator per configured
@@ -372,8 +627,13 @@ func serveSandbox(cfg *config.Config, dbPath string) (sandbox.Sandbox, error) {
 // the project's own configured path, gh shared by every one of them, and
 // BuildWritableRoots from the sandbox's own cache root and mds folder when
 // it is available (task 8, design section 15). bindings supplies the store
-// project id for each configured project name (ensureBindings, above).
-func buildJobProjects(ctx context.Context, projects []config.Project, bindings []zdispatch.Binding, gh orchestrator.GitHub, sb sandbox.Sandbox) (map[int64]job.Project, error) {
+// project id for each configured project name (ensureBindings, above). gh is
+// the concrete *orchestrator.GitHubClient, not the four-method GitHub
+// interface: every job.Project also carries Owner, Repo, and gh itself as
+// its PullRequests, Flips, Checks, and Threads (PKG9-PLAN.md section 10.3),
+// so the shipping and respond handlers read and write GitHub through the
+// same client Package 5's git writes use.
+func buildJobProjects(ctx context.Context, projects []config.Project, bindings []zdispatch.Binding, gh *orchestrator.GitHubClient, sb sandbox.Sandbox) (map[int64]job.Project, error) {
 	storeProjectID := make(map[string]int64, len(bindings))
 	for _, b := range bindings {
 		storeProjectID[b.TrackerProject] = b.StoreProjectID
@@ -404,7 +664,10 @@ func buildJobProjects(ctx context.Context, projects []config.Project, bindings [
 		if err != nil {
 			return nil, fmt.Errorf("serve: project %s: git common dir: %w", p.Name, err)
 		}
-		out[id] = job.Project{Orch: orch, RepoGit: repoGit, TestCmd: p.Commands.Test, LintCmd: p.Commands.Lint}
+		out[id] = job.Project{
+			Orch: orch, RepoGit: repoGit, TestCmd: p.Commands.Test, LintCmd: p.Commands.Lint,
+			Owner: owner, Repo: repo, PullRequests: gh, Flips: gh, Checks: gh, Threads: gh,
+		}
 	}
 	return out, nil
 }
@@ -431,12 +694,13 @@ func sandboxBuildWritableRoots(sb sandbox.Sandbox) []string {
 // productionRuntimes builds the runtime.Set serve wires the dispatcher with:
 // the two real runtimes, claude and codex, resolved by their bare bin names
 // (an empty bin argument to runtime.NewClaude/NewCodex resolves through
-// PATH), and nothing else (design D2, section 4.1; task 14). Production
-// never maps the fake name; only selftest and the test suites still build a
-// runtime.Fake.
-func productionRuntimes() (runtime.Set, error) {
+// PATH), and nothing else (design D2, section 4.1; task 14). oauthToken is
+// cfg.ClaudeOAuthToken, the only credential the claude runtime ever carries
+// to its child (PKG9-PLAN.md section 4.6, D26). Production never maps the
+// fake name; only selftest and the test suites still build a runtime.Fake.
+func productionRuntimes(oauthToken string) (runtime.Set, error) {
 	rts, err := runtime.NewSet(map[string]runtime.Runtime{
-		runtimeNameClaude: runtime.NewClaude(""),
+		runtimeNameClaude: runtime.NewClaude("", oauthToken),
 		runtimeNameCodex:  runtime.NewCodex(""),
 	})
 	if err != nil {
@@ -772,6 +1036,7 @@ func ensureBindings(ctx context.Context, st *store.Store, projects []config.Proj
 			TrackerProject: p.Name,
 			Rule:           tracker.IntakeRule{Assignee: p.Intake.AssignedTo},
 			User:           user,
+			Mode:           p.Intake.Mode,
 		})
 	}
 	return bindings, nil

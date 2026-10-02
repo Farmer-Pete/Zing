@@ -457,6 +457,21 @@ func CountWord(n int) string {
 	return strconv.Itoa(n)
 }
 
+// CountNoun spells a count together with its noun, singular for one and
+// plural otherwise: CountNoun(1, "finding", "findings") is "one finding",
+// CountNoun(3, "finding", "findings") is "three findings" (design section
+// 6.4, in place of file/files). It builds on CountWord rather than
+// duplicating its number-spelling, so PerimeterNotice's and askCommit's own
+// hand-rolled singular/plural picks (perimeter.go, building.go) stay exact
+// matches of what this produces, if they are ever folded into a call here.
+func CountNoun(n int, one, many string) string {
+	noun := many
+	if n == 1 {
+		noun = one
+	}
+	return CountWord(n) + " " + noun
+}
+
 // PerimeterNotice is the message the build loop resumes the agent with after
 // a revert (PKG5-PLAN.md section 12.3). It names each reverted path and its
 // marker, states that the change was reverted, and gives the agent two
@@ -544,7 +559,7 @@ func (o *Orchestrator) Hunk(ctx context.Context, wt Worktree, c Change) (string,
 		out = got
 	case Untracked:
 		got, err := run.Output(ctx, wt.dir, "git", "diff", "--no-ext-diff", "--no-textconv", "--no-index", "--", os.DevNull, c.Path)
-		if err != nil && !isExitCode(err, 1) {
+		if err != nil && !isExitCode1(err) {
 			return "", fmt.Errorf("orchestrator: hunk: %s: %w", c.Path, err)
 		}
 		out = got

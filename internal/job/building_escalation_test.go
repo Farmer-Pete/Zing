@@ -32,8 +32,11 @@ import (
 	"testing"
 	"time"
 
+	"zing/internal/gitfixture"
 	"zing/internal/job"
 	"zing/internal/response"
+	"zing/internal/runtime"
+	"zing/internal/sandbox"
 	"zing/internal/store"
 )
 
@@ -58,7 +61,9 @@ func runBuilding(t *testing.T, s *store.Store, deps job.Deps, ticketID int64) (s
 // back/reply-only row is TestReplanUnsupportedText, and the abandon row is
 // TestBuildingAbandonResolvesAll.
 func TestBuildingEscalationTable(t *testing.T) {
+	t.Parallel()
 	t.Run("BuildRetryWithRun", func(t *testing.T) {
+		t.Parallel()
 		// "a retry | build, fix with a run": RUN first turn of the same
 		// unit, fresh session, inputs notes and error (fenced), resolving
 		// the round.
@@ -90,6 +95,7 @@ func TestBuildingEscalationTable(t *testing.T) {
 	})
 
 	t.Run("BuildRetryNoRun", func(t *testing.T) {
+		t.Parallel()
 		// "a retry | build with no run (step 0, CHECK, LAND, RESOLVE
 		// failures)": resolve the round, commit the marker "retry
 		// requested", stay; no runtime call.
@@ -113,6 +119,7 @@ func TestBuildingEscalationTable(t *testing.T) {
 	})
 
 	t.Run("PerimeterRetry", func(t *testing.T) {
+		t.Parallel()
 		// "a retry | perimeter": resolve the round, commit the marker
 		// "retry requested", stay; the next tick's DESCRIBE retakes the
 		// same path on its own, so no runtime call happens here either.
@@ -133,6 +140,7 @@ func TestBuildingEscalationTable(t *testing.T) {
 	})
 
 	t.Run("CapBudgetRetry", func(t *testing.T) {
+		t.Parallel()
 		// "a retry | cap_budget | recapBudgetEscalation": re-escalate
 		// wall_clock in this same commit, resolving the round, with no
 		// runtime call.
@@ -162,6 +170,7 @@ func TestBuildingEscalationTable(t *testing.T) {
 // regardless of the escalation's own origin -- here perimeter, to prove the
 // code, not the origin, decides.
 func TestSandboxUnavailableEscalates(t *testing.T) {
+	t.Parallel()
 	s, rt, ticketID := buildTicketInBuilding(t)
 	qID := escalateDirect(t, s, ticketID, nil, nil, response.EscalationCodeSandboxUnavailable, response.EscalationOriginPerimeter)
 	answerGateQuestion(t, s, ticketID, qID, new("a"), "")
@@ -183,6 +192,7 @@ func TestSandboxUnavailableEscalates(t *testing.T) {
 // replan_unsupported, origin unchanged, with the plan's exact What/Why
 // text, resolving the round.
 func TestReplanUnsupportedText(t *testing.T) {
+	t.Parallel()
 	for _, tc := range []struct {
 		name   string
 		option *string
@@ -191,6 +201,7 @@ func TestReplanUnsupportedText(t *testing.T) {
 		{"ReplyOnly", nil},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
 			s, rt, ticketID := buildTicketInBuilding(t)
 			qID := escalateDirect(t, s, ticketID, nil, nil, response.EscalationCodeEnvironment, response.EscalationOriginBuild)
 			answerGateQuestion(t, s, ticketID, qID, tc.option, "let's replan instead")
@@ -229,6 +240,7 @@ func TestReplanUnsupportedText(t *testing.T) {
 // open or answered question resolves (ResolveAll), and job.ValidateCommit
 // (apply's own check) accepts the building -> abandoned edge.
 func TestBuildingAbandonResolvesAll(t *testing.T) {
+	t.Parallel()
 	s, rt, ticketID := buildTicketInBuilding(t)
 	qID := escalateDirect(t, s, ticketID, nil, nil, response.EscalationCodeEnvironment, response.EscalationOriginBuild)
 	answerGateQuestion(t, s, ticketID, qID, new("c"), "I'm done with this one")
@@ -272,6 +284,7 @@ func TestBuildingAbandonResolvesAll(t *testing.T) {
 // from the tree, and both the escalation round and the preserved perimeter
 // round resolve.
 func TestCapResumesRetryCarriesAnswers(t *testing.T) {
+	t.Parallel()
 	s, ticketID, rid, scriptRT := perimeterScenario(t, map[string]string{testExtraPath: testExtraReason})
 	scriptRT.steps = append(scriptRT.steps, perimeterStep("Adds a small helper.", "perim-sess-1"))
 	describeTick(t, s, scriptRT, ticketID) // DESCRIBE + ASK
@@ -353,6 +366,169 @@ func TestCapResumesRetryCarriesAnswers(t *testing.T) {
 			t.Errorf("AnsweredRounds after the cap retry = %+v, still has run %d's round, want it resolved", rounds, rid)
 		}
 	}
+}
+
+// TestTaskEscalationOriginStillBuild is TestFixEscalationOriginFix's own
+// mirror (fix_test.go, design section 5.4 change 2, #28 gap 2): the same
+// six shared-step call sites, driven for a task unit instead of a fix
+// unit, still escalate origin "build" now that unitEscalation and
+// originFor derive it from the unit (u.TaskN != 0) rather than the
+// constant every one of these call sites hardcoded before task 2.
+func TestTaskEscalationOriginStillBuild(t *testing.T) {
+	t.Parallel()
+	assertBuildOrigin := func(t *testing.T, commit store.HandlerCommit) {
+		t.Helper()
+		if commit.Escalation == nil {
+			t.Fatal("commit.Escalation = nil, want an escalation")
+		}
+		if commit.Escalation.Payload.Origin != string(response.EscalationOriginBuild) {
+			t.Errorf("escalation origin = %q, want %q", commit.Escalation.Payload.Origin, response.EscalationOriginBuild)
+		}
+	}
+
+	t.Run("CHECK command failure", func(t *testing.T) {
+		t.Parallel()
+		s, rt, ticketID := buildTicketInBuilding(t)
+		deps := claimForBuild(t, s, rt, ticketID)
+		commit, err := runBuilding(t, s, deps, ticketID) // RUN task 1
+		if err != nil {
+			t.Fatalf("RUN: %v", err)
+		}
+		apply(t, s, getTicket(t, s, ticketID), commit)
+
+		deps2 := claimForBuild(t, s, rt, ticketID)
+		deps2.RequireSandbox = true
+		deps2.Commands = job.NewCommandRunner(sandbox.Off(), true)
+		checkCommit, err := runBuilding(t, s, deps2, ticketID) // CHECK: sandbox unavailable
+		if err != nil {
+			t.Fatalf("CHECK: %v", err)
+		}
+		assertBuildOrigin(t, checkCommit)
+		if checkCommit.Escalation.Payload.Code != string(response.EscalationCodeSandboxUnavailable) {
+			t.Errorf("escalation code = %q, want %q", checkCommit.Escalation.Payload.Code, response.EscalationCodeSandboxUnavailable)
+		}
+	})
+
+	t.Run("LAND signing failure", func(t *testing.T) {
+		t.Parallel()
+		s, rt, ticketID := buildTicketInBuilding(t)
+		deps := claimForBuild(t, s, rt, ticketID)
+		commit, err := runBuilding(t, s, deps, ticketID) // RUN task 1 (the fake runtime writes hello.txt)
+		if err != nil {
+			t.Fatalf("RUN: %v", err)
+		}
+		apply(t, s, getTicket(t, s, ticketID), commit)
+
+		deps2 := claimForBuild(t, s, rt, ticketID)
+		_, wt := buildWorktreeFor(t, deps2, getTicket(t, s, ticketID))
+		badKey := filepath.Join(t.TempDir(), "no-such-signing-key")
+		if out, cfgErr := gitfixture.Git(t.Context(), wt.Dir(), "config", "user.signingKey", badKey); cfgErr != nil {
+			t.Fatalf("git config user.signingKey: %v: %s", cfgErr, out)
+		}
+
+		landCommit, err := runBuilding(t, s, deps2, ticketID) // CHECK, clean, LAND: signing fails
+		if err != nil {
+			t.Fatalf("CHECK+LAND: %v", err)
+		}
+		assertBuildOrigin(t, landCommit)
+		const wantWhat = "commit signing failed"
+		if !strings.Contains(landCommit.Escalation.Body, wantWhat) {
+			t.Errorf("escalation body = %q, want it to contain %q", landCommit.Escalation.Body, wantWhat)
+		}
+	})
+
+	t.Run("DESCRIBE unclaimed extra", func(t *testing.T) {
+		t.Parallel()
+		s, ticketID, _, scriptRT := perimeterScenario(t, map[string]string{testExtraPath: testExtraReason})
+
+		ticket := getTicket(t, s, ticketID)
+		deps := claimForBuild(t, s, scriptRT, ticketID)
+		_, wt := buildWorktreeFor(t, deps, ticket)
+		const surprisePath = "aaa_surprise.go" // sorts before testExtraPath ("extra1.go"): the first undescribed extra
+		if writeErr := os.WriteFile(filepath.Join(wt.Dir(), surprisePath), []byte("surprise\n"), 0o600); writeErr != nil {
+			t.Fatalf("write %s: %v", surprisePath, writeErr)
+		}
+
+		commit, err := job.Registry()[testStateBuilding].Run(t.Context(), ticket, deps) // DESCRIBE: unclaimed extra
+		if err != nil {
+			t.Fatalf("Run: %v", err)
+		}
+		assertBuildOrigin(t, commit)
+	})
+
+	t.Run("RESOLVE revert failure", func(t *testing.T) {
+		t.Parallel()
+		s, ticketID, _, scriptRT := perimeterScenario(t, map[string]string{testExtraPath: testExtraReason})
+		scriptRT.steps = append(scriptRT.steps, perimeterStep("Adds a small helper.", "task-resolve-perim-sess"))
+		describeTick(t, s, scriptRT, ticketID) // DESCRIBE + ASK
+
+		q := findOpenQuestionByKind(t, s, ticketID, response.QuestionKindPerimeter)
+		answerPerimeterQuestion(t, s, ticketID, q.ID, map[string]response.Decision{testExtraPath: response.DecisionReject})
+
+		ticket := getTicket(t, s, ticketID)
+		deps := claimForBuild(t, s, scriptRT, ticketID)
+		_, wt := buildWorktreeFor(t, deps, ticket)
+		if chmodErr := os.Chmod(wt.Dir(), 0o555); chmodErr != nil {
+			t.Fatalf("chmod worktree dir: %v", chmodErr)
+		}
+		t.Cleanup(func() {
+			if chmodErr := os.Chmod(wt.Dir(), 0o755); chmodErr != nil {
+				t.Logf("restore worktree dir permissions: %v", chmodErr)
+			}
+		})
+
+		resolveCommit, err := job.Registry()[testStateBuilding].Run(t.Context(), ticket, deps) // RESOLVE: revert fails
+		if err != nil {
+			t.Fatalf("RESOLVE: %v", err)
+		}
+		assertBuildOrigin(t, resolveCommit)
+	})
+
+	t.Run("build run error outcome", func(t *testing.T) {
+		t.Parallel()
+		s, _, ticketID := buildTicketInBuilding(t)
+		ticket := getTicket(t, s, ticketID)
+
+		scriptRT := &scriptedRuntime{t: t, steps: []scriptedStep{fixErrorStep("task-error-sess")}}
+		deps := claimForBuild(t, s, scriptRT, ticketID)
+
+		commit, err := job.Registry()[testStateBuilding].Run(t.Context(), ticket, deps) // RUN: error outcome
+		if err != nil {
+			t.Fatalf("RUN: %v", err)
+		}
+		assertBuildOrigin(t, commit)
+	})
+
+	t.Run("resume exec failure", func(t *testing.T) {
+		t.Parallel()
+		s, _, ticketID := buildTicketInBuilding(t)
+
+		scriptRT := &scriptedRuntime{t: t, steps: []scriptedStep{buildStep([]string{helloTxt}, 0, 0, nil, "task-exec-fail-sess")}}
+		deps := claimForBuild(t, s, scriptRT, ticketID)
+		commit, err := runBuilding(t, s, deps, ticketID) // RUN: claims hello.txt, writes nothing
+		if err != nil {
+			t.Fatalf("RUN: %v", err)
+		}
+		apply(t, s, getTicket(t, s, ticketID), commit)
+
+		deps2 := claimForBuild(t, s, scriptRT, ticketID)
+		checkCommit, err := runBuilding(t, s, deps2, ticketID) // CHECK: claim errors pending
+		if err != nil {
+			t.Fatalf("CHECK: %v", err)
+		}
+		apply(t, s, getTicket(t, s, ticketID), checkCommit)
+
+		scriptRT.steps = append(scriptRT.steps, scriptedStep{res: runtime.RunResult{ExitCode: -1, AgentTime: 0}, err: runtime.ErrStart})
+		deps3 := claimForBuild(t, s, scriptRT, ticketID)
+		resumeCommit, err := runBuilding(t, s, deps3, ticketID) // resume: exec failure
+		if err != nil {
+			t.Fatalf("resume: %v", err)
+		}
+		assertBuildOrigin(t, resumeCommit)
+		if resumeCommit.Escalation.Payload.Code != string(response.EscalationCodeRuntimeExecFailed) {
+			t.Errorf("escalation code = %q, want %q", resumeCommit.Escalation.Payload.Code, response.EscalationCodeRuntimeExecFailed)
+		}
+	})
 }
 
 // containsAll reports whether s contains every one of subs.

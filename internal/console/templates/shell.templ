@@ -115,7 +115,39 @@ templ palette() {
 			padding: 1rem;
 			overflow-y: auto;
 		}
-		#main { padding: 1.5rem; overflow-y: auto; }
+		#main { padding: 1.5rem; overflow-y: auto; overflow-x: hidden; }
+		/* Bug fix 17: a wide plan table or a long code line used to force a
+		   horizontal scrollbar under the whole thread, because neither a
+		   table nor a pre shrinks to its container on its own. Each gets its
+		   own scroll box instead (display: block turns a table into a
+		   container overflow-x can actually apply to), so the page itself
+		   never scrolls sideways. */
+		#main table { display: block; max-width: 100%; overflow-x: auto; }
+		#main pre { max-width: 100%; overflow-x: auto; }
+		/* .change-block (bug fix: the plan's Changes table rendered one row
+		   per change, with Before/After whole source files in a <pre> table
+		   cell; a row grew hundreds of pixels tall and mostly empty in the
+		   ~800px thread column). plan.templ's changeBlocks renders one block
+		   per change instead, reusing .run-fields below for its Callers/
+		   Callees/Simple call list; .change-code is its own scroll box so a
+		   long line never widens the page past #main pre's own rule above. */
+		.change-block {
+			border: 1px solid var(--zing-border);
+			border-radius: 0.5rem;
+			padding: 0.75rem 1rem;
+			margin-bottom: 0.75rem;
+			background: var(--zing-surface);
+		}
+		.change-block h4 { margin: 0 0 0.375rem; }
+		.change-code {
+			margin: 0;
+			max-width: 100%;
+			overflow-x: auto;
+			background: var(--zing-bg);
+			border: 1px solid var(--zing-border);
+			border-radius: 0.375rem;
+			padding: 0.5rem;
+		}
 		#rail {
 			border-left: 1px solid var(--zing-border);
 			padding: 1rem;
@@ -147,6 +179,14 @@ templ palette() {
 			text-decoration: none;
 		}
 		.nav-link:hover { border-color: var(--zing-accent); }
+		/* threadLink's own "selected" class (bug fix, nav.templ): the open
+		   thread's row stays visibly marked across every #nav patch, since
+		   it is server-rendered HTML rather than the clicked anchor's
+		   native focus outline a patch is not guaranteed to preserve. */
+		.nav-thread.selected {
+			border-color: var(--zing-accent);
+			background: var(--zing-picked-soft);
+		}
 		.badge, .pill, .item-marker {
 			font-size: 0.75rem;
 			padding: 0.125rem 0.5rem;
@@ -248,6 +288,137 @@ templ palette() {
 			border-radius: 0.375rem;
 			padding: 0.375rem 0.5rem;
 			font: inherit;
+		}
+
+		/* The draft banner and per-reply hint (bug fix): sending is
+		   keyboard-only by design (Q31), and nothing on screen said so,
+		   which left the owner thinking a saved draft had been lost.
+		   draftBanner (thread.templ) shows once, only while the ticket
+		   carries a draft; reply-hint shows under every reply box, since
+		   it explains what that box does rather than reporting state. */
+		.draft-banner {
+			color: var(--zing-text-dim);
+			font-size: 0.85rem;
+			margin: 0.5rem 0;
+		}
+		/* .wait-progress (bug fix, thread.templ's waitProgressBanner): the
+		   current round's answered-vs-total count, e.g. "Answered 1 of 2.
+		   Zing resumes the agent when every question is answered." --
+		   correct design (every question of a round must be answered before
+		   Zing resumes), but previously unexplained. */
+		.wait-progress {
+			color: var(--zing-text-dim);
+			font-size: 0.85rem;
+			margin: 0 0 0.75rem;
+		}
+		.reply-hint {
+			color: var(--zing-text-dim);
+			font-size: 0.75rem;
+			margin: 0.25rem 0 0;
+		}
+		/* .draft-saved (bug fix 11, console.js's showDraftSaved): "Saved." next
+		   to a reply box right after Enter actually saves its draft, since the
+		   box itself no longer clears on Enter and needed its own on-screen
+		   confirmation. Empty (the common case) renders nothing, matching
+		   #alerts:empty above. */
+		.draft-saved:empty { display: none; }
+		.draft-saved {
+			color: var(--zing-accent);
+			font-size: 0.75rem;
+			margin: 0.25rem 0 0;
+		}
+		/* .draft-conflict (bug fix, console.js's showDraftConflict): a
+		   closed-question 409 beside the reply box that triggered it, e.g.
+		   "This question is already answered." Empty (the common case)
+		   renders nothing, matching #alerts:empty above. */
+		.draft-conflict:empty { display: none; }
+		.draft-conflict {
+			color: var(--zing-danger);
+			font-size: 0.75rem;
+			margin: 0.25rem 0 0;
+		}
+		/* .q-answered (bug fix, thread.templ's answeredLocked): a closed,
+		   answered question's locked note, shown where its now-hidden
+		   controls were, naming what was actually sent. */
+		.q-answered {
+			color: var(--zing-text-dim);
+			font-size: 0.85rem;
+			margin: 0.5rem 0 0;
+		}
+		/* .q-revisable (D30, thread.templ's reviseNote): an already-answered
+		   question whose controls are still live, since the ticket still
+		   waits on this round -- distinct from .q-answered's locked note. */
+		.q-revisable {
+			color: var(--zing-accent);
+			font-size: 0.8rem;
+			margin: 0 0 0.5rem;
+		}
+		/* .q-turns and .q-turn (bug fix 10, extended by D31-5, thread.templ's
+		   turnsList): a question's own conversation, shown under its options
+		   instead of as a detached "reply you" card at the bottom of the
+		   thread. .turn-author labels who wrote it; a turn with none (a bare
+		   system note such as "Resolved.") renders unlabeled. .pill-queued
+		   marks an owner turn no run has taken delivery of yet (design
+		   section 22.7). */
+		.q-turn {
+			color: var(--zing-text-dim);
+			font-size: 0.85rem;
+			margin: 0.35rem 0 0;
+		}
+		.turn-author {
+			color: var(--zing-text);
+			font-weight: 600;
+			margin-right: 0.25rem;
+		}
+		.pill-queued {
+			margin-left: 0.5rem;
+			background: var(--zing-border);
+		}
+		/* .q-settled (D31, design section 22.7 item 6, thread.templ's
+		   settledBlock): a planning question's own closing line once the
+		   agent has settled it, in place of .q-answered for every other
+		   kind. */
+		.q-settled {
+			color: var(--zing-text-dim);
+			font-size: 0.85rem;
+			margin: 0.5rem 0 0;
+		}
+		/* .agent-status (design section 22.7, views.go's buildAgentStatus): the
+		   Thread view's own banner for a ticket with at least one planning
+		   question, in place of .wait-progress. */
+		.agent-status {
+			color: var(--zing-text-dim);
+			font-size: 0.85rem;
+			margin: 0 0 0.75rem;
+		}
+		/* .chip.locked and .decision.locked (bug fix: "options vanish once
+		   locked", design section 22.7 item 4): a settled or answered
+		   question's own numbered list, disabled rather than removed, so
+		   what was picked stays visible. */
+		.chip.locked, .decision.locked {
+			opacity: 0.7;
+			cursor: default;
+		}
+
+		/* #send-result (bug fix, console.js's showSendResult): a client-owned
+		   banner reporting POST /send's own result line ("Sent N answer(s)."
+		   or "Nothing to send."), appended outside #main/#rail so the patch
+		   POST /send's own bus.Publish triggers right after cannot morph it
+		   back to nothing before a reader sees it. Empty (before the first
+		   send) renders nothing, matching #alerts:empty above. */
+		#send-result:empty { display: none; }
+		#send-result {
+			position: fixed;
+			left: 50%;
+			bottom: 1.5rem;
+			transform: translateX(-50%);
+			z-index: 900;
+			padding: 0.5rem 1rem;
+			border-radius: 0.375rem;
+			background: var(--zing-surface);
+			border: 1px solid var(--zing-border);
+			color: var(--zing-text);
+			font-size: 0.85rem;
 		}
 
 		/* The rail (design section 6.11): Phase, Artifacts, Run, Log, and the

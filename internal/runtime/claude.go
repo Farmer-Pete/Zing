@@ -27,15 +27,19 @@ const maxOutputBytes = 4 * 1024 * 1024
 var _ Runtime = Claude{}
 
 // Claude runs a job through the real claude CLI (design section 4.1, D18).
-// bin is the path to the binary; "" means claude on PATH.
+// bin is the path to the binary; "" means claude on PATH. oauthToken
+// authenticates every run (PKG9-PLAN.md section 4.6, D26): the output of
+// `claude setup-token`, appended to the child's environment as
+// CLAUDE_CODE_OAUTH_TOKEN and never passed to any other runtime or command.
 type Claude struct {
-	bin string
+	bin        string
+	oauthToken string
 }
 
 // NewClaude returns a Claude that runs bin, or "claude" on PATH when bin is
-// "".
-func NewClaude(bin string) Claude {
-	return Claude{bin: bin}
+// "", authenticating every run with oauthToken (PKG9-PLAN.md section 4.6).
+func NewClaude(bin, oauthToken string) Claude {
+	return Claude{bin: bin, oauthToken: oauthToken}
 }
 
 // resolveBin returns the binary Run should execute: c.bin, or "claude" on
@@ -341,6 +345,11 @@ func classifyProcessOutcome(ctx context.Context, overflowed bool, waitErr error,
 func (c Claude) Run(ctx context.Context, req RunRequest) (RunResult, error) {
 	start := time.Now()
 
+	if c.oauthToken == "" {
+		slog.Error("claude run: no oauth token configured", "job", req.Job)
+		return RunResult{ExitCode: -1, AgentTime: time.Since(start)}, ErrNoOAuthToken
+	}
+
 	sessionID := req.SessionID
 	var newUUID string
 	if sessionID == "" {
@@ -380,7 +389,12 @@ func (c Claude) run(ctx context.Context, req RunRequest, argv []string, sessionI
 	name, args := c.commandNameArgs(req, argv)
 	cmd := exec.CommandContext(ctx, name, args...) //nolint:gosec // G204: bin is an operator-configured path (NewClaude), argv is built by claudeArgv from validated fields, and ExecPrefix (when set) is the sandbox's own prefix (sandbox.Sandbox.Prefix) -- never raw external input
 	cmd.Dir = req.WorkDir
-	cmd.Env = agentEnv(req)
+	// The token is appended after agentEnv, not passed through it, so
+	// FilteredEnv's own drop pass (which removes anything *_TOKEN-shaped,
+	// including a parent or req.Env CLAUDE_CODE_OAUTH_TOKEN) never has to
+	// know about it, and only the claude runtime's own configured value
+	// ever reaches a child (PKG9-PLAN.md section 4.6, D26).
+	cmd.Env = append(agentEnv(req), "CLAUDE_CODE_OAUTH_TOKEN="+c.oauthToken)
 	cmd.Stdin = strings.NewReader(req.Prompt)
 	configureProcessGroup(cmd)
 
@@ -389,7 +403,8 @@ func (c Claude) run(ctx context.Context, req RunRequest, argv []string, sessionI
 
 	var stderrCount countingWriter
 	stderrHash := sha256.New()
-	cmd.Stderr = io.MultiWriter(&stderrCount, stderrHash)
+	stderrCap := &capWriter{limit: maxStderrBytes}
+	cmd.Stderr = io.MultiWriter(&stderrCount, stderrHash, stderrCap)
 
 	if err := cmd.Start(); err != nil {
 		return RunResult{ExitCode: -1, AgentTime: time.Since(start)}, ErrStart
@@ -404,6 +419,7 @@ func (c Claude) run(ctx context.Context, req RunRequest, argv []string, sessionI
 		ExitCode:     exitCodeFrom(waitErr),
 		StderrLen:    stderrCount.n,
 		StderrSHA256: shortHex(stderrHash.Sum(nil)),
+		Stderr:       stderrCap.bytes(),
 	}
 
 	if outcomeErr := classifyProcessOutcome(ctx, stdout.overflowed(), waitErr, res.ExitCode); outcomeErr != nil {
@@ -450,6 +466,39 @@ func exitCodeFrom(waitErr error) int {
 // 4.1), the only form a stderr digest is ever allowed to take.
 func shortHex(sum []byte) string {
 	return hex.EncodeToString(sum)[:12]
+}
+
+// Command returns the exact argv Run would execute for req -- ExecPrefix
+// applied the same way commandNameArgs applies it in run -- and the
+// session id Run would use (req.SessionID echoed back on a resume, a fresh
+// one minted on a first turn). Exported for the sandbox package's own host
+// credential probes (PKG9-PLAN.md section 7.3, M1 task 7): a probe that
+// hand-rolls its own claude argv can silently drift from what production
+// actually runs, so it builds the command through this instead.
+func (c Claude) Command(req RunRequest) (name string, args []string, sessionID string, err error) {
+	sessionID = req.SessionID
+	var newUUID string
+	if sessionID == "" {
+		newUUID, err = newSessionUUID()
+		if err != nil {
+			return "", nil, "", fmt.Errorf("runtime: claude: new session uuid: %w", err)
+		}
+		sessionID = newUUID
+	}
+	argv, err := claudeArgv(req, newUUID)
+	if err != nil {
+		return "", nil, "", err
+	}
+	name, args = c.commandNameArgs(req, argv)
+	return name, args, sessionID, nil
+}
+
+// Env returns the exact child environment Run would use for req: the
+// filtered parent allowlist plus req.Env (agentEnv), with the configured
+// oauth token appended last, matching run's own cmd.Env construction.
+// Exported for the same reason as Command.
+func (c Claude) Env(req RunRequest) []string {
+	return append(agentEnv(req), "CLAUDE_CODE_OAUTH_TOKEN="+c.oauthToken)
 }
 
 // version runs `claude --version` and returns its trimmed output, for the

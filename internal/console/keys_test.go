@@ -21,6 +21,7 @@ const keysJSONPath = "static/keys.json"
 // schema drift (design section 6.4, 7.3: "asserts keys.json is current
 // against keys.go").
 func TestKeysJSONMatchesCommitted(t *testing.T) {
+	t.Parallel()
 	generated, err := console.GenerateKeysJSON()
 	if err != nil {
 		t.Fatalf("GenerateKeysJSON: %v", err)
@@ -64,6 +65,7 @@ var every14Key = []string{
 // KeyBinding.Keys, and Bindings names no key outside that closed set
 // (design section 8: "Each maps to exactly one action").
 func TestBindingsCoverEvery14KeyExactlyOnce(t *testing.T) {
+	t.Parallel()
 	counts := make(map[string]int)
 	for _, b := range console.Bindings() {
 		for _, k := range b.Keys {
@@ -93,6 +95,7 @@ func TestBindingsCoverEvery14KeyExactlyOnce(t *testing.T) {
 // would silently drop an action out of the closed-set coverage above
 // without failing it).
 func TestBindingsActionsAreNonEmptyAndKeysNonEmpty(t *testing.T) {
+	t.Parallel()
 	for _, b := range console.Bindings() {
 		if b.Action == "" {
 			t.Errorf("KeyBinding with Keys=%v has an empty Action", b.Keys)

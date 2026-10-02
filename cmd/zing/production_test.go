@@ -36,7 +36,7 @@ import (
 func TestProductionRuntimes_ResolvesClaudeAndCodexNotFake(t *testing.T) {
 	t.Parallel()
 
-	rts, err := productionRuntimes()
+	rts, err := productionRuntimes("test-claude-oauth-token")
 	if err != nil {
 		t.Fatalf("productionRuntimes: %v", err)
 	}
@@ -173,6 +173,51 @@ func TestServeRequiresSandbox(t *testing.T) {
 	}
 }
 
+// TestServeLoadsBuildAndReadonly proves serveSandbox loads the build and
+// readonly profiles (PKG9-PLAN.md section 4.7). Build and readonly are
+// really attempted here (sandbox.LoadProfile), proving the wiring reaches
+// them at all; whether this host can run sandbox-exec at all is
+// internal/sandbox's own suite's concern, not this one's, so an
+// unavailable result only needs a non-empty reason.
+func TestServeLoadsBuildAndReadonly(t *testing.T) {
+	t.Parallel()
+
+	cfg := &config.Config{}
+	dataDir := t.TempDir()
+
+	sbSet, err := serveSandbox(cfg, dataDir)
+	if err != nil {
+		t.Fatalf("serveSandbox: %v", err)
+	}
+	if !sbSet.Build.Available() && sbSet.Build.Reason() == "" {
+		t.Error("Build.Reason() is empty for an unavailable sandbox")
+	}
+	if !sbSet.ReadOnly.Available() && sbSet.ReadOnly.Reason() == "" {
+		t.Error("ReadOnly.Reason() is empty for an unavailable sandbox")
+	}
+}
+
+// TestServeLoadsJudge proves serveSandbox also loads the judge profile
+// (PKG9-PLAN.md section 4.7; M2 task 2 adds judge.sb and its own load, in
+// place of M1's Set.Judge, which was sandbox.NotLoaded()). Judge's own
+// proof needs a real scenarios-file read and a real CODEX_HOME write
+// (section 4.7's own worked example), so this only needs a non-empty
+// reason on an unavailable result, the same as Build and ReadOnly above.
+func TestServeLoadsJudge(t *testing.T) {
+	t.Parallel()
+
+	cfg := &config.Config{}
+	dataDir := t.TempDir()
+
+	sbSet, err := serveSandbox(cfg, dataDir)
+	if err != nil {
+		t.Fatalf("serveSandbox: %v", err)
+	}
+	if !sbSet.Judge.Available() && sbSet.Judge.Reason() == "" {
+		t.Error("Judge.Reason() is empty for an unavailable sandbox")
+	}
+}
+
 // TestServeBuildsOneOrchestratorPerProject proves buildJobProjects builds
 // exactly one job.Project per configured project, keyed by its store
 // project id, each carrying its own repository's real git common dir.
@@ -189,9 +234,9 @@ func TestServeBuildsOneOrchestratorPerProject(t *testing.T) {
 		{StoreProjectID: 10, TrackerProject: "alpha"},
 		{StoreProjectID: 20, TrackerProject: "beta"},
 	}
-	gh, err := orchestrator.NewGitHub("test-github-token")
+	gh, err := orchestrator.NewGitHubClient("test-github-token")
 	if err != nil {
-		t.Fatalf("orchestrator.NewGitHub: %v", err)
+		t.Fatalf("orchestrator.NewGitHubClient: %v", err)
 	}
 
 	projects, err := buildJobProjects(t.Context(), cfgProjects, bindings, gh, sandbox.Off())
@@ -220,6 +265,88 @@ func TestServeBuildsOneOrchestratorPerProject(t *testing.T) {
 		if p.RepoGit != wantGitDir {
 			t.Errorf("projects[%d].RepoGit = %q, want %q", id, p.RepoGit, wantGitDir)
 		}
+	}
+}
+
+// TestServeProjectsHaveM3Interfaces proves buildJobProjects fills every
+// job.Project's Owner, Repo, PullRequests, and Checks from the configured
+// repo and the one shared *orchestrator.GitHubClient (PKG9-PLAN.md section
+// 10.3, M3 task 2), ahead of shipping's POLL (task 7) ever reading them.
+func TestServeProjectsHaveM3Interfaces(t *testing.T) {
+	t.Parallel()
+
+	const gammaProject = "gamma"
+
+	repoA := newTestGitRepo(t)
+	cfgProjects := []config.Project{
+		{Name: gammaProject, Repo: "acme/" + gammaProject, Path: repoA, Tracker: testServeTracker},
+	}
+	bindings := []zdispatch.Binding{
+		{StoreProjectID: 10, TrackerProject: gammaProject},
+	}
+	gh, err := orchestrator.NewGitHubClient("test-github-token")
+	if err != nil {
+		t.Fatalf("orchestrator.NewGitHubClient: %v", err)
+	}
+
+	projects, err := buildJobProjects(t.Context(), cfgProjects, bindings, gh, sandbox.Off())
+	if err != nil {
+		t.Fatalf("buildJobProjects: %v", err)
+	}
+
+	p, ok := projects[10]
+	if !ok {
+		t.Fatal("projects[10] missing")
+	}
+	if p.Owner != "acme" {
+		t.Errorf("Owner = %q, want %q", p.Owner, "acme")
+	}
+	if p.Repo != gammaProject {
+		t.Errorf("Repo = %q, want %q", p.Repo, gammaProject)
+	}
+	if p.PullRequests == nil {
+		t.Error("PullRequests is nil")
+	}
+	if p.Checks == nil {
+		t.Error("Checks is nil")
+	}
+}
+
+// TestServeProjectsHaveM4Interfaces proves buildJobProjects fills every
+// job.Project's Flips and Threads from the one shared
+// *orchestrator.GitHubClient (PKG9-PLAN.md section 10.3, M4 task 1), ahead
+// of RESPOND (task 4) or the ready flip (task 7) ever reading them.
+func TestServeProjectsHaveM4Interfaces(t *testing.T) {
+	t.Parallel()
+
+	const deltaProject = "delta"
+
+	repoA := newTestGitRepo(t)
+	cfgProjects := []config.Project{
+		{Name: deltaProject, Repo: "acme/" + deltaProject, Path: repoA, Tracker: testServeTracker},
+	}
+	bindings := []zdispatch.Binding{
+		{StoreProjectID: 10, TrackerProject: deltaProject},
+	}
+	gh, err := orchestrator.NewGitHubClient("test-github-token")
+	if err != nil {
+		t.Fatalf("orchestrator.NewGitHubClient: %v", err)
+	}
+
+	projects, err := buildJobProjects(t.Context(), cfgProjects, bindings, gh, sandbox.Off())
+	if err != nil {
+		t.Fatalf("buildJobProjects: %v", err)
+	}
+
+	p, ok := projects[10]
+	if !ok {
+		t.Fatal("projects[10] missing")
+	}
+	if p.Flips == nil {
+		t.Error("Flips is nil")
+	}
+	if p.Threads == nil {
+		t.Error("Threads is nil")
 	}
 }
 
@@ -314,7 +441,8 @@ func driveTicketToBuilding(t *testing.T, st *store.Store, m *machine.Machine, rt
 			Reserve: func(ctx context.Context, tid int64, su store.SessionUpsert, seed store.RunSeed) (store.Reserved, error) {
 				return st.Reserve(ctx, tid, owner, expires, su, seed)
 			},
-			Sandbox: sandbox.Off(), RequireSandbox: false, Commands: job.NewCommandRunner(sandbox.Off(), false),
+			Sandboxes: sandbox.OffSet(), RequireSandbox: false, Commands: job.NewCommandRunner(sandbox.Off(), false),
+			DataDir: t.TempDir(),
 		}
 		commit, err := reg[state].Run(t.Context(), ticket, deps)
 		if err != nil {
@@ -364,6 +492,7 @@ func driveTicketToBuilding(t *testing.T, st *store.Store, m *machine.Machine, rt
 // escalates sandbox_unavailable and never calls the runtime or the command
 // runner (design section 5.5, N9).
 func TestProductionBuildNeedsSandbox(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	st, err := store.Open(t.Context(), filepath.Join(dir, "zing.db"))
 	if err != nil {
@@ -450,7 +579,7 @@ func TestProductionBuildNeedsSandbox(t *testing.T) {
 		Reserve: func(ctx context.Context, tid int64, su store.SessionUpsert, seed store.RunSeed) (store.Reserved, error) {
 			return st.Reserve(ctx, tid, owner, expires, su, seed)
 		},
-		Sandbox: sandbox.Off(), RequireSandbox: serveRequireSandbox,
+		Sandboxes: sandbox.OffSet(), RequireSandbox: serveRequireSandbox,
 		Commands: neverCalledCommandRunner{t: t},
 		Projects: map[int64]job.Project{
 			projectID: {Orch: orch, RepoGit: repoGit, TestCmd: "test -f hello.txt", LintCmd: "true"},

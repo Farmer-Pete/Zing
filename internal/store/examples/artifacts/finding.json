@@ -3,5 +3,9 @@
   "severity": "minor",
   "location": "internal/cart/cart_test.go:10",
   "text": "the new test does not assert the order total",
-  "fix": "assert order.Total == 0 for an empty cart"
+  "fix": "assert order.Total == 0 for an empty cart",
+  "id": "r1f1",
+  "round": 1,
+  "sha": "0123456789abcdef0123456789abcdef01234567",
+  "lenses": ["tests"]
 }

@@ -29,6 +29,11 @@ const (
 	testJobBuild       = "build"
 	testModelClaudeX   = "claude-x"
 	testModelOpus48    = "claude-opus-4-8"
+
+	// testEscalationBodyWallClock is a cap-escalation body repeated across
+	// commit_test.go, planning_reads_test.go, and conversation_reads_test.go
+	// cousins (goconst).
+	testEscalationBodyWallClock = "wall_clock: over budget"
 )
 
 var wantTables = []string{
@@ -37,6 +42,7 @@ var wantTables = []string{
 }
 
 func TestOpen_CreatesAllTables(t *testing.T) {
+	t.Parallel()
 	ctx := t.Context()
 	path := filepath.Join(t.TempDir(), "zing.db")
 
@@ -57,6 +63,7 @@ func TestOpen_CreatesAllTables(t *testing.T) {
 }
 
 func TestOpen_WALMode(t *testing.T) {
+	t.Parallel()
 	ctx := t.Context()
 	path := filepath.Join(t.TempDir(), "zing.db")
 
@@ -76,6 +83,7 @@ func TestOpen_WALMode(t *testing.T) {
 }
 
 func TestOpen_SecondOpenIsNoOp(t *testing.T) {
+	t.Parallel()
 	ctx := t.Context()
 	path := filepath.Join(t.TempDir(), "zing.db")
 
@@ -108,6 +116,7 @@ func TestOpen_SecondOpenIsNoOp(t *testing.T) {
 // path in Open. A later Open on a good path must still succeed, proving the
 // failed attempt leaked no connection.
 func TestOpen_FailingOpenLeavesNothingWedged(t *testing.T) {
+	t.Parallel()
 	ctx := t.Context()
 	dirAsPath := t.TempDir()
 
@@ -150,6 +159,7 @@ func seedProjectAndTicket(t *testing.T, s *Store) {
 // of the eight tables, exercising each table's foreign keys, CHECK
 // constraints, and unique indexes on a valid row.
 func TestStore_RoundTripAllTables(t *testing.T) {
+	t.Parallel()
 	ctx := t.Context()
 	s, err := Open(ctx, dbPath(t))
 	if err != nil {
@@ -209,16 +219,18 @@ func TestStore_RoundTripAllTables(t *testing.T) {
 // TestStore_ConstraintViolations proves the CHECK, foreign key, and unique
 // constraints in the migration actually reject a bad row.
 func TestStore_ConstraintViolations(t *testing.T) {
+	t.Parallel()
 	ctx := t.Context()
 	s, err := Open(ctx, dbPath(t))
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
-	defer func() { _ = s.Close() }()
+	t.Cleanup(func() { _ = s.Close() })
 
 	seedProjectAndTicket(t, s)
 
 	t.Run("bad foreign key", func(t *testing.T) {
+		t.Parallel()
 		_, err := s.db.ExecContext(ctx,
 			`INSERT INTO sessions (ticket_id, job, runtime) VALUES (999, 'planning', 'claude')`)
 		if err == nil {
@@ -227,6 +239,7 @@ func TestStore_ConstraintViolations(t *testing.T) {
 	})
 
 	t.Run("bad enum", func(t *testing.T) {
+		t.Parallel()
 		_, err := s.db.ExecContext(ctx,
 			`INSERT INTO tickets (project_id, tracker_ref, title, state) VALUES (1, '99', 't', 'bogus')`)
 		if err == nil {
@@ -235,6 +248,7 @@ func TestStore_ConstraintViolations(t *testing.T) {
 	})
 
 	t.Run("duplicate unique key", func(t *testing.T) {
+		t.Parallel()
 		_, err := s.db.ExecContext(ctx,
 			`INSERT INTO projects (name, repo_url, local_path, tracker) VALUES ('zing', 'x', 'y', 'github')`)
 		if err == nil {
@@ -247,6 +261,7 @@ func TestStore_ConstraintViolations(t *testing.T) {
 // prove payload rides as string(payload), never the raw []byte: modernc/sqlite
 // binds a []byte as a BLOB, which would break the TEXT storage contract.
 func TestInsertMessage_BindsPayloadAsText(t *testing.T) {
+	t.Parallel()
 	ctx := t.Context()
 	s, err := Open(ctx, dbPath(t))
 	if err != nil {
@@ -274,6 +289,7 @@ func TestInsertMessage_BindsPayloadAsText(t *testing.T) {
 }
 
 func TestInsertArtifact_BindsPayloadAsText(t *testing.T) {
+	t.Parallel()
 	ctx := t.Context()
 	s, err := Open(ctx, dbPath(t))
 	if err != nil {

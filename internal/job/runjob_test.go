@@ -1,8 +1,10 @@
 package job
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"slices"
@@ -43,10 +45,20 @@ const (
 	testRuntimeCodex  = "codex"
 	testModelAlias    = "sonnet"
 	testModelExact    = "claude-opus-x"
+	// testModelAliasOpus and testModelAliasFable name the other two
+	// model-alias keys this file's own all-aliases Models maps repeat
+	// (goconst); testModelAlias ("sonnet") and pbRuntimeCodex ("codex",
+	// postbuild_test.go, also package job) already cover the other two.
+	testModelAliasOpus  = "opus"
+	testModelAliasFable = "fable"
+	// testClassifyScriptKey is the Fake runtime's own script key for a
+	// classify first turn (runtime/fake.go's scriptKey), shared by every
+	// test in this file that scripts one (goconst).
+	testClassifyScriptKey = "classify/1.xml"
 )
 
 var runJobTestProject = store.Project{
-	Name: "zing", RepoURL: "https://github.com/x/zing", LocalPath: "/tmp/zing", Tracker: "github",
+	Name: "zing", RepoURL: "https://github.com/x/zing", LocalPath: "/tmp/zing", Tracker: testTrackerGithub,
 }
 
 // newRunJobTestStore opens a fresh Store on a temp-file database, closed on
@@ -198,6 +210,7 @@ func (c *countingRuntime) Run(ctx context.Context, req runtime.RunRequest) (runt
 // TestRunJob_UnknownJobReturnsErrConfigNoReserve proves an unknown job name
 // fails at step 1 (design section 4.6), before Deps.Reserve is ever called.
 func TestRunJob_UnknownJobReturnsErrConfigNoReserve(t *testing.T) {
+	t.Parallel()
 	s := newRunJobTestStore(t)
 	ticketID := seedRunJobTicket(t, s)
 	ticket := getRunJobTicket(t, s, ticketID)
@@ -209,7 +222,7 @@ func TestRunJob_UnknownJobReturnsErrConfigNoReserve(t *testing.T) {
 		Budget: time.Hour, Owner: owner, Expires: expires, Reserve: rec.Reserve,
 	}
 
-	_, err := runJob(t.Context(), d, ticket, "no-such-job", store.SessionUpsert{}, runtime.RunRequest{}, nil)
+	_, err := runJob(t.Context(), d, ticket, "no-such-job", store.SessionUpsert{}, runtime.RunRequest{}, nil, nil, 0)
 	if !errors.Is(err, ErrConfig) {
 		t.Fatalf("err = %v, want errors.Is(err, ErrConfig)", err)
 	}
@@ -223,6 +236,7 @@ func TestRunJob_UnknownJobReturnsErrConfigNoReserve(t *testing.T) {
 // (classify) is well-formed (design section 4.6: the runtime is resolved
 // before a run is ever reserved).
 func TestRunJob_UnknownRuntimeReturnsErrConfigNoReserve(t *testing.T) {
+	t.Parallel()
 	s := newRunJobTestStore(t)
 	ticketID := seedRunJobTicket(t, s)
 	ticket := getRunJobTicket(t, s, ticketID)
@@ -240,7 +254,7 @@ func TestRunJob_UnknownRuntimeReturnsErrConfigNoReserve(t *testing.T) {
 		Budget: time.Hour, Owner: owner, Expires: expires, Reserve: rec.Reserve,
 	}
 
-	_, err = runJob(t.Context(), d, ticket, testJobClassify, store.SessionUpsert{}, runtime.RunRequest{Job: response.JobClassify}, nil)
+	_, err = runJob(t.Context(), d, ticket, testJobClassify, store.SessionUpsert{}, runtime.RunRequest{Job: response.JobClassify}, nil, nil, 0)
 	if !errors.Is(err, ErrConfig) {
 		t.Fatalf("err = %v, want errors.Is(err, ErrConfig)", err)
 	}
@@ -252,6 +266,7 @@ func TestRunJob_UnknownRuntimeReturnsErrConfigNoReserve(t *testing.T) {
 // TestRunJob_MissingModelAliasReturnsErrConfigNoReserve proves a Models map
 // missing the job's model alias fails at step 3, before Reserve.
 func TestRunJob_MissingModelAliasReturnsErrConfigNoReserve(t *testing.T) {
+	t.Parallel()
 	s := newRunJobTestStore(t)
 	ticketID := seedRunJobTicket(t, s)
 	ticket := getRunJobTicket(t, s, ticketID)
@@ -269,7 +284,7 @@ func TestRunJob_MissingModelAliasReturnsErrConfigNoReserve(t *testing.T) {
 		Budget: time.Hour, Owner: owner, Expires: expires, Reserve: rec.Reserve,
 	}
 
-	_, err = runJob(t.Context(), d, ticket, testJobClassify, store.SessionUpsert{}, runtime.RunRequest{Job: response.JobClassify}, nil)
+	_, err = runJob(t.Context(), d, ticket, testJobClassify, store.SessionUpsert{}, runtime.RunRequest{Job: response.JobClassify}, nil, nil, 0)
 	if !errors.Is(err, ErrConfig) {
 		t.Fatalf("err = %v, want errors.Is(err, ErrConfig)", err)
 	}
@@ -283,6 +298,7 @@ func TestRunJob_MissingModelAliasReturnsErrConfigNoReserve(t *testing.T) {
 // ticket's spent agent-time already meets the cap (design section 4.6: >=,
 // not >).
 func TestRunJob_BudgetExhaustedReturnsErrBudgetNoReserveNoRun(t *testing.T) {
+	t.Parallel()
 	s := newRunJobTestStore(t)
 	ticketID := seedRunJobTicket(t, s)
 	seedAgentSeconds(t, s, ticketID, 10)
@@ -302,7 +318,7 @@ func TestRunJob_BudgetExhaustedReturnsErrBudgetNoReserveNoRun(t *testing.T) {
 		Budget: 10 * time.Second, Owner: owner, Expires: expires, Reserve: rec.Reserve,
 	}
 
-	_, err = runJob(t.Context(), d, ticket, testJobClassify, store.SessionUpsert{}, runtime.RunRequest{Job: response.JobClassify}, nil)
+	_, err = runJob(t.Context(), d, ticket, testJobClassify, store.SessionUpsert{}, runtime.RunRequest{Job: response.JobClassify}, nil, nil, 0)
 	if !errors.Is(err, ErrBudget) {
 		t.Fatalf("err = %v, want errors.Is(err, ErrBudget)", err)
 	}
@@ -319,6 +335,7 @@ func TestRunJob_BudgetExhaustedReturnsErrBudgetNoReserveNoRun(t *testing.T) {
 // as an error that still satisfies errors.Is(err, store.ErrClaimLost),
 // wrapped but never swallowed.
 func TestRunJob_LostClaimWrapsErrClaimLost(t *testing.T) {
+	t.Parallel()
 	s := newRunJobTestStore(t)
 	ticketID := seedRunJobTicket(t, s)
 	ticket := getRunJobTicket(t, s, ticketID)
@@ -345,9 +362,10 @@ func TestRunJob_LostClaimWrapsErrClaimLost(t *testing.T) {
 	d := Deps{
 		Store: s, Runtimes: set, Machine: runJobTestMachine(t), Models: map[string]string{testModelAlias: testModelExact},
 		Budget: time.Hour, Owner: owner, Expires: expires, Reserve: realReserve(s, owner, expires),
+		DataDir: t.TempDir(),
 	}
 
-	_, err = runJob(t.Context(), d, ticket, testJobClassify, store.SessionUpsert{Job: testJobClassify, Runtime: runtimeFake}, runtime.RunRequest{Job: response.JobClassify}, nil)
+	_, err = runJob(t.Context(), d, ticket, testJobClassify, store.SessionUpsert{Job: testJobClassify, Runtime: runtimeFake}, runtime.RunRequest{Job: response.JobClassify}, nil, nil, 0)
 	if !errors.Is(err, store.ErrClaimLost) {
 		t.Fatalf("err = %v, want errors.Is(err, store.ErrClaimLost)", err)
 	}
@@ -359,12 +377,13 @@ func TestRunJob_LostClaimWrapsErrClaimLost(t *testing.T) {
 // and classify's own machine.toml job, the child context's deadline equals
 // the job timeout, and the Fake's result comes back unchanged.
 func TestRunJob_HappyPathReservesFillsRequestAndRuns(t *testing.T) {
+	t.Parallel()
 	s := newRunJobTestStore(t)
 	ticketID := seedRunJobTicket(t, s)
 	ticket := getRunJobTicket(t, s, ticketID)
 	owner, expires := claimRunJobTicket(t, s, ticketID)
 
-	scripts := fstest.MapFS{"classify/1.xml": &fstest.MapFile{Data: []byte(classifyBugXML)}}
+	scripts := fstest.MapFS{testClassifyScriptKey: &fstest.MapFile{Data: []byte(classifyBugXML)}}
 	counting := &countingRuntime{rt: runtime.NewFake(scripts)}
 	set, err := runtime.NewSet(map[string]runtime.Runtime{testRuntimeClaude: counting, testRuntimeCodex: counting, runtimeFake: counting})
 	if err != nil {
@@ -374,11 +393,12 @@ func TestRunJob_HappyPathReservesFillsRequestAndRuns(t *testing.T) {
 	d := Deps{
 		Store: s, Runtimes: set, Machine: runJobTestMachine(t), Models: map[string]string{testModelAlias: testModelExact},
 		Budget: time.Hour, Owner: owner, Expires: expires, Reserve: realReserve(s, owner, expires),
+		DataDir: t.TempDir(),
 	}
 
 	before := time.Now()
 	rr, err := runJob(t.Context(), d, ticket, testJobClassify, store.SessionUpsert{Job: testJobClassify, Runtime: testRuntimeClaude},
-		runtime.RunRequest{Job: response.JobClassify}, nil)
+		runtime.RunRequest{Job: response.JobClassify}, nil, nil, 0)
 	after := time.Now()
 	if err != nil {
 		t.Fatalf("runJob: %v", err)
@@ -454,6 +474,11 @@ const testBuildLabel = "1"
 // every sandbox test below that needs a scripted build turn.
 const testBuildScriptKey = "build/1/1.xml"
 
+// testSandboxExecArg is Sandbox.Prefix's own argv[0] (internal/sandbox),
+// reused by every test below that just checks a request was wrapped at all
+// (goconst: three or more call sites compared this literal).
+const testSandboxExecArg = "sandbox-exec"
+
 // testSandboxProfile is a minimal, always-loadable seatbelt profile (no
 // rule beyond the two placeholders every real profile carries): these tests
 // are about runJob's own wrapping logic, not about proving the checked-in
@@ -491,11 +516,12 @@ func buildSandboxDeps(t *testing.T, s *store.Store, rt runtime.Runtime, projectI
 	}
 	return Deps{
 		Store: s, Runtimes: set, Machine: runJobTestMachine(t),
-		Models: map[string]string{"sonnet": testModelExact, "opus": testModelExact, "fable": testModelExact, "codex": testModelExact},
+		Models: map[string]string{testModelAlias: testModelExact, testModelAliasOpus: testModelExact, testModelAliasFable: testModelExact, testRuntimeCodex: testModelExact},
 		Budget: time.Hour, Owner: owner, Expires: expires, Reserve: realReserve(s, owner, expires),
 		Projects:       map[int64]Project{projectID: {RepoGit: t.TempDir()}},
-		Sandbox:        sb,
+		Sandboxes:      sandbox.Set{Build: sb},
 		RequireSandbox: requireSandbox,
+		DataDir:        t.TempDir(),
 	}
 }
 
@@ -503,6 +529,7 @@ func buildSandboxDeps(t *testing.T, s *store.Store, rt runtime.Runtime, projectI
 // job's request with the sandbox's own ExecPrefix and Env when the sandbox
 // is available, regardless of RequireSandbox.
 func TestRunJobWrapsWhenAvailable(t *testing.T) {
+	t.Parallel()
 	sb := loadTestSandboxOrSkip(t)
 
 	s := newRunJobTestStore(t)
@@ -519,14 +546,14 @@ func TestRunJobWrapsWhenAvailable(t *testing.T) {
 	// directory here in production (runjob.go's own "Building passes the
 	// worktree directory in req.WorkDir already").
 	rr, err := runJob(t.Context(), deps, ticket, testJobBuild, store.SessionUpsert{Job: testJobBuild, Runtime: testRuntimeClaude},
-		runtime.RunRequest{Job: response.JobBuild, Label: testBuildLabel, WorkDir: t.TempDir()}, nil)
+		runtime.RunRequest{Job: response.JobBuild, Label: testBuildLabel, WorkDir: t.TempDir()}, nil, nil, 0)
 	if err != nil {
 		t.Fatalf("runJob: %v", err)
 	}
 	if counting.calls != 1 {
 		t.Fatalf("runtime Run calls = %d, want 1", counting.calls)
 	}
-	if len(counting.lastReq.ExecPrefix) == 0 || counting.lastReq.ExecPrefix[0] != "sandbox-exec" {
+	if len(counting.lastReq.ExecPrefix) == 0 || counting.lastReq.ExecPrefix[0] != testSandboxExecArg {
 		t.Fatalf("ExecPrefix = %v, want it to start with sandbox-exec", counting.lastReq.ExecPrefix)
 	}
 	if !slices.ContainsFunc(counting.lastReq.Env, func(kv string) bool { return strings.HasPrefix(kv, "TMPDIR=") }) {
@@ -541,6 +568,7 @@ func TestRunJobWrapsWhenAvailable(t *testing.T) {
 // returns ErrSandbox with nothing reserved and the runtime never called
 // (design section 5.5).
 func TestRunJobErrSandboxWhenRequired(t *testing.T) {
+	t.Parallel()
 	s := newRunJobTestStore(t)
 	ticketID := seedRunJobTicket(t, s)
 	ticket := getRunJobTicket(t, s, ticketID)
@@ -552,7 +580,7 @@ func TestRunJobErrSandboxWhenRequired(t *testing.T) {
 	deps.Reserve = rec.Reserve
 
 	_, err := runJob(t.Context(), deps, ticket, testJobBuild, store.SessionUpsert{Job: testJobBuild, Runtime: testRuntimeClaude},
-		runtime.RunRequest{Job: response.JobBuild, Label: testBuildLabel}, nil)
+		runtime.RunRequest{Job: response.JobBuild, Label: testBuildLabel}, nil, nil, 0)
 	if !errors.Is(err, ErrSandbox) {
 		t.Fatalf("err = %v, want ErrSandbox", err)
 	}
@@ -568,6 +596,7 @@ func TestRunJobErrSandboxWhenRequired(t *testing.T) {
 // RequireSandbox false runs the job unwrapped (design D5: suites on the
 // fake runtime), rather than failing.
 func TestRunJobUnwrappedWhenNotRequired(t *testing.T) {
+	t.Parallel()
 	s := newRunJobTestStore(t)
 	ticketID := seedRunJobTicket(t, s)
 	ticket := getRunJobTicket(t, s, ticketID)
@@ -578,7 +607,7 @@ func TestRunJobUnwrappedWhenNotRequired(t *testing.T) {
 	deps := buildSandboxDeps(t, s, counting, ticket.ProjectID, owner, expires, sandbox.Off(), false)
 
 	_, err := runJob(t.Context(), deps, ticket, testJobBuild, store.SessionUpsert{Job: testJobBuild, Runtime: testRuntimeClaude},
-		runtime.RunRequest{Job: response.JobBuild, Label: testBuildLabel}, nil)
+		runtime.RunRequest{Job: response.JobBuild, Label: testBuildLabel}, nil, nil, 0)
 	if err != nil {
 		t.Fatalf("runJob: %v", err)
 	}
@@ -594,6 +623,7 @@ func TestRunJobUnwrappedWhenNotRequired(t *testing.T) {
 // wrapping step creates is removed once runJob returns (its deferred
 // cleanup, design section 5.5).
 func TestRunJobRemovesRunDir(t *testing.T) {
+	t.Parallel()
 	sb := loadTestSandboxOrSkip(t)
 
 	s := newRunJobTestStore(t)
@@ -608,7 +638,7 @@ func TestRunJobRemovesRunDir(t *testing.T) {
 	// A real, existing directory: see TestRunJobWrapsWhenAvailable's own
 	// comment on WorkDir.
 	_, err := runJob(t.Context(), deps, ticket, testJobBuild, store.SessionUpsert{Job: testJobBuild, Runtime: testRuntimeClaude},
-		runtime.RunRequest{Job: response.JobBuild, Label: testBuildLabel, WorkDir: t.TempDir()}, nil)
+		runtime.RunRequest{Job: response.JobBuild, Label: testBuildLabel, WorkDir: t.TempDir()}, nil, nil, 0)
 	if err != nil {
 		t.Fatalf("runJob: %v", err)
 	}
@@ -635,6 +665,7 @@ func TestRunJobRemovesRunDir(t *testing.T) {
 // /private/var symlink never matched a seatbelt subpath rule built from the
 // unresolved path).
 func TestRunJobUsesResolvedWorkDir(t *testing.T) {
+	t.Parallel()
 	sb := loadTestSandboxOrSkip(t)
 
 	s := newRunJobTestStore(t)
@@ -661,7 +692,7 @@ func TestRunJobUsesResolvedWorkDir(t *testing.T) {
 	deps := buildSandboxDeps(t, s, counting, ticket.ProjectID, owner, expires, sb, true)
 
 	_, err = runJob(t.Context(), deps, ticket, testJobBuild, store.SessionUpsert{Job: testJobBuild, Runtime: testRuntimeClaude},
-		runtime.RunRequest{Job: response.JobBuild, Label: testBuildLabel, WorkDir: link}, nil)
+		runtime.RunRequest{Job: response.JobBuild, Label: testBuildLabel, WorkDir: link}, nil, nil, 0)
 	if err != nil {
 		t.Fatalf("runJob: %v", err)
 	}
@@ -670,17 +701,322 @@ func TestRunJobUsesResolvedWorkDir(t *testing.T) {
 	}
 }
 
-// TestRunJobSeedsTaskN proves runJob copies its own taskN parameter into
-// RunSeed.TaskN (design section 6.3): a non-nil taskN lands on the reserved
-// run's own task_n column, and a nil one (planning's own four callers)
-// leaves it NULL.
-func TestRunJobSeedsTaskN(t *testing.T) {
+// TestRunJobPicksProfileByName proves runJob resolves a job's sandbox
+// profile by the name its own machine.toml entry gives (PKG9-PLAN.md
+// section 4.7: d.Sandboxes.For(jobCfg.Sandbox)), not always "build": a job
+// naming "readonly" runs wrapped in Sandboxes.ReadOnly even though
+// Sandboxes.Build is off and required, which would refuse the run outright
+// if runJob ever picked the wrong profile.
+func TestRunJobPicksProfileByName(t *testing.T) {
+	t.Parallel()
+	readonlySB := loadTestSandboxOrSkip(t)
+
 	s := newRunJobTestStore(t)
 	ticketID := seedRunJobTicket(t, s)
 	ticket := getRunJobTicket(t, s, ticketID)
 	owner, expires := claimRunJobTicket(t, s, ticketID)
 
-	scripts := fstest.MapFS{"classify/1.xml": &fstest.MapFile{Data: []byte(classifyBugXML)}}
+	m := runJobTestMachine(t)
+	readonlyJob := m.Jobs[testJobBuild]
+	readonlyJob.Sandbox = "readonly"
+	const testJobReadonly = "readonly-test-job"
+	m.Jobs[testJobReadonly] = readonlyJob
+
+	scripts := fstest.MapFS{testBuildScriptKey: &fstest.MapFile{Data: []byte(buildOkXML)}}
+	counting := &countingRuntime{rt: runtime.NewFake(scripts)}
+	set, err := runtime.NewSet(map[string]runtime.Runtime{testRuntimeClaude: counting, testRuntimeCodex: counting, runtimeFake: counting})
+	if err != nil {
+		t.Fatalf("runtime.NewSet: %v", err)
+	}
+
+	deps := Deps{
+		Store: s, Runtimes: set, Machine: m,
+		Models: map[string]string{testModelAlias: testModelExact, testModelAliasOpus: testModelExact, testModelAliasFable: testModelExact, testRuntimeCodex: testModelExact},
+		Budget: time.Hour, Owner: owner, Expires: expires, Reserve: realReserve(s, owner, expires),
+		Projects:       map[int64]Project{ticket.ProjectID: {RepoGit: t.TempDir()}},
+		Sandboxes:      sandbox.Set{Build: sandbox.Off(), ReadOnly: readonlySB},
+		RequireSandbox: true,
+	}
+
+	rr, err := runJob(t.Context(), deps, ticket, testJobReadonly, store.SessionUpsert{Job: testJobReadonly, Runtime: testRuntimeClaude},
+		runtime.RunRequest{Job: response.JobBuild, Label: testBuildLabel, WorkDir: t.TempDir()}, nil, nil, 0)
+	if err != nil {
+		t.Fatalf("runJob: %v (want the readonly profile picked, not the off-and-required build one)", err)
+	}
+	if counting.calls != 1 {
+		t.Fatalf("runtime Run calls = %d, want 1", counting.calls)
+	}
+	if len(counting.lastReq.ExecPrefix) == 0 || counting.lastReq.ExecPrefix[0] != testSandboxExecArg {
+		t.Errorf("ExecPrefix = %v, want it to start with sandbox-exec", counting.lastReq.ExecPrefix)
+	}
+	if rr.Res.Response == nil || rr.Res.Response.Header().Outcome != response.OutcomeOk {
+		t.Errorf("outcome = %v, want ok", rr.Res.Response)
+	}
+}
+
+// testJudgeTestJob is the machine.toml job name TestRunJobJudgeParamsCodexHome
+// and TestRunJobJudgeEmptyCodexHomeIsConfigError both register, a copy of
+// the build job with its own Sandbox set to "judge" (goconst: shared by
+// both).
+const testJudgeTestJob = "judge-test-job"
+
+// newJudgeProfileJob returns a machine.Machine whose own testJudgeTestJob
+// entry is a copy of testJobBuild with Sandbox set to "judge", for a test
+// that exercises runJob's own CODEX_HOME wiring (PKG9-PLAN.md section 7.3,
+// D27) without needing the real judge.sb profile or a scenarios file: the
+// Sandbox this test slots into Deps.Sandboxes.Judge is loaded under the
+// name "build" (loadTestSandboxOrSkip), so sandbox.Prefix's own
+// judge-name-keyed "SCENARIOS_FILE and CODEX_HOME together" rule never
+// triggers, the same way TestRunJobPicksProfileByName reuses a sandbox
+// loaded under one name for a different Deps.Sandboxes slot.
+func newJudgeProfileJob(t *testing.T) *machine.Machine {
+	t.Helper()
+	m := runJobTestMachine(t)
+	judgeJob := m.Jobs[testJobBuild]
+	judgeJob.Sandbox = sandboxProfileJudge
+	m.Jobs[testJudgeTestJob] = judgeJob
+	return m
+}
+
+// TestRunJobJudgeParamsCodexHome proves runJob's applySandbox step fills
+// Params.CodexHome from Deps.JudgeCodexHome for a job whose profile is
+// "judge" (PKG9-PLAN.md section 7.3, D27): the sandbox-exec prefix carries
+// "-D CODEX_HOME=<value>".
+func TestRunJobJudgeParamsCodexHome(t *testing.T) {
+	t.Parallel()
+	judgeSB := loadTestSandboxOrSkip(t)
+
+	s := newRunJobTestStore(t)
+	ticketID := seedRunJobTicket(t, s)
+	ticket := getRunJobTicket(t, s, ticketID)
+	owner, expires := claimRunJobTicket(t, s, ticketID)
+
+	m := newJudgeProfileJob(t)
+	scripts := fstest.MapFS{testBuildScriptKey: &fstest.MapFile{Data: []byte(buildOkXML)}}
+	counting := &countingRuntime{rt: runtime.NewFake(scripts)}
+	set, err := runtime.NewSet(map[string]runtime.Runtime{testRuntimeClaude: counting, testRuntimeCodex: counting, runtimeFake: counting})
+	if err != nil {
+		t.Fatalf("runtime.NewSet: %v", err)
+	}
+
+	const wantJudgeCodexHome = "/test/judge/codex/home"
+	deps := Deps{
+		Store: s, Runtimes: set, Machine: m,
+		Models: map[string]string{testModelAlias: testModelExact, testModelAliasOpus: testModelExact, testModelAliasFable: testModelExact, testRuntimeCodex: testModelExact},
+		Budget: time.Hour, Owner: owner, Expires: expires, Reserve: realReserve(s, owner, expires),
+		Projects:       map[int64]Project{ticket.ProjectID: {RepoGit: t.TempDir()}},
+		Sandboxes:      sandbox.Set{Build: sandbox.Off(), Judge: judgeSB},
+		RequireSandbox: true,
+		JudgeCodexHome: wantJudgeCodexHome,
+	}
+
+	_, err = runJob(t.Context(), deps, ticket, testJudgeTestJob, store.SessionUpsert{Job: testJudgeTestJob, Runtime: testRuntimeCodex},
+		runtime.RunRequest{Job: response.JobBuild, Label: testBuildLabel, WorkDir: t.TempDir()}, nil, nil, 0)
+	if err != nil {
+		t.Fatalf("runJob: %v", err)
+	}
+	wantFlag := "CODEX_HOME=" + wantJudgeCodexHome
+	if !slices.Contains(counting.lastReq.ExecPrefix, wantFlag) {
+		t.Errorf("ExecPrefix = %v, want it to contain %q", counting.lastReq.ExecPrefix, wantFlag)
+	}
+}
+
+// TestRunJobJudgeEmptyCodexHomeIsConfigError proves a judge-profile job
+// with an empty Deps.JudgeCodexHome refuses to run at all, before any
+// reserve, with the exact error text (PKG9-PLAN.md section 7.3, D27).
+func TestRunJobJudgeEmptyCodexHomeIsConfigError(t *testing.T) {
+	t.Parallel()
+	judgeSB := loadTestSandboxOrSkip(t)
+
+	s := newRunJobTestStore(t)
+	ticketID := seedRunJobTicket(t, s)
+	ticket := getRunJobTicket(t, s, ticketID)
+	owner, expires := claimRunJobTicket(t, s, ticketID)
+
+	m := newJudgeProfileJob(t)
+	counting := &countingRuntime{rt: runtime.NewFake(fstest.MapFS{})}
+	set, err := runtime.NewSet(map[string]runtime.Runtime{testRuntimeClaude: counting, testRuntimeCodex: counting, runtimeFake: counting})
+	if err != nil {
+		t.Fatalf("runtime.NewSet: %v", err)
+	}
+
+	rec := &recordingReserve{fn: realReserve(s, owner, expires)}
+	deps := Deps{
+		Store: s, Runtimes: set, Machine: m,
+		Models: map[string]string{testModelAlias: testModelExact, testModelAliasOpus: testModelExact, testModelAliasFable: testModelExact, testRuntimeCodex: testModelExact},
+		Budget: time.Hour, Owner: owner, Expires: expires, Reserve: rec.Reserve,
+		Projects:       map[int64]Project{ticket.ProjectID: {RepoGit: t.TempDir()}},
+		Sandboxes:      sandbox.Set{Build: sandbox.Off(), Judge: judgeSB},
+		RequireSandbox: true,
+		// JudgeCodexHome left empty.
+	}
+
+	_, err = runJob(t.Context(), deps, ticket, testJudgeTestJob, store.SessionUpsert{Job: testJudgeTestJob, Runtime: testRuntimeCodex},
+		runtime.RunRequest{Job: response.JobBuild, Label: testBuildLabel, WorkDir: t.TempDir()}, nil, nil, 0)
+	if !errors.Is(err, ErrConfig) {
+		t.Fatalf("err = %v, want errors.Is(err, ErrConfig)", err)
+	}
+	want := "job: configuration error: judge codex home is not configured"
+	if err.Error() != want {
+		t.Errorf("err = %q, want %q", err.Error(), want)
+	}
+	if rec.calls != 0 {
+		t.Errorf("Reserve calls = %d, want 0", rec.calls)
+	}
+	if counting.calls != 0 {
+		t.Errorf("runtime Run calls = %d, want 0", counting.calls)
+	}
+}
+
+// TestRunJobUnknownProfileIsConfigError proves a job whose machine.toml
+// sandbox name Set.For does not recognize is ErrConfig, with nothing
+// reserved and the runtime never called (PKG9-PLAN.md section 4.7): this
+// can never happen through a real, validated machine.toml (machine.go's
+// own validateJob already refuses any other value), so this test builds
+// its own machine.Machine to reach runJob's own defensive check directly.
+func TestRunJobUnknownProfileIsConfigError(t *testing.T) {
+	t.Parallel()
+	s := newRunJobTestStore(t)
+	ticketID := seedRunJobTicket(t, s)
+	ticket := getRunJobTicket(t, s, ticketID)
+	owner, expires := claimRunJobTicket(t, s, ticketID)
+
+	m := runJobTestMachine(t)
+	mysteryJob := m.Jobs[testJobBuild]
+	mysteryJob.Sandbox = "mystery"
+	const testJobMystery = "mystery-test-job"
+	m.Jobs[testJobMystery] = mysteryJob
+
+	counting := &countingRuntime{rt: runtime.NewFake(fstest.MapFS{})}
+	set, err := runtime.NewSet(map[string]runtime.Runtime{testRuntimeClaude: counting, testRuntimeCodex: counting, runtimeFake: counting})
+	if err != nil {
+		t.Fatalf("runtime.NewSet: %v", err)
+	}
+
+	rec := &recordingReserve{fn: realReserve(s, owner, expires)}
+	deps := Deps{
+		Store: s, Runtimes: set, Machine: m,
+		Models: map[string]string{testModelAlias: testModelExact, testModelAliasOpus: testModelExact, testModelAliasFable: testModelExact, testRuntimeCodex: testModelExact},
+		Budget: time.Hour, Owner: owner, Expires: expires, Reserve: rec.Reserve,
+		Projects:       map[int64]Project{ticket.ProjectID: {RepoGit: t.TempDir()}},
+		Sandboxes:      sandbox.OffSet(),
+		RequireSandbox: true,
+	}
+
+	_, err = runJob(t.Context(), deps, ticket, testJobMystery, store.SessionUpsert{Job: testJobMystery, Runtime: testRuntimeClaude},
+		runtime.RunRequest{Job: response.JobBuild, Label: testBuildLabel, WorkDir: t.TempDir()}, nil, nil, 0)
+	if !errors.Is(err, ErrConfig) {
+		t.Fatalf("err = %v, want errors.Is(err, ErrConfig)", err)
+	}
+	if rec.calls != 0 {
+		t.Errorf("Reserve calls = %d, want 0", rec.calls)
+	}
+	if counting.calls != 0 {
+		t.Errorf("runtime Run calls = %d, want 0", counting.calls)
+	}
+}
+
+// ---- the private temp root of an unsandboxed run (design section 7.3) ----
+
+// TestRunJobEmptyDataDirIsConfigError proves a job naming no sandbox
+// (classify) refuses to run at all with an empty Deps.DataDir, before any
+// reserve (PKG9-PLAN.md section 7.3): a private temp root needs somewhere
+// to live.
+func TestRunJobEmptyDataDirIsConfigError(t *testing.T) {
+	t.Parallel()
+	s := newRunJobTestStore(t)
+	ticketID := seedRunJobTicket(t, s)
+	ticket := getRunJobTicket(t, s, ticketID)
+	owner, expires := claimRunJobTicket(t, s, ticketID)
+
+	fake := runtime.NewFake(fstest.MapFS{})
+	set, err := runtime.NewSet(map[string]runtime.Runtime{testRuntimeClaude: fake, testRuntimeCodex: fake, runtimeFake: fake})
+	if err != nil {
+		t.Fatalf("runtime.NewSet: %v", err)
+	}
+
+	rec := &recordingReserve{fn: realReserve(s, owner, expires)}
+	d := Deps{
+		Store: s, Runtimes: set, Machine: runJobTestMachine(t), Models: map[string]string{testModelAlias: testModelExact},
+		Budget: time.Hour, Owner: owner, Expires: expires, Reserve: rec.Reserve,
+		// DataDir deliberately left empty.
+	}
+
+	_, err = runJob(t.Context(), d, ticket, testJobClassify, store.SessionUpsert{}, runtime.RunRequest{Job: response.JobClassify}, nil, nil, 0)
+	if !errors.Is(err, ErrConfig) {
+		t.Fatalf("err = %v, want errors.Is(err, ErrConfig)", err)
+	}
+	if rec.calls != 0 {
+		t.Errorf("Reserve calls = %d, want 0", rec.calls)
+	}
+}
+
+// TestUnsandboxedRunGetsPrivateTemp proves a job naming no sandbox
+// (classify) carries TMPDIR and CLAUDE_CODE_TMPDIR pointing under
+// <DataDir>/tmp/run/ in its request env, and that the private temp root is
+// removed once runJob returns (PKG9-PLAN.md section 7.3).
+func TestUnsandboxedRunGetsPrivateTemp(t *testing.T) {
+	t.Parallel()
+	s := newRunJobTestStore(t)
+	ticketID := seedRunJobTicket(t, s)
+	ticket := getRunJobTicket(t, s, ticketID)
+	owner, expires := claimRunJobTicket(t, s, ticketID)
+
+	dataDir := t.TempDir()
+	scripts := fstest.MapFS{testClassifyScriptKey: &fstest.MapFile{Data: []byte(classifyBugXML)}}
+	counting := &countingRuntime{rt: runtime.NewFake(scripts)}
+	set, err := runtime.NewSet(map[string]runtime.Runtime{testRuntimeClaude: counting, testRuntimeCodex: counting, runtimeFake: counting})
+	if err != nil {
+		t.Fatalf("runtime.NewSet: %v", err)
+	}
+
+	d := Deps{
+		Store: s, Runtimes: set, Machine: runJobTestMachine(t), Models: map[string]string{testModelAlias: testModelExact},
+		Budget: time.Hour, Owner: owner, Expires: expires, Reserve: realReserve(s, owner, expires),
+		DataDir: dataDir,
+	}
+
+	_, err = runJob(t.Context(), d, ticket, testJobClassify, store.SessionUpsert{Job: testJobClassify, Runtime: testRuntimeClaude},
+		runtime.RunRequest{Job: response.JobClassify}, nil, nil, 0)
+	if err != nil {
+		t.Fatalf("runJob: %v", err)
+	}
+
+	var tmpDir, claudeTmpDir string
+	for _, kv := range counting.lastReq.Env {
+		if after, ok := strings.CutPrefix(kv, "TMPDIR="); ok {
+			tmpDir = after
+		}
+		if after, ok := strings.CutPrefix(kv, "CLAUDE_CODE_TMPDIR="); ok {
+			claudeTmpDir = after
+		}
+	}
+	wantRoot := filepath.Join(dataDir, "tmp", "run")
+	if tmpDir == "" || !strings.HasPrefix(tmpDir, wantRoot) {
+		t.Errorf("TMPDIR = %q, want it under %q", tmpDir, wantRoot)
+	}
+	if claudeTmpDir == "" || !strings.HasPrefix(claudeTmpDir, wantRoot) {
+		t.Errorf("CLAUDE_CODE_TMPDIR = %q, want it under %q", claudeTmpDir, wantRoot)
+	}
+
+	privateRoot := filepath.Dir(tmpDir) // the run-id directory, parent of "tmp"
+	if _, statErr := os.Stat(privateRoot); !os.IsNotExist(statErr) {
+		t.Errorf("private temp root %s still exists after runJob returned (stat err = %v)", privateRoot, statErr)
+	}
+}
+
+// TestRunJobSeedsTaskN proves runJob copies its own taskN parameter into
+// RunSeed.TaskN (design section 6.3): a non-nil taskN lands on the reserved
+// run's own task_n column, and a nil one (planning's own four callers)
+// leaves it NULL.
+func TestRunJobSeedsTaskN(t *testing.T) {
+	t.Parallel()
+	s := newRunJobTestStore(t)
+	ticketID := seedRunJobTicket(t, s)
+	ticket := getRunJobTicket(t, s, ticketID)
+	owner, expires := claimRunJobTicket(t, s, ticketID)
+
+	scripts := fstest.MapFS{testClassifyScriptKey: &fstest.MapFile{Data: []byte(classifyBugXML)}}
 	fake := runtime.NewFake(scripts)
 	set, err := runtime.NewSet(map[string]runtime.Runtime{testRuntimeClaude: fake, testRuntimeCodex: fake, runtimeFake: fake})
 	if err != nil {
@@ -690,11 +1026,12 @@ func TestRunJobSeedsTaskN(t *testing.T) {
 	d := Deps{
 		Store: s, Runtimes: set, Machine: runJobTestMachine(t), Models: map[string]string{testModelAlias: testModelExact},
 		Budget: time.Hour, Owner: owner, Expires: expires, Reserve: realReserve(s, owner, expires),
+		DataDir: t.TempDir(),
 	}
 
 	n := 3
 	rr, err := runJob(t.Context(), d, ticket, testJobClassify, store.SessionUpsert{Job: testJobClassify, Runtime: testRuntimeClaude},
-		runtime.RunRequest{Job: response.JobClassify}, &n)
+		runtime.RunRequest{Job: response.JobClassify}, &n, nil, 0)
 	if err != nil {
 		t.Fatalf("runJob: %v", err)
 	}
@@ -704,5 +1041,217 @@ func TestRunJobSeedsTaskN(t *testing.T) {
 	}
 	if run.TaskN == nil || *run.TaskN != 3 {
 		t.Errorf("run.TaskN = %v, want 3", run.TaskN)
+	}
+}
+
+// ---- runJobWith's afterReserve hook (PKG9-PLAN.md section 7.3, D19) ------
+
+// recordingHook is an afterReserve (runjob.go) that records the exact
+// store.Reserved it was called with and whether req already carried the
+// sandbox's own ExecPrefix (it must not: runJobWith only builds the prefix
+// after the hook returns, since the prefix may need to name a file the
+// hook just wrote under the run's own id). It returns scenariosFile and a
+// cleanup that counts its own calls and can be made to fail, plus hookErr.
+type recordingHook struct {
+	calls         int
+	gotRunID      int64
+	hadExecPrefix bool
+	scenariosFile string
+	cleanupCalls  int
+	cleanupErr    error
+	hookErr       error
+}
+
+func (h *recordingHook) hook(_ context.Context, rsv store.Reserved, req *runtime.RunRequest) (scenariosFile string, cleanup func() error, err error) {
+	h.calls++
+	h.gotRunID = rsv.RunID
+	h.hadExecPrefix = len(req.ExecPrefix) != 0
+	return h.scenariosFile, func() error {
+		h.cleanupCalls++
+		return h.cleanupErr
+	}, h.hookErr
+}
+
+// stubRunResult is a fixed-result runtime.Runtime: every call returns res
+// and err unconditionally, regardless of req or ctx. It stands in for the
+// real Fake in the hook tests below that only care how runJobWith's own
+// bookkeeping reacts to rt.Run's outcome (ok, a plain error, or a
+// cancellation), not about a scripted turn.
+type stubRunResult struct {
+	res runtime.RunResult
+	err error
+}
+
+func (s stubRunResult) Run(context.Context, runtime.RunRequest) (runtime.RunResult, error) {
+	return s.res, s.err
+}
+
+// TestRunJobWithHookRunsAfterReserve proves runJobWith calls its
+// afterReserve hook once, after Reserve has already fixed the run (the
+// hook sees the same run id runResult.Reserved carries) and before the
+// sandbox prefix is built (the hook's own req snapshot carries no
+// ExecPrefix yet), and that the sandbox prefix is still built, from the
+// params the hook had a chance to fill, before rt.Run (PKG9-PLAN.md section
+// 7.3).
+func TestRunJobWithHookRunsAfterReserve(t *testing.T) {
+	t.Parallel()
+	sb := loadTestSandboxOrSkip(t)
+
+	s := newRunJobTestStore(t)
+	ticketID := seedRunJobTicket(t, s)
+	ticket := getRunJobTicket(t, s, ticketID)
+	owner, expires := claimRunJobTicket(t, s, ticketID)
+
+	scripts := fstest.MapFS{testBuildScriptKey: &fstest.MapFile{Data: []byte(buildOkXML)}}
+	counting := &countingRuntime{rt: runtime.NewFake(scripts)}
+	deps := buildSandboxDeps(t, s, counting, ticket.ProjectID, owner, expires, sb, true)
+
+	h := &recordingHook{}
+	rr, err := runJobWith(t.Context(), deps, ticket, testJobBuild, store.SessionUpsert{Job: testJobBuild, Runtime: testRuntimeClaude},
+		runtime.RunRequest{Job: response.JobBuild, Label: testBuildLabel, WorkDir: t.TempDir()}, nil, nil, 0, h.hook)
+	if err != nil {
+		t.Fatalf("runJobWith: %v", err)
+	}
+
+	if h.calls != 1 {
+		t.Fatalf("hook calls = %d, want 1", h.calls)
+	}
+	if h.gotRunID != rr.Reserved.RunID {
+		t.Errorf("hook saw rsv.RunID = %d, want %d (the run Reserve fixed)", h.gotRunID, rr.Reserved.RunID)
+	}
+	if h.hadExecPrefix {
+		t.Error("hook's own req already carried an ExecPrefix; want it called before the sandbox prefix is built")
+	}
+	if len(counting.lastReq.ExecPrefix) == 0 || counting.lastReq.ExecPrefix[0] != testSandboxExecArg {
+		t.Errorf("ExecPrefix = %v, want it built (after the hook returned) before rt.Run", counting.lastReq.ExecPrefix)
+	}
+	if counting.calls != 1 {
+		t.Errorf("runtime Run calls = %d, want 1", counting.calls)
+	}
+}
+
+// TestRunJobWithHookCleanupAfterRun proves the hook's own cleanup always
+// runs once rt.Run has returned, whatever it returned: ok, a plain error,
+// or a cancellation (PKG9-PLAN.md section 7.3, matching runJob's own
+// sandbox and private-temp-root cleanups, which already run on every
+// path).
+func TestRunJobWithHookCleanupAfterRun(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name string
+		rt   runtime.Runtime
+	}{
+		{"ok", runtime.NewFake(fstest.MapFS{testBuildScriptKey: &fstest.MapFile{Data: []byte(buildOkXML)}})},
+		{"error", runtime.NewFake(fstest.MapFS{})}, // no script for the build label: rt.Run errors
+		{"canceled", stubRunResult{err: runtime.ErrCanceled}},
+	}
+
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			t.Parallel()
+			sb := loadTestSandboxOrSkip(t)
+
+			s := newRunJobTestStore(t)
+			ticketID := seedRunJobTicket(t, s)
+			ticket := getRunJobTicket(t, s, ticketID)
+			owner, expires := claimRunJobTicket(t, s, ticketID)
+
+			deps := buildSandboxDeps(t, s, c.rt, ticket.ProjectID, owner, expires, sb, true)
+
+			h := &recordingHook{}
+			if _, runErr := runJobWith(t.Context(), deps, ticket, testJobBuild, store.SessionUpsert{Job: testJobBuild, Runtime: testRuntimeClaude},
+				runtime.RunRequest{Job: response.JobBuild, Label: testBuildLabel, WorkDir: t.TempDir()}, nil, nil, 0, h.hook); runErr != nil {
+				t.Logf("runJobWith: %v (expected for the %s case)", runErr, c.name)
+			}
+
+			if h.cleanupCalls != 1 {
+				t.Errorf("hook cleanup calls = %d, want 1 (rt.Run outcome: %s)", h.cleanupCalls, c.name)
+			}
+		})
+	}
+}
+
+// TestRunJobWithHookErrorTerminalizes proves a hook error still returns the
+// reserved run (Reserved.RunID set), the same shape a runtime failure
+// returns, since Reserve has already fixed this call's turn by the time the
+// hook runs: a caller like runAndRoute needs Reserved.RunID != 0 to route
+// the error into postRunFailure rather than leaving the run's outcome NULL
+// forever (PKG9-PLAN.md section 7.3). rt.Run itself is never called: the
+// hook's own error comes before it.
+func TestRunJobWithHookErrorTerminalizes(t *testing.T) {
+	t.Parallel()
+	sb := loadTestSandboxOrSkip(t)
+
+	s := newRunJobTestStore(t)
+	ticketID := seedRunJobTicket(t, s)
+	ticket := getRunJobTicket(t, s, ticketID)
+	owner, expires := claimRunJobTicket(t, s, ticketID)
+
+	counting := &countingRuntime{rt: runtime.NewFake(fstest.MapFS{})}
+	deps := buildSandboxDeps(t, s, counting, ticket.ProjectID, owner, expires, sb, true)
+
+	wantErr := errors.New("write scenarios file: boom")
+	h := &recordingHook{hookErr: wantErr}
+	rr, err := runJobWith(t.Context(), deps, ticket, testJobBuild, store.SessionUpsert{Job: testJobBuild, Runtime: testRuntimeClaude},
+		runtime.RunRequest{Job: response.JobBuild, Label: testBuildLabel, WorkDir: t.TempDir()}, nil, nil, 0, h.hook)
+
+	if !errors.Is(err, wantErr) {
+		t.Fatalf("err = %v, want %v", err, wantErr)
+	}
+	if rr.Reserved.RunID == 0 {
+		t.Error("Reserved.RunID = 0, want the run Reserve already fixed")
+	}
+	if counting.calls != 0 {
+		t.Errorf("runtime Run calls = %d, want 0 (the hook errored before rt.Run)", counting.calls)
+	}
+	if h.cleanupCalls != 1 {
+		t.Errorf("hook cleanup calls = %d, want 1 (still run on a hook error)", h.cleanupCalls)
+	}
+}
+
+// TestRunJobWithHookCleanupFailureLogged proves a cleanup error the hook
+// returns is logged at WARN as "run cleanup failed" with ticket_id and
+// run_id, and never replaces the run's own (successful) result (PKG9-PLAN.md
+// section 7.3). Not parallel: it calls slog.SetDefault to capture a log
+// line, which swaps the process-wide default logger.
+func TestRunJobWithHookCleanupFailureLogged(t *testing.T) {
+	sb := loadTestSandboxOrSkip(t)
+
+	s := newRunJobTestStore(t)
+	ticketID := seedRunJobTicket(t, s)
+	ticket := getRunJobTicket(t, s, ticketID)
+	owner, expires := claimRunJobTicket(t, s, ticketID)
+
+	scripts := fstest.MapFS{testBuildScriptKey: &fstest.MapFile{Data: []byte(buildOkXML)}}
+	counting := &countingRuntime{rt: runtime.NewFake(scripts)}
+	deps := buildSandboxDeps(t, s, counting, ticket.ProjectID, owner, expires, sb, true)
+
+	cleanupErr := errors.New("remove scenarios dir: boom")
+	h := &recordingHook{cleanupErr: cleanupErr}
+
+	var logBuf bytes.Buffer
+	prevDefault := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logBuf, &slog.HandlerOptions{Level: slog.LevelWarn})))
+	t.Cleanup(func() { slog.SetDefault(prevDefault) })
+
+	rr, err := runJobWith(t.Context(), deps, ticket, testJobBuild, store.SessionUpsert{Job: testJobBuild, Runtime: testRuntimeClaude},
+		runtime.RunRequest{Job: response.JobBuild, Label: testBuildLabel, WorkDir: t.TempDir()}, nil, nil, 0, h.hook)
+	if err != nil {
+		t.Fatalf("runJobWith: %v", err)
+	}
+
+	logged := logBuf.String()
+	if !strings.Contains(logged, "run cleanup failed") {
+		t.Fatalf("log missing \"run cleanup failed\"; got:\n%s", logged)
+	}
+	if !strings.Contains(logged, "ticket_id="+strconv.FormatInt(ticket.ID, 10)) {
+		t.Errorf("log missing ticket_id=%d; got:\n%s", ticket.ID, logged)
+	}
+	if !strings.Contains(logged, "run_id="+strconv.FormatInt(rr.Reserved.RunID, 10)) {
+		t.Errorf("log missing run_id=%d; got:\n%s", rr.Reserved.RunID, logged)
+	}
+	if !strings.Contains(logged, cleanupErr.Error()) {
+		t.Errorf("log missing the cleanup error text; got:\n%s", logged)
 	}
 }

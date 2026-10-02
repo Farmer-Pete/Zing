@@ -23,6 +23,7 @@ func goldenPath(job Job, outcome Outcome) string {
 // exactly. It enumerates the same registry task 1 built (registry.go), so a
 // pair added there gets a golden here without this test changing.
 func TestRenderTemplate_MatchesGolden(t *testing.T) {
+	t.Parallel()
 	if *update {
 		for key := range registry {
 			out, err := RenderTemplate(key.Job, key.Outcome)
@@ -41,6 +42,7 @@ func TestRenderTemplate_MatchesGolden(t *testing.T) {
 
 	for key := range registry {
 		t.Run(string(key.Job)+"/"+string(key.Outcome), func(t *testing.T) {
+			t.Parallel()
 			got, err := RenderTemplate(key.Job, key.Outcome)
 			if err != nil {
 				t.Fatalf("RenderTemplate(%s, %s): %v", key.Job, key.Outcome, err)
@@ -235,6 +237,34 @@ func TestRenderTemplate_EachFieldShowsItsType(t *testing.T) {
 				t.Errorf("planning/ready template missing %q", tt.want)
 			}
 		})
+	}
+}
+
+// TestRenderTemplate_OutcomeNoteIsJobScoped asserts the root outcome
+// attribute's "one of: ..." note lists only the rendering job's own
+// registered outcomes plus the two universal ones, question and error
+// (design section 22.6, the D31-4 fix): OutcomeReplies sits in the shared
+// Outcome.Values() text, so without this, every job's schema would list
+// "replies" even though only planning ever returns it.
+func TestRenderTemplate_OutcomeNoteIsJobScoped(t *testing.T) {
+	t.Parallel()
+
+	for _, job := range []Job{JobBuild, JobReview, JobJudge, JobRespond} {
+		out, err := RenderTemplate(job, OutcomeOk)
+		if err != nil {
+			t.Fatalf("RenderTemplate(%s, ok): %v", job, err)
+		}
+		if strings.Contains(out, "replies") {
+			t.Errorf("%s/ok template mentions replies; a non-planning agent must never see it:\n%s", job, out)
+		}
+	}
+
+	out, err := RenderTemplate(JobPlanning, OutcomeReady)
+	if err != nil {
+		t.Fatalf("RenderTemplate(planning, ready): %v", err)
+	}
+	if !strings.Contains(out, "one of: questions | replies | confirmed | ready | children | nothing_to_do | question | error") {
+		t.Errorf("planning/ready template's outcome note does not list replies among planning's own outcomes:\n%s", out)
 	}
 }
 

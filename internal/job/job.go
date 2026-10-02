@@ -62,10 +62,12 @@ type Deps struct {
 	// the repository's common git dir, and the project's test and lint
 	// commands. Wired by dispatch.Config.Projects.
 	Projects map[int64]Project
-	// Sandbox is the seatbelt profile runJob wraps a sandboxed job's run in
-	// (section 5.5). serve loads a real one; selftest and most test suites
-	// use sandbox.Off().
-	Sandbox sandbox.Sandbox
+	// Sandboxes holds the loaded profile set runJob wraps a sandboxed job's
+	// run in, keyed by the name machine.toml's job.sandbox gives it: build,
+	// readonly, or judge (PKG9-PLAN.md section 4.3, 4.7, replacing the
+	// single Sandbox field). serve loads real profiles; selftest and most
+	// test suites use sandbox.OffSet().
+	Sandboxes sandbox.Set
 	// RequireSandbox is true in serve (a real build run refuses to start
 	// without a loaded sandbox, design N9) and false in selftest and every
 	// suite that drives the fake runtime.
@@ -73,6 +75,43 @@ type Deps struct {
 	// Commands runs the test and lint re-runs a build unit's CHECK step
 	// makes (task 9). Wired by dispatch.Config.Commands.
 	Commands CommandRunner
+	// DataDir is the resolved data directory (PKG9-PLAN.md section 4.3,
+	// 7.3): the private temp root runJob gives every run whose job names no
+	// sandbox lives under it. Empty is ErrConfig for a run that needs one.
+	DataDir string
+	// LensesParallel bounds how many of ROUND's seven lens runs are ever in
+	// flight at once (PKG9-PLAN.md section 4.3, 6.2): config.Review's own
+	// max_lenses_parallel, 1..7. Wired by dispatch.Config.LensesParallel.
+	LensesParallel int
+	// JudgeCodexHome is the resolved judge_codex_home (PKG9-PLAN.md section
+	// 4.3, 4.5, D27): the judge's own persistent Codex home, copied into
+	// the sandbox's CODEX_HOME parameter for any job whose profile is
+	// "judge" (runjob.go). Empty for a judge run is ErrConfig. Wired by
+	// dispatch.Config.JudgeCodexHome.
+	JudgeCodexHome string
+	// Tracker is what the shipping handler needs from the tracker
+	// (PKG9-PLAN.md section 8.6, 17.1): PUBLISH's own PostPRLink, and
+	// POLL's PostDone (task 7). The dispatcher implements ShipTracker over
+	// its own tracker and bindings and passes itself here
+	// (internal/dispatch/dispatch.go's runAndCommit).
+	Tracker ShipTracker
+	// MergeRule is config.Merge, resolved once at startup (PKG9-PLAN.md
+	// section 4.3, 8.8): mergeDecision's own input for row 9's automatic
+	// merge gate (shiprules.go). The zero value (Auto false) always asks.
+	MergeRule MergeRule
+}
+
+// MergeRule is design section 8.8's own merge rule (zing.toml's [merge]
+// table, config.Merge): Auto gates every automatic merge off by default
+// (N5); ManualPaths and DependencyFiles each name path globs or exact/base
+// names that block an automatic merge even when Auto is on, so
+// mergeDecision (shiprules.go) can ask instead. Method is the GitHub merge
+// method MERGE itself calls with (squash, merge, or rebase).
+type MergeRule struct {
+	Auto            bool
+	Method          string
+	ManualPaths     []string
+	DependencyFiles []string
 }
 
 // Project is what building needs to know about one store project (design
@@ -82,6 +121,16 @@ type Project struct {
 	RepoGit string // the repository's common git dir, absolute; Orch.GitCommonDir at startup
 	TestCmd string // config projects[i].commands.test
 	LintCmd string // config projects[i].commands.lint
+	Owner   string // the GitHub repository owner serve fills every project with (PKG9-PLAN.md section 10.3)
+	Repo    string // the GitHub repository name serve fills every project with (PKG9-PLAN.md section 10.3)
+	// PullRequests, Flips, Checks, and Threads are the shipping and respond
+	// handlers' own window onto GitHub (PKG9-PLAN.md section 10.3): serve
+	// fills all four from one shared *orchestrator.GitHubClient; a test fake
+	// implements only the interface its test needs.
+	PullRequests PullRequests
+	Flips        DraftFlips
+	Checks       Checks
+	Threads      ReviewThreads
 }
 
 // CommandRunner runs one shell command in dir, in its own process group, and
@@ -139,18 +188,18 @@ type Handler interface {
 }
 
 // Registry returns the six pipeline-state handlers (design section 6.5),
-// keyed by the state each drives: queued, reviewing, judging, and shipping
-// are still the skeleton's code-only transitions; planning (task 6) and
-// building (task 9) are the real handlers. done is terminal and carries no
-// handler.
+// keyed by the state each drives: queued is still the skeleton's code-only
+// transition; planning (task 6), building (task 9), reviewing (task 10),
+// judging (M2 task 8), and shipping (M3 task 6, PUBLISH; task 7, POLL) are
+// the real handlers. done is terminal and carries no handler.
 func Registry() map[string]Handler {
 	return map[string]Handler{
 		stateQueued:    queuedHandler{},
 		statePlanning:  planningHandler{},
 		stateBuilding:  buildingHandler{},
 		stateReviewing: reviewingHandler{},
-		stateJudging:   judgingHandler{},
-		stateShipping:  shippingHandler{},
+		stateJudging:   judgeHandler{},
+		stateShipping:  shipHandler{},
 	}
 }
 
@@ -180,9 +229,9 @@ var legalEdges = map[string][]string{
 	stateQueued:    {statePlanning},
 	statePlanning:  {statePlanning, stateBuilding, stateDone, stateAbandoned},
 	stateBuilding:  {stateReviewing, stateAbandoned},
-	stateReviewing: {stateJudging},
-	stateJudging:   {stateShipping},
-	stateShipping:  {stateDone},
+	stateReviewing: {stateJudging, stateAbandoned},
+	stateJudging:   {stateShipping, stateAbandoned},
+	stateShipping:  {stateDone, stateAbandoned},
 }
 
 // legalWaiting is the eight waiting_on flags migrations/0001_init.sql
@@ -196,8 +245,9 @@ var legalWaiting = map[string]bool{
 // commit shape rules (design section 6.5): c.TicketID must name the ticket
 // it was built against, the commit must do something (it is never wholly
 // empty: at least one of Next, Waiting, Messages, Runs, ResolveQuestions,
-// Session, SetKind, SetBranch, Artifacts, ResolveAll, Seal, Escalation, or
-// TrackerEffect must be set), when Next is set it names a legal successor of
+// Session, Sessions, SetKind, SetBranch, Artifacts, ResolveAll, Seal,
+// Escalation, TrackerEffect, SetPRURL, Poll, PollSchedule, ClearPoll, or
+// Conversation must be set), when Next is set it names a legal successor of
 // t.State and carries a non-empty Reason, and it does not also set a
 // non-error Waiting; any set Waiting is one of the eight closed-set flags.
 func ValidateCommit(t store.Ticket, c store.HandlerCommit) error {
@@ -205,10 +255,12 @@ func ValidateCommit(t store.Ticket, c store.HandlerCommit) error {
 		return fmt.Errorf("job: commit is for ticket %d, not ticket %d", c.TicketID, t.ID)
 	}
 	if c.Next == "" && c.Waiting == nil && len(c.Messages) == 0 && len(c.Runs) == 0 &&
-		len(c.ResolveQuestions) == 0 && c.Session == nil &&
+		len(c.ResolveQuestions) == 0 && c.Session == nil && len(c.Sessions) == 0 &&
 		c.SetKind == nil && c.SetBranch == nil && len(c.Artifacts) == 0 && !c.ResolveAll &&
-		c.Seal == nil && c.Escalation == nil && c.TrackerEffect == nil {
-		return fmt.Errorf("job: commit for ticket %d carries no Next, Waiting, Messages, Runs, ResolveQuestions, Session, SetKind, SetBranch, Artifacts, ResolveAll, Seal, Escalation, or TrackerEffect", t.ID)
+		c.Seal == nil && c.Escalation == nil && c.TrackerEffect == nil &&
+		c.SetPRURL == nil && c.Poll == nil && c.PollSchedule == nil && !c.ClearPoll &&
+		len(c.WithdrawQuestions) == 0 && c.Conversation == nil {
+		return fmt.Errorf("job: commit for ticket %d carries no Next, Waiting, Messages, Runs, ResolveQuestions, Session, Sessions, SetKind, SetBranch, Artifacts, ResolveAll, Seal, Escalation, TrackerEffect, SetPRURL, Poll, PollSchedule, ClearPoll, WithdrawQuestions, or Conversation", t.ID)
 	}
 	if c.Next != "" {
 		if c.Reason == "" {

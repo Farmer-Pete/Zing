@@ -15,6 +15,27 @@
     "evidence": {
       "type": "string",
       "minLength": 1
+    },
+    "kind": {
+      "type": "string",
+      "enum": [
+        "behavior",
+        "negative",
+        "performance"
+      ]
+    },
+    "round": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "sha": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{40}$"
+    },
+    "check_exit": {
+      "type": "integer",
+      "maximum": 255,
+      "minimum": -1
     }
   },
   "additionalProperties": false,
@@ -22,6 +43,9 @@
   "required": [
     "scenario_id",
     "result",
-    "evidence"
+    "evidence",
+    "kind",
+    "round",
+    "sha"
   ]
 }

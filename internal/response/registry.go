@@ -22,7 +22,9 @@ func buildRegistry() map[registryKey]func() Response {
 	m := map[registryKey]func() Response{
 		{JobClassify, OutcomeBug}:         func() Response { return &ClassifyResponse{} },
 		{JobClassify, OutcomeFeature}:     func() Response { return &ClassifyResponse{} },
-		{JobPlanning, OutcomeQuestions}:   func() Response { return &QuestionResponse{} },
+		{JobPlanning, OutcomeQuestions}:   func() Response { return &PlanningQuestionsResponse{} },
+		{JobPlanning, OutcomeReplies}:     func() Response { return &RepliesResponse{} },
+		{JobPlanning, OutcomeConfirmed}:   func() Response { return &ConfirmedResponse{} },
 		{JobPlanning, OutcomeReady}:       func() Response { return &ReadyResponse{} },
 		{JobPlanning, OutcomeChildren}:    func() Response { return &ChildrenResponse{} },
 		{JobPlanning, OutcomeNothingToDo}: func() Response { return &NothingToDoResponse{} },
@@ -39,6 +41,10 @@ func buildRegistry() map[registryKey]func() Response {
 		m[registryKey{job, OutcomeQuestion}] = func() Response { return &QuestionResponse{} }
 		m[registryKey{job, OutcomeError}] = func() Response { return &ErrorResponse{} }
 	}
+	// Planning's own "question" spelling decodes the same as "questions":
+	// a planning document may close a thread without opening a new one, so
+	// it needs the Conversation fields too (design section 22.2).
+	m[registryKey{JobPlanning, OutcomeQuestion}] = func() Response { return &PlanningQuestionsResponse{} }
 	return m
 }
 

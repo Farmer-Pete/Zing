@@ -24,6 +24,9 @@ func TestLinear_EveryMethodReturnsNotImplemented(t *testing.T) {
 	if _, err := l.Fetch(ctx, "proj", "ref"); !errors.Is(err, errLinearNotImplemented) {
 		t.Errorf("Fetch err = %v, want %v", err, errLinearNotImplemented)
 	}
+	if _, err := l.Issue(ctx, "proj", "ref"); !errors.Is(err, errLinearNotImplemented) {
+		t.Errorf("Issue err = %v, want %v", err, errLinearNotImplemented)
+	}
 	if err := l.Comment(ctx, "proj", "ref", "body"); !errors.Is(err, errLinearNotImplemented) {
 		t.Errorf("Comment err = %v, want %v", err, errLinearNotImplemented)
 	}
@@ -32,6 +35,12 @@ func TestLinear_EveryMethodReturnsNotImplemented(t *testing.T) {
 	}
 	if _, err := l.Collaborators(ctx, "proj"); !errors.Is(err, errLinearNotImplemented) {
 		t.Errorf("Collaborators err = %v, want %v", err, errLinearNotImplemented)
+	}
+	if err := l.Close(ctx, "proj", "ref"); !errors.Is(err, errLinearNotImplemented) {
+		t.Errorf("Close err = %v, want %v", err, errLinearNotImplemented)
+	}
+	if _, err := l.CommentContains(ctx, "proj", "ref", "needle"); !errors.Is(err, errLinearNotImplemented) {
+		t.Errorf("CommentContains err = %v, want %v", err, errLinearNotImplemented)
 	}
 }
 

@@ -126,6 +126,7 @@ func mustMarshalEscalation(t *testing.T, p response.EscalationPayload) []byte {
 // --- CurrentCohort (design section 4.5, 6.6 step 1) -------------------------
 
 func TestCurrentCohort_NoPlanReturnsFalse(t *testing.T) {
+	t.Parallel()
 	s := newTestStore(t)
 	ctx := t.Context()
 	_, ticketID := seedQueuedTicket(t, s, "1")
@@ -140,6 +141,7 @@ func TestCurrentCohort_NoPlanReturnsFalse(t *testing.T) {
 }
 
 func TestCurrentCohort_MaxVersionWins(t *testing.T) {
+	t.Parallel()
 	s := newTestStore(t)
 	ctx := t.Context()
 	_, ticketID := seedQueuedTicket(t, s, "1")
@@ -165,6 +167,7 @@ func TestCurrentCohort_MaxVersionWins(t *testing.T) {
 }
 
 func TestCurrentCohort_LegacyPlanNullRunIDReturnsNilRunID(t *testing.T) {
+	t.Parallel()
 	s := newTestStore(t)
 	ctx := t.Context()
 	_, ticketID := seedQueuedTicket(t, s, "1")
@@ -185,6 +188,7 @@ func TestCurrentCohort_LegacyPlanNullRunIDReturnsNilRunID(t *testing.T) {
 // --- CohortSealState (design D16, section 4.5, 6.6 step 3) ------------------
 
 func TestCohortSealState_NoneSealedCommonAtNil(t *testing.T) {
+	t.Parallel()
 	s := newTestStore(t)
 	ctx := t.Context()
 	_, ticketID := seedQueuedTicket(t, s, "1")
@@ -206,6 +210,7 @@ func TestCohortSealState_NoneSealedCommonAtNil(t *testing.T) {
 }
 
 func TestCohortSealState_AllSealedSameInstantReturnsCommonAt(t *testing.T) {
+	t.Parallel()
 	s := newTestStore(t)
 	ctx := t.Context()
 	_, ticketID := seedQueuedTicket(t, s, "1")
@@ -228,6 +233,7 @@ func TestCohortSealState_AllSealedSameInstantReturnsCommonAt(t *testing.T) {
 }
 
 func TestCohortSealState_SealedAtTwoInstantsReturnsNilCommonAt(t *testing.T) {
+	t.Parallel()
 	s := newTestStore(t)
 	ctx := t.Context()
 	_, ticketID := seedQueuedTicket(t, s, "1")
@@ -251,6 +257,7 @@ func TestCohortSealState_SealedAtTwoInstantsReturnsNilCommonAt(t *testing.T) {
 }
 
 func TestCohortSealState_DifferentCohortNotCounted(t *testing.T) {
+	t.Parallel()
 	s := newTestStore(t)
 	ctx := t.Context()
 	_, ticketID := seedQueuedTicket(t, s, "1")
@@ -273,6 +280,7 @@ func TestCohortSealState_DifferentCohortNotCounted(t *testing.T) {
 // --- ScenariosForRun / AllScenarios (design section 7, 8) -------------------
 
 func TestScenariosForRun_OrderedByIDAndSealedOnlyFilters(t *testing.T) {
+	t.Parallel()
 	s := newTestStore(t)
 	ctx := t.Context()
 	_, ticketID := seedQueuedTicket(t, s, "1")
@@ -310,6 +318,7 @@ func TestScenariosForRun_OrderedByIDAndSealedOnlyFilters(t *testing.T) {
 }
 
 func TestAllScenarios_OrderedByIDAcrossRunsAndLegacyRows(t *testing.T) {
+	t.Parallel()
 	s := newTestStore(t)
 	ctx := t.Context()
 	_, ticketID := seedQueuedTicket(t, s, "1")
@@ -341,12 +350,18 @@ func TestAllScenarios_OrderedByIDAcrossRunsAndLegacyRows(t *testing.T) {
 // --- AnsweredRounds (design section 4.5, 5.1 step 1) ------------------------
 
 func TestAnsweredRounds_TwoRoundsNewestFirst(t *testing.T) {
+	t.Parallel()
 	s := newTestStore(t)
 	ctx := t.Context()
 	_, ticketID := seedQueuedTicket(t, s, "1")
 	setTicketState(t, s, ticketID, testStatePlanning)
-	sessA := insertSession(t, s, ticketID, testStatePlanning)
-	sessB := insertSession(t, s, ticketID, testStatePlanning)
+	// The round-grouping mechanics under test here are generic to any job;
+	// "classify" stands in rather than "planning" because a planning-job
+	// session's own questions are excluded from AnsweredRounds entirely
+	// (D31, design section 22.1, 22.3).
+	const roundJob = "classify"
+	sessA := insertSession(t, s, ticketID, roundJob)
+	sessB := insertSession(t, s, ticketID, roundJob)
 	runA := insertQuestionRun(t, s, sessA)
 	runB := insertQuestionRun(t, s, sessB)
 
@@ -371,8 +386,8 @@ func TestAnsweredRounds_TwoRoundsNewestFirst(t *testing.T) {
 	if rounds[1].RunID == nil || *rounds[1].RunID != runA {
 		t.Errorf("rounds[1].RunID = %v, want %d", rounds[1].RunID, runA)
 	}
-	if rounds[0].Job != testStatePlanning || rounds[1].Job != testStatePlanning {
-		t.Errorf("rounds Job = [%q, %q], want both %q", rounds[0].Job, rounds[1].Job, testStatePlanning)
+	if rounds[0].Job != roundJob || rounds[1].Job != roundJob {
+		t.Errorf("rounds Job = [%q, %q], want both %q", rounds[0].Job, rounds[1].Job, roundJob)
 	}
 	if rounds[0].SessionID == nil || *rounds[0].SessionID != sessB {
 		t.Errorf("rounds[0].SessionID = %v, want %d", rounds[0].SessionID, sessB)
@@ -383,11 +398,14 @@ func TestAnsweredRounds_TwoRoundsNewestFirst(t *testing.T) {
 }
 
 func TestAnsweredRounds_RepliesWithNoAnswer(t *testing.T) {
+	t.Parallel()
 	s := newTestStore(t)
 	ctx := t.Context()
 	_, ticketID := seedQueuedTicket(t, s, "1")
 	setTicketState(t, s, ticketID, testStatePlanning)
-	sess := insertSession(t, s, ticketID, testStatePlanning)
+	// "classify" stands in for the generic mechanics under test; see
+	// TestAnsweredRounds_TwoRoundsNewestFirst's own comment.
+	sess := insertSession(t, s, ticketID, "classify")
 	runID := insertQuestionRun(t, s, sess)
 
 	qID := insertOpenQuestion(t, s, ticketID, runID, "Q1")
@@ -410,11 +428,14 @@ func TestAnsweredRounds_RepliesWithNoAnswer(t *testing.T) {
 }
 
 func TestAnsweredRounds_UnrelatedReplyToAnotherParentExcluded(t *testing.T) {
+	t.Parallel()
 	s := newTestStore(t)
 	ctx := t.Context()
 	_, ticketID := seedQueuedTicket(t, s, "1")
 	setTicketState(t, s, ticketID, testStatePlanning)
-	sess := insertSession(t, s, ticketID, testStatePlanning)
+	// "classify" stands in for the generic mechanics under test; see
+	// TestAnsweredRounds_TwoRoundsNewestFirst's own comment.
+	sess := insertSession(t, s, ticketID, "classify")
 	runID := insertQuestionRun(t, s, sess)
 
 	qID := insertOpenQuestion(t, s, ticketID, runID, "Q1")
@@ -437,6 +458,7 @@ func TestAnsweredRounds_UnrelatedReplyToAnotherParentExcluded(t *testing.T) {
 }
 
 func TestAnsweredRounds_ParentKeyedRoundFromEscalation(t *testing.T) {
+	t.Parallel()
 	s := newTestStore(t)
 	ctx := t.Context()
 	_, ticketID := seedQueuedTicket(t, s, "1")
@@ -447,7 +469,7 @@ func TestAnsweredRounds_ParentKeyedRoundFromEscalation(t *testing.T) {
 		TicketID: ticketID, Owner: owner, Expires: expires,
 		Waiting: new(testWaitingQuestions),
 		Escalation: &EscalationCommit{
-			RunID: nil, Body: "wall_clock: over budget",
+			RunID: nil, Body: testEscalationBodyWallClock,
 			Payload: escalationTestPayload(response.EscalationCodeWallClock, response.EscalationOriginCapBudget),
 		},
 	}); err != nil {
@@ -501,6 +523,7 @@ func TestAnsweredRounds_ParentKeyedRoundFromEscalation(t *testing.T) {
 }
 
 func TestAnsweredRounds_ResolvedQuestionExcluded(t *testing.T) {
+	t.Parallel()
 	s := newTestStore(t)
 	ctx := t.Context()
 	_, ticketID := seedQueuedTicket(t, s, "1")
@@ -527,6 +550,7 @@ func TestAnsweredRounds_ResolvedQuestionExcluded(t *testing.T) {
 // --- RunContext (design section 4.5) ----------------------------------------
 
 func TestRunContext_ReturnsJobAndTicket(t *testing.T) {
+	t.Parallel()
 	s := newTestStore(t)
 	ctx := t.Context()
 	_, ticketID := seedQueuedTicket(t, s, "1")
@@ -546,6 +570,7 @@ func TestRunContext_ReturnsJobAndTicket(t *testing.T) {
 }
 
 func TestRunContext_UnknownRunWrapsErrNoRows(t *testing.T) {
+	t.Parallel()
 	s := newTestStore(t)
 	ctx := t.Context()
 
@@ -558,6 +583,7 @@ func TestRunContext_UnknownRunWrapsErrNoRows(t *testing.T) {
 // --- ProjectForTicket --------------------------------------------------------
 
 func TestProjectForTicket_ReturnsTheTicketsProject(t *testing.T) {
+	t.Parallel()
 	s := newTestStore(t)
 	ctx := t.Context()
 	projectID, ticketID := seedQueuedTicket(t, s, "1")
@@ -577,6 +603,7 @@ func TestProjectForTicket_ReturnsTheTicketsProject(t *testing.T) {
 // --- AgentSecondsForTicket (design section 4.6's budget check) --------------
 
 func TestAgentSecondsForTicket_SumsAcrossSessionsAndExcludesOtherTickets(t *testing.T) {
+	t.Parallel()
 	s := newTestStore(t)
 	ctx := t.Context()
 	_, ticketA := seedQueuedTicket(t, s, "1")
@@ -599,6 +626,7 @@ func TestAgentSecondsForTicket_SumsAcrossSessionsAndExcludesOtherTickets(t *test
 }
 
 func TestAgentSecondsForTicket_ZeroWhenNone(t *testing.T) {
+	t.Parallel()
 	s := newTestStore(t)
 	ctx := t.Context()
 	_, ticketID := seedQueuedTicket(t, s, "1")
@@ -615,6 +643,7 @@ func TestAgentSecondsForTicket_ZeroWhenNone(t *testing.T) {
 // --- CountDeliveredReviews (design section 5.1 step 7, 5.3) -----------------
 
 func TestCountDeliveredReviews_CountsOnlyDeliveredMarkers(t *testing.T) {
+	t.Parallel()
 	s := newTestStore(t)
 	ctx := t.Context()
 	_, ticketID := seedQueuedTicket(t, s, "1")
@@ -636,6 +665,7 @@ func TestCountDeliveredReviews_CountsOnlyDeliveredMarkers(t *testing.T) {
 // --- ConsecutiveInvalidOutputs (design D14, section 4.5, 5.4) ---------------
 
 func TestConsecutiveInvalidOutputs_ZeroWhenNoErrorRuns(t *testing.T) {
+	t.Parallel()
 	s := newTestStore(t)
 	ctx := t.Context()
 	_, ticketID := seedQueuedTicket(t, s, "1")
@@ -653,6 +683,7 @@ func TestConsecutiveInvalidOutputs_ZeroWhenNoErrorRuns(t *testing.T) {
 }
 
 func TestConsecutiveInvalidOutputs_OneWithReason(t *testing.T) {
+	t.Parallel()
 	s := newTestStore(t)
 	ctx := t.Context()
 	_, ticketID := seedQueuedTicket(t, s, "1")
@@ -674,6 +705,7 @@ func TestConsecutiveInvalidOutputs_OneWithReason(t *testing.T) {
 }
 
 func TestConsecutiveInvalidOutputs_Two(t *testing.T) {
+	t.Parallel()
 	s := newTestStore(t)
 	ctx := t.Context()
 	_, ticketID := seedQueuedTicket(t, s, "1")
@@ -698,6 +730,7 @@ func TestConsecutiveInvalidOutputs_Two(t *testing.T) {
 }
 
 func TestConsecutiveInvalidOutputs_InvalidValidInvalidGivesOne(t *testing.T) {
+	t.Parallel()
 	s := newTestStore(t)
 	ctx := t.Context()
 	_, ticketID := seedQueuedTicket(t, s, "1")
@@ -724,6 +757,7 @@ func TestConsecutiveInvalidOutputs_InvalidValidInvalidGivesOne(t *testing.T) {
 }
 
 func TestConsecutiveInvalidOutputs_EscalatedRunStopsTheWalk(t *testing.T) {
+	t.Parallel()
 	s := newTestStore(t)
 	ctx := t.Context()
 	_, ticketID := seedQueuedTicket(t, s, "1")
@@ -752,6 +786,7 @@ func TestConsecutiveInvalidOutputs_EscalatedRunStopsTheWalk(t *testing.T) {
 }
 
 func TestConsecutiveInvalidOutputs_SessionFilterExcludesOtherSessionsRuns(t *testing.T) {
+	t.Parallel()
 	s := newTestStore(t)
 	ctx := t.Context()
 	_, ticketID := seedQueuedTicket(t, s, "1")
@@ -774,6 +809,7 @@ func TestConsecutiveInvalidOutputs_SessionFilterExcludesOtherSessionsRuns(t *tes
 }
 
 func TestConsecutiveInvalidOutputs_NullOutcomeRunsAreSkipped(t *testing.T) {
+	t.Parallel()
 	s := newTestStore(t)
 	ctx := t.Context()
 	_, ticketID := seedQueuedTicket(t, s, "1")
@@ -795,6 +831,7 @@ func TestConsecutiveInvalidOutputs_NullOutcomeRunsAreSkipped(t *testing.T) {
 // --- HasEscalation (design D17, section 5.1 step 3) -------------------------
 
 func TestHasEscalation_TrueForMatchingOriginAndSession(t *testing.T) {
+	t.Parallel()
 	s := newTestStore(t)
 	ctx := t.Context()
 	_, ticketID := seedQueuedTicket(t, s, "1")
@@ -819,6 +856,7 @@ func TestHasEscalation_TrueForMatchingOriginAndSession(t *testing.T) {
 }
 
 func TestHasEscalation_FalseByOrigin(t *testing.T) {
+	t.Parallel()
 	s := newTestStore(t)
 	ctx := t.Context()
 	_, ticketID := seedQueuedTicket(t, s, "1")
@@ -843,6 +881,7 @@ func TestHasEscalation_FalseByOrigin(t *testing.T) {
 }
 
 func TestHasEscalation_FalseBySession(t *testing.T) {
+	t.Parallel()
 	s := newTestStore(t)
 	ctx := t.Context()
 	_, ticketID := seedQueuedTicket(t, s, "1")
@@ -870,6 +909,7 @@ func TestHasEscalation_FalseBySession(t *testing.T) {
 // --- LiveMarker (design section 5.1 steps 5 and 7) --------------------------
 
 func TestLiveMarker_PendingOnlyIsLive(t *testing.T) {
+	t.Parallel()
 	s := newTestStore(t)
 	ctx := t.Context()
 	_, ticketID := seedQueuedTicket(t, s, "1")
@@ -888,6 +928,7 @@ func TestLiveMarker_PendingOnlyIsLive(t *testing.T) {
 }
 
 func TestLiveMarker_PendingThenDeliveredIsNotLive(t *testing.T) {
+	t.Parallel()
 	s := newTestStore(t)
 	ctx := t.Context()
 	_, ticketID := seedQueuedTicket(t, s, "1")
@@ -904,6 +945,7 @@ func TestLiveMarker_PendingThenDeliveredIsNotLive(t *testing.T) {
 }
 
 func TestLiveMarker_DeliveredThenNewerPendingIsLive(t *testing.T) {
+	t.Parallel()
 	s := newTestStore(t)
 	ctx := t.Context()
 	_, ticketID := seedQueuedTicket(t, s, "1")
@@ -920,6 +962,7 @@ func TestLiveMarker_DeliveredThenNewerPendingIsLive(t *testing.T) {
 }
 
 func TestLiveMarker_OlderDeliveredDoesNotCloseNewerPendingOfDifferentRun(t *testing.T) {
+	t.Parallel()
 	s := newTestStore(t)
 	ctx := t.Context()
 	_, ticketID := seedQueuedTicket(t, s, "1")
@@ -940,6 +983,7 @@ func TestLiveMarker_OlderDeliveredDoesNotCloseNewerPendingOfDifferentRun(t *test
 }
 
 func TestLiveMarker_DeliveredForSameRunClosesPending(t *testing.T) {
+	t.Parallel()
 	s := newTestStore(t)
 	ctx := t.Context()
 	_, ticketID := seedQueuedTicket(t, s, "1")
@@ -952,5 +996,71 @@ func TestLiveMarker_DeliveredForSameRunClosesPending(t *testing.T) {
 	}
 	if ok {
 		t.Error("LiveMarker after delivered for the same run: ok = true, want false")
+	}
+}
+
+// TestAnsweredRoundsExcludesPlanningQuestions proves AnsweredRounds' own
+// D31 exclusion (design section 22.3): a planning question left "answered"
+// (the legacy upgrade case, section 22.8, since SendBatch never writes that
+// state for one any more) never becomes a round -- it is delivered through
+// PlanningConversation instead.
+func TestAnsweredRoundsExcludesPlanningQuestions(t *testing.T) {
+	t.Parallel()
+	s := newTestStore(t)
+	ctx := t.Context()
+	_, ticketID := seedQueuedTicket(t, s, "1")
+
+	planningSess := insertSession(t, s, ticketID, testStatePlanning)
+	planningRun := insertQuestionRun(t, s, planningSess)
+	planningQID := insertOpenQuestion(t, s, ticketID, planningRun, "Q1")
+	markAnswered(t, s, planningQID)
+	insertSentAnswer(t, s, ticketID, planningQID, "a")
+
+	classifySess := insertSession(t, s, ticketID, "classify")
+	classifyRun := insertQuestionRun(t, s, classifySess)
+	classifyQID := insertOpenQuestion(t, s, ticketID, classifyRun, "Q1")
+	markAnswered(t, s, classifyQID)
+	insertSentAnswer(t, s, ticketID, classifyQID, "a")
+
+	rounds, err := s.AnsweredRounds(ctx, ticketID)
+	if err != nil {
+		t.Fatalf("AnsweredRounds: %v", err)
+	}
+	if len(rounds) != 1 {
+		t.Fatalf("AnsweredRounds = %d rounds, want 1 (only the classify round)", len(rounds))
+	}
+	if rounds[0].RunID == nil || *rounds[0].RunID != classifyRun {
+		t.Errorf("rounds[0].RunID = %v, want the classify run %d, not the planning one", rounds[0].RunID, classifyRun)
+	}
+}
+
+// TestAnsweredRoundsRepliesAreOwnersOnly proves messagesByParent's own
+// author filter (design section 22.3): a zing-authored reply parented to
+// an answered, non-planning question (an agent reply D31's own
+// conversation model can leave behind on a thread the owner never settles
+// through a round) never reaches Round.Replies, which must hold only what
+// the owner wrote.
+func TestAnsweredRoundsRepliesAreOwnersOnly(t *testing.T) {
+	t.Parallel()
+	s := newTestStore(t)
+	ctx := t.Context()
+	_, ticketID := seedQueuedTicket(t, s, "1")
+
+	sess := insertSession(t, s, ticketID, "classify")
+	runID := insertQuestionRun(t, s, sess)
+	qID := insertOpenQuestion(t, s, ticketID, runID, "Q1")
+	markAnswered(t, s, qID)
+	ownerReplyID := insertSentReply(t, s, ticketID, &qID, "why though")
+	insertAgentReply(t, s, ticketID, qID, runID, "because the fixture says so")
+
+	rounds, err := s.AnsweredRounds(ctx, ticketID)
+	if err != nil {
+		t.Fatalf("AnsweredRounds: %v", err)
+	}
+	if len(rounds) != 1 {
+		t.Fatalf("AnsweredRounds = %d rounds, want 1", len(rounds))
+	}
+	if len(rounds[0].Replies) != 1 || rounds[0].Replies[0].ID != ownerReplyID {
+		t.Errorf("Replies = %+v, want exactly the owner's one reply (id %d)", rounds[0].Replies, ownerReplyID)
 	}
 }

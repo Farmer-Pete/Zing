@@ -49,3 +49,25 @@ func DoneComment(owner, prURL string) string {
 func NothingToDoComment(owner, notes string) string {
 	return "Zing found nothing to do for this issue. " + notes + "\n\n" + disclosure(owner)
 }
+
+// replyPrefixFmt and replyPrefixNoOwner are ReplyPrefix's two forms
+// (design D10, section 9.3): the GitHub login of the token's owner, read
+// once with GitHub.Viewer and cached, because zing.toml's "user" need not
+// be a login. The empty-login fallback follows disclosure's own rule, so
+// an unknown login never renders the grammatically broken "on 's behalf:".
+const (
+	replyPrefixFmt     = "Zing (an AI agent) replying on behalf of @%s:"
+	replyPrefixNoOwner = "Zing (an AI agent) replying:"
+)
+
+// ReplyPrefix is the first line of every reply Zing posts to a GitHub
+// review thread (design D10, section 9.3): disclosure scoped to one
+// reply, distinct from disclosure's own whole-comment line because a
+// reply lives inside someone else's review thread, not a standalone
+// comment Zing posts on its own behalf.
+func ReplyPrefix(login string) string {
+	if login == "" {
+		return replyPrefixNoOwner
+	}
+	return fmt.Sprintf(replyPrefixFmt, login)
+}

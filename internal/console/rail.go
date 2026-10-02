@@ -179,11 +179,66 @@ func (c *console) buildArtifactsRail(ctx context.Context, ticketID int64) ([]tem
 		if a, ok := newest[def.Type]; ok {
 			slot.Present = true
 			slot.Version = a.Version
+			if def.Type == scenarioArtifactType {
+				if v, found := scenarioCohortVersion(all, a.RunID); found {
+					slot.Version = v
+				}
+			}
 			slot.PayloadText = prettyPayload(a.Payload)
+			if def.Type == planArtifactType {
+				rendered, err := c.renderPlanSlot(ctx, ticketID, a.Payload)
+				if err != nil {
+					return nil, err
+				}
+				slot.RenderedHTML = rendered
+			}
 		}
 		slots = append(slots, slot)
 	}
 	return slots, nil
+}
+
+// scenarioCohortVersion returns the plan cohort version the newest scenario
+// artifact's own run_id belongs to, rather than that scenario row's own
+// Version: readyArtifacts (internal/job/planning.go) writes a cohort's plan
+// and scenario rows together under one run id, but each scenario row is
+// still its own artifacts.type='scenario' row, so InsertArtifact's "next
+// past (ticket, type)'s current maximum" versioning climbs once per
+// scenario, not once per planning turn (bug: the rail showed "Scenarios
+// v40" next to "Plan v5" -- 40 scenario rows written across 5 turns). found
+// is false when scenarioRunID is nil (a legacy artifact stored before every
+// row carried run_id) or no plan artifact shares it, and the caller keeps
+// the scenario row's own version rather than guessing.
+func scenarioCohortVersion(all []store.Artifact, scenarioRunID *int64) (version int, found bool) {
+	if scenarioRunID == nil {
+		return 0, false
+	}
+	for _, a := range all {
+		if a.Type == planArtifactType && a.RunID != nil && *a.RunID == *scenarioRunID {
+			return a.Version, true
+		}
+	}
+	return 0, false
+}
+
+// renderPlanSlot decodes a "plan" artifact's payload and renders it through
+// the same plan renderer the gate's own context region uses (bug fix 16:
+// the rail showed this slot as raw indented JSON, unreadable next to the
+// gate's own fully rendered plan). A malformed payload is unreachable in
+// practice -- every stored artifact already passed InsertArtifact's schema
+// validation -- but is reported rather than silently falling back to raw
+// JSON, the same strictness loadPlan (views.go) already applies to this
+// exact payload shape.
+func (c *console) renderPlanSlot(ctx context.Context, ticketID int64, payload json.RawMessage) (templ.Component, error) {
+	var plan response.Plan
+	if err := json.Unmarshal(payload, &plan); err != nil {
+		return nil, fmt.Errorf("console: rail: unmarshal plan artifact for ticket %d: %w", ticketID, err)
+	}
+	events, err := c.store.FileEvents(ctx, ticketID)
+	if err != nil {
+		return nil, fmt.Errorf("console: rail: file events for ticket %d: %w", ticketID, err)
+	}
+	return RenderPlan(plan, events)
 }
 
 // prettyPayload indents raw's JSON for the artifact disclosure's <pre>
@@ -267,6 +322,11 @@ func (c *console) buildRunRail(ctx context.Context, ticketID int64) (templates.R
 // is enough.
 const logLineTimeFormat = "15:04:05.000"
 
+// railStartedAtFormat is LogRail.StartedAt's own format (bug fix): plain
+// HH:MM is enough for "quiet since the server started at", not the
+// sub-second precision a log line's own timestamp needs.
+const railStartedAtFormat = "15:04"
+
 // buildLogRail renders the Log section (design section 6.11, 6.12): the
 // current settings.log_level, whether ticketID's per-ticket debug override
 // is on, and the ring buffer's entries for every run on ticketID
@@ -318,7 +378,10 @@ func (c *console) buildLogRail(ctx context.Context, ticketID int64) (templates.L
 		})
 	}
 
-	return templates.LogRail{Level: level, Debug: c.log.IsDebug(ticketID), Lines: lines}, nil
+	return templates.LogRail{
+		Level: level, Debug: c.log.IsDebug(ticketID), Lines: lines,
+		StartedAt: c.startedAt.Format(railStartedAtFormat),
+	}, nil
 }
 
 // capLogEntries trims a slice already sorted oldest-first down to at most

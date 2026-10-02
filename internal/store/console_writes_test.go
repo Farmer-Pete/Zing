@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"strconv"
 	"strings"
 	"sync"
@@ -11,6 +12,15 @@ import (
 
 	"zing/internal/response"
 )
+
+// testConflictQuestionClosed is the "question closed" conflict reason,
+// named once so goconst has nothing to flag across this file's several
+// closed-question tests (D30 and D31 alike).
+const testConflictQuestionClosed = "question closed"
+
+// testReopenText is the owner's reopening reply body, shared by this
+// file's several D32 reopen tests (goconst).
+const testReopenText = "Print JSON too."
 
 // draftQuestionPayload builds a QuestionPayload for kind, with options for
 // an option kind or items for an item kind, marshaled the way a real
@@ -96,6 +106,7 @@ func conflictReason(t *testing.T, err error) string {
 // ---- SaveDraft: option answers -------------------------------------------
 
 func TestSaveDraft_OptionUpsertsAndIsIdempotent(t *testing.T) {
+	t.Parallel()
 	s := newTestStore(t)
 	_, ticketID := seedQueuedTicket(t, s, "1")
 	qID := insertQuestionOption(t, s, ticketID, "Q1")
@@ -144,11 +155,12 @@ func TestSaveDraft_OptionUpsertsAndIsIdempotent(t *testing.T) {
 // ---- SaveDraft: item answers ----------------------------------------------
 
 func TestSaveDraft_ItemMergesFirstPickThenReplacesOne(t *testing.T) {
+	t.Parallel()
 	s := newTestStore(t)
 	_, ticketID := seedQueuedTicket(t, s, "1")
 	items := []response.Item{{Ref: testRefAGo, Text: "a"}, {Ref: testRefBGo, Text: "b"}}
-	// review, not perimeter: this test exercises drop, which a perimeter
-	// item no longer accepts (design section 4.2).
+	// review, not perimeter: this test exercises drop and discuss, which a
+	// perimeter item no longer accepts (design section 4.2).
 	qID := insertQuestionOfKind(t, s, ticketID, "Q1", response.QuestionKindReview, nil, items)
 
 	res1, err := s.SaveDraft(t.Context(), DraftInput{
@@ -167,7 +179,7 @@ func TestSaveDraft_ItemMergesFirstPickThenReplacesOne(t *testing.T) {
 
 	// A second ref merges in alongside the first.
 	res2, err := s.SaveDraft(t.Context(), DraftInput{
-		TicketID: ticketID, QuestionID: &qID, Item: &ItemDecision{Ref: testRefBGo, Decision: response.DecisionReject},
+		TicketID: ticketID, QuestionID: &qID, Item: &ItemDecision{Ref: testRefBGo, Decision: response.DecisionDiscuss},
 	})
 	if err != nil {
 		t.Fatalf("SaveDraft (second ref): %v", err)
@@ -176,8 +188,8 @@ func TestSaveDraft_ItemMergesFirstPickThenReplacesOne(t *testing.T) {
 		t.Errorf("second ref MessageID = %d, want the same row %d", res2.MessageID, res1.MessageID)
 	}
 	got = draftPayloadOf(t, s, res1.MessageID)
-	if len(got.Items) != 2 || got.Items[testRefAGo] != response.DecisionAccept || got.Items[testRefBGo] != response.DecisionReject {
-		t.Fatalf("items after second ref = %v, want {a.go: accept, b.go: reject}", got.Items)
+	if len(got.Items) != 2 || got.Items[testRefAGo] != response.DecisionAccept || got.Items[testRefBGo] != response.DecisionDiscuss {
+		t.Fatalf("items after second ref = %v, want {a.go: accept, b.go: discuss}", got.Items)
 	}
 
 	// Replacing the first ref's decision keeps the row, changes only that entry.
@@ -191,8 +203,51 @@ func TestSaveDraft_ItemMergesFirstPickThenReplacesOne(t *testing.T) {
 		t.Error("replacing a.go's decision: Replaced = false, want true")
 	}
 	got = draftPayloadOf(t, s, res1.MessageID)
-	if len(got.Items) != 2 || got.Items[testRefAGo] != response.DecisionDrop || got.Items[testRefBGo] != response.DecisionReject {
-		t.Fatalf("items after replace one = %v, want {a.go: drop, b.go: reject}", got.Items)
+	if len(got.Items) != 2 || got.Items[testRefAGo] != response.DecisionDrop || got.Items[testRefBGo] != response.DecisionDiscuss {
+		t.Fatalf("items after replace one = %v, want {a.go: drop, b.go: discuss}", got.Items)
+	}
+}
+
+// TestSaveDraftReviewDecision proves the section 4.2 rule: a review item
+// takes accept, drop, or discuss; reject is refused with the conflict "a
+// review item takes accept, drop, or discuss".
+func TestSaveDraftReviewDecision(t *testing.T) {
+	t.Parallel()
+	s := newTestStore(t)
+	_, ticketID := seedQueuedTicket(t, s, "1")
+	items := []response.Item{{Ref: testRefAGo, Text: "a"}}
+
+	tests := []struct {
+		name     string
+		key      string
+		decision response.Decision
+		wantErr  string
+	}{
+		{"accept saves", "Q1", response.DecisionAccept, ""},
+		{"drop saves", "Q2", response.DecisionDrop, ""},
+		{"discuss saves", "Q3", response.DecisionDiscuss, ""},
+		{"reject is refused", "Q4", response.DecisionReject, "a review item takes accept, drop, or discuss"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			qID := insertQuestionOfKind(t, s, ticketID, tc.key, response.QuestionKindReview, nil, items)
+			_, err := s.SaveDraft(t.Context(), DraftInput{
+				TicketID: ticketID, QuestionID: &qID, Item: &ItemDecision{Ref: testRefAGo, Decision: tc.decision},
+			})
+			if tc.wantErr == "" {
+				if err != nil {
+					t.Errorf("SaveDraft(decision=%s): %v, want nil", tc.decision, err)
+				}
+				return
+			}
+			if err == nil {
+				t.Fatalf("SaveDraft(decision=%s): err = nil, want a ConflictError", tc.decision)
+			}
+			if got := conflictReason(t, err); got != tc.wantErr {
+				t.Errorf("conflict reason = %q, want %q", got, tc.wantErr)
+			}
+		})
 	}
 }
 
@@ -200,6 +255,7 @@ func TestSaveDraft_ItemMergesFirstPickThenReplacesOne(t *testing.T) {
 // item takes accept or reject; accept and reject save, drop and discuss
 // return the conflict "a perimeter item takes accept or reject".
 func TestSaveDraftPerimeterDecision(t *testing.T) {
+	t.Parallel()
 	s := newTestStore(t)
 	_, ticketID := seedQueuedTicket(t, s, "1")
 	items := []response.Item{{Ref: testRefAGo, Text: "a"}}
@@ -217,6 +273,7 @@ func TestSaveDraftPerimeterDecision(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
 			qID := insertQuestionOfKind(t, s, ticketID, tc.key, response.QuestionKindPerimeter, nil, items)
 			_, err := s.SaveDraft(t.Context(), DraftInput{
 				TicketID: ticketID, QuestionID: &qID, Item: &ItemDecision{Ref: testRefAGo, Decision: tc.decision},
@@ -240,6 +297,7 @@ func TestSaveDraftPerimeterDecision(t *testing.T) {
 // ---- SaveDraft: replies ----------------------------------------------------
 
 func TestSaveDraft_QuestionReplyAndThreadReply(t *testing.T) {
+	t.Parallel()
 	s := newTestStore(t)
 	_, ticketID := seedQueuedTicket(t, s, "1")
 	qID := insertQuestionOption(t, s, ticketID, "Q1")
@@ -275,6 +333,7 @@ func TestSaveDraft_QuestionReplyAndThreadReply(t *testing.T) {
 // ---- SaveDraft: conflicts ---------------------------------------------------
 
 func TestSaveDraft_Conflicts(t *testing.T) {
+	t.Parallel()
 	s := newTestStore(t)
 	_, ticketA := seedQueuedTicket(t, s, "a")
 	_, ticketB := seedQueuedTicket(t, s, "b")
@@ -293,7 +352,7 @@ func TestSaveDraft_Conflicts(t *testing.T) {
 		in   DraftInput
 		want string
 	}{
-		{"closed question", DraftInput{TicketID: ticketA, QuestionID: &resolvedQID, Option: &opt}, "question closed"},
+		{"closed question", DraftInput{TicketID: ticketA, QuestionID: &resolvedQID, Option: &opt}, testConflictQuestionClosed},
 		{"wrong ticket", DraftInput{TicketID: ticketB, QuestionID: &qID, Option: &opt}, "wrong ticket"},
 		{"bad option", DraftInput{TicketID: ticketA, QuestionID: &qID, Option: &badOpt}, "missing option"},
 		{
@@ -307,6 +366,7 @@ func TestSaveDraft_Conflicts(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
 			_, err := s.SaveDraft(t.Context(), tc.in)
 			if err == nil {
 				t.Fatal("SaveDraft: err = nil, want a ConflictError")
@@ -318,9 +378,57 @@ func TestSaveDraft_Conflicts(t *testing.T) {
 	}
 }
 
+// TestSaveDraft_AnsweredQuestionDraftableWhileWaitingOnQuestions proves D30:
+// a draft against a question already state=answered is allowed, not
+// "question closed", while its ticket's waiting_on is still "questions" --
+// the agent has not yet resumed with that round, so a revised pick still
+// lands where the resume prompt will read it.
+func TestSaveDraft_AnsweredQuestionDraftableWhileWaitingOnQuestions(t *testing.T) {
+	t.Parallel()
+	s := newTestStore(t)
+	_, ticketID := seedQueuedTicket(t, s, "1")
+	setTicketWaiting(t, s, ticketID, testWaitingQuestions)
+	qID := insertQuestionOption(t, s, ticketID, "Q1")
+	closeQuestion(t, s, qID, questionStateAnswered)
+
+	opt := "b"
+	result, err := s.SaveDraft(t.Context(), DraftInput{TicketID: ticketID, QuestionID: &qID, Option: &opt})
+	if err != nil {
+		t.Fatalf("SaveDraft against an answered question while still waiting: %v", err)
+	}
+	if ap := draftPayloadOf(t, s, result.MessageID); ap.Option == nil || *ap.Option != "b" {
+		t.Errorf("draft option = %v, want \"b\"", ap.Option)
+	}
+}
+
+// TestSaveDraft_AnsweredQuestionConflictsOnceWaitCleared proves D30's other
+// half: the same draft, once the ticket's wait has cleared (the agent was
+// already resumed with this round), is an ordinary "question closed"
+// conflict, same as any other closed question.
+func TestSaveDraft_AnsweredQuestionConflictsOnceWaitCleared(t *testing.T) {
+	t.Parallel()
+	s := newTestStore(t)
+	_, ticketID := seedQueuedTicket(t, s, "1")
+	qID := insertQuestionOption(t, s, ticketID, "Q1")
+	closeQuestion(t, s, qID, questionStateAnswered)
+	// ticketID's waiting_on is left nil (seedQueuedTicket's own default):
+	// the wait has already cleared, as it would once SendBatch resumes the
+	// agent with every question of the round answered.
+
+	opt := "b"
+	_, err := s.SaveDraft(t.Context(), DraftInput{TicketID: ticketID, QuestionID: &qID, Option: &opt})
+	if err == nil {
+		t.Fatal("SaveDraft: err = nil, want a ConflictError")
+	}
+	if got := conflictReason(t, err); got != testConflictQuestionClosed {
+		t.Errorf("conflict reason = %q, want %q", got, testConflictQuestionClosed)
+	}
+}
+
 // ---- SendBatch --------------------------------------------------------------
 
 func TestSendBatch_EmptyIsSafe(t *testing.T) {
+	t.Parallel()
 	s := newTestStore(t)
 	_, ticketID := seedQueuedTicket(t, s, "1")
 
@@ -334,6 +442,7 @@ func TestSendBatch_EmptyIsSafe(t *testing.T) {
 }
 
 func TestSendBatch_LocksAllocatesOneBatchIDAndClearsAQuestionsWait(t *testing.T) {
+	t.Parallel()
 	s := newTestStore(t)
 	_, ticketID := seedQueuedTicket(t, s, "1")
 	setTicketWaiting(t, s, ticketID, testWaitingQuestions)
@@ -372,10 +481,17 @@ func TestSendBatch_LocksAllocatesOneBatchIDAndClearsAQuestionsWait(t *testing.T)
 	}
 }
 
+// TestSendBatch_ClearsAGateWaitButNeverErrorOrChildren's three subtests each
+// open their own store rather than share one across t.Parallel() siblings:
+// each seeds a ticket under the same fixed testProject name, and
+// EnsureProject's own check-then-insert is not safe for two goroutines
+// racing on the same project row.
 func TestSendBatch_ClearsAGateWaitButNeverErrorOrChildren(t *testing.T) {
-	s := newTestStore(t)
+	t.Parallel()
 
 	t.Run("gate wait cleared by a gate answer", func(t *testing.T) {
+		t.Parallel()
+		s := newTestStore(t)
 		_, ticketID := seedQueuedTicket(t, s, "gate")
 		setTicketWaiting(t, s, ticketID, "gate")
 		qID := insertQuestionOfKind(t, s, ticketID, "Q1", response.QuestionKindGate, optionsAB, nil)
@@ -400,6 +516,8 @@ func TestSendBatch_ClearsAGateWaitButNeverErrorOrChildren(t *testing.T) {
 	})
 
 	t.Run("a reply-only batch never clears an error wait", func(t *testing.T) {
+		t.Parallel()
+		s := newTestStore(t)
 		_, ticketID := seedQueuedTicket(t, s, "err")
 		setTicketWaiting(t, s, ticketID, "error")
 		items := []response.Item{{Ref: "f1", Text: "finding"}}
@@ -432,6 +550,8 @@ func TestSendBatch_ClearsAGateWaitButNeverErrorOrChildren(t *testing.T) {
 	})
 
 	t.Run("children wait is never cleared by SendBatch", func(t *testing.T) {
+		t.Parallel()
+		s := newTestStore(t)
 		_, ticketID := seedQueuedTicket(t, s, "children")
 		setTicketWaiting(t, s, ticketID, "children")
 		qID := insertQuestionOption(t, s, ticketID, "Q1")
@@ -450,6 +570,7 @@ func TestSendBatch_ClearsAGateWaitButNeverErrorOrChildren(t *testing.T) {
 }
 
 func TestSendBatch_IncompleteItemAnswerLeavesQuestionOpen(t *testing.T) {
+	t.Parallel()
 	s := newTestStore(t)
 	_, ticketID := seedQueuedTicket(t, s, "1")
 	items := []response.Item{{Ref: testRefAGo, Text: "a"}, {Ref: testRefBGo, Text: "b"}}
@@ -485,6 +606,7 @@ func TestSendBatch_IncompleteItemAnswerLeavesQuestionOpen(t *testing.T) {
 // all-or-nothing revalidateBatchTx did. SendBatch instead discards the one
 // stale draft outright and sends every other draft in the batch.
 func TestSendBatch_DiscardsStaleDraftAndSendsTheRest(t *testing.T) {
+	t.Parallel()
 	s := newTestStore(t)
 	_, ticketID := seedQueuedTicket(t, s, "1")
 	setTicketWaiting(t, s, ticketID, testWaitingQuestions)
@@ -555,6 +677,7 @@ func TestSendBatch_DiscardsStaleDraftAndSendsTheRest(t *testing.T) {
 // discards it and finds nothing to send, yet must still clear a now-obsolete
 // wait so the ticket is not left blocked with no run to resume it.
 func TestSendBatch_AllStaleDiscardsAndClearsWait(t *testing.T) {
+	t.Parallel()
 	s := newTestStore(t)
 	_, ticketID := seedQueuedTicket(t, s, "1")
 	setTicketWaiting(t, s, ticketID, testWaitingQuestions)
@@ -594,6 +717,7 @@ func TestSendBatch_AllStaleDiscardsAndClearsWait(t *testing.T) {
 }
 
 func TestSendBatch_CommitsOnceUnderAConcurrentSend(t *testing.T) {
+	t.Parallel()
 	s := newTestStore(t)
 	_, ticketID := seedQueuedTicket(t, s, "1")
 	qID := insertQuestionOption(t, s, ticketID, "Q1")
@@ -644,6 +768,7 @@ func TestSendBatch_CommitsOnceUnderAConcurrentSend(t *testing.T) {
 // calls is marked answered, and its wait clears, once every item has a
 // decision from any send, not only the batch just sent.
 func TestSendBatch_ItemCompletenessAccumulatesAcrossSends(t *testing.T) {
+	t.Parallel()
 	s := newTestStore(t)
 	_, ticketID := seedQueuedTicket(t, s, "1")
 	setTicketWaiting(t, s, ticketID, string(response.QuestionKindPerimeter))
@@ -709,6 +834,479 @@ func TestSendBatch_ItemCompletenessAccumulatesAcrossSends(t *testing.T) {
 	}
 }
 
+// TestSendBatch_RevisedAnswerStaysAnsweredAndDoesNotClearAnEarlyWait proves
+// D30: sending a revised draft against a question already state=answered
+// (SaveDraft allowed it while the ticket still waits, the test above) keeps
+// it answered -- markAnsweredQuestionsTx's own UPDATE only ever matches
+// state=open, so re-marking an already-answered question is a no-op, not a
+// second transition -- and, with a second question of the same round still
+// open, does not clear the ticket's wait early.
+func TestSendBatch_RevisedAnswerStaysAnsweredAndDoesNotClearAnEarlyWait(t *testing.T) {
+	t.Parallel()
+	s := newTestStore(t)
+	_, ticketID := seedQueuedTicket(t, s, "1")
+	setTicketWaiting(t, s, ticketID, testWaitingQuestions)
+	q1ID := insertQuestionOption(t, s, ticketID, "Q1")
+	q2ID := insertQuestionOption(t, s, ticketID, "Q2")
+
+	// Answer and send Q1 alone: Q2 is still open, so the wait must not clear
+	// yet (ordinary behavior, not D30's own concern).
+	opt := "a"
+	if _, err := s.SaveDraft(t.Context(), DraftInput{TicketID: ticketID, QuestionID: &q1ID, Option: &opt}); err != nil {
+		t.Fatalf("SaveDraft(Q1, first answer): %v", err)
+	}
+	first, err := s.SendBatch(t.Context(), ticketID)
+	if err != nil {
+		t.Fatalf("SendBatch (first): %v", err)
+	}
+	if first.Sent != 1 || first.WaitCleared {
+		t.Fatalf("first SendBatch = %+v, want Sent=1 WaitCleared=false (Q2 still open)", first)
+	}
+
+	// Revise Q1's answer while the ticket still waits (D30: allowed since
+	// Q1 is answered, not resolved, and waiting_on is still "questions"),
+	// then send again.
+	revised := "b"
+	if _, saveErr := s.SaveDraft(t.Context(), DraftInput{TicketID: ticketID, QuestionID: &q1ID, Option: &revised}); saveErr != nil {
+		t.Fatalf("SaveDraft(Q1, revised answer): %v", saveErr)
+	}
+	second, err := s.SendBatch(t.Context(), ticketID)
+	if err != nil {
+		t.Fatalf("SendBatch (second, revised): %v", err)
+	}
+	if second.Sent != 1 {
+		t.Errorf("second SendBatch.Sent = %d, want 1", second.Sent)
+	}
+	if second.WaitCleared {
+		t.Error("second SendBatch.WaitCleared = true, want false: Q2 is still open")
+	}
+
+	q1, err := s.GetMessage(t.Context(), q1ID)
+	if err != nil {
+		t.Fatalf("GetMessage(Q1): %v", err)
+	}
+	if q1.State == nil || *q1.State != questionStateAnswered {
+		t.Errorf("Q1 state = %v, want unchanged %q", q1.State, questionStateAnswered)
+	}
+
+	ticket, err := s.GetTicket(t.Context(), ticketID)
+	if err != nil {
+		t.Fatalf("GetTicket: %v", err)
+	}
+	if ticket.WaitingOn == nil || *ticket.WaitingOn != testWaitingQuestions {
+		t.Errorf("ticket.WaitingOn = %v, want still %q (Q2 open)", ticket.WaitingOn, testWaitingQuestions)
+	}
+
+	q2, err := s.GetMessage(t.Context(), q2ID)
+	if err != nil {
+		t.Fatalf("GetMessage(Q2): %v", err)
+	}
+	if q2.State == nil || *q2.State != questionStateOpen {
+		t.Errorf("Q2 state = %v, want unchanged %q", q2.State, questionStateOpen)
+	}
+
+	// The revised answer is what the round reader now sees for Q1.
+	if ap := draftPayloadOf(t, s, mustLatestAnswerID(t, s, q1ID)); ap.Option == nil || *ap.Option != "b" {
+		t.Errorf("Q1's sent answer option = %v, want \"b\" (the revision)", ap.Option)
+	}
+}
+
+// mustLatestAnswerID returns the highest-id "answer" message whose parent is
+// questionID -- the most recently sent one, since SendBatch only ever
+// inserts higher ids -- for a D30 test to read the round's latest pick back.
+func mustLatestAnswerID(t *testing.T, s *Store, questionID int64) int64 {
+	t.Helper()
+	var id int64
+	if err := s.db.QueryRowContext(t.Context(),
+		`SELECT id FROM messages WHERE parent_id = ? AND type = ? ORDER BY id DESC LIMIT 1`,
+		questionID, msgTypeAnswer,
+	).Scan(&id); err != nil {
+		t.Fatalf("mustLatestAnswerID(%d): %v", questionID, err)
+	}
+	return id
+}
+
+// ---- D31: planning questions through SendBatch and SaveDraft ---------------
+
+// insertPlanningQuestion inserts an open planning question keyed "Q1"
+// (D31, design section 22.1): a "question" message, kind "question", no
+// parent, asked by a run on a fresh "planning" job session -- the one
+// shape planningQuestionsSQL (conversation_reads.go) recognizes.
+func insertPlanningQuestion(t *testing.T, s *Store, ticketID int64) int64 {
+	t.Helper()
+	sessID := insertSession(t, s, ticketID, testStatePlanning)
+	runID := insertQuestionRun(t, s, sessID)
+	return insertQuestionOfKindWithRun(t, s, ticketID, runID, "Q1", response.QuestionKindQuestion)
+}
+
+// TestSendBatchWakesPlanningOnOneMessage proves wakePlanningTx (design
+// section 22.3): sending one message to an open planning question clears
+// the "questions" wait at once, with no escalation in the way.
+func TestSendBatchWakesPlanningOnOneMessage(t *testing.T) {
+	t.Parallel()
+	s := newTestStore(t)
+	_, ticketID := seedQueuedTicket(t, s, "1")
+	setTicketWaiting(t, s, ticketID, testWaitingQuestions)
+	qID := insertPlanningQuestion(t, s, ticketID)
+
+	if _, err := s.SaveDraft(t.Context(), DraftInput{TicketID: ticketID, QuestionID: &qID, Text: "Also print the commit hash."}); err != nil {
+		t.Fatalf("SaveDraft: %v", err)
+	}
+
+	res, err := s.SendBatch(t.Context(), ticketID)
+	if err != nil {
+		t.Fatalf("SendBatch: %v", err)
+	}
+	if res.Empty || res.Sent != 1 {
+		t.Fatalf("SendBatch = %+v, want Sent=1", res)
+	}
+	if !res.WaitCleared {
+		t.Error("WaitCleared = false, want true (no escalation open)")
+	}
+	ticket, err := s.GetTicket(t.Context(), ticketID)
+	if err != nil {
+		t.Fatalf("GetTicket: %v", err)
+	}
+	if ticket.WaitingOn != nil {
+		t.Errorf("ticket.WaitingOn = %q, want nil", *ticket.WaitingOn)
+	}
+}
+
+// TestSendBatchNeverMarksPlanningQuestionAnswered proves markAnsweredQuestionsTx
+// skips planning questions (design section 22.3): the question stays "open"
+// after SendBatch sends an option draft against it, unlike every other
+// question kind.
+func TestSendBatchNeverMarksPlanningQuestionAnswered(t *testing.T) {
+	t.Parallel()
+	s := newTestStore(t)
+	_, ticketID := seedQueuedTicket(t, s, "1")
+	setTicketWaiting(t, s, ticketID, testWaitingQuestions)
+	qID := insertPlanningQuestion(t, s, ticketID)
+
+	opt := "a"
+	if _, err := s.SaveDraft(t.Context(), DraftInput{TicketID: ticketID, QuestionID: &qID, Option: &opt}); err != nil {
+		t.Fatalf("SaveDraft: %v", err)
+	}
+	res, err := s.SendBatch(t.Context(), ticketID)
+	if err != nil {
+		t.Fatalf("SendBatch: %v", err)
+	}
+	if res.Sent != 1 {
+		t.Fatalf("SendBatch = %+v, want Sent=1", res)
+	}
+
+	q, err := s.GetMessage(t.Context(), qID)
+	if err != nil {
+		t.Fatalf("GetMessage: %v", err)
+	}
+	if q.State == nil || *q.State != questionStateOpen {
+		t.Errorf("question state = %v, want %q (planning questions never become answered)", q.State, questionStateOpen)
+	}
+}
+
+// TestSendBatchQueuesUnderOpenEscalation proves wakePlanningTx's own
+// escalation guard (design section 22.3): with an open escalation-linked
+// question on the ticket, sending a message to a planning question leaves
+// waiting_on untouched -- the messages queue behind the escalation.
+func TestSendBatchQueuesUnderOpenEscalation(t *testing.T) {
+	t.Parallel()
+	s := newTestStore(t)
+	_, ticketID := seedQueuedTicket(t, s, "1")
+	setTicketWaiting(t, s, ticketID, testWaitingQuestions)
+	qID := insertPlanningQuestion(t, s, ticketID)
+
+	sessID := insertSession(t, s, ticketID, testStatePlanning)
+	runID := insertQuestionRun(t, s, sessID)
+	parentID := insertUpdateMarker(t, s, ticketID, "escalation placeholder")
+	insertQuestionWithParent(t, s, ticketID, runID, parentID, "Q9") // open escalation-linked question
+
+	opt := "a"
+	if _, err := s.SaveDraft(t.Context(), DraftInput{TicketID: ticketID, QuestionID: &qID, Option: &opt}); err != nil {
+		t.Fatalf("SaveDraft: %v", err)
+	}
+	res, err := s.SendBatch(t.Context(), ticketID)
+	if err != nil {
+		t.Fatalf("SendBatch: %v", err)
+	}
+	if res.Sent != 1 {
+		t.Fatalf("SendBatch = %+v, want Sent=1", res)
+	}
+	if res.WaitCleared {
+		t.Error("WaitCleared = true, want false (an escalation question is still open)")
+	}
+	ticket, err := s.GetTicket(t.Context(), ticketID)
+	if err != nil {
+		t.Fatalf("GetTicket: %v", err)
+	}
+	if ticket.WaitingOn == nil || *ticket.WaitingOn != testWaitingQuestions {
+		t.Errorf("ticket.WaitingOn = %v, want still %q", ticket.WaitingOn, testWaitingQuestions)
+	}
+}
+
+// TestSaveDraftPlanningQuestionLocksOnlyAtSeal proves questionDraftableTx's
+// own planning rule (design section 22.3, widened by D32, design section
+// 22.12.1, 22.12.2): a planning question drafts fine in "answered" state
+// with waiting_on already cleared (nil) -- every other question kind would
+// refuse this as "question closed" -- and a "resolved" one still drafts
+// fine (reopenable) while its ticket is in "planning". Only once the ticket
+// has left "planning" (the seal, building here) does the same resolved
+// question finally refuse.
+func TestSaveDraftPlanningQuestionLocksOnlyAtSeal(t *testing.T) {
+	t.Parallel()
+	s := newTestStore(t)
+	_, ticketID := seedQueuedTicket(t, s, "1")
+	setTicketState(t, s, ticketID, testStatePlanning)
+	qID := insertPlanningQuestion(t, s, ticketID)
+	closeQuestion(t, s, qID, questionStateAnswered)
+	// waiting_on stays nil: under D30's own rule this would refuse the
+	// draft outright, but a planning question ignores waiting_on entirely.
+
+	opt := "a"
+	if _, err := s.SaveDraft(t.Context(), DraftInput{TicketID: ticketID, QuestionID: &qID, Option: &opt}); err != nil {
+		t.Fatalf("SaveDraft on an answered planning question: %v, want it to succeed", err)
+	}
+
+	closeQuestion(t, s, qID, questionStateResolved)
+	if _, err := s.SaveDraft(t.Context(), DraftInput{TicketID: ticketID, QuestionID: &qID, Text: "reopen it"}); err != nil {
+		t.Fatalf("SaveDraft on a resolved, reopenable planning question: %v, want it to succeed", err)
+	}
+
+	setTicketState(t, s, ticketID, testStateBuilding) // the seal: locks every planning thread for good
+	_, err := s.SaveDraft(t.Context(), DraftInput{TicketID: ticketID, QuestionID: &qID, Text: "too late"})
+	var ce *ConflictError
+	if !errors.As(err, &ce) || ce.Reason != testConflictQuestionClosed {
+		t.Errorf("SaveDraft on a resolved planning question after the seal: err = %v, want the \"question closed\" conflict", err)
+	}
+}
+
+// TestClearMatchingWaitIgnoresPlanningQuestions proves openQuestionOfKindExistsTx's
+// own planning exclusion (design section 22.3): an open planning question
+// never holds a classify round's own "questions" wait open -- answering
+// that round's own question clears the wait even while the planning
+// thread stays open.
+func TestClearMatchingWaitIgnoresPlanningQuestions(t *testing.T) {
+	t.Parallel()
+	s := newTestStore(t)
+	_, ticketID := seedQueuedTicket(t, s, "1")
+	setTicketWaiting(t, s, ticketID, testWaitingQuestions)
+	insertPlanningQuestion(t, s, ticketID) // stays open throughout
+
+	classifyQID := insertQuestionOption(t, s, ticketID, "Q2") // a classify-round-shaped question, no run
+	opt := "a"
+	if _, err := s.SaveDraft(t.Context(), DraftInput{TicketID: ticketID, QuestionID: &classifyQID, Option: &opt}); err != nil {
+		t.Fatalf("SaveDraft: %v", err)
+	}
+	res, err := s.SendBatch(t.Context(), ticketID)
+	if err != nil {
+		t.Fatalf("SendBatch: %v", err)
+	}
+	if res.Sent != 1 {
+		t.Fatalf("SendBatch = %+v, want Sent=1", res)
+	}
+	if !res.WaitCleared {
+		t.Error("WaitCleared = false, want true (the open planning question must not hold this wait)")
+	}
+}
+
+// ---- D32: reopen until the gate (design section 22.12.2) ------------------
+
+// insertSettledPlanningQuestion inserts a planning question already
+// resolved, with a zing-authored decision row: the fixture D32's reopen
+// tests build on (design section 22.12.1's "reopenable").
+func insertSettledPlanningQuestion(t *testing.T, s *Store, ticketID, runID int64, key, decision string) int64 {
+	t.Helper()
+	qID := insertQuestionOfKindWithRun(t, s, ticketID, runID, key, response.QuestionKindQuestion)
+	closeQuestion(t, s, qID, questionStateResolved)
+	if _, err := s.InsertMessage(t.Context(), Message{
+		TicketID: ticketID, ParentID: &qID, RunID: &runID, Type: msgTypeResolved, Author: authorZing, Body: decision,
+	}); err != nil {
+		t.Fatalf("insert decision row for %s: %v", key, err)
+	}
+	return qID
+}
+
+// TestSendBatchReopensSettledThreadAndWithdrawsGate proves reopenStepTx's
+// own steps 2 through 4 (design section 22.12.2): a reply to a settled
+// planning thread, while the ticket sits at an open gate, reopens the
+// thread with its own "followup" turn, withdraws the gate question (a
+// resolved/system row, design section 4.2's withdrawQuestionTx), and clears
+// the "gate" wait -- all in the one SendBatch transaction.
+func TestSendBatchReopensSettledThreadAndWithdrawsGate(t *testing.T) {
+	t.Parallel()
+	s := newTestStore(t)
+	_, ticketID := seedQueuedTicket(t, s, "1")
+	setTicketState(t, s, ticketID, testStatePlanning)
+	setTicketWaiting(t, s, ticketID, string(response.QuestionKindGate))
+
+	planningSess := insertSession(t, s, ticketID, testStatePlanning)
+	planningRun := insertQuestionRun(t, s, planningSess)
+	q1ID := insertSettledPlanningQuestion(t, s, ticketID, planningRun, "Q1", "Plain text only.")
+	gateQID := insertQuestionOfKind(t, s, ticketID, "Q2", response.QuestionKindGate, optionsAB, nil)
+
+	if _, err := s.SaveDraft(t.Context(), DraftInput{TicketID: ticketID, QuestionID: &q1ID, Text: testReopenText}); err != nil {
+		t.Fatalf("SaveDraft: %v", err)
+	}
+	res, err := s.SendBatch(t.Context(), ticketID)
+	if err != nil {
+		t.Fatalf("SendBatch: %v", err)
+	}
+	if res.Sent != 1 {
+		t.Fatalf("SendBatch = %+v, want Sent=1", res)
+	}
+	if !res.WaitCleared {
+		t.Error("WaitCleared = false, want true (the gate question was withdrawn)")
+	}
+
+	q1, err := s.GetMessage(t.Context(), q1ID)
+	if err != nil {
+		t.Fatalf("GetMessage(q1): %v", err)
+	}
+	if q1.State == nil || *q1.State != questionStateOpen {
+		t.Errorf("Q1 state = %v, want %q (reopened)", q1.State, questionStateOpen)
+	}
+	if n := countRows(t, s, `SELECT COUNT(*) FROM messages WHERE ticket_id = ? AND parent_id = ? AND type = ? AND author = ? AND body = ?`,
+		ticketID, q1ID, msgTypeFollowup, authorYou, "reopened"); n != 1 {
+		t.Errorf("followup rows for Q1 = %d, want 1", n)
+	}
+
+	gate, err := s.GetMessage(t.Context(), gateQID)
+	if err != nil {
+		t.Fatalf("GetMessage(gate): %v", err)
+	}
+	if gate.State == nil || *gate.State != questionStateResolved {
+		t.Errorf("gate state = %v, want %q (withdrawn)", gate.State, questionStateResolved)
+	}
+	if n := countRows(t, s, `SELECT COUNT(*) FROM messages WHERE ticket_id = ? AND parent_id = ? AND type = ? AND author = ?`,
+		ticketID, gateQID, msgTypeResolved, authorSystem); n != 1 {
+		t.Errorf("resolved/system rows for the gate = %d, want 1", n)
+	}
+
+	ticket, err := s.GetTicket(t.Context(), ticketID)
+	if err != nil {
+		t.Fatalf("GetTicket: %v", err)
+	}
+	if ticket.WaitingOn != nil {
+		t.Errorf("ticket.WaitingOn = %q, want nil", *ticket.WaitingOn)
+	}
+}
+
+// TestSendBatchReopenBeatsApproveInOneBatch proves step 1 (design section
+// 22.12.2, 22.12.6's "Approve and a reopen in one batch"): a batch that
+// carries both a reply on a reopenable thread and an approve pick on the
+// still-open gate discards the gate draft as stale, and the gate ends
+// withdrawn rather than answered.
+func TestSendBatchReopenBeatsApproveInOneBatch(t *testing.T) {
+	t.Parallel()
+	s := newTestStore(t)
+	_, ticketID := seedQueuedTicket(t, s, "1")
+	setTicketState(t, s, ticketID, testStatePlanning)
+	setTicketWaiting(t, s, ticketID, string(response.QuestionKindGate))
+
+	planningSess := insertSession(t, s, ticketID, testStatePlanning)
+	planningRun := insertQuestionRun(t, s, planningSess)
+	q1ID := insertSettledPlanningQuestion(t, s, ticketID, planningRun, "Q1", "Plain text only.")
+	gateQID := insertQuestionOfKind(t, s, ticketID, "Q2", response.QuestionKindGate, optionsAB, nil)
+
+	if _, err := s.SaveDraft(t.Context(), DraftInput{TicketID: ticketID, QuestionID: &q1ID, Text: testReopenText}); err != nil {
+		t.Fatalf("SaveDraft Q1: %v", err)
+	}
+	approve := "a"
+	if _, err := s.SaveDraft(t.Context(), DraftInput{TicketID: ticketID, QuestionID: &gateQID, Option: &approve}); err != nil {
+		t.Fatalf("SaveDraft gate: %v", err)
+	}
+
+	res, err := s.SendBatch(t.Context(), ticketID)
+	if err != nil {
+		t.Fatalf("SendBatch: %v", err)
+	}
+	if res.Sent != 1 {
+		t.Errorf("Sent = %d, want 1 (only Q1's reply)", res.Sent)
+	}
+	if res.Discarded != 1 {
+		t.Errorf("Discarded = %d, want 1 (the losing gate draft)", res.Discarded)
+	}
+
+	gate, err := s.GetMessage(t.Context(), gateQID)
+	if err != nil {
+		t.Fatalf("GetMessage(gate): %v", err)
+	}
+	if gate.State == nil || *gate.State != questionStateResolved {
+		t.Errorf("gate state = %v, want %q (withdrawn, never answered)", gate.State, questionStateResolved)
+	}
+	if n := countRows(t, s, `SELECT COUNT(*) FROM messages WHERE parent_id = ? AND type = ?`, gateQID, msgTypeAnswer); n != 0 {
+		t.Errorf("answer rows on the gate = %d, want 0 (the draft was discarded, not sent)", n)
+	}
+}
+
+// TestSendDuringApprovalCancelsIt proves step 3's own "answered with an
+// approval in progress" branch (design section 22.12.2, 22.12.6's "the
+// owner writes on a settled thread during an approval"): the owner sends
+// Approve first (the gate goes "answered"), then reopens a settled thread
+// in a later batch; the gate is withdrawn with a cancellation marker naming
+// that later batch, not the run that would have confirmed it.
+func TestSendDuringApprovalCancelsIt(t *testing.T) {
+	t.Parallel()
+	s := newTestStore(t)
+	_, ticketID := seedQueuedTicket(t, s, "1")
+	setTicketState(t, s, ticketID, testStatePlanning)
+
+	planningSess := insertSession(t, s, ticketID, testStatePlanning)
+	planningRun := insertQuestionRun(t, s, planningSess)
+	q1ID := insertSettledPlanningQuestion(t, s, ticketID, planningRun, "Q1", "Plain text only.")
+	gateQID := insertQuestionOfKind(t, s, ticketID, "Q2", response.QuestionKindGate, optionsAB, nil)
+
+	approve := "a"
+	if _, err := s.SaveDraft(t.Context(), DraftInput{TicketID: ticketID, QuestionID: &gateQID, Option: &approve}); err != nil {
+		t.Fatalf("SaveDraft approve: %v", err)
+	}
+	approveRes, err := s.SendBatch(t.Context(), ticketID)
+	if err != nil {
+		t.Fatalf("SendBatch (approve): %v", err)
+	}
+	if approveRes.Sent != 1 {
+		t.Fatalf("approve SendBatch = %+v, want Sent=1", approveRes)
+	}
+	gateAfterApprove, err := s.GetMessage(t.Context(), gateQID)
+	if err != nil {
+		t.Fatalf("GetMessage(gate) after approve: %v", err)
+	}
+	if gateAfterApprove.State == nil || *gateAfterApprove.State != questionStateAnswered {
+		t.Fatalf("gate state after approve = %v, want %q", gateAfterApprove.State, questionStateAnswered)
+	}
+
+	if _, saveErr := s.SaveDraft(t.Context(), DraftInput{TicketID: ticketID, QuestionID: &q1ID, Text: testReopenText}); saveErr != nil {
+		t.Fatalf("SaveDraft reopen: %v", saveErr)
+	}
+	reopenRes, err := s.SendBatch(t.Context(), ticketID)
+	if err != nil {
+		t.Fatalf("SendBatch (reopen): %v", err)
+	}
+	if reopenRes.Sent != 1 {
+		t.Fatalf("reopen SendBatch = %+v, want Sent=1", reopenRes)
+	}
+
+	gate, err := s.GetMessage(t.Context(), gateQID)
+	if err != nil {
+		t.Fatalf("GetMessage(gate) after reopen: %v", err)
+	}
+	if gate.State == nil || *gate.State != questionStateResolved {
+		t.Errorf("gate state after reopen = %v, want %q (withdrawn)", gate.State, questionStateResolved)
+	}
+	wantCancel := fmt.Sprintf("gate approval cancelled gate %d batch %d", gateQID, reopenRes.BatchID)
+	if n := countRows(t, s, `SELECT COUNT(*) FROM messages WHERE ticket_id = ? AND parent_id = ? AND type = ? AND author = ? AND body = ?`,
+		ticketID, gateQID, msgTypeUpdate, authorSystem, wantCancel); n != 1 {
+		t.Errorf("cancellation marker %q not found", wantCancel)
+	}
+
+	q1, err := s.GetMessage(t.Context(), q1ID)
+	if err != nil {
+		t.Fatalf("GetMessage(q1): %v", err)
+	}
+	if q1.State == nil || *q1.State != questionStateOpen {
+		t.Errorf("Q1 state = %v, want %q (reopened)", q1.State, questionStateOpen)
+	}
+}
+
 // ---- SaveDraft: reply dedupe on repeated Enter ------------------------------
 
 // TestSaveDraft_QuestionReplyIsIdempotentOnRepeatedEnter proves the
@@ -716,6 +1314,7 @@ func TestSendBatch_ItemCompletenessAccumulatesAcrossSends(t *testing.T) {
 // update one draft row in place rather than accumulating a second row that
 // would send twice.
 func TestSaveDraft_QuestionReplyIsIdempotentOnRepeatedEnter(t *testing.T) {
+	t.Parallel()
 	s := newTestStore(t)
 	_, ticketID := seedQueuedTicket(t, s, "1")
 	qID := insertQuestionOption(t, s, ticketID, "Q1")
@@ -772,6 +1371,7 @@ func TestSaveDraft_QuestionReplyIsIdempotentOnRepeatedEnter(t *testing.T) {
 // thread reply (QuestionID nil), which dedupes by (ticket, thread) instead
 // of (ticket, question).
 func TestSaveDraft_ThreadReplyIsIdempotentOnRepeatedEnter(t *testing.T) {
+	t.Parallel()
 	s := newTestStore(t)
 	_, ticketID := seedQueuedTicket(t, s, "1")
 
@@ -803,6 +1403,7 @@ func TestSaveDraft_ThreadReplyIsIdempotentOnRepeatedEnter(t *testing.T) {
 // ---- MarkRead ---------------------------------------------------------------
 
 func TestMarkRead_SetsReadAt(t *testing.T) {
+	t.Parallel()
 	s := newTestStore(t)
 	_, ticketID := seedQueuedTicket(t, s, "1")
 	msgID := insertZingUpdate(t, s, ticketID)
@@ -829,6 +1430,7 @@ func TestMarkRead_SetsReadAt(t *testing.T) {
 }
 
 func TestMarkRead_MissingMessageErrors(t *testing.T) {
+	t.Parallel()
 	s := newTestStore(t)
 	if err := s.MarkRead(t.Context(), 999999); err == nil {
 		t.Error("MarkRead on a missing message: err = nil, want an error")
@@ -841,6 +1443,7 @@ func TestMarkRead_MissingMessageErrors(t *testing.T) {
 // and inserts a brand-new key (the shape Task 11's VAPID pair needs) in the
 // same transaction.
 func TestSetSettings_UpdatesExistingAndInsertsNew(t *testing.T) {
+	t.Parallel()
 	s := newTestStore(t)
 
 	if err := s.SetSettings(t.Context(), "log_level", "debug", "vapid_public", "pub-key"); err != nil {
@@ -868,6 +1471,7 @@ func TestSetSettings_UpdatesExistingAndInsertsNew(t *testing.T) {
 // value is rejected before any write happens, rather than silently dropping
 // the dangling key.
 func TestSetSettings_RejectsOddArgumentCount(t *testing.T) {
+	t.Parallel()
 	s := newTestStore(t)
 	if err := s.SetSettings(t.Context(), "log_level"); err == nil {
 		t.Error("SetSettings with an odd argument count: err = nil, want an error")
@@ -885,6 +1489,7 @@ func pushKeysJSON(p256dh, auth string) []byte {
 // endpoint replaces its keys_json in place, so a re-subscribe is idempotent
 // rather than leaving two rows.
 func TestUpsertPushSubscription_InsertsThenReplacesByEndpoint(t *testing.T) {
+	t.Parallel()
 	s := newTestStore(t)
 	const endpoint = "https://push.example/abc"
 
@@ -917,6 +1522,7 @@ func TestUpsertPushSubscription_InsertsThenReplacesByEndpoint(t *testing.T) {
 // keys_json is validated against the push_subscriptions/keys schema: a
 // payload missing p256dh or auth is rejected and writes nothing.
 func TestUpsertPushSubscription_RejectsKeysMissingRequiredFields(t *testing.T) {
+	t.Parallel()
 	s := newTestStore(t)
 
 	tests := []struct {
@@ -929,6 +1535,7 @@ func TestUpsertPushSubscription_RejectsKeysMissingRequiredFields(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
 			err := s.UpsertPushSubscription(t.Context(), PushSubscription{
 				Endpoint: "https://push.example/" + tc.name, KeysJSON: tc.keys,
 			})

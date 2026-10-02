@@ -19,15 +19,22 @@ import {
 	isInputContext,
 	isSendChord,
 	sendChordToken,
+	sendChordLabel,
+	draftConflictMessage,
+	TOAST_DISMISS_MS,
+	scheduleToastDismiss,
+	clearReplyInputs,
 	resolveToken,
 	stepFocus,
 	reconcileFocus,
 	collectPatchWork,
 	navChanged,
 	reduceNav,
+	nextPendingNav,
 	stepComposerIndex,
 	buildChipDraftBody,
 	buildItemDraftBody,
+	unsavedReplyBody,
 	describeAction,
 	ACTION_LABELS,
 } from './keyboard.mjs';
@@ -156,6 +163,62 @@ test('isSendChord: both Ctrl and Cmd held at once is not the send chord on eithe
 test('sendChordToken names the platform-correct keys.json token', () => {
 	assert.equal(sendChordToken(true), 'Cmd-Enter');
 	assert.equal(sendChordToken(false), 'Ctrl-Enter');
+});
+
+// sendChordLabel (bug fix): the glyph the "saved as a draft" hints show,
+// distinct from sendChordToken's keys.json binding string.
+test('sendChordLabel renders the platform-correct glyph', () => {
+	assert.equal(sendChordLabel(true), '⌘+Enter');
+	assert.equal(sendChordLabel(false), 'Ctrl+Enter');
+});
+
+// draftConflictMessage (bug fix): a closed-question 409 beside the reply
+// box that triggered it reads as a sentence, not console_writes.go's raw
+// conflict reason.
+test('draftConflictMessage: "question closed" reads as a plain sentence', () => {
+	assert.equal(draftConflictMessage('question closed'), 'This question is already answered.');
+});
+
+test('draftConflictMessage: any other reason is shown as-is', () => {
+	assert.equal(draftConflictMessage('missing option'), 'missing option');
+	assert.equal(draftConflictMessage('ambiguous draft mode'), 'ambiguous draft mode');
+});
+
+// clearReplyInputs (design section 22.7): a 200 from /send clears every
+// .reply-input inside #main, so a sent draft's own box does not keep
+// showing text the owner just sent.
+test('clearReplyInputs: a 200 from /send clears the reply inputs', () => {
+	const inputs = [{ value: 'already sent text' }, { value: 'another box' }];
+	clearReplyInputs(inputs);
+	assert.deepEqual(
+		inputs.map((i) => i.value),
+		['', ''],
+	);
+});
+
+test('clearReplyInputs: no inputs is a no-op', () => {
+	assert.doesNotThrow(() => clearReplyInputs([]));
+});
+
+// scheduleToastDismiss (bug fix 12): the bottom "Sent N answer(s)."/"Nothing
+// to send." toast never auto-dismissed, and two sends close together could
+// otherwise arm two independent dismiss timers that race each other.
+test('scheduleToastDismiss: no previous timer, just arms the next one', () => {
+	const cleared = [];
+	const id = scheduleToastDismiss(null, () => 42, (timerID) => cleared.push(timerID));
+	assert.equal(id, 42);
+	assert.deepEqual(cleared, []);
+});
+
+test('scheduleToastDismiss: a pending timer is cleared before the next one arms', () => {
+	const cleared = [];
+	const id = scheduleToastDismiss(7, () => 8, (timerID) => cleared.push(timerID));
+	assert.equal(id, 8);
+	assert.deepEqual(cleared, [7]);
+});
+
+test('TOAST_DISMISS_MS is about 4 seconds', () => {
+	assert.equal(TOAST_DISMISS_MS, 4000);
 });
 
 // resolveToken: outside an input, a single key held with Ctrl, Meta, or Alt
@@ -355,6 +418,21 @@ test('reduceNav: a back navigation (isBack) updates nav without pushing another 
 	assert.equal(result.changed, true);
 });
 
+// nextPendingNav: console.js's onZingNav calls this after reduceNav on
+// every zing-nav event (bug fix: the first Threads-sidebar click right
+// after a page load did nothing because it could race GET /stream's first
+// frame, the only proof Datastar's own listener is wired up).
+
+test('nextPendingNav: before the stream connects, the event becomes the pending nav to re-apply', () => {
+	const nav = { view: 'thread', open: 7, project: 0 };
+	assert.deepEqual(nextPendingNav(false, nav), { view: 'thread', open: 7, project: 0 });
+});
+
+test('nextPendingNav: once the stream has connected, there is nothing to remember', () => {
+	const nav = { view: 'thread', open: 7, project: 0 };
+	assert.equal(nextPendingNav(true, nav), null);
+});
+
 // stepComposerIndex: console.js's moveComposerFocus() over the composer's
 // own controls (code review fix 3).
 
@@ -443,4 +521,18 @@ test('describeAction returns the mapped label for a known action', () => {
 
 test('describeAction falls back to the raw action name for one outside ACTION_LABELS', () => {
 	assert.equal(describeAction('some-future-action'), 'some-future-action');
+});
+
+// unsavedReplyBody: Cmd+Enter saves the focused reply box's typed text
+// before it sends, so typing then sending without Enter still sends.
+
+test('unsavedReplyBody: a reply box with text yields its draft body', () => {
+	const el = { dataset: { draftTicket: '7', draftQuestion: '9' }, value: 'why?' };
+	assert.deepEqual(unsavedReplyBody(el), { ticket: 7, question: 9, text: 'why?' });
+});
+
+test('unsavedReplyBody: an empty box, a non-reply element, or nothing focused yields null', () => {
+	assert.equal(unsavedReplyBody({ dataset: { draftTicket: '7', draftQuestion: '9' }, value: '' }), null);
+	assert.equal(unsavedReplyBody({ dataset: {}, value: 'text' }), null);
+	assert.equal(unsavedReplyBody(null), null);
 });

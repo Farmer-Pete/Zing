@@ -37,6 +37,11 @@ const (
 	reasonUserCacheDirNotFound = "user cache directory not found"
 	reasonProfileRejected      = "profile rejected"
 	reasonOff                  = "off"
+	// reasonNotLoaded is NotLoaded's own reason (PKG9-PLAN.md section 4.7):
+	// M1's own Set.Judge, a profile name Set.For recognizes that this build
+	// of serve does not load yet, distinct from Off's "off" (a suite on the
+	// fake runtime that never attempts sandbox-exec at all).
+	reasonNotLoaded = "not loaded"
 )
 
 // Params fills one profile's per-run "-D NAME=value" values (section 5.2).
@@ -45,6 +50,14 @@ const (
 type Params struct {
 	Home, Worktree, RepoGit, DataDir, ZingBin             string
 	CacheRoot, CacheShared, RunDir, Transcripts, MDSCache string
+	// ScenariosFile and CodexHome are the judge profile's own two extra
+	// parameters (PKG9-PLAN.md section 4.7, D19, D27): the run's sealed
+	// scenarios file and the judge's persistent Codex home. Empty for the
+	// build and readonly profiles, which never set either. Prefix emits a
+	// "-D" flag for each only when it is set, and refuses to build a
+	// prefix for the judge profile with either one empty: a judge run
+	// missing one is worse than refusing outright (errJudgeParamsIncomplete).
+	ScenariosFile, CodexHome string
 }
 
 // Host holds what is the same for every run on this machine (section 5.2):
@@ -54,13 +67,19 @@ type Host struct {
 }
 
 // Sandbox is a loaded (or deliberately unavailable) seatbelt profile: its
-// rendered text, the host values every run on this machine shares, and
-// whether it is safe to wrap a real run in.
+// rendered text, the host values every run on this machine shares, whether
+// it is safe to wrap a real run in, and the profile name it was loaded
+// under (PKG9-PLAN.md section 4.7): empty for a zero-value Sandbox built
+// straight from a literal (most of this package's own white-box tests),
+// one of the three Set.For names otherwise. Prefix reads it to decide
+// whether the judge profile's two extra parameters, SCENARIOS_FILE and
+// CODEX_HOME, are required.
 type Sandbox struct {
 	renderedProfile string
 	host            Host
 	available       bool
 	reason          string
+	name            string
 }
 
 // Off returns a Sandbox that is never available, for a suite that drives the
@@ -68,6 +87,79 @@ type Sandbox struct {
 // never uses it (N9): a real build run fails closed instead.
 func Off() Sandbox {
 	return Sandbox{reason: reasonOff}
+}
+
+// NotLoaded returns an unavailable Sandbox with reason "not loaded", for a
+// Set.For name this build of serve does not load yet (PKG9-PLAN.md section
+// 4.7): M1's own Set.Judge, before M2 task 2 adds judge.sb and its load.
+func NotLoaded() Sandbox {
+	return Sandbox{reason: reasonNotLoaded}
+}
+
+// Set holds the three loaded profiles machine.toml's job.sandbox key can
+// name (PKG9-PLAN.md section 4.7): build, readonly, and, from M2 on, judge.
+// In M1, serve loads Build and ReadOnly and leaves Judge Off() with reason
+// "not loaded".
+type Set struct {
+	Build, ReadOnly, Judge Sandbox
+}
+
+// profileNameBuild, profileNameReadOnly, and profileNameJudge are the three
+// machine.toml job.sandbox values Set.For recognizes (section 4.7), named
+// once so machine.go's own validation and this package's lookup never drift
+// apart.
+const (
+	profileNameBuild    = "build"
+	profileNameReadOnly = "readonly"
+	profileNameJudge    = "judge"
+)
+
+// For returns the profile machine.toml names: "build", "readonly", or
+// "judge". ok is false for any other name (section 4.7).
+func (s Set) For(name string) (Sandbox, bool) {
+	switch name {
+	case profileNameBuild:
+		return s.Build, true
+	case profileNameReadOnly:
+		return s.ReadOnly, true
+	case profileNameJudge:
+		return s.Judge, true
+	default:
+		return Sandbox{}, false
+	}
+}
+
+// OffSet returns a Set of three Off() sandboxes, for a suite that drives
+// the fake runtime and must never attempt sandbox-exec at all (section
+// 4.7, design D5).
+func OffSet() Set {
+	return Set{Build: Off(), ReadOnly: Off(), Judge: Off()}
+}
+
+// setProfileOrder is the order FirstUnavailable reports in (section 4.7):
+// build, readonly, judge.
+var setProfileOrder = []string{profileNameBuild, profileNameReadOnly, profileNameJudge}
+
+// FirstUnavailable returns "<name>: <reason>" for the first profile, in
+// setProfileOrder, that some machine.toml job in used actually names and
+// that did not load, or "" when every used profile is available (section
+// 4.7). A profile no job uses never turns the console indicator red, even
+// when it is Off() (M1's own Set.Judge, for instance).
+func (s Set) FirstUnavailable(used []string) string {
+	usedSet := make(map[string]bool, len(used))
+	for _, name := range used {
+		usedSet[name] = true
+	}
+	for _, name := range setProfileOrder {
+		if !usedSet[name] {
+			continue
+		}
+		sb, ok := s.For(name)
+		if ok && !sb.Available() {
+			return name + ": " + sb.Reason()
+		}
+	}
+	return ""
 }
 
 // Available reports whether s loaded and proved itself.
@@ -83,30 +175,49 @@ const cacheDirPerm = 0o700
 
 // Load resolves the host values, renders profile with readPaths and
 // consolePort, and proves the result loads by running sandbox-exec against
-// a throwaway run directory (section 5.4). It never returns an error: any
-// failure is recorded on the returned Sandbox, unavailable, with one of the
-// four closed reasons.
+// a throwaway run directory (design section 5.4 of PKG8-PLAN.md). It never
+// returns an error: any failure is recorded on the returned Sandbox,
+// unavailable, with one of the four closed reasons. Load is LoadProfile("build",
+// ...) (PKG9-PLAN.md section 4.7): every earlier caller of Load keeps
+// working unchanged now that loading is profile-aware.
 func Load(profile []byte, dataDir string, readPaths []string, consolePort int) Sandbox {
+	return LoadProfile(profileNameBuild, profile, dataDir, readPaths, consolePort)
+}
+
+// LoadProfile resolves the host values, renders profile with readPaths and
+// consolePort, and proves the result loads by running sandbox-exec against
+// a throwaway run directory (PKG9-PLAN.md section 4.7): build and readonly
+// share M1's own proof (a fresh /usr/bin/true under generic parameters);
+// name == "judge" additionally writes a temp scenarios file and a temp
+// Codex home into that same run directory and proves SCENARIOS_FILE's
+// literal allow with "/bin/cat" instead (section 4.7's own worked
+// example), so a judge profile that cannot read its one literal file is
+// caught at load time, not at the judge's first real run. name is kept on
+// the returned Sandbox (Prefix reads it) so every later caller already
+// names which profile it loaded. It never returns an error: any failure is
+// recorded on the returned Sandbox, unavailable, with one of the four
+// closed reasons.
+func LoadProfile(name string, profile []byte, dataDir string, readPaths []string, consolePort int) Sandbox {
 	if runtime.GOOS != "darwin" {
-		return Sandbox{reason: reasonNotMacOS}
+		return Sandbox{reason: reasonNotMacOS, name: name}
 	}
 	if _, err := exec.LookPath("sandbox-exec"); err != nil {
-		return Sandbox{reason: reasonSandboxExecNotFound}
+		return Sandbox{reason: reasonSandboxExecNotFound, name: name}
 	}
 
 	host, err := resolveHost(dataDir)
 	if err != nil {
-		return Sandbox{reason: reasonUserCacheDirNotFound}
+		return Sandbox{reason: reasonUserCacheDirNotFound, name: name}
 	}
 
 	rendered, err := renderProfile(profile, readPaths, consolePort)
 	if err != nil {
-		return Sandbox{host: host, reason: reasonProfileRejected}
+		return Sandbox{host: host, reason: reasonProfileRejected, name: name}
 	}
-	sb := Sandbox{host: host, renderedProfile: rendered}
+	sb := Sandbox{host: host, renderedProfile: rendered, name: name}
 
 	if !sb.proves() {
-		return Sandbox{host: host, renderedProfile: rendered, reason: reasonProfileRejected}
+		return Sandbox{host: host, renderedProfile: rendered, reason: reasonProfileRejected, name: name}
 	}
 	sb.available = true
 	return sb
@@ -183,7 +294,11 @@ func resolveHost(dataDir string) (Host, error) {
 // proves runs the section 5.4 proof command: sandbox-exec, every param
 // filled (WORKTREE, REPO_GIT, and TRANSCRIPTS all pointed at one fresh run
 // directory, since the proof only needs the profile to load, not a
-// fine-grained boundary), the rendered profile, and /usr/bin/true.
+// fine-grained boundary), the rendered profile, and a command that proves
+// the profile's own reach: /usr/bin/true for build and readonly, or (name
+// == "judge") /bin/cat against a temp scenarios file, proving the literal
+// SCENARIOS_FILE allow the same way a real judge run depends on it
+// (section 4.7, D19).
 func (s Sandbox) proves() bool {
 	runDir, cleanup, err := s.NewRunDir()
 	if err != nil {
@@ -196,16 +311,57 @@ func (s Sandbox) proves() bool {
 		CacheRoot: s.host.CacheRoot, CacheShared: s.host.CacheShared, RunDir: runDir,
 		Transcripts: runDir, MDSCache: s.host.MDSCache,
 	}
+	cmd := []string{"/usr/bin/true"}
+	if s.name == profileNameJudge {
+		proofCmd, judgeErr := s.judgeProof(runDir, &p)
+		if judgeErr != nil {
+			return false
+		}
+		cmd = proofCmd
+	}
+
 	argv, err := s.Prefix(p)
 	if err != nil {
 		return false
 	}
-	argv = append(argv, "/usr/bin/true")
+	argv = append(argv, cmd...)
 
 	ctx, cancel := context.WithTimeout(context.Background(), proveTimeout)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, argv[0], argv[1:]...) //nolint:gosec // G204: argv is built by Prefix from validated host and run-dir paths, never from model-influenced input
-	return cmd.Run() == nil
+	c := exec.CommandContext(ctx, argv[0], argv[1:]...) //nolint:gosec // G204: argv is built by Prefix from validated host and run-dir paths, never from model-influenced input
+	return c.Run() == nil
+}
+
+// judgeProofScenariosContent is the one line the judge proof's temp
+// scenarios file holds: its content is irrelevant (the proof only needs
+// something for /bin/cat to read), so this is simple, fixed text rather
+// than a real <scenario> element.
+const judgeProofScenariosContent = "judge profile proof\n"
+
+// judgeProof writes a temp scenarios file (mode 0600) and creates a temp
+// Codex home, both under runDir so NewRunDir's own cleanup removes them
+// with everything else once the proof returns, fills p's ScenariosFile and
+// CodexHome from them, and returns the command the proof should run
+// instead of /usr/bin/true: /bin/cat against the literal scenarios path
+// (section 4.7's own worked example), proving SCENARIOS_FILE's literal
+// allow actually reaches a real file.
+func (s Sandbox) judgeProof(runDir string, p *Params) ([]string, error) {
+	scenariosPath := filepath.Join(runDir, "scenarios.xml")
+	if err := os.WriteFile(scenariosPath, []byte(judgeProofScenariosContent), 0o600); err != nil {
+		return nil, fmt.Errorf("sandbox: write judge proof scenarios file: %w", err)
+	}
+	if err := os.Chmod(scenariosPath, 0o600); err != nil {
+		return nil, fmt.Errorf("sandbox: chmod judge proof scenarios file: %w", err)
+	}
+
+	codexHome := filepath.Join(runDir, "codex-home")
+	if err := os.MkdirAll(codexHome, cacheDirPerm); err != nil {
+		return nil, fmt.Errorf("sandbox: create judge proof codex home: %w", err)
+	}
+
+	p.ScenariosFile = scenariosPath
+	p.CodexHome = codexHome
+	return []string{"/bin/cat", scenariosPath}, nil
 }
 
 // runIDBytes is the number of random bytes NewRunDir reads to build a run
@@ -328,13 +484,24 @@ func checkParamValue(name, value string) error {
 	return nil
 }
 
+// errJudgeParamsIncomplete is Prefix's own sentinel for the judge
+// profile's two extra parameters (PKG9-PLAN.md section 4.7, D19, D27):
+// SCENARIOS_FILE and CODEX_HOME must both be set together. A judge run
+// missing just one is worse than refusing outright -- it would either
+// point SCENARIOS_FILE at nothing or leave Codex with no durable login
+// home -- so Prefix fails closed rather than building a prefix either one
+// is empty in.
+var errJudgeParamsIncomplete = errors.New("sandbox: judge profile needs both SCENARIOS_FILE and CODEX_HOME")
+
 // Prefix returns the command prefix: sandbox-exec -D HOME=<..> -D
 // WORKTREE=<..> ... -p <profile>, with the -D flags in paramOrder (section
-// 5.4). It validates every param value first (checkParamValue), in that
-// same order, so the first unsafe value's own name is what the error names.
+// 5.4), followed by the judge profile's own two extra flags when this
+// Sandbox was loaded under that name (section 4.7). It validates every
+// param value first (checkParamValue), in that same order, so the first
+// unsafe value's own name is what the error names.
 func (s Sandbox) Prefix(p Params) ([]string, error) {
 	values := paramValues(p)
-	argv := make([]string, 0, 2+2*len(paramOrder)+2)
+	argv := make([]string, 0, 2+2*len(paramOrder)+4+2)
 	argv = append(argv, "sandbox-exec")
 	for i, name := range paramOrder {
 		if err := checkParamValue(name, values[i]); err != nil {
@@ -342,7 +509,45 @@ func (s Sandbox) Prefix(p Params) ([]string, error) {
 		}
 		argv = append(argv, "-D", name+"="+values[i])
 	}
+
+	judgeArgs, err := s.judgeParamArgs(p)
+	if err != nil {
+		return nil, err
+	}
+	argv = append(argv, judgeArgs...)
+
 	argv = append(argv, "-p", s.renderedProfile)
+	return argv, nil
+}
+
+// judgeParamArgs returns the "-D SCENARIOS_FILE=..." and "-D
+// CODEX_HOME=..." pair Prefix appends after paramOrder's own flags, for
+// the judge profile's two extra parameters (section 4.7, D19, D27): each
+// field that is set gets its own flag, checked the same way
+// checkParamValue checks every other param; build and readonly never set
+// either field, so this adds nothing for them. The "both or neither" rule
+// -- a judge run missing just one is worse than refusing outright -- is
+// enforced only for a Sandbox actually loaded under the judge name: a
+// caller testing CODEX_HOME's own wiring in isolation, against some other
+// loaded profile, is not forced to also wire a scenarios file to do it
+// (internal/job's own TestRunJobJudgeParamsCodexHome).
+func (s Sandbox) judgeParamArgs(p Params) ([]string, error) {
+	if s.name == profileNameJudge && (p.ScenariosFile == "" || p.CodexHome == "") {
+		return nil, errJudgeParamsIncomplete
+	}
+	var argv []string
+	for _, kv := range []struct{ name, value string }{
+		{"SCENARIOS_FILE", p.ScenariosFile},
+		{"CODEX_HOME", p.CodexHome},
+	} {
+		if kv.value == "" {
+			continue
+		}
+		if err := checkParamValue(kv.name, kv.value); err != nil {
+			return nil, err
+		}
+		argv = append(argv, "-D", kv.name+"="+kv.value)
+	}
 	return argv, nil
 }
 

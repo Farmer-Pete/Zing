@@ -27,7 +27,15 @@ type Reserved struct {
 // 4.2).
 type RunSeed struct {
 	Model string
-	TaskN *int // runs.task_n; nil for every job except build and perimeter task units
+	TaskN *int    // runs.task_n; nil for every job except build and perimeter task units
+	Lens  *string // runs.lens; set on a review run, one of the seven code lenses
+	// ThroughBatch is the largest owner-message batch this reserved run
+	// carries (design section 22.3, D31): above 0, Reserve writes
+	// "conversation pending run <R> batch <B>" once the run row exists, the
+	// marker PlanningConversation's in-flight read recovers it from. Zero
+	// (every non-planning caller, and a planning run that received no owner
+	// message) writes none.
+	ThroughBatch int64
 }
 
 // Reserve is the one pre-commit write a handler may make under its claim
@@ -69,6 +77,7 @@ func (s *Store) Reserve(ctx context.Context, ticketID int64, owner string, expir
 	}
 
 	var sessionID int64
+	job := su.Job
 	if su.ID != nil {
 		if err = verifySessionForTicket(ctx, tx, ticketID, *su.ID); err != nil {
 			return Reserved{}, fmt.Errorf("reserve: %w", err)
@@ -78,6 +87,17 @@ func (s *Store) Reserve(ctx context.Context, ticketID int64, owner string, expir
 			if _, err = tx.ExecContext(ctx, `UPDATE sessions SET resumes = resumes + 1 WHERE id = ?`, sessionID); err != nil {
 				return Reserved{}, fmt.Errorf("reserve: bump session resumes: %w", err)
 			}
+		}
+		// A resume's own SessionUpsert never carries Job (every resume call
+		// site -- building.go, planning.go, reviewing.go, judging.go,
+		// respond.go -- sets only ID and BumpResumes), so the log line below
+		// would otherwise print job="" on a resumed turn (bug fix: the
+		// owner's serve log showed "run reserved ... job="" turn=1" on a
+		// resume, next to "job=planning" on the turn that started it). The
+		// session's own job column, set once at creation, never changes, so
+		// reading it back here makes the log line accurate on every turn.
+		if job, err = sessionJobTx(ctx, tx, sessionID); err != nil {
+			return Reserved{}, err
 		}
 	} else {
 		var sessRes sql.Result
@@ -102,8 +122,8 @@ func (s *Store) Reserve(ctx context.Context, ticketID int64, owner string, expir
 
 	var runRes sql.Result
 	runRes, err = tx.ExecContext(ctx,
-		`INSERT INTO runs (session_id, turn, model, task_n, outcome, exit_code, agent_seconds) VALUES (?, ?, ?, ?, NULL, NULL, NULL)`,
-		sessionID, turn, seed.Model, seed.TaskN)
+		`INSERT INTO runs (session_id, turn, lens, model, task_n, outcome, exit_code, agent_seconds) VALUES (?, ?, ?, ?, ?, NULL, NULL, NULL)`,
+		sessionID, turn, seed.Lens, seed.Model, seed.TaskN)
 	if err != nil {
 		return Reserved{}, fmt.Errorf("reserve: insert run: %w", err)
 	}
@@ -117,6 +137,45 @@ func (s *Store) Reserve(ctx context.Context, ticketID int64, owner string, expir
 		return Reserved{}, fmt.Errorf("reserve: commit tx: %w", err)
 	}
 
-	slog.Info("run reserved", "ticket_id", ticketID, "session_id", sessionID, "run_id", runID, "job", su.Job, "turn", turn)
+	slog.Info("run reserved", "ticket_id", ticketID, "session_id", sessionID, "run_id", runID, "job", job, "turn", turn)
+
+	if seed.ThroughBatch > 0 {
+		if err = writePendingConversationMarker(ctx, s, ticketID, runID, seed.ThroughBatch); err != nil {
+			return Reserved{}, fmt.Errorf("reserve: %w", err)
+		}
+	}
+
 	return Reserved{SessionID: sessionID, RunID: runID, Turn: turn}, nil
+}
+
+// writePendingConversationMarker writes "conversation pending run <R>
+// batch <B>" in its own transaction, after the run row that gives it R
+// (design section 22.3, D31): the marker a resumed in-flight read recovers
+// a reserved run's own batch from, until its commit replaces it with a
+// delivered marker.
+func writePendingConversationMarker(ctx context.Context, s *Store, ticketID, runID, throughBatch int64) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin pending marker tx: %w", err)
+	}
+	defer rollback(tx)
+	if err = s.insertMessageTx(ctx, tx, Message{
+		TicketID: ticketID, Type: msgTypeUpdate, Author: authorSystem,
+		Body: fmt.Sprintf("%s%d batch %d", conversationPendingPrefix, runID, throughBatch),
+	}); err != nil {
+		return fmt.Errorf("insert pending marker: %w", err)
+	}
+	return tx.Commit()
+}
+
+// sessionJobTx reads sessionID's own job column: set once when the session
+// is created and never changed by a resume, so a resumed Reserve call can
+// recover the job name its own SessionUpsert leaves unset (bug fix, see
+// Reserve above).
+func sessionJobTx(ctx context.Context, tx *sql.Tx, sessionID int64) (string, error) {
+	var job string
+	if err := tx.QueryRowContext(ctx, `SELECT job FROM sessions WHERE id = ?`, sessionID).Scan(&job); err != nil {
+		return "", fmt.Errorf("reserve: get session %d job: %w", sessionID, err)
+	}
+	return job, nil
 }

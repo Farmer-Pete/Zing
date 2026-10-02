@@ -14,6 +14,10 @@ var update = flag.Bool("update", false, "update the committed golden prompts in 
 
 const goldenDir = "testdata"
 
+// healthCheckPlan is the stored-plan XML shared by every golden case that
+// needs one: build-first, build-fix, and review-first.
+const healthCheckPlan = "<plan><objective>Add a health check endpoint.</objective></plan>"
+
 // readAsset reads one file through zing.Assets, the same embed.FS
 // production code reads prompt and style files from, so these goldens
 // track the pinned prompt text (internal/machine/prompts_test.go pins the
@@ -148,9 +152,9 @@ func goldenCases() []goldenCase {
 				}
 				ticket := "Title: Add a health check\n\n" +
 					"Body: Add a ping endpoint so uptime monitoring has something to hit."
-				plan := "<plan><objective>Add a health check endpoint.</objective></plan>"
+				plan := healthCheckPlan
 				accepted := []string{"internal/health/ping.go", "internal/health/ping_test.go"}
-				in, err := ForBuild(jobPrompt, task, "go test ./...", "make lint", ticket, plan, accepted, nil)
+				in, err := ForBuild(jobPrompt, task, "go test ./...", "make lint", ticket, plan, "", accepted, nil)
 				if err != nil {
 					t.Fatalf("ForBuild: %v", err)
 				}
@@ -182,10 +186,10 @@ func goldenCases() []goldenCase {
 				jobPrompt := readAsset(t, "prompts/build.md")
 				ticket := "Title: Add a health check\n\n" +
 					"Body: Add a ping endpoint so uptime monitoring has something to hit."
-				plan := "<plan><objective>Add a health check endpoint.</objective></plan>"
+				plan := healthCheckPlan
 				findings := "problem: internal/health/ping.go returns 500 on success."
 				in, err := ForFix(jobPrompt, "Fix review findings", "findings", findings,
-					"go test ./...", "make lint", ticket, plan, nil, nil)
+					"go test ./...", "make lint", ticket, plan, "", nil, nil)
 				if err != nil {
 					t.Fatalf("ForFix: %v", err)
 				}
@@ -221,6 +225,102 @@ func goldenCases() []goldenCase {
 				return in
 			},
 		},
+		{
+			name: "review-first",
+			in: func(t *testing.T) Input {
+				t.Helper()
+				jobPrompt := readAsset(t, "prompts/review.md")
+				codeSection, err := CodeLensSection(readAsset(t, "prompts/lenses/correctness.md"))
+				if err != nil {
+					t.Fatalf("CodeLensSection: %v", err)
+				}
+				plan := healthCheckPlan
+				diff := "diff --git a/internal/health/ping.go b/internal/health/ping.go\n" +
+					"+func Ping() string { return \"pong\" }\n"
+				in, err := ForReview(jobPrompt, "correctness", "a1b2c3d", codeSection, plan, diff, nil)
+				if err != nil {
+					t.Fatalf("ForReview: %v", err)
+				}
+				in.Schemas = schemasFor(t, response.JobReview,
+					response.OutcomeOk, response.OutcomeQuestion, response.OutcomeError)
+				return in
+			},
+		},
+		{
+			// Carries one findings block and one notes block (design section
+			// 6.6's discuss-resume inputs).
+			name: "review-discuss",
+			in: func(t *testing.T) Input {
+				t.Helper()
+				in := ForReviewDiscuss([]NamedInput{
+					Findings("r1f1: internal/health/ping.go:12 returns 500 on success."),
+					Notes("r1f1: the handler is supposed to degrade, not fail."),
+				})
+				in.Schemas = schemasFor(t, response.JobReview,
+					response.OutcomeOk, response.OutcomeQuestion, response.OutcomeError)
+				return in
+			},
+		},
+		{
+			name: "judge-first",
+			in: func(t *testing.T) Input {
+				t.Helper()
+				jobPrompt := readAsset(t, "prompts/judge.md")
+				ticket := "Title: Add a health check\n\n" +
+					"Body: Add a ping endpoint so uptime monitoring has something to hit."
+				in := ForJudge(jobPrompt, ticket, nil)
+				in.Schemas = schemasFor(t, response.JobJudge,
+					response.OutcomeOk, response.OutcomeQuestion, response.OutcomeError)
+				return in
+			},
+		},
+		{
+			// Carries one answers block (plan section 7.2's resume input for
+			// an answered judge question).
+			name: "judge-resume",
+			in: func(t *testing.T) Input {
+				t.Helper()
+				in := ForJudgeResume([]NamedInput{
+					Answers("Q1: which exit code counts as a pass? -> a: 0 only."),
+				})
+				in.Schemas = schemasFor(t, response.JobJudge,
+					response.OutcomeOk, response.OutcomeQuestion, response.OutcomeError)
+				return in
+			},
+		},
+		{
+			name: "respond-first",
+			in: func(t *testing.T) Input {
+				t.Helper()
+				jobPrompt := readAsset(t, "prompts/respond.md")
+				styles := []string{readAsset(t, "prompts/style/prose.md")}
+				plan := healthCheckPlan
+				diff := "diff --git a/internal/health/ping.go b/internal/health/ping.go\n" +
+					"+func Ping() string { return \"pong\" }\n"
+				threads := "thread t1\n" +
+					"file internal/health/ping.go:12\n" +
+					"comment by @alice at 2026-09-30T12:00:00Z:\n" +
+					"Why does this return 500 on success?"
+				in := ForRespond(jobPrompt, styles, plan, diff, threads, nil)
+				in.Schemas = schemasFor(t, response.JobRespond,
+					response.OutcomeOk, response.OutcomeQuestion, response.OutcomeError)
+				return in
+			},
+		},
+		{
+			// Carries one answers block (plan section 9.2's resume input for
+			// an answered respond question).
+			name: "respond-resume",
+			in: func(t *testing.T) Input {
+				t.Helper()
+				in := ForRespondResume([]NamedInput{
+					Answers("Q1: should thread t1 be a fix or a reply? -> a: reply, the code is correct."),
+				})
+				in.Schemas = schemasFor(t, response.JobRespond,
+					response.OutcomeOk, response.OutcomeQuestion, response.OutcomeError)
+				return in
+			},
+		},
 	}
 }
 
@@ -232,6 +332,7 @@ func goldenCases() []goldenCase {
 // case's assembled bytes must equal its committed golden exactly. Every
 // case uses the fixed-nonce testFence, so the fenced bytes are pinned too.
 func TestAssemble_MatchesGolden(t *testing.T) {
+	t.Parallel()
 	cases := goldenCases()
 
 	if *update {
@@ -248,6 +349,7 @@ func TestAssemble_MatchesGolden(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
 			in := tc.in(t)
 			in.Fence = testFence
 			got := Assemble(in)

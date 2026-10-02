@@ -2,6 +2,7 @@ package response
 
 import (
 	"fmt"
+	"regexp"
 	"slices"
 	"strings"
 )
@@ -15,6 +16,11 @@ import (
 // sites (extra path, fence path/symbol via checkFenceField, and fence
 // text) so the wording never drifts between them.
 const msgSingleLine = "must be a single line"
+
+// msgEmpty is the empty-value message checkFenceField, checkRespondThreadsShape,
+// and checkConstraints' own minLength check (validate.go) all share, so the
+// wording never drifts between them.
+const msgEmpty = "must not be empty"
 
 // itemChangeSeparator is this package's own copy of Item.Text's wire
 // literal (design section 6.5, review F059): internal/job/building.go's
@@ -254,7 +260,7 @@ func checkBuildShape(r *BuildResponse, present map[string]bool) []*PathError {
 func checkFenceField(path, value string) []*PathError {
 	switch {
 	case value == "":
-		return []*PathError{{Path: path, Msg: "must not be empty"}}
+		return []*PathError{{Path: path, Msg: msgEmpty}}
 	case strings.ContainsAny(value, "\n\r"):
 		return []*PathError{{Path: path, Msg: msgSingleLine}}
 	default:
@@ -294,6 +300,150 @@ func checkQuestionCardinality(questions []Question) []*PathError {
 			errs = append(errs, &PathError{
 				Path: indexedName("question", i) + "/options",
 				Msg:  "give none, or two to four",
+			})
+		}
+	}
+	return errs
+}
+
+// findingLocationPattern is a code-review finding's location shape (design
+// section 4.1): path:line, with line a positive integer. A plan-review
+// finding's location is an element path inside the plan instead, resolved
+// elsewhere by internal/job/planning.go's ResolvesInPlan, so layer2 only
+// runs this check for the review job.
+var findingLocationPattern = regexp.MustCompile(`^(.+):([1-9]\d*)$`)
+
+// checkReviewFindingsShape enforces the review job's own finding rules
+// (design section 4.1's table): the location is path:line inside the diff,
+// the problem lens never appears (it belongs to plan review only, which has
+// no code section to point at), and a fidelity finding always quotes the
+// plan element it checks the code against.
+//
+// present gates the location and lens checks the same way checkBuildShape's
+// own checks do: each is a required attribute Layer 1 already reports
+// missing, so a check here only runs once Layer 1 found it present, and
+// never duplicates that "missing required element" error. plan_ref is
+// different: it is optional, and its very absence is the condition
+// checkReviewFindingsShape's fidelity rule tests, so that check reads
+// f.PlanRef directly, ungated (see validate.go's filterPresent doc on this
+// same distinction).
+func checkReviewFindingsShape(findings []Finding, present map[string]bool) []*PathError {
+	var errs []*PathError
+	for i, f := range findings {
+		locPath := indexedName("finding", i) + "/location"
+		if present[locPath] && !findingLocationPattern.MatchString(f.Location) {
+			errs = append(errs, &PathError{Path: locPath, Msg: "must be path:line with line >= 1"})
+		}
+
+		lensPath := indexedName("finding", i) + "/lens"
+		if present[lensPath] && f.Lens == LensProblem {
+			errs = append(errs, &PathError{Path: lensPath, Msg: "the problem lens has no code section"})
+		}
+
+		if f.Lens == LensFidelity && strings.TrimSpace(f.PlanRef) == "" {
+			errs = append(errs, &PathError{
+				Path: indexedName("finding", i) + "/plan_ref",
+				Msg:  "a fidelity finding must quote the plan element",
+			})
+		}
+	}
+	return errs
+}
+
+// checkJudgeDuplicateVerdicts enforces the judge job's one rule (design
+// section 4.1): at most one verdict per scenario id. scenario is a required
+// attribute, so present gates the check the same way checkReviewFindingsShape
+// gates location and lens, leaving a missing scenario to Layer 1 alone.
+func checkJudgeDuplicateVerdicts(verdicts []Verdict, present map[string]bool) []*PathError {
+	var errs []*PathError
+	seen := make(map[string]bool, len(verdicts))
+	for i, v := range verdicts {
+		path := indexedName("verdict", i) + "/scenario"
+		if present[path] {
+			if seen[v.Scenario] {
+				errs = append(errs, &PathError{Path: path, Msg: "duplicate verdict for scenario " + v.Scenario})
+			}
+			seen[v.Scenario] = true
+		}
+	}
+	return errs
+}
+
+// zingReplyMarker is the reserved sequence every marker Zing itself posts
+// to GitHub carries, such as "<!-- zing:reply a57 t3f9a0c1b2d4e5f60 -->" or
+// "<!-- zing:pr t<ticket_id> -->" (design section 9.4, 10.3). Rejecting it
+// here is Layer 2's half of the defense: a respond run's output, however
+// prompted, can never forge one of Zing's own markers; replyBody (job
+// package, section 9.4) refuses the same sequence again as the second
+// layer.
+const zingReplyMarker = "<!-- zing:"
+
+// replyPath builds one reply's own element path, e.g.
+// replyPath(0, "decision") -> "replies/reply[0]/decision" (claims.go's
+// claimPath, the same convention for the other wrapped-list type).
+func replyPath(i int, field string) string {
+	base := joinPath("replies", indexedName("reply", i))
+	if field == "" {
+		return base
+	}
+	return joinPath(base, field)
+}
+
+// checkReplies enforces replies' own Layer 2 rules (design section 22.2,
+// D31), beyond what Layer 1's presence and pattern checks already catch:
+// a settled reply must carry a decision, a decision is only legal on a
+// settled reply, and no two replies in one turn answer the same question
+// twice. present gates the decision-presence checks the same discipline
+// every other Layer 2 check in this file uses: decision is an optional
+// attribute (omitempty), so its absence from the document, not merely an
+// empty Go zero value, is what each rule tests.
+func checkReplies(replies []Reply, present map[string]bool) []*PathError {
+	var errs []*PathError
+	seen := make(map[string]bool, len(replies))
+	for i, r := range replies {
+		decisionPath := replyPath(i, "decision")
+		switch {
+		case r.Settled && !present[decisionPath]:
+			errs = append(errs, &PathError{Path: decisionPath, Msg: `required when settled="true"`})
+		case !r.Settled && present[decisionPath]:
+			errs = append(errs, &PathError{Path: decisionPath, Msg: `only allowed with settled="true"`})
+		}
+
+		questionPath := replyPath(i, "question")
+		if seen[r.Question] {
+			errs = append(errs, &PathError{Path: questionPath, Msg: "duplicate reply to " + r.Question + "; one reply per question"})
+		}
+		seen[r.Question] = true
+	}
+	return errs
+}
+
+// checkRespondThreadsShape enforces the respond job's own thread rules
+// (design section 4.1's table): no duplicate thread id, no empty thread id,
+// and no thread text carrying the reserved zingReplyMarker sequence.
+// present gates the id checks (a required attribute) the same way
+// checkReviewFindingsShape gates its own required-attribute checks; the
+// text check is chardata, always decoded, so it runs unconditionally like
+// checkBuildShape's own fence-text check.
+func checkRespondThreadsShape(threads []ThreadAction, present map[string]bool) []*PathError {
+	var errs []*PathError
+	seen := make(map[string]bool, len(threads))
+	for i, th := range threads {
+		idPath := indexedName("thread", i) + "/id"
+		if present[idPath] {
+			switch {
+			case strings.TrimSpace(th.ID) == "":
+				errs = append(errs, &PathError{Path: idPath, Msg: msgEmpty})
+			case seen[th.ID]:
+				errs = append(errs, &PathError{Path: idPath, Msg: "duplicate thread " + th.ID})
+			}
+			seen[th.ID] = true
+		}
+
+		if strings.Contains(strings.ToLower(th.Text), zingReplyMarker) {
+			errs = append(errs, &PathError{
+				Path: indexedName("thread", i),
+				Msg:  `text must not contain the reserved "<!-- zing:" sequence`,
 			})
 		}
 	}

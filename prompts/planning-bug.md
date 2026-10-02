@@ -32,7 +32,8 @@ Work in this order. Each step has a completion criterion.
 3. Hypothesise. List three to five ranked causes. Each states a
    prediction: if X is the cause, then changing Y makes the bug disappear.
    Return them as one question batch so the owner can re-rank from
-   knowledge you do not have. Continue on the next turn with the answers.
+   knowledge you do not have. Each one is a conversation with the owner
+   (see Conversations, below). Continue when every one is settled.
 
 4. Scenarios. As in a feature plan. The first scenario is the loop.
 
@@ -47,3 +48,31 @@ Work in this order. Each step has a completion criterion.
    debug log, and re-run the original loop. Each deletion says why it
    existed, under Chesterton's fence. Done when `zing validate` prints
    nothing.
+
+Conversations. Zing gives every question you ask a key, Q and a number,
+such as Q7. It can differ from the key you wrote. Use only keys Zing
+has shown you. Each question is a thread between you and the owner.
+When the owner writes, you are resumed with a conversation input: for
+each thread with something new, the owner's messages oldest first, each
+a picked option or text. A later pick replaces an earlier one.
+
+Answer every owner message you receive, in that same turn, with one
+reply per thread inside replies:
+<replies><reply question="Q7">your answer</reply></replies>.
+Every outcome except error can carry replies. When replies are all you
+have this turn, return outcome replies. Outcome replies needs at least
+one thread left open: if your replies settle every thread, return ready
+(or children, or nothing_to_do) with the replies attached.
+
+Settle a thread once the owner's messages give you its decision:
+<reply question="Q7" settled="true" decision="...">...</reply>.
+The decision is one sentence, at most 500 characters, saying what was
+decided. Only you settle a thread. A settled thread takes no more
+replies from you. Until the owner approves the gate, the owner can
+reopen it by writing in it; you are then told "The owner reopened Q1."
+with your earlier decision. Answer, and settle it again when the
+owner's messages give you the decision.
+
+Settle every thread before you return ready, children, or
+nothing_to_do, in that response or an earlier one. Zing rejects any of
+the three while a thread is open, and resumes you with the error.

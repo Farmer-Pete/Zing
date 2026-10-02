@@ -22,6 +22,18 @@ var (
 	// ErrOutputTooLarge reports stdout or the final-message file exceeding
 	// the 4 MiB cap.
 	ErrOutputTooLarge = errors.New("runtime: output exceeded the 4 MiB cap")
+	// ErrNoOAuthToken reports an empty Claude oauth token (PKG9-PLAN.md
+	// section 4.6, D26): Claude.Run refuses to start the child at all
+	// rather than exec a CLI that can only fail to log in.
+	ErrNoOAuthToken = errors.New("runtime: claude: no oauth token configured")
+	// ErrCodexFullAccessNeedsExecPrefix reports a judge-job Codex.Run call
+	// with no ExecPrefix (PKG9-PLAN.md section 4.6, D20): the judge needs
+	// danger-full-access because a seatbelt cannot start inside another,
+	// but only once Zing's own judge profile is actually wrapping the
+	// process. With no exec prefix that outer profile is not in place, so
+	// Codex.Run refuses to start rather than run Codex with no containment
+	// at all.
+	ErrCodexFullAccessNeedsExecPrefix = errors.New("runtime: codex: full access needs an exec prefix")
 )
 
 // ExecError reports a process that ran and exited non-zero with no

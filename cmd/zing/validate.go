@@ -9,13 +9,19 @@ import (
 	"zing/internal/response"
 )
 
-const usage = "usage: zing validate [--kind bug|feature] <file>"
+const usage = "usage: zing validate [--kind bug|feature] <file|->"
 
 // runValidate parses one <zing> document, validates it, and returns the
 // process exit code: 0 when it is valid (silently), 1 when it is invalid
 // (one error per line on stderr) or fails to parse, 2 for a usage or read
-// error.
+// error. A file argument of "-" reads the document from standard input,
+// so a job whose sandbox cannot write files can still validate.
 func runValidate(args []string) int {
+	return runValidateFrom(args, os.Stdin)
+}
+
+// runValidateFrom is runValidate reading "-" from stdin.
+func runValidateFrom(args []string, stdin io.Reader) int {
 	fs := flag.NewFlagSet("validate", flag.ContinueOnError)
 	fs.SetOutput(io.Discard) // Usage below prints our own single line to stderr
 	kind := fs.String("kind", string(response.KindFeature), "bug or feature")
@@ -31,7 +37,13 @@ func runValidate(args []string) int {
 	}
 	path := rest[0]
 
-	data, err := os.ReadFile(path)
+	var data []byte
+	var err error
+	if path == "-" {
+		data, err = io.ReadAll(stdin)
+	} else {
+		data, err = os.ReadFile(path)
+	}
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "validate: %v\n", err)
 		return 2

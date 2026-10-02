@@ -18,6 +18,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
@@ -133,8 +134,15 @@ type sendRequest struct {
 
 // handleSend is POST /send (design section 6.7, 7.1): send the ticket's
 // drafted batch. 400 on a malformed body or non-positive ticket, 409 when
-// SendBatch reports Empty (nothing drafted) or a typed conflict, 204 and a
-// bus publish on success.
+// SendBatch reports Empty (nothing drafted) or a typed conflict, 200 with a
+// plain result line and a bus publish on success.
+//
+// The success response carries a body (bug fix: Cmd+Enter sent the batch,
+// but console.js's postJSON ignored a 204's empty body, so the console
+// showed nothing and the owner could not tell whether the chord had done
+// anything), so it is 200 rather than 204, which forbids one. "Nothing to
+// send." (the Empty branch) reads the same whether a question answers
+// vanished after SendBatch's own revalidation discarded them as stale.
 func (c *console) handleSend(w http.ResponseWriter, r *http.Request) {
 	r.Body = http.MaxBytesReader(w, r.Body, maxDraftBodyBytes)
 
@@ -159,12 +167,38 @@ func (c *console) handleSend(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if result.Empty {
-		http.Error(w, "nothing to send", http.StatusConflict)
+		http.Error(w, "Nothing to send.", http.StatusConflict)
 		return
 	}
 
 	c.bus.Publish()
-	w.WriteHeader(http.StatusNoContent)
+	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	w.WriteHeader(http.StatusOK)
+	if _, err := io.WriteString(w, sendResultText(result)); err != nil {
+		slog.Error("console: write send result", "ticket_id", req.Ticket, "err", err)
+	}
+}
+
+// sendResultText is handleSend's success body (bug fix, extended by design
+// section 22.7): "Sent 1 message." singular, "Sent N messages." plural,
+// read off BatchResult.Sent -- always > 0 here, since handleSend already
+// returned on result.Empty above -- plus, when the batch also discarded a
+// draft against a question that closed out from under it (SendBatch's own
+// revalidation), " 1 not sent: its question closed first." or " N not
+// sent: its question closed first.", so the owner learns what happened to
+// it rather than finding it silently gone.
+func sendResultText(result store.BatchResult) string {
+	text := "Sent 1 message."
+	if result.Sent != 1 {
+		text = fmt.Sprintf("Sent %d messages.", result.Sent)
+	}
+	switch {
+	case result.Discarded == 1:
+		text += " 1 not sent: its question closed first."
+	case result.Discarded > 1:
+		text += fmt.Sprintf(" %d not sent: its question closed first.", result.Discarded)
+	}
+	return text
 }
 
 // readRequest is POST /read's body (design section 6.4: markRead posts

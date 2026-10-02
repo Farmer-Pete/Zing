@@ -49,6 +49,7 @@ import (
 
 	zing "zing"
 	"zing/internal/bus"
+	"zing/internal/config"
 	"zing/internal/console"
 	zdispatch "zing/internal/dispatch"
 	"zing/internal/gitfixture"
@@ -182,21 +183,46 @@ func liveModulePathFor(name string) string {
 	return filepath.Join("testdata", "live", "module", name)
 }
 
-// liveBuildSkipReason reports why TestLiveBuild would skip given goos and
-// the ZING_LIVE_CLI value, or "" to run it for real (PKG8-PLAN.md section
-// 18 task 16). Splitting this out of TestLiveBuild lets
+// liveBuildSkipReason reports why TestLiveBuild would skip given the
+// ZING_LIVE_CLI value, or "" to run it for real (PKG8-PLAN.md section 18
+// task 16). It reads runtime.GOOS directly rather than taking it as a
+// parameter: every caller in this package passes the real goruntime.GOOS
+// anyway (none fakes a different OS to test the darwin-only branch in
+// isolation), so a parameter here would only be unparam's own flagged
+// "always the same value" case. Splitting this out of TestLiveBuild lets
 // TestLiveBuildSkipsWithoutGate prove the gate's own logic -- including
 // that its message names the variable -- without needing ZING_LIVE_CLI
 // itself set one way or the other in the process actually running the
 // test suite.
-func liveBuildSkipReason(goos, liveCLI string) string {
+func liveBuildSkipReason(liveCLI string) string {
 	if liveCLI != "1" {
 		return "set ZING_LIVE_CLI=1 to run the live build harness against the real claude CLI"
 	}
-	if goos != "darwin" {
+	if goruntime.GOOS != "darwin" {
 		return "the live build harness only runs on macOS: the sandbox is darwin-only (PKG8-PLAN.md section 5)"
 	}
 	return ""
+}
+
+// liveClaudeOAuthToken reads claude_oauth_token through the config model
+// (PKG9-PLAN.md section 4.5, 19.2 task 7), the same way serve does: the
+// owner's real ~/.zing/zing.toml, never an environment variable. It skips,
+// with a clear reason, when the config file cannot be loaded or carries no
+// token, rather than failing the live harness outright.
+func liveClaudeOAuthToken(t *testing.T) string {
+	t.Helper()
+	cfgPath, err := config.DefaultPath()
+	if err != nil {
+		t.Skipf("resolve zing.toml path: %v", err)
+	}
+	cfg, err := config.Load(cfgPath)
+	if err != nil {
+		t.Skipf("load %s: %v", cfgPath, err)
+	}
+	if cfg.ClaudeOAuthToken == "" {
+		t.Skip("zing.toml carries no claude_oauth_token")
+	}
+	return cfg.ClaudeOAuthToken
 }
 
 // TestLiveBuildSkipsWithoutGate proves liveBuildSkipReason's own gate: with
@@ -204,7 +230,8 @@ func liveBuildSkipReason(goos, liveCLI string) string {
 // that names the variable, so a plain `go test ./...` run always skips
 // TestLiveBuild rather than spending real Claude usage.
 func TestLiveBuildSkipsWithoutGate(t *testing.T) {
-	reason := liveBuildSkipReason(goruntime.GOOS, "")
+	t.Parallel()
+	reason := liveBuildSkipReason("")
 	if reason == "" {
 		t.Fatal("liveBuildSkipReason returned no reason with ZING_LIVE_CLI unset, want a skip reason")
 	}
@@ -221,6 +248,7 @@ func TestLiveBuildSkipsWithoutGate(t *testing.T) {
 // file the fixture module already carries; a "create" file need not exist
 // yet, since building it is exactly what the task does.
 func TestLiveBuildFixtureIsValid(t *testing.T) {
+	t.Parallel()
 	data, err := os.ReadFile(filepath.Join("testdata", "live", "plan.xml"))
 	if err != nil {
 		t.Fatalf("read plan.xml: %v", err)
@@ -290,6 +318,31 @@ const liveTestCmd = "go test ./..."
 // "build" literal alongside the unrelated "go build" exec argv above.
 const liveJobBuild = "build"
 
+// liveJobPlanning is the sessions.job and tickets.state value "planning"
+// (machine.toml's own job name and response.TicketStatePlanning's string
+// form), named once so goconst has one definition every live harness --
+// seedLiveBuildTicket here, seedLiveJudgeCohort in live_judge_test.go --
+// points at instead of its own raw "planning" literal.
+const liveJobPlanning = "planning"
+
+// liveMsgTypeQuestion is the messages.type value "question", named once so
+// goconst has one definition across this file's own gate-approval fixture
+// and its question-filtering checks.
+const liveMsgTypeQuestion = "question"
+
+// liveGreetGoFilename is "greet.go", the one fixture source file name every
+// live harness in this package plants, declares as a build claim, or both
+// (this file, live_review_test.go, live_judge_test.go), named once so
+// goconst has one definition to point at.
+const liveGreetGoFilename = "greet.go"
+
+// liveFakePollInterval is runLiveBuildHarness's own poll interval for every
+// caller driving the fake runtime (through runLiveBuildHarnessRecording):
+// there is no real agent to avoid hammering, only a local store and the
+// fake's own canned turns, so the loop can tick as fast as it finishes
+// work instead of waiting out TestLiveBuild's one-real-second pace.
+const liveFakePollInterval = 10 * time.Millisecond
+
 // normalizeLivePlanArrays mirrors internal/job/planning.go's own
 // (unexported) normalizePlanArrays: a Plan decoded from XML leaves an
 // absent array element as a nil Go slice, and json.Marshal writes a nil
@@ -338,7 +391,7 @@ func seedLiveBuildTicket(ctx context.Context, st *store.Store, ticketID int64, r
 	}
 
 	reserved, err := st.Reserve(ctx, ticketID, planOwner, planExpires,
-		store.SessionUpsert{Job: "planning", Runtime: "claude"}, store.RunSeed{Model: model})
+		store.SessionUpsert{Job: liveJobPlanning, Runtime: "claude"}, store.RunSeed{Model: model})
 	if err != nil {
 		return fmt.Errorf("reserve the seeded plan run: %w", err)
 	}
@@ -375,7 +428,7 @@ func seedLiveBuildTicket(ctx context.Context, st *store.Store, ticketID int64, r
 		Expires:   planExpires,
 		Runs:      []store.Run{{ID: reserved.RunID, Outcome: &outcome, ExitCode: &exitCode, AgentSeconds: &agentSeconds}},
 		Artifacts: artifacts,
-		Next:      "planning",
+		Next:      liveJobPlanning,
 		Reason:    "live harness: seeded a ready cohort",
 	})
 	if err != nil {
@@ -395,15 +448,31 @@ func seedLiveBuildTicket(ctx context.Context, st *store.Store, ticketID int64, r
 		return fmt.Errorf("seed live build ticket: ticket %d is already claimed for the gate", ticketID)
 	}
 
+	// D32 (design section 22.12.3a): the seal invariant needs a confirmed
+	// approval. This harness seeds the gate flow directly (it never drives
+	// the real confirming turn), so it writes the minimal fixture itself: a
+	// gate question, its approving answer, and the confirming marker
+	// binding both to plan version 1. The gate question carries the plan
+	// run's own id, matching the real shape (a run-attached question,
+	// design section 4.5) that AnsweredRounds and the building handler's
+	// own round grouping expect; a run-less one groups as an orphaned
+	// round instead, the same shape an escalation's linked question takes.
+	gateQID, approveAID, gaErr := seedLiveGateApproval(ctx, st, ticketID, reserved.RunID)
+	if gaErr != nil {
+		return fmt.Errorf("seed the gate approval fixture: %w", gaErr)
+	}
+
 	applied, err = st.CommitHandlerResult(ctx, store.HandlerCommit{
-		TicketID: ticketID,
-		Owner:    gateOwner,
-		Expires:  gateExpires,
-		Next:     liveStateBuilding,
-		Reason:   "live harness: sealed the cohort and moved to building",
+		TicketID:         ticketID,
+		Owner:            gateOwner,
+		Expires:          gateExpires,
+		Next:             liveStateBuilding,
+		Reason:           "live harness: sealed the cohort and moved to building",
+		ResolveQuestions: []int64{gateQID},
 		Seal: &store.SealRequest{
 			RunID: reserved.RunID, PlanVersion: 1, ExpectedCount: len(resp.Scenarios), At: time.Now().UTC(),
 		},
+		GateApproval: &store.GateApproval{QuestionID: gateQID, AnswerID: approveAID, PlanVersion: 1},
 	})
 	if err != nil {
 		return fmt.Errorf("commit the seeded gate approval: %w", err)
@@ -412,6 +481,37 @@ func seedLiveBuildTicket(ctx context.Context, st *store.Store, ticketID int64, r
 		return fmt.Errorf("seed live build ticket: ticket %d lost its claim before the gate commit", ticketID)
 	}
 	return nil
+}
+
+// seedLiveGateApproval seeds the minimal gate approval the seal invariant
+// needs (D32, design section 22.12.1, 22.12.3a): a gate question, its
+// approving answer, and the confirming marker binding both to plan version
+// 1. It returns the gate question id and the approving answer id.
+func seedLiveGateApproval(ctx context.Context, st *store.Store, ticketID, runID int64) (gateQID, approveAID int64, err error) {
+	gatePayload, err := json.Marshal(response.QuestionPayload{
+		Key: "Q1", Kind: response.QuestionKindGate, State: response.QuestionStateAnswered,
+		Recommended: "a", Options: []response.Option{{Key: "a", Text: "Approve"}, {Key: "b", Text: "Reject"}},
+	})
+	if err != nil {
+		return 0, 0, err
+	}
+	gateQID, err = st.InsertMessage(ctx, store.Message{
+		TicketID: ticketID, RunID: &runID, Type: liveMsgTypeQuestion, Author: "zing", State: new("answered"), Body: "Q1", Payload: gatePayload,
+	})
+	if err != nil {
+		return 0, 0, err
+	}
+	approveAID, err = st.InsertMessage(ctx, store.Message{
+		TicketID: ticketID, ParentID: &gateQID, Type: "answer", Author: "you", State: new("sent"), Payload: []byte(`{"option":"a"}`),
+	})
+	if err != nil {
+		return 0, 0, err
+	}
+	_, err = st.InsertMessage(ctx, store.Message{
+		TicketID: ticketID, ParentID: &gateQID, Type: "update", Author: "system",
+		Body: fmt.Sprintf("gate confirmed run 1 plan v1 gate %d answer %d", gateQID, approveAID),
+	})
+	return gateQID, approveAID, err
 }
 
 // newLiveFixtureRepo builds the "greeter" gitfixture repository this
@@ -434,7 +534,7 @@ func newLiveFixtureRepo(t *testing.T) string {
 	if err := gitfixture.NewSigningRepo(ctx, dir); err != nil {
 		t.Fatalf("build gitfixture repo: %v", err)
 	}
-	for _, name := range []string{"go.mod", "README.md", "greet.go"} {
+	for _, name := range []string{"go.mod", "README.md", liveGreetGoFilename} {
 		content, err := os.ReadFile(liveModulePathFor(name))
 		if err != nil {
 			t.Fatalf("read fixture module %s: %v", name, err)
@@ -472,7 +572,9 @@ func newLiveConsoleServer(st *store.Store, b *bus.Broker, m *machine.Machine, lo
 		return nil, fmt.Errorf("unexpected listener address type %T", ln.Addr())
 	}
 	const livePushToken = "live-harness-push-token" //nolint:gosec // not a credential: a fixed placeholder no route in this harness checks
-	handler := console.New(st, b, m, []string{"127.0.0.1"}, addr.Port, logHandler, nil, livePushToken, e2eFloor, sandboxReason)
+	// tracker and user are left zero (nil, ""): this live harness does not
+	// exercise POST /projects/{id}/pickup (PKG9-PLAN.md D29).
+	handler := console.New(st, b, m, []string{"127.0.0.1"}, addr.Port, logHandler, nil, livePushToken, e2eFloor, sandboxReason, nil, "")
 	srv := httptest.NewUnstartedServer(handler)
 	if err := srv.Listener.Close(); err != nil {
 		return nil, fmt.Errorf("close the placeholder listener: %w", err)
@@ -592,7 +694,7 @@ func openEscalationQuestions(ctx context.Context, st *store.Store, ticketID int6
 
 	var open []openEscalationQuestion
 	for i := range msgs {
-		if msgs[i].Type != "question" || msgs[i].ParentID == nil {
+		if msgs[i].Type != liveMsgTypeQuestion || msgs[i].ParentID == nil {
 			continue
 		}
 		if msgs[i].State == nil || *msgs[i].State != "open" {
@@ -703,7 +805,13 @@ func listRunRootEntries(runRoot string) ([]string, error) {
 // never ran to remove it). Once the ticket reaches "reviewing", any entry
 // that was not already there fails the run with its name; a stale entry
 // never does.
-func runLiveBuildHarness(ctx context.Context, t liveHarnessT, st *store.Store, projDir string, rts runtime.Set, sb sandbox.Sandbox, requireSandbox bool, cmds job.CommandRunner, ln net.Listener, runRoot string, maxWait time.Duration) liveBuildResult {
+//
+// pollInterval is how long each loop pass sleeps between ticks: TestLiveBuild
+// passes a full second so a real agent run is not hammered with ticks while
+// it thinks; the fake-runtime callers, with nothing to wait on but a local
+// store and the fake's own canned turns, pass a short interval instead so
+// the fixture's handful of turns do not cost a real second apiece.
+func runLiveBuildHarness(ctx context.Context, t liveHarnessT, st *store.Store, projDir string, rts runtime.Set, sb sandbox.Sandbox, requireSandbox bool, cmds job.CommandRunner, ln net.Listener, runRoot string, maxWait, pollInterval time.Duration) liveBuildResult {
 	t.Helper()
 
 	staleRunEntries, err := listRunRootEntries(runRoot)
@@ -723,7 +831,7 @@ func runLiveBuildHarness(ctx context.Context, t liveHarnessT, st *store.Store, p
 
 	projectID, err := st.EnsureProject(ctx, store.Project{
 		Name: "greeter", RepoURL: "https://example.invalid/greeter", LocalPath: projDir,
-		Tracker: "github", DefaultBranch: liveDefaultBranch,
+		Tracker: testServeTracker, DefaultBranch: liveDefaultBranch,
 	})
 	if err != nil {
 		t.Fatalf("ensure project: %v", err)
@@ -773,7 +881,7 @@ func runLiveBuildHarness(ctx context.Context, t liveHarnessT, st *store.Store, p
 		Projects: map[int64]job.Project{
 			projectID: {Orch: orch, RepoGit: repoGit, TestCmd: liveTestCmd, LintCmd: "go vet ./..."},
 		},
-		Sandbox:        sb,
+		Sandboxes:      sandbox.Set{Build: sb},
 		RequireSandbox: requireSandbox,
 		Commands:       cmds,
 	}, rts)
@@ -874,7 +982,7 @@ func runLiveBuildHarness(ctx context.Context, t liveHarnessT, st *store.Store, p
 			t.Fatalf("ticket %d did not reach reviewing within %s (state=%s, waiting_on=%v, open questions: %s)",
 				ticketID, maxWait, ticket.State, ticket.WaitingOn, desc)
 		}
-		time.Sleep(time.Second)
+		time.Sleep(pollInterval)
 	}
 }
 
@@ -964,6 +1072,10 @@ func newLiveFakeRunRoot(t *testing.T) string {
 // question all land, and the ticket reaches "reviewing" with three signed
 // commits.
 func TestLiveBuildHarnessOnFake(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow end-to-end flow; runs in the full suite")
+	}
+	t.Parallel()
 	st := newLiveStore(t)
 	projDir := newLiveFixtureRepo(t)
 
@@ -982,7 +1094,7 @@ func TestLiveBuildHarnessOnFake(t *testing.T) {
 	}
 
 	sb := sandbox.Off()
-	res := runLiveBuildHarness(t.Context(), t, st, projDir, rts, sb, false, job.NewCommandRunner(sb, false), ln, newLiveFakeRunRoot(t), 2*time.Minute)
+	res := runLiveBuildHarness(t.Context(), t, st, projDir, rts, sb, false, job.NewCommandRunner(sb, false), ln, newLiveFakeRunRoot(t), 2*time.Minute, liveFakePollInterval)
 
 	shas, err := res.Orch.BranchCommits(t.Context(), res.Worktree)
 	if err != nil {
@@ -1001,10 +1113,16 @@ func TestLiveBuildHarnessOnFake(t *testing.T) {
 // gone; and its four canaries -- one in the home root, one in the fixture
 // repository's .git, one in the host TMPDIR, one in the host Go build cache
 // -- are byte-identical after the run.
+//
+// Not parallel: it calls t.Setenv("PATH", ...) to prepend a stub claude
+// binary, and it already skips by default (ZING_LIVE_CLI), so it never
+// shares the suite's wall clock budget with the parallel tests anyway.
 func TestLiveBuild(t *testing.T) {
-	if reason := liveBuildSkipReason(goruntime.GOOS, os.Getenv("ZING_LIVE_CLI")); reason != "" {
+	if reason := liveBuildSkipReason(os.Getenv("ZING_LIVE_CLI")); reason != "" {
 		t.Skip(reason)
 	}
+
+	oauthToken := liveClaudeOAuthToken(t)
 
 	home, err := os.UserHomeDir()
 	if err != nil {
@@ -1028,7 +1146,7 @@ func TestLiveBuild(t *testing.T) {
 	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 
 	rts, err := runtime.NewSet(map[string]runtime.Runtime{
-		runtimeNameClaude: runtime.NewClaude(""), runtimeNameCodex: runtime.NewCodex(""),
+		runtimeNameClaude: runtime.NewClaude("", oauthToken), runtimeNameCodex: runtime.NewCodex(""),
 	})
 	if err != nil {
 		t.Fatalf("build runtime set: %v", err)
@@ -1055,7 +1173,7 @@ func TestLiveBuild(t *testing.T) {
 	}
 	runRoot := filepath.Join(mustSandboxCacheRoot(t, sb), "run")
 
-	res := runLiveBuildHarness(t.Context(), t, st, projDir, rts, sb, true, job.NewCommandRunner(sb, true), ln, runRoot, 60*time.Minute)
+	res := runLiveBuildHarness(t.Context(), t, st, projDir, rts, sb, true, job.NewCommandRunner(sb, true), ln, runRoot, 60*time.Minute, time.Second)
 
 	shas, err := res.Orch.BranchCommits(t.Context(), res.Worktree)
 	if err != nil {
@@ -1091,7 +1209,7 @@ func TestLiveBuild(t *testing.T) {
 	}
 	var perimeterQuestions, buildQuestions int
 	for i := range msgs {
-		if msgs[i].Type != "question" {
+		if msgs[i].Type != liveMsgTypeQuestion {
 			continue
 		}
 		var payload response.QuestionPayload
@@ -1138,7 +1256,7 @@ func runLiveBuildHarnessRecording(t *testing.T, st *store.Store, projDir string,
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		runLiveBuildHarness(t.Context(), rec, st, projDir, rts, sb, requireSandbox, cmds, ln, runRoot, maxWait)
+		runLiveBuildHarness(t.Context(), rec, st, projDir, rts, sb, requireSandbox, cmds, ln, runRoot, maxWait, liveFakePollInterval)
 	}()
 	<-done
 	rec.runCleanups()
@@ -1169,6 +1287,10 @@ func runLiveBuildHarnessExpectingFatal(t *testing.T, st *store.Store, projDir st
 // and the newest escalation's own What text -- and no fourth run is ever
 // reserved.
 func TestLiveBuildHarnessCapsRepeatedEscalations(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow end-to-end flow; runs in the full suite")
+	}
+	t.Parallel()
 	st := newLiveStore(t)
 	projDir := newLiveFixtureRepo(t)
 
@@ -1238,7 +1360,12 @@ func TestLiveBuildHarnessCapsRepeatedEscalations(t *testing.T) {
 // the harness never drafts or sends an answer, which a still-"open"
 // question in the store after the timeout proves directly -- and the
 // timeout's own Fatalf names that open question.
+//
+// Not parallel: it calls t.Setenv(liveOwnerAnswerEnv, ...) below.
 func TestLiveBuildHarnessOwnerModeAnswersNothing(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow end-to-end flow; runs in the full suite")
+	}
 	t.Setenv(liveOwnerAnswerEnv, liveOwnerAnswerValue)
 
 	st := newLiveStore(t)
@@ -1295,10 +1422,19 @@ func TestLiveBuildHarnessOwnerModeAnswersNothing(t *testing.T) {
 	if err != nil {
 		t.Fatalf("list messages: %v", err)
 	}
+	answerCount := 0
 	for i := range answered {
 		if answered[i].Type == "answer" {
-			t.Errorf("message %d is an answer; want the harness to have sent none in owner mode", answered[i].ID)
+			answerCount++
 		}
+	}
+	// D32 (design section 22.12.3a): seedLiveBuildTicket now seeds one real
+	// "answer" message of its own -- the gate's approving pick, needed to
+	// satisfy the seal invariant -- so exactly one is expected here, not
+	// zero; the harness itself, in owner mode, must still never send a
+	// second one.
+	if answerCount != 1 {
+		t.Errorf("answer messages = %d, want exactly 1 (the seeded gate approval; the harness itself must send none in owner mode)", answerCount)
 	}
 }
 
@@ -1311,6 +1447,10 @@ func TestLiveBuildHarnessOwnerModeAnswersNothing(t *testing.T) {
 // TestLiveBuildHarnessOnFake drives, logging the pre-existing entry's name
 // once, and must not fail over it.
 func TestLiveBuildHarnessIgnoresStaleRunDir(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow end-to-end flow; runs in the full suite")
+	}
+	t.Parallel()
 	st := newLiveStore(t)
 	projDir := newLiveFixtureRepo(t)
 

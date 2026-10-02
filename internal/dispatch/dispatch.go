@@ -26,16 +26,30 @@ import (
 // 3); every ticket starts there.
 const stateQueued = "queued"
 
-// The two machine.toml job names the timeout lookup maps a pipeline state to
-// (design section 6.8 step 6): planning's job is "planning", building's job
-// is "build". Every other candidate state is a code-only handler and uses
-// defaultCodeTimeout.
+// The machine.toml job names claimTimeoutFor maps a pipeline state to
+// (design section 6.8 step 6, PKG9-PLAN.md section 17.1): planning's job is
+// "planning", building's job is "build", reviewing's job is "review" (ROUND
+// runs up to seven lens runs in parallel under one job.review.timeout_minutes
+// horizon, PKG9-PLAN.md section 6.2), judging's own claim takes the largest
+// of "judge", "build", and "perimeter" (a fix step runs in every post-build
+// state, design section 5.3) and a 10-minute floor; shipping's own claim
+// takes the largest of "respond", "build", and "perimeter", the same
+// reasoning with no floor of its own (a respond batch, not just a fix step,
+// can also run inside "shipping"). Every other candidate state is a
+// code-only handler and uses defaultCodeTimeout.
 const (
-	statePlanning = "planning"
-	stateBuilding = "building"
+	statePlanning  = "planning"
+	stateBuilding  = "building"
+	stateReviewing = "reviewing"
+	stateJudging   = "judging"
+	stateShipping  = "shipping"
 
-	jobPlanning = "planning"
-	jobBuild    = "build"
+	jobPlanning  = "planning"
+	jobBuild     = "build"
+	jobReview    = "review"
+	jobJudge     = "judge"
+	jobPerimeter = "perimeter"
+	jobRespond   = "respond"
 )
 
 // defaultCodeTimeout is the claim/run timeout a code-only state's handler
@@ -83,7 +97,20 @@ type Binding struct {
 	// claim identity. intake names it in the pickup comment it posts for
 	// every newly inserted ticket.
 	User string
+	// Mode is the project's config.Intake.Mode value, copied verbatim by
+	// ensureBindings (cmd/zing/serve.go) so this package need not import
+	// internal/config for one comparison (PKG9-PLAN.md D29): intake skips a
+	// binding whose Mode is intakeModeManual. Empty (a Binding literal that
+	// predates D29, as every existing test's own still is) behaves as auto,
+	// matching config's own default.
+	Mode string
 }
+
+// intakeModeManual is config.IntakeModeManual copied as a plain string
+// (PKG9-PLAN.md D29), the same "own copy of an unexported-to-us constant"
+// pattern msgTypeUpdate and authorSystem above already use for store's
+// values.
+const intakeModeManual = "manual"
 
 // Config is the dispatcher's run-time tuning (design section 6.8). Models,
 // Budget, and Floor (design section 4.4) are threaded straight into every
@@ -96,16 +123,40 @@ type Config struct {
 	Models      map[string]string // alias -> exact model id (config.Models)
 	Budget      time.Duration     // time.Duration(cfg.Budget.AgentMinutesPerTicket) * time.Minute
 	Floor       response.Severity // config.Review.Floor, parsed
-	// Projects, Sandbox, RequireSandbox, and Commands are PKG8-PLAN.md
-	// section 10's own additions, copied straight into every job.Deps
-	// runAndCommit builds: Projects carries what building needs to know
-	// about each store project; Sandbox and RequireSandbox gate every
-	// sandboxed job's run (design section 5.5); Commands runs a build
-	// unit's test and lint re-runs.
+	// Projects, Sandboxes, RequireSandbox, and Commands are PKG8-PLAN.md
+	// section 10's own additions (Sandboxes replacing the single-profile
+	// Sandbox, PKG9-PLAN.md section 4.3, 4.7), copied straight into every
+	// job.Deps runAndCommit builds: Projects carries what building needs to
+	// know about each store project; Sandboxes and RequireSandbox gate
+	// every sandboxed job's run (design section 5.5); Commands runs a
+	// build unit's test and lint re-runs.
 	Projects       map[int64]job.Project
-	Sandbox        sandbox.Sandbox
+	Sandboxes      sandbox.Set
 	RequireSandbox bool
 	Commands       job.CommandRunner
+	// DataDir is the resolved data directory (PKG9-PLAN.md section 4.3,
+	// 7.3): the private temp root of every unsandboxed run lives under it.
+	DataDir string
+	// LensesParallel is config.Review.MaxLensesParallel, copied into every
+	// job.Deps runAndCommit builds (PKG9-PLAN.md section 4.3, 6.2): the
+	// bound ROUND's own semaphore uses.
+	LensesParallel int
+	// JudgeCodexHome is the resolved judge_codex_home (PKG9-PLAN.md section
+	// 4.3, 4.5, D27), copied into every job.Deps runAndCommit builds:
+	// runjob.go's own applySandbox step reads it for a job whose profile is
+	// "judge".
+	JudgeCodexHome string
+	// MergeRule is config.Merge (PKG9-PLAN.md section 4.3, 8.8), copied
+	// into every job.Deps runAndCommit builds: mergeDecision's own input
+	// for the shipping handler's row 9 automatic merge gate.
+	MergeRule job.MergeRule
+	// Now is the clock Tick reads "the current instant" from for picking
+	// ready candidates (PKG9-PLAN.md section 17.1): serve leaves it nil, so
+	// New defaults it to time.Now; selftest injects a fake clock that
+	// advances to a ticket's own next_poll_at whenever a tick finds nothing
+	// due (section 17.1), so a babysit poll's backoff can be driven without
+	// a real wall-clock wait.
+	Now func() time.Time
 }
 
 // Dispatcher ticks: reconcile, intake, count, pick, claim, run, commit
@@ -143,6 +194,9 @@ func New(
 ) (*Dispatcher, error) {
 	if err := job.Validate(m, reg); err != nil {
 		return nil, fmt.Errorf("dispatch: %w", err)
+	}
+	if cfg.Now == nil {
+		cfg.Now = time.Now
 	}
 	slog.Info("deferred section 10 mechanics are explicit no-ops in this package",
 		"mechanics", deferredMechanics, "owner", "Package 7")
@@ -214,8 +268,12 @@ func (d *Dispatcher) Tick(ctx context.Context) error {
 		return nil
 	}
 
-	// 5. Pick.
-	candidates, err := d.store.ListReadyCandidates(ctx, d.machine.States.Terminal)
+	// 5. Pick. cfg.Now() (defaulted to time.Now in New when serve leaves it
+	// nil), not the tick-start now above (which only bounds ExpireClaims'
+	// own reconcile pass), is what ListReadyCandidates compares next_poll_at
+	// against, so selftest's injected fake clock governs candidacy the same
+	// way a real poll schedule would (PKG9-PLAN.md section 17.1).
+	candidates, err := d.store.ListReadyCandidates(ctx, d.machine.States.Terminal, d.cfg.Now())
 	if err != nil {
 		return fmt.Errorf("dispatch: list ready candidates: %w", err)
 	}
@@ -236,7 +294,7 @@ func (d *Dispatcher) Tick(ctx context.Context) error {
 	// lease's actual coverage, measured from the moment it is really
 	// claimed, would fall short of timeout + claimGrace by however long
 	// those earlier steps took (design section "dispatch" fix 5, cubic P2).
-	timeout := d.timeoutFor(ticket.State)
+	timeout := d.claimTimeoutFor(ticket.State)
 	expires := time.Now().Add(timeout + claimGrace)
 	claimed, err := d.store.Claim(ctx, ticket.ID, d.cfg.Owner, expires)
 	if err != nil {
@@ -305,9 +363,14 @@ func ctxErrOr(ctx context.Context, err error) error {
 
 // intake runs step 3: for each binding, ask the tracker for its tickets and
 // insert every one the store does not already carry for that (project, ref)
-// pair (design section 6.8 step 3).
+// pair (design section 6.8 step 3). A binding whose Mode is intakeModeManual
+// is skipped entirely: manual intake (PKG9-PLAN.md D29) picks up issues only
+// through POST /projects/{id}/pickup, never through this automatic poll.
 func (d *Dispatcher) intake(ctx context.Context) error {
 	for _, b := range d.bindings {
+		if b.Mode == intakeModeManual {
+			continue
+		}
 		tickets, err := d.tracker.Intake(ctx, b.TrackerProject, b.Rule)
 		if err != nil {
 			// A single project's tracker going unreachable must not stop
@@ -325,52 +388,93 @@ func (d *Dispatcher) intake(ctx context.Context) error {
 			if ok {
 				continue
 			}
-			newID, err := d.store.InsertTicket(ctx, store.Ticket{
-				ProjectID: b.StoreProjectID, TrackerRef: tk.Ref, Title: tk.Title, Body: tk.Body, State: stateQueued,
-			})
-			if err != nil {
-				return fmt.Errorf("dispatch: intake insert %s: %w", tk.Ref, err)
-			}
-			// The pickup comment is best-effort: it never fails the tick,
-			// never rolls back the row just inserted, and is never retried.
-			// The store is the source of truth; the tracker is a mirror, so
-			// a lagging mirror is acceptable (design section 6.8 step 3,
-			// plan section 6). The comment body is never logged.
-			if cErr := d.tracker.Comment(ctx, b.TrackerProject, tk.Ref, tracker.PickupComment(b.User)); cErr != nil {
-				slog.Warn("pickup comment failed", "ticket_id", newID, "project", b.TrackerProject, "ref", tk.Ref, "err", cErr)
+			if _, err := InsertAndAnnounce(ctx, d.store, d.tracker, b.StoreProjectID, b.TrackerProject, b.User, tk); err != nil {
+				return err
 			}
 		}
 	}
 	return nil
 }
 
-// timeoutFor returns the claim/run timeout for state: the state's job
-// timeout_minutes for planning and building, or defaultCodeTimeout for
-// every other (code-only) state (design section 6.8 step 6).
-func (d *Dispatcher) timeoutFor(state string) time.Duration {
-	jobName, ok := jobNameForState(state)
-	if !ok {
+// InsertAndAnnounce inserts a new queued ticket for tk under
+// storeProjectID and posts the pickup comment, exactly once, matching
+// intake's own insert step above (design section 6.8 step 3). It is
+// exported so POST /projects/{id}/pickup's manual-intake handler
+// (internal/console/pickup.go, PKG9-PLAN.md D29) reuses this same step
+// instead of duplicating it: "it inserts the ticket exactly as intake does
+// ... and posts the same pickup comment." The comment post is best-effort,
+// like intake's own: a failure only warns, the inserted row is never rolled
+// back, and the post is never retried (the store is the source of truth;
+// the tracker is a mirror).
+func InsertAndAnnounce(ctx context.Context, st *store.Store, tr tracker.Tracker, storeProjectID int64, trackerProject, user string, tk tracker.Ticket) (int64, error) {
+	newID, err := st.InsertTicket(ctx, store.Ticket{
+		ProjectID: storeProjectID, TrackerRef: tk.Ref, Title: tk.Title, Body: tk.Body, State: stateQueued,
+	})
+	if err != nil {
+		return 0, fmt.Errorf("dispatch: insert ticket %s: %w", tk.Ref, err)
+	}
+	// The comment body is never logged (repo rule: never log a secret).
+	if cErr := tr.Comment(ctx, trackerProject, tk.Ref, tracker.PickupComment(user)); cErr != nil {
+		slog.Warn("pickup comment failed", "ticket_id", newID, "project", trackerProject, "ref", tk.Ref, "err", cErr)
+	}
+	return newID, nil
+}
+
+// claimTimeoutFor returns the claim/run timeout for state (design section
+// 6.8 step 6, PKG9-PLAN.md section 17.1): planning, building, and reviewing
+// each take one job's own timeout_minutes (jobTimeoutMinutes' own
+// defaultCodeTimeout fallback when that job is missing or carries no
+// positive timeout_minutes); judging takes the largest of the judge,
+// build, and perimeter job timeouts and a 10-minute floor
+// (judgingMinClaimTimeout) -- CHECK's own command re-runs and a fix step
+// (design section 5.3) can each run inside "judging", so its own claim
+// must outlast all three -- never falling back to defaultCodeTimeout even
+// when every one of those jobs is misconfigured at 0. Every other
+// (code-only) state uses defaultCodeTimeout.
+func (d *Dispatcher) claimTimeoutFor(state string) time.Duration {
+	switch state {
+	case statePlanning:
+		return d.jobTimeoutOrDefault(jobPlanning)
+	case stateBuilding:
+		return d.jobTimeoutOrDefault(jobBuild)
+	case stateReviewing:
+		return d.jobTimeoutOrDefault(jobReview)
+	case stateJudging:
+		return max(d.jobTimeoutMinutes(jobJudge), d.jobTimeoutMinutes(jobBuild), d.jobTimeoutMinutes(jobPerimeter), judgingMinClaimTimeout)
+	case stateShipping:
+		return max(d.jobTimeoutMinutes(jobRespond), d.jobTimeoutMinutes(jobBuild), d.jobTimeoutMinutes(jobPerimeter))
+	default:
 		return defaultCodeTimeout
 	}
-	j, ok := d.machine.Jobs[jobName]
+}
+
+// jobTimeoutOrDefault returns name's own timeout_minutes, or
+// defaultCodeTimeout when machine.toml names no such job or gives it no
+// positive timeout_minutes (claimTimeoutFor's own single-job states).
+func (d *Dispatcher) jobTimeoutOrDefault(name string) time.Duration {
+	j, ok := d.machine.Jobs[name]
 	if !ok || j.TimeoutMinutes <= 0 {
 		return defaultCodeTimeout
 	}
 	return time.Duration(j.TimeoutMinutes) * time.Minute
 }
 
-// jobNameForState maps the two fake-runtime pipeline states to the
-// machine.toml job name that names their timeout.
-func jobNameForState(state string) (string, bool) {
-	switch state {
-	case statePlanning:
-		return jobPlanning, true
-	case stateBuilding:
-		return jobBuild, true
-	default:
-		return "", false
+// jobTimeoutMinutes returns name's own timeout_minutes as a Duration, or 0
+// when machine.toml names no such job or gives it no positive
+// timeout_minutes: claimTimeoutFor's own judging row folds this into a
+// max() alongside judgingMinClaimTimeout, so a misconfigured job
+// contributes nothing rather than defaultCodeTimeout's own 5 minutes.
+func (d *Dispatcher) jobTimeoutMinutes(name string) time.Duration {
+	j, ok := d.machine.Jobs[name]
+	if !ok || j.TimeoutMinutes <= 0 {
+		return 0
 	}
+	return time.Duration(j.TimeoutMinutes) * time.Minute
 }
+
+// judgingMinClaimTimeout is claimTimeoutFor's own floor for "judging"
+// (design section 17.1's table: "max(judge, build, perimeter, 10)").
+const judgingMinClaimTimeout = 10 * time.Minute
 
 // runAndCommit is step 7: run ticket's handler under a context whose
 // deadline is (a fresh time.Now(), taken here, right after the claim) +
@@ -400,7 +504,13 @@ func (d *Dispatcher) runAndCommit(ctx context.Context, ticket store.Ticket, time
 		Store: d.store, Runtimes: d.rts, Machine: d.machine,
 		Models: d.cfg.Models, Budget: d.cfg.Budget, Floor: d.cfg.Floor,
 		Owner: d.cfg.Owner, Expires: expires,
-		Projects: d.cfg.Projects, Sandbox: d.cfg.Sandbox, RequireSandbox: d.cfg.RequireSandbox, Commands: d.cfg.Commands,
+		Projects: d.cfg.Projects, Sandboxes: d.cfg.Sandboxes, RequireSandbox: d.cfg.RequireSandbox, Commands: d.cfg.Commands,
+		DataDir: d.cfg.DataDir, LensesParallel: d.cfg.LensesParallel, JudgeCodexHome: d.cfg.JudgeCodexHome,
+		MergeRule: d.cfg.MergeRule,
+		// Tracker is the dispatcher itself: PostPRLink and PostDone (below)
+		// already give it job.ShipTracker's own two methods, over its own
+		// tracker and bindings (PKG9-PLAN.md section 8.6, 17.1).
+		Tracker: d,
 		// Reserve closes over this tick's own owner and expires (the same
 		// lease Claim above just took out), so a handler's runJob call never
 		// sees either directly (design D13, section 4.4, 4.6).
@@ -475,6 +585,18 @@ func (d *Dispatcher) runAndCommit(ctx context.Context, ticket store.Ticket, time
 		if errors.Is(err, store.ErrSealMismatch) && errors.As(err, &mismatch) {
 			return d.releaseAfterSealMismatch(ctx, ticket.ID, commit, expires, mismatch)
 		}
+
+		// store.ErrSealRefused (D32, design section 22.12.3a): the seal
+		// invariant's own check failed -- no approval, a stale or cancelled
+		// one, or an owner message after it. It releases the claim and
+		// writes a marker naming the reason, exactly like a mismatch, but
+		// never escalates: the next tick re-reads the store, which already
+		// reflects whatever made the check fail (a resolved gate question
+		// after an owner send, for instance).
+		var refused *store.SealRefusedError
+		if errors.Is(err, store.ErrSealRefused) && errors.As(err, &refused) {
+			return d.releaseAfterSealRefused(ctx, ticket.ID, commit, expires, refused)
+		}
 	}
 	if err != nil || !applied {
 		if err != nil {
@@ -526,13 +648,47 @@ func (d *Dispatcher) releaseAfterSealMismatch(
 	return d.releaseClaimNoStop(ctx, ticketID, expires, "claim released after seal mismatch", marker)
 }
 
+// releaseAfterSealRefused is D32's own dispatcher rule (design section
+// 22.12.3a): log the refusal at warn with the gate question id commit's own
+// GateApproval named (0 when the commit carried none at all, the "no gate
+// approval check" case -- a caller bug, since every real seal-shaped commit
+// sets it), write the "seal refused gate <QID>" marker (first line) then
+// the reason (second line), and release the claim through the same
+// no-escalate path -- the next tick re-reads the store, which already
+// reflects whatever made the check fail. The marker is parented to the gate
+// question, exactly as releaseAfterSealMismatch's own marker is, only when
+// GateApproval named one; with none, it is still written, unparented,
+// rather than silently dropped.
+func (d *Dispatcher) releaseAfterSealRefused(
+	ctx context.Context, ticketID int64, commit store.HandlerCommit, expires time.Time, refused *store.SealRefusedError,
+) error {
+	var qid int64
+	var parentID *int64
+	if commit.GateApproval != nil {
+		qid = commit.GateApproval.QuestionID
+		parentID = &qid
+	}
+	slog.Warn("seal refused", "ticket_id", ticketID, "question_id", qid, "reason", refused.Reason)
+
+	marker := store.Message{
+		TicketID: ticketID, ParentID: parentID, Type: msgTypeUpdate, Author: authorSystem,
+		Body: fmt.Sprintf("seal refused gate %d\n%s", qid, refused.Reason),
+	}
+	return d.releaseClaimNoStop(ctx, ticketID, expires, "claim released after seal refused", marker)
+}
+
 // postCommitTrackerEffect runs commit.TrackerEffect, if any, only after
 // CommitHandlerResult has already applied cleanly (design D12, section 4.5,
 // 6.8): it resolves the binding for ticket.ProjectID the same way intake
-// (above) resolves one for its pickup comment, builds the nothing_to_do
-// comment body, and posts it best-effort -- a failure only warns, since the
+// (above) resolves one for its pickup comment, builds the comment body
+// e.Kind names, and posts it best-effort -- a failure only warns, since the
 // ticket's own state has already committed and must not be undone by a
-// tracker-side failure.
+// tracker-side failure. An unrecognized Kind posts nothing: every kind this
+// dispatcher knows is named below, and guessing at an unknown one risks
+// posting the wrong comment under the ticket's own name. PUBLISH's PR-link
+// comment and DONE's done comment never reach here -- PostPRLink and
+// PostDone (below) post those before their own commits (PKG9-PLAN.md
+// section 8.2, 8.6, 11).
 func (d *Dispatcher) postCommitTrackerEffect(ctx context.Context, ticket store.Ticket, commit store.HandlerCommit) {
 	if commit.TrackerEffect == nil {
 		return
@@ -545,7 +701,15 @@ func (d *Dispatcher) postCommitTrackerEffect(ctx context.Context, ticket store.T
 		return
 	}
 
-	body := tracker.NothingToDoComment(b.User, e.Notes)
+	var body string
+	switch e.Kind {
+	case store.TrackerEffectKindNothingToDo:
+		body = tracker.NothingToDoComment(b.User, e.Notes)
+	default:
+		slog.Warn("tracker comment skipped", "ticket_id", ticket.ID, "ref", e.Ref, "kind", e.Kind, "err", "unrecognized tracker effect kind")
+		return
+	}
+
 	// Unlike the store writes above (which detach with WithoutCancel so they
 	// still land after a cancel), this comment is best-effort and the commit
 	// has already succeeded, so it derives from ctx and is cancelled by a
@@ -556,6 +720,84 @@ func (d *Dispatcher) postCommitTrackerEffect(ctx context.Context, ticket store.T
 	if err := d.tracker.Comment(commentCtx, b.TrackerProject, e.Ref, body); err != nil {
 		slog.Warn("tracker comment failed", "ticket_id", ticket.ID, "ref", e.Ref, "err", err)
 	}
+}
+
+// shipMarkerFmt is the hidden marker PostPRLink and PostDone each search
+// for, then post, scoped to one ticket by its own store id (PKG9-PLAN.md
+// section 8.2 step 5, 8.6 step 1, 11): "pr" before the draft PR's link
+// comment, "done" before the done comment.
+const shipMarkerFmt = "<!-- zing:%s t%d -->"
+
+// postMarkedOnce is PostPRLink and PostDone's shared shape (PKG9-PLAN.md
+// section 11): resolve the ticket this (projectID, ref) pair names, so the
+// hidden marker is scoped to its own store id (neither method is handed the
+// ticket id directly), search the issue's comments for that marker through
+// CommentContains, which counts only one from the tracker's own
+// authenticated login (design 10.5, so a spoofed marker from anyone else
+// never suppresses the real post), and post bodyFor's comment, the marker
+// appended after a blank line, only when no such comment exists yet. It
+// returns the resolved binding so PostDone can reuse it for Close without a
+// second lookup.
+func (d *Dispatcher) postMarkedOnce(ctx context.Context, projectID int64, ref, kind string, bodyFor func(Binding) string) (Binding, error) {
+	b, ok := d.bindingForProject(projectID)
+	if !ok {
+		return Binding{}, fmt.Errorf("dispatch: no tracker binding for project %d", projectID)
+	}
+	t, found, err := d.store.TicketByRef(ctx, projectID, ref)
+	if err != nil {
+		return Binding{}, fmt.Errorf("dispatch: ticket by ref: %w", err)
+	}
+	if !found {
+		return Binding{}, fmt.Errorf("dispatch: no ticket for project %d ref %q", projectID, ref)
+	}
+
+	marker := fmt.Sprintf(shipMarkerFmt, kind, t.ID)
+	already, err := d.tracker.CommentContains(ctx, b.TrackerProject, ref, marker)
+	if err != nil {
+		return Binding{}, fmt.Errorf("dispatch: comment contains: %w", err)
+	}
+	if already {
+		return b, nil
+	}
+
+	body := bodyFor(b) + "\n\n" + marker
+	if err := d.tracker.Comment(ctx, b.TrackerProject, ref, body); err != nil {
+		return Binding{}, fmt.Errorf("dispatch: post comment: %w", err)
+	}
+	return b, nil
+}
+
+// Dispatcher satisfies job.ShipTracker through PostPRLink and PostDone
+// below, so Deps.Tracker (runAndCommit) can carry *Dispatcher directly.
+var _ job.ShipTracker = (*Dispatcher)(nil)
+
+// PostPRLink implements job.ShipTracker's PostPRLink (PKG9-PLAN.md section
+// 8.2 step 5, section 11): posts tracker.PRComment at most once per ticket,
+// guarded by postMarkedOnce's hidden marker.
+func (d *Dispatcher) PostPRLink(ctx context.Context, projectID int64, ref, prURL string) error {
+	_, err := d.postMarkedOnce(ctx, projectID, ref, "pr", func(b Binding) string {
+		return tracker.PRComment(b.User, prURL)
+	})
+	return err
+}
+
+// PostDone implements job.ShipTracker's PostDone (PKG9-PLAN.md section 8.6
+// step 1, section 11): posts tracker.DoneComment the same marked-once way
+// PostPRLink posts the PR link, then closes the tracker issue. Closing an
+// already-closed issue succeeds (design 10.5), so a crash between the two
+// calls, or a retried tick, never fails on the second one -- PostDone always
+// calls Close, even when the comment step itself was a skip.
+func (d *Dispatcher) PostDone(ctx context.Context, projectID int64, ref, prURL string) error {
+	b, err := d.postMarkedOnce(ctx, projectID, ref, "done", func(b Binding) string {
+		return tracker.DoneComment(b.User, prURL)
+	})
+	if err != nil {
+		return err
+	}
+	if err := d.tracker.Close(ctx, b.TrackerProject, ref); err != nil {
+		return fmt.Errorf("dispatch: close issue: %w", err)
+	}
+	return nil
 }
 
 // bindingForProject returns the Binding whose StoreProjectID matches

@@ -14,6 +14,11 @@ const (
 	// testJobNameBuild is the real machine.toml's "build" job name
 	// (goconst): both this file and prompts_test.go repeat it.
 	testJobNameBuild = "build"
+	// planningFeaturePromptPath and planningBugPromptPath are the real
+	// machine.toml's planning prompt paths (goconst): this file and
+	// prompts_test.go both repeat them.
+	planningFeaturePromptPath = "prompts/planning-feature.md"
+	planningBugPromptPath     = "prompts/planning-bug.md"
 )
 
 func TestLoad_RealMachineTOMLLoadsClean(t *testing.T) {
@@ -38,7 +43,7 @@ func TestLoad_RealMachineTOMLLoadsClean(t *testing.T) {
 
 	// planning's prompt is a {feature, bug} pair.
 	planning := m.Jobs["planning"]
-	if planning.Prompt.Feature != "prompts/planning-feature.md" || planning.Prompt.Bug != "prompts/planning-bug.md" {
+	if planning.Prompt.Feature != planningFeaturePromptPath || planning.Prompt.Bug != planningBugPromptPath {
 		t.Errorf("planning.Prompt = %+v, want the feature/bug pair", planning.Prompt)
 	}
 
@@ -68,6 +73,19 @@ func TestLoad_RealMachineTOMLLoadsClean(t *testing.T) {
 	}
 	if got := m.Jobs["classify"].Sandbox; got != "" {
 		t.Errorf("classify.Sandbox = %q, want empty", got)
+	}
+
+	// respond runs under the readonly sandbox, bounded by max_loops 3
+	// (D14's shared shipping counter) and the prose style file (D15).
+	respond := m.Jobs["respond"]
+	if respond.Sandbox != "readonly" {
+		t.Errorf("respond.Sandbox = %q, want readonly", respond.Sandbox)
+	}
+	if respond.MaxLoops != 3 {
+		t.Errorf("respond.MaxLoops = %d, want 3", respond.MaxLoops)
+	}
+	if len(respond.Style) != 1 || respond.Style[0] != "prompts/style/prose.md" {
+		t.Errorf("respond.Style = %v, want [prompts/style/prose.md]", respond.Style)
 	}
 }
 
@@ -99,13 +117,35 @@ func TestJobSandboxKey(t *testing.T) {
 		}
 	})
 
+	t.Run("readonly", func(t *testing.T) {
+		t.Parallel()
+		m, err := Load(machineFixture(t, validJobFragment+"\nsandbox = \"readonly\"\n"), machineTOMLPath)
+		if err != nil {
+			t.Fatalf("Load(): %v", err)
+		}
+		if got := m.Jobs["test"].Sandbox; got != "readonly" {
+			t.Errorf("Sandbox = %q, want readonly", got)
+		}
+	})
+
+	t.Run("judge", func(t *testing.T) {
+		t.Parallel()
+		m, err := Load(machineFixture(t, validJobFragment+"\nsandbox = \"judge\"\n"), machineTOMLPath)
+		if err != nil {
+			t.Fatalf("Load(): %v", err)
+		}
+		if got := m.Jobs["test"].Sandbox; got != "judge" {
+			t.Errorf("Sandbox = %q, want judge", got)
+		}
+	})
+
 	t.Run("anything else", func(t *testing.T) {
 		t.Parallel()
 		_, err := Load(machineFixture(t, validJobFragment+"\nsandbox = \"bogus\"\n"), machineTOMLPath)
 		if err == nil {
 			t.Fatal("Load() = nil, want an error")
 		}
-		want := "machine.toml: job test: sandbox: must be absent or build"
+		want := "machine.toml: job test: sandbox: must be absent, build, readonly, or judge"
 		if err.Error() != want {
 			t.Errorf("Load() = %q, want %q", err.Error(), want)
 		}

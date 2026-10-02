@@ -20,9 +20,12 @@ const Tail = "Your final message is exactly one <zing> document that follows the
 	"above. Nothing else in the final message is read. If you need a decision\n" +
 	"from the owner, return the question outcome. If you cannot continue, return\n" +
 	"the error outcome with what, why, and what you tried. Before you finish,\n" +
-	"write the document to a file and run `zing validate <file>`. Fix every error\n" +
-	"it prints and run it again until it prints nothing. Every claim is checked\n" +
-	"by a program, not a person."
+	"run `zing validate -` with the document on standard input, or\n" +
+	"`zing validate FILE` if you can write files. Inside the document, write a\n" +
+	"literal < as &lt; and & as &amp;, even inside backticks. Fix every error it prints\n" +
+	"and run it again until it prints nothing. If your tools cannot run it,\n" +
+	"return the document anyway: Zing validates every document and sends any\n" +
+	"errors back. Every claim is checked by a program, not a person."
 
 // Input is everything Assemble needs for one prompt: the job prompt text,
 // the style files layered over it, the labeled inputs (a ticket, an

@@ -1,0 +1,64 @@
+(version 1)
+(allow default)
+
+; Reads in home are denied by default, then allowed by name. No profile
+; reads the keychain (PKG9-PLAN.md D26, N2): the Claude CLI logs in with
+; CLAUDE_CODE_OAUTH_TOKEN instead, so ~/Library/Keychains is never allowed.
+(deny file-read-data (subpath (param "HOME")))
+(allow file-read-data
+  (subpath (param "WORKTREE"))
+  (subpath (param "REPO_GIT"))
+  (subpath (string-append (param "HOME") "/.claude"))
+  (literal (string-append (param "HOME") "/.claude.json"))
+  (subpath (param "CACHE_ROOT")))
+; No other session's transcript, the planning session's above all (N6): the
+; planning transcript holds the sealed scenarios, so a review or respond
+; run must not read any transcript folder but its own (PKG9-PLAN.md section
+; 7.3, a Package 8 holdout fix).
+(deny file-read-data (subpath (string-append (param "HOME") "/.claude/projects")))
+(allow file-read-data (subpath (param "TRANSCRIPTS")))
+;;READ_PATHS;;
+
+; The console has no login. A review or respond run must not read it or
+; answer through it.
+;;CONSOLE_DENY;;
+
+; No system service may act for a review or respond run outside the
+; sandbox. No profile allows com.apple.SecurityServer any more (D26, N2):
+; that Mach service is how a process reaches the keychain, and the Claude
+; CLI's login no longer lives there. com.apple.trustd.agent is not allowed
+; either: M1 task 7's host probe (TestProbeTLSWithoutSecurityServer) ran
+; `go mod download` and curl against a fresh TLS connection with and
+; without it, both clean, so TLS verification does not need it.
+(deny appleevent-send)
+(deny mach-lookup)
+(allow mach-lookup
+  (global-name "com.apple.system.opendirectoryd.membership")
+  (global-name "com.apple.system.opendirectoryd.libinfo"))
+
+; No connection to the owner's ssh-agent: an agent process must never be
+; able to sign for the owner's SSH key (D26, N2). This is the first of
+; 7.3's two candidate rule forms; M1 task 7's host probe
+; (TestProbeSSHAgentDenied) decides whether it actually blocks `ssh-add -l`
+; against the real agent socket, or whether the second form
+; (network-outbound regex, no "remote unix-socket" wrapper) is needed
+; instead.
+(deny network-outbound (remote unix-socket (path-regex #"^/private/tmp/com\.apple\.launchd\.[^/]+/Listeners$")))
+
+; No git credential helper may run: it would hand out the owner's GitHub
+; credentials (N2). Git execs helpers as git-credential-<name>. Defense in
+; depth, not a guarantee (D26): a "!" shell helper is not caught by this.
+(deny process-exec (regex #"/git-credential-[^/]*$"))
+
+; The Zing data directory holds the sealed scenarios.
+(deny file-read* file-write* (subpath (param "DATA_DIR")))
+(allow file-read* process-exec (literal (param "ZING_BIN")))
+
+; Writes are denied everywhere, then allowed by name. A review or respond
+; run writes nothing in the worktree (D4).
+(deny file-write* (subpath "/"))
+(allow file-write*
+  (subpath (param "TRANSCRIPTS"))
+  (subpath (param "MDS_CACHE"))
+  (subpath (param "RUN_DIR"))
+  (subpath "/dev"))

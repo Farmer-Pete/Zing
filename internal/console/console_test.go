@@ -20,6 +20,7 @@ import (
 	"zing/internal/machine"
 	"zing/internal/response"
 	"zing/internal/store"
+	"zing/internal/tracker"
 )
 
 // frameTimeout bounds every SSE read in this file: long enough for a slow
@@ -97,6 +98,8 @@ const (
 	testArtifactTypePlan     = "plan"
 	testArtifactTypeScenario = "scenario"
 	testPlanningLiteral      = "planning"
+	testStateQueued          = "queued"
+	testQuestionStateOpen    = "open"
 )
 
 var testProject = store.Project{
@@ -144,12 +147,40 @@ func newTestServerFloor(t *testing.T, s *store.Store, b *bus.Broker, m *machine.
 	return newTestServerSandbox(t, s, b, m, log, floor, "")
 }
 
+// testPickupUser is the user every pickup_test.go server acts for
+// (PKG9-PLAN.md D29): no test there asserts the pickup comment's exact
+// text, so one fixed name suffices.
+const testPickupUser = "peter"
+
+// newTestServerPickup is newTestServer with an explicit tracker (PKG9-PLAN.md
+// D29): every other server in this package leaves it nil, since only
+// pickup_test.go's own tests exercise POST /projects/{id}/pickup. machine is
+// always nil here (no test in pickup_test.go touches the rail) and user is
+// always testPickupUser, so neither is a parameter.
+func newTestServerPickup(t *testing.T, s *store.Store, b *bus.Broker, log *console.Handler, tr tracker.Tracker) *httptest.Server {
+	t.Helper()
+	return newTestServerSandboxTracker(t, s, b, nil, log, response.SeverityMinor, "", tr, testPickupUser)
+}
+
 // newTestServerSandbox is newTestServerFloor with an explicit sandboxReason
 // (design section 9.2, Task 15): every other test in this package keeps the
 // default "" (sandbox available) through newTestServer or newTestServerFloor;
 // TestNavShowsSandboxOff and TestNavHidesSandboxWhenLoaded call this
 // directly, to prove the nav region's sandbox indicator at both values.
 func newTestServerSandbox(t *testing.T, s *store.Store, b *bus.Broker, m *machine.Machine, log *console.Handler, floor response.Severity, sandboxReason string) *httptest.Server {
+	t.Helper()
+	return newTestServerSandboxTracker(t, s, b, m, log, floor, sandboxReason, nil, "")
+}
+
+// newTestServerSandboxTracker is newTestServerSandbox with an explicit
+// tracker and user (PKG9-PLAN.md D29): newTestServerSandbox itself passes
+// nil, "", its own prior behavior, so every existing caller is unaffected;
+// newTestServerPickup (above) is pickup_test.go's own entry point into this
+// function.
+func newTestServerSandboxTracker(
+	t *testing.T, s *store.Store, b *bus.Broker, m *machine.Machine, log *console.Handler,
+	floor response.Severity, sandboxReason string, tr tracker.Tracker, user string,
+) *httptest.Server {
 	t.Helper()
 
 	var lc net.ListenConfig
@@ -162,7 +193,7 @@ func newTestServerSandbox(t *testing.T, s *store.Store, b *bus.Broker, m *machin
 		t.Fatalf("unexpected listener address type %T", ln.Addr())
 	}
 
-	handler := console.New(s, b, m, testBindHosts, addr.Port, log, nil, testPushToken, floor, sandboxReason)
+	handler := console.New(s, b, m, testBindHosts, addr.Port, log, nil, testPushToken, floor, sandboxReason, tr, user)
 	srv := httptest.NewUnstartedServer(handler)
 	if err := srv.Listener.Close(); err != nil {
 		t.Fatalf("close the placeholder listener: %v", err)
@@ -183,7 +214,7 @@ func seedTicketIn(t *testing.T, s *store.Store, proj store.Project, ref, title s
 		t.Fatalf("EnsureProject: %v", err)
 	}
 	id, err := s.InsertTicket(t.Context(), store.Ticket{
-		ProjectID: projectID, TrackerRef: ref, Title: title, State: "queued",
+		ProjectID: projectID, TrackerRef: ref, Title: title, State: testStateQueued,
 	})
 	if err != nil {
 		t.Fatalf("InsertTicket(%s): %v", ref, err)
@@ -251,7 +282,7 @@ func seedOpenQuestion(t *testing.T, s *store.Store, ticketID int64) int64 {
 	}
 
 	waiting := testWaitingQuestions
-	openState := "open"
+	openState := testQuestionStateOpen
 	payload := []byte(`{"key":"Q1","kind":"question","state":"open","recommended":"a",` +
 		`"options":[{"key":"a","text":"Plain hello"},{"key":"b","text":"hello, world"}]}`)
 
@@ -395,6 +426,7 @@ func assertExactSSEFraming(t *testing.T, frame string) {
 }
 
 func TestIndexRendersShellRegionsAndScript(t *testing.T) {
+	t.Parallel()
 	s := newConsoleTestStore(t)
 	ticketID := seedTicket(t, s, "fake#1", "Add a hello endpoint")
 	seedOpenQuestion(t, s, ticketID) // blocking, so it shows in #nav's thread list
@@ -435,6 +467,7 @@ func TestIndexRendersShellRegionsAndScript(t *testing.T) {
 }
 
 func TestStaticServesDatastarBundle(t *testing.T) {
+	t.Parallel()
 	s := newConsoleTestStore(t)
 	srv := newTestServer(t, s, bus.New(), nil, newTestLogHandler(t))
 
@@ -466,6 +499,7 @@ func TestStaticServesDatastarBundle(t *testing.T) {
 // generic body, logging the detail server-side instead (design section
 // "Console" fix 10).
 func TestIndexReturns500WithGenericBodyOnStoreError(t *testing.T) {
+	t.Parallel()
 	s := newConsoleTestStore(t)
 	srv := newTestServer(t, s, bus.New(), nil, newTestLogHandler(t))
 
@@ -500,6 +534,7 @@ func TestIndexReturns500WithGenericBodyOnStoreError(t *testing.T) {
 // only that its presence leaves a normal response intact; answer_test.go
 // covers the same guard on the mutation routes.
 func TestNonStreamingRoutesSucceedUnderWriteDeadline(t *testing.T) {
+	t.Parallel()
 	s := newConsoleTestStore(t)
 
 	srv := newTestServer(t, s, bus.New(), nil, newTestLogHandler(t))
@@ -529,6 +564,7 @@ func TestNonStreamingRoutesSucceedUnderWriteDeadline(t *testing.T) {
 // section 9.2, Task 15): with a non-empty sandboxReason, GET / renders the
 // closed span with the reason as its title.
 func TestNavShowsSandboxOff(t *testing.T) {
+	t.Parallel()
 	s := newConsoleTestStore(t)
 	srv := newTestServerSandbox(t, s, bus.New(), nil, newTestLogHandler(t), response.SeverityMinor, "sandbox-exec not found")
 
@@ -553,6 +589,7 @@ func TestNavShowsSandboxOff(t *testing.T) {
 // indicator when sandboxReason is empty (design section 9.2: "empty means
 // available").
 func TestNavHidesSandboxWhenLoaded(t *testing.T) {
+	t.Parallel()
 	s := newConsoleTestStore(t)
 	srv := newTestServerSandbox(t, s, bus.New(), nil, newTestLogHandler(t), response.SeverityMinor, "")
 

@@ -85,7 +85,16 @@ func (c *console) handleStream(w http.ResponseWriter, r *http.Request) {
 // every other region's, rather than looping (design section 6a, "risk:
 // alerts onWarn re-entrancy").
 func (c *console) patchRegions(ctx context.Context, sse *datastar.ServerSentEventGenerator, sig streamSignals) bool {
-	nav, err := c.navComponent(ctx)
+	// nav's own open ticket is sig.Open only in the thread view: every other
+	// view's open is 0 in practice (console.js's reduceNav sets the whole
+	// {view,open,project} triple together on every navigation), but a
+	// stray/crafted sig.Open must not select a row the thread view did not
+	// actually open.
+	navOpen := int64(0)
+	if sig.View == viewThread {
+		navOpen = sig.Open
+	}
+	nav, err := c.navComponent(ctx, navOpen)
 	if err != nil {
 		slog.Error("console: stream: build nav", "err", err)
 		return false

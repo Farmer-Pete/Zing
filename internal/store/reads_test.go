@@ -1,9 +1,18 @@
 package store
 
 import (
+	"slices"
 	"strings"
 	"testing"
 	"time"
+)
+
+// testStateShipping and testWaitingMerge are the state and waiting_on
+// literals this file's poll-candidacy tests (TestListReadyCandidatesNextPoll
+// and below) share (goconst).
+const (
+	testStateShipping = "shipping"
+	testWaitingMerge  = "merge"
 )
 
 // seedQueuedTicket inserts a project and one queued ticket on it through the
@@ -63,6 +72,7 @@ func questionPayload(key string) []byte {
 }
 
 func TestTicketByRef_FindsAnExistingTicket(t *testing.T) {
+	t.Parallel()
 	s := newTestStore(t)
 	ctx := t.Context()
 	projectID, ticketID := seedQueuedTicket(t, s, "42")
@@ -80,6 +90,7 @@ func TestTicketByRef_FindsAnExistingTicket(t *testing.T) {
 }
 
 func TestTicketByRef_AbsentRefReturnsFalseNoError(t *testing.T) {
+	t.Parallel()
 	s := newTestStore(t)
 	ctx := t.Context()
 	projectID, _ := seedQueuedTicket(t, s, "42")
@@ -94,6 +105,7 @@ func TestTicketByRef_AbsentRefReturnsFalseNoError(t *testing.T) {
 }
 
 func TestListAllTickets_OrderedByID(t *testing.T) {
+	t.Parallel()
 	s := newTestStore(t)
 	ctx := t.Context()
 	projectID, err := s.EnsureProject(ctx, testProject)
@@ -127,6 +139,7 @@ func TestListAllTickets_OrderedByID(t *testing.T) {
 }
 
 func TestListReadyCandidates_ExcludesClaimedWaitingAndTerminal(t *testing.T) {
+	t.Parallel()
 	s := newTestStore(t)
 	ctx := t.Context()
 	projectID, err := s.EnsureProject(ctx, testProject)
@@ -158,7 +171,7 @@ func TestListReadyCandidates_ExcludesClaimedWaitingAndTerminal(t *testing.T) {
 	}
 	setTicketState(t, s, done, "done")
 
-	got, err := s.ListReadyCandidates(ctx, []string{"done", "escalated", "abandoned"})
+	got, err := s.ListReadyCandidates(ctx, []string{"done", "escalated", "abandoned"}, time.Now())
 	if err != nil {
 		t.Fatalf("ListReadyCandidates: %v", err)
 	}
@@ -168,16 +181,152 @@ func TestListReadyCandidates_ExcludesClaimedWaitingAndTerminal(t *testing.T) {
 }
 
 func TestListReadyCandidates_EmptyTerminalStillFilters(t *testing.T) {
+	t.Parallel()
 	s := newTestStore(t)
 	ctx := t.Context()
 	_, ticketID := seedQueuedTicket(t, s, "1")
 
-	got, err := s.ListReadyCandidates(ctx, nil)
+	got, err := s.ListReadyCandidates(ctx, nil, time.Now())
 	if err != nil {
 		t.Fatalf("ListReadyCandidates: %v", err)
 	}
 	if len(got) != 1 || got[0].ID != ticketID {
 		t.Errorf("ListReadyCandidates(nil terminal) = %v, want [%d]", ticketIDs(got), ticketID)
+	}
+}
+
+// setTicketPoll writes next_poll_at directly (fixture setup, not the code
+// under test), bypassing CommitHandlerResult's own Poll/ClearPoll
+// validation. This file's poll-candidacy tests only ever need next_poll_at
+// set; poll_interval_s and poll_fingerprint stay NULL.
+func setTicketPoll(t *testing.T, s *Store, ticketID int64, nextPollAt time.Time) {
+	t.Helper()
+	at := formatTime(nextPollAt)
+	if _, err := s.db.ExecContext(t.Context(),
+		`UPDATE tickets SET next_poll_at = ? WHERE id = ?`,
+		at, ticketID); err != nil {
+		t.Fatalf("set ticket poll columns: %v", err)
+	}
+}
+
+// TestListReadyCandidatesNextPoll proves ListReadyCandidates' first clause
+// (design section 4.2, D8): a ticket not waiting on anything is skipped
+// while its own next_poll_at is still in the future, picked once that time
+// has passed, and picked when it carries no poll schedule at all (NULL).
+func TestListReadyCandidatesNextPoll(t *testing.T) {
+	t.Parallel()
+	s := newTestStore(t)
+	ctx := t.Context()
+	now := time.Now().UTC().Truncate(time.Second)
+
+	_, future := seedQueuedTicket(t, s, "1")
+	setTicketState(t, s, future, testStateShipping)
+	futureAt := now.Add(time.Hour)
+	setTicketPoll(t, s, future, futureAt)
+
+	_, past := seedQueuedTicket(t, s, "2")
+	setTicketState(t, s, past, testStateShipping)
+	pastAt := now.Add(-time.Hour)
+	setTicketPoll(t, s, past, pastAt)
+
+	_, noPoll := seedQueuedTicket(t, s, "3")
+
+	got, err := s.ListReadyCandidates(ctx, nil, now)
+	if err != nil {
+		t.Fatalf("ListReadyCandidates: %v", err)
+	}
+	gotIDs := ticketIDs(got)
+	for _, want := range []int64{past, noPoll} {
+		if !slices.Contains(gotIDs, want) {
+			t.Errorf("ListReadyCandidates = %v, want it to contain %d", gotIDs, want)
+		}
+	}
+	if slices.Contains(gotIDs, future) {
+		t.Errorf("ListReadyCandidates = %v, want it to exclude %d (poll not due)", gotIDs, future)
+	}
+}
+
+// TestListReadyCandidatesMergeWaitDue proves ListReadyCandidates' second
+// clause (design D21/OQ7): a ticket waiting on merge stays a candidate once
+// its poll comes due, so a merge on GitHub or a reopened loop is seen, but
+// is skipped while that poll is not yet due, and skipped if it carries no
+// poll schedule at all (a waiting-on-merge ticket with no schedule should
+// never happen in practice, but the clause's own AND next_poll_at IS NOT
+// NULL still excludes it rather than picking it every tick).
+func TestListReadyCandidatesMergeWaitDue(t *testing.T) {
+	t.Parallel()
+	s := newTestStore(t)
+	ctx := t.Context()
+	now := time.Now().UTC().Truncate(time.Second)
+
+	_, due := seedQueuedTicket(t, s, "1")
+	setTicketState(t, s, due, testStateShipping)
+	setTicketWaiting(t, s, due, testWaitingMerge)
+	pastAt := now.Add(-time.Hour)
+	setTicketPoll(t, s, due, pastAt)
+
+	_, notDue := seedQueuedTicket(t, s, "2")
+	setTicketState(t, s, notDue, testStateShipping)
+	setTicketWaiting(t, s, notDue, testWaitingMerge)
+	futureAt := now.Add(time.Hour)
+	setTicketPoll(t, s, notDue, futureAt)
+
+	_, noSchedule := seedQueuedTicket(t, s, "3")
+	setTicketState(t, s, noSchedule, testStateShipping)
+	setTicketWaiting(t, s, noSchedule, testWaitingMerge)
+
+	got, err := s.ListReadyCandidates(ctx, nil, now)
+	if err != nil {
+		t.Fatalf("ListReadyCandidates: %v", err)
+	}
+	gotIDs := ticketIDs(got)
+	if !slices.Contains(gotIDs, due) {
+		t.Errorf("ListReadyCandidates = %v, want it to contain %d (merge poll due)", gotIDs, due)
+	}
+	if slices.Contains(gotIDs, notDue) {
+		t.Errorf("ListReadyCandidates = %v, want it to exclude %d (merge poll not due)", gotIDs, notDue)
+	}
+	if slices.Contains(gotIDs, noSchedule) {
+		t.Errorf("ListReadyCandidates = %v, want it to exclude %d (no poll schedule)", gotIDs, noSchedule)
+	}
+}
+
+// TestListReadyCandidatesAnsweredSkipsWait proves ListReadyCandidates'
+// third clause (design section 4.2): once a ticket's waiting_on has already
+// cleared to NULL (SendBatch's own job, design section 6.7, fires before
+// ListReadyCandidates ever runs), an answered question still on the ticket
+// lets it skip a poll schedule that has not come due yet, rather than
+// waiting out whatever backoff interval was in force when the question was
+// asked.
+func TestListReadyCandidatesAnsweredSkipsWait(t *testing.T) {
+	t.Parallel()
+	s := newTestStore(t)
+	ctx := t.Context()
+	now := time.Now().UTC().Truncate(time.Second)
+
+	_, answered := seedQueuedTicket(t, s, "1")
+	setTicketState(t, s, answered, testStateShipping)
+	futureAt := now.Add(time.Hour)
+	setTicketPoll(t, s, answered, futureAt)
+	sessionID := insertSession(t, s, answered, "shipping")
+	runID := insertQuestionRun(t, s, sessionID)
+	questionID := insertOpenQuestion(t, s, answered, runID, "Q1")
+	markAnswered(t, s, questionID)
+
+	_, noQuestion := seedQueuedTicket(t, s, "2")
+	setTicketState(t, s, noQuestion, testStateShipping)
+	setTicketPoll(t, s, noQuestion, futureAt)
+
+	got, err := s.ListReadyCandidates(ctx, nil, now)
+	if err != nil {
+		t.Fatalf("ListReadyCandidates: %v", err)
+	}
+	gotIDs := ticketIDs(got)
+	if !slices.Contains(gotIDs, answered) {
+		t.Errorf("ListReadyCandidates = %v, want it to contain %d (answered question skips the wait)", gotIDs, answered)
+	}
+	if slices.Contains(gotIDs, noQuestion) {
+		t.Errorf("ListReadyCandidates = %v, want it to exclude %d (poll not due, no answered question)", gotIDs, noQuestion)
 	}
 }
 
@@ -190,6 +339,7 @@ func ticketIDs(ts []Ticket) []int64 {
 }
 
 func TestListMessages_OrderedByID(t *testing.T) {
+	t.Parallel()
 	s := newTestStore(t)
 	ctx := t.Context()
 	_, ticketID := seedQueuedTicket(t, s, "1")
@@ -223,6 +373,7 @@ func TestListMessages_OrderedByID(t *testing.T) {
 }
 
 func TestListMessages_ScopedToOneTicket(t *testing.T) {
+	t.Parallel()
 	s := newTestStore(t)
 	ctx := t.Context()
 	_, ticketA := seedQueuedTicket(t, s, "1")
@@ -245,6 +396,7 @@ func TestListMessages_ScopedToOneTicket(t *testing.T) {
 }
 
 func TestQuestionsByState_FiltersByLifecycleState(t *testing.T) {
+	t.Parallel()
 	s := newTestStore(t)
 	ctx := t.Context()
 	_, ticketID := seedQueuedTicket(t, s, "1")
@@ -299,6 +451,7 @@ func TestQuestionsByState_FiltersByLifecycleState(t *testing.T) {
 }
 
 func TestOpenSession_ReturnsNewestForTicketAndJob(t *testing.T) {
+	t.Parallel()
 	s := newTestStore(t)
 	ctx := t.Context()
 	_, ticketID := seedQueuedTicket(t, s, "1")
@@ -323,6 +476,7 @@ func TestOpenSession_ReturnsNewestForTicketAndJob(t *testing.T) {
 }
 
 func TestOpenSession_NoneForJobReturnsFalse(t *testing.T) {
+	t.Parallel()
 	s := newTestStore(t)
 	ctx := t.Context()
 	_, ticketID := seedQueuedTicket(t, s, "1")
@@ -359,6 +513,7 @@ func setSessionResumes(t *testing.T, s *Store, sessionID int64, resumes int) {
 // (design D17, section 4.5): a ticket with no session at all for the job
 // gets SessionNone, not an error.
 func TestLatestSession_NoneReturnsSessionNone(t *testing.T) {
+	t.Parallel()
 	s := newTestStore(t)
 	ctx := t.Context()
 	_, ticketID := seedQueuedTicket(t, s, "1")
@@ -378,6 +533,7 @@ func TestLatestSession_NoneReturnsSessionNone(t *testing.T) {
 // echo one back -- classifies as SessionIdless, the same as no session at
 // all for step 3's purposes.
 func TestLatestSession_NewestNullExternalIDReturnsIdless(t *testing.T) {
+	t.Parallel()
 	s := newTestStore(t)
 	ctx := t.Context()
 	_, ticketID := seedQueuedTicket(t, s, "1")
@@ -399,6 +555,7 @@ func TestLatestSession_NewestNullExternalIDReturnsIdless(t *testing.T) {
 // (design D17): the newest session with an external_id and resumes below
 // maxResumes classifies as SessionOpen.
 func TestLatestSession_NewestOpenBelowCapReturnsOpen(t *testing.T) {
+	t.Parallel()
 	s := newTestStore(t)
 	ctx := t.Context()
 	_, ticketID := seedQueuedTicket(t, s, "1")
@@ -422,6 +579,7 @@ func TestLatestSession_NewestOpenBelowCapReturnsOpen(t *testing.T) {
 // (design D17): the newest session with an external_id and resumes at or
 // past maxResumes classifies as SessionExhausted.
 func TestLatestSession_NewestAtCapReturnsExhausted(t *testing.T) {
+	t.Parallel()
 	s := newTestStore(t)
 	ctx := t.Context()
 	_, ticketID := seedQueuedTicket(t, s, "1")
@@ -442,6 +600,7 @@ func TestLatestSession_NewestAtCapReturnsExhausted(t *testing.T) {
 // highest id, not "the one still open": an older, still-open session must
 // not shadow a newer session that has since gone idless.
 func TestLatestSession_NewestByIDEvenWhenOlderIsOpen(t *testing.T) {
+	t.Parallel()
 	s := newTestStore(t)
 	ctx := t.Context()
 	_, ticketID := seedQueuedTicket(t, s, "1")
@@ -470,6 +629,7 @@ func TestLatestSession_NewestByIDEvenWhenOlderIsOpen(t *testing.T) {
 // 0003's BEFORE INSERT trigger on sessions rejects the raw INSERT before
 // LatestSession ever gets a chance to read such a row back.
 func TestLatestSession_EmptyExternalIDIsAnError(t *testing.T) {
+	t.Parallel()
 	s := newTestStore(t)
 	ctx := t.Context()
 	_, ticketID := seedQueuedTicket(t, s, "1")
@@ -490,6 +650,7 @@ func TestLatestSession_EmptyExternalIDIsAnError(t *testing.T) {
 // existing session (NULL going in, same as a first-turn session before the
 // runtime has echoed one back) is rejected the same way an insert is.
 func TestLatestSession_UpdateToEmptyExternalIDIsAnError(t *testing.T) {
+	t.Parallel()
 	s := newTestStore(t)
 	ctx := t.Context()
 	_, ticketID := seedQueuedTicket(t, s, "1")
@@ -510,6 +671,7 @@ func TestLatestSession_UpdateToEmptyExternalIDIsAnError(t *testing.T) {
 // round.SessionID directly, not necessarily the ticket's newest session for
 // the job).
 func TestSessionByID_OpenReturnsSessionOpen(t *testing.T) {
+	t.Parallel()
 	s := newTestStore(t)
 	ctx := t.Context()
 	_, ticketID := seedQueuedTicket(t, s, "1")
@@ -532,6 +694,7 @@ func TestSessionByID_OpenReturnsSessionOpen(t *testing.T) {
 // TestSessionByID_ExhaustedReturnsSessionExhausted proves the exhausted
 // case: resumes at or past maxResumes classifies as SessionExhausted.
 func TestSessionByID_ExhaustedReturnsSessionExhausted(t *testing.T) {
+	t.Parallel()
 	s := newTestStore(t)
 	ctx := t.Context()
 	_, ticketID := seedQueuedTicket(t, s, "1")
@@ -551,6 +714,7 @@ func TestSessionByID_ExhaustedReturnsSessionExhausted(t *testing.T) {
 // TestSessionByID_IdlessReturnsSessionIdless proves the idless case: a
 // session whose external_id is still NULL classifies as SessionIdless.
 func TestSessionByID_IdlessReturnsSessionIdless(t *testing.T) {
+	t.Parallel()
 	s := newTestStore(t)
 	ctx := t.Context()
 	_, ticketID := seedQueuedTicket(t, s, "1")
@@ -568,6 +732,7 @@ func TestSessionByID_IdlessReturnsSessionIdless(t *testing.T) {
 // TestSessionByID_UnknownIDIsAnError proves an id naming no session returns
 // a wrapped sql.ErrNoRows, not a zero-value SessionNone success.
 func TestSessionByID_UnknownIDIsAnError(t *testing.T) {
+	t.Parallel()
 	s := newTestStore(t)
 	ctx := t.Context()
 
@@ -578,6 +743,7 @@ func TestSessionByID_UnknownIDIsAnError(t *testing.T) {
 }
 
 func TestFirstRun_ReturnsLowestTurnForSession(t *testing.T) {
+	t.Parallel()
 	s := newTestStore(t)
 	ctx := t.Context()
 	_, ticketID := seedQueuedTicket(t, s, "1")
@@ -607,6 +773,7 @@ func TestFirstRun_ReturnsLowestTurnForSession(t *testing.T) {
 }
 
 func TestFirstRun_NoRunsReturnsFalse(t *testing.T) {
+	t.Parallel()
 	s := newTestStore(t)
 	ctx := t.Context()
 	_, ticketID := seedQueuedTicket(t, s, "1")
@@ -622,6 +789,7 @@ func TestFirstRun_NoRunsReturnsFalse(t *testing.T) {
 }
 
 func TestQuestionsByRun_ScopedToOneRun(t *testing.T) {
+	t.Parallel()
 	s := newTestStore(t)
 	ctx := t.Context()
 	_, ticketID := seedQueuedTicket(t, s, "1")
@@ -662,6 +830,7 @@ func TestQuestionsByRun_ScopedToOneRun(t *testing.T) {
 }
 
 func TestGetMessage_RoundTrips(t *testing.T) {
+	t.Parallel()
 	s := newTestStore(t)
 	ctx := t.Context()
 	_, ticketID := seedQueuedTicket(t, s, "1")
@@ -687,6 +856,7 @@ func TestGetMessage_RoundTrips(t *testing.T) {
 }
 
 func TestCountActiveRuns_CountsClaimedNotWaiting(t *testing.T) {
+	t.Parallel()
 	s := newTestStore(t)
 	ctx := t.Context()
 	projectID, err := s.EnsureProject(ctx, testProject)

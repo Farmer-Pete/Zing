@@ -56,6 +56,8 @@ const (
 	OutcomeBug         Outcome = "bug"
 	OutcomeFeature     Outcome = "feature"
 	OutcomeQuestions   Outcome = "questions"
+	OutcomeReplies     Outcome = "replies"
+	OutcomeConfirmed   Outcome = "confirmed"
 	OutcomeReady       Outcome = "ready"
 	OutcomeChildren    Outcome = "children"
 	OutcomeNothingToDo Outcome = "nothing_to_do"
@@ -67,9 +69,9 @@ const (
 // Values returns every valid Outcome.
 func (Outcome) Values() []string {
 	return []string{
-		string(OutcomeBug), string(OutcomeFeature), string(OutcomeQuestions), string(OutcomeReady),
-		string(OutcomeChildren), string(OutcomeNothingToDo), string(OutcomeOk), string(OutcomeQuestion),
-		string(OutcomeError),
+		string(OutcomeBug), string(OutcomeFeature), string(OutcomeQuestions), string(OutcomeReplies),
+		string(OutcomeConfirmed), string(OutcomeReady), string(OutcomeChildren), string(OutcomeNothingToDo), string(OutcomeOk),
+		string(OutcomeQuestion), string(OutcomeError),
 	}
 }
 
@@ -281,6 +283,9 @@ const (
 	// decision D14): "back to planning" from a building escalation is
 	// deferred, so that option re-escalates under this code instead.
 	EscalationCodeReplanUnsupported EscalationCode = "replan_unsupported"
+	// EscalationCodePRClosed is Package 9's own code (design decision D13):
+	// a PR closed without merging, whoever closed it.
+	EscalationCodePRClosed EscalationCode = "pr_closed"
 )
 
 // Values returns every valid EscalationCode.
@@ -292,6 +297,7 @@ func (EscalationCode) Values() []string {
 		string(EscalationCodeNothingToDoWithTrueClaims), string(EscalationCodeRuntimeExecFailed),
 		string(EscalationCodeResponseInvalid), string(EscalationCodeSealFailed), string(EscalationCodePostRunFailed),
 		string(EscalationCodeSandboxUnavailable), string(EscalationCodeReplanUnsupported),
+		string(EscalationCodePRClosed),
 	}
 }
 
@@ -320,6 +326,14 @@ const (
 	EscalationOriginBuild     EscalationOrigin = "build"
 	EscalationOriginPerimeter EscalationOrigin = "perimeter"
 	EscalationOriginFix       EscalationOrigin = "fix"
+	// EscalationOriginReview, EscalationOriginJudge, EscalationOriginShipping,
+	// and EscalationOriginRespond are Package 9's own origins: the review
+	// round, the judge run, the shipping (CI and merge) loop, and the
+	// respond job.
+	EscalationOriginReview   EscalationOrigin = "review"
+	EscalationOriginJudge    EscalationOrigin = "judge"
+	EscalationOriginShipping EscalationOrigin = "shipping"
+	EscalationOriginRespond  EscalationOrigin = "respond"
 )
 
 // Values returns every valid EscalationOrigin.
@@ -330,6 +344,8 @@ func (EscalationOrigin) Values() []string {
 		string(EscalationOriginCapResumes), string(EscalationOriginCapLoops), string(EscalationOriginCapBudget),
 		string(EscalationOriginSplit), string(EscalationOriginNothingToDoClaims),
 		string(EscalationOriginBuild), string(EscalationOriginPerimeter), string(EscalationOriginFix),
+		string(EscalationOriginReview), string(EscalationOriginJudge), string(EscalationOriginShipping),
+		string(EscalationOriginRespond),
 	}
 }
 
@@ -413,6 +429,23 @@ const (
 // Values returns accept and reject, in that order.
 func (PerimeterDecision) Values() []string {
 	return []string{string(PerimeterAccept), string(PerimeterReject)}
+}
+
+// FindingDecision is the owner's or the floor's call on one stored code
+// review finding. It is its own type, like PerimeterDecision, because a
+// jsonschema enum tag on a Decision field adds to Decision's four values
+// instead of narrowing them (Package 8, task 3a).
+type FindingDecision string
+
+const (
+	FindingAccept  FindingDecision = "accept"
+	FindingDrop    FindingDecision = "drop"
+	FindingDiscuss FindingDecision = "discuss"
+)
+
+// Values returns accept, drop, discuss, in that order.
+func (FindingDecision) Values() []string {
+	return []string{string(FindingAccept), string(FindingDrop), string(FindingDiscuss)}
 }
 
 // Result is a scenario verdict's pass/fail result.

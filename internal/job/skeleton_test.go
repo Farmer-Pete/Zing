@@ -3,9 +3,11 @@ package job_test
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io/fs"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 
@@ -65,10 +67,28 @@ const (
 	testArtifactTypePlanreview = "planreview"
 
 	testMsgTypeUpdate = "update"
+	testAuthorSystem  = "system"
 	testKindBug       = "bug"
 	testKindFeature   = "feature"
 	testTicketTitle   = "Add a hello endpoint"
 	testModelClaudeX  = "claude-x"
+	// testFixtureGitHubOwner is the owner and repo name every orchestrator
+	// this file builds uses: a placeholder, never a real GitHub repository.
+	testFixtureGitHubOwner = "fixture"
+
+	// testOptionAText and testOptionBText are the two-option payload's own
+	// option text, shared across every hand-built question/questions
+	// response in planning_test.go and escalation_test.go (D31's own
+	// conversation-carrying fixtures among them).
+	testOptionAText  = "Option A"
+	testOptionBText  = "Option B"
+	testQuestionBody = "Body."
+	// testQ1SettledDecision is the fixed decision text every D31 fixture
+	// uses to settle Q1 through a hand-built <replies> reply, so a
+	// ready/children/nothing_to_do response can pass checkConversation's
+	// "every question settled" rule without each test inventing its own
+	// wording.
+	testQ1SettledDecision = "The owner's answer to Q1 settles this thread."
 )
 
 // testProject is the one project every test in this file seeds. LocalPath
@@ -161,6 +181,152 @@ func (jobTestGitHub) FindPRByHead(context.Context, string, string, string, strin
 
 var errFakeGitHub = errors.New("jobTestGitHub: not implemented")
 
+// jobTestShipGitHub is this file's own working GitHub double for
+// TestRing_QueuedToDoneAnsweringOneQuestion (M3 tasks 6, 7): unlike
+// jobTestGitHub above, PUBLISH and POLL both reach it for real, so
+// CreateDraftPR and FindPRByHead actually track one pull request, and
+// GetPR reports it merged from the very first read -- the same state POLL
+// would see if the owner had merged it by hand on GitHub while the loop
+// was still open (design section 14's own "the owner merges on GitHub
+// while the ticket waits on merge" row), since M3 builds PUBLISH and POLL
+// but not the ready flip or MERGE itself (M4). ListCheckRuns and
+// RequiredCheckRules report one green "ci" check, matching required, so
+// EvaluateCI's own green branch is realistic even though POLL's "pr.Merged"
+// row (checked first) never actually needs it to reach done.
+type jobTestShipGitHub struct {
+	mu      sync.Mutex
+	pr      *jobTestShipPR
+	nextNum int
+}
+
+type jobTestShipPR struct {
+	url, head, base string
+	number          int
+}
+
+func (*jobTestShipGitHub) RepoDefaultBranch(context.Context, string, string) (string, error) {
+	return "", errFakeGitHub
+}
+
+func (*jobTestShipGitHub) RequiredChecks(context.Context, string, string, string) ([]string, error) {
+	return nil, errFakeGitHub
+}
+
+func (g *jobTestShipGitHub) CreateDraftPR(_ context.Context, _, _, head, base, _, _ string) (url string, number int, err error) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if g.pr != nil {
+		return "", 0, errors.New("jobTestShipGitHub: a pull request already exists for this head")
+	}
+	g.nextNum++
+	g.pr = &jobTestShipPR{url: fmt.Sprintf("https://github.com/fixture/fixture/pull/%d", g.nextNum), head: head, base: base, number: g.nextNum}
+	return g.pr.url, g.pr.number, nil
+}
+
+func (g *jobTestShipGitHub) FindPRByHead(_ context.Context, _, _, head, base string) (url string, number int, ok bool, err error) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if g.pr == nil || g.pr.head != head || g.pr.base != base {
+		return "", 0, false, nil
+	}
+	return g.pr.url, g.pr.number, true, nil
+}
+
+func (*jobTestShipGitHub) GetPR(context.Context, string, string, int) (orchestrator.PRState, error) {
+	return orchestrator.PRState{Merged: true, Draft: true}, nil
+}
+
+func (*jobTestShipGitHub) Merge(context.Context, string, string, int, string, string, string) (string, error) {
+	return "", errors.New("jobTestShipGitHub: Merge not implemented (M4)")
+}
+
+func (*jobTestShipGitHub) ListCheckRuns(context.Context, string, string, string) ([]orchestrator.CheckRun, error) {
+	return []orchestrator.CheckRun{{ID: 1, Name: "ci", Status: "completed", Conclusion: "success", AppSlug: "github-actions", AppID: 1}}, nil
+}
+
+func (*jobTestShipGitHub) ListStatuses(context.Context, string, string, string) ([]orchestrator.CommitStatus, error) {
+	return nil, nil
+}
+
+func (*jobTestShipGitHub) RequiredCheckRules(context.Context, string, string, string) ([]orchestrator.RequiredCheck, error) {
+	return []orchestrator.RequiredCheck{{Context: "ci"}}, nil
+}
+
+func (*jobTestShipGitHub) JobLogTail(context.Context, string, string, int64, int) (string, error) {
+	return "", nil
+}
+
+// jobTestShipTracker is a job.ShipTracker double that always succeeds: this
+// ring test cares that PUBLISH and POLL each reach job.Deps.Tracker, not
+// about the tracker's own comment text (tracker package's own fixture and
+// its dispatcher-level wiring are proven elsewhere, internal/dispatch and
+// internal/tracker).
+type jobTestShipTracker struct{}
+
+func (jobTestShipTracker) PostPRLink(context.Context, int64, string, string) error { return nil }
+func (jobTestShipTracker) PostDone(context.Context, int64, string, string) error   { return nil }
+
+// addBareOriginForTicket gives ticketID's own project a bare origin remote
+// (gitfixture.WithBareOrigin), exactly once: git itself refuses a second
+// "remote add origin", so callers that reach shipping more than once (the
+// ring test's own PUBLISH tick, then its POLL tick) call this before the
+// first of the two, not before each.
+func addBareOriginForTicket(t *testing.T, s *store.Store, ticketID int64) {
+	t.Helper()
+	proj, err := s.ProjectForTicket(t.Context(), ticketID)
+	if err != nil {
+		t.Fatalf("ProjectForTicket: %v", err)
+	}
+	if _, err := gitfixture.WithBareOrigin(t.Context(), proj.LocalPath); err != nil {
+		t.Fatalf("gitfixture.WithBareOrigin: %v", err)
+	}
+}
+
+// shipCapableDeps is claim's own twin for the one state this file's shared
+// Deps cannot carry a ticket through: shipping's own PUBLISH (git push, a
+// real draft pull request) and POLL (a GitHub read that reports it merged,
+// then the done comment). It overrides ticketID's own project's Owner,
+// Repo, PullRequests, and Checks with gh, plus Deps.Tracker with
+// jobTestShipTracker -- the two things claim's own shared Deps leaves
+// zero, since every other test in this file never reaches shipping. The
+// ring test's own PUBLISH tick and POLL tick share one *jobTestShipGitHub
+// (gh, passed in rather than built here), so POLL's own GetPR sees the
+// very pull request PUBLISH's CreateDraftPR just opened, the way the
+// dispatcher's own Deps.Projects would carry it across two real ticks of
+// the same process.
+func shipCapableDeps(t *testing.T, s *store.Store, rt runtime.Runtime, ticketID int64, gh *jobTestShipGitHub) job.Deps {
+	t.Helper()
+	deps := claim(t, s, rt, ticketID)
+
+	proj, err := s.ProjectForTicket(t.Context(), ticketID)
+	if err != nil {
+		t.Fatalf("ProjectForTicket: %v", err)
+	}
+	// buildJobTestProjects (claim's own Projects builder) wires proj.Orch to
+	// jobTestGitHub, a never-implemented stub: PUBLISH's own Push and
+	// CreateDraftPR calls go through proj.Orch, not the PullRequests/Checks
+	// fields below, so reaching gh for real needs a fresh Orchestrator built
+	// over it, not just an override of the small-interface fields POLL
+	// reads.
+	orch, orchErr := orchestrator.New(
+		orchestrator.Project{Owner: testFixtureGitHubOwner, Repo: testFixtureGitHubOwner, LocalPath: proj.LocalPath, DefaultBranch: "main"},
+		gh, orchestrator.NewRunner(), nil)
+	if orchErr != nil {
+		t.Fatalf("orchestrator.New: %v", orchErr)
+	}
+	repoGit, gitErr := orch.GitCommonDir(t.Context())
+	if gitErr != nil {
+		t.Fatalf("GitCommonDir: %v", gitErr)
+	}
+
+	deps.Projects[proj.ID] = job.Project{
+		Orch: orch, RepoGit: repoGit, TestCmd: "test -f hello.txt", LintCmd: testNoopShellCmd,
+		Owner: testFixtureGitHubOwner, Repo: testFixtureGitHubOwner, PullRequests: gh, Checks: gh,
+	}
+	deps.Tracker = jobTestShipTracker{}
+	return deps
+}
+
 // buildJobTestProjects returns a job.Project for every store project whose
 // LocalPath is a real git repository: orchestrator.New never fails on a
 // plain directory, but GitCommonDir does, so a project seeded through the
@@ -176,7 +342,7 @@ func buildJobTestProjects(t *testing.T, s *store.Store) map[int64]job.Project {
 	out := make(map[int64]job.Project, len(projects))
 	for _, p := range projects {
 		orch, orchErr := orchestrator.New(
-			orchestrator.Project{Owner: "fixture", Repo: "fixture", LocalPath: p.LocalPath, DefaultBranch: "main"},
+			orchestrator.Project{Owner: testFixtureGitHubOwner, Repo: testFixtureGitHubOwner, LocalPath: p.LocalPath, DefaultBranch: "main"},
 			jobTestGitHub{}, orchestrator.NewRunner(), nil)
 		if orchErr != nil {
 			continue
@@ -289,9 +455,14 @@ func claim(t *testing.T, s *store.Store, rt runtime.Runtime, ticketID int64) job
 		Reserve: func(ctx context.Context, ticketID int64, su store.SessionUpsert, seed store.RunSeed) (store.Reserved, error) {
 			return s.Reserve(ctx, ticketID, owner, expires, su, seed)
 		},
-		Sandbox: sandbox.Off(), RequireSandbox: false,
+		Sandboxes: sandbox.OffSet(), RequireSandbox: false,
 		Commands: job.NewCommandRunner(sandbox.Off(), false),
 		Projects: buildJobTestProjects(t, s),
+		DataDir:  t.TempDir(),
+		// LensesParallel bounds ROUND's own semaphore (PKG9-PLAN.md section
+		// 4.3, 6.2): zero would block every lens forever the moment a test
+		// drives a ticket through "reviewing" for real.
+		LensesParallel: 7,
 	}
 }
 
@@ -352,6 +523,10 @@ func getTicket(t *testing.T, s *store.Store, ticketID int64) store.Ticket {
 // calls write no state message, since none of them carries a Next; only the
 // review tick's clean shortcut does.
 func TestRing_QueuedToDoneAnsweringOneQuestion(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow end-to-end flow; runs in the full suite")
+	}
+	t.Parallel()
 	s := newJobTestStore(t)
 	rt := fakeRuntime(t)
 	ticketID := seedQueuedGitBackedTicket(t, s)
@@ -424,25 +599,59 @@ func TestRing_QueuedToDoneAnsweringOneQuestion(t *testing.T) {
 	}
 	advanceBuilding(t, s, rt, ticketID)
 
-	// the remaining code-only states.
-	order := []string{testStateReviewing, testStateJudging, testStateShipping}
-	for _, state := range order {
-		ticket = getTicket(t, s, ticketID)
-		if ticket.State != state {
-			t.Fatalf("before handler %s: ticket state = %q, want %q", state, ticket.State, state)
-		}
-		deps = claim(t, s, rt, ticketID)
-
-		handler, ok := reg[state]
-		if !ok {
-			t.Fatalf("Registry() has no handler for state %s", state)
-		}
-		commit, err = handler.Run(t.Context(), ticket, deps)
-		if err != nil {
-			t.Fatalf("%s handler.Run: %v", state, err)
-		}
-		apply(t, s, ticket, commit)
+	// reviewing: the real handler (design section 6) still completes ROUND
+	// in one call -- every one of the seven clean lens scripts returns ok --
+	// so one Run call is still enough.
+	ticket = getTicket(t, s, ticketID)
+	if ticket.State != testStateReviewing {
+		t.Fatalf("before reviewing: ticket state = %q, want %q", ticket.State, testStateReviewing)
 	}
+	deps = claim(t, s, rt, ticketID)
+	commit, err = reg[testStateReviewing].Run(t.Context(), ticket, deps)
+	if err != nil {
+		t.Fatalf("reviewing handler.Run: %v", err)
+	}
+	apply(t, s, ticket, commit)
+
+	// judging: the real handler (design section 7) takes a START call, a RUN
+	// call, one CHECK call per scenario with a check command, and an
+	// EVALUATE call, not the skeleton's one-shot fake pass-through.
+	ticket = getTicket(t, s, ticketID)
+	if ticket.State != testStateJudging {
+		t.Fatalf("before judging: ticket state = %q, want %q", ticket.State, testStateJudging)
+	}
+	advanceJudging(t, s, rt, ticketID)
+
+	// shipping: the real handler (design section 8) takes a PUBLISH call
+	// (pushes, opens a draft pull request; no state transition, SetPRURL
+	// only) and a POLL call (reads the fake PR back merged, same as the
+	// owner merging it by hand on GitHub while M3's own loop -- no ready
+	// flip or MERGE yet -- was still open; shipping -> done).
+	ticket = getTicket(t, s, ticketID)
+	if ticket.State != testStateShipping {
+		t.Fatalf("before shipping: ticket state = %q, want %q", ticket.State, testStateShipping)
+	}
+	addBareOriginForTicket(t, s, ticketID)
+	gh := &jobTestShipGitHub{}
+
+	deps = shipCapableDeps(t, s, rt, ticketID, gh)
+	commit, err = reg[testStateShipping].Run(t.Context(), ticket, deps)
+	if err != nil {
+		t.Fatalf("shipping PUBLISH handler.Run: %v", err)
+	}
+	apply(t, s, ticket, commit)
+
+	published := getTicket(t, s, ticketID)
+	if published.State != testStateShipping || published.PRURL == nil {
+		t.Fatalf("after PUBLISH: ticket = (state=%q, pr_url=%v), want (shipping, non-nil)", published.State, published.PRURL)
+	}
+
+	deps = shipCapableDeps(t, s, rt, ticketID, gh)
+	commit, err = reg[testStateShipping].Run(t.Context(), published, deps)
+	if err != nil {
+		t.Fatalf("shipping POLL handler.Run: %v", err)
+	}
+	apply(t, s, published, commit)
 
 	final := getTicket(t, s, ticketID)
 	if final.State != testStateDone {
@@ -516,6 +725,7 @@ func answerFixtureQuestion(t *testing.T, s *store.Store, ticketID int64) {
 // TestQueuedHandler_TransitionsToPlanning is a focused unit-level check of
 // queuedHandler's commit shape (design section 6.5).
 func TestQueuedHandler_TransitionsToPlanning(t *testing.T) {
+	t.Parallel()
 	s := newJobTestStore(t)
 	ticketID := seedQueuedTicket(t, s)
 	ticket := getTicket(t, s, ticketID)
@@ -572,6 +782,10 @@ func advanceThroughStates(t *testing.T, s *store.Store, ticketID int64, states .
 			advanceBuilding(t, s, fakeRuntime(t), ticketID)
 			continue
 		}
+		if state == testStateJudging {
+			advanceJudging(t, s, fakeRuntime(t), ticketID)
+			continue
+		}
 
 		deps := claim(t, s, fakeRuntime(t), ticketID)
 		commit, err := reg[state].Run(t.Context(), ticket, deps)
@@ -609,6 +823,64 @@ func advanceBuilding(t *testing.T, s *store.Store, rt runtime.Runtime, ticketID 
 		}
 	}
 	t.Fatalf("advanceBuilding: still in building after %d handler calls", advanceBuildingMaxCalls)
+}
+
+// judgeCheckFixtureCmd is the one shell command fixtures/scripts/
+// planning/2.xml's own scenario s1 carries as its check_cmd: CHECK (design
+// section 7.5) re-runs it for real, but no fixture project in this suite
+// ever starts a real HTTP server on port 8080, so a live curl would always
+// fail. testJudgeCommands intercepts exactly this command and reports the
+// pass CHECK's own real exit-code contract would have reported had a
+// server been listening -- the same CommandRunner seam building's own
+// CHECK step already takes its commands through (job.Deps.Commands),
+// never a live network call.
+const judgeCheckFixtureCmd = "curl -sf localhost:8080/hello"
+
+// testJudgeCommands wraps a real CommandRunner so judging's own CHECK step
+// never dials out: every command but judgeCheckFixtureCmd runs for real
+// (building's own "test -f hello.txt" and "true" included), and
+// judgeCheckFixtureCmd always reports exit 0 with no error.
+type testJudgeCommands struct {
+	real job.CommandRunner
+}
+
+func (c testJudgeCommands) Run(ctx context.Context, dir, repoGit, shellCmd string, timeout time.Duration) (int, error) {
+	if shellCmd == judgeCheckFixtureCmd {
+		return 0, nil
+	}
+	return c.real.Run(ctx, dir, repoGit, shellCmd, timeout)
+}
+
+// advanceJudgingMaxCalls bounds advanceJudging's own handler-call loop:
+// START, RUN, one CHECK (the fixture cohort's own single checked scenario,
+// s1), and EVALUATE is four calls; the headroom catches a stuck handler
+// instead of hanging the test.
+const advanceJudgingMaxCalls = 8
+
+// advanceJudging drives the real judging handler through as many calls as
+// it now takes to land a passing round and transition to shipping (design
+// section 7): unlike the skeleton's one-shot fake pass-through, each call
+// only advances one step (START, RUN, one scenario's own CHECK, or
+// EVALUATE), so this loops until the ticket leaves "judging". Its own
+// Deps.Commands (testJudgeCommands) keeps CHECK's re-run of the fixture
+// cohort's one check command from ever dialing a real server.
+func advanceJudging(t *testing.T, s *store.Store, rt runtime.Runtime, ticketID int64) {
+	t.Helper()
+	reg := job.Registry()
+	for range advanceJudgingMaxCalls {
+		ticket := getTicket(t, s, ticketID)
+		deps := claim(t, s, rt, ticketID)
+		deps.Commands = testJudgeCommands{real: deps.Commands}
+		commit, err := reg[testStateJudging].Run(t.Context(), ticket, deps)
+		if err != nil {
+			t.Fatalf("judging Run: %v", err)
+		}
+		apply(t, s, ticket, commit)
+		if getTicket(t, s, ticketID).State != testStateJudging {
+			return
+		}
+	}
+	t.Fatalf("advanceJudging: still in judging after %d handler calls", advanceJudgingMaxCalls)
 }
 
 // advancePlanningMaxCalls bounds advancePlanningWithAnAnswer's own
@@ -686,11 +958,19 @@ func answerGateApprove(t *testing.T, s *store.Store, ticketID int64) {
 	}
 }
 
-// TestReviewingHandler_TransitionsToJudging, TestJudgingHandler_TransitionsToShipping,
-// and TestShippingHandler_TransitionsToDone cover the three remaining
-// code-only handlers (design section 6.5).
+// TestReviewingHandler_TransitionsToJudging covers reviewing's own
+// smoke-test shape; judging's and shipping's own one-shot skeleton smoke
+// tests are both gone along with skeleton.go's own judgingHandler (M2 task
+// 8) and shippingHandler (M3 task 7): judging_test.go's TestJudgePassMovesToShipping
+// and shipping_test.go's own PUBLISH/POLL tests cover the real handlers'
+// own pass branches instead, and advanceJudging (below) is what every
+// multi-state test in this file now uses to reach "shipping" for real.
 
 func TestReviewingHandler_TransitionsToJudging(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow end-to-end flow; runs in the full suite")
+	}
+	t.Parallel()
 	s := newJobTestStore(t)
 	ticketID := seedQueuedGitBackedTicket(t, s)
 	advanceThroughStates(t, s, ticketID, testStateQueued, testStatePlanning, testStateBuilding)
@@ -707,45 +987,5 @@ func TestReviewingHandler_TransitionsToJudging(t *testing.T) {
 	apply(t, s, ticket, commit)
 	if final := getTicket(t, s, ticketID); final.State != testStateJudging {
 		t.Errorf("final ticket state = %q, want judging", final.State)
-	}
-}
-
-func TestJudgingHandler_TransitionsToShipping(t *testing.T) {
-	s := newJobTestStore(t)
-	ticketID := seedQueuedGitBackedTicket(t, s)
-	advanceThroughStates(t, s, ticketID, testStateQueued, testStatePlanning, testStateBuilding, testStateReviewing)
-
-	ticket := getTicket(t, s, ticketID)
-	deps := claim(t, s, fakeRuntime(t), ticketID)
-	commit, err := job.Registry()[testStateJudging].Run(t.Context(), ticket, deps)
-	if err != nil {
-		t.Fatalf("Run: %v", err)
-	}
-	if commit.Next != testStateShipping || commit.Reason != "judge passed" {
-		t.Errorf("commit = (Next=%q, Reason=%q), want (shipping, judge passed)", commit.Next, commit.Reason)
-	}
-	apply(t, s, ticket, commit)
-	if final := getTicket(t, s, ticketID); final.State != testStateShipping {
-		t.Errorf("final ticket state = %q, want shipping", final.State)
-	}
-}
-
-func TestShippingHandler_TransitionsToDone(t *testing.T) {
-	s := newJobTestStore(t)
-	ticketID := seedQueuedGitBackedTicket(t, s)
-	advanceThroughStates(t, s, ticketID, testStateQueued, testStatePlanning, testStateBuilding, testStateReviewing, testStateJudging)
-
-	ticket := getTicket(t, s, ticketID)
-	deps := claim(t, s, fakeRuntime(t), ticketID)
-	commit, err := job.Registry()[testStateShipping].Run(t.Context(), ticket, deps)
-	if err != nil {
-		t.Fatalf("Run: %v", err)
-	}
-	if commit.Next != testStateDone || commit.Reason != "shipped" {
-		t.Errorf("commit = (Next=%q, Reason=%q), want (done, shipped)", commit.Next, commit.Reason)
-	}
-	apply(t, s, ticket, commit)
-	if final := getTicket(t, s, ticketID); final.State != testStateDone {
-		t.Errorf("final ticket state = %q, want done", final.State)
 	}
 }

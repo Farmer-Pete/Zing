@@ -28,10 +28,16 @@ func filePayload(path string, taskN int, decision string) []byte {
 // TestStoredPlan proves StoredPlan reads the ticket's max-version plan
 // artifact, decoded (design section 4.2): ok is false with no plan yet, and
 // a second, higher version wins over the first.
+// TestStoredPlan's two subtests each open their own store rather than share
+// one across t.Parallel() siblings: both seed a ticket under the same
+// fixed testProject name, and EnsureProject's own check-then-insert is not
+// safe for two goroutines racing on the same project row.
 func TestStoredPlan(t *testing.T) {
-	s := newTestStore(t)
+	t.Parallel()
 
 	t.Run("no plan yet", func(t *testing.T) {
+		t.Parallel()
+		s := newTestStore(t)
 		ctx := t.Context()
 		_, ticketID := seedQueuedTicket(t, s, "1")
 		_, _, ok, err := s.StoredPlan(ctx, ticketID)
@@ -44,6 +50,8 @@ func TestStoredPlan(t *testing.T) {
 	})
 
 	t.Run("max version wins", func(t *testing.T) {
+		t.Parallel()
+		s := newTestStore(t)
 		ctx := t.Context()
 		_, ticketID := seedQueuedTicket(t, s, "2")
 		insertPlanArtifact(t, s, ticketID, nil, 1)
@@ -69,6 +77,7 @@ func TestStoredPlan(t *testing.T) {
 // artifact of the ticket, decoded, ORDER BY artifacts.id (design section
 // 4.2): insertion order, not task or run order.
 func TestBuildReportsOrder(t *testing.T) {
+	t.Parallel()
 	s := newTestStore(t)
 	ctx := t.Context()
 	_, ticketID := seedQueuedTicket(t, s, "1")
@@ -119,6 +128,7 @@ func TestBuildReportsOrder(t *testing.T) {
 // append-only event, oldest first, so a caller can reduce to "newest row
 // per path wins" itself.
 func TestFileEventsOrder(t *testing.T) {
+	t.Parallel()
 	s := newTestStore(t)
 	ctx := t.Context()
 	_, ticketID := seedQueuedTicket(t, s, "1")
@@ -167,10 +177,16 @@ func TestFileEventsOrder(t *testing.T) {
 // TestUnitSession proves UnitSession finds the newest "build" session whose
 // first run matches taskN, taskN 0 matching a fix unit's NULL task_n
 // (design section 4.2), under the same SessionState rules as LatestSession.
+// TestUnitSession's three subtests each open their own store rather than
+// share one across t.Parallel() siblings: each seeds a ticket under the
+// same fixed testProject name, and EnsureProject's own check-then-insert is
+// not safe for two goroutines racing on the same project row.
 func TestUnitSession(t *testing.T) {
-	s := newTestStore(t)
+	t.Parallel()
 
 	t.Run("none for a task that never ran", func(t *testing.T) {
+		t.Parallel()
+		s := newTestStore(t)
 		ctx := t.Context()
 		_, ticketID := seedQueuedTicket(t, s, "1")
 		_, _, _, ok, err := s.UnitSession(ctx, ticketID, 1, 3)
@@ -183,6 +199,8 @@ func TestUnitSession(t *testing.T) {
 	})
 
 	t.Run("finds a task unit, not a fix or a different task", func(t *testing.T) {
+		t.Parallel()
+		s := newTestStore(t)
 		ctx := t.Context()
 		_, ticketID := seedQueuedTicket(t, s, "2")
 		setTicketState(t, s, ticketID, testStatePlanning)
@@ -232,6 +250,8 @@ func TestUnitSession(t *testing.T) {
 	})
 
 	t.Run("open and exhausted states", func(t *testing.T) {
+		t.Parallel()
+		s := newTestStore(t)
 		ctx := t.Context()
 		_, ticketID := seedQueuedTicket(t, s, "3")
 		setTicketState(t, s, ticketID, testStatePlanning)
@@ -285,6 +305,7 @@ func TestUnitSession(t *testing.T) {
 // line by exact equality, not by prefix (design section 4.2): "claims ok
 // run 4" does not match a row "claims ok run 42".
 func TestMarkerMatchesFirstLineExactly(t *testing.T) {
+	t.Parallel()
 	s := newTestStore(t)
 	ctx := t.Context()
 	_, ticketID := seedQueuedTicket(t, s, "1")

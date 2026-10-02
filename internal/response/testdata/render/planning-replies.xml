@@ -1,0 +1,6 @@
+<zing job="planning" outcome="replies"> <!-- job: Job, one of: classify | planning | planreview | build | perimeter | review | judge | respond | side, the running job; must match; outcome: Outcome, one of: questions | replies | confirmed | ready | children | nothing_to_do | question | error, one of this job's outcomes, or question, or error -->
+  <replies>
+    <reply question="..." settled="..." decision="...">...</reply> <!-- Reply, one or more, one per question thread you answer this turn; question: string, the question's key as Zing showed it, such as Q7, never your own q1; settled: bool, optional, write settled="true" to close the thread with decision; decision: string, optional, required when settled: the decision taken, one sentence -->
+  </replies>
+  <progress>...</progress> <!-- string, what is done so far, so the resumed run can continue -->
+</zing>

@@ -6,6 +6,7 @@ import (
 	"io/fs"
 	"log/slog"
 	"strconv"
+	"strings"
 	"sync"
 
 	"github.com/BurntSushi/toml"
@@ -15,11 +16,17 @@ import (
 // construction and served unchanged on every call. It carries no
 // connection, so it never fails after construction.
 type Fixture struct {
-	mu      sync.Mutex
-	project string
-	tickets []Ticket
-	nextRef int
+	mu       sync.Mutex
+	project  string
+	tickets  []Ticket
+	nextRef  int
+	comments map[string][]string // ref -> every Comment body posted, in post order
+	closed   map[string]bool     // ref -> whether Close has been called on it
 }
+
+// Guarantee the concrete type satisfies the interface, the same proof
+// github.go's own GitHubTracker carries.
+var _ Tracker = (*Fixture)(nil)
 
 // fixtureDoc is fixtures/tickets.toml's shape: one project name and its
 // tickets.
@@ -53,9 +60,11 @@ func NewFixture(fsys fs.FS, path string) (*Fixture, error) {
 	}
 
 	return &Fixture{
-		project: doc.Project,
-		tickets: tickets,
-		nextRef: maxNumericRef(tickets) + 1,
+		project:  doc.Project,
+		tickets:  tickets,
+		nextRef:  maxNumericRef(tickets) + 1,
+		comments: make(map[string][]string),
+		closed:   make(map[string]bool),
 	}, nil
 }
 
@@ -123,13 +132,78 @@ func (f *Fixture) Fetch(_ context.Context, project, ref string) (Ticket, error) 
 	return Ticket{}, fmt.Errorf("tracker: no ticket %q in project %q", ref, project)
 }
 
-// Comment records a structured log line for body against ref and returns
-// nil; the fixture keeps no comment history to read back. The log line
-// carries body's length, never body itself: a comment body can carry
-// sensitive text, and the repo rule is never log a secret.
+// Issue returns the ticket matching ref within project, the same lookup
+// Fetch makes, but with ErrIssueNotFound (PKG9-PLAN.md D29) in place of
+// Fetch's own generic "no ticket" error when ref is unknown: the fixture
+// carries no closed or pull-request state to test ErrIssueClosed or
+// ErrIssueIsPullRequest against (those are exercised against the real
+// GitHub tracker, github_test.go).
+func (f *Fixture) Issue(_ context.Context, project, ref string) (Ticket, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	if project != f.project {
+		return Ticket{}, fmt.Errorf("tracker: unknown project %q", project)
+	}
+	for _, t := range f.tickets {
+		if t.Ref == ref {
+			return t, nil
+		}
+	}
+	return Ticket{}, ErrIssueNotFound
+}
+
+// Comment records a structured log line for body against ref, keeps body
+// in memory under ref for CommentContains to search, and returns nil. The
+// log line carries body's length, never body itself: a comment body can
+// carry sensitive text, and the repo rule is never log a secret.
 func (f *Fixture) Comment(_ context.Context, project, ref, body string) error {
 	slog.Info("tracker fixture comment", "project", project, "ref", ref, "body_len", len(body))
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.comments[ref] = append(f.comments[ref], body)
 	return nil
+}
+
+// CommentContains reports whether ref carries a recorded comment
+// containing needle (design section 10.5). The fixture posts every comment
+// under its own single identity, so no other-author case can arise the way
+// it can against a real tracker.
+func (f *Fixture) CommentContains(_ context.Context, project, ref, needle string) (bool, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	if project != f.project {
+		return false, fmt.Errorf("tracker: unknown project %q", project)
+	}
+	for _, body := range f.comments[ref] {
+		if strings.Contains(body, needle) {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+// Close records ref as closed (design section 10.5, PKG9-PLAN.md section
+// 8.6): closing an already-closed ref is a no-op, matching the real
+// tracker's own idempotent behavior.
+func (f *Fixture) Close(_ context.Context, project, ref string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	if project != f.project {
+		return fmt.Errorf("tracker: unknown project %q", project)
+	}
+	f.closed[ref] = true
+	return nil
+}
+
+// Closed reports whether Close has been called on ref, so a test can
+// assert Close's effect without a real tracker to read it back from.
+func (f *Fixture) Closed(ref string) bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.closed[ref]
 }
 
 // FileTicket appends t to the in-memory ticket list under a generated

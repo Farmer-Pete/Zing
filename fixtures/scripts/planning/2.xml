@@ -59,4 +59,7 @@
       </risks>
     </review>
   </plan>
+  <replies>
+    <reply question="Q1" settled="true" decision="Use the recommended greeting text: hello, world.">Agreed, going with hello, world.</reply>
+  </replies>
 </zing>

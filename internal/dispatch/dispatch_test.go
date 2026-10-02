@@ -10,6 +10,7 @@ import (
 	"io/fs"
 	"log/slog"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -48,6 +49,13 @@ const (
 	testOwner       = "test-host-1"
 	testFixtureRef  = "fake#1" // fixtures/tickets.toml's one ticket
 	testTicketTitle = "a ticket"
+	testBindingUser = "peter" // the Binding.User most tests here share (goconst)
+
+	// testSeedReason and testSpyReason are the fixed Reason strings every
+	// direct-to-state seed commit and spyHandler in this file shares
+	// (goconst): neither is read back by anything a test asserts on.
+	testSeedReason = "test setup"
+	testSpyReason  = "test"
 
 	testWaitingQuestions = "questions"
 	testWaitingGate      = "gate"
@@ -57,6 +65,8 @@ const (
 	testRuntimeFake     = "fake"
 
 	testMsgTypeEscalation = "escalation"
+	testMsgTypeUpdate     = "update"
+	testArtifactTypePlan  = "plan"
 	testOutcomeError      = "error"
 	testModelClaudeX      = "claude-x"
 )
@@ -192,9 +202,14 @@ func testDeps(t *testing.T, s *store.Store, rt runtime.Runtime, owner string, ex
 		Reserve: func(ctx context.Context, ticketID int64, su store.SessionUpsert, seed store.RunSeed) (store.Reserved, error) {
 			return s.Reserve(ctx, ticketID, owner, expires, su, seed)
 		},
-		Sandbox: sandbox.Off(), RequireSandbox: false,
+		Sandboxes: sandbox.OffSet(), RequireSandbox: false,
 		Commands: job.NewCommandRunner(sandbox.Off(), false),
 		Projects: buildTestProjects(t, s),
+		DataDir:  t.TempDir(),
+		// LensesParallel bounds ROUND's own semaphore (PKG9-PLAN.md section
+		// 4.3, 6.2): zero would block every lens forever the moment a test
+		// drives a ticket through "reviewing" for real.
+		LensesParallel: 7,
 	}
 }
 
@@ -339,7 +354,686 @@ func advanceTicket(t *testing.T, s *store.Store, rt runtime.Runtime, ticketID in
 			advanceBuilding(t, s, rt, ticketID)
 			continue
 		}
+		if state == testStateJudging {
+			advanceJudging(t, s, rt, ticketID)
+			continue
+		}
 		runHandlerOnce(t, s, rt, ticketID, state)
+	}
+}
+
+// seedTicketDirectlyToState drives ticketID straight to state with one
+// claim-then-commit, the same direct-commit shape TestTickUsesInjectedClock
+// already seeds shipping with: no handler runs, so a test that only needs a
+// ticket actually sitting in state (never caring how it got there) skips
+// running the real handler chain for a state it is not itself testing.
+func seedTicketDirectlyToState(t *testing.T, s *store.Store, ticketID int64, state string) {
+	t.Helper()
+	owner := "seed-direct-" + state
+	expires := time.Now().Add(10 * time.Minute).UTC().Truncate(time.Second)
+	claimed, err := s.Claim(t.Context(), ticketID, owner, expires)
+	if err != nil || !claimed {
+		t.Fatalf("seedTicketDirectlyToState(%s): claim: claimed=%v err=%v", state, claimed, err)
+	}
+	applied, err := s.CommitHandlerResult(t.Context(), store.HandlerCommit{
+		TicketID: ticketID, Owner: owner, Expires: expires, Next: state, Reason: testSeedReason,
+	})
+	if err != nil || !applied {
+		t.Fatalf("seedTicketDirectlyToState(%s): commit: applied=%v err=%v", state, applied, err)
+	}
+}
+
+// judgeCheckFixtureCmd and dispatchJudgeCommands mirror cmd/zing/selftest.go's
+// own e2eJudgeCheckCmd and selftestCommands: the fixture cohort's scenario
+// s1 carries "curl -sf localhost:8080/hello" as its check_cmd, and judging's
+// own CHECK step (design section 7.5) re-runs it for real, but this suite's
+// fixture project never starts a real HTTP server on port 8080. Every other
+// command (the building state's own "test -f hello.txt" and "true") still
+// runs for real, at the same CommandRunner seam (job.Deps.Commands).
+const judgeCheckFixtureCmd = "curl -sf localhost:8080/hello"
+
+type dispatchJudgeCommands struct {
+	real job.CommandRunner
+}
+
+func (c dispatchJudgeCommands) Run(ctx context.Context, dir, repoGit, shellCmd string, timeout time.Duration) (int, error) {
+	if shellCmd == judgeCheckFixtureCmd {
+		return 0, nil
+	}
+	return c.real.Run(ctx, dir, repoGit, shellCmd, timeout)
+}
+
+// advanceJudgingMaxCalls bounds advanceJudging's (and
+// advanceJudgingWithCommands') own handler-call loop: START, RUN, one CHECK
+// (the fixture cohort's own single checked scenario, s1), and EVALUATE is
+// four calls for a round that passes outright; a round that fails once,
+// drives a fix to landing, and passes on a second round (PKG9-PLAN.md
+// section 19.3 task 9) takes roughly twice that. The headroom above either
+// catches a stuck handler instead of hanging the test.
+const advanceJudgingMaxCalls = 16
+
+// advanceJudging drives the real judging handler through as many calls as
+// it now takes to land a passing round and transition to shipping (design
+// section 7): unlike the skeleton's one-shot fake pass-through, each call
+// only advances one step (START, RUN, one scenario's own CHECK, or
+// EVALUATE), so this loops until the ticket leaves "judging". Its own
+// Deps.Commands (dispatchJudgeCommands) keeps CHECK's re-run of the fixture
+// cohort's one check command from ever dialing a real server, always
+// reporting the pass a live one would have.
+func advanceJudging(t *testing.T, s *store.Store, rt runtime.Runtime, ticketID int64) {
+	t.Helper()
+	advanceJudgingWithCommands(t, s, rt, ticketID, dispatchJudgeCommands{real: job.NewCommandRunner(sandbox.Off(), false)})
+}
+
+// advanceJudgingWithCommands is advanceJudging's own loop, parameterized
+// over cmds (PKG9-PLAN.md section 19.3 task 9): a caller whose own
+// CommandRunner must see every one of judging's own CHECK calls in order
+// -- a stateful one, failing round 1's own check and passing round 2's,
+// the way dispatchJudgeFailThenPassCommands does -- builds it once, ahead
+// of this loop, and shares that one instance across every call the loop
+// makes; advanceJudging's own cmds is stateless, so a fresh one each call
+// would behave identically, but sharing one here either way costs nothing.
+func advanceJudgingWithCommands(t *testing.T, s *store.Store, rt runtime.Runtime, ticketID int64, cmds job.CommandRunner) {
+	t.Helper()
+	for range advanceJudgingMaxCalls {
+		ticket := getTicket(t, s, ticketID)
+		owner := fmt.Sprintf("advance-%d-judging", ticketID)
+		expires := time.Now().Add(10 * time.Minute).UTC().Truncate(time.Second)
+		claimed, err := s.Claim(t.Context(), ticketID, owner, expires)
+		if err != nil || !claimed {
+			t.Fatalf("advanceJudging: claim: claimed=%v err=%v", claimed, err)
+		}
+		deps := testDeps(t, s, rt, owner, expires)
+		deps.Commands = cmds
+		commit, err := job.Registry()[testStateJudging].Run(t.Context(), ticket, deps)
+		if err != nil {
+			t.Fatalf("advanceJudging: Run: %v", err)
+		}
+		if err = job.ValidateCommit(ticket, commit); err != nil {
+			t.Fatalf("advanceJudging: ValidateCommit: %v", err)
+		}
+		applied, err := s.CommitHandlerResult(t.Context(), commit)
+		if err != nil || !applied {
+			t.Fatalf("advanceJudging: CommitHandlerResult: applied=%v err=%v", applied, err)
+		}
+		if getTicket(t, s, ticketID).State != testStateJudging {
+			return
+		}
+	}
+	t.Fatalf("advanceJudging: still in judging after %d handler calls", advanceJudgingMaxCalls)
+}
+
+// dispatchJudgeFailThenPassCommands is dispatchJudgeCommands with a
+// checkCalls counter shared across every call (PKG9-PLAN.md section 19.3
+// task 9: "the e2e passes review, a judge failure, a fix, and a judge
+// pass"): its first call to judgeCheckFixtureCmd reports the exit 1 a
+// server not yet listening would give, failing judge round 1 and driving
+// fixtures/scripts/build/fix/1.xml's own fix to landing; every later call
+// -- round 2's own re-run, after the fix -- reports the exit 0 a live one
+// would, matching fixtures/scripts/judge/2/1.xml's own scripted pass
+// verdict for s1. checkCalls is a pointer, not a plain int, so every
+// job.Deps copy this value is handed into still shares the one counter.
+type dispatchJudgeFailThenPassCommands struct {
+	real       job.CommandRunner
+	checkCalls *int32
+}
+
+// newDispatchJudgeFailThenPassCommands returns a
+// dispatchJudgeFailThenPassCommands wrapping real, its own
+// judgeCheckFixtureCmd call counter freshly zeroed.
+func newDispatchJudgeFailThenPassCommands(realRunner job.CommandRunner) dispatchJudgeFailThenPassCommands {
+	return dispatchJudgeFailThenPassCommands{real: realRunner, checkCalls: new(int32)}
+}
+
+func (c dispatchJudgeFailThenPassCommands) Run(ctx context.Context, dir, repoGit, shellCmd string, timeout time.Duration) (int, error) {
+	if shellCmd == judgeCheckFixtureCmd {
+		if atomic.AddInt32(c.checkCalls, 1) == 1 {
+			return 1, nil // round 1: the scenario's own check fails, forcing a fix
+		}
+		return 0, nil // round 2, after the fix lands: the check passes
+	}
+	return c.real.Run(ctx, dir, repoGit, shellCmd, timeout)
+}
+
+// judgeRoundMarkerBodies returns ticketID's own "update" message bodies, in
+// id order, for TestJudgeFailureFixThenPass' own marker assertions below.
+func judgeRoundMarkerBodies(t *testing.T, s *store.Store, ticketID int64) []string {
+	t.Helper()
+	msgs, err := s.ListMessages(t.Context(), ticketID)
+	if err != nil {
+		t.Fatalf("ListMessages: %v", err)
+	}
+	var bodies []string
+	for i := range msgs {
+		if msgs[i].Type == testMsgTypeUpdate {
+			bodies = append(bodies, msgs[i].Body)
+		}
+	}
+	return bodies
+}
+
+// TestJudgeFailureFixThenPass proves PKG9-PLAN.md section 19.3 task 9's own
+// e2e, at the real dispatcher's own cut point (a handler driven through
+// Registry() with a real store, the fake runtime, and real git, mirroring
+// every other test in this file rather than the fake-runtime-only unit
+// proof internal/job/judging_test.go's own TestJudgeFixThenPass already
+// gives): review passes (every lens fixture returns zero findings), judge
+// round 1 fails (dispatchJudgeFailThenPassCommands' own first call),
+// building lands the fix request fixtures/scripts/build/fix/1.xml scripts,
+// and judge round 2 -- fixtures/scripts/judge/2/1.xml's own first turn --
+// passes, carrying the ticket on to shipping.
+func TestJudgeFailureFixThenPass(t *testing.T) {
+	t.Parallel()
+	s := newDispatchTestStore(t)
+	rt := fakeRuntime(t)
+	ticketID := seedQueuedGitBackedTicket(t, s, testFixtureRef)
+
+	advanceTicket(t, s, rt, ticketID, testStateQueued, testStatePlanning, testStateBuilding, testStateReviewing)
+
+	cmds := newDispatchJudgeFailThenPassCommands(job.NewCommandRunner(sandbox.Off(), false))
+	advanceJudgingWithCommands(t, s, rt, ticketID, cmds)
+
+	ticket := getTicket(t, s, ticketID)
+	if ticket.State != testStateShipping {
+		t.Fatalf("ticket state = %q, want %q (judge round 2 must pass after the fix lands)", ticket.State, testStateShipping)
+	}
+
+	bodies := judgeRoundMarkerBodies(t, s, ticketID)
+	var sawFailed, sawLanded, sawPassed bool
+	for _, body := range bodies {
+		switch {
+		case strings.HasPrefix(body, "judge round 1 failed"):
+			sawFailed = true
+		case strings.HasPrefix(body, "fix landed ") && sawFailed && !sawPassed:
+			sawLanded = true
+		case body == "judge round 2 passed":
+			sawPassed = true
+		}
+	}
+	if !sawFailed {
+		t.Error(`no "judge round 1 failed" marker, want judge round 1 to fail`)
+	}
+	if !sawLanded {
+		t.Error(`no "fix landed" marker after judge round 1 failed, want the fix request to land`)
+	}
+	if !sawPassed {
+		t.Error(`no "judge round 2 passed" marker, want round 2 to pass after the fix landed`)
+	}
+}
+
+// testShipGitHubOwner is the placeholder owner and repo name
+// dispatchShipGitHub's own test uses: it never calls the real GitHub API,
+// so the exact value only has to be non-empty.
+const testShipGitHubOwner = "zing-fixture"
+
+// dispatchShipPR is one pull request dispatchShipGitHub has created.
+type dispatchShipPR struct {
+	url, head, base string
+	number          int
+}
+
+// dispatchShipGitHub is a stateful, scripted orchestrator.GitHub double
+// this file's own shipping e2e test needs (PKG9-PLAN.md section 19.4 task
+// 8), unlike dispatchTestGitHub above (never called): CreateDraftPR,
+// FindPRByHead, GetPR, and ListCheckRuns here are real enough to carry one
+// pull request through a CI failure, a landed ci_log fix, the push that
+// follows, and the merge GitHub reports once the pushed commit's checks
+// have read green -- the same "the owner merged once CI went green" shape
+// cmd/zing/selftest.go's own selftestShipGitHub scripts, since M3 builds
+// neither the ready flip nor MERGE itself (shipping.go's own header
+// comment). redSHA is the commit PUBLISH first pushed, read straight off
+// the real bare origin remoteDir rather than a canned field this double
+// would otherwise have to be told about, so a real git push is what
+// actually moves what GetPR reports: every check run on redSHA always
+// fails; every other sha (the one the landed fix later pushes) always
+// succeeds, and GetPR reports the pull request merged starting on its own
+// second read of that other sha, so one CI-green poll is actually observed
+// before done.
+type dispatchShipGitHub struct {
+	mu          sync.Mutex
+	remoteDir   string
+	pr          *dispatchShipPR
+	nextNum     int
+	redSHA      string
+	callsForSHA map[string]int
+	threads     []orchestrator.Thread
+	replies     map[string]string // raw thread id -> the body ReplyToThread posted
+}
+
+// dispatchShipReplyThreadID and dispatchShipFixThreadID are the two review
+// threads newDispatchShipGitHub seeds (PKG9-PLAN.md section 19.5 task 10),
+// cmd/zing/selftest.go's own selftestShipReplyThreadID and
+// selftestShipFixThreadID mirrored at this package's own cut point: one a
+// plain "reply" fixtures/scripts/respond/1/1.xml answers, the other a
+// "fix" it collects into a consolidated fix request (design section 9.3
+// step 3), so this test walks RESPOND, APPLY, the shared fix driver, and
+// FIX-REPLIES (design section 9.4), not only PUBLISH and the ci_log fix
+// M3 task 8 already proved here.
+const (
+	dispatchShipReplyThreadID = "RT_thread_1"
+	dispatchShipFixThreadID   = "RT_thread_2"
+	dispatchShipGHViewerLogin = "zing-dispatch-test-bot"
+)
+
+func newDispatchShipGitHub(remoteDir string) *dispatchShipGitHub {
+	commentAt := time.Now().UTC()
+	return &dispatchShipGitHub{
+		remoteDir: remoteDir, callsForSHA: map[string]int{}, replies: make(map[string]string),
+		threads: []orchestrator.Thread{
+			{
+				ID: dispatchShipReplyThreadID, Path: "cmd/zing/main.go", Line: 1,
+				Comments: []orchestrator.ThreadComment{{
+					ID: "c1", Author: "reviewer-bot", Body: "What does this line do?",
+					CreatedAt: commentAt, UpdatedAt: commentAt,
+				}},
+			},
+			{
+				ID: dispatchShipFixThreadID, Path: "hello.txt", Line: 1,
+				Comments: []orchestrator.ThreadComment{{
+					ID: "c2", Author: "reviewer-bot", Body: "Validate this before using it.",
+					CreatedAt: commentAt, UpdatedAt: commentAt,
+				}},
+			},
+		},
+	}
+}
+
+// headSHA reads branch's current commit straight off g's own real bare
+// origin.
+func (g *dispatchShipGitHub) headSHA(ctx context.Context, branch string) (string, error) {
+	cmd := exec.CommandContext(ctx, "git", "-C", g.remoteDir, "rev-parse", "refs/heads/"+branch)
+	// Scrubbed, so a GIT_DIR a git hook exported cannot redirect "-C".
+	cmd.Env = gitfixture.Environ()
+	out, err := cmd.Output()
+	if err != nil {
+		return "", fmt.Errorf("dispatchShipGitHub: rev-parse %s: %w", branch, err)
+	}
+	return strings.TrimSpace(string(out)), nil
+}
+
+func (g *dispatchShipGitHub) RepoDefaultBranch(context.Context, string, string) (string, error) {
+	return "", errors.New("dispatchShipGitHub: not implemented")
+}
+
+func (g *dispatchShipGitHub) RequiredChecks(context.Context, string, string, string) ([]string, error) {
+	return nil, errors.New("dispatchShipGitHub: not implemented")
+}
+
+func (g *dispatchShipGitHub) CreateDraftPR(ctx context.Context, _, _, head, base, _, _ string) (prURL string, number int, err error) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if g.pr != nil {
+		return "", 0, errors.New("dispatchShipGitHub: a pull request already exists for this head")
+	}
+	sha, err := g.headSHA(ctx, head)
+	if err != nil {
+		return "", 0, err
+	}
+	g.nextNum++
+	g.pr = &dispatchShipPR{
+		url:  fmt.Sprintf("https://github.com/%s/%s/pull/%d", testShipGitHubOwner, testShipGitHubOwner, g.nextNum),
+		head: head, base: base, number: g.nextNum,
+	}
+	g.redSHA = sha
+	return g.pr.url, g.pr.number, nil
+}
+
+func (g *dispatchShipGitHub) FindPRByHead(_ context.Context, _, _, head, base string) (prURL string, number int, ok bool, err error) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if g.pr == nil || g.pr.head != head || g.pr.base != base {
+		return "", 0, false, nil
+	}
+	return g.pr.url, g.pr.number, true, nil
+}
+
+func (g *dispatchShipGitHub) GetPR(ctx context.Context, _, _ string, _ int) (orchestrator.PRState, error) {
+	g.mu.Lock()
+	pr := g.pr
+	redSHA := g.redSHA
+	g.mu.Unlock()
+	if pr == nil {
+		return orchestrator.PRState{}, errors.New("dispatchShipGitHub: GetPR before CreateDraftPR")
+	}
+	sha, err := g.headSHA(ctx, pr.head)
+	if err != nil {
+		return orchestrator.PRState{}, err
+	}
+	g.mu.Lock()
+	g.callsForSHA[sha]++
+	n := g.callsForSHA[sha]
+	allResolved := true
+	for _, th := range g.threads {
+		if !th.IsResolved {
+			allResolved = false
+			break
+		}
+	}
+	g.mu.Unlock()
+	return orchestrator.PRState{
+		Number: pr.number, State: "open", Draft: true, HeadSHA: sha, BaseRef: pr.base,
+		// allResolved gates the same synthesized merge the package doc
+		// comment on dispatchShipGitHub's own MarkReady/ConvertToDraft
+		// already describes (M3's "the owner merged once CI went green"
+		// shortcut): without it, a stray second GetPR call made while
+		// RESPOND, APPLY, or FIX-REPLIES are still working through the
+		// two seeded threads (M4 task 10) could push n to 2 and report
+		// merged before either thread is actually resolved.
+		Merged: sha != redSHA && n >= 2 && allResolved,
+	}, nil
+}
+
+func (g *dispatchShipGitHub) Merge(context.Context, string, string, int, string, string, string) (string, error) {
+	return "", errors.New("dispatchShipGitHub: Merge not implemented (M4)")
+}
+
+func (g *dispatchShipGitHub) ListCheckRuns(_ context.Context, _, _, sha string) ([]orchestrator.CheckRun, error) {
+	g.mu.Lock()
+	redSHA := g.redSHA
+	g.mu.Unlock()
+	conclusion := "success"
+	if sha == redSHA {
+		conclusion = "failure"
+	}
+	return []orchestrator.CheckRun{{ID: 1, Name: "ci", Status: "completed", Conclusion: conclusion, AppSlug: "github-actions"}}, nil
+}
+
+func (g *dispatchShipGitHub) ListStatuses(context.Context, string, string, string) ([]orchestrator.CommitStatus, error) {
+	return nil, nil
+}
+
+func (g *dispatchShipGitHub) RequiredCheckRules(context.Context, string, string, string) ([]orchestrator.RequiredCheck, error) {
+	return []orchestrator.RequiredCheck{{Context: "ci"}}, nil
+}
+
+func (g *dispatchShipGitHub) JobLogTail(context.Context, string, string, int64, int) (string, error) {
+	return "", nil
+}
+
+// MarkReady and ConvertToDraft give dispatchShipGitHub job.DraftFlips too
+// (M4 task 7): this fake always reports Draft: true (GetPR, above), so
+// this file's own shipping e2e necessarily reaches row 8's ready flip on
+// its first clean-sha poll before GetPR starts reporting merged; both
+// calls just succeed, since this test cares about the ticket's own state
+// and markers, not what a draft flip posts.
+func (g *dispatchShipGitHub) MarkReady(context.Context, string) error {
+	return nil
+}
+
+func (g *dispatchShipGitHub) ConvertToDraft(context.Context, string) error {
+	return nil
+}
+
+// ListThreads, ThreadCommentsContain, ReplyToThread, and ResolveThread give
+// dispatchShipGitHub job.ReviewThreads too (M4 tasks 4, 10): this test's
+// own fixture ticket does open two real review threads
+// (newDispatchShipGitHub), so these four track and mutate real state the
+// same way GetPR's own callsForSHA bookkeeping does above, mirroring
+// cmd/zing/selftest.go's own selftestShipGitHub at this package's own cut
+// point.
+func (g *dispatchShipGitHub) ListThreads(context.Context, string, string, int) ([]orchestrator.Thread, error) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	out := make([]orchestrator.Thread, len(g.threads))
+	copy(out, g.threads)
+	return out, nil
+}
+
+func (g *dispatchShipGitHub) ThreadCommentsContain(_ context.Context, rawID, needle, _ string) (bool, error) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return strings.Contains(g.replies[rawID], needle), nil
+}
+
+func (g *dispatchShipGitHub) ReplyToThread(_ context.Context, rawID, body string) error {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	i := slices.IndexFunc(g.threads, func(th orchestrator.Thread) bool { return th.ID == rawID })
+	if i < 0 {
+		return fmt.Errorf("dispatchShipGitHub: ReplyToThread: unknown thread %s", rawID)
+	}
+	g.replies[rawID] = body
+	now := time.Now().UTC()
+	g.threads[i].Comments = append(g.threads[i].Comments, orchestrator.ThreadComment{
+		ID: "zing-reply-" + rawID, Author: dispatchShipGHViewerLogin, Body: body, CreatedAt: now, UpdatedAt: now,
+	})
+	return nil
+}
+
+func (g *dispatchShipGitHub) ResolveThread(_ context.Context, rawID string) error {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	i := slices.IndexFunc(g.threads, func(th orchestrator.Thread) bool { return th.ID == rawID })
+	if i < 0 {
+		return fmt.Errorf("dispatchShipGitHub: ResolveThread: unknown thread %s", rawID)
+	}
+	g.threads[i].IsResolved = true
+	return nil
+}
+
+func (g *dispatchShipGitHub) ListReviews(context.Context, string, string, int) ([]orchestrator.Review, error) {
+	return nil, nil
+}
+
+func (g *dispatchShipGitHub) RequestReviewers(context.Context, string, string, int, string) error {
+	return errors.New("dispatchShipGitHub: not implemented")
+}
+
+func (g *dispatchShipGitHub) Viewer(context.Context) (string, error) {
+	return dispatchShipGHViewerLogin, nil
+}
+
+var (
+	_ orchestrator.GitHub = (*dispatchShipGitHub)(nil)
+	_ job.PullRequests    = (*dispatchShipGitHub)(nil)
+	_ job.Checks          = (*dispatchShipGitHub)(nil)
+	_ job.ReviewThreads   = (*dispatchShipGitHub)(nil)
+	_ job.DraftFlips      = (*dispatchShipGitHub)(nil)
+)
+
+// dispatchShipTracker is a minimal job.ShipTracker double for this file's
+// own direct-handler shipping e2e: it only counts calls, since this test
+// cares about the ticket's own state and markers, not what the tracker
+// posts (shipTrackerDouble, above, already covers PostPRLink/PostDone's
+// own marker and ordering rules against the real Dispatcher).
+type dispatchShipTracker struct {
+	mu             sync.Mutex
+	prLinks, dones int
+}
+
+func (tr *dispatchShipTracker) PostPRLink(context.Context, int64, string, string) error {
+	tr.mu.Lock()
+	defer tr.mu.Unlock()
+	tr.prLinks++
+	return nil
+}
+
+func (tr *dispatchShipTracker) PostDone(context.Context, int64, string, string) error {
+	tr.mu.Lock()
+	defer tr.mu.Unlock()
+	tr.dones++
+	return nil
+}
+
+var _ job.ShipTracker = (*dispatchShipTracker)(nil)
+
+// advanceShippingMaxCalls bounds advanceShipping's own handler-call loop:
+// PUBLISH, one failed POLL (ci_log fix request), RUN, CHECK-then-LAND, one
+// POLL that pushes, one POLL that starts a respond batch once CI reads
+// green (design section 19.5 task 10's own two seeded threads), RESPOND,
+// APPLY (posts the plain reply and requests a fix for the other thread),
+// RUN, CHECK-then-LAND for that fix, one POLL that pushes it, one POLL for
+// FIX-REPLIES, one POLL for RE-REQUEST, one POLL that reads every check and
+// thread clean (ready, idle), and one POLL that finds the pull request
+// merged is sixteen calls; the headroom catches a stuck handler instead of
+// hanging the test.
+const advanceShippingMaxCalls = 24
+
+// advanceShipping drives the real shipping handler through as many calls as
+// it now takes to open a draft pull request, land a ci_log fix once GitHub
+// reports its checks failed, push the fix, and reach "done" once GitHub
+// reports the pull request merged (PKG9-PLAN.md section 19.4 task 8).
+// Unlike advanceJudging's own fixed-shape round, POLL's own idle commit
+// (design section 8.3) sets a real Poll{NextAt}, but this loop drives the
+// handler directly, never through the dispatcher's own
+// ListReadyCandidates, so that backoff is never actually waited out. Each
+// call rebuilds the project's own *orchestrator.Orchestrator over gh, the
+// same way shipClaim (internal/job/shipping_test.go) rebuilds Deps on every
+// claim.
+func advanceShipping(t *testing.T, s *store.Store, rt runtime.Runtime, ticketID int64, gh *dispatchShipGitHub, tr job.ShipTracker) {
+	t.Helper()
+	for range advanceShippingMaxCalls {
+		ticket := getTicket(t, s, ticketID)
+		owner := fmt.Sprintf("advance-%d-shipping", ticketID)
+		expires := time.Now().Add(10 * time.Minute).UTC().Truncate(time.Second)
+		claimed, err := s.Claim(t.Context(), ticketID, owner, expires)
+		if err != nil || !claimed {
+			t.Fatalf("advanceShipping: claim: claimed=%v err=%v", claimed, err)
+		}
+
+		proj, err := s.ProjectForTicket(t.Context(), ticketID)
+		if err != nil {
+			t.Fatalf("advanceShipping: ProjectForTicket: %v", err)
+		}
+		orch, err := orchestrator.New(
+			orchestrator.Project{Owner: testShipGitHubOwner, Repo: testShipGitHubOwner, LocalPath: proj.LocalPath, DefaultBranch: "main"},
+			gh, orchestrator.NewRunner(), nil)
+		if err != nil {
+			t.Fatalf("advanceShipping: orchestrator.New: %v", err)
+		}
+		repoGit, err := orch.GitCommonDir(t.Context())
+		if err != nil {
+			t.Fatalf("advanceShipping: GitCommonDir: %v", err)
+		}
+
+		deps := testDeps(t, s, rt, owner, expires)
+		deps.Projects = map[int64]job.Project{
+			ticket.ProjectID: {
+				Orch: orch, RepoGit: repoGit, TestCmd: "test -f hello.txt", LintCmd: "true",
+				Owner: testShipGitHubOwner, Repo: testShipGitHubOwner,
+				PullRequests: gh, Checks: gh, Threads: gh, Flips: gh,
+			},
+		}
+		deps.Tracker = tr
+
+		commit, err := job.Registry()[testStateShipping].Run(t.Context(), ticket, deps)
+		if err != nil {
+			t.Fatalf("advanceShipping: Run: %v", err)
+		}
+		if err = job.ValidateCommit(ticket, commit); err != nil {
+			t.Fatalf("advanceShipping: ValidateCommit: %v", err)
+		}
+		applied, err := s.CommitHandlerResult(t.Context(), commit)
+		if err != nil || !applied {
+			t.Fatalf("advanceShipping: CommitHandlerResult: applied=%v err=%v", applied, err)
+		}
+		if getTicket(t, s, ticketID).State != testStateShipping {
+			return
+		}
+	}
+	t.Fatalf("advanceShipping: still in shipping after %d handler calls", advanceShippingMaxCalls)
+}
+
+// TestShipCIFailThenFixThenMergeGoesDone proves the shipping state machine
+// end to end, at this package's own cut point (PKG9-PLAN.md section 19.4
+// task 8): PUBLISH opens a draft pull request, POLL finds its checks
+// failed and requests a ci_log fix, the fix lands, POLL pushes it, POLL
+// finds the pushed commit's checks green, and POLL finds the pull request
+// merged -- the "the owner merged once CI went green" shape M3 scripts,
+// since the ready flip and MERGE itself are M4's own (shipping.go's own
+// header comment).
+func TestShipCIFailThenFixThenMergeGoesDone(t *testing.T) {
+	t.Parallel()
+	s := newDispatchTestStore(t)
+	rt := fakeRuntime(t)
+	ticketID := seedQueuedGitBackedTicket(t, s, testFixtureRef)
+
+	advanceTicket(t, s, rt, ticketID, testStateQueued, testStatePlanning, testStateBuilding, testStateReviewing)
+	advanceJudging(t, s, rt, ticketID)
+
+	ticket := getTicket(t, s, ticketID)
+	if ticket.State != testStateShipping {
+		t.Fatalf("ticket state = %q, want %q (the judge round must pass before shipping)", ticket.State, testStateShipping)
+	}
+
+	proj, err := s.ProjectForTicket(t.Context(), ticketID)
+	if err != nil {
+		t.Fatalf("ProjectForTicket: %v", err)
+	}
+	remoteDir, err := gitfixture.WithBareOrigin(t.Context(), proj.LocalPath)
+	if err != nil {
+		t.Fatalf("gitfixture.WithBareOrigin: %v", err)
+	}
+
+	gh := newDispatchShipGitHub(remoteDir)
+	tr := &dispatchShipTracker{}
+	advanceShipping(t, s, rt, ticketID, gh, tr)
+
+	ticket = getTicket(t, s, ticketID)
+	if ticket.State != testStateDone {
+		t.Fatalf("ticket state = %q, want %q", ticket.State, testStateDone)
+	}
+
+	bodies := judgeRoundMarkerBodies(t, s, ticketID)
+	var sawPROpened, sawFixRequested, sawFixLanded bool
+	var sawBatchStarted, sawThreadsRequested, sawRepliesPosted bool
+	landedCount := 0
+	for _, body := range bodies {
+		switch {
+		case strings.HasPrefix(body, "pr opened "):
+			sawPROpened = true
+		case strings.HasPrefix(body, "fix requested ci_log after run ") && sawPROpened:
+			sawFixRequested = true
+		case strings.HasPrefix(body, "respond batch 1 started sha ") && sawFixRequested:
+			sawBatchStarted = true
+		case strings.HasPrefix(body, "fix requested threads after run ") && sawBatchStarted:
+			sawThreadsRequested = true
+		case strings.HasPrefix(body, "fix landed "):
+			landedCount++
+			sawFixLanded = true
+		case strings.HasPrefix(body, "fix replies posted ") && sawThreadsRequested && landedCount >= 2:
+			sawRepliesPosted = true
+		}
+	}
+	if !sawPROpened {
+		t.Error(`no "pr opened" marker, want PUBLISH to open a draft pull request`)
+	}
+	if !sawFixRequested {
+		t.Error(`no "fix requested ci_log" marker after the pull request opened, want POLL to request a fix once CI failed`)
+	}
+	if !sawFixLanded {
+		t.Error(`no "fix landed" marker after the ci_log fix request, want the fix to land`)
+	}
+	if !sawBatchStarted {
+		t.Error(`no "respond batch 1 started" marker after the ci_log fix, want POLL to start a respond batch once an actionable thread exists (PKG9-PLAN.md section 19.5 task 10)`)
+	}
+	if !sawThreadsRequested {
+		t.Error(`no "fix requested threads" marker after the respond batch started, want APPLY to collect the other thread into a fix request`)
+	}
+	if landedCount < 2 {
+		t.Errorf(`%d "fix landed" markers, want at least 2 (the ci_log fix and the threads fix)`, landedCount)
+	}
+	if !sawRepliesPosted {
+		t.Error(`no "fix replies posted" marker after the threads fix landed, want FIX-REPLIES to close the loop`)
+	}
+	reply, posted := gh.replies[dispatchShipReplyThreadID]
+	if !posted {
+		t.Error("no reply recorded for the review thread, want APPLY to post one")
+	}
+	wantPrefix := "Zing (an AI agent) replying on behalf of @" + dispatchShipGHViewerLogin + ":"
+	if !strings.HasPrefix(reply, wantPrefix) {
+		t.Errorf("posted reply = %q, want it to start with the disclosure prefix %q (design D10)", reply, wantPrefix)
+	}
+	for _, th := range gh.threads {
+		if !th.IsResolved {
+			t.Errorf("thread %s is still unresolved, want both seeded threads resolved by the time the ticket reaches done", th.ID)
+		}
+	}
+	if tr.dones != 1 {
+		t.Errorf("PostDone calls = %d, want 1", tr.dones)
+	}
+	if gh.pr == nil || gh.pr.number != 1 {
+		t.Errorf("gh.pr = %+v, want exactly one pull request", gh.pr)
 	}
 }
 
@@ -473,6 +1167,15 @@ func newDispatcher(t *testing.T, s *store.Store, tr tracker.Tracker, b *bus.Brok
 	if cfg.Budget == 0 {
 		cfg.Budget = testBudget
 	}
+	if cfg.DataDir == "" {
+		cfg.DataDir = t.TempDir()
+	}
+	if cfg.LensesParallel == 0 {
+		// Bounds ROUND's own semaphore (PKG9-PLAN.md section 4.3, 6.2): zero
+		// would block every lens forever the moment a test drives a ticket
+		// through "reviewing" for real.
+		cfg.LensesParallel = 7
+	}
 	d, err := dispatch.New(s, tr, b, loadMachine(t), reg, bindings, cfg, testRuntimeSet(t, rt))
 	if err != nil {
 		t.Fatalf("dispatch.New: %v", err)
@@ -571,6 +1274,78 @@ func TestTick_IntakeInsertsAndDedupsOnASecondIntake(t *testing.T) {
 	}
 }
 
+// intakeCallTracker wraps a Tracker and records every project name Intake
+// was called with, so a test can assert Intake was never called for a
+// manual-mode binding (PKG9-PLAN.md D29) while still being called for an
+// auto one. It embeds tracker.Tracker, the same pattern slowTracker below
+// uses, so every other method just delegates.
+type intakeCallTracker struct {
+	tracker.Tracker
+	mu       sync.Mutex
+	projects []string
+}
+
+func (c *intakeCallTracker) Intake(ctx context.Context, project string, rule tracker.IntakeRule) ([]tracker.Ticket, error) {
+	c.mu.Lock()
+	c.projects = append(c.projects, project)
+	c.mu.Unlock()
+	return c.Tracker.Intake(ctx, project, rule)
+}
+
+func (c *intakeCallTracker) calledProjects() []string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return append([]string(nil), c.projects...)
+}
+
+// TestTick_IntakeSkipsManualModeProjectButRunsForAuto proves intake (design
+// section 6.8 step 3, PKG9-PLAN.md D29) never calls Tracker.Intake for a
+// binding whose Mode is "manual", while an "auto" binding alongside it still
+// gets its ordinary automatic intake. MaxParallel: 0 isolates intake's own
+// effect, as TestTick_IntakeInsertsAndDedupsOnASecondIntake above does.
+func TestTick_IntakeSkipsManualModeProjectButRunsForAuto(t *testing.T) {
+	t.Parallel()
+
+	s := newDispatchTestStore(t)
+	autoProjectID := seedProject(t, s) // testProject.Name ("zing"), matching the fixture
+	manualProjectID, err := s.EnsureProject(t.Context(), store.Project{
+		Name: "manual-proj", RepoURL: "https://github.com/x/manual", Tracker: "github",
+	})
+	if err != nil {
+		t.Fatalf("EnsureProject(manual-proj): %v", err)
+	}
+
+	tr := &intakeCallTracker{Tracker: newFixtureTracker(t)}
+	bindings := []dispatch.Binding{
+		{StoreProjectID: autoProjectID, TrackerProject: testProject.Name, Mode: "auto"},
+		{StoreProjectID: manualProjectID, TrackerProject: "manual-proj", Mode: "manual"},
+	}
+
+	d := newDispatcher(t, s, tr, bus.New(), fakeRuntime(t), nil, bindings, dispatch.Config{MaxParallel: 0, Owner: testOwner})
+	if err = d.Tick(t.Context()); err != nil {
+		t.Fatalf("Tick: %v", err)
+	}
+
+	called := tr.calledProjects()
+	if !slices.Contains(called, testProject.Name) {
+		t.Errorf("Intake calls = %v, want it to include the auto project %q", called, testProject.Name)
+	}
+	if slices.Contains(called, "manual-proj") {
+		t.Errorf("Intake calls = %v, want no call for the manual-mode project", called)
+	}
+
+	tickets, err := s.ListAllTickets(t.Context())
+	if err != nil {
+		t.Fatalf("ListAllTickets: %v", err)
+	}
+	if len(tickets) != 1 {
+		t.Fatalf("tickets after Tick = %d, want exactly 1 (only the auto project's fixture ticket)", len(tickets))
+	}
+	if tickets[0].ProjectID != autoProjectID {
+		t.Errorf("the one inserted ticket's ProjectID = %d, want the auto project %d", tickets[0].ProjectID, autoProjectID)
+	}
+}
+
 // failingIntakeTracker is a minimal Tracker test double for the intake
 // resilience test below (PKG7-PLAN.md D6, task 14): Intake fails with
 // errIntakeBoom for failProject and returns exactly one fixed ticket for any
@@ -595,6 +1370,10 @@ func (f *failingIntakeTracker) Fetch(context.Context, string, string) (tracker.T
 	panic("failingIntakeTracker: Fetch is unused by this test")
 }
 
+func (f *failingIntakeTracker) Issue(context.Context, string, string) (tracker.Ticket, error) {
+	panic("failingIntakeTracker: Issue is unused by this test")
+}
+
 func (f *failingIntakeTracker) Comment(context.Context, string, string, string) error {
 	return nil
 }
@@ -605,6 +1384,14 @@ func (f *failingIntakeTracker) FileTicket(context.Context, string, tracker.NewTi
 
 func (f *failingIntakeTracker) Collaborators(context.Context, string) ([]string, error) {
 	panic("failingIntakeTracker: Collaborators is unused by this test")
+}
+
+func (f *failingIntakeTracker) Close(context.Context, string, string) error {
+	panic("failingIntakeTracker: Close is unused by this test")
+}
+
+func (f *failingIntakeTracker) CommentContains(context.Context, string, string, string) (bool, error) {
+	panic("failingIntakeTracker: CommentContains is unused by this test")
 }
 
 var _ tracker.Tracker = (*failingIntakeTracker)(nil)
@@ -741,7 +1528,14 @@ func TestTick_PicksTheFurthestAlongTicketOverQueuedOnesAndExcludesTerminal(t *te
 	rt := fakeRuntime(t)
 
 	doneID := seedQueuedGitBackedTicket(t, s, "fake#1")
-	advanceTicket(t, s, rt, doneID, testStateQueued, testStatePlanning, testStateBuilding, testStateReviewing, testStateJudging, testStateShipping)
+	advanceTicket(t, s, rt, doneID, testStateQueued, testStatePlanning, testStateBuilding, testStateReviewing, testStateJudging)
+	// shipping's own real handler (M3 tasks 6, 7) takes a PUBLISH tick and a
+	// POLL tick, neither of which this test cares about (it only needs a
+	// terminal ticket to prove Tick excludes it); seedTicketDirectlyToState
+	// mirrors TestTickUsesInjectedClock's own direct-commit seed, skipping
+	// straight from judging to shipping to done.
+	seedTicketDirectlyToState(t, s, doneID, testStateShipping)
+	seedTicketDirectlyToState(t, s, doneID, testStateDone)
 
 	buildingID := seedQueuedGitBackedTicket(t, s, "fake#2")
 	advanceTicket(t, s, rt, buildingID, testStateQueued, testStatePlanning)
@@ -750,7 +1544,7 @@ func TestTick_PicksTheFurthestAlongTicketOverQueuedOnesAndExcludesTerminal(t *te
 
 	d := newDispatcher(t, s, newFixtureTracker(t), bus.New(), rt, nil, nil, dispatch.Config{
 		MaxParallel: 2, Owner: testOwner,
-		Sandbox: sandbox.Off(), RequireSandbox: false, Commands: job.NewCommandRunner(sandbox.Off(), false),
+		Sandboxes: sandbox.OffSet(), RequireSandbox: false, Commands: job.NewCommandRunner(sandbox.Off(), false),
 		Projects: buildTestProjects(t, s),
 	})
 	if err := d.Tick(t.Context()); err != nil {
@@ -892,6 +1686,271 @@ func TestTick_ClaimUsesTheJobTimeoutAndRunsUnderThatDeadlineNotTheClaimGrace(t *
 	claimGraceMax := after.Add(66 * time.Minute)
 	if spy.expires.Before(claimGraceMin) || spy.expires.After(claimGraceMax) {
 		t.Errorf("claim expiry (Deps.Expires) = %v, want within [%v, %v] (~65m: 60m timeout + 5m grace)", spy.expires, claimGraceMin, claimGraceMax)
+	}
+}
+
+// TestClaimTimeoutForReviewing proves design section 6.8 step 6's own
+// timeout lookup for the "reviewing" state (PKG9-PLAN.md section 4.3, 6.2):
+// ROUND's own semaphore-bounded fan-out of up to seven lens runs needs a
+// claim/run deadline of jobs.review.timeout_minutes (30), not
+// defaultCodeTimeout, the 5-minute bound a code-only state like judging or
+// shipping still uses.
+func TestClaimTimeoutForReviewing(t *testing.T) {
+	t.Parallel()
+
+	s := newDispatchTestStore(t)
+	ticketID := seedQueuedTicket(t, s, testFixtureRef)
+
+	// Jump the ticket straight to reviewing: this test only cares about
+	// which job timeout the dispatcher looks up for that state, not how a
+	// ticket really gets there, so it skips driving the real pipeline
+	// (dispatch_test.go's own seed-direct shortcut, matching
+	// postbuild_test.go's pbSeedTicketInState, package job).
+	seedOwner := "seed-reviewing-owner"
+	seedExpires := time.Now().Add(10 * time.Minute).UTC().Truncate(time.Second)
+	claimed, err := s.Claim(t.Context(), ticketID, seedOwner, seedExpires)
+	if err != nil || !claimed {
+		t.Fatalf("seed claim: claimed=%v err=%v", claimed, err)
+	}
+	applied, err := s.CommitHandlerResult(t.Context(), store.HandlerCommit{
+		TicketID: ticketID, Owner: seedOwner, Expires: seedExpires, Next: testStateReviewing, Reason: testSeedReason,
+	})
+	if err != nil || !applied {
+		t.Fatalf("seed commit: applied=%v err=%v", applied, err)
+	}
+
+	spy := &spyHandler{next: testStateJudging, reason: testSpyReason}
+	reg := job.Registry()
+	reg[testStateReviewing] = spy
+
+	d := newDispatcher(t, s, newFixtureTracker(t), bus.New(), fakeRuntime(t), reg, nil, dispatch.Config{MaxParallel: 2, Owner: testOwner})
+
+	before := time.Now()
+	if err := d.Tick(t.Context()); err != nil {
+		t.Fatalf("Tick: %v", err)
+	}
+	after := time.Now()
+
+	if spy.calls != 1 {
+		t.Fatalf("spy.calls = %d, want 1", spy.calls)
+	}
+	if !spy.hasDeadline {
+		t.Fatal("the handler's context carried no deadline, want now+timeout")
+	}
+	wantMin := before.Add(29 * time.Minute)
+	wantMax := after.Add(31 * time.Minute)
+	if spy.deadline.Before(wantMin) || spy.deadline.After(wantMax) {
+		t.Errorf("run deadline = %v, want within [%v, %v] (~30m, jobs.review.timeout_minutes, not the 5m defaultCodeTimeout)", spy.deadline, wantMin, wantMax)
+	}
+}
+
+// TestTickUsesInjectedClock proves step 5's own "now" (PKG9-PLAN.md section
+// 17.1) comes from cfg.Now, not a bare time.Now() Tick reads itself: a
+// ticket whose next_poll_at sits two hours past real wall-clock time is
+// skipped by a Tick with no injected clock (cfg.Now defaults to time.Now in
+// dispatch.New), but picked by a Tick whose cfg.Now reports a time already
+// past that poll schedule -- the fake clock selftest's own 17.1 wiring
+// needs to drive a babysit poll's backoff without a real wait.
+func TestTickUsesInjectedClock(t *testing.T) {
+	t.Parallel()
+
+	s := newDispatchTestStore(t)
+	ticketID := seedQueuedTicket(t, s, testFixtureRef)
+
+	seedOwner := "seed-shipping-owner"
+	seedExpires := time.Now().Add(10 * time.Minute).UTC().Truncate(time.Second)
+	claimed, err := s.Claim(t.Context(), ticketID, seedOwner, seedExpires)
+	if err != nil || !claimed {
+		t.Fatalf("seed claim: claimed=%v err=%v", claimed, err)
+	}
+	applied, err := s.CommitHandlerResult(t.Context(), store.HandlerCommit{
+		TicketID: ticketID, Owner: seedOwner, Expires: seedExpires, Next: testStateShipping, Reason: testSeedReason,
+	})
+	if err != nil || !applied {
+		t.Fatalf("seed commit: applied=%v err=%v", applied, err)
+	}
+
+	farFuture := time.Now().Add(2 * time.Hour).UTC().Truncate(time.Second)
+	pollOwner := "seed-poll-owner"
+	pollExpires := time.Now().Add(10 * time.Minute).UTC().Truncate(time.Second)
+	claimed, err = s.Claim(t.Context(), ticketID, pollOwner, pollExpires)
+	if err != nil || !claimed {
+		t.Fatalf("seed poll claim: claimed=%v err=%v", claimed, err)
+	}
+	applied, err = s.CommitHandlerResult(t.Context(), store.HandlerCommit{
+		TicketID: ticketID, Owner: pollOwner, Expires: pollExpires,
+		Poll: &store.PollUpdate{NextAt: farFuture, IntervalS: 300, Fingerprint: strings.Repeat("a", 64)},
+	})
+	if err != nil || !applied {
+		t.Fatalf("seed poll commit: applied=%v err=%v", applied, err)
+	}
+
+	spy := &spyHandler{next: testStateDone, reason: testSpyReason}
+	reg := job.Registry()
+	reg[testStateShipping] = spy
+
+	// The real clock: the poll is not due for another two hours, so this
+	// tick must not pick the ticket.
+	dReal := newDispatcher(t, s, newFixtureTracker(t), bus.New(), fakeRuntime(t), reg, nil, dispatch.Config{MaxParallel: 2, Owner: testOwner})
+	if err := dReal.Tick(t.Context()); err != nil {
+		t.Fatalf("Tick (real clock): %v", err)
+	}
+	if spy.calls != 0 {
+		t.Fatalf("spy.calls = %d after a real-clock tick, want 0 (the poll is not due yet)", spy.calls)
+	}
+
+	// An injected clock past the poll time: this tick must pick it up.
+	injected := farFuture.Add(time.Minute)
+	dFake := newDispatcher(t, s, newFixtureTracker(t), bus.New(), fakeRuntime(t), reg, nil, dispatch.Config{
+		MaxParallel: 2, Owner: testOwner, Now: func() time.Time { return injected },
+	})
+	if err := dFake.Tick(t.Context()); err != nil {
+		t.Fatalf("Tick (injected clock): %v", err)
+	}
+	if spy.calls != 1 {
+		t.Fatalf("spy.calls = %d after an injected-clock tick past the poll time, want 1", spy.calls)
+	}
+}
+
+// TestClaimTimeoutForJudging proves claimTimeoutFor's own "judging" row
+// (PKG9-PLAN.md section 17.1): the real machine.toml gives jobs.judge and
+// jobs.build both 45 minutes and jobs.perimeter 3, so
+// max(judge, build, perimeter, 10) is 45 -- the build job's own timeout,
+// not judge's alone, so this also proves the row reads every one of the
+// three jobs rather than just "judge".
+func TestClaimTimeoutForJudging(t *testing.T) {
+	t.Parallel()
+
+	s := newDispatchTestStore(t)
+	ticketID := seedQueuedTicket(t, s, testFixtureRef)
+
+	seedOwner := "seed-judging-owner"
+	seedExpires := time.Now().Add(10 * time.Minute).UTC().Truncate(time.Second)
+	claimed, err := s.Claim(t.Context(), ticketID, seedOwner, seedExpires)
+	if err != nil || !claimed {
+		t.Fatalf("seed claim: claimed=%v err=%v", claimed, err)
+	}
+	applied, err := s.CommitHandlerResult(t.Context(), store.HandlerCommit{
+		TicketID: ticketID, Owner: seedOwner, Expires: seedExpires, Next: testStateJudging, Reason: testSeedReason,
+	})
+	if err != nil || !applied {
+		t.Fatalf("seed commit: applied=%v err=%v", applied, err)
+	}
+
+	spy := &spyHandler{next: testStateShipping, reason: testSpyReason}
+	reg := job.Registry()
+	reg[testStateJudging] = spy
+
+	d := newDispatcher(t, s, newFixtureTracker(t), bus.New(), fakeRuntime(t), reg, nil, dispatch.Config{MaxParallel: 2, Owner: testOwner})
+
+	before := time.Now()
+	if err := d.Tick(t.Context()); err != nil {
+		t.Fatalf("Tick: %v", err)
+	}
+	after := time.Now()
+
+	if spy.calls != 1 {
+		t.Fatalf("spy.calls = %d, want 1", spy.calls)
+	}
+	if !spy.hasDeadline {
+		t.Fatal("the handler's context carried no deadline, want now+timeout")
+	}
+	wantMin := before.Add(44 * time.Minute)
+	wantMax := after.Add(46 * time.Minute)
+	if spy.deadline.Before(wantMin) || spy.deadline.After(wantMax) {
+		t.Errorf("run deadline = %v, want within [%v, %v] (~45m, max(judge, build, perimeter, 10))", spy.deadline, wantMin, wantMax)
+	}
+}
+
+// TestClaimTimeoutForShipping proves claimTimeoutFor's own "shipping" row
+// (PKG9-PLAN.md section 17.1): the real machine.toml gives jobs.build 45
+// minutes, jobs.perimeter 3, and jobs.respond 15, so
+// max(respond, build, perimeter) is 45 -- the build job's own timeout, not
+// respond's alone, so this also proves the row reads every one of the
+// three jobs rather than just "respond".
+func TestClaimTimeoutForShipping(t *testing.T) {
+	t.Parallel()
+
+	s := newDispatchTestStore(t)
+	ticketID := seedQueuedTicket(t, s, testFixtureRef)
+
+	seedOwner := "seed-shipping-timeout-owner"
+	seedExpires := time.Now().Add(10 * time.Minute).UTC().Truncate(time.Second)
+	claimed, err := s.Claim(t.Context(), ticketID, seedOwner, seedExpires)
+	if err != nil || !claimed {
+		t.Fatalf("seed claim: claimed=%v err=%v", claimed, err)
+	}
+	applied, err := s.CommitHandlerResult(t.Context(), store.HandlerCommit{
+		TicketID: ticketID, Owner: seedOwner, Expires: seedExpires, Next: testStateShipping, Reason: testSeedReason,
+	})
+	if err != nil || !applied {
+		t.Fatalf("seed commit: applied=%v err=%v", applied, err)
+	}
+
+	spy := &spyHandler{next: testStateDone, reason: testSpyReason}
+	reg := job.Registry()
+	reg[testStateShipping] = spy
+
+	d := newDispatcher(t, s, newFixtureTracker(t), bus.New(), fakeRuntime(t), reg, nil, dispatch.Config{MaxParallel: 2, Owner: testOwner})
+
+	before := time.Now()
+	if err := d.Tick(t.Context()); err != nil {
+		t.Fatalf("Tick: %v", err)
+	}
+	after := time.Now()
+
+	if spy.calls != 1 {
+		t.Fatalf("spy.calls = %d, want 1", spy.calls)
+	}
+	if !spy.hasDeadline {
+		t.Fatal("the handler's context carried no deadline, want now+timeout")
+	}
+	wantMin := before.Add(44 * time.Minute)
+	wantMax := after.Add(46 * time.Minute)
+	if spy.deadline.Before(wantMin) || spy.deadline.After(wantMax) {
+		t.Errorf("run deadline = %v, want within [%v, %v] (~45m, max(respond, build, perimeter))", spy.deadline, wantMin, wantMax)
+	}
+}
+
+// TestRunAndCommitCopiesJudgeCodexHome proves runAndCommit copies
+// dispatch.Config.JudgeCodexHome into every job.Deps it builds
+// (PKG9-PLAN.md section 4.3, 7.3, D27), the same way it already threads
+// DataDir and LensesParallel.
+func TestRunAndCommitCopiesJudgeCodexHome(t *testing.T) {
+	t.Parallel()
+
+	s := newDispatchTestStore(t)
+	ticketID := seedQueuedTicket(t, s, testFixtureRef)
+
+	seedOwner := "seed-judging-owner"
+	seedExpires := time.Now().Add(10 * time.Minute).UTC().Truncate(time.Second)
+	claimed, err := s.Claim(t.Context(), ticketID, seedOwner, seedExpires)
+	if err != nil || !claimed {
+		t.Fatalf("seed claim: claimed=%v err=%v", claimed, err)
+	}
+	applied, err := s.CommitHandlerResult(t.Context(), store.HandlerCommit{
+		TicketID: ticketID, Owner: seedOwner, Expires: seedExpires, Next: testStateJudging, Reason: testSeedReason,
+	})
+	if err != nil || !applied {
+		t.Fatalf("seed commit: applied=%v err=%v", applied, err)
+	}
+
+	spy := &spyHandler{next: testStateShipping, reason: testSpyReason}
+	reg := job.Registry()
+	reg[testStateJudging] = spy
+
+	const wantJudgeCodexHome = "/test/judge/codex/home"
+	d := newDispatcher(t, s, newFixtureTracker(t), bus.New(), fakeRuntime(t), reg, nil,
+		dispatch.Config{MaxParallel: 2, Owner: testOwner, JudgeCodexHome: wantJudgeCodexHome})
+
+	if err := d.Tick(t.Context()); err != nil {
+		t.Fatalf("Tick: %v", err)
+	}
+	if spy.calls != 1 {
+		t.Fatalf("spy.calls = %d, want 1", spy.calls)
+	}
+	if spy.judgeCodexHome != wantJudgeCodexHome {
+		t.Errorf("Deps.JudgeCodexHome = %q, want %q", spy.judgeCodexHome, wantJudgeCodexHome)
 	}
 }
 
@@ -1141,7 +2200,11 @@ func TestTick_PostHandlerCommitSurvivesCancelledTickContext(t *testing.T) {
 	defer cancel()
 
 	reg := job.Registry()
-	reg[testStatePlanning] = &cancelingHandler{cancel: cancel, next: testStateBuilding, reason: testReasonPlanReady}
+	// Next is "done", not "building": D32's own seal invariant (design
+	// section 22.12.3a) gates a planning -> building commit on a
+	// GateApproval, which this test has no reason to carry -- it only
+	// cares that a commit lands despite the cancelled tick context.
+	reg[testStatePlanning] = &cancelingHandler{cancel: cancel, next: testStateDone, reason: testReasonPlanReady}
 
 	d := newDispatcher(t, s, newFixtureTracker(t), bus.New(), rt, reg, nil, dispatch.Config{MaxParallel: 2, Owner: testOwner})
 
@@ -1150,8 +2213,8 @@ func TestTick_PostHandlerCommitSurvivesCancelledTickContext(t *testing.T) {
 	}
 
 	final := getTicket(t, s, ticketID)
-	if final.State != testStateBuilding {
-		t.Errorf("final ticket state = %q, want building (the post-handler commit must survive ctx's own cancellation)", final.State)
+	if final.State != testStateDone {
+		t.Errorf("final ticket state = %q, want done (the post-handler commit must survive ctx's own cancellation)", final.State)
 	}
 }
 
@@ -1400,7 +2463,6 @@ func TestTick_IntakePostsPickupCommentForEachNewTicket(t *testing.T) {
 
 	s := newDispatchTestStore(t)
 	projectID := seedProject(t, s)
-	const testBindingUser = "peter"
 	bindings := []dispatch.Binding{{StoreProjectID: projectID, TrackerProject: testProject.Name, User: testBindingUser}}
 
 	rec := newTwoTicketFixture(t)
@@ -1461,7 +2523,7 @@ func TestTick_IntakePickupCommentFailureIsBestEffort(t *testing.T) {
 
 	s := newDispatchTestStore(t)
 	projectID := seedProject(t, s)
-	bindings := []dispatch.Binding{{StoreProjectID: projectID, TrackerProject: testProject.Name, User: "peter"}}
+	bindings := []dispatch.Binding{{StoreProjectID: projectID, TrackerProject: testProject.Name, User: testBindingUser}}
 
 	rec := newTwoTicketFixture(t)
 	rec.failFirst = true
@@ -1555,6 +2617,271 @@ func (c *commentingFixture) attemptCount() int {
 	return c.attempts
 }
 
+// --- PostPRLink / PostDone (design section 8.2 step 5, 8.6 step 1, 11, 10.5) ---
+
+// markedComment is one comment shipTrackerDouble tracks under a ref: author
+// is who it was "posted" by, so a test can seed a comment under any author
+// and prove CommentContains only ever counts the double's own login.
+type markedComment struct {
+	author, body string
+}
+
+// shipTrackerDouble is a Tracker test double for PostPRLink and PostDone:
+// it embeds a *tracker.Fixture for every method they do not touch, and
+// implements Comment, CommentContains, and Close itself so a test can seed
+// a comment under an arbitrary author (seedMarked), inject an error from
+// any of the three calls, and read back exactly what was posted, closed,
+// and in what order.
+type shipTrackerDouble struct {
+	*tracker.Fixture
+
+	mu       sync.Mutex
+	ownLogin string
+	marked   map[string][]markedComment // ref -> comments, in arrival order
+	posted   []recordedComment          // every successful Comment call
+	closed   []string                   // every successful Close call's ref
+	sequence []string                   // "comment:<ref>" then "close:<ref>", call order
+
+	failComment, failContains, failClose error
+}
+
+func newShipTrackerDouble(t *testing.T, login string) *shipTrackerDouble {
+	t.Helper()
+	return &shipTrackerDouble{Fixture: newFixtureTracker(t), ownLogin: login, marked: map[string][]markedComment{}}
+}
+
+// seedMarked records a comment under testFixtureRef, the one ref every
+// PostPRLink/PostDone test here uses, as if it were already posted before
+// the call runs: author == the double's own login simulates a real earlier
+// post surviving a crash; any other author simulates a spoofed marker
+// CommentContains must ignore.
+func (s *shipTrackerDouble) seedMarked(author, body string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.marked[testFixtureRef] = append(s.marked[testFixtureRef], markedComment{author: author, body: body})
+}
+
+func (s *shipTrackerDouble) Comment(_ context.Context, project, ref, body string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.failComment != nil {
+		return s.failComment
+	}
+	s.posted = append(s.posted, recordedComment{project: project, ref: ref, body: body})
+	s.marked[ref] = append(s.marked[ref], markedComment{author: s.ownLogin, body: body})
+	s.sequence = append(s.sequence, "comment:"+ref)
+	return nil
+}
+
+func (s *shipTrackerDouble) CommentContains(_ context.Context, _, ref, needle string) (bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.failContains != nil {
+		return false, s.failContains
+	}
+	for _, c := range s.marked[ref] {
+		if c.author == s.ownLogin && strings.Contains(c.body, needle) {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+func (s *shipTrackerDouble) Close(_ context.Context, _, ref string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.failClose != nil {
+		return s.failClose
+	}
+	s.closed = append(s.closed, ref)
+	s.sequence = append(s.sequence, "close:"+ref)
+	return nil
+}
+
+func (s *shipTrackerDouble) postedComments() []recordedComment {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]recordedComment(nil), s.posted...)
+}
+
+func (s *shipTrackerDouble) callSequence() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]string(nil), s.sequence...)
+}
+
+var _ tracker.Tracker = (*shipTrackerDouble)(nil)
+
+// shipTestFixture builds a *store.Store, one ticket under testFixtureRef
+// (state is irrelevant to PostPRLink/PostDone, which never read it), and a
+// *shipTrackerDouble, all under one project id. It returns the project id,
+// the ticket's own store id (the ticket id the marker is scoped to), and
+// the double; each test builds its own binding.
+func shipTestFixture(t *testing.T) (s *store.Store, projectID, ticketID int64, tr *shipTrackerDouble) {
+	t.Helper()
+	s = newDispatchTestStore(t)
+	projectID = seedProject(t, s)
+	ticketID, err := s.InsertTicket(t.Context(), store.Ticket{
+		ProjectID: projectID, TrackerRef: testFixtureRef, Title: testTicketTitle, State: testStateQueued,
+	})
+	if err != nil {
+		t.Fatalf("InsertTicket: %v", err)
+	}
+	tr = newShipTrackerDouble(t, "zing-bot")
+	return s, projectID, ticketID, tr
+}
+
+const testPRURL = "https://github.com/o/r/pull/1"
+
+// TestPostPRLinkSkipsMarkedComment proves PostPRLink skips posting once its
+// own marker is already on the issue, including when CommentContains found
+// it on a later page (design section 8.2 step 5, 11): the real tracker's
+// own pagination is proved by tracker.TestCommentContainsPagesAll;
+// shipTrackerDouble stands in for "found it somewhere" here.
+func TestPostPRLinkSkipsMarkedComment(t *testing.T) {
+	t.Parallel()
+
+	s, projectID, ticketID, tr := shipTestFixture(t)
+	marker := fmt.Sprintf("<!-- zing:pr t%d -->", ticketID)
+	tr.seedMarked(tr.ownLogin, "an earlier post\n\n"+marker)
+
+	bindings := []dispatch.Binding{{StoreProjectID: projectID, TrackerProject: testProject.Name, User: testBindingUser}}
+	d := newDispatcher(t, s, tr, bus.New(), fakeRuntime(t), nil, bindings, dispatch.Config{MaxParallel: 2, Owner: testOwner})
+
+	if err := d.PostPRLink(t.Context(), projectID, testFixtureRef, testPRURL); err != nil {
+		t.Fatalf("PostPRLink: %v", err)
+	}
+	if got := tr.postedComments(); len(got) != 0 {
+		t.Errorf("posted comments = %+v, want none (the marker was already there)", got)
+	}
+}
+
+// TestPostPRLinkIgnoresSpoofedMarker proves a marker from any login but the
+// tracker's own never suppresses the real post (design section 10.5).
+func TestPostPRLinkIgnoresSpoofedMarker(t *testing.T) {
+	t.Parallel()
+
+	s, projectID, ticketID, tr := shipTestFixture(t)
+	marker := fmt.Sprintf("<!-- zing:pr t%d -->", ticketID)
+	tr.seedMarked("impostor", marker)
+
+	bindings := []dispatch.Binding{{StoreProjectID: projectID, TrackerProject: testProject.Name, User: testBindingUser}}
+	d := newDispatcher(t, s, tr, bus.New(), fakeRuntime(t), nil, bindings, dispatch.Config{MaxParallel: 2, Owner: testOwner})
+
+	if err := d.PostPRLink(t.Context(), projectID, testFixtureRef, testPRURL); err != nil {
+		t.Fatalf("PostPRLink: %v", err)
+	}
+	got := tr.postedComments()
+	if len(got) != 1 {
+		t.Fatalf("posted comments = %+v, want 1 (a spoofed marker must not suppress the real post)", got)
+	}
+	if !strings.Contains(got[0].body, marker) {
+		t.Errorf("posted comment body = %q, want it to carry %q", got[0].body, marker)
+	}
+}
+
+// TestPostPRLinkErrorReturned proves a Comment failure propagates (design
+// section 8.2 step 4, 11): the next tick must see the error and retry.
+func TestPostPRLinkErrorReturned(t *testing.T) {
+	t.Parallel()
+
+	s, projectID, _, tr := shipTestFixture(t)
+	tr.failComment = errors.New("boom: comment failed")
+
+	bindings := []dispatch.Binding{{StoreProjectID: projectID, TrackerProject: testProject.Name, User: testBindingUser}}
+	d := newDispatcher(t, s, tr, bus.New(), fakeRuntime(t), nil, bindings, dispatch.Config{MaxParallel: 2, Owner: testOwner})
+
+	if err := d.PostPRLink(t.Context(), projectID, testFixtureRef, testPRURL); err == nil {
+		t.Error("PostPRLink err = nil, want an error")
+	}
+}
+
+// TestPostDoneSkipsMarkedComment proves PostDone skips the comment once its
+// own marker is already posted, but still calls Close every time (design
+// section 8.6 step 1, 11): a crash between the post and the close must
+// still converge on the next tick.
+func TestPostDoneSkipsMarkedComment(t *testing.T) {
+	t.Parallel()
+
+	s, projectID, ticketID, tr := shipTestFixture(t)
+	marker := fmt.Sprintf("<!-- zing:done t%d -->", ticketID)
+	tr.seedMarked(tr.ownLogin, "an earlier post\n\n"+marker)
+
+	bindings := []dispatch.Binding{{StoreProjectID: projectID, TrackerProject: testProject.Name, User: testBindingUser}}
+	d := newDispatcher(t, s, tr, bus.New(), fakeRuntime(t), nil, bindings, dispatch.Config{MaxParallel: 2, Owner: testOwner})
+
+	if err := d.PostDone(t.Context(), projectID, testFixtureRef, testPRURL); err != nil {
+		t.Fatalf("PostDone: %v", err)
+	}
+	if got := tr.postedComments(); len(got) != 0 {
+		t.Errorf("posted comments = %+v, want none (the marker was already there)", got)
+	}
+	want := []string{"close:" + testFixtureRef}
+	if got := tr.callSequence(); !slices.Equal(got, want) {
+		t.Errorf("call sequence = %v, want %v (Close still runs when the comment is skipped)", got, want)
+	}
+}
+
+// TestPostDoneIgnoresSpoofedMarker is PostPRLink's spoofed-marker proof,
+// for PostDone (design section 10.5).
+func TestPostDoneIgnoresSpoofedMarker(t *testing.T) {
+	t.Parallel()
+
+	s, projectID, ticketID, tr := shipTestFixture(t)
+	marker := fmt.Sprintf("<!-- zing:done t%d -->", ticketID)
+	tr.seedMarked("impostor", marker)
+
+	bindings := []dispatch.Binding{{StoreProjectID: projectID, TrackerProject: testProject.Name, User: testBindingUser}}
+	d := newDispatcher(t, s, tr, bus.New(), fakeRuntime(t), nil, bindings, dispatch.Config{MaxParallel: 2, Owner: testOwner})
+
+	if err := d.PostDone(t.Context(), projectID, testFixtureRef, testPRURL); err != nil {
+		t.Fatalf("PostDone: %v", err)
+	}
+	got := tr.postedComments()
+	if len(got) != 1 {
+		t.Fatalf("posted comments = %+v, want 1 (a spoofed marker must not suppress the real post)", got)
+	}
+	if !strings.Contains(got[0].body, marker) {
+		t.Errorf("posted comment body = %q, want it to carry %q", got[0].body, marker)
+	}
+}
+
+// TestPostDoneClosesAfterComment proves PostDone posts the done comment
+// before it closes the issue (design section 8.6 step 1).
+func TestPostDoneClosesAfterComment(t *testing.T) {
+	t.Parallel()
+
+	s, projectID, _, tr := shipTestFixture(t)
+
+	bindings := []dispatch.Binding{{StoreProjectID: projectID, TrackerProject: testProject.Name, User: testBindingUser}}
+	d := newDispatcher(t, s, tr, bus.New(), fakeRuntime(t), nil, bindings, dispatch.Config{MaxParallel: 2, Owner: testOwner})
+
+	if err := d.PostDone(t.Context(), projectID, testFixtureRef, testPRURL); err != nil {
+		t.Fatalf("PostDone: %v", err)
+	}
+	want := []string{"comment:" + testFixtureRef, "close:" + testFixtureRef}
+	if got := tr.callSequence(); !slices.Equal(got, want) {
+		t.Errorf("call sequence = %v, want %v", got, want)
+	}
+}
+
+// TestPostDoneErrorReturned proves a Close failure propagates (design
+// section 11: "the next tick sees it merged and runs DONE" only holds once
+// Close actually succeeds).
+func TestPostDoneErrorReturned(t *testing.T) {
+	t.Parallel()
+
+	s, projectID, _, tr := shipTestFixture(t)
+	tr.failClose = errors.New("boom: close failed")
+
+	bindings := []dispatch.Binding{{StoreProjectID: projectID, TrackerProject: testProject.Name, User: testBindingUser}}
+	d := newDispatcher(t, s, tr, bus.New(), fakeRuntime(t), nil, bindings, dispatch.Config{MaxParallel: 2, Owner: testOwner})
+
+	if err := d.PostDone(t.Context(), projectID, testFixtureRef, testPRURL); err == nil {
+		t.Error("PostDone err = nil, want an error")
+	}
+}
+
 // cancelingHandler is a job.Handler test double that cancels a captured
 // context.CancelFunc from inside Run, simulating the tick context becoming
 // cancelled (a drain force-cancel racing the exact moment the handler
@@ -1587,6 +2914,11 @@ type spyHandler struct {
 	hasDeadline bool
 	deadline    time.Time
 	expires     time.Time
+	// judgeCodexHome records d.JudgeCodexHome (PKG9-PLAN.md section 4.3,
+	// 7.3, D27), so TestRunAndCommitCopiesJudgeCodexHome can assert
+	// runAndCommit copied dispatch.Config.JudgeCodexHome into the Deps a
+	// handler actually sees.
+	judgeCodexHome string
 
 	next, reason string
 	err          error
@@ -1595,6 +2927,7 @@ type spyHandler struct {
 func (h *spyHandler) Run(ctx context.Context, t store.Ticket, d job.Deps) (store.HandlerCommit, error) {
 	h.calls++
 	h.expires = d.Expires
+	h.judgeCodexHome = d.JudgeCodexHome
 	if dl, ok := ctx.Deadline(); ok {
 		h.hasDeadline = true
 		h.deadline = dl
@@ -1620,7 +2953,9 @@ func (c *countingRuntime) Run(ctx context.Context, req runtime.RunRequest) (runt
 // staleOwnerHandler runs one real fake-runtime turn (job planning), then
 // simulates a concurrent reconcile stealing this ticket's lease mid-run by
 // expiring every claim as of just past its own Expires, and finally returns
-// a commit that would otherwise be perfectly legal (planning -> building).
+// a commit that would otherwise be perfectly legal (planning -> done; not
+// "building", which D32's own seal invariant, design section 22.12.3a, now
+// gates on a GateApproval this test has no reason to carry).
 // CommitHandlerResult's fence then no longer matches, so the dispatcher must
 // fail closed rather than re-drive the fake session it already advanced.
 type staleOwnerHandler struct{}
@@ -1636,7 +2971,7 @@ func (staleOwnerHandler) Run(ctx context.Context, t store.Ticket, d job.Deps) (s
 	if _, err := d.Store.ExpireClaims(ctx, d.Expires.Add(time.Second)); err != nil {
 		return store.HandlerCommit{}, err
 	}
-	return store.HandlerCommit{TicketID: t.ID, Owner: d.Owner, Expires: d.Expires, Next: testStateBuilding, Reason: testReasonPlanReady}, nil
+	return store.HandlerCommit{TicketID: t.ID, Owner: d.Owner, Expires: d.Expires, Next: testStateDone, Reason: testReasonPlanReady}, nil
 }
 
 // staleOwnerReleaseHandler runs one real fake-runtime turn (job planning),
@@ -1765,11 +3100,55 @@ func (sealMismatchHandler) Run(ctx context.Context, t store.Ticket, d job.Deps) 
 	if err != nil {
 		return store.HandlerCommit{}, err
 	}
+
+	// D32 (design section 22.12.3a): the seal invariant needs a confirmed
+	// approval; this handler tests sealCohortTx's own mismatch, not the
+	// gate flow, so it seeds a fresh, valid one on every call (including a
+	// retry after a prior mismatch rolled its own fixture back).
+	gateQID, approveAID, gaErr := gateApprovalFixture(ctx, d.Store, t.ID)
+	if gaErr != nil {
+		return store.HandlerCommit{}, gaErr
+	}
+
 	return store.HandlerCommit{
 		TicketID: t.ID, Owner: d.Owner, Expires: d.Expires,
-		Artifacts: []store.Artifact{{RunID: &rsv.RunID, Type: "plan", Version: 1, Payload: json.RawMessage(testPlanPayload)}},
-		Seal:      &store.SealRequest{RunID: rsv.RunID, PlanVersion: 1, ExpectedCount: 2, At: time.Now()},
+		Artifacts:    []store.Artifact{{RunID: &rsv.RunID, Type: testArtifactTypePlan, Version: 1, Payload: json.RawMessage(testPlanPayload)}},
+		Seal:         &store.SealRequest{RunID: rsv.RunID, PlanVersion: 1, ExpectedCount: 2, At: time.Now()},
+		GateApproval: &store.GateApproval{QuestionID: gateQID, AnswerID: approveAID, PlanVersion: 1},
 	}, nil
+}
+
+// gateApprovalFixture seeds the minimal gate approval the seal invariant
+// needs (D32, design section 22.12.1, 22.12.3a): a gate question, its
+// approving answer, and the confirming marker binding both to plan version
+// 1. Used by test handlers whose own point is sealCohortTx's or the
+// dispatcher's behavior, not the gate flow itself.
+func gateApprovalFixture(ctx context.Context, s *store.Store, ticketID int64) (gateQID, approveAID int64, err error) {
+	const authorZing = "zing" // avoids a third bare "zing" literal (goconst)
+	gatePayload, err := json.Marshal(response.QuestionPayload{
+		Key: "Q1", Kind: response.QuestionKindGate, State: response.QuestionStateAnswered,
+		Recommended: "a", Options: []response.Option{{Key: "a", Text: "Approve"}, {Key: "b", Text: "Reject"}},
+	})
+	if err != nil {
+		return 0, 0, err
+	}
+	gateQID, err = s.InsertMessage(ctx, store.Message{
+		TicketID: ticketID, Type: "question", Author: authorZing, State: new("answered"), Body: "Q1", Payload: gatePayload,
+	})
+	if err != nil {
+		return 0, 0, err
+	}
+	approveAID, err = s.InsertMessage(ctx, store.Message{
+		TicketID: ticketID, ParentID: &gateQID, Type: "answer", Author: "you", State: new("sent"), Payload: []byte(`{"option":"a"}`),
+	})
+	if err != nil {
+		return 0, 0, err
+	}
+	_, err = s.InsertMessage(ctx, store.Message{
+		TicketID: ticketID, ParentID: &gateQID, Type: testMsgTypeUpdate, Author: "system",
+		Body: fmt.Sprintf("gate confirmed run 1 plan v1 gate %d answer %d", gateQID, approveAID),
+	})
+	return gateQID, approveAID, err
 }
 
 // countSealMismatchMarkers counts msgs' "update" messages whose body starts
@@ -1779,7 +3158,7 @@ func countSealMismatchMarkers(msgs []store.MessageRow) int {
 	const prefix = "seal mismatch cohort"
 	n := 0
 	for i := range msgs {
-		if msgs[i].Type == "update" && strings.HasPrefix(msgs[i].Body, prefix) {
+		if msgs[i].Type == testMsgTypeUpdate && strings.HasPrefix(msgs[i].Body, prefix) {
 			n++
 		}
 	}
@@ -1842,6 +3221,84 @@ func TestTick_SealMismatchReleasesClaimWritesMarkerAndContinues(t *testing.T) {
 	}
 }
 
+// sealRefusedHandler proposes a Seal that sealCohortTx would otherwise
+// accept (its ExpectedCount matches the one scenario it seeds), carrying no
+// GateApproval at all: the seal invariant's own check 1 refuses it (design
+// section 22.12.3a) before sealCohortTx ever runs, isolating that refusal
+// from a sealCohortTx mismatch.
+type sealRefusedHandler struct{}
+
+func (sealRefusedHandler) Run(ctx context.Context, t store.Ticket, d job.Deps) (store.HandlerCommit, error) {
+	rsv, err := d.Reserve(ctx, t.ID, store.SessionUpsert{Job: testStatePlanning, Runtime: testRuntimeFake}, store.RunSeed{Model: testModelClaudeX})
+	if err != nil {
+		return store.HandlerCommit{}, err
+	}
+	scPayload, err := json.Marshal(response.Scenario{
+		ID: "s1", Kind: response.ScenarioKindBehavior, Given: "the server is running", When: "a request arrives", Then: "it responds",
+	})
+	if err != nil {
+		return store.HandlerCommit{}, err
+	}
+	return store.HandlerCommit{
+		TicketID: t.ID, Owner: d.Owner, Expires: d.Expires,
+		Artifacts: []store.Artifact{
+			{RunID: &rsv.RunID, Type: testArtifactTypePlan, Version: 1, Payload: json.RawMessage(testPlanPayload)},
+			{RunID: &rsv.RunID, Type: "scenario", Payload: scPayload},
+		},
+		Seal: &store.SealRequest{RunID: rsv.RunID, PlanVersion: 1, ExpectedCount: 1, At: time.Now()},
+	}, nil
+}
+
+// TestSealRefusedReleasesClaimAndMarks proves the D32 dispatcher rule
+// (design section 22.12.3a): a seal invariant refusal (here, "no gate
+// approval check") releases the claim, writes the "seal refused gate <QID>"
+// marker (QID 0, since the commit carried no GateApproval at all) with the
+// reason on its own line, never escalates, and never stops the dispatcher.
+func TestSealRefusedReleasesClaimAndMarks(t *testing.T) {
+	t.Parallel()
+
+	s := newDispatchTestStore(t)
+	ticketID := seedQueuedTicket(t, s, testFixtureRef)
+
+	reg := job.Registry()
+	reg[testStateQueued] = sealRefusedHandler{}
+
+	d := newDispatcher(t, s, newFixtureTracker(t), bus.New(), fakeRuntime(t), reg, nil, dispatch.Config{MaxParallel: 2, Owner: testOwner})
+	if err := d.Tick(t.Context()); err != nil {
+		t.Fatalf("Tick: %v, want nil (a seal refusal must not fail closed)", err)
+	}
+
+	final := getTicket(t, s, ticketID)
+	if final.State != testStateQueued {
+		t.Errorf("final ticket state = %q, want unchanged queued", final.State)
+	}
+	if final.ClaimOwner != nil {
+		t.Errorf("final ticket claim owner = %v, want nil (released)", *final.ClaimOwner)
+	}
+
+	_, stopped, err := s.Flags(t.Context())
+	if err != nil {
+		t.Fatalf("Flags: %v", err)
+	}
+	if stopped {
+		t.Error("stopped = true, want false (a seal refusal must not fail closed)")
+	}
+
+	msgs, err := s.ListMessages(t.Context(), ticketID)
+	if err != nil {
+		t.Fatalf("ListMessages: %v", err)
+	}
+	found := false
+	for _, m := range msgs {
+		if m.Type == testMsgTypeUpdate && m.Body == "seal refused gate 0\nno gate approval check" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("messages = %+v, want a \"seal refused gate 0\\nno gate approval check\" marker", msgs)
+	}
+}
+
 // seedGateReadyTicket seeds one project, one ticket already sitting in
 // "planning" with kind "feature" (bypassing classify and the interview,
 // which the real gate approve pre-check never touches), a plan cohort of n
@@ -1877,7 +3334,7 @@ func seedGateReadyTicket(t *testing.T, s *store.Store, n int) (ticketID, runID i
 
 	extID := "seed-gate-ready-ext"
 	artifacts := make([]store.Artifact, 0, 1+n)
-	artifacts = append(artifacts, store.Artifact{RunID: &rsv.RunID, Type: "plan", Version: 1, Payload: json.RawMessage(testPlanPayload)})
+	artifacts = append(artifacts, store.Artifact{RunID: &rsv.RunID, Type: testArtifactTypePlan, Version: 1, Payload: json.RawMessage(testPlanPayload)})
 	for i := range n {
 		sc := response.Scenario{
 			ID: fmt.Sprintf("s%d", i+1), Kind: response.ScenarioKindBehavior,
@@ -1919,6 +3376,30 @@ func seedGateReadyTicket(t *testing.T, s *store.Store, n int) (ticketID, runID i
 	}
 	if res, ansErr := s.AnswerQuestion(ctx, store.AnswerInput{TicketID: ticketID, QuestionID: qID, Option: "a"}); ansErr != nil || !res.Accepted {
 		t.Fatalf("seedGateReadyTicket: AnswerQuestion: %+v, %v", res, ansErr)
+	}
+
+	// D32 (design section 22.12.3a): the seal invariant needs a confirmed
+	// approval, so this seeds the confirming marker directly -- the race
+	// and mismatch behavior below is gateApprove's own pre-check, not the
+	// confirming turn, which gets its own dedicated tests.
+	msgs, listErr := s.ListMessages(ctx, ticketID)
+	if listErr != nil {
+		t.Fatalf("seedGateReadyTicket: ListMessages: %v", listErr)
+	}
+	var aID int64
+	for i := range msgs {
+		if msgs[i].Type == "answer" && msgs[i].ParentID != nil && *msgs[i].ParentID == qID {
+			aID = msgs[i].ID
+		}
+	}
+	if aID == 0 {
+		t.Fatal("seedGateReadyTicket: no approving answer found")
+	}
+	if _, insErr := s.InsertMessage(ctx, store.Message{
+		TicketID: ticketID, ParentID: &qID, Type: testMsgTypeUpdate, Author: "system",
+		Body: fmt.Sprintf("gate confirmed run %d plan v1 gate %d answer %d", rsv.RunID, qID, aID),
+	}); insErr != nil {
+		t.Fatalf("seedGateReadyTicket: insert confirming marker: %v", insErr)
 	}
 
 	return ticketID, rsv.RunID
@@ -2334,8 +3815,53 @@ type trackerEffectHandler struct{}
 func (trackerEffectHandler) Run(_ context.Context, t store.Ticket, d job.Deps) (store.HandlerCommit, error) {
 	return store.HandlerCommit{
 		TicketID: t.ID, Owner: d.Owner, Expires: d.Expires,
-		TrackerEffect: &store.TrackerEffect{Ref: testFixtureRef, Notes: "already handled elsewhere"},
+		TrackerEffect: &store.TrackerEffect{
+			Kind: store.TrackerEffectKindNothingToDo, Ref: testFixtureRef, Notes: "already handled elsewhere",
+		},
 	}, nil
+}
+
+// trackerEffectUnknownKindHandler proposes a commit carrying a
+// TrackerEffect whose Kind postCommitTrackerEffect does not recognize
+// (design section 4.5): an unrecognized Kind must never guess which
+// comment to send.
+type trackerEffectUnknownKindHandler struct{}
+
+func (trackerEffectUnknownKindHandler) Run(_ context.Context, t store.Ticket, d job.Deps) (store.HandlerCommit, error) {
+	return store.HandlerCommit{
+		TicketID: t.ID, Owner: d.Owner, Expires: d.Expires,
+		TrackerEffect: &store.TrackerEffect{Kind: "mystery", Ref: testFixtureRef, Notes: "should never post"},
+	}, nil
+}
+
+// TestTrackerEffectUnknownKindPostsNothing proves postCommitTrackerEffect's
+// fail-safe default (design section 4.5): a Kind it does not recognize
+// posts no comment at all, rather than guessing one.
+func TestTrackerEffectUnknownKindPostsNothing(t *testing.T) {
+	t.Parallel()
+
+	s := newDispatchTestStore(t)
+	projectID := seedProject(t, s)
+	if _, err := s.InsertTicket(t.Context(), store.Ticket{
+		ProjectID: projectID, TrackerRef: testFixtureRef, Title: "t", State: testStateQueued,
+	}); err != nil {
+		t.Fatalf("InsertTicket: %v", err)
+	}
+
+	reg := job.Registry()
+	reg[testStateQueued] = trackerEffectUnknownKindHandler{}
+	bindings := []dispatch.Binding{{StoreProjectID: projectID, TrackerProject: testProject.Name, User: testBindingUser}}
+
+	rec := &commentingFixture{Fixture: newFixtureTracker(t)}
+	d := newDispatcher(t, s, rec, bus.New(), fakeRuntime(t), reg, bindings, dispatch.Config{MaxParallel: 2, Owner: testOwner})
+
+	if err := d.Tick(t.Context()); err != nil {
+		t.Fatalf("Tick: %v", err)
+	}
+
+	if got := rec.recorded(); len(got) != 0 {
+		t.Errorf("tracker comments = %+v, want none (an unrecognized kind must post nothing)", got)
+	}
 }
 
 // TestTick_TrackerEffectPostsNothingToDoCommentAfterCommit proves the D12
@@ -2347,7 +3873,7 @@ func TestTick_TrackerEffectPostsNothingToDoCommentAfterCommit(t *testing.T) {
 
 	s := newDispatchTestStore(t)
 	projectID := seedProject(t, s)
-	const bindingUser = "peter"
+	const bindingUser = testBindingUser
 	if _, err := s.InsertTicket(t.Context(), store.Ticket{
 		ProjectID: projectID, TrackerRef: testFixtureRef, Title: "t", State: testStateQueued,
 	}); err != nil {
@@ -2435,6 +3961,14 @@ func TestTick_PlanningNothingToDoAllFalseClaimsPostsTrackerComment(t *testing.T)
 			{Kind: response.ClaimKindCode, Verdict: response.ClaimVerdictFalse, Evidence: readyClaimEvidencePath + ":2", Text: "already tested"},
 		},
 		Notes: notes,
+		// D31 (design section 22.2): nothing_to_do needs every planning
+		// question settled, or checkConversation rejects the response
+		// before this outcome's own commit logic (and the tracker comment
+		// this test is about) ever runs. Q1 is answerOpenQuestion's own
+		// open planning question.
+		Replies: []response.Reply{
+			{Question: "Q1", Settled: true, Decision: "The owner's answer to Q1 settles this thread."},
+		},
 	}
 	rt := &planningNothingToDoRuntime{t: t, fake: fakeRuntime(t), resp: resp}
 
@@ -2486,7 +4020,7 @@ func TestTick_TrackerEffectFailureIsBestEffort(t *testing.T) {
 
 	reg := job.Registry()
 	reg[testStateQueued] = trackerEffectHandler{}
-	bindings := []dispatch.Binding{{StoreProjectID: projectID, TrackerProject: testProject.Name, User: "peter"}}
+	bindings := []dispatch.Binding{{StoreProjectID: projectID, TrackerProject: testProject.Name, User: testBindingUser}}
 
 	rec := &commentingFixture{Fixture: newFixtureTracker(t)}
 	rec.failFirst = true
@@ -2505,5 +4039,46 @@ func TestTick_TrackerEffectFailureIsBestEffort(t *testing.T) {
 	final := getTicket(t, s, ticketID)
 	if final.ClaimOwner != nil {
 		t.Errorf("final ticket claim owner = %v, want nil (the ticket's own commit still applied)", *final.ClaimOwner)
+	}
+}
+
+// TestDispatchShipGitHubHeadSHAIgnoresInheritedGitDir reproduces the
+// pre-push failure of TestShipCIFailThenFixThenMergeGoesDone: lefthook's
+// pre-push exports GIT_DIR, which overrides "git -C <origin>", so headSHA
+// read the branch off the repository being pushed, GetPR failed every
+// poll, and shipping never advanced. headSHA must read the fixture origin.
+//
+// Not parallel: it calls t.Setenv, which t.Parallel forbids.
+func TestDispatchShipGitHubHeadSHAIgnoresInheritedGitDir(t *testing.T) {
+	ctx := t.Context()
+	repo := filepath.Join(t.TempDir(), "repo")
+	if err := gitfixture.NewSigningRepo(ctx, repo); err != nil {
+		t.Fatalf("NewSigningRepo: %v", err)
+	}
+	remoteDir, err := gitfixture.WithBareOrigin(ctx, repo)
+	if err != nil {
+		t.Fatalf("WithBareOrigin: %v", err)
+	}
+	if out, pushErr := gitfixture.Git(ctx, repo, "push", "-q", "origin", "main"); pushErr != nil {
+		t.Fatalf("push: %v: %s", pushErr, out)
+	}
+	want, err := gitfixture.Git(ctx, repo, "rev-parse", "HEAD")
+	if err != nil {
+		t.Fatalf("rev-parse HEAD: %v", err)
+	}
+
+	// A decoy repository with no "main" branch, exported as a git hook would.
+	decoy := t.TempDir()
+	if out, initErr := gitfixture.Git(ctx, decoy, "init", "-q", "-b", "other"); initErr != nil {
+		t.Fatalf("init decoy: %v: %s", initErr, out)
+	}
+	t.Setenv("GIT_DIR", filepath.Join(decoy, ".git"))
+
+	got, err := newDispatchShipGitHub(remoteDir).headSHA(ctx, "main")
+	if err != nil {
+		t.Fatalf("headSHA: %v", err)
+	}
+	if got != strings.TrimSpace(string(want)) {
+		t.Errorf("headSHA = %q, want %q", got, strings.TrimSpace(string(want)))
 	}
 }

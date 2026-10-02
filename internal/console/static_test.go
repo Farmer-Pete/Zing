@@ -32,9 +32,13 @@ const (
 // for the five public static assets the allowlist in
 // internal/console/server.go serves (design section 5, 12).
 func TestStaticAssetsServeWithContentType(t *testing.T) {
+	t.Parallel()
 	s := newConsoleTestStore(t)
-	srv := httptest.NewServer(console.New(s, bus.New(), nil, testBindHosts, testConsolePort, newTestLogHandler(t), nil, testPushToken, response.SeverityMinor, ""))
-	defer srv.Close()
+	srv := httptest.NewServer(console.New(s, bus.New(), nil, testBindHosts, testConsolePort, newTestLogHandler(t), nil, testPushToken, response.SeverityMinor, "", nil, ""))
+	// t.Cleanup, not defer: this test's subtests below call t.Parallel(),
+	// which pauses them until this function returns, so a deferred
+	// srv.Close() would close the server before any subtest's GET runs.
+	t.Cleanup(srv.Close)
 
 	tests := []struct {
 		path        string
@@ -49,6 +53,7 @@ func TestStaticAssetsServeWithContentType(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.path, func(t *testing.T) {
+			t.Parallel()
 			resp, err := http.Get(srv.URL + tt.path) //nolint:noctx // a bare GET on a test server needs no deadline
 			if err != nil {
 				t.Fatalf("GET %s: %v", tt.path, err)
@@ -78,9 +83,13 @@ func TestStaticAssetsServeWithContentType(t *testing.T) {
 // tooling, license bookkeeping) but must never be servable (design section
 // 3, 5, 12).
 func TestStaticAssetsRejectForbiddenPaths(t *testing.T) {
+	t.Parallel()
 	s := newConsoleTestStore(t)
-	srv := httptest.NewServer(console.New(s, bus.New(), nil, testBindHosts, testConsolePort, newTestLogHandler(t), nil, testPushToken, response.SeverityMinor, ""))
-	defer srv.Close()
+	srv := httptest.NewServer(console.New(s, bus.New(), nil, testBindHosts, testConsolePort, newTestLogHandler(t), nil, testPushToken, response.SeverityMinor, "", nil, ""))
+	// t.Cleanup, not defer: this test's subtests below call t.Parallel(),
+	// which pauses them until this function returns, so a deferred
+	// srv.Close() would close the server before any subtest's GET runs.
+	t.Cleanup(srv.Close)
 
 	forbidden := []string{
 		"/static/console.test.js",
@@ -90,6 +99,7 @@ func TestStaticAssetsRejectForbiddenPaths(t *testing.T) {
 
 	for _, path := range forbidden {
 		t.Run(path, func(t *testing.T) {
+			t.Parallel()
 			resp, err := http.Get(srv.URL + path) //nolint:noctx // a bare GET on a test server needs no deadline
 			if err != nil {
 				t.Fatalf("GET %s: %v", path, err)
@@ -109,8 +119,9 @@ func TestStaticAssetsRejectForbiddenPaths(t *testing.T) {
 // hand-edit of the vendored file) is caught rather than silently served
 // (design section 0, dependency set).
 func TestMermaidAssetDigestMatchesRecorded(t *testing.T) {
+	t.Parallel()
 	s := newConsoleTestStore(t)
-	srv := httptest.NewServer(console.New(s, bus.New(), nil, testBindHosts, testConsolePort, newTestLogHandler(t), nil, testPushToken, response.SeverityMinor, ""))
+	srv := httptest.NewServer(console.New(s, bus.New(), nil, testBindHosts, testConsolePort, newTestLogHandler(t), nil, testPushToken, response.SeverityMinor, "", nil, ""))
 	defer srv.Close()
 
 	resp, err := http.Get(srv.URL + "/static/mermaid.js") //nolint:noctx // a bare GET on a test server needs no deadline

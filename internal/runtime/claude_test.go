@@ -22,6 +22,11 @@ const (
 	fakeClaudeScript     = "testdata/fake_claude.sh"
 	testModel            = "claude-test-model"
 	testResumedSessionID = "resumed-session-123"
+	// testOAuthToken is the claude_oauth_token value every fake-CLI test in
+	// this file that does not itself test the empty-token refusal
+	// (TestClaude_RefusesEmptyOAuthToken) constructs its Claude with
+	// (PKG9-PLAN.md section 4.6, D26).
+	testOAuthToken = "test-claude-oauth-token"
 )
 
 // testTools and its two derived lists (design section 4.1's tool map) are
@@ -152,7 +157,7 @@ func TestClaude_ArgvFirstTurn(t *testing.T) {
 
 	dir := t.TempDir()
 	req := newFakeRequest(dir, "success")
-	c := NewClaude(fakeClaudeScript)
+	c := NewClaude(fakeClaudeScript, testOAuthToken)
 	res, err := c.Run(context.Background(), req)
 	if err != nil {
 		t.Fatalf("Run: %v", err)
@@ -175,7 +180,7 @@ func TestClaude_ArgvResume(t *testing.T) {
 	dir := t.TempDir()
 	req := newFakeRequest(dir, "success")
 	req.SessionID = testResumedSessionID
-	c := NewClaude(fakeClaudeScript)
+	c := NewClaude(fakeClaudeScript, testOAuthToken)
 	res, err := c.Run(context.Background(), req)
 	if err != nil {
 		t.Fatalf("Run: %v", err)
@@ -197,7 +202,7 @@ func TestClaude_ForbiddenFlagsAbsent(t *testing.T) {
 
 	dir := t.TempDir()
 	req := newFakeRequest(dir, "success")
-	c := NewClaude(fakeClaudeScript)
+	c := NewClaude(fakeClaudeScript, testOAuthToken)
 	if _, err := c.Run(context.Background(), req); err != nil {
 		t.Fatalf("Run: %v", err)
 	}
@@ -224,7 +229,7 @@ func TestClaude_PromptOnStdinNotArgv(t *testing.T) {
 	dir := t.TempDir()
 	req := newFakeRequest(dir, "success")
 	req.Prompt = "SECRET-PROMPT-MARKER the assembled prompt text"
-	c := NewClaude(fakeClaudeScript)
+	c := NewClaude(fakeClaudeScript, testOAuthToken)
 	if _, err := c.Run(context.Background(), req); err != nil {
 		t.Fatalf("Run: %v", err)
 	}
@@ -246,7 +251,7 @@ func TestClaude_EnvFilter(t *testing.T) {
 
 	dir := t.TempDir()
 	req := newFakeRequest(dir, "success", "GITHUB_TOKEN=x", "AWS_SECRET_ACCESS_KEY=y")
-	c := NewClaude(fakeClaudeScript)
+	c := NewClaude(fakeClaudeScript, testOAuthToken)
 	if _, err := c.Run(context.Background(), req); err != nil {
 		t.Fatalf("Run: %v", err)
 	}
@@ -266,6 +271,90 @@ func TestClaude_EnvFilter(t *testing.T) {
 	}
 	if _, ok := env["ZING_UNRELATED_TEST_VAR"]; ok {
 		t.Error("an unrelated parent variable leaked into the child environment")
+	}
+}
+
+// TestClaudeEnvCarriesOAuthToken proves the child's environment holds
+// CLAUDE_CODE_OAUTH_TOKEN exactly once, set to the configured value
+// (PKG9-PLAN.md section 4.6, D26).
+func TestClaudeEnvCarriesOAuthToken(t *testing.T) {
+	t.Parallel()
+	requireUnix(t)
+
+	dir := t.TempDir()
+	req := newFakeRequest(dir, "success")
+	c := NewClaude(fakeClaudeScript, testOAuthToken)
+	if _, err := c.Run(context.Background(), req); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	data := readRecordedFile(t, filepath.Join(dir, "env"))
+	if count := strings.Count(data, "CLAUDE_CODE_OAUTH_TOKEN="); count != 1 {
+		t.Fatalf("CLAUDE_CODE_OAUTH_TOKEN appears %d times in the child env, want 1", count)
+	}
+	env := readRecordedEnv(t, dir)
+	if v, ok := env["CLAUDE_CODE_OAUTH_TOKEN"]; !ok || v != testOAuthToken {
+		t.Errorf("CLAUDE_CODE_OAUTH_TOKEN = %q, ok=%v, want %q", v, ok, testOAuthToken)
+	}
+}
+
+// TestClaudeEnvDropsParentOAuthToken proves a parent process's own
+// CLAUDE_CODE_OAUTH_TOKEN, and one set through req.Env, are both dropped:
+// only Claude's own configured token ever reaches the child (PKG9-PLAN.md
+// section 4.6, D26). Not parallel: t.Setenv cannot combine with
+// t.Parallel.
+func TestClaudeEnvDropsParentOAuthToken(t *testing.T) {
+	requireUnix(t)
+	t.Setenv("CLAUDE_CODE_OAUTH_TOKEN", "parent-token-should-not-reach-child")
+
+	dir := t.TempDir()
+	req := newFakeRequest(dir, "success", "CLAUDE_CODE_OAUTH_TOKEN=req-env-token-should-not-reach-child")
+	c := NewClaude(fakeClaudeScript, testOAuthToken)
+	if _, err := c.Run(context.Background(), req); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	data := readRecordedFile(t, filepath.Join(dir, "env"))
+	if count := strings.Count(data, "CLAUDE_CODE_OAUTH_TOKEN="); count != 1 {
+		t.Fatalf("CLAUDE_CODE_OAUTH_TOKEN appears %d times in the child env, want exactly 1", count)
+	}
+	env := readRecordedEnv(t, dir)
+	if v := env["CLAUDE_CODE_OAUTH_TOKEN"]; v != testOAuthToken {
+		t.Errorf("CLAUDE_CODE_OAUTH_TOKEN = %q, want the configured %q, not a parent or req.Env value", v, testOAuthToken)
+	}
+}
+
+// TestClaudeRefusesEmptyToken proves Claude.Run refuses to start the child
+// at all when its own oauth token is empty (PKG9-PLAN.md section 4.6,
+// D26): no process is started, so this needs no fake CLI and no
+// requireUnix.
+func TestClaudeRefusesEmptyToken(t *testing.T) {
+	t.Parallel()
+
+	c := NewClaude(fakeClaudeScript, "")
+	res, err := c.Run(context.Background(), RunRequest{Job: response.JobClassify, Model: testModel})
+	if !errors.Is(err, ErrNoOAuthToken) {
+		t.Fatalf("err = %v, want ErrNoOAuthToken", err)
+	}
+	if res.ExitCode != -1 {
+		t.Errorf("ExitCode = %d, want -1", res.ExitCode)
+	}
+}
+
+// TestAgentEnvHasNoSSHAuthSock proves allowedParentEnv carries no
+// SSH_AUTH_SOCK (PKG9-PLAN.md section 4.6, D26, N2): a parent's own
+// ssh-agent socket path must never reach an agent's environment, since the
+// ssh-agent socket itself is also denied at the sandbox layer. Not
+// parallel: t.Setenv cannot combine with t.Parallel.
+func TestAgentEnvHasNoSSHAuthSock(t *testing.T) {
+	t.Setenv("SSH_AUTH_SOCK", "/tmp/ssh-agent.sock")
+
+	env := agentEnv(RunRequest{})
+
+	for _, kv := range env {
+		if name, _, _ := strings.Cut(kv, "="); name == "SSH_AUTH_SOCK" {
+			t.Errorf("agentEnv() = %v, want no SSH_AUTH_SOCK entry", env)
+		}
 	}
 }
 
@@ -330,7 +419,7 @@ func TestClaude_FixtureParse_FirstTurn(t *testing.T) {
 
 	dir := t.TempDir()
 	req := newFakeRequest(dir, "success", "FAKE_CLAUDE_RESULT_FILE=testdata/claude_result.json")
-	c := NewClaude(fakeClaudeScript)
+	c := NewClaude(fakeClaudeScript, testOAuthToken)
 	res, err := c.Run(context.Background(), req)
 	if err != nil {
 		t.Fatalf("Run: %v", err)
@@ -357,7 +446,7 @@ func TestClaude_FixtureParse_Resume(t *testing.T) {
 	dir := t.TempDir()
 	req := newFakeRequest(dir, "success", "FAKE_CLAUDE_RESULT_FILE=testdata/claude_result.json")
 	req.SessionID = "prior-session-id"
-	c := NewClaude(fakeClaudeScript)
+	c := NewClaude(fakeClaudeScript, testOAuthToken)
 	res, err := c.Run(context.Background(), req)
 	if err != nil {
 		t.Fatalf("Run: %v", err)
@@ -372,7 +461,7 @@ func TestClaude_FixtureParse_Resume(t *testing.T) {
 func TestClaude_ErrStart(t *testing.T) {
 	t.Parallel()
 
-	c := NewClaude(filepath.Join(t.TempDir(), "no-such-claude-binary"))
+	c := NewClaude(filepath.Join(t.TempDir(), "no-such-claude-binary"), testOAuthToken)
 	res, err := c.Run(context.Background(), RunRequest{Job: response.JobClassify, Model: "m"})
 	if !errors.Is(err, ErrStart) {
 		t.Fatalf("err = %v, want ErrStart", err)
@@ -423,7 +512,7 @@ func TestClaude_ErrTimeout(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 
-	c := NewClaude(fakeClaudeScript)
+	c := NewClaude(fakeClaudeScript, testOAuthToken)
 	res, err := c.Run(ctx, req)
 	if !errors.Is(err, ErrTimeout) {
 		t.Fatalf("err = %v, want ErrTimeout", err)
@@ -451,7 +540,7 @@ func TestClaude_ErrCanceled(t *testing.T) {
 		err error
 	}
 	done := make(chan outcome, 1)
-	c := NewClaude(fakeClaudeScript)
+	c := NewClaude(fakeClaudeScript, testOAuthToken)
 	go func() {
 		res, err := c.Run(ctx, req)
 		done <- outcome{res, err}
@@ -480,7 +569,7 @@ func TestClaude_ExecErrorRealCode(t *testing.T) {
 
 	dir := t.TempDir()
 	req := newFakeRequest(dir, "exit_nonzero", "FAKE_CLAUDE_EXIT_CODE=3")
-	c := NewClaude(fakeClaudeScript)
+	c := NewClaude(fakeClaudeScript, testOAuthToken)
 	res, err := c.Run(context.Background(), req)
 
 	var execErr *ExecError
@@ -501,7 +590,7 @@ func TestClaude_ExecErrorSignal(t *testing.T) {
 
 	dir := t.TempDir()
 	req := newFakeRequest(dir, "signal_kill")
-	c := NewClaude(fakeClaudeScript)
+	c := NewClaude(fakeClaudeScript, testOAuthToken)
 	res, err := c.Run(context.Background(), req)
 
 	var execErr *ExecError
@@ -527,7 +616,7 @@ func TestClaude_OutputTooLarge(t *testing.T) {
 	defer cancel()
 
 	start := time.Now()
-	c := NewClaude(fakeClaudeScript)
+	c := NewClaude(fakeClaudeScript, testOAuthToken)
 	res, err := c.Run(ctx, req)
 	elapsed := time.Since(start)
 
@@ -548,7 +637,7 @@ func TestClaude_StderrMetadata(t *testing.T) {
 
 	dir := t.TempDir()
 	req := newFakeRequest(dir, "big_stderr")
-	c := NewClaude(fakeClaudeScript)
+	c := NewClaude(fakeClaudeScript, testOAuthToken)
 	res, err := c.Run(context.Background(), req)
 	if err != nil {
 		t.Fatalf("Run: %v", err)
@@ -585,7 +674,7 @@ func TestClaudeArgvWithExecPrefix(t *testing.T) {
 	dir := t.TempDir()
 	req := newFakeRequest(dir, "success")
 	req.ExecPrefix = []string{"env", "PREFIX_MARKER=1"}
-	c := NewClaude(fakeClaudeScript)
+	c := NewClaude(fakeClaudeScript, testOAuthToken)
 	res, err := c.Run(context.Background(), req)
 	if err != nil {
 		t.Fatalf("Run: %v", err)
@@ -617,7 +706,7 @@ func TestClaudeKillsGroupAfterExit(t *testing.T) {
 	canary := filepath.Join(t.TempDir(), "canary")
 	req := newFakeRequest(dir, "fork_delay_write", "FAKE_CLAUDE_CANARY="+canary)
 
-	c := NewClaude(fakeClaudeScript)
+	c := NewClaude(fakeClaudeScript, testOAuthToken)
 	if _, err := c.Run(context.Background(), req); err != nil {
 		t.Fatalf("Run: %v", err)
 	}
@@ -658,7 +747,7 @@ func TestClaude_DecodeErrorIsInvalidOutput(t *testing.T) {
 	}
 	req := newFakeRequest(dir, "success", "FAKE_CLAUDE_RESULT_FILE="+resultPath)
 
-	c := NewClaude(fakeClaudeScript)
+	c := NewClaude(fakeClaudeScript, testOAuthToken)
 	res, err := c.Run(context.Background(), req)
 
 	var invalidErr *InvalidOutputError

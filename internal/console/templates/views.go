@@ -17,8 +17,20 @@ package templates
 import (
 	"github.com/a-h/templ"
 
+	"zing/internal/response"
 	"zing/internal/store"
 )
+
+// FeedRow is one message the Feed view renders (design section 6.5):
+// console.displayFeedMessages' own decode of its Body (bug fix, PR #16)
+// plus BodyHTML, that decoded text markdown-rendered (bug fix: raw
+// backticks showed literally in the Feed, the owner's locked-view
+// complaint, design section 22.7).
+type FeedRow struct {
+	ID, TicketID int64
+	Type, Author string
+	BodyHTML     templ.Component
+}
 
 // InboxGroup is one project's cluster of inbox cards, the Inbox view's
 // grouping unit (design section 6.5: "grouped by project, blocking first").
@@ -46,6 +58,12 @@ type NavThread struct {
 // keyboard's chip action.
 type ThreadOption struct {
 	Key, Text string
+
+	// TextHTML is Text run through console.RenderInline (bug fix: raw
+	// backticks in option chips, design section 22.7's owner-reported
+	// locked-view complaint): optionChips renders this, inline-safe markdown,
+	// in place of the plain Text string a <button> used to show verbatim.
+	TextHTML templ.Component
 }
 
 // ThreadItem is one row an item-kind question (perimeter, review) renders:
@@ -103,10 +121,32 @@ type ThreadQuestion struct {
 	// context region and lifecycle pill still show, but console.SaveDraft
 	// already refuses a draft against a closed question (openQuestionForTicketTx),
 	// so a control that let a visitor try anyway was misleading, not just
-	// inert.
+	// inert. As of D30, Interactive is also true for a question already
+	// answered while the ticket still waits on this round (Revisable
+	// below): the owner can still change their pick before Zing resumes the
+	// agent with it.
 	Interactive bool
-	PRURL       string        // merge kind only; empty when the ticket has no PR link yet
-	Plan        *RenderedPlan // gate kind only; nil when the ticket has no stored plan artifact yet
+
+	// Revisable is D30's own narrower flag: true only for a question
+	// state=answered whose ticket still waits on this round. questionGroup
+	// shows its revise note ("Answered. You can change this until Zing
+	// resumes the agent.") only then, distinguishing it from an ordinary
+	// still-open (never answered) question, which Interactive alone cannot.
+	Revisable bool
+
+	// ReopenPlaceholder is D32's own reply-box placeholder for a settled,
+	// still-reopenable planning question (design section 22.12.2, 22.12.4):
+	// "Write to reopen Q1", with "and withdraw the gate" appended while a
+	// gate question is currently open. Empty for every other question --
+	// still open (Interactive's own box renders instead, with the default
+	// placeholder), not a planning question, or a planning question already
+	// locked for good because the ticket left "planning" -- so questionGroup
+	// (thread.templ) treats a non-empty value as "show the reply box anyway,
+	// with this placeholder" alongside Interactive, never instead of it.
+	ReopenPlaceholder string
+
+	PRURL string        // merge kind only; empty when the ticket has no PR link yet
+	Plan  *RenderedPlan // gate kind only; nil when the ticket has no stored plan artifact yet
 
 	// Scenarios and Findings are the gate kind's other two context regions
 	// (design section 7, D8, Task 11), rendered before Plan inside
@@ -117,25 +157,123 @@ type ThreadQuestion struct {
 	// region.
 	Scenarios []ScenarioRow
 	Findings  []FindingRow
+
+	// DraftReply, DraftOption, and DraftItems are the ticket's own
+	// in-progress, unsent draft against this question, if any (bug fix: the
+	// owner typed a reply, it saved, but the thread never rendered it back,
+	// so it looked lost). freeReply (thread.templ) renders DraftReply as
+	// the reply box's starting value. Every field is the zero value when
+	// this question carries no draft. DraftOption and DraftItems feed
+	// optionChips/itemRows only while Interactive (console.effectivePickedOption,
+	// effectivePickedItems); PickedOption and PickedItems below are what
+	// those same controls render once the question is locked.
+	DraftReply  string
+	DraftOption string
+	DraftItems  map[string]response.Decision
+
+	// PickedOption and PickedItems are this question's own sent answer,
+	// decoded once (console.collectSentAnswers) and kept separate from
+	// DraftOption/DraftItems (bug fix: "options vanish once locked" --
+	// optionChips and itemRows used to render only while Interactive, so a
+	// settled or answered question showed no trace of what was picked).
+	// They are set only once the question is no longer Interactive, so
+	// HasDraft (the draft banner's own guard) never sees a sent answer as
+	// an unsent draft. console.effectivePickedOption/effectivePickedItems
+	// are the one place that reads them, falling back to Draft* while the
+	// question is still open.
+	PickedOption string
+	PickedItems  map[string]response.Decision
+
+	// AnsweredHTML is a closed, state=answered question's own sent answer,
+	// pre-rendered as markdown (bug fix: raw backticks showed literally;
+	// design section 22.7 bug-fix table), nil otherwise. questionGroup
+	// renders it as a locked note instead of optionChips/itemRows/freeReply
+	// when !Interactive and this question carries no SettledHTML (a
+	// planning question's own, differently worded locked note).
+	AnsweredHTML templ.Component
+
+	// Turns is every sent (never draft) reply or answer naming this
+	// question as its parent, each pre-rendered as markdown and labeled by
+	// who wrote it (bug fix 10, extended by D31-5): each used to also get
+	// its own standalone ThreadRow, so a typed reply like "Explain these
+	// three options in more detail" showed up as a "reply you" card at the
+	// bottom of the thread, detached from the question it was actually
+	// about. For a planning question (design section 22.1, 22.7) this is
+	// the whole conversation in turn order -- owner picks and texts, the
+	// agent's own replies, each tagged Queued when the owner sent it but no
+	// run has taken delivery of it yet -- built from
+	// store.PlanningConversation; for every other kind it is each sent
+	// reply (never an answer -- AnsweredHTML already shows the pick, so
+	// repeating it here was the "duplicate Answered: plus You:" bug), in
+	// message order, always labeled "You".
+	Turns []Turn
+
+	// SettledLabel and SettledHTML are a settled planning question's own
+	// closing line (design section 22.7 item 6): "Settled by <agent>:" and
+	// the agent's decision, pre-rendered as markdown. Both are zero for
+	// every other kind, and for a planning question the agent settled with
+	// no decision text to show (the owner-abandoned path, design section
+	// 22.3's resolved/system row): that row renders as an ordinary,
+	// unlabeled Turn ("Resolved.") instead, so a settled thread is never
+	// left with an empty closing line.
+	SettledLabel string
+	SettledHTML  templ.Component
 }
 
-// ThreadRow is one message the read-only Thread view renders: a state
-// separator (Type == "state"), or a plain row (update, escalation, or any
-// other type) with Body as its already-decoded display text, or, when
-// Question is non-nil, a read-only question group in place of Body (design
-// section 6.6).
+// Turn is one line of a question's own conversation (design section 22.7):
+// an owner pick or text, the agent's reply, or -- unlabeled, Author "" --
+// a bare system note such as "Resolved." (design/threading-design.md (d)'s
+// fallback for a row placement put inside a question but that carries no
+// turn of its own, bug 14). BodyHTML is always markdown-rendered, even for
+// a plain reply, so a backtick in it never shows raw (bug fix). Queued is
+// meaningful only for a planning question's own owner turns: true when the
+// owner sent it but no run has yet taken delivery of it (design section
+// 22.3, 22.7 item 5).
+type Turn struct {
+	Author   string
+	BodyHTML templ.Component
+	Queued   bool
+}
+
+// HasDraft reports whether this question carries any unsent draft -- a
+// reply, an option pick, or at least one item pick (bug fix): Thread's own
+// banner (thread.templ's draftBanner) shows only when some question in the
+// ticket does.
+func (q *ThreadQuestion) HasDraft() bool {
+	return q.DraftReply != "" || q.DraftOption != "" || len(q.DraftItems) > 0
+}
+
+// WaitProgress is the current round's answered-vs-total count (bug fix:
+// "After a partial batch, Zing keeps the ticket waiting until every open
+// question is answered, which is correct design, but nothing says so").
+// console.buildWaitProgress computes it from the ticket's own waiting_on and
+// its questions' states; Total == 0 means nothing to show (Thread,
+// thread.templ) -- the ticket is not currently question-blocked.
+type WaitProgress struct {
+	Answered, Total int
+}
+
+// ThreadRow is one message the read-only Thread view renders: a read-only
+// question group in place of Body when Question is non-nil (a "question" or
+// "escalation" row always opens its own thread this way, design section
+// 6.6); a one-line timeline divider when Divider is true -- a state
+// transition, or any other unparented row this view does not otherwise
+// expect, including a recognized or unrecognized "update" marker
+// (design/threading-design.md (d), task D31-4a: "placement by structure,
+// not by type" -- any row with a parent_id renders inside its parent's
+// thread instead of reaching here at all, so the only rows that ever become
+// a ThreadRow of their own are a question, an escalation, a divider, or the
+// one allowed card below); or a plain message card -- only ever an
+// unparented owner reply, buildThreadRows' sole exception to the divider
+// default.
 type ThreadRow struct {
 	ID       int64
 	Type     string
 	Author   string
 	Body     string
+	Divider  bool
 	Question *ThreadQuestion
 }
-
-// IsState reports whether this row is a state-transition separator, the one
-// row type the Thread view centers rather than left-aligning (design
-// section 6.6).
-func (r ThreadRow) IsState() bool { return r.Type == "state" }
 
 // PhaseDot is one state in the rail's Phase section (design section 6.11):
 // machine.States.Order drawn as dots, each before, at, or after the
@@ -156,13 +294,18 @@ type PhaseDot struct {
 // payload, shown inline through a <details> disclosure when Present: design
 // section 7.1's route table names no artifact-viewing endpoint, so "links
 // to open it" (design section 6.11) is an in-page disclosure rather than a
-// second page (console.buildArtifactsRail, rail.go).
+// second page (console.buildArtifactsRail, rail.go). RenderedHTML is set
+// only for the Plan slot (bug fix 16: the rail showed the plan artifact as
+// raw indented JSON): console.buildArtifactsRail runs it through the same
+// RenderPlan the gate's own context region uses, and artifactsRail
+// (rail.templ) prefers it over PayloadText when it is non-nil.
 type ArtifactSlot struct {
-	Label       string
-	Present     bool
-	Version     int
-	AfterPhase  string
-	PayloadText string
+	Label        string
+	Present      bool
+	Version      int
+	AfterPhase   string
+	PayloadText  string
+	RenderedHTML templ.Component
 }
 
 // RunRail is the rail's Run section (design section 6.11): the newest
@@ -192,6 +335,14 @@ type LogRail struct {
 	Level string
 	Debug bool
 	Lines []LogLine
+
+	// StartedAt is the server's own start time, pre-formatted HH:MM (bug
+	// fix, console.buildLogRail): Lines is empty both when the ring
+	// genuinely holds nothing yet and right after a `zing serve` restart,
+	// since the ring lives in memory and a restart always starts it empty.
+	// logRail's empty state names StartedAt so the second case reads as
+	// "quiet since the restart", not "broken".
+	StartedAt string
 }
 
 // AlertLine is one row the #alerts region renders (design section 6a, D8):

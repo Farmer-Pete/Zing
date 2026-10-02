@@ -15,6 +15,7 @@ import (
 // 409 conflict path (a question already resolved is rejected, nothing
 // written) (design section 6.7, 7.1).
 func TestDraft_SucceedsThenConflictsOnAClosedQuestion(t *testing.T) {
+	t.Parallel()
 	s := newConsoleTestStore(t)
 	ticketID := seedTicket(t, s, "fake#1", "Add a hello endpoint")
 	questionID := seedOpenQuestion(t, s, ticketID)
@@ -51,8 +52,8 @@ func TestDraft_SucceedsThenConflictsOnAClosedQuestion(t *testing.T) {
 	// same question now hits SaveDraft's closed-question conflict.
 	sendResp := doRequest(t, mutationRequest(t, srv, "/send", fmt.Sprintf(`{"ticket":%d}`, ticketID)))
 	_ = sendResp.Body.Close()
-	if sendResp.StatusCode != http.StatusNoContent {
-		t.Fatalf("POST /send status = %d, want 204", sendResp.StatusCode)
+	if sendResp.StatusCode != http.StatusOK {
+		t.Fatalf("POST /send status = %d, want 200", sendResp.StatusCode)
 	}
 
 	resp2 := doRequest(t, mutationRequest(t, srv, "/draft", body))
@@ -71,12 +72,14 @@ func TestDraft_SucceedsThenConflictsOnAClosedQuestion(t *testing.T) {
 // section 6.7): malformed JSON and an unknown field are 400, and a body
 // padded well past the 64 KiB cap is 413.
 func TestDraft_RejectsMalformedAndOversizedBodies(t *testing.T) {
+	t.Parallel()
 	s := newConsoleTestStore(t)
 	ticketID := seedTicket(t, s, "fake#1", "Add a hello endpoint")
 
 	srv, _ := newMutationTestServer(t, s, bus.New(), newTestLogHandler(t))
 
 	t.Run("malformed JSON", func(t *testing.T) {
+		t.Parallel()
 		resp := doRequest(t, mutationRequest(t, srv, "/draft", `{not json`))
 		defer func() { _ = resp.Body.Close() }()
 		if resp.StatusCode != http.StatusBadRequest {
@@ -85,6 +88,7 @@ func TestDraft_RejectsMalformedAndOversizedBodies(t *testing.T) {
 	})
 
 	t.Run("unknown field", func(t *testing.T) {
+		t.Parallel()
 		body := fmt.Sprintf(`{"ticket":%d,"text":"hi","bogus":true}`, ticketID)
 		resp := doRequest(t, mutationRequest(t, srv, "/draft", body))
 		defer func() { _ = resp.Body.Close() }()
@@ -94,6 +98,7 @@ func TestDraft_RejectsMalformedAndOversizedBodies(t *testing.T) {
 	})
 
 	t.Run("text over 8000 characters", func(t *testing.T) {
+		t.Parallel()
 		body := fmt.Sprintf(`{"ticket":%d,"text":%q}`, ticketID, strings.Repeat("x", 8001))
 		resp := doRequest(t, mutationRequest(t, srv, "/draft", body))
 		defer func() { _ = resp.Body.Close() }()
@@ -103,6 +108,7 @@ func TestDraft_RejectsMalformedAndOversizedBodies(t *testing.T) {
 	})
 
 	t.Run("oversized body", func(t *testing.T) {
+		t.Parallel()
 		filler := strings.Repeat("x", 80<<10) // past the 64 KiB cap
 		body := fmt.Sprintf(`{"ticket":%d,"text":%q}`, ticketID, filler)
 		resp := doRequest(t, mutationRequest(t, srv, "/draft", body))
@@ -120,6 +126,7 @@ func TestDraft_RejectsMalformedAndOversizedBodies(t *testing.T) {
 // messages.ticket_id foreign key and an untyped store error the handler
 // mapped to 500.
 func TestDraft_ThreadReplyAgainstMissingTicketReturns409(t *testing.T) {
+	t.Parallel()
 	s := newConsoleTestStore(t)
 	srv, _ := newMutationTestServer(t, s, bus.New(), newTestLogHandler(t))
 
@@ -140,6 +147,7 @@ func TestDraft_ThreadReplyAgainstMissingTicketReturns409(t *testing.T) {
 // which does not exist at the top level), so a body like `{"ticket":1}}`
 // used to decode as valid.
 func TestDraft_RejectsTrailingDataAfterTheJSONBody(t *testing.T) {
+	t.Parallel()
 	s := newConsoleTestStore(t)
 	ticketID := seedTicket(t, s, "fake#1", "Add a hello endpoint")
 	srv, _ := newMutationTestServer(t, s, bus.New(), newTestLogHandler(t))
@@ -154,6 +162,7 @@ func TestDraft_RejectsTrailingDataAfterTheJSONBody(t *testing.T) {
 		{"trailing garbage", fmt.Sprintf(`{"ticket":%d,"text":"hi"} garbage`, ticketID)},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
 			resp := doRequest(t, mutationRequest(t, srv, "/draft", tc.body))
 			defer func() { _ = resp.Body.Close() }()
 			if resp.StatusCode != http.StatusBadRequest {
@@ -164,9 +173,13 @@ func TestDraft_RejectsTrailingDataAfterTheJSONBody(t *testing.T) {
 }
 
 // TestSend_SucceedsThenConflictsWhenEmpty proves POST /send's happy path
-// (204, drafts flip to sent) and that sending again with nothing left
-// drafted is 409 Empty (design section 6.7, 7.1).
+// (200, drafts flip to sent, a plain "Sent N answer(s)." body) and that
+// sending again with nothing left drafted is 409 Empty with a "Nothing to
+// send." body (design section 6.7, 7.1; bug fix: Cmd+Enter sent the batch,
+// but the console showed nothing, so the owner thought it had done
+// nothing -- POST /send's 204 carried no way to say what happened).
 func TestSend_SucceedsThenConflictsWhenEmpty(t *testing.T) {
+	t.Parallel()
 	s := newConsoleTestStore(t)
 	ticketID := seedTicket(t, s, "fake#1", "Add a hello endpoint")
 	questionID := seedOpenQuestion(t, s, ticketID)
@@ -182,9 +195,16 @@ func TestSend_SucceedsThenConflictsWhenEmpty(t *testing.T) {
 
 	sendBody := fmt.Sprintf(`{"ticket":%d}`, ticketID)
 	sendResp := doRequest(t, mutationRequest(t, srv, "/send", sendBody))
+	sendRespBody, err := io.ReadAll(sendResp.Body)
 	_ = sendResp.Body.Close()
-	if sendResp.StatusCode != http.StatusNoContent {
-		t.Fatalf("first POST /send status = %d, want 204", sendResp.StatusCode)
+	if err != nil {
+		t.Fatalf("read first POST /send body: %v", err)
+	}
+	if sendResp.StatusCode != http.StatusOK {
+		t.Fatalf("first POST /send status = %d, want 200", sendResp.StatusCode)
+	}
+	if got := string(sendRespBody); got != "Sent 1 message." {
+		t.Errorf("first POST /send body = %q, want %q", got, "Sent 1 message.")
 	}
 
 	ticket, err := s.GetTicket(t.Context(), ticketID)
@@ -196,9 +216,16 @@ func TestSend_SucceedsThenConflictsWhenEmpty(t *testing.T) {
 	}
 
 	sendResp2 := doRequest(t, mutationRequest(t, srv, "/send", sendBody))
-	defer func() { _ = sendResp2.Body.Close() }()
+	sendRespBody2, err := io.ReadAll(sendResp2.Body)
+	_ = sendResp2.Body.Close()
+	if err != nil {
+		t.Fatalf("read second POST /send body: %v", err)
+	}
 	if sendResp2.StatusCode != http.StatusConflict {
 		t.Fatalf("second POST /send status = %d, want 409 (nothing left to send)", sendResp2.StatusCode)
+	}
+	if got := strings.TrimSpace(string(sendRespBody2)); got != "Nothing to send." {
+		t.Errorf("second POST /send body = %q, want %q", got, "Nothing to send.")
 	}
 }
 
@@ -209,6 +236,7 @@ func TestSend_SucceedsThenConflictsWhenEmpty(t *testing.T) {
 // collapse the open question group after every pick. POST /send against the
 // same ticket, by contrast, still publishes once the batch actually sends.
 func TestDraft_DoesNotPublishWhileSendDoes(t *testing.T) {
+	t.Parallel()
 	s := newConsoleTestStore(t)
 	ticketID := seedTicket(t, s, "fake#1", "Add a hello endpoint")
 	questionID := seedOpenQuestion(t, s, ticketID)
@@ -233,8 +261,8 @@ func TestDraft_DoesNotPublishWhileSendDoes(t *testing.T) {
 
 	sendResp := doRequest(t, mutationRequest(t, srv, "/send", fmt.Sprintf(`{"ticket":%d}`, ticketID)))
 	_ = sendResp.Body.Close()
-	if sendResp.StatusCode != http.StatusNoContent {
-		t.Fatalf("POST /send status = %d, want 204", sendResp.StatusCode)
+	if sendResp.StatusCode != http.StatusOK {
+		t.Fatalf("POST /send status = %d, want 200", sendResp.StatusCode)
 	}
 
 	select {
@@ -247,6 +275,7 @@ func TestDraft_DoesNotPublishWhileSendDoes(t *testing.T) {
 // TestRead_MarksOneMessageRead proves POST /read sets read_at on the named
 // message and publishes (design section 6.8, 7.1).
 func TestRead_MarksOneMessageRead(t *testing.T) {
+	t.Parallel()
 	s := newConsoleTestStore(t)
 	ticketID := seedTicket(t, s, "fake#1", "Add a hello endpoint")
 	msgID := seedUnreadUpdate(t, s, ticketID, "progress")

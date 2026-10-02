@@ -7,6 +7,7 @@ import (
 
 	"zing/internal/bus"
 	"zing/internal/console"
+	"zing/internal/store"
 )
 
 // splitQuestionGroups splits one rendered #main thread frame into its
@@ -45,13 +46,15 @@ func findGroup(t *testing.T, groups []string, title string) string {
 // TestQuestionKindsRenderTheirControls proves the Task 6 dispatch table
 // (design section 6.6): the four option kinds (question, gate, split,
 // merge) render numbered option chips, the two item kinds (perimeter,
-// review) render one row per item with all four decision controls and the
-// item's ref, and every kind renders a free reply input wired to
-// console.js's postDraft contract (data-draft-ticket, data-draft-question).
+// review) render one row per item with their own decision controls and the
+// item's ref (perimeter: accept, reject; review: accept, drop, discuss --
+// design section 6.5, 9.2), and every kind renders a free reply input wired
+// to console.js's postDraft contract (data-draft-ticket, data-draft-question).
 // It seeds all six kinds through SeedQuestionFixtures -- the real store, the
 // real validated inserts, no hand-built payload -- then reads them back
 // over the live /stream the browser itself uses.
 func TestQuestionKindsRenderTheirControls(t *testing.T) {
+	t.Parallel()
 	s := newConsoleTestStore(t)
 	ticketID := seedTicket(t, s, "fake#1", "Add a hello endpoint")
 	if err := console.SeedQuestionFixtures(t.Context(), s, ticketID); err != nil {
@@ -75,6 +78,7 @@ func TestQuestionKindsRenderTheirControls(t *testing.T) {
 	ticketAttr := `data-draft-ticket="` + strconv.FormatInt(ticketID, 10) + `"`
 
 	t.Run("question kind renders two numbered chips and a free reply", func(t *testing.T) {
+		t.Parallel()
 		g := findGroup(t, groups, "How should the greeting read?")
 		assertChip(t, g, 1, "a")
 		assertChip(t, g, 2, "b")
@@ -83,6 +87,7 @@ func TestQuestionKindsRenderTheirControls(t *testing.T) {
 	})
 
 	t.Run("gate kind renders its placeholder context plus chips", func(t *testing.T) {
+		t.Parallel()
 		g := findGroup(t, groups, "Approve the plan?")
 		if !strings.Contains(g, `class="q-context gate-context"`) {
 			t.Errorf("gate group missing its gate-context placeholder; got:\n%s", g)
@@ -93,6 +98,7 @@ func TestQuestionKindsRenderTheirControls(t *testing.T) {
 	})
 
 	t.Run("split kind renders its placeholder context plus chips", func(t *testing.T) {
+		t.Parallel()
 		g := findGroup(t, groups, "Split this ticket?")
 		if !strings.Contains(g, `class="q-context split-context"`) {
 			t.Errorf("split group missing its split-context placeholder; got:\n%s", g)
@@ -103,6 +109,7 @@ func TestQuestionKindsRenderTheirControls(t *testing.T) {
 	})
 
 	t.Run("merge kind renders its PR-link context plus chips", func(t *testing.T) {
+		t.Parallel()
 		g := findGroup(t, groups, "Merge the PR?")
 		if !strings.Contains(g, `class="q-context merge-context"`) {
 			t.Errorf("merge group missing its merge-context region; got:\n%s", g)
@@ -116,6 +123,7 @@ func TestQuestionKindsRenderTheirControls(t *testing.T) {
 	})
 
 	t.Run("perimeter kind renders one row per item with accept and reject only", func(t *testing.T) {
+		t.Parallel()
 		g := findGroup(t, groups, "Confirm the file perimeter")
 		assertItemRowDecisions(t, g, "internal/hello/handler.go", "accept", "reject")
 		assertItemRowDecisions(t, g, "internal/hello/handler_test.go", "accept", "reject")
@@ -126,10 +134,11 @@ func TestQuestionKindsRenderTheirControls(t *testing.T) {
 		}
 	})
 
-	t.Run("review kind renders one row per item with all four decisions", func(t *testing.T) {
+	t.Run("review kind renders one row per item with accept, drop, and discuss", func(t *testing.T) {
+		t.Parallel()
 		g := findGroup(t, groups, "Triage the review findings")
-		assertItemRow(t, g, "F1")
-		assertItemRow(t, g, "F2")
+		assertItemRowDecisions(t, g, "F1", reviewItemDecisions...)
+		assertItemRowDecisions(t, g, "F2", reviewItemDecisions...)
 		assertFreeReply(t, g, ticketAttr)
 		if strings.Contains(g, `class="chips"`) {
 			t.Errorf("review (an item kind) must not render option chips; got:\n%s", g)
@@ -164,22 +173,29 @@ func assertFreeReply(t *testing.T, group, ticketAttr string) {
 	}
 }
 
+// The design section 8 closed set's own four decision strings, named once
+// (goconst) since allItemDecisions and reviewItemDecisions both spell them.
+const (
+	decisionAccept  = "accept"
+	decisionReject  = "reject"
+	decisionDrop    = "drop"
+	decisionDiscuss = "discuss"
+)
+
 // allItemDecisions is the design section 8 closed set, in the order the
 // controls render.
-var allItemDecisions = []string{"accept", "reject", "drop", "discuss"}
+var allItemDecisions = []string{decisionAccept, decisionReject, decisionDrop, decisionDiscuss}
 
-// assertItemRow fails the test unless group contains an item row for ref,
-// carrying its ref and all four closed-set decision controls (the review
-// kind's own set).
-func assertItemRow(t *testing.T, group, ref string) {
-	t.Helper()
-	assertItemRowDecisions(t, group, ref, allItemDecisions...)
-}
+// reviewItemDecisions is the review kind's own closed set (design section
+// 6.5, 9.2, Task 11): accept, drop, and discuss, matching
+// response.FindingDecision -- never reject, which stays perimeter's alone.
+var reviewItemDecisions = []string{decisionAccept, decisionDrop, decisionDiscuss}
 
 // assertItemRowDecisions fails the test unless group contains an item row
 // for ref carrying exactly want's decision controls: every one of want
 // present, and every closed-set decision not in want absent (design section
-// 9.2: perimeter renders accept and reject only; review keeps all four).
+// 9.2: perimeter renders accept and reject only; review renders accept,
+// drop, and discuss).
 func assertItemRowDecisions(t *testing.T, group, ref string, want ...string) {
 	t.Helper()
 	if !strings.Contains(group, `data-item-ref="`+ref+`"`) {
@@ -234,17 +250,61 @@ func perimeterAndReviewGroups(t *testing.T) (perimeter, review string) {
 // narrowing (Task 10): a perimeter question's item rows carry accept and
 // reject only, never drop or discuss.
 func TestPerimeterRendersAcceptAndReject(t *testing.T) {
+	t.Parallel()
 	perimeter, _ := perimeterAndReviewGroups(t)
 	assertItemRowDecisions(t, perimeter, "internal/hello/handler.go", "accept", "reject")
 	assertItemRowDecisions(t, perimeter, "internal/hello/handler_test.go", "accept", "reject")
 	assertItemRowDecisions(t, perimeter, "cmd/zing/main.go", "accept", "reject")
 }
 
-// TestReviewRendersFourDecisions proves design section 9.2's own contrast
-// case: a review question keeps all four decisions, unaffected by
-// perimeter's narrowing.
-func TestReviewRendersFourDecisions(t *testing.T) {
+// TestReviewRendersThreeDecisions proves design section 6.5's own review
+// decision set (accept, drop, discuss): a review question's item rows carry
+// exactly those three controls, never perimeter's reject.
+func TestReviewRendersThreeDecisions(t *testing.T) {
+	t.Parallel()
 	_, review := perimeterAndReviewGroups(t)
-	assertItemRowDecisions(t, review, "F1", allItemDecisions...)
-	assertItemRowDecisions(t, review, "F2", allItemDecisions...)
+	assertItemRowDecisions(t, review, "F1", reviewItemDecisions...)
+	assertItemRowDecisions(t, review, "F2", reviewItemDecisions...)
+}
+
+// TestMergeQuestionShowsPRLink proves mergeContext's own real-rendering
+// branch (views.go's buildThreadQuestion, templates/thread.templ): once
+// ticket.PRURL is set, the merge question's own context region renders the
+// PR link instead of "No PR yet." (M4 task 8, deferred from task 9's own
+// TestQuestionKindsRenderTheirControls, whose merge subtest only proves the
+// empty-state fallback -- that fixture's ticket carries no PRURL at all).
+func TestMergeQuestionShowsPRLink(t *testing.T) {
+	t.Parallel()
+	s := newConsoleTestStore(t)
+	projectID, err := s.EnsureProject(t.Context(), testProject)
+	if err != nil {
+		t.Fatalf("EnsureProject: %v", err)
+	}
+	prURL := "https://github.com/x/zing/pull/7"
+	ticketID, err := s.InsertTicket(t.Context(), store.Ticket{
+		ProjectID: projectID, TrackerRef: "fake#2", Title: "Add a hello endpoint", State: "queued", PRURL: &prURL,
+	})
+	if err != nil {
+		t.Fatalf("InsertTicket: %v", err)
+	}
+	if err := console.SeedQuestionFixtures(t.Context(), s, ticketID); err != nil {
+		t.Fatalf("SeedQuestionFixtures: %v", err)
+	}
+
+	srv := newTestServer(t, s, bus.New(), nil, newTestLogHandler(t))
+
+	resp, r, cancel := openStream(t, srv.URL, "thread", ticketID, 0)
+	defer cancel()
+	defer func() { _ = resp.Body.Close() }()
+
+	_, main, _, _ := readInitialFrames(t, r)
+	groups := splitQuestionGroups(t, main)
+	g := findGroup(t, groups, "Merge the PR?")
+
+	if !strings.Contains(g, prURL) {
+		t.Errorf("merge group missing the PR link %q; got:\n%s", prURL, g)
+	}
+	if strings.Contains(g, "No PR yet.") {
+		t.Errorf("merge group with ticket.PRURL set should not show the empty state; got:\n%s", g)
+	}
 }

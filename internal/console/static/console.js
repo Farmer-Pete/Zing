@@ -22,14 +22,21 @@ import {
 	isInputContext,
 	isSendChord,
 	sendChordToken,
+	sendChordLabel,
 	resolveToken,
 	stepFocus,
 	reduceNav,
 	stepComposerIndex,
 	buildChipDraftBody,
 	buildItemDraftBody,
+	unsavedReplyBody,
 	collectPatchWork,
 	describeAction,
+	nextPendingNav,
+	draftConflictMessage,
+	TOAST_DISMISS_MS,
+	scheduleToastDismiss,
+	clearReplyInputs,
 } from './keyboard.mjs';
 
 // defaultNav is the shell's own data-signals default (templates/shell.templ:
@@ -64,6 +71,20 @@ const state = {
 	previousFocusableIDs: [],
 	railOpen: false,
 	helpOpen: false,
+	// streamConnected and pendingNav (bug fix): #stream-ctl's data-init
+	// fires the first GET /stream before console.js's own script can prove
+	// Datastar has finished wiring up #stream-ctl's data-on:zing-nav
+	// listener (and every nav-link's data-on:click). A zing-nav dispatched
+	// in that window -- the first click on a Threads-sidebar row right
+	// after a page load -- could be caught by nothing and silently
+	// dropped, leaving the main pane on the project list until a second
+	// click. streamConnected flips true the first time the patch observer
+	// sees a real mutation from the live stream (installPatchObserver's
+	// markStreamConnected), proving the page is fully wired up; pendingNav
+	// holds the last nav seen before that point so it can be re-applied
+	// once it is.
+	streamConnected: false,
+	pendingNav: null,
 };
 
 // ---- keys.json loading -----------------------------------------------
@@ -138,6 +159,31 @@ function onZingNav(event) {
 	if (changed) {
 		setFocusedID('');
 		state.previousFocusableIDs = [];
+	}
+	// nextPendingNav (keyboard.mjs, bug fix): remember this destination
+	// until the stream proves connected, in case Datastar's own
+	// data-on:zing-nav listener was not actually bound yet to act on the
+	// event this handler just saw.
+	state.pendingNav = nextPendingNav(state.streamConnected, nav);
+}
+
+// markStreamConnected flips state.streamConnected on the first real patch
+// from the live stream (installPatchObserver's MutationObserver callback,
+// never its one-time initial scan) and re-dispatches any nav queued before
+// that point (bug fix: see state.pendingNav above). dispatchNav, not
+// navigate, because the destination already went through reduceNav once;
+// re-running it through onZingNav a second time is what actually applies
+// it now that the stream -- and so Datastar's own listener -- is known to
+// be live.
+function markStreamConnected() {
+	if (state.streamConnected) {
+		return;
+	}
+	state.streamConnected = true;
+	if (state.pendingNav) {
+		const pending = state.pendingNav;
+		state.pendingNav = null;
+		dispatchNav(pending, false);
 	}
 }
 
@@ -284,32 +330,92 @@ async function postJSON(path, body) {
 	}
 }
 
+// findDraftConflictEl locates the reply box's own conflict span
+// (thread.templ's freeReply: a ".draft-conflict" sibling inside the same
+// ".reply" wrapper), the element showDraftConflict/clearDraftConflict
+// below fill in or empty.
+function findDraftConflictEl(inputEl) {
+	return inputEl.closest('.reply')?.querySelector('.draft-conflict') ?? null;
+}
+
+function showDraftConflict(inputEl, message) {
+	const el = findDraftConflictEl(inputEl);
+	if (el) {
+		el.textContent = message;
+	}
+}
+
+// findDraftSavedEl/showDraftSaved mirror findDraftConflictEl/
+// showDraftConflict above, for freeReply's own ".draft-saved" span (bug fix
+// 11): the one place postDraftRequest reports a successful save back to the
+// box it came from.
+function findDraftSavedEl(inputEl) {
+	return inputEl.closest('.reply')?.querySelector('.draft-saved') ?? null;
+}
+
+function showDraftSaved(inputEl, message) {
+	const el = findDraftSavedEl(inputEl);
+	if (el) {
+		el.textContent = message;
+	}
+}
+
 // postDraft handles Enter inside a question input (design section 6.4,
 // 6.7): data-draft-ticket/data-draft-question on the focused input, its
-// value as the free-text reply. It clears the input synchronously, the
-// moment the draft is queued, rather than waiting on postJSON's fetch to
-// resolve (PR #16 review, cubic console.js:255): clearing in the async
-// .then left a window where fast typing after Enter landed in the input
-// before the response came back, and the old callback then wiped out that
-// new, unsent text along with the already-sent draft. Clearing up front
-// means a failed POST (postJSON's own console.error) loses the input's
-// echo of what was sent, which is an acceptable trade against silently
-// eating a later keystroke.
+// value as the free-text reply.
+//
+// It leaves the input's text in place (bug fix 11: Enter saved the draft --
+// the serve log and the store both showed it -- but the box emptied and
+// stayed empty, looking like the reply was lost). The earlier code cleared
+// the box synchronously on Enter on the assumption that the live /stream's
+// next patch would refill it from the now-saved draft, the way a full page
+// load already does (01e4713); it doesn't, by design (answer.go's
+// handleDraft: a draft publishes no bus wake, so saving one never patches
+// #main), so the clear was never undone. Leaving the text alone sidesteps
+// that gap entirely: the box already shows what got saved, postDraftRequest
+// below reports success beside it (.draft-saved, "Saved."), and the box is
+// only ever cleared by a real re-render -- after a successful send
+// (sendBatch), when the draft drops out of the ticket's in-progress answer
+// and the next patch renders the box empty.
 function postDraft() {
 	const el = document.activeElement;
-	const ticket = el?.dataset?.draftTicket;
-	const question = el?.dataset?.draftQuestion;
-	if (!ticket || typeof el.value !== 'string' || el.value === '') {
+	const body = unsavedReplyBody(el);
+	if (!body) {
 		return false;
 	}
-	const text = el.value;
-	el.value = '';
-	postJSON('/draft', {
-		ticket: Number(ticket),
-		question: question ? Number(question) : null,
-		text,
-	});
+	showDraftConflict(el, '');
+	showDraftSaved(el, '');
+	postDraftRequest(el, body.ticket, body.question, body.text);
 	return true;
+}
+
+// postDraftRequest reports its outcome only if el still holds the same text
+// it was sent with: the owner may have kept typing while the request was in
+// flight, and a stale "Saved."/conflict for text that is no longer in the
+// box would be as misleading as the bug this fixes. It resolves true when
+// the draft saved, so sendBatch can wait for the save before it sends.
+async function postDraftRequest(el, ticket, question, text) {
+	try {
+		const resp = await fetch('/draft', {
+			method: 'POST',
+			headers: { 'Content-Type': 'application/json', 'Datastar-Request': 'true' },
+			body: JSON.stringify({ ticket, question, text }),
+		});
+		if (el.value !== text) {
+			return resp.ok;
+		}
+		if (resp.ok) {
+			showDraftSaved(el, 'Saved.');
+			return true;
+		}
+		console.error('console.js: POST /draft', resp.status);
+		const reason = (await resp.text()).trim();
+		showDraftConflict(el, draftConflictMessage(reason));
+		return false;
+	} catch (err) {
+		console.error('console.js: POST /draft', err);
+		return false;
+	}
 }
 
 // installChipActivation wires a delegated click listener for the
@@ -357,15 +463,96 @@ function pickChip(n) {
 	return true;
 }
 
-// sendBatch handles the send chord (design section 6.4, 6.7). POST /send
-// does not exist until Task 7; wired ahead of it against the ticket this
-// module's own nav state already tracks.
+// sendResultSelector/showSendResult (bug fix: Cmd+Enter sent the batch, but
+// nothing in the console said so, so the owner thought it had done
+// nothing). The banner is appended to document.body, a sibling of #main and
+// #rail rather than a child of either (buildHelpOverlay, below, uses the
+// same placement): POST /send's own bus.Publish wakes /stream almost
+// immediately, and a #main patch lands right after the response this
+// banner is built from, so an element server-rendered inside #main would
+// be morphed back to empty before a reader could see it. A plain,
+// client-owned node outside every patched region has nothing to race.
+//
+// sendResultTimerID (bug fix 12: the toast never went away on its own, so a
+// "Sent 1 answer." from minutes ago kept looking current) tracks the one
+// pending auto-dismiss across calls. showSendResult reuses the single
+// #send-result element and always overwrites its text, so a second toast
+// already replaces the first on screen; scheduleToastDismiss (keyboard.mjs)
+// additionally cancels the first toast's own dismiss timer, so it cannot
+// fire after the fact and remove the second toast early.
+let sendResultTimerID = null;
+
+function showSendResult(text) {
+	let el = document.getElementById('send-result');
+	if (!el) {
+		el = document.createElement('div');
+		el.id = 'send-result';
+		el.className = 'send-result';
+		el.setAttribute('role', 'status');
+		el.setAttribute('aria-live', 'polite');
+		document.body.appendChild(el);
+	}
+	el.textContent = text;
+	sendResultTimerID = scheduleToastDismiss(
+		sendResultTimerID,
+		() =>
+			setTimeout(() => {
+				el.textContent = '';
+				sendResultTimerID = null;
+			}, TOAST_DISMISS_MS),
+		clearTimeout,
+	);
+}
+
+// sendBatch handles the send chord (design section 6.4, 6.7): POST /send
+// against the ticket this module's own nav state already tracks, then
+// shows its plain-text result (sendResultText, answer.go) via
+// showSendResult -- "Sent N answer(s)." on 200, or the 409 body ("Nothing
+// to send.") otherwise -- so Cmd+Enter is never silent.
+//
+// Text typed into the focused reply box but not yet saved with Enter is
+// saved first (unsavedReplyBody), so typing then pressing Cmd+Enter sends
+// it. A failed save shows its conflict beside the box and sends nothing.
 function sendBatch() {
 	if (!state.nav.open) {
 		return false;
 	}
-	postJSON('/send', { ticket: state.nav.open });
+	postSendBatch(state.nav.open, document.activeElement);
 	return true;
+}
+
+async function postSendBatch(ticket, focusedEl) {
+	const unsaved = unsavedReplyBody(focusedEl);
+	if (unsaved) {
+		showDraftConflict(focusedEl, '');
+		showDraftSaved(focusedEl, '');
+		const saved = await postDraftRequest(focusedEl, unsaved.ticket, unsaved.question, unsaved.text);
+		if (!saved) {
+			return;
+		}
+	}
+	try {
+		const resp = await fetch('/send', {
+			method: 'POST',
+			headers: { 'Content-Type': 'application/json', 'Datastar-Request': 'true' },
+			body: JSON.stringify({ ticket }),
+		});
+		const text = await resp.text();
+		showSendResult(text);
+		if (resp.ok) {
+			// A 200 means every open draft just sent, so its own reply box
+			// should not keep showing text the owner just sent (design
+			// section 22.7): Datastar's own morph never refills a focused
+			// input, so this module clears it directly.
+			clearReplyInputs(document.querySelectorAll('#main .reply-input'));
+			document.activeElement?.blur?.();
+		}
+		if (!resp.ok && resp.status !== 409) {
+			console.error('console.js: POST /send', resp.status);
+		}
+	} catch (err) {
+		console.error('console.js: POST /send', err);
+	}
 }
 
 // ---- rail, side box, stop, mark-read (Task 9/10/7 backends) -------------
@@ -431,6 +618,61 @@ function installSideBox() {
 		}
 		event.preventDefault();
 		postSide(button);
+	});
+}
+
+// ---- manual intake pickup (PKG9-PLAN.md D29) ------------------------------
+
+// pickupIssue handles a click on the project view's "Pick up" button
+// (PKG9-PLAN.md D29): reads the issue number from the box's own number
+// input and the project id off the box's data-pickup-project attribute,
+// posts POST /projects/{id}/pickup, and on a non-2xx response shows the
+// response body -- D29's own exact refusal text -- in the box's error span.
+// Unlike postJSON's other callers, the response body matters on failure, so
+// this builds its own fetch rather than using postJSON, the same reason
+// postSide above does.
+async function pickupIssue(button) {
+	const box = button.closest('.pickup-box');
+	const input = box?.querySelector('.pickup-n');
+	const errorSpan = box?.querySelector('.pickup-error');
+	const projectID = box?.dataset?.pickupProject;
+	if (!box || !input || !errorSpan || !projectID) {
+		return;
+	}
+	const n = Number(input.value);
+	if (!Number.isInteger(n) || n <= 0) {
+		errorSpan.textContent = 'enter a positive issue number';
+		return;
+	}
+	try {
+		const resp = await fetch(`/projects/${projectID}/pickup`, {
+			method: 'POST',
+			headers: { 'Content-Type': 'application/json', 'Datastar-Request': 'true' },
+			body: JSON.stringify({ n }),
+		});
+		if (!resp.ok) {
+			errorSpan.textContent = await resp.text();
+			return;
+		}
+		input.value = '';
+		errorSpan.textContent = '';
+	} catch (err) {
+		console.error('console.js: POST /projects/{id}/pickup', err);
+		errorSpan.textContent = 'request failed';
+	}
+}
+
+// installPickupBox wires the project view's pickup button (PKG9-PLAN.md
+// D29), delegated from document like installSideBox above, because #main
+// is morphed by every /stream patch (design section 6.3).
+function installPickupBox() {
+	document.addEventListener('click', (event) => {
+		const button = event.target.closest?.('.pickup-box button[type="submit"]');
+		if (!button) {
+			return;
+		}
+		event.preventDefault();
+		pickupIssue(button);
 	});
 }
 
@@ -635,7 +877,8 @@ function onKeyDown(event) {
 	dispatchAction(resolveAction(token, state.bindings), event);
 }
 
-// ---- the patch observer: focus reconcile + (guarded) mermaid ------------
+// ---- the patch observer: focus reconcile, (guarded) mermaid, send-chord
+// hints ------------------------------------------------------------------
 
 // diagramSelector names an unprocessed mermaid fence (design section 6.3,
 // 6.10: goldmark-diagram emits `<pre class="mermaid">`). processedAttr
@@ -696,6 +939,35 @@ function runMermaidGuarded(diagramIDs) {
 		.catch((err) => console.error('console.js: mermaid.run', err));
 }
 
+// sendChordSelector names an unprocessed send-chord placeholder
+// (thread.templ's draftBanner and freeReply, bug fix: the composer saves a
+// draft silently and sends only on a chord, with nothing on screen saying
+// so). sendChordProcessedAttr marks a node once filled, the same guard
+// processedAttr gives mermaid's diagram nodes above, so a later unrelated
+// patch does not re-walk it.
+const sendChordSelector = '.send-chord:not([data-send-chord-processed])';
+const sendChordProcessedAttr = 'data-send-chord-processed';
+
+// runSendChordHints fills every unprocessed ".send-chord" placeholder with
+// the platform-correct glyph (design section 6.4's send-chord check, reused
+// here since this server-rendered page cannot know the browser's platform):
+// "⌘+Enter" on macOS, "Ctrl+Enter" elsewhere (sendChordLabel, keyboard.mjs).
+// Marking each node processed before writing its text avoids reprocessing
+// it on the childList mutation that textContent itself fires, the same
+// bounded-single-extra-pass shape runMermaidGuarded's processedAttr gives
+// mermaid's own diagram nodes.
+function runSendChordHints() {
+	const nodes = document.querySelectorAll(`#main ${sendChordSelector}`);
+	if (nodes.length === 0) {
+		return;
+	}
+	const label = sendChordLabel(isMac());
+	for (const el of nodes) {
+		el.setAttribute(sendChordProcessedAttr, '');
+		el.textContent = label;
+	}
+}
+
 // runPatchWork is the MutationObserver callback's one per-patch step
 // (design section 6.3): collect plain descriptors from the DOM, hand them
 // to the pure collectPatchWork, then apply its result as DOM effects.
@@ -709,6 +981,7 @@ function runPatchWork() {
 	state.previousFocusableIDs = descriptors.focusableIDs;
 	setFocusedID(focusID);
 	runMermaidGuarded(diagramIDs);
+	runSendChordHints();
 }
 
 // installPatchObserver installs the one MutationObserver on #main and
@@ -718,7 +991,15 @@ function runPatchWork() {
 // not react to its own class or attribute changes"). It runs one initial
 // scan on install, matching "It does one initial scan on install".
 function installPatchObserver() {
-	const observer = new MutationObserver(() => runPatchWork());
+	// The callback only ever runs for an actual #main/#rail mutation, never
+	// for the installPatchObserver's own initial scan below, which calls
+	// runPatchWork() directly -- so reaching this callback is itself proof
+	// that a real /stream frame patched the page, the signal
+	// markStreamConnected (bug fix, state.streamConnected above) needs.
+	const observer = new MutationObserver(() => {
+		markStreamConnected();
+		runPatchWork();
+	});
 	for (const id of ['main', 'rail']) {
 		const el = document.getElementById(id);
 		if (el) {
@@ -740,14 +1021,23 @@ function installNavBridge() {
 	ctl?.addEventListener('zing-nav', onZingNav);
 }
 
+// install wires every delegated listener synchronously, before awaiting
+// loadBindings' own /static/keys.json fetch (bug fix): none of
+// installNavBridge, installPatchObserver, installSideBox,
+// installLogControls, installChipActivation, or installPickupBox reads
+// state.bindings, so there was no reason their listeners -- installNavBridge
+// above all, the zing-nav bridge a Threads-sidebar click needs live as
+// early as possible -- sat behind an unrelated network round trip. Only
+// onKeyDown needs the parsed bindings, so it alone waits on the fetch.
 async function install() {
-	await loadBindings();
-	document.addEventListener('keydown', onKeyDown);
 	installNavBridge();
 	installPatchObserver();
 	installSideBox();
 	installLogControls();
 	installChipActivation();
+	installPickupBox();
+	await loadBindings();
+	document.addEventListener('keydown', onKeyDown);
 }
 
 install();
