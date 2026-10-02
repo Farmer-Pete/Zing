@@ -28,12 +28,12 @@ func TestPrompts_MatchThePinnedDesignText(t *testing.T) {
 		{
 			name:   "planning-feature",
 			path:   planningFeaturePromptPath,
-			sha256: "b267c6b3a79c1b5acb5d76bd80e618258d8120ef9274620193a49c8aba7eecb4",
+			sha256: "108dfbe3da5c1b7bb80a56d804ac6bc440dc8a502d6a3cf420e87cbbaff5a5a1",
 		},
 		{
 			name:   "planning-bug",
 			path:   planningBugPromptPath,
-			sha256: "e28374158e19d529045fc6fba27a24bbba00a7969ab6b028a8f7867f57e3b53d",
+			sha256: "988ef88900583959df8c32d263b2763f836de198eb3497a2b28c490199900fd0",
 		},
 		{
 			name:   "planreview",
@@ -104,7 +104,9 @@ Answer every owner message you receive, in that same turn, with one
 reply per thread inside replies:
 <replies><reply question="Q7">your answer</reply></replies>.
 Every outcome except error can carry replies. When replies are all you
-have this turn, return outcome replies.
+have this turn, return outcome replies. Outcome replies needs at least
+one thread left open: if your replies settle every thread, return ready
+(or children, or nothing_to_do) with the replies attached.
 
 Settle a thread once the owner's messages give you its decision:
 <reply question="Q7" settled="true" decision="...">...</reply>.
