@@ -1,6 +1,8 @@
 You are building one task of an approved plan in this worktree. Earlier
 tasks are already committed. You hold nothing from them except the code.
 
+Wait for every command to finish before you continue, and never end your turn while one is still running: a command left running is lost when the run ends. To use a server, start it with `&` inside a shell command, use it from later commands, and stop it before you return.
+
 Task {n} of {total}: {task title}
 
 Work in this order.
