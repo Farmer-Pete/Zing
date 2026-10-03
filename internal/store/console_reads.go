@@ -110,23 +110,26 @@ func (s *Store) ListProjects(ctx context.Context) ([]Project, error) {
 	return out, nil
 }
 
-// inboxQuery is InboxItems' single joined read (design section 6.5: "one
-// joined read, no N+1"). One row per (ticket, open question) pair, a
-// question's columns NULL when the ticket has none (the LEFT JOIN); a
-// correlated MAX(id) subquery supplies the newest-message time and the
+// inboxSelect and inboxOrder are InboxItems' single joined read (design
+// section 6.5: "one joined read, no N+1"), split around the WHERE clause so
+// InboxItems can build that clause's terminal-state filter inline with
+// placeholders only, every value a bind argument (the same pattern
+// ListReadyCandidates uses, reads.go). One row per (ticket, open question)
+// pair, a question's columns NULL when the ticket has none (the LEFT JOIN);
+// a correlated MAX(id) subquery supplies the newest-message time and the
 // ordering key, per section 7.2's "never by timestamp ... id is the only
 // correct sort". Rows are grouped back into InboxItems in Go, by ticket id
 // change; the ORDER BY guarantees one ticket's rows are contiguous.
-// inboxQuery's two "newest message" correlated subqueries (the display
-// time and the sort key) both exclude state=draft rows (code review fix 2):
-// an unsent draft is only visible in the composer queue, so it must not
-// count as a ticket's newest message for the inbox's display time or its
-// blocking-first, newest-first sort, even though it is a real row with the
-// greatest id. Bound as "?" rather than inlined, so this stays an ordinary
-// parameterized literal rather than string-built SQL; InboxItems passes
-// draftState (console_writes.go) for both placeholders, in the order they
-// appear here.
-const inboxQuery = `
+// inboxSelect's and inboxOrder's "newest message" correlated subqueries
+// (the display time and the sort key) both exclude state=draft rows (code
+// review fix 2): an unsent draft is only visible in the composer queue, so
+// it must not count as a ticket's newest message for the inbox's display
+// time or its blocking-first, newest-first sort, even though it is a real
+// row with the greatest id. Bound as "?" rather than inlined, so this stays
+// an ordinary parameterized literal rather than string-built SQL;
+// InboxItems passes draftState (console_writes.go) for both placeholders,
+// in the order they appear across inboxSelect and inboxOrder.
+const inboxSelect = `
 SELECT
 	t.id, t.project_id, t.tracker_ref, t.title, t.body, t.kind, t.state, t.waiting_on,
 	t.parent_ticket_id, t.branch, t.pr_url, t.claim_owner, t.claim_expires_at,
@@ -136,8 +139,9 @@ SELECT
 FROM tickets t
 JOIN projects p ON p.id = t.project_id
 LEFT JOIN messages q ON q.ticket_id = t.id AND q.type = 'question' AND q.state = 'open'
-WHERE t.waiting_on IS NOT NULL
-   OR EXISTS (SELECT 1 FROM messages um WHERE um.ticket_id = t.id AND ` + unreadMessageWhere + `)
+`
+
+const inboxOrder = `
 ORDER BY
 	(t.waiting_on IS NOT NULL) DESC,
 	(SELECT MAX(mm.id) FROM messages mm WHERE mm.ticket_id = t.id AND (mm.state IS NULL OR mm.state != ?)) DESC,
@@ -148,14 +152,35 @@ ORDER BY
 // InboxItems returns every ticket that is blocking (waiting_on IS NOT NULL)
 // or has an unread message, blocking first, then by the ticket's greatest
 // SENT message id descending, then ticket id (design section 7.2; "sent"
-// per code review fix 2 -- see inboxQuery). unreadMessageWhere's own
+// per code review fix 2 -- see inboxSelect). unreadMessageWhere's own
 // author='zing' clause already excludes a draft from the unread check
 // itself, since every draft SaveDraft or SendBatch writes is author="you"
 // (console_writes.go); only the two newest-message subqueries need the
-// explicit exclusion inboxQuery adds. Each item carries its open questions,
-// ordered by message id, and the display-only time of its newest message.
-func (s *Store) InboxItems(ctx context.Context) ([]InboxItem, error) {
-	rows, err := s.db.QueryContext(ctx, inboxQuery, draftState, draftState)
+// explicit exclusion inboxSelect and inboxOrder add. Each item carries its
+// open questions, ordered by message id, and the display-only time of its
+// newest message.
+//
+// terminal is the machine's terminal state list (console.terminalStates,
+// design section 6.8's goal "InboxItems leaves out unread-only tickets
+// whose state is in machine.States.Terminal"): a ticket in one of these
+// states never counts as unread, though it still lists as blocking
+// whatever its state. A nil or empty terminal leaves the unread branch
+// unfiltered, the pre-filter behavior every existing caller that passes nil
+// still gets.
+func (s *Store) InboxItems(ctx context.Context, terminal []string) ([]InboxItem, error) {
+	unread := `EXISTS (SELECT 1 FROM messages um WHERE um.ticket_id = t.id AND ` + unreadMessageWhere + `)`
+	args := make([]any, 0, len(terminal)+2)
+	args = append(args, draftState)
+	if len(terminal) > 0 {
+		ph := strings.TrimSuffix(strings.Repeat("?, ", len(terminal)), ", ")
+		unread = `(t.state NOT IN (` + ph + `) AND ` + unread + `)` //nolint:gosec // G202: placeholders only, values are bind args
+		for _, st := range terminal {
+			args = append(args, st)
+		}
+	}
+	args = append(args, draftState)
+	query := inboxSelect + `WHERE t.waiting_on IS NOT NULL OR ` + unread + inboxOrder
+	rows, err := s.db.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, fmt.Errorf("inbox items: %w", err)
 	}

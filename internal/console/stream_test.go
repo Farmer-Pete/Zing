@@ -15,6 +15,7 @@ import (
 
 	"zing/internal/bus"
 	"zing/internal/console"
+	"zing/internal/response"
 	"zing/internal/store"
 )
 
@@ -221,7 +222,7 @@ func TestStreamBusWakeDoesNotMarkRead(t *testing.T) {
 	b.Publish()
 	readInitialFrames(t, r) // the wake's own re-render; it must not mark the new message
 
-	items, err := s.InboxItems(t.Context())
+	items, err := s.InboxItems(t.Context(), nil)
 	if err != nil {
 		t.Fatalf("InboxItems: %v", err)
 	}
@@ -289,7 +290,7 @@ func TestStreamOpenWithoutDatastarHeaderMarksNothing(t *testing.T) {
 	defer func() { _ = resp1.Body.Close() }()
 	readInitialFrames(t, bufio.NewReader(resp1.Body))
 
-	items, err := s.InboxItems(t.Context())
+	items, err := s.InboxItems(t.Context(), nil)
 	if err != nil {
 		t.Fatalf("InboxItems: %v", err)
 	}
@@ -313,12 +314,61 @@ func TestStreamOpenWithoutDatastarHeaderMarksNothing(t *testing.T) {
 	defer func() { _ = resp2.Body.Close() }()
 	readInitialFrames(t, bufio.NewReader(resp2.Body))
 
-	items, err = s.InboxItems(t.Context())
+	items, err = s.InboxItems(t.Context(), nil)
 	if err != nil {
 		t.Fatalf("InboxItems: %v", err)
 	}
 	if !inboxHasTicket(items, ticketID) {
 		t.Error("InboxItems no longer lists the ticket after an open with Sec-Fetch-Site: cross-site")
+	}
+}
+
+// TestStreamTerminalTicketNeverShowsUnread proves a ticket in a terminal
+// state never shows "unread" (design section 6.8's goal "a ticket in a
+// terminal state never shows unread"), even carrying unread messages and
+// even though nothing ever opened its thread: navComponent and
+// inboxComponent pass the real machine's terminal list (machine.toml's
+// "done", "escalated", "abandoned") to InboxItems, so a done ticket drops
+// out of both #nav's badge list and the Inbox view.
+func TestStreamTerminalTicketNeverShowsUnread(t *testing.T) {
+	t.Parallel()
+	s := newConsoleTestStore(t)
+	ticketID := seedTicket(t, s, "done#1", "Finished ticket")
+	seedUnreadUpdate(t, s, ticketID, "first")
+	seedUnreadUpdate(t, s, ticketID, "second")
+
+	const owner = "test-owner"
+	expires := time.Now().Add(10 * time.Minute)
+	claimed, err := s.Claim(t.Context(), ticketID, owner, expires)
+	if err != nil {
+		t.Fatalf("Claim: %v", err)
+	}
+	if !claimed {
+		t.Fatal("Claim: got false, want true")
+	}
+	applied, err := s.CommitHandlerResult(t.Context(), store.HandlerCommit{
+		TicketID: ticketID, Owner: owner, Expires: expires,
+		Next: string(response.TicketStateDone), Reason: "test: finished",
+	})
+	if err != nil {
+		t.Fatalf("CommitHandlerResult: %v", err)
+	}
+	if !applied {
+		t.Fatal("CommitHandlerResult: applied = false, want true")
+	}
+
+	srv := newTestServer(t, s, bus.New(), testMachine(t), newTestLogHandler(t))
+
+	resp, r, cancel := openStream(t, srv.URL, "inbox", 0, 0)
+	defer cancel()
+	defer func() { _ = resp.Body.Close() }()
+	nav, main, _, _ := readInitialFrames(t, r)
+
+	if strings.Contains(nav, "Finished ticket") {
+		t.Errorf("nav frame still lists the done ticket; got:\n%s", nav)
+	}
+	if strings.Contains(main, "Finished ticket") {
+		t.Errorf("inbox main frame still lists the done ticket; got:\n%s", main)
 	}
 }
 

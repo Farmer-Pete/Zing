@@ -96,11 +96,23 @@ func (c *console) navComponent(ctx context.Context, open int64) (templ.Component
 	if err != nil {
 		return nil, err
 	}
-	items, err := c.store.InboxItems(ctx)
+	items, err := c.store.InboxItems(ctx, c.terminalStates())
 	if err != nil {
 		return nil, err
 	}
 	return templates.Nav(projects, buildNavThreads(items), c.sandboxReason, open), nil
+}
+
+// terminalStates is the machine's terminal state list for InboxItems
+// (design section 6.8's goal "InboxItems leaves out unread-only tickets
+// whose state is in machine.States.Terminal"), nil when no machine is
+// loaded (most console tests), which leaves the unread branch unfiltered,
+// the same guard rail.go's buildPhaseRail already uses for a nil machine.
+func (c *console) terminalStates() []string {
+	if c.machine == nil {
+		return nil
+	}
+	return c.machine.States.Terminal
 }
 
 // buildNavThreads turns InboxItems into #nav's badge rows, preserving their
@@ -161,7 +173,7 @@ func (c *console) mainComponent(ctx context.Context, view string, open, project 
 // are blocking or have an unread message, grouped by project under
 // headings, blocking first.
 func (c *console) inboxComponent(ctx context.Context) (templ.Component, error) {
-	items, err := c.store.InboxItems(ctx)
+	items, err := c.store.InboxItems(ctx, c.terminalStates())
 	if err != nil {
 		return nil, err
 	}
