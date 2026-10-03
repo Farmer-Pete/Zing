@@ -17,7 +17,7 @@ import (
 // anything is pushed. Only then does it run
 // "git -C <dir> push origin refs/heads/<branch>:refs/heads/<branch>", an
 // explicit same-name refspec that cannot be reinterpreted as a target on the
-// default branch, followed by "git branch --set-upstream-to" to record the
+// default branch, followed by "git config --local branch.<b>.remote/.merge" to record the
 // upstream (PR review fix C3; design section 8's own inventory in
 // commonlock.go).
 func (o *Orchestrator) Push(ctx context.Context, wt Worktree) error {
@@ -52,10 +52,18 @@ func (o *Orchestrator) Push(ctx context.Context, wt Worktree) error {
 		return fmt.Errorf("orchestrator: push: git push: %w: %s", runErr, strings.TrimSpace(out))
 	}
 
-	// Only this second call writes branch.<b>.* in the shared config, so
-	// only it needs commonMu.
-	if out, runErr := o.runCommon(ctx, o.run, wt.dir, "branch", "--set-upstream-to", "origin/"+wt.branch, wt.branch); runErr != nil {
-		return fmt.Errorf("orchestrator: push: git branch --set-upstream-to: %w: %s", runErr, strings.TrimSpace(out))
+	// Only the upstream config writes touch the shared config, so only
+	// they need commonMu. They write branch.<b>.remote and .merge
+	// directly rather than through git branch --set-upstream-to, which
+	// needs refs/remotes/origin/<b> and so fails when origin has no fetch
+	// refspec, even though the push above already published the branch.
+	for _, kv := range [][2]string{
+		{"branch." + wt.branch + ".remote", "origin"},
+		{"branch." + wt.branch + ".merge", "refs/heads/" + wt.branch},
+	} {
+		if out, runErr := o.runCommon(ctx, o.run, wt.dir, "config", "--local", kv[0], kv[1]); runErr != nil {
+			return fmt.Errorf("orchestrator: push: git config %s: %w: %s", kv[0], runErr, strings.TrimSpace(out))
+		}
 	}
 
 	o.log.Info("pushed branch", "branch", wt.branch)

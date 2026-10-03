@@ -36,7 +36,7 @@ package orchestrator
 //	perimeter.go Hunk                           diff ...                                    per-worktree (read)
 //	perimeter.go BranchCommits                  rev-list --reverse ...                     per-worktree (read)
 //	push.go   Push                              push origin <refspec>                      per-worktree (network I/O; only writes refs/remotes/origin/<branch>, a ref update -- PR review fix C3)
-//	push.go   Push                              branch --set-upstream-to <upstream> <br>   SHARED (writes branch.<b>.* in the shared config)
+//	push.go   Push                              config --local branch.<b>.remote/.merge    SHARED (writes branch.<b>.* in the shared config)
 //	push.go   unpushedShas                      log -z --format=%H ...                     per-worktree (read)
 //	review.go HeadSHA                           rev-parse HEAD                             per-worktree (read)
 //	review.go Diff                              merge-base, diff ...                       per-worktree (read)
@@ -217,10 +217,15 @@ func canonicalCommonDir(dir string) (string, error) {
 // concurrent caller of CommonMuHeldForTest (export_test.go), which itself
 // calls back into this function.
 func (o *Orchestrator) resolveCommonMu(ctx context.Context) (*commonMutex, error) {
+	// The guard covers only the cached read and the publish, never the git
+	// call itself, so a Runner that calls back into resolveCommonMu cannot
+	// deadlock on it. Two concurrent resolvers may both run GitCommonDir;
+	// commonLockFor hands both the same mutex, and the first to publish wins.
 	o.commonMuGuard.Lock()
-	defer o.commonMuGuard.Unlock()
-	if o.commonMu != nil {
-		return o.commonMu, nil
+	cached := o.commonMu
+	o.commonMuGuard.Unlock()
+	if cached != nil {
+		return cached, nil
 	}
 	dir, err := o.GitCommonDir(ctx)
 	if err != nil {
@@ -230,7 +235,11 @@ func (o *Orchestrator) resolveCommonMu(ctx context.Context) (*commonMutex, error
 	if err != nil {
 		return nil, fmt.Errorf("orchestrator: resolve common git dir: %w", err)
 	}
-	o.commonMu = commonLockFor(resolved)
+	o.commonMuGuard.Lock()
+	defer o.commonMuGuard.Unlock()
+	if o.commonMu == nil {
+		o.commonMu = commonLockFor(resolved)
+	}
 	return o.commonMu, nil
 }
 
@@ -246,7 +255,7 @@ var sharedGitSubcommandPrefixes = [][]string{
 	{"worktree", "add"},
 	{"worktree", "remove"},
 	{"branch", "-D"},
-	{"branch", "--set-upstream-to"},
+	{"config", "--local"},
 	{"sparse-checkout", "init"},
 }
 

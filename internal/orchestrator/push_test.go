@@ -425,7 +425,7 @@ func TestPushArgvDisablesHooks(t *testing.T) {
 
 // TestPush_PushRunsUnlockedUpstreamRunsLocked proves PR review fix C3: the
 // network "git push" itself (no -u) runs without commonMu held, and only
-// the second call, "git branch --set-upstream-to" -- the one that writes
+// the upstream calls, "git config --local branch.<b>.remote/.merge" -- the ones that write
 // branch.<b>.* in the shared config -- runs with it held. A slow or
 // stalled remote must never block every other ticket's shared git writes
 // in this repository for the push's own network round trip.
@@ -463,10 +463,10 @@ func TestPush_PushRunsUnlockedUpstreamRunsLocked(t *testing.T) {
 			if ev.locked {
 				t.Error("git push ran with commonMu held, want unlocked")
 			}
-		case len(ev.args) >= 2 && ev.args[0] == "branch" && ev.args[1] == "--set-upstream-to":
+		case len(ev.args) >= 2 && ev.args[0] == "config" && ev.args[1] == "--local":
 			sawUpstream = true
 			if !ev.locked {
-				t.Error("git branch --set-upstream-to ran without commonMu held, want locked")
+				t.Errorf("git %v ran without commonMu held, want locked", ev.args)
 			}
 		}
 	}
@@ -474,6 +474,6 @@ func TestPush_PushRunsUnlockedUpstreamRunsLocked(t *testing.T) {
 		t.Error("never observed a git push call")
 	}
 	if !sawUpstream {
-		t.Error("never observed a git branch --set-upstream-to call")
+		t.Error("never observed a git config --local upstream call")
 	}
 }

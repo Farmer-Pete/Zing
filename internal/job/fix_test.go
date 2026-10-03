@@ -370,9 +370,10 @@ type canceledClaimsResume struct {
 	store        *store.Store
 	ticketID     int64
 	req          job.FixRequest
-	deps3        job.Deps // the canceled resume's own Owner/Expires, for a caller that reconciles through InterruptRuns (which fences on them)
-	maxResumes   int      // for the LatestSession calls every caller makes
-	pendingRunID string   // the CHECK commit's own "claim errors pending run <id>" marker id; empty unless CHECK wrote one
+	deps3        job.Deps        // the canceled resume's own Owner/Expires, for a caller that reconciles through InterruptRuns (which fences on them)
+	maxResumes   int             // for the LatestSession calls every caller makes
+	pendingRunID string          // the CHECK commit's own "claim errors pending run <id>" marker id; empty unless CHECK wrote one
+	checkMsgs    []store.Message // the CHECK commit's messages, for a caller's diagnostics
 }
 
 // driveFixThroughCanceledClaimsResume is the ~100-line scaffold
@@ -426,7 +427,7 @@ func driveFixThroughCanceledClaimsResume(t *testing.T, sessionID string) cancele
 		t.Fatalf("err = %v, want errors.Is(err, runtime.ErrCanceled)", err)
 	}
 
-	return canceledClaimsResume{store: s, ticketID: ticketID, req: req, deps3: deps3, maxResumes: maxResumes, pendingRunID: pendingRunID}
+	return canceledClaimsResume{store: s, ticketID: ticketID, req: req, deps3: deps3, maxResumes: maxResumes, pendingRunID: pendingRunID, checkMsgs: checkCommit.Messages}
 }
 
 // TestDriveFixResumesInterrupted proves advanceUnit's own "error,
@@ -548,7 +549,7 @@ func TestFixInterruptedClaimsResumeResendsClaims(t *testing.T) {
 	r := driveFixThroughCanceledClaimsResume(t, "fix-claims-mismatch-sess")
 	s, ticketID, req, deps3, maxResumes, rid := r.store, r.ticketID, r.req, r.deps3, r.maxResumes, r.pendingRunID
 	if rid == "" {
-		t.Fatal("driveFixThroughCanceledClaimsResume: no claim errors pending marker found, want one from CHECK")
+		t.Fatalf("CHECK commit.Messages = %+v, want one \"claim errors pending run <id>\" marker", r.checkMsgs)
 	}
 
 	applied, interruptErr := s.InterruptRuns(t.Context(), ticketID, deps3.Owner, deps3.Expires)

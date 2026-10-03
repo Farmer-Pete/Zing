@@ -3,6 +3,7 @@
 package proc
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"strconv"
@@ -66,8 +67,8 @@ func startToken(pid int) (string, error) {
 	}
 
 	starttime := fields[starttimeFieldsAfterComm]
-	if _, err := strconv.ParseUint(starttime, 10, 64); err != nil {
-		return "", fmt.Errorf("proc: start token: pid %d: starttime field %q: %w", pid, starttime, err)
+	if _, perr := strconv.ParseUint(starttime, 10, 64); perr != nil {
+		return "", fmt.Errorf("proc: start token: pid %d: starttime field %q: %w", pid, starttime, perr)
 	}
 
 	// starttime alone is ticks since boot, so it resets every reboot: a pid
@@ -102,5 +103,5 @@ func bootTime() (uint64, error) {
 		}
 		return btime, nil
 	}
-	return 0, fmt.Errorf("no btime line in /proc/stat")
+	return 0, errors.New("no btime line in /proc/stat")
 }
