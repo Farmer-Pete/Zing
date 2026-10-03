@@ -118,7 +118,7 @@ const planningReadyExample = `<zing job="planning" outcome="ready">` +
 	`<migrations none="true"></migrations>` +
 	`</design>` +
 	`<delivery>` +
-	`<files><file path="cmd/zing/validate.go" action="modify">wire the new subcommand</file></files>` +
+	`<files><file path="cmd/zing/validate.go" action="modify" task="1">wire the new subcommand</file></files>` +
 	`<deletions none="true"></deletions>` +
 	`<tests><test name="TestRunValidate" seam="runValidate" kind="unit" mocks="">a bad document exits 1</test></tests>` +
 	`<tasks><task n="1" test="TestRunValidate" demo="true">Add runValidate and wire it into main.</task></tasks>` +

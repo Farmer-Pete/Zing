@@ -42,9 +42,9 @@ graph TD
     </design>
     <delivery>
       <files>
-        <file path="greet.go" action="modify">adds Greet, task 1, and Farewell, task 3</file>
-        <file path="greet_test.go" action="create">pins Greet's return value for a given name, task 1</file>
-        <file path="cmd/greeter/main.go" action="create">a runnable command that prints Greet's text, task 2</file>
+        <file path="greet.go" action="modify" task="1 3">adds Greet, task 1, and Farewell, task 3</file>
+        <file path="greet_test.go" action="create" task="1">pins Greet's return value for a given name, task 1</file>
+        <file path="cmd/greeter/main.go" action="create" task="2">a runnable command that prints Greet's text, task 2</file>
       </files>
       <deletions none="true"></deletions>
       <tests>

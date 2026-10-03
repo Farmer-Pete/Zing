@@ -678,7 +678,7 @@ func planXML() string {
 		`<migrations none="true"></migrations>` +
 		`</design>` +
 		`<delivery>` +
-		`<files><file path="a.go" action="create">why</file></files>` +
+		`<files><file path="a.go" action="create" task="1">why</file></files>` +
 		`<deletions none="true"></deletions>` +
 		`<tests><test name="t1" seam="s" kind="unit" mocks="">asserts</test></tests>` +
 		`<tasks><task n="1" test="t1" demo="true">do it</task></tasks>` +
@@ -705,7 +705,7 @@ func planXMLWithHypothesisRank(rank int) string {
 		`<migrations none="true"></migrations>` +
 		`</design>` +
 		`<delivery>` +
-		`<files><file path="a.go" action="create">why</file></files>` +
+		`<files><file path="a.go" action="create" task="1">why</file></files>` +
 		`<deletions none="true"></deletions>` +
 		`<tests><test name="t1" seam="s" kind="unit" mocks="">asserts</test></tests>` +
 		`<tasks><task n="1" test="t1" demo="true">do it</task></tasks>` +
@@ -731,7 +731,7 @@ func planXMLWithShape(shape string) string {
 		`<migrations none="true"></migrations>` +
 		`</design>` +
 		`<delivery>` +
-		`<files><file path="a.go" action="create">why</file></files>` +
+		`<files><file path="a.go" action="create" task="1">why</file></files>` +
 		`<deletions none="true"></deletions>` +
 		`<tests><test name="t1" seam="s" kind="unit" mocks="">asserts</test></tests>` +
 		`<tasks><task n="1" test="t1" demo="true">do it</task></tasks>` +
@@ -757,7 +757,7 @@ func planXMLWithMigrationsNoneFalse() string {
 		`<migrations none="false"></migrations>` +
 		`</design>` +
 		`<delivery>` +
-		`<files><file path="a.go" action="create">why</file></files>` +
+		`<files><file path="a.go" action="create" task="1">why</file></files>` +
 		`<deletions none="true"></deletions>` +
 		`<tests><test name="t1" seam="s" kind="unit" mocks="">asserts</test></tests>` +
 		`<tasks><task n="1" test="t1" demo="true">do it</task></tasks>` +
@@ -786,7 +786,7 @@ func planXMLNoProblem() string {
 		`<migrations none="true"></migrations>` +
 		`</design>` +
 		`<delivery>` +
-		`<files><file path="a.go" action="create">why</file></files>` +
+		`<files><file path="a.go" action="create" task="1">why</file></files>` +
 		`<deletions none="true"></deletions>` +
 		`<tests><test name="t1" seam="s" kind="regression" mocks="">asserts</test></tests>` +
 		`<tasks><task n="1" test="t1" demo="true">do it</task></tasks>` +
@@ -830,7 +830,7 @@ func planXMLBugValidFirstTest(testKindAttr string) string {
 		`<migrations none="true"></migrations>` +
 		`</design>` +
 		`<delivery>` +
-		`<files><file path="a.go" action="create">why</file></files>` +
+		`<files><file path="a.go" action="create" task="1">why</file></files>` +
 		`<deletions none="true"></deletions>` +
 		`<tests><test name="t1" seam="s"` + kindAttr + ` mocks="">asserts</test></tests>` +
 		`<tasks><task n="1" test="t1" demo="true">do it</task></tasks>` +
@@ -856,7 +856,7 @@ func planXMLWithBadFence() string {
 		`<migrations none="true"></migrations>` +
 		`</design>` +
 		`<delivery>` +
-		`<files><file path="a.go" action="create">why</file></files>` +
+		`<files><file path="a.go" action="create" task="1">why</file></files>` +
 		`<deletions><fence path="a.go" symbol="Old">not the right words</fence></deletions>` +
 		`<tests><test name="t1" seam="s" kind="unit" mocks="">asserts</test></tests>` +
 		`<tasks><task n="1" test="t1" demo="true">do it</task></tasks>` +
@@ -885,7 +885,7 @@ func planXMLWithTasks(tasksXML string) string {
 		`<migrations none="true"></migrations>` +
 		`</design>` +
 		`<delivery>` +
-		`<files><file path="a.go" action="create">why</file></files>` +
+		`<files><file path="a.go" action="create" task="1">why</file></files>` +
 		`<deletions none="true"></deletions>` +
 		`<tests><test name="t1" seam="s" kind="unit" mocks="">asserts</test></tests>` +
 		`<tasks>` + tasksXML + `</tasks>` +

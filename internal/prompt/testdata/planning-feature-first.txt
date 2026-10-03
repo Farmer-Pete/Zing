@@ -319,7 +319,7 @@ Body: Users want a dark theme toggle in settings.
     </design>
     <delivery> <!-- Delivery -->
       <files>
-        <file path="..." action="...">...</file> <!-- FileChange, one or more, every path the build will create, modify, or delete; this is the perimeter; path: string; action: FileAction, one of: create | modify | delete -->
+        <file path="..." action="..." task="...">...</file> <!-- FileChange, one or more, every path the build will create, modify, or delete; this is the perimeter; path: string; action: FileAction, one of: create | modify | delete; task: string, must match ^[1-9][0-9]?( [1-9][0-9]?)*$, the n of every task that changes this file, space-separated, such as 1 or 1 3 -->
       </files>
       <deletions none="true"/> <!-- write none="true" when nothing is removed -->
       <deletions>
