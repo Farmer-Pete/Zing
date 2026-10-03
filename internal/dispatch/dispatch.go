@@ -854,7 +854,7 @@ func (d *Dispatcher) reclaimForeign(ctx context.Context) error {
 
 // clearDeadExpiringChecks judges the CHECK command of every claim
 // ExpireClaims(now, onlyOwner) is about to consider, by the same rules
-// reclaimForeign applies (review finding 2): ExpireClaims skips a ticket
+// reclaimForeign applies: ExpireClaims skips a ticket
 // that still records a CHECK command, so this deletes the row of a command
 // judged gone -- only while the row still names that exact process -- and
 // leaves a live one's claim held.
@@ -976,23 +976,23 @@ func (d *Dispatcher) evaluateOrphan(ticketID int64, r store.OpenRun, process str
 	}
 	now := time.Now()
 	if now.Before(deadline) {
-		slog.Info("waiting for orphaned agent of dead serve", "ticket_id", ticketID, "run_id", r.RunID, "pgid", *r.PGID, "process", process)
+		slog.Info("waiting for orphaned process of dead serve", "ticket_id", ticketID, "run_id", r.RunID, "pgid", *r.PGID, "process", process)
 		return true
 	}
 
 	if class == orphanUnverifiedLive {
-		slog.Warn("orphaned agent unverified past deadline; reclaiming without kill", "ticket_id", ticketID, "run_id", r.RunID, "pgid", *r.PGID, "process", process)
+		slog.Warn("orphaned process unverified past deadline; reclaiming without kill", "ticket_id", ticketID, "run_id", r.RunID, "pgid", *r.PGID, "process", process)
 		return false
 	}
 
 	if err := proc.KillGroup(*r.PGID); err != nil {
-		slog.Error("kill orphaned agent failed; retrying next tick", "ticket_id", ticketID, "run_id", r.RunID, "pgid", *r.PGID, "process", process, "err", err)
+		slog.Error("kill orphaned process failed; retrying next tick", "ticket_id", ticketID, "run_id", r.RunID, "pgid", *r.PGID, "process", process, "err", err)
 		return true
 	}
 	// SIGKILL is delivered, but the group may not have exited yet, so the
 	// claim stays held this pass; a later pass reclaims it once the
 	// liveness check finds the group gone (design section 6.3).
-	slog.Warn("killed orphaned agent of dead serve", "ticket_id", ticketID, "run_id", r.RunID, "pgid", *r.PGID, "process", process)
+	slog.Warn("killed orphaned process of dead serve", "ticket_id", ticketID, "run_id", r.RunID, "pgid", *r.PGID, "process", process)
 	return true
 }
 

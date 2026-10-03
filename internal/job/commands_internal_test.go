@@ -44,10 +44,9 @@ func TestTailBufferKeepsLastBytes(t *testing.T) {
 	}
 }
 
-// TestTailBufferBoundedOnLargeSingleWrite proves one write far larger than
-// the limit never makes the buffer hold more than the limit (review
-// finding 3): the retained bytes stay bounded while writing, not only
-// after a later trim.
+// TestTailBufferBoundedOnLargeSingleWrite proves one 1 MiB write leaves the
+// buffer's capacity at no more than checkOutputCap, keeps exactly the last
+// checkOutputCap bytes, and counts every byte written.
 func TestTailBufferBoundedOnLargeSingleWrite(t *testing.T) {
 	t.Parallel()
 	big := bytes.Repeat([]byte("0123456789abcdef"), 1<<16) // 1 MiB

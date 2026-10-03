@@ -160,7 +160,7 @@ type ExpiringCheck struct {
 // ExpiringChecks returns every claim ExpireClaims(now, onlyOwner) would
 // consider that still records a CHECK command. ExpireClaims skips those
 // tickets, so the dispatcher judges each command's process group first and
-// clears the row of a gone one with ClearDeadCheck (review finding 2).
+// clears the row of a gone one with ClearDeadCheck.
 func (s *Store) ExpiringChecks(ctx context.Context, now time.Time, onlyOwner string) ([]ExpiringCheck, error) {
 	ids, err := s.expiringCheckTicketIDs(ctx, now, onlyOwner)
 	if err != nil {

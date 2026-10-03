@@ -125,7 +125,7 @@ func (s *Store) Claim(ctx context.Context, id int64, owner string, expires time.
 // behavior of expiring every owner's claims. A ticket that still records a
 // CHECK command (check_procs, #55) is skipped: its command may still be
 // running in the worktree, so the dispatcher judges it first through
-// ExpiringChecks and ClearDeadCheck (review finding 2). It runs in one
+// ExpiringChecks and ClearDeadCheck. It runs in one
 // transaction:
 // for each expiring ticket, reconcileReservedRunsTx (design D13, section 4.5)
 // terminalizes any run left reserved with no outcome -- a crash, or an

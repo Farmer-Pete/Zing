@@ -701,7 +701,7 @@ func TestReclaimForeign_CheckAndAgentBothMustExit(t *testing.T) {
 
 // TestExpireClaims_KeepsExpiredClaimWithLiveCheckCommand proves ordinary
 // claim expiry respects a live recorded CHECK command the same way reclaim
-// does (review finding 2): an expired claim, foreign or this serve's own,
+// does: an expired claim, foreign or this serve's own,
 // is kept while the command's verified group lives inside its deadline,
 // and expires, with the row deleted, once the group is gone.
 func TestExpireClaims_KeepsExpiredClaimWithLiveCheckCommand(t *testing.T) {

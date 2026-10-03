@@ -152,8 +152,7 @@ func TestCheckLintGetsOnlyRemainingBudget(t *testing.T) {
 }
 
 // TestCheckLintNotRunIsAFailure proves a passing test command that uses the
-// whole shared budget does not let CHECK land (Codex review finding 1):
-// lint never ran, so the result is a failure with its own line, and the
+// whole shared budget does not let CHECK land: lint never ran, so the result is a failure with its own line, and the
 // builder is resumed or the cap escalates. Not parallel: it swaps checkNow.
 func TestCheckLintNotRunIsAFailure(t *testing.T) {
 	start := time.Date(2026, 10, 3, 9, 0, 0, 0, time.UTC)

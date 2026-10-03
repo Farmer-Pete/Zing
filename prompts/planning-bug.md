@@ -46,10 +46,11 @@ Work in this order. Each step has a completion criterion.
    risks: that is a finding, not a task. The first task writes that test,
    watches it fail, and applies the fix, so the test passes when the task
    ends. Later tasks remove every tagged debug log and re-run the original
-   loop. Every task ends with the project's test and lint commands
-   passing; a test written in a task is made to pass in that same task,
-   never left failing for a later one. Each deletion says why it existed,
-   under Chesterton's fence. Done when `zing validate` prints nothing.
+   loop. Every task ends with its named tests passing; a test written in
+   a task is made to pass in that same task, never left failing for a
+   later one. Zing runs the project's full test and lint commands after
+   each task. Each deletion says why it existed, under Chesterton's
+   fence. Done when `zing validate` prints nothing.
 
 Conversations. Zing gives every question you ask a key, Q and a number,
 such as Q7. It can differ from the key you wrote. Use only keys Zing

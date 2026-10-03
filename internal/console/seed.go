@@ -353,7 +353,8 @@ const demoBuildMarkerAuthor = "system"
 
 // demoBuildMarkers returns, in order, the three type="update" bodies
 // seedDemoBuildMarkers inserts (Task 11b): a clean claim check, a claim
-// mismatch with its two error lines, and the perimeter's resolution.
+// mismatch with its one files_changed error line, and the perimeter's
+// resolution.
 func demoBuildMarkers() []string {
 	return []string{
 		demoBuildMarkerClaimsOk,

@@ -247,8 +247,7 @@ func (s *Store) InterruptRuns(ctx context.Context, ticketID int64, owner string,
 // when it read none). The row is deleted in the same transaction, but only
 // while it is still exactly that record (its generation); a row
 // recorded since, or one that appeared where none was read, keeps the
-// claim (applied false) so a later pass can judge the new process (#55,
-// review finding 1).
+// claim (applied false) so a later pass can judge the new process (#55).
 func (s *Store) ReclaimClaim(ctx context.Context, ticketID int64, owner string, expires time.Time, check *OpenCheck) (applied bool, err error) {
 	return s.interruptClaimedRuns(ctx, ticketID, owner, expires, func(tx *sql.Tx) (bool, error) {
 		if check != nil {

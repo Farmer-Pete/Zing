@@ -65,7 +65,7 @@ func TestRecordCheckStartAndClear(t *testing.T) {
 
 // TestCheckClearsNeedTheRecordGeneration proves a replacement command with
 // the same pgid and no start token is never cleared by a holder of the
-// earlier record (Codex review finding 2): pgid and a NULL proc_start
+// earlier record: pgid and a NULL proc_start
 // cannot tell the two apart, so every clear and reclaim delete matches the
 // record's own generation.
 func TestCheckClearsNeedTheRecordGeneration(t *testing.T) {
@@ -139,7 +139,7 @@ func TestRecordCheckStartReplaces(t *testing.T) {
 }
 
 // TestRecordCheckStartFencedOnClaim proves only the live claim's holder
-// can record a CHECK command (review finding 1): a wrong owner or expiry
+// can record a CHECK command: a wrong owner or expiry
 // writes nothing and returns ErrClaimLost, and a non-positive pgid is
 // refused.
 func TestRecordCheckStartFencedOnClaim(t *testing.T) {
@@ -234,8 +234,8 @@ func TestReclaimClaimDeletesCheckRow(t *testing.T) {
 	}
 }
 
-// TestReclaimClaimKeepsClaimWhenCheckRowReplaced proves the race review
-// finding 1 names: the claim holder records a new CHECK command between
+// TestReclaimClaimKeepsClaimWhenCheckRowReplaced proves the race between a
+// read and a reclaim: the claim holder records a new CHECK command between
 // the ForeignClaims read and ReclaimClaim, so the row no longer names the
 // process reclaim judged gone. ReclaimClaim must keep the claim and the
 // new row; a later pass judges the new process.
@@ -286,8 +286,8 @@ func TestReclaimClaimKeepsClaimWhenCheckRowReplaced(t *testing.T) {
 }
 
 // TestExpireClaimsKeepsClaimWithCheckRow proves ordinary expiry never
-// clears a claim whose ticket still records a CHECK command (review
-// finding 2): ExpiringChecks reports it for the dispatcher to judge, and
+// clears a claim whose ticket still records a CHECK command:
+// ExpiringChecks reports it for the dispatcher to judge, and
 // only once ClearDeadCheck removes that exact row does ExpireClaims clear
 // the claim.
 func TestExpireClaimsKeepsClaimWithCheckRow(t *testing.T) {

@@ -423,6 +423,11 @@ type BuildReport struct {
 	Report    string       `json:"report"`
 	Title     string       `json:"title"                jsonschema:"minLength=1" doc:"the commit subject"`
 	CommitSHA *string      `json:"commit_sha,omitempty" jsonschema:"pattern=^[0-9a-f]{40}$"`
+	// LegacyTestExit and LegacyLintExit keep a report stored before #55
+	// valid: the builder claimed both exits then. Zing never writes them
+	// now; a stored value is carried through unchanged.
+	LegacyTestExit *int `json:"test_exit,omitempty" doc:"legacy, before #55; never written now"`
+	LegacyLintExit *int `json:"lint_exit,omitempty" doc:"legacy, before #55; never written now"`
 }
 
 // FindingArtifact is the stored form of one code-review finding (artifact

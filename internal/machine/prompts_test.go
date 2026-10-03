@@ -28,12 +28,12 @@ func TestPrompts_MatchThePinnedDesignText(t *testing.T) {
 		{
 			name:   "planning-feature",
 			path:   planningFeaturePromptPath,
-			sha256: "0e514f698eb2f01568222374d4bf44061af9c411484537a3915e6e112c5d8128",
+			sha256: "f76a96bf5ff2d3a5fbb32ec727ef83b7fadc6f3baea1f57d2943eae15e4f9e4c",
 		},
 		{
 			name:   "planning-bug",
 			path:   planningBugPromptPath,
-			sha256: "3b89647a8146c1fbc4c5eede07719cc3b2347e876635d2fd75e0695620e69a71",
+			sha256: "5a248f5cb134b6171de1a6796a79b1356d44297b30d8b03f98a14bf5ef2f9df1",
 		},
 		{
 			name:   "planreview",
@@ -43,7 +43,7 @@ func TestPrompts_MatchThePinnedDesignText(t *testing.T) {
 		{
 			name:   testJobNameBuild,
 			path:   "prompts/build.md",
-			sha256: "15fbbf429faa586f20f0b040ba27cc2d4f35c4e779d0e79fe4ff35c807406f66",
+			sha256: "9da88e8dd8ae6b37f6ff75dc35a6c57ee2b5da13fad51023ff4099d15e679d19",
 		},
 		{
 			name:   "perimeter",
@@ -164,9 +164,13 @@ func TestBuildPromptLeavesFullSuiteToZing(t *testing.T) {
 	if strings.Contains(text, "until both exit 0") {
 		t.Error("prompts/build.md still tells the builder to run the commands until both exit 0")
 	}
+	if strings.Contains(text, "Every task ends green") {
+		t.Error("prompts/build.md requires a regression test and fix of every task, including cleanup tasks and fix runs that reproduce nothing")
+	}
 	for _, want := range []string{
 		"Do not run the project's full test or lint command",
 		"return the error outcome with code plan_gap",
+		"When this task adds a regression test for a failure you reproduced, its fix lands in this same task",
 	} {
 		if !strings.Contains(text, want) {
 			t.Errorf("prompts/build.md lacks %q", want)
@@ -174,10 +178,12 @@ func TestBuildPromptLeavesFullSuiteToZing(t *testing.T) {
 	}
 }
 
-// greenTasksSentence is the sentence both planning prompts carry (#55):
-// every task ends green.
-const greenTasksSentence = "Every task ends with the project's test and lint commands passing; " +
-	"a test written in a task is made to pass in that same task, never left failing for a later one."
+// greenTasksSentence is what both planning prompts say about tests (#55):
+// each task's named tests pass when it ends, and the full test and lint
+// run is Zing's CHECK after the task, as build.md says.
+const greenTasksSentence = "Every task ends with its named tests passing; " +
+	"a test written in a task is made to pass in that same task, never left failing for a later one. " +
+	"Zing runs the project's full test and lint commands after each task."
 
 // TestPlanningPromptsRequireGreenTasks proves both planning prompts tell
 // the planner that no task may end with a failing test (#55).

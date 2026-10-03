@@ -177,8 +177,9 @@ func TestMigration0005Columns(t *testing.T) {
 }
 
 // TestMigration0006CheckProcs proves migration 0006_check_procs.sql created
-// the check_procs table and its CHECK constraints (#55): pgid 0 and an
-// unknown kind are refused, and a legal row is accepted.
+// the check_procs table and its CHECK constraints (#55): pgid 0, an
+// unknown kind, and an empty proc_start are refused, and a legal row is
+// accepted.
 func TestMigration0006CheckProcs(t *testing.T) {
 	t.Parallel()
 	ctx := t.Context()
@@ -201,6 +202,11 @@ func TestMigration0006CheckProcs(t *testing.T) {
 	}
 	if _, err := s.db.ExecContext(ctx, insert, "fmt", 4242); err == nil {
 		t.Error("INSERT kind fmt: want a CHECK constraint error, got nil")
+	}
+	if _, err := s.db.ExecContext(ctx,
+		`INSERT INTO check_procs (ticket_id, kind, pgid, proc_start, started_at, budget_started_at) VALUES (1, 'test', 4242, '', '2026-10-03T00:00:00Z', '2026-10-03T00:00:00Z')`,
+	); err == nil {
+		t.Error("INSERT proc_start '': want a CHECK constraint error, got nil")
 	}
 	if _, err := s.db.ExecContext(ctx, insert, "lint", 4242); err != nil {
 		t.Errorf("INSERT a legal row: %v", err)

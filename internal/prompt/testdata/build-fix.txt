@@ -36,9 +36,10 @@ Work in this order.
 5. For every deletion this task made, write a fence: the path, the
    symbol, and why it existed, in the words "existed because".
 
-Every task ends green: a regression test and its fix land in this same
-task. If the task forbids the change that would make its named test
-pass, return the error outcome with code plan_gap.
+When this task adds a regression test for a failure you reproduced, its
+fix lands in this same task, so the test passes when the task ends. If
+the task forbids the change that would make its named test pass, return
+the error outcome with code plan_gap.
 
 Done when the named test passes and every changed path is listed in
 files_changed. Zing then runs the project's test and lint commands and

@@ -333,3 +333,22 @@ func TestMarkerMatchesFirstLineExactly(t *testing.T) {
 		t.Errorf("got.Body = %q, want %q", got.Body, "claims ok run 4")
 	}
 }
+
+// TestBuildReportLegacyExitFieldsValidate proves a build_report stored
+// before #55, which still carries test_exit and lint_exit, passes the
+// schema: both fields stay optional properties, so a report written by an
+// older binary is never rejected.
+func TestBuildReportLegacyExitFieldsValidate(t *testing.T) {
+	t.Parallel()
+	schemas, err := loadSchemas()
+	if err != nil {
+		t.Fatalf("loadSchemas: %v", err)
+	}
+	legacy := `{"task_n":1,"files_changed":["a.go"],"test_exit":0,"lint_exit":0,"extras":[],"fences":[],"report":"did it","title":"Task 1"}`
+	if err := schemas.validate(testTableArtifacts, "build_report", []byte(legacy)); err != nil {
+		t.Errorf("validate legacy build_report: %v", err)
+	}
+	if err := schemas.validate(testTableArtifacts, "build_report", buildReportPayload(1)); err != nil {
+		t.Errorf("validate current build_report: %v", err)
+	}
+}
