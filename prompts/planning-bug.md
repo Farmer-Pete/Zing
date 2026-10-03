@@ -47,9 +47,10 @@ Work in this order. Each step has a completion criterion.
    and watches it fail. Later tasks apply the fix, remove every tagged
    debug log, and re-run the original loop. Each deletion says why it
    existed, under Chesterton's fence. Give every file the tasks that
-   change it, as task="1" or task="1 3". Every task owns at least one
-   file, so re-running the loop belongs to a task that changes one.
-   Done when `zing validate` prints nothing.
+   change it, listing each task once, as task="1" or task="1 3".
+   Every task owns at least one file, so re-running the loop belongs
+   to a task that changes one. Done when `zing validate` prints
+   nothing.
 
 Conversations. Zing gives every question you ask a key, Q and a number,
 such as Q7. It can differ from the key you wrote. Use only keys Zing

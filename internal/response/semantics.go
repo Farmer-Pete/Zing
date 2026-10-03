@@ -299,7 +299,7 @@ var fileTaskPattern = regexp.MustCompile(`^[1-9][0-9]?( [1-9][0-9]?)*$`) //nolin
 func checkFileTasks(files []FileChange, tasks []Task, present map[string]bool) []*PathError {
 	var errs []*PathError
 	owned := make(map[int]bool)
-	complete := true
+	complete := len(files) > 0
 	for i, f := range files {
 		path := "plan/delivery/files/" + indexedName("file", i) + "/task"
 		if !present[path] || !fileTaskPattern.MatchString(f.Task) {

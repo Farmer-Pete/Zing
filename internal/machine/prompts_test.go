@@ -28,12 +28,12 @@ func TestPrompts_MatchThePinnedDesignText(t *testing.T) {
 		{
 			name:   "planning-feature",
 			path:   planningFeaturePromptPath,
-			sha256: "4b1bfa93e8a4165a93f2178352b679b7db934ab2e426279e3dd437b670153249",
+			sha256: "28a811f6d1941783d43ffca4eed32b6b4b94cb4b820b74a97056bdd9fe4bd497",
 		},
 		{
 			name:   "planning-bug",
 			path:   planningBugPromptPath,
-			sha256: "df151b2d1d62d10beac3cf07d9364f6383b1ce5f07e1335552e166b68cec3a3f",
+			sha256: "ab568a62aa82f3f7dfb9b8034345c6b41c465bfe652460da8d996937fc40987e",
 		},
 		{
 			name:   "planreview",
@@ -43,7 +43,7 @@ func TestPrompts_MatchThePinnedDesignText(t *testing.T) {
 		{
 			name:   testJobNameBuild,
 			path:   "prompts/build.md",
-			sha256: "3740a70c8cb365012c99265260e80d59343beaa3279ee2fbdf372588ffe207f7",
+			sha256: "c52065b4d9fd094288576764be701d9610fad6c52c7f9ca500ef3e706b555495",
 		},
 		{
 			name:   "perimeter",

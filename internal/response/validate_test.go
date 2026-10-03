@@ -1014,6 +1014,44 @@ func readyXMLFileTask(fileTaskAttr string, taskCount int) string {
 		`</zing>`
 }
 
+// readyXMLNoFiles is readyXMLFileTask with the files list left empty, so
+// TestValidateFileTasks/empty can drive checkFileTasks with files == nil
+// without going through the file-element XML at all.
+func readyXMLNoFiles(taskCount int) string {
+	var tasksXML strings.Builder
+	for i := 1; i <= taskCount; i++ {
+		tasksXML.WriteString(`<task n="` + strconv.Itoa(i) + `" test="t1" demo="true">do it</task>`)
+	}
+	plan := `<plan>` +
+		`<overview>` +
+		`<objective>o</objective><context>c</context>` +
+		`<problem>problem text</problem>` +
+		`<goals><goal>g1</goal></goals><nongoals><nongoal>ng1</nongoal></nongoals>` +
+		`</overview>` +
+		`<design>` +
+		`<demo cmd="go run ./x">demo text</demo>` +
+		`<shape>shape text</shape>` +
+		`<migrations none="true"></migrations>` +
+		`</design>` +
+		`<delivery>` +
+		`<files></files>` +
+		`<deletions none="true"></deletions>` +
+		`<tests><test name="t1" seam="s" kind="unit" mocks="">asserts</test></tests>` +
+		`<tasks>` + tasksXML.String() + `</tasks>` +
+		`</delivery>` +
+		`<review>` +
+		`<trust_root>none</trust_root>` +
+		`<alternatives><alternative>alt</alternative></alternatives>` +
+		`<risks><risk>risk</risk></risks>` +
+		`</review>` +
+		`</plan>`
+	return `<zing job="planning" outcome="ready">` +
+		`<claims><claim kind="code" verdict="true" evidence="a.go:1">it works</claim></claims>` +
+		`<scenarios>` + scenarioXML("s1") + scenarioXML("s2") + `</scenarios>` +
+		plan +
+		`</zing>`
+}
+
 // TestValidateFileTasks proves checkFileTasks' own rules (design section
 // 4.1): every file names at least one task, in range, without repeats, and
 // every task owns at least one file; a malformed task attribute draws only
@@ -1088,6 +1126,21 @@ func TestValidateFileTasks(t *testing.T) {
 		}
 		if got := firstErrString(errs); got != want {
 			t.Errorf("errs[0] = %q, want %q", got, want)
+		}
+	})
+
+	t.Run("empty", func(t *testing.T) {
+		t.Parallel()
+		doc := mustParse(t, readyXMLNoFiles(2))
+		errs := Validate(doc, ValidateContext{})
+		want := "plan/delivery/files/file: need at least 1"
+		if !containsErr(errs, want) {
+			t.Fatalf("Validate = %v, want to contain %q", dumpErrs(errs), want)
+		}
+		for _, e := range errs {
+			if strings.Contains(e.Msg, "owns no file") {
+				t.Errorf("Validate = %v, want no owns-no-file error", dumpErrs(errs))
+			}
 		}
 	})
 }
