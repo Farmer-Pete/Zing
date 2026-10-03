@@ -7,9 +7,11 @@ import (
 	"context"
 	"errors"
 	"io"
+	"os/exec"
 	"slices"
 	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -483,5 +485,102 @@ func TestBuildInterruptedCheckResumeResendsOutput(t *testing.T) {
 	}
 	if len(rows) != 1 {
 		t.Errorf("delivered check markers = %d, want exactly 1", len(rows))
+	}
+}
+
+// groupLeaderCommands runs every test command as a real "sleep 30" process
+// group leader, reports it through OnStart, snapshots the ticket's
+// recorded CHECK command while it runs, then kills the group and returns
+// exit 1. Lint passes without running anything.
+type groupLeaderCommands struct {
+	t        *testing.T
+	s        *store.Store
+	ticketID int64
+	testCmd  string
+	pid      int
+	seen     *store.OpenCheck
+}
+
+func (c *groupLeaderCommands) Run(ctx context.Context, _, _, shellCmd string, _ time.Duration, cio job.CommandIO) (int, error) {
+	if shellCmd != c.testCmd {
+		return 0, nil
+	}
+	cmd := exec.CommandContext(ctx, "sleep", "30")
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	if err := cmd.Start(); err != nil {
+		return -1, err
+	}
+	c.pid = cmd.Process.Pid
+	if cio.OnStart != nil {
+		cio.OnStart(c.pid)
+	}
+	claims, err := c.s.ForeignClaims(ctx, "nobody")
+	if err != nil {
+		c.t.Errorf("ForeignClaims: %v", err)
+	}
+	for i := range claims {
+		if claims[i].TicketID == c.ticketID {
+			c.seen = claims[i].Check
+		}
+	}
+	if err := syscall.Kill(-c.pid, syscall.SIGKILL); err != nil {
+		c.t.Errorf("kill group %d: %v", c.pid, err)
+	}
+	_ = cmd.Wait() //nolint:errcheck // the group was just killed, so Wait reports the kill
+	return 1, nil
+}
+
+// TestCheckRecordsAndClearsCommandGroup proves CHECK records the running
+// command's process group in check_procs (plan D10) while it runs, with
+// the budget start no later than the command start, and clears it once the
+// command ends.
+func TestCheckRecordsAndClearsCommandGroup(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow end-to-end flow; runs in the full suite")
+	}
+	t.Parallel()
+	s, _, ticketID := buildTicketInBuilding(t)
+	script := &scriptedRuntime{t: t, steps: []scriptedStep{buildStep([]string{}, nil, "group-sess")}}
+	const groupTest = "the group test"
+	cmds := &groupLeaderCommands{t: t, s: s, ticketID: ticketID, testCmd: groupTest}
+
+	var check store.HandlerCommit
+	for range 2 { // RUN, then CHECK
+		ticket := getTicket(t, s, ticketID)
+		deps := withCheckTestCommand(claimForBuild(t, s, script, ticketID), ticket, groupTest)
+		deps.Commands = cmds
+		commit, err := job.Registry()[testStateBuilding].Run(t.Context(), ticket, deps)
+		if err != nil {
+			t.Fatalf("building tick: %v", err)
+		}
+		check = commit
+		if cmds.pid != 0 { // CHECK ran; read the row before the claim is released
+			claims, cerr := s.ForeignClaims(t.Context(), "nobody")
+			if cerr != nil {
+				t.Fatalf("ForeignClaims: %v", cerr)
+			}
+			for i := range claims {
+				if claims[i].TicketID == ticketID && claims[i].Check != nil {
+					t.Errorf("check_procs row %+v after the command ended, want none", claims[i].Check)
+				}
+			}
+		}
+		apply(t, s, ticket, commit)
+	}
+	if _, ok := messageWithPrefix(check.Messages, checkPendingPrefix); !ok {
+		t.Errorf("CHECK commit.Messages = %+v, want a check failed pending marker", check.Messages)
+	}
+	c := cmds.seen
+	if c == nil {
+		t.Fatal("no check_procs row while the command ran")
+	}
+	if c.Kind != "test" || c.PGID != cmds.pid {
+		t.Errorf("row = %+v, want kind test and pgid %d", c, cmds.pid)
+	}
+	if c.ProcStart == nil {
+		t.Error("row proc_start is NULL, want the group leader's start token")
+	}
+	if c.BudgetStartedAt.After(c.StartedAt) {
+		t.Errorf("budget_started_at %v is after started_at %v", c.BudgetStartedAt, c.StartedAt)
 	}
 }

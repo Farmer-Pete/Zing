@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"zing/internal/orchestrator"
+	"zing/internal/proc"
 	"zing/internal/prompt"
 	"zing/internal/response"
 	"zing/internal/store"
@@ -58,8 +59,11 @@ func checkBudget(d Deps) time.Duration {
 // under one shared checkBudget measured from the start of test (plan D1).
 // Lint gets only what test left; when test times out, or leaves nothing,
 // lint does not run and is left out. Each command's output is kept in a
-// tailBuffer. rid is the unit's newest ok run, or nil during adoption. An
-// error is runCheckCommand's unclassified infrastructure error, for
+// tailBuffer. Each command's process group is recorded in check_procs
+// while it runs and cleared once it ends (plan D10), so a later serve
+// never starts CHECK in this worktree while an orphaned command still
+// writes to it. rid is the unit's newest ok run, or nil during adoption.
+// An error is runCheckCommand's unclassified infrastructure error, for
 // commandInfraEscalation.
 func runCheckCommands(ctx context.Context, d Deps, t store.Ticket, wt orchestrator.Worktree, proj Project, rid *int64) ([]commandResult, error) {
 	budget := checkBudget(d)
@@ -71,7 +75,15 @@ func runCheckCommands(ctx context.Context, d Deps, t store.Ticket, wt orchestrat
 		if remaining <= 0 {
 			break
 		}
-		r, err := runCheckCommand(ctx, d, t, wt, proj, rid, c.kind, c.cmd, remaining, nil)
+		pgid := 0
+		onStart := func(p int) {
+			pgid = p
+			recordCheckStart(ctx, d, t.ID, c.kind, p, budgetStart)
+		}
+		r, err := runCheckCommand(ctx, d, t, wt, proj, rid, c.kind, c.cmd, remaining, onStart)
+		if pgid > 0 {
+			clearCheckStart(ctx, d, t.ID, pgid)
+		}
 		if err != nil {
 			return nil, err
 		}
@@ -82,6 +94,39 @@ func runCheckCommands(ctx context.Context, d Deps, t store.Ticket, wt orchestrat
 		}
 	}
 	return results, nil
+}
+
+// recordCheckStart is a CHECK command's OnStart body, mirroring runjob.go's
+// recordRunStart: it reads the group leader's start token ("" with a WARN
+// when it cannot) and records the group under the claim (plan D10). A
+// failed write is logged at WARN and the command keeps running: the same
+// accepted risk #45 takes for runs, since no row means reclaim treats the
+// command as gone.
+func recordCheckStart(ctx context.Context, d Deps, ticketID int64, kind string, pgid int, budgetStart time.Time) {
+	token, err := proc.StartToken(pgid)
+	if err != nil {
+		slog.Warn("start token unavailable", "ticket_id", ticketID, "command", kind, "pgid", pgid, "error", err)
+		token = ""
+	}
+	startCtx, cancel := onStartContext(ctx)
+	defer cancel()
+	if err := d.Store.RecordCheckStart(startCtx, ticketID, d.Owner, d.Expires, kind, pgid, token, time.Now(), budgetStart); err != nil {
+		slog.Warn("record check start failed", "ticket_id", ticketID, "command", kind, "pgid", pgid, "error", err)
+		return
+	}
+	slog.Info("check command started", "ticket_id", ticketID, "command", kind, "pgid", pgid)
+}
+
+// clearCheckStart deletes the CHECK row for pgid once its command ended,
+// under a context detached from a canceled tick. A failure is logged at
+// WARN: the stale row names a dead group, which the next record replaces
+// or reclaim clears.
+func clearCheckStart(ctx context.Context, d Deps, ticketID int64, pgid int) {
+	clearCtx, cancel := onStartContext(ctx)
+	defer cancel()
+	if err := d.Store.ClearCheckStart(clearCtx, ticketID, pgid); err != nil {
+		slog.Warn("clear check start failed", "ticket_id", ticketID, "pgid", pgid, "error", err)
+	}
 }
 
 // checkInputText renders the failed results as the check input (plan

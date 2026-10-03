@@ -579,7 +579,7 @@ func TestFixInterruptedResumeIsFree(t *testing.T) {
 // model): a fix unit's own claims resume, interrupted mid-flight, re-sends
 // the original claims text alongside the interrupted input on the next
 // tick, free and uncapped, since DriveFix shares advanceUnit (and
-// claimsPendingInput through it) with the task-unit handler.
+// pendingCheckResume through it) with the task-unit handler.
 func TestFixInterruptedClaimsResumeResendsClaims(t *testing.T) {
 	if testing.Short() {
 		t.Skip("slow end-to-end flow; runs in the full suite")

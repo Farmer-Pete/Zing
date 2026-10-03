@@ -457,3 +457,299 @@ func TestReclaimForeign_AllLensOrphansMustExit(t *testing.T) {
 		t.Errorf("final ticket claim owner = %v, want reclaimed once every lens orphan exited", final.ClaimOwner)
 	}
 }
+
+// ---- orphaned CHECK commands (#55 plan D10) --------------------------------
+
+// checkDeadline is how far past budget_started_at reclaim waits on a live
+// CHECK command: machine.toml's build timeout (45m) plus claimGrace (5m).
+const checkDeadline = 50 * time.Minute
+
+// seedCheckProc records a running CHECK command for ticketID under the
+// exact (owner, expires) claim, standing in for a dead serve's CHECK.
+func seedCheckProc(t *testing.T, s *store.Store, ticketID int64, owner string, expires time.Time, pgid int, procStart string, budgetStartedAt time.Time) {
+	t.Helper()
+	if err := s.RecordCheckStart(t.Context(), ticketID, owner, expires, "test", pgid, procStart, budgetStartedAt, budgetStartedAt); err != nil {
+		t.Fatalf("seedCheckProc: RecordCheckStart: %v", err)
+	}
+}
+
+// hasCheckProc reports whether ticketID still records a CHECK command.
+func hasCheckProc(t *testing.T, s *store.Store, ticketID int64) bool {
+	t.Helper()
+	_, ok, err := s.CheckProc(t.Context(), ticketID)
+	if err != nil {
+		t.Fatalf("CheckProc: %v", err)
+	}
+	return ok
+}
+
+// reclaimingDispatcher is a dispatcher that reclaims foreign claims.
+func reclaimingDispatcher(t *testing.T, s *store.Store) *dispatch.Dispatcher {
+	t.Helper()
+	return newDispatcher(t, s, newFixtureTracker(t), bus.New(), fakeRuntime(t), nil, nil, dispatch.Config{
+		MaxParallel: 1, Owner: testOwner, ReclaimForeign: true,
+	})
+}
+
+// claimOwnerIs reports whether ticketID is still claimed by owner.
+func claimOwnerIs(t *testing.T, s *store.Store, ticketID int64, owner string) bool {
+	t.Helper()
+	tk := getTicket(t, s, ticketID)
+	return tk.ClaimOwner != nil && *tk.ClaimOwner == owner
+}
+
+// TestReclaimForeign_WaitsForLiveCheckCommand proves a dead serve's claim
+// is kept while its orphaned CHECK command is alive, and is reclaimed, with
+// the row deleted, once the command's group exits.
+func TestReclaimForeign_WaitsForLiveCheckCommand(t *testing.T) {
+	t.Parallel()
+	s := newDispatchTestStore(t)
+	ticketID := seedQueuedTicket(t, s, testFixtureRef)
+	cmd := startGroupLeader(t)
+	pgid := cmd.Process.Pid
+	token, err := proc.StartToken(pgid)
+	if err != nil {
+		killGroup(t, cmd)
+		t.Skipf("proc.StartToken unsupported on this platform: %v", err)
+	}
+	const owner = "dead-check-1"
+	expires := time.Now().Add(10 * time.Minute).UTC().Truncate(time.Second)
+	seedForeignClaim(t, s, ticketID, owner, expires)
+	seedCheckProc(t, s, ticketID, owner, expires, pgid, token, time.Now())
+
+	d := reclaimingDispatcher(t, s)
+	if err := d.Tick(t.Context()); err != nil {
+		t.Fatalf("Tick (command alive): %v", err)
+	}
+	if !claimOwnerIs(t, s, ticketID, owner) {
+		t.Fatal("claim reclaimed while the CHECK command is alive, want it kept")
+	}
+
+	killGroup(t, cmd)
+	waitGroupGone(t, pgid)
+	if err := d.Tick(t.Context()); err != nil {
+		t.Fatalf("Tick (command gone): %v", err)
+	}
+	if claimOwnerIs(t, s, ticketID, owner) {
+		t.Error("claim kept after the CHECK command exited, want reclaimed")
+	}
+	if hasCheckProc(t, s, ticketID) {
+		t.Error("check_procs row kept after the reclaim, want it deleted")
+	}
+}
+
+// TestReclaimForeign_CheckLiveDescendantAfterLeaderExit proves a CHECK
+// command whose leader exited but whose descendant lives keeps the claim.
+func TestReclaimForeign_CheckLiveDescendantAfterLeaderExit(t *testing.T) {
+	t.Parallel()
+	s := newDispatchTestStore(t)
+	ticketID := seedQueuedTicket(t, s, testFixtureRef)
+	cmd := exec.CommandContext(t.Context(), "sh", "-c", "sleep 30 & exit 0")
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	if err := cmd.Start(); err != nil {
+		t.Skipf("start sh: %v", err)
+	}
+	pgid := cmd.Process.Pid
+	token, err := proc.StartToken(pgid)
+	if err != nil {
+		_ = syscall.Kill(-pgid, syscall.SIGKILL) //nolint:errcheck // best-effort teardown
+		t.Skipf("proc.StartToken unsupported on this platform: %v", err)
+	}
+	defer func() {
+		_ = syscall.Kill(-pgid, syscall.SIGKILL) //nolint:errcheck // best-effort teardown
+	}()
+	if err := cmd.Wait(); err != nil {
+		t.Fatalf("wait for the leader to exit: %v", err)
+	}
+	if !proc.GroupAlive(pgid) {
+		t.Fatal("group gone right after the leader exited, want the backgrounded sleep to keep it alive")
+	}
+
+	const owner = "dead-check-2"
+	expires := time.Now().Add(10 * time.Minute).UTC().Truncate(time.Second)
+	seedForeignClaim(t, s, ticketID, owner, expires)
+	seedCheckProc(t, s, ticketID, owner, expires, pgid, token, time.Now())
+
+	if err := reclaimingDispatcher(t, s).Tick(t.Context()); err != nil {
+		t.Fatalf("Tick: %v", err)
+	}
+	if !claimOwnerIs(t, s, ticketID, owner) {
+		t.Error("claim reclaimed while the CHECK command's descendant lives, want it kept")
+	}
+}
+
+// TestReclaimForeign_CheckReusedPidIsDead proves a recorded start token that
+// no longer matches the live group is a dead CHECK command: reclaimed at
+// once, row deleted.
+func TestReclaimForeign_CheckReusedPidIsDead(t *testing.T) {
+	t.Parallel()
+	s := newDispatchTestStore(t)
+	ticketID := seedQueuedTicket(t, s, testFixtureRef)
+	cmd := startGroupLeader(t)
+	defer killGroup(t, cmd)
+	pgid := cmd.Process.Pid
+	if _, err := proc.StartToken(pgid); err != nil {
+		t.Skipf("proc.StartToken unsupported on this platform: %v", err)
+	}
+	const owner = "dead-check-3"
+	expires := time.Now().Add(10 * time.Minute).UTC().Truncate(time.Second)
+	seedForeignClaim(t, s, ticketID, owner, expires)
+	seedCheckProc(t, s, ticketID, owner, expires, pgid, "a-token-nobody-really-has", time.Now())
+
+	if err := reclaimingDispatcher(t, s).Tick(t.Context()); err != nil {
+		t.Fatalf("Tick: %v", err)
+	}
+	if claimOwnerIs(t, s, ticketID, owner) {
+		t.Error("claim kept for a reused pid, want reclaimed")
+	}
+	if hasCheckProc(t, s, ticketID) {
+		t.Error("check_procs row kept, want it deleted")
+	}
+}
+
+// TestReclaimForeign_CheckUnverifiedNeverKilled proves a CHECK command with
+// no start token is never killed: past its deadline the claim is reclaimed
+// and the group left alone.
+func TestReclaimForeign_CheckUnverifiedNeverKilled(t *testing.T) {
+	t.Parallel()
+	s := newDispatchTestStore(t)
+	ticketID := seedQueuedTicket(t, s, testFixtureRef)
+	cmd := startGroupLeader(t)
+	defer killGroup(t, cmd)
+	pgid := cmd.Process.Pid
+	const owner = "dead-check-4"
+	expires := time.Now().Add(10 * time.Minute).UTC().Truncate(time.Second)
+	seedForeignClaim(t, s, ticketID, owner, expires)
+	seedCheckProc(t, s, ticketID, owner, expires, pgid, "", time.Now().Add(-2*time.Hour))
+
+	if err := reclaimingDispatcher(t, s).Tick(t.Context()); err != nil {
+		t.Fatalf("Tick: %v", err)
+	}
+	if !proc.GroupAlive(pgid) {
+		t.Error("the unverified CHECK group was killed, want it left alone")
+	}
+	if claimOwnerIs(t, s, ticketID, owner) {
+		t.Error("claim kept for an unverified command past its deadline, want reclaimed")
+	}
+}
+
+// TestReclaimForeign_KillsCheckCommandPastDeadline proves a verified CHECK
+// command past budget_started_at + 45m + 5m is killed with the claim kept
+// on that pass, and reclaimed with its row deleted once the group exits.
+func TestReclaimForeign_KillsCheckCommandPastDeadline(t *testing.T) {
+	t.Parallel()
+	s := newDispatchTestStore(t)
+	ticketID := seedQueuedTicket(t, s, testFixtureRef)
+	cmd := startGroupLeader(t)
+	pgid := cmd.Process.Pid
+	token, err := proc.StartToken(pgid)
+	if err != nil {
+		killGroup(t, cmd)
+		t.Skipf("proc.StartToken unsupported on this platform: %v", err)
+	}
+	const owner = "dead-check-5"
+	expires := time.Now().Add(10 * time.Minute).UTC().Truncate(time.Second)
+	seedForeignClaim(t, s, ticketID, owner, expires)
+	seedCheckProc(t, s, ticketID, owner, expires, pgid, token, time.Now().Add(-(checkDeadline + time.Second)))
+
+	d := reclaimingDispatcher(t, s)
+	if err := d.Tick(t.Context()); err != nil {
+		t.Fatalf("Tick: %v", err)
+	}
+	if !claimOwnerIs(t, s, ticketID, owner) {
+		t.Fatal("claim reclaimed on the kill pass, want it kept until the group exits")
+	}
+	_ = cmd.Wait() //nolint:errcheck // best-effort reap, SIGKILL already delivered
+	waitGroupGone(t, pgid)
+	if err := d.Tick(t.Context()); err != nil {
+		t.Fatalf("second Tick: %v", err)
+	}
+	if claimOwnerIs(t, s, ticketID, owner) {
+		t.Error("claim kept after the killed CHECK command exited, want reclaimed")
+	}
+	if hasCheckProc(t, s, ticketID) {
+		t.Error("check_procs row kept, want it deleted")
+	}
+}
+
+// TestReclaimForeign_CheckAndAgentBothMustExit proves a dead open run does
+// not free a claim whose CHECK command still lives.
+func TestReclaimForeign_CheckAndAgentBothMustExit(t *testing.T) {
+	t.Parallel()
+	s := newDispatchTestStore(t)
+	ticketID := seedQueuedTicket(t, s, testFixtureRef)
+	cmd := startGroupLeader(t)
+	defer killGroup(t, cmd)
+	pgid := cmd.Process.Pid
+	token, err := proc.StartToken(pgid)
+	if err != nil {
+		t.Skipf("proc.StartToken unsupported on this platform: %v", err)
+	}
+	const owner = "dead-check-6"
+	expires := time.Now().Add(10 * time.Minute).UTC().Truncate(time.Second)
+	seedForeignClaim(t, s, ticketID, owner, expires)
+	seedOpenRun(t, s, ticketID, owner, expires, 0, "", time.Now())
+	seedCheckProc(t, s, ticketID, owner, expires, pgid, token, time.Now())
+
+	if err := reclaimingDispatcher(t, s).Tick(t.Context()); err != nil {
+		t.Fatalf("Tick: %v", err)
+	}
+	if !claimOwnerIs(t, s, ticketID, owner) {
+		t.Error("claim reclaimed while the CHECK command lives, want it kept")
+	}
+}
+
+// TestExpireClaims_KeepsExpiredClaimWithLiveCheckCommand proves ordinary
+// claim expiry respects a live recorded CHECK command the same way reclaim
+// does (review finding 2): an expired claim, foreign or this serve's own,
+// is kept while the command's verified group lives inside its deadline,
+// and expires, with the row deleted, once the group is gone.
+func TestExpireClaims_KeepsExpiredClaimWithLiveCheckCommand(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name           string
+		owner          string
+		reclaimForeign bool
+	}{
+		{"any owner, no reclaim", "crashed-check-serve", false},
+		{"own claim, with reclaim", testOwner, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			s := newDispatchTestStore(t)
+			ticketID := seedQueuedTicket(t, s, testFixtureRef)
+			cmd := startGroupLeader(t)
+			pgid := cmd.Process.Pid
+			token, err := proc.StartToken(pgid)
+			if err != nil {
+				killGroup(t, cmd)
+				t.Skipf("proc.StartToken unsupported on this platform: %v", err)
+			}
+			expires := time.Now().Add(-time.Minute).UTC().Truncate(time.Second)
+			seedForeignClaim(t, s, ticketID, tc.owner, expires)
+			seedCheckProc(t, s, ticketID, tc.owner, expires, pgid, token, time.Now())
+
+			d := newDispatcher(t, s, newFixtureTracker(t), bus.New(), fakeRuntime(t), nil, nil, dispatch.Config{
+				MaxParallel: 1, Owner: testOwner, ReclaimForeign: tc.reclaimForeign,
+			})
+			if err := d.Tick(t.Context()); err != nil {
+				t.Fatalf("Tick (command alive): %v", err)
+			}
+			if !claimOwnerIs(t, s, ticketID, tc.owner) {
+				t.Fatal("expired claim cleared while its CHECK command lives, want it kept")
+			}
+
+			killGroup(t, cmd)
+			waitGroupGone(t, pgid)
+			if err := d.Tick(t.Context()); err != nil {
+				t.Fatalf("Tick (command gone): %v", err)
+			}
+			if tk := getTicket(t, s, ticketID); tk.ClaimExpiresAt != nil && tk.ClaimExpiresAt.Equal(expires) {
+				t.Error("the expired claim was kept after the CHECK command exited, want it cleared")
+			}
+			if hasCheckProc(t, s, ticketID) {
+				t.Error("check_procs row kept, want it deleted")
+			}
+		})
+	}
+}

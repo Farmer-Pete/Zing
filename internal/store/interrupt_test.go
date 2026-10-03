@@ -555,7 +555,7 @@ func TestReclaimClaim_AppliesAndClearsForeignClaim(t *testing.T) {
 		t.Fatalf("Reserve: %v", err)
 	}
 
-	applied, err := s.ReclaimClaim(ctx, ticketID, "other-1", expires)
+	applied, err := s.ReclaimClaim(ctx, ticketID, "other-1", expires, nil)
 	if err != nil {
 		t.Fatalf("ReclaimClaim: %v", err)
 	}
@@ -592,7 +592,7 @@ func TestReclaimClaim_NoOpWhenClaimAlreadyGone(t *testing.T) {
 	ctx := t.Context()
 	_, ticketID := seedQueuedTicket(t, s, "1")
 
-	applied, err := s.ReclaimClaim(ctx, ticketID, "other-1", time.Now().Add(time.Hour))
+	applied, err := s.ReclaimClaim(ctx, ticketID, "other-1", time.Now().Add(time.Hour), nil)
 	if err != nil {
 		t.Fatalf("ReclaimClaim: %v", err)
 	}
