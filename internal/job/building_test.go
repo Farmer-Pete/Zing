@@ -37,6 +37,7 @@ import (
 const (
 	helloTxt          = "hello.txt"
 	extraTxt          = "extra.txt"
+	greetGo           = "greet.go"
 	helloWorldContent = "hello, world\n"
 
 	// testExtraPath and testExtraReason are the single-extra scenario's own
@@ -449,7 +450,7 @@ func TestCheckRejectsAnotherTasksFile(t *testing.T) {
 	s, _, ticketID := buildTicketInBuilding(t)
 	ticket := getTicket(t, s, ticketID)
 
-	scriptRT := &scriptedRuntime{t: t, steps: []scriptedStep{buildStep([]string{helloTxt, "greet.go"}, 0, 0, nil, "scope-sess")}}
+	scriptRT := &scriptedRuntime{t: t, steps: []scriptedStep{buildStep([]string{helloTxt, greetGo}, 0, 0, nil, "scope-sess")}}
 	deps := claimForBuild(t, s, scriptRT, ticketID)
 	overrideProj := deps.Projects[ticket.ProjectID]
 	overrideProj.TestCmd = "printf 'hello, world\\n' > hello.txt && printf 'package greet\\n' > greet.go && test -f hello.txt"
@@ -956,6 +957,13 @@ func TestBuildAdoptionChecks(t *testing.T) {
 		files := map[string]string{helloTxt: helloWorldContent, extraTxt: "extra\n"}
 		s, ticketID, deps, _ := prepareUnrecordedCommit(t, []string{helloTxt, extraTxt}, 0, extras, "", files, true)
 		assertAdoptionFails(t, s, ticketID, deps, "undeclared path")
+	})
+
+	t.Run("another task's path", func(t *testing.T) {
+		t.Parallel()
+		files := map[string]string{helloTxt: helloWorldContent, greetGo: "package greet\n"}
+		s, ticketID, deps, _ := prepareUnrecordedCommit(t, []string{helloTxt, greetGo}, 0, nil, "", files, true)
+		assertAdoptionFails(t, s, ticketID, deps, "another task's path")
 	})
 }
 
@@ -1759,7 +1767,7 @@ func TestAcceptedExtraAsksAgainForLaterTask(t *testing.T) {
 	}
 
 	scriptRT.steps = append(scriptRT.steps,
-		buildStep([]string{testExtraPath, "greet.go"}, 0, 0, []response.ExtraClaim{{Path: testExtraPath, Reason: "task 2 extends the helper"}}, "task2-sess"),
+		buildStep([]string{testExtraPath, greetGo}, 0, 0, []response.ExtraClaim{{Path: testExtraPath, Reason: "task 2 extends the helper"}}, "task2-sess"),
 		perimeterStep("Extends the helper.", "perim-sess-2"),
 	)
 

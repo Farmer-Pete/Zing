@@ -2874,6 +2874,15 @@ func (h buildingHandler) adopt(ctx context.Context, t store.Ticket, d Deps, proj
 		return fail("claims failed"), nil
 	}
 
+	if foreign := foreignTaskPaths(plan, u.TaskN, changedPathList(commitChanges)); len(foreign) > 0 {
+		msgs := make([]string, len(foreign))
+		for i, e := range foreign {
+			msgs[i] = e.Msg
+		}
+		slog.Warn("task scope violation", "ticket_id", t.ID, "run_id", newestRun.ID, "task_n", u.TaskN, "commit_sha", sha, "foreign", msgs)
+		return fail("another task's path"), nil
+	}
+
 	if len(extras) > 0 {
 		return fail("undeclared path"), nil
 	}
