@@ -414,6 +414,33 @@ func (s *Store) QuestionsByRun(ctx context.Context, runID int64, state string) (
 	return out, nil
 }
 
+// OpenRunIDs returns the set of every run whose outcome is still NULL (D13,
+// section 4.5): still reserved, not yet terminalized by a commit or by
+// ExpireClaims's own reconcile. cmd/zing's removeStaleStderrFiles reads this
+// so a run's own stderr file (runjob.go's writeStderrFile) is never removed
+// while its run is still open, whatever its age. A Store method because
+// Store.db is unexported (store.go).
+func (s *Store) OpenRunIDs(ctx context.Context) (map[int64]bool, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT id FROM runs WHERE outcome IS NULL`)
+	if err != nil {
+		return nil, fmt.Errorf("open run ids: %w", err)
+	}
+	defer rows.Close()
+
+	out := make(map[int64]bool)
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err != nil {
+			return nil, fmt.Errorf("open run ids: %w", err)
+		}
+		out[id] = true
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("open run ids: %w", err)
+	}
+	return out, nil
+}
+
 // GetMessage reads the message with id, or a wrapped sql.ErrNoRows if none exists.
 func (s *Store) GetMessage(ctx context.Context, id int64) (MessageRow, error) {
 	row := s.db.QueryRowContext(ctx, `SELECT `+messageColumns+` FROM messages WHERE id = ?`, id)
