@@ -2470,16 +2470,19 @@ func TestPlanningHandler_ReviewTick_FloorFindingsPendThenResumeThenDeliverThenSt
 	}
 }
 
-// TestPlanningHandler_ReviewTick_MaxLoopsEscalatesLoopsExhausted proves the
-// section 5.1 step 7 cap: CountDeliveredReviews already at machine.toml's
-// planreview max_loops (2), with a live pending marker and at-or-below
-// findings, escalates loops_exhausted with a nil RunID (design section 6.7)
-// rather than resuming a third time.
-func TestPlanningHandler_ReviewTick_MaxLoopsEscalatesLoopsExhausted(t *testing.T) {
+// TestPlanningHandler_ReviewTick_MaxLoopsWithOnlyFloorFindingsReachesGate
+// proves issue #48: CountDeliveredReviews already at machine.toml's
+// planreview max_loops (2), with a live pending marker and a stored
+// artifact whose only finding is at-or-below the floor, posts the gate
+// (the owner decides) instead of escalating loops_exhausted -- the loop
+// exhausting on nothing but minor findings must not block the ticket on an
+// escalation nobody above the floor asked for.
+func TestPlanningHandler_ReviewTick_MaxLoopsWithOnlyFloorFindingsReachesGate(t *testing.T) {
 	t.Parallel()
 	s := newJobTestStore(t)
 	ticketID := seedFeatureTicketInPlanning(t, s)
-	planVersion, runID := seedCohort(t, s, ticketID, validPlan("Max loops."), validScenarios(2, "maxloops"))
+	const objective = "Max loops, floor only."
+	planVersion, runID := seedCohort(t, s, ticketID, validPlan(objective), validScenarios(2, "maxloopsgate"))
 
 	// Two earlier loops' own delivered markers (different versions: this
 	// cohort's own pending marker below is version-scoped, so these do not
@@ -2490,6 +2493,57 @@ func TestPlanningHandler_ReviewTick_MaxLoopsEscalatesLoopsExhausted(t *testing.T
 
 	f := finding(response.SeverityMinor, "plan/design/shape", "still wrong", "fix it")
 	seedPlanreviewArtifact(t, s, ticketID, planVersion, runID, f)
+	insertUpdateMarker(t, s, ticketID, fmt.Sprintf("planreview v%d pending", planVersion))
+
+	commit, err := runPlanning(t, s, claim(t, s, &scriptedRuntime{t: t}, ticketID), ticketID)
+	if err != nil {
+		t.Fatalf("planning Run: %v", err)
+	}
+	if commit.Escalation != nil {
+		t.Fatalf("commit.Escalation = %+v, want nil (an all-floor cap reaches the gate, not an escalation)", commit.Escalation)
+	}
+	if commit.AttachRunToMsgs {
+		t.Error("commit.AttachRunToMsgs = true, want false (no run caused this, the cap did)")
+	}
+	if commit.Waiting == nil || *commit.Waiting != testWaitingGate {
+		t.Fatalf("commit.Waiting = %v, want gate", commit.Waiting)
+	}
+	if len(commit.Messages) != 1 {
+		t.Fatalf("commit.Messages = %+v, want exactly 1 (the gate question)", commit.Messages)
+	}
+	msg := commit.Messages[0]
+	if !strings.HasPrefix(msg.Body, objective+"\n\n") {
+		t.Errorf("gate message body = %q, want it to start with the plan's objective %q", msg.Body, objective)
+	}
+	if !strings.Contains(msg.Body, "max_loops") {
+		t.Errorf("gate message body = %q, want it to say the cap was reached", msg.Body)
+	}
+	var qp response.QuestionPayload
+	if err := json.Unmarshal(msg.Payload, &qp); err != nil {
+		t.Fatalf("unmarshal gate question payload: %v", err)
+	}
+	if qp.Kind != response.QuestionKindGate {
+		t.Errorf("gate question Kind = %q, want gate", qp.Kind)
+	}
+}
+
+// TestPlanningHandler_ReviewTick_MaxLoopsWithAboveFloorFindingStillEscalates
+// proves rule 2 of issue #48's fix is unchanged from before it: the same cap
+// setup, but the stored artifact also carries one above-floor finding,
+// still escalates loops_exhausted with a nil RunID (design section 6.7)
+// rather than posting a gate with a mixed artifact.
+func TestPlanningHandler_ReviewTick_MaxLoopsWithAboveFloorFindingStillEscalates(t *testing.T) {
+	t.Parallel()
+	s := newJobTestStore(t)
+	ticketID := seedFeatureTicketInPlanning(t, s)
+	planVersion, runID := seedCohort(t, s, ticketID, validPlan("Max loops, still above floor."), validScenarios(2, "maxloopsescalate"))
+
+	insertUpdateMarker(t, s, ticketID, "planreview v1 delivered")
+	insertUpdateMarker(t, s, ticketID, "planreview v2 delivered")
+
+	minor := finding(response.SeverityMinor, "plan/design/shape", "still wrong", "fix it")
+	major := finding(response.SeverityMajor, "plan/design/other", "worse", "fix that too")
+	seedPlanreviewArtifact(t, s, ticketID, planVersion, runID, minor, major)
 	insertUpdateMarker(t, s, ticketID, fmt.Sprintf("planreview v%d pending", planVersion))
 
 	commit, err := runPlanning(t, s, claim(t, s, &scriptedRuntime{t: t}, ticketID), ticketID)

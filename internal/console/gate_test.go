@@ -221,6 +221,43 @@ func TestGateFindingsTable_FloorNitShowsBlockerMajorAndMinor(t *testing.T) {
 	}
 }
 
+// TestGateFindingsTable_LoopExhaustedShowsFloorFindings proves issue #48's
+// loosened filter (views.go's loadFindings): once CountDeliveredReviews has
+// reached machine.toml's planreview max_loops, the floor-conditional skip
+// stops firing, since those at-or-below-floor findings are exactly what the
+// owner must now decide on at the gate -- unlike
+// TestGateFindingsTable_FloorMinorShowsBlockerAndMajorOnly, which must keep
+// excluding them when the loop is not capped, proving the loosened filter is
+// cap-conditional, not a blanket change.
+func TestGateFindingsTable_LoopExhaustedShowsFloorFindings(t *testing.T) {
+	t.Parallel()
+	s := newConsoleTestStore(t)
+	ticketID := seedTicket(t, s, "fake#1", "Add a hello endpoint")
+	runID := seedRun(t, s, ticketID)
+	seedPlanArtifact(t, s, ticketID, &runID, 1)
+	seedPlanReviewArtifact(t, s, ticketID, runID, 1, fourSeverityFindings())
+	seedGateQuestion(t, s, ticketID)
+
+	// machine.toml's own planreview.max_loops is 2 (testMachine loads the
+	// real file): two delivered markers reach it before the stream ever
+	// reads the ticket.
+	seedUnreadUpdate(t, s, ticketID, "planreview v1 delivered")
+	seedUnreadUpdate(t, s, ticketID, "planreview v2 delivered")
+
+	srv := newTestServerFloor(t, s, bus.New(), testMachine(t), newTestLogHandler(t), response.SeverityMinor)
+	resp, r, cancel := openStream(t, srv.URL, "thread", ticketID, 0)
+	defer cancel()
+	defer func() { _ = resp.Body.Close() }()
+	_, main, _, _ := readInitialFrames(t, r)
+	gate := findGroup(t, splitQuestionGroups(t, main), gateQuestionTitle)
+
+	for _, want := range []string{blockerFindingText, majorFindingText, minorFindingText, nitFindingText} {
+		if !strings.Contains(gate, want) {
+			t.Errorf("loop exhausted: missing %q; got:\n%s", want, gate)
+		}
+	}
+}
+
 // fourSeverityFindings returns one finding of each of the four closed
 // severities, each with a distinct, greppable Text, for the floor tests
 // above.

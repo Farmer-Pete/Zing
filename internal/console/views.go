@@ -450,9 +450,25 @@ func (c *console) loadFindings(ctx context.Context, ticketID int64) ([]templates
 		return nil, fmt.Errorf("console: unmarshal planreview artifact for ticket %d: %w", ticketID, err)
 	}
 
+	// capped mirrors job/planning.go's own maybeResumeFloorFindings cap
+	// check (issue #48): once CountDeliveredReviews has reached
+	// machine.toml's planreview max_loops, a gate posted at the cap carries
+	// only at-or-below-floor findings (an above-floor survivor escalates
+	// instead of posting a gate), so the per-finding floor filter below must
+	// stop hiding them -- they are exactly what the owner now decides on.
+	// The nil-guard mirrors rail.go:124's c.machine == nil pattern.
+	capped := false
+	if c.machine != nil {
+		n, cntErr := c.store.CountDeliveredReviews(ctx, ticketID)
+		if cntErr != nil {
+			return nil, fmt.Errorf("console: count delivered reviews for ticket %d: %w", ticketID, cntErr)
+		}
+		capped = n >= c.machine.Jobs[string(response.JobPlanreview)].MaxLoops
+	}
+
 	rows := make([]templates.FindingRow, 0, len(payload.Findings))
 	for _, f := range payload.Findings {
-		if f.Severity.Rank() <= c.floor.Rank() {
+		if f.Severity.Rank() <= c.floor.Rank() && !capped {
 			continue
 		}
 		rows = append(rows, templates.FindingRow{
