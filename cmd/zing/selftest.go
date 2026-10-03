@@ -516,7 +516,7 @@ var e2eModels = map[string]string{
 	modelAliasSonnet: "claude-sonnet-5",
 	modelAliasOpus:   "claude-opus-5-5",
 	modelAliasFable:  "claude-fable-5-1",
-	modelAliasCodex:  "gpt-5.5",
+	modelAliasCodex:  "gpt-6-luna",
 }
 
 // e2eWantStates is the ordered "to" state of every state message the

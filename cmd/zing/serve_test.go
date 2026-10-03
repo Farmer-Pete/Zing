@@ -882,6 +882,252 @@ func TestServeRemovesJudgeDirAtStartup(t *testing.T) {
 	}
 }
 
+// writeStderrFixture writes <dir>/run-<runID>-stderr.log (writeStderrFile's
+// own name, runjob.go) and backdates its mtime to mtime, the shape
+// TestServeRemovesStaleStderrFilesAtStartup needs to plant both a stale and
+// a fresh file without waiting on a real run.
+func writeStderrFixture(t *testing.T, dir string, runID int64, mtime time.Time) string {
+	t.Helper()
+
+	path := filepath.Join(dir, fmt.Sprintf("run-%d-stderr.log", runID))
+	if err := os.WriteFile(path, []byte("stderr\n"), 0o600); err != nil {
+		t.Fatalf("write %s: %v", path, err)
+	}
+	if err := os.Chtimes(path, mtime, mtime); err != nil {
+		t.Fatalf("chtimes %s: %v", path, err)
+	}
+	return path
+}
+
+// TestServeRemovesStaleStderrFilesAtStartup proves removeStaleStderrFiles
+// (ticket #8's retention fix): a finished run's stderr file older than
+// stderrRetention is removed, a fresh one is kept,
+// and an old file is kept when its own run is still open (runs.outcome IS
+// NULL), whatever its age. A file outside the run-<id>-stderr.log shape is
+// left alone no matter how old it is.
+func TestServeRemovesStaleStderrFilesAtStartup(t *testing.T) {
+	t.Parallel()
+
+	dataDir := t.TempDir()
+	st, err := store.Open(t.Context(), filepath.Join(dataDir, "zing.db"))
+	if err != nil {
+		t.Fatalf("store.Open: %v", err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+
+	projectID, err := st.EnsureProject(t.Context(), store.Project{
+		Name: testServeProjectName, RepoURL: "https://github.com/x/zing", Tracker: testServeTracker,
+	})
+	if err != nil {
+		t.Fatalf("EnsureProject: %v", err)
+	}
+
+	ticketA, err := st.InsertTicket(t.Context(), store.Ticket{
+		ProjectID: projectID, TrackerRef: "manual#1", Title: "a", State: testServeStateQueued,
+	})
+	if err != nil {
+		t.Fatalf("InsertTicket (A): %v", err)
+	}
+	ticketB, err := st.InsertTicket(t.Context(), store.Ticket{
+		ProjectID: projectID, TrackerRef: "manual#2", Title: "b", State: testServeStateQueued,
+	})
+	if err != nil {
+		t.Fatalf("InsertTicket (B): %v", err)
+	}
+
+	const ownerA, ownerB = "owner-a", "owner-b"
+	now := time.Now()
+	leaseExpires := now.Add(10 * time.Minute)
+	var claimed bool
+	claimed, err = st.Claim(t.Context(), ticketA, ownerA, leaseExpires)
+	if err != nil || !claimed {
+		t.Fatalf("claim A: claimed=%v err=%v", claimed, err)
+	}
+	claimed, err = st.Claim(t.Context(), ticketB, ownerB, leaseExpires)
+	if err != nil || !claimed {
+		t.Fatalf("claim B: claimed=%v err=%v", claimed, err)
+	}
+
+	runA, err := st.Reserve(t.Context(), ticketA, ownerA, leaseExpires,
+		store.SessionUpsert{Job: "planning", Runtime: runtimeNameFake}, store.RunSeed{Model: "fake-model"})
+	if err != nil {
+		t.Fatalf("reserve A: %v", err)
+	}
+	runB, err := st.Reserve(t.Context(), ticketB, ownerB, leaseExpires,
+		store.SessionUpsert{Job: "planning", Runtime: runtimeNameFake}, store.RunSeed{Model: "fake-model"})
+	if err != nil {
+		t.Fatalf("reserve B: %v", err)
+	}
+
+	// Expiring only ownerA's claim finishes run A (reconcileReservedRunsTx
+	// terminalizes it) while leaving run B's claim, and its run, open.
+	if _, err := st.ExpireClaims(t.Context(), now.Add(time.Hour), ownerA); err != nil {
+		t.Fatalf("ExpireClaims: %v", err)
+	}
+
+	runsDir := filepath.Join(dataDir, "runs")
+	if err := os.MkdirAll(runsDir, 0o700); err != nil {
+		t.Fatalf("mkdir %s: %v", runsDir, err)
+	}
+
+	staleFinished := writeStderrFixture(t, runsDir, runA.RunID, now.Add(-20*24*time.Hour))
+	staleOpen := writeStderrFixture(t, runsDir, runB.RunID, now.Add(-20*24*time.Hour))
+	fresh := writeStderrFixture(t, runsDir, 999999, now.Add(-1*24*time.Hour))
+	notes := filepath.Join(runsDir, "notes.txt")
+	if err := os.WriteFile(notes, []byte("keep me"), 0o600); err != nil {
+		t.Fatalf("write %s: %v", notes, err)
+	}
+	if err := os.Chtimes(notes, now.Add(-20*24*time.Hour), now.Add(-20*24*time.Hour)); err != nil {
+		t.Fatalf("chtimes %s: %v", notes, err)
+	}
+	// A directory that happens to match the run-<id>-stderr.log name shape
+	// must be left alone: only entry.Type().IsRegular() files are removed.
+	staleDir := filepath.Join(runsDir, "run-5-stderr.log")
+	if err := os.Mkdir(staleDir, 0o700); err != nil {
+		t.Fatalf("mkdir %s: %v", staleDir, err)
+	}
+	if err := os.Chtimes(staleDir, now.Add(-20*24*time.Hour), now.Add(-20*24*time.Hour)); err != nil {
+		t.Fatalf("chtimes %s: %v", staleDir, err)
+	}
+
+	n := removeStaleStderrFiles(t.Context(), st, dataDir, now)
+	if n != 1 {
+		t.Errorf("removeStaleStderrFiles = %d, want 1", n)
+	}
+	if _, err := os.Stat(staleFinished); !os.IsNotExist(err) {
+		t.Errorf("stale finished run's stderr file still exists (stat err = %v)", err)
+	}
+	for _, path := range []string{staleOpen, fresh, notes, staleDir} {
+		if _, err := os.Stat(path); err != nil {
+			t.Errorf("%s was removed, want kept: %v", path, err)
+		}
+	}
+
+	// A second call removes nothing more.
+	if n := removeStaleStderrFiles(t.Context(), st, dataDir, now); n != 0 {
+		t.Errorf("removeStaleStderrFiles (second call) = %d, want 0", n)
+	}
+
+	// A dataDir with no runs/ directory at all is not an error.
+	if n := removeStaleStderrFiles(t.Context(), st, t.TempDir(), now); n != 0 {
+		t.Errorf("removeStaleStderrFiles (no runs dir) = %d, want 0", n)
+	}
+}
+
+// TestServeRemovesStaleStderrFilesAtStartup_OpenRunIDsFails proves that when
+// store.Store.OpenRunIDs fails, removeStaleStderrFiles deletes nothing and
+// returns 0: a failed open-run query must not be treated as an empty open
+// set, or every old stderr file, including those of runs still in progress,
+// would be removed.
+func TestServeRemovesStaleStderrFilesAtStartup_OpenRunIDsFails(t *testing.T) {
+	t.Parallel()
+
+	dataDir := t.TempDir()
+	st, err := store.Open(t.Context(), filepath.Join(dataDir, "zing.db"))
+	if err != nil {
+		t.Fatalf("store.Open: %v", err)
+	}
+	// Closing the store before the sweep runs makes its next query fail,
+	// standing in for any open-run query error.
+	if err := st.Close(); err != nil {
+		t.Fatalf("store.Close: %v", err)
+	}
+
+	runsDir := filepath.Join(dataDir, "runs")
+	if err := os.MkdirAll(runsDir, 0o700); err != nil {
+		t.Fatalf("mkdir %s: %v", runsDir, err)
+	}
+	now := time.Now()
+	stale := writeStderrFixture(t, runsDir, 1, now.Add(-20*24*time.Hour))
+
+	if n := removeStaleStderrFiles(t.Context(), st, dataDir, now); n != 0 {
+		t.Errorf("removeStaleStderrFiles = %d, want 0", n)
+	}
+	if _, err := os.Stat(stale); err != nil {
+		t.Errorf("%s was removed, want kept: %v", stale, err)
+	}
+}
+
+// TestServeRemovesStaleStderrFilesAtStartup_UnparseableRunID proves that a
+// name matching the run-<id>-stderr.log shape whose id fails to parse as an
+// integer can name no open run, so it is treated as finished and removed on
+// age alone.
+func TestServeRemovesStaleStderrFilesAtStartup_UnparseableRunID(t *testing.T) {
+	t.Parallel()
+
+	dataDir := t.TempDir()
+	st, err := store.Open(t.Context(), filepath.Join(dataDir, "zing.db"))
+	if err != nil {
+		t.Fatalf("store.Open: %v", err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+
+	runsDir := filepath.Join(dataDir, "runs")
+	if err := os.MkdirAll(runsDir, 0o700); err != nil {
+		t.Fatalf("mkdir %s: %v", runsDir, err)
+	}
+	now := time.Now()
+	unparseable := filepath.Join(runsDir, "run-abc-stderr.log")
+	if err := os.WriteFile(unparseable, []byte("stderr\n"), 0o600); err != nil {
+		t.Fatalf("write %s: %v", unparseable, err)
+	}
+	if err := os.Chtimes(unparseable, now.Add(-20*24*time.Hour), now.Add(-20*24*time.Hour)); err != nil {
+		t.Fatalf("chtimes %s: %v", unparseable, err)
+	}
+
+	if n := removeStaleStderrFiles(t.Context(), st, dataDir, now); n != 1 {
+		t.Errorf("removeStaleStderrFiles = %d, want 1", n)
+	}
+	if _, err := os.Stat(unparseable); !os.IsNotExist(err) {
+		t.Errorf("%s still exists, want removed (stat err = %v)", unparseable, err)
+	}
+}
+
+// TestServeRemovesStaleStderrFilesAtStartup_RemoveFailureIsNotCounted proves
+// that a failed os.Remove is logged and skipped, not counted: n++ only ever
+// follows a successful Remove.
+func TestServeRemovesStaleStderrFilesAtStartup_RemoveFailureIsNotCounted(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root ignores directory permissions, so unlink would still succeed")
+	}
+	t.Parallel()
+
+	dataDir := t.TempDir()
+	st, err := store.Open(t.Context(), filepath.Join(dataDir, "zing.db"))
+	if err != nil {
+		t.Fatalf("store.Open: %v", err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+
+	runsDir := filepath.Join(dataDir, "runs")
+	if err := os.MkdirAll(runsDir, 0o700); err != nil {
+		t.Fatalf("mkdir %s: %v", runsDir, err)
+	}
+	now := time.Now()
+	staleA := writeStderrFixture(t, runsDir, 1, now.Add(-20*24*time.Hour))
+	staleB := writeStderrFixture(t, runsDir, 2, now.Add(-20*24*time.Hour))
+
+	// A read-only runs directory lets entries be listed and stat'd but
+	// makes every unlink inside it fail with EACCES.
+	if err := os.Chmod(runsDir, 0o500); err != nil {
+		t.Fatalf("chmod %s: %v", runsDir, err)
+	}
+	t.Cleanup(func() {
+		if err := os.Chmod(runsDir, 0o700); err != nil {
+			t.Logf("restore runs dir permissions: %v", err)
+		}
+	})
+
+	if n := removeStaleStderrFiles(t.Context(), st, dataDir, now); n != 0 {
+		t.Errorf("removeStaleStderrFiles = %d, want 0", n)
+	}
+	for _, path := range []string{staleA, staleB} {
+		if _, err := os.Stat(path); err != nil {
+			t.Errorf("%s was removed, want kept: %v", path, err)
+		}
+	}
+}
+
 // TestResolvePushToken_StableAcrossARestartUnlessExplicitlyConfigured
 // proves the design section 6.13 precedence rule end to end against a real
 // store: with no explicit console.push_token, the first call generates and
