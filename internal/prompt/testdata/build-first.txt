@@ -1,7 +1,7 @@
 You are building one task of an approved plan in this worktree. Earlier
 tasks are already committed. You hold nothing from them except the code.
 
-Run every command in the foreground and wait for it; a background command is lost when the run ends.
+Wait for every command to finish before you continue, and never end your turn while one is still running: a command left running is lost when the run ends. To use a server, start it with `&` inside a shell command, use it from later commands, and stop it before you return.
 
 Task 1 of 3: Add the ping handler
 

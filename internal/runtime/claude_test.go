@@ -769,15 +769,19 @@ func TestClaude_DecodeErrorIsInvalidOutput(t *testing.T) {
 // wantEnvValue fails t unless env holds name=want exactly once.
 func wantEnvValue(t *testing.T, env []string, name, want string) {
 	t.Helper()
+	var got []string
 	for _, kv := range env {
 		if n, v, ok := strings.Cut(kv, "="); ok && n == name {
-			if v != want {
-				t.Errorf("%s = %q, want %q", name, v, want)
-			}
-			return
+			got = append(got, v)
 		}
 	}
-	t.Errorf("%s not found in agentEnv output %v", name, env)
+	if len(got) != 1 {
+		t.Errorf("%s appears %d times in agentEnv output %v, want exactly once", name, len(got), env)
+		return
+	}
+	if got[0] != want {
+		t.Errorf("%s = %q, want %q", name, got[0], want)
+	}
 }
 
 // TestAgentEnvDisablesBackgroundTasks proves CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1
@@ -806,27 +810,28 @@ func TestAgentEnvBashTimeoutsFromRequestTimeout(t *testing.T) {
 	wantEnvValue(t, env, "BASH_MAX_TIMEOUT_MS", "2640000")
 }
 
-// TestAgentEnvBashTimeoutsFloorAtMinimum proves both bash timeout variables
-// clamp to the 120000ms floor instead of going to zero or negative, at and
-// below the boundary machine.toml's own 3-minute perimeter job sits on
-// (plan #54): 3 minutes minus the margin lands exactly on the floor, and 1
-// minute drives the raw value to zero, exercising the clamp itself.
-func TestAgentEnvBashTimeoutsFloorAtMinimum(t *testing.T) {
+// TestAgentEnvBashTimeoutsStayUnderShortRunDeadline proves both bash
+// timeout variables stay under the run's own deadline for short jobs
+// (issue #54 review): at 3 minutes the margin rule gives 120000 ms, and a
+// 1-minute job gets half the run, 30000 ms, never a limit longer than the
+// run itself.
+func TestAgentEnvBashTimeoutsStayUnderShortRunDeadline(t *testing.T) {
 	t.Parallel()
 
 	cases := []struct {
 		name    string
 		timeout time.Duration
+		want    string
 	}{
-		{"exact boundary", 3 * time.Minute},
-		{"below floor", time.Minute},
+		{"margin rule", 3 * time.Minute, "120000"},
+		{"half the run", time.Minute, "30000"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			env := agentEnv(RunRequest{Timeout: tc.timeout})
-			wantEnvValue(t, env, "BASH_DEFAULT_TIMEOUT_MS", "120000")
-			wantEnvValue(t, env, "BASH_MAX_TIMEOUT_MS", "120000")
+			wantEnvValue(t, env, "BASH_DEFAULT_TIMEOUT_MS", tc.want)
+			wantEnvValue(t, env, "BASH_MAX_TIMEOUT_MS", tc.want)
 		})
 	}
 }

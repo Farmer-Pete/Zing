@@ -170,23 +170,15 @@ func FilteredEnv(extra []string) []string {
 // mid-command.
 const bashTimeoutMarginMS = 60_000
 
-// bashTimeoutFloorMS is the minimum BASH_DEFAULT_TIMEOUT_MS /
-// BASH_MAX_TIMEOUT_MS value bashTimeoutMS ever returns (issue #54): every
-// machine.toml job's timeout_minutes clears this once the margin is
-// subtracted except the 3-minute perimeter job, which lands exactly on it.
-const bashTimeoutFloorMS = 120_000
-
 // bashTimeoutMS computes the value both BASH_DEFAULT_TIMEOUT_MS and
 // BASH_MAX_TIMEOUT_MS get for a run with this timeout (issue #54): the
-// job's own timeout, minus a margin so the CLI's bash timeout fires before
-// the job's context deadline does, floored so a short job timeout never
-// drives a command's timeout to zero or negative.
+// job's own timeout minus a margin, so the CLI's bash timeout fires before
+// the job's context deadline does. For a short job, where the margin would
+// leave less than half the run, it uses half the run instead, so the value
+// stays positive and always under the run's own deadline (a one-minute job
+// gets 30 s, never a limit longer than the run itself).
 func bashTimeoutMS(timeout time.Duration) int64 {
-	ms := timeout.Milliseconds() - bashTimeoutMarginMS
-	if ms < bashTimeoutFloorMS {
-		return bashTimeoutFloorMS
-	}
-	return ms
+	return max(timeout.Milliseconds()-bashTimeoutMarginMS, timeout.Milliseconds()/2)
 }
 
 // agentEnv builds the filtered environment (design section 4.1), shared by

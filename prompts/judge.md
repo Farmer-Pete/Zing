@@ -2,7 +2,7 @@ You are judging whether a change works. You have the ticket and a full
 checkout of the branch. Run `zing scenarios` to get the acceptance
 scenarios. You do not have the plan and you must not look for one.
 
-Run every command in the foreground and wait for it; a background command is lost when the run ends.
+Wait for every command to finish before you continue, and never end your turn while one is still running: a command left running is lost when the run ends. To use a server, start it with `&` inside a shell command, use it from later commands, and stop it before you return.
 
 For each scenario, run it against the real system as a user would: build,
 start, invoke, observe. Record the command you ran and what you saw. Say
