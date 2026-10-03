@@ -299,9 +299,10 @@ func TestBuildRunGoesThroughRunJob(t *testing.T) {
 // ---- CHECK: a claim mismatch -------------------------------------------------
 
 // TestBuildClaimMismatchWritesPendingMarker proves a files_changed mismatch
-// (the run claims hello.txt changed, but the scripted runtime writes
-// nothing) makes CHECK write the "claim errors pending" marker rather than
-// landing (design section 6.4).
+// (the run claims phantom.txt changed, but nothing writes it) makes CHECK
+// write the "claim errors pending" marker rather than landing (design
+// section 6.4). withHelloAlwaysProject keeps the commands passing, so the
+// claim is the only failure.
 func TestBuildClaimMismatchWritesPendingMarker(t *testing.T) {
 	if testing.Short() {
 		t.Skip("slow end-to-end flow; runs in the full suite")
@@ -310,8 +311,8 @@ func TestBuildClaimMismatchWritesPendingMarker(t *testing.T) {
 	s, rt, ticketID := buildTicketInBuilding(t)
 	ticket := getTicket(t, s, ticketID)
 
-	mismatchRT := &scriptedRuntime{t: t, steps: []scriptedStep{buildStep([]string{helloTxt}, nil, "mismatch-sess")}}
-	deps := claimForBuild(t, s, mismatchRT, ticketID)
+	mismatchRT := &scriptedRuntime{t: t, steps: []scriptedStep{buildStep([]string{helloTxt, phantomTxt}, nil, "mismatch-sess")}}
+	deps := withHelloAlwaysProject(claimForBuild(t, s, mismatchRT, ticketID), ticket)
 	commit, err := job.Registry()[testStateBuilding].Run(t.Context(), ticket, deps)
 	if err != nil {
 		t.Fatalf("RUN: %v", err)
@@ -319,7 +320,7 @@ func TestBuildClaimMismatchWritesPendingMarker(t *testing.T) {
 	apply(t, s, ticket, commit)
 
 	ticket = getTicket(t, s, ticketID)
-	deps2 := claimForBuild(t, s, rt, ticketID)
+	deps2 := withHelloAlwaysProject(claimForBuild(t, s, rt, ticketID), ticket)
 	commit2, err := job.Registry()[testStateBuilding].Run(t.Context(), ticket, deps2)
 	if err != nil {
 		t.Fatalf("CHECK: %v", err)
@@ -336,46 +337,6 @@ func TestBuildClaimMismatchWritesPendingMarker(t *testing.T) {
 	}
 	if !strings.Contains(body, "claims/files_changed") {
 		t.Errorf("marker body = %q, want a files_changed mismatch line", body)
-	}
-}
-
-// TestCheckRejectsTruthfulFailingCommands proves a build that truthfully
-// claims a failing command still fails CHECK (design section 6.4, 6.5's own
-// CheckCommandsPassed doc): the observed re-run's exits, not the claim,
-// decide.
-func TestCheckRejectsTruthfulFailingCommands(t *testing.T) {
-	if testing.Short() {
-		t.Skip("slow end-to-end flow; runs in the full suite")
-	}
-	t.Parallel()
-	s, rt, ticketID := buildTicketInBuilding(t)
-	ticket := getTicket(t, s, ticketID)
-
-	// Truthfully claims both commands failed, but writes nothing: the real
-	// re-run also observes test_exit 1 (no hello.txt), agreeing with the
-	// claim -- and CHECK still refuses to land.
-	failRT := &scriptedRuntime{t: t, steps: []scriptedStep{buildStep([]string{helloTxt}, nil, "fail-sess")}}
-	deps := claimForBuild(t, s, failRT, ticketID)
-	commit, err := job.Registry()[testStateBuilding].Run(t.Context(), ticket, deps)
-	if err != nil {
-		t.Fatalf("RUN: %v", err)
-	}
-	apply(t, s, ticket, commit)
-
-	ticket = getTicket(t, s, ticketID)
-	deps2 := claimForBuild(t, s, rt, ticketID)
-	commit2, err := job.Registry()[testStateBuilding].Run(t.Context(), ticket, deps2)
-	if err != nil {
-		t.Fatalf("CHECK: %v", err)
-	}
-	if commit2.Next != "" || len(commit2.Artifacts) != 0 {
-		t.Fatalf("commit = %+v, want no transition and no landed build_report", commit2)
-	}
-	if len(commit2.Messages) != 1 || !strings.HasPrefix(commit2.Messages[0].Body, "claim errors pending run ") {
-		t.Fatalf("commit.Messages = %+v, want one claim errors pending marker", commit2.Messages)
-	}
-	if !strings.Contains(commit2.Messages[0].Body, "claims/test_exit: observed 1, want 0") {
-		t.Errorf("marker body = %q, want a test_exit observed-1 line", commit2.Messages[0].Body)
 	}
 }
 
@@ -918,6 +879,11 @@ func TestBuildAdoptRoutesSandboxUnavailable(t *testing.T) {
 	}
 	if commit.Escalation.Payload.Code != string(response.EscalationCodeSandboxUnavailable) {
 		t.Errorf("escalation code = %q, want %q", commit.Escalation.Payload.Code, response.EscalationCodeSandboxUnavailable)
+	}
+	for _, m := range commit.Messages {
+		if strings.HasPrefix(m.Body, "check failed") {
+			t.Errorf("commit.Messages carries %q, want no check failed marker when the sandbox is unavailable", m.Body)
+		}
 	}
 }
 
@@ -2110,16 +2076,16 @@ func TestClaimErrorsResumeAndDelivered(t *testing.T) {
 	s, rt, ticketID := buildTicketInBuilding(t)
 	ticket := getTicket(t, s, ticketID)
 
-	mismatchRT := &scriptedRuntime{t: t, steps: []scriptedStep{buildStep([]string{helloTxt}, nil, "mismatch-sess")}}
-	deps := claimForBuild(t, s, mismatchRT, ticketID)
-	commit, err := job.Registry()[testStateBuilding].Run(t.Context(), ticket, deps) // RUN: claims hello.txt, writes nothing
+	mismatchRT := &scriptedRuntime{t: t, steps: []scriptedStep{buildStep([]string{helloTxt, phantomTxt}, nil, "mismatch-sess")}}
+	deps := withHelloAlwaysProject(claimForBuild(t, s, mismatchRT, ticketID), ticket)
+	commit, err := job.Registry()[testStateBuilding].Run(t.Context(), ticket, deps) // RUN: claims phantom.txt, which nothing writes
 	if err != nil {
 		t.Fatalf("RUN: %v", err)
 	}
 	apply(t, s, ticket, commit)
 
 	ticket = getTicket(t, s, ticketID)
-	deps2 := claimForBuild(t, s, rt, ticketID)
+	deps2 := withHelloAlwaysProject(claimForBuild(t, s, rt, ticketID), ticket)
 	checkCommit, err := job.Registry()[testStateBuilding].Run(t.Context(), ticket, deps2) // CHECK: pending marker
 	if err != nil {
 		t.Fatalf("CHECK: %v", err)
@@ -2139,9 +2105,9 @@ func TestClaimErrorsResumeAndDelivered(t *testing.T) {
 		t.Fatalf("sessions.resumes before the resume = %d, want 0", sess.Resumes)
 	}
 
-	resumeRT := &scriptedRuntime{t: t, steps: []scriptedStep{buildStep([]string{helloTxt}, nil, "mismatch-sess")}}
+	resumeRT := &scriptedRuntime{t: t, steps: []scriptedStep{buildStep([]string{helloTxt, phantomTxt}, nil, "mismatch-sess")}}
 	ticket = getTicket(t, s, ticketID)
-	deps3 := claimForBuild(t, s, resumeRT, ticketID)
+	deps3 := withHelloAlwaysProject(claimForBuild(t, s, resumeRT, ticketID), ticket)
 	resumeCommit, err := job.Registry()[testStateBuilding].Run(t.Context(), ticket, deps3) // resume: claims
 	if err != nil {
 		t.Fatalf("resume: %v", err)
@@ -2574,16 +2540,16 @@ func TestBuildInterruptedClaimsResumeResendsClaims(t *testing.T) {
 	s, rt, ticketID := buildTicketInBuilding(t)
 	ticket := getTicket(t, s, ticketID)
 
-	mismatchRT := &scriptedRuntime{t: t, steps: []scriptedStep{buildStep([]string{helloTxt}, nil, "mismatch-sess")}}
-	deps := claimForBuild(t, s, mismatchRT, ticketID)
-	commit, err := job.Registry()[testStateBuilding].Run(t.Context(), ticket, deps) // RUN: claims hello.txt, writes nothing
+	mismatchRT := &scriptedRuntime{t: t, steps: []scriptedStep{buildStep([]string{helloTxt, phantomTxt}, nil, "mismatch-sess")}}
+	deps := withHelloAlwaysProject(claimForBuild(t, s, mismatchRT, ticketID), ticket)
+	commit, err := job.Registry()[testStateBuilding].Run(t.Context(), ticket, deps) // RUN: claims phantom.txt, which nothing writes
 	if err != nil {
 		t.Fatalf("RUN: %v", err)
 	}
 	apply(t, s, ticket, commit)
 
 	ticket = getTicket(t, s, ticketID)
-	deps2 := claimForBuild(t, s, rt, ticketID)
+	deps2 := withHelloAlwaysProject(claimForBuild(t, s, rt, ticketID), ticket)
 	checkCommit, err := job.Registry()[testStateBuilding].Run(t.Context(), ticket, deps2) // CHECK: pending marker
 	if err != nil {
 		t.Fatalf("CHECK: %v", err)
@@ -2599,7 +2565,7 @@ func TestBuildInterruptedClaimsResumeResendsClaims(t *testing.T) {
 		{res: runtime.RunResult{ExitCode: -1, AgentTime: time.Second}, err: runtime.ErrCanceled},
 	}}
 	ticket = getTicket(t, s, ticketID)
-	deps3 := claimForBuild(t, s, canceledRT, ticketID)
+	deps3 := withHelloAlwaysProject(claimForBuild(t, s, canceledRT, ticketID), ticket)
 	_, err = job.Registry()[testStateBuilding].Run(t.Context(), ticket, deps3) // resume: claims, interrupted mid-flight
 	if !errors.Is(err, runtime.ErrCanceled) {
 		t.Fatalf("err = %v, want errors.Is(err, runtime.ErrCanceled)", err)
@@ -2625,9 +2591,9 @@ func TestBuildInterruptedClaimsResumeResendsClaims(t *testing.T) {
 		t.Fatalf("session state after the canceled claims resume = %v, want SessionOpen", state)
 	}
 
-	rec := &recordingRuntime{rt: &scriptedRuntime{t: t, steps: []scriptedStep{buildStep([]string{helloTxt}, nil, "mismatch-sess")}}}
+	rec := &recordingRuntime{rt: &scriptedRuntime{t: t, steps: []scriptedStep{buildStep([]string{helloTxt, phantomTxt}, nil, "mismatch-sess")}}}
 	ticket = getTicket(t, s, ticketID)
-	deps4 := claimForBuild(t, s, rec, ticketID)
+	deps4 := withHelloAlwaysProject(claimForBuild(t, s, rec, ticketID), ticket)
 	resumeCommit, err := job.Registry()[testStateBuilding].Run(t.Context(), ticket, deps4) // resume: interrupted claims, free
 	if err != nil {
 		t.Fatalf("resume: %v", err)

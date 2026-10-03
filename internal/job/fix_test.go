@@ -250,9 +250,8 @@ func TestDriveFixResumesAfterAnswer(t *testing.T) {
 
 // TestDriveFixResumesClaimErrors proves review F003/F005's own claims-
 // pending resume case, generalized to a fix unit through advanceCheckedRun
-// (design section 5.4 change 1): a fix unit's own RUN claims a passing
-// test_exit the real command contradicts, so CHECK writes a claim-errors-
-// pending marker and the next DriveFix tick resumes it, still labeled
+// (design section 5.4 change 1): a fix unit's own RUN claims phantom.txt,
+// which nothing writes, so CHECK writes a claim-errors-pending marker and the next DriveFix tick resumes it, still labeled
 // "fix" and still carrying a nil task_n.
 func TestDriveFixResumesClaimErrors(t *testing.T) {
 	if testing.Short() {
@@ -263,20 +262,20 @@ func TestDriveFixResumesClaimErrors(t *testing.T) {
 	mid := writeFixRequestMarker(t, s, ticketID, job.FixKindCILog, testFixCILogText, 0)
 	ticket := getTicket(t, s, ticketID)
 
-	scriptRT := &scriptedRuntime{t: t, steps: []scriptedStep{buildStep([]string{helloTxt}, nil, "fix-pending-sess")}}
+	scriptRT := &scriptedRuntime{t: t, steps: []scriptedStep{buildStep([]string{helloTxt, phantomTxt}, nil, "fix-pending-sess")}}
 	rec := &recordingRuntime{rt: scriptRT}
-	deps := claimForBuild(t, s, rec, ticketID)
+	deps := withHelloAlwaysProject(claimForBuild(t, s, rec, ticketID), ticket)
 	req := job.FixRequest{MessageID: mid, Kind: job.FixKindCILog, Text: testFixCILogText, AfterRunID: 0}
 
-	commit, err := job.DriveFix(t.Context(), ticket, deps, req) // RUN: claims hello.txt, writes nothing
+	commit, err := job.DriveFix(t.Context(), ticket, deps, req) // RUN: claims phantom.txt, which nothing writes
 	if err != nil {
 		t.Fatalf("DriveFix (RUN): %v", err)
 	}
 	apply(t, s, ticket, commit)
 
 	ticket = getTicket(t, s, ticketID)
-	deps2 := claimForBuild(t, s, rec, ticketID)
-	checkCommit, err := job.DriveFix(t.Context(), ticket, deps2, req) // CHECK: claim errors pending (test_exit false)
+	deps2 := withHelloAlwaysProject(claimForBuild(t, s, rec, ticketID), ticket)
+	checkCommit, err := job.DriveFix(t.Context(), ticket, deps2, req) // CHECK: claim errors pending
 	if err != nil {
 		t.Fatalf("DriveFix (CHECK): %v", err)
 	}
@@ -285,9 +284,9 @@ func TestDriveFixResumesClaimErrors(t *testing.T) {
 	}
 	apply(t, s, ticket, checkCommit)
 
-	scriptRT.steps = append(scriptRT.steps, buildStep([]string{helloTxt}, nil, "fix-pending-sess"))
+	scriptRT.steps = append(scriptRT.steps, buildStep([]string{helloTxt, phantomTxt}, nil, "fix-pending-sess"))
 	ticket = getTicket(t, s, ticketID)
-	deps3 := claimForBuild(t, s, rec, ticketID)
+	deps3 := withHelloAlwaysProject(claimForBuild(t, s, rec, ticketID), ticket)
 	resumeCommit, err := job.DriveFix(t.Context(), ticket, deps3, req) // resume: claims
 	if err != nil {
 		t.Fatalf("DriveFix (resume): %v", err)
@@ -317,6 +316,45 @@ func TestDriveFixResumesClaimErrors(t *testing.T) {
 	if !found {
 		t.Fatalf("RunsForTicket(%d) = %+v, want to find run %d", ticketID, runs, runID)
 	}
+}
+
+// TestDriveFixCheckFailureResumesWithOutput proves a fix unit gets the
+// CHECK loop through the shared advanceCheckedRun with no fix-specific
+// code (#55): a failing test command resumes the fix session, labeled
+// "fix", with the command's output in the prompt.
+func TestDriveFixCheckFailureResumesWithOutput(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow end-to-end flow; runs in the full suite")
+	}
+	t.Parallel()
+	s, _, ticketID := buildTicketInBuilding(t)
+	mid := writeFixRequestMarker(t, s, ticketID, job.FixKindCILog, testFixCILogText, 0)
+	req := job.FixRequest{MessageID: mid, Kind: job.FixKindCILog, Text: testFixCILogText, AfterRunID: 0}
+	scriptRT := &scriptedRuntime{t: t, steps: []scriptedStep{buildStep([]string{}, nil, "fix-check-sess")}}
+	rec := &recordingRuntime{rt: scriptRT}
+
+	tick := func() store.HandlerCommit {
+		t.Helper()
+		ticket := getTicket(t, s, ticketID)
+		deps := withCheckTestCommand(claimForBuild(t, s, rec, ticketID), ticket, checkFailingTestCmd)
+		commit, err := job.DriveFix(t.Context(), ticket, deps, req)
+		if err != nil {
+			t.Fatalf("DriveFix: %v", err)
+		}
+		apply(t, s, ticket, commit)
+		return commit
+	}
+	tick() // RUN
+	check := tick()
+	if len(check.Messages) != 1 || !strings.HasPrefix(check.Messages[0].Body, checkPendingPrefix) {
+		t.Fatalf("CHECK commit.Messages = %+v, want one check failed pending marker", check.Messages)
+	}
+	scriptRT.steps = append(scriptRT.steps, buildStep([]string{}, nil, "fix-check-sess"))
+	tick() // resume
+	if rec.lastReq.Label != testFixLabel {
+		t.Errorf("resume request Label = %q, want %q", rec.lastReq.Label, testFixLabel)
+	}
+	assertFenced(t, rec.lastReq.Prompt, "check", checkFailLine)
 }
 
 // TestDriveFixResumesInvalidOutput proves advanceUnit's own "error,
@@ -380,8 +418,9 @@ type canceledClaimsResume struct {
 // TestDriveFixResumesInterrupted, TestFixInterruptedResumeIsFree, and
 // TestFixInterruptedClaimsResumeResendsClaims each used to copy by hand
 // (PR review fix F3, the repo's "three repetitions before abstraction"
-// rule): it drives a fresh fix request through RUN (claims hello.txt,
-// writes nothing) and CHECK (claim errors pending), then resumes once more
+// rule): it drives a fresh fix request through RUN (claims phantom.txt,
+// which nothing writes) and CHECK (claim errors pending, the commands
+// passing), then resumes once more
 // with a runtime that reports runtime.ErrCanceled mid-flight, leaving the
 // session's newest run reserved with no outcome. The caller reconciles
 // that canceled resume its own way -- ExpireClaims (a plain lease expiry)
@@ -394,19 +433,19 @@ func driveFixThroughCanceledClaimsResume(t *testing.T, sessionID string) cancele
 	mid := writeFixRequestMarker(t, s, ticketID, job.FixKindCILog, testFixCILogText, 0)
 	ticket := getTicket(t, s, ticketID)
 
-	mismatchRT := &scriptedRuntime{t: t, steps: []scriptedStep{buildStep([]string{helloTxt}, nil, sessionID)}}
-	deps := claimForBuild(t, s, mismatchRT, ticketID)
+	mismatchRT := &scriptedRuntime{t: t, steps: []scriptedStep{buildStep([]string{helloTxt, phantomTxt}, nil, sessionID)}}
+	deps := withHelloAlwaysProject(claimForBuild(t, s, mismatchRT, ticketID), ticket)
 	req := job.FixRequest{MessageID: mid, Kind: job.FixKindCILog, Text: testFixCILogText, AfterRunID: 0}
 	maxResumes := deps.Machine.Jobs["build"].MaxResumes
 
-	commit, err := job.DriveFix(t.Context(), ticket, deps, req) // RUN: claims hello.txt, writes nothing
+	commit, err := job.DriveFix(t.Context(), ticket, deps, req) // RUN: claims phantom.txt, which nothing writes
 	if err != nil {
 		t.Fatalf("DriveFix (RUN): %v", err)
 	}
 	apply(t, s, ticket, commit)
 
 	ticket = getTicket(t, s, ticketID)
-	deps2 := claimForBuild(t, s, mismatchRT, ticketID)
+	deps2 := withHelloAlwaysProject(claimForBuild(t, s, mismatchRT, ticketID), ticket)
 	checkCommit, err := job.DriveFix(t.Context(), ticket, deps2, req) // CHECK: pending marker
 	if err != nil {
 		t.Fatalf("DriveFix (CHECK): %v", err)
@@ -422,7 +461,7 @@ func driveFixThroughCanceledClaimsResume(t *testing.T, sessionID string) cancele
 		{res: runtime.RunResult{ExitCode: -1, AgentTime: 0}, err: runtime.ErrCanceled},
 	}}
 	ticket = getTicket(t, s, ticketID)
-	deps3 := claimForBuild(t, s, canceledRT, ticketID)
+	deps3 := withHelloAlwaysProject(claimForBuild(t, s, canceledRT, ticketID), ticket)
 	if _, err = job.DriveFix(t.Context(), ticket, deps3, req); !errors.Is(err, runtime.ErrCanceled) { // resume: claims, interrupted mid-flight
 		t.Fatalf("err = %v, want errors.Is(err, runtime.ErrCanceled)", err)
 	}
@@ -988,7 +1027,7 @@ func TestFixEscalationOriginFix(t *testing.T) {
 
 		ticket = getTicket(t, s, ticketID)
 		deps2 := claimForBuild(t, s, rec, ticketID)
-		checkCommit, err := job.DriveFix(t.Context(), ticket, deps2, req) // CHECK: claim errors pending (test_exit false)
+		checkCommit, err := job.DriveFix(t.Context(), ticket, deps2, req) // CHECK: claim errors and the test command pending
 		if err != nil {
 			t.Fatalf("DriveFix (CHECK): %v", err)
 		}

@@ -531,7 +531,8 @@ const (
 // run <id>[...]", invalidOutputCommit's "response invalid run
 // <id>\n<reason>", store.CountSealMismatches' "seal mismatch cohort <id>",
 // and building.go's own markerClaimsOkFmt, markerClaimErrorsPendingFmt,
-// markerClaimErrorsDeliveredFmt, markerPerimeterResolvedFmt, the escalation
+// markerClaimErrorsDeliveredFmt, markerPerimeterResolvedFmt, checkloop.go's
+// markerCheckFailedPendingFmt and markerCheckFailedDeliveredFmt, the escalation
 // resolution's "retry requested", and markerPerimeterQuestionDroppedFmt --
 // and reviewing.go's own "review round <n> done/asked/failed/void", "review
 // discussed <id>", and "review note <id>" -- so displayBody can recognize
@@ -550,6 +551,8 @@ const (
 	updateMarkerClaimsOkPrefix                 = "claims ok run "
 	updateMarkerClaimErrorsPendingPrefix       = "claim errors pending run "
 	updateMarkerClaimErrorsDeliveredPrefix     = "claim errors delivered run "
+	updateMarkerCheckFailedPendingPrefix       = "check failed pending run "
+	updateMarkerCheckFailedDeliveredPrefix     = "check failed delivered run "
 	updateMarkerPerimeterResolvedPrefix        = "perimeter resolved run "
 	updateMarkerRetryRequested                 = "retry requested"
 	updateMarkerPerimeterQuestionDroppedPrefix = "perimeter question dropped run "
@@ -1779,6 +1782,10 @@ func updateLine(m *store.MessageRow, agent string) (string, bool) {
 		return claimErrorsPendingLine(body), true
 	case strings.HasPrefix(body, updateMarkerClaimErrorsDeliveredPrefix):
 		return "Claim errors sent back to run " + strings.TrimPrefix(body, updateMarkerClaimErrorsDeliveredPrefix) + ".", true
+	case strings.HasPrefix(body, updateMarkerCheckFailedPendingPrefix):
+		return checkFailedPendingLine(body), true
+	case strings.HasPrefix(body, updateMarkerCheckFailedDeliveredPrefix):
+		return "Test and lint output sent back to run " + strings.TrimPrefix(body, updateMarkerCheckFailedDeliveredPrefix) + ".", true
 	case strings.HasPrefix(body, updateMarkerPerimeterResolvedPrefix):
 		return "Perimeter decided for run " + strings.TrimPrefix(body, updateMarkerPerimeterResolvedPrefix) + ".", true
 	case body == updateMarkerRetryRequested:
@@ -2251,12 +2258,25 @@ func fixLandedLine(first string) (string, bool) {
 // first line as one owner-facing sentence, then the marker's own error
 // lines unchanged (design section 9.2): unlike validationErrorsLine's own
 // "Field <path>: <message>" rewrite, a claim error's own path (for example
-// "claims/test_exit: observed 1, want 0") is already the owner-facing
-// shape CheckBuildClaims and CheckCommandsPassed produce.
+// "claims/files_changed: observed [a.go], claimed [a.go, b.go]") is
+// already the owner-facing shape CheckBuildClaims produces.
 func claimErrorsPendingLine(body string) string {
 	first, rest, hasRest := strings.Cut(body, "\n")
 	rid := strings.TrimPrefix(first, updateMarkerClaimErrorsPendingPrefix)
 	header := "Claim check failed for run " + rid + ":"
+	if !hasRest {
+		return header
+	}
+	return header + "\n" + rest
+}
+
+// checkFailedPendingLine renders a "check failed pending run <rid>" body's
+// first line as one owner-facing sentence, then the failing commands'
+// sections unchanged (#55), mirroring claimErrorsPendingLine.
+func checkFailedPendingLine(body string) string {
+	first, rest, hasRest := strings.Cut(body, "\n")
+	rid := strings.TrimPrefix(first, updateMarkerCheckFailedPendingPrefix)
+	header := "Test or lint failed for run " + rid + ":"
 	if !hasRest {
 		return header
 	}

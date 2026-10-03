@@ -138,6 +138,12 @@ func Notes(text string) NamedInput { return NamedInput{Label: "notes", Text: tex
 // model-written text re-entering a model (plan section 4.2, D15).
 func Error(text string) NamedInput { return NamedInput{Label: "error", Text: text, Untrusted: true} }
 
+// Check returns the "check" labeled input carrying the output of the
+// project's failing test or lint command back into the build session
+// (#55), fenced because a command prints whatever the code under test
+// makes it print.
+func Check(text string) NamedInput { return NamedInput{Label: "check", Text: text, Untrusted: true} }
+
 // Answers returns the "answers" labeled input carrying a cap_resumes
 // resolution's preserved answers into a fresh session, fenced along with
 // every other owner- or model-originated input (plan section 4.2, D15).
