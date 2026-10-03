@@ -12,7 +12,6 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
-	"sync"
 	"testing"
 )
 
@@ -269,7 +268,7 @@ func TestJudgeTreeRemoveReturnsError(t *testing.T) {
 			return slices.Contains(args, "remove")
 		},
 	}
-	jt := JudgeTree{dir: dir, repoPath: repoPath, run: failing, commonMu: &sync.Mutex{}}
+	jt := JudgeTree{dir: dir, repoPath: repoPath, run: failing, commonMu: newCommonMutex()}
 
 	if err := jt.Remove(t.Context()); err == nil {
 		t.Fatal("Remove: want an error for a forced git worktree remove failure, got nil")

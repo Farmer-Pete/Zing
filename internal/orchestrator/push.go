@@ -15,9 +15,11 @@ import (
 // <default_branch>..<branch> is signed, using the same signedStatus (8.3)
 // CommitTask verifies with: a single unsigned commit aborts the push before
 // anything is pushed. Only then does it run
-// "git -C <dir> push -u origin refs/heads/<branch>:refs/heads/<branch>", an
+// "git -C <dir> push origin refs/heads/<branch>:refs/heads/<branch>", an
 // explicit same-name refspec that cannot be reinterpreted as a target on the
-// default branch.
+// default branch, followed by "git branch --set-upstream-to" to record the
+// upstream (PR review fix C3; design section 8's own inventory in
+// commonlock.go).
 func (o *Orchestrator) Push(ctx context.Context, wt Worktree) error {
 	if err := o.revalidate(ctx, wt); err != nil {
 		return fmt.Errorf("orchestrator: push: %w", err)
@@ -39,9 +41,21 @@ func (o *Orchestrator) Push(ctx context.Context, wt Worktree) error {
 
 	o.log.Info("pushing branch", "branch", wt.branch, "commits", len(shas))
 
+	// The push itself (no -u) writes only refs/remotes/origin/<branch>: a
+	// ref update, which git-safe object/ref writes already make safe
+	// without commonMu (design section 8's own "Scope of the guarantee").
+	// It runs outside the lock (PR review fix C3), so a slow or stalled
+	// remote never blocks every other ticket's shared git writes in this
+	// repository for the whole network round trip.
 	refspec := "refs/heads/" + wt.branch + ":refs/heads/" + wt.branch
-	if out, runErr := o.runCommon(ctx, o.run, wt.dir, "push", "-u", "origin", refspec); runErr != nil {
+	if out, runErr := o.run.Run(ctx, wt.dir, "git", "push", "origin", refspec); runErr != nil {
 		return fmt.Errorf("orchestrator: push: git push: %w: %s", runErr, strings.TrimSpace(out))
+	}
+
+	// Only this second call writes branch.<b>.* in the shared config, so
+	// only it needs commonMu.
+	if out, runErr := o.runCommon(ctx, o.run, wt.dir, "branch", "--set-upstream-to", "origin/"+wt.branch, wt.branch); runErr != nil {
+		return fmt.Errorf("orchestrator: push: git branch --set-upstream-to: %w: %s", runErr, strings.TrimSpace(out))
 	}
 
 	o.log.Info("pushed branch", "branch", wt.branch)

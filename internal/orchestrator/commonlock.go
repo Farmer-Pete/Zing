@@ -35,7 +35,8 @@ package orchestrator
 //	perimeter.go RevertPaths (litRun)           restore --staged [--worktree] ...          per-worktree (worktree's own index/working tree)
 //	perimeter.go Hunk                           diff ...                                    per-worktree (read)
 //	perimeter.go BranchCommits                  rev-list --reverse ...                     per-worktree (read)
-//	push.go   Push                              push -u origin <refspec>                   SHARED (writes branch.<b>.* in the shared config)
+//	push.go   Push                              push origin <refspec>                      per-worktree (network I/O; only writes refs/remotes/origin/<branch>, a ref update -- PR review fix C3)
+//	push.go   Push                              branch --set-upstream-to <upstream> <br>   SHARED (writes branch.<b>.* in the shared config)
 //	push.go   unpushedShas                      log -z --format=%H ...                     per-worktree (read)
 //	review.go HeadSHA                           rev-parse HEAD                             per-worktree (read)
 //	review.go Diff                              merge-base, diff ...                       per-worktree (read)
@@ -94,22 +95,72 @@ import (
 	"time"
 )
 
-// commonLocks is the process-wide registry handing out one *sync.Mutex per
-// repository (keyed by its canonicalized common git dir), so two
+// commonMutex is a context-aware mutual-exclusion lock (PR review fix C4):
+// commonMu used to be a plain *sync.Mutex, so a waiter stuck behind another
+// ticket's long shared git write (a slow push, a stalled lock-contention
+// retry) could not be interrupted even once its own ctx ended. It is a
+// channel-based binary semaphore -- a capacity-1 channel holding a single
+// token, present exactly when the lock is free -- not a sync.Mutex, so
+// acquiring it can select on ctx.Done() alongside taking the token.
+type commonMutex struct {
+	ch chan struct{} // capacity 1; a token present means unlocked
+}
+
+// newCommonMutex returns a commonMutex ready to be locked, its one token
+// already in place.
+func newCommonMutex() *commonMutex {
+	m := &commonMutex{ch: make(chan struct{}, 1)}
+	m.ch <- struct{}{}
+	return m
+}
+
+// Lock acquires m, waiting for the token or for ctx to end, whichever
+// comes first. Every lock site below passes the same ctx its own git call
+// (or file write) will use, so a caller that gives up while still waiting
+// never also starts that call.
+func (m *commonMutex) Lock(ctx context.Context) error {
+	select {
+	case <-m.ch:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+// Unlock returns m's token. A caller that never successfully Locked must
+// never call this.
+func (m *commonMutex) Unlock() {
+	m.ch <- struct{}{}
+}
+
+// TryLock reports whether m was free and, if so, takes its token (ordinary
+// sync.Mutex.TryLock semantics: the caller must Unlock an Locked m). It
+// never waits. CommonMuHeldForTest (export_test.go) is its only caller.
+func (m *commonMutex) TryLock() bool {
+	select {
+	case <-m.ch:
+		return true
+	default:
+		return false
+	}
+}
+
+// commonLocks is the process-wide registry handing out one *commonMutex
+// per repository (keyed by its canonicalized common git dir), so two
 // Orchestrator values pointing at the same repository -- config allows two
 // project entries to do that -- serialize against each other, not just
 // against their own other calls (design section 8).
 var commonLocks struct {
 	mu sync.Mutex
-	m  map[string]*sync.Mutex
+	m  map[string]*commonMutex
 }
 
-// commonLockFor returns the one *sync.Mutex every orchestrator for
+// commonLockFor returns the one *commonMutex every orchestrator for
 // commonDir (already canonicalized by the caller) shares, creating it on
 // first use.
 //
 // Lock sites. Three places in this package (and judge.go, same package)
-// ever take the *sync.Mutex this returns: runCommon (every SHARED git call
+// ever take the *commonMutex this returns: runCommon (every SHARED git call
 // in the inventory above), ensureWorktreeExcludeLocked (the one shared
 // write that is not a git subcommand, so it cannot go through runCommon),
 // and JudgeTree.removeLocked (judge.go: a JudgeTree is called with no
@@ -118,16 +169,16 @@ var commonLocks struct {
 // calling runCommon (no nesting). This is the one place that list is
 // spelled out; every lock site's own doc comment just names itself and
 // points back here, rather than asserting its own count.
-func commonLockFor(commonDir string) *sync.Mutex {
+func commonLockFor(commonDir string) *commonMutex {
 	commonLocks.mu.Lock()
 	defer commonLocks.mu.Unlock()
 	if commonLocks.m == nil {
-		commonLocks.m = make(map[string]*sync.Mutex)
+		commonLocks.m = make(map[string]*commonMutex)
 	}
 	if mu, ok := commonLocks.m[commonDir]; ok {
 		return mu
 	}
-	mu := &sync.Mutex{}
+	mu := newCommonMutex()
 	commonLocks.m[commonDir] = mu
 	return mu
 }
@@ -148,29 +199,39 @@ func canonicalCommonDir(dir string) (string, error) {
 	return resolved, nil
 }
 
-// resolveCommonMu resolves (and caches, via o.commonMuOnce) this
+// resolveCommonMu resolves (and caches, guarded by o.commonMuGuard) this
 // orchestrator's own shared mutex, lazily, on its first runCommon call
 // (design section 8): o.GitCommonDir needs a working git call before this
-// can resolve at all, so it cannot be built eagerly in New. A resolution
-// failure is cached too (sync.Once runs its function exactly once either
-// way): the common git dir is a property of the repository, not a
-// transient condition, so a failure here is expected to keep failing on
-// retry.
-func (o *Orchestrator) resolveCommonMu(ctx context.Context) (*sync.Mutex, error) {
-	o.commonMuOnce.Do(func() {
-		dir, err := o.GitCommonDir(ctx)
-		if err != nil {
-			o.commonMuErr = fmt.Errorf("orchestrator: resolve common git dir: %w", err)
-			return
-		}
-		resolved, err := canonicalCommonDir(dir)
-		if err != nil {
-			o.commonMuErr = fmt.Errorf("orchestrator: resolve common git dir: %w", err)
-			return
-		}
-		o.commonMu = commonLockFor(resolved)
-	})
-	return o.commonMu, o.commonMuErr
+// can resolve at all, so it cannot be built eagerly in New.
+//
+// Only a success is cached (PR review fix C1): a prior sync.Once-based
+// version cached a failure too, on the theory that the common git dir is a
+// property of the repository, not a transient condition. That is not true
+// of a canceled or timed-out ctx -- a caller that happens to resolve the
+// mutex for the first time with a bad ctx (serve shutdown, in particular)
+// would otherwise poison every later call, including cleanupWorktree's own
+// detached, generously-timed-out ctx, with the same stale error forever.
+// A mutex guard, not sync.Once, makes retrying after a failure possible;
+// commonMuGuard is held only across this function's own body, never across
+// a git call, so a failed GitCommonDir call here cannot deadlock against a
+// concurrent caller of CommonMuHeldForTest (export_test.go), which itself
+// calls back into this function.
+func (o *Orchestrator) resolveCommonMu(ctx context.Context) (*commonMutex, error) {
+	o.commonMuGuard.Lock()
+	defer o.commonMuGuard.Unlock()
+	if o.commonMu != nil {
+		return o.commonMu, nil
+	}
+	dir, err := o.GitCommonDir(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("orchestrator: resolve common git dir: %w", err)
+	}
+	resolved, err := canonicalCommonDir(dir)
+	if err != nil {
+		return nil, fmt.Errorf("orchestrator: resolve common git dir: %w", err)
+	}
+	o.commonMu = commonLockFor(resolved)
+	return o.commonMu, nil
 }
 
 // sharedGitSubcommandPrefixes is the argv prefix of every shared git call
@@ -185,7 +246,7 @@ var sharedGitSubcommandPrefixes = [][]string{
 	{"worktree", "add"},
 	{"worktree", "remove"},
 	{"branch", "-D"},
-	{"push", "-u"},
+	{"branch", "--set-upstream-to"},
 	{"sparse-checkout", "init"},
 }
 
@@ -238,6 +299,13 @@ func runCommonLocked(ctx context.Context, r Runner, dir string, args ...string) 
 	var out string
 	var err error
 	for attempt := 0; ; attempt++ {
+		// Checked before every attempt, including the first (PR review fix
+		// C2): a ctx that ended while this call waited for commonMu itself
+		// (runCommon's own mu.Lock(ctx)) must not still launch one more git
+		// subprocess.
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return out, ctxErr
+		}
 		out, err = r.Run(ctx, dir, "git", args...)
 		if err == nil || !lockFileContentionPattern.MatchString(out) {
 			return out, err
@@ -245,7 +313,16 @@ func runCommonLocked(ctx context.Context, r Runner, dir string, args ...string) 
 		if attempt >= commonLockRetries {
 			return out, err
 		}
-		time.Sleep(commonLockRetryDelay)
+		// A select on ctx.Done(), not a bare time.Sleep (PR review fix C2):
+		// this runs with commonMu held, so a bare sleep would also block
+		// every other goroutine waiting on the same mutex for the full
+		// delay even after shutdown has started, and would still launch
+		// one more git subprocess once it woke.
+		select {
+		case <-ctx.Done():
+			return out, ctx.Err()
+		case <-time.After(commonLockRetryDelay):
+		}
 	}
 }
 
@@ -260,7 +337,9 @@ func (o *Orchestrator) runCommon(ctx context.Context, r Runner, dir string, args
 	if err != nil {
 		return "", err
 	}
-	mu.Lock()
+	if lockErr := mu.Lock(ctx); lockErr != nil {
+		return "", lockErr
+	}
 	defer mu.Unlock()
 	return runCommonLocked(ctx, r, dir, args...)
 }
@@ -276,7 +355,9 @@ func (o *Orchestrator) ensureWorktreeExcludeLocked(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	mu.Lock()
+	if lockErr := mu.Lock(ctx); lockErr != nil {
+		return lockErr
+	}
 	defer mu.Unlock()
 	return o.ensureWorktreeExclude(ctx)
 }

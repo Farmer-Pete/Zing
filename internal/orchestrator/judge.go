@@ -13,7 +13,6 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
-	"sync"
 )
 
 // JudgeTree is one detached checkout prepared for the judge, at
@@ -31,7 +30,7 @@ type JudgeTree struct {
 	// 8, commonlock.go), captured at JudgeWorktree time: Remove's own
 	// "worktree remove --force" is a shared write, and callers (internal/job)
 	// invoke it directly, with no Orchestrator in scope to resolve one.
-	commonMu *sync.Mutex
+	commonMu *commonMutex
 }
 
 // Dir returns the checkout's absolute path.
@@ -63,7 +62,9 @@ func (j JudgeTree) Remove(ctx context.Context) error {
 // and ensureWorktreeExcludeLocked that takes the lock, since JudgeTree has
 // no Orchestrator to call runCommon through.
 func (j JudgeTree) removeLocked(ctx context.Context) (string, error) {
-	j.commonMu.Lock()
+	if err := j.commonMu.Lock(ctx); err != nil {
+		return "", err
+	}
 	defer j.commonMu.Unlock()
 	return runCommonLocked(ctx, j.run, j.repoPath, "worktree", "remove", "--force", j.dir)
 }

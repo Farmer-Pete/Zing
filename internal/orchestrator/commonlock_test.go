@@ -9,6 +9,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 )
 
 // countingLockRunner is runCommonLocked's own test double (design section
@@ -69,6 +70,30 @@ func TestRunCommonGivesUpAfterFourConsecutiveFailures(t *testing.T) {
 	}
 }
 
+// TestRunCommonLocked_CancelDuringRetryDelayReturnsCtxErr proves PR review
+// fix C2: a ctx canceled while runCommonLocked is waiting out its own
+// retry delay returns ctx.Err() at once, instead of sleeping out the full
+// delay (and then checking it only before the next git call, as a bare
+// time.Sleep would have).
+func TestRunCommonLocked_CancelDuringRetryDelayReturnsCtxErr(t *testing.T) {
+	t.Parallel()
+	r := &countingLockRunner{failCount: 1000}
+	ctx, cancel := context.WithCancel(t.Context())
+
+	go func() {
+		time.Sleep(50 * time.Millisecond) // well inside the first 200ms retry delay
+		cancel()
+	}()
+
+	_, err := runCommonLocked(ctx, r, "/x", "config", "--get", "foo")
+	if !errors.Is(err, context.Canceled) {
+		t.Errorf("runCommonLocked = %v, want context.Canceled", err)
+	}
+	if r.calls > commonLockRetries+1 {
+		t.Errorf("calls = %d, want at most %d (canceled before exhausting the retry budget)", r.calls, commonLockRetries+1)
+	}
+}
+
 // TestRunCommonReturnsAtOnceOnAnOrdinaryFailure proves runCommonLocked
 // retries only the exact lock-contention shape, not any failure: an
 // ordinary git error (no lock-file message in the output) returns after
@@ -106,10 +131,69 @@ func (r runnerFunc) Output(ctx context.Context, dir, name string, args ...string
 	return r.run(ctx, dir, name, args...)
 }
 
+// TestResolveCommonMu_DoesNotCacheFailure proves PR review fix C1: a
+// canceled ctx on resolveCommonMu's very first call must not poison every
+// later call with the same stale error once ctx is healthy again -- the
+// common git dir is a property of the repository, but a canceled or
+// timed-out ctx is not a property of the repository.
+func TestResolveCommonMu_DoesNotCacheFailure(t *testing.T) {
+	t.Parallel()
+	repo := newTestRepo(t)
+	o := newTestOrchestrator(t, repo, execRunner{})
+
+	canceledCtx, cancel := context.WithCancel(t.Context())
+	cancel()
+	if _, err := o.resolveCommonMu(canceledCtx); err == nil {
+		t.Fatal("resolveCommonMu(canceled ctx): want an error, got nil")
+	}
+
+	mu, err := o.resolveCommonMu(t.Context())
+	if err != nil {
+		t.Fatalf("resolveCommonMu(healthy ctx) after a prior failure: %v, want success", err)
+	}
+	if mu == nil {
+		t.Fatal("resolveCommonMu returned a nil mutex")
+	}
+}
+
+// TestCommonMutex_LockReturnsCtxErrWhileWaiting proves PR review fix C4: a
+// waiter blocked on an already-locked commonMutex gives up as soon as its
+// own ctx ends, rather than blocking until the holder releases it --
+// runCommon and every other lock site thread their own ctx through to
+// exactly this call.
+func TestCommonMutex_LockReturnsCtxErrWhileWaiting(t *testing.T) {
+	t.Parallel()
+	mu := newCommonMutex()
+	if err := mu.Lock(t.Context()); err != nil {
+		t.Fatalf("first Lock: %v", err)
+	}
+	// mu is now held and deliberately never released in this test.
+
+	ctx, cancel := context.WithCancel(t.Context())
+	done := make(chan error, 1)
+	go func() { done <- mu.Lock(ctx) }()
+
+	select {
+	case err := <-done:
+		t.Fatalf("second Lock returned %v before ctx was even canceled, want it still waiting", err)
+	case <-time.After(100 * time.Millisecond):
+	}
+
+	cancel()
+	select {
+	case err := <-done:
+		if !errors.Is(err, context.Canceled) {
+			t.Errorf("second Lock = %v, want context.Canceled", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("second Lock never returned after ctx was canceled")
+	}
+}
+
 // TestCommonLockSharedAcrossOrchestratorsOfOneRepo proves commonLockFor's
 // own registry (design section 8): two Orchestrator values for the same
 // repository -- one reached directly, one through a symlinked path --
-// resolve to the identical *sync.Mutex, while an orchestrator for a
+// resolve to the identical *commonMutex, while an orchestrator for a
 // different repository gets a different one.
 func TestCommonLockSharedAcrossOrchestratorsOfOneRepo(t *testing.T) {
 	t.Parallel()
@@ -258,11 +342,13 @@ func TestOrchestratorSerializesCommonGitWrites(t *testing.T) {
 	// Warm resolveCommonMu's cache with a plain, uninstrumented Runner
 	// first: GitCommonDir's own resolution call would otherwise run
 	// through rec below, which probes CommonMuHeldForTest, which itself
-	// calls resolveCommonMu -- a reentrant call into the very
-	// sync.Once.Do that is still running, which deadlocks. Once
-	// commonMuOnce has fired, every later resolveCommonMu call (including
-	// the ones CommonMuHeldForTest makes from inside rec's own Run/Output)
-	// just returns the cached mutex, no further git call involved.
+	// calls resolveCommonMu -- a reentrant call that would try to
+	// re-Lock the very commonMuGuard this call already holds, which
+	// deadlocks (a plain sync.Mutex, unlike commonMutex itself, has no
+	// context-aware escape hatch). Once o.commonMu is cached, every later
+	// resolveCommonMu call (including the ones CommonMuHeldForTest makes
+	// from inside rec's own Run/Output) just returns it, no further git
+	// call or guard lock involved.
 	o := newTestOrchestrator(t, repo, execRunner{})
 	if _, err := o.resolveCommonMu(ctx); err != nil {
 		t.Fatalf("resolveCommonMu: %v", err)

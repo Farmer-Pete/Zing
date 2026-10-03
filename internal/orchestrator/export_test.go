@@ -7,10 +7,11 @@ import "context"
 // now. It is a non-blocking probe: TryLock succeeds (so this returns
 // false) exactly when nothing holds the mutex, including when this very
 // goroutine is the one calling from inside a Runner's Run or Output that
-// runCommon invoked with the lock already held -- sync.Mutex has no
-// goroutine affinity, so a held lock fails TryLock regardless of which
-// goroutine asks. A momentarily acquired lock is released at once, so this
-// probe never itself changes whether the mutex is held.
+// runCommon invoked with the lock already held -- commonMutex, like
+// sync.Mutex, has no goroutine affinity, so a held lock fails TryLock
+// regardless of which goroutine asks. A momentarily acquired lock is
+// released at once, so this probe never itself changes whether the mutex
+// is held.
 //
 // Exported to tests (export_test.go, built only for `go test`) so
 // TestOrchestratorSerializesCommonGitWrites' own recording Runner can

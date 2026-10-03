@@ -422,3 +422,58 @@ func TestPushArgvDisablesHooks(t *testing.T) {
 
 	assertMarkerAbsent(t, marker)
 }
+
+// TestPush_PushRunsUnlockedUpstreamRunsLocked proves PR review fix C3: the
+// network "git push" itself (no -u) runs without commonMu held, and only
+// the second call, "git branch --set-upstream-to" -- the one that writes
+// branch.<b>.* in the shared config -- runs with it held. A slow or
+// stalled remote must never block every other ticket's shared git writes
+// in this repository for the push's own network round trip.
+func TestPush_PushRunsUnlockedUpstreamRunsLocked(t *testing.T) {
+	t.Parallel()
+	fixture := newSigningFixture(t, true)
+	repo := newSigningTestRepo(t, fixture)
+	ctx := t.Context()
+	remote := newBareRemote(ctx, t)
+	addOrigin(ctx, t, repo, remote)
+
+	o := newTestOrchestrator(t, repo, execRunner{})
+	// Warm resolveCommonMu's cache with a plain Runner first, the same way
+	// TestOrchestratorSerializesCommonGitWrites does (commonlock_test.go),
+	// before swapping in the recording Runner: otherwise CommonMuHeldForTest's
+	// own reentrant call into resolveCommonMu, from inside rec's Run below,
+	// would race the first, still-uncached resolution.
+	if _, err := o.resolveCommonMu(ctx); err != nil {
+		t.Fatalf("resolveCommonMu: %v", err)
+	}
+
+	rec := &recordingRunner{o: o}
+	o.run = rec
+
+	wt := prepareSignedCommit(ctx, t, o, 90)
+	if err := o.Push(ctx, wt); err != nil {
+		t.Fatalf("Push: %v", err)
+	}
+
+	var sawPush, sawUpstream bool
+	for _, ev := range rec.snapshot() {
+		switch {
+		case len(ev.args) >= 2 && ev.args[0] == "push" && ev.args[1] == "origin":
+			sawPush = true
+			if ev.locked {
+				t.Error("git push ran with commonMu held, want unlocked")
+			}
+		case len(ev.args) >= 2 && ev.args[0] == "branch" && ev.args[1] == "--set-upstream-to":
+			sawUpstream = true
+			if !ev.locked {
+				t.Error("git branch --set-upstream-to ran without commonMu held, want locked")
+			}
+		}
+	}
+	if !sawPush {
+		t.Error("never observed a git push call")
+	}
+	if !sawUpstream {
+		t.Error("never observed a git branch --set-upstream-to call")
+	}
+}
