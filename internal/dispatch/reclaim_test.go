@@ -293,3 +293,158 @@ func TestReclaimForeign_UnverifiedGroupNeverKilled(t *testing.T) {
 		t.Errorf("final ticket claim owner = %v, want reclaimed (an unverified group past its deadline still frees the claim)", final.ClaimOwner)
 	}
 }
+
+// TestReclaimForeign_KillsOrphanPastDeadline proves a dead serve's
+// verified-live orphan, once its own job's deadline (plus claimGrace) has
+// passed, is killed outright rather than left to wait forever -- and that
+// the claim it was guarding is reclaimed once evaluateOrphan reports it no
+// longer live (design section 6.3, dispatch.go's evaluateOrphan KillGroup
+// branch).
+func TestReclaimForeign_KillsOrphanPastDeadline(t *testing.T) {
+	t.Parallel()
+	s := newDispatchTestStore(t)
+	ticketID := seedQueuedTicket(t, s, testFixtureRef)
+
+	cmd := startGroupLeader(t)
+	pgid := cmd.Process.Pid
+	token, err := proc.StartToken(pgid)
+	if err != nil {
+		killGroup(t, cmd)
+		t.Skipf("proc.StartToken unsupported on this platform: %v", err)
+	}
+
+	foreignOwner := "dead-serve-6"
+	expires := time.Now().Add(10 * time.Minute).UTC().Truncate(time.Second)
+	seedForeignClaim(t, s, ticketID, foreignOwner, expires)
+	// StartedAt far in the past: well past any job's deadline plus
+	// claimGrace, so a verified-live group here must be killed, not
+	// waited on (TestReclaimForeign_WaitsForLiveOrphan's own mirror).
+	seedOpenRun(t, s, ticketID, foreignOwner, expires, pgid, token, time.Now().Add(-2*time.Hour))
+
+	d := newDispatcher(t, s, newFixtureTracker(t), bus.New(), fakeRuntime(t), nil, nil, dispatch.Config{
+		MaxParallel: 1, Owner: testOwner, ReclaimForeign: true,
+	})
+	if err := d.Tick(t.Context()); err != nil {
+		t.Fatalf("Tick: %v", err)
+	}
+
+	// evaluateOrphan's KillGroup already delivered SIGKILL synchronously
+	// inside Tick; reap the leader so GroupAlive (a kill(pgid, 0) probe,
+	// which a zombie still answers) actually reports it gone, the same
+	// reaping every other test's own killGroup helper does right after it
+	// signals a group itself.
+	_ = cmd.Wait() //nolint:errcheck // best-effort reap, SIGKILL already delivered
+	waitGroupGone(t, pgid)
+
+	final := getTicket(t, s, ticketID)
+	if final.ClaimOwner != nil && *final.ClaimOwner == foreignOwner {
+		t.Errorf("final ticket claim owner = %v, want reclaimed once the overdue orphan was killed", final.ClaimOwner)
+	}
+}
+
+// TestReclaimForeign_ExpiredForeignClaimWithLiveOrphanIsKept proves fill's
+// own reconcile ordering (design section 4.2 step 1, 6.3): reclaimForeign
+// runs before ExpireClaims, and ExpireClaims is scoped to this process's
+// own owner (d.cfg.Owner), so a foreign claim is never swept by
+// ExpireClaims just because its claim_expires_at has already passed --
+// only reclaimForeign, gated on the orphan actually being dead, may ever
+// free it. A regression to ExpireClaims(ctx, now, "") (every owner) would
+// sweep this claim out from under the still-live orphan and fail this
+// test.
+func TestReclaimForeign_ExpiredForeignClaimWithLiveOrphanIsKept(t *testing.T) {
+	t.Parallel()
+	s := newDispatchTestStore(t)
+	ticketID := seedQueuedTicket(t, s, testFixtureRef)
+
+	cmd := startGroupLeader(t)
+	defer killGroup(t, cmd)
+	pgid := cmd.Process.Pid
+	token, err := proc.StartToken(pgid)
+	if err != nil {
+		t.Skipf("proc.StartToken unsupported on this platform: %v", err)
+	}
+
+	foreignOwner := "dead-serve-7"
+	// claim_expires_at already in the past: an unscoped ExpireClaims would
+	// treat this as fair game.
+	expires := time.Now().Add(-10 * time.Minute).UTC().Truncate(time.Second)
+	seedForeignClaim(t, s, ticketID, foreignOwner, expires)
+	// StartedAt recent: well inside the job's deadline, so the orphan is
+	// live and not yet killable.
+	seedOpenRun(t, s, ticketID, foreignOwner, expires, pgid, token, time.Now())
+
+	d := newDispatcher(t, s, newFixtureTracker(t), bus.New(), fakeRuntime(t), nil, nil, dispatch.Config{
+		MaxParallel: 1, Owner: testOwner, ReclaimForeign: true,
+	})
+	if tickErr := d.Tick(t.Context()); tickErr != nil {
+		t.Fatalf("Tick: %v", tickErr)
+	}
+
+	kept := getTicket(t, s, ticketID)
+	if kept.ClaimOwner == nil || *kept.ClaimOwner != foreignOwner {
+		t.Fatalf("ticket claim owner = %v, want unchanged %q (a live orphan's foreign claim must survive even past its own claim_expires_at)", kept.ClaimOwner, foreignOwner)
+	}
+
+	runs, err := s.RunsForTicket(t.Context(), ticketID)
+	if err != nil {
+		t.Fatalf("RunsForTicket: %v", err)
+	}
+	if len(runs) != 1 || runs[0].Outcome != nil {
+		t.Errorf("runs = %+v, want exactly one run still open (Outcome nil)", runs)
+	}
+}
+
+// TestReclaimForeign_AllLensOrphansMustExit proves reclaimForeign's own
+// anyLive aggregation (dispatch.go's reclaimForeign loop) over every open
+// run of a foreign claim, the shape a review round's parallel lens
+// sessions leave behind: the claim is kept as long as even one of several
+// open runs is still live, and is only reclaimed once every one of them
+// has actually exited (design section 6.3).
+func TestReclaimForeign_AllLensOrphansMustExit(t *testing.T) {
+	t.Parallel()
+	s := newDispatchTestStore(t)
+	ticketID := seedQueuedTicket(t, s, testFixtureRef)
+
+	cmd := startGroupLeader(t)
+	pgid := cmd.Process.Pid
+	token, err := proc.StartToken(pgid)
+	if err != nil {
+		killGroup(t, cmd)
+		t.Skipf("proc.StartToken unsupported on this platform: %v", err)
+	}
+
+	foreignOwner := "dead-serve-8"
+	expires := time.Now().Add(10 * time.Minute).UTC().Truncate(time.Second)
+	seedForeignClaim(t, s, ticketID, foreignOwner, expires)
+	// Two open runs under the one claim, the live one seeded (and so
+	// scanned) first and the dead one (no agent was ever recorded, pgid 0)
+	// second: an aggregation bug that just overwrites anyLive with each
+	// run's own verdict, rather than OR-ing them together, would let this
+	// dead second run erase the live first run's own true and still pass
+	// if the two were seeded the other way around.
+	seedOpenRun(t, s, ticketID, foreignOwner, expires, pgid, token, time.Now())
+	seedOpenRun(t, s, ticketID, foreignOwner, expires, 0, "", time.Now())
+
+	d := newDispatcher(t, s, newFixtureTracker(t), bus.New(), fakeRuntime(t), nil, nil, dispatch.Config{
+		MaxParallel: 1, Owner: testOwner, ReclaimForeign: true,
+	})
+	if err := d.Tick(t.Context()); err != nil {
+		t.Fatalf("Tick (one lens still alive): %v", err)
+	}
+
+	kept := getTicket(t, s, ticketID)
+	if kept.ClaimOwner == nil || *kept.ClaimOwner != foreignOwner {
+		t.Fatalf("ticket claim owner = %v while one lens orphan is still alive, want unchanged %q", kept.ClaimOwner, foreignOwner)
+	}
+
+	killGroup(t, cmd)
+	waitGroupGone(t, pgid)
+
+	if err := d.Tick(t.Context()); err != nil {
+		t.Fatalf("Tick (both lenses now gone): %v", err)
+	}
+	final := getTicket(t, s, ticketID)
+	if final.ClaimOwner != nil && *final.ClaimOwner == foreignOwner {
+		t.Errorf("final ticket claim owner = %v, want reclaimed once every lens orphan exited", final.ClaimOwner)
+	}
+}
