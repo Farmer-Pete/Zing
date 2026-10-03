@@ -14,9 +14,10 @@ import (
 // startHandshakeStub is a POSIX shell script this file writes fresh for the
 // start-handshake tests (design section 7.1, #45). It is simpler than
 // fake_claude.sh/fake_codex.sh, which record a run's full argv/env for
-// assertion elsewhere: this stub only needs to mark two moments -- when it
-// started, and when its stdin reached EOF -- so a test can prove the
-// second happens only after Go's own OnStart callback returned.
+// assertion elsewhere: this stub marks when it started and when its stdin
+// reached EOF, and at EOF it records ("ordered") whether OnStart's own
+// marker file already existed, so a test can prove the prompt arrived only
+// after Go's OnStart callback returned.
 //
 // Codex's own argv carries "-o <path>", where its final message must be
 // written; a Claude invocation never does, so the stub writes its scripted
@@ -91,10 +92,10 @@ func assertStdinClosedAfterOnStart(t *testing.T, dir string) {
 
 // TestClaudeOnStartRunsBeforePromptIsWritten proves the start handshake
 // (design section 7.1, #45): req.OnStart runs, and returns, strictly
-// before the prompt reaches the child's stdin. OnStart sleeps 200ms before
-// recording its own return time, so the stub's own stdin-EOF marker (the
-// earliest moment it could have received the prompt and the stdin close
-// that follows it) must postdate it by at least that long.
+// before the prompt reaches the child's stdin. OnStart sleeps 200ms, then
+// creates its marker file as its last act; the stub must find that marker
+// when its stdin reaches EOF. The sleep is what makes an early EOF (a
+// prompt written before OnStart returned) reliably miss the marker.
 func TestClaudeOnStartRunsBeforePromptIsWritten(t *testing.T) {
 	t.Parallel()
 	requireUnix(t)
