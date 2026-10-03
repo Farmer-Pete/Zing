@@ -175,7 +175,14 @@ func TestAgentWithoutPromptExits(t *testing.T) {
 	dir := t.TempDir()
 	stub := writeStartHandshakeStub(t, dir)
 
-	cmd := exec.CommandContext(t.Context(), stub)
+	// PR review fix G2: t.Context() alone is canceled only when the test
+	// returns, so a hang -- the very regression this test guards against --
+	// would stall the whole package until go test's own -timeout kills the
+	// binary, rather than failing this one test fast with a diagnosis.
+	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+	defer cancel()
+
+	cmd := exec.CommandContext(ctx, stub)
 	cmd.Env = append(os.Environ(), "STUB_DIR="+dir)
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
