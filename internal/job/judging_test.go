@@ -2000,8 +2000,6 @@ const judgeFixBuildScript = `<zing job="build" outcome="ok">
     <files_changed>
       <path>hello.txt</path>
     </files_changed>
-    <test_exit>0</test_exit>
-    <lint_exit>0</lint_exit>
   </claims>
   <report>Fixed the failing scenario's own check.</report>
   <notes></notes>

@@ -51,11 +51,8 @@ const (
 	artifactTypeFile        = "file"
 )
 
-// claimsTestExitPath and claimsLintExitPath are the two element paths
-// CheckCommandsPassed and CheckBuildClaims (internal/response/claims.go)
-// both report claim errors under: this file's own dedup step (a timeout's
-// own message, and dropping CheckBuildClaims's duplicate of an exit
-// CheckCommandsPassed already reported) matches on them by name.
+// claimsTestExitPath and claimsLintExitPath are the element paths CHECK
+// reports a failing command under until the check loop replaces them.
 const (
 	claimsTestExitPath = "claims/test_exit"
 	claimsLintExitPath = "claims/lint_exit"
@@ -1861,21 +1858,21 @@ func (h buildingHandler) check(ctx context.Context, t store.Ticket, d Deps, proj
 	claimed := orchestrator.Perimeter(changed, declaredBefore, trustRoot, styleGuide)
 	extras := orchestrator.Perimeter(changed, declaredNow, trustRoot, styleGuide)
 
-	cmdErrs := response.CheckCommandsPassed(testExit, lintExit)
-	for i, e := range cmdErrs {
-		if e.Path == claimsTestExitPath && testTimedOut {
-			cmdErrs[i] = &response.PathError{Path: claimsTestExitPath, Msg: "timed out after 10m"}
-		}
-		if e.Path == claimsLintExitPath && lintTimedOut {
-			cmdErrs[i] = &response.PathError{Path: claimsLintExitPath, Msg: "timed out after 10m"}
-		}
+	var cmdErrs []*response.PathError
+	switch {
+	case testTimedOut:
+		cmdErrs = append(cmdErrs, &response.PathError{Path: claimsTestExitPath, Msg: "timed out after 10m"})
+	case testExit != 0:
+		cmdErrs = append(cmdErrs, &response.PathError{Path: claimsTestExitPath, Msg: fmt.Sprintf("observed %d, want 0", testExit)})
 	}
-	cmdPaths := make(map[string]bool, len(cmdErrs))
-	for _, e := range cmdErrs {
-		cmdPaths[e.Path] = true
+	switch {
+	case lintTimedOut:
+		cmdErrs = append(cmdErrs, &response.PathError{Path: claimsLintExitPath, Msg: "timed out after 10m"})
+	case lintExit != 0:
+		cmdErrs = append(cmdErrs, &response.PathError{Path: claimsLintExitPath, Msg: fmt.Sprintf("observed %d, want 0", lintExit)})
 	}
 
-	obs := response.BuildObservation{FilesChanged: changedPathList(changed), TestExit: testExit, LintExit: lintExit}
+	obs := response.BuildObservation{FilesChanged: changedPathList(changed)}
 	claimErrs := response.CheckBuildClaims(report.Report.BuildClaims, obs)
 
 	resp := &response.BuildResponse{Claims: report.Report.BuildClaims, Extras: report.Report.Extras, Fences: report.Report.Fences}
@@ -1883,14 +1880,9 @@ func (h buildingHandler) check(ctx context.Context, t store.Ticket, d Deps, proj
 		Changed: changedPathList(changed), Deleted: deletedPathList(changed), Extras: extraPathList(claimed),
 	})
 
-	var errs []*response.PathError
+	errs := make([]*response.PathError, 0, len(cmdErrs)+len(claimErrs)+len(treeErrs))
 	errs = append(errs, cmdErrs...)
-	for _, e := range claimErrs {
-		if (e.Path == claimsTestExitPath || e.Path == claimsLintExitPath) && cmdPaths[e.Path] {
-			continue
-		}
-		errs = append(errs, e)
-	}
+	errs = append(errs, claimErrs...)
 	errs = append(errs, treeErrs...)
 
 	slog.Info("claim check", "ticket_id", t.ID, "run_id", rid, "task_n", u.TaskN, "errors", len(errs), "changed", len(changed), "extras", len(extras))
@@ -2802,14 +2794,13 @@ func (h buildingHandler) adopt(ctx context.Context, t store.Ticket, d Deps, proj
 	claimed := orchestrator.Perimeter(commitChanges, declaredBefore, trustRoot, styleGuide)
 	extras := orchestrator.Perimeter(commitChanges, declaredNow, trustRoot, styleGuide)
 
-	cmdErrs := response.CheckCommandsPassed(testExit, lintExit)
-	obs := response.BuildObservation{FilesChanged: changedPathList(commitChanges), TestExit: testExit, LintExit: lintExit}
+	obs := response.BuildObservation{FilesChanged: changedPathList(commitChanges)}
 	claimErrs := response.CheckBuildClaims(report.Report.BuildClaims, obs)
 	resp := &response.BuildResponse{Claims: report.Report.BuildClaims, Extras: report.Report.Extras, Fences: report.Report.Fences}
 	treeErrs := response.CheckBuildTree(resp, response.BuildTree{
 		Changed: changedPathList(commitChanges), Deleted: deletedPathList(commitChanges), Extras: extraPathList(claimed),
 	})
-	if len(cmdErrs) > 0 || len(claimErrs) > 0 || len(treeErrs) > 0 {
+	if len(claimErrs) > 0 || len(treeErrs) > 0 {
 		return fail("claims failed"), nil
 	}
 

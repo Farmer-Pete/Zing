@@ -61,8 +61,6 @@ problem: internal/health/ping.go returns 500 on success.
     <files_changed>
       <path>...</path> <!-- string, optional, zero or more, every changed path, or none for a fix run whose failure is not in the code; the program diffs the tree -->
     </files_changed>
-    <test_exit>...</test_exit> <!-- int, the program re-runs the command -->
-    <lint_exit>...</lint_exit> <!-- int, the program re-runs the command -->
   </claims>
   <extra path="...">...</extra> <!-- ExtraClaim, optional, zero or more, one per changed path the plan does not declare; path: string -->
   <fence path="..." symbol="...">...</fence> <!-- Fence, optional, zero or more, one per deletion this task made; path: string; symbol: string -->

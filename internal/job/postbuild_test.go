@@ -518,7 +518,7 @@ func pbBuildStep(filesChanged []string, extras []response.ExtraClaim, sessionID 
 	return pbScriptedStep{res: runtime.RunResult{
 		Response: &response.BuildResponse{
 			Job: response.JobBuild, Outcome: response.OutcomeOk,
-			Claims: response.BuildClaims{FilesChanged: filesChanged, TestExit: 0, LintExit: 0},
+			Claims: response.BuildClaims{FilesChanged: filesChanged},
 			Extras: extras, Report: "did something",
 		},
 		SessionID: sessionID, ExitCode: 0, AgentTime: time.Second,

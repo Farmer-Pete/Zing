@@ -406,8 +406,8 @@ func seedLiveShipTicket(t *testing.T, st *store.Store, ticketID int64, plan resp
 
 	report := response.BuildReport{
 		TaskN:        1,
-		FilesChanged: []string{liveGreetGoFilename}, TestExit: 1, LintExit: 0,
-		Extras: []response.ExtraClaim{}, Fences: []response.Fence{},
+		FilesChanged: []string{liveGreetGoFilename},
+		Extras:       []response.ExtraClaim{}, Fences: []response.Fence{},
 		Report: "Broke Greet's wording on purpose, to prove CI goes red.",
 		Title:  "Break Greet's wording to prove CI goes red", CommitSHA: &sha,
 	}

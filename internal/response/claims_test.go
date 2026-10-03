@@ -28,8 +28,8 @@ const (
 func TestCheckBuildClaims_MatchingPasses(t *testing.T) {
 	t.Parallel()
 
-	c := BuildClaims{FilesChanged: []string{testFileA, testFileB}, TestExit: 0, LintExit: 0}
-	o := BuildObservation{FilesChanged: []string{testFileA, testFileB}, TestExit: 0, LintExit: 0}
+	c := BuildClaims{FilesChanged: []string{testFileA, testFileB}}
+	o := BuildObservation{FilesChanged: []string{testFileA, testFileB}}
 
 	errs := CheckBuildClaims(c, o)
 	if len(errs) != 0 {
@@ -37,42 +37,19 @@ func TestCheckBuildClaims_MatchingPasses(t *testing.T) {
 	}
 }
 
-func TestCheckBuildClaims_TestExitMismatch(t *testing.T) {
-	t.Parallel()
-
-	c := BuildClaims{FilesChanged: []string{testFileA}, TestExit: 0, LintExit: 0}
-	o := BuildObservation{FilesChanged: []string{testFileA}, TestExit: 1, LintExit: 0}
-
-	errs := CheckBuildClaims(c, o)
-	want := "claims/test_exit: observed 1, claimed 0"
-	if !containsErr(errs, want) {
-		t.Fatalf("CheckBuildClaims = %v, want to contain %q", dumpErrs(errs), want)
-	}
-}
-
-func TestCheckBuildClaims_LintExitMismatch(t *testing.T) {
-	t.Parallel()
-
-	c := BuildClaims{FilesChanged: []string{testFileA}, TestExit: 0, LintExit: 0}
-	o := BuildObservation{FilesChanged: []string{testFileA}, TestExit: 0, LintExit: 2}
-
-	errs := CheckBuildClaims(c, o)
-	want := "claims/lint_exit: observed 2, claimed 0"
-	if !containsErr(errs, want) {
-		t.Fatalf("CheckBuildClaims = %v, want to contain %q", dumpErrs(errs), want)
-	}
-}
-
 func TestCheckBuildClaims_FilesChangedMismatch(t *testing.T) {
 	t.Parallel()
 
-	c := BuildClaims{FilesChanged: []string{testFileA, "c.go"}, TestExit: 0, LintExit: 0}
-	o := BuildObservation{FilesChanged: []string{testFileA, testFileB}, TestExit: 0, LintExit: 0}
+	c := BuildClaims{FilesChanged: []string{testFileA, "c.go"}}
+	o := BuildObservation{FilesChanged: []string{testFileA, testFileB}}
 
 	errs := CheckBuildClaims(c, o)
 	want := "claims/files_changed: observed [a.go, b.go], claimed [a.go, c.go]"
 	if !containsErr(errs, want) {
 		t.Fatalf("CheckBuildClaims = %v, want to contain %q", dumpErrs(errs), want)
+	}
+	if len(errs) != 1 {
+		t.Fatalf("CheckBuildClaims = %v, want exactly 1 error", dumpErrs(errs))
 	}
 }
 
@@ -180,8 +157,8 @@ func TestCheckNothingToDoClaims_CodeClaimTrueFails(t *testing.T) {
 func TestCheckBuildClaims_FilesChangedIgnoresOrderAndDupes(t *testing.T) {
 	t.Parallel()
 
-	c := BuildClaims{FilesChanged: []string{testFileB, testFileA, testFileA}, TestExit: 0, LintExit: 0}
-	o := BuildObservation{FilesChanged: []string{testFileA, testFileB}, TestExit: 0, LintExit: 0}
+	c := BuildClaims{FilesChanged: []string{testFileB, testFileA, testFileA}}
+	o := BuildObservation{FilesChanged: []string{testFileA, testFileB}}
 
 	errs := CheckBuildClaims(c, o)
 	if len(errs) != 0 {
@@ -259,55 +236,6 @@ func TestCheckCoverage_UnknownScenario(t *testing.T) {
 	want := "verdict for unknown scenario s9"
 	if !containsMsg(errs, want) {
 		t.Fatalf("CheckCoverage = %v, want to contain %q", msgs(errs), want)
-	}
-}
-
-func TestCheckCommandsPassed_BothZeroPasses(t *testing.T) {
-	t.Parallel()
-
-	errs := CheckCommandsPassed(0, 0)
-	if len(errs) != 0 {
-		t.Fatalf("CheckCommandsPassed = %v, want no errors", dumpErrs(errs))
-	}
-}
-
-func TestCheckCommandsPassed_TestNonZero(t *testing.T) {
-	t.Parallel()
-
-	errs := CheckCommandsPassed(1, 0)
-	want := "claims/test_exit: observed 1, want 0"
-	if !containsErr(errs, want) {
-		t.Fatalf("CheckCommandsPassed = %v, want to contain %q", dumpErrs(errs), want)
-	}
-	if len(errs) != 1 {
-		t.Fatalf("CheckCommandsPassed = %v, want exactly 1 error", dumpErrs(errs))
-	}
-}
-
-func TestCheckCommandsPassed_LintNonZero(t *testing.T) {
-	t.Parallel()
-
-	errs := CheckCommandsPassed(0, 2)
-	want := "claims/lint_exit: observed 2, want 0"
-	if !containsErr(errs, want) {
-		t.Fatalf("CheckCommandsPassed = %v, want to contain %q", dumpErrs(errs), want)
-	}
-	if len(errs) != 1 {
-		t.Fatalf("CheckCommandsPassed = %v, want exactly 1 error", dumpErrs(errs))
-	}
-}
-
-func TestCheckCommandsPassed_BothNonZero(t *testing.T) {
-	t.Parallel()
-
-	errs := CheckCommandsPassed(1, 2)
-	wantTest := "claims/test_exit: observed 1, want 0"
-	wantLint := "claims/lint_exit: observed 2, want 0"
-	if !containsErr(errs, wantTest) || !containsErr(errs, wantLint) {
-		t.Fatalf("CheckCommandsPassed = %v, want to contain %q and %q", dumpErrs(errs), wantTest, wantLint)
-	}
-	if len(errs) != 2 {
-		t.Fatalf("CheckCommandsPassed = %v, want exactly 2 errors", dumpErrs(errs))
 	}
 }
 

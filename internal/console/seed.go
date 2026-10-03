@@ -341,7 +341,6 @@ func seedDemoDecidedFiles(ctx context.Context, s *store.Store, ticketID int64) e
 const (
 	demoBuildMarkerClaimsOk           = "claims ok run 5"
 	demoBuildMarkerClaimErrorsPending = "claim errors pending run 6\n" +
-		"claims/test_exit: observed 1, want 0\n" +
 		"claims/files_changed: observed [greet.go], claimed [greet.go, greet_test.go]"
 	demoBuildMarkerPerimeterResolved = "perimeter resolved run 6"
 )

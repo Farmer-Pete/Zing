@@ -9,7 +9,7 @@ import (
 // payload (schemas/artifacts/build_report.json) for task n.
 func buildReportPayload(n int) []byte {
 	return []byte(fmt.Sprintf(
-		`{"task_n":%d,"files_changed":["a.go"],"test_exit":0,"lint_exit":0,"extras":[],"fences":[],"report":"did it","title":"Task %d"}`,
+		`{"task_n":%d,"files_changed":["a.go"],"extras":[],"fences":[],"report":"did it","title":"Task %d"}`,
 		n, n))
 }
 

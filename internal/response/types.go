@@ -318,8 +318,9 @@ type ExtraClaim struct {
 
 type BuildClaims struct {
 	FilesChanged []string `xml:"files_changed>path" json:"files_changed" doc:"every changed path, or none for a fix run whose failure is not in the code; the program diffs the tree"`
-	TestExit     int      `xml:"test_exit"          json:"test_exit"     doc:"the program re-runs the command"`
-	LintExit     int      `xml:"lint_exit"          json:"lint_exit"     doc:"the program re-runs the command"`
+	// Fence: TestExit and LintExit existed because the builder ran the
+	// full suite and CHECK compared its claimed exits with a re-run; Zing
+	// now measures them itself and sends the output back (#55).
 }
 
 // ---- perimeter, judge, side ----------------------------------------------

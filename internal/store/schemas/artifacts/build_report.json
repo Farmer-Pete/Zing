@@ -12,12 +12,6 @@
       },
       "type": "array"
     },
-    "test_exit": {
-      "type": "integer"
-    },
-    "lint_exit": {
-      "type": "integer"
-    },
     "extras": {
       "items": {
         "properties": {
@@ -80,8 +74,6 @@
   "required": [
     "task_n",
     "files_changed",
-    "test_exit",
-    "lint_exit",
     "extras",
     "fences",
     "report",
