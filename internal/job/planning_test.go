@@ -2508,8 +2508,8 @@ func TestPlanningHandler_ReviewTick_MaxLoopsWithOnlyFloorFindingsReachesGate(t *
 	if commit.Waiting == nil || *commit.Waiting != testWaitingGate {
 		t.Fatalf("commit.Waiting = %v, want gate", commit.Waiting)
 	}
-	if len(commit.Messages) != 1 {
-		t.Fatalf("commit.Messages = %+v, want exactly 1 (the gate question)", commit.Messages)
+	if len(commit.Messages) != 2 {
+		t.Fatalf("commit.Messages = %+v, want exactly 2 (the gate question, then the cap marker)", commit.Messages)
 	}
 	msg := commit.Messages[0]
 	if !strings.HasPrefix(msg.Body, objective+"\n\n") {
@@ -2524,6 +2524,16 @@ func TestPlanningHandler_ReviewTick_MaxLoopsWithOnlyFloorFindingsReachesGate(t *
 	}
 	if qp.Kind != response.QuestionKindGate {
 		t.Errorf("gate question Kind = %q, want gate", qp.Kind)
+	}
+	// Review P1/P2 on issue #48's own PR: the cap's reason must survive past
+	// this very commit (a future config change to max_loops must not change
+	// what a later reject or console read does with an already-posted
+	// capped gate), so this marker -- not a recomputed CountDeliveredReviews
+	// -- is what both console's loadFindings and this file's own
+	// gateRejectExtra check instead.
+	wantMarker := fmt.Sprintf("gate cap reached plan v%d", planVersion)
+	if commit.Messages[1].Type != testMsgTypeUpdate || commit.Messages[1].Body != wantMarker {
+		t.Errorf("commit.Messages[1] = %+v, want an update marker %q", commit.Messages[1], wantMarker)
 	}
 }
 

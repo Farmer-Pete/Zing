@@ -418,6 +418,16 @@ type planreviewFindingsPayload struct {
 	Findings []response.Finding `json:"findings"`
 }
 
+// gateCapMarker mirrors job/planning.go's own gateCapMarker exactly (issue
+// #48 review P2): the fixed, version-scoped marker that file writes in the
+// same commit that posts a gate at machine.toml's planreview max_loops cap.
+// loadFindings reads this marker, not current config, so raising max_loops
+// after a capped gate posts can never hide the floor findings that gate
+// already asked the owner to review.
+func gateCapMarker(version int) string {
+	return fmt.Sprintf("gate cap reached plan v%d", version)
+}
+
 // loadFindings reads ticketID's above-floor plan-review findings for the
 // gate's context region (design section 7, D8, Task 11): the "planreview"
 // artifact stored at the current cohort's exact plan version
@@ -446,24 +456,23 @@ func (c *console) loadFindings(ctx context.Context, ticketID int64) ([]templates
 	}
 
 	var payload planreviewFindingsPayload
-	if err := json.Unmarshal(artifact.Payload, &payload); err != nil {
-		return nil, fmt.Errorf("console: unmarshal planreview artifact for ticket %d: %w", ticketID, err)
+	if unmarshalErr := json.Unmarshal(artifact.Payload, &payload); unmarshalErr != nil {
+		return nil, fmt.Errorf("console: unmarshal planreview artifact for ticket %d: %w", ticketID, unmarshalErr)
 	}
 
-	// capped mirrors job/planning.go's own maybeResumeFloorFindings cap
-	// check (issue #48): once CountDeliveredReviews has reached
-	// machine.toml's planreview max_loops, a gate posted at the cap carries
-	// only at-or-below-floor findings (an above-floor survivor escalates
-	// instead of posting a gate), so the per-finding floor filter below must
-	// stop hiding them -- they are exactly what the owner now decides on.
-	// The nil-guard mirrors rail.go:124's c.machine == nil pattern.
-	capped := false
-	if c.machine != nil {
-		n, cntErr := c.store.CountDeliveredReviews(ctx, ticketID)
-		if cntErr != nil {
-			return nil, fmt.Errorf("console: count delivered reviews for ticket %d: %w", ticketID, cntErr)
-		}
-		capped = n >= c.machine.Jobs[string(response.JobPlanreview)].MaxLoops
+	// capped reads job/planning.go's own gateCapMarker for this cohort's
+	// exact plan version (issue #48 review P2), not current config: a gate
+	// posted at the cap carries only at-or-below-floor findings (an
+	// above-floor survivor escalates instead of posting a gate), so the
+	// per-finding floor filter below must stop hiding them once that marker
+	// is present -- they are exactly what the owner now decides on. Reading
+	// the marker the gate's own commit wrote, rather than recomputing
+	// CountDeliveredReviews against machine.toml, means raising max_loops
+	// after the gate posts can never hide findings it already asked the
+	// owner to review.
+	_, capped, err := c.store.Marker(ctx, ticketID, gateCapMarker(cohort.PlanVersion))
+	if err != nil {
+		return nil, fmt.Errorf("console: gate cap marker for ticket %d: %w", ticketID, err)
 	}
 
 	rows := make([]templates.FindingRow, 0, len(payload.Findings))

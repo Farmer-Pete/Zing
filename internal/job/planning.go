@@ -1122,6 +1122,18 @@ func planreviewDeliveredMarker(version int) string {
 	return fmt.Sprintf("planreview v%d delivered", version)
 }
 
+// gateCapMarker is issue #48's own fixed, version-scoped marker for a gate
+// posted at machine.toml's planreview max_loops cap
+// (maybeResumeFloorFindings's above==0 branch), written in the same commit
+// as the gate. It is the one source both console's loadFindings and this
+// file's own gateRejectExtra consult to tell a capped gate apart from a
+// clean-review one: neither recomputes CountDeliveredReviews against
+// current config, so raising max_loops after this gate already posted can
+// never change what either does with it.
+func gateCapMarker(version int) string {
+	return fmt.Sprintf("gate cap reached plan v%d", version)
+}
+
 // maybeReviewTick is section 5.1 step 6: a stored cohort with no planreview
 // artifact yet at its exact version starts the review tick fresh. handled is
 // false when there is no cohort yet, or its planreview artifact already
@@ -1226,7 +1238,20 @@ func maybeResumeFloorFindings(ctx context.Context, t store.Ticket, d Deps, sess 
 				return store.HandlerCommit{}, false, fmt.Errorf("job: planning: unmarshal plan artifact: %w", unmarshalErr)
 			}
 			commit, err = postGateCommit(ctx, t, d, plan.Overview.Objective, true)
-			return commit, true, err
+			if err != nil {
+				return commit, true, err
+			}
+			// gateCapMarker (review P2 on issue #48's own PR) is the fixed,
+			// per-version record of why this gate posted: console's loadFindings
+			// and this file's own gateRejectExtra both read it instead of
+			// recomputing CountDeliveredReviews against current config, so
+			// raising max_loops after this gate posts can never change what
+			// either one does with it.
+			commit.Messages = append(commit.Messages, store.Message{
+				TicketID: t.ID, Type: msgTypeUpdate, Author: authorSystem, Body: gateCapMarker(cohort.PlanVersion),
+			})
+			slog.Info("gate posted at loop cap", "ticket_id", t.ID, "plan_version", cohort.PlanVersion, "floor_findings", len(atOrBelow))
+			return commit, true, nil
 		}
 		c := escalationCommit(t, d, nil, nil,
 			string(response.EscalationCodeLoopsExhausted), loopsExhaustedWhat, loopsExhaustedWhy, "", response.EscalationOriginCapLoops)
@@ -1553,7 +1578,11 @@ func (h planningHandler) enterFromGateRound(ctx context.Context, t store.Ticket,
 	if !gateRoundApproved(round) {
 		notes := joinReplies(round.Replies)
 		slog.Info("gate rejected", "ticket_id", t.ID)
-		return resumeOrFresh(ctx, t, d, []prompt.NamedInput{prompt.Notes(notes)}, resolveIDs)
+		extra, extraErr := gateRejectExtra(ctx, t, d, notes)
+		if extraErr != nil {
+			return store.HandlerCommit{}, extraErr
+		}
+		return resumeOrFresh(ctx, t, d, extra, resolveIDs)
 	}
 
 	cohort, ok, err := d.Store.CurrentCohort(ctx, t.ID)
@@ -1580,6 +1609,49 @@ func (h planningHandler) enterFromGateRound(ctx context.Context, t store.Ticket,
 	notes := joinReplies(round.Replies)
 	slog.Info("gate approval starts confirming turn", "ticket_id", t.ID, "question_id", gateQID, "plan_version", cohort.PlanVersion)
 	return gateConfirmEntry(ctx, t, d, gateQID, approveRow.ID, cohort, notes)
+}
+
+// gateRejectExtra builds a rejected gate's resume extra (review P2 on issue
+// #48's own PR): the owner's notes alone give the planner nothing to act on
+// when the rejected gate was posted at the loop cap (gateCapMarker), since
+// those at-or-below-floor findings were never fed back into planning -- the
+// cap stopped the resume loop that would have done that. When the current
+// cohort carries that marker, this fetches its stored floor findings with
+// outstandingFloorFindings (the same helper the cap_loops escalation retry
+// already uses) and fences them ahead of the notes, exactly as the
+// floor-findings resume renders them; a clean-review gate (no marker)
+// carries notes alone, unchanged.
+func gateRejectExtra(ctx context.Context, t store.Ticket, d Deps, notes string) ([]prompt.NamedInput, error) {
+	capped, err := rejectedGateWasCapped(ctx, t, d)
+	if err != nil {
+		return nil, err
+	}
+	if !capped {
+		return []prompt.NamedInput{prompt.Notes(notes)}, nil
+	}
+	findings, err := outstandingFloorFindings(ctx, t, d)
+	if err != nil {
+		return nil, err
+	}
+	return []prompt.NamedInput{prompt.Findings(renderFindings(findings)), prompt.Notes(notes)}, nil
+}
+
+// rejectedGateWasCapped reports whether the current cohort's exact plan
+// version carries gateCapMarker: false, with no error, when there is no
+// current cohort at all (nothing to check).
+func rejectedGateWasCapped(ctx context.Context, t store.Ticket, d Deps) (bool, error) {
+	cohort, ok, err := d.Store.CurrentCohort(ctx, t.ID)
+	if err != nil {
+		return false, fmt.Errorf("job: gate: current cohort: %w", err)
+	}
+	if !ok {
+		return false, nil
+	}
+	_, found, err := d.Store.Marker(ctx, t.ID, gateCapMarker(cohort.PlanVersion))
+	if err != nil {
+		return false, fmt.Errorf("job: gate: cap marker: %w", err)
+	}
+	return found, nil
 }
 
 // newestChosenAnswer returns the row and option key of answers' newest sent
