@@ -1580,9 +1580,13 @@ func newestFileEventPerPath(events []store.FileEventRow) map[string]store.FileEv
 func acceptedPaths(plan response.Plan, events []store.FileEventRow, taskN int) []string {
 	var out []string
 	for _, row := range newestFileEventPerPath(events) {
-		if row.File.Decision != nil && *row.File.Decision == response.PerimeterAccept && extraInScope(plan, row.File, taskN) {
-			out = append(out, row.File.Path)
+		if row.File.Decision == nil || *row.File.Decision != response.PerimeterAccept {
+			continue
 		}
+		if !extraInScope(plan, row.File, taskN) {
+			continue
+		}
+		out = append(out, row.File.Path)
 	}
 	sort.Strings(out)
 	return out
@@ -1610,11 +1614,18 @@ func declaredPaths(plan response.Plan, events []store.FileEventRow, before *int6
 	return out
 }
 
+// wholePlanScope reports whether the unit numbered taskN keeps whole-plan
+// scope: always for a fix unit (0), or for any unit when the plan carries
+// no task mapping (stored before files named tasks).
+func wholePlanScope(plan response.Plan, taskN int) bool {
+	return taskN == 0 || !response.TaskMapped(plan)
+}
+
 // extraInScope reports whether accepted extra fa counts for the unit
-// numbered taskN: always for a fix unit (0) or a plan with no task mapping,
-// otherwise only when the owner accepted it for taskN.
+// numbered taskN: always under wholePlanScope, otherwise only when the
+// owner accepted it for taskN.
 func extraInScope(plan response.Plan, fa response.FileArtifact, taskN int) bool {
-	return taskN == 0 || !response.TaskMapped(plan) || fa.TaskN == taskN
+	return wholePlanScope(plan, taskN) || fa.TaskN == taskN
 }
 
 func changedPathList(changes []orchestrator.Change) []string {
@@ -1852,7 +1863,7 @@ const claimsFilesChangedPath = "claims/files_changed"
 // fix unit (taskN 0) and a plan with no task mapping (stored before files
 // named tasks) get none: both keep whole-plan scope.
 func foreignTaskPaths(plan response.Plan, taskN int, changed []string) []*response.PathError {
-	if taskN == 0 || !response.TaskMapped(plan) {
+	if wholePlanScope(plan, taskN) {
 		return nil
 	}
 	owners := make(map[string][]int)
@@ -1880,6 +1891,16 @@ func foreignTaskPaths(plan response.Plan, taskN int, changed []string) []*respon
 		})
 	}
 	return errs
+}
+
+// pathErrorMsgs returns each error's Msg, in order, for a "task scope
+// violation" Warn line's "foreign" value.
+func pathErrorMsgs(errs []*response.PathError) []string {
+	out := make([]string, len(errs))
+	for i, e := range errs {
+		out[i] = e.Msg
+	}
+	return out
 }
 
 // check runs design section 6.4's CHECK, shared by the first check and the
@@ -1946,11 +1967,7 @@ func (h buildingHandler) check(ctx context.Context, t store.Ticket, d Deps, proj
 
 	foreign := foreignTaskPaths(plan, u.TaskN, changedPathList(changed))
 	if len(foreign) > 0 {
-		msgs := make([]string, len(foreign))
-		for i, e := range foreign {
-			msgs[i] = e.Msg
-		}
-		slog.Warn("task scope violation", "ticket_id", t.ID, "run_id", rid, "task_n", u.TaskN, "foreign", msgs)
+		slog.Warn("task scope violation", "ticket_id", t.ID, "run_id", rid, "task_n", u.TaskN, "foreign", pathErrorMsgs(foreign))
 	}
 	errs = append(errs, foreign...)
 
@@ -2875,11 +2892,7 @@ func (h buildingHandler) adopt(ctx context.Context, t store.Ticket, d Deps, proj
 	}
 
 	if foreign := foreignTaskPaths(plan, u.TaskN, changedPathList(commitChanges)); len(foreign) > 0 {
-		msgs := make([]string, len(foreign))
-		for i, e := range foreign {
-			msgs[i] = e.Msg
-		}
-		slog.Warn("task scope violation", "ticket_id", t.ID, "run_id", newestRun.ID, "task_n", u.TaskN, "commit_sha", sha, "foreign", msgs)
+		slog.Warn("task scope violation", "ticket_id", t.ID, "run_id", newestRun.ID, "task_n", u.TaskN, "commit_sha", sha, "foreign", pathErrorMsgs(foreign))
 		return fail("another task's path"), nil
 	}
 
