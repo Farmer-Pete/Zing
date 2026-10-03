@@ -686,10 +686,10 @@ const stderrRetention = 14 * 24 * time.Hour
 // older than stderrRetention, unless its own run is still open (runs.
 // outcome IS NULL, store.Store.OpenRunIDs), before the dispatcher starts
 // (ticket #8): nothing else ever removes one of these files, so without
-// this sweep <dataDir>/runs grows without bound. A file whose name doesn't
-// match the run-<id>-stderr.log shape, or whose id fails to parse, is
-// treated as belonging to no open run, so it is removed on age alone; any
-// other file in the directory is left alone regardless of age.
+// this sweep <dataDir>/runs grows without bound. A file that matches the
+// run-<id>-stderr.log shape but whose id fails to parse, or whose id names
+// no open run, is treated as belonging to no open run, so it is removed on
+// age alone; any file outside that shape is left alone regardless of age.
 //
 // It logs one INFO line with the count of files it actually removed, and a
 // WARN line for every failure along the way (a failed open-run query or
@@ -709,8 +709,9 @@ func removeStaleStderrFiles(ctx context.Context, st *store.Store, dataDir string
 	if err != nil {
 		if !os.IsNotExist(err) {
 			slog.Warn("stderr retention skipped", "dir", dir, "err", err)
+			return 0
 		}
-		return 0
+		entries = nil
 	}
 
 	cutoff := now.Add(-stderrRetention)
@@ -727,21 +728,27 @@ func removeStaleStderrFiles(ctx context.Context, st *store.Store, dataDir string
 		if !ok {
 			continue
 		}
-		if id, perr := strconv.ParseInt(idStr, 10, 64); perr == nil && open[id] {
+		id, perr := strconv.ParseInt(idStr, 10, 64)
+		if perr == nil && open[id] {
 			continue
 		}
 
 		path := filepath.Join(dir, entry.Name())
+		logArgs := []any{"path", path}
+		if perr == nil {
+			logArgs = append(logArgs, "run_id", id)
+		}
+
 		info, err := entry.Info()
 		if err != nil {
-			slog.Warn("stderr file stat failed", "path", path, "err", err)
+			slog.Warn("stderr file stat failed", append(logArgs, "err", err)...)
 			continue
 		}
 		if !info.ModTime().Before(cutoff) {
 			continue
 		}
 		if err := os.Remove(path); err != nil {
-			slog.Warn("stderr file remove failed", "path", path, "err", err)
+			slog.Warn("stderr file remove failed", append(logArgs, "err", err)...)
 			continue
 		}
 		n++

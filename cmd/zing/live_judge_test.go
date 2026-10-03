@@ -206,8 +206,9 @@ type liveJudgeConfig struct {
 // always carries some codex value after Load (applyDefaults substitutes
 // "gpt-6-luna" the moment zing.toml leaves [models] codex undefined), so
 // reading it back from cfg itself could never distinguish the owner's own
-// choice from that silent default -- exactly the literal this harness's
-// first live runs proved the judge Codex home's own login refuses. Only
+// choice from that silent default -- gpt-5.5, the old default, was exactly
+// the literal this harness's first live runs proved the judge Codex home's
+// own login refuses; gpt-6-luna replaced it for that reason. Only
 // toml.DecodeFile's own metadata (IsDefined), read directly here, can tell
 // the two apart.
 type liveJudgeRawModels struct {

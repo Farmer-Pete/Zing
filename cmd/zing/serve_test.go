@@ -980,13 +980,25 @@ func TestServeRemovesStaleStderrFilesAtStartup(t *testing.T) {
 	if err := os.Chtimes(notes, now.Add(-20*24*time.Hour), now.Add(-20*24*time.Hour)); err != nil {
 		t.Fatalf("chtimes %s: %v", notes, err)
 	}
+	// A name that matches the run-<id>-stderr.log shape but whose id doesn't
+	// parse as an integer can name no open run, so it counts as finished and
+	// is removed on age alone.
+	unparseable := filepath.Join(runsDir, "run-abc-stderr.log")
+	if err := os.WriteFile(unparseable, []byte("stderr\n"), 0o600); err != nil {
+		t.Fatalf("write %s: %v", unparseable, err)
+	}
+	if err := os.Chtimes(unparseable, now.Add(-20*24*time.Hour), now.Add(-20*24*time.Hour)); err != nil {
+		t.Fatalf("chtimes %s: %v", unparseable, err)
+	}
 
 	n := removeStaleStderrFiles(t.Context(), st, dataDir, now)
-	if n != 1 {
-		t.Errorf("removeStaleStderrFiles = %d, want 1", n)
+	if n != 2 {
+		t.Errorf("removeStaleStderrFiles = %d, want 2", n)
 	}
-	if _, err := os.Stat(staleFinished); !os.IsNotExist(err) {
-		t.Errorf("stale finished run's stderr file still exists (stat err = %v)", err)
+	for _, path := range []string{staleFinished, unparseable} {
+		if _, err := os.Stat(path); !os.IsNotExist(err) {
+			t.Errorf("%s still exists, want removed (stat err = %v)", path, err)
+		}
 	}
 	for _, path := range []string{staleOpen, fresh, notes} {
 		if _, err := os.Stat(path); err != nil {
@@ -1002,6 +1014,40 @@ func TestServeRemovesStaleStderrFilesAtStartup(t *testing.T) {
 	// A dataDir with no runs/ directory at all is not an error.
 	if n := removeStaleStderrFiles(t.Context(), st, t.TempDir(), now); n != 0 {
 		t.Errorf("removeStaleStderrFiles (no runs dir) = %d, want 0", n)
+	}
+}
+
+// TestServeRemovesStaleStderrFilesAtStartup_OpenRunIDsFails proves that when
+// store.Store.OpenRunIDs fails, removeStaleStderrFiles deletes nothing and
+// returns 0: a failed open-run query must not be treated as an empty open
+// set, or every old stderr file, including those of runs still in progress,
+// would be removed.
+func TestServeRemovesStaleStderrFilesAtStartup_OpenRunIDsFails(t *testing.T) {
+	t.Parallel()
+
+	dataDir := t.TempDir()
+	st, err := store.Open(t.Context(), filepath.Join(dataDir, "zing.db"))
+	if err != nil {
+		t.Fatalf("store.Open: %v", err)
+	}
+	// Closing the store before the sweep runs makes its next query fail,
+	// standing in for any open-run query error.
+	if err := st.Close(); err != nil {
+		t.Fatalf("store.Close: %v", err)
+	}
+
+	runsDir := filepath.Join(dataDir, "runs")
+	if err := os.MkdirAll(runsDir, 0o700); err != nil {
+		t.Fatalf("mkdir %s: %v", runsDir, err)
+	}
+	now := time.Now()
+	stale := writeStderrFixture(t, runsDir, 1, now.Add(-20*24*time.Hour))
+
+	if n := removeStaleStderrFiles(t.Context(), st, dataDir, now); n != 0 {
+		t.Errorf("removeStaleStderrFiles = %d, want 0", n)
+	}
+	if _, err := os.Stat(stale); err != nil {
+		t.Errorf("%s was removed, want kept: %v", stale, err)
 	}
 }
 
