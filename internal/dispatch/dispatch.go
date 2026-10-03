@@ -446,9 +446,7 @@ func (d *Dispatcher) Run(ctx context.Context) error {
 		case <-d.drainCh:
 			draining, _, err := d.store.Flags(ctx)
 			if err != nil {
-				wrapped := fmt.Errorf("dispatch: read flags: %w", err)
-				d.setStop(wrapped)
-				return d.finish(ctxErrOr(ctx, wrapped), results)
+				return d.stopOnPassError(ctx, fmt.Errorf("dispatch: read flags: %w", err), results)
 			}
 			if draining {
 				d.setStop(nil)
@@ -466,20 +464,32 @@ func (d *Dispatcher) Run(ctx context.Context) error {
 		case <-ticker.C:
 			draining, _, err := d.store.Flags(ctx)
 			if err != nil {
-				wrapped := fmt.Errorf("dispatch: read flags: %w", err)
-				d.setStop(wrapped)
-				return d.finish(ctxErrOr(ctx, wrapped), results)
+				return d.stopOnPassError(ctx, fmt.Errorf("dispatch: read flags: %w", err), results)
 			}
 			if draining {
 				d.setStop(nil)
 				return d.finish(nil, results)
 			}
 			if _, fillErr := d.fill(ctx, results); fillErr != nil {
-				d.setStop(fillErr)
-				return d.finish(fillErr, results)
+				return d.stopOnPassError(ctx, fillErr, results)
 			}
 		}
 	}
+}
+
+// stopOnPassError ends Run after a store read or a fill pass failed. When
+// ctx is already done, the failure is only the cancel cutting a statement
+// off mid-flight (database/sql then reports its own rollback error, not
+// the context's), so Run stops as for a cancel: no stop
+// error, no alerts, and ctx.Err() as the result. Otherwise the error stops
+// the dispatcher and raises both alerts (design section 4.6).
+func (d *Dispatcher) stopOnPassError(ctx context.Context, err error, results <-chan runResult) error {
+	if ctx.Err() != nil {
+		d.setStop(nil)
+		return d.finish(ctx.Err(), results)
+	}
+	d.setStop(err)
+	return d.finish(err, results)
 }
 
 // finish is Run's (and Tick's own fail-closed path's) shutdown join (design
@@ -639,24 +649,6 @@ func truncateCause(s string, maxBytes int) string {
 		cut--
 	}
 	return s[:cut]
-}
-
-// ctxErrOr returns ctx.Err() in place of err whenever ctx has already been
-// canceled or has expired. A store call that straddles the moment ctx ends
-// races database/sql's own context-driven teardown (it cancels the
-// in-flight statement and, for a transaction, auto-rolls it back), so the
-// error that surfaces is whichever side of that race lost -- for example
-// "sql: transaction has already been committed or rolled back" or the
-// driver's own "interrupted" -- never context.DeadlineExceeded or
-// context.Canceled itself, even though ctx ending is what really caused the
-// failure. Run's contract is to end because ctx is done; once it is, that
-// is the reason to report, not an artifact of an operation ctx cut off
-// mid-flight.
-func ctxErrOr(ctx context.Context, err error) error {
-	if ctxErr := ctx.Err(); ctxErr != nil {
-		return ctxErr
-	}
-	return err
 }
 
 // fill runs one reconcile-intake-pick-claim-launch pass (design section
