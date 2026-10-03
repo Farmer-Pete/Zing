@@ -53,13 +53,14 @@ func (c *console) handleStream(w http.ResponseWriter, r *http.Request) {
 	// this connect is the one place it is marked read; a bus wake below never
 	// marks, so a patch the owner did not cause leaves new messages unread.
 	// GET /stream only passes the Host check (mw.go requireAllowedHost), so
-	// the write also needs the Datastar-Request header the mutation guard
-	// trusts (mw.go): a cross-site img or link cannot send it. Any other
-	// request still renders but writes nothing. It runs before Subscribe so
-	// this tab's own Publish does not wake it, and publishes only when a row
-	// changed. A failure is logged and the stream still renders.
+	// the write also needs the same-site signal isDatastarSameSite shares
+	// with the mutation guard (mw.go): a cross-site img or link cannot send
+	// it. Any other request still renders but writes nothing. It runs before
+	// Subscribe so this tab's own Publish does not wake it, and publishes
+	// only when a row changed. A failure is logged and the stream still
+	// renders.
 	if sig.View == viewThread && sig.Open > 0 {
-		if r.Header.Get(datastarRequestHeader) != "true" || r.Header.Get("Sec-Fetch-Site") == "cross-site" {
+		if !isDatastarSameSite(r) {
 			slog.Debug("console: stream: open not marked", "ticket_id", sig.Open, "sec_fetch_site", r.Header.Get("Sec-Fetch-Site"))
 		} else {
 			n, err := c.store.MarkThreadRead(r.Context(), sig.Open)
