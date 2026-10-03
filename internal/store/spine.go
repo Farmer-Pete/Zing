@@ -122,7 +122,11 @@ func (s *Store) Claim(ctx context.Context, id int64, owner string, expires time.
 // (dispatch.Config.ReclaimForeign), a foreign claim must never be expired
 // here, so a live orphan's claim is never cleared out from under reclaim.
 // Every caller but the dispatcher's ReclaimForeign path passes "", today's
-// behavior of expiring every owner's claims. It runs in one transaction:
+// behavior of expiring every owner's claims. A ticket that still records a
+// CHECK command (check_procs, #55) is skipped: its command may still be
+// running in the worktree, so the dispatcher judges it first through
+// ExpiringChecks and ClearDeadCheck. It runs in one
+// transaction:
 // for each expiring ticket, reconcileReservedRunsTx (design D13, section 4.5)
 // terminalizes any run left reserved with no outcome -- a crash, or an
 // ErrCanceled shutdown that left no commit -- before that ticket's own claim
@@ -165,12 +169,14 @@ func (s *Store) ExpireClaims(ctx context.Context, now time.Time, onlyOwner strin
 }
 
 // expiringTicketIDsTx returns every ticket id whose claim is set and expires
-// at or before now, the set ExpireClaims reconciles and clears inside its
-// one transaction. onlyOwner, when non-empty, additionally restricts the set
-// to claims owned by exactly that owner (ExpireClaims above).
+// at or before now and that records no CHECK command, the set ExpireClaims
+// reconciles and clears inside its one transaction. onlyOwner, when
+// non-empty, additionally restricts the set to claims owned by exactly that
+// owner (ExpireClaims above).
 func expiringTicketIDsTx(ctx context.Context, tx *sql.Tx, now time.Time, onlyOwner string) ([]int64, error) {
 	query := `SELECT id FROM tickets
-		 WHERE claim_owner IS NOT NULL AND claim_expires_at IS NOT NULL AND claim_expires_at <= ?`
+		 WHERE claim_owner IS NOT NULL AND claim_expires_at IS NOT NULL AND claim_expires_at <= ?
+		   AND id NOT IN (SELECT ticket_id FROM check_procs)`
 	args := []any{formatTime(now)}
 	if onlyOwner != "" {
 		query += ` AND claim_owner = ?`

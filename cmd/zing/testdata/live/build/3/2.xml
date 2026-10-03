@@ -3,8 +3,6 @@
     <files_changed>
       <path>greet.go</path>
     </files_changed>
-    <test_exit>0</test_exit>
-    <lint_exit>0</lint_exit>
   </claims>
   <report>Added Farewell(name string) string to greet.go, using the owner's chosen wording, "Goodbye, &lt;name&gt;."</report>
   <notes></notes>

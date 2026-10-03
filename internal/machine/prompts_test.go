@@ -28,12 +28,12 @@ func TestPrompts_MatchThePinnedDesignText(t *testing.T) {
 		{
 			name:   "planning-feature",
 			path:   planningFeaturePromptPath,
-			sha256: "108dfbe3da5c1b7bb80a56d804ac6bc440dc8a502d6a3cf420e87cbbaff5a5a1",
+			sha256: "f76a96bf5ff2d3a5fbb32ec727ef83b7fadc6f3baea1f57d2943eae15e4f9e4c",
 		},
 		{
 			name:   "planning-bug",
 			path:   planningBugPromptPath,
-			sha256: "988ef88900583959df8c32d263b2763f836de198eb3497a2b28c490199900fd0",
+			sha256: "5a248f5cb134b6171de1a6796a79b1356d44297b30d8b03f98a14bf5ef2f9df1",
 		},
 		{
 			name:   "planreview",
@@ -43,7 +43,7 @@ func TestPrompts_MatchThePinnedDesignText(t *testing.T) {
 		{
 			name:   testJobNameBuild,
 			path:   "prompts/build.md",
-			sha256: "52645515bf90bb5b0ac37d4e8d786c023029e8570a1989898eee1b3bdd5ad3d0",
+			sha256: "9da88e8dd8ae6b37f6ff75dc35a6c57ee2b5da13fad51023ff4099d15e679d19",
 		},
 		{
 			name:   "perimeter",
@@ -140,6 +140,59 @@ func TestPlanningPromptsTeachConversations(t *testing.T) {
 				t.Errorf("%s is missing the Conversations. section verbatim (design section 22.6)", path)
 			}
 		})
+	}
+}
+
+// unwrapped reads path and joins its lines, so a test can look for a
+// sentence the file wraps at its own column width.
+func unwrapped(t *testing.T, path string) string {
+	t.Helper()
+	got, err := zing.Assets.ReadFile(path)
+	if err != nil {
+		t.Fatalf("ReadFile(%s): %v", path, err)
+	}
+	return strings.Join(strings.Fields(string(got)), " ")
+}
+
+// TestBuildPromptLeavesFullSuiteToZing proves the build prompt no longer
+// asks the builder to run the full test and lint commands (#55): Zing runs
+// them at CHECK and resumes the builder with any failing output, and a
+// task that forbids its own fix is a plan_gap.
+func TestBuildPromptLeavesFullSuiteToZing(t *testing.T) {
+	t.Parallel()
+	text := unwrapped(t, "prompts/build.md")
+	if strings.Contains(text, "until both exit 0") {
+		t.Error("prompts/build.md still tells the builder to run the commands until both exit 0")
+	}
+	if strings.Contains(text, "Every task ends green") {
+		t.Error("prompts/build.md requires a regression test and fix of every task, including cleanup tasks and fix runs that reproduce nothing")
+	}
+	for _, want := range []string{
+		"Do not run the project's full test or lint command",
+		"return the error outcome with code plan_gap",
+		"When this task adds a regression test for a failure you reproduced, its fix lands in this same task",
+	} {
+		if !strings.Contains(text, want) {
+			t.Errorf("prompts/build.md lacks %q", want)
+		}
+	}
+}
+
+// greenTasksSentence is what both planning prompts say about tests (#55):
+// each task's named tests pass when it ends, and the full test and lint
+// run is Zing's CHECK after the task, as build.md says.
+const greenTasksSentence = "Every task ends with its named tests passing; " +
+	"a test written in a task is made to pass in that same task, never left failing for a later one. " +
+	"Zing runs the project's full test and lint commands after each task."
+
+// TestPlanningPromptsRequireGreenTasks proves both planning prompts tell
+// the planner that no task may end with a failing test (#55).
+func TestPlanningPromptsRequireGreenTasks(t *testing.T) {
+	t.Parallel()
+	for _, path := range []string{planningFeaturePromptPath, planningBugPromptPath} {
+		if !strings.Contains(unwrapped(t, path), greenTasksSentence) {
+			t.Errorf("%s lacks the green-tasks sentence", path)
+		}
 	}
 }
 

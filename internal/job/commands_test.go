@@ -78,7 +78,7 @@ func TestCommandRunnerExitCode(t *testing.T) {
 	t.Parallel()
 	r := NewCommandRunner(sandbox.Off(), false)
 
-	exitCode, err := r.Run(t.Context(), t.TempDir(), "", "exit 3", commandRunnerTimeout)
+	exitCode, err := r.Run(t.Context(), t.TempDir(), "", "exit 3", commandRunnerTimeout, CommandIO{})
 	if err != nil {
 		t.Fatalf("Run: %v", err)
 	}
@@ -104,7 +104,7 @@ func TestCommandRunnerTimeout(t *testing.T) {
 	canary := filepath.Join(dir, "canary")
 
 	shellCmd := fmt.Sprintf("echo $$ >%s; sleep 2; touch %s", pidFile, canary)
-	exitCode, err := r.Run(t.Context(), dir, "", shellCmd, 200*time.Millisecond)
+	exitCode, err := r.Run(t.Context(), dir, "", shellCmd, 200*time.Millisecond, CommandIO{})
 	if !errors.Is(err, ErrCommandTimeout) {
 		t.Fatalf("err = %v, want ErrCommandTimeout", err)
 	}
@@ -143,7 +143,7 @@ func TestCommandRunnerKillsGroupChild(t *testing.T) {
 	canary := filepath.Join(dir, "canary")
 
 	shellCmd := fmt.Sprintf("echo $$ >%s; ( sleep 2; touch %s ) >/dev/null 2>&1 & disown; exit 0", pidFile, canary)
-	exitCode, err := r.Run(t.Context(), dir, "", shellCmd, commandRunnerTimeout)
+	exitCode, err := r.Run(t.Context(), dir, "", shellCmd, commandRunnerTimeout, CommandIO{})
 	if err != nil {
 		t.Fatalf("Run: %v", err)
 	}
@@ -164,7 +164,7 @@ func TestCommandRunnerStartFailure(t *testing.T) {
 	t.Parallel()
 	r := NewCommandRunner(sandbox.Off(), false)
 
-	exitCode, err := r.Run(t.Context(), filepath.Join(t.TempDir(), "does-not-exist"), "", "true", commandRunnerTimeout)
+	exitCode, err := r.Run(t.Context(), filepath.Join(t.TempDir(), "does-not-exist"), "", "true", commandRunnerTimeout, CommandIO{})
 	if err == nil {
 		t.Fatal("Run with a nonexistent working directory: want an error, got nil")
 	}
@@ -188,7 +188,7 @@ func TestCommandRunnerFilteredEnv(t *testing.T) {
 	dir := t.TempDir()
 	out := filepath.Join(dir, "env.txt")
 
-	exitCode, err := r.Run(t.Context(), dir, "", "env >"+out, commandRunnerTimeout)
+	exitCode, err := r.Run(t.Context(), dir, "", "env >"+out, commandRunnerTimeout, CommandIO{})
 	if err != nil {
 		t.Fatalf("Run: %v", err)
 	}
@@ -230,7 +230,7 @@ func TestCommandRunnerEnvHasNoOAuthToken(t *testing.T) {
 	dir := t.TempDir()
 	out := filepath.Join(dir, "env.txt")
 
-	exitCode, err := r.Run(t.Context(), dir, "", "env >"+out, commandRunnerTimeout)
+	exitCode, err := r.Run(t.Context(), dir, "", "env >"+out, commandRunnerTimeout, CommandIO{})
 	if err != nil {
 		t.Fatalf("Run: %v", err)
 	}
@@ -254,11 +254,66 @@ func TestSandboxedCommandsErrSandbox(t *testing.T) {
 	t.Parallel()
 	r := NewCommandRunner(sandbox.Off(), true)
 
-	exitCode, err := r.Run(t.Context(), t.TempDir(), "", "true", commandRunnerTimeout)
+	exitCode, err := r.Run(t.Context(), t.TempDir(), "", "true", commandRunnerTimeout, CommandIO{})
 	if !errors.Is(err, ErrSandbox) {
 		t.Fatalf("err = %v, want ErrSandbox", err)
 	}
 	if exitCode != -1 {
 		t.Errorf("exitCode = %d, want -1", exitCode)
+	}
+}
+
+// TestCommandRunnerCapturesOutput proves stdout and stderr reach one
+// CommandIO.Out writer as one stream, in write order (plan D2), and that a
+// zero CommandIO discards output without failing.
+func TestCommandRunnerCapturesOutput(t *testing.T) {
+	t.Parallel()
+	r := NewCommandRunner(sandbox.Off(), false)
+	out := newTailBuffer(checkOutputCap)
+
+	exitCode, err := r.Run(t.Context(), t.TempDir(), "", "printf out; printf err >&2; exit 3", commandRunnerTimeout, CommandIO{Out: out})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if exitCode != 3 {
+		t.Errorf("exitCode = %d, want 3", exitCode)
+	}
+	if got := out.Tail(); got != "outerr" {
+		t.Errorf("output = %q, want %q", got, "outerr")
+	}
+
+	exitCode, err = r.Run(t.Context(), t.TempDir(), "", "printf out; exit 3", commandRunnerTimeout, CommandIO{})
+	if err != nil {
+		t.Fatalf("Run with zero CommandIO: %v", err)
+	}
+	if exitCode != 3 {
+		t.Errorf("exitCode with zero CommandIO = %d, want 3", exitCode)
+	}
+}
+
+// TestCommandRunnerOnStartGivesGroupLeader proves OnStart runs once, before
+// Run returns, with the pid of the command's process group leader.
+func TestCommandRunnerOnStartGivesGroupLeader(t *testing.T) {
+	t.Parallel()
+	r := NewCommandRunner(sandbox.Off(), false)
+	var calls, leaderPGID, pid int
+	onStart := func(p int) {
+		calls++
+		pid = p
+		g, err := syscall.Getpgid(p)
+		if err != nil {
+			t.Errorf("Getpgid(%d): %v", p, err)
+		}
+		leaderPGID = g
+	}
+
+	if _, err := r.Run(t.Context(), t.TempDir(), "", "sleep 0.2", commandRunnerTimeout, CommandIO{OnStart: onStart}); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if calls != 1 {
+		t.Fatalf("OnStart called %d times, want 1", calls)
+	}
+	if leaderPGID != pid {
+		t.Errorf("Getpgid(%d) = %d, want the pid itself (a group leader)", pid, leaderPGID)
 	}
 }

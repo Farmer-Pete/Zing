@@ -850,11 +850,11 @@ type testJudgeCommands struct {
 	real job.CommandRunner
 }
 
-func (c testJudgeCommands) Run(ctx context.Context, dir, repoGit, shellCmd string, timeout time.Duration) (int, error) {
+func (c testJudgeCommands) Run(ctx context.Context, dir, repoGit, shellCmd string, timeout time.Duration, cio job.CommandIO) (int, error) {
 	if shellCmd == judgeCheckFixtureCmd {
 		return 0, nil
 	}
-	return c.real.Run(ctx, dir, repoGit, shellCmd, timeout)
+	return c.real.Run(ctx, dir, repoGit, shellCmd, timeout, cio)
 }
 
 // advanceJudgingMaxCalls bounds advanceJudging's own handler-call loop:

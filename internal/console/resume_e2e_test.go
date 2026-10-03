@@ -145,11 +145,11 @@ type resumeE2ECommands struct {
 	real job.CommandRunner
 }
 
-func (c resumeE2ECommands) Run(ctx context.Context, dir, repoGit, shellCmd string, timeout time.Duration) (int, error) {
+func (c resumeE2ECommands) Run(ctx context.Context, dir, repoGit, shellCmd string, timeout time.Duration, cio job.CommandIO) (int, error) {
 	if shellCmd == resumeE2EJudgeCheckCmd {
 		return 0, nil
 	}
-	return c.real.Run(ctx, dir, repoGit, shellCmd, timeout)
+	return c.real.Run(ctx, dir, repoGit, shellCmd, timeout, cio)
 }
 
 // resumeE2EModels and resumeE2EBudget mirror cmd/zing/selftest.go's own

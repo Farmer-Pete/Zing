@@ -15,28 +15,14 @@ import (
 // it never appears on the wire itself.
 type BuildObservation struct {
 	FilesChanged []string
-	TestExit     int
-	LintExit     int
 }
 
 // CheckBuildClaims compares a build's claims against what was actually
-// observed (design section 6.5). BuildClaims carries no tests_added field
-// (decision Q-b), so this checks only test_exit, lint_exit, and
-// files_changed, in that order (design section 6.5).
+// observed (design section 6.5). The only claim left is files_changed:
+// Zing runs the test and lint commands itself and reads their results
+// directly (#55).
 func CheckBuildClaims(c BuildClaims, o BuildObservation) []*PathError {
 	var errs []*PathError
-	if o.TestExit != c.TestExit {
-		errs = append(errs, &PathError{
-			Path: "claims/test_exit",
-			Msg:  fmt.Sprintf("observed %d, claimed %d", o.TestExit, c.TestExit),
-		})
-	}
-	if o.LintExit != c.LintExit {
-		errs = append(errs, &PathError{
-			Path: "claims/lint_exit",
-			Msg:  fmt.Sprintf("observed %d, claimed %d", o.LintExit, c.LintExit),
-		})
-	}
 	if !sameSet(o.FilesChanged, c.FilesChanged) {
 		errs = append(errs, &PathError{
 			Path: "claims/files_changed",
@@ -46,26 +32,8 @@ func CheckBuildClaims(c BuildClaims, o BuildObservation) []*PathError {
 	return errs
 }
 
-// CheckCommandsPassed checks the two command exits Zing itself observed by
-// re-running them (design section 6.4 step 5, paired with step 1's
-// testExit/lintExit), independent of anything the response claims: a
-// build that truthfully claims a failing command still fails CHECK.
-func CheckCommandsPassed(testExit, lintExit int) []*PathError {
-	var errs []*PathError
-	if testExit != 0 {
-		errs = append(errs, &PathError{
-			Path: "claims/test_exit",
-			Msg:  fmt.Sprintf("observed %d, want 0", testExit),
-		})
-	}
-	if lintExit != 0 {
-		errs = append(errs, &PathError{
-			Path: "claims/lint_exit",
-			Msg:  fmt.Sprintf("observed %d, want 0", lintExit),
-		})
-	}
-	return errs
-}
+// Fence: CheckCommandsPassed existed because a truthful failing claim
+// still had to fail CHECK; CHECK now reads command results directly (#55).
 
 // BuildTree is what Zing observed in the worktree after a build run
 // (design section 4.1): every changed path, the subset git reports

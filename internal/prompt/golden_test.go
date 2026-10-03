@@ -164,14 +164,16 @@ func goldenCases() []goldenCase {
 			},
 		},
 		{
-			// Carries one answer, one claims block, and one invalid
-			// reason (plan section 6.3's resume inputs table).
+			// Carries one answer, one claims block, one check block
+			// (#55), and one invalid reason (plan section 6.3's resume
+			// inputs table).
 			name: "build-resume",
 			in: func(t *testing.T) Input {
 				t.Helper()
 				in := ForBuildResume([]NamedInput{
 					Answer("Q1 Which status code on a degraded dependency? -> a (503): keep it simple."),
 					{Label: "claims", Text: "internal/health/ping.go: declared but not written", Untrusted: true},
+					Check("test command: go test ./...\nexit code: 1\noutput:\n--- FAIL: TestPingHandlerReturnsPong"),
 					Invalid("output was not one <zing> document"),
 				})
 				in.Schemas = schemasFor(t, response.JobBuild,

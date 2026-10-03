@@ -3,8 +3,6 @@
     <files_changed>
       <path>greet.go</path>
     </files_changed>
-    <test_exit>0</test_exit>
-    <lint_exit>0</lint_exit>
   </claims>
   <report>Added the greet package with a Greet function that returns the fixed text "hello, world".</report>
   <notes></notes>

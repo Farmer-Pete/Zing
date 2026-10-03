@@ -733,7 +733,7 @@ func TestResetAfterUnsignedCommit_SurvivesCancelledContext(t *testing.T) {
 func TestRenderAcceptsValidatedFences(t *testing.T) {
 	t.Parallel()
 	xmlDoc := `<zing job="build" outcome="ok">` +
-		`<claims><files_changed><path>a.go</path></files_changed><test_exit>0</test_exit><lint_exit>0</lint_exit></claims>` +
+		`<claims><files_changed><path>a.go</path></files_changed></claims>` +
 		`<fence path="internal/orchestrator/old.go" symbol="scanTree">existed because the walking skeleton diffed by hand</fence>` +
 		`<report>did stuff</report><notes></notes></zing>`
 

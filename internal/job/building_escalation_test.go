@@ -72,7 +72,7 @@ func TestBuildingEscalationTable(t *testing.T) {
 		qID := escalateDirect(t, s, ticketID, &runID, &sessID, response.EscalationCodeRuntimeExecFailed, response.EscalationOriginBuild)
 		answerGateQuestion(t, s, ticketID, qID, new("a"), "please look again")
 
-		scriptRT := &scriptedRuntime{t: t, steps: []scriptedStep{buildStep([]string{helloTxt}, 0, 0, nil, "retry-fresh-sess")}}
+		scriptRT := &scriptedRuntime{t: t, steps: []scriptedStep{buildStep([]string{helloTxt}, nil, "retry-fresh-sess")}}
 		rec := &recordingRuntime{rt: scriptRT}
 		commit, err := runBuilding(t, s, claimForBuild(t, s, rec, ticketID), ticketID)
 		if err != nil {
@@ -359,7 +359,7 @@ func TestCapResumesRetryCarriesAnswers(t *testing.T) {
 	escQID := open[0].ID
 	answerGateQuestion(t, s, ticketID, escQID, new("a"), "please retry")
 
-	scriptRT.steps = append(scriptRT.steps, buildStep([]string{helloTxt}, 0, 0, nil, "cap-retry-fresh-sess"))
+	scriptRT.steps = append(scriptRT.steps, buildStep([]string{helloTxt}, nil, "cap-retry-fresh-sess"))
 	rec := &recordingRuntime{rt: scriptRT}
 	ticket = getTicket(t, s, ticketID)
 	deps2 := claimForBuild(t, s, rec, ticketID)
@@ -542,7 +542,7 @@ func TestTaskEscalationOriginStillBuild(t *testing.T) {
 		t.Parallel()
 		s, _, ticketID := buildTicketInBuilding(t)
 
-		scriptRT := &scriptedRuntime{t: t, steps: []scriptedStep{buildStep([]string{helloTxt}, 0, 0, nil, "task-exec-fail-sess")}}
+		scriptRT := &scriptedRuntime{t: t, steps: []scriptedStep{buildStep([]string{helloTxt}, nil, "task-exec-fail-sess")}}
 		deps := claimForBuild(t, s, scriptRT, ticketID)
 		commit, err := runBuilding(t, s, deps, ticketID) // RUN: claims hello.txt, writes nothing
 		if err != nil {

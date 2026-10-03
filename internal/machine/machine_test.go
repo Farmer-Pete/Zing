@@ -209,6 +209,28 @@ func machineFixture(t *testing.T, jobBody string) fstest.MapFS {
 	}
 }
 
+// TestLoad_CheckLoopsDefaultsToFive proves the build job's check loop cap
+// (#55) is 5 in the repository's machine.toml and 5 when the key is absent.
+func TestLoad_CheckLoopsDefaultsToFive(t *testing.T) {
+	t.Parallel()
+
+	m, err := Load(zing.Assets, machineTOMLPath)
+	if err != nil {
+		t.Fatalf("Load(real machine.toml): %v", err)
+	}
+	if got := m.Jobs[testJobNameBuild].CheckLoops; got != 5 {
+		t.Errorf("build.CheckLoops = %d, want 5", got)
+	}
+
+	m, err = Load(machineFixture(t, validJobFragment), machineTOMLPath)
+	if err != nil {
+		t.Fatalf("Load(fragment): %v", err)
+	}
+	if got := m.Jobs["test"].CheckLoops; got != 5 {
+		t.Errorf("CheckLoops with no key = %d, want 5 (the absent-key default)", got)
+	}
+}
+
 func TestLoad_JobFieldValidation(t *testing.T) {
 	t.Parallel()
 
@@ -251,6 +273,16 @@ timeout_minutes = 5
 			name:    "bad max_loops (out of range)",
 			jobBody: validJobFragment + "\nmax_loops = 6\n",
 			want:    "machine.toml: job test: max_loops: must be 1 to 5",
+		},
+		{
+			name:    "bad check_loops (zero)",
+			jobBody: validJobFragment + "\ncheck_loops = 0\n",
+			want:    "machine.toml: job test: check_loops: must be 1 to 20",
+		},
+		{
+			name:    "bad check_loops (21)",
+			jobBody: validJobFragment + "\ncheck_loops = 21\n",
+			want:    "machine.toml: job test: check_loops: must be 1 to 20",
 		},
 		{
 			name:    "bad session",

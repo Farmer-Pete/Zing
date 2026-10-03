@@ -675,17 +675,18 @@ func (d *Dispatcher) fill(ctx context.Context, results chan<- runResult) (int, e
 	// from under it. Without ReclaimForeign, ExpireClaims keeps today's
 	// behavior of expiring every owner's claims (tests, selftest, a serve
 	// without the lock).
+	expireOwner := ""
 	if d.cfg.ReclaimForeign {
 		if err := d.reclaimForeign(ctx); err != nil {
 			return 0, fmt.Errorf("dispatch: reclaim foreign: %w", err)
 		}
-		if _, err := d.store.ExpireClaims(ctx, now, d.cfg.Owner); err != nil {
-			return 0, fmt.Errorf("dispatch: reconcile: %w", err)
-		}
-	} else {
-		if _, err := d.store.ExpireClaims(ctx, now, ""); err != nil {
-			return 0, fmt.Errorf("dispatch: reconcile: %w", err)
-		}
+		expireOwner = d.cfg.Owner
+	}
+	if err := d.clearDeadExpiringChecks(ctx, now, expireOwner); err != nil {
+		return 0, fmt.Errorf("dispatch: reconcile: %w", err)
+	}
+	if _, err := d.store.ExpireClaims(ctx, now, expireOwner); err != nil {
+		return 0, fmt.Errorf("dispatch: reconcile: %w", err)
 	}
 
 	// 2. Drain or stop: return without starting work.
@@ -814,11 +815,12 @@ func (d *Dispatcher) worker(ctx context.Context, ticket store.Ticket, timeout ti
 
 // reclaimForeign reclaims the claims of a dead serve (design section 6.3):
 // for every ticket claimed by an owner other than cfg.Owner, it reclaims
-// the claim once no open run of that ticket's sessions still has a live
-// process group, killing a group that has outlived its job's timeout plus
-// claimGrace (unless its liveness could not be verified, in which case it
-// is never killed). It runs inside fill's own reconcile step, before
-// ExpireClaims, only when cfg.ReclaimForeign is set.
+// the claim once neither an open run of that ticket's sessions nor its
+// recorded CHECK command (#55) still has a live process group, killing a
+// group that has outlived its job's timeout plus claimGrace (unless its
+// liveness could not be verified, in which case it is never killed). It
+// runs inside fill's own reconcile step, before ExpireClaims, only when
+// cfg.ReclaimForeign is set.
 func (d *Dispatcher) reclaimForeign(ctx context.Context) error {
 	claims, err := d.store.ForeignClaims(ctx, d.cfg.Owner)
 	if err != nil {
@@ -828,15 +830,18 @@ func (d *Dispatcher) reclaimForeign(ctx context.Context) error {
 	for _, c := range claims {
 		anyLive := false
 		for _, r := range c.Open {
-			if d.evaluateOrphan(c.TicketID, r) {
+			if d.evaluateOrphan(c.TicketID, r, orphanProcessAgent) {
 				anyLive = true
 			}
+		}
+		if c.Check != nil && d.evaluateOrphan(c.TicketID, c.Check.AsOpenRun(), orphanProcessCheck) {
+			anyLive = true
 		}
 		if anyLive {
 			continue
 		}
 
-		applied, err := d.store.ReclaimClaim(ctx, c.TicketID, c.Owner, c.Expires)
+		applied, err := d.store.ReclaimClaim(ctx, c.TicketID, c.Owner, c.Expires, c.Check)
 		if err != nil {
 			return fmt.Errorf("reclaim claim ticket %d: %w", c.TicketID, err)
 		}
@@ -846,6 +851,38 @@ func (d *Dispatcher) reclaimForeign(ctx context.Context) error {
 	}
 	return nil
 }
+
+// clearDeadExpiringChecks judges the CHECK command of every claim
+// ExpireClaims(now, onlyOwner) is about to consider, by the same rules
+// reclaimForeign applies: ExpireClaims skips a ticket
+// that still records a CHECK command, so this deletes the row of a command
+// judged gone -- only while the row still names that exact process -- and
+// leaves a live one's claim held.
+func (d *Dispatcher) clearDeadExpiringChecks(ctx context.Context, now time.Time, onlyOwner string) error {
+	checks, err := d.store.ExpiringChecks(ctx, now, onlyOwner)
+	if err != nil {
+		return fmt.Errorf("expiring checks: %w", err)
+	}
+	for _, c := range checks {
+		if d.evaluateOrphan(c.TicketID, c.Check.AsOpenRun(), orphanProcessCheck) {
+			continue
+		}
+		cleared, err := d.store.ClearDeadCheck(ctx, c.TicketID, c.Check)
+		if err != nil {
+			return fmt.Errorf("clear dead check ticket %d: %w", c.TicketID, err)
+		}
+		slog.Info("expired claim's check command gone", "ticket_id", c.TicketID, "pgid", c.Check.PGID, "cleared", cleared)
+	}
+	return nil
+}
+
+// orphanProcessAgent and orphanProcessCheck name what evaluateOrphan is
+// judging, for its logs: an agent run's process group, or a CHECK
+// command's (#55).
+const (
+	orphanProcessAgent = "agent"
+	orphanProcessCheck = "check"
+)
 
 // orphanLiveness classifies one open run's process group against its
 // recorded identity (design section 6.3).
@@ -924,8 +961,10 @@ func classifyOpenRun(r store.OpenRun) orphanLiveness {
 // evaluateOrphan decides whether r still counts as live for this
 // reclaimForeign pass (design section 6.3), killing its group when it has
 // outlived its job's deadline and can be verified, and logging throughout
-// so the console's alerts strip shows every step.
-func (d *Dispatcher) evaluateOrphan(ticketID int64, r store.OpenRun) bool {
+// so the console's alerts strip shows every step. process names what r
+// stands for in those logs: orphanProcessAgent, or orphanProcessCheck for
+// a CHECK command presented through store.OpenCheck.AsOpenRun.
+func (d *Dispatcher) evaluateOrphan(ticketID int64, r store.OpenRun, process string) bool {
 	class := classifyOpenRun(r)
 	if class == orphanDead {
 		return false
@@ -937,23 +976,23 @@ func (d *Dispatcher) evaluateOrphan(ticketID int64, r store.OpenRun) bool {
 	}
 	now := time.Now()
 	if now.Before(deadline) {
-		slog.Info("waiting for orphaned agent of dead serve", "ticket_id", ticketID, "run_id", r.RunID, "pgid", *r.PGID)
+		slog.Info("waiting for orphaned process of dead serve", "ticket_id", ticketID, "run_id", r.RunID, "pgid", *r.PGID, "process", process)
 		return true
 	}
 
 	if class == orphanUnverifiedLive {
-		slog.Warn("orphaned agent unverified past deadline; reclaiming without kill", "ticket_id", ticketID, "run_id", r.RunID, "pgid", *r.PGID)
+		slog.Warn("orphaned process unverified past deadline; reclaiming without kill", "ticket_id", ticketID, "run_id", r.RunID, "pgid", *r.PGID, "process", process)
 		return false
 	}
 
 	if err := proc.KillGroup(*r.PGID); err != nil {
-		slog.Error("kill orphaned agent failed; retrying next tick", "ticket_id", ticketID, "run_id", r.RunID, "pgid", *r.PGID, "err", err)
+		slog.Error("kill orphaned process failed; retrying next tick", "ticket_id", ticketID, "run_id", r.RunID, "pgid", *r.PGID, "process", process, "err", err)
 		return true
 	}
 	// SIGKILL is delivered, but the group may not have exited yet, so the
 	// claim stays held this pass; a later pass reclaims it once the
 	// liveness check finds the group gone (design section 6.3).
-	slog.Warn("killed orphaned agent of dead serve", "ticket_id", ticketID, "run_id", r.RunID, "pgid", *r.PGID)
+	slog.Warn("killed orphaned process of dead serve", "ticket_id", ticketID, "run_id", r.RunID, "pgid", *r.PGID, "process", process)
 	return true
 }
 
@@ -1017,11 +1056,14 @@ func InsertAndAnnounce(ctx context.Context, st *store.Store, tr tracker.Tracker,
 }
 
 // claimTimeoutFor returns the claim/run timeout for state (design section
-// 6.8 step 6, PKG9-PLAN.md section 17.1): planning, building, and reviewing
-// each take one job's own timeout_minutes (jobTimeoutMinutes' own
+// 6.8 step 6, PKG9-PLAN.md section 17.1): planning and building each take
+// one job's own timeout_minutes (jobTimeoutOrDefault's own
 // defaultCodeTimeout fallback when that job is missing or carries no
-// positive timeout_minutes); judging takes the largest of the judge,
-// build, and perimeter job timeouts and a 10-minute floor
+// positive timeout_minutes); reviewing takes the largest of the review,
+// build, and perimeter job timeouts, like shipping, since a review fix
+// unit's build run and CHECK run inside it (#55); judging takes the
+// largest of the judge, build, and perimeter job timeouts and a 10-minute
+// floor
 // (judgingMinClaimTimeout) -- CHECK's own command re-runs and a fix step
 // (design section 5.3) can each run inside "judging", so its own claim
 // must outlast all three -- never falling back to defaultCodeTimeout even
@@ -1034,7 +1076,9 @@ func (d *Dispatcher) claimTimeoutFor(state string) time.Duration {
 	case stateBuilding:
 		return d.jobTimeoutOrDefault(jobBuild)
 	case stateReviewing:
-		return d.jobTimeoutOrDefault(jobReview)
+		// A review fix unit runs a build run and CHECK inside
+		// "reviewing", so its claim must outlast both (#55 plan D9).
+		return max(d.jobTimeoutMinutes(jobReview), d.jobTimeoutMinutes(jobBuild), d.jobTimeoutMinutes(jobPerimeter))
 	case stateJudging:
 		return max(d.jobTimeoutMinutes(jobJudge), d.jobTimeoutMinutes(jobBuild), d.jobTimeoutMinutes(jobPerimeter), judgingMinClaimTimeout)
 	case stateShipping:

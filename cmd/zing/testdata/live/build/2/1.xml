@@ -4,8 +4,6 @@
       <path>cmd/greeter/main.go</path>
       <path>README.md</path>
     </files_changed>
-    <test_exit>0</test_exit>
-    <lint_exit>0</lint_exit>
   </claims>
   <extra path="README.md">cmd/greeter/main.go gives the module a runnable command, and the task text asked for README.md to document it, even though the plan does not declare README.md.</extra>
   <report>Added cmd/greeter/main.go, a command that prints Greet's text for a fixed name, and documented it in README.md.</report>

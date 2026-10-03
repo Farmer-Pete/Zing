@@ -330,7 +330,7 @@ func TestLiveJudge(t *testing.T) {
 		t.Fatalf("head sha: %v", err)
 	}
 
-	claims := response.BuildClaims{FilesChanged: []string{liveGreetGoFilename}, TestExit: 0, LintExit: 0}
+	claims := response.BuildClaims{FilesChanged: []string{liveGreetGoFilename}}
 	report := response.BuildReport{
 		TaskN:       1,
 		BuildClaims: claims,

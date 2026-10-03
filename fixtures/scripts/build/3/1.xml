@@ -3,8 +3,6 @@
     <files_changed>
       <path>greet_test.go</path>
     </files_changed>
-    <test_exit>0</test_exit>
-    <lint_exit>0</lint_exit>
   </claims>
   <report>Added greet_test.go, covering Greet's fixed return value.</report>
   <notes></notes>

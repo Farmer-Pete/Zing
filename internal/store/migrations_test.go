@@ -175,3 +175,40 @@ func TestMigration0005Columns(t *testing.T) {
 			interrupted, gotPGID, gotProcStart, gotStartedAt, "123.000456", "2026-10-02T00:00:00Z")
 	}
 }
+
+// TestMigration0006CheckProcs proves migration 0006_check_procs.sql created
+// the check_procs table and its CHECK constraints (#55): pgid 0, an
+// unknown kind, and an empty proc_start are refused, and a legal row is
+// accepted.
+func TestMigration0006CheckProcs(t *testing.T) {
+	t.Parallel()
+	ctx := t.Context()
+	s, err := Open(ctx, dbPath(t))
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer func() { _ = s.Close() }()
+	seedProjectAndTicket(t, s)
+
+	found := tableColumnNames(t, s, "check_procs")
+	for _, col := range []string{"ticket_id", "kind", "pgid", "proc_start", "started_at", "budget_started_at"} {
+		if !found[col] {
+			t.Errorf("check_procs.%s column not found after migration 0006", col)
+		}
+	}
+	const insert = `INSERT INTO check_procs (ticket_id, kind, pgid, proc_start, started_at, budget_started_at) VALUES (1, ?, ?, NULL, '2026-10-03T00:00:00Z', '2026-10-03T00:00:00Z')`
+	if _, err := s.db.ExecContext(ctx, insert, "test", 0); err == nil {
+		t.Error("INSERT pgid 0: want a CHECK constraint error, got nil")
+	}
+	if _, err := s.db.ExecContext(ctx, insert, "fmt", 4242); err == nil {
+		t.Error("INSERT kind fmt: want a CHECK constraint error, got nil")
+	}
+	if _, err := s.db.ExecContext(ctx,
+		`INSERT INTO check_procs (ticket_id, kind, pgid, proc_start, started_at, budget_started_at) VALUES (1, 'test', 4242, '', '2026-10-03T00:00:00Z', '2026-10-03T00:00:00Z')`,
+	); err == nil {
+		t.Error("INSERT proc_start '': want a CHECK constraint error, got nil")
+	}
+	if _, err := s.db.ExecContext(ctx, insert, "lint", 4242); err != nil {
+		t.Errorf("INSERT a legal row: %v", err)
+	}
+}

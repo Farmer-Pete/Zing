@@ -33,7 +33,8 @@ type Job struct {
 	TimeoutMinutes int       `toml:"timeout_minutes"`
 	MaxResumes     int       `toml:"max_resumes"` // default 1 when the key is absent
 	MaxLoops       int       `toml:"max_loops"`
-	Outcomes       []string  `toml:"outcomes"` // default ["ok"] when the key is absent
+	CheckLoops     int       `toml:"check_loops"` // build only: CHECK's test-and-lint fix loop cap; default 5 when absent
+	Outcomes       []string  `toml:"outcomes"`    // default ["ok"] when the key is absent
 	// Sandbox names the seatbelt profile this job's runs are wrapped in
 	// (PKG8-PLAN.md section 4.5; PKG9-PLAN.md section 4.4): absent,
 	// "build", "readonly", or "judge". machine.toml sets it on jobs.build
@@ -149,12 +150,16 @@ func sortedJobNames(jobs map[string]Job) []string {
 	return names
 }
 
-// applyJobDefaults materializes the two absent-key defaults: MaxResumes
-// becomes 1, and Outcomes becomes ["ok"], each only when its key was absent
-// from machine.toml (an explicit 0 or [] is left alone for validation).
+// applyJobDefaults materializes the absent-key defaults: MaxResumes becomes
+// 1, CheckLoops becomes 5, and Outcomes becomes ["ok"], each only when its
+// key was absent from machine.toml (an explicit 0 or [] is left alone for
+// validation).
 func applyJobDefaults(md toml.MetaData, name string, job *Job) {
 	if !md.IsDefined("jobs", name, "max_resumes") {
 		job.MaxResumes = 1
+	}
+	if !md.IsDefined("jobs", name, "check_loops") {
+		job.CheckLoops = 5
 	}
 	if !md.IsDefined("jobs", name, "outcomes") {
 		job.Outcomes = []string{"ok"}
@@ -239,6 +244,9 @@ func validateJob(fsys fs.FS, md toml.MetaData, name string, job Job) error {
 	}
 	if md.IsDefined("jobs", name, "max_loops") && (job.MaxLoops < 1 || job.MaxLoops > 5) {
 		return jobErr("max_loops", "must be 1 to 5")
+	}
+	if job.CheckLoops < 1 || job.CheckLoops > 20 {
+		return jobErr("check_loops", "must be 1 to 20")
 	}
 	if job.TimeoutMinutes < 1 || job.TimeoutMinutes > 240 {
 		return jobErr("timeout_minutes", "must be 1 to 240")

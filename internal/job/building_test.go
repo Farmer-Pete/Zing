@@ -37,6 +37,7 @@ import (
 const (
 	helloTxt          = "hello.txt"
 	extraTxt          = "extra.txt"
+	phantomTxt        = "phantom.txt"
 	helloWorldContent = "hello, world\n"
 
 	// testExtraPath and testExtraReason are the single-extra scenario's own
@@ -108,11 +109,11 @@ func buildWorktreeFor(t *testing.T, deps job.Deps, ticket store.Ticket) (job.Pro
 // buildStep builds a scriptedStep whose Response is a minimal, hand-built
 // BuildResponse: a canned "ok" outcome no fixture script can express with
 // the exact claims and extras a test needs (design section 4.1).
-func buildStep(filesChanged []string, testExit, lintExit int, extras []response.ExtraClaim, sessionID string) scriptedStep {
+func buildStep(filesChanged []string, extras []response.ExtraClaim, sessionID string) scriptedStep {
 	return scriptedStep{res: runtime.RunResult{
 		Response: &response.BuildResponse{
 			Job: response.JobBuild, Outcome: response.OutcomeOk,
-			Claims: response.BuildClaims{FilesChanged: filesChanged, TestExit: testExit, LintExit: lintExit},
+			Claims: response.BuildClaims{FilesChanged: filesChanged},
 			Extras: extras,
 			Report: "did something",
 		},
@@ -298,9 +299,10 @@ func TestBuildRunGoesThroughRunJob(t *testing.T) {
 // ---- CHECK: a claim mismatch -------------------------------------------------
 
 // TestBuildClaimMismatchWritesPendingMarker proves a files_changed mismatch
-// (the run claims hello.txt changed, but the scripted runtime writes
-// nothing) makes CHECK write the "claim errors pending" marker rather than
-// landing (design section 6.4).
+// (the run claims phantom.txt changed, but nothing writes it) makes CHECK
+// write the "claim errors pending" marker rather than landing (design
+// section 6.4). withHelloAlwaysProject keeps the commands passing, so the
+// claim is the only failure.
 func TestBuildClaimMismatchWritesPendingMarker(t *testing.T) {
 	if testing.Short() {
 		t.Skip("slow end-to-end flow; runs in the full suite")
@@ -309,8 +311,8 @@ func TestBuildClaimMismatchWritesPendingMarker(t *testing.T) {
 	s, rt, ticketID := buildTicketInBuilding(t)
 	ticket := getTicket(t, s, ticketID)
 
-	mismatchRT := &scriptedRuntime{t: t, steps: []scriptedStep{buildStep([]string{helloTxt}, 0, 0, nil, "mismatch-sess")}}
-	deps := claimForBuild(t, s, mismatchRT, ticketID)
+	mismatchRT := &scriptedRuntime{t: t, steps: []scriptedStep{buildStep([]string{helloTxt, phantomTxt}, nil, "mismatch-sess")}}
+	deps := withHelloAlwaysProject(claimForBuild(t, s, mismatchRT, ticketID), ticket)
 	commit, err := job.Registry()[testStateBuilding].Run(t.Context(), ticket, deps)
 	if err != nil {
 		t.Fatalf("RUN: %v", err)
@@ -318,7 +320,7 @@ func TestBuildClaimMismatchWritesPendingMarker(t *testing.T) {
 	apply(t, s, ticket, commit)
 
 	ticket = getTicket(t, s, ticketID)
-	deps2 := claimForBuild(t, s, rt, ticketID)
+	deps2 := withHelloAlwaysProject(claimForBuild(t, s, rt, ticketID), ticket)
 	commit2, err := job.Registry()[testStateBuilding].Run(t.Context(), ticket, deps2)
 	if err != nil {
 		t.Fatalf("CHECK: %v", err)
@@ -335,46 +337,6 @@ func TestBuildClaimMismatchWritesPendingMarker(t *testing.T) {
 	}
 	if !strings.Contains(body, "claims/files_changed") {
 		t.Errorf("marker body = %q, want a files_changed mismatch line", body)
-	}
-}
-
-// TestCheckRejectsTruthfulFailingCommands proves a build that truthfully
-// claims a failing command still fails CHECK (design section 6.4, 6.5's own
-// CheckCommandsPassed doc): the observed re-run's exits, not the claim,
-// decide.
-func TestCheckRejectsTruthfulFailingCommands(t *testing.T) {
-	if testing.Short() {
-		t.Skip("slow end-to-end flow; runs in the full suite")
-	}
-	t.Parallel()
-	s, rt, ticketID := buildTicketInBuilding(t)
-	ticket := getTicket(t, s, ticketID)
-
-	// Truthfully claims both commands failed, but writes nothing: the real
-	// re-run also observes test_exit 1 (no hello.txt), agreeing with the
-	// claim -- and CHECK still refuses to land.
-	failRT := &scriptedRuntime{t: t, steps: []scriptedStep{buildStep([]string{helloTxt}, 1, 1, nil, "fail-sess")}}
-	deps := claimForBuild(t, s, failRT, ticketID)
-	commit, err := job.Registry()[testStateBuilding].Run(t.Context(), ticket, deps)
-	if err != nil {
-		t.Fatalf("RUN: %v", err)
-	}
-	apply(t, s, ticket, commit)
-
-	ticket = getTicket(t, s, ticketID)
-	deps2 := claimForBuild(t, s, rt, ticketID)
-	commit2, err := job.Registry()[testStateBuilding].Run(t.Context(), ticket, deps2)
-	if err != nil {
-		t.Fatalf("CHECK: %v", err)
-	}
-	if commit2.Next != "" || len(commit2.Artifacts) != 0 {
-		t.Fatalf("commit = %+v, want no transition and no landed build_report", commit2)
-	}
-	if len(commit2.Messages) != 1 || !strings.HasPrefix(commit2.Messages[0].Body, "claim errors pending run ") {
-		t.Fatalf("commit.Messages = %+v, want one claim errors pending marker", commit2.Messages)
-	}
-	if !strings.Contains(commit2.Messages[0].Body, "claims/test_exit: observed 1, want 0") {
-		t.Errorf("marker body = %q, want a test_exit observed-1 line", commit2.Messages[0].Body)
 	}
 }
 
@@ -395,7 +357,7 @@ func TestCheckReadsTreeAfterCommands(t *testing.T) {
 	ticket := getTicket(t, s, ticketID)
 
 	extras := []response.ExtraClaim{{Path: extraTxt, Reason: "the test command writes it"}}
-	scriptRT := &scriptedRuntime{t: t, steps: []scriptedStep{buildStep([]string{helloTxt, extraTxt}, 0, 0, extras, "reads-tree-sess")}}
+	scriptRT := &scriptedRuntime{t: t, steps: []scriptedStep{buildStep([]string{helloTxt, extraTxt}, extras, "reads-tree-sess")}}
 	deps := claimForBuild(t, s, scriptRT, ticketID)
 	overrideProj := deps.Projects[ticket.ProjectID]
 	overrideProj.TestCmd = "touch extra.txt && printf 'hello, world\\n' > hello.txt && test -f hello.txt"
@@ -705,20 +667,19 @@ func TestBuildEscalatesOnForeignCommits(t *testing.T) {
 // ---- step 0.5: verified adoption of an unrecorded commit --------------------
 
 // prepareUnrecordedCommit drives task 1's RUN turn with a scripted response
-// claiming claimFiles/lintExit (test_exit is always claimed truthfully as
-// 0; only the "claims failed" case needs a claim that disagrees with the
-// real re-run, and it varies lint_exit for that) and extras, writes
+// claiming claimFiles (only the "claims failed" case needs a claim that
+// disagrees with the tree, and it adds phantomTxt for that) and extras, writes
 // writeFiles to the worktree and commits exactly their keys (signed unless
 // signed is false), under title (the report's own Title when empty) --
 // without ever calling the handler's own LAND. It is section 6.1's
 // single-unrecorded-commit scenario every TestBuildAdoptionChecks case
 // starts from.
-func prepareUnrecordedCommit(t *testing.T, claimFiles []string, lintExit int, extras []response.ExtraClaim, titleOverride string, writeFiles map[string]string, signed bool) (*store.Store, int64, job.Deps, orchestrator.Worktree) {
+func prepareUnrecordedCommit(t *testing.T, claimFiles []string, extras []response.ExtraClaim, titleOverride string, writeFiles map[string]string, signed bool) (*store.Store, int64, job.Deps, orchestrator.Worktree) {
 	t.Helper()
 	s, _, ticketID := buildTicketInBuilding(t)
 
 	ticket := getTicket(t, s, ticketID)
-	scriptRT := &scriptedRuntime{t: t, steps: []scriptedStep{buildStep(claimFiles, 0, lintExit, extras, "adopt-sess")}}
+	scriptRT := &scriptedRuntime{t: t, steps: []scriptedStep{buildStep(claimFiles, extras, "adopt-sess")}}
 	deps := claimForBuild(t, s, scriptRT, ticketID)
 	commit, err := job.Registry()[testStateBuilding].Run(t.Context(), ticket, deps)
 	if err != nil {
@@ -789,7 +750,7 @@ func TestBuildAdoptsVerifiedCommit(t *testing.T) {
 		t.Skip("slow end-to-end flow; runs in the full suite")
 	}
 	t.Parallel()
-	s, ticketID, _, wt := prepareUnrecordedCommit(t, []string{helloTxt}, 0, nil, "", map[string]string{helloTxt: helloWorldContent}, true)
+	s, ticketID, _, wt := prepareUnrecordedCommit(t, []string{helloTxt}, nil, "", map[string]string{helloTxt: helloWorldContent}, true)
 
 	sha, err := orchestratorHeadSHA(t, wt.Dir())
 	if err != nil {
@@ -831,7 +792,7 @@ func TestBuildAdoptionChecks(t *testing.T) {
 	t.Parallel()
 	t.Run("commands failed", func(t *testing.T) {
 		t.Parallel()
-		s, ticketID, deps, _ := prepareUnrecordedCommit(t, []string{helloTxt}, 0, nil, "", map[string]string{helloTxt: helloWorldContent}, true)
+		s, ticketID, deps, _ := prepareUnrecordedCommit(t, []string{helloTxt}, nil, "", map[string]string{helloTxt: helloWorldContent}, true)
 		ticket := getTicket(t, s, ticketID)
 		badProj := deps.Projects[ticket.ProjectID]
 		badProj.TestCmd = "false"
@@ -841,7 +802,7 @@ func TestBuildAdoptionChecks(t *testing.T) {
 
 	t.Run("tree not clean", func(t *testing.T) {
 		t.Parallel()
-		s, ticketID, deps, wt := prepareUnrecordedCommit(t, []string{helloTxt}, 0, nil, "", map[string]string{helloTxt: helloWorldContent}, true)
+		s, ticketID, deps, wt := prepareUnrecordedCommit(t, []string{helloTxt}, nil, "", map[string]string{helloTxt: helloWorldContent}, true)
 		if writeErr := os.WriteFile(filepath.Join(wt.Dir(), "untracked.txt"), []byte("x"), 0o600); writeErr != nil {
 			t.Fatalf("write untracked file: %v", writeErr)
 		}
@@ -850,7 +811,7 @@ func TestBuildAdoptionChecks(t *testing.T) {
 
 	t.Run("unsigned", func(t *testing.T) {
 		t.Parallel()
-		s, ticketID, deps, _ := prepareUnrecordedCommit(t, []string{helloTxt}, 0, nil, "", map[string]string{helloTxt: helloWorldContent}, false)
+		s, ticketID, deps, _ := prepareUnrecordedCommit(t, []string{helloTxt}, nil, "", map[string]string{helloTxt: helloWorldContent}, false)
 		assertAdoptionFails(t, s, ticketID, deps, "unsigned")
 	})
 
@@ -873,16 +834,15 @@ func TestBuildAdoptionChecks(t *testing.T) {
 
 	t.Run("subject mismatch", func(t *testing.T) {
 		t.Parallel()
-		s, ticketID, deps, _ := prepareUnrecordedCommit(t, []string{helloTxt}, 0, nil, "a subject the report never gave", map[string]string{helloTxt: helloWorldContent}, true)
+		s, ticketID, deps, _ := prepareUnrecordedCommit(t, []string{helloTxt}, nil, "a subject the report never gave", map[string]string{helloTxt: helloWorldContent}, true)
 		assertAdoptionFails(t, s, ticketID, deps, "subject mismatch")
 	})
 
 	t.Run("claims failed", func(t *testing.T) {
 		t.Parallel()
-		// The run claims lint_exit 1; the fixture project's real lint
-		// command ("true") always exits 0, so the adoption re-run
-		// disagrees with the stored claim.
-		s, ticketID, deps, _ := prepareUnrecordedCommit(t, []string{helloTxt}, 1, nil, "", map[string]string{helloTxt: helloWorldContent}, true)
+		// The run also claims phantom.txt, which the commit never
+		// touches, so the stored files_changed claim disagrees with it.
+		s, ticketID, deps, _ := prepareUnrecordedCommit(t, []string{helloTxt, phantomTxt}, nil, "", map[string]string{helloTxt: helloWorldContent}, true)
 		assertAdoptionFails(t, s, ticketID, deps, "claims failed")
 	})
 
@@ -890,7 +850,7 @@ func TestBuildAdoptionChecks(t *testing.T) {
 		t.Parallel()
 		extras := []response.ExtraClaim{{Path: extraTxt, Reason: "needed it"}}
 		files := map[string]string{helloTxt: helloWorldContent, extraTxt: "extra\n"}
-		s, ticketID, deps, _ := prepareUnrecordedCommit(t, []string{helloTxt, extraTxt}, 0, extras, "", files, true)
+		s, ticketID, deps, _ := prepareUnrecordedCommit(t, []string{helloTxt, extraTxt}, extras, "", files, true)
 		assertAdoptionFails(t, s, ticketID, deps, "undeclared path")
 	})
 }
@@ -905,7 +865,7 @@ func TestBuildAdoptRoutesSandboxUnavailable(t *testing.T) {
 		t.Skip("slow end-to-end flow; runs in the full suite")
 	}
 	t.Parallel()
-	s, ticketID, deps, _ := prepareUnrecordedCommit(t, []string{helloTxt}, 0, nil, "", map[string]string{helloTxt: helloWorldContent}, true)
+	s, ticketID, deps, _ := prepareUnrecordedCommit(t, []string{helloTxt}, nil, "", map[string]string{helloTxt: helloWorldContent}, true)
 	deps.RequireSandbox = true
 	deps.Commands = job.NewCommandRunner(sandbox.Off(), true)
 
@@ -919,6 +879,11 @@ func TestBuildAdoptRoutesSandboxUnavailable(t *testing.T) {
 	}
 	if commit.Escalation.Payload.Code != string(response.EscalationCodeSandboxUnavailable) {
 		t.Errorf("escalation code = %q, want %q", commit.Escalation.Payload.Code, response.EscalationCodeSandboxUnavailable)
+	}
+	for _, m := range commit.Messages {
+		if strings.HasPrefix(m.Body, "check failed") {
+			t.Errorf("commit.Messages carries %q, want no check failed marker when the sandbox is unavailable", m.Body)
+		}
 	}
 }
 
@@ -997,7 +962,7 @@ func perimeterScenario(t *testing.T, extraReasons map[string]string) (s *store.S
 		extras[i] = response.ExtraClaim{Path: p, Reason: extraReasons[p]}
 	}
 
-	scriptRT = &scriptedRuntime{t: t, steps: []scriptedStep{buildStep(filesChanged, 0, 0, extras, "run-sess")}}
+	scriptRT = &scriptedRuntime{t: t, steps: []scriptedStep{buildStep(filesChanged, extras, "run-sess")}}
 	deps := claimForBuild(t, s, scriptRT, ticketID)
 	overrideProj := deps.Projects[ticket.ProjectID]
 	overrideProj.TestCmd = "printf 'hello, world\\n' > hello.txt && touch " + strings.Join(paths, " ") + " && test -f hello.txt"
@@ -1534,7 +1499,7 @@ func TestResolveRejectedIsRevertedAndResumed(t *testing.T) {
 	s, ticketID, _, scriptRT := perimeterScenario(t, map[string]string{testExtraPath: testExtraReason})
 	scriptRT.steps = append(scriptRT.steps,
 		perimeterStep("Adds a small helper.", "perim-sess-1"),
-		buildStep([]string{helloTxt}, 0, 0, nil, "resume-sess"),
+		buildStep([]string{helloTxt}, nil, "resume-sess"),
 	)
 	describeTick(t, s, scriptRT, ticketID) // DESCRIBE + ASK
 
@@ -1615,7 +1580,7 @@ func TestAcceptedPathAsksOnceOnly(t *testing.T) {
 		// commit that produced this run, at a lower artifact id): the
 		// resumed run claims it as an ordinary changed path, not a new
 		// extra.
-		buildStep([]string{helloTxt, acceptedPath}, 0, 0, nil, "resume-sess"),
+		buildStep([]string{helloTxt, acceptedPath}, nil, "resume-sess"),
 	)
 	describeTick(t, s, scriptRT, ticketID) // DESCRIBE extra_bad.go
 	describeTick(t, s, scriptRT, ticketID) // DESCRIBE extra_ok.go + ASK
@@ -1676,7 +1641,7 @@ func TestResolveDefaultsUnknownDecisionToReject(t *testing.T) {
 	s, ticketID, rid, scriptRT := perimeterScenario(t, map[string]string{testExtraPath: testExtraReason})
 	scriptRT.steps = append(scriptRT.steps,
 		perimeterStep("Adds a small helper.", "perim-sess-1"),
-		buildStep([]string{helloTxt}, 0, 0, nil, "resume-defaulted-sess"),
+		buildStep([]string{helloTxt}, nil, "resume-defaulted-sess"),
 	)
 	describeTick(t, s, scriptRT, ticketID) // DESCRIBE + the real ASK (left open, unused)
 
@@ -1923,7 +1888,8 @@ func TestPerimeterQuestionDroppedWhenPathGone(t *testing.T) {
 // its test command creates and finds hello.txt on every re-run,
 // deterministically, whatever a scripted run's own claim says: the
 // resume-pool tests below need CHECK's own claim-vs-observed mismatch to
-// come only from a false lint_exit claim, never from a missing file, so
+// come only from a false files_changed claim (phantom.txt), never from a
+// failing command, so
 // several resumes can be driven off one project without the fixture's
 // fake-runtime file effects.
 func withHelloAlwaysProject(deps job.Deps, ticket store.Ticket) job.Deps {
@@ -1949,7 +1915,7 @@ func TestBuildQuestionWaitsAndResumes(t *testing.T) {
 
 	scriptRT := &scriptedRuntime{t: t, steps: []scriptedStep{
 		questionResult(response.JobBuild, "build-q-sess"),
-		buildStep([]string{helloTxt}, 0, 0, nil, "build-q-sess"),
+		buildStep([]string{helloTxt}, nil, "build-q-sess"),
 	}}
 	deps := claimForBuild(t, s, scriptRT, ticketID)
 	commit, err := job.Registry()[testStateBuilding].Run(t.Context(), ticket, deps) // RUN: question
@@ -2070,7 +2036,7 @@ func TestBuildRoundResumesItsOwnSession(t *testing.T) {
 		t.Fatalf("SendBatch (fix): %v", sendErr)
 	}
 
-	scriptRT.steps = append(scriptRT.steps, buildStep([]string{helloTxt}, 0, 0, nil, "fix-q-sess"))
+	scriptRT.steps = append(scriptRT.steps, buildStep([]string{helloTxt}, nil, "fix-q-sess"))
 	ticket = getTicket(t, s, ticketID)
 	deps2 := claimForBuild(t, s, scriptRT, ticketID)
 	firstResumeCommit, err := job.Registry()[testStateBuilding].Run(t.Context(), ticket, deps2) // resumes the newest round (fix's)
@@ -2079,7 +2045,7 @@ func TestBuildRoundResumesItsOwnSession(t *testing.T) {
 	}
 	apply(t, s, ticket, firstResumeCommit)
 
-	scriptRT.steps = append(scriptRT.steps, buildStep([]string{helloTxt}, 0, 0, nil, "task-q-sess"))
+	scriptRT.steps = append(scriptRT.steps, buildStep([]string{helloTxt}, nil, "task-q-sess"))
 	ticket = getTicket(t, s, ticketID)
 	deps3 := claimForBuild(t, s, scriptRT, ticketID)
 	secondResumeCommit, err := job.Registry()[testStateBuilding].Run(t.Context(), ticket, deps3) // resumes the only round left (task's)
@@ -2110,16 +2076,16 @@ func TestClaimErrorsResumeAndDelivered(t *testing.T) {
 	s, rt, ticketID := buildTicketInBuilding(t)
 	ticket := getTicket(t, s, ticketID)
 
-	mismatchRT := &scriptedRuntime{t: t, steps: []scriptedStep{buildStep([]string{helloTxt}, 0, 0, nil, "mismatch-sess")}}
-	deps := claimForBuild(t, s, mismatchRT, ticketID)
-	commit, err := job.Registry()[testStateBuilding].Run(t.Context(), ticket, deps) // RUN: claims hello.txt, writes nothing
+	mismatchRT := &scriptedRuntime{t: t, steps: []scriptedStep{buildStep([]string{helloTxt, phantomTxt}, nil, "mismatch-sess")}}
+	deps := withHelloAlwaysProject(claimForBuild(t, s, mismatchRT, ticketID), ticket)
+	commit, err := job.Registry()[testStateBuilding].Run(t.Context(), ticket, deps) // RUN: claims phantom.txt, which nothing writes
 	if err != nil {
 		t.Fatalf("RUN: %v", err)
 	}
 	apply(t, s, ticket, commit)
 
 	ticket = getTicket(t, s, ticketID)
-	deps2 := claimForBuild(t, s, rt, ticketID)
+	deps2 := withHelloAlwaysProject(claimForBuild(t, s, rt, ticketID), ticket)
 	checkCommit, err := job.Registry()[testStateBuilding].Run(t.Context(), ticket, deps2) // CHECK: pending marker
 	if err != nil {
 		t.Fatalf("CHECK: %v", err)
@@ -2139,9 +2105,9 @@ func TestClaimErrorsResumeAndDelivered(t *testing.T) {
 		t.Fatalf("sessions.resumes before the resume = %d, want 0", sess.Resumes)
 	}
 
-	resumeRT := &scriptedRuntime{t: t, steps: []scriptedStep{buildStep([]string{helloTxt}, 0, 0, nil, "mismatch-sess")}}
+	resumeRT := &scriptedRuntime{t: t, steps: []scriptedStep{buildStep([]string{helloTxt, phantomTxt}, nil, "mismatch-sess")}}
 	ticket = getTicket(t, s, ticketID)
-	deps3 := claimForBuild(t, s, resumeRT, ticketID)
+	deps3 := withHelloAlwaysProject(claimForBuild(t, s, resumeRT, ticketID), ticket)
 	resumeCommit, err := job.Registry()[testStateBuilding].Run(t.Context(), ticket, deps3) // resume: claims
 	if err != nil {
 		t.Fatalf("resume: %v", err)
@@ -2202,7 +2168,7 @@ func TestBuildInvalidOutputChain(t *testing.T) {
 	}
 	apply(t, s, ticket, firstCommit)
 
-	scriptRT.steps = append(scriptRT.steps, buildStep([]string{helloTxt}, 0, 0, nil, "invalid-sess-1"))
+	scriptRT.steps = append(scriptRT.steps, buildStep([]string{helloTxt}, nil, "invalid-sess-1"))
 	ticket = getTicket(t, s, ticketID)
 	deps2 := claimForBuild(t, s, scriptRT, ticketID)
 	retryCommit, err := job.Registry()[testStateBuilding].Run(t.Context(), ticket, deps2) // resume: invalid
@@ -2263,7 +2229,7 @@ func TestInterruptedRunResumes(t *testing.T) {
 	s, rt, ticketID := buildTicketInBuilding(t)
 	ticket := getTicket(t, s, ticketID)
 
-	mismatchRT := &scriptedRuntime{t: t, steps: []scriptedStep{buildStep([]string{helloTxt}, 0, 0, nil, "mismatch-sess")}}
+	mismatchRT := &scriptedRuntime{t: t, steps: []scriptedStep{buildStep([]string{helloTxt}, nil, "mismatch-sess")}}
 	deps := claimForBuild(t, s, mismatchRT, ticketID)
 	commit, err := job.Registry()[testStateBuilding].Run(t.Context(), ticket, deps) // RUN: claims hello.txt, writes nothing
 	if err != nil {
@@ -2308,7 +2274,7 @@ func TestInterruptedRunResumes(t *testing.T) {
 		t.Fatalf("session state after the canceled resume = %v, want SessionOpen", state)
 	}
 
-	resumeRT := &scriptedRuntime{t: t, steps: []scriptedStep{buildStep([]string{helloTxt}, 0, 0, nil, "mismatch-sess")}}
+	resumeRT := &scriptedRuntime{t: t, steps: []scriptedStep{buildStep([]string{helloTxt}, nil, "mismatch-sess")}}
 	ticket = getTicket(t, s, ticketID)
 	deps4 := claimForBuild(t, s, resumeRT, ticketID)
 	resumeCommit, err := job.Registry()[testStateBuilding].Run(t.Context(), ticket, deps4) // resume: interrupted
@@ -2351,7 +2317,7 @@ func TestBuildInterruptedResumeIsFree(t *testing.T) {
 	s, rt, ticketID := buildTicketInBuilding(t)
 	ticket := getTicket(t, s, ticketID)
 
-	mismatchRT := &scriptedRuntime{t: t, steps: []scriptedStep{buildStep([]string{helloTxt}, 0, 0, nil, "free-mismatch-sess")}}
+	mismatchRT := &scriptedRuntime{t: t, steps: []scriptedStep{buildStep([]string{helloTxt}, nil, "free-mismatch-sess")}}
 	deps := claimForBuild(t, s, mismatchRT, ticketID)
 	commit, err := job.Registry()[testStateBuilding].Run(t.Context(), ticket, deps) // RUN: claims hello.txt, writes nothing
 	if err != nil {
@@ -2400,7 +2366,7 @@ func TestBuildInterruptedResumeIsFree(t *testing.T) {
 		t.Fatalf("session state after the canceled resume = %v, want SessionOpen", state)
 	}
 
-	resumeRT := &scriptedRuntime{t: t, steps: []scriptedStep{buildStep([]string{helloTxt}, 0, 0, nil, "free-mismatch-sess")}}
+	resumeRT := &scriptedRuntime{t: t, steps: []scriptedStep{buildStep([]string{helloTxt}, nil, "free-mismatch-sess")}}
 	ticket = getTicket(t, s, ticketID)
 	deps4 := claimForBuild(t, s, resumeRT, ticketID)
 	resumeCommit, err := job.Registry()[testStateBuilding].Run(t.Context(), ticket, deps4) // resume: interrupted, free
@@ -2443,7 +2409,7 @@ func TestBuildInterruptedResumeBypassesExhaustedCap(t *testing.T) {
 	s, _, ticketID := buildTicketInBuilding(t)
 	ticket := getTicket(t, s, ticketID)
 
-	scriptRT := &scriptedRuntime{t: t, steps: []scriptedStep{buildStep([]string{helloTxt}, 0, 1, nil, "cap-sess")}}
+	scriptRT := &scriptedRuntime{t: t, steps: []scriptedStep{buildStep([]string{helloTxt, phantomTxt}, nil, "cap-sess")}}
 	deps := withHelloAlwaysProject(claimForBuild(t, s, scriptRT, ticketID), ticket)
 	commit, err := job.Registry()[testStateBuilding].Run(t.Context(), ticket, deps) // RUN
 	if err != nil {
@@ -2467,7 +2433,7 @@ func TestBuildInterruptedResumeBypassesExhaustedCap(t *testing.T) {
 		}
 		apply(t, s, ticket, checkCommit)
 
-		scriptRT.steps = append(scriptRT.steps, buildStep([]string{helloTxt}, 0, 1, nil, "cap-sess"))
+		scriptRT.steps = append(scriptRT.steps, buildStep([]string{helloTxt, phantomTxt}, nil, "cap-sess"))
 		ticket = getTicket(t, s, ticketID)
 		deps = withHelloAlwaysProject(claimForBuild(t, s, scriptRT, ticketID), ticket)
 		resumeCommit, resumeErr := job.Registry()[testStateBuilding].Run(t.Context(), ticket, deps) // resume: claims
@@ -2530,7 +2496,7 @@ func TestBuildInterruptedResumeBypassesExhaustedCap(t *testing.T) {
 	// The next tick resumes free, bypassing the exhausted cap entirely
 	// (design D5): no resumes_exhausted escalation, and the resume itself
 	// is not charged.
-	resumeRT := &scriptedRuntime{t: t, steps: []scriptedStep{buildStep([]string{helloTxt}, 0, 1, nil, "cap-sess")}}
+	resumeRT := &scriptedRuntime{t: t, steps: []scriptedStep{buildStep([]string{helloTxt, phantomTxt}, nil, "cap-sess")}}
 	ticket = getTicket(t, s, ticketID)
 	deps = withHelloAlwaysProject(claimForBuild(t, s, resumeRT, ticketID), ticket)
 	freeCommit, err := job.Registry()[testStateBuilding].Run(t.Context(), ticket, deps) // resume: interrupted, free, bypasses cap
@@ -2574,16 +2540,16 @@ func TestBuildInterruptedClaimsResumeResendsClaims(t *testing.T) {
 	s, rt, ticketID := buildTicketInBuilding(t)
 	ticket := getTicket(t, s, ticketID)
 
-	mismatchRT := &scriptedRuntime{t: t, steps: []scriptedStep{buildStep([]string{helloTxt}, 0, 0, nil, "mismatch-sess")}}
-	deps := claimForBuild(t, s, mismatchRT, ticketID)
-	commit, err := job.Registry()[testStateBuilding].Run(t.Context(), ticket, deps) // RUN: claims hello.txt, writes nothing
+	mismatchRT := &scriptedRuntime{t: t, steps: []scriptedStep{buildStep([]string{helloTxt, phantomTxt}, nil, "mismatch-sess")}}
+	deps := withHelloAlwaysProject(claimForBuild(t, s, mismatchRT, ticketID), ticket)
+	commit, err := job.Registry()[testStateBuilding].Run(t.Context(), ticket, deps) // RUN: claims phantom.txt, which nothing writes
 	if err != nil {
 		t.Fatalf("RUN: %v", err)
 	}
 	apply(t, s, ticket, commit)
 
 	ticket = getTicket(t, s, ticketID)
-	deps2 := claimForBuild(t, s, rt, ticketID)
+	deps2 := withHelloAlwaysProject(claimForBuild(t, s, rt, ticketID), ticket)
 	checkCommit, err := job.Registry()[testStateBuilding].Run(t.Context(), ticket, deps2) // CHECK: pending marker
 	if err != nil {
 		t.Fatalf("CHECK: %v", err)
@@ -2599,7 +2565,7 @@ func TestBuildInterruptedClaimsResumeResendsClaims(t *testing.T) {
 		{res: runtime.RunResult{ExitCode: -1, AgentTime: time.Second}, err: runtime.ErrCanceled},
 	}}
 	ticket = getTicket(t, s, ticketID)
-	deps3 := claimForBuild(t, s, canceledRT, ticketID)
+	deps3 := withHelloAlwaysProject(claimForBuild(t, s, canceledRT, ticketID), ticket)
 	_, err = job.Registry()[testStateBuilding].Run(t.Context(), ticket, deps3) // resume: claims, interrupted mid-flight
 	if !errors.Is(err, runtime.ErrCanceled) {
 		t.Fatalf("err = %v, want errors.Is(err, runtime.ErrCanceled)", err)
@@ -2625,9 +2591,9 @@ func TestBuildInterruptedClaimsResumeResendsClaims(t *testing.T) {
 		t.Fatalf("session state after the canceled claims resume = %v, want SessionOpen", state)
 	}
 
-	rec := &recordingRuntime{rt: &scriptedRuntime{t: t, steps: []scriptedStep{buildStep([]string{helloTxt}, 0, 0, nil, "mismatch-sess")}}}
+	rec := &recordingRuntime{rt: &scriptedRuntime{t: t, steps: []scriptedStep{buildStep([]string{helloTxt, phantomTxt}, nil, "mismatch-sess")}}}
 	ticket = getTicket(t, s, ticketID)
-	deps4 := claimForBuild(t, s, rec, ticketID)
+	deps4 := withHelloAlwaysProject(claimForBuild(t, s, rec, ticketID), ticket)
 	resumeCommit, err := job.Registry()[testStateBuilding].Run(t.Context(), ticket, deps4) // resume: interrupted claims, free
 	if err != nil {
 		t.Fatalf("resume: %v", err)
@@ -2674,7 +2640,7 @@ func TestBuildInterruptedClaimsResumeBypassesExhaustedCap(t *testing.T) {
 	s, _, ticketID := buildTicketInBuilding(t)
 	ticket := getTicket(t, s, ticketID)
 
-	scriptRT := &scriptedRuntime{t: t, steps: []scriptedStep{buildStep([]string{helloTxt}, 0, 1, nil, "cap-sess")}}
+	scriptRT := &scriptedRuntime{t: t, steps: []scriptedStep{buildStep([]string{helloTxt, phantomTxt}, nil, "cap-sess")}}
 	deps := withHelloAlwaysProject(claimForBuild(t, s, scriptRT, ticketID), ticket)
 	commit, err := job.Registry()[testStateBuilding].Run(t.Context(), ticket, deps) // RUN
 	if err != nil {
@@ -2698,7 +2664,7 @@ func TestBuildInterruptedClaimsResumeBypassesExhaustedCap(t *testing.T) {
 		}
 		apply(t, s, ticket, checkCommit)
 
-		scriptRT.steps = append(scriptRT.steps, buildStep([]string{helloTxt}, 0, 1, nil, "cap-sess"))
+		scriptRT.steps = append(scriptRT.steps, buildStep([]string{helloTxt, phantomTxt}, nil, "cap-sess"))
 		ticket = getTicket(t, s, ticketID)
 		deps = withHelloAlwaysProject(claimForBuild(t, s, scriptRT, ticketID), ticket)
 		resumeCommit, resumeErr := job.Registry()[testStateBuilding].Run(t.Context(), ticket, deps) // resume: claims
@@ -2754,7 +2720,7 @@ func TestBuildInterruptedClaimsResumeBypassesExhaustedCap(t *testing.T) {
 		t.Fatalf("session state = %v, want SessionExhausted", state)
 	}
 
-	rec := &recordingRuntime{rt: &scriptedRuntime{t: t, steps: []scriptedStep{buildStep([]string{helloTxt}, 0, 1, nil, "cap-sess")}}}
+	rec := &recordingRuntime{rt: &scriptedRuntime{t: t, steps: []scriptedStep{buildStep([]string{helloTxt, phantomTxt}, nil, "cap-sess")}}}
 	ticket = getTicket(t, s, ticketID)
 	deps = withHelloAlwaysProject(claimForBuild(t, s, rec, ticketID), ticket)
 	freeCommit, err := job.Registry()[testStateBuilding].Run(t.Context(), ticket, deps) // resume: interrupted claims, free, bypasses cap
@@ -2764,7 +2730,7 @@ func TestBuildInterruptedClaimsResumeBypassesExhaustedCap(t *testing.T) {
 	if freeCommit.Escalation != nil {
 		t.Fatalf("free resume commit.Escalation = %+v, want nil (D5: bypasses the exhausted cap)", freeCommit.Escalation)
 	}
-	if !strings.Contains(rec.lastReq.Prompt, "claims/lint_exit") {
+	if !strings.Contains(rec.lastReq.Prompt, "claims/files_changed") {
 		t.Errorf("free resume prompt = %q, want the original claim errors, fenced", rec.lastReq.Prompt)
 	}
 	if !strings.Contains(rec.lastReq.Prompt, "the previous run was interrupted") {
@@ -2894,7 +2860,7 @@ func TestBuildAnsweredRoundInterruptedBypassesExhaustedCap(t *testing.T) {
 
 	// The next tick resumes the still-answered round free, bypassing the
 	// exhausted cap entirely (design D5).
-	resumeRT := &scriptedRuntime{t: t, steps: []scriptedStep{buildStep([]string{helloTxt}, 0, 0, nil, "round-cap-sess")}}
+	resumeRT := &scriptedRuntime{t: t, steps: []scriptedStep{buildStep([]string{helloTxt}, nil, "round-cap-sess")}}
 	ticket = getTicket(t, s, ticketID)
 	deps = claimForBuild(t, s, resumeRT, ticketID)
 	freeCommit, err := job.Registry()[testStateBuilding].Run(t.Context(), ticket, deps) // resume: round, interrupted, free, bypasses cap
@@ -2928,8 +2894,8 @@ func TestBuildAnsweredRoundInterruptedBypassesExhaustedCap(t *testing.T) {
 // exhaustBuildResumePool drives ticketID's task-1 build session through
 // design D15's own resume pool exactly to machine.toml's max_resumes for
 // "build" (3): a first turn, then one claim-errors CHECK/resume cycle per
-// resume, each falsely claiming lint_exit 1 against the project's own
-// always-0 lint command, so CHECK marks it pending again every time. resumes
+// resume, each falsely claiming phantom.txt, a path no run writes, so
+// CHECK marks it pending again every time. resumes
 // is sessions.resumes read fresh after each of the maxResumes resumes, in
 // order (the value this task's own report names).
 func exhaustBuildResumePool(t *testing.T) (s *store.Store, ticketID int64, maxResumes int, resumes []int) {
@@ -2937,7 +2903,7 @@ func exhaustBuildResumePool(t *testing.T) (s *store.Store, ticketID int64, maxRe
 	s, _, ticketID = buildTicketInBuilding(t)
 	ticket := getTicket(t, s, ticketID)
 
-	scriptRT := &scriptedRuntime{t: t, steps: []scriptedStep{buildStep([]string{helloTxt}, 0, 1, nil, "pool-sess")}}
+	scriptRT := &scriptedRuntime{t: t, steps: []scriptedStep{buildStep([]string{helloTxt, phantomTxt}, nil, "pool-sess")}}
 	deps := withHelloAlwaysProject(claimForBuild(t, s, scriptRT, ticketID), ticket)
 	commit, err := job.Registry()[testStateBuilding].Run(t.Context(), ticket, deps) // RUN
 	if err != nil {
@@ -2955,7 +2921,7 @@ func exhaustBuildResumePool(t *testing.T) (s *store.Store, ticketID int64, maxRe
 		}
 		apply(t, s, ticket, checkCommit)
 
-		scriptRT.steps = append(scriptRT.steps, buildStep([]string{helloTxt}, 0, 1, nil, "pool-sess"))
+		scriptRT.steps = append(scriptRT.steps, buildStep([]string{helloTxt, phantomTxt}, nil, "pool-sess"))
 		ticket = getTicket(t, s, ticketID)
 		deps = withHelloAlwaysProject(claimForBuild(t, s, scriptRT, ticketID), ticket)
 		resumeCommit, resumeErr := job.Registry()[testStateBuilding].Run(t.Context(), ticket, deps) // resume: claims
@@ -3068,7 +3034,7 @@ func TestLastResumeReturningOkLands(t *testing.T) {
 	s, _, ticketID := buildTicketInBuilding(t)
 	ticket := getTicket(t, s, ticketID)
 
-	scriptRT := &scriptedRuntime{t: t, steps: []scriptedStep{buildStep([]string{helloTxt}, 0, 1, nil, "last-sess")}}
+	scriptRT := &scriptedRuntime{t: t, steps: []scriptedStep{buildStep([]string{helloTxt, phantomTxt}, nil, "last-sess")}}
 	deps := withHelloAlwaysProject(claimForBuild(t, s, scriptRT, ticketID), ticket)
 	commit, err := job.Registry()[testStateBuilding].Run(t.Context(), ticket, deps) // RUN
 	if err != nil {
@@ -3090,7 +3056,7 @@ func TestLastResumeReturningOkLands(t *testing.T) {
 		}
 		apply(t, s, ticket, checkCommit)
 
-		scriptRT.steps = append(scriptRT.steps, buildStep([]string{helloTxt}, 0, 1, nil, "last-sess"))
+		scriptRT.steps = append(scriptRT.steps, buildStep([]string{helloTxt, phantomTxt}, nil, "last-sess"))
 		ticket = getTicket(t, s, ticketID)
 		deps = withHelloAlwaysProject(claimForBuild(t, s, scriptRT, ticketID), ticket)
 		resumeCommit, resumeErr := job.Registry()[testStateBuilding].Run(t.Context(), ticket, deps) // resume: still wrong
@@ -3109,7 +3075,7 @@ func TestLastResumeReturningOkLands(t *testing.T) {
 	apply(t, s, ticket, checkCommit)
 
 	// The third (last permitted) resume claims correctly.
-	scriptRT.steps = append(scriptRT.steps, buildStep([]string{helloTxt}, 0, 0, nil, "last-sess"))
+	scriptRT.steps = append(scriptRT.steps, buildStep([]string{helloTxt}, nil, "last-sess"))
 	ticket = getTicket(t, s, ticketID)
 	deps = withHelloAlwaysProject(claimForBuild(t, s, scriptRT, ticketID), ticket)
 	lastResumeCommit, lastErr := job.Registry()[testStateBuilding].Run(t.Context(), ticket, deps) // resume 3: ok, true claim
