@@ -93,6 +93,38 @@ const (
 	respondCoverageDeliveredFmt = "respond coverage delivered run %d"
 )
 
+// respondCoveragePendingInput reads run rid's own "respond coverage
+// failed" marker and builds the "coverage" input and the "respond coverage
+// delivered" message that marks it delivered (design section 9.2), shared
+// by respondEnterCoverageResume's own first attempt at a freshly-run
+// coverage failure and respondEnterErrorResume's interrupted-resume
+// re-send (F009, design section 7.4, mirroring judging.go's
+// judgeCoveragePendingInput), which calls this for an earlier run than the
+// one that is currently newest. ok is false when rid's marker is not
+// pending, or a "respond coverage delivered run <rid>" marker already
+// exists for it.
+func respondCoveragePendingInput(ctx context.Context, t store.Ticket, d Deps, rid int64) (input prompt.NamedInput, deliveredMsg store.Message, ok bool, err error) {
+	pendingRow, pending, err := d.Store.Marker(ctx, t.ID, fmt.Sprintf(respondCoverageFailedFmt, rid))
+	if err != nil {
+		return prompt.NamedInput{}, store.Message{}, false, fmt.Errorf("job: shipping: respond coverage failed marker: %w", err)
+	}
+	if !pending {
+		return prompt.NamedInput{}, store.Message{}, false, nil
+	}
+	_, delivered, err := d.Store.Marker(ctx, t.ID, fmt.Sprintf(respondCoverageDeliveredFmt, rid))
+	if err != nil {
+		return prompt.NamedInput{}, store.Message{}, false, fmt.Errorf("job: shipping: respond coverage delivered marker: %w", err)
+	}
+	if delivered {
+		return prompt.NamedInput{}, store.Message{}, false, nil
+	}
+	_, errsText, _ := strings.Cut(pendingRow.Body, "\n")
+	return respondCoverageInput(errsText), store.Message{
+		TicketID: t.ID, Type: msgTypeUpdate, Author: authorSystem,
+		Body: fmt.Sprintf(respondCoverageDeliveredFmt, rid),
+	}, true, nil
+}
+
 // respondCoverageTwiceWhat is RESPOND's own "incomplete twice in a row"
 // escalation text (design section 9.2, mirroring judgeCoverageTwiceWhat).
 const respondCoverageTwiceWhat = "the respond batch's thread actions are incomplete twice in a row"
@@ -670,9 +702,9 @@ func (h shipHandler) respondResumeTurn(
 // 'respond coverage failed run <rid>' undelivered" branch (design section
 // 9.2), mirroring judgeHandler.enterCoverageResume.
 func (h shipHandler) respondEnterCoverageResume(ctx context.Context, t store.Ticket, d Deps, n int, sha string, ids []string, seen map[string]string, sess store.Session, state store.SessionState, newestRun store.Run) (store.HandlerCommit, error) {
-	pendingRow, pending, err := d.Store.Marker(ctx, t.ID, fmt.Sprintf(respondCoverageFailedFmt, newestRun.ID))
+	coverageInput, deliveredMsg, pending, err := respondCoveragePendingInput(ctx, t, d, newestRun.ID)
 	if err != nil {
-		return store.HandlerCommit{}, fmt.Errorf("job: shipping: respond coverage failed marker: %w", err)
+		return store.HandlerCommit{}, err
 	}
 	if !pending {
 		return store.HandlerCommit{}, ErrNoAction
@@ -683,15 +715,9 @@ func (h shipHandler) respondEnterCoverageResume(ctx context.Context, t store.Tic
 		return capCommit, capErr
 	}
 
-	_, errsText, _ := strings.Cut(pendingRow.Body, "\n")
-	priorRunID := newestRun.ID
-
-	commit, resumeErr := h.respondResumeTurn(ctx, t, d, n, sha, ids, seen, sess, 0, nil, []prompt.NamedInput{respondCoverageInput(errsText)}, true, true)
+	commit, resumeErr := h.respondResumeTurn(ctx, t, d, n, sha, ids, seen, sess, 0, nil, []prompt.NamedInput{coverageInput}, true, true)
 	if resumeErr == nil && len(commit.Runs) > 0 {
-		commit.Messages = append(commit.Messages, store.Message{
-			TicketID: t.ID, Type: msgTypeUpdate, Author: authorSystem,
-			Body: fmt.Sprintf(respondCoverageDeliveredFmt, priorRunID),
-		})
+		commit.Messages = append(commit.Messages, deliveredMsg)
 	}
 	return commit, resumeErr
 }
@@ -703,6 +729,32 @@ func (h shipHandler) respondEnterCoverageResume(ctx context.Context, t store.Tic
 // today's behavior) or free and uncapped (newestRun.Interrupted: a
 // shutdown or dead-serve interrupt).
 func (h shipHandler) respondEnterErrorResume(ctx context.Context, t store.Ticket, d Deps, n int, sha string, ids []string, seen map[string]string, sess store.Session, state store.SessionState, newestRun store.Run) (store.HandlerCommit, error) {
+	bump, gate := resumeCharge(newestRun)
+
+	// F009 (design section 7.4): an interrupted coverage resume re-sends
+	// its original coverage input plus the interrupted input, free and
+	// uncapped (judging.go's enterErrorResume, the model this mirrors).
+	if newestRun.Interrupted {
+		priorRun, found, priorErr := priorNonInterruptedRun(ctx, d, t.ID, sess.ID, newestRun.ID)
+		if priorErr != nil {
+			return store.HandlerCommit{}, priorErr
+		}
+		if found && priorRun.Outcome != nil && *priorRun.Outcome == string(response.OutcomeOk) {
+			coverageInput, deliveredMsg, pending, markerErr := respondCoveragePendingInput(ctx, t, d, priorRun.ID)
+			if markerErr != nil {
+				return store.HandlerCommit{}, markerErr
+			}
+			if pending {
+				interruptedInput := prompt.NamedInput{Label: labelInterrupted, Text: interruptedResumeText, Untrusted: false}
+				commit, resumeErr := h.respondResumeTurn(ctx, t, d, n, sha, ids, seen, sess, 0, nil, []prompt.NamedInput{coverageInput, interruptedInput}, true, bump)
+				if resumeErr == nil && len(commit.Runs) > 0 {
+					commit.Messages = append(commit.Messages, deliveredMsg)
+				}
+				return commit, resumeErr
+			}
+		}
+	}
+
 	nInvalid, reason, err := d.Store.ConsecutiveInvalidOutputs(ctx, t.ID, jobRespondName, &sess.ID)
 	if err != nil {
 		return store.HandlerCommit{}, fmt.Errorf("job: shipping: consecutive invalid outputs: %w", err)
@@ -718,7 +770,6 @@ func (h shipHandler) respondEnterErrorResume(ctx context.Context, t store.Ticket
 		return store.HandlerCommit{}, ErrNoAction
 	}
 
-	bump, gate := resumeCharge(newestRun)
 	if gate {
 		capCommit, mayResume, capErr := h.respondCapGate(ctx, t, d, sess, state)
 		if !mayResume {

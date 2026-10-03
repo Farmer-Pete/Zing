@@ -161,6 +161,36 @@ const (
 	judgeCoverageDeliveredFmt = "judge coverage delivered run %d"
 )
 
+// judgeCoveragePendingInput reads run rid's own "judge coverage failed"
+// marker and builds the "coverage" input and the "judge coverage
+// delivered" message that marks it delivered (design section 7.2), shared
+// by enterCoverageResume's own first attempt at a freshly-run coverage
+// failure and enterErrorResume's interrupted-resume re-send (F009, design
+// section 7.4), which calls this for an earlier run than the one that is
+// currently newest. ok is false when rid's marker is not pending, or a
+// "judge coverage delivered run <rid>" marker already exists for it.
+func judgeCoveragePendingInput(ctx context.Context, t store.Ticket, d Deps, rid int64) (input prompt.NamedInput, deliveredMsg store.Message, ok bool, err error) {
+	pendingRow, pending, err := d.Store.Marker(ctx, t.ID, fmt.Sprintf(judgeCoverageFailedFmt, rid))
+	if err != nil {
+		return prompt.NamedInput{}, store.Message{}, false, fmt.Errorf("job: judging: coverage failed marker: %w", err)
+	}
+	if !pending {
+		return prompt.NamedInput{}, store.Message{}, false, nil
+	}
+	_, delivered, err := d.Store.Marker(ctx, t.ID, fmt.Sprintf(judgeCoverageDeliveredFmt, rid))
+	if err != nil {
+		return prompt.NamedInput{}, store.Message{}, false, fmt.Errorf("job: judging: coverage delivered marker: %w", err)
+	}
+	if delivered {
+		return prompt.NamedInput{}, store.Message{}, false, nil
+	}
+	_, errsText, _ := strings.Cut(pendingRow.Body, "\n")
+	return judgeCoverageInput(errsText), store.Message{
+		TicketID: t.ID, Type: msgTypeUpdate, Author: authorSystem,
+		Body: fmt.Sprintf(judgeCoverageDeliveredFmt, rid),
+	}, true, nil
+}
+
 // The section 7.1, 7.2 escalation What/Why texts this file writes that
 // building.go and reviewing.go have no equivalent constant for (a matching
 // text -- noStoredPlanWhat/Why, worktreeNotPreparedWhat/Why from
@@ -536,9 +566,9 @@ func (h judgeHandler) enterAfterStart(ctx context.Context, t store.Ticket, d Dep
 // makes this branch fire at all -- resumeBuildRound's own
 // "claim errors pending" check (building.go) is the model this mirrors.
 func (h judgeHandler) enterCoverageResume(ctx context.Context, t store.Ticket, d Deps, n int, sha string, sess store.Session, state store.SessionState, newestRun store.Run) (store.HandlerCommit, error) {
-	pendingRow, pending, err := d.Store.Marker(ctx, t.ID, fmt.Sprintf(judgeCoverageFailedFmt, newestRun.ID))
+	coverageInput, deliveredMsg, pending, err := judgeCoveragePendingInput(ctx, t, d, newestRun.ID)
 	if err != nil {
-		return store.HandlerCommit{}, fmt.Errorf("job: judging: coverage failed marker: %w", err)
+		return store.HandlerCommit{}, err
 	}
 	if !pending {
 		return store.HandlerCommit{}, ErrNoAction
@@ -557,18 +587,12 @@ func (h judgeHandler) enterCoverageResume(ctx context.Context, t store.Ticket, d
 		return store.HandlerCommit{}, fmt.Errorf("job: judging: ticket %d: no sealed scenarios on a coverage resume", t.ID)
 	}
 
-	_, errsText, _ := strings.Cut(pendingRow.Body, "\n")
-	priorRunID := newestRun.ID
-
-	commit, resumeErr := h.judgeResumeTurn(ctx, t, d, n, sha, sess, 0, nil, []prompt.NamedInput{judgeCoverageInput(errsText)}, true,
+	commit, resumeErr := h.judgeResumeTurn(ctx, t, d, n, sha, sess, 0, nil, []prompt.NamedInput{coverageInput}, true,
 		func(rr runResult, sessionCommit *store.SessionUpsert) (store.HandlerCommit, error) {
 			return judgeOkCommit(t, d, n, sha, scenarios, rr, sessionCommit, nil, true)
 		})
 	if resumeErr == nil && len(commit.Runs) > 0 {
-		commit.Messages = append(commit.Messages, store.Message{
-			TicketID: t.ID, Type: msgTypeUpdate, Author: authorSystem,
-			Body: fmt.Sprintf(judgeCoverageDeliveredFmt, priorRunID),
-		})
+		commit.Messages = append(commit.Messages, deliveredMsg)
 	}
 	return commit, resumeErr
 }
@@ -584,6 +608,42 @@ func (h judgeHandler) enterCoverageResume(ctx context.Context, t store.Ticket, d
 // behavior) or free and uncapped (newestRun.Interrupted: a shutdown or
 // dead-serve interrupt).
 func (h judgeHandler) enterErrorResume(ctx context.Context, t store.Ticket, d Deps, n int, sha string, sess store.Session, state store.SessionState, newestRun store.Run) (store.HandlerCommit, error) {
+	bump, gate := resumeCharge(newestRun)
+
+	// F009 (design section 7.4): an interrupted coverage resume re-sends
+	// its original coverage input plus the interrupted input, free and
+	// uncapped (building.go's advanceUnit, the model this mirrors).
+	if newestRun.Interrupted {
+		priorRun, found, priorErr := priorNonInterruptedRun(ctx, d, t.ID, sess.ID, newestRun.ID)
+		if priorErr != nil {
+			return store.HandlerCommit{}, priorErr
+		}
+		if found && priorRun.Outcome != nil && *priorRun.Outcome == string(response.OutcomeOk) {
+			coverageInput, deliveredMsg, pending, markerErr := judgeCoveragePendingInput(ctx, t, d, priorRun.ID)
+			if markerErr != nil {
+				return store.HandlerCommit{}, markerErr
+			}
+			if pending {
+				scenarios, scenErr := judgeScenariosFor(ctx, t, d)
+				if scenErr != nil {
+					return store.HandlerCommit{}, scenErr
+				}
+				if len(scenarios) == 0 {
+					return store.HandlerCommit{}, fmt.Errorf("job: judging: ticket %d: no sealed scenarios on a coverage resume", t.ID)
+				}
+				interruptedInput := prompt.NamedInput{Label: labelInterrupted, Text: interruptedResumeText, Untrusted: false}
+				commit, resumeErr := h.judgeResumeTurn(ctx, t, d, n, sha, sess, 0, nil, []prompt.NamedInput{coverageInput, interruptedInput}, bump,
+					func(rr runResult, sessionCommit *store.SessionUpsert) (store.HandlerCommit, error) {
+						return judgeOkCommit(t, d, n, sha, scenarios, rr, sessionCommit, nil, true)
+					})
+				if resumeErr == nil && len(commit.Runs) > 0 {
+					commit.Messages = append(commit.Messages, deliveredMsg)
+				}
+				return commit, resumeErr
+			}
+		}
+	}
+
 	nInvalid, reason, err := d.Store.ConsecutiveInvalidOutputs(ctx, t.ID, jobJudgeName, &sess.ID)
 	if err != nil {
 		return store.HandlerCommit{}, fmt.Errorf("job: judging: consecutive invalid outputs: %w", err)
@@ -599,7 +659,6 @@ func (h judgeHandler) enterErrorResume(ctx context.Context, t store.Ticket, d De
 		return store.HandlerCommit{}, ErrNoAction
 	}
 
-	bump, gate := resumeCharge(newestRun)
 	if gate {
 		capCommit, mayResume, capErr := h.resumeCapGate(ctx, t, d, sess, state)
 		if !mayResume {

@@ -526,6 +526,112 @@ func TestFixInterruptedResumeIsFree(t *testing.T) {
 	}
 }
 
+// TestFixInterruptedClaimsResumeResendsClaims proves F009 (design section
+// 7.4) carries a fix unit exactly as it carries a task unit
+// (TestBuildInterruptedClaimsResumeResendsClaims's own shape, this test's
+// model): a fix unit's own claims resume, interrupted mid-flight, re-sends
+// the original claims text alongside the interrupted input on the next
+// tick, free and uncapped, since DriveFix shares advanceUnit (and
+// claimsPendingInput through it) with the task-unit handler.
+func TestFixInterruptedClaimsResumeResendsClaims(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow end-to-end flow; runs in the full suite")
+	}
+	t.Parallel()
+	s, _, ticketID := buildTicketInBuilding(t)
+	mid := writeFixRequestMarker(t, s, ticketID, job.FixKindCILog, testFixCILogText, 0)
+	ticket := getTicket(t, s, ticketID)
+
+	mismatchRT := &scriptedRuntime{t: t, steps: []scriptedStep{buildStep([]string{helloTxt}, 0, 0, nil, "fix-claims-mismatch-sess")}}
+	deps := claimForBuild(t, s, mismatchRT, ticketID)
+	req := job.FixRequest{MessageID: mid, Kind: job.FixKindCILog, Text: testFixCILogText, AfterRunID: 0}
+
+	commit, err := job.DriveFix(t.Context(), ticket, deps, req) // RUN: claims hello.txt, writes nothing
+	if err != nil {
+		t.Fatalf("DriveFix (RUN): %v", err)
+	}
+	apply(t, s, ticket, commit)
+
+	ticket = getTicket(t, s, ticketID)
+	deps2 := claimForBuild(t, s, mismatchRT, ticketID)
+	checkCommit, err := job.DriveFix(t.Context(), ticket, deps2, req) // CHECK: pending marker
+	if err != nil {
+		t.Fatalf("DriveFix (CHECK): %v", err)
+	}
+	if len(checkCommit.Messages) != 1 || !strings.HasPrefix(checkCommit.Messages[0].Body, "claim errors pending run ") {
+		t.Fatalf("CHECK commit.Messages = %+v, want the pending marker", checkCommit.Messages)
+	}
+	pendingHead, _, _ := strings.Cut(checkCommit.Messages[0].Body, "\n")
+	rid := strings.TrimPrefix(pendingHead, "claim errors pending run ")
+	apply(t, s, ticket, checkCommit)
+
+	canceledRT := &scriptedRuntime{t: t, steps: []scriptedStep{
+		{res: runtime.RunResult{ExitCode: -1, AgentTime: 0}, err: runtime.ErrCanceled},
+	}}
+	ticket = getTicket(t, s, ticketID)
+	deps3 := claimForBuild(t, s, canceledRT, ticketID)
+	_, err = job.DriveFix(t.Context(), ticket, deps3, req) // resume: claims, interrupted mid-flight
+	if !errors.Is(err, runtime.ErrCanceled) {
+		t.Fatalf("err = %v, want errors.Is(err, runtime.ErrCanceled)", err)
+	}
+
+	applied, interruptErr := s.InterruptRuns(t.Context(), ticketID, deps3.Owner, deps3.Expires)
+	if interruptErr != nil {
+		t.Fatalf("InterruptRuns: %v", interruptErr)
+	}
+	if !applied {
+		t.Fatal("InterruptRuns: applied = false, want true")
+	}
+
+	maxResumes := deps.Machine.Jobs["build"].MaxResumes
+	sess, state, err := s.LatestSession(t.Context(), ticketID, "build", maxResumes)
+	if err != nil {
+		t.Fatalf("LatestSession: %v", err)
+	}
+	if sess.Resumes != 1 {
+		t.Fatalf("sessions.resumes after the canceled claims resume = %d, want 1 (charged at Reserve)", sess.Resumes)
+	}
+	if state != store.SessionOpen {
+		t.Fatalf("session state after the canceled claims resume = %v, want SessionOpen", state)
+	}
+
+	rec := &recordingRuntime{rt: &scriptedRuntime{t: t, steps: []scriptedStep{buildStep([]string{helloTxt}, 0, 0, nil, "fix-claims-mismatch-sess")}}}
+	ticket = getTicket(t, s, ticketID)
+	deps4 := claimForBuild(t, s, rec, ticketID)
+	resumeCommit, err := job.DriveFix(t.Context(), ticket, deps4, req) // resume: interrupted claims, free
+	if err != nil {
+		t.Fatalf("DriveFix (resume, interrupted claims): %v", err)
+	}
+	if !strings.Contains(rec.lastReq.Prompt, "claims/files_changed") {
+		t.Errorf("resume prompt = %q, want the original claim errors, fenced", rec.lastReq.Prompt)
+	}
+	if !strings.Contains(rec.lastReq.Prompt, "the previous run was interrupted") {
+		t.Errorf("resume prompt = %q, want the interrupted input alongside the claims", rec.lastReq.Prompt)
+	}
+	if resumeCommit.Session == nil || resumeCommit.Session.BumpResumes {
+		t.Errorf("resumeCommit.Session = %+v, want BumpResumes=false (the resume is free)", resumeCommit.Session)
+	}
+	wantDelivered := "claim errors delivered run " + rid
+	found := false
+	for _, m := range resumeCommit.Messages {
+		if m.Body == wantDelivered {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("resumeCommit.Messages = %+v, want %q among them", resumeCommit.Messages, wantDelivered)
+	}
+	apply(t, s, ticket, resumeCommit)
+
+	sess, _, err = s.LatestSession(t.Context(), ticketID, "build", maxResumes)
+	if err != nil {
+		t.Fatalf("LatestSession: %v", err)
+	}
+	if sess.Resumes != 1 {
+		t.Errorf("sessions.resumes after the free claims resume = %d, want 1 (unchanged: the resume was not charged)", sess.Resumes)
+	}
+}
+
 // TestDriveFixLandWritesLandedMarker proves the fix driver's own LAND
 // addition (design section 5.1, 5.3): a fix unit that checks clean lands
 // in one commit, exactly as a task unit does, and that commit also carries

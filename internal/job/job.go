@@ -231,6 +231,38 @@ func resumeCharge(latest store.Run) (bump, gate bool) {
 	return true, true
 }
 
+// priorNonInterruptedRun returns sessionID's own newest run strictly before
+// beforeRunID whose outcome is not itself an unanswered interrupted error
+// (design section 7.4, F009/7.2): it walks back past every run in the same
+// "resumed, interrupted again" chain -- each one outcome "error" with
+// Interrupted true -- so a claims or coverage resume that gets interrupted
+// more than once in a row still lands on the same settled run every time,
+// the one a pending-but-undelivered marker (claim errors, judge or respond
+// coverage) is keyed to. found is false when sessionID has no such run
+// (beforeRunID was its own first run, or every earlier run is itself part
+// of that same interrupted chain).
+func priorNonInterruptedRun(ctx context.Context, d Deps, ticketID, sessionID, beforeRunID int64) (store.Run, bool, error) {
+	runs, err := d.Store.RunsForTicket(ctx, ticketID)
+	if err != nil {
+		return store.Run{}, false, fmt.Errorf("job: prior non-interrupted run: runs for ticket: %w", err)
+	}
+	var best store.Run
+	found := false
+	for _, r := range runs {
+		if r.SessionID != sessionID || r.ID >= beforeRunID {
+			continue
+		}
+		if r.Outcome != nil && *r.Outcome == string(response.OutcomeError) && r.Interrupted {
+			continue // still inside the same interrupted-resume chain
+		}
+		if !found || r.ID > best.ID {
+			best = r
+			found = true
+		}
+	}
+	return best, found, nil
+}
+
 // Validate confirms every non-terminal state m.States.Order names has a
 // handler in reg, so a missing handler fails at startup, never at a nil map
 // read mid-tick.

@@ -2744,6 +2744,104 @@ func TestRespondInterruptedResumeIsFree(t *testing.T) {
 	}
 }
 
+// TestRespondInterruptedCoverageResumeResendsCoverage proves F009 (design
+// section 7.4) for respond's own coverage resume, the same gap
+// TestJudgeInterruptedCoverageResumeResendsCoverage proves for judge:
+// TestRespondInterruptedResumeIsFree's own shape (a first turn that answers
+// the wrong thread, a coverage resume cancelled mid-flight), except this
+// test also proves the free resume's own prompt still carries the original
+// coverage text -- not just the interrupted input -- and that the
+// "respond coverage delivered" marker for the first turn's own run id
+// lands in that same commit.
+func TestRespondInterruptedCoverageResumeResendsCoverage(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow end-to-end flow; runs in the full suite")
+	}
+	t.Parallel()
+	when := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	s, ticket, gh, tr, _ := shipRespondReady(t, when)
+
+	rt := runtime.NewFake(respondScriptsFS(shipRespondWrongThreadScript))
+	deps := shipClaim(t, s, rt, ticket.ID, gh, tr)
+	firstCommit, err := (shipHandler{}).Run(t.Context(), ticket, deps) // RUN: wrong thread, coverage failure
+	if err != nil {
+		t.Fatalf("first Run: %v", err)
+	}
+	firstRunID := firstCommit.Runs[0].ID
+	pbApply(t, s, ticket, firstCommit)
+
+	canceledRT := &pbScriptedRuntime{t: t, steps: []pbScriptedStep{
+		{res: runtime.RunResult{ExitCode: -1, AgentTime: time.Second}, err: runtime.ErrCanceled},
+	}}
+	deps2 := shipClaim(t, s, canceledRT, ticket.ID, gh, tr)
+	_, err = (shipHandler{}).Run(t.Context(), pbGetTicket(t, s, ticket.ID), deps2) // coverage resume: interrupted mid-flight
+	if !errors.Is(err, runtime.ErrCanceled) {
+		t.Fatalf("err = %v, want errors.Is(err, runtime.ErrCanceled)", err)
+	}
+
+	applied, interruptErr := s.InterruptRuns(t.Context(), ticket.ID, deps2.Owner, deps2.Expires)
+	if interruptErr != nil {
+		t.Fatalf("InterruptRuns: %v", interruptErr)
+	}
+	if !applied {
+		t.Fatal("InterruptRuns: applied = false, want true")
+	}
+
+	maxResumes := pbMachine(t).Jobs[jobRespondName].MaxResumes
+	sess, state, err := s.LatestSession(t.Context(), ticket.ID, jobRespondName, maxResumes)
+	if err != nil {
+		t.Fatalf("LatestSession: %v", err)
+	}
+	if sess.Resumes != 1 {
+		t.Fatalf("sessions.resumes after the canceled coverage resume = %d, want 1 (charged at Reserve)", sess.Resumes)
+	}
+	if state != store.SessionOpen {
+		t.Fatalf("session state = %v, want SessionOpen", state)
+	}
+
+	okRT := &pbScriptedRuntime{t: t, steps: []pbScriptedStep{{res: runtime.RunResult{
+		Response: &response.RespondResponse{
+			Job: response.JobRespond, Outcome: response.OutcomeOk,
+			Threads: []response.ThreadAction{{ID: shipRespondTID, Action: response.ThreadVerbReply, Text: "fixed as described"}},
+		},
+		SessionID: "respond-cov-interrupt-sess", ExitCode: 0, AgentTime: time.Second,
+	}}}}
+	deps3 := shipClaim(t, s, okRT, ticket.ID, gh, tr)
+	resumeCommit, err := (shipHandler{}).Run(t.Context(), pbGetTicket(t, s, ticket.ID), deps3) // resume: interrupted coverage, free
+	if err != nil {
+		t.Fatalf("resume: %v", err)
+	}
+	lastReq := okRT.reqs[len(okRT.reqs)-1]
+	if !strings.Contains(lastReq.Prompt, "is not in this batch") {
+		t.Errorf("resume prompt = %q, want the original coverage text", lastReq.Prompt)
+	}
+	if !strings.Contains(lastReq.Prompt, "the previous run was interrupted") {
+		t.Errorf("resume prompt = %q, want the interrupted input alongside the coverage text", lastReq.Prompt)
+	}
+	if resumeCommit.Session == nil || resumeCommit.Session.BumpResumes {
+		t.Errorf("resumeCommit.Session = %+v, want BumpResumes=false (the resume is free)", resumeCommit.Session)
+	}
+	wantDelivered := fmt.Sprintf(respondCoverageDeliveredFmt, firstRunID)
+	found := false
+	for _, m := range resumeCommit.Messages {
+		if m.Body == wantDelivered {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("resumeCommit.Messages = %+v, want %q among them", resumeCommit.Messages, wantDelivered)
+	}
+	pbApply(t, s, ticket, resumeCommit)
+
+	sess, _, err = s.LatestSession(t.Context(), ticket.ID, jobRespondName, maxResumes)
+	if err != nil {
+		t.Fatalf("LatestSession: %v", err)
+	}
+	if sess.Resumes != 1 {
+		t.Errorf("sessions.resumes after the free coverage resume = %d, want 1 (unchanged: the resume was not charged)", sess.Resumes)
+	}
+}
+
 // ---- TestRespondAnsweredRoundInterruptedBypassesExhaustedCap ----------------
 
 // TestRespondAnsweredRoundInterruptedBypassesExhaustedCap proves design
