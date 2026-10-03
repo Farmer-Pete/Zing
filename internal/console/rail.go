@@ -302,6 +302,7 @@ func (c *console) buildRunRail(ctx context.Context, ticketID int64) (templates.R
 		run.Model, run.AgentTime = dash, dash
 		return run, nil
 	}
+	run.Interrupted = newestRun.Interrupted
 	if newestRun.Model != nil {
 		run.Model = *newestRun.Model
 	} else {

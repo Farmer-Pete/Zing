@@ -316,6 +316,52 @@ func TestRail_NoSessionRendersAllDashes(t *testing.T) {
 	}
 }
 
+// TestRail_RunInterruptedShowsLabel proves #45 design section 9:
+// buildRunRail (rail.go) reads the newest run's own store.Run.Interrupted,
+// and rail.templ renders the word "interrupted" right after Model when it
+// is set. The run is reserved, then interrupted for real through
+// InterruptRuns (section 5.3), the same path a shutdown or a dead-serve
+// reclaim drives in production, rather than set the column directly:
+// CommitHandlerResult's own Runs field never writes Interrupted (D6, design
+// section 7.2), only InterruptRuns and ReclaimClaim do.
+func TestRail_RunInterruptedShowsLabel(t *testing.T) {
+	t.Parallel()
+	s := newConsoleTestStore(t)
+	ticketID := seedTicket(t, s, "fake#1", "Add a hello endpoint")
+	advanceTicketToBuilding(t, s, ticketID, "sonnet", 42) // one terminal run, so a newest session already exists
+
+	const owner = "rail-interrupt-owner"
+	expires := time.Now().Add(10 * time.Minute).UTC().Truncate(time.Second)
+	claimed, err := s.Claim(t.Context(), ticketID, owner, expires)
+	if err != nil || !claimed {
+		t.Fatalf("Claim: claimed=%v err=%v", claimed, err)
+	}
+	if _, reserveErr := s.Reserve(t.Context(), ticketID, owner, expires,
+		store.SessionUpsert{Job: string(response.TicketStateBuilding), Runtime: testRuntimeFake},
+		store.RunSeed{Model: "opus-interrupted"},
+	); reserveErr != nil {
+		t.Fatalf("Reserve: %v", reserveErr)
+	}
+	applied, err := s.InterruptRuns(t.Context(), ticketID, owner, expires)
+	if err != nil {
+		t.Fatalf("InterruptRuns: %v", err)
+	}
+	if !applied {
+		t.Fatal("InterruptRuns: applied = false, want true")
+	}
+
+	srv := newTestServer(t, s, bus.New(), testMachine(t), newTestLogHandler(t))
+
+	resp, r, cancel := openStream(t, srv.URL, "thread", ticketID, 0)
+	defer cancel()
+	defer func() { _ = resp.Body.Close() }()
+	_, _, rail, _ := readInitialFrames(t, r)
+
+	if !strings.Contains(rail, `<dd>opus-interrupted<span class="pill pill-interrupted">interrupted</span></dd>`) {
+		t.Errorf("rail run section missing the interrupted label right after Model; got:\n%s", rail)
+	}
+}
+
 // logLine calls console.Handler.Handle directly with a hand-built
 // slog.Record so the entry lands at an exact, caller-chosen Time -- the
 // equal-Time collision TestBuildLogRail_TiesKeepRunAppendOrder needs, which
