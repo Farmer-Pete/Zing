@@ -320,6 +320,100 @@ func TestInterruptRuns_FallsBackToExistingAgentSecondsWithNoStartedAt(t *testing
 	}
 }
 
+// TestInterruptRuns_KeepsExistingAgentSecondsWithNoStartedAt is
+// TestInterruptRuns_FallsBackToExistingAgentSecondsWithNoStartedAt's own
+// sibling for the other half of the same fallback (PR review fix E2): a
+// run that already carries a non-NULL agent_seconds before it is
+// interrupted, with no started_at to compute a fresh span from, keeps that
+// value rather than having it replaced by the floor-at-0 case above. The
+// fixture above never seeded agent_seconds (Reserve leaves it NULL), so it
+// could only ever exercise the floor, never this preservation branch.
+func TestInterruptRuns_KeepsExistingAgentSecondsWithNoStartedAt(t *testing.T) {
+	t.Parallel()
+	s := newTestStore(t)
+	ctx := t.Context()
+	_, ticketID := seedQueuedTicket(t, s, "1")
+	setTicketState(t, s, ticketID, testStatePlanning)
+	owner, expires := claimForCommit(t, s, ticketID)
+
+	reserved, err := s.Reserve(ctx, ticketID, owner, expires,
+		SessionUpsert{Job: testStatePlanning, Runtime: testRuntimeFake}, RunSeed{Model: testModelClaudeX})
+	if err != nil {
+		t.Fatalf("Reserve: %v", err)
+	}
+	if _, seedErr := s.db.ExecContext(ctx, `UPDATE runs SET agent_seconds = 5 WHERE id = ?`, reserved.RunID); seedErr != nil {
+		t.Fatalf("seed agent_seconds: %v", seedErr)
+	}
+
+	if _, err = s.InterruptRuns(ctx, ticketID, owner, expires); err != nil {
+		t.Fatalf("InterruptRuns: %v", err)
+	}
+
+	run, ok, err := s.FirstRun(ctx, reserved.SessionID)
+	if err != nil {
+		t.Fatalf("FirstRun: %v", err)
+	}
+	if !ok {
+		t.Fatal("FirstRun: ok = false, want true")
+	}
+	if run.AgentSeconds == nil || *run.AgentSeconds != 5 {
+		t.Errorf("run.AgentSeconds = %v, want 5 (no started_at: the existing value survives)", run.AgentSeconds)
+	}
+}
+
+// TestInterruptRuns_CapsAgentSecondsAtClaimExpiry proves design section
+// 5.3's cap (PR review fix E1): a reclaim that happens long after the
+// claim's own lease lapsed must never charge the ticket for how long the
+// dead serve sat down, only for the time the lease actually covered -- the
+// agent cannot legitimately run longer than started_at plus the lease.
+func TestInterruptRuns_CapsAgentSecondsAtClaimExpiry(t *testing.T) {
+	t.Parallel()
+	s := newTestStore(t)
+	ctx := t.Context()
+	_, ticketID := seedQueuedTicket(t, s, "1")
+	setTicketState(t, s, ticketID, testStatePlanning)
+
+	owner := testOwner
+	expires := time.Now().Add(-time.Hour).UTC().Truncate(time.Second) // the lease lapsed long ago
+	claimed, err := s.Claim(ctx, ticketID, owner, expires)
+	if err != nil {
+		t.Fatalf("Claim: %v", err)
+	}
+	if !claimed {
+		t.Fatal("Claim: got false, want true")
+	}
+
+	reserved, err := s.Reserve(ctx, ticketID, owner, expires,
+		SessionUpsert{Job: testStatePlanning, Runtime: testRuntimeFake}, RunSeed{Model: testModelClaudeX})
+	if err != nil {
+		t.Fatalf("Reserve: %v", err)
+	}
+	startedAt := expires.Add(-10 * time.Second) // ran for 10s inside its own lease
+	if err = s.RecordRunStart(ctx, reserved.RunID, 100, "1.000", startedAt, ""); err != nil {
+		t.Fatalf("RecordRunStart: %v", err)
+	}
+
+	// "now" (real time.Now(), inside interruptClaimedRuns) is long after
+	// expires: standing in for a replacement serve reclaiming hours after
+	// the dead serve's lease lapsed. Without the cap this would charge
+	// nearly an hour of agent_seconds for a run that only ever covered 10s
+	// of its own lease.
+	if _, err = s.InterruptRuns(ctx, ticketID, owner, expires); err != nil {
+		t.Fatalf("InterruptRuns: %v", err)
+	}
+
+	run, ok, err := s.FirstRun(ctx, reserved.SessionID)
+	if err != nil {
+		t.Fatalf("FirstRun: %v", err)
+	}
+	if !ok {
+		t.Fatal("FirstRun: ok = false, want true")
+	}
+	if run.AgentSeconds == nil || *run.AgentSeconds < 9 || *run.AgentSeconds > 11 {
+		t.Errorf("run.AgentSeconds = %v, want roughly 10 (capped at the claim's own expiry, not charged for how long the lease sat lapsed)", run.AgentSeconds)
+	}
+}
+
 // TestInterruptRuns_NoOpWhenFenceMismatch proves the fence (design section
 // 5.3): a claim already moved on (wrong owner or expiry) makes InterruptRuns
 // report applied=false with no error, and writes nothing.

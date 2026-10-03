@@ -266,7 +266,7 @@ func (s *Store) interruptClaimedRuns(ctx context.Context, ticketID int64, owner 
 	}
 
 	for _, target := range targets {
-		seconds := interruptedAgentSeconds(target, now)
+		seconds := interruptedAgentSeconds(target, now, expires)
 		if _, err := tx.ExecContext(ctx,
 			`UPDATE runs SET outcome = 'error', interrupted = 1, exit_code = -1, agent_seconds = ? WHERE id = ?`,
 			seconds, target.runID,
@@ -342,17 +342,28 @@ func interruptTargetsTx(ctx context.Context, tx *sql.Tx, ticketID int64) ([]inte
 }
 
 // interruptedAgentSeconds computes the agent_seconds interruptClaimedRuns
-// writes for target (design section 5.3): whole seconds from started_at to
-// now when started_at is set, else the run's existing agent_seconds (0 when
-// that too is NULL) -- never negative, so a clock skew or a started_at
-// recorded after now can never undercharge below what was already there.
-func interruptedAgentSeconds(target interruptTarget, now time.Time) int {
-	if target.startedAt == nil {
-		if target.agentSeconds != nil {
-			return *target.agentSeconds
-		}
-		return 0
+// writes for target (design section 5.3, PR review fix E1): when
+// started_at is set, the whole seconds from started_at to end, where end
+// is now capped at claimExpires -- the agent cannot legitimately run longer
+// than its own claim's lease (timeout + claimGrace), so a reclaim that
+// happens long after the lease lapsed (a replacement serve starting hours
+// after a crash) must not charge the ticket for how long the dead serve
+// sat down. Either way, the result is floored at the run's own existing
+// agent_seconds (0 when that is also NULL): a clock skew or a started_at
+// recorded after end can never undercharge below what was already there,
+// and an existing value this run already earned is never reduced.
+func interruptedAgentSeconds(target interruptTarget, now, claimExpires time.Time) int {
+	existing := 0
+	if target.agentSeconds != nil {
+		existing = max(*target.agentSeconds, 0)
 	}
-	seconds := int(now.Sub(*target.startedAt) / time.Second)
-	return max(seconds, 0)
+	if target.startedAt == nil {
+		return existing
+	}
+	end := now
+	if claimExpires.Before(end) {
+		end = claimExpires
+	}
+	span := int(end.Sub(*target.startedAt) / time.Second)
+	return max(max(span, 0), existing)
 }
