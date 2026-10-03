@@ -1706,13 +1706,12 @@ func TestTick_ClaimUsesTheJobTimeoutAndRunsUnderThatDeadlineNotTheClaimGrace(t *
 	}
 }
 
-// TestClaimTimeoutForReviewing proves design section 6.8 step 6's own
-// timeout lookup for the "reviewing" state (PKG9-PLAN.md section 4.3, 6.2):
-// ROUND's own semaphore-bounded fan-out of up to seven lens runs needs a
-// claim/run deadline of jobs.review.timeout_minutes (30), not
-// defaultCodeTimeout, the 5-minute bound a code-only state like judging or
-// shipping still uses.
-func TestClaimTimeoutForReviewing(t *testing.T) {
+// TestClaimTimeoutForReviewingCoversBuild proves the "reviewing" state's
+// claim/run deadline is the largest of the review, build, and perimeter
+// job timeouts (#55 plan D9): a review fix unit runs a 45-minute build run
+// and a 45-minute CHECK inside "reviewing", so with build at 45 and review
+// at 30 the deadline is 45m, not review's own 30m.
+func TestClaimTimeoutForReviewingCoversBuild(t *testing.T) {
 	t.Parallel()
 
 	s := newDispatchTestStore(t)
@@ -1754,10 +1753,10 @@ func TestClaimTimeoutForReviewing(t *testing.T) {
 	if !spy.HasDeadline() {
 		t.Fatal("the handler's context carried no deadline, want now+timeout")
 	}
-	wantMin := before.Add(29 * time.Minute)
-	wantMax := after.Add(31 * time.Minute)
+	wantMin := before.Add(44 * time.Minute)
+	wantMax := after.Add(46 * time.Minute)
 	if spy.Deadline().Before(wantMin) || spy.Deadline().After(wantMax) {
-		t.Errorf("run deadline = %v, want within [%v, %v] (~30m, jobs.review.timeout_minutes, not the 5m defaultCodeTimeout)", spy.Deadline(), wantMin, wantMax)
+		t.Errorf("run deadline = %v, want within [%v, %v] (~45m, jobs.build.timeout_minutes, not review's 30m)", spy.Deadline(), wantMin, wantMax)
 	}
 }
 

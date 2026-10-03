@@ -1017,11 +1017,14 @@ func InsertAndAnnounce(ctx context.Context, st *store.Store, tr tracker.Tracker,
 }
 
 // claimTimeoutFor returns the claim/run timeout for state (design section
-// 6.8 step 6, PKG9-PLAN.md section 17.1): planning, building, and reviewing
-// each take one job's own timeout_minutes (jobTimeoutMinutes' own
+// 6.8 step 6, PKG9-PLAN.md section 17.1): planning and building each take
+// one job's own timeout_minutes (jobTimeoutOrDefault's own
 // defaultCodeTimeout fallback when that job is missing or carries no
-// positive timeout_minutes); judging takes the largest of the judge,
-// build, and perimeter job timeouts and a 10-minute floor
+// positive timeout_minutes); reviewing takes the largest of the review,
+// build, and perimeter job timeouts, like shipping, since a review fix
+// unit's build run and CHECK run inside it (#55); judging takes the
+// largest of the judge, build, and perimeter job timeouts and a 10-minute
+// floor
 // (judgingMinClaimTimeout) -- CHECK's own command re-runs and a fix step
 // (design section 5.3) can each run inside "judging", so its own claim
 // must outlast all three -- never falling back to defaultCodeTimeout even
@@ -1034,7 +1037,9 @@ func (d *Dispatcher) claimTimeoutFor(state string) time.Duration {
 	case stateBuilding:
 		return d.jobTimeoutOrDefault(jobBuild)
 	case stateReviewing:
-		return d.jobTimeoutOrDefault(jobReview)
+		// A review fix unit runs a build run and CHECK inside
+		// "reviewing", so its claim must outlast both (#55 plan D9).
+		return max(d.jobTimeoutMinutes(jobReview), d.jobTimeoutMinutes(jobBuild), d.jobTimeoutMinutes(jobPerimeter))
 	case stateJudging:
 		return max(d.jobTimeoutMinutes(jobJudge), d.jobTimeoutMinutes(jobBuild), d.jobTimeoutMinutes(jobPerimeter), judgingMinClaimTimeout)
 	case stateShipping:
