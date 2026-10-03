@@ -214,7 +214,11 @@ func (h planningHandler) Run(ctx context.Context, t store.Ticket, d Deps) (store
 		// cut short (store.Run.Interrupted) still resumes, free and
 		// uncapped, rather than escalate resumes_exhausted -- the next,
 		// non-interrupted resume is still blocked by the cap (section 11's
-		// own edge case).
+		// own edge case). planningInterruptedFallback tries the
+		// stalled-invalid-retry and validation-errors branches first, so an
+		// interrupted n==1 retry or a pending validation-errors marker still
+		// carries its own text alongside the interrupted input, rather than
+		// losing it to a plain interrupted-only resume.
 		if commit, handled, fallbackErr := planningInterruptedFallback(ctx, t, d, sess); handled {
 			return commit, fallbackErr
 		}
@@ -559,10 +563,19 @@ func runPlanningResume(ctx context.Context, t store.Ticket, d Deps, sess store.S
 // resume no more specific branch above claims): sess's newest run carries
 // store.Run.Interrupted, so it resumes free with the interrupted input
 // (runPlanningResume adds that input itself, from the same newest run).
-// handled is false, with no error, when the session has no run yet or its
-// newest run was not interrupted -- the caller still falls through to
-// ErrNoAction for a plain reconciled run with nothing else pending, exactly
-// as today.
+// Before falling back to that plain resume, it tries the same two specific
+// branches the open-session case runs ahead of its own plain resume
+// (maybeResumeStalledInvalidRetry, then maybeResumeValidationErrors): an
+// exhausted session's interrupted newest run can just as well be the n==1
+// invalid-output retry (section 7.5 bug 3) or carry a pending
+// validation-errors marker, and either one's own text would otherwise be
+// lost -- resumed with only the interrupted input and nothing else. Both
+// calls still resume free: runPlanningResume's own resumeCharge handling
+// (design D5) reads this same newest run and ANDs its bump into whatever
+// charge they pass. handled is false, with no error, when the session has
+// no run yet or its newest run was not interrupted -- the caller still
+// falls through to ErrNoAction for a plain reconciled run with nothing else
+// pending, exactly as today.
 func planningInterruptedFallback(ctx context.Context, t store.Ticket, d Deps, sess store.Session) (store.HandlerCommit, bool, error) {
 	newestRun, found, err := d.Store.SessionNewestRun(ctx, sess.ID)
 	if err != nil {
@@ -570,6 +583,12 @@ func planningInterruptedFallback(ctx context.Context, t store.Ticket, d Deps, se
 	}
 	if !found || !newestRun.Interrupted {
 		return store.HandlerCommit{}, false, nil
+	}
+	if commit, handled, stallErr := maybeResumeStalledInvalidRetry(ctx, t, d, sess); handled {
+		return commit, true, stallErr
+	}
+	if commit, handled, resumeErr := maybeResumeValidationErrors(ctx, t, d, sess); handled {
+		return commit, true, resumeErr
 	}
 	commit, err := runPlanningResume(ctx, t, d, sess, nil, nil, 0, true)
 	return commit, true, err
@@ -594,8 +613,11 @@ func planningInterruptedFallback(ctx context.Context, t store.Ticket, d Deps, se
 // to the invalid-retry text this function supplies. handled is false when
 // the newest run is not an unanswered error (the ordinary D14 n==1 check
 // should run instead) or it has no predecessor carrying its own invalid
-// marker (not a stalled retry at all -- the first-turn-interrupted
-// fallback, planningInterruptedFallback, claims that case instead).
+// marker (not a stalled retry at all): on an open session the ordinary
+// D14 n==1 check runs next; on an exhausted session,
+// planningInterruptedFallback (which calls this function first, before
+// its own plain interrupted resume) tries maybeResumeValidationErrors
+// next instead.
 func maybeResumeStalledInvalidRetry(ctx context.Context, t store.Ticket, d Deps, sess store.Session) (store.HandlerCommit, bool, error) {
 	newestRun, found, err := d.Store.SessionNewestRun(ctx, sess.ID)
 	if err != nil {

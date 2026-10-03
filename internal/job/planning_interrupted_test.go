@@ -289,6 +289,120 @@ func TestPlanningInterruptedResumeBypassesExhaustedCap(t *testing.T) {
 	if !strings.Contains(rec.lastReq.Prompt, wantInterruptedText) {
 		t.Errorf("resume prompt does not carry the interrupted input:\n%s", rec.lastReq.Prompt)
 	}
+	// F011 / design section 7.5 bug 3: the interrupted run being resumed
+	// here is itself the n==1 invalid-output retry (readyRT above returned
+	// invalidResult(reason, ...) on the first turn), so the exhausted
+	// fallback must also carry the invalid-retry text, not just the
+	// interrupted input, or the model never learns why its last document
+	// was rejected.
+	if !strings.Contains(rec.lastReq.Prompt, reason) {
+		t.Errorf("resume prompt does not carry the invalid-retry reason %q:\n%s", reason, rec.lastReq.Prompt)
+	}
+	apply(t, s, getTicket(t, s, ticketID), resumeCommit)
+
+	sess, _, err = s.LatestSession(t.Context(), ticketID, "planning", 12)
+	if err != nil {
+		t.Fatalf("LatestSession: %v", err)
+	}
+	if sess.Resumes != 12 {
+		t.Errorf("sessions.resumes after the free resume = %d, want 12 (unchanged: the resume was not charged)", sess.Resumes)
+	}
+}
+
+// TestPlanningInterruptedValidationErrorsResumeAtExhaustedCap proves F011's
+// other shape of design section 7.5 bug 3 / D5 (design section 7.4): an
+// exhausted session whose newest run is interrupted, and whose prior turn
+// left a live "validation errors pending" marker (one scenario, failing the
+// 2-to-30 shape check), resumes with both the validation-errors text and
+// the interrupted input, free and uncapped, and writes the "validation
+// errors delivered" marker so the errors are not sent a second time.
+func TestPlanningInterruptedValidationErrorsResumeAtExhaustedCap(t *testing.T) {
+	t.Parallel()
+	s := newJobTestStore(t)
+	ticketID := seedQueuedTicket(t, s)
+	fake := fakeRuntime(t)
+	advanceQueuedToPlanning(t, s, fake, ticketID)
+	apply(t, s, getTicket(t, s, ticketID), mustPlanning(t, s, claim(t, s, fake, ticketID), ticketID)) // classify
+
+	badResp := readyResponse(validPlan("Store the ready cohort."), validClaims(), validScenarios(1, "val-cap"))
+	firstRT := readyScriptedRuntime(t, readyStep(badResp, "val-cap-sess"))
+	firstCommit := mustPlanning(t, s, claimWithRuntimes(t, s, firstRT, ticketID), ticketID) // first turn: shape error
+	if len(firstCommit.Messages) != 1 || !strings.HasPrefix(firstCommit.Messages[0].Body, "validation errors pending run ") {
+		t.Fatalf("first commit.Messages = %+v, want one pending marker", firstCommit.Messages)
+	}
+	apply(t, s, getTicket(t, s, ticketID), firstCommit)
+
+	sess, _, err := s.LatestSession(t.Context(), ticketID, "planning", 12)
+	if err != nil {
+		t.Fatalf("LatestSession: %v", err)
+	}
+
+	owner := "planning-val-cap-owner"
+	expires := time.Now().Add(10 * time.Minute).UTC().Truncate(time.Second)
+	bumpPlanningResumesBy(t, s, ticketID, sess.ID, 11, owner, expires) // resumes: 0 -> 11, one short of the cap
+
+	_, state, err := s.LatestSession(t.Context(), ticketID, "planning", 12)
+	if err != nil {
+		t.Fatalf("LatestSession: %v", err)
+	}
+	if state != store.SessionOpen {
+		t.Fatalf("session state before the final resume = %v, want SessionOpen", state)
+	}
+
+	canceledRT := &scriptedRuntime{t: t, steps: []scriptedStep{
+		{res: runtime.RunResult{ExitCode: -1, AgentTime: time.Second}, err: runtime.ErrCanceled},
+	}}
+	deps := claimWithRuntimes(t, s, byJobRuntime{t: t, byJob: map[response.Job]runtime.Runtime{response.JobPlanning: canceledRT}}, ticketID)
+	_, err = runPlanning(t, s, deps, ticketID) // the validation-errors resume: interrupted mid-flight
+	if !errors.Is(err, runtime.ErrCanceled) {
+		t.Fatalf("err = %v, want errors.Is(err, runtime.ErrCanceled)", err)
+	}
+
+	applied, interruptErr := s.InterruptRuns(t.Context(), ticketID, deps.Owner, deps.Expires)
+	if interruptErr != nil {
+		t.Fatalf("InterruptRuns: %v", interruptErr)
+	}
+	if !applied {
+		t.Fatal("InterruptRuns: applied = false, want true")
+	}
+
+	sess, state, err = s.LatestSession(t.Context(), ticketID, "planning", 12)
+	if err != nil {
+		t.Fatalf("LatestSession: %v", err)
+	}
+	if sess.Resumes != 12 {
+		t.Fatalf("sessions.resumes after the canceled resume = %d, want 12 (charged at Reserve)", sess.Resumes)
+	}
+	if state != store.SessionExhausted {
+		t.Fatalf("session state = %v, want SessionExhausted", state)
+	}
+
+	rec := &recordingRuntime{rt: readyScriptedRuntime(t, questionResult(response.JobPlanning, "val-cap-sess"))}
+	resumeCommit, err := runPlanning(t, s, claimWithRuntimes(t, s, rec, ticketID), ticketID) // next tick: resumes free, uncapped
+	if err != nil {
+		t.Fatalf("resume after the cap: %v", err)
+	}
+	if resumeCommit.Escalation != nil {
+		t.Fatalf("resumeCommit.Escalation = %+v, want nil (no resumes_exhausted escalation)", resumeCommit.Escalation)
+	}
+	if resumeCommit.Session == nil || resumeCommit.Session.BumpResumes {
+		t.Errorf("resumeCommit.Session = %+v, want BumpResumes=false (the resume bypasses the cap)", resumeCommit.Session)
+	}
+	if !strings.Contains(rec.lastReq.Prompt, wantInterruptedText) {
+		t.Errorf("resume prompt does not carry the interrupted input:\n%s", rec.lastReq.Prompt)
+	}
+	if !strings.Contains(rec.lastReq.Prompt, "need 2 to 30 scenarios") {
+		t.Errorf("resume prompt does not carry the validation errors:\n%s", rec.lastReq.Prompt)
+	}
+	var delivered int
+	for _, m := range resumeCommit.Messages {
+		if strings.HasPrefix(m.Body, "validation errors delivered run ") {
+			delivered++
+		}
+	}
+	if delivered != 1 {
+		t.Fatalf("resumeCommit.Messages = %+v, want exactly one delivered marker", resumeCommit.Messages)
+	}
 	apply(t, s, getTicket(t, s, ticketID), resumeCommit)
 
 	sess, _, err = s.LatestSession(t.Context(), ticketID, "planning", 12)
