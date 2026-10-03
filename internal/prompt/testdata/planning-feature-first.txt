@@ -54,7 +54,9 @@ the next step.
    integration tests at cut points first; unit tests for parsers and pure
    functions only; mocks only at cut points. Order the tasks so the
    working demo lands first, at most twelve, each naming the test written
-   before it. Done when `zing validate` prints nothing.
+   before it. Give every file the tasks that change it, as task="1" or
+   task="1 3". Every task owns at least one file, and a task changes
+   only its own files. Done when `zing validate` prints nothing.
 
 Conversations. Zing gives every question you ask a key, Q and a number,
 such as Q7. It can differ from the key you wrote. Use only keys Zing
