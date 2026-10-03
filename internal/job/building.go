@@ -1574,20 +1574,13 @@ func newestFileEventPerPath(events []store.FileEventRow) map[string]store.FileEv
 	return out
 }
 
-// acceptedExtra reports whether fa's newest file event carries Decision
-// accept, the single test acceptedPaths and declaredPaths both apply
-// before extraInScope.
-func acceptedExtra(fa response.FileArtifact) bool {
-	return fa.Decision != nil && *fa.Decision == response.PerimeterAccept
-}
-
 // acceptedPaths returns, sorted, every path whose newest file event carries
 // Decision accept and is in scope for taskN (design section 9.1's own
 // "accepted" prompt input; design rule 4's own extraInScope).
 func acceptedPaths(plan response.Plan, events []store.FileEventRow, taskN int) []string {
 	var out []string
 	for _, row := range newestFileEventPerPath(events) {
-		if acceptedExtra(row.File) && extraInScope(plan, row.File, taskN) {
+		if row.File.Decision != nil && *row.File.Decision == response.PerimeterAccept && extraInScope(plan, row.File, taskN) {
 			out = append(out, row.File.Path)
 		}
 	}
@@ -1603,7 +1596,7 @@ func acceptedPaths(plan response.Plan, events []store.FileEventRow, taskN int) [
 func declaredPaths(plan response.Plan, events []store.FileEventRow, before *int64, taskN int) []string {
 	out := planFilePaths(plan)
 	for _, row := range newestFileEventPerPath(events) {
-		if !acceptedExtra(row.File) {
+		if row.File.Decision == nil || *row.File.Decision != response.PerimeterAccept {
 			continue
 		}
 		if before != nil && row.ArtifactID >= *before {
@@ -1889,19 +1882,6 @@ func foreignTaskPaths(plan response.Plan, taskN int, changed []string) []*respon
 	return errs
 }
 
-// logTaskScopeViolation writes the one "task scope violation" Warn line
-// check and adopt both log when foreignTaskPaths finds anything: attrs
-// carries each call site's own identifying fields (ticket_id, run_id,
-// task_n, and, for adopt, commit_sha), and foreign's own Msg fields are
-// appended last as "foreign" so the two sites' lines cannot drift apart.
-func logTaskScopeViolation(foreign []*response.PathError, attrs ...any) {
-	msgs := make([]string, len(foreign))
-	for i, e := range foreign {
-		msgs[i] = e.Msg
-	}
-	slog.Warn("task scope violation", append(attrs, "foreign", msgs)...)
-}
-
 // check runs design section 6.4's CHECK, shared by the first check and the
 // check-before-landing recheck (firstCheck tells them apart only for the
 // "claims ok" marker write). rid is the unit's newest ok run; report is
@@ -1966,7 +1946,11 @@ func (h buildingHandler) check(ctx context.Context, t store.Ticket, d Deps, proj
 
 	foreign := foreignTaskPaths(plan, u.TaskN, changedPathList(changed))
 	if len(foreign) > 0 {
-		logTaskScopeViolation(foreign, "ticket_id", t.ID, "run_id", rid, "task_n", u.TaskN)
+		msgs := make([]string, len(foreign))
+		for i, e := range foreign {
+			msgs[i] = e.Msg
+		}
+		slog.Warn("task scope violation", "ticket_id", t.ID, "run_id", rid, "task_n", u.TaskN, "foreign", msgs)
 	}
 	errs = append(errs, foreign...)
 
@@ -2891,7 +2875,11 @@ func (h buildingHandler) adopt(ctx context.Context, t store.Ticket, d Deps, proj
 	}
 
 	if foreign := foreignTaskPaths(plan, u.TaskN, changedPathList(commitChanges)); len(foreign) > 0 {
-		logTaskScopeViolation(foreign, "ticket_id", t.ID, "run_id", newestRun.ID, "task_n", u.TaskN, "commit_sha", sha)
+		msgs := make([]string, len(foreign))
+		for i, e := range foreign {
+			msgs[i] = e.Msg
+		}
+		slog.Warn("task scope violation", "ticket_id", t.ID, "run_id", newestRun.ID, "task_n", u.TaskN, "commit_sha", sha, "foreign", msgs)
 		return fail("another task's path"), nil
 	}
 
