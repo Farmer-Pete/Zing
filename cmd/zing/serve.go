@@ -734,21 +734,17 @@ func removeStaleStderrFiles(ctx context.Context, st *store.Store, dataDir string
 		}
 
 		path := filepath.Join(dir, entry.Name())
-		logArgs := []any{"path", path}
-		if perr == nil {
-			logArgs = append(logArgs, "run_id", id)
-		}
 
 		info, err := entry.Info()
 		if err != nil {
-			slog.Warn("stderr file stat failed", append(logArgs, "err", err)...)
+			slog.Warn("stderr file stat failed", "path", path, "err", err)
 			continue
 		}
 		if !info.ModTime().Before(cutoff) {
 			continue
 		}
 		if err := os.Remove(path); err != nil {
-			slog.Warn("stderr file remove failed", append(logArgs, "err", err)...)
+			slog.Warn("stderr file remove failed", "path", path, "err", err)
 			continue
 		}
 		n++
