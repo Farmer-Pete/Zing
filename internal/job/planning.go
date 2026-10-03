@@ -640,34 +640,39 @@ func maybeResumeStalledInvalidRetry(ctx context.Context, t store.Ticket, d Deps,
 	if !hadPriorRetry {
 		return store.HandlerCommit{}, false, nil
 	}
-	commit, err := runPlanningResume(ctx, t, d, sess, nil, []prompt.NamedInput{prompt.Invalid(invalidRetryText(reason))}, 0, true)
+	// priorInvalid is 1, not 0 (PR review fix F1): this resume found the
+	// preceding invalid marker, so it is itself the D14 retry turn. If the
+	// recovered retry is invalid again, invalidOutputCommit's own
+	// "priorInvalid == 1" check must see that and escalate response_invalid
+	// (D14's two-strike rule), rather than silently resetting the chain and
+	// retrying forever.
+	commit, err := runPlanningResume(ctx, t, d, sess, nil, []prompt.NamedInput{prompt.Invalid(invalidRetryText(reason))}, 1, true)
 	return commit, true, err
 }
 
 // priorInvalidReason looks up the "response invalid run <id>" marker (D14,
-// design section 5.4) of sessionID's own run immediately before
-// beforeRunID -- the run that triggered the retry beforeRunID itself
-// carried out. found is false when beforeRunID is this session's very
-// first run, or its predecessor carries no such marker (an ordinary
-// interrupted first turn, not a stalled retry).
+// design section 5.4) of sessionID's own newest run strictly before
+// beforeRunID that is not itself part of the same interrupted-resume chain
+// (job.go's priorNonInterruptedRun, PR review fix F2) -- the run that
+// triggered the retry beforeRunID itself carried out. Walking past
+// interrupted runs, not just to the immediately preceding one, matters
+// when the stalled retry turn is itself interrupted more than once in a
+// row: its own immediate predecessor is then another interrupted-chain
+// member with no marker of its own, and landing there instead of on the
+// run that actually carries the marker would silently drop the original
+// invalid-retry text. found is false when beforeRunID is this session's
+// very first run, or every run before it is itself an interrupted-chain
+// member with no marker (an ordinary interrupted first turn, not a
+// stalled retry).
 func priorInvalidReason(ctx context.Context, d Deps, ticketID, sessionID, beforeRunID int64) (reason string, found bool, err error) {
-	runs, err := d.Store.RunsForTicket(ctx, ticketID)
+	prior, found, err := priorNonInterruptedRun(ctx, d, ticketID, sessionID, beforeRunID)
 	if err != nil {
-		return "", false, fmt.Errorf("job: planning: prior invalid reason: runs for ticket: %w", err)
+		return "", false, fmt.Errorf("job: planning: prior invalid reason: %w", err)
 	}
-	priorID := int64(-1)
-	for _, r := range runs {
-		if r.SessionID != sessionID || r.ID >= beforeRunID {
-			continue
-		}
-		if r.ID > priorID {
-			priorID = r.ID
-		}
-	}
-	if priorID < 0 {
+	if !found {
 		return "", false, nil
 	}
-	row, ok, err := d.Store.Marker(ctx, ticketID, fmt.Sprintf("response invalid run %d", priorID))
+	row, ok, err := d.Store.Marker(ctx, ticketID, fmt.Sprintf("response invalid run %d", prior.ID))
 	if err != nil {
 		return "", false, fmt.Errorf("job: planning: prior invalid reason: marker: %w", err)
 	}

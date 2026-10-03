@@ -533,6 +533,128 @@ func TestPlanningReconciledInvalidRetryStallResumes(t *testing.T) {
 	}
 }
 
+// TestPlanningReconciledInvalidRetryStallEscalatesOnSecondInvalid proves PR
+// review fix F1: maybeResumeStalledInvalidRetry's own resume now passes
+// priorInvalid=1 (it found the preceding invalid marker, so this resume is
+// itself the D14 retry turn), so a recovered retry that is invalid again
+// still escalates response_invalid through D14's two-strike rule, instead
+// of silently resetting the chain and retrying forever (the same stall
+// TestPlanningReconciledInvalidRetryStallResumes above proves is otherwise
+// fixed, but only for a retry that recovers into something valid).
+func TestPlanningReconciledInvalidRetryStallEscalatesOnSecondInvalid(t *testing.T) {
+	t.Parallel()
+	s := newJobTestStore(t)
+	ticketID := seedQueuedTicket(t, s)
+	fake := fakeRuntime(t)
+	advanceQueuedToPlanning(t, s, fake, ticketID)
+	apply(t, s, getTicket(t, s, ticketID), mustPlanning(t, s, claim(t, s, fake, ticketID), ticketID)) // classify
+
+	const reason = "zing document failed validation"
+	firstRT := readyScriptedRuntime(t, invalidResult(reason, "stall-escalate-sess"))
+	firstCommit := mustPlanning(t, s, claimWithRuntimes(t, s, firstRT, ticketID), ticketID) // first turn: D14 invalid
+	apply(t, s, getTicket(t, s, ticketID), firstCommit)
+
+	canceledRT := &scriptedRuntime{t: t, steps: []scriptedStep{
+		{res: runtime.RunResult{ExitCode: -1, AgentTime: time.Second}, err: runtime.ErrCanceled},
+	}}
+	deps2 := claimWithRuntimes(t, s, byJobRuntime{t: t, byJob: map[response.Job]runtime.Runtime{response.JobPlanning: canceledRT}}, ticketID)
+	_, err := runPlanning(t, s, deps2, ticketID) // the D14 n==1 retry resume: cut short
+	if !errors.Is(err, runtime.ErrCanceled) {
+		t.Fatalf("err = %v, want errors.Is(err, runtime.ErrCanceled)", err)
+	}
+
+	// A plain lease-expiry reconcile (interrupted stays 0), same as
+	// TestPlanningReconciledInvalidRetryStallResumes above.
+	if _, expireErr := s.ExpireClaims(t.Context(), time.Now().Add(20*time.Minute), ""); expireErr != nil {
+		t.Fatalf("ExpireClaims: %v", expireErr)
+	}
+
+	// The recovered retry is invalid again: the second consecutive invalid
+	// output on this chain.
+	again := readyScriptedRuntime(t, invalidResult(reason, "stall-escalate-sess"))
+	commit, err := runPlanning(t, s, claimWithRuntimes(t, s, again, ticketID), ticketID)
+	if err != nil {
+		t.Fatalf("resume after the reconciled stall: %v", err)
+	}
+	if commit.Escalation == nil {
+		t.Fatal("commit.Escalation is nil, want response_invalid (second consecutive invalid output)")
+	}
+	var payload response.EscalationPayload
+	if unmarshalErr := json.Unmarshal(mustEscalationPayload(t, commit), &payload); unmarshalErr != nil {
+		t.Fatalf("unmarshal escalation payload: %v", unmarshalErr)
+	}
+	if payload.Code != testCodeResponseInvalid {
+		t.Errorf("payload.Code = %q, want response_invalid", payload.Code)
+	}
+}
+
+// TestPlanningTwiceInterruptedInvalidRetryKeepsReason proves PR review fix
+// F2: priorInvalidReason now walks back past interrupted runs in the same
+// resume chain (job.go's priorNonInterruptedRun), so a D14 retry that is
+// itself interrupted a second time in a row still finds the original
+// invalid-retry text on the run that actually carries its marker, rather
+// than landing on its own interrupted predecessor (which carries no
+// marker of its own) and losing it.
+func TestPlanningTwiceInterruptedInvalidRetryKeepsReason(t *testing.T) {
+	t.Parallel()
+	s := newJobTestStore(t)
+	ticketID := seedQueuedTicket(t, s)
+	fake := fakeRuntime(t)
+	advanceQueuedToPlanning(t, s, fake, ticketID)
+	apply(t, s, getTicket(t, s, ticketID), mustPlanning(t, s, claim(t, s, fake, ticketID), ticketID)) // classify
+
+	const reason = "zing document failed validation"
+	firstRT := readyScriptedRuntime(t, invalidResult(reason, "twice-interrupted-sess"))
+	firstCommit := mustPlanning(t, s, claimWithRuntimes(t, s, firstRT, ticketID), ticketID) // first turn: D14 invalid (R1, carries the marker)
+	apply(t, s, getTicket(t, s, ticketID), firstCommit)
+
+	canceled := func() *scriptedRuntime {
+		return &scriptedRuntime{t: t, steps: []scriptedStep{
+			{res: runtime.RunResult{ExitCode: -1, AgentTime: time.Second}, err: runtime.ErrCanceled},
+		}}
+	}
+
+	// D14's own n==1 retry (R2): interrupted mid-flight, before it ever
+	// answers (no marker of its own).
+	deps2 := claimWithRuntimes(t, s, byJobRuntime{t: t, byJob: map[response.Job]runtime.Runtime{response.JobPlanning: canceled()}}, ticketID)
+	if _, err := runPlanning(t, s, deps2, ticketID); !errors.Is(err, runtime.ErrCanceled) {
+		t.Fatalf("R2 err = %v, want errors.Is(err, runtime.ErrCanceled)", err)
+	}
+	applied, err := s.InterruptRuns(t.Context(), ticketID, deps2.Owner, deps2.Expires)
+	if err != nil || !applied {
+		t.Fatalf("InterruptRuns (R2): applied=%v err=%v, want applied=true, err=nil", applied, err)
+	}
+
+	// R2's own free resume (R3): interrupted again, also before it ever
+	// answers -- the twice-interrupted chain this fix is for.
+	deps3 := claimWithRuntimes(t, s, byJobRuntime{t: t, byJob: map[response.Job]runtime.Runtime{response.JobPlanning: canceled()}}, ticketID)
+	if _, r3Err := runPlanning(t, s, deps3, ticketID); !errors.Is(r3Err, runtime.ErrCanceled) {
+		t.Fatalf("R3 err = %v, want errors.Is(err, runtime.ErrCanceled)", r3Err)
+	}
+	applied, err = s.InterruptRuns(t.Context(), ticketID, deps3.Owner, deps3.Expires)
+	if err != nil || !applied {
+		t.Fatalf("InterruptRuns (R3): applied=%v err=%v, want applied=true, err=nil", applied, err)
+	}
+
+	// The next tick's own free resume (R4) must still carry the original
+	// invalid-retry reason, found by walking back past both interrupted
+	// runs (R3, then R2) to R1, the run that actually carries the marker.
+	rec := &recordingRuntime{rt: readyScriptedRuntime(t, questionResult(response.JobPlanning, "twice-interrupted-sess"))}
+	commit, err := runPlanning(t, s, claimWithRuntimes(t, s, rec, ticketID), ticketID)
+	if err != nil {
+		t.Fatalf("resume after the twice-interrupted retry: %v", err)
+	}
+	if !strings.Contains(rec.lastReq.Prompt, reason) {
+		t.Errorf("resume prompt does not carry the original invalid-retry reason:\n%s", rec.lastReq.Prompt)
+	}
+	if !strings.Contains(rec.lastReq.Prompt, wantInterruptedText) {
+		t.Errorf("resume prompt does not carry the interrupted input:\n%s", rec.lastReq.Prompt)
+	}
+	if commit.Session == nil || commit.Session.BumpResumes {
+		t.Errorf("commit.Session = %+v, want BumpResumes=false (genuinely interrupted, so free)", commit.Session)
+	}
+}
+
 // TestPlanningReconciledInvalidRetryStaysCapped proves section 7.5 bug 3's
 // own exhausted-session guard: a session already at max_resumes, whose
 // newest run is a reconciled (not interrupted) D14 retry, still escalates
