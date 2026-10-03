@@ -433,6 +433,70 @@ func TestCheckReadsTreeAfterCommands(t *testing.T) {
 	}
 }
 
+// TestCheckRejectsAnotherTasksFile proves CHECK's own foreignTaskPaths
+// wiring (ticket "check each build task against its own files, not the
+// whole plan", design rule 2): task 1's builder also changing greet.go --
+// a file the fixture plan (fixtures/scripts/planning/2.xml) assigns only
+// to task 2 -- is refused with the ownership claim error, and the
+// resumed session receives that same line. The thread message is the
+// durable record of the refusal; this test does not capture slog, since
+// it runs in parallel and slog.SetDefault is process-wide.
+func TestCheckRejectsAnotherTasksFile(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow end-to-end flow; runs in the full suite")
+	}
+	t.Parallel()
+	s, _, ticketID := buildTicketInBuilding(t)
+	ticket := getTicket(t, s, ticketID)
+
+	scriptRT := &scriptedRuntime{t: t, steps: []scriptedStep{buildStep([]string{helloTxt, "greet.go"}, 0, 0, nil, "scope-sess")}}
+	deps := claimForBuild(t, s, scriptRT, ticketID)
+	overrideProj := deps.Projects[ticket.ProjectID]
+	overrideProj.TestCmd = "printf 'hello, world\\n' > hello.txt && printf 'package greet\\n' > greet.go && test -f hello.txt"
+	overrideProj.LintCmd = testNoopShellCmd
+	deps.Projects = map[int64]job.Project{ticket.ProjectID: overrideProj}
+
+	commit, err := job.Registry()[testStateBuilding].Run(t.Context(), ticket, deps) // RUN: claims hello.txt, greet.go
+	if err != nil {
+		t.Fatalf("RUN: %v", err)
+	}
+	apply(t, s, ticket, commit)
+
+	ticket = getTicket(t, s, ticketID)
+	deps2 := claimForBuild(t, s, scriptRT, ticketID)
+	deps2.Projects = map[int64]job.Project{ticket.ProjectID: overrideProj}
+	checkCommit, err := job.Registry()[testStateBuilding].Run(t.Context(), ticket, deps2) // CHECK
+	if err != nil {
+		t.Fatalf("CHECK: %v", err)
+	}
+	if len(checkCommit.Artifacts) != 0 || checkCommit.Next != "" {
+		t.Fatalf("CHECK commit = %+v, want no artifacts and no transition", checkCommit)
+	}
+	wantLine := "claims/files_changed: greet.go belongs to task 2, not task 1"
+	if len(checkCommit.Messages) != 1 || !strings.HasPrefix(checkCommit.Messages[0].Body, "claim errors pending run ") {
+		t.Fatalf("CHECK commit.Messages = %+v, want the pending marker", checkCommit.Messages)
+	}
+	if !strings.Contains(checkCommit.Messages[0].Body, wantLine) {
+		t.Fatalf("CHECK marker body = %q, want it to contain %q", checkCommit.Messages[0].Body, wantLine)
+	}
+	apply(t, s, ticket, checkCommit)
+
+	resumeRT := &scriptedRuntime{t: t, steps: []scriptedStep{buildStep([]string{helloTxt}, 0, 0, nil, "scope-sess")}}
+	ticket = getTicket(t, s, ticketID)
+	deps3 := claimForBuild(t, s, resumeRT, ticketID)
+	if _, err := job.Registry()[testStateBuilding].Run(t.Context(), ticket, deps3); err != nil { // resume: claims
+		t.Fatalf("resume: %v", err)
+	}
+
+	lastReq := resumeRT.reqs[len(resumeRT.reqs)-1]
+	if lastReq.SessionID != "scope-sess" {
+		t.Errorf("resume request SessionID = %q, want %q", lastReq.SessionID, "scope-sess")
+	}
+	if !strings.Contains(lastReq.Prompt, wantLine) {
+		t.Errorf("resume prompt = %q, want it to contain %q", lastReq.Prompt, wantLine)
+	}
+}
+
 // ---- LAND -------------------------------------------------------------------
 
 // TestBuildLandStagesOnlyChangedPaths proves LAND commits exactly the

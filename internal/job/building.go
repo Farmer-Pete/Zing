@@ -1831,6 +1831,46 @@ func commandInfraEscalation(t store.Ticket, d Deps, u unit, err error) (store.Ha
 	}
 }
 
+// claimsFilesChangedPath is the element path CheckBuildClaims reports a
+// files_changed mismatch under; ownership errors share it.
+const claimsFilesChangedPath = "claims/files_changed"
+
+// foreignTaskPaths returns one claim error per path in changed that the
+// plan assigns only to tasks other than taskN, in changed's order, each
+// naming the owners as "task 2", "tasks 2 and 3", or "tasks 1, 2 and 4". A
+// fix unit (taskN 0) and a plan with no task mapping (stored before files
+// named tasks) get none: both keep whole-plan scope.
+func foreignTaskPaths(plan response.Plan, taskN int, changed []string) []*response.PathError {
+	if taskN == 0 || !response.TaskMapped(plan) {
+		return nil
+	}
+	owners := make(map[string][]int)
+	for _, f := range response.Files(plan) {
+		owners[f.Path] = append(owners[f.Path], response.FileTasks(f)...)
+	}
+	var errs []*response.PathError
+	for _, p := range changed {
+		own := owners[p]
+		if len(own) == 0 || slices.Contains(own, taskN) {
+			continue
+		}
+		sorted := slices.Compact(slices.Sorted(slices.Values(own)))
+		owner := fmt.Sprintf("task %d", sorted[0])
+		if len(sorted) > 1 {
+			parts := make([]string, len(sorted))
+			for i, n := range sorted {
+				parts[i] = strconv.Itoa(n)
+			}
+			owner = "tasks " + strings.Join(parts[:len(parts)-1], ", ") + " and " + parts[len(parts)-1]
+		}
+		errs = append(errs, &response.PathError{
+			Path: claimsFilesChangedPath,
+			Msg:  fmt.Sprintf("%s belongs to %s, not task %d", p, owner, taskN),
+		})
+	}
+	return errs
+}
+
 // check runs design section 6.4's CHECK, shared by the first check and the
 // check-before-landing recheck (firstCheck tells them apart only for the
 // "claims ok" marker write). rid is the unit's newest ok run; report is
@@ -1892,6 +1932,16 @@ func (h buildingHandler) check(ctx context.Context, t store.Ticket, d Deps, proj
 		errs = append(errs, e)
 	}
 	errs = append(errs, treeErrs...)
+
+	foreign := foreignTaskPaths(plan, u.TaskN, changedPathList(changed))
+	if len(foreign) > 0 {
+		msgs := make([]string, len(foreign))
+		for i, e := range foreign {
+			msgs[i] = e.Msg
+		}
+		slog.Warn("task scope violation", "ticket_id", t.ID, "run_id", rid, "task_n", u.TaskN, "foreign", msgs)
+	}
+	errs = append(errs, foreign...)
 
 	slog.Info("claim check", "ticket_id", t.ID, "run_id", rid, "task_n", u.TaskN, "errors", len(errs), "changed", len(changed), "extras", len(extras))
 
