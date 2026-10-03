@@ -1,6 +1,8 @@
 You are building one task of an approved plan in this worktree. Earlier
 tasks are already committed. You hold nothing from them except the code.
 
+Run every command in the foreground and wait for it; a background command is lost when the run ends.
+
 Task {n} of {total}: {task title}
 
 Work in this order.

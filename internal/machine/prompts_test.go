@@ -43,7 +43,7 @@ func TestPrompts_MatchThePinnedDesignText(t *testing.T) {
 		{
 			name:   testJobNameBuild,
 			path:   "prompts/build.md",
-			sha256: "10b1fe9b4539a77a4c0fc418364227ec42c425311d27c1284ff4091d26c1c03e",
+			sha256: "aa7a9e1eca398f3d891433807c15b4df079c8062a7494f00dcc1734f06775e3f",
 		},
 		{
 			name:   "perimeter",
@@ -58,7 +58,7 @@ func TestPrompts_MatchThePinnedDesignText(t *testing.T) {
 		{
 			name:   "judge",
 			path:   "prompts/judge.md",
-			sha256: "40ba95666f7d24a842b22b061f2f8aeca7b0a13af3aeb48e7f59a0abaf6f9eb6",
+			sha256: "32696784412227a34e3699fcde225dec3c3e343cbc46b5f57318b0e876e610a7",
 		},
 		{
 			name:   "respond",

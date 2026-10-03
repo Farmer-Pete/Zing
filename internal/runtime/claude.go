@@ -13,6 +13,7 @@ import (
 	"log/slog"
 	"os"
 	"os/exec"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -162,13 +163,54 @@ func FilteredEnv(extra []string) []string {
 	return out
 }
 
+// bashTimeoutMarginMS is subtracted from req.Timeout before it becomes
+// BASH_DEFAULT_TIMEOUT_MS / BASH_MAX_TIMEOUT_MS (issue #54), so a bash
+// command run near the end of a job's own timeout budget gets killed by the
+// CLI's own timeout instead of by the job's context deadline landing on it
+// mid-command.
+const bashTimeoutMarginMS = 60_000
+
+// bashTimeoutFloorMS is the minimum BASH_DEFAULT_TIMEOUT_MS /
+// BASH_MAX_TIMEOUT_MS value bashTimeoutMS ever returns (issue #54): every
+// machine.toml job's timeout_minutes clears this once the margin is
+// subtracted except the 3-minute perimeter job, which lands exactly on it.
+const bashTimeoutFloorMS = 120_000
+
+// bashTimeoutMS computes the value both BASH_DEFAULT_TIMEOUT_MS and
+// BASH_MAX_TIMEOUT_MS get for a run with this timeout (issue #54): the
+// job's own timeout, minus a margin so the CLI's bash timeout fires before
+// the job's context deadline does, floored so a short job timeout never
+// drives a command's timeout to zero or negative.
+func bashTimeoutMS(timeout time.Duration) int64 {
+	ms := timeout.Milliseconds() - bashTimeoutMarginMS
+	if ms < bashTimeoutFloorMS {
+		return bashTimeoutFloorMS
+	}
+	return ms
+}
+
 // agentEnv builds the filtered environment (design section 4.1), shared by
-// both Claude and Codex: FilteredEnv over req.Env plus the two variables
-// every run needs. CLAUDE_CODE_PROMPT_CACHE_TTL is harmless to a codex run:
-// it is an environment variable, not a flag, and codex ignores names it
-// does not read.
+// both Claude and Codex: FilteredEnv over req.Env plus the variables every
+// run needs. CLAUDE_CODE_PROMPT_CACHE_TTL and
+// CLAUDE_CODE_DISABLE_BACKGROUND_TASKS are harmless to a codex run: they
+// are environment variables, not flags, and codex ignores names it does
+// not read. CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1 (issue #54) stops a
+// build or judge turn from losing its remaining work to a command it
+// backgrounded: a backgrounded command is killed with the rest of the
+// process group the moment the run ends (killProcessGroup), so letting the
+// model background one at all only hides lost work behind a clean-looking
+// turn. BASH_DEFAULT_TIMEOUT_MS and BASH_MAX_TIMEOUT_MS (also issue #54)
+// bound every bash call the model makes to req.Timeout, so a single
+// command cannot quietly consume the whole job's budget.
 func agentEnv(req RunRequest) []string {
-	return FilteredEnv(append(req.Env, "CLAUDE_CODE_PROMPT_CACHE_TTL=1h", "ZING_RUN_TOKEN="+req.RunToken))
+	bashTimeout := strconv.FormatInt(bashTimeoutMS(req.Timeout), 10)
+	return FilteredEnv(append(req.Env,
+		"CLAUDE_CODE_PROMPT_CACHE_TTL=1h",
+		"CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1",
+		"BASH_DEFAULT_TIMEOUT_MS="+bashTimeout,
+		"BASH_MAX_TIMEOUT_MS="+bashTimeout,
+		"ZING_RUN_TOKEN="+req.RunToken,
+	))
 }
 
 // envNameBlocked reports whether name is shaped like a secret (design

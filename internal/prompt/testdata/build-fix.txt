@@ -1,6 +1,8 @@
 You are building one task of an approved plan in this worktree. Earlier
 tasks are already committed. You hold nothing from them except the code.
 
+Run every command in the foreground and wait for it; a background command is lost when the run ends.
+
 Fix run: Fix review findings
 If the reported failure does not reproduce against the code, change nothing and return outcome ok with an empty files_changed and a report that says why.
 
