@@ -288,6 +288,58 @@ func checkTaskNumbering(tasks []Task, present map[string]bool) []*PathError {
 	return errs
 }
 
+// fileTaskPattern is FileChange.Task's own Layer 1 pattern, repeated here
+// so checkFileTasks can tell a well-formed value from one Layer 1 rejected.
+var fileTaskPattern = regexp.MustCompile(`^[1-9]\d?( [1-9]\d?)*$`)
+
+// checkFileTasks enforces the file-to-task mapping: every number a file
+// lists names a task in the plan, once, and every task owns a file. The
+// owns-no-file check runs only when every file's task attribute is present
+// and well formed, so a missing attribute draws Layer 1's error alone.
+func checkFileTasks(files []FileChange, tasks []Task, present map[string]bool) []*PathError {
+	var errs []*PathError
+	owned := make(map[int]bool)
+	complete := true
+	for i, f := range files {
+		path := "plan/delivery/files/" + indexedName("file", i) + "/task"
+		if !present[path] || !fileTaskPattern.MatchString(f.Task) {
+			complete = false
+			continue
+		}
+		seen := make(map[int]bool)
+		for _, n := range FileTasks(f) {
+			switch {
+			case seen[n]:
+				errs = append(errs, &PathError{Path: path, Msg: fmt.Sprintf("lists task %d twice", n)})
+			case n > len(tasks):
+				noun := "tasks"
+				if len(tasks) == 1 {
+					noun = "task"
+				}
+				errs = append(errs, &PathError{Path: path, Msg: fmt.Sprintf("names task %d, but the plan has %d %s", n, len(tasks), noun)})
+			default:
+				owned[n] = true
+			}
+			seen[n] = true
+		}
+	}
+	if !complete {
+		return errs
+	}
+	for i, tk := range tasks {
+		if !present["plan/delivery/tasks/"+indexedName("task", i)+"/n"] {
+			continue
+		}
+		if !owned[tk.N] {
+			errs = append(errs, &PathError{
+				Path: "plan/delivery/tasks/" + indexedName("task", i),
+				Msg:  fmt.Sprintf("task %d owns no file; fold it into a task that changes one", tk.N),
+			})
+		}
+	}
+	return errs
+}
+
 // checkQuestionCardinality enforces each question's option count (design
 // section 6.6): none, or two to four. Layer 1's maxItems=4 constraint
 // already flags a count over four with its own message, so this checks
