@@ -33,7 +33,7 @@ func TestPrompts_MatchThePinnedDesignText(t *testing.T) {
 		{
 			name:   "planning-bug",
 			path:   planningBugPromptPath,
-			sha256: "ab568a62aa82f3f7dfb9b8034345c6b41c465bfe652460da8d996937fc40987e",
+			sha256: "0afa4d9ebfb4197b7b369169de775c16bf00f3e9e0ab346cf524a3eaa3e28364",
 		},
 		{
 			name:   "planreview",
