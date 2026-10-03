@@ -5074,6 +5074,60 @@ func TestMergeHold(t *testing.T) {
 	}
 }
 
+// TestMergeReplyOnlyHolds proves PR #60 review's own P1 (#47 follow-up,
+// planning.go's roundChoice/roundRecommendedOption): a text-only reply
+// with no option at all must still hold, never merge. A merge question's
+// own stored Recommended is always "a" (mergeQuestionMessages), the
+// opposite of what an escalation's own stored-recommendation default
+// means, so roundChoice's escalation-only fallback must never read it back
+// here -- this proves it stays gated on the question's own kind, not
+// applied positionally to whichever question a round happens to answer.
+func TestMergeReplyOnlyHolds(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow end-to-end flow; runs in the full suite")
+	}
+	t.Parallel()
+	s, ticket, gh, tr := shipPublished(t)
+	local := shipHeadSHA(t, s, ticket)
+	runs, required := shipGreenCI()
+	gh.runs, gh.required = runs, required
+	gh.prState = shipMergeReadyPR(local, "PR_node_reply_only")
+
+	commit1, err := shipPollRun(t, s, ticket, gh, tr)
+	if err != nil {
+		t.Fatalf("Run (ask): %v", err)
+	}
+	pbApply(t, s, ticket, commit1)
+
+	open, err := s.QuestionsByState(t.Context(), ticket.ID, questionStateOpen)
+	if err != nil || len(open) != 1 {
+		t.Fatalf("QuestionsByState(open) = %d, %v, want exactly 1", len(open), err)
+	}
+	if _, saveErr := s.SaveDraft(t.Context(), store.DraftInput{TicketID: ticket.ID, QuestionID: &open[0].ID, Text: "let me check first"}); saveErr != nil {
+		t.Fatalf("SaveDraft: %v", saveErr)
+	}
+	if _, sendErr := s.SendBatch(t.Context(), ticket.ID); sendErr != nil {
+		t.Fatalf("SendBatch: %v", sendErr)
+	}
+
+	commit2, err := shipPollRun(t, s, pbGetTicket(t, s, ticket.ID), gh, tr)
+	if err != nil {
+		t.Fatalf("Run (reply-only): %v", err)
+	}
+	if !shipHasMessage(commit2, "merge "+mergeMarkerHeld+" "+local) {
+		t.Errorf("commit2.Messages = %+v, want %q", commit2.Messages, "merge held "+local)
+	}
+	if !commit2.ClearPoll {
+		t.Error("ClearPoll = false, want true")
+	}
+	if len(commit2.WithdrawQuestions) != 1 {
+		t.Errorf("WithdrawQuestions = %+v, want exactly one id", commit2.WithdrawQuestions)
+	}
+	if len(gh.mergeCalls) != 0 {
+		t.Errorf("mergeCalls = %+v, want none (a text-only reply must never merge)", gh.mergeCalls)
+	}
+}
+
 // TestHeldShaNotAskedAgain proves design section 8.8's own "A held sha is
 // not asked about again": after Hold, a clean poll on the same head is
 // row 10's own idle wait, not a fresh ask.

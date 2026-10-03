@@ -80,6 +80,55 @@ func escalateDirect(t *testing.T, s *store.Store, ticketID int64, runID, session
 	return open[len(open)-1].ID
 }
 
+// legacyEscalationQuestion inserts an escalation message plus its linked
+// question directly through store.InsertMessage, carrying the fixed
+// three-option payload every escalation offered before #47 item 2
+// (design section 6.7, pre-fix): "Retry", "Back to planning", and
+// "Abandon", recommended "b". escalateDirect now goes through the fixed
+// escalateTx, which never offers "b" once the ticket is past planning, so
+// it cannot produce this shape any more -- this helper stands in for one of
+// the escalations the database already carried before that fix shipped
+// (the plan's own "Existing stored escalations: not touched"), so
+// building.go's and postbuild.go's own choice == b row (D14, left
+// unchanged by #47 item 2) still has a real stored row to resolve in
+// tests. Returns the linked question's id.
+func legacyEscalationQuestion(t *testing.T, s *store.Store, ticketID int64, code response.EscalationCode, origin response.EscalationOrigin) int64 {
+	t.Helper()
+	payload := testEscalationPayload(code, origin)
+	body := string(code) + ": " + payload.What
+	escPayload, err := json.Marshal(payload)
+	if err != nil {
+		t.Fatalf("legacyEscalationQuestion: marshal escalation payload: %v", err)
+	}
+	escID, err := s.InsertMessage(t.Context(), store.Message{
+		TicketID: ticketID, Type: testMsgTypeEscalation, Author: testAuthorZing, Body: body, Payload: escPayload,
+	})
+	if err != nil {
+		t.Fatalf("legacyEscalationQuestion: InsertMessage(escalation): %v", err)
+	}
+
+	qPayload, err := json.Marshal(response.QuestionPayload{
+		Key: "Q1", Kind: response.QuestionKindQuestion, State: response.QuestionStateOpen,
+		Recommended: "b",
+		Options: []response.Option{
+			{Key: "a", Text: "Retry"},
+			{Key: "b", Text: "Back to planning"},
+			{Key: "c", Text: "Abandon"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("legacyEscalationQuestion: marshal question payload: %v", err)
+	}
+	qID, err := s.InsertMessage(t.Context(), store.Message{
+		TicketID: ticketID, ParentID: &escID, Type: testMsgTypeQuestion, Author: testAuthorZing,
+		State: new("open"), Body: body + "\n\nHow should Zing proceed?", Payload: qPayload,
+	})
+	if err != nil {
+		t.Fatalf("legacyEscalationQuestion: InsertMessage(question): %v", err)
+	}
+	return qID
+}
+
 // reserveTerminalRun opens a fresh session for job (design section 4.5's
 // own Reserve, Session insert on su.ID == nil) and terminalizes its first
 // run as "error", the RunID a run-caused escalation's own Escalation.RunID
@@ -210,7 +259,7 @@ func TestEscalationResolve_Classify_EveryChoiceClassifiesFreshWithNotesAndError(
 	}{
 		{"Retry", new("a")},
 		{"Back", new("b")},
-		{"ReplyOnly", nil},
+		{testCaseReplyOnly, nil},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
@@ -666,12 +715,25 @@ func TestEscalationResolve_CapBudget_EveryChoiceReEscalatesWallClock(t *testing.
 
 // TestEscalationResolve_SplitAndNothingToDoClaims_EveryChoiceResumesOrFresh
 // proves section 6.7's "a | split, nothing_to_do_claims | same as b" row:
-// both origins, both choices, all resume or fresh with notes and error.
+// both origins, every choice -- explicit retry, explicit back, and a
+// text-only reply with no option at all -- all resume or fresh with notes
+// and error. ReplyOnly proves roundRecommendedOption (planning.go, #47
+// follow-up): split_unsupported and nothing_to_do_with_true_claims are the
+// only two codes escalationOptionsFor (store/commit.go) still recommends
+// "b" for in planning, so a plain reply on one of these still goes back to
+// planning, exactly as an explicit "b" would.
 func TestEscalationResolve_SplitAndNothingToDoClaims_EveryChoiceResumesOrFresh(t *testing.T) {
 	t.Parallel()
 	for _, origin := range []response.EscalationOrigin{response.EscalationOriginSplit, response.EscalationOriginNothingToDoClaims} {
-		for _, choice := range []string{"a", "b"} {
-			t.Run(string(origin)+"/"+choice, func(t *testing.T) {
+		for _, tc := range []struct {
+			name   string
+			option *string
+		}{
+			{"a", new("a")},
+			{"b", new("b")},
+			{testCaseReplyOnly, nil},
+		} {
+			t.Run(string(origin)+"/"+tc.name, func(t *testing.T) {
 				t.Parallel()
 				s := newJobTestStore(t)
 				ticketID := seedFeatureTicketInPlanning(t, s)
@@ -681,13 +743,13 @@ func TestEscalationResolve_SplitAndNothingToDoClaims_EveryChoiceResumesOrFresh(t
 					code = response.EscalationCodeNothingToDoWithTrueClaims
 				}
 				qID := escalateDirect(t, s, ticketID, &runID, &sessID, code, origin)
-				answerGateQuestion(t, s, ticketID, qID, new(choice), "notes here")
+				answerGateQuestion(t, s, ticketID, qID, tc.option, "notes here")
 
 				rt := &scriptedRuntime{t: t, steps: []scriptedStep{questionResult(response.JobPlanning, "split-ntd-sess")}}
 				rec := &recordingRuntime{rt: rt}
 				_, err := runPlanning(t, s, claim(t, s, rec, ticketID), ticketID)
 				if err != nil {
-					t.Fatalf("escalation resolve (%s, %s) Run: %v", origin, choice, err)
+					t.Fatalf("escalation resolve (%s, %s) Run: %v", origin, tc.name, err)
 				}
 				assertFenced(t, rec.lastReq.Prompt, "notes", "notes here")
 				assertFenced(t, rec.lastReq.Prompt, "error", "what happened")
