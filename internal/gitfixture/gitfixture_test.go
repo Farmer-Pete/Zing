@@ -88,3 +88,26 @@ func TestNewSigningRepoLeavesGlobalConfigAlone(t *testing.T) {
 		}
 	}
 }
+
+// TestTemplateDisablesAutoMaintenance proves the template repository turns
+// off git's automatic maintenance and gc, so no commit in it starts a
+// background "git maintenance run --auto" whose objects/maintenance.lock
+// could vanish while another test copies the template (seen in CI on PR
+// #59).
+func TestTemplateDisablesAutoMaintenance(t *testing.T) {
+	t.Parallel()
+
+	dir, err := template()
+	if err != nil {
+		t.Fatalf("template: %v", err)
+	}
+	for key, want := range map[string]string{"maintenance.auto": "false", "gc.auto": "0"} {
+		out, err := Git(t.Context(), dir, "config", "--get", key)
+		if err != nil {
+			t.Fatalf("git config --get %s: %v", key, err)
+		}
+		if got := strings.TrimSpace(string(out)); got != want {
+			t.Errorf("%s = %q, want %q", key, got, want)
+		}
+	}
+}
