@@ -25,9 +25,12 @@ type commandResult struct {
 	Budget   time.Duration // the shared check budget, for the timeout line
 	Output   string        // tailBuffer.Tail()
 	Total    int64         // tailBuffer.Total()
+	// NotRun is a command the shared budget left no time for: a failure,
+	// since CHECK cannot pass a command it never ran.
+	NotRun bool
 }
 
-func (r commandResult) failed() bool { return r.TimedOut || r.Exit != 0 }
+func (r commandResult) failed() bool { return r.NotRun || r.TimedOut || r.Exit != 0 }
 
 // The CHECK loop's marker heads and its cap escalation's text (#55 plan
 // section 3).
@@ -57,8 +60,9 @@ func checkBudget(d Deps) time.Duration {
 
 // runCheckCommands runs the project's test command, then its lint command,
 // under one shared checkBudget measured from the start of test (plan D1).
-// Lint gets only what test left; when test times out, or leaves nothing,
-// lint does not run and is left out. Each command's output is kept in a
+// Lint gets only what test left. When test times out, lint does not run
+// and is left out; when test passes but leaves no budget, lint is reported
+// as not run, a failure, so CHECK never lands an unlinted tree. Each command's output is kept in a
 // tailBuffer. Each command's process group is recorded in check_procs
 // while it runs and cleared once it ends (plan D10), so a later serve
 // never starts CHECK in this worktree while an orphaned command still
@@ -73,16 +77,16 @@ func runCheckCommands(ctx context.Context, d Deps, t store.Ticket, wt orchestrat
 	for _, c := range commands {
 		remaining := budget - checkNow().Sub(budgetStart)
 		if remaining <= 0 {
+			results = append(results, commandResult{Kind: c.kind, Cmd: c.cmd, Exit: -1, NotRun: true, Budget: budget})
 			break
 		}
-		pgid := 0
-		onStart := func(p int) {
-			pgid = p
-			recordCheckStart(ctx, d, t.ID, c.kind, p, budgetStart)
+		var gen int64
+		onStart := func(pgid int) {
+			gen = recordCheckStart(ctx, d, t.ID, c.kind, pgid, budgetStart)
 		}
 		r, err := runCheckCommand(ctx, d, t, wt, proj, rid, c.kind, c.cmd, remaining, onStart)
-		if pgid > 0 {
-			clearCheckStart(ctx, d, t.ID, pgid)
+		if gen > 0 {
+			clearCheckStart(ctx, d, t.ID, gen)
 		}
 		if err != nil {
 			return nil, err
@@ -101,8 +105,9 @@ func runCheckCommands(ctx context.Context, d Deps, t store.Ticket, wt orchestrat
 // when it cannot) and records the group under the claim (plan D10). A
 // failed write is logged at WARN and the command keeps running: the same
 // accepted risk #45 takes for runs, since no row means reclaim treats the
-// command as gone.
-func recordCheckStart(ctx context.Context, d Deps, ticketID int64, kind string, pgid int, budgetStart time.Time) {
+// command as gone. It returns the record's generation, 0 when nothing was
+// recorded.
+func recordCheckStart(ctx context.Context, d Deps, ticketID int64, kind string, pgid int, budgetStart time.Time) int64 {
 	token, err := proc.StartToken(pgid)
 	if err != nil {
 		slog.Warn("start token unavailable", "ticket_id", ticketID, "command", kind, "pgid", pgid, "error", err)
@@ -110,22 +115,24 @@ func recordCheckStart(ctx context.Context, d Deps, ticketID int64, kind string, 
 	}
 	startCtx, cancel := onStartContext(ctx)
 	defer cancel()
-	if err := d.Store.RecordCheckStart(startCtx, ticketID, d.Owner, d.Expires, kind, pgid, token, time.Now(), budgetStart); err != nil {
+	gen, err := d.Store.RecordCheckStart(startCtx, ticketID, d.Owner, d.Expires, kind, pgid, token, time.Now(), budgetStart)
+	if err != nil {
 		slog.Warn("record check start failed", "ticket_id", ticketID, "command", kind, "pgid", pgid, "error", err)
-		return
+		return 0
 	}
-	slog.Info("check command started", "ticket_id", ticketID, "command", kind, "pgid", pgid)
+	slog.Info("check command started", "ticket_id", ticketID, "command", kind, "pgid", pgid, "gen", gen)
+	return gen
 }
 
-// clearCheckStart deletes the CHECK row for pgid once its command ended,
-// under a context detached from a canceled tick. A failure is logged at
-// WARN: the stale row names a dead group, which the next record replaces
-// or reclaim clears.
-func clearCheckStart(ctx context.Context, d Deps, ticketID int64, pgid int) {
+// clearCheckStart deletes the CHECK row of generation gen once its command
+// ended, under a context detached from a canceled tick. A failure is
+// logged at WARN: the stale row names a dead group, which the next record
+// replaces or reclaim clears.
+func clearCheckStart(ctx context.Context, d Deps, ticketID, gen int64) {
 	clearCtx, cancel := onStartContext(ctx)
 	defer cancel()
-	if err := d.Store.ClearCheckStart(clearCtx, ticketID, pgid); err != nil {
-		slog.Warn("clear check start failed", "ticket_id", ticketID, "pgid", pgid, "error", err)
+	if err := d.Store.ClearCheckStart(clearCtx, ticketID, gen); err != nil {
+		slog.Warn("clear check start failed", "ticket_id", ticketID, "gen", gen, "error", err)
 	}
 }
 
@@ -140,6 +147,11 @@ func checkInputText(results []commandResult) string {
 		}
 		var b strings.Builder
 		fmt.Fprintf(&b, "%s command: %s\n", r.Kind, r.Cmd)
+		if r.NotRun {
+			fmt.Fprintf(&b, "%s did not run: the CHECK budget ran out after the test command", r.Kind)
+			sections = append(sections, b.String())
+			continue
+		}
 		if r.TimedOut {
 			fmt.Fprintf(&b, "exit code: none (killed when the %dm check budget ran out)\n", int(r.Budget.Minutes()))
 		} else {
@@ -163,7 +175,7 @@ func checkInputText(results []commandResult) string {
 // check" log: -1 when it timed out or did not run.
 func checkedExit(results []commandResult, kind string) int {
 	for _, r := range results {
-		if r.Kind == kind && !r.TimedOut {
+		if r.Kind == kind && !r.TimedOut && !r.NotRun {
 			return r.Exit
 		}
 	}

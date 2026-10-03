@@ -245,7 +245,7 @@ func (s *Store) InterruptRuns(ctx context.Context, ticketID int64, owner string,
 // under a different caller's fence, so both share interruptClaimedRuns.
 // check is the CHECK row ForeignClaims read and reclaim judged gone (nil
 // when it read none). The row is deleted in the same transaction, but only
-// while it still names exactly that process (pgid and proc_start); a row
+// while it is still exactly that record (its generation); a row
 // recorded since, or one that appeared where none was read, keeps the
 // claim (applied false) so a later pass can judge the new process (#55,
 // review finding 1).

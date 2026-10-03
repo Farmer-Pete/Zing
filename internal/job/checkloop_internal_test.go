@@ -150,3 +150,39 @@ func TestCheckLintGetsOnlyRemainingBudget(t *testing.T) {
 		t.Errorf("check input = %q, want the lint timeout line", text)
 	}
 }
+
+// TestCheckLintNotRunIsAFailure proves a passing test command that uses the
+// whole shared budget does not let CHECK land (Codex review finding 1):
+// lint never ran, so the result is a failure with its own line, and the
+// builder is resumed or the cap escalates. Not parallel: it swaps checkNow.
+func TestCheckLintNotRunIsAFailure(t *testing.T) {
+	start := time.Date(2026, 10, 3, 9, 0, 0, 0, time.UTC)
+	now := start
+	orig := checkNow
+	checkNow = func() time.Time { return now }
+	t.Cleanup(func() { checkNow = orig })
+
+	fake := &budgetCommands{
+		timeouts: map[string]time.Duration{},
+		results: map[string]struct {
+			exit int
+			err  error
+		}{fakeTestCmd: {exit: 0}},
+		advance: func() { now = now.Add(45 * time.Minute) },
+	}
+	d := Deps{Commands: fake, Machine: &machine.Machine{Jobs: map[string]machine.Job{jobBuildName: {TimeoutMinutes: 45}}}}
+	results, err := runCheckCommands(t.Context(), d, store.Ticket{ID: 1}, orchestrator.Worktree{}, Project{TestCmd: fakeTestCmd, LintCmd: fakeLintCmd}, nil)
+	if err != nil {
+		t.Fatalf("runCheckCommands: %v", err)
+	}
+	if _, ran := fake.timeouts[fakeLintCmd]; ran {
+		t.Error("lint ran with no budget left")
+	}
+	if got := failedKinds(results); len(got) != 1 || got[0] != checkKindLint {
+		t.Fatalf("failed kinds = %v, want [lint]", got)
+	}
+	want := "lint command: the-lint\nlint did not run: the CHECK budget ran out after the test command"
+	if text := checkInputText(results); text != want {
+		t.Errorf("check input = %q, want %q", text, want)
+	}
+}

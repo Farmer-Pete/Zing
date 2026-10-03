@@ -45,20 +45,69 @@ func TestRecordCheckStartAndClear(t *testing.T) {
 	ticketID, expires := claimedTicket(t, s)
 	now := time.Now()
 
-	if err := s.RecordCheckStart(ctx, ticketID, testForeignOwner, expires, testCheckKindTest, 4242, testCheckToken, now, now); err != nil {
+	gen, err := s.RecordCheckStart(ctx, ticketID, testForeignOwner, expires, testCheckKindTest, 4242, testCheckToken, now, now)
+	if err != nil {
 		t.Fatalf("RecordCheckStart: %v", err)
 	}
-	if err := s.ClearCheckStart(ctx, ticketID, 4243); err != nil {
-		t.Fatalf("ClearCheckStart(wrong pgid): %v", err)
+	if err := s.ClearCheckStart(ctx, ticketID, gen+1); err != nil {
+		t.Fatalf("ClearCheckStart(wrong gen): %v", err)
 	}
 	if n := checkProcCount(t, s, ticketID); n != 1 {
-		t.Fatalf("rows after a clear with the wrong pgid = %d, want 1", n)
+		t.Fatalf("rows after a clear with the wrong gen = %d, want 1", n)
 	}
-	if err := s.ClearCheckStart(ctx, ticketID, 4242); err != nil {
+	if err := s.ClearCheckStart(ctx, ticketID, gen); err != nil {
 		t.Fatalf("ClearCheckStart: %v", err)
 	}
 	if n := checkProcCount(t, s, ticketID); n != 0 {
-		t.Errorf("rows after a clear with the right pgid = %d, want 0", n)
+		t.Errorf("rows after a clear with the right gen = %d, want 0", n)
+	}
+}
+
+// TestCheckClearsNeedTheRecordGeneration proves a replacement command with
+// the same pgid and no start token is never cleared by a holder of the
+// earlier record (Codex review finding 2): pgid and a NULL proc_start
+// cannot tell the two apart, so every clear and reclaim delete matches the
+// record's own generation.
+func TestCheckClearsNeedTheRecordGeneration(t *testing.T) {
+	t.Parallel()
+	s := newTestStore(t)
+	ctx := t.Context()
+	ticketID, expires := claimedTicket(t, s)
+	now := time.Now()
+
+	first, err := s.RecordCheckStart(ctx, ticketID, testForeignOwner, expires, testCheckKindTest, 4242, "", now, now)
+	if err != nil {
+		t.Fatalf("RecordCheckStart(first): %v", err)
+	}
+	seen, ok, err := s.CheckProc(ctx, ticketID)
+	if err != nil || !ok || seen.Gen != first {
+		t.Fatalf("CheckProc = (%+v, %v, %v), want the first record, gen %d", seen, ok, err, first)
+	}
+	second, err := s.RecordCheckStart(ctx, ticketID, testForeignOwner, expires, testCheckKindLint, 4242, "", now, now)
+	if err != nil {
+		t.Fatalf("RecordCheckStart(replacement): %v", err)
+	}
+	if second == first {
+		t.Fatalf("replacement gen = %d, want a new generation", second)
+	}
+
+	if err := s.ClearCheckStart(ctx, ticketID, first); err != nil {
+		t.Fatalf("ClearCheckStart(first): %v", err)
+	}
+	if ok, err := s.ClearDeadCheck(ctx, ticketID, seen); err != nil || ok {
+		t.Fatalf("ClearDeadCheck(first) = (%v, %v), want (false, nil)", ok, err)
+	}
+	if applied, err := s.ReclaimClaim(ctx, ticketID, testForeignOwner, expires, &seen); err != nil || applied {
+		t.Fatalf("ReclaimClaim(first) = (%v, %v), want (false, nil)", applied, err)
+	}
+	if n := checkProcCount(t, s, ticketID); n != 1 {
+		t.Fatalf("rows = %d, want the replacement kept", n)
+	}
+	if err := s.ClearCheckStart(ctx, ticketID, second); err != nil {
+		t.Fatalf("ClearCheckStart(second): %v", err)
+	}
+	if n := checkProcCount(t, s, ticketID); n != 0 {
+		t.Errorf("rows after clearing the replacement's own gen = %d, want 0", n)
 	}
 }
 
@@ -71,10 +120,10 @@ func TestRecordCheckStartReplaces(t *testing.T) {
 	ticketID, expires := claimedTicket(t, s)
 	now := time.Now()
 
-	if err := s.RecordCheckStart(ctx, ticketID, testForeignOwner, expires, testCheckKindTest, 4242, testCheckToken, now, now); err != nil {
+	if _, err := s.RecordCheckStart(ctx, ticketID, testForeignOwner, expires, testCheckKindTest, 4242, testCheckToken, now, now); err != nil {
 		t.Fatalf("RecordCheckStart(test): %v", err)
 	}
-	if err := s.RecordCheckStart(ctx, ticketID, testForeignOwner, expires, testCheckKindLint, 4300, "", now, now); err != nil {
+	if _, err := s.RecordCheckStart(ctx, ticketID, testForeignOwner, expires, testCheckKindLint, 4300, "", now, now); err != nil {
 		t.Fatalf("RecordCheckStart(lint): %v", err)
 	}
 	if n := checkProcCount(t, s, ticketID); n != 1 {
@@ -100,13 +149,13 @@ func TestRecordCheckStartFencedOnClaim(t *testing.T) {
 	ticketID, expires := claimedTicket(t, s)
 	now := time.Now()
 
-	if err := s.RecordCheckStart(ctx, ticketID, "someone-else", expires, testCheckKindTest, 4242, "", now, now); !errors.Is(err, ErrClaimLost) {
+	if _, err := s.RecordCheckStart(ctx, ticketID, "someone-else", expires, testCheckKindTest, 4242, "", now, now); !errors.Is(err, ErrClaimLost) {
 		t.Errorf("wrong owner: err = %v, want ErrClaimLost", err)
 	}
-	if err := s.RecordCheckStart(ctx, ticketID, testForeignOwner, expires.Add(time.Second), testCheckKindTest, 4242, "", now, now); !errors.Is(err, ErrClaimLost) {
+	if _, err := s.RecordCheckStart(ctx, ticketID, testForeignOwner, expires.Add(time.Second), testCheckKindTest, 4242, "", now, now); !errors.Is(err, ErrClaimLost) {
 		t.Errorf("wrong expiry: err = %v, want ErrClaimLost", err)
 	}
-	if err := s.RecordCheckStart(ctx, ticketID, testForeignOwner, expires, testCheckKindTest, 0, "", now, now); err == nil {
+	if _, err := s.RecordCheckStart(ctx, ticketID, testForeignOwner, expires, testCheckKindTest, 0, "", now, now); err == nil {
 		t.Error("pgid 0: want an error, got nil")
 	}
 	if n := checkProcCount(t, s, ticketID); n != 0 {
@@ -132,7 +181,7 @@ func TestForeignClaimsCarriesCheck(t *testing.T) {
 
 	budgetStart := time.Date(2026, 10, 3, 9, 0, 0, 0, time.UTC)
 	started := budgetStart.Add(3 * time.Minute)
-	if err = s.RecordCheckStart(ctx, ticketID, testForeignOwner, expires, testCheckKindLint, 4242, testCheckToken, started, budgetStart); err != nil {
+	if _, err = s.RecordCheckStart(ctx, ticketID, testForeignOwner, expires, testCheckKindLint, 4242, testCheckToken, started, budgetStart); err != nil {
 		t.Fatalf("RecordCheckStart: %v", err)
 	}
 	claims, err = s.ForeignClaims(ctx, "self")
@@ -159,7 +208,7 @@ func TestReclaimClaimDeletesCheckRow(t *testing.T) {
 	ctx := t.Context()
 	ticketID, expires := claimedTicket(t, s)
 	now := time.Now()
-	if err := s.RecordCheckStart(ctx, ticketID, testForeignOwner, expires, testCheckKindTest, 4242, testCheckToken, now, now); err != nil {
+	if _, err := s.RecordCheckStart(ctx, ticketID, testForeignOwner, expires, testCheckKindTest, 4242, testCheckToken, now, now); err != nil {
 		t.Fatalf("RecordCheckStart: %v", err)
 	}
 	claims, err := s.ForeignClaims(ctx, "self")
@@ -196,7 +245,7 @@ func TestReclaimClaimKeepsClaimWhenCheckRowReplaced(t *testing.T) {
 	ctx := t.Context()
 	ticketID, expires := claimedTicket(t, s)
 	now := time.Now()
-	if err := s.RecordCheckStart(ctx, ticketID, testForeignOwner, expires, testCheckKindTest, 4242, testCheckToken, now, now); err != nil {
+	if _, err := s.RecordCheckStart(ctx, ticketID, testForeignOwner, expires, testCheckKindTest, 4242, testCheckToken, now, now); err != nil {
 		t.Fatalf("RecordCheckStart(test): %v", err)
 	}
 	claims, err := s.ForeignClaims(ctx, "self")
@@ -210,7 +259,7 @@ func TestReclaimClaimKeepsClaimWhenCheckRowReplaced(t *testing.T) {
 		pgid  int
 		token string
 	}{{4242, "78.000002"}, {4300, testCheckToken}} {
-		if recErr := s.RecordCheckStart(ctx, ticketID, testForeignOwner, expires, testCheckKindLint, replacement.pgid, replacement.token, now, now); recErr != nil {
+		if _, recErr := s.RecordCheckStart(ctx, ticketID, testForeignOwner, expires, testCheckKindLint, replacement.pgid, replacement.token, now, now); recErr != nil {
 			t.Fatalf("RecordCheckStart(replacement): %v", recErr)
 		}
 		applied, reclaimErr := s.ReclaimClaim(ctx, ticketID, testForeignOwner, expires, seen)
@@ -247,7 +296,7 @@ func TestExpireClaimsKeepsClaimWithCheckRow(t *testing.T) {
 	ctx := t.Context()
 	ticketID, expires := claimedTicket(t, s)
 	now := time.Now()
-	if err := s.RecordCheckStart(ctx, ticketID, testForeignOwner, expires, testCheckKindTest, 4242, testCheckToken, now, now); err != nil {
+	if _, err := s.RecordCheckStart(ctx, ticketID, testForeignOwner, expires, testCheckKindTest, 4242, testCheckToken, now, now); err != nil {
 		t.Fatalf("RecordCheckStart: %v", err)
 	}
 	later := expires.Add(time.Minute)
@@ -261,7 +310,7 @@ func TestExpireClaimsKeepsClaimWithCheckRow(t *testing.T) {
 	}
 
 	stale := checks[0].Check
-	stale.PGID = 9999
+	stale.Gen++
 	if ok, err := s.ClearDeadCheck(ctx, ticketID, stale); err != nil || ok {
 		t.Fatalf("ClearDeadCheck with another identity = (%v, %v), want (false, nil)", ok, err)
 	}

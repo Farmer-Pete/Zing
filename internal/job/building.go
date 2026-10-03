@@ -2678,7 +2678,7 @@ func (h buildingHandler) adopt(ctx context.Context, t store.Ticket, d Deps, proj
 	if err != nil {
 		return commandInfraEscalation(t, d, u, err)
 	}
-	if len(failedKinds(results)) > 0 || len(results) < 2 {
+	if len(failedKinds(results)) > 0 {
 		return fail("commands failed"), nil
 	}
 

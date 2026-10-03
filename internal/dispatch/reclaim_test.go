@@ -468,7 +468,7 @@ const checkDeadline = 50 * time.Minute
 // exact (owner, expires) claim, standing in for a dead serve's CHECK.
 func seedCheckProc(t *testing.T, s *store.Store, ticketID int64, owner string, expires time.Time, pgid int, procStart string, budgetStartedAt time.Time) {
 	t.Helper()
-	if err := s.RecordCheckStart(t.Context(), ticketID, owner, expires, "test", pgid, procStart, budgetStartedAt, budgetStartedAt); err != nil {
+	if _, err := s.RecordCheckStart(t.Context(), ticketID, owner, expires, "test", pgid, procStart, budgetStartedAt, budgetStartedAt); err != nil {
 		t.Fatalf("seedCheckProc: RecordCheckStart: %v", err)
 	}
 }

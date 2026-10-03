@@ -14,10 +14,11 @@ import (
 // once. It is fenced on the live claim exactly as Reserve is, so a serve
 // that lost its claim records nothing and gets ErrClaimLost. procStart ""
 // is stored as NULL (an unverified group); pgid <= 0 is an error and
-// nothing is written.
-func (s *Store) RecordCheckStart(ctx context.Context, ticketID int64, owner string, expires time.Time, kind string, pgid int, procStart string, startedAt, budgetStartedAt time.Time) error {
+// nothing is written. It returns the record's generation, which the caller
+// passes to ClearCheckStart: no later record ever reuses it.
+func (s *Store) RecordCheckStart(ctx context.Context, ticketID int64, owner string, expires time.Time, kind string, pgid int, procStart string, startedAt, budgetStartedAt time.Time) (int64, error) {
 	if pgid <= 0 {
-		return fmt.Errorf("record check start: ticket %d: pgid %d is not a process group", ticketID, pgid)
+		return 0, fmt.Errorf("record check start: ticket %d: pgid %d is not a process group", ticketID, pgid)
 	}
 	var procStartParam *string
 	if procStart != "" {
@@ -26,7 +27,7 @@ func (s *Store) RecordCheckStart(ctx context.Context, ticketID int64, owner stri
 
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
-		return fmt.Errorf("record check start: begin tx: %w", err)
+		return 0, fmt.Errorf("record check start: begin tx: %w", err)
 	}
 	defer rollback(tx)
 
@@ -36,28 +37,33 @@ func (s *Store) RecordCheckStart(ctx context.Context, ticketID int64, owner stri
 		ticketID, owner, formatTime(truncateExpires(expires))).Scan(&fenced)
 	switch {
 	case errors.Is(err, sql.ErrNoRows):
-		return ErrClaimLost
+		return 0, ErrClaimLost
 	case err != nil:
-		return fmt.Errorf("record check start: fence ticket %d: %w", ticketID, err)
+		return 0, fmt.Errorf("record check start: fence ticket %d: %w", ticketID, err)
 	}
 
-	if _, err := tx.ExecContext(ctx,
+	res, err := tx.ExecContext(ctx,
 		`INSERT OR REPLACE INTO check_procs (ticket_id, kind, pgid, proc_start, started_at, budget_started_at) VALUES (?, ?, ?, ?, ?, ?)`,
-		ticketID, kind, pgid, procStartParam, formatTime(startedAt), formatTime(budgetStartedAt),
-	); err != nil {
-		return fmt.Errorf("record check start: ticket %d: %w", ticketID, err)
+		ticketID, kind, pgid, procStartParam, formatTime(startedAt), formatTime(budgetStartedAt))
+	if err != nil {
+		return 0, fmt.Errorf("record check start: ticket %d: %w", ticketID, err)
+	}
+	gen, err := res.LastInsertId()
+	if err != nil {
+		return 0, fmt.Errorf("record check start: ticket %d: gen: %w", ticketID, err)
 	}
 	if err := tx.Commit(); err != nil {
-		return fmt.Errorf("record check start: commit tx: %w", err)
+		return 0, fmt.Errorf("record check start: commit tx: %w", err)
 	}
-	return nil
+	return gen, nil
 }
 
 // ClearCheckStart deletes ticketID's CHECK row once its command has ended.
-// It matches on pgid, so it never deletes a newer command's row.
-func (s *Store) ClearCheckStart(ctx context.Context, ticketID int64, pgid int) error {
+// It matches on the record's generation, so it never deletes a newer
+// command's row.
+func (s *Store) ClearCheckStart(ctx context.Context, ticketID, gen int64) error {
 	if _, err := s.db.ExecContext(ctx,
-		`DELETE FROM check_procs WHERE ticket_id = ? AND pgid = ?`, ticketID, pgid,
+		`DELETE FROM check_procs WHERE ticket_id = ? AND gen = ?`, ticketID, gen,
 	); err != nil {
 		return fmt.Errorf("clear check start: ticket %d: %w", ticketID, err)
 	}
@@ -67,6 +73,7 @@ func (s *Store) ClearCheckStart(ctx context.Context, ticketID int64, pgid int) e
 // OpenCheck is a ticket's recorded CHECK command: enough identity for the
 // dispatcher to decide whether its process group is still alive.
 type OpenCheck struct {
+	Gen             int64 // the record's generation, unique for all time
 	Kind            string
 	PGID            int
 	ProcStart       *string
@@ -85,7 +92,7 @@ func (c OpenCheck) AsOpenRun() OpenRun {
 // none.
 func openCheckForTicket(ctx context.Context, q queryer, ticketID int64) (OpenCheck, bool, error) {
 	rows, err := q.QueryContext(ctx,
-		`SELECT kind, pgid, proc_start, started_at, budget_started_at FROM check_procs WHERE ticket_id = ?`, ticketID)
+		`SELECT gen, kind, pgid, proc_start, started_at, budget_started_at FROM check_procs WHERE ticket_id = ?`, ticketID)
 	if err != nil {
 		return OpenCheck{}, false, fmt.Errorf("open check for ticket %d: %w", ticketID, err)
 	}
@@ -99,7 +106,7 @@ func openCheckForTicket(ctx context.Context, q queryer, ticketID int64) (OpenChe
 	var c OpenCheck
 	var procStart sql.NullString
 	var startedAt, budgetStartedAt string
-	if err = rows.Scan(&c.Kind, &c.PGID, &procStart, &startedAt, &budgetStartedAt); err != nil {
+	if err = rows.Scan(&c.Gen, &c.Kind, &c.PGID, &procStart, &startedAt, &budgetStartedAt); err != nil {
 		return OpenCheck{}, false, fmt.Errorf("scan open check for ticket %d: %w", ticketID, err)
 	}
 	if procStart.Valid {
@@ -119,11 +126,13 @@ type execer interface {
 	ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error)
 }
 
-// deleteCheckIfSame deletes ticketID's CHECK row only while it still names
-// exactly c's process (pgid and proc_start), and reports whether it did.
+// deleteCheckIfSame deletes ticketID's CHECK row only while it is still
+// exactly c's record (its generation), and reports whether it did. pgid and
+// proc_start alone cannot tell a replacement with the same pgid and no
+// start token apart.
 func deleteCheckIfSame(ctx context.Context, e execer, ticketID int64, c OpenCheck) (bool, error) {
 	res, err := e.ExecContext(ctx,
-		`DELETE FROM check_procs WHERE ticket_id = ? AND pgid = ? AND proc_start IS ?`, ticketID, c.PGID, c.ProcStart)
+		`DELETE FROM check_procs WHERE ticket_id = ? AND gen = ?`, ticketID, c.Gen)
 	if err != nil {
 		return false, fmt.Errorf("delete check for ticket %d: %w", ticketID, err)
 	}
