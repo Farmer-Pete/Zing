@@ -1110,7 +1110,11 @@ func TestPlanningHandler_FirstTurn_ErrStartLeavesAnIdlessSessionAndEscalates(t *
 // TestPlanningHandler_Classify_ErrCanceledReturnsWithNoCommit proves D13's
 // shutdown rule: runtime.ErrCanceled returns unchanged with a wholly empty
 // commit, so the caller applies nothing and the dispatcher leaves the
-// claim for ExpireClaims to reconcile.
+// claim for ExpireClaims to reconcile. It also proves design section 7.4's
+// classify row ("keep fresh re-runs"): once InterruptRuns marks that
+// reserved run interrupted, the next tick runs an entirely fresh classify
+// turn -- runClassify's own SessionUpsert never carries a session id to
+// resume -- rather than try to resume the interrupted run's session.
 func TestPlanningHandler_Classify_ErrCanceledReturnsWithNoCommit(t *testing.T) {
 	t.Parallel()
 	s := newJobTestStore(t)
@@ -1121,12 +1125,36 @@ func TestPlanningHandler_Classify_ErrCanceledReturnsWithNoCommit(t *testing.T) {
 		{res: runtime.RunResult{ExitCode: -1, AgentTime: time.Second}, err: runtime.ErrCanceled},
 	}}
 
-	commit, err := runPlanning(t, s, claimWithRuntimes(t, s, rt, ticketID), ticketID)
+	deps := claimWithRuntimes(t, s, rt, ticketID)
+	commit, err := runPlanning(t, s, deps, ticketID)
 	if !errors.Is(err, runtime.ErrCanceled) {
 		t.Fatalf("err = %v, want errors.Is(err, runtime.ErrCanceled)", err)
 	}
 	if commit.TicketID != 0 || commit.Session != nil || len(commit.Runs) != 0 || commit.Escalation != nil || commit.Next != "" {
 		t.Errorf("commit = %+v, want the zero value (no commit)", commit)
+	}
+
+	applied, interruptErr := s.InterruptRuns(t.Context(), ticketID, deps.Owner, deps.Expires)
+	if interruptErr != nil {
+		t.Fatalf("InterruptRuns: %v", interruptErr)
+	}
+	if !applied {
+		t.Fatal("InterruptRuns: applied = false, want true")
+	}
+
+	sessionsBefore, err := s.SessionsForTicket(t.Context(), ticketID)
+	if err != nil {
+		t.Fatalf("SessionsForTicket: %v", err)
+	}
+	interruptedSessionID := sessionsBefore[0].ID
+
+	freshCommit := mustPlanning(t, s, claim(t, s, fakeRuntime(t), ticketID), ticketID) // classify again: must run fresh
+	if freshCommit.Session == nil || freshCommit.Session.ID == nil || *freshCommit.Session.ID == interruptedSessionID {
+		t.Fatalf("freshCommit.Session = %+v, want a new session distinct from the interrupted one (%d), not a resume of it",
+			freshCommit.Session, interruptedSessionID)
+	}
+	if freshCommit.SetKind == nil {
+		t.Fatal("freshCommit.SetKind is nil, want a fresh classify to set kind")
 	}
 }
 

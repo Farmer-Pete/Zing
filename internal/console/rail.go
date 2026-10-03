@@ -302,6 +302,11 @@ func (c *console) buildRunRail(ctx context.Context, ticketID int64) (templates.R
 		run.Model, run.AgentTime = dash, dash
 		return run, nil
 	}
+	// newestRun is this ticket's newest run, so its own Interrupted only
+	// ever reads true here for as long as that run stays the newest one:
+	// once it resumes free, the resume's own run row is newer and carries
+	// Interrupted=false (RunRail's own doc comment, views.go).
+	run.Interrupted = newestRun.Interrupted
 	if newestRun.Model != nil {
 		run.Model = *newestRun.Model
 	} else {

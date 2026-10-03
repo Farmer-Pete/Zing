@@ -10,11 +10,15 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"sync"
+	"sync/atomic"
 	"time"
+	"unicode/utf8"
 
 	"zing/internal/bus"
 	"zing/internal/job"
 	"zing/internal/machine"
+	"zing/internal/proc"
 	"zing/internal/response"
 	"zing/internal/runtime"
 	"zing/internal/sandbox"
@@ -84,6 +88,48 @@ const postHandlerWriteTimeout = 30 * time.Second
 // Run exits and a later Tick call returns immediately at the drain-or-stop
 // check without touching the runtime again.
 var ErrFailClosed = errors.New("dispatch: fail-closed: commit not applied cleanly")
+
+// ErrConcurrentDrive is Tick's and Run's error when one of them is already
+// driving this Dispatcher (design section 4.1): the two must never claim
+// and launch at the same time, since both read and mutate d.inflight and
+// d.stop. Exported, unlike the plan's own lowercase errConcurrentDrive, so
+// a test in the external dispatch_test package can match it with errors.Is
+// (a deviation noted in the implementation report).
+var ErrConcurrentDrive = errors.New("dispatch: Tick or Run is already running on this dispatcher")
+
+// alertCauseMaxBytes bounds the cause text a fail-closed alert quotes
+// (design section 4.6): long enough for a useful message, short enough
+// that one oversized error can never make an alert line unwieldy.
+const alertCauseMaxBytes = 300
+
+// runResult is one worker's outcome, sent on fill's caller-owned results
+// channel (design section 4.2): Err is nil on success, or a *runError
+// naming the ticket a worker's runAndCommit call failed on. The failed
+// ticket id, when there is one, lives on the *runError itself (PR review
+// fix D2): every reader (Tick, Run, finish) only ever consumes Err, and
+// reportFirstError names the ticket through stopErr's own *runError, never
+// through a field on this struct.
+type runResult struct {
+	Err error
+}
+
+// runError wraps a worker's runAndCommit error with the ticket id it ran
+// against (design section 4.6), so reportFirstError and logStopAlert can
+// name the failed ticket without Run or Tick threading it through
+// separately. Unwrap keeps errors.Is(err, ErrFailClosed) working through the
+// wrapper.
+type runError struct {
+	TicketID int64
+	Err      error
+}
+
+func (e *runError) Error() string {
+	return fmt.Sprintf("ticket %d: %v", e.TicketID, e.Err)
+}
+
+func (e *runError) Unwrap() error {
+	return e.Err
+}
 
 // Binding pairs one store project with the tracker project intake reads for
 // it and the assignee rule intake applies (design section 6.8). Bindings is
@@ -157,10 +203,20 @@ type Config struct {
 	// due (section 17.1), so a babysit poll's backoff can be driven without
 	// a real wall-clock wait.
 	Now func() time.Time
+	// ReclaimForeign makes fill's reconcile step reclaim claims held by any
+	// other owner (design section 4.2, 6.3), running reclaimForeign before
+	// ExpireClaims and scoping ExpireClaims to this process's own owner so
+	// a live orphan's claim is never expired out from under reclaim. Only
+	// serve sets it, and only after taking serve.lock (section 6.2): a
+	// process without the lock cannot prove every other owner's claim is
+	// really dead.
+	ReclaimForeign bool
 }
 
 // Dispatcher ticks: reconcile, intake, count, pick, claim, run, commit
-// (design section 6.8).
+// (design section 6.8), now launching up to cfg.MaxParallel claimed
+// tickets' handlers at once (design section 4.1, #45 D1) instead of running
+// one ticket per tick to completion before returning.
 type Dispatcher struct {
 	store    *store.Store
 	tracker  tracker.Tracker
@@ -171,6 +227,62 @@ type Dispatcher struct {
 	bindings []Binding
 	cfg      Config
 	drainCh  chan struct{}
+
+	// mu guards inflight, stop, stopErr, and firstErrorReported (design
+	// section 4.1): every read or write of these four fields happens under
+	// it, including a bare len(inflight).
+	mu       sync.Mutex
+	inflight map[int64]bool // ticket ids this process is running now
+	stop     bool           // set once: no further claim or launch
+	stopErr  error          // the first error that set stop; nil when a drain or cancel set it
+
+	// firstErrorReported guards reportFirstError's alert 1 (design section
+	// 4.6): raised at most once per Dispatcher lifetime, whether the error
+	// that stopped the dispatcher arrives in Run's main loop or while
+	// finish drains the remaining in-flight workers.
+	firstErrorReported bool
+
+	// wg counts launched-but-not-yet-finished workers (design section
+	// 4.1): one Add per launch in fill, one Done per worker return, Wait in
+	// finish so Run (and Tick) never returns while a worker is still live.
+	wg sync.WaitGroup
+
+	// driving enforces one caller of Tick or Run at a time (design section
+	// 4.1): both start with a CompareAndSwap and return ErrConcurrentDrive
+	// on failure, since concurrent passes would race every read and write
+	// of inflight and stop above.
+	driving atomic.Bool
+
+	// afterClaimForTest, when non-nil, is called by fill synchronously
+	// right after a successful Claim for ticketID, before fill's own
+	// stop-check-and-launch critical section (design section 4.2 step 5).
+	// It exists only so a test can open a precise, otherwise sub-microsecond
+	// race window -- call setStop, or NotifyDrain, or cancel ctx, from
+	// another goroutine while this goroutine is paused here -- and is set
+	// only through export_test.go's SetAfterClaimForTest, never in
+	// production code.
+	afterClaimForTest func(ticketID int64)
+
+	// beforeClaimForTest, when non-nil, is called by fill synchronously
+	// right before attempting Claim for ticketID, for each candidate in
+	// pick order (design section 4.2 step 5). It exists only so a test can
+	// block a later candidate's claim attempt in the same pass until a
+	// concurrently running worker (launched for an earlier candidate in
+	// that same pass) has reached a specific point -- most usefully,
+	// stopErrRecordedForTest below firing -- making a race between a
+	// worker's own setStop and fill's own return deterministic instead of
+	// timing-dependent. Set only through export_test.go's
+	// SetBeforeClaimForTest, never in production code.
+	beforeClaimForTest func(ticketID int64)
+
+	// stopErrRecordedForTest, when non-nil, is called by setStop
+	// synchronously, right after it is the first call to record a non-nil
+	// stopErr (design section 4.6), with that same error. It exists only so
+	// a test can learn the exact moment reportFirstError's own eventual
+	// description became fixed, without polling or sleeping. Set only
+	// through export_test.go's SetStopErrRecordedForTest, never in
+	// production code.
+	stopErrRecordedForTest func(err error)
 }
 
 // deferredMechanics names the three section 10 dispatcher mechanics this
@@ -202,7 +314,8 @@ func New(
 		"mechanics", deferredMechanics, "owner", "Package 7")
 	return &Dispatcher{
 		store: s, tracker: tr, bus: b, machine: m, reg: reg, rts: rts, bindings: bindings, cfg: cfg,
-		drainCh: make(chan struct{}, 1),
+		drainCh:  make(chan struct{}, 1),
+		inflight: make(map[int64]bool),
 	}, nil
 }
 
@@ -222,143 +335,626 @@ func postHandlerContext(ctx context.Context) (context.Context, context.CancelFun
 
 // NotifyDrain wakes a running Run promptly once draining has been set,
 // rather than leaving it to notice on the next ticker fire (up to
-// cfg.Interval, which can race a short drain deadline). The send is
-// non-blocking, so repeated notifications before Run consumes one coalesce
-// into a single wake.
+// cfg.Interval, which can race a short drain deadline). It first calls
+// setStop(nil) (design section 4.5): from that moment fill launches nothing
+// more, whether or not Run's select loop has yet woken on drainCh, so a
+// pass that is mid-claim when drain begins still stops at (or right after)
+// its very next claim. The drainCh send itself stays non-blocking, so
+// repeated notifications before Run consumes one coalesce into a single
+// wake.
 func (d *Dispatcher) NotifyDrain() {
+	d.setStop(nil)
 	select {
 	case d.drainCh <- struct{}{}:
 	default:
 	}
 }
 
-// Tick runs one pass (design section 6.8): reconcile, drain-or-stop check,
-// intake, the max-parallel count guard, pick, claim, and run-and-commit. It
-// is the unit the tests drive directly, for determinism, rather than
-// relying on Run's timer.
-func (d *Dispatcher) Tick(ctx context.Context) error {
-	now := time.Now()
+// setStop records that no further claim or launch may happen (design
+// section 4.1): stop is set unconditionally, and stopErr is set to err only
+// while it is still nil, so the first non-nil error any caller reports
+// wins and is never overwritten by a later one -- including a later nil
+// from a drain or a context cancellation, which must never erase a real
+// error already recorded. It returns whether this call was the first to
+// set stop, though no caller in this package currently needs that signal.
+func (d *Dispatcher) setStop(err error) bool {
+	d.mu.Lock()
+	first := !d.stop
+	d.stop = true
+	recorded := false
+	if d.stopErr == nil {
+		d.stopErr = err
+		recorded = err != nil
+	}
+	hook := d.stopErrRecordedForTest
+	d.mu.Unlock()
 
-	// 1. Reconcile. ExpireClaims logs "claim expired" per id itself
-	// (store/spine.go), so Tick does not repeat that line.
-	if _, err := d.store.ExpireClaims(ctx, now); err != nil {
-		return fmt.Errorf("dispatch: reconcile: %w", err)
+	if recorded && hook != nil {
+		hook(err)
 	}
-
-	// 2. Drain or stop: return without starting work.
-	draining, stopped, err := d.store.Flags(ctx)
-	if err != nil {
-		return fmt.Errorf("dispatch: read flags: %w", err)
-	}
-	if draining || stopped {
-		return nil
-	}
-
-	// 3. Intake.
-	if intakeErr := d.intake(ctx); intakeErr != nil {
-		return intakeErr
-	}
-
-	// 4. Count: the max-parallel guard.
-	active, err := d.store.CountActiveRuns(ctx)
-	if err != nil {
-		return fmt.Errorf("dispatch: count active runs: %w", err)
-	}
-	if active >= d.cfg.MaxParallel {
-		return nil
-	}
-
-	// 5. Pick. cfg.Now() (defaulted to time.Now in New when serve leaves it
-	// nil), not the tick-start now above (which only bounds ExpireClaims'
-	// own reconcile pass), is what ListReadyCandidates compares next_poll_at
-	// against, so selftest's injected fake clock governs candidacy the same
-	// way a real poll schedule would (PKG9-PLAN.md section 17.1).
-	candidates, err := d.store.ListReadyCandidates(ctx, d.machine.States.Terminal, d.cfg.Now())
-	if err != nil {
-		return fmt.Errorf("dispatch: list ready candidates: %w", err)
-	}
-	ordered := job.OrderCandidates(candidates, d.machine.States.Order)
-	if len(ordered) == 0 {
-		return nil
-	}
-	ticket := ordered[0]
-
-	// 6. Claim. Claim and CommitHandlerResult each truncate their own
-	// incoming expires to whole-second UTC precision at the store boundary
-	// (section 6.3), so this same raw expires, handed to both Claim below
-	// and to Deps.Expires / the eventual commit's Expires, fences correctly
-	// without this caller truncating it itself. expires is computed from a
-	// fresh time.Now() taken right here, after reconcile, intake, and count
-	// (steps 1-4, which can each spend real wall time, notably a slow
-	// intake) have already run, not the tick-start now: otherwise the
-	// lease's actual coverage, measured from the moment it is really
-	// claimed, would fall short of timeout + claimGrace by however long
-	// those earlier steps took (design section "dispatch" fix 5, cubic P2).
-	timeout := d.claimTimeoutFor(ticket.State)
-	expires := time.Now().Add(timeout + claimGrace)
-	claimed, err := d.store.Claim(ctx, ticket.ID, d.cfg.Owner, expires)
-	if err != nil {
-		return fmt.Errorf("dispatch: claim ticket %d: %w", ticket.ID, err)
-	}
-	if !claimed {
-		return nil // another worker holds it
-	}
-
-	// 7. Run and commit.
-	return d.runAndCommit(ctx, ticket, timeout, expires)
+	return first
 }
 
-// Run ticks every cfg.Interval until ctx is done or the drain flag is set.
-// It returns as soon as draining is observed, after the current tick
-// finishes (design section 6.8). NotifyDrain wakes it promptly rather than
-// leaving it to notice only on the next ticker fire.
+// isStopped reports whether setStop has been called yet (design section
+// 4.1), read under d.mu like every other access to stop.
+func (d *Dispatcher) isStopped() bool {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.stop
+}
+
+// Tick runs one pass synchronously (design section 4.3): fill, then wait
+// for every worker fill launched this pass to finish, then return their
+// joined errors. It is the unit the tests drive directly, for determinism,
+// rather than relying on Run's timer; cmd/zing/selftest.go and the e2e
+// suites also drive it directly. Only one of Tick or Run may be driving
+// this Dispatcher at a time (design section 4.1): a second call while one
+// is already in flight returns ErrConcurrentDrive rather than racing fill's
+// own claim-and-launch critical section.
+func (d *Dispatcher) Tick(ctx context.Context) error {
+	if !d.driving.CompareAndSwap(false, true) {
+		return ErrConcurrentDrive
+	}
+	defer d.driving.Store(false)
+
+	results := make(chan runResult, d.cfg.MaxParallel)
+	launched, fillErr := d.fill(ctx, results)
+	if fillErr != nil {
+		d.setStop(fillErr)
+	}
+
+	errs := make([]error, 0, launched+1)
+	errs = append(errs, fillErr)
+	for range launched {
+		r := <-results
+		errs = append(errs, r.Err)
+	}
+
+	err := errors.Join(errs...)
+	if err != nil {
+		// D3: a fail-closed (or any other) error raises both alerts even
+		// from Tick, so the console's alerts strip shows them the same way
+		// a real serve's Run would (design section 4.3, 4.6).
+		d.reportFirstError()
+		d.logStopAlert()
+	}
+	return err
+}
+
+// Run ticks every cfg.Interval until ctx is done, the drain flag is
+// observed, or a fill pass or a launched worker reports an error (design
+// section 4.4). Unlike Tick, Run never blocks the caller between passes:
+// each tick's fill only launches workers and returns; Run's own select loop
+// keeps receiving their results so a free slot is ready for the next
+// ticker fire, and a worker's error stops future launches and begins the
+// drain-then-return sequence immediately rather than waiting for the next
+// tick to notice. Only one of Tick or Run may drive this Dispatcher at a
+// time; see Tick's own doc comment.
 func (d *Dispatcher) Run(ctx context.Context) error {
+	if !d.driving.CompareAndSwap(false, true) {
+		return ErrConcurrentDrive
+	}
+	defer d.driving.Store(false)
+
+	results := make(chan runResult, d.cfg.MaxParallel)
 	ticker := time.NewTicker(d.cfg.Interval)
 	defer ticker.Stop()
 
 	for {
 		select {
 		case <-ctx.Done():
-			return ctx.Err()
+			d.setStop(nil)
+			return d.finish(ctx.Err(), results)
+
 		case <-d.drainCh:
 			draining, _, err := d.store.Flags(ctx)
 			if err != nil {
-				return ctxErrOr(ctx, fmt.Errorf("dispatch: read flags: %w", err))
+				return d.stopOnPassError(ctx, fmt.Errorf("dispatch: read flags: %w", err), results)
 			}
 			if draining {
-				return nil
+				d.setStop(nil)
+				return d.finish(nil, results)
 			}
+
+		case r := <-results:
+			if r.Err != nil {
+				return d.finish(r.Err, results)
+			}
+			// A nil result only frees a slot; the next ticker fire refills
+			// it (design section 4.4) -- this keeps one place, the ticker,
+			// that starts passes.
+
 		case <-ticker.C:
-			if err := d.Tick(ctx); err != nil {
-				return ctxErrOr(ctx, err)
-			}
 			draining, _, err := d.store.Flags(ctx)
 			if err != nil {
-				return ctxErrOr(ctx, fmt.Errorf("dispatch: read flags: %w", err))
+				return d.stopOnPassError(ctx, fmt.Errorf("dispatch: read flags: %w", err), results)
 			}
 			if draining {
-				return nil
+				d.setStop(nil)
+				return d.finish(nil, results)
+			}
+			if _, fillErr := d.fill(ctx, results); fillErr != nil {
+				return d.stopOnPassError(ctx, fillErr, results)
 			}
 		}
 	}
 }
 
-// ctxErrOr returns ctx.Err() in place of err whenever ctx has already been
-// canceled or has expired. A store call that straddles the moment ctx ends
-// races database/sql's own context-driven teardown (it cancels the
-// in-flight statement and, for a transaction, auto-rolls it back), so the
-// error that surfaces is whichever side of that race lost -- for example
-// "sql: transaction has already been committed or rolled back" or the
-// driver's own "interrupted" -- never context.DeadlineExceeded or
-// context.Canceled itself, even though ctx ending is what really caused the
-// failure. Run's contract is to end because ctx is done; once it is, that
-// is the reason to report, not an artifact of an operation ctx cut off
-// mid-flight.
-func ctxErrOr(ctx context.Context, err error) error {
-	if ctxErr := ctx.Err(); ctxErr != nil {
-		return ctxErr
+// stopOnPassError ends Run after a store read or a fill pass failed. When
+// ctx is already done, the failure is only the cancel cutting a statement
+// off mid-flight (database/sql then reports its own rollback error, not
+// the context's), so Run stops as for a cancel: no stop
+// error, no alerts, and ctx.Err() as the result. Otherwise the error stops
+// the dispatcher and raises both alerts (design section 4.6).
+func (d *Dispatcher) stopOnPassError(ctx context.Context, err error, results <-chan runResult) error {
+	if ctx.Err() != nil {
+		d.setStop(nil)
+		return d.finish(ctx.Err(), results)
 	}
-	return err
+	d.setStop(err)
+	return d.finish(err, results)
+}
+
+// finish is Run's (and Tick's own fail-closed path's) shutdown join (design
+// section 4.4): it calls reportFirstError (alert 1) up front, before
+// anything else, so every caller -- a worker error, a flags-read failure, or
+// a fill error -- raises alert 1 before alert 2, matching Tick's behavior
+// (reportFirstError is idempotent and a no-op when d.stopErr is nil). It
+// then waits for every worker fill ever launched to call d.wg.Done(),
+// draining results throughout so no worker ever blocks on a full channel,
+// joining every non-nil result error into err and reporting it too (the
+// same idempotent call, in case a worker error arrives only here). It
+// returns only after every launched worker has actually returned, so Run
+// (and the goroutine serve starts it in) never lets the store close under a
+// live handler. Once the wait is over, alert 2 (design section 4.6) is
+// logged if any error was ever reported during this Dispatcher's lifetime.
+func (d *Dispatcher) finish(err error, results <-chan runResult) error {
+	d.reportFirstError()
+
+	done := make(chan struct{})
+	go func() {
+		d.wg.Wait()
+		close(done)
+	}()
+
+	waiting := true
+	for waiting {
+		select {
+		case r := <-results:
+			if r.Err != nil {
+				d.reportFirstError()
+				err = errors.Join(err, r.Err)
+			}
+		case <-done:
+			waiting = false
+		}
+	}
+
+	// Every worker sends its result before calling wg.Done (design section
+	// 4.2 step 5), so by the time d.wg.Wait() above returned, every
+	// in-flight worker's value is already sitting in results' buffer
+	// (capacity cfg.MaxParallel) even if Go's select happened to pick the
+	// done case first above. Drain it now, without blocking.
+	for {
+		select {
+		case r := <-results:
+			if r.Err != nil {
+				d.reportFirstError()
+				err = errors.Join(err, r.Err)
+			}
+		default:
+			if d.hasStopErr() {
+				d.logStopAlert()
+			}
+			return err
+		}
+	}
+}
+
+// hasStopErr reports whether stopErr has ever been set to a non-nil error
+// (design section 4.6): finish's own signal for whether alert 2 belongs on
+// the way out, since a plain drain or ctx cancellation (stopErr left nil)
+// must never raise it.
+func (d *Dispatcher) hasStopErr() bool {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.stopErr != nil
+}
+
+// reportFirstError logs alert 1 (design section 4.6) at most once per
+// Dispatcher lifetime, naming d.stopErr -- the error saved by the first
+// setStop call that carried one -- never whichever result happened to
+// arrive first at a caller's own select. Both Tick and Run call it from
+// every place an error can first become visible (a worker's result, or a
+// fill error), so whichever happens first is what gets reported, matching
+// setStop's own "first error wins" rule.
+func (d *Dispatcher) reportFirstError() {
+	d.mu.Lock()
+	if d.firstErrorReported || d.stopErr == nil {
+		d.mu.Unlock()
+		return
+	}
+	d.firstErrorReported = true
+	err := d.stopErr
+	inFlight := len(d.inflight)
+	d.mu.Unlock()
+
+	kind, where, ticketID, hasTicket := alertKindWhere(err)
+	cause := truncateCause(alertCause(err), alertCauseMaxBytes)
+	msg := fmt.Sprintf("%s %s: %s. Finishing %d other run(s), then stopping.", kind, where, cause, inFlight)
+	if hasTicket {
+		slog.Error(msg, "ticket_id", ticketID, "in_flight", inFlight)
+	} else {
+		slog.Error(msg, "in_flight", inFlight)
+	}
+}
+
+// logStopAlert logs alert 2 (design section 4.6): called once, after
+// d.wg.Wait() has returned, whenever any error was ever reported during
+// this Dispatcher's lifetime (hasStopErr above).
+func (d *Dispatcher) logStopAlert() {
+	d.mu.Lock()
+	err := d.stopErr
+	d.mu.Unlock()
+	if err == nil {
+		return
+	}
+
+	kind, where, ticketID, hasTicket := alertKindWhere(err)
+	msg := fmt.Sprintf("dispatcher stopped after %s %s. Restart zing serve to resume.", kind, where)
+	if hasTicket {
+		slog.Error(msg, "ticket_id", ticketID)
+	} else {
+		slog.Error(msg)
+	}
+}
+
+// alertKindWhere derives the two alerts' shared kind and where from err
+// (design section 4.6): kind is "fail-closed" when err wraps ErrFailClosed,
+// else "error"; where is "on ticket <id>" when err is a *runError, else "in
+// a dispatcher pass" (a reconcile, flags, intake, list, or claim failure
+// from fill itself).
+func alertKindWhere(err error) (kind, where string, ticketID int64, hasTicket bool) {
+	if re, ok := errors.AsType[*runError](err); ok {
+		ticketID = re.TicketID
+		hasTicket = true
+		where = fmt.Sprintf("on ticket %d", re.TicketID)
+	} else {
+		where = "in a dispatcher pass"
+	}
+	if errors.Is(err, ErrFailClosed) {
+		kind = "fail-closed"
+	} else {
+		kind = "error"
+	}
+	return kind, where, ticketID, hasTicket
+}
+
+// alertCause returns the text alert 1 quotes as "cause" (design section
+// 4.6): a *runError's own underlying Err, never the wrapper's "ticket %d:"
+// prefix (where already names the ticket), or err's own message when it
+// carries no ticket at all.
+func alertCause(err error) string {
+	if re, ok := errors.AsType[*runError](err); ok {
+		return re.Err.Error()
+	}
+	return err.Error()
+}
+
+// truncateCause cuts s to at most maxBytes bytes, backing up to a valid
+// rune boundary rather than splitting one (design section 4.6).
+func truncateCause(s string, maxBytes int) string {
+	if len(s) <= maxBytes {
+		return s
+	}
+	cut := maxBytes
+	for cut > 0 && !utf8.RuneStart(s[cut]) {
+		cut--
+	}
+	return s[:cut]
+}
+
+// fill runs one reconcile-intake-pick-claim-launch pass (design section
+// 4.2): it replaces the body of the old Tick, except that step 7 (today's
+// run-and-commit) now only launches a worker goroutine per claimed ticket,
+// up to cfg.MaxParallel concurrently in flight for this process, instead of
+// running the one picked ticket to completion inline. The caller owns
+// results; fill only ever sends to it, through the worker goroutines it
+// starts. It returns the number of workers launched this pass and the
+// first error that ended it early (a reconcile, flags, intake, list, or
+// claim failure) -- never a worker's own error, which always arrives later,
+// on results.
+func (d *Dispatcher) fill(ctx context.Context, results chan<- runResult) (int, error) {
+	now := time.Now()
+
+	// 1. Reconcile, in the order design section 4.2 step 1 and 6.3 give:
+	// with a lock-holding serve reclaiming foreign claims itself, reclaim
+	// runs first (it alone may clear a claim this process does not own),
+	// then ExpireClaims is scoped to this process's own owner, so a live
+	// orphan's claim already visited by reclaim is never also expired out
+	// from under it. Without ReclaimForeign, ExpireClaims keeps today's
+	// behavior of expiring every owner's claims (tests, selftest, a serve
+	// without the lock).
+	if d.cfg.ReclaimForeign {
+		if err := d.reclaimForeign(ctx); err != nil {
+			return 0, fmt.Errorf("dispatch: reclaim foreign: %w", err)
+		}
+		if _, err := d.store.ExpireClaims(ctx, now, d.cfg.Owner); err != nil {
+			return 0, fmt.Errorf("dispatch: reconcile: %w", err)
+		}
+	} else {
+		if _, err := d.store.ExpireClaims(ctx, now, ""); err != nil {
+			return 0, fmt.Errorf("dispatch: reconcile: %w", err)
+		}
+	}
+
+	// 2. Drain or stop: return without starting work.
+	draining, stopped, err := d.store.Flags(ctx)
+	if err != nil {
+		return 0, fmt.Errorf("dispatch: read flags: %w", err)
+	}
+	if draining || stopped || d.isStopped() {
+		return 0, nil
+	}
+
+	// 3. Intake.
+	if intakeErr := d.intake(ctx); intakeErr != nil {
+		return 0, intakeErr
+	}
+
+	// 4. Pick. cfg.Now() (defaulted to time.Now in New when serve leaves it
+	// nil), not fill's own start-of-pass now above (which only bounds
+	// ExpireClaims' own reconcile pass), is what ListReadyCandidates
+	// compares next_poll_at against, so selftest's injected fake clock
+	// governs candidacy the same way a real poll schedule would
+	// (PKG9-PLAN.md section 17.1).
+	candidates, err := d.store.ListReadyCandidates(ctx, d.machine.States.Terminal, d.cfg.Now())
+	if err != nil {
+		return 0, fmt.Errorf("dispatch: list ready candidates: %w", err)
+	}
+	ordered := job.OrderCandidates(candidates, d.machine.States.Order)
+
+	// 5. Claim and launch every free slot, in priority order. A refused
+	// claim (another worker, of this process or another, already holds the
+	// ticket) moves on to the next candidate rather than ending the pass.
+	launched := 0
+	for i := range ordered {
+		// Indexed, not "for _, ticket := range ordered": store.Ticket is
+		// large enough that gocritic's rangeValCopy flags a per-iteration
+		// value copy here, and every use below only ever needs a field or,
+		// once, a copy to hand the worker goroutine (which must own one
+		// regardless).
+		id, state := ordered[i].ID, ordered[i].State
+
+		d.mu.Lock()
+		if d.stop || len(d.inflight) >= d.cfg.MaxParallel {
+			d.mu.Unlock()
+			break
+		}
+		if d.inflight[id] {
+			d.mu.Unlock()
+			continue
+		}
+		d.mu.Unlock()
+
+		// expires is computed from a fresh time.Now() per candidate, not
+		// fill's own start-of-pass now: otherwise the lease's actual
+		// coverage, measured from the moment it is really claimed, would
+		// fall short of timeout + claimGrace by however long reconcile,
+		// flags, intake, and list (and any earlier candidate in this same
+		// loop) already spent (design section "dispatch" fix 5, cubic P2).
+		timeout := d.claimTimeoutFor(state)
+		expires := time.Now().Add(timeout + claimGrace)
+		if d.beforeClaimForTest != nil {
+			d.beforeClaimForTest(id)
+		}
+		claimed, err := d.store.Claim(ctx, id, d.cfg.Owner, expires)
+		if err != nil {
+			return launched, fmt.Errorf("dispatch: claim ticket %d: %w", id, err)
+		}
+		if !claimed {
+			continue // another worker holds it
+		}
+		if d.afterClaimForTest != nil {
+			d.afterClaimForTest(id)
+		}
+
+		// This is the launch linearization point (design section 4.2 step
+		// 5): setStop also takes d.mu, so a stop set before this section
+		// prevents the launch below, and a stop set after it finds the run
+		// already launched (and drained like any other, by finish). ctx is
+		// also checked here, not only d.stop (PR review fix D1): a ctx
+		// cancellation that is not routed through setStop at all -- the
+		// force-cancel at the drain deadline races this exact window too,
+		// same as a stop -- must still release the claim through the
+		// detached path below rather than launch a worker against an
+		// already-cancelled context.
+		d.mu.Lock()
+		if d.stop || ctx.Err() != nil {
+			d.mu.Unlock()
+			if relErr := d.releaseClaimNoStop(ctx, id, expires, "claim released, dispatcher stopping"); relErr != nil {
+				return launched, relErr
+			}
+			break
+		}
+		d.inflight[id] = true
+		d.wg.Add(1)
+		go d.worker(ctx, ordered[i], timeout, expires, results)
+		d.mu.Unlock()
+		launched++
+	}
+
+	return launched, nil
+}
+
+// worker runs one claimed ticket's handler to completion and reports the
+// outcome on results (design section 4.2 step 5). A non-nil error stops the
+// dispatcher (setStop) before anything else -- including before this
+// worker's own inflight entry is cleared -- so a fill pass still claiming
+// when this worker fails sees the stop at its very next candidate check, or
+// right after its own claim (fill's own two stop checks), per the fail-
+// closed guarantee (design D3, section 4.2).
+func (d *Dispatcher) worker(ctx context.Context, ticket store.Ticket, timeout time.Duration, expires time.Time, results chan<- runResult) {
+	err := d.runAndCommit(ctx, ticket, timeout, expires)
+	if err != nil {
+		err = &runError{TicketID: ticket.ID, Err: err}
+		d.setStop(err)
+	}
+
+	// Send before leaving inflight: a finished worker whose result the
+	// caller has not read yet still holds its slot, so fill can never
+	// launch more than MaxParallel workers even while results sit unread.
+	results <- runResult{Err: err}
+
+	d.mu.Lock()
+	delete(d.inflight, ticket.ID)
+	d.mu.Unlock()
+	d.wg.Done()
+}
+
+// reclaimForeign reclaims the claims of a dead serve (design section 6.3):
+// for every ticket claimed by an owner other than cfg.Owner, it reclaims
+// the claim once no open run of that ticket's sessions still has a live
+// process group, killing a group that has outlived its job's timeout plus
+// claimGrace (unless its liveness could not be verified, in which case it
+// is never killed). It runs inside fill's own reconcile step, before
+// ExpireClaims, only when cfg.ReclaimForeign is set.
+func (d *Dispatcher) reclaimForeign(ctx context.Context) error {
+	claims, err := d.store.ForeignClaims(ctx, d.cfg.Owner)
+	if err != nil {
+		return fmt.Errorf("foreign claims: %w", err)
+	}
+
+	for _, c := range claims {
+		anyLive := false
+		for _, r := range c.Open {
+			if d.evaluateOrphan(c.TicketID, r) {
+				anyLive = true
+			}
+		}
+		if anyLive {
+			continue
+		}
+
+		applied, err := d.store.ReclaimClaim(ctx, c.TicketID, c.Owner, c.Expires)
+		if err != nil {
+			return fmt.Errorf("reclaim claim ticket %d: %w", c.TicketID, err)
+		}
+		if applied {
+			slog.Warn("claim reclaimed from dead serve", "ticket_id", c.TicketID, "old_owner", c.Owner)
+		}
+	}
+	return nil
+}
+
+// orphanLiveness classifies one open run's process group against its
+// recorded identity (design section 6.3).
+type orphanLiveness int
+
+const (
+	orphanDead orphanLiveness = iota
+	orphanLive
+	// orphanUnverifiedLive is a group GroupAlive reports alive with no
+	// recorded start token to confirm it is really the run's own group
+	// (design section 6.3): never killed, since Zing cannot tell it apart
+	// from an unrelated group that happened to reuse the same id.
+	orphanUnverifiedLive
+)
+
+// classifyOpenRun decides r's liveness (design section 6.3):
+//   - PGID nil: dead (no agent was ever recorded for this run).
+//   - ProcStart recorded and the live group's own StartToken matches it: live.
+//   - ProcStart recorded and StartToken reports ErrNoProcess (the leader
+//     exited but the group id cannot yet be reused while a descendant is
+//     still in it): live.
+//   - ProcStart recorded and the token differs (the pid was reused by an
+//     unrelated process): dead.
+//   - ProcStart nil (no token recorded, whichever platform or read failure
+//     caused that): live but unverified when GroupAlive reports a member,
+//     dead otherwise.
+func classifyOpenRun(r store.OpenRun) orphanLiveness {
+	if r.PGID == nil {
+		return orphanDead
+	}
+	pgid := *r.PGID
+
+	if r.ProcStart == nil {
+		if proc.GroupAlive(pgid) {
+			return orphanUnverifiedLive
+		}
+		return orphanDead
+	}
+
+	token, err := proc.StartToken(pgid)
+	switch {
+	case err == nil:
+		if token == *r.ProcStart {
+			return orphanLive
+		}
+		return orphanDead
+	case errors.Is(err, proc.ErrNoProcess):
+		// The leader (pid == pgid) has exited, but a process group id
+		// cannot be reused while any member is alive -- so this alone does
+		// not prove the group is empty, only that its own leader is gone.
+		// GroupAlive settles it: a live member still in the group (a
+		// descendant the leader spawned before exiting) means the group
+		// is still the same incarnation and verified live; nothing left
+		// means it is dead, reclaimable now rather than waiting for a
+		// deadline that already passed the moment the leader exited.
+		if proc.GroupAlive(pgid) {
+			return orphanLive
+		}
+		return orphanDead
+	default:
+		// StartToken failed for a reason other than "no such process" (for
+		// example ErrUnsupported, or a transient read failure) even though
+		// a token was recorded at start: the plan names no rule for this
+		// case. Falling back to the same unverified treatment the
+		// no-token case gets, rather than assuming either live or dead, is
+		// the smaller risk: a real orphan is never silently reclaimed, and
+		// an unrelated group that reused the id is never killed either
+		// (implementation report deviation).
+		if proc.GroupAlive(pgid) {
+			return orphanUnverifiedLive
+		}
+		return orphanDead
+	}
+}
+
+// evaluateOrphan decides whether r still counts as live for this
+// reclaimForeign pass (design section 6.3), killing its group when it has
+// outlived its job's deadline and can be verified, and logging throughout
+// so the console's alerts strip shows every step.
+func (d *Dispatcher) evaluateOrphan(ticketID int64, r store.OpenRun) bool {
+	class := classifyOpenRun(r)
+	if class == orphanDead {
+		return false
+	}
+
+	deadline := time.Now()
+	if r.StartedAt != nil {
+		deadline = r.StartedAt.Add(d.jobTimeoutOrDefault(r.Job) + claimGrace)
+	}
+	now := time.Now()
+	if now.Before(deadline) {
+		slog.Info("waiting for orphaned agent of dead serve", "ticket_id", ticketID, "run_id", r.RunID, "pgid", *r.PGID)
+		return true
+	}
+
+	if class == orphanUnverifiedLive {
+		slog.Warn("orphaned agent unverified past deadline; reclaiming without kill", "ticket_id", ticketID, "run_id", r.RunID, "pgid", *r.PGID)
+		return false
+	}
+
+	if err := proc.KillGroup(*r.PGID); err != nil {
+		slog.Error("kill orphaned agent failed; retrying next tick", "ticket_id", ticketID, "run_id", r.RunID, "pgid", *r.PGID, "err", err)
+		return true
+	}
+	// SIGKILL is delivered, but the group may not have exited yet, so the
+	// claim stays held this pass; a later pass reclaims it once the
+	// liveness check finds the group gone (design section 6.3).
+	slog.Warn("killed orphaned agent of dead serve", "ticket_id", ticketID, "run_id", r.RunID, "pgid", *r.PGID)
+	return true
 }
 
 // intake runs step 3: for each binding, ask the tracker for its tickets and
@@ -532,13 +1128,30 @@ func (d *Dispatcher) runAndCommit(ctx context.Context, ticket store.Ticket, time
 	}
 
 	commit, err := handler.Run(runCtx, ticket, deps)
+
+	// Shutdown interrupt (design section 7.2): ctx is this Dispatcher's own
+	// long-lived context (serve's dispCtx), not runCtx, so this is true
+	// only when the *dispatcher* was told to stop -- the drain sequence's
+	// force-cancel at the drain deadline -- not when runCtx's own deadline
+	// merely expired while ctx is still live (that keeps the handler-error
+	// path below, exactly as before #45). Whatever the handler returned
+	// (runtime.ErrCanceled, a plain context.Canceled, some other wrapped
+	// error, or even nil with a commit) is irrelevant here: the run is
+	// interrupted either way, any commit is discarded, and InterruptRuns
+	// recognizes the running session as cut off mid-turn so the next tick
+	// resumes it instead of redriving a runtime that already advanced.
+	if ctx.Err() != nil {
+		return d.recordShutdownInterrupt(ctx, ticket, expires)
+	}
+
 	if err == nil {
 		err = job.ValidateCommit(ticket, commit)
 	}
 	if err != nil {
-		// runtime.ErrCanceled (design D13, section 4.5, 6.8): the parent
-		// context was canceled (dispatcher shutdown), not a failure to
-		// escalate. The claim is left in place -- releasing it would clear
+		// runtime.ErrCanceled (design D13, section 4.5, 6.8): runCtx's own
+		// deadline expired (ctx itself is still live, or the branch above
+		// would already have returned), not a failure to escalate. The
+		// claim is left in place -- releasing it would clear
 		// claim_expires_at, and ExpireClaims reconciles only a lease that
 		// has actually expired, so a release here would orphan the run
 		// Reserve already wrote with a null outcome. Letting the lease
@@ -620,6 +1233,32 @@ func (d *Dispatcher) runAndCommit(ctx context.Context, ticket store.Ticket, time
 	}
 
 	d.postCommitTrackerEffect(ctx, ticket, commit)
+	d.bus.Publish()
+	return nil
+}
+
+// recordShutdownInterrupt runs runAndCommit's own shutdown-interrupt path
+// (design section 7.2): it terminalizes every open run of ticket's
+// sessions as interrupted and clears the claim in one fenced write
+// (store.InterruptRuns), under a detached, bounded context so the
+// dispatcher's own cancellation cannot abort the write that must still
+// land. It never returns a non-nil error: a write failure only logs (the
+// claim then simply expires later, and ExpireClaims or a later reclaim
+// pass reconciles it the ordinary way), since a shutdown already in
+// progress must not itself fail closed.
+func (d *Dispatcher) recordShutdownInterrupt(ctx context.Context, ticket store.Ticket, expires time.Time) error {
+	postCtx, cancel := postHandlerContext(ctx)
+	defer cancel()
+
+	applied, err := d.store.InterruptRuns(postCtx, ticket.ID, d.cfg.Owner, expires)
+	if err != nil {
+		slog.Error("record shutdown interrupt failed", "ticket_id", ticket.ID, "err", err)
+		return nil
+	}
+	if !applied {
+		slog.Warn("claim already lost", "ticket_id", ticket.ID)
+		return nil
+	}
 	d.bus.Publish()
 	return nil
 }

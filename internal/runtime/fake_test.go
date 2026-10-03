@@ -16,11 +16,12 @@ const (
 	classifyBugXML     = `<zing job="classify" outcome="bug"><reason>first turn</reason></zing>`
 	classifyFeatureXML = `<zing job="classify" outcome="feature"><reason>second turn</reason></zing>`
 	brokenXML          = `not a zing document`
+	classifyTurn1Key   = "classify/1.xml"
 )
 
 func newClassifyFS() fstest.MapFS {
 	return fstest.MapFS{
-		"classify/1.xml":        &fstest.MapFile{Data: []byte(classifyBugXML)},
+		classifyTurn1Key:        &fstest.MapFile{Data: []byte(classifyBugXML)},
 		"classify/2.xml":        &fstest.MapFile{Data: []byte(classifyFeatureXML)},
 		"classify/label/1.xml":  &fstest.MapFile{Data: []byte(classifyBugXML)},
 		"classify/broken/1.xml": &fstest.MapFile{Data: []byte(brokenXML)},
@@ -194,6 +195,51 @@ func TestFake_MissingScriptErrors(t *testing.T) {
 	want := "fake: no script for nope/1.xml"
 	if err == nil || err.Error() != want {
 		t.Fatalf("Run error = %v, want %q", err, want)
+	}
+}
+
+// TestFake_MissingScriptRecordsNoOnStart proves PR review fix G1: OnStart
+// fires only after the turn's script is read and parsed (and ctx
+// rechecked) -- the real runtimes' own rule (claude.go, codex.go fire
+// OnStart only after cmd.Start succeeds, the last fallible precondition
+// before any work) -- so a turn whose script does not exist at all, and so
+// never does any work, records no start.
+func TestFake_MissingScriptRecordsNoOnStart(t *testing.T) {
+	t.Parallel()
+
+	f := NewFake(newClassifyFS())
+	var onStartCalls int
+	_, err := f.Run(context.Background(), RunRequest{
+		Job:     response.Job("nope"),
+		OnStart: func(StartInfo) { onStartCalls++ },
+	})
+	if err == nil {
+		t.Fatal("Run with a missing script, want an error")
+	}
+	if onStartCalls != 0 {
+		t.Errorf("OnStart called %d times, want 0 (the script was never even read)", onStartCalls)
+	}
+}
+
+// TestFake_BrokenScriptRecordsNoOnStart is
+// TestFake_MissingScriptRecordsNoOnStart's own proof for a script that
+// exists but fails to parse: response.Parse's own failure is also before
+// OnStart's call, not after.
+func TestFake_BrokenScriptRecordsNoOnStart(t *testing.T) {
+	t.Parallel()
+
+	fsys := fstest.MapFS{classifyTurn1Key: &fstest.MapFile{Data: []byte(brokenXML)}}
+	f := NewFake(fsys)
+	var onStartCalls int
+	_, err := f.Run(context.Background(), RunRequest{
+		Job:     response.JobClassify,
+		OnStart: func(StartInfo) { onStartCalls++ },
+	})
+	if err == nil {
+		t.Fatal("Run with a broken script, want an error")
+	}
+	if onStartCalls != 0 {
+		t.Errorf("OnStart called %d times, want 0 (the script never parsed)", onStartCalls)
 	}
 }
 

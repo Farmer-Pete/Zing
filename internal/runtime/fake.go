@@ -81,6 +81,17 @@ func (f *Fake) Run(ctx context.Context, req RunRequest) (RunResult, error) {
 		return RunResult{}, err
 	}
 
+	// The start handshake's fake-runtime twin (design section 7.1, #45):
+	// PID 0 since there is no real process, called while f.mu is held, so
+	// OnStart must never call back into this Fake. This is the real
+	// runtimes' own rule (PR review fix G1): claude.go and codex.go fire
+	// OnStart only after cmd.Start succeeds, the last fallible precondition
+	// before any work, so a turn whose script is missing or fails to parse
+	// -- never reaching this point -- records no start either.
+	if req.OnStart != nil {
+		req.OnStart(StartInfo{PID: 0, SessionID: sessionID})
+	}
+
 	if err := f.applyEffects(req.Job, req.Label, sess.nextTurn, req.WorkDir); err != nil {
 		return RunResult{}, err
 	}

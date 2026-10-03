@@ -203,6 +203,66 @@ func Registry() map[string]Handler {
 	}
 }
 
+// interruptedResumeText is the fixed wording of the "interrupted" resume
+// input (design section 6.3, 7.3): the raw, never-fenced sentence a resume
+// carries when the session's latest run was cut off by a shutdown or a
+// dead-serve reclaim (store.Run.Interrupted), shared by every job that
+// resumes a session (building.go, fix.go, judging.go, respond.go).
+const interruptedResumeText = "the previous run was interrupted; continue and return your document"
+
+// labelInterrupted is the NamedInput.Label every "interrupted" resume input
+// carries (building.go, judging.go, respond.go): a shared constant, not a
+// literal repeated at each call site (goconst).
+const labelInterrupted = "interrupted"
+
+// resumeCharge says how a resume of a session is charged, from the newest
+// run of that session (design D5, section 7.4): an interrupted latest run
+// (store.Run.Interrupted) resumes free (bump is false, so the caller's own
+// SessionUpsert carries BumpResumes: false) and ignores max_resumes (gate is
+// false, so the caller skips its own resumeCapGate / respondCapGate check
+// entirely, even on an already-exhausted session); anything else is charged
+// and cap-gated exactly as before (bump and gate both true). Every resume
+// branch of every job that can resume an interrupted run calls this with
+// that session's newest run and obeys both return values.
+func resumeCharge(latest store.Run) (bump, gate bool) {
+	if latest.Interrupted {
+		return false, false
+	}
+	return true, true
+}
+
+// priorNonInterruptedRun returns sessionID's own newest run strictly before
+// beforeRunID whose outcome is not itself an unanswered interrupted error
+// (design section 7.4, F009/7.2): it walks back past every run in the same
+// "resumed, interrupted again" chain -- each one outcome "error" with
+// Interrupted true -- so a claims or coverage resume that gets interrupted
+// more than once in a row still lands on the same settled run every time,
+// the one a pending-but-undelivered marker (claim errors, judge or respond
+// coverage) is keyed to. found is false when sessionID has no such run
+// (beforeRunID was its own first run, or every earlier run is itself part
+// of that same interrupted chain).
+func priorNonInterruptedRun(ctx context.Context, d Deps, ticketID, sessionID, beforeRunID int64) (store.Run, bool, error) {
+	runs, err := d.Store.RunsForTicket(ctx, ticketID)
+	if err != nil {
+		return store.Run{}, false, fmt.Errorf("job: prior non-interrupted run: runs for ticket: %w", err)
+	}
+	var best store.Run
+	found := false
+	for _, r := range runs {
+		if r.SessionID != sessionID || r.ID >= beforeRunID {
+			continue
+		}
+		if r.Outcome != nil && *r.Outcome == string(response.OutcomeError) && r.Interrupted {
+			continue // still inside the same interrupted-resume chain
+		}
+		if !found || r.ID > best.ID {
+			best = r
+			found = true
+		}
+	}
+	return best, found, nil
+}
+
 // Validate confirms every non-terminal state m.States.Order names has a
 // handler in reg, so a missing handler fails at startup, never at a nil map
 // read mid-tick.

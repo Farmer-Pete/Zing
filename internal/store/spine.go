@@ -116,7 +116,13 @@ func (s *Store) Claim(ctx context.Context, id int64, owner string, expires time.
 }
 
 // ExpireClaims clears the claim on every ticket whose claim_expires_at is at
-// or before now, and returns the ids it cleared. It runs in one transaction:
+// or before now, and returns the ids it cleared. onlyOwner, when non-empty,
+// scopes the expiry to claims owned by exactly that owner (design section
+// 4.2, 5.3): with a lock-holding serve reclaiming foreign claims itself
+// (dispatch.Config.ReclaimForeign), a foreign claim must never be expired
+// here, so a live orphan's claim is never cleared out from under reclaim.
+// Every caller but the dispatcher's ReclaimForeign path passes "", today's
+// behavior of expiring every owner's claims. It runs in one transaction:
 // for each expiring ticket, reconcileReservedRunsTx (design D13, section 4.5)
 // terminalizes any run left reserved with no outcome -- a crash, or an
 // ErrCanceled shutdown that left no commit -- before that ticket's own claim
@@ -126,14 +132,14 @@ func (s *Store) Claim(ctx context.Context, id int64, owner string, expires time.
 // connection is held for the whole transaction, so no other write can land
 // between the scan that finds an expiring ticket and the clear that follows
 // it).
-func (s *Store) ExpireClaims(ctx context.Context, now time.Time) ([]int64, error) {
+func (s *Store) ExpireClaims(ctx context.Context, now time.Time, onlyOwner string) ([]int64, error) {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return nil, fmt.Errorf("expire claims: begin tx: %w", err)
 	}
 	defer rollback(tx)
 
-	ids, err := expiringTicketIDsTx(ctx, tx, now)
+	ids, err := expiringTicketIDsTx(ctx, tx, now, onlyOwner)
 	if err != nil {
 		return nil, fmt.Errorf("expire claims: %w", err)
 	}
@@ -160,12 +166,17 @@ func (s *Store) ExpireClaims(ctx context.Context, now time.Time) ([]int64, error
 
 // expiringTicketIDsTx returns every ticket id whose claim is set and expires
 // at or before now, the set ExpireClaims reconciles and clears inside its
-// one transaction.
-func expiringTicketIDsTx(ctx context.Context, tx *sql.Tx, now time.Time) ([]int64, error) {
-	rows, err := tx.QueryContext(ctx,
-		`SELECT id FROM tickets
-		 WHERE claim_owner IS NOT NULL AND claim_expires_at IS NOT NULL AND claim_expires_at <= ?`,
-		formatTime(now))
+// one transaction. onlyOwner, when non-empty, additionally restricts the set
+// to claims owned by exactly that owner (ExpireClaims above).
+func expiringTicketIDsTx(ctx context.Context, tx *sql.Tx, now time.Time, onlyOwner string) ([]int64, error) {
+	query := `SELECT id FROM tickets
+		 WHERE claim_owner IS NOT NULL AND claim_expires_at IS NOT NULL AND claim_expires_at <= ?`
+	args := []any{formatTime(now)}
+	if onlyOwner != "" {
+		query += ` AND claim_owner = ?`
+		args = append(args, onlyOwner)
+	}
+	rows, err := tx.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, fmt.Errorf("select expiring: %w", err)
 	}

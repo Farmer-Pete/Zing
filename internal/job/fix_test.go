@@ -362,26 +362,42 @@ func TestDriveFixResumesInvalidOutput(t *testing.T) {
 	}
 }
 
-// TestDriveFixResumesInterrupted proves advanceUnit's own "error,
-// interrupted" branch (design section 5.4 change 1) carries a fix unit
-// exactly as it carries a task unit (design section 6.3/6.10, section
-// 14's "the process dies during a build run" row): a claims resume that
-// runtime.ErrCanceled interrupts leaves the session's newest run reserved
-// with no outcome; ExpireClaims reconciles it to "error", and the session
-// stays open, ready for the next DriveFix tick to resume with the raw
-// "interrupted" input.
-func TestDriveFixResumesInterrupted(t *testing.T) {
-	if testing.Short() {
-		t.Skip("slow end-to-end flow; runs in the full suite")
-	}
-	t.Parallel()
+// canceledClaimsResume is driveFixThroughCanceledClaimsResume's own result
+// (PR review fix F3): bundled into one struct, rather than returned as
+// separate values, because gocritic's result-count check caps a function
+// at five.
+type canceledClaimsResume struct {
+	store        *store.Store
+	ticketID     int64
+	req          job.FixRequest
+	deps3        job.Deps        // the canceled resume's own Owner/Expires, for a caller that reconciles through InterruptRuns (which fences on them)
+	maxResumes   int             // for the LatestSession calls every caller makes
+	pendingRunID string          // the CHECK commit's own "claim errors pending run <id>" marker id; empty unless CHECK wrote one
+	checkMsgs    []store.Message // the CHECK commit's messages, for a caller's diagnostics
+}
+
+// driveFixThroughCanceledClaimsResume is the ~100-line scaffold
+// TestDriveFixResumesInterrupted, TestFixInterruptedResumeIsFree, and
+// TestFixInterruptedClaimsResumeResendsClaims each used to copy by hand
+// (PR review fix F3, the repo's "three repetitions before abstraction"
+// rule): it drives a fresh fix request through RUN (claims hello.txt,
+// writes nothing) and CHECK (claim errors pending), then resumes once more
+// with a runtime that reports runtime.ErrCanceled mid-flight, leaving the
+// session's newest run reserved with no outcome. The caller reconciles
+// that canceled resume its own way -- ExpireClaims (a plain lease expiry)
+// or InterruptRuns (a real shutdown or dead-serve interrupt) -- then drives
+// its own final resume and assertions, using the returned store, ticketID,
+// and req.
+func driveFixThroughCanceledClaimsResume(t *testing.T, sessionID string) canceledClaimsResume {
+	t.Helper()
 	s, _, ticketID := buildTicketInBuilding(t)
 	mid := writeFixRequestMarker(t, s, ticketID, job.FixKindCILog, testFixCILogText, 0)
 	ticket := getTicket(t, s, ticketID)
 
-	mismatchRT := &scriptedRuntime{t: t, steps: []scriptedStep{buildStep([]string{helloTxt}, 0, 0, nil, "fix-mismatch-sess")}}
+	mismatchRT := &scriptedRuntime{t: t, steps: []scriptedStep{buildStep([]string{helloTxt}, 0, 0, nil, sessionID)}}
 	deps := claimForBuild(t, s, mismatchRT, ticketID)
 	req := job.FixRequest{MessageID: mid, Kind: job.FixKindCILog, Text: testFixCILogText, AfterRunID: 0}
+	maxResumes := deps.Machine.Jobs["build"].MaxResumes
 
 	commit, err := job.DriveFix(t.Context(), ticket, deps, req) // RUN: claims hello.txt, writes nothing
 	if err != nil {
@@ -395,6 +411,11 @@ func TestDriveFixResumesInterrupted(t *testing.T) {
 	if err != nil {
 		t.Fatalf("DriveFix (CHECK): %v", err)
 	}
+	var pendingRunID string
+	if len(checkCommit.Messages) == 1 && strings.HasPrefix(checkCommit.Messages[0].Body, "claim errors pending run ") {
+		pendingHead, _, _ := strings.Cut(checkCommit.Messages[0].Body, "\n")
+		pendingRunID = strings.TrimPrefix(pendingHead, "claim errors pending run ")
+	}
 	apply(t, s, ticket, checkCommit)
 
 	canceledRT := &scriptedRuntime{t: t, steps: []scriptedStep{
@@ -402,16 +423,33 @@ func TestDriveFixResumesInterrupted(t *testing.T) {
 	}}
 	ticket = getTicket(t, s, ticketID)
 	deps3 := claimForBuild(t, s, canceledRT, ticketID)
-	_, err = job.DriveFix(t.Context(), ticket, deps3, req) // resume: claims, interrupted mid-flight
-	if !errors.Is(err, runtime.ErrCanceled) {
+	if _, err = job.DriveFix(t.Context(), ticket, deps3, req); !errors.Is(err, runtime.ErrCanceled) { // resume: claims, interrupted mid-flight
 		t.Fatalf("err = %v, want errors.Is(err, runtime.ErrCanceled)", err)
 	}
 
-	if _, expireErr := s.ExpireClaims(t.Context(), time.Now().Add(20*time.Minute)); expireErr != nil {
+	return canceledClaimsResume{store: s, ticketID: ticketID, req: req, deps3: deps3, maxResumes: maxResumes, pendingRunID: pendingRunID, checkMsgs: checkCommit.Messages}
+}
+
+// TestDriveFixResumesInterrupted proves advanceUnit's own "error,
+// interrupted" branch (design section 5.4 change 1) carries a fix unit
+// exactly as it carries a task unit (design section 6.3/6.10, section
+// 14's "the process dies during a build run" row): a claims resume that
+// runtime.ErrCanceled interrupts leaves the session's newest run reserved
+// with no outcome; ExpireClaims reconciles it to "error", and the session
+// stays open, ready for the next DriveFix tick to resume with the raw
+// "interrupted" input.
+func TestDriveFixResumesInterrupted(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow end-to-end flow; runs in the full suite")
+	}
+	t.Parallel()
+	r := driveFixThroughCanceledClaimsResume(t, "fix-mismatch-sess")
+	s, ticketID, req, maxResumes := r.store, r.ticketID, r.req, r.maxResumes
+
+	if _, expireErr := s.ExpireClaims(t.Context(), time.Now().Add(20*time.Minute), ""); expireErr != nil {
 		t.Fatalf("ExpireClaims: %v", expireErr)
 	}
 
-	maxResumes := deps.Machine.Jobs["build"].MaxResumes
 	sess, state, err := s.LatestSession(t.Context(), ticketID, "build", maxResumes)
 	if err != nil {
 		t.Fatalf("LatestSession: %v", err)
@@ -427,7 +465,7 @@ func TestDriveFixResumesInterrupted(t *testing.T) {
 	}
 
 	resumeRT := &scriptedRuntime{t: t, steps: []scriptedStep{buildStep([]string{helloTxt}, 0, 0, nil, "fix-mismatch-sess")}}
-	ticket = getTicket(t, s, ticketID)
+	ticket := getTicket(t, s, ticketID)
 	deps4 := claimForBuild(t, s, resumeRT, ticketID)
 	resumeCommit, err := job.DriveFix(t.Context(), ticket, deps4, req) // resume: "interrupted"
 	if err != nil {
@@ -437,6 +475,137 @@ func TestDriveFixResumesInterrupted(t *testing.T) {
 		t.Errorf("resume prompt = %q, want the fixed interrupted wording", resumeRT.reqs[0].Prompt)
 	}
 	apply(t, s, ticket, resumeCommit)
+}
+
+// TestFixInterruptedResumeIsFree proves design D5, section 7.4's own
+// resumeCharge carries a fix unit exactly as it carries a task unit
+// (TestDriveFixResumesInterrupted's own shape, this test's model): the
+// cancelled run is terminalized by InterruptRuns (a real shutdown or
+// dead-serve interrupt, interrupted=1) rather than ExpireClaims's plain
+// reconcile. DriveFix shares advanceUnit with the task-unit handler
+// (fix.go's own doc comment), so the free resume needs no fix-specific
+// code; this test proves the sharing actually carries the free charge
+// through.
+func TestFixInterruptedResumeIsFree(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow end-to-end flow; runs in the full suite")
+	}
+	t.Parallel()
+	r := driveFixThroughCanceledClaimsResume(t, "fix-free-mismatch-sess")
+	s, ticketID, req, deps3, maxResumes := r.store, r.ticketID, r.req, r.deps3, r.maxResumes
+
+	applied, interruptErr := s.InterruptRuns(t.Context(), ticketID, deps3.Owner, deps3.Expires)
+	if interruptErr != nil {
+		t.Fatalf("InterruptRuns: %v", interruptErr)
+	}
+	if !applied {
+		t.Fatal("InterruptRuns: applied = false, want true")
+	}
+
+	sess, state, err := s.LatestSession(t.Context(), ticketID, "build", maxResumes)
+	if err != nil {
+		t.Fatalf("LatestSession: %v", err)
+	}
+	if sess.Resumes != 1 {
+		t.Fatalf("sessions.resumes after the canceled resume = %d, want 1 (charged at Reserve, design section 4.2)", sess.Resumes)
+	}
+	if state != store.SessionOpen {
+		t.Fatalf("session state after the canceled resume = %v, want SessionOpen", state)
+	}
+
+	resumeRT := &scriptedRuntime{t: t, steps: []scriptedStep{buildStep([]string{helloTxt}, 0, 0, nil, "fix-free-mismatch-sess")}}
+	ticket := getTicket(t, s, ticketID)
+	deps4 := claimForBuild(t, s, resumeRT, ticketID)
+	resumeCommit, err := job.DriveFix(t.Context(), ticket, deps4, req) // resume: "interrupted", free
+	if err != nil {
+		t.Fatalf("DriveFix (resume, interrupted): %v", err)
+	}
+	if !strings.Contains(resumeRT.reqs[0].Prompt, "interrupted") {
+		t.Errorf("resume prompt = %q, want the fixed interrupted wording", resumeRT.reqs[0].Prompt)
+	}
+	apply(t, s, ticket, resumeCommit)
+
+	sess, _, err = s.LatestSession(t.Context(), ticketID, "build", maxResumes)
+	if err != nil {
+		t.Fatalf("LatestSession: %v", err)
+	}
+	if sess.Resumes != 1 {
+		t.Errorf("sessions.resumes after the free interrupted resume = %d, want 1 (unchanged: the resume was not charged)", sess.Resumes)
+	}
+}
+
+// TestFixInterruptedClaimsResumeResendsClaims proves F009 (design section
+// 7.4) carries a fix unit exactly as it carries a task unit
+// (TestBuildInterruptedClaimsResumeResendsClaims's own shape, this test's
+// model): a fix unit's own claims resume, interrupted mid-flight, re-sends
+// the original claims text alongside the interrupted input on the next
+// tick, free and uncapped, since DriveFix shares advanceUnit (and
+// claimsPendingInput through it) with the task-unit handler.
+func TestFixInterruptedClaimsResumeResendsClaims(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow end-to-end flow; runs in the full suite")
+	}
+	t.Parallel()
+	r := driveFixThroughCanceledClaimsResume(t, "fix-claims-mismatch-sess")
+	s, ticketID, req, deps3, maxResumes, rid := r.store, r.ticketID, r.req, r.deps3, r.maxResumes, r.pendingRunID
+	if rid == "" {
+		t.Fatalf("CHECK commit.Messages = %+v, want one \"claim errors pending run <id>\" marker", r.checkMsgs)
+	}
+
+	applied, interruptErr := s.InterruptRuns(t.Context(), ticketID, deps3.Owner, deps3.Expires)
+	if interruptErr != nil {
+		t.Fatalf("InterruptRuns: %v", interruptErr)
+	}
+	if !applied {
+		t.Fatal("InterruptRuns: applied = false, want true")
+	}
+
+	sess, state, err := s.LatestSession(t.Context(), ticketID, "build", maxResumes)
+	if err != nil {
+		t.Fatalf("LatestSession: %v", err)
+	}
+	if sess.Resumes != 1 {
+		t.Fatalf("sessions.resumes after the canceled claims resume = %d, want 1 (charged at Reserve)", sess.Resumes)
+	}
+	if state != store.SessionOpen {
+		t.Fatalf("session state after the canceled claims resume = %v, want SessionOpen", state)
+	}
+
+	rec := &recordingRuntime{rt: &scriptedRuntime{t: t, steps: []scriptedStep{buildStep([]string{helloTxt}, 0, 0, nil, "fix-claims-mismatch-sess")}}}
+	ticket := getTicket(t, s, ticketID)
+	deps4 := claimForBuild(t, s, rec, ticketID)
+	resumeCommit, err := job.DriveFix(t.Context(), ticket, deps4, req) // resume: interrupted claims, free
+	if err != nil {
+		t.Fatalf("DriveFix (resume, interrupted claims): %v", err)
+	}
+	if !strings.Contains(rec.lastReq.Prompt, "claims/files_changed") {
+		t.Errorf("resume prompt = %q, want the original claim errors, fenced", rec.lastReq.Prompt)
+	}
+	if !strings.Contains(rec.lastReq.Prompt, "the previous run was interrupted") {
+		t.Errorf("resume prompt = %q, want the interrupted input alongside the claims", rec.lastReq.Prompt)
+	}
+	if resumeCommit.Session == nil || resumeCommit.Session.BumpResumes {
+		t.Errorf("resumeCommit.Session = %+v, want BumpResumes=false (the resume is free)", resumeCommit.Session)
+	}
+	wantDelivered := "claim errors delivered run " + rid
+	found := false
+	for _, m := range resumeCommit.Messages {
+		if m.Body == wantDelivered {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("resumeCommit.Messages = %+v, want %q among them", resumeCommit.Messages, wantDelivered)
+	}
+	apply(t, s, ticket, resumeCommit)
+
+	sess, _, err = s.LatestSession(t.Context(), ticketID, "build", maxResumes)
+	if err != nil {
+		t.Fatalf("LatestSession: %v", err)
+	}
+	if sess.Resumes != 1 {
+		t.Errorf("sessions.resumes after the free claims resume = %d, want 1 (unchanged: the resume was not charged)", sess.Resumes)
+	}
 }
 
 // TestDriveFixLandWritesLandedMarker proves the fix driver's own LAND

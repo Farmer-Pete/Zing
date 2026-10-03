@@ -453,7 +453,8 @@ func (s *Store) SessionsForTicket(ctx context.Context, ticketID int64) ([]Sessio
 // it to one ticket.
 func (s *Store) RunsForTicket(ctx context.Context, ticketID int64) ([]Run, error) {
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT r.id, r.session_id, r.turn, r.lens, r.task_n, r.model, r.outcome, r.agent_seconds, r.exit_code
+		`SELECT r.id, r.session_id, r.turn, r.lens, r.task_n, r.model, r.outcome, r.agent_seconds, r.exit_code,
+		        r.interrupted, r.pgid, r.proc_start, r.started_at
 		 FROM runs r JOIN sessions s ON s.id = r.session_id
 		 WHERE s.ticket_id = ? ORDER BY r.id`, ticketID)
 	if err != nil {

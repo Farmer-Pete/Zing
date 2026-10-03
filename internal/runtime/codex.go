@@ -311,7 +311,6 @@ func (c Codex) run(ctx context.Context, req RunRequest, argv []string, outPath s
 	cmd := exec.CommandContext(ctx, name, args...) //nolint:gosec // G204: bin is an operator-configured path (NewCodex), argv is built by codexArgv from validated fields, and ExecPrefix (when set) is the sandbox's own prefix (sandbox.Sandbox.Prefix) -- never raw external input
 	cmd.Dir = req.WorkDir
 	cmd.Env = agentEnv(req)
-	cmd.Stdin = strings.NewReader(req.Prompt)
 	configureProcessGroup(cmd)
 
 	stdout := &capWriter{limit: maxOutputBytes}
@@ -322,9 +321,25 @@ func (c Codex) run(ctx context.Context, req RunRequest, argv []string, outPath s
 	stderrCap := &capWriter{limit: maxStderrBytes}
 	cmd.Stderr = io.MultiWriter(&stderrCount, stderrHash, stderrCap)
 
-	if err := cmd.Start(); err != nil {
+	// The start handshake (design section 7.1, #45): see claude.go's own
+	// run for why stdin is a pipe written only after OnStart returns.
+	stdin, err := cmd.StdinPipe()
+	if err != nil {
 		return RunResult{ExitCode: -1, AgentTime: time.Since(start)}, ErrStart
 	}
+
+	if err = cmd.Start(); err != nil {
+		return RunResult{ExitCode: -1, AgentTime: time.Since(start)}, ErrStart
+	}
+
+	if req.OnStart != nil {
+		req.OnStart(StartInfo{PID: cmd.Process.Pid, SessionID: req.SessionID})
+	}
+
+	go func() {
+		_, _ = io.WriteString(stdin, req.Prompt) //nolint:errcheck // EPIPE means the agent already exited; cmd.Wait reports the real outcome
+		_ = stdin.Close()                        //nolint:errcheck // same: a close error here never changes the run's outcome
+	}()
 
 	waitErr := cmd.Wait()
 

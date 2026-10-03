@@ -28,6 +28,7 @@ const (
 	testStateDone        = "done"
 	testReasonPlanReady  = "plan ready"
 	testOutcomeBug       = "bug"
+	testOutcomeError     = "error"
 	testTypePlan         = "plan"
 
 	// testStateGeneric is an arbitrary Next value for a fence or claim test

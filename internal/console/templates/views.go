@@ -312,9 +312,16 @@ type ArtifactSlot struct {
 // session's newest run. Every field is pre-formatted by
 // console.buildRunRail (rail.go), "-" standing in for a value this package
 // cannot supply yet (Worktree, Branch -- design section 6.11: "arrive with
-// Package 5") or that a fixture run left nil (Model, AgentTime).
+// Package 5") or that a fixture run left nil (Model, AgentTime). Interrupted
+// is the newest run's own store.Run.Interrupted (#45 design section 9):
+// rail.templ renders the word "interrupted" right after Model when true.
+// That is only while the interrupted run is still the ticket's newest run --
+// until its own free resume (section 7.4) starts: the resume's own run row
+// carries Interrupted=false (migration 0005's own default) and, once it
+// exists, is the newest run in its place, so the pill is gone from then on.
 type RunRail struct {
 	Model, AgentTime, Attempts, Worktree, Branch string
+	Interrupted                                  bool
 }
 
 // LogLine is one entry the rail's Log section renders (design section 6.11,

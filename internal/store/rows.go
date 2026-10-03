@@ -60,7 +60,12 @@ type Session struct {
 }
 
 // Run is a row in the runs table. Turn is 0-based (design section 9: a
-// session's first run is turn 0).
+// session's first run is turn 0). Interrupted, PGID, ProcStart, and
+// StartedAt are migration 0005's four columns (design section 5.1, D6):
+// Interrupted marks a run a shutdown or a dead-serve reclaim cut off,
+// resumable for free (D5); PGID, ProcStart, and StartedAt are the agent
+// process identity RecordRunStart records at the start handshake (section
+// 7.1), used to tell a live orphan from a dead one (section 6.3).
 type Run struct {
 	ID, SessionID          int64
 	Turn                   int
@@ -68,6 +73,10 @@ type Run struct {
 	TaskN                  *int
 	Model, Outcome         *string
 	AgentSeconds, ExitCode *int
+	Interrupted            bool
+	PGID                   *int
+	ProcStart              *string
+	StartedAt              *time.Time
 }
 
 // Project is a row in the projects table.

@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/base64"
+	"encoding/hex"
 	"errors"
 	"flag"
 	"fmt"
@@ -19,6 +20,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -142,6 +144,18 @@ func serve(ctx context.Context, cfgPath, dbPath string, seedDemo bool) error {
 	if len(hosts) == 0 {
 		return fmt.Errorf("zing.toml: console.bind: no address could be resolved from %v", cfg.Console.Bind)
 	}
+
+	// One serve per data directory (design D7, section 6.2): acquired
+	// right here, before store.Open, so a second serve against the same
+	// data directory never opens the store or runs the tmp/judge sweeps
+	// below. dataDir here is unresolved (filepath.Dir(dbPath) as given,
+	// not EvalSymlinks'd): the lock files live next to zing.db itself,
+	// wherever that path actually points.
+	lock, err := acquireServeLock(filepath.Dir(dbPath))
+	if err != nil {
+		return err
+	}
+	defer lock.release()
 
 	st, err := store.Open(ctx, dbPath)
 	if err != nil {
@@ -331,6 +345,10 @@ func serve(ctx context.Context, cfgPath, dbPath string, seedDemo bool) error {
 			Auto: cfg.Merge.Auto, Method: cfg.Merge.Method,
 			ManualPaths: cfg.Merge.ManualPaths, DependencyFiles: cfg.Merge.DependencyFiles,
 		},
+		// ReclaimForeign is only safe once serve.lock proves every other
+		// claim owner is dead (design section 6.2, 6.3): serve took that
+		// lock above, so it is the only caller that ever sets this true.
+		ReclaimForeign: true,
 	}, rts)
 	if err != nil {
 		_ = st.Close()
@@ -387,25 +405,57 @@ func serve(ctx context.Context, cfgPath, dbPath string, seedDemo bool) error {
 	}
 	slog.Info("starting", "hosts", hosts, "port", cfg.Console.Port)
 
-	// dispTriggered records whether the dispatcher's own goroutine is what
-	// ended this select, as opposed to a normal signal (ctx.Done()) or an
-	// HTTP listener failure (errCh). Only in that case does the dispatcher's
-	// captured error become serve's return value below: on the other two
-	// paths dispDone will also close during the drain that shutdown runs
-	// next, but that is the expected, graceful join, not a failure to
-	// report.
-	var serveErr error
-	var dispTriggered bool
-	var consumedFromErrCh bool
-	select {
-	case serveErr = <-errCh:
-		consumedFromErrCh = true
-	case <-ctx.Done():
-	case <-dispDone:
-		dispTriggered = true
-	}
+	consumedFromErrCh, dispTriggered, serveErr := waitForShutdownTrigger(ctx, errCh, dispDone, func() error { return dispErr })
 
 	return shutdown(ctx, st, srv, d, errCh, len(listeners), consumedFromErrCh, serveErr, dispTriggered, dispDone, func() error { return dispErr }, cancelDisp)
+}
+
+// waitForShutdownTrigger blocks until a real shutdown trigger arrives: an
+// HTTP listener failure (errCh), a signal or parent cancellation
+// (ctx.Done()), or the dispatcher's own goroutine ending with a nil error
+// or context.Canceled (today's graceful-join case, which only happens if
+// something else set draining). It returns what shutdown (below) needs:
+// the listener error when that is what ended it, whether it was consumed
+// from errCh, and dispTriggered, whether the dispatcher's own goroutine is
+// what serve should name as the reason it stopped.
+//
+// A real dispatcher error (most commonly ErrFailClosed, design D3, section
+// 4.7) does not end this wait on its own: the console already alerted
+// (design section 4.6) and stays up so the owner can still use it, and this
+// keeps waiting on errCh and ctx.Done() for one of the other two triggers.
+// dispTriggered still ends up true once that later trigger arrives, so
+// serve's eventual exit status still names the dispatcher's own failure
+// (dispatchFailure, in shutdown below) -- the dispatcher merely stops being
+// what ends serve's wait, not what serve blames for ending it. dispDoneCh
+// is set to nil once that path is taken, so this same, already-closed
+// channel is never selected again (a nil channel blocks forever, which is
+// exactly "stop considering this case").
+func waitForShutdownTrigger(ctx context.Context, errCh <-chan error, dispDone <-chan struct{}, dispErr func() error) (consumedFromErrCh, dispTriggered bool, serveErr error) {
+	var dispFailedReal bool
+
+	dispDoneCh := dispDone
+selectLoop:
+	for {
+		select {
+		case serveErr = <-errCh:
+			consumedFromErrCh = true
+			break selectLoop
+		case <-ctx.Done():
+			break selectLoop
+		case <-dispDoneCh:
+			if de := dispErr(); de != nil && !errors.Is(de, context.Canceled) {
+				dispFailedReal = true
+				dispDoneCh = nil
+				continue selectLoop
+			}
+			dispTriggered = true
+			break selectLoop
+		}
+	}
+	if dispFailedReal {
+		dispTriggered = true
+	}
+	return consumedFromErrCh, dispTriggered, serveErr
 }
 
 // serveRequireSandbox is always true in serve (design N9, section 10): a
@@ -843,12 +893,7 @@ func shutdown(
 		slog.Error("dispatcher stopped", "err", de)
 	}
 
-	if serveErr == nil {
-		serveErr = dispatchFailure(dispTriggered, de)
-	}
-	if serveErr == nil {
-		serveErr = err
-	}
+	serveErr = resolveServeErr(serveErr, dispTriggered, de, err)
 	// Every srv.Serve(ln) goroutine (one per resolved listener) sends its
 	// own return value to errCh; the outer select above already consumed
 	// one of them when consumedFromErrCh is true. Drain the rest here, so
@@ -880,6 +925,33 @@ func dispatchFailure(dispTriggered bool, de error) error {
 		return nil
 	}
 	return fmt.Errorf("dispatcher: %w", de)
+}
+
+// resolveServeErr picks shutdown's own return value from every error
+// source it collects (PR review fix D3): triggerErr is whatever ended
+// waitForShutdownTrigger's own select (a listener failure from errCh, or
+// nil for a signal or a benign dispDone); dispTriggered and de are
+// waitForShutdownTrigger's own report of the dispatcher's goroutine; err is
+// drainAndShutdown's own shutdown/closeStore error.
+//
+// dispatchFailure(dispTriggered, de) always wins when it is non-nil. Before
+// this fix, a dispatcher failure was reported only when triggerErr was
+// still nil by the time shutdown ran its own "if serveErr == nil" check --
+// so a listener failure that happened to end the wait after the dispatcher
+// had already failed closed (waitForShutdownTrigger's own documented case:
+// the dispatcher's failure keeps the wait going until a real trigger
+// arrives) silently masked the dispatcher's own failure instead of joining
+// or naming it. dispTriggered being true already means the dispatcher's
+// failure is what the console alerted on and what an operator needs named
+// in serve's own exit status, whatever else also happened to end the wait.
+func resolveServeErr(triggerErr error, dispTriggered bool, de, drainErr error) error {
+	if dispFail := dispatchFailure(dispTriggered, de); dispFail != nil {
+		return dispFail
+	}
+	if triggerErr != nil {
+		return triggerErr
+	}
+	return drainErr
 }
 
 // drainAndShutdown runs the section 6.10 drain-then-close sequence, decoupled
@@ -1042,14 +1114,32 @@ func ensureBindings(ctx context.Context, st *store.Store, projects []config.Proj
 	return bindings, nil
 }
 
-// claimOwner returns this process's claim owner id, <hostname>-<pid>
-// (design section 7.2).
+// claimOwnerNonce is 8 lowercase hex characters from crypto/rand, minted
+// once per process (design section 6.2): a new serve that reuses a dead
+// serve's PID after a reboot must never mistake the old serve's claims for
+// its own just because the hostname and PID happen to match again. Nothing
+// ever parses the owner string; the nonce only needs to differ from one
+// process's lifetime to the next.
+var claimOwnerNonce = sync.OnceValue(func() string {
+	buf := make([]byte, 4)
+	if _, err := rand.Read(buf); err != nil {
+		// crypto/rand failing is effectively unreachable on every platform
+		// this builds for; a fixed fallback keeps claimOwner() returning a
+		// usable id instead of panicking, at the cost of this one
+		// process's own extra collision guard for this one run.
+		return "00000000"
+	}
+	return hex.EncodeToString(buf)
+})
+
+// claimOwner returns this process's claim owner id,
+// <hostname>-<pid>-<nonce> (design section 6.2, 7.2).
 func claimOwner() string {
 	host, err := os.Hostname()
 	if err != nil {
 		host = "unknown"
 	}
-	return fmt.Sprintf("%s-%d", host, os.Getpid())
+	return fmt.Sprintf("%s-%d-%s", host, os.Getpid(), claimOwnerNonce())
 }
 
 // newServer builds the HTTP server with its timeouts and graceful-drain

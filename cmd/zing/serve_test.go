@@ -925,3 +925,44 @@ func TestResolvePushToken_StableAcrossARestartUnlessExplicitlyConfigured(t *test
 		t.Errorf("resolvePushToken (explicit) = %q, want my-explicit-token", explicit)
 	}
 }
+
+// --- #45 milestone 5: one serve per data directory -------------------------
+
+// TestServe_SecondServeRefused proves design D7 end to end: a second serve
+// against the same data directory while a first one is still up is
+// refused, naming the first serve's pid, and does not disturb the first
+// serve at all.
+func TestServe_SecondServeRefused(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "zing.toml")
+	dbPath := filepath.Join(dir, "zing.db")
+
+	port := freeLoopbackPort(t)
+	writeZingTOML(t, cfgPath, zingTOMLOpts{
+		Port: port, IntervalSeconds: 1, MaxParallel: 1, Bind: []string{loopback},
+	})
+
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+
+	firstDone := make(chan error, 1)
+	go func() { firstDone <- serve(ctx, cfgPath, dbPath, false) }()
+
+	waitForServing(t, fmt.Sprintf("http://%s:%d", loopback, port), firstDone)
+
+	secondCtx, secondCancel := context.WithCancel(t.Context())
+	defer secondCancel()
+	err := serve(secondCtx, cfgPath, dbPath, false)
+	if err == nil {
+		t.Fatal("second serve against the same data directory: want an error, got nil")
+	}
+	if !strings.Contains(err.Error(), "another zing serve is running") {
+		t.Errorf("second serve err = %q, want it to name the live holder", err.Error())
+	}
+
+	// The first serve must be untouched by the refused second attempt.
+	waitForServing(t, fmt.Sprintf("http://%s:%d", loopback, port), firstDone)
+	cancelAndWaitForServe(t, cancel, firstDone)
+}

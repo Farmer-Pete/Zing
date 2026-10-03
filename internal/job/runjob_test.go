@@ -344,7 +344,7 @@ func TestRunJob_LostClaimWrapsErrClaimLost(t *testing.T) {
 	// Simulate the lease moving on from under this call: expire every claim
 	// as of a moment in the future, then let a different owner claim the
 	// ticket, so (owner, expires) above no longer matches the live row.
-	if _, err := s.ExpireClaims(t.Context(), time.Now().Add(time.Hour)); err != nil {
+	if _, err := s.ExpireClaims(t.Context(), time.Now().Add(time.Hour), ""); err != nil {
 		t.Fatalf("ExpireClaims: %v", err)
 	}
 	otherExpires := time.Now().Add(10 * time.Minute).UTC().Truncate(time.Second)
@@ -441,6 +441,71 @@ func TestRunJob_HappyPathReservesFillsRequestAndRuns(t *testing.T) {
 
 	if rr.Res.Response == nil || rr.Res.Response.Header().Outcome != response.OutcomeBug {
 		t.Errorf("Res.Response outcome = %v, want %v (the Fake's scripted bug turn)", rr.Res.Response, response.OutcomeBug)
+	}
+}
+
+// TestRunJobWith_OnStartRecordsRunStart proves runJobWith's own OnStart
+// closure (design section 7.1, #45): the fake runtime calls it with PID 0
+// and the session id it minted, before running the fake's scripted turn,
+// and the closure records that identity through store.RecordRunStart --
+// started_at set, pgid left NULL for the fake runtime's PID 0, and the
+// session's external_id filled with the fake's own minted id.
+func TestRunJobWith_OnStartRecordsRunStart(t *testing.T) {
+	t.Parallel()
+	s := newRunJobTestStore(t)
+	ticketID := seedRunJobTicket(t, s)
+	ticket := getRunJobTicket(t, s, ticketID)
+	owner, expires := claimRunJobTicket(t, s, ticketID)
+
+	scripts := fstest.MapFS{testClassifyScriptKey: &fstest.MapFile{Data: []byte(classifyBugXML)}}
+	fake := runtime.NewFake(scripts)
+	set, err := runtime.NewSet(map[string]runtime.Runtime{testRuntimeClaude: fake, testRuntimeCodex: fake, runtimeFake: fake})
+	if err != nil {
+		t.Fatalf("runtime.NewSet: %v", err)
+	}
+
+	d := Deps{
+		Store: s, Runtimes: set, Machine: runJobTestMachine(t), Models: map[string]string{testModelAlias: testModelExact},
+		Budget: time.Hour, Owner: owner, Expires: expires, Reserve: realReserve(s, owner, expires),
+		DataDir: t.TempDir(),
+	}
+
+	before := time.Now()
+	rr, err := runJob(t.Context(), d, ticket, testJobClassify, store.SessionUpsert{Job: testJobClassify, Runtime: testRuntimeClaude},
+		runtime.RunRequest{Job: response.JobClassify}, nil, nil, 0)
+	if err != nil {
+		t.Fatalf("runJob: %v", err)
+	}
+
+	run, ok, err := s.FirstRun(t.Context(), rr.Reserved.SessionID)
+	if err != nil {
+		t.Fatalf("FirstRun: %v", err)
+	}
+	if !ok {
+		t.Fatal("FirstRun: ok = false, want true")
+	}
+	if run.StartedAt == nil || run.StartedAt.Before(before.Add(-time.Second)) {
+		t.Errorf("run.StartedAt = %v, want set to roughly now", run.StartedAt)
+	}
+	if run.PGID != nil {
+		t.Errorf("run.PGID = %v, want nil for the fake runtime's PID 0", run.PGID)
+	}
+	if run.ProcStart != nil {
+		t.Errorf("run.ProcStart = %v, want nil for the fake runtime's PID 0", run.ProcStart)
+	}
+
+	sess, ok, err := s.OpenSession(t.Context(), ticketID, testJobClassify)
+	if err != nil {
+		t.Fatalf("OpenSession: %v", err)
+	}
+	if !ok {
+		t.Fatal("OpenSession: ok = false, want true")
+	}
+	if sess.ExternalID == nil || *sess.ExternalID == "" {
+		t.Fatal("session.ExternalID = nil, want the fake runtime's own minted session id")
+	}
+	if rr.Res.SessionID != *sess.ExternalID {
+		t.Errorf("session.ExternalID = %q, want the fake's own RunResult.SessionID %q", *sess.ExternalID, rr.Res.SessionID)
 	}
 }
 

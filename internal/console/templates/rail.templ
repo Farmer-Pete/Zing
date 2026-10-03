@@ -81,13 +81,22 @@ templ artifactsRail(slots []ArtifactSlot) {
 // Model, Agent time, Attempts, Worktree, Branch. Every field arrives
 // pre-formatted (console.buildRunRail, rail.go), including the "-" for a
 // value this package cannot supply (Worktree, Branch) or a fixture run
-// leaves nil (Model, AgentTime).
+// leaves nil (Model, AgentTime). The word "interrupted" renders right after
+// Model when run.Interrupted is set (#45 design section 9): the newest run
+// was cut short by a shutdown or a dead-serve reclaim and is waiting to
+// resume free, under design D5. The pill shows only while that interrupted
+// run is still the newest one: once its own free resume starts, the
+// resume's own run row carries Interrupted=false and becomes the newest in
+// its place, so the pill is gone from then on (RunRail's own doc comment,
+// views.go).
 templ runRail(run RunRail) {
 	<section class="rail-run">
 		<h3>Run</h3>
 		<dl class="run-fields">
 			<dt>Model</dt>
-			<dd>{ run.Model }</dd>
+			<dd>{ run.Model }if run.Interrupted {
+				<span class="pill pill-interrupted">interrupted</span>
+			}</dd>
 			<dt>Agent time</dt>
 			<dd>{ run.AgentTime }</dd>
 			<dt>Attempts</dt>

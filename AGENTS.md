@@ -7,6 +7,10 @@ Go web service with a Datastar frontend. Module path `zing`, entrypoint `cmd/zin
 - Before committing, run `make fmt lint` and `go build ./...`. The lefthook pre-commit hook runs the lint and build checks the same way, so a failure there fails for the same reason; its format step only rewrites staged files, unlike `make fmt`, which rewrites the whole tree. `make ci` runs everything CI's checks job runs; the secrets job additionally runs a full-history gitleaks scan.
 - New clones need `make hooks-install` once.
 
+## Operations
+
+`zing serve` holds `<DataDir>/serve.lock` for as long as it runs, so only one serve can own a given data directory at a time: a live holder refuses a second serve with a clear error, and a stale lock (its PID dead, or alive under a different start token after a reboot reused the PID) is taken over automatically. Stopping serve with a signal interrupts every run still in flight -- each is recorded as interrupted and its claim released -- and after a restart the next tick resumes that session for free, without spending a resume against `max_resumes`. `kill -9` skips that shutdown path: the dying process records nothing, so the runs are marked interrupted (and the claim reclaimed) only by a replacement serve once it has verified -- and, if necessary, killed -- their agent process groups, which can take up to the job's timeout plus a grace period; the session then resumes for free the same way. When upgrading the binary, stop the old `zing serve` and wait for it to exit before starting the new one: starting the new serve while an old build without this lock is still running would let it reclaim that old serve's still-live claims out from under it.
+
 ## Style
 
 - Standard library first. Every new dependency is named in the plan with one line of why.

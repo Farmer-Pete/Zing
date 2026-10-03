@@ -427,14 +427,16 @@ func (o *Orchestrator) PrepareWorktree(ctx context.Context, ticketID int64, slug
 		return Worktree{}, fmt.Errorf("orchestrator: prepare worktree: stat %s: %w", dir, statErr)
 	}
 
-	if err := o.ensureWorktreeExclude(ctx); err != nil {
+	if err := o.ensureWorktreeExcludeLocked(ctx); err != nil {
 		return Worktree{}, fmt.Errorf("orchestrator: prepare worktree: %w", err)
 	}
 
 	o.log.Info("preparing worktree", "ticket_id", ticketID, "branch", branch, "dir", dir)
 
 	// Phase 1: create the directory and branch, checking out nothing.
-	if out, err := o.run.Run(ctx, o.proj.LocalPath, "git", "worktree", "add", "--no-checkout", "-b", branch, dir, o.proj.DefaultBranch); err != nil {
+	// Shared (design section 8): "worktree add" writes the common gitdir's
+	// own worktree administration.
+	if out, err := o.runCommon(ctx, o.run, o.proj.LocalPath, "worktree", "add", "--no-checkout", "-b", branch, dir, o.proj.DefaultBranch); err != nil {
 		return Worktree{}, fmt.Errorf("orchestrator: git worktree add: %w: %s", err, strings.TrimSpace(out))
 	}
 
@@ -450,7 +452,10 @@ func (o *Orchestrator) PrepareWorktree(ctx context.Context, ticketID int64, slug
 	run := execRunner{drivers: wt.drivers}
 
 	if len(cone) > 0 {
-		if out, err := run.Run(ctx, dir, "git", "sparse-checkout", "init", "--cone"); err != nil {
+		// Shared (design section 8): with no worktree-specific config yet,
+		// "sparse-checkout init --cone" sets core.sparseCheckoutCone in the
+		// shared config, not anything scoped to this worktree.
+		if out, err := o.runCommon(ctx, run, dir, "sparse-checkout", "init", "--cone"); err != nil {
 			o.cleanupWorktree(ctx, wt)
 			return Worktree{}, fmt.Errorf("orchestrator: git sparse-checkout init: %w: %s", err, strings.TrimSpace(out))
 		}
@@ -692,7 +697,9 @@ func (o *Orchestrator) cleanupWorktree(ctx context.Context, wt Worktree) {
 
 	cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), cleanupWorktreeTimeout)
 	defer cancel()
-	if out, err := o.run.Run(cleanupCtx, o.proj.LocalPath, "git", "branch", "-D", wt.branch); err != nil {
+	// Shared (design section 8): "branch -D" removes a ref from the common
+	// gitdir.
+	if out, err := o.runCommon(cleanupCtx, o.run, o.proj.LocalPath, "branch", "-D", wt.branch); err != nil {
 		o.log.Warn("cleanup: delete branch failed", "branch", wt.branch, "err", err, "output", strings.TrimSpace(out))
 	}
 }
@@ -713,7 +720,9 @@ func (o *Orchestrator) cleanupWorktreeDir(ctx context.Context, wt Worktree) {
 	cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), cleanupWorktreeTimeout)
 	defer cancel()
 
-	if out, err := o.run.Run(cleanupCtx, o.proj.LocalPath, "git", "worktree", "remove", "--force", wt.dir); err != nil {
+	// Shared (design section 8): "worktree remove" clears this worktree's
+	// registration from the common gitdir's own worktree administration.
+	if out, err := o.runCommon(cleanupCtx, o.run, o.proj.LocalPath, "worktree", "remove", "--force", wt.dir); err != nil {
 		o.log.Warn("cleanup: remove worktree failed", "branch", wt.branch, "dir", wt.dir, "err", err, "output", strings.TrimSpace(out))
 	}
 }
@@ -771,7 +780,9 @@ func (o *Orchestrator) RemoveWorktree(ctx context.Context, wt Worktree) error {
 		}
 	}
 
-	if out, removeErr := o.run.Run(ctx, o.proj.LocalPath, "git", "worktree", "remove", "--force", wt.dir); removeErr != nil && !isNotAWorkingTreeErrorOutput(out) {
+	// Shared (design section 8): "worktree remove" clears this worktree's
+	// registration from the common gitdir's own worktree administration.
+	if out, removeErr := o.runCommon(ctx, o.run, o.proj.LocalPath, "worktree", "remove", "--force", wt.dir); removeErr != nil && !isNotAWorkingTreeErrorOutput(out) {
 		return fmt.Errorf("orchestrator: remove worktree: git worktree remove: %w: %s", removeErr, strings.TrimSpace(out))
 	}
 
@@ -780,7 +791,9 @@ func (o *Orchestrator) RemoveWorktree(ctx context.Context, wt Worktree) error {
 		return fmt.Errorf("orchestrator: remove worktree: %w", err)
 	}
 	if branchPresent {
-		if out, deleteErr := o.run.Run(ctx, o.proj.LocalPath, "git", "branch", "-D", wt.branch); deleteErr != nil {
+		// Shared (design section 8): "branch -D" removes a ref from the
+		// common gitdir.
+		if out, deleteErr := o.runCommon(ctx, o.run, o.proj.LocalPath, "branch", "-D", wt.branch); deleteErr != nil {
 			return fmt.Errorf("orchestrator: remove worktree: git branch -D: %w: %s", deleteErr, strings.TrimSpace(out))
 		}
 	}
@@ -938,11 +951,13 @@ func (o *Orchestrator) matchingZingBranches(ctx context.Context, ticketID int64)
 // removes the directory this call created (cleanupWorktreeDir, not
 // cleanupWorktree: the branch existed before this call and must survive).
 func (o *Orchestrator) reattachWorktree(ctx context.Context, dir, branch string) (Worktree, error) {
-	if out, err := o.run.Run(ctx, o.proj.LocalPath, "git", "worktree", "remove", "--force", dir); err != nil && !isNotAWorkingTreeErrorOutput(out) {
+	// Shared (design section 8): both calls act on the common gitdir's own
+	// worktree administration.
+	if out, err := o.runCommon(ctx, o.run, o.proj.LocalPath, "worktree", "remove", "--force", dir); err != nil && !isNotAWorkingTreeErrorOutput(out) {
 		return Worktree{}, fmt.Errorf("orchestrator: reattach worktree: clear stale registration: %w: %s", err, strings.TrimSpace(out))
 	}
 
-	if out, err := o.run.Run(ctx, o.proj.LocalPath, "git", "worktree", "add", "--no-checkout", dir, branch); err != nil {
+	if out, err := o.runCommon(ctx, o.run, o.proj.LocalPath, "worktree", "add", "--no-checkout", dir, branch); err != nil {
 		return Worktree{}, fmt.Errorf("orchestrator: reattach worktree: git worktree add: %w: %s", err, strings.TrimSpace(out))
 	}
 

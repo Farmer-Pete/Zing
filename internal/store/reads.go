@@ -219,6 +219,26 @@ func (s *Store) LatestSession(ctx context.Context, ticketID int64, job string, m
 	return sess, state, nil
 }
 
+// SessionNewestRun returns the newest run (by turn) of sessionID: design
+// section 7.4's own "latest run" for an answered-round resume (building.go's
+// resumeBuildRound, judging.go's resumeAnswered, respond.go's
+// resumeRespondAnswered), each of which already has the session by id
+// (SessionByID) and needs only its newest run's Interrupted flag to decide
+// resumeCharge. ok is false, with no error, when the session has no runs
+// yet (never expected in practice: a round's own session always has at
+// least the run that asked the question).
+func (s *Store) SessionNewestRun(ctx context.Context, sessionID int64) (Run, bool, error) {
+	row := s.db.QueryRowContext(ctx, `SELECT `+runColumns+` FROM runs WHERE session_id = ? ORDER BY turn DESC LIMIT 1`, sessionID)
+	r, err := scanRun(row)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return Run{}, false, nil
+		}
+		return Run{}, false, fmt.Errorf("newest run for session %d: %w", sessionID, err)
+	}
+	return r, true, nil
+}
+
 // SessionByID returns the session with id, classified against maxResumes
 // the same way LatestSession classifies its own newest session (review
 // F045): a build or perimeter round resumes round.SessionID directly (plan
@@ -293,16 +313,22 @@ func (s *Store) QuestionsByState(ctx context.Context, ticketID int64, state stri
 	return out, nil
 }
 
-// runColumns is the runs column list, in table-declaration order.
-const runColumns = `id, session_id, turn, lens, task_n, model, outcome, agent_seconds, exit_code`
+// runColumns is the runs column list, in table-declaration order, including
+// migration 0005's four interrupt/identity columns (design section 5.1).
+const runColumns = `id, session_id, turn, lens, task_n, model, outcome, agent_seconds, exit_code, interrupted, pgid, proc_start, started_at`
 
 // scanRun scans one row of runColumns, in that order, into a Run.
 func scanRun(rs rowScanner) (Run, error) {
 	var r Run
 	var lens, model, outcome sql.NullString
-	var taskN, agentSeconds, exitCode sql.NullInt64
+	var taskN, agentSeconds, exitCode, pgid sql.NullInt64
+	var interrupted int
+	var procStart, startedAt sql.NullString
 
-	if err := rs.Scan(&r.ID, &r.SessionID, &r.Turn, &lens, &taskN, &model, &outcome, &agentSeconds, &exitCode); err != nil {
+	if err := rs.Scan(
+		&r.ID, &r.SessionID, &r.Turn, &lens, &taskN, &model, &outcome, &agentSeconds, &exitCode,
+		&interrupted, &pgid, &procStart, &startedAt,
+	); err != nil {
 		return Run{}, err
 	}
 	if lens.Valid {
@@ -325,6 +351,21 @@ func scanRun(rs rowScanner) (Run, error) {
 	if exitCode.Valid {
 		n := int(exitCode.Int64)
 		r.ExitCode = &n
+	}
+	r.Interrupted = interrupted != 0
+	if pgid.Valid {
+		n := int(pgid.Int64)
+		r.PGID = &n
+	}
+	if procStart.Valid {
+		r.ProcStart = &procStart.String
+	}
+	if startedAt.Valid {
+		ts, err := time.Parse(fixedTimeLayout, startedAt.String)
+		if err != nil {
+			return Run{}, fmt.Errorf("parse started_at: %w", err)
+		}
+		r.StartedAt = &ts
 	}
 	return r, nil
 }
@@ -381,16 +422,4 @@ func (s *Store) GetMessage(ctx context.Context, id int64) (MessageRow, error) {
 		return MessageRow{}, fmt.Errorf("get message %d: %w", id, err)
 	}
 	return m, nil
-}
-
-// CountActiveRuns counts tickets that are claimed and not waiting, the
-// max_parallel guard's input.
-func (s *Store) CountActiveRuns(ctx context.Context) (int, error) {
-	var n int
-	err := s.db.QueryRowContext(ctx,
-		`SELECT COUNT(*) FROM tickets WHERE claim_owner IS NOT NULL AND waiting_on IS NULL`).Scan(&n)
-	if err != nil {
-		return 0, fmt.Errorf("count active runs: %w", err)
-	}
-	return n, nil
 }

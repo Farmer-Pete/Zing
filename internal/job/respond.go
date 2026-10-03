@@ -93,6 +93,38 @@ const (
 	respondCoverageDeliveredFmt = "respond coverage delivered run %d"
 )
 
+// respondCoveragePendingInput reads run rid's own "respond coverage
+// failed" marker and builds the "coverage" input and the "respond coverage
+// delivered" message that marks it delivered (design section 9.2), shared
+// by respondEnterCoverageResume's own first attempt at a freshly-run
+// coverage failure and respondEnterErrorResume's interrupted-resume
+// re-send (F009, design section 7.4, mirroring judging.go's
+// judgeCoveragePendingInput), which calls this for an earlier run than the
+// one that is currently newest. ok is false when rid's marker is not
+// pending, or a "respond coverage delivered run <rid>" marker already
+// exists for it.
+func respondCoveragePendingInput(ctx context.Context, t store.Ticket, d Deps, rid int64) (input prompt.NamedInput, deliveredMsg store.Message, ok bool, err error) {
+	pendingRow, pending, err := d.Store.Marker(ctx, t.ID, fmt.Sprintf(respondCoverageFailedFmt, rid))
+	if err != nil {
+		return prompt.NamedInput{}, store.Message{}, false, fmt.Errorf("job: shipping: respond coverage failed marker: %w", err)
+	}
+	if !pending {
+		return prompt.NamedInput{}, store.Message{}, false, nil
+	}
+	_, delivered, err := d.Store.Marker(ctx, t.ID, fmt.Sprintf(respondCoverageDeliveredFmt, rid))
+	if err != nil {
+		return prompt.NamedInput{}, store.Message{}, false, fmt.Errorf("job: shipping: respond coverage delivered marker: %w", err)
+	}
+	if delivered {
+		return prompt.NamedInput{}, store.Message{}, false, nil
+	}
+	_, errsText, _ := strings.Cut(pendingRow.Body, "\n")
+	return respondCoverageInput(errsText), store.Message{
+		TicketID: t.ID, Type: msgTypeUpdate, Author: authorSystem,
+		Body: fmt.Sprintf(respondCoverageDeliveredFmt, rid),
+	}, true, nil
+}
+
 // respondCoverageTwiceWhat is RESPOND's own "incomplete twice in a row"
 // escalation text (design section 9.2, mirroring judgeCoverageTwiceWhat).
 const respondCoverageTwiceWhat = "the respond batch's thread actions are incomplete twice in a row"
@@ -489,7 +521,13 @@ func (h shipHandler) enterRespondBatch(ctx context.Context, t store.Ticket, d De
 	if err != nil {
 		return store.HandlerCommit{}, false, fmt.Errorf("job: shipping: session after: %w", err)
 	}
-	if !found {
+	if !found || state == store.SessionIdless {
+		// No session yet, or one whose external_id never got set (bug fix,
+		// design section 7.5 #2): a first turn that was itself interrupted
+		// before the runtime ever echoed a session id back has nothing to
+		// resume, so it runs fresh exactly as a first turn does, mirroring
+		// judging.go's own enterAfterStart and fix.go's "!ok || state ==
+		// store.SessionIdless" check.
 		commit, runErr := h.respondRunFirst(ctx, t, d, n, sha, ids, seen, nil)
 		return commit, true, runErr
 	}
@@ -504,7 +542,7 @@ func (h shipHandler) enterRespondBatch(ctx context.Context, t store.Ticket, d De
 		commit, runErr := h.respondEnterCoverageResume(ctx, t, d, n, sha, ids, seen, sess, state, newestRun)
 		return commit, true, runErr
 	case string(response.OutcomeError):
-		commit, runErr := h.respondEnterErrorResume(ctx, t, d, n, sha, ids, seen, sess, state)
+		commit, runErr := h.respondEnterErrorResume(ctx, t, d, n, sha, ids, seen, sess, state, newestRun)
 		return commit, true, runErr
 	default:
 		return store.HandlerCommit{}, true, ErrNoAction
@@ -621,10 +659,12 @@ func (h shipHandler) respondRunFirst(ctx context.Context, t store.Ticket, d Deps
 // respond needs no detached checkout of its own) through
 // prompt.ForRespondResume. secondFailure is true only for the coverage
 // resume's own ok outcome (judgeResumeTurn's priorInvalid is this file's
-// nearest analogue).
+// nearest analogue). bump is the caller's own resumeCharge result (design
+// D5, section 7.4): false only for an interrupted latest run's own free
+// resume, true for every other resume this file sends.
 func (h shipHandler) respondResumeTurn(
 	ctx context.Context, t store.Ticket, d Deps, n int, sha string, ids []string, seen map[string]string,
-	sess store.Session, priorInvalid int, resolveIDs []int64, inputs []prompt.NamedInput, secondFailure bool,
+	sess store.Session, priorInvalid int, resolveIDs []int64, inputs []prompt.NamedInput, secondFailure bool, bump bool,
 ) (store.HandlerCommit, error) {
 	if sess.ExternalID == nil {
 		return store.HandlerCommit{}, fmt.Errorf("job: shipping: respond resume: session %d has no external id", sess.ID)
@@ -649,7 +689,7 @@ func (h shipHandler) respondResumeTurn(
 		Job: response.JobRespond, Label: strconv.Itoa(n), WorkDir: wt.Dir(),
 		SessionID: *sess.ExternalID, Prompt: prompt.Assemble(in),
 	}
-	su := store.SessionUpsert{ID: &sess.ID, BumpResumes: true}
+	su := store.SessionUpsert{ID: &sess.ID, BumpResumes: bump}
 	sessionRecord := func(r runResult) *store.SessionUpsert { return resumeSessionRecord(sess.ID, r) }
 
 	return h.respondRunAndRoute(ctx, d, t, su, req, priorInvalid, sessionRecord, resolveIDs,
@@ -662,9 +702,9 @@ func (h shipHandler) respondResumeTurn(
 // 'respond coverage failed run <rid>' undelivered" branch (design section
 // 9.2), mirroring judgeHandler.enterCoverageResume.
 func (h shipHandler) respondEnterCoverageResume(ctx context.Context, t store.Ticket, d Deps, n int, sha string, ids []string, seen map[string]string, sess store.Session, state store.SessionState, newestRun store.Run) (store.HandlerCommit, error) {
-	pendingRow, pending, err := d.Store.Marker(ctx, t.ID, fmt.Sprintf(respondCoverageFailedFmt, newestRun.ID))
+	coverageInput, deliveredMsg, pending, err := respondCoveragePendingInput(ctx, t, d, newestRun.ID)
 	if err != nil {
-		return store.HandlerCommit{}, fmt.Errorf("job: shipping: respond coverage failed marker: %w", err)
+		return store.HandlerCommit{}, err
 	}
 	if !pending {
 		return store.HandlerCommit{}, ErrNoAction
@@ -675,22 +715,46 @@ func (h shipHandler) respondEnterCoverageResume(ctx context.Context, t store.Tic
 		return capCommit, capErr
 	}
 
-	_, errsText, _ := strings.Cut(pendingRow.Body, "\n")
-	priorRunID := newestRun.ID
-
-	commit, resumeErr := h.respondResumeTurn(ctx, t, d, n, sha, ids, seen, sess, 0, nil, []prompt.NamedInput{respondCoverageInput(errsText)}, true)
+	commit, resumeErr := h.respondResumeTurn(ctx, t, d, n, sha, ids, seen, sess, 0, nil, []prompt.NamedInput{coverageInput}, true, true)
 	if resumeErr == nil && len(commit.Runs) > 0 {
-		commit.Messages = append(commit.Messages, store.Message{
-			TicketID: t.ID, Type: msgTypeUpdate, Author: authorSystem,
-			Body: fmt.Sprintf(respondCoverageDeliveredFmt, priorRunID),
-		})
+		commit.Messages = append(commit.Messages, deliveredMsg)
 	}
 	return commit, resumeErr
 }
 
 // respondEnterErrorResume is decision tree step (2)'s two "newest run
 // error" branches (design section 9.2), mirroring judgeHandler.enterErrorResume.
-func (h shipHandler) respondEnterErrorResume(ctx context.Context, t store.Ticket, d Deps, n int, sha string, ids []string, seen map[string]string, sess store.Session, state store.SessionState) (store.HandlerCommit, error) {
+// resumeCharge (job.go, design D5, section 7.4), called on newestRun, says
+// whether this resume is charged and cap-gated (an ordinary reconcile,
+// today's behavior) or free and uncapped (newestRun.Interrupted: a
+// shutdown or dead-serve interrupt).
+func (h shipHandler) respondEnterErrorResume(ctx context.Context, t store.Ticket, d Deps, n int, sha string, ids []string, seen map[string]string, sess store.Session, state store.SessionState, newestRun store.Run) (store.HandlerCommit, error) {
+	bump, gate := resumeCharge(newestRun)
+
+	// F009 (design section 7.4): an interrupted coverage resume re-sends
+	// its original coverage input plus the interrupted input, free and
+	// uncapped (judging.go's enterErrorResume, the model this mirrors).
+	if newestRun.Interrupted {
+		priorRun, found, priorErr := priorNonInterruptedRun(ctx, d, t.ID, sess.ID, newestRun.ID)
+		if priorErr != nil {
+			return store.HandlerCommit{}, priorErr
+		}
+		if found && priorRun.Outcome != nil && *priorRun.Outcome == string(response.OutcomeOk) {
+			coverageInput, deliveredMsg, pending, markerErr := respondCoveragePendingInput(ctx, t, d, priorRun.ID)
+			if markerErr != nil {
+				return store.HandlerCommit{}, markerErr
+			}
+			if pending {
+				interruptedInput := prompt.NamedInput{Label: labelInterrupted, Text: interruptedResumeText, Untrusted: false}
+				commit, resumeErr := h.respondResumeTurn(ctx, t, d, n, sha, ids, seen, sess, 0, nil, []prompt.NamedInput{coverageInput, interruptedInput}, true, bump)
+				if resumeErr == nil && len(commit.Runs) > 0 {
+					commit.Messages = append(commit.Messages, deliveredMsg)
+				}
+				return commit, resumeErr
+			}
+		}
+	}
+
 	nInvalid, reason, err := d.Store.ConsecutiveInvalidOutputs(ctx, t.ID, jobRespondName, &sess.ID)
 	if err != nil {
 		return store.HandlerCommit{}, fmt.Errorf("job: shipping: consecutive invalid outputs: %w", err)
@@ -706,12 +770,14 @@ func (h shipHandler) respondEnterErrorResume(ctx context.Context, t store.Ticket
 		return store.HandlerCommit{}, ErrNoAction
 	}
 
-	capCommit, mayResume, capErr := h.respondCapGate(ctx, t, d, sess, state)
-	if !mayResume {
-		return capCommit, capErr
+	if gate {
+		capCommit, mayResume, capErr := h.respondCapGate(ctx, t, d, sess, state)
+		if !mayResume {
+			return capCommit, capErr
+		}
 	}
 
-	return h.respondResumeTurn(ctx, t, d, n, sha, ids, seen, sess, nInvalid, nil, []prompt.NamedInput{input}, false)
+	return h.respondResumeTurn(ctx, t, d, n, sha, ids, seen, sess, nInvalid, nil, []prompt.NamedInput{input}, false, bump)
 }
 
 // resumeRespondAnswered is the shipping decision tree's own step (1) "job
@@ -739,18 +805,36 @@ func (h shipHandler) resumeRespondAnswered(ctx context.Context, t store.Ticket, 
 		return store.HandlerCommit{}, err
 	}
 
-	capCommit, mayResume, capErr := h.respondCapGate(ctx, t, d, sess, state)
-	if !mayResume {
-		capCommit.ResolveQuestions = resolveIDs
-		return capCommit, capErr
+	// resumeCharge (job.go, design D5, section 7.4): an interrupted latest
+	// run resumes this round free and bypasses the exhausted-cap gate
+	// below, even on a session already at max_resumes.
+	newestRun, foundRun, newestErr := d.Store.SessionNewestRun(ctx, sess.ID)
+	if newestErr != nil {
+		return store.HandlerCommit{}, fmt.Errorf("job: shipping: answered round: newest run: %w", newestErr)
+	}
+	bump, gate := true, true
+	if foundRun {
+		bump, gate = resumeCharge(newestRun)
+	}
+
+	if gate {
+		capCommit, mayResume, capErr := h.respondCapGate(ctx, t, d, sess, state)
+		if !mayResume {
+			capCommit.ResolveQuestions = resolveIDs
+			return capCommit, capErr
+		}
 	}
 
 	answers, ansErr := renderRoundAnswers(round)
 	if ansErr != nil {
 		return store.HandlerCommit{}, ansErr
 	}
+	inputs := []prompt.NamedInput{prompt.Answers(answers)}
+	if foundRun && newestRun.Interrupted {
+		inputs = append(inputs, prompt.NamedInput{Label: labelInterrupted, Text: interruptedResumeText, Untrusted: false})
+	}
 
-	return h.respondResumeTurn(ctx, t, d, n, sha, ids, seen, sess, 0, resolveIDs, []prompt.NamedInput{prompt.Answers(answers)}, false)
+	return h.respondResumeTurn(ctx, t, d, n, sha, ids, seen, sess, 0, resolveIDs, inputs, false, bump)
 }
 
 // respondCapGate is the decision tree's own shared "needs a resume" gate

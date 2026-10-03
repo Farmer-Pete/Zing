@@ -12,6 +12,7 @@ import (
 	"strconv"
 	"time"
 
+	"zing/internal/proc"
 	"zing/internal/runtime"
 	"zing/internal/sandbox"
 	"zing/internal/store"
@@ -225,6 +226,9 @@ func runJobWith(
 		return runResult{}, fmt.Errorf("job: %s: reserve: %w", jobName, reserveErr)
 	}
 	req.RunToken = strconv.FormatInt(rsv.RunID, 10)
+	req.OnStart = func(info runtime.StartInfo) {
+		recordRunStart(ctx, d, t.ID, rsv.RunID, info)
+	}
 
 	if sandboxed && hook != nil {
 		scenariosFile, hookCleanup, hookErr := hook(runCtx, rsv, &req)
@@ -419,6 +423,44 @@ func applyPrivateTempRoot(d Deps, req *runtime.RunRequest) (cleanup func() error
 	}
 	req.Env = append(req.Env, "TMPDIR="+filepath.Join(dir, "tmp"), "CLAUDE_CODE_TMPDIR="+filepath.Join(dir, "claude-tmp"))
 	return cleanup, nil
+}
+
+// onStartContext detaches from ctx -- the outer context runJobWith was
+// called with, not runCtx, the job-timeout-bound child it derives -- so the
+// store write recordRunStart makes below can still land even if the job's
+// own context is canceled around the same moment (a shutdown racing the
+// process's own start), and bounds it to 10s so a stuck write can never
+// block the run (design section 7.1).
+func onStartContext(ctx context.Context) (context.Context, context.CancelFunc) {
+	return context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+}
+
+// recordRunStart is runJobWith's own OnStart closure body (design section
+// 7.1, #45): it resolves info.PID's start token (skipped for the fake
+// runtime's PID 0, which proc.StartToken cannot look up) and records the
+// process identity through RecordRunStart, logging any failure at WARN
+// rather than failing the run -- a run that reaches this point has already
+// been reserved, and a start-identity write failing it would orphan that
+// reservation for no benefit. This is a plan-accepted risk (design section
+// 11's "RecordRunStart fails" row): the run's pgid stays NULL, so reclaim
+// treats it as not live (section 6.3's own "PGID NULL: not live" rule) and
+// reclaims its claim at once, rather than waiting on it as unverified.
+func recordRunStart(ctx context.Context, d Deps, ticketID, runID int64, info runtime.StartInfo) {
+	var token string
+	if info.PID > 0 {
+		var tokErr error
+		token, tokErr = proc.StartToken(info.PID)
+		if tokErr != nil {
+			slog.Warn("start token unavailable", "ticket_id", ticketID, "run_id", runID, "pid", info.PID, "error", tokErr)
+			token = ""
+		}
+	}
+
+	startCtx, cancel := onStartContext(ctx)
+	defer cancel()
+	if err := d.Store.RecordRunStart(startCtx, runID, info.PID, token, time.Now(), info.SessionID); err != nil {
+		slog.Warn("record run start failed", "ticket_id", ticketID, "run_id", runID, "error", err)
+	}
 }
 
 // errKind renders err for the "runJob end" observability event only (design

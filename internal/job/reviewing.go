@@ -662,7 +662,19 @@ func (h reviewingHandler) discuss(ctx context.Context, t store.Ticket, d Deps, g
 		resolveIDs = questionIDs(*round)
 	}
 
-	if state == store.SessionExhausted {
+	// resumeCharge (job.go, design D5, section 7.4): an interrupted latest
+	// run resumes this discuss turn free and bypasses the exhausted-cap
+	// escalation below, even on a session already at max_resumes.
+	newestRun, foundRun, newestErr := d.Store.SessionNewestRun(ctx, sess.ID)
+	if newestErr != nil {
+		return store.HandlerCommit{}, fmt.Errorf("job: reviewing: discuss: newest run: %w", newestErr)
+	}
+	bump, gate := true, true
+	if foundRun {
+		bump, gate = resumeCharge(newestRun)
+	}
+
+	if state == store.SessionExhausted && gate {
 		has, hasErr := d.Store.HasEscalation(ctx, t.ID, string(response.EscalationOriginCapResumes), sess.ID)
 		if hasErr != nil {
 			return store.HandlerCommit{}, fmt.Errorf("job: reviewing: discuss: has escalation: %w", hasErr)
@@ -680,22 +692,31 @@ func (h reviewingHandler) discuss(ctx context.Context, t store.Ticket, d Deps, g
 		return store.HandlerCommit{}, fmt.Errorf("job: reviewing: discuss: %w", err)
 	}
 
-	var in prompt.Input
+	var inputs []prompt.NamedInput
 	if round != nil {
 		answers, ansErr := renderRoundAnswers(*round)
 		if ansErr != nil {
 			return store.HandlerCommit{}, ansErr
 		}
-		in = prompt.ForReviewResume([]prompt.NamedInput{prompt.Answers(answers)})
+		inputs = []prompt.NamedInput{prompt.Answers(answers)}
 	} else {
 		notesText, notesErr := discussNotesInput(ctx, d, t.ID, group.findings)
 		if notesErr != nil {
 			return store.HandlerCommit{}, notesErr
 		}
-		in = prompt.ForReviewDiscuss([]prompt.NamedInput{
+		inputs = []prompt.NamedInput{
 			prompt.Findings(renderDiscussFindings(group.findings)),
 			prompt.Notes(notesText),
-		})
+		}
+	}
+	if foundRun && newestRun.Interrupted {
+		inputs = append(inputs, prompt.NamedInput{Label: labelInterrupted, Text: interruptedResumeText, Untrusted: false})
+	}
+	var in prompt.Input
+	if round != nil {
+		in = prompt.ForReviewResume(inputs)
+	} else {
+		in = prompt.ForReviewDiscuss(inputs)
 	}
 	in.Schemas = schemas
 
@@ -703,7 +724,7 @@ func (h reviewingHandler) discuss(ctx context.Context, t store.Ticket, d Deps, g
 		Job: response.JobReview, Label: fmt.Sprintf("%d-%s", group.round, group.lens), WorkDir: wt.Dir(),
 		SessionID: derefString(sess.ExternalID), Prompt: prompt.Assemble(in),
 	}
-	su := store.SessionUpsert{ID: &sess.ID, BumpResumes: true}
+	su := store.SessionUpsert{ID: &sess.ID, BumpResumes: bump}
 
 	priorInvalid, _, invErr := d.Store.ConsecutiveInvalidOutputs(ctx, t.ID, jobReviewName, &sess.ID)
 	if invErr != nil {
@@ -1786,12 +1807,16 @@ func (h reviewingHandler) continueRound(ctx context.Context, t store.Ticket, d D
 	}
 
 	// Step 2: for each asking run, the cap gate; an exhausted session
-	// escalates once with no run started for any lens.
+	// escalates once with no run started for any lens, unless its newest
+	// run was itself cut short (resumeCharge, design D5, section 7.4),
+	// which bypasses the cap for that one asker and resumes it free.
 	maxResumes := d.Machine.Jobs[jobReviewName].MaxResumes
 	type asker struct {
-		lens    response.Lens
-		sess    store.Session
-		answers string
+		lens        response.Lens
+		sess        store.Session
+		answers     string
+		bump        bool
+		interrupted bool
 	}
 	askers := make([]asker, 0, len(answered))
 	for _, r := range answered {
@@ -1806,7 +1831,15 @@ func (h reviewingHandler) continueRound(ctx context.Context, t store.Ticket, d D
 		if sessErr != nil {
 			return store.HandlerCommit{}, fmt.Errorf("job: reviewing: continue: session by id: %w", sessErr)
 		}
-		if state == store.SessionExhausted {
+		newestRun, foundRun, newestErr := d.Store.SessionNewestRun(ctx, sess.ID)
+		if newestErr != nil {
+			return store.HandlerCommit{}, fmt.Errorf("job: reviewing: continue: newest run: %w", newestErr)
+		}
+		bump, gate := true, true
+		if foundRun {
+			bump, gate = resumeCharge(newestRun)
+		}
+		if state == store.SessionExhausted && gate {
 			has, hasErr := d.Store.HasEscalation(ctx, t.ID, string(response.EscalationOriginCapResumes), sess.ID)
 			if hasErr != nil {
 				return store.HandlerCommit{}, fmt.Errorf("job: reviewing: continue: has escalation: %w", hasErr)
@@ -1820,7 +1853,10 @@ func (h reviewingHandler) continueRound(ctx context.Context, t store.Ticket, d D
 		if ansErr != nil {
 			return store.HandlerCommit{}, ansErr
 		}
-		askers = append(askers, asker{lens: response.Lens(*run.Lens), sess: sess, answers: answers})
+		askers = append(askers, asker{
+			lens: response.Lens(*run.Lens), sess: sess, answers: answers,
+			bump: bump, interrupted: foundRun && newestRun.Interrupted,
+		})
 	}
 
 	diff, err := proj.Orch.Diff(ctx, wt, sha)
@@ -1843,13 +1879,17 @@ func (h reviewingHandler) continueRound(ctx context.Context, t store.Ticket, d D
 
 	attempts, lensesErr := runLensesParallel(ctx, d, t, lenses, func(lens response.Lens) (store.SessionUpsert, runtime.RunRequest, func(runResult) *store.SessionUpsert) {
 		a := byLens[lens]
-		in := prompt.ForReviewResume([]prompt.NamedInput{prompt.Answers(a.answers)})
+		inputs := []prompt.NamedInput{prompt.Answers(a.answers)}
+		if a.interrupted {
+			inputs = append(inputs, prompt.NamedInput{Label: labelInterrupted, Text: interruptedResumeText, Untrusted: false})
+		}
+		in := prompt.ForReviewResume(inputs)
 		in.Schemas = schemas
 		req := runtime.RunRequest{
 			Job: response.JobReview, Label: fmt.Sprintf("%d-%s", n, lens), WorkDir: wt.Dir(),
 			SessionID: derefString(a.sess.ExternalID), Prompt: prompt.Assemble(in),
 		}
-		su := store.SessionUpsert{ID: &a.sess.ID, BumpResumes: true}
+		su := store.SessionUpsert{ID: &a.sess.ID, BumpResumes: a.bump}
 		sessionID := a.sess.ID
 		return su, req, func(rr runResult) *store.SessionUpsert { return resumeSessionRecord(sessionID, rr) }
 	})

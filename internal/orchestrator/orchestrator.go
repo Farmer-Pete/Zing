@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 )
 
 // Project is the git and GitHub identity of one repository the orchestrator
@@ -205,6 +206,15 @@ type Orchestrator struct {
 	gh   GitHub
 	run  Runner
 	log  *slog.Logger
+
+	// commonMuGuard and commonMu resolve this orchestrator's own shared
+	// git-lock mutex lazily, on its first runCommon call, and cache only a
+	// successful resolution (commonlock.go, design section 8, PR review
+	// fix C1): two Orchestrator values for the same repository -- config
+	// allows two project entries to share a LocalPath -- resolve to the
+	// same *commonMutex, from commonLockFor's package-level registry.
+	commonMuGuard sync.Mutex
+	commonMu      *commonMutex
 }
 
 // New validates proj (non-empty Owner, Repo, DefaultBranch; absolute
