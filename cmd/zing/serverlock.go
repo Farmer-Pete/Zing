@@ -147,15 +147,24 @@ func (g *serveLockGuard) release() {
 	_ = g.f.Close()
 }
 
-// linkServeLock writes path's complete content to a per-pid temp file,
+// linkServeLock writes path's complete content to a fixed-name temp file,
 // fsyncs and closes it, then links it into path (design section 6.2): a
 // hard link either fails (most commonly EEXIST, when path already names a
 // file) or creates path with the complete content in one step, so path is
 // never visible half-written. The temp file is removed after the link
 // attempt either way. linked is false, err nil, only on EEXIST; any other
 // failure is returned as a real error.
+//
+// The temp file's name is fixed, not per-pid (PR review fix A3): it is
+// only ever written and removed under the serve.lock.guard flock
+// (acquireServeLockAs's own caller), so no two acquires ever touch it at
+// once, and a crash between OpenFile and the Remove calls below -- any
+// error return after OpenFile, or a SIGKILL mid-acquire -- leaves at most
+// one inert leftover file, which the next acquire's own OpenFile(O_TRUNC)
+// simply overwrites, rather than one abandoned file per dead pid
+// accumulating forever in the data directory.
 func linkServeLock(dataDir, path string, pid int, token string) (linked bool, err error) {
-	tmp := filepath.Join(dataDir, fmt.Sprintf("%s.%d.tmp", serveLockFilename, pid))
+	tmp := filepath.Join(dataDir, serveLockFilename+".tmp")
 	content := fmt.Sprintf("pid=%d\nstart=%s\n", pid, token)
 
 	f, err := os.OpenFile(tmp, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
@@ -222,6 +231,15 @@ func parseServeLock(data []byte) (pid int, token string, err error) {
 	if err != nil {
 		return 0, "", fmt.Errorf("serve.lock: parse pid %q: %w", pidStr, err)
 	}
+	// A non-positive pid is malformed, never a live holder (PR review fix
+	// A1): kill(0, 0) checks the caller's own process group and kill(-1, 0)
+	// checks every process the caller can signal, so either would report a
+	// corrupted "pid=0" or negative lock as alive forever. Reporting this
+	// as a parse failure routes it through the same stale-takeover path
+	// every other unparseable lock already takes.
+	if pid <= 0 {
+		return 0, "", fmt.Errorf("serve.lock: pid %d must be positive", pid)
+	}
 	token, ok = strings.CutPrefix(lines[1], "start=")
 	if !ok {
 		return 0, "", fmt.Errorf("serve.lock: second line %q missing start= prefix", lines[1])
@@ -236,6 +254,13 @@ func parseServeLock(data []byte) (pid int, token string, err error) {
 // is empty (an unsupported platform, or a start-time read failure), it
 // falls back to a plain signal-0 liveness check.
 func serveLockHolderAlive(pid int, token string) bool {
+	// Defense in depth alongside parseServeLock's own guard (PR review fix
+	// A1): parseServeLock never hands this function a non-positive pid
+	// today, but a future caller that reads pid from somewhere else must
+	// not get a false "alive" from kill(0, 0) or kill(-1, 0) either.
+	if pid <= 0 {
+		return false
+	}
 	if token != "" {
 		got, err := proc.StartToken(pid)
 		return err == nil && got == token

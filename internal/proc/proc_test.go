@@ -157,3 +157,33 @@ func TestKillGroup_KillsGroupAndIsIdempotent(t *testing.T) {
 		t.Errorf("second KillGroup on an already-gone group: %v, want nil (ESRCH is not an error)", err)
 	}
 }
+
+// TestStartToken_ZombieReturnsErrNoProcess proves PR review fix A2: an
+// unreaped zombie -- a process that has already exited but whose parent
+// has not yet called wait on it -- still has a stable, readable process
+// table entry (on Linux, /proc/<pid>/stat with state "Z"; on Darwin, the
+// same kinfo_proc sysctl with P_stat SZOMB), but it is not alive. Without
+// this, a SIGKILL'd serve whose parent has not yet reaped it would block
+// takeover of its own stale lock forever, and reclaim would wait on an
+// orphaned agent's zombie group leader as though it were still running.
+func TestStartToken_ZombieReturnsErrNoProcess(t *testing.T) {
+	t.Parallel()
+	cmd := exec.CommandContext(t.Context(), "true")
+	if err := cmd.Start(); err != nil {
+		t.Skipf("start true: %v", err)
+	}
+	pid := cmd.Process.Pid
+	defer func() { _ = cmd.Wait() }() //nolint:errcheck // reap the zombie at teardown; the exit itself is expected
+
+	// "true" exits almost immediately; poll until StartToken itself
+	// observes the zombie, rather than guessing how long that takes.
+	deadline := time.Now().Add(2 * time.Second)
+	var err error
+	for time.Now().Before(deadline) {
+		if _, err = StartToken(pid); errors.Is(err, ErrNoProcess) {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Errorf("StartToken(zombie) err = %v, want ErrNoProcess within 2s", err)
+}

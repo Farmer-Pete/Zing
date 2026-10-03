@@ -38,6 +38,17 @@ func startToken(pid int) (string, error) {
 	}
 
 	fields := strings.Fields(line[closeParen+2:])
+	if len(fields) == 0 {
+		return "", fmt.Errorf("proc: start token: pid %d: malformed /proc/%d/stat", pid, pid)
+	}
+	// fields[0] is the state field (field 3): "Z" is a zombie, a process
+	// already exited but not yet reaped by its parent (PR review fix A2).
+	// It still has a stable starttime, but it is not alive -- a SIGKILL'd
+	// serve's own zombie, unreaped, must not block a stale lock's takeover
+	// forever, nor read as a live orphan for reclaim.
+	if fields[0] == "Z" {
+		return "", fmt.Errorf("%w: pid %d: zombie", ErrNoProcess, pid) //nolint:errorlint // ErrNoProcess is the sentinel this wraps; err's own type carries nothing a caller matches on
+	}
 	if len(fields) <= starttimeFieldsAfterComm {
 		return "", fmt.Errorf("proc: start token: pid %d: too few fields in /proc/%d/stat", pid, pid)
 	}

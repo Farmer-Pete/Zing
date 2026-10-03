@@ -148,6 +148,48 @@ func TestAcquireServeLock_UnparseableFileTakenOver(t *testing.T) {
 	lock.release()
 }
 
+// TestAcquireServeLock_NonPositivePIDTakenOver proves PR review fix A1: a
+// lock file recording pid=0 or a negative pid is malformed, not a live
+// holder. Before this fix, serveLockHolderAlive would report a pid 0 "alive"
+// forever: syscall.Kill(0, 0) checks the caller's own process group and
+// returns nil, and syscall.Kill(-1, 0) checks every process the caller can
+// signal, so either would block every later acquire until an operator
+// deleted the file by hand.
+func TestAcquireServeLock_NonPositivePIDTakenOver(t *testing.T) {
+	t.Parallel()
+	for _, pid := range []int{0, -1} {
+		t.Run(fmt.Sprintf("pid=%d", pid), func(t *testing.T) {
+			t.Parallel()
+			dir := t.TempDir()
+			content := fmt.Sprintf("pid=%d\nstart=\n", pid)
+			if err := os.WriteFile(filepath.Join(dir, serveLockFilename), []byte(content), 0o600); err != nil {
+				t.Fatalf("write non-positive-pid lock: %v", err)
+			}
+
+			lock, err := acquireServeLockAs(dir, os.Getpid(), "tok-live")
+			if err != nil {
+				t.Fatalf("acquire over a non-positive pid lock: %v", err)
+			}
+			lock.release()
+		})
+	}
+}
+
+// TestServeLockHolderAlive_NonPositivePIDIsNotAlive is
+// TestAcquireServeLock_NonPositivePIDTakenOver's own direct unit proof
+// (PR review fix A1): serveLockHolderAlive itself, not only the acquire
+// path above it, must refuse to call kill(0, 0) or kill(-1, 0) on these
+// values.
+func TestServeLockHolderAlive_NonPositivePIDIsNotAlive(t *testing.T) {
+	t.Parallel()
+	if serveLockHolderAlive(0, "") {
+		t.Error(`serveLockHolderAlive(0, "") = true, want false`)
+	}
+	if serveLockHolderAlive(-1, "") {
+		t.Error(`serveLockHolderAlive(-1, "") = true, want false`)
+	}
+}
+
 // TestServeLock_ReleaseRemovesOnlyMatchingFile proves release only removes
 // the lock file when it still parses with this lock's own pid and token,
 // never a file some other acquire has since overwritten (design section
