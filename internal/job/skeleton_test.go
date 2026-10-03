@@ -36,13 +36,14 @@ const (
 	testStateDone      = "done"
 	testRefFake1       = "fake#1"
 
-	testMsgTypeQuestion  = "question"
-	testWaitingQuestions = "questions"
-	testWaitingGate      = "gate"
-	testAuthorZing       = "zing"
-	testRuntimeClaude    = "claude"
-	testRuntimeFake      = "fake"
-	testRuntimeCodex     = "codex"
+	testMsgTypeQuestion   = "question"
+	testMsgTypeEscalation = "escalation"
+	testWaitingQuestions  = "questions"
+	testWaitingGate       = "gate"
+	testAuthorZing        = "zing"
+	testRuntimeClaude     = "claude"
+	testRuntimeFake       = "fake"
+	testRuntimeCodex      = "codex"
 
 	// testNoopShellCmd is the always-succeeds shell command several
 	// building tests give a project's TestCmd or LintCmd when the test

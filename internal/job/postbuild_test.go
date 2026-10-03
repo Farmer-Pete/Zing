@@ -18,6 +18,7 @@ import (
 	"errors"
 	"io/fs"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -1128,6 +1129,65 @@ func TestPreludeAbandon(t *testing.T) {
 	final := pbGetTicket(t, s, ticket.ID)
 	if final.State != stateAbandoned {
 		t.Fatalf("ticket state = %q, want abandoned", final.State)
+	}
+}
+
+// TestPreludeAbandonKeepsPostSealOptionIDs proves #47 item 2's option-ID
+// stability through the real decode path: a post-seal escalation offers
+// only Retry and Abandon, their keys stay "a" and "c" (Abandon is never
+// renumbered to "b" just because Back to planning is missing), and
+// answering the stored Abandon key -- read back from the question's own
+// payload, not hardcoded -- resolves through store.AnswerQuestion (SaveDraft
+// plus SendBatch) and abandons the ticket rather than sending it back to
+// planning.
+func TestPreludeAbandonKeepsPostSealOptionIDs(t *testing.T) {
+	t.Parallel()
+	s := newFixTestStore(t)
+	ticket := pbSeedTicketInState(t, s, stateReviewing)
+
+	qID := pbEscalateDirect(t, s, ticket.ID, nil, nil, response.EscalationCodeEnvironment, response.EscalationOriginFix)
+
+	msg, err := s.GetMessage(t.Context(), qID)
+	if err != nil {
+		t.Fatalf("GetMessage: %v", err)
+	}
+	var qp response.QuestionPayload
+	if err := json.Unmarshal(msg.Payload, &qp); err != nil {
+		t.Fatalf("unmarshal question payload: %v", err)
+	}
+
+	wantOptions := []response.Option{{Key: "a", Text: "Retry"}, {Key: "c", Text: "Abandon"}}
+	if !reflect.DeepEqual(qp.Options, wantOptions) {
+		t.Fatalf("question.Options = %+v, want %+v (post-seal: no Back to planning, Abandon keeps key c)", qp.Options, wantOptions)
+	}
+
+	var abandonKey string
+	for _, opt := range qp.Options {
+		if opt.Text == "Abandon" {
+			abandonKey = opt.Key
+		}
+	}
+	if abandonKey == "" {
+		t.Fatal("no option named Abandon among question.Options")
+	}
+
+	pbAnswerEscalation(t, s, ticket.ID, qID, abandonKey)
+
+	deps := pbClaim(t, s, pbFakeRuntime(t), ticket.ID)
+	commit, handled := pbRunPrelude(t, s, deps, ticket.ID)
+	if !handled {
+		t.Fatal("handled = false, want true")
+	}
+	if commit.Next != stateAbandoned {
+		t.Errorf("commit.Next = %q, want %q (not back to planning)", commit.Next, stateAbandoned)
+	}
+	if !commit.ResolveAll {
+		t.Error("commit.ResolveAll = false, want true")
+	}
+
+	final := pbGetTicket(t, s, ticket.ID)
+	if final.State != stateAbandoned {
+		t.Fatalf("ticket state = %q, want abandoned (not sent back to planning)", final.State)
 	}
 }
 

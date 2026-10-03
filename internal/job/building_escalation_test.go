@@ -190,20 +190,33 @@ func TestSandboxUnavailableEscalates(t *testing.T) {
 // TestReplanUnsupportedText proves design D14's own row: choice b (back to
 // planning) and a reply with no option at all both re-escalate
 // replan_unsupported, origin unchanged, with the plan's exact What/Why
-// text, resolving the round.
+// text, resolving the round. #47 item 2 fixed escalateTx to stop offering
+// "b" once the ticket is past planning, so a freshly raised escalation can
+// no longer be answered with it; the "Back" case here instead answers one
+// of the escalations the database already carried before that fix shipped
+// (legacyEscalationQuestion), proving this unchanged resolution row still
+// runs correctly against that still-real shape. "ReplyOnly" still uses a
+// fresh, real escalation (escalateDirect): roundChoice's own "a reply with
+// no option is choice b" default needs no option to exist at all.
 func TestReplanUnsupportedText(t *testing.T) {
 	t.Parallel()
 	for _, tc := range []struct {
 		name   string
 		option *string
+		legacy bool
 	}{
-		{"Back", new("b")},
-		{"ReplyOnly", nil},
+		{"Back", new("b"), true},
+		{"ReplyOnly", nil, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			s, rt, ticketID := buildTicketInBuilding(t)
-			qID := escalateDirect(t, s, ticketID, nil, nil, response.EscalationCodeEnvironment, response.EscalationOriginBuild)
+			var qID int64
+			if tc.legacy {
+				qID = legacyEscalationQuestion(t, s, ticketID, response.EscalationCodeEnvironment, response.EscalationOriginBuild)
+			} else {
+				qID = escalateDirect(t, s, ticketID, nil, nil, response.EscalationCodeEnvironment, response.EscalationOriginBuild)
+			}
 			answerGateQuestion(t, s, ticketID, qID, tc.option, "let's replan instead")
 
 			commit, err := runBuilding(t, s, claimForBuild(t, s, rt, ticketID), ticketID)

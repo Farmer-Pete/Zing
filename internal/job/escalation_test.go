@@ -80,6 +80,55 @@ func escalateDirect(t *testing.T, s *store.Store, ticketID int64, runID, session
 	return open[len(open)-1].ID
 }
 
+// legacyEscalationQuestion inserts an escalation message plus its linked
+// question directly through store.InsertMessage, carrying the fixed
+// three-option payload every escalation offered before #47 item 2
+// (design section 6.7, pre-fix): "Retry", "Back to planning", and
+// "Abandon", recommended "b". escalateDirect now goes through the fixed
+// escalateTx, which never offers "b" once the ticket is past planning, so
+// it cannot produce this shape any more -- this helper stands in for one of
+// the escalations the database already carried before that fix shipped
+// (the plan's own "Existing stored escalations: not touched"), so
+// building.go's and postbuild.go's own choice == b row (D14, left
+// unchanged by #47 item 2) still has a real stored row to resolve in
+// tests. Returns the linked question's id.
+func legacyEscalationQuestion(t *testing.T, s *store.Store, ticketID int64, code response.EscalationCode, origin response.EscalationOrigin) int64 {
+	t.Helper()
+	payload := testEscalationPayload(code, origin)
+	body := string(code) + ": " + payload.What
+	escPayload, err := json.Marshal(payload)
+	if err != nil {
+		t.Fatalf("legacyEscalationQuestion: marshal escalation payload: %v", err)
+	}
+	escID, err := s.InsertMessage(t.Context(), store.Message{
+		TicketID: ticketID, Type: testMsgTypeEscalation, Author: testAuthorZing, Body: body, Payload: escPayload,
+	})
+	if err != nil {
+		t.Fatalf("legacyEscalationQuestion: InsertMessage(escalation): %v", err)
+	}
+
+	qPayload, err := json.Marshal(response.QuestionPayload{
+		Key: "Q1", Kind: response.QuestionKindQuestion, State: response.QuestionStateOpen,
+		Recommended: "b",
+		Options: []response.Option{
+			{Key: "a", Text: "Retry"},
+			{Key: "b", Text: "Back to planning"},
+			{Key: "c", Text: "Abandon"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("legacyEscalationQuestion: marshal question payload: %v", err)
+	}
+	qID, err := s.InsertMessage(t.Context(), store.Message{
+		TicketID: ticketID, ParentID: &escID, Type: testMsgTypeQuestion, Author: testAuthorZing,
+		State: new("open"), Body: body + "\n\nHow should Zing proceed?", Payload: qPayload,
+	})
+	if err != nil {
+		t.Fatalf("legacyEscalationQuestion: InsertMessage(question): %v", err)
+	}
+	return qID
+}
+
 // reserveTerminalRun opens a fresh session for job (design section 4.5's
 // own Reserve, Session insert on su.ID == nil) and terminalizes its first
 // run as "error", the RunID a run-caused escalation's own Escalation.RunID
