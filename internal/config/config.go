@@ -660,7 +660,7 @@ func applyDefaults(md toml.MetaData, cfg *Config) {
 		cfg.Models.Fable = "claude-fable-5-1"
 	}
 	if !md.IsDefined("models", "codex") {
-		cfg.Models.Codex = "gpt-5.5"
+		cfg.Models.Codex = "gpt-6-luna"
 	}
 	if !md.IsDefined("dispatch", "interval_seconds") {
 		cfg.Dispatch.IntervalSeconds = 30

@@ -204,7 +204,7 @@ type liveJudgeConfig struct {
 // liveJudgeRawModels is the one key loadLiveJudgeConfig reads straight from
 // zing.toml, bypassing config.Load's own applyDefaults: config.Config.Models
 // always carries some codex value after Load (applyDefaults substitutes
-// "gpt-5.5" the moment zing.toml leaves [models] codex undefined), so
+// "gpt-6-luna" the moment zing.toml leaves [models] codex undefined), so
 // reading it back from cfg itself could never distinguish the owner's own
 // choice from that silent default -- exactly the literal this harness's
 // first live runs proved the judge Codex home's own login refuses. Only
