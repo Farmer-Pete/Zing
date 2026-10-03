@@ -78,8 +78,17 @@ const (
 	// escalationChoiceRetry, escalationChoiceBack, and escalationChoiceAbandon
 	// are the three option keys escalateTx's own linked question ever offers
 	// (design D10, section 6.7): "retry", "back to planning", and "abandon".
-	// A round carrying replies and no option at all resolves as
-	// escalationChoiceBack (roundChoice's own default).
+	// An escalation round carrying replies and no option at all resolves as
+	// that question's own stored Recommended option, falling back to
+	// escalationChoiceRetry when none is stored (roundChoice's own default,
+	// #47 follow-up: it used to hardcode escalationChoiceBack here, which
+	// re-escalated replan_unsupported for a plain reply on a post-seal
+	// escalation -- back to planning cannot run there any more). Every
+	// other question kind roundChoice ever sees (merge, gate, split,
+	// perimeter, review) keeps the plain escalationChoiceBack default it
+	// always had (PR #60 review, P1: only an escalation's own Kind may read
+	// its Recommended back this way -- a merge question's Recommended is
+	// always "a", meaning something else entirely there).
 	escalationChoiceRetry   = "a"
 	escalationChoiceBack    = "b"
 	escalationChoiceAbandon = "c"
@@ -1723,14 +1732,53 @@ func resumeOrFresh(ctx context.Context, t store.Ticket, d Deps, extra []prompt.N
 
 // roundChoice returns round's choice among escalationChoiceRetry,
 // escalationChoiceBack, and escalationChoiceAbandon (design section 6.7's
-// Resolve): the newest sent answer's chosen option, or escalationChoiceBack
-// when the round carries replies and no option at all ("a round with
-// replies and no option is choice b").
+// Resolve): the newest sent answer's chosen option, or, when the round
+// carries replies and no option at all, whatever roundRecommendedOption
+// defaults an unanswered round of this kind to. roundChoice is shared with
+// every question kind a round can carry (building.go's and postbuild.go's
+// own escalation rounds, and shipping.go's mergeAnswer, a merge round) --
+// only an escalation question may default to its own stored Recommended
+// (PR #60 review, P1): a merge question's Recommended is always "a"
+// (mergeQuestionMessages, shipping.go), the opposite of what reading it
+// back here would mean (it would silently merge a PR the owner only left
+// a note on, never picked a chip for), so roundRecommendedOption gates
+// that default on the round's own question Kind.
 func roundChoice(round store.Round) string {
 	if opt := newestChosenOption(round.Answers); opt != "" {
 		return opt
 	}
-	return escalationChoiceBack
+	return roundRecommendedOption(round)
+}
+
+// roundRecommendedOption is roundChoice's own "replies with no option"
+// default. For an escalation question (Kind "question", escalateTx's own
+// payload.Kind, store/commit.go) it reads that question's own stored
+// Recommended option back (#47 follow-up): a freshly raised escalation's
+// Recommended already follows escalationOptionsFor (store/commit.go), so
+// this just carries that choice through unanswered; an escalation stored
+// before that fix shipped keeps whatever it recommended then (store's own
+// "existing stored escalations: not touched"). It falls back to
+// escalationChoiceRetry only when an escalation's own payload has no
+// parseable Recommended. For every other kind (merge, gate, split,
+// perimeter, review) -- and when there is no question at all -- it returns
+// escalationChoiceBack, exactly the one fixed default every kind had
+// before #47 (PR #60 review, P1): escalationChoiceBack already means
+// "hold" for a merge round (shipping.go's mergeAnswer: anything but
+// escalationChoiceRetry holds), so this is not a new behavior for those
+// kinds, only a name for the one they already had.
+func roundRecommendedOption(round store.Round) string {
+	if len(round.Questions) == 0 {
+		return escalationChoiceBack
+	}
+	var qp response.QuestionPayload
+	q := round.Questions[len(round.Questions)-1]
+	if err := json.Unmarshal(q.Payload, &qp); err != nil || qp.Kind != response.QuestionKindQuestion {
+		return escalationChoiceBack
+	}
+	if qp.Recommended == "" {
+		return escalationChoiceRetry
+	}
+	return qp.Recommended
 }
 
 // int64OrZero renders a nullable id for a log line as 0 when absent, never a

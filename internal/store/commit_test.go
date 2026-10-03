@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -30,6 +31,12 @@ const (
 	testOutcomeBug       = "bug"
 	testOutcomeError     = "error"
 	testTypePlan         = "plan"
+
+	// testStateReviewing and testStateJudging name the two post-seal ticket
+	// states the escalation-options tests (#47 item 2) table over, alongside
+	// testStateBuilding and reads_test.go's own testStateShipping.
+	testStateReviewing = "reviewing"
+	testStateJudging   = "judging"
 
 	// testStateGeneric is an arbitrary Next value for a fence or claim test
 	// that cares only about ownership and expiry, not about any real
@@ -842,12 +849,12 @@ func TestCommitHandlerResult_CodeHandlerTransitionWritesStateMessage(t *testing.
 	s := newTestStore(t)
 	ctx := t.Context()
 	_, ticketID := seedQueuedTicket(t, s, "1")
-	setTicketState(t, s, ticketID, "reviewing")
+	setTicketState(t, s, ticketID, testStateReviewing)
 	owner, expires := claimForCommit(t, s, ticketID)
 
 	applied, err := s.CommitHandlerResult(ctx, HandlerCommit{
 		TicketID: ticketID, Owner: owner, Expires: expires,
-		Next: "judging", Reason: "review clean",
+		Next: testStateJudging, Reason: "review clean",
 	})
 	if err != nil {
 		t.Fatalf("CommitHandlerResult: %v", err)
@@ -3119,19 +3126,33 @@ func escalationTestPayload(code response.EscalationCode, origin response.Escalat
 	}
 }
 
-// wantEscalationOptions is the fixed retry/back-to-planning/abandon choice
-// every escalation's linked question offers (design section 6.7).
-var wantEscalationOptions = []response.Option{
-	{Key: "a", Text: "Retry"},
-	{Key: "b", Text: "Back to planning"},
-	{Key: "c", Text: "Abandon"},
+// wantEscalationOptionsPlanning is the three-option retry/back-to-planning/
+// abandon choice a planning-stage escalation's linked question offers
+// (design section 6.7; #47 item 2: back to planning can run in planning, so
+// all three are offered there).
+var wantEscalationOptionsPlanning = []response.Option{
+	{Key: "a", Text: escalationOptionRetry},
+	{Key: "b", Text: escalationOptionBackToPlanning},
+	{Key: "c", Text: escalationOptionAbandon},
+}
+
+// wantEscalationOptionsPostSeal is the two-option retry/abandon choice a
+// post-seal escalation's linked question offers (#47 item 2): back to
+// planning cannot run once the plan is sealed (replanUnsupportedEscalation
+// is the only thing choosing it does there), so it is dropped rather than
+// offered and left to loop. Abandon keeps its "c" key; it is never
+// renumbered to "b".
+var wantEscalationOptionsPostSeal = []response.Option{
+	{Key: "a", Text: escalationOptionRetry},
+	{Key: "c", Text: escalationOptionAbandon},
 }
 
 // TestCommitHandlerResult_EscalationCapHasNilRunID proves a cap escalation
 // (no run caused it) inserts an escalation message and its linked question
 // both with RunID nil, the question parented to the escalation's own id,
-// recommended "b", offering the fixed three options, and both bodies exactly
-// as design section 6.7 specifies.
+// recommended "a" (wall_clock is not a back-to-planning code), offering the
+// three planning-stage options, and both bodies exactly as design section
+// 6.7 specifies.
 func TestCommitHandlerResult_EscalationCapHasNilRunID(t *testing.T) {
 	t.Parallel()
 	s := newTestStore(t)
@@ -3193,11 +3214,11 @@ func TestCommitHandlerResult_EscalationCapHasNilRunID(t *testing.T) {
 	if qp.Key != "Q1" {
 		t.Errorf("question.Key = %q, want Q1", qp.Key)
 	}
-	if qp.Recommended != "b" {
-		t.Errorf("question.Recommended = %q, want b", qp.Recommended)
+	if qp.Recommended != "a" {
+		t.Errorf("question.Recommended = %q, want a", qp.Recommended)
 	}
-	if !reflect.DeepEqual(qp.Options, wantEscalationOptions) {
-		t.Errorf("question.Options = %+v, want %+v", qp.Options, wantEscalationOptions)
+	if !reflect.DeepEqual(qp.Options, wantEscalationOptionsPlanning) {
+		t.Errorf("question.Options = %+v, want %+v", qp.Options, wantEscalationOptionsPlanning)
 	}
 
 	var ep response.EscalationPayload
@@ -3335,6 +3356,194 @@ func TestCommitHandlerResult_EscalationAllocatesSequentialQuestionKeys(t *testin
 	}
 	if !reflect.DeepEqual(keys, []string{"Q1", "Q2"}) {
 		t.Errorf("question keys in commit order = %v, want [Q1 Q2]", keys)
+	}
+}
+
+// latestQuestionPayload returns the newest "question" message's own payload
+// for ticketID, unmarshaled (#47 item 2's escalation-options tests share
+// this instead of each repeating the ListMessages/unmarshal pair).
+func latestQuestionPayload(t *testing.T, s *Store, ticketID int64) response.QuestionPayload {
+	t.Helper()
+	msgs, err := s.ListMessages(t.Context(), ticketID)
+	if err != nil {
+		t.Fatalf("ListMessages: %v", err)
+	}
+	for i := range slices.Backward(msgs) {
+		if msgs[i].Type != msgTypeQuestion {
+			continue
+		}
+		var qp response.QuestionPayload
+		if err := json.Unmarshal(msgs[i].Payload, &qp); err != nil {
+			t.Fatalf("unmarshal question payload: %v", err)
+		}
+		return qp
+	}
+	t.Fatal("latestQuestionPayload: no question message found")
+	return response.QuestionPayload{}
+}
+
+// TestCommitHandlerResult_EscalationPostSealOmitsBackToPlanning proves a
+// post-seal escalation (#47 item 2) offers only Retry and Abandon,
+// recommending Retry, for every post-seal state and whatever code raised
+// it: back to planning cannot run once the plan is sealed
+// (replanUnsupportedEscalation is the only thing choosing it does there),
+// so it is dropped rather than offered and left to loop. Abandon keeps its
+// "c" key in every row -- it is never renumbered to "b".
+func TestCommitHandlerResult_EscalationPostSealOmitsBackToPlanning(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name   string
+		state  string
+		origin response.EscalationOrigin
+	}{
+		{"building", testStateBuilding, response.EscalationOriginBuild},
+		{"reviewing", testStateReviewing, response.EscalationOriginReview},
+		{"judging", testStateJudging, response.EscalationOriginJudge},
+		{"shipping", testStateShipping, response.EscalationOriginShipping},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			s := newTestStore(t)
+			ctx := t.Context()
+			_, ticketID := seedQueuedTicket(t, s, "1")
+			setTicketState(t, s, ticketID, tt.state)
+
+			owner, expires := claimForCommit(t, s, ticketID)
+			applied, err := s.CommitHandlerResult(ctx, HandlerCommit{
+				TicketID: ticketID, Owner: owner, Expires: expires,
+				Escalation: &EscalationCommit{
+					Body:    "response_invalid: post-seal, invalid output twice",
+					Payload: escalationTestPayload(response.EscalationCodeResponseInvalid, tt.origin),
+				},
+			})
+			if err != nil {
+				t.Fatalf("CommitHandlerResult: %v", err)
+			}
+			if !applied {
+				t.Fatal("applied = false, want true")
+			}
+
+			qp := latestQuestionPayload(t, s, ticketID)
+			if !reflect.DeepEqual(qp.Options, wantEscalationOptionsPostSeal) {
+				t.Errorf("question.Options = %+v, want %+v", qp.Options, wantEscalationOptionsPostSeal)
+			}
+			if qp.Recommended != "a" {
+				t.Errorf("question.Recommended = %q, want a", qp.Recommended)
+			}
+		})
+	}
+}
+
+// TestCommitHandlerResult_EscalationPlanningLoopsExhaustedRecommendsRetry
+// proves a planning-stage loops_exhausted escalation recommends Retry
+// (#47 item 2's table: "retry with findings," matching the owner's own
+// example) while still offering all three options.
+func TestCommitHandlerResult_EscalationPlanningLoopsExhaustedRecommendsRetry(t *testing.T) {
+	t.Parallel()
+	s := newTestStore(t)
+	ctx := t.Context()
+	_, ticketID := seedQueuedTicket(t, s, "1")
+	setTicketState(t, s, ticketID, testStatePlanning)
+
+	owner, expires := claimForCommit(t, s, ticketID)
+	applied, err := s.CommitHandlerResult(ctx, HandlerCommit{
+		TicketID: ticketID, Owner: owner, Expires: expires,
+		Escalation: &EscalationCommit{
+			Body:    "loops_exhausted: floor findings remain open",
+			Payload: escalationTestPayload(response.EscalationCodeLoopsExhausted, response.EscalationOriginCapLoops),
+		},
+	})
+	if err != nil {
+		t.Fatalf("CommitHandlerResult: %v", err)
+	}
+	if !applied {
+		t.Fatal("applied = false, want true")
+	}
+
+	qp := latestQuestionPayload(t, s, ticketID)
+	if qp.Recommended != "a" {
+		t.Errorf("question.Recommended = %q, want a", qp.Recommended)
+	}
+	if !reflect.DeepEqual(qp.Options, wantEscalationOptionsPlanning) {
+		t.Errorf("question.Options = %+v, want %+v", qp.Options, wantEscalationOptionsPlanning)
+	}
+}
+
+// TestCommitHandlerResult_EscalationPlanningSplitUnsupportedRecommendsBack
+// proves a planning-stage split_unsupported escalation recommends back to
+// planning (#47 item 2's table: the split can't proceed, so a new plan is
+// the actual fix) while still offering all three options.
+func TestCommitHandlerResult_EscalationPlanningSplitUnsupportedRecommendsBack(t *testing.T) {
+	t.Parallel()
+	s := newTestStore(t)
+	ctx := t.Context()
+	_, ticketID := seedQueuedTicket(t, s, "1")
+	setTicketState(t, s, ticketID, testStatePlanning)
+
+	owner, expires := claimForCommit(t, s, ticketID)
+	applied, err := s.CommitHandlerResult(ctx, HandlerCommit{
+		TicketID: ticketID, Owner: owner, Expires: expires,
+		Escalation: &EscalationCommit{
+			Body:    "split_unsupported: the split cannot proceed",
+			Payload: escalationTestPayload(response.EscalationCodeSplitUnsupported, response.EscalationOriginSplit),
+		},
+	})
+	if err != nil {
+		t.Fatalf("CommitHandlerResult: %v", err)
+	}
+	if !applied {
+		t.Fatal("applied = false, want true")
+	}
+
+	qp := latestQuestionPayload(t, s, ticketID)
+	if qp.Recommended != "b" {
+		t.Errorf("question.Recommended = %q, want b", qp.Recommended)
+	}
+	if !reflect.DeepEqual(qp.Options, wantEscalationOptionsPlanning) {
+		t.Errorf("question.Options = %+v, want %+v", qp.Options, wantEscalationOptionsPlanning)
+	}
+}
+
+// TestCommitHandlerResult_EscalationPlanningDefaultsToRetry proves every
+// planning-stage code but the two back-to-planning codes recommends Retry
+// (#47 item 2's table: transient, or both choices already run the identical
+// commit, so Retry is the non-misleading label).
+func TestCommitHandlerResult_EscalationPlanningDefaultsToRetry(t *testing.T) {
+	t.Parallel()
+	codes := []response.EscalationCode{
+		response.EscalationCodeResponseInvalid, response.EscalationCodeEnvironment,
+		response.EscalationCodeWallClock, response.EscalationCodeResumesExhausted,
+		response.EscalationCodeSandboxUnavailable, response.EscalationCodeOther,
+	}
+	for _, code := range codes {
+		t.Run(string(code), func(t *testing.T) {
+			t.Parallel()
+			s := newTestStore(t)
+			ctx := t.Context()
+			_, ticketID := seedQueuedTicket(t, s, "1")
+			setTicketState(t, s, ticketID, testStatePlanning)
+
+			owner, expires := claimForCommit(t, s, ticketID)
+			applied, err := s.CommitHandlerResult(ctx, HandlerCommit{
+				TicketID: ticketID, Owner: owner, Expires: expires,
+				Escalation: &EscalationCommit{
+					Body:    string(code) + ": test",
+					Payload: escalationTestPayload(code, response.EscalationOriginPlanningResume),
+				},
+			})
+			if err != nil {
+				t.Fatalf("CommitHandlerResult: %v", err)
+			}
+			if !applied {
+				t.Fatal("applied = false, want true")
+			}
+
+			qp := latestQuestionPayload(t, s, ticketID)
+			if qp.Recommended != "a" {
+				t.Errorf("question.Recommended = %q, want a", qp.Recommended)
+			}
+		})
 	}
 }
 

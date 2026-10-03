@@ -472,7 +472,7 @@ func (s *Store) CommitHandlerResult(ctx context.Context, c HandlerCommit) (bool,
 	}
 
 	if c.Escalation != nil {
-		if err = s.escalateTx(ctx, tx, c.TicketID, *c.Escalation); err != nil {
+		if err = s.escalateTx(ctx, tx, c.TicketID, ticket.State, *c.Escalation); err != nil {
 			return false, fmt.Errorf("commit handler result: %w", err)
 		}
 	}
@@ -1201,12 +1201,58 @@ func fillQuestionKeyTx(ctx context.Context, tx *sql.Tx, ticketID int64, payload 
 	return out, nil
 }
 
+// escalationOptionRetry, escalationOptionBackToPlanning, and
+// escalationOptionAbandon are the three escalation option texts
+// escalationOptionsFor assembles (goconst: each repeats across commit.go
+// and commit_test.go's own want fixtures). The option keys stay literal
+// "a"/"b"/"c" at each call site: those are the stable ids this plan's own
+// point is that every caller must keep meaning the same thing by them, not
+// a value worth hiding behind a name.
+const (
+	escalationOptionRetry          = "Retry"
+	escalationOptionBackToPlanning = "Back to planning"
+	escalationOptionAbandon        = "Abandon"
+)
+
+// escalationOptionsFor picks the question's options and recommendation
+// (#47): post-seal, back to planning cannot run (replanUnsupportedEscalation
+// is the only thing it does there), so it's dropped and Retry is always
+// recommended. In planning all three options work; the recommendation
+// follows the code. Abandon always keeps its "c" key, in both branches: it
+// is never renumbered to "b" just because back to planning is missing.
+func escalationOptionsFor(ticketState, code string) (options []response.Option, recommended string) {
+	if ticketState != ticketStatePlanning {
+		return []response.Option{
+			{Key: "a", Text: escalationOptionRetry},
+			{Key: "c", Text: escalationOptionAbandon},
+		}, "a"
+	}
+	recommended = "a"
+	if escalationBackToPlanningCodes[code] {
+		recommended = "b"
+	}
+	return []response.Option{
+		{Key: "a", Text: escalationOptionRetry},
+		{Key: "b", Text: escalationOptionBackToPlanning},
+		{Key: "c", Text: escalationOptionAbandon},
+	}, recommended
+}
+
+// escalationBackToPlanningCodes is the planning-stage table's own two
+// exceptions (#47 item 2): every other code recommends Retry.
+var escalationBackToPlanningCodes = map[string]bool{
+	string(response.EscalationCodeSplitUnsupported):          true,
+	string(response.EscalationCodeNothingToDoWithTrueClaims): true,
+}
+
 // escalateTx inserts ec's escalation message, then its linked question
 // (design D10, section 6.7): the question is parented to the escalation's
-// own id, carries the same run id, is recommended "b", and offers the fixed
-// retry/back-to-planning/abandon choice. Both payloads are validated by
-// insertMessageTx against their committed schemas.
-func (s *Store) escalateTx(ctx context.Context, tx *sql.Tx, ticketID int64, ec EscalationCommit) error {
+// own id, carries the same run id, and offers whichever options and
+// recommendation escalationOptionsFor picks for ticketState and the
+// escalation's own code (#47 item 2: post-seal, back to planning cannot
+// run, so it is dropped). Both payloads are validated by insertMessageTx
+// against their committed schemas.
+func (s *Store) escalateTx(ctx context.Context, tx *sql.Tx, ticketID int64, ticketState string, ec EscalationCommit) error {
 	// A non-nil RunID must name a run on one of this ticket's own sessions,
 	// the same scoping every Artifact.RunID passes: the foreign key alone only
 	// proves the run exists, so without this a RunID from another ticket would
@@ -1241,16 +1287,13 @@ func (s *Store) escalateTx(ctx context.Context, tx *sql.Tx, ticketID int64, ec E
 		return fmt.Errorf("escalation: %w", err)
 	}
 
+	options, recommended := escalationOptionsFor(ticketState, ec.Payload.Code)
 	qPayload, err := json.Marshal(response.QuestionPayload{
 		Key:         fmt.Sprintf("Q%d", n),
 		Kind:        response.QuestionKindQuestion,
 		State:       response.QuestionStateOpen,
-		Recommended: "b",
-		Options: []response.Option{
-			{Key: "a", Text: "Retry"},
-			{Key: "b", Text: "Back to planning"},
-			{Key: "c", Text: "Abandon"},
-		},
+		Recommended: recommended,
+		Options:     options,
 	})
 	if err != nil {
 		return fmt.Errorf("escalation: marshal question payload: %w", err)
