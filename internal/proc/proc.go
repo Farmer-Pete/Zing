@@ -8,6 +8,7 @@ package proc
 
 import (
 	"errors"
+	"fmt"
 	"syscall"
 )
 
@@ -39,6 +40,14 @@ func StartToken(pid int) (string, error) {
 // nil (we may signal it) or EPERM (a process is there, just not ours to
 // signal) both mean at least one process in it is still alive.
 func GroupAlive(pgid int) bool {
+	// pgid <= 0 is never a group this package's own caller recorded (design
+	// section 5.1's CHECK (pgid > 0) on runs.pgid): pgid 0 would target
+	// this very process's own group, and a negative value becomes a
+	// positive pid, signaling one unrelated process instead of a group
+	// (PR review fix B1). Reject both before they ever reach kill(2).
+	if pgid <= 0 {
+		return false
+	}
 	err := syscall.Kill(-pgid, 0)
 	return err == nil || errors.Is(err, syscall.EPERM)
 }
@@ -48,6 +57,13 @@ func GroupAlive(pgid int) bool {
 // may retry KillGroup every pass until the group is actually gone, and that
 // retry must not itself start failing once it succeeds.
 func KillGroup(pgid int) error {
+	// Same guard as GroupAlive, and for the same reason (PR review fix
+	// B1): pgid 0 would send SIGKILL to zing serve's own process group, and
+	// a negative pgid becomes a positive pid, signaling one unrelated
+	// process instead of a group.
+	if pgid <= 0 {
+		return fmt.Errorf("proc: kill group: invalid pgid %d", pgid)
+	}
 	if err := syscall.Kill(-pgid, syscall.SIGKILL); err != nil && !errors.Is(err, syscall.ESRCH) {
 		return err
 	}

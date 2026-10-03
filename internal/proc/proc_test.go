@@ -32,30 +32,49 @@ func TestStartToken_SelfIsNonEmptyAndStable(t *testing.T) {
 	}
 }
 
-// TestStartToken_ChildDiffersFromSelf proves two different live processes
-// get different tokens (design section 6.1).
-func TestStartToken_ChildDiffersFromSelf(t *testing.T) {
+// TestStartToken_TwoChildrenSeparatedByATickDiffer proves two distinct live
+// processes started clearly more than one kernel tick apart get different
+// tokens (design section 6.1). It compares two children this test itself
+// starts, not self against a child (PR review fix B4): self is the test
+// binary, whose own start has nothing to do with the child's, so that
+// comparison could share a tick (Linux's starttime field is clock-tick
+// resolution, 10ms at the common HZ=100) with no guarantee either way;
+// two children started 50ms apart -- well past even a coarse 100Hz
+// kernel's own tick -- is the comparison that actually needs to differ,
+// and deterministically does.
+func TestStartToken_TwoChildrenSeparatedByATickDiffer(t *testing.T) {
 	t.Parallel()
-	self, err := StartToken(os.Getpid())
-	if err != nil {
-		t.Fatalf("StartToken(self): %v", err)
-	}
 
-	cmd := exec.CommandContext(t.Context(), "sleep", "5")
-	if err = cmd.Start(); err != nil {
+	first := exec.CommandContext(t.Context(), "sleep", "5")
+	if err := first.Start(); err != nil {
 		t.Skipf("start sleep: %v", err)
 	}
 	defer func() {
-		_ = cmd.Process.Kill() //nolint:errcheck // best-effort teardown; the process may already be gone
-		_ = cmd.Wait()         //nolint:errcheck // best-effort teardown; only reaping the child matters here
+		_ = first.Process.Kill() //nolint:errcheck // best-effort teardown; the process may already be gone
+		_ = first.Wait()         //nolint:errcheck // best-effort teardown; only reaping the child matters here
 	}()
 
-	child, err := StartToken(cmd.Process.Pid)
-	if err != nil {
-		t.Fatalf("StartToken(child): %v", err)
+	time.Sleep(50 * time.Millisecond)
+
+	second := exec.CommandContext(t.Context(), "sleep", "5")
+	if err := second.Start(); err != nil {
+		t.Skipf("start sleep: %v", err)
 	}
-	if child == self {
-		t.Errorf("StartToken(child) = %q, same as self %q, want different", child, self)
+	defer func() {
+		_ = second.Process.Kill() //nolint:errcheck // best-effort teardown; the process may already be gone
+		_ = second.Wait()         //nolint:errcheck // best-effort teardown; only reaping the child matters here
+	}()
+
+	firstToken, err := StartToken(first.Process.Pid)
+	if err != nil {
+		t.Fatalf("StartToken(first): %v", err)
+	}
+	secondToken, err := StartToken(second.Process.Pid)
+	if err != nil {
+		t.Fatalf("StartToken(second): %v", err)
+	}
+	if firstToken == secondToken {
+		t.Errorf("StartToken(first) = StartToken(second) = %q, want different (started 50ms apart)", firstToken)
 	}
 }
 
@@ -155,6 +174,35 @@ func TestKillGroup_KillsGroupAndIsIdempotent(t *testing.T) {
 
 	if err := KillGroup(pgid); err != nil {
 		t.Errorf("second KillGroup on an already-gone group: %v, want nil (ESRCH is not an error)", err)
+	}
+}
+
+// TestGroupAlive_RejectsNonPositivePgid proves PR review fix B1:
+// GroupAlive(0) would otherwise check this very test process's own group
+// (kill(0, 0)), and a negative pgid becomes a positive pid, signaling one
+// unrelated process instead of a group -- both must report false, not
+// "alive", for a value that was never a real process group id this
+// package's own caller recorded.
+func TestGroupAlive_RejectsNonPositivePgid(t *testing.T) {
+	t.Parallel()
+	if GroupAlive(0) {
+		t.Error("GroupAlive(0) = true, want false")
+	}
+	if GroupAlive(-1) {
+		t.Error("GroupAlive(-1) = true, want false")
+	}
+}
+
+// TestKillGroup_RejectsNonPositivePgid is TestGroupAlive_RejectsNonPositivePgid's
+// own proof for KillGroup (PR review fix B1): KillGroup(0) would otherwise
+// send SIGKILL to this very test process's own group.
+func TestKillGroup_RejectsNonPositivePgid(t *testing.T) {
+	t.Parallel()
+	if err := KillGroup(0); err == nil {
+		t.Error("KillGroup(0) = nil, want an error")
+	}
+	if err := KillGroup(-1); err == nil {
+		t.Error("KillGroup(-1) = nil, want an error")
 	}
 }
 

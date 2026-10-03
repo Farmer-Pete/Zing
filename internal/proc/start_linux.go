@@ -17,17 +17,29 @@ import (
 const starttimeFieldsAfterComm = 19
 
 // startToken reads pid's process start time from /proc/<pid>/stat (design
-// section 6.1): field 22, starttime, in clock ticks since boot -- an
-// incarnation marker the kernel never reuses for a pid's later process
-// while it can still answer at all. The comm field (field 2) is
-// parenthesized and may itself contain spaces or parens, so this finds the
-// stat line's *last* ')' and splits only what follows it, rather than
-// splitting the whole line on whitespace and risking a shifted field index.
-// A missing file (the process already exited, and the kernel no longer has
-// an entry for it) wraps ErrNoProcess.
+// section 6.1): field 22, starttime, in clock ticks since boot, prefixed
+// with the current boot's own btime (PR review fix B2) so the token also
+// differs across a reboot that reuses the pid -- starttime alone is tick-
+// resolution and resets every boot, so a pid reused after a reboot could
+// otherwise land on the same tick value a stale recording named. The comm
+// field (field 2) is parenthesized and may itself contain spaces or
+// parens, so this finds the stat line's *last* ')' and splits only what
+// follows it, rather than splitting the whole line on whitespace and
+// risking a shifted field index. A missing file (the process already
+// exited, and the kernel no longer has an entry for it) wraps
+// ErrNoProcess.
 func startToken(pid int) (string, error) {
 	data, err := os.ReadFile(fmt.Sprintf("/proc/%d/stat", pid))
 	if err != nil {
+		// Only a missing entry means the process is gone (PR review fix
+		// B3): a permission or I/O failure reading an otherwise-live
+		// process's own /proc/<pid>/stat must not be mistaken for
+		// ErrNoProcess, or a caller (serveLockHolderAlive, reclaim's own
+		// classifyOpenRun) would treat an unreadable live process as
+		// exited.
+		if !os.IsNotExist(err) {
+			return "", fmt.Errorf("proc: start token: pid %d: read /proc/%d/stat: %w", pid, pid, err)
+		}
 		return "", fmt.Errorf("%w: pid %d: %v", ErrNoProcess, pid, err) //nolint:errorlint // ErrNoProcess is the sentinel this wraps; err's own type carries nothing a caller matches on
 	}
 
@@ -57,5 +69,38 @@ func startToken(pid int) (string, error) {
 	if _, err := strconv.ParseUint(starttime, 10, 64); err != nil {
 		return "", fmt.Errorf("proc: start token: pid %d: starttime field %q: %w", pid, starttime, err)
 	}
-	return starttime, nil
+
+	// starttime alone is ticks since boot, so it resets every reboot: a pid
+	// reused after a reboot can land on the same tick value a stale
+	// recording named, which would make a dead serve's lock, or a dead
+	// orphan's process group, read as alive (PR review fix B2). Prefixing
+	// the current boot's own btime (seconds since the epoch, from
+	// /proc/stat, which does not reset within one boot) makes the token
+	// differ across any two boots even when the tick value coincides.
+	btime, err := bootTime()
+	if err != nil {
+		return "", fmt.Errorf("proc: start token: pid %d: %w", pid, err)
+	}
+	return fmt.Sprintf("%d:%s", btime, starttime), nil
+}
+
+// bootTime reads /proc/stat's own "btime" line: the current boot's start
+// time, in whole seconds since the epoch, stable for the life of the boot.
+func bootTime() (uint64, error) {
+	data, err := os.ReadFile("/proc/stat")
+	if err != nil {
+		return 0, fmt.Errorf("read /proc/stat: %w", err)
+	}
+	for line := range strings.Lines(string(data)) {
+		rest, ok := strings.CutPrefix(line, "btime ")
+		if !ok {
+			continue
+		}
+		btime, perr := strconv.ParseUint(strings.TrimSpace(rest), 10, 64)
+		if perr != nil {
+			return 0, fmt.Errorf("parse btime %q: %w", rest, perr)
+		}
+		return btime, nil
+	}
+	return 0, fmt.Errorf("no btime line in /proc/stat")
 }
