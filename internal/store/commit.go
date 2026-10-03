@@ -1329,7 +1329,8 @@ func applyConversationTx(ctx context.Context, tx *sql.Tx, s *Store, ticketID int
 			continue
 		}
 		if _, err = tx.ExecContext(ctx,
-			`UPDATE messages SET state = ? WHERE id = ?`, questionStateResolved, settle.QuestionID,
+			`UPDATE messages SET state = ?, read_at = COALESCE(read_at, ?) WHERE id = ?`,
+			questionStateResolved, formatTime(time.Now()), settle.QuestionID,
 		); err != nil {
 			return nil, fmt.Errorf("settle question %d: %w", settle.QuestionID, err)
 		}

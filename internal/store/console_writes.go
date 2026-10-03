@@ -680,6 +680,20 @@ func (s *Store) SendBatch(ctx context.Context, ticketID int64) (result BatchResu
 		return BatchResult{}, markErr
 	}
 
+	// Answering a question means the owner read it: set read_at on every
+	// question a sent draft points at, planning questions included.
+	readAt := formatTime(time.Now())
+	for i := range valid {
+		if valid[i].ParentID == nil {
+			continue
+		}
+		if _, err = tx.ExecContext(ctx,
+			`UPDATE messages SET read_at = ? WHERE id = ? AND read_at IS NULL`, readAt, *valid[i].ParentID,
+		); err != nil {
+			return BatchResult{}, fmt.Errorf("send batch: mark question %d read: %w", *valid[i].ParentID, err)
+		}
+	}
+
 	waitCleared, err := clearMatchingWaitTx(ctx, tx, ticketID)
 	if err != nil {
 		return BatchResult{}, err

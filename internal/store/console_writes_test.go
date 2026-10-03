@@ -481,6 +481,34 @@ func TestSendBatch_LocksAllocatesOneBatchIDAndClearsAQuestionsWait(t *testing.T)
 	}
 }
 
+// TestSendBatch_MarksRepliedQuestionRead proves answering a question sets
+// its read_at: the owner reading the answer draft implies they read the
+// question it replies to (design section 6.7, console_writes.go SendBatch).
+func TestSendBatch_MarksRepliedQuestionRead(t *testing.T) {
+	t.Parallel()
+	s := newTestStore(t)
+	_, ticketID := seedQueuedTicket(t, s, "1")
+	setTicketWaiting(t, s, ticketID, testWaitingQuestions)
+	qID := insertQuestionOption(t, s, ticketID, "Q1")
+
+	opt := "a"
+	if _, err := s.SaveDraft(t.Context(), DraftInput{TicketID: ticketID, QuestionID: &qID, Option: &opt}); err != nil {
+		t.Fatalf("SaveDraft: %v", err)
+	}
+
+	if _, err := s.SendBatch(t.Context(), ticketID); err != nil {
+		t.Fatalf("SendBatch: %v", err)
+	}
+
+	q, err := s.GetMessage(t.Context(), qID)
+	if err != nil {
+		t.Fatalf("GetMessage(question): %v", err)
+	}
+	if q.ReadAt == nil {
+		t.Error("question ReadAt = nil, want set after answering")
+	}
+}
+
 // TestSendBatch_ClearsAGateWaitButNeverErrorOrChildren's three subtests each
 // open their own store rather than share one across t.Parallel() siblings:
 // each seeds a ticket under the same fixed testProject name, and
