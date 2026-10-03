@@ -219,6 +219,26 @@ func (s *Store) LatestSession(ctx context.Context, ticketID int64, job string, m
 	return sess, state, nil
 }
 
+// SessionNewestRun returns the newest run (by turn) of sessionID: design
+// section 7.4's own "latest run" for an answered-round resume (building.go's
+// resumeBuildRound, judging.go's resumeAnswered, respond.go's
+// resumeRespondAnswered), each of which already has the session by id
+// (SessionByID) and needs only its newest run's Interrupted flag to decide
+// resumeCharge. ok is false, with no error, when the session has no runs
+// yet (never expected in practice: a round's own session always has at
+// least the run that asked the question).
+func (s *Store) SessionNewestRun(ctx context.Context, sessionID int64) (Run, bool, error) {
+	row := s.db.QueryRowContext(ctx, `SELECT `+runColumns+` FROM runs WHERE session_id = ? ORDER BY turn DESC LIMIT 1`, sessionID)
+	r, err := scanRun(row)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return Run{}, false, nil
+		}
+		return Run{}, false, fmt.Errorf("newest run for session %d: %w", sessionID, err)
+	}
+	return r, true, nil
+}
+
 // SessionByID returns the session with id, classified against maxResumes
 // the same way LatestSession classifies its own newest session (review
 // F045): a build or perimeter round resumes round.SessionID directly (plan

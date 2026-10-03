@@ -439,6 +439,93 @@ func TestDriveFixResumesInterrupted(t *testing.T) {
 	apply(t, s, ticket, resumeCommit)
 }
 
+// TestFixInterruptedResumeIsFree proves design D5, section 7.4's own
+// resumeCharge carries a fix unit exactly as it carries a task unit
+// (TestDriveFixResumesInterrupted's own shape, this test's model): the
+// cancelled run is terminalized by InterruptRuns (a real shutdown or
+// dead-serve interrupt, interrupted=1) rather than ExpireClaims's plain
+// reconcile. DriveFix shares advanceUnit with the task-unit handler
+// (fix.go's own doc comment), so the free resume needs no fix-specific
+// code; this test proves the sharing actually carries the free charge
+// through.
+func TestFixInterruptedResumeIsFree(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow end-to-end flow; runs in the full suite")
+	}
+	t.Parallel()
+	s, _, ticketID := buildTicketInBuilding(t)
+	mid := writeFixRequestMarker(t, s, ticketID, job.FixKindCILog, testFixCILogText, 0)
+	ticket := getTicket(t, s, ticketID)
+
+	mismatchRT := &scriptedRuntime{t: t, steps: []scriptedStep{buildStep([]string{helloTxt}, 0, 0, nil, "fix-free-mismatch-sess")}}
+	deps := claimForBuild(t, s, mismatchRT, ticketID)
+	req := job.FixRequest{MessageID: mid, Kind: job.FixKindCILog, Text: testFixCILogText, AfterRunID: 0}
+
+	commit, err := job.DriveFix(t.Context(), ticket, deps, req) // RUN: claims hello.txt, writes nothing
+	if err != nil {
+		t.Fatalf("DriveFix (RUN): %v", err)
+	}
+	apply(t, s, ticket, commit)
+
+	ticket = getTicket(t, s, ticketID)
+	deps2 := claimForBuild(t, s, mismatchRT, ticketID)
+	checkCommit, err := job.DriveFix(t.Context(), ticket, deps2, req) // CHECK: pending marker
+	if err != nil {
+		t.Fatalf("DriveFix (CHECK): %v", err)
+	}
+	apply(t, s, ticket, checkCommit)
+
+	canceledRT := &scriptedRuntime{t: t, steps: []scriptedStep{
+		{res: runtime.RunResult{ExitCode: -1, AgentTime: 0}, err: runtime.ErrCanceled},
+	}}
+	ticket = getTicket(t, s, ticketID)
+	deps3 := claimForBuild(t, s, canceledRT, ticketID)
+	_, err = job.DriveFix(t.Context(), ticket, deps3, req) // resume: claims, interrupted mid-flight
+	if !errors.Is(err, runtime.ErrCanceled) {
+		t.Fatalf("err = %v, want errors.Is(err, runtime.ErrCanceled)", err)
+	}
+
+	applied, interruptErr := s.InterruptRuns(t.Context(), ticketID, deps3.Owner, deps3.Expires)
+	if interruptErr != nil {
+		t.Fatalf("InterruptRuns: %v", interruptErr)
+	}
+	if !applied {
+		t.Fatal("InterruptRuns: applied = false, want true")
+	}
+
+	maxResumes := deps.Machine.Jobs["build"].MaxResumes
+	sess, state, err := s.LatestSession(t.Context(), ticketID, "build", maxResumes)
+	if err != nil {
+		t.Fatalf("LatestSession: %v", err)
+	}
+	if sess.Resumes != 1 {
+		t.Fatalf("sessions.resumes after the canceled resume = %d, want 1 (charged at Reserve, design section 4.2)", sess.Resumes)
+	}
+	if state != store.SessionOpen {
+		t.Fatalf("session state after the canceled resume = %v, want SessionOpen", state)
+	}
+
+	resumeRT := &scriptedRuntime{t: t, steps: []scriptedStep{buildStep([]string{helloTxt}, 0, 0, nil, "fix-free-mismatch-sess")}}
+	ticket = getTicket(t, s, ticketID)
+	deps4 := claimForBuild(t, s, resumeRT, ticketID)
+	resumeCommit, err := job.DriveFix(t.Context(), ticket, deps4, req) // resume: "interrupted", free
+	if err != nil {
+		t.Fatalf("DriveFix (resume, interrupted): %v", err)
+	}
+	if !strings.Contains(resumeRT.reqs[0].Prompt, "interrupted") {
+		t.Errorf("resume prompt = %q, want the fixed interrupted wording", resumeRT.reqs[0].Prompt)
+	}
+	apply(t, s, ticket, resumeCommit)
+
+	sess, _, err = s.LatestSession(t.Context(), ticketID, "build", maxResumes)
+	if err != nil {
+		t.Fatalf("LatestSession: %v", err)
+	}
+	if sess.Resumes != 1 {
+		t.Errorf("sessions.resumes after the free interrupted resume = %d, want 1 (unchanged: the resume was not charged)", sess.Resumes)
+	}
+}
+
 // TestDriveFixLandWritesLandedMarker proves the fix driver's own LAND
 // addition (design section 5.1, 5.3): a fix unit that checks clean lands
 // in one commit, exactly as a task unit does, and that commit also carries

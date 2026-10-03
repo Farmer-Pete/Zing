@@ -72,17 +72,6 @@ const (
 	markerPerimeterQuestionDroppedFmt = "perimeter question dropped run %d"
 )
 
-// interruptedResumeText is the fixed wording of the "interrupted" resume
-// input (design section 6.3): the raw, never-fenced sentence a build resume
-// carries when ExpireClaims marked its previous run "error" with no
-// escalation and no invalid-output marker of its own.
-const interruptedResumeText = "the previous run was interrupted; continue and return your document"
-
-// labelInterrupted is the NamedInput.Label every "interrupted" resume input
-// carries (building.go, judging.go, respond.go): a shared constant, not a
-// literal repeated at each call site (goconst).
-const labelInterrupted = "interrupted"
-
 // The section 6.1/6.4/6.7 escalation What texts, byte for byte from the
 // plan. Why is this file's own plain-sentence gloss on each one: the plan
 // gives no exact Why for these, only What and (for the adoption checks)
@@ -413,8 +402,12 @@ func (h buildingHandler) advanceUnit(ctx context.Context, t store.Ticket, d Deps
 		// would already have escalated response_invalid, which this
 		// invocation could never reach, the tick's own "not waiting"
 		// precondition). n==0, with the ticket not waiting and the same
-		// session's newest run still error, is exactly what ExpireClaims
-		// leaves behind: an interrupted run.
+		// session's newest run still error, is a run that never got a
+		// response at all -- a shutdown or dead-serve interrupt
+		// (newestRun.Interrupted) or a plainer reconcile ExpireClaims left
+		// behind. resumeCharge (job.go, design D5, section 7.4) tells the
+		// two apart: an interrupted newest run resumes free and skips the
+		// cap gate; anything else keeps today's charged, cap-gated resume.
 		n, reason, invErr := d.Store.ConsecutiveInvalidOutputs(ctx, t.ID, jobBuildName, &sess.ID)
 		if invErr != nil {
 			return store.HandlerCommit{}, fmt.Errorf("job: building: consecutive invalid outputs: %w", invErr)
@@ -423,11 +416,14 @@ func (h buildingHandler) advanceUnit(ctx context.Context, t store.Ticket, d Deps
 		if n == 1 {
 			input = prompt.Invalid(invalidRetryText(reason))
 		}
-		capCommit, mayResume, capErr := h.resumeCapGate(ctx, t, d, u.TaskN, sess, state)
-		if !mayResume {
-			return withBranchResult(capCommit, capErr, wt)
+		bump, gate := resumeCharge(newestRun)
+		if gate {
+			capCommit, mayResume, capErr := h.resumeCapGate(ctx, t, d, u.TaskN, sess, state)
+			if !mayResume {
+				return withBranchResult(capCommit, capErr, wt)
+			}
 		}
-		resumeCommit, resumeErr := h.runBuildResume(ctx, t, d, wt, u, sess, n, nil, []prompt.NamedInput{input})
+		resumeCommit, resumeErr := h.runBuildResume(ctx, t, d, wt, u, sess, n, nil, []prompt.NamedInput{input}, bump)
 		return withBranchResult(resumeCommit, resumeErr, wt)
 
 	default:
@@ -472,7 +468,7 @@ func (h buildingHandler) advanceCheckedRun(ctx context.Context, t store.Ticket, 
 		// first non-"error" outcome, so it can only ever read 0 here.
 		_, errsText, _ := strings.Cut(markerRow.Body, "\n")
 		claimsInput := prompt.NamedInput{Label: "claims", Text: errsText, Untrusted: true}
-		resumeCommit, resumeErr := h.runBuildResume(ctx, t, d, wt, u, sess, 0, nil, []prompt.NamedInput{claimsInput})
+		resumeCommit, resumeErr := h.runBuildResume(ctx, t, d, wt, u, sess, 0, nil, []prompt.NamedInput{claimsInput}, true)
 		if resumeErr == nil && len(resumeCommit.Runs) > 0 {
 			resumeCommit.Messages = append(resumeCommit.Messages, store.Message{
 				TicketID: t.ID, Type: msgTypeUpdate, Author: authorSystem,
@@ -635,7 +631,19 @@ func (h buildingHandler) resumeBuildRound(ctx context.Context, t store.Ticket, d
 		return store.HandlerCommit{}, false, fmt.Errorf("job: building: answered round: session by id: %w", err)
 	}
 
-	if state == store.SessionExhausted {
+	// resumeCharge (job.go, design D5, section 7.4): an interrupted latest
+	// run resumes this round free and bypasses the exhausted-cap escalation
+	// below, even on a session already at max_resumes.
+	newestRun, foundRun, newestErr := d.Store.SessionNewestRun(ctx, sess.ID)
+	if newestErr != nil {
+		return store.HandlerCommit{}, false, fmt.Errorf("job: building: answered round: newest run: %w", newestErr)
+	}
+	bump, gate := true, true
+	if foundRun {
+		bump, gate = resumeCharge(newestRun)
+	}
+
+	if state == store.SessionExhausted && gate {
 		has, hasErr := d.Store.HasEscalation(ctx, t.ID, string(response.EscalationOriginCapResumes), sess.ID)
 		if hasErr != nil {
 			return store.HandlerCommit{}, false, fmt.Errorf("job: building: answered round: has escalation: %w", hasErr)
@@ -659,8 +667,11 @@ func (h buildingHandler) resumeBuildRound(ctx context.Context, t store.Ticket, d
 	if ansErr != nil {
 		return store.HandlerCommit{}, false, ansErr
 	}
+	if foundRun && newestRun.Interrupted {
+		answers = append(answers, prompt.NamedInput{Label: labelInterrupted, Text: interruptedResumeText, Untrusted: false})
+	}
 
-	runCommit, runErr := h.runBuildResume(ctx, t, d, wt, u, sess, 0, questionIDs(round), answers)
+	runCommit, runErr := h.runBuildResume(ctx, t, d, wt, u, sess, 0, questionIDs(round), answers, bump)
 	result, resultErr := withBranchResult(runCommit, runErr, wt)
 	return result, false, resultErr
 }
@@ -692,12 +703,14 @@ func (h buildingHandler) resumeCapGate(ctx context.Context, t store.Ticket, d De
 // external id, u's own label, routed through buildSuccessCommit.
 // resolveIDs is nil for a claims/invalid/interrupted resume (none of them
 // resolve a round) and the round's own question ids for an answered
-// build-question resume.
-func (h buildingHandler) runBuildResume(ctx context.Context, t store.Ticket, d Deps, wt orchestrator.Worktree, u unit, sess store.Session, priorInvalid int, resolveIDs []int64, inputs []prompt.NamedInput) (store.HandlerCommit, error) {
+// build-question resume. bump is the caller's own resumeCharge result
+// (design D5, section 7.4): false only for an interrupted latest run's own
+// free resume, true for every other resume this file sends.
+func (h buildingHandler) runBuildResume(ctx context.Context, t store.Ticket, d Deps, wt orchestrator.Worktree, u unit, sess store.Session, priorInvalid int, resolveIDs []int64, inputs []prompt.NamedInput, bump bool) (store.HandlerCommit, error) {
 	if sess.ExternalID == nil {
 		return store.HandlerCommit{}, fmt.Errorf("job: building: resume: session %d has no external id", sess.ID)
 	}
-	su := store.SessionUpsert{ID: &sess.ID, BumpResumes: true}
+	su := store.SessionUpsert{ID: &sess.ID, BumpResumes: bump}
 	req := runtime.RunRequest{
 		Job: response.JobBuild, Label: buildLabel(u.TaskN), WorkDir: wt.Dir(),
 		SessionID: *sess.ExternalID, Prompt: prompt.Assemble(prompt.ForBuildResume(inputs)),

@@ -203,6 +203,34 @@ func Registry() map[string]Handler {
 	}
 }
 
+// interruptedResumeText is the fixed wording of the "interrupted" resume
+// input (design section 6.3, 7.3): the raw, never-fenced sentence a resume
+// carries when the session's latest run was cut off by a shutdown or a
+// dead-serve reclaim (store.Run.Interrupted), shared by every job that
+// resumes a session (building.go, fix.go, judging.go, respond.go).
+const interruptedResumeText = "the previous run was interrupted; continue and return your document"
+
+// labelInterrupted is the NamedInput.Label every "interrupted" resume input
+// carries (building.go, judging.go, respond.go): a shared constant, not a
+// literal repeated at each call site (goconst).
+const labelInterrupted = "interrupted"
+
+// resumeCharge says how a resume of a session is charged, from the newest
+// run of that session (design D5, section 7.4): an interrupted latest run
+// (store.Run.Interrupted) resumes free (bump is false, so the caller's own
+// SessionUpsert carries BumpResumes: false) and ignores max_resumes (gate is
+// false, so the caller skips its own resumeCapGate / respondCapGate check
+// entirely, even on an already-exhausted session); anything else is charged
+// and cap-gated exactly as before (bump and gate both true). Every resume
+// branch of every job that can resume an interrupted run calls this with
+// that session's newest run and obeys both return values.
+func resumeCharge(latest store.Run) (bump, gate bool) {
+	if latest.Interrupted {
+		return false, false
+	}
+	return true, true
+}
+
 // Validate confirms every non-terminal state m.States.Order names has a
 // handler in reg, so a missing handler fails at startup, never at a nil map
 // read mid-tick.

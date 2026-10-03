@@ -809,6 +809,267 @@ func TestJudgeQuestionResumes(t *testing.T) {
 	}
 }
 
+// ---- TestJudgeInterruptedIdlessFirstTurnRunsFresh ---------------------------
+
+// TestJudgeInterruptedIdlessFirstTurnRunsFresh proves design section 7.5
+// bug 1 (the judge idless resume loop): a first turn that is itself
+// cancelled before the runtime ever echoes a session id back leaves the
+// session idless (external_id NULL); before the fix, enterAfterStart's own
+// switch on outcome routed that reconciled "error" run into
+// judgeResumeTurn, which always errors "has no external id" on an idless
+// session, on every later tick. The fix routes an idless session straight
+// to runFirst, mirroring fix.go's own "!ok || state == store.SessionIdless"
+// check, so the next tick runs a fresh first turn instead of looping.
+func TestJudgeInterruptedIdlessFirstTurnRunsFresh(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow end-to-end flow; runs in the full suite")
+	}
+	t.Parallel()
+	s, ticket := judgeTicketReady(t)
+
+	canceledRT := &pbScriptedRuntime{t: t, steps: []pbScriptedStep{
+		{res: runtime.RunResult{ExitCode: -1, AgentTime: time.Second}, err: runtime.ErrCanceled},
+	}}
+	ticket = judgeAdvanceStart(t, s, canceledRT, ticket) // START: no runtime call
+
+	deps := pbClaim(t, s, canceledRT, ticket.ID)
+	_, err := (judgeHandler{}).Run(t.Context(), ticket, deps) // RUN: first turn, interrupted before any session id
+	if !errors.Is(err, runtime.ErrCanceled) {
+		t.Fatalf("err = %v, want errors.Is(err, runtime.ErrCanceled)", err)
+	}
+
+	if _, expireErr := s.ExpireClaims(t.Context(), time.Now().Add(20*time.Minute), ""); expireErr != nil {
+		t.Fatalf("ExpireClaims: %v", expireErr)
+	}
+
+	maxResumes := pbMachine(t).Jobs[jobJudgeName].MaxResumes
+	sess, state, err := s.LatestSession(t.Context(), ticket.ID, jobJudgeName, maxResumes)
+	if err != nil {
+		t.Fatalf("LatestSession: %v", err)
+	}
+	if sess.ExternalID != nil {
+		t.Fatal("session has an external id, want nil (idless)")
+	}
+	if state != store.SessionIdless {
+		t.Fatalf("session state = %v, want SessionIdless", state)
+	}
+
+	okRT := runtime.NewFake(judgeScriptsFS(judgeOkBothScript))
+	ticket = pbGetTicket(t, s, ticket.ID)
+	deps2 := pbClaim(t, s, okRT, ticket.ID)
+	commit, err := (judgeHandler{}).Run(t.Context(), ticket, deps2) // RUN again: must run fresh, not try to resume
+	if err != nil {
+		t.Fatalf("RUN after idless interrupted: %v", err)
+	}
+	if len(commit.Runs) != 1 || commit.Runs[0].Outcome == nil || *commit.Runs[0].Outcome != string(response.OutcomeOk) {
+		t.Fatalf("commit.Runs = %+v, want exactly one ok run", commit.Runs)
+	}
+	if len(commit.Artifacts) != 2 {
+		t.Fatalf("commit.Artifacts has %d entries, want 2", len(commit.Artifacts))
+	}
+}
+
+// ---- TestJudgeInterruptedResumeIsFree ---------------------------------------
+
+// TestJudgeInterruptedResumeIsFree proves design D5, section 7.4's own
+// resumeCharge for judge's enterErrorResume: TestJudgeCoverageFailureResumes'
+// own shape (a first turn that covers only s1, leaving a pending "coverage
+// failed" marker), except the coverage resume itself is cancelled
+// mid-flight and terminalized by InterruptRuns (interrupted=1) rather than
+// let to complete. The next tick's newest run is now "error", so it enters
+// through enterErrorResume (not enterCoverageResume again): the same
+// "interrupted" input, but sessions.resumes is not bumped and the resume
+// is not cap-gated.
+func TestJudgeInterruptedResumeIsFree(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow end-to-end flow; runs in the full suite")
+	}
+	t.Parallel()
+	s, ticket := judgeTicketReady(t)
+	incomplete := judgeOkScript(judgeVerdictXML("s1", "ran it"))
+	// rt is reused for both the first turn and the free resume at the end:
+	// the cancelled coverage resume in between goes through a separate
+	// canceledRT, never touching rt's own internal turn count, so rt's own
+	// second script (judgeOkBothScript) is still the next one it serves
+	// this same external session id when the free resume reaches it.
+	rt := runtime.NewFake(judgeScriptsFS(incomplete, judgeOkBothScript))
+	ticket = judgeAdvanceStart(t, s, rt, ticket)
+
+	deps := pbClaim(t, s, rt, ticket.ID)
+	firstCommit, err := (judgeHandler{}).Run(t.Context(), ticket, deps) // RUN: first turn, coverage failure
+	if err != nil {
+		t.Fatalf("RUN (first turn): %v", err)
+	}
+	pbApply(t, s, ticket, firstCommit)
+	ticket = pbGetTicket(t, s, ticket.ID)
+
+	canceledRT := &pbScriptedRuntime{t: t, steps: []pbScriptedStep{
+		{res: runtime.RunResult{ExitCode: -1, AgentTime: time.Second}, err: runtime.ErrCanceled},
+	}}
+	deps2 := pbClaim(t, s, canceledRT, ticket.ID)
+	_, err = (judgeHandler{}).Run(t.Context(), ticket, deps2) // coverage resume: interrupted mid-flight
+	if !errors.Is(err, runtime.ErrCanceled) {
+		t.Fatalf("err = %v, want errors.Is(err, runtime.ErrCanceled)", err)
+	}
+
+	applied, interruptErr := s.InterruptRuns(t.Context(), ticket.ID, deps2.Owner, deps2.Expires)
+	if interruptErr != nil {
+		t.Fatalf("InterruptRuns: %v", interruptErr)
+	}
+	if !applied {
+		t.Fatal("InterruptRuns: applied = false, want true")
+	}
+
+	maxResumes := pbMachine(t).Jobs[jobJudgeName].MaxResumes
+	sess, state, err := s.LatestSession(t.Context(), ticket.ID, jobJudgeName, maxResumes)
+	if err != nil {
+		t.Fatalf("LatestSession: %v", err)
+	}
+	if sess.Resumes != 1 {
+		t.Fatalf("sessions.resumes after the canceled resume = %d, want 1 (charged at Reserve, design section 4.2)", sess.Resumes)
+	}
+	if state != store.SessionOpen {
+		t.Fatalf("session state = %v, want SessionOpen", state)
+	}
+
+	ticket = pbGetTicket(t, s, ticket.ID)
+	deps3 := pbClaim(t, s, rt, ticket.ID)
+	resumeCommit, err := (judgeHandler{}).Run(t.Context(), ticket, deps3) // resume: interrupted, free
+	if err != nil {
+		t.Fatalf("resume: %v", err)
+	}
+	if len(resumeCommit.Runs) != 1 || resumeCommit.Runs[0].Outcome == nil || *resumeCommit.Runs[0].Outcome != string(response.OutcomeOk) {
+		t.Fatalf("resumeCommit.Runs = %+v, want exactly one ok run", resumeCommit.Runs)
+	}
+	if len(resumeCommit.Artifacts) != 2 {
+		t.Fatalf("resumeCommit.Artifacts has %d entries, want 2 (the free resume actually ran, not just escalated)", len(resumeCommit.Artifacts))
+	}
+	pbApply(t, s, ticket, resumeCommit)
+
+	sess, _, err = s.LatestSession(t.Context(), ticket.ID, jobJudgeName, maxResumes)
+	if err != nil {
+		t.Fatalf("LatestSession: %v", err)
+	}
+	if sess.Resumes != 1 {
+		t.Errorf("sessions.resumes after the free interrupted resume = %d, want 1 (unchanged: the resume was not charged)", sess.Resumes)
+	}
+}
+
+// ---- TestJudgeAnsweredRoundInterruptedBypassesExhaustedCap ------------------
+
+// TestJudgeAnsweredRoundInterruptedBypassesExhaustedCap proves design D5's
+// own "ignores max_resumes" for judge's resumeAnswered (section 7.4's
+// answered-round branch): a judge session exhausted (max_resumes=2) by its
+// own cancelled, interrupted second answered-round resume still resumes
+// that same round on the next tick, free and uncapped, carrying the
+// owner's own answer plus the interrupted input.
+func TestJudgeAnsweredRoundInterruptedBypassesExhaustedCap(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow end-to-end flow; runs in the full suite")
+	}
+	t.Parallel()
+	s, ticket := judgeTicketReady(t)
+	// rt serves the first turn's own question, the first answered-round
+	// resume's own further question, and the free resume's own
+	// fully-covered ok turn, in that order: the cancelled second
+	// answered-round resume below goes through a separate canceledRT,
+	// never touching rt's own internal turn count, so rt's own third
+	// script is still the next one it serves this same external session
+	// id when the free resume reaches it.
+	rt := runtime.NewFake(judgeScriptsFS(judgeQuestionScript, judgeQuestionScript, judgeOkBothScript))
+	ticket = judgeAdvanceStart(t, s, rt, ticket)
+
+	deps := pbClaim(t, s, rt, ticket.ID)
+	firstCommit, err := (judgeHandler{}).Run(t.Context(), ticket, deps) // RUN: question (round 1)
+	if err != nil {
+		t.Fatalf("RUN (first turn): %v", err)
+	}
+	pbApply(t, s, ticket, firstCommit)
+	ticket = pbGetTicket(t, s, ticket.ID)
+
+	maxResumes := pbMachine(t).Jobs[jobJudgeName].MaxResumes
+	if maxResumes != 2 {
+		t.Fatalf("machine.toml judge max_resumes = %d, want 2", maxResumes)
+	}
+
+	judgeAnswerOpenQuestion(t, s, ticket.ID, "a")
+	deps = pbClaim(t, s, rt, ticket.ID)
+	secondCommit, err := (judgeHandler{}).Run(t.Context(), ticket, deps) // resume: answer, new question (round 2)
+	if err != nil {
+		t.Fatalf("RUN (round 1 answer): %v", err)
+	}
+	pbApply(t, s, ticket, secondCommit)
+	ticket = pbGetTicket(t, s, ticket.ID)
+
+	sess, _, err := s.LatestSession(t.Context(), ticket.ID, jobJudgeName, maxResumes)
+	if err != nil {
+		t.Fatalf("LatestSession: %v", err)
+	}
+	if sess.Resumes != 1 {
+		t.Fatalf("sessions.resumes before the final resume = %d, want 1", sess.Resumes)
+	}
+
+	// Round 2's own answer resume is cancelled mid-flight. Reserve charges
+	// its resume regardless (design section 4.2), pushing sessions.resumes
+	// to maxResumes, but the round is never resolved: it stays answered
+	// for the next tick.
+	judgeAnswerOpenQuestion(t, s, ticket.ID, "a")
+	canceledRT := &pbScriptedRuntime{t: t, steps: []pbScriptedStep{
+		{res: runtime.RunResult{ExitCode: -1, AgentTime: time.Second}, err: runtime.ErrCanceled},
+	}}
+	deps2 := pbClaim(t, s, canceledRT, ticket.ID)
+	_, err = (judgeHandler{}).Run(t.Context(), ticket, deps2) // resume: answer, interrupted mid-flight
+	if !errors.Is(err, runtime.ErrCanceled) {
+		t.Fatalf("err = %v, want errors.Is(err, runtime.ErrCanceled)", err)
+	}
+
+	applied, interruptErr := s.InterruptRuns(t.Context(), ticket.ID, deps2.Owner, deps2.Expires)
+	if interruptErr != nil {
+		t.Fatalf("InterruptRuns: %v", interruptErr)
+	}
+	if !applied {
+		t.Fatal("InterruptRuns: applied = false, want true")
+	}
+
+	sess, state, err := s.LatestSession(t.Context(), ticket.ID, jobJudgeName, maxResumes)
+	if err != nil {
+		t.Fatalf("LatestSession: %v", err)
+	}
+	if sess.Resumes != maxResumes {
+		t.Fatalf("sessions.resumes after the interrupted resume = %d, want %d (charged at Reserve)", sess.Resumes, maxResumes)
+	}
+	if state != store.SessionExhausted {
+		t.Fatalf("session state = %v, want SessionExhausted", state)
+	}
+
+	// The next tick resumes the still-answered round free, bypassing the
+	// exhausted cap entirely (design D5).
+	ticket = pbGetTicket(t, s, ticket.ID)
+	deps3 := pbClaim(t, s, rt, ticket.ID)
+	freeCommit, err := (judgeHandler{}).Run(t.Context(), ticket, deps3) // resume: round, interrupted, free, bypasses cap
+	if err != nil {
+		t.Fatalf("free resume: %v", err)
+	}
+	if freeCommit.Escalation != nil {
+		t.Fatalf("free resume commit.Escalation = %+v, want nil (D5: bypasses the exhausted cap)", freeCommit.Escalation)
+	}
+	if len(freeCommit.ResolveQuestions) == 0 {
+		t.Error("free resume commit.ResolveQuestions is empty, want the round resolved")
+	}
+	if len(freeCommit.Artifacts) != 2 {
+		t.Fatalf("free resume commit.Artifacts has %d entries, want 2 (the free resume actually ran, not just escalated)", len(freeCommit.Artifacts))
+	}
+	pbApply(t, s, ticket, freeCommit)
+
+	sess, _, err = s.LatestSession(t.Context(), ticket.ID, jobJudgeName, maxResumes)
+	if err != nil {
+		t.Fatalf("LatestSession: %v", err)
+	}
+	if sess.Resumes != maxResumes {
+		t.Errorf("sessions.resumes after the free interrupted resume = %d, want %d (unchanged)", sess.Resumes, maxResumes)
+	}
+}
+
 // ---- TestJudgeErrorEscalatesOriginJudge -------------------------------------
 
 // TestJudgeErrorEscalatesOriginJudge proves the universal error outcome

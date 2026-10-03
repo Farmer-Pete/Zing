@@ -396,6 +396,62 @@ func TestInterruptedResumeStaysCharged(t *testing.T) {
 	}
 }
 
+// TestShutdownInterruptedResumeIsFree is TestInterruptedResumeStaysCharged's
+// own sibling (design D5, section 7.4): the same shape, but the previous
+// run is cut off by a real shutdown or dead-serve reclaim (InterruptRuns,
+// interrupted=1) rather than an ordinary lease reconcile (ExpireClaims,
+// interrupted=0). A resume Reserve makes of an interrupted session with
+// BumpResumes: false -- the job package's own resumeCharge decides this,
+// never Reserve itself -- leaves sessions.resumes unchanged: free, as
+// design D5 promises, and unlike the reconciled case above, which stays
+// charged.
+func TestShutdownInterruptedResumeIsFree(t *testing.T) {
+	t.Parallel()
+	s := newTestStore(t)
+	ctx := t.Context()
+	_, ticketID := seedQueuedTicket(t, s, "1")
+	setTicketState(t, s, ticketID, testStatePlanning)
+	owner, expires := reserveInput(t, s, ticketID)
+
+	first, err := s.Reserve(ctx, ticketID, owner, expires,
+		SessionUpsert{Job: testStatePlanning, Runtime: testRuntimeFake}, RunSeed{Model: testModelClaudeX})
+	if err != nil {
+		t.Fatalf("first Reserve: %v", err)
+	}
+
+	applied, err := s.InterruptRuns(ctx, ticketID, owner, expires)
+	if err != nil {
+		t.Fatalf("InterruptRuns: %v", err)
+	}
+	if !applied {
+		t.Fatal("InterruptRuns: applied = false, want true")
+	}
+
+	run, ok, err := s.FirstRun(ctx, first.SessionID)
+	if err != nil {
+		t.Fatalf("FirstRun: %v", err)
+	}
+	if !ok {
+		t.Fatal("FirstRun: ok = false, want true")
+	}
+	if !run.Interrupted {
+		t.Fatal("run.Interrupted = false, want true")
+	}
+
+	// The next tick re-claims the ticket and resumes free: BumpResumes is
+	// false, the job package's own resumeCharge result for an interrupted
+	// latest run.
+	owner2, expires2 := reserveInput(t, s, ticketID)
+	if _, err = s.Reserve(ctx, ticketID, owner2, expires2,
+		SessionUpsert{ID: &first.SessionID, BumpResumes: false}, RunSeed{Model: testModelClaudeX}); err != nil {
+		t.Fatalf("free resume Reserve: %v", err)
+	}
+
+	if got := sessionResumes(t, s, first.SessionID); got != 0 {
+		t.Errorf("resumes after a free interrupted resume = %d, want 0 (unchanged: the resume was not charged)", got)
+	}
+}
+
 // TestReserve_ResumeLogsExistingSessionJob proves the "run reserved" log
 // line carries the resumed session's own job name (bug fix): a resume's
 // SessionUpsert sets only ID and BumpResumes, never Job (every resume call
