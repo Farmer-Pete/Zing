@@ -259,7 +259,7 @@ func TestEscalationResolve_Classify_EveryChoiceClassifiesFreshWithNotesAndError(
 	}{
 		{"Retry", new("a")},
 		{"Back", new("b")},
-		{"ReplyOnly", nil},
+		{testCaseReplyOnly, nil},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
@@ -715,12 +715,25 @@ func TestEscalationResolve_CapBudget_EveryChoiceReEscalatesWallClock(t *testing.
 
 // TestEscalationResolve_SplitAndNothingToDoClaims_EveryChoiceResumesOrFresh
 // proves section 6.7's "a | split, nothing_to_do_claims | same as b" row:
-// both origins, both choices, all resume or fresh with notes and error.
+// both origins, every choice -- explicit retry, explicit back, and a
+// text-only reply with no option at all -- all resume or fresh with notes
+// and error. ReplyOnly proves roundRecommendedOption (planning.go, #47
+// follow-up): split_unsupported and nothing_to_do_with_true_claims are the
+// only two codes escalationOptionsFor (store/commit.go) still recommends
+// "b" for in planning, so a plain reply on one of these still goes back to
+// planning, exactly as an explicit "b" would.
 func TestEscalationResolve_SplitAndNothingToDoClaims_EveryChoiceResumesOrFresh(t *testing.T) {
 	t.Parallel()
 	for _, origin := range []response.EscalationOrigin{response.EscalationOriginSplit, response.EscalationOriginNothingToDoClaims} {
-		for _, choice := range []string{"a", "b"} {
-			t.Run(string(origin)+"/"+choice, func(t *testing.T) {
+		for _, tc := range []struct {
+			name   string
+			option *string
+		}{
+			{"a", new("a")},
+			{"b", new("b")},
+			{testCaseReplyOnly, nil},
+		} {
+			t.Run(string(origin)+"/"+tc.name, func(t *testing.T) {
 				t.Parallel()
 				s := newJobTestStore(t)
 				ticketID := seedFeatureTicketInPlanning(t, s)
@@ -730,13 +743,13 @@ func TestEscalationResolve_SplitAndNothingToDoClaims_EveryChoiceResumesOrFresh(t
 					code = response.EscalationCodeNothingToDoWithTrueClaims
 				}
 				qID := escalateDirect(t, s, ticketID, &runID, &sessID, code, origin)
-				answerGateQuestion(t, s, ticketID, qID, new(choice), "notes here")
+				answerGateQuestion(t, s, ticketID, qID, tc.option, "notes here")
 
 				rt := &scriptedRuntime{t: t, steps: []scriptedStep{questionResult(response.JobPlanning, "split-ntd-sess")}}
 				rec := &recordingRuntime{rt: rt}
 				_, err := runPlanning(t, s, claim(t, s, rec, ticketID), ticketID)
 				if err != nil {
-					t.Fatalf("escalation resolve (%s, %s) Run: %v", origin, choice, err)
+					t.Fatalf("escalation resolve (%s, %s) Run: %v", origin, tc.name, err)
 				}
 				assertFenced(t, rec.lastReq.Prompt, "notes", "notes here")
 				assertFenced(t, rec.lastReq.Prompt, "error", "what happened")

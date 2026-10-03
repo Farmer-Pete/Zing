@@ -36,6 +36,7 @@ func TestEscalationOptionsFor(t *testing.T) {
 			for _, code := range []response.EscalationCode{
 				response.EscalationCodeResponseInvalid, response.EscalationCodeSplitUnsupported,
 				response.EscalationCodeNothingToDoWithTrueClaims, response.EscalationCodeOther,
+				response.EscalationCodeReplanUnsupported,
 			} {
 				opts, recommended := escalationOptionsFor(state, string(code))
 				if !reflect.DeepEqual(opts, wantPostSeal) {

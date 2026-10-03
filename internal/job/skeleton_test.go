@@ -90,6 +90,11 @@ const (
 	// "every question settled" rule without each test inventing its own
 	// wording.
 	testQ1SettledDecision = "The owner's answer to Q1 settles this thread."
+	// testCaseReplyOnly names the escalation-resolution table tests' own
+	// "a text-only reply, no option at all" subtest (#47 follow-up:
+	// roundRecommendedOption, planning.go), shared across
+	// building_escalation_test.go and escalation_test.go.
+	testCaseReplyOnly = "ReplyOnly"
 )
 
 // testProject is the one project every test in this file seeds. LocalPath

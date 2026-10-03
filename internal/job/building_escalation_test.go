@@ -192,31 +192,27 @@ func TestSandboxUnavailableEscalates(t *testing.T) {
 // replan_unsupported, origin unchanged, with the plan's exact What/Why
 // text, resolving the round. #47 item 2 fixed escalateTx to stop offering
 // "b" once the ticket is past planning, so a freshly raised escalation can
-// no longer be answered with it; the "Back" case here instead answers one
-// of the escalations the database already carried before that fix shipped
-// (legacyEscalationQuestion), proving this unchanged resolution row still
-// runs correctly against that still-real shape. "ReplyOnly" still uses a
-// fresh, real escalation (escalateDirect): roundChoice's own "a reply with
-// no option is choice b" default needs no option to exist at all.
+// no longer be answered with it, nor default to it (roundRecommendedOption,
+// planning.go): both cases here instead answer one of the escalations the
+// database already carried before that fix shipped (legacyEscalationQuestion,
+// stored Recommended "b"), proving this unchanged resolution row still runs
+// correctly against that still-real shape -- "ReplyOnly" proves
+// roundRecommendedOption reads the stored recommendation back rather than
+// assuming it, since a fresh escalation's own stored recommendation would
+// resolve differently (TestEscalationReplyOnlyPostSealDefaultsToRetry).
 func TestReplanUnsupportedText(t *testing.T) {
 	t.Parallel()
 	for _, tc := range []struct {
 		name   string
 		option *string
-		legacy bool
 	}{
-		{"Back", new("b"), true},
-		{"ReplyOnly", nil, false},
+		{"Back", new("b")},
+		{testCaseReplyOnly, nil},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			s, rt, ticketID := buildTicketInBuilding(t)
-			var qID int64
-			if tc.legacy {
-				qID = legacyEscalationQuestion(t, s, ticketID, response.EscalationCodeEnvironment, response.EscalationOriginBuild)
-			} else {
-				qID = escalateDirect(t, s, ticketID, nil, nil, response.EscalationCodeEnvironment, response.EscalationOriginBuild)
-			}
+			qID := legacyEscalationQuestion(t, s, ticketID, response.EscalationCodeEnvironment, response.EscalationOriginBuild)
 			answerGateQuestion(t, s, ticketID, qID, tc.option, "let's replan instead")
 
 			commit, err := runBuilding(t, s, claimForBuild(t, s, rt, ticketID), ticketID)
@@ -245,6 +241,36 @@ func TestReplanUnsupportedText(t *testing.T) {
 				t.Errorf("commit.ResolveQuestions = %v, want [%d]", commit.ResolveQuestions, qID)
 			}
 		})
+	}
+}
+
+// TestEscalationReplyOnlyPostSealDefaultsToRetry proves roundRecommendedOption
+// (planning.go, #47 follow-up): a text-only reply (no option at all) on a
+// freshly raised post-seal escalation resolves as Retry, not back to
+// planning -- its own stored Recommended is "a" (escalationOptionsFor,
+// store/commit.go, since back to planning is never offered post-seal any
+// more), and roundChoice now reads that back instead of hardcoding "b".
+// Same shape as BuildRetryNoRun (TestBuildingEscalationTable): resolve the
+// round, commit the marker "retry requested", stay; no runtime call, no
+// re-escalation.
+func TestEscalationReplyOnlyPostSealDefaultsToRetry(t *testing.T) {
+	t.Parallel()
+	s, rt, ticketID := buildTicketInBuilding(t)
+	qID := escalateDirect(t, s, ticketID, nil, nil, response.EscalationCodeEnvironment, response.EscalationOriginBuild)
+	answerGateQuestion(t, s, ticketID, qID, nil, "no option, just a note")
+
+	commit, err := runBuilding(t, s, claimForBuild(t, s, rt, ticketID), ticketID)
+	if err != nil {
+		t.Fatalf("escalation resolve (reply-only, post-seal) Run: %v", err)
+	}
+	if commit.Escalation != nil {
+		t.Errorf("commit.Escalation = %+v, want nil (no re-escalation)", commit.Escalation)
+	}
+	if len(commit.Messages) != 1 || commit.Messages[0].Body != testMarkerRetryRequested {
+		t.Fatalf("commit.Messages = %+v, want one %q marker", commit.Messages, testMarkerRetryRequested)
+	}
+	if len(commit.ResolveQuestions) != 1 || commit.ResolveQuestions[0] != qID {
+		t.Errorf("commit.ResolveQuestions = %v, want [%d]", commit.ResolveQuestions, qID)
 	}
 }
 
