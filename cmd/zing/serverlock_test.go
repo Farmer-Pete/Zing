@@ -338,3 +338,25 @@ func startAndReapChild(t *testing.T) int {
 	}
 	return cmd.Process.Pid
 }
+
+// TestAcquireServeLock_CreatesMissingDataDir proves a fresh install, where
+// the data directory does not exist yet, can take the lock: serve acquires
+// it before store.Open, which is what used to create the directory.
+func TestAcquireServeLock_CreatesMissingDataDir(t *testing.T) {
+	t.Parallel()
+
+	dir := filepath.Join(t.TempDir(), "fresh", ".zing")
+	lock, err := acquireServeLock(dir)
+	if err != nil {
+		t.Fatalf("acquireServeLock on a missing dir: %v", err)
+	}
+	defer lock.release()
+
+	info, err := os.Stat(dir)
+	if err != nil {
+		t.Fatalf("stat data dir: %v", err)
+	}
+	if mode := info.Mode().Perm(); mode != 0o700 {
+		t.Errorf("data dir mode = %o, want 700", mode)
+	}
+}

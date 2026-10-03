@@ -333,8 +333,17 @@ func TestReclaimForeign_KillsOrphanPastDeadline(t *testing.T) {
 	// which a zombie still answers) actually reports it gone, the same
 	// reaping every other test's own killGroup helper does right after it
 	// signals a group itself.
+	// The kill pass keeps the claim: SIGKILL does not wait for the group
+	// to exit, so reclaiming in the same pass could resume the session
+	// while the old agent still runs.
+	if mid := getTicket(t, s, ticketID); mid.ClaimOwner == nil || *mid.ClaimOwner != foreignOwner {
+		t.Fatalf("claim owner right after the kill = %v, want still %q", mid.ClaimOwner, foreignOwner)
+	}
 	_ = cmd.Wait() //nolint:errcheck // best-effort reap, SIGKILL already delivered
 	waitGroupGone(t, pgid)
+	if err := d.Tick(t.Context()); err != nil {
+		t.Fatalf("second Tick: %v", err)
+	}
 
 	final := getTicket(t, s, ticketID)
 	if final.ClaimOwner != nil && *final.ClaimOwner == foreignOwner {

@@ -122,6 +122,12 @@ type serveLockGuard struct {
 }
 
 func lockServeLockGuard(dataDir string) (*serveLockGuard, error) {
+	// serve takes the lock before store.Open, which is what creates the
+	// data directory on a fresh install, so create it here first (same
+	// 0700 mode store.Open uses).
+	if err := os.MkdirAll(dataDir, 0o700); err != nil {
+		return nil, fmt.Errorf("serve: create data directory %s: %w", dataDir, err)
+	}
 	path := filepath.Join(dataDir, serveLockGuardFilename)
 	f, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0o600)
 	if err != nil {

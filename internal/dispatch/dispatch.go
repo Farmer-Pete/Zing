@@ -792,11 +792,14 @@ func (d *Dispatcher) worker(ctx context.Context, ticket store.Ticket, timeout ti
 		d.setStop(err)
 	}
 
+	// Send before leaving inflight: a finished worker whose result the
+	// caller has not read yet still holds its slot, so fill can never
+	// launch more than MaxParallel workers even while results sit unread.
+	results <- runResult{TicketID: ticket.ID, Err: err}
+
 	d.mu.Lock()
 	delete(d.inflight, ticket.ID)
 	d.mu.Unlock()
-
-	results <- runResult{TicketID: ticket.ID, Err: err}
 	d.wg.Done()
 }
 
@@ -938,8 +941,11 @@ func (d *Dispatcher) evaluateOrphan(ticketID int64, r store.OpenRun) bool {
 		slog.Error("kill orphaned agent failed; retrying next tick", "ticket_id", ticketID, "run_id", r.RunID, "pgid", *r.PGID, "err", err)
 		return true
 	}
+	// SIGKILL is delivered, but the group may not have exited yet, so the
+	// claim stays held this pass; a later pass reclaims it once the
+	// liveness check finds the group gone (design section 6.3).
 	slog.Warn("killed orphaned agent of dead serve", "ticket_id", ticketID, "run_id", r.RunID, "pgid", *r.PGID)
-	return false
+	return true
 }
 
 // intake runs step 3: for each binding, ask the tracker for its tickets and
