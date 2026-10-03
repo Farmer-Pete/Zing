@@ -335,7 +335,7 @@ func runFixFirst(ctx context.Context, t store.Ticket, d Deps, proj Project, wt o
 	if err != nil {
 		return store.HandlerCommit{}, fmt.Errorf("job: fix: file events: %w", err)
 	}
-	accepted := acceptedPaths(events)
+	accepted := acceptedPaths(plan, events, 0)
 	schemas, err := renderSchemas(response.JobBuild, response.OutcomeOk)
 	if err != nil {
 		return store.HandlerCommit{}, fmt.Errorf("job: fix: %w", err)

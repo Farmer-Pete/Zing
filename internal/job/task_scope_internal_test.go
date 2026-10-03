@@ -1,14 +1,17 @@
 package job
 
 // task_scope_internal_test.go tests building.go's own unexported
-// foreignTaskPaths (task 2 of "check each build task against its own
-// files, not the whole plan"): a pure function over a plan and a changed
-// path list, reached by no seam in building_test.go (package job_test).
+// foreignTaskPaths (task 2) and declaredPaths/acceptedPaths task scoping
+// (task 4) of "check each build task against its own files, not the whole
+// plan": pure functions over a plan, events, and a changed path list,
+// reached by no seam in building_test.go (package job_test).
 
 import (
+	"slices"
 	"testing"
 
 	"zing/internal/response"
+	"zing/internal/store"
 )
 
 // testScopeGreetPath and testScopeHelperPath are this file's own file-path
@@ -143,6 +146,57 @@ func TestForeignTaskPaths(t *testing.T) {
 				if e.Msg != tc.want[i] {
 					t.Errorf("errs[%d].Msg = %q, want %q", i, e.Msg, tc.want[i])
 				}
+			}
+		})
+	}
+}
+
+const testScopeExtraPath = "extra.go"
+
+func acceptedExtraEvent(path string, taskN int) store.FileEventRow {
+	accept := response.PerimeterAccept
+	return store.FileEventRow{
+		ArtifactID: 1,
+		File: response.FileArtifact{
+			FileChange: response.FileChange{Path: path},
+			TaskN:      taskN,
+			Decision:   &accept,
+		},
+	}
+}
+
+// TestDeclaredPathsScopesAcceptedExtras proves declaredPaths and
+// acceptedPaths' own extraInScope rule (design rule 4): an accepted extra
+// counts as declared, and is offered to the builder as accepted, only for
+// the task the owner accepted it for -- unless the plan carries no task
+// mapping at all (a plan stored before this change), which keeps
+// whole-plan scope for every unit.
+func TestDeclaredPathsScopesAcceptedExtras(t *testing.T) {
+	t.Parallel()
+
+	mapped := response.Plan{Delivery: response.Delivery{Files: []response.FileChange{fileTask(pbHelloTxt, "1")}}}
+	events := []store.FileEventRow{acceptedExtraEvent(testScopeExtraPath, 1)}
+
+	cases := []struct {
+		name  string
+		plan  response.Plan
+		taskN int
+		want  bool
+	}{
+		{"mapped task 1 (the accepting task)", mapped, 1, true},
+		{"mapped fix unit", mapped, 0, true},
+		{"mapped task 2 (a later task)", mapped, 2, false},
+		{"unmapped task 2", response.Plan{Delivery: response.Delivery{Files: []response.FileChange{{Path: pbHelloTxt}}}}, 2, true},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := slices.Contains(declaredPaths(tc.plan, events, nil, tc.taskN), testScopeExtraPath); got != tc.want {
+				t.Errorf("declaredPaths contains %q = %v, want %v", testScopeExtraPath, got, tc.want)
+			}
+			if got := slices.Contains(acceptedPaths(tc.plan, events, tc.taskN), testScopeExtraPath); got != tc.want {
+				t.Errorf("acceptedPaths contains %q = %v, want %v", testScopeExtraPath, got, tc.want)
 			}
 		})
 	}

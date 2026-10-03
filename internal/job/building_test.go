@@ -1725,6 +1725,89 @@ func TestAcceptedPathAsksOnceOnly(t *testing.T) {
 	}
 }
 
+// TestAcceptedExtraAsksAgainForLaterTask proves design rule 4 (declaredPaths
+// scopes an accepted extra to the task the owner accepted it for, ticket
+// "check each build task against its own files, not the whole plan"):
+// extra1.go, accepted while building task 1, is not declared for task 2.
+// Task 2 changing it too reaches the perimeter again rather than landing
+// silently, and the file artifact DESCRIBE writes for it this time carries
+// task_n 2, not 1.
+func TestAcceptedExtraAsksAgainForLaterTask(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow end-to-end flow; runs in the full suite")
+	}
+	t.Parallel()
+	s, ticketID, _, scriptRT := perimeterScenario(t, map[string]string{testExtraPath: testExtraReason})
+	scriptRT.steps = append(scriptRT.steps, perimeterStep("Adds a small helper.", "perim-sess-1"))
+	describeTick(t, s, scriptRT, ticketID) // DESCRIBE + ASK
+
+	q := findOpenQuestionByKind(t, s, ticketID, response.QuestionKindPerimeter)
+	answerPerimeterQuestion(t, s, ticketID, q.ID, map[string]response.Decision{testExtraPath: response.DecisionAccept})
+
+	describeTick(t, s, scriptRT, ticketID)               // RESOLVE
+	landCommit := describeTick(t, s, scriptRT, ticketID) // check (first, for the fresh report) + LAND
+
+	if len(landCommit.Artifacts) != 1 {
+		t.Fatalf("task 1 LAND commit.Artifacts = %+v, want exactly one landed build_report", landCommit.Artifacts)
+	}
+	var landed response.BuildReport
+	if err := json.Unmarshal(landCommit.Artifacts[0].Payload, &landed); err != nil {
+		t.Fatalf("unmarshal landed build_report: %v", err)
+	}
+	if landed.CommitSHA == nil {
+		t.Fatal("landed.CommitSHA = nil, want a sha")
+	}
+
+	scriptRT.steps = append(scriptRT.steps,
+		buildStep([]string{testExtraPath, "greet.go"}, 0, 0, []response.ExtraClaim{{Path: testExtraPath, Reason: "task 2 extends the helper"}}, "task2-sess"),
+		perimeterStep("Extends the helper.", "perim-sess-2"),
+	)
+
+	ticket := getTicket(t, s, ticketID)
+	deps := claimForBuild(t, s, scriptRT, ticketID)
+	overrideProj := deps.Projects[ticket.ProjectID]
+	overrideProj.TestCmd = "printf 'package greet\\n' > greet.go && printf 'more\\n' >> extra1.go && test -f hello.txt"
+	overrideProj.LintCmd = testNoopShellCmd
+	deps.Projects = map[int64]job.Project{ticket.ProjectID: overrideProj}
+
+	commit, err := job.Registry()[testStateBuilding].Run(t.Context(), ticket, deps) // task 2 RUN
+	if err != nil {
+		t.Fatalf("task 2 RUN: %v", err)
+	}
+	apply(t, s, ticket, commit)
+
+	ticket = getTicket(t, s, ticketID)
+	deps2 := claimForBuild(t, s, scriptRT, ticketID)
+	deps2.Projects = map[int64]job.Project{ticket.ProjectID: overrideProj}
+	checkCommit, err := job.Registry()[testStateBuilding].Run(t.Context(), ticket, deps2) // task 2 CHECK
+	if err != nil {
+		t.Fatalf("task 2 CHECK: %v", err)
+	}
+	if len(checkCommit.Artifacts) != 0 || len(checkCommit.Messages) != 1 || !strings.HasPrefix(checkCommit.Messages[0].Body, "claims ok run ") {
+		t.Fatalf("task 2 CHECK commit = %+v, want no artifacts and exactly one claims-ok marker (extra1.go is undeclared for task 2)", checkCommit)
+	}
+	apply(t, s, ticket, checkCommit)
+
+	describeCommit := describeTick(t, s, scriptRT, ticketID) // task 2 DESCRIBE + ASK
+	if len(describeCommit.Artifacts) != 1 {
+		t.Fatalf("task 2 DESCRIBE commit.Artifacts = %+v, want exactly one file artifact", describeCommit.Artifacts)
+	}
+	var fa response.FileArtifact
+	if err := json.Unmarshal(describeCommit.Artifacts[0].Payload, &fa); err != nil {
+		t.Fatalf("unmarshal file artifact: %v", err)
+	}
+	if fa.Path != testExtraPath {
+		t.Errorf("file artifact path = %q, want %q", fa.Path, testExtraPath)
+	}
+	if fa.TaskN != 2 {
+		t.Errorf("file artifact task_n = %d, want 2", fa.TaskN)
+	}
+
+	if n := countPerimeterQuestions(t, s, ticketID); n != 2 {
+		t.Errorf("perimeter questions ever asked = %d, want 2 (task 2 must ask about extra1.go again)", n)
+	}
+}
+
 // TestResolveDefaultsUnknownDecisionToReject proves design section 6.6 step
 // 2's defensive default: the console's own SaveDraft already refuses a
 // perimeter item decision outside accept/reject (internal/store/console_

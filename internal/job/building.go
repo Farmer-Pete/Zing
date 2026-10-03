@@ -553,7 +553,7 @@ func (h buildingHandler) advanceCheckedRun(ctx context.Context, t store.Ticket, 
 	if evErr != nil {
 		return store.HandlerCommit{}, fmt.Errorf("job: building: file events: %w", evErr)
 	}
-	declaredNow := declaredPaths(plan, events, nil)
+	declaredNow := declaredPaths(plan, events, nil, u.TaskN)
 	changed, changedErr := proj.Orch.ChangedPaths(ctx, wt)
 	if changedErr != nil {
 		return unitEscalation(t, d, u, string(response.EscalationCodeEnvironment), treeNotDiffedWhat, treeNotDiffedWhy, changedErr.Error()), nil
@@ -1251,7 +1251,7 @@ func (h buildingHandler) retryCapResumesPerimeter(ctx context.Context, t store.T
 	if err != nil {
 		return unitEscalation(t, d, unit{TaskN: taskN}, string(response.EscalationCodeEnvironment), treeNotDiffedWhat, treeNotDiffedWhy, err.Error()), 0, nil
 	}
-	declaredNow := declaredPaths(plan, events, nil)
+	declaredNow := declaredPaths(plan, events, nil, taskN)
 	extras := orchestrator.Perimeter(changed, declaredNow, trustRoot, styleGuide)
 
 	reports, err := d.Store.BuildReports(ctx, t.ID)
@@ -1575,11 +1575,12 @@ func newestFileEventPerPath(events []store.FileEventRow) map[string]store.FileEv
 }
 
 // acceptedPaths returns, sorted, every path whose newest file event carries
-// Decision accept (design section 9.1's own "accepted" prompt input).
-func acceptedPaths(events []store.FileEventRow) []string {
+// Decision accept and is in scope for taskN (design section 9.1's own
+// "accepted" prompt input; design rule 4's own extraInScope).
+func acceptedPaths(plan response.Plan, events []store.FileEventRow, taskN int) []string {
 	var out []string
 	for _, row := range newestFileEventPerPath(events) {
-		if row.File.Decision != nil && *row.File.Decision == response.PerimeterAccept {
+		if row.File.Decision != nil && *row.File.Decision == response.PerimeterAccept && extraInScope(plan, row.File, taskN) {
 			out = append(out, row.File.Path)
 		}
 	}
@@ -1588,11 +1589,11 @@ func acceptedPaths(events []store.FileEventRow) []string {
 }
 
 // declaredPaths is CHECK's declaredBefore/declaredNow (design section 6.4
-// step 3): the plan's declared files plus every accepted path, or, with
-// before non-nil, only the accepted paths whose deciding artifact id is
-// lower than *before (declaredBefore); nil includes every accepted path
-// (declaredNow).
-func declaredPaths(plan response.Plan, events []store.FileEventRow, before *int64) []string {
+// step 3): the plan's declared files plus every accepted path in scope for
+// taskN, or, with before non-nil, only the accepted paths whose deciding
+// artifact id is lower than *before (declaredBefore); nil includes every
+// accepted path in scope (declaredNow).
+func declaredPaths(plan response.Plan, events []store.FileEventRow, before *int64, taskN int) []string {
 	out := planFilePaths(plan)
 	for _, row := range newestFileEventPerPath(events) {
 		if row.File.Decision == nil || *row.File.Decision != response.PerimeterAccept {
@@ -1601,9 +1602,19 @@ func declaredPaths(plan response.Plan, events []store.FileEventRow, before *int6
 		if before != nil && row.ArtifactID >= *before {
 			continue
 		}
+		if !extraInScope(plan, row.File, taskN) {
+			continue
+		}
 		out = append(out, row.File.Path)
 	}
 	return out
+}
+
+// extraInScope reports whether accepted extra fa counts for the unit
+// numbered taskN: always for a fix unit (0) or a plan with no task mapping,
+// otherwise only when the owner accepted it for taskN.
+func extraInScope(plan response.Plan, fa response.FileArtifact, taskN int) bool {
+	return taskN == 0 || !response.TaskMapped(plan) || fa.TaskN == taskN
 }
 
 func changedPathList(changes []orchestrator.Change) []string {
@@ -1691,7 +1702,7 @@ func (h buildingHandler) runFirst(ctx context.Context, t store.Ticket, d Deps, p
 	if err != nil {
 		return store.HandlerCommit{}, fmt.Errorf("job: building: file events: %w", err)
 	}
-	accepted := acceptedPaths(events)
+	accepted := acceptedPaths(plan, events, u.TaskN)
 
 	schemas, err := renderSchemas(response.JobBuild, response.OutcomeOk)
 	if err != nil {
@@ -1895,8 +1906,8 @@ func (h buildingHandler) check(ctx context.Context, t store.Ticket, d Deps, proj
 		return store.HandlerCommit{}, fmt.Errorf("job: building: check: file events: %w", err)
 	}
 	artifactID := report.ArtifactID
-	declaredBefore := declaredPaths(plan, events, &artifactID)
-	declaredNow := declaredPaths(plan, events, nil)
+	declaredBefore := declaredPaths(plan, events, &artifactID, u.TaskN)
+	declaredNow := declaredPaths(plan, events, nil, u.TaskN)
 
 	claimed := orchestrator.Perimeter(changed, declaredBefore, trustRoot, styleGuide)
 	extras := orchestrator.Perimeter(changed, declaredNow, trustRoot, styleGuide)
@@ -2648,7 +2659,7 @@ func (h buildingHandler) resolvePerimeterQuestion(ctx context.Context, t store.T
 	if err != nil {
 		return unitEscalation(t, d, unit{TaskN: taskN}, string(response.EscalationCodeEnvironment), treeNotDiffedWhat, treeNotDiffedWhy, err.Error()), nil
 	}
-	declaredNow := declaredPaths(plan, events, nil)
+	declaredNow := declaredPaths(plan, events, nil, taskN)
 	extras := orchestrator.Perimeter(changed, declaredNow, trustRoot, styleGuide)
 
 	extra, extraIndex, stillExtra := extraFor(extras, path)
@@ -2847,8 +2858,8 @@ func (h buildingHandler) adopt(ctx context.Context, t store.Ticket, d Deps, proj
 	// yet, since DESCRIBE and RESOLVE are task 10/11), but adopt must still
 	// compute them the same distinct way check does.
 	artifactID := report.ArtifactID
-	declaredBefore := declaredPaths(plan, events, &artifactID)
-	declaredNow := declaredPaths(plan, events, nil)
+	declaredBefore := declaredPaths(plan, events, &artifactID, u.TaskN)
+	declaredNow := declaredPaths(plan, events, nil, u.TaskN)
 	claimed := orchestrator.Perimeter(commitChanges, declaredBefore, trustRoot, styleGuide)
 	extras := orchestrator.Perimeter(commitChanges, declaredNow, trustRoot, styleGuide)
 
