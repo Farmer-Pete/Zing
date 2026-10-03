@@ -4801,6 +4801,45 @@ func TestFill_ReleaseAfterCancelStillLands(t *testing.T) {
 	}
 }
 
+// TestFill_CtxCanceledBetweenClaimAndLaunchReleasesClaim proves PR review
+// fix D1: fill's own launch linearization point (design section 4.2 step
+// 5) also treats a ctx cancellation that never went through setStop as a
+// stop -- the force-cancel at the drain deadline can race this exact
+// window too, same as an explicit setStop call, and launching a worker
+// against an already-cancelled ctx would be no different from launching
+// one after a stop. ctx is cancelled here with d.stop deliberately left
+// unset, so only the new ctx.Err() check (not the existing d.stop check)
+// can be what prevents the launch.
+func TestFill_CtxCanceledBetweenClaimAndLaunchReleasesClaim(t *testing.T) {
+	t.Parallel()
+
+	s := newDispatchTestStore(t)
+	ticketID := seedQueuedTicket(t, s, testFixtureRef)
+
+	spy := &spyHandler{next: testStatePlanning, reason: testSpyReason}
+	reg := job.Registry()
+	reg[testStateQueued] = spy
+
+	d := newDispatcher(t, s, newFixtureTracker(t), bus.New(), fakeRuntime(t), reg, nil, dispatch.Config{MaxParallel: 1, Owner: testOwner})
+
+	ctx, cancel := context.WithCancel(t.Context())
+	dispatch.SetAfterClaimForTest(d, func(int64) {
+		cancel()
+	})
+
+	if err := d.Tick(ctx); err != nil {
+		t.Fatalf("Tick: %v", err)
+	}
+
+	if got := spy.Calls(); got != 0 {
+		t.Errorf("spy.Calls() = %d, want 0 (a ctx cancelled between claim and launch must release, not run)", got)
+	}
+	final := getTicket(t, s, ticketID)
+	if final.State != testStateQueued || final.ClaimOwner != nil {
+		t.Errorf("final ticket = %+v, want unchanged queued, claim released", final)
+	}
+}
+
 // TestRun_AlertNamesTheErrorThatStopped proves reportFirstError always
 // describes d.stopErr -- the error the first setStop(err) call with a
 // non-nil error recorded -- never whichever error a caller's own select

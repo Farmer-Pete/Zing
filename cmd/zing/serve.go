@@ -893,12 +893,7 @@ func shutdown(
 		slog.Error("dispatcher stopped", "err", de)
 	}
 
-	if serveErr == nil {
-		serveErr = dispatchFailure(dispTriggered, de)
-	}
-	if serveErr == nil {
-		serveErr = err
-	}
+	serveErr = resolveServeErr(serveErr, dispTriggered, de, err)
 	// Every srv.Serve(ln) goroutine (one per resolved listener) sends its
 	// own return value to errCh; the outer select above already consumed
 	// one of them when consumedFromErrCh is true. Drain the rest here, so
@@ -930,6 +925,33 @@ func dispatchFailure(dispTriggered bool, de error) error {
 		return nil
 	}
 	return fmt.Errorf("dispatcher: %w", de)
+}
+
+// resolveServeErr picks shutdown's own return value from every error
+// source it collects (PR review fix D3): triggerErr is whatever ended
+// waitForShutdownTrigger's own select (a listener failure from errCh, or
+// nil for a signal or a benign dispDone); dispTriggered and de are
+// waitForShutdownTrigger's own report of the dispatcher's goroutine; err is
+// drainAndShutdown's own shutdown/closeStore error.
+//
+// dispatchFailure(dispTriggered, de) always wins when it is non-nil. Before
+// this fix, a dispatcher failure was reported only when triggerErr was
+// still nil by the time shutdown ran its own "if serveErr == nil" check --
+// so a listener failure that happened to end the wait after the dispatcher
+// had already failed closed (waitForShutdownTrigger's own documented case:
+// the dispatcher's failure keeps the wait going until a real trigger
+// arrives) silently masked the dispatcher's own failure instead of joining
+// or naming it. dispTriggered being true already means the dispatcher's
+// failure is what the console alerted on and what an operator needs named
+// in serve's own exit status, whatever else also happened to end the wait.
+func resolveServeErr(triggerErr error, dispTriggered bool, de, drainErr error) error {
+	if dispFail := dispatchFailure(dispTriggered, de); dispFail != nil {
+		return dispFail
+	}
+	if triggerErr != nil {
+		return triggerErr
+	}
+	return drainErr
 }
 
 // drainAndShutdown runs the section 6.10 drain-then-close sequence, decoupled

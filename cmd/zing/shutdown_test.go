@@ -271,6 +271,48 @@ func TestWaitForShutdownTrigger_BenignDispDoneEndsWaitImmediately(t *testing.T) 
 	}
 }
 
+// TestResolveServeErr_DispatcherFailureNotMaskedByLaterListenerFailure
+// proves PR review fix D3: a dispatcher failure that already set
+// dispTriggered must win over a listener failure that happened to end the
+// wait afterward (design section 4.7's own documented case: the dispatcher
+// keeps serve's wait going until a real trigger arrives). Before this fix,
+// shutdown's own "if serveErr == nil" ordering let the later listener
+// failure silently mask the dispatcher's.
+func TestResolveServeErr_DispatcherFailureNotMaskedByLaterListenerFailure(t *testing.T) {
+	t.Parallel()
+	dispErr := errors.New("boom: dispatcher failed closed")
+	listenerErr := errors.New("boom: listener failed after the dispatcher")
+
+	got := resolveServeErr(listenerErr, true, dispErr, nil)
+	if !errors.Is(got, dispErr) {
+		t.Errorf("resolveServeErr = %v, want it to wrap the dispatcher failure %v, not the later listener failure %v", got, dispErr, listenerErr)
+	}
+}
+
+// TestResolveServeErr_ListenerFailureAloneIsReported proves resolveServeErr
+// keeps today's behavior absent a dispatcher failure: an ordinary listener
+// failure (dispTriggered false) is still what serve reports.
+func TestResolveServeErr_ListenerFailureAloneIsReported(t *testing.T) {
+	t.Parallel()
+	listenerErr := errors.New("boom: listener failed")
+	got := resolveServeErr(listenerErr, false, nil, nil)
+	if !errors.Is(got, listenerErr) {
+		t.Errorf("resolveServeErr = %v, want %v", got, listenerErr)
+	}
+}
+
+// TestResolveServeErr_FallsBackToDrainError proves resolveServeErr's last
+// priority: with no trigger error and no dispatcher failure, a real
+// shutdown/closeStore failure from drainAndShutdown is still reported.
+func TestResolveServeErr_FallsBackToDrainError(t *testing.T) {
+	t.Parallel()
+	drainErr := errors.New("boom: drain")
+	got := resolveServeErr(nil, false, nil, drainErr)
+	if !errors.Is(got, drainErr) {
+		t.Errorf("resolveServeErr = %v, want %v", got, drainErr)
+	}
+}
+
 // TestWaitForShutdownTrigger_ListenerFailureEndsWaitAndIsConsumed proves an
 // HTTP listener failure (errCh) ends the wait and is reported back, even
 // while the dispatcher is still healthy (dispDone never closes).

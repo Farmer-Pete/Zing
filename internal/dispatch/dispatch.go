@@ -104,10 +104,13 @@ const alertCauseMaxBytes = 300
 
 // runResult is one worker's outcome, sent on fill's caller-owned results
 // channel (design section 4.2): Err is nil on success, or a *runError
-// naming the ticket a worker's runAndCommit call failed on.
+// naming the ticket a worker's runAndCommit call failed on. The failed
+// ticket id, when there is one, lives on the *runError itself (PR review
+// fix D2): every reader (Tick, Run, finish) only ever consumes Err, and
+// reportFirstError names the ticket through stopErr's own *runError, never
+// through a field on this struct.
 type runResult struct {
-	TicketID int64
-	Err      error
+	Err error
 }
 
 // runError wraps a worker's runAndCommit error with the ticket id it ran
@@ -759,9 +762,15 @@ func (d *Dispatcher) fill(ctx context.Context, results chan<- runResult) (int, e
 		// This is the launch linearization point (design section 4.2 step
 		// 5): setStop also takes d.mu, so a stop set before this section
 		// prevents the launch below, and a stop set after it finds the run
-		// already launched (and drained like any other, by finish).
+		// already launched (and drained like any other, by finish). ctx is
+		// also checked here, not only d.stop (PR review fix D1): a ctx
+		// cancellation that is not routed through setStop at all -- the
+		// force-cancel at the drain deadline races this exact window too,
+		// same as a stop -- must still release the claim through the
+		// detached path below rather than launch a worker against an
+		// already-cancelled context.
 		d.mu.Lock()
-		if d.stop {
+		if d.stop || ctx.Err() != nil {
 			d.mu.Unlock()
 			if relErr := d.releaseClaimNoStop(ctx, id, expires, "claim released, dispatcher stopping"); relErr != nil {
 				return launched, relErr
@@ -795,7 +804,7 @@ func (d *Dispatcher) worker(ctx context.Context, ticket store.Ticket, timeout ti
 	// Send before leaving inflight: a finished worker whose result the
 	// caller has not read yet still holds its slot, so fill can never
 	// launch more than MaxParallel workers even while results sit unread.
-	results <- runResult{TicketID: ticket.ID, Err: err}
+	results <- runResult{Err: err}
 
 	d.mu.Lock()
 	delete(d.inflight, ticket.ID)
