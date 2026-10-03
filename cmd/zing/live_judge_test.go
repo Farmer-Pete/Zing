@@ -243,7 +243,7 @@ func loadLiveJudgeConfig(t *testing.T, m *machine.Machine) liveJudgeConfig {
 		t.Skipf("re-read %s for [models] codex: %v", cfgPath, decodeErr)
 	}
 	if !md.IsDefined("models", "codex") || raw.Models.Codex == "" {
-		t.Skipf("%s leaves [models] codex undefined; set one the judge Codex home's own login accepts (its default, %q, is not)", cfgPath, cfg.Models.Codex)
+		t.Skipf("%s leaves [models] codex undefined; set one explicitly so this test is not silently coupled to applyDefaults' own choice (currently %q)", cfgPath, cfg.Models.Codex)
 	}
 
 	return liveJudgeConfig{codexHome: cfg.JudgeCodexHome, codexModel: raw.Models.Codex}
