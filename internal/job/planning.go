@@ -210,6 +210,14 @@ func (h planningHandler) Run(ctx context.Context, t store.Ticket, d Deps) (store
 		if commit, handled, reviewErr := maybeReviewTick(ctx, t, d); handled {
 			return commit, reviewErr
 		}
+		// D5 (design section 7.4): an exhausted session whose newest run was
+		// cut short (store.Run.Interrupted) still resumes, free and
+		// uncapped, rather than escalate resumes_exhausted -- the next,
+		// non-interrupted resume is still blocked by the cap (section 11's
+		// own edge case).
+		if commit, handled, fallbackErr := planningInterruptedFallback(ctx, t, d, sess); handled {
+			return commit, fallbackErr
+		}
 		has, hasErr := d.Store.HasEscalation(ctx, t.ID, string(response.EscalationOriginCapResumes), sess.ID)
 		if hasErr != nil {
 			return store.HandlerCommit{}, fmt.Errorf("job: planning: has escalation: %w", hasErr)
@@ -219,6 +227,16 @@ func (h planningHandler) Run(ctx context.Context, t store.Ticket, d Deps) (store
 		}
 		return capResumesEscalation(t, d, sess.ID), nil
 	case store.SessionOpen:
+		// Design section 7.5 bug 3: before the ordinary D14 n==1 check,
+		// handle a newest run that is itself a stalled invalid retry -- one
+		// ConsecutiveInvalidOutputs' own walk stops on, uncounted, because
+		// it never got a response of its own. Left to the n==1 check alone,
+		// this run's own missing marker makes n come back 0 with nothing
+		// else pending, stalling on ErrNoAction forever (the bug).
+		if commit, handled, stallErr := maybeResumeStalledInvalidRetry(ctx, t, d, sess); handled {
+			return commit, stallErr
+		}
+
 		n, reason, invErr := d.Store.ConsecutiveInvalidOutputs(ctx, t.ID, jobPlanningName, &sess.ID)
 		if invErr != nil {
 			return store.HandlerCommit{}, fmt.Errorf("job: planning: consecutive invalid outputs: %w", invErr)
@@ -245,6 +263,11 @@ func (h planningHandler) Run(ctx context.Context, t store.Ticket, d Deps) (store
 			if chargeErr != nil {
 				return store.HandlerCommit{}, fmt.Errorf("job: planning: session interrupted: %w", chargeErr)
 			}
+			// runPlanningResume itself ANDs charge against resumeCharge's own
+			// bump (design D5, section 7.4) and appends the interrupted
+			// input when the session's newest run carries it, so this call
+			// site's own charge computation (SessionInterrupted, D31's
+			// unrelated resume-charging table) stays exactly as it was.
 			return runPlanningResume(ctx, t, d, sess, nil, nil, 0, charge)
 		}
 		if len(conv.Unsettled()) > 0 && t.WaitingOn == nil {
@@ -262,6 +285,17 @@ func (h planningHandler) Run(ctx context.Context, t store.Ticket, d Deps) (store
 		}
 		if commit, handled, resumeErr := maybeResumeFloorFindings(ctx, t, d, sess); handled {
 			return commit, resumeErr
+		}
+		// D5's own catch-all (design section 7.4's "planning, first turn"
+		// row): nothing above claimed this tick, but the session's newest
+		// run was cut short -- a first turn interrupted before it ever
+		// answered (the external id was already written at start, 7.1, so
+		// the session is open rather than idless), or any other resume
+		// whose only story is "it was interrupted". A plain reconciled run
+		// (Interrupted false) with nothing else pending keeps today's
+		// ErrNoAction.
+		if commit, handled, fallbackErr := planningInterruptedFallback(ctx, t, d, sess); handled {
+			return commit, fallbackErr
 		}
 		return store.HandlerCommit{}, ErrNoAction
 	}
@@ -471,10 +505,29 @@ func runPlanningFirst(ctx context.Context, t store.Ticket, d Deps, extra []promp
 // that followed no other, agent-driven reason. Every call also reads
 // PlanningConversation and, when Undelivered() is non-empty, appends the
 // resume block carrying every owner message this turn has not yet seen
-// (design section 22.4, 22.5).
+// (design section 22.4, 22.5). resumeCharge (job.go, design D5, section
+// 7.4), read from sess's own newest run, ANDs its own bump into charge
+// (an interrupted newest run makes every caller's resume free, whatever
+// charge it computed on its own) and, when that newest run is interrupted,
+// appends the interrupted input to extra -- so every one of this
+// function's five call sites (the D14 retry, the owner-delivery resume,
+// the validation-errors resume, the floor-findings resume, and the
+// answered-round resume) gets both halves of D5 for free.
 func runPlanningResume(ctx context.Context, t store.Ticket, d Deps, sess store.Session, resolveIDs []int64, extra []prompt.NamedInput, priorInvalid int, charge bool) (store.HandlerCommit, error) {
 	if sess.ExternalID == nil || *sess.ExternalID == "" {
 		return store.HandlerCommit{}, fmt.Errorf("job: planning: resume: session %d has no external id", sess.ID)
+	}
+
+	newestRun, foundRun, err := d.Store.SessionNewestRun(ctx, sess.ID)
+	if err != nil {
+		return store.HandlerCommit{}, fmt.Errorf("job: planning: resume: newest run: %w", err)
+	}
+	if foundRun {
+		bump, _ := resumeCharge(newestRun)
+		charge = charge && bump
+		if newestRun.Interrupted {
+			extra = append(append([]prompt.NamedInput{}, extra...), prompt.NamedInput{Label: labelInterrupted, Text: interruptedResumeText, Untrusted: false})
+		}
 	}
 
 	schemas, err := planningSchemas()
@@ -499,6 +552,108 @@ func runPlanningResume(ctx context.Context, t store.Ticket, d Deps, sess store.S
 		func(rr runResult) (store.HandlerCommit, error) {
 			return planningSuccessCommit(ctx, t, d, rr, sessionRecord(rr), resolveIDs, response.EscalationOriginPlanningResume, conv, throughBatch)
 		}, nil, throughBatch)
+}
+
+// planningInterruptedFallback is design D5's own catch-all (section 7.4's
+// "planning, first turn" row, which also covers any other mid-planning
+// resume no more specific branch above claims): sess's newest run carries
+// store.Run.Interrupted, so it resumes free with the interrupted input
+// (runPlanningResume adds that input itself, from the same newest run).
+// handled is false, with no error, when the session has no run yet or its
+// newest run was not interrupted -- the caller still falls through to
+// ErrNoAction for a plain reconciled run with nothing else pending, exactly
+// as today.
+func planningInterruptedFallback(ctx context.Context, t store.Ticket, d Deps, sess store.Session) (store.HandlerCommit, bool, error) {
+	newestRun, found, err := d.Store.SessionNewestRun(ctx, sess.ID)
+	if err != nil {
+		return store.HandlerCommit{}, false, fmt.Errorf("job: planning: interrupted fallback: newest run: %w", err)
+	}
+	if !found || !newestRun.Interrupted {
+		return store.HandlerCommit{}, false, nil
+	}
+	commit, err := runPlanningResume(ctx, t, d, sess, nil, nil, 0, true)
+	return commit, true, err
+}
+
+// maybeResumeStalledInvalidRetry is design section 7.5 bug 3 (the planning
+// invalid-retry stall): sess's newest run ended "error" but carries no
+// "response invalid run <rid>" marker of its own -- exactly the shape of a
+// D14 retry turn (runPlanningResume's own n==1 branch) that was itself cut
+// short before it ever answered. Left alone, ConsecutiveInvalidOutputs'
+// walk (internal/store/planning_reads.go) stops on that run, uncounted,
+// because a response-less run cannot carry the marker; n comes back 0, and
+// with nothing else pending the handler stalls on ErrNoAction forever.
+// This runs first and rebuilds the retry text from the run that actually
+// triggered the chain -- sess's own run immediately before the newest one
+// -- so the resume carries the same invalid-retry text the stalled turn
+// itself was launched with. runPlanningResume's own resumeCharge handling
+// (design D5) then decides, from this same newest run, whether the resume
+// is free (genuinely interrupted) or charged and cap-gated (a plainer
+// reconcile, section 7.5 bug 3's "reconciled" row): either way it also
+// appends the interrupted input when the newest run is interrupted, next
+// to the invalid-retry text this function supplies. handled is false when
+// the newest run is not an unanswered error (the ordinary D14 n==1 check
+// should run instead) or it has no predecessor carrying its own invalid
+// marker (not a stalled retry at all -- the first-turn-interrupted
+// fallback, planningInterruptedFallback, claims that case instead).
+func maybeResumeStalledInvalidRetry(ctx context.Context, t store.Ticket, d Deps, sess store.Session) (store.HandlerCommit, bool, error) {
+	newestRun, found, err := d.Store.SessionNewestRun(ctx, sess.ID)
+	if err != nil {
+		return store.HandlerCommit{}, false, fmt.Errorf("job: planning: stalled invalid retry: newest run: %w", err)
+	}
+	if !found || newestRun.Outcome == nil || *newestRun.Outcome != string(response.OutcomeError) {
+		return store.HandlerCommit{}, false, nil
+	}
+	_, hasOwnMarker, err := d.Store.Marker(ctx, t.ID, fmt.Sprintf("response invalid run %d", newestRun.ID))
+	if err != nil {
+		return store.HandlerCommit{}, false, fmt.Errorf("job: planning: stalled invalid retry: own marker: %w", err)
+	}
+	if hasOwnMarker {
+		return store.HandlerCommit{}, false, nil
+	}
+	reason, hadPriorRetry, err := priorInvalidReason(ctx, d, t.ID, sess.ID, newestRun.ID)
+	if err != nil {
+		return store.HandlerCommit{}, false, err
+	}
+	if !hadPriorRetry {
+		return store.HandlerCommit{}, false, nil
+	}
+	commit, err := runPlanningResume(ctx, t, d, sess, nil, []prompt.NamedInput{prompt.Invalid(invalidRetryText(reason))}, 0, true)
+	return commit, true, err
+}
+
+// priorInvalidReason looks up the "response invalid run <id>" marker (D14,
+// design section 5.4) of sessionID's own run immediately before
+// beforeRunID -- the run that triggered the retry beforeRunID itself
+// carried out. found is false when beforeRunID is this session's very
+// first run, or its predecessor carries no such marker (an ordinary
+// interrupted first turn, not a stalled retry).
+func priorInvalidReason(ctx context.Context, d Deps, ticketID, sessionID, beforeRunID int64) (reason string, found bool, err error) {
+	runs, err := d.Store.RunsForTicket(ctx, ticketID)
+	if err != nil {
+		return "", false, fmt.Errorf("job: planning: prior invalid reason: runs for ticket: %w", err)
+	}
+	priorID := int64(-1)
+	for _, r := range runs {
+		if r.SessionID != sessionID || r.ID >= beforeRunID {
+			continue
+		}
+		if r.ID > priorID {
+			priorID = r.ID
+		}
+	}
+	if priorID < 0 {
+		return "", false, nil
+	}
+	row, ok, err := d.Store.Marker(ctx, ticketID, fmt.Sprintf("response invalid run %d", priorID))
+	if err != nil {
+		return "", false, fmt.Errorf("job: planning: prior invalid reason: marker: %w", err)
+	}
+	if !ok {
+		return "", false, nil
+	}
+	_, reason, _ = strings.Cut(row.Body, "\n")
+	return reason, true, nil
 }
 
 // planningSuccessCommit routes a planning run's parsed response (design
@@ -1776,11 +1931,27 @@ func gateConfirmEntry(ctx context.Context, t store.Ticket, d Deps, gateQID, appr
 // confirmingTurnSuccessCommit. gateQID, approveAID, and planVersion carry
 // through to that commit's own confirmed marker and, for every other
 // outcome, the cancellation marker and gate resolution (design section
-// 22.12.3).
+// 22.12.3). resumeCharge (job.go, design D5, section 7.4), read from sess's
+// own newest run, ANDs its own bump into charge and, when that newest run
+// is interrupted, appends the interrupted input -- the gate's own "already
+// free" confirming turn (gateConfirmEntry's plain branch) is where this
+// actually fires, design section 7.4's "gate confirming turn" row.
 func runGateConfirm(
 	ctx context.Context, t store.Ticket, d Deps, sess store.Session, inputs []prompt.NamedInput, priorInvalid int, charge bool,
 	conv store.PlanningConversation, throughBatch int64, gateQID, approveAID int64, planVersion int,
 ) (store.HandlerCommit, error) {
+	newestRun, foundRun, err := d.Store.SessionNewestRun(ctx, sess.ID)
+	if err != nil {
+		return store.HandlerCommit{}, fmt.Errorf("job: gate: confirm: newest run: %w", err)
+	}
+	if foundRun {
+		bump, _ := resumeCharge(newestRun)
+		charge = charge && bump
+		if newestRun.Interrupted {
+			inputs = append(append([]prompt.NamedInput{}, inputs...), prompt.NamedInput{Label: labelInterrupted, Text: interruptedResumeText, Untrusted: false})
+		}
+	}
+
 	schemas, err := confirmSchemas()
 	if err != nil {
 		return store.HandlerCommit{}, fmt.Errorf("job: gate: confirm: %w", err)

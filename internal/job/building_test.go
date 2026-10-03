@@ -1124,6 +1124,44 @@ func TestPerimeterAskInLastDescribeCommit(t *testing.T) {
 	}
 }
 
+// TestPerimeterInterruptedRerunsFresh proves design section 7.4's
+// perimeter row ("keep fresh re-runs"): DESCRIBE's own SessionUpsert never
+// carries a session id to resume (building.go's describe step always
+// builds su with Job and Runtime only), so a DESCRIBE cut short and marked
+// interrupted re-runs an entirely fresh perimeter turn on the next tick
+// rather than try to resume it.
+func TestPerimeterInterruptedRerunsFresh(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow end-to-end flow; runs in the full suite")
+	}
+	t.Parallel()
+	s, ticketID, _, scriptRT := perimeterScenario(t, map[string]string{testExtraPath: testExtraReason})
+
+	canceledRT := &scriptedRuntime{t: t, steps: []scriptedStep{
+		{res: runtime.RunResult{ExitCode: -1, AgentTime: time.Second}, err: runtime.ErrCanceled},
+	}}
+	ticket := getTicket(t, s, ticketID)
+	deps := claimForBuild(t, s, canceledRT, ticketID)
+	_, err := job.Registry()[testStateBuilding].Run(t.Context(), ticket, deps) // DESCRIBE: interrupted mid-flight
+	if !errors.Is(err, runtime.ErrCanceled) {
+		t.Fatalf("err = %v, want errors.Is(err, runtime.ErrCanceled)", err)
+	}
+
+	applied, interruptErr := s.InterruptRuns(t.Context(), ticketID, deps.Owner, deps.Expires)
+	if interruptErr != nil {
+		t.Fatalf("InterruptRuns: %v", interruptErr)
+	}
+	if !applied {
+		t.Fatal("InterruptRuns: applied = false, want true")
+	}
+
+	scriptRT.steps = append(scriptRT.steps, perimeterStep("Adds a small helper.", "perim-fresh-sess"))
+	commit := describeTick(t, s, scriptRT, ticketID) // DESCRIBE again: must run fresh, not try to resume
+	if commit.Session == nil || commit.Session.ExternalID == nil || *commit.Session.ExternalID != "perim-fresh-sess" {
+		t.Fatalf("commit.Session = %+v, want a fresh session with external id perim-fresh-sess", commit.Session)
+	}
+}
+
 // TestPerimeterItemText proves Item.Text's exact format (design section
 // 6.5): the marker in brackets when set, then "Builder: <reason> ", then
 // "Change: <description>" -- covering no marker, trust root, and style
