@@ -11,6 +11,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"slices"
 	"strconv"
 	"time"
@@ -133,9 +134,17 @@ type Project struct {
 	Threads      ReviewThreads
 }
 
+// CommandIO is what a CommandRunner caller can attach to one command. The
+// zero value discards output and records nothing.
+type CommandIO struct {
+	Out     io.Writer      // stdout and stderr, one child-side stream (#55 plan D2); nil discards
+	OnStart func(pgid int) // called once, synchronously, right after Start; pgid == pid (Setpgid)
+}
+
 // CommandRunner runs one shell command in dir, in its own process group, and
 // returns its exit code. The whole group is killed when Run returns (design
-// section 4.3, 5.5):
+// section 4.3, 5.5). cio attaches an output writer and a start callback;
+// CommandIO{} attaches neither:
 //
 //	err == nil:                 the process ran and exited; exitCode is real
 //	ErrCommandTimeout:          the timeout killed it; exitCode is -1
@@ -143,7 +152,7 @@ type Project struct {
 //	context.Canceled (wrapped): the parent context ended; exitCode is -1
 //	any other error:            the command could not start; exitCode is -1
 type CommandRunner interface {
-	Run(ctx context.Context, dir, repoGit, shellCmd string, timeout time.Duration) (exitCode int, err error)
+	Run(ctx context.Context, dir, repoGit, shellCmd string, timeout time.Duration, cio CommandIO) (exitCode int, err error)
 }
 
 // ErrSandbox and ErrCommandTimeout are the two new job-level errors this

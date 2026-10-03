@@ -468,14 +468,14 @@ func newSelftestCommands(realRunner job.CommandRunner) selftestCommands {
 	return selftestCommands{real: realRunner, checkCalls: new(int32)}
 }
 
-func (c selftestCommands) Run(ctx context.Context, dir, repoGit, shellCmd string, timeout time.Duration) (int, error) {
+func (c selftestCommands) Run(ctx context.Context, dir, repoGit, shellCmd string, timeout time.Duration, cio job.CommandIO) (int, error) {
 	if shellCmd == e2eJudgeCheckCmd {
 		if atomic.AddInt32(c.checkCalls, 1) == 1 {
 			return 1, nil // round 1: the scenario's own check fails, forcing a fix
 		}
 		return 0, nil // round 2, after the fix lands: the check passes
 	}
-	return c.real.Run(ctx, dir, repoGit, shellCmd, timeout)
+	return c.real.Run(ctx, dir, repoGit, shellCmd, timeout, cio)
 }
 
 // e2eOwner is this selftest run's claim owner id (design section 7.2's

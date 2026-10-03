@@ -1797,7 +1797,7 @@ func buildSuccessCommit(t store.Ticket, d Deps, rr runResult, sessionCommit *sto
 // unclassified for the caller to route.
 func runCheckCommand(ctx context.Context, d Deps, t store.Ticket, wt orchestrator.Worktree, proj Project, rid *int64, kind, shellCmd string) (exit int, timedOut bool, err error) {
 	started := time.Now()
-	exit, runErr := d.Commands.Run(ctx, wt.Dir(), proj.RepoGit, shellCmd, checkCommandTimeout)
+	exit, runErr := d.Commands.Run(ctx, wt.Dir(), proj.RepoGit, shellCmd, checkCommandTimeout, CommandIO{})
 	seconds := int(time.Since(started).Seconds())
 	switch {
 	case runErr == nil:

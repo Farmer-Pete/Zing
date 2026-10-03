@@ -396,11 +396,11 @@ type dispatchJudgeCommands struct {
 	real job.CommandRunner
 }
 
-func (c dispatchJudgeCommands) Run(ctx context.Context, dir, repoGit, shellCmd string, timeout time.Duration) (int, error) {
+func (c dispatchJudgeCommands) Run(ctx context.Context, dir, repoGit, shellCmd string, timeout time.Duration, cio job.CommandIO) (int, error) {
 	if shellCmd == judgeCheckFixtureCmd {
 		return 0, nil
 	}
-	return c.real.Run(ctx, dir, repoGit, shellCmd, timeout)
+	return c.real.Run(ctx, dir, repoGit, shellCmd, timeout, cio)
 }
 
 // advanceJudgingMaxCalls bounds advanceJudging's (and
@@ -485,14 +485,14 @@ func newDispatchJudgeFailThenPassCommands(realRunner job.CommandRunner) dispatch
 	return dispatchJudgeFailThenPassCommands{real: realRunner, checkCalls: new(int32)}
 }
 
-func (c dispatchJudgeFailThenPassCommands) Run(ctx context.Context, dir, repoGit, shellCmd string, timeout time.Duration) (int, error) {
+func (c dispatchJudgeFailThenPassCommands) Run(ctx context.Context, dir, repoGit, shellCmd string, timeout time.Duration, cio job.CommandIO) (int, error) {
 	if shellCmd == judgeCheckFixtureCmd {
 		if atomic.AddInt32(c.checkCalls, 1) == 1 {
 			return 1, nil // round 1: the scenario's own check fails, forcing a fix
 		}
 		return 0, nil // round 2, after the fix lands: the check passes
 	}
-	return c.real.Run(ctx, dir, repoGit, shellCmd, timeout)
+	return c.real.Run(ctx, dir, repoGit, shellCmd, timeout, cio)
 }
 
 // judgeRoundMarkerBodies returns ticketID's own "update" message bodies, in
