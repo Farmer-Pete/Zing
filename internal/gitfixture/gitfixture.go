@@ -7,6 +7,7 @@ package gitfixture
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io/fs"
 	"os"
@@ -85,6 +86,12 @@ func buildSigningRepo(ctx context.Context, dir string) error {
 		{"commit.gpgsign", "true"},
 		{"gpg.format", "ssh"},
 		{"user.signingKey", keyPath},
+		// No automatic maintenance or gc: a commit would otherwise start
+		// "git maintenance run --auto" in the background, and its
+		// objects/maintenance.lock can appear and vanish while another test
+		// copies this template (seen in CI on PR #59).
+		{"maintenance.auto", "false"},
+		{"gc.auto", "0"},
 	}
 	for _, kv := range config {
 		if err := runGit(ctx, dir, "config", kv[0], kv[1]); err != nil {
@@ -105,9 +112,13 @@ func buildSigningRepo(ctx context.Context, dir string) error {
 // copyTree copies every directory and regular file under src to the same
 // relative path under dest, keeping each one's permission bits. Anything
 // else (a symlink, a socket) is an error: git init and one commit create
-// neither.
+// neither. An entry that vanishes during the walk (a transient lock file)
+// is skipped.
 func copyTree(src, dest string) error {
 	return filepath.WalkDir(src, func(path string, d fs.DirEntry, walkErr error) error {
+		if errors.Is(walkErr, fs.ErrNotExist) {
+			return nil
+		}
 		if walkErr != nil {
 			return walkErr
 		}
@@ -117,6 +128,9 @@ func copyTree(src, dest string) error {
 		}
 		target := filepath.Join(dest, rel)
 		info, err := d.Info()
+		if errors.Is(err, fs.ErrNotExist) {
+			return nil
+		}
 		if err != nil {
 			return err
 		}
@@ -125,6 +139,9 @@ func copyTree(src, dest string) error {
 			return os.MkdirAll(target, info.Mode().Perm())
 		case info.Mode().IsRegular():
 			content, err := os.ReadFile(path) //nolint:gosec // G304: path comes from walking this package's own template directory
+			if errors.Is(err, fs.ErrNotExist) {
+				return nil
+			}
 			if err != nil {
 				return err
 			}
