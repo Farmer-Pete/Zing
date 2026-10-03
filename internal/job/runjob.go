@@ -441,8 +441,10 @@ func onStartContext(ctx context.Context) (context.Context, context.CancelFunc) {
 // process identity through RecordRunStart, logging any failure at WARN
 // rather than failing the run -- a run that reaches this point has already
 // been reserved, and a start-identity write failing it would orphan that
-// reservation for no benefit (reclaim simply treats such a run as not
-// verifiable, section 6.3).
+// reservation for no benefit. This is a plan-accepted risk (design section
+// 11's "RecordRunStart fails" row): the run's pgid stays NULL, so reclaim
+// treats it as not live (section 6.3's own "PGID NULL: not live" rule) and
+// reclaims its claim at once, rather than waiting on it as unverified.
 func recordRunStart(ctx context.Context, d Deps, ticketID, runID int64, info runtime.StartInfo) {
 	var token string
 	if info.PID > 0 {
