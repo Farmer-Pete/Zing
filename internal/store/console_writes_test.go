@@ -1437,6 +1437,78 @@ func TestMarkRead_MissingMessageErrors(t *testing.T) {
 	}
 }
 
+// TestMarkThreadRead_MarksOnlyUnreadZingMessages proves MarkThreadRead marks
+// every unread, zing-authored, thread-visible message on one ticket, leaves
+// a "you"-authored message and a state message alone, never touches another
+// ticket's messages, and returns 0 (not an error) on a second call or on an
+// id that names no ticket.
+func TestMarkThreadRead_MarksOnlyUnreadZingMessages(t *testing.T) {
+	t.Parallel()
+	s := newTestStore(t)
+	_, ticketID := seedQueuedTicket(t, s, "1")
+	zing1 := insertZingUpdate(t, s, ticketID)
+	zing2 := insertZingUpdate(t, s, ticketID)
+	you, err := s.InsertMessage(t.Context(), Message{
+		TicketID: ticketID, Type: testTypeUpdate, Author: "you", Body: "a note",
+	})
+	if err != nil {
+		t.Fatalf("InsertMessage (you): %v", err)
+	}
+	stateMsg, err := s.InsertMessage(t.Context(), Message{
+		TicketID: ticketID, Type: msgTypeState, Author: authorSystem,
+		Payload: []byte(`{"from":"queued","to":"queued","reason":"test"}`),
+	})
+	if err != nil {
+		t.Fatalf("InsertMessage (state): %v", err)
+	}
+
+	_, otherTicketID := seedQueuedTicket(t, s, "2")
+	otherZing := insertZingUpdate(t, s, otherTicketID)
+
+	n, err := s.MarkThreadRead(t.Context(), ticketID)
+	if err != nil {
+		t.Fatalf("MarkThreadRead: %v", err)
+	}
+	if n != 2 {
+		t.Errorf("MarkThreadRead marked = %d, want 2", n)
+	}
+
+	for _, id := range []int64{zing1, zing2} {
+		msg, getErr := s.GetMessage(t.Context(), id)
+		if getErr != nil {
+			t.Fatalf("GetMessage(%d): %v", id, getErr)
+		}
+		if msg.ReadAt == nil {
+			t.Errorf("message %d: ReadAt is nil, want set", id)
+		}
+	}
+	for _, id := range []int64{you, stateMsg, otherZing} {
+		msg, getErr := s.GetMessage(t.Context(), id)
+		if getErr != nil {
+			t.Fatalf("GetMessage(%d): %v", id, getErr)
+		}
+		if msg.ReadAt != nil {
+			t.Errorf("message %d: ReadAt is set, want nil", id)
+		}
+	}
+
+	second, err := s.MarkThreadRead(t.Context(), ticketID)
+	if err != nil {
+		t.Fatalf("MarkThreadRead (second call): %v", err)
+	}
+	if second != 0 {
+		t.Errorf("MarkThreadRead (already read) marked = %d, want 0", second)
+	}
+
+	missing, err := s.MarkThreadRead(t.Context(), 999999)
+	if err != nil {
+		t.Fatalf("MarkThreadRead (missing ticket): %v", err)
+	}
+	if missing != 0 {
+		t.Errorf("MarkThreadRead (missing ticket) marked = %d, want 0", missing)
+	}
+}
+
 // TestSetSettings_UpdatesExistingAndInsertsNew proves SetSettings (design
 // section 6.12, 6.13, 7.2) writes every key/value pair in one call: it
 // updates an existing row (log_level, seeded by migrations/0001_init.sql)

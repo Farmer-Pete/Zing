@@ -1370,3 +1370,21 @@ func (s *Store) MarkRead(ctx context.Context, messageID int64) error {
 	}
 	return nil
 }
+
+// MarkThreadRead sets read_at to now on every unread message of ticketID
+// (unreadMessageWhere, design section 6.8), returning how many it marked.
+// Opening a thread calls it once (stream.go). Zero is not an error: an
+// already-read thread and an id that names no ticket both return 0.
+func (s *Store) MarkThreadRead(ctx context.Context, ticketID int64) (int64, error) {
+	res, err := s.db.ExecContext(ctx,
+		`UPDATE messages SET read_at = ? WHERE ticket_id = ? AND `+unreadMessageWhere,
+		formatTime(time.Now()), ticketID)
+	if err != nil {
+		return 0, fmt.Errorf("mark thread read: ticket %d: %w", ticketID, err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return 0, fmt.Errorf("mark thread read: ticket %d: %w", ticketID, err)
+	}
+	return n, nil
+}
