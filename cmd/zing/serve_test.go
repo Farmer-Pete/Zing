@@ -900,8 +900,8 @@ func writeStderrFixture(t *testing.T, dir string, runID int64, mtime time.Time) 
 }
 
 // TestServeRemovesStaleStderrFilesAtStartup proves removeStaleStderrFiles
-// (ticket #8's retention fix, PKG9-PLAN.md section 7.3): a finished run's
-// stderr file older than stderrRetention is removed, a fresh one is kept,
+// (ticket #8's retention fix): a finished run's stderr file older than
+// stderrRetention is removed, a fresh one is kept,
 // and an old file is kept when its own run is still open (runs.outcome IS
 // NULL), whatever its age. A file outside the run-<id>-stderr.log shape is
 // left alone no matter how old it is.
@@ -1084,8 +1084,8 @@ func TestServeRemovesStaleStderrFilesAtStartup_UnparseableRunID(t *testing.T) {
 }
 
 // TestServeRemovesStaleStderrFilesAtStartup_RemoveFailureIsNotCounted proves
-// that a failed os.Remove is logged and skipped, not counted, and does not
-// stop the sweep from finishing: n++ only ever follows a successful Remove.
+// that a failed os.Remove is logged and skipped, not counted: n++ only ever
+// follows a successful Remove.
 func TestServeRemovesStaleStderrFilesAtStartup_RemoveFailureIsNotCounted(t *testing.T) {
 	if os.Geteuid() == 0 {
 		t.Skip("root ignores directory permissions, so unlink would still succeed")
