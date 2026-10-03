@@ -74,8 +74,8 @@ package orchestrator
 // append of the repository's info/exclude file -- so it holds commonMu
 // itself, across both steps, through ensureWorktreeExcludeLocked below,
 // rather than going through runCommon. Rule: no code holds commonMu while
-// calling runCommon (no nesting); runCommon and ensureWorktreeExcludeLocked
-// are the only two places that take the lock.
+// calling runCommon (no nesting); commonLockFor's own doc comment below
+// lists every place in this package that takes the lock.
 //
 // judge.go's JudgeTree carries its own commonMu (captured at JudgeWorktree
 // time, from the same registry entry its own Orchestrator resolved), since
@@ -107,6 +107,17 @@ var commonLocks struct {
 // commonLockFor returns the one *sync.Mutex every orchestrator for
 // commonDir (already canonicalized by the caller) shares, creating it on
 // first use.
+//
+// Lock sites. Three places in this package (and judge.go, same package)
+// ever take the *sync.Mutex this returns: runCommon (every SHARED git call
+// in the inventory above), ensureWorktreeExcludeLocked (the one shared
+// write that is not a git subcommand, so it cannot go through runCommon),
+// and JudgeTree.removeLocked (judge.go: a JudgeTree is called with no
+// Orchestrator in scope, so it cannot reach runCommon either, and holds its
+// own captured commonMu directly). Rule: no code holds the lock while
+// calling runCommon (no nesting). This is the one place that list is
+// spelled out; every lock site's own doc comment just names itself and
+// points back here, rather than asserting its own count.
 func commonLockFor(commonDir string) *sync.Mutex {
 	commonLocks.mu.Lock()
 	defer commonLocks.mu.Unlock()
@@ -258,8 +269,8 @@ func (o *Orchestrator) runCommon(ctx context.Context, r Runner, dir string, args
 // own read-check-append of info/exclude (design section 8): that write is
 // shared (every worktree under this repository shares one info/exclude),
 // but it is a plain file read and append, not a git subcommand, so it
-// cannot go through runCommon. It is the second, and last, place in this
-// package that takes the lock.
+// cannot go through runCommon. commonLockFor's own doc comment lists every
+// lock site in this package, this one included.
 func (o *Orchestrator) ensureWorktreeExcludeLocked(ctx context.Context) error {
 	mu, err := o.resolveCommonMu(ctx)
 	if err != nil {
