@@ -290,7 +290,7 @@ func checkTaskNumbering(tasks []Task, present map[string]bool) []*PathError {
 
 // fileTaskPattern is FileChange.Task's own Layer 1 pattern, repeated here
 // so checkFileTasks can tell a well-formed value from one Layer 1 rejected.
-var fileTaskPattern = regexp.MustCompile(`^[1-9]\d?( [1-9]\d?)*$`)
+var fileTaskPattern = regexp.MustCompile(`^[1-9][0-9]?( [1-9][0-9]?)*$`) //nolint:gocritic // written exactly as FileChange.Task's jsonschema pattern tag, so a search for the pattern text finds both copies
 
 // checkFileTasks enforces the file-to-task mapping: every number a file
 // lists names a task in the plan, once, and every task owns a file. The

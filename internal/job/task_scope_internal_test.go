@@ -10,6 +10,7 @@ import (
 	"slices"
 	"testing"
 
+	"zing/internal/orchestrator"
 	"zing/internal/response"
 	"zing/internal/store"
 )
@@ -127,7 +128,7 @@ func TestForeignTaskPaths(t *testing.T) {
 				fileTask(pbHelloTxt, "1"), fileTask(testScopeGreetPath, "2"),
 			}}},
 			taskN:   1,
-			changed: []string{testScopeGreetPath},
+			changed: changedPathList([]orchestrator.Change{{Path: testScopeGreetPath, Code: orchestrator.Deleted}}),
 			want:    []string{"greet.go belongs to task 2, not task 1"},
 		},
 	}
