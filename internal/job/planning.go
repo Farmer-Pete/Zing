@@ -141,6 +141,19 @@ const (
 		"approve, writing in any settled question reopens it and withdraws this gate. Findings at or below " +
 		"the quality floor were already fixed automatically; only findings above the floor are shown here."
 
+	// gateApproveExplainsLoopsExhausted is gateApproveExplains' own
+	// counterpart for issue #48's cap-reached gate (design section 5.1 step
+	// 7, 6.6): maybeResumeFloorFindings posts this instead of escalating
+	// loops_exhausted when every finding still in the stored artifact is at
+	// or below the floor, so the owner, not the loop, decides. Unlike the
+	// clean-review gate, these findings were never fixed automatically --
+	// the cap stopped the resume loop before another cycle could try.
+	gateApproveExplainsLoopsExhausted = "Approve asks the planning agent whether any question is still open. If none is, " +
+		"Zing seals this scenario set and moves the ticket to building. This cannot be undone. Until you " +
+		"approve, writing in any settled question reopens it and withdraws this gate. Plan review reached " +
+		"machine.toml's planreview max_loops with only at-or-below-floor findings left; they were not fixed " +
+		"automatically and are shown below for your decision."
+
 	// The three artifact types a stored ready cohort writes (design section
 	// 6.5, 4.5): internal/store/schemas/artifacts/{plan,claims,scenario}.json
 	// are their validated shapes, and internal/store/examples/artifacts holds
@@ -1109,6 +1122,18 @@ func planreviewDeliveredMarker(version int) string {
 	return fmt.Sprintf("planreview v%d delivered", version)
 }
 
+// gateCapMarker is issue #48's own fixed, version-scoped marker for a gate
+// posted at machine.toml's planreview max_loops cap
+// (maybeResumeFloorFindings's above==0 branch), written in the same commit
+// as the gate. It is the one source both console's loadFindings and this
+// file's own gateRejectExtra consult to tell a capped gate apart from a
+// clean-review one: neither recomputes CountDeliveredReviews against
+// current config, so raising max_loops after this gate already posted can
+// never change what either does with it.
+func gateCapMarker(version int) string {
+	return fmt.Sprintf("gate cap reached plan v%d", version)
+}
+
 // maybeReviewTick is section 5.1 step 6: a stored cohort with no planreview
 // artifact yet at its exact version starts the review tick fresh. handled is
 // false when there is no cohort yet, or its planreview artifact already
@@ -1188,12 +1213,46 @@ func maybeResumeFloorFindings(ctx context.Context, t store.Ticket, d Deps, sess 
 			atOrBelow = append(atOrBelow, f)
 		}
 	}
+	above := len(payload.Findings) - len(atOrBelow)
 
 	n, err := d.Store.CountDeliveredReviews(ctx, t.ID)
 	if err != nil {
 		return store.HandlerCommit{}, false, fmt.Errorf("job: planning: count delivered reviews: %w", err)
 	}
 	if n >= d.Machine.Jobs[jobPlanreviewName].MaxLoops {
+		// Issue #48: an above-floor finding still escalates loops_exhausted,
+		// unchanged -- a gate must never post against a mixed artifact. Only
+		// when every surviving finding is at or below the floor does the cap
+		// post the gate instead, so the owner decides rather than the loop
+		// exhausting into an escalation nobody above the floor asked for.
+		if above == 0 {
+			planArtifact, found, artErr := d.Store.GetArtifact(ctx, t.ID, artifactTypePlan)
+			if artErr != nil {
+				return store.HandlerCommit{}, false, fmt.Errorf("job: planning: get plan artifact: %w", artErr)
+			}
+			if !found {
+				return store.HandlerCommit{}, false, fmt.Errorf("job: planning: ticket %d has a cohort but no plan artifact", t.ID)
+			}
+			var plan response.Plan
+			if unmarshalErr := json.Unmarshal(planArtifact.Payload, &plan); unmarshalErr != nil {
+				return store.HandlerCommit{}, false, fmt.Errorf("job: planning: unmarshal plan artifact: %w", unmarshalErr)
+			}
+			commit, err = postGateCommit(ctx, t, d, plan.Overview.Objective, true)
+			if err != nil {
+				return commit, true, err
+			}
+			// gateCapMarker (review P2 on issue #48's own PR) is the fixed,
+			// per-version record of why this gate posted: console's loadFindings
+			// and this file's own gateRejectExtra both read it instead of
+			// recomputing CountDeliveredReviews against current config, so
+			// raising max_loops after this gate posts can never change what
+			// either one does with it.
+			commit.Messages = append(commit.Messages, store.Message{
+				TicketID: t.ID, Type: msgTypeUpdate, Author: authorSystem, Body: gateCapMarker(cohort.PlanVersion),
+			})
+			slog.Info("gate posted at loop cap", "ticket_id", t.ID, "plan_version", cohort.PlanVersion, "floor_findings", len(atOrBelow))
+			return commit, true, nil
+		}
 		c := escalationCommit(t, d, nil, nil,
 			string(response.EscalationCodeLoopsExhausted), loopsExhaustedWhat, loopsExhaustedWhy, "", response.EscalationOriginCapLoops)
 		return c, true, nil
@@ -1359,27 +1418,17 @@ func planReviewOkCommit(ctx context.Context, t store.Ticket, d Deps, rr runResul
 	}}
 
 	if atOrBelow == 0 {
-		msg, msgErr := gateQuestionMessage(t.ID, plan.Overview.Objective)
-		if msgErr != nil {
-			return store.HandlerCommit{}, msgErr
+		gc, gcErr := postGateCommit(ctx, t, d, plan.Overview.Objective, false)
+		if gcErr != nil {
+			return store.HandlerCommit{}, gcErr
 		}
-		c.Messages = []store.Message{msg}
-		c.AttachRunToMsgs = true
-		waiting := waitingFlagGate
-		c.Waiting = &waiting
-		// D32 (design section 22.12.2): the owner can reopen a thread while
-		// this very review tick is in flight, racing this gate post. The
-		// fence inside CommitHandlerResult's own applyConversationTx needs
-		// the watermark to tell a reopen's own late owner row apart from
-		// one already delivered; this carries no Settle entries, since a
-		// plan-review run settles nothing.
-		conv, convErr := d.Store.PlanningConversation(ctx, t.ID)
-		if convErr != nil {
-			return store.HandlerCommit{}, fmt.Errorf("job: planreview: planning conversation: %w", convErr)
-		}
-		c.Conversation = &store.ConversationCommit{ThroughBatch: conv.Delivered}
+		gc.Runs = c.Runs
+		gc.Session = c.Session
+		gc.ResolveQuestions = c.ResolveQuestions
+		gc.Artifacts = c.Artifacts
+		gc.AttachRunToMsgs = true
 		slog.Info("gate posted", "ticket_id", t.ID, "run_id", rr.Reserved.RunID, "plan_version", cohort.PlanVersion)
-		return c, nil
+		return gc, nil
 	}
 
 	c.Messages = []store.Message{{
@@ -1465,7 +1514,7 @@ func renderFindings(findings []response.Finding) string {
 // cuts the body on its first newline, so objective still renders as the
 // question's title and gateApproveExplains as its markdown body, exactly as
 // every other question's Title/Body pair does.
-func gateQuestionMessage(ticketID int64, objective string) (store.Message, error) {
+func gateQuestionMessage(ticketID int64, objective string, loopsExhausted bool) (store.Message, error) {
 	payload, err := json.Marshal(response.QuestionPayload{
 		Kind:        response.QuestionKindGate,
 		State:       response.QuestionStateOpen,
@@ -1478,10 +1527,40 @@ func gateQuestionMessage(ticketID int64, objective string) (store.Message, error
 	if err != nil {
 		return store.Message{}, fmt.Errorf("job: gate: marshal question payload: %w", err)
 	}
+	explains := gateApproveExplains
+	if loopsExhausted {
+		explains = gateApproveExplainsLoopsExhausted
+	}
 	return store.Message{
 		TicketID: ticketID, Type: msgTypeQuestion, Author: authorZing,
-		State: new(questionStateOpen), Body: objective + "\n\n" + gateApproveExplains, Payload: payload,
+		State: new(questionStateOpen), Body: objective + "\n\n" + explains, Payload: payload,
 	}, nil
+}
+
+// postGateCommit builds section 6.6's "Post" commit (design section 6.6,
+// D8; issue #48): the gate question (gateQuestionMessage), Waiting set to
+// waitingFlagGate, and the D32 conversation fence (design section 22.12.2)
+// that tells a reopen racing this very post apart from one already
+// delivered. It carries no Runs, Session, ResolveQuestions, or
+// AttachRunToMsgs -- planReviewOkCommit, the caller with a live review run,
+// overlays those itself; maybeResumeFloorFindings's cap branch has no run
+// to attach, since the cap, not a run, produced this gate.
+func postGateCommit(ctx context.Context, t store.Ticket, d Deps, objective string, loopsExhausted bool) (store.HandlerCommit, error) {
+	msg, err := gateQuestionMessage(t.ID, objective, loopsExhausted)
+	if err != nil {
+		return store.HandlerCommit{}, err
+	}
+	c := baseCommit(t, d)
+	c.Messages = []store.Message{msg}
+	waiting := waitingFlagGate
+	c.Waiting = &waiting
+
+	conv, err := d.Store.PlanningConversation(ctx, t.ID)
+	if err != nil {
+		return store.HandlerCommit{}, fmt.Errorf("job: gate: planning conversation: %w", err)
+	}
+	c.Conversation = &store.ConversationCommit{ThroughBatch: conv.Delivered}
+	return c, nil
 }
 
 // enterFromGateRound is section 5.1 step 1(a), rewritten by D32 (design
@@ -1499,7 +1578,11 @@ func (h planningHandler) enterFromGateRound(ctx context.Context, t store.Ticket,
 	if !gateRoundApproved(round) {
 		notes := joinReplies(round.Replies)
 		slog.Info("gate rejected", "ticket_id", t.ID)
-		return resumeOrFresh(ctx, t, d, []prompt.NamedInput{prompt.Notes(notes)}, resolveIDs)
+		extra, extraErr := gateRejectExtra(ctx, t, d, notes)
+		if extraErr != nil {
+			return store.HandlerCommit{}, extraErr
+		}
+		return resumeOrFresh(ctx, t, d, extra, resolveIDs)
 	}
 
 	cohort, ok, err := d.Store.CurrentCohort(ctx, t.ID)
@@ -1526,6 +1609,49 @@ func (h planningHandler) enterFromGateRound(ctx context.Context, t store.Ticket,
 	notes := joinReplies(round.Replies)
 	slog.Info("gate approval starts confirming turn", "ticket_id", t.ID, "question_id", gateQID, "plan_version", cohort.PlanVersion)
 	return gateConfirmEntry(ctx, t, d, gateQID, approveRow.ID, cohort, notes)
+}
+
+// gateRejectExtra builds a rejected gate's resume extra (review P2 on issue
+// #48's own PR): the owner's notes alone give the planner nothing to act on
+// when the rejected gate was posted at the loop cap (gateCapMarker), since
+// those at-or-below-floor findings were never fed back into planning -- the
+// cap stopped the resume loop that would have done that. When the current
+// cohort carries that marker, this fetches its stored floor findings with
+// outstandingFloorFindings (the same helper the cap_loops escalation retry
+// already uses) and fences them ahead of the notes, exactly as the
+// floor-findings resume renders them; a clean-review gate (no marker)
+// carries notes alone, unchanged.
+func gateRejectExtra(ctx context.Context, t store.Ticket, d Deps, notes string) ([]prompt.NamedInput, error) {
+	capped, err := rejectedGateWasCapped(ctx, t, d)
+	if err != nil {
+		return nil, err
+	}
+	if !capped {
+		return []prompt.NamedInput{prompt.Notes(notes)}, nil
+	}
+	findings, err := outstandingFloorFindings(ctx, t, d)
+	if err != nil {
+		return nil, err
+	}
+	return []prompt.NamedInput{prompt.Findings(renderFindings(findings)), prompt.Notes(notes)}, nil
+}
+
+// rejectedGateWasCapped reports whether the current cohort's exact plan
+// version carries gateCapMarker: false, with no error, when there is no
+// current cohort at all (nothing to check).
+func rejectedGateWasCapped(ctx context.Context, t store.Ticket, d Deps) (bool, error) {
+	cohort, ok, err := d.Store.CurrentCohort(ctx, t.ID)
+	if err != nil {
+		return false, fmt.Errorf("job: gate: current cohort: %w", err)
+	}
+	if !ok {
+		return false, nil
+	}
+	_, found, err := d.Store.Marker(ctx, t.ID, gateCapMarker(cohort.PlanVersion))
+	if err != nil {
+		return false, fmt.Errorf("job: gate: cap marker: %w", err)
+	}
+	return found, nil
 }
 
 // newestChosenAnswer returns the row and option key of answers' newest sent

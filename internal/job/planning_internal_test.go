@@ -21,7 +21,7 @@ import (
 func TestGateQuestionMessage_StatesWhatApproveDoes(t *testing.T) {
 	t.Parallel()
 	const objective = "Add a hello endpoint so a caller can get a plain-text greeting back over HTTP."
-	msg, err := gateQuestionMessage(1, objective)
+	msg, err := gateQuestionMessage(1, objective, false)
 	if err != nil {
 		t.Fatalf("gateQuestionMessage: %v", err)
 	}
@@ -50,6 +50,41 @@ func TestGateQuestionMessage_StatesWhatApproveDoes(t *testing.T) {
 		if payload.Options[i] != o {
 			t.Errorf("payload.Options[%d] = %+v, want %+v", i, payload.Options[i], o)
 		}
+	}
+}
+
+// TestGateQuestionMessage_LoopsExhaustedUsesDifferentExplainsText proves
+// issue #48's gate text split: loopsExhausted false keeps today's
+// clean-review explains text ("already fixed automatically"); loopsExhausted
+// true swaps in the cap-reached explains text instead, and the two bodies
+// never share that phrase.
+func TestGateQuestionMessage_LoopsExhaustedUsesDifferentExplainsText(t *testing.T) {
+	t.Parallel()
+	const objective = "Loop exhausted on floor-only findings."
+
+	tests := []struct {
+		name           string
+		loopsExhausted bool
+		wantContains   string
+		wantAbsent     string
+	}{
+		{"clean review", false, "already fixed automatically", "max_loops"},
+		{"loops exhausted", true, "max_loops", "already fixed automatically"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			msg, err := gateQuestionMessage(1, objective, tt.loopsExhausted)
+			if err != nil {
+				t.Fatalf("gateQuestionMessage: %v", err)
+			}
+			if !strings.Contains(msg.Body, tt.wantContains) {
+				t.Errorf("message body = %q, want it to contain %q", msg.Body, tt.wantContains)
+			}
+			if strings.Contains(msg.Body, tt.wantAbsent) {
+				t.Errorf("message body = %q, want it to not contain %q", msg.Body, tt.wantAbsent)
+			}
+		})
 	}
 }
 

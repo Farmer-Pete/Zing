@@ -94,11 +94,12 @@ func seedScenarioArtifact(t *testing.T, s *store.Store, ticketID int64, runID *i
 	}
 }
 
-// seedPlanReviewArtifact inserts one "planreview" artifact at version,
-// carrying runID and findings, wrapped exactly as job/planning.go's own
-// planReviewOkCommit stores them (internal/store/schemas/artifacts/
-// planreview.json: {"findings": [...]}).
-func seedPlanReviewArtifact(t *testing.T, s *store.Store, ticketID, runID int64, version int, findings []response.Finding) {
+// seedPlanReviewArtifact inserts one "planreview" artifact at version 1 (every
+// caller in this file seeds a single-cohort fixture), carrying runID and
+// findings, wrapped exactly as job/planning.go's own planReviewOkCommit
+// stores them (internal/store/schemas/artifacts/planreview.json:
+// {"findings": [...]}).
+func seedPlanReviewArtifact(t *testing.T, s *store.Store, ticketID, runID int64, findings []response.Finding) {
 	t.Helper()
 	payload, err := json.Marshal(struct {
 		Findings []response.Finding `json:"findings"`
@@ -107,7 +108,7 @@ func seedPlanReviewArtifact(t *testing.T, s *store.Store, ticketID, runID int64,
 		t.Fatalf("marshal planreview findings: %v", err)
 	}
 	if _, err := s.InsertArtifact(t.Context(), store.Artifact{
-		TicketID: ticketID, Type: "planreview", Version: version, RunID: &runID, Payload: payload,
+		TicketID: ticketID, Type: "planreview", Version: 1, RunID: &runID, Payload: payload,
 	}); err != nil {
 		t.Fatalf("InsertArtifact(planreview): %v", err)
 	}
@@ -173,7 +174,7 @@ func TestGateFindingsTable_FloorMinorShowsBlockerAndMajorOnly(t *testing.T) {
 	ticketID := seedTicket(t, s, "fake#1", "Add a hello endpoint")
 	runID := seedRun(t, s, ticketID)
 	seedPlanArtifact(t, s, ticketID, &runID, 1)
-	seedPlanReviewArtifact(t, s, ticketID, runID, 1, fourSeverityFindings())
+	seedPlanReviewArtifact(t, s, ticketID, runID, fourSeverityFindings())
 	seedGateQuestion(t, s, ticketID)
 
 	srv := newTestServerFloor(t, s, bus.New(), nil, newTestLogHandler(t), response.SeverityMinor)
@@ -201,7 +202,7 @@ func TestGateFindingsTable_FloorNitShowsBlockerMajorAndMinor(t *testing.T) {
 	ticketID := seedTicket(t, s, "fake#1", "Add a hello endpoint")
 	runID := seedRun(t, s, ticketID)
 	seedPlanArtifact(t, s, ticketID, &runID, 1)
-	seedPlanReviewArtifact(t, s, ticketID, runID, 1, fourSeverityFindings())
+	seedPlanReviewArtifact(t, s, ticketID, runID, fourSeverityFindings())
 	seedGateQuestion(t, s, ticketID)
 
 	srv := newTestServerFloor(t, s, bus.New(), nil, newTestLogHandler(t), response.SeverityNit)
@@ -218,6 +219,74 @@ func TestGateFindingsTable_FloorNitShowsBlockerMajorAndMinor(t *testing.T) {
 	}
 	if strings.Contains(gate, nitFindingText) {
 		t.Errorf("floor nit: unwanted nit finding shown; got:\n%s", gate)
+	}
+}
+
+// TestGateFindingsTable_LoopExhaustedShowsFloorFindings proves issue #48's
+// loosened filter (views.go's loadFindings): once job/planning.go's own
+// gateCapMarker is stored for the current cohort's plan version, the
+// floor-conditional skip stops firing, since those at-or-below-floor
+// findings are exactly what the owner must now decide on at the gate --
+// unlike TestGateFindingsTable_FloorMinorShowsBlockerAndMajorOnly, which
+// must keep excluding them with no marker present, proving the loosened
+// filter is marker-conditional, not a blanket change. No machine is passed
+// (nil, like the unmodified floor tests): the marker alone drives this, not
+// config.
+func TestGateFindingsTable_LoopExhaustedShowsFloorFindings(t *testing.T) {
+	t.Parallel()
+	s := newConsoleTestStore(t)
+	ticketID := seedTicket(t, s, "fake#1", "Add a hello endpoint")
+	runID := seedRun(t, s, ticketID)
+	seedPlanArtifact(t, s, ticketID, &runID, 1)
+	seedPlanReviewArtifact(t, s, ticketID, runID, fourSeverityFindings())
+	seedGateQuestion(t, s, ticketID)
+	seedUnreadUpdate(t, s, ticketID, "gate cap reached plan v1")
+
+	srv := newTestServerFloor(t, s, bus.New(), nil, newTestLogHandler(t), response.SeverityMinor)
+	resp, r, cancel := openStream(t, srv.URL, "thread", ticketID, 0)
+	defer cancel()
+	defer func() { _ = resp.Body.Close() }()
+	_, main, _, _ := readInitialFrames(t, r)
+	gate := findGroup(t, splitQuestionGroups(t, main), gateQuestionTitle)
+
+	for _, want := range []string{blockerFindingText, majorFindingText, minorFindingText, nitFindingText} {
+		if !strings.Contains(gate, want) {
+			t.Errorf("loop exhausted: missing %q; got:\n%s", want, gate)
+		}
+	}
+}
+
+// TestGateFindingsTable_CapMarkerDrivesCappedRegardlessOfCurrentConfig
+// proves issue #48 review P2 directly: loadFindings decides "cap gate" from
+// job/planning.go's own gateCapMarker, not by recomputing
+// CountDeliveredReviews against current config. A real machine (testMachine)
+// whose planreview.max_loops (2) this ticket's zero "delivered" review
+// markers come nowhere near -- CountDeliveredReviews would read 0, well
+// under the cap -- still shows every floor finding once the fixed marker is
+// present, proving the marker, not a live config recomputation, is what the
+// capped branch depends on; raising max_loops after a gate posts can never
+// retroactively hide what it already showed.
+func TestGateFindingsTable_CapMarkerDrivesCappedRegardlessOfCurrentConfig(t *testing.T) {
+	t.Parallel()
+	s := newConsoleTestStore(t)
+	ticketID := seedTicket(t, s, "fake#1", "Add a hello endpoint")
+	runID := seedRun(t, s, ticketID)
+	seedPlanArtifact(t, s, ticketID, &runID, 1)
+	seedPlanReviewArtifact(t, s, ticketID, runID, fourSeverityFindings())
+	seedGateQuestion(t, s, ticketID)
+	seedUnreadUpdate(t, s, ticketID, "gate cap reached plan v1")
+
+	srv := newTestServerFloor(t, s, bus.New(), testMachine(t), newTestLogHandler(t), response.SeverityMinor)
+	resp, r, cancel := openStream(t, srv.URL, "thread", ticketID, 0)
+	defer cancel()
+	defer func() { _ = resp.Body.Close() }()
+	_, main, _, _ := readInitialFrames(t, r)
+	gate := findGroup(t, splitQuestionGroups(t, main), gateQuestionTitle)
+
+	for _, want := range []string{blockerFindingText, majorFindingText, minorFindingText, nitFindingText} {
+		if !strings.Contains(gate, want) {
+			t.Errorf("cap marker present, delivered-review count not capped: missing %q; got:\n%s", want, gate)
+		}
 	}
 }
 
