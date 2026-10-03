@@ -4550,27 +4550,59 @@ func TestRun_ForceCancelInterruptsInflight(t *testing.T) {
 }
 
 // TestRun_FillErrorRaisesAlerts proves a fill error (not a worker error)
-// raises both D3 alerts, naming it "in a dispatcher pass" since it carries
-// no ticket id (design section 4.6): closing the store out from under a
-// Tick call makes the reconcile step (ExpireClaims) fail for real, no hook
-// needed.
+// raises both D3 alerts under Run, naming it "in a dispatcher pass" since
+// it carries no ticket id (design section 4.6, F001): this is the Run path
+// serve actually drives, where three of the four select-loop exits used to
+// call setStop and finish without ever calling reportFirstError, so alert 1
+// never fired. It drives Run, not Tick (Tick already called
+// reportFirstError correctly, which let the Tick-driven version of this
+// test hide the Run gap). The store hook is a second, raw connection to
+// the same on-disk database that drops the tickets table out from under
+// fill's reconcile step (ExpireClaims), a real failure with no test-only
+// fault-injection field needed; Run's own Flags(ctx) call (the settings
+// table, left intact) still succeeds, so the pass reaches fill for real
+// and fails there, at the ticker.C branch's fill-error exit.
 func TestRun_FillErrorRaisesAlerts(t *testing.T) {
-	s := newDispatchTestStore(t)
+	dbPath := filepath.Join(t.TempDir(), "zing.db")
+	s, err := store.Open(t.Context(), dbPath)
+	if err != nil {
+		t.Fatalf("store.Open: %v", err)
+	}
+	t.Cleanup(func() { _ = s.Close() })
 	seedQueuedTicket(t, s, testFixtureRef)
 
-	d := newDispatcher(t, s, newFixtureTracker(t), bus.New(), fakeRuntime(t), nil, nil, dispatch.Config{MaxParallel: 1, Owner: testOwner})
-
-	if err := s.Close(); err != nil {
-		t.Fatalf("Close: %v", err)
-	}
+	d := newDispatcher(t, s, newFixtureTracker(t), bus.New(), fakeRuntime(t), nil, nil,
+		dispatch.Config{MaxParallel: 1, Interval: 5 * time.Millisecond, Owner: testOwner})
 
 	var logBuf bytes.Buffer
 	prevDefault := slog.Default()
 	slog.SetDefault(slog.New(slog.NewTextHandler(&logBuf, &slog.HandlerOptions{Level: slog.LevelDebug})))
 	t.Cleanup(func() { slog.SetDefault(prevDefault) })
 
-	if err := d.Tick(t.Context()); err == nil {
-		t.Fatal("Tick against a closed store: want an error, got nil")
+	raw, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatalf("sql.Open: %v", err)
+	}
+	if _, err := raw.ExecContext(t.Context(), "DROP TABLE tickets"); err != nil {
+		t.Fatalf("drop tickets table: %v", err)
+	}
+	if err := raw.Close(); err != nil {
+		t.Fatalf("close raw db: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	runErrCh := make(chan error, 1)
+	go func() { runErrCh <- d.Run(ctx) }()
+
+	var runErr error
+	select {
+	case runErr = <-runErrCh:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Run never returned")
+	}
+	if runErr == nil {
+		t.Fatal("Run against a dropped tickets table: want an error, got nil")
 	}
 
 	logged := logBuf.String()
@@ -4579,6 +4611,9 @@ func TestRun_FillErrorRaisesAlerts(t *testing.T) {
 	}
 	if !strings.Contains(logged, "dispatcher stopped after") {
 		t.Errorf("log = %q, want alert 2 (\"dispatcher stopped after ...\")", logged)
+	}
+	if i1, i2 := strings.Index(logged, "in a dispatcher pass"), strings.Index(logged, "dispatcher stopped after"); i1 < 0 || i2 < 0 || i2 < i1 {
+		t.Errorf("alerts out of order (alert1 at %d, alert2 at %d); log: %s", i1, i2, logged)
 	}
 }
 

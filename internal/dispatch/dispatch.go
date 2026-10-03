@@ -457,7 +457,6 @@ func (d *Dispatcher) Run(ctx context.Context) error {
 
 		case r := <-results:
 			if r.Err != nil {
-				d.reportFirstError()
 				return d.finish(r.Err, results)
 			}
 			// A nil result only frees a slot; the next ticker fire refills
@@ -484,15 +483,21 @@ func (d *Dispatcher) Run(ctx context.Context) error {
 }
 
 // finish is Run's (and Tick's own fail-closed path's) shutdown join (design
-// section 4.4): it waits for every worker fill ever launched to call
-// d.wg.Done(), draining results throughout so no worker ever blocks on a
-// full channel, joining every non-nil result error into err and reporting
-// the first one through reportFirstError exactly once. It returns only
-// after every launched worker has actually returned, so Run (and the
-// goroutine serve starts it in) never lets the store close under a live
-// handler. Once the wait is over, alert 2 (design section 4.6) is logged
-// if any error was ever reported during this Dispatcher's lifetime.
+// section 4.4): it calls reportFirstError (alert 1) up front, before
+// anything else, so every caller -- a worker error, a flags-read failure, or
+// a fill error -- raises alert 1 before alert 2, matching Tick's behavior
+// (reportFirstError is idempotent and a no-op when d.stopErr is nil). It
+// then waits for every worker fill ever launched to call d.wg.Done(),
+// draining results throughout so no worker ever blocks on a full channel,
+// joining every non-nil result error into err and reporting it too (the
+// same idempotent call, in case a worker error arrives only here). It
+// returns only after every launched worker has actually returned, so Run
+// (and the goroutine serve starts it in) never lets the store close under a
+// live handler. Once the wait is over, alert 2 (design section 4.6) is
+// logged if any error was ever reported during this Dispatcher's lifetime.
 func (d *Dispatcher) finish(err error, results <-chan runResult) error {
+	d.reportFirstError()
+
 	done := make(chan struct{})
 	go func() {
 		d.wg.Wait()
