@@ -208,7 +208,7 @@ func TestStreamBusWakeDoesNotMarkRead(t *testing.T) {
 	t.Parallel()
 	s := newConsoleTestStore(t)
 	ticketID := seedTicket(t, s, "fake#1", "Unread thread")
-	seedUnreadUpdate(t, s, ticketID, "first")
+	firstID := seedUnreadUpdate(t, s, ticketID, "first")
 	b := bus.New()
 
 	srv := newTestServer(t, s, b, nil, newTestLogHandler(t))
@@ -218,21 +218,31 @@ func TestStreamBusWakeDoesNotMarkRead(t *testing.T) {
 	defer func() { _ = resp.Body.Close() }()
 	readInitialFrames(t, r) // the open-time mark: the seeded message is now read
 
-	seedUnreadUpdate(t, s, ticketID, "second")
+	first, err := s.GetMessage(t.Context(), firstID)
+	if err != nil {
+		t.Fatalf("GetMessage(first): %v", err)
+	}
+	if first.ReadAt == nil {
+		t.Error("the first message's ReadAt is still nil after opening the thread")
+	}
+
+	secondID := seedUnreadUpdate(t, s, ticketID, "second")
 	b.Publish()
 	readInitialFrames(t, r) // the wake's own re-render; it must not mark the new message
+
+	second, err := s.GetMessage(t.Context(), secondID)
+	if err != nil {
+		t.Fatalf("GetMessage(second): %v", err)
+	}
+	if second.ReadAt != nil {
+		t.Error("the second message's ReadAt is set after a bus wake; only the open itself should mark")
+	}
 
 	items, err := s.InboxItems(t.Context(), nil)
 	if err != nil {
 		t.Fatalf("InboxItems: %v", err)
 	}
-	found := false
-	for i := range items {
-		if items[i].Ticket.ID == ticketID {
-			found = true
-		}
-	}
-	if !found {
+	if !inboxHasTicket(items, ticketID) {
 		t.Error("InboxItems no longer lists the ticket after a bus wake; the second message should still be unread")
 	}
 }
@@ -389,7 +399,8 @@ func inboxHasTicket(items []store.InboxItem, ticketID int64) bool {
 func TestStreamOpeningAMissingTicketMarksNothing(t *testing.T) {
 	t.Parallel()
 	s := newConsoleTestStore(t)
-	seedTicket(t, s, "fake#1", "Some other ticket")
+	otherID := seedTicket(t, s, "fake#1", "Some other ticket")
+	otherMsgID := seedUnreadUpdate(t, s, otherID, "progress")
 	b := bus.New()
 
 	srv := newTestServer(t, s, b, nil, newTestLogHandler(t))
@@ -403,8 +414,16 @@ func TestStreamOpeningAMissingTicketMarksNothing(t *testing.T) {
 	defer threadCancel()
 	defer func() { _ = threadResp.Body.Close() }()
 	_, main, _, _ := readInitialFrames(t, threadR)
-	if !strings.Contains(main, `id="main"`) {
-		t.Errorf("missing-ticket thread open main frame missing #main; got:\n%s", main)
+	if !strings.Contains(main, "Select a ticket.") {
+		t.Errorf("missing-ticket thread open main frame is not the empty thread view; got:\n%s", main)
+	}
+
+	otherMsg, err := s.GetMessage(t.Context(), otherMsgID)
+	if err != nil {
+		t.Fatalf("GetMessage: %v", err)
+	}
+	if otherMsg.ReadAt != nil {
+		t.Error("the unrelated ticket's message was marked read by an open naming a missing ticket")
 	}
 
 	expectNoMoreFrames(t, readerA, 300*time.Millisecond)
