@@ -39,6 +39,9 @@ done
 
 stdin="$(cat)"
 : > "$dir/stdin_done"
+if [ -e "$dir/onstart_done" ]; then
+  : > "$dir/ordered"
+fi
 if [ -z "$stdin" ]; then
   : > "$dir/no_work"
   exit 0
@@ -62,18 +65,28 @@ func writeStartHandshakeStub(t *testing.T, dir string) string {
 	return path
 }
 
-// fileModTime stats path and returns its modification time, the ordering
-// signal these tests compare against Go's own wall-clock OnStart return
-// time: both modern macOS (APFS) and Linux (ext4) file systems this repo
-// targets keep sub-second mtime precision, well inside the 200ms gap
-// OnStart's own sleep below creates.
-func fileModTime(t *testing.T, path string) time.Time {
+// markOnStartDone creates the marker the stub checks for once its stdin
+// closes. OnStart creates it as its last act, so the stub finds it only if
+// the prompt was written after OnStart returned. This is a causal check: a
+// file mtime comparison against time.Now flakes on Linux, whose mtime
+// clock is coarser than Go's.
+func markOnStartDone(t *testing.T, dir string) {
 	t.Helper()
-	info, err := os.Stat(path)
-	if err != nil {
-		t.Fatalf("stat %s: %v", path, err)
+	if err := os.WriteFile(filepath.Join(dir, "onstart_done"), nil, 0o600); err != nil {
+		t.Errorf("write onstart_done: %v", err)
 	}
-	return info.ModTime()
+}
+
+// assertStdinClosedAfterOnStart checks the stub saw stdin close and found
+// OnStart's marker at that moment.
+func assertStdinClosedAfterOnStart(t *testing.T, dir string) {
+	t.Helper()
+	if _, err := os.Stat(filepath.Join(dir, "stdin_done")); err != nil {
+		t.Fatalf("stub never reached stdin EOF: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "ordered")); err != nil {
+		t.Error("stdin reached EOF before OnStart returned, want the prompt written only after OnStart")
+	}
 }
 
 // TestClaudeOnStartRunsBeforePromptIsWritten proves the start handshake
@@ -89,7 +102,6 @@ func TestClaudeOnStartRunsBeforePromptIsWritten(t *testing.T) {
 	dir := t.TempDir()
 	stub := writeStartHandshakeStub(t, dir)
 
-	var onStartReturnedAt time.Time
 	var gotPID int
 	req := RunRequest{
 		Job:    response.JobClassify,
@@ -99,7 +111,7 @@ func TestClaudeOnStartRunsBeforePromptIsWritten(t *testing.T) {
 		OnStart: func(info StartInfo) {
 			gotPID = info.PID
 			time.Sleep(200 * time.Millisecond)
-			onStartReturnedAt = time.Now()
+			markOnStartDone(t, dir)
 		},
 	}
 
@@ -111,10 +123,7 @@ func TestClaudeOnStartRunsBeforePromptIsWritten(t *testing.T) {
 	if gotPID <= 0 {
 		t.Errorf("OnStart PID = %d, want > 0", gotPID)
 	}
-	stdinDoneAt := fileModTime(t, filepath.Join(dir, "stdin_done"))
-	if !stdinDoneAt.After(onStartReturnedAt) {
-		t.Errorf("stdin reached EOF at %v, want after OnStart returned at %v", stdinDoneAt, onStartReturnedAt)
-	}
+	assertStdinClosedAfterOnStart(t, dir)
 }
 
 // TestCodexOnStartRunsBeforePromptIsWritten is TestClaudeOnStartRunsBeforePromptIsWritten's
@@ -129,7 +138,6 @@ func TestCodexOnStartRunsBeforePromptIsWritten(t *testing.T) {
 	dir := t.TempDir()
 	stub := writeStartHandshakeStub(t, dir)
 
-	var onStartReturnedAt time.Time
 	var gotPID int
 	var gotSessionID string
 	req := RunRequest{
@@ -141,7 +149,7 @@ func TestCodexOnStartRunsBeforePromptIsWritten(t *testing.T) {
 			gotPID = info.PID
 			gotSessionID = info.SessionID
 			time.Sleep(200 * time.Millisecond)
-			onStartReturnedAt = time.Now()
+			markOnStartDone(t, dir)
 		},
 	}
 
@@ -156,10 +164,7 @@ func TestCodexOnStartRunsBeforePromptIsWritten(t *testing.T) {
 	if gotSessionID != "" {
 		t.Errorf("OnStart SessionID = %q, want \"\" on an unresumed first turn", gotSessionID)
 	}
-	stdinDoneAt := fileModTime(t, filepath.Join(dir, "stdin_done"))
-	if !stdinDoneAt.After(onStartReturnedAt) {
-		t.Errorf("stdin reached EOF at %v, want after OnStart returned at %v", stdinDoneAt, onStartReturnedAt)
-	}
+	assertStdinClosedAfterOnStart(t, dir)
 }
 
 // TestAgentWithoutPromptExits proves the handshake's own failure mode
