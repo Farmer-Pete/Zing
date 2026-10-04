@@ -1,7 +1,6 @@
 package main
 
 import (
-	"context"
 	"errors"
 	"io"
 	"net"
@@ -9,7 +8,6 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
-	"time"
 )
 
 // TestShutdownCancelsRequests proves the drain wiring in newServer: a handler
@@ -53,17 +51,11 @@ func TestShutdownCancelsRequests(t *testing.T) {
 		}
 	})
 
-	shutdownCtx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
-	defer cancel()
-	if err := srv.Shutdown(shutdownCtx); err != nil {
+	if err := srv.Shutdown(t.Context()); err != nil {
 		t.Fatalf("Shutdown: %v", err)
 	}
 
-	select {
-	case <-released:
-	case <-time.After(time.Second):
-		t.Fatal("handler was not released by Shutdown")
-	}
+	waitFor(t, released, "handler release by Shutdown")
 	if err := <-serveErr; !errors.Is(err, http.ErrServerClosed) {
 		t.Errorf("Serve returned %v, want http.ErrServerClosed", err)
 	}
