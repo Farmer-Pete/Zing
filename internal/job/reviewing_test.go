@@ -2670,55 +2670,23 @@ func TestReReviewRunsSelectedLenses(t *testing.T) {
 	}
 }
 
-// ---- TestLoopGateEscalatesAfterTwoFixes ------------------------------------
+// ---- TestLoopGateMinorFindingsMoveToJudging --------------------------------
 
-// TestLoopGateEscalatesAfterTwoFixes proves design section 6.8's own worked
-// example: round 1 keeps a minor finding -- at or below the floor, so it
-// routes straight to FIXREQ with no question -- request 1; the fix lands
-// but leaves the same defect; round 2 keeps it again, request 2; round 3
-// keeps it a third time, k = 2 = max_loops, so FIXREQ escalates
-// loops_exhausted instead of opening a third request.
-func TestLoopGateEscalatesAfterTwoFixes(t *testing.T) {
+// TestLoopGateMinorFindingsMoveToJudging proves design section 6.8's own
+// worked example, extended by issue #68: round 1 keeps a minor finding -- at
+// or below the floor, so it routes straight to FIXREQ with no question --
+// request 1; the fix lands but leaves the same defect; round 2 keeps it
+// again, request 2; round 3 keeps it a third time, k = 2 = max_loops, and
+// every finding left is still at or below the floor, so FIXREQ moves the
+// ticket on to judging instead of escalating loops_exhausted, posting a
+// message that lists the finding Zing let through unfixed.
+func TestLoopGateMinorFindingsMoveToJudging(t *testing.T) {
 	if testing.Short() {
 		t.Skip("slow end-to-end flow; runs in the full suite")
 	}
 	t.Parallel()
 	const loopLens = "quality"
-	s, ticket, _ := reviewTicketReady(t)
-	scripts := reviewScriptsFS(map[string]string{
-		reviewScriptKey(loopLens, 1): findingScript(loopLens, "minor", "needs a comment", "add a comment"),
-	})
-	rt := runtime.NewFake(scripts)
-
-	deps := pbClaim(t, s, rt, ticket.ID)
-	commit, err := (reviewingHandler{}).Run(t.Context(), ticket, deps) // round 1
-	if err != nil {
-		t.Fatalf("Run (round 1): %v", err)
-	}
-	if len(commit.Messages) != 2 || !strings.HasPrefix(commit.Messages[1].Body, fixRequestedFindingsPrefix) {
-		t.Fatalf("round 1 commit.Messages = %+v, want [done marker, %q message]", commit.Messages, fixRequestedFindingsPrefix)
-	}
-	pbApply(t, s, ticket, commit)
-
-	scripts["build/fix/1.xml"] = &fstest.MapFile{Data: []byte(reReviewFixScript)}
-	driveReviewFixToLanding(t, s, ticket.ID, rt, reReviewFixCmd)
-
-	scripts[reviewRoundScriptKey(2, lensFidelity)] = &fstest.MapFile{Data: []byte(reviewOKScript)}
-	scripts[reviewRoundScriptKey(2, loopLens)] = &fstest.MapFile{Data: []byte(findingScript(loopLens, "minor", "still needs a comment", "add a comment"))}
-
-	ticket2 := pbGetTicket(t, s, ticket.ID)
-	deps2 := pbClaim(t, s, rt, ticket.ID)
-	commit2, err := (reviewingHandler{}).Run(t.Context(), ticket2, deps2) // round 2
-	if err != nil {
-		t.Fatalf("Run (round 2): %v", err)
-	}
-	if len(commit2.Messages) != 2 || !strings.HasPrefix(commit2.Messages[1].Body, fixRequestedFindingsPrefix) {
-		t.Fatalf("round 2 commit.Messages = %+v, want [done marker, %q message]", commit2.Messages, fixRequestedFindingsPrefix)
-	}
-	pbApply(t, s, ticket, commit2)
-
-	scripts["build/fix/1.xml"] = &fstest.MapFile{Data: []byte(reReviewFixScript)}
-	driveReviewFixToLanding(t, s, ticket.ID, rt, reReviewFixCmd)
+	s, ticket, rt, scripts := driveReviewToCap(t)
 
 	scripts[reviewRoundScriptKey(3, lensFidelity)] = &fstest.MapFile{Data: []byte(reviewOKScript)}
 	scripts[reviewRoundScriptKey(3, loopLens)] = &fstest.MapFile{Data: []byte(findingScript(loopLens, "minor", "still not fixed", "add a comment"))}
@@ -2729,17 +2697,74 @@ func TestLoopGateEscalatesAfterTwoFixes(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Run (round 3): %v", err)
 	}
-	if commit3.Escalation == nil {
-		t.Fatal("commit3.Escalation = nil, want set (the loop gate)")
+	if commit3.Escalation != nil {
+		t.Fatalf("commit3.Escalation = %+v, want nil (every finding left is at or below the floor)", commit3.Escalation)
 	}
-	if commit3.Escalation.Payload.Code != string(response.EscalationCodeLoopsExhausted) {
-		t.Errorf("escalation code = %q, want %q", commit3.Escalation.Payload.Code, response.EscalationCodeLoopsExhausted)
+	if commit3.Waiting != nil {
+		t.Errorf("commit3.Waiting = %q, want nil", *commit3.Waiting)
 	}
-	if commit3.Escalation.Payload.Origin != string(response.EscalationOriginReview) {
-		t.Errorf("escalation origin = %q, want %q", commit3.Escalation.Payload.Origin, response.EscalationOriginReview)
+	if commit3.Next != stateJudging {
+		t.Errorf("commit3.Next = %q, want %q", commit3.Next, stateJudging)
 	}
-	if !strings.Contains(commit3.Escalation.Payload.What, "2 fix runs") {
-		t.Errorf("escalation What = %q, want it to name 2 fix runs", commit3.Escalation.Payload.What)
+	if commit3.Reason != reasonReviewAcceptedAtCap {
+		t.Errorf("commit3.Reason = %q, want %q", commit3.Reason, reasonReviewAcceptedAtCap)
+	}
+
+	var acceptMsg *store.Message
+	for i := range commit3.Messages {
+		if strings.HasPrefix(commit3.Messages[i].Body, "Zing accepted ") {
+			acceptMsg = &commit3.Messages[i]
+		}
+	}
+	if acceptMsg == nil {
+		t.Fatalf("commit3.Messages = %+v, want one starting %q", commit3.Messages, "Zing accepted ")
+	}
+	if !strings.HasPrefix(acceptMsg.Body, "Zing accepted one finding at the review fix loop cap") {
+		t.Errorf("accept message = %q, want it to name one finding", acceptMsg.Body)
+	}
+	if !strings.Contains(acceptMsg.Body, "after 2 fix runs") {
+		t.Errorf("accept message = %q, want it to name 2 fix runs", acceptMsg.Body)
+	}
+	if !strings.Contains(acceptMsg.Body, "- r3f1 minor ") || !strings.Contains(acceptMsg.Body, "still not fixed") {
+		t.Errorf("accept message = %q, want the r3f1 minor finding listed", acceptMsg.Body)
+	}
+
+	var doneMsg *store.Message
+	for i := range commit3.Messages {
+		if strings.HasPrefix(commit3.Messages[i].Body, "review round 3 done") {
+			doneMsg = &commit3.Messages[i]
+		}
+	}
+	if doneMsg == nil {
+		t.Fatalf("commit3.Messages = %+v, want round 3's own done marker alongside the accepted-findings message", commit3.Messages)
+	}
+
+	if len(commit3.Artifacts) != 1 {
+		t.Fatalf("commit3.Artifacts = %+v, want exactly one (round 3's own r3f1 finding)", commit3.Artifacts)
+	}
+	var artifact response.FindingArtifact
+	if err = json.Unmarshal(commit3.Artifacts[0].Payload, &artifact); err != nil {
+		t.Fatalf("unmarshal commit3.Artifacts[0]: %v", err)
+	}
+	if artifact.ID != "r3f1" {
+		t.Errorf("commit3.Artifacts[0] finding ID = %q, want %q", artifact.ID, "r3f1")
+	}
+
+	pbApply(t, s, ticket, commit3)
+
+	final := pbGetTicket(t, s, ticket.ID)
+	if final.State != stateJudging {
+		t.Errorf("ticket state = %q, want %q", final.State, stateJudging)
+	}
+	if final.WaitingOn != nil {
+		t.Errorf("ticket WaitingOn = %q, want nil", *final.WaitingOn)
+	}
+	rounds, err := s.AnsweredRounds(t.Context(), ticket.ID)
+	if err != nil {
+		t.Fatalf("AnsweredRounds: %v", err)
+	}
+	if len(rounds) != 0 {
+		t.Errorf("AnsweredRounds = %+v, want none (the gate asked the owner nothing)", rounds)
 	}
 }
 

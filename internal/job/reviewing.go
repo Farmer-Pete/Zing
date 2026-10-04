@@ -332,34 +332,26 @@ func acceptedRoundFindings(findings []store.FindingRow, round int) []response.Fi
 // opened a fix request.
 const fixRequestedFindingsPrefix = "fix requested findings after run "
 
-// fixreq is FIXREQ (design section 6.8): k, the number of "fix requested
-// findings" markers the ticket carries, gates against jobs.review.max_loops;
-// under the gate, it opens a fix request with accepted's own fix text.
+// fixreq is FIXREQ (design section 6.8) entered from enterFromDone: under
+// jobs.review.max_loops it opens a fix request with accepted's own fix
+// text. At the gate, an accepted list wholly at or below the floor moves on
+// to judging (acceptAtCap, issue #68); one where the owner accepted an
+// above-floor finding escalates loops_exhausted as before.
 func (h reviewingHandler) fixreq(ctx context.Context, t store.Ticket, d Deps, accepted []response.FindingArtifact) (store.HandlerCommit, error) {
-	allReqs, err := d.Store.MarkersWithPrefix(ctx, t.ID, "fix requested findings")
+	msg, k, maxLoops, err := fixRequestOrLoopsExhausted(ctx, t, d, accepted)
 	if err != nil {
-		return store.HandlerCommit{}, fmt.Errorf("job: reviewing: fix requested findings markers: %w", err)
+		return store.HandlerCommit{}, err
 	}
-	k := len(allReqs)
-	maxLoops := d.Machine.Jobs[jobReviewName].MaxLoops
-
-	fixText := renderFixFindings(accepted)
-	if k >= maxLoops {
+	if msg == nil {
+		if allAtOrBelowFloor(accepted, d.Floor) {
+			return acceptAtCap(baseCommit(t, d), t, d, k, maxLoops, accepted), nil
+		}
 		what := fmt.Sprintf("review findings remain after %d fix runs", k)
 		why := fmt.Sprintf("max_loops for review is %d", maxLoops)
-		return reviewLoopsExhausted(t, d, what, why, fixText), nil
-	}
-
-	maxRunID, err := d.Store.MaxRunID(ctx, t.ID)
-	if err != nil {
-		return store.HandlerCommit{}, fmt.Errorf("job: reviewing: max run id: %w", err)
-	}
-	msg, msgErr := fixRequestMessage(t, FixKindFindings, fixText, maxRunID)
-	if msgErr != nil {
-		return store.HandlerCommit{}, fmt.Errorf("job: reviewing: fix request message: %w", msgErr)
+		return reviewLoopsExhausted(t, d, what, why, renderFixFindings(accepted)), nil
 	}
 	c := baseCommit(t, d)
-	c.Messages = []store.Message{msg}
+	c.Messages = []store.Message{*msg}
 	return c, nil
 }
 
@@ -1393,31 +1385,84 @@ func reviewRoundFailedMarker(ticketID int64, n int, reason string) store.Message
 }
 
 // fixRequestOrLoopsExhausted is FIXREQ's own body (design section 6.8),
-// shared by enterFromDone's own fixreq entry and successCommit's inline
-// one: under jobs.review.max_loops, it returns a "fix requested findings"
-// marker (msg non-nil) the caller adds to its own commit; at or past the
-// gate, it returns nil and the what/why a loops_exhausted escalation
-// carries instead.
-func fixRequestOrLoopsExhausted(ctx context.Context, t store.Ticket, d Deps, accepted []response.FindingArtifact) (msg *store.Message, what, why string, err error) {
+// shared by fixreq and successCommit's inline FIXREQ: under
+// jobs.review.max_loops, it returns a "fix requested findings" marker (msg
+// non-nil) the caller adds to its own commit; at or past the gate, msg is
+// nil and the caller decides between acceptAtCap and a loops_exhausted
+// escalation. k and maxLoops are returned either way.
+func fixRequestOrLoopsExhausted(ctx context.Context, t store.Ticket, d Deps, accepted []response.FindingArtifact) (msg *store.Message, k, maxLoops int, err error) {
 	allReqs, err := d.Store.MarkersWithPrefix(ctx, t.ID, "fix requested findings")
 	if err != nil {
-		return nil, "", "", fmt.Errorf("job: reviewing: fix requested findings markers: %w", err)
+		return nil, 0, 0, fmt.Errorf("job: reviewing: fix requested findings markers: %w", err)
 	}
-	k := len(allReqs)
-	maxLoops := d.Machine.Jobs[jobReviewName].MaxLoops
+	k = len(allReqs)
+	maxLoops = d.Machine.Jobs[jobReviewName].MaxLoops
 	if k >= maxLoops {
-		return nil, fmt.Sprintf("review findings remain after %d fix runs", k), fmt.Sprintf("max_loops for review is %d", maxLoops), nil
+		return nil, k, maxLoops, nil
 	}
 
 	maxRunID, err := d.Store.MaxRunID(ctx, t.ID)
 	if err != nil {
-		return nil, "", "", fmt.Errorf("job: reviewing: max run id: %w", err)
+		return nil, 0, 0, fmt.Errorf("job: reviewing: max run id: %w", err)
 	}
 	m, msgErr := fixRequestMessage(t, FixKindFindings, renderFixFindings(accepted), maxRunID)
 	if msgErr != nil {
-		return nil, "", "", fmt.Errorf("job: reviewing: fix request message: %w", msgErr)
+		return nil, 0, 0, fmt.Errorf("job: reviewing: fix request message: %w", msgErr)
 	}
-	return &m, "", "", nil
+	return &m, k, maxLoops, nil
+}
+
+// reasonReviewAcceptedAtCap is the reviewing → judging state reason when
+// the FIXREQ gate is reached with only at-or-below-floor findings left
+// (issue #68), distinct from reasonReviewClean so the state history shows
+// that findings were let through unfixed.
+const reasonReviewAcceptedAtCap = "review findings accepted at loop cap"
+
+// acceptedAtCapTextRunes caps each finding's one-line text in acceptAtCap's
+// message, "..." appended when cut.
+const acceptedAtCapTextRunes = 200
+
+// allAtOrBelowFloor reports whether every row's severity is at or below
+// floor, by the same Rank comparison splitByFloor uses. An empty rows is
+// true.
+func allAtOrBelowFloor(rows []response.FindingArtifact, floor response.Severity) bool {
+	for i := range rows {
+		if rows[i].Severity.Rank() > floor.Rank() {
+			return false
+		}
+	}
+	return true
+}
+
+// acceptAtCap is the FIXREQ gate's own outcome when every accepted finding
+// is at or below the floor (issue #68, mirroring maybeResumeFloorFindings'
+// cap gate in planning.go): c, the caller's own commit so far, moves to
+// judging with one message for the owner listing, in id order, the findings
+// let through unfixed, one "- <id> <severity> <location> <text>" line
+// each. Location and Text are lens output, so both are whitespace-collapsed:
+// no finding can break its own line or forge another. No escalation, no
+// Waiting.
+func acceptAtCap(c store.HandlerCommit, t store.Ticket, d Deps, k, maxLoops int, accepted []response.FindingArtifact) store.HandlerCommit {
+	lines := make([]string, 0, 2+len(accepted))
+	lines = append(lines,
+		"Zing accepted "+orchestrator.CountNoun(len(accepted), "finding", "findings")+" at the review fix loop cap",
+		fmt.Sprintf("Review reached max_loops (%d) after %d fix runs, and every finding left is at or below the floor (%s). "+
+			"Zing moved the ticket to judging without fixing these:", maxLoops, k, d.Floor),
+	)
+	sorted := sortByID(accepted)
+	for i := range sorted {
+		f := &sorted[i]
+		location := collapseWhitespace(f.Location)
+		text := collapseWhitespace(f.Text)
+		if cut := cutRunes(text, acceptedAtCapTextRunes); cut != text {
+			text = cut + "..."
+		}
+		lines = append(lines, fmt.Sprintf("- %s %s %s %s", f.ID, f.Severity, location, text))
+	}
+	slog.Info("review findings accepted at loop cap", "ticket_id", t.ID, "fix_runs", k, "findings", len(accepted))
+	c.Messages = append(c.Messages, store.Message{TicketID: t.ID, Type: msgTypeUpdate, Author: authorSystem, Body: strings.Join(lines, "\n")})
+	c.Next, c.Reason = stateJudging, reasonReviewAcceptedAtCap
+	return c
 }
 
 // waitingFlagReview is the review question's own waiting_on value (design
@@ -1544,23 +1589,14 @@ func (h reviewingHandler) successCommit(
 		return c, nil
 
 	case len(atOrBelow) > 0:
-		msg, what, why, fixErr := fixRequestOrLoopsExhausted(ctx, t, d, atOrBelow)
+		msg, k, maxLoops, fixErr := fixRequestOrLoopsExhausted(ctx, t, d, atOrBelow)
 		if fixErr != nil {
 			return store.HandlerCommit{}, fixErr
 		}
 		if msg == nil {
-			code := string(response.EscalationCodeLoopsExhausted)
-			slog.Warn("escalation written", "ticket_id", t.ID, "session_id", nil, "run_id", nil, "code", code, "origin", string(response.EscalationOriginReview))
-			c.Escalation = &store.EscalationCommit{
-				Body: code + ": " + what,
-				Payload: response.EscalationPayload{
-					Code: code, What: what, Why: why, Tried: renderFixFindings(atOrBelow),
-					Options: escalationOptions, Origin: string(response.EscalationOriginReview),
-				},
-			}
-			waiting := waitingFlagQuestions
-			c.Waiting = &waiting
-			return c, nil
+			// Every row here is at or below the floor by construction
+			// (splitByFloor), so the gate always accepts them (issue #68).
+			return acceptAtCap(c, t, d, k, maxLoops, atOrBelow), nil
 		}
 		c.Messages = append(c.Messages, *msg)
 		return c, nil
