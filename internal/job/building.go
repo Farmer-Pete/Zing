@@ -1628,10 +1628,16 @@ func extraPathList(extras []orchestrator.Extra) []string {
 	return out
 }
 
+// funcLineWidth is the rune width funcLines wraps each line to.
+const funcLineWidth = 72
+
 // funcLines is design section 6.7's own helper: for each plan.Design.Changes
 // entry, in plan order, whose Path is in approved, "<symbol> (<path>):
 // called by <callers>; calls <callees>", with every whitespace run in
-// callers and callees collapsed to one space, the line cut to 160 runes.
+// callers and callees collapsed to one space, the line wrapped on spaces
+// into entries of at most funcLineWidth runes, continuation entries
+// indented two spaces; a word longer than that stays whole on its own
+// entry.
 func funcLines(plan response.Plan, approved []string) []string {
 	approvedSet := make(map[string]bool, len(approved))
 	for _, p := range approved {
@@ -1646,7 +1652,17 @@ func funcLines(plan response.Plan, approved []string) []string {
 		callers := collapseWhitespace(ch.Callers)
 		callees := collapseWhitespace(ch.Callees)
 		line := fmt.Sprintf("%s (%s): called by %s; calls %s", ch.Symbol, ch.Path, callers, callees)
-		lines = append(lines, cutRunes(line, 160))
+		words := strings.Fields(line)
+		cur := words[0]
+		for _, w := range words[1:] {
+			if len([]rune(cur))+1+len([]rune(w)) <= funcLineWidth {
+				cur += " " + w
+				continue
+			}
+			lines = append(lines, cur)
+			cur = "  " + w
+		}
+		lines = append(lines, cur)
 	}
 	return lines
 }
