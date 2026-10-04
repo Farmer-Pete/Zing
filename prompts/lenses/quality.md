@@ -14,5 +14,5 @@ Check:
 - Generics outside containers, closures nested past one level.
 - Strategy over visitor.
 - New public functions have a simple call.
-- The commit message places each changed function among its callers and
-  callees.
+- Commit messages and commit authorship are out of scope: a fix run only
+  adds commits and cannot reword ones already on the branch.
