@@ -423,6 +423,54 @@ func TestPushArgvDisablesHooks(t *testing.T) {
 	assertMarkerAbsent(t, marker)
 }
 
+// TestPushRefreshesBase proves Push fetches the base itself (right after
+// revalidate, not buried inside it): a commit that lands on origin's main
+// after the ticket branch was cut and committed still advances
+// refs/zing/base/<default> by the time Push returns, while the push itself
+// still succeeds and the bare remote ends up with the ticket's own commit.
+func TestPushRefreshesBase(t *testing.T) {
+	t.Parallel()
+	fixture := newSigningFixture(t, true)
+	repo := newSigningTestRepo(t, fixture)
+	ctx := t.Context()
+	remote := newBareRemote(ctx, t)
+	addOrigin(ctx, t, repo, remote)
+	runGit(ctx, t, repo, "push", "-q", "origin", mainBranch)
+
+	o, logs := newTestOrchestratorCapturingLog(t, repo, execRunner{})
+
+	wt := prepareSignedCommit(ctx, t, o, 734)
+	ticketSHA := strings.TrimSpace(runGit(ctx, t, wt.Dir(), "rev-parse", "HEAD"))
+
+	newSHA := cloneAndCommitUpstream(ctx, t, remote, "upstream.txt", "upstream\n", "add upstream.txt")
+
+	if err := o.Push(ctx, wt); err != nil {
+		t.Fatalf("Push: %v", err)
+	}
+
+	gotBase := strings.TrimSpace(runGit(ctx, t, repo, "rev-parse", "refs/zing/base/main"))
+	if gotBase != newSHA {
+		t.Errorf("refs/zing/base/main = %s, want %s", gotBase, newSHA)
+	}
+
+	gotRemote := strings.TrimSpace(runGit(ctx, t, remote, "rev-parse", "refs/heads/"+wt.Branch()))
+	if gotRemote != ticketSHA {
+		t.Errorf("remote %s = %s, want %s", wt.Branch(), gotRemote, ticketSHA)
+	}
+
+	fetched := findRecords(logs.records(t), "fetched base")
+	if len(fetched) == 0 {
+		t.Fatal("found no \"fetched base\" records")
+	}
+	last := fetched[len(fetched)-1]
+	if got, want := last["ticket_id"], float64(734); got != want {
+		t.Errorf("ticket_id = %v, want %v", got, want)
+	}
+	if last["sha"] != newSHA {
+		t.Errorf("sha = %v, want %s", last["sha"], newSHA)
+	}
+}
+
 // TestPush_PushRunsUnlockedUpstreamRunsLocked proves PR review fix C3: the
 // network "git push" itself (no -u) runs without commonMu held, and only
 // the upstream calls, "git config --local branch.<b>.remote/.merge" -- the ones that write

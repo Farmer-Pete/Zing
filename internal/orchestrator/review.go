@@ -28,8 +28,9 @@ func (o *Orchestrator) HeadSHA(ctx context.Context, wt Worktree) (string, error)
 //	base := git merge-base <baseRev> <sha>
 //	git diff --no-ext-diff --no-textconv --no-color --no-renames -U3 <base> <sha>
 //
-// baseRev is refs/zing/base/<default>, kept current by fetchBase, or the
-// local default branch while that ref does not exist yet.
+// Diff fetches the base itself, right after revalidate, so baseRev is
+// refs/zing/base/<default> as of this call, or the local default branch
+// when the fetch has never worked.
 //
 // --no-ext-diff and --no-textconv keep a configured external diff or
 // textconv driver from ever running or reshaping the text a lens reads (the
@@ -37,6 +38,10 @@ func (o *Orchestrator) HeadSHA(ctx context.Context, wt Worktree) (string, error)
 // assumption that "diff --git a/<p> b/<p>" always names one path, not two.
 func (o *Orchestrator) Diff(ctx context.Context, wt Worktree, sha string) (string, error) {
 	if err := o.revalidate(ctx, wt); err != nil {
+		return "", fmt.Errorf("orchestrator: diff: %w", err)
+	}
+
+	if _, _, err := o.fetchBase(ctx, wt.ticketID()); err != nil {
 		return "", fmt.Errorf("orchestrator: diff: %w", err)
 	}
 

@@ -94,6 +94,65 @@ func TestDiffAgainstMergeBase(t *testing.T) {
 	}
 }
 
+// TestDiffRefreshesBase proves Diff fetches the base itself (right after
+// revalidate, not buried inside it): a commit that lands on origin's main
+// after the ticket branch was cut still becomes the new merge-base for a
+// later Diff call, while the diff itself still names only the ticket's own
+// file and the branch's own HEAD never moves.
+func TestDiffRefreshesBase(t *testing.T) {
+	t.Parallel()
+	ctx := t.Context()
+
+	repo := newTestRepo(t)
+	remote := newBareRemote(ctx, t)
+	addOrigin(ctx, t, repo, remote)
+	runGit(ctx, t, repo, "push", "-q", "origin", mainBranch)
+
+	o, logs := newTestOrchestratorCapturingLog(t, repo, execRunner{})
+
+	wt, err := o.PrepareWorktree(ctx, 733, "diff", nil)
+	if err != nil {
+		t.Fatalf("PrepareWorktree: %v", err)
+	}
+	ticketSHA := commitFile(ctx, t, wt.Dir(), "ticket.txt", "ticket\n", "add ticket.txt")
+
+	newSHA := cloneAndCommitUpstream(ctx, t, remote, "upstream.txt", "upstream\n", "add upstream.txt")
+
+	diff, err := o.Diff(ctx, wt, ticketSHA)
+	if err != nil {
+		t.Fatalf("Diff: %v", err)
+	}
+
+	gotBase := strings.TrimSpace(runGit(ctx, t, repo, "rev-parse", "refs/zing/base/main"))
+	if gotBase != newSHA {
+		t.Errorf("refs/zing/base/main = %s, want %s", gotBase, newSHA)
+	}
+
+	if !strings.Contains(diff, "diff --git a/ticket.txt b/ticket.txt") {
+		t.Errorf("Diff missing ticket.txt:\n%s", diff)
+	}
+	if strings.Contains(diff, "upstream.txt") {
+		t.Errorf("Diff mentions upstream.txt, which should not be in the ticket's own diff:\n%s", diff)
+	}
+
+	head := strings.TrimSpace(runGit(ctx, t, wt.Dir(), "rev-parse", "HEAD"))
+	if head != ticketSHA {
+		t.Errorf("branch HEAD moved from %s to %s", ticketSHA, head)
+	}
+
+	fetched := findRecords(logs.records(t), "fetched base")
+	if len(fetched) == 0 {
+		t.Fatal("found no \"fetched base\" records")
+	}
+	last := fetched[len(fetched)-1]
+	if got, want := last["ticket_id"], float64(733); got != want {
+		t.Errorf("ticket_id = %v, want %v", got, want)
+	}
+	if last["sha"] != newSHA {
+		t.Errorf("sha = %v, want %s", last["sha"], newSHA)
+	}
+}
+
 // TestDiffIgnoresTextconv proves Diff's --no-textconv flag, mirroring
 // perimeter_test.go's TestHunkIgnoresTextconv: a "diff.<driver>.textconv"
 // configured for the changed path's extension, with a command that writes

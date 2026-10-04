@@ -11,10 +11,11 @@ import (
 // revalidates wt (8.2): the branch must match the zing/ form, must differ
 // from the default branch, and must be the branch actually checked out in
 // wt.Dir. That rejects a default or a forged non-zing branch before any git
-// command runs. It then verifies every commit in
-// <default_branch>..<branch> is signed, using the same signedStatus (8.3)
-// CommitTask verifies with: a single unsigned commit aborts the push before
-// anything is pushed. Only then does it run
+// command runs. It then fetches the base itself, right after revalidate,
+// so refs/zing/base/<default> is current before unpushedShas reads it. It
+// then verifies every commit in <base>..<branch> is signed, using the same
+// signedStatus (8.3) CommitTask verifies with: a single unsigned commit
+// aborts the push before anything is pushed. Only then does it run
 // "git -C <dir> push origin refs/heads/<branch>:refs/heads/<branch>", an
 // explicit same-name refspec that cannot be reinterpreted as a target on the
 // default branch, followed by "git config --local branch.<b>.remote/.merge" to record the
@@ -22,6 +23,10 @@ import (
 // commonlock.go).
 func (o *Orchestrator) Push(ctx context.Context, wt Worktree) error {
 	if err := o.revalidate(ctx, wt); err != nil {
+		return fmt.Errorf("orchestrator: push: %w", err)
+	}
+
+	if _, _, err := o.fetchBase(ctx, wt.ticketID()); err != nil {
 		return fmt.Errorf("orchestrator: push: %w", err)
 	}
 

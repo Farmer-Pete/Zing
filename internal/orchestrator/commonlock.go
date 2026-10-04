@@ -36,10 +36,12 @@ package orchestrator
 //	perimeter.go RevertPaths (litRun)           restore --staged [--worktree] ...          per-worktree (worktree's own index/working tree)
 //	perimeter.go Hunk                           diff ...                                    per-worktree (read)
 //	perimeter.go BranchCommits                  rev-list --reverse ...                     per-worktree (read)
+//	push.go   Push (fetchBase)                  see worktree.go's fetchBase rows below      --
 //	push.go   Push                              push origin <refspec>                      per-worktree (network I/O; only writes refs/remotes/origin/<branch>, a ref update -- PR review fix C3)
 //	push.go   Push                              config --local branch.<b>.remote/.merge    SHARED (writes branch.<b>.* in the shared config)
 //	push.go   unpushedShas                      log -z --format=%H ...                     per-worktree (read)
 //	review.go HeadSHA                           rev-parse HEAD                             per-worktree (read)
+//	review.go Diff (fetchBase)                  see worktree.go's fetchBase rows below      --
 //	review.go Diff                              merge-base, diff ...                       per-worktree (read)
 //	review.go ChangedFilesBetween               diff --name-only --no-renames -z ...        per-worktree (read)
 //	review.go ChangedFilesSinceBase             merge-base ...                              per-worktree (read)
