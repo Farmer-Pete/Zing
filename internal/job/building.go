@@ -1637,8 +1637,11 @@ const funcLineWidth = 72
 // callers and callees collapsed to one space. A line of at most
 // funcLineWidth runes is returned unchanged, byte for byte. A longer line
 // is wrapped on spaces into entries of at most funcLineWidth runes,
-// continuation entries indented two spaces; a word longer than that stays
-// whole on its own entry.
+// continuation entries indented two spaces. The one exception: a word that
+// does not fit the room left on its entry (funcLineWidth runes on the
+// line's first entry, funcLineWidth-2 on a continuation entry, to leave
+// room for the two-space indent) stays whole on its own entry regardless,
+// so that entry can run past funcLineWidth runes.
 func funcLines(plan response.Plan, approved []string) []string {
 	approvedSet := make(map[string]bool, len(approved))
 	for _, p := range approved {

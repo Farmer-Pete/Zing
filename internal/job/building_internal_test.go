@@ -7,6 +7,7 @@ package job
 
 import (
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 
@@ -179,6 +180,25 @@ func TestFuncLines(t *testing.T) {
 		}
 		if !reflect.DeepEqual(gotWords, wantWords) {
 			t.Errorf("funcLines words = %v, want %v", gotWords, wantWords)
+		}
+	})
+
+	t.Run("forces a word that doesn't fit the continuation room onto its own entry", func(t *testing.T) {
+		t.Parallel()
+		word71 := strings.Repeat("x", 71)
+		word70 := strings.Repeat("y", 70)
+		plan := response.Plan{Design: response.Design{Changes: []response.Change{
+			{Path: pGoPath, Symbol: "F", Callers: "c", Callees: "b " + word71 + " end71"},
+			{Path: pGoPath, Symbol: "F", Callers: "c", Callees: "b " + word70 + " end70"},
+		}}}
+		got := funcLines(plan, []string{pGoPath, pGoPath})
+		want71 := "  " + word71
+		want70 := "  " + word70
+		if !slices.Contains(got, want71) {
+			t.Errorf("funcLines = %v, want an entry %q (73 runes: a 71-rune word doesn't fit the 70-rune room left after the two-space indent, so it stays whole and the entry runs past funcLineWidth)", got, want71)
+		}
+		if !slices.Contains(got, want70) {
+			t.Errorf("funcLines = %v, want an entry %q (72 runes: a 70-rune word exactly fills the room left after the two-space indent)", got, want70)
 		}
 	})
 
