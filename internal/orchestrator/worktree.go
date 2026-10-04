@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -14,6 +15,8 @@ import (
 	"strings"
 	"sync/atomic"
 	"time"
+
+	"zing/internal/gitbin"
 )
 
 // Worktree is a prepared ticket worktree. Its fields are unexported, so only
@@ -49,22 +52,15 @@ var (
 // [a-z0-9._-]; a run of any other character becomes a single "-"; leading
 // and trailing "-" and "." are then trimmed. The candidate is checked
 // against zingBranchPattern and, as a second and independent layer, against
-// "git check-ref-format refs/heads/<name>" -- git's own ref-name rules (no
-// ".." sequence, no trailing ".lock", no bare "." component, and so on) --
-// so a candidate that slips past the pattern is still caught. So the branch
-// can never be a bare ref, a refspec, or an invalid ref. Its "zing/" prefix
-// also keeps it structurally distinct from a repository's default branch in
-// the ordinary case; PrepareWorktree additionally rejects the pathological
-// case where the default branch itself matches the zing/ pattern, since
-// check-ref-format has no notion of "the default branch" to compare
-// against.
-//
-// branchName takes ctx (a small, deliberate deviation from PKG5-PLAN.md
-// section 8.2's signature, which omits it) because it runs a real git
-// subprocess through checkRefFormat; every git-invoking function in this
-// package threads ctx from its caller, and branchName should be no
-// exception -- PrepareWorktree already has one to pass down.
-func branchName(ctx context.Context, ticketID int64, slug string) (string, error) {
+// checkRefFormat -- a pure-Go version of git's own ref-name rules (no ".."
+// sequence, no trailing ".lock", no bare "." component, and so on) -- so a
+// candidate that slips past the pattern is still caught. So the branch can
+// never be a bare ref, a refspec, or an invalid ref. Its "zing/" prefix also
+// keeps it structurally distinct from a repository's default branch in the
+// ordinary case; PrepareWorktree additionally rejects the pathological case
+// where the default branch itself matches the zing/ pattern, since
+// checkRefFormat has no notion of "the default branch" to compare against.
+func branchName(ticketID int64, slug string) (string, error) {
 	if ticketID <= 0 {
 		return "", fmt.Errorf("orchestrator: branch name: ticket id must be positive, got %d", ticketID)
 	}
@@ -79,7 +75,7 @@ func branchName(ctx context.Context, ticketID int64, slug string) (string, error
 	if !zingBranchPattern.MatchString(name) {
 		return "", fmt.Errorf("orchestrator: branch name %q does not match the zing/ pattern", name)
 	}
-	if err := checkRefFormat(ctx, name); err != nil {
+	if err := checkRefFormat(name); err != nil {
 		return "", fmt.Errorf("orchestrator: branch name %q: %w", name, err)
 	}
 
@@ -92,23 +88,38 @@ func sanitizeSlug(slug string) string {
 	return strings.Trim(collapsed, "-.")
 }
 
-// checkRefFormatArgs returns the hardened argv for checkRefFormat's call,
-// pulled out as its own pure function so a test can inspect it without
-// running git: hardenedGitArgs(nil, ...), since checkRefFormat reads no
-// repository -- there is no worktree, and so no filter driver, to override.
-func checkRefFormatArgs(name string) []string {
-	return hardenedGitArgs(nil, "check-ref-format", "refs/heads/"+name)
-}
-
-// checkRefFormat runs "git check-ref-format refs/heads/<name>" directly with
-// os/exec (branchName is the package's one pure-ish validator, with no
-// Runner of its own), using the caller's ctx like every other git-invoking
-// call in this package. It is git's own authority on ref-name rules,
-// catching anything the package's own pattern missed.
-func checkRefFormat(ctx context.Context, name string) error {
-	out, err := exec.CommandContext(ctx, "git", checkRefFormatArgs(name)...).CombinedOutput() //nolint:gosec // argv-only, no shell; name is git-syntax-checked by this very call
-	if err != nil {
-		return fmt.Errorf("git check-ref-format: %w: %s", err, strings.TrimSpace(string(out)))
+// checkRefFormat applies git's documented ref-name rules
+// (git-check-ref-format(1), no options) to "refs/heads/" + name, in Go,
+// with no subprocess. TestCheckRefFormatMatchesGit keeps it honest against
+// real git.
+func checkRefFormat(name string) error {
+	ref := "refs/heads/" + name
+	invalid := func(why string) error { return fmt.Errorf("invalid ref name %q: %s", ref, why) }
+	switch {
+	case strings.HasSuffix(ref, "/"):
+		return invalid("ends with /")
+	case strings.HasSuffix(ref, "."):
+		return invalid("ends with .")
+	case strings.Contains(ref, ".."):
+		return invalid("contains ..")
+	case strings.Contains(ref, "@{"):
+		return invalid("contains @{")
+	}
+	for i := range len(ref) {
+		c := ref[i]
+		if c < 0x20 || c == 0x7f || strings.IndexByte(" ~^:?*[\\", c) >= 0 {
+			return invalid(fmt.Sprintf("contains forbidden byte %q", c))
+		}
+	}
+	for comp := range strings.SplitSeq(ref, "/") {
+		switch {
+		case comp == "":
+			return invalid("has an empty component")
+		case comp[0] == '.':
+			return invalid("has a component starting with .")
+		case strings.HasSuffix(comp, ".lock"):
+			return invalid("has a component ending in .lock")
+		}
 	}
 	return nil
 }
@@ -129,7 +140,7 @@ func checkRefFormat(ctx context.Context, name string) error {
 // no longer have a checked-out HEAD to read, so it validates only the
 // branch-shape condition (see RemoveWorktree).
 func (o *Orchestrator) revalidate(ctx context.Context, wt Worktree) error {
-	if err := o.validateZingBranch(ctx, wt.branch); err != nil {
+	if err := o.validateZingBranch(wt.branch); err != nil {
 		return err
 	}
 
@@ -240,7 +251,32 @@ func resolveOrClean(p string) string {
 // checkout's ".git" directory, or the bare repository itself), which is
 // where "worktrees/<id>" -- the real gitdir a linked worktree's own ".git"
 // pointer file names -- lives.
+//
+// The result is cached on o for its lifetime (.git does not move while Zing
+// runs), so only the first successful call ever runs git; every later call,
+// here or in any other Orchestrator method, returns the cached path at
+// once. Resolution is serialized by commonDirResolve, so concurrent first
+// calls run git exactly once: the winner publishes the result and logs it
+// once at Debug; a loser that waited finds the cache already filled and
+// returns it without running git itself. A failed resolution (git error,
+// empty output, or a ctx that ended while waiting) caches nothing, so the
+// next call retries.
 func (o *Orchestrator) GitCommonDir(ctx context.Context) (string, error) {
+	cached, resolveMu := o.commonDirSnapshot()
+	if cached != "" {
+		return cached, nil
+	}
+
+	if err := resolveMu.Lock(ctx); err != nil {
+		return "", fmt.Errorf("orchestrator: git common dir: %w", err)
+	}
+	defer resolveMu.Unlock()
+
+	// A caller that waited on resolveMu finds the winner's result here.
+	if cached, _ := o.commonDirSnapshot(); cached != "" {
+		return cached, nil
+	}
+
 	out, err := o.run.Output(ctx, o.proj.LocalPath, "git", "rev-parse", "--path-format=absolute", "--git-common-dir")
 	if err != nil {
 		return "", fmt.Errorf("orchestrator: git common dir: %w", err)
@@ -249,27 +285,43 @@ func (o *Orchestrator) GitCommonDir(ctx context.Context) (string, error) {
 	if dir == "" {
 		return "", errors.New("orchestrator: git common dir: empty result")
 	}
+
+	o.commonDirGuard.Lock()
+	o.commonDir = dir
+	o.commonDirGuard.Unlock()
+	o.log.Debug("git common dir resolved", "local_path", o.proj.LocalPath, "dir", dir)
 	return dir, nil
+}
+
+// commonDirSnapshot returns the cached common dir ("" when unresolved) and
+// the resolve lock, creating the lock on first use.
+func (o *Orchestrator) commonDirSnapshot() (string, *commonMutex) {
+	o.commonDirGuard.Lock()
+	defer o.commonDirGuard.Unlock()
+	if o.commonDirResolve == nil {
+		o.commonDirResolve = newCommonMutex()
+	}
+	return o.commonDir, o.commonDirResolve
 }
 
 // validateZingBranch is the branch-shape half of revalidate: the branch
 // must match the zing/ form, must differ from the default branch, and must
-// be a git-legal ref name under "git check-ref-format" -- the same second,
+// be a git-legal ref name under checkRefFormat -- the same second,
 // independent layer branchName checks a freshly built candidate against, so
 // a zing/-shaped branch that was hand-crafted rather than produced by
-// branchName (and so never ran through check-ref-format) is still rejected
-// on the destructive paths that use validateZingBranch (revalidate,
-// RemoveWorktree). It takes ctx to run that check; RemoveWorktree uses it
-// directly, without the checked-out-HEAD check revalidate adds, since a
-// half-removed worktree may have no HEAD to read.
-func (o *Orchestrator) validateZingBranch(ctx context.Context, branch string) error {
+// branchName (and so never ran through checkRefFormat) is still rejected on
+// the destructive paths that use validateZingBranch (revalidate,
+// RemoveWorktree). RemoveWorktree uses it directly, without the
+// checked-out-HEAD check revalidate adds, since a half-removed worktree may
+// have no HEAD to read.
+func (o *Orchestrator) validateZingBranch(branch string) error {
 	if !zingBranchPattern.MatchString(branch) {
 		return fmt.Errorf("orchestrator: branch %q is not a zing/ ticket branch", branch)
 	}
 	if branch == o.proj.DefaultBranch {
 		return fmt.Errorf("orchestrator: branch %q must not be the default branch", branch)
 	}
-	if err := checkRefFormat(ctx, branch); err != nil {
+	if err := checkRefFormat(branch); err != nil {
 		return fmt.Errorf("orchestrator: branch %q: %w", branch, err)
 	}
 	return nil
@@ -381,7 +433,7 @@ func sparseCheckoutSetArgs(drivers []string) []string {
 // fake in a test, so widening it for this one call would ripple through
 // every test double for no other benefit.
 func runSparseCheckoutSet(ctx context.Context, dir string, cone, drivers []string) (string, error) {
-	cmd := exec.CommandContext(ctx, "git", sparseCheckoutSetArgs(drivers)...) //nolint:gosec // argv-only, no shell; drivers is repository-config-derived, never user input, and every element goes through hardenedGitArgs' fixed "-c filter.<name>.<key>=" template
+	cmd := exec.CommandContext(ctx, gitbin.Path(), sparseCheckoutSetArgs(drivers)...) //nolint:gosec // argv-only, no shell; drivers is repository-config-derived, never user input, and every element goes through hardenedGitArgs' fixed "-c filter.<name>.<key>=" template
 	cmd.Dir = dir
 	cmd.Env = scrubGitLocationEnv(os.Environ())
 	cmd.Stdin = strings.NewReader(strings.Join(cone, "\n") + "\n")
@@ -413,7 +465,7 @@ const fetchRefCleanupTimeout = 10 * time.Second
 // use it directly as the base without a second read; fetched reports
 // whether this call's own fetch is what produced it.
 func (o *Orchestrator) fetchBase(ctx context.Context, ticketID int64) (sha string, fetched bool, err error) {
-	if err := checkRefFormat(ctx, o.proj.DefaultBranch); err != nil {
+	if err := checkRefFormat(o.proj.DefaultBranch); err != nil {
 		o.log.Error("fetch base error", "ticket_id", ticketID, "ref", o.baseRef(), "reason", "invalid_default_branch")
 		return "", false, fmt.Errorf("orchestrator: fetch base: default branch %q is not a valid branch name: %w", o.proj.DefaultBranch, err)
 	}
@@ -679,7 +731,7 @@ func (o *Orchestrator) baseRev(ctx context.Context, ticketID int64) (string, err
 // check runs before checkout, and so before any command that could
 // otherwise reach an unsafe signing program.
 func (o *Orchestrator) PrepareWorktree(ctx context.Context, ticketID int64, slug string, cone []string) (Worktree, error) {
-	branch, err := branchName(ctx, ticketID, slug)
+	branch, err := branchName(ticketID, slug)
 	if err != nil {
 		return Worktree{}, fmt.Errorf("orchestrator: prepare worktree: %w", err)
 	}
@@ -746,74 +798,115 @@ func (o *Orchestrator) PrepareWorktree(ctx context.Context, ticketID int64, slug
 	return wt, nil
 }
 
-// readWorktreeGitConfig reads wt.dir's effective filter drivers and checks
-// its git signing program config, both inside the worktree (so a
-// conditional include or extensions.worktreeConfig scoped to that worktree
-// is seen), and stores the discovered drivers on *wt. It is the config-read
-// half of the two-phase creation PrepareWorktree and reattachWorktree share,
-// and the check EnsureWorktree also repeats on every call for an
-// already-present worktree.
+// readWorktreeGitConfig reads wt.dir's effective filter drivers and signing
+// config with one readGitConfig call, inside the worktree (so a conditional
+// include or extensions.worktreeConfig scoped to that worktree is seen),
+// checks the signing config, and stores the discovered drivers on *wt. It
+// is the config-read half of the two-phase creation PrepareWorktree and
+// reattachWorktree share, and the check EnsureWorktree also repeats on
+// every call for an already-present worktree. The Debug log record carries
+// key names only -- drivers and signing key names -- never a signing value,
+// which can name a user's private tooling or hold arguments.
 func (o *Orchestrator) readWorktreeGitConfig(ctx context.Context, wt *Worktree) error {
-	drivers, err := o.FilterDrivers(ctx, wt.dir)
+	cfg, err := o.readGitConfig(ctx, wt.dir)
 	if err != nil {
 		return err
 	}
-	if err := o.checkSigningPrograms(ctx, wt.dir); err != nil {
+	signingKeys := slices.Sorted(maps.Keys(cfg.signing))
+	o.log.Debug("worktree git config read", "ticket_id", wt.ticketID, "dir", wt.dir,
+		"drivers", cfg.drivers, "signing_keys", signingKeys, "matched", cfg.matched)
+	if err := o.checkSigningPrograms(cfg.signing); err != nil {
 		return err
 	}
-	wt.drivers = drivers
+	wt.drivers = cfg.drivers
 	return nil
+}
+
+// worktreeConfigPattern matches, in git's canonical key form (section and
+// variable lowercased, subsection kept as written), every key the
+// orchestrator polices: filter driver commands and the five signing keys.
+const worktreeConfigPattern = `^(filter\..*\.(clean|smudge|process)|gpg\.(program|openpgp\.program|x509\.program|ssh\.program|ssh\.defaultkeycommand))$`
+
+// configEntry is one key/value pair parseConfigZ split out of
+// "git config -z --get-regexp" output.
+type configEntry struct{ key, value string }
+
+// worktreeGitConfig is readGitConfig's result: a ticket worktree's filter
+// drivers and signing-program config, read together in one git call.
+type worktreeGitConfig struct {
+	drivers []string          // filter driver names, sorted, deduplicated, case preserved
+	signing map[string]string // canonical lowercase key -> last value git printed; never logged
+	matched bool              // true when git config exited 0 (at least one key matched)
+}
+
+// parseConfigZ splits `git config -z --get-regexp` output: entries end in
+// NUL; each is the key, then a newline and the value, or the key alone for
+// a valueless (implicit true) key, whose value is "". Empty entries (the
+// trailing one) are skipped. Order is preserved.
+func parseConfigZ(out string) []configEntry {
+	var entries []configEntry
+	for raw := range strings.SplitSeq(out, "\x00") {
+		if raw == "" {
+			continue
+		}
+		key, value, _ := strings.Cut(raw, "\n")
+		entries = append(entries, configEntry{key: key, value: value})
+	}
+	return entries
+}
+
+// readGitConfig reads dir's filter drivers and signing keys with one
+// "git -C dir config -z --get-regexp worktreeConfigPattern" (every config
+// level and include, as git itself resolves them). Exit 1 (no match) is an
+// empty result with matched false.
+func (o *Orchestrator) readGitConfig(ctx context.Context, dir string) (worktreeGitConfig, error) {
+	cfg := worktreeGitConfig{signing: map[string]string{}}
+	out, err := o.run.Output(ctx, dir, "git", "config", "-z", "--get-regexp", worktreeConfigPattern)
+	if err != nil {
+		if isExitCode1(err) {
+			return cfg, nil
+		}
+		return worktreeGitConfig{}, fmt.Errorf("orchestrator: read git config: %w", err)
+	}
+	cfg.matched = true
+	seen := make(map[string]struct{})
+	for _, e := range parseConfigZ(out) {
+		if strings.HasPrefix(e.key, "filter.") {
+			// filter.NAME.clean|smudge|process; NAME may itself hold dots.
+			parts := strings.Split(e.key, ".")
+			if len(parts) < 3 {
+				continue
+			}
+			if name := strings.Join(parts[1:len(parts)-1], "."); name != "" {
+				seen[name] = struct{}{}
+			}
+			continue
+		}
+		cfg.signing[e.key] = e.value // later entries win, like `git config --get`
+	}
+	for name := range seen {
+		cfg.drivers = append(cfg.drivers, name)
+	}
+	sort.Strings(cfg.drivers)
+	return cfg, nil
 }
 
 // FilterDrivers returns the filter driver names git config defines for the
 // repository as seen from dir (the ticket worktree), from every config
-// level, sorted and deduplicated (PKG8-PLAN.md section 7.2):
-//
-//	git -C <dir> config --get-regexp '^filter\..*\.(clean|smudge|process)$'
-//
-// Exit code 1 (no match) is an empty list, not an error.
+// level, sorted and deduplicated (PKG8-PLAN.md section 7.2). Exit code 1
+// (no match) is an empty list, not an error.
 func (o *Orchestrator) FilterDrivers(ctx context.Context, dir string) ([]string, error) {
-	out, err := o.run.Output(ctx, dir, "git", "config", "--get-regexp", filterDriverConfigPattern)
+	cfg, err := o.readGitConfig(ctx, dir)
 	if err != nil {
-		if isExitCode1(err) {
-			return nil, nil
-		}
-		return nil, fmt.Errorf("orchestrator: filter drivers: %w", err)
+		return nil, err
 	}
-
-	seen := make(map[string]struct{})
-	for line := range strings.SplitSeq(out, "\n") {
-		line = strings.TrimSpace(line)
-		if line == "" {
-			continue
-		}
-		key := strings.Fields(line)[0]
-		parts := strings.Split(key, ".")
-		if len(parts) < 3 {
-			continue
-		}
-		name := strings.Join(parts[1:len(parts)-1], ".")
-		if name == "" {
-			continue
-		}
-		seen[name] = struct{}{}
-	}
-
-	names := make([]string, 0, len(seen))
-	for name := range seen {
-		names = append(names, name)
-	}
-	sort.Strings(names)
-	return names, nil
+	return cfg.drivers, nil
 }
-
-// filterDriverConfigPattern matches a filter driver's clean, smudge, or
-// process command setting, whatever name the driver is given.
-const filterDriverConfigPattern = `^filter\..*\.(clean|smudge|process)$`
 
 // gitSigningProgramKeys are the four config keys section 7.2's grammar
 // governs as "a bare name or an absolute path, no argument". Each is read
-// with "git config --get" and, when set, checked by validateSigningProgram.
+// from readGitConfig's single "config -z --get-regexp worktreeConfigPattern"
+// call and, when set, checked by validateSigningProgramValue.
 var gitSigningProgramKeys = []string{
 	"gpg.program",
 	"gpg.openpgp.program",
@@ -839,52 +932,32 @@ const defaultKeyCommandAllowed = "ssh-add -L"
 // closes off anyway rather than reason about case by case.
 var signingProgramForbidden = regexp.MustCompile(`[ \t;|&$` + "`" + `"'()<>\\*?~]`)
 
-// checkSigningPrograms reads the five signing-program keys with
-// "git -C dir config --get <key>" and refuses (PKG8-PLAN.md section 7.2)
-// when a set value does not match its closed grammar, or -- for the four
-// program keys -- when it resolves to a path inside a root a build can
-// write. A key that is not set at all passes with nothing to check.
-func (o *Orchestrator) checkSigningPrograms(ctx context.Context, dir string) error {
+// checkSigningPrograms checks signing (readGitConfig's canonical-key map)
+// against section 7.2's grammar: a set value that does not match its
+// closed grammar, or -- for the four program keys -- that resolves to a
+// path inside a root a build can write, is refused. A key that is not set
+// at all passes with nothing to check. It runs no git.
+func (o *Orchestrator) checkSigningPrograms(signing map[string]string) error {
 	roots, err := o.signingProgramDisallowedRoots()
 	if err != nil {
 		return err
 	}
 
 	for _, key := range gitSigningProgramKeys {
-		value, ok, readErr := o.gitConfigGet(ctx, dir, key)
-		if readErr != nil {
-			return fmt.Errorf("orchestrator: read git config %s: %w", key, readErr)
-		}
+		value, ok := signing[key]
 		if !ok {
 			continue
 		}
-		if validateErr := validateSigningProgramValue(key, value, roots); validateErr != nil {
-			return validateErr
+		if err := validateSigningProgramValue(key, value, roots); err != nil {
+			return err
 		}
 	}
 
-	value, ok, err := o.gitConfigGet(ctx, dir, gitDefaultKeyCommandKey)
-	if err != nil {
-		return fmt.Errorf("orchestrator: read git config %s: %w", gitDefaultKeyCommandKey, err)
-	}
-	if ok && value != defaultKeyCommandAllowed {
+	if value, ok := signing[strings.ToLower(gitDefaultKeyCommandKey)]; ok && value != defaultKeyCommandAllowed {
 		return fmt.Errorf("orchestrator: git signing key %s is not an allowed value", gitDefaultKeyCommandKey)
 	}
 
 	return nil
-}
-
-// gitConfigGet reads one scalar git config key in dir, distinguishing "not
-// set" (git config --get exits 1) from a real error.
-func (o *Orchestrator) gitConfigGet(ctx context.Context, dir, key string) (value string, ok bool, err error) {
-	out, err := o.run.Output(ctx, dir, "git", "config", "--get", key)
-	if err != nil {
-		if isExitCode1(err) {
-			return "", false, nil
-		}
-		return "", false, err
-	}
-	return strings.TrimSpace(out), true, nil
 }
 
 // signingProgramDisallowedRoots returns the absolute roots a git signing
@@ -1000,7 +1073,7 @@ func (o *Orchestrator) cleanupWorktreeDir(ctx context.Context, wt Worktree) {
 
 // RemoveWorktree removes the worktree and deletes its branch. It first
 // validates the branch (zing/ form, not the default branch, a git-legal ref
-// per check-ref-format); an invalid or default branch is an error and
+// per checkRefFormat); an invalid or default branch is an error and
 // nothing is removed. If "git worktree list --porcelain" shows wt.Dir as a
 // live, present worktree (not a stale registration), it first reads the
 // branch actually checked out there with "git -C wt.dir symbolic-ref --short
@@ -1029,7 +1102,7 @@ func (o *Orchestrator) cleanupWorktreeDir(ctx context.Context, wt Worktree) {
 // registration elsewhere in the repository is ever touched, and the default
 // branch is never touched.
 func (o *Orchestrator) RemoveWorktree(ctx context.Context, wt Worktree) error {
-	if err := o.validateZingBranch(ctx, wt.branch); err != nil {
+	if err := o.validateZingBranch(wt.branch); err != nil {
 		return fmt.Errorf("orchestrator: remove worktree: %w", err)
 	}
 
@@ -1268,9 +1341,12 @@ func (o *Orchestrator) reattachWorktree(ctx context.Context, ticketID int64, dir
 // to run symbolic-ref and read dir's config first, so a rewritten pointer
 // still had two git commands run against whatever it now names before
 // being refused. A pointer-check failure is refused without leaking its
-// content; the final revalidate call below re-checks it anyway (cheaply)
-// and adds the HEAD == branch check, so this early check is pure
-// defense-in-depth on top of it, not a replacement for it.
+// content; the final checks below re-check it anyway (cheaply, from the
+// cache) rather than calling revalidate, which would read HEAD a second
+// time -- branch above already came from that same symbolic-ref call, so
+// HEAD == branch holds by construction and needs no second read. This
+// early check is pure defense-in-depth on top of that final check, not a
+// replacement for it.
 func (o *Orchestrator) ensureWorktreePresent(ctx context.Context, ticketID int64, dir string) (Worktree, error) {
 	refused := fmt.Errorf("orchestrator: worktree directory exists but is not ticket %d's worktree: %s", ticketID, dir)
 
@@ -1300,7 +1376,12 @@ func (o *Orchestrator) ensureWorktreePresent(ctx context.Context, ticketID int64
 	if err := o.readWorktreeGitConfig(ctx, &wt); err != nil {
 		return Worktree{}, fmt.Errorf("orchestrator: ensure worktree: %w", err)
 	}
-	if err := o.revalidate(ctx, wt); err != nil {
+	// revalidate's checks minus its HEAD read: branch is the HEAD read
+	// above, so HEAD == branch holds by construction.
+	if err := o.validateZingBranch(branch); err != nil {
+		return Worktree{}, fmt.Errorf("orchestrator: ensure worktree: %w", err)
+	}
+	if err := o.checkGitPointer(ctx, wt); err != nil {
 		return Worktree{}, fmt.Errorf("orchestrator: ensure worktree: %w", err)
 	}
 	return wt, nil

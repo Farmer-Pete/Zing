@@ -15,6 +15,8 @@ import (
 	"sort"
 	"strings"
 	"sync"
+
+	"zing/internal/gitbin"
 )
 
 // Project is the git and GitHub identity of one repository the orchestrator
@@ -152,12 +154,14 @@ var localeEnv = []string{"LC_ALL=C", "LANG=C"}
 // single source of truth for which repository the command acts on. When
 // name is "git", args is first passed through hardenedGitArgs(r.drivers,
 // ...), so every git call this Runner makes -- whatever the caller asked
-// for -- carries the hooks/fsmonitor/driver-override prefix; a non-git
+// for -- carries the hooks/fsmonitor/driver-override prefix, and name
+// becomes gitbin.Path(), so cmd.Args[0] is that resolved path; a non-git
 // command (there are none in production, but tests exercise this) is left
 // alone.
 func (r execRunner) command(ctx context.Context, dir, name string, args ...string) *exec.Cmd {
 	if name == "git" {
 		args = hardenedGitArgs(r.drivers, args...)
+		name = gitbin.Path()
 	}
 	cmd := exec.CommandContext(ctx, name, args...)
 	cmd.Dir = dir
@@ -215,6 +219,17 @@ type Orchestrator struct {
 	// same *commonMutex, from commonLockFor's package-level registry.
 	commonMuGuard sync.Mutex
 	commonMu      *commonMutex
+
+	// commonDirGuard guards commonDir and commonDirResolve. Held only
+	// across reading or publishing them, never across a git call.
+	// commonDir is GitCommonDir's cache: "" until the first successful
+	// resolution, then that absolute path for the Orchestrator's lifetime
+	// (.git does not move while Zing runs). commonDirResolve, created
+	// lazily on the first GitCommonDir call, serializes resolution so
+	// concurrent first calls run git once.
+	commonDirGuard   sync.Mutex
+	commonDir        string
+	commonDirResolve *commonMutex
 }
 
 // New validates proj (non-empty Owner, Repo, DefaultBranch; absolute

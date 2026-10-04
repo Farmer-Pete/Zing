@@ -46,9 +46,8 @@ package orchestrator
 //	review.go ChangedFilesBetween               diff --name-only --no-renames -z ...        per-worktree (read)
 //	review.go ChangedFilesSinceBase             merge-base <baseRev> <to>                   per-worktree (read)
 //	review.go IsAncestor                        merge-base --is-ancestor                    per-worktree (read)
-//	worktree.go checkRefFormat                  check-ref-format                            per-worktree (no repository touched at all)
 //	worktree.go revalidate                      symbolic-ref --short HEAD                   per-worktree (read)
-//	worktree.go GitCommonDir                    rev-parse --git-common-dir                  per-worktree (read)
+//	worktree.go GitCommonDir                    rev-parse --git-common-dir                  per-worktree (read; cached per Orchestrator after the first success, resolution serialized)
 //	worktree.go gitPathInfoExclude              rev-parse --git-path info/exclude           per-worktree (read)
 //	worktree.go ensureWorktreeExclude           (no git call: direct info/exclude read+append) SHARED, see below
 //	worktree.go runSparseCheckoutSet            sparse-checkout set --stdin                 per-worktree (worktree's own admin-dir sparse-checkout file)
@@ -62,8 +61,7 @@ package orchestrator
 //	worktree.go PrepareWorktree                 worktree add --no-checkout -b <branch> <baseRef> SHARED
 //	worktree.go PrepareWorktree                 sparse-checkout init --cone                 SHARED (no worktree-specific config yet: writes the shared config)
 //	worktree.go PrepareWorktree                 checkout                                     per-worktree
-//	worktree.go FilterDrivers                   config --get-regexp ...                     per-worktree (read)
-//	worktree.go gitConfigGet                    config --get <key>                           per-worktree (read)
+//	worktree.go readGitConfig                   config -z --get-regexp ...                  per-worktree (read)
 //	worktree.go cleanupWorktree                 branch -D <branch>                           SHARED
 //	worktree.go cleanupWorktreeDir              worktree remove --force                      SHARED
 //	worktree.go RemoveWorktree                  symbolic-ref --short HEAD                    per-worktree (read)
@@ -242,8 +240,9 @@ func canonicalCommonDir(dir string) (string, error) {
 func (o *Orchestrator) resolveCommonMu(ctx context.Context) (*commonMutex, error) {
 	// The guard covers only the cached read and the publish, never the git
 	// call itself, so a Runner that calls back into resolveCommonMu cannot
-	// deadlock on it. Two concurrent resolvers may both run GitCommonDir;
-	// commonLockFor hands both the same mutex, and the first to publish wins.
+	// deadlock on it. Two concurrent resolvers share GitCommonDir's single
+	// resolution; commonLockFor hands both the same mutex, and the first to
+	// publish wins.
 	o.commonMuGuard.Lock()
 	cached := o.commonMu
 	o.commonMuGuard.Unlock()

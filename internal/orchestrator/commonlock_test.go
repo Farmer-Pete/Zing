@@ -9,7 +9,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
-	"time"
+	"testing/synctest"
 )
 
 // countingLockRunner is runCommonLocked's own test double (design section
@@ -67,30 +67,6 @@ func TestRunCommonGivesUpAfterFourConsecutiveFailures(t *testing.T) {
 	}
 	if r.calls != commonLockRetries+1 {
 		t.Errorf("calls = %d, want %d (the initial attempt plus %d retries)", r.calls, commonLockRetries+1, commonLockRetries)
-	}
-}
-
-// TestRunCommonLocked_CancelDuringRetryDelayReturnsCtxErr proves PR review
-// fix C2: a ctx canceled while runCommonLocked is waiting out its own
-// retry delay returns ctx.Err() at once, instead of sleeping out the full
-// delay (and then checking it only before the next git call, as a bare
-// time.Sleep would have).
-func TestRunCommonLocked_CancelDuringRetryDelayReturnsCtxErr(t *testing.T) {
-	t.Parallel()
-	r := &countingLockRunner{failCount: 1000}
-	ctx, cancel := context.WithCancel(t.Context())
-
-	go func() {
-		time.Sleep(50 * time.Millisecond) // well inside the first 200ms retry delay
-		cancel()
-	}()
-
-	_, err := runCommonLocked(ctx, r, "/x", "config", "--get", "foo")
-	if !errors.Is(err, context.Canceled) {
-		t.Errorf("runCommonLocked = %v, want context.Canceled", err)
-	}
-	if r.calls > commonLockRetries+1 {
-		t.Errorf("calls = %d, want at most %d (canceled before exhausting the retry budget)", r.calls, commonLockRetries+1)
 	}
 }
 
@@ -153,40 +129,6 @@ func TestResolveCommonMu_DoesNotCacheFailure(t *testing.T) {
 	}
 	if mu == nil {
 		t.Fatal("resolveCommonMu returned a nil mutex")
-	}
-}
-
-// TestCommonMutex_LockReturnsCtxErrWhileWaiting proves PR review fix C4: a
-// waiter blocked on an already-locked commonMutex gives up as soon as its
-// own ctx ends, rather than blocking until the holder releases it --
-// runCommon and every other lock site thread their own ctx through to
-// exactly this call.
-func TestCommonMutex_LockReturnsCtxErrWhileWaiting(t *testing.T) {
-	t.Parallel()
-	mu := newCommonMutex()
-	if err := mu.Lock(t.Context()); err != nil {
-		t.Fatalf("first Lock: %v", err)
-	}
-	// mu is now held and deliberately never released in this test.
-
-	ctx, cancel := context.WithCancel(t.Context())
-	done := make(chan error, 1)
-	go func() { done <- mu.Lock(ctx) }()
-
-	select {
-	case err := <-done:
-		t.Fatalf("second Lock returned %v before ctx was even canceled, want it still waiting", err)
-	case <-time.After(100 * time.Millisecond):
-	}
-
-	cancel()
-	select {
-	case err := <-done:
-		if !errors.Is(err, context.Canceled) {
-			t.Errorf("second Lock = %v, want context.Canceled", err)
-		}
-	case <-time.After(5 * time.Second):
-		t.Fatal("second Lock never returned after ctx was canceled")
 	}
 }
 
@@ -446,4 +388,69 @@ func TestRunCommonLocksARunnerPassedExplicitly(t *testing.T) {
 	if !events[0].locked {
 		t.Error("runCommon ran the explicitly-passed Runner without commonMu held")
 	}
+}
+
+// TestRunCommonLocked_CancelDuringRetryDelayReturnsCtxErr proves PR review
+// fix C2: a ctx canceled while runCommonLocked is waiting out its own
+// retry delay returns ctx.Err() at once, instead of sleeping out the full
+// delay (and then checking it only before the next git call, as a bare
+// time.Sleep would have). synctest.Wait reaches the exact moment the
+// goroutine is parked in the retry delay's select, rather than guessing
+// with a wall-clock sleep.
+func TestRunCommonLocked_CancelDuringRetryDelayReturnsCtxErr(t *testing.T) {
+	t.Parallel()
+	synctest.Test(t, func(t *testing.T) {
+		r := &countingLockRunner{failCount: 1000}
+		ctx, cancel := context.WithCancel(t.Context())
+
+		errc := make(chan error, 1)
+		go func() {
+			_, err := runCommonLocked(ctx, r, "/x", "config", "--get", "foo")
+			errc <- err
+		}()
+
+		synctest.Wait() // the goroutine is now parked in the retry delay's select
+		cancel()
+
+		if err := <-errc; !errors.Is(err, context.Canceled) {
+			t.Errorf("runCommonLocked = %v, want context.Canceled", err)
+		}
+		if r.calls != 1 {
+			t.Errorf("calls = %d, want 1 (canceled during the first retry delay)", r.calls)
+		}
+	})
+}
+
+// TestCommonMutex_LockReturnsCtxErrWhileWaiting proves PR review fix C4: a
+// waiter blocked on an already-locked commonMutex gives up as soon as its
+// own ctx ends, rather than blocking until the holder releases it --
+// runCommon and every other lock site thread their own ctx through to
+// exactly this call. synctest.Wait reaches the exact moment the second
+// Lock is parked waiting, rather than guessing with a wall-clock timeout.
+func TestCommonMutex_LockReturnsCtxErrWhileWaiting(t *testing.T) {
+	t.Parallel()
+	synctest.Test(t, func(t *testing.T) {
+		mu := newCommonMutex()
+		if err := mu.Lock(t.Context()); err != nil {
+			t.Fatalf("first Lock: %v", err)
+		}
+		// mu is now held and deliberately never released in this test.
+
+		ctx, cancel := context.WithCancel(t.Context())
+		done := make(chan error, 1)
+		go func() { done <- mu.Lock(ctx) }()
+
+		synctest.Wait() // the second Lock is now parked waiting for mu or ctx
+
+		select {
+		case err := <-done:
+			t.Fatalf("second Lock returned %v before ctx was even canceled, want it still waiting", err)
+		default:
+		}
+
+		cancel()
+		if err := <-done; !errors.Is(err, context.Canceled) {
+			t.Errorf("second Lock = %v, want context.Canceled", err)
+		}
+	})
 }

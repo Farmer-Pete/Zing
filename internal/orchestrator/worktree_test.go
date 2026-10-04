@@ -17,23 +17,28 @@ import (
 	"time"
 
 	"github.com/google/go-cmp/cmp"
+
+	"zing/internal/gitbin"
+	"zing/internal/gitfixture"
 )
 
 const (
-	testOwner     = "acme"
-	testRepo      = "widgets"
-	mainBranch    = "main"
-	absLocalPath  = "/tmp/widgets"
-	branch7MySlug = "zing/7-my-slug"
-	gitName       = "git"
-	statusArg     = "status"
-	configArg     = "config"
-	ownDriverName = "own"
-	gpgProgramKey = "gpg.program"
-	hooksPathArg  = "core.hooksPath=/dev/null"
-	fsmonitorArg  = "core.fsmonitor=false"
-	driverZebra   = "zebra"
-	driverAlpha   = "alpha"
+	testOwner      = "acme"
+	testRepo       = "widgets"
+	mainBranch     = "main"
+	absLocalPath   = "/tmp/widgets"
+	branch7MySlug  = "zing/7-my-slug"
+	gitName        = "git"
+	statusArg      = "status"
+	configArg      = "config"
+	symbolicRefArg = "symbolic-ref"
+	ownDriverName  = "own"
+	gpgProgramKey  = "gpg.program"
+	hooksPathArg   = "core.hooksPath=/dev/null"
+	fsmonitorArg   = "core.fsmonitor=false"
+	driverZebra    = "zebra"
+	driverAlpha    = "alpha"
+	configKeyAB    = "a.b"
 )
 
 // fakeGitHub is a no-op GitHub, enough to satisfy New's required parameter
@@ -247,7 +252,7 @@ func TestBranchName(t *testing.T) {
 		for _, c := range cases {
 			t.Run(c.name, func(t *testing.T) {
 				t.Parallel()
-				got, err := branchName(t.Context(), c.ticketID, c.slug)
+				got, err := branchName(c.ticketID, c.slug)
 				if err != nil {
 					t.Fatalf("branchName(%d, %q): unexpected error: %v", c.ticketID, c.slug, err)
 				}
@@ -261,57 +266,104 @@ func TestBranchName(t *testing.T) {
 	t.Run("invalid ticket id", func(t *testing.T) {
 		t.Parallel()
 		for _, id := range []int64{0, -1, -100} {
-			if _, err := branchName(t.Context(), id, "slug"); err == nil {
+			if _, err := branchName(id, "slug"); err == nil {
 				t.Errorf("branchName(%d, \"slug\"): expected an error, got nil", id)
 			}
 		}
 	})
 
-	t.Run("a trailing .lock is rejected by check-ref-format", func(t *testing.T) {
+	t.Run("a trailing .lock is rejected by checkRefFormat", func(t *testing.T) {
 		t.Parallel()
 		// "lock" is a legal slug character, so sanitizeSlug leaves it
 		// untouched; the candidate matches zingBranchPattern but git's
 		// own ref-name rule (no ref may end in ".lock") still rejects it.
-		if _, err := branchName(t.Context(), 7, "wip.lock"); err == nil {
+		if _, err := branchName(7, "wip.lock"); err == nil {
 			t.Fatal("branchName(7, \"wip.lock\"): expected an error, got nil")
 		}
 	})
 
-	t.Run("a run of internal dots is rejected by check-ref-format", func(t *testing.T) {
+	t.Run("a run of internal dots is rejected by checkRefFormat", func(t *testing.T) {
 		t.Parallel()
 		// sanitizeSlug only trims leading/trailing dots, so an internal
 		// ".." survives to the candidate; git rejects two consecutive
 		// dots anywhere in a ref name.
-		if _, err := branchName(t.Context(), 7, "a..b"); err == nil {
+		if _, err := branchName(7, "a..b"); err == nil {
 			t.Fatal("branchName(7, \"a..b\"): expected an error, got nil")
 		}
 	})
 }
 
-// TestCheckRefFormat exercises the git check-ref-format wrapper directly,
-// with cases git's ref-name rules reject that branchName's own sanitizing
-// never has occasion to produce (a bare "." component). It is the second,
-// independent validation layer branchName relies on.
-func TestCheckRefFormat(t *testing.T) {
+// TestCheckRefFormatMatchesGit proves checkRefFormat (the pure-Go ref-name
+// check) agrees with real git on every case in this table: the oracle
+// binary is gitbin.Path(), the same binary the orchestrator execs.
+func TestCheckRefFormatMatchesGit(t *testing.T) {
 	t.Parallel()
+
+	gitPath := gitbin.Path()
+
 	cases := []struct {
-		name    string
-		ref     string
-		wantErr bool
+		name      string
+		ref       string
+		wantValid bool
 	}{
-		{"valid zing branch", branch7MySlug, false},
-		{"bare dot component", ".", true},
-		{"trailing .lock", "zing/7-wip.lock", true},
+		{"zing branch", branch7MySlug, true},
+		{"main", mainBranch, true},
+		{"nested", "feature/x", true},
+		{"internal dot", configKeyAB, true},
+		{"bare at", "@", true},
+		{"at not followed by brace", "a@b", true},
+		{"non-ascii", "feature/ünï", true},
+		{"lock as a substring, not a suffix", "x.lockx", true},
+		{"empty", "", false},
+		{"bare dot component", ".", false},
+		{"bare dotdot", "..", false},
+		{"internal dotdot", "a..b", false},
+		{"component starting with dot", ".hidden", false},
+		{"nested component starting with dot", "a/.b", false},
+		{"ends in .lock", "x.lock", false},
+		{"nested component ends in .lock", "a.lock/b", false},
+		{"ends with dot", "end.", false},
+		{"ends with slash", "end/", false},
+		{"starts with slash", "/start", false},
+		{"empty component", "a//b", false},
+		{"space", "a b", false},
+		{"tilde", "a~b", false},
+		{"caret", "a^b", false},
+		{"colon", "a:b", false},
+		{"question mark", "a?b", false},
+		{"asterisk", "a*b", false},
+		{"open bracket", "a[b", false},
+		{"backslash", "a\\b", false},
+		{"at-brace sequence", "a@{b", false},
+		{"tab", "tab\tx", false},
+		{"del byte", "del\x7f", false},
+		{"control byte", "ctl\x01", false},
 	}
+
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			t.Parallel()
-			err := checkRefFormat(t.Context(), c.ref)
-			if c.wantErr && err == nil {
-				t.Errorf("checkRefFormat(%q): expected an error, got nil", c.ref)
+
+			ctx := t.Context()
+			cmd := exec.CommandContext(ctx, gitPath, "check-ref-format", "refs/heads/"+c.ref) //nolint:gosec // argv-only, no shell; a fixed oracle binary and a table-driven test value
+			cmd.Env = gitfixture.Environ()
+			out, runErr := cmd.CombinedOutput()
+
+			gitValid := runErr == nil
+			if runErr != nil {
+				var exitErr *exec.ExitError
+				if !errors.As(runErr, &exitErr) || exitErr.ExitCode() != 1 {
+					t.Fatalf("git check-ref-format refs/heads/%q: unexpected failure: %v: %s", c.ref, runErr, strings.TrimSpace(string(out)))
+				}
 			}
-			if !c.wantErr && err != nil {
-				t.Errorf("checkRefFormat(%q): unexpected error: %v", c.ref, err)
+
+			if gitValid != c.wantValid {
+				t.Fatalf("git check-ref-format refs/heads/%q: valid = %v, want %v (table is wrong)", c.ref, gitValid, c.wantValid)
+			}
+
+			gotValid := checkRefFormat(c.ref) == nil
+			if gotValid != c.wantValid {
+				t.Errorf("checkRefFormat(%q) valid = %v, want %v", c.ref, gotValid, c.wantValid)
 			}
 		})
 	}
@@ -366,6 +418,72 @@ func TestRevalidate(t *testing.T) {
 			t.Error("revalidate: expected an error when HEAD no longer matches wt.branch, got nil")
 		}
 	})
+}
+
+// recordingArgsRunner wraps a real execRunner and records each call's argv,
+// under a mutex, so a test can assert exactly which git commands a code
+// path ran. Unlike commonlock_test.go's recordingRunner, it tracks no lock
+// state: it exists for call-count assertions, not for commonMu's own tests.
+type recordingArgsRunner struct {
+	mu    sync.Mutex
+	calls [][]string
+}
+
+func (r *recordingArgsRunner) record(args []string) {
+	r.mu.Lock()
+	r.calls = append(r.calls, append([]string(nil), args...))
+	r.mu.Unlock()
+}
+
+func (r *recordingArgsRunner) Run(ctx context.Context, dir, name string, args ...string) (string, error) {
+	r.record(args)
+	return execRunner{}.Run(ctx, dir, name, args...)
+}
+
+func (r *recordingArgsRunner) Output(ctx context.Context, dir, name string, args ...string) (string, error) {
+	r.record(args)
+	return execRunner{}.Output(ctx, dir, name, args...)
+}
+
+func (r *recordingArgsRunner) snapshot() [][]string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append([][]string(nil), r.calls...)
+}
+
+// TestRevalidateRunsOneGitCommand proves that, once GitCommonDir's cache is
+// warm, revalidate runs exactly one git command: checkGitPointer's own
+// common-dir lookup is served from the cache, so the only git process left
+// is the "symbolic-ref" read that compares the checked-out branch against
+// wt.branch.
+func TestRevalidateRunsOneGitCommand(t *testing.T) {
+	t.Parallel()
+	repo := newTestRepo(t)
+	o := newTestOrchestrator(t, repo, execRunner{})
+	ctx := t.Context()
+
+	wt, err := o.PrepareWorktree(ctx, 210, "revalidate-calls", nil)
+	if err != nil {
+		t.Fatalf("PrepareWorktree: %v", err)
+	}
+
+	// Warm the cache with a plain Runner first, so the recorder swapped in
+	// below sees only revalidate's own calls.
+	if _, err := o.GitCommonDir(ctx); err != nil {
+		t.Fatalf("GitCommonDir: %v", err)
+	}
+
+	rec := &recordingArgsRunner{}
+	o.run = rec
+
+	if err := o.revalidate(ctx, wt); err != nil {
+		t.Fatalf("revalidate: %v", err)
+	}
+
+	want := [][]string{{symbolicRefArg, "--short", "HEAD"}}
+	if diff := cmp.Diff(want, rec.snapshot()); diff != "" {
+		t.Errorf("recorded git calls (-want +got):\n%s", diff)
+	}
 }
 
 func TestPrepareWorktree(t *testing.T) {
@@ -1081,7 +1199,7 @@ func TestExecRunnerDisablesHooksAndFsmonitor(t *testing.T) {
 	t.Run("a git call's argv starts with the two -c pairs", func(t *testing.T) {
 		t.Parallel()
 		cmd := execRunner{}.command(t.Context(), absLocalPath, gitName, statusArg, "--porcelain")
-		want := []string{gitName, "-c", hooksPathArg, "-c", fsmonitorArg, statusArg, "--porcelain"}
+		want := []string{gitbin.Path(), "-c", hooksPathArg, "-c", fsmonitorArg, statusArg, "--porcelain"}
 		if !slices.Equal(cmd.Args, want) {
 			t.Errorf("cmd.Args = %q, want %q", cmd.Args, want)
 		}
@@ -1091,7 +1209,7 @@ func TestExecRunnerDisablesHooksAndFsmonitor(t *testing.T) {
 		t.Parallel()
 		cmd := execRunner{drivers: []string{ownDriverName}}.command(t.Context(), absLocalPath, gitName, "add", "-A")
 		want := []string{
-			gitName, "-c", hooksPathArg, "-c", fsmonitorArg,
+			gitbin.Path(), "-c", hooksPathArg, "-c", fsmonitorArg,
 			"-c", "filter.own.clean=", "-c", "filter.own.smudge=", "-c", "filter.own.process=", "-c", "filter.own.required=false",
 			"add", "-A",
 		}
@@ -1122,17 +1240,6 @@ func TestNewRunner(t *testing.T) {
 	}
 	if len(run.drivers) != 0 {
 		t.Errorf("NewRunner().drivers = %v, want empty", run.drivers)
-	}
-}
-
-// TestCheckRefFormatArgv proves checkRefFormat's argv (checkRefFormatArgs)
-// carries the hardening prefix, even though it reads no repository.
-func TestCheckRefFormatArgv(t *testing.T) {
-	t.Parallel()
-	got := checkRefFormatArgs(branch7MySlug)
-	want := []string{"-c", hooksPathArg, "-c", fsmonitorArg, "check-ref-format", "refs/heads/" + branch7MySlug}
-	if !slices.Equal(got, want) {
-		t.Errorf("checkRefFormatArgs(%q) = %q, want %q", branch7MySlug, got, want)
 	}
 }
 
@@ -1168,6 +1275,142 @@ func TestSparseCheckoutArgv(t *testing.T) {
 // -----------------------------------------------------------------------
 // FilterDrivers, GitCommonDir
 // -----------------------------------------------------------------------
+
+// TestParseConfigZ proves parseConfigZ's splitting rules: NUL-terminated
+// entries, a key alone (no newline) for a valueless key, a value that
+// itself holds a newline kept intact by Cut's "first newline only" rule,
+// order preserved, and a missing trailing NUL still yielding the last
+// entry.
+func TestParseConfigZ(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name string
+		in   string
+		want []configEntry
+	}{
+		{name: "empty", in: "", want: nil},
+		{name: "one entry", in: configKeyAB + "\nv\x00", want: []configEntry{{key: configKeyAB, value: "v"}}},
+		{name: "valueless key", in: "gpg.program\x00", want: []configEntry{{key: "gpg.program", value: ""}}},
+		{name: "value with an embedded newline", in: "k\nline1\nline2\x00", want: []configEntry{{key: "k", value: "line1\nline2"}}},
+		{
+			name: "two entries keep their order",
+			in:   configKeyAB + "\nfirst\x00c.d\nsecond\x00",
+			want: []configEntry{{key: configKeyAB, value: "first"}, {key: "c.d", value: "second"}},
+		},
+		{name: "missing trailing NUL still yields the last entry", in: configKeyAB + "\nv", want: []configEntry{{key: configKeyAB, value: "v"}}},
+	}
+
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			t.Parallel()
+			got := parseConfigZ(c.in)
+			if diff := cmp.Diff(c.want, got, cmp.AllowUnexported(configEntry{})); diff != "" {
+				t.Errorf("parseConfigZ(%q) (-want +got):\n%s", c.in, diff)
+			}
+		})
+	}
+}
+
+// TestReadGitConfigLastValueWins proves readGitConfig's one
+// "config -z --get-regexp" call resolves a key set more than once to the
+// last value git printed (the same rule "git config --get" applies), that
+// it still collects filter driver names and signing keys together, and
+// that its Debug log record carries key names only -- never a signing
+// value -- while reporting matched accurately.
+func TestReadGitConfigLastValueWins(t *testing.T) {
+	t.Parallel()
+
+	t.Run("the later --add value wins and is refused", func(t *testing.T) {
+		t.Parallel()
+		repo := newTestRepo(t)
+		ctx := t.Context()
+		runGit(ctx, t, repo, "config", "--add", gpgProgramKey, "/usr/bin/true")
+		runGit(ctx, t, repo, "config", "--add", gpgProgramKey, "node signer.js")
+		o := newTestOrchestrator(t, repo, execRunner{})
+
+		_, _, err := o.EnsureWorktree(ctx, 700, "last-value-wins")
+		if err == nil {
+			t.Fatal("EnsureWorktree: expected an error, the last gpg.program value is disallowed, got nil")
+		}
+		if !strings.Contains(err.Error(), gpgProgramKey) {
+			t.Errorf("EnsureWorktree error = %v, want it to name %q", err, gpgProgramKey)
+		}
+	})
+
+	t.Run("the opposite order succeeds", func(t *testing.T) {
+		t.Parallel()
+		repo := newTestRepo(t)
+		ctx := t.Context()
+		runGit(ctx, t, repo, "config", "--add", gpgProgramKey, "node signer.js")
+		runGit(ctx, t, repo, "config", "--add", gpgProgramKey, "/usr/bin/true")
+		o := newTestOrchestrator(t, repo, execRunner{})
+
+		if _, _, err := o.EnsureWorktree(ctx, 701, "last-value-wins-ok"); err != nil {
+			t.Fatalf("EnsureWorktree: unexpected error: %v", err)
+		}
+	})
+
+	t.Run("filter drivers and signing keys read together, logged without values", func(t *testing.T) {
+		t.Parallel()
+		repo := newTestRepo(t)
+		ctx := t.Context()
+		runGit(ctx, t, repo, "config", "filter.lfs.clean", "git-lfs clean")
+		runGit(ctx, t, repo, "config", "gpg.ssh.defaultKeyCommand", "ssh-add -L")
+		o, logs := newTestOrchestratorCapturingLog(t, repo, execRunner{})
+
+		wt, _, err := o.EnsureWorktree(ctx, 702, "drivers-and-signing")
+		if err != nil {
+			t.Fatalf("EnsureWorktree: unexpected error: %v", err)
+		}
+		if diff := cmp.Diff([]string{"lfs"}, wt.drivers); diff != "" {
+			t.Errorf("wt.drivers (-want +got):\n%s", diff)
+		}
+
+		records := findRecords(logs.records(t), "worktree git config read")
+		if len(records) == 0 {
+			t.Fatal("found no \"worktree git config read\" records")
+		}
+		rec := records[len(records)-1]
+		if rec[logFieldTicketID] != float64(702) {
+			t.Errorf("record[ticket_id] = %v, want 702", rec[logFieldTicketID])
+		}
+		if diff := cmp.Diff([]any{"lfs"}, rec["drivers"]); diff != "" {
+			t.Errorf("record[drivers] (-want +got):\n%s", diff)
+		}
+		if diff := cmp.Diff([]any{"gpg.ssh.defaultkeycommand"}, rec["signing_keys"]); diff != "" {
+			t.Errorf("record[signing_keys] (-want +got):\n%s", diff)
+		}
+		if rec["matched"] != true {
+			t.Errorf("record[matched] = %v, want true", rec["matched"])
+		}
+		if logs.contains("ssh-add") {
+			t.Error("log output contains the signing value \"ssh-add -L\", want key names only")
+		}
+		if logs.contains("git-lfs clean") {
+			t.Error("log output contains the filter driver command \"git-lfs clean\", want driver names only")
+		}
+	})
+
+	t.Run("no matching keys gives matched false", func(t *testing.T) {
+		t.Parallel()
+		repo := newTestRepo(t)
+		ctx := t.Context()
+		o, logs := newTestOrchestratorCapturingLog(t, repo, execRunner{})
+
+		if _, _, err := o.EnsureWorktree(ctx, 703, "no-matching-keys"); err != nil {
+			t.Fatalf("EnsureWorktree: unexpected error: %v", err)
+		}
+
+		records := findRecords(logs.records(t), "worktree git config read")
+		if len(records) == 0 {
+			t.Fatal("found no \"worktree git config read\" records")
+		}
+		rec := records[len(records)-1]
+		if rec["matched"] != false {
+			t.Errorf("record[matched] = %v, want false", rec["matched"])
+		}
+	})
+}
 
 func TestFilterDrivers(t *testing.T) {
 	t.Parallel()
@@ -1249,6 +1492,116 @@ func TestGitCommonDir(t *testing.T) {
 	if gotResolved != want {
 		t.Errorf("GitCommonDir = %q, want %q", gotResolved, want)
 	}
+}
+
+// TestGitCommonDirCachedPerOrchestrator proves GitCommonDir resolves git at
+// most once per Orchestrator, even when several goroutines make their first
+// call at once, and that a failed first call (a canceled ctx) caches
+// nothing, so the next, healthy call still resolves successfully.
+func TestGitCommonDirCachedPerOrchestrator(t *testing.T) {
+	t.Parallel()
+	repo := newTestRepo(t)
+	want, err := filepath.EvalSymlinks(filepath.Join(repo, ".git"))
+	if err != nil {
+		t.Fatalf("resolve want: %v", err)
+	}
+	wantCommonDirCall := []string{"rev-parse", "--path-format=absolute", "--git-common-dir"}
+
+	t.Run("concurrent first calls run git once and log once", func(t *testing.T) {
+		t.Parallel()
+		run := &recordingArgsRunner{}
+		o, logs := newTestOrchestratorCapturingLog(t, repo, run)
+
+		const n = 8
+		start := make(chan struct{})
+		results := make(chan string, n)
+		var wg sync.WaitGroup
+		for range n {
+			wg.Go(func() {
+				<-start
+				got, err := o.GitCommonDir(t.Context())
+				if err != nil {
+					t.Errorf("GitCommonDir: %v", err)
+					return
+				}
+				results <- got
+			})
+		}
+		close(start)
+		wg.Wait()
+		close(results)
+
+		for got := range results {
+			gotResolved, err := filepath.EvalSymlinks(got)
+			if err != nil {
+				t.Fatalf("resolve got %q: %v", got, err)
+			}
+			if gotResolved != want {
+				t.Errorf("GitCommonDir = %q, want %q", gotResolved, want)
+			}
+		}
+
+		got, err := o.GitCommonDir(t.Context())
+		if err != nil {
+			t.Fatalf("GitCommonDir (one more call): %v", err)
+		}
+		if gotResolved, evalErr := filepath.EvalSymlinks(got); evalErr != nil || gotResolved != want {
+			t.Errorf("GitCommonDir (one more call) = %q, want %q", got, want)
+		}
+
+		wantCalls := [][]string{wantCommonDirCall}
+		if diff := cmp.Diff(wantCalls, run.snapshot()); diff != "" {
+			t.Errorf("rev-parse reached the Runner an unexpected number of times (-want +got):\n%s", diff)
+		}
+
+		records := findRecords(logs.records(t), "git common dir resolved")
+		if len(records) != 1 {
+			t.Fatalf("found %d \"git common dir resolved\" records, want 1", len(records))
+		}
+		if records[0]["local_path"] != repo {
+			t.Errorf("record[local_path] = %v, want %v", records[0]["local_path"], repo)
+		}
+		if records[0]["dir"] == "" || records[0]["dir"] == nil {
+			t.Errorf("record[dir] is empty, want the resolved common dir")
+		}
+	})
+
+	t.Run("a canceled first call caches nothing, so the next call still succeeds", func(t *testing.T) {
+		t.Parallel()
+		run := &recordingArgsRunner{}
+		o, logs := newTestOrchestratorCapturingLog(t, repo, run)
+
+		canceledCtx, cancel := context.WithCancel(t.Context())
+		cancel()
+		if _, err := o.GitCommonDir(canceledCtx); err == nil {
+			t.Fatal("GitCommonDir(canceled ctx): want an error, got nil")
+		}
+		if records := findRecords(logs.records(t), "git common dir resolved"); len(records) != 0 {
+			t.Errorf("found %d \"git common dir resolved\" records after a canceled call, want 0", len(records))
+		}
+		// commonMutex.Lock's select may or may not have reached git before
+		// erroring out on the already-canceled ctx (Go picks among ready
+		// cases at random when the fresh mutex's token is also ready), so
+		// only the calls the following healthy call itself adds are
+		// asserted, not the total.
+		before := len(run.snapshot())
+
+		got, err := o.GitCommonDir(t.Context())
+		if err != nil {
+			t.Fatalf("GitCommonDir(healthy ctx) after a prior failure: %v, want success", err)
+		}
+		if gotResolved, evalErr := filepath.EvalSymlinks(got); evalErr != nil || gotResolved != want {
+			t.Errorf("GitCommonDir = %q, want %q", got, want)
+		}
+
+		wantCalls := [][]string{wantCommonDirCall}
+		if diff := cmp.Diff(wantCalls, run.snapshot()[before:]); diff != "" {
+			t.Errorf("rev-parse calls made after the canceled call (-want +got):\n%s", diff)
+		}
+		if records := findRecords(logs.records(t), "git common dir resolved"); len(records) != 1 {
+			t.Errorf("found %d \"git common dir resolved\" records after the healthy call, want 1", len(records))
+		}
+	})
 }
 
 // -----------------------------------------------------------------------
@@ -1351,7 +1704,7 @@ func TestEnsureWorktree(t *testing.T) {
 			t.Fatalf("rewrite .git pointer: %v", writeErr)
 		}
 
-		spy := forbiddenArgsRunner{t: t, inner: execRunner{}, forbidden: map[string]bool{"symbolic-ref": true, configArg: true}}
+		spy := forbiddenArgsRunner{t: t, inner: execRunner{}, forbidden: map[string]bool{symbolicRefArg: true, configArg: true}}
 		spyOrch := newTestOrchestrator(t, repo, spy)
 
 		_, _, err = spyOrch.EnsureWorktree(ctx, 203, "present")
@@ -1363,6 +1716,51 @@ func TestEnsureWorktree(t *testing.T) {
 			t.Errorf("EnsureWorktree error = %q, want it to contain %q (the refused error)", err.Error(), wantSubstr)
 		}
 	})
+}
+
+// TestEnsureWorktreePresentGitCalls proves ensureWorktreePresent, on an
+// already-present worktree with GitCommonDir's cache warm, runs exactly
+// three git commands: "git worktree list --porcelain" to confirm presence,
+// "git symbolic-ref --short HEAD" once (the second read revalidate used to
+// make is gone, replaced by validateZingBranch and checkGitPointer alone),
+// and readWorktreeGitConfig's single "config -z --get-regexp" call, which
+// collapses what used to be the filter-driver read plus five separate
+// signing-key reads.
+func TestEnsureWorktreePresentGitCalls(t *testing.T) {
+	t.Parallel()
+	repo := newTestRepo(t)
+	o := newTestOrchestrator(t, repo, execRunner{})
+	ctx := t.Context()
+
+	if _, err := o.PrepareWorktree(ctx, 211, "ensure-calls", nil); err != nil {
+		t.Fatalf("PrepareWorktree: %v", err)
+	}
+
+	// Warm the cache with a plain Runner first, so the recorder swapped in
+	// below sees only EnsureWorktree's own calls.
+	if _, err := o.GitCommonDir(ctx); err != nil {
+		t.Fatalf("GitCommonDir: %v", err)
+	}
+
+	rec := &recordingArgsRunner{}
+	o.run = rec
+
+	_, created, err := o.EnsureWorktree(ctx, 211, "ensure-calls")
+	if err != nil {
+		t.Fatalf("EnsureWorktree: %v", err)
+	}
+	if created {
+		t.Error("created = true, want false (the worktree was already present)")
+	}
+
+	want := [][]string{
+		{"worktree", "list", "--porcelain"},
+		{symbolicRefArg, "--short", "HEAD"},
+		{configArg, "-z", "--get-regexp", worktreeConfigPattern},
+	}
+	if diff := cmp.Diff(want, rec.snapshot()); diff != "" {
+		t.Errorf("recorded git calls (-want +got):\n%s", diff)
+	}
 }
 
 // forbiddenArgsRunner wraps a real Runner and fails the test outright if any
@@ -2020,11 +2418,13 @@ func (c *logCapture) contains(s string) bool {
 
 // newTestOrchestratorCapturingLog mirrors newTestOrchestrator, but with a
 // JSON-handler logger writing into a logCapture a test can decode, instead
-// of the silent slog.DiscardHandler every other test in this file uses.
+// of the silent slog.DiscardHandler every other test in this file uses. The
+// handler's level is Debug, so a test can see GitCommonDir's and
+// readWorktreeGitConfig's Debug-level records too.
 func newTestOrchestratorCapturingLog(t *testing.T, localPath string, run Runner) (*Orchestrator, *logCapture) {
 	t.Helper()
 	logs := &logCapture{}
-	log := slog.New(slog.NewJSONHandler(logs, nil))
+	log := slog.New(slog.NewJSONHandler(logs, &slog.HandlerOptions{Level: slog.LevelDebug}))
 	proj := Project{Owner: testOwner, Repo: testRepo, LocalPath: localPath, DefaultBranch: mainBranch}
 	o, err := New(proj, fakeGitHub{}, run, log)
 	if err != nil {
