@@ -2729,6 +2729,27 @@ func TestLoopGateMinorFindingsMoveToJudging(t *testing.T) {
 		t.Errorf("accept message = %q, want the r3f1 minor finding listed", acceptMsg.Body)
 	}
 
+	var doneMsg *store.Message
+	for i := range commit3.Messages {
+		if strings.HasPrefix(commit3.Messages[i].Body, "review round 3 done") {
+			doneMsg = &commit3.Messages[i]
+		}
+	}
+	if doneMsg == nil {
+		t.Fatalf("commit3.Messages = %+v, want round 3's own done marker alongside the accepted-findings message", commit3.Messages)
+	}
+
+	if len(commit3.Artifacts) != 1 {
+		t.Fatalf("commit3.Artifacts = %+v, want exactly one (round 3's own r3f1 finding)", commit3.Artifacts)
+	}
+	var artifact response.FindingArtifact
+	if err = json.Unmarshal(commit3.Artifacts[0].Payload, &artifact); err != nil {
+		t.Fatalf("unmarshal commit3.Artifacts[0]: %v", err)
+	}
+	if artifact.ID != "r3f1" {
+		t.Errorf("commit3.Artifacts[0] finding ID = %q, want %q", artifact.ID, "r3f1")
+	}
+
 	pbApply(t, s, ticket, commit3)
 
 	final := pbGetTicket(t, s, ticket.ID)

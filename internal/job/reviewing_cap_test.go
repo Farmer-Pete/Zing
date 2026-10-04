@@ -7,6 +7,7 @@ package job
 
 import (
 	"encoding/json"
+	"fmt"
 	"strings"
 	"testing"
 	"testing/fstest"
@@ -15,6 +16,20 @@ import (
 	"zing/internal/runtime"
 	"zing/internal/store"
 )
+
+// fidelityFindingScript is the fidelity lens's own "ok" document carrying
+// one finding: unlike findingScript/findingScriptAt, it sets plan_ref,
+// since FilterFindings (reviewrules.go) drops any fidelity finding whose
+// plan_ref is blank.
+func fidelityFindingScript(severity, location, text, fix string) string {
+	return fmt.Sprintf(`<zing job="review" outcome="ok">
+<finding lens="%s" severity="%s" location="%s">
+<text>%s</text>
+<fix>%s</fix>
+<plan_ref>plan/delivery/tasks/task[1]</plan_ref>
+</finding>
+</zing>`, lensFidelity, severity, location, text, fix)
+}
 
 // driveReviewToCap drives a fresh reviewing ticket through two rounds of
 // FIXREQ, lifted out of what was TestLoopGateEscalatesAfterTwoFixes (now
@@ -145,17 +160,6 @@ func TestAcceptAtCap(t *testing.T) {
 			if msg.Body != tc.wantBody {
 				t.Errorf("Messages[0].Body =\n%q\nwant\n%q", msg.Body, tc.wantBody)
 			}
-			if tc.name == "hostile location cannot forge another finding's line" {
-				lines := strings.Split(msg.Body, "\n")
-				if len(lines) != 3 {
-					t.Fatalf("len(lines) = %d, want 3", len(lines))
-				}
-				for _, line := range lines {
-					if strings.HasPrefix(line, "- r9f9") {
-						t.Errorf("line %q forged a second finding", line)
-					}
-				}
-			}
 		})
 	}
 }
@@ -242,12 +246,12 @@ func TestLoopGateMajorFindingEscalates(t *testing.T) {
 // ---- TestLoopGateDroppedMajorMovesToJudging --------------------------------
 
 // TestLoopGateDroppedMajorMovesToJudging proves allAtOrBelowFloor itself,
-// through fixreq (hypothesis 2, issue #68): round 3's loop lens keeps a
-// major finding alongside a minor one, at two distinct locations (so
-// DedupFindings keeps them as two rows); the owner drops the major one in
-// triage, leaving an accepted list of just the minor finding, wholly at or
-// below the floor, so the following fixreq tick moves the ticket on to
-// judging instead of escalating.
+// through fixreq (hypothesis 2, issue #68): round 3's quality lens keeps a
+// major finding and its fidelity lens keeps a minor one, at two distinct
+// locations (so DedupFindings keeps them as two rows); the owner drops the
+// major one in triage, leaving an accepted list of just the minor finding,
+// wholly at or below the floor, so the following fixreq tick moves the
+// ticket on to judging instead of escalating.
 func TestLoopGateDroppedMajorMovesToJudging(t *testing.T) {
 	if testing.Short() {
 		t.Skip("slow end-to-end flow; runs in the full suite")
@@ -256,11 +260,8 @@ func TestLoopGateDroppedMajorMovesToJudging(t *testing.T) {
 	const loopLens = "quality"
 	s, ticket, rt, scripts := driveReviewToCap(t)
 
-	scripts[reviewRoundScriptKey(3, lensFidelity)] = &fstest.MapFile{Data: []byte(reviewOKScript)}
-	scripts[reviewRoundScriptKey(3, loopLens)] = &fstest.MapFile{Data: []byte(twoFindingScript(
-		loopLens, "major", greetGoLine5, "still broken", "fix it",
-		"minor", greetGoLine2, "still not fixed", "add a comment",
-	))}
+	scripts[reviewRoundScriptKey(3, loopLens)] = &fstest.MapFile{Data: []byte(findingScript(loopLens, "major", "still broken", "fix it"))}
+	scripts[reviewRoundScriptKey(3, lensFidelity)] = &fstest.MapFile{Data: []byte(fidelityFindingScript("minor", greetGoLine2, "still not fixed", "add a comment"))}
 
 	ticket3 := pbGetTicket(t, s, ticket.ID)
 	deps3 := pbClaim(t, s, rt, ticket.ID)
