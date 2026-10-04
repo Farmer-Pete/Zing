@@ -1810,7 +1810,7 @@ func updateLine(m *store.MessageRow, agent string) (string, bool) {
 	case strings.HasPrefix(body, updateMarkerValidationDeliveredPrefix):
 		return "The agent received the check results.", true
 	case strings.HasPrefix(body, updateMarkerResponseInvalidPrefix):
-		return "The agent's last response could not be used. Zing retries once.", true
+		return responseInvalidLine(body), true
 	case strings.HasPrefix(body, updateMarkerSealMismatchPrefix):
 		return "The scenario set changed before approval. Zing re-reads it on the next tick.", true
 	case strings.HasPrefix(body, updateMarkerClaimsOkPrefix):
@@ -2328,6 +2328,26 @@ func checkFailedPendingLine(body string) string {
 // ": " -- a PathError's message never contains that substring, since it is
 // generated from a small fixed set of English reasons (checkReady,
 // checkScenarioShape), not user- or model-supplied text.
+// responseInvalidLine renders a "response invalid run <rid>\n<reason>[\n
+// <errors>]" marker (invalidMarkerBody, internal/job/planning.go): one
+// sentence naming the run and the closed reason, then the validator's
+// errors unchanged, one per line. A marker with no reason line keeps the
+// reason clause out. It is a pure renderer and logs nothing.
+func responseInvalidLine(body string) string {
+	first, rest, _ := strings.Cut(body, "\n")
+	rid := strings.TrimPrefix(first, updateMarkerResponseInvalidPrefix)
+	reason, errs, hasErrs := strings.Cut(rest, "\n")
+	head := "Run " + rid + "'s response could not be used"
+	if reason != "" {
+		head += ": " + reason
+	}
+	head += ". Zing retries once. Its final message is linked under Runs in the side panel."
+	if !hasErrs || errs == "" {
+		return head
+	}
+	return head + "\n" + errs
+}
+
 func validationErrorsLine(body string) string {
 	_, rest, hasErrors := strings.Cut(body, "\n")
 	lines := []string{"The agent's last response did not pass Zing's checks. Zing is asking the agent to fix it."}

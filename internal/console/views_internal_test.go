@@ -104,13 +104,25 @@ func TestDisplayBody_ValidationErrorsDeliveredIsHumanReadable(t *testing.T) {
 	}
 }
 
-// TestDisplayBody_ResponseInvalidIsHumanReadable proves a "response invalid
-// run <id>" marker (invalidOutputCommit) renders as a plain sentence, its
-// invErr.Reason line dropped rather than shown raw.
-func TestDisplayBody_ResponseInvalidIsHumanReadable(t *testing.T) {
+// TestDisplayBody_ResponseInvalidShowsReasonAndErrors proves a "response
+// invalid run <id>" marker (invalidOutputCommit) renders the run id, the
+// closed reason, and the validator's errors, one per line, in place of the
+// old generic sentence.
+func TestDisplayBody_ResponseInvalidShowsReasonAndErrors(t *testing.T) {
 	t.Parallel()
-	const want = "The agent's last response could not be used. Zing retries once."
-	body := "response invalid run 9\nmissing required field \"plan\""
+	const want = "Run 9's response could not be used: zing document failed validation. Zing retries once. Its final message is linked under Runs in the side panel.\nplan/goals: required"
+	body := "response invalid run 9\nzing document failed validation\nplan/goals: required"
+	if got := displayBody(updateRow(body)); got != want {
+		t.Errorf("displayBody(%q) = %q, want %q", body, got, want)
+	}
+}
+
+// TestDisplayBody_ResponseInvalidWithoutErrors proves a "response invalid
+// run <id>" marker with no error-list line renders just the head sentence.
+func TestDisplayBody_ResponseInvalidWithoutErrors(t *testing.T) {
+	t.Parallel()
+	const want = "Run 4's response could not be used: no zing element in final message. Zing retries once. Its final message is linked under Runs in the side panel."
+	body := "response invalid run 4\nno zing element in final message"
 	if got := displayBody(updateRow(body)); got != want {
 		t.Errorf("displayBody(%q) = %q, want %q", body, got, want)
 	}
