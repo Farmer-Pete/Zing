@@ -197,23 +197,39 @@ func TestFuncLines(t *testing.T) {
 			wantSet[w] = true
 		}
 
-		gotWords := make([]string, 0, len(wantWords))
-		for w := range strings.FieldsSeq(strings.Join(got, " ")) {
-			if !wantSet[w] {
-				t.Fatalf("word %q in func line is not a word of the input line", w)
-			}
-			gotWords = append(gotWords, w)
-		}
-		if !reflect.DeepEqual(gotWords, wantWords) {
-			t.Errorf("funcLines words = %v, want %v", gotWords, wantWords)
-		}
-
 		msg, err := orchestrator.CommitMessage{Title: "t", FuncLines: got}.Render()
 		if err != nil {
 			t.Fatalf("Render() error = %v", err)
 		}
-		if !strings.Contains(msg, "abcdefghi") {
-			t.Errorf("Render() = %q, want it to contain the callee word", msg)
+		// The body is "title\n\n" + func lines joined by "\n" + "\n\n" +
+		// the trailer (commit.go's Render), with no fences here, so the
+		// middle "\n\n"-delimited section is exactly the func lines.
+		parts := strings.Split(msg, "\n\n")
+		if len(parts) < 2 {
+			t.Fatalf("Render() = %q, want a func-line section", msg)
+		}
+		renderedLines := strings.Split(parts[1], "\n")
+		if !reflect.DeepEqual(renderedLines, got) {
+			t.Errorf("rendered func lines = %v, want %v", renderedLines, got)
+		}
+
+		gotWords := make([]string, 0, len(wantWords))
+		for i, l := range renderedLines {
+			if n := len([]rune(l)); n > 72 {
+				t.Errorf("rendered func line %d = %q has %d runes, want at most 72", i, l, n)
+			}
+			if i > 0 && !strings.HasPrefix(l, "  ") {
+				t.Errorf("rendered func line %d = %q, want a two-space indent", i, l)
+			}
+			for w := range strings.FieldsSeq(l) {
+				if !wantSet[w] {
+					t.Fatalf("word %q in func line is not a word of the input line", w)
+				}
+				gotWords = append(gotWords, w)
+			}
+		}
+		if !reflect.DeepEqual(gotWords, wantWords) {
+			t.Errorf("funcLines words = %v, want %v", gotWords, wantWords)
 		}
 	})
 
