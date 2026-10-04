@@ -625,12 +625,16 @@ func (o *Orchestrator) resolveBase(ctx context.Context) (string, error) {
 	return o.revParseCommit(ctx, o.baseRef())
 }
 
-// baseRev is the revision every base comparison reads: baseRef when it
-// exists, else the local default branch, which is what a ticket cut
-// before fetchBase ever ran was cut from (and what every call site in this
-// package compared against before this change). A git error other than
-// "absent" is logged with a fixed reason and returned, rather than
-// silently falling back.
+// baseRev is the revision every base comparison reads: baseRef's resolved
+// commit sha when that ref exists, else the local default branch's name,
+// which is what a ticket cut before fetchBase ever ran was cut from (and
+// what every call site in this package compared against before this
+// change). It returns the sha already resolved by resolveBase, not the
+// mutable ref name, so a caller that issues more than one git command
+// against this value (readGovernanceFiles, looping over judgeGovernanceFiles)
+// stays pinned to one commit even if another ticket's fetchBase advances
+// baseRef in between. A git error other than "absent" is logged with a
+// fixed reason and returned, rather than silently falling back.
 func (o *Orchestrator) baseRev(ctx context.Context, ticketID int64) (string, error) {
 	sha, err := o.resolveBase(ctx)
 	if err != nil {
@@ -640,7 +644,7 @@ func (o *Orchestrator) baseRev(ctx context.Context, ticketID int64) (string, err
 	if sha == "" {
 		return o.proj.DefaultBranch, nil
 	}
-	return o.baseRef(), nil
+	return sha, nil
 }
 
 // PrepareWorktree creates the worktree directory and branch and applies the

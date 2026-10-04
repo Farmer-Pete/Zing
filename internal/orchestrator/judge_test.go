@@ -7,11 +7,13 @@ package orchestrator
 // pattern every git-backed test in this package already follows.
 
 import (
+	"context"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync/atomic"
 	"testing"
 )
 
@@ -25,6 +27,7 @@ const (
 	judgeTicketNoSmudge         = 903
 	judgeTicketRemoveTwice      = 904
 	judgeTicketGovernanceOrigin = 906
+	judgeTicketGovernancePinned = 907 // and 908, for the concurrent fetchBase in TestJudgeWorktreeGovernancePinnedToOneBase's advance callback
 )
 
 // TestJudgeWorktreeDetachedAtSha proves JudgeWorktree checks sha out at
@@ -168,6 +171,97 @@ func TestJudgeWorktreeGovernanceFromOrigin(t *testing.T) {
 	want := "origin agents, ahead of local main\n"
 	if string(gotAgents) != want {
 		t.Errorf("AGENTS.md = %q, want origin's content %q, not local main's stale content", gotAgents, want)
+	}
+
+	if err := jt.Remove(ctx); err != nil {
+		t.Errorf("Remove: %v", err)
+	}
+}
+
+// showGateRunner wraps a real Runner and, the first time an Output call's
+// args matches match, invokes advance (once) after delegating but before
+// returning -- letting a test move refs/zing/base/<default> forward in
+// between two "git show" calls readGovernanceFiles makes in the same loop.
+// Every other call, and every call once the gate has already fired once,
+// passes straight through with no side effect.
+type showGateRunner struct {
+	inner   Runner
+	match   func(args []string) bool
+	advance func()
+	fired   atomic.Bool
+}
+
+func (r *showGateRunner) Run(ctx context.Context, dir, name string, args ...string) (string, error) {
+	return r.inner.Run(ctx, dir, name, args...)
+}
+
+func (r *showGateRunner) Output(ctx context.Context, dir, name string, args ...string) (string, error) {
+	out, err := r.inner.Output(ctx, dir, name, args...)
+	if err == nil && r.match(args) && r.fired.CompareAndSwap(false, true) {
+		r.advance()
+	}
+	return out, err
+}
+
+// TestJudgeWorktreeGovernancePinnedToOneBase proves readGovernanceFiles
+// reads every governance file from the one base commit baseRev resolved at
+// the start of its loop, even when another ticket's fetchBase advances
+// refs/zing/base/<default> in between the loop's two "git show" calls.
+// baseRev used to return the mutable ref name instead of the sha it had
+// just resolved, so the second "git show" could re-resolve the ref and pick
+// up a newer commit than the first one read, mixing a judge checkout's two
+// governance files across two different base commits.
+func TestJudgeWorktreeGovernancePinnedToOneBase(t *testing.T) {
+	t.Parallel()
+	ctx := t.Context()
+
+	repo := newTestRepo(t)
+	writeTestFile(t, filepath.Join(repo, "CLAUDE.md"), "base claude v1\n")
+	writeTestFile(t, filepath.Join(repo, "AGENTS.md"), "base agents v1\n")
+	runGit(ctx, t, repo, "add", "CLAUDE.md", "AGENTS.md")
+	runGit(ctx, t, repo, "commit", "-q", "-m", "add governance files")
+
+	remote := newBareRemote(ctx, t)
+	addOrigin(ctx, t, repo, remote)
+	runGit(ctx, t, repo, "push", "-q", "origin", mainBranch)
+
+	var o *Orchestrator
+	run := &showGateRunner{
+		inner: execRunner{},
+		match: func(args []string) bool {
+			return len(args) >= 2 && args[0] == "show" && strings.HasSuffix(args[1], ":CLAUDE.md")
+		},
+		advance: func() {
+			cloneAndCommitUpstream(ctx, t, remote, "AGENTS.md", "base agents v2, advanced mid-loop\n", "advance AGENTS.md during the judge's governance read")
+			if _, _, err := o.fetchBase(ctx, judgeTicketGovernancePinned+1); err != nil {
+				t.Fatalf("fetchBase (concurrent advance): %v", err)
+			}
+		},
+	}
+	o = newTestOrchestrator(t, repo, run)
+
+	wt, err := o.PrepareWorktree(ctx, judgeTicketGovernancePinned, "judge-governance-pinned", nil)
+	if err != nil {
+		t.Fatalf("PrepareWorktree: %v", err)
+	}
+	sha := commitFile(ctx, t, wt.Dir(), "feature.txt", "v1\n", "add feature")
+
+	jt, err := o.JudgeWorktree(ctx, judgeTicketGovernancePinned, sha)
+	if err != nil {
+		t.Fatalf("JudgeWorktree: %v", err)
+	}
+
+	if !run.fired.Load() {
+		t.Fatalf("showGateRunner never matched a CLAUDE.md read; the race this test exercises never happened")
+	}
+
+	gotAgents, err := os.ReadFile(filepath.Join(jt.Dir(), "AGENTS.md"))
+	if err != nil {
+		t.Fatalf("read AGENTS.md: %v", err)
+	}
+	want := "base agents v1\n"
+	if string(gotAgents) != want {
+		t.Errorf("AGENTS.md = %q, want %q (the base baseRev resolved before the loop, not the base advanced mid-loop)", gotAgents, want)
 	}
 
 	if err := jt.Remove(ctx); err != nil {
