@@ -37,6 +37,7 @@ const (
 	fsmonitorArg   = "core.fsmonitor=false"
 	driverZebra    = "zebra"
 	driverAlpha    = "alpha"
+	configKeyAB    = "a.b"
 )
 
 // fakeGitHub is a no-op GitHub, enough to satisfy New's required parameter
@@ -311,7 +312,7 @@ func TestCheckRefFormatMatchesGit(t *testing.T) {
 		{"zing branch", branch7MySlug, true},
 		{"main", mainBranch, true},
 		{"nested", "feature/x", true},
-		{"internal dot", "a.b", true},
+		{"internal dot", configKeyAB, true},
 		{"bare at", "@", true},
 		{"at not followed by brace", "a@b", true},
 		{"non-ascii", "feature/ünï", true},
@@ -1278,6 +1279,135 @@ func TestSparseCheckoutArgv(t *testing.T) {
 // FilterDrivers, GitCommonDir
 // -----------------------------------------------------------------------
 
+// TestParseConfigZ proves parseConfigZ's splitting rules: NUL-terminated
+// entries, a key alone (no newline) for a valueless key, a value that
+// itself holds a newline kept intact by Cut's "first newline only" rule,
+// order preserved, and a missing trailing NUL still yielding the last
+// entry.
+func TestParseConfigZ(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name string
+		in   string
+		want []configEntry
+	}{
+		{name: "empty", in: "", want: nil},
+		{name: "one entry", in: configKeyAB + "\nv\x00", want: []configEntry{{key: configKeyAB, value: "v"}}},
+		{name: "valueless key", in: "gpg.program\x00", want: []configEntry{{key: "gpg.program", value: ""}}},
+		{name: "value with an embedded newline", in: "k\nline1\nline2\x00", want: []configEntry{{key: "k", value: "line1\nline2"}}},
+		{
+			name: "two entries keep their order",
+			in:   configKeyAB + "\nfirst\x00c.d\nsecond\x00",
+			want: []configEntry{{key: configKeyAB, value: "first"}, {key: "c.d", value: "second"}},
+		},
+		{name: "missing trailing NUL still yields the last entry", in: configKeyAB + "\nv", want: []configEntry{{key: configKeyAB, value: "v"}}},
+	}
+
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			t.Parallel()
+			got := parseConfigZ(c.in)
+			if diff := cmp.Diff(c.want, got, cmp.AllowUnexported(configEntry{})); diff != "" {
+				t.Errorf("parseConfigZ(%q) (-want +got):\n%s", c.in, diff)
+			}
+		})
+	}
+}
+
+// TestReadGitConfigLastValueWins proves readGitConfig's one
+// "config -z --get-regexp" call resolves a key set more than once to the
+// last value git printed (the same rule "git config --get" applies), that
+// it still collects filter driver names and signing keys together, and
+// that its Debug log record carries key names only -- never a signing
+// value -- while reporting matched accurately.
+func TestReadGitConfigLastValueWins(t *testing.T) {
+	t.Parallel()
+
+	t.Run("the later --add value wins and is refused", func(t *testing.T) {
+		t.Parallel()
+		repo := newTestRepo(t)
+		ctx := t.Context()
+		runGit(ctx, t, repo, "config", "--add", gpgProgramKey, "/usr/bin/true")
+		runGit(ctx, t, repo, "config", "--add", gpgProgramKey, "node signer.js")
+		o := newTestOrchestrator(t, repo, execRunner{})
+
+		if _, _, err := o.EnsureWorktree(ctx, 700, "last-value-wins"); err == nil {
+			t.Fatal("EnsureWorktree: expected an error, the last gpg.program value is disallowed, got nil")
+		}
+	})
+
+	t.Run("the opposite order succeeds", func(t *testing.T) {
+		t.Parallel()
+		repo := newTestRepo(t)
+		ctx := t.Context()
+		runGit(ctx, t, repo, "config", "--add", gpgProgramKey, "node signer.js")
+		runGit(ctx, t, repo, "config", "--add", gpgProgramKey, "/usr/bin/true")
+		o := newTestOrchestrator(t, repo, execRunner{})
+
+		if _, _, err := o.EnsureWorktree(ctx, 701, "last-value-wins-ok"); err != nil {
+			t.Fatalf("EnsureWorktree: unexpected error: %v", err)
+		}
+	})
+
+	t.Run("filter drivers and signing keys read together, logged without values", func(t *testing.T) {
+		t.Parallel()
+		repo := newTestRepo(t)
+		ctx := t.Context()
+		runGit(ctx, t, repo, "config", "filter.lfs.clean", "git-lfs clean")
+		runGit(ctx, t, repo, "config", "gpg.ssh.defaultKeyCommand", "ssh-add -L")
+		o, logs := newTestOrchestratorCapturingLog(t, repo, execRunner{})
+
+		wt, _, err := o.EnsureWorktree(ctx, 702, "drivers-and-signing")
+		if err != nil {
+			t.Fatalf("EnsureWorktree: unexpected error: %v", err)
+		}
+		if diff := cmp.Diff([]string{"lfs"}, wt.drivers); diff != "" {
+			t.Errorf("wt.drivers (-want +got):\n%s", diff)
+		}
+
+		records := findRecords(logs.records(t), "worktree git config read")
+		if len(records) == 0 {
+			t.Fatal("found no \"worktree git config read\" records")
+		}
+		rec := records[len(records)-1]
+		if rec[logFieldTicketID] != float64(702) {
+			t.Errorf("record[ticket_id] = %v, want 702", rec[logFieldTicketID])
+		}
+		if diff := cmp.Diff([]any{"lfs"}, rec["drivers"]); diff != "" {
+			t.Errorf("record[drivers] (-want +got):\n%s", diff)
+		}
+		if diff := cmp.Diff([]any{"gpg.ssh.defaultkeycommand"}, rec["signing_keys"]); diff != "" {
+			t.Errorf("record[signing_keys] (-want +got):\n%s", diff)
+		}
+		if rec["matched"] != true {
+			t.Errorf("record[matched] = %v, want true", rec["matched"])
+		}
+		if logs.contains("ssh-add") {
+			t.Error("log output contains the signing value \"ssh-add -L\", want key names only")
+		}
+	})
+
+	t.Run("no matching keys gives matched false", func(t *testing.T) {
+		t.Parallel()
+		repo := newTestRepo(t)
+		ctx := t.Context()
+		o, logs := newTestOrchestratorCapturingLog(t, repo, execRunner{})
+
+		if _, _, err := o.EnsureWorktree(ctx, 703, "no-matching-keys"); err != nil {
+			t.Fatalf("EnsureWorktree: unexpected error: %v", err)
+		}
+
+		records := findRecords(logs.records(t), "worktree git config read")
+		if len(records) == 0 {
+			t.Fatal("found no \"worktree git config read\" records")
+		}
+		rec := records[len(records)-1]
+		if rec["matched"] != false {
+			t.Errorf("record[matched] = %v, want false", rec["matched"])
+		}
+	})
+}
+
 func TestFilterDrivers(t *testing.T) {
 	t.Parallel()
 	t.Run("none configured", func(t *testing.T) {
@@ -1595,14 +1725,13 @@ func TestEnsureWorktree(t *testing.T) {
 }
 
 // TestEnsureWorktreePresentGitCalls proves ensureWorktreePresent, on an
-// already-present worktree with GitCommonDir's cache warm, reads HEAD
-// exactly once: "git worktree list --porcelain" to confirm presence, then
-// "git symbolic-ref --short HEAD" once, not twice (the second read
-// revalidate used to make is gone, replaced by validateZingBranch and
-// checkGitPointer alone). This task asserts only that first pair and the
-// single symbolic-ref; task 4 collapses the signing and filter config
-// reads that still follow into one "config -z --get-regexp" call and
-// tightens this to the exact three-call list.
+// already-present worktree with GitCommonDir's cache warm, runs exactly
+// three git commands: "git worktree list --porcelain" to confirm presence,
+// "git symbolic-ref --short HEAD" once (the second read revalidate used to
+// make is gone, replaced by validateZingBranch and checkGitPointer alone),
+// and readWorktreeGitConfig's single "config -z --get-regexp" call, which
+// collapses what used to be the filter-driver read plus five separate
+// signing-key reads.
 func TestEnsureWorktreePresentGitCalls(t *testing.T) {
 	t.Parallel()
 	repo := newTestRepo(t)
@@ -1630,26 +1759,13 @@ func TestEnsureWorktreePresentGitCalls(t *testing.T) {
 		t.Error("created = true, want false (the worktree was already present)")
 	}
 
-	calls := rec.snapshot()
-	if len(calls) < 2 {
-		t.Fatalf("recorded %d git calls, want at least 2: %v", len(calls), calls)
-	}
-	wantFirstTwo := [][]string{
+	want := [][]string{
 		{"worktree", "list", "--porcelain"},
 		{symbolicRefArg, "--short", "HEAD"},
+		{configArg, "-z", "--get-regexp", worktreeConfigPattern},
 	}
-	if diff := cmp.Diff(wantFirstTwo, calls[:2]); diff != "" {
-		t.Errorf("first two recorded git calls (-want +got):\n%s", diff)
-	}
-
-	symbolicRefCalls := 0
-	for _, c := range calls {
-		if len(c) > 0 && c[0] == symbolicRefArg {
-			symbolicRefCalls++
-		}
-	}
-	if symbolicRefCalls != 1 {
-		t.Errorf("symbolic-ref ran %d times, want exactly 1: %v", symbolicRefCalls, calls)
+	if diff := cmp.Diff(want, rec.snapshot()); diff != "" {
+		t.Errorf("recorded git calls (-want +got):\n%s", diff)
 	}
 }
 

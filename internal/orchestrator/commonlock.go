@@ -61,8 +61,7 @@ package orchestrator
 //	worktree.go PrepareWorktree                 worktree add --no-checkout -b <branch> <baseRef> SHARED
 //	worktree.go PrepareWorktree                 sparse-checkout init --cone                 SHARED (no worktree-specific config yet: writes the shared config)
 //	worktree.go PrepareWorktree                 checkout                                     per-worktree
-//	worktree.go FilterDrivers                   config --get-regexp ...                     per-worktree (read)
-//	worktree.go gitConfigGet                    config --get <key>                           per-worktree (read)
+//	worktree.go readGitConfig                   config -z --get-regexp ...                  per-worktree (read)
 //	worktree.go cleanupWorktree                 branch -D <branch>                           SHARED
 //	worktree.go cleanupWorktreeDir              worktree remove --force                      SHARED
 //	worktree.go RemoveWorktree                  symbolic-ref --short HEAD                    per-worktree (read)

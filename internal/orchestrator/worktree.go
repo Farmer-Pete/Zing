@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -795,70 +796,110 @@ func (o *Orchestrator) PrepareWorktree(ctx context.Context, ticketID int64, slug
 	return wt, nil
 }
 
-// readWorktreeGitConfig reads wt.dir's effective filter drivers and checks
-// its git signing program config, both inside the worktree (so a
-// conditional include or extensions.worktreeConfig scoped to that worktree
-// is seen), and stores the discovered drivers on *wt. It is the config-read
-// half of the two-phase creation PrepareWorktree and reattachWorktree share,
-// and the check EnsureWorktree also repeats on every call for an
-// already-present worktree.
+// readWorktreeGitConfig reads wt.dir's effective filter drivers and signing
+// config with one readGitConfig call, inside the worktree (so a conditional
+// include or extensions.worktreeConfig scoped to that worktree is seen),
+// checks the signing config, and stores the discovered drivers on *wt. It
+// is the config-read half of the two-phase creation PrepareWorktree and
+// reattachWorktree share, and the check EnsureWorktree also repeats on
+// every call for an already-present worktree. The Debug log record carries
+// key names only -- drivers and signing key names -- never a signing value,
+// which can name a user's private tooling or hold arguments.
 func (o *Orchestrator) readWorktreeGitConfig(ctx context.Context, wt *Worktree) error {
-	drivers, err := o.FilterDrivers(ctx, wt.dir)
+	cfg, err := o.readGitConfig(ctx, wt.dir)
 	if err != nil {
 		return err
 	}
-	if err := o.checkSigningPrograms(ctx, wt.dir); err != nil {
+	signingKeys := slices.Sorted(maps.Keys(cfg.signing))
+	o.log.Debug("worktree git config read", "ticket_id", wt.ticketID, "dir", wt.dir,
+		"drivers", cfg.drivers, "signing_keys", signingKeys, "matched", cfg.matched)
+	if err := o.checkSigningPrograms(cfg.signing); err != nil {
 		return err
 	}
-	wt.drivers = drivers
+	wt.drivers = cfg.drivers
 	return nil
+}
+
+// worktreeConfigPattern matches, in git's canonical key form (section and
+// variable lowercased, subsection kept as written), every key the
+// orchestrator polices: filter driver commands and the five signing keys.
+const worktreeConfigPattern = `^(filter\..*\.(clean|smudge|process)|gpg\.(program|openpgp\.program|x509\.program|ssh\.program|ssh\.defaultkeycommand))$`
+
+// configEntry is one key/value pair parseConfigZ split out of
+// "git config -z --get-regexp" output.
+type configEntry struct{ key, value string }
+
+// worktreeGitConfig is readGitConfig's result: a ticket worktree's filter
+// drivers and signing-program config, read together in one git call.
+type worktreeGitConfig struct {
+	drivers []string          // filter driver names, sorted, deduplicated, case preserved
+	signing map[string]string // canonical lowercase key -> last value git printed; never logged
+	matched bool              // true when git config exited 0 (at least one key matched)
+}
+
+// parseConfigZ splits `git config -z --get-regexp` output: entries end in
+// NUL; each is the key, then a newline and the value, or the key alone for
+// a valueless (implicit true) key, whose value is "". Empty entries (the
+// trailing one) are skipped. Order is preserved.
+func parseConfigZ(out string) []configEntry {
+	var entries []configEntry
+	for raw := range strings.SplitSeq(out, "\x00") {
+		if raw == "" {
+			continue
+		}
+		key, value, _ := strings.Cut(raw, "\n")
+		entries = append(entries, configEntry{key: key, value: value})
+	}
+	return entries
+}
+
+// readGitConfig reads dir's filter drivers and signing keys with one
+// "git -C dir config -z --get-regexp worktreeConfigPattern" (every config
+// level and include, as git itself resolves them). Exit 1 (no match) is an
+// empty result with matched false.
+func (o *Orchestrator) readGitConfig(ctx context.Context, dir string) (worktreeGitConfig, error) {
+	cfg := worktreeGitConfig{signing: map[string]string{}}
+	out, err := o.run.Output(ctx, dir, "git", "config", "-z", "--get-regexp", worktreeConfigPattern)
+	if err != nil {
+		if isExitCode1(err) {
+			return cfg, nil
+		}
+		return worktreeGitConfig{}, fmt.Errorf("orchestrator: read git config: %w", err)
+	}
+	cfg.matched = true
+	seen := make(map[string]struct{})
+	for _, e := range parseConfigZ(out) {
+		if strings.HasPrefix(e.key, "filter.") {
+			// filter.NAME.clean|smudge|process; NAME may itself hold dots.
+			parts := strings.Split(e.key, ".")
+			if len(parts) < 3 {
+				continue
+			}
+			if name := strings.Join(parts[1:len(parts)-1], "."); name != "" {
+				seen[name] = struct{}{}
+			}
+			continue
+		}
+		cfg.signing[e.key] = e.value // later entries win, like `git config --get`
+	}
+	for name := range seen {
+		cfg.drivers = append(cfg.drivers, name)
+	}
+	sort.Strings(cfg.drivers)
+	return cfg, nil
 }
 
 // FilterDrivers returns the filter driver names git config defines for the
 // repository as seen from dir (the ticket worktree), from every config
-// level, sorted and deduplicated (PKG8-PLAN.md section 7.2):
-//
-//	git -C <dir> config --get-regexp '^filter\..*\.(clean|smudge|process)$'
-//
-// Exit code 1 (no match) is an empty list, not an error.
+// level, sorted and deduplicated (PKG8-PLAN.md section 7.2). Exit code 1
+// (no match) is an empty list, not an error.
 func (o *Orchestrator) FilterDrivers(ctx context.Context, dir string) ([]string, error) {
-	out, err := o.run.Output(ctx, dir, "git", "config", "--get-regexp", filterDriverConfigPattern)
+	cfg, err := o.readGitConfig(ctx, dir)
 	if err != nil {
-		if isExitCode1(err) {
-			return nil, nil
-		}
-		return nil, fmt.Errorf("orchestrator: filter drivers: %w", err)
+		return nil, err
 	}
-
-	seen := make(map[string]struct{})
-	for line := range strings.SplitSeq(out, "\n") {
-		line = strings.TrimSpace(line)
-		if line == "" {
-			continue
-		}
-		key := strings.Fields(line)[0]
-		parts := strings.Split(key, ".")
-		if len(parts) < 3 {
-			continue
-		}
-		name := strings.Join(parts[1:len(parts)-1], ".")
-		if name == "" {
-			continue
-		}
-		seen[name] = struct{}{}
-	}
-
-	names := make([]string, 0, len(seen))
-	for name := range seen {
-		names = append(names, name)
-	}
-	sort.Strings(names)
-	return names, nil
+	return cfg.drivers, nil
 }
-
-// filterDriverConfigPattern matches a filter driver's clean, smudge, or
-// process command setting, whatever name the driver is given.
-const filterDriverConfigPattern = `^filter\..*\.(clean|smudge|process)$`
 
 // gitSigningProgramKeys are the four config keys section 7.2's grammar
 // governs as "a bare name or an absolute path, no argument". Each is read
@@ -888,52 +929,32 @@ const defaultKeyCommandAllowed = "ssh-add -L"
 // closes off anyway rather than reason about case by case.
 var signingProgramForbidden = regexp.MustCompile(`[ \t;|&$` + "`" + `"'()<>\\*?~]`)
 
-// checkSigningPrograms reads the five signing-program keys with
-// "git -C dir config --get <key>" and refuses (PKG8-PLAN.md section 7.2)
-// when a set value does not match its closed grammar, or -- for the four
-// program keys -- when it resolves to a path inside a root a build can
-// write. A key that is not set at all passes with nothing to check.
-func (o *Orchestrator) checkSigningPrograms(ctx context.Context, dir string) error {
+// checkSigningPrograms checks signing (readGitConfig's canonical-key map)
+// against section 7.2's grammar: a set value that does not match its
+// closed grammar, or -- for the four program keys -- that resolves to a
+// path inside a root a build can write, is refused. A key that is not set
+// at all passes with nothing to check. It runs no git.
+func (o *Orchestrator) checkSigningPrograms(signing map[string]string) error {
 	roots, err := o.signingProgramDisallowedRoots()
 	if err != nil {
 		return err
 	}
 
 	for _, key := range gitSigningProgramKeys {
-		value, ok, readErr := o.gitConfigGet(ctx, dir, key)
-		if readErr != nil {
-			return fmt.Errorf("orchestrator: read git config %s: %w", key, readErr)
-		}
+		value, ok := signing[key]
 		if !ok {
 			continue
 		}
-		if validateErr := validateSigningProgramValue(key, value, roots); validateErr != nil {
-			return validateErr
+		if err := validateSigningProgramValue(key, value, roots); err != nil {
+			return err
 		}
 	}
 
-	value, ok, err := o.gitConfigGet(ctx, dir, gitDefaultKeyCommandKey)
-	if err != nil {
-		return fmt.Errorf("orchestrator: read git config %s: %w", gitDefaultKeyCommandKey, err)
-	}
-	if ok && value != defaultKeyCommandAllowed {
+	if value, ok := signing[strings.ToLower(gitDefaultKeyCommandKey)]; ok && value != defaultKeyCommandAllowed {
 		return fmt.Errorf("orchestrator: git signing key %s is not an allowed value", gitDefaultKeyCommandKey)
 	}
 
 	return nil
-}
-
-// gitConfigGet reads one scalar git config key in dir, distinguishing "not
-// set" (git config --get exits 1) from a real error.
-func (o *Orchestrator) gitConfigGet(ctx context.Context, dir, key string) (value string, ok bool, err error) {
-	out, err := o.run.Output(ctx, dir, "git", "config", "--get", key)
-	if err != nil {
-		if isExitCode1(err) {
-			return "", false, nil
-		}
-		return "", false, err
-	}
-	return strings.TrimSpace(out), true, nil
 }
 
 // signingProgramDisallowedRoots returns the absolute roots a git signing
