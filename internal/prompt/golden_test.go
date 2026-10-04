@@ -201,6 +201,25 @@ func goldenCases() []goldenCase {
 			},
 		},
 		{
+			name: "merge-first",
+			in: func(t *testing.T) Input {
+				t.Helper()
+				jobPrompt := readAsset(t, "prompts/merge.md")
+				ticket := "Title: Add a health check\n\n" +
+					"Body: Add a ping endpoint so uptime monitoring has something to hit."
+				plan := healthCheckPlan
+				conflicts := "internal/health/ping.go"
+				baseLog := "1111111111111111111111111111111111111111\nReturn 204 from ping (#61)\n"
+				in, err := ForMerge(jobPrompt, "go test ./...", "make lint", ticket, plan, conflicts, baseLog, nil)
+				if err != nil {
+					t.Fatalf("ForMerge: %v", err)
+				}
+				in.Schemas = schemasFor(t, response.JobBuild,
+					response.OutcomeOk, response.OutcomeQuestion, response.OutcomeError)
+				return in
+			},
+		},
+		{
 			name: "perimeter",
 			in: func(t *testing.T) Input {
 				t.Helper()

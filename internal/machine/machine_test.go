@@ -19,6 +19,9 @@ const (
 	// prompts_test.go both repeat them.
 	planningFeaturePromptPath = "prompts/planning-feature.md"
 	planningBugPromptPath     = "prompts/planning-bug.md"
+	// modelOpus is the real machine.toml's "opus" model name (goconst):
+	// planning, review, and merge all use it.
+	modelOpus = "opus"
 )
 
 func TestLoad_RealMachineTOMLLoadsClean(t *testing.T) {
@@ -32,8 +35,8 @@ func TestLoad_RealMachineTOMLLoadsClean(t *testing.T) {
 	if m.Version != 1 {
 		t.Errorf("Version = %d, want 1", m.Version)
 	}
-	if len(m.Jobs) != 9 {
-		t.Errorf("len(Jobs) = %d, want 9", len(m.Jobs))
+	if len(m.Jobs) != 10 {
+		t.Errorf("len(Jobs) = %d, want 10", len(m.Jobs))
 	}
 
 	// classify's prompt is a bare string.
@@ -46,10 +49,10 @@ func TestLoad_RealMachineTOMLLoadsClean(t *testing.T) {
 	if planning.Prompt.Feature != planningFeaturePromptPath || planning.Prompt.Bug != planningBugPromptPath {
 		t.Errorf("planning.Prompt = %+v, want the feature/bug pair", planning.Prompt)
 	}
-	if planning.Model != "opus" {
+	if planning.Model != modelOpus {
 		t.Errorf("planning.Model = %q, want opus", planning.Model)
 	}
-	if got := m.Jobs["review"].Model; got != "opus" {
+	if got := m.Jobs["review"].Model; got != modelOpus {
 		t.Errorf("review.Model = %q, want opus", got)
 	}
 
@@ -92,6 +95,37 @@ func TestLoad_RealMachineTOMLLoadsClean(t *testing.T) {
 	}
 	if len(respond.Style) != 1 || respond.Style[0] != "prompts/style/prose.md" {
 		t.Errorf("respond.Style = %v, want [prompts/style/prose.md]", respond.Style)
+	}
+
+	// merge resolves a conflicting base branch merge (#64's ticket);
+	// opus judgement, build's sandbox, and its own loop limits.
+	merge := m.Jobs["merge"]
+	if merge.Model != modelOpus {
+		t.Errorf("merge.Model = %q, want opus", merge.Model)
+	}
+	if merge.Runtime != "claude" {
+		t.Errorf("merge.Runtime = %q, want claude", merge.Runtime)
+	}
+	if merge.Prompt.Single != "prompts/merge.md" {
+		t.Errorf("merge.Prompt.Single = %q, want prompts/merge.md", merge.Prompt.Single)
+	}
+	if merge.TimeoutMinutes != 45 {
+		t.Errorf("merge.TimeoutMinutes = %d, want 45", merge.TimeoutMinutes)
+	}
+	if merge.MaxResumes != 6 {
+		t.Errorf("merge.MaxResumes = %d, want 6", merge.MaxResumes)
+	}
+	if merge.MaxLoops != 2 {
+		t.Errorf("merge.MaxLoops = %d, want 2", merge.MaxLoops)
+	}
+	if merge.CheckLoops != 5 {
+		t.Errorf("merge.CheckLoops = %d, want 5", merge.CheckLoops)
+	}
+	if len(merge.Outcomes) != 1 || merge.Outcomes[0] != "ok" {
+		t.Errorf("merge.Outcomes = %v, want [ok]", merge.Outcomes)
+	}
+	if merge.Sandbox != testJobNameBuild {
+		t.Errorf("merge.Sandbox = %q, want build", merge.Sandbox)
 	}
 }
 
