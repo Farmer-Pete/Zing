@@ -106,7 +106,45 @@ templ runRail(run RunRail) {
 			<dt>Branch</dt>
 			<dd>{ run.Branch }</dd>
 		</dl>
+		@runList(run.Runs)
 	</section>
+}
+
+// runList renders every run of the open ticket, newest first (#43 split):
+// run id, job, runtime, model, outcome, agent time, an "interrupted" pill
+// when set, and -- only when the run kept that evidence -- links to its
+// final message and stderr, plus the transcript path as plain text. An
+// empty rows shows "No runs yet." rather than an empty list.
+templ runList(rows []RunRow) {
+	<h4>Runs</h4>
+	if len(rows) == 0 {
+		<p class="empty">No runs yet.</p>
+	} else {
+		<ol class="run-list">
+			for _, row := range rows {
+				<li class="run-row" data-run-id={ strconv.FormatInt(row.ID, 10) }>
+					<span class="run-id">run { strconv.FormatInt(row.ID, 10) }</span>
+					<span class="run-job">{ row.Job }</span>
+					<span class="run-runtime">{ row.Runtime }</span>
+					<span class="run-model">{ row.Model }</span>
+					<span class="run-outcome">{ row.Outcome }</span>
+					if row.Interrupted {
+						<span class="pill pill-interrupted">interrupted</span>
+					}
+					<span class="run-time">{ row.AgentTime }</span>
+					if row.FinalURL != "" {
+						<a class="run-final" href={ templ.SafeURL(row.FinalURL) } target="_blank" rel="noopener">final message</a>
+					}
+					if row.StderrURL != "" {
+						<a class="run-stderr" href={ templ.SafeURL(row.StderrURL) } target="_blank" rel="noopener">stderr</a>
+					}
+					if row.Transcript != "" {
+						<span class="run-transcript">transcript { row.Transcript }</span>
+					}
+				</li>
+			}
+		</ol>
+	}
 }
 
 // logLevelOptions is POST /loglevel's closed set (design section 6.12,

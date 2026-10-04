@@ -288,6 +288,10 @@ func (c *console) buildRunRail(ctx context.Context, ticketID int64) (templates.R
 	if err != nil {
 		return templates.RunRail{}, fmt.Errorf("console: rail: runs for ticket %d: %w", ticketID, err)
 	}
+	evidence, err := c.store.RunEvidenceForTicket(ctx, ticketID)
+	if err != nil {
+		return templates.RunRail{}, fmt.Errorf("console: rail: run evidence for ticket %d: %w", ticketID, err)
+	}
 	var newestRun store.Run
 	haveRun := false
 	for _, r := range runs {
@@ -301,6 +305,7 @@ func (c *console) buildRunRail(ctx context.Context, ticketID int64) (templates.R
 		Attempts: strconv.Itoa(newestSession.Resumes + 1),
 		Worktree: dash, // arrives with Package 5 (design section 6.11)
 		Branch:   dash, // arrives with Package 5 (design section 6.11)
+		Runs:     runRows(sessions, runs, evidence),
 	}
 	if !haveRun {
 		run.Model, run.AgentTime = dash, dash
@@ -322,6 +327,60 @@ func (c *console) buildRunRail(ctx context.Context, ticketID int64) (templates.R
 		run.AgentTime = dash
 	}
 	return run, nil
+}
+
+// runRows turns every run of a ticket into one rail row, newest (greatest
+// id) first (#43 split): RunsForTicket already orders runs id-ascending
+// (design section 7.2), so this walks it back to front. Job and Runtime
+// come from the run's own session ("-" when that session is missing from
+// sessions, which should not happen in practice since every run belongs to
+// a session its own ticket still carries). FinalURL and StderrURL are set
+// only when evidence names that run with a non-nil field; Transcript is the
+// stored path or "".
+func runRows(sessions []store.Session, runs []store.Run, evidence map[int64]store.RunEvidence) []templates.RunRow {
+	sessionByID := make(map[int64]store.Session, len(sessions))
+	for _, sess := range sessions {
+		sessionByID[sess.ID] = sess
+	}
+
+	rows := make([]templates.RunRow, len(runs))
+	for i, r := range runs {
+		row := templates.RunRow{
+			ID:          r.ID,
+			Job:         dash,
+			Runtime:     dash,
+			Model:       dash,
+			Outcome:     "running",
+			Interrupted: r.Interrupted,
+			AgentTime:   dash,
+		}
+		if sess, ok := sessionByID[r.SessionID]; ok {
+			row.Job = sess.Job
+			row.Runtime = sess.Runtime
+		}
+		if r.Model != nil {
+			row.Model = *r.Model
+		}
+		if r.Outcome != nil {
+			row.Outcome = *r.Outcome
+		}
+		if r.AgentSeconds != nil {
+			row.AgentTime = (time.Duration(*r.AgentSeconds) * time.Second).String()
+		}
+		if ev, ok := evidence[r.ID]; ok {
+			if ev.FinalMessage != nil {
+				row.FinalURL = fmt.Sprintf("/runs/%d/final", r.ID)
+			}
+			if ev.StderrPath != nil {
+				row.StderrURL = fmt.Sprintf("/runs/%d/stderr", r.ID)
+			}
+			if ev.TranscriptPath != nil {
+				row.Transcript = *ev.TranscriptPath
+			}
+		}
+		rows[len(runs)-1-i] = row
+	}
+	return rows
 }
 
 // logLineTimeFormat is the Log rail's own compact per-line timestamp,

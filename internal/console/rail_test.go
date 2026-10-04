@@ -365,6 +365,318 @@ func TestRail_RunInterruptedShowsLabel(t *testing.T) {
 	}
 }
 
+// ---- Run rail's run list (#43 split, run evidence) ---------------------
+
+// advanceTicketWithRuns is advanceTicketToBuilding generalized to any job,
+// runtime and set of runs: it claims ticketID, then commits one transition
+// to next with a brand-new session (job, runtime) and every entry of runs
+// inserted under it, through the same store.CommitHandlerResult seam
+// commit.go's own producers use. Calling it again on the same ticket
+// creates a second session (store.upsertSessionTx inserts whenever
+// SessionUpsert.ID is nil), which is the point: TestRail_RunListShowsEveryRun
+// needs two sessions with different jobs and runtimes.
+func advanceTicketWithRuns(t *testing.T, s *store.Store, ticketID int64, next, job, runtime string, runs []store.Run) {
+	t.Helper()
+
+	owner := fmt.Sprintf("rail-test-owner-%s-%s", job, runtime)
+	expires := time.Now().Add(10 * time.Minute).UTC().Truncate(time.Second)
+	claimed, err := s.Claim(t.Context(), ticketID, owner, expires)
+	if err != nil {
+		t.Fatalf("Claim: %v", err)
+	}
+	if !claimed {
+		t.Fatal("Claim: got false, want true")
+	}
+
+	waiting := testWaitingGate
+	applied, err := s.CommitHandlerResult(t.Context(), store.HandlerCommit{
+		TicketID: ticketID, Owner: owner, Expires: expires,
+		Next: next, Reason: "rail test advance with runs",
+		Waiting: &waiting,
+		Session: &store.SessionUpsert{Job: job, Runtime: runtime},
+		Runs:    runs,
+	})
+	if err != nil {
+		t.Fatalf("CommitHandlerResult: %v", err)
+	}
+	if !applied {
+		t.Fatal("CommitHandlerResult: applied = false, want true")
+	}
+}
+
+// runRowHTML returns the <li class="run-row" data-run-id="runID">...</li>
+// element the rail's run list rendered for runID, failing the test if the
+// rail holds none.
+func runRowHTML(t *testing.T, rail string, runID int64) string {
+	t.Helper()
+	pattern := regexp.MustCompile(`(?s)<li class="run-row" data-run-id="` + strconv.FormatInt(runID, 10) + `">.*?</li>`)
+	row := pattern.FindString(rail)
+	if row == "" {
+		t.Fatalf("rail missing a run-row for run %d; got:\n%s", runID, rail)
+	}
+	return row
+}
+
+// runRowHref returns the href attribute of the <a class="class"> element
+// inside row, failing the test if row holds none.
+func runRowHref(t *testing.T, row, class string) string {
+	t.Helper()
+	pattern := regexp.MustCompile(`class="` + class + `" href="([^"]+)"`)
+	m := pattern.FindStringSubmatch(row)
+	if m == nil {
+		t.Fatalf("row missing an href for class %q; got:\n%s", class, row)
+	}
+	return m[1]
+}
+
+// TestRail_RunEvidenceLinksServeStoredText is the design's demo test: it
+// stores a run's final message and stderr path through
+// Store.RecordRunEvidence, opens the ticket's thread stream, reads the run
+// row's two hrefs out of the rail, and fetches both, proving that stored
+// evidence reaches the owner through the rail rather than just the store.
+func TestRail_RunEvidenceLinksServeStoredText(t *testing.T) {
+	t.Parallel()
+	s := newConsoleTestStore(t)
+	ticketID := seedTicket(t, s, "fake#1", "Add a hello endpoint")
+	runID := oneSeededRun(t, s, ticketID, "sonnet")
+
+	const stderrText = "boom: something failed\n"
+	stderrPath := writeRunStderrFile(t, s, runID, stderrText)
+	final := "the agent said this"
+	if err := s.RecordRunEvidence(t.Context(), runID, store.RunEvidence{FinalMessage: &final, StderrPath: &stderrPath}); err != nil {
+		t.Fatalf("RecordRunEvidence: %v", err)
+	}
+
+	srv := newTestServer(t, s, bus.New(), nil, newTestLogHandler(t))
+	resp, r, cancel := openStream(t, srv.URL, "thread", ticketID, 0)
+	defer cancel()
+	defer func() { _ = resp.Body.Close() }()
+	_, _, rail, _ := readInitialFrames(t, r)
+
+	row := runRowHTML(t, rail, runID)
+	finalHref := runRowHref(t, row, "run-final")
+	stderrHref := runRowHref(t, row, "run-stderr")
+
+	finalResp, err := http.Get(srv.URL + finalHref) //nolint:noctx // a bare GET on a test server needs no deadline
+	if err != nil {
+		t.Fatalf("GET %s: %v", finalHref, err)
+	}
+	defer func() { _ = finalResp.Body.Close() }()
+	if finalResp.StatusCode != http.StatusOK {
+		t.Fatalf("GET %s status = %d, want 200", finalHref, finalResp.StatusCode)
+	}
+	finalBody, err := io.ReadAll(finalResp.Body)
+	if err != nil {
+		t.Fatalf("read final body: %v", err)
+	}
+	if string(finalBody) != final {
+		t.Errorf("final body = %q, want %q", finalBody, final)
+	}
+
+	stderrResp, err := http.Get(srv.URL + stderrHref) //nolint:noctx // a bare GET on a test server needs no deadline
+	if err != nil {
+		t.Fatalf("GET %s: %v", stderrHref, err)
+	}
+	defer func() { _ = stderrResp.Body.Close() }()
+	if stderrResp.StatusCode != http.StatusOK {
+		t.Fatalf("GET %s status = %d, want 200", stderrHref, stderrResp.StatusCode)
+	}
+	stderrBody, err := io.ReadAll(stderrResp.Body)
+	if err != nil {
+		t.Fatalf("read stderr body: %v", err)
+	}
+	if string(stderrBody) != stderrText {
+		t.Errorf("stderr body = %q, want %q", stderrBody, stderrText)
+	}
+}
+
+// TestRail_RunListShowsEveryRun proves the rail's run list shows every run
+// of the ticket across every session, newest first, each with its own
+// session's job and runtime and the run's own model -- and that only the
+// run carrying evidence gets final/stderr links.
+func TestRail_RunListShowsEveryRun(t *testing.T) {
+	t.Parallel()
+	s := newConsoleTestStore(t)
+	ticketID := seedTicket(t, s, "fake#1", "Add a hello endpoint")
+
+	// planningModel deliberately avoids the literal "sonnet": that string
+	// already has two other non-call occurrences in this package
+	// (TestBuildLogRail_TiesKeepRunAppendOrder's own model var, and
+	// resume_e2e_test.go's model-alias map), and goconst (make lint) flags
+	// a third.
+	planningModel, judgeModel1, judgeModel2 := "sonnet-plan", "gpt-5", "gpt-5-mini"
+	outcomeOK := "ok"
+	secs5, secs7, secs9 := 5, 7, 9
+	advanceTicketWithRuns(t, s, ticketID, string(response.TicketStatePlanning), "planning", "claude", []store.Run{
+		{Turn: 0, Model: &planningModel, Outcome: &outcomeOK, AgentSeconds: &secs5},
+	})
+	advanceTicketWithRuns(t, s, ticketID, string(response.TicketStateJudging), "judge", "codex", []store.Run{
+		{Turn: 0, Model: &judgeModel1, Outcome: &outcomeOK, AgentSeconds: &secs7},
+		{Turn: 1, Model: &judgeModel2, Outcome: &outcomeOK, AgentSeconds: &secs9},
+	})
+
+	runs, err := s.RunsForTicket(t.Context(), ticketID)
+	if err != nil {
+		t.Fatalf("RunsForTicket: %v", err)
+	}
+	if len(runs) != 3 {
+		t.Fatalf("RunsForTicket returned %d runs, want 3", len(runs))
+	}
+	planningRun, judgeRun1, judgeRun2 := runs[0], runs[1], runs[2]
+
+	final := "judge's final word"
+	if err := s.RecordRunEvidence(t.Context(), judgeRun2.ID, store.RunEvidence{FinalMessage: &final}); err != nil {
+		t.Fatalf("RecordRunEvidence: %v", err)
+	}
+	stderrPath := writeRunStderrFile(t, s, judgeRun2.ID, "judge stderr")
+	if err := s.RecordRunEvidence(t.Context(), judgeRun2.ID, store.RunEvidence{FinalMessage: &final, StderrPath: &stderrPath}); err != nil {
+		t.Fatalf("RecordRunEvidence: %v", err)
+	}
+
+	srv := newTestServer(t, s, bus.New(), nil, newTestLogHandler(t))
+	resp, r, cancel := openStream(t, srv.URL, "thread", ticketID, 0)
+	defer cancel()
+	defer func() { _ = resp.Body.Close() }()
+	_, _, rail, _ := readInitialFrames(t, r)
+
+	ids := regexp.MustCompile(`data-run-id="(\d+)"`).FindAllStringSubmatch(rail, -1)
+	if len(ids) != 3 {
+		t.Fatalf("rail has %d run-row elements, want 3; got:\n%s", len(ids), rail)
+	}
+	wantOrder := []int64{judgeRun2.ID, judgeRun1.ID, planningRun.ID}
+	for i, want := range wantOrder {
+		got, convErr := strconv.ParseInt(ids[i][1], 10, 64)
+		if convErr != nil {
+			t.Fatalf("parse run id %q: %v", ids[i][1], convErr)
+		}
+		if got != want {
+			t.Errorf("run-row[%d] id = %d, want %d (newest first)", i, got, want)
+		}
+	}
+
+	planningRow := runRowHTML(t, rail, planningRun.ID)
+	for _, want := range []string{
+		`<span class="run-job">planning</span>`,
+		`<span class="run-runtime">claude</span>`,
+		`<span class="run-model">sonnet-plan</span>`,
+	} {
+		if !strings.Contains(planningRow, want) {
+			t.Errorf("planning run row missing %q; got:\n%s", want, planningRow)
+		}
+	}
+	if strings.Contains(planningRow, `href="/runs/`) {
+		t.Errorf("planning run row should carry no evidence links; got:\n%s", planningRow)
+	}
+
+	judgeRow2 := runRowHTML(t, rail, judgeRun2.ID)
+	for _, want := range []string{
+		`<span class="run-job">judge</span>`,
+		`<span class="run-runtime">codex</span>`,
+		`<span class="run-model">gpt-5-mini</span>`,
+		fmt.Sprintf(`href="/runs/%d/final"`, judgeRun2.ID),
+		fmt.Sprintf(`href="/runs/%d/stderr"`, judgeRun2.ID),
+	} {
+		if !strings.Contains(judgeRow2, want) {
+			t.Errorf("newest judge run row missing %q; got:\n%s", want, judgeRow2)
+		}
+	}
+
+	judgeRow1 := runRowHTML(t, rail, judgeRun1.ID)
+	if strings.Contains(judgeRow1, `href="/runs/`) {
+		t.Errorf("older judge run row should carry no evidence links; got:\n%s", judgeRow1)
+	}
+}
+
+// TestRail_RunListShowsTranscriptPath proves a run whose transcript_path is
+// set renders that path as plain text, with no anchor around it: design's
+// nongoal "Serving or rendering transcripts" -- transcripts live under
+// ~/.claude/projects, outside the data directory.
+func TestRail_RunListShowsTranscriptPath(t *testing.T) {
+	t.Parallel()
+	s := newConsoleTestStore(t)
+	ticketID := seedTicket(t, s, "fake#1", "Add a hello endpoint")
+	runID := oneSeededRun(t, s, ticketID, "sonnet")
+
+	const transcript = "/home/owner/.claude/projects/-work-zing/abc123.jsonl"
+	if err := s.RecordRunEvidence(t.Context(), runID, store.RunEvidence{TranscriptPath: new(transcript)}); err != nil {
+		t.Fatalf("RecordRunEvidence: %v", err)
+	}
+
+	srv := newTestServer(t, s, bus.New(), nil, newTestLogHandler(t))
+	resp, r, cancel := openStream(t, srv.URL, "thread", ticketID, 0)
+	defer cancel()
+	defer func() { _ = resp.Body.Close() }()
+	_, _, rail, _ := readInitialFrames(t, r)
+
+	row := runRowHTML(t, rail, runID)
+	if !strings.Contains(row, `class="run-transcript"`) || !strings.Contains(row, transcript) {
+		t.Errorf("run row missing the transcript path as text; got:\n%s", row)
+	}
+	if strings.Contains(row, "<a ") {
+		t.Errorf("run row with only a transcript path should carry no anchor; got:\n%s", row)
+	}
+}
+
+// TestRail_RunListShowsRunningAndInterrupted proves a run that was reserved
+// but never terminalized renders outcome "running" (runs.outcome is NULL),
+// and that once InterruptRuns terminalizes it (#45: outcome becomes "error"
+// and interrupted becomes true), the run list's own row shows the
+// interrupted pill too, not just the old single-run Model field.
+func TestRail_RunListShowsRunningAndInterrupted(t *testing.T) {
+	t.Parallel()
+	s := newConsoleTestStore(t)
+	ticketID := seedTicket(t, s, "fake#1", "Add a hello endpoint")
+
+	const owner = "rail-running-owner"
+	expires := time.Now().Add(10 * time.Minute).UTC().Truncate(time.Second)
+	claimed, err := s.Claim(t.Context(), ticketID, owner, expires)
+	if err != nil || !claimed {
+		t.Fatalf("Claim: claimed=%v err=%v", claimed, err)
+	}
+	reserved, err := s.Reserve(t.Context(), ticketID, owner, expires,
+		store.SessionUpsert{Job: string(response.TicketStateBuilding), Runtime: testRuntimeFake},
+		store.RunSeed{Model: "running-model"},
+	)
+	if err != nil {
+		t.Fatalf("Reserve: %v", err)
+	}
+
+	srv := newTestServer(t, s, bus.New(), nil, newTestLogHandler(t))
+
+	func() {
+		resp, r, cancel := openStream(t, srv.URL, "thread", ticketID, 0)
+		defer cancel()
+		defer func() { _ = resp.Body.Close() }()
+		_, _, rail, _ := readInitialFrames(t, r)
+
+		row := runRowHTML(t, rail, reserved.RunID)
+		if !strings.Contains(row, `<span class="run-outcome">running</span>`) {
+			t.Errorf("run row missing outcome running; got:\n%s", row)
+		}
+		if strings.Contains(row, "pill-interrupted") {
+			t.Errorf("run row should not show interrupted yet; got:\n%s", row)
+		}
+	}()
+
+	applied, err := s.InterruptRuns(t.Context(), ticketID, owner, expires)
+	if err != nil {
+		t.Fatalf("InterruptRuns: %v", err)
+	}
+	if !applied {
+		t.Fatal("InterruptRuns: applied = false, want true")
+	}
+
+	resp, r, cancel := openStream(t, srv.URL, "thread", ticketID, 0)
+	defer cancel()
+	defer func() { _ = resp.Body.Close() }()
+	_, _, rail, _ := readInitialFrames(t, r)
+
+	row := runRowHTML(t, rail, reserved.RunID)
+	if !strings.Contains(row, `<span class="pill pill-interrupted">interrupted</span>`) {
+		t.Errorf("run row missing the interrupted pill; got:\n%s", row)
+	}
+}
+
 // logLine calls console.Handler.Handle directly with a hand-built
 // slog.Record so the entry lands at an exact, caller-chosen Time -- the
 // equal-Time collision TestBuildLogRail_TiesKeepRunAppendOrder needs, which
