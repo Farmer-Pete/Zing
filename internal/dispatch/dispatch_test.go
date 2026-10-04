@@ -2407,13 +2407,8 @@ func TestRun_ReturnsAfterTheCurrentTickWhenDraining(t *testing.T) {
 	done := make(chan error, 1)
 	go func() { done <- d.Run(ctx) }()
 
-	select {
-	case err := <-done:
-		if err != nil {
-			t.Errorf("Run() = %v, want nil on drain", err)
-		}
-	case <-time.After(2 * time.Second):
-		t.Fatal("Run did not return after the drain flag was set")
+	if err := waitFor(t, done, "Run to return after the drain flag was set"); err != nil {
+		t.Errorf("Run() = %v, want nil on drain", err)
 	}
 }
 
@@ -2441,13 +2436,8 @@ func TestRun_NotifyDrainReturnsPromptly(t *testing.T) {
 	}
 	d.NotifyDrain()
 
-	select {
-	case err := <-done:
-		if err != nil {
-			t.Errorf("Run() = %v, want nil on drain", err)
-		}
-	case <-time.After(2 * time.Second):
-		t.Fatal("Run did not return promptly after NotifyDrain (want well under the 1h tick interval)")
+	if err := waitFor(t, done, "Run to return promptly after NotifyDrain (want well under the 1h tick interval)"); err != nil {
+		t.Errorf("Run() = %v, want nil on drain", err)
 	}
 }
 
@@ -4365,24 +4355,15 @@ func TestTick_ConcurrentDriveRefused(t *testing.T) {
 	tickErrCh := make(chan error, 1)
 	go func() { tickErrCh <- d.Tick(t.Context()) }()
 
-	select {
-	case <-started:
-	case <-time.After(5 * time.Second):
-		t.Fatal("handler never started")
-	}
+	waitFor(t, started, "handler to start")
 
 	if err := d.Tick(t.Context()); !errors.Is(err, dispatch.ErrConcurrentDrive) {
 		t.Fatalf("second Tick while the first is in flight: err = %v, want ErrConcurrentDrive", err)
 	}
 
 	close(release)
-	select {
-	case err := <-tickErrCh:
-		if err != nil {
-			t.Fatalf("first Tick: %v", err)
-		}
-	case <-time.After(5 * time.Second):
-		t.Fatal("first Tick never returned")
+	if err := waitFor(t, tickErrCh, "first Tick to return"); err != nil {
+		t.Fatalf("first Tick: %v", err)
 	}
 
 	final := getTicket(t, s, ticketID)
@@ -4415,22 +4396,14 @@ func TestRun_RunsTwoTicketsAtOnce(t *testing.T) {
 	go func() { runErrCh <- d.Run(ctx) }()
 
 	seen := make(map[int64]bool)
-	timeout := time.After(5 * time.Second)
 	for len(seen) < 2 {
-		select {
-		case id := <-started:
-			seen[id] = true
-		case <-timeout:
-			t.Fatalf("only %d of 2 handlers started within the timeout", len(seen))
-		}
+		seen[waitFor(t, started, "both handlers to start")] = true
 	}
 
 	close(release)
 	cancel()
-	select {
-	case <-runErrCh:
-	case <-time.After(5 * time.Second):
-		t.Fatal("Run never returned")
+	if err := waitFor(t, runErrCh, "Run to return"); !errors.Is(err, context.Canceled) {
+		t.Errorf("Run() = %v, want context.Canceled", err)
 	}
 }
 
@@ -4456,11 +4429,7 @@ func TestRun_DrainWaitsForInflight(t *testing.T) {
 	runErrCh := make(chan error, 1)
 	go func() { runErrCh <- d.Run(ctx) }()
 
-	select {
-	case <-started:
-	case <-time.After(5 * time.Second):
-		t.Fatal("handler never started")
-	}
+	waitFor(t, started, "handler to start")
 
 	if err := s.SetDraining(t.Context(), true); err != nil {
 		t.Fatalf("SetDraining: %v", err)
@@ -4475,13 +4444,8 @@ func TestRun_DrainWaitsForInflight(t *testing.T) {
 	}
 
 	close(release)
-	select {
-	case err := <-runErrCh:
-		if err != nil {
-			t.Fatalf("Run: %v, want nil (a graceful drain is not an error)", err)
-		}
-	case <-time.After(5 * time.Second):
-		t.Fatal("Run never returned after the worker was released")
+	if err := waitFor(t, runErrCh, "Run to return after the worker was released"); err != nil {
+		t.Fatalf("Run: %v, want nil (a graceful drain is not an error)", err)
 	}
 
 	if got := getTicket(t, s, ticketID).State; got != testStatePlanning {
@@ -4510,20 +4474,11 @@ func TestRun_ForceCancelInterruptsInflight(t *testing.T) {
 	runErrCh := make(chan error, 1)
 	go func() { runErrCh <- d.Run(ctx) }()
 
-	select {
-	case <-started:
-	case <-time.After(5 * time.Second):
-		t.Fatal("handler never started")
-	}
+	waitFor(t, started, "handler to start")
 
 	cancel()
-	select {
-	case err := <-runErrCh:
-		if !errors.Is(err, context.Canceled) {
-			t.Fatalf("Run: err = %v, want context.Canceled", err)
-		}
-	case <-time.After(5 * time.Second):
-		t.Fatal("Run never returned after the force-cancel")
+	if err := waitFor(t, runErrCh, "Run to return after the force-cancel"); !errors.Is(err, context.Canceled) {
+		t.Fatalf("Run: err = %v, want context.Canceled", err)
 	}
 
 	final := getTicket(t, s, ticketID)
@@ -4594,12 +4549,7 @@ func TestRun_FillErrorRaisesAlerts(t *testing.T) {
 	runErrCh := make(chan error, 1)
 	go func() { runErrCh <- d.Run(ctx) }()
 
-	var runErr error
-	select {
-	case runErr = <-runErrCh:
-	case <-time.After(5 * time.Second):
-		t.Fatal("Run never returned")
-	}
+	runErr := waitFor(t, runErrCh, "Run to return")
 	if runErr == nil {
 		t.Fatal("Run against a dropped tickets table: want an error, got nil")
 	}
@@ -4646,31 +4596,15 @@ func TestRun_FailClosedLetsOthersFinish(t *testing.T) {
 	runErrCh := make(chan error, 1)
 	go func() { runErrCh <- d.Run(ctx) }()
 
-	select {
-	case got := <-started:
-		if got != bID {
-			t.Fatalf("started ticket = %d, want %d (B)", got, bID)
-		}
-	case <-time.After(5 * time.Second):
-		t.Fatal("B never started")
+	if got := waitFor(t, started, "B to start"); got != bID {
+		t.Fatalf("started ticket = %d, want %d (B)", got, bID)
 	}
 
-	deadline := time.Now().Add(5 * time.Second)
-	for !dispatch.IsStoppedForTest(d) {
-		if time.Now().After(deadline) {
-			t.Fatal("dispatcher never stopped after A's fail-closed commit")
-		}
-		time.Sleep(time.Millisecond)
-	}
+	waitUntil(t, func() bool { return dispatch.IsStoppedForTest(d) }, "dispatcher to stop after A's fail-closed commit")
 
 	close(release)
 
-	var runErr error
-	select {
-	case runErr = <-runErrCh:
-	case <-time.After(5 * time.Second):
-		t.Fatal("Run never returned")
-	}
+	runErr := waitFor(t, runErrCh, "Run to return")
 	if !errors.Is(runErr, dispatch.ErrFailClosed) {
 		t.Fatalf("Run err = %v, want errors.Is(err, dispatch.ErrFailClosed)", runErr)
 	}
@@ -4946,11 +4880,7 @@ func TestRun_DrainRacingWorkerErrorStillAlerts(t *testing.T) {
 	runErrCh := make(chan error, 1)
 	go func() { runErrCh <- d.Run(ctx) }()
 
-	select {
-	case <-started:
-	case <-time.After(5 * time.Second):
-		t.Fatal("handler never started")
-	}
+	waitFor(t, started, "handler to start")
 
 	if err := s.SetDraining(t.Context(), true); err != nil {
 		t.Fatalf("SetDraining: %v", err)
@@ -4962,12 +4892,7 @@ func TestRun_DrainRacingWorkerErrorStillAlerts(t *testing.T) {
 	close(release)
 	d.NotifyDrain()
 
-	var runErr error
-	select {
-	case runErr = <-runErrCh:
-	case <-time.After(5 * time.Second):
-		t.Fatal("Run never returned")
-	}
+	runErr := waitFor(t, runErrCh, "Run to return")
 	if !errors.Is(runErr, dispatch.ErrFailClosed) {
 		t.Errorf("Run err = %v, want errors.Is(err, dispatch.ErrFailClosed)", runErr)
 	}
