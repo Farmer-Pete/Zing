@@ -24,6 +24,7 @@ var migrationsFS embed.FS
 type Store struct {
 	db      *sql.DB
 	schemas *schemaSet
+	dir     string
 }
 
 // DefaultPath returns the default database path, ~/.zing/zing.db.
@@ -87,8 +88,13 @@ func Open(ctx context.Context, path string) (*Store, error) {
 		return nil, fmt.Errorf("load schemas: %w", err)
 	}
 
-	return &Store{db: db, schemas: schemas}, nil
+	return &Store{db: db, schemas: schemas, dir: filepath.Dir(path)}, nil
 }
+
+// Dir is the directory holding the database file, as given to Open (not
+// symlink-resolved). serve's DATA_DIR is this same directory resolved
+// (cmd/zing/serve.go), so a run's stderr file lives under it.
+func (s *Store) Dir() string { return s.dir }
 
 // coreTables are the eight tables migration 0001_init.sql creates. Selftest
 // asserts each exists (plan section 6.9 step 2).
