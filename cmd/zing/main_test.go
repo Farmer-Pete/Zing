@@ -100,10 +100,23 @@ func TestCommandName(t *testing.T) {
 	}
 }
 
+// TestDispatch_Selftest is the one test that runs the selftest end-to-end
+// flow: dispatch routes "selftest" to runSelftest, which runs every
+// selftest step, section 11's dispatcher-to-done e2e suite (selftestE2E)
+// included, and exits 0 only once every step, schema and template checks
+// and the e2e path through shipping and respond, passes. The path it
+// drives runs all the way through shipping (PKG9-PLAN.md section 19.4 task
+// 8): selftestShipGH scripts a CI failure, a landed ci_log fix, and the
+// push that follows; and through respond (section 19.5 task 10): two
+// seeded review threads, one answered with a disclosed reply and resolved
+// by APPLY, the other collected into a fix request the shared fix driver
+// lands and FIX-REPLIES then closes -- before row 8's ready flip, the
+// merge question, "Merge now", and the real Merge GitHub reports once
+// every check and thread reads clean. On failure, runSelftest writes
+// "selftest: end-to-end: ..." to stderr, which go test shows alongside
+// this test's failure, naming the e2e path rather than a bare non-zero
+// exit.
 func TestDispatch_Selftest(t *testing.T) {
-	if testing.Short() {
-		t.Skip("slow end-to-end flow; runs in the full suite")
-	}
 	t.Parallel()
 
 	if got := dispatch([]string{argv0, cmdSelftest}); got != 0 {

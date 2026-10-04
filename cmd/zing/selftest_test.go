@@ -15,41 +15,6 @@ import (
 	"zing/internal/schemagen"
 )
 
-// TestRunSelftest_ReturnsZeroOnEmptyMachine proves the whole selftest suite
-// passes end to end, schema and template checks through the design section
-// 11 dispatcher-to-done e2e suite (selftestE2E) included: runSelftest
-// prints "selftest: OK" and exits 0.
-func TestRunSelftest_ReturnsZeroOnEmptyMachine(t *testing.T) {
-	if testing.Short() {
-		t.Skip("slow end-to-end flow; runs in the full suite")
-	}
-	t.Parallel()
-	if got := runSelftest(); got != 0 {
-		t.Errorf("runSelftest() = %d, want 0", got)
-	}
-}
-
-// TestSelftestE2E_TicketReachesDoneWithOneQuestionAnswered isolates the
-// section 11 end-to-end suite from the rest of selftest, so a failure here
-// names the e2e path specifically rather than surfacing only as
-// runSelftest's generic non-zero exit. The path it drives runs all the way
-// through shipping (PKG9-PLAN.md section 19.4 task 8): selftestShipGH
-// scripts a CI failure, a landed ci_log fix, and the push that follows; and
-// through respond (section 19.5 task 10): two seeded review threads, one
-// answered with a disclosed reply and resolved by APPLY, the other
-// collected into a fix request the shared fix driver lands and FIX-REPLIES
-// then closes -- before row 8's ready flip, the merge question, "Merge
-// now", and the real Merge GitHub reports once every check and thread
-// reads clean, verified by verifySelftestShipCILogFixedThenMerged,
-// verifySelftestRespondAnsweredThenReady, and
-// verifySelftestRespondDisclosedReply.
-func TestSelftestE2E_TicketReachesDoneWithOneQuestionAnswered(t *testing.T) {
-	t.Parallel()
-	if err := selftestE2E(t.Context()); err != nil {
-		t.Errorf("selftestE2E() = %v, want nil", err)
-	}
-}
-
 // TestSelftestShipThreadTIDsMatchFixture proves selftestShipReplyThreadID
 // and selftestShipFixThreadID (cmd/zing/selftest.go) still hash, by
 // threadrules.go's own tid function (sha256 of the raw id, "t" plus its
