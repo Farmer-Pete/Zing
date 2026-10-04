@@ -603,6 +603,12 @@ func (h shipHandler) poll(ctx context.Context, t store.Ticket, d Deps) (store.Ha
 		return h.pollHeadMismatch(ctx, t, d, proj, wt, pr, local)
 	}
 
+	// GitHub builds no merge for a conflicting pull request, so CI never
+	// starts; waiting on it would wait forever.
+	if pr.MergeableState == mergeableStateDirty {
+		return h.pollConflict(ctx, t, d, proj, wt, pr, number)
+	}
+
 	runs, err := proj.Checks.ListCheckRuns(ctx, proj.Owner, proj.Repo, local)
 	if err != nil {
 		if c, handled := pollReadFailure(t, d, false, err); handled {
