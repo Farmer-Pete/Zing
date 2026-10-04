@@ -71,13 +71,20 @@ func (o *Orchestrator) Push(ctx context.Context, wt Worktree) error {
 	return nil
 }
 
-// unpushedShas returns every commit sha in <default_branch>..<branch>, read
-// with "git log -z --format=%H" and split on NUL, trimmed, with empty
-// fields dropped.
+// unpushedShas returns every commit sha in <base>..<branch>, read with
+// "git log -z --format=%H" and split on NUL, trimmed, with empty fields
+// dropped. base is baseRev: refs/zing/base/<default>, kept current by
+// fetchBase, or the local default branch while that ref does not exist
+// yet.
 func (o *Orchestrator) unpushedShas(ctx context.Context, wt Worktree) ([]string, error) {
-	out, err := o.run.Output(ctx, wt.dir, "git", "log", "-z", "--format=%H", o.proj.DefaultBranch+".."+wt.branch)
+	base, err := o.baseRev(ctx, wt.ticketID())
 	if err != nil {
-		return nil, fmt.Errorf("git log %s..%s: %w", o.proj.DefaultBranch, wt.branch, err)
+		return nil, fmt.Errorf("orchestrator: unpushed shas: %w", err)
+	}
+
+	out, err := o.run.Output(ctx, wt.dir, "git", "log", "-z", "--format=%H", base+".."+wt.branch)
+	if err != nil {
+		return nil, fmt.Errorf("git log %s..%s: %w", base, wt.branch, err)
 	}
 
 	var shas []string

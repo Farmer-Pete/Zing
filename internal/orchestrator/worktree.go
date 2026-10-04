@@ -12,6 +12,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 )
 
@@ -32,6 +33,19 @@ type Worktree struct {
 
 func (w Worktree) Dir() string    { return w.dir }
 func (w Worktree) Branch() string { return w.branch }
+
+// ticketID is the ticket this worktree belongs to: the last element of
+// dir, which PrepareWorktree and EnsureWorktree always build as
+// <local_path>/.zing/wt/<ticket_id>. It is 0 when dir does not end in a
+// number; it only labels log lines and the temporary fetch ref, never a
+// security- or correctness-relevant decision.
+func (w Worktree) ticketID() int64 {
+	id, err := strconv.ParseInt(filepath.Base(w.dir), 10, 64)
+	if err != nil {
+		return 0
+	}
+	return id
+}
 
 var (
 	// slugCollapse replaces every run of characters branchName's slug
@@ -387,6 +401,251 @@ func runSparseCheckoutSet(ctx context.Context, dir string, cone, drivers []strin
 	return string(out), err
 }
 
+// baseRef is the ref Zing cuts ticket branches from and compares them
+// against: origin's default branch as of the newest fetchBase, or local
+// main when no fetch has ever worked. The owner's own refs are never
+// moved.
+func (o *Orchestrator) baseRef() string { return "refs/zing/base/" + o.proj.DefaultBranch }
+
+// fetchSeq makes every temporary fetch ref fetchBase creates unique within
+// this process, even across two fetches started in the same nanosecond.
+var fetchSeq atomic.Uint64
+
+// fetchRefCleanupTimeout bounds removeFetchRef's lock wait and delete.
+const fetchRefCleanupTimeout = 10 * time.Second
+
+// fetchBase fetches the project's default branch from origin into a
+// temporary ref, then advances baseRef to it (updateBaseLocked,
+// advanceBaseLocked), never moving the owner's own local branch or
+// refs/remotes/origin/*. When the fetch itself fails -- offline, no
+// origin, the ref not found upstream -- it falls back to whatever baseRef
+// already holds, seeding it from the local default branch the first time
+// there is nothing to fall back to. fetched reports whether this call's own
+// fetch is what produced sha; it is informational only, since every
+// caller of fetchBase immediately re-reads the ref it needs through
+// baseRev or o.baseRef() rather than trusting this return value.
+func (o *Orchestrator) fetchBase(ctx context.Context, ticketID int64) (sha string, fetched bool, err error) {
+	if err := checkRefFormat(ctx, o.proj.DefaultBranch); err != nil {
+		o.log.Error("fetch base error", "ticket_id", ticketID, "ref", o.baseRef(), "reason", "invalid_default_branch")
+		return "", false, fmt.Errorf("orchestrator: fetch base: default branch %q is not a valid branch name: %w", o.proj.DefaultBranch, err)
+	}
+
+	src := "refs/heads/" + o.proj.DefaultBranch
+	tmp := fmt.Sprintf("refs/zing/fetch/%s/%d-%d-%d", o.proj.DefaultBranch, ticketID, os.Getpid(), fetchSeq.Add(1))
+
+	// Network call, no lock held: it writes only tmp, a ref no other
+	// goroutine or process ever names.
+	out, fetchErr := o.run.Run(ctx, o.proj.LocalPath, "git", "fetch", "--no-tags", "origin", "+"+src+":"+tmp)
+	if fetchErr == nil {
+		// Installed before any lock attempt, so it runs on every later
+		// path, lock failure included. updateBaseLocked has released
+		// commonMu by the time this runs.
+		defer o.removeFetchRef(ctx, ticketID, tmp)
+	}
+	return o.updateBaseLocked(ctx, ticketID, src, tmp, out, fetchErr)
+}
+
+// updateBaseLocked takes commonMu, applies the fetch result to baseRef, and
+// releases commonMu before it returns. out is git fetch's own combined
+// output: it is only classified against a fixed set of known failure
+// shapes, never logged or returned, so a credential or a remote URL
+// embedded in it never reaches a log record or an error message.
+func (o *Orchestrator) updateBaseLocked(ctx context.Context, ticketID int64, src, tmp, out string, fetchErr error) (resultSHA string, resultFetched bool, resultErr error) {
+	ref := o.baseRef()
+	fail := func(reason string, err error) (string, bool, error) {
+		o.log.Error("fetch base error", "ticket_id", ticketID, "ref", ref, "reason", reason)
+		return "", false, err
+	}
+
+	mu, muErr := o.resolveCommonMu(ctx)
+	if muErr != nil {
+		return fail("lock_failed", fmt.Errorf("orchestrator: fetch base: %w", muErr))
+	}
+	if lockErr := mu.Lock(ctx); lockErr != nil {
+		return fail("lock_failed", fmt.Errorf("orchestrator: fetch base: lock: %w", lockErr))
+	}
+	defer mu.Unlock()
+
+	if fetchErr == nil {
+		return o.advanceBaseLocked(ctx, ticketID, tmp, fail)
+	}
+
+	var reason string
+	switch {
+	case strings.Contains(out, "does not appear to be a git repository"), strings.Contains(out, "No such remote"):
+		reason = "no_origin"
+	case strings.Contains(out, "couldn't find remote ref"):
+		reason = "remote_ref_missing"
+	case strings.Contains(out, "Authentication failed"), strings.Contains(out, "could not read Username"), strings.Contains(out, "Permission denied"):
+		reason = "auth"
+	case strings.Contains(out, "Could not resolve host"), strings.Contains(out, "Connection refused"), strings.Contains(out, "Connection timed out"), strings.Contains(out, "unable to access"):
+		reason = "network"
+	default:
+		reason = "fetch_failed"
+	}
+
+	sha, err := o.resolveBase(ctx) // "" only on exit 1 (absent); any other git error is err
+	if err != nil {
+		return fail("resolve_failed", fmt.Errorf("orchestrator: fetch base: resolve %s: %w", ref, err))
+	}
+	if sha == "" {
+		// The empty old value makes update-ref refuse if the ref appeared
+		// (seeded by a concurrent fetch for another ticket) between the
+		// read above and this write.
+		_, seedErr := o.run.Run(ctx, o.proj.LocalPath, "git", "update-ref", ref, src, "")
+		sha, err = o.resolveBase(ctx)
+		switch {
+		case err != nil:
+			return fail("resolve_failed", fmt.Errorf("orchestrator: fetch base: resolve %s after seeding: %w", ref, err))
+		case sha == "" && seedErr != nil:
+			return fail("seed_failed", fmt.Errorf("orchestrator: fetch base: seed %s from %s: %w", ref, src, seedErr))
+		case sha == "":
+			return fail("seed_failed", fmt.Errorf("orchestrator: fetch base: seed %s from %s: ref missing after update-ref", ref, src))
+		}
+	}
+	o.log.Warn("fetch base failed, using last fetched base", "ticket_id", ticketID, "ref", ref, "sha", sha, "reason", reason)
+	return sha, false, nil
+}
+
+// advanceBaseLocked moves baseRef to the commit fetched into tmp, but only
+// forward: when baseRef is absent, or its current value is an ancestor of
+// the fetched commit. An older fetch finishing after a newer one, or a
+// force-pushed origin that no longer descends from the current base,
+// leaves the base where it is. The caller holds commonMu.
+func (o *Orchestrator) advanceBaseLocked(ctx context.Context, ticketID int64, tmp string, fail func(string, error) (string, bool, error)) (resultSHA string, resultFetched bool, resultErr error) {
+	ref := o.baseRef()
+
+	newSHA, err := o.revParseCommit(ctx, tmp)
+	if err != nil {
+		return fail("resolve_failed", fmt.Errorf("orchestrator: fetch base: resolve fetched %s: %w", tmp, err))
+	}
+	if newSHA == "" {
+		return fail("missing_after_fetch", fmt.Errorf("orchestrator: fetch base: %s missing after a successful fetch", tmp))
+	}
+
+	cur, err := o.resolveBase(ctx)
+	if err != nil {
+		return fail("resolve_failed", fmt.Errorf("orchestrator: fetch base: resolve %s: %w", ref, err))
+	}
+
+	switch cur {
+	case "":
+		if _, err := o.run.Run(ctx, o.proj.LocalPath, "git", "update-ref", ref, newSHA, ""); err != nil {
+			return fail("advance_failed", fmt.Errorf("orchestrator: fetch base: set %s: %w", ref, err))
+		}
+	case newSHA:
+		// Already there; nothing to move.
+	default:
+		fwd, err := o.isAncestorRev(ctx, cur, newSHA)
+		if err != nil {
+			return fail("ancestry_failed", fmt.Errorf("orchestrator: fetch base: is %s an ancestor of the fetched commit: %w", ref, err))
+		}
+		if fwd {
+			if _, err := o.run.Run(ctx, o.proj.LocalPath, "git", "update-ref", ref, newSHA, cur); err != nil {
+				return fail("advance_failed", fmt.Errorf("orchestrator: fetch base: advance %s: %w", ref, err))
+			}
+		} else {
+			back, err := o.isAncestorRev(ctx, newSHA, cur)
+			if err != nil {
+				return fail("ancestry_failed", fmt.Errorf("orchestrator: fetch base: is the fetched commit an ancestor of %s: %w", ref, err))
+			}
+			if !back {
+				o.log.Warn("fetched base diverged, keeping current", "ticket_id", ticketID, "ref", ref, "sha", cur, "fetched_sha", newSHA, "reason", "diverged")
+				return cur, true, nil
+			}
+			// An older fetch finished last: keep the newer base already in place.
+			newSHA = cur
+		}
+	}
+
+	o.log.Info("fetched base", "ticket_id", ticketID, "ref", ref, "sha", newSHA)
+	return newSHA, true, nil
+}
+
+// removeFetchRef deletes tmp under commonMu. It ignores the caller's own
+// cancellation, because it must also run after a lock failure caused by
+// that same cancellation, but gives up after fetchRefCleanupTimeout so a
+// lock held well past that leaves tmp behind (logged WARN) rather than
+// blocking the caller indefinitely.
+func (o *Orchestrator) removeFetchRef(ctx context.Context, ticketID int64, tmp string) {
+	cctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), fetchRefCleanupTimeout)
+	defer cancel()
+
+	warn := func(reason string) {
+		o.log.Warn("fetch ref cleanup failed", "ticket_id", ticketID, "ref", tmp, "reason", reason)
+	}
+
+	mu, err := o.resolveCommonMu(cctx)
+	if err != nil {
+		warn("lock_failed")
+		return
+	}
+	if err := mu.Lock(cctx); err != nil {
+		warn("lock_failed")
+		return
+	}
+	defer mu.Unlock()
+
+	if _, err := o.run.Run(cctx, o.proj.LocalPath, "git", "update-ref", "-d", tmp); err != nil {
+		warn("delete_failed")
+	}
+}
+
+// revParseCommit returns rev's commit sha via
+// "git rev-parse --verify --quiet <rev>^{commit}". Exit 1 means rev does
+// not resolve to a commit at all and returns "", nil; every other failure
+// (a corrupt repository, a killed git) is returned as an error rather than
+// silently treated as "absent".
+func (o *Orchestrator) revParseCommit(ctx context.Context, rev string) (string, error) {
+	out, err := o.run.Output(ctx, o.proj.LocalPath, "git", "rev-parse", "--verify", "--quiet", rev+"^{commit}")
+	if err != nil {
+		if isExitCode1(err) {
+			return "", nil
+		}
+		return "", fmt.Errorf("git rev-parse --verify --quiet %s: %w", rev, err)
+	}
+	return strings.TrimSpace(out), nil
+}
+
+// isAncestorRev runs "git merge-base --is-ancestor a b": exit 0 is true,
+// exit 1 is false, and every other failure is returned as an error rather
+// than silently treated as "not an ancestor". It is IsAncestor's rule
+// (review.go) without a Worktree, since baseRef lives in the main
+// checkout, not in any one ticket's worktree.
+func (o *Orchestrator) isAncestorRev(ctx context.Context, a, b string) (bool, error) {
+	if _, err := o.run.Output(ctx, o.proj.LocalPath, "git", "merge-base", "--is-ancestor", a, b); err != nil {
+		if isExitCode1(err) {
+			return false, nil
+		}
+		return false, fmt.Errorf("git merge-base --is-ancestor %s %s: %w", a, b, err)
+	}
+	return true, nil
+}
+
+// resolveBase returns baseRef's commit sha, "" when the ref is absent
+// (rev-parse exit 1 only), or the error for any other git failure.
+func (o *Orchestrator) resolveBase(ctx context.Context) (string, error) {
+	return o.revParseCommit(ctx, o.baseRef())
+}
+
+// baseRev is the revision every base comparison reads: baseRef when it
+// exists, else the local default branch, which is what a ticket cut
+// before fetchBase ever ran was cut from (and what every call site in this
+// package compared against before this change). A git error other than
+// "absent" is logged with a fixed reason and returned, rather than
+// silently falling back.
+func (o *Orchestrator) baseRev(ctx context.Context, ticketID int64) (string, error) {
+	sha, err := o.resolveBase(ctx)
+	if err != nil {
+		o.log.Error("base ref error", "ticket_id", ticketID, "ref", o.baseRef(), "reason", "resolve_failed")
+		return "", fmt.Errorf("orchestrator: resolve %s: %w", o.baseRef(), err)
+	}
+	if sha == "" {
+		return o.proj.DefaultBranch, nil
+	}
+	return o.baseRef(), nil
+}
+
 // PrepareWorktree creates the worktree directory and branch and applies the
 // sparse cone. cone is the list of cone paths to include; an empty cone
 // means a full checkout. It first ensures <local_path>/.git/info/exclude
@@ -400,6 +659,11 @@ func runSparseCheckoutSet(ctx context.Context, dir string, cone, drivers []strin
 // repository's default branch, but a project whose default branch itself
 // happens to be named "zing/..." would otherwise slip past that assumption
 // and hand the caller a Worktree pointing at the default branch.
+//
+// Right before "git worktree add", it calls fetchBase, so the branch is
+// cut from origin's default branch as of this call, not from whatever the
+// owner's local default branch happens to be: "git worktree add" names
+// o.baseRef() (refs/zing/base/<default>), not o.proj.DefaultBranch itself.
 //
 // Creation is two-phase (PKG8-PLAN.md section 7.2): "git worktree add
 // --no-checkout" creates the directory and checks out nothing, and runs no
@@ -433,10 +697,14 @@ func (o *Orchestrator) PrepareWorktree(ctx context.Context, ticketID int64, slug
 
 	o.log.Info("preparing worktree", "ticket_id", ticketID, "branch", branch, "dir", dir)
 
+	if _, _, err := o.fetchBase(ctx, ticketID); err != nil {
+		return Worktree{}, fmt.Errorf("orchestrator: prepare worktree: %w", err)
+	}
+
 	// Phase 1: create the directory and branch, checking out nothing.
 	// Shared (design section 8): "worktree add" writes the common gitdir's
 	// own worktree administration.
-	if out, err := o.runCommon(ctx, o.run, o.proj.LocalPath, "worktree", "add", "--no-checkout", "-b", branch, dir, o.proj.DefaultBranch); err != nil {
+	if out, err := o.runCommon(ctx, o.run, o.proj.LocalPath, "worktree", "add", "--no-checkout", "-b", branch, dir, o.baseRef()); err != nil {
 		return Worktree{}, fmt.Errorf("orchestrator: git worktree add: %w: %s", err, strings.TrimSpace(out))
 	}
 

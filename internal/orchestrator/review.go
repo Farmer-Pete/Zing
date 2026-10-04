@@ -23,10 +23,13 @@ func (o *Orchestrator) HeadSHA(ctx context.Context, wt Worktree) (string, error)
 }
 
 // Diff returns the branch's diff at sha against its merge base with the
-// default branch (design section 10.1):
+// base (design section 10.1):
 //
-//	base := git merge-base <default_branch> <sha>
+//	base := git merge-base <baseRev> <sha>
 //	git diff --no-ext-diff --no-textconv --no-color --no-renames -U3 <base> <sha>
+//
+// baseRev is refs/zing/base/<default>, kept current by fetchBase, or the
+// local default branch while that ref does not exist yet.
 //
 // --no-ext-diff and --no-textconv keep a configured external diff or
 // textconv driver from ever running or reshaping the text a lens reads (the
@@ -37,8 +40,13 @@ func (o *Orchestrator) Diff(ctx context.Context, wt Worktree, sha string) (strin
 		return "", fmt.Errorf("orchestrator: diff: %w", err)
 	}
 
+	baseRev, err := o.baseRev(ctx, wt.ticketID())
+	if err != nil {
+		return "", fmt.Errorf("orchestrator: diff: %w", err)
+	}
+
 	run := execRunner{drivers: wt.drivers}
-	base, err := run.Output(ctx, wt.dir, "git", "merge-base", o.proj.DefaultBranch, sha)
+	base, err := run.Output(ctx, wt.dir, "git", "merge-base", baseRev, sha)
 	if err != nil {
 		return "", fmt.Errorf("orchestrator: diff: merge-base: %w", err)
 	}
@@ -74,14 +82,19 @@ func (o *Orchestrator) ChangedFilesBetween(ctx context.Context, wt Worktree, fro
 	return paths, nil
 }
 
-// ChangedFilesSinceBase is ChangedFilesBetween(merge-base(default, to), to).
+// ChangedFilesSinceBase is ChangedFilesBetween(merge-base(baseRev, to), to).
 func (o *Orchestrator) ChangedFilesSinceBase(ctx context.Context, wt Worktree, to string) ([]string, error) {
 	if err := o.revalidate(ctx, wt); err != nil {
 		return nil, fmt.Errorf("orchestrator: changed files since base: %w", err)
 	}
 
+	baseRev, err := o.baseRev(ctx, wt.ticketID())
+	if err != nil {
+		return nil, fmt.Errorf("orchestrator: changed files since base: %w", err)
+	}
+
 	run := execRunner{drivers: wt.drivers}
-	base, err := run.Output(ctx, wt.dir, "git", "merge-base", o.proj.DefaultBranch, to)
+	base, err := run.Output(ctx, wt.dir, "git", "merge-base", baseRev, to)
 	if err != nil {
 		return nil, fmt.Errorf("orchestrator: changed files since base: merge-base: %w", err)
 	}
