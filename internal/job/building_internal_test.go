@@ -6,9 +6,12 @@ package job
 // alongside it.
 
 import (
+	"reflect"
+	"slices"
 	"strings"
 	"testing"
 
+	"zing/internal/orchestrator"
 	"zing/internal/response"
 )
 
@@ -86,11 +89,15 @@ func TestUnitTitle(t *testing.T) {
 	}
 }
 
+// pGoPath is the plan path shared by TestFuncLines' wrap subtests.
+const pGoPath = "p.go"
+
 // TestFuncLines proves design section 6.7's LAND helper: one line per
 // plan.Design.Changes entry whose Path is in approved, in plan order, each
 // "<symbol> (<path>): called by <callers>; calls <callees>", with every
 // whitespace run in callers and callees collapsed to one space and the
-// whole line cut to 160 runes.
+// line wrapped on spaces into entries of at most funcLineWidth runes,
+// continuation entries indented two spaces, never splitting a word.
 func TestFuncLines(t *testing.T) {
 	t.Parallel()
 	t.Run("formats and filters by approved path, in plan order", func(t *testing.T) {
@@ -120,18 +127,142 @@ func TestFuncLines(t *testing.T) {
 		}
 	})
 
-	t.Run("cuts a long line to 160 runes", func(t *testing.T) {
+	t.Run("wraps a long line at 72 runes", func(t *testing.T) {
 		t.Parallel()
 		long := strings.Repeat("caller ", 40)
 		plan := response.Plan{Design: response.Design{Changes: []response.Change{
-			{Path: "p.go", Symbol: "F", Callers: long, Callees: "c"},
+			{Path: pGoPath, Symbol: "F", Callers: long, Callees: "c"},
 		}}}
-		got := funcLines(plan, []string{"p.go"})
-		if len(got) != 1 {
-			t.Fatalf("funcLines = %v, want exactly one line", got)
+		got := funcLines(plan, []string{pGoPath})
+		if len(got) == 0 {
+			t.Fatalf("funcLines = %v, want at least one line", got)
 		}
-		if n := len([]rune(got[0])); n > 160 {
-			t.Errorf("funcLines[0] has %d runes, want at most 160", n)
+		wantWords := strings.Fields("F (p.go): called by " + collapseWhitespace(long) + "; calls c")
+		gotWords := make([]string, 0, len(wantWords))
+		for i, line := range got {
+			if n := len([]rune(line)); n > 72 {
+				t.Errorf("funcLines[%d] has %d runes, want at most 72", i, n)
+			}
+			if i > 0 && !strings.HasPrefix(line, "  ") {
+				t.Errorf("funcLines[%d] = %q, want a two-space indent", i, line)
+			}
+			gotWords = append(gotWords, strings.Fields(line)...)
+		}
+		if !reflect.DeepEqual(gotWords, wantWords) {
+			t.Errorf("funcLines words = %v, want %v", gotWords, wantWords)
+		}
+	})
+
+	t.Run("keeps an overlong word whole", func(t *testing.T) {
+		t.Parallel()
+		plan := response.Plan{Design: response.Design{Changes: []response.Change{
+			{Path: pGoPath, Symbol: "F", Callers: "a", Callees: "b " + strings.Repeat("x", 100) + " c"},
+		}}}
+		got := funcLines(plan, []string{pGoPath})
+		overlong := "  " + strings.Repeat("x", 100)
+		found := false
+		for _, line := range got {
+			if line == overlong {
+				found = true
+				continue
+			}
+			if n := len([]rune(line)); n > 72 {
+				t.Errorf("funcLines entry %q has %d runes, want at most 72", line, n)
+			}
+		}
+		if !found {
+			t.Errorf("funcLines = %v, want an entry %q", got, overlong)
+		}
+		wantWords := strings.Fields("F (p.go): called by a; calls b " + strings.Repeat("x", 100) + " c")
+		gotWords := make([]string, 0, len(wantWords))
+		for _, line := range got {
+			gotWords = append(gotWords, strings.Fields(line)...)
+		}
+		if !reflect.DeepEqual(gotWords, wantWords) {
+			t.Errorf("funcLines words = %v, want %v", gotWords, wantWords)
+		}
+	})
+
+	t.Run("forces a word that doesn't fit the continuation room onto its own entry", func(t *testing.T) {
+		t.Parallel()
+		word71 := strings.Repeat("x", 71)
+		word70 := strings.Repeat("y", 70)
+		plan := response.Plan{Design: response.Design{Changes: []response.Change{
+			{Path: pGoPath, Symbol: "F", Callers: "c", Callees: "b " + word71 + " end71"},
+			{Path: pGoPath, Symbol: "F", Callers: "c", Callees: "b " + word70 + " end70"},
+		}}}
+		got := funcLines(plan, []string{pGoPath, pGoPath})
+		want71 := "  " + word71
+		want70 := "  " + word70
+		if !slices.Contains(got, want71) {
+			t.Errorf("funcLines = %v, want an entry %q (73 runes: a 71-rune word doesn't fit the 70-rune room left after the two-space indent, so it stays whole and the entry runs past funcLineWidth)", got, want71)
+		}
+		if !slices.Contains(got, want70) {
+			t.Errorf("funcLines = %v, want an entry %q (72 runes: a 70-rune word exactly fills the room left after the two-space indent)", got, want70)
+		}
+	})
+
+	t.Run("wraps without splitting a word", func(t *testing.T) {
+		t.Parallel()
+		callees := strings.Repeat("abcdefghi ", 20)
+		plan := response.Plan{Design: response.Design{Changes: []response.Change{
+			{Path: pGoPath, Symbol: "F", Callers: "c", Callees: callees},
+		}}}
+		got := funcLines(plan, []string{pGoPath})
+
+		line := "F (p.go): called by c; calls " + collapseWhitespace(callees)
+		wantWords := strings.Fields(line)
+		wantSet := make(map[string]bool, len(wantWords))
+		for _, w := range wantWords {
+			wantSet[w] = true
+		}
+
+		msg, err := orchestrator.CommitMessage{Title: "t", FuncLines: got}.Render()
+		if err != nil {
+			t.Fatalf("Render() error = %v", err)
+		}
+		// The body is "title\n\n" + func lines joined by "\n" + "\n\n" +
+		// the trailer (commit.go's Render), with no fences here, so the
+		// middle "\n\n"-delimited section is exactly the func lines.
+		parts := strings.Split(msg, "\n\n")
+		if len(parts) < 2 {
+			t.Fatalf("Render() = %q, want a func-line section", msg)
+		}
+		renderedLines := strings.Split(parts[1], "\n")
+		if !reflect.DeepEqual(renderedLines, got) {
+			t.Errorf("rendered func lines = %v, want %v", renderedLines, got)
+		}
+
+		gotWords := make([]string, 0, len(wantWords))
+		for i, l := range renderedLines {
+			if n := len([]rune(l)); n > 72 {
+				t.Errorf("rendered func line %d = %q has %d runes, want at most 72", i, l, n)
+			}
+			if i > 0 && !strings.HasPrefix(l, "  ") {
+				t.Errorf("rendered func line %d = %q, want a two-space indent", i, l)
+			}
+			for w := range strings.FieldsSeq(l) {
+				if !wantSet[w] {
+					t.Fatalf("word %q in func line is not a word of the input line", w)
+				}
+				gotWords = append(gotWords, w)
+			}
+		}
+		if !reflect.DeepEqual(gotWords, wantWords) {
+			t.Errorf("funcLines words = %v, want %v", gotWords, wantWords)
+		}
+	})
+
+	t.Run("leaves a short line's symbol and path whitespace untouched", func(t *testing.T) {
+		t.Parallel()
+		const spacedPath = "p  a.go"
+		plan := response.Plan{Design: response.Design{Changes: []response.Change{
+			{Path: spacedPath, Symbol: "F", Callers: "c", Callees: "d"},
+		}}}
+		got := funcLines(plan, []string{spacedPath})
+		want := []string{"F (p  a.go): called by c; calls d"}
+		if !reflect.DeepEqual(got, want) {
+			t.Errorf("funcLines = %v, want %v", got, want)
 		}
 	})
 

@@ -4,9 +4,14 @@ package job
 // 6.3, 6.7, reviewrules.go): ParseLocation, FilterFindings, DedupFindings,
 // splitByFloor, selectLenses, renderFixFindings, and (since job already
 // imports orchestrator, and this is where the plan lists its test)
-// orchestrator.CountNoun.
+// orchestrator.CountNoun. It also tests FilterFindings' commit-text drop
+// rule (ticket #10): a quality finding about pushed commit text can never
+// be fixed by a fix run, so it is dropped and logged rather than kept.
 
 import (
+	"bytes"
+	"log/slog"
+	"strings"
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
@@ -108,6 +113,10 @@ func TestFilterFindings(t *testing.T) {
 		{"fidelity with an empty plan_ref: dropped", response.Finding{Lens: response.LensFidelity, Location: nestedAGoLine12, PlanRef: "  ", Text: "t", Fix: "f"}, false},
 		{"fidelity with a plan_ref: kept", response.Finding{Lens: response.LensFidelity, Location: nestedAGoLine12, PlanRef: "plan/delivery/tasks/task[3]", Text: "t", Fix: "f"}, true},
 		{"a non-fidelity finding needs no plan_ref", response.Finding{Lens: response.LensSecurity, Location: nestedAGoLine12, Text: "t", Fix: "f"}, true},
+		{"a quality finding about a cut commit message: dropped", response.Finding{Lens: response.LensQuality, Location: nestedAGoLine12, Text: "commit message is cut mid-word", Fix: "f"}, false},
+		{"a quality finding about commit authorship: dropped", response.Finding{Lens: response.LensQuality, Location: nestedAGoLine12, Text: "Co-Authored-By trailer names the wrong author", Fix: "f"}, false},
+		{"a correctness finding mentioning the commit message builder: kept", response.Finding{Lens: response.LensCorrectness, Location: nestedAGoLine12, Text: "the commit message builder skips fences", Fix: "f"}, true},
+		{"a quality finding unrelated to commit text: kept", response.Finding{Lens: response.LensQuality, Location: nestedAGoLine12, Text: "name tmp is not a plain word", Fix: "f"}, true},
 	}
 
 	findings := make([]response.Finding, len(cases))
@@ -128,6 +137,45 @@ func TestFilterFindings(t *testing.T) {
 				t.Errorf("FilterFindings: survived = %v, want %v for %+v", got, tc.want, tc.f)
 			}
 		})
+	}
+}
+
+// TestFilterFindingsLogsCommitTextDrop proves a dropped commit-text finding
+// is logged with its lens, location, and the matched phrase, never the
+// finding's own text. Not parallel: it calls slog.SetDefault to capture a
+// log line, which swaps the process-wide default logger.
+func TestFilterFindingsLogsCommitTextDrop(t *testing.T) {
+	idx := reviewDiffIndex()
+
+	var logBuf bytes.Buffer
+	prevDefault := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logBuf, nil)))
+	t.Cleanup(func() { slog.SetDefault(prevDefault) })
+
+	findings := []response.Finding{
+		{Lens: response.LensQuality, Location: nestedAGoLine12, Text: "Co-Authored-By trailer names the wrong author", Fix: "f"},
+	}
+
+	got := FilterFindings(findings, idx)
+	if len(got) != 0 {
+		t.Fatalf("FilterFindings = %+v, want it dropped", got)
+	}
+
+	logged := logBuf.String()
+	if !strings.Contains(logged, "review finding about pushed commit text dropped") {
+		t.Errorf("log = %q, want it to contain the drop message", logged)
+	}
+	if !strings.Contains(logged, "lens=quality") {
+		t.Errorf("log = %q, want lens=quality", logged)
+	}
+	if !strings.Contains(logged, "location="+nestedAGoLine12) {
+		t.Errorf("log = %q, want location=%s", logged, nestedAGoLine12)
+	}
+	if !strings.Contains(logged, "phrase=co-authored-by") {
+		t.Errorf("log = %q, want phrase=co-authored-by", logged)
+	}
+	if strings.Contains(logged, "trailer names the wrong author") {
+		t.Errorf("log = %q, must not contain the finding text", logged)
 	}
 }
 

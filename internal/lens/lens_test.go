@@ -1,6 +1,7 @@
 package lens
 
 import (
+	"strings"
 	"testing"
 	"testing/fstest"
 
@@ -80,6 +81,35 @@ func firstLine(s string) string {
 		}
 	}
 	return s
+}
+
+func TestLoad_QualityCodeLeavesCommitsAlone(t *testing.T) {
+	t.Parallel()
+
+	lenses, err := Load(zing.Assets, lensesDir)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+
+	var quality *Lens
+	for i := range lenses {
+		if lenses[i].Name == "quality" {
+			quality = &lenses[i]
+		}
+	}
+	if quality == nil {
+		t.Fatal("no quality lens found")
+	}
+
+	words := strings.Fields(quality.Code)
+	code := strings.Join(words, " ")
+
+	if strings.Contains(code, "The commit message places each changed function") {
+		t.Errorf("quality.Code still asks reviewers to judge the commit message: %q", code)
+	}
+	if !strings.Contains(code, "Commit messages and commit authorship are out of scope") {
+		t.Errorf("quality.Code does not say commit messages and commit authorship are out of scope: %q", code)
+	}
 }
 
 func TestParseLens_Fixtures(t *testing.T) {

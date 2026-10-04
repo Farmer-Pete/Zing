@@ -2,6 +2,7 @@ package job
 
 import (
 	"fmt"
+	"log/slog"
 	stdpath "path"
 	"regexp"
 	"sort"
@@ -39,12 +40,36 @@ func ParseLocation(loc string) (path string, line int, ok bool) {
 	return cleaned, n, true
 }
 
+// commitTextPhrases mark a finding whose subject is commit text already
+// on the branch, which a fix run cannot change.
+var commitTextPhrases = []string{"commit message", "commit body", "commit subject", "co-authored-by", "authorship"}
+
+// commitPhrase returns the first commitTextPhrases entry found in a
+// quality finding's text (case-insensitive), and whether one matched.
+func commitPhrase(f response.Finding) (string, bool) {
+	if f.Lens != response.LensQuality {
+		return "", false
+	}
+	text := strings.ToLower(f.Text)
+	for _, p := range commitTextPhrases {
+		if strings.Contains(text, p) {
+			return p, true
+		}
+	}
+	return "", false
+}
+
 // FilterFindings applies 6.3's diff filter and fidelity check to one
 // round's raw lens findings: a finding with a bad Location, a Location
 // outside idx (its path not in the diff, or its line outside every range
 // the diff records for that path), or -- for a fidelity finding only -- an
-// empty PlanRef after trimming, is dropped. Order among survivors follows
-// findings.
+// empty PlanRef after trimming, is dropped. A quality finding about commit
+// text (commit message, commit body, commit subject, Co-Authored-By, or
+// authorship) already pushed to the branch is also dropped and logged with
+// its lens, location, and the matched phrase -- never the finding text
+// (internal/console/log.go:295) -- because a fix run can only add commits
+// and cannot reword ones already on the branch. Order among survivors
+// follows findings.
 func FilterFindings(findings []response.Finding, idx orchestrator.DiffIndex) []response.Finding {
 	survivors := make([]response.Finding, 0, len(findings))
 	for _, f := range findings {
@@ -53,6 +78,10 @@ func FilterFindings(findings []response.Finding, idx orchestrator.DiffIndex) []r
 			continue
 		}
 		if f.Lens == response.LensFidelity && strings.TrimSpace(f.PlanRef) == "" {
+			continue
+		}
+		if phrase, ok := commitPhrase(f); ok {
+			slog.Warn("review finding about pushed commit text dropped", "lens", f.Lens, "location", f.Location, "phrase", phrase)
 			continue
 		}
 		survivors = append(survivors, f)
