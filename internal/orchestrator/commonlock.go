@@ -48,7 +48,7 @@ package orchestrator
 //	review.go IsAncestor                        merge-base --is-ancestor                    per-worktree (read)
 //	worktree.go checkRefFormat                  check-ref-format                            per-worktree (no repository touched at all)
 //	worktree.go revalidate                      symbolic-ref --short HEAD                   per-worktree (read)
-//	worktree.go GitCommonDir                    rev-parse --git-common-dir                  per-worktree (read)
+//	worktree.go GitCommonDir                    rev-parse --git-common-dir                  per-worktree (read; cached per Orchestrator after the first success, resolution serialized)
 //	worktree.go gitPathInfoExclude              rev-parse --git-path info/exclude           per-worktree (read)
 //	worktree.go ensureWorktreeExclude           (no git call: direct info/exclude read+append) SHARED, see below
 //	worktree.go runSparseCheckoutSet            sparse-checkout set --stdin                 per-worktree (worktree's own admin-dir sparse-checkout file)
@@ -242,8 +242,9 @@ func canonicalCommonDir(dir string) (string, error) {
 func (o *Orchestrator) resolveCommonMu(ctx context.Context) (*commonMutex, error) {
 	// The guard covers only the cached read and the publish, never the git
 	// call itself, so a Runner that calls back into resolveCommonMu cannot
-	// deadlock on it. Two concurrent resolvers may both run GitCommonDir;
-	// commonLockFor hands both the same mutex, and the first to publish wins.
+	// deadlock on it. Two concurrent resolvers share GitCommonDir's single
+	// resolution; commonLockFor hands both the same mutex, and the first to
+	// publish wins.
 	o.commonMuGuard.Lock()
 	cached := o.commonMu
 	o.commonMuGuard.Unlock()

@@ -1251,6 +1251,126 @@ func TestGitCommonDir(t *testing.T) {
 	}
 }
 
+// countingRunner wraps a real execRunner, counting how many times Run or
+// Output actually reached it, guarded by a mutex so concurrent callers
+// (TestGitCommonDirCachedPerOrchestrator's eight goroutines) count safely.
+type countingRunner struct {
+	mu    sync.Mutex
+	runs  int
+	outs  int
+	inner execRunner
+}
+
+func (r *countingRunner) Run(ctx context.Context, dir, name string, args ...string) (string, error) {
+	r.mu.Lock()
+	r.runs++
+	r.mu.Unlock()
+	return r.inner.Run(ctx, dir, name, args...)
+}
+
+func (r *countingRunner) Output(ctx context.Context, dir, name string, args ...string) (string, error) {
+	r.mu.Lock()
+	r.outs++
+	r.mu.Unlock()
+	return r.inner.Output(ctx, dir, name, args...)
+}
+
+func (r *countingRunner) outputCalls() int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.outs
+}
+
+// TestGitCommonDirCachedPerOrchestrator proves GitCommonDir resolves git at
+// most once per Orchestrator, even when several goroutines make their first
+// call at once, and that a failed first call (a canceled ctx) caches
+// nothing, so the next, healthy call still resolves successfully.
+func TestGitCommonDirCachedPerOrchestrator(t *testing.T) {
+	t.Parallel()
+	repo := newTestRepo(t)
+	want, err := filepath.EvalSymlinks(filepath.Join(repo, ".git"))
+	if err != nil {
+		t.Fatalf("resolve want: %v", err)
+	}
+
+	t.Run("concurrent first calls run git once and log once", func(t *testing.T) {
+		t.Parallel()
+		run := &countingRunner{}
+		o, logs := newTestOrchestratorCapturingLog(t, repo, run)
+
+		const n = 8
+		start := make(chan struct{})
+		results := make(chan string, n)
+		var wg sync.WaitGroup
+		for range n {
+			wg.Go(func() {
+				<-start
+				got, err := o.GitCommonDir(t.Context())
+				if err != nil {
+					t.Errorf("GitCommonDir: %v", err)
+					return
+				}
+				results <- got
+			})
+		}
+		close(start)
+		wg.Wait()
+		close(results)
+
+		for got := range results {
+			gotResolved, err := filepath.EvalSymlinks(got)
+			if err != nil {
+				t.Fatalf("resolve got %q: %v", got, err)
+			}
+			if gotResolved != want {
+				t.Errorf("GitCommonDir = %q, want %q", gotResolved, want)
+			}
+		}
+
+		got, err := o.GitCommonDir(t.Context())
+		if err != nil {
+			t.Fatalf("GitCommonDir (one more call): %v", err)
+		}
+		if gotResolved, evalErr := filepath.EvalSymlinks(got); evalErr != nil || gotResolved != want {
+			t.Errorf("GitCommonDir (one more call) = %q, want %q", got, want)
+		}
+
+		if calls := run.outputCalls(); calls != 1 {
+			t.Errorf("rev-parse reached the Runner %d times, want 1", calls)
+		}
+
+		records := findRecords(logs.records(t), "git common dir resolved")
+		if len(records) != 1 {
+			t.Fatalf("found %d \"git common dir resolved\" records, want 1", len(records))
+		}
+		if records[0]["local_path"] != repo {
+			t.Errorf("record[local_path] = %v, want %v", records[0]["local_path"], repo)
+		}
+		if records[0]["dir"] == "" || records[0]["dir"] == nil {
+			t.Errorf("record[dir] is empty, want the resolved common dir")
+		}
+	})
+
+	t.Run("a canceled first call caches nothing, so the next call still succeeds", func(t *testing.T) {
+		t.Parallel()
+		o := newTestOrchestrator(t, repo, execRunner{})
+
+		canceledCtx, cancel := context.WithCancel(t.Context())
+		cancel()
+		if _, err := o.GitCommonDir(canceledCtx); err == nil {
+			t.Fatal("GitCommonDir(canceled ctx): want an error, got nil")
+		}
+
+		got, err := o.GitCommonDir(t.Context())
+		if err != nil {
+			t.Fatalf("GitCommonDir(healthy ctx) after a prior failure: %v, want success", err)
+		}
+		if gotResolved, evalErr := filepath.EvalSymlinks(got); evalErr != nil || gotResolved != want {
+			t.Errorf("GitCommonDir = %q, want %q", got, want)
+		}
+	})
+}
+
 // -----------------------------------------------------------------------
 // EnsureWorktree
 // -----------------------------------------------------------------------
@@ -2020,11 +2140,13 @@ func (c *logCapture) contains(s string) bool {
 
 // newTestOrchestratorCapturingLog mirrors newTestOrchestrator, but with a
 // JSON-handler logger writing into a logCapture a test can decode, instead
-// of the silent slog.DiscardHandler every other test in this file uses.
+// of the silent slog.DiscardHandler every other test in this file uses. The
+// handler's level is Debug, so a test can see GitCommonDir's and
+// readWorktreeGitConfig's Debug-level records too.
 func newTestOrchestratorCapturingLog(t *testing.T, localPath string, run Runner) (*Orchestrator, *logCapture) {
 	t.Helper()
 	logs := &logCapture{}
-	log := slog.New(slog.NewJSONHandler(logs, nil))
+	log := slog.New(slog.NewJSONHandler(logs, &slog.HandlerOptions{Level: slog.LevelDebug}))
 	proj := Project{Owner: testOwner, Repo: testRepo, LocalPath: localPath, DefaultBranch: mainBranch}
 	o, err := New(proj, fakeGitHub{}, run, log)
 	if err != nil {

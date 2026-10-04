@@ -215,6 +215,17 @@ type Orchestrator struct {
 	// same *commonMutex, from commonLockFor's package-level registry.
 	commonMuGuard sync.Mutex
 	commonMu      *commonMutex
+
+	// commonDirGuard guards commonDir and commonDirResolve. Held only
+	// across reading or publishing them, never across a git call.
+	// commonDir is GitCommonDir's cache: "" until the first successful
+	// resolution, then that absolute path for the Orchestrator's lifetime
+	// (.git does not move while Zing runs). commonDirResolve, created
+	// lazily on the first GitCommonDir call, serializes resolution so
+	// concurrent first calls run git once.
+	commonDirGuard   sync.Mutex
+	commonDir        string
+	commonDirResolve *commonMutex
 }
 
 // New validates proj (non-empty Owner, Repo, DefaultBranch; absolute

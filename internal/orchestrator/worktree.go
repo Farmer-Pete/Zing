@@ -240,7 +240,32 @@ func resolveOrClean(p string) string {
 // checkout's ".git" directory, or the bare repository itself), which is
 // where "worktrees/<id>" -- the real gitdir a linked worktree's own ".git"
 // pointer file names -- lives.
+//
+// The result is cached on o for its lifetime (.git does not move while Zing
+// runs), so only the first successful call ever runs git; every later call,
+// here or in any other Orchestrator method, returns the cached path at
+// once. Resolution is serialized by commonDirResolve, so concurrent first
+// calls run git exactly once: the winner publishes the result and logs it
+// once at Debug; a loser that waited finds the cache already filled and
+// returns it without running git itself. A failed resolution (git error,
+// empty output, or a ctx that ended while waiting) caches nothing, so the
+// next call retries.
 func (o *Orchestrator) GitCommonDir(ctx context.Context) (string, error) {
+	if cached, _ := o.commonDirSnapshot(); cached != "" {
+		return cached, nil
+	}
+
+	_, resolveMu := o.commonDirSnapshot()
+	if err := resolveMu.Lock(ctx); err != nil {
+		return "", fmt.Errorf("orchestrator: git common dir: %w", err)
+	}
+	defer resolveMu.Unlock()
+
+	// A caller that waited on resolveMu finds the winner's result here.
+	if cached, _ := o.commonDirSnapshot(); cached != "" {
+		return cached, nil
+	}
+
 	out, err := o.run.Output(ctx, o.proj.LocalPath, "git", "rev-parse", "--path-format=absolute", "--git-common-dir")
 	if err != nil {
 		return "", fmt.Errorf("orchestrator: git common dir: %w", err)
@@ -249,7 +274,23 @@ func (o *Orchestrator) GitCommonDir(ctx context.Context) (string, error) {
 	if dir == "" {
 		return "", errors.New("orchestrator: git common dir: empty result")
 	}
+
+	o.commonDirGuard.Lock()
+	o.commonDir = dir
+	o.commonDirGuard.Unlock()
+	o.log.Debug("git common dir resolved", "local_path", o.proj.LocalPath, "dir", dir)
 	return dir, nil
+}
+
+// commonDirSnapshot returns the cached common dir ("" when unresolved) and
+// the resolve lock, creating the lock on first use.
+func (o *Orchestrator) commonDirSnapshot() (string, *commonMutex) {
+	o.commonDirGuard.Lock()
+	defer o.commonDirGuard.Unlock()
+	if o.commonDirResolve == nil {
+		o.commonDirResolve = newCommonMutex()
+	}
+	return o.commonDir, o.commonDirResolve
 }
 
 // validateZingBranch is the branch-shape half of revalidate: the branch
