@@ -430,8 +430,10 @@ func (o *Orchestrator) fetchBase(ctx context.Context, ticketID int64) (sha strin
 	// $GIT_DIR/FETCH_HEAD, which two overlapping fetches could otherwise
 	// corrupt by writing at once. --no-auto-maintenance keeps it from
 	// running "gc --auto" against the shared repository while another
-	// ticket's locked shared write is in flight.
-	out, fetchErr := o.run.Run(ctx, o.proj.LocalPath, "git", "fetch", "--no-tags", "--no-write-fetch-head", "--no-auto-maintenance", "--refmap=", "origin", "+"+src+":"+tmp)
+	// ticket's locked shared write is in flight. --no-recurse-submodules
+	// keeps this base-only fetch from also fetching a populated submodule
+	// whose pointer changed on origin's default branch.
+	out, fetchErr := o.run.Run(ctx, o.proj.LocalPath, "git", "fetch", "--no-tags", "--no-write-fetch-head", "--no-auto-maintenance", "--no-recurse-submodules", "--refmap=", "origin", "+"+src+":"+tmp)
 	if fetchErr == nil {
 		// Installed before any lock attempt, so it runs on every later
 		// path, lock failure included. updateBaseLocked has released
