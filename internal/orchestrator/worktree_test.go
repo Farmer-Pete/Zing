@@ -1386,6 +1386,9 @@ func TestReadGitConfigLastValueWins(t *testing.T) {
 		if logs.contains("ssh-add") {
 			t.Error("log output contains the signing value \"ssh-add -L\", want key names only")
 		}
+		if logs.contains("git-lfs clean") {
+			t.Error("log output contains the filter driver command \"git-lfs clean\", want driver names only")
+		}
 	})
 
 	t.Run("no matching keys gives matched false", func(t *testing.T) {

@@ -47,10 +47,6 @@ var (
 	zingBranchPattern = regexp.MustCompile(`^zing/\d+(-[a-z0-9._-]+)?$`)
 )
 
-// refForbiddenPunct is the punctuation git-check-ref-format(1) forbids
-// anywhere in a ref name, alongside control bytes and DEL.
-const refForbiddenPunct = " ~^:?*[\\"
-
 // branchName builds and validates the branch (PKG5-PLAN.md section 8.2).
 // ticketID must be positive. slug is lowercased and reduced to
 // [a-z0-9._-]; a run of any other character becomes a single "-"; leading
@@ -111,9 +107,7 @@ func checkRefFormat(name string) error {
 	}
 	for i := range len(ref) {
 		c := ref[i]
-		isControl := c < 0x20 || c == 0x7f
-		isForbiddenPunct := strings.IndexByte(refForbiddenPunct, c) >= 0
-		if isControl || isForbiddenPunct {
+		if c < 0x20 || c == 0x7f || strings.IndexByte(" ~^:?*[\\", c) >= 0 {
 			return invalid(fmt.Sprintf("contains forbidden byte %q", c))
 		}
 	}
@@ -911,7 +905,8 @@ func (o *Orchestrator) FilterDrivers(ctx context.Context, dir string) ([]string,
 
 // gitSigningProgramKeys are the four config keys section 7.2's grammar
 // governs as "a bare name or an absolute path, no argument". Each is read
-// with "git config --get" and, when set, checked by validateSigningProgram.
+// from readGitConfig's single "config -z --get-regexp worktreeConfigPattern"
+// call and, when set, checked by validateSigningProgramValue.
 var gitSigningProgramKeys = []string{
 	"gpg.program",
 	"gpg.openpgp.program",
