@@ -319,8 +319,9 @@ type ExtraClaim struct {
 
 type BuildClaims struct {
 	FilesChanged []string `xml:"files_changed>path" json:"files_changed" doc:"every changed path, or none for a fix run whose failure is not in the code; the program diffs the tree"`
-	TestExit     int      `xml:"test_exit"          json:"test_exit"     doc:"the program re-runs the command"`
-	LintExit     int      `xml:"lint_exit"          json:"lint_exit"     doc:"the program re-runs the command"`
+	// Fence: TestExit and LintExit existed because the builder ran the
+	// full suite and CHECK compared its claimed exits with a re-run; Zing
+	// now measures them itself and sends the output back (#55).
 }
 
 // ---- perimeter, judge, side ----------------------------------------------
@@ -423,6 +424,11 @@ type BuildReport struct {
 	Report    string       `json:"report"`
 	Title     string       `json:"title"                jsonschema:"minLength=1" doc:"the commit subject"`
 	CommitSHA *string      `json:"commit_sha,omitempty" jsonschema:"pattern=^[0-9a-f]{40}$"`
+	// LegacyTestExit and LegacyLintExit keep a report stored before #55
+	// valid: the builder claimed both exits then. Zing never writes them
+	// now; a stored value is carried through unchanged.
+	LegacyTestExit *int `json:"test_exit,omitempty" doc:"legacy, before #55; never written now"`
+	LegacyLintExit *int `json:"lint_exit,omitempty" doc:"legacy, before #55; never written now"`
 }
 
 // FindingArtifact is the stored form of one code-review finding (artifact

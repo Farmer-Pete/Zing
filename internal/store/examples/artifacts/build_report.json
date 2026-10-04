@@ -1,8 +1,6 @@
 {
   "task_n": 1,
   "files_changed": ["internal/cart/cart.go", "internal/cart/cart_test.go"],
-  "test_exit": 0,
-  "lint_exit": 0,
   "extras": [],
   "fences": [],
   "report": "Initialized cart.Items to an empty slice; added TestEmptyCart_ReturnsEmptyOrder.",

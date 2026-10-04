@@ -41,19 +41,36 @@ func TestValidate_ValidDocumentReturnsNil(t *testing.T) {
 func TestValidate_MissingRequiredElement_NoCascade(t *testing.T) {
 	t.Parallel()
 
-	// BuildClaims.TestExit is required (no omitempty). Omit the element
-	// entirely: it must fail exactly once, not also emit a bounds error.
+	// BuildResponse.Claims is required (no omitempty). Omit the element
+	// entirely: it must fail exactly once, not also emit a nested error.
 	xmlDoc := `<zing job="build" outcome="ok">` +
-		`<claims><files_changed><path>a.go</path></files_changed><lint_exit>0</lint_exit></claims>` +
 		`<report>did stuff</report><notes></notes></zing>`
 	doc := mustParse(t, xmlDoc)
 	errs := Validate(doc, ValidateContext{})
 	if len(errs) != 1 {
 		t.Fatalf("Validate = %v, want exactly 1 error", dumpErrs(errs))
 	}
-	want := "claims/test_exit: missing required element"
+	want := "claims: missing required element"
 	if got := firstErrString(errs); got != want {
 		t.Errorf("errs[0] = %q, want %q", got, want)
+	}
+}
+
+// TestValidateBuildIgnoresLegacyExitElements proves a build document that
+// still carries the retired test_exit and lint_exit claims (#55) parses
+// and validates clean: encoding/xml ignores the unknown elements.
+func TestValidateBuildIgnoresLegacyExitElements(t *testing.T) {
+	t.Parallel()
+
+	xmlDoc := `<zing job="build" outcome="ok">` +
+		`<claims><files_changed><path>a.go</path></files_changed><test_exit>0</test_exit><lint_exit>0</lint_exit></claims>` +
+		`<report>did stuff</report><notes></notes></zing>`
+	doc := mustParse(t, xmlDoc)
+	if errs := Validate(doc, ValidateContext{}); len(errs) != 0 {
+		t.Fatalf("Validate = %v, want no errors", dumpErrs(errs))
+	}
+	if _, ok := doc.Response.(*BuildResponse); !ok {
+		t.Fatalf("Response is %T, want *BuildResponse", doc.Response)
 	}
 }
 

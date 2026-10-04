@@ -204,10 +204,11 @@ type liveJudgeConfig struct {
 // liveJudgeRawModels is the one key loadLiveJudgeConfig reads straight from
 // zing.toml, bypassing config.Load's own applyDefaults: config.Config.Models
 // always carries some codex value after Load (applyDefaults substitutes
-// "gpt-5.5" the moment zing.toml leaves [models] codex undefined), so
+// "gpt-6-luna" the moment zing.toml leaves [models] codex undefined), so
 // reading it back from cfg itself could never distinguish the owner's own
-// choice from that silent default -- exactly the literal this harness's
-// first live runs proved the judge Codex home's own login refuses. Only
+// choice from that silent default -- gpt-5.5, the old default, was exactly
+// the literal this harness's first live runs proved the judge Codex home's
+// own login refuses; gpt-6-luna replaced it for that reason. Only
 // toml.DecodeFile's own metadata (IsDefined), read directly here, can tell
 // the two apart.
 type liveJudgeRawModels struct {
@@ -242,7 +243,7 @@ func loadLiveJudgeConfig(t *testing.T, m *machine.Machine) liveJudgeConfig {
 		t.Skipf("re-read %s for [models] codex: %v", cfgPath, decodeErr)
 	}
 	if !md.IsDefined("models", "codex") || raw.Models.Codex == "" {
-		t.Skipf("%s leaves [models] codex undefined; set one the judge Codex home's own login accepts (its default, %q, is not)", cfgPath, cfg.Models.Codex)
+		t.Skipf("%s leaves [models] codex undefined; set one explicitly so this test is not silently coupled to applyDefaults' own choice (currently %q)", cfgPath, cfg.Models.Codex)
 	}
 
 	return liveJudgeConfig{codexHome: cfg.JudgeCodexHome, codexModel: raw.Models.Codex}
@@ -330,7 +331,7 @@ func TestLiveJudge(t *testing.T) {
 		t.Fatalf("head sha: %v", err)
 	}
 
-	claims := response.BuildClaims{FilesChanged: []string{liveGreetGoFilename}, TestExit: 0, LintExit: 0}
+	claims := response.BuildClaims{FilesChanged: []string{liveGreetGoFilename}}
 	report := response.BuildReport{
 		TaskN:       1,
 		BuildClaims: claims,

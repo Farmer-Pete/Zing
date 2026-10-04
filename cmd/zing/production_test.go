@@ -371,7 +371,7 @@ func (n neverCalledRuntime) Run(context.Context, runtime.RunRequest) (runtime.Ru
 // neverCalledCommandRunner fails the test if its Run is ever called.
 type neverCalledCommandRunner struct{ t *testing.T }
 
-func (n neverCalledCommandRunner) Run(context.Context, string, string, string, time.Duration) (int, error) {
+func (n neverCalledCommandRunner) Run(context.Context, string, string, string, time.Duration, job.CommandIO) (int, error) {
 	n.t.Helper()
 	n.t.Fatal("CommandRunner.Run was called; the sandbox gate should have refused before any command ran")
 	return -1, nil

@@ -1531,7 +1531,7 @@ type judgeScriptedCheckCommands struct {
 	gotDir string
 }
 
-func (c *judgeScriptedCheckCommands) Run(ctx context.Context, dir, repoGit, shellCmd string, timeout time.Duration) (int, error) {
+func (c *judgeScriptedCheckCommands) Run(ctx context.Context, dir, repoGit, shellCmd string, timeout time.Duration, cio CommandIO) (int, error) {
 	if shellCmd == judgeCheckScenarioCmd {
 		if c.i >= len(c.steps) {
 			return 0, fmt.Errorf("judgeScriptedCheckCommands: no more scripted steps for %q", shellCmd)
@@ -1542,7 +1542,7 @@ func (c *judgeScriptedCheckCommands) Run(ctx context.Context, dir, repoGit, shel
 		return step.exit, step.err
 	}
 	if c.real != nil {
-		return c.real.Run(ctx, dir, repoGit, shellCmd, timeout)
+		return c.real.Run(ctx, dir, repoGit, shellCmd, timeout, cio)
 	}
 	return 0, nil
 }
@@ -2000,8 +2000,6 @@ const judgeFixBuildScript = `<zing job="build" outcome="ok">
     <files_changed>
       <path>hello.txt</path>
     </files_changed>
-    <test_exit>0</test_exit>
-    <lint_exit>0</lint_exit>
   </claims>
   <report>Fixed the failing scenario's own check.</report>
   <notes></notes>

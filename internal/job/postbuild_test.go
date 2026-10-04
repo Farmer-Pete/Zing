@@ -18,6 +18,7 @@ import (
 	"errors"
 	"io/fs"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -518,7 +519,7 @@ func pbBuildStep(filesChanged []string, extras []response.ExtraClaim, sessionID 
 	return pbScriptedStep{res: runtime.RunResult{
 		Response: &response.BuildResponse{
 			Job: response.JobBuild, Outcome: response.OutcomeOk,
-			Claims: response.BuildClaims{FilesChanged: filesChanged, TestExit: 0, LintExit: 0},
+			Claims: response.BuildClaims{FilesChanged: filesChanged},
 			Extras: extras, Report: "did something",
 		},
 		SessionID: sessionID, ExitCode: 0, AgentTime: time.Second,
@@ -893,6 +894,63 @@ func pbEscalateDirect(t *testing.T, s *store.Store, ticketID int64, runID, sessi
 	return open[len(open)-1].ID
 }
 
+// pbEscalationTextRetry and pbEscalationTextAbandon are the two option
+// texts escalationOptionsFor (store/commit.go) assembles for a post-seal
+// escalation (goconst: each repeats across this file's own fixture and
+// assertions).
+const (
+	pbEscalationTextRetry   = "Retry"
+	pbEscalationTextAbandon = "Abandon"
+)
+
+// pbLegacyEscalationQuestion inserts an escalation message plus its linked
+// question directly through store.InsertMessage, carrying the fixed
+// three-option payload every escalation offered before #47 item 2
+// (escalation_test.go's own legacyEscalationQuestion, package job_test,
+// unreachable from here): "Retry", "Back to planning", and "Abandon",
+// recommended "b". pbEscalateDirect now goes through the fixed escalateTx,
+// which never recommends "b" post-seal any more (either answered explicitly
+// or defaulted through roundRecommendedOption, planning.go), so it cannot
+// produce this shape -- this helper simulates one of the escalations the
+// database already carried before that fix shipped. Returns the linked
+// question's id.
+func pbLegacyEscalationQuestion(t *testing.T, s *store.Store, ticketID int64, code response.EscalationCode, origin response.EscalationOrigin) int64 {
+	t.Helper()
+	payload := pbTestEscalationPayload(code, origin)
+	body := string(code) + ": " + payload.What
+	escPayload, err := json.Marshal(payload)
+	if err != nil {
+		t.Fatalf("pbLegacyEscalationQuestion: marshal escalation payload: %v", err)
+	}
+	escID, err := s.InsertMessage(t.Context(), store.Message{
+		TicketID: ticketID, Type: "escalation", Author: authorZing, Body: body, Payload: escPayload,
+	})
+	if err != nil {
+		t.Fatalf("pbLegacyEscalationQuestion: InsertMessage(escalation): %v", err)
+	}
+
+	qPayload, err := json.Marshal(response.QuestionPayload{
+		Key: "Q1", Kind: response.QuestionKindQuestion, State: response.QuestionStateOpen,
+		Recommended: "b",
+		Options: []response.Option{
+			{Key: "a", Text: pbEscalationTextRetry},
+			{Key: "b", Text: "Back to planning"},
+			{Key: "c", Text: pbEscalationTextAbandon},
+		},
+	})
+	if err != nil {
+		t.Fatalf("pbLegacyEscalationQuestion: marshal question payload: %v", err)
+	}
+	qID, err := s.InsertMessage(t.Context(), store.Message{
+		TicketID: ticketID, ParentID: &escID, Type: msgTypeQuestion, Author: authorZing,
+		State: new(questionStateOpen), Body: body + "\n\nHow should Zing proceed?", Payload: qPayload,
+	})
+	if err != nil {
+		t.Fatalf("pbLegacyEscalationQuestion: InsertMessage(question): %v", err)
+	}
+	return qID
+}
+
 // pbAnswerEscalation answers questionID with option (escalation_test.go's
 // own answerGateQuestion, package job_test, unreachable from here).
 func pbAnswerEscalation(t *testing.T, s *store.Store, ticketID, questionID int64, option string) {
@@ -1131,16 +1189,81 @@ func TestPreludeAbandon(t *testing.T) {
 	}
 }
 
-// TestPreludeBackToPlanningReplanUnsupported proves 5.6's own choice b row
-// (D14 of Package 8, design section 5.5): back to planning is deferred, so
-// choice b, or a reply with no option, re-escalates replan_unsupported with
-// the origin unchanged.
-func TestPreludeBackToPlanningReplanUnsupported(t *testing.T) {
+// TestPreludeAbandonKeepsPostSealOptionIDs proves #47 item 2's option-ID
+// stability through the real decode path: a post-seal escalation offers
+// only Retry and Abandon, their keys stay "a" and "c" (Abandon is never
+// renumbered to "b" just because Back to planning is missing), and
+// answering the stored Abandon key -- read back from the question's own
+// payload, not hardcoded -- resolves through store.AnswerQuestion (SaveDraft
+// plus SendBatch) and abandons the ticket rather than sending it back to
+// planning.
+func TestPreludeAbandonKeepsPostSealOptionIDs(t *testing.T) {
 	t.Parallel()
 	s := newFixTestStore(t)
 	ticket := pbSeedTicketInState(t, s, stateReviewing)
 
 	qID := pbEscalateDirect(t, s, ticket.ID, nil, nil, response.EscalationCodeEnvironment, response.EscalationOriginFix)
+
+	msg, err := s.GetMessage(t.Context(), qID)
+	if err != nil {
+		t.Fatalf("GetMessage: %v", err)
+	}
+	var qp response.QuestionPayload
+	if err := json.Unmarshal(msg.Payload, &qp); err != nil {
+		t.Fatalf("unmarshal question payload: %v", err)
+	}
+
+	wantOptions := []response.Option{{Key: "a", Text: pbEscalationTextRetry}, {Key: "c", Text: pbEscalationTextAbandon}}
+	if !reflect.DeepEqual(qp.Options, wantOptions) {
+		t.Fatalf("question.Options = %+v, want %+v (post-seal: no Back to planning, Abandon keeps key c)", qp.Options, wantOptions)
+	}
+
+	var abandonKey string
+	for _, opt := range qp.Options {
+		if opt.Text == pbEscalationTextAbandon {
+			abandonKey = opt.Key
+		}
+	}
+	if abandonKey == "" {
+		t.Fatal("no option named Abandon among question.Options")
+	}
+
+	pbAnswerEscalation(t, s, ticket.ID, qID, abandonKey)
+
+	deps := pbClaim(t, s, pbFakeRuntime(t), ticket.ID)
+	commit, handled := pbRunPrelude(t, s, deps, ticket.ID)
+	if !handled {
+		t.Fatal("handled = false, want true")
+	}
+	if commit.Next != stateAbandoned {
+		t.Errorf("commit.Next = %q, want %q (not back to planning)", commit.Next, stateAbandoned)
+	}
+	if !commit.ResolveAll {
+		t.Error("commit.ResolveAll = false, want true")
+	}
+
+	final := pbGetTicket(t, s, ticket.ID)
+	if final.State != stateAbandoned {
+		t.Fatalf("ticket state = %q, want abandoned (not sent back to planning)", final.State)
+	}
+}
+
+// TestPreludeBackToPlanningReplanUnsupported proves 5.6's own choice b row
+// (D14 of Package 8, design section 5.5): back to planning is deferred, so
+// choice b, or a reply with no option, re-escalates replan_unsupported with
+// the origin unchanged. #47 item 2 fixed escalateTx to stop offering "b"
+// post-seal, and its own follow-up (roundRecommendedOption, planning.go)
+// stopped a plain reply defaulting to "b" either, so this answers one of
+// the escalations the database already carried before that fix shipped
+// (pbLegacyEscalationQuestion, stored Recommended "b"): a fresh post-seal
+// escalation's own reply-only default is TestEscalationReplyOnlyPostSealDefaultsToRetry
+// (building_escalation_test.go, package job_test) instead.
+func TestPreludeBackToPlanningReplanUnsupported(t *testing.T) {
+	t.Parallel()
+	s := newFixTestStore(t)
+	ticket := pbSeedTicketInState(t, s, stateReviewing)
+
+	qID := pbLegacyEscalationQuestion(t, s, ticket.ID, response.EscalationCodeEnvironment, response.EscalationOriginFix)
 	if _, err := s.SaveDraft(t.Context(), store.DraftInput{TicketID: ticket.ID, QuestionID: &qID, Text: "not yet"}); err != nil {
 		t.Fatalf("SaveDraft: %v", err)
 	}

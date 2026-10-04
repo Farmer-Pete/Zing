@@ -672,6 +672,54 @@ func TestPlanningHandler_Gate_Reject_NoOpenSessionGoesToFreshFirstTurn(t *testin
 	}
 }
 
+// TestPlanningHandler_Gate_Reject_CapGateIncludesStoredFloorFindings proves
+// issue #48 review P2: rejecting a gate posted at the loop cap
+// (job/planning.go's own gateCapMarker, written in the same commit as the
+// gate) carries the cohort's stored at-or-below-floor findings into the
+// resume, fenced exactly as the floor-findings resume renders them,
+// alongside the owner's notes -- a bare "fix these" note otherwise gives the
+// planner nothing to act on.
+func TestPlanningHandler_Gate_Reject_CapGateIncludesStoredFloorFindings(t *testing.T) {
+	t.Parallel()
+	s := newJobTestStore(t)
+	ticketID := seedQueuedTicket(t, s)
+	rt := fakeRuntime(t)
+	advanceQueuedToPlanning(t, s, rt, ticketID)
+	apply(t, s, getTicket(t, s, ticketID), mustPlanning(t, s, claim(t, s, rt, ticketID), ticketID)) // classify
+	apply(t, s, getTicket(t, s, ticketID), mustPlanning(t, s, claim(t, s, rt, ticketID), ticketID)) // first turn: posts Q1
+	answerFixtureQuestion(t, s, ticketID)                                                           // Q1: opens the planning session, still open after
+
+	planVersion, runID := seedCohort(t, s, ticketID, validPlan("Cap gate reject."), validScenarios(2, "capreject"))
+	f := finding(response.SeverityMinor, "plan/design/shape", "still a bit off", "tighten the copy")
+	seedPlanreviewArtifact(t, s, ticketID, planVersion, runID, f)
+	insertUpdateMarker(t, s, ticketID, fmt.Sprintf("gate cap reached plan v%d", planVersion))
+
+	qID := seedGateQuestion(t, s, ticketID, &runID)
+	const notes = "fix these"
+	answerGateQuestion(t, s, ticketID, qID, new("b"), notes)
+
+	openSess, _, err := s.LatestSession(t.Context(), ticketID, testStatePlanning, 12)
+	if err != nil {
+		t.Fatalf("LatestSession: %v", err)
+	}
+
+	resumeRT := &scriptedRuntime{t: t, steps: []scriptedStep{questionResult(response.JobPlanning, "gate-reject-cap-sess")}}
+	rec := &recordingRuntime{rt: resumeRT}
+	commit, err := runPlanning(t, s, claim(t, s, rec, ticketID), ticketID)
+	if err != nil {
+		t.Fatalf("gate reject (capped) Run: %v", err)
+	}
+	if commit.Session == nil || commit.Session.ID == nil || *commit.Session.ID != openSess.ID {
+		t.Fatalf("commit.Session = %+v, want the already-open session %d (a resume, not fresh)", commit.Session, openSess.ID)
+	}
+	if !strings.Contains(rec.lastReq.Prompt, "<<<UNTRUSTED ") || !strings.Contains(rec.lastReq.Prompt, "still a bit off") {
+		t.Errorf("resume prompt does not carry the capped gate's stored floor finding, fenced:\n%s", rec.lastReq.Prompt)
+	}
+	if !strings.Contains(rec.lastReq.Prompt, notes) {
+		t.Errorf("resume prompt does not carry the owner's rejection notes:\n%s", rec.lastReq.Prompt)
+	}
+}
+
 // ---- seeding helpers this file adds on top of planning_test.go's own ------
 
 // seedSealedCohort is seedCohort (planning_test.go), with every scenario

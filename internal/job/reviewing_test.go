@@ -2517,8 +2517,6 @@ const reReviewFixScript = `<zing job="build" outcome="ok">
     <files_changed>
       <path>greet.go</path>
     </files_changed>
-    <test_exit>0</test_exit>
-    <lint_exit>0</lint_exit>
   </claims>
   <report>Reviewed and touched up greet.go.</report>
   <notes></notes>

@@ -118,7 +118,7 @@ func TestFixKindThreadsSubject(t *testing.T) {
 			mid := writeFixRequestMarker(t, s, ticketID, tc.kind, "do the thing", 0)
 			ticket := getTicket(t, s, ticketID)
 
-			scriptRT := &scriptedRuntime{t: t, steps: []scriptedStep{buildStep([]string{helloTxt}, 0, 0, nil, "fix-sess-"+string(tc.kind))}}
+			scriptRT := &scriptedRuntime{t: t, steps: []scriptedStep{buildStep([]string{helloTxt}, nil, "fix-sess-"+string(tc.kind))}}
 			rec := &recordingRuntime{rt: scriptRT}
 			deps := claimForBuild(t, s, rec, ticketID)
 
@@ -163,7 +163,7 @@ func TestDriveFixRunsFirstTurn(t *testing.T) {
 	mid := writeFixRequestMarker(t, s, ticketID, job.FixKindCILog, testFixCILogText, 0)
 	ticket := getTicket(t, s, ticketID)
 
-	scriptRT := &scriptedRuntime{t: t, steps: []scriptedStep{buildStep([]string{helloTxt}, 0, 0, nil, "fix-first-sess")}}
+	scriptRT := &scriptedRuntime{t: t, steps: []scriptedStep{buildStep([]string{helloTxt}, nil, "fix-first-sess")}}
 	rec := &recordingRuntime{rt: scriptRT}
 	deps := claimForBuild(t, s, rec, ticketID)
 
@@ -232,7 +232,7 @@ func TestDriveFixResumesAfterAnswer(t *testing.T) {
 		t.Fatalf("SendBatch: %v", sendErr)
 	}
 
-	scriptRT.steps = append(scriptRT.steps, buildStep([]string{helloTxt}, 0, 0, nil, "fix-q-sess"))
+	scriptRT.steps = append(scriptRT.steps, buildStep([]string{helloTxt}, nil, "fix-q-sess"))
 	ticket = getTicket(t, s, ticketID)
 	deps2 := claimForBuild(t, s, scriptRT, ticketID)
 	resumeCommit, err := job.DriveFix(t.Context(), ticket, deps2, req) // resumes the answered round
@@ -250,9 +250,8 @@ func TestDriveFixResumesAfterAnswer(t *testing.T) {
 
 // TestDriveFixResumesClaimErrors proves review F003/F005's own claims-
 // pending resume case, generalized to a fix unit through advanceCheckedRun
-// (design section 5.4 change 1): a fix unit's own RUN claims a passing
-// test_exit the real command contradicts, so CHECK writes a claim-errors-
-// pending marker and the next DriveFix tick resumes it, still labeled
+// (design section 5.4 change 1): a fix unit's own RUN claims phantom.txt,
+// which nothing writes, so CHECK writes a claim-errors-pending marker and the next DriveFix tick resumes it, still labeled
 // "fix" and still carrying a nil task_n.
 func TestDriveFixResumesClaimErrors(t *testing.T) {
 	if testing.Short() {
@@ -263,20 +262,20 @@ func TestDriveFixResumesClaimErrors(t *testing.T) {
 	mid := writeFixRequestMarker(t, s, ticketID, job.FixKindCILog, testFixCILogText, 0)
 	ticket := getTicket(t, s, ticketID)
 
-	scriptRT := &scriptedRuntime{t: t, steps: []scriptedStep{buildStep([]string{helloTxt}, 0, 0, nil, "fix-pending-sess")}}
+	scriptRT := &scriptedRuntime{t: t, steps: []scriptedStep{buildStep([]string{helloTxt, phantomTxt}, nil, "fix-pending-sess")}}
 	rec := &recordingRuntime{rt: scriptRT}
-	deps := claimForBuild(t, s, rec, ticketID)
+	deps := withHelloAlwaysProject(claimForBuild(t, s, rec, ticketID), ticket)
 	req := job.FixRequest{MessageID: mid, Kind: job.FixKindCILog, Text: testFixCILogText, AfterRunID: 0}
 
-	commit, err := job.DriveFix(t.Context(), ticket, deps, req) // RUN: claims hello.txt, writes nothing
+	commit, err := job.DriveFix(t.Context(), ticket, deps, req) // RUN: claims phantom.txt, which nothing writes
 	if err != nil {
 		t.Fatalf("DriveFix (RUN): %v", err)
 	}
 	apply(t, s, ticket, commit)
 
 	ticket = getTicket(t, s, ticketID)
-	deps2 := claimForBuild(t, s, rec, ticketID)
-	checkCommit, err := job.DriveFix(t.Context(), ticket, deps2, req) // CHECK: claim errors pending (test_exit false)
+	deps2 := withHelloAlwaysProject(claimForBuild(t, s, rec, ticketID), ticket)
+	checkCommit, err := job.DriveFix(t.Context(), ticket, deps2, req) // CHECK: claim errors pending
 	if err != nil {
 		t.Fatalf("DriveFix (CHECK): %v", err)
 	}
@@ -285,9 +284,9 @@ func TestDriveFixResumesClaimErrors(t *testing.T) {
 	}
 	apply(t, s, ticket, checkCommit)
 
-	scriptRT.steps = append(scriptRT.steps, buildStep([]string{helloTxt}, 0, 0, nil, "fix-pending-sess"))
+	scriptRT.steps = append(scriptRT.steps, buildStep([]string{helloTxt, phantomTxt}, nil, "fix-pending-sess"))
 	ticket = getTicket(t, s, ticketID)
-	deps3 := claimForBuild(t, s, rec, ticketID)
+	deps3 := withHelloAlwaysProject(claimForBuild(t, s, rec, ticketID), ticket)
 	resumeCommit, err := job.DriveFix(t.Context(), ticket, deps3, req) // resume: claims
 	if err != nil {
 		t.Fatalf("DriveFix (resume): %v", err)
@@ -319,6 +318,45 @@ func TestDriveFixResumesClaimErrors(t *testing.T) {
 	}
 }
 
+// TestDriveFixCheckFailureResumesWithOutput proves a fix unit gets the
+// CHECK loop through the shared advanceCheckedRun with no fix-specific
+// code (#55): a failing test command resumes the fix session, labeled
+// "fix", with the command's output in the prompt.
+func TestDriveFixCheckFailureResumesWithOutput(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow end-to-end flow; runs in the full suite")
+	}
+	t.Parallel()
+	s, _, ticketID := buildTicketInBuilding(t)
+	mid := writeFixRequestMarker(t, s, ticketID, job.FixKindCILog, testFixCILogText, 0)
+	req := job.FixRequest{MessageID: mid, Kind: job.FixKindCILog, Text: testFixCILogText, AfterRunID: 0}
+	scriptRT := &scriptedRuntime{t: t, steps: []scriptedStep{buildStep([]string{}, nil, "fix-check-sess")}}
+	rec := &recordingRuntime{rt: scriptRT}
+
+	tick := func() store.HandlerCommit {
+		t.Helper()
+		ticket := getTicket(t, s, ticketID)
+		deps := withCheckTestCommand(claimForBuild(t, s, rec, ticketID), ticket, checkFailingTestCmd)
+		commit, err := job.DriveFix(t.Context(), ticket, deps, req)
+		if err != nil {
+			t.Fatalf("DriveFix: %v", err)
+		}
+		apply(t, s, ticket, commit)
+		return commit
+	}
+	tick() // RUN
+	check := tick()
+	if len(check.Messages) != 1 || !strings.HasPrefix(check.Messages[0].Body, checkPendingPrefix) {
+		t.Fatalf("CHECK commit.Messages = %+v, want one check failed pending marker", check.Messages)
+	}
+	scriptRT.steps = append(scriptRT.steps, buildStep([]string{}, nil, "fix-check-sess"))
+	tick() // resume
+	if rec.lastReq.Label != testFixLabel {
+		t.Errorf("resume request Label = %q, want %q", rec.lastReq.Label, testFixLabel)
+	}
+	assertFenced(t, rec.lastReq.Prompt, "check", checkFailLine)
+}
+
 // TestDriveFixResumesInvalidOutput proves advanceUnit's own "error,
 // invalid" branch (design section 5.4 change 1) carries a fix unit exactly
 // as it carries a task unit: a first invalid output is not escalated, and
@@ -346,7 +384,7 @@ func TestDriveFixResumesInvalidOutput(t *testing.T) {
 	}
 	apply(t, s, ticket, firstCommit)
 
-	scriptRT.steps = append(scriptRT.steps, buildStep([]string{helloTxt}, 0, 0, nil, "fix-invalid-sess"))
+	scriptRT.steps = append(scriptRT.steps, buildStep([]string{helloTxt}, nil, "fix-invalid-sess"))
 	ticket = getTicket(t, s, ticketID)
 	deps2 := claimForBuild(t, s, scriptRT, ticketID)
 	_, err = job.DriveFix(t.Context(), ticket, deps2, req) // resume: invalid
@@ -380,8 +418,9 @@ type canceledClaimsResume struct {
 // TestDriveFixResumesInterrupted, TestFixInterruptedResumeIsFree, and
 // TestFixInterruptedClaimsResumeResendsClaims each used to copy by hand
 // (PR review fix F3, the repo's "three repetitions before abstraction"
-// rule): it drives a fresh fix request through RUN (claims hello.txt,
-// writes nothing) and CHECK (claim errors pending), then resumes once more
+// rule): it drives a fresh fix request through RUN (claims phantom.txt,
+// which nothing writes) and CHECK (claim errors pending, the commands
+// passing), then resumes once more
 // with a runtime that reports runtime.ErrCanceled mid-flight, leaving the
 // session's newest run reserved with no outcome. The caller reconciles
 // that canceled resume its own way -- ExpireClaims (a plain lease expiry)
@@ -394,19 +433,19 @@ func driveFixThroughCanceledClaimsResume(t *testing.T, sessionID string) cancele
 	mid := writeFixRequestMarker(t, s, ticketID, job.FixKindCILog, testFixCILogText, 0)
 	ticket := getTicket(t, s, ticketID)
 
-	mismatchRT := &scriptedRuntime{t: t, steps: []scriptedStep{buildStep([]string{helloTxt}, 0, 0, nil, sessionID)}}
-	deps := claimForBuild(t, s, mismatchRT, ticketID)
+	mismatchRT := &scriptedRuntime{t: t, steps: []scriptedStep{buildStep([]string{helloTxt, phantomTxt}, nil, sessionID)}}
+	deps := withHelloAlwaysProject(claimForBuild(t, s, mismatchRT, ticketID), ticket)
 	req := job.FixRequest{MessageID: mid, Kind: job.FixKindCILog, Text: testFixCILogText, AfterRunID: 0}
 	maxResumes := deps.Machine.Jobs["build"].MaxResumes
 
-	commit, err := job.DriveFix(t.Context(), ticket, deps, req) // RUN: claims hello.txt, writes nothing
+	commit, err := job.DriveFix(t.Context(), ticket, deps, req) // RUN: claims phantom.txt, which nothing writes
 	if err != nil {
 		t.Fatalf("DriveFix (RUN): %v", err)
 	}
 	apply(t, s, ticket, commit)
 
 	ticket = getTicket(t, s, ticketID)
-	deps2 := claimForBuild(t, s, mismatchRT, ticketID)
+	deps2 := withHelloAlwaysProject(claimForBuild(t, s, mismatchRT, ticketID), ticket)
 	checkCommit, err := job.DriveFix(t.Context(), ticket, deps2, req) // CHECK: pending marker
 	if err != nil {
 		t.Fatalf("DriveFix (CHECK): %v", err)
@@ -422,7 +461,7 @@ func driveFixThroughCanceledClaimsResume(t *testing.T, sessionID string) cancele
 		{res: runtime.RunResult{ExitCode: -1, AgentTime: 0}, err: runtime.ErrCanceled},
 	}}
 	ticket = getTicket(t, s, ticketID)
-	deps3 := claimForBuild(t, s, canceledRT, ticketID)
+	deps3 := withHelloAlwaysProject(claimForBuild(t, s, canceledRT, ticketID), ticket)
 	if _, err = job.DriveFix(t.Context(), ticket, deps3, req); !errors.Is(err, runtime.ErrCanceled) { // resume: claims, interrupted mid-flight
 		t.Fatalf("err = %v, want errors.Is(err, runtime.ErrCanceled)", err)
 	}
@@ -464,7 +503,7 @@ func TestDriveFixResumesInterrupted(t *testing.T) {
 		t.Fatalf("session state after the canceled resume = %v, want SessionOpen", state)
 	}
 
-	resumeRT := &scriptedRuntime{t: t, steps: []scriptedStep{buildStep([]string{helloTxt}, 0, 0, nil, "fix-mismatch-sess")}}
+	resumeRT := &scriptedRuntime{t: t, steps: []scriptedStep{buildStep([]string{helloTxt}, nil, "fix-mismatch-sess")}}
 	ticket := getTicket(t, s, ticketID)
 	deps4 := claimForBuild(t, s, resumeRT, ticketID)
 	resumeCommit, err := job.DriveFix(t.Context(), ticket, deps4, req) // resume: "interrupted"
@@ -513,7 +552,7 @@ func TestFixInterruptedResumeIsFree(t *testing.T) {
 		t.Fatalf("session state after the canceled resume = %v, want SessionOpen", state)
 	}
 
-	resumeRT := &scriptedRuntime{t: t, steps: []scriptedStep{buildStep([]string{helloTxt}, 0, 0, nil, "fix-free-mismatch-sess")}}
+	resumeRT := &scriptedRuntime{t: t, steps: []scriptedStep{buildStep([]string{helloTxt}, nil, "fix-free-mismatch-sess")}}
 	ticket := getTicket(t, s, ticketID)
 	deps4 := claimForBuild(t, s, resumeRT, ticketID)
 	resumeCommit, err := job.DriveFix(t.Context(), ticket, deps4, req) // resume: "interrupted", free
@@ -540,7 +579,7 @@ func TestFixInterruptedResumeIsFree(t *testing.T) {
 // model): a fix unit's own claims resume, interrupted mid-flight, re-sends
 // the original claims text alongside the interrupted input on the next
 // tick, free and uncapped, since DriveFix shares advanceUnit (and
-// claimsPendingInput through it) with the task-unit handler.
+// pendingCheckResume through it) with the task-unit handler.
 func TestFixInterruptedClaimsResumeResendsClaims(t *testing.T) {
 	if testing.Short() {
 		t.Skip("slow end-to-end flow; runs in the full suite")
@@ -571,7 +610,7 @@ func TestFixInterruptedClaimsResumeResendsClaims(t *testing.T) {
 		t.Fatalf("session state after the canceled claims resume = %v, want SessionOpen", state)
 	}
 
-	rec := &recordingRuntime{rt: &scriptedRuntime{t: t, steps: []scriptedStep{buildStep([]string{helloTxt}, 0, 0, nil, "fix-claims-mismatch-sess")}}}
+	rec := &recordingRuntime{rt: &scriptedRuntime{t: t, steps: []scriptedStep{buildStep([]string{helloTxt}, nil, "fix-claims-mismatch-sess")}}}
 	ticket := getTicket(t, s, ticketID)
 	deps4 := claimForBuild(t, s, rec, ticketID)
 	resumeCommit, err := job.DriveFix(t.Context(), ticket, deps4, req) // resume: interrupted claims, free
@@ -622,7 +661,7 @@ func TestDriveFixLandWritesLandedMarker(t *testing.T) {
 	mid := writeFixRequestMarker(t, s, ticketID, job.FixKindFailure, "scenario 2 failed: timeout", 0)
 	ticket := getTicket(t, s, ticketID)
 
-	scriptRT := &scriptedRuntime{t: t, steps: []scriptedStep{buildStep([]string{helloTxt}, 0, 0, nil, "fix-land-sess")}}
+	scriptRT := &scriptedRuntime{t: t, steps: []scriptedStep{buildStep([]string{helloTxt}, nil, "fix-land-sess")}}
 	deps := withFixTestCmd(claimForBuild(t, s, scriptRT, ticketID), ticket)
 	req := job.FixRequest{MessageID: mid, Kind: job.FixKindFailure, Text: "scenario 2 failed: timeout", AfterRunID: 0}
 
@@ -684,7 +723,7 @@ func TestSecondFixAdvancesAfterFirstLanded(t *testing.T) {
 	mid1 := writeFixRequestMarker(t, s, ticketID, job.FixKindCILog, testFixCILogText, 0)
 	ticket := getTicket(t, s, ticketID)
 
-	scriptRT := &scriptedRuntime{t: t, steps: []scriptedStep{buildStep([]string{helloTxt}, 0, 0, nil, "fix1-sess")}}
+	scriptRT := &scriptedRuntime{t: t, steps: []scriptedStep{buildStep([]string{helloTxt}, nil, "fix1-sess")}}
 	deps := withFixTestCmd(claimForBuild(t, s, scriptRT, ticketID), ticket)
 	req1 := job.FixRequest{MessageID: mid1, Kind: job.FixKindCILog, Text: testFixCILogText, AfterRunID: 0}
 
@@ -710,7 +749,7 @@ func TestSecondFixAdvancesAfterFirstLanded(t *testing.T) {
 		t.Fatalf("MaxRunID: %v", err)
 	}
 	mid2 := writeFixRequestMarker(t, s, ticketID, job.FixKindFailure, "second problem", watermark)
-	scriptRT.steps = append(scriptRT.steps, buildStep([]string{helloTxt}, 0, 0, nil, "fix2-sess"))
+	scriptRT.steps = append(scriptRT.steps, buildStep([]string{helloTxt}, nil, "fix2-sess"))
 	ticket = getTicket(t, s, ticketID)
 	deps3 := withFixTestCmd2(claimForBuild(t, s, scriptRT, ticketID), ticket)
 	req2 := job.FixRequest{MessageID: mid2, Kind: job.FixKindFailure, Text: "second problem", AfterRunID: watermark}
@@ -789,7 +828,7 @@ func TestFixEscalationOriginFix(t *testing.T) {
 		mid := writeFixRequestMarker(t, s, ticketID, job.FixKindCILog, testFixCILogText, 0)
 		ticket := getTicket(t, s, ticketID)
 
-		scriptRT := &scriptedRuntime{t: t, steps: []scriptedStep{buildStep([]string{helloTxt}, 0, 0, nil, "fix-check-fail-sess")}}
+		scriptRT := &scriptedRuntime{t: t, steps: []scriptedStep{buildStep([]string{helloTxt}, nil, "fix-check-fail-sess")}}
 		deps := withFixTestCmd(claimForBuild(t, s, scriptRT, ticketID), ticket)
 		req := job.FixRequest{MessageID: mid, Kind: job.FixKindCILog, Text: testFixCILogText, AfterRunID: 0}
 
@@ -819,7 +858,7 @@ func TestFixEscalationOriginFix(t *testing.T) {
 		mid := writeFixRequestMarker(t, s, ticketID, job.FixKindFailure, "scenario 2 failed: timeout", 0)
 		ticket := getTicket(t, s, ticketID)
 
-		scriptRT := &scriptedRuntime{t: t, steps: []scriptedStep{buildStep([]string{helloTxt}, 0, 0, nil, "fix-sign-fail-sess")}}
+		scriptRT := &scriptedRuntime{t: t, steps: []scriptedStep{buildStep([]string{helloTxt}, nil, "fix-sign-fail-sess")}}
 		deps := withFixTestCmd(claimForBuild(t, s, scriptRT, ticketID), ticket)
 		req := job.FixRequest{MessageID: mid, Kind: job.FixKindFailure, Text: "scenario 2 failed: timeout", AfterRunID: 0}
 
@@ -855,7 +894,7 @@ func TestFixEscalationOriginFix(t *testing.T) {
 		ticket := getTicket(t, s, ticketID)
 
 		claimedExtras := []response.ExtraClaim{{Path: testExtraPath, Reason: testExtraReason}}
-		scriptRT := &scriptedRuntime{t: t, steps: []scriptedStep{buildStep([]string{helloTxt, testExtraPath}, 0, 0, claimedExtras, "fix-describe-fail-sess")}}
+		scriptRT := &scriptedRuntime{t: t, steps: []scriptedStep{buildStep([]string{helloTxt, testExtraPath}, claimedExtras, "fix-describe-fail-sess")}}
 		req := job.FixRequest{MessageID: mid, Kind: job.FixKindCILog, Text: testFixCILogText, AfterRunID: 0}
 
 		commit, err := job.DriveFix(t.Context(), ticket, withTouchCmd(claimForBuild(t, s, scriptRT, ticketID), ticket, testExtraPath), req) // RUN
@@ -896,7 +935,7 @@ func TestFixEscalationOriginFix(t *testing.T) {
 		ticket := getTicket(t, s, ticketID)
 
 		claimedExtras := []response.ExtraClaim{{Path: testExtraPath, Reason: testExtraReason}}
-		scriptRT := &scriptedRuntime{t: t, steps: []scriptedStep{buildStep([]string{helloTxt, testExtraPath}, 0, 0, claimedExtras, "fix-resolve-fail-sess")}}
+		scriptRT := &scriptedRuntime{t: t, steps: []scriptedStep{buildStep([]string{helloTxt, testExtraPath}, claimedExtras, "fix-resolve-fail-sess")}}
 		req := job.FixRequest{MessageID: mid, Kind: job.FixKindCILog, Text: testFixCILogText, AfterRunID: 0}
 
 		commit, err := job.DriveFix(t.Context(), ticket, withTouchCmd(claimForBuild(t, s, scriptRT, ticketID), ticket, testExtraPath), req) // RUN
@@ -975,7 +1014,7 @@ func TestFixEscalationOriginFix(t *testing.T) {
 		mid := writeFixRequestMarker(t, s, ticketID, job.FixKindCILog, testFixCILogText, 0)
 		ticket := getTicket(t, s, ticketID)
 
-		scriptRT := &scriptedRuntime{t: t, steps: []scriptedStep{buildStep([]string{helloTxt}, 0, 0, nil, "fix-exec-fail-sess")}}
+		scriptRT := &scriptedRuntime{t: t, steps: []scriptedStep{buildStep([]string{helloTxt}, nil, "fix-exec-fail-sess")}}
 		rec := &recordingRuntime{rt: scriptRT}
 		deps := claimForBuild(t, s, rec, ticketID)
 		req := job.FixRequest{MessageID: mid, Kind: job.FixKindCILog, Text: testFixCILogText, AfterRunID: 0}
@@ -988,7 +1027,7 @@ func TestFixEscalationOriginFix(t *testing.T) {
 
 		ticket = getTicket(t, s, ticketID)
 		deps2 := claimForBuild(t, s, rec, ticketID)
-		checkCommit, err := job.DriveFix(t.Context(), ticket, deps2, req) // CHECK: claim errors pending (test_exit false)
+		checkCommit, err := job.DriveFix(t.Context(), ticket, deps2, req) // CHECK: claim errors and the test command pending
 		if err != nil {
 			t.Fatalf("DriveFix (CHECK): %v", err)
 		}
@@ -1046,21 +1085,20 @@ func fixTicket(ticket store.Ticket) store.Ticket {
 }
 
 // prepareUnrecordedFixCommit drives an open fix request's own first RUN
-// turn (claiming claimFiles/lintExit, test_exit always claimed truthfully
-// as 0) and then commits writeFiles directly to the worktree branch
+// turn (claiming claimFiles) and then commits writeFiles directly to the worktree branch
 // (signed unless signed is false) under title (the landed report's own
 // Title when empty) -- without ever calling DriveFix's own LAND. It is
 // design section 5.3 step 0's single-unrecorded-commit scenario every
 // TestDriveFixAdoptionChecks case starts from, the fix driver's own mirror
 // of building_test.go's prepareUnrecordedCommit.
-func prepareUnrecordedFixCommit(t *testing.T, claimFiles []string, lintExit int, extras []response.ExtraClaim, titleOverride string, writeFiles map[string]string, signed bool) (*store.Store, int64, job.Deps, orchestrator.Worktree, job.FixRequest) {
+func prepareUnrecordedFixCommit(t *testing.T, claimFiles []string, extras []response.ExtraClaim, titleOverride string, writeFiles map[string]string, signed bool) (*store.Store, int64, job.Deps, orchestrator.Worktree, job.FixRequest) {
 	t.Helper()
 	s, _, ticketID := buildTicketInBuilding(t)
 	mid := writeFixRequestMarker(t, s, ticketID, job.FixKindCILog, testFixCILogText, 0)
 	req := job.FixRequest{MessageID: mid, Kind: job.FixKindCILog, Text: testFixCILogText, AfterRunID: 0}
 	ticket := getTicket(t, s, ticketID)
 
-	scriptRT := &scriptedRuntime{t: t, steps: []scriptedStep{buildStep(claimFiles, 0, lintExit, extras, "fix-adopt-sess")}}
+	scriptRT := &scriptedRuntime{t: t, steps: []scriptedStep{buildStep(claimFiles, extras, "fix-adopt-sess")}}
 	deps := claimForBuild(t, s, scriptRT, ticketID)
 	commit, err := job.DriveFix(t.Context(), fixTicket(ticket), deps, req) // RUN: first turn
 	if err != nil {
@@ -1138,7 +1176,7 @@ func TestDriveFixAdoptsVerifiedCommit(t *testing.T) {
 		t.Skip("slow end-to-end flow; runs in the full suite")
 	}
 	t.Parallel()
-	s, ticketID, _, wt, req := prepareUnrecordedFixCommit(t, []string{helloTxt}, 0, nil, "", map[string]string{helloTxt: helloWorldContent}, true)
+	s, ticketID, _, wt, req := prepareUnrecordedFixCommit(t, []string{helloTxt}, nil, "", map[string]string{helloTxt: helloWorldContent}, true)
 
 	sha, err := orchestratorHeadSHA(t, wt.Dir())
 	if err != nil {
@@ -1188,7 +1226,7 @@ func TestDriveFixAdoptionChecks(t *testing.T) {
 	t.Parallel()
 	t.Run("commands failed", func(t *testing.T) {
 		t.Parallel()
-		s, ticketID, deps, _, req := prepareUnrecordedFixCommit(t, []string{helloTxt}, 0, nil, "", map[string]string{helloTxt: helloWorldContent}, true)
+		s, ticketID, deps, _, req := prepareUnrecordedFixCommit(t, []string{helloTxt}, nil, "", map[string]string{helloTxt: helloWorldContent}, true)
 		ticket := getTicket(t, s, ticketID)
 		badProj := deps.Projects[ticket.ProjectID]
 		badProj.TestCmd = "false"
@@ -1198,7 +1236,7 @@ func TestDriveFixAdoptionChecks(t *testing.T) {
 
 	t.Run("tree not clean", func(t *testing.T) {
 		t.Parallel()
-		s, ticketID, deps, wt, req := prepareUnrecordedFixCommit(t, []string{helloTxt}, 0, nil, "", map[string]string{helloTxt: helloWorldContent}, true)
+		s, ticketID, deps, wt, req := prepareUnrecordedFixCommit(t, []string{helloTxt}, nil, "", map[string]string{helloTxt: helloWorldContent}, true)
 		if writeErr := os.WriteFile(filepath.Join(wt.Dir(), "untracked.txt"), []byte("x"), 0o600); writeErr != nil {
 			t.Fatalf("write untracked file: %v", writeErr)
 		}
@@ -1207,22 +1245,21 @@ func TestDriveFixAdoptionChecks(t *testing.T) {
 
 	t.Run("unsigned", func(t *testing.T) {
 		t.Parallel()
-		s, ticketID, deps, _, req := prepareUnrecordedFixCommit(t, []string{helloTxt}, 0, nil, "", map[string]string{helloTxt: helloWorldContent}, false)
+		s, ticketID, deps, _, req := prepareUnrecordedFixCommit(t, []string{helloTxt}, nil, "", map[string]string{helloTxt: helloWorldContent}, false)
 		assertFixAdoptionFails(t, s, ticketID, deps, req, "unsigned")
 	})
 
 	t.Run("subject mismatch", func(t *testing.T) {
 		t.Parallel()
-		s, ticketID, deps, _, req := prepareUnrecordedFixCommit(t, []string{helloTxt}, 0, nil, "a subject the report never gave", map[string]string{helloTxt: helloWorldContent}, true)
+		s, ticketID, deps, _, req := prepareUnrecordedFixCommit(t, []string{helloTxt}, nil, "a subject the report never gave", map[string]string{helloTxt: helloWorldContent}, true)
 		assertFixAdoptionFails(t, s, ticketID, deps, req, "subject mismatch")
 	})
 
 	t.Run("claims failed", func(t *testing.T) {
 		t.Parallel()
-		// The run claims lint_exit 1; the fixture project's real lint
-		// command ("true") always exits 0, so the adoption re-run
-		// disagrees with the stored claim.
-		s, ticketID, deps, _, req := prepareUnrecordedFixCommit(t, []string{helloTxt}, 1, nil, "", map[string]string{helloTxt: helloWorldContent}, true)
+		// The run also claims phantom.txt, which the commit never
+		// touches, so the stored files_changed claim disagrees with it.
+		s, ticketID, deps, _, req := prepareUnrecordedFixCommit(t, []string{helloTxt, phantomTxt}, nil, "", map[string]string{helloTxt: helloWorldContent}, true)
 		assertFixAdoptionFails(t, s, ticketID, deps, req, "claims failed")
 	})
 
@@ -1230,7 +1267,7 @@ func TestDriveFixAdoptionChecks(t *testing.T) {
 		t.Parallel()
 		extras := []response.ExtraClaim{{Path: extraTxt, Reason: "needed it"}}
 		files := map[string]string{helloTxt: helloWorldContent, extraTxt: "extra\n"}
-		s, ticketID, deps, _, req := prepareUnrecordedFixCommit(t, []string{helloTxt, extraTxt}, 0, extras, "", files, true)
+		s, ticketID, deps, _, req := prepareUnrecordedFixCommit(t, []string{helloTxt, extraTxt}, extras, "", files, true)
 		assertFixAdoptionFails(t, s, ticketID, deps, req, "undeclared path")
 	})
 }
@@ -1293,7 +1330,7 @@ func TestDriveFixEscalatesMissingRecorded(t *testing.T) {
 	req := job.FixRequest{MessageID: mid, Kind: job.FixKindCILog, Text: testFixCILogText, AfterRunID: 0}
 	ticket := getTicket(t, s, ticketID)
 
-	scriptRT := &scriptedRuntime{t: t, steps: []scriptedStep{buildStep([]string{helloTxt}, 0, 0, nil, "fix-missing-sess")}}
+	scriptRT := &scriptedRuntime{t: t, steps: []scriptedStep{buildStep([]string{helloTxt}, nil, "fix-missing-sess")}}
 	deps := withFixTestCmd(claimForBuild(t, s, scriptRT, ticketID), ticket)
 	commit, err := job.DriveFix(t.Context(), fixTicket(ticket), deps, req) // RUN: first turn
 	if err != nil {
@@ -1347,7 +1384,7 @@ func TestDriveFixWithNoChangesLandsAtHead(t *testing.T) {
 	mid := writeFixRequestMarker(t, s, ticketID, job.FixKindFailure, "scenario 1 failed in the re-run only", 0)
 	ticket := getTicket(t, s, ticketID)
 
-	scriptRT := &scriptedRuntime{t: t, steps: []scriptedStep{buildStep(nil, 0, 0, nil, "fix-noop-sess")}}
+	scriptRT := &scriptedRuntime{t: t, steps: []scriptedStep{buildStep(nil, nil, "fix-noop-sess")}}
 	deps := withNoopCommands(claimForBuild(t, s, scriptRT, ticketID), ticket)
 	req := job.FixRequest{MessageID: mid, Kind: job.FixKindFailure, Text: "scenario 1 failed in the re-run only", AfterRunID: 0}
 

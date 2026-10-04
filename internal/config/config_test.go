@@ -108,7 +108,7 @@ func TestLoad_MinimalConfigGetsEveryDefault(t *testing.T) {
 			Sonnet: "claude-sonnet-5",
 			Opus:   "claude-opus-5-5",
 			Fable:  "claude-fable-5-1",
-			Codex:  "gpt-5.5",
+			Codex:  "gpt-6-luna",
 		},
 		Dispatch: Dispatch{IntervalSeconds: 30, MaxParallel: 2},
 		Budget:   Budget{AgentMinutesPerTicket: 240, UsageHoldPercent: 80},

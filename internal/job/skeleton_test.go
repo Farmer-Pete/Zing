@@ -36,13 +36,14 @@ const (
 	testStateDone      = "done"
 	testRefFake1       = "fake#1"
 
-	testMsgTypeQuestion  = "question"
-	testWaitingQuestions = "questions"
-	testWaitingGate      = "gate"
-	testAuthorZing       = "zing"
-	testRuntimeClaude    = "claude"
-	testRuntimeFake      = "fake"
-	testRuntimeCodex     = "codex"
+	testMsgTypeQuestion   = "question"
+	testMsgTypeEscalation = "escalation"
+	testWaitingQuestions  = "questions"
+	testWaitingGate       = "gate"
+	testAuthorZing        = "zing"
+	testRuntimeClaude     = "claude"
+	testRuntimeFake       = "fake"
+	testRuntimeCodex      = "codex"
 
 	// testNoopShellCmd is the always-succeeds shell command several
 	// building tests give a project's TestCmd or LintCmd when the test
@@ -89,6 +90,11 @@ const (
 	// "every question settled" rule without each test inventing its own
 	// wording.
 	testQ1SettledDecision = "The owner's answer to Q1 settles this thread."
+	// testCaseReplyOnly names the escalation-resolution table tests' own
+	// "a text-only reply, no option at all" subtest (#47 follow-up:
+	// roundRecommendedOption, planning.go), shared across
+	// building_escalation_test.go and escalation_test.go.
+	testCaseReplyOnly = "ReplyOnly"
 )
 
 // testProject is the one project every test in this file seeds. LocalPath
@@ -844,11 +850,11 @@ type testJudgeCommands struct {
 	real job.CommandRunner
 }
 
-func (c testJudgeCommands) Run(ctx context.Context, dir, repoGit, shellCmd string, timeout time.Duration) (int, error) {
+func (c testJudgeCommands) Run(ctx context.Context, dir, repoGit, shellCmd string, timeout time.Duration, cio job.CommandIO) (int, error) {
 	if shellCmd == judgeCheckFixtureCmd {
 		return 0, nil
 	}
-	return c.real.Run(ctx, dir, repoGit, shellCmd, timeout)
+	return c.real.Run(ctx, dir, repoGit, shellCmd, timeout, cio)
 }
 
 // advanceJudgingMaxCalls bounds advanceJudging's own handler-call loop:

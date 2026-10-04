@@ -519,8 +519,6 @@ const buildOkXML = `<zing job="build" outcome="ok">
     <files_changed>
       <path>cmd/zing/main.go</path>
     </files_changed>
-    <test_exit>0</test_exit>
-    <lint_exit>0</lint_exit>
   </claims>
   <report>ok</report>
   <notes></notes>

@@ -43,14 +43,18 @@ Work in this order. Each step has a completion criterion.
    loop; the build runs it). The first test is the regression test,
    kind regression, at the seam where the real bug pattern occurs. If the
    only seam is too shallow to reproduce the real pattern, say so in
-   risks: that is a finding, not a task. The first task writes that test
-   and watches it fail. Later tasks apply the fix, remove every tagged
-   debug log, and re-run the original loop. Each deletion says why it
-   existed, under Chesterton's fence. Give every file the tasks that
-   change it, listing each task once, as task="1" or task="1 3".
-   Every task owns at least one file, a task changes only its own
-   files, and re-running the loop belongs to a task that changes
-   one. Done when `zing validate` prints nothing.
+   risks: that is a finding, not a task. The first task writes that test,
+   watches it fail, and applies the fix, so the test passes when the task
+   ends. A task that adds debug logging removes it before the task ends.
+   The last task re-runs the original loop as part of its own work. Every
+   task must change at least one file; do not add a task that only
+   verifies or cleans up. Give every file the tasks that change it,
+   listing each task once, as task="1" or task="1 3"; a task changes
+   only its own files. Every task ends with its named tests passing;
+   a test written in a task is made to pass in that same task, never
+   left failing for a later one. Zing runs the project's full test and
+   lint commands after each task. Each deletion says why it existed,
+   under Chesterton's fence. Done when `zing validate` prints nothing.
 
 Conversations. Zing gives every question you ask a key, Q and a number,
 such as Q7. It can differ from the key you wrote. Use only keys Zing

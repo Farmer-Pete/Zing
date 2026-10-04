@@ -307,6 +307,11 @@ func serve(ctx context.Context, cfgPath, dbPath string, seedDemo bool) error {
 		return err
 	}
 
+	// Each run's own stderr file (runjob.go's writeStderrFile) otherwise
+	// accumulates forever under <DATA_DIR>/runs/: swept the same way, once
+	// here before the dispatcher starts (ticket #8).
+	removeStaleStderrFiles(ctx, st, dataDir, time.Now())
+
 	gh, err := orchestrator.NewGitHubClient(cfg.GitHubToken)
 	if err != nil {
 		_ = st.Close()
@@ -669,6 +674,84 @@ func removeStartupJudgeDir(dataDir string) error {
 		return fmt.Errorf("serve: remove %s: %w", judgeRoot, err)
 	}
 	return nil
+}
+
+// stderrRetention is how long a finished run's own stderr file
+// (writeStderrFile, internal/job/runjob.go) survives before
+// removeStaleStderrFiles deletes it.
+const stderrRetention = 14 * 24 * time.Hour
+
+// removeStaleStderrFiles deletes every <dataDir>/runs/run-<id>-stderr.log
+// (writeStderrFile, internal/job/runjob.go) whose modification time is
+// older than stderrRetention, unless its own run is still open (runs.
+// outcome IS NULL, store.Store.OpenRunIDs), before the dispatcher starts
+// (ticket #8): nothing else ever removes one of these files, so without
+// this sweep <dataDir>/runs grows without bound. A file that matches the
+// run-<id>-stderr.log shape but whose id fails to parse, or whose id names
+// no open run, is treated as belonging to no open run, so it is removed on
+// age alone; any file outside that shape is left alone regardless of age.
+//
+// It logs one INFO line with the count of files it actually removed, and a
+// WARN line for every failure along the way (a failed open-run query or
+// directory read, a failed per-file stat, or a failed remove), and never
+// returns an error itself: a store or filesystem problem here is logged,
+// not fatal, so it never keeps serve from starting (Q5).
+func removeStaleStderrFiles(ctx context.Context, st *store.Store, dataDir string, now time.Time) int {
+	dir := filepath.Join(dataDir, "runs")
+
+	open, err := st.OpenRunIDs(ctx)
+	if err != nil {
+		slog.Warn("stderr retention skipped", "dir", dir, "err", err)
+		return 0
+	}
+
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		if !os.IsNotExist(err) {
+			slog.Warn("stderr retention skipped", "dir", dir, "err", err)
+			return 0
+		}
+		entries = nil
+	}
+
+	cutoff := now.Add(-stderrRetention)
+	n := 0
+	for _, entry := range entries {
+		if !entry.Type().IsRegular() {
+			continue
+		}
+		rest, ok := strings.CutPrefix(entry.Name(), "run-")
+		if !ok {
+			continue
+		}
+		idStr, ok := strings.CutSuffix(rest, "-stderr.log")
+		if !ok {
+			continue
+		}
+		id, perr := strconv.ParseInt(idStr, 10, 64)
+		if perr == nil && open[id] {
+			continue
+		}
+
+		path := filepath.Join(dir, entry.Name())
+
+		info, err := entry.Info()
+		if err != nil {
+			slog.Warn("stderr file stat failed", "path", path, "err", err)
+			continue
+		}
+		if !info.ModTime().Before(cutoff) {
+			continue
+		}
+		if err := os.Remove(path); err != nil {
+			slog.Warn("stderr file remove failed", "path", path, "err", err)
+			continue
+		}
+		n++
+	}
+
+	slog.Info("stderr files removed", "count", n)
+	return n
 }
 
 // buildJobProjects builds one orchestrator.Orchestrator per configured

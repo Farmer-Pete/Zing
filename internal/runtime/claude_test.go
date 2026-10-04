@@ -765,3 +765,93 @@ func TestClaude_DecodeErrorIsInvalidOutput(t *testing.T) {
 		t.Error("Log is empty, want the decode error detail")
 	}
 }
+
+// wantEnvValue fails t unless env holds name=want exactly once.
+func wantEnvValue(t *testing.T, env []string, name, want string) {
+	t.Helper()
+	var got []string
+	for _, kv := range env {
+		if n, v, ok := strings.Cut(kv, "="); ok && n == name {
+			got = append(got, v)
+		}
+	}
+	if len(got) != 1 {
+		t.Errorf("%s appears %d times in agentEnv output %v, want exactly once", name, len(got), env)
+		return
+	}
+	if got[0] != want {
+		t.Errorf("%s = %q, want %q", name, got[0], want)
+	}
+}
+
+// TestAgentEnvDisablesBackgroundTasks proves CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1
+// rides in agentEnv's output unconditionally (plan #54), the same way
+// CLAUDE_CODE_PROMPT_CACHE_TTL already does (TestClaude_EnvFilter): a
+// backgrounded command outlives the run that started it, so every agent run
+// needs this set, not just Claude's fake-CLI integration tests.
+func TestAgentEnvDisablesBackgroundTasks(t *testing.T) {
+	t.Parallel()
+
+	env := agentEnv(RunRequest{})
+	if !slices.Contains(env, "CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1") {
+		t.Errorf("agentEnv(RunRequest{}) = %v, want it to contain CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1", env)
+	}
+}
+
+// TestAgentEnvBashTimeoutsFromRequestTimeout proves BASH_DEFAULT_TIMEOUT_MS
+// and BASH_MAX_TIMEOUT_MS both carry req.Timeout minus the 60s margin (plan
+// #54): 45 minutes is 2700000ms, minus the 60000ms margin is 2640000, well
+// clear of the 120000ms floor.
+func TestAgentEnvBashTimeoutsFromRequestTimeout(t *testing.T) {
+	t.Parallel()
+
+	env := agentEnv(RunRequest{Timeout: 45 * time.Minute})
+	wantEnvValue(t, env, "BASH_DEFAULT_TIMEOUT_MS", "2640000")
+	wantEnvValue(t, env, "BASH_MAX_TIMEOUT_MS", "2640000")
+}
+
+// TestAgentEnvBashTimeoutsStayUnderShortRunDeadline proves both bash
+// timeout variables stay under the run's own deadline for short jobs
+// (issue #54 review): at 3 minutes the margin rule gives 120000 ms, and a
+// 1-minute job gets half the run, 30000 ms, never a limit longer than the
+// run itself.
+func TestAgentEnvBashTimeoutsStayUnderShortRunDeadline(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name    string
+		timeout time.Duration
+		want    string
+	}{
+		{"margin rule", 3 * time.Minute, "120000"},
+		{"half the run", time.Minute, "30000"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			env := agentEnv(RunRequest{Timeout: tc.timeout})
+			wantEnvValue(t, env, "BASH_DEFAULT_TIMEOUT_MS", tc.want)
+			wantEnvValue(t, env, "BASH_MAX_TIMEOUT_MS", tc.want)
+		})
+	}
+}
+
+// TestAgentEnvBashTimeoutsSurviveFilterDrop pins that the two bash timeout
+// variable names are not shaped like a secret to envNameBlocked (plan #54):
+// a *_MS suffix matches none of _TOKEN/_KEY/_SECRET/AWS_, so FilteredEnv's
+// drop pass never strips them out of agentEnv's result. This is a
+// regression test for exactly the drop pass that scrubs secrets.
+func TestAgentEnvBashTimeoutsSurviveFilterDrop(t *testing.T) {
+	t.Parallel()
+
+	if envNameBlocked("BASH_DEFAULT_TIMEOUT_MS") {
+		t.Error("envNameBlocked(BASH_DEFAULT_TIMEOUT_MS) = true, want false")
+	}
+	if envNameBlocked("BASH_MAX_TIMEOUT_MS") {
+		t.Error("envNameBlocked(BASH_MAX_TIMEOUT_MS) = true, want false")
+	}
+
+	env := agentEnv(RunRequest{Timeout: 45 * time.Minute})
+	wantEnvValue(t, env, "BASH_DEFAULT_TIMEOUT_MS", "2640000")
+	wantEnvValue(t, env, "BASH_MAX_TIMEOUT_MS", "2640000")
+}

@@ -418,6 +418,16 @@ type planreviewFindingsPayload struct {
 	Findings []response.Finding `json:"findings"`
 }
 
+// gateCapMarker mirrors job/planning.go's own gateCapMarker exactly (issue
+// #48 review P2): the fixed, version-scoped marker that file writes in the
+// same commit that posts a gate at machine.toml's planreview max_loops cap.
+// loadFindings reads this marker, not current config, so raising max_loops
+// after a capped gate posts can never hide the floor findings that gate
+// already asked the owner to review.
+func gateCapMarker(version int) string {
+	return fmt.Sprintf("gate cap reached plan v%d", version)
+}
+
 // loadFindings reads ticketID's above-floor plan-review findings for the
 // gate's context region (design section 7, D8, Task 11): the "planreview"
 // artifact stored at the current cohort's exact plan version
@@ -446,13 +456,28 @@ func (c *console) loadFindings(ctx context.Context, ticketID int64) ([]templates
 	}
 
 	var payload planreviewFindingsPayload
-	if err := json.Unmarshal(artifact.Payload, &payload); err != nil {
-		return nil, fmt.Errorf("console: unmarshal planreview artifact for ticket %d: %w", ticketID, err)
+	if unmarshalErr := json.Unmarshal(artifact.Payload, &payload); unmarshalErr != nil {
+		return nil, fmt.Errorf("console: unmarshal planreview artifact for ticket %d: %w", ticketID, unmarshalErr)
+	}
+
+	// capped reads job/planning.go's own gateCapMarker for this cohort's
+	// exact plan version (issue #48 review P2), not current config: a gate
+	// posted at the cap carries only at-or-below-floor findings (an
+	// above-floor survivor escalates instead of posting a gate), so the
+	// per-finding floor filter below must stop hiding them once that marker
+	// is present -- they are exactly what the owner now decides on. Reading
+	// the marker the gate's own commit wrote, rather than recomputing
+	// CountDeliveredReviews against machine.toml, means raising max_loops
+	// after the gate posts can never hide findings it already asked the
+	// owner to review.
+	_, capped, err := c.store.Marker(ctx, ticketID, gateCapMarker(cohort.PlanVersion))
+	if err != nil {
+		return nil, fmt.Errorf("console: gate cap marker for ticket %d: %w", ticketID, err)
 	}
 
 	rows := make([]templates.FindingRow, 0, len(payload.Findings))
 	for _, f := range payload.Findings {
-		if f.Severity.Rank() <= c.floor.Rank() {
+		if f.Severity.Rank() <= c.floor.Rank() && !capped {
 			continue
 		}
 		rows = append(rows, templates.FindingRow{
@@ -531,7 +556,8 @@ const (
 // run <id>[...]", invalidOutputCommit's "response invalid run
 // <id>\n<reason>", store.CountSealMismatches' "seal mismatch cohort <id>",
 // and building.go's own markerClaimsOkFmt, markerClaimErrorsPendingFmt,
-// markerClaimErrorsDeliveredFmt, markerPerimeterResolvedFmt, the escalation
+// markerClaimErrorsDeliveredFmt, markerPerimeterResolvedFmt, checkloop.go's
+// markerCheckFailedPendingFmt and markerCheckFailedDeliveredFmt, the escalation
 // resolution's "retry requested", and markerPerimeterQuestionDroppedFmt --
 // and reviewing.go's own "review round <n> done/asked/failed/void", "review
 // discussed <id>", and "review note <id>" -- so displayBody can recognize
@@ -550,6 +576,8 @@ const (
 	updateMarkerClaimsOkPrefix                 = "claims ok run "
 	updateMarkerClaimErrorsPendingPrefix       = "claim errors pending run "
 	updateMarkerClaimErrorsDeliveredPrefix     = "claim errors delivered run "
+	updateMarkerCheckFailedPendingPrefix       = "check failed pending run "
+	updateMarkerCheckFailedDeliveredPrefix     = "check failed delivered run "
 	updateMarkerPerimeterResolvedPrefix        = "perimeter resolved run "
 	updateMarkerRetryRequested                 = "retry requested"
 	updateMarkerPerimeterQuestionDroppedPrefix = "perimeter question dropped run "
@@ -1779,6 +1807,10 @@ func updateLine(m *store.MessageRow, agent string) (string, bool) {
 		return claimErrorsPendingLine(body), true
 	case strings.HasPrefix(body, updateMarkerClaimErrorsDeliveredPrefix):
 		return "Claim errors sent back to run " + strings.TrimPrefix(body, updateMarkerClaimErrorsDeliveredPrefix) + ".", true
+	case strings.HasPrefix(body, updateMarkerCheckFailedPendingPrefix):
+		return checkFailedPendingLine(body), true
+	case strings.HasPrefix(body, updateMarkerCheckFailedDeliveredPrefix):
+		return "Test and lint output sent back to run " + strings.TrimPrefix(body, updateMarkerCheckFailedDeliveredPrefix) + ".", true
 	case strings.HasPrefix(body, updateMarkerPerimeterResolvedPrefix):
 		return "Perimeter decided for run " + strings.TrimPrefix(body, updateMarkerPerimeterResolvedPrefix) + ".", true
 	case body == updateMarkerRetryRequested:
@@ -2251,12 +2283,25 @@ func fixLandedLine(first string) (string, bool) {
 // first line as one owner-facing sentence, then the marker's own error
 // lines unchanged (design section 9.2): unlike validationErrorsLine's own
 // "Field <path>: <message>" rewrite, a claim error's own path (for example
-// "claims/test_exit: observed 1, want 0") is already the owner-facing
-// shape CheckBuildClaims and CheckCommandsPassed produce.
+// "claims/files_changed: observed [a.go], claimed [a.go, b.go]") is
+// already the owner-facing shape CheckBuildClaims produces.
 func claimErrorsPendingLine(body string) string {
 	first, rest, hasRest := strings.Cut(body, "\n")
 	rid := strings.TrimPrefix(first, updateMarkerClaimErrorsPendingPrefix)
 	header := "Claim check failed for run " + rid + ":"
+	if !hasRest {
+		return header
+	}
+	return header + "\n" + rest
+}
+
+// checkFailedPendingLine renders a "check failed pending run <rid>" body's
+// first line as one owner-facing sentence, then the failing commands'
+// sections unchanged (#55), mirroring claimErrorsPendingLine.
+func checkFailedPendingLine(body string) string {
+	first, rest, hasRest := strings.Cut(body, "\n")
+	rid := strings.TrimPrefix(first, updateMarkerCheckFailedPendingPrefix)
+	header := "Test or lint failed for run " + rid + ":"
 	if !hasRest {
 		return header
 	}

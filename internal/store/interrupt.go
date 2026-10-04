@@ -94,6 +94,10 @@ type ForeignClaim struct {
 	Owner    string
 	Expires  time.Time
 	Open     []OpenRun // runs of the ticket's sessions with a null outcome
+	// Check is the ticket's recorded CHECK command (#55), nil when none is
+	// recorded: reclaim judges its process group by the same rules as an
+	// open run's.
+	Check *OpenCheck
 }
 
 // OpenRun is one run of a ForeignClaim's ticket with a null outcome: enough
@@ -143,7 +147,7 @@ func foreignClaimRows(ctx context.Context, s *Store, self string) ([]claimRow, e
 
 // ForeignClaims returns every ticket claimed by an owner other than self,
 // each with its sessions' open (null-outcome) runs (design section 5.3,
-// 6.3).
+// 6.3) and its recorded CHECK command, if any (#55).
 func (s *Store) ForeignClaims(ctx context.Context, self string) ([]ForeignClaim, error) {
 	claimRows, err := foreignClaimRows(ctx, s, self)
 	if err != nil {
@@ -160,7 +164,15 @@ func (s *Store) ForeignClaims(ctx context.Context, self string) ([]ForeignClaim,
 		if oerr != nil {
 			return nil, fmt.Errorf("foreign claims: %w", oerr)
 		}
-		out = append(out, ForeignClaim{TicketID: c.ticketID, Owner: c.owner, Expires: expires, Open: open})
+		fc := ForeignClaim{TicketID: c.ticketID, Owner: c.owner, Expires: expires, Open: open}
+		check, hasCheck, cerr := openCheckForTicket(ctx, s.db, c.ticketID)
+		if cerr != nil {
+			return nil, fmt.Errorf("foreign claims: %w", cerr)
+		}
+		if hasCheck {
+			fc.Check = &check
+		}
+		out = append(out, fc)
 	}
 	return out, nil
 }
@@ -224,22 +236,34 @@ func openRunsForTicket(ctx context.Context, q queryer, ticketID int64) ([]OpenRu
 // Reserve uses (design section 5.3). applied is false, err nil, when the
 // fence finds no matching claim.
 func (s *Store) InterruptRuns(ctx context.Context, ticketID int64, owner string, expires time.Time) (applied bool, err error) {
-	return s.interruptClaimedRuns(ctx, ticketID, owner, expires)
+	return s.interruptClaimedRuns(ctx, ticketID, owner, expires, nil)
 }
 
 // ReclaimClaim is InterruptRuns fenced on the foreign owner and expiry
 // ForeignClaims reads (design section 5.3, 6.3): reclaiming a dead serve's
 // claim and recording a shutdown interrupt are the same database write
 // under a different caller's fence, so both share interruptClaimedRuns.
-func (s *Store) ReclaimClaim(ctx context.Context, ticketID int64, owner string, expires time.Time) (applied bool, err error) {
-	return s.interruptClaimedRuns(ctx, ticketID, owner, expires)
+// check is the CHECK row ForeignClaims read and reclaim judged gone (nil
+// when it read none). The row is deleted in the same transaction, but only
+// while it is still exactly that record (its generation); a row
+// recorded since, or one that appeared where none was read, keeps the
+// claim (applied false) so a later pass can judge the new process (#55).
+func (s *Store) ReclaimClaim(ctx context.Context, ticketID int64, owner string, expires time.Time, check *OpenCheck) (applied bool, err error) {
+	return s.interruptClaimedRuns(ctx, ticketID, owner, expires, func(tx *sql.Tx) (bool, error) {
+		if check != nil {
+			return deleteCheckIfSame(ctx, tx, ticketID, *check)
+		}
+		_, present, err := openCheckForTicket(ctx, tx, ticketID)
+		return !present, err
+	})
 }
 
 // interruptClaimedRuns is the shared transaction body behind InterruptRuns
-// and ReclaimClaim (design section 5.3): fence on the exact claim, then
+// and ReclaimClaim (design section 5.3): fence on the exact claim, run
+// afterFence when set (false keeps the claim and writes nothing), then
 // terminalize every open run of ticketID's sessions as interrupted, then
 // clear the claim.
-func (s *Store) interruptClaimedRuns(ctx context.Context, ticketID int64, owner string, expires time.Time) (bool, error) {
+func (s *Store) interruptClaimedRuns(ctx context.Context, ticketID int64, owner string, expires time.Time, afterFence func(*sql.Tx) (bool, error)) (bool, error) {
 	expires = truncateExpires(expires)
 	now := time.Now()
 
@@ -258,6 +282,17 @@ func (s *Store) interruptClaimedRuns(ctx context.Context, ticketID int64, owner 
 		return false, nil
 	case err != nil:
 		return false, fmt.Errorf("interrupt runs: fence ticket %d: %w", ticketID, err)
+	}
+
+	if afterFence != nil {
+		proceed, fenceErr := afterFence(tx)
+		if fenceErr != nil {
+			return false, fmt.Errorf("interrupt runs: ticket %d: %w", ticketID, fenceErr)
+		}
+		if !proceed {
+			slog.Info("reclaim deferred: check command changed", "ticket_id", ticketID)
+			return false, nil
+		}
 	}
 
 	targets, err := interruptTargetsTx(ctx, tx, ticketID)

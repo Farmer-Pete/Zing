@@ -4,8 +4,6 @@
       <path>greet.go</path>
       <path>greet_test.go</path>
     </files_changed>
-    <test_exit>0</test_exit>
-    <lint_exit>0</lint_exit>
   </claims>
   <report>Added Greet(name string) string to greet.go, returning "Hello, &lt;name&gt;!", and greet_test.go pinning its return value.</report>
   <notes></notes>

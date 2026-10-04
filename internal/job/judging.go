@@ -1156,7 +1156,7 @@ func (h judgeHandler) check(ctx context.Context, t store.Ticket, d Deps, n int, 
 		}
 	}()
 
-	exit, runErr := d.Commands.Run(ctx, jt.Dir(), proj.RepoGit, sc.Check, checkCommandTimeout)
+	exit, runErr := d.Commands.Run(ctx, jt.Dir(), proj.RepoGit, sc.Check, checkCommandTimeout, CommandIO{})
 	switch {
 	case runErr == nil:
 		// exit already holds the real exit code.

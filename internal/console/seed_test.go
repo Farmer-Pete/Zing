@@ -632,7 +632,6 @@ func TestSeedDemoStoresBuildMarkers(t *testing.T) {
 var demoBuildMarkerBodies = map[string]bool{
 	"claims ok run 5": true,
 	"claim errors pending run 6\n" +
-		"claims/test_exit: observed 1, want 0\n" +
 		"claims/files_changed: observed [greet.go], claimed [greet.go, greet_test.go]": true,
 	"perimeter resolved run 6": true,
 }

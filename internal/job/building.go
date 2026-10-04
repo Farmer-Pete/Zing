@@ -38,8 +38,9 @@ import (
 // job config are keyed under, "build" (design section 4.3, 6.3).
 const jobBuildName = string(response.JobBuild)
 
-// checkCommandTimeout bounds each of CHECK's two command re-runs (design
-// D16, section 6.4 step 1): 10 minutes, independently for test and lint.
+// checkCommandTimeout bounds the judge's scenario check command (design
+// D16): 10 minutes. CHECK's test and lint commands share checkBudget
+// instead (#55).
 const checkCommandTimeout = 10 * time.Minute
 
 // The two artifact types this file writes and reads (design section 4.1,
@@ -51,15 +52,10 @@ const (
 	artifactTypeFile        = "file"
 )
 
-// claimsTestExitPath and claimsLintExitPath are the two element paths
-// CheckCommandsPassed and CheckBuildClaims (internal/response/claims.go)
-// both report claim errors under: this file's own dedup step (a timeout's
-// own message, and dropping CheckBuildClaims's duplicate of an exit
-// CheckCommandsPassed already reported) matches on them by name.
-const (
-	claimsTestExitPath = "claims/test_exit"
-	claimsLintExitPath = "claims/lint_exit"
-)
+// Fence: claimsTestExitPath and claimsLintExitPath existed because CHECK
+// rewrote a timed-out exit's message and dropped CheckBuildClaims's
+// duplicate of an exit CheckCommandsPassed already reported; with no exit
+// claims there is nothing to dedupe (#55).
 
 // Marker head formats CHECK reads and writes (design section 4.2, 6.4):
 // Marker's own exact-first-line match makes "claims ok run 4" and "claims ok
@@ -72,38 +68,9 @@ const (
 	markerPerimeterQuestionDroppedFmt = "perimeter question dropped run %d"
 )
 
-// claimsPendingInput reads run rid's own "claim errors pending" marker and
-// builds the "claims" input and the "claim errors delivered" message that
-// marks it delivered (design section 6.4), shared by advanceCheckedRun's
-// own first attempt at a freshly-checked run and advanceUnit's interrupted-
-// resume re-send (F009, design section 7.4), which calls this for an
-// earlier run than the one that is currently newest. ok is false when
-// rid's marker is not pending, or a "claim errors delivered run <rid>"
-// marker already exists for it (the resume that answered it already ran;
-// never re-send).
-func claimsPendingInput(ctx context.Context, t store.Ticket, d Deps, rid int64) (input prompt.NamedInput, deliveredMsg store.Message, ok bool, err error) {
-	markerRow, pending, err := d.Store.Marker(ctx, t.ID, fmt.Sprintf(markerClaimErrorsPendingFmt, rid))
-	if err != nil {
-		return prompt.NamedInput{}, store.Message{}, false, fmt.Errorf("job: building: claim errors marker: %w", err)
-	}
-	if !pending {
-		return prompt.NamedInput{}, store.Message{}, false, nil
-	}
-	_, delivered, err := d.Store.Marker(ctx, t.ID, fmt.Sprintf(markerClaimErrorsDeliveredFmt, rid))
-	if err != nil {
-		return prompt.NamedInput{}, store.Message{}, false, fmt.Errorf("job: building: claim errors delivered marker: %w", err)
-	}
-	if delivered {
-		return prompt.NamedInput{}, store.Message{}, false, nil
-	}
-	_, errsText, _ := strings.Cut(markerRow.Body, "\n")
-	input = prompt.NamedInput{Label: "claims", Text: errsText, Untrusted: true}
-	deliveredMsg = store.Message{
-		TicketID: t.ID, Type: msgTypeUpdate, Author: authorSystem,
-		Body: fmt.Sprintf(markerClaimErrorsDeliveredFmt, rid),
-	}
-	return input, deliveredMsg, true, nil
-}
+// Fence: claimsPendingInput existed because advanceCheckedRun and the F009
+// interrupted re-send both read the one claims marker; pendingCheckResume
+// (checkloop.go) now reads both markers for both callers (#55).
 
 // The section 6.1/6.4/6.7 escalation What texts, byte for byte from the
 // plan. Why is this file's own plain-sentence gloss on each one: the plan
@@ -430,30 +397,31 @@ func (h buildingHandler) advanceUnit(ctx context.Context, t store.Ticket, d Deps
 	case string(response.OutcomeError):
 		bump, gate := resumeCharge(newestRun)
 
-		// F009 (design section 7.4): an interrupted claims resume re-sends
-		// its original claims input plus the interrupted input, free and
-		// uncapped, rather than losing the claims text -- walk back past
-		// every run still inside this same interrupted chain to the
-		// session's last settled (non-interrupted) run; if that run was
-		// ok and its own "claim errors pending" marker is still undelivered
-		// (the resume that was meant to answer it never finished), re-send
-		// it now, sharing claimsPendingInput with advanceCheckedRun's own
-		// first attempt at the same marker.
+		// F009 (design section 7.4): an interrupted claims or check resume
+		// re-sends its original inputs plus the interrupted input, free and
+		// uncapped by both max_resumes and check_loops, rather than losing
+		// them -- walk back past every run still inside this same
+		// interrupted chain to the session's last settled (non-interrupted)
+		// run; if that run was ok and its "claim errors pending" or "check
+		// failed pending" marker is still undelivered (the resume that was
+		// meant to answer it never finished), re-send it now, sharing
+		// pendingCheckResume with advanceCheckedRun. No delivered marker
+		// exists until a resumed run commits, so the loop counts it once.
 		if newestRun.Interrupted {
 			priorRun, found, priorErr := priorNonInterruptedRun(ctx, d, t.ID, sess.ID, newestRun.ID)
 			if priorErr != nil {
 				return store.HandlerCommit{}, priorErr
 			}
 			if found && priorRun.Outcome != nil && *priorRun.Outcome == string(response.OutcomeOk) {
-				claimsInput, deliveredMsg, pending, markerErr := claimsPendingInput(ctx, t, d, priorRun.ID)
+				cr, markerErr := pendingCheckResume(ctx, t, d, priorRun.ID)
 				if markerErr != nil {
 					return store.HandlerCommit{}, markerErr
 				}
-				if pending {
+				if cr.Claims || cr.Check {
 					interruptedInput := prompt.NamedInput{Label: labelInterrupted, Text: interruptedResumeText, Untrusted: false}
-					resumeCommit, resumeErr := h.runBuildResume(ctx, t, d, wt, u, sess, 0, nil, []prompt.NamedInput{claimsInput, interruptedInput}, bump)
+					resumeCommit, resumeErr := h.runBuildResume(ctx, t, d, wt, u, sess, 0, nil, append(cr.Inputs, interruptedInput), bump)
 					if resumeErr == nil && len(resumeCommit.Runs) > 0 {
-						resumeCommit.Messages = append(resumeCommit.Messages, deliveredMsg)
+						resumeCommit.Messages = append(resumeCommit.Messages, cr.Delivered...)
 					}
 					return withBranchResult(resumeCommit, resumeErr, wt)
 				}
@@ -516,26 +484,32 @@ func (h buildingHandler) advanceCheckedRun(ctx context.Context, t store.Ticket, 
 	}
 	u.Title = report.Report.Title
 
-	// The claims input is exactly the marker's own error lines (design
-	// section 6.4): priorInvalid is 0, not computed, since this session's
-	// newest run is the "ok" one CHECK just wrote a pending marker for --
-	// ConsecutiveInvalidOutputs' own walk stops at the first non-"error"
-	// outcome, so it can only ever read 0 here. claimsPendingInput is
-	// shared with advanceUnit's own interrupted-resume re-send (F009,
-	// design section 7.4), which calls it for an earlier run than this
-	// one's own rid.
-	claimsInput, deliveredMsg, pending, markerErr := claimsPendingInput(ctx, t, d, rid)
+	// The claims and check inputs are exactly their markers' bodies (design
+	// section 6.4, #55): priorInvalid is 0, not computed, since this
+	// session's newest run is the "ok" one CHECK just wrote a pending
+	// marker for. Claim errors are charged to max_resumes; a failing
+	// command alone is gated only by check_loops; both together resume
+	// once, charged, and count as one check loop (#55 plan D3).
+	cr, markerErr := pendingCheckResume(ctx, t, d, rid)
 	if markerErr != nil {
 		return store.HandlerCommit{}, markerErr
 	}
-	if pending {
+	if cr.Claims {
 		capCommit, mayResume, capErr := h.resumeCapGate(ctx, t, d, u.TaskN, sess, state)
 		if !mayResume {
 			return capCommit, capErr
 		}
-		resumeCommit, resumeErr := h.runBuildResume(ctx, t, d, wt, u, sess, 0, nil, []prompt.NamedInput{claimsInput}, true)
+	}
+	if cr.Check {
+		loopCommit, mayResume, loopErr := h.checkLoopGate(ctx, t, d, u, sess, rid, cr.CheckText)
+		if !mayResume {
+			return loopCommit, loopErr
+		}
+	}
+	if cr.Claims || cr.Check {
+		resumeCommit, resumeErr := h.runBuildResume(ctx, t, d, wt, u, sess, 0, nil, cr.Inputs, cr.Claims)
 		if resumeErr == nil && len(resumeCommit.Runs) > 0 {
-			resumeCommit.Messages = append(resumeCommit.Messages, deliveredMsg)
+			resumeCommit.Messages = append(resumeCommit.Messages, cr.Delivered...)
 		}
 		return resumeCommit, resumeErr
 	}
@@ -1808,29 +1782,31 @@ func buildSuccessCommit(t store.Ticket, d Deps, rr runResult, sessionCommit *sto
 
 // ---- CHECK, LAND --------------------------------------------------------
 
-// runCheckCommand runs one CHECK command re-run (design section 6.4 step
-// 1), logging "command re-run" (design section 11) regardless of outcome.
-// rid is the unit's newest ok run when one is already known (CHECK); it is
-// nil during step 0.5's adoption commands, run before the adopted commit's
-// own run is identified (design section 6.1 step 5's checks 1-2 precede
-// check 4, which is the first to name a run). A timeout reports exit -1
-// with timedOut true and no error; any other CommandRunner failure
-// (ErrSandbox, a wrapped context.Canceled, or anything else) is returned
-// unclassified for the caller to route.
-func runCheckCommand(ctx context.Context, d Deps, t store.Ticket, wt orchestrator.Worktree, proj Project, rid *int64, kind, shellCmd string) (exit int, timedOut bool, err error) {
+// runCheckCommand runs one CHECK command (design section 6.4 step 1)
+// within timeout, keeping the last checkOutputCap bytes of its output, and
+// logs "command re-run" (design section 11) on every completed run. rid is
+// the unit's newest ok run when one is already known (CHECK); it is nil
+// during step 0.5's adoption commands. onStart, when set, receives the
+// command's process group id. A timeout reports Exit -1 with TimedOut and
+// no error; any other CommandRunner failure (ErrSandbox, a wrapped
+// context.Canceled, or anything else) is returned unclassified for the
+// caller to route.
+func runCheckCommand(ctx context.Context, d Deps, t store.Ticket, wt orchestrator.Worktree, proj Project, rid *int64, kind, shellCmd string, timeout time.Duration, onStart func(pgid int)) (commandResult, error) {
+	out := newTailBuffer(checkOutputCap)
 	started := time.Now()
-	exit, runErr := d.Commands.Run(ctx, wt.Dir(), proj.RepoGit, shellCmd, checkCommandTimeout)
+	exit, runErr := d.Commands.Run(ctx, wt.Dir(), proj.RepoGit, shellCmd, timeout, CommandIO{Out: out, OnStart: onStart})
 	seconds := int(time.Since(started).Seconds())
+	r := commandResult{Kind: kind, Cmd: shellCmd, Exit: exit}
 	switch {
 	case runErr == nil:
-		slog.Info("command re-run", "ticket_id", t.ID, "run_id", int64OrZero(rid), "command", kind, "exit_code", exit, "seconds", seconds, "timed_out", false)
-		return exit, false, nil
 	case errors.Is(runErr, ErrCommandTimeout):
-		slog.Info("command re-run", "ticket_id", t.ID, "run_id", int64OrZero(rid), "command", kind, "exit_code", -1, "seconds", seconds, "timed_out", true)
-		return -1, true, nil
+		r.Exit, r.TimedOut = -1, true
 	default:
-		return exit, false, runErr
+		return commandResult{}, runErr
 	}
+	r.Output, r.Total = out.Tail(), out.Total()
+	slog.Info("command re-run", "ticket_id", t.ID, "run_id", int64OrZero(rid), "command", kind, "exit_code", r.Exit, "seconds", seconds, "timed_out", r.TimedOut, "output_bytes", r.Total)
+	return r, nil
 }
 
 // commandInfraEscalation classifies a non-timeout CommandRunner error
@@ -1908,11 +1884,7 @@ func pathErrorMsgs(errs []*response.PathError) []string {
 // "claims ok" marker write). rid is the unit's newest ok run; report is
 // that run's own build_report row.
 func (h buildingHandler) check(ctx context.Context, t store.Ticket, d Deps, proj Project, wt orchestrator.Worktree, plan response.Plan, u unit, rid int64, report store.BuildReportRow, firstCheck bool) (store.HandlerCommit, error) {
-	testExit, testTimedOut, err := runCheckCommand(ctx, d, t, wt, proj, &rid, "test", proj.TestCmd)
-	if err != nil {
-		return commandInfraEscalation(t, d, u, err)
-	}
-	lintExit, lintTimedOut, err := runCheckCommand(ctx, d, t, wt, proj, &rid, "lint", proj.LintCmd)
+	results, err := runCheckCommands(ctx, d, t, wt, proj, &rid)
 	if err != nil {
 		return commandInfraEscalation(t, d, u, err)
 	}
@@ -1933,21 +1905,7 @@ func (h buildingHandler) check(ctx context.Context, t store.Ticket, d Deps, proj
 	claimed := orchestrator.Perimeter(changed, declaredBefore, trustRoot, styleGuide)
 	extras := orchestrator.Perimeter(changed, declaredNow, trustRoot, styleGuide)
 
-	cmdErrs := response.CheckCommandsPassed(testExit, lintExit)
-	for i, e := range cmdErrs {
-		if e.Path == claimsTestExitPath && testTimedOut {
-			cmdErrs[i] = &response.PathError{Path: claimsTestExitPath, Msg: "timed out after 10m"}
-		}
-		if e.Path == claimsLintExitPath && lintTimedOut {
-			cmdErrs[i] = &response.PathError{Path: claimsLintExitPath, Msg: "timed out after 10m"}
-		}
-	}
-	cmdPaths := make(map[string]bool, len(cmdErrs))
-	for _, e := range cmdErrs {
-		cmdPaths[e.Path] = true
-	}
-
-	obs := response.BuildObservation{FilesChanged: changedPathList(changed), TestExit: testExit, LintExit: lintExit}
+	obs := response.BuildObservation{FilesChanged: changedPathList(changed)}
 	claimErrs := response.CheckBuildClaims(report.Report.BuildClaims, obs)
 
 	resp := &response.BuildResponse{Claims: report.Report.BuildClaims, Extras: report.Report.Extras, Fences: report.Report.Fences}
@@ -1955,15 +1913,10 @@ func (h buildingHandler) check(ctx context.Context, t store.Ticket, d Deps, proj
 		Changed: changedPathList(changed), Deleted: deletedPathList(changed), Extras: extraPathList(claimed),
 	})
 
-	var errs []*response.PathError
-	errs = append(errs, cmdErrs...)
-	for _, e := range claimErrs {
-		if (e.Path == claimsTestExitPath || e.Path == claimsLintExitPath) && cmdPaths[e.Path] {
-			continue
-		}
-		errs = append(errs, e)
-	}
+	errs := make([]*response.PathError, 0, len(claimErrs)+len(treeErrs))
+	errs = append(errs, claimErrs...)
 	errs = append(errs, treeErrs...)
+	checkText := checkInputText(results)
 
 	foreign := foreignTaskPaths(plan, u.TaskN, changedPathList(changed))
 	if len(foreign) > 0 {
@@ -1971,17 +1924,27 @@ func (h buildingHandler) check(ctx context.Context, t store.Ticket, d Deps, proj
 	}
 	errs = append(errs, foreign...)
 
-	slog.Info("claim check", "ticket_id", t.ID, "run_id", rid, "task_n", u.TaskN, "errors", len(errs), "changed", len(changed), "extras", len(extras))
+	slog.Info("claim check", "ticket_id", t.ID, "run_id", rid, "task_n", u.TaskN, "errors", len(errs), "changed", len(changed), "extras", len(extras),
+		"check_failed", checkText != "", "test_exit", checkedExit(results, checkKindTest), "lint_exit", checkedExit(results, checkKindLint))
 
+	claimsFailed := len(errs) > 0
+	commandsFailed := checkText != ""
 	switch {
-	case len(errs) > 0:
-		lines := make([]string, len(errs))
-		for i, e := range errs {
-			lines[i] = e.Error()
-		}
-		body := fmt.Sprintf(markerClaimErrorsPendingFmt, rid) + "\n" + strings.Join(lines, "\n")
+	case claimsFailed || commandsFailed:
 		c := baseCommit(t, d)
-		c.Messages = []store.Message{{TicketID: t.ID, Type: msgTypeUpdate, Author: authorSystem, Body: body}}
+		if claimsFailed {
+			lines := make([]string, len(errs))
+			for i, e := range errs {
+				lines[i] = e.Error()
+			}
+			body := fmt.Sprintf(markerClaimErrorsPendingFmt, rid) + "\n" + strings.Join(lines, "\n")
+			c.Messages = append(c.Messages, store.Message{TicketID: t.ID, Type: msgTypeUpdate, Author: authorSystem, Body: body})
+		}
+		if commandsFailed {
+			slog.Info("check failed", "ticket_id", t.ID, "run_id", rid, "task_n", u.TaskN, "commands", strings.Join(failedKinds(results), ","))
+			body := fmt.Sprintf(markerCheckFailedPendingFmt, rid) + "\n" + checkText
+			c.Messages = append(c.Messages, store.Message{TicketID: t.ID, Type: msgTypeUpdate, Author: authorSystem, Body: body})
+		}
 		return c, nil
 	case len(extras) > 0 && firstCheck:
 		c := baseCommit(t, d)
@@ -2789,15 +2752,11 @@ func (h buildingHandler) adopt(ctx context.Context, t store.Ticket, d Deps, proj
 		return fail("no report"), nil
 	}
 
-	testExit, testTimedOut, err := runCheckCommand(ctx, d, t, wt, proj, nil, "test", proj.TestCmd)
+	results, err := runCheckCommands(ctx, d, t, wt, proj, nil)
 	if err != nil {
 		return commandInfraEscalation(t, d, u, err)
 	}
-	lintExit, lintTimedOut, err := runCheckCommand(ctx, d, t, wt, proj, nil, "lint", proj.LintCmd)
-	if err != nil {
-		return commandInfraEscalation(t, d, u, err)
-	}
-	if testExit != 0 || lintExit != 0 || testTimedOut || lintTimedOut {
+	if len(failedKinds(results)) > 0 {
 		return fail("commands failed"), nil
 	}
 
@@ -2880,14 +2839,13 @@ func (h buildingHandler) adopt(ctx context.Context, t store.Ticket, d Deps, proj
 	claimed := orchestrator.Perimeter(commitChanges, declaredBefore, trustRoot, styleGuide)
 	extras := orchestrator.Perimeter(commitChanges, declaredNow, trustRoot, styleGuide)
 
-	cmdErrs := response.CheckCommandsPassed(testExit, lintExit)
-	obs := response.BuildObservation{FilesChanged: changedPathList(commitChanges), TestExit: testExit, LintExit: lintExit}
+	obs := response.BuildObservation{FilesChanged: changedPathList(commitChanges)}
 	claimErrs := response.CheckBuildClaims(report.Report.BuildClaims, obs)
 	resp := &response.BuildResponse{Claims: report.Report.BuildClaims, Extras: report.Report.Extras, Fences: report.Report.Fences}
 	treeErrs := response.CheckBuildTree(resp, response.BuildTree{
 		Changed: changedPathList(commitChanges), Deleted: deletedPathList(commitChanges), Extras: extraPathList(claimed),
 	})
-	if len(cmdErrs) > 0 || len(claimErrs) > 0 || len(treeErrs) > 0 {
+	if len(claimErrs) > 0 || len(treeErrs) > 0 {
 		return fail("claims failed"), nil
 	}
 

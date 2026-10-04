@@ -6,6 +6,8 @@ Check:
 - For a bug, the first test is the regression test, at a seam that
   reproduces the real bug pattern.
 - Every task names the test written before it.
+- No task's only change is a failing test: a regression test and its fix
+  land in the same task.
 
 ## In code
 Check that the tests exist and assert behavior, not implementation. A

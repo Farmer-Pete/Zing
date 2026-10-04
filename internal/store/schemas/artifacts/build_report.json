@@ -12,12 +12,6 @@
       },
       "type": "array"
     },
-    "test_exit": {
-      "type": "integer"
-    },
-    "lint_exit": {
-      "type": "integer"
-    },
     "extras": {
       "items": {
         "properties": {
@@ -73,6 +67,12 @@
     "commit_sha": {
       "type": "string",
       "pattern": "^[0-9a-f]{40}$"
+    },
+    "test_exit": {
+      "type": "integer"
+    },
+    "lint_exit": {
+      "type": "integer"
     }
   },
   "additionalProperties": false,
@@ -80,8 +80,6 @@
   "required": [
     "task_n",
     "files_changed",
-    "test_exit",
-    "lint_exit",
     "extras",
     "fences",
     "report",

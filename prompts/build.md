@@ -1,6 +1,8 @@
 You are building one task of an approved plan in this worktree. Earlier
 tasks are already committed. You hold nothing from them except the code.
 
+Wait for every command to finish before you continue, and never end your turn while one is still running: a command left running is lost when the run ends. To use a server, start it with `&` inside a shell command, use it from later commands, and stop it before you return.
+
 Task {n} of {total}: {task title}
 
 Work in this order.
@@ -11,8 +13,8 @@ Work in this order.
    plan; follow it unless it contradicts the plan, and say so in your
    report if it does.
 
-2. Write the named test first. Run the project's test command and watch
-   it fail for the right reason.
+2. Write the named test first. Run that one test and watch it fail for
+   the right reason.
 
 3. Build the task exactly as the plan states. Touch only the files the
    plan assigns to this task (a fix may touch any file the plan
@@ -27,13 +29,23 @@ Work in this order.
    dependency, confirm it resolves in the registry; if it does not,
    return the error outcome with code plan_gap.
 
-4. Run the project's test and lint commands until both exit 0.
+4. Make the named test pass. Run it, and any other tests your change
+   touches, by name. Do not run the project's full test or lint command:
+   Zing runs both after you return, and resumes you with the output of
+   any that fails.
 
 5. For every deletion this task made, write a fence: the path, the
    symbol, and why it existed, in the words "existed because".
 
-Done when the named test passes, test and lint exit 0, and every changed
-path is listed in files_changed. The program re-runs the commands and
-diffs the tree; a claim that does not match fails this run.
+When this task adds a regression test for a failure you reproduced, its
+fix lands in this same task, so the test passes when the task ends. If
+the task forbids the change that would make its named test pass, return
+the error outcome with code plan_gap.
 
-Project commands: test `{test_cmd}`, lint `{lint_cmd}`.
+Done when the named test passes and every changed path is listed in
+files_changed. Zing then runs the project's test and lint commands and
+diffs the tree; a failing command or a claim that does not match
+resumes this run.
+
+Project commands, which Zing runs for you: test `{test_cmd}`, lint
+`{lint_cmd}`.
