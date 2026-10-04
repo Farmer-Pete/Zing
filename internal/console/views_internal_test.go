@@ -110,7 +110,7 @@ func TestDisplayBody_ValidationErrorsDeliveredIsHumanReadable(t *testing.T) {
 // old generic sentence.
 func TestDisplayBody_ResponseInvalidShowsReasonAndErrors(t *testing.T) {
 	t.Parallel()
-	const want = "Run 9's response could not be used: zing document failed validation. Its final message is linked under Runs in the side panel.\nplan/goals: required\nplan/review: required"
+	const want = "Run 9's response could not be used: zing document failed validation. If a final message was kept, it is linked under Runs in the side panel.\nplan/goals: required\nplan/review: required"
 	body := "response invalid run 9\nzing document failed validation\nplan/goals: required\nplan/review: required"
 	if got := displayBody(updateRow(body)); got != want {
 		t.Errorf("displayBody(%q) = %q, want %q", body, got, want)
@@ -121,7 +121,7 @@ func TestDisplayBody_ResponseInvalidShowsReasonAndErrors(t *testing.T) {
 // run <id>" marker with no error-list line renders just the head sentence.
 func TestDisplayBody_ResponseInvalidWithoutErrors(t *testing.T) {
 	t.Parallel()
-	const want = "Run 4's response could not be used: no zing element in final message. Its final message is linked under Runs in the side panel."
+	const want = "Run 4's response could not be used: no zing element in final message. If a final message was kept, it is linked under Runs in the side panel."
 	body := "response invalid run 4\nno zing element in final message"
 	if got := displayBody(updateRow(body)); got != want {
 		t.Errorf("displayBody(%q) = %q, want %q", body, got, want)

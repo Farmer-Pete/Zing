@@ -2326,8 +2326,11 @@ func checkFailedPendingLine(body string) string {
 // errors unchanged, one per line. A marker with no reason line keeps the
 // reason clause out. It never claims a retry: invalidOutputCommit
 // (internal/job/planning.go) escalates response_invalid instead of
-// retrying once this is the second consecutive invalid run. It is a pure
-// renderer and logs nothing.
+// retrying once this is the second consecutive invalid run. It never
+// asserts a link exists: recordRunEvidence (internal/job/runjob.go) only
+// stores a final message when the run actually produced one, so an empty
+// Codex -o file or empty Claude stdout leaves no link to point at. It is a
+// pure renderer and logs nothing.
 func responseInvalidLine(body string) string {
 	first, rest, _ := strings.Cut(body, "\n")
 	rid := strings.TrimPrefix(first, updateMarkerResponseInvalidPrefix)
@@ -2336,7 +2339,7 @@ func responseInvalidLine(body string) string {
 	if reason != "" {
 		head += ": " + reason
 	}
-	head += ". Its final message is linked under Runs in the side panel."
+	head += ". If a final message was kept, it is linked under Runs in the side panel."
 	if !hasErrs || errs == "" {
 		return head
 	}
