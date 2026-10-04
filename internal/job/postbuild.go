@@ -154,7 +154,11 @@ func postBuildRoundOwnedByOpenFix(ctx context.Context, t store.Ticket, d Deps, r
 // "with a run"'s own fresh round retry -- judging.go's retryFreshRound).
 // Shipping's own loops_exhausted row is shipHandler.retryShippingLoopsExhausted
 // (shipping.go, task 7); its pr_closed and every other code share
-// shipRetryMarkerCommit, the same "retry requested" marker plus ClearPoll.
+// shipRetryMarkerCommit, the same "retry requested" marker plus ClearPoll --
+// except a merge-unit escalation (isBaseMergeTried, merge.go task 7), which
+// takes priority over loops_exhausted and every other code and routes to
+// shipHandler.retryMerge instead, since Tried names the open base merge
+// request rather than anything loops_exhausted or pr_closed would mean.
 // The respond rows (M4 task 4, respond.go) are shipHandler.retryRespondWithRun
 // ("respond, with a run": a fresh batch run immediately with notes and
 // error) and shipHandler.retryRespondNoRun ("respond, with no run":
@@ -216,6 +220,9 @@ func resolvePostBuildEscalation(ctx context.Context, t store.Ticket, d Deps, rou
 
 	case origin == response.EscalationOriginJudge:
 		commit = h.retryMarkerCommit(t, d, resolveIDs)
+
+	case origin == response.EscalationOriginShipping && isBaseMergeTried(payload.Tried):
+		commit, err = shipHandler{}.retryMerge(ctx, t, d, resolveIDs, notes, payload.Tried)
 
 	case origin == response.EscalationOriginShipping && payload.Code == string(response.EscalationCodeLoopsExhausted):
 		commit, err = shipHandler{}.retryShippingLoopsExhausted(ctx, t, d, resolveIDs, notes, payload.Tried)

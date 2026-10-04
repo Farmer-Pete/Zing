@@ -839,3 +839,256 @@ func TestMergeCheckLoopsEscalate(t *testing.T) {
 		t.Errorf("Tried = %q, want the failing test command's own output", tried)
 	}
 }
+
+// ---- task 7: mergeAfterError, retryMerge, reopenMerge ---------------------
+
+// mergeQuestionScript is a minimal merge "question" turn (overview design,
+// nongoal "A resumable owner question inside a merge session"): the merge
+// unit never resumes a question itself -- mergeSuccessCommit's own
+// QuestionResponse branch escalates it straight to the owner, so this
+// script's own options are never read back as the agent's own choice,
+// only as something a human reading the escalation's Tried text would see.
+const mergeQuestionScript = `<zing job="build" outcome="question">
+  <question key="Q1">
+    <title>Keep the ticket's error type or main's?</title>
+    <body>Both sides redefine the same error type differently; say which one to keep.</body>
+    <option key="a">Keep the ticket's own type</option>
+    <option key="b">Keep main's type</option>
+    <recommended>a</recommended>
+  </question>
+</zing>`
+
+// mergeAgentFSQuestion is the fake runtime's own scripts tree for a merge
+// job's first turn that asks a question instead of resolving anything.
+func mergeAgentFSQuestion() fstest.MapFS {
+	return fstest.MapFS{mergeTurn1XMLKey: &fstest.MapFile{Data: []byte(mergeQuestionScript)}}
+}
+
+// TestMergeQuestionEscalatesAndRetryCarriesNotes proves mergeSuccessCommit's
+// own question escalation, and retryMerge/reopenMerge's own request
+// lifecycle (overview design "Request lifecycle"): a merge agent's question
+// escalates immediately, naming the open request in Tried; the owner's
+// retry (option "a" plus a free-text note) closes that request and opens
+// its successor carrying the note; the next tick reserves a fresh merge
+// session whose prompt carries it.
+func TestMergeQuestionEscalatesAndRetryCarriesNotes(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow end-to-end flow; runs in the full suite")
+	}
+	t.Parallel()
+	s, ticket, _ := shipTicketReady(t)
+	mergeConflictOnMain(t, s, ticket, "hello.txt", []byte(mergeHelloConflict))
+
+	gh := &shipGitHub{}
+	tr := &shipTracker{}
+	rec := &recordingRuntime{inner: runtime.NewFake(mergeAgentFSQuestion())}
+
+	ticket = mergeDirtyAfterPublish(t, s, ticket, rec, gh, tr)
+
+	deps := shipClaim(t, s, rec, ticket.ID, gh, tr)
+	ticket, _ = mergeRunTick(t, s, deps, ticket, "poll writes request") // POLL
+
+	deps = shipClaim(t, s, rec, ticket.ID, gh, tr)
+	commit, err := (shipHandler{}).Run(t.Context(), ticket, deps) // runMergeFirst: the agent asks a question
+	if err != nil {
+		t.Fatalf("run first: %v", err)
+	}
+	if commit.Escalation == nil {
+		t.Fatal("commit.Escalation is nil, want the merge question to escalate")
+	}
+	if commit.Escalation.Payload.What != mergeDecisionWhat {
+		t.Errorf("What = %q, want %q", commit.Escalation.Payload.What, mergeDecisionWhat)
+	}
+	tried := commit.Escalation.Payload.Tried
+	firstID, ok := baseMergeTriedID(tried)
+	if !ok {
+		t.Fatalf("baseMergeTriedID(%q) = (_, false), want a %q prefix", tried, "base merge ")
+	}
+	pbApply(t, s, ticket, commit)
+	ticket = pbGetTicket(t, s, ticket.ID)
+
+	open, err := s.QuestionsByState(t.Context(), ticket.ID, "open")
+	if err != nil {
+		t.Fatalf("QuestionsByState: %v", err)
+	}
+	if len(open) == 0 {
+		t.Fatal("QuestionsByState(open) = [], want at least one open question")
+	}
+	qID := open[len(open)-1].ID
+
+	const retryNote = "keep main's error type"
+	optA := "a"
+	if _, draftErr := s.SaveDraft(t.Context(), store.DraftInput{TicketID: ticket.ID, QuestionID: &qID, Option: &optA}); draftErr != nil {
+		t.Fatalf("SaveDraft(option): %v", draftErr)
+	}
+	if _, draftErr := s.SaveDraft(t.Context(), store.DraftInput{TicketID: ticket.ID, QuestionID: &qID, Text: retryNote}); draftErr != nil {
+		t.Fatalf("SaveDraft(text): %v", draftErr)
+	}
+	if _, sendErr := s.SendBatch(t.Context(), ticket.ID); sendErr != nil {
+		t.Fatalf("SendBatch: %v", sendErr)
+	}
+
+	deps = shipClaim(t, s, rec, ticket.ID, gh, tr)
+	var reopenCommit store.HandlerCommit
+	ticket, reopenCommit = mergeRunTick(t, s, deps, ticket, "retry: close and reopen")
+
+	if !reopenCommit.ClearPoll {
+		t.Error("reopenCommit.ClearPoll = false, want true")
+	}
+	closedBody := fmt.Sprintf("base merge closed %d", firstID)
+	foundClosed, foundRequest := false, false
+	var newReqBody string
+	for _, m := range reopenCommit.Messages {
+		switch {
+		case m.Body == closedBody:
+			foundClosed = true
+		case strings.HasPrefix(m.Body, "base merge requested after run "):
+			foundRequest = true
+			newReqBody = m.Body
+		}
+	}
+	if !foundClosed {
+		t.Errorf("reopenCommit.Messages = %+v, want %q", reopenCommit.Messages, closedBody)
+	}
+	if !foundRequest {
+		t.Fatalf("reopenCommit.Messages = %+v, want a fresh request marker", reopenCommit.Messages)
+	}
+
+	newReq, err := parseBaseMergeRequest(store.MessageRow{ID: 999, Body: newReqBody})
+	if err != nil {
+		t.Fatalf("parseBaseMergeRequest: %v", err)
+	}
+	if newReq.RetryOf != firstID {
+		t.Errorf("newReq.RetryOf = %d, want %d", newReq.RetryOf, firstID)
+	}
+	if !strings.Contains(newReq.Notes, retryNote) {
+		t.Errorf("newReq.Notes = %q, want it to contain %q", newReq.Notes, retryNote)
+	}
+
+	open, err = s.QuestionsByState(t.Context(), ticket.ID, "open")
+	if err != nil {
+		t.Fatalf("QuestionsByState (after retry): %v", err)
+	}
+	if len(open) != 0 {
+		t.Errorf("open questions after retry = %+v, want none (the round resolved)", open)
+	}
+
+	// The tick after that reserves a fresh merge session whose prompt
+	// carries the owner's own note.
+	deps = shipClaim(t, s, rec, ticket.ID, gh, tr)
+	if _, runErr := (shipHandler{}).Run(t.Context(), ticket, deps); runErr != nil {
+		t.Fatalf("fresh run: %v", runErr)
+	}
+	gotPrompt := rec.lastRequest(t).Prompt
+	if !strings.Contains(gotPrompt, "notes:\n") {
+		t.Errorf("fresh run prompt = %q, want a %q labeled input", gotPrompt, "notes:\n")
+	}
+	if !strings.Contains(gotPrompt, retryNote) {
+		t.Errorf("fresh run prompt = %q, want it to contain %q", gotPrompt, retryNote)
+	}
+}
+
+// TestMergeInterruptedRunResumesFree proves mergeAfterError's own
+// interrupted branch (overview design "One merge tick"): a merge session
+// whose newest run was cut short with no answer at all (a shutdown or
+// dead-serve reclaim, store.Run.Interrupted) resumes the very same session,
+// free -- the resume carries the raw "interrupted" input and Reserve's own
+// BumpResumes stays false, so sessions.resumes is unchanged.
+func TestMergeInterruptedRunResumesFree(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow end-to-end flow; runs in the full suite")
+	}
+	t.Parallel()
+	s, ticket, _ := shipTicketReady(t)
+	mergeConflictOnMain(t, s, ticket, "hello.txt", []byte(mergeHelloConflict))
+
+	gh := &shipGitHub{}
+	tr := &shipTracker{}
+	rt := runtime.NewFake(fstest.MapFS{})
+
+	ticket = mergeDirtyAfterPublish(t, s, ticket, rt, gh, tr)
+
+	deps := shipClaim(t, s, rt, ticket.ID, gh, tr)
+	ticket, _ = mergeRunTick(t, s, deps, ticket, "poll writes request") // POLL
+
+	// A session reserved directly through the store, its external id set
+	// by its own terminalizing commit (freshSessionRecord's own shape) but
+	// its one run left reserved (outcome NULL): the shape a process death
+	// right after the runtime answered with a session id, but before this
+	// code ever read that answer, would leave behind.
+	deps = shipClaim(t, s, rt, ticket.ID, gh, tr)
+	rsv, reserveErr := s.Reserve(t.Context(), ticket.ID, deps.Owner, deps.Expires, store.SessionUpsert{Job: jobMergeName, Runtime: pbRuntimeClaude}, store.RunSeed{Model: pbModelClaudeX})
+	if reserveErr != nil {
+		t.Fatalf("Reserve: %v", reserveErr)
+	}
+	const mergeInterruptedSessionID = "merge-interrupted-sess"
+	ext := mergeInterruptedSessionID
+	applied, commitErr := s.CommitHandlerResult(t.Context(), store.HandlerCommit{
+		TicketID: ticket.ID, Owner: deps.Owner, Expires: deps.Expires,
+		Session: &store.SessionUpsert{ID: &rsv.SessionID, ExternalID: &ext},
+	})
+	if commitErr != nil || !applied {
+		t.Fatalf("CommitHandlerResult(external id): applied=%v err=%v", applied, commitErr)
+	}
+
+	deps = shipClaim(t, s, rt, ticket.ID, gh, tr)
+	interrupted, interruptErr := s.InterruptRuns(t.Context(), ticket.ID, deps.Owner, deps.Expires)
+	if interruptErr != nil {
+		t.Fatalf("InterruptRuns: %v", interruptErr)
+	}
+	if !interrupted {
+		t.Fatal("InterruptRuns: applied = false, want true")
+	}
+
+	req, open, err := openBaseMerge(t.Context(), ticket, Deps{Store: s})
+	if err != nil {
+		t.Fatalf("openBaseMerge: %v", err)
+	}
+	if !open {
+		t.Fatal("open = false, want true")
+	}
+	maxResumes := pbMachine(t).Jobs[jobMergeName].MaxResumes
+	sess, state, _, found, sessErr := s.SessionAfter(t.Context(), ticket.ID, jobMergeName, req.AfterRunID, maxResumes)
+	if sessErr != nil {
+		t.Fatalf("SessionAfter: %v", sessErr)
+	}
+	if !found || state != store.SessionOpen {
+		t.Fatalf("SessionAfter = (found %v, state %v), want (true, SessionOpen)", found, state)
+	}
+	if sess.Resumes != 0 {
+		t.Fatalf("session Resumes before the interrupted resume = %d, want 0", sess.Resumes)
+	}
+
+	resumeRT := &pbScriptedRuntime{t: t, steps: []pbScriptedStep{pbBuildStep(nil, nil, mergeInterruptedSessionID)}}
+	deps = shipClaim(t, s, resumeRT, ticket.ID, gh, tr)
+	ticket, commit := mergeRunTick(t, s, deps, ticket, "resume: interrupted, free")
+	_ = ticket
+
+	if len(resumeRT.reqs) != 1 {
+		t.Fatalf("resumeRT.reqs = %+v, want exactly one", resumeRT.reqs)
+	}
+	lastReq := resumeRT.reqs[0]
+	if !strings.Contains(lastReq.Prompt, interruptedResumeText) {
+		t.Errorf("resume prompt = %q, want the interrupted input", lastReq.Prompt)
+	}
+	if lastReq.SessionID != mergeInterruptedSessionID {
+		t.Errorf("resume request SessionID = %q, want %q", lastReq.SessionID, mergeInterruptedSessionID)
+	}
+	if len(commit.Runs) != 1 {
+		t.Errorf("commit.Runs = %+v, want exactly one", commit.Runs)
+	}
+
+	sessions, err := s.SessionsForTicket(t.Context(), ticket.ID)
+	if err != nil {
+		t.Fatalf("SessionsForTicket: %v", err)
+	}
+	mergeResumes := -1
+	for _, sv := range sessions {
+		if sv.Job == jobMergeName {
+			mergeResumes = sv.Resumes
+		}
+	}
+	if mergeResumes != 0 {
+		t.Errorf("session Resumes after the free interrupted resume = %d, want 0 (unchanged)", mergeResumes)
+	}
+}

@@ -146,9 +146,8 @@ func (h shipHandler) driveOpenMerge(ctx context.Context, t store.Ticket, d Deps)
 // not, or whatever the session's own newest run needs next.
 //
 // Until task 8 adds adoptMerge, a single unrecorded commit at the tip
-// escalates exactly as two or more do (foreignCommitsWhat/Why); until task
-// 7 adds mergeAfterError, a session whose newest run ended in error
-// escalates mergeFailedWhat/Why instead of resuming it.
+// escalates exactly as two or more do (foreignCommitsWhat/Why). A session
+// whose newest run ended in error routes through mergeAfterError.
 func (h shipHandler) driveMerge(ctx context.Context, t store.Ticket, d Deps, req baseMergeRequest) (store.HandlerCommit, error) {
 	proj, wt, escalation, err := ensureWorktreeOrEscalate(ctx, t, d, func(errText string) store.HandlerCommit {
 		return mergeEscalation(t, d, req, worktreeNotPreparedWhat, worktreeNotPreparedWhy, errText)
@@ -219,10 +218,9 @@ func (h shipHandler) driveMerge(ctx context.Context, t store.Ticket, d Deps, req
 		commit, runErr := h.mergeCheck(ctx, t, d, proj, wt, req, &rid, &sess)
 		return withBranchResult(commit, runErr, wt)
 	case string(response.OutcomeError):
-		// Task 7 replaces this with mergeAfterError's own interrupted/invalid/
-		// already-escalated routing.
 		slog.Debug("base merge step", "ticket_id", t.ID, "request_id", req.MessageID, "step", "run_error")
-		return withBranch(mergeEscalation(t, d, req, mergeFailedWhat, mergeFailedWhy, ""), wt), nil
+		commit, runErr := h.mergeAfterError(ctx, t, d, wt, req, sess, newestRun)
+		return withBranchResult(commit, runErr, wt)
 	default:
 		slog.Debug("base merge step", "ticket_id", t.ID, "request_id", req.MessageID, "step", "unrecognized")
 		return store.HandlerCommit{}, ErrNoAction
@@ -502,4 +500,98 @@ func mergeSuccessCommit(t store.Ticket, d Deps, rr runResult, sessionCommit *sto
 	default:
 		return store.HandlerCommit{}, fmt.Errorf("job: merge: outcome %s not handled", rr.Res.Response.Header().Outcome)
 	}
+}
+
+// mergeAfterError handles a merge session whose newest run ended in error
+// (overview design "One merge tick"): an interrupted newest run resumes
+// free with the fixed interrupted input, skipping the invalid-output
+// check entirely, since nothing about it answered the prompt at all; a
+// first invalid output (no escalation yet, ConsecutiveInvalidOutputs == 1)
+// resumes charged with the invalid input, giving the agent one chance to
+// return a valid document before response_invalid would otherwise
+// escalate; anything else means the failure already escalated once and the
+// owner retried it through the generic shipping row (retryMerge), so this
+// session is done and a fresh one starts over the same half-resolved tree
+// (reopenMerge).
+func (h shipHandler) mergeAfterError(ctx context.Context, t store.Ticket, d Deps, wt orchestrator.Worktree, req baseMergeRequest, sess store.Session, newest store.Run) (store.HandlerCommit, error) {
+	if newest.Interrupted {
+		bump, _ := resumeCharge(newest)
+		input := prompt.NamedInput{Label: labelInterrupted, Text: interruptedResumeText, Untrusted: false}
+		return h.runMergeResume(ctx, t, d, wt, req, sess, 0, []prompt.NamedInput{input}, bump)
+	}
+
+	n, reason, err := d.Store.ConsecutiveInvalidOutputs(ctx, t.ID, jobMergeName, &sess.ID)
+	if err != nil {
+		return store.HandlerCommit{}, fmt.Errorf("job: merge: consecutive invalid outputs: %w", err)
+	}
+	if n == 1 {
+		return h.runMergeResume(ctx, t, d, wt, req, sess, 1, []prompt.NamedInput{prompt.Invalid(invalidRetryText(reason))}, true)
+	}
+
+	return h.reopenMerge(ctx, t, d, req, "", nil)
+}
+
+// isBaseMergeTried reports whether tried's first line is "base merge <id>":
+// resolvePostBuildEscalation's own routing test for every merge-unit
+// escalation, since they all share origin shipping with escalation codes
+// that mean nothing merge-specific on their own.
+func isBaseMergeTried(tried string) bool {
+	_, ok := baseMergeTriedID(tried)
+	return ok
+}
+
+// retryMerge is the owner's retry on a merge-unit escalation (overview
+// design "Request lifecycle"): when the ticket's one open request is the
+// one tried names, reopenMerge closes it and opens its successor carrying
+// the owner's notes; otherwise a later tick already landed or closed it on
+// its own before the owner answered, and the generic shipping "retry
+// requested" marker is all there is left to write.
+func (h shipHandler) retryMerge(ctx context.Context, t store.Ticket, d Deps, resolveIDs []int64, notes, tried string) (store.HandlerCommit, error) {
+	id, ok := baseMergeTriedID(tried)
+	if !ok {
+		return store.HandlerCommit{}, fmt.Errorf("job: merge: retry: malformed tried text %q", tried)
+	}
+	req, open, err := openBaseMerge(ctx, t, d)
+	if err != nil {
+		return store.HandlerCommit{}, err
+	}
+	if !open || req.MessageID != id {
+		return shipRetryMarkerCommit(t, d, resolveIDs), nil
+	}
+	return h.reopenMerge(ctx, t, d, req, notes, resolveIDs)
+}
+
+// reopenMerge closes req and opens its successor in one commit (overview
+// design "Request lifecycle" and "Markers" table): "base merge closed <req
+// id>", then a fresh request carrying req's own base branch and sha,
+// RetryOf req's id, and Notes the two notes joined by a blank line with
+// empty parts dropped. The worktree is left exactly as it is: StartBaseMerge
+// finds the merge still in progress and the fresh run continues from the
+// half-resolved tree.
+func (h shipHandler) reopenMerge(ctx context.Context, t store.Ticket, d Deps, req baseMergeRequest, notes string, resolveIDs []int64) (store.HandlerCommit, error) {
+	maxRunID, err := d.Store.MaxRunID(ctx, t.ID)
+	if err != nil {
+		return store.HandlerCommit{}, fmt.Errorf("job: merge: reopen: max run id: %w", err)
+	}
+	var parts []string
+	if req.Notes != "" {
+		parts = append(parts, req.Notes)
+	}
+	if notes != "" {
+		parts = append(parts, notes)
+	}
+	next := baseMergeRequest{
+		AfterRunID: maxRunID, BaseBranch: req.BaseBranch, BaseSHA: req.BaseSHA,
+		RetryOf: req.MessageID, Notes: strings.Join(parts, "\n\n"),
+	}
+
+	c := baseCommit(t, d)
+	c.Messages = []store.Message{
+		{TicketID: t.ID, Type: msgTypeUpdate, Author: authorSystem, Body: fmt.Sprintf("base merge closed %d", req.MessageID)},
+		{TicketID: t.ID, Type: msgTypeUpdate, Author: authorSystem, Body: next.body()},
+	}
+	c.ResolveQuestions = resolveIDs
+	c.ClearPoll = true
+	slog.Info("base merge reopened", "ticket_id", t.ID, "closed_request_id", req.MessageID)
+	return c, nil
 }
