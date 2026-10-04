@@ -1317,9 +1317,12 @@ func (o *Orchestrator) reattachWorktree(ctx context.Context, ticketID int64, dir
 // to run symbolic-ref and read dir's config first, so a rewritten pointer
 // still had two git commands run against whatever it now names before
 // being refused. A pointer-check failure is refused without leaking its
-// content; the final revalidate call below re-checks it anyway (cheaply)
-// and adds the HEAD == branch check, so this early check is pure
-// defense-in-depth on top of it, not a replacement for it.
+// content; the final checks below re-check it anyway (cheaply, from the
+// cache) rather than calling revalidate, which would read HEAD a second
+// time -- branch above already came from that same symbolic-ref call, so
+// HEAD == branch holds by construction and needs no second read. This
+// early check is pure defense-in-depth on top of that final check, not a
+// replacement for it.
 func (o *Orchestrator) ensureWorktreePresent(ctx context.Context, ticketID int64, dir string) (Worktree, error) {
 	refused := fmt.Errorf("orchestrator: worktree directory exists but is not ticket %d's worktree: %s", ticketID, dir)
 
@@ -1349,7 +1352,12 @@ func (o *Orchestrator) ensureWorktreePresent(ctx context.Context, ticketID int64
 	if err := o.readWorktreeGitConfig(ctx, &wt); err != nil {
 		return Worktree{}, fmt.Errorf("orchestrator: ensure worktree: %w", err)
 	}
-	if err := o.revalidate(ctx, wt); err != nil {
+	// revalidate's checks minus its HEAD read: branch is the HEAD read
+	// above, so HEAD == branch holds by construction.
+	if err := o.validateZingBranch(branch); err != nil {
+		return Worktree{}, fmt.Errorf("orchestrator: ensure worktree: %w", err)
+	}
+	if err := o.checkGitPointer(ctx, wt); err != nil {
 		return Worktree{}, fmt.Errorf("orchestrator: ensure worktree: %w", err)
 	}
 	return wt, nil

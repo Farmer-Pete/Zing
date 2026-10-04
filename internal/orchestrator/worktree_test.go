@@ -22,20 +22,21 @@ import (
 )
 
 const (
-	testOwner     = "acme"
-	testRepo      = "widgets"
-	mainBranch    = "main"
-	absLocalPath  = "/tmp/widgets"
-	branch7MySlug = "zing/7-my-slug"
-	gitName       = "git"
-	statusArg     = "status"
-	configArg     = "config"
-	ownDriverName = "own"
-	gpgProgramKey = "gpg.program"
-	hooksPathArg  = "core.hooksPath=/dev/null"
-	fsmonitorArg  = "core.fsmonitor=false"
-	driverZebra   = "zebra"
-	driverAlpha   = "alpha"
+	testOwner      = "acme"
+	testRepo       = "widgets"
+	mainBranch     = "main"
+	absLocalPath   = "/tmp/widgets"
+	branch7MySlug  = "zing/7-my-slug"
+	gitName        = "git"
+	statusArg      = "status"
+	configArg      = "config"
+	symbolicRefArg = "symbolic-ref"
+	ownDriverName  = "own"
+	gpgProgramKey  = "gpg.program"
+	hooksPathArg   = "core.hooksPath=/dev/null"
+	fsmonitorArg   = "core.fsmonitor=false"
+	driverZebra    = "zebra"
+	driverAlpha    = "alpha"
 )
 
 // fakeGitHub is a no-op GitHub, enough to satisfy New's required parameter
@@ -419,6 +420,72 @@ func TestRevalidate(t *testing.T) {
 			t.Error("revalidate: expected an error when HEAD no longer matches wt.branch, got nil")
 		}
 	})
+}
+
+// recordingArgsRunner wraps a real execRunner and records each call's argv,
+// under a mutex, so a test can assert exactly which git commands a code
+// path ran. Unlike commonlock_test.go's recordingRunner, it tracks no lock
+// state: it exists for call-count assertions, not for commonMu's own tests.
+type recordingArgsRunner struct {
+	mu    sync.Mutex
+	calls [][]string
+}
+
+func (r *recordingArgsRunner) record(args []string) {
+	r.mu.Lock()
+	r.calls = append(r.calls, append([]string(nil), args...))
+	r.mu.Unlock()
+}
+
+func (r *recordingArgsRunner) Run(ctx context.Context, dir, name string, args ...string) (string, error) {
+	r.record(args)
+	return execRunner{}.Run(ctx, dir, name, args...)
+}
+
+func (r *recordingArgsRunner) Output(ctx context.Context, dir, name string, args ...string) (string, error) {
+	r.record(args)
+	return execRunner{}.Output(ctx, dir, name, args...)
+}
+
+func (r *recordingArgsRunner) snapshot() [][]string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append([][]string(nil), r.calls...)
+}
+
+// TestRevalidateRunsOneGitCommand proves that, once GitCommonDir's cache is
+// warm, revalidate runs exactly one git command: checkGitPointer's own
+// common-dir lookup is served from the cache, so the only git process left
+// is the "symbolic-ref" read that compares the checked-out branch against
+// wt.branch.
+func TestRevalidateRunsOneGitCommand(t *testing.T) {
+	t.Parallel()
+	repo := newTestRepo(t)
+	o := newTestOrchestrator(t, repo, execRunner{})
+	ctx := t.Context()
+
+	wt, err := o.PrepareWorktree(ctx, 210, "revalidate-calls", nil)
+	if err != nil {
+		t.Fatalf("PrepareWorktree: %v", err)
+	}
+
+	// Warm the cache with a plain Runner first, so the recorder swapped in
+	// below sees only revalidate's own calls.
+	if _, err := o.GitCommonDir(ctx); err != nil {
+		t.Fatalf("GitCommonDir: %v", err)
+	}
+
+	rec := &recordingArgsRunner{}
+	o.run = rec
+
+	if err := o.revalidate(ctx, wt); err != nil {
+		t.Fatalf("revalidate: %v", err)
+	}
+
+	want := [][]string{{symbolicRefArg, "--short", "HEAD"}}
+	if diff := cmp.Diff(want, rec.snapshot()); diff != "" {
+		t.Errorf("recorded git calls (-want +got):\n%s", diff)
+	}
 }
 
 func TestPrepareWorktree(t *testing.T) {
@@ -1513,7 +1580,7 @@ func TestEnsureWorktree(t *testing.T) {
 			t.Fatalf("rewrite .git pointer: %v", writeErr)
 		}
 
-		spy := forbiddenArgsRunner{t: t, inner: execRunner{}, forbidden: map[string]bool{"symbolic-ref": true, configArg: true}}
+		spy := forbiddenArgsRunner{t: t, inner: execRunner{}, forbidden: map[string]bool{symbolicRefArg: true, configArg: true}}
 		spyOrch := newTestOrchestrator(t, repo, spy)
 
 		_, _, err = spyOrch.EnsureWorktree(ctx, 203, "present")
@@ -1525,6 +1592,65 @@ func TestEnsureWorktree(t *testing.T) {
 			t.Errorf("EnsureWorktree error = %q, want it to contain %q (the refused error)", err.Error(), wantSubstr)
 		}
 	})
+}
+
+// TestEnsureWorktreePresentGitCalls proves ensureWorktreePresent, on an
+// already-present worktree with GitCommonDir's cache warm, reads HEAD
+// exactly once: "git worktree list --porcelain" to confirm presence, then
+// "git symbolic-ref --short HEAD" once, not twice (the second read
+// revalidate used to make is gone, replaced by validateZingBranch and
+// checkGitPointer alone). This task asserts only that first pair and the
+// single symbolic-ref; task 4 collapses the signing and filter config
+// reads that still follow into one "config -z --get-regexp" call and
+// tightens this to the exact three-call list.
+func TestEnsureWorktreePresentGitCalls(t *testing.T) {
+	t.Parallel()
+	repo := newTestRepo(t)
+	o := newTestOrchestrator(t, repo, execRunner{})
+	ctx := t.Context()
+
+	if _, err := o.PrepareWorktree(ctx, 211, "ensure-calls", nil); err != nil {
+		t.Fatalf("PrepareWorktree: %v", err)
+	}
+
+	// Warm the cache with a plain Runner first, so the recorder swapped in
+	// below sees only EnsureWorktree's own calls.
+	if _, err := o.GitCommonDir(ctx); err != nil {
+		t.Fatalf("GitCommonDir: %v", err)
+	}
+
+	rec := &recordingArgsRunner{}
+	o.run = rec
+
+	_, created, err := o.EnsureWorktree(ctx, 211, "ensure-calls")
+	if err != nil {
+		t.Fatalf("EnsureWorktree: %v", err)
+	}
+	if created {
+		t.Error("created = true, want false (the worktree was already present)")
+	}
+
+	calls := rec.snapshot()
+	if len(calls) < 2 {
+		t.Fatalf("recorded %d git calls, want at least 2: %v", len(calls), calls)
+	}
+	wantFirstTwo := [][]string{
+		{"worktree", "list", "--porcelain"},
+		{symbolicRefArg, "--short", "HEAD"},
+	}
+	if diff := cmp.Diff(wantFirstTwo, calls[:2]); diff != "" {
+		t.Errorf("first two recorded git calls (-want +got):\n%s", diff)
+	}
+
+	symbolicRefCalls := 0
+	for _, c := range calls {
+		if len(c) > 0 && c[0] == symbolicRefArg {
+			symbolicRefCalls++
+		}
+	}
+	if symbolicRefCalls != 1 {
+		t.Errorf("symbolic-ref ran %d times, want exactly 1: %v", symbolicRefCalls, calls)
+	}
 }
 
 // forbiddenArgsRunner wraps a real Runner and fails the test outright if any
