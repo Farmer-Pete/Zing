@@ -49,22 +49,15 @@ var (
 // [a-z0-9._-]; a run of any other character becomes a single "-"; leading
 // and trailing "-" and "." are then trimmed. The candidate is checked
 // against zingBranchPattern and, as a second and independent layer, against
-// "git check-ref-format refs/heads/<name>" -- git's own ref-name rules (no
-// ".." sequence, no trailing ".lock", no bare "." component, and so on) --
-// so a candidate that slips past the pattern is still caught. So the branch
-// can never be a bare ref, a refspec, or an invalid ref. Its "zing/" prefix
-// also keeps it structurally distinct from a repository's default branch in
-// the ordinary case; PrepareWorktree additionally rejects the pathological
-// case where the default branch itself matches the zing/ pattern, since
-// check-ref-format has no notion of "the default branch" to compare
-// against.
-//
-// branchName takes ctx (a small, deliberate deviation from PKG5-PLAN.md
-// section 8.2's signature, which omits it) because it runs a real git
-// subprocess through checkRefFormat; every git-invoking function in this
-// package threads ctx from its caller, and branchName should be no
-// exception -- PrepareWorktree already has one to pass down.
-func branchName(ctx context.Context, ticketID int64, slug string) (string, error) {
+// checkRefFormat -- a pure-Go version of git's own ref-name rules (no ".."
+// sequence, no trailing ".lock", no bare "." component, and so on) -- so a
+// candidate that slips past the pattern is still caught. So the branch can
+// never be a bare ref, a refspec, or an invalid ref. Its "zing/" prefix also
+// keeps it structurally distinct from a repository's default branch in the
+// ordinary case; PrepareWorktree additionally rejects the pathological case
+// where the default branch itself matches the zing/ pattern, since
+// checkRefFormat has no notion of "the default branch" to compare against.
+func branchName(ticketID int64, slug string) (string, error) {
 	if ticketID <= 0 {
 		return "", fmt.Errorf("orchestrator: branch name: ticket id must be positive, got %d", ticketID)
 	}
@@ -79,7 +72,7 @@ func branchName(ctx context.Context, ticketID int64, slug string) (string, error
 	if !zingBranchPattern.MatchString(name) {
 		return "", fmt.Errorf("orchestrator: branch name %q does not match the zing/ pattern", name)
 	}
-	if err := checkRefFormat(ctx, name); err != nil {
+	if err := checkRefFormat(name); err != nil {
 		return "", fmt.Errorf("orchestrator: branch name %q: %w", name, err)
 	}
 
@@ -92,23 +85,38 @@ func sanitizeSlug(slug string) string {
 	return strings.Trim(collapsed, "-.")
 }
 
-// checkRefFormatArgs returns the hardened argv for checkRefFormat's call,
-// pulled out as its own pure function so a test can inspect it without
-// running git: hardenedGitArgs(nil, ...), since checkRefFormat reads no
-// repository -- there is no worktree, and so no filter driver, to override.
-func checkRefFormatArgs(name string) []string {
-	return hardenedGitArgs(nil, "check-ref-format", "refs/heads/"+name)
-}
-
-// checkRefFormat runs "git check-ref-format refs/heads/<name>" directly with
-// os/exec (branchName is the package's one pure-ish validator, with no
-// Runner of its own), using the caller's ctx like every other git-invoking
-// call in this package. It is git's own authority on ref-name rules,
-// catching anything the package's own pattern missed.
-func checkRefFormat(ctx context.Context, name string) error {
-	out, err := exec.CommandContext(ctx, "git", checkRefFormatArgs(name)...).CombinedOutput() //nolint:gosec // argv-only, no shell; name is git-syntax-checked by this very call
-	if err != nil {
-		return fmt.Errorf("git check-ref-format: %w: %s", err, strings.TrimSpace(string(out)))
+// checkRefFormat applies git's documented ref-name rules
+// (git-check-ref-format(1), no options) to "refs/heads/" + name, in Go,
+// with no subprocess. TestCheckRefFormatMatchesGit keeps it honest against
+// real git.
+func checkRefFormat(name string) error {
+	ref := "refs/heads/" + name
+	invalid := func(why string) error { return fmt.Errorf("invalid ref name %q: %s", ref, why) }
+	switch {
+	case strings.HasSuffix(ref, "/"):
+		return invalid("ends with /")
+	case strings.HasSuffix(ref, "."):
+		return invalid("ends with .")
+	case strings.Contains(ref, ".."):
+		return invalid("contains ..")
+	case strings.Contains(ref, "@{"):
+		return invalid("contains @{")
+	}
+	for i := range len(ref) {
+		c := ref[i]
+		if c < 0x20 || c == 0x7f || strings.IndexByte(" ~^:?*[\\", c) >= 0 {
+			return invalid(fmt.Sprintf("contains forbidden byte %q", c))
+		}
+	}
+	for comp := range strings.SplitSeq(ref, "/") {
+		switch {
+		case comp == "":
+			return invalid("has an empty component")
+		case comp[0] == '.':
+			return invalid("has a component starting with .")
+		case strings.HasSuffix(comp, ".lock"):
+			return invalid("has a component ending in .lock")
+		}
 	}
 	return nil
 }
@@ -129,7 +137,7 @@ func checkRefFormat(ctx context.Context, name string) error {
 // no longer have a checked-out HEAD to read, so it validates only the
 // branch-shape condition (see RemoveWorktree).
 func (o *Orchestrator) revalidate(ctx context.Context, wt Worktree) error {
-	if err := o.validateZingBranch(ctx, wt.branch); err != nil {
+	if err := o.validateZingBranch(wt.branch); err != nil {
 		return err
 	}
 
@@ -295,22 +303,22 @@ func (o *Orchestrator) commonDirSnapshot() (string, *commonMutex) {
 
 // validateZingBranch is the branch-shape half of revalidate: the branch
 // must match the zing/ form, must differ from the default branch, and must
-// be a git-legal ref name under "git check-ref-format" -- the same second,
+// be a git-legal ref name under checkRefFormat -- the same second,
 // independent layer branchName checks a freshly built candidate against, so
 // a zing/-shaped branch that was hand-crafted rather than produced by
-// branchName (and so never ran through check-ref-format) is still rejected
-// on the destructive paths that use validateZingBranch (revalidate,
-// RemoveWorktree). It takes ctx to run that check; RemoveWorktree uses it
-// directly, without the checked-out-HEAD check revalidate adds, since a
-// half-removed worktree may have no HEAD to read.
-func (o *Orchestrator) validateZingBranch(ctx context.Context, branch string) error {
+// branchName (and so never ran through checkRefFormat) is still rejected on
+// the destructive paths that use validateZingBranch (revalidate,
+// RemoveWorktree). RemoveWorktree uses it directly, without the
+// checked-out-HEAD check revalidate adds, since a half-removed worktree may
+// have no HEAD to read.
+func (o *Orchestrator) validateZingBranch(branch string) error {
 	if !zingBranchPattern.MatchString(branch) {
 		return fmt.Errorf("orchestrator: branch %q is not a zing/ ticket branch", branch)
 	}
 	if branch == o.proj.DefaultBranch {
 		return fmt.Errorf("orchestrator: branch %q must not be the default branch", branch)
 	}
-	if err := checkRefFormat(ctx, branch); err != nil {
+	if err := checkRefFormat(branch); err != nil {
 		return fmt.Errorf("orchestrator: branch %q: %w", branch, err)
 	}
 	return nil
@@ -454,7 +462,7 @@ const fetchRefCleanupTimeout = 10 * time.Second
 // use it directly as the base without a second read; fetched reports
 // whether this call's own fetch is what produced it.
 func (o *Orchestrator) fetchBase(ctx context.Context, ticketID int64) (sha string, fetched bool, err error) {
-	if err := checkRefFormat(ctx, o.proj.DefaultBranch); err != nil {
+	if err := checkRefFormat(o.proj.DefaultBranch); err != nil {
 		o.log.Error("fetch base error", "ticket_id", ticketID, "ref", o.baseRef(), "reason", "invalid_default_branch")
 		return "", false, fmt.Errorf("orchestrator: fetch base: default branch %q is not a valid branch name: %w", o.proj.DefaultBranch, err)
 	}
@@ -720,7 +728,7 @@ func (o *Orchestrator) baseRev(ctx context.Context, ticketID int64) (string, err
 // check runs before checkout, and so before any command that could
 // otherwise reach an unsafe signing program.
 func (o *Orchestrator) PrepareWorktree(ctx context.Context, ticketID int64, slug string, cone []string) (Worktree, error) {
-	branch, err := branchName(ctx, ticketID, slug)
+	branch, err := branchName(ticketID, slug)
 	if err != nil {
 		return Worktree{}, fmt.Errorf("orchestrator: prepare worktree: %w", err)
 	}
@@ -1041,7 +1049,7 @@ func (o *Orchestrator) cleanupWorktreeDir(ctx context.Context, wt Worktree) {
 
 // RemoveWorktree removes the worktree and deletes its branch. It first
 // validates the branch (zing/ form, not the default branch, a git-legal ref
-// per check-ref-format); an invalid or default branch is an error and
+// per checkRefFormat); an invalid or default branch is an error and
 // nothing is removed. If "git worktree list --porcelain" shows wt.Dir as a
 // live, present worktree (not a stale registration), it first reads the
 // branch actually checked out there with "git -C wt.dir symbolic-ref --short
@@ -1070,7 +1078,7 @@ func (o *Orchestrator) cleanupWorktreeDir(ctx context.Context, wt Worktree) {
 // registration elsewhere in the repository is ever touched, and the default
 // branch is never touched.
 func (o *Orchestrator) RemoveWorktree(ctx context.Context, wt Worktree) error {
-	if err := o.validateZingBranch(ctx, wt.branch); err != nil {
+	if err := o.validateZingBranch(wt.branch); err != nil {
 		return fmt.Errorf("orchestrator: remove worktree: %w", err)
 	}
 

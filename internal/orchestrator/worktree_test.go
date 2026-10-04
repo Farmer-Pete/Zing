@@ -17,6 +17,8 @@ import (
 	"time"
 
 	"github.com/google/go-cmp/cmp"
+
+	"zing/internal/gitfixture"
 )
 
 const (
@@ -247,7 +249,7 @@ func TestBranchName(t *testing.T) {
 		for _, c := range cases {
 			t.Run(c.name, func(t *testing.T) {
 				t.Parallel()
-				got, err := branchName(t.Context(), c.ticketID, c.slug)
+				got, err := branchName(c.ticketID, c.slug)
 				if err != nil {
 					t.Fatalf("branchName(%d, %q): unexpected error: %v", c.ticketID, c.slug, err)
 				}
@@ -261,57 +263,108 @@ func TestBranchName(t *testing.T) {
 	t.Run("invalid ticket id", func(t *testing.T) {
 		t.Parallel()
 		for _, id := range []int64{0, -1, -100} {
-			if _, err := branchName(t.Context(), id, "slug"); err == nil {
+			if _, err := branchName(id, "slug"); err == nil {
 				t.Errorf("branchName(%d, \"slug\"): expected an error, got nil", id)
 			}
 		}
 	})
 
-	t.Run("a trailing .lock is rejected by check-ref-format", func(t *testing.T) {
+	t.Run("a trailing .lock is rejected by checkRefFormat", func(t *testing.T) {
 		t.Parallel()
 		// "lock" is a legal slug character, so sanitizeSlug leaves it
 		// untouched; the candidate matches zingBranchPattern but git's
 		// own ref-name rule (no ref may end in ".lock") still rejects it.
-		if _, err := branchName(t.Context(), 7, "wip.lock"); err == nil {
+		if _, err := branchName(7, "wip.lock"); err == nil {
 			t.Fatal("branchName(7, \"wip.lock\"): expected an error, got nil")
 		}
 	})
 
-	t.Run("a run of internal dots is rejected by check-ref-format", func(t *testing.T) {
+	t.Run("a run of internal dots is rejected by checkRefFormat", func(t *testing.T) {
 		t.Parallel()
 		// sanitizeSlug only trims leading/trailing dots, so an internal
 		// ".." survives to the candidate; git rejects two consecutive
 		// dots anywhere in a ref name.
-		if _, err := branchName(t.Context(), 7, "a..b"); err == nil {
+		if _, err := branchName(7, "a..b"); err == nil {
 			t.Fatal("branchName(7, \"a..b\"): expected an error, got nil")
 		}
 	})
 }
 
-// TestCheckRefFormat exercises the git check-ref-format wrapper directly,
-// with cases git's ref-name rules reject that branchName's own sanitizing
-// never has occasion to produce (a bare "." component). It is the second,
-// independent validation layer branchName relies on.
-func TestCheckRefFormat(t *testing.T) {
+// TestCheckRefFormatMatchesGit proves checkRefFormat (the pure-Go ref-name
+// check) agrees with real git on every case in this table: the oracle
+// binary is exec.LookPath("git") until task 5 brings gitbin, which then
+// becomes the binary of record.
+func TestCheckRefFormatMatchesGit(t *testing.T) {
 	t.Parallel()
-	cases := []struct {
-		name    string
-		ref     string
-		wantErr bool
-	}{
-		{"valid zing branch", branch7MySlug, false},
-		{"bare dot component", ".", true},
-		{"trailing .lock", "zing/7-wip.lock", true},
+
+	gitPath, err := exec.LookPath("git")
+	if err != nil {
+		t.Skipf("git not found on PATH: %v", err)
 	}
+
+	cases := []struct {
+		name      string
+		ref       string
+		wantValid bool
+	}{
+		{"zing branch", branch7MySlug, true},
+		{"main", mainBranch, true},
+		{"nested", "feature/x", true},
+		{"internal dot", "a.b", true},
+		{"bare at", "@", true},
+		{"at not followed by brace", "a@b", true},
+		{"non-ascii", "feature/ünï", true},
+		{"lock as a substring, not a suffix", "x.lockx", true},
+		{"empty", "", false},
+		{"bare dot component", ".", false},
+		{"bare dotdot", "..", false},
+		{"internal dotdot", "a..b", false},
+		{"component starting with dot", ".hidden", false},
+		{"nested component starting with dot", "a/.b", false},
+		{"ends in .lock", "x.lock", false},
+		{"nested component ends in .lock", "a.lock/b", false},
+		{"ends with dot", "end.", false},
+		{"ends with slash", "end/", false},
+		{"starts with slash", "/start", false},
+		{"empty component", "a//b", false},
+		{"space", "a b", false},
+		{"tilde", "a~b", false},
+		{"caret", "a^b", false},
+		{"colon", "a:b", false},
+		{"question mark", "a?b", false},
+		{"asterisk", "a*b", false},
+		{"open bracket", "a[b", false},
+		{"backslash", "a\\b", false},
+		{"at-brace sequence", "a@{b", false},
+		{"tab", "tab\tx", false},
+		{"del byte", "del\x7f", false},
+		{"control byte", "ctl\x01", false},
+	}
+
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			t.Parallel()
-			err := checkRefFormat(t.Context(), c.ref)
-			if c.wantErr && err == nil {
-				t.Errorf("checkRefFormat(%q): expected an error, got nil", c.ref)
+
+			ctx := t.Context()
+			cmd := exec.CommandContext(ctx, gitPath, "check-ref-format", "refs/heads/"+c.ref) //nolint:gosec // argv-only, no shell; a fixed oracle binary and a table-driven test value
+			cmd.Env = gitfixture.Environ()
+			out, runErr := cmd.CombinedOutput()
+
+			gitValid := runErr == nil
+			if runErr != nil {
+				var exitErr *exec.ExitError
+				if !errors.As(runErr, &exitErr) || exitErr.ExitCode() != 1 {
+					t.Fatalf("git check-ref-format refs/heads/%q: unexpected failure: %v: %s", c.ref, runErr, strings.TrimSpace(string(out)))
+				}
 			}
-			if !c.wantErr && err != nil {
-				t.Errorf("checkRefFormat(%q): unexpected error: %v", c.ref, err)
+
+			if gitValid != c.wantValid {
+				t.Fatalf("git check-ref-format refs/heads/%q: valid = %v, want %v (table is wrong)", c.ref, gitValid, c.wantValid)
+			}
+
+			gotValid := checkRefFormat(c.ref) == nil
+			if gotValid != c.wantValid {
+				t.Errorf("checkRefFormat(%q) valid = %v, want %v", c.ref, gotValid, c.wantValid)
 			}
 		})
 	}
@@ -1122,17 +1175,6 @@ func TestNewRunner(t *testing.T) {
 	}
 	if len(run.drivers) != 0 {
 		t.Errorf("NewRunner().drivers = %v, want empty", run.drivers)
-	}
-}
-
-// TestCheckRefFormatArgv proves checkRefFormat's argv (checkRefFormatArgs)
-// carries the hardening prefix, even though it reads no repository.
-func TestCheckRefFormatArgv(t *testing.T) {
-	t.Parallel()
-	got := checkRefFormatArgs(branch7MySlug)
-	want := []string{"-c", hooksPathArg, "-c", fsmonitorArg, "check-ref-format", "refs/heads/" + branch7MySlug}
-	if !slices.Equal(got, want) {
-		t.Errorf("checkRefFormatArgs(%q) = %q, want %q", branch7MySlug, got, want)
 	}
 }
 

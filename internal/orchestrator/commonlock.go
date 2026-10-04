@@ -46,7 +46,6 @@ package orchestrator
 //	review.go ChangedFilesBetween               diff --name-only --no-renames -z ...        per-worktree (read)
 //	review.go ChangedFilesSinceBase             merge-base <baseRev> <to>                   per-worktree (read)
 //	review.go IsAncestor                        merge-base --is-ancestor                    per-worktree (read)
-//	worktree.go checkRefFormat                  check-ref-format                            per-worktree (no repository touched at all)
 //	worktree.go revalidate                      symbolic-ref --short HEAD                   per-worktree (read)
 //	worktree.go GitCommonDir                    rev-parse --git-common-dir                  per-worktree (read; cached per Orchestrator after the first success, resolution serialized)
 //	worktree.go gitPathInfoExclude              rev-parse --git-path info/exclude           per-worktree (read)
