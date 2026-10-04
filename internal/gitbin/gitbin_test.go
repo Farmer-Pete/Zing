@@ -37,6 +37,10 @@ func TestResolveGit(t *testing.T) {
 	if err := os.Mkdir(dirGit, 0o755); err != nil {
 		t.Fatalf("mkdir dirGit: %v", err)
 	}
+	nonExecGit := filepath.Join(dir, "non-exec-git")
+	if err := os.WriteFile(nonExecGit, []byte("#!/bin/sh\n"), 0o644); err != nil {
+		t.Fatalf("write nonExecGit: %v", err)
+	}
 	missingGit := filepath.Join(dir, "missing-git")
 
 	lookPathErr := errors.New("exec: \"git\": executable file not found in $PATH")
@@ -119,6 +123,15 @@ func TestResolveGit(t *testing.T) {
 				return dirGit, nil
 			},
 			want: resolution{path: trampoline, source: sourceXcrunFailed, lookPath: trampoline, err: errors.New("not a regular file")},
+		},
+		{
+			name:     "xcrun names a non-executable regular file",
+			goos:     darwinGOOS,
+			lookPath: func(string) (string, error) { return trampoline, nil },
+			xcrunFind: func() (string, error) {
+				return nonExecGit, nil
+			},
+			want: resolution{path: trampoline, source: sourceXcrunFailed, lookPath: trampoline, err: errors.New("not executable")},
 		},
 	}
 

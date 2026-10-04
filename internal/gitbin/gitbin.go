@@ -71,6 +71,8 @@ func resolve(goos string, lookPath func(string) (string, error), xcrunFind func(
 		var info os.FileInfo
 		if info, err = os.Stat(realGit); err == nil && !info.Mode().IsRegular() {
 			err = fmt.Errorf("%s is not a regular file", realGit)
+		} else if err == nil && info.Mode().Perm()&0o111 == 0 {
+			err = fmt.Errorf("%s is not executable", realGit)
 		}
 	}
 	if err != nil {

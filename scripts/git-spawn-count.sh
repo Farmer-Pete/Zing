@@ -1,6 +1,16 @@
 #!/bin/sh
-# Counts the git processes a `go test` run starts, by putting a counting
-# `git` shim first on PATH and asking it to record one line per call.
+# Counts invocations of the literal `git` name that land on PATH during a
+# `go test` run, by putting a counting `git` shim first on PATH and asking
+# it to record one line per call. This is not a raw OS-level process/exec
+# count:
+#
+#   - Because this script's shim directory is first on PATH, code under
+#     test that calls exec.LookPath("git") (gitbin.Path(), for one) never
+#     sees /usr/bin/git here, so on darwin the xcrun trampoline's extra
+#     exec is never on the path this script measures either way, and it
+#     cannot show task 5's fix for that trampoline.
+#   - It cannot see any subprocess git forks internally, for example a
+#     git-remote-* helper.
 #
 # Usage: scripts/git-spawn-count.sh [go test package args...]
 #   scripts/git-spawn-count.sh ./internal/job/
