@@ -3,7 +3,9 @@ package job
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -1316,5 +1318,329 @@ func TestRunJobWithHookCleanupFailureLogged(t *testing.T) {
 	}
 	if !strings.Contains(logged, cleanupErr.Error()) {
 		t.Errorf("log missing the cleanup error text; got:\n%s", logged)
+	}
+}
+
+// ---- run evidence (#43 split: final message, stderr and transcript links) ----
+
+// closeStoreThenResult is a runtime.Runtime stub that closes the store
+// before returning a fixed result, so the caller's own recordRunEvidence
+// write fails against an already-closed database (TestRunJob_EvidenceWriteFailureLogsWarn).
+type closeStoreThenResult struct {
+	store *store.Store
+	res   runtime.RunResult
+}
+
+func (c closeStoreThenResult) Run(context.Context, runtime.RunRequest) (runtime.RunResult, error) {
+	_ = c.store.Close()
+	return c.res, nil
+}
+
+// jsonLogRecords parses buf as one JSON object per line (slog's own
+// JSONHandler shape), so a logging test can assert on individual fields
+// rather than substrings.
+func jsonLogRecords(t *testing.T, buf *bytes.Buffer) []map[string]any {
+	t.Helper()
+	var recs []map[string]any
+	for line := range strings.SplitSeq(strings.TrimRight(buf.String(), "\n"), "\n") {
+		if line == "" {
+			continue
+		}
+		var m map[string]any
+		if err := json.Unmarshal([]byte(line), &m); err != nil {
+			t.Fatalf("unmarshal log line %q: %v", line, err)
+		}
+		recs = append(recs, m)
+	}
+	return recs
+}
+
+// findLogRecord returns the first record in recs whose "msg" field equals
+// msg, failing the test if there is none.
+func findLogRecord(t *testing.T, recs []map[string]any, msg string) map[string]any {
+	t.Helper()
+	for _, r := range recs {
+		if r["msg"] == msg {
+			return r
+		}
+	}
+	t.Fatalf("no log record with msg %q among %d records", msg, len(recs))
+	return nil
+}
+
+// logRecordInt64 reads key from rec as the int64 a JSON number decodes to
+// (encoding/json gives float64), failing the test if key is absent or not a
+// number.
+func logRecordInt64(t *testing.T, rec map[string]any, key string) int64 {
+	t.Helper()
+	v, ok := rec[key].(float64)
+	if !ok {
+		t.Fatalf("field %q = %v (%T), want a number", key, rec[key], rec[key])
+	}
+	return int64(v)
+}
+
+// logRecordString reads key from rec as a string, failing the test if key
+// is absent or not a string.
+func logRecordString(t *testing.T, rec map[string]any, key string) string {
+	t.Helper()
+	v, ok := rec[key].(string)
+	if !ok {
+		t.Fatalf("field %q = %v (%T), want a string", key, rec[key], rec[key])
+	}
+	return v
+}
+
+// TestRunJob_RecordsRunEvidence proves runJobWith stores a successful run's
+// final message, stderr file path and transcript path through
+// Store.RecordRunEvidence, right after the stderr file is written (design
+// section: shape, recordRunEvidence).
+func TestRunJob_RecordsRunEvidence(t *testing.T) {
+	t.Parallel()
+	s := newRunJobTestStore(t)
+	ticketID := seedRunJobTicket(t, s)
+	ticket := getRunJobTicket(t, s, ticketID)
+	owner, expires := claimRunJobTicket(t, s, ticketID)
+
+	const wantTranscript = "/h/t.jsonl"
+	stub := stubRunResult{res: runtime.RunResult{
+		FinalMessage:   "doc",
+		TranscriptPath: wantTranscript,
+		Stderr:         []byte("boom"),
+	}}
+	set, err := runtime.NewSet(map[string]runtime.Runtime{testRuntimeClaude: stub, testRuntimeCodex: stub, runtimeFake: stub})
+	if err != nil {
+		t.Fatalf("runtime.NewSet: %v", err)
+	}
+
+	dataDir := t.TempDir()
+	d := Deps{
+		Store: s, Runtimes: set, Machine: runJobTestMachine(t), Models: map[string]string{testModelAlias: testModelExact},
+		Budget: time.Hour, Owner: owner, Expires: expires, Reserve: realReserve(s, owner, expires),
+		DataDir: dataDir,
+	}
+
+	rr, err := runJob(t.Context(), d, ticket, testJobClassify, store.SessionUpsert{Job: testJobClassify, Runtime: testRuntimeClaude},
+		runtime.RunRequest{Job: response.JobClassify}, nil, nil, 0)
+	if err != nil {
+		t.Fatalf("runJob: %v", err)
+	}
+
+	_, ev, err := s.RunEvidenceByID(t.Context(), rr.Reserved.RunID)
+	if err != nil {
+		t.Fatalf("RunEvidenceByID: %v", err)
+	}
+	if ev.FinalMessage == nil || *ev.FinalMessage != "doc" {
+		t.Errorf("FinalMessage = %v, want \"doc\"", ev.FinalMessage)
+	}
+	wantStderrPath := filepath.Join(dataDir, "runs", fmt.Sprintf("run-%d-stderr.log", rr.Reserved.RunID))
+	if ev.StderrPath == nil || *ev.StderrPath != wantStderrPath {
+		t.Errorf("StderrPath = %v, want %q", ev.StderrPath, wantStderrPath)
+	}
+	if ev.TranscriptPath == nil || *ev.TranscriptPath != wantTranscript {
+		t.Errorf("TranscriptPath = %v, want %q", ev.TranscriptPath, wantTranscript)
+	}
+}
+
+// TestRunJob_RecordsEvidenceForInvalidOutput proves evidence is recorded
+// even when rt.Run returns an InvalidOutputError (every outcome stores
+// evidence, design goal): the final message is kept, and a run with no
+// stderr stores no stderr path.
+func TestRunJob_RecordsEvidenceForInvalidOutput(t *testing.T) {
+	t.Parallel()
+	s := newRunJobTestStore(t)
+	ticketID := seedRunJobTicket(t, s)
+	ticket := getRunJobTicket(t, s, ticketID)
+	owner, expires := claimRunJobTicket(t, s, ticketID)
+
+	wantErr := &runtime.InvalidOutputError{Reason: "no zing element in final message"}
+	stub := stubRunResult{res: runtime.RunResult{FinalMessage: "bad text"}, err: wantErr}
+	set, err := runtime.NewSet(map[string]runtime.Runtime{testRuntimeClaude: stub, testRuntimeCodex: stub, runtimeFake: stub})
+	if err != nil {
+		t.Fatalf("runtime.NewSet: %v", err)
+	}
+
+	d := Deps{
+		Store: s, Runtimes: set, Machine: runJobTestMachine(t), Models: map[string]string{testModelAlias: testModelExact},
+		Budget: time.Hour, Owner: owner, Expires: expires, Reserve: realReserve(s, owner, expires),
+		DataDir: t.TempDir(),
+	}
+
+	rr, err := runJob(t.Context(), d, ticket, testJobClassify, store.SessionUpsert{Job: testJobClassify, Runtime: testRuntimeClaude},
+		runtime.RunRequest{Job: response.JobClassify}, nil, nil, 0)
+	var invalidErr *runtime.InvalidOutputError
+	// errors.As, not the modernize-suggested errors.AsType: AsType's (E, bool)
+	// result has E discarded via _, and errcheck's check-blank (this repo's
+	// config) flags that discard since E is itself error-shaped.
+	if !errors.As(err, &invalidErr) { //nolint:modernize // see comment above
+		t.Fatalf("runJob err = %v, want *runtime.InvalidOutputError", err)
+	}
+
+	_, ev, evErr := s.RunEvidenceByID(t.Context(), rr.Reserved.RunID)
+	if evErr != nil {
+		t.Fatalf("RunEvidenceByID: %v", evErr)
+	}
+	if ev.FinalMessage == nil || *ev.FinalMessage != "bad text" {
+		t.Errorf("FinalMessage = %v, want \"bad text\"", ev.FinalMessage)
+	}
+	if ev.StderrPath != nil {
+		t.Errorf("StderrPath = %v, want nil (no stderr)", ev.StderrPath)
+	}
+}
+
+// TestRunJob_FakeRunStoresScriptAsFinalMessage proves a real, scripted
+// planning-style fake run stores its script text as the run's
+// final_message (runtime.Fake.Run already sets RunResult.FinalMessage to
+// the script text; this proves runJobWith carries it through to the
+// store).
+func TestRunJob_FakeRunStoresScriptAsFinalMessage(t *testing.T) {
+	t.Parallel()
+	s := newRunJobTestStore(t)
+	ticketID := seedRunJobTicket(t, s)
+	ticket := getRunJobTicket(t, s, ticketID)
+	owner, expires := claimRunJobTicket(t, s, ticketID)
+
+	scripts := fstest.MapFS{testClassifyScriptKey: &fstest.MapFile{Data: []byte(classifyBugXML)}}
+	fake := runtime.NewFake(scripts)
+	set, err := runtime.NewSet(map[string]runtime.Runtime{testRuntimeClaude: fake, testRuntimeCodex: fake, runtimeFake: fake})
+	if err != nil {
+		t.Fatalf("runtime.NewSet: %v", err)
+	}
+
+	d := Deps{
+		Store: s, Runtimes: set, Machine: runJobTestMachine(t), Models: map[string]string{testModelAlias: testModelExact},
+		Budget: time.Hour, Owner: owner, Expires: expires, Reserve: realReserve(s, owner, expires),
+		DataDir: t.TempDir(),
+	}
+
+	rr, err := runJob(t.Context(), d, ticket, testJobClassify, store.SessionUpsert{Job: testJobClassify, Runtime: testRuntimeClaude},
+		runtime.RunRequest{Job: response.JobClassify}, nil, nil, 0)
+	if err != nil {
+		t.Fatalf("runJob: %v", err)
+	}
+
+	_, ev, err := s.RunEvidenceByID(t.Context(), rr.Reserved.RunID)
+	if err != nil {
+		t.Fatalf("RunEvidenceByID: %v", err)
+	}
+	if ev.FinalMessage == nil || *ev.FinalMessage != classifyBugXML {
+		t.Errorf("FinalMessage = %v, want the script text", ev.FinalMessage)
+	}
+}
+
+// TestRunJob_EvidenceWriteFailureLogsWarn proves a failed evidence write
+// logs a WARN "run evidence not recorded" with ticket_id, run_id and error,
+// never fails the run itself, and never logs the final message text. Not
+// t.Parallel: it swaps slog's process-wide default to capture the record.
+func TestRunJob_EvidenceWriteFailureLogsWarn(t *testing.T) {
+	s := newRunJobTestStore(t)
+	ticketID := seedRunJobTicket(t, s)
+	ticket := getRunJobTicket(t, s, ticketID)
+	owner, expires := claimRunJobTicket(t, s, ticketID)
+
+	wantRes := runtime.RunResult{
+		FinalMessage: "hidden text",
+	}
+	stub := closeStoreThenResult{store: s, res: wantRes}
+	set, err := runtime.NewSet(map[string]runtime.Runtime{testRuntimeClaude: stub, testRuntimeCodex: stub, runtimeFake: stub})
+	if err != nil {
+		t.Fatalf("runtime.NewSet: %v", err)
+	}
+
+	d := Deps{
+		Store: s, Runtimes: set, Machine: runJobTestMachine(t), Models: map[string]string{testModelAlias: testModelExact},
+		Budget: time.Hour, Owner: owner, Expires: expires, Reserve: realReserve(s, owner, expires),
+		DataDir: t.TempDir(),
+	}
+
+	var logBuf bytes.Buffer
+	prevDefault := slog.Default()
+	slog.SetDefault(slog.New(slog.NewJSONHandler(&logBuf, &slog.HandlerOptions{Level: slog.LevelWarn})))
+	t.Cleanup(func() { slog.SetDefault(prevDefault) })
+
+	rr, err := runJob(t.Context(), d, ticket, testJobClassify, store.SessionUpsert{Job: testJobClassify, Runtime: testRuntimeClaude},
+		runtime.RunRequest{Job: response.JobClassify}, nil, nil, 0)
+	if err != nil {
+		t.Fatalf("runJob: %v, want nil (an evidence write failure must not fail the run)", err)
+	}
+	if rr.Res.FinalMessage != "hidden text" {
+		t.Errorf("rr.Res.FinalMessage = %q, want %q", rr.Res.FinalMessage, "hidden text")
+	}
+
+	recs := jsonLogRecords(t, &logBuf)
+	warn := findLogRecord(t, recs, "run evidence not recorded")
+	if warn["level"] != "WARN" {
+		t.Errorf("level = %v, want WARN", warn["level"])
+	}
+	if got := logRecordInt64(t, warn, "ticket_id"); got != ticket.ID {
+		t.Errorf("ticket_id = %d, want %d", got, ticket.ID)
+	}
+	if got := logRecordInt64(t, warn, "run_id"); got != rr.Reserved.RunID {
+		t.Errorf("run_id = %d, want %d", got, rr.Reserved.RunID)
+	}
+	if logRecordString(t, warn, "error") == "" {
+		t.Error("error field is empty, want the store's own close-related error")
+	}
+
+	if strings.Contains(logBuf.String(), "hidden text") {
+		t.Errorf("log buffer contains the final message text:\n%s", logBuf.String())
+	}
+}
+
+// TestRunJob_EndLogNamesEvidenceNotContents proves the "runJob end" INFO
+// line carries final_message_len and transcript_path, never the final
+// message text itself. Not t.Parallel: it swaps slog's process-wide
+// default to capture the record.
+func TestRunJob_EndLogNamesEvidenceNotContents(t *testing.T) {
+	s := newRunJobTestStore(t)
+	ticketID := seedRunJobTicket(t, s)
+	ticket := getRunJobTicket(t, s, ticketID)
+	owner, expires := claimRunJobTicket(t, s, ticketID)
+
+	const wantTranscript = "/h/t.jsonl"
+	const wantFinalMessage = "secret words"
+	stub := stubRunResult{res: runtime.RunResult{
+		FinalMessage:   wantFinalMessage,
+		TranscriptPath: wantTranscript,
+	}}
+	set, err := runtime.NewSet(map[string]runtime.Runtime{testRuntimeClaude: stub, testRuntimeCodex: stub, runtimeFake: stub})
+	if err != nil {
+		t.Fatalf("runtime.NewSet: %v", err)
+	}
+
+	d := Deps{
+		Store: s, Runtimes: set, Machine: runJobTestMachine(t), Models: map[string]string{testModelAlias: testModelExact},
+		Budget: time.Hour, Owner: owner, Expires: expires, Reserve: realReserve(s, owner, expires),
+		DataDir: t.TempDir(),
+	}
+
+	var logBuf bytes.Buffer
+	prevDefault := slog.Default()
+	slog.SetDefault(slog.New(slog.NewJSONHandler(&logBuf, &slog.HandlerOptions{Level: slog.LevelInfo})))
+	t.Cleanup(func() { slog.SetDefault(prevDefault) })
+
+	rr, err := runJob(t.Context(), d, ticket, testJobClassify, store.SessionUpsert{Job: testJobClassify, Runtime: testRuntimeClaude},
+		runtime.RunRequest{Job: response.JobClassify}, nil, nil, 0)
+	if err != nil {
+		t.Fatalf("runJob: %v", err)
+	}
+
+	recs := jsonLogRecords(t, &logBuf)
+	end := findLogRecord(t, recs, "runJob end")
+	if got := logRecordInt64(t, end, "final_message_len"); got != int64(len(wantFinalMessage)) {
+		t.Errorf("final_message_len = %d, want %d", got, len(wantFinalMessage))
+	}
+	if got := logRecordString(t, end, "transcript_path"); got != wantTranscript {
+		t.Errorf("transcript_path = %q, want %q", got, wantTranscript)
+	}
+	if got := logRecordInt64(t, end, "ticket_id"); got != ticket.ID {
+		t.Errorf("ticket_id = %d, want %d", got, ticket.ID)
+	}
+	if got := logRecordInt64(t, end, "run_id"); got != rr.Reserved.RunID {
+		t.Errorf("run_id = %d, want %d", got, rr.Reserved.RunID)
+	}
+
+	if strings.Contains(logBuf.String(), wantFinalMessage) {
+		t.Errorf("log buffer contains the final message text:\n%s", logBuf.String())
 	}
 }

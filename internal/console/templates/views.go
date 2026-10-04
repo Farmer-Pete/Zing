@@ -322,6 +322,36 @@ type ArtifactSlot struct {
 type RunRail struct {
 	Model, AgentTime, Attempts, Worktree, Branch string
 	Interrupted                                  bool
+
+	// Runs lists every run of the open ticket, newest (greatest id) first
+	// (console.runRows, rail.go; #43 split). nil or empty renders "No runs
+	// yet." (rail.templ's runList).
+	Runs []RunRow
+}
+
+// RunRow is one row of the rail's Run list (design section 6.11, #43
+// split): one runs table row joined with its session's job and runtime.
+// Every field is pre-formatted by console.runRows (rail.go). Job and
+// Runtime read "-" when the row's session is missing from the sessions
+// read that built it; Model reads "-" when runs.model is NULL; Outcome
+// reads "running" when runs.outcome is NULL; AgentTime reads "-" when
+// runs.agent_seconds is NULL. FinalURL and StderrURL are "" unless the run
+// kept that evidence (RecordRunEvidence, migration 0007), in which case
+// rail.templ renders a link to GET /runs/{id}/{kind}. Transcript is the
+// stored transcript path, shown as plain text rather than a link (design:
+// transcripts live outside the data directory, so the console never serves
+// them).
+type RunRow struct {
+	ID          int64
+	Job         string
+	Runtime     string
+	Model       string
+	Outcome     string
+	Interrupted bool
+	AgentTime   string
+	FinalURL    string
+	StderrURL   string
+	Transcript  string
 }
 
 // LogLine is one entry the rail's Log section renders (design section 6.11,

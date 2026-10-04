@@ -13,6 +13,7 @@ import (
 	"log/slog"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -290,6 +291,75 @@ type claudeResult struct {
 	Result string `json:"result"`
 }
 
+// claudeFinalMessage returns the text Claude's run treats as the final
+// message: the JSON result object's "result" field when stdout decodes
+// and that field is non-empty, otherwise stdout itself, so a crash or a
+// truncated object still leaves its text behind.
+func claudeFinalMessage(stdout []byte) string {
+	var cr claudeResult
+	if err := json.Unmarshal(stdout, &cr); err == nil && cr.Result != "" {
+		return cr.Result
+	}
+	return string(stdout)
+}
+
+// claudeTranscriptPath is where the claude CLI writes this session's
+// transcript: HOME/.claude/projects/ENC(workDir)/SESSION.jsonl, ENC
+// replacing every byte outside [A-Za-z0-9] with '-' (the same encoding
+// sandbox.encodeTranscriptDir uses for the TRANSCRIPTS profile parameter).
+// workDir is resolved to an absolute, symlink-free path first, matching
+// what finishSandboxRequest already hands Claude for a sandboxed run; an
+// unsandboxed run's WorkDir can still hold symlink components. home is the
+// last HOME= entry in env, falling back to os.UserHomeDir; "" when either
+// path fails to resolve or sessionID is "".
+func claudeTranscriptPath(env []string, workDir, sessionID string) string {
+	if sessionID == "" {
+		return ""
+	}
+	home := ""
+	for _, kv := range env {
+		if v, ok := strings.CutPrefix(kv, "HOME="); ok {
+			home = v
+		}
+	}
+	if home == "" {
+		h, err := os.UserHomeDir()
+		if err != nil {
+			return ""
+		}
+		home = h
+	}
+	absoluteWorkDir, err := filepath.Abs(workDir)
+	if err != nil {
+		return ""
+	}
+	resolvedWorkDir, err := filepath.EvalSymlinks(absoluteWorkDir)
+	if err != nil {
+		return ""
+	}
+	return filepath.Join(home, ".claude", "projects", encodeClaudeTranscriptDir(resolvedWorkDir), sessionID+".jsonl")
+}
+
+// encodeClaudeTranscriptDir mirrors sandbox.encodeTranscriptDir: every byte
+// outside [A-Za-z0-9] becomes '-'. It is not shared with that package: an
+// internal/sandbox darwin test file imports internal/runtime, so
+// internal/runtime importing internal/sandbox back would cycle the
+// sandbox test binary.
+func encodeClaudeTranscriptDir(path string) string {
+	var b strings.Builder
+	b.Grow(len(path))
+	for i := 0; i < len(path); i++ {
+		c := path[i]
+		switch {
+		case c >= 'A' && c <= 'Z', c >= 'a' && c <= 'z', c >= '0' && c <= '9':
+			b.WriteByte(c)
+		default:
+			b.WriteByte('-')
+		}
+	}
+	return b.String()
+}
+
 // configureProcessGroup puts cmd in its own process group and arranges for
 // ctx's cancellation to SIGKILL the whole group, not just cmd.Process
 // (design section 4.1, shared by Claude and Codex): either CLI may itself
@@ -466,12 +536,14 @@ func (c Claude) run(ctx context.Context, req RunRequest, argv []string, sessionI
 	killProcessGroup(cmd)
 
 	res := RunResult{
-		AgentTime:    time.Since(start),
-		SessionID:    sessionID,
-		ExitCode:     exitCodeFrom(waitErr),
-		StderrLen:    stderrCount.n,
-		StderrSHA256: shortHex(stderrHash.Sum(nil)),
-		Stderr:       stderrCap.bytes(),
+		AgentTime:      time.Since(start),
+		SessionID:      sessionID,
+		ExitCode:       exitCodeFrom(waitErr),
+		StderrLen:      stderrCount.n,
+		StderrSHA256:   shortHex(stderrHash.Sum(nil)),
+		Stderr:         stderrCap.bytes(),
+		FinalMessage:   capFinalMessage(claudeFinalMessage(stdout.bytes())),
+		TranscriptPath: claudeTranscriptPath(cmd.Env, req.WorkDir, sessionID),
 	}
 
 	if outcomeErr := classifyProcessOutcome(ctx, stdout.overflowed(), waitErr, res.ExitCode); outcomeErr != nil {

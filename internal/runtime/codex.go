@@ -13,6 +13,7 @@ import (
 	"os/exec"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"zing/internal/response"
 )
@@ -183,6 +184,25 @@ func readCapped(path string, limit int) ([]byte, error) {
 		return nil, ErrOutputTooLarge
 	}
 	return data, nil
+}
+
+// readFinalMessageFile reads Codex's -o file for RunResult.FinalMessage,
+// best effort: at most maxFinalMessageBytes+utf8.UTFMax bytes are read and
+// then capped; a missing or unreadable file gives "" and logs nothing
+// (classifyProcessOutcome and the existing readCapped path already report
+// the run's real failure).
+func readFinalMessageFile(path string) string {
+	f, err := os.Open(path)
+	if err != nil {
+		return ""
+	}
+	defer f.Close()
+
+	data, err := io.ReadAll(io.LimitReader(f, int64(maxFinalMessageBytes)+utf8.UTFMax))
+	if err != nil {
+		return ""
+	}
+	return capFinalMessage(string(data))
 }
 
 // codexEventLine is the subset of one codex exec --json JSONL event's
@@ -356,6 +376,7 @@ func (c Codex) run(ctx context.Context, req RunRequest, argv []string, outPath s
 		StderrSHA256: shortHex(stderrHash.Sum(nil)),
 		Stderr:       stderrCap.bytes(),
 	}
+	res.FinalMessage = readFinalMessageFile(outPath)
 
 	if outcomeErr := classifyProcessOutcome(ctx, stdout.overflowed(), waitErr, res.ExitCode); outcomeErr != nil {
 		if errors.Is(outcomeErr, ErrTimeout) || errors.Is(outcomeErr, ErrCanceled) {

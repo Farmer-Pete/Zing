@@ -70,6 +70,79 @@ func TestFake_FirstTurnMintsIDAndServesTurnOne(t *testing.T) {
 	}
 }
 
+// TestFake_FinalMessageIsScript covers #43: a scripted turn's
+// RunResult.FinalMessage is the script file's own text.
+func TestFake_FinalMessageIsScript(t *testing.T) {
+	t.Parallel()
+
+	f := NewFake(newClassifyFS())
+	res, err := f.Run(context.Background(), RunRequest{Job: response.JobClassify})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if res.FinalMessage != classifyBugXML {
+		t.Errorf("FinalMessage = %q, want %q", res.FinalMessage, classifyBugXML)
+	}
+}
+
+// TestFake_FinalMessageKeptOnApplyEffectsError proves a started run (its
+// OnStart already fired) keeps its FinalMessage even when applyEffects
+// fails: the script is read and OnStart fires before the ".delete" line
+// is found unsafe, so the run counts as started and must not lose its
+// final message on this error path.
+func TestFake_FinalMessageKeptOnApplyEffectsError(t *testing.T) {
+	t.Parallel()
+
+	workDir := t.TempDir()
+	fsys := fstest.MapFS{
+		effectScriptKey: &fstest.MapFile{Data: []byte(classifyBugXML)},
+		effectDeleteKey: &fstest.MapFile{Data: []byte("/etc/hosts\n")},
+	}
+	f := NewFake(fsys)
+
+	res, err := f.Run(context.Background(), RunRequest{Job: response.JobClassify, Label: "1", WorkDir: workDir})
+	assertUnsafeEffectError(t, err)
+	if res.FinalMessage != classifyBugXML {
+		t.Errorf("FinalMessage = %q, want %q", res.FinalMessage, classifyBugXML)
+	}
+	if res.SessionID == "" {
+		t.Error("SessionID = \"\", want the minted session id")
+	}
+}
+
+// TestFake_ResumeAfterApplyEffectsErrorRetriesSameTurn proves a session
+// that failed its first turn on applyEffects is still committed: OnStart
+// already told the caller this sessionID started (and runJobWith's OnStart
+// callback persists it immediately), so a resume with that id must find a
+// known session rather than "fake: unknown session", and it must retry the
+// same (unadvanced) turn rather than skip ahead.
+func TestFake_ResumeAfterApplyEffectsErrorRetriesSameTurn(t *testing.T) {
+	t.Parallel()
+
+	workDir := t.TempDir()
+	fsys := fstest.MapFS{
+		effectScriptKey: &fstest.MapFile{Data: []byte(classifyBugXML)},
+		effectDeleteKey: &fstest.MapFile{Data: []byte("/etc/hosts\n")},
+	}
+	f := NewFake(fsys)
+
+	res, err := f.Run(context.Background(), RunRequest{Job: response.JobClassify, Label: "1", WorkDir: workDir})
+	assertUnsafeEffectError(t, err)
+
+	resumed, err := f.Run(context.Background(), RunRequest{
+		Job: response.JobClassify, Label: "1", SessionID: res.SessionID,
+	})
+	if err != nil {
+		t.Fatalf("resume after applyEffects error: %v", err)
+	}
+	if resumed.SessionID != res.SessionID {
+		t.Errorf("resumed SessionID = %q, want %q", resumed.SessionID, res.SessionID)
+	}
+	if resumed.FinalMessage != classifyBugXML {
+		t.Errorf("resumed FinalMessage = %q, want %q (the same, unadvanced turn)", resumed.FinalMessage, classifyBugXML)
+	}
+}
+
 func TestFake_HonorsCancellation(t *testing.T) {
 	t.Parallel()
 

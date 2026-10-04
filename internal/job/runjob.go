@@ -266,6 +266,8 @@ func runJobWith(
 		stderrFile = path
 	}
 
+	recordRunEvidence(ctx, d, t.ID, rsv.RunID, res, stderrFile)
+
 	slog.Info("runJob end",
 		"ticket_id", t.ID,
 		"session_id", rsv.SessionID,
@@ -279,6 +281,8 @@ func runJobWith(
 		"stderr_len", res.StderrLen,
 		"stderr_sha256", res.StderrSHA256,
 		"stderr_file", stderrFile,
+		"final_message_len", len(res.FinalMessage),
+		"transcript_path", res.TranscriptPath,
 	)
 
 	return runResult{Res: res, Reserved: rsv, Started: started}, runErr
@@ -293,11 +297,35 @@ func writeStderrFile(dataDir string, runID int64, data []byte) (string, error) {
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return "", fmt.Errorf("stderr file: %w", err)
 	}
-	path := filepath.Join(dir, fmt.Sprintf("run-%d-stderr.log", runID))
+	path := filepath.Join(dir, store.StderrFileName(runID))
 	if err := os.WriteFile(path, data, 0o600); err != nil {
 		return "", fmt.Errorf("stderr file: %w", err)
 	}
 	return path, nil
+}
+
+// recordRunEvidence stores what runID left behind (#43 split): the final
+// message, the stderr file path, and the transcript path, each NULL when
+// empty. Like recordRunStart it detaches from ctx and bounds the write to
+// 10s, and a failure is logged at WARN, never returned: losing evidence
+// must not fail a run that otherwise finished. The log names the run, never
+// the text it would have stored.
+func recordRunEvidence(ctx context.Context, d Deps, ticketID, runID int64, res runtime.RunResult, stderrFile string) {
+	var ev store.RunEvidence
+	if res.FinalMessage != "" {
+		ev.FinalMessage = &res.FinalMessage
+	}
+	if stderrFile != "" {
+		ev.StderrPath = &stderrFile
+	}
+	if res.TranscriptPath != "" {
+		ev.TranscriptPath = &res.TranscriptPath
+	}
+	evCtx, cancel := onStartContext(ctx)
+	defer cancel()
+	if err := d.Store.RecordRunEvidence(evCtx, runID, ev); err != nil {
+		slog.Warn("run evidence not recorded", "ticket_id", ticketID, "run_id", runID, "error", err)
+	}
 }
 
 // seedTaskN is store.RunSeed.TaskN's own value for a build or perimeter

@@ -13,10 +13,14 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
+	"os"
+	"path/filepath"
 	"slices"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/a-h/templ"
@@ -284,6 +288,10 @@ func (c *console) buildRunRail(ctx context.Context, ticketID int64) (templates.R
 	if err != nil {
 		return templates.RunRail{}, fmt.Errorf("console: rail: runs for ticket %d: %w", ticketID, err)
 	}
+	evidence, err := c.store.RunEvidenceForTicket(ctx, ticketID)
+	if err != nil {
+		return templates.RunRail{}, fmt.Errorf("console: rail: run evidence for ticket %d: %w", ticketID, err)
+	}
 	var newestRun store.Run
 	haveRun := false
 	for _, r := range runs {
@@ -297,6 +305,7 @@ func (c *console) buildRunRail(ctx context.Context, ticketID int64) (templates.R
 		Attempts: strconv.Itoa(newestSession.Resumes + 1),
 		Worktree: dash, // arrives with Package 5 (design section 6.11)
 		Branch:   dash, // arrives with Package 5 (design section 6.11)
+		Runs:     runRows(sessions, runs, evidence),
 	}
 	if !haveRun {
 		run.Model, run.AgentTime = dash, dash
@@ -318,6 +327,59 @@ func (c *console) buildRunRail(ctx context.Context, ticketID int64) (templates.R
 		run.AgentTime = dash
 	}
 	return run, nil
+}
+
+// runRows turns every run of a ticket into one rail row, newest (greatest
+// id) first (#43 split): RunsForTicket already orders runs id-ascending
+// (design section 7.2), so this walks it back to front. Job and Runtime
+// come from the run's own session ("-" when that session is missing from
+// sessions, which should not happen in practice since every run belongs to
+// a session its own ticket still carries). FinalURL and StderrURL are set
+// only when evidence names that run with a non-nil field; Transcript is the
+// stored path or "".
+func runRows(sessions []store.Session, runs []store.Run, evidence map[int64]store.RunEvidence) []templates.RunRow {
+	sessionByID := make(map[int64]store.Session, len(sessions))
+	for _, sess := range sessions {
+		sessionByID[sess.ID] = sess
+	}
+
+	rows := make([]templates.RunRow, len(runs))
+	for i, r := range runs {
+		row := templates.RunRow{
+			ID:          r.ID,
+			Job:         dash,
+			Runtime:     dash,
+			Model:       dash,
+			Outcome:     "running",
+			Interrupted: r.Interrupted,
+			AgentTime:   dash,
+		}
+		if sess, ok := sessionByID[r.SessionID]; ok {
+			row.Job = sess.Job
+			row.Runtime = sess.Runtime
+		}
+		if r.Model != nil {
+			row.Model = *r.Model
+		}
+		if r.Outcome != nil {
+			row.Outcome = *r.Outcome
+		}
+		if r.AgentSeconds != nil {
+			row.AgentTime = (time.Duration(*r.AgentSeconds) * time.Second).String()
+		}
+		ev := evidence[r.ID]
+		if ev.FinalMessage != nil {
+			row.FinalURL = fmt.Sprintf("/runs/%d/final", r.ID)
+		}
+		if ev.StderrPath != nil {
+			row.StderrURL = fmt.Sprintf("/runs/%d/stderr", r.ID)
+		}
+		if ev.TranscriptPath != nil {
+			row.Transcript = *ev.TranscriptPath
+		}
+		rows[len(runs)-1-i] = row
+	}
+	return rows
 }
 
 // logLineTimeFormat is the Log rail's own compact per-line timestamp,
@@ -457,4 +519,136 @@ func (c *console) handleSide(w http.ResponseWriter, r *http.Request) {
 	if _, err := w.Write(buf.Bytes()); err != nil {
 		slog.Error("console: write side reply", "err", err)
 	}
+}
+
+// ---- GET /runs/{id}/{kind} (#43 split, run evidence) ------------------
+
+// contentTypePlainText is the one run-file route's success Content-Type;
+// paired with X-Content-Type-Options: nosniff so a browser never sniffs a
+// served final message or stderr file as HTML.
+const contentTypePlainText = "text/plain; charset=utf-8"
+
+// handleRunFile is GET /runs/{id}/{kind}: one run's kept evidence (a final
+// message or a stderr file), served as plain text. kind is "final" or
+// "stderr"; any other kind, or an {id} that is not a positive int64, 404s
+// without a store read. A stderr read is refused unless the recorded path
+// resolves to exactly store.StderrFileName(id) directly inside
+// <store.Dir()>/runs, the one file job.writeStderrFile ever writes; that
+// keeps the route off zing.db, another run's stderr file, and anything
+// else the data directory holds. Every branch logs one line naming the
+// run, never the text it serves or refuses (design section's Logging
+// table).
+func (c *console) handleRunFile(w http.ResponseWriter, r *http.Request) {
+	runID, idOK := parsePositiveID(r.PathValue("id"))
+	kind := r.PathValue("kind")
+	knownKind := kind == "final" || kind == "stderr"
+	if !idOK || !knownKind {
+		slog.Info("run file not found", "ticket_id", int64(0), "run_id", runID, "kind", kind, "reason", "bad_path")
+		http.NotFound(w, r)
+		return
+	}
+
+	ticketID, ev, err := c.store.RunEvidenceByID(r.Context(), runID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			slog.Info("run file not found", "ticket_id", int64(0), "run_id", runID, "kind", kind, "reason", "no_such_run")
+			http.Error(w, "no such run", http.StatusNotFound)
+			return
+		}
+		slog.Error("run file read failed", "ticket_id", int64(0), "run_id", runID, "kind", kind, "error", err)
+		http.Error(w, genericServerErrorBody, http.StatusInternalServerError)
+		return
+	}
+
+	if kind == "final" {
+		if ev.FinalMessage == nil {
+			slog.Info("run file not found", "ticket_id", ticketID, "run_id", runID, "kind", kind, "reason", "no_final_message")
+			http.Error(w, "this run kept no final message", http.StatusNotFound)
+			return
+		}
+		w.Header().Set("Content-Type", contentTypePlainText)
+		w.Header().Set("X-Content-Type-Options", "nosniff")
+		if _, writeErr := io.WriteString(w, *ev.FinalMessage); writeErr != nil {
+			slog.Error("console: write run file", "ticket_id", ticketID, "run_id", runID, "kind", kind, "error", writeErr)
+			return
+		}
+		slog.Info("run file served", "ticket_id", ticketID, "run_id", runID, "kind", kind, "bytes", len(*ev.FinalMessage))
+		return
+	}
+
+	if ev.StderrPath == nil {
+		slog.Info("run file not found", "ticket_id", ticketID, "run_id", runID, "kind", kind, "reason", "no_stderr")
+		http.Error(w, "this run wrote no stderr", http.StatusNotFound)
+		return
+	}
+
+	dataDir, rootErr := filepath.EvalSymlinks(c.store.Dir())
+	if rootErr != nil {
+		slog.Info("run file not found", "ticket_id", ticketID, "run_id", runID, "kind", kind, "reason", "stderr_gone", "error", rootErr)
+		http.Error(w, "stderr file is gone", http.StatusNotFound)
+		return
+	}
+	p, pathErr := filepath.EvalSymlinks(*ev.StderrPath)
+	if pathErr != nil {
+		slog.Info("run file not found", "ticket_id", ticketID, "run_id", runID, "kind", kind, "reason", "stderr_gone", "error", pathErr)
+		http.Error(w, "stderr file is gone", http.StatusNotFound)
+		return
+	}
+
+	// wantRel is the only path this run's stderr evidence may resolve to:
+	// run-<runID>-stderr.log directly inside <dataDir>/runs. relToData
+	// says the truth about where the resolved path actually sits relative
+	// to the whole data directory, so the 403 this route sends never
+	// claims a file is "outside the data directory" when it is really
+	// inside it under the wrong name (for instance zing.db, or another
+	// run's stderr file).
+	wantRel := filepath.Join("runs", store.StderrFileName(runID))
+	relToData, relErr := filepath.Rel(dataDir, p)
+	escapesDataDir := relErr != nil || relToData == ".." || strings.HasPrefix(relToData, ".."+string(filepath.Separator)) || filepath.IsAbs(relToData)
+	if escapesDataDir || relToData != wantRel {
+		reason, body := "unexpected_name", "stderr file does not match this run"
+		if escapesDataDir {
+			reason, body = "outside_data_dir", "stderr file is outside the data directory"
+		}
+		slog.Warn("run file outside data dir", "ticket_id", ticketID, "run_id", runID, "kind", kind, "reason", reason, "path", *ev.StderrPath)
+		http.Error(w, body, http.StatusForbidden)
+		return
+	}
+
+	runsDir := filepath.Join(dataDir, "runs")
+	dirRoot, err := os.OpenRoot(runsDir)
+	if err != nil {
+		slog.Info("run file not found", "ticket_id", ticketID, "run_id", runID, "kind", kind, "reason", "stderr_gone", "error", err)
+		http.Error(w, "stderr file is gone", http.StatusNotFound)
+		return
+	}
+	defer func() { _ = dirRoot.Close() }()
+
+	f, err := dirRoot.Open(store.StderrFileName(runID))
+	if err != nil {
+		slog.Info("run file not found", "ticket_id", ticketID, "run_id", runID, "kind", kind, "reason", "stderr_gone", "error", err)
+		http.Error(w, "stderr file is gone", http.StatusNotFound)
+		return
+	}
+	defer func() { _ = f.Close() }()
+
+	switch fi, statErr := f.Stat(); {
+	case statErr != nil:
+		slog.Info("run file not found", "ticket_id", ticketID, "run_id", runID, "kind", kind, "reason", "stderr_gone", "error", statErr)
+		http.Error(w, "stderr file is gone", http.StatusNotFound)
+		return
+	case !fi.Mode().IsRegular():
+		slog.Info("run file not found", "ticket_id", ticketID, "run_id", runID, "kind", kind, "reason", "not_regular", "mode", fi.Mode().String())
+		http.Error(w, "stderr file is gone", http.StatusNotFound)
+		return
+	}
+
+	w.Header().Set("Content-Type", contentTypePlainText)
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	n, copyErr := io.Copy(w, f)
+	if copyErr != nil {
+		slog.Error("console: write run file", "ticket_id", ticketID, "run_id", runID, "kind", kind, "bytes", n, "error", copyErr)
+		return
+	}
+	slog.Info("run file served", "ticket_id", ticketID, "run_id", runID, "kind", kind, "bytes", n)
 }

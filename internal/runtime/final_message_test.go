@@ -114,15 +114,113 @@ func TestParseFinalMessage_ParseErrorGoesToDetail(t *testing.T) {
 	}
 }
 
+// TestCapFinalMessage proves capFinalMessage leaves a short string
+// unchanged and cuts a long one on a rune boundary, within
+// maxFinalMessageBytes, ending in finalMessageCutSuffix.
+func TestCapFinalMessage(t *testing.T) {
+	t.Parallel()
+
+	short := "a short final message"
+	if got := capFinalMessage(short); got != short {
+		t.Errorf("capFinalMessage(short) = %q, want unchanged %q", got, short)
+	}
+
+	long := strings.Repeat("é", 60000)
+	got := capFinalMessage(long)
+	if len(got) > maxFinalMessageBytes {
+		t.Errorf("len(got) = %d, want at most %d", len(got), maxFinalMessageBytes)
+	}
+	if !utf8.ValidString(got) {
+		t.Error("capFinalMessage result is not valid UTF-8")
+	}
+	if !strings.HasSuffix(got, finalMessageCutSuffix) {
+		t.Errorf("capFinalMessage result does not end with %q", finalMessageCutSuffix)
+	}
+}
+
+// TestParseFinalMessage_ValidationErrorsOnePerLine proves a document with
+// two validation errors gives a Detail with a "\n" between them, not the
+// old "; " join: two missing required fields on an error-outcome document
+// (universal for any job) each add their own PathError.
+func TestParseFinalMessage_ValidationErrorsOnePerLine(t *testing.T) {
+	t.Parallel()
+
+	text := `<zing job="classify" outcome="error"><error code="other"><what></what><why></why></error></zing>`
+	_, log, err := parseFinalMessage(text, response.JobClassify)
+	assertReason(t, err, reasonFailedValidation)
+	if !strings.Contains(log, "\n") {
+		t.Fatalf("log = %q, want at least two lines joined by \\n", log)
+	}
+	if strings.Contains(log, "; ") {
+		t.Errorf("log = %q, want no \"; \" join between errors", log)
+	}
+	var invalidErr *InvalidOutputError
+	if !errors.As(err, &invalidErr) {
+		t.Fatalf("err = %#v, want *InvalidOutputError", err)
+	}
+	if strings.Contains(invalidErr.Detail, "; ") {
+		t.Errorf("Detail = %q, want no \"; \" join between errors", invalidErr.Detail)
+	}
+	if !strings.Contains(invalidErr.Detail, "\n") {
+		t.Errorf("Detail = %q, want at least two lines joined by \\n", invalidErr.Detail)
+	}
+}
+
 func TestCapDetail_StaysWithinLimit(t *testing.T) {
 	t.Parallel()
+
+	short := strings.Repeat("x", 3000)
+	if got := capDetail(short); got != short {
+		t.Errorf("capDetail(short 3000 bytes) = %q, want unchanged", got)
+	}
 
 	long := strings.Repeat("é", maxDetailBytes)
 	got := capDetail(long)
 	if len(got) > maxDetailBytes {
 		t.Errorf("len = %d, want at most %d", len(got), maxDetailBytes)
 	}
+	if maxDetailBytes != 64<<10 {
+		t.Errorf("maxDetailBytes = %d, want %d (64 KiB)", maxDetailBytes, 64<<10)
+	}
 	if !strings.HasSuffix(got, detailCutSuffix) || !utf8.ValidString(got) {
 		t.Errorf("capDetail result must be valid UTF-8 ending in %q", detailCutSuffix)
+	}
+}
+
+// TestCapDetail_MultiByteOverLimit is a regression test for a validation
+// error list made entirely of multi-byte runes: capDetail must still cut on
+// a rune boundary and keep the result valid UTF-8, even when the naive cut
+// point in maxDetailBytes falls inside a rune.
+func TestCapDetail_MultiByteOverLimit(t *testing.T) {
+	t.Parallel()
+
+	long := strings.Repeat("plan/ü: ünknown wörd\n", 5000)
+	if len(long) != 120000 {
+		t.Fatalf("len(long) = %d, want 120000", len(long))
+	}
+	got := capDetail(long)
+	if len(got) > maxDetailBytes {
+		t.Errorf("len(got) = %d, want at most %d", len(got), maxDetailBytes)
+	}
+	if !utf8.ValidString(got) {
+		t.Error("capDetail result is not valid UTF-8")
+	}
+	if !strings.HasSuffix(got, detailCutSuffix) {
+		t.Errorf("capDetail result does not end with %q", detailCutSuffix)
+	}
+	prefix := strings.TrimSuffix(got, detailCutSuffix)
+	if !strings.HasPrefix(long, prefix) {
+		t.Errorf("capDetail result minus its suffix is not a prefix of the input")
+	}
+
+	// A three-byte rune straddling byte maxDetailBytes-len(detailCutSuffix).
+	cut := maxDetailBytes - len(detailCutSuffix)
+	straddling := strings.Repeat("a", cut-1) + "€" + strings.Repeat("b", 100)
+	got2 := capDetail(straddling)
+	if !utf8.ValidString(got2) {
+		t.Error("capDetail result for a straddling multi-byte rune is not valid UTF-8")
+	}
+	if !strings.HasSuffix(got2, detailCutSuffix) {
+		t.Errorf("capDetail result does not end with %q", detailCutSuffix)
 	}
 }

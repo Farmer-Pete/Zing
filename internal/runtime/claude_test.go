@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -31,6 +32,10 @@ const (
 	// package that does not itself care about the prompt's exact text uses
 	// (goconst: four or more call sites compared this literal).
 	testPrompt = "the assembled prompt"
+	// notJSONStdout is TestClaudeFinalMessage's non-JSON case: both its
+	// input and expected output (claudeFinalMessage falls back to stdout
+	// unchanged), named once so goconst does not flag the repeated literal.
+	notJSONStdout = "not json"
 )
 
 // testTools and its two derived lists (design section 4.1's tool map) are
@@ -833,6 +838,127 @@ func TestAgentEnvBashTimeoutsStayUnderShortRunDeadline(t *testing.T) {
 			wantEnvValue(t, env, "BASH_DEFAULT_TIMEOUT_MS", tc.want)
 			wantEnvValue(t, env, "BASH_MAX_TIMEOUT_MS", tc.want)
 		})
+	}
+}
+
+// ---- final message and transcript path (#43 split) -------------------------
+
+// TestClaudeRun_FinalMessageOnInvalidOutput covers #43: a clean exit whose
+// result text has no zing element must still leave that text in
+// res.FinalMessage, and res.TranscriptPath must still be filled, so the
+// console rail has something to link to even when the run is otherwise
+// unusable.
+func TestClaudeRun_FinalMessageOnInvalidOutput(t *testing.T) {
+	t.Parallel()
+	requireUnix(t)
+
+	dir := t.TempDir()
+	const text = "plain text with no zing element at all"
+	resultPath := filepath.Join(t.TempDir(), "result.json")
+	resultJSON := fmt.Sprintf(`{"result":%q}`, text)
+	if err := os.WriteFile(resultPath, []byte(resultJSON), 0o600); err != nil {
+		t.Fatalf("write result file: %v", err)
+	}
+	req := newFakeRequest(dir, "success", "FAKE_CLAUDE_RESULT_FILE="+resultPath)
+
+	c := NewClaude(fakeClaudeScript, testOAuthToken)
+	res, err := c.Run(context.Background(), req)
+
+	var invalidErr *InvalidOutputError
+	if !errors.As(err, &invalidErr) {
+		t.Fatalf("err = %v, want *InvalidOutputError", err)
+	}
+	if invalidErr.Reason != reasonNoZingElement {
+		t.Errorf("Reason = %q, want %q", invalidErr.Reason, reasonNoZingElement)
+	}
+	if res.FinalMessage != text {
+		t.Errorf("FinalMessage = %q, want %q", res.FinalMessage, text)
+	}
+	if !strings.HasSuffix(res.TranscriptPath, res.SessionID+".jsonl") {
+		t.Errorf("TranscriptPath = %q, want it to end in %s.jsonl", res.TranscriptPath, res.SessionID)
+	}
+}
+
+// TestClaudeRun_FinalMessageOnTimeout covers #43: a run killed by the job
+// deadline must still carry whatever partial stdout the child wrote before
+// it was killed.
+func TestClaudeRun_FinalMessageOnTimeout(t *testing.T) {
+	t.Parallel()
+	requireUnix(t)
+
+	dir := t.TempDir()
+	const partial = "partial output before timeout"
+	req := newFakeRequest(dir, "partial_then_sleep",
+		"FAKE_CLAUDE_PARTIAL_OUTPUT="+partial, "FAKE_CLAUDE_SLEEP_SECONDS=30")
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	c := NewClaude(fakeClaudeScript, testOAuthToken)
+	res, err := c.Run(ctx, req)
+	if !errors.Is(err, ErrTimeout) {
+		t.Fatalf("err = %v, want ErrTimeout", err)
+	}
+	if res.FinalMessage != partial {
+		t.Errorf("FinalMessage = %q, want %q", res.FinalMessage, partial)
+	}
+}
+
+// TestClaudeFinalMessage is claudeFinalMessage's own unit test (no process):
+// the JSON result object's "result" field wins when present and non-empty,
+// otherwise stdout itself comes back unchanged.
+func TestClaudeFinalMessage(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name   string
+		stdout string
+		want   string
+	}{
+		{"result field", `{"result":"hi"}`, "hi"},
+		{"empty result field", `{"result":""}`, `{"result":""}`},
+		{"not json", notJSONStdout, notJSONStdout},
+		{"empty input", "", ""},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := claudeFinalMessage([]byte(tc.stdout)); got != tc.want {
+				t.Errorf("claudeFinalMessage(%q) = %q, want %q", tc.stdout, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestClaudeTranscriptPath is claudeTranscriptPath's own unit test: it
+// builds HOME/.claude/projects/ENC(workDir)/SESSION.jsonl against workDir
+// resolved to an absolute, symlink-free path, the last HOME= entry in env
+// wins, and an empty session id gives "". workDir must exist on disk, since
+// claudeTranscriptPath resolves it with filepath.EvalSymlinks.
+func TestClaudeTranscriptPath(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	resolvedDir, err := filepath.EvalSymlinks(dir)
+	if err != nil {
+		t.Fatalf("EvalSymlinks(%s): %v", dir, err)
+	}
+	encodedDir := encodeClaudeTranscriptDir(resolvedDir)
+
+	got := claudeTranscriptPath([]string{"HOME=/h"}, dir, "s1")
+	want := filepath.Join(string(filepath.Separator)+"h", ".claude", "projects", encodedDir, "s1.jsonl")
+	if got != want {
+		t.Errorf("claudeTranscriptPath() = %q, want %q", got, want)
+	}
+
+	got = claudeTranscriptPath([]string{"HOME=/old", "HOME=/new"}, dir, "s1")
+	want = filepath.Join(string(filepath.Separator)+"new", ".claude", "projects", encodedDir, "s1.jsonl")
+	if got != want {
+		t.Errorf("claudeTranscriptPath() with two HOME entries = %q, want the last one %q", got, want)
+	}
+
+	if got := claudeTranscriptPath([]string{"HOME=/h"}, dir, ""); got != "" {
+		t.Errorf("claudeTranscriptPath() with empty session = %q, want \"\"", got)
 	}
 }
 

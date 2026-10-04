@@ -1,8 +1,11 @@
 package store
 
 import (
+	"database/sql"
 	"strings"
 	"testing"
+
+	"github.com/adlio/schema"
 )
 
 // TestMigration0004Columns proves migration 0004_ticket_poll.sql installed
@@ -210,5 +213,109 @@ func TestMigration0006CheckProcs(t *testing.T) {
 	}
 	if _, err := s.db.ExecContext(ctx, insert, "lint", 4242); err != nil {
 		t.Errorf("INSERT a legal row: %v", err)
+	}
+}
+
+// TestMigration0007_AppliesOverPopulated0006 proves migration
+// 0007_run_evidence.sql applies cleanly to a database already carrying rows
+// through 0006: it adds final_message, stderr_path and transcript_path to
+// runs, leaves existing rows NULL in all three, rejects an empty-string
+// write to any of them, and rejects a final_message over the 65536-byte
+// cap (the CHECK clauses measure bytes via length(CAST(x AS BLOB))).
+func TestMigration0007_AppliesOverPopulated0006(t *testing.T) {
+	t.Parallel()
+	ctx := t.Context()
+	path := dbPath(t)
+
+	db, err := sql.Open("sqlite", "file:"+path)
+	if err != nil {
+		t.Fatalf("sql.Open: %v", err)
+	}
+	defer func() { _ = db.Close() }()
+
+	applyMigration := func(pattern string) {
+		t.Helper()
+		migrator := schema.NewMigrator(schema.WithDialect(schema.SQLite), schema.WithContext(ctx))
+		migs, fsErr := schema.FSMigrations(migrationsFS, pattern)
+		if fsErr != nil {
+			t.Fatalf("FSMigrations(%s): %v", pattern, fsErr)
+		}
+		if applyErr := migrator.Apply(db, migs); applyErr != nil {
+			t.Fatalf("apply %s: %v", pattern, applyErr)
+		}
+	}
+
+	for _, file := range []string{
+		"0001_init.sql", "0002_message_created_at.sql", "0003_sessions_external_id_nonempty.sql",
+		"0004_ticket_poll.sql", "0005_runs_interrupt.sql", "0006_check_procs.sql",
+	} {
+		applyMigration("migrations/" + file)
+	}
+
+	if _, execErr := db.ExecContext(ctx,
+		`INSERT INTO projects (id, name, repo_url, local_path, tracker) VALUES (1, 'zing', 'https://github.com/x/zing', '/tmp/zing', 'github')`,
+	); execErr != nil {
+		t.Fatalf("seed project: %v", execErr)
+	}
+	if _, execErr := db.ExecContext(ctx,
+		`INSERT INTO tickets (id, project_id, tracker_ref, title, state) VALUES (1, 1, '42', 'fix the bug', 'queued')`,
+	); execErr != nil {
+		t.Fatalf("seed ticket: %v", execErr)
+	}
+	if _, execErr := db.ExecContext(ctx,
+		`INSERT INTO sessions (id, ticket_id, job, runtime) VALUES (1, 1, 'planning', 'claude')`,
+	); execErr != nil {
+		t.Fatalf("seed session: %v", execErr)
+	}
+	if _, execErr := db.ExecContext(ctx,
+		`INSERT INTO runs (id, session_id, turn) VALUES (1, 1, 0)`,
+	); execErr != nil {
+		t.Fatalf("seed run 1: %v", execErr)
+	}
+	if _, execErr := db.ExecContext(ctx,
+		`INSERT INTO runs (id, session_id, turn) VALUES (2, 1, 1)`,
+	); execErr != nil {
+		t.Fatalf("seed run 2: %v", execErr)
+	}
+
+	applyMigration("migrations/0007_run_evidence.sql")
+
+	rows, err := db.QueryContext(ctx,
+		`SELECT id, final_message, stderr_path, transcript_path FROM runs ORDER BY id`)
+	if err != nil {
+		t.Fatalf("query runs after migration: %v", err)
+	}
+	defer rows.Close()
+
+	var got []int64
+	for rows.Next() {
+		var id int64
+		var finalMessage, stderrPath, transcriptPath sql.NullString
+		if scanErr := rows.Scan(&id, &finalMessage, &stderrPath, &transcriptPath); scanErr != nil {
+			t.Fatalf("scan run row: %v", scanErr)
+		}
+		if finalMessage.Valid || stderrPath.Valid || transcriptPath.Valid {
+			t.Errorf("run %d evidence columns = (%v, %v, %v), want all NULL", id, finalMessage, stderrPath, transcriptPath)
+		}
+		got = append(got, id)
+	}
+	if rowsErr := rows.Err(); rowsErr != nil {
+		t.Fatalf("run rows: %v", rowsErr)
+	}
+	if len(got) != 2 || got[0] != 1 || got[1] != 2 {
+		t.Errorf("run ids after migration = %v, want [1 2]", got)
+	}
+
+	for _, col := range []string{"final_message", "stderr_path", "transcript_path"} {
+		if _, execErr := db.ExecContext(ctx, `UPDATE runs SET `+col+` = '' WHERE id = 1`); execErr == nil {
+			t.Errorf("UPDATE %s = '': want a CHECK constraint error, got nil", col)
+		}
+	}
+
+	// hex(randomblob(32769)) is 65538 ASCII bytes, just over the 65536-byte cap.
+	if _, execErr := db.ExecContext(ctx,
+		`UPDATE runs SET final_message = hex(randomblob(32769)) WHERE id = 1`,
+	); execErr == nil {
+		t.Error("UPDATE final_message to 65538 bytes: want a CHECK constraint error, got nil")
 	}
 }

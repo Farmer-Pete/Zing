@@ -1810,7 +1810,7 @@ func updateLine(m *store.MessageRow, agent string) (string, bool) {
 	case strings.HasPrefix(body, updateMarkerValidationDeliveredPrefix):
 		return "The agent received the check results.", true
 	case strings.HasPrefix(body, updateMarkerResponseInvalidPrefix):
-		return "The agent's last response could not be used. Zing retries once.", true
+		return responseInvalidLine(body), true
 	case strings.HasPrefix(body, updateMarkerSealMismatchPrefix):
 		return "The scenario set changed before approval. Zing re-reads it on the next tick.", true
 	case strings.HasPrefix(body, updateMarkerClaimsOkPrefix):
@@ -2318,6 +2318,32 @@ func checkFailedPendingLine(body string) string {
 		return header
 	}
 	return header + "\n" + rest
+}
+
+// responseInvalidLine renders a "response invalid run <rid>\n<reason>[\n
+// <errors>]" marker (invalidMarkerBody, internal/job/planning.go): one
+// sentence naming the run and the closed reason, then the validator's
+// errors unchanged, one per line. A marker with no reason line keeps the
+// reason clause out. It never claims a retry: invalidOutputCommit
+// (internal/job/planning.go) escalates response_invalid instead of
+// retrying once this is the second consecutive invalid run. It never
+// asserts a link exists: recordRunEvidence (internal/job/runjob.go) only
+// stores a final message when the run actually produced one, so an empty
+// Codex -o file or empty Claude stdout leaves no link to point at. It is a
+// pure renderer and logs nothing.
+func responseInvalidLine(body string) string {
+	first, rest, _ := strings.Cut(body, "\n")
+	rid := strings.TrimPrefix(first, updateMarkerResponseInvalidPrefix)
+	reason, errs, hasErrs := strings.Cut(rest, "\n")
+	head := "Run " + rid + "'s response could not be used"
+	if reason != "" {
+		head += ": " + reason
+	}
+	head += ". If a final message was kept, it is linked under Runs in the side panel."
+	if !hasErrs || errs == "" {
+		return head
+	}
+	return head + "\n" + errs
 }
 
 // validationErrorsLine renders a "validation errors pending run <id>"

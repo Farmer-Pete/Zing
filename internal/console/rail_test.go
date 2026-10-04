@@ -4,11 +4,14 @@
 package console_test
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
+	"os"
+	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
@@ -362,6 +365,316 @@ func TestRail_RunInterruptedShowsLabel(t *testing.T) {
 	}
 }
 
+// ---- Run rail's run list (#43 split, run evidence) ---------------------
+
+// advanceTicketWithRuns is advanceTicketToBuilding generalized to any job,
+// runtime and set of runs: it claims ticketID, then commits one transition
+// to next with a brand-new session (job, runtime) and every entry of runs
+// inserted under it, through the same store.CommitHandlerResult seam
+// commit.go's own producers use. Calling it again on the same ticket
+// creates a second session (store.upsertSessionTx inserts whenever
+// SessionUpsert.ID is nil), which is the point: TestRail_RunListShowsEveryRun
+// needs two sessions with different jobs and runtimes.
+func advanceTicketWithRuns(t *testing.T, s *store.Store, ticketID int64, next, job, runtime string, runs []store.Run) {
+	t.Helper()
+
+	owner := fmt.Sprintf("rail-test-owner-%s-%s", job, runtime)
+	expires := time.Now().Add(10 * time.Minute).UTC().Truncate(time.Second)
+	claimed, err := s.Claim(t.Context(), ticketID, owner, expires)
+	if err != nil {
+		t.Fatalf("Claim: %v", err)
+	}
+	if !claimed {
+		t.Fatal("Claim: got false, want true")
+	}
+
+	waiting := testWaitingGate
+	applied, err := s.CommitHandlerResult(t.Context(), store.HandlerCommit{
+		TicketID: ticketID, Owner: owner, Expires: expires,
+		Next: next, Reason: "rail test advance with runs",
+		Waiting: &waiting,
+		Session: &store.SessionUpsert{Job: job, Runtime: runtime},
+		Runs:    runs,
+	})
+	if err != nil {
+		t.Fatalf("CommitHandlerResult: %v", err)
+	}
+	if !applied {
+		t.Fatal("CommitHandlerResult: applied = false, want true")
+	}
+}
+
+// runRowHTML returns the <li class="run-row" data-run-id="runID">...</li>
+// element the rail's run list rendered for runID, failing the test if the
+// rail holds none.
+func runRowHTML(t *testing.T, rail string, runID int64) string {
+	t.Helper()
+	pattern := regexp.MustCompile(`(?s)<li class="run-row" data-run-id="` + strconv.FormatInt(runID, 10) + `">.*?</li>`)
+	row := pattern.FindString(rail)
+	if row == "" {
+		t.Fatalf("rail missing a run-row for run %d; got:\n%s", runID, rail)
+	}
+	return row
+}
+
+// runRowHref returns the href attribute of the <a class="class"> element
+// inside row, failing the test if row holds none.
+func runRowHref(t *testing.T, row, class string) string {
+	t.Helper()
+	pattern := regexp.MustCompile(`class="` + class + `" href="([^"]+)"`)
+	m := pattern.FindStringSubmatch(row)
+	if m == nil {
+		t.Fatalf("row missing an href for class %q; got:\n%s", class, row)
+	}
+	return m[1]
+}
+
+// TestRail_RunEvidenceLinksServeStoredText is the design's demo test: it
+// stores a run's final message and stderr path through
+// Store.RecordRunEvidence, opens the ticket's thread stream, reads the run
+// row's two hrefs out of the rail, and fetches both, proving that stored
+// evidence reaches the owner through the rail rather than just the store.
+func TestRail_RunEvidenceLinksServeStoredText(t *testing.T) {
+	t.Parallel()
+	s := newConsoleTestStore(t)
+	ticketID := seedTicket(t, s, "fake#1", "Add a hello endpoint")
+	runID := oneSeededRun(t, s, ticketID, "sonnet")
+
+	const stderrText = "boom: something failed\n"
+	stderrPath := writeRunStderrFile(t, s, runID, stderrText)
+	final := "the agent said this"
+	if err := s.RecordRunEvidence(t.Context(), runID, store.RunEvidence{FinalMessage: &final, StderrPath: &stderrPath}); err != nil {
+		t.Fatalf("RecordRunEvidence: %v", err)
+	}
+
+	srv := newTestServer(t, s, bus.New(), nil, newTestLogHandler(t))
+	resp, r, cancel := openStream(t, srv.URL, "thread", ticketID, 0)
+	defer cancel()
+	defer func() { _ = resp.Body.Close() }()
+	_, _, rail, _ := readInitialFrames(t, r)
+
+	row := runRowHTML(t, rail, runID)
+	finalHref := runRowHref(t, row, "run-final")
+	stderrHref := runRowHref(t, row, "run-stderr")
+
+	finalResp, err := http.Get(srv.URL + finalHref) //nolint:noctx // a bare GET on a test server needs no deadline
+	if err != nil {
+		t.Fatalf("GET %s: %v", finalHref, err)
+	}
+	defer func() { _ = finalResp.Body.Close() }()
+	if finalResp.StatusCode != http.StatusOK {
+		t.Fatalf("GET %s status = %d, want 200", finalHref, finalResp.StatusCode)
+	}
+	finalBody, err := io.ReadAll(finalResp.Body)
+	if err != nil {
+		t.Fatalf("read final body: %v", err)
+	}
+	if string(finalBody) != final {
+		t.Errorf("final body = %q, want %q", finalBody, final)
+	}
+
+	stderrResp, err := http.Get(srv.URL + stderrHref) //nolint:noctx // a bare GET on a test server needs no deadline
+	if err != nil {
+		t.Fatalf("GET %s: %v", stderrHref, err)
+	}
+	defer func() { _ = stderrResp.Body.Close() }()
+	if stderrResp.StatusCode != http.StatusOK {
+		t.Fatalf("GET %s status = %d, want 200", stderrHref, stderrResp.StatusCode)
+	}
+	stderrBody, err := io.ReadAll(stderrResp.Body)
+	if err != nil {
+		t.Fatalf("read stderr body: %v", err)
+	}
+	if string(stderrBody) != stderrText {
+		t.Errorf("stderr body = %q, want %q", stderrBody, stderrText)
+	}
+}
+
+// TestRail_RunListShowsEveryRun proves the rail's run list shows every run
+// of the ticket across every session, newest first, each with its own
+// session's job and runtime and the run's own model -- and that only the
+// run carrying evidence gets final/stderr links.
+func TestRail_RunListShowsEveryRun(t *testing.T) {
+	t.Parallel()
+	s := newConsoleTestStore(t)
+	ticketID := seedTicket(t, s, "fake#1", "Add a hello endpoint")
+
+	// planningModel deliberately avoids the literal "sonnet": that string
+	// already has two other non-call occurrences in this package
+	// (TestBuildLogRail_TiesKeepRunAppendOrder's own model var, and
+	// resume_e2e_test.go's model-alias map), and goconst (make lint) flags
+	// a third.
+	planningModel, judgeModel1, judgeModel2 := "sonnet-plan", "gpt-5", "gpt-5-mini"
+	outcomeOK := "ok"
+	secs5, secs7, secs9 := 5, 7, 9
+	advanceTicketWithRuns(t, s, ticketID, string(response.TicketStatePlanning), "planning", "claude", []store.Run{
+		{Turn: 0, Model: &planningModel, Outcome: &outcomeOK, AgentSeconds: &secs5},
+	})
+	advanceTicketWithRuns(t, s, ticketID, string(response.TicketStateJudging), "judge", "codex", []store.Run{
+		{Turn: 0, Model: &judgeModel1, Outcome: &outcomeOK, AgentSeconds: &secs7},
+		{Turn: 1, Model: &judgeModel2, Outcome: &outcomeOK, AgentSeconds: &secs9},
+	})
+
+	runs, err := s.RunsForTicket(t.Context(), ticketID)
+	if err != nil {
+		t.Fatalf("RunsForTicket: %v", err)
+	}
+	if len(runs) != 3 {
+		t.Fatalf("RunsForTicket returned %d runs, want 3", len(runs))
+	}
+	planningRun, judgeRun1, judgeRun2 := runs[0], runs[1], runs[2]
+
+	final := "judge's final word"
+	stderrPath := writeRunStderrFile(t, s, judgeRun2.ID, "judge stderr")
+	if err := s.RecordRunEvidence(t.Context(), judgeRun2.ID, store.RunEvidence{FinalMessage: &final, StderrPath: &stderrPath}); err != nil {
+		t.Fatalf("RecordRunEvidence: %v", err)
+	}
+
+	srv := newTestServer(t, s, bus.New(), nil, newTestLogHandler(t))
+	resp, r, cancel := openStream(t, srv.URL, "thread", ticketID, 0)
+	defer cancel()
+	defer func() { _ = resp.Body.Close() }()
+	_, _, rail, _ := readInitialFrames(t, r)
+
+	ids := regexp.MustCompile(`data-run-id="(\d+)"`).FindAllStringSubmatch(rail, -1)
+	if len(ids) != 3 {
+		t.Fatalf("rail has %d run-row elements, want 3; got:\n%s", len(ids), rail)
+	}
+	wantOrder := []int64{judgeRun2.ID, judgeRun1.ID, planningRun.ID}
+	for i, want := range wantOrder {
+		got, convErr := strconv.ParseInt(ids[i][1], 10, 64)
+		if convErr != nil {
+			t.Fatalf("parse run id %q: %v", ids[i][1], convErr)
+		}
+		if got != want {
+			t.Errorf("run-row[%d] id = %d, want %d (newest first)", i, got, want)
+		}
+	}
+
+	planningRow := runRowHTML(t, rail, planningRun.ID)
+	for _, want := range []string{
+		`<span class="run-job">planning</span>`,
+		`<span class="run-runtime">claude</span>`,
+		`<span class="run-model">sonnet-plan</span>`,
+	} {
+		if !strings.Contains(planningRow, want) {
+			t.Errorf("planning run row missing %q; got:\n%s", want, planningRow)
+		}
+	}
+	if strings.Contains(planningRow, `href="/runs/`) {
+		t.Errorf("planning run row should carry no evidence links; got:\n%s", planningRow)
+	}
+
+	judgeRow2 := runRowHTML(t, rail, judgeRun2.ID)
+	for _, want := range []string{
+		`<span class="run-job">judge</span>`,
+		`<span class="run-runtime">codex</span>`,
+		`<span class="run-model">gpt-5-mini</span>`,
+		fmt.Sprintf(`href="/runs/%d/final"`, judgeRun2.ID),
+		fmt.Sprintf(`href="/runs/%d/stderr"`, judgeRun2.ID),
+	} {
+		if !strings.Contains(judgeRow2, want) {
+			t.Errorf("newest judge run row missing %q; got:\n%s", want, judgeRow2)
+		}
+	}
+
+	judgeRow1 := runRowHTML(t, rail, judgeRun1.ID)
+	if strings.Contains(judgeRow1, `href="/runs/`) {
+		t.Errorf("older judge run row should carry no evidence links; got:\n%s", judgeRow1)
+	}
+}
+
+// TestRail_RunListShowsTranscriptPath proves a run whose transcript_path is
+// set renders that path as plain text, with no anchor around it: design's
+// nongoal "Serving or rendering transcripts" -- transcripts live under
+// ~/.claude/projects, outside the data directory.
+func TestRail_RunListShowsTranscriptPath(t *testing.T) {
+	t.Parallel()
+	s := newConsoleTestStore(t)
+	ticketID := seedTicket(t, s, "fake#1", "Add a hello endpoint")
+	runID := oneSeededRun(t, s, ticketID, "sonnet")
+
+	const transcript = "/home/owner/.claude/projects/-work-zing/abc123.jsonl"
+	if err := s.RecordRunEvidence(t.Context(), runID, store.RunEvidence{TranscriptPath: new(transcript)}); err != nil {
+		t.Fatalf("RecordRunEvidence: %v", err)
+	}
+
+	srv := newTestServer(t, s, bus.New(), nil, newTestLogHandler(t))
+	resp, r, cancel := openStream(t, srv.URL, "thread", ticketID, 0)
+	defer cancel()
+	defer func() { _ = resp.Body.Close() }()
+	_, _, rail, _ := readInitialFrames(t, r)
+
+	row := runRowHTML(t, rail, runID)
+	if !strings.Contains(row, `class="run-transcript"`) || !strings.Contains(row, transcript) {
+		t.Errorf("run row missing the transcript path as text; got:\n%s", row)
+	}
+	if strings.Contains(row, "<a ") {
+		t.Errorf("run row with only a transcript path should carry no anchor; got:\n%s", row)
+	}
+}
+
+// railHTML opens ticketID's thread stream against srvURL, reads the
+// initial frames, closes the response, and returns the rail HTML. Tests
+// that need to read the rail more than once in a row use this instead of
+// repeating the open/read/close sequence inline.
+func railHTML(t *testing.T, srvURL string, ticketID int64) string {
+	t.Helper()
+	resp, r, cancel := openStream(t, srvURL, "thread", ticketID, 0)
+	defer cancel()
+	defer func() { _ = resp.Body.Close() }()
+	_, _, rail, _ := readInitialFrames(t, r)
+	return rail
+}
+
+// TestRail_RunListShowsRunningAndInterrupted proves a run that was reserved
+// but never terminalized renders outcome "running" (runs.outcome is NULL),
+// and that once InterruptRuns terminalizes it (#45: outcome becomes "error"
+// and interrupted becomes true), the run list's own row shows the
+// interrupted pill too, not just the old single-run Model field.
+func TestRail_RunListShowsRunningAndInterrupted(t *testing.T) {
+	t.Parallel()
+	s := newConsoleTestStore(t)
+	ticketID := seedTicket(t, s, "fake#1", "Add a hello endpoint")
+
+	const owner = "rail-running-owner"
+	expires := time.Now().Add(10 * time.Minute).UTC().Truncate(time.Second)
+	claimed, err := s.Claim(t.Context(), ticketID, owner, expires)
+	if err != nil || !claimed {
+		t.Fatalf("Claim: claimed=%v err=%v", claimed, err)
+	}
+	reserved, err := s.Reserve(t.Context(), ticketID, owner, expires,
+		store.SessionUpsert{Job: string(response.TicketStateBuilding), Runtime: testRuntimeFake},
+		store.RunSeed{Model: "running-model"},
+	)
+	if err != nil {
+		t.Fatalf("Reserve: %v", err)
+	}
+
+	srv := newTestServer(t, s, bus.New(), nil, newTestLogHandler(t))
+
+	row := runRowHTML(t, railHTML(t, srv.URL, ticketID), reserved.RunID)
+	if !strings.Contains(row, `<span class="run-outcome">running</span>`) {
+		t.Errorf("run row missing outcome running; got:\n%s", row)
+	}
+	if strings.Contains(row, "pill-interrupted") {
+		t.Errorf("run row should not show interrupted yet; got:\n%s", row)
+	}
+
+	applied, err := s.InterruptRuns(t.Context(), ticketID, owner, expires)
+	if err != nil {
+		t.Fatalf("InterruptRuns: %v", err)
+	}
+	if !applied {
+		t.Fatal("InterruptRuns: applied = false, want true")
+	}
+
+	row = runRowHTML(t, railHTML(t, srv.URL, ticketID), reserved.RunID)
+	if !strings.Contains(row, `<span class="pill pill-interrupted">interrupted</span>`) {
+		t.Errorf("run row missing the interrupted pill; got:\n%s", row)
+	}
+}
+
 // logLine calls console.Handler.Handle directly with a hand-built
 // slog.Record so the entry lands at an exact, caller-chosen Time -- the
 // equal-Time collision TestBuildLogRail_TiesKeepRunAppendOrder needs, which
@@ -554,5 +867,497 @@ func TestBuildLogRail_EmptyStateNamesServerStart(t *testing.T) {
 	want := regexp.MustCompile(`No log lines since Zing started at \d{2}:\d{2}\.`)
 	if !want.MatchString(rail) {
 		t.Errorf("rail log section missing the server-start empty state; got:\n%s", rail)
+	}
+}
+
+// ---- GET /runs/{id}/{kind} (#43 split, run evidence) -------------------
+
+// oneSeededRun advances ticketID to building once (advanceTicketToBuilding)
+// and returns the id of the one run that call writes, failing the test if
+// RunsForTicket does not report exactly one more run than before.
+func oneSeededRun(t *testing.T, s *store.Store, ticketID int64, model string) int64 {
+	t.Helper()
+	before, err := s.RunsForTicket(t.Context(), ticketID)
+	if err != nil {
+		t.Fatalf("RunsForTicket (before): %v", err)
+	}
+	advanceTicketToBuilding(t, s, ticketID, model, 1)
+	after, err := s.RunsForTicket(t.Context(), ticketID)
+	if err != nil {
+		t.Fatalf("RunsForTicket (after): %v", err)
+	}
+	if len(after) != len(before)+1 {
+		t.Fatalf("RunsForTicket returned %d runs, want %d (one more than before)", len(after), len(before)+1)
+	}
+	return after[len(after)-1].ID
+}
+
+// writeRunStderrFile writes data under s.Dir()/runs/run-<runID>-stderr.log,
+// the same path shape job/runjob.go's writeStderrFile produces, and returns
+// it.
+func writeRunStderrFile(t *testing.T, s *store.Store, runID int64, data string) string {
+	t.Helper()
+	dir := filepath.Join(s.Dir(), "runs")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	path := filepath.Join(dir, store.StderrFileName(runID))
+	if err := os.WriteFile(path, []byte(data), 0o600); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	return path
+}
+
+// TestRunFile_ServesFinalMessage proves GET /runs/{id}/final serves a
+// stored final message as plain text, with the headers that keep a browser
+// from sniffing it as HTML.
+func TestRunFile_ServesFinalMessage(t *testing.T) {
+	t.Parallel()
+	s := newConsoleTestStore(t)
+	ticketID := seedTicket(t, s, "fake#1", "Add a hello endpoint")
+	runID := oneSeededRun(t, s, ticketID, "sonnet")
+
+	final := "the agent said <b>this</b>"
+	if err := s.RecordRunEvidence(t.Context(), runID, store.RunEvidence{FinalMessage: &final}); err != nil {
+		t.Fatalf("RecordRunEvidence: %v", err)
+	}
+
+	srv := newTestServer(t, s, bus.New(), nil, newTestLogHandler(t))
+	resp, err := http.Get(fmt.Sprintf("%s/runs/%d/final", srv.URL, runID)) //nolint:noctx // a bare GET on a test server needs no deadline
+	if err != nil {
+		t.Fatalf("GET /runs/%d/final: %v", runID, err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	}
+	if ct := resp.Header.Get("Content-Type"); ct != "text/plain; charset=utf-8" {
+		t.Errorf("Content-Type = %q, want text/plain; charset=utf-8", ct)
+	}
+	if nos := resp.Header.Get("X-Content-Type-Options"); nos != "nosniff" {
+		t.Errorf("X-Content-Type-Options = %q, want nosniff", nos)
+	}
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("read body: %v", err)
+	}
+	if string(body) != final {
+		t.Errorf("body = %q, want %q", body, final)
+	}
+}
+
+// TestRunFile_ServesStderrFromDataDir proves GET /runs/{id}/stderr serves
+// the stderr file a run's recorded stderr_path names, when it resolves
+// inside the store's own data directory.
+func TestRunFile_ServesStderrFromDataDir(t *testing.T) {
+	t.Parallel()
+	s := newConsoleTestStore(t)
+	ticketID := seedTicket(t, s, "fake#1", "Add a hello endpoint")
+	runID := oneSeededRun(t, s, ticketID, "sonnet")
+
+	const stderrText = "boom: something failed\n"
+	path := writeRunStderrFile(t, s, runID, stderrText)
+	if err := s.RecordRunEvidence(t.Context(), runID, store.RunEvidence{StderrPath: &path}); err != nil {
+		t.Fatalf("RecordRunEvidence: %v", err)
+	}
+
+	srv := newTestServer(t, s, bus.New(), nil, newTestLogHandler(t))
+	resp, err := http.Get(fmt.Sprintf("%s/runs/%d/stderr", srv.URL, runID)) //nolint:noctx // a bare GET on a test server needs no deadline
+	if err != nil {
+		t.Fatalf("GET /runs/%d/stderr: %v", runID, err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	}
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("read body: %v", err)
+	}
+	if string(body) != stderrText {
+		t.Errorf("body = %q, want %q", body, stderrText)
+	}
+}
+
+// TestRunFile_RefusesPathOutsideDataDir proves GET /runs/{id}/stderr 403s,
+// and never leaks the file's text, when the recorded stderr_path resolves
+// outside the store's data directory (a shape this route should never see
+// in production, but must refuse rather than trust).
+func TestRunFile_RefusesPathOutsideDataDir(t *testing.T) {
+	t.Parallel()
+	s := newConsoleTestStore(t)
+	ticketID := seedTicket(t, s, "fake#1", "Add a hello endpoint")
+	runID := oneSeededRun(t, s, ticketID, "sonnet")
+
+	const secretText = "outside secret\n"
+	outside := filepath.Join(t.TempDir(), "outside-stderr.log")
+	if err := os.WriteFile(outside, []byte(secretText), 0o600); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	if err := s.RecordRunEvidence(t.Context(), runID, store.RunEvidence{StderrPath: &outside}); err != nil {
+		t.Fatalf("RecordRunEvidence: %v", err)
+	}
+
+	srv := newTestServer(t, s, bus.New(), nil, newTestLogHandler(t))
+	resp, err := http.Get(fmt.Sprintf("%s/runs/%d/stderr", srv.URL, runID)) //nolint:noctx // a bare GET on a test server needs no deadline
+	if err != nil {
+		t.Fatalf("GET /runs/%d/stderr: %v", runID, err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode != http.StatusForbidden {
+		t.Fatalf("status = %d, want 403", resp.StatusCode)
+	}
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("read body: %v", err)
+	}
+	if strings.Contains(string(body), secretText) || strings.Contains(string(body), "outside secret") {
+		t.Errorf("response body leaked the file's text: %q", body)
+	}
+	if !strings.Contains(string(body), "outside the data directory") {
+		t.Errorf("body = %q, want it to mention the data directory", body)
+	}
+}
+
+// TestRunFile_RefusesSymlinkEscapingRunsDir proves GET /runs/{id}/stderr
+// 403s, and never leaks the file's text, when the recorded stderr_path
+// names a symlink that lives inside <store.Dir()>/runs but resolves to a
+// file outside it. filepath.Rel alone cannot catch this: the path string
+// itself sits under runs/, only EvalSymlinks shows where it really points.
+func TestRunFile_RefusesSymlinkEscapingRunsDir(t *testing.T) {
+	t.Parallel()
+	s := newConsoleTestStore(t)
+	ticketID := seedTicket(t, s, "fake#1", "Add a hello endpoint")
+	runID := oneSeededRun(t, s, ticketID, "sonnet")
+
+	const secretText = "symlink secret\n"
+	target := filepath.Join(t.TempDir(), "target-stderr.log")
+	if err := os.WriteFile(target, []byte(secretText), 0o600); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	runsDir := filepath.Join(s.Dir(), "runs")
+	if err := os.MkdirAll(runsDir, 0o700); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	link := filepath.Join(runsDir, store.StderrFileName(runID))
+	if err := os.Symlink(target, link); err != nil {
+		t.Fatalf("Symlink: %v", err)
+	}
+	if err := s.RecordRunEvidence(t.Context(), runID, store.RunEvidence{StderrPath: &link}); err != nil {
+		t.Fatalf("RecordRunEvidence: %v", err)
+	}
+
+	srv := newTestServer(t, s, bus.New(), nil, newTestLogHandler(t))
+	resp, err := http.Get(fmt.Sprintf("%s/runs/%d/stderr", srv.URL, runID)) //nolint:noctx // a bare GET on a test server needs no deadline
+	if err != nil {
+		t.Fatalf("GET /runs/%d/stderr: %v", runID, err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode != http.StatusForbidden {
+		t.Fatalf("status = %d, want 403", resp.StatusCode)
+	}
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("read body: %v", err)
+	}
+	if strings.Contains(string(body), secretText) || strings.Contains(string(body), "symlink secret") {
+		t.Errorf("response body leaked the file's text: %q", body)
+	}
+}
+
+// TestRunFile_RefusesNonStderrFileInsideDataDir proves GET /runs/{id}/stderr
+// 403s when stderr_path names a real file inside the data directory that
+// is not a run's stderr log, such as the store's own database file. The
+// route serves only run-<id>-stderr.log directly inside <store.Dir()>/runs,
+// never anything else the data directory holds. The file genuinely sits
+// inside the data directory, so the body must not claim it is outside.
+func TestRunFile_RefusesNonStderrFileInsideDataDir(t *testing.T) {
+	t.Parallel()
+	s := newConsoleTestStore(t)
+	ticketID := seedTicket(t, s, "fake#1", "Add a hello endpoint")
+	runID := oneSeededRun(t, s, ticketID, "sonnet")
+
+	dbPath := filepath.Join(s.Dir(), "zing.db")
+	if err := s.RecordRunEvidence(t.Context(), runID, store.RunEvidence{StderrPath: &dbPath}); err != nil {
+		t.Fatalf("RecordRunEvidence: %v", err)
+	}
+
+	srv := newTestServer(t, s, bus.New(), nil, newTestLogHandler(t))
+	resp, err := http.Get(fmt.Sprintf("%s/runs/%d/stderr", srv.URL, runID)) //nolint:noctx // a bare GET on a test server needs no deadline
+	if err != nil {
+		t.Fatalf("GET /runs/%d/stderr: %v", runID, err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode != http.StatusForbidden {
+		t.Fatalf("status = %d, want 403", resp.StatusCode)
+	}
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("read body: %v", err)
+	}
+	if strings.Contains(string(body), "outside the data directory") {
+		t.Errorf("body = %q, zing.db sits inside the data directory, should not say otherwise", body)
+	}
+}
+
+// TestRunFile_RefusesAnotherRunsStderrFile proves GET /runs/{id}/stderr 403s,
+// and never leaks the file's text, when stderr_path names a real stderr
+// file inside <store.Dir()>/runs that belongs to a different run. The exact
+// per-run file name check (not just "inside runs/") is what catches this.
+func TestRunFile_RefusesAnotherRunsStderrFile(t *testing.T) {
+	t.Parallel()
+	s := newConsoleTestStore(t)
+	ticketID := seedTicket(t, s, "fake#1", "Add a hello endpoint")
+	runID := oneSeededRun(t, s, ticketID, "sonnet")
+	otherRunID := oneSeededRun(t, s, ticketID, "sonnet")
+
+	const otherSecret = "another run's stderr\n"
+	otherPath := writeRunStderrFile(t, s, otherRunID, otherSecret)
+	if err := s.RecordRunEvidence(t.Context(), runID, store.RunEvidence{StderrPath: &otherPath}); err != nil {
+		t.Fatalf("RecordRunEvidence: %v", err)
+	}
+
+	srv := newTestServer(t, s, bus.New(), nil, newTestLogHandler(t))
+	resp, err := http.Get(fmt.Sprintf("%s/runs/%d/stderr", srv.URL, runID)) //nolint:noctx // a bare GET on a test server needs no deadline
+	if err != nil {
+		t.Fatalf("GET /runs/%d/stderr: %v", runID, err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode != http.StatusForbidden {
+		t.Fatalf("status = %d, want 403", resp.StatusCode)
+	}
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("read body: %v", err)
+	}
+	if strings.Contains(string(body), otherSecret) || strings.Contains(string(body), "another run's stderr") {
+		t.Errorf("response body leaked the file's text: %q", body)
+	}
+}
+
+// TestRunFile_MissingCases proves the route's various 404 shapes: a run
+// with no evidence at all for either kind, a run whose stderr file has
+// since been deleted, a run id that names no run, an unrecognized kind,
+// and an id that does not even parse as a positive int64.
+func TestRunFile_MissingCases(t *testing.T) {
+	t.Parallel()
+	s := newConsoleTestStore(t)
+	ticketID := seedTicket(t, s, "fake#1", "Add a hello endpoint")
+	noEvidenceRunID := oneSeededRun(t, s, ticketID, "sonnet")
+	goneRunID := oneSeededRun(t, s, ticketID, "opus")
+	dirRunID := oneSeededRun(t, s, ticketID, "opus")
+
+	goneStderr := writeRunStderrFile(t, s, goneRunID, "will be deleted")
+	if err := s.RecordRunEvidence(t.Context(), goneRunID, store.RunEvidence{StderrPath: &goneStderr}); err != nil {
+		t.Fatalf("RecordRunEvidence: %v", err)
+	}
+	if err := os.Remove(goneStderr); err != nil {
+		t.Fatalf("Remove: %v", err)
+	}
+
+	runsDir := filepath.Join(s.Dir(), "runs")
+	if err := os.MkdirAll(runsDir, 0o700); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	dirStderr := filepath.Join(runsDir, store.StderrFileName(dirRunID))
+	if err := os.Mkdir(dirStderr, 0o700); err != nil {
+		t.Fatalf("Mkdir: %v", err)
+	}
+	if err := s.RecordRunEvidence(t.Context(), dirRunID, store.RunEvidence{StderrPath: &dirStderr}); err != nil {
+		t.Fatalf("RecordRunEvidence: %v", err)
+	}
+
+	unknownRunID := goneRunID + 1_000_000
+
+	srv := newTestServer(t, s, bus.New(), nil, newTestLogHandler(t))
+
+	tests := []struct {
+		name       string
+		path       string
+		wantInBody string
+	}{
+		{"no final message", fmt.Sprintf("/runs/%d/final", noEvidenceRunID), "this run kept no final message"},
+		{"no stderr", fmt.Sprintf("/runs/%d/stderr", noEvidenceRunID), "this run wrote no stderr"},
+		{"stderr file gone", fmt.Sprintf("/runs/%d/stderr", goneRunID), "stderr file is gone"},
+		{"stderr path is a directory", fmt.Sprintf("/runs/%d/stderr", dirRunID), "stderr file is gone"},
+		{"unknown run", fmt.Sprintf("/runs/%d/final", unknownRunID), "no such run"},
+		{"unrecognized kind", fmt.Sprintf("/runs/%d/transcript", noEvidenceRunID), "404 page not found"},
+		{"id does not parse", "/runs/abc/final", "404 page not found"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			resp, err := http.Get(srv.URL + tt.path) //nolint:noctx // a bare GET on a test server needs no deadline
+			if err != nil {
+				t.Fatalf("GET %s: %v", tt.path, err)
+			}
+			defer func() { _ = resp.Body.Close() }()
+			if resp.StatusCode != http.StatusNotFound {
+				t.Errorf("GET %s status = %d, want 404", tt.path, resp.StatusCode)
+			}
+			body, err := io.ReadAll(resp.Body)
+			if err != nil {
+				t.Fatalf("GET %s: read body: %v", tt.path, err)
+			}
+			if !strings.Contains(string(body), tt.wantInBody) {
+				t.Errorf("GET %s body = %q, want it to contain %q", tt.path, body, tt.wantInBody)
+			}
+		})
+	}
+}
+
+// runFileLogRecords parses buf as one JSON object per line (slog's own
+// JSONHandler shape), so TestRunFile_LogsOutcomes can assert on individual
+// fields rather than substrings.
+func runFileLogRecords(t *testing.T, buf *bytes.Buffer) []map[string]any {
+	t.Helper()
+	var recs []map[string]any
+	for line := range strings.SplitSeq(strings.TrimRight(buf.String(), "\n"), "\n") {
+		if line == "" {
+			continue
+		}
+		var m map[string]any
+		if err := json.Unmarshal([]byte(line), &m); err != nil {
+			t.Fatalf("unmarshal log line %q: %v", line, err)
+		}
+		recs = append(recs, m)
+	}
+	return recs
+}
+
+// findRunFileLogRecord returns the first record in recs whose "msg" field
+// equals msg, failing the test if there is none.
+func findRunFileLogRecord(t *testing.T, recs []map[string]any, msg string) map[string]any {
+	t.Helper()
+	for _, r := range recs {
+		if r["msg"] == msg {
+			return r
+		}
+	}
+	t.Fatalf("no log record with msg %q among %d records", msg, len(recs))
+	return nil
+}
+
+// runFileLogInt64 reads key from rec as the int64 a JSON number decodes to
+// (encoding/json gives float64), failing the test if key is absent or not
+// a number.
+func runFileLogInt64(t *testing.T, rec map[string]any, key string) int64 {
+	t.Helper()
+	v, ok := rec[key].(float64)
+	if !ok {
+		t.Fatalf("field %q = %v (%T), want a number", key, rec[key], rec[key])
+	}
+	return int64(v)
+}
+
+// TestRunFile_LogsOutcomes proves the route's three outcome log lines
+// (served, not found, outside the data dir) name the run and ticket but
+// never carry the evidence text itself. Not t.Parallel: it swaps slog's
+// process-wide default to capture the records.
+func TestRunFile_LogsOutcomes(t *testing.T) {
+	s := newConsoleTestStore(t)
+	ticketID := seedTicket(t, s, "fake#1", "Add a hello endpoint")
+	r1 := oneSeededRun(t, s, ticketID, "sonnet") // served
+	r2 := oneSeededRun(t, s, ticketID, "sonnet") // not found
+	r3 := oneSeededRun(t, s, ticketID, "sonnet") // outside the data dir
+
+	const finalMsg = "final secret"
+	const stderrSecret = "stderr secret"
+	stderrPath := writeRunStderrFile(t, s, r1, stderrSecret)
+	if err := s.RecordRunEvidence(t.Context(), r1, store.RunEvidence{FinalMessage: new(finalMsg), StderrPath: &stderrPath}); err != nil {
+		t.Fatalf("RecordRunEvidence r1: %v", err)
+	}
+
+	outside := filepath.Join(t.TempDir(), "r3-stderr.log")
+	if err := os.WriteFile(outside, []byte(stderrSecret), 0o600); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	if err := s.RecordRunEvidence(t.Context(), r3, store.RunEvidence{StderrPath: &outside}); err != nil {
+		t.Fatalf("RecordRunEvidence r3: %v", err)
+	}
+
+	srv := newTestServer(t, s, bus.New(), nil, newTestLogHandler(t))
+
+	var logBuf bytes.Buffer
+	prevDefault := slog.Default()
+	slog.SetDefault(slog.New(slog.NewJSONHandler(&logBuf, &slog.HandlerOptions{Level: slog.LevelInfo})))
+	t.Cleanup(func() { slog.SetDefault(prevDefault) })
+
+	getBody := func(path string) {
+		resp, err := http.Get(srv.URL + path) //nolint:noctx // a bare GET on a test server needs no deadline
+		if err != nil {
+			t.Fatalf("GET %s: %v", path, err)
+		}
+		if _, err := io.Copy(io.Discard, resp.Body); err != nil {
+			t.Fatalf("drain body for %s: %v", path, err)
+		}
+		_ = resp.Body.Close()
+	}
+	getBody(fmt.Sprintf("/runs/%d/final", r1))
+	getBody(fmt.Sprintf("/runs/%d/final", r2))
+	getBody(fmt.Sprintf("/runs/%d/stderr", r3))
+
+	recs := runFileLogRecords(t, &logBuf)
+
+	served := findRunFileLogRecord(t, recs, "run file served")
+	if served["level"] != "INFO" {
+		t.Errorf("served level = %v, want INFO", served["level"])
+	}
+	if got := runFileLogInt64(t, served, "ticket_id"); got != ticketID {
+		t.Errorf("served ticket_id = %d, want %d", got, ticketID)
+	}
+	if got := runFileLogInt64(t, served, "run_id"); got != r1 {
+		t.Errorf("served run_id = %d, want %d", got, r1)
+	}
+	if served["kind"] != "final" {
+		t.Errorf("served kind = %v, want final", served["kind"])
+	}
+	if got := runFileLogInt64(t, served, "bytes"); got != int64(len(finalMsg)) {
+		t.Errorf("served bytes = %d, want %d", got, len(finalMsg))
+	}
+
+	notFound := findRunFileLogRecord(t, recs, "run file not found")
+	if notFound["level"] != "INFO" {
+		t.Errorf("not found level = %v, want INFO", notFound["level"])
+	}
+	if got := runFileLogInt64(t, notFound, "ticket_id"); got != ticketID {
+		t.Errorf("not found ticket_id = %d, want %d", got, ticketID)
+	}
+	if got := runFileLogInt64(t, notFound, "run_id"); got != r2 {
+		t.Errorf("not found run_id = %d, want %d", got, r2)
+	}
+	if notFound["kind"] != "final" {
+		t.Errorf("not found kind = %v, want final", notFound["kind"])
+	}
+	if notFound["reason"] != "no_final_message" {
+		t.Errorf("not found reason = %v, want no_final_message", notFound["reason"])
+	}
+
+	outsideRec := findRunFileLogRecord(t, recs, "run file outside data dir")
+	if outsideRec["level"] != "WARN" {
+		t.Errorf("outside level = %v, want WARN", outsideRec["level"])
+	}
+	if got := runFileLogInt64(t, outsideRec, "ticket_id"); got != ticketID {
+		t.Errorf("outside ticket_id = %d, want %d", got, ticketID)
+	}
+	if got := runFileLogInt64(t, outsideRec, "run_id"); got != r3 {
+		t.Errorf("outside run_id = %d, want %d", got, r3)
+	}
+	if outsideRec["kind"] != "stderr" {
+		t.Errorf("outside kind = %v, want stderr", outsideRec["kind"])
+	}
+	if outsideRec["path"] != outside {
+		t.Errorf("outside path = %v, want %q", outsideRec["path"], outside)
+	}
+
+	if strings.Contains(logBuf.String(), finalMsg) || strings.Contains(logBuf.String(), stderrSecret) {
+		t.Errorf("log buffer leaked evidence text:\n%s", logBuf.String())
 	}
 }
