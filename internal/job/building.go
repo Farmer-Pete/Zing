@@ -1634,10 +1634,11 @@ const funcLineWidth = 72
 // funcLines is design section 6.7's own helper: for each plan.Design.Changes
 // entry, in plan order, whose Path is in approved, "<symbol> (<path>):
 // called by <callers>; calls <callees>", with every whitespace run in
-// callers and callees collapsed to one space, the line wrapped on spaces
-// into entries of at most funcLineWidth runes, continuation entries
-// indented two spaces; a word longer than that stays whole on its own
-// entry.
+// callers and callees collapsed to one space. A line of at most
+// funcLineWidth runes is returned unchanged, byte for byte. A longer line
+// is wrapped on spaces into entries of at most funcLineWidth runes,
+// continuation entries indented two spaces; a word longer than that stays
+// whole on its own entry.
 func funcLines(plan response.Plan, approved []string) []string {
 	approvedSet := make(map[string]bool, len(approved))
 	for _, p := range approved {
@@ -1652,6 +1653,10 @@ func funcLines(plan response.Plan, approved []string) []string {
 		callers := collapseWhitespace(ch.Callers)
 		callees := collapseWhitespace(ch.Callees)
 		line := fmt.Sprintf("%s (%s): called by %s; calls %s", ch.Symbol, ch.Path, callers, callees)
+		if len([]rune(line)) <= funcLineWidth {
+			lines = append(lines, line)
+			continue
+		}
 		words := strings.Fields(line)
 		cur := words[0]
 		for _, w := range words[1:] {

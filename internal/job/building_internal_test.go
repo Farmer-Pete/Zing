@@ -233,6 +233,19 @@ func TestFuncLines(t *testing.T) {
 		}
 	})
 
+	t.Run("leaves a short line's symbol and path whitespace untouched", func(t *testing.T) {
+		t.Parallel()
+		const spacedPath = "p  a.go"
+		plan := response.Plan{Design: response.Design{Changes: []response.Change{
+			{Path: spacedPath, Symbol: "F", Callers: "c", Callees: "d"},
+		}}}
+		got := funcLines(plan, []string{spacedPath})
+		want := []string{"F (p  a.go): called by c; calls d"}
+		if !reflect.DeepEqual(got, want) {
+			t.Errorf("funcLines = %v, want %v", got, want)
+		}
+	})
+
 	t.Run("empty approved set produces no lines", func(t *testing.T) {
 		t.Parallel()
 		plan := response.Plan{Design: response.Design{Changes: []response.Change{
