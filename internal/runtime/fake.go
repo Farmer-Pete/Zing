@@ -98,6 +98,15 @@ func (f *Fake) Run(ctx context.Context, req RunRequest) (RunResult, error) {
 	// every outcome, including this error path.
 	final := capFinalMessage(string(data))
 	if err := f.applyEffects(req.Job, req.Label, sess.nextTurn, req.WorkDir); err != nil {
+		if isNew {
+			// Commit the newly minted session despite the error: OnStart
+			// already fired with this sessionID above, and runJobWith's
+			// OnStart callback persists it to the store immediately, so a
+			// later resume must find a session the Fake itself knows about.
+			// nextTurn is left unadvanced, so the resume retries this same
+			// failed turn.
+			f.sessions[sessionID] = sess
+		}
 		return RunResult{SessionID: sessionID, FinalMessage: final}, err
 	}
 

@@ -110,6 +110,39 @@ func TestFake_FinalMessageKeptOnApplyEffectsError(t *testing.T) {
 	}
 }
 
+// TestFake_ResumeAfterApplyEffectsErrorRetriesSameTurn proves a session
+// that failed its first turn on applyEffects is still committed: OnStart
+// already told the caller this sessionID started (and runJobWith's OnStart
+// callback persists it immediately), so a resume with that id must find a
+// known session rather than "fake: unknown session", and it must retry the
+// same (unadvanced) turn rather than skip ahead.
+func TestFake_ResumeAfterApplyEffectsErrorRetriesSameTurn(t *testing.T) {
+	t.Parallel()
+
+	workDir := t.TempDir()
+	fsys := fstest.MapFS{
+		effectScriptKey: &fstest.MapFile{Data: []byte(classifyBugXML)},
+		effectDeleteKey: &fstest.MapFile{Data: []byte("/etc/hosts\n")},
+	}
+	f := NewFake(fsys)
+
+	res, err := f.Run(context.Background(), RunRequest{Job: response.JobClassify, Label: "1", WorkDir: workDir})
+	assertUnsafeEffectError(t, err)
+
+	resumed, err := f.Run(context.Background(), RunRequest{
+		Job: response.JobClassify, Label: "1", SessionID: res.SessionID,
+	})
+	if err != nil {
+		t.Fatalf("resume after applyEffects error: %v", err)
+	}
+	if resumed.SessionID != res.SessionID {
+		t.Errorf("resumed SessionID = %q, want %q", resumed.SessionID, res.SessionID)
+	}
+	if resumed.FinalMessage != classifyBugXML {
+		t.Errorf("resumed FinalMessage = %q, want %q (the same, unadvanced turn)", resumed.FinalMessage, classifyBugXML)
+	}
+}
+
 func TestFake_HonorsCancellation(t *testing.T) {
 	t.Parallel()
 
