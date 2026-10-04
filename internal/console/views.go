@@ -2324,7 +2324,10 @@ func checkFailedPendingLine(body string) string {
 // <errors>]" marker (invalidMarkerBody, internal/job/planning.go): one
 // sentence naming the run and the closed reason, then the validator's
 // errors unchanged, one per line. A marker with no reason line keeps the
-// reason clause out. It is a pure renderer and logs nothing.
+// reason clause out. It never claims a retry: invalidOutputCommit
+// (internal/job/planning.go) escalates response_invalid instead of
+// retrying once this is the second consecutive invalid run. It is a pure
+// renderer and logs nothing.
 func responseInvalidLine(body string) string {
 	first, rest, _ := strings.Cut(body, "\n")
 	rid := strings.TrimPrefix(first, updateMarkerResponseInvalidPrefix)
@@ -2333,7 +2336,7 @@ func responseInvalidLine(body string) string {
 	if reason != "" {
 		head += ": " + reason
 	}
-	head += ". Zing retries once. Its final message is linked under Runs in the side panel."
+	head += ". Its final message is linked under Runs in the side panel."
 	if !hasErrs || errs == "" {
 		return head
 	}

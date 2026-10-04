@@ -307,8 +307,11 @@ func claudeFinalMessage(stdout []byte) string {
 // transcript: HOME/.claude/projects/ENC(workDir)/SESSION.jsonl, ENC
 // replacing every byte outside [A-Za-z0-9] with '-' (the same encoding
 // sandbox.encodeTranscriptDir uses for the TRANSCRIPTS profile parameter).
-// home is the last HOME= entry in env, falling back to os.UserHomeDir; ""
-// when neither resolves or sessionID is "".
+// workDir is resolved to an absolute, symlink-free path first, matching
+// what finishSandboxRequest already hands Claude for a sandboxed run; an
+// unsandboxed run's WorkDir can still hold symlink components. home is the
+// last HOME= entry in env, falling back to os.UserHomeDir; "" when either
+// path fails to resolve or sessionID is "".
 func claudeTranscriptPath(env []string, workDir, sessionID string) string {
 	if sessionID == "" {
 		return ""
@@ -326,11 +329,22 @@ func claudeTranscriptPath(env []string, workDir, sessionID string) string {
 		}
 		home = h
 	}
-	return filepath.Join(home, ".claude", "projects", encodeClaudeTranscriptDir(workDir), sessionID+".jsonl")
+	absoluteWorkDir, err := filepath.Abs(workDir)
+	if err != nil {
+		return ""
+	}
+	resolvedWorkDir, err := filepath.EvalSymlinks(absoluteWorkDir)
+	if err != nil {
+		return ""
+	}
+	return filepath.Join(home, ".claude", "projects", encodeClaudeTranscriptDir(resolvedWorkDir), sessionID+".jsonl")
 }
 
 // encodeClaudeTranscriptDir mirrors sandbox.encodeTranscriptDir: every byte
-// outside [A-Za-z0-9] becomes '-'.
+// outside [A-Za-z0-9] becomes '-'. It is not shared with that package: an
+// internal/sandbox darwin test file imports internal/runtime, so
+// internal/runtime importing internal/sandbox back would cycle the
+// sandbox test binary.
 func encodeClaudeTranscriptDir(path string) string {
 	var b strings.Builder
 	b.Grow(len(path))

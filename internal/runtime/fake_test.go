@@ -85,6 +85,31 @@ func TestFake_FinalMessageIsScript(t *testing.T) {
 	}
 }
 
+// TestFake_FinalMessageKeptOnApplyEffectsError proves a started run (its
+// OnStart already fired) keeps its FinalMessage even when applyEffects
+// fails: the script is read and OnStart fires before the ".delete" line
+// is found unsafe, so the run counts as started and must not lose its
+// final message on this error path.
+func TestFake_FinalMessageKeptOnApplyEffectsError(t *testing.T) {
+	t.Parallel()
+
+	workDir := t.TempDir()
+	fsys := fstest.MapFS{
+		effectScriptKey: &fstest.MapFile{Data: []byte(classifyBugXML)},
+		effectDeleteKey: &fstest.MapFile{Data: []byte("/etc/hosts\n")},
+	}
+	f := NewFake(fsys)
+
+	res, err := f.Run(context.Background(), RunRequest{Job: response.JobClassify, Label: "1", WorkDir: workDir})
+	assertUnsafeEffectError(t, err)
+	if res.FinalMessage != classifyBugXML {
+		t.Errorf("FinalMessage = %q, want %q", res.FinalMessage, classifyBugXML)
+	}
+	if res.SessionID == "" {
+		t.Error("SessionID = \"\", want the minted session id")
+	}
+}
+
 func TestFake_HonorsCancellation(t *testing.T) {
 	t.Parallel()
 

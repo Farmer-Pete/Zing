@@ -92,8 +92,13 @@ func (f *Fake) Run(ctx context.Context, req RunRequest) (RunResult, error) {
 		req.OnStart(StartInfo{PID: 0, SessionID: sessionID})
 	}
 
+	// final is computed before applyEffects so a failure there still
+	// returns it: OnStart already fired above, so this run counts as
+	// started, and the design keeps a started run's final message on
+	// every outcome, including this error path.
+	final := capFinalMessage(string(data))
 	if err := f.applyEffects(req.Job, req.Label, sess.nextTurn, req.WorkDir); err != nil {
-		return RunResult{}, err
+		return RunResult{SessionID: sessionID, FinalMessage: final}, err
 	}
 
 	sess.nextTurn++
@@ -102,7 +107,7 @@ func (f *Fake) Run(ctx context.Context, req RunRequest) (RunResult, error) {
 		// a failed first turn leaves no unreachable session in the map.
 		f.sessions[sessionID] = sess
 	}
-	return RunResult{Response: doc.Response, SessionID: sessionID, FinalMessage: capFinalMessage(string(data))}, nil
+	return RunResult{Response: doc.Response, SessionID: sessionID, FinalMessage: final}, nil
 }
 
 // resolveSessionLocked mints a new session for an empty req.SessionID (the

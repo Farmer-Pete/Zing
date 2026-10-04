@@ -73,10 +73,8 @@ func TestInvalidRetryText_MultiLineDetail(t *testing.T) {
 
 	reason := testReasonFailedValidation + "\na: x\nb: y\nc: z"
 	got := invalidRetryText(reason)
-	for _, want := range []string{"a: x", "b: y", "c: z"} {
-		if !strings.Contains(got, want) {
-			t.Errorf("invalidRetryText = %q, want it to contain %q", got, want)
-		}
+	if !strings.Contains(got, "a: x\nb: y\nc: z") {
+		t.Errorf("invalidRetryText = %q, want it to contain the newline-joined sequence %q", got, "a: x\nb: y\nc: z")
 	}
 	open := strings.Index(got, "<<<UNTRUSTED ")
 	end := strings.Index(got, "<<<END ")
@@ -84,9 +82,7 @@ func TestInvalidRetryText_MultiLineDetail(t *testing.T) {
 		t.Fatalf("invalidRetryText = %q, want a fenced block", got)
 	}
 	fenced := got[open:end]
-	for _, want := range []string{"a: x", "b: y", "c: z"} {
-		if !strings.Contains(fenced, want) {
-			t.Errorf("fenced block = %q, want it to contain %q", fenced, want)
-		}
+	if !strings.Contains(fenced, "a: x\nb: y\nc: z") {
+		t.Errorf("fenced block = %q, want it to contain the newline-joined sequence %q", fenced, "a: x\nb: y\nc: z")
 	}
 }

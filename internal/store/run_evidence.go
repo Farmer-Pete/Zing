@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 )
 
@@ -39,7 +40,18 @@ func (s *Store) RecordRunEvidence(ctx context.Context, runID int64, ev RunEviden
 		return fmt.Errorf("record run evidence: run %d: %w", runID, err)
 	}
 	if n == 0 {
-		return fmt.Errorf("record run evidence: run %d: %w", runID, sql.ErrNoRows)
+		// RowsAffected reporting 0 doesn't by itself prove the row is
+		// missing: an UPDATE that sets every column to the value it
+		// already held can also report 0. Confirm absence before
+		// claiming sql.ErrNoRows.
+		var exists int
+		existsErr := s.db.QueryRowContext(ctx, `SELECT 1 FROM runs WHERE id = ?`, runID).Scan(&exists)
+		switch {
+		case errors.Is(existsErr, sql.ErrNoRows):
+			return fmt.Errorf("record run evidence: run %d: %w", runID, sql.ErrNoRows)
+		case existsErr != nil:
+			return fmt.Errorf("record run evidence: run %d: %w", runID, existsErr)
+		}
 	}
 	return nil
 }

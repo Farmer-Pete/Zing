@@ -219,8 +219,9 @@ func TestMigration0006CheckProcs(t *testing.T) {
 // TestMigration0007_AppliesOverPopulated0006 proves migration
 // 0007_run_evidence.sql applies cleanly to a database already carrying rows
 // through 0006: it adds final_message, stderr_path and transcript_path to
-// runs, leaves existing rows NULL in all three, and rejects an empty-string
-// write to any of them (the CHECK length(...) > 0 guards).
+// runs, leaves existing rows NULL in all three, rejects an empty-string
+// write to any of them, and rejects a final_message over the 65536-byte
+// cap (the CHECK clauses measure bytes via length(CAST(x AS BLOB))).
 func TestMigration0007_AppliesOverPopulated0006(t *testing.T) {
 	t.Parallel()
 	ctx := t.Context()
@@ -309,5 +310,12 @@ func TestMigration0007_AppliesOverPopulated0006(t *testing.T) {
 		if _, execErr := db.ExecContext(ctx, `UPDATE runs SET `+col+` = '' WHERE id = 1`); execErr == nil {
 			t.Errorf("UPDATE %s = '': want a CHECK constraint error, got nil", col)
 		}
+	}
+
+	// hex(randomblob(32769)) is 65538 ASCII bytes, just over the 65536-byte cap.
+	if _, execErr := db.ExecContext(ctx,
+		`UPDATE runs SET final_message = hex(randomblob(32769)) WHERE id = 1`,
+	); execErr == nil {
+		t.Error("UPDATE final_message to 65538 bytes: want a CHECK constraint error, got nil")
 	}
 }

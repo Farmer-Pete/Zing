@@ -109,6 +109,38 @@ func TestRunEvidence_RecordAndReadBack(t *testing.T) {
 	}
 }
 
+// TestRunEvidence_RecordSameValuesTwiceSucceeds proves a second
+// RecordRunEvidence call that writes the exact values a run's columns
+// already hold still succeeds: RowsAffected reporting 0 for a no-op UPDATE
+// must not be misread as "no such run".
+func TestRunEvidence_RecordSameValuesTwiceSucceeds(t *testing.T) {
+	t.Parallel()
+	ctx := t.Context()
+	s, err := Open(ctx, dbPath(t))
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer func() { _ = s.Close() }()
+	seedProjectAndTicket(t, s)
+
+	run := seedRunForEvidence(t, s)
+	ev := RunEvidence{FinalMessage: new("same text")}
+	if recErr := s.RecordRunEvidence(ctx, run, ev); recErr != nil {
+		t.Fatalf("RecordRunEvidence(first write): %v", recErr)
+	}
+	if recErr := s.RecordRunEvidence(ctx, run, ev); recErr != nil {
+		t.Errorf("RecordRunEvidence(same values again) = %v, want nil", recErr)
+	}
+
+	_, got, err := s.RunEvidenceByID(ctx, run)
+	if err != nil {
+		t.Fatalf("RunEvidenceByID: %v", err)
+	}
+	if got.FinalMessage == nil || *got.FinalMessage != "same text" {
+		t.Errorf("FinalMessage = %v, want %q", got.FinalMessage, "same text")
+	}
+}
+
 // TestRunEvidence_UnknownRun proves both RecordRunEvidence and
 // RunEvidenceByID report a wrapped sql.ErrNoRows for a run id that does not
 // exist, and that RunEvidenceByID's ticketID is 0 in that case.

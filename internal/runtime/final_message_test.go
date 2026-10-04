@@ -161,6 +161,9 @@ func TestParseFinalMessage_ValidationErrorsOnePerLine(t *testing.T) {
 	if strings.Contains(invalidErr.Detail, "; ") {
 		t.Errorf("Detail = %q, want no \"; \" join between errors", invalidErr.Detail)
 	}
+	if !strings.Contains(invalidErr.Detail, "\n") {
+		t.Errorf("Detail = %q, want at least two lines joined by \\n", invalidErr.Detail)
+	}
 }
 
 func TestCapDetail_StaysWithinLimit(t *testing.T) {

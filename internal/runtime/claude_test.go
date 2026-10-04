@@ -931,24 +931,33 @@ func TestClaudeFinalMessage(t *testing.T) {
 }
 
 // TestClaudeTranscriptPath is claudeTranscriptPath's own unit test: it
-// builds HOME/.claude/projects/ENC(workDir)/SESSION.jsonl, the last HOME=
-// entry in env wins, and an empty session id gives "".
+// builds HOME/.claude/projects/ENC(workDir)/SESSION.jsonl against workDir
+// resolved to an absolute, symlink-free path, the last HOME= entry in env
+// wins, and an empty session id gives "". workDir must exist on disk, since
+// claudeTranscriptPath resolves it with filepath.EvalSymlinks.
 func TestClaudeTranscriptPath(t *testing.T) {
 	t.Parallel()
 
-	got := claudeTranscriptPath([]string{"HOME=/h"}, "/a/b.c", "s1")
-	want := "/h/.claude/projects/-a-b-c/s1.jsonl"
+	dir := t.TempDir()
+	resolvedDir, err := filepath.EvalSymlinks(dir)
+	if err != nil {
+		t.Fatalf("EvalSymlinks(%s): %v", dir, err)
+	}
+	encodedDir := encodeClaudeTranscriptDir(resolvedDir)
+
+	got := claudeTranscriptPath([]string{"HOME=/h"}, dir, "s1")
+	want := filepath.Join(string(filepath.Separator)+"h", ".claude", "projects", encodedDir, "s1.jsonl")
 	if got != want {
 		t.Errorf("claudeTranscriptPath() = %q, want %q", got, want)
 	}
 
-	got = claudeTranscriptPath([]string{"HOME=/old", "HOME=/new"}, "/a/b.c", "s1")
-	want = "/new/.claude/projects/-a-b-c/s1.jsonl"
+	got = claudeTranscriptPath([]string{"HOME=/old", "HOME=/new"}, dir, "s1")
+	want = filepath.Join(string(filepath.Separator)+"new", ".claude", "projects", encodedDir, "s1.jsonl")
 	if got != want {
 		t.Errorf("claudeTranscriptPath() with two HOME entries = %q, want the last one %q", got, want)
 	}
 
-	if got := claudeTranscriptPath([]string{"HOME=/h"}, "/a/b.c", ""); got != "" {
+	if got := claudeTranscriptPath([]string{"HOME=/h"}, dir, ""); got != "" {
 		t.Errorf("claudeTranscriptPath() with empty session = %q, want \"\"", got)
 	}
 }
