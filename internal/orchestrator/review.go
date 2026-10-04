@@ -45,18 +45,18 @@ func (o *Orchestrator) Diff(ctx context.Context, wt Worktree, sha string) (strin
 		return "", fmt.Errorf("orchestrator: diff: %w", err)
 	}
 
-	baseRev, err := o.baseRev(ctx, wt.ticketID())
+	base, err := o.baseRev(ctx, wt.ticketID())
 	if err != nil {
 		return "", fmt.Errorf("orchestrator: diff: %w", err)
 	}
 
 	run := execRunner{drivers: wt.drivers}
-	base, err := run.Output(ctx, wt.dir, "git", "merge-base", baseRev, sha)
+	mergeBase, err := run.Output(ctx, wt.dir, "git", "merge-base", base, sha)
 	if err != nil {
 		return "", fmt.Errorf("orchestrator: diff: merge-base: %w", err)
 	}
 
-	out, err := run.Output(ctx, wt.dir, "git", "diff", "--no-ext-diff", "--no-textconv", "--no-color", "--no-renames", "-U3", strings.TrimSpace(base), sha)
+	out, err := run.Output(ctx, wt.dir, "git", "diff", "--no-ext-diff", "--no-textconv", "--no-color", "--no-renames", "-U3", strings.TrimSpace(mergeBase), sha)
 	if err != nil {
 		return "", fmt.Errorf("orchestrator: diff: %w", err)
 	}
@@ -93,18 +93,18 @@ func (o *Orchestrator) ChangedFilesSinceBase(ctx context.Context, wt Worktree, t
 		return nil, fmt.Errorf("orchestrator: changed files since base: %w", err)
 	}
 
-	baseRev, err := o.baseRev(ctx, wt.ticketID())
+	base, err := o.baseRev(ctx, wt.ticketID())
 	if err != nil {
 		return nil, fmt.Errorf("orchestrator: changed files since base: %w", err)
 	}
 
 	run := execRunner{drivers: wt.drivers}
-	base, err := run.Output(ctx, wt.dir, "git", "merge-base", baseRev, to)
+	mergeBase, err := run.Output(ctx, wt.dir, "git", "merge-base", base, to)
 	if err != nil {
 		return nil, fmt.Errorf("orchestrator: changed files since base: merge-base: %w", err)
 	}
 
-	return o.ChangedFilesBetween(ctx, wt, strings.TrimSpace(base), to)
+	return o.ChangedFilesBetween(ctx, wt, strings.TrimSpace(mergeBase), to)
 }
 
 // IsAncestor runs git merge-base --is-ancestor a b; exit 1 is false, nil.

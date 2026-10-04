@@ -427,15 +427,18 @@ const fetchRefCleanupTimeout = 10 * time.Second
 func (o *Orchestrator) fetchBase(ctx context.Context, ticketID int64) (sha string, fetched bool, err error) {
 	if err := checkRefFormat(ctx, o.proj.DefaultBranch); err != nil {
 		o.log.Error("fetch base error", "ticket_id", ticketID, "ref", o.baseRef(), "reason", "invalid_default_branch")
-		return "", false, fmt.Errorf("orchestrator: fetch base: default branch %q is not a valid branch name: %w", o.proj.DefaultBranch, err)
+		return "", false, fmt.Errorf("orchestrator: fetch base: default branch %q is not a valid branch name", o.proj.DefaultBranch)
 	}
 
 	src := "refs/heads/" + o.proj.DefaultBranch
 	tmp := fmt.Sprintf("refs/zing/fetch/%s/%d-%d-%d", o.proj.DefaultBranch, ticketID, os.Getpid(), fetchSeq.Add(1))
 
 	// Network call, no lock held: it writes only tmp, a ref no other
-	// goroutine or process ever names.
-	out, fetchErr := o.run.Run(ctx, o.proj.LocalPath, "git", "fetch", "--no-tags", "origin", "+"+src+":"+tmp)
+	// goroutine or process ever names. --refmap= disables the remote's
+	// configured remote.origin.fetch mapping, which git otherwise applies
+	// in addition to an explicit refspec given on the command line, and
+	// which would silently also move refs/remotes/origin/<default>.
+	out, fetchErr := o.run.Run(ctx, o.proj.LocalPath, "git", "fetch", "--no-tags", "--refmap=", "origin", "+"+src+":"+tmp)
 	if fetchErr == nil {
 		// Installed before any lock attempt, so it runs on every later
 		// path, lock failure included. updateBaseLocked has released
@@ -450,7 +453,7 @@ func (o *Orchestrator) fetchBase(ctx context.Context, ticketID int64) (sha strin
 // output: it is only classified against a fixed set of known failure
 // shapes, never logged or returned, so a credential or a remote URL
 // embedded in it never reaches a log record or an error message.
-func (o *Orchestrator) updateBaseLocked(ctx context.Context, ticketID int64, src, tmp, out string, fetchErr error) (resultSHA string, resultFetched bool, resultErr error) {
+func (o *Orchestrator) updateBaseLocked(ctx context.Context, ticketID int64, src, tmp, out string, fetchErr error) (sha string, fetched bool, err error) {
 	ref := o.baseRef()
 	fail := func(reason string, err error) (string, bool, error) {
 		o.log.Error("fetch base error", "ticket_id", ticketID, "ref", ref, "reason", reason)
@@ -484,7 +487,7 @@ func (o *Orchestrator) updateBaseLocked(ctx context.Context, ticketID int64, src
 		reason = "fetch_failed"
 	}
 
-	sha, err := o.resolveBase(ctx) // "" only on exit 1 (absent); any other git error is err
+	sha, err = o.resolveBase(ctx) // "" only on exit 1 (absent); any other git error is err
 	if err != nil {
 		return fail("resolve_failed", fmt.Errorf("orchestrator: fetch base: resolve %s: %w", ref, err))
 	}
@@ -512,7 +515,7 @@ func (o *Orchestrator) updateBaseLocked(ctx context.Context, ticketID int64, src
 // the fetched commit. An older fetch finishing after a newer one, or a
 // force-pushed origin that no longer descends from the current base,
 // leaves the base where it is. The caller holds commonMu.
-func (o *Orchestrator) advanceBaseLocked(ctx context.Context, ticketID int64, tmp string, fail func(string, error) (string, bool, error)) (resultSHA string, resultFetched bool, resultErr error) {
+func (o *Orchestrator) advanceBaseLocked(ctx context.Context, ticketID int64, tmp string, fail func(string, error) (string, bool, error)) (sha string, fetched bool, err error) {
 	ref := o.baseRef()
 
 	newSHA, err := o.revParseCommit(ctx, tmp)
@@ -528,22 +531,17 @@ func (o *Orchestrator) advanceBaseLocked(ctx context.Context, ticketID int64, tm
 		return fail("resolve_failed", fmt.Errorf("orchestrator: fetch base: resolve %s: %w", ref, err))
 	}
 
-	switch cur {
-	case "":
-		if _, err := o.run.Run(ctx, o.proj.LocalPath, "git", "update-ref", ref, newSHA, ""); err != nil {
-			return fail("advance_failed", fmt.Errorf("orchestrator: fetch base: set %s: %w", ref, err))
-		}
-	case newSHA:
-		// Already there; nothing to move.
-	default:
+	// advance tracks whether newSHA needs writing to ref: cur == "" (no ref
+	// yet) and the "cur is an ancestor of newSHA" case below both resolve to
+	// the same single compare-and-swap, "update-ref ref newSHA cur".
+	advance := cur == ""
+	if cur != "" && cur != newSHA {
 		fwd, err := o.isAncestorRev(ctx, cur, newSHA)
 		if err != nil {
 			return fail("ancestry_failed", fmt.Errorf("orchestrator: fetch base: is %s an ancestor of the fetched commit: %w", ref, err))
 		}
 		if fwd {
-			if _, err := o.run.Run(ctx, o.proj.LocalPath, "git", "update-ref", ref, newSHA, cur); err != nil {
-				return fail("advance_failed", fmt.Errorf("orchestrator: fetch base: advance %s: %w", ref, err))
-			}
+			advance = true
 		} else {
 			back, err := o.isAncestorRev(ctx, newSHA, cur)
 			if err != nil {
@@ -555,6 +553,12 @@ func (o *Orchestrator) advanceBaseLocked(ctx context.Context, ticketID int64, tm
 			}
 			// An older fetch finished last: keep the newer base already in place.
 			newSHA = cur
+		}
+	}
+
+	if advance {
+		if _, err := o.run.Run(ctx, o.proj.LocalPath, "git", "update-ref", ref, newSHA, cur); err != nil {
+			return fail("advance_failed", fmt.Errorf("orchestrator: fetch base: advance %s: %w", ref, err))
 		}
 	}
 
@@ -641,6 +645,7 @@ func (o *Orchestrator) baseRev(ctx context.Context, ticketID int64) (string, err
 		return "", fmt.Errorf("orchestrator: resolve %s: %w", o.baseRef(), err)
 	}
 	if sha == "" {
+		o.log.Debug("base ref absent, using local default branch", "ticket_id", ticketID, "ref", o.baseRef(), "fallback", o.proj.DefaultBranch, "reason", "base_ref_absent")
 		return o.proj.DefaultBranch, nil
 	}
 	return o.baseRef(), nil

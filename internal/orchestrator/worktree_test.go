@@ -2122,6 +2122,10 @@ func TestPrepareWorktreeCutsFromFetchedBase(t *testing.T) {
 		t.Errorf("refs/zing/fetch/ not cleaned up")
 	}
 
+	if gotOriginMain := strings.TrimSpace(runGit(ctx, t, repo, "rev-parse", "refs/remotes/origin/main")); gotOriginMain != localMainSHA {
+		t.Errorf("refs/remotes/origin/main = %s, want it to stay %s (only fetchBase's own TMP ref and refs/zing/base/ should move on a fetch)", gotOriginMain, localMainSHA)
+	}
+
 	fetched := findRecords(logs.records(t), "fetched base")
 	if len(fetched) != 1 {
 		t.Fatalf("found %d \"fetched base\" records, want 1", len(fetched))
@@ -2156,7 +2160,8 @@ type gateRunner struct {
 
 func (r *gateRunner) Run(ctx context.Context, dir, name string, args ...string) (string, error) {
 	out, err := r.inner.Run(ctx, dir, name, args...)
-	if err == nil && r.match(args) && r.fired.CompareAndSwap(false, true) {
+	matched := err == nil && r.match(args)
+	if matched && r.fired.CompareAndSwap(false, true) {
 		close(r.ready)
 		<-r.release
 	}
@@ -2232,6 +2237,76 @@ func TestFetchBaseOlderFetchFinishingLastKeepsNewerBase(t *testing.T) {
 	}
 }
 
+// forcePushOrphanCommit clones remote, creates an orphan commit that shares
+// no history with remote's current main, and force-pushes it to main --
+// standing in for a history-rewriting force-push upstream that no longer
+// descends from what this repository last fetched. It returns the new
+// commit's sha.
+func forcePushOrphanCommit(ctx context.Context, t *testing.T, remote, relPath, content, message string) string {
+	t.Helper()
+	tmp := t.TempDir()
+	clone := filepath.Join(tmp, "clone")
+	runGit(ctx, t, tmp, "clone", "-q", remote, clone)
+	runGit(ctx, t, clone, "config", "user.email", "zing-test@example.com")
+	runGit(ctx, t, clone, "config", "user.name", "Zing Test")
+	runGit(ctx, t, clone, "config", "commit.gpgsign", "false")
+	runGit(ctx, t, clone, "checkout", "-q", "--orphan", "diverged")
+	writeTestFile(t, filepath.Join(clone, relPath), content)
+	runGit(ctx, t, clone, "add", relPath)
+	runGit(ctx, t, clone, "commit", "-q", "-m", message)
+	runGit(ctx, t, clone, "push", "-q", "--force", "origin", "diverged:"+mainBranch)
+	return strings.TrimSpace(runGit(ctx, t, clone, "rev-parse", "HEAD"))
+}
+
+// TestFetchBaseDivergedOriginKeepsCurrentBase proves a force-pushed origin
+// whose new main no longer descends from the base fetchBase already
+// recorded is reported as "diverged" and leaves the base exactly where it
+// was, rather than silently jumping to a commit with no ancestry relation
+// to what Zing has already counted as the ticket's own.
+func TestFetchBaseDivergedOriginKeepsCurrentBase(t *testing.T) {
+	t.Parallel()
+	ctx := t.Context()
+
+	repo := newTestRepo(t)
+	remote := newBareRemote(ctx, t)
+	addOrigin(ctx, t, repo, remote)
+	runGit(ctx, t, repo, "push", "-q", "origin", mainBranch)
+
+	o, logs := newTestOrchestratorCapturingLog(t, repo, execRunner{})
+	sha1, _, err := o.fetchBase(ctx, 744)
+	if err != nil {
+		t.Fatalf("fetchBase (first, successful): %v", err)
+	}
+
+	divergedSHA := forcePushOrphanCommit(ctx, t, remote, "diverged.txt", "diverged\n", "force-pushed, unrelated history")
+
+	gotSHA, _, err := o.fetchBase(ctx, 744)
+	if err != nil {
+		t.Fatalf("fetchBase (diverged origin): %v", err)
+	}
+	if gotSHA != sha1 {
+		t.Errorf("fetchBase = %s, want %s (the current base, unmoved)", gotSHA, sha1)
+	}
+	if base := strings.TrimSpace(runGit(ctx, t, repo, "rev-parse", "refs/zing/base/main")); base != sha1 {
+		t.Errorf("refs/zing/base/main = %s, want it unchanged at %s", base, sha1)
+	}
+	if !forEachRefEmpty(ctx, t, repo, "refs/zing/fetch/") {
+		t.Errorf("refs/zing/fetch/ not cleaned up")
+	}
+
+	recs := findRecords(logs.records(t), "fetched base diverged, keeping current")
+	if len(recs) != 1 {
+		t.Fatalf("found %d \"fetched base diverged, keeping current\" records, want 1", len(recs))
+	}
+	rec := recs[0]
+	if rec["level"] != "WARN" {
+		t.Errorf("level = %v, want WARN", rec["level"])
+	}
+	if rec["ticket_id"] != float64(744) || rec["sha"] != sha1 || rec["fetched_sha"] != divergedSHA || rec["reason"] != "diverged" {
+		t.Errorf("record = %v, want ticket_id 744, sha %s, fetched_sha %s, reason diverged", rec, sha1, divergedSHA)
+	}
+}
+
 // cancelAfterFetchRunner wraps a real Runner and cancels a captured
 // context.CancelFunc right after a successful "git fetch" call, so a test
 // can force fetchBase's own later lock attempt to run against an
@@ -2268,17 +2343,9 @@ func TestFetchBaseRemovesTmpRefWhenLockFails(t *testing.T) {
 	addOrigin(ctx, t, repo, remote)
 	runGit(ctx, t, repo, "push", "-q", "origin", mainBranch)
 
-	logs := &logCapture{}
-	log := slog.New(slog.NewJSONHandler(logs, nil))
-	proj := Project{Owner: testOwner, Repo: testRepo, LocalPath: repo, DefaultBranch: mainBranch}
-
 	fctx, cancel := context.WithCancel(ctx)
 	run := cancelAfterFetchRunner{inner: execRunner{}, cancel: cancel}
-
-	o, err := New(proj, fakeGitHub{}, run, log)
-	if err != nil {
-		t.Fatalf("New: %v", err)
-	}
+	o, logs := newTestOrchestratorCapturingLog(t, repo, run)
 
 	// Warm and take commonMu from the test itself, so fetchBase's own
 	// Lock call (once its ctx is canceled) blocks rather than racing a
@@ -2543,13 +2610,8 @@ func TestFetchBaseSeedFailureNamesRefAndSource(t *testing.T) {
 	ctx := t.Context()
 	repo := newTestRepo(t)
 
-	logs := &logCapture{}
-	log := slog.New(slog.NewJSONHandler(logs, nil))
-	proj := Project{Owner: testOwner, Repo: testRepo, LocalPath: repo, DefaultBranch: "trunk"}
-	o, err := New(proj, fakeGitHub{}, execRunner{}, log)
-	if err != nil {
-		t.Fatalf("New: %v", err)
-	}
+	o, logs := newTestOrchestratorCapturingLog(t, repo, execRunner{})
+	o.proj.DefaultBranch = "trunk"
 
 	_, _, fetchErr := o.fetchBase(ctx, 736)
 	if fetchErr == nil {
@@ -2559,9 +2621,8 @@ func TestFetchBaseSeedFailureNamesRefAndSource(t *testing.T) {
 		t.Errorf("fetchBase error %q does not name both refs/zing/base/trunk and refs/heads/trunk", fetchErr.Error())
 	}
 
-	out, rpErr := exec.CommandContext(ctx, "git", "rev-parse", "--verify", "--quiet", "refs/zing/base/trunk^{commit}").CombinedOutput()
-	if rpErr == nil {
-		t.Errorf("refs/zing/base/trunk unexpectedly resolved: %s", out)
+	if !forEachRefEmpty(ctx, t, repo, "refs/zing/base/") {
+		t.Errorf("refs/zing/base/trunk was written despite the failed seed")
 	}
 
 	recs := findRecords(logs.records(t), "fetch base error")
@@ -2571,18 +2632,23 @@ func TestFetchBaseSeedFailureNamesRefAndSource(t *testing.T) {
 }
 
 // TestFetchBaseRejectsInvalidDefaultBranch proves a project whose default
-// branch is not a legal git ref name (New itself only checks non-empty) is
-// refused by fetchBase before anything under refs/zing/ is touched, rather
-// than handed straight to "git fetch" or "git update-ref".
+// branch is not a legal git ref name (New itself only checks non-empty, and
+// accepts it) is refused by fetchBase before anything under refs/zing/ is
+// touched, rather than handed straight to "git fetch" or "git update-ref".
 func TestFetchBaseRejectsInvalidDefaultBranch(t *testing.T) {
 	t.Parallel()
 	ctx := t.Context()
 	repo := newTestRepo(t)
 
-	o, logs := newTestOrchestratorCapturingLog(t, repo, execRunner{})
-	o.proj.DefaultBranch = "bad..name"
+	logs := &logCapture{}
+	log := slog.New(slog.NewJSONHandler(logs, nil))
+	proj := Project{Owner: testOwner, Repo: testRepo, LocalPath: repo, DefaultBranch: "bad..name"}
+	o, err := New(proj, fakeGitHub{}, execRunner{}, log)
+	if err != nil {
+		t.Fatalf("New: %v, want New to accept an invalid default branch name (it only checks non-empty)", err)
+	}
 
-	_, _, err := o.fetchBase(ctx, 738)
+	_, _, err = o.fetchBase(ctx, 738)
 	if err == nil {
 		t.Fatal("fetchBase: expected an error, got nil")
 	}

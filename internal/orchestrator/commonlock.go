@@ -35,16 +35,16 @@ package orchestrator
 //	perimeter.go ChangedPaths                   status --porcelain=v1 ...                  per-worktree (read)
 //	perimeter.go RevertPaths (litRun)           restore --staged [--worktree] ...          per-worktree (worktree's own index/working tree)
 //	perimeter.go Hunk                           diff ...                                    per-worktree (read)
-//	perimeter.go BranchCommits                  rev-list --reverse ...                     per-worktree (read)
+//	perimeter.go BranchCommits                  rev-list --reverse <baseRev>..HEAD        per-worktree (read)
 //	push.go   Push (fetchBase)                  see worktree.go's fetchBase rows below      --
 //	push.go   Push                              push origin <refspec>                      per-worktree (network I/O; only writes refs/remotes/origin/<branch>, a ref update -- PR review fix C3)
 //	push.go   Push                              config --local branch.<b>.remote/.merge    SHARED (writes branch.<b>.* in the shared config)
-//	push.go   unpushedShas                      log -z --format=%H ...                     per-worktree (read)
+//	push.go   unpushedShas                      log -z --format=%H <baseRev>..<branch>    per-worktree (read)
 //	review.go HeadSHA                           rev-parse HEAD                             per-worktree (read)
 //	review.go Diff (fetchBase)                  see worktree.go's fetchBase rows below      --
 //	review.go Diff                              merge-base, diff ...                       per-worktree (read)
 //	review.go ChangedFilesBetween               diff --name-only --no-renames -z ...        per-worktree (read)
-//	review.go ChangedFilesSinceBase             merge-base ...                              per-worktree (read)
+//	review.go ChangedFilesSinceBase             merge-base <baseRev> <to>                   per-worktree (read)
 //	review.go IsAncestor                        merge-base --is-ancestor                    per-worktree (read)
 //	worktree.go checkRefFormat                  check-ref-format                            per-worktree (no repository touched at all)
 //	worktree.go revalidate                      symbolic-ref --short HEAD                   per-worktree (read)
@@ -52,11 +52,11 @@ package orchestrator
 //	worktree.go gitPathInfoExclude              rev-parse --git-path info/exclude           per-worktree (read)
 //	worktree.go ensureWorktreeExclude           (no git call: direct info/exclude read+append) SHARED, see below
 //	worktree.go runSparseCheckoutSet            sparse-checkout set --stdin                 per-worktree (worktree's own admin-dir sparse-checkout file)
-//	worktree.go fetchBase                       fetch --no-tags origin +refs/heads/D:TMP    per-worktree (network I/O; writes only its own TMP ref under refs/zing/fetch/, no lock held -- same reasoning as push.go's own Push row)
+//	worktree.go fetchBase                       fetch --no-tags --refmap= origin +refs/heads/D:TMP  per-worktree (network I/O; --refmap= disables the remote's configured fetch mapping, so this writes only its own TMP ref under refs/zing/fetch/, never refs/remotes/origin/*, no lock held -- same reasoning as push.go's own Push row)
 //	worktree.go revParseCommit, resolveBase     rev-parse --verify --quiet ...               per-worktree (read; also run under commonMu, inside updateBaseLocked/advanceBaseLocked, for a consistent view of baseRef)
 //	worktree.go isAncestorRev                   merge-base --is-ancestor                     per-worktree (read, run under commonMu inside advanceBaseLocked, same reason)
 //	worktree.go updateBaseLocked                update-ref <baseRef> <src> ""                SHARED (seeds baseRef from the local default branch after a failed fetch finds nothing to fall back to; holds commonMu itself, see below)
-//	worktree.go advanceBaseLocked               update-ref <baseRef> <new> [<old>]           SHARED (moves baseRef forward after a successful fetch; holds commonMu itself, see below)
+//	worktree.go advanceBaseLocked               update-ref <baseRef> <new> [<old>]           SHARED (moves baseRef forward after a successful fetch; runs under the commonMu its caller, updateBaseLocked, already holds -- see below)
 //	worktree.go removeFetchRef                  update-ref -d <TMP>                          SHARED (deletes fetchBase's own temporary ref; holds commonMu itself, see below)
 //	worktree.go baseRev                          (no git call: resolveBase, see above)        per-worktree (read)
 //	worktree.go PrepareWorktree                 worktree add --no-checkout -b <branch> <baseRef> SHARED
@@ -80,13 +80,15 @@ package orchestrator
 // Every SHARED row above goes through runCommon, whatever Runner it uses
 // (worktree.go's "sparse-checkout init --cone" builds its own execRunner,
 // like several per-worktree calls do, and passes that same value to
-// runCommon rather than calling it directly), except the three "update-ref"
-// rows fetchBase's own helpers write: updateBaseLocked, advanceBaseLocked,
-// and removeFetchRef each already hold commonMu themselves (the same
-// "holds the lock itself" shape ensureWorktreeExclude and
-// JudgeTree.removeLocked already use below), so they call o.run directly
-// rather than through runCommon, which would try to take the lock a second
-// time. ensureWorktreeExclude is the one shared write that is not a git
+// runCommon rather than calling it directly), except the "update-ref" rows
+// fetchBase's own helpers write: updateBaseLocked and removeFetchRef each
+// already hold commonMu themselves (the same "holds the lock itself" shape
+// ensureWorktreeExclude and JudgeTree.removeLocked already use below), so
+// they call o.run directly rather than through runCommon, which would try
+// to take the lock a second time. advanceBaseLocked's own update-ref runs
+// under the commonMu its caller, updateBaseLocked, already holds, rather
+// than taking the lock a third time. ensureWorktreeExclude is the one shared
+// write that is not a git
 // subcommand at all -- a direct read and append of the repository's
 // info/exclude file -- so it holds commonMu itself, across both steps,
 // through ensureWorktreeExcludeLocked below, rather than going through
@@ -175,20 +177,22 @@ var commonLocks struct {
 // commonDir (already canonicalized by the caller) shares, creating it on
 // first use.
 //
-// Lock sites. Six places in this package (and judge.go, same package) ever
+// Lock sites. Five places in this package (and judge.go, same package) ever
 // take the *commonMutex this returns: runCommon (every SHARED git call in
 // the inventory above), ensureWorktreeExcludeLocked (the one shared write
 // that is not a git subcommand, so it cannot go through runCommon),
 // JudgeTree.removeLocked (judge.go: a JudgeTree is called with no
 // Orchestrator in scope, so it cannot reach runCommon either, and holds its
-// own captured commonMu directly), and fetchBase's own three helpers --
-// updateBaseLocked, advanceBaseLocked, and removeFetchRef -- which hold the
-// lock themselves across a short sequence of rev-parse/merge-base/
-// update-ref calls rather than one single SHARED command, so they cannot
-// go through runCommon either. Rule: no code holds the lock while calling
-// runCommon (no nesting). This is the one place that list is spelled out;
-// every lock site's own doc comment just names itself and points back
-// here, rather than asserting its own count.
+// own captured commonMu directly), and fetchBase's own two helpers --
+// updateBaseLocked and removeFetchRef -- which hold the lock themselves
+// across a short sequence of rev-parse/merge-base/update-ref calls rather
+// than one single SHARED command, so they cannot go through runCommon
+// either. advanceBaseLocked, updateBaseLocked's own helper, never takes the
+// lock itself: it runs entirely under the commonMu updateBaseLocked already
+// holds. Rule: no code holds the lock while calling runCommon (no nesting).
+// This is the one place that list is spelled out; every lock site's own doc
+// comment just names itself and points back here, rather than asserting its
+// own count.
 func commonLockFor(commonDir string) *commonMutex {
 	commonLocks.mu.Lock()
 	defer commonLocks.mu.Unlock()
