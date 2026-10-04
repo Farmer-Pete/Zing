@@ -90,6 +90,13 @@ type RunResult struct {
 	StderrLen    int64
 	StderrSHA256 string
 	Stderr       []byte
+	// FinalMessage is the agent's raw final message, capped by
+	// capFinalMessage, filled on every outcome once the process has exited;
+	// "" when the process never started or produced nothing. Never logged.
+	FinalMessage string
+	// TranscriptPath is where the runtime's own transcript lives (Claude
+	// only); "" for Codex, the Fake, and a process that never started.
+	TranscriptPath string
 }
 
 // maxStderrBytes caps RunResult.Stderr.

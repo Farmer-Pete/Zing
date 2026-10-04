@@ -44,6 +44,11 @@ sleep)
   sleep "${FAKE_CLAUDE_SLEEP_SECONDS:-5}"
   exit 0
   ;;
+partial_then_sleep)
+  printf '%s' "${FAKE_CLAUDE_PARTIAL_OUTPUT:-partial output}"
+  sleep "${FAKE_CLAUDE_SLEEP_SECONDS:-5}"
+  exit 0
+  ;;
 big_stdout)
   head -c 6291456 /dev/zero | tr '\0' 'a'
   exit 0

@@ -114,6 +114,30 @@ func TestParseFinalMessage_ParseErrorGoesToDetail(t *testing.T) {
 	}
 }
 
+// TestCapFinalMessage proves capFinalMessage leaves a short string
+// unchanged and cuts a long one on a rune boundary, within
+// maxFinalMessageBytes, ending in finalMessageCutSuffix.
+func TestCapFinalMessage(t *testing.T) {
+	t.Parallel()
+
+	short := "a short final message"
+	if got := capFinalMessage(short); got != short {
+		t.Errorf("capFinalMessage(short) = %q, want unchanged %q", got, short)
+	}
+
+	long := strings.Repeat("é", 60000)
+	got := capFinalMessage(long)
+	if len(got) > maxFinalMessageBytes {
+		t.Errorf("len(got) = %d, want at most %d", len(got), maxFinalMessageBytes)
+	}
+	if !utf8.ValidString(got) {
+		t.Error("capFinalMessage result is not valid UTF-8")
+	}
+	if !strings.HasSuffix(got, finalMessageCutSuffix) {
+		t.Errorf("capFinalMessage result does not end with %q", finalMessageCutSuffix)
+	}
+}
+
 func TestCapDetail_StaysWithinLimit(t *testing.T) {
 	t.Parallel()
 

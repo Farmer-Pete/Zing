@@ -438,6 +438,37 @@ func TestCodex_FixtureParse(t *testing.T) {
 	}
 }
 
+// TestCodexRun_FinalMessage covers #43: an invalid -o document still leaves
+// its text in res.FinalMessage, and Codex never fills TranscriptPath --
+// Codex names its rollout files by date and thread id, a layout no current
+// code knows.
+func TestCodexRun_FinalMessage(t *testing.T) {
+	t.Parallel()
+	requireUnix(t)
+
+	dir := t.TempDir()
+	const content = "no zing document here at all"
+	resultPath := writeCodexResultFile(t, content)
+	req := newFakeCodexRequest(dir, "success", "FAKE_CODEX_RESULT_FILE="+resultPath)
+
+	c := NewCodex(fakeCodexScript)
+	res, err := c.Run(context.Background(), req)
+
+	var invalidErr *InvalidOutputError
+	if !errors.As(err, &invalidErr) {
+		t.Fatalf("err = %v, want *InvalidOutputError", err)
+	}
+	if invalidErr.Reason != reasonNoZingElement {
+		t.Errorf("Reason = %q, want %q", invalidErr.Reason, reasonNoZingElement)
+	}
+	if res.FinalMessage != content {
+		t.Errorf("FinalMessage = %q, want %q", res.FinalMessage, content)
+	}
+	if res.TranscriptPath != "" {
+		t.Errorf("TranscriptPath = %q, want empty", res.TranscriptPath)
+	}
+}
+
 // ---- exit and errors --------------------------------------------------------
 
 func TestCodex_ErrStart(t *testing.T) {

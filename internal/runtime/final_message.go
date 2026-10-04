@@ -105,6 +105,26 @@ func formatValidationErrors(errs []*response.PathError) string {
 	return strings.Join(parts, "; ")
 }
 
+// maxFinalMessageBytes caps RunResult.FinalMessage, the same 64 KiB cap
+// RunResult.Stderr uses.
+const maxFinalMessageBytes = maxStderrBytes
+
+// finalMessageCutSuffix ends a FinalMessage that capFinalMessage shortened.
+const finalMessageCutSuffix = "\n(final message cut at 64 KiB)"
+
+// capFinalMessage cuts s on a rune boundary so the result, suffix
+// included, is at most maxFinalMessageBytes.
+func capFinalMessage(s string) string {
+	if len(s) <= maxFinalMessageBytes {
+		return s
+	}
+	cut := maxFinalMessageBytes - len(finalMessageCutSuffix)
+	for cut > 0 && !utf8.RuneStart(s[cut]) {
+		cut--
+	}
+	return s[:cut] + finalMessageCutSuffix
+}
+
 // maxDetailBytes caps an InvalidOutputError Detail, which is stored in a
 // marker and shown in the retry prompt.
 const maxDetailBytes = 2000

@@ -102,7 +102,7 @@ func (f *Fake) Run(ctx context.Context, req RunRequest) (RunResult, error) {
 		// a failed first turn leaves no unreachable session in the map.
 		f.sessions[sessionID] = sess
 	}
-	return RunResult{Response: doc.Response, SessionID: sessionID}, nil
+	return RunResult{Response: doc.Response, SessionID: sessionID, FinalMessage: capFinalMessage(string(data))}, nil
 }
 
 // resolveSessionLocked mints a new session for an empty req.SessionID (the

@@ -70,6 +70,21 @@ func TestFake_FirstTurnMintsIDAndServesTurnOne(t *testing.T) {
 	}
 }
 
+// TestFake_FinalMessageIsScript covers #43: a scripted turn's
+// RunResult.FinalMessage is the script file's own text.
+func TestFake_FinalMessageIsScript(t *testing.T) {
+	t.Parallel()
+
+	f := NewFake(newClassifyFS())
+	res, err := f.Run(context.Background(), RunRequest{Job: response.JobClassify})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if res.FinalMessage != classifyBugXML {
+		t.Errorf("FinalMessage = %q, want %q", res.FinalMessage, classifyBugXML)
+	}
+}
+
 func TestFake_HonorsCancellation(t *testing.T) {
 	t.Parallel()
 
