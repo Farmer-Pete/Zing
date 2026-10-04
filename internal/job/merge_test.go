@@ -9,10 +9,14 @@ package job
 import (
 	"fmt"
 	"os/exec"
+	"slices"
 	"strings"
 	"testing"
+	"testing/fstest"
 
+	"zing/internal/gitfixture"
 	"zing/internal/orchestrator"
+	"zing/internal/runtime"
 	"zing/internal/store"
 )
 
@@ -279,5 +283,204 @@ func TestMergeEscalationSetsTriedAndClearPoll(t *testing.T) {
 	id, ok := baseMergeTriedID(c.Escalation.Payload.Tried)
 	if !ok || id != req.MessageID {
 		t.Errorf("baseMergeTriedID(Tried) = (%d, %v), want (%d, true)", id, ok, req.MessageID)
+	}
+}
+
+// ---- task 5: the merge unit itself ---------------------------------------
+
+// mergeHelloConflict is the content main's own conflicting commit on
+// hello.txt carries (mergeConflictOnMain): different from the ticket
+// branch's own "hello, world\n" (fixtures/scripts/build/1/1.tree/hello.txt),
+// so merging main into the ticket branch leaves a real "both added"
+// conflict on the one file both sides touch.
+const mergeHelloConflict = "hello, main\n"
+
+// mergeHelloResolved is the fake merge agent's own resolution of that
+// conflict (mergeAgentFS's own build/merge/1.tree/hello.txt sibling): both
+// sides' text, with no conflict markers left.
+const mergeHelloResolved = "hello, world\nhello, main\n"
+
+// mergeAgentScript is the fake merge agent's own turn 1: an ok build
+// document claiming it resolved hello.txt, the one path main's own
+// conflicting commit and the ticket's own task 1 both touch.
+const mergeAgentScript = `<zing job="build" outcome="ok">
+  <claims>
+    <files_changed>
+      <path>hello.txt</path>
+    </files_changed>
+  </claims>
+  <report>Kept both sides: the ticket's own greeting, then main's, one per line.</report>
+  <notes></notes>
+</zing>`
+
+// mergeAgentFS is the fake runtime's own scripts tree for the merge job's
+// first turn (runtime.Fake's own "<job>/<label>/<turn>.xml" key: job
+// response.JobBuild "build", label mergeRunLabel "merge").
+func mergeAgentFS() fstest.MapFS {
+	return fstest.MapFS{
+		"build/merge/1.xml":            &fstest.MapFile{Data: []byte(mergeAgentScript)},
+		"build/merge/1.tree/hello.txt": &fstest.MapFile{Data: []byte(mergeHelloResolved)},
+	}
+}
+
+// mergeConflictOnMain commits path (with content) on the project's own
+// checkout -- still on the project's default branch, exactly where
+// gitfixture.NewSigningRepo left it, since building's own worktree is a
+// separate git-worktree directory -- and pushes that branch to origin, so
+// a later FetchBase reads a base sha that conflicts with the ticket's own
+// edit of the same path (overview design's own demo: "main gets a commit
+// that edits the same line of a file the ticket branch edits and is
+// pushed to the bare origin"). It returns the new commit's own sha.
+func mergeConflictOnMain(t *testing.T, s *store.Store, ticket store.Ticket, path string, content []byte) string {
+	t.Helper()
+	proj, err := s.ProjectForTicket(t.Context(), ticket.ID)
+	if err != nil {
+		t.Fatalf("ProjectForTicket: %v", err)
+	}
+	if addErr := gitfixture.AddFile(t.Context(), proj.LocalPath, path, content); addErr != nil {
+		t.Fatalf("gitfixture.AddFile: %v", addErr)
+	}
+	if out, pushErr := gitfixture.Git(t.Context(), proj.LocalPath, "push", "origin", pbFixtureDefaultBranch); pushErr != nil {
+		t.Fatalf("git push origin %s: %v: %s", pbFixtureDefaultBranch, pushErr, out)
+	}
+	sha, err := gitfixture.Git(t.Context(), proj.LocalPath, "rev-parse", "HEAD")
+	if err != nil {
+		t.Fatalf("git rev-parse HEAD: %v", err)
+	}
+	return strings.TrimSpace(string(sha))
+}
+
+// shipHasMergeLanded reports whether c.Messages carries a "base merge
+// landed " marker.
+func shipHasMergeLanded(c store.HandlerCommit) bool {
+	for _, m := range c.Messages {
+		if strings.HasPrefix(m.Body, "base merge landed ") {
+			return true
+		}
+	}
+	return false
+}
+
+// TestMergeResolvesConflictEndToEnd is the overview design's own demo: a
+// real git fixture where main changes a file the ticket also changed, so
+// the published pull request goes dirty. POLL writes the conflict notice
+// and the request; the merge unit runs the fake merge agent, which
+// resolves the one conflicting file; CHECK passes and Zing makes the
+// signed merge commit and records it; a final POLL, with the pull
+// request's own head still at the ticket's pre-merge commit, pushes the
+// merged branch to origin.
+func TestMergeResolvesConflictEndToEnd(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow end-to-end flow; runs in the full suite")
+	}
+	t.Parallel()
+	s, ticket, remoteDir := shipTicketReady(t)
+	baseSHA := mergeConflictOnMain(t, s, ticket, "hello.txt", []byte(mergeHelloConflict))
+
+	gh := &shipGitHub{}
+	tr := &shipTracker{}
+	rt := runtime.NewFake(mergeAgentFS())
+
+	deps := shipClaim(t, s, rt, ticket.ID, gh, tr)
+	commit, err := (shipHandler{}).Run(t.Context(), ticket, deps) // PUBLISH
+	if err != nil {
+		t.Fatalf("PUBLISH: %v", err)
+	}
+	if commit.Escalation != nil {
+		t.Fatalf("PUBLISH escalated: %+v", commit.Escalation.Payload)
+	}
+	pbApply(t, s, ticket, commit)
+	ticket = pbGetTicket(t, s, ticket.ID)
+
+	preMergeHead := shipHeadSHA(t, s, ticket)
+	gh.prState = orchestrator.PRState{
+		State: questionStateOpen, Draft: true, HeadSHA: preMergeHead,
+		BaseRef: pbFixtureDefaultBranch, MergeableState: mergeableStateDirty,
+	}
+
+	landed := false
+	for i := 0; i < 5 && !landed; i++ {
+		ticket = pbGetTicket(t, s, ticket.ID)
+		deps = shipClaim(t, s, rt, ticket.ID, gh, tr)
+		commit, err = (shipHandler{}).Run(t.Context(), ticket, deps)
+		if err != nil {
+			t.Fatalf("tick %d: %v", i, err)
+		}
+		if commit.Escalation != nil {
+			t.Fatalf("tick %d escalated: %+v", i, commit.Escalation.Payload)
+		}
+		pbApply(t, s, ticket, commit)
+		landed = shipHasMergeLanded(commit)
+	}
+	if !landed {
+		t.Fatal("base merge did not land within 5 ticks")
+	}
+	ticket = pbGetTicket(t, s, ticket.ID)
+
+	proj := deps.Projects[ticket.ProjectID]
+	wt, _, err := proj.Orch.EnsureWorktree(t.Context(), ticket.ID, ticket.Title)
+	if err != nil {
+		t.Fatalf("EnsureWorktree: %v", err)
+	}
+	mergeSHA := shipHeadSHA(t, s, ticket)
+
+	parents, err := proj.Orch.CommitParents(t.Context(), wt, mergeSHA)
+	if err != nil {
+		t.Fatalf("CommitParents: %v", err)
+	}
+	t.Logf("merge sha %s, parents %v", mergeSHA, parents)
+	if len(parents) != 2 || parents[0] != preMergeHead || parents[1] != baseSHA {
+		t.Errorf("CommitParents(%s) = %v, want [%s %s]", mergeSHA, parents, preMergeHead, baseSHA)
+	}
+
+	signed, err := proj.Orch.SignedStatus(t.Context(), wt, mergeSHA)
+	if err != nil {
+		t.Fatalf("SignedStatus: %v", err)
+	}
+	if !signed {
+		t.Error("SignedStatus(merge commit) = false, want true")
+	}
+
+	reports, err := s.BuildReports(t.Context(), ticket.ID)
+	if err != nil {
+		t.Fatalf("BuildReports: %v", err)
+	}
+	foundMergeReport := false
+	for _, r := range reports {
+		if r.Report.CommitSHA != nil && *r.Report.CommitSHA == mergeSHA {
+			foundMergeReport = true
+		}
+	}
+	if !foundMergeReport {
+		t.Errorf("BuildReports has no row with commit_sha %s", mergeSHA)
+	}
+
+	branchShas, err := proj.Orch.BranchCommits(t.Context(), wt)
+	if err != nil {
+		t.Fatalf("BranchCommits: %v", err)
+	}
+	if !slices.Equal(recordedShas(reports), branchShas) {
+		t.Errorf("recordedShas(reports) = %v, want BranchCommits %v", recordedShas(reports), branchShas)
+	}
+
+	// A final POLL, with the pull request's own head still at the
+	// ticket's pre-merge commit, pushes the merged branch.
+	gh.prState.HeadSHA = preMergeHead
+	deps = shipClaim(t, s, rt, ticket.ID, gh, tr)
+	commit, err = (shipHandler{}).Run(t.Context(), ticket, deps) // POLL: push
+	if err != nil {
+		t.Fatalf("final POLL: %v", err)
+	}
+	if commit.Escalation != nil {
+		t.Fatalf("final POLL escalated: %+v", commit.Escalation.Payload)
+	}
+	pbApply(t, s, ticket, commit)
+
+	out, err := gitfixture.Git(t.Context(), remoteDir, "rev-parse", "refs/heads/"+*ticket.Branch)
+	if err != nil {
+		t.Fatalf("git rev-parse refs/heads/%s in origin: %v", *ticket.Branch, err)
+	}
+	if got := strings.TrimSpace(string(out)); got != mergeSHA {
+		t.Errorf("origin's %s = %s, want the merge sha %s", *ticket.Branch, got, mergeSHA)
 	}
 }

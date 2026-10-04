@@ -119,6 +119,12 @@ func (h shipHandler) Run(ctx context.Context, t store.Ticket, d Deps) (store.Han
 		return c, err
 	}
 
+	// An open base merge (merge.go) owns the worktree until it lands or
+	// closes: nothing else in shipping may read or move the branch meanwhile.
+	if mc, merging, mergeErr := h.driveOpenMerge(ctx, t, d); merging || mergeErr != nil {
+		return mc, mergeErr
+	}
+
 	rounds, err := d.Store.AnsweredRounds(ctx, t.ID)
 	if err != nil {
 		return store.HandlerCommit{}, fmt.Errorf("job: shipping: answered rounds: %w", err)
