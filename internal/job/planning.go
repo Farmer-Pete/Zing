@@ -2791,13 +2791,14 @@ func invalidRetryText(reason string) string {
 }
 
 // invalidMarkerBody is the "response invalid run <id>" marker's body: the
-// closed reason on line two and, for a failed validation, the validator's
-// error list on line three, which invalidRetryText fences back into the
-// retry prompt.
+// closed reason on line two and, from line three on, Detail unchanged --
+// for a failed validation, the validator's errors one per line, capped at
+// 64 KiB by capDetail (Q1) -- which invalidRetryText fences back into the
+// retry prompt and the console's responseInvalidLine shows the owner.
 func invalidMarkerBody(runID int64, invErr *runtime.InvalidOutputError) string {
 	body := fmt.Sprintf("response invalid run %d\n%s", runID, invErr.Reason)
 	if invErr.Detail != "" {
-		body += "\n" + strings.ReplaceAll(invErr.Detail, "\n", " ")
+		body += "\n" + invErr.Detail
 	}
 	return body
 }

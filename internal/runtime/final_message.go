@@ -102,7 +102,7 @@ func formatValidationErrors(errs []*response.PathError) string {
 	for i, e := range errs {
 		parts[i] = e.Error()
 	}
-	return strings.Join(parts, "; ")
+	return strings.Join(parts, "\n")
 }
 
 // maxFinalMessageBytes caps RunResult.FinalMessage, the same 64 KiB cap
@@ -126,14 +126,19 @@ func capFinalMessage(s string) string {
 }
 
 // maxDetailBytes caps an InvalidOutputError Detail, which is stored in a
-// marker and shown in the retry prompt.
-const maxDetailBytes = 2000
+// marker and shown in the retry prompt (Q1: the same 64 KiB cap stderr and
+// the final message use).
+const maxDetailBytes = 64 << 10
 
 // detailCutSuffix marks a Detail that capDetail shortened.
 const detailCutSuffix = " (more errors cut)"
 
-// capDetail cuts detail on a rune boundary so the result, suffix included,
-// is at most maxDetailBytes.
+// capDetail returns detail unchanged when it is at most maxDetailBytes
+// (64 KiB). Otherwise it cuts at maxDetailBytes - len(detailCutSuffix),
+// steps back to the nearest UTF-8 rune start so no rune is split, and
+// appends detailCutSuffix (" (more errors cut)"). The result, suffix
+// included, is then at most 65536 bytes and valid UTF-8 whenever detail
+// was.
 func capDetail(detail string) string {
 	if len(detail) <= maxDetailBytes {
 		return detail
