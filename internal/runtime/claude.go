@@ -326,9 +326,6 @@ func claudeTranscriptPath(env []string, workDir, sessionID string) string {
 		}
 		home = h
 	}
-	if home == "" {
-		return ""
-	}
 	return filepath.Join(home, ".claude", "projects", encodeClaudeTranscriptDir(workDir), sessionID+".jsonl")
 }
 

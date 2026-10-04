@@ -532,12 +532,18 @@ const contentTypePlainText = "text/plain; charset=utf-8"
 // handleRunFile is GET /runs/{id}/{kind}: one run's kept evidence (a final
 // message or a stderr file), served as plain text. kind is "final" or
 // "stderr"; any other kind, or an {id} that is not a positive int64, 404s
-// without a store read. Every branch logs one line naming the run, never
-// the text it serves or refuses (design section's Logging table).
+// without a store read. A stderr read is refused unless the recorded path
+// resolves to exactly run-<id>-stderr.log directly inside
+// <store.Dir()>/runs, the one file writeStderrFile ever writes
+// (internal/job/runjob.go); that keeps the route off zing.db and anything
+// else the data directory holds. Every branch logs one line naming the
+// run, never the text it serves or refuses (design section's Logging
+// table).
 func (c *console) handleRunFile(w http.ResponseWriter, r *http.Request) {
 	runID, idOK := parsePositiveID(r.PathValue("id"))
 	kind := r.PathValue("kind")
-	if !idOK || (kind != "final" && kind != "stderr") {
+	knownKind := kind == "final" || kind == "stderr"
+	if !idOK || !knownKind {
 		slog.Info("run file not found", "ticket_id", int64(0), "run_id", runID, "kind", kind, "reason", "bad_path")
 		http.NotFound(w, r)
 		return
@@ -561,7 +567,12 @@ func (c *console) handleRunFile(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "this run kept no final message", http.StatusNotFound)
 			return
 		}
-		writeRunFileText(w, *ev.FinalMessage)
+		w.Header().Set("Content-Type", contentTypePlainText)
+		w.Header().Set("X-Content-Type-Options", "nosniff")
+		if _, writeErr := io.WriteString(w, *ev.FinalMessage); writeErr != nil {
+			slog.Warn("run file write failed", "ticket_id", ticketID, "run_id", runID, "kind", kind, "error", writeErr)
+			return
+		}
 		slog.Info("run file served", "ticket_id", ticketID, "run_id", runID, "kind", kind, "bytes", len(*ev.FinalMessage))
 		return
 	}
@@ -572,24 +583,43 @@ func (c *console) handleRunFile(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	root, rootErr := filepath.EvalSymlinks(c.store.Dir())
+	// runsDir, not the whole data dir, is the containment root: the data
+	// dir also holds zing.db and the judge's Codex home, which this route
+	// must never be able to reach even if a stderr_path row were ever
+	// wrong. It is computed from the data dir's resolved form (which
+	// always exists, since the open database lives there) joined with
+	// the fixed, non-attacker-controlled "runs" segment, so a run whose
+	// runs/ directory hasn't been created yet still 403s rather than
+	// 404ing as "gone".
+	dataDir, rootErr := filepath.EvalSymlinks(c.store.Dir())
+	if rootErr != nil {
+		slog.Error("run file not found", "ticket_id", ticketID, "run_id", runID, "kind", kind, "reason", "stderr_gone", "error", rootErr)
+		http.Error(w, "stderr file is gone", http.StatusNotFound)
+		return
+	}
+	runsDir := filepath.Join(dataDir, "runs")
 	p, pathErr := filepath.EvalSymlinks(*ev.StderrPath)
-	if rootErr != nil || pathErr != nil {
-		slog.Info("run file not found", "ticket_id", ticketID, "run_id", runID, "kind", kind, "reason", "stderr_gone")
+	if pathErr != nil {
+		slog.Info("run file not found", "ticket_id", ticketID, "run_id", runID, "kind", kind, "reason", "stderr_gone", "error", pathErr)
 		http.Error(w, "stderr file is gone", http.StatusNotFound)
 		return
 	}
 
-	rel, relErr := filepath.Rel(root, p)
-	if relErr != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) || filepath.IsAbs(rel) {
+	rel, relErr := filepath.Rel(runsDir, p)
+	escapesRoot := relErr != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) || filepath.IsAbs(rel)
+	// validName ties the resolved path to this exact run: only
+	// run-<runID>-stderr.log directly inside runsDir, the one name
+	// writeStderrFile ever writes (internal/job/runjob.go).
+	validName := !escapesRoot && rel == fmt.Sprintf("run-%d-stderr.log", runID)
+	if escapesRoot || !validName {
 		slog.Warn("run file outside data dir", "ticket_id", ticketID, "run_id", runID, "kind", kind, "path", *ev.StderrPath)
 		http.Error(w, "stderr file is outside the data directory", http.StatusForbidden)
 		return
 	}
 
-	dirRoot, err := os.OpenRoot(root)
+	dirRoot, err := os.OpenRoot(runsDir)
 	if err != nil {
-		slog.Info("run file not found", "ticket_id", ticketID, "run_id", runID, "kind", kind, "reason", "stderr_gone")
+		slog.Info("run file not found", "ticket_id", ticketID, "run_id", runID, "kind", kind, "reason", "stderr_gone", "error", err)
 		http.Error(w, "stderr file is gone", http.StatusNotFound)
 		return
 	}
@@ -597,28 +627,24 @@ func (c *console) handleRunFile(w http.ResponseWriter, r *http.Request) {
 
 	f, err := dirRoot.Open(rel)
 	if err != nil {
-		slog.Info("run file not found", "ticket_id", ticketID, "run_id", runID, "kind", kind, "reason", "stderr_gone")
+		slog.Info("run file not found", "ticket_id", ticketID, "run_id", runID, "kind", kind, "reason", "stderr_gone", "error", err)
 		http.Error(w, "stderr file is gone", http.StatusNotFound)
 		return
 	}
 	defer func() { _ = f.Close() }()
 
+	if fi, statErr := f.Stat(); statErr != nil || !fi.Mode().IsRegular() {
+		slog.Info("run file not found", "ticket_id", ticketID, "run_id", runID, "kind", kind, "reason", "stderr_gone", "error", statErr)
+		http.Error(w, "stderr file is gone", http.StatusNotFound)
+		return
+	}
+
 	w.Header().Set("Content-Type", contentTypePlainText)
 	w.Header().Set("X-Content-Type-Options", "nosniff")
 	n, copyErr := io.Copy(w, f)
 	if copyErr != nil {
-		slog.Error("run file read failed", "ticket_id", ticketID, "run_id", runID, "kind", kind, "error", copyErr)
+		slog.Warn("run file write failed", "ticket_id", ticketID, "run_id", runID, "kind", kind, "bytes", n, "error", copyErr)
 		return
 	}
 	slog.Info("run file served", "ticket_id", ticketID, "run_id", runID, "kind", kind, "bytes", n)
-}
-
-// writeRunFileText writes text as the route's 200 body with the plain-text
-// headers set first, so a short write still carries the right Content-Type.
-func writeRunFileText(w http.ResponseWriter, text string) {
-	w.Header().Set("Content-Type", contentTypePlainText)
-	w.Header().Set("X-Content-Type-Options", "nosniff")
-	if _, err := io.WriteString(w, text); err != nil {
-		slog.Error("console: write run file", "err", err)
-	}
 }

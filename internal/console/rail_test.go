@@ -525,9 +525,6 @@ func TestRail_RunListShowsEveryRun(t *testing.T) {
 	planningRun, judgeRun1, judgeRun2 := runs[0], runs[1], runs[2]
 
 	final := "judge's final word"
-	if err := s.RecordRunEvidence(t.Context(), judgeRun2.ID, store.RunEvidence{FinalMessage: &final}); err != nil {
-		t.Fatalf("RecordRunEvidence: %v", err)
-	}
 	stderrPath := writeRunStderrFile(t, s, judgeRun2.ID, "judge stderr")
 	if err := s.RecordRunEvidence(t.Context(), judgeRun2.ID, store.RunEvidence{FinalMessage: &final, StderrPath: &stderrPath}); err != nil {
 		t.Fatalf("RecordRunEvidence: %v", err)
@@ -1024,6 +1021,82 @@ func TestRunFile_RefusesPathOutsideDataDir(t *testing.T) {
 	}
 }
 
+// TestRunFile_RefusesSymlinkEscapingRunsDir proves GET /runs/{id}/stderr
+// 403s, and never leaks the file's text, when the recorded stderr_path
+// names a symlink that lives inside <store.Dir()>/runs but resolves to a
+// file outside it. filepath.Rel alone cannot catch this: the path string
+// itself sits under runs/, only EvalSymlinks shows where it really points.
+func TestRunFile_RefusesSymlinkEscapingRunsDir(t *testing.T) {
+	t.Parallel()
+	s := newConsoleTestStore(t)
+	ticketID := seedTicket(t, s, "fake#1", "Add a hello endpoint")
+	runID := oneSeededRun(t, s, ticketID, "sonnet")
+
+	const secretText = "symlink secret\n"
+	target := filepath.Join(t.TempDir(), "target-stderr.log")
+	if err := os.WriteFile(target, []byte(secretText), 0o600); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	runsDir := filepath.Join(s.Dir(), "runs")
+	if err := os.MkdirAll(runsDir, 0o700); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	link := filepath.Join(runsDir, fmt.Sprintf("run-%d-stderr.log", runID))
+	if err := os.Symlink(target, link); err != nil {
+		t.Fatalf("Symlink: %v", err)
+	}
+	if err := s.RecordRunEvidence(t.Context(), runID, store.RunEvidence{StderrPath: &link}); err != nil {
+		t.Fatalf("RecordRunEvidence: %v", err)
+	}
+
+	srv := newTestServer(t, s, bus.New(), nil, newTestLogHandler(t))
+	resp, err := http.Get(fmt.Sprintf("%s/runs/%d/stderr", srv.URL, runID)) //nolint:noctx // a bare GET on a test server needs no deadline
+	if err != nil {
+		t.Fatalf("GET /runs/%d/stderr: %v", runID, err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode != http.StatusForbidden {
+		t.Fatalf("status = %d, want 403", resp.StatusCode)
+	}
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("read body: %v", err)
+	}
+	if strings.Contains(string(body), secretText) || strings.Contains(string(body), "symlink secret") {
+		t.Errorf("response body leaked the file's text: %q", body)
+	}
+}
+
+// TestRunFile_RefusesNonStderrFileInsideDataDir proves GET /runs/{id}/stderr
+// 403s when stderr_path names a real file inside the data directory that
+// is not a run's stderr log, such as the store's own database file. The
+// route serves only run-<id>-stderr.log directly inside <store.Dir()>/runs,
+// never anything else the data directory holds.
+func TestRunFile_RefusesNonStderrFileInsideDataDir(t *testing.T) {
+	t.Parallel()
+	s := newConsoleTestStore(t)
+	ticketID := seedTicket(t, s, "fake#1", "Add a hello endpoint")
+	runID := oneSeededRun(t, s, ticketID, "sonnet")
+
+	dbPath := filepath.Join(s.Dir(), "zing.db")
+	if err := s.RecordRunEvidence(t.Context(), runID, store.RunEvidence{StderrPath: &dbPath}); err != nil {
+		t.Fatalf("RecordRunEvidence: %v", err)
+	}
+
+	srv := newTestServer(t, s, bus.New(), nil, newTestLogHandler(t))
+	resp, err := http.Get(fmt.Sprintf("%s/runs/%d/stderr", srv.URL, runID)) //nolint:noctx // a bare GET on a test server needs no deadline
+	if err != nil {
+		t.Fatalf("GET /runs/%d/stderr: %v", runID, err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode != http.StatusForbidden {
+		t.Fatalf("status = %d, want 403", resp.StatusCode)
+	}
+}
+
 // TestRunFile_MissingCases proves the route's various 404 shapes: a run
 // with no evidence at all for either kind, a run whose stderr file has
 // since been deleted, a run id that names no run, an unrecognized kind,
@@ -1048,15 +1121,16 @@ func TestRunFile_MissingCases(t *testing.T) {
 	srv := newTestServer(t, s, bus.New(), nil, newTestLogHandler(t))
 
 	tests := []struct {
-		name string
-		path string
+		name       string
+		path       string
+		wantInBody string
 	}{
-		{"no final message", fmt.Sprintf("/runs/%d/final", noEvidenceRunID)},
-		{"no stderr", fmt.Sprintf("/runs/%d/stderr", noEvidenceRunID)},
-		{"stderr file gone", fmt.Sprintf("/runs/%d/stderr", goneRunID)},
-		{"unknown run", fmt.Sprintf("/runs/%d/final", unknownRunID)},
-		{"unrecognized kind", fmt.Sprintf("/runs/%d/transcript", noEvidenceRunID)},
-		{"id does not parse", "/runs/abc/final"},
+		{"no final message", fmt.Sprintf("/runs/%d/final", noEvidenceRunID), "this run kept no final message"},
+		{"no stderr", fmt.Sprintf("/runs/%d/stderr", noEvidenceRunID), "this run wrote no stderr"},
+		{"stderr file gone", fmt.Sprintf("/runs/%d/stderr", goneRunID), "stderr file is gone"},
+		{"unknown run", fmt.Sprintf("/runs/%d/final", unknownRunID), "no such run"},
+		{"unrecognized kind", fmt.Sprintf("/runs/%d/transcript", noEvidenceRunID), "404 page not found"},
+		{"id does not parse", "/runs/abc/final", "404 page not found"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -1068,6 +1142,13 @@ func TestRunFile_MissingCases(t *testing.T) {
 			defer func() { _ = resp.Body.Close() }()
 			if resp.StatusCode != http.StatusNotFound {
 				t.Errorf("GET %s status = %d, want 404", tt.path, resp.StatusCode)
+			}
+			body, err := io.ReadAll(resp.Body)
+			if err != nil {
+				t.Fatalf("GET %s: read body: %v", tt.path, err)
+			}
+			if !strings.Contains(string(body), tt.wantInBody) {
+				t.Errorf("GET %s body = %q, want it to contain %q", tt.path, body, tt.wantInBody)
 			}
 		})
 	}

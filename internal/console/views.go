@@ -2320,14 +2320,6 @@ func checkFailedPendingLine(body string) string {
 	return header + "\n" + rest
 }
 
-// validationErrorsLine renders a "validation errors pending run <id>"
-// body's first line as one owner-facing sentence, then one line per
-// response.PathError the run reported (formatReadyErrors,
-// internal/job/planning.go: each already its own Error() shape, "path:
-// msg"), rewritten as "Field <path>: <message>" by cutting on the first
-// ": " -- a PathError's message never contains that substring, since it is
-// generated from a small fixed set of English reasons (checkReady,
-// checkScenarioShape), not user- or model-supplied text.
 // responseInvalidLine renders a "response invalid run <rid>\n<reason>[\n
 // <errors>]" marker (invalidMarkerBody, internal/job/planning.go): one
 // sentence naming the run and the closed reason, then the validator's
@@ -2348,6 +2340,14 @@ func responseInvalidLine(body string) string {
 	return head + "\n" + errs
 }
 
+// validationErrorsLine renders a "validation errors pending run <id>"
+// body's first line as one owner-facing sentence, then one line per
+// response.PathError the run reported (formatReadyErrors,
+// internal/job/planning.go: each already its own Error() shape, "path:
+// msg"), rewritten as "Field <path>: <message>" by cutting on the first
+// ": " -- a PathError's message never contains that substring, since it is
+// generated from a small fixed set of English reasons (checkReady,
+// checkScenarioShape), not user- or model-supplied text.
 func validationErrorsLine(body string) string {
 	_, rest, hasErrors := strings.Cut(body, "\n")
 	lines := []string{"The agent's last response did not pass Zing's checks. Zing is asking the agent to fix it."}
