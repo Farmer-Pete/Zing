@@ -39,6 +39,11 @@ const (
 	// clean merge that never ran the agent (rid nil, task 6's own "no-run"
 	// case): CHECK alone decided there was nothing for it to do.
 	mergeNoConflictReport = "The base branch merged with no conflicts and CHECK passed."
+
+	mergeCheckWhat     = "the merge still fails CHECK after the agent's fix attempts"
+	mergeCheckWhyFmt   = "check_loops for merge is %d; the last failing output is under Tried"
+	mergeResumesWhat   = "the merge session ran out of resumes"
+	mergeResumesWhyFmt = "max_resumes for merge is %d"
 )
 
 // pollConflict is POLL's own dirty row: GitHub builds no merge ref for a
@@ -253,12 +258,13 @@ func mergeCommandInfraEscalation(t store.Ticket, d Deps, req baseMergeRequest, e
 }
 
 // mergeCheck runs the project's commands, then reads the conflict markers
-// left in the tree (overview design "One merge tick"): a clean result
-// lands the merge (landMerge); a failing one resumes the merge session
-// with the check input, charged (runMergeResume). Task 6 adds the no-run
-// branch (rid nil), the outside-the-merge path read, and the check_loops
-// and max_resumes gates; until then, rid is always a real run's id and
-// sess is always that run's own session.
+// and the outside-the-merge paths left in the tree (overview design "One
+// merge tick"): a clean result lands the merge (landMerge). A failing
+// result with rid nil (a clean merge that never ran the agent) runs the
+// agent for the first time, with the check input in place of any
+// conflicts (runMergeFirst); otherwise it resumes the merge session with
+// the check input, charged (runMergeResume), gated by jobs.merge.check_loops
+// then jobs.merge.max_resumes.
 func (h shipHandler) mergeCheck(ctx context.Context, t store.Ticket, d Deps, proj Project, wt orchestrator.Worktree, req baseMergeRequest, rid *int64, sess *store.Session) (store.HandlerCommit, error) {
 	results, err := runCheckCommands(ctx, d, t, wt, proj, rid)
 	if err != nil {
@@ -269,14 +275,59 @@ func (h shipHandler) mergeCheck(ctx context.Context, t store.Ticket, d Deps, pro
 	if err != nil {
 		return mergeEscalation(t, d, req, treeNotDiffedWhat, treeNotDiffedWhy, err.Error()), nil
 	}
+	outside, err := mergeOutsidePaths(ctx, proj, wt)
+	if err != nil {
+		return mergeEscalation(t, d, req, treeNotDiffedWhat, treeNotDiffedWhy, err.Error()), nil
+	}
 
-	text := mergeCheckText(results, markers, nil)
-	slog.Info("merge check", "ticket_id", t.ID, "request_id", req.MessageID, "check_failed", text != "", "markers", len(markers))
+	text := mergeCheckText(results, markers, outside)
+	slog.Info("merge check", "ticket_id", t.ID, "request_id", req.MessageID, "check_failed", text != "", "markers", len(markers), "outside", len(outside))
 	if text == "" {
 		return h.landMerge(ctx, t, d, proj, wt, req, rid)
 	}
 
+	if rid == nil {
+		return h.runMergeFirst(ctx, t, d, proj, wt, req, nil, []prompt.NamedInput{prompt.Check(text)})
+	}
+
+	checkLoops := d.Machine.Jobs[jobMergeName].CheckLoops
+	if sess.Resumes >= checkLoops {
+		return mergeEscalation(t, d, req, mergeCheckWhat, fmt.Sprintf(mergeCheckWhyFmt, checkLoops), text), nil
+	}
+	maxResumes := d.Machine.Jobs[jobMergeName].MaxResumes
+	if sess.Resumes >= maxResumes {
+		return mergeEscalation(t, d, req, mergeResumesWhat, fmt.Sprintf(mergeResumesWhyFmt, maxResumes), text), nil
+	}
+
 	return h.runMergeResume(ctx, t, d, wt, req, *sess, 0, []prompt.NamedInput{prompt.Check(text)}, true)
+}
+
+// mergeOutsidePaths is mergeCheck's own outside-the-merge read: every path
+// MergeChangedPaths reports that is not among MergeSidePaths, the set
+// either side of the merge may legitimately touch. MergeChangedPaths
+// (unlike orchestrator.ChangedPaths) tolerates a path the index still
+// carries unmerged, exactly what a real, unresolved conflict's own hunk
+// leaves behind until CommitMerge's own "git add -u".
+func mergeOutsidePaths(ctx context.Context, proj Project, wt orchestrator.Worktree) ([]string, error) {
+	allowed, err := proj.Orch.MergeSidePaths(ctx, wt)
+	if err != nil {
+		return nil, err
+	}
+	allowedSet := make(map[string]bool, len(allowed))
+	for _, p := range allowed {
+		allowedSet[p] = true
+	}
+	changed, err := proj.Orch.MergeChangedPaths(ctx, wt)
+	if err != nil {
+		return nil, err
+	}
+	var outside []string
+	for _, p := range changed {
+		if !allowedSet[p] {
+			outside = append(outside, p)
+		}
+	}
+	return outside, nil
 }
 
 // landMerge commits and records the merge (overview design "One merge

@@ -121,6 +121,49 @@ func (o *Orchestrator) ChangedPaths(ctx context.Context, wt Worktree) ([]Change,
 	return changes, nil
 }
 
+// MergeChangedPaths returns, sorted, every path the working tree changed
+// since HEAD during an in-progress merge, tracked or untracked. Unlike
+// ChangedPaths, a path the index still carries unmerged is included as a
+// plain path rather than rejected as an error: an ordinary build or fix
+// unit never legitimately has one, but a merge in progress does, for as
+// long as a real conflict's hunks remain unstaged -- content alone, with
+// no "git add", never clears git's own conflict stage, so the merge
+// unit's own outside-the-merge read (internal/job/merge.go) needs a path
+// list that tolerates it. It is an error when no merge is in progress.
+func (o *Orchestrator) MergeChangedPaths(ctx context.Context, wt Worktree) ([]string, error) {
+	if err := o.revalidate(ctx, wt); err != nil {
+		return nil, fmt.Errorf("orchestrator: merge changed paths: %w", err)
+	}
+	inProgress, err := o.mergeInProgress(ctx, wt)
+	if err != nil {
+		return nil, fmt.Errorf("orchestrator: merge changed paths: %w", err)
+	}
+	if !inProgress {
+		return nil, errors.New("orchestrator: merge changed paths: no merge in progress")
+	}
+
+	run := execRunner{drivers: wt.drivers}
+	out, err := run.Output(ctx, wt.dir, "git", "-c", "status.renames=false",
+		"status", "--porcelain=v1", "-z", "--untracked-files=all", "--no-renames")
+	if err != nil {
+		return nil, fmt.Errorf("orchestrator: merge changed paths: %w", err)
+	}
+
+	records := strings.Split(out, "\x00")
+	paths := make([]string, 0, len(records))
+	for _, record := range records {
+		if record == "" {
+			continue
+		}
+		if len(record) < 4 || record[2] != ' ' {
+			return nil, fmt.Errorf("orchestrator: merge changed paths: malformed status record %q", record)
+		}
+		paths = append(paths, record[3:])
+	}
+	sort.Strings(paths)
+	return paths, nil
+}
+
 // statusFromXY classifies a git porcelain-v1 XY status code. "??" is
 // Untracked. A conflict code (conflictCodes) is an error. Otherwise: an
 // index status of "A" (checked first, since it can co-occur with a worktree

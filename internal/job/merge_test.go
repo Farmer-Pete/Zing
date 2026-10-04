@@ -313,13 +313,22 @@ const mergeAgentScript = `<zing job="build" outcome="ok">
   <notes></notes>
 </zing>`
 
+// mergeTurn1XMLKey and mergeTurn1HelloTreeKey are the fake runtime's own
+// scripts-tree keys for the merge job's first turn (runtime.Fake's own
+// "<job>/<label>/<turn>.xml" and ".tree/<path>" keys: job
+// response.JobBuild "build", label mergeRunLabel "merge"), shared by every
+// fixture below whose own turn 1 claims hello.txt fixed.
+const (
+	mergeTurn1XMLKey       = "build/merge/1.xml"
+	mergeTurn1HelloTreeKey = "build/merge/1.tree/hello.txt"
+)
+
 // mergeAgentFS is the fake runtime's own scripts tree for the merge job's
-// first turn (runtime.Fake's own "<job>/<label>/<turn>.xml" key: job
-// response.JobBuild "build", label mergeRunLabel "merge").
+// first turn.
 func mergeAgentFS() fstest.MapFS {
 	return fstest.MapFS{
-		"build/merge/1.xml":            &fstest.MapFile{Data: []byte(mergeAgentScript)},
-		"build/merge/1.tree/hello.txt": &fstest.MapFile{Data: []byte(mergeHelloResolved)},
+		mergeTurn1XMLKey:       &fstest.MapFile{Data: []byte(mergeAgentScript)},
+		mergeTurn1HelloTreeKey: &fstest.MapFile{Data: []byte(mergeHelloResolved)},
 	}
 }
 
@@ -482,5 +491,351 @@ func TestMergeResolvesConflictEndToEnd(t *testing.T) {
 	}
 	if got := strings.TrimSpace(string(out)); got != mergeSHA {
 		t.Errorf("origin's %s = %s, want the merge sha %s", *ticket.Branch, got, mergeSHA)
+	}
+}
+
+// ---- task 6: mergeCheck's own no-run branch, the outside-the-merge read,
+// and the check_loops/max_resumes gates --------------------------------
+
+// mergeOtherTxt is a path main's own commit touches that the ticket branch
+// never changes (mergeConflictOnMain, despite its name, is just "a commit
+// on main"): merging it leaves no conflict at all.
+const mergeOtherTxt = "other.txt"
+
+// mergeDirtyAfterPublish runs PUBLISH on a shipTicketReady ticket, then
+// reports the published pull request dirty against base, the shape every
+// test below starts the merge unit from.
+func mergeDirtyAfterPublish(t *testing.T, s *store.Store, ticket store.Ticket, rt runtime.Runtime, gh *shipGitHub, tr *shipTracker) store.Ticket {
+	t.Helper()
+	deps := shipClaim(t, s, rt, ticket.ID, gh, tr)
+	commit, err := (shipHandler{}).Run(t.Context(), ticket, deps) // PUBLISH
+	if err != nil {
+		t.Fatalf("PUBLISH: %v", err)
+	}
+	if commit.Escalation != nil {
+		t.Fatalf("PUBLISH escalated: %+v", commit.Escalation.Payload)
+	}
+	pbApply(t, s, ticket, commit)
+	ticket = pbGetTicket(t, s, ticket.ID)
+
+	gh.prState = orchestrator.PRState{
+		State: questionStateOpen, Draft: true, HeadSHA: shipHeadSHA(t, s, ticket),
+		BaseRef: pbFixtureDefaultBranch, MergeableState: mergeableStateDirty,
+	}
+	return ticket
+}
+
+// mergeRunTick runs one shipHandler.Run tick, fails the test if it
+// escalates, applies the commit, and returns the refreshed ticket plus
+// the commit itself.
+func mergeRunTick(t *testing.T, s *store.Store, deps Deps, ticket store.Ticket, label string) (store.Ticket, store.HandlerCommit) {
+	t.Helper()
+	commit, err := (shipHandler{}).Run(t.Context(), ticket, deps)
+	if err != nil {
+		t.Fatalf("%s: %v", label, err)
+	}
+	if commit.Escalation != nil {
+		t.Fatalf("%s escalated: %+v", label, commit.Escalation.Payload)
+	}
+	pbApply(t, s, ticket, commit)
+	return pbGetTicket(t, s, ticket.ID), commit
+}
+
+// TestMergeCleanSkipsAgent proves mergeCheck's own no-run branch (task 6):
+// a clean merge -- main touches a path the ticket never changed, so
+// StartBaseMerge finds no conflict -- runs CHECK with no agent turn at
+// all, and a green result lands the merge with the synthesized report
+// (landMerge's own rid-nil case, wired up in task 5).
+func TestMergeCleanSkipsAgent(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow end-to-end flow; runs in the full suite")
+	}
+	t.Parallel()
+	s, ticket, _ := shipTicketReady(t)
+	mergeConflictOnMain(t, s, ticket, mergeOtherTxt, []byte("main only\n"))
+
+	gh := &shipGitHub{}
+	tr := &shipTracker{}
+	rt := runtime.NewFake(fstest.MapFS{})
+
+	ticket = mergeDirtyAfterPublish(t, s, ticket, rt, gh, tr)
+
+	landed := false
+	var last store.HandlerCommit
+	for i := 0; i < 4 && !landed; i++ {
+		deps := shipClaim(t, s, rt, ticket.ID, gh, tr)
+		ticket, last = mergeRunTick(t, s, deps, ticket, fmt.Sprintf("tick %d", i))
+		landed = shipHasMergeLanded(last)
+	}
+	if !landed {
+		t.Fatal("base merge did not land within 4 ticks")
+	}
+
+	sessions, err := s.SessionsForTicket(t.Context(), ticket.ID)
+	if err != nil {
+		t.Fatalf("SessionsForTicket: %v", err)
+	}
+	for _, sess := range sessions {
+		if sess.Job == jobMergeName {
+			t.Errorf("sessions = %+v, want no %q session", sessions, jobMergeName)
+		}
+	}
+
+	reports, err := s.BuildReports(t.Context(), ticket.ID)
+	if err != nil {
+		t.Fatalf("BuildReports: %v", err)
+	}
+	found := false
+	for _, r := range reports {
+		if r.RunID == 0 && len(r.Report.FilesChanged) == 0 && r.Report.CommitSHA != nil {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("BuildReports = %+v, want a synthesized row (RunID 0, empty files_changed, CommitSHA set)", reports)
+	}
+}
+
+// mergeConflictMarkerStill is a hello.txt resolution that still carries
+// git's own conflict marker lines: turn 1's own claimed fix for
+// TestMergeCheckFailureResumes, so CHECK's own ConflictMarkerPaths read,
+// not the test or lint command, is what catches the unfinished work.
+const mergeConflictMarkerStill = "<<<<<<< HEAD\nhello, world\n=======\nhello, main\n>>>>>>> main\n"
+
+// mergeAgentFSMarkersThenResolved is TestMergeCheckFailureResumes' own
+// fake runtime script: turn 1 claims hello.txt fixed but leaves conflict
+// markers behind, turn 2 writes the real resolution.
+func mergeAgentFSMarkersThenResolved() fstest.MapFS {
+	return fstest.MapFS{
+		mergeTurn1XMLKey:               &fstest.MapFile{Data: []byte(mergeAgentScript)},
+		mergeTurn1HelloTreeKey:         &fstest.MapFile{Data: []byte(mergeConflictMarkerStill)},
+		"build/merge/2.xml":            &fstest.MapFile{Data: []byte(mergeAgentScript)},
+		"build/merge/2.tree/hello.txt": &fstest.MapFile{Data: []byte(mergeHelloResolved)},
+	}
+}
+
+// TestMergeCheckFailureResumes proves mergeCheck's own charged resume
+// (task 6): a first turn that leaves conflict markers behind fails CHECK,
+// which resumes the session with a check input naming the file, charged
+// (Resumes becomes 1); the second turn resolves it for real and the next
+// CHECK lands the merge.
+func TestMergeCheckFailureResumes(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow end-to-end flow; runs in the full suite")
+	}
+	t.Parallel()
+	s, ticket, _ := shipTicketReady(t)
+	mergeConflictOnMain(t, s, ticket, "hello.txt", []byte(mergeHelloConflict))
+
+	gh := &shipGitHub{}
+	tr := &shipTracker{}
+	rec := &recordingRuntime{inner: runtime.NewFake(mergeAgentFSMarkersThenResolved())}
+
+	ticket = mergeDirtyAfterPublish(t, s, ticket, rec, gh, tr)
+
+	deps := shipClaim(t, s, rec, ticket.ID, gh, tr)
+	ticket, _ = mergeRunTick(t, s, deps, ticket, "poll writes request") // POLL
+
+	deps = shipClaim(t, s, rec, ticket.ID, gh, tr)
+	ticket, _ = mergeRunTick(t, s, deps, ticket, "run first") // runMergeFirst: turn 1
+
+	deps = shipClaim(t, s, rec, ticket.ID, gh, tr)
+	var checkOne store.HandlerCommit
+	ticket, checkOne = mergeRunTick(t, s, deps, ticket, "check 1") // CHECK finds markers, resumes: turn 2
+	if shipHasMergeLanded(checkOne) {
+		t.Fatal("check 1 landed the merge, want a charged resume instead")
+	}
+
+	gotPrompt := rec.lastRequest(t).Prompt
+	wantText := "conflict markers remain in: hello.txt"
+	if !strings.Contains(gotPrompt, wantText) {
+		t.Errorf("resume prompt = %q, want it to contain %q", gotPrompt, wantText)
+	}
+
+	sessions, err := s.SessionsForTicket(t.Context(), ticket.ID)
+	if err != nil {
+		t.Fatalf("SessionsForTicket: %v", err)
+	}
+	mergeResumes := -1
+	for _, sess := range sessions {
+		if sess.Job == jobMergeName {
+			mergeResumes = sess.Resumes
+		}
+	}
+	if mergeResumes != 1 {
+		t.Errorf("merge session Resumes = %d, want 1", mergeResumes)
+	}
+
+	deps = shipClaim(t, s, rec, ticket.ID, gh, tr)
+	var checkTwo store.HandlerCommit
+	ticket, checkTwo = mergeRunTick(t, s, deps, ticket, "check 2") // CHECK on turn 2's resolution: lands
+	if !shipHasMergeLanded(checkTwo) {
+		t.Fatal("check 2 did not land the merge")
+	}
+	_ = ticket
+}
+
+// mergeNotesExtra is a path neither side of the merge touches, written by
+// TestMergeOutsidePathFailsCheck's own turn 1 alongside its real
+// resolution of hello.txt.
+const mergeNotesExtra = "scratch notes, not part of the merge\n"
+
+// mergeAgentFSExtraThenDeleted is TestMergeOutsidePathFailsCheck's own
+// fake runtime script: turn 1 resolves hello.txt cleanly but also writes
+// notes.txt; turn 2 deletes it.
+func mergeAgentFSExtraThenDeleted() fstest.MapFS {
+	return fstest.MapFS{
+		mergeTurn1XMLKey:               &fstest.MapFile{Data: []byte(mergeAgentScript)},
+		mergeTurn1HelloTreeKey:         &fstest.MapFile{Data: []byte(mergeHelloResolved)},
+		"build/merge/1.tree/notes.txt": &fstest.MapFile{Data: []byte(mergeNotesExtra)},
+		"build/merge/2.xml":            &fstest.MapFile{Data: []byte(mergeAgentScript)},
+		"build/merge/2.delete":         &fstest.MapFile{Data: []byte("notes.txt\n")},
+	}
+}
+
+// TestMergeOutsidePathFailsCheck proves mergeCheck's own outside-the-merge
+// read (task 6): a turn that resolves every conflict but also leaves a
+// path neither side of the merge touched fails CHECK, naming that path;
+// once it is removed, the merge lands.
+func TestMergeOutsidePathFailsCheck(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow end-to-end flow; runs in the full suite")
+	}
+	t.Parallel()
+	s, ticket, _ := shipTicketReady(t)
+	mergeConflictOnMain(t, s, ticket, "hello.txt", []byte(mergeHelloConflict))
+
+	gh := &shipGitHub{}
+	tr := &shipTracker{}
+	rec := &recordingRuntime{inner: runtime.NewFake(mergeAgentFSExtraThenDeleted())}
+
+	ticket = mergeDirtyAfterPublish(t, s, ticket, rec, gh, tr)
+
+	deps := shipClaim(t, s, rec, ticket.ID, gh, tr)
+	ticket, _ = mergeRunTick(t, s, deps, ticket, "poll writes request") // POLL
+
+	deps = shipClaim(t, s, rec, ticket.ID, gh, tr)
+	ticket, _ = mergeRunTick(t, s, deps, ticket, "run first") // runMergeFirst: turn 1
+
+	deps = shipClaim(t, s, rec, ticket.ID, gh, tr)
+	var checkOne store.HandlerCommit
+	ticket, checkOne = mergeRunTick(t, s, deps, ticket, "check 1") // CHECK finds notes.txt, resumes: turn 2
+	if shipHasMergeLanded(checkOne) {
+		t.Fatal("check 1 landed the merge, want a charged resume instead")
+	}
+
+	gotPrompt := rec.lastRequest(t).Prompt
+	wantText := "these paths are outside the merge; restore or delete them: notes.txt"
+	if !strings.Contains(gotPrompt, wantText) {
+		t.Errorf("resume prompt = %q, want it to contain %q", gotPrompt, wantText)
+	}
+
+	deps = shipClaim(t, s, rec, ticket.ID, gh, tr)
+	var checkTwo store.HandlerCommit
+	ticket, checkTwo = mergeRunTick(t, s, deps, ticket, "check 2") // CHECK on turn 2's deletion: lands
+	if !shipHasMergeLanded(checkTwo) {
+		t.Fatal("check 2 did not land the merge")
+	}
+	_ = ticket
+}
+
+// mergeOkNoChangeScript is TestMergeCheckLoopsEscalate's own repeated
+// turn: an ok claim with nothing changed, since the fixture's own test
+// command fails for a reason no file edit can fix.
+const mergeOkNoChangeScript = `<zing job="build" outcome="ok">
+  <claims>
+    <files_changed>
+    </files_changed>
+  </claims>
+  <report>The project's own test command fails for reasons outside this merge.</report>
+  <notes></notes>
+</zing>`
+
+// mergeRepeatedOkFS returns n identical ok turns under the merge job's own
+// label, "build/merge/<turn>.xml".
+func mergeRepeatedOkFS(n int) fstest.MapFS {
+	fsys := make(fstest.MapFS, n)
+	for i := 1; i <= n; i++ {
+		fsys[fmt.Sprintf("build/merge/%d.xml", i)] = &fstest.MapFile{Data: []byte(mergeOkNoChangeScript)}
+	}
+	return fsys
+}
+
+// mergeClaimFailingTest is shipClaim with the ticket's own project test
+// command replaced by "false", so CHECK fails deterministically no matter
+// what the merge or the agent do to the tree.
+func mergeClaimFailingTest(t *testing.T, s *store.Store, rt runtime.Runtime, ticket store.Ticket, gh orchestrator.GitHub, tr ShipTracker) Deps {
+	t.Helper()
+	deps := shipClaim(t, s, rt, ticket.ID, gh, tr)
+	proj := deps.Projects[ticket.ProjectID]
+	proj.TestCmd = "false"
+	deps.Projects[ticket.ProjectID] = proj
+	return deps
+}
+
+// TestMergeCheckLoopsEscalate proves mergeCheck's own check_loops gate
+// (task 6): a test command that always fails burns through
+// jobs.merge.check_loops (5) charged resumes, then the next CHECK
+// escalates instead of resuming again, with Tried holding the failing
+// output.
+func TestMergeCheckLoopsEscalate(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow end-to-end flow; runs in the full suite")
+	}
+	t.Parallel()
+	s, ticket, _ := shipTicketReady(t)
+	mergeConflictOnMain(t, s, ticket, "other2.txt", []byte("main only, again\n"))
+
+	checkLoops := pbMachine(t).Jobs[jobMergeName].CheckLoops
+
+	gh := &shipGitHub{}
+	tr := &shipTracker{}
+	rt := runtime.NewFake(mergeRepeatedOkFS(checkLoops + 1))
+
+	deps := mergeClaimFailingTest(t, s, rt, ticket, gh, tr)
+	commit, err := (shipHandler{}).Run(t.Context(), ticket, deps) // PUBLISH
+	if err != nil {
+		t.Fatalf("PUBLISH: %v", err)
+	}
+	pbApply(t, s, ticket, commit)
+	ticket = pbGetTicket(t, s, ticket.ID)
+	gh.prState = orchestrator.PRState{
+		State: questionStateOpen, Draft: true, HeadSHA: shipHeadSHA(t, s, ticket),
+		BaseRef: pbFixtureDefaultBranch, MergeableState: mergeableStateDirty,
+	}
+
+	deps = mergeClaimFailingTest(t, s, rt, ticket, gh, tr)
+	ticket, _ = mergeRunTick(t, s, deps, ticket, "poll writes request") // POLL
+
+	var last store.HandlerCommit
+	for i := 0; i < checkLoops+1; i++ {
+		deps = mergeClaimFailingTest(t, s, rt, ticket, gh, tr)
+		ticket, last = mergeRunTick(t, s, deps, ticket, fmt.Sprintf("tick %d", i))
+		if shipHasMergeLanded(last) {
+			t.Fatalf("tick %d landed the merge, want %d charged resumes first", i, checkLoops)
+		}
+	}
+
+	deps = mergeClaimFailingTest(t, s, rt, ticket, gh, tr)
+	commit, err = (shipHandler{}).Run(t.Context(), ticket, deps) // the next CHECK: escalates
+	if err != nil {
+		t.Fatalf("final check: %v", err)
+	}
+	if commit.Escalation == nil {
+		t.Fatal("final check did not escalate")
+	}
+	if commit.Escalation.Payload.What != mergeCheckWhat {
+		t.Errorf("What = %q, want %q", commit.Escalation.Payload.What, mergeCheckWhat)
+	}
+	wantWhy := fmt.Sprintf(mergeCheckWhyFmt, checkLoops)
+	if commit.Escalation.Payload.Why != wantWhy {
+		t.Errorf("Why = %q, want %q", commit.Escalation.Payload.Why, wantWhy)
+	}
+	tried := commit.Escalation.Payload.Tried
+	if !strings.HasPrefix(tried, "base merge ") {
+		t.Errorf("Tried = %q, want prefix %q", tried, "base merge ")
+	}
+	if !strings.Contains(tried, "test command: false") {
+		t.Errorf("Tried = %q, want the failing test command's own output", tried)
 	}
 }
