@@ -6,6 +6,7 @@ package job
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -13,6 +14,8 @@ import (
 	"github.com/google/go-cmp/cmp/cmpopts"
 
 	"zing/internal/orchestrator"
+	"zing/internal/response"
+	"zing/internal/store"
 )
 
 // Test-only stand-ins, reused across this file's cases so each raw string
@@ -641,5 +644,237 @@ func TestAttestAppStatuses(t *testing.T) {
 	}
 	if got := EvaluateCI(attestAppStatuses(runs, statuses, required, "blocked"), statuses, required); got.State != CIPending {
 		t.Errorf("blocked: State = %v, want pending (a status alone never satisfies an app-bound check)", got.State)
+	}
+}
+
+// -----------------------------------------------------------------------
+// Pure: the base merge request markers
+// -----------------------------------------------------------------------
+
+func TestParseBaseMergeRequest(t *testing.T) {
+	t.Parallel()
+
+	poll := baseMergeRequest{MessageID: 7, AfterRunID: 3, BaseBranch: pbFixtureDefaultBranch, BaseSHA: strings.Repeat("a", 40)}
+	t.Run("poll request round-trips", func(t *testing.T) {
+		t.Parallel()
+		row := store.MessageRow{ID: poll.MessageID, Message: store.Message{Body: poll.body()}} //nolint:modernize // keyed on purpose: MessageRow's ID and CreatedAt fields precede the embedded Message, so the key cannot be dropped
+		got, err := parseBaseMergeRequest(row)
+		if err != nil {
+			t.Fatalf("parseBaseMergeRequest() error = %v", err)
+		}
+		if got != poll {
+			t.Errorf("parseBaseMergeRequest() = %+v, want %+v", got, poll)
+		}
+	})
+
+	retry := baseMergeRequest{MessageID: 9, AfterRunID: 4, BaseBranch: pbFixtureDefaultBranch, BaseSHA: strings.Repeat("b", 40), RetryOf: 7, Notes: "line one\nline two"}
+	t.Run("retry request round-trips", func(t *testing.T) {
+		t.Parallel()
+		row := store.MessageRow{ID: retry.MessageID, Message: store.Message{Body: retry.body()}} //nolint:modernize // keyed on purpose: MessageRow's ID and CreatedAt fields precede the embedded Message, so the key cannot be dropped
+		got, err := parseBaseMergeRequest(row)
+		if err != nil {
+			t.Fatalf("parseBaseMergeRequest() error = %v", err)
+		}
+		if got != retry {
+			t.Errorf("parseBaseMergeRequest() = %+v, want %+v", got, retry)
+		}
+	})
+
+	malformed := []struct {
+		name string
+		body string
+	}{
+		{"bad first line", "not a request line\nbase main " + strings.Repeat("a", 40)},
+		{"short sha", "base merge requested after run 1\nbase main " + strings.Repeat("a", 39)},
+		{"uppercase sha", "base merge requested after run 1\nbase main " + strings.Repeat("A", 40)},
+		{"missing base line", "base merge requested after run 1\nnot a base line"},
+		{"line 3 not a retry line", "base merge requested after run 1\nbase main " + strings.Repeat("a", 40) + "\nnot a retry line"},
+	}
+	for _, c := range malformed {
+		t.Run(c.name, func(t *testing.T) {
+			t.Parallel()
+			row := store.MessageRow{ID: 42, Message: store.Message{Body: c.body}} //nolint:modernize // keyed on purpose: MessageRow's ID and CreatedAt fields precede the embedded Message, so the key cannot be dropped
+			_, err := parseBaseMergeRequest(row)
+			wantErr := "job: base merge request 42: malformed marker"
+			if err == nil || err.Error() != wantErr {
+				t.Errorf("parseBaseMergeRequest() error = %v, want %q", err, wantErr)
+			}
+		})
+	}
+}
+
+func TestOpenBaseMergeRequest(t *testing.T) {
+	t.Parallel()
+
+	req1 := baseMergeRequest{MessageID: 1, AfterRunID: 1, BaseBranch: pbFixtureDefaultBranch, BaseSHA: strings.Repeat("a", 40)}
+	req2 := baseMergeRequest{MessageID: 4, AfterRunID: 2, BaseBranch: pbFixtureDefaultBranch, BaseSHA: strings.Repeat("b", 40), RetryOf: 1}
+	otherOpen := baseMergeRequest{MessageID: 5, AfterRunID: 1, BaseBranch: pbFixtureDefaultBranch, BaseSHA: strings.Repeat("c", 40)}
+
+	row := func(id int64, body string) store.MessageRow {
+		return store.MessageRow{ID: id, Message: store.Message{Body: body}} //nolint:modernize // keyed on purpose: MessageRow's ID and CreatedAt fields precede the embedded Message, so the key cannot be dropped
+	}
+
+	cases := []struct {
+		name     string
+		rows     []store.MessageRow
+		want     baseMergeRequest
+		wantOpen bool
+		wantErr  string
+	}{
+		{name: "no rows"},
+		{
+			name:     "a lone request is open",
+			rows:     []store.MessageRow{row(req1.MessageID, req1.body())},
+			want:     req1,
+			wantOpen: true,
+		},
+		{
+			name: "landed closes it",
+			rows: []store.MessageRow{
+				row(req1.MessageID, req1.body()),
+				row(2, fmt.Sprintf("base merge landed %d sha %s", req1.MessageID, strings.Repeat("d", 40))),
+			},
+		},
+		{
+			name: "closed closes it",
+			rows: []store.MessageRow{
+				row(req1.MessageID, req1.body()),
+				row(2, fmt.Sprintf("base merge closed %d", req1.MessageID)),
+			},
+		},
+		{
+			name: "closed followed by a retry request leaves the retry open",
+			rows: []store.MessageRow{
+				row(req1.MessageID, req1.body()),
+				row(2, fmt.Sprintf("base merge closed %d", req1.MessageID)),
+				row(req2.MessageID, req2.body()),
+			},
+			want:     req2,
+			wantOpen: true,
+		},
+		{
+			name: "two open requests is an error",
+			rows: []store.MessageRow{
+				row(req1.MessageID, req1.body()),
+				row(otherOpen.MessageID, otherOpen.body()),
+			},
+			wantErr: "job: ticket has two open base merge requests",
+		},
+		{
+			name: "unrelated rows are ignored",
+			rows: []store.MessageRow{
+				row(99, "merge asked "+strings.Repeat("e", 40)),
+				row(req1.MessageID, req1.body()),
+			},
+			want:     req1,
+			wantOpen: true,
+		},
+	}
+
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			t.Parallel()
+			got, open, err := openBaseMergeRequest(c.rows)
+			if c.wantErr != "" {
+				if err == nil || err.Error() != c.wantErr {
+					t.Fatalf("openBaseMergeRequest() error = %v, want %q", err, c.wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("openBaseMergeRequest() unexpected error = %v", err)
+			}
+			if open != c.wantOpen || got != c.want {
+				t.Errorf("openBaseMergeRequest() = (%+v, %v), want (%+v, %v)", got, open, c.want, c.wantOpen)
+			}
+		})
+	}
+}
+
+func TestPollMergeCount(t *testing.T) {
+	t.Parallel()
+
+	pollA := baseMergeRequest{MessageID: 1, AfterRunID: 1, BaseBranch: pbFixtureDefaultBranch, BaseSHA: strings.Repeat("a", 40)}
+	pollB := baseMergeRequest{MessageID: 2, AfterRunID: 2, BaseBranch: pbFixtureDefaultBranch, BaseSHA: strings.Repeat("b", 40)}
+	retry := baseMergeRequest{MessageID: 3, AfterRunID: 3, BaseBranch: pbFixtureDefaultBranch, BaseSHA: strings.Repeat("c", 40), RetryOf: 1}
+
+	rows := []store.MessageRow{
+		{ID: pollA.MessageID, Message: store.Message{Body: pollA.body()}}, //nolint:modernize // keyed on purpose: MessageRow's ID and CreatedAt fields precede the embedded Message, so the key cannot be dropped
+		{ID: pollB.MessageID, Message: store.Message{Body: pollB.body()}}, //nolint:modernize // keyed on purpose: MessageRow's ID and CreatedAt fields precede the embedded Message, so the key cannot be dropped
+		{ID: retry.MessageID, Message: store.Message{Body: retry.body()}}, //nolint:modernize // keyed on purpose: MessageRow's ID and CreatedAt fields precede the embedded Message, so the key cannot be dropped
+	}
+	if got := pollMergeCount(rows); got != 2 {
+		t.Errorf("pollMergeCount() = %d, want 2", got)
+	}
+}
+
+func TestBaseMergeTriedID(t *testing.T) {
+	t.Parallel()
+
+	if id, ok := baseMergeTriedID("base merge 12\nmore"); !ok || id != 12 {
+		t.Errorf("baseMergeTriedID() = (%d, %v), want (12, true)", id, ok)
+	}
+	for _, tried := range []string{"", "base merge x", "ci_log\nsomething", "base merge 0"} {
+		if _, ok := baseMergeTriedID(tried); ok {
+			t.Errorf("baseMergeTriedID(%q) ok = true, want false", tried)
+		}
+	}
+}
+
+func TestMergeCheckText(t *testing.T) {
+	t.Parallel()
+
+	if got := mergeCheckText(nil, nil, nil); got != "" {
+		t.Errorf("mergeCheckText() = %q, want empty", got)
+	}
+
+	results := []commandResult{{Kind: checkKindTest, Cmd: "go test ./...", Exit: 1, Output: "FAIL"}}
+	markers := []string{"a.go"}
+	outside := []string{"b.go"}
+	want := strings.Join([]string{
+		checkInputText(results),
+		"conflict markers remain in: a.go",
+		"these paths are outside the merge; restore or delete them: b.go",
+	}, "\n\n")
+	if got := mergeCheckText(results, markers, outside); got != want {
+		t.Errorf("mergeCheckText() = %q, want %q", got, want)
+	}
+}
+
+func TestMergeFuncLines(t *testing.T) {
+	t.Parallel()
+
+	req := baseMergeRequest{BaseBranch: pbFixtureDefaultBranch, BaseSHA: "abc1234567890123456789012345678901234567"}
+	if got := mergeTitle(req); got != "Merge main into the ticket branch" {
+		t.Errorf("mergeTitle() = %q, want %q", got, "Merge main into the ticket branch")
+	}
+
+	lines := mergeFuncLines(req, []string{"a.go", "b\nbad.go", "", "c.go"})
+	want := []string{"Merges main at abc1234", "Resolves a.go", "Resolves c.go"}
+	if diff := cmp.Diff(want, lines); diff != "" {
+		t.Errorf("mergeFuncLines() mismatch (-want +got):\n%s", diff)
+	}
+
+	qs := []response.Question{{Title: "t1", Body: "b1", Recommended: "r1"}}
+	wantQ := "t1\nb1\nRecommended: r1"
+	if got := mergeQuestionText(qs); got != wantQ {
+		t.Errorf("mergeQuestionText() = %q, want %q", got, wantQ)
+	}
+}
+
+// TestBaseMergePrefix proves baseMergePrefix, the "base merge " family
+// Store.MarkersWithPrefix reads, matches every marker this file renders: a
+// request's own body, a landed marker, and a closed marker.
+func TestBaseMergePrefix(t *testing.T) {
+	t.Parallel()
+
+	req := baseMergeRequest{MessageID: 1, AfterRunID: 1, BaseBranch: pbFixtureDefaultBranch, BaseSHA: strings.Repeat("a", 40)}
+	landed := fmt.Sprintf("base merge landed %d sha %s", req.MessageID, strings.Repeat("b", 40))
+	closed := fmt.Sprintf("base merge closed %d", req.MessageID)
+
+	for _, body := range []string{req.body(), landed, closed} {
+		if !strings.HasPrefix(body, baseMergePrefix) {
+			t.Errorf("%q does not have prefix %q", body, baseMergePrefix)
+		}
 	}
 }

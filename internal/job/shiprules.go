@@ -16,6 +16,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"path"
 	"regexp"
@@ -25,6 +26,7 @@ import (
 
 	"zing/internal/orchestrator"
 	"zing/internal/response"
+	"zing/internal/store"
 )
 
 // CIState is EvaluateCI's verdict on a commit's checks against the base
@@ -547,4 +549,222 @@ func attestAppStatuses(runs []orchestrator.CheckRun, statuses []orchestrator.Com
 // (bug fix: POLL asked to merge while MERGE's re-check refused).
 func prCI(pr orchestrator.PRState, runs []orchestrator.CheckRun, statuses []orchestrator.CommitStatus, required []orchestrator.RequiredCheck) CIResult {
 	return EvaluateCI(attestAppStatuses(runs, statuses, required, pr.MergeableState), statuses, required)
+}
+
+// baseMergePrefix is the "base merge " marker family a base merge request,
+// its landed or closed end marker, and an escalation's Tried text all
+// share (openBaseMergeRequest, pollMergeCount, baseMergeTriedID).
+const baseMergePrefix = "base merge "
+
+var (
+	baseMergeRequestedLine = regexp.MustCompile(`^base merge requested after run (0|[1-9]\d*)$`)
+	baseMergeBaseLine      = regexp.MustCompile(`^base (\S+) ([0-9a-f]{40})$`)
+	baseMergeRetryLine     = regexp.MustCompile(`^retry of ([1-9]\d*)$`)
+	baseMergeEndLine       = regexp.MustCompile(`^base merge (?:landed ([1-9]\d*) sha [0-9a-f]{40}|closed ([1-9]\d*))$`)
+	baseMergeTriedLine     = regexp.MustCompile(`^base merge ([1-9]\d*)$`)
+)
+
+// baseMergeRequest is one base-merge request marker, read back or about to
+// be written (overview design, "Markers" table).
+type baseMergeRequest struct {
+	MessageID  int64  // the marker's message id; 0 before it is written
+	AfterRunID int64  // the SessionAfter watermark
+	BaseBranch string // the project's default branch, as POLL read it
+	BaseSHA    string // 40 lowercase hex characters
+	RetryOf    int64  // 0 for a request POLL wrote; else the closed request's message id
+	Notes      string // owner retry notes, trimmed; set only when RetryOf is non-zero
+}
+
+// body renders the request marker: line 1 "base merge requested after run
+// <R>", line 2 "base <branch> <sha>", and for a retry line 3 "retry of
+// <id>" then the notes (trimmed; omitted when empty).
+func (r baseMergeRequest) body() string {
+	lines := []string{
+		fmt.Sprintf("base merge requested after run %d", r.AfterRunID),
+		fmt.Sprintf("base %s %s", r.BaseBranch, r.BaseSHA),
+	}
+	if r.RetryOf != 0 {
+		lines = append(lines, fmt.Sprintf("retry of %d", r.RetryOf))
+		if notes := strings.TrimSpace(r.Notes); notes != "" {
+			lines = append(lines, notes)
+		}
+	}
+	return strings.Join(lines, "\n")
+}
+
+// parseBaseMergeRequest parses one request marker row. Line 1 or 2 not
+// matching, or a line 3 present but not "retry of <id>", is the error
+// "job: base merge request <id>: malformed marker".
+func parseBaseMergeRequest(row store.MessageRow) (baseMergeRequest, error) {
+	malformed := fmt.Errorf("job: base merge request %d: malformed marker", row.ID)
+
+	lines := strings.Split(row.Body, "\n")
+	if len(lines) < 2 {
+		return baseMergeRequest{}, malformed
+	}
+	m1 := baseMergeRequestedLine.FindStringSubmatch(lines[0])
+	if m1 == nil {
+		return baseMergeRequest{}, malformed
+	}
+	afterRunID, err := strconv.ParseInt(m1[1], 10, 64)
+	if err != nil {
+		return baseMergeRequest{}, malformed
+	}
+	m2 := baseMergeBaseLine.FindStringSubmatch(lines[1])
+	if m2 == nil {
+		return baseMergeRequest{}, malformed
+	}
+
+	req := baseMergeRequest{MessageID: row.ID, AfterRunID: afterRunID, BaseBranch: m2[1], BaseSHA: m2[2]}
+	if len(lines) == 2 {
+		return req, nil
+	}
+
+	m3 := baseMergeRetryLine.FindStringSubmatch(lines[2])
+	if m3 == nil {
+		return baseMergeRequest{}, malformed
+	}
+	retryOf, err := strconv.ParseInt(m3[1], 10, 64)
+	if err != nil {
+		return baseMergeRequest{}, malformed
+	}
+	req.RetryOf = retryOf
+	if len(lines) > 3 {
+		req.Notes = strings.Join(lines[3:], "\n")
+	}
+	return req, nil
+}
+
+// openBaseMergeRequest reads every "base merge " marker row (oldest
+// first): request rows, and landed/closed rows naming a request id. It
+// returns the one request no landed or closed row names. Two open is the
+// error "job: ticket has two open base merge requests". Rows matching
+// neither shape are ignored.
+func openBaseMergeRequest(rows []store.MessageRow) (baseMergeRequest, bool, error) {
+	var requests []store.MessageRow
+	ended := make(map[int64]bool)
+	for i := range rows {
+		firstLine, _, _ := strings.Cut(rows[i].Body, "\n")
+		if baseMergeRequestedLine.MatchString(firstLine) {
+			requests = append(requests, rows[i])
+			continue
+		}
+		m := baseMergeEndLine.FindStringSubmatch(firstLine)
+		if m == nil {
+			continue
+		}
+		idText := m[1]
+		if idText == "" {
+			idText = m[2]
+		}
+		if id, err := strconv.ParseInt(idText, 10, 64); err == nil {
+			ended[id] = true
+		}
+	}
+
+	var open []store.MessageRow
+	for i := range requests {
+		if !ended[requests[i].ID] {
+			open = append(open, requests[i])
+		}
+	}
+
+	switch len(open) {
+	case 0:
+		return baseMergeRequest{}, false, nil
+	case 1:
+		req, err := parseBaseMergeRequest(open[0])
+		if err != nil {
+			return baseMergeRequest{}, false, err
+		}
+		return req, true, nil
+	default:
+		return baseMergeRequest{}, false, errors.New("job: ticket has two open base merge requests")
+	}
+}
+
+// pollMergeCount is the number of request rows with no "retry of" line:
+// the merges POLL itself started, counted against jobs.merge.max_loops. A
+// malformed request row counts too.
+func pollMergeCount(rows []store.MessageRow) int {
+	count := 0
+	for i := range rows {
+		lines := strings.Split(rows[i].Body, "\n")
+		if len(lines) == 0 || !baseMergeRequestedLine.MatchString(lines[0]) {
+			continue
+		}
+		if len(lines) >= 3 && baseMergeRetryLine.MatchString(lines[2]) {
+			continue
+		}
+		count++
+	}
+	return count
+}
+
+// baseMergeTriedID parses an escalation's Tried text: first line "base
+// merge <id>".
+func baseMergeTriedID(tried string) (int64, bool) {
+	firstLine, _, _ := strings.Cut(tried, "\n")
+	m := baseMergeTriedLine.FindStringSubmatch(firstLine)
+	if m == nil {
+		return 0, false
+	}
+	id, err := strconv.ParseInt(m[1], 10, 64)
+	if err != nil {
+		return 0, false
+	}
+	return id, true
+}
+
+// mergeCheckText is the merge CHECK verdict: "" when every command
+// passed, markers is empty and outside is empty; otherwise, joined by a
+// blank line: checkInputText(results) when non-empty, then "conflict
+// markers remain in: <p1>, <p2>" when markers is non-empty, then "these
+// paths are outside the merge; restore or delete them: <p1>, <p2>" when
+// outside is non-empty.
+func mergeCheckText(results []commandResult, markers, outside []string) string {
+	var parts []string
+	if text := checkInputText(results); text != "" {
+		parts = append(parts, text)
+	}
+	if len(markers) > 0 {
+		parts = append(parts, "conflict markers remain in: "+strings.Join(markers, ", "))
+	}
+	if len(outside) > 0 {
+		parts = append(parts, "these paths are outside the merge; restore or delete them: "+strings.Join(outside, ", "))
+	}
+	return strings.Join(parts, "\n\n")
+}
+
+// mergeTitle is "Merge <branch> into the ticket branch".
+func mergeTitle(req baseMergeRequest) string {
+	return fmt.Sprintf("Merge %s into the ticket branch", req.BaseBranch)
+}
+
+// mergeFuncLines is the merge commit body: "Merges <branch> at <sha7>",
+// then "Resolves <path>" for each of filesChanged, in order, skipping any
+// path that is empty or holds "\n" or "\r".
+func mergeFuncLines(req baseMergeRequest, filesChanged []string) []string {
+	sha7 := req.BaseSHA
+	if len(sha7) > 7 {
+		sha7 = sha7[:7]
+	}
+	lines := []string{fmt.Sprintf("Merges %s at %s", req.BaseBranch, sha7)}
+	for _, p := range filesChanged {
+		if p == "" || strings.ContainsAny(p, "\n\r") {
+			continue
+		}
+		lines = append(lines, "Resolves "+p)
+	}
+	return lines
+}
+
+// mergeQuestionText renders an agent's questions for Tried: per question
+// "<title>\n<body>\nRecommended: <recommended>", joined by a blank line.
+func mergeQuestionText(qs []response.Question) string {
+	parts := make([]string, 0, len(qs))
+	for _, q := range qs {
+		parts = append(parts, fmt.Sprintf("%s\n%s\nRecommended: %s", q.Title, q.Body, q.Recommended))
+	}
+	return strings.Join(parts, "\n\n")
 }
