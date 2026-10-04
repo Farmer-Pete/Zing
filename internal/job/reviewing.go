@@ -334,15 +334,18 @@ const fixRequestedFindingsPrefix = "fix requested findings after run "
 
 // fixreq is FIXREQ (design section 6.8) entered from enterFromDone: under
 // jobs.review.max_loops it opens a fix request with accepted's own fix
-// text. At the gate it escalates loops_exhausted, as today (the
-// at-or-below-floor case at this gate is task 2's own allAtOrBelowFloor
-// check, issue #68).
+// text. At the gate, an accepted list wholly at or below the floor moves on
+// to judging (acceptAtCap, issue #68); one where the owner accepted an
+// above-floor finding escalates loops_exhausted as before.
 func (h reviewingHandler) fixreq(ctx context.Context, t store.Ticket, d Deps, accepted []response.FindingArtifact) (store.HandlerCommit, error) {
 	msg, k, maxLoops, err := fixRequestOrLoopsExhausted(ctx, t, d, accepted)
 	if err != nil {
 		return store.HandlerCommit{}, err
 	}
 	if msg == nil {
+		if allAtOrBelowFloor(accepted, d.Floor) {
+			return acceptAtCap(baseCommit(t, d), t, d, k, maxLoops, accepted), nil
+		}
 		what := fmt.Sprintf("review findings remain after %d fix runs", k)
 		why := fmt.Sprintf("max_loops for review is %d", maxLoops)
 		return reviewLoopsExhausted(t, d, what, why, renderFixFindings(accepted)), nil
@@ -1418,6 +1421,18 @@ const reasonReviewAcceptedAtCap = "review findings accepted at loop cap"
 // acceptedAtCapTextRunes caps each finding's one-line text in acceptAtCap's
 // message, "..." appended when cut.
 const acceptedAtCapTextRunes = 200
+
+// allAtOrBelowFloor reports whether every row's severity is at or below
+// floor, by the same Rank comparison splitByFloor uses. An empty rows is
+// true.
+func allAtOrBelowFloor(rows []response.FindingArtifact, floor response.Severity) bool {
+	for i := range rows {
+		if rows[i].Severity.Rank() > floor.Rank() {
+			return false
+		}
+	}
+	return true
+}
 
 // acceptAtCap is the FIXREQ gate's own outcome when every accepted finding
 // is at or below the floor (issue #68, mirroring maybeResumeFloorFindings'

@@ -6,6 +6,7 @@
 package job
 
 import (
+	"encoding/json"
 	"strings"
 	"testing"
 	"testing/fstest"
@@ -156,5 +157,165 @@ func TestAcceptAtCap(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// ---- TestLoopGateMajorFindingEscalates -------------------------------------
+
+// TestLoopGateMajorFindingEscalates proves fixreq's own fallback still
+// escalates loops_exhausted at the cap when the owner accepted an
+// above-floor finding (hypothesis 2, issue #68): round 3 keeps one major
+// quality finding, the owner accepts it in triage, and the following
+// fixreq tick hits k = 2 = max_loops with an accepted list that is not
+// wholly at or below the floor, so allAtOrBelowFloor is false and the gate
+// escalates exactly as it did before this change.
+func TestLoopGateMajorFindingEscalates(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow end-to-end flow; runs in the full suite")
+	}
+	t.Parallel()
+	const loopLens = "quality"
+	s, ticket, rt, scripts := driveReviewToCap(t)
+
+	scripts[reviewRoundScriptKey(3, lensFidelity)] = &fstest.MapFile{Data: []byte(reviewOKScript)}
+	scripts[reviewRoundScriptKey(3, loopLens)] = &fstest.MapFile{Data: []byte(findingScript(loopLens, "major", "still broken", "fix it"))}
+
+	ticket3 := pbGetTicket(t, s, ticket.ID)
+	deps3 := pbClaim(t, s, rt, ticket.ID)
+	commit3, err := (reviewingHandler{}).Run(t.Context(), ticket3, deps3) // round 3: above floor, posts a question
+	if err != nil {
+		t.Fatalf("Run (round 3): %v", err)
+	}
+	pbApply(t, s, ticket, commit3)
+
+	q := newestOpenQuestion(t, s, ticket.ID)
+	var payload response.QuestionPayload
+	if err = json.Unmarshal(q.Payload, &payload); err != nil {
+		t.Fatalf("unmarshal question payload: %v", err)
+	}
+	ref := itemRefByText(t, payload, "still broken")
+	answerReviewItems(t, s, ticket.ID, q.ID, map[string]response.Decision{ref: response.DecisionAccept}, "")
+
+	ticket4 := pbGetTicket(t, s, ticket.ID)
+	deps4 := pbClaim(t, s, rt, ticket.ID)
+	commit4, err := (reviewingHandler{}).Run(t.Context(), ticket4, deps4) // triage
+	if err != nil {
+		t.Fatalf("Run (triage): %v", err)
+	}
+	pbApply(t, s, ticket, commit4)
+
+	ticket5 := pbGetTicket(t, s, ticket.ID)
+	deps5 := pbClaim(t, s, rt, ticket.ID)
+	commit5, err := (reviewingHandler{}).Run(t.Context(), ticket5, deps5) // fixreq: gate reached, major accepted
+	if err != nil {
+		t.Fatalf("Run (fixreq): %v", err)
+	}
+
+	if commit5.Escalation == nil {
+		t.Fatalf("commit5.Escalation = nil, want loops_exhausted (an accepted finding is above the floor)")
+	}
+	if commit5.Escalation.Payload.Code != string(response.EscalationCodeLoopsExhausted) {
+		t.Errorf("Escalation.Payload.Code = %q, want %q", commit5.Escalation.Payload.Code, response.EscalationCodeLoopsExhausted)
+	}
+	if commit5.Escalation.Payload.Origin != string(response.EscalationOriginReview) {
+		t.Errorf("Escalation.Payload.Origin = %q, want %q", commit5.Escalation.Payload.Origin, response.EscalationOriginReview)
+	}
+	if commit5.Escalation.Payload.What != "review findings remain after 2 fix runs" {
+		t.Errorf("Escalation.Payload.What = %q, want %q", commit5.Escalation.Payload.What, "review findings remain after 2 fix runs")
+	}
+	if commit5.Escalation.Payload.Why != "max_loops for review is 2" {
+		t.Errorf("Escalation.Payload.Why = %q, want %q", commit5.Escalation.Payload.Why, "max_loops for review is 2")
+	}
+	if !strings.Contains(commit5.Escalation.Payload.Tried, "still broken") {
+		t.Errorf("Escalation.Payload.Tried = %q, want it to mention %q", commit5.Escalation.Payload.Tried, "still broken")
+	}
+	if commit5.Next != "" {
+		t.Errorf("commit5.Next = %q, want %q", commit5.Next, "")
+	}
+	for _, m := range commit5.Messages {
+		if strings.HasPrefix(m.Body, "Zing accepted ") {
+			t.Errorf("commit5.Messages carries %q, want no accepted-findings message", m.Body)
+		}
+	}
+}
+
+// ---- TestLoopGateDroppedMajorMovesToJudging --------------------------------
+
+// TestLoopGateDroppedMajorMovesToJudging proves allAtOrBelowFloor itself,
+// through fixreq (hypothesis 2, issue #68): round 3's loop lens keeps a
+// major finding alongside a minor one, at two distinct locations (so
+// DedupFindings keeps them as two rows); the owner drops the major one in
+// triage, leaving an accepted list of just the minor finding, wholly at or
+// below the floor, so the following fixreq tick moves the ticket on to
+// judging instead of escalating.
+func TestLoopGateDroppedMajorMovesToJudging(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow end-to-end flow; runs in the full suite")
+	}
+	t.Parallel()
+	const loopLens = "quality"
+	s, ticket, rt, scripts := driveReviewToCap(t)
+
+	scripts[reviewRoundScriptKey(3, lensFidelity)] = &fstest.MapFile{Data: []byte(reviewOKScript)}
+	scripts[reviewRoundScriptKey(3, loopLens)] = &fstest.MapFile{Data: []byte(twoFindingScript(
+		loopLens, "major", greetGoLine5, "still broken", "fix it",
+		"minor", greetGoLine2, "still not fixed", "add a comment",
+	))}
+
+	ticket3 := pbGetTicket(t, s, ticket.ID)
+	deps3 := pbClaim(t, s, rt, ticket.ID)
+	commit3, err := (reviewingHandler{}).Run(t.Context(), ticket3, deps3) // round 3: above floor, posts a question
+	if err != nil {
+		t.Fatalf("Run (round 3): %v", err)
+	}
+	pbApply(t, s, ticket, commit3)
+
+	q := newestOpenQuestion(t, s, ticket.ID)
+	var payload response.QuestionPayload
+	if err = json.Unmarshal(q.Payload, &payload); err != nil {
+		t.Fatalf("unmarshal question payload: %v", err)
+	}
+	ref := itemRefByText(t, payload, "still broken")
+	answerReviewItems(t, s, ticket.ID, q.ID, map[string]response.Decision{ref: response.DecisionDrop}, "")
+
+	ticket4 := pbGetTicket(t, s, ticket.ID)
+	deps4 := pbClaim(t, s, rt, ticket.ID)
+	commit4, err := (reviewingHandler{}).Run(t.Context(), ticket4, deps4) // triage
+	if err != nil {
+		t.Fatalf("Run (triage): %v", err)
+	}
+	pbApply(t, s, ticket, commit4)
+
+	ticket5 := pbGetTicket(t, s, ticket.ID)
+	deps5 := pbClaim(t, s, rt, ticket.ID)
+	commit5, err := (reviewingHandler{}).Run(t.Context(), ticket5, deps5) // fixreq: gate reached, only the minor finding accepted
+	if err != nil {
+		t.Fatalf("Run (fixreq): %v", err)
+	}
+
+	if commit5.Escalation != nil {
+		t.Fatalf("commit5.Escalation = %+v, want nil (the dropped major finding leaves only a minor one)", commit5.Escalation)
+	}
+	if commit5.Next != stateJudging {
+		t.Errorf("commit5.Next = %q, want %q", commit5.Next, stateJudging)
+	}
+	if commit5.Reason != reasonReviewAcceptedAtCap {
+		t.Errorf("commit5.Reason = %q, want %q", commit5.Reason, reasonReviewAcceptedAtCap)
+	}
+
+	var acceptMsg *store.Message
+	for i := range commit5.Messages {
+		if strings.HasPrefix(commit5.Messages[i].Body, "Zing accepted ") {
+			acceptMsg = &commit5.Messages[i]
+		}
+	}
+	if acceptMsg == nil {
+		t.Fatalf("commit5.Messages = %+v, want one starting %q", commit5.Messages, "Zing accepted ")
+	}
+	if !strings.Contains(acceptMsg.Body, "still not fixed") {
+		t.Errorf("accept message = %q, want it to name the minor finding", acceptMsg.Body)
+	}
+	if strings.Contains(acceptMsg.Body, "still broken") {
+		t.Errorf("accept message = %q, want it to exclude the dropped major finding", acceptMsg.Body)
 	}
 }
