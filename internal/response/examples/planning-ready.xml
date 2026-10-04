@@ -33,8 +33,8 @@
     </design>
     <delivery>
       <files>
-        <file path="cmd/zing/main.go" action="modify">register the /healthz route in newMux and add its handler</file>
-        <file path="cmd/zing/main_test.go" action="modify">add TestHealthz covering GET and the POST 405 case</file>
+        <file path="cmd/zing/main.go" action="modify" task="1">register the /healthz route in newMux and add its handler</file>
+        <file path="cmd/zing/main_test.go" action="modify" task="1">add TestHealthz covering GET and the POST 405 case</file>
       </files>
       <deletions none="true"></deletions>
       <tests>

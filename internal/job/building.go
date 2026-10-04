@@ -527,7 +527,7 @@ func (h buildingHandler) advanceCheckedRun(ctx context.Context, t store.Ticket, 
 	if evErr != nil {
 		return store.HandlerCommit{}, fmt.Errorf("job: building: file events: %w", evErr)
 	}
-	declaredNow := declaredPaths(plan, events, nil)
+	declaredNow := declaredPaths(plan, events, nil, u.TaskN)
 	changed, changedErr := proj.Orch.ChangedPaths(ctx, wt)
 	if changedErr != nil {
 		return unitEscalation(t, d, u, string(response.EscalationCodeEnvironment), treeNotDiffedWhat, treeNotDiffedWhy, changedErr.Error()), nil
@@ -1225,7 +1225,7 @@ func (h buildingHandler) retryCapResumesPerimeter(ctx context.Context, t store.T
 	if err != nil {
 		return unitEscalation(t, d, unit{TaskN: taskN}, string(response.EscalationCodeEnvironment), treeNotDiffedWhat, treeNotDiffedWhy, err.Error()), 0, nil
 	}
-	declaredNow := declaredPaths(plan, events, nil)
+	declaredNow := declaredPaths(plan, events, nil, taskN)
 	extras := orchestrator.Perimeter(changed, declaredNow, trustRoot, styleGuide)
 
 	reports, err := d.Store.BuildReports(ctx, t.ID)
@@ -1549,24 +1549,29 @@ func newestFileEventPerPath(events []store.FileEventRow) map[string]store.FileEv
 }
 
 // acceptedPaths returns, sorted, every path whose newest file event carries
-// Decision accept (design section 9.1's own "accepted" prompt input).
-func acceptedPaths(events []store.FileEventRow) []string {
+// Decision accept and is in scope for taskN (design section 9.1's own
+// "accepted" prompt input; design rule 4's own extraInScope).
+func acceptedPaths(plan response.Plan, events []store.FileEventRow, taskN int) []string {
 	var out []string
 	for _, row := range newestFileEventPerPath(events) {
-		if row.File.Decision != nil && *row.File.Decision == response.PerimeterAccept {
-			out = append(out, row.File.Path)
+		if row.File.Decision == nil || *row.File.Decision != response.PerimeterAccept {
+			continue
 		}
+		if !extraInScope(plan, row.File, taskN) {
+			continue
+		}
+		out = append(out, row.File.Path)
 	}
 	sort.Strings(out)
 	return out
 }
 
 // declaredPaths is CHECK's declaredBefore/declaredNow (design section 6.4
-// step 3): the plan's declared files plus every accepted path, or, with
-// before non-nil, only the accepted paths whose deciding artifact id is
-// lower than *before (declaredBefore); nil includes every accepted path
-// (declaredNow).
-func declaredPaths(plan response.Plan, events []store.FileEventRow, before *int64) []string {
+// step 3): the plan's declared files plus every accepted path in scope for
+// taskN, or, with before non-nil, only the accepted paths whose deciding
+// artifact id is lower than *before (declaredBefore); nil includes every
+// accepted path in scope (declaredNow).
+func declaredPaths(plan response.Plan, events []store.FileEventRow, before *int64, taskN int) []string {
 	out := planFilePaths(plan)
 	for _, row := range newestFileEventPerPath(events) {
 		if row.File.Decision == nil || *row.File.Decision != response.PerimeterAccept {
@@ -1575,9 +1580,26 @@ func declaredPaths(plan response.Plan, events []store.FileEventRow, before *int6
 		if before != nil && row.ArtifactID >= *before {
 			continue
 		}
+		if !extraInScope(plan, row.File, taskN) {
+			continue
+		}
 		out = append(out, row.File.Path)
 	}
 	return out
+}
+
+// wholePlanScope reports whether the unit numbered taskN keeps whole-plan
+// scope: always for a fix unit (0), or for any unit when the plan carries
+// no task mapping (stored before files named tasks).
+func wholePlanScope(plan response.Plan, taskN int) bool {
+	return taskN == 0 || !response.TaskMapped(plan)
+}
+
+// extraInScope reports whether accepted extra fa counts for the unit
+// numbered taskN: always under wholePlanScope, otherwise only when the
+// owner accepted it for taskN.
+func extraInScope(plan response.Plan, fa response.FileArtifact, taskN int) bool {
+	return wholePlanScope(plan, taskN) || fa.TaskN == taskN
 }
 
 func changedPathList(changes []orchestrator.Change) []string {
@@ -1665,7 +1687,7 @@ func (h buildingHandler) runFirst(ctx context.Context, t store.Ticket, d Deps, p
 	if err != nil {
 		return store.HandlerCommit{}, fmt.Errorf("job: building: file events: %w", err)
 	}
-	accepted := acceptedPaths(events)
+	accepted := acceptedPaths(plan, events, u.TaskN)
 
 	schemas, err := renderSchemas(response.JobBuild, response.OutcomeOk)
 	if err != nil {
@@ -1807,6 +1829,56 @@ func commandInfraEscalation(t store.Ticket, d Deps, u unit, err error) (store.Ha
 	}
 }
 
+// claimsFilesChangedPath is the element path CheckBuildClaims reports a
+// files_changed mismatch under; ownership errors share it.
+const claimsFilesChangedPath = "claims/files_changed"
+
+// foreignTaskPaths returns one claim error per path in changed that the
+// plan assigns only to tasks other than taskN, in changed's order, each
+// naming the owners as "task 2", "tasks 2 and 3", or "tasks 1, 2 and 4". A
+// fix unit (taskN 0) and a plan with no task mapping (stored before files
+// named tasks) get none: both keep whole-plan scope.
+func foreignTaskPaths(plan response.Plan, taskN int, changed []string) []*response.PathError {
+	if wholePlanScope(plan, taskN) {
+		return nil
+	}
+	owners := make(map[string][]int)
+	for _, f := range response.Files(plan) {
+		owners[f.Path] = append(owners[f.Path], response.FileTasks(f)...)
+	}
+	var errs []*response.PathError
+	for _, p := range changed {
+		own := owners[p]
+		if len(own) == 0 || slices.Contains(own, taskN) {
+			continue
+		}
+		sorted := slices.Compact(slices.Sorted(slices.Values(own)))
+		owner := fmt.Sprintf("task %d", sorted[0])
+		if len(sorted) > 1 {
+			parts := make([]string, len(sorted))
+			for i, n := range sorted {
+				parts[i] = strconv.Itoa(n)
+			}
+			owner = "tasks " + strings.Join(parts[:len(parts)-1], ", ") + " and " + parts[len(parts)-1]
+		}
+		errs = append(errs, &response.PathError{
+			Path: claimsFilesChangedPath,
+			Msg:  fmt.Sprintf("%s belongs to %s, not task %d", p, owner, taskN),
+		})
+	}
+	return errs
+}
+
+// pathErrorMsgs returns each error's Msg, in order, for a "task scope
+// violation" Warn line's "foreign" value.
+func pathErrorMsgs(errs []*response.PathError) []string {
+	out := make([]string, len(errs))
+	for i, e := range errs {
+		out[i] = e.Msg
+	}
+	return out
+}
+
 // check runs design section 6.4's CHECK, shared by the first check and the
 // check-before-landing recheck (firstCheck tells them apart only for the
 // "claims ok" marker write). rid is the unit's newest ok run; report is
@@ -1827,8 +1899,8 @@ func (h buildingHandler) check(ctx context.Context, t store.Ticket, d Deps, proj
 		return store.HandlerCommit{}, fmt.Errorf("job: building: check: file events: %w", err)
 	}
 	artifactID := report.ArtifactID
-	declaredBefore := declaredPaths(plan, events, &artifactID)
-	declaredNow := declaredPaths(plan, events, nil)
+	declaredBefore := declaredPaths(plan, events, &artifactID, u.TaskN)
+	declaredNow := declaredPaths(plan, events, nil, u.TaskN)
 
 	claimed := orchestrator.Perimeter(changed, declaredBefore, trustRoot, styleGuide)
 	extras := orchestrator.Perimeter(changed, declaredNow, trustRoot, styleGuide)
@@ -1845,6 +1917,12 @@ func (h buildingHandler) check(ctx context.Context, t store.Ticket, d Deps, proj
 	errs = append(errs, claimErrs...)
 	errs = append(errs, treeErrs...)
 	checkText := checkInputText(results)
+
+	foreign := foreignTaskPaths(plan, u.TaskN, changedPathList(changed))
+	if len(foreign) > 0 {
+		slog.Warn("task scope violation", "ticket_id", t.ID, "run_id", rid, "task_n", u.TaskN, "foreign", pathErrorMsgs(foreign))
+	}
+	errs = append(errs, foreign...)
 
 	slog.Info("claim check", "ticket_id", t.ID, "run_id", rid, "task_n", u.TaskN, "errors", len(errs), "changed", len(changed), "extras", len(extras),
 		"check_failed", checkText != "", "test_exit", checkedExit(results, checkKindTest), "lint_exit", checkedExit(results, checkKindLint))
@@ -2561,7 +2639,7 @@ func (h buildingHandler) resolvePerimeterQuestion(ctx context.Context, t store.T
 	if err != nil {
 		return unitEscalation(t, d, unit{TaskN: taskN}, string(response.EscalationCodeEnvironment), treeNotDiffedWhat, treeNotDiffedWhy, err.Error()), nil
 	}
-	declaredNow := declaredPaths(plan, events, nil)
+	declaredNow := declaredPaths(plan, events, nil, taskN)
 	extras := orchestrator.Perimeter(changed, declaredNow, trustRoot, styleGuide)
 
 	extra, extraIndex, stillExtra := extraFor(extras, path)
@@ -2756,8 +2834,8 @@ func (h buildingHandler) adopt(ctx context.Context, t store.Ticket, d Deps, proj
 	// yet, since DESCRIBE and RESOLVE are task 10/11), but adopt must still
 	// compute them the same distinct way check does.
 	artifactID := report.ArtifactID
-	declaredBefore := declaredPaths(plan, events, &artifactID)
-	declaredNow := declaredPaths(plan, events, nil)
+	declaredBefore := declaredPaths(plan, events, &artifactID, u.TaskN)
+	declaredNow := declaredPaths(plan, events, nil, u.TaskN)
 	claimed := orchestrator.Perimeter(commitChanges, declaredBefore, trustRoot, styleGuide)
 	extras := orchestrator.Perimeter(commitChanges, declaredNow, trustRoot, styleGuide)
 
@@ -2769,6 +2847,11 @@ func (h buildingHandler) adopt(ctx context.Context, t store.Ticket, d Deps, proj
 	})
 	if len(claimErrs) > 0 || len(treeErrs) > 0 {
 		return fail("claims failed"), nil
+	}
+
+	if foreign := foreignTaskPaths(plan, u.TaskN, changedPathList(commitChanges)); len(foreign) > 0 {
+		slog.Warn("task scope violation", "ticket_id", t.ID, "run_id", newestRun.ID, "task_n", u.TaskN, "commit_sha", sha, "foreign", pathErrorMsgs(foreign))
+		return fail("another task's path"), nil
 	}
 
 	if len(extras) > 0 {

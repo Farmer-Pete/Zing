@@ -35,9 +35,9 @@
     </design>
     <delivery>
       <files>
-        <file path="hello.txt" action="create">a fixture marker file task 1 writes so the project's test command has something to find</file>
-        <file path="greet.go" action="create">the greet package and its Greet function, task 2</file>
-        <file path="greet_test.go" action="create">the test for Greet, task 3</file>
+        <file path="hello.txt" action="create" task="1">a fixture marker file task 1 writes so the project's test command has something to find</file>
+        <file path="greet.go" action="create" task="2">the greet package and its Greet function, task 2</file>
+        <file path="greet_test.go" action="create" task="3">the test for Greet, task 3</file>
       </files>
       <deletions none="true"></deletions>
       <tests>

@@ -203,6 +203,7 @@ func layer2Ready(r *ReadyResponse, ctx ValidateContext, present map[string]bool)
 	}
 	errs = append(errs, CheckPlan(r.Plan, r.Scenarios, ctx.Kind == KindBug, planChecklists, present)...)
 	errs = append(errs, checkTaskNumbering(r.Plan.Delivery.Tasks, present)...)
+	errs = append(errs, checkFileTasks(r.Plan.Delivery.Files, r.Plan.Delivery.Tasks, present)...)
 
 	if present["plan/design/migrations"] {
 		m := r.Plan.Design.Migrations

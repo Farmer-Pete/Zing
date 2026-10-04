@@ -1315,7 +1315,7 @@ func validPlan(objective string) response.Plan {
 			Shape: "readyCommit checks the claims, the scenario shape, and the plan, then stores three artifact types under one run id.",
 		},
 		Delivery: response.Delivery{
-			Files: []response.FileChange{{Path: "internal/job/planning.go", Action: response.FileActionModify, Reason: "store the ready cohort"}},
+			Files: []response.FileChange{{Path: "internal/job/planning.go", Action: response.FileActionModify, Task: "1", Reason: "store the ready cohort"}},
 			Tests: []response.TestCase{{Name: "TestReadyCohort", Seam: "readyCommit", Kind: response.TestKindIntegration, Asserts: "the cohort round-trips"}},
 			Tasks: []response.Task{{N: 1, Test: "TestReadyCohort", Demo: true, Text: "Store the plan, claims, and scenarios under the reserved run."}},
 		},

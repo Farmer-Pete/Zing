@@ -37,6 +37,7 @@ import (
 const (
 	helloTxt          = "hello.txt"
 	extraTxt          = "extra.txt"
+	greetGo           = "greet.go"
 	phantomTxt        = "phantom.txt"
 	helloWorldContent = "hello, world\n"
 
@@ -392,6 +393,70 @@ func TestCheckReadsTreeAfterCommands(t *testing.T) {
 	}
 	if _, statErr := os.Stat(filepath.Join(wt.Dir(), extraTxt)); statErr != nil {
 		t.Errorf("extra.txt not found in the worktree: %v (want the test command's own write)", statErr)
+	}
+}
+
+// TestCheckRejectsAnotherTasksFile proves CHECK's own foreignTaskPaths
+// wiring (ticket "check each build task against its own files, not the
+// whole plan", design rule 2): task 1's builder also changing greet.go --
+// a file the fixture plan (fixtures/scripts/planning/2.xml) assigns only
+// to task 2 -- is refused with the ownership claim error, and the
+// resumed session receives that same line. The thread message is the
+// durable record of the refusal; this test does not capture slog, since
+// it runs in parallel and slog.SetDefault is process-wide.
+func TestCheckRejectsAnotherTasksFile(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow end-to-end flow; runs in the full suite")
+	}
+	t.Parallel()
+	s, _, ticketID := buildTicketInBuilding(t)
+	ticket := getTicket(t, s, ticketID)
+
+	scriptRT := &scriptedRuntime{t: t, steps: []scriptedStep{buildStep([]string{helloTxt, greetGo}, nil, "scope-sess")}}
+	deps := claimForBuild(t, s, scriptRT, ticketID)
+	overrideProj := deps.Projects[ticket.ProjectID]
+	overrideProj.TestCmd = "printf 'hello, world\\n' > hello.txt && printf 'package greet\\n' > greet.go && test -f hello.txt"
+	overrideProj.LintCmd = testNoopShellCmd
+	deps.Projects = map[int64]job.Project{ticket.ProjectID: overrideProj}
+
+	commit, err := job.Registry()[testStateBuilding].Run(t.Context(), ticket, deps) // RUN: claims hello.txt, greet.go
+	if err != nil {
+		t.Fatalf("RUN: %v", err)
+	}
+	apply(t, s, ticket, commit)
+
+	ticket = getTicket(t, s, ticketID)
+	deps2 := claimForBuild(t, s, scriptRT, ticketID)
+	deps2.Projects = map[int64]job.Project{ticket.ProjectID: overrideProj}
+	checkCommit, err := job.Registry()[testStateBuilding].Run(t.Context(), ticket, deps2) // CHECK
+	if err != nil {
+		t.Fatalf("CHECK: %v", err)
+	}
+	if len(checkCommit.Artifacts) != 0 || checkCommit.Next != "" {
+		t.Fatalf("CHECK commit = %+v, want no artifacts and no transition", checkCommit)
+	}
+	wantLine := "claims/files_changed: greet.go belongs to task 2, not task 1"
+	if len(checkCommit.Messages) != 1 || !strings.HasPrefix(checkCommit.Messages[0].Body, "claim errors pending run ") {
+		t.Fatalf("CHECK commit.Messages = %+v, want the pending marker", checkCommit.Messages)
+	}
+	if !strings.Contains(checkCommit.Messages[0].Body, wantLine) {
+		t.Fatalf("CHECK marker body = %q, want it to contain %q", checkCommit.Messages[0].Body, wantLine)
+	}
+	apply(t, s, ticket, checkCommit)
+
+	resumeRT := &scriptedRuntime{t: t, steps: []scriptedStep{buildStep([]string{helloTxt}, nil, "scope-sess")}}
+	ticket = getTicket(t, s, ticketID)
+	deps3 := claimForBuild(t, s, resumeRT, ticketID)
+	if _, err := job.Registry()[testStateBuilding].Run(t.Context(), ticket, deps3); err != nil { // resume: claims
+		t.Fatalf("resume: %v", err)
+	}
+
+	lastReq := resumeRT.reqs[len(resumeRT.reqs)-1]
+	if lastReq.SessionID != "scope-sess" {
+		t.Errorf("resume request SessionID = %q, want %q", lastReq.SessionID, "scope-sess")
+	}
+	if !strings.Contains(lastReq.Prompt, wantLine) {
+		t.Errorf("resume prompt = %q, want it to contain %q", lastReq.Prompt, wantLine)
 	}
 }
 
@@ -852,6 +917,13 @@ func TestBuildAdoptionChecks(t *testing.T) {
 		files := map[string]string{helloTxt: helloWorldContent, extraTxt: "extra\n"}
 		s, ticketID, deps, _ := prepareUnrecordedCommit(t, []string{helloTxt, extraTxt}, extras, "", files, true)
 		assertAdoptionFails(t, s, ticketID, deps, "undeclared path")
+	})
+
+	t.Run("another task's path", func(t *testing.T) {
+		t.Parallel()
+		files := map[string]string{helloTxt: helloWorldContent, greetGo: "package greet\n"}
+		s, ticketID, deps, _ := prepareUnrecordedCommit(t, []string{helloTxt, greetGo}, nil, "", files, true)
+		assertAdoptionFails(t, s, ticketID, deps, "another task's path")
 	})
 }
 
@@ -1623,6 +1695,89 @@ func TestAcceptedPathAsksOnceOnly(t *testing.T) {
 
 	if n := countPerimeterQuestions(t, s, ticketID); n != 1 {
 		t.Errorf("perimeter questions ever asked = %d, want exactly 1 (the accepted path must not be asked about twice)", n)
+	}
+}
+
+// TestAcceptedExtraAsksAgainForLaterTask proves design rule 4 (declaredPaths
+// scopes an accepted extra to the task the owner accepted it for, ticket
+// "check each build task against its own files, not the whole plan"):
+// extra1.go, accepted while building task 1, is not declared for task 2.
+// Task 2 changing it too reaches the perimeter again rather than landing
+// silently, and the file artifact DESCRIBE writes for it this time carries
+// task_n 2, not 1.
+func TestAcceptedExtraAsksAgainForLaterTask(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow end-to-end flow; runs in the full suite")
+	}
+	t.Parallel()
+	s, ticketID, _, scriptRT := perimeterScenario(t, map[string]string{testExtraPath: testExtraReason})
+	scriptRT.steps = append(scriptRT.steps, perimeterStep("Adds a small helper.", "perim-sess-1"))
+	describeTick(t, s, scriptRT, ticketID) // DESCRIBE + ASK
+
+	q := findOpenQuestionByKind(t, s, ticketID, response.QuestionKindPerimeter)
+	answerPerimeterQuestion(t, s, ticketID, q.ID, map[string]response.Decision{testExtraPath: response.DecisionAccept})
+
+	describeTick(t, s, scriptRT, ticketID)               // RESOLVE
+	landCommit := describeTick(t, s, scriptRT, ticketID) // check (first, for the fresh report) + LAND
+
+	if len(landCommit.Artifacts) != 1 {
+		t.Fatalf("task 1 LAND commit.Artifacts = %+v, want exactly one landed build_report", landCommit.Artifacts)
+	}
+	var landed response.BuildReport
+	if err := json.Unmarshal(landCommit.Artifacts[0].Payload, &landed); err != nil {
+		t.Fatalf("unmarshal landed build_report: %v", err)
+	}
+	if landed.CommitSHA == nil {
+		t.Fatal("landed.CommitSHA = nil, want a sha")
+	}
+
+	scriptRT.steps = append(scriptRT.steps,
+		buildStep([]string{testExtraPath, greetGo}, []response.ExtraClaim{{Path: testExtraPath, Reason: "task 2 extends the helper"}}, "task2-sess"),
+		perimeterStep("Extends the helper.", "perim-sess-2"),
+	)
+
+	ticket := getTicket(t, s, ticketID)
+	deps := claimForBuild(t, s, scriptRT, ticketID)
+	overrideProj := deps.Projects[ticket.ProjectID]
+	overrideProj.TestCmd = "printf 'package greet\\n' > greet.go && printf 'more\\n' >> extra1.go && test -f hello.txt"
+	overrideProj.LintCmd = testNoopShellCmd
+	deps.Projects = map[int64]job.Project{ticket.ProjectID: overrideProj}
+
+	commit, err := job.Registry()[testStateBuilding].Run(t.Context(), ticket, deps) // task 2 RUN
+	if err != nil {
+		t.Fatalf("task 2 RUN: %v", err)
+	}
+	apply(t, s, ticket, commit)
+
+	ticket = getTicket(t, s, ticketID)
+	deps2 := claimForBuild(t, s, scriptRT, ticketID)
+	deps2.Projects = map[int64]job.Project{ticket.ProjectID: overrideProj}
+	checkCommit, err := job.Registry()[testStateBuilding].Run(t.Context(), ticket, deps2) // task 2 CHECK
+	if err != nil {
+		t.Fatalf("task 2 CHECK: %v", err)
+	}
+	if len(checkCommit.Artifacts) != 0 || len(checkCommit.Messages) != 1 || !strings.HasPrefix(checkCommit.Messages[0].Body, "claims ok run ") {
+		t.Fatalf("task 2 CHECK commit = %+v, want no artifacts and exactly one claims-ok marker (extra1.go is undeclared for task 2)", checkCommit)
+	}
+	apply(t, s, ticket, checkCommit)
+
+	describeCommit := describeTick(t, s, scriptRT, ticketID) // task 2 DESCRIBE + ASK
+	if len(describeCommit.Artifacts) != 1 {
+		t.Fatalf("task 2 DESCRIBE commit.Artifacts = %+v, want exactly one file artifact", describeCommit.Artifacts)
+	}
+	var fa response.FileArtifact
+	if err := json.Unmarshal(describeCommit.Artifacts[0].Payload, &fa); err != nil {
+		t.Fatalf("unmarshal file artifact: %v", err)
+	}
+	if fa.Path != testExtraPath {
+		t.Errorf("file artifact path = %q, want %q", fa.Path, testExtraPath)
+	}
+	if fa.TaskN != 2 {
+		t.Errorf("file artifact task_n = %d, want 2", fa.TaskN)
+	}
+
+	if n := countPerimeterQuestions(t, s, ticketID); n != 2 {
+		t.Errorf("perimeter questions ever asked = %d, want 2 (task 2 must ask about extra1.go again)", n)
 	}
 }
 

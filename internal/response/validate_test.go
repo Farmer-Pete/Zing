@@ -695,7 +695,7 @@ func planXML() string {
 		`<migrations none="true"></migrations>` +
 		`</design>` +
 		`<delivery>` +
-		`<files><file path="a.go" action="create">why</file></files>` +
+		`<files><file path="a.go" action="create" task="1">why</file></files>` +
 		`<deletions none="true"></deletions>` +
 		`<tests><test name="t1" seam="s" kind="unit" mocks="">asserts</test></tests>` +
 		`<tasks><task n="1" test="t1" demo="true">do it</task></tasks>` +
@@ -722,7 +722,7 @@ func planXMLWithHypothesisRank(rank int) string {
 		`<migrations none="true"></migrations>` +
 		`</design>` +
 		`<delivery>` +
-		`<files><file path="a.go" action="create">why</file></files>` +
+		`<files><file path="a.go" action="create" task="1">why</file></files>` +
 		`<deletions none="true"></deletions>` +
 		`<tests><test name="t1" seam="s" kind="unit" mocks="">asserts</test></tests>` +
 		`<tasks><task n="1" test="t1" demo="true">do it</task></tasks>` +
@@ -748,7 +748,7 @@ func planXMLWithShape(shape string) string {
 		`<migrations none="true"></migrations>` +
 		`</design>` +
 		`<delivery>` +
-		`<files><file path="a.go" action="create">why</file></files>` +
+		`<files><file path="a.go" action="create" task="1">why</file></files>` +
 		`<deletions none="true"></deletions>` +
 		`<tests><test name="t1" seam="s" kind="unit" mocks="">asserts</test></tests>` +
 		`<tasks><task n="1" test="t1" demo="true">do it</task></tasks>` +
@@ -774,7 +774,7 @@ func planXMLWithMigrationsNoneFalse() string {
 		`<migrations none="false"></migrations>` +
 		`</design>` +
 		`<delivery>` +
-		`<files><file path="a.go" action="create">why</file></files>` +
+		`<files><file path="a.go" action="create" task="1">why</file></files>` +
 		`<deletions none="true"></deletions>` +
 		`<tests><test name="t1" seam="s" kind="unit" mocks="">asserts</test></tests>` +
 		`<tasks><task n="1" test="t1" demo="true">do it</task></tasks>` +
@@ -803,7 +803,7 @@ func planXMLNoProblem() string {
 		`<migrations none="true"></migrations>` +
 		`</design>` +
 		`<delivery>` +
-		`<files><file path="a.go" action="create">why</file></files>` +
+		`<files><file path="a.go" action="create" task="1">why</file></files>` +
 		`<deletions none="true"></deletions>` +
 		`<tests><test name="t1" seam="s" kind="regression" mocks="">asserts</test></tests>` +
 		`<tasks><task n="1" test="t1" demo="true">do it</task></tasks>` +
@@ -847,7 +847,7 @@ func planXMLBugValidFirstTest(testKindAttr string) string {
 		`<migrations none="true"></migrations>` +
 		`</design>` +
 		`<delivery>` +
-		`<files><file path="a.go" action="create">why</file></files>` +
+		`<files><file path="a.go" action="create" task="1">why</file></files>` +
 		`<deletions none="true"></deletions>` +
 		`<tests><test name="t1" seam="s"` + kindAttr + ` mocks="">asserts</test></tests>` +
 		`<tasks><task n="1" test="t1" demo="true">do it</task></tasks>` +
@@ -873,7 +873,7 @@ func planXMLWithBadFence() string {
 		`<migrations none="true"></migrations>` +
 		`</design>` +
 		`<delivery>` +
-		`<files><file path="a.go" action="create">why</file></files>` +
+		`<files><file path="a.go" action="create" task="1">why</file></files>` +
 		`<deletions><fence path="a.go" symbol="Old">not the right words</fence></deletions>` +
 		`<tests><test name="t1" seam="s" kind="unit" mocks="">asserts</test></tests>` +
 		`<tasks><task n="1" test="t1" demo="true">do it</task></tasks>` +
@@ -902,7 +902,7 @@ func planXMLWithTasks(tasksXML string) string {
 		`<migrations none="true"></migrations>` +
 		`</design>` +
 		`<delivery>` +
-		`<files><file path="a.go" action="create">why</file></files>` +
+		`<files><file path="a.go" action="create" task="1 2">why</file></files>` +
 		`<deletions none="true"></deletions>` +
 		`<tests><test name="t1" seam="s" kind="unit" mocks="">asserts</test></tests>` +
 		`<tasks>` + tasksXML + `</tasks>` +
@@ -981,6 +981,182 @@ func TestReadyTaskNumbering(t *testing.T) {
 		} {
 			if !containsErr(errs, want) {
 				t.Errorf("task %d: Validate = %v, want to contain %q", i, dumpErrs(errs), want)
+			}
+		}
+	})
+}
+
+// planXMLFileTask builds a minimal plan with one file, whose task
+// attribute is the literal XML fragment fileTaskAttr (such as `task="1"`,
+// or "" to omit the attribute entirely), and taskCount tasks numbered 1
+// through taskCount, so TestValidateFileTasks can exercise checkFileTasks
+// in isolation from the other Layer 2 plan checks.
+func planXMLFileTask(fileTaskAttr string, taskCount int) string {
+	var tasksXML strings.Builder
+	for i := 1; i <= taskCount; i++ {
+		tasksXML.WriteString(`<task n="` + strconv.Itoa(i) + `" test="t1" demo="true">do it</task>`)
+	}
+	return `<plan>` +
+		`<overview>` +
+		`<objective>o</objective><context>c</context>` +
+		`<problem>problem text</problem>` +
+		`<goals><goal>g1</goal></goals><nongoals><nongoal>ng1</nongoal></nongoals>` +
+		`</overview>` +
+		`<design>` +
+		`<demo cmd="go run ./x">demo text</demo>` +
+		`<shape>shape text</shape>` +
+		`<migrations none="true"></migrations>` +
+		`</design>` +
+		`<delivery>` +
+		`<files><file path="a.go" action="create" ` + fileTaskAttr + `>why</file></files>` +
+		`<deletions none="true"></deletions>` +
+		`<tests><test name="t1" seam="s" kind="unit" mocks="">asserts</test></tests>` +
+		`<tasks>` + tasksXML.String() + `</tasks>` +
+		`</delivery>` +
+		`<review>` +
+		`<trust_root>none</trust_root>` +
+		`<alternatives><alternative>alt</alternative></alternatives>` +
+		`<risks><risk>risk</risk></risks>` +
+		`</review>` +
+		`</plan>`
+}
+
+// readyXMLFileTask wraps planXMLFileTask in the header, claims, and
+// scenarios every ready document needs.
+func readyXMLFileTask(fileTaskAttr string, taskCount int) string {
+	return `<zing job="planning" outcome="ready">` +
+		`<claims><claim kind="code" verdict="true" evidence="a.go:1">it works</claim></claims>` +
+		`<scenarios>` + scenarioXML("s1") + scenarioXML("s2") + `</scenarios>` +
+		planXMLFileTask(fileTaskAttr, taskCount) +
+		`</zing>`
+}
+
+// readyXMLNoFiles is readyXMLFileTask with the files list left empty, so
+// TestValidateFileTasks/empty can drive checkFileTasks with files == nil
+// without going through the file-element XML at all.
+func readyXMLNoFiles(taskCount int) string {
+	var tasksXML strings.Builder
+	for i := 1; i <= taskCount; i++ {
+		tasksXML.WriteString(`<task n="` + strconv.Itoa(i) + `" test="t1" demo="true">do it</task>`)
+	}
+	plan := `<plan>` +
+		`<overview>` +
+		`<objective>o</objective><context>c</context>` +
+		`<problem>problem text</problem>` +
+		`<goals><goal>g1</goal></goals><nongoals><nongoal>ng1</nongoal></nongoals>` +
+		`</overview>` +
+		`<design>` +
+		`<demo cmd="go run ./x">demo text</demo>` +
+		`<shape>shape text</shape>` +
+		`<migrations none="true"></migrations>` +
+		`</design>` +
+		`<delivery>` +
+		`<files></files>` +
+		`<deletions none="true"></deletions>` +
+		`<tests><test name="t1" seam="s" kind="unit" mocks="">asserts</test></tests>` +
+		`<tasks>` + tasksXML.String() + `</tasks>` +
+		`</delivery>` +
+		`<review>` +
+		`<trust_root>none</trust_root>` +
+		`<alternatives><alternative>alt</alternative></alternatives>` +
+		`<risks><risk>risk</risk></risks>` +
+		`</review>` +
+		`</plan>`
+	return `<zing job="planning" outcome="ready">` +
+		`<claims><claim kind="code" verdict="true" evidence="a.go:1">it works</claim></claims>` +
+		`<scenarios>` + scenarioXML("s1") + scenarioXML("s2") + `</scenarios>` +
+		plan +
+		`</zing>`
+}
+
+// TestValidateFileTasks proves checkFileTasks' own rules (design section
+// 4.1): every file names at least one task, in range, without repeats, and
+// every task owns at least one file; a malformed task attribute draws only
+// Layer 1's pattern error, since checkFileTasks skips the owns-no-file
+// check entirely once any file's attribute failed to decode or match.
+func TestValidateFileTasks(t *testing.T) {
+	t.Parallel()
+
+	t.Run("missing", func(t *testing.T) {
+		t.Parallel()
+		doc := mustParse(t, readyXMLFileTask("", 2))
+		errs := Validate(doc, ValidateContext{})
+		want := "plan/delivery/files/file[0]/task: missing required element"
+		if !containsErr(errs, want) {
+			t.Fatalf("Validate = %v, want to contain %q", dumpErrs(errs), want)
+		}
+		for _, e := range errs {
+			if strings.Contains(e.Msg, "owns no file") {
+				t.Errorf("Validate = %v, want no owns-no-file error", dumpErrs(errs))
+			}
+		}
+	})
+
+	t.Run("unknown", func(t *testing.T) {
+		t.Parallel()
+		doc := mustParse(t, readyXMLFileTask(`task="3"`, 2))
+		errs := Validate(doc, ValidateContext{})
+		want := "plan/delivery/files/file[0]/task: names task 3, but the plan has 2 tasks"
+		if !containsErr(errs, want) {
+			t.Fatalf("Validate = %v, want to contain %q", dumpErrs(errs), want)
+		}
+	})
+
+	t.Run("twice", func(t *testing.T) {
+		t.Parallel()
+		doc := mustParse(t, readyXMLFileTask(`task="1 1"`, 2))
+		errs := Validate(doc, ValidateContext{})
+		want := "plan/delivery/files/file[0]/task: lists task 1 twice"
+		if !containsErr(errs, want) {
+			t.Fatalf("Validate = %v, want to contain %q", dumpErrs(errs), want)
+		}
+	})
+
+	t.Run("unowned", func(t *testing.T) {
+		t.Parallel()
+		doc := mustParse(t, readyXMLFileTask(`task="1"`, 2))
+		errs := Validate(doc, ValidateContext{})
+		want := "plan/delivery/tasks/task[1]: task 2 owns no file; fold it into a task that changes one"
+		if !containsErr(errs, want) {
+			t.Fatalf("Validate = %v, want to contain %q", dumpErrs(errs), want)
+		}
+	})
+
+	t.Run("shared", func(t *testing.T) {
+		t.Parallel()
+		doc := mustParse(t, readyXMLFileTask(`task="1 2"`, 2))
+		errs := Validate(doc, ValidateContext{})
+		for _, e := range errs {
+			if e.Path == "plan/delivery/files/file[0]/task" || strings.Contains(e.Msg, "owns no file") {
+				t.Errorf("Validate = %v, want no file-task error, got %q", dumpErrs(errs), e.Error())
+			}
+		}
+	})
+
+	t.Run("malformed", func(t *testing.T) {
+		t.Parallel()
+		doc := mustParse(t, readyXMLFileTask(`task="0"`, 1))
+		errs := Validate(doc, ValidateContext{})
+		want := "plan/delivery/files/file[0]/task: must match ^[1-9][0-9]?( [1-9][0-9]?)*$"
+		if len(errs) != 1 {
+			t.Fatalf("Validate = %v, want exactly 1 error", dumpErrs(errs))
+		}
+		if got := firstErrString(errs); got != want {
+			t.Errorf("errs[0] = %q, want %q", got, want)
+		}
+	})
+
+	t.Run("empty", func(t *testing.T) {
+		t.Parallel()
+		doc := mustParse(t, readyXMLNoFiles(2))
+		errs := Validate(doc, ValidateContext{})
+		want := "plan/delivery/files/file: need at least 1"
+		if !containsErr(errs, want) {
+			t.Fatalf("Validate = %v, want to contain %q", dumpErrs(errs), want)
+		}
+		for _, e := range errs {
+			if strings.Contains(e.Msg, "owns no file") {
+				t.Errorf("Validate = %v, want no owns-no-file error", dumpErrs(errs))
 			}
 		}
 	})

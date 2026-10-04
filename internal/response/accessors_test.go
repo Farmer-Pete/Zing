@@ -70,3 +70,44 @@ func TestTasks_ReturnsDeliveryTasks(t *testing.T) {
 		t.Errorf("Tasks(p) = %s, want %s", mustJSON(t, got), mustJSON(t, want))
 	}
 }
+
+func TestFileTasks(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		task string
+		want []int
+	}{
+		{"single", "1", []int{1}},
+		{"multiple", "1 3", []int{1, 3}},
+		{"empty", "", nil},
+		{"skipsMalformed", "1 x 0", []int{1}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got := FileTasks(FileChange{Task: tt.task})
+			if !bytes.Equal(mustJSON(t, got), mustJSON(t, tt.want)) {
+				t.Errorf("FileTasks(FileChange{Task: %q}) = %v, want %v", tt.task, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestTaskMapped(t *testing.T) {
+	t.Parallel()
+	t.Run("false when every file's Task is empty", func(t *testing.T) {
+		t.Parallel()
+		p := Plan{Delivery: Delivery{Files: []FileChange{{Path: "a.go"}, {Path: "b.go"}}}}
+		if TaskMapped(p) {
+			t.Errorf("TaskMapped(p) = true, want false")
+		}
+	})
+	t.Run("true when one file has a task", func(t *testing.T) {
+		t.Parallel()
+		p := Plan{Delivery: Delivery{Files: []FileChange{{Path: "a.go"}, {Path: "b.go", Task: "2"}}}}
+		if !TaskMapped(p) {
+			t.Errorf("TaskMapped(p) = false, want true")
+		}
+	})
+}

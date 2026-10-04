@@ -201,6 +201,7 @@ type Delivery struct {
 type FileChange struct {
 	Path   string     `xml:"path,attr"   json:"path"`
 	Action FileAction `xml:"action,attr" json:"action"`
+	Task   string     `xml:"task,attr"   json:"task,omitempty" jsonschema:"pattern=^[1-9][0-9]?( [1-9][0-9]?)*$" doc:"the n of every task that changes this file, space-separated, such as 1 or 1 3"`
 	Reason string     `xml:",chardata"   json:"reason" jsonschema:"minLength=1" doc:"one line"`
 }
 

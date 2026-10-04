@@ -17,7 +17,9 @@ Work in this order.
    the right reason.
 
 3. Build the task exactly as the plan states. Touch only the files the
-   plan declares and the files the accepted input lists. If the task
+   plan assigns to this task (a fix may touch any file the plan
+   declares, and so may a task building a plan that assigns no file
+   to any task) and the files the accepted input lists. If the task
    cannot be done without another file, change it and add one extra
    element with its path and why the task needs it; the owner accepts or
    rejects each one. If the task needs a decision the plan does not make,

@@ -6,6 +6,8 @@ Check:
 - Every edge case and failure mode names its exact behavior.
 - Every migration has schema, backfill, locks, compatibility, and rollback.
 - The parts agree with each other: files, changes, types, tests, tasks.
+- Every file names the tasks that change it, and each task's text
+  changes only its own files.
 
 ## In code
 Find logic errors, off-by-one, nil and error paths, races, leaks, and

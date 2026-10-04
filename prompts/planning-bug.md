@@ -48,7 +48,9 @@ Work in this order. Each step has a completion criterion.
    ends. A task that adds debug logging removes it before the task ends.
    The last task re-runs the original loop as part of its own work. Every
    task must change at least one file; do not add a task that only
-   verifies or cleans up. Every task ends with its named tests passing;
+   verifies or cleans up. Give every file the tasks that change it,
+   listing each task once, as task="1" or task="1 3"; a task changes
+   only its own files. Every task ends with its named tests passing;
    a test written in a task is made to pass in that same task, never
    left failing for a later one. Zing runs the project's full test and
    lint commands after each task. Each deletion says why it existed,
