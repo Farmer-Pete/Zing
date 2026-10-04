@@ -226,6 +226,94 @@ func (o *Orchestrator) resetAfterUnsignedCommit(ctx context.Context, wt Worktree
 	return errors.New("commit signing failed: " + reason)
 }
 
+// CommitMerge finishes the merge in progress as one signed merge commit:
+// git add -u (every tracked change, which marks resolved conflicts as
+// resolved), then git commit -S -F <msg> with no pathspec, because git
+// refuses a partial commit during a merge, which is why CommitTask cannot
+// do this. It returns an error, touching nothing, when no merge is in
+// progress. A commit error, an unsigned result, or a failed verification
+// resets to the prior HEAD and puts MERGE_HEAD back
+// (resetAfterUnsignedMerge), so the resolved tree stays a merge in
+// progress the next tick can commit again.
+func (o *Orchestrator) CommitMerge(ctx context.Context, wt Worktree, m CommitMessage) (string, error) {
+	if err := o.revalidate(ctx, wt); err != nil {
+		return "", fmt.Errorf("orchestrator: commit merge: %w", err)
+	}
+	inProgress, err := o.mergeInProgress(ctx, wt)
+	if err != nil {
+		return "", fmt.Errorf("orchestrator: commit merge: %w", err)
+	}
+	if !inProgress {
+		return "", errors.New("orchestrator: commit merge: no merge in progress")
+	}
+	mergeHead, err := o.run.Output(ctx, wt.dir, "git", "rev-parse", "MERGE_HEAD")
+	if err != nil {
+		return "", fmt.Errorf("orchestrator: commit merge: read MERGE_HEAD: %w", err)
+	}
+	mergeHead = strings.TrimSpace(mergeHead)
+	priorHead, err := o.run.Output(ctx, wt.dir, "git", "rev-parse", "HEAD")
+	if err != nil {
+		return "", fmt.Errorf("orchestrator: commit merge: record head: %w", err)
+	}
+	priorHead = strings.TrimSpace(priorHead)
+
+	message, err := m.Render()
+	if err != nil {
+		return "", fmt.Errorf("orchestrator: commit merge: %w", err)
+	}
+	msgFile, err := writeCommitMessageFile(message)
+	if err != nil {
+		return "", fmt.Errorf("orchestrator: commit merge: %w", err)
+	}
+	defer func() { _ = os.Remove(msgFile) }()
+
+	run := execRunner{drivers: wt.drivers}
+	if out, addErr := run.Run(ctx, wt.dir, "git", "add", "-u"); addErr != nil {
+		return "", fmt.Errorf("orchestrator: commit merge: stage: %w: %s", addErr, strings.TrimSpace(out))
+	}
+	o.log.Info("committing merge", "branch", wt.branch, "merge_head", mergeHead)
+	if out, commitErr := run.Run(ctx, wt.dir, "git", "commit", "-S", "-F", msgFile); commitErr != nil {
+		return "", o.resetAfterUnsignedMerge(ctx, wt, priorHead, mergeHead,
+			fmt.Sprintf("git commit -S: %v: %s", commitErr, strings.TrimSpace(out)))
+	}
+	signed, verified, statusErr := o.signedStatus(ctx, wt.dir, "HEAD")
+	if statusErr != nil {
+		return "", o.resetAfterUnsignedMerge(ctx, wt, priorHead, mergeHead, fmt.Sprintf("verify signature: %v", statusErr))
+	}
+	if !signed {
+		return "", o.resetAfterUnsignedMerge(ctx, wt, priorHead, mergeHead, "commit at HEAD carries no signature")
+	}
+	if !verified {
+		o.log.Warn("commit signed but not locally verifiable (no gpg.ssh.allowedSignersFile on this host)",
+			"branch", wt.branch)
+	}
+	newSHA, err := o.run.Output(ctx, wt.dir, "git", "rev-parse", "HEAD")
+	if err != nil {
+		return "", fmt.Errorf("orchestrator: commit merge: read new sha: %w", err)
+	}
+	newSHA = strings.TrimSpace(newSHA)
+	o.log.Info("committed merge", "branch", wt.branch, "sha", newSHA, "verified", verified)
+	return newSHA, nil
+}
+
+// resetAfterUnsignedMerge is resetAfterUnsignedCommit plus
+// "git update-ref MERGE_HEAD <mergeHead>" under the same detached,
+// bounded context: git reset clears MERGE_HEAD, and without it the
+// resolved tree would stop being a merge. A failed update-ref is logged
+// WARN ("merge head restore failed"), never returned; the returned error
+// is resetAfterUnsignedCommit's own "commit signing failed: ..." error.
+func (o *Orchestrator) resetAfterUnsignedMerge(ctx context.Context, wt Worktree, priorHead, mergeHead, reason string) error {
+	err := o.resetAfterUnsignedCommit(ctx, wt, priorHead, reason)
+
+	resetCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), resetUnsignedCommitTimeout)
+	defer cancel()
+	if out, updateErr := o.run.Run(resetCtx, wt.dir, "git", "update-ref", "MERGE_HEAD", mergeHead); updateErr != nil {
+		o.log.Warn("merge head restore failed", "branch", wt.branch,
+			"err", updateErr, "output", strings.TrimSpace(out))
+	}
+	return err
+}
+
 // pathspecArgs appends "--pathspec-from-file=<file> --pathspec-file-nul" to
 // args, the two flags every pathspec-scoped git call in this file and
 // perimeter.go needs to read its paths from file rather than argv.
