@@ -18,6 +18,7 @@ import (
 
 	"github.com/google/go-cmp/cmp"
 
+	"zing/internal/gitbin"
 	"zing/internal/gitfixture"
 )
 
@@ -294,15 +295,11 @@ func TestBranchName(t *testing.T) {
 
 // TestCheckRefFormatMatchesGit proves checkRefFormat (the pure-Go ref-name
 // check) agrees with real git on every case in this table: the oracle
-// binary is exec.LookPath("git") until task 5 brings gitbin, which then
-// becomes the binary of record.
+// binary is gitbin.Path(), the same binary the orchestrator execs.
 func TestCheckRefFormatMatchesGit(t *testing.T) {
 	t.Parallel()
 
-	gitPath, err := exec.LookPath("git")
-	if err != nil {
-		t.Skipf("git not found on PATH: %v", err)
-	}
+	gitPath := gitbin.Path()
 
 	cases := []struct {
 		name      string
@@ -1202,7 +1199,7 @@ func TestExecRunnerDisablesHooksAndFsmonitor(t *testing.T) {
 	t.Run("a git call's argv starts with the two -c pairs", func(t *testing.T) {
 		t.Parallel()
 		cmd := execRunner{}.command(t.Context(), absLocalPath, gitName, statusArg, "--porcelain")
-		want := []string{gitName, "-c", hooksPathArg, "-c", fsmonitorArg, statusArg, "--porcelain"}
+		want := []string{gitbin.Path(), "-c", hooksPathArg, "-c", fsmonitorArg, statusArg, "--porcelain"}
 		if !slices.Equal(cmd.Args, want) {
 			t.Errorf("cmd.Args = %q, want %q", cmd.Args, want)
 		}
@@ -1212,7 +1209,7 @@ func TestExecRunnerDisablesHooksAndFsmonitor(t *testing.T) {
 		t.Parallel()
 		cmd := execRunner{drivers: []string{ownDriverName}}.command(t.Context(), absLocalPath, gitName, "add", "-A")
 		want := []string{
-			gitName, "-c", hooksPathArg, "-c", fsmonitorArg,
+			gitbin.Path(), "-c", hooksPathArg, "-c", fsmonitorArg,
 			"-c", "filter.own.clean=", "-c", "filter.own.smudge=", "-c", "filter.own.process=", "-c", "filter.own.required=false",
 			"add", "-A",
 		}

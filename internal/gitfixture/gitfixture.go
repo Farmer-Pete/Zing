@@ -15,6 +15,8 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+
+	"zing/internal/gitbin"
 )
 
 // signingKeyName is the file each fixture's own copy of the shared signing
@@ -178,7 +180,7 @@ var gitLocationEnv = []string{
 // cannot be redirected at the real repository. Found when the first
 // Package 8 push failed every git-init test in three packages.
 func Git(ctx context.Context, dir string, args ...string) ([]byte, error) {
-	cmd := exec.CommandContext(ctx, "git", args...)
+	cmd := exec.CommandContext(ctx, gitbin.Path(), args...) //nolint:gosec // G204: gitbin.Path() resolves the git binary itself, never caller input
 	cmd.Dir = dir
 	cmd.Env = Environ()
 	return cmd.CombinedOutput()
@@ -284,7 +286,7 @@ func WithBareOrigin(ctx context.Context, dir string) (remoteDir string, err erro
 // environment variables scrubbed, so it can never be sent at a
 // repository other than dir.
 func runGit(ctx context.Context, dir string, args ...string) error {
-	cmd := exec.CommandContext(ctx, "git", args...)
+	cmd := exec.CommandContext(ctx, gitbin.Path(), args...) //nolint:gosec // G204: gitbin.Path() resolves the git binary itself, never caller input
 	cmd.Dir = dir
 	cmd.Env = Environ()
 	if out, err := cmd.CombinedOutput(); err != nil {

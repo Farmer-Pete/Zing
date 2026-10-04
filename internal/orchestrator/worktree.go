@@ -15,6 +15,8 @@ import (
 	"strings"
 	"sync/atomic"
 	"time"
+
+	"zing/internal/gitbin"
 )
 
 // Worktree is a prepared ticket worktree. Its fields are unexported, so only
@@ -431,7 +433,7 @@ func sparseCheckoutSetArgs(drivers []string) []string {
 // fake in a test, so widening it for this one call would ripple through
 // every test double for no other benefit.
 func runSparseCheckoutSet(ctx context.Context, dir string, cone, drivers []string) (string, error) {
-	cmd := exec.CommandContext(ctx, "git", sparseCheckoutSetArgs(drivers)...) //nolint:gosec // argv-only, no shell; drivers is repository-config-derived, never user input, and every element goes through hardenedGitArgs' fixed "-c filter.<name>.<key>=" template
+	cmd := exec.CommandContext(ctx, gitbin.Path(), sparseCheckoutSetArgs(drivers)...) //nolint:gosec // argv-only, no shell; drivers is repository-config-derived, never user input, and every element goes through hardenedGitArgs' fixed "-c filter.<name>.<key>=" template
 	cmd.Dir = dir
 	cmd.Env = scrubGitLocationEnv(os.Environ())
 	cmd.Stdin = strings.NewReader(strings.Join(cone, "\n") + "\n")
