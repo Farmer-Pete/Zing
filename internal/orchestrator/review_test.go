@@ -95,10 +95,16 @@ func TestDiffAgainstMergeBase(t *testing.T) {
 }
 
 // TestDiffRefreshesBase proves Diff fetches the base itself (right after
-// revalidate, not buried inside it): a commit that lands on origin's main
-// after the ticket branch was cut still becomes the new merge-base for a
-// later Diff call, while the diff itself still names only the ticket's own
-// file and the branch's own HEAD never moves.
+// revalidate, not buried inside it), and that it is Diff's own fetched
+// baseRev -- not o.proj.DefaultBranch -- that feeds the merge-base: origin
+// is already ahead of local main before the ticket branch is even cut, so
+// the ticket is cut from that newer commit and local main never reaches it.
+// A second upstream commit after the cut then becomes the new merge-base
+// for a later Diff call, while the diff itself still names only the
+// ticket's own file (neither upstream commit) and the branch's own HEAD
+// never moves. If Diff's merge-base read local main instead, the first
+// upstream commit -- never reachable from local main -- would wrongly show
+// up in the diff.
 func TestDiffRefreshesBase(t *testing.T) {
 	t.Parallel()
 	ctx := t.Context()
@@ -108,6 +114,8 @@ func TestDiffRefreshesBase(t *testing.T) {
 	addOrigin(ctx, t, repo, remote)
 	runGit(ctx, t, repo, "push", "-q", "origin", mainBranch)
 
+	cutSHA := cloneAndCommitUpstream(ctx, t, remote, "upstream1.txt", "upstream1\n", "add upstream1.txt, before the cut")
+
 	o, logs := newTestOrchestratorCapturingLog(t, repo, execRunner{})
 
 	wt, err := o.PrepareWorktree(ctx, 733, "diff", nil)
@@ -116,7 +124,7 @@ func TestDiffRefreshesBase(t *testing.T) {
 	}
 	ticketSHA := commitFile(ctx, t, wt.Dir(), "ticket.txt", "ticket\n", "add ticket.txt")
 
-	newSHA := cloneAndCommitUpstream(ctx, t, remote, "upstream.txt", "upstream\n", "add upstream.txt")
+	newSHA := cloneAndCommitUpstream(ctx, t, remote, "upstream2.txt", "upstream2\n", "add upstream2.txt, after the cut")
 
 	diff, err := o.Diff(ctx, wt, ticketSHA)
 	if err != nil {
@@ -131,8 +139,11 @@ func TestDiffRefreshesBase(t *testing.T) {
 	if !strings.Contains(diff, "diff --git a/ticket.txt b/ticket.txt") {
 		t.Errorf("Diff missing ticket.txt:\n%s", diff)
 	}
-	if strings.Contains(diff, "upstream.txt") {
-		t.Errorf("Diff mentions upstream.txt, which should not be in the ticket's own diff:\n%s", diff)
+	if strings.Contains(diff, "upstream1.txt") {
+		t.Errorf("Diff mentions upstream1.txt, already part of the ticket's own base at cutSHA=%s:\n%s", cutSHA, diff)
+	}
+	if strings.Contains(diff, "upstream2.txt") {
+		t.Errorf("Diff mentions upstream2.txt, which should not be in the ticket's own diff:\n%s", diff)
 	}
 
 	head := strings.TrimSpace(runGit(ctx, t, wt.Dir(), "rev-parse", "HEAD"))
@@ -224,6 +235,42 @@ func TestChangedFilesSinceBase(t *testing.T) {
 	want := []string{aGoPath, bGoPath}
 	if !slices.Equal(got, want) {
 		t.Errorf("ChangedFilesSinceBase = %v, want %v (sorted, no README.md)", got, want)
+	}
+}
+
+// TestChangedFilesSinceBaseUsesFetchedBase proves ChangedFilesSinceBase's
+// merge-base reads baseRev -- refs/zing/base/<default>, kept current by
+// fetchBase -- rather than o.proj.DefaultBranch: the ticket branch is cut
+// from a commit origin already has but local main does not, so if the
+// merge-base instead read local main (older, and never moved by this
+// test), that commit's own file would wrongly show up as one of the
+// ticket's own changed files.
+func TestChangedFilesSinceBaseUsesFetchedBase(t *testing.T) {
+	t.Parallel()
+	ctx := t.Context()
+
+	repo := newTestRepo(t)
+	remote := newBareRemote(ctx, t)
+	addOrigin(ctx, t, repo, remote)
+	runGit(ctx, t, repo, "push", "-q", "origin", mainBranch)
+
+	cloneAndCommitUpstream(ctx, t, remote, "upstream.txt", "upstream\n", "add upstream.txt, before the cut")
+
+	o := newTestOrchestrator(t, repo, execRunner{})
+	wt, err := o.PrepareWorktree(ctx, 907, "changed-since-base", nil)
+	if err != nil {
+		t.Fatalf("PrepareWorktree: %v", err)
+	}
+
+	sha := commitFile(ctx, t, wt.Dir(), aGoPath, "package a\n", "add a.go")
+
+	got, err := o.ChangedFilesSinceBase(ctx, wt, sha)
+	if err != nil {
+		t.Fatalf("ChangedFilesSinceBase: %v", err)
+	}
+	want := []string{aGoPath}
+	if !slices.Equal(got, want) {
+		t.Errorf("ChangedFilesSinceBase = %v, want %v (not upstream.txt, already part of the ticket's own fetched base)", got, want)
 	}
 }
 

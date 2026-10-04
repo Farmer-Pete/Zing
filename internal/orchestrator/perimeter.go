@@ -600,7 +600,7 @@ func (o *Orchestrator) BranchCommits(ctx context.Context, wt Worktree) ([]string
 		return nil, fmt.Errorf("orchestrator: branch commits: %w", err)
 	}
 
-	base, err := o.baseRev(ctx, wt.ticketID())
+	base, err := o.baseRev(ctx, wt.ticketID)
 	if err != nil {
 		return nil, fmt.Errorf("orchestrator: branch commits: %w", err)
 	}

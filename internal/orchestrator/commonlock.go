@@ -52,7 +52,7 @@ package orchestrator
 //	worktree.go gitPathInfoExclude              rev-parse --git-path info/exclude           per-worktree (read)
 //	worktree.go ensureWorktreeExclude           (no git call: direct info/exclude read+append) SHARED, see below
 //	worktree.go runSparseCheckoutSet            sparse-checkout set --stdin                 per-worktree (worktree's own admin-dir sparse-checkout file)
-//	worktree.go fetchBase                       fetch --no-tags --refmap= origin +refs/heads/D:TMP  per-worktree (network I/O; --refmap= disables the remote's configured fetch mapping, so this writes only its own TMP ref under refs/zing/fetch/, never refs/remotes/origin/*, no lock held -- same reasoning as push.go's own Push row)
+//	worktree.go fetchBase                       fetch --no-tags --no-write-fetch-head --no-auto-maintenance --refmap= origin +refs/heads/D:TMP  per-worktree (network I/O; --refmap= disables the remote's configured fetch mapping and --no-write-fetch-head/--no-auto-maintenance keep it from touching the shared FETCH_HEAD file or running gc, so this writes only its own TMP ref under refs/zing/fetch/, never refs/remotes/origin/* or FETCH_HEAD, no lock held -- same reasoning as push.go's own Push row)
 //	worktree.go revParseCommit, resolveBase     rev-parse --verify --quiet ...               per-worktree (read; also run under commonMu, inside updateBaseLocked/advanceBaseLocked, for a consistent view of baseRef)
 //	worktree.go isAncestorRev                   merge-base --is-ancestor                     per-worktree (read, run under commonMu inside advanceBaseLocked, same reason)
 //	worktree.go updateBaseLocked                update-ref <baseRef> <src> ""                SHARED (seeds baseRef from the local default branch after a failed fetch finds nothing to fall back to; holds commonMu itself, see below)
@@ -88,12 +88,11 @@ package orchestrator
 // to take the lock a second time. advanceBaseLocked's own update-ref runs
 // under the commonMu its caller, updateBaseLocked, already holds, rather
 // than taking the lock a third time. ensureWorktreeExclude is the one shared
-// write that is not a git
-// subcommand at all -- a direct read and append of the repository's
-// info/exclude file -- so it holds commonMu itself, across both steps,
-// through ensureWorktreeExcludeLocked below, rather than going through
-// runCommon. Rule: no code holds commonMu while calling runCommon (no
-// nesting); commonLockFor's own doc comment below lists every place in
+// write that is not a git subcommand at all -- a direct read and append of
+// the repository's info/exclude file -- so it holds commonMu itself, across
+// both steps, through ensureWorktreeExcludeLocked below, rather than going
+// through runCommon. Rule: no code holds commonMu while calling runCommon
+// (no nesting); commonLockFor's own doc comment below lists every place in
 // this package that takes the lock.
 //
 // judge.go's JudgeTree carries its own commonMu (captured at JudgeWorktree

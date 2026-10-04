@@ -26,26 +26,14 @@ import (
 // PrepareWorktree checks for it explicitly. Dir and Branch expose the
 // values.
 type Worktree struct {
-	dir     string   // <local_path>/.zing/wt/<ticket_id>
-	branch  string   // zing/<ticket_id>-<slug>, or zing/<ticket_id> when slug is empty
-	drivers []string // filter driver names this worktree's repository defines, sorted (PKG8-PLAN.md section 7.2); overridden to empty on every git call a method scoped to this Worktree makes
+	dir      string   // <local_path>/.zing/wt/<ticket_id>
+	branch   string   // zing/<ticket_id>-<slug>, or zing/<ticket_id> when slug is empty
+	ticketID int64    // the ticket this worktree belongs to, set wherever dir and branch are: PrepareWorktree, reattachWorktree, ensureWorktreePresent
+	drivers  []string // filter driver names this worktree's repository defines, sorted (PKG8-PLAN.md section 7.2); overridden to empty on every git call a method scoped to this Worktree makes
 }
 
 func (w Worktree) Dir() string    { return w.dir }
 func (w Worktree) Branch() string { return w.branch }
-
-// ticketID is the ticket this worktree belongs to: the last element of
-// dir, which PrepareWorktree and EnsureWorktree always build as
-// <local_path>/.zing/wt/<ticket_id>. It is 0 when dir does not end in a
-// number; it only labels log lines and the temporary fetch ref, never a
-// security- or correctness-relevant decision.
-func (w Worktree) ticketID() int64 {
-	id, err := strconv.ParseInt(filepath.Base(w.dir), 10, 64)
-	if err != nil {
-		return 0
-	}
-	return id
-}
 
 var (
 	// slugCollapse replaces every run of characters branchName's slug
@@ -420,14 +408,14 @@ const fetchRefCleanupTimeout = 10 * time.Second
 // refs/remotes/origin/*. When the fetch itself fails -- offline, no
 // origin, the ref not found upstream -- it falls back to whatever baseRef
 // already holds, seeding it from the local default branch the first time
-// there is nothing to fall back to. fetched reports whether this call's own
-// fetch is what produced sha; it is informational only, since every
-// caller of fetchBase immediately re-reads the ref it needs through
-// baseRev or o.baseRef() rather than trusting this return value.
+// there is nothing to fall back to. On success (err == nil), sha is
+// baseRef's resulting commit, always non-empty, so a caller like Diff can
+// use it directly as the base without a second read; fetched reports
+// whether this call's own fetch is what produced it.
 func (o *Orchestrator) fetchBase(ctx context.Context, ticketID int64) (sha string, fetched bool, err error) {
 	if err := checkRefFormat(ctx, o.proj.DefaultBranch); err != nil {
 		o.log.Error("fetch base error", "ticket_id", ticketID, "ref", o.baseRef(), "reason", "invalid_default_branch")
-		return "", false, fmt.Errorf("orchestrator: fetch base: default branch %q is not a valid branch name", o.proj.DefaultBranch)
+		return "", false, fmt.Errorf("orchestrator: fetch base: default branch %q is not a valid branch name: %w", o.proj.DefaultBranch, err)
 	}
 
 	src := "refs/heads/" + o.proj.DefaultBranch
@@ -438,7 +426,12 @@ func (o *Orchestrator) fetchBase(ctx context.Context, ticketID int64) (sha strin
 	// configured remote.origin.fetch mapping, which git otherwise applies
 	// in addition to an explicit refspec given on the command line, and
 	// which would silently also move refs/remotes/origin/<default>.
-	out, fetchErr := o.run.Run(ctx, o.proj.LocalPath, "git", "fetch", "--no-tags", "--refmap=", "origin", "+"+src+":"+tmp)
+	// --no-write-fetch-head keeps this from overwriting the owner's shared
+	// $GIT_DIR/FETCH_HEAD, which two overlapping fetches could otherwise
+	// corrupt by writing at once. --no-auto-maintenance keeps it from
+	// running "gc --auto" against the shared repository while another
+	// ticket's locked shared write is in flight.
+	out, fetchErr := o.run.Run(ctx, o.proj.LocalPath, "git", "fetch", "--no-tags", "--no-write-fetch-head", "--no-auto-maintenance", "--refmap=", "origin", "+"+src+":"+tmp)
 	if fetchErr == nil {
 		// Installed before any lock attempt, so it runs on every later
 		// path, lock failure included. updateBaseLocked has released
@@ -645,7 +638,6 @@ func (o *Orchestrator) baseRev(ctx context.Context, ticketID int64) (string, err
 		return "", fmt.Errorf("orchestrator: resolve %s: %w", o.baseRef(), err)
 	}
 	if sha == "" {
-		o.log.Debug("base ref absent, using local default branch", "ticket_id", ticketID, "ref", o.baseRef(), "fallback", o.proj.DefaultBranch, "reason", "base_ref_absent")
 		return o.proj.DefaultBranch, nil
 	}
 	return o.baseRef(), nil
@@ -713,7 +705,7 @@ func (o *Orchestrator) PrepareWorktree(ctx context.Context, ticketID int64, slug
 		return Worktree{}, fmt.Errorf("orchestrator: git worktree add: %w: %s", err, strings.TrimSpace(out))
 	}
 
-	wt := Worktree{dir: dir, branch: branch}
+	wt := Worktree{dir: dir, branch: branch, ticketID: ticketID}
 
 	// Phase 2: read the config that takes effect inside this worktree
 	// specifically, before any command that touches its content.
@@ -1174,7 +1166,7 @@ func (o *Orchestrator) ensureWorktreeAbsent(ctx context.Context, ticketID int64,
 	case 0:
 		return o.PrepareWorktree(ctx, ticketID, slug, nil)
 	case 1:
-		return o.reattachWorktree(ctx, dir, branches[0])
+		return o.reattachWorktree(ctx, ticketID, dir, branches[0])
 	default:
 		return Worktree{}, fmt.Errorf("orchestrator: ticket %d has more than one zing branch", ticketID)
 	}
@@ -1223,7 +1215,7 @@ func (o *Orchestrator) matchingZingBranches(ctx context.Context, ticketID int64)
 // branch is kept rather than replaced. A failure past "git worktree add"
 // removes the directory this call created (cleanupWorktreeDir, not
 // cleanupWorktree: the branch existed before this call and must survive).
-func (o *Orchestrator) reattachWorktree(ctx context.Context, dir, branch string) (Worktree, error) {
+func (o *Orchestrator) reattachWorktree(ctx context.Context, ticketID int64, dir, branch string) (Worktree, error) {
 	// Shared (design section 8): both calls act on the common gitdir's own
 	// worktree administration.
 	if out, err := o.runCommon(ctx, o.run, o.proj.LocalPath, "worktree", "remove", "--force", dir); err != nil && !isNotAWorkingTreeErrorOutput(out) {
@@ -1234,7 +1226,7 @@ func (o *Orchestrator) reattachWorktree(ctx context.Context, dir, branch string)
 		return Worktree{}, fmt.Errorf("orchestrator: reattach worktree: git worktree add: %w: %s", err, strings.TrimSpace(out))
 	}
 
-	wt := Worktree{dir: dir, branch: branch}
+	wt := Worktree{dir: dir, branch: branch, ticketID: ticketID}
 
 	if err := o.readWorktreeGitConfig(ctx, &wt); err != nil {
 		o.cleanupWorktreeDir(ctx, wt)
@@ -1298,7 +1290,7 @@ func (o *Orchestrator) ensureWorktreePresent(ctx context.Context, ticketID int64
 		return Worktree{}, refused
 	}
 
-	wt := Worktree{dir: dir, branch: branch}
+	wt := Worktree{dir: dir, branch: branch, ticketID: ticketID}
 	if err := o.readWorktreeGitConfig(ctx, &wt); err != nil {
 		return Worktree{}, fmt.Errorf("orchestrator: ensure worktree: %w", err)
 	}

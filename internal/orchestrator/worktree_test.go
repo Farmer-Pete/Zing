@@ -2044,6 +2044,29 @@ func findRecords(records []map[string]any, msg string) []map[string]any {
 	return out
 }
 
+// Log field names assertRecord's callers below check repeatedly, pulled
+// out as constants (goconst) rather than repeating the literal at each
+// call site.
+const (
+	logFieldTicketID   = "ticket_id"
+	logFieldSHA        = "sha"
+	logFieldReason     = "reason"
+	logFieldFetchedSHA = "fetched_sha"
+)
+
+// assertRecord compares rec against want key by key, reporting each
+// mismatched field on its own line, instead of one combined boolean
+// condition that only says "the record" was wrong without saying which
+// field.
+func assertRecord(t *testing.T, rec, want map[string]any) {
+	t.Helper()
+	for key, wantVal := range want {
+		if gotVal := rec[key]; gotVal != wantVal {
+			t.Errorf("record[%q] = %v, want %v (record = %v)", key, gotVal, wantVal, rec)
+		}
+	}
+}
+
 // cloneAndCommitUpstream clones remote into a fresh temp directory, commits
 // relPath there with content, and pushes main back to remote, standing in
 // for a second developer who has already pushed what the local checkout
@@ -2124,6 +2147,10 @@ func TestPrepareWorktreeCutsFromFetchedBase(t *testing.T) {
 
 	if gotOriginMain := strings.TrimSpace(runGit(ctx, t, repo, "rev-parse", "refs/remotes/origin/main")); gotOriginMain != localMainSHA {
 		t.Errorf("refs/remotes/origin/main = %s, want it to stay %s (only fetchBase's own TMP ref and refs/zing/base/ should move on a fetch)", gotOriginMain, localMainSHA)
+	}
+
+	if _, statErr := os.Stat(filepath.Join(repo, ".git", "FETCH_HEAD")); !os.IsNotExist(statErr) {
+		t.Errorf("stat .git/FETCH_HEAD = %v, want it absent: fetchBase's fetch must not write the owner's shared FETCH_HEAD", statErr)
 	}
 
 	fetched := findRecords(logs.records(t), "fetched base")
@@ -2299,12 +2326,13 @@ func TestFetchBaseDivergedOriginKeepsCurrentBase(t *testing.T) {
 		t.Fatalf("found %d \"fetched base diverged, keeping current\" records, want 1", len(recs))
 	}
 	rec := recs[0]
-	if rec["level"] != "WARN" {
-		t.Errorf("level = %v, want WARN", rec["level"])
-	}
-	if rec["ticket_id"] != float64(744) || rec["sha"] != sha1 || rec["fetched_sha"] != divergedSHA || rec["reason"] != "diverged" {
-		t.Errorf("record = %v, want ticket_id 744, sha %s, fetched_sha %s, reason diverged", rec, sha1, divergedSHA)
-	}
+	assertRecord(t, rec, map[string]any{
+		"level":            "WARN",
+		logFieldTicketID:   float64(744),
+		logFieldSHA:        sha1,
+		logFieldFetchedSHA: divergedSHA,
+		logFieldReason:     "diverged",
+	})
 }
 
 // cancelAfterFetchRunner wraps a real Runner and cancels a captured
@@ -2429,9 +2457,13 @@ func TestFetchBaseGitErrorsAreNotAnswers(t *testing.T) {
 			t.Errorf("refs/zing/base/ was written despite the forced rev-parse failure")
 		}
 		recs := findRecords(logs.records(t), "fetch base error")
-		if len(recs) != 1 || recs[0]["reason"] != "resolve_failed" || recs[0]["ticket_id"] != float64(743) {
-			t.Errorf("fetch base error records = %v, want exactly one with ticket_id 743 and reason resolve_failed", recs)
+		if len(recs) != 1 {
+			t.Fatalf("found %d \"fetch base error\" records, want 1", len(recs))
 		}
+		assertRecord(t, recs[0], map[string]any{
+			logFieldReason:   "resolve_failed",
+			logFieldTicketID: float64(743),
+		})
 	})
 
 	t.Run("merge-base", func(t *testing.T) {
@@ -2516,12 +2548,12 @@ func TestFetchBaseFallsBackToLastFetchedBase(t *testing.T) {
 		t.Fatalf("found %d \"fetch base failed, using last fetched base\" records, want 1", len(recs))
 	}
 	rec := recs[0]
-	if rec["level"] != "WARN" {
-		t.Errorf("level = %v, want WARN", rec["level"])
-	}
-	if rec["ticket_id"] != float64(731) || rec["sha"] != sha1 || rec["reason"] != "no_origin" {
-		t.Errorf("record = %v, want ticket_id 731, sha %s, reason no_origin", rec, sha1)
-	}
+	assertRecord(t, rec, map[string]any{
+		"level":          "WARN",
+		logFieldTicketID: float64(731),
+		logFieldSHA:      sha1,
+		logFieldReason:   "no_origin",
+	})
 	if logs.contains(missingPath) {
 		t.Error("the missing remote path leaked into the log buffer")
 	}
@@ -2561,9 +2593,11 @@ func TestFetchBaseSeedsFromLocalMainWithoutOrigin(t *testing.T) {
 		t.Fatalf("found %d WARN records, want 1", len(recs))
 	}
 	rec := recs[0]
-	if rec["ticket_id"] != float64(732) || rec["sha"] != localMainSHA || rec["reason"] != "no_origin" {
-		t.Errorf("record = %v, want ticket_id 732, sha %s, reason no_origin", rec, localMainSHA)
-	}
+	assertRecord(t, rec, map[string]any{
+		logFieldTicketID: float64(732),
+		logFieldSHA:      localMainSHA,
+		logFieldReason:   "no_origin",
+	})
 }
 
 // TestFetchBaseEmptyOriginReportsRemoteRefMissing proves an origin that
@@ -2610,8 +2644,13 @@ func TestFetchBaseSeedFailureNamesRefAndSource(t *testing.T) {
 	ctx := t.Context()
 	repo := newTestRepo(t)
 
-	o, logs := newTestOrchestratorCapturingLog(t, repo, execRunner{})
-	o.proj.DefaultBranch = "trunk"
+	logs := &logCapture{}
+	log := slog.New(slog.NewJSONHandler(logs, nil))
+	proj := Project{Owner: testOwner, Repo: testRepo, LocalPath: repo, DefaultBranch: "trunk"}
+	o, err := New(proj, fakeGitHub{}, execRunner{}, log)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
 
 	_, _, fetchErr := o.fetchBase(ctx, 736)
 	if fetchErr == nil {
@@ -2621,14 +2660,22 @@ func TestFetchBaseSeedFailureNamesRefAndSource(t *testing.T) {
 		t.Errorf("fetchBase error %q does not name both refs/zing/base/trunk and refs/heads/trunk", fetchErr.Error())
 	}
 
-	if !forEachRefEmpty(ctx, t, repo, "refs/zing/base/") {
-		t.Errorf("refs/zing/base/trunk was written despite the failed seed")
+	verify := exec.CommandContext(ctx, "git", "rev-parse", "--verify", "--quiet", "refs/zing/base/trunk")
+	verify.Dir = repo
+	verify.Env = scrubGitLocationEnv(os.Environ())
+	if out, err := verify.CombinedOutput(); err == nil {
+		t.Errorf("rev-parse --verify --quiet refs/zing/base/trunk succeeded (%q), want exit 1: refs/zing/base/trunk was written despite the failed seed", out)
 	}
 
 	recs := findRecords(logs.records(t), "fetch base error")
-	if len(recs) != 1 || recs[0]["ticket_id"] != float64(736) || recs[0]["ref"] != "refs/zing/base/trunk" || recs[0]["reason"] != "seed_failed" {
-		t.Errorf("records = %v, want exactly one with ticket_id 736, ref refs/zing/base/trunk, reason seed_failed", recs)
+	if len(recs) != 1 {
+		t.Fatalf("found %d \"fetch base error\" records, want 1", len(recs))
 	}
+	assertRecord(t, recs[0], map[string]any{
+		logFieldTicketID: float64(736),
+		"ref":            "refs/zing/base/trunk",
+		logFieldReason:   "seed_failed",
+	})
 }
 
 // TestFetchBaseRejectsInvalidDefaultBranch proves a project whose default
@@ -2660,7 +2707,11 @@ func TestFetchBaseRejectsInvalidDefaultBranch(t *testing.T) {
 	}
 
 	recs := findRecords(logs.records(t), "fetch base error")
-	if len(recs) != 1 || recs[0]["ticket_id"] != float64(738) || recs[0]["reason"] != "invalid_default_branch" {
-		t.Errorf("records = %v, want exactly one with ticket_id 738 and reason invalid_default_branch", recs)
+	if len(recs) != 1 {
+		t.Fatalf("found %d \"fetch base error\" records, want 1", len(recs))
 	}
+	assertRecord(t, recs[0], map[string]any{
+		logFieldTicketID: float64(738),
+		logFieldReason:   "invalid_default_branch",
+	})
 }

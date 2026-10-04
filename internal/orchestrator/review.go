@@ -29,8 +29,7 @@ func (o *Orchestrator) HeadSHA(ctx context.Context, wt Worktree) (string, error)
 //	git diff --no-ext-diff --no-textconv --no-color --no-renames -U3 <base> <sha>
 //
 // Diff fetches the base itself, right after revalidate, so baseRev is
-// refs/zing/base/<default> as of this call, or the local default branch
-// when the fetch has never worked.
+// refs/zing/base/<default> as of this call.
 //
 // --no-ext-diff and --no-textconv keep a configured external diff or
 // textconv driver from ever running or reshaping the text a lens reads (the
@@ -41,11 +40,7 @@ func (o *Orchestrator) Diff(ctx context.Context, wt Worktree, sha string) (strin
 		return "", fmt.Errorf("orchestrator: diff: %w", err)
 	}
 
-	if _, _, err := o.fetchBase(ctx, wt.ticketID()); err != nil {
-		return "", fmt.Errorf("orchestrator: diff: %w", err)
-	}
-
-	base, err := o.baseRev(ctx, wt.ticketID())
+	base, _, err := o.fetchBase(ctx, wt.ticketID)
 	if err != nil {
 		return "", fmt.Errorf("orchestrator: diff: %w", err)
 	}
@@ -93,7 +88,7 @@ func (o *Orchestrator) ChangedFilesSinceBase(ctx context.Context, wt Worktree, t
 		return nil, fmt.Errorf("orchestrator: changed files since base: %w", err)
 	}
 
-	base, err := o.baseRev(ctx, wt.ticketID())
+	base, err := o.baseRev(ctx, wt.ticketID)
 	if err != nil {
 		return nil, fmt.Errorf("orchestrator: changed files since base: %w", err)
 	}

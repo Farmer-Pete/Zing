@@ -26,7 +26,7 @@ func (o *Orchestrator) Push(ctx context.Context, wt Worktree) error {
 		return fmt.Errorf("orchestrator: push: %w", err)
 	}
 
-	if _, _, err := o.fetchBase(ctx, wt.ticketID()); err != nil {
+	if _, _, err := o.fetchBase(ctx, wt.ticketID); err != nil {
 		return fmt.Errorf("orchestrator: push: %w", err)
 	}
 
@@ -82,7 +82,7 @@ func (o *Orchestrator) Push(ctx context.Context, wt Worktree) error {
 // fetchBase, or the local default branch while that ref does not exist
 // yet.
 func (o *Orchestrator) unpushedShas(ctx context.Context, wt Worktree) ([]string, error) {
-	base, err := o.baseRev(ctx, wt.ticketID())
+	base, err := o.baseRev(ctx, wt.ticketID)
 	if err != nil {
 		return nil, fmt.Errorf("orchestrator: unpushed shas: %w", err)
 	}

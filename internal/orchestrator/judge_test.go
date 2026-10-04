@@ -19,11 +19,12 @@ import (
 // each subtest below uses for its own ".zing/judge/<id>" and ".zing/wt/<id>"
 // directories, so the real-git fixtures each subtest builds never collide.
 const (
-	judgeTicketDetached    = 900
-	judgeTicketGovernance  = 901
-	judgeTicketLeftover    = 902
-	judgeTicketNoSmudge    = 903
-	judgeTicketRemoveTwice = 904
+	judgeTicketDetached         = 900
+	judgeTicketGovernance       = 901
+	judgeTicketLeftover         = 902
+	judgeTicketNoSmudge         = 903
+	judgeTicketRemoveTwice      = 904
+	judgeTicketGovernanceOrigin = 906
 )
 
 // TestJudgeWorktreeDetachedAtSha proves JudgeWorktree checks sha out at
@@ -113,6 +114,60 @@ func TestJudgeWorktreeGovernanceFromBase(t *testing.T) {
 
 	if _, statErr := os.Stat(filepath.Join(jt.Dir(), "CLAUDE.md")); !os.IsNotExist(statErr) {
 		t.Errorf("CLAUDE.md present in the judge checkout (stat err = %v), want it removed: absent on the default branch", statErr)
+	}
+
+	if err := jt.Remove(ctx); err != nil {
+		t.Errorf("Remove: %v", err)
+	}
+}
+
+// TestJudgeWorktreeGovernanceFromOrigin proves JudgeWorktree fetches the
+// base itself (right before readGovernanceFiles), and that readGovernanceFiles
+// reads that fetched baseRev -- refs/zing/base/<default> -- rather than
+// o.proj.DefaultBranch: a governance file changed on origin's default
+// branch after the ticket branch was already cut still reaches the judge's
+// checkout, even though local main (never pushed to) still carries the old
+// content. If either the fetchBase call or the baseRev read were missing,
+// the judge would see local main's stale AGENTS.md instead.
+func TestJudgeWorktreeGovernanceFromOrigin(t *testing.T) {
+	t.Parallel()
+	ctx := t.Context()
+
+	repo := newTestRepo(t)
+	writeTestFile(t, filepath.Join(repo, "AGENTS.md"), "local agents\n")
+	runGit(ctx, t, repo, "add", "AGENTS.md")
+	runGit(ctx, t, repo, "commit", "-q", "-m", "add local AGENTS.md")
+
+	remote := newBareRemote(ctx, t)
+	addOrigin(ctx, t, repo, remote)
+	runGit(ctx, t, repo, "push", "-q", "origin", mainBranch)
+
+	o := newTestOrchestrator(t, repo, execRunner{})
+	wt, err := o.PrepareWorktree(ctx, judgeTicketGovernanceOrigin, "judge-governance-origin", nil)
+	if err != nil {
+		t.Fatalf("PrepareWorktree: %v", err)
+	}
+	sha := commitFile(ctx, t, wt.Dir(), "feature.txt", "v1\n", "add feature")
+
+	upstreamSHA := cloneAndCommitUpstream(ctx, t, remote, "AGENTS.md", "origin agents, ahead of local main\n", "advance AGENTS.md on origin, after the cut")
+
+	jt, err := o.JudgeWorktree(ctx, judgeTicketGovernanceOrigin, sha)
+	if err != nil {
+		t.Fatalf("JudgeWorktree: %v", err)
+	}
+
+	gotBase := strings.TrimSpace(runGit(ctx, t, repo, "rev-parse", "refs/zing/base/main"))
+	if gotBase != upstreamSHA {
+		t.Errorf("refs/zing/base/main = %s, want %s", gotBase, upstreamSHA)
+	}
+
+	gotAgents, err := os.ReadFile(filepath.Join(jt.Dir(), "AGENTS.md"))
+	if err != nil {
+		t.Fatalf("read AGENTS.md: %v", err)
+	}
+	want := "origin agents, ahead of local main\n"
+	if string(gotAgents) != want {
+		t.Errorf("AGENTS.md = %q, want origin's content %q, not local main's stale content", gotAgents, want)
 	}
 
 	if err := jt.Remove(ctx); err != nil {
