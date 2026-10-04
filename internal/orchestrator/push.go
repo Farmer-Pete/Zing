@@ -11,10 +11,11 @@ import (
 // revalidates wt (8.2): the branch must match the zing/ form, must differ
 // from the default branch, and must be the branch actually checked out in
 // wt.Dir. That rejects a default or a forged non-zing branch before any git
-// command runs. It then verifies every commit in
-// <default_branch>..<branch> is signed, using the same signedStatus (8.3)
-// CommitTask verifies with: a single unsigned commit aborts the push before
-// anything is pushed. Only then does it run
+// command runs. It then fetches the base itself, right after revalidate,
+// so refs/zing/base/<default> is current before unpushedShas reads it. It
+// then verifies every commit in <base>..<branch> is signed, using the same
+// signedStatus (8.3) CommitTask verifies with: a single unsigned commit
+// aborts the push before anything is pushed. Only then does it run
 // "git -C <dir> push origin refs/heads/<branch>:refs/heads/<branch>", an
 // explicit same-name refspec that cannot be reinterpreted as a target on the
 // default branch, followed by "git config --local branch.<b>.remote/.merge" to record the
@@ -22,6 +23,10 @@ import (
 // commonlock.go).
 func (o *Orchestrator) Push(ctx context.Context, wt Worktree) error {
 	if err := o.revalidate(ctx, wt); err != nil {
+		return fmt.Errorf("orchestrator: push: %w", err)
+	}
+
+	if _, _, err := o.fetchBase(ctx, wt.ticketID); err != nil {
 		return fmt.Errorf("orchestrator: push: %w", err)
 	}
 
@@ -71,13 +76,20 @@ func (o *Orchestrator) Push(ctx context.Context, wt Worktree) error {
 	return nil
 }
 
-// unpushedShas returns every commit sha in <default_branch>..<branch>, read
-// with "git log -z --format=%H" and split on NUL, trimmed, with empty
-// fields dropped.
+// unpushedShas returns every commit sha in <base>..<branch>, read with
+// "git log -z --format=%H" and split on NUL, trimmed, with empty fields
+// dropped. base is baseRev: refs/zing/base/<default>, kept current by
+// fetchBase, or the local default branch while that ref does not exist
+// yet.
 func (o *Orchestrator) unpushedShas(ctx context.Context, wt Worktree) ([]string, error) {
-	out, err := o.run.Output(ctx, wt.dir, "git", "log", "-z", "--format=%H", o.proj.DefaultBranch+".."+wt.branch)
+	base, err := o.baseRev(ctx, wt.ticketID)
 	if err != nil {
-		return nil, fmt.Errorf("git log %s..%s: %w", o.proj.DefaultBranch, wt.branch, err)
+		return nil, fmt.Errorf("orchestrator: unpushed shas: %w", err)
+	}
+
+	out, err := o.run.Output(ctx, wt.dir, "git", "log", "-z", "--format=%H", base+".."+wt.branch)
+	if err != nil {
+		return nil, fmt.Errorf("git log %s..%s: %w", base, wt.branch, err)
 	}
 
 	var shas []string

@@ -23,10 +23,13 @@ func (o *Orchestrator) HeadSHA(ctx context.Context, wt Worktree) (string, error)
 }
 
 // Diff returns the branch's diff at sha against its merge base with the
-// default branch (design section 10.1):
+// base (design section 10.1):
 //
-//	base := git merge-base <default_branch> <sha>
+//	base := git merge-base <baseRev> <sha>
 //	git diff --no-ext-diff --no-textconv --no-color --no-renames -U3 <base> <sha>
+//
+// Diff fetches the base itself, right after revalidate, so baseRev is
+// refs/zing/base/<default> as of this call.
 //
 // --no-ext-diff and --no-textconv keep a configured external diff or
 // textconv driver from ever running or reshaping the text a lens reads (the
@@ -37,13 +40,18 @@ func (o *Orchestrator) Diff(ctx context.Context, wt Worktree, sha string) (strin
 		return "", fmt.Errorf("orchestrator: diff: %w", err)
 	}
 
+	base, _, err := o.fetchBase(ctx, wt.ticketID)
+	if err != nil {
+		return "", fmt.Errorf("orchestrator: diff: %w", err)
+	}
+
 	run := execRunner{drivers: wt.drivers}
-	base, err := run.Output(ctx, wt.dir, "git", "merge-base", o.proj.DefaultBranch, sha)
+	mergeBase, err := run.Output(ctx, wt.dir, "git", "merge-base", base, sha)
 	if err != nil {
 		return "", fmt.Errorf("orchestrator: diff: merge-base: %w", err)
 	}
 
-	out, err := run.Output(ctx, wt.dir, "git", "diff", "--no-ext-diff", "--no-textconv", "--no-color", "--no-renames", "-U3", strings.TrimSpace(base), sha)
+	out, err := run.Output(ctx, wt.dir, "git", "diff", "--no-ext-diff", "--no-textconv", "--no-color", "--no-renames", "-U3", strings.TrimSpace(mergeBase), sha)
 	if err != nil {
 		return "", fmt.Errorf("orchestrator: diff: %w", err)
 	}
@@ -74,19 +82,24 @@ func (o *Orchestrator) ChangedFilesBetween(ctx context.Context, wt Worktree, fro
 	return paths, nil
 }
 
-// ChangedFilesSinceBase is ChangedFilesBetween(merge-base(default, to), to).
+// ChangedFilesSinceBase is ChangedFilesBetween(merge-base(baseRev, to), to).
 func (o *Orchestrator) ChangedFilesSinceBase(ctx context.Context, wt Worktree, to string) ([]string, error) {
 	if err := o.revalidate(ctx, wt); err != nil {
 		return nil, fmt.Errorf("orchestrator: changed files since base: %w", err)
 	}
 
+	base, err := o.baseRev(ctx, wt.ticketID)
+	if err != nil {
+		return nil, fmt.Errorf("orchestrator: changed files since base: %w", err)
+	}
+
 	run := execRunner{drivers: wt.drivers}
-	base, err := run.Output(ctx, wt.dir, "git", "merge-base", o.proj.DefaultBranch, to)
+	mergeBase, err := run.Output(ctx, wt.dir, "git", "merge-base", base, to)
 	if err != nil {
 		return nil, fmt.Errorf("orchestrator: changed files since base: merge-base: %w", err)
 	}
 
-	return o.ChangedFilesBetween(ctx, wt, strings.TrimSpace(base), to)
+	return o.ChangedFilesBetween(ctx, wt, strings.TrimSpace(mergeBase), to)
 }
 
 // IsAncestor runs git merge-base --is-ancestor a b; exit 1 is false, nil.

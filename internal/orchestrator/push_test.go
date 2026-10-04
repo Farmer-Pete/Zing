@@ -423,6 +423,63 @@ func TestPushArgvDisablesHooks(t *testing.T) {
 	assertMarkerAbsent(t, marker)
 }
 
+// TestPushRefreshesBase proves Push fetches the base itself (right after
+// revalidate, not buried inside it), and that unpushedShas reads that
+// fetched baseRev rather than o.proj.DefaultBranch: origin gets an unsigned
+// commit before the ticket branch is even cut, so the cut (and Push's own
+// signed-commit check) must see it as already part of the base, not as one
+// of the ticket's own unpushed commits. If unpushedShas read local main
+// instead -- which never advances past its own push below and so never
+// reaches that unsigned commit -- Push would wrongly find it in
+// <local main>..<branch> and refuse it as unsigned. A second upstream
+// commit after the cut then still advances refs/zing/base/<default> by the
+// time Push returns, while the push itself still succeeds and the bare
+// remote ends up with only the ticket's own signed commit.
+func TestPushRefreshesBase(t *testing.T) {
+	t.Parallel()
+	fixture := newSigningFixture(t, true)
+	repo := newSigningTestRepo(t, fixture)
+	ctx := t.Context()
+	remote := newBareRemote(ctx, t)
+	addOrigin(ctx, t, repo, remote)
+	runGit(ctx, t, repo, "push", "-q", "origin", mainBranch)
+
+	unsignedSHA := cloneAndCommitUpstream(ctx, t, remote, "upstream1.txt", "upstream1\n", "add upstream1.txt, unsigned, before the cut")
+
+	o, logs := newTestOrchestratorCapturingLog(t, repo, execRunner{})
+
+	wt := prepareSignedCommit(ctx, t, o, 734)
+	ticketSHA := strings.TrimSpace(runGit(ctx, t, wt.Dir(), "rev-parse", "HEAD"))
+
+	newSHA := cloneAndCommitUpstream(ctx, t, remote, "upstream2.txt", "upstream2\n", "add upstream2.txt, after the cut")
+
+	if err := o.Push(ctx, wt); err != nil {
+		t.Fatalf("Push: %v (the unsigned commit %s should already be part of the base, not one of the ticket's own unpushed commits)", err, unsignedSHA)
+	}
+
+	gotBase := strings.TrimSpace(runGit(ctx, t, repo, "rev-parse", "refs/zing/base/main"))
+	if gotBase != newSHA {
+		t.Errorf("refs/zing/base/main = %s, want %s", gotBase, newSHA)
+	}
+
+	gotRemote := strings.TrimSpace(runGit(ctx, t, remote, "rev-parse", "refs/heads/"+wt.Branch()))
+	if gotRemote != ticketSHA {
+		t.Errorf("remote %s = %s, want %s", wt.Branch(), gotRemote, ticketSHA)
+	}
+
+	fetched := findRecords(logs.records(t), "fetched base")
+	if len(fetched) == 0 {
+		t.Fatal("found no \"fetched base\" records")
+	}
+	last := fetched[len(fetched)-1]
+	if got, want := last["ticket_id"], float64(734); got != want {
+		t.Errorf("ticket_id = %v, want %v", got, want)
+	}
+	if last["sha"] != newSHA {
+		t.Errorf("sha = %v, want %s", last["sha"], newSHA)
+	}
+}
+
 // TestPush_PushRunsUnlockedUpstreamRunsLocked proves PR review fix C3: the
 // network "git push" itself (no -u) runs without commonMu held, and only
 // the upstream calls, "git config --local branch.<b>.remote/.merge" -- the ones that write

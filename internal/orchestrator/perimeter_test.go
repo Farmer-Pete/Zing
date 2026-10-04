@@ -889,3 +889,27 @@ func TestBranchCommitsOrder(t *testing.T) {
 		t.Errorf("BranchCommits = %v, want %v (oldest first)", got, shas)
 	}
 }
+
+// TestBranchCommitsWithoutBaseRefUsesLocalDefault proves baseRev's own
+// fallback: a ticket created before fetchBase ever ran (or one whose base
+// ref was removed by hand) still gets a usable comparison, against the
+// local default branch, rather than an error.
+func TestBranchCommitsWithoutBaseRefUsesLocalDefault(t *testing.T) {
+	t.Parallel()
+	o, wt, ctx := preparePerimeterWorktree(t, 735)
+
+	runGit(ctx, t, wt.Dir(), "update-ref", "-d", "refs/zing/base/main")
+
+	writeTestFile(t, filepath.Join(wt.Dir(), "solo.txt"), "content\n")
+	runGit(ctx, t, wt.Dir(), "add", "solo.txt")
+	runGit(ctx, t, wt.Dir(), "commit", "-q", "-m", "solo commit")
+	sha := strings.TrimSpace(runGit(ctx, t, wt.Dir(), "rev-parse", "HEAD"))
+
+	got, err := o.BranchCommits(ctx, wt)
+	if err != nil {
+		t.Fatalf("BranchCommits: %v", err)
+	}
+	if !slices.Equal(got, []string{sha}) {
+		t.Errorf("BranchCommits = %v, want [%s]", got, sha)
+	}
+}

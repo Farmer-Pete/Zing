@@ -591,16 +591,22 @@ func cutHunk(out string) string {
 }
 
 // BranchCommits returns the shas on the ticket branch that are not on the
-// default branch, oldest first: git rev-list --reverse <default>..HEAD. It
-// first calls revalidate: a wrong, stale, or tampered worktree is never
-// read.
+// base (git rev-list --reverse <base>..HEAD), oldest first. The base is
+// baseRev: refs/zing/base/<default>, kept current by fetchBase, or the
+// local default branch while that ref does not exist yet. It first calls
+// revalidate: a wrong, stale, or tampered worktree is never read.
 func (o *Orchestrator) BranchCommits(ctx context.Context, wt Worktree) ([]string, error) {
 	if err := o.revalidate(ctx, wt); err != nil {
 		return nil, fmt.Errorf("orchestrator: branch commits: %w", err)
 	}
 
+	base, err := o.baseRev(ctx, wt.ticketID)
+	if err != nil {
+		return nil, fmt.Errorf("orchestrator: branch commits: %w", err)
+	}
+
 	run := execRunner{drivers: wt.drivers}
-	out, err := run.Output(ctx, wt.dir, "git", "rev-list", "--reverse", o.proj.DefaultBranch+"..HEAD")
+	out, err := run.Output(ctx, wt.dir, "git", "rev-list", "--reverse", base+"..HEAD")
 	if err != nil {
 		return nil, fmt.Errorf("orchestrator: branch commits: %w", err)
 	}

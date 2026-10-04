@@ -117,7 +117,11 @@ func (o *Orchestrator) JudgeWorktree(ctx context.Context, ticketID int64, sha st
 		return JudgeTree{}, fmt.Errorf("orchestrator: judge worktree: remove leftover: %w", err)
 	}
 
-	governance, err := o.readGovernanceFiles(ctx)
+	if _, _, err := o.fetchBase(ctx, ticketID); err != nil {
+		return JudgeTree{}, fmt.Errorf("orchestrator: judge worktree: %w", err)
+	}
+
+	governance, err := o.readGovernanceFiles(ctx, ticketID)
 	if err != nil {
 		return JudgeTree{}, fmt.Errorf("orchestrator: judge worktree: %w", err)
 	}
@@ -149,21 +153,27 @@ func (o *Orchestrator) JudgeWorktree(ctx context.Context, ticketID int64, sha st
 	return jt, nil
 }
 
-// readGovernanceFiles reads each of judgeGovernanceFiles from the default
-// branch with "git show <default_branch>:<name>". A file absent there
-// (isMissingAtRevision) is recorded as such, not an error; any other
-// failure is.
-func (o *Orchestrator) readGovernanceFiles(ctx context.Context) ([]governanceFile, error) {
+// readGovernanceFiles reads each of judgeGovernanceFiles from the base
+// (baseRev: refs/zing/base/<default>, kept current by fetchBase, or the
+// local default branch while that ref does not exist yet) with
+// "git show <base>:<name>". A file absent there (isMissingAtRevision) is
+// recorded as such, not an error; any other failure is.
+func (o *Orchestrator) readGovernanceFiles(ctx context.Context, ticketID int64) ([]governanceFile, error) {
+	base, err := o.baseRev(ctx, ticketID)
+	if err != nil {
+		return nil, fmt.Errorf("orchestrator: read governance files: %w", err)
+	}
+
 	files := make([]governanceFile, 0, len(judgeGovernanceFiles))
 	for _, name := range judgeGovernanceFiles {
-		out, err := o.run.Output(ctx, o.proj.LocalPath, "git", "show", o.proj.DefaultBranch+":"+name)
+		out, err := o.run.Output(ctx, o.proj.LocalPath, "git", "show", base+":"+name)
 		switch {
 		case err == nil:
 			files = append(files, governanceFile{name: name, content: []byte(out), present: true})
 		case isMissingAtRevision(err):
 			files = append(files, governanceFile{name: name, present: false})
 		default:
-			return nil, fmt.Errorf("git show %s:%s: %w", o.proj.DefaultBranch, name, err)
+			return nil, fmt.Errorf("git show %s:%s: %w", base, name, err)
 		}
 	}
 	return files, nil
