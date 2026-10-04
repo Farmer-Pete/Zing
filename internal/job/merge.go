@@ -155,19 +155,23 @@ func (h shipHandler) driveMerge(ctx context.Context, t store.Ticket, d Deps, req
 		return mergeEscalation(t, d, req, worktreeNotPreparedWhat, worktreeNotPreparedWhy, errText)
 	})
 	if err != nil {
+		slog.Debug("base merge step", "ticket_id", t.ID, "request_id", req.MessageID, "step", "worktree_error")
 		return store.HandlerCommit{}, err
 	}
 	if escalation != nil {
+		slog.Debug("base merge step", "ticket_id", t.ID, "request_id", req.MessageID, "step", "worktree_not_prepared")
 		return *escalation, nil
 	}
 	slog.Debug("base merge step", "ticket_id", t.ID, "request_id", req.MessageID, "step", "worktree_ensured")
 
 	reports, err := d.Store.BuildReports(ctx, t.ID)
 	if err != nil {
+		slog.Debug("base merge step", "ticket_id", t.ID, "request_id", req.MessageID, "step", "build_reports_error")
 		return store.HandlerCommit{}, fmt.Errorf("job: merge: build reports: %w", err)
 	}
 	unrecorded, prefixOK, err := unrecordedCommits(ctx, proj, wt, reports)
 	if err != nil {
+		slog.Debug("base merge step", "ticket_id", t.ID, "request_id", req.MessageID, "step", "unrecorded_commits_error")
 		return store.HandlerCommit{}, err
 	}
 	if !prefixOK {
@@ -179,7 +183,7 @@ func (h shipHandler) driveMerge(ctx context.Context, t store.Ticket, d Deps, req
 		// continue to step 1
 	case 1:
 		slog.Debug("base merge step", "ticket_id", t.ID, "request_id", req.MessageID, "step", "adopt")
-		commit, adoptErr := h.adoptMerge(ctx, t, d, proj, wt, req, unrecorded[0])
+		commit, adoptErr := h.adoptMerge(ctx, t, d, proj, wt, req, reports, unrecorded[0])
 		if adoptErr != nil {
 			return store.HandlerCommit{}, adoptErr
 		}
@@ -202,6 +206,7 @@ func (h shipHandler) driveMerge(ctx context.Context, t store.Ticket, d Deps, req
 	maxResumes := d.Machine.Jobs[jobMergeName].MaxResumes
 	sess, state, newestRun, found, sessErr := d.Store.SessionAfter(ctx, t.ID, jobMergeName, req.AfterRunID, maxResumes)
 	if sessErr != nil {
+		slog.Debug("base merge step", "ticket_id", t.ID, "request_id", req.MessageID, "step", "session_after_error")
 		return store.HandlerCommit{}, fmt.Errorf("job: merge: session after: %w", sessErr)
 	}
 
@@ -216,24 +221,31 @@ func (h shipHandler) driveMerge(ctx context.Context, t store.Ticket, d Deps, req
 		return withBranchResult(commit, runErr, wt)
 	}
 
-	outcome := ""
-	if newestRun.Outcome != nil {
-		outcome = *newestRun.Outcome
-	}
-	switch outcome {
+	switch runOutcome(newestRun) {
 	case string(response.OutcomeOk):
-		slog.Debug("base merge step", "ticket_id", t.ID, "request_id", req.MessageID, "step", "check")
 		rid := newestRun.ID
+		slog.Debug("base merge step", "ticket_id", t.ID, "request_id", req.MessageID, "run_id", rid, "step", "check")
 		commit, runErr := h.mergeCheck(ctx, t, d, proj, wt, req, &rid, &sess)
 		return withBranchResult(commit, runErr, wt)
 	case string(response.OutcomeError):
-		slog.Debug("base merge step", "ticket_id", t.ID, "request_id", req.MessageID, "step", "run_error")
+		slog.Debug("base merge step", "ticket_id", t.ID, "request_id", req.MessageID, "run_id", newestRun.ID, "step", "run_error")
 		commit, runErr := h.mergeAfterError(ctx, t, d, wt, req, sess, newestRun)
 		return withBranchResult(commit, runErr, wt)
 	default:
 		slog.Debug("base merge step", "ticket_id", t.ID, "request_id", req.MessageID, "step", "unrecognized")
 		return store.HandlerCommit{}, ErrNoAction
 	}
+}
+
+// runOutcome returns r's own outcome string, or "" when r has none yet
+// (its reserved run has not answered): driveMerge's own newest-run switch
+// and adoptMerge's own "is the newest run ok" test share this instead of
+// each unpacking the nullable field inline.
+func runOutcome(r store.Run) string {
+	if r.Outcome == nil {
+		return ""
+	}
+	return *r.Outcome
 }
 
 // baseMergeClosedCommit writes "base merge closed <id>" with ClearPoll:
@@ -243,7 +255,7 @@ func baseMergeClosedCommit(t store.Ticket, d Deps, req baseMergeRequest) store.H
 	c := baseCommit(t, d)
 	c.Messages = []store.Message{{
 		TicketID: t.ID, Type: msgTypeUpdate, Author: authorSystem,
-		Body: fmt.Sprintf("base merge closed %d", req.MessageID),
+		Body: baseMergeClosedBody(req.MessageID),
 	}}
 	c.ClearPoll = true
 	return c
@@ -288,7 +300,7 @@ func (h shipHandler) mergeCheck(ctx context.Context, t store.Ticket, d Deps, pro
 	}
 
 	text := mergeCheckText(results, markers, outside)
-	slog.Info("merge check", "ticket_id", t.ID, "request_id", req.MessageID, "check_failed", text != "", "markers", len(markers), "outside", len(outside))
+	slog.Info("merge check", "ticket_id", t.ID, "request_id", req.MessageID, "run_id", int64OrZero(rid), "check_failed", text != "", "markers", len(markers), "outside", len(outside))
 	if text == "" {
 		return h.landMerge(ctx, t, d, proj, wt, req, rid)
 	}
@@ -340,18 +352,18 @@ func mergeOutsidePaths(ctx context.Context, proj Project, wt orchestrator.Worktr
 // landMerge commits and records the merge (overview design "One merge
 // tick"): report is the build_report of run rid (findUnitReport), or, when
 // rid is nil, the synthesized clean-merge report (mergeNoConflictReport).
-// report.Title is always mergeTitle(req), overriding whatever the agent's
-// own report carried. A CommitMerge error naming "commit signing failed"
-// escalates commitSigningFailedWhat/Why, any other escalates
-// taskNotCommittedWhat/Why, both with the error as detail.
+// The commit message carries only Title and FuncLines -- never the agent's
+// own Fences, since a merge commit's message is never the agent's to write
+// (mergeReportFor's own doc comment). A CommitMerge error naming "commit
+// signing failed" escalates commitSigningFailedWhat/Why, any other
+// escalates taskNotCommittedWhat/Why, both with the error as detail.
 func (h shipHandler) landMerge(ctx context.Context, t store.Ticket, d Deps, proj Project, wt orchestrator.Worktree, req baseMergeRequest, rid *int64) (store.HandlerCommit, error) {
-	report, err := mergeReportFor(ctx, t, d, rid)
+	report, err := mergeReportFor(ctx, t, d, rid, req)
 	if err != nil {
 		return store.HandlerCommit{}, err
 	}
-	report.Title = mergeTitle(req)
 
-	msg := orchestrator.CommitMessage{Title: report.Title, FuncLines: mergeFuncLines(req, report.FilesChanged), Fences: report.Fences}
+	msg := orchestrator.CommitMessage{Title: report.Title, FuncLines: mergeFuncLines(req, report.FilesChanged)}
 	sha, commitErr := proj.Orch.CommitMerge(ctx, wt, msg)
 	if commitErr != nil {
 		what, why := taskNotCommittedWhat, taskNotCommittedWhy
@@ -361,32 +373,39 @@ func (h shipHandler) landMerge(ctx context.Context, t store.Ticket, d Deps, proj
 		return mergeEscalation(t, d, req, what, why, commitErr.Error()), nil
 	}
 
-	slog.Info("base merge landed", "ticket_id", t.ID, "request_id", req.MessageID, "sha", sha)
+	slog.Info("base merge landed", "ticket_id", t.ID, "request_id", req.MessageID, "run_id", int64OrZero(rid), "commit_sha", sha)
 	return mergeLandedCommit(t, d, req, rid, report, sha)
 }
 
-// mergeReportFor is landMerge's own report lookup: the unlanded
-// build_report of run rid (findUnitReport), or, when rid is nil, the
-// synthesized report a clean merge with no agent run ever produces.
-func mergeReportFor(ctx context.Context, t store.Ticket, d Deps, rid *int64) (response.BuildReport, error) {
+// mergeReportFor is landMerge's and adoptMerge's own report lookup: the
+// unlanded build_report of run rid (findUnitReport), or, when rid is nil,
+// the synthesized report a clean merge with no agent run ever produces.
+// Title is always mergeTitle(req), overriding whatever the agent's own
+// report carried -- a merge commit's own message is never the agent's to
+// write.
+func mergeReportFor(ctx context.Context, t store.Ticket, d Deps, rid *int64, req baseMergeRequest) (response.BuildReport, error) {
+	var report response.BuildReport
 	if rid == nil {
-		return response.BuildReport{
+		report = response.BuildReport{
 			TaskN:        0,
 			FilesChanged: []string{},
 			Extras:       []response.ExtraClaim{},
 			Fences:       []response.Fence{},
 			Report:       mergeNoConflictReport,
-		}, nil
+		}
+	} else {
+		reports, err := d.Store.BuildReports(ctx, t.ID)
+		if err != nil {
+			return response.BuildReport{}, fmt.Errorf("job: merge: build reports: %w", err)
+		}
+		row, found := findUnitReport(reports, *rid)
+		if !found {
+			return response.BuildReport{}, fmt.Errorf("job: merge: ticket %d: no build_report for run %d", t.ID, *rid)
+		}
+		report = row.Report
 	}
-	reports, err := d.Store.BuildReports(ctx, t.ID)
-	if err != nil {
-		return response.BuildReport{}, fmt.Errorf("job: merge: build reports: %w", err)
-	}
-	row, found := findUnitReport(reports, *rid)
-	if !found {
-		return response.BuildReport{}, fmt.Errorf("job: merge: ticket %d: no build_report for run %d", t.ID, *rid)
-	}
-	return row.Report, nil
+	report.Title = mergeTitle(req)
+	return report, nil
 }
 
 // mergeLandedCommit is landMerge's own terminal commit: one build_report
@@ -406,7 +425,7 @@ func mergeLandedCommit(t store.Ticket, d Deps, req baseMergeRequest, rid *int64,
 	c.Artifacts = []store.Artifact{{Type: artifactTypeBuildReport, RunID: rid, Payload: payload}}
 	c.Messages = []store.Message{{
 		TicketID: t.ID, Type: msgTypeUpdate, Author: authorSystem,
-		Body: fmt.Sprintf("base merge landed %d sha %s", req.MessageID, sha),
+		Body: baseMergeLandedBody(req.MessageID, sha),
 	}}
 	c.ClearPoll = true
 	return c, nil
@@ -415,26 +434,34 @@ func mergeLandedCommit(t store.Ticket, d Deps, req baseMergeRequest, rid *int64,
 // adoptMerge records sha, the single unrecorded commit at the tip
 // (driveMerge's own step 0), when a previous tick committed the merge
 // through CommitMerge and crashed before recording it: sha must have
-// exactly two parents, the second equal to req.BaseSHA, and be signed.
-// Unlike building's own adopt, there is no subject or claims check here --
-// a merge commit's own message is never the agent's to write -- so a
-// clean StartBaseMerge (task 6's own no-run case) and an agent-resolved
-// merge adopt exactly alike: the report is the newest ok merge run's
-// report in this request's session (mergeReportFor), or the synthesized
-// one when the session has none. Anything else means sha is not this
-// request's own merge commit, and it escalates unverifiableCommitWhat/Why
-// with detail "not this request's merge commit".
-func (h shipHandler) adoptMerge(ctx context.Context, t store.Ticket, d Deps, proj Project, wt orchestrator.Worktree, req baseMergeRequest, sha string) (store.HandlerCommit, error) {
-	fail := func() store.HandlerCommit {
-		return mergeEscalation(t, d, req, unverifiableCommitWhat, unverifiableCommitWhy, "not this request's merge commit")
+// exactly two parents, the second equal to req.BaseSHA and the first equal
+// to the branch's own last recorded commit (recordedShas(reports)), and be
+// signed. Unlike that trusted shape, an ordinary git commit an agent (or
+// anyone with bash in the worktree) made during the merge session can carry
+// the same two parents and a real signature, so adopt never trusts shape
+// alone: it also re-runs CHECK's own gates -- the project's commands, a
+// clean tree, every path the commit touched confined to the merge's own
+// side set (git diff parents[0]..parents[1]), and no conflict marker left
+// in any of them -- exactly what mergeCheck already requires of a tick that
+// commits for real. Unlike building's own adopt, there is no subject or
+// claims check here -- a merge commit's own message is never the agent's to
+// write -- so a clean StartBaseMerge (task 6's own no-run case) and an
+// agent-resolved merge adopt exactly alike: the report is the newest ok
+// merge run's report in this request's session (mergeReportFor), or the
+// synthesized one when the session has none. Any failed check escalates
+// unverifiableCommitWhat/Why, detail naming which one failed.
+func (h shipHandler) adoptMerge(ctx context.Context, t store.Ticket, d Deps, proj Project, wt orchestrator.Worktree, req baseMergeRequest, reports []store.BuildReportRow, sha string) (store.HandlerCommit, error) {
+	fail := func(detail string) store.HandlerCommit {
+		return mergeEscalation(t, d, req, unverifiableCommitWhat, unverifiableCommitWhy, detail)
 	}
 
 	parents, err := proj.Orch.CommitParents(ctx, wt, sha)
 	if err != nil {
 		return store.HandlerCommit{}, fmt.Errorf("job: merge: adopt: commit parents: %w", err)
 	}
-	if len(parents) != 2 || parents[1] != req.BaseSHA {
-		return fail(), nil
+	recorded := recordedShas(reports)
+	if len(parents) != 2 || parents[1] != req.BaseSHA || len(recorded) == 0 || parents[0] != recorded[len(recorded)-1] {
+		return fail("not this request's merge commit"), nil
 	}
 
 	signed, err := proj.Orch.SignedStatus(ctx, wt, sha)
@@ -442,7 +469,49 @@ func (h shipHandler) adoptMerge(ctx context.Context, t store.Ticket, d Deps, pro
 		return store.HandlerCommit{}, fmt.Errorf("job: merge: adopt: signed status: %w", err)
 	}
 	if !signed {
-		return fail(), nil
+		return fail("unsigned"), nil
+	}
+
+	results, err := runCheckCommands(ctx, d, t, wt, proj, nil)
+	if err != nil {
+		return mergeCommandInfraEscalation(t, d, req, err)
+	}
+	if len(failedKinds(results)) > 0 {
+		return fail("commands failed"), nil
+	}
+
+	changed, err := proj.Orch.ChangedPaths(ctx, wt)
+	if err != nil {
+		return store.HandlerCommit{}, fmt.Errorf("job: merge: adopt: changed paths: %w", err)
+	}
+	if len(changed) != 0 {
+		return fail("tree not clean"), nil
+	}
+
+	commitPaths, err := proj.Orch.ChangedFilesBetween(ctx, wt, parents[0], sha)
+	if err != nil {
+		return store.HandlerCommit{}, fmt.Errorf("job: merge: adopt: changed files between: %w", err)
+	}
+	mergeSidePaths, err := proj.Orch.ChangedFilesBetween(ctx, wt, parents[0], parents[1])
+	if err != nil {
+		return store.HandlerCommit{}, fmt.Errorf("job: merge: adopt: changed files between: %w", err)
+	}
+	allowed := make(map[string]bool, len(mergeSidePaths))
+	for _, p := range mergeSidePaths {
+		allowed[p] = true
+	}
+	for _, p := range commitPaths {
+		if !allowed[p] {
+			return fail("outside the merge"), nil
+		}
+	}
+
+	markers, err := proj.Orch.PathsWithConflictMarkers(ctx, wt, commitPaths)
+	if err != nil {
+		return store.HandlerCommit{}, fmt.Errorf("job: merge: adopt: conflict marker paths: %w", err)
+	}
+	if len(markers) > 0 {
+		return fail("conflict markers remain"), nil
 	}
 
 	maxResumes := d.Machine.Jobs[jobMergeName].MaxResumes
@@ -451,18 +520,17 @@ func (h shipHandler) adoptMerge(ctx context.Context, t store.Ticket, d Deps, pro
 		return store.HandlerCommit{}, fmt.Errorf("job: merge: adopt: session after: %w", err)
 	}
 	var rid *int64
-	if found && newestRun.Outcome != nil && *newestRun.Outcome == string(response.OutcomeOk) {
+	if found && runOutcome(newestRun) == string(response.OutcomeOk) {
 		id := newestRun.ID
 		rid = &id
 	}
 
-	report, err := mergeReportFor(ctx, t, d, rid)
+	report, err := mergeReportFor(ctx, t, d, rid, req)
 	if err != nil {
 		return store.HandlerCommit{}, err
 	}
-	report.Title = mergeTitle(req)
 
-	slog.Warn("base merge commit adopted", "ticket_id", t.ID, "request_id", req.MessageID, "sha", sha)
+	slog.Warn("base merge commit adopted", "ticket_id", t.ID, "request_id", req.MessageID, "run_id", int64OrZero(rid), "commit_sha", sha)
 	return mergeLandedCommit(t, d, req, rid, report, sha)
 }
 
@@ -579,6 +647,7 @@ func mergeSuccessCommit(t store.Ticket, d Deps, rr runResult, sessionCommit *sto
 func (h shipHandler) mergeAfterError(ctx context.Context, t store.Ticket, d Deps, wt orchestrator.Worktree, req baseMergeRequest, sess store.Session, newest store.Run) (store.HandlerCommit, error) {
 	if newest.Interrupted {
 		bump, _ := resumeCharge(newest)
+		slog.Debug("base merge step", "ticket_id", t.ID, "request_id", req.MessageID, "run_id", newest.ID, "step", "resume_interrupted")
 		input := prompt.NamedInput{Label: labelInterrupted, Text: interruptedResumeText, Untrusted: false}
 		return h.runMergeResume(ctx, t, d, wt, req, sess, 0, []prompt.NamedInput{input}, bump)
 	}
@@ -588,9 +657,16 @@ func (h shipHandler) mergeAfterError(ctx context.Context, t store.Ticket, d Deps
 		return store.HandlerCommit{}, fmt.Errorf("job: merge: consecutive invalid outputs: %w", err)
 	}
 	if n == 1 {
+		maxResumes := d.Machine.Jobs[jobMergeName].MaxResumes
+		if sess.Resumes >= maxResumes {
+			slog.Debug("base merge step", "ticket_id", t.ID, "request_id", req.MessageID, "run_id", newest.ID, "step", "resumes_exhausted")
+			return mergeEscalation(t, d, req, mergeResumesWhat, fmt.Sprintf(mergeResumesWhyFmt, maxResumes), ""), nil
+		}
+		slog.Debug("base merge step", "ticket_id", t.ID, "request_id", req.MessageID, "run_id", newest.ID, "step", "resume_invalid", "invalid_count", n)
 		return h.runMergeResume(ctx, t, d, wt, req, sess, 1, []prompt.NamedInput{prompt.Invalid(invalidRetryText(reason))}, true)
 	}
 
+	slog.Debug("base merge step", "ticket_id", t.ID, "request_id", req.MessageID, "run_id", newest.ID, "step", "reopen_after_error")
 	return h.reopenMerge(ctx, t, d, req, "", nil)
 }
 
@@ -650,7 +726,7 @@ func (h shipHandler) reopenMerge(ctx context.Context, t store.Ticket, d Deps, re
 
 	c := baseCommit(t, d)
 	c.Messages = []store.Message{
-		{TicketID: t.ID, Type: msgTypeUpdate, Author: authorSystem, Body: fmt.Sprintf("base merge closed %d", req.MessageID)},
+		{TicketID: t.ID, Type: msgTypeUpdate, Author: authorSystem, Body: baseMergeClosedBody(req.MessageID)},
 		{TicketID: t.ID, Type: msgTypeUpdate, Author: authorSystem, Body: next.body()},
 	}
 	c.ResolveQuestions = resolveIDs

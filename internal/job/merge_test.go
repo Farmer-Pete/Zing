@@ -8,14 +8,18 @@ package job
 
 import (
 	"fmt"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
 	"testing/fstest"
+	"time"
 
 	"zing/internal/gitfixture"
 	"zing/internal/orchestrator"
+	"zing/internal/response"
 	"zing/internal/runtime"
 	"zing/internal/store"
 )
@@ -177,12 +181,8 @@ func TestPollDirtyOtherBaseEscalates(t *testing.T) {
 // POLL still takes its ordinary idle row.
 func TestPollUnknownMergeableStateIdles(t *testing.T) {
 	t.Parallel()
-	s, ticket, gh, tr := shipPublished(t)
-	local := shipHeadSHA(t, s, ticket)
-	gh.prState = orchestrator.PRState{
-		State: questionStateOpen, Draft: true, HeadSHA: local,
-		BaseRef: pbFixtureDefaultBranch, MergeableState: "unknown",
-	}
+	s, ticket, gh, tr := mergePublished(t)
+	gh.prState.MergeableState = "unknown"
 	gh.required = []orchestrator.RequiredCheck{{Context: "ci"}}
 
 	commit, err := shipPollRun(t, s, ticket, gh, tr)
@@ -289,7 +289,7 @@ func TestMergeEscalationSetsTriedAndClearPoll(t *testing.T) {
 // ---- task 5: the merge unit itself ---------------------------------------
 
 // mergeHelloConflict is the content main's own conflicting commit on
-// hello.txt carries (mergeConflictOnMain): different from the ticket
+// hello.txt carries (mergeCommitOnMain): different from the ticket
 // branch's own "hello, world\n" (fixtures/scripts/build/1/1.tree/hello.txt),
 // so merging main into the ticket branch leaves a real "both added"
 // conflict on the one file both sides touch.
@@ -332,7 +332,7 @@ func mergeAgentFS() fstest.MapFS {
 	}
 }
 
-// mergeConflictOnMain commits path (with content) on the project's own
+// mergeCommitOnMain commits path (with content) on the project's own
 // checkout -- still on the project's default branch, exactly where
 // gitfixture.NewSigningRepo left it, since building's own worktree is a
 // separate git-worktree directory -- and pushes that branch to origin, so
@@ -340,7 +340,7 @@ func mergeAgentFS() fstest.MapFS {
 // edit of the same path (overview design's own demo: "main gets a commit
 // that edits the same line of a file the ticket branch edits and is
 // pushed to the bare origin"). It returns the new commit's own sha.
-func mergeConflictOnMain(t *testing.T, s *store.Store, ticket store.Ticket, path string, content []byte) string {
+func mergeCommitOnMain(t *testing.T, s *store.Store, ticket store.Ticket, path string, content []byte) string {
 	t.Helper()
 	proj, err := s.ProjectForTicket(t.Context(), ticket.ID)
 	if err != nil {
@@ -384,47 +384,26 @@ func TestMergeResolvesConflictEndToEnd(t *testing.T) {
 	}
 	t.Parallel()
 	s, ticket, remoteDir := shipTicketReady(t)
-	baseSHA := mergeConflictOnMain(t, s, ticket, "hello.txt", []byte(mergeHelloConflict))
+	baseSHA := mergeCommitOnMain(t, s, ticket, "hello.txt", []byte(mergeHelloConflict))
 
 	gh := &shipGitHub{}
 	tr := &shipTracker{}
 	rt := runtime.NewFake(mergeAgentFS())
 
-	deps := shipClaim(t, s, rt, ticket.ID, gh, tr)
-	commit, err := (shipHandler{}).Run(t.Context(), ticket, deps) // PUBLISH
-	if err != nil {
-		t.Fatalf("PUBLISH: %v", err)
-	}
-	if commit.Escalation != nil {
-		t.Fatalf("PUBLISH escalated: %+v", commit.Escalation.Payload)
-	}
-	pbApply(t, s, ticket, commit)
-	ticket = pbGetTicket(t, s, ticket.ID)
+	ticket = mergeDirtyAfterPublish(t, s, ticket, rt, gh, tr)
+	preMergeHead := gh.prState.HeadSHA
 
-	preMergeHead := shipHeadSHA(t, s, ticket)
-	gh.prState = orchestrator.PRState{
-		State: questionStateOpen, Draft: true, HeadSHA: preMergeHead,
-		BaseRef: pbFixtureDefaultBranch, MergeableState: mergeableStateDirty,
-	}
-
+	var deps Deps
 	landed := false
-	for i := 0; i < 5 && !landed; i++ {
-		ticket = pbGetTicket(t, s, ticket.ID)
+	var last store.HandlerCommit
+	for i := 0; i < 4 && !landed; i++ {
 		deps = shipClaim(t, s, rt, ticket.ID, gh, tr)
-		commit, err = (shipHandler{}).Run(t.Context(), ticket, deps)
-		if err != nil {
-			t.Fatalf("tick %d: %v", i, err)
-		}
-		if commit.Escalation != nil {
-			t.Fatalf("tick %d escalated: %+v", i, commit.Escalation.Payload)
-		}
-		pbApply(t, s, ticket, commit)
-		landed = shipHasMergeLanded(commit)
+		ticket, last = mergeRunTick(t, s, deps, ticket, fmt.Sprintf("tick %d", i))
+		landed = shipHasMergeLanded(last)
 	}
 	if !landed {
-		t.Fatal("base merge did not land within 5 ticks")
+		t.Fatal("base merge did not land within 4 ticks")
 	}
-	ticket = pbGetTicket(t, s, ticket.ID)
 
 	proj := deps.Projects[ticket.ProjectID]
 	wt, _, err := proj.Orch.EnsureWorktree(t.Context(), ticket.ID, ticket.Title)
@@ -476,14 +455,7 @@ func TestMergeResolvesConflictEndToEnd(t *testing.T) {
 	// ticket's pre-merge commit, pushes the merged branch.
 	gh.prState.HeadSHA = preMergeHead
 	deps = shipClaim(t, s, rt, ticket.ID, gh, tr)
-	commit, err = (shipHandler{}).Run(t.Context(), ticket, deps) // POLL: push
-	if err != nil {
-		t.Fatalf("final POLL: %v", err)
-	}
-	if commit.Escalation != nil {
-		t.Fatalf("final POLL escalated: %+v", commit.Escalation.Payload)
-	}
-	pbApply(t, s, ticket, commit)
+	ticket, _ = mergeRunTick(t, s, deps, ticket, "final POLL: push")
 
 	out, err := gitfixture.Git(t.Context(), remoteDir, "rev-parse", "refs/heads/"+*ticket.Branch)
 	if err != nil {
@@ -498,8 +470,7 @@ func TestMergeResolvesConflictEndToEnd(t *testing.T) {
 // and the check_loops/max_resumes gates --------------------------------
 
 // mergeOtherTxt is a path main's own commit touches that the ticket branch
-// never changes (mergeConflictOnMain, despite its name, is just "a commit
-// on main"): merging it leaves no conflict at all.
+// never changes: merging it leaves no conflict at all.
 const mergeOtherTxt = "other.txt"
 
 // mergeDirtyAfterPublish runs PUBLISH on a shipTicketReady ticket, then
@@ -552,7 +523,7 @@ func TestMergeCleanSkipsAgent(t *testing.T) {
 	}
 	t.Parallel()
 	s, ticket, _ := shipTicketReady(t)
-	mergeConflictOnMain(t, s, ticket, mergeOtherTxt, []byte("main only\n"))
+	mergeCommitOnMain(t, s, ticket, mergeOtherTxt, []byte("main only\n"))
 
 	gh := &shipGitHub{}
 	tr := &shipTracker{}
@@ -596,6 +567,57 @@ func TestMergeCleanSkipsAgent(t *testing.T) {
 	}
 }
 
+// TestMergeLandSigningFailureEscalates proves landMerge's own CommitMerge
+// failure path (overview design "One merge tick"): when CHECK passes but
+// the commit itself cannot be signed, the tick escalates
+// commitSigningFailedWhat with Tried naming the open request, and lands
+// nothing.
+func TestMergeLandSigningFailureEscalates(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow end-to-end flow; runs in the full suite")
+	}
+	t.Parallel()
+	s, ticket, _ := shipTicketReady(t)
+	mergeCommitOnMain(t, s, ticket, mergeOtherTxt, []byte("main only\n"))
+
+	gh := &shipGitHub{}
+	tr := &shipTracker{}
+	rt := runtime.NewFake(fstest.MapFS{})
+
+	ticket = mergeDirtyAfterPublish(t, s, ticket, rt, gh, tr)
+
+	deps := shipClaim(t, s, rt, ticket.ID, gh, tr)
+	ticket, _ = mergeRunTick(t, s, deps, ticket, "poll writes request") // POLL
+
+	deps = shipClaim(t, s, rt, ticket.ID, gh, tr)
+	proj := deps.Projects[ticket.ProjectID]
+	wt, _, err := proj.Orch.EnsureWorktree(t.Context(), ticket.ID, ticket.Title)
+	if err != nil {
+		t.Fatalf("EnsureWorktree: %v", err)
+	}
+	badKey := filepath.Join(t.TempDir(), "no-such-signing-key")
+	if out, cfgErr := gitfixture.Git(t.Context(), wt.Dir(), "config", "user.signingKey", badKey); cfgErr != nil {
+		t.Fatalf("git config user.signingKey: %v: %s", cfgErr, out)
+	}
+
+	commit, err := (shipHandler{}).Run(t.Context(), ticket, deps) // StartBaseMerge + CHECK + LAND: signing fails
+	if err != nil {
+		t.Fatalf("merge tick: %v", err)
+	}
+	if commit.Escalation == nil {
+		t.Fatal("commit.Escalation is nil, want a signing-failure escalation")
+	}
+	if commit.Escalation.Payload.What != commitSigningFailedWhat {
+		t.Errorf("What = %q, want %q", commit.Escalation.Payload.What, commitSigningFailedWhat)
+	}
+	if !strings.HasPrefix(commit.Escalation.Payload.Tried, "base merge ") {
+		t.Errorf("Tried = %q, want prefix %q", commit.Escalation.Payload.Tried, "base merge ")
+	}
+	if shipHasMergeLanded(commit) {
+		t.Error("commit landed the merge, want a signing-failure escalation instead")
+	}
+}
+
 // mergeConflictMarkerStill is a hello.txt resolution that still carries
 // git's own conflict marker lines: turn 1's own claimed fix for
 // TestMergeCheckFailureResumes, so CHECK's own ConflictMarkerPaths read,
@@ -625,7 +647,7 @@ func TestMergeCheckFailureResumes(t *testing.T) {
 	}
 	t.Parallel()
 	s, ticket, _ := shipTicketReady(t)
-	mergeConflictOnMain(t, s, ticket, "hello.txt", []byte(mergeHelloConflict))
+	mergeCommitOnMain(t, s, ticket, "hello.txt", []byte(mergeHelloConflict))
 
 	gh := &shipGitHub{}
 	tr := &shipTracker{}
@@ -703,7 +725,7 @@ func TestMergeOutsidePathFailsCheck(t *testing.T) {
 	}
 	t.Parallel()
 	s, ticket, _ := shipTicketReady(t)
-	mergeConflictOnMain(t, s, ticket, "hello.txt", []byte(mergeHelloConflict))
+	mergeCommitOnMain(t, s, ticket, "hello.txt", []byte(mergeHelloConflict))
 
 	gh := &shipGitHub{}
 	tr := &shipTracker{}
@@ -784,7 +806,7 @@ func TestMergeCheckLoopsEscalate(t *testing.T) {
 	}
 	t.Parallel()
 	s, ticket, _ := shipTicketReady(t)
-	mergeConflictOnMain(t, s, ticket, "other2.txt", []byte("main only, again\n"))
+	mergeCommitOnMain(t, s, ticket, "other2.txt", []byte("main only, again\n"))
 
 	checkLoops := pbMachine(t).Jobs[jobMergeName].CheckLoops
 
@@ -877,7 +899,7 @@ func TestMergeQuestionEscalatesAndRetryCarriesNotes(t *testing.T) {
 	}
 	t.Parallel()
 	s, ticket, _ := shipTicketReady(t)
-	mergeConflictOnMain(t, s, ticket, "hello.txt", []byte(mergeHelloConflict))
+	mergeCommitOnMain(t, s, ticket, "hello.txt", []byte(mergeHelloConflict))
 
 	gh := &shipGitHub{}
 	tr := &shipTracker{}
@@ -903,6 +925,9 @@ func TestMergeQuestionEscalatesAndRetryCarriesNotes(t *testing.T) {
 	firstID, ok := baseMergeTriedID(tried)
 	if !ok {
 		t.Fatalf("baseMergeTriedID(%q) = (_, false), want a %q prefix", tried, "base merge ")
+	}
+	if len(commit.Runs) != 1 || runOutcome(commit.Runs[0]) != string(response.OutcomeQuestion) {
+		t.Errorf("commit.Runs = %+v, want exactly one run with outcome %q", commit.Runs, response.OutcomeQuestion)
 	}
 	pbApply(t, s, ticket, commit)
 	ticket = pbGetTicket(t, s, ticket.ID)
@@ -1000,7 +1025,7 @@ func TestMergeInterruptedRunResumesFree(t *testing.T) {
 	}
 	t.Parallel()
 	s, ticket, _ := shipTicketReady(t)
-	mergeConflictOnMain(t, s, ticket, "hello.txt", []byte(mergeHelloConflict))
+	mergeCommitOnMain(t, s, ticket, "hello.txt", []byte(mergeHelloConflict))
 
 	gh := &shipGitHub{}
 	tr := &shipTracker{}
@@ -1093,6 +1118,165 @@ func TestMergeInterruptedRunResumesFree(t *testing.T) {
 	}
 }
 
+// TestMergeInvalidOutputResumesCharged proves mergeAfterError's own charged
+// resume after a first invalid output (overview design "One merge tick"):
+// the agent's first turn returns an unparseable document, which only marks
+// "response invalid run <rid>" rather than escalating; the next tick
+// resumes the very same session with the invalid input, charged (Resumes
+// becomes 1).
+func TestMergeInvalidOutputResumesCharged(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow end-to-end flow; runs in the full suite")
+	}
+	t.Parallel()
+	s, ticket, _ := shipTicketReady(t)
+	mergeCommitOnMain(t, s, ticket, "hello.txt", []byte(mergeHelloConflict))
+
+	gh := &shipGitHub{}
+	tr := &shipTracker{}
+	const mergeInvalidSessionID = "merge-invalid-sess"
+	const invalidReason = "no zing element in final message"
+	scripted := &pbScriptedRuntime{t: t, steps: []pbScriptedStep{{
+		res: runtime.RunResult{SessionID: mergeInvalidSessionID, ExitCode: 0, AgentTime: time.Second},
+		err: &runtime.InvalidOutputError{Reason: invalidReason},
+	}}}
+
+	ticket = mergeDirtyAfterPublish(t, s, ticket, scripted, gh, tr)
+
+	deps := shipClaim(t, s, scripted, ticket.ID, gh, tr)
+	ticket, _ = mergeRunTick(t, s, deps, ticket, "poll writes request") // POLL
+
+	deps = shipClaim(t, s, scripted, ticket.ID, gh, tr)
+	firstCommit, err := (shipHandler{}).Run(t.Context(), ticket, deps) // runMergeFirst: invalid output
+	if err != nil {
+		t.Fatalf("run first: %v", err)
+	}
+	if firstCommit.Escalation != nil {
+		t.Fatalf("first invalid output escalated: %+v", firstCommit.Escalation.Payload)
+	}
+	pbApply(t, s, ticket, firstCommit)
+	ticket = pbGetTicket(t, s, ticket.ID)
+
+	scripted.steps = append(scripted.steps, pbBuildStep([]string{pbHelloTxt}, nil, mergeInvalidSessionID))
+	deps = shipClaim(t, s, scripted, ticket.ID, gh, tr)
+	resumeCommit, err := (shipHandler{}).Run(t.Context(), ticket, deps) // mergeAfterError: charged resume
+	if err != nil {
+		t.Fatalf("resume: %v", err)
+	}
+	if resumeCommit.Escalation != nil {
+		t.Fatalf("resume escalated: %+v", resumeCommit.Escalation.Payload)
+	}
+
+	if len(scripted.reqs) != 2 {
+		t.Fatalf("scripted.reqs = %+v, want exactly two", scripted.reqs)
+	}
+	resumeReq := scripted.reqs[1]
+	if !strings.Contains(resumeReq.Prompt, invalidReason) {
+		t.Errorf("resume prompt = %q, want it to contain %q", resumeReq.Prompt, invalidReason)
+	}
+	if resumeReq.SessionID != mergeInvalidSessionID {
+		t.Errorf("resume request SessionID = %q, want %q", resumeReq.SessionID, mergeInvalidSessionID)
+	}
+
+	sessions, err := s.SessionsForTicket(t.Context(), ticket.ID)
+	if err != nil {
+		t.Fatalf("SessionsForTicket: %v", err)
+	}
+	mergeResumes := -1
+	for _, sv := range sessions {
+		if sv.Job == jobMergeName {
+			mergeResumes = sv.Resumes
+		}
+	}
+	if mergeResumes != 1 {
+		t.Errorf("session Resumes after the charged invalid-output resume = %d, want 1", mergeResumes)
+	}
+}
+
+// TestMergeRetriedErrorReopens proves mergeAfterError's own fall-through
+// (overview design "One merge tick"): once a merge session's own error run
+// has already escalated and the owner retried it through the generic
+// shipping row (not a merge-specific one), a later tick finds the session
+// still sitting on that same settled error run and reopens the request
+// rather than resuming it again.
+func TestMergeRetriedErrorReopens(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow end-to-end flow; runs in the full suite")
+	}
+	t.Parallel()
+	s, ticket, _ := shipTicketReady(t)
+	mergeCommitOnMain(t, s, ticket, "hello.txt", []byte(mergeHelloConflict))
+
+	gh := &shipGitHub{}
+	tr := &shipTracker{}
+	rt := runtime.NewFake(fstest.MapFS{})
+
+	ticket = mergeDirtyAfterPublish(t, s, ticket, rt, gh, tr)
+
+	deps := shipClaim(t, s, rt, ticket.ID, gh, tr)
+	ticket, _ = mergeRunTick(t, s, deps, ticket, "poll writes request") // POLL
+
+	req, open, err := openBaseMerge(t.Context(), ticket, Deps{Store: s})
+	if err != nil {
+		t.Fatalf("openBaseMerge: %v", err)
+	}
+	if !open {
+		t.Fatal("openBaseMerge: no open request after POLL")
+	}
+
+	// A session reserved directly through the store, its one run already
+	// terminalized as an error (outcome error, not interrupted): the shape
+	// a merge run's own escalation, already answered once through the
+	// generic shipping retry row, leaves behind once the owner's retry
+	// resolved the escalation but never reopened the merge-specific
+	// request itself.
+	deps = shipClaim(t, s, rt, ticket.ID, gh, tr)
+	rsv, reserveErr := s.Reserve(t.Context(), ticket.ID, deps.Owner, deps.Expires, store.SessionUpsert{Job: jobMergeName, Runtime: pbRuntimeClaude}, store.RunSeed{Model: pbModelClaudeX})
+	if reserveErr != nil {
+		t.Fatalf("Reserve: %v", reserveErr)
+	}
+	const mergeRetriedSessionID = "merge-retried-sess"
+	ext := mergeRetriedSessionID
+	outcome, exitCode, agentSeconds := string(response.OutcomeError), 1, 1
+	applied, commitErr := s.CommitHandlerResult(t.Context(), store.HandlerCommit{
+		TicketID: ticket.ID, Owner: deps.Owner, Expires: deps.Expires,
+		Session: &store.SessionUpsert{ID: &rsv.SessionID, ExternalID: &ext},
+		Runs:    []store.Run{{ID: rsv.RunID, Outcome: &outcome, ExitCode: &exitCode, AgentSeconds: &agentSeconds}},
+	})
+	if commitErr != nil || !applied {
+		t.Fatalf("CommitHandlerResult(settled error run): applied=%v err=%v", applied, commitErr)
+	}
+
+	deps = shipClaim(t, s, rt, ticket.ID, gh, tr)
+	ticket = pbGetTicket(t, s, ticket.ID)
+	commit, err := (shipHandler{}).Run(t.Context(), ticket, deps) // mergeAfterError: fall-through reopen
+	if err != nil {
+		t.Fatalf("reopen tick: %v", err)
+	}
+	if commit.Escalation != nil {
+		t.Fatalf("reopen tick escalated: %+v", commit.Escalation.Payload)
+	}
+	if !commit.ClearPoll {
+		t.Error("commit.ClearPoll = false, want true")
+	}
+	closedBody := fmt.Sprintf("base merge closed %d", req.MessageID)
+	foundClosed, foundRequest := false, false
+	for _, m := range commit.Messages {
+		switch {
+		case m.Body == closedBody:
+			foundClosed = true
+		case strings.HasPrefix(m.Body, "base merge requested after run "):
+			foundRequest = true
+		}
+	}
+	if !foundClosed {
+		t.Errorf("commit.Messages = %+v, want %q", commit.Messages, closedBody)
+	}
+	if !foundRequest {
+		t.Errorf("commit.Messages = %+v, want a fresh request marker", commit.Messages)
+	}
+}
+
 // ---- task 8: adoptMerge, and StartBaseMerge's own already-merged branch --
 
 // TestMergeAdoptsCommitAfterCrash proves adoptMerge (overview design
@@ -1108,7 +1292,7 @@ func TestMergeAdoptsCommitAfterCrash(t *testing.T) {
 	}
 	t.Parallel()
 	s, ticket, _ := shipTicketReady(t)
-	baseSHA := mergeConflictOnMain(t, s, ticket, "hello.txt", []byte(mergeHelloConflict))
+	baseSHA := mergeCommitOnMain(t, s, ticket, "hello.txt", []byte(mergeHelloConflict))
 
 	gh := &shipGitHub{}
 	tr := &shipTracker{}
@@ -1203,6 +1387,158 @@ func TestMergeAdoptsCommitAfterCrash(t *testing.T) {
 	}
 	if !found {
 		t.Errorf("BuildReports has no row with commit_sha %s", mergeSHA)
+	}
+}
+
+// TestMergeAdoptForeignOrdinaryCommitEscalates proves adoptMerge refuses an
+// ordinary, single-parent commit left at the tip by anyone with bash in the
+// worktree (overview design nongoal "Adopting a merge commit the owner made
+// by hand"): it is signed, but it is not a merge at all, so the parents
+// check fails before any of adoptMerge's other gates ever run.
+func TestMergeAdoptForeignOrdinaryCommitEscalates(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow end-to-end flow; runs in the full suite")
+	}
+	t.Parallel()
+	s, ticket, _ := shipTicketReady(t)
+	mergeCommitOnMain(t, s, ticket, mergeOtherTxt, []byte("main only\n"))
+
+	gh := &shipGitHub{}
+	tr := &shipTracker{}
+	rt := runtime.NewFake(fstest.MapFS{})
+
+	ticket = mergeDirtyAfterPublish(t, s, ticket, rt, gh, tr)
+
+	deps := shipClaim(t, s, rt, ticket.ID, gh, tr)
+	ticket, _ = mergeRunTick(t, s, deps, ticket, "poll writes request") // POLL
+
+	req, open, err := openBaseMerge(t.Context(), ticket, Deps{Store: s})
+	if err != nil {
+		t.Fatalf("openBaseMerge: %v", err)
+	}
+	if !open {
+		t.Fatal("openBaseMerge: no open request after POLL")
+	}
+
+	deps = shipClaim(t, s, rt, ticket.ID, gh, tr)
+	proj := deps.Projects[ticket.ProjectID]
+	wt, _, err := proj.Orch.EnsureWorktree(t.Context(), ticket.ID, ticket.Title)
+	if err != nil {
+		t.Fatalf("EnsureWorktree: %v", err)
+	}
+	if writeErr := os.WriteFile(filepath.Join(wt.Dir(), "foreign.txt"), []byte("not a merge\n"), 0o644); writeErr != nil {
+		t.Fatalf("write foreign.txt: %v", writeErr)
+	}
+	if out, addErr := gitfixture.Git(t.Context(), wt.Dir(), "add", "foreign.txt"); addErr != nil {
+		t.Fatalf("git add: %v: %s", addErr, out)
+	}
+	if out, commitErr := gitfixture.Git(t.Context(), wt.Dir(), "commit", "-q", "-S", "-m", "a foreign commit, not a merge"); commitErr != nil {
+		t.Fatalf("git commit: %v: %s", commitErr, out)
+	}
+	shipReleaseClaim(t, s, ticket.ID, deps)
+
+	deps = shipClaim(t, s, rt, ticket.ID, gh, tr)
+	ticket = pbGetTicket(t, s, ticket.ID)
+	commit, err := (shipHandler{}).Run(t.Context(), ticket, deps)
+	if err != nil {
+		t.Fatalf("adopt tick: %v", err)
+	}
+	if commit.Escalation == nil {
+		t.Fatal("commit.Escalation is nil, want an unverifiable_commit escalation")
+	}
+	if commit.Escalation.Payload.What != unverifiableCommitWhat {
+		t.Errorf("What = %q, want %q", commit.Escalation.Payload.What, unverifiableCommitWhat)
+	}
+	tried := commit.Escalation.Payload.Tried
+	wantTried := fmt.Sprintf("base merge %d\nnot this request's merge commit", req.MessageID)
+	if tried != wantTried {
+		t.Errorf("Tried = %q, want %q", tried, wantTried)
+	}
+	if shipHasMergeLanded(commit) {
+		t.Error("commit landed the merge, want an escalation instead")
+	}
+}
+
+// TestMergeAdoptWrongSecondParentEscalates proves adoptMerge refuses a
+// two-parent commit whose second parent is not req.BaseSHA: shape alone
+// (signed, two parents) is not enough to trust it as this request's own
+// merge.
+func TestMergeAdoptWrongSecondParentEscalates(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow end-to-end flow; runs in the full suite")
+	}
+	t.Parallel()
+	s, ticket, _ := shipTicketReady(t)
+	mergeCommitOnMain(t, s, ticket, mergeOtherTxt, []byte("main only\n"))
+
+	gh := &shipGitHub{}
+	tr := &shipTracker{}
+	rt := runtime.NewFake(fstest.MapFS{})
+
+	ticket = mergeDirtyAfterPublish(t, s, ticket, rt, gh, tr)
+
+	deps := shipClaim(t, s, rt, ticket.ID, gh, tr)
+	ticket, _ = mergeRunTick(t, s, deps, ticket, "poll writes request") // POLL
+
+	req, open, err := openBaseMerge(t.Context(), ticket, Deps{Store: s})
+	if err != nil {
+		t.Fatalf("openBaseMerge: %v", err)
+	}
+	if !open {
+		t.Fatal("openBaseMerge: no open request after POLL")
+	}
+
+	deps = shipClaim(t, s, rt, ticket.ID, gh, tr)
+	proj := deps.Projects[ticket.ProjectID]
+	wt, _, err := proj.Orch.EnsureWorktree(t.Context(), ticket.ID, ticket.Title)
+	if err != nil {
+		t.Fatalf("EnsureWorktree: %v", err)
+	}
+
+	headOut, headErr := gitfixture.Git(t.Context(), wt.Dir(), "rev-parse", "HEAD")
+	if headErr != nil {
+		t.Fatalf("git rev-parse HEAD: %v", headErr)
+	}
+	head := strings.TrimSpace(string(headOut))
+	// otherParent is an ancestor already reachable from HEAD (the merge
+	// base with the fetched base branch), not a brand new commit: using an
+	// unreachable commit here would itself add a second unrecorded commit,
+	// tripping driveMerge's own foreign_commits branch before adoptMerge
+	// ever runs.
+	mergeBaseOut, mergeBaseErr := gitfixture.Git(t.Context(), wt.Dir(), "merge-base", "refs/zing/base/"+pbFixtureDefaultBranch, "HEAD")
+	if mergeBaseErr != nil {
+		t.Fatalf("git merge-base: %v: %s", mergeBaseErr, mergeBaseOut)
+	}
+	otherParent := strings.TrimSpace(string(mergeBaseOut))
+	fakeMergeOut, fakeMergeErr := gitfixture.Git(t.Context(), wt.Dir(), "commit-tree", "HEAD^{tree}", "-p", head, "-p", otherParent, "-S", "-m", "a merge that is not this request's own")
+	if fakeMergeErr != nil {
+		t.Fatalf("git commit-tree (fake merge): %v: %s", fakeMergeErr, fakeMergeOut)
+	}
+	fakeMerge := strings.TrimSpace(string(fakeMergeOut))
+	if out, updateErr := gitfixture.Git(t.Context(), wt.Dir(), "update-ref", "HEAD", fakeMerge); updateErr != nil {
+		t.Fatalf("git update-ref HEAD: %v: %s", updateErr, out)
+	}
+	shipReleaseClaim(t, s, ticket.ID, deps)
+
+	deps = shipClaim(t, s, rt, ticket.ID, gh, tr)
+	ticket = pbGetTicket(t, s, ticket.ID)
+	commit, err := (shipHandler{}).Run(t.Context(), ticket, deps)
+	if err != nil {
+		t.Fatalf("adopt tick: %v", err)
+	}
+	if commit.Escalation == nil {
+		t.Fatal("commit.Escalation is nil, want an unverifiable_commit escalation")
+	}
+	if commit.Escalation.Payload.What != unverifiableCommitWhat {
+		t.Errorf("What = %q, want %q", commit.Escalation.Payload.What, unverifiableCommitWhat)
+	}
+	tried := commit.Escalation.Payload.Tried
+	wantTried := fmt.Sprintf("base merge %d\nnot this request's merge commit", req.MessageID)
+	if tried != wantTried {
+		t.Errorf("Tried = %q, want %q", tried, wantTried)
+	}
+	if shipHasMergeLanded(commit) {
+		t.Error("commit landed the merge, want an escalation instead")
 	}
 }
 

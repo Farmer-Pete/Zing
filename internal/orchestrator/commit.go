@@ -302,7 +302,23 @@ func (o *Orchestrator) CommitMerge(ctx context.Context, wt Worktree, m CommitMes
 // resolved tree would stop being a merge. A failed update-ref is logged
 // WARN ("merge head restore failed"), never returned; the returned error
 // is resetAfterUnsignedCommit's own "commit signing failed: ..." error.
+//
+// When "git commit -S" itself failed outright -- a pre-commit hook or a
+// signing error that never produced a commit -- HEAD is still priorHead
+// and MERGE_HEAD still resolves to mergeHead: nothing moved, so there is
+// nothing to reset and no MERGE_HEAD to restore. Only an unsigned or
+// unverifiable commit, which did move HEAD, needs the soft reset and the
+// MERGE_HEAD restore.
 func (o *Orchestrator) resetAfterUnsignedMerge(ctx context.Context, wt Worktree, priorHead, mergeHead, reason string) error {
+	checkCtx, checkCancel := context.WithTimeout(context.WithoutCancel(ctx), resetUnsignedCommitTimeout)
+	defer checkCancel()
+	headNow, headErr := o.run.Output(checkCtx, wt.dir, "git", "rev-parse", "HEAD")
+	mergeHeadNow, mergeHeadErr := o.run.Output(checkCtx, wt.dir, "git", "rev-parse", "-q", "--verify", "MERGE_HEAD")
+	if headErr == nil && strings.TrimSpace(headNow) == priorHead &&
+		mergeHeadErr == nil && strings.TrimSpace(mergeHeadNow) == mergeHead {
+		return errors.New("commit signing failed: " + reason)
+	}
+
 	err := o.resetAfterUnsignedCommit(ctx, wt, priorHead, reason)
 
 	resetCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), resetUnsignedCommitTimeout)

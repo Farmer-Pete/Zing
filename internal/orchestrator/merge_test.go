@@ -4,7 +4,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
-	"sort"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -82,7 +82,7 @@ func TestCommitMergeSignedTwoParents(t *testing.T) {
 	if err != nil {
 		t.Fatalf("StartBaseMerge: unexpected error: %v", err)
 	}
-	if want := []string{mergeSharedPath}; !sliceEqual(conflicted, want) {
+	if want := []string{mergeSharedPath}; !slices.Equal(conflicted, want) {
 		t.Fatalf("StartBaseMerge conflicted = %v, want %v", conflicted, want)
 	}
 
@@ -101,7 +101,7 @@ func TestCommitMergeSignedTwoParents(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CommitParents: %v", err)
 	}
-	if want := []string{f.ticketHead, f.baseSHA}; !sliceEqual(parents, want) {
+	if want := []string{f.ticketHead, f.baseSHA}; !slices.Equal(parents, want) {
 		t.Errorf("CommitParents = %v, want %v", parents, want)
 	}
 
@@ -146,7 +146,7 @@ func TestStartBaseMergeResumesInProgress(t *testing.T) {
 	if err != nil {
 		t.Fatalf("StartBaseMerge (second): unexpected error: %v", err)
 	}
-	if !sliceEqual(first, second) {
+	if !slices.Equal(first, second) {
 		t.Errorf("second StartBaseMerge paths = %v, want %v", second, first)
 	}
 
@@ -246,7 +246,7 @@ func TestConflictMarkerPaths(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ConflictMarkerPaths: unexpected error: %v", err)
 	}
-	if want := []string{mergeSharedPath}; !sliceEqual(marked, want) {
+	if want := []string{mergeSharedPath}; !slices.Equal(marked, want) {
 		t.Fatalf("ConflictMarkerPaths = %v, want %v", marked, want)
 	}
 
@@ -279,7 +279,7 @@ func TestMergeSidePaths(t *testing.T) {
 		t.Fatalf("MergeSidePaths: unexpected error: %v", err)
 	}
 	want := []string{mergeBaseOnlyPath, mergeSharedPath, mergeTicketOnlyPath}
-	if !sliceEqual(got, want) {
+	if !slices.Equal(got, want) {
 		t.Errorf("MergeSidePaths = %v, want %v", got, want)
 	}
 
@@ -380,24 +380,63 @@ func TestCommitMergeRefusesWithoutMerge(t *testing.T) {
 }
 
 // -----------------------------------------------------------------------
-// test helpers
+// MergeChangedPaths
 // -----------------------------------------------------------------------
 
-func sliceEqual(a, b []string) bool {
-	if len(a) != len(b) {
-		return false
+// TestMergeChangedPaths proves MergeChangedPaths over a real, unresolved
+// conflict (perimeter.go): the index still carries mergeSharedPath
+// unmerged, mergeBaseOnlyPath is staged clean from the base side, and an
+// untracked file in a subdirectory the merge never touched should still be
+// reported, since MergeChangedPaths lists the working tree's own changes,
+// not the merge's own side set. mergeTicketOnlyPath, already part of HEAD
+// before the merge and untouched by the base side, carries no status at
+// all and so is absent from the result.
+func TestMergeChangedPaths(t *testing.T) {
+	t.Parallel()
+	ctx := t.Context()
+	f := newMergeConflictFixture(t, 9)
+
+	if _, err := f.o.StartBaseMerge(ctx, f.wt, f.baseSHA); err != nil {
+		t.Fatalf("StartBaseMerge: unexpected error: %v", err)
 	}
-	as := append([]string(nil), a...)
-	bs := append([]string(nil), b...)
-	sort.Strings(as)
-	sort.Strings(bs)
-	for i := range as {
-		if as[i] != bs[i] {
-			return false
-		}
+
+	const untrackedPath = "scratch/untracked.txt"
+	if err := os.MkdirAll(filepath.Join(f.wt.Dir(), "scratch"), 0o755); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
 	}
-	return true
+	writeTestFile(t, filepath.Join(f.wt.Dir(), untrackedPath), "not part of the merge\n")
+
+	got, err := f.o.MergeChangedPaths(ctx, f.wt)
+	if err != nil {
+		t.Fatalf("MergeChangedPaths: unexpected error: %v", err)
+	}
+	want := []string{mergeBaseOnlyPath, untrackedPath, mergeSharedPath}
+	slices.Sort(want)
+	if !slices.Equal(got, want) {
+		t.Errorf("MergeChangedPaths = %v, want %v", got, want)
+	}
+
+	// No merge in progress in a fresh worktree.
+	fresh := newSigningFixture(t, true)
+	freshRepo := newSigningTestRepo(t, fresh)
+	freshO := newTestOrchestrator(t, freshRepo, execRunner{})
+	freshWT, err := freshO.PrepareWorktree(ctx, 61, "", nil)
+	if err != nil {
+		t.Fatalf("PrepareWorktree: %v", err)
+	}
+	_, err = freshO.MergeChangedPaths(ctx, freshWT)
+	if err == nil {
+		t.Fatal("MergeChangedPaths: expected an error with no merge in progress, got nil")
+	}
+	const wantErr = "orchestrator: merge changed paths: no merge in progress"
+	if err.Error() != wantErr {
+		t.Errorf("MergeChangedPaths error = %q, want %q", err.Error(), wantErr)
+	}
 }
+
+// -----------------------------------------------------------------------
+// test helpers
+// -----------------------------------------------------------------------
 
 func readFileString(t *testing.T, path string) string {
 	t.Helper()

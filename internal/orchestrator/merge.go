@@ -143,18 +143,52 @@ func (o *Orchestrator) ConflictMarkerPaths(ctx context.Context, wt Worktree) ([]
 	for _, p := range changed {
 		seen[p] = struct{}{}
 	}
+	candidates := make([]string, 0, len(seen))
+	for p := range seen {
+		candidates = append(candidates, p)
+	}
 
-	root, err := os.OpenRoot(wt.dir)
+	marked, err := filterConflictMarkerPaths(wt.dir, candidates)
 	if err != nil {
 		return nil, fmt.Errorf("orchestrator: conflict marker paths: %w", err)
+	}
+	return marked, nil
+}
+
+// PathsWithConflictMarkers filters paths to the ones, sorted, whose current
+// working-tree file holds a conflict marker line -- the same test
+// ConflictMarkerPaths runs, but over a caller-supplied path list rather
+// than the index's own unmerged paths. adoptMerge (merge job unit) uses
+// this to check an already-committed merge's own changed paths, once
+// MERGE_HEAD no longer resolves.
+func (o *Orchestrator) PathsWithConflictMarkers(ctx context.Context, wt Worktree, paths []string) ([]string, error) {
+	if err := o.revalidate(ctx, wt); err != nil {
+		return nil, fmt.Errorf("orchestrator: paths with conflict markers: %w", err)
+	}
+	marked, err := filterConflictMarkerPaths(wt.dir, paths)
+	if err != nil {
+		return nil, fmt.Errorf("orchestrator: paths with conflict markers: %w", err)
+	}
+	return marked, nil
+}
+
+// filterConflictMarkerPaths is ConflictMarkerPaths' and
+// PathsWithConflictMarkers' shared scan: candidates, sorted, whose
+// working-tree file (read through os.OpenRoot(dir), so a path never
+// escapes it) has a line starting "<<<<<<< " or ">>>>>>> ". An absent file
+// or a non-regular file is skipped.
+func filterConflictMarkerPaths(dir string, candidates []string) ([]string, error) {
+	root, err := os.OpenRoot(dir)
+	if err != nil {
+		return nil, err
 	}
 	defer root.Close()
 
 	marked := make([]string, 0)
-	for p := range seen {
+	for _, p := range candidates {
 		has, err := fileHasConflictMarkers(root, p)
 		if err != nil {
-			return nil, fmt.Errorf("orchestrator: conflict marker paths: %s: %w", p, err)
+			return nil, fmt.Errorf("%s: %w", p, err)
 		}
 		if has {
 			marked = append(marked, p)

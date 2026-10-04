@@ -564,6 +564,18 @@ var (
 	baseMergeTriedLine     = regexp.MustCompile(`^base merge ([1-9]\d*)$`)
 )
 
+// baseMergeClosedBody renders the closed end marker baseMergeEndLine
+// parses back: "base merge closed <id>".
+func baseMergeClosedBody(id int64) string {
+	return fmt.Sprintf("base merge closed %d", id)
+}
+
+// baseMergeLandedBody renders the landed end marker baseMergeEndLine
+// parses back: "base merge landed <id> sha <sha>".
+func baseMergeLandedBody(id int64, sha string) string {
+	return fmt.Sprintf("base merge landed %d sha %s", id, sha)
+}
+
 // baseMergeRequest is one base-merge request marker, read back or about to
 // be written (overview design, "Markers" table).
 type baseMergeRequest struct {
