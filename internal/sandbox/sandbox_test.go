@@ -882,3 +882,29 @@ func TestJudgeProofWritesTempScenariosFile(t *testing.T) {
 		t.Errorf("scenarios file still exists after runDir is removed (stat err = %v)", err)
 	}
 }
+
+// ---- denying outbound git transports (#49) -----------------------------
+
+// TestProfilesDenyGitTransports is sandbox-safe (it reads text, never runs
+// sandbox-exec), so a build itself can watch it fail before the fix and
+// pass after. It proves build.sb and judge.sb both carry the port 22/9418
+// outbound deny and the "/ssh$" exec deny the #49 fix adds.
+func TestProfilesDenyGitTransports(t *testing.T) {
+	t.Parallel()
+	wantTCPDeny := `(deny network-outbound (remote tcp "*:22") (remote tcp "*:9418"))`
+	wantSSHExecDeny := `(deny process-exec (regex #"/ssh$"))`
+
+	for _, name := range []string{"sandbox/build.sb", "sandbox/judge.sb"} {
+		profile, err := zing.Assets.ReadFile(name)
+		if err != nil {
+			t.Fatalf("read %s: %v", name, err)
+		}
+		text := string(profile)
+		if !strings.Contains(text, wantTCPDeny) {
+			t.Errorf("%s does not contain %q", name, wantTCPDeny)
+		}
+		if !strings.Contains(text, wantSSHExecDeny) {
+			t.Errorf("%s does not contain %q", name, wantSSHExecDeny)
+		}
+	}
+}

@@ -21,10 +21,12 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	zing "zing"
+	"zing/internal/gitbin"
 	"zing/internal/gitfixture"
 )
 
@@ -1059,4 +1061,132 @@ func TestJudgeCanonicalizesCodexHomeInsideDataDir(t *testing.T) {
 	if exitCode, out := runSandboxed(t, sb, p, "/bin/ls", dirs.dataDir); exitCode == 0 {
 		t.Errorf("list DATA_DIR under the judge profile: want a non-zero exit, got 0 (output %q)", out)
 	}
+}
+
+// ---- denying outbound git transports (#49) -----------------------------
+
+// gitPushListenerPort is git's own well-known port for the git:// protocol,
+// and the fixed (not ephemeral) port TestBuildDeniesGitPush and
+// TestJudgeDeniesGitPush bind their stand-in remote to: the push under
+// test must dial this exact port for the profile's own deny to be what is
+// under test. Neither test calls t.Parallel, since both bind it.
+const gitPushListenerPort = 9418
+
+// countingAccepts accepts and discards every connection ln receives,
+// incrementing *accepts for each, until Accept fails (the listener
+// closing). Run it in a goroutine the way acceptAndDiscard's callers do;
+// unlike acceptAndDiscard, this also counts, so a test can assert a denied
+// connect never reached the stand-in remote at all.
+func countingAccepts(ln net.Listener, accepts *int64) {
+	for {
+		conn, err := ln.Accept()
+		if err != nil {
+			return
+		}
+		atomic.AddInt64(accepts, 1)
+		_ = conn.Close()
+	}
+}
+
+// filterOutEnv returns env with every entry naming one of names (as
+// "NAME=...") removed.
+func filterOutEnv(env []string, names ...string) []string {
+	out := make([]string, 0, len(env))
+	for _, kv := range env {
+		drop := false
+		for _, name := range names {
+			if strings.HasPrefix(kv, name+"=") {
+				drop = true
+				break
+			}
+		}
+		if !drop {
+			out = append(out, kv)
+		}
+	}
+	return out
+}
+
+// wantOperationNotPermitted is the text every denied connect or exec this
+// file's git-push probes assert on: seatbelt's own refusal text for both a
+// network-outbound deny and a process-exec deny (judge.sb's own file-deny
+// rules already quote it the same way).
+const wantOperationNotPermitted = "Operation not permitted"
+
+// testDeniesGitPush is TestBuildDeniesGitPush's and TestJudgeDeniesGitPush's
+// shared body (#49): a signed git repository under worktree and a stand-in
+// git:// remote listening on gitPushListenerPort, then three outbound
+// attempts the profile must refuse. It is not safe to call with
+// t.Parallel, since it binds that fixed port.
+func testDeniesGitPush(t *testing.T, sb Sandbox, p Params, worktree string) {
+	t.Helper()
+
+	if err := gitfixture.NewSigningRepo(t.Context(), worktree); err != nil {
+		t.Fatalf("NewSigningRepo: %v", err)
+	}
+
+	var lc net.ListenConfig
+	ln, err := lc.Listen(t.Context(), "tcp", fmt.Sprintf("127.0.0.1:%d", gitPushListenerPort))
+	if err != nil {
+		t.Fatalf("listen 127.0.0.1:%d: %v", gitPushListenerPort, err)
+	}
+	defer func() { _ = ln.Close() }()
+	var accepts int64
+	go countingAccepts(ln, &accepts)
+
+	// SSH_AUTH_SOCK is dropped, not merely left unset by gitfixture.Environ():
+	// this test's own parent process may run under a real agent, and the
+	// push under test must not be able to reach it.
+	env := filterOutEnv(gitfixture.Environ(), "SSH_AUTH_SOCK")
+	env = append(env,
+		"GIT_CONFIG_GLOBAL=/dev/null",
+		"GIT_CONFIG_NOSYSTEM=1",
+		"GIT_SSH_COMMAND=ssh -F /dev/null -o BatchMode=yes -o ConnectTimeout=2 -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o IdentityAgent=none",
+	)
+
+	exitCode, out := runSandboxedWithEnv(t, sb, p, env, gitbin.Path(), "-C", worktree, "push", "git://127.0.0.1:9418/x.git", "HEAD")
+	if exitCode == 0 {
+		t.Errorf("git push git://127.0.0.1:9418/x.git: want a non-zero exit, got 0 (output %q)", out)
+	}
+	if !strings.Contains(out, wantOperationNotPermitted) {
+		t.Errorf("git push git:// output = %q, want it to contain %q", out, wantOperationNotPermitted)
+	}
+	if got := atomic.LoadInt64(&accepts); got != 0 {
+		t.Errorf("git:// listener accepted %d connections, want 0", got)
+	}
+
+	exitCode, out = runSandboxedWithEnv(t, sb, p, env, gitbin.Path(), "-C", worktree, "push", "ssh://git@127.0.0.1:22/x.git", "HEAD")
+	if exitCode == 0 {
+		t.Errorf("git push ssh://git@127.0.0.1:22/x.git: want a non-zero exit, got 0 (output %q)", out)
+	}
+	if !strings.Contains(out, wantOperationNotPermitted) {
+		t.Errorf("git push ssh:// output = %q, want it to contain %q", out, wantOperationNotPermitted)
+	}
+
+	exitCode, out = runSandboxedWithEnv(t, sb, p, env, "/usr/bin/nc", "-v", "-z", "-w", "2", "127.0.0.1", "22")
+	if exitCode == 0 {
+		t.Errorf("nc -z 127.0.0.1 22: want a non-zero exit, got 0 (output %q)", out)
+	}
+	if !strings.Contains(out, wantOperationNotPermitted) {
+		t.Errorf("nc -z 127.0.0.1 22 output = %q, want it to contain %q", out, wantOperationNotPermitted)
+	}
+}
+
+// TestBuildDeniesGitPush is #49's own regression test under build.sb: run
+// outside the sandbox (requireNotSandboxed, through newLoadedSandbox), it
+// reproduces the pattern that pushed a real branch to GitHub -- a git push
+// over ssh:// or git://, plus a bare TCP connect to port 22 -- and proves
+// build.sb's new rules refuse every one of them.
+func TestBuildDeniesGitPush(t *testing.T) {
+	sb := newLoadedSandbox(t, nil, 7420)
+	dirs := newTestDirs(t)
+	testDeniesGitPush(t, sb, dirs.params(), dirs.worktree)
+}
+
+// TestJudgeDeniesGitPush is TestBuildDeniesGitPush's own counterpart under
+// judge.sb, the profile #49 actually ran inside.
+func TestJudgeDeniesGitPush(t *testing.T) {
+	sb := newLoadedJudgeSandbox(t)
+	dirs := newTestDirs(t)
+	testDeniesGitPush(t, sb, dirs.judgeParams(t), dirs.worktree)
 }

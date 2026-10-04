@@ -55,6 +55,17 @@
 ; instead.
 (deny network-outbound (remote unix-socket (path-regex #"^/private/tmp/com\.apple\.launchd\.[^/]+/Listeners$")))
 
+; No outbound connect to a git transport port: #49 found a judge-profile
+; probe push `git@github.com` over SSH (port 22) because the profile
+; allowed the connect once ssh had read an unencrypted key from the real
+; ~/.ssh (the probe's own temp HOME masked only its own home read, not
+; this). git's own protocol (port 9418) is denied the same way.
+(deny network-outbound (remote tcp "*:22") (remote tcp "*:9418"))
+; No exec of any binary whose path ends in "/ssh", covering both
+; /usr/bin/ssh and a Homebrew ssh earlier in PATH (#49): without a key to
+; read, ssh cannot sign, but it must not even run.
+(deny process-exec (regex #"/ssh$"))
+
 ; No git credential helper may run: it would hand out the owner's GitHub
 ; credentials (N2). Git execs helpers as git-credential-<name>. Defense in
 ; depth, not a guarantee (D26): a "!" shell helper is not caught by this.
