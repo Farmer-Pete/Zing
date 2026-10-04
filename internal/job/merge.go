@@ -145,8 +145,10 @@ func (h shipHandler) driveOpenMerge(ctx context.Context, t store.Ticket, d Deps)
 // turn when there are conflicts to resolve, CHECK alone when there are
 // not, or whatever the session's own newest run needs next.
 //
-// Until task 8 adds adoptMerge, a single unrecorded commit at the tip
-// escalates exactly as two or more do (foreignCommitsWhat/Why). A session
+// Step 0's single-unrecorded-commit case is adoptMerge: a previous tick
+// that committed the merge and crashed before recording it looks
+// identical to a foreign commit until adoptMerge verifies it. Two or more
+// unrecorded commits still escalate (foreignCommitsWhat/Why). A session
 // whose newest run ended in error routes through mergeAfterError.
 func (h shipHandler) driveMerge(ctx context.Context, t store.Ticket, d Deps, req baseMergeRequest) (store.HandlerCommit, error) {
 	proj, wt, escalation, err := ensureWorktreeOrEscalate(ctx, t, d, func(errText string) store.HandlerCommit {
@@ -172,10 +174,17 @@ func (h shipHandler) driveMerge(ctx context.Context, t store.Ticket, d Deps, req
 		slog.Debug("base merge step", "ticket_id", t.ID, "request_id", req.MessageID, "step", "branch_missing_recorded")
 		return withBranch(mergeEscalation(t, d, req, branchMissingRecordedWhat, branchMissingRecordedWhy, ""), wt), nil
 	}
-	if len(unrecorded) > 0 {
-		// Task 8 replaces this with adoptMerge for the len==1 case: a
-		// previous tick that committed the merge and crashed before
-		// recording it looks identical to a foreign commit until then.
+	switch len(unrecorded) {
+	case 0:
+		// continue to step 1
+	case 1:
+		slog.Debug("base merge step", "ticket_id", t.ID, "request_id", req.MessageID, "step", "adopt")
+		commit, adoptErr := h.adoptMerge(ctx, t, d, proj, wt, req, unrecorded[0])
+		if adoptErr != nil {
+			return store.HandlerCommit{}, adoptErr
+		}
+		return withBranch(commit, wt), nil
+	default:
 		slog.Debug("base merge step", "ticket_id", t.ID, "request_id", req.MessageID, "step", "foreign_commits")
 		return withBranch(mergeEscalation(t, d, req, foreignCommitsWhat, foreignCommitsWhy, ""), wt), nil
 	}
@@ -401,6 +410,60 @@ func mergeLandedCommit(t store.Ticket, d Deps, req baseMergeRequest, rid *int64,
 	}}
 	c.ClearPoll = true
 	return c, nil
+}
+
+// adoptMerge records sha, the single unrecorded commit at the tip
+// (driveMerge's own step 0), when a previous tick committed the merge
+// through CommitMerge and crashed before recording it: sha must have
+// exactly two parents, the second equal to req.BaseSHA, and be signed.
+// Unlike building's own adopt, there is no subject or claims check here --
+// a merge commit's own message is never the agent's to write -- so a
+// clean StartBaseMerge (task 6's own no-run case) and an agent-resolved
+// merge adopt exactly alike: the report is the newest ok merge run's
+// report in this request's session (mergeReportFor), or the synthesized
+// one when the session has none. Anything else means sha is not this
+// request's own merge commit, and it escalates unverifiableCommitWhat/Why
+// with detail "not this request's merge commit".
+func (h shipHandler) adoptMerge(ctx context.Context, t store.Ticket, d Deps, proj Project, wt orchestrator.Worktree, req baseMergeRequest, sha string) (store.HandlerCommit, error) {
+	fail := func() store.HandlerCommit {
+		return mergeEscalation(t, d, req, unverifiableCommitWhat, unverifiableCommitWhy, "not this request's merge commit")
+	}
+
+	parents, err := proj.Orch.CommitParents(ctx, wt, sha)
+	if err != nil {
+		return store.HandlerCommit{}, fmt.Errorf("job: merge: adopt: commit parents: %w", err)
+	}
+	if len(parents) != 2 || parents[1] != req.BaseSHA {
+		return fail(), nil
+	}
+
+	signed, err := proj.Orch.SignedStatus(ctx, wt, sha)
+	if err != nil {
+		return store.HandlerCommit{}, fmt.Errorf("job: merge: adopt: signed status: %w", err)
+	}
+	if !signed {
+		return fail(), nil
+	}
+
+	maxResumes := d.Machine.Jobs[jobMergeName].MaxResumes
+	_, _, newestRun, found, err := d.Store.SessionAfter(ctx, t.ID, jobMergeName, req.AfterRunID, maxResumes)
+	if err != nil {
+		return store.HandlerCommit{}, fmt.Errorf("job: merge: adopt: session after: %w", err)
+	}
+	var rid *int64
+	if found && newestRun.Outcome != nil && *newestRun.Outcome == string(response.OutcomeOk) {
+		id := newestRun.ID
+		rid = &id
+	}
+
+	report, err := mergeReportFor(ctx, t, d, rid)
+	if err != nil {
+		return store.HandlerCommit{}, err
+	}
+	report.Title = mergeTitle(req)
+
+	slog.Warn("base merge commit adopted", "ticket_id", t.ID, "request_id", req.MessageID, "sha", sha)
+	return mergeLandedCommit(t, d, req, rid, report, sha)
 }
 
 // runMergeFirst is RUN's first turn for the merge unit: the merge job

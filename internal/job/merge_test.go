@@ -1092,3 +1092,186 @@ func TestMergeInterruptedRunResumesFree(t *testing.T) {
 		t.Errorf("session Resumes after the free interrupted resume = %d, want 0 (unchanged)", mergeResumes)
 	}
 }
+
+// ---- task 8: adoptMerge, and StartBaseMerge's own already-merged branch --
+
+// TestMergeAdoptsCommitAfterCrash proves adoptMerge (overview design
+// "Request lifecycle"): a merge commit git already holds -- landed by a
+// tick that committed it through CommitMerge directly and then crashed
+// before recording "base merge landed" -- is adopted on the next tick
+// without git ever committing again: the commit's own two parents and its
+// signature are enough to trust it, and the merge session's own newest ok
+// run (the agent turn that resolved hello.txt) gives its report.
+func TestMergeAdoptsCommitAfterCrash(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow end-to-end flow; runs in the full suite")
+	}
+	t.Parallel()
+	s, ticket, _ := shipTicketReady(t)
+	baseSHA := mergeConflictOnMain(t, s, ticket, "hello.txt", []byte(mergeHelloConflict))
+
+	gh := &shipGitHub{}
+	tr := &shipTracker{}
+	rt := runtime.NewFake(mergeAgentFS())
+
+	ticket = mergeDirtyAfterPublish(t, s, ticket, rt, gh, tr)
+	preMergeHead := shipHeadSHA(t, s, ticket)
+
+	deps := shipClaim(t, s, rt, ticket.ID, gh, tr)
+	ticket, _ = mergeRunTick(t, s, deps, ticket, "poll writes request") // POLL
+
+	req, open, err := openBaseMerge(t.Context(), ticket, Deps{Store: s})
+	if err != nil {
+		t.Fatalf("openBaseMerge: %v", err)
+	}
+	if !open {
+		t.Fatal("openBaseMerge: no open request after POLL")
+	}
+
+	// StartBaseMerge finds the conflict and runs the fake merge agent's
+	// first turn, which resolves hello.txt and records an ok run plus its
+	// own build_report -- but nothing is committed yet.
+	deps = shipClaim(t, s, rt, ticket.ID, gh, tr)
+	var runCommit store.HandlerCommit
+	ticket, runCommit = mergeRunTick(t, s, deps, ticket, "merge run")
+	if shipHasMergeLanded(runCommit) {
+		t.Fatal("the merge run tick already landed, want the agent turn only")
+	}
+
+	// Simulate a crash right after a tick committed the merge for real
+	// (CommitMerge, direct through the orchestrator) but before it could
+	// record "base merge landed": the claim is released with no commit
+	// applied, exactly as TestReadyCrashConverges (shipping_test.go) does
+	// for MarkReady.
+	preCrashDeps := shipClaim(t, s, rt, ticket.ID, gh, tr)
+	proj := preCrashDeps.Projects[ticket.ProjectID]
+	wt, _, err := proj.Orch.EnsureWorktree(t.Context(), ticket.ID, ticket.Title)
+	if err != nil {
+		t.Fatalf("EnsureWorktree: %v", err)
+	}
+	mergeSHA, commitErr := proj.Orch.CommitMerge(t.Context(), wt, orchestrator.CommitMessage{
+		Title: mergeTitle(req), FuncLines: mergeFuncLines(req, []string{pbHelloTxt}),
+	})
+	if commitErr != nil {
+		t.Fatalf("CommitMerge (pre-crash): %v", commitErr)
+	}
+	shipReleaseClaim(t, s, ticket.ID, preCrashDeps)
+
+	// The next tick's driveMerge finds mergeSHA as the one unrecorded
+	// commit at the tip and adopts it: no new git commit, just the
+	// "landed" marker and build_report.
+	deps = shipClaim(t, s, rt, ticket.ID, gh, tr)
+	ticket = pbGetTicket(t, s, ticket.ID)
+	commit, err := (shipHandler{}).Run(t.Context(), ticket, deps)
+	if err != nil {
+		t.Fatalf("adopt tick: %v", err)
+	}
+	if commit.Escalation != nil {
+		t.Fatalf("adopt tick escalated: %+v", commit.Escalation.Payload)
+	}
+	want := fmt.Sprintf("base merge landed %d sha %s", req.MessageID, mergeSHA)
+	if !shipHasMessage(commit, want) {
+		t.Errorf("commit.Messages = %+v, want %q", commit.Messages, want)
+	}
+	pbApply(t, s, ticket, commit)
+	ticket = pbGetTicket(t, s, ticket.ID)
+
+	if got := shipHeadSHA(t, s, ticket); got != mergeSHA {
+		t.Errorf("HEAD after the adopt tick = %s, want it unchanged at the pre-crash merge sha %s", got, mergeSHA)
+	}
+
+	parents, err := proj.Orch.CommitParents(t.Context(), wt, mergeSHA)
+	if err != nil {
+		t.Fatalf("CommitParents: %v", err)
+	}
+	if len(parents) != 2 || parents[0] != preMergeHead || parents[1] != baseSHA {
+		t.Errorf("CommitParents(%s) = %v, want [%s %s]", mergeSHA, parents, preMergeHead, baseSHA)
+	}
+
+	reports, err := s.BuildReports(t.Context(), ticket.ID)
+	if err != nil {
+		t.Fatalf("BuildReports: %v", err)
+	}
+	found := false
+	for _, r := range reports {
+		if r.Report.CommitSHA != nil && *r.Report.CommitSHA == mergeSHA {
+			found = true
+			if len(r.Report.FilesChanged) != 1 || r.Report.FilesChanged[0] != pbHelloTxt {
+				t.Errorf("adopted report FilesChanged = %v, want [hello.txt] (the agent's own report, not synthesized)", r.Report.FilesChanged)
+			}
+		}
+	}
+	if !found {
+		t.Errorf("BuildReports has no row with commit_sha %s", mergeSHA)
+	}
+}
+
+// TestMergeAlreadyMergedClosesRequest proves StartBaseMerge's own
+// ErrAlreadyMerged branch (overview design "Request lifecycle"): a request
+// whose own base sha is already an ancestor of the ticket branch -- the
+// ordinary shape right after POLL writes the very first request, before
+// main ever diverges a second time -- closes with no git merge and no
+// agent run, and ClearPoll, so the next tick runs POLL again.
+func TestMergeAlreadyMergedClosesRequest(t *testing.T) {
+	t.Parallel()
+	s, ticket, gh, tr := mergePublished(t)
+	rt := runtime.NewFake(fstest.MapFS{})
+
+	pollCommit, err := shipPollRun(t, s, ticket, gh, tr)
+	if err != nil {
+		t.Fatalf("poll: %v", err)
+	}
+	if pollCommit.Escalation != nil {
+		t.Fatalf("poll escalated: %+v", pollCommit.Escalation.Payload)
+	}
+	pbApply(t, s, ticket, pollCommit)
+	ticket = pbGetTicket(t, s, ticket.ID)
+
+	req, open, err := openBaseMerge(t.Context(), ticket, Deps{Store: s})
+	if err != nil {
+		t.Fatalf("openBaseMerge: %v", err)
+	}
+	if !open {
+		t.Fatal("openBaseMerge: no open request after POLL")
+	}
+
+	deps := shipClaim(t, s, rt, ticket.ID, gh, tr)
+	commit, err := (shipHandler{}).Run(t.Context(), ticket, deps)
+	if err != nil {
+		t.Fatalf("merge tick: %v", err)
+	}
+	if commit.Escalation != nil {
+		t.Fatalf("merge tick escalated: %+v", commit.Escalation.Payload)
+	}
+	wantClosed := fmt.Sprintf("base merge closed %d", req.MessageID)
+	if len(commit.Messages) != 1 || commit.Messages[0].Body != wantClosed {
+		t.Errorf("commit.Messages = %+v, want exactly one message %q", commit.Messages, wantClosed)
+	}
+	if !commit.ClearPoll {
+		t.Error("commit.ClearPoll = false, want true")
+	}
+	pbApply(t, s, ticket, commit)
+	ticket = pbGetTicket(t, s, ticket.ID)
+
+	_, stillOpen, err := openBaseMerge(t.Context(), ticket, Deps{Store: s})
+	if err != nil {
+		t.Fatalf("openBaseMerge (after close): %v", err)
+	}
+	if stillOpen {
+		t.Error("openBaseMerge: a request is still open after the close marker, want none")
+	}
+
+	// The next tick runs POLL again (driveOpenMerge finds nothing open):
+	// the same dirty PR opens a fresh request rather than idling forever.
+	next, err := shipPollRun(t, s, ticket, gh, tr)
+	if err != nil {
+		t.Fatalf("poll (after close): %v", err)
+	}
+	if next.Escalation != nil {
+		t.Fatalf("poll (after close) escalated: %+v", next.Escalation.Payload)
+	}
+	wantWhat := "PR #1 conflicts with " + pbFixtureDefaultBranch
+	if !shipHasMessage(next, wantWhat) {
+		t.Errorf("commit.Messages = %+v, want a fresh %q notice", next.Messages, wantWhat)
+	}
+}
