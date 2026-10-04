@@ -16,6 +16,14 @@ type RunEvidence struct {
 	TranscriptPath *string
 }
 
+// StderrFileName is the one file name job.writeStderrFile ever writes for
+// runID, directly inside <DataDir>/runs. console.handleRunFile checks a
+// run's stored stderr_path against this same name before it will serve the
+// file, so the shape is owned here rather than duplicated at each caller.
+func StderrFileName(runID int64) string {
+	return fmt.Sprintf("run-%d-stderr.log", runID)
+}
+
 // RecordRunEvidence writes runID's three evidence columns in one UPDATE. A
 // nil field writes NULL. It returns an error wrapping sql.ErrNoRows when no
 // run has that id. It logs nothing; its caller logs a failure.

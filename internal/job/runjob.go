@@ -297,7 +297,7 @@ func writeStderrFile(dataDir string, runID int64, data []byte) (string, error) {
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return "", fmt.Errorf("stderr file: %w", err)
 	}
-	path := filepath.Join(dir, fmt.Sprintf("run-%d-stderr.log", runID))
+	path := filepath.Join(dir, store.StderrFileName(runID))
 	if err := os.WriteFile(path, data, 0o600); err != nil {
 		return "", fmt.Errorf("stderr file: %w", err)
 	}

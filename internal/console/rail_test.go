@@ -614,6 +614,19 @@ func TestRail_RunListShowsTranscriptPath(t *testing.T) {
 	}
 }
 
+// railHTML opens ticketID's thread stream against srvURL, reads the
+// initial frames, closes the response, and returns the rail HTML. Tests
+// that need to read the rail more than once in a row use this instead of
+// repeating the open/read/close sequence inline.
+func railHTML(t *testing.T, srvURL string, ticketID int64) string {
+	t.Helper()
+	resp, r, cancel := openStream(t, srvURL, "thread", ticketID, 0)
+	defer cancel()
+	defer func() { _ = resp.Body.Close() }()
+	_, _, rail, _ := readInitialFrames(t, r)
+	return rail
+}
+
 // TestRail_RunListShowsRunningAndInterrupted proves a run that was reserved
 // but never terminalized renders outcome "running" (runs.outcome is NULL),
 // and that once InterruptRuns terminalizes it (#45: outcome becomes "error"
@@ -640,20 +653,13 @@ func TestRail_RunListShowsRunningAndInterrupted(t *testing.T) {
 
 	srv := newTestServer(t, s, bus.New(), nil, newTestLogHandler(t))
 
-	func() {
-		resp, r, cancel := openStream(t, srv.URL, "thread", ticketID, 0)
-		defer cancel()
-		defer func() { _ = resp.Body.Close() }()
-		_, _, rail, _ := readInitialFrames(t, r)
-
-		row := runRowHTML(t, rail, reserved.RunID)
-		if !strings.Contains(row, `<span class="run-outcome">running</span>`) {
-			t.Errorf("run row missing outcome running; got:\n%s", row)
-		}
-		if strings.Contains(row, "pill-interrupted") {
-			t.Errorf("run row should not show interrupted yet; got:\n%s", row)
-		}
-	}()
+	row := runRowHTML(t, railHTML(t, srv.URL, ticketID), reserved.RunID)
+	if !strings.Contains(row, `<span class="run-outcome">running</span>`) {
+		t.Errorf("run row missing outcome running; got:\n%s", row)
+	}
+	if strings.Contains(row, "pill-interrupted") {
+		t.Errorf("run row should not show interrupted yet; got:\n%s", row)
+	}
 
 	applied, err := s.InterruptRuns(t.Context(), ticketID, owner, expires)
 	if err != nil {
@@ -663,12 +669,7 @@ func TestRail_RunListShowsRunningAndInterrupted(t *testing.T) {
 		t.Fatal("InterruptRuns: applied = false, want true")
 	}
 
-	resp, r, cancel := openStream(t, srv.URL, "thread", ticketID, 0)
-	defer cancel()
-	defer func() { _ = resp.Body.Close() }()
-	_, _, rail, _ := readInitialFrames(t, r)
-
-	row := runRowHTML(t, rail, reserved.RunID)
+	row = runRowHTML(t, railHTML(t, srv.URL, ticketID), reserved.RunID)
 	if !strings.Contains(row, `<span class="pill pill-interrupted">interrupted</span>`) {
 		t.Errorf("run row missing the interrupted pill; got:\n%s", row)
 	}
@@ -900,7 +901,7 @@ func writeRunStderrFile(t *testing.T, s *store.Store, runID int64, data string) 
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		t.Fatalf("MkdirAll: %v", err)
 	}
-	path := filepath.Join(dir, fmt.Sprintf("run-%d-stderr.log", runID))
+	path := filepath.Join(dir, store.StderrFileName(runID))
 	if err := os.WriteFile(path, []byte(data), 0o600); err != nil {
 		t.Fatalf("WriteFile: %v", err)
 	}
@@ -1042,7 +1043,7 @@ func TestRunFile_RefusesSymlinkEscapingRunsDir(t *testing.T) {
 	if err := os.MkdirAll(runsDir, 0o700); err != nil {
 		t.Fatalf("MkdirAll: %v", err)
 	}
-	link := filepath.Join(runsDir, fmt.Sprintf("run-%d-stderr.log", runID))
+	link := filepath.Join(runsDir, store.StderrFileName(runID))
 	if err := os.Symlink(target, link); err != nil {
 		t.Fatalf("Symlink: %v", err)
 	}
@@ -1073,7 +1074,8 @@ func TestRunFile_RefusesSymlinkEscapingRunsDir(t *testing.T) {
 // 403s when stderr_path names a real file inside the data directory that
 // is not a run's stderr log, such as the store's own database file. The
 // route serves only run-<id>-stderr.log directly inside <store.Dir()>/runs,
-// never anything else the data directory holds.
+// never anything else the data directory holds. The file genuinely sits
+// inside the data directory, so the body must not claim it is outside.
 func TestRunFile_RefusesNonStderrFileInsideDataDir(t *testing.T) {
 	t.Parallel()
 	s := newConsoleTestStore(t)
@@ -1095,6 +1097,49 @@ func TestRunFile_RefusesNonStderrFileInsideDataDir(t *testing.T) {
 	if resp.StatusCode != http.StatusForbidden {
 		t.Fatalf("status = %d, want 403", resp.StatusCode)
 	}
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("read body: %v", err)
+	}
+	if strings.Contains(string(body), "outside the data directory") {
+		t.Errorf("body = %q, zing.db sits inside the data directory, should not say otherwise", body)
+	}
+}
+
+// TestRunFile_RefusesAnotherRunsStderrFile proves GET /runs/{id}/stderr 403s,
+// and never leaks the file's text, when stderr_path names a real stderr
+// file inside <store.Dir()>/runs that belongs to a different run. The exact
+// per-run file name check (not just "inside runs/") is what catches this.
+func TestRunFile_RefusesAnotherRunsStderrFile(t *testing.T) {
+	t.Parallel()
+	s := newConsoleTestStore(t)
+	ticketID := seedTicket(t, s, "fake#1", "Add a hello endpoint")
+	runID := oneSeededRun(t, s, ticketID, "sonnet")
+	otherRunID := oneSeededRun(t, s, ticketID, "sonnet")
+
+	const otherSecret = "another run's stderr\n"
+	otherPath := writeRunStderrFile(t, s, otherRunID, otherSecret)
+	if err := s.RecordRunEvidence(t.Context(), runID, store.RunEvidence{StderrPath: &otherPath}); err != nil {
+		t.Fatalf("RecordRunEvidence: %v", err)
+	}
+
+	srv := newTestServer(t, s, bus.New(), nil, newTestLogHandler(t))
+	resp, err := http.Get(fmt.Sprintf("%s/runs/%d/stderr", srv.URL, runID)) //nolint:noctx // a bare GET on a test server needs no deadline
+	if err != nil {
+		t.Fatalf("GET /runs/%d/stderr: %v", runID, err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode != http.StatusForbidden {
+		t.Fatalf("status = %d, want 403", resp.StatusCode)
+	}
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("read body: %v", err)
+	}
+	if strings.Contains(string(body), otherSecret) || strings.Contains(string(body), "another run's stderr") {
+		t.Errorf("response body leaked the file's text: %q", body)
+	}
 }
 
 // TestRunFile_MissingCases proves the route's various 404 shapes: a run
@@ -1107,6 +1152,7 @@ func TestRunFile_MissingCases(t *testing.T) {
 	ticketID := seedTicket(t, s, "fake#1", "Add a hello endpoint")
 	noEvidenceRunID := oneSeededRun(t, s, ticketID, "sonnet")
 	goneRunID := oneSeededRun(t, s, ticketID, "opus")
+	dirRunID := oneSeededRun(t, s, ticketID, "opus")
 
 	goneStderr := writeRunStderrFile(t, s, goneRunID, "will be deleted")
 	if err := s.RecordRunEvidence(t.Context(), goneRunID, store.RunEvidence{StderrPath: &goneStderr}); err != nil {
@@ -1114,6 +1160,18 @@ func TestRunFile_MissingCases(t *testing.T) {
 	}
 	if err := os.Remove(goneStderr); err != nil {
 		t.Fatalf("Remove: %v", err)
+	}
+
+	runsDir := filepath.Join(s.Dir(), "runs")
+	if err := os.MkdirAll(runsDir, 0o700); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	dirStderr := filepath.Join(runsDir, store.StderrFileName(dirRunID))
+	if err := os.Mkdir(dirStderr, 0o700); err != nil {
+		t.Fatalf("Mkdir: %v", err)
+	}
+	if err := s.RecordRunEvidence(t.Context(), dirRunID, store.RunEvidence{StderrPath: &dirStderr}); err != nil {
+		t.Fatalf("RecordRunEvidence: %v", err)
 	}
 
 	unknownRunID := goneRunID + 1_000_000
@@ -1128,6 +1186,7 @@ func TestRunFile_MissingCases(t *testing.T) {
 		{"no final message", fmt.Sprintf("/runs/%d/final", noEvidenceRunID), "this run kept no final message"},
 		{"no stderr", fmt.Sprintf("/runs/%d/stderr", noEvidenceRunID), "this run wrote no stderr"},
 		{"stderr file gone", fmt.Sprintf("/runs/%d/stderr", goneRunID), "stderr file is gone"},
+		{"stderr path is a directory", fmt.Sprintf("/runs/%d/stderr", dirRunID), "stderr file is gone"},
 		{"unknown run", fmt.Sprintf("/runs/%d/final", unknownRunID), "no such run"},
 		{"unrecognized kind", fmt.Sprintf("/runs/%d/transcript", noEvidenceRunID), "404 page not found"},
 		{"id does not parse", "/runs/abc/final", "404 page not found"},

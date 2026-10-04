@@ -367,16 +367,15 @@ func runRows(sessions []store.Session, runs []store.Run, evidence map[int64]stor
 		if r.AgentSeconds != nil {
 			row.AgentTime = (time.Duration(*r.AgentSeconds) * time.Second).String()
 		}
-		if ev, ok := evidence[r.ID]; ok {
-			if ev.FinalMessage != nil {
-				row.FinalURL = fmt.Sprintf("/runs/%d/final", r.ID)
-			}
-			if ev.StderrPath != nil {
-				row.StderrURL = fmt.Sprintf("/runs/%d/stderr", r.ID)
-			}
-			if ev.TranscriptPath != nil {
-				row.Transcript = *ev.TranscriptPath
-			}
+		ev := evidence[r.ID]
+		if ev.FinalMessage != nil {
+			row.FinalURL = fmt.Sprintf("/runs/%d/final", r.ID)
+		}
+		if ev.StderrPath != nil {
+			row.StderrURL = fmt.Sprintf("/runs/%d/stderr", r.ID)
+		}
+		if ev.TranscriptPath != nil {
+			row.Transcript = *ev.TranscriptPath
 		}
 		rows[len(runs)-1-i] = row
 	}
@@ -533,9 +532,9 @@ const contentTypePlainText = "text/plain; charset=utf-8"
 // message or a stderr file), served as plain text. kind is "final" or
 // "stderr"; any other kind, or an {id} that is not a positive int64, 404s
 // without a store read. A stderr read is refused unless the recorded path
-// resolves to exactly run-<id>-stderr.log directly inside
-// <store.Dir()>/runs, the one file writeStderrFile ever writes
-// (internal/job/runjob.go); that keeps the route off zing.db and anything
+// resolves to exactly store.StderrFileName(id) directly inside
+// <store.Dir()>/runs, the one file job.writeStderrFile ever writes; that
+// keeps the route off zing.db, another run's stderr file, and anything
 // else the data directory holds. Every branch logs one line naming the
 // run, never the text it serves or refuses (design section's Logging
 // table).
@@ -570,7 +569,7 @@ func (c *console) handleRunFile(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", contentTypePlainText)
 		w.Header().Set("X-Content-Type-Options", "nosniff")
 		if _, writeErr := io.WriteString(w, *ev.FinalMessage); writeErr != nil {
-			slog.Warn("run file write failed", "ticket_id", ticketID, "run_id", runID, "kind", kind, "error", writeErr)
+			slog.Error("console: write run file", "ticket_id", ticketID, "run_id", runID, "kind", kind, "error", writeErr)
 			return
 		}
 		slog.Info("run file served", "ticket_id", ticketID, "run_id", runID, "kind", kind, "bytes", len(*ev.FinalMessage))
@@ -583,21 +582,12 @@ func (c *console) handleRunFile(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// runsDir, not the whole data dir, is the containment root: the data
-	// dir also holds zing.db and the judge's Codex home, which this route
-	// must never be able to reach even if a stderr_path row were ever
-	// wrong. It is computed from the data dir's resolved form (which
-	// always exists, since the open database lives there) joined with
-	// the fixed, non-attacker-controlled "runs" segment, so a run whose
-	// runs/ directory hasn't been created yet still 403s rather than
-	// 404ing as "gone".
 	dataDir, rootErr := filepath.EvalSymlinks(c.store.Dir())
 	if rootErr != nil {
-		slog.Error("run file not found", "ticket_id", ticketID, "run_id", runID, "kind", kind, "reason", "stderr_gone", "error", rootErr)
+		slog.Info("run file not found", "ticket_id", ticketID, "run_id", runID, "kind", kind, "reason", "stderr_gone", "error", rootErr)
 		http.Error(w, "stderr file is gone", http.StatusNotFound)
 		return
 	}
-	runsDir := filepath.Join(dataDir, "runs")
 	p, pathErr := filepath.EvalSymlinks(*ev.StderrPath)
 	if pathErr != nil {
 		slog.Info("run file not found", "ticket_id", ticketID, "run_id", runID, "kind", kind, "reason", "stderr_gone", "error", pathErr)
@@ -605,18 +595,27 @@ func (c *console) handleRunFile(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	rel, relErr := filepath.Rel(runsDir, p)
-	escapesRoot := relErr != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) || filepath.IsAbs(rel)
-	// validName ties the resolved path to this exact run: only
-	// run-<runID>-stderr.log directly inside runsDir, the one name
-	// writeStderrFile ever writes (internal/job/runjob.go).
-	validName := !escapesRoot && rel == fmt.Sprintf("run-%d-stderr.log", runID)
-	if escapesRoot || !validName {
-		slog.Warn("run file outside data dir", "ticket_id", ticketID, "run_id", runID, "kind", kind, "path", *ev.StderrPath)
-		http.Error(w, "stderr file is outside the data directory", http.StatusForbidden)
+	// wantRel is the only path this run's stderr evidence may resolve to:
+	// run-<runID>-stderr.log directly inside <dataDir>/runs. relToData
+	// says the truth about where the resolved path actually sits relative
+	// to the whole data directory, so the 403 this route sends never
+	// claims a file is "outside the data directory" when it is really
+	// inside it under the wrong name (for instance zing.db, or another
+	// run's stderr file).
+	wantRel := filepath.Join("runs", store.StderrFileName(runID))
+	relToData, relErr := filepath.Rel(dataDir, p)
+	escapesDataDir := relErr != nil || relToData == ".." || strings.HasPrefix(relToData, ".."+string(filepath.Separator)) || filepath.IsAbs(relToData)
+	if escapesDataDir || relToData != wantRel {
+		reason, body := "unexpected_name", "stderr file does not match this run"
+		if escapesDataDir {
+			reason, body = "outside_data_dir", "stderr file is outside the data directory"
+		}
+		slog.Warn("run file outside data dir", "ticket_id", ticketID, "run_id", runID, "kind", kind, "reason", reason, "path", *ev.StderrPath)
+		http.Error(w, body, http.StatusForbidden)
 		return
 	}
 
+	runsDir := filepath.Join(dataDir, "runs")
 	dirRoot, err := os.OpenRoot(runsDir)
 	if err != nil {
 		slog.Info("run file not found", "ticket_id", ticketID, "run_id", runID, "kind", kind, "reason", "stderr_gone", "error", err)
@@ -625,7 +624,7 @@ func (c *console) handleRunFile(w http.ResponseWriter, r *http.Request) {
 	}
 	defer func() { _ = dirRoot.Close() }()
 
-	f, err := dirRoot.Open(rel)
+	f, err := dirRoot.Open(store.StderrFileName(runID))
 	if err != nil {
 		slog.Info("run file not found", "ticket_id", ticketID, "run_id", runID, "kind", kind, "reason", "stderr_gone", "error", err)
 		http.Error(w, "stderr file is gone", http.StatusNotFound)
@@ -633,8 +632,13 @@ func (c *console) handleRunFile(w http.ResponseWriter, r *http.Request) {
 	}
 	defer func() { _ = f.Close() }()
 
-	if fi, statErr := f.Stat(); statErr != nil || !fi.Mode().IsRegular() {
+	switch fi, statErr := f.Stat(); {
+	case statErr != nil:
 		slog.Info("run file not found", "ticket_id", ticketID, "run_id", runID, "kind", kind, "reason", "stderr_gone", "error", statErr)
+		http.Error(w, "stderr file is gone", http.StatusNotFound)
+		return
+	case !fi.Mode().IsRegular():
+		slog.Info("run file not found", "ticket_id", ticketID, "run_id", runID, "kind", kind, "reason", "not_regular", "mode", fi.Mode().String())
 		http.Error(w, "stderr file is gone", http.StatusNotFound)
 		return
 	}
@@ -643,7 +647,7 @@ func (c *console) handleRunFile(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("X-Content-Type-Options", "nosniff")
 	n, copyErr := io.Copy(w, f)
 	if copyErr != nil {
-		slog.Warn("run file write failed", "ticket_id", ticketID, "run_id", runID, "kind", kind, "bytes", n, "error", copyErr)
+		slog.Error("console: write run file", "ticket_id", ticketID, "run_id", runID, "kind", kind, "bytes", n, "error", copyErr)
 		return
 	}
 	slog.Info("run file served", "ticket_id", ticketID, "run_id", runID, "kind", kind, "bytes", n)
