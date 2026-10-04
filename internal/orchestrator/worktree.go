@@ -47,6 +47,10 @@ var (
 	zingBranchPattern = regexp.MustCompile(`^zing/\d+(-[a-z0-9._-]+)?$`)
 )
 
+// refForbiddenPunct is the punctuation git-check-ref-format(1) forbids
+// anywhere in a ref name, alongside control bytes and DEL.
+const refForbiddenPunct = " ~^:?*[\\"
+
 // branchName builds and validates the branch (PKG5-PLAN.md section 8.2).
 // ticketID must be positive. slug is lowercased and reduced to
 // [a-z0-9._-]; a run of any other character becomes a single "-"; leading
@@ -107,7 +111,9 @@ func checkRefFormat(name string) error {
 	}
 	for i := range len(ref) {
 		c := ref[i]
-		if c < 0x20 || c == 0x7f || strings.IndexByte(" ~^:?*[\\", c) >= 0 {
+		isControl := c < 0x20 || c == 0x7f
+		isForbiddenPunct := strings.IndexByte(refForbiddenPunct, c) >= 0
+		if isControl || isForbiddenPunct {
 			return invalid(fmt.Sprintf("contains forbidden byte %q", c))
 		}
 	}
@@ -262,11 +268,11 @@ func resolveOrClean(p string) string {
 // empty output, or a ctx that ended while waiting) caches nothing, so the
 // next call retries.
 func (o *Orchestrator) GitCommonDir(ctx context.Context) (string, error) {
-	if cached, _ := o.commonDirSnapshot(); cached != "" {
+	cached, resolveMu := o.commonDirSnapshot()
+	if cached != "" {
 		return cached, nil
 	}
 
-	_, resolveMu := o.commonDirSnapshot()
 	if err := resolveMu.Lock(ctx); err != nil {
 		return "", fmt.Errorf("orchestrator: git common dir: %w", err)
 	}

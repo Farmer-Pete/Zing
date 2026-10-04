@@ -176,4 +176,9 @@ func TestPathSkipsXcrunTrampoline(t *testing.T) {
 	if !info.Mode().IsRegular() {
 		t.Fatalf("Path() = %q is not a regular file", got)
 	}
+
+	out, err := exec.CommandContext(t.Context(), got, "--version").CombinedOutput()
+	if err != nil {
+		t.Fatalf("%s --version: %v: %s", got, err, out)
+	}
 }

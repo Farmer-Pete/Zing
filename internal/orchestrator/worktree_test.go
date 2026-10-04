@@ -1328,8 +1328,12 @@ func TestReadGitConfigLastValueWins(t *testing.T) {
 		runGit(ctx, t, repo, "config", "--add", gpgProgramKey, "node signer.js")
 		o := newTestOrchestrator(t, repo, execRunner{})
 
-		if _, _, err := o.EnsureWorktree(ctx, 700, "last-value-wins"); err == nil {
+		_, _, err := o.EnsureWorktree(ctx, 700, "last-value-wins")
+		if err == nil {
 			t.Fatal("EnsureWorktree: expected an error, the last gpg.program value is disallowed, got nil")
+		}
+		if !strings.Contains(err.Error(), gpgProgramKey) {
+			t.Errorf("EnsureWorktree error = %v, want it to name %q", err, gpgProgramKey)
 		}
 	})
 
@@ -1487,36 +1491,6 @@ func TestGitCommonDir(t *testing.T) {
 	}
 }
 
-// countingRunner wraps a real execRunner, counting how many times Run or
-// Output actually reached it, guarded by a mutex so concurrent callers
-// (TestGitCommonDirCachedPerOrchestrator's eight goroutines) count safely.
-type countingRunner struct {
-	mu    sync.Mutex
-	runs  int
-	outs  int
-	inner execRunner
-}
-
-func (r *countingRunner) Run(ctx context.Context, dir, name string, args ...string) (string, error) {
-	r.mu.Lock()
-	r.runs++
-	r.mu.Unlock()
-	return r.inner.Run(ctx, dir, name, args...)
-}
-
-func (r *countingRunner) Output(ctx context.Context, dir, name string, args ...string) (string, error) {
-	r.mu.Lock()
-	r.outs++
-	r.mu.Unlock()
-	return r.inner.Output(ctx, dir, name, args...)
-}
-
-func (r *countingRunner) outputCalls() int {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	return r.outs
-}
-
 // TestGitCommonDirCachedPerOrchestrator proves GitCommonDir resolves git at
 // most once per Orchestrator, even when several goroutines make their first
 // call at once, and that a failed first call (a canceled ctx) caches
@@ -1528,10 +1502,11 @@ func TestGitCommonDirCachedPerOrchestrator(t *testing.T) {
 	if err != nil {
 		t.Fatalf("resolve want: %v", err)
 	}
+	wantCommonDirCall := []string{"rev-parse", "--path-format=absolute", "--git-common-dir"}
 
 	t.Run("concurrent first calls run git once and log once", func(t *testing.T) {
 		t.Parallel()
-		run := &countingRunner{}
+		run := &recordingArgsRunner{}
 		o, logs := newTestOrchestratorCapturingLog(t, repo, run)
 
 		const n = 8
@@ -1571,8 +1546,9 @@ func TestGitCommonDirCachedPerOrchestrator(t *testing.T) {
 			t.Errorf("GitCommonDir (one more call) = %q, want %q", got, want)
 		}
 
-		if calls := run.outputCalls(); calls != 1 {
-			t.Errorf("rev-parse reached the Runner %d times, want 1", calls)
+		wantCalls := [][]string{wantCommonDirCall}
+		if diff := cmp.Diff(wantCalls, run.snapshot()); diff != "" {
+			t.Errorf("rev-parse reached the Runner an unexpected number of times (-want +got):\n%s", diff)
 		}
 
 		records := findRecords(logs.records(t), "git common dir resolved")
@@ -1589,13 +1565,23 @@ func TestGitCommonDirCachedPerOrchestrator(t *testing.T) {
 
 	t.Run("a canceled first call caches nothing, so the next call still succeeds", func(t *testing.T) {
 		t.Parallel()
-		o := newTestOrchestrator(t, repo, execRunner{})
+		run := &recordingArgsRunner{}
+		o, logs := newTestOrchestratorCapturingLog(t, repo, run)
 
 		canceledCtx, cancel := context.WithCancel(t.Context())
 		cancel()
 		if _, err := o.GitCommonDir(canceledCtx); err == nil {
 			t.Fatal("GitCommonDir(canceled ctx): want an error, got nil")
 		}
+		if records := findRecords(logs.records(t), "git common dir resolved"); len(records) != 0 {
+			t.Errorf("found %d \"git common dir resolved\" records after a canceled call, want 0", len(records))
+		}
+		// commonMutex.Lock's select may or may not have reached git before
+		// erroring out on the already-canceled ctx (Go picks among ready
+		// cases at random when the fresh mutex's token is also ready), so
+		// only the calls the following healthy call itself adds are
+		// asserted, not the total.
+		before := len(run.snapshot())
 
 		got, err := o.GitCommonDir(t.Context())
 		if err != nil {
@@ -1603,6 +1589,14 @@ func TestGitCommonDirCachedPerOrchestrator(t *testing.T) {
 		}
 		if gotResolved, evalErr := filepath.EvalSymlinks(got); evalErr != nil || gotResolved != want {
 			t.Errorf("GitCommonDir = %q, want %q", got, want)
+		}
+
+		wantCalls := [][]string{wantCommonDirCall}
+		if diff := cmp.Diff(wantCalls, run.snapshot()[before:]); diff != "" {
+			t.Errorf("rev-parse calls made after the canceled call (-want +got):\n%s", diff)
+		}
+		if records := findRecords(logs.records(t), "git common dir resolved"); len(records) != 1 {
+			t.Errorf("found %d \"git common dir resolved\" records after the healthy call, want 1", len(records))
 		}
 	})
 }

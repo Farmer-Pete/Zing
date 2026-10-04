@@ -20,7 +20,7 @@ log="$tmp/calls.log"
 
 cat >"$tmp/git" <<EOF
 #!/bin/sh
-echo "\$0 \$*" >>"$log"
+printf '%s\n' x >>"$log"
 exec "$real_git" "\$@"
 EOF
 chmod +x "$tmp/git"
