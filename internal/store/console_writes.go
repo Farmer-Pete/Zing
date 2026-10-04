@@ -680,6 +680,20 @@ func (s *Store) SendBatch(ctx context.Context, ticketID int64) (result BatchResu
 		return BatchResult{}, markErr
 	}
 
+	// Answering a question means the owner read it: set read_at on every
+	// question a sent draft points at, planning questions included.
+	readAt := formatTime(time.Now())
+	for i := range valid {
+		if valid[i].ParentID == nil {
+			continue
+		}
+		if _, err = tx.ExecContext(ctx,
+			`UPDATE messages SET read_at = ? WHERE id = ? AND read_at IS NULL`, readAt, *valid[i].ParentID,
+		); err != nil {
+			return BatchResult{}, fmt.Errorf("send batch: mark question %d read: %w", *valid[i].ParentID, err)
+		}
+	}
+
 	waitCleared, err := clearMatchingWaitTx(ctx, tx, ticketID)
 	if err != nil {
 		return BatchResult{}, err
@@ -1369,4 +1383,22 @@ func (s *Store) MarkRead(ctx context.Context, messageID int64) error {
 		return fmt.Errorf("mark read: message %d: %w", messageID, sql.ErrNoRows)
 	}
 	return nil
+}
+
+// MarkThreadRead sets read_at to now on every unread message of ticketID
+// (unreadMessageWhere, design section 6.8), returning how many it marked.
+// Opening a thread calls it once (stream.go). Zero is not an error: an
+// already-read thread and an id that names no ticket both return 0.
+func (s *Store) MarkThreadRead(ctx context.Context, ticketID int64) (int64, error) {
+	res, err := s.db.ExecContext(ctx,
+		`UPDATE messages SET read_at = ? WHERE ticket_id = ? AND `+unreadMessageWhere,
+		formatTime(time.Now()), ticketID)
+	if err != nil {
+		return 0, fmt.Errorf("mark thread read: ticket %d: %w", ticketID, err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return 0, fmt.Errorf("mark thread read: ticket %d: %w", ticketID, err)
+	}
+	return n, nil
 }

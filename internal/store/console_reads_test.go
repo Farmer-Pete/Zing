@@ -148,7 +148,7 @@ func TestInboxItems_BlockingFirstThenNewestMessageIDDesc(t *testing.T) {
 	}
 	insertZingUpdate(t, s, ticketE) // unread, not blocking, newer
 
-	got, err := s.InboxItems(t.Context())
+	got, err := s.InboxItems(t.Context(), nil)
 	if err != nil {
 		t.Fatalf("InboxItems: %v", err)
 	}
@@ -194,7 +194,7 @@ func TestInboxItems_ExcludesNeitherBlockingNorUnread(t *testing.T) {
 		t.Fatalf("insert your update: %v", err)
 	}
 
-	got, err := s.InboxItems(t.Context())
+	got, err := s.InboxItems(t.Context(), nil)
 	if err != nil {
 		t.Fatalf("InboxItems: %v", err)
 	}
@@ -222,7 +222,7 @@ func TestInboxItems_OpenQuestionSummaries(t *testing.T) {
 	q1Time := messageCreatedAt(t, s, q1ID)
 	q2Time := messageCreatedAt(t, s, q2ID)
 
-	got, err := s.InboxItems(t.Context())
+	got, err := s.InboxItems(t.Context(), nil)
 	if err != nil {
 		t.Fatalf("InboxItems: %v", err)
 	}
@@ -266,7 +266,7 @@ func TestInboxItems_PreviewTruncatesLongTitle(t *testing.T) {
 	longLine := strings.Repeat("x", 120)
 	insertQuestionWithBody(t, s, ticketID, "Q1", longLine, questionStateOpen)
 
-	got, err := s.InboxItems(t.Context())
+	got, err := s.InboxItems(t.Context(), nil)
 	if err != nil {
 		t.Fatalf("InboxItems: %v", err)
 	}
@@ -284,6 +284,80 @@ func TestInboxItems_PreviewTruncatesLongTitle(t *testing.T) {
 	if q.Preview == q.Title {
 		t.Error("Preview equals Title for a title longer than questionPreviewMaxRunes; want it truncated")
 	}
+}
+
+// testStateEscalated and testStateAbandoned round up the terminal-state
+// literals TestInboxItems_TerminalTicketNeverUnread needs, alongside the
+// already-declared testStateDone (commit_test.go): named once rather than
+// repeated, the same reasoning testStateDone itself follows.
+const (
+	testStateEscalated = "escalated"
+	testStateAbandoned = "abandoned"
+)
+
+// TestInboxItems_TerminalTicketNeverUnread proves the terminal argument
+// (design section 6.8's goal "InboxItems leaves out unread-only tickets
+// whose state is in machine.States.Terminal") only ever drops an
+// unread-only ticket: a done ticket with an unread message is excluded,
+// while an escalated ticket that is also blocking (waiting_on set) stays
+// listed whatever its state, and a queued ticket's unread message is
+// unaffected. Passing nil, as every pre-existing caller does, leaves the
+// unread branch unfiltered and lists all three.
+func TestInboxItems_TerminalTicketNeverUnread(t *testing.T) {
+	t.Parallel()
+	s := newTestStore(t)
+	projectID := seedProjectNamed(t, s, testProjectAlpha)
+
+	done, err := s.InsertTicket(t.Context(), Ticket{ProjectID: projectID, TrackerRef: "finished", Title: "t finished", State: ticketStateQueued})
+	if err != nil {
+		t.Fatalf("InsertTicket(done): %v", err)
+	}
+	insertZingUpdate(t, s, done)
+	setTicketState(t, s, done, testStateDone)
+
+	escalated := insertWaitingTicket(t, s, projectID, "escalated")
+	setTicketState(t, s, escalated, testStateEscalated)
+
+	queued, err := s.InsertTicket(t.Context(), Ticket{ProjectID: projectID, TrackerRef: "queued", Title: "t queued", State: ticketStateQueued})
+	if err != nil {
+		t.Fatalf("InsertTicket(queued): %v", err)
+	}
+	insertZingUpdate(t, s, queued)
+
+	terminal := []string{testStateDone, testStateEscalated, testStateAbandoned}
+	got, err := s.InboxItems(t.Context(), terminal)
+	if err != nil {
+		t.Fatalf("InboxItems(terminal): %v", err)
+	}
+	if inboxHasTicket(got, done) {
+		t.Errorf("InboxItems(terminal) includes the done ticket %d: %+v", done, got)
+	}
+	if !inboxHasTicket(got, escalated) {
+		t.Errorf("InboxItems(terminal) excludes the blocking escalated ticket %d: %+v", escalated, got)
+	}
+	if !inboxHasTicket(got, queued) {
+		t.Errorf("InboxItems(terminal) excludes the queued ticket %d: %+v", queued, got)
+	}
+
+	gotAll, err := s.InboxItems(t.Context(), nil)
+	if err != nil {
+		t.Fatalf("InboxItems(nil): %v", err)
+	}
+	for _, id := range []int64{done, escalated, queued} {
+		if !inboxHasTicket(gotAll, id) {
+			t.Errorf("InboxItems(nil) excludes ticket %d: %+v", id, gotAll)
+		}
+	}
+}
+
+// inboxHasTicket reports whether items contains ticketID.
+func inboxHasTicket(items []InboxItem, ticketID int64) bool {
+	for i := range items {
+		if items[i].Ticket.ID == ticketID {
+			return true
+		}
+	}
+	return false
 }
 
 func TestTicketsByProject_OrderedByTrackerRefThenID(t *testing.T) {

@@ -48,6 +48,34 @@ func (c *console) handleStream(w http.ResponseWriter, r *http.Request) {
 	}
 
 	sse := datastar.NewSSE(w, r)
+
+	// Opening a thread is a fresh GET /stream (shell.templ's zing-nav), so
+	// this connect is the one place it is marked read; a bus wake below never
+	// marks, so a patch the owner did not cause leaves new messages unread.
+	// GET /stream only passes the Host check (mw.go requireAllowedHost), so
+	// the write also needs the same-site signal isDatastarSameSite shares
+	// with the mutation guard (mw.go): a cross-site img or link cannot send
+	// it. Any other request still renders but writes nothing. It runs before
+	// Subscribe so this tab's own Publish does not wake it, and publishes
+	// only when a row changed. A failure is logged and the stream still
+	// renders.
+	if sig.View == viewThread && sig.Open > 0 {
+		if !isDatastarSameSite(r) {
+			slog.Debug("console: stream: open not marked", "ticket_id", sig.Open, "sec_fetch_site", r.Header.Get("Sec-Fetch-Site"))
+		} else {
+			n, err := c.store.MarkThreadRead(r.Context(), sig.Open)
+			switch {
+			case err != nil:
+				slog.Error("console: stream: mark thread read", "ticket_id", sig.Open, "view", sig.View, "err", err)
+			case n > 0:
+				slog.Info("console: stream: marked thread read", "ticket_id", sig.Open, "marked", n)
+				c.bus.Publish()
+			default:
+				slog.Debug("console: stream: thread already read", "ticket_id", sig.Open)
+			}
+		}
+	}
+
 	ch, cancel := c.bus.Subscribe()
 	defer cancel()
 

@@ -23,6 +23,17 @@ import (
 // something other than a browser.
 const datastarRequestHeader = "Datastar-Request"
 
+// isDatastarSameSite reports whether r carries the Datastar-Request header
+// and a Sec-Fetch-Site that is not "cross-site" -- the one trust decision
+// GET /stream's open-time mark (stream.go) shares with requireSameOrigin
+// above, kept here so every request-trust rule lives in this one file.
+// Origin is not checked: a same-origin fetch GET usually carries no Origin
+// header at all (the same reason requireAllowedHost below skips it), so
+// requiring it would reject the console's own @get.
+func isDatastarSameSite(r *http.Request) bool {
+	return r.Header.Get(datastarRequestHeader) == "true" && r.Header.Get("Sec-Fetch-Site") != "cross-site"
+}
+
 // formContentTypes are the three MIME types a plain HTML <form> can submit
 // without any JavaScript (the CORS "simple request" content types). A
 // mutation route rejects all three: nothing this console serves ever POSTs

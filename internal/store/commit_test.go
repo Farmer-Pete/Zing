@@ -3718,6 +3718,47 @@ func TestCommitConversationSettlesWithDecisionRow(t *testing.T) {
 	}
 }
 
+// TestCommitConversationSettleMarksQuestionRead proves settling a question
+// sets its read_at: the agent closing it implies the owner has seen it
+// (commit.go applyConversationTx).
+func TestCommitConversationSettleMarksQuestionRead(t *testing.T) {
+	t.Parallel()
+	s := newTestStore(t)
+	ctx := t.Context()
+	_, ticketID := seedQueuedTicket(t, s, "1")
+	setTicketState(t, s, ticketID, testStatePlanning)
+
+	sessID := insertSession(t, s, ticketID, testStatePlanning)
+	run0ID := insertQuestionRun(t, s, sessID)
+	qID := insertOpenQuestion(t, s, ticketID, run0ID, "Q1")
+
+	owner, expires := claimForCommit(t, s, ticketID)
+
+	applied, err := s.CommitHandlerResult(ctx, HandlerCommit{
+		TicketID: ticketID, Owner: owner, Expires: expires,
+		Session: &SessionUpsert{ID: &sessID},
+		Runs:    []Run{{Turn: 1, Outcome: new(testTypeQuestion)}},
+		Conversation: &ConversationCommit{
+			ThroughBatch: 0,
+			Settle:       []SettleQuestion{{QuestionID: qID, Decision: "Agreed, no ldflags."}},
+		},
+	})
+	if err != nil {
+		t.Fatalf("CommitHandlerResult: %v", err)
+	}
+	if !applied {
+		t.Fatal("applied = false, want true")
+	}
+
+	var readAt *string
+	if err := s.db.QueryRowContext(ctx, `SELECT read_at FROM messages WHERE id = ?`, qID).Scan(&readAt); err != nil {
+		t.Fatalf("read question read_at: %v", err)
+	}
+	if readAt == nil {
+		t.Error("question read_at = nil, want set after settle")
+	}
+}
+
 // TestCommitConversationDefersSettleOnLateMessage proves a Settle entry
 // whose question carries a sent owner message above ThroughBatch is
 // skipped: the question stays open, and no decision row is inserted

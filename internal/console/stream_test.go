@@ -15,6 +15,8 @@ import (
 
 	"zing/internal/bus"
 	"zing/internal/console"
+	"zing/internal/response"
+	"zing/internal/store"
 )
 
 // streamURL builds a GET /stream request url sending view, open, and
@@ -38,6 +40,7 @@ func openStream(t *testing.T, base, view string, open, project int64) (*http.Res
 		cancel()
 		t.Fatalf("new request: %v", err)
 	}
+	req.Header.Set("Datastar-Request", "true") // what Datastar's @get sends (mw.go)
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		cancel()
@@ -161,6 +164,269 @@ func TestStreamLeavingAThreadPatchesAnEmptyRail(t *testing.T) {
 	if !strings.Contains(inboxRail, `<aside id="rail"></aside>`) {
 		t.Errorf("view=inbox rail frame is not the empty placeholder; got:\n%s", inboxRail)
 	}
+}
+
+// TestStreamOpeningAThreadMarksItRead proves opening a thread (a GET /stream
+// with view=thread and open set to a real ticket, carrying Datastar-Request
+// as Datastar's @get does) marks every unread message of that ticket read
+// in the store before the first frame renders, so neither that thread's own
+// nav frame nor a freshly opened inbox stream's nav frame still shows
+// badge-unread or the ticket's title (design section 6.8).
+func TestStreamOpeningAThreadMarksItRead(t *testing.T) {
+	t.Parallel()
+	s := newConsoleTestStore(t)
+	ticketID := seedTicket(t, s, "fake#1", "Unread thread")
+	seedUnreadUpdate(t, s, ticketID, "progress")
+
+	srv := newTestServer(t, s, bus.New(), nil, newTestLogHandler(t))
+
+	threadResp, threadR, threadCancel := openStream(t, srv.URL, "thread", ticketID, 0)
+	threadNav, _, _, _ := readInitialFrames(t, threadR)
+	threadCancel()
+	_ = threadResp.Body.Close()
+
+	if strings.Contains(threadNav, "badge-unread") {
+		t.Errorf("thread-open nav frame still shows badge-unread; got:\n%s", threadNav)
+	}
+
+	inboxResp, inboxR, inboxCancel := openStream(t, srv.URL, "inbox", 0, 0)
+	defer inboxCancel()
+	defer func() { _ = inboxResp.Body.Close() }()
+	inboxNav, _, _, _ := readInitialFrames(t, inboxR)
+
+	if strings.Contains(inboxNav, "Unread thread") {
+		t.Errorf("post-open inbox nav frame still lists the ticket; got:\n%s", inboxNav)
+	}
+}
+
+// TestStreamBusWakeDoesNotMarkRead proves a bus wake on an already-open
+// stream never marks anything read: only the connect itself does (design
+// section 6.8's "not on SSE patches the owner did not cause"). After the
+// thread's own open marks its one message read, a second message that
+// arrives and wakes the stream through the bus stays unread.
+func TestStreamBusWakeDoesNotMarkRead(t *testing.T) {
+	t.Parallel()
+	s := newConsoleTestStore(t)
+	ticketID := seedTicket(t, s, "fake#1", "Unread thread")
+	firstID := seedUnreadUpdate(t, s, ticketID, "first")
+	b := bus.New()
+
+	srv := newTestServer(t, s, b, nil, newTestLogHandler(t))
+
+	resp, r, cancel := openStream(t, srv.URL, "thread", ticketID, 0)
+	defer cancel()
+	defer func() { _ = resp.Body.Close() }()
+	readInitialFrames(t, r) // the open-time mark: the seeded message is now read
+
+	first, err := s.GetMessage(t.Context(), firstID)
+	if err != nil {
+		t.Fatalf("GetMessage(first): %v", err)
+	}
+	if first.ReadAt == nil {
+		t.Error("the first message's ReadAt is still nil after opening the thread")
+	}
+
+	secondID := seedUnreadUpdate(t, s, ticketID, "second")
+	b.Publish()
+	readInitialFrames(t, r) // the wake's own re-render; it must not mark the new message
+
+	second, err := s.GetMessage(t.Context(), secondID)
+	if err != nil {
+		t.Fatalf("GetMessage(second): %v", err)
+	}
+	if second.ReadAt != nil {
+		t.Error("the second message's ReadAt is set after a bus wake; only the open itself should mark")
+	}
+
+	items, err := s.InboxItems(t.Context(), nil)
+	if err != nil {
+		t.Fatalf("InboxItems: %v", err)
+	}
+	if !inboxHasTicket(items, ticketID) {
+		t.Error("InboxItems no longer lists the ticket after a bus wake; the second message should still be unread")
+	}
+}
+
+// TestStreamOpeningAReadThreadPublishesNothing proves the open-time mark
+// publishes only when it actually marked a row: opening a thread with no
+// unread messages costs an already-open stream no extra frame (design
+// section 6.8's "an already-read thread ... costs no extra frames").
+func TestStreamOpeningAReadThreadPublishesNothing(t *testing.T) {
+	t.Parallel()
+	s := newConsoleTestStore(t)
+	ticketID := seedTicket(t, s, "fake#1", "Already read")
+	b := bus.New()
+
+	srv := newTestServer(t, s, b, nil, newTestLogHandler(t))
+
+	respA, readerA, cancelA := openStream(t, srv.URL, "inbox", 0, 0)
+	defer cancelA()
+	defer func() { _ = respA.Body.Close() }()
+	readInitialFrames(t, readerA)
+
+	threadResp, threadR, threadCancel := openStream(t, srv.URL, "thread", ticketID, 0)
+	defer threadCancel()
+	defer func() { _ = threadResp.Body.Close() }()
+	readInitialFrames(t, threadR)
+
+	expectNoMoreFrames(t, readerA, 300*time.Millisecond)
+}
+
+// TestStreamOpenWithoutDatastarHeaderMarksNothing proves the open-time mark
+// is gated behind the same Datastar-Request signal the mutation guard
+// trusts (design section 6.8's goal 2): a GET /stream that lacks that
+// header, or that carries a cross-site Sec-Fetch-Site, still renders but
+// marks nothing, because GET /stream itself sits behind only the
+// Host-allowlist guard.
+func TestStreamOpenWithoutDatastarHeaderMarksNothing(t *testing.T) {
+	t.Parallel()
+	s := newConsoleTestStore(t)
+	ticketID := seedTicket(t, s, "fake#1", "Unread thread")
+	seedUnreadUpdate(t, s, ticketID, "progress")
+
+	srv := newTestServer(t, s, bus.New(), nil, newTestLogHandler(t))
+
+	// No Datastar-Request header at all.
+	ctx1, cancel1 := context.WithCancel(t.Context())
+	defer cancel1()
+	req1, err := http.NewRequestWithContext(ctx1, http.MethodGet, streamURL(srv.URL, "thread", ticketID, 0), http.NoBody)
+	if err != nil {
+		t.Fatalf("new request: %v", err)
+	}
+	resp1, err := http.DefaultClient.Do(req1)
+	if err != nil {
+		t.Fatalf("GET /stream: %v", err)
+	}
+	defer func() { _ = resp1.Body.Close() }()
+	readInitialFrames(t, bufio.NewReader(resp1.Body))
+
+	items, err := s.InboxItems(t.Context(), nil)
+	if err != nil {
+		t.Fatalf("InboxItems: %v", err)
+	}
+	if !inboxHasTicket(items, ticketID) {
+		t.Error("InboxItems no longer lists the ticket after an open with no Datastar-Request header")
+	}
+
+	// Datastar-Request set, but Sec-Fetch-Site is cross-site.
+	ctx2, cancel2 := context.WithCancel(t.Context())
+	defer cancel2()
+	req2, err := http.NewRequestWithContext(ctx2, http.MethodGet, streamURL(srv.URL, "thread", ticketID, 0), http.NoBody)
+	if err != nil {
+		t.Fatalf("new request: %v", err)
+	}
+	req2.Header.Set("Datastar-Request", "true")
+	req2.Header.Set("Sec-Fetch-Site", "cross-site")
+	resp2, err := http.DefaultClient.Do(req2)
+	if err != nil {
+		t.Fatalf("GET /stream: %v", err)
+	}
+	defer func() { _ = resp2.Body.Close() }()
+	readInitialFrames(t, bufio.NewReader(resp2.Body))
+
+	items, err = s.InboxItems(t.Context(), nil)
+	if err != nil {
+		t.Fatalf("InboxItems: %v", err)
+	}
+	if !inboxHasTicket(items, ticketID) {
+		t.Error("InboxItems no longer lists the ticket after an open with Sec-Fetch-Site: cross-site")
+	}
+}
+
+// TestStreamTerminalTicketNeverShowsUnread proves a ticket in a terminal
+// state never shows "unread" (design section 6.8's goal "a ticket in a
+// terminal state never shows unread"), even carrying unread messages and
+// even though nothing ever opened its thread: navComponent and
+// inboxComponent pass the real machine's terminal list (machine.toml's
+// "done", "escalated", "abandoned") to InboxItems, so a done ticket drops
+// out of both #nav's badge list and the Inbox view.
+func TestStreamTerminalTicketNeverShowsUnread(t *testing.T) {
+	t.Parallel()
+	s := newConsoleTestStore(t)
+	ticketID := seedTicket(t, s, "done#1", "Finished ticket")
+	seedUnreadUpdate(t, s, ticketID, "first")
+	seedUnreadUpdate(t, s, ticketID, "second")
+
+	const owner = "test-owner"
+	expires := time.Now().Add(10 * time.Minute)
+	claimed, err := s.Claim(t.Context(), ticketID, owner, expires)
+	if err != nil {
+		t.Fatalf("Claim: %v", err)
+	}
+	if !claimed {
+		t.Fatal("Claim: got false, want true")
+	}
+	applied, err := s.CommitHandlerResult(t.Context(), store.HandlerCommit{
+		TicketID: ticketID, Owner: owner, Expires: expires,
+		Next: string(response.TicketStateDone), Reason: "test: finished",
+	})
+	if err != nil {
+		t.Fatalf("CommitHandlerResult: %v", err)
+	}
+	if !applied {
+		t.Fatal("CommitHandlerResult: applied = false, want true")
+	}
+
+	srv := newTestServer(t, s, bus.New(), testMachine(t), newTestLogHandler(t))
+
+	resp, r, cancel := openStream(t, srv.URL, "inbox", 0, 0)
+	defer cancel()
+	defer func() { _ = resp.Body.Close() }()
+	nav, main, _, _ := readInitialFrames(t, r)
+
+	if strings.Contains(nav, "Finished ticket") {
+		t.Errorf("nav frame still lists the done ticket; got:\n%s", nav)
+	}
+	if strings.Contains(main, "Finished ticket") {
+		t.Errorf("inbox main frame still lists the done ticket; got:\n%s", main)
+	}
+}
+
+// inboxHasTicket reports whether items contains ticketID.
+func inboxHasTicket(items []store.InboxItem, ticketID int64) bool {
+	for i := range items {
+		if items[i].Ticket.ID == ticketID {
+			return true
+		}
+	}
+	return false
+}
+
+// TestStreamOpeningAMissingTicketMarksNothing proves an open id that names
+// no ticket renders the empty thread view, marks nothing, and publishes
+// nothing (design section 6.8's goal 3): MarkThreadRead's UPDATE matches no
+// row, so it returns 0 and the open-time publish never fires.
+func TestStreamOpeningAMissingTicketMarksNothing(t *testing.T) {
+	t.Parallel()
+	s := newConsoleTestStore(t)
+	otherID := seedTicket(t, s, "fake#1", "Some other ticket")
+	otherMsgID := seedUnreadUpdate(t, s, otherID, "progress")
+	b := bus.New()
+
+	srv := newTestServer(t, s, b, nil, newTestLogHandler(t))
+
+	respA, readerA, cancelA := openStream(t, srv.URL, "inbox", 0, 0)
+	defer cancelA()
+	defer func() { _ = respA.Body.Close() }()
+	readInitialFrames(t, readerA)
+
+	threadResp, threadR, threadCancel := openStream(t, srv.URL, "thread", 999999, 0)
+	defer threadCancel()
+	defer func() { _ = threadResp.Body.Close() }()
+	_, main, _, _ := readInitialFrames(t, threadR)
+	if !strings.Contains(main, "Select a ticket.") {
+		t.Errorf("missing-ticket thread open main frame is not the empty thread view; got:\n%s", main)
+	}
+
+	otherMsg, err := s.GetMessage(t.Context(), otherMsgID)
+	if err != nil {
+		t.Fatalf("GetMessage: %v", err)
+	}
+	if otherMsg.ReadAt != nil {
+		t.Error("the unrelated ticket's message was marked read by an open naming a missing ticket")
+	}
+
+	expectNoMoreFrames(t, readerA, 300*time.Millisecond)
 }
 
 // TestStreamDisconnectUnsubscribesWithNoGoroutineLeak proves the loop exits
