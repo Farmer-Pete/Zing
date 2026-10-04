@@ -35,6 +35,6 @@ exec "$real_git" "\$@"
 EOF
 chmod +x "$tmp/git"
 
-PATH="$tmp:$PATH" GOFLAGS=-buildvcs=false go test -count=1 "$@" 1>&2
+PATH="$tmp:$PATH" GOFLAGS="${GOFLAGS:+$GOFLAGS }-buildvcs=false" go test -count=1 "$@" 1>&2
 
 wc -l <"$log" | tr -d ' '
