@@ -28,12 +28,12 @@ func TestPrompts_MatchThePinnedDesignText(t *testing.T) {
 		{
 			name:   "planning-feature",
 			path:   planningFeaturePromptPath,
-			sha256: "e603319479edd10f7e3e162aa052e26e99b8671286d8956a0675f2a2748c857f",
+			sha256: "535243076bcffd12da0b8f89ab675f120786b0f072c78c460b3e31edfbb181e3",
 		},
 		{
 			name:   "planning-bug",
 			path:   planningBugPromptPath,
-			sha256: "97bf910bd76569b20ade58e34d77c2e9048221937f2cf5c6cc93668e273fb20c",
+			sha256: "e949246c56e771cd56aa29b85c5e66e95077e55e22a65a5dc0069cb46aa9ffd9",
 		},
 		{
 			name:   "planreview",
@@ -63,7 +63,7 @@ func TestPrompts_MatchThePinnedDesignText(t *testing.T) {
 		{
 			name:   "judge",
 			path:   "prompts/judge.md",
-			sha256: "4f3a570983506de4fd530ab428f31600028a1c8ab7e52d21617c0883ca74c154",
+			sha256: "64092ad52905e96d4a09b236f9209b008b7d09ad7de3602bcbd107fdddbcb0b1",
 		},
 		{
 			name:   "respond",
@@ -267,6 +267,49 @@ func TestPlanningPromptsTeachSandboxChecks(t *testing.T) {
 	for _, path := range []string{planningFeaturePromptPath, planningBugPromptPath} {
 		if !strings.Contains(unwrapped(t, path), sandboxChecksSentence) {
 			t.Errorf("%s lacks the sandbox-checks sentence", path)
+		}
+	}
+}
+
+// hostKindSentence is what both planning prompts say about kind host
+// (#49): Zing runs a host scenario's check on the owner's machine at
+// judging, outside any sandbox, once the owner approves it at the gate,
+// for a live sandbox probe, a live zing serve, or wall-clock timing, and
+// a host scenario needs a check.
+const hostKindSentence = "The exception is kind host. " +
+	"Zing runs a host scenario's check on the owner's machine at judging, " +
+	"outside any sandbox, once the owner approves it at the gate. " +
+	"Use it for a live sandbox probe, a live zing serve, or wall-clock timing. " +
+	"A host scenario needs a check."
+
+// TestPlanningPromptsTeachHostKind proves both planning prompts offer kind
+// host right after the sandbox-checks sentence, and that planning-feature.md
+// lists it as the fourth kind in its scenarios step (#49).
+func TestPlanningPromptsTeachHostKind(t *testing.T) {
+	t.Parallel()
+	for _, path := range []string{planningFeaturePromptPath, planningBugPromptPath} {
+		if !strings.Contains(unwrapped(t, path), hostKindSentence) {
+			t.Errorf("%s lacks the host-kind sentence", path)
+		}
+	}
+	if !strings.Contains(unwrapped(t, planningFeaturePromptPath), "behavior, negative, performance, or host") {
+		t.Errorf("%s does not list host as the fourth kind", planningFeaturePromptPath)
+	}
+}
+
+// TestJudgePromptTrustsHostChecks proves prompts/judge.md tells the judge
+// that a host scenario arrives already run, with its exit code and
+// output in host_checks, that the judge must not re-run it, and that it
+// must never return cannot_run for one (#49).
+func TestJudgePromptTrustsHostChecks(t *testing.T) {
+	t.Parallel()
+	text := unwrapped(t, "prompts/judge.md")
+	for _, want := range []string{
+		"Do not run a host scenario's check, and never return cannot_run for a host scenario.",
+		"The host_checks input gives each one's exit code and the tail of its output.",
+	} {
+		if !strings.Contains(text, want) {
+			t.Errorf("prompts/judge.md lacks %q", want)
 		}
 	}
 }

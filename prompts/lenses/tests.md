@@ -15,6 +15,10 @@ Check:
   start (`sandbox-exec`), or a sandbox probe that skips when sandboxed
   is a finding, unless the then names that skip as the expected result
   and the check proves it per the next bullet.
+- A scenario of kind host is the exception to the bullet above: Zing
+  runs its check on the owner's machine at judging, so a live
+  `zing serve`, a sandbox probe, or timing belongs there. A host
+  scenario with no check is a finding.
 - A scenario whose then expects a skip has a check that runs `go test
   -v` and greps the skip line, such as `--- SKIP: TestName`, and the
   skip message. A bare `go test` exits 0 whether or not the test

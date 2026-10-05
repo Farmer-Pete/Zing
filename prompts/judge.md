@@ -25,6 +25,13 @@ is not observed. If a scenario's verdict rests on a skip like that,
 return the error outcome with code cannot_run, naming the scenario and
 the skip message.
 
+A scenario of kind host has already been run. Zing ran each host check
+on the owner's machine, outside any sandbox, before this run started.
+The host_checks input gives each one's exit code and the tail of its
+output. Do not run a host scenario's check, and never return
+cannot_run for a host scenario. Give its verdict from that exit code
+and output, and quote them in its evidence.
+
 For each scenario, run it against the real system as a user would: build,
 start, invoke, observe. Record the command you ran and what you saw. Say
 pass or fail from what you observed, never from what the code looks like.
