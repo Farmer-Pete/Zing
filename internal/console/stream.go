@@ -1,13 +1,22 @@
 // stream.go: GET /stream, the one live SSE stream per tab (design section
 // 6.3, Q6). It reads the three navigation signals, renders and patches
 // #nav, #main, and #rail once on connect, then again every time the bus
-// wakes it, until the request context is done.
+// wakes it or its own heartbeat ticker fires, until the request context is
+// done.
 //
 // bus.Subscribe's cancel deregisters the subscription but never closes the
 // channel (Task 1 reconciliation against merged Package 3, design section
 // 14: "the /stream loop must select on r.Context().Done() to exit; there is
 // no closed-channel branch"), so the loop below selects on the request
 // context alone; a !ok receive is never reachable and is not written.
+//
+// The heartbeat (bug fix, console.streamHeartbeat) re-renders and patches
+// all four regions on a fixed interval with no bus wake at all, so a
+// missed or swallowed wake -- the stream's own failure mode this fixes --
+// heals within one interval instead of leaving the page stale with nothing
+// on screen saying so. A zero streamHeartbeat (every test that does not
+// itself exercise the beat) leaves the ticker channel nil, and a nil
+// channel's select case never fires.
 package console
 
 import (
@@ -96,7 +105,14 @@ func (c *console) handleStream(w http.ResponseWriter, r *http.Request) {
 	ch, cancel := c.bus.Subscribe()
 	defer cancel()
 
-	if !c.patchRegions(r.Context(), sse, sig) {
+	var beat <-chan time.Time
+	if c.streamHeartbeat > 0 {
+		t := time.NewTicker(c.streamHeartbeat)
+		defer t.Stop()
+		beat = t.C
+	}
+
+	if !c.patchRegions(r.Context(), rc, sse, sig) {
 		return
 	}
 	for {
@@ -104,7 +120,11 @@ func (c *console) handleStream(w http.ResponseWriter, r *http.Request) {
 		case <-r.Context().Done():
 			return
 		case <-ch:
-			if !c.patchRegions(r.Context(), sse, sig) {
+			if !c.patchRegions(r.Context(), rc, sse, sig) {
+				return
+			}
+		case <-beat:
+			if !c.patchRegions(r.Context(), rc, sse, sig) {
 				return
 			}
 		}
@@ -115,14 +135,15 @@ func (c *console) handleStream(w http.ResponseWriter, r *http.Request) {
 // frame, always all four (design section 6.3: "#rail ... is always
 // patched, so leaving a thread clears the old rail"; design section 6a,
 // D8: "#alerts ... patched on every frame"). It returns false -- ending the
-// stream -- on a store read failure or on any PatchElementTempl error (a
-// render error or a write error alike, folded together by the SDK, most
-// often meaning the client has gone away). Every PatchElementTempl error is
-// logged, with the frame's ids, before the stream ends (review fix, PR
-// #16): the SDK folds a render error into the same return as an ordinary
-// client-disconnect write error, so this was the only place that could
-// still tell the two apart, and silently ending on a genuine render error
-// left it undiagnosable.
+// stream -- on a store read failure, on armFrameWriteDeadline failing to
+// arm a region's deadline, or on any PatchElementTempl error (a render
+// error or a write error alike, folded together by the SDK, most often
+// meaning the client has gone away, or now a write that blocked past its
+// deadline). Every PatchElementTempl error is logged, with the frame's
+// ids, before the stream ends (review fix, PR #16): the SDK folds a render
+// error into the same return as an ordinary client-disconnect write error,
+// so this was the only place that could still tell the two apart, and
+// silently ending on a genuine render error left it undiagnosable.
 //
 // #alerts never logs at warn itself (its own render path only reads the
 // ring; it never calls slog.Warn), so patching it cannot re-trigger onWarn
@@ -134,7 +155,7 @@ func (c *console) handleStream(w http.ResponseWriter, r *http.Request) {
 // stream's own context is done -- the owner navigated or closed the tab --
 // logs at Debug instead of its usual level, and so never reaches the
 // #alerts banner.
-func (c *console) patchRegions(ctx context.Context, sse *datastar.ServerSentEventGenerator, sig streamSignals) bool {
+func (c *console) patchRegions(ctx context.Context, rc *http.ResponseController, sse *datastar.ServerSentEventGenerator, sig streamSignals) bool {
 	// nav's own open ticket is sig.Open only in the thread view: every other
 	// view's open is 0 in practice (console.js's reduceNav sets the whole
 	// {view,open,project} triple together on every navigation), but a
@@ -149,6 +170,9 @@ func (c *console) patchRegions(ctx context.Context, sse *datastar.ServerSentEven
 		logStreamErr(ctx, slog.LevelError, "console: stream: build nav", err)
 		return false
 	}
+	if !c.armFrameWriteDeadline(ctx, rc, "nav", sig) {
+		return false
+	}
 	if patchErr := sse.PatchElementTempl(nav); patchErr != nil {
 		logStreamErr(ctx, slog.LevelWarn, "console: stream: patch nav", patchErr, "view", sig.View, "open", sig.Open)
 		return false
@@ -157,6 +181,9 @@ func (c *console) patchRegions(ctx context.Context, sse *datastar.ServerSentEven
 	main, err := c.mainComponent(ctx, sig.View, sig.Open, sig.Project)
 	if err != nil {
 		logStreamErr(ctx, slog.LevelError, "console: stream: build main", err, "view", sig.View)
+		return false
+	}
+	if !c.armFrameWriteDeadline(ctx, rc, "main", sig) {
 		return false
 	}
 	if patchErr := sse.PatchElementTempl(main); patchErr != nil {
@@ -169,13 +196,48 @@ func (c *console) patchRegions(ctx context.Context, sse *datastar.ServerSentEven
 		logStreamErr(ctx, slog.LevelError, "console: stream: build rail", err, "view", sig.View, "open", sig.Open)
 		return false
 	}
+	if !c.armFrameWriteDeadline(ctx, rc, "rail", sig) {
+		return false
+	}
 	if patchErr := sse.PatchElementTempl(rail); patchErr != nil {
 		logStreamErr(ctx, slog.LevelWarn, "console: stream: patch rail", patchErr, "view", sig.View, "open", sig.Open)
 		return false
 	}
 
+	if !c.armFrameWriteDeadline(ctx, rc, "alerts", sig) {
+		return false
+	}
 	if patchErr := sse.PatchElementTempl(c.alertsComponent()); patchErr != nil {
 		logStreamErr(ctx, slog.LevelWarn, "console: stream: patch alerts", patchErr, "view", sig.View, "open", sig.Open)
+		return false
+	}
+	return true
+}
+
+// armFrameWriteDeadline sets rc's write deadline streamWriteTimeout out from
+// now, right before the next region write on /stream (bug fix: a wedged
+// write otherwise blocks forever, since handleStream clears the write
+// deadline entirely on connect, and the bus's one-slot buffer then drops
+// every later wake while it is stuck). A zero streamWriteTimeout (a bare
+// console literal, every test that does not itself exercise the deadline)
+// arms nothing and returns true, matching handleStream's own unbounded
+// streaming write. http.ErrNotSupported is tolerated the same way
+// handleStream's own SetWriteDeadline calls already tolerate it (stream.go):
+// it means w does not implement the optional deadline interface at all,
+// which a real connection's ResponseWriter always does. Any other error is
+// logged through logStreamErr at Warn, with region and sig's view/open, the
+// same fields patchRegions' own per-region patch failures already carry, so
+// the #alerts banner says which region and which open ticket's stream ended
+// on a stuck write; the stream ends, the same as a failed region write.
+func (c *console) armFrameWriteDeadline(ctx context.Context, rc *http.ResponseController, region string, sig streamSignals) bool {
+	if c.streamWriteTimeout <= 0 {
+		return true
+	}
+	if err := rc.SetWriteDeadline(time.Now().Add(c.streamWriteTimeout)); err != nil {
+		if errors.Is(err, http.ErrNotSupported) {
+			return true
+		}
+		logStreamErr(ctx, slog.LevelWarn, "console: stream: arm write deadline", err, "region", region, "view", sig.View, "open", sig.Open)
 		return false
 	}
 	return true

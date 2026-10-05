@@ -43,11 +43,12 @@ import templruntime "github.com/a-h/templ/runtime"
 // console.js loads before datastar.js (the reconnect plan): its own
 // datastar-fetch listener (installStreamWatch) must already be bound before
 // datastar.js processes #stream-ctl's data-init and fires /stream's very
-// first `started` event, or that event -- and the "live" settle timer it
-// starts -- would be missed. Both /stream calls pass {retryMaxCount: 0},
-// handing every reconnect attempt to console.js instead of to Datastar's
-// own retry, which fires no `started` event per retry and so gives the
-// client no way to tell when a retry has actually succeeded.
+// first `started` event, or that event -- and the frame-driven "live"
+// signal it feeds into reduceStreamStatus -- would be missed. Both /stream
+// calls pass {retryMaxCount: 0}, handing every reconnect attempt to
+// console.js instead of to Datastar's own retry, which fires no `started`
+// event per retry and so gives the client no way to tell when a retry has
+// actually succeeded.
 func Shell(nav, main, rail, alerts templ.Component) templ.Component {
 	return templruntime.GeneratedTemplate(func(templ_7745c5c3_Input templruntime.GeneratedComponentInput) (templ_7745c5c3_Err error) {
 		templ_7745c5c3_W, ctx := templ_7745c5c3_Input.Writer, templ_7745c5c3_Input.Context

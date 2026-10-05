@@ -815,21 +815,23 @@ export function describeAction(action) {
 export const RECONNECT_BASE_MS = 1000;
 export const RECONNECT_MAX_MS = 30000;
 
-// STREAM_SETTLE_MS is how long a started /stream request must stay open
-// before reduceStreamStatus treats it as live (console.js's applyStreamEvent
-// schedules a "settled" event this far after "started"). A patch clears the
-// stale marker sooner, but an idiomorph morph of identical content can
-// produce no patch at all, so settling on time elapsed alone is the
-// fallback that still clears it.
-export const STREAM_SETTLE_MS = 1000;
+// STREAM_IDLE_MS is how long reduceStreamStatus waits, with a request
+// in flight and no frame, before treating the stream as silently stuck and
+// going stale: three missed 15s server beats (streamHeartbeatInterval,
+// internal/console/server.go), so one slow or dropped beat does not trip it.
+export const STREAM_IDLE_MS = 45000;
+
+// STREAM_TICK_MS is how often console.js's installStreamWatch re-evaluates
+// the idle clock by feeding reduceStreamStatus a 'tick' event.
+export const STREAM_TICK_MS = 5000;
 
 /**
  * emptyStreamStatus is reduceStreamStatus's rest state: no /stream request
- * in flight, no backoff attempt counted, and not stale.
- * @returns {{inflight: number, gen: number, attempt: number, staleSince: number|null}}
+ * in flight, no backoff attempt counted, not stale, and no frame seen yet.
+ * @returns {{inflight: number, attempt: number, staleSince: number|null, lastFrameAt: number|null}}
  */
 export function emptyStreamStatus() {
-	return { inflight: 0, gen: 0, attempt: 0, staleSince: null };
+	return { inflight: 0, attempt: 0, staleSince: null, lastFrameAt: null };
 }
 
 /**
@@ -846,57 +848,76 @@ export function reconnectDelay(attempt) {
 /**
  * reduceStreamStatus is console.js's one reducer over every /stream
  * lifecycle event (started, finished, error, retrying, retries-failed,
- * reconnecting, settled, patched), driving both the reconnect backoff and
- * the "Reconnecting. Stale since HH:MM." marker (bug fix: after a stream
- * ended for good, nothing noticed, and the sidebar kept showing a frame
- * that was no longer live). inflight counts /stream requests console.js has
- * seen started but not yet finished, so a navigation's requestCancellation
- * aborting an old stream while a new one is already open does not schedule
- * a reconnect the new stream makes unnecessary. gen is bumped on every
- * started request and on every failure, so a settle timer armed for an
- * older request (event.gen) is a no-op once a newer one has started or
- * failed. staleSince latches the first failure's or reconnect wait's time
- * and holds it through repeats, so retriggering does not keep moving the
- * "Stale since" clock forward.
+ * reconnecting, patched, datastar-patch-elements, visible, tick), driving
+ * both the reconnect backoff and the "Reconnecting. Stale since HH:MM."
+ * marker (bug fix: a stream that stayed open but stopped delivering frames
+ * -- a half-open socket, a hidden-tab pause, a wedged server write -- left
+ * the page showing a stale frame forever, with nothing noticing). inflight
+ * counts /stream requests console.js has seen started but not yet finished,
+ * so a navigation's requestCancellation aborting an old stream while a new
+ * one is already open does not schedule a reconnect the new stream makes
+ * unnecessary. lastFrameAt is the last time a request started or delivered
+ * a frame; 'tick' compares it against STREAM_IDLE_MS to notice a request
+ * that is still inflight but has gone silent. staleSince latches the first
+ * failure's, reconnect wait's, or idle trip's time and holds it through
+ * repeats, so retriggering does not keep moving the "Stale since" clock
+ * forward; only a frame (patched or datastar-patch-elements) while inflight
+ * clears it.
  *
- * @param {{inflight: number, gen: number, attempt: number, staleSince: number|null}} status
- * @param {{type: 'started'|'finished'|'error'|'retrying'|'retries-failed'|'reconnecting'|'settled'|'patched', gen?: number}} event
+ * @param {{inflight: number, attempt: number, staleSince: number|null, lastFrameAt: number|null}} status
+ * @param {{type: 'started'|'finished'|'error'|'retrying'|'retries-failed'|'reconnecting'|'patched'|'datastar-patch-elements'|'visible'|'tick'}} event
  * @param {number} now - Date.now()-style milliseconds
- * @returns {{status: object, effect: {settleGen: number|null, reconnectIn: number|null, cancelReconnect: boolean}}}
+ * @returns {{status: object, effect: {reconnectIn: number|null, cancelReconnect: boolean}}}
  */
 export function reduceStreamStatus(status, event, now) {
-	const none = { settleGen: null, reconnectIn: null, cancelReconnect: false };
+	const none = { reconnectIn: null, cancelReconnect: false };
 	switch (event.type) {
-		case 'started': {
-			const gen = status.gen + 1;
+		case 'started':
 			return {
-				status: { ...status, inflight: status.inflight + 1, gen },
-				effect: { ...none, settleGen: gen, cancelReconnect: true },
+				status: { ...status, inflight: status.inflight + 1, lastFrameAt: now },
+				effect: { ...none, cancelReconnect: true },
 			};
-		}
 		case 'finished': {
 			const inflight = Math.max(0, status.inflight - 1);
 			if (inflight > 0) {
 				return { status: { ...status, inflight }, effect: none };
 			}
 			return {
-				status: { ...status, inflight, gen: status.gen + 1, attempt: status.attempt + 1 },
+				status: { ...status, inflight, attempt: status.attempt + 1 },
 				effect: { ...none, reconnectIn: reconnectDelay(status.attempt) },
 			};
 		}
 		case 'error':
 		case 'retrying':
 		case 'retries-failed':
-			return { status: { ...status, gen: status.gen + 1, staleSince: status.staleSince ?? now }, effect: none };
 		case 'reconnecting':
 			return { status: { ...status, staleSince: status.staleSince ?? now }, effect: none };
-		case 'settled':
-		case 'patched': {
-			const current = event.type === 'patched' || event.gen === status.gen;
-			if (status.inflight === 0 || !current) {
+		case 'patched':
+		case 'datastar-patch-elements': {
+			if (status.inflight === 0) {
 				return { status, effect: none };
 			}
-			return { status: { ...status, attempt: 0, staleSince: null }, effect: none };
+			return {
+				status: { ...status, attempt: 0, staleSince: null, lastFrameAt: now },
+				effect: { ...none, cancelReconnect: true },
+			};
+		}
+		case 'visible': {
+			if (status.inflight === 0) {
+				return { status, effect: none };
+			}
+			return { status: { ...status, lastFrameAt: now }, effect: none };
+		}
+		case 'tick': {
+			const inflight = status.inflight > 0;
+			const silentTooLong = status.lastFrameAt !== null && now - status.lastFrameAt >= STREAM_IDLE_MS;
+			if (!inflight || !silentTooLong) {
+				return { status, effect: none };
+			}
+			return {
+				status: { ...status, staleSince: status.staleSince ?? now, attempt: status.attempt + 1, lastFrameAt: now },
+				effect: { ...none, reconnectIn: reconnectDelay(status.attempt) },
+			};
 		}
 		default:
 			return { status, effect: none };
