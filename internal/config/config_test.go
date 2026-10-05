@@ -919,6 +919,38 @@ func TestLoad_PushTokenCountsRunesNotBytes(t *testing.T) {
 	}
 }
 
+// TestLoad_FixCommandIsOptional proves projects[i].commands.fix (the
+// owner-set auto-fix command CHECK runs before lint): set, it loads back
+// unchanged; absent, it loads back empty with no error.
+func TestLoad_FixCommandIsOptional(t *testing.T) {
+	t.Parallel()
+
+	t.Run("set", func(t *testing.T) {
+		t.Parallel()
+		// Appended, not prepended: minimalValidTOML's last line leaves
+		// [projects.commands] open, so this still lands inside it.
+		const withFix = minimalValidTOML + "fix = \"golangci-lint run --fix\"\n"
+		cfg, err := Load(writeTOML(t, withFix))
+		if err != nil {
+			t.Fatalf("Load: %v", err)
+		}
+		if cfg.Projects[0].Commands.Fix != "golangci-lint run --fix" {
+			t.Errorf("Commands.Fix = %q, want %q", cfg.Projects[0].Commands.Fix, "golangci-lint run --fix")
+		}
+	})
+
+	t.Run("absent", func(t *testing.T) {
+		t.Parallel()
+		cfg, err := Load(writeTOML(t, minimalValidTOML))
+		if err != nil {
+			t.Fatalf("Load: %v", err)
+		}
+		if cfg.Projects[0].Commands.Fix != "" {
+			t.Errorf("Commands.Fix = %q, want empty", cfg.Projects[0].Commands.Fix)
+		}
+	})
+}
+
 func TestDefaultPath(t *testing.T) {
 	t.Parallel()
 
@@ -1270,6 +1302,38 @@ func TestLoad_PathIsADirectoryIsRejectedWithoutChmod(t *testing.T) {
 	}
 	if perm := info.Mode().Perm(); perm != 0o755 {
 		t.Errorf("directory mode = %o after Load, want unchanged 0755 (repairFileMode must not chmod a non-regular file)", perm)
+	}
+}
+
+// TestAppendProject_OmitsEmptyFix proves commands.fix's toml:"fix,omitempty"
+// tag: appending a project whose Commands.Fix is "" writes no fix key at
+// all, and Load reads that project back with Fix still "".
+func TestAppendProject_OmitsEmptyFix(t *testing.T) {
+	t.Parallel()
+
+	path := writeTOML(t, minimalValidTOML)
+
+	if err := AppendProject(path, testAppendedProject); err != nil {
+		t.Fatalf("AppendProject: %v", err)
+	}
+
+	written, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read back: %v", err)
+	}
+	if strings.Contains(string(written), "fix") {
+		t.Errorf("zing.toml after AppendProject contains \"fix\":\n%s", written)
+	}
+
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load after AppendProject: %v", err)
+	}
+	if len(cfg.Projects) != 2 {
+		t.Fatalf("Projects = %+v, want two", cfg.Projects)
+	}
+	if cfg.Projects[1].Commands.Fix != "" {
+		t.Errorf("Projects[1].Commands.Fix = %q, want empty", cfg.Projects[1].Commands.Fix)
 	}
 }
 

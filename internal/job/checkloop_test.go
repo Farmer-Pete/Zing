@@ -6,15 +6,21 @@ package job_test
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
+	"os"
 	"os/exec"
+	"path/filepath"
+	"reflect"
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"testing"
 	"time"
 
+	"zing/internal/gitfixture"
 	"zing/internal/job"
 	"zing/internal/response"
 	"zing/internal/runtime"
@@ -29,7 +35,7 @@ const (
 	// checkFailingTestCmd fails with a recognizable line every time.
 	checkFailingTestCmd = "echo 'FAIL: TestPing want pong'; exit 1"
 	checkFailLine       = "FAIL: TestPing want pong"
-	checkLoopsWhat      = "the project's test or lint command still fails after the builder's fix attempts"
+	checkLoopsWhat      = "the project's fix, lint or test command still fails after the builder's fix attempts"
 )
 
 // withCheckTestCommand returns deps with ticket's project rewired to run
@@ -308,6 +314,106 @@ func TestCheckClaimsAndCommandFailuresShareOneResume(t *testing.T) {
 	}
 }
 
+// recordingCommands is a job.CommandRunner that appends each shell command
+// it is asked to run to a mutex-guarded slice, in call order, then runs it
+// for real.
+type recordingCommands struct {
+	mu    sync.Mutex
+	calls []string
+	real  job.CommandRunner
+}
+
+func (c *recordingCommands) Run(ctx context.Context, dir, repoGit, shellCmd string, timeout time.Duration, cio job.CommandIO) (int, error) {
+	c.mu.Lock()
+	c.calls = append(c.calls, shellCmd)
+	c.mu.Unlock()
+	return c.real.Run(ctx, dir, repoGit, shellCmd, timeout, cio)
+}
+
+// TestCheckLintFailureSkipsTest proves CHECK runs lint before test and
+// stops at the first failed result: a failing lint command is reported and
+// the test command never runs (#79).
+func TestCheckLintFailureSkipsTest(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow end-to-end flow; runs in the full suite")
+	}
+	t.Parallel()
+	s, _, ticketID := buildTicketInBuilding(t)
+	script := &scriptedRuntime{t: t, steps: []scriptedStep{buildStep([]string{}, nil, "lint-fail-sess")}}
+	const failingLint = "echo 'lint: goconst'; exit 1"
+	cmds := &recordingCommands{real: job.NewCommandRunner(sandbox.Off(), false)}
+
+	var check store.HandlerCommit
+	for range 2 { // RUN, then CHECK
+		ticket := getTicket(t, s, ticketID)
+		deps := claimForBuild(t, s, script, ticketID)
+		proj := deps.Projects[ticket.ProjectID]
+		proj.LintCmd = failingLint
+		proj.TestCmd = testNoopShellCmd
+		deps.Projects = map[int64]job.Project{ticket.ProjectID: proj}
+		deps.Commands = cmds
+		commit, err := job.Registry()[testStateBuilding].Run(t.Context(), ticket, deps)
+		if err != nil {
+			t.Fatalf("building tick: %v", err)
+		}
+		apply(t, s, ticket, commit)
+		check = commit
+	}
+	m, ok := messageWithPrefix(check.Messages, checkPendingPrefix)
+	if !ok {
+		t.Fatalf("CHECK commit.Messages = %+v, want a check failed pending marker", check.Messages)
+	}
+	for _, want := range []string{"lint command: echo", "lint: goconst"} {
+		if !strings.Contains(m.Body, want) {
+			t.Errorf("marker body = %q, want %q", m.Body, want)
+		}
+	}
+	if strings.Contains(m.Body, "test command:") {
+		t.Errorf("marker body = %q, want no test command section", m.Body)
+	}
+	if want := []string{failingLint}; !slices.Equal(cmds.calls, want) {
+		t.Errorf("recorded commands = %v, want %v", cmds.calls, want)
+	}
+}
+
+// TestCheckRunsLintBeforeTest proves a passing lint command runs before the
+// test command, both recorded in that order, when test then fails.
+func TestCheckRunsLintBeforeTest(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow end-to-end flow; runs in the full suite")
+	}
+	t.Parallel()
+	s, _, ticketID := buildTicketInBuilding(t)
+	script := &scriptedRuntime{t: t, steps: []scriptedStep{buildStep([]string{}, nil, "lint-then-test-sess")}}
+	cmds := &recordingCommands{real: job.NewCommandRunner(sandbox.Off(), false)}
+
+	var check store.HandlerCommit
+	for range 2 { // RUN, then CHECK
+		ticket := getTicket(t, s, ticketID)
+		deps := withCheckTestCommand(claimForBuild(t, s, script, ticketID), ticket, checkFailingTestCmd)
+		deps.Commands = cmds
+		commit, err := job.Registry()[testStateBuilding].Run(t.Context(), ticket, deps)
+		if err != nil {
+			t.Fatalf("building tick: %v", err)
+		}
+		apply(t, s, ticket, commit)
+		check = commit
+	}
+	m, ok := messageWithPrefix(check.Messages, checkPendingPrefix)
+	if !ok {
+		t.Fatalf("CHECK commit.Messages = %+v, want a check failed pending marker", check.Messages)
+	}
+	if !strings.Contains(m.Body, checkFailLine) {
+		t.Errorf("marker body = %q, want %q", m.Body, checkFailLine)
+	}
+	if strings.Contains(m.Body, "lint command:") {
+		t.Errorf("marker body = %q, want no lint command section", m.Body)
+	}
+	if want := []string{testNoopShellCmd, checkFailingTestCmd}; !slices.Equal(cmds.calls, want) {
+		t.Errorf("recorded commands = %v, want %v", cmds.calls, want)
+	}
+}
+
 // timeoutTestCommands times out the test command after writing partial
 // output, and runs every other command for real, recording whether it did.
 type timeoutTestCommands struct {
@@ -329,9 +435,9 @@ func (c *timeoutTestCommands) Run(ctx context.Context, dir, repoGit, shellCmd st
 	return c.real.Run(ctx, dir, repoGit, shellCmd, timeout, cio)
 }
 
-// TestCheckCommandTimeoutResumesWithPartialOutput proves a test command
-// killed by the budget reports its partial output with the timeout line,
-// and lint does not run.
+// TestCheckCommandTimeoutResumesWithPartialOutput proves lint runs once
+// before a test command killed by the budget, which reports its partial
+// output with the timeout line.
 func TestCheckCommandTimeoutResumesWithPartialOutput(t *testing.T) {
 	if testing.Short() {
 		t.Skip("slow end-to-end flow; runs in the full suite")
@@ -363,8 +469,237 @@ func TestCheckCommandTimeoutResumesWithPartialOutput(t *testing.T) {
 			t.Errorf("marker body = %q, want %q", m.Body, want)
 		}
 	}
+	if cmds.otherCalls != 1 {
+		t.Errorf("lint ran %d times before the test command timed out, want 1", cmds.otherCalls)
+	}
+}
+
+// TestCheckFixCommandLandsLintFix proves a project's fix command repairs a
+// lint finding before lint runs, and that fix's own edit to the builder's
+// already-changed file lands in the unit's commit while a stray path fix
+// also wrote is reverted and never lands (#79 plan task 2).
+func TestCheckFixCommandLandsLintFix(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow end-to-end flow; runs in the full suite")
+	}
+	t.Parallel()
+	s, _, ticketID := buildTicketInBuilding(t)
+	script := &scriptedRuntime{t: t, steps: []scriptedStep{buildStep([]string{helloTxt}, nil, "fix-land-sess")}}
+	cmds := &recordingCommands{real: job.NewCommandRunner(sandbox.Off(), false)}
+
+	ticket := getTicket(t, s, ticketID)
+	deps := claimForBuild(t, s, script, ticketID)
+	commit, err := job.Registry()[testStateBuilding].Run(t.Context(), ticket, deps) // RUN
+	if err != nil {
+		t.Fatalf("RUN: %v", err)
+	}
+	apply(t, s, ticket, commit)
+
+	_, wt := buildWorktreeFor(t, deps, getTicket(t, s, ticketID))
+	if writeErr := os.WriteFile(filepath.Join(wt.Dir(), helloTxt), []byte("hello, WORLD\n"), 0o600); writeErr != nil {
+		t.Fatalf("write hello.txt: %v", writeErr)
+	}
+
+	const (
+		fixCmd  = "printf 'hello, world\\n' > hello.txt; printf x > stray.txt; exit 1"
+		lintCmd = "grep -qx 'hello, world' hello.txt"
+		testCmd = "true"
+	)
+	ticket = getTicket(t, s, ticketID)
+	deps = claimForBuild(t, s, script, ticketID)
+	proj := deps.Projects[ticket.ProjectID]
+	proj.FixCmd, proj.LintCmd, proj.TestCmd = fixCmd, lintCmd, testCmd
+	deps.Projects = map[int64]job.Project{ticket.ProjectID: proj}
+	deps.Commands = cmds
+	check, err := job.Registry()[testStateBuilding].Run(t.Context(), ticket, deps) // CHECK
+	if err != nil {
+		t.Fatalf("CHECK: %v", err)
+	}
+	apply(t, s, ticket, check)
+
+	if _, ok := messageWithPrefix(check.Messages, checkPendingPrefix); ok {
+		t.Fatalf("CHECK commit.Messages = %+v, want no check failed marker", check.Messages)
+	}
+	reports, err := s.BuildReports(t.Context(), ticketID)
+	if err != nil {
+		t.Fatalf("BuildReports: %v", err)
+	}
+	landed := false
+	for _, r := range reports {
+		if r.Report.TaskN == 1 && r.Report.CommitSHA != nil {
+			landed = true
+		}
+	}
+	if !landed {
+		t.Errorf("no landed build_report for task 1 among %+v", reports)
+	}
+	if script.calls != 1 {
+		t.Errorf("runtime calls = %d, want 1 (no resume)", script.calls)
+	}
+	out, err := gitfixture.Git(t.Context(), wt.Dir(), "show", "HEAD:"+helloTxt)
+	if err != nil {
+		t.Fatalf("git show HEAD:%s: %v", helloTxt, err)
+	}
+	if string(out) != "hello, world\n" {
+		t.Errorf("HEAD:%s = %q, want %q", helloTxt, out, "hello, world\n")
+	}
+	if _, statErr := os.Stat(filepath.Join(wt.Dir(), "stray.txt")); !os.IsNotExist(statErr) {
+		t.Errorf("stray.txt exists in the worktree, want it reverted before lint ran")
+	}
+	if want := []string{fixCmd, lintCmd, testCmd}; !slices.Equal(cmds.calls, want) {
+		t.Errorf("recorded commands = %v, want %v", cmds.calls, want)
+	}
+}
+
+// TestCheckFixTimeoutFailsCheck proves a fix command that times out fails
+// CHECK on its own, exactly like lint or test, and that neither lint nor
+// test ever ran.
+func TestCheckFixTimeoutFailsCheck(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow end-to-end flow; runs in the full suite")
+	}
+	t.Parallel()
+	s, _, ticketID := buildTicketInBuilding(t)
+	script := &scriptedRuntime{t: t, steps: []scriptedStep{buildStep([]string{}, nil, "fix-timeout-sess")}}
+	const slowFix = "sleep 3600"
+	cmds := &timeoutTestCommands{testCmd: slowFix, real: job.NewCommandRunner(sandbox.Off(), false)}
+
+	var check store.HandlerCommit
+	for range 2 { // RUN, then CHECK
+		ticket := getTicket(t, s, ticketID)
+		deps := claimForBuild(t, s, script, ticketID)
+		proj := deps.Projects[ticket.ProjectID]
+		proj.FixCmd = slowFix
+		proj.LintCmd = testNoopShellCmd
+		proj.TestCmd = testNoopShellCmd
+		deps.Projects = map[int64]job.Project{ticket.ProjectID: proj}
+		deps.Commands = cmds
+		commit, err := job.Registry()[testStateBuilding].Run(t.Context(), ticket, deps)
+		if err != nil {
+			t.Fatalf("building tick: %v", err)
+		}
+		apply(t, s, ticket, commit)
+		check = commit
+	}
+	m, ok := messageWithPrefix(check.Messages, checkPendingPrefix)
+	if !ok {
+		t.Fatalf("CHECK commit.Messages = %+v, want a check failed pending marker", check.Messages)
+	}
+	for _, want := range []string{"fix command: sleep 3600", "exit code: none (killed when the 45m check budget ran out)"} {
+		if !strings.Contains(m.Body, want) {
+			t.Errorf("marker body = %q, want %q", m.Body, want)
+		}
+	}
 	if cmds.otherCalls != 0 {
-		t.Errorf("lint ran %d times after the test command timed out, want 0", cmds.otherCalls)
+		t.Errorf("other commands ran %d times, want 0 (a fix timeout stops CHECK)", cmds.otherCalls)
+	}
+}
+
+// TestAdoptSkipsFixCommand proves adoption never runs a project's fix
+// command: fix would edit the tree the "tree not clean" adoption check
+// must find clean, so adopt always clears FixCmd before runCheckCommands.
+// It records every command adoption actually runs (review r1f5): checking
+// only that fix-ran.txt is absent cannot tell "fix never ran" apart from
+// "fix ran and its stray file was reverted by the same cleanup that keeps
+// fix's edits inside the unit's lane", since that cleanup would delete
+// fix-ran.txt either way.
+func TestAdoptSkipsFixCommand(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow end-to-end flow; runs in the full suite")
+	}
+	t.Parallel()
+	s, ticketID, _, _ := prepareUnrecordedCommit(t, []string{helloTxt}, nil, "", map[string]string{helloTxt: helloWorldContent}, true)
+
+	// prepareUnrecordedCommit's own RUN already claimed and released the
+	// ticket once (apply()); this tick needs its own fresh claim.
+	ticket := getTicket(t, s, ticketID)
+	deps := claimForBuild(t, s, fakeRuntime(t), ticketID)
+	proj := deps.Projects[ticket.ProjectID]
+	proj.FixCmd = "printf x > fix-ran.txt"
+	deps.Projects = map[int64]job.Project{ticket.ProjectID: proj}
+	cmds := &recordingCommands{real: job.NewCommandRunner(sandbox.Off(), false)}
+	deps.Commands = cmds
+
+	commit, err := job.Registry()[testStateBuilding].Run(t.Context(), ticket, deps)
+	if err != nil {
+		t.Fatalf("adopt tick: %v", err)
+	}
+	if commit.Escalation != nil {
+		t.Fatalf("commit.Escalation = %+v, want none", commit.Escalation)
+	}
+	if len(commit.Artifacts) != 1 {
+		t.Fatalf("commit.Artifacts = %+v, want exactly one landed build_report", commit.Artifacts)
+	}
+	if want := []string{proj.LintCmd, proj.TestCmd}; !slices.Equal(cmds.calls, want) {
+		t.Errorf("recorded commands = %v, want %v (fix never ran)", cmds.calls, want)
+	}
+}
+
+// cancelingFixCommands runs fixCmd by writing a stray file, canceling the
+// test's own context, and returning a wrapped context.Canceled, exactly as
+// a real sandboxed command looks when the tick that started it is
+// canceled mid-run. Any other command goes to the real runner.
+type cancelingFixCommands struct {
+	fixCmd string
+	cancel context.CancelFunc
+	real   job.CommandRunner
+}
+
+func (c *cancelingFixCommands) Run(ctx context.Context, dir, repoGit, shellCmd string, timeout time.Duration, cio job.CommandIO) (int, error) {
+	if shellCmd == c.fixCmd {
+		if writeErr := os.WriteFile(filepath.Join(dir, "stray.txt"), []byte("x"), 0o600); writeErr != nil {
+			return -1, writeErr
+		}
+		c.cancel()
+		return -1, fmt.Errorf("job: command runner: %w", context.Canceled)
+	}
+	return c.real.Run(ctx, dir, repoGit, shellCmd, timeout, cio)
+}
+
+// TestCheckFixCleanupRunsAfterCancel proves fix's cleanup, which keeps its
+// edits inside the unit's lane, runs even when the tick that started fix
+// was canceled mid-run, because it runs under a context detached from the
+// tick's own ctx.
+func TestCheckFixCleanupRunsAfterCancel(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow end-to-end flow; runs in the full suite")
+	}
+	t.Parallel()
+	s, _, ticketID := buildTicketInBuilding(t)
+	script := &scriptedRuntime{t: t, steps: []scriptedStep{buildStep([]string{}, nil, "fix-cancel-sess")}}
+	const theFix = "the-fix"
+
+	ticket := getTicket(t, s, ticketID)
+	deps := claimForBuild(t, s, script, ticketID)
+	commit, err := job.Registry()[testStateBuilding].Run(t.Context(), ticket, deps) // RUN
+	if err != nil {
+		t.Fatalf("RUN: %v", err)
+	}
+	apply(t, s, ticket, commit)
+
+	_, wt := buildWorktreeFor(t, deps, getTicket(t, s, ticketID))
+
+	ctx, cancel := context.WithCancel(t.Context())
+	cmds := &cancelingFixCommands{fixCmd: theFix, cancel: cancel, real: job.NewCommandRunner(sandbox.Off(), false)}
+
+	ticket = getTicket(t, s, ticketID)
+	deps = claimForBuild(t, s, script, ticketID)
+	proj := deps.Projects[ticket.ProjectID]
+	proj.FixCmd = theFix
+	proj.LintCmd = testNoopShellCmd
+	proj.TestCmd = testNoopShellCmd
+	deps.Projects = map[int64]job.Project{ticket.ProjectID: proj}
+	deps.Commands = cmds
+
+	check, err := job.Registry()[testStateBuilding].Run(ctx, ticket, deps) // CHECK, canceled mid-fix
+	if !errors.Is(err, runtime.ErrCanceled) {
+		t.Fatalf("err = %v, want runtime.ErrCanceled", err)
+	}
+	if !reflect.DeepEqual(check, store.HandlerCommit{}) {
+		t.Errorf("commit = %+v, want the zero value", check)
+	}
+	if _, statErr := os.Stat(filepath.Join(wt.Dir(), "stray.txt")); !os.IsNotExist(statErr) {
+		t.Errorf("stray.txt exists in the worktree, want the detached cleanup to have removed it")
 	}
 }
 

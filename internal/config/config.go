@@ -148,6 +148,13 @@ var validIntakeModes = []string{IntakeModeAuto, IntakeModeManual}
 type Commands struct {
 	Test string `toml:"test"`
 	Lint string `toml:"lint"`
+	// Fix is projects[i].commands.fix: an optional, owner-set shell command
+	// run verbatim by /bin/sh -c under the build sandbox, trusted the same
+	// as Test and Lint. CHECK runs it before Lint when it is set; empty (the
+	// default) means CHECK runs no fix step. Load applies no validation to
+	// it, the same as Test and Lint. "omitempty" keeps AppendProject from
+	// writing an explicit fix = "" for a project that never set one.
+	Fix string `toml:"fix,omitempty"`
 }
 
 // DefaultPath returns the default config path, ~/.zing/zing.toml.

@@ -60,8 +60,8 @@ type Deps struct {
 	Reserve ReserveFunc
 	// Projects carries what building needs to know about each store
 	// project, keyed by its id (PKG8-PLAN.md section 4.3): the orchestrator,
-	// the repository's common git dir, and the project's test and lint
-	// commands. Wired by dispatch.Config.Projects.
+	// the repository's common git dir, and the project's test, lint and
+	// fix commands. Wired by dispatch.Config.Projects.
 	Projects map[int64]Project
 	// Sandboxes holds the loaded profile set runJob wraps a sandboxed job's
 	// run in, keyed by the name machine.toml's job.sandbox gives it: build,
@@ -122,8 +122,11 @@ type Project struct {
 	RepoGit string // the repository's common git dir, absolute; Orch.GitCommonDir at startup
 	TestCmd string // config projects[i].commands.test
 	LintCmd string // config projects[i].commands.lint
-	Owner   string // the GitHub repository owner serve fills every project with (PKG9-PLAN.md section 10.3)
-	Repo    string // the GitHub repository name serve fills every project with (PKG9-PLAN.md section 10.3)
+	// FixCmd is config projects[i].commands.fix: owner-set, trusted like
+	// test and lint, run in the build sandbox; empty runs no fix.
+	FixCmd string
+	Owner  string // the GitHub repository owner serve fills every project with (PKG9-PLAN.md section 10.3)
+	Repo   string // the GitHub repository name serve fills every project with (PKG9-PLAN.md section 10.3)
 	// PullRequests, Flips, Checks, and Threads are the shipping and respond
 	// handlers' own window onto GitHub (PKG9-PLAN.md section 10.3): serve
 	// fills all four from one shared *orchestrator.GitHubClient; a test fake

@@ -2776,7 +2776,11 @@ func (h buildingHandler) adopt(ctx context.Context, t store.Ticket, d Deps, proj
 		return fail("no report"), nil
 	}
 
-	results, err := runCheckCommands(ctx, d, t, wt, proj, nil)
+	// Adoption only verifies a commit: fix would edit the tree that the
+	// "tree not clean" check below must find clean.
+	verify := proj
+	verify.FixCmd = ""
+	results, err := runCheckCommands(ctx, d, t, wt, verify, nil)
 	if err != nil {
 		return commandInfraEscalation(t, d, u, err)
 	}
