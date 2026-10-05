@@ -38,6 +38,7 @@ import (
 	"io/fs"
 	"log/slog"
 	"os"
+	"regexp"
 	"strings"
 	"time"
 
@@ -950,7 +951,11 @@ func checkReady(t store.Ticket, resp *response.ReadyResponse, fsys fs.FS) ([]*re
 // for a compromised or buggy agent process, is the only caller that can).
 // It also refuses a check that starts a nested sandbox (sandbox-exec or
 // internal/sandbox's own probes), which skips and exits 0 inside the
-// seatbelt the judge and CHECK already run under (#78).
+// seatbelt the judge and CHECK already run under (#78), unless the check
+// greps the "--- SKIP:" line, which proves the skip happened rather than
+// hiding behind the sandbox's own skip. It also refuses a then that
+// expects a skip (#80, #129 s5) when its check doesn't grep that same
+// line, since a bare go test exits 0 whether or not the test skipped.
 func checkScenarioShape(scenarios []response.Scenario) []*response.PathError {
 	var errs []*response.PathError
 	if n := len(scenarios); n < minReadyScenarios || n > maxReadyScenarios {
@@ -978,13 +983,25 @@ func checkScenarioShape(scenarios []response.Scenario) []*response.PathError {
 		}
 		// Zing runs every check inside a seatbelt sandbox (the judge's, then
 		// CHECK's build sandbox), and seatbelt cannot start sandbox-exec, so
-		// the sandbox probes skip and exit 0 (#78).
+		// the sandbox probes skip and exit 0 (#78). A check that greps the
+		// "--- SKIP:" line asserts the skip itself, so it proves the probe
+		// skipped rather than hiding behind the sandbox's own skip.
+		assertsSkip := strings.Contains(sc.Check, skipLine)
 		startsSeatbelt := strings.Contains(sc.Check, "sandbox-exec")
 		runsSandboxProbes := strings.Contains(sc.Check, "internal/sandbox")
-		if startsSeatbelt || runsSandboxProbes {
+		if (startsSeatbelt || runsSandboxProbes) && !assertsSkip {
 			errs = append(errs, &response.PathError{
 				Path: "scenarios/" + indexedScenario(i) + "/check",
 				Msg:  hostSandboxCheckMsg,
+			})
+		}
+		// A bare go test exits 0 whether or not the test skipped, so a then
+		// that expects a skip needs a check that greps the skip line (#80,
+		// #129 s5).
+		if strings.TrimSpace(sc.Check) != "" && skipWord.MatchString(sc.Then) && !assertsSkip {
+			errs = append(errs, &response.PathError{
+				Path: "scenarios/" + indexedScenario(i) + "/check",
+				Msg:  expectedSkipCheckMsg,
 			})
 		}
 	}
@@ -992,6 +1009,15 @@ func checkScenarioShape(scenarios []response.Scenario) []*response.PathError {
 }
 
 const hostSandboxCheckMsg = "check runs the host sandbox (sandbox-exec or the internal/sandbox probes), which cannot start inside the sandbox Zing runs checks in, so its probes skip and prove nothing; leave it out of the sealed checks"
+
+// skipWord matches a then that names a skip as the expected result.
+var skipWord = regexp.MustCompile(`(?i)\bskip(s|ped)?\b`)
+
+// skipLine is the go test -v line a check must grep to assert that a skip
+// happened, since a bare go test exits 0 whether or not the test skipped.
+const skipLine = "--- SKIP:"
+
+const expectedSkipCheckMsg = "then expects a skip, but go test exits 0 whether or not the test skipped; run go test -v and grep the skip line, such as go test -v -run TestName ./pkg | grep -q -- '--- SKIP: TestName', so the check asserts the skip itself"
 
 // indexedScenario formats a scenario's 0-based index the way response's own
 // element-path grammar does (design section 6.4, internal/response/epath.go),
