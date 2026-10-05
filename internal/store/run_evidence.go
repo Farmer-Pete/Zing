@@ -25,6 +25,16 @@ func StderrFileName(runID int64) string {
 	return fmt.Sprintf("run-%d-stderr.log", runID)
 }
 
+// StdoutFileName is the one file name job.writeTranscriptFile ever writes
+// for runID, directly inside <DataDir>/runs: a Codex run's own stdout
+// (runtime.RunResult.Stdout), kept as that run's transcript. Named
+// alongside StderrFileName for the same reason: console.handleRunFile
+// checks a run's stored transcript_path against this same name before it
+// will serve the file.
+func StdoutFileName(runID int64) string {
+	return fmt.Sprintf("run-%d-stdout.jsonl", runID)
+}
+
 // RecordRunEvidence writes runID's three evidence columns in one UPDATE. A
 // nil field writes NULL. It returns an error wrapping sql.ErrNoRows when no
 // run has that id. It logs nothing; its caller logs a failure.

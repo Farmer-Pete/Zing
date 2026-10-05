@@ -336,7 +336,10 @@ func (c *console) buildRunRail(ctx context.Context, ticketID int64) (templates.R
 // sessions, which should not happen in practice since every run belongs to
 // a session its own ticket still carries). FinalURL and StderrURL are set
 // only when evidence names that run with a non-nil field; Transcript is the
-// stored path or "".
+// stored path or "". TranscriptURL is set, alongside Transcript, only when
+// that path's base name is this run's own store.StdoutFileName -- the one
+// name job.writeTranscriptFile ever writes -- so a Claude transcript path
+// elsewhere keeps rendering as plain text.
 func runRows(sessions []store.Session, runs []store.Run, evidence map[int64]store.RunEvidence) []templates.RunRow {
 	sessionByID := make(map[int64]store.Session, len(sessions))
 	for _, sess := range sessions {
@@ -376,6 +379,9 @@ func runRows(sessions []store.Session, runs []store.Run, evidence map[int64]stor
 		}
 		if ev.TranscriptPath != nil {
 			row.Transcript = *ev.TranscriptPath
+			if filepath.Base(*ev.TranscriptPath) == store.StdoutFileName(r.ID) {
+				row.TranscriptURL = fmt.Sprintf("/runs/%d/transcript", r.ID)
+			}
 		}
 		rows[len(runs)-1-i] = row
 	}
@@ -529,19 +535,20 @@ func (c *console) handleSide(w http.ResponseWriter, r *http.Request) {
 const contentTypePlainText = "text/plain; charset=utf-8"
 
 // handleRunFile is GET /runs/{id}/{kind}: one run's kept evidence (a final
-// message or a stderr file), served as plain text. kind is "final" or
-// "stderr"; any other kind, or an {id} that is not a positive int64, 404s
-// without a store read. A stderr read is refused unless the recorded path
-// resolves to exactly store.StderrFileName(id) directly inside
-// <store.Dir()>/runs, the one file job.writeStderrFile ever writes; that
-// keeps the route off zing.db, another run's stderr file, and anything
-// else the data directory holds. Every branch logs one line naming the
-// run, never the text it serves or refuses (design section's Logging
-// table).
+// message, a stderr file, or a Codex transcript), served as plain text.
+// kind is "final", "stderr", or "transcript"; any other kind, or an {id}
+// that is not a positive int64, 404s without a store read. A stderr or
+// transcript read is refused unless the recorded path resolves to exactly
+// that kind's fixed file name (store.StderrFileName or
+// store.StdoutFileName) directly inside <store.Dir()>/runs, the one file
+// job.writeStderrFile or job.writeTranscriptFile ever writes for that kind;
+// that keeps the route off zing.db, another run's file, and anything else
+// the data directory holds. Every branch logs one line naming the run,
+// never the text it serves or refuses (design section's Logging table).
 func (c *console) handleRunFile(w http.ResponseWriter, r *http.Request) {
 	runID, idOK := parsePositiveID(r.PathValue("id"))
 	kind := r.PathValue("kind")
-	knownKind := kind == "final" || kind == "stderr"
+	knownKind := kind == "final" || kind == "stderr" || kind == "transcript"
 	if !idOK || !knownKind {
 		slog.Info("run file not found", "ticket_id", int64(0), "run_id", runID, "kind", kind, "reason", "bad_path")
 		http.NotFound(w, r)
@@ -576,41 +583,63 @@ func (c *console) handleRunFile(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if ev.StderrPath == nil {
-		slog.Info("run file not found", "ticket_id", ticketID, "run_id", runID, "kind", kind, "reason", "no_stderr")
-		http.Error(w, "this run wrote no stderr", http.StatusNotFound)
+	if kind == "stderr" {
+		c.serveRunsFile(w, ticketID, runID, kind, "this run wrote no stderr", ev.StderrPath, store.StderrFileName(runID))
 		return
 	}
 
+	c.serveRunsFile(w, ticketID, runID, kind, "this run kept no transcript", ev.TranscriptPath, store.StdoutFileName(runID))
+}
+
+// serveRunsFile is the shared body of the stderr and transcript branches of
+// handleRunFile: it was pulled out when the transcript branch arrived,
+// alongside the stderr branch it has served since #43, so both kinds get
+// the exact same path checks. storedPath is the evidence row's own
+// StderrPath or TranscriptPath; wantName is the kind's one allowed file
+// name directly inside <store.Dir()>/runs (store.StderrFileName or
+// store.StdoutFileName). kind, already "stderr" or "transcript" as
+// handleRunFile resolves it, names the kind in every body and log line
+// this serves: "KIND file is gone", "KIND file does not match this run",
+// "KIND file is outside the data directory", and the reasons "no_KIND" and
+// "KIND_gone" -- so today's stderr bodies and reasons stay byte-for-byte.
+// missingBody is the 404 body for a nil storedPath, which names the verb
+// ("wrote" for stderr, "kept" for a transcript) kind alone cannot carry.
+func (c *console) serveRunsFile(w http.ResponseWriter, ticketID, runID int64, kind, missingBody string, storedPath *string, wantName string) {
+	if storedPath == nil {
+		slog.Info("run file not found", "ticket_id", ticketID, "run_id", runID, "kind", kind, "reason", "no_"+kind)
+		http.Error(w, missingBody, http.StatusNotFound)
+		return
+	}
+
+	goneBody := kind + " file is gone"
 	dataDir, rootErr := filepath.EvalSymlinks(c.store.Dir())
 	if rootErr != nil {
-		slog.Info("run file not found", "ticket_id", ticketID, "run_id", runID, "kind", kind, "reason", "stderr_gone", "error", rootErr)
-		http.Error(w, "stderr file is gone", http.StatusNotFound)
+		slog.Info("run file not found", "ticket_id", ticketID, "run_id", runID, "kind", kind, "reason", kind+"_gone", "error", rootErr)
+		http.Error(w, goneBody, http.StatusNotFound)
 		return
 	}
-	p, pathErr := filepath.EvalSymlinks(*ev.StderrPath)
+	p, pathErr := filepath.EvalSymlinks(*storedPath)
 	if pathErr != nil {
-		slog.Info("run file not found", "ticket_id", ticketID, "run_id", runID, "kind", kind, "reason", "stderr_gone", "error", pathErr)
-		http.Error(w, "stderr file is gone", http.StatusNotFound)
+		slog.Info("run file not found", "ticket_id", ticketID, "run_id", runID, "kind", kind, "reason", kind+"_gone", "error", pathErr)
+		http.Error(w, goneBody, http.StatusNotFound)
 		return
 	}
 
-	// wantRel is the only path this run's stderr evidence may resolve to:
-	// run-<runID>-stderr.log directly inside <dataDir>/runs. relToData
-	// says the truth about where the resolved path actually sits relative
-	// to the whole data directory, so the 403 this route sends never
-	// claims a file is "outside the data directory" when it is really
-	// inside it under the wrong name (for instance zing.db, or another
-	// run's stderr file).
-	wantRel := filepath.Join("runs", store.StderrFileName(runID))
+	// wantRel is the only path this run's evidence may resolve to: wantName
+	// directly inside <dataDir>/runs. relToData says the truth about where
+	// the resolved path actually sits relative to the whole data directory,
+	// so the 403 this route sends never claims a file is "outside the data
+	// directory" when it is really inside it under the wrong name (for
+	// instance zing.db, or another run's file).
+	wantRel := filepath.Join("runs", wantName)
 	relToData, relErr := filepath.Rel(dataDir, p)
 	escapesDataDir := relErr != nil || relToData == ".." || strings.HasPrefix(relToData, ".."+string(filepath.Separator)) || filepath.IsAbs(relToData)
 	if escapesDataDir || relToData != wantRel {
-		reason, body := "unexpected_name", "stderr file does not match this run"
+		reason, body := "unexpected_name", kind+" file does not match this run"
 		if escapesDataDir {
-			reason, body = "outside_data_dir", "stderr file is outside the data directory"
+			reason, body = "outside_data_dir", kind+" file is outside the data directory"
 		}
-		slog.Warn("run file outside data dir", "ticket_id", ticketID, "run_id", runID, "kind", kind, "reason", reason, "path", *ev.StderrPath)
+		slog.Warn("run file outside data dir", "ticket_id", ticketID, "run_id", runID, "kind", kind, "reason", reason, "path", *storedPath)
 		http.Error(w, body, http.StatusForbidden)
 		return
 	}
@@ -618,28 +647,28 @@ func (c *console) handleRunFile(w http.ResponseWriter, r *http.Request) {
 	runsDir := filepath.Join(dataDir, "runs")
 	dirRoot, err := os.OpenRoot(runsDir)
 	if err != nil {
-		slog.Info("run file not found", "ticket_id", ticketID, "run_id", runID, "kind", kind, "reason", "stderr_gone", "error", err)
-		http.Error(w, "stderr file is gone", http.StatusNotFound)
+		slog.Info("run file not found", "ticket_id", ticketID, "run_id", runID, "kind", kind, "reason", kind+"_gone", "error", err)
+		http.Error(w, goneBody, http.StatusNotFound)
 		return
 	}
 	defer func() { _ = dirRoot.Close() }()
 
-	f, err := dirRoot.Open(store.StderrFileName(runID))
+	f, err := dirRoot.Open(wantName)
 	if err != nil {
-		slog.Info("run file not found", "ticket_id", ticketID, "run_id", runID, "kind", kind, "reason", "stderr_gone", "error", err)
-		http.Error(w, "stderr file is gone", http.StatusNotFound)
+		slog.Info("run file not found", "ticket_id", ticketID, "run_id", runID, "kind", kind, "reason", kind+"_gone", "error", err)
+		http.Error(w, goneBody, http.StatusNotFound)
 		return
 	}
 	defer func() { _ = f.Close() }()
 
 	switch fi, statErr := f.Stat(); {
 	case statErr != nil:
-		slog.Info("run file not found", "ticket_id", ticketID, "run_id", runID, "kind", kind, "reason", "stderr_gone", "error", statErr)
-		http.Error(w, "stderr file is gone", http.StatusNotFound)
+		slog.Info("run file not found", "ticket_id", ticketID, "run_id", runID, "kind", kind, "reason", kind+"_gone", "error", statErr)
+		http.Error(w, goneBody, http.StatusNotFound)
 		return
 	case !fi.Mode().IsRegular():
 		slog.Info("run file not found", "ticket_id", ticketID, "run_id", runID, "kind", kind, "reason", "not_regular", "mode", fi.Mode().String())
-		http.Error(w, "stderr file is gone", http.StatusNotFound)
+		http.Error(w, goneBody, http.StatusNotFound)
 		return
 	}
 

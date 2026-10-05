@@ -44,6 +44,14 @@ var (
 // -1 when the OS gave no numeric status (for example, a signal).
 type ExecError struct {
 	ExitCode int
+	// Transient is the pattern codexTransientMatch found in a Codex run's
+	// FailureDetail (Codex only, and only when that detail came from an
+	// error or turn.failed event): one of 429, rate limit, 500, 502, 503,
+	// 504, connection reset, stream disconnected, or "" when no such
+	// pattern matched, or for every other runtime. job.retryTransient
+	// retries the run once, on this same ExecError, when it is non-empty.
+	// Not part of Error().
+	Transient string
 }
 
 func (e *ExecError) Error() string {

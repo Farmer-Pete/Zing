@@ -171,7 +171,7 @@ type console struct {
 //	POST /stop                  the s/S keyboard keys: stop everything, or one ticket (design section 6.11, 7.1)
 //	POST /projects/{id}/pickup  manual intake: pick up one issue by number (PKG9-PLAN.md D29)
 //	POST /tickets/{id}/sandbox-run  run one command in a ticket's worktree as CHECK runs it (loopback only)
-//	GET  /runs/{id}/{kind}      one run's final message or stderr, as plain text
+//	GET  /runs/{id}/{kind}      one run's final message, stderr, or transcript, as plain text
 //	GET  /push/key               the VAPID public key (design section 6.13, 7.1)
 //	POST /push/subscribe        store one push subscription (design section 6.13, 7.1)
 //	GET  /static/datastar.js    the vendored Datastar bundle

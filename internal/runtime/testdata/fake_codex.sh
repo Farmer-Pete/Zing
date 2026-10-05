@@ -20,6 +20,17 @@ printf '%s\n' "$@" > "$dir/argv"
 cat > "$dir/stdin"
 env > "$dir/env"
 
+# One line appended per invocation, in every mode, so a test driving a
+# retry (job.retryTransient calling rt.Run a second time on the same run)
+# can count how many times this script actually ran, and transient_once
+# below can tell its first call from its second.
+calls_file="$dir/calls"
+call_n=1
+if [ -f "$calls_file" ]; then
+  call_n=$(($(wc -l < "$calls_file") + 1))
+fi
+echo "$call_n" >> "$calls_file"
+
 # ---- self-check the host-isolation flags (design section 4.1, D18) --------
 
 has_ignore_user_config=false
@@ -112,6 +123,50 @@ success)
   ;;
 exit_nonzero)
   exit "${FAKE_CODEX_EXIT_CODE:-3}"
+  ;;
+error_event)
+  # A run that dies within seconds with an error event on stdout, no
+  # stderr, and no -o content (the ticket's repro, "Codex runs that exit 1
+  # within seconds leave no stderr, transcript, or cause"): thread.started
+  # so a session id is still known, then an error event and a matching
+  # turn.failed carrying the same message in its error.message, the two
+  # shapes codexFailureDetail reads. The -o file is left exactly as Run
+  # created it (empty), so FinalMessage stays "".
+  msg="${FAKE_CODEX_ERROR_MESSAGE:-unexpected status 400 Bad Request: model not supported}"
+  printf '{"type":"thread.started","thread_id":"fake-codex-error-thread-id"}\n'
+  printf '{"type":"error","message":"%s"}\n' "$msg"
+  printf '{"type":"turn.failed","error":{"message":"%s"}}\n' "$msg"
+  exit 1
+  ;;
+transient_once)
+  # The retry repro (design goal: a Codex failure matching a transient
+  # pattern is retried once on the same run): the first call sleeps 1s --
+  # long enough that a test can tell it apart from the second call's own
+  # near-instant return, proving retryTransient actually re-ran the
+  # process rather than just reusing the first result -- then fails with a
+  # 503 event, no stderr, and no -o content, the same repro shape
+  # error_event uses. Every call after the first succeeds normally.
+  if [ "$call_n" = "1" ]; then
+    sleep 1
+    printf '{"type":"thread.started","thread_id":"fake-codex-transient-thread-id"}\n'
+    printf '{"type":"error","message":"unexpected status 503 Service Unavailable"}\n'
+    printf '{"type":"turn.failed","error":{"message":"unexpected status 503 Service Unavailable"}}\n'
+    exit 1
+  fi
+  printf '%s\n' "$default_events"
+  printf '%s' "$default_result" > "$outfile"
+  exit 0
+  ;;
+plain_stdout_error)
+  # A run that exits 1 with plain text on stdout -- no JSON event at all --
+  # so codexFailureDetail falls back to its last-lines reading (fromEvent
+  # false) even when that text itself contains a transient-looking number
+  # such as 503: Codex.run must only call codexTransientMatch when
+  # codexFailureDetail's match came from an actual error or turn.failed
+  # event, never from this fallback.
+  msg="${FAKE_CODEX_ERROR_MESSAGE:-plain line mentioning 503 with no event}"
+  printf '%s\n' "$msg"
+  exit 1
   ;;
 sleep)
   # A grandchild relative to the Go test process: this script (already the

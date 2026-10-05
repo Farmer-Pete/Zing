@@ -1569,8 +1569,8 @@ func TestRunJob_EvidenceWriteFailureLogsWarn(t *testing.T) {
 
 	recs := jsonLogRecords(t, &logBuf)
 	warn := findLogRecord(t, recs, "run evidence not recorded")
-	if warn["level"] != "WARN" {
-		t.Errorf("level = %v, want WARN", warn["level"])
+	if warn["level"] != slogLevelWarn {
+		t.Errorf("level = %v, want %s", warn["level"], slogLevelWarn)
 	}
 	if got := logRecordInt64(t, warn, "ticket_id"); got != ticket.ID {
 		t.Errorf("ticket_id = %d, want %d", got, ticket.ID)

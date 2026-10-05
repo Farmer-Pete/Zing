@@ -4,7 +4,9 @@ import (
 	"bytes"
 	"context"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
+	"fmt"
 	"io/fs"
 	"log/slog"
 	"os"
@@ -13,6 +15,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"zing/internal/response"
 )
@@ -651,6 +654,271 @@ func TestCodex_ExecErrorRealCode(t *testing.T) {
 	}
 	if res.ExitCode != 3 {
 		t.Errorf("res.ExitCode = %d, want 3", res.ExitCode)
+	}
+}
+
+// TestCodex_ErrorEventKeptInResult proves a Codex run that writes one
+// error event to stdout and exits 1, with no stderr and no -o content (the
+// ticket's repro, "Codex runs that exit 1 within seconds leave no stderr,
+// transcript, or cause"), keeps that event: Run returns an *ExecError,
+// res.Stdout holds the event line, and res.FailureDetail is the event's
+// own message -- but res.TranscriptPath stays empty, since only
+// job.runJobWith, one layer up, ever sets it for Codex.
+func TestCodex_ErrorEventKeptInResult(t *testing.T) {
+	t.Parallel()
+	requireUnix(t)
+
+	const wantMessage = "unexpected status 400 Bad Request: model not supported"
+	dir := t.TempDir()
+	req := newFakeCodexRequest(dir, "error_event")
+	c := NewCodex(fakeCodexScript)
+	res, err := c.Run(context.Background(), req)
+
+	var execErr *ExecError
+	if !errors.As(err, &execErr) {
+		t.Fatalf("err = %v, want *ExecError", err)
+	}
+	if execErr.ExitCode != 1 {
+		t.Errorf("ExecError.ExitCode = %d, want 1", execErr.ExitCode)
+	}
+	if !bytes.Contains(res.Stdout, []byte(`"type":"error"`)) {
+		t.Errorf("res.Stdout = %q, want it to contain a type error event", res.Stdout)
+	}
+	if res.FailureDetail != wantMessage {
+		t.Errorf("res.FailureDetail = %q, want %q", res.FailureDetail, wantMessage)
+	}
+	if res.TranscriptPath != "" {
+		t.Errorf("res.TranscriptPath = %q, want empty (Codex.run never sets it)", res.TranscriptPath)
+	}
+	if execErr.Transient != "" {
+		t.Errorf("ExecError.Transient = %q, want empty (the default message names no transient pattern)", execErr.Transient)
+	}
+}
+
+// TestCodex_TransientErrorSetsExecErrorTransient proves a Codex run whose
+// error event names a 503 sets ExecError.Transient to "503" (design:
+// codexTransientMatch, called by Codex.run only when codexFailureDetail
+// returned fromEvent true).
+func TestCodex_TransientErrorSetsExecErrorTransient(t *testing.T) {
+	t.Parallel()
+	requireUnix(t)
+
+	dir := t.TempDir()
+	req := newFakeCodexRequest(dir, "error_event", "FAKE_CODEX_ERROR_MESSAGE=unexpected status 503 Service Unavailable")
+	c := NewCodex(fakeCodexScript)
+	_, err := c.Run(context.Background(), req)
+
+	var execErr *ExecError
+	if !errors.As(err, &execErr) {
+		t.Fatalf("err = %v, want *ExecError", err)
+	}
+	if execErr.Transient != "503" {
+		t.Errorf("ExecError.Transient = %q, want %q", execErr.Transient, "503")
+	}
+}
+
+// TestCodex_PlainStdoutMentioningPatternSetsNoTransient proves Codex.run
+// only calls codexTransientMatch when codexFailureDetail's result came from
+// an actual error or turn.failed event (fromEvent true), not from its
+// last-lines fallback: a run whose stdout is plain text mentioning 503,
+// with no JSON event at all, must leave ExecError.Transient empty even
+// though codexTransientMatch itself would match that text.
+func TestCodex_PlainStdoutMentioningPatternSetsNoTransient(t *testing.T) {
+	t.Parallel()
+	requireUnix(t)
+
+	const line = "plain line mentioning 503 with no event"
+	dir := t.TempDir()
+	req := newFakeCodexRequest(dir, "plain_stdout_error", "FAKE_CODEX_ERROR_MESSAGE="+line)
+	c := NewCodex(fakeCodexScript)
+	res, err := c.Run(context.Background(), req)
+
+	var execErr *ExecError
+	if !errors.As(err, &execErr) {
+		t.Fatalf("err = %v, want *ExecError", err)
+	}
+	if execErr.Transient != "" {
+		t.Errorf("ExecError.Transient = %q, want empty (the match came from the fallback, not an event)", execErr.Transient)
+	}
+	if res.FailureDetail != line {
+		t.Errorf("res.FailureDetail = %q, want %q", res.FailureDetail, line)
+	}
+}
+
+// TestTailWriter proves tailWriter keeps only the most recently written
+// bytes, up to its limit, unlike capWriter, which keeps the first bytes and
+// drops the rest: several writes totaling more than the limit, including one
+// write bigger than the limit by itself, must still leave bytes() holding
+// exactly limit bytes, equal to the tail of everything written.
+func TestTailWriter(t *testing.T) {
+	t.Parallel()
+
+	const limit = 100
+	w := &tailWriter{limit: limit}
+
+	var all []byte
+	writes := [][]byte{
+		bytes.Repeat([]byte("a"), 40),
+		bytes.Repeat([]byte("b"), 40),
+		bytes.Repeat([]byte("c"), 150), // bigger than limit by itself
+		bytes.Repeat([]byte("d"), 30),
+	}
+	for _, p := range writes {
+		n, err := w.Write(p)
+		if err != nil {
+			t.Fatalf("Write: %v", err)
+		}
+		if n != len(p) {
+			t.Errorf("Write returned %d, want %d", n, len(p))
+		}
+		all = append(all, p...)
+	}
+
+	got := w.bytes()
+	if len(got) != limit {
+		t.Fatalf("len(bytes()) = %d, want %d", len(got), limit)
+	}
+	want := all[len(all)-limit:]
+	if !bytes.Equal(got, want) {
+		t.Errorf("bytes() = %q, want %q", got, want)
+	}
+}
+
+// fakeCodexNonEmptyLines builds n non-blank lines, each "lineN", separated
+// by a blank line, so a test can prove codexFailureDetail both skips blank
+// lines and keeps only the last maxTailLines of them.
+func fakeCodexNonEmptyLines(n int) string {
+	var b strings.Builder
+	for i := 1; i <= n; i++ {
+		fmt.Fprintf(&b, "line%d\n\n", i)
+	}
+	return b.String()
+}
+
+func TestCodexFailureDetail(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name          string
+		stdout        string
+		wantDetail    string
+		wantFromEvent bool
+	}{
+		{
+			name: "last error event wins over an earlier one",
+			stdout: `{"type":"error","message":"first error"}
+{"type":"error","message":"second error"}`,
+			wantDetail:    "second error",
+			wantFromEvent: true,
+		},
+		{
+			name: "turn.failed error.message is read",
+			stdout: `{"type":"thread.started","thread_id":"t1"}
+{"type":"turn.failed","error":{"message":"turn failed message"}}`,
+			wantDetail:    "turn failed message",
+			wantFromEvent: true,
+		},
+		{
+			name:          "an error event with an empty message is skipped, falling back to its own raw line",
+			stdout:        `{"type":"error","message":""}`,
+			wantDetail:    `{"type":"error","message":""}`,
+			wantFromEvent: false,
+		},
+		{
+			name: "an earlier event with a message wins over a later event with an empty message",
+			stdout: `{"type":"error","message":"first error"}
+{"type":"error","message":""}`,
+			wantDetail:    "first error",
+			wantFromEvent: true,
+		},
+		{
+			name:          "25 lines with blanks between gives the last 20 non-empty",
+			stdout:        fakeCodexNonEmptyLines(25),
+			wantDetail:    strings.Join([]string{"line6", "line7", "line8", "line9", "line10", "line11", "line12", "line13", "line14", "line15", "line16", "line17", "line18", "line19", "line20", "line21", "line22", "line23", "line24", "line25"}, "\n"),
+			wantFromEvent: false,
+		},
+		{
+			name:          "empty input",
+			stdout:        "",
+			wantDetail:    noStdoutFailureDetail,
+			wantFromEvent: false,
+		},
+		{
+			name:          "whitespace-only input",
+			stdout:        "   \n\t\n   \n",
+			wantDetail:    noStdoutFailureDetail,
+			wantFromEvent: false,
+		},
+		{
+			name:          "a 5000-byte message is cut to at most 2048 bytes on a rune boundary",
+			stdout:        `{"type":"error","message":"` + strings.Repeat("a", 5000) + `"}`,
+			wantDetail:    strings.Repeat("a", maxFailureDetailBytes),
+			wantFromEvent: true,
+		},
+		{
+			// A JSON message with 2047 ASCII bytes followed by a two-byte
+			// rune (é, U+00E9) straddles byte 2048: a cut that blindly took
+			// the first maxFailureDetailBytes bytes would split é in half
+			// and produce invalid UTF-8. json.Marshal below both builds the
+			// JSON event text (so é is escaped exactly as Codex's own JSON
+			// encoder would emit it) and gives wantDetail the same message
+			// before any cut, so the test does not hard-code JSON escaping.
+			name: "a multi-byte rune straddling the 2048-byte cut is kept whole",
+			stdout: func() string {
+				msg := strings.Repeat("a", 2047) + strings.Repeat("é", 10)
+				encoded, err := json.Marshal(msg)
+				if err != nil {
+					t.Fatalf("json.Marshal: %v", err)
+				}
+				return `{"type":"error","message":` + string(encoded) + `}`
+			}(),
+			wantDetail:    strings.Repeat("a", 2047),
+			wantFromEvent: true,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			detail, fromEvent := codexFailureDetail([]byte(tc.stdout))
+			if detail != tc.wantDetail {
+				t.Errorf("detail = %q, want %q", detail, tc.wantDetail)
+			}
+			if fromEvent != tc.wantFromEvent {
+				t.Errorf("fromEvent = %v, want %v", fromEvent, tc.wantFromEvent)
+			}
+			if len(detail) > maxFailureDetailBytes {
+				t.Errorf("len(detail) = %d, want at most %d", len(detail), maxFailureDetailBytes)
+			}
+			if !utf8.ValidString(detail) {
+				t.Error("detail is not valid UTF-8")
+			}
+		})
+	}
+}
+
+func TestCodexTransientMatch(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name   string
+		detail string
+		want   string
+	}{
+		{"503", "unexpected status 503 Service Unavailable", "503"},
+		{"rate limit", "Rate limit reached", "rate limit"},
+		{"stream disconnected", "stream disconnected before completion", "stream disconnected"},
+		{"usage limit carve-out", "You've hit your usage limit (429)", ""},
+		{"no match", "unexpected status 400 Bad Request", ""},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := codexTransientMatch(tc.detail); got != tc.want {
+				t.Errorf("codexTransientMatch(%q) = %q, want %q", tc.detail, got, tc.want)
+			}
+		})
 	}
 }
 

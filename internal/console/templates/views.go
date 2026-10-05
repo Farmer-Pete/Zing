@@ -339,20 +339,24 @@ type RunRail struct {
 // runs.agent_seconds is NULL. FinalURL and StderrURL are "" unless the run
 // kept that evidence (RecordRunEvidence, migration 0007), in which case
 // rail.templ renders a link to GET /runs/{id}/{kind}. Transcript is the
-// stored transcript path, shown as plain text rather than a link (design:
-// transcripts live outside the data directory, so the console never serves
-// them).
+// stored transcript path, shown as plain text when TranscriptURL is "".
+// TranscriptURL is set only when the stored path is this run's own
+// Zing-written stdout file (store.StdoutFileName), in which case
+// rail.templ renders a link to GET /runs/{id}/transcript instead; a
+// Claude transcript lives outside the data directory and the console never
+// serves it, so it keeps rendering as plain text.
 type RunRow struct {
-	ID          int64
-	Job         string
-	Runtime     string
-	Model       string
-	Outcome     string
-	Interrupted bool
-	AgentTime   string
-	FinalURL    string
-	StderrURL   string
-	Transcript  string
+	ID            int64
+	Job           string
+	Runtime       string
+	Model         string
+	Outcome       string
+	Interrupted   bool
+	AgentTime     string
+	FinalURL      string
+	StderrURL     string
+	Transcript    string
+	TranscriptURL string
 }
 
 // LogLine is one entry the rail's Log section renders (design section 6.11,

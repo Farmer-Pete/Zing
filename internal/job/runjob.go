@@ -265,6 +265,7 @@ func runJobWith(
 
 	started := time.Now()
 	res, runErr := rt.Run(runCtx, req)
+	res, runErr = retryTransient(runCtx, rt, req, t.ID, rsv.RunID, jobName, res, runErr)
 
 	stderrFile := ""
 	if len(res.Stderr) > 0 && d.DataDir != "" {
@@ -273,6 +274,20 @@ func runJobWith(
 			slog.Warn("stderr file not written", "ticket_id", t.ID, "run_id", rsv.RunID, "error", writeErr)
 		}
 		stderrFile = path
+	}
+
+	// Codex never sets TranscriptPath itself (unlike Claude, whose own
+	// runtime does): its stdout, the codex exec --json event stream, is
+	// where an early error that kills the run within seconds is actually
+	// reported, so it is the transcript worth keeping (design: "Codex runs
+	// that exit 1 within seconds leave no stderr, transcript, or cause").
+	keepStdoutTranscript := len(res.Stdout) > 0 && d.DataDir != "" && res.TranscriptPath == ""
+	if keepStdoutTranscript {
+		path, writeErr := writeTranscriptFile(d.DataDir, rsv.RunID, res.Stdout)
+		if writeErr != nil {
+			slog.Warn("transcript file not written", "ticket_id", t.ID, "run_id", rsv.RunID, "error", writeErr)
+		}
+		res.TranscriptPath = path
 	}
 
 	recordRunEvidence(ctx, d, t.ID, rsv.RunID, res, stderrFile)
@@ -301,20 +316,122 @@ func runJobWith(
 	return runResult{Res: res, Reserved: rsv, Started: started}, runErr
 }
 
-// writeStderrFile saves one run's captured stderr to
-// <dataDir>/runs/run-<runID>-stderr.log, mode 0600 in a 0700 directory,
-// and returns the path. The log names the path, never the text, since
-// stderr can echo anything the child saw.
-func writeStderrFile(dataDir string, runID int64, data []byte) (string, error) {
+// transientRetryDelay is retryTransient's own wait before its one retry
+// (design goals: "retried once ... after 2 s", nongoals: "No ... backoff
+// beyond the single 2 s wait").
+const transientRetryDelay = 2 * time.Second
+
+// maxTranscriptBytes caps the stdout retryTransient joins from both
+// attempts before runJobWith ever writes it to disk (design goals: "After a
+// retry, the file holds the last 64 KiB of both attempts' stdout combined,
+// so it never passes 65536 bytes"), the same bound runtime.Codex itself
+// applies to one attempt's own tailWriter.
+const maxTranscriptBytes = 64 << 10
+
+// retryTransient is runJobWith's own single automatic retry (design goals:
+// a Codex ExecError whose Transient names a matched pattern -- 429, rate
+// limit, 500, 502, 503, 504, connection reset, or stream disconnected -- is
+// retried once, on the same reserved run, after a 2s wait; every other
+// result or error passes through res and runErr unchanged. When runCtx ends
+// during the wait, there is no second attempt: it keeps the first result
+// (stdout, FailureDetail, AgentTime), sets ExitCode to -1, and returns
+// runtime.ErrTimeout for the job deadline or runtime.ErrCanceled for a
+// parent cancel, so routeFailure handles the retry exactly as it would an
+// un-retried run that hit the same wall. When the wait completes, it calls
+// rt.Run once more on the same req, adds the first attempt's AgentTime to
+// the retry's, and joins both attempts' stdout, kept to the last
+// maxTranscriptBytes so the eventual transcript file never passes that
+// bound. A retry that still fails rewrites FailureDetail into a note naming
+// the matched pattern and quoting the retry's own detail, so
+// execFailureCommit's Tried (planning.go) tells the owner a retry was
+// already tried, not just that the run failed twice silently.
+func retryTransient(
+	ctx context.Context, rt runtime.Runtime, req runtime.RunRequest,
+	ticketID, runID int64, jobName string, res runtime.RunResult, runErr error,
+) (runtime.RunResult, error) {
+	var execErr *runtime.ExecError
+	// errors.As, not the modernize-suggested errors.AsType: errcheck's
+	// check-blank (this repo's config) flags AsType's (E, bool) result
+	// since its discarded E is itself error-shaped, same as errKind's own
+	// comment.
+	if !errors.As(runErr, &execErr) || execErr.Transient == "" { //nolint:modernize // see comment above
+		return res, runErr
+	}
+
+	slog.Info("runtime transient retry", "ticket_id", ticketID, "run_id", runID, "job", jobName, "match", execErr.Transient)
+
+	select {
+	case <-ctx.Done():
+		res.ExitCode = -1
+		skipErr := runtime.ErrCanceled
+		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+			skipErr = runtime.ErrTimeout
+		}
+		slog.Warn("runtime transient retry skipped", "ticket_id", ticketID, "run_id", runID, "job", jobName, "match", execErr.Transient, "err_kind", errKind(skipErr))
+		return res, skipErr
+	case <-time.After(transientRetryDelay):
+	}
+
+	firstAgentTime, firstStdout, firstSessionID := res.AgentTime, res.Stdout, res.SessionID
+	retryRes, retryErr := rt.Run(ctx, req)
+	if retryRes.SessionID == "" {
+		retryRes.SessionID = firstSessionID
+	}
+	retryRes.AgentTime += firstAgentTime
+	joinedStdout := append(append([]byte(nil), firstStdout...), retryRes.Stdout...)
+	if len(joinedStdout) > maxTranscriptBytes {
+		joinedStdout = joinedStdout[len(joinedStdout)-maxTranscriptBytes:]
+	}
+	retryRes.Stdout = joinedStdout
+
+	if retryErr == nil {
+		slog.Info("runtime transient retry succeeded", "ticket_id", ticketID, "run_id", runID, "job", jobName, "match", execErr.Transient)
+		return retryRes, nil
+	}
+
+	slog.Warn("runtime transient retry failed", "ticket_id", ticketID, "run_id", runID, "job", jobName, "match", execErr.Transient, "err_kind", errKind(retryErr), "exit_code", retryRes.ExitCode)
+	// retryRes.FailureDetail is "" whenever the retry's own failure is not a
+	// Codex ExecError with no final message (an ErrTimeout from the job
+	// deadline, ErrStart, ErrOutputTooLarge, or a -o file with content):
+	// quoting retryErr.Error() there keeps execFailureCommit's Tried from
+	// ending in "the retry failed with: " with nothing after the colon.
+	quoted := retryRes.FailureDetail
+	if quoted == "" {
+		quoted = retryErr.Error()
+	}
+	retryRes.FailureDetail = runtime.CapFailureDetail(fmt.Sprintf("retried once after a transient failure matching %q; the retry failed with: %s", execErr.Transient, quoted))
+	return retryRes, retryErr
+}
+
+// writeRunsFile saves data to <dataDir>/runs/name, mode 0600 in a 0700
+// directory, and returns the path. writeStderrFile and writeTranscriptFile
+// both hold this one body: the directory and file modes, and the "never
+// retained past this write" shape, are the same for either file.
+func writeRunsFile(dataDir, name string, data []byte) (string, error) {
 	dir := filepath.Join(dataDir, "runs")
 	if err := os.MkdirAll(dir, 0o700); err != nil {
-		return "", fmt.Errorf("stderr file: %w", err)
+		return "", fmt.Errorf("runs file: %w", err)
 	}
-	path := filepath.Join(dir, store.StderrFileName(runID))
+	path := filepath.Join(dir, name)
 	if err := os.WriteFile(path, data, 0o600); err != nil {
-		return "", fmt.Errorf("stderr file: %w", err)
+		return "", fmt.Errorf("runs file: %w", err)
 	}
 	return path, nil
+}
+
+// writeStderrFile saves one run's captured stderr to
+// <dataDir>/runs/run-<runID>-stderr.log. The log names the path, never the
+// text, since stderr can echo anything the child saw.
+func writeStderrFile(dataDir string, runID int64, data []byte) (string, error) {
+	return writeRunsFile(dataDir, store.StderrFileName(runID), data)
+}
+
+// writeTranscriptFile saves a Codex run's captured stdout to
+// <dataDir>/runs/run-<runID>-stdout.jsonl, runJobWith's own transcript for
+// a runtime that never sets RunResult.TranscriptPath itself. The log names
+// the path, never the text, since stdout is Codex's raw event stream.
+func writeTranscriptFile(dataDir string, runID int64, data []byte) (string, error) {
+	return writeRunsFile(dataDir, store.StdoutFileName(runID), data)
 }
 
 // recordRunEvidence stores what runID left behind (#43 split): the final
