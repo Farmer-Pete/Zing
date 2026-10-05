@@ -282,7 +282,48 @@ func (h judgeHandler) Run(ctx context.Context, t store.Ticket, d Deps) (store.Ha
 		if convErr != nil {
 			return store.HandlerCommit{}, fmt.Errorf("job: judging: parse failed round %q: %w", firstLine, convErr)
 		}
-		return h.start(ctx, t, d, m+1)
+
+		// #86's own repeat (ticket #50, Q1): a "failure" fix that lands
+		// with no new commit (building.go's own HeadSHA branch) leaves
+		// HEAD exactly where round m already failed it, so starting round
+		// m+1 here would judge the same code again and fail the same way.
+		// The owner's own Retry on that escalation writes markerRetryRequested
+		// newer than this failed marker -- the same retry-resets-the-count
+		// rule enterRound (reviewing.go:238-250) already gives a failed or
+		// void review round -- and only then does round m+1 start anyway,
+		// at that same sha.
+		prevSHA, shaErr := judgeStartedSHA(markers, m)
+		if shaErr != nil {
+			return store.HandlerCommit{}, shaErr
+		}
+
+		sha, maxRunID, escalation, checksErr := judgeStartChecks(ctx, t, d)
+		if checksErr != nil {
+			return store.HandlerCommit{}, checksErr
+		}
+		if escalation != nil {
+			return *escalation, nil
+		}
+
+		if sha == prevSHA {
+			retries, retryErr := d.Store.MarkersWithPrefix(ctx, t.ID, markerRetryRequested)
+			if retryErr != nil {
+				return store.HandlerCommit{}, fmt.Errorf("job: judging: retry requested markers: %w", retryErr)
+			}
+			retried := false
+			for i := range retries {
+				if retries[i].ID > newest.ID && retries[i].Body == markerRetryRequested {
+					retried = true
+					break
+				}
+			}
+			if !retried {
+				_, idsLine, _ := strings.Cut(newest.Body, "\n")
+				return judgeSameSHAEscalation(t, d, m, sha, strings.Split(idsLine, ",")), nil
+			}
+		}
+
+		return judgeStartCommit(t, d, m+1, sha, maxRunID), nil
 
 	case judgeRoundStartedLine.MatchString(firstLine):
 		sub := judgeRoundStartedLine.FindStringSubmatch(firstLine)
@@ -505,8 +546,7 @@ func judgeStartChecks(ctx context.Context, t store.Ticket, d Deps) (sha string, 
 }
 
 // start is START (design section 7.2): judgeStartChecks' own four checks,
-// then the no-runtime-call commit: marker "judge round <n> started sha
-// <HeadSHA> after run <MaxRunID>".
+// then judgeStartCommit's own no-runtime-call commit.
 func (h judgeHandler) start(ctx context.Context, t store.Ticket, d Deps, n int) (store.HandlerCommit, error) {
 	sha, maxRunID, escalation, err := judgeStartChecks(ctx, t, d)
 	if err != nil {
@@ -515,13 +555,34 @@ func (h judgeHandler) start(ctx context.Context, t store.Ticket, d Deps, n int) 
 	if escalation != nil {
 		return *escalation, nil
 	}
+	return judgeStartCommit(t, d, n, sha, maxRunID), nil
+}
 
+// judgeStartCommit is START's own no-runtime-call commit (design section
+// 7.2): marker "judge round <n> started sha <sha> after run <maxRunID>",
+// shared by start's own fresh round and the failed-round branch of Run
+// (design section 7.1) once it has decided round n may start.
+func judgeStartCommit(t store.Ticket, d Deps, n int, sha string, maxRunID int64) store.HandlerCommit {
 	c := baseCommit(t, d)
 	c.Messages = []store.Message{{
 		TicketID: t.ID, Type: msgTypeUpdate, Author: authorSystem,
 		Body: fmt.Sprintf("judge round %d started sha %s after run %d", n, sha, maxRunID),
 	}}
-	return c, nil
+	return c
+}
+
+// judgeSameSHAEscalation is the failed-round branch's own same-sha guard
+// (design section 7.1, ticket #50 Q1): a "failure" fix landed with no new
+// commit, so round m's own failing scenarios (ids) still fail at sha, and
+// judging again would only repeat round m. The owner's Retry re-judges
+// that same sha anyway (the failed-round branch's own retried check).
+func judgeSameSHAEscalation(t store.Ticket, d Deps, m int, sha string, ids []string) store.HandlerCommit {
+	what := fmt.Sprintf("the fix changed no code, so judging again would repeat round %d", m)
+	why := fmt.Sprintf("round %d failed at sha %s and the fix landed at that same sha", m, sha)
+	tried := fmt.Sprintf("scenarios still failing: %s\nif a check looks wrong, edit it in the console and pick Retry to judge this sha again.", strings.Join(ids, ","))
+	slog.Warn("escalation written", "ticket_id", t.ID, "session_id", nil, "run_id", nil,
+		"code", string(response.EscalationCodeCannotRun), "origin", string(response.EscalationOriginJudge))
+	return escalationCommit(t, d, nil, nil, string(response.EscalationCodeCannotRun), what, why, tried, response.EscalationOriginJudge)
 }
 
 // ---- RUN (design section 7.2) ---------------------------------------------
