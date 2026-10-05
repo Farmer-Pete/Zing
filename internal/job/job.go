@@ -122,8 +122,11 @@ type Project struct {
 	RepoGit string // the repository's common git dir, absolute; Orch.GitCommonDir at startup
 	TestCmd string // config projects[i].commands.test
 	LintCmd string // config projects[i].commands.lint
-	Owner   string // the GitHub repository owner serve fills every project with (PKG9-PLAN.md section 10.3)
-	Repo    string // the GitHub repository name serve fills every project with (PKG9-PLAN.md section 10.3)
+	// FixCmd is config projects[i].commands.fix: owner-set, trusted like
+	// test and lint, run in the build sandbox; empty runs no fix.
+	FixCmd string
+	Owner  string // the GitHub repository owner serve fills every project with (PKG9-PLAN.md section 10.3)
+	Repo   string // the GitHub repository name serve fills every project with (PKG9-PLAN.md section 10.3)
 	// PullRequests, Flips, Checks, and Threads are the shipping and respond
 	// handlers' own window onto GitHub (PKG9-PLAN.md section 10.3): serve
 	// fills all four from one shared *orchestrator.GitHubClient; a test fake

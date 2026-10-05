@@ -726,7 +726,7 @@ func TestPreludeRunsFixDriver(t *testing.T) {
 	if len(commit.Runs) != 1 {
 		t.Fatalf("commit.Runs = %+v, want exactly one", commit.Runs)
 	}
-	if len(scriptRT.reqs) != 1 || scriptRT.reqs[0].Label != "fix" {
+	if len(scriptRT.reqs) != 1 || scriptRT.reqs[0].Label != fixRunLabel {
 		t.Fatalf("runtime requests = %+v, want one request labeled \"fix\"", scriptRT.reqs)
 	}
 	if !strings.Contains(scriptRT.reqs[0].Prompt, pbFixText) {
@@ -1147,7 +1147,7 @@ func TestPreludeCapResumesRetryFix(t *testing.T) {
 	if len(scriptRT.reqs) != 1 {
 		t.Fatalf("runtime requests = %+v, want exactly one", scriptRT.reqs)
 	}
-	if scriptRT.reqs[0].Label != "fix" {
+	if scriptRT.reqs[0].Label != fixRunLabel {
 		t.Errorf("retry request Label = %q, want \"fix\"", scriptRT.reqs[0].Label)
 	}
 

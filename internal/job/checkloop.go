@@ -18,7 +18,7 @@ import (
 
 // commandResult is one CHECK command run (#55).
 type commandResult struct {
-	Kind     string        // "test" or "lint"
+	Kind     string        // "fix", "lint" or "test"; a fix result appears only when it timed out or did not run
 	Cmd      string        // the shell command, as configured
 	Exit     int           // -1 when TimedOut
 	TimedOut bool          // the shared check budget ran out
@@ -41,10 +41,13 @@ const (
 	checkLoopsExhaustedWhyFmt     = "check_loops for build is %d; the last failing output is under Tried"
 )
 
-// The two CHECK command kinds, in run order: lint first, since it takes
-// seconds where test can take minutes, so a lint failure is reported
-// without paying for a full test run (#79).
+// The CHECK command kinds, in run order: fix (when the project sets one),
+// then lint, then test. Lint takes seconds where test can take minutes, so
+// a lint failure is reported without paying for a full test run (#79). Fix
+// runs first because it can repair the very findings lint would otherwise
+// fail on (#79 plan task 2).
 const (
+	checkKindFix  = "fix"
 	checkKindLint = "lint"
 	checkKindTest = "test"
 )
@@ -60,26 +63,56 @@ func checkBudget(d Deps) time.Duration {
 	return time.Duration(d.Machine.Jobs[jobBuildName].TimeoutMinutes) * time.Minute
 }
 
-// runCheckCommands runs the project's lint command, then its test command,
-// under one shared checkBudget measured from the start of lint (plan D1),
-// and stops at the first failed result (a nonzero exit, a timeout, or a
-// command the budget left no time for): a lint failure is reported without
-// paying for a full test run (#79). Test gets only what lint left. When
-// lint fails or times out, test does not run and is left out; when lint
-// passes but leaves no budget, test is reported as not run, a failure, so
-// CHECK never lands an unlinted tree. Each command's output is kept in a
-// tailBuffer. Each command's process group is recorded in check_procs
-// while it runs and cleared once it ends (plan D10), so a later serve
-// never starts CHECK in this worktree while an orphaned command still
-// writes to it. rid is the unit's newest ok run, or nil during adoption.
-// An error is runCheckCommand's unclassified infrastructure error, for
-// commandInfraEscalation.
+// runCheckCommands runs fix (when proj.FixCmd is set), then the project's
+// lint command, then its test command, under one shared checkBudget
+// measured from before the first command (plan D1), and stops at the first
+// failed result (a nonzero exit, a timeout, or a command the budget left
+// no time for): a lint failure is reported without paying for a full test
+// run (#79). Each command's timeout is the budget left right before it
+// starts, so time spent on fix's snapshot and cleanup (below) comes out of
+// the next command's share. When lint fails or times out, test does not
+// run and is left out; when lint passes but leaves no budget, test is
+// reported as not run, a failure, so CHECK never lands an unlinted tree.
+//
+// Fix differs from lint and test: before it runs, this snapshots the
+// worktree's changed paths; after it runs, under a context detached from
+// ctx (onStartContext), it restores every path fix changed that was not
+// already changed before it ran, keeping fix's edits inside the unit's own
+// lane (owner decision Q3) even when the tick is canceled mid-run. That
+// restore is what lets fix's edits land in the same commit as the
+// builder's own changes without claiming paths the builder never touched.
+// Git-ignored paths fix writes are out of scope: ChangedPaths never lists
+// them, and they never reach a commit. A fix result is added to results
+// only when it timed out; a completed fix, whatever its exit code, adds
+// nothing (a nonzero exit from golangci-lint run --fix just means findings
+// remain, which lint reports next).
+//
+// Each command's output is kept in a tailBuffer. Each command's process
+// group is recorded in check_procs while it runs and cleared once it ends
+// (plan D10), so a later serve never starts CHECK in this worktree while
+// an orphaned command still writes to it. rid is the unit's newest ok run,
+// or nil during adoption. An error is runCheckCommand's unclassified
+// infrastructure error, or one of this function's own wrapped errors from
+// the fix snapshot or cleanup, for commandInfraEscalation.
 func runCheckCommands(ctx context.Context, d Deps, t store.Ticket, wt orchestrator.Worktree, proj Project, rid *int64) ([]commandResult, error) {
 	budget := checkBudget(d)
 	budgetStart := checkNow()
 	commands := []struct{ kind, cmd string }{{checkKindLint, proj.LintCmd}, {checkKindTest, proj.TestCmd}}
+	if proj.FixCmd != "" {
+		commands = append([]struct{ kind, cmd string }{{checkKindFix, proj.FixCmd}}, commands...)
+	}
 	results := make([]commandResult, 0, len(commands))
 	for _, c := range commands {
+		var before []orchestrator.Change
+		if c.kind == checkKindFix {
+			var snapErr error
+			if before, snapErr = proj.Orch.ChangedPaths(ctx, wt); snapErr != nil {
+				return nil, fmt.Errorf("job: check: before fix: %w", snapErr)
+			}
+		}
+		// remaining is read after the fix snapshot, right before the
+		// command starts, so no command's timeout outlives the shared
+		// budget.
 		remaining := budget - checkNow().Sub(budgetStart)
 		if remaining <= 0 {
 			results = append(results, commandResult{Kind: c.kind, Cmd: c.cmd, Exit: -1, NotRun: true, Budget: budget})
@@ -92,6 +125,44 @@ func runCheckCommands(ctx context.Context, d Deps, t store.Ticket, wt orchestrat
 		r, err := runCheckCommand(ctx, d, t, wt, proj, rid, c.kind, c.cmd, remaining, onStart)
 		if gen > 0 {
 			clearCheckStart(ctx, d, t.ID, gen)
+		}
+		if c.kind == checkKindFix {
+			// Keep fix inside the unit's lane (owner decision Q3): restore
+			// every path it changed that was not changed before it ran.
+			// Git-ignored paths are not listed and never reach a commit.
+			// This runs under its own 10s context, so a canceled tick
+			// still leaves no stray edit behind.
+			laneCtx, cancel := onStartContext(ctx)
+			after, laneErr := proj.Orch.ChangedPaths(laneCtx, wt)
+			if laneErr == nil {
+				inLane := make(map[string]bool, len(before))
+				for _, b := range before {
+					inLane[b.Path] = true
+				}
+				var stray []orchestrator.Change
+				for _, a := range after {
+					if !inLane[a.Path] {
+						stray = append(stray, a)
+					}
+				}
+				if len(stray) > 0 {
+					slog.Warn("fix change reverted", "ticket_id", t.ID, "run_id", int64OrZero(rid), "paths", changedPathList(stray))
+					laneErr = proj.Orch.RevertPaths(laneCtx, wt, stray)
+				}
+			}
+			cancel()
+			if err != nil {
+				if laneErr != nil {
+					slog.Warn("fix cleanup failed", "ticket_id", t.ID, "run_id", int64OrZero(rid), "error", laneErr)
+				}
+				return nil, err
+			}
+			if laneErr != nil {
+				return nil, fmt.Errorf("job: check: keep fix in lane: %w", laneErr)
+			}
+			if !r.TimedOut {
+				continue // fix's exit code never fails CHECK; lint decides
+			}
 		}
 		if err != nil {
 			return nil, err

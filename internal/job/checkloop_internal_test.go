@@ -1,11 +1,16 @@
 package job
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
+	"log/slog"
+	"math"
 	"strings"
 	"testing"
 	"time"
 
+	"zing/internal/gitfixture"
 	"zing/internal/machine"
 	"zing/internal/orchestrator"
 	"zing/internal/store"
@@ -173,5 +178,143 @@ func TestCheckTestNotRunIsAFailure(t *testing.T) {
 	want := "test command: the-test\ntest did not run: the CHECK budget ran out before it started"
 	if text := checkInputText(results); text != want {
 		t.Errorf("check input = %q, want %q", text, want)
+	}
+}
+
+// TestCheckFixSnapshotUsesBudget proves the pre-fix ChangedPaths snapshot
+// runs before remaining is computed: once the snapshot alone exhausts the
+// shared budget, fix is reported as not run, exactly like lint or test.
+// Not parallel: it swaps checkNow.
+func TestCheckFixSnapshotUsesBudget(t *testing.T) {
+	start := time.Date(2026, 10, 3, 9, 0, 0, 0, time.UTC)
+	calls := 0
+	orig := checkNow
+	checkNow = func() time.Time {
+		calls++
+		if calls == 1 {
+			return start
+		}
+		return start.Add(45 * time.Minute)
+	}
+	t.Cleanup(func() { checkNow = orig })
+
+	dir := t.TempDir()
+	if err := gitfixture.NewSigningRepo(t.Context(), dir); err != nil {
+		t.Fatalf("gitfixture.NewSigningRepo: %v", err)
+	}
+	orch, repoGit, ok := pbOrchestratorFor(t, dir, orchestrator.NewRunner())
+	if !ok {
+		t.Fatal("pbOrchestratorFor: not a git repository")
+	}
+	wt, _, err := orch.EnsureWorktree(t.Context(), 1, "fix-snapshot-budget")
+	if err != nil {
+		t.Fatalf("EnsureWorktree: %v", err)
+	}
+
+	const theFix = "the-fix"
+	fake := &budgetCommands{
+		timeouts: map[string]time.Duration{},
+		results: map[string]struct {
+			exit int
+			err  error
+		}{},
+	}
+	d := Deps{Commands: fake, Machine: &machine.Machine{Jobs: map[string]machine.Job{jobBuildName: {TimeoutMinutes: 45}}}}
+	proj := Project{Orch: orch, RepoGit: repoGit, FixCmd: theFix, LintCmd: fakeLintCmd, TestCmd: fakeTestCmd}
+	results, err := runCheckCommands(t.Context(), d, store.Ticket{ID: 1}, wt, proj, nil)
+	if err != nil {
+		t.Fatalf("runCheckCommands: %v", err)
+	}
+
+	if _, ran := fake.timeouts[theFix]; ran {
+		t.Error("fix ran with no budget left")
+	}
+	if got := failedKinds(results); len(got) != 1 || got[0] != checkKindFix {
+		t.Fatalf("failed kinds = %v, want [fix]", got)
+	}
+	want := "fix command: the-fix\nfix did not run: the CHECK budget ran out before it started"
+	if text := checkInputText(results); text != want {
+		t.Errorf("check input = %q, want %q", text, want)
+	}
+}
+
+// fixDurationCommands returns one scripted (exit, err) pair per call, in
+// order, whatever shell command it is asked to run: TestRunCheckCommandLogsFixDuration
+// needs the same command to produce two different outcomes (an exit code,
+// then a timeout) across its two calls to runCheckCommand.
+type fixDurationCommands struct {
+	results []struct {
+		exit int
+		err  error
+	}
+	calls int
+}
+
+func (c *fixDurationCommands) Run(context.Context, string, string, string, time.Duration, CommandIO) (int, error) {
+	r := c.results[c.calls]
+	c.calls++
+	return r.exit, r.err
+}
+
+// TestRunCheckCommandLogsFixDuration proves runCheckCommand's existing
+// "command re-run" INFO record (building.go) already covers the fix kind:
+// one record per call, naming command "fix", with a whole-second duration
+// and the right exit_code/timed_out pair. Not parallel: it swaps
+// slog.Default.
+func TestRunCheckCommandLogsFixDuration(t *testing.T) {
+	var buf bytes.Buffer
+	orig := slog.Default()
+	slog.SetDefault(slog.New(slog.NewJSONHandler(&buf, &slog.HandlerOptions{Level: slog.LevelInfo})))
+	t.Cleanup(func() { slog.SetDefault(orig) })
+
+	cmds := &fixDurationCommands{results: []struct {
+		exit int
+		err  error
+	}{
+		{exit: 1, err: nil},
+		{exit: -1, err: ErrCommandTimeout},
+	}}
+	d := Deps{Commands: cmds}
+	rid := int64(9)
+	for range 2 {
+		if _, err := runCheckCommand(t.Context(), d, store.Ticket{ID: 7}, orchestrator.Worktree{}, Project{}, &rid, checkKindFix, "the-fix", time.Minute, nil); err != nil {
+			t.Fatalf("runCheckCommand: %v", err)
+		}
+	}
+
+	var records []map[string]any
+	dec := json.NewDecoder(&buf)
+	for dec.More() {
+		var rec map[string]any
+		if err := dec.Decode(&rec); err != nil {
+			t.Fatalf("decode log line: %v", err)
+		}
+		if rec["msg"] == "command re-run" && rec["command"] == checkKindFix {
+			records = append(records, rec)
+		}
+	}
+	if len(records) != 2 {
+		t.Fatalf("records = %+v, want exactly 2", records)
+	}
+	for _, rec := range records {
+		if rec["level"] != "INFO" {
+			t.Errorf("level = %v, want INFO", rec["level"])
+		}
+		if rec["ticket_id"] != float64(7) {
+			t.Errorf("ticket_id = %v, want 7", rec["ticket_id"])
+		}
+		if rec["run_id"] != float64(9) {
+			t.Errorf("run_id = %v, want 9", rec["run_id"])
+		}
+		v, ok := rec["seconds"].(float64)
+		if !ok || v < 0 || v != math.Trunc(v) {
+			t.Errorf("seconds = %v, want a non-negative whole number", rec["seconds"])
+		}
+	}
+	if records[0]["exit_code"] != float64(1) || records[0]["timed_out"] != false {
+		t.Errorf("first record = %+v, want exit_code 1, timed_out false", records[0])
+	}
+	if records[1]["exit_code"] != float64(-1) || records[1]["timed_out"] != true {
+		t.Errorf("second record = %+v, want exit_code -1, timed_out true", records[1])
 	}
 }
