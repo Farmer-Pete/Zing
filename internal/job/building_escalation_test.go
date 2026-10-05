@@ -155,8 +155,11 @@ func TestBuildingEscalationTable(t *testing.T) {
 		if err != nil {
 			t.Fatalf("escalation resolve (cap_budget retry) Run: %v", err)
 		}
-		if commit.Escalation != nil {
-			t.Errorf("commit.Escalation = %+v, want nil (budget has room)", commit.Escalation)
+		if commit.Escalation != nil || commit.Next != "" {
+			t.Errorf("commit = %+v, want a plain marker commit, no escalation, no transition", commit)
+		}
+		if commit.Waiting != nil {
+			t.Errorf("commit.Waiting = %v, want nil", commit.Waiting)
 		}
 		if len(commit.Messages) != 1 || commit.Messages[0].Body != testMarkerRetryRequested {
 			t.Fatalf("commit.Messages = %+v, want one %q marker", commit.Messages, testMarkerRetryRequested)

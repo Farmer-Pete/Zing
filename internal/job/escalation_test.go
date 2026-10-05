@@ -671,7 +671,7 @@ func TestEscalationResolve_CapLoops_BackResumesWithNotesAndErrorNoFindings(t *te
 	assertNoLabel(t, rec.lastReq.Prompt, "findings")
 }
 
-// ---- cap_budget origin: retry checks the budget, back always re-escalates -
+// ---- cap_budget origin: both choices resume once the budget has room -----
 
 // TestEscalationResolve_CapBudget_RetryResumesWhenBudgetHasRoom proves
 // section 6.7's cap_budget retry row once the owner has raised the budget

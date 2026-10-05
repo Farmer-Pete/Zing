@@ -154,9 +154,11 @@ func postBuildRoundOwnedByOpenFix(ctx context.Context, t store.Ticket, d Deps, r
 // "with a run"'s own fresh round retry -- judging.go's retryFreshRound).
 // cap_budget's own row is retryCapBudget (#25, planning.go): once the
 // ticket's spent agent seconds leave room under d.Budget, it resolves the
-// round and writes the "retry requested" marker -- plus ClearPoll, through
-// shipRetryMarkerCommit, when the ticket is in shipping -- and otherwise
-// re-escalates wall_clock, unchanged from before #25.
+// round and writes the "retry requested" marker through the marker commit
+// this switch passes it -- shipRetryMarkerCommit, plus ClearPoll, when the
+// ticket is in shipping, and h.retryMarkerCommit otherwise -- and
+// re-escalates wall_clock on its own, unchanged from before #25, while the
+// budget still has no room.
 // Shipping's own loops_exhausted row is shipHandler.retryShippingLoopsExhausted
 // (shipping.go, task 7); its pr_closed and every other code share
 // shipRetryMarkerCommit, the same "retry requested" marker plus ClearPoll.
@@ -193,7 +195,11 @@ func resolvePostBuildEscalation(ctx context.Context, t store.Ticket, d Deps, rou
 		commit = h.retryMarkerCommit(t, d, resolveIDs)
 
 	case origin == response.EscalationOriginCapBudget:
-		commit, err = retryCapBudget(ctx, t, d, resolveIDs)
+		marker := h.retryMarkerCommit
+		if t.State == stateShipping {
+			marker = shipRetryMarkerCommit
+		}
+		commit, err = retryCapBudget(ctx, t, d, resolveIDs, marker)
 
 	case origin == response.EscalationOriginCapResumes:
 		commit, preserved, err = h.retryCapResumes(ctx, t, d, resolveIDs, notes, int64OrZero(payload.SessionID))

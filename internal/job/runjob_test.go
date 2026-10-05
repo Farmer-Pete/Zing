@@ -1662,10 +1662,11 @@ func TestRetryCapBudget_LogsBranchAtInfo(t *testing.T) {
 	slog.SetDefault(slog.New(slog.NewJSONHandler(&logBuf, &slog.HandlerOptions{Level: slog.LevelInfo})))
 	t.Cleanup(func() { slog.SetDefault(prevDefault) })
 
-	if _, err := retryCapBudget(t.Context(), ticket, Deps{Store: s, Budget: time.Hour}, nil); err != nil {
+	marker := buildingHandler{}.retryMarkerCommit
+	if _, err := retryCapBudget(t.Context(), ticket, Deps{Store: s, Budget: time.Hour}, nil, marker); err != nil {
 		t.Fatalf("retryCapBudget (budget has room): %v", err)
 	}
-	if _, err := retryCapBudget(t.Context(), ticket, Deps{Store: s, Budget: 0}, nil); err != nil {
+	if _, err := retryCapBudget(t.Context(), ticket, Deps{Store: s, Budget: 0}, nil, marker); err != nil {
 		t.Fatalf("retryCapBudget (still over budget): %v", err)
 	}
 
@@ -1694,10 +1695,10 @@ func TestRetryCapBudget_LogsBranchAtInfo(t *testing.T) {
 
 	logBuf.Reset()
 	slog.SetDefault(slog.New(slog.NewJSONHandler(&logBuf, &slog.HandlerOptions{Level: slog.LevelWarn})))
-	if _, err := retryCapBudget(t.Context(), ticket, Deps{Store: s, Budget: time.Hour}, nil); err != nil {
+	if _, err := retryCapBudget(t.Context(), ticket, Deps{Store: s, Budget: time.Hour}, nil, marker); err != nil {
 		t.Fatalf("retryCapBudget (budget has room, warn level): %v", err)
 	}
-	if _, err := retryCapBudget(t.Context(), ticket, Deps{Store: s, Budget: 0}, nil); err != nil {
+	if _, err := retryCapBudget(t.Context(), ticket, Deps{Store: s, Budget: 0}, nil, marker); err != nil {
 		t.Fatalf("retryCapBudget (still over budget, warn level): %v", err)
 	}
 	if logged := logBuf.String(); strings.Contains(logged, "cap_budget retry") {

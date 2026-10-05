@@ -2216,8 +2216,14 @@ func TestShippingEscalationRetries(t *testing.T) {
 		if commit.Escalation != nil {
 			t.Errorf("commit.Escalation = %+v, want nil (budget has room)", commit.Escalation)
 		}
+		if commit.Waiting != nil {
+			t.Errorf("commit.Waiting = %v, want nil", commit.Waiting)
+		}
 		if !commit.ClearPoll {
 			t.Error("ClearPoll = false, want true")
+		}
+		if len(commit.ResolveQuestions) != 1 || commit.ResolveQuestions[0] != qID {
+			t.Errorf("commit.ResolveQuestions = %v, want [%d]", commit.ResolveQuestions, qID)
 		}
 		found := false
 		for _, m := range commit.Messages {
