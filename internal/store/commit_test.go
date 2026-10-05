@@ -1439,6 +1439,39 @@ func TestCommitHandlerResult_AttachRunToMsgsRejectsMessageRunIDZero(t *testing.T
 	}
 }
 
+// TestCommitHandlerResult_MessageRejectsRunFromAnotherTicket proves the
+// same ownership subquery the Artifacts loop already uses (design section
+// 4.5): a non-nil Message.RunID that belongs to another ticket's run is
+// rejected, and nothing is inserted.
+func TestCommitHandlerResult_MessageRejectsRunFromAnotherTicket(t *testing.T) {
+	t.Parallel()
+	s := newTestStore(t)
+	ctx := t.Context()
+	_, ticketA := seedQueuedTicket(t, s, "1")
+	_, ticketB := seedQueuedTicket(t, s, "2")
+	setTicketState(t, s, ticketA, testStatePlanning)
+	setTicketState(t, s, ticketB, testStatePlanning)
+
+	sessA := insertSession(t, s, ticketA, testStatePlanning)
+	runA := insertQuestionRun(t, s, sessA)
+
+	owner, expires := claimForCommit(t, s, ticketB)
+	applied, err := s.CommitHandlerResult(ctx, HandlerCommit{
+		TicketID: ticketB, Owner: owner, Expires: expires,
+		Messages: []Message{{RunID: &runA, Type: msgTypeUpdate, Author: authorSystem, Body: "hello"}},
+	})
+	wantErr := fmt.Sprintf("message run %d not owned by ticket %d", runA, ticketB)
+	if err == nil || !strings.Contains(err.Error(), wantErr) {
+		t.Fatalf("err = %v, want containing %q", err, wantErr)
+	}
+	if applied {
+		t.Error("applied = true, want false")
+	}
+	if n := countRows(t, s, `SELECT COUNT(*) FROM messages WHERE ticket_id = ?`, ticketB); n != 0 {
+		t.Errorf("messages after a rejected commit = %d, want 0", n)
+	}
+}
+
 // TestCommitHandlerResult_AttachRunToMsgsKeepsExplicitRunID proves a message
 // that already carries a non-zero RunID is left alone even when
 // AttachRunToMsgs is set: only a nil RunID is filled in.

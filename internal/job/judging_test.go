@@ -2020,8 +2020,8 @@ func driveJudgeFixToLanding(t *testing.T, s *store.Store, ticketID int64, rt run
 			t.Fatalf("driveJudgeFixToLanding: Run (step %d): %v", i, err)
 		}
 		pbApply(t, s, ticket, commit)
-		for _, m := range commit.Messages {
-			if strings.HasPrefix(m.Body, "fix landed ") {
+		for j := range commit.Messages {
+			if strings.HasPrefix(commit.Messages[j].Body, "fix landed ") {
 				return
 			}
 		}

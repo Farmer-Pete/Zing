@@ -547,9 +547,9 @@ func liveShipFirstLine(s string) string {
 // passed" in seedLiveShipTicket, rather than reaching into package job for
 // an unexported constant).
 func liveShipHasMessagePrefix(msgs []store.Message, prefix string) (store.Message, bool) {
-	for _, m := range msgs {
-		if strings.HasPrefix(m.Body, prefix) {
-			return m, true
+	for i := range msgs {
+		if strings.HasPrefix(msgs[i].Body, prefix) {
+			return msgs[i], true
 		}
 	}
 	return store.Message{}, false

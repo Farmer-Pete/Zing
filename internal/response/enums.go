@@ -474,3 +474,17 @@ const (
 func (ThreadVerb) Values() []string {
 	return []string{string(ThreadVerbFix), string(ThreadVerbReply), string(ThreadVerbAddressed)}
 }
+
+// CheckName is which CI check a typed event names (first used by the
+// check_rerun event, #91's once-per-sha gate).
+type CheckName string
+
+const (
+	CheckNameTest CheckName = "test"
+	CheckNameLint CheckName = "lint"
+)
+
+// Values returns test, lint, in that order.
+func (CheckName) Values() []string {
+	return []string{string(CheckNameTest), string(CheckNameLint)}
+}

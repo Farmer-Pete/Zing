@@ -319,3 +319,94 @@ func TestMigration0007_AppliesOverPopulated0006(t *testing.T) {
 		t.Error("UPDATE final_message to 65538 bytes: want a CHECK constraint error, got nil")
 	}
 }
+
+// TestMigration0008_AppliesOverPopulated0007 proves migration
+// 0008_message_event_kind.sql applies cleanly to a database already
+// carrying rows through 0007: event_kind on an existing row reads back
+// NULL, and the new column's CHECK ties a non-NULL event_kind to a
+// non-empty value, type 'update', and a non-NULL payload.
+func TestMigration0008_AppliesOverPopulated0007(t *testing.T) {
+	t.Parallel()
+	ctx := t.Context()
+	path := dbPath(t)
+
+	db, err := sql.Open("sqlite", "file:"+path)
+	if err != nil {
+		t.Fatalf("sql.Open: %v", err)
+	}
+	defer func() { _ = db.Close() }()
+
+	applyMigration := func(pattern string) {
+		t.Helper()
+		migrator := schema.NewMigrator(schema.WithDialect(schema.SQLite), schema.WithContext(ctx))
+		migs, fsErr := schema.FSMigrations(migrationsFS, pattern)
+		if fsErr != nil {
+			t.Fatalf("FSMigrations(%s): %v", pattern, fsErr)
+		}
+		if applyErr := migrator.Apply(db, migs); applyErr != nil {
+			t.Fatalf("apply %s: %v", pattern, applyErr)
+		}
+	}
+
+	for _, file := range []string{
+		"0001_init.sql", "0002_message_created_at.sql", "0003_sessions_external_id_nonempty.sql",
+		"0004_ticket_poll.sql", "0005_runs_interrupt.sql", "0006_check_procs.sql", "0007_run_evidence.sql",
+	} {
+		applyMigration("migrations/" + file)
+	}
+
+	if _, execErr := db.ExecContext(ctx,
+		`INSERT INTO projects (id, name, repo_url, local_path, tracker) VALUES (1, 'zing', 'https://github.com/x/zing', '/tmp/zing', 'github')`,
+	); execErr != nil {
+		t.Fatalf("seed project: %v", execErr)
+	}
+	if _, execErr := db.ExecContext(ctx,
+		`INSERT INTO tickets (id, project_id, tracker_ref, title, state) VALUES (1, 1, '42', 'fix the bug', 'queued')`,
+	); execErr != nil {
+		t.Fatalf("seed ticket: %v", execErr)
+	}
+	if _, execErr := db.ExecContext(ctx,
+		`INSERT INTO messages (id, ticket_id, type, author, body) VALUES (1, 1, 'update', 'system', 'progress')`,
+	); execErr != nil {
+		t.Fatalf("seed update message: %v", execErr)
+	}
+
+	applyMigration("migrations/0008_message_event_kind.sql")
+
+	var eventKind sql.NullString
+	if scanErr := db.QueryRowContext(ctx, `SELECT event_kind FROM messages WHERE id = 1`).Scan(&eventKind); scanErr != nil {
+		t.Fatalf("read event_kind after migration: %v", scanErr)
+	}
+	if eventKind.Valid {
+		t.Errorf("message 1 event_kind = %v, want NULL", eventKind)
+	}
+
+	rejects := []struct {
+		name string
+		stmt string
+	}{
+		{
+			"event_kind on a non-update row with a payload",
+			`INSERT INTO messages (id, ticket_id, type, author, payload, event_kind) VALUES (2, 1, 'state', 'system', '{}', 'check_rerun')`,
+		},
+		{
+			"type update with event_kind set and a NULL payload",
+			`INSERT INTO messages (id, ticket_id, type, author, event_kind) VALUES (3, 1, 'update', 'system', 'check_rerun')`,
+		},
+		{
+			"empty event_kind",
+			`INSERT INTO messages (id, ticket_id, type, author, payload, event_kind) VALUES (4, 1, 'update', 'system', '{}', '')`,
+		},
+	}
+	for _, tc := range rejects {
+		if _, execErr := db.ExecContext(ctx, tc.stmt); execErr == nil {
+			t.Errorf("%s: want a CHECK constraint error, got nil", tc.name)
+		}
+	}
+
+	if _, execErr := db.ExecContext(ctx,
+		`INSERT INTO messages (id, ticket_id, type, author, payload, event_kind) VALUES (5, 1, 'update', 'system', '{}', 'check_rerun')`,
+	); execErr != nil {
+		t.Errorf("insert valid event row: %v", execErr)
+	}
+}

@@ -1,0 +1,22 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "properties": {
+    "check": {
+      "type": "string",
+      "enum": [
+        "test",
+        "lint"
+      ]
+    },
+    "sha": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{40}$"
+    }
+  },
+  "additionalProperties": false,
+  "type": "object",
+  "required": [
+    "check",
+    "sha"
+  ]
+}

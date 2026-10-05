@@ -1095,6 +1095,7 @@ func TestConversationMarkersHidden(t *testing.T) {
 // recognize).
 func TestMarkerRecognized(t *testing.T) {
 	t.Parallel()
+	checkRerun, unknownKind := store.EventKindCheckRerun, "not_a_kind"
 	for _, tc := range []struct {
 		name string
 		row  store.MessageRow
@@ -1119,6 +1120,21 @@ func TestMarkerRecognized(t *testing.T) {
 			"a non-update row has nothing to recognize",
 			store.MessageRow{Message: store.Message{Type: msgTypeState, Author: authorSystem, Body: "queued -> planning"}}, //nolint:modernize // keyed on purpose
 			true,
+		},
+		{
+			"a typed event with a registered rule is recognized",
+			store.MessageRow{Message: store.Message{ //nolint:modernize // keyed on purpose
+				Type: msgTypeUpdate, Author: authorSystem, EventKind: &checkRerun,
+				Payload: []byte(`{"check":"test","sha":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}`),
+			}},
+			true,
+		},
+		{
+			"a typed event with no registered rule is not recognized",
+			store.MessageRow{Message: store.Message{ //nolint:modernize // keyed on purpose
+				Type: msgTypeUpdate, Author: authorSystem, EventKind: &unknownKind,
+			}},
+			false,
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

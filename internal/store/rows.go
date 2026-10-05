@@ -113,9 +113,9 @@ const ticketStateQueued = "queued"
 const ticketColumns = `id, project_id, tracker_ref, title, body, kind, state, waiting_on, parent_ticket_id, branch, pr_url, claim_owner, claim_expires_at, next_poll_at, poll_interval_s, poll_fingerprint`
 
 // messageColumns is the messages column list, id first, then the store's
-// Message (store.go) fields in that struct's order, then created_at
-// (migration 0002, design section 6.16).
-const messageColumns = `id, ticket_id, run_id, parent_id, type, author, state, body, payload, batch_id, read_at, created_at`
+// Message (store.go) fields in that struct's order (event_kind last,
+// migration 0008), then created_at (migration 0002, design section 6.16).
+const messageColumns = `id, ticket_id, run_id, parent_id, type, author, state, body, payload, batch_id, read_at, event_kind, created_at`
 
 // rowScanner is satisfied by both *sql.Row and *sql.Rows, so scanTicket and
 // scanMessage work for a single-row QueryRowContext and a multi-row
@@ -188,11 +188,11 @@ func scanTicket(rs rowScanner) (Ticket, error) {
 func scanMessage(rs rowScanner) (MessageRow, error) {
 	var row MessageRow
 	var runID, parentID, batchID sql.NullInt64
-	var state, body, payload, readAt, createdAt sql.NullString
+	var state, body, payload, readAt, eventKind, createdAt sql.NullString
 
 	if err := rs.Scan(
 		&row.ID, &row.TicketID, &runID, &parentID, &row.Type, &row.Author,
-		&state, &body, &payload, &batchID, &readAt, &createdAt,
+		&state, &body, &payload, &batchID, &readAt, &eventKind, &createdAt,
 	); err != nil {
 		return MessageRow{}, err
 	}
@@ -224,6 +224,9 @@ func scanMessage(rs rowScanner) (MessageRow, error) {
 			return MessageRow{}, fmt.Errorf("parse read_at: %w", err)
 		}
 		row.ReadAt = &ts
+	}
+	if eventKind.Valid {
+		row.EventKind = &eventKind.String
 	}
 	if createdAt.Valid {
 		ts, err := time.Parse(time.RFC3339Nano, createdAt.String)

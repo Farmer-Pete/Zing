@@ -6,6 +6,7 @@ import (
 	"database/sql"
 	"embed"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/url"
 	"os"
@@ -146,18 +147,22 @@ var messagePayloadTypes = map[string]bool{
 
 // Message is a row to insert into the messages table. Payload is required
 // and validated for the four payload-carrying types (question, answer,
-// escalation, state); every other type must carry no payload.
+// escalation, state); every other type must carry no payload. EventKind is
+// migration 0008's typed-event column (#34 first step): when non-nil, Type
+// must be "update" and Payload is required and validated against
+// schemas/events/<EventKind> instead of the four-type rule above.
 type Message struct {
-	TicketID int64
-	RunID    *int64
-	ParentID *int64
-	Type     string
-	Author   string
-	State    *string
-	Body     string
-	Payload  json.RawMessage
-	BatchID  *int64
-	ReadAt   *time.Time
+	TicketID  int64
+	RunID     *int64
+	ParentID  *int64
+	Type      string
+	Author    string
+	State     *string
+	Body      string
+	Payload   json.RawMessage
+	BatchID   *int64
+	ReadAt    *time.Time
+	EventKind *string
 }
 
 // InsertArtifact validates a.Payload against its schema, then inserts the row.
@@ -194,21 +199,48 @@ func (s *Store) InsertArtifact(ctx context.Context, a Artifact) (int64, error) {
 	return id, nil
 }
 
-// InsertMessage validates m.Payload for the four payload-carrying message
-// types, rejects a payload on every other type, then inserts the row.
-func (s *Store) InsertMessage(ctx context.Context, m Message) (int64, error) {
-	var payloadParam *string
-	if messagePayloadTypes[m.Type] {
+// messagePayloadParam applies the payload rule every message insert shares.
+// If m.EventKind is set, m must be an update row with a payload valid
+// against events/<kind>. Otherwise the four payload-carrying types need a
+// payload valid against messages/<type>, and every other type takes none.
+func messagePayloadParam(schemas *schemaSet, m Message) (sql.NullString, error) {
+	switch {
+	case m.EventKind != nil:
+		kind := *m.EventKind
+		if kind == "" {
+			return sql.NullString{}, errors.New("event kind must not be empty")
+		}
+		if m.Type != msgTypeUpdate {
+			return sql.NullString{}, fmt.Errorf("event %s: message type %s, want %s", kind, m.Type, msgTypeUpdate)
+		}
 		if len(m.Payload) == 0 {
-			return 0, fmt.Errorf("message type %s requires a payload", m.Type)
+			return sql.NullString{}, fmt.Errorf("event %s requires a payload", kind)
 		}
-		if err := s.schemas.validate("messages", m.Type, m.Payload); err != nil {
-			return 0, err
+		if err := schemas.validate(tableEvents, kind, m.Payload); err != nil {
+			return sql.NullString{}, err
 		}
-		text := string(m.Payload)
-		payloadParam = &text
-	} else if len(m.Payload) != 0 {
-		return 0, fmt.Errorf("message type %s takes no payload", m.Type)
+	case messagePayloadTypes[m.Type]:
+		if len(m.Payload) == 0 {
+			return sql.NullString{}, fmt.Errorf("message type %s requires a payload", m.Type)
+		}
+		if err := schemas.validate("messages", m.Type, m.Payload); err != nil {
+			return sql.NullString{}, err
+		}
+	default:
+		if len(m.Payload) != 0 {
+			return sql.NullString{}, fmt.Errorf("message type %s takes no payload", m.Type)
+		}
+		return sql.NullString{}, nil
+	}
+	return sql.NullString{String: string(m.Payload), Valid: true}, nil
+}
+
+// InsertMessage validates m.Payload by messagePayloadParam's rule, then
+// inserts the row.
+func (s *Store) InsertMessage(ctx context.Context, m Message) (int64, error) {
+	payloadParam, err := messagePayloadParam(s.schemas, m)
+	if err != nil {
+		return 0, err
 	}
 
 	var readAt *string
@@ -218,9 +250,9 @@ func (s *Store) InsertMessage(ctx context.Context, m Message) (int64, error) {
 	}
 
 	res, err := s.db.ExecContext(ctx,
-		`INSERT INTO messages (ticket_id, run_id, parent_id, type, author, state, body, payload, batch_id, read_at)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		m.TicketID, m.RunID, m.ParentID, m.Type, m.Author, m.State, m.Body, payloadParam, m.BatchID, readAt,
+		`INSERT INTO messages (ticket_id, run_id, parent_id, type, author, state, body, payload, batch_id, read_at, event_kind)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		m.TicketID, m.RunID, m.ParentID, m.Type, m.Author, m.State, m.Body, payloadParam, m.BatchID, readAt, m.EventKind,
 	)
 	if err != nil {
 		return 0, fmt.Errorf("insert message: %w", err)

@@ -91,9 +91,9 @@ func latestBuildSession(t *testing.T, s *store.Store, ticketID int64) store.Sess
 
 // messageWithPrefix returns the first message whose body starts with prefix.
 func messageWithPrefix(msgs []store.Message, prefix string) (store.Message, bool) {
-	for _, m := range msgs {
-		if strings.HasPrefix(m.Body, prefix) {
-			return m, true
+	for i := range msgs {
+		if strings.HasPrefix(msgs[i].Body, prefix) {
+			return msgs[i], true
 		}
 	}
 	return store.Message{}, false

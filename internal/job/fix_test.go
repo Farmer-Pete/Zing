@@ -1051,11 +1051,11 @@ func TestFixEscalationOriginFix(t *testing.T) {
 // msgs and returns its own <id>, failing the test when none is found.
 func landedMessageID(t *testing.T, msgs []store.Message) int64 {
 	t.Helper()
-	for _, m := range msgs {
-		if !strings.HasPrefix(m.Body, "fix landed ") {
+	for i := range msgs {
+		if !strings.HasPrefix(msgs[i].Body, "fix landed ") {
 			continue
 		}
-		fields := strings.Fields(m.Body)
+		fields := strings.Fields(msgs[i].Body)
 		if len(fields) < 3 {
 			continue
 		}
