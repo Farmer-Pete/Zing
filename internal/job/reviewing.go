@@ -1368,6 +1368,15 @@ func (h reviewingHandler) tableCommit(
 		return store.HandlerCommit{}, ctx.Err()
 	}
 
+	// A capped lens (the Claude session limit, or the dispatcher's own hold
+	// refusal) discards the whole round: no commit, so no "review round N
+	// failed" marker and no two-in-a-row count; the dispatcher parks every
+	// open lens run of this round and every lens resumes free after the
+	// reset (design shape, owner decision Q3).
+	if at, ok := firstBadAttempt(attempts, func(a lensAttempt) bool { return claudeCapped(a.err) }); ok {
+		return store.HandlerCommit{}, fmt.Errorf("job: reviewing: lens %s: %w", at.lens, at.err)
+	}
+
 	if _, ok := firstBadAttempt(attempts, func(a lensAttempt) bool { return errors.Is(a.err, ErrBudget) }); ok {
 		c := budgetEscalationCommit(t, d, resolveIDs)
 		applyAttempts(&c, t.ID, attempts)
