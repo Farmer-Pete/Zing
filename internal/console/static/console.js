@@ -1161,16 +1161,20 @@ function installSandboxRunBox() {
 // body, with an audit trail (#41) ------------------------------------------
 
 // ownerEditSubmit posts one owner edit (POST /tickets/{id}/edit) from the
-// .owner-edit box around button: every [data-field] inside it becomes a
-// body field (a checkbox sends its checked boolean), action is "drop" for
-// .owner-edit-drop after a confirm(), else "edit". A non-2xx response
-// shows its body text in the box's .owner-edit-error span.
+// .owner-edit box around button: every [data-field] inside it whose value
+// has changed since the box loaded becomes a body field (a checkbox sends
+// its checked boolean; an unchanged field is left out, so saving given,
+// when, then, text, or demo never also sends an untouched check or test,
+// which would need a loopback caller for no reason). action is "drop" for
+// .owner-edit-drop after a confirm(), and a drop sends no fields at all. A
+// non-2xx response shows its body text in the box's .owner-edit-error span.
 async function ownerEditSubmit(button) {
 	const box = button.closest('.owner-edit');
 	const errorSpan = box?.querySelector('.owner-edit-error');
 	const ticketID = box?.dataset?.ticket;
 	const target = box?.dataset?.target;
-	if (!box || !errorSpan || !ticketID || !target) {
+	const wellFormed = box && errorSpan && ticketID && target;
+	if (!wellFormed) {
 		return;
 	}
 	const ref = box.dataset.ref ?? '';
@@ -1179,9 +1183,17 @@ async function ownerEditSubmit(button) {
 		return;
 	}
 	const body = { target, ref, action: dropping ? 'drop' : 'edit' };
-	for (const field of box.querySelectorAll('[data-field]')) {
-		const name = field.dataset.field;
-		body[name] = field.type === 'checkbox' ? field.checked : field.value;
+	if (!dropping) {
+		for (const field of box.querySelectorAll('[data-field]')) {
+			const name = field.dataset.field;
+			if (field.type === 'checkbox') {
+				if (field.checked !== field.defaultChecked) {
+					body[name] = field.checked;
+				}
+			} else if (field.value !== field.defaultValue) {
+				body[name] = field.value;
+			}
+		}
 	}
 	let message = '';
 	try {

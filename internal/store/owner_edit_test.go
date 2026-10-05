@@ -13,10 +13,13 @@ import (
 )
 
 // planTaskText1 and planTaskText2 are the task-1 and task-2 Text literals
-// several plan fixtures below share.
+// several plan fixtures below share. fieldNameText is the field name
+// TestOwnerEdit_RefusesFieldNotAllowedForTarget expects named in a
+// refusal's reason, matching store_test.go's own "text" literal (goconst).
 const (
 	planTaskText1 = "text 1"
 	planTaskText2 = "text 2"
+	fieldNameText = "text"
 )
 
 // seedSealedScenario seeds ticketID (seedQueuedTicket's ticketID) with one
@@ -38,8 +41,9 @@ func ownerEditEvents(t *testing.T, s *Store, ticketID int64) []MessageRow {
 	return rows
 }
 
-// scenarioCheck reads back ticketID's scenario id's check_cmd field.
-func scenarioCheck(t *testing.T, s *Store, ticketID int64, id string) string {
+// readScenarioPayload reads back ticketID's scenario id's raw payload bytes,
+// for a byte-for-byte unchanged check.
+func readScenarioPayload(t *testing.T, s *Store, ticketID int64, id string) []byte {
 	t.Helper()
 	var payload []byte
 	if err := s.db.QueryRowContext(t.Context(),
@@ -48,8 +52,14 @@ func scenarioCheck(t *testing.T, s *Store, ticketID int64, id string) string {
 	).Scan(&payload); err != nil {
 		t.Fatalf("read back scenario %s: %v", id, err)
 	}
+	return payload
+}
+
+// scenarioCheck reads back ticketID's scenario id's check_cmd field.
+func scenarioCheck(t *testing.T, s *Store, ticketID int64, id string) string {
+	t.Helper()
 	var sc response.Scenario
-	if err := json.Unmarshal(payload, &sc); err != nil {
+	if err := json.Unmarshal(readScenarioPayload(t, s, ticketID, id), &sc); err != nil {
 		t.Fatalf("unmarshal scenario %s: %v", id, err)
 	}
 	return sc.Check
@@ -244,12 +254,13 @@ func TestOwnerEdit_RefusesFieldNotAllowedForTarget(t *testing.T) {
 	seedSealedScenario(t, s, ticketID)
 
 	tests := []struct {
-		name string
-		req  OwnerEditRequest
+		name       string
+		req        OwnerEditRequest
+		wantReason string
 	}{
-		{"text field on scenario", OwnerEditRequest{TicketID: ticketID, Target: OwnerEditScenario, Ref: "s1", Action: OwnerEditActionEdit, Text: new("x")}},
-		{"drop on scenario", OwnerEditRequest{TicketID: ticketID, Target: OwnerEditScenario, Ref: "s1", Action: OwnerEditActionDrop}},
-		{"edit with no fields", OwnerEditRequest{TicketID: ticketID, Target: OwnerEditScenario, Ref: "s1", Action: OwnerEditActionEdit}},
+		{"text field on scenario", OwnerEditRequest{TicketID: ticketID, Target: OwnerEditScenario, Ref: "s1", Action: OwnerEditActionEdit, Text: new("x")}, fieldNameText},
+		{"drop on scenario", OwnerEditRequest{TicketID: ticketID, Target: OwnerEditScenario, Ref: "s1", Action: OwnerEditActionDrop}, ""},
+		{"edit with no fields", OwnerEditRequest{TicketID: ticketID, Target: OwnerEditScenario, Ref: "s1", Action: OwnerEditActionEdit}, ""},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -261,6 +272,9 @@ func TestOwnerEdit_RefusesFieldNotAllowedForTarget(t *testing.T) {
 			}
 			if refusal.Code != OwnerEditCodeBadRequest {
 				t.Errorf("code = %q, want %q", refusal.Code, OwnerEditCodeBadRequest)
+			}
+			if tc.wantReason != "" && !strings.Contains(refusal.Reason, tc.wantReason) {
+				t.Errorf("reason = %q, want it to name %q", refusal.Reason, tc.wantReason)
 			}
 		})
 	}
@@ -382,6 +396,7 @@ func TestOwnerEdit_RefusesSchemaBreakingEdit(t *testing.T) {
 	s := newTestStore(t)
 	_, ticketID := seedQueuedTicket(t, s, "1")
 	seedSealedScenario(t, s, ticketID)
+	before := readScenarioPayload(t, s, ticketID, "s1")
 
 	err := s.OwnerEdit(t.Context(), OwnerEditRequest{
 		TicketID: ticketID, Target: OwnerEditScenario, Ref: "s1", Action: OwnerEditActionEdit, Given: new(""),
@@ -392,6 +407,9 @@ func TestOwnerEdit_RefusesSchemaBreakingEdit(t *testing.T) {
 	}
 	if refusal.Code != OwnerEditCodeInvalid {
 		t.Errorf("code = %q, want %q", refusal.Code, OwnerEditCodeInvalid)
+	}
+	if after := readScenarioPayload(t, s, ticketID, "s1"); !bytes.Equal(after, before) {
+		t.Errorf("payload = %s, want unchanged %s", after, before)
 	}
 	if n, err := s.CountEvents(t.Context(), ticketID, EventKindOwnerEdit, EventFilter{}); err != nil || n != 0 {
 		t.Errorf("owner_edit events = %d (err %v), want 0", n, err)

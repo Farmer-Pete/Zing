@@ -269,7 +269,7 @@ func (s *Store) OwnerEdit(ctx context.Context, req OwnerEditRequest) error {
 		return fmt.Errorf("owner edit: commit: %w", commitErr)
 	}
 
-	slog.Info("owner edit applied", "ticket_id", req.TicketID, "target", req.Target, "ref", req.Ref, "action", req.Action)
+	slog.InfoContext(ctx, "owner edit applied", "ticket_id", req.TicketID, "target", req.Target, "ref", req.Ref, "action", req.Action)
 	return nil
 }
 
@@ -395,14 +395,16 @@ func (s *Store) editPlanTaskTx(ctx context.Context, tx *sql.Tx, req OwnerEditReq
 			plan.Delivery.Tasks[idx].Demo = *req.Demo
 		}
 	case OwnerEditActionDrop:
-		landed, lerr := landedTaskNumbers(ctx, tx, req.TicketID)
-		if lerr != nil {
-			return response.OwnerEditEvent{}, lerr
+		var maxLanded sql.NullInt64
+		if err = tx.QueryRowContext(ctx,
+			`SELECT MAX(json_extract(payload, '$.task_n')) FROM artifacts
+			 WHERE ticket_id = ? AND type = 'build_report' AND json_extract(payload, '$.commit_sha') IS NOT NULL`,
+			req.TicketID,
+		).Scan(&maxLanded); err != nil {
+			return response.OwnerEditEvent{}, fmt.Errorf("owner edit: load landed tasks: %w", err)
 		}
-		for _, m := range landed {
-			if m >= n {
-				return response.OwnerEditEvent{}, ownerEditErr(OwnerEditCodeLanded, fmt.Sprintf("task %d has landed; only tasks after it can be dropped", m))
-			}
+		if maxLanded.Valid && int(maxLanded.Int64) >= n {
+			return response.OwnerEditEvent{}, ownerEditErr(OwnerEditCodeLanded, fmt.Sprintf("task %d has landed; only tasks after it can be dropped", maxLanded.Int64))
 		}
 		plan = dropPlanTask(plan, n)
 	}
@@ -429,37 +431,6 @@ func (s *Store) editPlanTaskTx(ctx context.Context, tx *sql.Tx, req OwnerEditReq
 		Target: OwnerEditPlanTask, Ref: req.Ref, Action: req.Action,
 		Old: oldPayload, New: string(newPayload),
 	}, nil
-}
-
-// landedTaskNumbers returns the task_n of every build_report artifact of
-// ticketID whose payload carries a commit_sha: the task numbers a drop must
-// not reach at or past (editPlanTaskTx's landed refusal).
-func landedTaskNumbers(ctx context.Context, tx *sql.Tx, ticketID int64) ([]int, error) {
-	rows, err := tx.QueryContext(ctx,
-		`SELECT payload FROM artifacts WHERE ticket_id = ? AND type = 'build_report' AND json_extract(payload, '$.commit_sha') IS NOT NULL`,
-		ticketID,
-	)
-	if err != nil {
-		return nil, fmt.Errorf("owner edit: load landed tasks: %w", err)
-	}
-	defer rows.Close()
-
-	var out []int
-	for rows.Next() {
-		var payload []byte
-		if err := rows.Scan(&payload); err != nil {
-			return nil, fmt.Errorf("owner edit: load landed tasks: %w", err)
-		}
-		var report response.BuildReport
-		if err := json.Unmarshal(payload, &report); err != nil {
-			return nil, fmt.Errorf("owner edit: decode build report: %w", err)
-		}
-		out = append(out, report.TaskN)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("owner edit: load landed tasks: %w", err)
-	}
-	return out, nil
 }
 
 // dropPlanTask returns p without task n: every later task's N drops by

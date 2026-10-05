@@ -98,7 +98,7 @@ func (c *console) handleOwnerEdit(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, refusal.Reason, ownerEditStatus[refusal.Code])
 		return
 	case err != nil:
-		slog.Error("console: owner edit", "ticket_id", id, "err", err)
+		slog.Error("console: owner edit", "ticket_id", id, "target", body.Target, "ref", body.Ref, "action", body.Action, "err", err)
 		http.Error(w, genericServerErrorBody, http.StatusInternalServerError)
 		return
 	}

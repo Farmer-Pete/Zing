@@ -18,10 +18,13 @@ import (
 )
 
 // testOldCheck and testNewCheck are the before/after check_cmd literals
-// every test in this file shares (goconst).
+// every test in this file shares (goconst). testNonLoopbackRemoteAddr is
+// the non-loopback RemoteAddr this file's two loopback-boundary tests
+// share, matching sandboxrun_test.go's own literal (goconst).
 const (
-	testOldCheck = "go test ./old"
-	testNewCheck = "go test ./new"
+	testOldCheck              = "go test ./old"
+	testNewCheck              = "go test ./new"
+	testNonLoopbackRemoteAddr = "192.0.2.1:1234"
 )
 
 // ownerEditPath builds POST /tickets/{id}/edit's path.
@@ -50,9 +53,9 @@ func seedSealedScenarioArtifact(t *testing.T, s *store.Store, ticketID int64, ru
 	}
 }
 
-// readScenarioCheck reads back ticketID's scenario "s1" own check_cmd
-// field, through the exported AllScenarios read.
-func readScenarioCheck(t *testing.T, s *store.Store, ticketID int64) string {
+// readScenario reads back ticketID's scenario "s1" in full, through the
+// exported AllScenarios read.
+func readScenario(t *testing.T, s *store.Store, ticketID int64) response.Scenario {
 	t.Helper()
 	artifacts, err := s.AllScenarios(t.Context(), ticketID)
 	if err != nil {
@@ -64,11 +67,18 @@ func readScenarioCheck(t *testing.T, s *store.Store, ticketID int64) string {
 			t.Fatalf("unmarshal scenario: %v", err)
 		}
 		if sc.ID == "s1" {
-			return sc.Check
+			return sc
 		}
 	}
 	t.Fatalf("no scenario s1 on ticket %d", ticketID)
-	return ""
+	return response.Scenario{}
+}
+
+// readScenarioCheck reads back ticketID's scenario "s1" own check_cmd
+// field, through readScenario.
+func readScenarioCheck(t *testing.T, s *store.Store, ticketID int64) string {
+	t.Helper()
+	return readScenario(t, s, ticketID).Check
 }
 
 // TestOwnerEditRoute_EditsSealedScenarioCheck proves the done-when test:
@@ -133,8 +143,8 @@ func TestOwnerEditRoute_RefusesSchemaBreakingEdit(t *testing.T) {
 		t.Fatalf("status = %d, want 422; body = %q", resp.StatusCode, readBody(t, resp))
 	}
 
-	if got := readScenarioCheck(t, s, ticketID); got != testOldCheck {
-		t.Errorf("s1 check_cmd = %q, want unchanged %q", got, testOldCheck)
+	if got := readScenario(t, s, ticketID).Given; got != "g" {
+		t.Errorf("s1 given = %q, want unchanged %q", got, "g")
 	}
 	if n, err := s.CountEvents(t.Context(), ticketID, store.EventKindOwnerEdit, store.EventFilter{}); err != nil || n != 0 {
 		t.Errorf("owner_edit events = %d (err %v), want 0", n, err)
@@ -343,7 +353,7 @@ func TestOwnerEditRoute_RefusesNonLoopbackCheckEdit(t *testing.T) {
 	body := `{"target":"scenario","ref":"s1","action":"edit","check":"` + testNewCheck + `"}`
 	req := httptest.NewRequestWithContext(t.Context(), http.MethodPost, srv.URL+ownerEditPath(ticketID), strings.NewReader(body))
 	req.Host = authority
-	req.RemoteAddr = "192.0.2.1:1234"
+	req.RemoteAddr = testNonLoopbackRemoteAddr
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Datastar-Request", "true")
 	req.Header.Set("Origin", srv.URL)
@@ -359,5 +369,40 @@ func TestOwnerEditRoute_RefusesNonLoopbackCheckEdit(t *testing.T) {
 
 	if got := readScenarioCheck(t, s, ticketID); got != testOldCheck {
 		t.Errorf("s1 check_cmd = %q, want unchanged %q", got, testOldCheck)
+	}
+}
+
+// TestOwnerEditRoute_AllowsNonLoopbackThenEdit proves the loopback
+// boundary falls only on check and test (Q14, triaging r2f5): a
+// non-loopback request that sets only then, with no check or test field at
+// all, succeeds. The fix for r2f5 itself lives in console.js's
+// ownerEditSubmit, which this Go test cannot drive; this proves the server
+// side of Q14's "only a change to a command needs loopback."
+func TestOwnerEditRoute_AllowsNonLoopbackThenEdit(t *testing.T) {
+	t.Parallel()
+	s := newConsoleTestStore(t)
+	ticketID := seedTicket(t, s, "1", "fix the bug")
+	seedSealedScenarioArtifact(t, s, ticketID, nil, response.Scenario{
+		ID: "s1", Kind: response.ScenarioKindBehavior, Check: testOldCheck, Given: "g", When: "w", Then: "t",
+	})
+
+	srv := newTestServer(t, s, bus.New(), nil, newTestLogHandler(t))
+	authority := strings.TrimPrefix(srv.URL, "http://")
+	body := `{"target":"scenario","ref":"s1","action":"edit","then":"new then"}`
+	req := httptest.NewRequestWithContext(t.Context(), http.MethodPost, srv.URL+ownerEditPath(ticketID), strings.NewReader(body))
+	req.Host = authority
+	req.RemoteAddr = testNonLoopbackRemoteAddr
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Datastar-Request", "true")
+	req.Header.Set("Origin", srv.URL)
+
+	rec := httptest.NewRecorder()
+	srv.Config.Handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("status = %d, want 204; body = %q", rec.Code, rec.Body.String())
+	}
+
+	if got := readScenario(t, s, ticketID).Then; got != "new then" {
+		t.Errorf("s1 then = %q, want %q", got, "new then")
 	}
 }
