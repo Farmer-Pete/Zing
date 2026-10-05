@@ -691,6 +691,110 @@ function installPickupBox() {
 	});
 }
 
+// ---- run a command in this ticket's sandbox (split from #73) ------------
+
+// sandboxRunOutputCap is the number of bytes the server keeps (job's
+// checkOutputCap), repeated here only to recognize a cut response.
+const sandboxRunOutputCap = 16384;
+
+// fillSandboxRunDialog writes title, exit line, and output into
+// #sandbox-run-result, under suppressPatchSignal since this writes outside
+// any /stream-patched region but the patch observer still watches the whole
+// document (console.js's own convention, matching pickupIssue above).
+function fillSandboxRunDialog(dialog, title, exitLine, output) {
+	suppressPatchSignal = true;
+	dialog.querySelector('.sandbox-run-title').textContent = title;
+	dialog.querySelector('.sandbox-run-exit').textContent = exitLine;
+	dialog.querySelector('.sandbox-run-output').textContent = output;
+	suppressPatchSignal = false;
+}
+
+// runInSandbox handles a click on the sandbox-run box's "Run" button (split
+// from #73): posts the box's command to POST /tickets/{id}/sandbox-run and
+// shows the exit code and output in the shell's own #sandbox-run-result
+// dialog (shell.templ), which sits outside every region /stream patches.
+async function runInSandbox(button) {
+	const box = button.closest('.sandbox-run-box');
+	const input = box?.querySelector('.sandbox-run-cmd');
+	const ticketID = box?.dataset?.sandboxRunTicket;
+	const dialog = document.getElementById('sandbox-run-result');
+	if (!box || !input || !ticketID || !dialog) {
+		return;
+	}
+	const cmd = input.value.trim();
+	if (cmd === '') {
+		return;
+	}
+	button.disabled = true;
+	fillSandboxRunDialog(dialog, `Ticket ${ticketID}: ${cmd}`, 'Running…', '');
+	if (!dialog.open) {
+		dialog.show();
+	}
+	try {
+		const resp = await fetch(`/tickets/${ticketID}/sandbox-run`, {
+			method: 'POST',
+			headers: { 'Content-Type': 'application/json', 'Datastar-Request': 'true' },
+			body: JSON.stringify({ cmd }),
+		});
+		if (!resp.ok) {
+			const text = await resp.text();
+			fillSandboxRunDialog(dialog, `Ticket ${ticketID}: ${cmd}`, 'Refused', text);
+		} else {
+			const result = await resp.json();
+			const exitLine = result.timed_out ? 'Timed out: killed when the build timeout ran out' : `Exit ${result.exit}`;
+			let output = result.output;
+			if (result.cut) {
+				output = `(last ${sandboxRunOutputCap} of ${result.total} bytes)\n${output}`;
+			} else if (output === '') {
+				output = '(no output)';
+			}
+			fillSandboxRunDialog(dialog, `Ticket ${ticketID}: ${cmd}`, exitLine, output);
+		}
+	} catch (err) {
+		console.error('console.js: POST /tickets/{id}/sandbox-run', err);
+		fillSandboxRunDialog(dialog, `Ticket ${ticketID}: ${cmd}`, 'Request failed', '');
+	} finally {
+		button.disabled = false;
+		if (!dialog.open) {
+			dialog.show();
+		}
+	}
+}
+
+// installSandboxRunBox wires the thread view's sandbox-run box (split from
+// #73), delegated from document like installPickupBox above, because #main
+// is morphed by every /stream patch (design section 6.3): a click on its
+// Run button, the dialog's Close button, and Enter inside its command
+// input, which takes the same path as the button rather than falling
+// through to the global keydown handler's own Enter-in-input/draft action
+// (that action is a no-op here, since this input carries no
+// data-draft-ticket).
+function installSandboxRunBox() {
+	document.addEventListener('click', (event) => {
+		const runButton = event.target.closest?.('.sandbox-run-box button[type="submit"]');
+		if (runButton) {
+			event.preventDefault();
+			runInSandbox(runButton);
+			return;
+		}
+		if (event.target.closest?.('.sandbox-run-close')) {
+			document.getElementById('sandbox-run-result')?.close();
+		}
+	});
+	document.addEventListener('keydown', (event) => {
+		if (event.key !== 'Enter' || !event.target.closest?.('.sandbox-run-cmd')) {
+			return;
+		}
+		const box = event.target.closest('.sandbox-run-box');
+		const runButton = box?.querySelector('button[type="submit"]');
+		if (!runButton) {
+			return;
+		}
+		event.preventDefault();
+		runInSandbox(runButton);
+	});
+}
+
 // postLogLevel handles a change on the Log rail's level select (design
 // section 6.11, 6.12, 7.1): POST /loglevel with the select's chosen value.
 // It is a small forward-wired affordance around the endpoint that is this
@@ -1132,7 +1236,8 @@ function installNavBridge() {
 // install wires every delegated listener synchronously, before awaiting
 // loadBindings' own /static/keys.json fetch (bug fix): none of
 // installStreamWatch, installNavBridge, installPatchObserver, installSideBox,
-// installLogControls, installChipActivation, or installPickupBox reads
+// installLogControls, installChipActivation, installPickupBox, or
+// installSandboxRunBox reads
 // state.bindings, so there was no reason their listeners -- installNavBridge
 // above all, the zing-nav bridge a Threads-sidebar click needs live as
 // early as possible -- sat behind an unrelated network round trip. Only
@@ -1148,6 +1253,7 @@ async function install() {
 	installLogControls();
 	installChipActivation();
 	installPickupBox();
+	installSandboxRunBox();
 	await loadBindings();
 	document.addEventListener('keydown', onKeyDown);
 }

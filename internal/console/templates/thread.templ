@@ -48,6 +48,7 @@ templ Thread(ticket *store.Ticket, rows []ThreadRow, wait WaitProgress, banner s
 					}
 				}
 			}
+			@sandboxRunBox(ticket.ID)
 		} else {
 			<p class="empty">Select a ticket.</p>
 		}
@@ -610,4 +611,19 @@ func fmtFocusID(namespace string, id int64) string {
 // when a row is inserted above it.
 func questionDOMID(id int64) string {
 	return "question-" + strconv.FormatInt(id, 10)
+}
+
+// sandboxRunBox is the owner's "run a command in this ticket's sandbox"
+// form (POST /tickets/{id}/sandbox-run): a text box for the command and a
+// Run button, no <form> element, matching pickupBox's own plain-button
+// shape (mw.go rejects every plain-form content type). console.js's
+// runInSandbox posts it and shows the result in the shell's own
+// #sandbox-run-result dialog (shell.templ), outside every region /stream
+// re-renders.
+templ sandboxRunBox(ticketID int64) {
+	<section class="sandbox-run-box" data-sandbox-run-ticket={ strconv.FormatInt(ticketID, 10) }>
+		<label for="sandbox-run-cmd">Run a command in this ticket's sandbox</label>
+		<input type="text" id="sandbox-run-cmd" class="sandbox-run-cmd" autocomplete="off" spellcheck="false" aria-label="Shell command"/>
+		<button type="submit">Run</button>
+	</section>
 }

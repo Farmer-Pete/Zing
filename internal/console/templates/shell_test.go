@@ -30,6 +30,26 @@ func TestMainScrollsWideContentInsteadOfThePage(t *testing.T) {
 	}
 }
 
+// TestShellRendersSandboxRunDialog proves the sandbox-run result dialog
+// (split from #73) renders after .layout's closing tag, so it sits outside
+// #main and every other region /stream re-renders.
+func TestShellRendersSandboxRunDialog(t *testing.T) {
+	t.Parallel()
+	var sb strings.Builder
+	if err := Shell(emptyBodyHTML, emptyBodyHTML, emptyBodyHTML, emptyBodyHTML).Render(t.Context(), &sb); err != nil {
+		t.Fatalf("Shell.Render: %v", err)
+	}
+	got := sb.String()
+	if !strings.Contains(got, `<dialog id="sandbox-run-result"`) {
+		t.Errorf("rendered shell missing the sandbox-run-result dialog; got:\n%s", got)
+	}
+	layoutClose := strings.Index(got, "</div>")
+	dialogIdx := strings.Index(got, `<dialog id="sandbox-run-result"`)
+	if layoutClose < 0 || dialogIdx < 0 || dialogIdx < layoutClose {
+		t.Errorf("rendered shell's sandbox-run-result dialog is not after .layout's close; got:\n%s", got)
+	}
+}
+
 // TestAlertStripHasBoundedHeight proves the alert strip bug fix: #alerts
 // sits above .layout in normal flow and holds up to alertsLimit (20)
 // lines, so an unbounded .alert-lines pushed the whole page down with

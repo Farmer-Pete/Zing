@@ -67,6 +67,10 @@ const (
 	testVersionQuestionTitle = "Where does the version string come from?"
 )
 
+// testHelloTicketTitle is a ticket title repeated across this package's
+// fixtures (goconst).
+const testHelloTicketTitle = "Add a hello endpoint"
+
 // emptyBodyHTML is a minimal templ.Component for a ThreadQuestion.BodyHTML
 // test stand-in: questionGroup renders it unconditionally, and its own
 // content is not what these tests assert on.
@@ -490,7 +494,7 @@ func TestQuestionGroupShowsReviseNoteWhileStillRevisable(t *testing.T) {
 // question-blocked.
 func TestThreadShowsWaitProgress(t *testing.T) {
 	t.Parallel()
-	ticket := &store.Ticket{ID: 1, Title: "Add a hello endpoint"}
+	ticket := &store.Ticket{ID: 1, Title: testHelloTicketTitle}
 
 	t.Run("a blocked ticket shows the progress line", func(t *testing.T) {
 		t.Parallel()
@@ -699,6 +703,44 @@ func TestTurnsRenderMarkdown(t *testing.T) {
 // since D31 never sets state=answered (section 22.3) -- a planning
 // question is only ever open or settled, with its own pill and settled
 // line in place of D30's answered/revisable rendering.
+// TestThreadRendersSandboxRunBox proves Thread renders sandboxRunBox after
+// the rows, for the open ticket's id, and renders nothing of it when there
+// is no open ticket (split from #73: the console action's own form).
+func TestThreadRendersSandboxRunBox(t *testing.T) {
+	t.Parallel()
+
+	t.Run("an open ticket renders the sandbox run box for its own id", func(t *testing.T) {
+		t.Parallel()
+		ticket := &store.Ticket{ID: 7, Title: testHelloTicketTitle}
+		var sb strings.Builder
+		if err := Thread(ticket, nil, WaitProgress{}, "").Render(t.Context(), &sb); err != nil {
+			t.Fatalf("Thread.Render: %v", err)
+		}
+		got := sb.String()
+		for _, want := range []string{
+			`class="sandbox-run-box"`,
+			`data-sandbox-run-ticket="7"`,
+			`class="sandbox-run-cmd"`,
+			`<button type="submit">Run</button>`,
+		} {
+			if !strings.Contains(got, want) {
+				t.Errorf("rendered thread missing %q; got:\n%s", want, got)
+			}
+		}
+	})
+
+	t.Run("no open ticket renders no sandbox run box", func(t *testing.T) {
+		t.Parallel()
+		var sb strings.Builder
+		if err := Thread(nil, nil, WaitProgress{}, "").Render(t.Context(), &sb); err != nil {
+			t.Fatalf("Thread.Render: %v", err)
+		}
+		if got := sb.String(); strings.Contains(got, "sandbox-run") {
+			t.Errorf("rendered thread has a sandbox run box with no open ticket; got:\n%s", got)
+		}
+	})
+}
+
 func TestNoReviseNoteOnPlanningQuestion(t *testing.T) {
 	t.Parallel()
 	got := renderQuestionGroup(t, ThreadRow{
