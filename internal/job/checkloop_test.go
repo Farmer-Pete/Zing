@@ -35,7 +35,7 @@ const (
 	// checkFailingTestCmd fails with a recognizable line every time.
 	checkFailingTestCmd = "echo 'FAIL: TestPing want pong'; exit 1"
 	checkFailLine       = "FAIL: TestPing want pong"
-	checkLoopsWhat      = "the project's test or lint command still fails after the builder's fix attempts"
+	checkLoopsWhat      = "the project's fix, lint or test command still fails after the builder's fix attempts"
 )
 
 // withCheckTestCommand returns deps with ticket's project rewired to run

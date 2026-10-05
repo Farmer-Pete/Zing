@@ -37,7 +37,7 @@ func (r commandResult) failed() bool { return r.NotRun || r.TimedOut || r.Exit !
 const (
 	markerCheckFailedPendingFmt   = "check failed pending run %d"
 	markerCheckFailedDeliveredFmt = "check failed delivered run %d"
-	checkLoopsExhaustedWhat       = "the project's test or lint command still fails after the builder's fix attempts"
+	checkLoopsExhaustedWhat       = "the project's fix, lint or test command still fails after the builder's fix attempts"
 	checkLoopsExhaustedWhyFmt     = "check_loops for build is %d; the last failing output is under Tried"
 )
 

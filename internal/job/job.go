@@ -60,8 +60,8 @@ type Deps struct {
 	Reserve ReserveFunc
 	// Projects carries what building needs to know about each store
 	// project, keyed by its id (PKG8-PLAN.md section 4.3): the orchestrator,
-	// the repository's common git dir, and the project's test and lint
-	// commands. Wired by dispatch.Config.Projects.
+	// the repository's common git dir, and the project's test, lint and
+	// fix commands. Wired by dispatch.Config.Projects.
 	Projects map[int64]Project
 	// Sandboxes holds the loaded profile set runJob wraps a sandboxed job's
 	// run in, keyed by the name machine.toml's job.sandbox gives it: build,

@@ -82,7 +82,7 @@ func TestCheckInputText(t *testing.T) {
 
 // budgetCommands is a CommandRunner that records each call's timeout and
 // returns a scripted result per shell command. advance, when set, moves
-// the fake check clock forward during the test command.
+// the fake check clock forward during the lint command.
 type budgetCommands struct {
 	timeouts map[string]time.Duration
 	results  map[string]struct {
