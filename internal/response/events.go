@@ -7,3 +7,32 @@ type CheckRerunEvent struct {
 	Check CheckName `json:"check"`
 	SHA   string    `json:"sha" jsonschema:"pattern=^[0-9a-f]{40}$"`
 }
+
+// OwnerEditEvent is the owner_edit typed event's payload (messages table,
+// event_kind "owner_edit"): one owner edit to a sealed scenario, a sealed
+// plan's task, or the ticket body (#41). Old and New hold the full prior
+// and new text -- the entire scenario or plan payload JSON for those two
+// targets, since a plan drop rewrites the whole task and file list, or the
+// raw ticket body text for ticket_body.
+type OwnerEditEvent struct {
+	Target string `json:"target" jsonschema:"enum=scenario,enum=plan_task,enum=ticket_body"`
+	Ref    string `json:"ref"`
+	Action string `json:"action" jsonschema:"enum=edit,enum=drop"`
+	Old    string `json:"old"`
+	New    string `json:"new"`
+}
+
+// OwnerEditLine renders an owner_edit event as one owner-facing feed
+// sentence.
+func OwnerEditLine(e OwnerEditEvent) string {
+	switch {
+	case e.Target == "scenario":
+		return "Owner edited scenario " + e.Ref + "."
+	case e.Target == "plan_task" && e.Action == "drop":
+		return "Owner dropped plan task " + e.Ref + "; later tasks moved up one."
+	case e.Target == "plan_task":
+		return "Owner edited plan task " + e.Ref + "."
+	default:
+		return "Owner amended the ticket body."
+	}
+}

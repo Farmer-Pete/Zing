@@ -70,10 +70,17 @@ type RenderedDelivery struct {
 // Design.Shape, and each Delivery.Tasks[n].Text. Review carries no markdown
 // field of its own. internal/console/plan.go builds one from a
 // store.GetArtifact(ticketID, "plan") payload; PlanView (plan.templ) is the
-// only thing that reads it.
+// only thing that reads it. TicketID and Editable (#41) are set only by
+// internal/console/views.go's loadPlan, for the gate's own rendering of the
+// current plan: RenderPlan (the artifacts rail) leaves both zero, so the
+// rail's own copy of the plan stays read-only. Editable is true only when
+// the plan's cohort has at least one sealed scenario (console.planSealed),
+// matching store.OwnerEdit's own not_sealed check for a plan task.
 type RenderedPlan struct {
 	Overview RenderedOverview
 	Design   RenderedDesign
 	Delivery RenderedDelivery
 	Review   response.Review
+	TicketID int64
+	Editable bool
 }
