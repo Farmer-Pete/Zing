@@ -187,6 +187,39 @@ func TestLoad_EmptyDirIsAnError(t *testing.T) {
 	}
 }
 
+func TestLoad_TestsLensFlagsUnobservableScenarios(t *testing.T) {
+	t.Parallel()
+
+	lenses, err := Load(zing.Assets, lensesDir)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+
+	var tests *Lens
+	for i := range lenses {
+		if lenses[i].Name == "tests" {
+			tests = &lenses[i]
+		}
+	}
+	if tests == nil {
+		t.Fatal("no tests lens found")
+	}
+
+	plan := strings.Join(strings.Fields(tests.Plan), " ")
+
+	for _, want := range []string{
+		"live `zing serve`",
+		"a machine outside the sandbox",
+		"the owner's own config",
+		"a write under /tmp",
+		"a sandbox probe that skips when sandboxed",
+	} {
+		if !strings.Contains(plan, want) {
+			t.Errorf("tests.Plan does not contain %q: %q", want, plan)
+		}
+	}
+}
+
 func TestParseLens_LeadingBlankLinesAllowedBeforeFirstHeading(t *testing.T) {
 	t.Parallel()
 

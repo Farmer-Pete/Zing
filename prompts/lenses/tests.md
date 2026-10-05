@@ -8,6 +8,11 @@ Check:
 - Every task names the test written before it.
 - No task's only change is a failing test: a regression test and its fix
   land in the same task.
+- Every scenario's given and check can be observed by an agent inside the
+  build sandbox. A scenario that needs a live `zing serve`, a machine
+  outside the sandbox, the owner's own config (`~/.codex`, `~/.claude`,
+  the console), a write under /tmp, or a sandbox probe that skips when
+  sandboxed is a finding.
 
 ## In code
 Check that the tests exist and assert behavior, not implementation. A
