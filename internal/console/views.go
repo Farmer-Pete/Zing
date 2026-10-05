@@ -738,6 +738,7 @@ const (
 	updateMarkerMergeAskedPrefix               = "merge asked "
 	updateMarkerMergeHeldPrefix                = "merge held "
 	updateMarkerMergeWithdrawnPrefix           = "merge withdrawn "
+	updateMarkerMergeRetryPrefix               = "merge retry "
 	updateMarkerMergeRefusedPrefix             = "merge refused "
 	updateMarkerPrMergedPrefix                 = "pr merged "
 	updateMarkerRespondBatchPrefix             = "respond batch "
@@ -2147,9 +2148,10 @@ func judgeRoundLine(first, rest string, hasRest bool) (string, bool) {
 
 // isShippingMarker reports whether body carries one of shipping.go's own
 // "pr opened/ready/draft/merged ", "ci waiting ", "reviewers re-requested
-// ", "threads blocking ", or "merge asked/held/withdrawn/refused " prefixes
-// (design section 5.1, 8.2-8.9): shippingUpdateLine's own exact-shape parse
-// runs behind, the same two-step pattern isReviewMarker uses.
+// ", "threads blocking ", or "merge asked/held/withdrawn/retry/refused "
+// prefixes (design section 5.1, 8.2-8.9): shippingUpdateLine's own
+// exact-shape parse runs behind, the same two-step pattern isReviewMarker
+// uses.
 func isShippingMarker(body string) bool {
 	return strings.HasPrefix(body, updateMarkerPrOpenedPrefix) ||
 		strings.HasPrefix(body, updateMarkerCIWaitingPrefix) ||
@@ -2160,6 +2162,7 @@ func isShippingMarker(body string) bool {
 		strings.HasPrefix(body, updateMarkerMergeAskedPrefix) ||
 		strings.HasPrefix(body, updateMarkerMergeHeldPrefix) ||
 		strings.HasPrefix(body, updateMarkerMergeWithdrawnPrefix) ||
+		strings.HasPrefix(body, updateMarkerMergeRetryPrefix) ||
 		strings.HasPrefix(body, updateMarkerMergeRefusedPrefix) ||
 		strings.HasPrefix(body, updateMarkerPrMergedPrefix)
 }
@@ -2169,10 +2172,11 @@ func isShippingMarker(body string) bool {
 // 6), "ci waiting <names>" (8.4), "reviewers re-requested <sha>" with its
 // own logins line (9.4), "pr ready/draft <sha>" (8.5 rows 3 and 8, 8.9),
 // "threads blocking <tids>" (8.5 row 6a), "merge asked/held/withdrawn
-// <sha>" and "merge refused <sha>" with its own reason line (8.8), and "pr
-// merged <sha>" (8.8). ok is false when body's prefix matched but the rest
-// of its shape did not, the same defensive fallback reviewUpdateLine's own
-// default case uses.
+// <sha>", "merge retry <sha>" (the automatic retry after a "Base branch
+// was modified" refusal), and "merge refused <sha>" with its own reason
+// line (8.8), and "pr merged <sha>" (8.8). ok is false when body's prefix
+// matched but the rest of its shape did not, the same defensive fallback
+// reviewUpdateLine's own default case uses.
 func shippingUpdateLine(body string) (string, bool) {
 	first, rest, hasRest := strings.Cut(body, "\n")
 	switch {
@@ -2205,6 +2209,8 @@ func shippingUpdateLine(body string) (string, bool) {
 		return "Merge held at " + sha7(sha) + ".", true
 	case strings.HasPrefix(first, updateMarkerMergeWithdrawnPrefix):
 		return "The merge question was withdrawn; the loop reopened.", true
+	case strings.HasPrefix(first, updateMarkerMergeRetryPrefix):
+		return "Main moved during the merge; Zing checks the pull request again in 10 seconds.", true
 	case strings.HasPrefix(first, updateMarkerMergeRefusedPrefix):
 		header := "Merge refused:"
 		if hasRest {

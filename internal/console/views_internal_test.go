@@ -280,6 +280,7 @@ func TestUpdateLineJudgeShippingRespondMarkers(t *testing.T) {
 		{"merge asked", "merge asked " + sha, "Asked whether to merge 0123456."},
 		{"merge held", "merge held " + sha, "Merge held at 0123456."},
 		{"merge withdrawn", "merge withdrawn " + sha, "The merge question was withdrawn; the loop reopened."},
+		{"merge retry", "merge retry " + sha, "Main moved during the merge; Zing checks the pull request again in 10 seconds."},
 		{"merge refused", "merge refused " + sha + "\nthe head moved", "Merge refused: the head moved"},
 		{"pr merged", "pr merged " + sha, "Pull request merged at 0123456."},
 		// respond markers (design section 5.1, 9.2-9.4, 5.6).
@@ -808,6 +809,7 @@ var markerShapeCases = []struct{ name, body string }{
 	{"merge asked", "merge asked 0123456789abcdef0123456789abcdef01234567"},
 	{"merge held", "merge held 0123456789abcdef0123456789abcdef01234567"},
 	{"merge withdrawn", "merge withdrawn 0123456789abcdef0123456789abcdef01234567"},
+	{"merge retry", "merge retry 0123456789abcdef0123456789abcdef01234567"},
 	{"merge refused", "merge refused 0123456789abcdef0123456789abcdef01234567\nthe head moved"},
 	{"pr merged", "pr merged 0123456789abcdef0123456789abcdef01234567"},
 	{
