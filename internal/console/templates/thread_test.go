@@ -2,7 +2,9 @@ package templates
 
 import (
 	"context"
+	"fmt"
 	"io"
+	"slices"
 	"strings"
 	"testing"
 
@@ -51,6 +53,10 @@ const testWaitingOnYou = "waiting on you"
 // testYouAuthor is Turn.Author for an owner turn (bug fix, design section
 // 22.7), repeated across this file's fixtures (goconst).
 const testYouAuthor = "You"
+
+// testSettledStateLabel is a settled question's StateLabel, repeated across
+// this file's fixtures (goconst).
+const testSettledStateLabel = "settled"
 
 // testApprovePlanTitle, testSplitTicketTitle, and testVersionQuestionTitle
 // are question titles repeated across this file's fixtures (goconst),
@@ -137,6 +143,92 @@ func TestPerimeterRowRendersParts(t *testing.T) {
 		}
 		if strings.Contains(got, "item-marker") || strings.Contains(got, "item-reason") || strings.Contains(got, "item-change") {
 			t.Errorf("rendered item-row split a non-conforming text into parts; got:\n%s", got)
+		}
+	})
+}
+
+// detailsOpenTag returns the opening <details ...> tag (up to and including
+// its closing >) from a rendered questionGroup, split into whitespace
+// tokens, so a test can check for an exact attribute token (e.g. "open" or
+// `id="question-1"`) without a substring match wrongly hitting
+// data-preserve-attr="open".
+func detailsOpenTag(t *testing.T, got string) []string {
+	t.Helper()
+	end := strings.Index(got, ">")
+	if end < 0 {
+		t.Fatalf("rendered question group has no closing > on its opening tag; got:\n%s", got)
+	}
+	return strings.Fields(got[:end])
+}
+
+// TestQuestionGroupKeepsOpenStateAcrossPatches proves the bug fix: a live
+// patch re-renders #main from the server's HTML on every bus wake
+// (stream.go), and Datastar's morph strips any attribute the new HTML
+// lacks unless that HTML's data-preserve-attr names it (datastar.js:9).
+// questionGroup's <details> never carried data-preserve-attr="open", so an
+// owner-expanded question (or a gate's chips) collapsed on the next frame.
+// This proves every question's <details> carries data-preserve-attr="open"
+// and a stable id (so the morph pairs it by id, not position), and that an
+// Interactive question (row.Question.Interactive, true for every question
+// still waiting on the owner, gates included) renders open from the start.
+func TestQuestionGroupKeepsOpenStateAcrossPatches(t *testing.T) {
+	t.Parallel()
+
+	t.Run("an interactive question renders open, preserved, and identified", func(t *testing.T) {
+		t.Parallel()
+		got := renderQuestionGroup(t, ThreadRow{
+			ID: 1,
+			Question: &ThreadQuestion{
+				Key: "Q1", Title: testVersionQuestionTitle, StateLabel: testWaitingOnYou,
+				BodyHTML: emptyBodyHTML, Options: []ThreadOption{threadOption("a", "ReadBuildInfo only")},
+				Interactive: true,
+			},
+		})
+		tag := detailsOpenTag(t, got)
+		for _, want := range []string{"open", `data-preserve-attr="open"`, `id="question-1"`} {
+			if !slices.Contains(tag, want) {
+				t.Errorf("rendered <details> tag missing token %q; got tag:\n%s", want, strings.Join(tag, " "))
+			}
+		}
+	})
+
+	t.Run("a non-interactive question renders no open token, but stays preserved and identified", func(t *testing.T) {
+		t.Parallel()
+		got := renderQuestionGroup(t, ThreadRow{
+			ID: 1,
+			Question: &ThreadQuestion{
+				Key: "Q1", Title: testVersionQuestionTitle, StateLabel: testSettledStateLabel,
+				BodyHTML: emptyBodyHTML, Options: []ThreadOption{threadOption("a", "ReadBuildInfo only")},
+				Interactive: false,
+			},
+		})
+		tag := detailsOpenTag(t, got)
+		if slices.Contains(tag, "open") {
+			t.Errorf("rendered <details> tag carries a bare open token on a non-interactive question; got tag:\n%s", strings.Join(tag, " "))
+		}
+		for _, want := range []string{`data-preserve-attr="open"`, `id="question-1"`} {
+			if !slices.Contains(tag, want) {
+				t.Errorf("rendered <details> tag missing token %q; got tag:\n%s", want, strings.Join(tag, " "))
+			}
+		}
+	})
+
+	t.Run("each question's id names its own row, so the morph pairs them apart", func(t *testing.T) {
+		t.Parallel()
+		for _, id := range []int64{1, 2} {
+			got := renderQuestionGroup(t, ThreadRow{
+				ID: id,
+				Question: &ThreadQuestion{
+					Key: "Q1", Title: testVersionQuestionTitle, StateLabel: testWaitingOnYou,
+					BodyHTML: emptyBodyHTML, Options: []ThreadOption{threadOption("a", "ReadBuildInfo only")},
+					Interactive: true,
+				},
+			})
+			tag := detailsOpenTag(t, got)
+			want := fmt.Sprintf(`id="question-%d"`, id)
+			if !slices.Contains(tag, want) {
+				t.Errorf("rendered <details> tag missing token %q; got tag:\n%s", want, strings.Join(tag, " "))
+			}
 		}
 	})
 }
@@ -307,7 +399,7 @@ func TestLockedQuestionShowsOptions(t *testing.T) {
 		got := renderQuestionGroup(t, ThreadRow{
 			ID: 1,
 			Question: &ThreadQuestion{
-				Key: "Q1", Title: testApprovePlanTitle, StateLabel: "settled",
+				Key: "Q1", Title: testApprovePlanTitle, StateLabel: testSettledStateLabel,
 				BodyHTML: emptyBodyHTML, MessageCount: 1,
 				Options:      []ThreadOption{threadOption("a", "Approve"), threadOption("b", "Reject")},
 				Interactive:  false,
@@ -485,7 +577,7 @@ func TestSettledThreadShowsDecisionAndLocks(t *testing.T) {
 	got := renderQuestionGroup(t, ThreadRow{
 		ID: 1,
 		Question: &ThreadQuestion{
-			Key: "Q1", Title: testVersionQuestionTitle, StateLabel: "settled",
+			Key: "Q1", Title: testVersionQuestionTitle, StateLabel: testSettledStateLabel,
 			BodyHTML: emptyBodyHTML, MessageCount: 2,
 			Options:      []ThreadOption{threadOption("a", "ReadBuildInfo only")},
 			Interactive:  false,
