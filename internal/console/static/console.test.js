@@ -602,6 +602,36 @@ test('sendResultWithUnsent: a trailing space on text is trimmed before appending
 	);
 });
 
+// sendResultWithUnsent's stale count: a box whose save failed at send time
+// but had an earlier autosave already in the store is not "unsent" -- an
+// older version did go out (bug fix, r2f9: reporting it as plain "not sent"
+// told the owner nothing went out when an earlier edit actually had).
+
+test('sendResultWithUnsent: a stale-sent reply gets its own sentence, distinct from unsent', () => {
+	assert.equal(
+		sendResultWithUnsent('Sent 1 message.', 0, 1),
+		'Sent 1 message. 1 reply sent an earlier version; its newest edit may be missing.',
+	);
+});
+
+test('sendResultWithUnsent: more than one stale-sent reply gets the plural sentence', () => {
+	assert.equal(
+		sendResultWithUnsent('Sent 1 message.', 0, 2),
+		'Sent 1 message. 2 replies sent an earlier version; their newest edits may be missing.',
+	);
+});
+
+test('sendResultWithUnsent: unsent and stale both append, unsent first', () => {
+	assert.equal(
+		sendResultWithUnsent('Sent 1 message.', 1, 1),
+		'Sent 1 message. 1 reply not sent; its text is still in its box. 1 reply sent an earlier version; its newest edit may be missing.',
+	);
+});
+
+test('sendResultWithUnsent: stale defaults to 0 when omitted', () => {
+	assert.equal(sendResultWithUnsent('Sent 1 message.', 0), 'Sent 1 message.');
+});
+
 // replyAutosaveBody: installReplyAutosave (console.js) debounces on 'input'
 // and posts this body a second after the owner stops typing, so a box's text
 // is never lost to a lost focus or an unmorphed send -- including an emptied
@@ -662,6 +692,15 @@ test('restoreFocusDecision: restores only a patch-caused blur, and refills an em
 	// from a stale, draft-less render): the snapshot's own text is restored
 	// too.
 	assert.deepEqual(restoreFocusDecision(snapshot, { isBody: true }, { value: '' }), {
+		focus: true,
+		restoreValue: true,
+	});
+
+	// The replacement node is non-empty but stale -- it shows only what the
+	// last autosave captured, a prefix of what the owner has since typed
+	// (bug fix: refilling only an empty replacement lost every keystroke
+	// since that autosave once the morph swapped in this node).
+	assert.deepEqual(restoreFocusDecision(snapshot, { isBody: true }, { value: 'hel' }), {
 		focus: true,
 		restoreValue: true,
 	});

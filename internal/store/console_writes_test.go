@@ -479,6 +479,27 @@ func TestSaveDraft_EmptyTextClearsQuestionReplyDraft(t *testing.T) {
 	}
 }
 
+// TestSaveDraft_EmptyTextAgainstClosedQuestionConflicts proves the relaxed
+// n==0 guard still runs openQuestionForTicketTx before it ever reaches
+// clearReplyDraftTx: an empty-text autosave against a question that has
+// already closed is still the ordinary "question closed" conflict, not a
+// silent delete of whatever draft reply that question still has.
+func TestSaveDraft_EmptyTextAgainstClosedQuestionConflicts(t *testing.T) {
+	t.Parallel()
+	s := newTestStore(t)
+	_, ticketID := seedQueuedTicket(t, s, "1")
+	qID := insertQuestionOption(t, s, ticketID, "Q1")
+	closeQuestion(t, s, qID, questionStateResolved)
+
+	_, err := s.SaveDraft(t.Context(), DraftInput{TicketID: ticketID, QuestionID: &qID, Text: ""})
+	if err == nil {
+		t.Fatal("SaveDraft (empty text, closed question): err = nil, want a ConflictError")
+	}
+	if got := conflictReason(t, err); got != testConflictQuestionClosed {
+		t.Errorf("conflict reason = %q, want %q", got, testConflictQuestionClosed)
+	}
+}
+
 // ---- SendBatch --------------------------------------------------------------
 
 func TestSendBatch_EmptyIsSafe(t *testing.T) {

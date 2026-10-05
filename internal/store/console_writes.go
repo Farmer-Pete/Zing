@@ -64,15 +64,6 @@ type DraftInput struct {
 	Text       string
 }
 
-// clearsReplyDraft reports whether in asks SaveDraft to delete an existing
-// question reply draft rather than write one (an empty Text against a
-// question, with neither Option nor Item set): SaveDraft's mode switch and
-// logSaveDraftOutcome below both need this same decision, named once so the
-// two cannot drift apart.
-func (in DraftInput) clearsReplyDraft() bool {
-	return in.QuestionID != nil && in.Text == "" && in.Option == nil && in.Item == nil
-}
-
 // DraftResult reports the draft row SaveDraft wrote, updated, or deleted.
 // Replaced is true only when this call changed an existing draft's stored
 // value; a fresh draft, and a repeat of the exact same option or item value,
@@ -180,7 +171,11 @@ func (s *Store) SaveDraft(ctx context.Context, in DraftInput) (result DraftResul
 				return DraftResult{}, conflict("a review item takes accept, drop, or discuss")
 			}
 			result, err = s.upsertItemDraftTx(ctx, tx, in.TicketID, *in.QuestionID, *in.Item)
-		case in.clearsReplyDraft():
+		case in.Text == "":
+			// Option and Item are already both nil in this branch (the two
+			// cases above), so an empty Text here is specifically "clear this
+			// question's reply draft", not the ambiguous or empty-mode
+			// conflict draftModeCount already ruled out above.
 			result, err = clearReplyDraftTx(ctx, tx, in.TicketID, *in.QuestionID)
 		default:
 			result, err = s.insertReplyDraftTx(ctx, tx, in.TicketID, in.QuestionID, in.Text)
@@ -223,13 +218,14 @@ func logSaveDraftOutcome(ctx context.Context, in DraftInput, result DraftResult,
 		}
 		return
 	}
-	if in.clearsReplyDraft() && !result.Cleared {
-		slog.InfoContext(ctx, "draft clear: nothing to clear", "ticket_id", in.TicketID, "question_id", questionID)
-		return
-	}
-	if in.clearsReplyDraft() {
-		slog.InfoContext(ctx, "draft cleared",
-			"ticket_id", in.TicketID, "question_id", questionID, "message_id", result.MessageID)
+	clearsReplyDraft := in.QuestionID != nil && in.Text == "" && in.Option == nil && in.Item == nil
+	if clearsReplyDraft {
+		if result.Cleared {
+			slog.InfoContext(ctx, "draft cleared",
+				"ticket_id", in.TicketID, "question_id", questionID, "message_id", result.MessageID, "cleared", result.Cleared)
+		} else {
+			slog.InfoContext(ctx, "draft clear: nothing to clear", "ticket_id", in.TicketID, "question_id", questionID)
+		}
 		return
 	}
 	slog.InfoContext(ctx, "draft saved",

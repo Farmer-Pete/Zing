@@ -483,24 +483,41 @@ export function unsavedReplyBodies(inputs) {
 
 /**
  * sendResultWithUnsent appends a sentence naming any reply box the send left
- * unsent to showSendResult's text (bug fix, Q11: a save failure used to be
+ * unsent, and any box whose failed save still sent an earlier autosaved
+ * version, to showSendResult's text (bug fix, Q11: a save failure used to be
  * silent, with the send still reporting plain success). text is returned
- * unchanged when unsent is 0. Any trailing space on text is trimmed before
- * appending, so the joined sentence never ends up with two spaces between.
+ * unchanged when both unsent and stale are 0. Any trailing space on text is
+ * trimmed before appending, so the joined sentence never ends up with two
+ * spaces between.
+ *
+ * stale counts a failed-to-save box differently from unsent (bug fix): when
+ * an earlier autosave of the same box already reached the store, /send still
+ * sends that older draft, so "not sent" would be wrong -- something did go
+ * out, just not the latest edit.
  *
  * @param {string} text - the base result line, e.g. "Sent 1 message."
- * @param {number} unsent - how many reply boxes failed to save
+ * @param {number} unsent - how many reply boxes failed to save, with nothing
+ *   earlier ever saved for them
+ * @param {number} [stale] - how many failed-to-save boxes still sent an
+ *   earlier autosaved version
  * @returns {string}
  */
-export function sendResultWithUnsent(text, unsent) {
-	if (unsent === 0) {
+export function sendResultWithUnsent(text, unsent, stale = 0) {
+	if (unsent === 0 && stale === 0) {
 		return text;
 	}
-	const base = text.trimEnd();
+	let base = text.trimEnd();
 	if (unsent === 1) {
-		return `${base} 1 reply not sent; its text is still in its box.`;
+		base = `${base} 1 reply not sent; its text is still in its box.`;
+	} else if (unsent > 1) {
+		base = `${base} ${unsent} replies not sent; their text is still in their boxes.`;
 	}
-	return `${base} ${unsent} replies not sent; their text is still in their boxes.`;
+	if (stale === 1) {
+		base = `${base} 1 reply sent an earlier version; its newest edit may be missing.`;
+	} else if (stale > 1) {
+		base = `${base} ${stale} replies sent an earlier version; their newest edits may be missing.`;
+	}
+	return base;
 }
 
 // AUTOSAVE_DEBOUNCE_MS is how long installReplyAutosave (console.js) waits
@@ -580,11 +597,16 @@ export function replyFocusSnapshot(el) {
  * element), which must never be undone by an unrelated later patch. focus is
  * true only when snapshot is non-null, active.isBody is true, and target
  * (the box for the same ticket and question, or null if the patch rendered
- * none) is non-null. restoreValue is true only when focus is true and
- * target's value is empty while snapshot's was not -- a replacement node
- * built from a stale, draft-less render -- so a target that already shows
- * text (the common case: the morph kept or restored it on its own) is never
- * overwritten.
+ * none) is non-null.
+ *
+ * restoreValue is true whenever focus is true and target's value differs
+ * from snapshot's at all, not only when target came up empty (bug fix: the
+ * replacement node's value comes from the server-rendered draftReply, which
+ * is only ever as fresh as the last autosave -- up to AUTOSAVE_DEBOUNCE_MS
+ * behind, or more while a save is in flight. snapshot.value is refreshed on
+ * every input event, so it is always the newest text regardless of what the
+ * replacement shows; trusting a non-empty-but-stale replacement instead
+ * silently lost whatever the owner typed since the last save).
  *
  * @param {{ticket: string, question: string, value: string, start: number, end: number} | null} snapshot
  * @param {{isBody: boolean}} active
@@ -593,8 +615,8 @@ export function replyFocusSnapshot(el) {
  */
 export function restoreFocusDecision(snapshot, active, target) {
 	const focus = Boolean(snapshot) && Boolean(active?.isBody) && target != null;
-	const replacementLostText = focus && target.value === '' && snapshot.value !== '';
-	return { focus, restoreValue: replacementLostText };
+	const staleReplacement = focus && target.value !== snapshot.value;
+	return { focus, restoreValue: staleReplacement };
 }
 
 /**
