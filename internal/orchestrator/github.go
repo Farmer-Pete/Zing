@@ -765,10 +765,7 @@ func tailLog(r io.Reader, n int) (string, error) {
 			switch {
 			case logGroupRunRe.MatchString(line):
 				if failedStepFound {
-					if err == nil {
-						err = io.EOF
-					}
-					break
+					return strings.Join(stepBuf, "\n"), nil
 				}
 				stepBuf = []string{line}
 				pending = nil

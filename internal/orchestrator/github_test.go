@@ -490,6 +490,8 @@ func TestGitHubClientSatisfiesInterfaces(t *testing.T) {
 	t.Parallel()
 }
 
+// TestGetPR proves GetPR fills PRState from GitHub's own fields, including
+// MergeCommitSHA from merge_commit_sha once the pull request is merged.
 func TestGetPR(t *testing.T) {
 	t.Parallel()
 
@@ -503,6 +505,18 @@ func TestGetPR(t *testing.T) {
 			"draft": true,
 			"head": {"sha": "deadbeefcafe0000111122223333444455556666"},
 			"base": {"ref": "main"}
+		}`)
+	})
+	mux.HandleFunc("/repos/acme/widgets/pulls/63", func(w http.ResponseWriter, _ *http.Request) {
+		fmt.Fprint(w, `{
+			"number": 63,
+			"node_id": "PR_kwXYZ",
+			"state": "closed",
+			"merged": true,
+			"draft": false,
+			"head": {"sha": "deadbeefcafe0000111122223333444455556666"},
+			"base": {"ref": "main"},
+			"merge_commit_sha": "0123456789abcdef0123456789abcdef01234567"
 		}`)
 	})
 
@@ -524,35 +538,13 @@ func TestGetPR(t *testing.T) {
 	if got != want {
 		t.Errorf("GetPR = %+v, want %+v", got, want)
 	}
-}
 
-// TestGetPRMergeCommitSHA proves GetPR fills PRState.MergeCommitSHA from
-// GitHub's merge_commit_sha once the pull request is merged.
-func TestGetPRMergeCommitSHA(t *testing.T) {
-	t.Parallel()
-
-	mux := http.NewServeMux()
-	mux.HandleFunc("/repos/acme/widgets/pulls/63", func(w http.ResponseWriter, _ *http.Request) {
-		fmt.Fprint(w, `{
-			"number": 63,
-			"node_id": "PR_kwXYZ",
-			"state": "closed",
-			"merged": true,
-			"draft": false,
-			"head": {"sha": "deadbeefcafe0000111122223333444455556666"},
-			"base": {"ref": "main"},
-			"merge_commit_sha": "0123456789abcdef0123456789abcdef01234567"
-		}`)
-	})
-
-	g := newTestGHClient(t, mux)
-
-	got, err := g.GetPR(t.Context(), "acme", "widgets", 63)
+	gotMerged, err := g.GetPR(t.Context(), "acme", "widgets", 63)
 	if err != nil {
 		t.Fatalf("GetPR: unexpected error: %v", err)
 	}
-	if got.MergeCommitSHA != "0123456789abcdef0123456789abcdef01234567" {
-		t.Errorf("GetPR().MergeCommitSHA = %q, want the merge commit sha", got.MergeCommitSHA)
+	if gotMerged.MergeCommitSHA != "0123456789abcdef0123456789abcdef01234567" {
+		t.Errorf("GetPR().MergeCommitSHA = %q, want the merge commit sha", gotMerged.MergeCommitSHA)
 	}
 }
 
@@ -1202,6 +1194,35 @@ func TestJobLogTailCutsAtFailedStep(t *testing.T) {
 		}
 		if strings.Contains(got, "Cleaning up orphan processes") {
 			t.Errorf("JobLogTail = %q, must not contain the post-job cleanup lines", got)
+		}
+	})
+
+	t.Run("stops at the next step header, so a later step cannot replace the failure", func(t *testing.T) {
+		t.Parallel()
+		var b strings.Builder
+		fmt.Fprintf(&b, "%s ##[group]Run make lint\n", ts(0))
+		fmt.Fprintf(&b, "%s golangci-lint run ./...\n", ts(1))
+		fmt.Fprintf(&b, "%s ##[error]Process completed with exit code 2.\n", ts(2))
+		fmt.Fprintf(&b, "%s ##[group]Run post-job cleanup\n", ts(3))
+		fmt.Fprintf(&b, "%s removing temp directory\n", ts(4))
+		fmt.Fprintf(&b, "%s ##[error]some unrelated later failure\n", ts(5))
+
+		g := serve(t, b.String())
+
+		got, err := g.JobLogTail(t.Context(), "acme", "widgets", 99, 200)
+		if err != nil {
+			t.Fatalf("JobLogTail: unexpected error: %v", err)
+		}
+
+		lines := strings.Split(got, "\n")
+		if !strings.Contains(lines[0], "##[group]Run make lint") {
+			t.Errorf("JobLogTail first line = %q, want it to contain %q", lines[0], "##[group]Run make lint")
+		}
+		if !strings.Contains(lines[len(lines)-1], "##[error]Process completed with exit code 2.") {
+			t.Errorf("JobLogTail last line = %q, want it to contain %q", lines[len(lines)-1], "##[error]Process completed with exit code 2.")
+		}
+		if strings.Contains(got, "post-job cleanup") || strings.Contains(got, "removing temp directory") || strings.Contains(got, "unrelated later failure") {
+			t.Errorf("JobLogTail = %q, must not contain the later step's lines", got)
 		}
 	})
 

@@ -1133,13 +1133,6 @@ func installLogHandler(ctx context.Context, st *store.Store, b *bus.Broker) (*co
 // would wrap around to a bogus (often negative) duration and panic it.
 const maxDispatchIntervalSeconds = math.MaxInt64 / int64(time.Second)
 
-// dispatchInterval returns the dispatcher's tick interval for a configured
-// dispatch.interval_seconds, clamping a non-positive value (zero or
-// negative, whether from an explicit zing.toml entry or an unset field) and
-// a value large enough to overflow a time.Duration
-// (maxDispatchIntervalSeconds) to defaultDispatchInterval. Passed straight
-// through to time.Ticker, either an out-of-range value would otherwise
-// panic it.
 // reviewBotChecks converts config.ReviewBots.Checks into job.ReviewBotRule's
 // own check list, field by field (the two types stay separate so job never
 // imports config).
@@ -1151,6 +1144,13 @@ func reviewBotChecks(checks []config.ReviewBotCheck) []job.ReviewBotCheck {
 	return out
 }
 
+// dispatchInterval returns the dispatcher's tick interval for a configured
+// dispatch.interval_seconds, clamping a non-positive value (zero or
+// negative, whether from an explicit zing.toml entry or an unset field) and
+// a value large enough to overflow a time.Duration
+// (maxDispatchIntervalSeconds) to defaultDispatchInterval. Passed straight
+// through to time.Ticker, either an out-of-range value would otherwise
+// panic it.
 func dispatchInterval(seconds int) time.Duration {
 	switch {
 	case seconds <= 0:

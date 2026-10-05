@@ -692,8 +692,8 @@ func checkSandboxReadPaths(paths []string) error {
 // [1, 1440], and any review_bots.checks entry with an empty check or
 // trigger, or a check name repeated by an earlier entry.
 func checkReviewBots(md toml.MetaData, bots ReviewBots) error {
-	if md.IsDefined("review_bots", "wait_minutes") &&
-		(bots.WaitMinutes < minReviewBotWaitMinutes || bots.WaitMinutes > maxReviewBotWaitMinutes) {
+	outOfRange := bots.WaitMinutes < minReviewBotWaitMinutes || bots.WaitMinutes > maxReviewBotWaitMinutes
+	if md.IsDefined("review_bots", "wait_minutes") && outOfRange {
 		return fmt.Errorf("zing.toml: review_bots.wait_minutes: must be %d to %d", minReviewBotWaitMinutes, maxReviewBotWaitMinutes)
 	}
 	seen := make(map[string]bool, len(bots.Checks))
@@ -762,7 +762,7 @@ func applyDefaults(md toml.MetaData, cfg *Config) {
 		cfg.ReviewBots.WaitMinutes = defaultReviewBotWaitMinutes
 	}
 	if !md.IsDefined("review_bots", "checks") {
-		cfg.ReviewBots.Checks = defaultReviewBotChecks
+		cfg.ReviewBots.Checks = slices.Clone(defaultReviewBotChecks)
 	}
 
 	for i := range cfg.Projects {

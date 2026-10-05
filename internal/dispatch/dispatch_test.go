@@ -2906,6 +2906,10 @@ func TestPostDonePassesMergeSHA(t *testing.T) {
 	if !strings.Contains(got[0].body, "was merged") || !strings.Contains(got[0].body, mergeSHA) {
 		t.Errorf("posted comment body = %q, want it to say \"was merged\" and name %q", got[0].body, mergeSHA)
 	}
+	want := []string{"comment:" + testFixtureRef, "close:" + testFixtureRef}
+	if gotSeq := tr.callSequence(); !slices.Equal(gotSeq, want) {
+		t.Errorf("call sequence = %v, want %v", gotSeq, want)
+	}
 }
 
 // TestPostDoneErrorReturned proves a Close failure propagates (design

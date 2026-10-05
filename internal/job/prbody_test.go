@@ -196,6 +196,56 @@ func TestPRBodyTitleIsTicketTitle(t *testing.T) {
 			t.Errorf("Title length = %d runes, want <= 256", n)
 		}
 	})
+
+	t.Run("a title exactly at the budget is returned untouched but for the suffix", func(t *testing.T) {
+		t.Parallel()
+		title := strings.Repeat("a", 250) // budget is 256 - len(" (#42)") == 250
+		ticket := store.Ticket{ID: 1, Title: title, TrackerRef: "42"}
+		got := prBody(ticket, plan, nil, nil, nil, nil)
+		want := title + " (#42)"
+		if got.Title != want {
+			t.Errorf("Title = %q, want %q", got.Title, want)
+		}
+	})
+
+	t.Run("one rune past the budget is cut", func(t *testing.T) {
+		t.Parallel()
+		title := strings.Repeat("a", 251)
+		ticket := store.Ticket{ID: 1, Title: title, TrackerRef: "42"}
+		got := prBody(ticket, plan, nil, nil, nil, nil)
+		want := strings.Repeat("a", 247) + "... (#42)"
+		if got.Title != want {
+			t.Errorf("Title = %q, want %q", got.Title, want)
+		}
+		if n := len([]rune(got.Title)); n != 256 {
+			t.Errorf("Title length = %d runes, want exactly 256", n)
+		}
+	})
+
+	t.Run("a title with no space in the cut window gets a hard cut, exactly 256 runes", func(t *testing.T) {
+		t.Parallel()
+		title := strings.Repeat("a", 300)
+		ticket := store.Ticket{ID: 1, Title: title, TrackerRef: "42"}
+		got := prBody(ticket, plan, nil, nil, nil, nil)
+		want := strings.Repeat("a", 247) + "... (#42)"
+		if got.Title != want {
+			t.Errorf("Title = %q, want %q", got.Title, want)
+		}
+		if n := len([]rune(got.Title)); n != 256 {
+			t.Errorf("Title length = %d runes, want exactly 256", n)
+		}
+	})
+
+	t.Run("a ref long enough to overrun the budget does not panic", func(t *testing.T) {
+		t.Parallel()
+		ref := strings.Repeat("r", 260)
+		ticket := store.Ticket{ID: 1, Title: "hi", TrackerRef: ref}
+		got := prBody(ticket, plan, nil, nil, nil, nil)
+		want := "... (" + ref + ")"
+		if got.Title != want {
+			t.Errorf("Title = %q, want %q", got.Title, want)
+		}
+	})
 }
 
 // TestPRBodyScenariosHideText asserts the Scenarios field never carries a

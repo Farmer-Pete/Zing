@@ -1097,22 +1097,14 @@ func (h shipHandler) pollIdle(ctx context.Context, t store.Ticket, d Deps, proj 
 		}
 
 		missingHead := reviewBotMissingHead(pr.HeadSHA, check.Check)
-		sinceAt, hasSince, err := reviewBotMarkerSince(ctx, t, d, missingHead, retryRow.ID, hasRetry)
+		since, err := reviewBotMarkerSince(ctx, t, d, missingHead, retryRow.ID, hasRetry)
 		if err != nil {
 			return store.HandlerCommit{}, err
-		}
-		var since *time.Time
-		if hasSince {
-			since = &sinceAt
 		}
 		nudgedHead := reviewBotNudgedHead(pr.HeadSHA, check.Check)
-		nudgedAtTime, hasNudged, err := reviewBotMarkerSince(ctx, t, d, nudgedHead, retryRow.ID, hasRetry)
+		nudgedAt, err := reviewBotMarkerSince(ctx, t, d, nudgedHead, retryRow.ID, hasRetry)
 		if err != nil {
 			return store.HandlerCommit{}, err
-		}
-		var nudgedAt *time.Time
-		if hasNudged {
-			nudgedAt = &nudgedAtTime
 		}
 
 		now := time.Now().UTC()
@@ -1148,19 +1140,24 @@ func (h shipHandler) pollIdle(ctx context.Context, t store.Ticket, d Deps, proj 
 
 // reviewBotMarkerSince reads headKey's own newest marker (one of
 // reviewBotMissingHead or reviewBotNudgedHead) and returns its own second
-// line's time; ok is false when there is none, or when it is older (by
-// message id) than the newest "retry requested" marker on the ticket --
-// Retry restarts the review-bot clock (design "Shape").
-func reviewBotMarkerSince(ctx context.Context, t store.Ticket, d Deps, headKey string, retryID int64, hasRetry bool) (at time.Time, ok bool, err error) {
+// line's time, straight to the pointer shape reviewBotAction takes: nil
+// when there is none, or when it is older (by message id) than the newest
+// "retry requested" marker on the ticket -- Retry restarts the review-bot
+// clock (design "Shape").
+func reviewBotMarkerSince(ctx context.Context, t store.Ticket, d Deps, headKey string, retryID int64, hasRetry bool) (*time.Time, error) {
 	row, found, err := d.Store.Marker(ctx, t.ID, headKey)
 	if err != nil {
-		return time.Time{}, false, fmt.Errorf("job: shipping: poll: review bot marker %q: %w", headKey, err)
+		return nil, fmt.Errorf("job: shipping: poll: review bot marker %q: %w", headKey, err)
 	}
-	if !found || (hasRetry && row.ID < retryID) {
-		return time.Time{}, false, nil
+	beforeRetry := hasRetry && row.ID < retryID
+	if !found || beforeRetry {
+		return nil, nil //nolint:nilnil // no marker (or one superseded by Retry) is a legitimate result, not an error
 	}
-	at, ok = reviewBotMarkerTime(row.Body)
-	return at, ok, nil
+	at, ok := reviewBotMarkerTime(row.Body)
+	if !ok {
+		return nil, nil //nolint:nilnil // a malformed marker body never happens in practice (reviewBotMarkerBody is its only writer); treated the same as no marker
+	}
+	return &at, nil
 }
 
 // previousCIWaiting returns the names the newest "ci waiting <names>"

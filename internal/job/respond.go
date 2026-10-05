@@ -1582,7 +1582,7 @@ func fixReplyText(ctx context.Context, t store.Ticket, d Deps, login string, aid
 		// Not a failed read: the builder's own report text tripped
 		// replyBody's reserved marker check, so the bare sentence is the
 		// designed fallback (design section 9.4), not an error.
-		slog.Warn("fix reply fell back to the bare no-op sentence", "ticket_id", t.ID, "aid", aid)
+		slog.Warn("fix reply fell back to the bare no-op sentence", "ticket_id", t.ID, "aid", aid, "error", bodyErr)
 		return "No code change was needed.", nil //nolint:nilerr // see the comment above
 	}
 	return noop, nil

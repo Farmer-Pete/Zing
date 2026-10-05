@@ -63,8 +63,9 @@ func prTitle(title, ref string) string {
 		return collapsed + suffix
 	}
 
-	window := runes[:budget-3]
-	cut := budget - 3
+	cutAt := max(budget-3, 0)
+	window := runes[:cutAt]
+	cut := cutAt
 	for i, w := range slices.Backward(window) {
 		if w == ' ' {
 			cut = i
@@ -81,25 +82,11 @@ func prTitleSuffix(ref string) string {
 	switch {
 	case ref == "":
 		return ""
-	case isAllASCIIDigits(ref):
+	case strings.Trim(ref, "0123456789") == "":
 		return " (#" + ref + ")"
 	default:
 		return " (" + ref + ")"
 	}
-}
-
-// isAllASCIIDigits reports whether s is non-empty and every rune is an
-// ASCII digit.
-func isAllASCIIDigits(s string) bool {
-	if s == "" {
-		return false
-	}
-	for _, r := range s {
-		if r < '0' || r > '9' {
-			return false
-		}
-	}
-	return true
 }
 
 // prWhat is the objective, a blank line, then one "- <goal>" line per goal.
