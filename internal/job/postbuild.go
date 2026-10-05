@@ -152,6 +152,11 @@ func postBuildRoundOwnedByOpenFix(ctx context.Context, t store.Ticket, d Deps, r
 // review, judge, and shipping (each with the same loops_exhausted fix
 // request, any other code's own "retry requested" marker, or, judge only,
 // "with a run"'s own fresh round retry -- judging.go's retryFreshRound).
+// cap_budget's own row is retryCapBudget (#25, planning.go): once the
+// ticket's spent agent seconds leave room under d.Budget, it resolves the
+// round and writes the "retry requested" marker -- plus ClearPoll, through
+// shipRetryMarkerCommit, when the ticket is in shipping -- and otherwise
+// re-escalates wall_clock, unchanged from before #25.
 // Shipping's own loops_exhausted row is shipHandler.retryShippingLoopsExhausted
 // (shipping.go, task 7); its pr_closed and every other code share
 // shipRetryMarkerCommit, the same "retry requested" marker plus ClearPoll.
