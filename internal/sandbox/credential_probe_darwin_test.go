@@ -349,8 +349,7 @@ func TestProbeTLSWithoutSecurityServer(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read sandbox/build.sb: %v", err)
 	}
-	profile, err = tlsProbeProfile(profile)
-	if err != nil {
+	if err := tlsProbeProfile(profile); err != nil {
 		t.Fatal(err)
 	}
 
