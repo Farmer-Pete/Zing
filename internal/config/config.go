@@ -702,6 +702,8 @@ func checkReviewBots(md toml.MetaData, bots ReviewBots) error {
 		switch {
 		case strings.TrimSpace(c.Check) == "":
 			return fmt.Errorf("zing.toml: review_bots.checks[%d].check: must not be empty", i)
+		case strings.Contains(c.Check, "\n"):
+			return fmt.Errorf("zing.toml: review_bots.checks[%d].check: must not contain a newline", i)
 		case strings.TrimSpace(c.Trigger) == "":
 			return fmt.Errorf("zing.toml: review_bots.checks[%d].trigger: must not be empty", i)
 		case seen[c.Check]:

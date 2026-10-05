@@ -738,26 +738,34 @@ func hasLogPrefix(line, prefix string) bool {
 // line starting with logGroupRunPrefix starts a new step, discarding any
 // step seen so far that had no error. A line starting with logErrorPrefix
 // marks the current step failed and flushes its pending lines (the lines
-// seen since the step header or the last error, also capped at n) into
-// that step's buffer. Once a step has failed, reading stops at the next
-// step header, so a later step's output cannot replace it. If any step
-// failed, tailLog returns that step's buffer -- from its header to its
-// last error line, capped at n -- instead of the plain ring.
+// seen since the step header or the last error, also capped at n-1) into
+// that step's body. The header itself is kept outside that cap, so it is
+// never evicted by the step's own output, and the returned step is always
+// header-first and at most n lines total. Once a step has failed, reading
+// stops at the next step header, so a later step's output cannot replace
+// it. If any step failed, tailLog returns its header followed by its
+// body -- from its header to its last error line, capped at n -- instead
+// of the plain ring.
 func tailLog(r io.Reader, n int) (string, error) {
 	limited := &io.LimitedReader{R: r, N: maxLogTotalBytes + 1}
 	br := bufio.NewReaderSize(limited, maxLogLineBytes)
 
-	pushCapped := func(buf []string, s string) []string {
+	pushCapped := func(buf []string, s string, limit int) []string {
 		buf = append(buf, s)
-		if len(buf) > n {
-			buf = buf[len(buf)-n:]
+		if len(buf) > limit {
+			buf = buf[len(buf)-limit:]
 		}
 		return buf
 	}
 
 	ring := make([]string, 0, n)
-	var stepBuf, pending []string
+	var header string
+	var body, pending []string
 	failedStepFound := false
+
+	joinStep := func() string {
+		return strings.Join(append([]string{header}, body...), "\n")
+	}
 
 	for {
 		first, isPrefix, err := br.ReadLine()
@@ -772,24 +780,25 @@ func tailLog(r io.Reader, n int) (string, error) {
 				}
 				line += "[line cut]"
 			}
-			ring = pushCapped(ring, line)
+			ring = pushCapped(ring, line, n)
 
 			switch {
 			case hasLogPrefix(line, logGroupRunPrefix):
 				if failedStepFound {
-					return strings.Join(stepBuf, "\n"), nil
+					return joinStep(), nil
 				}
-				stepBuf = []string{line}
+				header = line
+				body = nil
 				pending = nil
 			case hasLogPrefix(line, logErrorPrefix):
 				for _, p := range pending {
-					stepBuf = pushCapped(stepBuf, p)
+					body = pushCapped(body, p, n-1)
 				}
-				stepBuf = pushCapped(stepBuf, line)
+				body = pushCapped(body, line, n-1)
 				pending = nil
 				failedStepFound = true
 			default:
-				pending = pushCapped(pending, line)
+				pending = pushCapped(pending, line, n-1)
 			}
 		}
 		if err != nil {
@@ -801,11 +810,11 @@ func tailLog(r io.Reader, n int) (string, error) {
 	}
 
 	if failedStepFound {
-		return strings.Join(stepBuf, "\n"), nil
+		return joinStep(), nil
 	}
 
 	if limited.N == 0 {
-		ring = pushCapped(ring, "[log cut at 64 MiB]")
+		ring = pushCapped(ring, "[log cut at 64 MiB]", n)
 	}
 
 	return strings.Join(ring, "\n"), nil

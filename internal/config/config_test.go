@@ -1065,6 +1065,11 @@ trigger = "@ci-sentry recheck"
 			want: "zing.toml: review_bots.checks[0].trigger: must not be empty",
 		},
 		{
+			name: "check contains a newline",
+			body: minimalValidTOML + "\n[[review_bots.checks]]\ncheck = \"CodeRabbit\\nci\"\ntrigger = \"@x review\"\n",
+			want: "zing.toml: review_bots.checks[0].check: must not contain a newline",
+		},
+		{
 			name: "duplicate check",
 			body: minimalValidTOML + `
 [[review_bots.checks]]

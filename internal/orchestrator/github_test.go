@@ -1247,6 +1247,9 @@ func TestJobLogTailCutsAtFailedStep(t *testing.T) {
 		if len(lines) != 200 {
 			t.Fatalf("JobLogTail lines = %d, want 200 (%q)", len(lines), got)
 		}
+		if !strings.Contains(lines[0], "##[group]Run make lint") {
+			t.Errorf("JobLogTail first line = %q, want it to contain %q", lines[0], "##[group]Run make lint")
+		}
 		if !strings.Contains(lines[len(lines)-1], "##[error]Process completed with exit code 2.") {
 			t.Errorf("JobLogTail last line = %q, want it to contain %q", lines[len(lines)-1], "##[error]Process completed with exit code 2.")
 		}
