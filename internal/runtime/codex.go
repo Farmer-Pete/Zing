@@ -70,6 +70,14 @@ func codexSandboxArgs(req RunRequest) ([]string, error) {
 	}
 }
 
+// codexSkillsOffSetting is the -c pair that turns off the judge's attempt to
+// scan its own skill directories, including `~/.agents/skills` (confirmed on
+// the host against Codex 0.160.0: `codex features list` names
+// `skip_host_skill_discovery`, and `codex exec -c features.skip_host_skill_discovery=true
+// --strict-config` accepts it as a known key; judge.sb already denies the
+// read at the OS level, so this is a second, best-effort layer).
+const codexSkillsOffSetting = "features.skip_host_skill_discovery=true"
+
 // codexArgv assembles Codex's argv exactly per design section 4.1. The
 // prompt never appears here: Run writes it to stdin, and the trailing "-"
 // argument tells codex to read the prompt from there instead of a
@@ -89,6 +97,15 @@ func codexSandboxArgs(req RunRequest) ([]string, error) {
 // 4.6, D20). The forbidden --dangerously-bypass-approvals-and-sandbox flag
 // (real, and present in both --help outputs) never appears.
 //
+// A judge-job request also carries one judge-only "-c" pair right after the
+// sandbox flags: codexSkillsOffSetting. Codex 0.160.0's config schema (104
+// top-level fields) has no key that bounds how long one shell command may
+// run -- background_terminal_max_timeout only controls when a still-running
+// command is handed to a background terminal the agent polls, so it is not
+// a substitute -- and prompts/judge.md's own instruction to run a long check
+// in the background and poll it covers that case instead. Every other
+// job's argv is unchanged.
+//
 // req.Tools is deliberately not read here: codex exec has no per-tool
 // allowlist flag, so the sandbox mode above is the control instead
 // (PKG7-PLAN.md section 4).
@@ -99,6 +116,9 @@ func codexArgv(req RunRequest, outPath string) ([]string, error) {
 	}
 	argv := []string{"exec", "--ignore-user-config", "--ignore-rules", "--skip-git-repo-check"}
 	argv = append(argv, sandboxArgs...)
+	if req.Job == response.JobJudge {
+		argv = append(argv, "-c", codexSkillsOffSetting)
+	}
 	argv = append(argv, "-m", req.Model, "--json", "-o", outPath)
 	if req.SessionID != "" {
 		argv = append(argv, "resume", req.SessionID)

@@ -28,12 +28,12 @@ func TestPrompts_MatchThePinnedDesignText(t *testing.T) {
 		{
 			name:   "planning-feature",
 			path:   planningFeaturePromptPath,
-			sha256: "6298806770584f3414fd9ef1d87713ae9b61427c9a3cd0b914ed4f293c1ea569",
+			sha256: "e603319479edd10f7e3e162aa052e26e99b8671286d8956a0675f2a2748c857f",
 		},
 		{
 			name:   "planning-bug",
 			path:   planningBugPromptPath,
-			sha256: "7c4d408da83354b1b134bbe09ecad84103641b6af666f82094b202af5c0d4483",
+			sha256: "97bf910bd76569b20ade58e34d77c2e9048221937f2cf5c6cc93668e273fb20c",
 		},
 		{
 			name:   "planreview",
@@ -63,7 +63,7 @@ func TestPrompts_MatchThePinnedDesignText(t *testing.T) {
 		{
 			name:   "judge",
 			path:   "prompts/judge.md",
-			sha256: "d4c0b02ff4d5cbbdfa95d930d41534300efa7cffb2b1ffd4877a5dc8f63085d7",
+			sha256: "61fac9e184103c064a0cf76c9933106dbd908329e5b88a1c58ad20e26162afe7",
 		},
 		{
 			name:   "respond",
@@ -217,6 +217,53 @@ func TestBuildPromptPlaceholders(t *testing.T) {
 	for _, p := range placeholders {
 		if n := strings.Count(text, p); n != 1 {
 			t.Errorf("prompts/build.md contains %s %d times, want 1", p, n)
+		}
+	}
+}
+
+// TestJudgePromptRunsChecksAsWritten proves prompts/judge.md tells the
+// judge to run each sealed check exactly as written rather than
+// repairing it, to use "$TMPDIR" instead of /tmp, to run a long check in
+// the background and poll it instead of waiting on one call, and to
+// treat a skipped test as not observed (#78, #46).
+func TestJudgePromptRunsChecksAsWritten(t *testing.T) {
+	t.Parallel()
+	text := unwrapped(t, "prompts/judge.md")
+	for _, want := range []string{
+		"Run each scenario's check command exactly as written.",
+		"do not repair it or run your own version",
+		"Return the error outcome with code cannot_run, naming the scenario and the defect in its check",
+		`Write temporary files under "$TMPDIR", never /tmp.`,
+		"Run one like that in the background and poll it until it finishes",
+		"A skipped test is not observed.",
+	} {
+		if !strings.Contains(text, want) {
+			t.Errorf("prompts/judge.md lacks %q", want)
+		}
+	}
+}
+
+// sandboxChecksSentence is what both planning prompts say about where
+// checks run (#78, #46): checks run inside the build sandbox, which
+// cannot start another sandbox, so a given or check that needs a live
+// serve, a machine outside the sandbox, or the owner's own config is
+// unobservable there.
+const sandboxChecksSentence = "Zing runs every check inside the build sandbox, " +
+	"which cannot start another sandbox. " +
+	`Write temporary files under "$TMPDIR", never /tmp. ` +
+	"Write only givens and checks an agent inside that sandbox can observe: " +
+	"no live zing serve, no machine outside the sandbox, and none of the " +
+	"owner's own config such as ~/.codex, ~/.claude, or the console."
+
+// TestPlanningPromptsTeachSandboxChecks proves both planning prompts tell
+// the planner that checks run inside the build sandbox, so temp files go
+// under "$TMPDIR" and scenarios must be observable from inside it (#78,
+// #46).
+func TestPlanningPromptsTeachSandboxChecks(t *testing.T) {
+	t.Parallel()
+	for _, path := range []string{planningFeaturePromptPath, planningBugPromptPath} {
+		if !strings.Contains(unwrapped(t, path), sandboxChecksSentence) {
+			t.Errorf("%s lacks the sandbox-checks sentence", path)
 		}
 	}
 }

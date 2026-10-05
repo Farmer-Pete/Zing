@@ -948,6 +948,9 @@ func checkReady(t store.Ticket, resp *response.ReadyResponse, fsys fs.FS) ([]*re
 // this; it defends the ready entry point itself against a Response value
 // that reached here some other way (a test's scriptedRuntime, standing in
 // for a compromised or buggy agent process, is the only caller that can).
+// It also refuses a check that starts a nested sandbox (sandbox-exec or
+// internal/sandbox's own probes), which skips and exits 0 inside the
+// seatbelt the judge and CHECK already run under (#78).
 func checkScenarioShape(scenarios []response.Scenario) []*response.PathError {
 	var errs []*response.PathError
 	if n := len(scenarios); n < minReadyScenarios || n > maxReadyScenarios {
@@ -973,9 +976,22 @@ func checkScenarioShape(scenarios []response.Scenario) []*response.PathError {
 				Msg:  "check must not write under /tmp, which the sandbox denies; use \"$TMPDIR\" instead",
 			})
 		}
+		// Zing runs every check inside a seatbelt sandbox (the judge's, then
+		// CHECK's build sandbox), and seatbelt cannot start sandbox-exec, so
+		// the sandbox probes skip and exit 0 (#78).
+		startsSeatbelt := strings.Contains(sc.Check, "sandbox-exec")
+		runsSandboxProbes := strings.Contains(sc.Check, "internal/sandbox")
+		if startsSeatbelt || runsSandboxProbes {
+			errs = append(errs, &response.PathError{
+				Path: "scenarios/" + indexedScenario(i) + "/check",
+				Msg:  hostSandboxCheckMsg,
+			})
+		}
 	}
 	return errs
 }
+
+const hostSandboxCheckMsg = "check runs the host sandbox (sandbox-exec or the internal/sandbox probes), which cannot start inside the sandbox Zing runs checks in, so its probes skip and prove nothing; leave it out of the sealed checks"
 
 // indexedScenario formats a scenario's 0-based index the way response's own
 // element-path grammar does (design section 6.4, internal/response/epath.go),

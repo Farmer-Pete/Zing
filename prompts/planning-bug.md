@@ -35,7 +35,12 @@ Work in this order. Each step has a completion criterion.
    knowledge you do not have. Each one is a conversation with the owner
    (see Conversations, below). Continue when every one is settled.
 
-4. Scenarios. As in a feature plan. The first scenario is the loop.
+4. Scenarios. As in a feature plan. The first scenario is the loop. Zing
+   runs every check inside the build sandbox, which cannot start another
+   sandbox. Write temporary files under "$TMPDIR", never /tmp. Write only
+   givens and checks an agent inside that sandbox can observe: no live zing
+   serve, no machine outside the sandbox, and none of the owner's own
+   config such as ~/.codex, ~/.claude, or the console.
 
 5. Plan. Fill the plan schema. Put the proof in the plan: the problem
    element carries the loop command, the repro, and the hypothesis that
