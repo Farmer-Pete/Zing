@@ -113,8 +113,10 @@ templ runRail(run RunRail) {
 // runList renders every run of the open ticket, newest first (#43 split):
 // run id, job, runtime, model, outcome, agent time, an "interrupted" pill
 // when set, and -- only when the run kept that evidence -- links to its
-// final message and stderr, plus the transcript path as plain text. An
-// empty rows shows "No runs yet." rather than an empty list.
+// final message and stderr, plus the transcript, as a link when
+// TranscriptURL names this run's own Zing-written stdout file or else as
+// plain text. An empty rows shows "No runs yet." rather than an empty
+// list.
 templ runList(rows []RunRow) {
 	<h4>Runs</h4>
 	if len(rows) == 0 {
@@ -138,7 +140,9 @@ templ runList(rows []RunRow) {
 					if row.StderrURL != "" {
 						<a class="run-stderr" href={ templ.SafeURL(row.StderrURL) } target="_blank" rel="noopener">stderr</a>
 					}
-					if row.Transcript != "" {
+					if row.TranscriptURL != "" {
+						<a class="run-transcript" href={ templ.SafeURL(row.TranscriptURL) } target="_blank" rel="noopener">transcript</a>
+					} else if row.Transcript != "" {
 						<span class="run-transcript">transcript { row.Transcript }</span>
 					}
 				</li>

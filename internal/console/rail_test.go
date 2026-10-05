@@ -614,6 +614,36 @@ func TestRail_RunListShowsTranscriptPath(t *testing.T) {
 	}
 }
 
+// TestRail_CodexTranscriptLinked proves a run whose transcript_path is this
+// run's own Zing-written stdout file (the shape job.writeTranscriptFile
+// produces) renders an anchor to GET /runs/{id}/transcript, unlike a
+// Claude-style path outside the data directory, which TestRail_
+// RunListShowsTranscriptPath keeps covering as plain text with no anchor.
+func TestRail_CodexTranscriptLinked(t *testing.T) {
+	t.Parallel()
+	s := newConsoleTestStore(t)
+	ticketID := seedTicket(t, s, "fake#1", "Add a hello endpoint")
+	runID := oneSeededRun(t, s, ticketID, "sonnet")
+
+	path := writeRunTranscriptFile(t, s, runID, `{"type":"thread.started"}`+"\n")
+	if err := s.RecordRunEvidence(t.Context(), runID, store.RunEvidence{TranscriptPath: &path}); err != nil {
+		t.Fatalf("RecordRunEvidence: %v", err)
+	}
+
+	srv := newTestServer(t, s, bus.New(), nil, newTestLogHandler(t))
+	resp, r, cancel := openStream(t, srv.URL, "thread", ticketID, 0)
+	defer cancel()
+	defer func() { _ = resp.Body.Close() }()
+	_, _, rail, _ := readInitialFrames(t, r)
+
+	row := runRowHTML(t, rail, runID)
+	href := runRowHref(t, row, "run-transcript")
+	want := fmt.Sprintf("/runs/%d/transcript", runID)
+	if href != want {
+		t.Errorf("transcript href = %q, want %q", href, want)
+	}
+}
+
 // railHTML opens ticketID's thread stream against srvURL, reads the
 // initial frames, closes the response, and returns the rail HTML. Tests
 // that need to read the rail more than once in a row use this instead of
@@ -908,6 +938,22 @@ func writeRunStderrFile(t *testing.T, s *store.Store, runID int64, data string) 
 	return path
 }
 
+// writeRunTranscriptFile writes data under
+// s.Dir()/runs/run-<runID>-stdout.jsonl, the same path shape
+// job/runjob.go's writeTranscriptFile produces, and returns it.
+func writeRunTranscriptFile(t *testing.T, s *store.Store, runID int64, data string) string {
+	t.Helper()
+	dir := filepath.Join(s.Dir(), "runs")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	path := filepath.Join(dir, store.StdoutFileName(runID))
+	if err := os.WriteFile(path, []byte(data), 0o600); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	return path
+}
+
 // TestRunFile_ServesFinalMessage proves GET /runs/{id}/final serves a
 // stored final message as plain text, with the headers that keep a browser
 // from sniffing it as HTML.
@@ -1142,8 +1188,106 @@ func TestRunFile_RefusesAnotherRunsStderrFile(t *testing.T) {
 	}
 }
 
+// TestRunFile_ServesTranscriptFromDataDir proves GET /runs/{id}/transcript
+// serves the stdout file a run's recorded transcript_path names, the same
+// way GET /runs/{id}/stderr already serves the stderr file.
+func TestRunFile_ServesTranscriptFromDataDir(t *testing.T) {
+	t.Parallel()
+	s := newConsoleTestStore(t)
+	ticketID := seedTicket(t, s, "fake#1", "Add a hello endpoint")
+	runID := oneSeededRun(t, s, ticketID, "sonnet")
+
+	const transcriptText = `{"type":"thread.started"}` + "\n" + `{"type":"error","message":"boom"}` + "\n"
+	path := writeRunTranscriptFile(t, s, runID, transcriptText)
+	if err := s.RecordRunEvidence(t.Context(), runID, store.RunEvidence{TranscriptPath: &path}); err != nil {
+		t.Fatalf("RecordRunEvidence: %v", err)
+	}
+
+	srv := newTestServer(t, s, bus.New(), nil, newTestLogHandler(t))
+	resp, err := http.Get(fmt.Sprintf("%s/runs/%d/transcript", srv.URL, runID)) //nolint:noctx // a bare GET on a test server needs no deadline
+	if err != nil {
+		t.Fatalf("GET /runs/%d/transcript: %v", runID, err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	}
+	if ct := resp.Header.Get("Content-Type"); ct != "text/plain; charset=utf-8" {
+		t.Errorf("Content-Type = %q, want text/plain; charset=utf-8", ct)
+	}
+	if nos := resp.Header.Get("X-Content-Type-Options"); nos != "nosniff" {
+		t.Errorf("X-Content-Type-Options = %q, want nosniff", nos)
+	}
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("read body: %v", err)
+	}
+	if string(body) != transcriptText {
+		t.Errorf("body = %q, want %q", body, transcriptText)
+	}
+}
+
+// TestRunFile_RefusesTranscriptOutsideRunsDir proves GET
+// /runs/{id}/transcript 403s on a Claude-style transcript path outside the
+// data directory, and 404s with a transcript-specific message when the run
+// kept no transcript at all.
+func TestRunFile_RefusesTranscriptOutsideRunsDir(t *testing.T) {
+	t.Parallel()
+	s := newConsoleTestStore(t)
+	ticketID := seedTicket(t, s, "fake#1", "Add a hello endpoint")
+	outsideRunID := oneSeededRun(t, s, ticketID, "sonnet")
+	noTranscriptRunID := oneSeededRun(t, s, ticketID, "sonnet")
+
+	const secretText = "claude rollout secret\n"
+	outside := filepath.Join(t.TempDir(), "abc123.jsonl")
+	if err := os.WriteFile(outside, []byte(secretText), 0o600); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	if err := s.RecordRunEvidence(t.Context(), outsideRunID, store.RunEvidence{TranscriptPath: &outside}); err != nil {
+		t.Fatalf("RecordRunEvidence: %v", err)
+	}
+
+	srv := newTestServer(t, s, bus.New(), nil, newTestLogHandler(t))
+
+	resp, err := http.Get(fmt.Sprintf("%s/runs/%d/transcript", srv.URL, outsideRunID)) //nolint:noctx // a bare GET on a test server needs no deadline
+	if err != nil {
+		t.Fatalf("GET /runs/%d/transcript: %v", outsideRunID, err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusForbidden {
+		t.Fatalf("status = %d, want 403", resp.StatusCode)
+	}
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("read body: %v", err)
+	}
+	if strings.Contains(string(body), secretText) || strings.Contains(string(body), "claude rollout secret") {
+		t.Errorf("response body leaked the file's text: %q", body)
+	}
+	if !strings.Contains(string(body), "outside the data directory") {
+		t.Errorf("body = %q, want it to mention the data directory", body)
+	}
+
+	resp2, err := http.Get(fmt.Sprintf("%s/runs/%d/transcript", srv.URL, noTranscriptRunID)) //nolint:noctx // a bare GET on a test server needs no deadline
+	if err != nil {
+		t.Fatalf("GET /runs/%d/transcript: %v", noTranscriptRunID, err)
+	}
+	defer func() { _ = resp2.Body.Close() }()
+	if resp2.StatusCode != http.StatusNotFound {
+		t.Fatalf("status = %d, want 404", resp2.StatusCode)
+	}
+	body2, err := io.ReadAll(resp2.Body)
+	if err != nil {
+		t.Fatalf("read body: %v", err)
+	}
+	if !strings.Contains(string(body2), "this run kept no transcript") {
+		t.Errorf("body = %q, want it to say this run kept no transcript", body2)
+	}
+}
+
 // TestRunFile_MissingCases proves the route's various 404 shapes: a run
-// with no evidence at all for either kind, a run whose stderr file has
+// with no evidence at all for any kind, a run whose stderr file has
 // since been deleted, a run id that names no run, an unrecognized kind,
 // and an id that does not even parse as a positive int64.
 func TestRunFile_MissingCases(t *testing.T) {
@@ -1188,7 +1332,8 @@ func TestRunFile_MissingCases(t *testing.T) {
 		{"stderr file gone", fmt.Sprintf("/runs/%d/stderr", goneRunID), "stderr file is gone"},
 		{"stderr path is a directory", fmt.Sprintf("/runs/%d/stderr", dirRunID), "stderr file is gone"},
 		{"unknown run", fmt.Sprintf("/runs/%d/final", unknownRunID), "no such run"},
-		{"unrecognized kind", fmt.Sprintf("/runs/%d/transcript", noEvidenceRunID), "404 page not found"},
+		{"no transcript", fmt.Sprintf("/runs/%d/transcript", noEvidenceRunID), "this run kept no transcript"},
+		{"unrecognized kind", fmt.Sprintf("/runs/%d/bogus", noEvidenceRunID), "404 page not found"},
 		{"id does not parse", "/runs/abc/final", "404 page not found"},
 	}
 	for _, tt := range tests {
