@@ -885,9 +885,11 @@ test('reduceStreamStatus marks stale on reconnecting and failures, clears on a f
 	assert.equal(result.status.staleSince, null);
 	assert.equal(result.status.attempt, 0);
 
-	// started always cancels any pending reconnect.
+	// started always cancels any pending reconnect, and its effect carries
+	// only cancelReconnect/reconnectIn -- no settleGen.
 	const started = reduceStreamStatus(emptyStreamStatus(), { type: 'started' }, 0);
 	assert.equal(started.effect.cancelReconnect, true);
+	assert.deepEqual(Object.keys(started.effect).sort(), ['cancelReconnect', 'reconnectIn']);
 });
 
 test('reduceStreamStatus marks a silent stream stale and reconnects after STREAM_IDLE_MS', () => {

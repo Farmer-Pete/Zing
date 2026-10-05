@@ -286,18 +286,20 @@ func TestLogStreamErr(t *testing.T) {
 // fails the test instead of the suite.
 const streamBeatFrameTimeout = 5 * time.Second
 
-// openInternalStream issues a GET /stream request for (view, open) against
-// base, carrying the Datastar-Request header handleStream's MarkThreadRead
-// branch requires (mw.go's isDatastarSameSite), and returns the response
-// and a buffered reader over its still-open body, without reading any
-// frame yet. This is console_test.go:36's openStream, reimplemented here
-// because this file is package console, not console_test, and so cannot
-// call it directly.
-func openInternalStream(t *testing.T, base, view string, open int64) (*http.Response, *bufio.Reader, context.CancelFunc) {
+// openInternalStream issues a GET /stream request for the thread view
+// (open) against base, carrying the Datastar-Request header handleStream's
+// MarkThreadRead branch requires (mw.go's isDatastarSameSite), and returns
+// the response and a buffered reader over its still-open body, without
+// reading any frame yet. This is console_test.go:36's openStream,
+// reimplemented here because this file is package console, not
+// console_test, and so cannot call it directly. Every caller below opens a
+// thread, so the view is fixed to viewThread rather than taken as a
+// parameter.
+func openInternalStream(t *testing.T, base string, open int64) (*http.Response, *bufio.Reader, context.CancelFunc) {
 	t.Helper()
 	ctx, cancel := context.WithCancel(t.Context())
 	v := url.Values{}
-	v.Set("datastar", fmt.Sprintf(`{"view":%q,"open":%d,"project":0}`, view, open))
+	v.Set("datastar", fmt.Sprintf(`{"view":%q,"open":%d,"project":0}`, viewThread, open))
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, base+"/stream?"+v.Encode(), http.NoBody)
 	if err != nil {
 		cancel()
@@ -312,15 +314,67 @@ func openInternalStream(t *testing.T, base, view string, open int64) (*http.Resp
 	return resp, bufio.NewReader(resp.Body), cancel
 }
 
-// readStreamFrame reads one SSE frame from r, bounded by
+// readOneFrame reads one SSE frame from r with no timeout of its own:
+// datastar-go writes each event's data lines, then a blank line, then one
+// extra blank line ("write double newlines to separate events", sse.go), so
+// a frame's content is preceded by zero or more stray blank lines left over
+// from the previous frame, skipped before accumulating starts. Callers
+// bound how long they wait for it; readOneFrame itself never calls into
+// testing.T, so it is safe to run from a goroutine the test does not own.
+func readOneFrame(r *bufio.Reader) (string, error) {
+	var sb strings.Builder
+	started := false
+	for {
+		line, err := r.ReadString('\n')
+		if !started {
+			if line == "\n" && err == nil {
+				continue // a stray separator blank line before the frame starts
+			}
+			started = true
+		}
+		sb.WriteString(line)
+		if err != nil {
+			return sb.String(), err
+		}
+		if line == "\n" {
+			return sb.String(), nil
+		}
+	}
+}
+
+// readStreamFrame reads and discards one SSE frame from r, bounded by
 // streamBeatFrameTimeout so a hung stream fails fast instead of hanging the
 // test suite. This is console_test.go:382's readFrame pattern, reimplemented
-// here because this file is package console, not console_test: datastar-go
-// writes each event's data lines, then a blank line, then one extra blank
-// line ("write double newlines to separate events", sse.go), so a frame's
-// content is preceded by zero or more stray blank lines left over from the
-// previous frame, skipped before accumulating starts.
-func readStreamFrame(t *testing.T, r *bufio.Reader) string {
+// here because this file is package console, not console_test. Every
+// caller below reads the connect-time frames only to advance past them, so
+// it returns nothing; a caller that needs a frame's content uses
+// readUntilFrameContains instead.
+func readStreamFrame(t *testing.T, r *bufio.Reader) {
+	t.Helper()
+
+	ch := make(chan error, 1)
+	go func() {
+		_, err := readOneFrame(r)
+		ch <- err
+	}()
+
+	select {
+	case err := <-ch:
+		if err != nil {
+			t.Fatalf("read SSE frame: %v", err)
+		}
+	case <-time.After(streamBeatFrameTimeout):
+		t.Fatal("timed out waiting for an SSE frame")
+	}
+}
+
+// readUntilFrameContains reads SSE frames from r until one contains want,
+// failing the test if none arrives within the whole of within -- not just
+// the gap between individual reads, which is all streamBeatFrameTimeout
+// bounds. The read loop runs in its own goroutine so a hang past within
+// fails the test immediately instead of waiting for readStreamFrame's own,
+// longer, per-read timeout.
+func readUntilFrameContains(t *testing.T, r *bufio.Reader, want string, within time.Duration) {
 	t.Helper()
 
 	type result struct {
@@ -329,37 +383,28 @@ func readStreamFrame(t *testing.T, r *bufio.Reader) string {
 	}
 	ch := make(chan result, 1)
 	go func() {
-		var sb strings.Builder
-		started := false
 		for {
-			line, err := r.ReadString('\n')
-			if !started {
-				if line == "\n" && err == nil {
-					continue // a stray separator blank line before the frame starts
-				}
-				started = true
-			}
-			sb.WriteString(line)
+			text, err := readOneFrame(r)
+			ch <- result{text, err}
 			if err != nil {
-				ch <- result{sb.String(), err}
-				return
-			}
-			if line == "\n" {
-				ch <- result{sb.String(), nil}
 				return
 			}
 		}
 	}()
 
-	select {
-	case res := <-ch:
-		if res.err != nil {
-			t.Fatalf("read SSE frame: %v", res.err)
+	deadline := time.After(within)
+	for {
+		select {
+		case res := <-ch:
+			if res.err != nil {
+				t.Fatalf("read SSE frame: %v", res.err)
+			}
+			if strings.Contains(res.text, want) {
+				return
+			}
+		case <-deadline:
+			t.Fatalf("no frame carrying %s arrived within %s", want, within)
 		}
-		return res.text
-	case <-time.After(streamBeatFrameTimeout):
-		t.Fatal("timed out waiting for an SSE frame")
-		return ""
 	}
 }
 
@@ -416,7 +461,7 @@ func TestStreamHeartbeatRepatchesWithoutAWake(t *testing.T) {
 	ticketID := streamHeartbeatDemoTicket(t, c)
 
 	srv := streamTestServer(t, c, false)
-	resp, r, cancel := openInternalStream(t, srv.URL, viewThread, ticketID)
+	resp, r, cancel := openInternalStream(t, srv.URL, ticketID)
 	defer cancel()
 	defer func() { _ = resp.Body.Close() }()
 
@@ -427,16 +472,7 @@ func TestStreamHeartbeatRepatchesWithoutAWake(t *testing.T) {
 	questionID := streamHeartbeatSeedGateQuestion(t, c, ticketID)
 	want := fmt.Sprintf(`id="question-%d"`, questionID)
 
-	deadline := time.Now().Add(2 * time.Second)
-	for {
-		if time.Now().After(deadline) {
-			t.Fatalf("no frame carrying %s arrived within 2s of a heartbeat-only commit (no bus.Publish)", want)
-		}
-		frame := readStreamFrame(t, r)
-		if strings.Contains(frame, want) {
-			return
-		}
-	}
+	readUntilFrameContains(t, r, want, 2*time.Second)
 }
 
 // TestStreamGateQuestionWakePatchesMain is the ticket's "Done when" test
@@ -451,7 +487,7 @@ func TestStreamGateQuestionWakePatchesMain(t *testing.T) {
 	ticketID := streamHeartbeatDemoTicket(t, c)
 
 	srv := streamTestServer(t, c, false)
-	resp, r, cancel := openInternalStream(t, srv.URL, viewThread, ticketID)
+	resp, r, cancel := openInternalStream(t, srv.URL, ticketID)
 	defer cancel()
 	defer func() { _ = resp.Body.Close() }()
 
@@ -463,16 +499,7 @@ func TestStreamGateQuestionWakePatchesMain(t *testing.T) {
 	c.bus.Publish()
 	want := fmt.Sprintf(`id="question-%d"`, questionID)
 
-	deadline := time.Now().Add(streamBeatFrameTimeout)
-	for {
-		if time.Now().After(deadline) {
-			t.Fatalf("no frame carrying %s arrived after a gate question commit plus bus.Publish", want)
-		}
-		frame := readStreamFrame(t, r)
-		if strings.Contains(frame, want) {
-			return
-		}
-	}
+	readUntilFrameContains(t, r, want, streamBeatFrameTimeout)
 }
 
 // TestStreamHeartbeatDoesNotMarkRead proves the beat case shares
@@ -486,7 +513,7 @@ func TestStreamHeartbeatDoesNotMarkRead(t *testing.T) {
 	ticketID := streamHeartbeatDemoTicket(t, c)
 
 	srv := streamTestServer(t, c, false)
-	resp, r, cancel := openInternalStream(t, srv.URL, viewThread, ticketID)
+	resp, r, cancel := openInternalStream(t, srv.URL, ticketID)
 	defer cancel()
 	defer func() { _ = resp.Body.Close() }()
 
@@ -529,52 +556,34 @@ func TestStreamEndsWhenAFrameWriteTimesOut(t *testing.T) {
 
 	srv := streamTestServer(t, c, false)
 
-	// doErr and status report the request's own round trip -- did /stream
-	// even open -- separately from readErr, the body read's own end (EOF or
-	// a read error, either is the timed-out deadline's doing). Folding them
-	// into one error, as an earlier version of this test did, let a failed
-	// Do (never reaching the server at all) pass silently: an empty body
-	// has no #main frame either, but for the wrong reason.
+	resp, r, cancel := openInternalStream(t, srv.URL, ticketID)
+	defer cancel()
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("GET /stream: status = %d, want %d", resp.StatusCode, http.StatusOK)
+	}
+
+	// Only the body read needs bounding: Do above already returned once the
+	// response headers arrived, before the first region write (and its
+	// already-past deadline) runs.
 	type result struct {
-		doErr   error
-		status  int
-		body    string
-		readErr error
+		body string
+		err  error
 	}
 	ch := make(chan result, 1)
 	go func() {
-		v := url.Values{}
-		v.Set("datastar", fmt.Sprintf(`{"view":%q,"open":%d,"project":0}`, viewThread, ticketID))
-		req, err := http.NewRequestWithContext(t.Context(), http.MethodGet, srv.URL+"/stream?"+v.Encode(), http.NoBody)
-		if err != nil {
-			ch <- result{doErr: err}
-			return
-		}
-		req.Header.Set("Datastar-Request", "true")
-		resp, err := http.DefaultClient.Do(req)
-		if err != nil {
-			ch <- result{doErr: err}
-			return
-		}
-		defer func() { _ = resp.Body.Close() }()
-		body, err := io.ReadAll(resp.Body)
-		ch <- result{status: resp.StatusCode, body: string(body), readErr: err}
+		body, err := io.ReadAll(r)
+		ch <- result{string(body), err}
 	}()
 
 	select {
 	case res := <-ch:
-		if res.doErr != nil {
-			t.Fatalf("GET /stream: %v", res.doErr)
-		}
-		if res.status != http.StatusOK {
-			t.Fatalf("GET /stream: status = %d, want %d", res.status, http.StatusOK)
-		}
 		if strings.Contains(res.body, `id="main"`) {
 			t.Fatalf("body carries a #main frame despite a write deadline already in the past:\n%s", res.body)
 		}
-		// res.readErr (EOF or a read error) is not checked further: either
-		// one means the stream ended, which is what a timed-out write
-		// deadline should do.
+		// res.err (EOF or a read error) is not checked further: either one
+		// means the stream ended, which is what a timed-out write deadline
+		// should do.
 	case <-time.After(streamBeatFrameTimeout):
 		t.Fatal("reading /stream's body did not end within 5s of a timed-out write deadline")
 	}

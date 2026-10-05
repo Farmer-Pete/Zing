@@ -1402,20 +1402,14 @@ let suppressPatchSignal = false;
 // (dispatchNav(state.nav), so the server renders the full view again) --
 // before re-rendering the stale marker.
 function applyStreamEvent(event) {
-	const now = Date.now();
-	const priorLastFrameAt = streamStatus.lastFrameAt;
-	const { status, effect } = reduceStreamStatus(streamStatus, event, now);
+	const { status, effect } = reduceStreamStatus(streamStatus, event, Date.now());
 	streamStatus = status;
 	if (effect.cancelReconnect) {
 		clearTimeout(reconnectTimerID);
 		reconnectTimerID = null;
 	}
 	if (effect.reconnectIn !== null) {
-		const detail = { reason: event.type, delayMs: effect.reconnectIn, attempt: streamStatus.attempt };
-		if (event.type === 'tick' && priorLastFrameAt !== null) {
-			detail.idleMs = now - priorLastFrameAt;
-		}
-		console.warn('console.js: /stream reconnecting', detail);
+		console.warn('console.js: /stream reconnecting', { reason: event.type, delayMs: effect.reconnectIn, attempt: streamStatus.attempt });
 		clearTimeout(reconnectTimerID);
 		reconnectTimerID = setTimeout(() => {
 			reconnectTimerID = null;
