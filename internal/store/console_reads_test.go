@@ -447,13 +447,13 @@ func TestLiveTickets_ExcludesTerminalUnlessBlocking(t *testing.T) {
 	}
 }
 
-// TestLiveTickets_OrdersBlockingThenUnreadThenIssueNumber proves
-// LiveTickets' full ordering: blocking first, then unread, then quiet, each
-// by issueNumberOrder -- numeric refs of any length sorted correctly, then
-// non-numeric refs as text. It also proves the variadic extra destinations
-// land correctly: the blocking ticket's OpenQuestionCount matches its open
-// question rows.
-func TestLiveTickets_OrdersBlockingThenUnreadThenIssueNumber(t *testing.T) {
+// TestLiveTickets_OrdersByIssueNumberOnly proves LiveTickets' full ordering
+// is issueNumberOrder alone (#106 bug 5, c8's owner decision (a)): a
+// blocking or unread ticket sorts by its ref like any other, not first --
+// numeric refs of any length sorted correctly, then non-numeric refs as
+// text. It also proves the variadic extra destinations land correctly: the
+// blocking ticket's OpenQuestionCount matches its open question rows.
+func TestLiveTickets_OrdersByIssueNumberOnly(t *testing.T) {
 	t.Parallel()
 	s := newTestStore(t)
 	projectID := seedProjectNamed(t, s, testProjectAlpha)
@@ -490,7 +490,7 @@ func TestLiveTickets_OrdersBlockingThenUnreadThenIssueNumber(t *testing.T) {
 	if err != nil {
 		t.Fatalf("LiveTickets: %v", err)
 	}
-	wantRefs := []string{"200", "9", "007", "65", "102", "99999999999999999999", "100000000000000000001", nonNumericBeforeDigits, nonNumericRef}
+	wantRefs := []string{"007", "9", "65", "102", "200", "99999999999999999999", "100000000000000000001", nonNumericBeforeDigits, nonNumericRef}
 	if len(got) != len(wantRefs) {
 		t.Fatalf("LiveTickets returned %d tickets, want %d: %+v", len(got), len(wantRefs), got)
 	}
@@ -499,8 +499,13 @@ func TestLiveTickets_OrdersBlockingThenUnreadThenIssueNumber(t *testing.T) {
 			t.Errorf("LiveTickets[%d].Ticket.TrackerRef = %q, want %q", i, got[i].Ticket.TrackerRef, want)
 		}
 	}
-	if got[0].OpenQuestionCount != 2 {
-		t.Errorf("LiveTickets[0] (ref 200) OpenQuestionCount = %d, want 2", got[0].OpenQuestionCount)
+	for i, want := range wantRefs {
+		if want != "200" {
+			continue
+		}
+		if got[i].OpenQuestionCount != 2 {
+			t.Errorf("LiveTickets[%d] (ref 200) OpenQuestionCount = %d, want 2", i, got[i].OpenQuestionCount)
+		}
 	}
 }
 

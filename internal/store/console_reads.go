@@ -293,8 +293,10 @@ type LiveTicket struct {
 // LiveTickets returns every ticket the sidebar lists (design section 6.3,
 // 6.8, #106 bug 4): blocking ones (waiting_on set) whatever their state,
 // and every ticket whose state is not in terminal. A nil or empty terminal
-// lists every ticket. Order is blocking first, then unread, then the rest,
-// each by issueNumberOrder.
+// lists every ticket. Order is issueNumberOrder only (#106 bug 5, c8's
+// owner decision (a)): gaining or losing a gate or an unread message never
+// moves a row, so a ticket never jumps under the owner's cursor. Blocking
+// and unread state still show, as a badge only (nav.templ's threadLink).
 func (s *Store) LiveTickets(ctx context.Context, terminal []string) ([]LiveTicket, error) {
 	where := ``
 	args := make([]any, 0, len(terminal))
@@ -309,7 +311,7 @@ func (s *Store) LiveTickets(ctx context.Context, terminal []string) ([]LiveTicke
 		EXISTS (SELECT 1 FROM messages um WHERE um.ticket_id = t.id AND ` + unreadMessageWhere + `) AS unread,
 		(SELECT COUNT(*) FROM messages q WHERE q.ticket_id = t.id AND q.type = 'question' AND q.state = 'open')
 		FROM tickets t ` + where + `
-		ORDER BY (t.waiting_on IS NOT NULL) DESC, unread DESC, ` + issueNumberOrder
+		ORDER BY ` + issueNumberOrder
 	rows, err := s.db.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, fmt.Errorf("live tickets: %w", err)

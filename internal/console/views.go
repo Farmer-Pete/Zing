@@ -133,7 +133,7 @@ func (c *console) stateOrder() []string {
 }
 
 // buildNavThreads turns LiveTickets into #nav's rows, preserving their
-// blocking, unread, issue-number order (design section 6.3, 6.8).
+// issue-number order (design section 6.3, 6.8, #106 bug 5).
 func buildNavThreads(items []store.LiveTicket) []templates.NavThread {
 	out := make([]templates.NavThread, 0, len(items))
 	for i := range items {
