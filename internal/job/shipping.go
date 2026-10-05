@@ -1057,12 +1057,14 @@ func (h shipHandler) pollCIFailed(ctx context.Context, t store.Ticket, d Deps, p
 //
 // Task 6 adds the review-bot nudge: on a non-draft pull request, each
 // configured review-bot check still missing gets reviewBotAction's own
-// verdict (shiprules.go) applied to its own clock markers on pr.HeadSHA,
-// oldest config entry first. Start writes the missing marker; nudge posts
-// the bot's trigger comment and writes the nudged marker; escalate returns
-// an escalation commit instead of this one, stopping the loop over the
-// remaining checks (only one commit can be returned per tick); wait leaves
-// this tick's commit as it already is.
+// verdict (shiprules.go) applied to its own clock markers on pr.HeadSHA.
+// Every check's verdict is worked out first, before any side effect: if
+// any one of them escalates, that escalation is returned in place of c,
+// before CommentOnPR is called for any check, so a later check's
+// escalation can never discard an earlier check's own already-decided
+// start or nudge marker. Otherwise, in config order, start writes the
+// missing marker, nudge posts the bot's trigger comment and writes the
+// nudged marker, and wait leaves this tick's commit as it already is.
 func (h shipHandler) pollIdle(ctx context.Context, t store.Ticket, d Deps, proj Project, pr orchestrator.PRState, number int, fp string, missing []string) (store.HandlerCommit, error) {
 	iv := nextInterval(t.PollFingerprint, t.PollIntervalS, fp)
 	next := time.Now().UTC().Truncate(time.Second).Add(time.Duration(iv) * time.Second)
@@ -1091,6 +1093,8 @@ func (h shipHandler) pollIdle(ctx context.Context, t store.Ticket, d Deps, proj 
 		return store.HandlerCommit{}, fmt.Errorf("job: shipping: poll: retry requested marker: %w", err)
 	}
 
+	now := time.Now().UTC()
+	plans := make([]reviewBotPlan, 0, len(d.ReviewBots.Checks))
 	for _, check := range d.ReviewBots.Checks {
 		if !slices.Contains(missing, check.Check) {
 			continue
@@ -1107,35 +1111,52 @@ func (h shipHandler) pollIdle(ctx context.Context, t store.Ticket, d Deps, proj 
 			return store.HandlerCommit{}, err
 		}
 
-		now := time.Now().UTC()
-		switch reviewBotAction(now, since, nudgedAt, d.ReviewBots.Wait) {
-		case reviewBotStart:
-			c.Messages = append(c.Messages, store.Message{
-				TicketID: t.ID, Type: msgTypeUpdate, Author: authorSystem,
-				Body: reviewBotMarkerBody(missingHead, now),
-			})
-		case reviewBotNudge:
-			if err := proj.Threads.CommentOnPR(ctx, proj.Owner, proj.Repo, number, check.Trigger); err != nil {
-				return store.HandlerCommit{}, fmt.Errorf("job: shipping: poll: comment on pr: %w", err)
-			}
-			slog.Info("review bot nudged", "ticket_id", t.ID, "check", check.Check)
-			c.Messages = append(c.Messages, store.Message{
-				TicketID: t.ID, Type: msgTypeUpdate, Author: authorSystem,
-				Body: reviewBotMarkerBody(nudgedHead, now),
-			})
-		case reviewBotEscalate:
+		action := reviewBotAction(now, since, nudgedAt, d.ReviewBots.Wait)
+		if action == reviewBotEscalate {
 			why := fmt.Sprintf("required check %s has not reported on %s since %s", check.Check, shortSHA(pr.HeadSHA), since.UTC().Format(time.RFC3339))
 			tried := fmt.Sprintf("posted %s at %s", check.Trigger, nudgedAt.UTC().Format(time.RFC3339))
 			ec := shipEscalation(t, d, reviewBotSilentWhat, why, tried)
 			ec.ClearPoll = true
 			return ec, nil
-		case reviewBotWait:
-			// Nothing to do this tick; the backoff commit already built
-			// above stands.
+		}
+		plans = append(plans, reviewBotPlan{check: check, action: action, missingHead: missingHead, nudgedHead: nudgedHead})
+	}
+
+	for _, p := range plans {
+		switch p.action {
+		case reviewBotStart:
+			c.Messages = append(c.Messages, store.Message{
+				TicketID: t.ID, Type: msgTypeUpdate, Author: authorSystem,
+				Body: reviewBotMarkerBody(p.missingHead, now),
+			})
+		case reviewBotNudge:
+			if err := proj.Threads.CommentOnPR(ctx, proj.Owner, proj.Repo, number, p.check.Trigger); err != nil {
+				return store.HandlerCommit{}, fmt.Errorf("job: shipping: poll: comment on pr: %w", err)
+			}
+			slog.Info("review bot nudged", "ticket_id", t.ID, "check", p.check.Check)
+			c.Messages = append(c.Messages, store.Message{
+				TicketID: t.ID, Type: msgTypeUpdate, Author: authorSystem,
+				Body: reviewBotMarkerBody(p.nudgedHead, now),
+			})
+		case reviewBotWait, reviewBotEscalate:
+			// reviewBotWait: nothing to do this tick, the backoff commit
+			// already built above stands. reviewBotEscalate never reaches
+			// here: the loop above returns before appending it to plans.
 		}
 	}
 
 	return c, nil
+}
+
+// reviewBotPlan is one configured check's own reviewBotAction verdict,
+// worked out before any side effect (pollIdle, above): a later check's
+// escalation must never discard an earlier check's already-decided start
+// or nudge, so every check is decided first and only a non-escalating
+// plan is applied, in config order.
+type reviewBotPlan struct {
+	check                   ReviewBotCheck
+	action                  reviewBotStep
+	missingHead, nudgedHead string
 }
 
 // reviewBotMarkerSince reads headKey's own newest marker (one of

@@ -15,7 +15,9 @@ import (
 	"time"
 
 	zing "zing"
+	"zing/internal/config"
 	"zing/internal/gitfixture"
+	"zing/internal/job"
 	"zing/internal/machine"
 	"zing/internal/store"
 )
@@ -469,6 +471,44 @@ func TestDispatchInterval(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestReviewBotChecks covers reviewBotChecks directly: it converts every
+// config.ReviewBotCheck entry into job.ReviewBotRule's own check list,
+// field by field, in order, and a nil or empty input converts to an empty
+// (non-nil) slice rather than nil, so a caller can always range over the
+// result.
+func TestReviewBotChecks(t *testing.T) {
+	t.Parallel()
+
+	t.Run("nil converts to an empty slice", func(t *testing.T) {
+		t.Parallel()
+		got := reviewBotChecks(nil)
+		if len(got) != 0 {
+			t.Errorf("reviewBotChecks(nil) = %+v, want empty", got)
+		}
+	})
+
+	t.Run("every entry converts field by field, in order", func(t *testing.T) {
+		t.Parallel()
+		in := []config.ReviewBotCheck{
+			{Check: "CodeRabbit", Trigger: "@coderabbitai review"},
+			{Check: "Other Bot", Trigger: "@otherbot review"},
+		}
+		want := []job.ReviewBotCheck{
+			{Check: "CodeRabbit", Trigger: "@coderabbitai review"},
+			{Check: "Other Bot", Trigger: "@otherbot review"},
+		}
+		got := reviewBotChecks(in)
+		if len(got) != len(want) {
+			t.Fatalf("reviewBotChecks(%+v) = %+v, want %+v", in, got, want)
+		}
+		for i := range want {
+			if got[i] != want[i] {
+				t.Errorf("reviewBotChecks(%+v)[%d] = %+v, want %+v", in, i, got[i], want[i])
+			}
+		}
+	})
 }
 
 // TestDispatchMaxParallel covers dispatchMaxParallel directly: a positive

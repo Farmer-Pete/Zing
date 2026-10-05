@@ -57,6 +57,12 @@ const (
 	testSeedReason = "test setup"
 	testSpyReason  = "test"
 
+	// testSeedJudgingOwner is the claim owner every test that seeds a
+	// ticket straight into "judging" (then substitutes a spyHandler for
+	// it) shares (goconst): never read back by anything a test asserts
+	// on.
+	testSeedJudgingOwner = "seed-judging-owner"
+
 	testWaitingQuestions = "questions"
 	testWaitingGate      = "gate"
 	testQuestionOpen     = "open"
@@ -1844,7 +1850,7 @@ func TestClaimTimeoutForJudging(t *testing.T) {
 	s := newDispatchTestStore(t)
 	ticketID := seedQueuedTicket(t, s, testFixtureRef)
 
-	seedOwner := "seed-judging-owner"
+	seedOwner := testSeedJudgingOwner
 	seedExpires := time.Now().Add(10 * time.Minute).UTC().Truncate(time.Second)
 	claimed, err := s.Claim(t.Context(), ticketID, seedOwner, seedExpires)
 	if err != nil || !claimed {
@@ -1942,7 +1948,7 @@ func TestRunAndCommitCopiesJudgeCodexHome(t *testing.T) {
 	s := newDispatchTestStore(t)
 	ticketID := seedQueuedTicket(t, s, testFixtureRef)
 
-	seedOwner := "seed-judging-owner"
+	seedOwner := testSeedJudgingOwner
 	seedExpires := time.Now().Add(10 * time.Minute).UTC().Truncate(time.Second)
 	claimed, err := s.Claim(t.Context(), ticketID, seedOwner, seedExpires)
 	if err != nil || !claimed {
@@ -1971,6 +1977,56 @@ func TestRunAndCommitCopiesJudgeCodexHome(t *testing.T) {
 	}
 	if spy.JudgeCodexHome() != wantJudgeCodexHome {
 		t.Errorf("Deps.JudgeCodexHome = %q, want %q", spy.JudgeCodexHome(), wantJudgeCodexHome)
+	}
+}
+
+// TestRunAndCommitCopiesReviewBots proves runAndCommit copies
+// dispatch.Config.ReviewBots into every job.Deps it builds, the same way
+// TestRunAndCommitCopiesJudgeCodexHome already proves for JudgeCodexHome:
+// without this copy, cmd/zing/serve.go could build an empty
+// job.ReviewBotRule, or drop the field from the dispatch.Config literal
+// entirely, and every pollIdle-level test would still pass (they all set
+// deps.ReviewBots directly) while production never nudges a silent review
+// bot.
+func TestRunAndCommitCopiesReviewBots(t *testing.T) {
+	t.Parallel()
+
+	s := newDispatchTestStore(t)
+	ticketID := seedQueuedTicket(t, s, testFixtureRef)
+
+	seedOwner := testSeedJudgingOwner
+	seedExpires := time.Now().Add(10 * time.Minute).UTC().Truncate(time.Second)
+	claimed, err := s.Claim(t.Context(), ticketID, seedOwner, seedExpires)
+	if err != nil || !claimed {
+		t.Fatalf("seed claim: claimed=%v err=%v", claimed, err)
+	}
+	applied, err := s.CommitHandlerResult(t.Context(), store.HandlerCommit{
+		TicketID: ticketID, Owner: seedOwner, Expires: seedExpires, Next: testStateJudging, Reason: testSeedReason,
+	})
+	if err != nil || !applied {
+		t.Fatalf("seed commit: applied=%v err=%v", applied, err)
+	}
+
+	spy := &spyHandler{next: testStateShipping, reason: testSpyReason}
+	reg := job.Registry()
+	reg[testStateJudging] = spy
+
+	wantReviewBots := job.ReviewBotRule{
+		Wait:   20 * time.Minute,
+		Checks: []job.ReviewBotCheck{{Check: "CodeRabbit", Trigger: "@coderabbitai review"}},
+	}
+	d := newDispatcher(t, s, newFixtureTracker(t), bus.New(), fakeRuntime(t), reg, nil,
+		dispatch.Config{MaxParallel: 2, Owner: testOwner, ReviewBots: wantReviewBots})
+
+	if err := d.Tick(t.Context()); err != nil {
+		t.Fatalf("Tick: %v", err)
+	}
+	if spy.Calls() != 1 {
+		t.Fatalf("spy.Calls() = %d, want 1", spy.Calls())
+	}
+	got := spy.ReviewBots()
+	if got.Wait != wantReviewBots.Wait || !slices.Equal(got.Checks, wantReviewBots.Checks) {
+		t.Errorf("Deps.ReviewBots = %+v, want %+v", got, wantReviewBots)
 	}
 }
 
@@ -2971,6 +3027,11 @@ type spyHandler struct {
 	// runAndCommit copied dispatch.Config.JudgeCodexHome into the Deps a
 	// handler actually sees.
 	judgeCodexHome string
+	// reviewBots records d.ReviewBots, so
+	// TestRunAndCommitCopiesReviewBots can assert runAndCommit copied
+	// dispatch.Config.ReviewBots into the Deps a handler actually sees,
+	// the same way judgeCodexHome already covers JudgeCodexHome.
+	reviewBots job.ReviewBotRule
 
 	next, reason string
 	err          error
@@ -2981,6 +3042,7 @@ func (h *spyHandler) Run(ctx context.Context, t store.Ticket, d job.Deps) (store
 	h.calls++
 	h.expires = d.Expires
 	h.judgeCodexHome = d.JudgeCodexHome
+	h.reviewBots = d.ReviewBots
 	if dl, ok := ctx.Deadline(); ok {
 		h.hasDeadline = true
 		h.deadline = dl
@@ -3027,6 +3089,13 @@ func (h *spyHandler) JudgeCodexHome() string {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	return h.judgeCodexHome
+}
+
+// ReviewBots returns the most recent Run call's d.ReviewBots.
+func (h *spyHandler) ReviewBots() job.ReviewBotRule {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.reviewBots
 }
 
 // countingRuntime wraps a runtime.Runtime and counts every Run call, so a

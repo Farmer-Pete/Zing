@@ -1221,7 +1221,8 @@ func TestJobLogTailCutsAtFailedStep(t *testing.T) {
 		if !strings.Contains(lines[len(lines)-1], "##[error]Process completed with exit code 2.") {
 			t.Errorf("JobLogTail last line = %q, want it to contain %q", lines[len(lines)-1], "##[error]Process completed with exit code 2.")
 		}
-		if strings.Contains(got, "post-job cleanup") || strings.Contains(got, "removing temp directory") || strings.Contains(got, "unrelated later failure") {
+		laterStepLeaked := strings.Contains(got, "post-job cleanup") || strings.Contains(got, "removing temp directory") || strings.Contains(got, "unrelated later failure")
+		if laterStepLeaked {
 			t.Errorf("JobLogTail = %q, must not contain the later step's lines", got)
 		}
 	})

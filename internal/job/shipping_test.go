@@ -24,6 +24,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"reflect"
 	"sort"
 	"strings"
 	"testing"
@@ -2271,6 +2272,72 @@ func shipCodeRabbitRule() ReviewBotRule {
 	return ReviewBotRule{Wait: 20 * time.Minute, Checks: []ReviewBotCheck{{Check: shipCodeRabbitCheck, Trigger: "@coderabbitai review"}}}
 }
 
+// shipOtherBotCheck is a second review-bot check context, distinct from
+// shipCodeRabbitCheck, so TestPollReviewBotEscalateNeverTouchesAnotherChecksSideEffects
+// can configure two checks and control each one's own verdict independently.
+const shipOtherBotCheck = "OtherBot"
+
+// shipTwoBotChecksCIAndRequired is shipReviewBotCIAndRequired's own twin
+// with a second required bot check, shipOtherBotCheck, that no run or
+// status ever matches either, so Missing is always exactly
+// [shipOtherBotCheck, shipCodeRabbitCheck].
+func shipTwoBotChecksCIAndRequired() (runs []orchestrator.CheckRun, required []orchestrator.RequiredCheck) {
+	runs, required = shipGreenCI()
+	return runs, append(required, orchestrator.RequiredCheck{Context: shipOtherBotCheck}, orchestrator.RequiredCheck{Context: shipCodeRabbitCheck})
+}
+
+// shipTwoBotChecksRule configures shipOtherBotCheck before shipCodeRabbitCheck,
+// in that order, so a test can put the check that should nudge ahead of the
+// one that should escalate in the same tick.
+func shipTwoBotChecksRule() ReviewBotRule {
+	return ReviewBotRule{Wait: 20 * time.Minute, Checks: []ReviewBotCheck{
+		{Check: shipOtherBotCheck, Trigger: "@otherbot review"},
+		{Check: shipCodeRabbitCheck, Trigger: "@coderabbitai review"},
+	}}
+}
+
+// TestPollReviewBotEscalateNeverTouchesAnotherChecksSideEffects proves
+// pollIdle decides every configured check's own reviewBotAction verdict
+// before acting on any of them: with shipOtherBotCheck (config order
+// first) due to nudge and shipCodeRabbitCheck (config order second) due to
+// escalate on the very same tick, the poll must escalate on CodeRabbit
+// without ever calling CommentOnPR for OtherBot. A loop that nudges as it
+// goes would call CommentOnPR for OtherBot before reaching CodeRabbit's
+// escalate, posting a trigger comment the returned escalation commit then
+// has no marker for (the comment went out, but the store has no record of
+// it -- a real duplicate on retry).
+func TestPollReviewBotEscalateNeverTouchesAnotherChecksSideEffects(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow end-to-end flow; runs in the full suite")
+	}
+	t.Parallel()
+	s, ticket, gh, tr := shipPublished(t)
+	local := shipHeadSHA(t, s, ticket)
+	gh.prState = orchestrator.PRState{State: shipPRStateOpen, Draft: false, HeadSHA: local, BaseRef: pbFixtureDefaultBranch}
+	gh.runs, gh.required = shipTwoBotChecksCIAndRequired()
+	rule := shipTwoBotChecksRule()
+
+	// OtherBot: missing marker old enough to nudge, no nudge yet.
+	shipInsertReviewBotMarker(t, s, ticket.ID, reviewBotMissingHead(local, shipOtherBotCheck), 21*time.Minute)
+	// CodeRabbit: missing and nudged markers both old enough to escalate.
+	shipInsertReviewBotMarker(t, s, ticket.ID, reviewBotMissingHead(local, shipCodeRabbitCheck), 50*time.Minute)
+	shipInsertReviewBotMarker(t, s, ticket.ID, reviewBotNudgedHead(local, shipCodeRabbitCheck), 21*time.Minute)
+
+	commit, err := shipPollRunWithReviewBots(t, s, ticket, gh, tr, rule)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if commit.Escalation == nil {
+		t.Fatal("want an escalation")
+	}
+	if !strings.Contains(commit.Escalation.Payload.Why, shipCodeRabbitCheck) {
+		t.Errorf("Why = %q, want it to name CodeRabbit", commit.Escalation.Payload.Why)
+	}
+	if len(gh.commentOnPRCalls) != 0 {
+		t.Errorf("commentOnPRCalls = %v, want none: CommentOnPR must never run for a check decided before an escalating one", gh.commentOnPRCalls)
+	}
+}
+
 // TestPollReviewBotNudgesThenEscalates proves pollIdle's own review-bot
 // clock (design "Shape"): the first poll that finds CodeRabbit missing
 // writes the missing marker and posts nothing; once that marker is old
@@ -2487,17 +2554,17 @@ func TestPollReviewBotCommentErrorPropagates(t *testing.T) {
 	wantErr := errors.New("boom: comment on pr failed")
 	gh.commentOnPRErr = wantErr
 
-	_, err := shipPollRunWithReviewBots(t, s, ticket, gh, tr, rule)
+	commit, err := shipPollRunWithReviewBots(t, s, ticket, gh, tr, rule)
 	if err == nil || !errors.Is(err, wantErr) {
 		t.Fatalf("Run: err = %v, want it to wrap %v", err, wantErr)
 	}
-
-	rows, markerErr := s.MarkersWithPrefix(t.Context(), ticket.ID, nudgedHead)
-	if markerErr != nil {
-		t.Fatalf("MarkersWithPrefix: %v", markerErr)
+	if !reflect.DeepEqual(commit, store.HandlerCommit{}) {
+		t.Errorf("Run: commit = %+v, want the zero value (nothing committed, so the nudge is retried)", commit)
 	}
-	if len(rows) != 0 {
-		t.Errorf("nudged marker rows = %+v, want none", rows)
+	for _, m := range commit.Messages {
+		if strings.HasPrefix(m.Body, nudgedHead) {
+			t.Errorf("commit.Messages = %+v, must not contain the nudged marker %q", commit.Messages, nudgedHead)
+		}
 	}
 }
 

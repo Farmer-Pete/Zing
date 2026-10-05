@@ -1480,26 +1480,27 @@ func respondFixLandedSHA(ctx context.Context, t store.Ticket, d Deps, aid int64)
 
 // fixLandedReport returns the build report of the task-0 unit that landed
 // a respond artifact's own collected fix actions at sha (design section
-// 9.4, M4 task 4, the no-op reply's own source of truth): the first
-// report, in store order (Store.BuildReports' own ORDER BY artifacts.id),
-// whose TaskN is 0, whose RunID is newer than respondFixRequestRun's own
-// watermark R (the fix request's own run, never an earlier unit's), and
-// whose CommitSHA equals sha. ok is false when respondFixRequestRun
-// itself is false (this batch collected no fix action) or no report
-// matches -- fixReplies' own caller already knows the fix landed at sha
-// (fixRepliesPending), so "no report" never happens in practice, only in
-// a test driving fixReplies directly.
-func fixLandedReport(ctx context.Context, t store.Ticket, d Deps, aid int64, sha string) (response.BuildReport, bool, error) {
+// 9.4, M4 task 4, the no-op reply's own source of truth), plus that row's
+// own RunID, so a caller logging a rejection of the report's text can name
+// the exact run it came from: the first report, in store order
+// (Store.BuildReports' own ORDER BY artifacts.id), whose TaskN is 0, whose
+// RunID is newer than respondFixRequestRun's own watermark R (the fix
+// request's own run, never an earlier unit's), and whose CommitSHA equals
+// sha. ok is false when respondFixRequestRun itself is false (this batch
+// collected no fix action) or no report matches -- fixReplies' own caller
+// already knows the fix landed at sha (fixRepliesPending), so "no report"
+// never happens in practice, only in a test driving fixReplies directly.
+func fixLandedReport(ctx context.Context, t store.Ticket, d Deps, aid int64, sha string) (report response.BuildReport, runID int64, ok bool, err error) {
 	r, found, err := respondFixRequestRun(ctx, t, d, aid)
 	if err != nil {
-		return response.BuildReport{}, false, err
+		return response.BuildReport{}, 0, false, err
 	}
 	if !found {
-		return response.BuildReport{}, false, nil
+		return response.BuildReport{}, 0, false, nil
 	}
 	reports, err := d.Store.BuildReports(ctx, t.ID)
 	if err != nil {
-		return response.BuildReport{}, false, fmt.Errorf("job: shipping: fix landed report: build reports: %w", err)
+		return response.BuildReport{}, 0, false, fmt.Errorf("job: shipping: fix landed report: build reports: %w", err)
 	}
 	for i := range reports {
 		if reports[i].Report.TaskN != 0 || reports[i].RunID <= r {
@@ -1508,9 +1509,9 @@ func fixLandedReport(ctx context.Context, t store.Ticket, d Deps, aid int64, sha
 		if reports[i].Report.CommitSHA == nil || *reports[i].Report.CommitSHA != sha {
 			continue
 		}
-		return reports[i].Report, true, nil
+		return reports[i].Report, reports[i].RunID, true, nil
 	}
-	return response.BuildReport{}, false, nil
+	return response.BuildReport{}, 0, false, nil
 }
 
 // fixRepliesPending is design section 8.5 row 1's own entry condition: the
@@ -1570,9 +1571,9 @@ func (h shipHandler) fixRepliesPending(ctx context.Context, t store.Ticket, d De
 // and a warning records why, rather than failing FIX-REPLIES outright.
 func fixReplyText(ctx context.Context, t store.Ticket, d Deps, login string, aid int64, sha string) (string, error) {
 	fixedText := fmt.Sprintf("Fixed in %s.", sha[:7])
-	report, found, err := fixLandedReport(ctx, t, d, aid, sha)
+	report, runID, found, err := fixLandedReport(ctx, t, d, aid, sha)
 	if err != nil {
-		return "", fmt.Errorf("job: shipping: fix replies: fix landed report: %w", err)
+		return "", err
 	}
 	if !found || len(report.FilesChanged) > 0 {
 		return fixedText, nil
@@ -1582,7 +1583,7 @@ func fixReplyText(ctx context.Context, t store.Ticket, d Deps, login string, aid
 		// Not a failed read: the builder's own report text tripped
 		// replyBody's reserved marker check, so the bare sentence is the
 		// designed fallback (design section 9.4), not an error.
-		slog.Warn("fix reply fell back to the bare no-op sentence", "ticket_id", t.ID, "aid", aid, "error", bodyErr)
+		slog.Warn("fix reply fell back to the bare no-op sentence", "ticket_id", t.ID, "aid", aid, "run_id", runID, "error", bodyErr)
 		return "No code change was needed.", nil //nolint:nilerr // see the comment above
 	}
 	return noop, nil
