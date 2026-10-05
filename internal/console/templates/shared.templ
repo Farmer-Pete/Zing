@@ -18,14 +18,15 @@ templ statePill(t store.Ticket) {
 	}
 }
 
-// ticketRow renders one read-only ticket line: ref, title, and its state
-// pill. Recent and Project share it (design section 6.5, Q3: both are
-// "real but thin" and "reuse the inbox row renderer"); Feed renders
-// messages, not tickets, so it does not use this.
+// ticketRow renders one ticket line: ref, title, and its state pill, as a
+// link that opens the ticket's thread through the same zing-nav dispatch
+// #nav's threadLink uses. Recent and Project share it (design section 6.5,
+// Q3: both are "real but thin" and "reuse the inbox row renderer"); Feed
+// renders messages, not tickets, so it does not use this.
 templ ticketRow(t store.Ticket) {
-	<div class="ticket-row" data-focus-id={ fmt.Sprintf("ticket:%d", t.ID) }>
+	<a href="#" class="ticket-row" data-focus-id={ fmt.Sprintf("ticket:%d", t.ID) } data-on:click__prevent={ zingNavExpr("thread", t.ID, 0) }>
 		<span class="ref">{ t.TrackerRef }</span>
 		<span class="title">{ t.Title }</span>
 		@statePill(t)
-	</div>
+	</a>
 }
