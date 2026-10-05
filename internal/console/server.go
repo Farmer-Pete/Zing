@@ -34,6 +34,22 @@ const (
 // bound on purpose (datastar skill, "Long-lived streams").
 const nonStreamWriteDeadline = 5 * time.Second
 
+// streamHeartbeatInterval is the interval New sets console.streamHeartbeat
+// to: an upper bound on how long a missed wake -- a dropped publish, a
+// wedged write recovering, a reconnect that never arrived -- can leave the
+// page showing stale content before the next full re-render corrects it.
+// keyboard.mjs's STREAM_IDLE_MS (45s) is three of these beats, so three
+// missed beats in a row, not one slow one, is what finally shows the stale
+// marker.
+const streamHeartbeatInterval = 15 * time.Second
+
+// streamFrameWriteTimeout is the interval New sets console.streamWriteTimeout
+// to: how long one region's write on /stream may block before
+// armFrameWriteDeadline's deadline fails it and handleStream ends the
+// stream, rather than leaving a wedged write to swallow every later wake
+// forever.
+const streamFrameWriteTimeout = 10 * time.Second
+
 // The five public static assets (design section 5, 12): the vendored
 // Datastar bundle (Package 3), the vendored mermaid.js (static/ASSETS.md
 // records its source, version, and digest), and three assets authored in
@@ -131,22 +147,6 @@ type console struct {
 	// as before.
 	streamWriteTimeout time.Duration
 }
-
-// streamHeartbeatInterval is the interval New sets console.streamHeartbeat
-// to: an upper bound on how long a missed wake -- a dropped publish, a
-// wedged write recovering, a reconnect that never arrived -- can leave the
-// page showing stale content before the next full re-render corrects it.
-// console.js's STREAM_IDLE_MS (45s) is three of these beats, so three
-// missed beats in a row, not one slow one, is what finally shows the stale
-// marker.
-const streamHeartbeatInterval = 15 * time.Second
-
-// streamFrameWriteTimeout is the interval New sets console.streamWriteTimeout
-// to: how long one region's write on /stream may block before
-// armFrameWriteDeadline's deadline fails it and handleStream ends the
-// stream, rather than leaving a wedged write to swallow every later wake
-// forever.
-const streamFrameWriteTimeout = 10 * time.Second
 
 // New builds the console and returns it as an http.Handler:
 //

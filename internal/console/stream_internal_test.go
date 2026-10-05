@@ -286,24 +286,6 @@ func TestLogStreamErr(t *testing.T) {
 // fails the test instead of the suite.
 const streamBeatFrameTimeout = 5 * time.Second
 
-// newHeartbeatTestConsole builds a console the way newStreamTestConsole
-// does, with heartbeat set as c.streamHeartbeat: the seam
-// TestStreamHeartbeatRepatchesWithoutAWake,
-// TestStreamGateQuestionWakePatchesMain, and
-// TestStreamHeartbeatDoesNotMarkRead each need their own value for (a
-// short beat to prove the ticker case fires; zero to prove the bus-wake
-// path still works alone).
-func newHeartbeatTestConsole(t *testing.T, heartbeat time.Duration) *console {
-	t.Helper()
-	s, err := store.Open(t.Context(), filepath.Join(t.TempDir(), "zing.db"))
-	if err != nil {
-		t.Fatalf("store.Open: %v", err)
-	}
-	t.Cleanup(func() { _ = s.Close() })
-	h := newTestLogHandler(t, io.Discard)
-	return &console{store: s, bus: bus.New(), log: h, streamHeartbeat: heartbeat}
-}
-
 // openInternalStream issues a GET /stream request for (view, open) against
 // base, carrying the Datastar-Request header handleStream's MarkThreadRead
 // branch requires (mw.go's isDatastarSameSite), and returns the response
@@ -429,7 +411,8 @@ func streamHeartbeatSeedGateQuestion(t *testing.T, c *console, ticketID int64) i
 // proving the beat -- not a wake the committer forgot to send -- is what
 // repatches the page.
 func TestStreamHeartbeatRepatchesWithoutAWake(t *testing.T) {
-	c := newHeartbeatTestConsole(t, 50*time.Millisecond)
+	c, _ := newStreamTestConsole(t)
+	c.streamHeartbeat = 50 * time.Millisecond
 	ticketID := streamHeartbeatDemoTicket(t, c)
 
 	srv := streamTestServer(t, c, false)
@@ -464,7 +447,7 @@ func TestStreamHeartbeatRepatchesWithoutAWake(t *testing.T) {
 // the server-side wake path reading the code already ruled out as the
 // fault, kept here as a guard against it regressing.
 func TestStreamGateQuestionWakePatchesMain(t *testing.T) {
-	c := newHeartbeatTestConsole(t, 0)
+	c, _ := newStreamTestConsole(t)
 	ticketID := streamHeartbeatDemoTicket(t, c)
 
 	srv := streamTestServer(t, c, false)
@@ -498,7 +481,8 @@ func TestStreamGateQuestionWakePatchesMain(t *testing.T) {
 // an unread message inserted on the open ticket stays unread through at
 // least three heartbeat-only re-renders.
 func TestStreamHeartbeatDoesNotMarkRead(t *testing.T) {
-	c := newHeartbeatTestConsole(t, 50*time.Millisecond)
+	c, _ := newStreamTestConsole(t)
+	c.streamHeartbeat = 50 * time.Millisecond
 	ticketID := streamHeartbeatDemoTicket(t, c)
 
 	srv := streamTestServer(t, c, false)
@@ -539,15 +523,23 @@ func TestStreamHeartbeatDoesNotMarkRead(t *testing.T) {
 // that end -- EOF or a read error, either way the read returns -- within a
 // few seconds, and the body it did get must carry no #main frame.
 func TestStreamEndsWhenAFrameWriteTimesOut(t *testing.T) {
-	c := newHeartbeatTestConsole(t, 0)
+	c, _ := newStreamTestConsole(t)
 	c.streamWriteTimeout = time.Nanosecond
 	ticketID := streamHeartbeatDemoTicket(t, c)
 
 	srv := streamTestServer(t, c, false)
 
+	// doErr and status report the request's own round trip -- did /stream
+	// even open -- separately from readErr, the body read's own end (EOF or
+	// a read error, either is the timed-out deadline's doing). Folding them
+	// into one error, as an earlier version of this test did, let a failed
+	// Do (never reaching the server at all) pass silently: an empty body
+	// has no #main frame either, but for the wrong reason.
 	type result struct {
-		body string
-		err  error
+		doErr   error
+		status  int
+		body    string
+		readErr error
 	}
 	ch := make(chan result, 1)
 	go func() {
@@ -555,25 +547,34 @@ func TestStreamEndsWhenAFrameWriteTimesOut(t *testing.T) {
 		v.Set("datastar", fmt.Sprintf(`{"view":%q,"open":%d,"project":0}`, viewThread, ticketID))
 		req, err := http.NewRequestWithContext(t.Context(), http.MethodGet, srv.URL+"/stream?"+v.Encode(), http.NoBody)
 		if err != nil {
-			ch <- result{err: err}
+			ch <- result{doErr: err}
 			return
 		}
 		req.Header.Set("Datastar-Request", "true")
 		resp, err := http.DefaultClient.Do(req)
 		if err != nil {
-			ch <- result{err: err}
+			ch <- result{doErr: err}
 			return
 		}
 		defer func() { _ = resp.Body.Close() }()
 		body, err := io.ReadAll(resp.Body)
-		ch <- result{body: string(body), err: err}
+		ch <- result{status: resp.StatusCode, body: string(body), readErr: err}
 	}()
 
 	select {
 	case res := <-ch:
+		if res.doErr != nil {
+			t.Fatalf("GET /stream: %v", res.doErr)
+		}
+		if res.status != http.StatusOK {
+			t.Fatalf("GET /stream: status = %d, want %d", res.status, http.StatusOK)
+		}
 		if strings.Contains(res.body, `id="main"`) {
 			t.Fatalf("body carries a #main frame despite a write deadline already in the past:\n%s", res.body)
 		}
+		// res.readErr (EOF or a read error) is not checked further: either
+		// one means the stream ended, which is what a timed-out write
+		// deadline should do.
 	case <-time.After(streamBeatFrameTimeout):
 		t.Fatal("reading /stream's body did not end within 5s of a timed-out write deadline")
 	}

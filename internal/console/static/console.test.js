@@ -888,7 +888,6 @@ test('reduceStreamStatus marks stale on reconnecting and failures, clears on a f
 	// started always cancels any pending reconnect.
 	const started = reduceStreamStatus(emptyStreamStatus(), { type: 'started' }, 0);
 	assert.equal(started.effect.cancelReconnect, true);
-	assert.equal(started.effect.settleGen, undefined);
 });
 
 test('reduceStreamStatus marks a silent stream stale and reconnects after STREAM_IDLE_MS', () => {
@@ -907,9 +906,11 @@ test('reduceStreamStatus marks a silent stream stale and reconnects after STREAM
 	status = result.status;
 
 	// A second tick 1s later is still within the (restarted) idle window, so
-	// it does not schedule another reconnect.
+	// it does not schedule another reconnect, and the stale clock does not
+	// move forward.
 	result = reduceStreamStatus(status, { type: 'tick' }, 100 + STREAM_IDLE_MS + 1000);
 	assert.equal(result.effect.reconnectIn, null);
+	assert.equal(result.status.staleSince, 100 + STREAM_IDLE_MS);
 });
 
 test('reduceStreamStatus keeps a reconnect stale until its first frame', () => {
@@ -921,15 +922,50 @@ test('reduceStreamStatus keeps a reconnect stale until its first frame', () => {
 	let result = reduceStreamStatus(status, { type: 'tick' }, 3100);
 	assert.equal(result.status.staleSince, 1000);
 
-	// Past the idle window with still no frame: another reconnect is scheduled.
+	// Past the idle window with still no frame: another reconnect is
+	// scheduled, and "Stale since" holds at the original 1000, not the trip
+	// time -- the clock latches on the first stale moment and must not keep
+	// moving forward on every repeat idle trip.
 	result = reduceStreamStatus(status, { type: 'tick' }, 1100 + STREAM_IDLE_MS);
 	assert.equal(result.effect.reconnectIn, reconnectDelay(0));
+	assert.equal(result.status.staleSince, 1000);
+	assert.equal(result.status.attempt, 1);
+	status = result.status;
+
+	// A second trip, STREAM_IDLE_MS after the reset lastFrameAt, backs off to
+	// the next attempt and still holds staleSince at 1000.
+	result = reduceStreamStatus(status, { type: 'tick' }, 1100 + 2 * STREAM_IDLE_MS);
+	assert.equal(result.effect.reconnectIn, reconnectDelay(1));
+	assert.equal(result.status.staleSince, 1000);
 	status = result.status;
 
 	// Only a frame clears it.
-	result = reduceStreamStatus(status, { type: 'datastar-patch-elements' }, 1100 + STREAM_IDLE_MS + 50);
+	result = reduceStreamStatus(status, { type: 'datastar-patch-elements' }, 1100 + 2 * STREAM_IDLE_MS + 50);
 	assert.equal(result.status.staleSince, null);
 	assert.equal(result.status.attempt, 0);
+});
+
+test('reduceStreamStatus does not trip a tick when not inflight, not started, or never framed', () => {
+	// Nothing inflight at all: a tick is a no-op, even long after now=0.
+	const idle = emptyStreamStatus();
+	let result = reduceStreamStatus(idle, { type: 'tick' }, 10 * STREAM_IDLE_MS);
+	assert.equal(result.effect.reconnectIn, null);
+	assert.deepEqual(result.status, idle);
+
+	// started then finished (inflight back to 0): a tick long after must not
+	// schedule a second reconnect on top of finished's own.
+	let status = reduceStreamStatus(emptyStreamStatus(), { type: 'started' }, 0).status;
+	status = reduceStreamStatus(status, { type: 'finished' }, 0).status;
+	result = reduceStreamStatus(status, { type: 'tick' }, STREAM_IDLE_MS);
+	assert.equal(result.effect.reconnectIn, null);
+
+	// inflight above 0 but lastFrameAt still null (should not happen in
+	// practice, since started always sets lastFrameAt, but the guard must
+	// hold regardless): a tick must not trip on a null lastFrameAt.
+	const noFrameYet = { ...emptyStreamStatus(), inflight: 1, lastFrameAt: null };
+	result = reduceStreamStatus(noFrameYet, { type: 'tick' }, 10 * STREAM_IDLE_MS);
+	assert.equal(result.effect.reconnectIn, null);
+	assert.deepEqual(result.status, noFrameYet);
 });
 
 test('reduceStreamStatus restarts the idle clock on visible', () => {

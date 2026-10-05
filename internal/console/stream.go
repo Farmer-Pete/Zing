@@ -105,9 +105,6 @@ func (c *console) handleStream(w http.ResponseWriter, r *http.Request) {
 	ch, cancel := c.bus.Subscribe()
 	defer cancel()
 
-	// A zero streamHeartbeat (every test that does not itself exercise the
-	// beat) leaves beat nil, so its select case below never fires -- not a
-	// missing bug fix's worth of real behavior, just no ticker to stop.
 	var beat <-chan time.Time
 	if c.streamHeartbeat > 0 {
 		t := time.NewTicker(c.streamHeartbeat)
@@ -173,7 +170,7 @@ func (c *console) patchRegions(ctx context.Context, rc *http.ResponseController,
 		logStreamErr(ctx, slog.LevelError, "console: stream: build nav", err)
 		return false
 	}
-	if !c.armFrameWriteDeadline(ctx, rc) {
+	if !c.armFrameWriteDeadline(ctx, rc, "nav", sig) {
 		return false
 	}
 	if patchErr := sse.PatchElementTempl(nav); patchErr != nil {
@@ -186,7 +183,7 @@ func (c *console) patchRegions(ctx context.Context, rc *http.ResponseController,
 		logStreamErr(ctx, slog.LevelError, "console: stream: build main", err, "view", sig.View)
 		return false
 	}
-	if !c.armFrameWriteDeadline(ctx, rc) {
+	if !c.armFrameWriteDeadline(ctx, rc, "main", sig) {
 		return false
 	}
 	if patchErr := sse.PatchElementTempl(main); patchErr != nil {
@@ -199,7 +196,7 @@ func (c *console) patchRegions(ctx context.Context, rc *http.ResponseController,
 		logStreamErr(ctx, slog.LevelError, "console: stream: build rail", err, "view", sig.View, "open", sig.Open)
 		return false
 	}
-	if !c.armFrameWriteDeadline(ctx, rc) {
+	if !c.armFrameWriteDeadline(ctx, rc, "rail", sig) {
 		return false
 	}
 	if patchErr := sse.PatchElementTempl(rail); patchErr != nil {
@@ -207,7 +204,7 @@ func (c *console) patchRegions(ctx context.Context, rc *http.ResponseController,
 		return false
 	}
 
-	if !c.armFrameWriteDeadline(ctx, rc) {
+	if !c.armFrameWriteDeadline(ctx, rc, "alerts", sig) {
 		return false
 	}
 	if patchErr := sse.PatchElementTempl(c.alertsComponent()); patchErr != nil {
@@ -228,9 +225,11 @@ func (c *console) patchRegions(ctx context.Context, rc *http.ResponseController,
 // handleStream's own SetWriteDeadline calls already tolerate it (stream.go):
 // it means w does not implement the optional deadline interface at all,
 // which a real connection's ResponseWriter always does. Any other error is
-// logged through logStreamErr at Warn and ends the stream, the same as a
-// failed region write.
-func (c *console) armFrameWriteDeadline(ctx context.Context, rc *http.ResponseController) bool {
+// logged through logStreamErr at Warn, with region and sig's view/open, the
+// same fields patchRegions' own per-region patch failures already carry, so
+// the #alerts banner says which region and which open ticket's stream ended
+// on a stuck write; the stream ends, the same as a failed region write.
+func (c *console) armFrameWriteDeadline(ctx context.Context, rc *http.ResponseController, region string, sig streamSignals) bool {
 	if c.streamWriteTimeout <= 0 {
 		return true
 	}
@@ -238,7 +237,7 @@ func (c *console) armFrameWriteDeadline(ctx context.Context, rc *http.ResponseCo
 		if errors.Is(err, http.ErrNotSupported) {
 			return true
 		}
-		logStreamErr(ctx, slog.LevelWarn, "console: stream: arm write deadline", err)
+		logStreamErr(ctx, slog.LevelWarn, "console: stream: arm write deadline", err, "region", region, "view", sig.View, "open", sig.Open)
 		return false
 	}
 	return true

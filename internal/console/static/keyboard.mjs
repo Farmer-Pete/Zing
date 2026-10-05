@@ -906,7 +906,9 @@ export function reduceStreamStatus(status, event, now) {
 			return { status: { ...status, lastFrameAt: now }, effect: none };
 		}
 		case 'tick': {
-			if (status.inflight === 0 || status.lastFrameAt === null || now - status.lastFrameAt < STREAM_IDLE_MS) {
+			const inflight = status.inflight > 0;
+			const silentTooLong = status.lastFrameAt !== null && now - status.lastFrameAt >= STREAM_IDLE_MS;
+			if (!inflight || !silentTooLong) {
 				return { status, effect: none };
 			}
 			return {
