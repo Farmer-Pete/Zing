@@ -1430,6 +1430,39 @@ func TestMergeFirstPromptCarriesConflictsAndBaseLog(t *testing.T) {
 	}
 }
 
+// TestMergeFirstPromptCarriesOwnerDecisions proves runMergeFirst builds the
+// merge agent's ticket input through specFor (task 5, mirroring
+// TestMergeFirstPromptCarriesConflictsAndBaseLog): seedOwnerDecision's own
+// resolved escalation reaches the recorded prompt.
+func TestMergeFirstPromptCarriesOwnerDecisions(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow end-to-end flow; runs in the full suite")
+	}
+	t.Parallel()
+	s, ticket, _ := shipTicketReady(t)
+	mergeCommitOnMain(t, s, ticket, "hello.txt", []byte(mergeHelloConflict))
+	seedOwnerDecision(t, s, ticket.ID, "Keep the deadline clear as a guard only.")
+
+	gh := &shipGitHub{}
+	tr := &shipTracker{}
+	rec := &recordingRuntime{inner: runtime.NewFake(mergeAgentFS())}
+
+	ticket = mergeDirtyAfterPublish(t, s, ticket, rec, gh, tr)
+
+	deps := shipClaim(t, s, rec, ticket.ID, gh, tr)
+	ticket, _ = mergeRunTick(t, s, deps, ticket, "poll writes request") // POLL
+
+	deps = shipClaim(t, s, rec, ticket.ID, gh, tr)
+	if _, err := (shipHandler{}).Run(t.Context(), ticket, deps); err != nil { // runMergeFirst
+		t.Fatalf("run first: %v", err)
+	}
+
+	gotPrompt := rec.lastRequest(t).Prompt
+	if !strings.Contains(gotPrompt, "Keep the deadline clear as a guard only.") {
+		t.Errorf("merge prompt does not carry the owner's decision:\n%s", gotPrompt)
+	}
+}
+
 // TestMergeQuestionEscalatesAndRetryCarriesNotes proves mergeSuccessCommit's
 // own question escalation, and retryMerge/reopenMerge's own request
 // lifecycle (overview design "Request lifecycle"): a merge agent's question

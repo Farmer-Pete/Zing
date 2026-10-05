@@ -419,7 +419,11 @@ func runClassify(ctx context.Context, t store.Ticket, d Deps, extra []prompt.Nam
 		return store.HandlerCommit{}, fmt.Errorf("job: classify: %w", err)
 	}
 
-	in := prompt.ForClassify(promptText, t.Title+"\n\n"+t.Body, inputs)
+	ticketText, err := specFor(ctx, d, t)
+	if err != nil {
+		return store.HandlerCommit{}, fmt.Errorf("job: classify: %w", err)
+	}
+	in := prompt.ForClassify(promptText, ticketText, inputs)
 	in.Schemas = schemas
 	assembled := prompt.Assemble(in)
 
@@ -505,7 +509,11 @@ func runPlanningFirst(ctx context.Context, t store.Ticket, d Deps, extra []promp
 	}
 	convExtra, throughBatch := conversationFreshInput(conv)
 
-	in := prompt.ForPlanningFirst(promptText, styles, t.Title+"\n\n"+t.Body, append(append([]prompt.NamedInput{}, extra...), convExtra...))
+	ticketText, err := specFor(ctx, d, t)
+	if err != nil {
+		return store.HandlerCommit{}, fmt.Errorf("job: planning: %w", err)
+	}
+	in := prompt.ForPlanningFirst(promptText, styles, ticketText, append(append([]prompt.NamedInput{}, extra...), convExtra...))
 	in.Schemas = schemas
 	assembled := prompt.Assemble(in)
 

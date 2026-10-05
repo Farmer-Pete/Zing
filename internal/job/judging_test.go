@@ -1367,6 +1367,32 @@ func TestJudgePromptCarriesNoPlan(t *testing.T) {
 	}
 }
 
+// ---- TestJudgePromptCarriesOwnerDecisions -----------------------------------
+
+// TestJudgePromptCarriesOwnerDecisions proves runFirst builds the judge's
+// ticket input through specFor (task 5, mirroring TestJudgePromptCarriesNoPlan):
+// seedOwnerDecision's own resolved escalation reaches the recorded prompt.
+func TestJudgePromptCarriesOwnerDecisions(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow end-to-end flow; runs in the full suite")
+	}
+	t.Parallel()
+	s, ticket := judgeTicketReady(t)
+	seedOwnerDecision(t, s, ticket.ID, "Keep the test as a guard only.")
+	rec := &recordingRuntime{inner: runtime.NewFake(judgeScriptsFS(judgeOkBothScript))}
+	ticket = judgeAdvanceStart(t, s, rec, ticket)
+
+	deps := pbClaim(t, s, rec, ticket.ID)
+	if _, err := (judgeHandler{}).Run(t.Context(), ticket, deps); err != nil {
+		t.Fatalf("RUN: %v", err)
+	}
+
+	req := rec.lastRequest(t)
+	if !strings.Contains(req.Prompt, "Keep the test as a guard only.") {
+		t.Errorf("judge prompt does not carry the owner's decision:\n%s", req.Prompt)
+	}
+}
+
 // ---- TestJudgeRunsWithJudgeCodexHome ----------------------------------------
 
 // TestJudgeRunsWithJudgeCodexHome proves D27 (design section 7.3): every
