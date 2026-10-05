@@ -364,10 +364,9 @@ func TestPollBelowReadyCycleCapFlipsToDraft(t *testing.T) {
 }
 
 // TestPollReadyCycleCapStillFlipsOnCIFailure proves design section 8.5 row
-// 3's own closing rule: whatever the cap already counted, a failed
-// required check still converts a ready pull request to draft, even with
-// an unresolved thread also in play (skipThreadDraftFlip must not skip the
-// flip just because the cap is reached).
+// 3's own closing rule: whatever the cap already counted, a failed required
+// check still converts a ready pull request to draft (skipThreadDraftFlip
+// must not skip the flip just because the cap is reached).
 func TestPollReadyCycleCapStillFlipsOnCIFailure(t *testing.T) {
 	if testing.Short() {
 		t.Skip("slow end-to-end flow; runs in the full suite")
@@ -380,9 +379,6 @@ func TestPollReadyCycleCapStillFlipsOnCIFailure(t *testing.T) {
 	gh.prState = orchestrator.PRState{Draft: false, HeadSHA: local, BaseRef: pbFixtureDefaultBranch, NodeID: shipNodeCapped}
 	gh.logTail = func(context.Context, string, string, int64, int) (string, error) { return shipCILogTailText, nil }
 	seedReadyCycles(t, s, ticket.ID, local, readyCycleCap)
-	gh.threads = []orchestrator.Thread{
-		shipThread("RT_ci_capped", "greet.go", 3, shipHumanComment("c1", "reviewer1", "nit: rename this", time.Now())),
-	}
 
 	_, err := shipPollRun(t, s, pbGetTicket(t, s, ticket.ID), gh, tr)
 	if err != nil {

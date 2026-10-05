@@ -1407,12 +1407,11 @@ func threadReadyCycles(markers []store.MessageRow) int {
 }
 
 // skipThreadDraftFlip reports whether POLL row 3 should leave a ready pull
-// request ready: CI neither failed nor is unprotected, the only reason to
-// flip is an unresolved thread, and t already finished readyCycleCap
-// thread-caused cycles (threadReadyCycles). Each skip logs one Info line
-// with ids and counts.
-func skipThreadDraftFlip(ctx context.Context, t store.Ticket, d Deps, pr orchestrator.PRState, number int, ciFailed, ciUnprotected, anyUnresolved bool) (bool, error) {
-	if pr.Draft || ciFailed || ciUnprotected || !anyUnresolved {
+// request ready: CI did not fail, the only reason to flip is an unresolved
+// thread, and t already finished readyCycleCap thread-caused cycles
+// (threadReadyCycles). Each skip logs one Info line with ids and counts.
+func skipThreadDraftFlip(ctx context.Context, t store.Ticket, d Deps, pr orchestrator.PRState, number int, ciFailed, anyUnresolved bool) (bool, error) {
+	if pr.Draft || ciFailed || !anyUnresolved {
 		return false, nil
 	}
 	var markers []store.MessageRow

@@ -698,8 +698,7 @@ func (h shipHandler) poll(ctx context.Context, t store.Ticket, d Deps) (store.Ha
 	fp := pollFingerprint(pr, runs, statuses, required, pollThreads)
 	result := prCI(pr, runs, statuses, required)
 	anyUnresolved := len(actionable) > 0 || len(leftover) > 0 || len(unclassified) > 0
-	ciFailed := result.State == CIFailed
-	skipFlip, err := skipThreadDraftFlip(ctx, t, d, pr, number, ciFailed, result.State == CIUnprotected, anyUnresolved)
+	skipFlip, err := skipThreadDraftFlip(ctx, t, d, pr, number, result.State == CIFailed, anyUnresolved)
 	if err != nil {
 		return store.HandlerCommit{}, err
 	}
@@ -709,7 +708,7 @@ func (h shipHandler) poll(ctx context.Context, t store.Ticket, d Deps) (store.Ha
 		c := shipEscalation(t, d, unprotectedWhat, unprotectedWhy, "")
 		c.ClearPoll = true
 		return c, nil
-	case !pr.Draft && (ciFailed || anyUnresolved) && !skipFlip:
+	case !pr.Draft && (result.State == CIFailed || anyUnresolved) && !skipFlip:
 		return h.pollConvertToDraft(ctx, t, d, proj, pr, local)
 	case result.State == CIFailed:
 		return h.pollCIFailed(ctx, t, d, proj, result)
