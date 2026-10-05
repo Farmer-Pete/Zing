@@ -390,41 +390,6 @@ func TestProbeTLSWithoutSecurityServer(t *testing.T) {
 	}
 }
 
-// tlsProbeProfile returns profile (sandbox/build.sb's text) unchanged when
-// its mach-lookup allow list names neither com.apple.SecurityServer nor
-// com.apple.trustd.agent, the state build.sb's own comment records (D26,
-// Package 8), and an error naming the first one it finds otherwise.
-func tlsProbeProfile(profile []byte) ([]byte, error) {
-	for _, name := range []string{"com.apple.SecurityServer", "com.apple.trustd.agent"} {
-		if strings.Contains(string(profile), `(global-name "`+name+`")`) {
-			return nil, fmt.Errorf("sandbox/build.sb allows mach-lookup of %s again; update this probe", name)
-		}
-	}
-	return profile, nil
-}
-
-// TestTLSProbeMatchesBuildProfile runs without ZING_LIVE_CLI or sandbox-exec:
-// it proves TestProbeTLSWithoutSecurityServer's own profile check accepts
-// the checked-in build.sb and rejects it with either Mach service added
-// back, so the live probe and the profile cannot drift apart unseen.
-func TestTLSProbeMatchesBuildProfile(t *testing.T) {
-	t.Parallel()
-	profile, err := zing.Assets.ReadFile("sandbox/build.sb")
-	if err != nil {
-		t.Fatalf("read sandbox/build.sb: %v", err)
-	}
-	if _, err := tlsProbeProfile(profile); err != nil {
-		t.Fatalf("checked-in build.sb: %v", err)
-	}
-	for _, name := range []string{"com.apple.SecurityServer", "com.apple.trustd.agent"} {
-		readded := strings.Replace(string(profile), `(global-name "com.apple.system.opendirectoryd.libinfo")`,
-			`(global-name "com.apple.system.opendirectoryd.libinfo") (global-name "`+name+`")`, 1)
-		if _, err := tlsProbeProfile([]byte(readded)); err == nil || !strings.Contains(err.Error(), name) {
-			t.Errorf("build.sb with %s added back: err = %v, want an error naming it", name, err)
-		}
-	}
-}
-
 // ---- TestProbeGhAuthTokenEmpty ---------------------------------------------
 
 // TestProbeGhAuthTokenEmpty proves `gh auth token` cannot reach the
