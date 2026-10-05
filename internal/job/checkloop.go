@@ -146,8 +146,11 @@ func runCheckCommands(ctx context.Context, d Deps, t store.Ticket, wt orchestrat
 					}
 				}
 				if len(stray) > 0 {
-					slog.Warn("fix change reverted", "ticket_id", t.ID, "run_id", int64OrZero(rid), "paths", changedPathList(stray))
-					laneErr = proj.Orch.RevertPaths(laneCtx, wt, stray)
+					if revertErr := proj.Orch.RevertPaths(laneCtx, wt, stray); revertErr != nil {
+						laneErr = fmt.Errorf("revert %v: %w", changedPathList(stray), revertErr)
+					} else {
+						slog.Warn("fix change reverted", "ticket_id", t.ID, "run_id", int64OrZero(rid), "paths", changedPathList(stray))
+					}
 				}
 			}
 			cancel()

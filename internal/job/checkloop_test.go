@@ -598,12 +598,17 @@ func TestCheckFixTimeoutFailsCheck(t *testing.T) {
 // TestAdoptSkipsFixCommand proves adoption never runs a project's fix
 // command: fix would edit the tree the "tree not clean" adoption check
 // must find clean, so adopt always clears FixCmd before runCheckCommands.
+// It records every command adoption actually runs (review r1f5): checking
+// only that fix-ran.txt is absent cannot tell "fix never ran" apart from
+// "fix ran and its stray file was reverted by the same cleanup that keeps
+// fix's edits inside the unit's lane", since that cleanup would delete
+// fix-ran.txt either way.
 func TestAdoptSkipsFixCommand(t *testing.T) {
 	if testing.Short() {
 		t.Skip("slow end-to-end flow; runs in the full suite")
 	}
 	t.Parallel()
-	s, ticketID, _, wt := prepareUnrecordedCommit(t, []string{helloTxt}, nil, "", map[string]string{helloTxt: helloWorldContent}, true)
+	s, ticketID, _, _ := prepareUnrecordedCommit(t, []string{helloTxt}, nil, "", map[string]string{helloTxt: helloWorldContent}, true)
 
 	// prepareUnrecordedCommit's own RUN already claimed and released the
 	// ticket once (apply()); this tick needs its own fresh claim.
@@ -612,6 +617,8 @@ func TestAdoptSkipsFixCommand(t *testing.T) {
 	proj := deps.Projects[ticket.ProjectID]
 	proj.FixCmd = "printf x > fix-ran.txt"
 	deps.Projects = map[int64]job.Project{ticket.ProjectID: proj}
+	cmds := &recordingCommands{real: job.NewCommandRunner(sandbox.Off(), false)}
+	deps.Commands = cmds
 
 	commit, err := job.Registry()[testStateBuilding].Run(t.Context(), ticket, deps)
 	if err != nil {
@@ -623,8 +630,8 @@ func TestAdoptSkipsFixCommand(t *testing.T) {
 	if len(commit.Artifacts) != 1 {
 		t.Fatalf("commit.Artifacts = %+v, want exactly one landed build_report", commit.Artifacts)
 	}
-	if _, statErr := os.Stat(filepath.Join(wt.Dir(), "fix-ran.txt")); !os.IsNotExist(statErr) {
-		t.Errorf("fix-ran.txt exists in the worktree, want adoption to never run fix")
+	if want := []string{proj.LintCmd, proj.TestCmd}; !slices.Equal(cmds.calls, want) {
+		t.Errorf("recorded commands = %v, want %v (fix never ran)", cmds.calls, want)
 	}
 }
 

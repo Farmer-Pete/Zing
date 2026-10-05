@@ -4,8 +4,12 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"log/slog"
 	"math"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -181,34 +185,64 @@ func TestCheckTestNotRunIsAFailure(t *testing.T) {
 	}
 }
 
+// snapshotClockRunner wraps a real orchestrator.Runner and advances a fake
+// clock on its first call, so a test can prove the shared budget is read
+// strictly after the pre-fix ChangedPaths snapshot, not merely after some
+// fixed number of checkNow calls (review r1f2: a reordering that read the
+// budget first would leave the clock at its start value and must not be
+// mistaken for the snapshot having already run). ChangedPaths and
+// RevertPaths both revalidate the worktree before their own git calls
+// (perimeter.go), so even the first call this runner sees -- resolving the
+// worktree's common git dir, or confirming its checked-out branch -- only
+// happens once the snapshot is already under way.
+type snapshotClockRunner struct {
+	real    orchestrator.Runner
+	advance func()
+}
+
+func (r *snapshotClockRunner) Run(ctx context.Context, dir, name string, args ...string) (string, error) {
+	r.advance()
+	return r.real.Run(ctx, dir, name, args...)
+}
+
+func (r *snapshotClockRunner) Output(ctx context.Context, dir, name string, args ...string) (string, error) {
+	r.advance()
+	return r.real.Output(ctx, dir, name, args...)
+}
+
 // TestCheckFixSnapshotUsesBudget proves the pre-fix ChangedPaths snapshot
 // runs before remaining is computed: once the snapshot alone exhausts the
-// shared budget, fix is reported as not run, exactly like lint or test.
-// Not parallel: it swaps checkNow.
+// shared budget, fix is reported as not run, exactly like lint or test. The
+// clock only advances when the snapshot's own git calls run, not on a
+// fixed call count, so a reordering that read the budget before the
+// snapshot would instead see the clock still at its start value and let
+// fix run. The worktree is set up through a separate, unwrapped
+// orchestrator first, so that setup's own git calls do not advance the
+// clock before the measured call. Not parallel: it swaps checkNow.
 func TestCheckFixSnapshotUsesBudget(t *testing.T) {
 	start := time.Date(2026, 10, 3, 9, 0, 0, 0, time.UTC)
-	calls := 0
+	now := start
 	orig := checkNow
-	checkNow = func() time.Time {
-		calls++
-		if calls == 1 {
-			return start
-		}
-		return start.Add(45 * time.Minute)
-	}
+	checkNow = func() time.Time { return now }
 	t.Cleanup(func() { checkNow = orig })
 
 	dir := t.TempDir()
 	if err := gitfixture.NewSigningRepo(t.Context(), dir); err != nil {
 		t.Fatalf("gitfixture.NewSigningRepo: %v", err)
 	}
-	orch, repoGit, ok := pbOrchestratorFor(t, dir, orchestrator.NewRunner())
+	setupOrch, repoGit, ok := pbOrchestratorFor(t, dir, orchestrator.NewRunner())
 	if !ok {
 		t.Fatal("pbOrchestratorFor: not a git repository")
 	}
-	wt, _, err := orch.EnsureWorktree(t.Context(), 1, "fix-snapshot-budget")
+	wt, _, err := setupOrch.EnsureWorktree(t.Context(), 1, "fix-snapshot-budget")
 	if err != nil {
 		t.Fatalf("EnsureWorktree: %v", err)
+	}
+
+	runner := &snapshotClockRunner{real: orchestrator.NewRunner(), advance: func() { now = start.Add(45 * time.Minute) }}
+	measureOrch, _, ok := pbOrchestratorFor(t, dir, runner)
+	if !ok {
+		t.Fatal("pbOrchestratorFor: not a git repository")
 	}
 
 	const theFix = "the-fix"
@@ -220,7 +254,7 @@ func TestCheckFixSnapshotUsesBudget(t *testing.T) {
 		}{},
 	}
 	d := Deps{Commands: fake, Machine: &machine.Machine{Jobs: map[string]machine.Job{jobBuildName: {TimeoutMinutes: 45}}}}
-	proj := Project{Orch: orch, RepoGit: repoGit, FixCmd: theFix, LintCmd: fakeLintCmd, TestCmd: fakeTestCmd}
+	proj := Project{Orch: measureOrch, RepoGit: repoGit, FixCmd: theFix, LintCmd: fakeLintCmd, TestCmd: fakeTestCmd}
 	results, err := runCheckCommands(t.Context(), d, store.Ticket{ID: 1}, wt, proj, nil)
 	if err != nil {
 		t.Fatalf("runCheckCommands: %v", err)
@@ -238,22 +272,85 @@ func TestCheckFixSnapshotUsesBudget(t *testing.T) {
 	}
 }
 
-// fixDurationCommands returns one scripted (exit, err) pair per call, in
-// order, whatever shell command it is asked to run: TestRunCheckCommandLogsFixDuration
-// needs the same command to produce two different outcomes (an exit code,
-// then a timeout) across its two calls to runCheckCommand.
-type fixDurationCommands struct {
-	results []struct {
-		exit int
-		err  error
+// plainShellCommands runs a shell command for real, with no sandbox and no
+// OnStart callback: TestCheckFixRevertLogsStrayPaths needs fix's own shell
+// command to actually write a file, but not the check_procs bookkeeping
+// NewCommandRunner's OnStart path drives, which needs a real Deps.Store
+// this test has no reason to open.
+type plainShellCommands struct{}
+
+func (plainShellCommands) Run(ctx context.Context, dir, _, shellCmd string, _ time.Duration, cio CommandIO) (int, error) {
+	cmd := exec.CommandContext(ctx, "/bin/sh", "-c", shellCmd)
+	cmd.Dir = dir
+	cmd.Stdout, cmd.Stderr = cio.Out, cio.Out
+	if err := cmd.Run(); err != nil {
+		if exitErr, ok := errors.AsType[*exec.ExitError](err); ok {
+			return exitErr.ExitCode(), nil
+		}
+		return -1, err
 	}
-	calls int
+	return 0, nil
 }
 
-func (c *fixDurationCommands) Run(context.Context, string, string, string, time.Duration, CommandIO) (int, error) {
-	r := c.results[c.calls]
-	c.calls++
-	return r.exit, r.err
+// TestCheckFixRevertLogsStrayPaths proves the WARN "fix change reverted"
+// record is logged only once RevertPaths has actually removed the stray
+// paths it names, not before: an operator who reads the record must be
+// able to trust that the named paths are already gone (review r1f1). Not
+// parallel: it swaps slog.Default.
+func TestCheckFixRevertLogsStrayPaths(t *testing.T) {
+	dir := t.TempDir()
+	if err := gitfixture.NewSigningRepo(t.Context(), dir); err != nil {
+		t.Fatalf("gitfixture.NewSigningRepo: %v", err)
+	}
+	orch, repoGit, ok := pbOrchestratorFor(t, dir, orchestrator.NewRunner())
+	if !ok {
+		t.Fatal("pbOrchestratorFor: not a git repository")
+	}
+	wt, _, err := orch.EnsureWorktree(t.Context(), 1, "fix-revert-log")
+	if err != nil {
+		t.Fatalf("EnsureWorktree: %v", err)
+	}
+
+	var buf bytes.Buffer
+	orig := slog.Default()
+	slog.SetDefault(slog.New(slog.NewJSONHandler(&buf, &slog.HandlerOptions{Level: slog.LevelWarn})))
+	t.Cleanup(func() { slog.SetDefault(orig) })
+
+	const fixCmd = "printf x > stray.txt"
+	d := Deps{Commands: plainShellCommands{}, Machine: &machine.Machine{Jobs: map[string]machine.Job{jobBuildName: {TimeoutMinutes: 45}}}}
+	proj := Project{Orch: orch, RepoGit: repoGit, FixCmd: fixCmd, LintCmd: "true", TestCmd: "true"}
+	results, err := runCheckCommands(t.Context(), d, store.Ticket{ID: 1}, wt, proj, nil)
+	if err != nil {
+		t.Fatalf("runCheckCommands: %v", err)
+	}
+	if got := failedKinds(results); len(got) != 0 {
+		t.Fatalf("failed kinds = %v, want none", got)
+	}
+	if _, statErr := os.Stat(filepath.Join(wt.Dir(), "stray.txt")); !os.IsNotExist(statErr) {
+		t.Fatalf("stray.txt exists in the worktree, want it reverted before the log is read")
+	}
+
+	var records []map[string]any
+	dec := json.NewDecoder(&buf)
+	for dec.More() {
+		var rec map[string]any
+		if decErr := dec.Decode(&rec); decErr != nil {
+			t.Fatalf("decode log line: %v", decErr)
+		}
+		if rec["msg"] == "fix change reverted" {
+			records = append(records, rec)
+		}
+	}
+	if len(records) != 1 {
+		t.Fatalf("records = %+v, want exactly 1", records)
+	}
+	if records[0]["level"] != "WARN" {
+		t.Errorf("level = %v, want WARN", records[0]["level"])
+	}
+	paths, ok := records[0]["paths"].([]any)
+	if !ok || len(paths) != 1 || paths[0] != "stray.txt" {
+		t.Errorf("paths = %v, want [stray.txt]", records[0]["paths"])
+	}
 }
 
 // TestRunCheckCommandLogsFixDuration proves runCheckCommand's existing
@@ -267,19 +364,26 @@ func TestRunCheckCommandLogsFixDuration(t *testing.T) {
 	slog.SetDefault(slog.New(slog.NewJSONHandler(&buf, &slog.HandlerOptions{Level: slog.LevelInfo})))
 	t.Cleanup(func() { slog.SetDefault(orig) })
 
-	cmds := &fixDurationCommands{results: []struct {
+	const theFix = "the-fix"
+	cmds := &budgetCommands{timeouts: map[string]time.Duration{}, results: map[string]struct {
 		exit int
 		err  error
-	}{
-		{exit: 1, err: nil},
-		{exit: -1, err: ErrCommandTimeout},
-	}}
+	}{}}
 	d := Deps{Commands: cmds}
 	rid := int64(9)
-	for range 2 {
-		if _, err := runCheckCommand(t.Context(), d, store.Ticket{ID: 7}, orchestrator.Worktree{}, Project{}, &rid, checkKindFix, "the-fix", time.Minute, nil); err != nil {
-			t.Fatalf("runCheckCommand: %v", err)
-		}
+	cmds.results[theFix] = struct {
+		exit int
+		err  error
+	}{exit: 1}
+	if _, err := runCheckCommand(t.Context(), d, store.Ticket{ID: 7}, orchestrator.Worktree{}, Project{}, &rid, checkKindFix, theFix, time.Minute, nil); err != nil {
+		t.Fatalf("runCheckCommand: %v", err)
+	}
+	cmds.results[theFix] = struct {
+		exit int
+		err  error
+	}{exit: -1, err: ErrCommandTimeout}
+	if _, err := runCheckCommand(t.Context(), d, store.Ticket{ID: 7}, orchestrator.Worktree{}, Project{}, &rid, checkKindFix, theFix, time.Minute, nil); err != nil {
+		t.Fatalf("runCheckCommand: %v", err)
 	}
 
 	var records []map[string]any
