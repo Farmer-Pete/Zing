@@ -700,9 +700,9 @@ func checkReviewBots(md toml.MetaData, bots ReviewBots) error {
 	for i := range bots.Checks {
 		c := &bots.Checks[i]
 		switch {
-		case c.Check == "":
+		case strings.TrimSpace(c.Check) == "":
 			return fmt.Errorf("zing.toml: review_bots.checks[%d].check: must not be empty", i)
-		case c.Trigger == "":
+		case strings.TrimSpace(c.Trigger) == "":
 			return fmt.Errorf("zing.toml: review_bots.checks[%d].trigger: must not be empty", i)
 		case seen[c.Check]:
 			return fmt.Errorf("zing.toml: review_bots.checks[%d].check: duplicate check %q", i, c.Check)

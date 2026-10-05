@@ -484,8 +484,8 @@ func TestReviewBotChecks(t *testing.T) {
 	t.Run("nil converts to an empty slice", func(t *testing.T) {
 		t.Parallel()
 		got := reviewBotChecks(nil)
-		if len(got) != 0 {
-			t.Errorf("reviewBotChecks(nil) = %+v, want empty", got)
+		if got == nil || len(got) != 0 {
+			t.Errorf("reviewBotChecks(nil) = %+v, want a non-nil empty slice", got)
 		}
 	})
 
