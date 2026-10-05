@@ -1467,7 +1467,11 @@ func tasksTable(ticketID int64, editable bool, tasks []RenderedTask) templ.Compo
 // /tickets/{id}/edit. t.Text, not t.TextHTML, prefills the textarea -- the
 // owner edits the raw markdown, not its rendered HTML.
 // data-preserve-attr="open" keeps it open across a /stream patch while the
-// owner is editing, matching questionGroup's own use of the attribute.
+// owner is editing, matching questionGroup's own use of the attribute. The
+// textarea's content opens with a "\n" (bug fix): the HTML parser drops
+// exactly one leading newline right after a textarea's opening tag, so
+// without it a stored text that itself starts with a newline would render
+// one character short; the prefix makes the parser's drop a no-op either way.
 func ownerEditTaskForm(ticketID int64, t RenderedTask) templ.Component {
 	return templruntime.GeneratedTemplate(func(templ_7745c5c3_Input templruntime.GeneratedComponentInput) (templ_7745c5c3_Err error) {
 		templ_7745c5c3_W, ctx := templ_7745c5c3_Input.Writer, templ_7745c5c3_Input.Context
@@ -1496,7 +1500,7 @@ func ownerEditTaskForm(ticketID int64, t RenderedTask) templ.Component {
 		var templ_7745c5c3_Var68 string
 		templ_7745c5c3_Var68, templ_7745c5c3_Err = templ.ResolveAttributeValue(strconv.FormatInt(ticketID, 10))
 		if templ_7745c5c3_Err != nil {
-			return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/console/templates/plan.templ`, Line: 419, Col: 100}
+			return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/console/templates/plan.templ`, Line: 423, Col: 100}
 		}
 		_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ_7745c5c3_Var68)
 		if templ_7745c5c3_Err != nil {
@@ -1509,7 +1513,7 @@ func ownerEditTaskForm(ticketID int64, t RenderedTask) templ.Component {
 		var templ_7745c5c3_Var69 string
 		templ_7745c5c3_Var69, templ_7745c5c3_Err = templ.ResolveAttributeValue(strconv.Itoa(t.N))
 		if templ_7745c5c3_Err != nil {
-			return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/console/templates/plan.templ`, Line: 419, Col: 155}
+			return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/console/templates/plan.templ`, Line: 423, Col: 155}
 		}
 		_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ_7745c5c3_Var69)
 		if templ_7745c5c3_Err != nil {
@@ -1520,9 +1524,9 @@ func ownerEditTaskForm(ticketID int64, t RenderedTask) templ.Component {
 			return templ_7745c5c3_Err
 		}
 		var templ_7745c5c3_Var70 string
-		templ_7745c5c3_Var70, templ_7745c5c3_Err = templ.JoinStringErrs(t.Text)
+		templ_7745c5c3_Var70, templ_7745c5c3_Err = templ.JoinStringErrs("\n" + t.Text)
 		if templ_7745c5c3_Err != nil {
-			return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/console/templates/plan.templ`, Line: 422, Col: 38}
+			return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/console/templates/plan.templ`, Line: 426, Col: 45}
 		}
 		_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ.EscapeString(templ_7745c5c3_Var70))
 		if templ_7745c5c3_Err != nil {
@@ -1535,7 +1539,7 @@ func ownerEditTaskForm(ticketID int64, t RenderedTask) templ.Component {
 		var templ_7745c5c3_Var71 string
 		templ_7745c5c3_Var71, templ_7745c5c3_Err = templ.ResolveAttributeValue(t.Test)
 		if templ_7745c5c3_Err != nil {
-			return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/console/templates/plan.templ`, Line: 424, Col: 53}
+			return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/console/templates/plan.templ`, Line: 428, Col: 53}
 		}
 		_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ_7745c5c3_Var71)
 		if templ_7745c5c3_Err != nil {

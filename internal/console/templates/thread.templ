@@ -62,11 +62,15 @@ templ Thread(ticket *store.Ticket, rows []ThreadRow, wait WaitProgress, banner s
 // amends tickets.body only, so the tracker reference renders as a plain
 // note the owner edits the issue by hand against.
 // data-preserve-attr="open" keeps it open across a /stream patch while the
-// owner is editing, matching questionGroup's own use of the attribute.
+// owner is editing, matching questionGroup's own use of the attribute. The
+// textarea's content opens with a "\n" (bug fix): the HTML parser drops
+// exactly one leading newline right after a textarea's opening tag, so
+// without it a stored body that itself starts with a newline would render
+// one character short; the prefix makes the parser's drop a no-op either way.
 templ ticketBodyEditor(ticket *store.Ticket) {
 	<details class="owner-edit" data-preserve-attr="open" data-ticket={ strconv.FormatInt(ticket.ID, 10) } data-target="ticket_body">
 		<summary>Ticket body</summary>
-		<textarea data-field="body">{ ticket.Body }</textarea>
+		<textarea data-field="body">{ "\n" + ticket.Body }</textarea>
 		<p>The tracker issue { ticket.TrackerRef } is not updated; edit it by hand to match.</p>
 		<button type="button" class="owner-edit-save">Save</button>
 		<span class="owner-edit-error"></span>

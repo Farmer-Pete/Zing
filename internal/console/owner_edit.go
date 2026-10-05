@@ -47,15 +47,25 @@ func (b ownerEditBody) request(ticketID int64) store.OwnerEditRequest {
 }
 
 // ownerEditStatus maps a *store.OwnerEditError's Code to the HTTP status
-// handleOwnerEdit answers with.
-var ownerEditStatus = map[string]int{
-	"bad_request": http.StatusBadRequest,
-	"not_found":   http.StatusNotFound,
-	"not_sealed":  http.StatusConflict,
-	"landed":      http.StatusConflict,
-	"claimed":     http.StatusConflict,
-	"invalid":     http.StatusUnprocessableEntity,
+// handleOwnerEdit answers with, keyed by store's own exported constants so a
+// renamed or added code fails to compile here instead of silently falling
+// back to status 0.
+var ownerEditStatus = map[store.OwnerEditCode]int{
+	store.OwnerEditCodeBadRequest: http.StatusBadRequest,
+	store.OwnerEditCodeNotFound:   http.StatusNotFound,
+	store.OwnerEditCodeNotSealed:  http.StatusConflict,
+	store.OwnerEditCodeLanded:     http.StatusConflict,
+	store.OwnerEditCodeClaimed:    http.StatusConflict,
+	store.OwnerEditCodeInvalid:    http.StatusUnprocessableEntity,
 }
+
+// ownerEditSandboxCmdOnlyReason is handleOwnerEdit's refusal when a remote,
+// non-loopback caller sets check or test: both become shell commands CHECK
+// and the build later run in the ticket's sandbox, the same owner-decided
+// local-only boundary sandboxrun.go's requireLoopback draws around POST
+// /tickets/{id}/sandbox-run. Every other field (given, when, then, text,
+// demo, body) carries no such risk and stays open to any same-origin caller.
+const ownerEditSandboxCmdOnlyReason = "editing a check or test command is allowed from this machine only"
 
 // handleOwnerEdit is POST /tickets/{id}/edit: the owner edits a sealed
 // scenario, a sealed plan's task, or the ticket body (store.OwnerEdit).
@@ -75,10 +85,16 @@ func (c *console) handleOwnerEdit(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if (body.Check != nil || body.Test != nil) && !isLoopbackRemote(r.RemoteAddr) {
+		http.Error(w, ownerEditSandboxCmdOnlyReason, http.StatusForbidden)
+		return
+	}
+
 	err = c.store.OwnerEdit(r.Context(), body.request(id))
 	var refusal *store.OwnerEditError
 	switch {
 	case errors.As(err, &refusal):
+		slog.Info("console: owner edit refused", "ticket_id", id, "target", body.Target, "ref", body.Ref, "action", body.Action, "code", refusal.Code)
 		http.Error(w, refusal.Reason, ownerEditStatus[refusal.Code])
 		return
 	case err != nil:

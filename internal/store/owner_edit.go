@@ -15,6 +15,7 @@ import (
 	"fmt"
 	"log/slog"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -35,14 +36,20 @@ const (
 	OwnerEditActionDrop = "drop"
 )
 
+// OwnerEditCode is OwnerEditError's Code: one of the named constants below.
+// The console keys its HTTP status map by these, not by a copied string, so
+// a renamed or added code fails to compile there instead of silently
+// falling back to status 0.
+type OwnerEditCode string
+
 // OwnerEditError's Code values.
 const (
-	ownerEditCodeBadRequest = "bad_request"
-	ownerEditCodeNotFound   = "not_found"
-	ownerEditCodeNotSealed  = "not_sealed"
-	ownerEditCodeLanded     = "landed"
-	ownerEditCodeClaimed    = "claimed"
-	ownerEditCodeInvalid    = "invalid"
+	OwnerEditCodeBadRequest OwnerEditCode = "bad_request"
+	OwnerEditCodeNotFound   OwnerEditCode = "not_found"
+	OwnerEditCodeNotSealed  OwnerEditCode = "not_sealed"
+	OwnerEditCodeLanded     OwnerEditCode = "landed"
+	OwnerEditCodeClaimed    OwnerEditCode = "claimed"
+	OwnerEditCodeInvalid    OwnerEditCode = "invalid"
 )
 
 // maxPlanTaskRef is the highest task number a plan may carry (response.
@@ -80,14 +87,40 @@ type OwnerEditRequest struct {
 // status the console maps it to, Reason is the one owner-facing sentence.
 // A refusal changes nothing.
 type OwnerEditError struct {
-	Code   string
+	Code   OwnerEditCode
 	Reason string
 }
 
 func (e *OwnerEditError) Error() string { return e.Reason }
 
-func ownerEditErr(code, reason string) *OwnerEditError {
+func ownerEditErr(code OwnerEditCode, reason string) *OwnerEditError {
 	return &OwnerEditError{Code: code, Reason: reason}
+}
+
+// ownerEditClaimedReason is every claim-guarded write's one refusal
+// sentence, shared by execClaimGuardedTx's callers so a claimed ticket
+// reads the same regardless of which target it refused.
+const ownerEditClaimedReason = "ticket is claimed; edits are refused while a run holds it"
+
+// execClaimGuardedTx runs query guarded by "the ticket is not claimed" --
+// query must itself AND its WHERE clause against
+// "(SELECT claim_owner FROM tickets WHERE id = ?) IS NULL" or
+// "claim_owner IS NULL" -- and returns a *OwnerEditError of
+// OwnerEditCodeClaimed when it affects no rows. what names the target in a
+// wrapped non-refusal error. nil means the write landed.
+func execClaimGuardedTx(ctx context.Context, tx *sql.Tx, what, query string, args ...any) error {
+	res, err := tx.ExecContext(ctx, query, args...)
+	if err != nil {
+		return fmt.Errorf("owner edit: update %s: %w", what, err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("owner edit: update %s: %w", what, err)
+	}
+	if n == 0 {
+		return ownerEditErr(OwnerEditCodeClaimed, ownerEditClaimedReason)
+	}
+	return nil
 }
 
 // scenarioRefPattern is OwnerEditRequest.Ref's required shape for a
@@ -138,22 +171,22 @@ func ownerEditSetFields(req OwnerEditRequest) []string {
 // that only the fields allowed for that target are set.
 func checkOwnerEditShape(req OwnerEditRequest) *OwnerEditError {
 	if req.TicketID < 1 {
-		return ownerEditErr(ownerEditCodeBadRequest, "ticket id must be at least 1")
+		return ownerEditErr(OwnerEditCodeBadRequest, "ticket id must be at least 1")
 	}
 
 	allowed, ok := ownerEditFieldsByTarget[req.Target]
 	if !ok {
-		return ownerEditErr(ownerEditCodeBadRequest, "target must be one of scenario, plan_task, ticket_body")
+		return ownerEditErr(OwnerEditCodeBadRequest, "target must be one of scenario, plan_task, ticket_body")
 	}
 
 	switch req.Action {
 	case OwnerEditActionEdit:
 	case OwnerEditActionDrop:
 		if req.Target != OwnerEditPlanTask {
-			return ownerEditErr(ownerEditCodeBadRequest, "drop is allowed only for plan_task")
+			return ownerEditErr(OwnerEditCodeBadRequest, "drop is allowed only for plan_task")
 		}
 	default:
-		return ownerEditErr(ownerEditCodeBadRequest, "action must be edit or drop")
+		return ownerEditErr(OwnerEditCodeBadRequest, "action must be edit or drop")
 	}
 
 	if err := checkOwnerEditRef(req.Target, req.Ref); err != nil {
@@ -163,15 +196,16 @@ func checkOwnerEditShape(req OwnerEditRequest) *OwnerEditError {
 	names := ownerEditSetFields(req)
 	for _, name := range names {
 		if !allowed[name] {
-			return ownerEditErr(ownerEditCodeBadRequest, "field "+name+" is not allowed for target "+req.Target)
+			return ownerEditErr(OwnerEditCodeBadRequest, "field "+name+" is not allowed for target "+req.Target)
 		}
 	}
 	if req.Action == OwnerEditActionEdit && len(names) == 0 {
-		return ownerEditErr(ownerEditCodeBadRequest, "an edit must set at least one field")
+		return ownerEditErr(OwnerEditCodeBadRequest, "an edit must set at least one field")
 	}
 
-	if req.Target == OwnerEditTicketBody && req.Body != nil && strings.TrimSpace(*req.Body) == "" {
-		return ownerEditErr(ownerEditCodeBadRequest, "body must not be blank")
+	blankBody := req.Body != nil && strings.TrimSpace(*req.Body) == ""
+	if req.Target == OwnerEditTicketBody && blankBody {
+		return ownerEditErr(OwnerEditCodeBadRequest, "body must not be blank")
 	}
 
 	return nil
@@ -184,16 +218,17 @@ func checkOwnerEditRef(target, ref string) *OwnerEditError {
 	switch target {
 	case OwnerEditScenario:
 		if !scenarioRefPattern.MatchString(ref) {
-			return ownerEditErr(ownerEditCodeBadRequest, "ref must match ^s[0-9]+$")
+			return ownerEditErr(OwnerEditCodeBadRequest, "ref must match ^s[0-9]+$")
 		}
 	case OwnerEditPlanTask:
 		n, err := strconv.Atoi(ref)
-		if err != nil || n < 1 || n > maxPlanTaskRef {
-			return ownerEditErr(ownerEditCodeBadRequest, fmt.Sprintf("ref must be a decimal from 1 to %d", maxPlanTaskRef))
+		inRange := err == nil && n >= 1 && n <= maxPlanTaskRef
+		if !inRange {
+			return ownerEditErr(OwnerEditCodeBadRequest, fmt.Sprintf("ref must be a decimal from 1 to %d", maxPlanTaskRef))
 		}
 	case OwnerEditTicketBody:
 		if ref != "" {
-			return ownerEditErr(ownerEditCodeBadRequest, "ref must be empty for ticket_body")
+			return ownerEditErr(OwnerEditCodeBadRequest, "ref must be empty for ticket_body")
 		}
 	}
 	return nil
@@ -254,12 +289,12 @@ func (s *Store) editScenarioTx(ctx context.Context, tx *sql.Tx, req OwnerEditReq
 	).Scan(&id, &payload, &sealedAt)
 	switch {
 	case errors.Is(err, sql.ErrNoRows):
-		return response.OwnerEditEvent{}, ownerEditErr(ownerEditCodeNotFound, "no scenario "+req.Ref+" on this ticket")
+		return response.OwnerEditEvent{}, ownerEditErr(OwnerEditCodeNotFound, "no scenario "+req.Ref+" on this ticket")
 	case err != nil:
 		return response.OwnerEditEvent{}, fmt.Errorf("owner edit: load scenario %s: %w", req.Ref, err)
 	}
 	if !sealedAt.Valid {
-		return response.OwnerEditEvent{}, ownerEditErr(ownerEditCodeNotSealed, "scenario "+req.Ref+" is not sealed; answer the gate instead")
+		return response.OwnerEditEvent{}, ownerEditErr(OwnerEditCodeNotSealed, "scenario "+req.Ref+" is not sealed; answer the gate instead")
 	}
 
 	var sc response.Scenario
@@ -286,22 +321,14 @@ func (s *Store) editScenarioTx(ctx context.Context, tx *sql.Tx, req OwnerEditReq
 		return response.OwnerEditEvent{}, fmt.Errorf("owner edit: marshal scenario %s: %w", req.Ref, err)
 	}
 	if err = s.schemas.validate("artifacts", "scenario", newPayload); err != nil {
-		return response.OwnerEditEvent{}, ownerEditErr(ownerEditCodeInvalid, err.Error())
+		return response.OwnerEditEvent{}, ownerEditErr(OwnerEditCodeInvalid, err.Error())
 	}
 
-	res, err := tx.ExecContext(ctx,
+	if err := execClaimGuardedTx(ctx, tx, "scenario "+req.Ref,
 		`UPDATE artifacts SET payload = ? WHERE id = ? AND (SELECT claim_owner FROM tickets WHERE id = ?) IS NULL`,
 		string(newPayload), id, req.TicketID,
-	)
-	if err != nil {
-		return response.OwnerEditEvent{}, fmt.Errorf("owner edit: update scenario %s: %w", req.Ref, err)
-	}
-	n, err := res.RowsAffected()
-	if err != nil {
-		return response.OwnerEditEvent{}, fmt.Errorf("owner edit: update scenario %s: %w", req.Ref, err)
-	}
-	if n == 0 {
-		return response.OwnerEditEvent{}, ownerEditErr(ownerEditCodeClaimed, "ticket is claimed; edits are refused while a run holds it")
+	); err != nil {
+		return response.OwnerEditEvent{}, err
 	}
 
 	return response.OwnerEditEvent{
@@ -325,7 +352,7 @@ func (s *Store) editPlanTaskTx(ctx context.Context, tx *sql.Tx, req OwnerEditReq
 	).Scan(&id, &runID, &payload)
 	switch {
 	case errors.Is(err, sql.ErrNoRows):
-		return response.OwnerEditEvent{}, ownerEditErr(ownerEditCodeNotFound, "this ticket has no plan")
+		return response.OwnerEditEvent{}, ownerEditErr(OwnerEditCodeNotFound, "this ticket has no plan")
 	case err != nil:
 		return response.OwnerEditEvent{}, fmt.Errorf("owner edit: load plan: %w", err)
 	}
@@ -338,13 +365,12 @@ func (s *Store) editPlanTaskTx(ctx context.Context, tx *sql.Tx, req OwnerEditReq
 		return response.OwnerEditEvent{}, fmt.Errorf("owner edit: count sealed scenarios: %w", err)
 	}
 	if sealedCount < 1 {
-		return response.OwnerEditEvent{}, ownerEditErr(ownerEditCodeNotSealed, "the plan is not sealed; answer the gate instead")
+		return response.OwnerEditEvent{}, ownerEditErr(OwnerEditCodeNotSealed, "the plan is not sealed; answer the gate instead")
 	}
 
-	n, err := strconv.Atoi(req.Ref)
-	if err != nil {
-		return response.OwnerEditEvent{}, ownerEditErr(ownerEditCodeNotFound, "no task "+req.Ref+" in the plan")
-	}
+	// checkOwnerEditRef has already confirmed req.Ref parses as a decimal
+	// from 1 to maxPlanTaskRef, so the error is unreachable here.
+	n, _ := strconv.Atoi(req.Ref) //nolint:errcheck // unreachable, see above
 
 	var plan response.Plan
 	if err = json.Unmarshal(payload, &plan); err != nil {
@@ -352,33 +378,21 @@ func (s *Store) editPlanTaskTx(ctx context.Context, tx *sql.Tx, req OwnerEditReq
 	}
 	oldPayload := string(payload)
 
-	found := false
-	for _, t := range plan.Delivery.Tasks {
-		if t.N == n {
-			found = true
-			break
-		}
-	}
-	if !found {
-		return response.OwnerEditEvent{}, ownerEditErr(ownerEditCodeNotFound, fmt.Sprintf("no task %d in the plan", n))
+	idx := slices.IndexFunc(plan.Delivery.Tasks, func(t response.Task) bool { return t.N == n })
+	if idx == -1 {
+		return response.OwnerEditEvent{}, ownerEditErr(OwnerEditCodeNotFound, fmt.Sprintf("no task %d in the plan", n))
 	}
 
 	switch req.Action {
 	case OwnerEditActionEdit:
-		for i := range plan.Delivery.Tasks {
-			if plan.Delivery.Tasks[i].N != n {
-				continue
-			}
-			if req.Text != nil {
-				plan.Delivery.Tasks[i].Text = *req.Text
-			}
-			if req.Test != nil {
-				plan.Delivery.Tasks[i].Test = *req.Test
-			}
-			if req.Demo != nil {
-				plan.Delivery.Tasks[i].Demo = *req.Demo
-			}
-			break
+		if req.Text != nil {
+			plan.Delivery.Tasks[idx].Text = *req.Text
+		}
+		if req.Test != nil {
+			plan.Delivery.Tasks[idx].Test = *req.Test
+		}
+		if req.Demo != nil {
+			plan.Delivery.Tasks[idx].Demo = *req.Demo
 		}
 	case OwnerEditActionDrop:
 		landed, lerr := landedTaskNumbers(ctx, tx, req.TicketID)
@@ -387,7 +401,7 @@ func (s *Store) editPlanTaskTx(ctx context.Context, tx *sql.Tx, req OwnerEditReq
 		}
 		for _, m := range landed {
 			if m >= n {
-				return response.OwnerEditEvent{}, ownerEditErr(ownerEditCodeLanded, fmt.Sprintf("task %d has landed; only tasks after it can be dropped", m))
+				return response.OwnerEditEvent{}, ownerEditErr(OwnerEditCodeLanded, fmt.Sprintf("task %d has landed; only tasks after it can be dropped", m))
 			}
 		}
 		plan = dropPlanTask(plan, n)
@@ -398,25 +412,17 @@ func (s *Store) editPlanTaskTx(ctx context.Context, tx *sql.Tx, req OwnerEditReq
 		return response.OwnerEditEvent{}, fmt.Errorf("owner edit: marshal plan: %w", err)
 	}
 	if err = s.schemas.validate("artifacts", "plan", newPayload); err != nil {
-		return response.OwnerEditEvent{}, ownerEditErr(ownerEditCodeInvalid, err.Error())
+		return response.OwnerEditEvent{}, ownerEditErr(OwnerEditCodeInvalid, err.Error())
 	}
 	if fault := checkPlanStructure(plan); fault != "" {
-		return response.OwnerEditEvent{}, ownerEditErr(ownerEditCodeInvalid, fault)
+		return response.OwnerEditEvent{}, ownerEditErr(OwnerEditCodeInvalid, fault)
 	}
 
-	res, err := tx.ExecContext(ctx,
+	if err := execClaimGuardedTx(ctx, tx, "plan",
 		`UPDATE artifacts SET payload = ? WHERE id = ? AND (SELECT claim_owner FROM tickets WHERE id = ?) IS NULL`,
 		string(newPayload), id, req.TicketID,
-	)
-	if err != nil {
-		return response.OwnerEditEvent{}, fmt.Errorf("owner edit: update plan: %w", err)
-	}
-	affected, err := res.RowsAffected()
-	if err != nil {
-		return response.OwnerEditEvent{}, fmt.Errorf("owner edit: update plan: %w", err)
-	}
-	if affected == 0 {
-		return response.OwnerEditEvent{}, ownerEditErr(ownerEditCodeClaimed, "ticket is claimed; edits are refused while a run holds it")
+	); err != nil {
+		return response.OwnerEditEvent{}, err
 	}
 
 	return response.OwnerEditEvent{
@@ -520,7 +526,8 @@ func checkPlanStructure(p response.Plan) string {
 	for _, f := range p.Delivery.Files {
 		for field := range strings.FieldsSeq(f.Task) {
 			m, err := strconv.Atoi(field)
-			if err != nil || m < 1 || m > len(tasks) {
+			namesTask := err == nil && m >= 1 && m <= len(tasks)
+			if !namesTask {
 				return fmt.Sprintf("file %s names task %s, outside 1..%d", f.Path, field, len(tasks))
 			}
 		}
@@ -537,26 +544,18 @@ func editTicketBodyTx(ctx context.Context, tx *sql.Tx, req OwnerEditRequest) (re
 	err := tx.QueryRowContext(ctx, `SELECT body FROM tickets WHERE id = ?`, req.TicketID).Scan(&oldBody)
 	switch {
 	case errors.Is(err, sql.ErrNoRows):
-		return response.OwnerEditEvent{}, ownerEditErr(ownerEditCodeNotFound, fmt.Sprintf("no ticket %d", req.TicketID))
+		return response.OwnerEditEvent{}, ownerEditErr(OwnerEditCodeNotFound, fmt.Sprintf("no ticket %d", req.TicketID))
 	case err != nil:
 		return response.OwnerEditEvent{}, fmt.Errorf("owner edit: load ticket %d: %w", req.TicketID, err)
 	}
 
 	newBody := *req.Body
 
-	res, err := tx.ExecContext(ctx,
+	if err := execClaimGuardedTx(ctx, tx, fmt.Sprintf("ticket %d body", req.TicketID),
 		`UPDATE tickets SET body = ? WHERE id = ? AND claim_owner IS NULL`,
 		newBody, req.TicketID,
-	)
-	if err != nil {
-		return response.OwnerEditEvent{}, fmt.Errorf("owner edit: update ticket %d body: %w", req.TicketID, err)
-	}
-	n, err := res.RowsAffected()
-	if err != nil {
-		return response.OwnerEditEvent{}, fmt.Errorf("owner edit: update ticket %d body: %w", req.TicketID, err)
-	}
-	if n == 0 {
-		return response.OwnerEditEvent{}, ownerEditErr(ownerEditCodeClaimed, "ticket is claimed; edits are refused while a run holds it")
+	); err != nil {
+		return response.OwnerEditEvent{}, err
 	}
 
 	return response.OwnerEditEvent{

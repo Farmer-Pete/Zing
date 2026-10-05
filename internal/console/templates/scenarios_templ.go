@@ -154,7 +154,11 @@ func scenariosSection(scenarios []ScenarioRow) templ.Component {
 // then, or check, posted by console.js's ownerEditSubmit to POST
 // /tickets/{id}/edit. data-preserve-attr="open" keeps it open across a
 // /stream patch while the owner is editing, matching questionGroup's own
-// use of the attribute.
+// use of the attribute. Each textarea's content opens with a "\n" (bug
+// fix): the HTML parser drops exactly one leading newline right after a
+// textarea's opening tag, so without it a stored value that itself starts
+// with a newline would render one character short; the prefix makes the
+// parser's drop a no-op either way.
 func ownerEditScenarioForm(s ScenarioRow) templ.Component {
 	return templruntime.GeneratedTemplate(func(templ_7745c5c3_Input templruntime.GeneratedComponentInput) (templ_7745c5c3_Err error) {
 		templ_7745c5c3_W, ctx := templ_7745c5c3_Input.Writer, templ_7745c5c3_Input.Context
@@ -183,7 +187,7 @@ func ownerEditScenarioForm(s ScenarioRow) templ.Component {
 		var templ_7745c5c3_Var9 string
 		templ_7745c5c3_Var9, templ_7745c5c3_Err = templ.ResolveAttributeValue(strconv.FormatInt(s.TicketID, 10))
 		if templ_7745c5c3_Err != nil {
-			return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/console/templates/scenarios.templ`, Line: 57, Col: 102}
+			return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/console/templates/scenarios.templ`, Line: 61, Col: 102}
 		}
 		_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ_7745c5c3_Var9)
 		if templ_7745c5c3_Err != nil {
@@ -196,7 +200,7 @@ func ownerEditScenarioForm(s ScenarioRow) templ.Component {
 		var templ_7745c5c3_Var10 string
 		templ_7745c5c3_Var10, templ_7745c5c3_Err = templ.ResolveAttributeValue(s.ID)
 		if templ_7745c5c3_Err != nil {
-			return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/console/templates/scenarios.templ`, Line: 57, Col: 143}
+			return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/console/templates/scenarios.templ`, Line: 61, Col: 143}
 		}
 		_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ_7745c5c3_Var10)
 		if templ_7745c5c3_Err != nil {
@@ -207,9 +211,9 @@ func ownerEditScenarioForm(s ScenarioRow) templ.Component {
 			return templ_7745c5c3_Err
 		}
 		var templ_7745c5c3_Var11 string
-		templ_7745c5c3_Var11, templ_7745c5c3_Err = templ.JoinStringErrs(s.Given)
+		templ_7745c5c3_Var11, templ_7745c5c3_Err = templ.JoinStringErrs("\n" + s.Given)
 		if templ_7745c5c3_Err != nil {
-			return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/console/templates/scenarios.templ`, Line: 60, Col: 40}
+			return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/console/templates/scenarios.templ`, Line: 64, Col: 47}
 		}
 		_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ.EscapeString(templ_7745c5c3_Var11))
 		if templ_7745c5c3_Err != nil {
@@ -220,9 +224,9 @@ func ownerEditScenarioForm(s ScenarioRow) templ.Component {
 			return templ_7745c5c3_Err
 		}
 		var templ_7745c5c3_Var12 string
-		templ_7745c5c3_Var12, templ_7745c5c3_Err = templ.JoinStringErrs(s.When)
+		templ_7745c5c3_Var12, templ_7745c5c3_Err = templ.JoinStringErrs("\n" + s.When)
 		if templ_7745c5c3_Err != nil {
-			return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/console/templates/scenarios.templ`, Line: 62, Col: 38}
+			return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/console/templates/scenarios.templ`, Line: 66, Col: 45}
 		}
 		_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ.EscapeString(templ_7745c5c3_Var12))
 		if templ_7745c5c3_Err != nil {
@@ -233,9 +237,9 @@ func ownerEditScenarioForm(s ScenarioRow) templ.Component {
 			return templ_7745c5c3_Err
 		}
 		var templ_7745c5c3_Var13 string
-		templ_7745c5c3_Var13, templ_7745c5c3_Err = templ.JoinStringErrs(s.Then)
+		templ_7745c5c3_Var13, templ_7745c5c3_Err = templ.JoinStringErrs("\n" + s.Then)
 		if templ_7745c5c3_Err != nil {
-			return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/console/templates/scenarios.templ`, Line: 64, Col: 38}
+			return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/console/templates/scenarios.templ`, Line: 68, Col: 45}
 		}
 		_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ.EscapeString(templ_7745c5c3_Var13))
 		if templ_7745c5c3_Err != nil {
@@ -248,7 +252,7 @@ func ownerEditScenarioForm(s ScenarioRow) templ.Component {
 		var templ_7745c5c3_Var14 string
 		templ_7745c5c3_Var14, templ_7745c5c3_Err = templ.ResolveAttributeValue(s.Check)
 		if templ_7745c5c3_Err != nil {
-			return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/console/templates/scenarios.templ`, Line: 66, Col: 55}
+			return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/console/templates/scenarios.templ`, Line: 70, Col: 55}
 		}
 		_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ_7745c5c3_Var14)
 		if templ_7745c5c3_Err != nil {

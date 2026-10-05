@@ -414,12 +414,16 @@ templ tasksTable(ticketID int64, editable bool, tasks []RenderedTask) {
 // /tickets/{id}/edit. t.Text, not t.TextHTML, prefills the textarea -- the
 // owner edits the raw markdown, not its rendered HTML.
 // data-preserve-attr="open" keeps it open across a /stream patch while the
-// owner is editing, matching questionGroup's own use of the attribute.
+// owner is editing, matching questionGroup's own use of the attribute. The
+// textarea's content opens with a "\n" (bug fix): the HTML parser drops
+// exactly one leading newline right after a textarea's opening tag, so
+// without it a stored text that itself starts with a newline would render
+// one character short; the prefix makes the parser's drop a no-op either way.
 templ ownerEditTaskForm(ticketID int64, t RenderedTask) {
 	<details class="owner-edit" data-preserve-attr="open" data-ticket={ strconv.FormatInt(ticketID, 10) } data-target="plan_task" data-ref={ strconv.Itoa(t.N) }>
 		<summary>Edit</summary>
 		<label>Text</label>
-		<textarea data-field="text">{ t.Text }</textarea>
+		<textarea data-field="text">{ "\n" + t.Text }</textarea>
 		<label>Test</label>
 		<input type="text" data-field="test" value={ t.Test }/>
 		<label>Demo</label>

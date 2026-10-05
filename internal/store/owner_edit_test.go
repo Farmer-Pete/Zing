@@ -20,16 +20,16 @@ const (
 )
 
 // seedSealedScenario seeds ticketID (seedQueuedTicket's ticketID) with one
-// sealed scenario artifact named id, through insertScenarioArtifact
+// sealed scenario artifact "s1", through insertScenarioArtifact
 // (planning_reads_test.go).
-func seedSealedScenario(t *testing.T, s *Store, ticketID int64, id string) { //nolint:unparam // every test in this file today seeds "s1"; kept as a parameter for a future test that seeds a second scenario
+func seedSealedScenario(t *testing.T, s *Store, ticketID int64) {
 	t.Helper()
 	at := time.Now().UTC().Truncate(time.Second)
-	insertScenarioArtifact(t, s, ticketID, nil, id, &at)
+	insertScenarioArtifact(t, s, ticketID, nil, "s1", &at)
 }
 
-// ownerEditScenarioEvents returns every owner_edit event on ticketID.
-func ownerEditScenarioEvents(t *testing.T, s *Store, ticketID int64) []MessageRow {
+// ownerEditEvents returns every owner_edit event on ticketID.
+func ownerEditEvents(t *testing.T, s *Store, ticketID int64) []MessageRow {
 	t.Helper()
 	rows, err := s.Events(t.Context(), ticketID, EventKindOwnerEdit, EventFilter{})
 	if err != nil {
@@ -170,7 +170,7 @@ func TestOwnerEdit_ScenarioCheckRewritesPayloadAndWritesEvent(t *testing.T) {
 	t.Parallel()
 	s := newTestStore(t)
 	_, ticketID := seedQueuedTicket(t, s, "1")
-	seedSealedScenario(t, s, ticketID, "s1")
+	seedSealedScenario(t, s, ticketID)
 
 	if err := s.OwnerEdit(t.Context(), OwnerEditRequest{
 		TicketID: ticketID, Target: OwnerEditScenario, Ref: "s1", Action: OwnerEditActionEdit,
@@ -183,7 +183,7 @@ func TestOwnerEdit_ScenarioCheckRewritesPayloadAndWritesEvent(t *testing.T) {
 		t.Errorf("check_cmd = %q, want %q", got, "go test ./new")
 	}
 
-	events := ownerEditScenarioEvents(t, s, ticketID)
+	events := ownerEditEvents(t, s, ticketID)
 	if len(events) != 1 {
 		t.Fatalf("owner_edit events = %d, want 1", len(events))
 	}
@@ -218,8 +218,8 @@ func TestOwnerEdit_RefusesUnsealedScenario(t *testing.T) {
 	if !ok {
 		t.Fatalf("OwnerEdit(unsealed s1) error = %v (%T), want *OwnerEditError", err, err)
 	}
-	if refusal.Code != ownerEditCodeNotSealed {
-		t.Errorf("code = %q, want %q", refusal.Code, ownerEditCodeNotSealed)
+	if refusal.Code != OwnerEditCodeNotSealed {
+		t.Errorf("code = %q, want %q", refusal.Code, OwnerEditCodeNotSealed)
 	}
 
 	err = s.OwnerEdit(t.Context(), OwnerEditRequest{
@@ -229,8 +229,8 @@ func TestOwnerEdit_RefusesUnsealedScenario(t *testing.T) {
 	if !ok {
 		t.Fatalf("OwnerEdit(missing s9) error = %v (%T), want *OwnerEditError", err, err)
 	}
-	if refusal.Code != ownerEditCodeNotFound {
-		t.Errorf("code = %q, want %q", refusal.Code, ownerEditCodeNotFound)
+	if refusal.Code != OwnerEditCodeNotFound {
+		t.Errorf("code = %q, want %q", refusal.Code, OwnerEditCodeNotFound)
 	}
 }
 
@@ -241,7 +241,7 @@ func TestOwnerEdit_RefusesFieldNotAllowedForTarget(t *testing.T) {
 	t.Parallel()
 	s := newTestStore(t)
 	_, ticketID := seedQueuedTicket(t, s, "1")
-	seedSealedScenario(t, s, ticketID, "s1")
+	seedSealedScenario(t, s, ticketID)
 
 	tests := []struct {
 		name string
@@ -259,8 +259,8 @@ func TestOwnerEdit_RefusesFieldNotAllowedForTarget(t *testing.T) {
 			if !ok {
 				t.Fatalf("OwnerEdit error = %v (%T), want *OwnerEditError", err, err)
 			}
-			if refusal.Code != ownerEditCodeBadRequest {
-				t.Errorf("code = %q, want %q", refusal.Code, ownerEditCodeBadRequest)
+			if refusal.Code != OwnerEditCodeBadRequest {
+				t.Errorf("code = %q, want %q", refusal.Code, OwnerEditCodeBadRequest)
 			}
 		})
 	}
@@ -276,7 +276,7 @@ func TestOwnerEdit_RefusesWhileClaimed(t *testing.T) {
 		t.Parallel()
 		s := newTestStore(t)
 		_, ticketID := seedQueuedTicket(t, s, "1")
-		seedSealedScenario(t, s, ticketID, "s1")
+		seedSealedScenario(t, s, ticketID)
 		before := scenarioCheck(t, s, ticketID, "s1")
 
 		claimed, err := s.Claim(t.Context(), ticketID, "runner-1", time.Now().Add(time.Hour))
@@ -291,8 +291,8 @@ func TestOwnerEdit_RefusesWhileClaimed(t *testing.T) {
 		if !ok {
 			t.Fatalf("OwnerEdit(claimed) error = %v (%T), want *OwnerEditError", err, err)
 		}
-		if refusal.Code != ownerEditCodeClaimed {
-			t.Errorf("code = %q, want %q", refusal.Code, ownerEditCodeClaimed)
+		if refusal.Code != OwnerEditCodeClaimed {
+			t.Errorf("code = %q, want %q", refusal.Code, OwnerEditCodeClaimed)
 		}
 		if got := scenarioCheck(t, s, ticketID, "s1"); got != before {
 			t.Errorf("check_cmd changed to %q, want unchanged %q", got, before)
@@ -327,8 +327,8 @@ func TestOwnerEdit_RefusesWhileClaimed(t *testing.T) {
 		if !ok {
 			t.Fatalf("OwnerEdit(claimed) error = %v (%T), want *OwnerEditError", err, err)
 		}
-		if refusal.Code != ownerEditCodeClaimed {
-			t.Errorf("code = %q, want %q", refusal.Code, ownerEditCodeClaimed)
+		if refusal.Code != OwnerEditCodeClaimed {
+			t.Errorf("code = %q, want %q", refusal.Code, OwnerEditCodeClaimed)
 		}
 		got, _, ok, err := s.StoredPlan(t.Context(), ticketID)
 		if err != nil || !ok {
@@ -359,8 +359,8 @@ func TestOwnerEdit_RefusesWhileClaimed(t *testing.T) {
 		if !ok {
 			t.Fatalf("OwnerEdit(claimed) error = %v (%T), want *OwnerEditError", err, err)
 		}
-		if refusal.Code != ownerEditCodeClaimed {
-			t.Errorf("code = %q, want %q", refusal.Code, ownerEditCodeClaimed)
+		if refusal.Code != OwnerEditCodeClaimed {
+			t.Errorf("code = %q, want %q", refusal.Code, OwnerEditCodeClaimed)
 		}
 		ticket, err := s.GetTicket(t.Context(), ticketID)
 		if err != nil {
@@ -381,7 +381,7 @@ func TestOwnerEdit_RefusesSchemaBreakingEdit(t *testing.T) {
 	t.Parallel()
 	s := newTestStore(t)
 	_, ticketID := seedQueuedTicket(t, s, "1")
-	seedSealedScenario(t, s, ticketID, "s1")
+	seedSealedScenario(t, s, ticketID)
 
 	err := s.OwnerEdit(t.Context(), OwnerEditRequest{
 		TicketID: ticketID, Target: OwnerEditScenario, Ref: "s1", Action: OwnerEditActionEdit, Given: new(""),
@@ -390,8 +390,8 @@ func TestOwnerEdit_RefusesSchemaBreakingEdit(t *testing.T) {
 	if !ok {
 		t.Fatalf("OwnerEdit(blank given) error = %v (%T), want *OwnerEditError", err, err)
 	}
-	if refusal.Code != ownerEditCodeInvalid {
-		t.Errorf("code = %q, want %q", refusal.Code, ownerEditCodeInvalid)
+	if refusal.Code != OwnerEditCodeInvalid {
+		t.Errorf("code = %q, want %q", refusal.Code, OwnerEditCodeInvalid)
 	}
 	if n, err := s.CountEvents(t.Context(), ticketID, EventKindOwnerEdit, EventFilter{}); err != nil || n != 0 {
 		t.Errorf("owner_edit events = %d (err %v), want 0", n, err)
@@ -451,7 +451,7 @@ func TestOwnerEdit_EditsPlanTaskInPlace(t *testing.T) {
 		t.Errorf("task 2 = %+v, want text %q demo true", got.Delivery.Tasks[1], "new text 2")
 	}
 
-	events := ownerEditScenarioEvents(t, s, ticketID)
+	events := ownerEditEvents(t, s, ticketID)
 	if len(events) != 1 {
 		t.Fatalf("owner_edit events = %d, want 1", len(events))
 	}
@@ -489,8 +489,8 @@ func TestOwnerEdit_RefusesUnsealedPlan(t *testing.T) {
 	if !ok {
 		t.Fatalf("OwnerEdit(unsealed plan) error = %v (%T), want *OwnerEditError", err, err)
 	}
-	if refusal.Code != ownerEditCodeNotSealed {
-		t.Errorf("code = %q, want %q", refusal.Code, ownerEditCodeNotSealed)
+	if refusal.Code != OwnerEditCodeNotSealed {
+		t.Errorf("code = %q, want %q", refusal.Code, OwnerEditCodeNotSealed)
 	}
 }
 
@@ -520,6 +520,14 @@ func TestOwnerEdit_RefusesDropAtOrBeforeLandedTask(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("insert build_report: %v", err)
 	}
+	// A build_report with no commit_sha, for task 3, is not landed: it must
+	// not itself block a drop of task 3 (landedTaskNumbers filters on
+	// commit_sha IS NOT NULL).
+	if _, err := s.InsertArtifact(t.Context(), Artifact{
+		TicketID: ticketID, Type: testTypeBuildReport, Payload: buildReportPayload(3),
+	}); err != nil {
+		t.Fatalf("insert build_report (no commit_sha): %v", err)
+	}
 
 	for _, n := range []string{"1", "2"} {
 		err := s.OwnerEdit(t.Context(), OwnerEditRequest{
@@ -529,8 +537,8 @@ func TestOwnerEdit_RefusesDropAtOrBeforeLandedTask(t *testing.T) {
 		if !ok {
 			t.Fatalf("OwnerEdit(drop task %s) error = %v (%T), want *OwnerEditError", n, err, err)
 		}
-		if refusal.Code != ownerEditCodeLanded {
-			t.Errorf("drop task %s: code = %q, want %q", n, refusal.Code, ownerEditCodeLanded)
+		if refusal.Code != OwnerEditCodeLanded {
+			t.Errorf("drop task %s: code = %q, want %q", n, refusal.Code, OwnerEditCodeLanded)
 		}
 	}
 
@@ -545,6 +553,28 @@ func TestOwnerEdit_RefusesDropAtOrBeforeLandedTask(t *testing.T) {
 	}
 	if len(got.Delivery.Tasks) != 2 {
 		t.Errorf("tasks = %d, want 2", len(got.Delivery.Tasks))
+	}
+
+	events := ownerEditEvents(t, s, ticketID)
+	if len(events) != 1 {
+		t.Fatalf("owner_edit events = %d, want 1", len(events))
+	}
+	var ev response.OwnerEditEvent
+	if err := json.Unmarshal(events[0].Payload, &ev); err != nil {
+		t.Fatalf("unmarshal owner_edit event: %v", err)
+	}
+	if ev.Action != OwnerEditActionDrop || ev.Ref != "3" {
+		t.Errorf("event action/ref = %q/%q, want %q/%q", ev.Action, ev.Ref, OwnerEditActionDrop, "3")
+	}
+	if !strings.Contains(ev.Old, "text 3") {
+		t.Errorf("event old = %q, want it to contain the dropped task's text", ev.Old)
+	}
+	if strings.Contains(ev.New, "text 3") {
+		t.Errorf("event new = %q, want it to no longer contain the dropped task's text", ev.New)
+	}
+	wantBody := "Owner dropped plan task 3; later tasks moved up one."
+	if events[0].Body != wantBody {
+		t.Errorf("event body = %q, want %q", events[0].Body, wantBody)
 	}
 }
 
@@ -572,8 +602,8 @@ func TestOwnerEdit_RefusesDropOfOnlyTask(t *testing.T) {
 	if !ok {
 		t.Fatalf("OwnerEdit(drop only task) error = %v (%T), want *OwnerEditError", err, err)
 	}
-	if refusal.Code != ownerEditCodeInvalid {
-		t.Errorf("code = %q, want %q", refusal.Code, ownerEditCodeInvalid)
+	if refusal.Code != OwnerEditCodeInvalid {
+		t.Errorf("code = %q, want %q", refusal.Code, OwnerEditCodeInvalid)
 	}
 
 	got, _, ok, err := s.StoredPlan(t.Context(), ticketID)
@@ -611,7 +641,7 @@ func TestOwnerEdit_AmendsTicketBody(t *testing.T) {
 		t.Errorf("body = %q, want %q", ticket.Body, "new body text")
 	}
 
-	events := ownerEditScenarioEvents(t, s, ticketID)
+	events := ownerEditEvents(t, s, ticketID)
 	if len(events) != 1 {
 		t.Fatalf("owner_edit events = %d, want 1", len(events))
 	}
@@ -637,8 +667,8 @@ func TestOwnerEdit_AmendsTicketBody(t *testing.T) {
 	if !ok {
 		t.Fatalf("OwnerEdit(blank body) error = %v (%T), want *OwnerEditError", err, err)
 	}
-	if refusal.Code != ownerEditCodeBadRequest {
-		t.Errorf("code = %q, want %q", refusal.Code, ownerEditCodeBadRequest)
+	if refusal.Code != OwnerEditCodeBadRequest {
+		t.Errorf("code = %q, want %q", refusal.Code, OwnerEditCodeBadRequest)
 	}
 }
 

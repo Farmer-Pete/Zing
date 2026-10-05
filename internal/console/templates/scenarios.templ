@@ -52,16 +52,20 @@ templ scenariosSection(scenarios []ScenarioRow) {
 // then, or check, posted by console.js's ownerEditSubmit to POST
 // /tickets/{id}/edit. data-preserve-attr="open" keeps it open across a
 // /stream patch while the owner is editing, matching questionGroup's own
-// use of the attribute.
+// use of the attribute. Each textarea's content opens with a "\n" (bug
+// fix): the HTML parser drops exactly one leading newline right after a
+// textarea's opening tag, so without it a stored value that itself starts
+// with a newline would render one character short; the prefix makes the
+// parser's drop a no-op either way.
 templ ownerEditScenarioForm(s ScenarioRow) {
 	<details class="owner-edit" data-preserve-attr="open" data-ticket={ strconv.FormatInt(s.TicketID, 10) } data-target="scenario" data-ref={ s.ID }>
 		<summary>Edit</summary>
 		<label>Given</label>
-		<textarea data-field="given">{ s.Given }</textarea>
+		<textarea data-field="given">{ "\n" + s.Given }</textarea>
 		<label>When</label>
-		<textarea data-field="when">{ s.When }</textarea>
+		<textarea data-field="when">{ "\n" + s.When }</textarea>
 		<label>Then</label>
-		<textarea data-field="then">{ s.Then }</textarea>
+		<textarea data-field="then">{ "\n" + s.Then }</textarea>
 		<label>Check</label>
 		<input type="text" data-field="check" value={ s.Check }/>
 		<button type="button" class="owner-edit-save">Save</button>

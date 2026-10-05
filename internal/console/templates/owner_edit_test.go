@@ -30,7 +30,7 @@ func TestOwnerEditControls_SealedScenarioOnly(t *testing.T) {
 	}
 }
 
-// minimalRenderedPlanTasks is RenderedPlan's minimal valid fixture for
+// minimalRenderedPlan is RenderedPlan's minimal valid fixture for
 // TestOwnerEditControls_TasksWhenEditable: every templ.Component field
 // PlanView unconditionally renders (ContextHTML, Problem.TextHTML,
 // Design.ShapeHTML) is a non-nil stand-in, and Delivery.Tasks is the only
@@ -94,7 +94,10 @@ func TestOwnerEditControls_TasksWhenEditable(t *testing.T) {
 // TestOwnerEditControls_TicketBodyEditor proves Thread renders
 // ticketBodyEditor's own owner-edit box (#41) for the open ticket: a
 // data-target="ticket_body" element whose textarea holds the ticket's
-// stored body.
+// stored body, behind the one leading "\n" every owner-edit textarea opens
+// with (bug fix: the HTML parser drops exactly one leading newline right
+// after a textarea's opening tag, so the prefix is there precisely so a
+// stored value does not lose one of its own).
 func TestOwnerEditControls_TicketBodyEditor(t *testing.T) {
 	t.Parallel()
 	ticket := &store.Ticket{ID: 7, Title: testHelloTicketTitle, Body: "B"}
@@ -108,7 +111,26 @@ func TestOwnerEditControls_TicketBodyEditor(t *testing.T) {
 	if !strings.Contains(got, `data-target="ticket_body"`) {
 		t.Errorf(`want a data-target="ticket_body" element; got:\n%s`, got)
 	}
-	if !strings.Contains(got, `<textarea data-field="body">B</textarea>`) {
-		t.Errorf("want the body textarea to contain B; got:\n%s", got)
+	if !strings.Contains(got, "<textarea data-field=\"body\">\nB</textarea>") {
+		t.Errorf("want the body textarea to open with a dropped newline then contain B; got:\n%s", got)
+	}
+}
+
+// TestOwnerEditControls_TextareaPreservesLeadingNewline proves the same
+// prefix keeps a stored value's own leading newline intact: a body of
+// "\nX" renders as "\n\nX" in the raw HTML, so the parser's one-newline
+// drop leaves exactly "\nX" -- the owner's stored text unchanged.
+func TestOwnerEditControls_TextareaPreservesLeadingNewline(t *testing.T) {
+	t.Parallel()
+	ticket := &store.Ticket{ID: 7, Title: testHelloTicketTitle, Body: "\nX"}
+
+	var sb strings.Builder
+	if err := Thread(ticket, nil, WaitProgress{}, "").Render(t.Context(), &sb); err != nil {
+		t.Fatalf("Thread.Render: %v", err)
+	}
+	got := sb.String()
+
+	if !strings.Contains(got, "<textarea data-field=\"body\">\n\nX</textarea>") {
+		t.Errorf("want the body textarea to double up the stored leading newline; got:\n%s", got)
 	}
 }

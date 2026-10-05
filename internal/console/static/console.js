@@ -1183,6 +1183,7 @@ async function ownerEditSubmit(button) {
 		const name = field.dataset.field;
 		body[name] = field.type === 'checkbox' ? field.checked : field.value;
 	}
+	let message = '';
 	try {
 		const resp = await fetch(`/tickets/${ticketID}/edit`, {
 			method: 'POST',
@@ -1190,21 +1191,15 @@ async function ownerEditSubmit(button) {
 			body: JSON.stringify(body),
 		});
 		if (!resp.ok) {
-			const text = await resp.text();
-			suppressPatchSignal = true;
-			errorSpan.textContent = text;
-			suppressPatchSignal = false;
-			return;
+			message = await resp.text();
 		}
-		suppressPatchSignal = true;
-		errorSpan.textContent = '';
-		suppressPatchSignal = false;
 	} catch (err) {
 		console.error('console.js: POST /tickets/{id}/edit', err);
-		suppressPatchSignal = true;
-		errorSpan.textContent = 'request failed';
-		suppressPatchSignal = false;
+		message = 'request failed';
 	}
+	suppressPatchSignal = true;
+	errorSpan.textContent = message;
+	suppressPatchSignal = false;
 }
 
 // installOwnerEdit wires every .owner-edit box's Save and Drop buttons

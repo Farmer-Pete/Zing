@@ -6,6 +6,7 @@ package console_test
 import (
 	"encoding/json"
 	"net/http"
+	"net/http/httptest"
 	"strconv"
 	"strings"
 	"testing"
@@ -29,11 +30,13 @@ func ownerEditPath(ticketID int64) string {
 }
 
 // seedSealedScenarioArtifact inserts one sealed scenario artifact on
-// ticketID, carrying no run_id, the legacy-but-still-sealed shape this
-// route's refusal and acceptance paths both need (store.OwnerEdit's
-// editScenarioTx looks up by ticket_id and the payload's own id, not by
-// run_id).
-func seedSealedScenarioArtifact(t *testing.T, s *store.Store, ticketID int64, sc response.Scenario) {
+// ticketID, owned by runID -- or carrying no run_id at all when runID is
+// nil, the legacy-but-still-sealed shape this route's refusal and
+// acceptance paths both need (store.OwnerEdit's editScenarioTx looks up by
+// ticket_id and the payload's own id, not by run_id). runID non-nil is the
+// shape editPlanTaskTx's seal check needs, counting sealed scenarios by
+// run_id.
+func seedSealedScenarioArtifact(t *testing.T, s *store.Store, ticketID int64, runID *int64, sc response.Scenario) {
 	t.Helper()
 	payload, err := json.Marshal(sc)
 	if err != nil {
@@ -41,15 +44,15 @@ func seedSealedScenarioArtifact(t *testing.T, s *store.Store, ticketID int64, sc
 	}
 	sealedAt := time.Now().UTC()
 	if _, err := s.InsertArtifact(t.Context(), store.Artifact{
-		TicketID: ticketID, Type: testArtifactTypeScenario, Payload: payload, SealedAt: &sealedAt,
+		TicketID: ticketID, RunID: runID, Type: testArtifactTypeScenario, Payload: payload, SealedAt: &sealedAt,
 	}); err != nil {
 		t.Fatalf("InsertArtifact(sealed scenario %s): %v", sc.ID, err)
 	}
 }
 
-// readScenarioCheck reads back ticketID's scenario id's check_cmd field,
-// through the exported AllScenarios read.
-func readScenarioCheck(t *testing.T, s *store.Store, ticketID int64, id string) string {
+// readScenarioCheck reads back ticketID's scenario "s1" own check_cmd
+// field, through the exported AllScenarios read.
+func readScenarioCheck(t *testing.T, s *store.Store, ticketID int64) string {
 	t.Helper()
 	artifacts, err := s.AllScenarios(t.Context(), ticketID)
 	if err != nil {
@@ -60,11 +63,11 @@ func readScenarioCheck(t *testing.T, s *store.Store, ticketID int64, id string) 
 		if err := json.Unmarshal(a.Payload, &sc); err != nil {
 			t.Fatalf("unmarshal scenario: %v", err)
 		}
-		if sc.ID == id {
+		if sc.ID == "s1" {
 			return sc.Check
 		}
 	}
-	t.Fatalf("no scenario %s on ticket %d", id, ticketID)
+	t.Fatalf("no scenario s1 on ticket %d", ticketID)
 	return ""
 }
 
@@ -75,10 +78,10 @@ func TestOwnerEditRoute_EditsSealedScenarioCheck(t *testing.T) {
 	t.Parallel()
 	s := newConsoleTestStore(t)
 	ticketID := seedTicket(t, s, "1", "fix the bug")
-	seedSealedScenarioArtifact(t, s, ticketID, response.Scenario{
+	seedSealedScenarioArtifact(t, s, ticketID, nil, response.Scenario{
 		ID: "s1", Kind: response.ScenarioKindBehavior, Check: testOldCheck, Given: "g", When: "w", Then: "t",
 	})
-	seedSealedScenarioArtifact(t, s, ticketID, response.Scenario{
+	seedSealedScenarioArtifact(t, s, ticketID, nil, response.Scenario{
 		ID: "s2", Kind: response.ScenarioKindBehavior, Check: "go test ./other", Given: "g", When: "w", Then: "t",
 	})
 
@@ -89,7 +92,7 @@ func TestOwnerEditRoute_EditsSealedScenarioCheck(t *testing.T) {
 		t.Fatalf("status = %d, want 204; body = %q", resp.StatusCode, readBody(t, resp))
 	}
 
-	if got := readScenarioCheck(t, s, ticketID, "s1"); got != testNewCheck {
+	if got := readScenarioCheck(t, s, ticketID); got != testNewCheck {
 		t.Errorf("s1 check_cmd = %q, want %q", got, testNewCheck)
 	}
 
@@ -119,7 +122,7 @@ func TestOwnerEditRoute_RefusesSchemaBreakingEdit(t *testing.T) {
 	t.Parallel()
 	s := newConsoleTestStore(t)
 	ticketID := seedTicket(t, s, "1", "fix the bug")
-	seedSealedScenarioArtifact(t, s, ticketID, response.Scenario{
+	seedSealedScenarioArtifact(t, s, ticketID, nil, response.Scenario{
 		ID: "s1", Kind: response.ScenarioKindBehavior, Check: testOldCheck, Given: "g", When: "w", Then: "t",
 	})
 
@@ -130,7 +133,7 @@ func TestOwnerEditRoute_RefusesSchemaBreakingEdit(t *testing.T) {
 		t.Fatalf("status = %d, want 422; body = %q", resp.StatusCode, readBody(t, resp))
 	}
 
-	if got := readScenarioCheck(t, s, ticketID, "s1"); got != testOldCheck {
+	if got := readScenarioCheck(t, s, ticketID); got != testOldCheck {
 		t.Errorf("s1 check_cmd = %q, want unchanged %q", got, testOldCheck)
 	}
 	if n, err := s.CountEvents(t.Context(), ticketID, store.EventKindOwnerEdit, store.EventFilter{}); err != nil || n != 0 {
@@ -146,23 +149,6 @@ func planWithTasks(tasks []response.Task, files []response.FileChange) response.
 	plan.Delivery.Tasks = tasks
 	plan.Delivery.Files = files
 	return plan
-}
-
-// seedSealedScenarioArtifactWithRun inserts one sealed scenario artifact on
-// ticketID, owned by runID: the shape editPlanTaskTx's seal check needs,
-// counting sealed scenarios by run_id.
-func seedSealedScenarioArtifactWithRun(t *testing.T, s *store.Store, ticketID, runID int64, sc response.Scenario) {
-	t.Helper()
-	payload, err := json.Marshal(sc)
-	if err != nil {
-		t.Fatalf("marshal scenario %s: %v", sc.ID, err)
-	}
-	sealedAt := time.Now().UTC()
-	if _, insErr := s.InsertArtifact(t.Context(), store.Artifact{
-		TicketID: ticketID, RunID: &runID, Type: testArtifactTypeScenario, Payload: payload, SealedAt: &sealedAt,
-	}); insErr != nil {
-		t.Fatalf("InsertArtifact(sealed scenario %s): %v", sc.ID, insErr)
-	}
 }
 
 // fileTaskByPath returns the Task field of the file named path, so the drop
@@ -207,10 +193,10 @@ func TestOwnerEditRoute_DropsPlanTask(t *testing.T) {
 	}); insErr != nil {
 		t.Fatalf("InsertArtifact(plan): %v", insErr)
 	}
-	seedSealedScenarioArtifactWithRun(t, s, ticketID, runID, response.Scenario{
+	seedSealedScenarioArtifact(t, s, ticketID, &runID, response.Scenario{
 		ID: "s1", Kind: response.ScenarioKindBehavior, Given: "g1", When: "w1", Then: "t1",
 	})
-	seedSealedScenarioArtifactWithRun(t, s, ticketID, runID, response.Scenario{
+	seedSealedScenarioArtifact(t, s, ticketID, &runID, response.Scenario{
 		ID: "s2", Kind: response.ScenarioKindBehavior, Given: "g2", When: "w2", Then: "t2",
 	})
 
@@ -313,7 +299,7 @@ func TestOwnerEditRoute_RefusesClaimedTicket(t *testing.T) {
 	t.Parallel()
 	s := newConsoleTestStore(t)
 	ticketID := seedTicket(t, s, "1", "fix the bug")
-	seedSealedScenarioArtifact(t, s, ticketID, response.Scenario{
+	seedSealedScenarioArtifact(t, s, ticketID, nil, response.Scenario{
 		ID: "s1", Kind: response.ScenarioKindBehavior, Check: testOldCheck, Given: "g", When: "w", Then: "t",
 	})
 	claimed, err := s.Claim(t.Context(), ticketID, "runner-1", time.Now().Add(time.Hour))
@@ -331,7 +317,47 @@ func TestOwnerEditRoute_RefusesClaimedTicket(t *testing.T) {
 		t.Errorf("body = %q, want %q", got, want)
 	}
 
-	if got := readScenarioCheck(t, s, ticketID, "s1"); got != testOldCheck {
+	if got := readScenarioCheck(t, s, ticketID); got != testOldCheck {
+		t.Errorf("s1 check_cmd = %q, want unchanged %q", got, testOldCheck)
+	}
+}
+
+// TestOwnerEditRoute_RefusesNonLoopbackCheckEdit proves a request that sets
+// check (or test) is refused 403 from a non-loopback caller, even with a
+// valid Host and same-origin Origin, the same local-only boundary
+// sandboxrun.go's requireLoopback draws around POST
+// /tickets/{id}/sandbox-run: both become shell commands CHECK and the build
+// later run. Driven straight against the handler (no real listener) so
+// RemoteAddr can be set directly (sandboxrun_test.go's own
+// TestSandboxRunRefusesNonLoopback precedent).
+func TestOwnerEditRoute_RefusesNonLoopbackCheckEdit(t *testing.T) {
+	t.Parallel()
+	s := newConsoleTestStore(t)
+	ticketID := seedTicket(t, s, "1", "fix the bug")
+	seedSealedScenarioArtifact(t, s, ticketID, nil, response.Scenario{
+		ID: "s1", Kind: response.ScenarioKindBehavior, Check: testOldCheck, Given: "g", When: "w", Then: "t",
+	})
+
+	srv := newTestServer(t, s, bus.New(), nil, newTestLogHandler(t))
+	authority := strings.TrimPrefix(srv.URL, "http://")
+	body := `{"target":"scenario","ref":"s1","action":"edit","check":"` + testNewCheck + `"}`
+	req := httptest.NewRequestWithContext(t.Context(), http.MethodPost, srv.URL+ownerEditPath(ticketID), strings.NewReader(body))
+	req.Host = authority
+	req.RemoteAddr = "192.0.2.1:1234"
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Datastar-Request", "true")
+	req.Header.Set("Origin", srv.URL)
+
+	rec := httptest.NewRecorder()
+	srv.Config.Handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, want 403; body = %q", rec.Code, rec.Body.String())
+	}
+	if got, want := strings.TrimSpace(rec.Body.String()), "editing a check or test command is allowed from this machine only"; got != want {
+		t.Errorf("body = %q, want %q", got, want)
+	}
+
+	if got := readScenarioCheck(t, s, ticketID); got != testOldCheck {
 		t.Errorf("s1 check_cmd = %q, want unchanged %q", got, testOldCheck)
 	}
 }

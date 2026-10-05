@@ -96,11 +96,11 @@ func TestBuildReportsOrder(t *testing.T) {
 
 	// Inserted in reverse task order, so BuildReports's own order proves it
 	// follows artifacts.id, not task_n.
-	aFirst, err := s.InsertArtifact(ctx, Artifact{TicketID: ticketID, RunID: &r2.RunID, Type: testTypeBuildReport, Payload: buildReportPayload(2)})
+	aFirst, err := s.InsertArtifact(ctx, Artifact{TicketID: ticketID, RunID: &r2.RunID, Type: "build_report", Payload: buildReportPayload(2)})
 	if err != nil {
 		t.Fatalf("insert build_report for task 2: %v", err)
 	}
-	aSecond, err := s.InsertArtifact(ctx, Artifact{TicketID: ticketID, RunID: &r1.RunID, Type: testTypeBuildReport, Payload: buildReportPayload(1)})
+	aSecond, err := s.InsertArtifact(ctx, Artifact{TicketID: ticketID, RunID: &r1.RunID, Type: "build_report", Payload: buildReportPayload(1)})
 	if err != nil {
 		t.Fatalf("insert build_report for task 1: %v", err)
 	}
@@ -345,10 +345,10 @@ func TestBuildReportLegacyExitFieldsValidate(t *testing.T) {
 		t.Fatalf("loadSchemas: %v", err)
 	}
 	legacy := `{"task_n":1,"files_changed":["a.go"],"test_exit":0,"lint_exit":0,"extras":[],"fences":[],"report":"did it","title":"Task 1"}`
-	if err := schemas.validate(testTableArtifacts, testTypeBuildReport, []byte(legacy)); err != nil {
+	if err := schemas.validate(testTableArtifacts, "build_report", []byte(legacy)); err != nil {
 		t.Errorf("validate legacy build_report: %v", err)
 	}
-	if err := schemas.validate(testTableArtifacts, testTypeBuildReport, buildReportPayload(1)); err != nil {
+	if err := schemas.validate(testTableArtifacts, "build_report", buildReportPayload(1)); err != nil {
 		t.Errorf("validate current build_report: %v", err)
 	}
 }
