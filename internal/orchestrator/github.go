@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"regexp"
 	"strings"
 	"time"
 
@@ -735,6 +736,32 @@ func hasLogPrefix(line, prefix string) bool {
 	return sp > 0 && strings.HasPrefix(line[sp+1:], prefix)
 }
 
+// goFileLinePattern matches a go source position, "name.go:N:".
+var goFileLinePattern = regexp.MustCompile(`[A-Za-z0-9_./-]+\.go:\d+:`)
+
+// isFailureLine reports whether line is a go test failure line: it holds
+// "--- FAIL", "panic:", or "DATA RACE"; it starts "FAIL" then a tab (after
+// an optional timestamp, hasLogPrefix); or it holds ".go:" and matches
+// goFileLinePattern. The regexp runs only on ".go:" lines, so a log of
+// millions of lines stays within JobLogTail's 30s client timeout under
+// -race.
+func isFailureLine(line string) bool {
+	switch {
+	case strings.Contains(line, "--- FAIL"):
+		return true
+	case strings.Contains(line, "panic:"):
+		return true
+	case strings.Contains(line, "DATA RACE"):
+		return true
+	case hasLogPrefix(line, "FAIL\t"):
+		return true
+	case strings.Contains(line, ".go:"):
+		return goFileLinePattern.MatchString(line)
+	default:
+		return false
+	}
+}
+
 // tailLog reads r line by line and returns, by default, the last n lines
 // joined with "\n" -- the fallback ring below. A line longer than
 // maxLogLineBytes is cut to that many bytes and ends "[line cut]"; the
@@ -753,9 +780,19 @@ func hasLogPrefix(line, prefix string) bool {
 // never evicted by the step's own output, and the returned step is always
 // header-first and at most n lines total. Once a step has failed, reading
 // stops at the next step header, so a later step's output cannot replace
-// it. If any step failed, tailLog returns its header followed by its
-// body -- from its header to its last error line, capped at n -- instead
-// of the plain ring.
+// it.
+//
+// tailLog also keeps hits within the current step's non-error output: a
+// hit is a line for which isFailureLine is true, kept with the 3 lines
+// before it (a before-window) and the 3 lines after it (an after-count),
+// with a "..." line marking a gap between two non-adjacent windows. Hits
+// are capped at n-2 lines, keeping the earliest; a new step header clears
+// them unless the step already failed. If the failed step has hits,
+// tailLog returns the header, then the hits, then the step's last
+// logErrorPrefix line (unless that line is already the final hit line).
+// When the failed step has no hits, tailLog returns its header followed
+// by its body -- from its header to its last error line, capped at n --
+// as above. With no failed step, tailLog returns the plain ring.
 func tailLog(r io.Reader, n int) (string, error) {
 	limited := &io.LimitedReader{R: r, N: maxLogTotalBytes + 1}
 	br := bufio.NewReaderSize(limited, maxLogLineBytes)
@@ -772,9 +809,74 @@ func tailLog(r io.Reader, n int) (string, error) {
 	var header string
 	var body, pending []string
 	failedStepFound := false
+	var lastErrorLine string
+
+	hitsCap := max(n-2, 0)
+	var hitsBuf, hitsRecent []string
+	hitsAfterRemain := 0
+	hitsLastPos := -1
+	hitsPos := 0
+
+	resetHits := func() {
+		hitsBuf = nil
+		hitsRecent = nil
+		hitsAfterRemain = 0
+		hitsLastPos = -1
+		hitsPos = 0
+	}
+
+	addHit := func(line string) {
+		defer func() { hitsPos++ }()
+		if len(hitsBuf) >= hitsCap {
+			return
+		}
+		isHit := isFailureLine(line)
+		switch {
+		case hitsAfterRemain > 0:
+			hitsBuf = append(hitsBuf, line)
+			hitsAfterRemain--
+			hitsLastPos = hitsPos
+			hitsRecent = nil
+			if isHit {
+				hitsAfterRemain = 3
+			}
+		case isHit:
+			var add []string
+			if hitsLastPos >= 0 && hitsPos-hitsLastPos-1 > 3 {
+				add = append(add, "...")
+			}
+			add = append(add, hitsRecent...)
+			add = append(add, line)
+			if remaining := hitsCap - len(hitsBuf); remaining > 0 {
+				if len(add) > remaining {
+					add = add[:remaining]
+				}
+				hitsBuf = append(hitsBuf, add...)
+			}
+			hitsRecent = nil
+			hitsAfterRemain = 3
+			hitsLastPos = hitsPos
+		default:
+			hitsRecent = append(hitsRecent, line)
+			if len(hitsRecent) > 3 {
+				hitsRecent = hitsRecent[1:]
+			}
+		}
+	}
 
 	joinStep := func() string {
 		return strings.Join(append([]string{header}, body...), "\n")
+	}
+
+	finalStep := func() string {
+		if len(hitsBuf) == 0 {
+			return joinStep()
+		}
+		out := append([]string{header}, hitsBuf...)
+		if lastErrorLine != "" && hitsBuf[len(hitsBuf)-1] != lastErrorLine {
+			out = append(out, lastErrorLine)
+		}
+		return strings.Join(out, "\n")
 	}
 
 	for {
@@ -795,11 +897,13 @@ func tailLog(r io.Reader, n int) (string, error) {
 			switch {
 			case hasLogPrefix(line, logGroupRunPrefix):
 				if failedStepFound {
-					return joinStep(), nil
+					return finalStep(), nil
 				}
 				header = line
 				body = nil
 				pending = nil
+				lastErrorLine = ""
+				resetHits()
 			case hasLogPrefix(line, logErrorPrefix):
 				for _, p := range pending {
 					body = pushCapped(body, p, n-1)
@@ -807,8 +911,10 @@ func tailLog(r io.Reader, n int) (string, error) {
 				body = pushCapped(body, line, n-1)
 				pending = nil
 				failedStepFound = true
+				lastErrorLine = line
 			default:
 				pending = pushCapped(pending, line, n-1)
+				addHit(line)
 			}
 		}
 		if err != nil {
@@ -820,7 +926,7 @@ func tailLog(r io.Reader, n int) (string, error) {
 	}
 
 	if failedStepFound {
-		return joinStep(), nil
+		return finalStep(), nil
 	}
 
 	if limited.N == 0 {

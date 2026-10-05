@@ -1301,6 +1301,99 @@ func TestJobLogTailCutsAtFailedStep(t *testing.T) {
 	})
 }
 
+// TestJobLogTailKeepsFailureLinesFromLongStep checks that a long go test
+// step's failure lines survive tailLog's cap even when they sit thousands
+// of lines before the step's final "##[error]" annotation (the "send the
+// failure, not the log head" gap: a 200-line tail of such a step would
+// otherwise hold nothing but unrelated setup or filler output).
+func TestJobLogTailKeepsFailureLinesFromLongStep(t *testing.T) {
+	t.Parallel()
+
+	const failureLine1 = "--- FAIL: TestResumeE2E_AnswerViaConsoleAdvancesTicketToDoneWithNoLeak (0.42s)"
+	const failureLine2 = "    merge_test.go:487: git rev-parse MERGE_HEAD: exit status 128"
+	const failSummaryLine = "FAIL\tzing/internal/job\t12.340s"
+
+	var b strings.Builder
+	fmt.Fprintln(&b, "##[group]Run go test")
+	filler := 0
+	writeFiller := func(n int) {
+		for range n {
+			fmt.Fprintf(&b, "filler %d\n", filler)
+			filler++
+		}
+	}
+	writeFiller(1000)
+	fmt.Fprintln(&b, failureLine1)
+	fmt.Fprintln(&b, failureLine2)
+	writeFiller(1000)
+	fmt.Fprintln(&b, failSummaryLine)
+	writeFiller(4000)
+	fmt.Fprint(&b, "##[error]Process completed with exit code 1.\n")
+
+	logServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		fmt.Fprint(w, b.String())
+	}))
+	t.Cleanup(logServer.Close)
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/repos/acme/widgets/actions/jobs/99/logs", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Location", logServer.URL+"/log")
+		w.WriteHeader(http.StatusFound)
+	})
+	g := newTestGHClient(t, mux)
+
+	got, err := g.JobLogTail(t.Context(), "acme", "widgets", 99, 200)
+	if err != nil {
+		t.Fatalf("JobLogTail: unexpected error: %v", err)
+	}
+
+	lines := strings.Split(got, "\n")
+	if !strings.Contains(lines[0], "##[group]Run go test") {
+		t.Errorf("JobLogTail first line = %q, want it to contain %q", lines[0], "##[group]Run go test")
+	}
+	if !strings.Contains(got, failureLine1) {
+		t.Errorf("JobLogTail = %q, want it to contain %q", got, failureLine1)
+	}
+	if !strings.Contains(got, failureLine2) {
+		t.Errorf("JobLogTail = %q, want it to contain %q", got, failureLine2)
+	}
+	if !strings.Contains(got, "FAIL\tzing/internal/job") {
+		t.Errorf("JobLogTail = %q, want it to contain %q", got, "FAIL\tzing/internal/job")
+	}
+	if !strings.Contains(lines[len(lines)-1], "##[error]Process completed with exit code 1.") {
+		t.Errorf("JobLogTail last line = %q, want it to contain %q", lines[len(lines)-1], "##[error]Process completed with exit code 1.")
+	}
+	if len(lines) > 200 {
+		t.Errorf("JobLogTail lines = %d, want at most 200", len(lines))
+	}
+	if strings.Contains(got, "filler 5000") {
+		t.Errorf("JobLogTail = %q, must not contain %q", got, "filler 5000")
+	}
+}
+
+func TestIsFailureLine(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		line string
+		want bool
+	}{
+		{"--- FAIL: TestX (0.1s)", true},
+		{"2026-10-05T01:02:03Z FAIL\tzing/x\t1.2s", true},
+		{"panic: runtime error", true},
+		{"WARNING: DATA RACE", true},
+		{"    merge_test.go:487: boom", true},
+		{"ok  \tzing/x\t0.1s", false},
+		{"go: downloading x", false},
+		{"FAILED to fetch", false},
+	}
+	for _, tt := range tests {
+		if got := isFailureLine(tt.line); got != tt.want {
+			t.Errorf("isFailureLine(%q) = %v, want %v", tt.line, got, tt.want)
+		}
+	}
+}
+
 func TestClassifyGitHubErr(t *testing.T) {
 	t.Parallel()
 
