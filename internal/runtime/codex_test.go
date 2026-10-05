@@ -26,6 +26,9 @@ const (
 	pinnedCodexThreadID    = "0199e2b1-2c8b-7c53-8e9e-0a1b2c3d4e5f"
 	forbiddenCodexBypass   = "--dangerously-bypass-approvals-and-sandbox"
 	fakeCodexDefaultThread = "fake-codex-default-thread-id"
+	// wantCodexJudgeTimeoutArg is codexCommandTimeoutKey=codexJudgeCommandTimeout
+	// in milliseconds, the exact "-c" value a judge request's argv carries.
+	wantCodexJudgeTimeoutArg = "background_terminal_max_timeout=600000"
 )
 
 // judgeOkResultXML is a minimal, valid response.JudgeResponse "ok" document
@@ -848,7 +851,7 @@ func TestCodexArgvFullAccessOnlyWithPrefix(t *testing.T) {
 
 		argv := readArgv(t, dir)
 		outPath := outfileFromArgv(t, argv)
-		want := wantCodexArgv(outPath, []string{"-s", "danger-full-access"}, []string{"-"})
+		want := wantCodexArgv(outPath, []string{"-s", "danger-full-access", "-c", wantCodexJudgeTimeoutArg, "-c", codexSkillsOffSetting}, []string{"-"})
 		if !slices.Equal(argv, want) {
 			t.Errorf("argv =\n%v\nwant\n%v", argv, want)
 		}
@@ -867,11 +870,88 @@ func TestCodexArgvFullAccessOnlyWithPrefix(t *testing.T) {
 
 		argv := readArgv(t, dir)
 		outPath := outfileFromArgv(t, argv)
-		want := wantCodexArgv(outPath, []string{"-c", `sandbox_mode="danger-full-access"`}, []string{"resume", testCodexResumeID, "-"})
+		want := wantCodexArgv(outPath, []string{"-c", `sandbox_mode="danger-full-access"`, "-c", wantCodexJudgeTimeoutArg, "-c", codexSkillsOffSetting}, []string{"resume", testCodexResumeID, "-"})
 		if !slices.Equal(argv, want) {
 			t.Errorf("argv =\n%v\nwant\n%v", argv, want)
 		}
 	})
+}
+
+// TestCodexJudgeArgsOnlyForJudge proves the judge-only "-c" pairs
+// (codexCommandTimeoutKey raised to codexJudgeCommandTimeout, and
+// codexSkillsOffSetting) appear in a judge request's argv on both a first
+// turn and a resume, and appear in no other job's argv.
+func TestCodexJudgeArgsOnlyForJudge(t *testing.T) {
+	t.Parallel()
+	requireUnix(t)
+
+	t.Run("judge first turn", func(t *testing.T) {
+		t.Parallel()
+		dir := t.TempDir()
+		req := newFakeJudgeRequest(t, dir)
+		req.ExecPrefix = judgeExecPrefix
+		c := NewCodex(fakeCodexScript)
+		if _, err := c.Run(context.Background(), req); err != nil {
+			t.Fatalf("Run: %v", err)
+		}
+
+		argv := readArgv(t, dir)
+		if !containsConfigPair(argv, wantCodexJudgeTimeoutArg) {
+			t.Errorf("argv = %v, want it to contain -c %q", argv, wantCodexJudgeTimeoutArg)
+		}
+		if !containsConfigPair(argv, codexSkillsOffSetting) {
+			t.Errorf("argv = %v, want it to contain -c %q", argv, codexSkillsOffSetting)
+		}
+	})
+
+	t.Run("judge resume", func(t *testing.T) {
+		t.Parallel()
+		dir := t.TempDir()
+		req := newFakeJudgeRequest(t, dir)
+		req.ExecPrefix = judgeExecPrefix
+		req.SessionID = testCodexResumeID
+		c := NewCodex(fakeCodexScript)
+		if _, err := c.Run(context.Background(), req); err != nil {
+			t.Fatalf("Run: %v", err)
+		}
+
+		argv := readArgv(t, dir)
+		if !containsConfigPair(argv, wantCodexJudgeTimeoutArg) {
+			t.Errorf("argv = %v, want it to contain -c %q", argv, wantCodexJudgeTimeoutArg)
+		}
+		if !containsConfigPair(argv, codexSkillsOffSetting) {
+			t.Errorf("argv = %v, want it to contain -c %q", argv, codexSkillsOffSetting)
+		}
+	})
+
+	t.Run("planreview carries neither", func(t *testing.T) {
+		t.Parallel()
+		dir := t.TempDir()
+		req := newFakeCodexRequest(dir, "success")
+		c := NewCodex(fakeCodexScript)
+		if _, err := c.Run(context.Background(), req); err != nil {
+			t.Fatalf("Run: %v", err)
+		}
+
+		argv := strings.Join(readArgv(t, dir), " ")
+		if strings.Contains(argv, wantCodexJudgeTimeoutArg) {
+			t.Errorf("argv contains judge-only timeout arg: %s", argv)
+		}
+		if strings.Contains(argv, codexSkillsOffSetting) {
+			t.Errorf("argv contains judge-only skills setting: %s", argv)
+		}
+	})
+}
+
+// containsConfigPair reports whether argv holds "-c" immediately followed
+// by value, anywhere in the slice.
+func containsConfigPair(argv []string, value string) bool {
+	for i := 0; i+1 < len(argv); i++ {
+		if argv[i] == "-c" && argv[i+1] == value {
+			return true
+		}
+	}
+	return false
 }
 
 // TestCodexRefusesFullAccessWithoutPrefix proves a judge-job request with
@@ -939,7 +1019,7 @@ func TestCodexHonorsExecPrefix(t *testing.T) {
 
 	argv := readArgv(t, dir)
 	outPath := outfileFromArgv(t, argv)
-	want := wantCodexArgv(outPath, []string{"-s", "danger-full-access"}, []string{"-"})
+	want := wantCodexArgv(outPath, []string{"-s", "danger-full-access", "-c", wantCodexJudgeTimeoutArg, "-c", codexSkillsOffSetting}, []string{"-"})
 	if !slices.Equal(argv, want) {
 		t.Errorf("argv (after the prefix) =\n%v\nwant\n%v", argv, want)
 	}

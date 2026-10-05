@@ -70,6 +70,28 @@ func codexSandboxArgs(req RunRequest) ([]string, error) {
 	}
 }
 
+// codexJudgeCommandTimeout is job.checkCommandTimeout's value
+// (internal/job/building.go): the judge may wait as long for one command as
+// Zing's own CHECK re-run does. runtime cannot import job, so the value is
+// repeated here.
+const codexJudgeCommandTimeout = 10 * time.Minute
+
+// codexCommandTimeoutKey is the -c key that bounds how long Codex lets one
+// shell command run before it is terminated: `background_terminal_max_timeout`,
+// a top-level config.toml field taking milliseconds (confirmed on the host
+// against Codex 0.160.0: `codex exec -c background_terminal_max_timeout=... --strict-config`
+// accepts the key, and a built-in "awaiter" agent role ships with
+// `background_terminal_max_timeout = 3600000` in its profile).
+const codexCommandTimeoutKey = "background_terminal_max_timeout"
+
+// codexSkillsOffSetting is the -c pair that turns off the judge's attempt to
+// scan its own skill directories, including `~/.agents/skills` (confirmed on
+// the host against Codex 0.160.0: `codex features list` names
+// `skip_host_skill_discovery`, and `codex exec -c features.skip_host_skill_discovery=true
+// --strict-config` accepts it as a known key; judge.sb already denies the
+// read at the OS level, so this is a second, best-effort layer).
+const codexSkillsOffSetting = "features.skip_host_skill_discovery=true"
+
 // codexArgv assembles Codex's argv exactly per design section 4.1. The
 // prompt never appears here: Run writes it to stdin, and the trailing "-"
 // argument tells codex to read the prompt from there instead of a
@@ -89,6 +111,10 @@ func codexSandboxArgs(req RunRequest) ([]string, error) {
 // 4.6, D20). The forbidden --dangerously-bypass-approvals-and-sandbox flag
 // (real, and present in both --help outputs) never appears.
 //
+// A judge-job request also carries two judge-only "-c" pairs right after
+// the sandbox flags: codexCommandTimeoutKey raised to codexJudgeCommandTimeout,
+// and codexSkillsOffSetting. Every other job's argv is unchanged.
+//
 // req.Tools is deliberately not read here: codex exec has no per-tool
 // allowlist flag, so the sandbox mode above is the control instead
 // (PKG7-PLAN.md section 4).
@@ -99,6 +125,11 @@ func codexArgv(req RunRequest, outPath string) ([]string, error) {
 	}
 	argv := []string{"exec", "--ignore-user-config", "--ignore-rules", "--skip-git-repo-check"}
 	argv = append(argv, sandboxArgs...)
+	if req.Job == response.JobJudge {
+		argv = append(argv,
+			"-c", fmt.Sprintf("%s=%d", codexCommandTimeoutKey, codexJudgeCommandTimeout.Milliseconds()),
+			"-c", codexSkillsOffSetting)
+	}
 	argv = append(argv, "-m", req.Model, "--json", "-o", outPath)
 	if req.SessionID != "" {
 		argv = append(argv, "resume", req.SessionID)
