@@ -34,6 +34,8 @@ import {
 	sendResultWithUnsent,
 	AUTOSAVE_DEBOUNCE_MS,
 	replyAutosaveBody,
+	replyFocusSnapshot,
+	restoreFocusDecision,
 	collectPatchWork,
 	describeAction,
 	nextPendingNav,
@@ -93,6 +95,12 @@ const state = {
 	// once it is.
 	streamConnected: false,
 	pendingNav: null,
+	// replyFocus is the reply box the owner was last typing into (design:
+	// "Snapshot document.activeElement ... and its selection before patch
+	// work"), kept so runPatchWork's restoreReplyFocus can give it back if a
+	// /stream patch blurred or replaced the node. null when no reply box has
+	// focus, or once a deliberate blur's own focusout timeout has run.
+	replyFocus: null,
 };
 
 // ---- keys.json loading -----------------------------------------------
@@ -600,6 +608,46 @@ function installReplyAutosave() {
 	});
 }
 
+// installReplyFocusTracking keeps state.replyFocus current with whichever
+// "#main .reply-input" the owner is typing into (design: "Snapshot
+// document.activeElement ... and its selection before patch work"),
+// delegated from document like installReplyAutosave above, because #main is
+// morphed by every /stream patch.
+//
+// A deliberate blur (Esc, a click elsewhere, the post-send blur) and a
+// patch-caused one (the morph replacing or moving the focused node) both
+// fire the same focusout event, with nothing in the event itself telling
+// them apart. The setTimeout(0) below defers clearing the snapshot to the
+// next task, rather than clearing it immediately: a deliberate blur has no
+// mutation in the same task, so this timeout is the next thing to run and
+// clears it; a patch-caused blur's MutationObserver callback is a microtask,
+// which runs before this timeout, so restoreReplyFocus (runPatchWork, below)
+// still finds the snapshot live and can restore it. Checking
+// document.activeElement again inside the timeout, rather than clearing
+// unconditionally, also covers the owner tabbing from one reply box straight
+// to another: that focusout must not clear the snapshot the new box's own
+// focusin just set.
+function installReplyFocusTracking() {
+	const snapshotFromTarget = (target) => {
+		const el = target?.closest?.('.reply-input');
+		if (!el || !el.closest('#main')) {
+			return;
+		}
+		state.replyFocus = replyFocusSnapshot(el);
+	};
+	document.addEventListener('focusin', (event) => snapshotFromTarget(event.target));
+	document.addEventListener('input', (event) => snapshotFromTarget(event.target));
+	document.addEventListener('select', (event) => snapshotFromTarget(event.target));
+	document.addEventListener('focusout', () => {
+		setTimeout(() => {
+			const active = document.activeElement;
+			if (!active?.closest?.('.reply-input') || !active.closest('#main')) {
+				state.replyFocus = null;
+			}
+		}, 0);
+	});
+}
+
 async function postSendBatch(ticket) {
 	cancelAutosaves();
 	const inputs = Array.from(document.querySelectorAll('#main .reply-input'));
@@ -1062,6 +1110,39 @@ function runSendChordHints() {
 	}
 }
 
+// restoreReplyFocus is runPatchWork's last step (design: "If the morph
+// blurred it, restore focus and selection in runPatchWork"): it looks up the
+// box for the same ticket and question state.replyFocus names, and -- only
+// when the patch itself left focus on document.body, per
+// restoreFocusDecision (keyboard.mjs) -- gives it back focus and selection,
+// refilling its value first if the replacement node came up empty. Running
+// last, after setFocusedID/runMermaidGuarded/runSendChordHints above have
+// already settled this patch's other DOM effects, keeps this the one step
+// that can move focus.
+function restoreReplyFocus() {
+	const snapshot = state.replyFocus;
+	if (!snapshot) {
+		return;
+	}
+	const target = document.querySelector(
+		`#main .reply-input[data-draft-ticket="${CSS.escape(snapshot.ticket)}"][data-draft-question="${CSS.escape(snapshot.question)}"]`,
+	);
+	const active = document.activeElement;
+	const { focus, restoreValue } = restoreFocusDecision(
+		snapshot,
+		{ isBody: active === null || active === document.body },
+		target ? { value: target.value } : null,
+	);
+	if (!focus) {
+		return;
+	}
+	if (restoreValue) {
+		target.value = snapshot.value;
+	}
+	target.focus({ preventScroll: true });
+	target.setSelectionRange(snapshot.start, snapshot.end);
+}
+
 // runPatchWork is the MutationObserver callback's one per-patch step
 // (design section 6.3): collect plain descriptors from the DOM, hand them
 // to the pure collectPatchWork, then apply its result as DOM effects.
@@ -1076,6 +1157,7 @@ function runPatchWork() {
 	setFocusedID(focusID);
 	runMermaidGuarded(diagramIDs);
 	runSendChordHints();
+	restoreReplyFocus();
 }
 
 // ---- stream reconnect ---------------------------------------------------
@@ -1211,11 +1293,11 @@ function installNavBridge() {
 // install wires every delegated listener synchronously, before awaiting
 // loadBindings' own /static/keys.json fetch (bug fix): none of
 // installStreamWatch, installNavBridge, installPatchObserver, installSideBox,
-// installLogControls, installChipActivation, installPickupBox, or
-// installReplyAutosave reads state.bindings, so there was no reason their
-// listeners -- installNavBridge above all, the zing-nav bridge a
-// Threads-sidebar click needs live as early as possible -- sat behind an
-// unrelated network round trip. Only
+// installLogControls, installChipActivation, installPickupBox,
+// installReplyAutosave, or installReplyFocusTracking reads state.bindings, so
+// there was no reason their listeners -- installNavBridge above all, the
+// zing-nav bridge a Threads-sidebar click needs live as early as possible --
+// sat behind an unrelated network round trip. Only
 // onKeyDown needs the parsed bindings, so it alone waits on the fetch.
 // installStreamWatch runs first (the reconnect plan): it must already be
 // bound before data-init's own @get('/stream') can fire the very first
@@ -1229,6 +1311,7 @@ async function install() {
 	installChipActivation();
 	installPickupBox();
 	installReplyAutosave();
+	installReplyFocusTracking();
 	await loadBindings();
 	document.addEventListener('keydown', onKeyDown);
 }

@@ -538,6 +538,61 @@ export function replyAutosaveBody(el, lastSavedText) {
 }
 
 /**
+ * replyFocusSnapshot captures a reply box's identity, text, and selection at
+ * the moment of a focusin, input, or select event (design: "Snapshot
+ * document.activeElement ... and its selection before patch work"), so
+ * console.js's restoreReplyFocus can give it back after a /stream patch
+ * blurs or replaces the node. ticket and question are kept as the dataset's
+ * own strings, not coerced to numbers, since they are only ever used again
+ * to rebuild the same CSS attribute selector that found this box, never sent
+ * over the wire. Null when el is not a question-targeted reply box.
+ *
+ * @param {{dataset?: {draftTicket?: string, draftQuestion?: string}, value?: unknown, selectionStart?: number, selectionEnd?: number} | null | undefined} el
+ * @returns {{ticket: string, question: string, value: string, start: number, end: number} | null}
+ */
+export function replyFocusSnapshot(el) {
+	const ticket = el?.dataset?.draftTicket;
+	const question = el?.dataset?.draftQuestion;
+	if (!ticket || !question) {
+		return null;
+	}
+	return {
+		ticket,
+		question,
+		value: typeof el.value === 'string' ? el.value : '',
+		start: el.selectionStart ?? 0,
+		end: el.selectionEnd ?? 0,
+	};
+}
+
+/**
+ * restoreFocusDecision decides whether runPatchWork should give focus back
+ * to the reply box named by snapshot, and whether to refill its text first
+ * (design: "If the morph blurred it, restore focus and selection in
+ * runPatchWork"). active.isBody tells apart a patch-caused blur -- the morph
+ * leaves nothing focused, so document.activeElement falls back to
+ * document.body -- from a deliberate one (Esc, a click on some other real
+ * element), which must never be undone by an unrelated later patch. focus is
+ * true only when snapshot is non-null, active.isBody is true, and target
+ * (the box for the same ticket and question, or null if the patch rendered
+ * none) is non-null. restoreValue is true only when focus is true and
+ * target's value is empty while snapshot's was not -- a replacement node
+ * built from a stale, draft-less render -- so a target that already shows
+ * text (the common case: the morph kept or restored it on its own) is never
+ * overwritten.
+ *
+ * @param {{ticket: string, question: string, value: string, start: number, end: number} | null} snapshot
+ * @param {{isBody: boolean}} active
+ * @param {{value: string} | null} target
+ * @returns {{focus: boolean, restoreValue: boolean}}
+ */
+export function restoreFocusDecision(snapshot, active, target) {
+	const focus = Boolean(snapshot) && Boolean(active?.isBody) && target != null;
+	const restoreValue = focus && target.value === '' && snapshot.value !== '';
+	return { focus, restoreValue };
+}
+
+/**
  * buildChipDraftBody builds POST /draft's JSON body for an option chip's
  * activation (design section 6.6, 6.7, code review fix 1): the chip's
  * data-draft-ticket, data-draft-question, and data-option, read off its

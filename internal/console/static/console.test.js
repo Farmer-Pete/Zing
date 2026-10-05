@@ -7,9 +7,12 @@
 // from a fixture keys.json, input-context suppression, the mac/non-mac
 // send chord, the id-based focus step (next, previous, from no focus,
 // empty list), reconcileFocus across insertion/removal/reorder (focused
-// first/middle/last row removed), collectPatchWork, and the /stream
+// first/middle/last row removed), collectPatchWork, the /stream
 // reconnect-and-stale-marker decisions (reduceStreamStatus, reconnectDelay,
-// staleMarkerText).
+// staleMarkerText), saving every unsaved reply box on send and naming any
+// left unsent (unsavedReplyBodies, sendResultWithUnsent), the debounced
+// autosave decision (replyAutosaveBody), and the patch-caused-blur-only
+// focus restore decision (replyFocusSnapshot, restoreFocusDecision).
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
@@ -41,6 +44,8 @@ import {
 	sendResultWithUnsent,
 	AUTOSAVE_DEBOUNCE_MS,
 	replyAutosaveBody,
+	replyFocusSnapshot,
+	restoreFocusDecision,
 	describeAction,
 	ACTION_LABELS,
 	RECONNECT_BASE_MS,
@@ -624,6 +629,60 @@ test('replyAutosaveBody: a missing data-draft-question yields null', () => {
 
 test('AUTOSAVE_DEBOUNCE_MS is a reasonable debounce window', () => {
 	assert.ok(AUTOSAVE_DEBOUNCE_MS >= 500 && AUTOSAVE_DEBOUNCE_MS <= 2000);
+});
+
+// replyFocusSnapshot / restoreFocusDecision: a /stream patch that blurs or
+// replaces the reply box the owner is typing into (the morph swapping the
+// node, bug fix: "letters run as shortcuts" once focus silently lands on
+// body) must restore it, but a deliberate blur (Esc, a click elsewhere)
+// must not be undone by the next unrelated patch.
+
+test("replyFocusSnapshot: reads a reply box's ticket, question, value, and selection", () => {
+	const el = { dataset: { draftTicket: '18', draftQuestion: '11' }, value: 'hello', selectionStart: 1, selectionEnd: 3 };
+	assert.deepEqual(replyFocusSnapshot(el), { ticket: '18', question: '11', value: 'hello', start: 1, end: 3 });
+});
+
+test('replyFocusSnapshot: a non-reply element, or nothing, yields null', () => {
+	assert.equal(replyFocusSnapshot({ dataset: {}, value: 'x' }), null);
+	assert.equal(replyFocusSnapshot(null), null);
+});
+
+test('restoreFocusDecision: restores only a patch-caused blur, and refills an emptied replacement', () => {
+	const snapshot = { ticket: '18', question: '11', value: 'hello', start: 2, end: 4 };
+
+	// The morph blurred the box onto body, and the box for the same
+	// question is still there with its text: give it focus back, but there
+	// is nothing to refill.
+	assert.deepEqual(restoreFocusDecision(snapshot, { isBody: true }, { value: 'hello' }), {
+		focus: true,
+		restoreValue: false,
+	});
+
+	// The replacement node came up with no text at all (a fresh node built
+	// from a stale, draft-less render): the snapshot's own text is restored
+	// too.
+	assert.deepEqual(restoreFocusDecision(snapshot, { isBody: true }, { value: '' }), {
+		focus: true,
+		restoreValue: true,
+	});
+
+	// A deliberate blur -- focus is on some other real element, not body --
+	// must not be restored by the next patch.
+	assert.deepEqual(restoreFocusDecision(snapshot, { isBody: false }, { value: 'hello' }), {
+		focus: false,
+		restoreValue: false,
+	});
+
+	// No snapshot (nothing was being typed into), or no target to restore
+	// into (the question's box no longer renders at all), each decline too.
+	assert.deepEqual(restoreFocusDecision(null, { isBody: true }, { value: 'hello' }), {
+		focus: false,
+		restoreValue: false,
+	});
+	assert.deepEqual(restoreFocusDecision(snapshot, { isBody: true }, null), {
+		focus: false,
+		restoreValue: false,
+	});
 });
 
 // reduceStreamStatus / reconnectDelay / staleMarkerText: console.js's
