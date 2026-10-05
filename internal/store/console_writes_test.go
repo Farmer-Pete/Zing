@@ -483,20 +483,44 @@ func TestSaveDraft_EmptyTextClearsQuestionReplyDraft(t *testing.T) {
 // n==0 guard still runs openQuestionForTicketTx before it ever reaches
 // clearReplyDraftTx: an empty-text autosave against a question that has
 // already closed is still the ordinary "question closed" conflict, not a
-// silent delete of whatever draft reply that question still has.
+// silent delete of whatever draft reply that question still has. The
+// fixture saves a text draft before closing the question, and asserts that
+// draft row survives the conflict, proving the conflict path returned
+// before ever reaching clearReplyDraftTx.
 func TestSaveDraft_EmptyTextAgainstClosedQuestionConflicts(t *testing.T) {
 	t.Parallel()
 	s := newTestStore(t)
 	_, ticketID := seedQueuedTicket(t, s, "1")
 	qID := insertQuestionOption(t, s, ticketID, "Q1")
+
+	saved, err := s.SaveDraft(t.Context(), DraftInput{TicketID: ticketID, QuestionID: &qID, Text: testReplyWhyThough})
+	if err != nil {
+		t.Fatalf("SaveDraft (text): %v", err)
+	}
+
 	closeQuestion(t, s, qID, questionStateResolved)
 
-	_, err := s.SaveDraft(t.Context(), DraftInput{TicketID: ticketID, QuestionID: &qID, Text: ""})
+	_, err = s.SaveDraft(t.Context(), DraftInput{TicketID: ticketID, QuestionID: &qID, Text: ""})
 	if err == nil {
 		t.Fatal("SaveDraft (empty text, closed question): err = nil, want a ConflictError")
 	}
 	if got := conflictReason(t, err); got != testConflictQuestionClosed {
 		t.Errorf("conflict reason = %q, want %q", got, testConflictQuestionClosed)
+	}
+
+	messages, err := s.ListMessages(t.Context(), ticketID)
+	if err != nil {
+		t.Fatalf("ListMessages: %v", err)
+	}
+	found := false
+	for i := range messages {
+		if messages[i].ID == saved.MessageID {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("draft reply %d no longer exists after the closed-question conflict: clearReplyDraftTx ran despite the conflict", saved.MessageID)
 	}
 }
 

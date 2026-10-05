@@ -426,18 +426,29 @@ async function postDraftRequest(el, ticket, question, text) {
 			headers: { 'Content-Type': 'application/json', 'Datastar-Request': 'true' },
 			body: JSON.stringify({ ticket, question, text }),
 		});
+		// Recorded before the stale-UI check below, and unconditionally on
+		// resp.ok: this tracks what the server actually has, independent of
+		// what the box currently shows right now. If the owner kept typing
+		// (or emptied the box) while this request was in flight, el.value
+		// !== text below and we skip the "Saved." note, but lastSavedText
+		// must still learn that `text` is now on the server -- otherwise a
+		// later autosave or send could see el.value equal to the stale
+		// lastSavedText fallback (el.defaultValue) and wrongly treat the box
+		// as already clear, leaving the server's stale text unsent and never
+		// cleared.
+		//
+		// A box targets a question (data-draft-question); a thread-level
+		// reply (question === null, unsavedReplyBody) has no autosave key to
+		// record against, since replyAutosaveBody only ever covers
+		// question-targeted boxes.
+		if (resp.ok && question != null) {
+			lastSavedText.set(replyAutosaveKeyFor(el), text);
+		}
 		if (el.value !== text) {
 			return resp.ok;
 		}
 		if (resp.ok) {
 			showDraftSaved(el, 'Saved.');
-			// A box targets a question (data-draft-question); a thread-level
-			// reply (question === null, unsavedReplyBody) has no autosave key to
-			// record against, since replyAutosaveBody only ever covers
-			// question-targeted boxes.
-			if (question != null) {
-				lastSavedText.set(replyAutosaveKeyFor(el), text);
-			}
 			return true;
 		}
 		console.error('console.js: POST /draft', resp.status);
@@ -571,6 +582,21 @@ const autosaveTimers = new Map();
 const autosaveInFlight = new Map();
 const lastSavedText = new Map();
 
+// sendBatchInFlight is true for postSendBatch's entire body, set there in a
+// try/finally so it still resets if /send throws. scheduleReplyAutosave
+// checks it so no new autosave timer can be armed while a send batch is
+// running (bug fix): postSendBatch's own cancelAutosaves() and its await
+// over autosaveInFlight only clear out autosaves that existed before it
+// started. Without this flag, typing during postSendBatch's later awaits
+// (the draft posts, or the /send fetch itself) could arm a fresh timer that
+// fires and saves newer text to the store before /send resolves; /send would
+// then send that newer text in full, but the post-send clear compares
+// el.value against the sentValues snapshot taken before that typing, sees a
+// mismatch, and leaves the box uncleared even though its current text was
+// already fully sent -- making it eligible to go out again on a later
+// Cmd+Enter.
+let sendBatchInFlight = false;
+
 // replyAutosaveKeyFor builds the one "ticket:question" key every autosave
 // map above and postDraftRequest's own lastSavedText.set share, named once
 // so the several call sites cannot drift into different keys for the same
@@ -638,6 +664,9 @@ function fireReplyAutosave(el) {
 // for this key may clear the entry, so a superseded promise settling late
 // can never delete a newer one postSendBatch still needs to await.
 function scheduleReplyAutosave(el) {
+	if (sendBatchInFlight) {
+		return;
+	}
 	const key = replyAutosaveKeyFor(el);
 	const fire = () => {
 		autosaveTimers.delete(key);
@@ -726,7 +755,19 @@ function installReplyFocusTracking() {
 	document.addEventListener('focusout', () => setTimeout(clearReplyFocusUnlessInReplyBox, 0));
 }
 
+// sendBatchInFlight is set true for the whole body below, in a try/finally
+// so it resets even if /send throws: see sendBatchInFlight's own comment for
+// why scheduleReplyAutosave must not arm a new timer during this window.
 async function postSendBatch(ticket) {
+	sendBatchInFlight = true;
+	try {
+		await postSendBatchLocked(ticket);
+	} finally {
+		sendBatchInFlight = false;
+	}
+}
+
+async function postSendBatchLocked(ticket) {
 	cancelAutosaves();
 	// A timer that had already fired before cancelAutosaves ran is no
 	// longer in autosaveTimers for it to cancel -- it is already awaiting

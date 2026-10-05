@@ -87,6 +87,22 @@ func TestDraft_EmptyTextClearsTheReplyDraft(t *testing.T) {
 		t.Fatalf("POST /draft (text) status = %d, want 204", resp.StatusCode)
 	}
 
+	messagesAfterSave, err := s.ListMessages(t.Context(), ticketID)
+	if err != nil {
+		t.Fatalf("ListMessages: %v", err)
+	}
+	foundDraft := false
+	for i := range messagesAfterSave {
+		m := &messagesAfterSave[i]
+		if m.Type == "reply" && m.ParentID != nil && *m.ParentID == questionID {
+			foundDraft = true
+			break
+		}
+	}
+	if !foundDraft {
+		t.Fatalf("draft reply not found after POST /draft (text): the clear-side assertion below would pass vacuously")
+	}
+
 	emptyBody := fmt.Sprintf(`{"ticket":%d,"question":%d,"text":""}`, ticketID, questionID)
 	resp2 := doRequest(t, mutationRequest(t, srv, "/draft", emptyBody))
 	_ = resp2.Body.Close()
