@@ -66,15 +66,9 @@
   (remote unix-socket (path-literal (param "SSH_AUTH_SOCK")))
   (remote unix-socket (path-literal (param "SSH_AUTH_SOCK_REAL"))))
 
-; No outbound connect to a git transport port: #49 found a judge-profile
-; probe push `git@github.com` over SSH (port 22) because the profile
-; allowed the connect once ssh had read an unencrypted key from the real
-; ~/.ssh (the probe's own temp HOME masked only its own home read, not
-; this). git's own protocol (port 9418) is denied the same way.
+; No outbound connect to a git transport port (#49: ssh read an unencrypted key from the real ~/.ssh and pushed over this).
 (deny network-outbound (remote tcp "*:22") (remote tcp "*:9418"))
-; No exec of any binary whose path ends in "/ssh", covering both
-; /usr/bin/ssh and a Homebrew ssh earlier in PATH (#49): without a key to
-; read, ssh cannot sign, but it must not even run.
+; No exec of any binary whose path ends in "/ssh" (#49: without this, a copy earlier in PATH could still read the unencrypted key).
 (deny process-exec (regex #"/ssh$"))
 
 ; No git credential helper may run: it would hand out the owner's GitHub

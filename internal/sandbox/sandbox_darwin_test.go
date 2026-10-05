@@ -1090,9 +1090,9 @@ func countingAccepts(ln net.Listener, accepts *int64) {
 	}
 }
 
-// waitForAccept dials dial itself, from this test process (never through
-// the sandbox), and blocks, with a deadline, until *accepts has counted
-// that connection, then returns the total. countingAccepts' own Accept
+// waitForAccept dials network/addr itself, from this test process (never
+// through the sandbox), and blocks, with a deadline, until *accepts has
+// counted that connection, then returns the total. countingAccepts' own Accept
 // loop drains its listener's backlog strictly in the order connections
 // arrived, so by the time this control connection's own accept is
 // counted, every connection a sandboxed command made earlier is already
@@ -1101,13 +1101,14 @@ func countingAccepts(ln net.Listener, accepts *int64) {
 // can otherwise race countingAccepts' own goroutine, in either direction
 // -- a denied connect's non-count might not be observed yet, and an
 // allowed connect's own count might not be either.
-func waitForAccept(t *testing.T, dial func(ctx context.Context) (net.Conn, error), accepts *int64) int64 {
+func waitForAccept(t *testing.T, network, addr string, accepts *int64) int64 {
 	t.Helper()
 	before := atomic.LoadInt64(accepts)
 
 	ctx, cancel := context.WithTimeout(t.Context(), 2*time.Second)
 	defer cancel()
-	conn, err := dial(ctx)
+	var d net.Dialer
+	conn, err := d.DialContext(ctx, network, addr)
 	if err != nil {
 		t.Fatalf("waitForAccept: control dial: %v", err)
 	}
@@ -1171,11 +1172,7 @@ func testDeniesGitPush(t *testing.T, sb Sandbox, p Params, worktree string) {
 	if !strings.Contains(out, wantOperationNotPermitted) {
 		t.Errorf("git push git:// output = %q, want it to contain %q", out, wantOperationNotPermitted)
 	}
-	dialGitPushListener := func(ctx context.Context) (net.Conn, error) {
-		var d net.Dialer
-		return d.DialContext(ctx, "tcp", fmt.Sprintf("127.0.0.1:%d", gitPushListenerPort))
-	}
-	if got := waitForAccept(t, dialGitPushListener, &accepts); got != 1 {
+	if got := waitForAccept(t, "tcp", fmt.Sprintf("127.0.0.1:%d", gitPushListenerPort), &accepts); got != 1 {
 		t.Errorf("git:// listener accepted %d connections (including this test's own control probe), want 1: the sandboxed push must never have reached it", got)
 	}
 
@@ -1193,6 +1190,28 @@ func testDeniesGitPush(t *testing.T, sb Sandbox, p Params, worktree string) {
 	}
 	if !strings.Contains(out, wantOperationNotPermitted) {
 		t.Errorf("nc -z 127.0.0.1 22 output = %q, want it to contain %q", out, wantOperationNotPermitted)
+	}
+
+	// Positive control (review r2f2): an unrelated, allowed port must
+	// still be reachable from inside the same sandbox, Params, and env.
+	// Without this, a zero accept count or a non-zero exit on 9418 or 22
+	// above could just as well mean git or nc never reached the network
+	// stack at all, for some unrelated profile or binary reason, and the
+	// port-22/9418 denies would never have been exercised.
+	controlLn := listenLoopback(t)
+	defer func() { _ = controlLn.Close() }()
+	controlPort := tcpPort(t, controlLn.Addr())
+	var controlAccepts int64
+	go countingAccepts(controlLn, &controlAccepts)
+
+	_, _ = runSandboxedWithEnv(t, sb, p, env, gitbin.Path(), "-C", worktree, "push", fmt.Sprintf("git://127.0.0.1:%d/x.git", controlPort), "HEAD")
+	if got := waitForAccept(t, "tcp", fmt.Sprintf("127.0.0.1:%d", controlPort), &controlAccepts); got != 2 {
+		t.Errorf("control listener accepted %d connections (including this test's own control probe), want 2: the sandboxed push to an allowed port must have reached it", got)
+	}
+
+	exitCode, out = runSandboxedWithEnv(t, sb, p, env, "/usr/bin/nc", "-v", "-z", "-w", "2", "127.0.0.1", strconv.Itoa(controlPort))
+	if exitCode != 0 {
+		t.Errorf("nc -z 127.0.0.1 %d (an allowed port): exit %d, want 0 (output %q)", controlPort, exitCode, out)
 	}
 }
 
@@ -1274,10 +1293,6 @@ func testDeniesAgentSocket(t *testing.T, sb Sandbox, p Params) {
 		t.Fatalf("symlink: %v", symlinkErr)
 	}
 
-	dialAgentSock := func(ctx context.Context) (net.Conn, error) {
-		var d net.Dialer
-		return d.DialContext(ctx, "unix", agentSock)
-	}
 	// wantAgentTotal is agentLn's own running total, advanced by one with
 	// every denyAgentSock call below (review r1f5): a deny case that lets
 	// a connect through would add one of its own, on top of this
@@ -1288,7 +1303,7 @@ func testDeniesAgentSocket(t *testing.T, sb Sandbox, p Params) {
 			t.Errorf("nc -U %s (%s): want a non-zero exit, got 0 (output %q)", path, label, out)
 		}
 		wantAgentTotal++
-		if got := waitForAccept(t, dialAgentSock, &agentAccepts); got != wantAgentTotal {
+		if got := waitForAccept(t, "unix", agentSock, &agentAccepts); got != wantAgentTotal {
 			t.Errorf("agent socket listener accepted %d connections (including this function's own control probes) after %s, want %d: the sandboxed connect must never have reached it", got, label, wantAgentTotal)
 		}
 	}
@@ -1332,7 +1347,7 @@ func testDeniesAgentSocket(t *testing.T, sb Sandbox, p Params) {
 		t.Errorf("nc -U a sandbox-created alias symlink to the denied agent socket: want a non-zero exit, got 0 (output %q)", out)
 	}
 	wantAgentTotal++
-	if got := waitForAccept(t, dialAgentSock, &agentAccepts); got != wantAgentTotal {
+	if got := waitForAccept(t, "unix", agentSock, &agentAccepts); got != wantAgentTotal {
 		t.Errorf("agent socket listener accepted %d connections (including this function's own control probes) after the alias-symlink case, want %d: path-literal must match the resolved vnode, not a connect's own sun_path", got, wantAgentTotal)
 	}
 
@@ -1345,11 +1360,7 @@ func testDeniesAgentSocket(t *testing.T, sb Sandbox, p Params) {
 	if exitCode, out := runSandboxed(t, sb, p, "/usr/bin/nc", "-U", "-w", "2", otherSock); exitCode != 0 {
 		t.Errorf("nc -U %s (a socket the profile does not name): exit %d, want 0 (output %q)", otherSock, exitCode, out)
 	}
-	dialOtherSock := func(ctx context.Context) (net.Conn, error) {
-		var d net.Dialer
-		return d.DialContext(ctx, "unix", otherSock)
-	}
-	if got := waitForAccept(t, dialOtherSock, &otherAccepts); got != 2 {
+	if got := waitForAccept(t, "unix", otherSock, &otherAccepts); got != 2 {
 		t.Errorf("other socket listener accepted %d connections (including this test's own control probe), want 2: the sandboxed connect must have reached it once", got)
 	}
 }
