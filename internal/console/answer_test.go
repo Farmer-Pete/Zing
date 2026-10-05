@@ -224,8 +224,8 @@ func TestSend_SucceedsThenConflictsWhenEmpty(t *testing.T) {
 	if sendResp2.StatusCode != http.StatusConflict {
 		t.Fatalf("second POST /send status = %d, want 409 (nothing left to send)", sendResp2.StatusCode)
 	}
-	if got := strings.TrimSpace(string(sendRespBody2)); got != "Nothing to send." {
-		t.Errorf("second POST /send body = %q, want %q", got, "Nothing to send.")
+	if got := strings.TrimSpace(string(sendRespBody2)); got != "Nothing to send. Pick an option or type a reply first." {
+		t.Errorf("second POST /send body = %q, want %q", got, "Nothing to send. Pick an option or type a reply first.")
 	}
 }
 

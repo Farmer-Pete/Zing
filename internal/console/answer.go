@@ -167,7 +167,7 @@ func (c *console) handleSend(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if result.Empty {
-		http.Error(w, "Nothing to send.", http.StatusConflict)
+		http.Error(w, "Nothing to send. Pick an option or type a reply first.", http.StatusConflict)
 		return
 	}
 
