@@ -186,8 +186,16 @@ func effectivePickedItems(q *ThreadQuestion) map[string]response.Decision {
 	return q.PickedItems
 }
 
+// questionDOMID is a question's DOM id (bug fix): Datastar's morph
+// (datastar.js:9) pairs elements by id before falling back to position, so
+// a stable id keeps one question's open state from landing on another's
+// when a row is inserted above it.
+func questionDOMID(id int64) string {
+	return "question-" + strconv.FormatInt(id, 10)
+}
+
 templ questionGroup(ticketID int64, row ThreadRow) {
-	<details class="q" data-focus-id={ fmtFocusID("question", row.ID) }>
+	<details class="q" id={ questionDOMID(row.ID) } data-focus-id={ fmtFocusID("question", row.ID) } data-preserve-attr="open" open?={ row.Question.Interactive }>
 		<summary>
 			<span class="q-key">{ row.Question.Key }</span>
 			<span class="q-title">{ row.Question.Title }</span>
