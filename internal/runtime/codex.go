@@ -289,6 +289,10 @@ func (c Codex) Run(ctx context.Context, req RunRequest) (RunResult, error) {
 
 	res, runErr := c.run(ctx, req, argv, outPath, start)
 
+	if errors.Is(runErr, ErrStart) {
+		slog.Warn("codex run: start failed", "job", req.Job, "run_token", req.RunToken, "error", runErr)
+	}
+
 	slog.Info("codex run",
 		"job", req.Job,
 		"model", req.Model,
@@ -345,11 +349,11 @@ func (c Codex) run(ctx context.Context, req RunRequest, argv []string, outPath s
 	// run for why stdin is a pipe written only after OnStart returns.
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
-		return RunResult{ExitCode: -1, AgentTime: time.Since(start)}, ErrStart
+		return RunResult{ExitCode: -1, AgentTime: time.Since(start)}, startErr(err)
 	}
 
 	if err = cmd.Start(); err != nil {
-		return RunResult{ExitCode: -1, AgentTime: time.Since(start)}, ErrStart
+		return RunResult{ExitCode: -1, AgentTime: time.Since(start)}, startErr(err)
 	}
 
 	if req.OnStart != nil {

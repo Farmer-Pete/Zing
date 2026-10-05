@@ -1,8 +1,11 @@
 package runtime
 
 import (
+	"context"
 	"errors"
 	"fmt"
+	"os/exec"
+	"syscall"
 )
 
 // The typed run failures (design section 4.1). Run returns (RunResult,
@@ -61,4 +64,23 @@ type InvalidOutputError struct {
 
 func (e *InvalidOutputError) Error() string {
 	return "runtime: invalid final message: " + e.Reason
+}
+
+// startErr wraps the cause of a failed cmd.StdinPipe or cmd.Start under
+// ErrStart (design section "startErr keeps the cause and drops the path",
+// #23): the syscall.Errno, exec.ErrNotFound/ErrDot, or context error inside
+// err, never the *os.PathError or *exec.Error around it, whose own text
+// carries the binary path. errors.Is(err, ErrStart) always holds on the
+// result; any cause this function does not recognize yields bare ErrStart,
+// losing the diagnosis but never leaking a path.
+func startErr(err error) error {
+	if errno, ok := errors.AsType[syscall.Errno](err); ok {
+		return fmt.Errorf("%w: %w", ErrStart, errno)
+	}
+	for _, cause := range []error{exec.ErrNotFound, exec.ErrDot, context.Canceled, context.DeadlineExceeded} {
+		if errors.Is(err, cause) {
+			return fmt.Errorf("%w: %w", ErrStart, cause)
+		}
+	}
+	return ErrStart
 }

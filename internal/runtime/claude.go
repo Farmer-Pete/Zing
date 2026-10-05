@@ -474,6 +474,10 @@ func (c Claude) Run(ctx context.Context, req RunRequest) (RunResult, error) {
 
 	res, runErr := c.run(ctx, req, argv, sessionID, start)
 
+	if errors.Is(runErr, ErrStart) {
+		slog.Warn("claude run: start failed", "job", req.Job, "run_token", req.RunToken, "error", runErr)
+	}
+
 	slog.Info("claude run",
 		"job", req.Job,
 		"model", req.Model,
@@ -516,11 +520,11 @@ func (c Claude) run(ctx context.Context, req RunRequest, argv []string, sessionI
 	// stdin simply closes with no prompt and it exits having done no work.
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
-		return RunResult{ExitCode: -1, AgentTime: time.Since(start)}, ErrStart
+		return RunResult{ExitCode: -1, AgentTime: time.Since(start)}, startErr(err)
 	}
 
 	if err = cmd.Start(); err != nil {
-		return RunResult{ExitCode: -1, AgentTime: time.Since(start)}, ErrStart
+		return RunResult{ExitCode: -1, AgentTime: time.Since(start)}, startErr(err)
 	}
 
 	if req.OnStart != nil {

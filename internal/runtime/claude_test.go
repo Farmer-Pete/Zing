@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -470,10 +471,21 @@ func TestClaude_FixtureParse_Resume(t *testing.T) {
 func TestClaude_ErrStart(t *testing.T) {
 	t.Parallel()
 
-	c := NewClaude(filepath.Join(t.TempDir(), "no-such-claude-binary"), testOAuthToken)
+	dir := t.TempDir()
+	c := NewClaude(filepath.Join(dir, "no-such-claude-binary"), testOAuthToken)
 	res, err := c.Run(context.Background(), RunRequest{Job: response.JobClassify, Model: "m"})
 	if !errors.Is(err, ErrStart) {
 		t.Fatalf("err = %v, want ErrStart", err)
+	}
+	if !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("err = %v, want fs.ErrNotExist", err)
+	}
+	const wantText = "runtime: process could not start: no such file or directory"
+	if err.Error() != wantText {
+		t.Errorf("err.Error() = %q, want %q", err.Error(), wantText)
+	}
+	if strings.Contains(err.Error(), dir) {
+		t.Errorf("err.Error() = %q, leaks the temp dir path", err.Error())
 	}
 	if res.ExitCode != -1 {
 		t.Errorf("ExitCode = %d, want -1", res.ExitCode)
