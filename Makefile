@@ -34,8 +34,14 @@ build: templ-generate
 vet:
 	go vet ./...
 
+# internal/job's tests queue on one process's fork lock (scripts/test-race.sh),
+# so letting go test run more than a few of them in parallel only makes them
+# wait longer instead of finishing sooner. Capping -parallel addresses that;
+# -p still runs separate packages side by side. Measured go test -count=1
+# ./internal/job: 193s uncapped, 106-156s at -parallel 4, on a 14-core Mac.
+TEST_PARALLEL ?= 4
 test:
-	go test ./...
+	go test $(if $(TEST_PARALLEL),-parallel $(TEST_PARALLEL),) ./...
 
 # Skips the slow end-to-end flows (testing.Short()-gated) for fast local
 # iteration; every other target above still runs the full suite.

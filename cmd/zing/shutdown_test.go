@@ -49,7 +49,7 @@ func TestDrainAndShutdown_GracefulPath(t *testing.T) {
 
 	err := drainAndShutdown(
 		context.Background(),
-		time.Second, // far longer than the 5ms dispDone delay: the graceful path must win
+		time.Hour, // far longer than the 5ms dispDone delay: the graceful path must win
 		func() error { return nil },
 		dispDone,
 		forceDisp,
@@ -134,12 +134,7 @@ func TestDrainAndShutdown_TimeoutForcesCancelAndJoins(t *testing.T) {
 		)
 	}()
 
-	var err error
-	select {
-	case err = <-done:
-	case <-time.After(2 * time.Second):
-		t.Fatal("drainAndShutdown did not return within 2s of the drain timeout; want forceDisp called and dispDone joined promptly (a regression dropping the forceDisp() call would hang here)")
-	}
+	err := waitFor(t, done, "drainAndShutdown to return after the drain timeout (a regression dropping the forceDisp() call would hang here)")
 	if err != nil {
 		t.Fatalf("drainAndShutdown: %v", err)
 	}
@@ -216,11 +211,7 @@ func TestWaitForShutdownTrigger_RealDispatcherFailureKeepsWaiting(t *testing.T) 
 	}
 
 	cancel()
-	select {
-	case <-done:
-	case <-time.After(5 * time.Second):
-		t.Fatal("waitForShutdownTrigger never returned after ctx was cancelled")
-	}
+	waitFor(t, done, "waitForShutdownTrigger to return after ctx was cancelled")
 
 	if serveErr != nil {
 		t.Errorf("serveErr = %v, want nil (ctx.Done, not errCh, is what ended the wait)", serveErr)
@@ -255,11 +246,7 @@ func TestWaitForShutdownTrigger_BenignDispDoneEndsWaitImmediately(t *testing.T) 
 		close(done)
 	}()
 
-	select {
-	case <-done:
-	case <-time.After(5 * time.Second):
-		t.Fatal("waitForShutdownTrigger never returned for a benign (nil-error) dispDone")
-	}
+	waitFor(t, done, "waitForShutdownTrigger to return for a benign (nil-error) dispDone")
 	if !dispTriggered {
 		t.Error("dispTriggered = false, want true")
 	}

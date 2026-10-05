@@ -1,6 +1,7 @@
 package dispatch_test
 
 import (
+	"fmt"
 	"os/exec"
 	"syscall"
 	"testing"
@@ -66,18 +67,12 @@ func killGroup(t *testing.T, cmd *exec.Cmd) {
 }
 
 // waitGroupGone polls proc.GroupAlive(pgid) until it reports false, bounded
-// so a group that never actually dies fails the test instead of hanging it
-// (mirrors internal/proc's own tests: GroupAlive can lag a kill by a few
-// scheduler ticks).
+// only by go test's -timeout: GroupAlive can lag a kill by a few scheduler
+// ticks (mirrors internal/proc's own tests), but a group that never
+// actually dies fails the test instead of hanging it.
 func waitGroupGone(t *testing.T, pgid int) {
 	t.Helper()
-	deadline := time.Now().Add(5 * time.Second)
-	for proc.GroupAlive(pgid) && time.Now().Before(deadline) {
-		time.Sleep(10 * time.Millisecond)
-	}
-	if proc.GroupAlive(pgid) {
-		t.Fatalf("group %d still alive after the deadline", pgid)
-	}
+	waitUntil(t, func() bool { return !proc.GroupAlive(pgid) }, fmt.Sprintf("group %d to exit", pgid))
 }
 
 // TestReclaimForeign_NoOpenRunsReclaimsAtOnce proves a dead serve's claim
@@ -187,16 +182,10 @@ func TestReclaimForeign_LiveDescendantAfterLeaderExit(t *testing.T) {
 
 	// The leader is gone and reaped; the backgrounded sleep keeps the
 	// group alive.
-	deadline := time.Now().Add(2 * time.Second)
-	for {
-		if _, err := proc.StartToken(pgid); err != nil {
-			break
-		}
-		if time.Now().After(deadline) {
-			t.Fatal("leader pid never reported ErrNoProcess")
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
+	waitUntil(t, func() bool {
+		_, err := proc.StartToken(pgid)
+		return err != nil
+	}, "the leader pid to report ErrNoProcess")
 	if !proc.GroupAlive(pgid) {
 		t.Fatal("group reported gone right after the leader exited, want the backgrounded sleep to keep it alive")
 	}

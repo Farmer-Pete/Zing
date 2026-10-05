@@ -10,6 +10,7 @@ import (
 	"path"
 	"sort"
 	"strings"
+	"sync"
 
 	"github.com/santhosh-tekuri/jsonschema/v6"
 	"golang.org/x/text/language"
@@ -41,8 +42,13 @@ type schemaSet struct {
 	compiled map[string]*jsonschema.Schema
 }
 
-// loadSchemas compiles every committed schema under schemas/.
-func loadSchemas() (*schemaSet, error) {
+// loadSchemas compiles every committed schema under schemas/ once per
+// process: the schemas are embedded at build time, and store.Open calls it
+// on every open, so every Store shares one read-only *schemaSet.
+var loadSchemas = sync.OnceValues(compileSchemas)
+
+// compileSchemas compiles every committed schema under schemas/.
+func compileSchemas() (*schemaSet, error) {
 	sub := SchemaFS()
 
 	compiler := jsonschema.NewCompiler()

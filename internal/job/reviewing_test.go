@@ -385,6 +385,32 @@ func TestRoundRespectsMaxLensesParallel(t *testing.T) {
 	}
 }
 
+// waitFor receives the next value from ch, bounded only by go test's
+// -timeout: if t.Deadline() reports none (-timeout 0), it waits forever.
+// Otherwise it fails with a message naming what it was waiting for once
+// nine tenths of the time remaining before the deadline has passed, well
+// before go test's own timeout panic.
+func waitFor[T any](t *testing.T, ch <-chan T, what string) T {
+	t.Helper()
+
+	deadline, ok := t.Deadline()
+	if !ok {
+		return <-ch
+	}
+
+	timer := time.NewTimer(time.Until(deadline) * 9 / 10)
+	defer timer.Stop()
+
+	select {
+	case v := <-ch:
+		return v
+	case <-timer.C:
+		t.Fatalf("%s: still waiting near go test's -timeout", what)
+		var zero T
+		return zero
+	}
+}
+
 // ---- TestRunLensesParallelRejectsOutOfRangeConfig ---------------------------
 
 // TestRunLensesParallelRejectsOutOfRangeConfig proves the handoff fix for
@@ -422,11 +448,7 @@ func TestRunLensesParallelRejectsOutOfRangeConfig(t *testing.T) {
 				attempts, err = runLensesParallel(t.Context(), deps, ticket, reviewLenses(deps), build)
 				close(done)
 			}()
-			select {
-			case <-done:
-			case <-time.After(5 * time.Second):
-				t.Fatal("runLensesParallel did not return within 5s: it deadlocked")
-			}
+			waitFor(t, done, "runLensesParallel to return (a deadlock hangs here)")
 
 			if !errors.Is(err, ErrConfig) {
 				t.Fatalf("err = %v, want errors.Is(err, ErrConfig)", err)
