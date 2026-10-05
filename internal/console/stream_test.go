@@ -6,7 +6,9 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
+	"net/http/httptest"
 	"net/url"
 	"runtime"
 	"strings"
@@ -60,6 +62,111 @@ func readInitialFrames(t *testing.T, r *bufio.Reader) (nav, main, rail, alerts s
 	rail = readFrame(t, r)
 	alerts = readFrame(t, r)
 	return nav, main, rail, alerts
+}
+
+// newReadTimeoutTestServer builds a console.New handler on a reserved
+// listener exactly like newTestServerSandboxTracker (console_test.go), but
+// sets the underlying http.Server's ReadTimeout to readTimeout before
+// Start: the same field newServer (cmd/zing/serve.go) sets to 10s, only
+// shorter, so a stream opened against this server hits the same net/http
+// background-read deadline newServer's real stream traffic does, just sooner.
+func newReadTimeoutTestServer(t *testing.T, s *store.Store, b *bus.Broker, readTimeout time.Duration) *httptest.Server {
+	t.Helper()
+
+	var lc net.ListenConfig
+	ln, err := lc.Listen(t.Context(), "tcp", testBindHost+":0")
+	if err != nil {
+		t.Fatalf("reserve a listener: %v", err)
+	}
+	addr, ok := ln.Addr().(*net.TCPAddr)
+	if !ok {
+		t.Fatalf("unexpected listener address type %T", ln.Addr())
+	}
+
+	handler := console.New(s, b, nil, testBindHosts, addr.Port, newTestLogHandler(t), nil, testPushToken, response.SeverityMinor, "", nil, "")
+	srv := httptest.NewUnstartedServer(handler)
+	if err := srv.Listener.Close(); err != nil {
+		t.Fatalf("close the placeholder listener: %v", err)
+	}
+	srv.Listener = ln
+	srv.Config.ReadTimeout = readTimeout
+	srv.Start()
+	t.Cleanup(srv.Close)
+	return srv
+}
+
+// TestStreamOutlivesServerReadTimeout proves a /stream connection survives
+// past the server's own ReadTimeout: newServer (cmd/zing/serve.go) sets
+// ReadTimeout to 10s, and handleStream cleared only the write deadline, so
+// net/http's background read against the (uncleared) read deadline canceled
+// r.Context() out from under a stream that was still open and healthy, and
+// the stream ended for good. This pins that mechanism with a 200ms
+// ReadTimeout instead of 10s, so the test runs in under a second.
+func TestStreamOutlivesServerReadTimeout(t *testing.T) {
+	t.Parallel()
+	s := newConsoleTestStore(t)
+	seedTicket(t, s, "fake#1", "Add a hello endpoint")
+	b := bus.New()
+
+	srv := newReadTimeoutTestServer(t, s, b, 200*time.Millisecond)
+
+	resp, r, cancel := openStream(t, srv.URL, "inbox", 0, 0)
+	defer cancel()
+	defer func() { _ = resp.Body.Close() }()
+
+	readInitialFrames(t, r)
+
+	time.Sleep(500 * time.Millisecond) // past the 200ms ReadTimeout
+	b.Publish()
+
+	nav, main, rail, alerts := readInitialFrames(t, r)
+	assertExactSSEFraming(t, nav)
+	assertExactSSEFraming(t, main)
+	assertExactSSEFraming(t, rail)
+	assertExactSSEFraming(t, alerts)
+	if !strings.Contains(nav, `id="nav"`) {
+		t.Errorf("post-ReadTimeout nav frame missing #nav; got:\n%s", nav)
+	}
+}
+
+// TestStreamEndsCleanlyWhenAFrameFailsToBuild proves a frame that fails to
+// build (here, a store read against a closed database) ends the stream with
+// a clean EOF rather than a hang or a write error: the client's fetch sees a
+// finished event it can reconnect on (design section's "the server half of
+// the reconnect contract"). newConsoleTestStore's own t.Cleanup double-closes
+// s and ignores that second error, so closing it early here is safe.
+func TestStreamEndsCleanlyWhenAFrameFailsToBuild(t *testing.T) {
+	t.Parallel()
+	s := newConsoleTestStore(t)
+	seedTicket(t, s, "fake#1", "Add a hello endpoint")
+	b := bus.New()
+
+	srv := newTestServer(t, s, b, nil, newTestLogHandler(t))
+
+	resp, r, cancel := openStream(t, srv.URL, "inbox", 0, 0)
+	defer cancel()
+	defer func() { _ = resp.Body.Close() }()
+
+	readInitialFrames(t, r)
+
+	if err := s.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	b.Publish()
+
+	ch := make(chan error, 1)
+	go func() {
+		_, err := io.ReadAll(r)
+		ch <- err
+	}()
+	select {
+	case err := <-ch:
+		if err != nil {
+			t.Errorf("io.ReadAll(body) after a frame failed to build: %v, want nil (a clean EOF)", err)
+		}
+	case <-time.After(frameTimeout):
+		t.Fatal("stream did not end within frameTimeout after a frame failed to build")
+	}
 }
 
 func TestStreamPatchesAllFourRegionsOnConnect(t *testing.T) {
