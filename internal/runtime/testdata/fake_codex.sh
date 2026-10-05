@@ -113,6 +113,20 @@ success)
 exit_nonzero)
   exit "${FAKE_CODEX_EXIT_CODE:-3}"
   ;;
+error_event)
+  # A run that dies within seconds with an error event on stdout, no
+  # stderr, and no -o content (the ticket's repro, "Codex runs that exit 1
+  # within seconds leave no stderr, transcript, or cause"): thread.started
+  # so a session id is still known, then an error event and a matching
+  # turn.failed carrying the same message in its error.message, the two
+  # shapes codexFailureDetail reads. The -o file is left exactly as Run
+  # created it (empty), so FinalMessage stays "".
+  msg="${FAKE_CODEX_ERROR_MESSAGE:-unexpected status 400 Bad Request: model not supported}"
+  printf '{"type":"thread.started","thread_id":"fake-codex-error-thread-id"}\n'
+  printf '{"type":"error","message":"%s"}\n' "$msg"
+  printf '{"type":"turn.failed","error":{"message":"%s"}}\n' "$msg"
+  exit 1
+  ;;
 sleep)
   # A grandchild relative to the Go test process: this script (already the
   # direct child exec.CommandContext started) backgrounds sleep, inheriting

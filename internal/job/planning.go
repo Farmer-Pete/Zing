@@ -2601,10 +2601,13 @@ func capResumesEscalation(t store.Ticket, d Deps, sessionID int64) store.Handler
 
 // execFailureCommit terminalizes the reserved run as an error and escalates
 // runtime_exec_failed (design section 6.8): RunID and SessionID are both
-// set, since a run always caused this.
+// set, since a run always caused this. Tried is rr.Res.FailureDetail: empty
+// for every failure kind but a Codex ExecError with no final message, which
+// is the one case the runtime has anything to quote (design: "Codex runs
+// that exit 1 within seconds leave no stderr, transcript, or cause").
 func execFailureCommit(t store.Ticket, d Deps, rr runResult, sessionCommit *store.SessionUpsert, resolveIDs []int64, origin response.EscalationOrigin) store.HandlerCommit {
 	c := escalationCommit(t, d, &rr.Reserved.RunID, &rr.Reserved.SessionID,
-		string(response.EscalationCodeRuntimeExecFailed), runtimeExecFailedWhat, runtimeExecFailedWhy, "", origin)
+		string(response.EscalationCodeRuntimeExecFailed), runtimeExecFailedWhat, runtimeExecFailedWhy, rr.Res.FailureDetail, origin)
 	c.Runs = terminalRuns(rr, string(response.OutcomeError))
 	c.Session = sessionCommit
 	c.ResolveQuestions = resolveIDs

@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"io/fs"
 	"log/slog"
 	"os"
@@ -13,6 +14,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"zing/internal/response"
 )
@@ -651,6 +653,121 @@ func TestCodex_ExecErrorRealCode(t *testing.T) {
 	}
 	if res.ExitCode != 3 {
 		t.Errorf("res.ExitCode = %d, want 3", res.ExitCode)
+	}
+}
+
+// TestCodex_ErrorEventKeptInResult proves a Codex run that writes one
+// error event to stdout and exits 1, with no stderr and no -o content (the
+// ticket's repro, "Codex runs that exit 1 within seconds leave no stderr,
+// transcript, or cause"), keeps that event: Run returns an *ExecError,
+// res.Stdout holds the event line, and res.FailureDetail is the event's
+// own message -- but res.TranscriptPath stays empty, since only
+// job.runJobWith, one layer up, ever sets it for Codex.
+func TestCodex_ErrorEventKeptInResult(t *testing.T) {
+	t.Parallel()
+	requireUnix(t)
+
+	const wantMessage = "unexpected status 400 Bad Request: model not supported"
+	dir := t.TempDir()
+	req := newFakeCodexRequest(dir, "error_event")
+	c := NewCodex(fakeCodexScript)
+	res, err := c.Run(context.Background(), req)
+
+	var execErr *ExecError
+	if !errors.As(err, &execErr) {
+		t.Fatalf("err = %v, want *ExecError", err)
+	}
+	if execErr.ExitCode != 1 {
+		t.Errorf("ExecError.ExitCode = %d, want 1", execErr.ExitCode)
+	}
+	if !bytes.Contains(res.Stdout, []byte(`"type":"error"`)) {
+		t.Errorf("res.Stdout = %q, want it to contain a type error event", res.Stdout)
+	}
+	if res.FailureDetail != wantMessage {
+		t.Errorf("res.FailureDetail = %q, want %q", res.FailureDetail, wantMessage)
+	}
+	if res.TranscriptPath != "" {
+		t.Errorf("res.TranscriptPath = %q, want empty (Codex.run never sets it)", res.TranscriptPath)
+	}
+}
+
+// fakeCodexNonEmptyLines builds n non-blank lines, each "lineN", separated
+// by a blank line, so a test can prove codexFailureDetail both skips blank
+// lines and keeps only the last maxTailLines of them.
+func fakeCodexNonEmptyLines(n int) string {
+	var b strings.Builder
+	for i := 1; i <= n; i++ {
+		fmt.Fprintf(&b, "line%d\n\n", i)
+	}
+	return b.String()
+}
+
+func TestCodexFailureDetail(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name          string
+		stdout        string
+		wantDetail    string
+		wantFromEvent bool
+	}{
+		{
+			name: "last error event wins over an earlier one",
+			stdout: `{"type":"error","message":"first error"}
+{"type":"error","message":"second error"}`,
+			wantDetail:    "second error",
+			wantFromEvent: true,
+		},
+		{
+			name: "turn.failed error.message is read",
+			stdout: `{"type":"thread.started","thread_id":"t1"}
+{"type":"turn.failed","error":{"message":"turn failed message"}}`,
+			wantDetail:    "turn failed message",
+			wantFromEvent: true,
+		},
+		{
+			name:          "25 lines with blanks between gives the last 20 non-empty",
+			stdout:        fakeCodexNonEmptyLines(25),
+			wantDetail:    strings.Join([]string{"line6", "line7", "line8", "line9", "line10", "line11", "line12", "line13", "line14", "line15", "line16", "line17", "line18", "line19", "line20", "line21", "line22", "line23", "line24", "line25"}, "\n"),
+			wantFromEvent: false,
+		},
+		{
+			name:          "empty input",
+			stdout:        "",
+			wantDetail:    noStdoutFailureDetail,
+			wantFromEvent: false,
+		},
+		{
+			name:          "whitespace-only input",
+			stdout:        "   \n\t\n   \n",
+			wantDetail:    noStdoutFailureDetail,
+			wantFromEvent: false,
+		},
+		{
+			name:          "a 5000-byte message is cut to at most 2048 bytes on a rune boundary",
+			stdout:        `{"type":"error","message":"` + strings.Repeat("a", 5000) + `"}`,
+			wantDetail:    strings.Repeat("a", maxFailureDetailBytes),
+			wantFromEvent: true,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			detail, fromEvent := codexFailureDetail([]byte(tc.stdout))
+			if detail != tc.wantDetail {
+				t.Errorf("detail = %q, want %q", detail, tc.wantDetail)
+			}
+			if fromEvent != tc.wantFromEvent {
+				t.Errorf("fromEvent = %v, want %v", fromEvent, tc.wantFromEvent)
+			}
+			if len(detail) > maxFailureDetailBytes {
+				t.Errorf("len(detail) = %d, want at most %d", len(detail), maxFailureDetailBytes)
+			}
+			if !utf8.ValidString(detail) {
+				t.Error("detail is not valid UTF-8")
+			}
+		})
 	}
 }
 

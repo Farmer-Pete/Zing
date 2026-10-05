@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/exec"
 	"strings"
+	"sync"
 	"time"
 	"unicode/utf8"
 
@@ -269,6 +270,124 @@ func firstCodexSessionID(stdout []byte) string {
 	return ""
 }
 
+// maxCodexStdoutBytes caps RunResult.Stdout: the last 64 KiB of the child's
+// raw stdout, kept so an early error event in a run that dies within
+// seconds survives even past a chatty stream (design: RunResult.Stdout).
+const maxCodexStdoutBytes = 64 << 10
+
+// tailWriter retains at most limit bytes, the most recently written ones,
+// unlike capWriter, which keeps the first bytes up to its limit and drops
+// everything after. Codex.run pairs it with capWriter on the same
+// io.MultiWriter so a late error event, the kind that actually explains a
+// run that dies within seconds, is never the part a chatty stream's cap
+// drops.
+type tailWriter struct {
+	mu    sync.Mutex
+	limit int
+	buf   []byte
+}
+
+func (w *tailWriter) Write(p []byte) (int, error) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.buf = append(w.buf, p...)
+	if over := len(w.buf) - w.limit; over > 0 {
+		w.buf = w.buf[over:]
+	}
+	return len(p), nil
+}
+
+// bytes returns a copy of what w currently holds.
+func (w *tailWriter) bytes() []byte {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	out := make([]byte, len(w.buf))
+	copy(out, w.buf)
+	return out
+}
+
+// maxFailureDetailBytes caps RunResult.FailureDetail (design:
+// codexFailureDetail).
+const maxFailureDetailBytes = 2048
+
+// noStdoutFailureDetail is codexFailureDetail's result for stdout with no
+// non-empty line at all: a process that died before printing anything.
+const noStdoutFailureDetail = "codex wrote nothing to stdout"
+
+// codexFailureEventLine is the subset of one codex exec --json JSONL
+// event's fields codexFailureDetail reads: an "error" event's own message,
+// or a "turn.failed" event's error.message (Codex's documented event shape,
+// openai/codex sdk/typescript/src/events.ts, commit f6ad902).
+type codexFailureEventLine struct {
+	Type    string `json:"type"`
+	Message string `json:"message"`
+	Error   struct {
+		Message string `json:"message"`
+	} `json:"error"`
+}
+
+// capFailureDetail cuts s on a rune boundary so the result is at most
+// maxFailureDetailBytes.
+func capFailureDetail(s string) string {
+	if len(s) <= maxFailureDetailBytes {
+		return s
+	}
+	cut := maxFailureDetailBytes
+	for cut > 0 && !utf8.RuneStart(s[cut]) {
+		cut--
+	}
+	return s[:cut]
+}
+
+// codexFailureDetail is Codex's own diagnosis of why a run with no final
+// message exited non-zero (design: RunResult.FailureDetail): it walks
+// stdout's JSONL lines and remembers the last line whose type is "error"
+// (its message) or "turn.failed" (its error.message). When it finds one, it
+// returns that message with fromEvent true. Otherwise it returns the last
+// 20 non-empty lines of stdout (trimmed, joined by "\n"), or
+// noStdoutFailureDetail when stdout has no non-empty line at all, both with
+// fromEvent false. The result is always at most maxFailureDetailBytes,
+// cut on a rune boundary.
+func codexFailureDetail(stdout []byte) (detail string, fromEvent bool) {
+	var lastEventMessage string
+	haveEvent := false
+	for line := range bytes.SplitSeq(stdout, []byte("\n")) {
+		line = bytes.TrimSpace(line)
+		if len(line) == 0 {
+			continue
+		}
+		var ev codexFailureEventLine
+		if err := json.Unmarshal(line, &ev); err != nil {
+			continue
+		}
+		switch ev.Type {
+		case "error":
+			lastEventMessage, haveEvent = ev.Message, true
+		case "turn.failed":
+			lastEventMessage, haveEvent = ev.Error.Message, true
+		}
+	}
+	if haveEvent {
+		return capFailureDetail(lastEventMessage), true
+	}
+
+	var nonEmpty []string
+	for line := range strings.SplitSeq(string(stdout), "\n") {
+		line = strings.TrimSpace(line)
+		if line != "" {
+			nonEmpty = append(nonEmpty, line)
+		}
+	}
+	if len(nonEmpty) == 0 {
+		return noStdoutFailureDetail, false
+	}
+	const maxTailLines = 20
+	if len(nonEmpty) > maxTailLines {
+		nonEmpty = nonEmpty[len(nonEmpty)-maxTailLines:]
+	}
+	return capFailureDetail(strings.Join(nonEmpty, "\n")), false
+}
+
 // Run runs one turn of req.Job through the codex CLI (design section 4.1):
 // argv per codexArgv, the prompt on stdin (never in argv), the environment
 // per agentEnv (identical to Claude's), stdout capped and drained the same
@@ -358,7 +477,8 @@ func (c Codex) run(ctx context.Context, req RunRequest, argv []string, outPath s
 	configureProcessGroup(cmd)
 
 	stdout := &capWriter{limit: maxOutputBytes}
-	cmd.Stdout = stdout
+	tail := &tailWriter{limit: maxCodexStdoutBytes}
+	cmd.Stdout = io.MultiWriter(stdout, tail)
 
 	var stderrCount countingWriter
 	stderrHash := sha256.New()
@@ -399,12 +519,17 @@ func (c Codex) run(ctx context.Context, req RunRequest, argv []string, outPath s
 		StderrLen:    stderrCount.n,
 		StderrSHA256: shortHex(stderrHash.Sum(nil)),
 		Stderr:       stderrCap.bytes(),
+		Stdout:       tail.bytes(),
 	}
 	res.FinalMessage = readFinalMessageFile(outPath)
 
 	if outcomeErr := classifyProcessOutcome(ctx, stdout.overflowed(), waitErr, res.ExitCode); outcomeErr != nil {
 		if errors.Is(outcomeErr, ErrTimeout) || errors.Is(outcomeErr, ErrCanceled) {
 			res.ExitCode = -1
+		}
+		var execErr *ExecError
+		if errors.As(outcomeErr, &execErr) && res.FinalMessage == "" {
+			res.FailureDetail, _ = codexFailureDetail(res.Stdout)
 		}
 		return res, outcomeErr
 	}

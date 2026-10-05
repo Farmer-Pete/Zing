@@ -275,6 +275,19 @@ func runJobWith(
 		stderrFile = path
 	}
 
+	// Codex never sets TranscriptPath itself (unlike Claude, whose own
+	// runtime does): its stdout, the codex exec --json event stream, is
+	// where an early error that kills the run within seconds is actually
+	// reported, so it is the transcript worth keeping (design: "Codex runs
+	// that exit 1 within seconds leave no stderr, transcript, or cause").
+	if len(res.Stdout) > 0 && d.DataDir != "" && res.TranscriptPath == "" {
+		path, writeErr := writeTranscriptFile(d.DataDir, rsv.RunID, res.Stdout)
+		if writeErr != nil {
+			slog.Warn("transcript file not written", "ticket_id", t.ID, "run_id", rsv.RunID, "error", writeErr)
+		}
+		res.TranscriptPath = path
+	}
+
 	recordRunEvidence(ctx, d, t.ID, rsv.RunID, res, stderrFile)
 
 	slog.Info("runJob end",
@@ -301,20 +314,35 @@ func runJobWith(
 	return runResult{Res: res, Reserved: rsv, Started: started}, runErr
 }
 
-// writeStderrFile saves one run's captured stderr to
-// <dataDir>/runs/run-<runID>-stderr.log, mode 0600 in a 0700 directory,
-// and returns the path. The log names the path, never the text, since
-// stderr can echo anything the child saw.
-func writeStderrFile(dataDir string, runID int64, data []byte) (string, error) {
+// writeRunsFile saves data to <dataDir>/runs/name, mode 0600 in a 0700
+// directory, and returns the path. writeStderrFile and writeTranscriptFile
+// both hold this one body: the directory and file modes, and the "never
+// retained past this write" shape, are the same for either file.
+func writeRunsFile(dataDir, name string, data []byte) (string, error) {
 	dir := filepath.Join(dataDir, "runs")
 	if err := os.MkdirAll(dir, 0o700); err != nil {
-		return "", fmt.Errorf("stderr file: %w", err)
+		return "", fmt.Errorf("runs file: %w", err)
 	}
-	path := filepath.Join(dir, store.StderrFileName(runID))
+	path := filepath.Join(dir, name)
 	if err := os.WriteFile(path, data, 0o600); err != nil {
-		return "", fmt.Errorf("stderr file: %w", err)
+		return "", fmt.Errorf("runs file: %w", err)
 	}
 	return path, nil
+}
+
+// writeStderrFile saves one run's captured stderr to
+// <dataDir>/runs/run-<runID>-stderr.log. The log names the path, never the
+// text, since stderr can echo anything the child saw.
+func writeStderrFile(dataDir string, runID int64, data []byte) (string, error) {
+	return writeRunsFile(dataDir, store.StderrFileName(runID), data)
+}
+
+// writeTranscriptFile saves a Codex run's captured stdout to
+// <dataDir>/runs/run-<runID>-stdout.jsonl, runJobWith's own transcript for
+// a runtime that never sets RunResult.TranscriptPath itself. The log names
+// the path, never the text, since stdout is Codex's raw event stream.
+func writeTranscriptFile(dataDir string, runID int64, data []byte) (string, error) {
+	return writeRunsFile(dataDir, store.StdoutFileName(runID), data)
 }
 
 // recordRunEvidence stores what runID left behind (#43 split): the final

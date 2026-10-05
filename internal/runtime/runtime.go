@@ -94,9 +94,28 @@ type RunResult struct {
 	// capFinalMessage, populated whenever the runtime produces final
 	// output; empty when it does not. Never logged.
 	FinalMessage string
-	// TranscriptPath is where the runtime's own transcript lives (Claude
-	// only); "" for Codex, the Fake, and a process that never started.
+	// TranscriptPath is where the runtime's own transcript lives: set by
+	// Claude's own runtime, and by job.runJobWith for Codex, which writes
+	// Stdout to its own file under DATA_DIR/runs once Run returns. "" for
+	// the Fake and a process that never started.
 	TranscriptPath string
+	// Stdout holds the last maxStdoutBytes (64 KiB) of the child's raw
+	// stdout (Codex only): the codex exec --json event stream, which is
+	// where an error that kills the run within seconds, before any final
+	// message exists, is actually reported. After job.runJobWith retries a
+	// transient failure, it is the last 64 KiB of both attempts' stdout
+	// joined. nil for Claude, the Fake, and a process that never started.
+	// Never logged.
+	Stdout []byte
+	// FailureDetail is Codex's own diagnosis of why a run with no final
+	// message exited non-zero (Codex only): the message of the last error
+	// or turn.failed event on Stdout, or, when no such event is found, the
+	// last 20 non-empty lines of Stdout. At most 2048 bytes of valid
+	// UTF-8. Empty unless the runtime returned a non-nil *ExecError with an
+	// empty FinalMessage. job.runJobWith's retryTransient may rewrite it
+	// into a note naming the matched transient pattern and the retry's own
+	// failure.
+	FailureDetail string
 	// StopHookEvents, StopHookBlocks and StopHookUnread are the Claude Code
 	// Stop hook's own counters for this run (Claude only, when a Stop hook
 	// ran); all 0 for Codex, the Fake, and a Claude run with no hook.
