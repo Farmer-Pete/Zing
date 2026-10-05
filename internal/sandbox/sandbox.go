@@ -15,6 +15,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"log/slog"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -50,6 +51,15 @@ const (
 type Params struct {
 	Home, Worktree, RepoGit, DataDir, ZingBin             string
 	CacheRoot, CacheShared, RunDir, Transcripts, MDSCache string
+	// SSHAuthSock and SSHAuthSockReal carry the parent's own SSH_AUTH_SOCK,
+	// as given and with its symlinks resolved (#49's agent-socket gap):
+	// both profiles deny a connect to either path, so a custom agent
+	// (1Password, Secretive) reached through a symlink is covered the
+	// same as the raw path. Empty for either field means the host never
+	// named an agent socket; Prefix substitutes noAgentSocket for an
+	// empty field rather than emit nothing, so the profile's own deny
+	// rule, which the param always backs, never names an unset param.
+	SSHAuthSock, SSHAuthSockReal string
 	// ScenariosFile and CodexHome are the judge profile's own two extra
 	// parameters (PKG9-PLAN.md section 4.7, D19, D27): the run's sealed
 	// scenarios file and the judge's persistent Codex home. Empty for the
@@ -64,6 +74,15 @@ type Params struct {
 // resolved once, at Load, and reused by every later ParamsFor call.
 type Host struct {
 	Home, DataDir, ZingBin, CacheRoot, CacheShared, MDSCache string
+	// SSHAuthSock and SSHAuthSockReal are resolveHost's own reading of the
+	// parent's SSH_AUTH_SOCK (#49): both empty when it was unset, empty,
+	// or relative.
+	SSHAuthSock, SSHAuthSockReal string
+	// agentSockBranch records which of resolveHost's own branches ran for
+	// SSH_AUTH_SOCK -- "unset", "relative", "resolved", or "unresolved" --
+	// so LoadProfile can log which one without ever logging the path
+	// itself.
+	agentSockBranch string
 }
 
 // Sandbox is a loaded (or deliberately unavailable) seatbelt profile: its
@@ -217,6 +236,9 @@ func LoadProfile(name string, profile []byte, dataDir string, readPaths []string
 	if err != nil {
 		return Sandbox{reason: reasonUserCacheDirNotFound, name: name}
 	}
+	// Only the profile name and the closed branch word are logged, never
+	// the socket path itself (#49's agent-socket gap).
+	slog.Debug("sandbox agent socket", "profile", name, "branch", host.agentSockBranch)
 	sb := Sandbox{host: host, renderedProfile: rendered, name: name}
 
 	if !sb.proves() {
@@ -288,9 +310,37 @@ func resolveHost(dataDir string) (Host, error) {
 		return Host{}, fmt.Errorf("sandbox: chmod cache shared dir: %w", err)
 	}
 
+	// SSH_AUTH_SOCK (#49's agent-socket gap): a relative value is treated
+	// the same as unset, since a relative path-literal would never match
+	// what the kernel resolves a connect against anyway. An absolute value
+	// is carried both as given and with its symlinks resolved, falling
+	// back to the raw value when resolution fails -- the same pattern this
+	// function already uses above for home and zingBin -- so a custom
+	// agent socket reached through a symlink is denied either way. No
+	// error ever comes from this: an unreadable or missing socket path
+	// still has a path, and the two profiles only need the path itself to
+	// build their deny rule from, never to open it here.
+	var sshAuthSock, sshAuthSockReal, agentSockBranch string
+	switch rawSock := os.Getenv("SSH_AUTH_SOCK"); {
+	case rawSock == "":
+		agentSockBranch = "unset"
+	case !filepath.IsAbs(rawSock):
+		agentSockBranch = "relative"
+	default:
+		sshAuthSock = rawSock
+		if resolved, evalErr := filepath.EvalSymlinks(rawSock); evalErr == nil {
+			sshAuthSockReal = resolved
+			agentSockBranch = "resolved"
+		} else {
+			sshAuthSockReal = rawSock
+			agentSockBranch = "unresolved"
+		}
+	}
+
 	return Host{
 		Home: home, DataDir: dataDir, ZingBin: zingBin,
 		CacheRoot: cacheRoot, CacheShared: cacheShared, MDSCache: mdsCache,
+		SSHAuthSock: sshAuthSock, SSHAuthSockReal: sshAuthSockReal, agentSockBranch: agentSockBranch,
 	}, nil
 }
 
@@ -313,6 +363,7 @@ func (s Sandbox) proves() bool {
 		Home: s.host.Home, Worktree: runDir, RepoGit: runDir, DataDir: s.host.DataDir, ZingBin: s.host.ZingBin,
 		CacheRoot: s.host.CacheRoot, CacheShared: s.host.CacheShared, RunDir: runDir,
 		Transcripts: runDir, MDSCache: s.host.MDSCache,
+		SSHAuthSock: s.host.SSHAuthSock, SSHAuthSockReal: s.host.SSHAuthSockReal,
 	}
 	cmd := []string{"/usr/bin/true"}
 	if s.name == profileNameJudge {
@@ -423,16 +474,18 @@ func (s Sandbox) ParamsFor(worktree, repoGit, runDir string) (Params, error) {
 		return Params{}, err
 	}
 	return Params{
-		Home:        s.host.Home,
-		Worktree:    resolvedWorktree,
-		RepoGit:     resolvedRepoGit,
-		DataDir:     s.host.DataDir,
-		ZingBin:     s.host.ZingBin,
-		CacheRoot:   s.host.CacheRoot,
-		CacheShared: s.host.CacheShared,
-		RunDir:      resolvedRunDir,
-		Transcripts: transcriptsDir(s.host.Home, resolvedWorktree),
-		MDSCache:    s.host.MDSCache,
+		Home:            s.host.Home,
+		Worktree:        resolvedWorktree,
+		RepoGit:         resolvedRepoGit,
+		DataDir:         s.host.DataDir,
+		ZingBin:         s.host.ZingBin,
+		CacheRoot:       s.host.CacheRoot,
+		CacheShared:     s.host.CacheShared,
+		RunDir:          resolvedRunDir,
+		Transcripts:     transcriptsDir(s.host.Home, resolvedWorktree),
+		MDSCache:        s.host.MDSCache,
+		SSHAuthSock:     s.host.SSHAuthSock,
+		SSHAuthSockReal: s.host.SSHAuthSockReal,
 	}, nil
 }
 
@@ -497,14 +550,16 @@ func checkParamValue(name, value string) error {
 var errJudgeParamsIncomplete = errors.New("sandbox: judge profile needs both SCENARIOS_FILE and CODEX_HOME")
 
 // Prefix returns the command prefix: sandbox-exec -D HOME=<..> -D
-// WORKTREE=<..> ... -p <profile>, with the -D flags in paramOrder (section
-// 5.4), followed by the judge profile's own two extra flags when this
-// Sandbox was loaded under that name (section 4.7). It validates every
-// param value first (checkParamValue), in that same order, so the first
-// unsafe value's own name is what the error names.
+// WORKTREE=<..> ... -D SSH_AUTH_SOCK=<..> -D SSH_AUTH_SOCK_REAL=<..> ...
+// -p <profile>, with the -D flags in paramOrder (section 5.4), followed by
+// the agent-socket pair (#49) every profile emits, followed by the judge
+// profile's own two extra flags when this Sandbox was loaded under that
+// name (section 4.7). It validates every param value first
+// (checkParamValue), in that same order, so the first unsafe value's own
+// name is what the error names.
 func (s Sandbox) Prefix(p Params) ([]string, error) {
 	values := paramValues(p)
-	argv := make([]string, 0, 2+2*len(paramOrder)+4+2)
+	argv := make([]string, 0, 2+2*len(paramOrder)+4+4+2)
 	argv = append(argv, "sandbox-exec")
 	for i, name := range paramOrder {
 		if err := checkParamValue(name, values[i]); err != nil {
@@ -513,6 +568,12 @@ func (s Sandbox) Prefix(p Params) ([]string, error) {
 		argv = append(argv, "-D", name+"="+values[i])
 	}
 
+	agentArgs, err := agentParamArgs(p)
+	if err != nil {
+		return nil, err
+	}
+	argv = append(argv, agentArgs...)
+
 	judgeArgs, err := s.judgeParamArgs(p)
 	if err != nil {
 		return nil, err
@@ -520,6 +581,38 @@ func (s Sandbox) Prefix(p Params) ([]string, error) {
 	argv = append(argv, judgeArgs...)
 
 	argv = append(argv, "-p", s.renderedProfile)
+	return argv, nil
+}
+
+// noAgentSocket is the sentinel path agentParamArgs substitutes for an
+// empty SSHAuthSock or SSHAuthSockReal (#49's agent-socket gap): /var/empty
+// is root-owned and empty, so nothing can ever bind a socket there, and
+// every profile's own SSH_AUTH_SOCK / SSH_AUTH_SOCK_REAL deny rule always
+// has a param to name, never an unset one.
+const noAgentSocket = "/var/empty/zing-no-ssh-agent"
+
+// agentParamArgs returns the "-D SSH_AUTH_SOCK=..." and "-D
+// SSH_AUTH_SOCK_REAL=..." pair Prefix appends after paramOrder's own flags,
+// for every profile (#49): an empty field becomes noAgentSocket rather than
+// being omitted, since every profile's deny rule always names both params.
+// It mirrors judgeParamArgs below, checking each value with the same
+// checkParamValue every other param goes through, so the error names only
+// the param and never the rejected value.
+func agentParamArgs(p Params) ([]string, error) {
+	var argv []string
+	for _, kv := range []struct{ name, value string }{
+		{"SSH_AUTH_SOCK", p.SSHAuthSock},
+		{"SSH_AUTH_SOCK_REAL", p.SSHAuthSockReal},
+	} {
+		value := kv.value
+		if value == "" {
+			value = noAgentSocket
+		}
+		if err := checkParamValue(kv.name, value); err != nil {
+			return nil, err
+		}
+		argv = append(argv, "-D", kv.name+"="+value)
+	}
 	return argv, nil
 }
 

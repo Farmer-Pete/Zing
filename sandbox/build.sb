@@ -55,6 +55,17 @@
 ; instead.
 (deny network-outbound (remote unix-socket (path-regex #"^/private/tmp/com\.apple\.launchd\.[^/]+/Listeners$")))
 
+; No connection to a custom ssh-agent socket either: the launchd-only regex
+; above never matches a 1Password- or Secretive-style agent, whose socket
+; sits somewhere under the owner's own SSH_AUTH_SOCK (#49's own agent-socket
+; gap). SSH_AUTH_SOCK_REAL is the same path with symlinks resolved, so a
+; socket reached only through a symlink is denied too. internal/sandbox
+; substitutes a sentinel nothing can ever listen at when the host never
+; named one, so this rule always has a real param to name.
+(deny network-outbound
+  (remote unix-socket (path-literal (param "SSH_AUTH_SOCK")))
+  (remote unix-socket (path-literal (param "SSH_AUTH_SOCK_REAL"))))
+
 ; No outbound connect to a git transport port: #49 found a judge-profile
 ; probe push `git@github.com` over SSH (port 22) because the profile
 ; allowed the connect once ssh had read an unencrypted key from the real

@@ -32,6 +32,10 @@ const testReadPathEntry = "/opt/homebrew/bin"
 // runtime.GOOS against, in its own not-macOS branch (goconst).
 const testGOOSDarwin = "darwin"
 
+// testSandboxExecArgv0 is argv[0] every Prefix test in this file expects
+// (goconst).
+const testSandboxExecArgv0 = "sandbox-exec"
+
 // testParams is a Params literal every absolute-field test in this file
 // starts from and overrides one field of, so a test failure names exactly
 // the field it changed.
@@ -63,7 +67,7 @@ func TestPrefixOrder(t *testing.T) {
 	}
 
 	want := []string{
-		"sandbox-exec",
+		testSandboxExecArgv0,
 		"-D", "HOME=" + p.Home,
 		"-D", "WORKTREE=" + p.Worktree,
 		"-D", "REPO_GIT=" + p.RepoGit,
@@ -74,6 +78,8 @@ func TestPrefixOrder(t *testing.T) {
 		"-D", "RUN_DIR=" + p.RunDir,
 		"-D", "MDS_CACHE=" + p.MDSCache,
 		"-D", "TRANSCRIPTS=" + p.Transcripts,
+		"-D", "SSH_AUTH_SOCK=" + noAgentSocket,
+		"-D", "SSH_AUTH_SOCK_REAL=" + noAgentSocket,
 		"-p", sb.renderedProfile,
 	}
 	if !slices.Equal(argv, want) {
@@ -115,6 +121,74 @@ func TestPrefixRejectsRelativeParam(t *testing.T) {
 	want := "sandbox: param WORKTREE has an unsafe value"
 	if err.Error() != want {
 		t.Errorf("Prefix error = %q, want %q", err.Error(), want)
+	}
+}
+
+// ---- the agent-socket params (#49) -------------------------------------
+
+// TestPrefixEmitsAgentSocketParams proves Prefix emits "-D
+// SSH_AUTH_SOCK=..." and "-D SSH_AUTH_SOCK_REAL=..." right after TRANSCRIPTS
+// when both fields are set, and that an unsafe value is refused by name
+// only, with the rejected value never appearing in the error text.
+func TestPrefixEmitsAgentSocketParams(t *testing.T) {
+	t.Parallel()
+	sb := Sandbox{renderedProfile: testMinimalRenderedProfile}
+	p := testParams()
+	p.SSHAuthSock = "/Users/test/agent-raw.sock"
+	p.SSHAuthSockReal = "/Users/test/agent-real.sock"
+
+	argv, err := sb.Prefix(p)
+	if err != nil {
+		t.Fatalf("Prefix: %v", err)
+	}
+	want := []string{
+		testSandboxExecArgv0,
+		"-D", "HOME=" + p.Home,
+		"-D", "WORKTREE=" + p.Worktree,
+		"-D", "REPO_GIT=" + p.RepoGit,
+		"-D", "DATA_DIR=" + p.DataDir,
+		"-D", "ZING_BIN=" + p.ZingBin,
+		"-D", "CACHE_ROOT=" + p.CacheRoot,
+		"-D", "CACHE_SHARED=" + p.CacheShared,
+		"-D", "RUN_DIR=" + p.RunDir,
+		"-D", "MDS_CACHE=" + p.MDSCache,
+		"-D", "TRANSCRIPTS=" + p.Transcripts,
+		"-D", "SSH_AUTH_SOCK=" + p.SSHAuthSock,
+		"-D", "SSH_AUTH_SOCK_REAL=" + p.SSHAuthSockReal,
+		"-p", sb.renderedProfile,
+	}
+	if !slices.Equal(argv, want) {
+		t.Errorf("Prefix() =\n%v\nwant\n%v", argv, want)
+	}
+
+	unsafe := `/Users/test/agent"; rm -rf /`
+	p.SSHAuthSock = unsafe
+	_, err = sb.Prefix(p)
+	wantErr := "sandbox: param SSH_AUTH_SOCK has an unsafe value"
+	if err == nil || err.Error() != wantErr {
+		t.Errorf("Prefix() err = %v, want %q", err, wantErr)
+	}
+	if err != nil && strings.Contains(err.Error(), unsafe) {
+		t.Errorf("Prefix() err = %q, must not contain the rejected value", err.Error())
+	}
+}
+
+// TestPrefixAgentSocketSentinel proves Prefix substitutes noAgentSocket for
+// both SSH_AUTH_SOCK and SSH_AUTH_SOCK_REAL when Params carries neither
+// (section: every profile's deny rule always names a real param).
+func TestPrefixAgentSocketSentinel(t *testing.T) {
+	t.Parallel()
+	sb := Sandbox{renderedProfile: testMinimalRenderedProfile}
+	p := testParams()
+
+	argv, err := sb.Prefix(p)
+	if err != nil {
+		t.Fatalf("Prefix: %v", err)
+	}
+	for _, flag := range []string{"SSH_AUTH_SOCK=" + noAgentSocket, "SSH_AUTH_SOCK_REAL=" + noAgentSocket} {
+		if !slices.Contains(argv, flag) {
+			t.Errorf("Prefix() = %v, want it to contain %q", argv, flag)
+		}
 	}
 }
 
@@ -714,7 +788,7 @@ func TestPrefixEmitsScenariosFileForJudge(t *testing.T) {
 		t.Fatalf("Prefix: %v", err)
 	}
 	want := []string{
-		"sandbox-exec",
+		testSandboxExecArgv0,
 		"-D", "HOME=" + p.Home,
 		"-D", "WORKTREE=" + p.Worktree,
 		"-D", "REPO_GIT=" + p.RepoGit,
@@ -725,6 +799,8 @@ func TestPrefixEmitsScenariosFileForJudge(t *testing.T) {
 		"-D", "RUN_DIR=" + p.RunDir,
 		"-D", "MDS_CACHE=" + p.MDSCache,
 		"-D", "TRANSCRIPTS=" + p.Transcripts,
+		"-D", "SSH_AUTH_SOCK=" + noAgentSocket,
+		"-D", "SSH_AUTH_SOCK_REAL=" + noAgentSocket,
 		"-D", "SCENARIOS_FILE=" + p.ScenariosFile,
 		"-D", "CODEX_HOME=" + p.CodexHome,
 		"-p", sb.renderedProfile,
@@ -893,6 +969,9 @@ func TestProfilesDenyGitTransports(t *testing.T) {
 	t.Parallel()
 	wantTCPDeny := `(deny network-outbound (remote tcp "*:22") (remote tcp "*:9418"))`
 	wantSSHExecDeny := `(deny process-exec (regex #"/ssh$"))`
+	wantAgentSocketDeny := "(deny network-outbound\n" +
+		"  (remote unix-socket (path-literal (param \"SSH_AUTH_SOCK\")))\n" +
+		"  (remote unix-socket (path-literal (param \"SSH_AUTH_SOCK_REAL\"))))"
 
 	for _, name := range []string{"sandbox/build.sb", "sandbox/judge.sb"} {
 		profile, err := zing.Assets.ReadFile(name)
@@ -905,6 +984,9 @@ func TestProfilesDenyGitTransports(t *testing.T) {
 		}
 		if !strings.Contains(text, wantSSHExecDeny) {
 			t.Errorf("%s does not contain %q", name, wantSSHExecDeny)
+		}
+		if !strings.Contains(text, wantAgentSocketDeny) {
+			t.Errorf("%s does not contain %q", name, wantAgentSocketDeny)
 		}
 	}
 }

@@ -1190,3 +1190,177 @@ func TestJudgeDeniesGitPush(t *testing.T) {
 	dirs := newTestDirs(t)
 	testDeniesGitPush(t, sb, dirs.judgeParams(t), dirs.worktree)
 }
+
+// ---- denying a custom ssh-agent socket (#49) ---------------------------
+
+// listenUnix opens a unix-socket listener at path through
+// net.ListenConfig (noctx: a bare net.Listen is disallowed).
+func listenUnix(t *testing.T, path string) net.Listener {
+	t.Helper()
+	var lc net.ListenConfig
+	ln, err := lc.Listen(t.Context(), "unix", path)
+	if err != nil {
+		t.Fatalf("listen %s: %v", path, err)
+	}
+	return ln
+}
+
+// testDeniesAgentSocket is TestBuildDeniesAgentSocket's and
+// TestJudgeDeniesAgentSocket's shared body: two listeners standing in for
+// an ssh-agent, one reached directly (SSHAuthSockReal) and the other
+// reached through a symlink (SSHAuthSock), plus a sibling socket the deny
+// must not touch. The socket directory is created directly under /tmp,
+// not under t.TempDir()'s own deeper base, to stay well under a unix
+// socket's 104-byte sun_path limit, and is also used as p.RunDir so a
+// write-gated false failure (the socket directory itself being outside
+// every write-allow) can never be mistaken for the network deny this test
+// is actually about.
+func testDeniesAgentSocket(t *testing.T, sb Sandbox, p Params) {
+	t.Helper()
+
+	dir, err := os.MkdirTemp("/tmp", "zsa") //nolint:usetesting // a unix socket's sun_path is 104 bytes; t.TempDir() nests too deep under macOS's own temp root
+	if err != nil {
+		t.Fatalf("MkdirTemp: %v", err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	if resolved, evalErr := filepath.EvalSymlinks(dir); evalErr == nil {
+		dir = resolved
+	}
+	p.RunDir = dir
+
+	agentSock := filepath.Join(dir, "agent.sock")
+	otherSock := filepath.Join(dir, "other.sock")
+	linkSock := filepath.Join(dir, "link.sock")
+
+	agentLn := listenUnix(t, agentSock)
+	defer func() { _ = agentLn.Close() }()
+	var agentAccepts int64
+	go countingAccepts(agentLn, &agentAccepts)
+
+	otherLn := listenUnix(t, otherSock)
+	defer func() { _ = otherLn.Close() }()
+	var otherAccepts int64
+	go countingAccepts(otherLn, &otherAccepts)
+
+	if symlinkErr := os.Symlink(agentSock, linkSock); symlinkErr != nil {
+		t.Fatalf("symlink: %v", symlinkErr)
+	}
+
+	p.SSHAuthSock = linkSock
+	p.SSHAuthSockReal = agentSock
+
+	if exitCode, out := runSandboxed(t, sb, p, "/usr/bin/nc", "-U", "-w", "2", linkSock); exitCode == 0 {
+		t.Errorf("nc -U %s (symlink to the denied agent socket): want a non-zero exit, got 0 (output %q)", linkSock, out)
+	}
+	if exitCode, out := runSandboxed(t, sb, p, "/usr/bin/nc", "-U", "-w", "2", agentSock); exitCode == 0 {
+		t.Errorf("nc -U %s (the denied agent socket): want a non-zero exit, got 0 (output %q)", agentSock, out)
+	}
+	if got := atomic.LoadInt64(&agentAccepts); got != 0 {
+		t.Errorf("agent socket listener accepted %d connections, want 0", got)
+	}
+
+	if exitCode, out := runSandboxed(t, sb, p, "/usr/bin/nc", "-U", "-w", "2", otherSock); exitCode != 0 {
+		t.Errorf("nc -U %s (a socket the profile does not name): exit %d, want 0 (output %q)", otherSock, exitCode, out)
+	}
+	if got := atomic.LoadInt64(&otherAccepts); got != 1 {
+		t.Errorf("other socket listener accepted %d connections, want 1", got)
+	}
+}
+
+// TestBuildDeniesAgentSocket proves build.sb denies a connect to the
+// socket the parent's own SSH_AUTH_SOCK names, both through the path as
+// given and through its symlink-resolved path, while leaving an unrelated
+// socket reachable (#49's own agent-socket gap).
+func TestBuildDeniesAgentSocket(t *testing.T) {
+	t.Parallel()
+	sb := newLoadedSandbox(t, nil, 7420)
+	dirs := newTestDirs(t)
+	testDeniesAgentSocket(t, sb, dirs.params())
+}
+
+// TestJudgeDeniesAgentSocket is TestBuildDeniesAgentSocket's own
+// counterpart under judge.sb.
+func TestJudgeDeniesAgentSocket(t *testing.T) {
+	t.Parallel()
+	sb := newLoadedJudgeSandbox(t)
+	dirs := newTestDirs(t)
+	testDeniesAgentSocket(t, sb, dirs.judgeParams(t))
+}
+
+// TestParamsForCarriesAgentSocket proves resolveHost's own SSH_AUTH_SOCK
+// resolution, carried through LoadProfile and ParamsFor, for each of
+// resolveHost's three non-empty branches (#49). Not parallel: it calls
+// t.Setenv.
+func TestParamsForCarriesAgentSocket(t *testing.T) {
+	requireNotSandboxed(t)
+
+	t.Run("resolved", func(t *testing.T) {
+		dir, mkdirErr := os.MkdirTemp("/tmp", "zsa") //nolint:usetesting // a unix socket's sun_path is 104 bytes; t.TempDir() nests too deep under macOS's own temp root
+		if mkdirErr != nil {
+			t.Fatalf("MkdirTemp: %v", mkdirErr)
+		}
+		t.Cleanup(func() { _ = os.RemoveAll(dir) })
+		if resolved, evalErr := filepath.EvalSymlinks(dir); evalErr == nil {
+			dir = resolved
+		}
+
+		agentSock := filepath.Join(dir, "agent.sock")
+		ln := listenUnix(t, agentSock)
+		t.Cleanup(func() { _ = ln.Close() })
+
+		linkSock := filepath.Join(dir, "link.sock")
+		if symlinkErr := os.Symlink(agentSock, linkSock); symlinkErr != nil {
+			t.Fatalf("symlink: %v", symlinkErr)
+		}
+
+		t.Setenv("SSH_AUTH_SOCK", linkSock)
+		sb := newLoadedSandbox(t, nil, 7420)
+		dirs := newTestDirs(t)
+		p, err := sb.ParamsFor(dirs.worktree, dirs.repoGit, dirs.runDir)
+		if err != nil {
+			t.Fatalf("ParamsFor: %v", err)
+		}
+		if p.SSHAuthSock != linkSock {
+			t.Errorf("SSHAuthSock = %q, want %q", p.SSHAuthSock, linkSock)
+		}
+		if p.SSHAuthSockReal != agentSock {
+			t.Errorf("SSHAuthSockReal = %q, want %q", p.SSHAuthSockReal, agentSock)
+		}
+		if sb.host.agentSockBranch != "resolved" {
+			t.Errorf("agentSockBranch = %q, want %q", sb.host.agentSockBranch, "resolved")
+		}
+	})
+
+	t.Run("relative", func(t *testing.T) {
+		t.Setenv("SSH_AUTH_SOCK", "relative/agent.sock")
+		sb := newLoadedSandbox(t, nil, 7420)
+		dirs := newTestDirs(t)
+		p, err := sb.ParamsFor(dirs.worktree, dirs.repoGit, dirs.runDir)
+		if err != nil {
+			t.Fatalf("ParamsFor: %v", err)
+		}
+		if p.SSHAuthSock != "" || p.SSHAuthSockReal != "" {
+			t.Errorf("SSHAuthSock=%q SSHAuthSockReal=%q, want both empty", p.SSHAuthSock, p.SSHAuthSockReal)
+		}
+		if sb.host.agentSockBranch != "relative" {
+			t.Errorf("agentSockBranch = %q, want %q", sb.host.agentSockBranch, "relative")
+		}
+	})
+
+	t.Run("unresolved", func(t *testing.T) {
+		missing := filepath.Join(t.TempDir(), "does-not-exist.sock")
+		t.Setenv("SSH_AUTH_SOCK", missing)
+		sb := newLoadedSandbox(t, nil, 7420)
+		dirs := newTestDirs(t)
+		p, err := sb.ParamsFor(dirs.worktree, dirs.repoGit, dirs.runDir)
+		if err != nil {
+			t.Fatalf("ParamsFor: %v", err)
+		}
+		if p.SSHAuthSock != missing || p.SSHAuthSockReal != missing {
+			t.Errorf("SSHAuthSock=%q SSHAuthSockReal=%q, want both %q", p.SSHAuthSock, p.SSHAuthSockReal, missing)
+		}
+		if sb.host.agentSockBranch != "unresolved" {
+			t.Errorf("agentSockBranch = %q, want %q", sb.host.agentSockBranch, "unresolved")
+		}
+	})
+}
