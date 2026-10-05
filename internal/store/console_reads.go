@@ -288,6 +288,13 @@ type LiveTicket struct {
 	Ticket            Ticket
 	Unread            bool
 	OpenQuestionCount int
+
+	// ParkedUntil is the MAX(capped_until) over every run of the ticket's
+	// sessions, past or future (#45): nil when the ticket has never been
+	// parked. The console compares it with now to decide whether a parked
+	// badge still applies (a past value is a parked ticket's own history,
+	// not a reason to show the badge again).
+	ParkedUntil *time.Time
 }
 
 // LiveTickets returns every ticket the sidebar lists (design section 6.3,
@@ -309,7 +316,8 @@ func (s *Store) LiveTickets(ctx context.Context, terminal []string) ([]LiveTicke
 	}
 	query := `SELECT ` + ticketColumns + `,
 		EXISTS (SELECT 1 FROM messages um WHERE um.ticket_id = t.id AND ` + unreadMessageWhere + `) AS unread,
-		(SELECT COUNT(*) FROM messages q WHERE q.ticket_id = t.id AND q.type = 'question' AND q.state = 'open')
+		(SELECT COUNT(*) FROM messages q WHERE q.ticket_id = t.id AND q.type = 'question' AND q.state = 'open'),
+		(SELECT MAX(r.capped_until) FROM runs r JOIN sessions s ON s.id = r.session_id WHERE s.ticket_id = t.id)
 		FROM tickets t ` + where + `
 		ORDER BY ` + issueNumberOrder
 	rows, err := s.db.QueryContext(ctx, query, args...)
@@ -321,11 +329,19 @@ func (s *Store) LiveTickets(ctx context.Context, terminal []string) ([]LiveTicke
 	var out []LiveTicket
 	for rows.Next() {
 		var lt LiveTicket
-		t, err := scanTicket(rows, &lt.Unread, &lt.OpenQuestionCount)
+		var parkedUntil sql.NullString
+		t, err := scanTicket(rows, &lt.Unread, &lt.OpenQuestionCount, &parkedUntil)
 		if err != nil {
 			return nil, fmt.Errorf("live tickets: scan: %w", err)
 		}
 		lt.Ticket = t
+		if parkedUntil.Valid {
+			ts, perr := time.Parse(fixedTimeLayout, parkedUntil.String)
+			if perr != nil {
+				return nil, fmt.Errorf("live tickets: parse parked_until: %w", perr)
+			}
+			lt.ParkedUntil = &ts
+		}
 		out = append(out, lt)
 	}
 	if err := rows.Err(); err != nil {

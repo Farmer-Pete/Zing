@@ -14,6 +14,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	zing "zing"
 	"zing/internal/console/templates"
@@ -1888,4 +1889,35 @@ func TestProjectSections(t *testing.T) {
 			t.Errorf("closed = %v, want empty", closed)
 		}
 	})
+}
+
+// TestBuildNavThreads_ParkedUntil proves buildNavThreads' own now comparison
+// (#45): a LiveTicket.ParkedUntil still after now gives NavThread.ParkedUntil
+// equal to clockLabel of that time; one at or before now gives the empty
+// string.
+func TestBuildNavThreads_ParkedUntil(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 10, 5, 16, 0, 0, 0, time.UTC)
+
+	future := now.Add(time.Minute)
+	past := now.Add(-time.Minute)
+	items := []store.LiveTicket{
+		{Ticket: store.Ticket{ID: 1}, ParkedUntil: &future},
+		{Ticket: store.Ticket{ID: 2}, ParkedUntil: &past},
+		{Ticket: store.Ticket{ID: 3}},
+	}
+
+	got := buildNavThreads(items, now)
+	if len(got) != 3 {
+		t.Fatalf("buildNavThreads returned %d threads, want 3", len(got))
+	}
+	if want := clockLabel(future); got[0].ParkedUntil != want {
+		t.Errorf("buildNavThreads[0].ParkedUntil = %q, want %q (future)", got[0].ParkedUntil, want)
+	}
+	if got[1].ParkedUntil != "" {
+		t.Errorf("buildNavThreads[1].ParkedUntil = %q, want \"\" (past)", got[1].ParkedUntil)
+	}
+	if got[2].ParkedUntil != "" {
+		t.Errorf("buildNavThreads[2].ParkedUntil = %q, want \"\" (nil)", got[2].ParkedUntil)
+	}
 }

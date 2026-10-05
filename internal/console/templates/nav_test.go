@@ -12,12 +12,19 @@ import (
 // the bare string (goconst).
 const testStatePlanning = "planning"
 
-// renderNav renders Nav(nil, threads, "", openTicketID) to a string,
+// renderNav renders Nav(nil, threads, "", "", openTicketID) to a string,
 // failing the test on a render error.
 func renderNav(t *testing.T, threads []NavThread, openTicketID int64) string {
 	t.Helper()
+	return renderNavWithHold(t, threads, "", openTicketID)
+}
+
+// renderNavWithHold renders Nav(nil, threads, "", claudeHold, openTicketID)
+// to a string, failing the test on a render error.
+func renderNavWithHold(t *testing.T, threads []NavThread, claudeHold string, openTicketID int64) string {
+	t.Helper()
 	var sb strings.Builder
-	if err := Nav(nil, threads, "", openTicketID).Render(t.Context(), &sb); err != nil {
+	if err := Nav(nil, threads, "", claudeHold, openTicketID).Render(t.Context(), &sb); err != nil {
 		t.Fatalf("Nav.Render: %v", err)
 	}
 	return sb.String()
@@ -168,4 +175,55 @@ func TestZingNavExpr_RejectsOutOfSetView(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestNav_ParkedBadgeAndClaudeHold proves #45's two sidebar markers: a
+// non-blocking parked thread's own badge, and the nav-wide claude-hold
+// status line, each rendered only while there is something to show.
+func TestNav_ParkedBadgeAndClaudeHold(t *testing.T) {
+	t.Parallel()
+
+	t.Run("a non-blocking parked thread shows the parked badge, and claudeHold shows the status line", func(t *testing.T) {
+		t.Parallel()
+		th := NavThread{
+			Ticket:      store.Ticket{ID: 1, State: testStatePlanning},
+			ParkedUntil: "12:20pm",
+		}
+		got := renderNavWithHold(t, []NavThread{th}, "12:20pm", 0)
+		if !strings.Contains(got, `<span class="badge badge-parked">parked until 12:20pm</span>`) {
+			t.Errorf("rendered nav missing the parked badge; got:\n%s", got)
+		}
+		if !strings.Contains(got, "claude: capped until 12:20pm") {
+			t.Errorf("rendered nav missing the claude-hold status line; got:\n%s", got)
+		}
+	})
+
+	t.Run("empty ParkedUntil and claudeHold render neither", func(t *testing.T) {
+		t.Parallel()
+		th := NavThread{Ticket: store.Ticket{ID: 2, State: testStatePlanning}}
+		got := renderNavWithHold(t, []NavThread{th}, "", 0)
+		if strings.Contains(got, "badge-parked") {
+			t.Errorf("rendered nav shows a parked badge with ParkedUntil empty; got:\n%s", got)
+		}
+		if strings.Contains(got, "claude: capped until") {
+			t.Errorf("rendered nav shows the claude-hold status line with claudeHold empty; got:\n%s", got)
+		}
+	})
+
+	t.Run("a blocking thread with ParkedUntil set shows the blocking badge, not the parked badge", func(t *testing.T) {
+		t.Parallel()
+		th := NavThread{
+			Ticket:      store.Ticket{ID: 3, State: testStatePlanning},
+			Blocking:    true,
+			WaitingOn:   "questions",
+			ParkedUntil: "12:20pm",
+		}
+		got := renderNav(t, []NavThread{th}, 0)
+		if !strings.Contains(got, "badge-blocking") {
+			t.Errorf("rendered nav missing badge-blocking for a blocking, parked thread; got:\n%s", got)
+		}
+		if strings.Contains(got, "badge-parked") {
+			t.Errorf("rendered nav shows badge-parked for a blocking thread; got:\n%s", got)
+		}
+	})
 }

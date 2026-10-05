@@ -51,6 +51,13 @@ type NavThread struct {
 	Unread            bool   // threadLink reads it only when Blocking is false
 	WaitingOn         string // meaningful only when Blocking
 	OpenQuestionCount int
+
+	// ParkedUntil is clockLabel of this ticket's own store.LiveTicket.
+	// ParkedUntil (#45), such as "12:20pm", when that time is still after
+	// now; empty otherwise. threadLink renders it as its own badge, after
+	// Blocking but ahead of Unread and the state pill, so a parked ticket's
+	// row names the one thing the owner cannot act on until the reset.
+	ParkedUntil string
 }
 
 // ThreadOption is one option chip a question group renders: a label plus
