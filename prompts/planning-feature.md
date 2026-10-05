@@ -37,8 +37,10 @@ the next step.
    "$TMPDIR", never /tmp. Write only givens and checks an agent inside that
    sandbox can observe: no live zing serve, no machine outside the sandbox,
    and none of the owner's own config such as ~/.codex, ~/.claude, or the
-   console. Done when a stranger could run every scenario and say pass or
-   fail.
+   console. Quote a check's glob, such as --include='*.go', and join a
+   prose file's lines before a multi-word grep, such as tr -s '[:space:]'
+   ' ' < FILE | grep -qF 'two words'. Done when a stranger could run every
+   scenario and say pass or fail.
 
 5. Cut. Find the 20 percent of the work that gives 80 percent of the
    value. That is the working demo: the smallest slice that runs end to

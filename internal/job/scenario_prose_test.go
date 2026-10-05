@@ -1,6 +1,9 @@
 package job
 
 import (
+	"os"
+	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 
@@ -90,5 +93,38 @@ func TestCheckScenarioShape_RejectsUnquotedGlob(t *testing.T) {
 	}
 	if errs := checkScenarioShape(noneScenarios); len(errs) != 0 {
 		t.Fatalf("checkScenarioShape = %+v, want no errors", errs)
+	}
+}
+
+// TestPromptsNameCheckSafeForms proves planning-bug.md, planning-feature.md,
+// and the tests lens all name the two safe forms that checkScenarioShape's
+// rules above require: a quoted include glob, and a tr join ahead of a
+// multi-word grep over prose. A planner reading any of these three prompts
+// should see the exact form that passes the rule, not just that the rule
+// exists.
+func TestPromptsNameCheckSafeForms(t *testing.T) {
+	t.Parallel()
+	collapse := regexp.MustCompile(`\s+`)
+	paths := []string{
+		"lenses/tests.md",
+		"planning-bug.md",
+		"planning-feature.md",
+	}
+	for _, p := range paths {
+		t.Run(p, func(t *testing.T) {
+			t.Parallel()
+			full := filepath.Join("..", "..", "prompts", p)
+			raw, err := os.ReadFile(full)
+			if err != nil {
+				t.Fatalf("read %s: %v", full, err)
+			}
+			text := collapse.ReplaceAllString(string(raw), " ")
+			if !strings.Contains(text, `tr -s '[:space:]' ' '`) {
+				t.Errorf("%s does not name the safe join form tr -s '[:space:]' ' '", full)
+			}
+			if !strings.Contains(text, `--include='*.go'`) {
+				t.Errorf("%s does not name the safe quoted glob --include='*.go'", full)
+			}
+		})
 	}
 }
