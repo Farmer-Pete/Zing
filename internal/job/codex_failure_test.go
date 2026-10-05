@@ -749,6 +749,54 @@ func TestRunJob_TransientRetryFailsWithNoFailureDetail(t *testing.T) {
 	}
 }
 
+// TestRunJob_TransientRetryKeepsFirstSessionIDOnSuccess proves that when the
+// retry's own RunResult carries no session id, retryTransient carries the
+// first attempt's session id forward, on the success path. codex.go's run
+// always derives SessionID from stdout, win or fail, before returning, so
+// the first attempt can discover a session id that a later rt.Run call
+// (for example one failing with runtime.ErrStart before any process starts)
+// never reports.
+func TestRunJob_TransientRetryKeepsFirstSessionIDOnSuccess(t *testing.T) {
+	t.Parallel()
+	const wantSessionID = "first-attempt-session-id"
+	stub := &scriptedTransientRuntime{results: []scriptedAttempt{
+		{res: runtime.RunResult{SessionID: wantSessionID}, err: &runtime.ExecError{ExitCode: 1, Transient: "503"}},
+		{res: runtime.RunResult{}},
+	}}
+	d, ticket := newTransientRetryStubDeps(t, stub)
+
+	rr, err := runJob(t.Context(), d, ticket, testJobClassify, store.SessionUpsert{Job: testJobClassify, Runtime: testRuntimeClaude},
+		runtime.RunRequest{Job: response.JobClassify}, nil, nil, 0)
+	if err != nil {
+		t.Fatalf("runJob: %v", err)
+	}
+	if rr.Res.SessionID != wantSessionID {
+		t.Errorf("rr.Res.SessionID = %q, want the first attempt's %q", rr.Res.SessionID, wantSessionID)
+	}
+}
+
+// TestRunJob_TransientRetryKeepsFirstSessionIDOnFailure is the above test's
+// sibling for the retry-failed path: retryTransient must carry the first
+// attempt's session id forward even when the retry itself also fails.
+func TestRunJob_TransientRetryKeepsFirstSessionIDOnFailure(t *testing.T) {
+	t.Parallel()
+	const wantSessionID = "first-attempt-session-id"
+	stub := &scriptedTransientRuntime{results: []scriptedAttempt{
+		{res: runtime.RunResult{SessionID: wantSessionID, FailureDetail: wantFirstAttemptDetail}, err: &runtime.ExecError{ExitCode: 1, Transient: "503"}},
+		{res: runtime.RunResult{}, err: runtime.ErrStart},
+	}}
+	d, ticket := newTransientRetryStubDeps(t, stub)
+
+	rr, err := runJob(t.Context(), d, ticket, testJobClassify, store.SessionUpsert{Job: testJobClassify, Runtime: testRuntimeClaude},
+		runtime.RunRequest{Job: response.JobClassify}, nil, nil, 0)
+	if !errors.Is(err, runtime.ErrStart) {
+		t.Fatalf("err = %v, want errors.Is(err, runtime.ErrStart)", err)
+	}
+	if rr.Res.SessionID != wantSessionID {
+		t.Errorf("rr.Res.SessionID = %q, want the first attempt's %q", rr.Res.SessionID, wantSessionID)
+	}
+}
+
 // TestRunJob_TransientRetryLogsSkipped proves the context-ended branch's
 // WARN line (design goals: "a skip is WARN runtime transient retry skipped
 // with err_kind when the run context ends during the 2s wait", each retry

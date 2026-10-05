@@ -372,8 +372,11 @@ func retryTransient(
 	case <-time.After(transientRetryDelay):
 	}
 
-	firstAgentTime, firstStdout := res.AgentTime, res.Stdout
+	firstAgentTime, firstStdout, firstSessionID := res.AgentTime, res.Stdout, res.SessionID
 	retryRes, retryErr := rt.Run(ctx, req)
+	if retryRes.SessionID == "" {
+		retryRes.SessionID = firstSessionID
+	}
 	retryRes.AgentTime += firstAgentTime
 	joinedStdout := append(append([]byte(nil), firstStdout...), retryRes.Stdout...)
 	if len(joinedStdout) > maxTranscriptBytes {
