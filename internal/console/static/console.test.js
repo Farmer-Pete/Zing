@@ -46,6 +46,7 @@ import {
 	sendResultWithUnsent,
 	sendTargets,
 	sendConfirmText,
+	skipConflicted,
 	AUTOSAVE_DEBOUNCE_MS,
 	replyAutosaveBody,
 	emptiedReplyBodies,
@@ -202,6 +203,10 @@ test('sendChordLabel renders the platform-correct glyph', () => {
 // conflict reason.
 test('draftConflictMessage: "question closed" reads as a plain sentence', () => {
 	assert.equal(draftConflictMessage('question closed'), 'This question is already answered.');
+});
+
+test('draftConflictMessage: "changed in another tab" reads as a plain sentence', () => {
+	assert.equal(draftConflictMessage('changed in another tab'), 'Changed in another tab.');
 });
 
 test('draftConflictMessage: any other reason is shown as-is', () => {
@@ -678,6 +683,24 @@ test('sendTargets: a conflicted entry with hasDraft true is left out of ids and 
 test('sendConfirmText: names the one question or lists several', () => {
 	assert.equal(sendConfirmText(['Q6']), 'Send 1 reply on Q6?');
 	assert.equal(sendConfirmText(['Q6', 'Q7', 'Q9']), 'Send 3 replies on Q6, Q7, Q9?');
+});
+
+// skipConflicted: postSendBatchLocked and rearmAutosaves (ticket #43, cause
+// 2, Q5) each run this over their own list, so a box holding a "changed in
+// another tab" note is neither saved nor sent until the owner's next
+// keystroke.
+
+test('skipConflicted: the middle of three conflicted items is dropped, order kept', () => {
+	const items = [{ id: 'a' }, { id: 'b' }, { id: 'c' }];
+	const result = skipConflicted(items, (item) => item.id === 'b');
+	assert.deepEqual(result, [{ id: 'a' }, { id: 'c' }]);
+});
+
+test('skipConflicted: an empty list returns an empty list', () => {
+	assert.deepEqual(
+		skipConflicted([], () => true),
+		[],
+	);
 });
 
 // replyAutosaveBody: installReplyAutosave (console.js) debounces on 'input'

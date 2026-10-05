@@ -34,6 +34,7 @@ import {
 	sendResultWithUnsent,
 	sendTargets,
 	sendConfirmText,
+	skipConflicted,
 	AUTOSAVE_DEBOUNCE_MS,
 	replyAutosaveBody,
 	emptiedReplyBodies,
@@ -419,14 +420,35 @@ function postDraft() {
 // beside the one function that actually posts the draft it is about (bug
 // fix, quality: the two lines were copied at three call sites and could
 // drift).
+//
+// A question-targeted box (question non-null) sends base: lastSavedFor(el),
+// the text this tab last saw saved, so the store can tell this tab's own
+// overwrite apart from a stale one (ticket #43, cause 2). A thread-level
+// reply (question null, unsavedReplyBody's own thread-level path) has no
+// autosave key and sends no base, matching SaveDraft's existing
+// unconditional overwrite there.
+//
+// A "changed in another tab" 409 (handleDraft's writeConflict, a JSON body
+// carrying current) is shown regardless of el.value -- unlike every other
+// conflict below, which is skipped once the owner has kept typing past it --
+// because the owner's rule (Q4/Q5) is that this note, and the hold on saving
+// and sending the box, must survive even if a later autosave already fired
+// for newer text before this response arrived. It also records current as
+// the box's new lastSavedText (Q4: the next keystroke's save overwrites
+// using the stored text as its base) and marks the box conflicted
+// (conflictedBoxes), which scheduleReplyAutosave, postSendBatchLocked, and
+// rearmAutosaves all honor until installReplyAutosave's own 'input' listener
+// clears it.
 async function postDraftRequest(el, ticket, question, text) {
 	showDraftConflict(el, '');
 	showDraftSaved(el, '');
+	const key = question != null ? replyAutosaveKeyFor(el) : null;
+	const body = key != null ? { ticket, question, text, base: lastSavedFor(el) } : { ticket, question, text };
 	try {
 		const resp = await fetch('/draft', {
 			method: 'POST',
 			headers: { 'Content-Type': 'application/json', 'Datastar-Request': 'true' },
-			body: JSON.stringify({ ticket, question, text }),
+			body: JSON.stringify(body),
 		});
 		// Recorded before the stale-UI check below, and unconditionally on
 		// resp.ok: this tracks what the server actually has, independent of
@@ -438,13 +460,17 @@ async function postDraftRequest(el, ticket, question, text) {
 		// lastSavedText fallback (el.defaultValue) and wrongly treat the box
 		// as already clear, leaving the server's stale text unsent and never
 		// cleared.
-		//
-		// A box targets a question (data-draft-question); a thread-level
-		// reply (question === null, unsavedReplyBody) has no autosave key to
-		// record against, since replyAutosaveBody only ever covers
-		// question-targeted boxes.
-		if (resp.ok && question != null) {
-			lastSavedText.set(replyAutosaveKeyFor(el), text);
+		if (resp.ok && key != null) {
+			lastSavedText.set(key, text);
+		}
+		if (resp.status === 409 && (resp.headers.get('Content-Type') ?? '').startsWith('application/json')) {
+			const { reason, current } = await resp.json();
+			if (key != null) {
+				lastSavedText.set(key, current);
+				conflictedBoxes.add(key);
+			}
+			showDraftConflict(el, draftConflictMessage(reason));
+			return false;
 		}
 		if (el.value !== text) {
 			return resp.ok;
@@ -554,9 +580,11 @@ function showSendResult(text) {
 // decides over: id and key off the question's own data-focus-id and
 // .q-key, hasDraft true when its reply box holds text or it carries a
 // picked chip or item decision (both render ".picked[data-draft-question]",
-// optionChips' pickToggleExpr and itemRow's own), and conflicted always
-// false here -- task 5's conflictedBoxes gives this field meaning once a
-// reply box can be held back after a stale "changed in another tab" save.
+// optionChips' pickToggleExpr and itemRow's own), and conflicted true when
+// the question's own reply box's key is in conflictedBoxes (ticket #43,
+// cause 2, Q5): sendTargets drops such a question even though it has a
+// draft, since sending it would send the other tab's text, not what the
+// owner has not yet typed over.
 function collectSendQuestions() {
 	return Array.from(document.querySelectorAll('#main .q[data-focus-id^="question:"]')).map((q) => {
 		const id = Number(q.getAttribute('data-focus-id').slice('question:'.length));
@@ -564,7 +592,8 @@ function collectSendQuestions() {
 		const replyInput = q.querySelector('.reply-input');
 		const hasReply = Boolean(replyInput && replyInput.value !== '');
 		const hasPick = Boolean(q.querySelector('.picked[data-draft-question]'));
-		return { id, key, hasDraft: hasReply || hasPick, conflicted: false };
+		const conflicted = Boolean(replyInput && conflictedBoxes.has(replyAutosaveKeyFor(replyInput)));
+		return { id, key, hasDraft: hasReply || hasPick, conflicted };
 	});
 }
 
@@ -702,6 +731,16 @@ const autosaveTimers = new Map();
 const autosaveInFlight = new Map();
 const lastSavedText = new Map();
 
+// conflictedBoxes holds the "ticket:question" key (replyAutosaveKeyFor) of
+// every reply box currently showing a "changed in another tab" note (ticket
+// #43, cause 2, Q4/Q5): postDraftRequest adds a key here on that 409, and
+// only a keystroke in that box -- installReplyAutosave's own 'input'
+// listener -- removes it. While a key is in this set, the owner's Q5 rule
+// holds: that box is neither autosaved nor sent, and collectSendQuestions
+// marks its question conflicted so sendTargets leaves it out of a Cmd+Enter
+// too, until the owner has typed over the note.
+const conflictedBoxes = new Set();
+
 // sendBatchInFlight is true for postSendBatch's entire body, set there in a
 // try/finally so it still resets if /send throws. scheduleReplyAutosave
 // checks it so no new autosave timer can be armed while a send batch is
@@ -822,10 +861,19 @@ function cancelAutosaves() {
 // "#main .reply-input" (design: "Autosave the reply box as a draft,
 // debounced on input"), delegated from document like installSideBox above
 // because #main is morphed by every /stream patch.
+//
+// It deletes the box's key from conflictedBoxes before scheduling (ticket
+// #43, cause 2, Q4/Q5): a "changed in another tab" note, and the hold on
+// saving and sending that box, survives until the owner's very next
+// keystroke proves they have seen it and are typing over the stored text
+// postDraftRequest just recorded as lastSavedText -- only then does this
+// keystroke's own debounced save run, overwriting with that text as its
+// base.
 function installReplyAutosave() {
 	document.addEventListener('input', (event) => {
 		const el = mainReplyInput(event.target);
 		if (el) {
+			conflictedBoxes.delete(replyAutosaveKeyFor(el));
 			scheduleReplyAutosave(el);
 		}
 	});
@@ -892,8 +940,15 @@ function installReplyFocusTracking() {
 // box whose own save failed or went stale (partitionFailedSaves), so either
 // kind gets another chance to reach the store without the owner having to
 // type again.
+//
+// skipConflicted drops any box still in conflictedBoxes (ticket #43, cause
+// 2, Q5): a conflicted box is held back from autosave until the owner's own
+// next keystroke clears it (installReplyAutosave), and re-arming it here
+// without a keystroke would overwrite the other tab's text the same way the
+// bug this fixes did.
 function rearmAutosaves() {
-	for (const el of document.querySelectorAll('#main .reply-input')) {
+	const inputs = skipConflicted(Array.from(document.querySelectorAll('#main .reply-input')), (el) => conflictedBoxes.has(replyAutosaveKeyFor(el)));
+	for (const el of inputs) {
 		if (replyAutosaveBody(el, lastSavedFor(el))) {
 			scheduleReplyAutosave(el);
 		}
@@ -905,6 +960,16 @@ function rearmAutosaves() {
 // why scheduleReplyAutosave must not arm a new timer during this window, and
 // rearmAutosaves' own comment for why the finally block re-arms every box
 // that window left unsaved.
+//
+// postSendBatchLocked itself skips every conflicted box three times over
+// (ticket #43, cause 2, Q5): out of pending (so a conflicted box's text is
+// never saved over the other tab's), out of emptied (so an emptied-but-
+// conflicted box's clear is never posted either), and out of the post-send
+// clear list (so a conflicted box's still-unsent text is not wiped from
+// its own input even though its question went out of neither pending nor
+// questions). The question is already left out of questions itself by
+// sendTargets (collectSendQuestions marks it conflicted); this is the
+// client-side half of the same hold, over the actual DOM input.
 async function postSendBatch(ticket, questions) {
 	sendBatchInFlight = true;
 	try {
@@ -931,7 +996,8 @@ async function postSendBatchLocked(ticket, questions) {
 	// cleared out from under them: the post-send clear only ever touches a
 	// box whose value still matches what was actually sent (bug fix).
 	const sentValues = new Map(inputs.map((el) => [el, el.value]));
-	const pending = unsavedReplyBodies(inputs);
+	const isBoxConflicted = (el) => conflictedBoxes.has(replyAutosaveKeyFor(el));
+	const pending = skipConflicted(unsavedReplyBodies(inputs), ({ el }) => isBoxConflicted(el));
 	// A box the owner emptied in the second before Cmd+Enter has no
 	// "unsaved text" (unsavedReplyBodies, above, skips every empty box), but
 	// cancelAutosaves above just dropped the pending timer that would have
@@ -940,7 +1006,7 @@ async function postSendBatchLocked(ticket, questions) {
 	// saved -- never sends text the box no longer shows (bug fix, Q3: "an
 	// emptied box has to undo its saved draft, or the deleted text still
 	// sends").
-	const emptied = emptiedReplyBodies(inputs, lastSavedFor);
+	const emptied = skipConflicted(emptiedReplyBodies(inputs, lastSavedFor), ({ el }) => isBoxConflicted(el));
 	const post = ({ el, body }) => postDraftRequest(el, body.ticket, body.question, body.text);
 
 	const [results, clearResults] = await Promise.all([Promise.all(pending.map(post)), Promise.all(emptied.map(post))]);
@@ -985,8 +1051,15 @@ async function postSendBatchLocked(ticket, questions) {
 			// postSendBatch's finally block re-arms that keystroke's autosave
 			// once sendBatchInFlight drops (rearmAutosaves, below; bug fix:
 			// clearing it here, or resetting its lastSavedText, would
-			// otherwise drop that typing silently).
-			const sent = inputs.filter((el) => !notSent.includes(el) && el.value === sentValues.get(el));
+			// otherwise drop that typing silently). A conflicted box is
+			// skipped too (ticket #43, cause 2, Q5): its question was left out
+			// of questions by sendTargets, so nothing of its text reached
+			// /send, and it keeps both its text and its "Changed in another
+			// tab." note until the owner's next keystroke.
+			const sent = skipConflicted(
+				inputs.filter((el) => !notSent.includes(el) && el.value === sentValues.get(el)),
+				isBoxConflicted,
+			);
 			clearReplyInputs(sent);
 			// lastSavedText otherwise still holds the text that was just
 			// sent, not the box's new, empty value: a later retype of that

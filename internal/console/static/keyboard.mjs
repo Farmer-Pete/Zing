@@ -158,10 +158,12 @@ export function sendChordLabel(isMac) {
  * still-rendered reply box -- most often a race with the owner's own
  * just-sent batch answer -- got a raw "question closed" 409 and the typed
  * text silently vanished, with nothing explaining why). "question closed"
- * is the one reason a reader hits often enough to need a plain sentence;
- * every other reason (a bad option or item ref, an ambiguous or missing
- * draft) is rare enough from the real console UI, which only ever sends
- * well-formed requests, that its own store wording is shown as-is.
+ * and "changed in another tab" (ticket #43, cause 2: two tabs' autosaves
+ * silently overwrote each other) are the two reasons a reader hits often
+ * enough to need a plain sentence; every other reason (a bad option or item
+ * ref, an ambiguous or missing draft) is rare enough from the real console
+ * UI, which only ever sends well-formed requests, that its own store
+ * wording is shown as-is.
  *
  * @param {string} reason
  * @returns {string}
@@ -169,6 +171,9 @@ export function sendChordLabel(isMac) {
 export function draftConflictMessage(reason) {
 	if (reason === 'question closed') {
 		return 'This question is already answered.';
+	}
+	if (reason === 'changed in another tab') {
+		return 'Changed in another tab.';
 	}
 	return reason;
 }
@@ -564,6 +569,26 @@ export function sendConfirmText(keys) {
 		return `Send 1 reply on ${keys[0]}?`;
 	}
 	return `Send ${keys.length} replies on ${keys.join(', ')}?`;
+}
+
+/**
+ * skipConflicted filters a conflicted reply box out of whatever list
+ * console.js is about to save or send (ticket #43, cause 2, Q5: a box that
+ * just got a "changed in another tab" note stays neither saved nor sent
+ * until the owner's next keystroke proves they have seen it and are typing
+ * over it). console.js's postSendBatchLocked runs this over the pending
+ * saves, the emptied-box clears, and the post-send clear list, and
+ * rearmAutosaves runs it over every box it would otherwise re-arm, each
+ * passing its own isConflicted(item) built from conflictedBoxes.has(key).
+ * Items that pass through keep their original order, since none of those
+ * callers depend on order but a stable one is the least surprising default.
+ *
+ * @param {object[]} items
+ * @param {(item: object) => boolean} isConflicted
+ * @returns {object[]}
+ */
+export function skipConflicted(items, isConflicted) {
+	return (items ?? []).filter((item) => !isConflicted(item));
 }
 
 // AUTOSAVE_DEBOUNCE_MS is how long installReplyAutosave (console.js) waits
