@@ -1050,6 +1050,76 @@ func TestMergeCheckFailureResumes(t *testing.T) {
 	_ = ticket
 }
 
+// TestMergeMarkersLeftWithFixCommandResumes is TestMergeCheckFailureResumes
+// with a fix command set on the project: mergeCheck's own clearing of
+// FixCmd while a marked path remains (internal/job/merge.go) must not make
+// CHECK silently skip ConflictMarkerPaths too. Check 1 still finds the
+// marker and resumes charged, with no escalation; the index still shows
+// hello.txt unmerged afterwards. Check 2, once the agent's second turn
+// resolves it for real, lands the merge.
+func TestMergeMarkersLeftWithFixCommandResumes(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow end-to-end flow; runs in the full suite")
+	}
+	t.Parallel()
+	s, ticket, _ := shipTicketReady(t)
+	mergeCommitOnMain(t, s, ticket, "hello.txt", []byte(mergeHelloConflict))
+
+	gh := &shipGitHub{}
+	tr := &shipTracker{}
+	rec := &recordingRuntime{inner: runtime.NewFake(mergeAgentFSMarkersThenResolved())}
+
+	ticket = mergeDirtyAfterPublish(t, s, ticket, rec, gh, tr)
+
+	claimWithFixCmd := func() Deps {
+		deps := shipClaim(t, s, rec, ticket.ID, gh, tr)
+		proj := deps.Projects[ticket.ProjectID]
+		proj.FixCmd = pbNoopShellCmd
+		deps.Projects[ticket.ProjectID] = proj
+		return deps
+	}
+
+	deps := claimWithFixCmd()
+	ticket, _ = mergeRunTick(t, s, deps, ticket, "poll writes request") // POLL
+
+	deps = claimWithFixCmd()
+	ticket, _ = mergeRunTick(t, s, deps, ticket, "run first") // runMergeFirst: turn 1
+
+	deps = claimWithFixCmd()
+	var checkOne store.HandlerCommit
+	ticket, checkOne = mergeRunTick(t, s, deps, ticket, "check 1") // CHECK finds markers, resumes: turn 2
+	if shipHasMergeLanded(checkOne) {
+		t.Fatal("check 1 landed the merge, want a charged resume instead")
+	}
+
+	gotPrompt := rec.lastRequest(t).Prompt
+	wantText := "conflict markers remain in: hello.txt"
+	if !strings.Contains(gotPrompt, wantText) {
+		t.Errorf("resume prompt = %q, want it to contain %q", gotPrompt, wantText)
+	}
+
+	proj := deps.Projects[ticket.ProjectID]
+	wt, _, err := proj.Orch.EnsureWorktree(t.Context(), ticket.ID, ticket.Title)
+	if err != nil {
+		t.Fatalf("EnsureWorktree: %v", err)
+	}
+	unmergedOut, err := gitfixture.Git(t.Context(), wt.Dir(), "diff", "--name-only", "--diff-filter=U")
+	if err != nil {
+		t.Fatalf("git diff --diff-filter=U: %v: %s", err, unmergedOut)
+	}
+	if unmerged := strings.TrimSpace(string(unmergedOut)); unmerged != pbHelloTxt {
+		t.Errorf("git diff --diff-filter=U after check 1 = %q, want %q", unmerged, pbHelloTxt)
+	}
+
+	deps = claimWithFixCmd()
+	var checkTwo store.HandlerCommit
+	ticket, checkTwo = mergeRunTick(t, s, deps, ticket, "check 2") // CHECK on turn 2's resolution: lands
+	if !shipHasMergeLanded(checkTwo) {
+		t.Fatal("check 2 did not land the merge")
+	}
+	_ = ticket
+}
+
 // mergeNotesExtra is a path neither side of the merge touches, written by
 // TestMergeOutsidePathFailsCheck's own turn 1 alongside its real
 // resolution of hello.txt.
