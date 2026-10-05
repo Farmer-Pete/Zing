@@ -7,6 +7,14 @@ Go web service with a Datastar frontend. Module path `zing`, entrypoint `cmd/zin
 - Before committing, run `make fmt lint` and `go build ./...`. The lefthook pre-commit hook runs the lint and build checks the same way, so a failure there fails for the same reason; its format step only rewrites staged files, unlike `make fmt`, which rewrites the whole tree. `make ci` runs everything CI's checks job runs; the secrets job additionally runs a full-history gitleaks scan.
 - New clones need `make hooks-install` once.
 
+## Dogfood the console
+
+The owner runs Zing from the web console, so every owner action goes through it, and using it is how it gets tested.
+
+- When driving Zing (reading questions, answering, approving gates, deciding review and perimeter items, picking up issues, merging), act through the console with real clicks and typing. The database and logs are for reading state and diagnosis only.
+- When the console can't do a step, or does it badly, that is a console bug: file it and fix the console. A single logged workaround may unblock that one step; name the bug it works around.
+- When building an owner action, put it in one function its console route calls. Owner actions get no CLI verb.
+
 ## Operations
 
 `zing serve` holds `<DataDir>/serve.lock` for as long as it runs, so only one serve can own a given data directory at a time: a live holder refuses a second serve with a clear error, and a stale lock (its PID dead, or alive under a different start token after a reboot reused the PID) is taken over automatically. Stopping serve with a signal interrupts every run still in flight -- each is recorded as interrupted and its claim released -- and after a restart the next tick resumes that session for free, without spending a resume against `max_resumes`. `kill -9` skips that shutdown path: the dying process records nothing, so the runs are marked interrupted (and the claim reclaimed) only by a replacement serve once it has verified -- and, if necessary, killed -- their agent process groups, which can take up to the job's timeout plus a grace period; the session then resumes for free the same way. When upgrading the binary, stop the old `zing serve` and wait for it to exit before starting the new one: starting the new serve while an old build without this lock is still running would let it reclaim that old serve's still-live claims out from under it.
