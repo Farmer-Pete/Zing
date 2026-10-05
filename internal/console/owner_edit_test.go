@@ -246,6 +246,66 @@ func TestOwnerEditRoute_DropsPlanTask(t *testing.T) {
 	}
 }
 
+// seedTicketWithBody inserts one queued ticket under testProject and ref,
+// with body as its stored body, returning its id: the fixture
+// TestOwnerEditRoute_AmendsTicketBody needs an old body to assert against.
+func seedTicketWithBody(t *testing.T, s *store.Store, ref, body string) int64 {
+	t.Helper()
+	projectID, err := s.EnsureProject(t.Context(), testProject)
+	if err != nil {
+		t.Fatalf("EnsureProject: %v", err)
+	}
+	id, err := s.InsertTicket(t.Context(), store.Ticket{
+		ProjectID: projectID, TrackerRef: ref, Title: "fix the bug", Body: body, State: testStateQueued,
+	})
+	if err != nil {
+		t.Fatalf("InsertTicket(%s): %v", ref, err)
+	}
+	return id
+}
+
+// TestOwnerEditRoute_AmendsTicketBody proves the done-when test: posting a
+// ticket_body edit through the console route rewrites tickets.body and
+// writes exactly one owner_edit event holding the old and new body.
+func TestOwnerEditRoute_AmendsTicketBody(t *testing.T) {
+	t.Parallel()
+	s := newConsoleTestStore(t)
+	ticketID := seedTicketWithBody(t, s, "1", "old body text")
+
+	srv := newTestServer(t, s, bus.New(), nil, newTestLogHandler(t))
+	resp := doRequest(t, mutationRequest(t, srv, ownerEditPath(ticketID), `{"target":"ticket_body","action":"edit","body":"new body text"}`))
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusNoContent {
+		t.Fatalf("status = %d, want 204; body = %q", resp.StatusCode, readBody(t, resp))
+	}
+
+	ticket, err := s.GetTicket(t.Context(), ticketID)
+	if err != nil {
+		t.Fatalf("GetTicket: %v", err)
+	}
+	if ticket.Body != "new body text" {
+		t.Errorf("body = %q, want %q", ticket.Body, "new body text")
+	}
+
+	events, err := s.Events(t.Context(), ticketID, store.EventKindOwnerEdit, store.EventFilter{})
+	if err != nil {
+		t.Fatalf("Events(owner_edit): %v", err)
+	}
+	if len(events) != 1 {
+		t.Fatalf("owner_edit events = %d, want 1", len(events))
+	}
+	var ev response.OwnerEditEvent
+	if err := json.Unmarshal(events[0].Payload, &ev); err != nil {
+		t.Fatalf("unmarshal owner_edit event: %v", err)
+	}
+	if ev.Old != "old body text" {
+		t.Errorf("event old = %q, want %q", ev.Old, "old body text")
+	}
+	if ev.New != "new body text" {
+		t.Errorf("event new = %q, want %q", ev.New, "new body text")
+	}
+}
+
 // TestOwnerEditRoute_RefusesClaimedTicket proves an edit is refused 409
 // with the exact claimed text while a run holds the ticket's claim, and
 // that the payload is unchanged.

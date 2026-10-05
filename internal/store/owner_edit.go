@@ -528,10 +528,41 @@ func checkPlanStructure(p response.Plan) string {
 	return ""
 }
 
-// editTicketBodyTx amends tickets.body. Task 3 implements this; for now it
-// refuses every request.
-func editTicketBodyTx(_ context.Context, _ *sql.Tx, _ OwnerEditRequest) (response.OwnerEditEvent, error) { //nolint:unparam // result 0 is always the zero value until task 3 implements this
-	return response.OwnerEditEvent{}, ownerEditErr(ownerEditCodeBadRequest, "not supported yet")
+// editTicketBodyTx amends tickets.body: checkOwnerEditShape has already
+// guaranteed req.Body is set and non-blank. It writes the new body back
+// guarded by the ticket's claim; Ref stays empty, matching the request's own
+// shape for this target.
+func editTicketBodyTx(ctx context.Context, tx *sql.Tx, req OwnerEditRequest) (response.OwnerEditEvent, error) {
+	var oldBody string
+	err := tx.QueryRowContext(ctx, `SELECT body FROM tickets WHERE id = ?`, req.TicketID).Scan(&oldBody)
+	switch {
+	case errors.Is(err, sql.ErrNoRows):
+		return response.OwnerEditEvent{}, ownerEditErr(ownerEditCodeNotFound, fmt.Sprintf("no ticket %d", req.TicketID))
+	case err != nil:
+		return response.OwnerEditEvent{}, fmt.Errorf("owner edit: load ticket %d: %w", req.TicketID, err)
+	}
+
+	newBody := *req.Body
+
+	res, err := tx.ExecContext(ctx,
+		`UPDATE tickets SET body = ? WHERE id = ? AND claim_owner IS NULL`,
+		newBody, req.TicketID,
+	)
+	if err != nil {
+		return response.OwnerEditEvent{}, fmt.Errorf("owner edit: update ticket %d body: %w", req.TicketID, err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return response.OwnerEditEvent{}, fmt.Errorf("owner edit: update ticket %d body: %w", req.TicketID, err)
+	}
+	if n == 0 {
+		return response.OwnerEditEvent{}, ownerEditErr(ownerEditCodeClaimed, "ticket is claimed; edits are refused while a run holds it")
+	}
+
+	return response.OwnerEditEvent{
+		Target: OwnerEditTicketBody, Ref: "", Action: OwnerEditActionEdit,
+		Old: oldBody, New: newBody,
+	}, nil
 }
 
 // insertOwnerEditEventTx builds the owner_edit event message for ev and

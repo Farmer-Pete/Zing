@@ -55,6 +55,24 @@ func scenarioCheck(t *testing.T, s *Store, ticketID int64, id string) string {
 	return sc.Check
 }
 
+// seedQueuedTicketWithBody is seedQueuedTicket, but with ticket.Body set to
+// body rather than left at its default empty string, the fixture the
+// ticket_body edit tests need an old value to assert against.
+func seedQueuedTicketWithBody(t *testing.T, s *Store, ref, body string) (projectID, ticketID int64) {
+	t.Helper()
+	ctx := t.Context()
+
+	projectID, err := s.EnsureProject(ctx, testProject)
+	if err != nil {
+		t.Fatalf("EnsureProject: %v", err)
+	}
+	ticketID, err = s.InsertTicket(ctx, Ticket{ProjectID: projectID, TrackerRef: ref, Title: "t", Body: body, State: ticketStateQueued})
+	if err != nil {
+		t.Fatalf("InsertTicket: %v", err)
+	}
+	return projectID, ticketID
+}
+
 // seedPlanRun inserts a bare session and run, returning the run's id: the
 // fixture a plan and its cohort's scenarios share through run_id so a
 // sealed scenario on the run marks the plan sealed (editPlanTaskTx's own
@@ -248,37 +266,113 @@ func TestOwnerEdit_RefusesFieldNotAllowedForTarget(t *testing.T) {
 	}
 }
 
-// TestOwnerEdit_RefusesWhileClaimed proves a scenario edit is refused
-// claimed while a run holds the ticket's claim, and that the payload does
-// not change.
+// TestOwnerEdit_RefusesWhileClaimed proves every target is refused claimed
+// while a run holds the ticket's claim, and that nothing changes: a
+// scenario edit, a plan task edit, and a ticket body edit.
 func TestOwnerEdit_RefusesWhileClaimed(t *testing.T) {
 	t.Parallel()
-	s := newTestStore(t)
-	_, ticketID := seedQueuedTicket(t, s, "1")
-	seedSealedScenario(t, s, ticketID, "s1")
-	before := scenarioCheck(t, s, ticketID, "s1")
 
-	claimed, err := s.Claim(t.Context(), ticketID, "runner-1", time.Now().Add(time.Hour))
-	if err != nil || !claimed {
-		t.Fatalf("Claim: claimed=%v err=%v", claimed, err)
-	}
+	t.Run("scenario", func(t *testing.T) {
+		t.Parallel()
+		s := newTestStore(t)
+		_, ticketID := seedQueuedTicket(t, s, "1")
+		seedSealedScenario(t, s, ticketID, "s1")
+		before := scenarioCheck(t, s, ticketID, "s1")
 
-	err = s.OwnerEdit(t.Context(), OwnerEditRequest{
-		TicketID: ticketID, Target: OwnerEditScenario, Ref: "s1", Action: OwnerEditActionEdit, Check: new("new"),
+		claimed, err := s.Claim(t.Context(), ticketID, "runner-1", time.Now().Add(time.Hour))
+		if err != nil || !claimed {
+			t.Fatalf("Claim: claimed=%v err=%v", claimed, err)
+		}
+
+		err = s.OwnerEdit(t.Context(), OwnerEditRequest{
+			TicketID: ticketID, Target: OwnerEditScenario, Ref: "s1", Action: OwnerEditActionEdit, Check: new("new"),
+		})
+		refusal, ok := errors.AsType[*OwnerEditError](err)
+		if !ok {
+			t.Fatalf("OwnerEdit(claimed) error = %v (%T), want *OwnerEditError", err, err)
+		}
+		if refusal.Code != ownerEditCodeClaimed {
+			t.Errorf("code = %q, want %q", refusal.Code, ownerEditCodeClaimed)
+		}
+		if got := scenarioCheck(t, s, ticketID, "s1"); got != before {
+			t.Errorf("check_cmd changed to %q, want unchanged %q", got, before)
+		}
+		if n, err := s.CountEvents(t.Context(), ticketID, EventKindOwnerEdit, EventFilter{}); err != nil || n != 0 {
+			t.Errorf("owner_edit events = %d (err %v), want 0", n, err)
+		}
 	})
-	refusal, ok := errors.AsType[*OwnerEditError](err)
-	if !ok {
-		t.Fatalf("OwnerEdit(claimed) error = %v (%T), want *OwnerEditError", err, err)
-	}
-	if refusal.Code != ownerEditCodeClaimed {
-		t.Errorf("code = %q, want %q", refusal.Code, ownerEditCodeClaimed)
-	}
-	if got := scenarioCheck(t, s, ticketID, "s1"); got != before {
-		t.Errorf("check_cmd changed to %q, want unchanged %q", got, before)
-	}
-	if n, err := s.CountEvents(t.Context(), ticketID, EventKindOwnerEdit, EventFilter{}); err != nil || n != 0 {
-		t.Errorf("owner_edit events = %d (err %v), want 0", n, err)
-	}
+
+	t.Run("plan_task", func(t *testing.T) {
+		t.Parallel()
+		s := newTestStore(t)
+		_, ticketID := seedQueuedTicket(t, s, "1")
+		runID := seedPlanRun(t, s, ticketID)
+		plan := planWithTasks(t,
+			[]response.Task{{N: 1, Test: "T1", Demo: true, Text: planTaskText1}},
+			[]response.FileChange{{Path: testRefAGo, Action: response.FileActionModify, Task: "1", Reason: "r"}},
+		)
+		insertPlanArtifactPayload(t, s, ticketID, &runID, plan)
+		sealedAt := time.Now().UTC()
+		insertScenarioArtifact(t, s, ticketID, &runID, "s1", &sealedAt)
+
+		claimed, err := s.Claim(t.Context(), ticketID, "runner-1", time.Now().Add(time.Hour))
+		if err != nil || !claimed {
+			t.Fatalf("Claim: claimed=%v err=%v", claimed, err)
+		}
+
+		err = s.OwnerEdit(t.Context(), OwnerEditRequest{
+			TicketID: ticketID, Target: OwnerEditPlanTask, Ref: "1", Action: OwnerEditActionEdit, Text: new("new text"),
+		})
+		refusal, ok := errors.AsType[*OwnerEditError](err)
+		if !ok {
+			t.Fatalf("OwnerEdit(claimed) error = %v (%T), want *OwnerEditError", err, err)
+		}
+		if refusal.Code != ownerEditCodeClaimed {
+			t.Errorf("code = %q, want %q", refusal.Code, ownerEditCodeClaimed)
+		}
+		got, _, ok, err := s.StoredPlan(t.Context(), ticketID)
+		if err != nil || !ok {
+			t.Fatalf("StoredPlan: ok=%v err=%v", ok, err)
+		}
+		if got.Delivery.Tasks[0].Text != planTaskText1 {
+			t.Errorf("task 1 text = %q, want unchanged %q", got.Delivery.Tasks[0].Text, planTaskText1)
+		}
+		if n, err := s.CountEvents(t.Context(), ticketID, EventKindOwnerEdit, EventFilter{}); err != nil || n != 0 {
+			t.Errorf("owner_edit events = %d (err %v), want 0", n, err)
+		}
+	})
+
+	t.Run("ticket_body", func(t *testing.T) {
+		t.Parallel()
+		s := newTestStore(t)
+		_, ticketID := seedQueuedTicketWithBody(t, s, "1", "old body")
+
+		claimed, err := s.Claim(t.Context(), ticketID, "runner-1", time.Now().Add(time.Hour))
+		if err != nil || !claimed {
+			t.Fatalf("Claim: claimed=%v err=%v", claimed, err)
+		}
+
+		err = s.OwnerEdit(t.Context(), OwnerEditRequest{
+			TicketID: ticketID, Target: OwnerEditTicketBody, Action: OwnerEditActionEdit, Body: new("new body"),
+		})
+		refusal, ok := errors.AsType[*OwnerEditError](err)
+		if !ok {
+			t.Fatalf("OwnerEdit(claimed) error = %v (%T), want *OwnerEditError", err, err)
+		}
+		if refusal.Code != ownerEditCodeClaimed {
+			t.Errorf("code = %q, want %q", refusal.Code, ownerEditCodeClaimed)
+		}
+		ticket, err := s.GetTicket(t.Context(), ticketID)
+		if err != nil {
+			t.Fatalf("GetTicket: %v", err)
+		}
+		if ticket.Body != "old body" {
+			t.Errorf("body = %q, want unchanged %q", ticket.Body, "old body")
+		}
+		if n, err := s.CountEvents(t.Context(), ticketID, EventKindOwnerEdit, EventFilter{}); err != nil || n != 0 {
+			t.Errorf("owner_edit events = %d (err %v), want 0", n, err)
+		}
+	})
 }
 
 // TestOwnerEdit_RefusesSchemaBreakingEdit proves an edit that would blank a
@@ -488,6 +582,63 @@ func TestOwnerEdit_RefusesDropOfOnlyTask(t *testing.T) {
 	}
 	if len(got.Delivery.Tasks) != 1 {
 		t.Errorf("tasks = %d, want unchanged 1", len(got.Delivery.Tasks))
+	}
+}
+
+// --- ticket body edits (#41, task 3) ----------------------------------------
+
+// TestOwnerEdit_AmendsTicketBody proves ticket_body's edit updates
+// tickets.body, writes an owner_edit event holding the old and new body,
+// and that a whitespace-only body is refused bad_request before any
+// transaction opens.
+func TestOwnerEdit_AmendsTicketBody(t *testing.T) {
+	t.Parallel()
+	s := newTestStore(t)
+	_, ticketID := seedQueuedTicketWithBody(t, s, "1", "old body text")
+
+	if err := s.OwnerEdit(t.Context(), OwnerEditRequest{
+		TicketID: ticketID, Target: OwnerEditTicketBody, Action: OwnerEditActionEdit,
+		Body: new("new body text"),
+	}); err != nil {
+		t.Fatalf("OwnerEdit: %v", err)
+	}
+
+	ticket, err := s.GetTicket(t.Context(), ticketID)
+	if err != nil {
+		t.Fatalf("GetTicket: %v", err)
+	}
+	if ticket.Body != "new body text" {
+		t.Errorf("body = %q, want %q", ticket.Body, "new body text")
+	}
+
+	events := ownerEditScenarioEvents(t, s, ticketID)
+	if len(events) != 1 {
+		t.Fatalf("owner_edit events = %d, want 1", len(events))
+	}
+	var ev response.OwnerEditEvent
+	if err = json.Unmarshal(events[0].Payload, &ev); err != nil {
+		t.Fatalf("unmarshal owner_edit event: %v", err)
+	}
+	if ev.Old != "old body text" {
+		t.Errorf("event old = %q, want %q", ev.Old, "old body text")
+	}
+	if ev.New != "new body text" {
+		t.Errorf("event new = %q, want %q", ev.New, "new body text")
+	}
+	if events[0].Body != response.OwnerEditLine(ev) {
+		t.Errorf("event body = %q, want %q", events[0].Body, response.OwnerEditLine(ev))
+	}
+
+	err = s.OwnerEdit(t.Context(), OwnerEditRequest{
+		TicketID: ticketID, Target: OwnerEditTicketBody, Action: OwnerEditActionEdit,
+		Body: new("   \n\t  "),
+	})
+	refusal, ok := errors.AsType[*OwnerEditError](err)
+	if !ok {
+		t.Fatalf("OwnerEdit(blank body) error = %v (%T), want *OwnerEditError", err, err)
+	}
+	if refusal.Code != ownerEditCodeBadRequest {
+		t.Errorf("code = %q, want %q", refusal.Code, ownerEditCodeBadRequest)
 	}
 }
 
