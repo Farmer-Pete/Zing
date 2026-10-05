@@ -56,6 +56,26 @@ func TestNoTestWritesAnExecutable(t *testing.T) {
 // mode argument's index.
 var osModeArg = map[string]int{"WriteFile": 2, "OpenFile": 2, "Chmod": 1}
 
+// osIdentName returns the local identifier that refers to the os package in
+// f: the name an explicit import alias gives it, or the default "os" if it
+// is imported unaliased or not imported at all (a source snippet in this
+// file's own self-tests). A guard that instead matched the literal "os"
+// would miss a file that imports os under an alias (review finding t0f,
+// #23).
+func osIdentName(f *ast.File) string {
+	for _, imp := range f.Imports {
+		path, err := strconv.Unquote(imp.Path.Value)
+		if err != nil || path != "os" {
+			continue
+		}
+		if imp.Name != nil {
+			return imp.Name.Name
+		}
+		return "os"
+	}
+	return "os"
+}
+
 // checkExecutableModes parses filename (read from disk when src is nil, or
 // parsed from src otherwise, per go/parser.ParseFile) and returns one
 // message per mode-bearing call whose mode is not an integer literal, or
@@ -67,6 +87,7 @@ func checkExecutableModes(filename string, src any) ([]string, error) {
 	if err != nil {
 		return nil, err
 	}
+	osName := osIdentName(f)
 
 	var violations []string
 	ast.Inspect(f, func(n ast.Node) bool {
@@ -84,7 +105,7 @@ func checkExecutableModes(filename string, src any) ([]string, error) {
 		var modeArg ast.Expr
 
 		pkgIdent, isPkg := fun.X.(*ast.Ident)
-		isOSCall := isPkg && pkgIdent.Name == "os"
+		isOSCall := isPkg && pkgIdent.Name == osName
 		switch {
 		case isOSCall:
 			if idx, hasMode := osModeArg[fun.Sel.Name]; hasMode && len(call.Args) > idx {
@@ -158,6 +179,32 @@ func TestCheckExecutableModes(t *testing.T) {
 				t.Errorf("checkExecutableModes(%q) = %v, want %d violation(s)", tc.body, got, tc.want)
 			}
 		})
+	}
+}
+
+// TestCheckExecutableModes_AliasedImport guards against a bypass review
+// finding t0f (#23): the guard once matched the literal identifier "os",
+// so a file that imports the os package under a local alias could call
+// WriteFile with an executable mode and never be flagged. checkExecutableModes
+// must resolve the file's own import of "os" to its local name, alias or
+// not, before matching selector calls against it.
+func TestCheckExecutableModes_AliasedImport(t *testing.T) {
+	t.Parallel()
+
+	src := `package p
+
+import stdos "os"
+
+func f() {
+	stdos.WriteFile(p, b, 0o755)
+}
+`
+	got, err := checkExecutableModes("snippet.go", src)
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if len(got) != 1 {
+		t.Errorf("checkExecutableModes(aliased os import) = %v, want 1 violation", got)
 	}
 }
 
