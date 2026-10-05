@@ -128,6 +128,17 @@ const zingMarker = "<zing"
 // must match.
 const zingElementName = "zing"
 
+// isZingStart reports whether tok is a start element named exactly
+// zingElementName in no namespace, the check Parse, ExtractAll, and the
+// repair pass all share for a candidate's opening token.
+func isZingStart(tok xml.Token) (xml.StartElement, bool) {
+	start, ok := tok.(xml.StartElement)
+	if !ok || start.Name.Local != zingElementName || start.Name.Space != "" {
+		return xml.StartElement{}, false
+	}
+	return start, true
+}
+
 // candidateOffsets returns every byte offset in input where the literal
 // <zing is immediately followed by a name-boundary byte (space, tab,
 // carriage return, newline, '>', or '/'), in order, so "<zinger>" never
@@ -253,8 +264,8 @@ func tryDecode(input []byte, offset int) (*Document, error) {
 	if err != nil {
 		return nil, errMalformedCandidate
 	}
-	start, ok := tok.(xml.StartElement)
-	if !ok || start.Name.Local != zingElementName || start.Name.Space != "" {
+	start, ok := isZingStart(tok)
+	if !ok {
 		return nil, errMalformedCandidate
 	}
 

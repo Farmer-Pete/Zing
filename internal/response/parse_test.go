@@ -19,12 +19,9 @@ const (
 	// classifyReadyDoc is a well-formed classify/ready document: classify
 	// has no ready outcome, so Parse always reports
 	// classifyReadyUnregisteredErr for it, while ExtractAll still counts it
-	// as one well-formed root. Shared across parse_test.go, extract_test.go,
-	// and validate_test.go.
+	// as one well-formed root. Shared across parse_test.go and
+	// extract_test.go.
 	classifyReadyDoc = `<zing job="classify" outcome="ready"><reason>x</reason></zing>`
-
-	// wantBareComparison is the live "a < b" prose shape.
-	wantBareComparison = "a < b"
 )
 
 func TestParse_AfterLogTextWithRawAngleAndAmpersand(t *testing.T) {
@@ -334,14 +331,14 @@ func TestParse_RepairsBareLessThan(t *testing.T) {
 
 	t.Run("classify reason comparison", func(t *testing.T) {
 		t.Parallel()
-		in := []byte(`<zing job="classify" outcome="bug"><reason>` + wantBareComparison + `</reason></zing>`)
+		in := []byte(`<zing job="classify" outcome="bug"><reason>a < b</reason></zing>`)
 		doc, err := Parse(in)
 		if err != nil {
 			t.Fatalf("Parse: %v", err)
 		}
 		cr, ok := doc.Response.(*ClassifyResponse)
-		if !ok || cr.Reason != wantBareComparison {
-			t.Fatalf("Response = %#v, want Reason %q", doc.Response, wantBareComparison)
+		if !ok || cr.Reason != "a < b" {
+			t.Fatalf("Response = %#v, want Reason %q", doc.Response, "a < b")
 		}
 		if !strings.Contains(string(doc.Elem), "&lt;") {
 			t.Errorf("doc.Elem = %q, want it to contain &lt;", doc.Elem)
@@ -480,20 +477,23 @@ func TestParse_UnregisteredPairIsNotRepaired(t *testing.T) {
 
 // TestParse_StrictDocumentKeepsItsBytes guards goal 2: a document that
 // parses on the strict pass comes back byte for byte, untouched by the
-// repair pass.
+// repair pass. The input holds no bare <, but reason's unknown <code>
+// child distinguishes the two passes: the strict decoder simply skips it,
+// while a repair-first Parse would treat reason as free text, escape
+// <code>'s opening < (rule 5), and then fail to match its closing
+// </code> against the open reason frame, changing the bytes. Asserting
+// byte-for-byte equality here would hold even if Parse ran its passes in
+// the wrong order only by accident; this input makes the two passes
+// disagree, so the assertion actually pins which one ran.
 func TestParse_StrictDocumentKeepsItsBytes(t *testing.T) {
 	t.Parallel()
-	in := []byte(`<zing job="classify" outcome="bug"><reason>a &lt; b</reason></zing>`)
+	in := []byte(`<zing job="classify" outcome="bug"><reason>use <code>x</code></reason></zing>`)
 	doc, err := Parse(in)
 	if err != nil {
 		t.Fatalf("Parse: %v", err)
 	}
 	if !bytes.Equal(doc.Elem, in) {
 		t.Errorf("doc.Elem = %q, want the input unchanged: %q", doc.Elem, in)
-	}
-	cr, ok := doc.Response.(*ClassifyResponse)
-	if !ok || cr.Reason != wantBareComparison {
-		t.Fatalf("Reason = %#v, want %q", doc.Response, wantBareComparison)
 	}
 }
 

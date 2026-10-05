@@ -39,8 +39,8 @@ func candidateShape(elem []byte) *node {
 	if err != nil {
 		return nil
 	}
-	start, ok := tok.(xml.StartElement)
-	if !ok || start.Name.Local != zingElementName || start.Name.Space != "" {
+	start, ok := isZingStart(tok)
+	if !ok {
 		return nil
 	}
 	job, outcome, ok := headerAttrs(start.Attr)

@@ -151,6 +151,22 @@ func TestRepairBareLessThan(t *testing.T) {
 			escaped: 1,
 			ok:      true,
 		},
+		{
+			name:    "self-closing child before the escaped field",
+			elem:    `<zing job="build" outcome="ok"><claims/><report>x is <nil></report></zing>`,
+			root:    buildRoot,
+			want:    `<zing job="build" outcome="ok"><claims/><report>x is &lt;nil></report></zing>`,
+			escaped: 1,
+			ok:      true,
+		},
+		{
+			name:    "closing tag with whitespace before the >",
+			elem:    `<zing job="classify" outcome="bug"><reason>a < b</reason ></zing>`,
+			root:    classifyRoot,
+			want:    `<zing job="classify" outcome="bug"><reason>a &lt; b</reason ></zing>`,
+			escaped: 1,
+			ok:      true,
+		},
 	}
 
 	for _, tc := range cases {

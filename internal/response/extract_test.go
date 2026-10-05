@@ -154,40 +154,41 @@ func TestExtractAll_UnregisteredPairIsNotRepaired(t *testing.T) {
 	}
 }
 
+// TestExtractAll_StrictRootWithUnknownChildSkipsRepair is ExtractAll's half
+// of TestParse_StrictDocumentKeepsItsBytes: the input holds no bare <, so
+// the strict pass finds it well formed and must return it unchanged. A
+// repair-first ExtractAll would instead treat reason as free text, escape
+// <code>'s opening < as text, and fail to match its closing </code>
+// against the open reason frame, changing the root.
+func TestExtractAll_StrictRootWithUnknownChildSkipsRepair(t *testing.T) {
+	t.Parallel()
+
+	in := `<zing job="classify" outcome="bug"><reason>use <code>x</code></reason></zing>`
+	got := ExtractAll(in)
+	if len(got) != 1 || got[0] != in {
+		t.Fatalf("ExtractAll = %v, want exactly [%q]", got, in)
+	}
+}
+
 // TestExtractStrict_HitsCapReturnsNilTrue pins extractStrict's own half of
-// the `|| capped` short-circuit: past maxRootCandidates candidates it
-// returns (nil, true), not whatever partial roots it had found, so
-// ExtractAll knows to stop rather than fall through to the repair pass.
+// the `|| capped` short-circuit: a well-formed root before the flood of
+// unclosed starts would otherwise show up in roots, but past
+// maxRootCandidates candidates extractStrict returns (nil, true), dropping
+// that root rather than returning whatever partial roots it had found. That
+// is also why ExtractAll checks capped at all: without it, ExtractAll would
+// fall through to the repair pass and redo the identical, already-bounded
+// scan for no benefit, since extractRepaired hits the same cap on the same
+// candidate list.
 func TestExtractStrict_HitsCapReturnsNilTrue(t *testing.T) {
 	t.Parallel()
 
-	hostile := strings.Repeat("<zing >\n", 2000)
+	hostile := wellFormedClassify + strings.Repeat("<zing >\n", 2000)
 	roots, capped := extractStrict([]byte(hostile))
 	if !capped {
 		t.Fatal("capped = false, want true past maxRootCandidates")
 	}
 	if roots != nil {
-		t.Errorf("roots = %v, want nil", roots)
-	}
-}
-
-// TestExtractAll_CappedSkipsRepair guards the `|| capped` half of
-// ExtractAll's condition: hitting maxRootCandidates in the strict pass
-// must return nothing outright, even when a well-formed, repairable
-// document follows the flood of broken candidates. Dropping `capped` from
-// that condition happens to still pass this test, since extractRepaired
-// scans the identical candidate list and is bounded by the same cap, so it
-// also returns nothing once the flood is large enough to cap the strict
-// pass (r1f1): this test pins the output both halves agree on, and
-// TestExtractStrict_HitsCapReturnsNilTrue above pins the signal ExtractAll
-// relies on to skip the repair pass's wasted work rather than redo it.
-func TestExtractAll_CappedSkipsRepair(t *testing.T) {
-	t.Parallel()
-
-	hostile := strings.Repeat("<zing >\n", 2000)
-	got := ExtractAll(hostile + brokenBuildReportNil)
-	if len(got) != 0 {
-		t.Fatalf("ExtractAll = %v, want zero roots (capped, repair must not run)", got)
+		t.Errorf("roots = %v, want nil (the earlier well-formed root must not survive the cap)", roots)
 	}
 }
 
@@ -222,8 +223,9 @@ func TestExtractAll_RepairLogsEscapedCount(t *testing.T) {
 	}
 }
 
-// TestExtractAll_RepairLogsRootsOverOne guards the count r1f2 flagged: a
-// message holding two repairable candidates gives ExtractAll two roots,
+// TestExtractAll_RepairLogsRootsOverOne guards the roots count in the
+// repair log record: a message holding two repairable candidates gives
+// ExtractAll two roots,
 // which runtime.parseFinalMessage then rejects outright as
 // reasonMultipleZingDocs. The log record must say roots=2, not read like a
 // single clean repair, so an operator matching repair records to runs by

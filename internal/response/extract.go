@@ -109,8 +109,7 @@ func wellFormedRootExtent(input []byte, offset int) (int, bool) {
 	if err != nil {
 		return 0, false
 	}
-	start, ok := tok.(xml.StartElement)
-	if !ok || start.Name.Local != zingElementName || start.Name.Space != "" {
+	if _, ok := isZingStart(tok); !ok {
 		return 0, false
 	}
 	if err := dec.Skip(); err != nil {
