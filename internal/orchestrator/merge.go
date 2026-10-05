@@ -2,6 +2,7 @@ package orchestrator
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -134,13 +135,18 @@ func hasConflictMarkerRun(line []byte, b byte) bool {
 	return n >= minConflictMarkerRun && n < len(line) && line[n] == ' '
 }
 
-// ConflictMarkerPaths returns, sorted, every path among the index's
-// unmerged paths and the working tree's changed paths (MergeChangedPaths:
+// ConflictMarkerPaths returns, sorted, every path still unresolved: a
+// binary path the index lists as unmerged (unmergedIndexPaths: git's own
+// "U" status) unconditionally, since a binary conflict leaves no text
+// marker an agent could write or clear, plus, among the index's unmerged
+// text paths and the working tree's other changed paths (MergeChangedPaths:
 // tracked or untracked, since an agent can "git rm --cached" a conflicting
-// path and leave its markers on disk) whose working-tree file has a line
-// matching hasConflictMarkerPrefix. An absent file or a non-regular file
-// is skipped. Files are read through os.OpenRoot(wt.dir), so a path never
-// escapes the worktree.
+// path and leave its markers on disk), every one whose working-tree file
+// has a line matching hasConflictMarkerPrefix. An absent file or a
+// non-regular file is skipped (and, for the binary test, treated as text,
+// so it is skipped the same way filterConflictMarkerPaths skips it). Files
+// are read through os.OpenRoot(wt.dir), so a path never escapes the
+// worktree.
 func (o *Orchestrator) ConflictMarkerPaths(ctx context.Context, wt Worktree) ([]string, error) {
 	if err := o.revalidate(ctx, wt); err != nil {
 		return nil, fmt.Errorf("orchestrator: conflict marker paths: %w", err)
@@ -150,28 +156,98 @@ func (o *Orchestrator) ConflictMarkerPaths(ctx context.Context, wt Worktree) ([]
 		return nil, fmt.Errorf("orchestrator: conflict marker paths: %w", err)
 	}
 
+	root, err := os.OpenRoot(wt.dir)
+	if err != nil {
+		return nil, fmt.Errorf("orchestrator: conflict marker paths: %w", err)
+	}
+	defer root.Close()
+
+	result := make(map[string]struct{}, len(unmerged))
+	for _, p := range unmerged {
+		binary, binErr := fileLooksBinary(root, p)
+		if binErr != nil {
+			return nil, fmt.Errorf("orchestrator: conflict marker paths: %s: %w", p, binErr)
+		}
+		if binary {
+			result[p] = struct{}{}
+		}
+	}
+
 	changed, err := o.MergeChangedPaths(ctx, wt)
 	if err != nil {
 		return nil, fmt.Errorf("orchestrator: conflict marker paths: %w", err)
 	}
-
-	seen := make(map[string]struct{}, len(unmerged)+len(changed))
+	candidates := make([]string, 0, len(unmerged)+len(changed))
+	seenCandidate := make(map[string]struct{}, len(unmerged)+len(changed))
+	addCandidate := func(p string) {
+		if _, already := result[p]; already {
+			return
+		}
+		if _, already := seenCandidate[p]; already {
+			return
+		}
+		seenCandidate[p] = struct{}{}
+		candidates = append(candidates, p)
+	}
 	for _, p := range unmerged {
-		seen[p] = struct{}{}
+		addCandidate(p)
 	}
 	for _, p := range changed {
-		seen[p] = struct{}{}
-	}
-	candidates := make([]string, 0, len(seen))
-	for p := range seen {
-		candidates = append(candidates, p)
+		addCandidate(p)
 	}
 
 	marked, err := filterConflictMarkerPaths(wt.dir, candidates)
 	if err != nil {
 		return nil, fmt.Errorf("orchestrator: conflict marker paths: %w", err)
 	}
-	return marked, nil
+	for _, p := range marked {
+		result[p] = struct{}{}
+	}
+
+	out := make([]string, 0, len(result))
+	for p := range result {
+		out = append(out, p)
+	}
+	sort.Strings(out)
+	return out, nil
+}
+
+// looksBinarySniffLen is how much of a file's start fileLooksBinary reads:
+// enough to catch the NUL byte git's own buffer_is_binary heuristic keys
+// on, without reading an arbitrarily large file in full.
+const looksBinarySniffLen = 8000
+
+// fileLooksBinary reports whether path, read through root, starts with a
+// NUL byte within its first looksBinarySniffLen bytes -- git's own
+// heuristic for "binary", and the reason a binary conflict's working-tree
+// file can never hold a text conflict marker. An absent file, a
+// non-regular file, or an empty file is reported false (text) with no
+// error, so the caller falls back to the marker scan, exactly as it does
+// for every other such path.
+func fileLooksBinary(root *os.Root, path string) (bool, error) {
+	info, err := root.Lstat(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return false, nil
+		}
+		return false, err
+	}
+	if !info.Mode().IsRegular() {
+		return false, nil
+	}
+
+	f, err := root.Open(path)
+	if err != nil {
+		return false, err
+	}
+	defer f.Close()
+
+	buf := make([]byte, looksBinarySniffLen)
+	n, err := io.ReadFull(f, buf)
+	if err != nil && !errors.Is(err, io.EOF) && !errors.Is(err, io.ErrUnexpectedEOF) {
+		return false, err
+	}
+	return bytes.IndexByte(buf[:n], 0) >= 0, nil
 }
 
 // PathsWithConflictMarkers filters paths to the ones, sorted, whose current

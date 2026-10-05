@@ -48,7 +48,7 @@ func TestPrompts_MatchThePinnedDesignText(t *testing.T) {
 		{
 			name:   "merge",
 			path:   "prompts/merge.md",
-			sha256: "6dfcff2686eb9e8e25e81d497f0a7106d292dc7cdd783aa24208e3e8276c9fca",
+			sha256: "dd65ef81eb5109231e84ee2c9ab008121f98a7e1fc4d9b9bc7708358dbb915f6",
 		},
 		{
 			name:   "perimeter",

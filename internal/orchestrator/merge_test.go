@@ -395,6 +395,64 @@ func TestConflictMarkerPathsUntracked(t *testing.T) {
 	}
 }
 
+// TestConflictMarkerPathsBinaryConflict proves ConflictMarkerPaths reports
+// a conflicting binary file even though it holds no text conflict marker
+// line: git's own unmerged ("U") index status already proves the path
+// unresolved, so ConflictMarkerPaths must not drop it just because
+// filterConflictMarkerPaths finds no marker in its (binary) content
+// (review thread tc2309919ac69222b).
+func TestConflictMarkerPathsBinaryConflict(t *testing.T) {
+	t.Parallel()
+	ctx := t.Context()
+
+	fixture := newSigningFixture(t, true)
+	repo := newSigningTestRepo(t, fixture)
+	o := newTestOrchestrator(t, repo, execRunner{})
+
+	const binPath = "image.bin"
+	writeTestBinaryFile(t, filepath.Join(repo, binPath), []byte{0x00, 0x01, 0x02})
+	runGit(ctx, t, repo, "add", binPath)
+	runGit(ctx, t, repo, "commit", "-q", "-m", "seed image.bin")
+
+	wt, err := o.PrepareWorktree(ctx, 9, "", nil)
+	if err != nil {
+		t.Fatalf("PrepareWorktree: %v", err)
+	}
+
+	writeTestBinaryFile(t, filepath.Join(wt.Dir(), binPath), []byte{0x00, 0x10, 0x11, 0x12})
+	runGit(ctx, t, wt.Dir(), "add", binPath)
+	runGit(ctx, t, wt.Dir(), "commit", "-q", "-m", "ticket edits image.bin")
+
+	writeTestBinaryFile(t, filepath.Join(repo, binPath), []byte{0x00, 0x20, 0x21, 0x22})
+	runGit(ctx, t, repo, "add", binPath)
+	runGit(ctx, t, repo, "commit", "-q", "-m", "main edits image.bin")
+	baseSHA := strings.TrimSpace(runGit(ctx, t, repo, "rev-parse", "HEAD"))
+
+	if _, mergeErr := o.StartBaseMerge(ctx, wt, baseSHA); mergeErr != nil {
+		t.Fatalf("StartBaseMerge: unexpected error: %v", mergeErr)
+	}
+
+	marked, err := o.ConflictMarkerPaths(ctx, wt)
+	if err != nil {
+		t.Fatalf("ConflictMarkerPaths: unexpected error: %v", err)
+	}
+	if want := []string{binPath}; !slices.Equal(marked, want) {
+		t.Fatalf("ConflictMarkerPaths = %v, want %v", marked, want)
+	}
+}
+
+// writeTestBinaryFile is writeTestFile for raw, non-UTF8 content: a NUL
+// byte is what makes git treat the path as binary.
+func writeTestBinaryFile(t *testing.T, path string, content []byte) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatalf("mkdir %s: %v", filepath.Dir(path), err)
+	}
+	if err := os.WriteFile(path, content, 0o644); err != nil {
+		t.Fatalf("write %s: %v", path, err)
+	}
+}
+
 // TestPathsWithConflictMarkers proves PathsWithConflictMarkers over a real,
 // already-committed merge: adoptMerge's own use, once MERGE_HEAD no longer
 // resolves, scanning the commit's own changed paths rather than the index's
@@ -409,9 +467,19 @@ func TestPathsWithConflictMarkers(t *testing.T) {
 	if _, err := f.o.StartBaseMerge(ctx, f.wt, f.baseSHA); err != nil {
 		t.Fatalf("StartBaseMerge: unexpected error: %v", err)
 	}
-	// Leave mergeSharedPath unresolved (still holding conflict markers);
-	// mergeTicketOnlyPath is clean and never touched by the merge at all.
+	// Stage mergeSharedPath still holding its conflict markers, then commit
+	// the merge, so the committed blob -- not just the live index -- still
+	// holds them; mergeTicketOnlyPath is clean and never touched by the
+	// merge at all.
 	runGit(ctx, t, f.wt.Dir(), "add", mergeSharedPath)
+	if _, err := f.o.CommitMerge(ctx, f.wt, mergeTestMessage(), f.baseSHA); err != nil {
+		t.Fatalf("CommitMerge: unexpected error: %v", err)
+	}
+	if inProgress, err := f.o.mergeInProgress(ctx, f.wt); err != nil {
+		t.Fatalf("mergeInProgress: %v", err)
+	} else if inProgress {
+		t.Fatalf("mergeInProgress = true after CommitMerge, want false")
+	}
 
 	candidates := []string{mergeSharedPath, mergeTicketOnlyPath, "missing.txt"}
 	marked, err := f.o.PathsWithConflictMarkers(ctx, f.wt, candidates)
