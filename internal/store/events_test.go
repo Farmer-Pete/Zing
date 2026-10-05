@@ -2,6 +2,7 @@ package store
 
 import (
 	"encoding/json"
+	"slices"
 	"strings"
 	"testing"
 
@@ -215,7 +216,6 @@ func TestInsertEventRejects(t *testing.T) {
 	const wantSchemaErr = "does not match schema"
 
 	validSHA := strings.Repeat("a", 40)
-	bogusKind := "bogus"
 
 	// eventMessage builds a check_rerun event Message on ticketID with a
 	// raw payload, for the invalid-payload cases below.
@@ -235,7 +235,7 @@ func TestInsertEventRejects(t *testing.T) {
 		{
 			"unknown kind",
 			Message{
-				TicketID: ticketID, Type: msgTypeUpdate, Author: authorSystem, EventKind: &bogusKind,
+				TicketID: ticketID, Type: msgTypeUpdate, Author: authorSystem, EventKind: new("bogus"),
 				Payload: json.RawMessage(`{"check":"test","sha":"` + validSHA + `"}`),
 			},
 			wantSchemaErr,
@@ -257,7 +257,7 @@ func TestInsertEventRejects(t *testing.T) {
 		},
 		{
 			"event kind with no payload",
-			Message{TicketID: ticketID, Type: msgTypeUpdate, Author: authorSystem, EventKind: &[]string{EventKindCheckRerun}[0]},
+			eventMessage(""),
 			"requires a payload",
 		},
 		{
@@ -272,7 +272,7 @@ func TestInsertEventRejects(t *testing.T) {
 		{
 			"empty event kind",
 			Message{
-				TicketID: ticketID, Type: msgTypeUpdate, Author: authorSystem, EventKind: &[]string{""}[0],
+				TicketID: ticketID, Type: msgTypeUpdate, Author: authorSystem, EventKind: new(""),
 				Payload: json.RawMessage(`{"check":"test","sha":"` + validSHA + `"}`),
 			},
 			"must not be empty",
@@ -313,12 +313,7 @@ func TestEventKinds(t *testing.T) {
 	t.Parallel()
 	got := EventKinds()
 	want := []string{"check_rerun"}
-	if len(got) != len(want) {
-		t.Fatalf("EventKinds() = %v, want %v", got, want)
-	}
-	for i, k := range want {
-		if got[i] != k {
-			t.Errorf("EventKinds()[%d] = %q, want %q", i, got[i], k)
-		}
+	if !slices.Equal(got, want) {
+		t.Errorf("EventKinds() = %v, want %v", got, want)
 	}
 }

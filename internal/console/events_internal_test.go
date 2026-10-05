@@ -20,14 +20,12 @@ func TestEveryEventKindHasARenderRule(t *testing.T) {
 	if len(kinds) == 0 {
 		t.Fatal("store.EventKinds() returned no kinds")
 	}
-	for _, kind := range kinds {
-		if _, ok := eventRules[kind]; !ok {
-			t.Errorf("event kind %s has no render rule in internal/console/events.go", kind)
-		}
-	}
 	known := make(map[string]bool, len(kinds))
 	for _, kind := range kinds {
 		known[kind] = true
+		if _, ok := eventRules[kind]; !ok {
+			t.Errorf("event kind %s has no render rule in internal/console/events.go", kind)
+		}
 	}
 	for kind := range eventRules {
 		if !known[kind] {
