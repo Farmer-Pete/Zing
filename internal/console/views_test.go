@@ -177,7 +177,7 @@ func TestNavOrderStable(t *testing.T) {
 
 	cases := []struct {
 		name  string
-		event string // used in the after-fix failure message
+		event string // names the event in failure messages
 		badge string
 		apply func(t *testing.T, s *store.Store, id int64)
 	}{
