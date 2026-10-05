@@ -952,13 +952,16 @@ func checkReady(t store.Ticket, resp *response.ReadyResponse, fsys fs.FS) ([]*re
 // It also refuses a check that starts a nested sandbox (sandbox-exec or
 // internal/sandbox's own probes), which skips and exits 0 inside the
 // seatbelt the judge and CHECK already run under (#78). The only exemption
-// is an internal/sandbox probe whose own expected skip is both named by the
-// scenario's then and proven by a grep for the "--- SKIP:" line in the
-// check (#80, #129 s5); a bare sandbox-exec invocation stays refused even
-// then, since the fix only needs to let a probe's own expected skip
-// through, not every nested-sandbox check. It also refuses a then that
-// expects a skip when its check doesn't grep that same line, since a bare
-// go test exits 0 whether or not the test skipped.
+// is an internal/sandbox probe whose own expected skip is both affirmatively
+// named by the scenario's then (not negated, as in "no longer skips") and
+// proven by a grep for the "--- SKIP:" line in the check (#80, #129 s5); a
+// bare sandbox-exec invocation stays refused even then, since the fix only
+// needs to let a probe's own expected skip through, not every
+// nested-sandbox check. It also refuses a then that expects a skip when its
+// check doesn't grep that same line, since a bare go test exits 0 whether
+// or not the test skipped; that second rule still fires on a negated skip
+// then, since only the host-sandbox exemption's affirmative check is
+// narrowed.
 func checkScenarioShape(scenarios []response.Scenario) []*response.PathError {
 	var errs []*response.PathError
 	if n := len(scenarios); n < minReadyScenarios || n > maxReadyScenarios {
@@ -994,14 +997,21 @@ func checkScenarioShape(scenarios []response.Scenario) []*response.PathError {
 		assertsSkip := strings.Contains(sc.Check, skipLine)
 		startsSeatbelt := strings.Contains(sc.Check, "sandbox-exec")
 		runsSandboxProbes := strings.Contains(sc.Check, "internal/sandbox")
+		// A then like "the test no longer skips" matches skipWord but
+		// expects the opposite result, so the host-sandbox exemption below
+		// must not fire for it: a grepped "--- SKIP:" would then prove the
+		// wrong thing and reopen #78's hole. expectedSkipCheckMsg below
+		// still fires on this same then (Q3, no_longer_skips_flagged); only
+		// the exemption's affirmative check is narrowed.
+		affirmsSkip := expectsSkip && !negatedSkipWord.MatchString(sc.Then)
 		// sandbox-exec is never exempt: the fix only needs to let an
 		// internal/sandbox probe's own expected skip through, and starting
 		// the seatbelt directly is the exact nested-sandbox invocation #78
 		// refused. An internal/sandbox check is exempt only when the check
-		// proves the skip (assertsSkip) and the scenario expects it
-		// (expectsSkip); a skip the then doesn't name still hides the
-		// behavior under test.
-		exemptSandboxProbe := runsSandboxProbes && assertsSkip && expectsSkip
+		// proves the skip (assertsSkip) and the scenario affirmatively
+		// expects it (affirmsSkip); a skip the then doesn't name, or
+		// negates, still hides the behavior under test.
+		exemptSandboxProbe := runsSandboxProbes && assertsSkip && affirmsSkip
 		if startsSeatbelt || (runsSandboxProbes && !exemptSandboxProbe) {
 			errs = append(errs, &response.PathError{
 				Path: "scenarios/" + indexedScenario(i) + "/check",
@@ -1025,6 +1035,12 @@ const hostSandboxCheckMsg = "check runs the host sandbox (sandbox-exec or the in
 
 // skipWord matches a then that names a skip as the expected result.
 var skipWord = regexp.MustCompile(`(?i)\bskip(s|ped)?\b`)
+
+// negatedSkipWord matches a then that names a skip only to deny it, such as
+// "the test no longer skips": skipWord still matches that text, but the
+// then expects the test to run, not to skip, so a check that merely greps
+// "--- SKIP:" would prove the opposite of what the then says.
+var negatedSkipWord = regexp.MustCompile(`(?i)\b(no longer|not|never|does not|will not|stopped)\s+skip`)
 
 // skipLine is the go test -v line a check must grep to assert that a skip
 // happened, since a bare go test exits 0 whether or not the test skipped.

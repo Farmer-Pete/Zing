@@ -116,6 +116,20 @@ func TestCheckScenarioShape_ExpectedSkip(t *testing.T) {
 			wantMsgs:  []string{hostSandboxCheckMsg},
 		},
 		{
+			// "no longer skips" matches skipWord, but negates it: the
+			// host-sandbox exemption must not fire, since a grepped
+			// "--- SKIP:" would prove the opposite of what the then says
+			// and reopen #78's hole for this combination.
+			name: "no_longer_skips_sandbox_probe_not_exempted",
+			scenario0: response.Scenario{
+				ID:    "s1",
+				Then:  "the test no longer skips",
+				Check: `go test ./internal/sandbox -run TestX -v -count=1 | grep -q -- '--- SKIP: TestX'`,
+			},
+			wantPaths: []string{scenario0CheckPath},
+			wantMsgs:  []string{hostSandboxCheckMsg},
+		},
+		{
 			name: "then_is_skipped_rejected",
 			scenario0: response.Scenario{
 				ID:    "s1",
