@@ -1,9 +1,12 @@
 package runtime
 
 import (
+	"bytes"
 	"context"
 	"encoding/hex"
 	"errors"
+	"io/fs"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"slices"
@@ -474,13 +477,88 @@ func TestCodexRun_FinalMessage(t *testing.T) {
 func TestCodex_ErrStart(t *testing.T) {
 	t.Parallel()
 
-	c := NewCodex(filepath.Join(t.TempDir(), "no-such-codex-binary"))
+	dir := t.TempDir()
+	c := NewCodex(filepath.Join(dir, "no-such-codex-binary"))
 	res, err := c.Run(context.Background(), RunRequest{Job: response.JobPlanreview, Model: "m"})
 	if !errors.Is(err, ErrStart) {
 		t.Fatalf("err = %v, want ErrStart", err)
 	}
+	if !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("err = %v, want fs.ErrNotExist", err)
+	}
+	const wantText = "runtime: process could not start: no such file or directory"
+	if err.Error() != wantText {
+		t.Errorf("err.Error() = %q, want %q", err.Error(), wantText)
+	}
+	if strings.Contains(err.Error(), dir) {
+		t.Errorf("err.Error() = %q, leaks the temp dir path", err.Error())
+	}
 	if res.ExitCode != -1 {
 		t.Errorf("ExitCode = %d, want -1", res.ExitCode)
+	}
+}
+
+// TestRun_ErrStartLogsCause proves Codex.Run and Claude.Run each log a WARN
+// "<runtime> run: start failed" line, carrying job, run_token, and the
+// wrapped error, whenever run returns ErrStart (design section "Logging",
+// #23). Not parallel: it calls slog.SetDefault to capture the line, which
+// swaps the process-wide default logger (runjob_test.go:1300-1301's own
+// pattern).
+func TestRun_ErrStartLogsCause(t *testing.T) {
+	dir := t.TempDir()
+	const runToken = "42"
+	const prompt = "do not log this prompt"
+
+	var logBuf bytes.Buffer
+	prevDefault := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logBuf, &slog.HandlerOptions{Level: slog.LevelWarn})))
+	t.Cleanup(func() { slog.SetDefault(prevDefault) })
+
+	codex := NewCodex(filepath.Join(dir, "no-such-codex-binary"))
+	if _, err := codex.Run(context.Background(), RunRequest{Job: response.JobPlanreview, Model: "m", RunToken: runToken, Prompt: prompt}); !errors.Is(err, ErrStart) {
+		t.Fatalf("codex Run err = %v, want ErrStart", err)
+	}
+
+	claude := NewClaude(filepath.Join(dir, "no-such-claude-binary"), testOAuthToken)
+	if _, err := claude.Run(context.Background(), RunRequest{Job: response.JobClassify, Model: "m", RunToken: runToken, Prompt: prompt}); !errors.Is(err, ErrStart) {
+		t.Fatalf("claude Run err = %v, want ErrStart", err)
+	}
+
+	logged := logBuf.String()
+	for _, tc := range []struct {
+		runtime string
+		job     string
+	}{
+		{"codex", string(response.JobPlanreview)},
+		{"claude", string(response.JobClassify)},
+	} {
+		want := tc.runtime + " run: start failed"
+		var line string
+		for candidate := range strings.SplitSeq(logged, "\n") {
+			if strings.Contains(candidate, want) {
+				line = candidate
+				break
+			}
+		}
+		if line == "" {
+			t.Fatalf("log missing a %q line; got:\n%s", want, logged)
+		}
+		for _, want := range []string{
+			"level=WARN",
+			"job=" + tc.job,
+			"run_token=" + runToken,
+			"no such file or directory",
+		} {
+			if !strings.Contains(line, want) {
+				t.Errorf("%s start-failed line missing %q; got:\n%s", tc.runtime, want, line)
+			}
+		}
+	}
+	if strings.Contains(logged, dir) {
+		t.Errorf("log leaks the temp dir path; got:\n%s", logged)
+	}
+	if strings.Contains(logged, prompt) {
+		t.Errorf("log leaks the prompt; got:\n%s", logged)
 	}
 }
 

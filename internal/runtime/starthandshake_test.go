@@ -2,6 +2,7 @@ package runtime
 
 import (
 	"context"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -11,8 +12,8 @@ import (
 	"zing/internal/response"
 )
 
-// startHandshakeStub is a POSIX shell script this file writes fresh for the
-// start-handshake tests (design section 7.1, #45). It is simpler than
+// startHandshakeStub is the path to the POSIX shell script the
+// start-handshake tests exec (design section 7.1, #45). It is simpler than
 // fake_claude.sh/fake_codex.sh, which record a run's full argv/env for
 // assertion elsewhere: this stub marks when it started and when its stdin
 // reached EOF, and at EOF it records ("ordered") whether OnStart's own
@@ -24,47 +25,13 @@ import (
 // result to that path when present, and to stdout (Claude's own result
 // channel) otherwise. Both results name job "classify" so
 // parseFinalMessage's job check passes for either runtime.
-const startHandshakeStub = `#!/bin/sh
-set -eu
-dir="${STUB_DIR:?STUB_DIR not set}"
-: > "$dir/started"
-
-outfile=""
-prev=""
-for arg in "$@"; do
-  if [ "$prev" = "-o" ]; then
-    outfile="$arg"
-  fi
-  prev="$arg"
-done
-
-stdin="$(cat)"
-: > "$dir/stdin_done"
-if [ -e "$dir/onstart_done" ]; then
-  : > "$dir/ordered"
-fi
-if [ -z "$stdin" ]; then
-  : > "$dir/no_work"
-  exit 0
-fi
-
-if [ -n "$outfile" ]; then
-  printf '%s' '<zing job="classify" outcome="bug"><reason>ok</reason></zing>' > "$outfile"
-else
-  printf '%s' '{"result":"<zing job=\"classify\" outcome=\"bug\"><reason>ok</reason></zing>"}'
-fi
-`
-
-// writeStartHandshakeStub writes startHandshakeStub to dir as an executable
-// file and returns its path.
-func writeStartHandshakeStub(t *testing.T, dir string) string {
-	t.Helper()
-	path := filepath.Join(dir, "stub.sh")
-	if err := os.WriteFile(path, []byte(startHandshakeStub), 0o755); err != nil { //nolint:gosec // G306: a test fixture script needs to be executable
-		t.Fatalf("write stub: %v", err)
-	}
-	return path
-}
+//
+// The script is committed under testdata, not written fresh per test: a
+// test that os.WriteFiles an executable script and execs it right after can
+// lose a race to a parallel test's fork, which inherits the still-open
+// write descriptor and fails its own exec with ETXTBSY (#23). A committed
+// file has no writer to race.
+const startHandshakeStub = "testdata/start_handshake_stub.sh"
 
 // markOnStartDone creates the marker the stub checks for once its stdin
 // closes. OnStart creates it as its last act, so the stub finds it only if
@@ -101,7 +68,6 @@ func TestClaudeOnStartRunsBeforePromptIsWritten(t *testing.T) {
 	requireUnix(t)
 
 	dir := t.TempDir()
-	stub := writeStartHandshakeStub(t, dir)
 
 	var gotPID int
 	req := RunRequest{
@@ -116,7 +82,7 @@ func TestClaudeOnStartRunsBeforePromptIsWritten(t *testing.T) {
 		},
 	}
 
-	c := NewClaude(stub, testOAuthToken)
+	c := NewClaude(startHandshakeStub, testOAuthToken)
 	if _, err := c.Run(context.Background(), req); err != nil {
 		t.Fatalf("Run: %v", err)
 	}
@@ -137,7 +103,6 @@ func TestCodexOnStartRunsBeforePromptIsWritten(t *testing.T) {
 	requireUnix(t)
 
 	dir := t.TempDir()
-	stub := writeStartHandshakeStub(t, dir)
 
 	var gotPID int
 	var gotSessionID string
@@ -154,7 +119,7 @@ func TestCodexOnStartRunsBeforePromptIsWritten(t *testing.T) {
 		},
 	}
 
-	c := NewCodex(stub)
+	c := NewCodex(startHandshakeStub)
 	if _, err := c.Run(context.Background(), req); err != nil {
 		t.Fatalf("Run: %v", err)
 	}
@@ -179,7 +144,6 @@ func TestAgentWithoutPromptExits(t *testing.T) {
 	requireUnix(t)
 
 	dir := t.TempDir()
-	stub := writeStartHandshakeStub(t, dir)
 
 	// PR review fix G2: t.Context() alone is canceled only when the test
 	// returns, so a hang -- the very regression this test guards against --
@@ -188,7 +152,7 @@ func TestAgentWithoutPromptExits(t *testing.T) {
 	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
 	defer cancel()
 
-	cmd := exec.CommandContext(ctx, stub)
+	cmd := exec.CommandContext(ctx, startHandshakeStub)
 	cmd.Env = append(os.Environ(), "STUB_DIR="+dir)
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
@@ -207,5 +171,47 @@ func TestAgentWithoutPromptExits(t *testing.T) {
 
 	if _, err := os.Stat(filepath.Join(dir, "no_work")); err != nil {
 		t.Errorf("no_work marker missing: %v", err)
+	}
+}
+
+// TestAgentWithNewlineOnlyPromptDoesWork guards against a shell command
+// substitution pitfall in the stub: "$(cat)" strips every trailing newline,
+// so a prompt consisting only of newlines used to collapse to the empty
+// string and wrongly take the no_work branch. A real prompt of only
+// newlines must still be treated as work.
+func TestAgentWithNewlineOnlyPromptDoesWork(t *testing.T) {
+	t.Parallel()
+	requireUnix(t)
+
+	dir := t.TempDir()
+
+	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+	defer cancel()
+
+	cmd := exec.CommandContext(ctx, startHandshakeStub)
+	cmd.Env = append(os.Environ(), "STUB_DIR="+dir)
+	stdin, err := cmd.StdinPipe()
+	if err != nil {
+		t.Fatalf("StdinPipe: %v", err)
+	}
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+
+	if _, err := io.WriteString(stdin, "\n\n"); err != nil {
+		t.Fatalf("write prompt: %v", err)
+	}
+	if err := stdin.Close(); err != nil {
+		t.Fatalf("close stdin: %v", err)
+	}
+	if err := cmd.Wait(); err != nil {
+		t.Fatalf("Wait: %v", err)
+	}
+
+	if _, err := os.Stat(filepath.Join(dir, "stdin_done")); err != nil {
+		t.Fatalf("stub never reached stdin EOF: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "no_work")); err == nil {
+		t.Error("no_work marker present, want a newline-only prompt treated as real work")
 	}
 }
