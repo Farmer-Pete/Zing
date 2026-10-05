@@ -57,6 +57,12 @@ const (
 	testSeedReason = "test setup"
 	testSpyReason  = "test"
 
+	// testSeedJudgingOwner is the claim owner every test that seeds a
+	// ticket straight into "judging" (then substitutes a spyHandler for
+	// it) shares (goconst): never read back by anything a test asserts
+	// on.
+	testSeedJudgingOwner = "seed-judging-owner"
+
 	testWaitingQuestions = "questions"
 	testWaitingGate      = "gate"
 	testQuestionOpen     = "open"
@@ -823,6 +829,10 @@ func (g *dispatchShipGitHub) Viewer(context.Context) (string, error) {
 	return dispatchShipGHViewerLogin, nil
 }
 
+func (g *dispatchShipGitHub) CommentOnPR(context.Context, string, string, int, string) error {
+	return errors.New("dispatchShipGitHub: not implemented")
+}
+
 var (
 	_ orchestrator.GitHub = (*dispatchShipGitHub)(nil)
 	_ job.PullRequests    = (*dispatchShipGitHub)(nil)
@@ -848,7 +858,7 @@ func (tr *dispatchShipTracker) PostPRLink(context.Context, int64, string, string
 	return nil
 }
 
-func (tr *dispatchShipTracker) PostDone(context.Context, int64, string, string) error {
+func (tr *dispatchShipTracker) PostDone(context.Context, int64, string, string, string) error {
 	tr.mu.Lock()
 	defer tr.mu.Unlock()
 	tr.dones++
@@ -1840,7 +1850,7 @@ func TestClaimTimeoutForJudging(t *testing.T) {
 	s := newDispatchTestStore(t)
 	ticketID := seedQueuedTicket(t, s, testFixtureRef)
 
-	seedOwner := "seed-judging-owner"
+	seedOwner := testSeedJudgingOwner
 	seedExpires := time.Now().Add(10 * time.Minute).UTC().Truncate(time.Second)
 	claimed, err := s.Claim(t.Context(), ticketID, seedOwner, seedExpires)
 	if err != nil || !claimed {
@@ -1938,7 +1948,7 @@ func TestRunAndCommitCopiesJudgeCodexHome(t *testing.T) {
 	s := newDispatchTestStore(t)
 	ticketID := seedQueuedTicket(t, s, testFixtureRef)
 
-	seedOwner := "seed-judging-owner"
+	seedOwner := testSeedJudgingOwner
 	seedExpires := time.Now().Add(10 * time.Minute).UTC().Truncate(time.Second)
 	claimed, err := s.Claim(t.Context(), ticketID, seedOwner, seedExpires)
 	if err != nil || !claimed {
@@ -1967,6 +1977,56 @@ func TestRunAndCommitCopiesJudgeCodexHome(t *testing.T) {
 	}
 	if spy.JudgeCodexHome() != wantJudgeCodexHome {
 		t.Errorf("Deps.JudgeCodexHome = %q, want %q", spy.JudgeCodexHome(), wantJudgeCodexHome)
+	}
+}
+
+// TestRunAndCommitCopiesReviewBots proves runAndCommit copies
+// dispatch.Config.ReviewBots into every job.Deps it builds, the same way
+// TestRunAndCommitCopiesJudgeCodexHome already proves for JudgeCodexHome:
+// without this copy, cmd/zing/serve.go could build an empty
+// job.ReviewBotRule, or drop the field from the dispatch.Config literal
+// entirely, and every pollIdle-level test would still pass (they all set
+// deps.ReviewBots directly) while production never nudges a silent review
+// bot.
+func TestRunAndCommitCopiesReviewBots(t *testing.T) {
+	t.Parallel()
+
+	s := newDispatchTestStore(t)
+	ticketID := seedQueuedTicket(t, s, testFixtureRef)
+
+	seedOwner := testSeedJudgingOwner
+	seedExpires := time.Now().Add(10 * time.Minute).UTC().Truncate(time.Second)
+	claimed, err := s.Claim(t.Context(), ticketID, seedOwner, seedExpires)
+	if err != nil || !claimed {
+		t.Fatalf("seed claim: claimed=%v err=%v", claimed, err)
+	}
+	applied, err := s.CommitHandlerResult(t.Context(), store.HandlerCommit{
+		TicketID: ticketID, Owner: seedOwner, Expires: seedExpires, Next: testStateJudging, Reason: testSeedReason,
+	})
+	if err != nil || !applied {
+		t.Fatalf("seed commit: applied=%v err=%v", applied, err)
+	}
+
+	spy := &spyHandler{next: testStateShipping, reason: testSpyReason}
+	reg := job.Registry()
+	reg[testStateJudging] = spy
+
+	wantReviewBots := job.ReviewBotRule{
+		Wait:   20 * time.Minute,
+		Checks: []job.ReviewBotCheck{{Check: "CodeRabbit", Trigger: "@coderabbitai review"}},
+	}
+	d := newDispatcher(t, s, newFixtureTracker(t), bus.New(), fakeRuntime(t), reg, nil,
+		dispatch.Config{MaxParallel: 2, Owner: testOwner, ReviewBots: wantReviewBots})
+
+	if err := d.Tick(t.Context()); err != nil {
+		t.Fatalf("Tick: %v", err)
+	}
+	if spy.Calls() != 1 {
+		t.Fatalf("spy.Calls() = %d, want 1", spy.Calls())
+	}
+	got := spy.ReviewBots()
+	if got.Wait != wantReviewBots.Wait || !slices.Equal(got.Checks, wantReviewBots.Checks) {
+		t.Errorf("Deps.ReviewBots = %+v, want %+v", got, wantReviewBots)
 	}
 }
 
@@ -2825,7 +2885,7 @@ func TestPostDoneSkipsMarkedComment(t *testing.T) {
 	bindings := []dispatch.Binding{{StoreProjectID: projectID, TrackerProject: testProject.Name, User: testBindingUser}}
 	d := newDispatcher(t, s, tr, bus.New(), fakeRuntime(t), nil, bindings, dispatch.Config{MaxParallel: 2, Owner: testOwner})
 
-	if err := d.PostDone(t.Context(), projectID, testFixtureRef, testPRURL); err != nil {
+	if err := d.PostDone(t.Context(), projectID, testFixtureRef, testPRURL, ""); err != nil {
 		t.Fatalf("PostDone: %v", err)
 	}
 	if got := tr.postedComments(); len(got) != 0 {
@@ -2849,7 +2909,7 @@ func TestPostDoneIgnoresSpoofedMarker(t *testing.T) {
 	bindings := []dispatch.Binding{{StoreProjectID: projectID, TrackerProject: testProject.Name, User: testBindingUser}}
 	d := newDispatcher(t, s, tr, bus.New(), fakeRuntime(t), nil, bindings, dispatch.Config{MaxParallel: 2, Owner: testOwner})
 
-	if err := d.PostDone(t.Context(), projectID, testFixtureRef, testPRURL); err != nil {
+	if err := d.PostDone(t.Context(), projectID, testFixtureRef, testPRURL, ""); err != nil {
 		t.Fatalf("PostDone: %v", err)
 	}
 	got := tr.postedComments()
@@ -2871,12 +2931,40 @@ func TestPostDoneClosesAfterComment(t *testing.T) {
 	bindings := []dispatch.Binding{{StoreProjectID: projectID, TrackerProject: testProject.Name, User: testBindingUser}}
 	d := newDispatcher(t, s, tr, bus.New(), fakeRuntime(t), nil, bindings, dispatch.Config{MaxParallel: 2, Owner: testOwner})
 
-	if err := d.PostDone(t.Context(), projectID, testFixtureRef, testPRURL); err != nil {
+	if err := d.PostDone(t.Context(), projectID, testFixtureRef, testPRURL, ""); err != nil {
 		t.Fatalf("PostDone: %v", err)
 	}
 	want := []string{"comment:" + testFixtureRef, "close:" + testFixtureRef}
 	if got := tr.callSequence(); !slices.Equal(got, want) {
 		t.Errorf("call sequence = %v, want %v", got, want)
+	}
+}
+
+// TestPostDonePassesMergeSHA proves PostDone forwards its mergeSHA argument
+// into tracker.DoneComment, so the posted comment names the merge commit
+// instead of saying the pull request is ready for review.
+func TestPostDonePassesMergeSHA(t *testing.T) {
+	t.Parallel()
+
+	const mergeSHA = "0123456789abcdef0123456789abcdef01234567"
+	s, projectID, _, tr := shipTestFixture(t)
+
+	bindings := []dispatch.Binding{{StoreProjectID: projectID, TrackerProject: testProject.Name, User: testBindingUser}}
+	d := newDispatcher(t, s, tr, bus.New(), fakeRuntime(t), nil, bindings, dispatch.Config{MaxParallel: 2, Owner: testOwner})
+
+	if err := d.PostDone(t.Context(), projectID, testFixtureRef, testPRURL, mergeSHA); err != nil {
+		t.Fatalf("PostDone: %v", err)
+	}
+	got := tr.postedComments()
+	if len(got) != 1 {
+		t.Fatalf("posted comments = %+v, want 1", got)
+	}
+	if !strings.Contains(got[0].body, "was merged") || !strings.Contains(got[0].body, mergeSHA) {
+		t.Errorf("posted comment body = %q, want it to say \"was merged\" and name %q", got[0].body, mergeSHA)
+	}
+	want := []string{"comment:" + testFixtureRef, "close:" + testFixtureRef}
+	if gotSeq := tr.callSequence(); !slices.Equal(gotSeq, want) {
+		t.Errorf("call sequence = %v, want %v", gotSeq, want)
 	}
 }
 
@@ -2892,7 +2980,7 @@ func TestPostDoneErrorReturned(t *testing.T) {
 	bindings := []dispatch.Binding{{StoreProjectID: projectID, TrackerProject: testProject.Name, User: testBindingUser}}
 	d := newDispatcher(t, s, tr, bus.New(), fakeRuntime(t), nil, bindings, dispatch.Config{MaxParallel: 2, Owner: testOwner})
 
-	if err := d.PostDone(t.Context(), projectID, testFixtureRef, testPRURL); err == nil {
+	if err := d.PostDone(t.Context(), projectID, testFixtureRef, testPRURL, ""); err == nil {
 		t.Error("PostDone err = nil, want an error")
 	}
 }
@@ -2939,6 +3027,11 @@ type spyHandler struct {
 	// runAndCommit copied dispatch.Config.JudgeCodexHome into the Deps a
 	// handler actually sees.
 	judgeCodexHome string
+	// reviewBots records d.ReviewBots, so
+	// TestRunAndCommitCopiesReviewBots can assert runAndCommit copied
+	// dispatch.Config.ReviewBots into the Deps a handler actually sees,
+	// the same way judgeCodexHome already covers JudgeCodexHome.
+	reviewBots job.ReviewBotRule
 
 	next, reason string
 	err          error
@@ -2949,6 +3042,7 @@ func (h *spyHandler) Run(ctx context.Context, t store.Ticket, d job.Deps) (store
 	h.calls++
 	h.expires = d.Expires
 	h.judgeCodexHome = d.JudgeCodexHome
+	h.reviewBots = d.ReviewBots
 	if dl, ok := ctx.Deadline(); ok {
 		h.hasDeadline = true
 		h.deadline = dl
@@ -2995,6 +3089,13 @@ func (h *spyHandler) JudgeCodexHome() string {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	return h.judgeCodexHome
+}
+
+// ReviewBots returns the most recent Run call's d.ReviewBots.
+func (h *spyHandler) ReviewBots() job.ReviewBotRule {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.reviewBots
 }
 
 // countingRuntime wraps a runtime.Runtime and counts every Run call, so a

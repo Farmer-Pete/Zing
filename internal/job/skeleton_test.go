@@ -270,7 +270,8 @@ func (*jobTestShipGitHub) JobLogTail(context.Context, string, string, int64, int
 type jobTestShipTracker struct{}
 
 func (jobTestShipTracker) PostPRLink(context.Context, int64, string, string) error { return nil }
-func (jobTestShipTracker) PostDone(context.Context, int64, string, string) error   { return nil }
+
+func (jobTestShipTracker) PostDone(context.Context, int64, string, string, string) error { return nil }
 
 // addBareOriginForTicket gives ticketID's own project a bare origin remote
 // (gitfixture.WithBareOrigin), exactly once: git itself refuses a second
