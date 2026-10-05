@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
-	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -64,35 +63,17 @@ func readInitialFrames(t *testing.T, r *bufio.Reader) (nav, main, rail, alerts s
 	return nav, main, rail, alerts
 }
 
-// newReadTimeoutTestServer builds a console.New handler on a reserved
-// listener exactly like newTestServerSandboxTracker (console_test.go), but
-// sets the underlying http.Server's ReadTimeout to readTimeout before
-// Start: the same field newServer (cmd/zing/serve.go) sets to 10s, only
-// shorter, so a stream opened against this server hits the same net/http
-// background-read deadline newServer's real stream traffic does, just sooner.
+// newReadTimeoutTestServer is newTestServerSandboxTracker (console_test.go)
+// with the underlying http.Server's ReadTimeout set to readTimeout before
+// Start, through newTestServerConfig's hook: the same field newServer
+// (cmd/zing/serve.go) sets to 10s, only shorter, so a stream opened against
+// this server hits the same net/http background-read deadline newServer's
+// real stream traffic does, just sooner.
 func newReadTimeoutTestServer(t *testing.T, s *store.Store, b *bus.Broker, readTimeout time.Duration) *httptest.Server {
 	t.Helper()
-
-	var lc net.ListenConfig
-	ln, err := lc.Listen(t.Context(), "tcp", testBindHost+":0")
-	if err != nil {
-		t.Fatalf("reserve a listener: %v", err)
-	}
-	addr, ok := ln.Addr().(*net.TCPAddr)
-	if !ok {
-		t.Fatalf("unexpected listener address type %T", ln.Addr())
-	}
-
-	handler := console.New(s, b, nil, testBindHosts, addr.Port, newTestLogHandler(t), nil, testPushToken, response.SeverityMinor, "", nil, "")
-	srv := httptest.NewUnstartedServer(handler)
-	if err := srv.Listener.Close(); err != nil {
-		t.Fatalf("close the placeholder listener: %v", err)
-	}
-	srv.Listener = ln
-	srv.Config.ReadTimeout = readTimeout
-	srv.Start()
-	t.Cleanup(srv.Close)
-	return srv
+	return newTestServerConfig(t, s, b, nil, newTestLogHandler(t), response.SeverityMinor, "", nil, "", func(c *http.Server) {
+		c.ReadTimeout = readTimeout
+	})
 }
 
 // TestStreamOutlivesServerReadTimeout proves a /stream connection survives

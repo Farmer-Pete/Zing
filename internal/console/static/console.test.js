@@ -604,10 +604,25 @@ test('reduceStreamStatus marks stale on reconnecting and failures, clears on set
 	assert.equal(result.status.staleSince, 3000);
 	status = result.status;
 
+	// error and retrying mark stale the same way as retries-failed.
+	assert.equal(reduceStreamStatus(emptyStreamStatus(), { type: 'error' }, 7000).status.staleSince, 7000);
+	assert.equal(reduceStreamStatus(emptyStreamStatus(), { type: 'retrying' }, 8000).status.staleSince, 8000);
+
 	// A settled event whose gen no longer matches the current stream is ignored.
 	result = reduceStreamStatus({ ...status, inflight: 1, gen: 5 }, { type: 'settled', gen: 4 }, 4000);
 	assert.equal(result.status.staleSince, 3000);
 	assert.equal(result.status.attempt, status.attempt);
+
+	// A settled or patched event while nothing is inflight (a late event after
+	// the stream has already finished) must not clear a stale marker: finished
+	// bumps gen, so a settle timer armed by the old started is also stale by gen.
+	const stale = { ...status, inflight: 0, gen: 5, attempt: 2, staleSince: 3000 };
+	result = reduceStreamStatus(stale, { type: 'settled', gen: 5 }, 9000);
+	assert.equal(result.status.staleSince, 3000);
+	assert.equal(result.status.attempt, 2);
+	result = reduceStreamStatus(stale, { type: 'patched' }, 9000);
+	assert.equal(result.status.staleSince, 3000);
+	assert.equal(result.status.attempt, 2);
 
 	// A settled event with the current gen, while inflight is above 0, clears staleSince and resets attempt.
 	const live = { ...status, inflight: 1, gen: 5, attempt: 2 };
@@ -624,6 +639,11 @@ test('reduceStreamStatus marks stale on reconnecting and failures, clears on set
 	const started = reduceStreamStatus(emptyStreamStatus(), { type: 'started' }, 0);
 	assert.equal(started.effect.cancelReconnect, true);
 	assert.equal(started.effect.settleGen, started.status.gen);
+
+	// finished bumps gen on the last in-flight request too, so a settle timer
+	// armed by that stream's own started is stale by the time it fires.
+	const lastFinished = reduceStreamStatus({ inflight: 1, gen: 3, attempt: 0, staleSince: null }, { type: 'finished' }, 0);
+	assert.equal(lastFinished.status.gen, 4);
 });
 
 test('staleMarkerText formats the stale time', () => {
