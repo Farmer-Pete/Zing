@@ -8,6 +8,23 @@ import (
 	"time"
 )
 
+// CheckKind is a CHECK command's kind: one of CheckKindFix, CheckKindLint
+// or CheckKindTest. Each value must be in migration 0009's check_procs.kind
+// CHECK list; TestCheckKindsAccepted enforces this by recording every value
+// of CheckKinds against the migrated schema.
+type CheckKind string
+
+// The CHECK command kinds that check_procs.kind accepts (migration 0009).
+const (
+	CheckKindFix  CheckKind = "fix"
+	CheckKindLint CheckKind = "lint"
+	CheckKindTest CheckKind = "test"
+)
+
+// CheckKinds returns the three kinds check_procs.kind accepts, in CHECK's
+// run order: fix, lint, test.
+func CheckKinds() []CheckKind { return []CheckKind{CheckKindFix, CheckKindLint, CheckKindTest} }
+
 // RecordCheckStart records the process group of the CHECK command a ticket's
 // claim holder just started (#55, #45 parity), replacing any earlier row:
 // only the claim holder runs CHECK, so a ticket never has two commands at
@@ -16,7 +33,7 @@ import (
 // is stored as NULL (an unverified group); pgid <= 0 is an error and
 // nothing is written. It returns the record's generation, which the caller
 // passes to ClearCheckStart: no later record ever reuses it.
-func (s *Store) RecordCheckStart(ctx context.Context, ticketID int64, owner string, expires time.Time, kind string, pgid int, procStart string, startedAt, budgetStartedAt time.Time) (int64, error) {
+func (s *Store) RecordCheckStart(ctx context.Context, ticketID int64, owner string, expires time.Time, kind CheckKind, pgid int, procStart string, startedAt, budgetStartedAt time.Time) (int64, error) {
 	if pgid <= 0 {
 		return 0, fmt.Errorf("record check start: ticket %d: pgid %d is not a process group", ticketID, pgid)
 	}
@@ -44,7 +61,7 @@ func (s *Store) RecordCheckStart(ctx context.Context, ticketID int64, owner stri
 
 	res, err := tx.ExecContext(ctx,
 		`INSERT OR REPLACE INTO check_procs (ticket_id, kind, pgid, proc_start, started_at, budget_started_at) VALUES (?, ?, ?, ?, ?, ?)`,
-		ticketID, kind, pgid, procStartParam, formatTime(startedAt), formatTime(budgetStartedAt))
+		ticketID, string(kind), pgid, procStartParam, formatTime(startedAt), formatTime(budgetStartedAt))
 	if err != nil {
 		return 0, fmt.Errorf("record check start: ticket %d: %w", ticketID, err)
 	}
@@ -74,7 +91,7 @@ func (s *Store) ClearCheckStart(ctx context.Context, ticketID, gen int64) error 
 // dispatcher to decide whether its process group is still alive.
 type OpenCheck struct {
 	Gen             int64 // the record's generation, unique for all time
-	Kind            string
+	Kind            CheckKind
 	PGID            int
 	ProcStart       *string
 	StartedAt       time.Time

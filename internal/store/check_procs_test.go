@@ -2,6 +2,7 @@ package store
 
 import (
 	"errors"
+	"slices"
 	"testing"
 	"time"
 )
@@ -60,6 +61,75 @@ func TestRecordCheckStartAndClear(t *testing.T) {
 	}
 	if n := checkProcCount(t, s, ticketID); n != 0 {
 		t.Errorf("rows after a clear with the right gen = %d, want 0", n)
+	}
+}
+
+// TestRecordCheckStartRecordsFix proves RecordCheckStart accepts kind fix
+// (#131 added the fix command to CHECK, but migration 0006's CHECK
+// constraint still refused anything but test and lint): the write succeeds,
+// CheckProc reads the row back with Kind fix and the recorded pgid, and
+// ClearCheckStart removes it.
+func TestRecordCheckStartRecordsFix(t *testing.T) {
+	t.Parallel()
+	s := newTestStore(t)
+	ctx := t.Context()
+	ticketID, expires := claimedTicket(t, s)
+	now := time.Now()
+
+	gen, err := s.RecordCheckStart(ctx, ticketID, testForeignOwner, expires, CheckKindFix, 4242, testCheckToken, now, now)
+	if err != nil {
+		t.Fatalf("RecordCheckStart(fix): %v", err)
+	}
+	if gen <= 0 {
+		t.Errorf("gen = %d, want > 0", gen)
+	}
+	c, ok, err := s.CheckProc(ctx, ticketID)
+	if err != nil || !ok {
+		t.Fatalf("CheckProc = (%+v, %v, %v), want a row", c, ok, err)
+	}
+	if c.Kind != CheckKindFix || c.PGID != 4242 {
+		t.Errorf("row = %+v, want kind fix, pgid 4242", c)
+	}
+	if err := s.ClearCheckStart(ctx, ticketID, gen); err != nil {
+		t.Fatalf("ClearCheckStart: %v", err)
+	}
+	if n := checkProcCount(t, s, ticketID); n != 0 {
+		t.Errorf("rows after clear = %d, want 0", n)
+	}
+}
+
+// TestCheckKindsAccepted proves every value CheckKinds returns is accepted
+// by check_procs.kind's CHECK constraint (migration 0009) and read back
+// unchanged: a kind added to CheckKinds without widening the CHECK turns
+// this test red.
+func TestCheckKindsAccepted(t *testing.T) {
+	t.Parallel()
+	want := []CheckKind{CheckKindFix, CheckKindLint, CheckKindTest}
+	if got := CheckKinds(); !slices.Equal(got, want) {
+		t.Fatalf("CheckKinds() = %v, want %v", got, want)
+	}
+	s := newTestStore(t)
+	ctx := t.Context()
+	for _, k := range CheckKinds() {
+		_, ticketID := seedQueuedTicket(t, s, string(k))
+		expires := time.Now().Add(time.Hour).UTC().Truncate(time.Second)
+		if ok, err := s.Claim(ctx, ticketID, testForeignOwner, expires); err != nil || !ok {
+			t.Fatalf("Claim(%s) = (%v, %v), want (true, nil)", k, ok, err)
+		}
+		gen, err := s.RecordCheckStart(ctx, ticketID, testForeignOwner, expires, k, 4242, testCheckToken, time.Now(), time.Now())
+		if err != nil {
+			t.Fatalf("RecordCheckStart(%s): %v", k, err)
+		}
+		c, ok, err := s.CheckProc(ctx, ticketID)
+		if err != nil || !ok {
+			t.Fatalf("CheckProc(%s) = (%+v, %v, %v), want a row", k, c, ok, err)
+		}
+		if c.Kind != k {
+			t.Errorf("Kind = %q, want %q", c.Kind, k)
+		}
+		if err := s.ClearCheckStart(ctx, ticketID, gen); err != nil {
+			t.Fatalf("ClearCheckStart(%s): %v", k, err)
+		}
 	}
 }
 
