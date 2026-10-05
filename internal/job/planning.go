@@ -1366,7 +1366,11 @@ func runPlanReview(ctx context.Context, t store.Ticket, d Deps, extra []prompt.N
 		return store.HandlerCommit{}, fmt.Errorf("job: planreview: %w", err)
 	}
 
-	in := prompt.ForPlanReview(promptText, lensSections, t.Title+"\n\n"+t.Body, scenariosRendered, planXML, inputs)
+	ticketText, err := specFor(ctx, d, t)
+	if err != nil {
+		return store.HandlerCommit{}, fmt.Errorf("job: planreview: %w", err)
+	}
+	in := prompt.ForPlanReview(promptText, lensSections, ticketText, scenariosRendered, planXML, inputs)
 	in.Schemas = schemas
 	assembled := prompt.Assemble(in)
 

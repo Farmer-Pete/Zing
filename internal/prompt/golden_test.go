@@ -129,7 +129,12 @@ func goldenCases() []goldenCase {
 					planLensSection(t, readAsset(t, "prompts/lenses/correctness.md")),
 				}
 				ticket := "Title: Add dark mode\n\n" +
-					"Body: Users want a dark theme toggle in settings."
+					"Body: Users want a dark theme toggle in settings.\n\n" +
+					"Owner decisions, oldest first. They amend the ticket text above.\n\n" +
+					"Q1: Is dark mode on by default?\n" +
+					"The owner, oldest first:\n" +
+					"- picked option a: No, default off\n" +
+					"Decision: Dark mode defaults to off."
 				scenarios := "given the settings page, when the user toggles dark mode, " +
 					"then the theme switches immediately"
 				plan := "<plan><objective>Add a dark mode toggle.</objective></plan>"
