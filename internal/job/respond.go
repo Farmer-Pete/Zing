@@ -1213,7 +1213,7 @@ type applyPendingReply struct {
 // the freshness check against a's own SHA and seen digests (step 1a, before
 // any write); every reply body built with replyBody before the first write
 // (step 1b); for each action, in artifact order, a missing or resolved
-// thread is skipped and logged, a reply or addressed action posts (guarded
+// thread is skipped and logged, a reply, nit, or addressed action posts (guarded
 // by ThreadCommentsContain's own idempotent marker check) and resolves, and
 // a fix action is collected (step 2); the collected fix actions, if any, go
 // through the shared shipping gate of 8.7 before one consolidated fix
@@ -1281,7 +1281,7 @@ func (h shipHandler) apply(ctx context.Context, t store.Ticket, d Deps, a store.
 		switch action.Action {
 		case response.ThreadVerbFix:
 			fixActions = append(fixActions, action)
-		case response.ThreadVerbReply, response.ThreadVerbAddressed:
+		case response.ThreadVerbReply, response.ThreadVerbNit, response.ThreadVerbAddressed:
 			marker := fmt.Sprintf("<!-- zing:reply a%d %s -->", a.ArtifactID, action.ID)
 			body, bodyErr := replyBody(login, action.Text, marker)
 			if bodyErr != nil {

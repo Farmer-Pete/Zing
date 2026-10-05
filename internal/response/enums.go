@@ -467,12 +467,13 @@ type ThreadVerb string
 const (
 	ThreadVerbFix       ThreadVerb = "fix"
 	ThreadVerbReply     ThreadVerb = "reply"
+	ThreadVerbNit       ThreadVerb = "nit"
 	ThreadVerbAddressed ThreadVerb = "addressed"
 )
 
 // Values returns every valid ThreadVerb.
 func (ThreadVerb) Values() []string {
-	return []string{string(ThreadVerbFix), string(ThreadVerbReply), string(ThreadVerbAddressed)}
+	return []string{string(ThreadVerbFix), string(ThreadVerbReply), string(ThreadVerbNit), string(ThreadVerbAddressed)}
 }
 
 // CheckName is which CI check a typed event names (first used by the

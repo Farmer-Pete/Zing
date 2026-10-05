@@ -12,6 +12,7 @@
             "enum": [
               "fix",
               "reply",
+              "nit",
               "addressed"
             ]
           },

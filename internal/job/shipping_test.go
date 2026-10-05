@@ -1541,24 +1541,25 @@ func seedReReqHandled(t *testing.T, s *store.Store, ticketID int64, headSHA stri
 	}
 }
 
-// seedLandedFixRequests writes n complete "fix requested <kind> after run
+// seedLandedFixRequests writes n complete "fix requested ci_log after run
 // 0" / "fix landed <mid> sha <fakesha>" marker pairs directly through
 // CommitHandlerResult, each in its own two commits (the landed marker's own
 // mid is the requested marker's own row id, assigned by the database only
 // once the first commit lands) -- standing in for n real fix cycles without
 // driving the fix unit three times over (design section 8.7's shared gate
-// only ever counts the marker text, never how it got there).
-func seedLandedFixRequests(t *testing.T, s *store.Store, ticketID int64, kind FixKind, n int) {
+// only ever counts the marker text, never how it got there, so every caller
+// seeds under FixKindCILog regardless of which kind its own test batches).
+func seedLandedFixRequests(t *testing.T, s *store.Store, ticketID int64, n int) {
 	t.Helper()
 	ctx := t.Context()
 	for i := range n {
-		reqOwner := fmt.Sprintf("seed-fix-req-%s-%d", kind, i)
+		reqOwner := fmt.Sprintf("seed-fix-req-%s-%d", FixKindCILog, i)
 		expires := time.Now().Add(10 * time.Minute).UTC().Truncate(time.Second)
 		claimed, err := s.Claim(ctx, ticketID, reqOwner, expires)
 		if err != nil || !claimed {
 			t.Fatalf("seedLandedFixRequests: claim %d: claimed=%v err=%v", i, claimed, err)
 		}
-		msg, msgErr := fixRequestMessage(store.Ticket{ID: ticketID}, kind, fmt.Sprintf("log %d", i), 0)
+		msg, msgErr := fixRequestMessage(store.Ticket{ID: ticketID}, FixKindCILog, fmt.Sprintf("log %d", i), 0)
 		if msgErr != nil {
 			t.Fatalf("seedLandedFixRequests: fixRequestMessage: %v", msgErr)
 		}
@@ -1569,11 +1570,7 @@ func seedLandedFixRequests(t *testing.T, s *store.Store, ticketID int64, kind Fi
 			t.Fatalf("seedLandedFixRequests: request commit %d: applied=%v err=%v", i, applied, err)
 		}
 
-		prefix := fixRequestedCILogPrefix
-		if kind == FixKindThreads {
-			prefix = fixRequestedThreadsPrefix
-		}
-		rows, err := s.MarkersWithPrefix(ctx, ticketID, prefix)
+		rows, err := s.MarkersWithPrefix(ctx, ticketID, fixRequestedCILogPrefix)
 		if err != nil || len(rows) == 0 {
 			t.Fatalf("seedLandedFixRequests: markers after request %d: rows=%d err=%v", i, len(rows), err)
 		}
@@ -1884,7 +1881,7 @@ func TestPollSharedGateEscalates(t *testing.T) {
 	t.Parallel()
 	s, ticket, gh, tr := shipPublished(t)
 	maxLoops := pbMachine(t).Jobs[jobRespondName].MaxLoops
-	seedLandedFixRequests(t, s, ticket.ID, FixKindCILog, maxLoops)
+	seedLandedFixRequests(t, s, ticket.ID, maxLoops)
 
 	local := shipHeadSHA(t, s, pbGetTicket(t, s, ticket.ID))
 	runs, required := shipFailedCI()
@@ -4240,7 +4237,7 @@ func TestApplyFixThreadsHitGate(t *testing.T) {
 		{ID: tid("RT_fix"), Action: response.ThreadVerbFix, Text: "Validate the input"},
 		{ID: tid("RT_reply"), Action: response.ThreadVerbReply, Text: "Good catch, thanks"},
 	})
-	seedLandedFixRequests(t, s, ticket.ID, FixKindCILog, 3) // jobs.respond.max_loops
+	seedLandedFixRequests(t, s, ticket.ID, 3) // jobs.respond.max_loops
 
 	commit, err := shipPollRun(t, s, pbGetTicket(t, s, ticket.ID), gh, tr)
 	if err != nil {
@@ -4728,7 +4725,7 @@ const (
 func shipReReqReady(t *testing.T) (s *store.Store, ticket store.Ticket, gh *shipGitHub, tr *shipTracker, local string) {
 	t.Helper()
 	s, ticket, gh, tr = shipPublished(t)
-	seedLandedFixRequests(t, s, ticket.ID, FixKindCILog, 1)
+	seedLandedFixRequests(t, s, ticket.ID, 1)
 	runs, required := shipGreenCI()
 	gh.runs, gh.required = runs, required
 	local = shipHeadSHA(t, s, pbGetTicket(t, s, ticket.ID))

@@ -7,7 +7,7 @@ Q1: should thread t1 be a fix or a reply? -> a: reply, the code is correct.
 <<<END abcdef>>>
 
 <zing job="respond" outcome="ok"> <!-- job: Job, one of: classify | planning | planreview | build | perimeter | review | judge | respond | side, the running job; must match; outcome: Outcome, one of: ok | question | error, one of this job's outcomes, or question, or error -->
-  <thread id="..." action="...">...</thread> <!-- ThreadAction, one to 1000, exactly one per unresolved review thread; id: string, the review thread id from the inputs; action: ThreadVerb, one of: fix | reply | addressed -->
+  <thread id="..." action="...">...</thread> <!-- ThreadAction, one to 1000, exactly one per unresolved review thread; id: string, the review thread id from the inputs; action: ThreadVerb, one of: fix | reply | nit | addressed -->
 </zing>
 
 <zing job="respond" outcome="question"> <!-- job: Job, one of: classify | planning | planreview | build | perimeter | review | judge | respond | side, the running job; must match; outcome: Outcome, one of: ok | question | error, one of this job's outcomes, or question, or error -->
