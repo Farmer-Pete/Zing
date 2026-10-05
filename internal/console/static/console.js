@@ -714,11 +714,15 @@ function fillSandboxRunDialog(dialog, title, exitLine, output) {
 // shows the exit code and output in the shell's own #sandbox-run-result
 // dialog (shell.templ), which sits outside every region /stream patches.
 async function runInSandbox(button) {
+	if (button.disabled) {
+		return;
+	}
 	const box = button.closest('.sandbox-run-box');
 	const input = box?.querySelector('.sandbox-run-cmd');
 	const ticketID = box?.dataset?.sandboxRunTicket;
 	const dialog = document.getElementById('sandbox-run-result');
-	if (!box || !input || !ticketID || !dialog) {
+	const boxWired = box && input && ticketID && dialog;
+	if (!boxWired) {
 		return;
 	}
 	const cmd = input.value.trim();
@@ -783,6 +787,9 @@ function installSandboxRunBox() {
 	});
 	document.addEventListener('keydown', (event) => {
 		if (event.key !== 'Enter' || !event.target.closest?.('.sandbox-run-cmd')) {
+			return;
+		}
+		if (event.isComposing || event.keyCode === 229 || event.ctrlKey || event.metaKey || event.altKey) {
 			return;
 		}
 		const box = event.target.closest('.sandbox-run-box');

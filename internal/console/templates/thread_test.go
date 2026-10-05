@@ -703,6 +703,21 @@ func TestTurnsRenderMarkdown(t *testing.T) {
 // since D31 never sets state=answered (section 22.3) -- a planning
 // question is only ever open or settled, with its own pill and settled
 // line in place of D30's answered/revisable rendering.
+func TestNoReviseNoteOnPlanningQuestion(t *testing.T) {
+	t.Parallel()
+	got := renderQuestionGroup(t, ThreadRow{
+		ID: 1,
+		Question: &ThreadQuestion{
+			Key: "Q1", Title: testApprovePlanTitle, StateLabel: "your turn",
+			BodyHTML: emptyBodyHTML, MessageCount: 1,
+			Interactive: true, Revisable: false,
+		},
+	})
+	if strings.Contains(got, "q-revisable") {
+		t.Errorf("rendered question group shows the revise note on a planning question; got:\n%s", got)
+	}
+}
+
 // TestThreadRendersSandboxRunBox proves Thread renders sandboxRunBox after
 // the rows, for the open ticket's id, and renders nothing of it when there
 // is no open ticket (split from #73: the console action's own form).
@@ -739,19 +754,4 @@ func TestThreadRendersSandboxRunBox(t *testing.T) {
 			t.Errorf("rendered thread has a sandbox run box with no open ticket; got:\n%s", got)
 		}
 	})
-}
-
-func TestNoReviseNoteOnPlanningQuestion(t *testing.T) {
-	t.Parallel()
-	got := renderQuestionGroup(t, ThreadRow{
-		ID: 1,
-		Question: &ThreadQuestion{
-			Key: "Q1", Title: testApprovePlanTitle, StateLabel: "your turn",
-			BodyHTML: emptyBodyHTML, MessageCount: 1,
-			Interactive: true, Revisable: false,
-		},
-	})
-	if strings.Contains(got, "q-revisable") {
-		t.Errorf("rendered question group shows the revise note on a planning question; got:\n%s", got)
-	}
 }

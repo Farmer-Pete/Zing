@@ -73,8 +73,7 @@ func (tc TicketCommands) Run(ctx context.Context, ticketID int64, shellCmd strin
 	case errors.Is(runErr, ErrCommandTimeout):
 		r.Exit, r.TimedOut = -1, true
 	default:
-		slog.Info("sandbox command not run", "ticket_id", ticketID, "error", runErr)
-		return TicketCommandResult{}, runErr
+		return TicketCommandResult{}, fmt.Errorf("job: ticket command: run: %w", runErr)
 	}
 	r.Output, r.Total = out.Tail(), out.Total()
 	r.Cut = r.Total > checkOutputCap

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -132,13 +133,13 @@ func sandboxRunWorktreeDir(t *testing.T, repoDir string, ticketID int64) string 
 // sandboxRunRequest builds a same-origin POST /tickets/{id}/sandbox-run
 // request against srv, the way mw_test.go's mutationRequest builds its own
 // same-origin requests.
-func sandboxRunRequest(t *testing.T, srv *httptest.Server, port, ticketID int64, cmd string) *http.Request {
+func sandboxRunRequest(t *testing.T, srv *httptest.Server, port int, ticketID int64, cmd string) *http.Request {
 	t.Helper()
 	body, err := json.Marshal(sandboxRunReqBody{Cmd: cmd})
 	if err != nil {
 		t.Fatalf("marshal body: %v", err)
 	}
-	return sandboxRunRawRequest(t, srv, port, ticketID, body)
+	return sandboxRunRawRequestPath(t, srv, port, strconv.FormatInt(ticketID, 10), body)
 }
 
 // sandboxRunReqBody is this test's own copy of sandboxrun.go's unexported
@@ -147,20 +148,12 @@ type sandboxRunReqBody struct {
 	Cmd string `json:"cmd"`
 }
 
-// sandboxRunRawRequest is sandboxRunRequest with a caller-built body, for
-// the malformed-JSON and unknown-field cases TestSandboxRunBadRequest
-// drives.
-func sandboxRunRawRequest(t *testing.T, srv *httptest.Server, port, ticketID int64, body []byte) *http.Request {
+// sandboxRunRawRequestPath is sandboxRunRequest with the {id} path segment
+// and body given literally, for the malformed-JSON, unknown-field, and
+// non-numeric id cases TestSandboxRunBadRequest drives.
+func sandboxRunRawRequestPath(t *testing.T, srv *httptest.Server, port int, idPath string, body []byte) *http.Request {
 	t.Helper()
-	return sandboxRunRawRequestPath(t, srv, port, strconv.FormatInt(ticketID, 10), body)
-}
-
-// sandboxRunRawRequestPath is sandboxRunRawRequest with the {id} path
-// segment given literally, for TestSandboxRunBadRequest's non-numeric id
-// case.
-func sandboxRunRawRequestPath(t *testing.T, srv *httptest.Server, port int64, idPath string, body []byte) *http.Request {
-	t.Helper()
-	authority := "127.0.0.1:" + strconv.FormatInt(port, 10)
+	authority := "127.0.0.1:" + strconv.Itoa(port)
 	req, err := http.NewRequestWithContext(t.Context(), http.MethodPost,
 		srv.URL+"/tickets/"+idPath+"/sandbox-run", bytes.NewReader(body))
 	if err != nil {
@@ -186,26 +179,9 @@ func decodeSandboxRunResponse(t *testing.T, resp *http.Response) sandboxRunRespo
 	return body
 }
 
-// sandboxRunAssertExit posts cmd and asserts the response's exit code and
-// timed_out, used by TestSandboxRunExitCodes for both of its subtests.
-func sandboxRunAssertExit(t *testing.T, srv *httptest.Server, port, ticketID int64, cmd string, wantExit int) {
-	t.Helper()
-	resp := doRequest(t, sandboxRunRequest(t, srv, port, ticketID, cmd))
-	defer func() { _ = resp.Body.Close() }()
-	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("status = %d, want 200", resp.StatusCode)
-	}
-	if ct := resp.Header.Get("Content-Type"); ct != contentTypeJSONForTest {
-		t.Errorf("Content-Type = %q, want %q", ct, contentTypeJSONForTest)
-	}
-	body := decodeSandboxRunResponse(t, resp)
-	if body.Exit != wantExit {
-		t.Errorf("exit = %d, want %d", body.Exit, wantExit)
-	}
-	if body.TimedOut {
-		t.Error("timed_out is true, want false")
-	}
-}
+// sandboxRunTrueCmd is the shell command this file posts whenever a test
+// only needs a command that exits 0, not what it does.
+const sandboxRunTrueCmd = "true"
 
 // TestSandboxRunExitCodes proves a command that exits cleanly and one that
 // exits with status 1 run through the endpoint report exit 0 and exit 1
@@ -215,14 +191,33 @@ func TestSandboxRunExitCodes(t *testing.T) {
 	cmds := job.NewCommandRunner(sandbox.Off(), false)
 	srv, _, port, ticketID, _ := newSandboxRunFixture(t, cmds, true)
 
-	t.Run("exits 0", func(t *testing.T) {
-		t.Parallel()
-		sandboxRunAssertExit(t, srv, int64(port), ticketID, "true", 0)
-	})
-	t.Run("exits 1", func(t *testing.T) {
-		t.Parallel()
-		sandboxRunAssertExit(t, srv, int64(port), ticketID, "false", 1)
-	})
+	tests := []struct {
+		cmd      string
+		wantExit int
+	}{
+		{sandboxRunTrueCmd, 0},
+		{"false", 1},
+	}
+	for _, tc := range tests {
+		t.Run(tc.cmd, func(t *testing.T) {
+			t.Parallel()
+			resp := doRequest(t, sandboxRunRequest(t, srv, port, ticketID, tc.cmd))
+			defer func() { _ = resp.Body.Close() }()
+			if resp.StatusCode != http.StatusOK {
+				t.Fatalf("status = %d, want 200", resp.StatusCode)
+			}
+			if ct := resp.Header.Get("Content-Type"); ct != contentTypeJSONForTest {
+				t.Errorf("Content-Type = %q, want %q", ct, contentTypeJSONForTest)
+			}
+			body := decodeSandboxRunResponse(t, resp)
+			if body.Exit != tc.wantExit {
+				t.Errorf("exit = %d, want %d", body.Exit, tc.wantExit)
+			}
+			if body.TimedOut {
+				t.Error("timed_out is true, want false")
+			}
+		})
+	}
 }
 
 // contentTypeJSONForTest mirrors the console package's own unexported
@@ -237,7 +232,7 @@ func TestSandboxRunOutput(t *testing.T) {
 	srv, _, port, ticketID, repoDir := newSandboxRunFixture(t, cmds, true)
 	wantDir := sandboxRunWorktreeDir(t, repoDir, ticketID)
 
-	resp := doRequest(t, sandboxRunRequest(t, srv, int64(port), ticketID, "pwd; echo to-stderr >&2"))
+	resp := doRequest(t, sandboxRunRequest(t, srv, port, ticketID, "pwd; echo to-stderr >&2"))
 	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("status = %d, want 200", resp.StatusCode)
@@ -262,7 +257,7 @@ func TestSandboxRunOutputCapped(t *testing.T) {
 	cmds := job.NewCommandRunner(sandbox.Off(), false)
 	srv, _, port, ticketID, _ := newSandboxRunFixture(t, cmds, true)
 
-	resp := doRequest(t, sandboxRunRequest(t, srv, int64(port), ticketID, "head -c 20000 /dev/zero | tr '\\0' a"))
+	resp := doRequest(t, sandboxRunRequest(t, srv, port, ticketID, "head -c 20000 /dev/zero | tr '\\0' a"))
 	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("status = %d, want 200", resp.StatusCode)
@@ -286,10 +281,13 @@ func TestSandboxRunNoWorktree(t *testing.T) {
 	cmds := job.NewCommandRunner(sandbox.Off(), false)
 	srv, _, port, ticketID, repoDir := newSandboxRunFixture(t, cmds, false)
 
-	resp := doRequest(t, sandboxRunRequest(t, srv, int64(port), ticketID, "true"))
+	resp := doRequest(t, sandboxRunRequest(t, srv, port, ticketID, "true"))
 	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusConflict {
 		t.Fatalf("status = %d, want 409", resp.StatusCode)
+	}
+	if got, want := readBody(t, resp), fmt.Sprintf("ticket %d has no worktree", ticketID); got != want {
+		t.Errorf("body = %q, want %q", got, want)
 	}
 	wtDir := filepath.Join(repoDir, ".zing", "wt", strconv.FormatInt(ticketID, 10))
 	if _, err := os.Stat(wtDir); !os.IsNotExist(err) {
@@ -304,10 +302,13 @@ func TestSandboxRunUnknownTicket(t *testing.T) {
 	cmds := job.NewCommandRunner(sandbox.Off(), false)
 	srv, _, port, _, _ := newSandboxRunFixture(t, cmds, true)
 
-	resp := doRequest(t, sandboxRunRequest(t, srv, int64(port), 999, "true"))
+	resp := doRequest(t, sandboxRunRequest(t, srv, port, 999, "true"))
 	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusNotFound {
 		t.Fatalf("status = %d, want 404", resp.StatusCode)
+	}
+	if got, want := readBody(t, resp), "ticket not found"; got != want {
+		t.Errorf("body = %q, want %q", got, want)
 	}
 }
 
@@ -346,16 +347,16 @@ func TestSandboxRunBadRequest(t *testing.T) {
 		req  func() *http.Request
 	}{
 		{"whitespace-only cmd", func() *http.Request {
-			return sandboxRunRequest(t, srv, int64(port), ticketID, "   ")
+			return sandboxRunRequest(t, srv, port, ticketID, "   ")
 		}},
 		{"4097-byte cmd", func() *http.Request {
-			return sandboxRunRequest(t, srv, int64(port), ticketID, strings.Repeat("a", 4097))
+			return sandboxRunRequest(t, srv, port, ticketID, strings.Repeat("a", 4097))
 		}},
 		{"unknown JSON key", func() *http.Request {
-			return sandboxRunRawRequest(t, srv, int64(port), ticketID, []byte(`{"cmd":"true","oops":1}`))
+			return sandboxRunRawRequestPath(t, srv, port, strconv.FormatInt(ticketID, 10), []byte(`{"cmd":"true","oops":1}`))
 		}},
 		{"non-numeric id", func() *http.Request {
-			return sandboxRunRawRequestPath(t, srv, int64(port), "abc", []byte(`{"cmd":"true"}`))
+			return sandboxRunRawRequestPath(t, srv, port, "abc", []byte(`{"cmd":"true"}`))
 		}},
 	}
 	for _, tc := range tests {
@@ -392,6 +393,9 @@ func TestSandboxRunRefusesNonLoopback(t *testing.T) {
 	if rec.Code != http.StatusForbidden {
 		t.Fatalf("status = %d, want 403", rec.Code)
 	}
+	if got, want := strings.TrimSpace(rec.Body.String()), "sandbox runs are allowed from this machine only"; got != want {
+		t.Errorf("body = %q, want %q", got, want)
+	}
 }
 
 // TestSandboxRunCrossOrigin proves a cross-site Origin is refused by the
@@ -401,12 +405,15 @@ func TestSandboxRunCrossOrigin(t *testing.T) {
 	cmds := job.NewCommandRunner(sandbox.Off(), false)
 	srv, _, port, ticketID, _ := newSandboxRunFixture(t, cmds, true)
 
-	req := sandboxRunRequest(t, srv, int64(port), ticketID, "true")
+	req := sandboxRunRequest(t, srv, port, ticketID, "true")
 	req.Header.Set("Origin", "http://evil.example")
 	resp := doRequest(t, req)
 	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusForbidden {
 		t.Fatalf("status = %d, want 403", resp.StatusCode)
+	}
+	if got, want := readBody(t, resp), "cross-site request rejected"; got != want {
+		t.Errorf("body = %q, want %q", got, want)
 	}
 }
 
@@ -418,10 +425,13 @@ func TestSandboxRunSandboxUnavailable(t *testing.T) {
 	cmds := job.NewCommandRunner(sandbox.NotLoaded(), true)
 	srv, _, port, ticketID, _ := newSandboxRunFixture(t, cmds, true)
 
-	resp := doRequest(t, sandboxRunRequest(t, srv, int64(port), ticketID, "true"))
+	resp := doRequest(t, sandboxRunRequest(t, srv, port, ticketID, "true"))
 	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusServiceUnavailable {
 		t.Fatalf("status = %d, want 503", resp.StatusCode)
+	}
+	if got, want := readBody(t, resp), "build sandbox unavailable"; got != want {
+		t.Errorf("body = %q, want %q", got, want)
 	}
 }
 
@@ -432,27 +442,14 @@ func TestSandboxRunNotConfigured(t *testing.T) {
 	s := newConsoleTestStore(t)
 	ticketID := seedTicket(t, s, "fake#1", "no runner configured")
 
-	var lc net.ListenConfig
-	ln, err := lc.Listen(t.Context(), "tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("reserve a listener: %v", err)
-	}
-	addr, ok := ln.Addr().(*net.TCPAddr)
-	if !ok {
-		t.Fatalf("unexpected listener address type %T", ln.Addr())
-	}
-	handler := console.New(s, bus.New(), nil, []string{testBindHost}, addr.Port, newTestLogHandler(t), nil, testPushToken, response.SeverityMinor, "", nil, "", nil)
-	srv := httptest.NewUnstartedServer(handler)
-	if err := srv.Listener.Close(); err != nil {
-		t.Fatalf("close the placeholder listener: %v", err)
-	}
-	srv.Listener = ln
-	srv.Start()
-	t.Cleanup(srv.Close)
+	srv, port := newMutationTestServer(t, s, bus.New(), newTestLogHandler(t))
 
-	resp := doRequest(t, sandboxRunRequest(t, srv, int64(addr.Port), ticketID, "true"))
+	resp := doRequest(t, sandboxRunRequest(t, srv, port, ticketID, "true"))
 	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusServiceUnavailable {
 		t.Fatalf("status = %d, want 503", resp.StatusCode)
+	}
+	if got, want := readBody(t, resp), "sandbox runs are not available"; got != want {
+		t.Errorf("body = %q, want %q", got, want)
 	}
 }
