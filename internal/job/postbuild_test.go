@@ -470,17 +470,26 @@ func pbAdvanceBuilding(t *testing.T, s *store.Store, rt runtime.Runtime, ticketI
 // planning and a real three-task build into "reviewing", with a stored plan
 // and a real worktree the fix driver can use (the heavy end of this file's
 // own harness, mirroring job_test's own buildTicketInBuilding +
-// advanceBuilding).
+// advanceBuilding). It is pbTicketInReviewingWith(t, pbFakeRuntime(t)).
 func pbTicketInReviewing(t *testing.T) (s *store.Store, ticketID int64) {
 	t.Helper()
+	return pbTicketInReviewingWith(t, pbFakeRuntime(t))
+}
+
+// pbTicketInReviewingWith is pbTicketInReviewing with rt in place of
+// pbFakeRuntime(t): a caller that needs the planning or build turns to
+// read from its own scripted fs.FS (#49 task 3's judgeHostTicketReady, a
+// planning fixture with a host-kind scenario) drives the same path with
+// that runtime instead.
+func pbTicketInReviewingWith(t *testing.T, rt runtime.Runtime) (s *store.Store, ticketID int64) {
+	t.Helper()
 	s = newPostbuildTestStore(t)
-	rt := pbFakeRuntime(t)
 	ticketID = pbSeedQueuedGitBackedTicket(t, s)
 	pbAdvanceQueuedToPlanning(t, s, rt, ticketID)
 	pbAdvancePlanningWithAnAnswer(t, s, rt, ticketID)
 	pbAdvanceBuilding(t, s, rt, ticketID)
 	if ticket := pbGetTicket(t, s, ticketID); ticket.State != stateReviewing {
-		t.Fatalf("pbTicketInReviewing: ticket state = %q, want reviewing", ticket.State)
+		t.Fatalf("pbTicketInReviewingWith: ticket state = %q, want reviewing", ticket.State)
 	}
 	return s, ticketID
 }

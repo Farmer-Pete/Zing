@@ -248,3 +248,14 @@ func (b *tailBuffer) Total() int64 {
 	defer b.mu.Unlock()
 	return b.total
 }
+
+// TailBytes returns a copy of the last limit bytes written, oldest first,
+// with no UTF-8 repair: judgeCapOutput (judging.go) repairs on bytes so its
+// own result stays within its own byte limit.
+func (b *tailBuffer) TailBytes() []byte {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	out := make([]byte, 0, len(b.buf))
+	out = append(out, b.buf[b.next:]...)
+	return append(out, b.buf[:b.next]...)
+}

@@ -13,6 +13,8 @@ package job
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"encoding/xml"
 	"errors"
@@ -24,6 +26,8 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"time"
+	"unicode/utf8"
 
 	"zing/internal/prompt"
 	"zing/internal/response"
@@ -541,7 +545,13 @@ func (h judgeHandler) enterAfterStart(ctx context.Context, t store.Ticket, d Dep
 		// design section 7.5 #1): a first turn that was itself interrupted
 		// before the runtime ever echoed a session id back has nothing to
 		// resume, so it runs fresh exactly as a first turn does, mirroring
-		// fix.go's own "!ok || state == store.SessionIdless" check.
+		// fix.go's own "!ok || state == store.SessionIdless" check. Before
+		// that, a pending host check (#49 task 3) runs one per tick, the
+		// same way CHECK runs one scenario check per tick.
+		c, ran, hostErr := h.runPendingHostCheck(ctx, t, d, n, sha)
+		if ran || hostErr != nil {
+			return c, hostErr
+		}
 		return h.runFirst(ctx, t, d, n, sha, nil)
 	}
 
@@ -783,6 +793,19 @@ func (h judgeHandler) runFirst(ctx context.Context, t store.Ticket, d Deps, n in
 	}
 	if len(scenarios) == 0 {
 		return judgeEscalation(t, d, judgeNoSealedScenariosWhat, judgeNoSealedScenariosWhy, ""), nil
+	}
+
+	if slices.ContainsFunc(scenarios, func(sc response.Scenario) bool { return sc.Kind == response.ScenarioKindHost }) {
+		results, resErr := judgeHostResultsAt(ctx, t, d, sha)
+		if resErr != nil {
+			return store.HandlerCommit{}, resErr
+		}
+		text, textErr := judgeHostChecksText(scenarios, results)
+		if textErr != nil {
+			return store.HandlerCommit{}, fmt.Errorf("job: judging: round %d at sha %s: %w", n, sha, textErr)
+		}
+		slog.Debug("judge host results reused", "ticket_id", t.ID, "round", n, "sha", sha, "scenario_count", len(results))
+		extra = append(slices.Clone(extra), prompt.NamedInput{Label: judgeHostChecksLabel, Text: text, Untrusted: true})
 	}
 
 	proj, ok := d.Projects[t.ProjectID]
@@ -1132,6 +1155,9 @@ func (h judgeHandler) checkOrEvaluate(ctx context.Context, t store.Ticket, d Dep
 		if !ok {
 			return store.HandlerCommit{}, fmt.Errorf("job: judging: ticket %d: round %d has no verdict for scenario %s", t.ID, n, sc.ID)
 		}
+		if sc.Kind == response.ScenarioKindHost {
+			return h.hostVerdict(ctx, t, d, n, sha, sc, judged)
+		}
 		return h.check(ctx, t, d, n, sha, sc, judged)
 	}
 
@@ -1185,6 +1211,309 @@ func (h judgeHandler) check(ctx context.Context, t store.Ticket, d Deps, n int, 
 	c.Messages = []store.Message{{
 		TicketID: t.ID, Type: msgTypeUpdate, Author: authorSystem,
 		Body: fmt.Sprintf("judge check %d %s exit %d", n, sc.ID, exit),
+	}}
+	return c, nil
+}
+
+// ---- host-kind scenario checks (#49 task 3): run at judging, outside any
+// sandbox, on the owner's machine, once per frozen sha per exact command --
+
+// judgeHostMarkerPrefix is every "judge host " marker's shared prefix: a
+// prefix distinct from "judge round " and "judge check " (7.1's own note),
+// so Store.MarkersWithPrefix never confuses one family for another.
+const judgeHostMarkerPrefix = "judge host "
+
+// judgeHostFmt is one "judge host " marker's first line:
+// "judge host <round> <scenario id> exit <code> cmd <sha256>". code is -1
+// on a command-runner timeout.
+const judgeHostFmt = "judge host %d %s exit %d cmd %s"
+
+// judgeHostOutputCap is how many bytes of one host check's own output Zing
+// keeps (judgeCapOutput): 64 KiB, distinct from checkOutputCap's 16 KiB,
+// since a host check's own evidence reaches the judge, not just the
+// builder.
+const judgeHostOutputCap = 64 * 1024
+
+// judgeHostChecksLabel is the host_checks prompt input's own label
+// (prompt.NamedInput.Label), carrying every host result to the judge's
+// first turn of a round (runFirst).
+const judgeHostChecksLabel = "host_checks"
+
+// judgeHostCheckCouldNotRunWhat is hostCheck's own "any other error"
+// escalation text: the host command runner itself failed to run the
+// scenario's own check command (distinct from judgeCheckCouldNotRunWhat,
+// CHECK's own sandboxed re-run failure).
+const judgeHostCheckCouldNotRunWhat = "a host check could not run"
+
+// judgeHostLine matches one "judge host " marker's first line.
+var judgeHostLine = regexp.MustCompile(`^judge host ([1-9]\d*) (s\d+) exit (-?\d+) cmd ([0-9a-f]{64})$`)
+
+// judgeHostKey identifies one host result: the scenario and the sha256 of
+// the exact command that ran. The frozen sha a lookup is scoped to is the
+// map's own scope (judgeHostResults' sha parameter), not part of the key.
+type judgeHostKey struct {
+	ScenarioID string
+	CmdSHA256  string
+}
+
+// judgeHostResult is one recorded host check: its exit code (-1 on
+// timeout) and its capped output.
+type judgeHostResult struct {
+	Exit   int
+	Output string
+}
+
+// judgeHostCmdHash is the lowercase hex sha256 of cmd's exact bytes,
+// untrimmed: a host scenario's own result key, and the "cmd" field of its
+// marker, so an owner edit of the check gives a fresh key with no result.
+func judgeHostCmdHash(cmd string) string {
+	sum := sha256.Sum256([]byte(cmd))
+	return hex.EncodeToString(sum[:])
+}
+
+// judgeCapOutput returns at most limit bytes of valid UTF-8 from the end
+// of raw: it keeps raw's last limit bytes, skips at most 3 leading UTF-8
+// continuation bytes so the result starts on a rune, replaces invalid
+// bytes with U+FFFD, and if that replacement grew past limit, drops runes
+// from the front until it fits. The result is always valid UTF-8 and never
+// longer than limit bytes.
+func judgeCapOutput(raw []byte, limit int) string {
+	if len(raw) > limit {
+		raw = raw[len(raw)-limit:]
+	}
+	for i := 0; i < 3 && len(raw) > 0 && !utf8.RuneStart(raw[0]); i++ {
+		raw = raw[1:]
+	}
+	s := strings.ToValidUTF8(string(raw), "�")
+	for len(s) > limit {
+		_, size := utf8.DecodeRuneInString(s)
+		s = s[size:]
+	}
+	return s
+}
+
+// judgeHostResults maps each key to its newest host result recorded by a
+// round that started at sha: hostMarkers and roundMarkers are both
+// MarkersWithPrefix's own oldest-first order, and the newest hostMarkers
+// entry per key wins simply by overwriting the map as this walks forward.
+// An unparseable "judge host " line, or a round with no started marker
+// (judgeStartedSHA), is an error.
+func judgeHostResults(hostMarkers, roundMarkers []store.MessageRow, sha string) (map[judgeHostKey]judgeHostResult, error) {
+	out := make(map[judgeHostKey]judgeHostResult, len(hostMarkers))
+	for i := range hostMarkers {
+		firstLine, output, _ := strings.Cut(hostMarkers[i].Body, "\n")
+		sub := judgeHostLine.FindStringSubmatch(firstLine)
+		if sub == nil {
+			return nil, fmt.Errorf("job: judging: unrecognized judge host marker %q", firstLine)
+		}
+		roundN, convErr := strconv.Atoi(sub[1])
+		if convErr != nil {
+			return nil, fmt.Errorf("job: judging: parse judge host marker %q: %w", firstLine, convErr)
+		}
+		startedSHA, shaErr := judgeStartedSHA(roundMarkers, roundN)
+		if shaErr != nil {
+			return nil, shaErr
+		}
+		if startedSHA != sha {
+			continue
+		}
+		exit, convErr := strconv.Atoi(sub[3])
+		if convErr != nil {
+			return nil, fmt.Errorf("job: judging: parse judge host marker %q: %w", firstLine, convErr)
+		}
+		out[judgeHostKey{ScenarioID: sub[2], CmdSHA256: sub[4]}] = judgeHostResult{Exit: exit, Output: output}
+	}
+	return out, nil
+}
+
+// judgeHostResultsAt reads both marker families (Store.MarkersWithPrefix)
+// and calls judgeHostResults for sha.
+func judgeHostResultsAt(ctx context.Context, t store.Ticket, d Deps, sha string) (map[judgeHostKey]judgeHostResult, error) {
+	hostMarkers, err := d.Store.MarkersWithPrefix(ctx, t.ID, judgeHostMarkerPrefix)
+	if err != nil {
+		return nil, fmt.Errorf("job: judging: judge host markers: %w", err)
+	}
+	roundMarkers, err := d.Store.MarkersWithPrefix(ctx, t.ID, judgeRoundMarkerPrefix)
+	if err != nil {
+		return nil, fmt.Errorf("job: judging: judge round markers: %w", err)
+	}
+	return judgeHostResults(hostMarkers, roundMarkers, sha)
+}
+
+// judgeHostResultFor looks up sc's result under its current sealed check:
+// an owner edit of the check changes the key a lookup hashes, so a stale
+// result never matches.
+func judgeHostResultFor(results map[judgeHostKey]judgeHostResult, sc response.Scenario) (judgeHostResult, bool) {
+	r, ok := results[judgeHostKey{ScenarioID: sc.ID, CmdSHA256: judgeHostCmdHash(sc.Check)}]
+	return r, ok
+}
+
+// judgePendingHost returns the cohort's first scenario, in cohort order,
+// of kind host with a non-blank check and no entry in results for its
+// current key: runPendingHostCheck's and retryFreshRound's own "is a host
+// check still due" test.
+func judgePendingHost(scenarios []response.Scenario, results map[judgeHostKey]judgeHostResult) (response.Scenario, bool) {
+	for _, sc := range scenarios {
+		if sc.Kind != response.ScenarioKindHost || strings.TrimSpace(sc.Check) == "" {
+			continue
+		}
+		if _, ok := judgeHostResultFor(results, sc); !ok {
+			return sc, true
+		}
+	}
+	return response.Scenario{}, false
+}
+
+// judgeHostChecksText renders the host_checks input: one block per host
+// scenario in cohort order, joined by a blank line; each block is
+// "scenario <id> exit <code>" (plus " (timed out after 10m)" when code is
+// -1), a newline, then the output with trailing newlines trimmed. A host
+// scenario with no result for its current key is an error naming it:
+// runPendingHostCheck already ran every pending one in the same tick
+// runFirst reads this from, so that should not happen.
+func judgeHostChecksText(scenarios []response.Scenario, results map[judgeHostKey]judgeHostResult) (string, error) {
+	var blocks []string
+	for _, sc := range scenarios {
+		if sc.Kind != response.ScenarioKindHost {
+			continue
+		}
+		res, ok := judgeHostResultFor(results, sc)
+		if !ok {
+			return "", fmt.Errorf("job: judging: scenario %s has no host result for its current check", sc.ID)
+		}
+		header := fmt.Sprintf("scenario %s exit %d", sc.ID, res.Exit)
+		if res.Exit == -1 {
+			header += " (timed out after 10m)"
+		}
+		blocks = append(blocks, header+"\n"+strings.TrimRight(res.Output, "\n"))
+	}
+	return strings.Join(blocks, "\n\n"), nil
+}
+
+// runPendingHostCheck runs the cohort's first host scenario, in cohort
+// order, with no result for its key at sha, one per tick, the same way
+// CHECK runs one scenario check per tick. ran is false when none is
+// pending (an empty cohort, impossible here since the caller only reaches
+// this once a sealed cohort is already known to exist, leaves ran false
+// too; runFirst's own no-sealed-scenarios escalation still guards it).
+func (h judgeHandler) runPendingHostCheck(ctx context.Context, t store.Ticket, d Deps, n int, sha string) (store.HandlerCommit, bool, error) {
+	scenarios, err := judgeScenariosFor(ctx, t, d)
+	if err != nil {
+		return store.HandlerCommit{}, false, err
+	}
+	results, err := judgeHostResultsAt(ctx, t, d, sha)
+	if err != nil {
+		return store.HandlerCommit{}, false, err
+	}
+	sc, pending := judgePendingHost(scenarios, results)
+	if !pending {
+		return store.HandlerCommit{}, false, nil
+	}
+	c, err := h.hostCheck(ctx, t, d, n, sha, sc)
+	return c, true, err
+}
+
+// hostCheck runs one host scenario's check, unsandboxed, in a fresh judge
+// checkout at the round's own frozen sha, through Deps.HostCommands, and
+// commits its own "judge host " marker recording the exit code, the
+// check's own sha256, and up to judgeHostOutputCap bytes of its tail
+// output (design section 5, #49 task 3). No verdict artifact is written
+// here: hostVerdict turns a recorded result into one, at CHECK.
+func (h judgeHandler) hostCheck(ctx context.Context, t store.Ticket, d Deps, n int, sha string, sc response.Scenario) (store.HandlerCommit, error) {
+	cmdHash := judgeHostCmdHash(sc.Check)
+	ids := []any{"ticket_id", t.ID, "round", n, "scenario_id", sc.ID, "sha", sha, "cmd_sha256", cmdHash}
+	if d.HostCommands == nil {
+		slog.Error("judge host check has no runner", ids...)
+		return store.HandlerCommit{}, ErrConfig
+	}
+	proj, ok := d.Projects[t.ProjectID]
+	if !ok {
+		return store.HandlerCommit{}, ErrConfig
+	}
+
+	jt, jtErr := proj.Orch.JudgeWorktree(ctx, t.ID, sha)
+	if jtErr != nil {
+		return judgeEscalation(t, d, judgeCheckoutNotPreparedWhat, judgeCheckoutNotPreparedWhy, jtErr.Error()), nil
+	}
+	defer func() {
+		if rmErr := jt.Remove(context.WithoutCancel(ctx)); rmErr != nil {
+			slog.Warn("judge worktree removal failed", "ticket_id", t.ID, "error", rmErr)
+		}
+	}()
+
+	slog.Info("judge host check started", ids...)
+	start := time.Now()
+	out := newTailBuffer(judgeHostOutputCap)
+	exit, runErr := d.HostCommands.Run(ctx, jt.Dir(), proj.RepoGit, sc.Check, checkCommandTimeout, CommandIO{Out: out})
+	done := append(slices.Clone(ids), "output_bytes", out.Total(), "duration_ms", time.Since(start).Milliseconds())
+
+	switch {
+	case runErr == nil:
+		slog.Info("judge host check finished", append(slices.Clone(done), "exit", exit)...)
+	case errors.Is(runErr, ErrCommandTimeout):
+		exit = -1
+		slog.Warn("judge host check timed out", append(slices.Clone(done), "exit", exit)...)
+	case errors.Is(runErr, context.Canceled):
+		slog.Info("judge host check canceled", ids...)
+		return store.HandlerCommit{}, runtime.ErrCanceled
+	default:
+		slog.Warn("judge host check could not run", append(slices.Clone(ids), "error", runErr.Error())...)
+		return judgeEscalation(t, d, judgeHostCheckCouldNotRunWhat, runErr.Error(), sc.ID), nil
+	}
+
+	c := baseCommit(t, d)
+	c.Messages = []store.Message{{
+		TicketID: t.ID, Type: msgTypeUpdate, Author: authorSystem,
+		Body: fmt.Sprintf(judgeHostFmt, n, sc.ID, exit, cmdHash) + "\n" + judgeCapOutput(out.TailBytes(), judgeHostOutputCap),
+	}}
+	return c, nil
+}
+
+// hostVerdict is CHECK for a host scenario (#49 task 3): it runs nothing.
+// With a result for the scenario's current check, it turns the recorded
+// exit into the override row (applyHostCheckExit) and the usual "judge
+// check <n> <id> exit <code>" marker, exactly as check does for a
+// sandboxed scenario. Without one, the owner edited the check after it
+// ran, so judging the stale output would be wrong: this starts round n+1
+// at the same sha instead, which reruns the edited check and the judge.
+func (h judgeHandler) hostVerdict(ctx context.Context, t store.Ticket, d Deps, n int, sha string, sc response.Scenario, judged store.VerdictRow) (store.HandlerCommit, error) {
+	results, err := judgeHostResultsAt(ctx, t, d, sha)
+	if err != nil {
+		return store.HandlerCommit{}, err
+	}
+	cmdHash := judgeHostCmdHash(sc.Check)
+	res, ok := judgeHostResultFor(results, sc)
+	if !ok {
+		newSHA, maxRunID, escalation, startErr := judgeStartChecks(ctx, t, d)
+		if startErr != nil {
+			return store.HandlerCommit{}, startErr
+		}
+		if escalation != nil {
+			return *escalation, nil
+		}
+		slog.Warn("judge host check changed after it ran; starting a fresh round", "ticket_id", t.ID, "round", n,
+			"scenario_id", sc.ID, "sha", sha, "cmd_sha256", cmdHash, "new_round", n+1)
+		c := baseCommit(t, d)
+		c.Messages = []store.Message{{
+			TicketID: t.ID, Type: msgTypeUpdate, Author: authorSystem,
+			Body: fmt.Sprintf("judge round %d started sha %s after run %d", n+1, newSHA, maxRunID),
+		}}
+		return c, nil
+	}
+
+	row := applyHostCheckExit(judged.Verdict, res.Exit)
+	slog.Info("judge host verdict", "ticket_id", t.ID, "round", n, "scenario_id", sc.ID, "sha", sha,
+		"cmd_sha256", cmdHash, "exit", res.Exit, "result", string(row.Result))
+	payload, marshalErr := json.Marshal(row)
+	if marshalErr != nil {
+		return store.HandlerCommit{}, fmt.Errorf("job: judging: marshal host check override for scenario %s: %w", sc.ID, marshalErr)
+	}
+
+	c := baseCommit(t, d)
+	c.Artifacts = []store.Artifact{{Type: artifactTypeVerdict, RunID: judged.RunID, Payload: payload}}
+	c.Messages = []store.Message{{
+		TicketID: t.ID, Type: msgTypeUpdate, Author: authorSystem,
+		Body: fmt.Sprintf("judge check %d %s exit %d", n, sc.ID, res.Exit),
 	}}
 	return c, nil
 }
@@ -1381,6 +1710,29 @@ func (h judgeHandler) retryFreshRound(ctx context.Context, t store.Ticket, d Dep
 	startMsg := store.Message{
 		TicketID: t.ID, Type: msgTypeUpdate, Author: authorSystem,
 		Body: fmt.Sprintf("judge round %d started sha %s after run %d", n, sha, maxRunID),
+	}
+
+	// A host check still pending at the new round's own sha (#49 task 3)
+	// cannot be run on this tick: runFirst needs every host result in hand
+	// before it builds host_checks, and the owner's retry notes have
+	// nowhere to go until the next tick, which runs the pending check and
+	// re-enters at enterAfterStart. That happens only when the owner edited
+	// a host check between the escalation and this retry.
+	scenarios, scenErr := judgeScenariosFor(ctx, t, d)
+	if scenErr != nil {
+		return store.HandlerCommit{}, scenErr
+	}
+	results, resErr := judgeHostResultsAt(ctx, t, d, sha)
+	if resErr != nil {
+		return store.HandlerCommit{}, resErr
+	}
+	if sc, pending := judgePendingHost(scenarios, results); pending {
+		slog.Warn("judge retry: host checks pending at the new round's sha; retry notes not delivered",
+			"ticket_id", t.ID, "round", n, "scenario_id", sc.ID, "sha", sha, "cmd_sha256", judgeHostCmdHash(sc.Check))
+		c := baseCommit(t, d)
+		c.Messages = []store.Message{startMsg}
+		c.ResolveQuestions = resolveIDs
+		return c, nil
 	}
 
 	extra := []prompt.NamedInput{prompt.Notes(notes), prompt.Error(errorText)}
