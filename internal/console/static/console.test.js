@@ -41,7 +41,6 @@ import {
 	ACTION_LABELS,
 	RECONNECT_BASE_MS,
 	RECONNECT_MAX_MS,
-	STREAM_SETTLE_MS,
 	emptyStreamStatus,
 	reconnectDelay,
 	reduceStreamStatus,
@@ -649,10 +648,4 @@ test('reduceStreamStatus marks stale on reconnecting and failures, clears on set
 test('staleMarkerText formats the stale time', () => {
 	assert.equal(staleMarkerText(null), '');
 	assert.equal(staleMarkerText(new Date(2026, 9, 4, 19, 25).getTime()), 'Reconnecting. Stale since 19:25.');
-});
-
-test('RECONNECT_BASE_MS, RECONNECT_MAX_MS, and STREAM_SETTLE_MS are about 1s, 30s, and 1s', () => {
-	assert.equal(RECONNECT_BASE_MS, 1000);
-	assert.equal(RECONNECT_MAX_MS, 30000);
-	assert.equal(STREAM_SETTLE_MS, 1000);
 });

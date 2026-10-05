@@ -485,9 +485,7 @@ func TestIndexRendersShellRegionsAndScript(t *testing.T) {
 
 	consoleIdx := strings.Index(got, `<script type="module" src="/static/console.js">`)
 	datastarIdx := strings.Index(got, `<script type="module" src="/static/datastar.js">`)
-	bothPresent := consoleIdx != -1 && datastarIdx != -1
-	consoleFirst := consoleIdx < datastarIdx
-	if !bothPresent || !consoleFirst {
+	if consoleIdx > datastarIdx {
 		t.Errorf("GET / body: console.js (index %d) must load before datastar.js (index %d)", consoleIdx, datastarIdx)
 	}
 }

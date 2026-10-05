@@ -1015,7 +1015,6 @@ function applyStreamEvent(event) {
 		setTimeout(() => applyStreamEvent({ type: 'settled', gen }), STREAM_SETTLE_MS);
 	}
 	if (effect.reconnectIn !== null) {
-		console.warn('console.js: /stream ended, reconnecting in', effect.reconnectIn, 'ms (attempt', streamStatus.attempt + ')');
 		clearTimeout(reconnectTimerID);
 		reconnectTimerID = setTimeout(() => {
 			reconnectTimerID = null;

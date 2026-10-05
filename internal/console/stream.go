@@ -40,6 +40,15 @@ func (c *console) handleStream(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "streaming unsupported", http.StatusInternalServerError)
 		return
 	}
+	// Defense in depth only: for a bodyless GET such as this one, net/http
+	// already clears the read deadline before the handler runs
+	// (go1.27 server.go startBackgroundRead), so this is not confirmed as the
+	// cause of the 19:25:57 cancel (H1 is unconfirmed). It guards against a
+	// request shape where net/http does not clear it first.
+	if err := rc.SetReadDeadline(time.Time{}); err != nil {
+		http.Error(w, "streaming unsupported", http.StatusInternalServerError)
+		return
+	}
 
 	var sig streamSignals
 	if err := datastar.ReadSignals(r, &sig); err != nil {

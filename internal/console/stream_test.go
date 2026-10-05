@@ -86,7 +86,6 @@ func newReadTimeoutTestServer(t *testing.T, s *store.Store, b *bus.Broker, readT
 func TestStreamOutlivesServerReadTimeout(t *testing.T) {
 	t.Parallel()
 	s := newConsoleTestStore(t)
-	seedTicket(t, s, "fake#1", "Add a hello endpoint")
 	b := bus.New()
 
 	srv := newReadTimeoutTestServer(t, s, b, 200*time.Millisecond)
