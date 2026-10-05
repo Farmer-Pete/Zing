@@ -951,11 +951,14 @@ func checkReady(t store.Ticket, resp *response.ReadyResponse, fsys fs.FS) ([]*re
 // for a compromised or buggy agent process, is the only caller that can).
 // It also refuses a check that starts a nested sandbox (sandbox-exec or
 // internal/sandbox's own probes), which skips and exits 0 inside the
-// seatbelt the judge and CHECK already run under (#78), unless the check
-// greps the "--- SKIP:" line, which proves the skip happened rather than
-// hiding behind the sandbox's own skip. It also refuses a then that
-// expects a skip (#80, #129 s5) when its check doesn't grep that same
-// line, since a bare go test exits 0 whether or not the test skipped.
+// seatbelt the judge and CHECK already run under (#78). The only exemption
+// is an internal/sandbox probe whose own expected skip is both named by the
+// scenario's then and proven by a grep for the "--- SKIP:" line in the
+// check (#80, #129 s5); a bare sandbox-exec invocation stays refused even
+// then, since the fix only needs to let a probe's own expected skip
+// through, not every nested-sandbox check. It also refuses a then that
+// expects a skip when its check doesn't prove that same skip, since a bare
+// go test exits 0 whether or not the test skipped.
 func checkScenarioShape(scenarios []response.Scenario) []*response.PathError {
 	var errs []*response.PathError
 	if n := len(scenarios); n < minReadyScenarios || n > maxReadyScenarios {
@@ -983,13 +986,27 @@ func checkScenarioShape(scenarios []response.Scenario) []*response.PathError {
 		}
 		// Zing runs every check inside a seatbelt sandbox (the judge's, then
 		// CHECK's build sandbox), and seatbelt cannot start sandbox-exec, so
-		// the sandbox probes skip and exit 0 (#78). A check that greps the
-		// "--- SKIP:" line asserts the skip itself, so it proves the probe
-		// skipped rather than hiding behind the sandbox's own skip.
-		assertsSkip := strings.Contains(sc.Check, skipLine)
+		// the sandbox probes skip and exit 0 (#78). A check that pipes the
+		// probe's "go test -v" output into a final grep for the "--- SKIP:"
+		// line asserts the skip itself, so it proves the probe skipped
+		// rather than hiding behind the sandbox's own skip. assertsSkip is
+		// structural, not a plain substring test, so a check can't satisfy
+		// it by putting the skip line in a shell comment or an echo that
+		// the test's own exit code ignores.
+		hasCheck := strings.TrimSpace(sc.Check) != ""
+		expectsSkip := skipWord.MatchString(sc.Then)
+		assertsSkip := assertsSkipPattern.MatchString(sc.Check)
 		startsSeatbelt := strings.Contains(sc.Check, "sandbox-exec")
 		runsSandboxProbes := strings.Contains(sc.Check, "internal/sandbox")
-		if (startsSeatbelt || runsSandboxProbes) && !assertsSkip {
+		// sandbox-exec is never exempt: the fix only needs to let an
+		// internal/sandbox probe's own expected skip through, and starting
+		// the seatbelt directly is the exact nested-sandbox invocation #78
+		// refused. An internal/sandbox check is exempt only when the check
+		// proves the skip (assertsSkip) and the scenario expects it
+		// (expectsSkip); a skip the then doesn't name still hides the
+		// behavior under test.
+		exemptSandboxProbe := runsSandboxProbes && assertsSkip && expectsSkip
+		if startsSeatbelt || (runsSandboxProbes && !exemptSandboxProbe) {
 			errs = append(errs, &response.PathError{
 				Path: "scenarios/" + indexedScenario(i) + "/check",
 				Msg:  hostSandboxCheckMsg,
@@ -998,7 +1015,7 @@ func checkScenarioShape(scenarios []response.Scenario) []*response.PathError {
 		// A bare go test exits 0 whether or not the test skipped, so a then
 		// that expects a skip needs a check that greps the skip line (#80,
 		// #129 s5).
-		if strings.TrimSpace(sc.Check) != "" && skipWord.MatchString(sc.Then) && !assertsSkip {
+		if hasCheck && expectsSkip && !assertsSkip {
 			errs = append(errs, &response.PathError{
 				Path: "scenarios/" + indexedScenario(i) + "/check",
 				Msg:  expectedSkipCheckMsg,
@@ -1016,6 +1033,17 @@ var skipWord = regexp.MustCompile(`(?i)\bskip(s|ped)?\b`)
 // skipLine is the go test -v line a check must grep to assert that a skip
 // happened, since a bare go test exits 0 whether or not the test skipped.
 const skipLine = "--- SKIP:"
+
+// assertsSkipPattern matches a check that pipes its go test -v output into
+// a final grep for the skip line, such as
+// `go test -v ... | grep -q -- '--- SKIP: TestName'`. It is structural, not
+// a plain substring test: the skip line must sit inside a grep argument fed
+// by a pipe, and the match must reach the end of the check. That refuses a
+// check that puts the skip line in a shell comment (`# --- SKIP:`) or an
+// echo (`echo '--- SKIP:'`) instead of actually asserting it, either of
+// which would otherwise clear the host-sandbox and expected-skip rules
+// while proving nothing.
+var assertsSkipPattern = regexp.MustCompile(`\|\s*grep\s+(-\S+\s+)*--\s+'` + regexp.QuoteMeta(skipLine) + ` [^']+'\s*$`)
 
 const expectedSkipCheckMsg = "then expects a skip, but go test exits 0 whether or not the test skipped; run go test -v and grep the skip line, such as go test -v -run TestName ./pkg | grep -q -- '--- SKIP: TestName', so the check asserts the skip itself"
 

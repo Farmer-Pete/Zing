@@ -7,6 +7,14 @@ import (
 	"zing/internal/response"
 )
 
+// thenLiveTestSkips and thenProbeSkips are reused across several cases
+// below, so they are named constants rather than repeated string literals
+// (goconst).
+const (
+	thenLiveTestSkips = "the live test skips"
+	thenProbeSkips    = "the probe skips"
+)
+
 // TestCheckScenarioShape_ExpectedSkip is a regression test for the judge
 // treating an expected skip as unobserved (#129 s5): a check that greps
 // the "--- SKIP:" line asserts the skip itself, so it is exempt from the
@@ -34,7 +42,7 @@ func TestCheckScenarioShape_ExpectedSkip(t *testing.T) {
 			name: "bare_go_test_rejected",
 			scenario0: response.Scenario{
 				ID:    "s1",
-				Then:  "the live test skips",
+				Then:  thenLiveTestSkips,
 				Check: `go test ./internal/runtime -run TestLive -count=1`,
 			},
 			wantPaths: []string{scenario0CheckPath},
@@ -44,7 +52,7 @@ func TestCheckScenarioShape_ExpectedSkip(t *testing.T) {
 			name: "grepped_outside_sandbox_accepted",
 			scenario0: response.Scenario{
 				ID:    "s1",
-				Then:  "the live test skips",
+				Then:  thenLiveTestSkips,
 				Check: `go test ./internal/runtime -run TestLive -v -count=1 | grep -q -- '--- SKIP: TestLive'`,
 			},
 			wantPaths: nil,
@@ -74,11 +82,109 @@ func TestCheckScenarioShape_ExpectedSkip(t *testing.T) {
 			name: "sandbox_probe_bare_both_errors",
 			scenario0: response.Scenario{
 				ID:    "s1",
-				Then:  "the probe skips",
+				Then:  thenProbeSkips,
 				Check: `go test ./internal/sandbox -run TestX`,
 			},
 			wantPaths: []string{scenario0CheckPath, scenario0CheckPath},
 			wantMsgs:  []string{hostSandboxCheckMsg, expectedSkipCheckMsg},
+		},
+		{
+			// assertsSkip is structural: a shell comment that happens to
+			// contain the skip line text asserts nothing, since it never
+			// runs. Without the pipe-to-grep requirement, the old plain
+			// substring test would have cleared both rules here.
+			name: "comment_bypass_rejected",
+			scenario0: response.Scenario{
+				ID:    "s1",
+				Then:  thenProbeSkips,
+				Check: `go test ./internal/sandbox -run TestX -v -count=1; echo done # --- SKIP: TestX`,
+			},
+			wantPaths: []string{scenario0CheckPath, scenario0CheckPath},
+			wantMsgs:  []string{hostSandboxCheckMsg, expectedSkipCheckMsg},
+		},
+		{
+			// An echo of the skip line text is not a grep of the test's
+			// real output and ignores the test's own exit code, so it
+			// must not satisfy the expected-skip rule either.
+			name: "echo_bypass_rejected",
+			scenario0: response.Scenario{
+				ID:    "s1",
+				Then:  thenLiveTestSkips,
+				Check: `go test ./internal/runtime -run TestLive -count=1 && echo '--- SKIP: TestLive'`,
+			},
+			wantPaths: []string{scenario0CheckPath},
+			wantMsgs:  []string{expectedSkipCheckMsg},
+		},
+		{
+			// The exemption is for an internal/sandbox probe's own expected
+			// skip, not for every grepped sandbox check: a then that does
+			// not expect a skip still gets the host-sandbox error.
+			name: "sandbox_probe_skip_grepped_but_not_expected",
+			scenario0: response.Scenario{
+				ID:    "s1",
+				Then:  "the probe passes",
+				Check: `go test ./internal/sandbox -run TestX -v -count=1 | grep -q -- '--- SKIP: TestX'`,
+			},
+			wantPaths: []string{scenario0CheckPath},
+			wantMsgs:  []string{hostSandboxCheckMsg},
+		},
+		{
+			// sandbox-exec is never exempt, even when the check greps the
+			// skip line and the then expects it: the fix only needs to let
+			// an internal/sandbox probe's own expected skip through, not
+			// every check that starts the seatbelt directly.
+			name: "sandbox_exec_skip_grepped_still_refused",
+			scenario0: response.Scenario{
+				ID:    "s1",
+				Then:  thenProbeSkips,
+				Check: `sandbox-exec -p profile go test -run TestX -v -count=1 | grep -q -- '--- SKIP: TestX'`,
+			},
+			wantPaths: []string{scenario0CheckPath},
+			wantMsgs:  []string{hostSandboxCheckMsg},
+		},
+		{
+			name: "then_is_skipped_rejected",
+			scenario0: response.Scenario{
+				ID:    "s1",
+				Then:  "the test is Skipped",
+				Check: okCheck,
+			},
+			wantPaths: []string{scenario0CheckPath},
+			wantMsgs:  []string{expectedSkipCheckMsg},
+		},
+		{
+			name: "then_bare_skip_word_rejected",
+			scenario0: response.Scenario{
+				ID:    "s1",
+				Then:  "expect a skip",
+				Check: okCheck,
+			},
+			wantPaths: []string{scenario0CheckPath},
+			wantMsgs:  []string{expectedSkipCheckMsg},
+		},
+		{
+			// "skipping" has no word boundary right after "skip", so it
+			// must not match skipWord; this pins the regex's \b boundaries.
+			name: "then_skipping_not_matched",
+			scenario0: response.Scenario{
+				ID:    "s1",
+				Then:  "no skipping happens",
+				Check: okCheck,
+			},
+			wantPaths: nil,
+			wantMsgs:  nil,
+		},
+		{
+			// A whitespace-only check is empty in substance; it must not
+			// be treated as a non-empty check that needs a skip grep.
+			name: "whitespace_only_check_accepted",
+			scenario0: response.Scenario{
+				ID:    "s1",
+				Then:  "skipped",
+				Check: "   ",
+			},
+			wantPaths: nil,
+			wantMsgs:  nil,
 		},
 	}
 
