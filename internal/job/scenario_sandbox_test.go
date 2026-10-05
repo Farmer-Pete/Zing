@@ -1,6 +1,7 @@
 package job
 
 import (
+	"strings"
 	"testing"
 
 	"zing/internal/response"
@@ -29,6 +30,7 @@ func TestCheckScenarioShape_RejectsHostSandboxProbes(t *testing.T) {
 		name      string
 		scenarios []response.Scenario
 		wantPaths []string
+		wantMsgs  []string
 	}{
 		{
 			name: "sandbox-exec",
@@ -37,6 +39,7 @@ func TestCheckScenarioShape_RejectsHostSandboxProbes(t *testing.T) {
 				{ID: "s2", Then: okThen, Check: okCheck},
 			},
 			wantPaths: []string{scenario0CheckPath},
+			wantMsgs:  []string{hostSandboxCheckMsg},
 		},
 		{
 			name: "internal/sandbox package",
@@ -45,6 +48,7 @@ func TestCheckScenarioShape_RejectsHostSandboxProbes(t *testing.T) {
 				{ID: "s2", Then: okThen, Check: okCheck},
 			},
 			wantPaths: []string{scenario0CheckPath},
+			wantMsgs:  []string{hostSandboxCheckMsg},
 		},
 		{
 			name: "both strings in one check still gives one error",
@@ -53,6 +57,7 @@ func TestCheckScenarioShape_RejectsHostSandboxProbes(t *testing.T) {
 				{ID: "s2", Then: okThen, Check: okCheck},
 			},
 			wantPaths: []string{scenario0CheckPath},
+			wantMsgs:  []string{hostSandboxCheckMsg},
 		},
 		{
 			name: "ordinary check and empty check give none",
@@ -61,6 +66,7 @@ func TestCheckScenarioShape_RejectsHostSandboxProbes(t *testing.T) {
 				{ID: "s2", Then: okThen, Check: ``},
 			},
 			wantPaths: nil,
+			wantMsgs:  nil,
 		},
 		{
 			// go test ./internal/sandboxes also matches on the
@@ -72,6 +78,7 @@ func TestCheckScenarioShape_RejectsHostSandboxProbes(t *testing.T) {
 				{ID: "s2", Then: okThen, Check: okCheck},
 			},
 			wantPaths: []string{scenario0CheckPath},
+			wantMsgs:  []string{hostSandboxCheckMsg},
 		},
 		{
 			name: "/tmp/ and internal/sandbox both match, /tmp first",
@@ -80,6 +87,11 @@ func TestCheckScenarioShape_RejectsHostSandboxProbes(t *testing.T) {
 				{ID: "s2", Then: okThen, Check: okCheck},
 			},
 			wantPaths: []string{scenario0CheckPath, scenario0CheckPath},
+			// The /tmp/ message comes first; checked by content (it
+			// names $TMPDIR) rather than exact text, since that
+			// message belongs to the existing /tmp/ check, not this
+			// test's own constant.
+			wantMsgs: []string{"$TMPDIR", hostSandboxCheckMsg},
 		},
 	}
 
@@ -95,8 +107,16 @@ func TestCheckScenarioShape_RejectsHostSandboxProbes(t *testing.T) {
 					t.Errorf("error %d path = %q, want %q", i, errs[i].Path, path)
 				}
 			}
-			if len(tt.wantPaths) == 1 && errs[0].Msg != hostSandboxCheckMsg {
-				t.Errorf("error msg = %q, want hostSandboxCheckMsg", errs[0].Msg)
+			for i, wantMsg := range tt.wantMsgs {
+				if wantMsg == hostSandboxCheckMsg {
+					if errs[i].Msg != hostSandboxCheckMsg {
+						t.Errorf("error %d msg = %q, want hostSandboxCheckMsg", i, errs[i].Msg)
+					}
+					continue
+				}
+				if !strings.Contains(errs[i].Msg, wantMsg) {
+					t.Errorf("error %d msg = %q, want it to mention %q", i, errs[i].Msg, wantMsg)
+				}
 			}
 		})
 	}

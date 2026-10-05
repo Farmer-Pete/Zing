@@ -76,12 +76,17 @@ func codexSandboxArgs(req RunRequest) ([]string, error) {
 // repeated here.
 const codexJudgeCommandTimeout = 10 * time.Minute
 
-// codexCommandTimeoutKey is the -c key that bounds how long Codex lets one
-// shell command run before it is terminated: `background_terminal_max_timeout`,
-// a top-level config.toml field taking milliseconds (confirmed on the host
-// against Codex 0.160.0: `codex exec -c background_terminal_max_timeout=... --strict-config`
-// accepts the key, and a built-in "awaiter" agent role ships with
-// `background_terminal_max_timeout = 3600000` in its profile).
+// codexCommandTimeoutKey is the -c key that bounds how long Codex's shell
+// tool lets one command run before Codex stops waiting on it and moves it to
+// a background terminal: `background_terminal_max_timeout`, a top-level
+// config.toml field taking milliseconds (confirmed against the installed
+// Codex 0.160.0: it is one of the packaged client's own default fields,
+// shipped with `background_terminal_max_timeout = 300000` i.e. five
+// minutes; `codex exec -c background_terminal_max_timeout=600000
+// --strict-config` passes config validation -- unlike an invented key, which
+// --strict-config rejects as "unknown configuration field" -- and only
+// fails later, at model-provider resolution. No other top-level field in
+// the 104-field config schema names a shell or exec timeout).
 const codexCommandTimeoutKey = "background_terminal_max_timeout"
 
 // codexSkillsOffSetting is the -c pair that turns off the judge's attempt to

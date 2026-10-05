@@ -885,44 +885,33 @@ func TestCodexJudgeArgsOnlyForJudge(t *testing.T) {
 	t.Parallel()
 	requireUnix(t)
 
-	t.Run("judge first turn", func(t *testing.T) {
-		t.Parallel()
-		dir := t.TempDir()
-		req := newFakeJudgeRequest(t, dir)
-		req.ExecPrefix = judgeExecPrefix
-		c := NewCodex(fakeCodexScript)
-		if _, err := c.Run(context.Background(), req); err != nil {
-			t.Fatalf("Run: %v", err)
-		}
+	for _, tt := range []struct {
+		name      string
+		sessionID string
+	}{
+		{"judge first turn", ""},
+		{"judge resume", testCodexResumeID},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			dir := t.TempDir()
+			req := newFakeJudgeRequest(t, dir)
+			req.ExecPrefix = judgeExecPrefix
+			req.SessionID = tt.sessionID
+			c := NewCodex(fakeCodexScript)
+			if _, err := c.Run(context.Background(), req); err != nil {
+				t.Fatalf("Run: %v", err)
+			}
 
-		argv := readArgv(t, dir)
-		if !containsConfigPair(argv, wantCodexJudgeTimeoutArg) {
-			t.Errorf("argv = %v, want it to contain -c %q", argv, wantCodexJudgeTimeoutArg)
-		}
-		if !containsConfigPair(argv, codexSkillsOffSetting) {
-			t.Errorf("argv = %v, want it to contain -c %q", argv, codexSkillsOffSetting)
-		}
-	})
-
-	t.Run("judge resume", func(t *testing.T) {
-		t.Parallel()
-		dir := t.TempDir()
-		req := newFakeJudgeRequest(t, dir)
-		req.ExecPrefix = judgeExecPrefix
-		req.SessionID = testCodexResumeID
-		c := NewCodex(fakeCodexScript)
-		if _, err := c.Run(context.Background(), req); err != nil {
-			t.Fatalf("Run: %v", err)
-		}
-
-		argv := readArgv(t, dir)
-		if !containsConfigPair(argv, wantCodexJudgeTimeoutArg) {
-			t.Errorf("argv = %v, want it to contain -c %q", argv, wantCodexJudgeTimeoutArg)
-		}
-		if !containsConfigPair(argv, codexSkillsOffSetting) {
-			t.Errorf("argv = %v, want it to contain -c %q", argv, codexSkillsOffSetting)
-		}
-	})
+			argv := readArgv(t, dir)
+			if !slices.Contains(argv, wantCodexJudgeTimeoutArg) {
+				t.Errorf("argv = %v, want it to contain -c %q", argv, wantCodexJudgeTimeoutArg)
+			}
+			if !slices.Contains(argv, codexSkillsOffSetting) {
+				t.Errorf("argv = %v, want it to contain -c %q", argv, codexSkillsOffSetting)
+			}
+		})
+	}
 
 	t.Run("planreview carries neither", func(t *testing.T) {
 		t.Parallel()
@@ -933,25 +922,16 @@ func TestCodexJudgeArgsOnlyForJudge(t *testing.T) {
 			t.Fatalf("Run: %v", err)
 		}
 
-		argv := strings.Join(readArgv(t, dir), " ")
-		if strings.Contains(argv, wantCodexJudgeTimeoutArg) {
-			t.Errorf("argv contains judge-only timeout arg: %s", argv)
-		}
-		if strings.Contains(argv, codexSkillsOffSetting) {
-			t.Errorf("argv contains judge-only skills setting: %s", argv)
+		argv := readArgv(t, dir)
+		for _, a := range argv {
+			if strings.HasPrefix(a, codexCommandTimeoutKey+"=") {
+				t.Errorf("argv = %v, carries judge-only key %q", argv, codexCommandTimeoutKey)
+			}
+			if a == codexSkillsOffSetting {
+				t.Errorf("argv = %v, carries judge-only skills setting", argv)
+			}
 		}
 	})
-}
-
-// containsConfigPair reports whether argv holds "-c" immediately followed
-// by value, anywhere in the slice.
-func containsConfigPair(argv []string, value string) bool {
-	for i := 0; i+1 < len(argv); i++ {
-		if argv[i] == "-c" && argv[i+1] == value {
-			return true
-		}
-	}
-	return false
 }
 
 // TestCodexRefusesFullAccessWithoutPrefix proves a judge-job request with
