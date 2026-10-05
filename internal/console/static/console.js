@@ -594,7 +594,11 @@ const lastSavedText = new Map();
 // el.value against the sentValues snapshot taken before that typing, sees a
 // mismatch, and leaves the box uncleared even though its current text was
 // already fully sent -- making it eligible to go out again on a later
-// Cmd+Enter.
+// Cmd+Enter. postSendBatch's own finally block calls rearmAutosaves once
+// this flag drops back to false, so a keystroke this flag blocked is not
+// left unarmed for good (bug fix: scheduleReplyAutosave's early return above
+// silently dropped that keystroke from autosave, and nothing else re-armed
+// it, so the box sat unsaved until the owner typed again or sent again).
 let sendBatchInFlight = false;
 
 // replyAutosaveKeyFor builds the one "ticket:question" key every autosave
@@ -755,15 +759,39 @@ function installReplyFocusTracking() {
 	document.addEventListener('focusout', () => setTimeout(clearReplyFocusUnlessInReplyBox, 0));
 }
 
+// rearmAutosaves re-arms the debounced autosave for every "#main
+// .reply-input" still holding text that differs from lastSavedFor(el), once
+// a send batch's sendBatchInFlight window has closed (bug fix:
+// scheduleReplyAutosave returns early for the whole window, so any keystroke
+// landing during postSendBatchLocked's own awaits -- the draft posts, the
+// /send fetch -- never armed a timer at all, and nothing else re-armed it
+// afterward; the box then sat unsaved until the owner typed again or sent
+// again, losing that edit if the tab closed first). It covers a box the
+// owner kept typing in during the send (the post-send clear above
+// deliberately left it alone, see "since changed" above) just as much as a
+// box whose own save failed or went stale (partitionFailedSaves), so either
+// kind gets another chance to reach the store without the owner having to
+// type again.
+function rearmAutosaves() {
+	for (const el of document.querySelectorAll('#main .reply-input')) {
+		if (replyAutosaveBody(el, lastSavedFor(el))) {
+			scheduleReplyAutosave(el);
+		}
+	}
+}
+
 // sendBatchInFlight is set true for the whole body below, in a try/finally
 // so it resets even if /send throws: see sendBatchInFlight's own comment for
-// why scheduleReplyAutosave must not arm a new timer during this window.
+// why scheduleReplyAutosave must not arm a new timer during this window, and
+// rearmAutosaves' own comment for why the finally block re-arms every box
+// that window left unsaved.
 async function postSendBatch(ticket) {
 	sendBatchInFlight = true;
 	try {
 		await postSendBatchLocked(ticket);
 	} finally {
 		sendBatchInFlight = false;
+		rearmAutosaves();
 	}
 }
 
@@ -833,9 +861,10 @@ async function postSendBatchLocked(ticket) {
 			// nothing about it reached /send, or what did was an older
 			// version than what the box still shows. A box whose value has
 			// since changed (sentValues, above) is left alone either way: the
-			// owner kept typing during this function's own awaits, and that
-			// keystroke's own autosave timer is still armed to save it (bug
-			// fix: clearing it here, or resetting its lastSavedText, would
+			// owner kept typing during this function's own awaits, and
+			// postSendBatch's finally block re-arms that keystroke's autosave
+			// once sendBatchInFlight drops (rearmAutosaves, below; bug fix:
+			// clearing it here, or resetting its lastSavedText, would
 			// otherwise drop that typing silently).
 			const sent = inputs.filter((el) => !notSent.includes(el) && el.value === sentValues.get(el));
 			clearReplyInputs(sent);
