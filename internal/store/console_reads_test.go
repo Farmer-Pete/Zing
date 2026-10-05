@@ -508,20 +508,23 @@ func liveHasTicket(items []LiveTicket, ticketID int64) bool {
 	return false
 }
 
-func TestTicketsByProject_OrderedByTrackerRefThenID(t *testing.T) {
+// TestTicketsByProject_OrderedByIssueNumberThenID proves TicketsByProject
+// orders by issueNumberOrder (Task 3), not by tracker_ref as text: refs 10,
+// 2, 31 come back as 2, 10, 31, not the text order 10, 2, 31.
+func TestTicketsByProject_OrderedByIssueNumberThenID(t *testing.T) {
 	t.Parallel()
 	s := newTestStore(t)
 	projectAID := seedProjectNamed(t, s, testProjectAlpha)
 	projectBID := seedProjectNamed(t, s, testProjectBeta)
 
 	refs := []string{"10", "2", "31"}
-	ids := make([]int64, 0, len(refs))
+	ids := make(map[string]int64, len(refs))
 	for _, ref := range refs {
 		id, err := s.InsertTicket(t.Context(), Ticket{ProjectID: projectAID, TrackerRef: ref, Title: "t", State: ticketStateQueued})
 		if err != nil {
 			t.Fatalf("InsertTicket(%s): %v", ref, err)
 		}
-		ids = append(ids, id)
+		ids[ref] = id
 	}
 	other, err := s.InsertTicket(t.Context(), Ticket{ProjectID: projectBID, TrackerRef: "1", Title: "other project", State: ticketStateQueued})
 	if err != nil {
@@ -532,14 +535,13 @@ func TestTicketsByProject_OrderedByTrackerRefThenID(t *testing.T) {
 	if err != nil {
 		t.Fatalf("TicketsByProject: %v", err)
 	}
-	// tracker_ref sorts as TEXT: "10" < "2" < "31".
-	wantOrder := []int64{ids[0], ids[1], ids[2]}
-	if len(got) != len(wantOrder) {
-		t.Fatalf("TicketsByProject returned %d tickets, want %d", len(got), len(wantOrder))
+	wantRefs := []string{"2", "10", "31"}
+	if len(got) != len(wantRefs) {
+		t.Fatalf("TicketsByProject returned %d tickets, want %d", len(got), len(wantRefs))
 	}
-	for i, w := range wantOrder {
-		if got[i].ID != w {
-			t.Errorf("TicketsByProject[%d].ID = %d, want %d (tracker_ref %q)", i, got[i].ID, w, refs[i])
+	for i, ref := range wantRefs {
+		if got[i].ID != ids[ref] {
+			t.Errorf("TicketsByProject[%d].ID = %d, want %d (tracker_ref %q)", i, got[i].ID, ids[ref], ref)
 		}
 	}
 	for _, item := range got {

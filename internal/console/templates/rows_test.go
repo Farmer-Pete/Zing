@@ -35,7 +35,7 @@ func TestTicketRowsCarryThreadNav(t *testing.T) {
 	t.Run("Project row", func(t *testing.T) {
 		t.Parallel()
 		var sb strings.Builder
-		if err := Project(1, []store.Ticket{ticket}).Render(t.Context(), &sb); err != nil {
+		if err := Project(1, []store.Ticket{ticket}, nil).Render(t.Context(), &sb); err != nil {
 			t.Fatalf("Project.Render: %v", err)
 		}
 		got := sb.String()

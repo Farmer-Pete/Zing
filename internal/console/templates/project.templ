@@ -6,22 +6,34 @@ import (
 	"zing/internal/store"
 )
 
-// Project renders the #main region for view=project (design section 6.5):
-// one project's tickets, ordered by tracker_ref then id, read only, plus
-// the "Pick up issue #" manual-intake form (PKG9-PLAN.md D29), which every
-// project shows regardless of its own intake mode (D29: "works in auto mode
-// too"). projectID feeds the form's data-pickup-project attribute, the
-// contract console.js's pickupIssue reads to build POST
-// /projects/{id}/pickup's URL.
-templ Project(projectID int64, tickets []store.Ticket) {
+// Project renders the #main region for view=project (design section 6.5,
+// Task 3, #106 bug 4): one project's live tickets first, furthest-along
+// state first (console.projectSections), then a collapsed "Closed (N)"
+// section below for terminal tickets, read only, plus the "Pick up issue #"
+// manual-intake form (PKG9-PLAN.md D29), which every project shows
+// regardless of its own intake mode (D29: "works in auto mode too").
+// projectID feeds the form's data-pickup-project attribute, the contract
+// console.js's pickupIssue reads to build POST /projects/{id}/pickup's URL.
+templ Project(projectID int64, live, closed []store.Ticket) {
 	<main id="main" class="view-project">
 		<h2>Project</h2>
 		@pickupBox(projectID)
-		if len(tickets) == 0 {
+		if len(live) == 0 && len(closed) == 0 {
 			<p class="empty">No tickets in this project.</p>
 		} else {
-			for _, t := range tickets {
+			if len(live) == 0 {
+				<p class="empty">No live tickets.</p>
+			}
+			for _, t := range live {
 				@ticketRow(t)
+			}
+			if len(closed) > 0 {
+				<details class="project-closed" id="project-closed" data-preserve-attr="open">
+					<summary>{ "Closed (" + strconv.Itoa(len(closed)) + ")" }</summary>
+					for _, t := range closed {
+						@ticketRow(t)
+					}
+				</details>
 			}
 		}
 	</main>

@@ -12,6 +12,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -140,6 +141,27 @@ func buildNavThreads(items []store.LiveTicket) []templates.NavThread {
 	return out
 }
 
+// projectSections splits one project's tickets, already in issue-number
+// order (store.TicketsByProject), into live and closed (design section
+// 6.5, Task 3, #106 bug 4): closed is every ticket whose state is in
+// terminal, in issue-number order; live is the rest, furthest-along state
+// first by its index in order (a state missing from order sorts last,
+// rank -1), issue-number order within a state (the sort is stable, so ties
+// keep the input's own order).
+func projectSections(tickets []store.Ticket, order, terminal []string) (live, closed []store.Ticket) {
+	for i := range tickets {
+		if slices.Contains(terminal, tickets[i].State) {
+			closed = append(closed, tickets[i])
+		} else {
+			live = append(live, tickets[i])
+		}
+	}
+	sort.SliceStable(live, func(i, j int) bool {
+		return slices.Index(order, live[i].State) > slices.Index(order, live[j].State)
+	})
+	return live, closed
+}
+
 // mainComponent builds the #main region for the current view (design
 // section 6.3, 6.5): Inbox, Recent, Feed, and Project each read straight
 // from their store method; Thread additionally reads the ticket and its
@@ -168,7 +190,13 @@ func (c *console) mainComponent(ctx context.Context, view string, open, project 
 		if err != nil {
 			return nil, err
 		}
-		return templates.Project(project, tickets), nil
+		var order []string
+		if c.machine != nil {
+			order = c.machine.States.Order
+		}
+		live, closed := projectSections(tickets, order, c.terminalStates())
+		slog.DebugContext(ctx, "console: project sections", "project_id", project, "live", len(live), "closed", len(closed))
+		return templates.Project(project, live, closed), nil
 	case viewThread:
 		return c.threadComponent(ctx, open)
 	default:

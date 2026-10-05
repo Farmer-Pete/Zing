@@ -323,6 +323,102 @@ func TestProjectScopesAndOrdersByTrackerRef(t *testing.T) {
 	}
 }
 
+// transitionTicket claims ticketID and commits a transition to state, the
+// only way (besides queued at intake) a real ticket reaches a given state
+// (design section 6.3's commit path).
+func transitionTicket(t *testing.T, s *store.Store, ticketID int64, state response.TicketState) {
+	t.Helper()
+	const owner = "test-owner"
+	expires := time.Now().Add(10 * time.Minute)
+	claimed, err := s.Claim(t.Context(), ticketID, owner, expires)
+	if err != nil {
+		t.Fatalf("Claim: %v", err)
+	}
+	if !claimed {
+		t.Fatalf("Claim(%d): got false, want true", ticketID)
+	}
+	applied, err := s.CommitHandlerResult(t.Context(), store.HandlerCommit{
+		TicketID: ticketID, Owner: owner, Expires: expires,
+		Next: string(state), Reason: "test: transition to " + string(state),
+	})
+	if err != nil {
+		t.Fatalf("CommitHandlerResult(%d, %s): %v", ticketID, state, err)
+	}
+	if !applied {
+		t.Fatalf("CommitHandlerResult(%d, %s): applied = false, want true", ticketID, state)
+	}
+}
+
+// TestProjectShowsLiveFirstAndClosedCollapsed proves the project page puts
+// live work first, furthest-along state first, with terminal tickets in a
+// collapsed "Closed (N)" section below (design section 6.5, Task 3, #106
+// bug 4): #110 reviewing, #65 building, #102 building, #95 queued render
+// live, in that order, and #96 done renders inside the collapsed details.
+// A second project holding only a live ticket renders no closed section at
+// all.
+func TestProjectShowsLiveFirstAndClosedCollapsed(t *testing.T) {
+	t.Parallel()
+	s := newConsoleTestStore(t)
+
+	ticket102 := seedTicketIn(t, s, testProject, "102", "Ticket 102")
+	transitionTicket(t, s, ticket102, response.TicketStateBuilding)
+	ticket65 := seedTicketIn(t, s, testProject, "65", "Ticket 65")
+	transitionTicket(t, s, ticket65, response.TicketStateBuilding)
+	ticket110 := seedTicketIn(t, s, testProject, "110", "Ticket 110")
+	transitionTicket(t, s, ticket110, response.TicketStateReviewing)
+	seedTicketIn(t, s, testProject, "95", "Ticket 95")
+	ticket96 := seedTicketIn(t, s, testProject, "96", "Ticket 96")
+	transitionTicket(t, s, ticket96, response.TicketStateDone)
+
+	srv := newTestServer(t, s, bus.New(), testMachine(t), newTestLogHandler(t))
+
+	projects, err := s.ListProjects(t.Context())
+	if err != nil {
+		t.Fatalf("ListProjects: %v", err)
+	}
+	var projectID int64
+	for _, p := range projects {
+		if p.Name == testProject.Name {
+			projectID = p.ID
+		}
+	}
+	if projectID == 0 {
+		t.Fatalf("could not find project id for %q among %+v", testProject.Name, projects)
+	}
+
+	main := mainFrame(t, srv.URL, "project", 0, projectID)
+
+	i110 := mustIndex(t, main, "Ticket 110")
+	i65 := mustIndex(t, main, "Ticket 65")
+	i102 := mustIndex(t, main, "Ticket 102")
+	i95 := mustIndex(t, main, "Ticket 95")
+	iClosed := mustIndex(t, main, `id="project-closed"`)
+	i96 := mustIndex(t, main, "Ticket 96")
+	if i110 >= i65 || i65 >= i102 || i102 >= i95 || i95 >= iClosed || iClosed >= i96 {
+		t.Errorf("expected order #110, #65, #102, #95, project-closed, #96; got:\n%s", main)
+	}
+
+	if !strings.Contains(main, `data-preserve-attr="open"`) {
+		t.Errorf("closed details missing data-preserve-attr=\"open\"; got:\n%s", main)
+	}
+	if strings.Contains(main, `<details class="project-closed" id="project-closed" data-preserve-attr="open" open`) {
+		t.Errorf("closed details should start collapsed (no bare open attribute); got:\n%s", main)
+	}
+	if !strings.Contains(main, "Closed (1)") {
+		t.Errorf("expected summary text \"Closed (1)\"; got:\n%s", main)
+	}
+
+	otherProjectID, err := s.EnsureProject(t.Context(), otherProject)
+	if err != nil {
+		t.Fatalf("EnsureProject: %v", err)
+	}
+	seedTicketIn(t, s, otherProject, "1", "Other project's only ticket")
+	otherMain := mainFrame(t, srv.URL, "project", 0, otherProjectID)
+	if strings.Contains(otherMain, "project-closed") {
+		t.Errorf("a project with no closed tickets should render no project-closed details; got:\n%s", otherMain)
+	}
+}
+
 // TestThreadRendersMessagesReadOnly proves the Thread view renders a
 // ticket's messages in id order -- a state separator, a plain row for
 // every other type, and a question as a read-only group -- with no

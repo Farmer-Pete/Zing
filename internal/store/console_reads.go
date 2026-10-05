@@ -332,11 +332,11 @@ func (s *Store) LiveTickets(ctx context.Context, terminal []string) ([]LiveTicke
 	return out, nil
 }
 
-// TicketsByProject returns one project's tickets, ordered by tracker_ref
-// then id.
+// TicketsByProject returns one project's tickets, ordered by issue number
+// (issueNumberOrder).
 func (s *Store) TicketsByProject(ctx context.Context, projectID int64) ([]Ticket, error) {
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT `+ticketColumns+` FROM tickets WHERE project_id = ? ORDER BY tracker_ref, id`, projectID)
+		`SELECT `+ticketColumns+` FROM tickets t WHERE t.project_id = ? ORDER BY `+issueNumberOrder, projectID)
 	if err != nil {
 		return nil, fmt.Errorf("tickets by project %d: %w", projectID, err)
 	}
