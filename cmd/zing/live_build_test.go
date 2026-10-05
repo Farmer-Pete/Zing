@@ -42,6 +42,7 @@ import (
 	"path/filepath"
 	goruntime "runtime"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -626,7 +627,11 @@ func answerAllOpenQuestions(ctx context.Context, st *store.Store, base string, t
 		}
 	}
 
-	sendBody := fmt.Sprintf(`{"ticket":%d}`, ticketID)
+	ids := make([]string, len(open))
+	for i := range open {
+		ids[i] = strconv.FormatInt(open[i].ID, 10)
+	}
+	sendBody := fmt.Sprintf(`{"ticket":%d,"questions":[%s]}`, ticketID, strings.Join(ids, ","))
 	return postSelftestConsole(ctx, base, "/send", sendBody)
 }
 

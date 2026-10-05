@@ -951,7 +951,7 @@ func answerFixtureQuestion(ctx context.Context, st *store.Store, base string, ti
 	if postErr := postSelftestConsole(ctx, base, "/draft", draftBody); postErr != nil {
 		return fmt.Errorf("draft answer for question %d: %w", open[0].ID, postErr)
 	}
-	sendBody := fmt.Sprintf(`{"ticket":%d}`, ticketID)
+	sendBody := fmt.Sprintf(`{"ticket":%d,"questions":[%d]}`, ticketID, open[0].ID)
 	if postErr := postSelftestConsole(ctx, base, "/send", sendBody); postErr != nil {
 		return fmt.Errorf("send batch for ticket %d: %w", ticketID, postErr)
 	}
