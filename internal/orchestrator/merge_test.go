@@ -318,6 +318,33 @@ func TestConflictMarkerPaths(t *testing.T) {
 	}
 }
 
+// TestConflictMarkerPathsLongLine proves fileHasConflictMarkers never fails
+// with bufio.ErrTooLong on a line longer than its old 1 MiB scanner buffer
+// (a lockfile, a minified bundle, embedded data): a file with one such long
+// line and no marker scans clean, and the real conflict in mergeSharedPath
+// is still found alongside it (review thread t01081b994b9e0591).
+func TestConflictMarkerPathsLongLine(t *testing.T) {
+	t.Parallel()
+	ctx := t.Context()
+	f := newMergeConflictFixture(t, 6)
+
+	if _, err := f.o.StartBaseMerge(ctx, f.wt, f.baseSHA); err != nil {
+		t.Fatalf("StartBaseMerge: unexpected error: %v", err)
+	}
+
+	longLine := strings.Repeat("a", 2*1024*1024) + "\n"
+	writeTestFile(t, filepath.Join(f.wt.Dir(), "long.txt"), longLine)
+	runGit(ctx, t, f.wt.Dir(), "add", "long.txt")
+
+	marked, err := f.o.ConflictMarkerPaths(ctx, f.wt)
+	if err != nil {
+		t.Fatalf("ConflictMarkerPaths: unexpected error: %v", err)
+	}
+	if want := []string{mergeSharedPath}; !slices.Equal(marked, want) {
+		t.Fatalf("ConflictMarkerPaths = %v, want %v", marked, want)
+	}
+}
+
 // TestPathsWithConflictMarkers proves PathsWithConflictMarkers over a real,
 // already-committed merge: adoptMerge's own use, once MERGE_HEAD no longer
 // resolves, scanning the commit's own changed paths rather than the index's

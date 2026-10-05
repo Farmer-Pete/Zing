@@ -2,9 +2,11 @@ package orchestrator
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"sort"
 	"strings"
@@ -219,20 +221,30 @@ func fileHasConflictMarkers(root *os.Root, path string) (bool, error) {
 	}
 	defer f.Close()
 
-	scanner := bufio.NewScanner(f)
-	scanner.Buffer(nil, 1024*1024)
-	for scanner.Scan() {
-		line := scanner.Text()
-		for _, prefix := range conflictMarkerPrefixes {
-			if strings.HasPrefix(line, prefix) {
-				return true, nil
+	// bufio.Reader.ReadLine never fails on a long line: a line longer than
+	// its buffer comes back in bounded chunks with isPrefix true until the
+	// line ends, unlike bufio.Scanner, which gives up with ErrTooLong past
+	// its fixed buffer. A conflict marker prefix is only ever eight bytes,
+	// so only the first chunk of each line needs the check.
+	r := bufio.NewReader(f)
+	atLineStart := true
+	for {
+		chunk, isPrefix, readErr := r.ReadLine()
+		if readErr != nil {
+			if readErr == io.EOF {
+				return false, nil
+			}
+			return false, readErr
+		}
+		if atLineStart {
+			for _, prefix := range conflictMarkerPrefixes {
+				if bytes.HasPrefix(chunk, []byte(prefix)) {
+					return true, nil
+				}
 			}
 		}
+		atLineStart = !isPrefix
 	}
-	if err := scanner.Err(); err != nil {
-		return false, err
-	}
-	return false, nil
 }
 
 // MergeSidePaths returns, sorted, every path that differs between HEAD
