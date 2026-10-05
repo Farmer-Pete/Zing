@@ -31,6 +31,7 @@ import (
 	"testing/fstest"
 	"time"
 
+	"github.com/google/go-cmp/cmp"
 	"github.com/google/go-github/v92/github"
 
 	"zing/internal/gitfixture"
@@ -1507,6 +1508,11 @@ func shipMergeReadyPR(local, nodeID string) orchestrator.PRState {
 // fix-request test and task 7's own draft-flip tests).
 const shipCILogTailText = "FAIL: boom"
 
+// shipFlakyLogText is the canned JobLogTail text every TestPollCIRerun test
+// below configures a flaky re-run with (goconst: repeated across several
+// of that test family's own ticks).
+const shipFlakyLogText = "--- FAIL: TestFlaky (0.1s)"
+
 // shipGreenCI is the Checks reads a ticket.ID's own POLL needs to reach
 // EvaluateCI's green branch: one required "ci" context, matched by one
 // completed/success run of the same name. Statuses are never used by any
@@ -1525,6 +1531,40 @@ func shipFailedCI() (runs []orchestrator.CheckRun, required []orchestrator.Requi
 			DetailsURL: "https://github.com/fixture/fixture/actions/runs/1/job/2",
 		}},
 		[]orchestrator.RequiredCheck{{Context: "ci"}}
+}
+
+// seedCheckRerun writes one check_rerun event directly through
+// InsertMessage, the shape pollRerun itself writes (task 4), the same way
+// shipInsertReviewBotMarker seeds a review-bot clock marker: a test of a
+// row below the rerun rows (the fix request, or a draft flip) seeds one
+// here first, so decideCIRerun's own "used" rule already finds a spent
+// flaky or no_log re-run for the check and sha under test. It returns the
+// new row's own message id.
+func seedCheckRerun(t *testing.T, s *store.Store, ticketID int64, event response.CheckRerunEvent) int64 {
+	t.Helper()
+	msg, err := store.NewEvent(ticketID, store.EventKindCheckRerun, event)
+	if err != nil {
+		t.Fatalf("seedCheckRerun: NewEvent: %v", err)
+	}
+	id, err := s.InsertMessage(t.Context(), msg)
+	if err != nil {
+		t.Fatalf("seedCheckRerun: InsertMessage: %v", err)
+	}
+	return id
+}
+
+// seedSpentFlakyCheckRerun seeds a "ci" check_rerun event, reason flaky,
+// under check_run_id 999 -- distinct from shipFailedCI's own check run id
+// 1, so decideCIRerun's own rule 1 (the same check run id, under 10
+// minutes old, waits) never matches it -- so every pre-task-4 failed-CI
+// test that expects a fix request or a draft flip on its very first
+// shipFailedCI tick keeps reaching that same row instead of a fresh
+// re-run (task 4's own addition to shipFailedCI's callers).
+func seedSpentFlakyCheckRerun(t *testing.T, s *store.Store, ticketID int64, sha string) {
+	t.Helper()
+	seedCheckRerun(t, s, ticketID, response.CheckRerunEvent{
+		Check: "ci", SHA: sha, RunID: 1, CheckRunID: 999, Reason: response.RerunReasonFlaky,
+	})
 }
 
 // seedReReqHandled writes "reviewers re-requested <headSHA>" directly
@@ -1854,6 +1894,7 @@ func TestPollCIFailedRequestsFix(t *testing.T) {
 	gh.runs, gh.required = runs, required
 	gh.prState = orchestrator.PRState{Draft: true, HeadSHA: local, BaseRef: pbFixtureDefaultBranch}
 	gh.logTail = func(context.Context, string, string, int64, int) (string, error) { return shipCILogTailText, nil }
+	seedSpentFlakyCheckRerun(t, s, ticket.ID, local)
 
 	commit, err := shipPollRun(t, s, ticket, gh, tr)
 	if err != nil {
@@ -1898,6 +1939,7 @@ func TestPollSharedGateEscalates(t *testing.T) {
 	gh.runs, gh.required = runs, required
 	gh.prState = orchestrator.PRState{Draft: true, HeadSHA: local, BaseRef: pbFixtureDefaultBranch}
 	seedReReqHandled(t, s, ticket.ID, local)
+	seedSpentFlakyCheckRerun(t, s, ticket.ID, local)
 
 	commit, err := shipPollRun(t, s, pbGetTicket(t, s, ticket.ID), gh, tr)
 	if err != nil {
@@ -1911,6 +1953,583 @@ func TestPollSharedGateEscalates(t *testing.T) {
 	}
 	if commit.Escalation.Payload.Origin != string(response.EscalationOriginShipping) {
 		t.Errorf("Origin = %q, want %q", commit.Escalation.Payload.Origin, response.EscalationOriginShipping)
+	}
+}
+
+// -----------------------------------------------------------------------
+// Re-run a failed CI job once before spending a fix run on it (#91, task 4)
+// -----------------------------------------------------------------------
+
+// shipCIRun builds one "ci" Actions check run with checkRunID, backed by
+// workflow run runID and job jobID (both embedded in DetailsURL, the shape
+// actionsJobIDPattern parses), under conclusion.
+func shipCIRun(checkRunID, runID, jobID int64, conclusion string) orchestrator.CheckRun {
+	return orchestrator.CheckRun{
+		ID: checkRunID, Name: "ci", Status: ghCompleted, Conclusion: conclusion, AppSlug: ghGitHubActions,
+		DetailsURL: fmt.Sprintf("https://github.com/fixture/fixture/actions/runs/%d/job/%d", runID, jobID),
+	}
+}
+
+// shipCIRequired is the one required "ci" check every TestPollCIRerun test
+// below reads back (shipFailedCI's own required, named here so a test that
+// never calls shipFailedCI still has it).
+func shipCIRequired() []orchestrator.RequiredCheck {
+	return []orchestrator.RequiredCheck{{Context: "ci"}}
+}
+
+// shipCheckRerunEvents decodes every check_rerun event message in c.Messages,
+// in order.
+func shipCheckRerunEvents(t *testing.T, c store.HandlerCommit) []response.CheckRerunEvent {
+	t.Helper()
+	var out []response.CheckRerunEvent
+	for i := range c.Messages {
+		if c.Messages[i].EventKind == nil || *c.Messages[i].EventKind != store.EventKindCheckRerun {
+			continue
+		}
+		var ev response.CheckRerunEvent
+		if err := json.Unmarshal(c.Messages[i].Payload, &ev); err != nil {
+			t.Fatalf("decode check_rerun event: %v", err)
+		}
+		out = append(out, ev)
+	}
+	return out
+}
+
+// shipCheckRerunPassedEvents decodes every check_rerun_passed event message
+// in c.Messages, in order.
+func shipCheckRerunPassedEvents(t *testing.T, c store.HandlerCommit) []response.CheckRerunPassedEvent {
+	t.Helper()
+	var out []response.CheckRerunPassedEvent
+	for i := range c.Messages {
+		if c.Messages[i].EventKind == nil || *c.Messages[i].EventKind != store.EventKindCheckRerunPassed {
+			continue
+		}
+		var ev response.CheckRerunPassedEvent
+		if err := json.Unmarshal(c.Messages[i].Payload, &ev); err != nil {
+			t.Fatalf("decode check_rerun_passed event: %v", err)
+		}
+		out = append(out, ev)
+	}
+	return out
+}
+
+// shipHasFixMarker reports whether c.Messages carries a "fix requested
+// ci_log after run " marker.
+func shipHasFixMarker(c store.HandlerCommit) bool {
+	for i := range c.Messages {
+		if strings.HasPrefix(c.Messages[i].Body, fixRequestedCILogPrefix) {
+			return true
+		}
+	}
+	return false
+}
+
+// TestPollCIRerunFlakyPassReachesMergeQuestion proves the ticket's own demo
+// (design "demo"): a required check that fails once, is re-run, and then
+// passes reaches the merge question with no fix run ever sent, and the
+// pass itself leaves exactly one check_rerun_passed event, never a second.
+func TestPollCIRerunFlakyPassReachesMergeQuestion(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow end-to-end flow; runs in the full suite")
+	}
+	t.Parallel()
+	s, ticket, gh, tr := shipPublished(t)
+	local := shipHeadSHA(t, s, ticket)
+	gh.runs, gh.required = shipFailedCI()
+	gh.prState = shipMergeReadyPR(local, "PR_node_flaky_pass")
+	gh.logTail = func(context.Context, string, string, int64, int) (string, error) {
+		return shipFlakyLogText, nil
+	}
+
+	commit1, err := shipPollRun(t, s, ticket, gh, tr)
+	if err != nil {
+		t.Fatalf("Run (tick 1): %v", err)
+	}
+	if diff := cmp.Diff([]int64{2}, gh.reruns); diff != "" {
+		t.Errorf("reruns mismatch (-want +got):\n%s", diff)
+	}
+	wantEvent := response.CheckRerunEvent{Check: "ci", SHA: local, RunID: 1, CheckRunID: 1, Reason: response.RerunReasonFlaky, Tests: []string{"TestFlaky"}}
+	if diff := cmp.Diff([]response.CheckRerunEvent{wantEvent}, shipCheckRerunEvents(t, commit1)); diff != "" {
+		t.Errorf("check_rerun event mismatch (-want +got):\n%s", diff)
+	}
+	if shipHasFixMarker(commit1) {
+		t.Errorf("commit1.Messages = %+v, want no fix marker", commit1.Messages)
+	}
+	if len(gh.convertToDraftCalls) != 0 {
+		t.Errorf("convertToDraftCalls = %+v, want none", gh.convertToDraftCalls)
+	}
+	pbApply(t, s, ticket, commit1)
+
+	gh.runs = []orchestrator.CheckRun{shipCIRun(3, 1, 2, ghSuccess)}
+	commit2, err := shipPollRun(t, s, pbGetTicket(t, s, ticket.ID), gh, tr)
+	if err != nil {
+		t.Fatalf("Run (tick 2): %v", err)
+	}
+	if !shipHasMessage(commit2, "merge asked "+local) {
+		t.Fatalf("commit2.Messages = %+v, want %q", commit2.Messages, "merge asked "+local)
+	}
+	wantPassed := response.CheckRerunPassedEvent{Check: "ci", SHA: local, Tests: []string{"TestFlaky"}}
+	if diff := cmp.Diff([]response.CheckRerunPassedEvent{wantPassed}, shipCheckRerunPassedEvents(t, commit2)); diff != "" {
+		t.Errorf("check_rerun_passed event mismatch (-want +got):\n%s", diff)
+	}
+	if shipHasFixMarker(commit2) {
+		t.Errorf("commit2.Messages = %+v, want no fix marker", commit2.Messages)
+	}
+	pbApply(t, s, ticket, commit2)
+
+	commit3, err := shipPollRun(t, s, pbGetTicket(t, s, ticket.ID), gh, tr)
+	if err != nil {
+		t.Fatalf("Run (tick 3): %v", err)
+	}
+	if passed3 := shipCheckRerunPassedEvents(t, commit3); len(passed3) != 0 {
+		t.Errorf("commit3 check_rerun_passed events = %+v, want none", passed3)
+	}
+}
+
+// TestPollCIRerunFailsAgainSendsFixRequest proves the ticket's own "A test
+// where the check fails twice sends the fix request": the re-run's own
+// budget spent, a second failure converts the still-ready pull request to
+// draft (design Q4: the re-run rows outrank the draft flip, but the draft
+// flip still outranks the fix row once the budget is gone), and the next
+// tick -- now draft -- sends the fix request, with no second re-run.
+func TestPollCIRerunFailsAgainSendsFixRequest(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow end-to-end flow; runs in the full suite")
+	}
+	t.Parallel()
+	s, ticket, gh, tr := shipPublished(t)
+	local := shipHeadSHA(t, s, ticket)
+	gh.runs, gh.required = shipFailedCI()
+	gh.prState = shipMergeReadyPR(local, "PR_node_fails_again")
+	gh.logTail = func(context.Context, string, string, int64, int) (string, error) {
+		return shipFlakyLogText, nil
+	}
+
+	commit1, err := shipPollRun(t, s, ticket, gh, tr)
+	if err != nil {
+		t.Fatalf("Run (tick 1): %v", err)
+	}
+	if len(gh.reruns) != 1 {
+		t.Fatalf("reruns = %+v, want exactly one", gh.reruns)
+	}
+	pbApply(t, s, ticket, commit1)
+
+	gh.runs = []orchestrator.CheckRun{shipCIRun(3, 4, 5, "failure")}
+	gh.logTail = func(context.Context, string, string, int64, int) (string, error) { return shipCILogTailText, nil }
+	commit2, err := shipPollRun(t, s, pbGetTicket(t, s, ticket.ID), gh, tr)
+	if err != nil {
+		t.Fatalf("Run (tick 2): %v", err)
+	}
+	if len(gh.convertToDraftCalls) != 1 {
+		t.Fatalf("convertToDraftCalls = %+v, want exactly one call", gh.convertToDraftCalls)
+	}
+	if shipHasFixMarker(commit2) {
+		t.Errorf("commit2.Messages = %+v, want no fix marker yet", commit2.Messages)
+	}
+	pbApply(t, s, ticket, commit2)
+	gh.prState.Draft = true
+
+	commit3, err := shipPollRun(t, s, pbGetTicket(t, s, ticket.ID), gh, tr)
+	if err != nil {
+		t.Fatalf("Run (tick 3): %v", err)
+	}
+	found := false
+	for _, m := range commit3.Messages {
+		if strings.HasPrefix(m.Body, fixRequestedCILogPrefix) && strings.Contains(m.Body, shipCILogTailText) {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("commit3.Messages = %+v, want a %q marker carrying the log tail", commit3.Messages, fixRequestedCILogPrefix)
+	}
+	if len(gh.reruns) != 1 {
+		t.Errorf("reruns = %+v, want still exactly one", gh.reruns)
+	}
+}
+
+// TestPollCIRerunKeepsReadyPRReady proves design Q4: a first-time failure
+// on a non-draft pull request re-runs the check instead of flipping to
+// draft.
+func TestPollCIRerunKeepsReadyPRReady(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow end-to-end flow; runs in the full suite")
+	}
+	t.Parallel()
+	s, ticket, gh, tr := shipPublished(t)
+	local := shipHeadSHA(t, s, ticket)
+	gh.runs, gh.required = shipFailedCI()
+	gh.prState = shipMergeReadyPR(local, "PR_node_keeps_ready")
+	gh.logTail = func(context.Context, string, string, int64, int) (string, error) {
+		return shipFlakyLogText, nil
+	}
+
+	_, err := shipPollRun(t, s, ticket, gh, tr)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if len(gh.convertToDraftCalls) != 0 {
+		t.Errorf("convertToDraftCalls = %+v, want none", gh.convertToDraftCalls)
+	}
+	if len(gh.reruns) != 1 {
+		t.Errorf("reruns = %+v, want exactly one", gh.reruns)
+	}
+}
+
+// TestPollCIRerunWaitsForRerunToAppear proves decideCIRerun's own rule 1
+// (design shape): the same check run id, seeded just now, makes POLL wait
+// instead of re-running again or sending a fix request.
+func TestPollCIRerunWaitsForRerunToAppear(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow end-to-end flow; runs in the full suite")
+	}
+	t.Parallel()
+	s, ticket, gh, tr := shipPublished(t)
+	local := shipHeadSHA(t, s, ticket)
+	gh.runs, gh.required = shipFailedCI()
+	gh.prState = shipMergeReadyPR(local, "PR_node_waits")
+	seedCheckRerun(t, s, ticket.ID, response.CheckRerunEvent{
+		Check: "ci", SHA: local, RunID: 1, CheckRunID: 1, Reason: response.RerunReasonFlaky,
+	})
+
+	before := time.Now().UTC()
+	commit, err := shipPollRun(t, s, ticket, gh, tr)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if len(gh.reruns) != 0 {
+		t.Errorf("reruns = %+v, want none", gh.reruns)
+	}
+	if shipHasFixMarker(commit) {
+		t.Errorf("commit.Messages = %+v, want no fix marker", commit.Messages)
+	}
+	if commit.Poll == nil {
+		t.Fatal("commit.Poll is nil, want the idle backoff commit")
+	}
+	if !commit.Poll.NextAt.After(before) {
+		t.Errorf("Poll.NextAt = %v, want it after %v", commit.Poll.NextAt, before)
+	}
+}
+
+// TestPollCIRerunInfraCapsAtThreeThenEscalates proves decideCIRerun's own
+// rule 2 (design shape): an infrastructure conclusion re-runs up to its own
+// cap of 3 per check per head sha, then escalates, never a fix request, and
+// never reads a log.
+func TestPollCIRerunInfraCapsAtThreeThenEscalates(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow end-to-end flow; runs in the full suite")
+	}
+	t.Parallel()
+	s, ticket, gh, tr := shipPublished(t)
+	local := shipHeadSHA(t, s, ticket)
+	gh.required = shipCIRequired()
+	gh.prState = shipMergeReadyPR(local, "PR_node_infra_cap")
+	gh.logTail = func(context.Context, string, string, int64, int) (string, error) {
+		t.Fatal("JobLogTail must not be called for an infrastructure conclusion")
+		return "", nil
+	}
+
+	for i, checkRunID := range []int64{2, 3, 4} {
+		runID := int64(100 + i)
+		gh.runs = []orchestrator.CheckRun{shipCIRun(checkRunID, runID, runID+1000, ghCancelled)}
+		commit, err := shipPollRun(t, s, pbGetTicket(t, s, ticket.ID), gh, tr)
+		if err != nil {
+			t.Fatalf("Run (tick %d): %v", i+1, err)
+		}
+		if len(gh.reruns) != i+1 {
+			t.Fatalf("tick %d: reruns = %+v, want %d", i+1, gh.reruns, i+1)
+		}
+		events := shipCheckRerunEvents(t, commit)
+		if len(events) != 1 || events[0].Reason != response.RerunReasonInfra {
+			t.Fatalf("tick %d: check_rerun events = %+v, want exactly one reason infra", i+1, events)
+		}
+		if shipHasFixMarker(commit) {
+			t.Errorf("tick %d: commit.Messages = %+v, want no fix marker", i+1, commit.Messages)
+		}
+		pbApply(t, s, ticket, commit)
+	}
+
+	gh.runs = []orchestrator.CheckRun{shipCIRun(5, 103, 1103, ghCancelled)}
+	commit, err := shipPollRun(t, s, pbGetTicket(t, s, ticket.ID), gh, tr)
+	if err != nil {
+		t.Fatalf("Run (tick 4): %v", err)
+	}
+	if commit.Escalation == nil {
+		t.Fatal("want an escalation")
+	}
+	if commit.Escalation.Payload.What != rerunInfraWhat {
+		t.Errorf("What = %q, want %q", commit.Escalation.Payload.What, rerunInfraWhat)
+	}
+	for _, runID := range []string{"100", "101", "102"} {
+		if !strings.Contains(commit.Escalation.Payload.Tried, runID) {
+			t.Errorf("Tried = %q, want it to list workflow run %s", commit.Escalation.Payload.Tried, runID)
+		}
+	}
+	if shipHasFixMarker(commit) {
+		t.Errorf("commit.Messages = %+v, want no fix marker", commit.Messages)
+	}
+	if len(gh.reruns) != 3 {
+		t.Errorf("reruns = %+v, want still exactly 3", gh.reruns)
+	}
+}
+
+// TestPollCIRerunInfraDoesNotSpendFlakyRerun proves decideCIRerun keeps an
+// infra re-run's own count separate from a flaky or no_log one: a prior
+// infra event for the check never counts as its "used" flaky budget.
+func TestPollCIRerunInfraDoesNotSpendFlakyRerun(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow end-to-end flow; runs in the full suite")
+	}
+	t.Parallel()
+	s, ticket, gh, tr := shipPublished(t)
+	local := shipHeadSHA(t, s, ticket)
+	gh.required = shipCIRequired()
+	gh.prState = shipMergeReadyPR(local, "PR_node_infra_not_spent")
+	gh.runs = []orchestrator.CheckRun{shipCIRun(7, 10, 11, "failure")}
+	gh.logTail = func(context.Context, string, string, int64, int) (string, error) {
+		return "--- FAIL: TestY (0.1s)", nil
+	}
+	seedCheckRerun(t, s, ticket.ID, response.CheckRerunEvent{
+		Check: "ci", SHA: local, RunID: 1, CheckRunID: 6, Reason: response.RerunReasonInfra,
+	})
+
+	commit, err := shipPollRun(t, s, ticket, gh, tr)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if len(gh.reruns) != 1 {
+		t.Fatalf("reruns = %+v, want exactly one", gh.reruns)
+	}
+	events := shipCheckRerunEvents(t, commit)
+	if len(events) != 1 || events[0].Reason != response.RerunReasonFlaky {
+		t.Fatalf("check_rerun events = %+v, want exactly one reason flaky", events)
+	}
+}
+
+// TestPollCIRerunNoLogTwiceEscalates proves decideCIRerun's own rule 4
+// (design shape): a failed check whose log cannot be read gets the check's
+// one re-run, and escalates -- never a fix request -- once that re-run
+// also has no log.
+func TestPollCIRerunNoLogTwiceEscalates(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow end-to-end flow; runs in the full suite")
+	}
+	t.Parallel()
+	s, ticket, gh, tr := shipPublished(t)
+	local := shipHeadSHA(t, s, ticket)
+	gh.runs, gh.required = shipFailedCI()
+	gh.prState = shipMergeReadyPR(local, "PR_node_no_log_twice")
+	logErr := errors.New("signed url expired")
+	gh.logTail = func(context.Context, string, string, int64, int) (string, error) { return "", logErr }
+
+	commit1, err := shipPollRun(t, s, ticket, gh, tr)
+	if err != nil {
+		t.Fatalf("Run (tick 1): %v", err)
+	}
+	events := shipCheckRerunEvents(t, commit1)
+	if len(events) != 1 || events[0].Reason != response.RerunReasonNoLog {
+		t.Fatalf("tick 1 check_rerun events = %+v, want exactly one reason no_log", events)
+	}
+	pbApply(t, s, ticket, commit1)
+
+	gh.runs = []orchestrator.CheckRun{shipCIRun(3, 4, 5, "failure")}
+	commit2, err := shipPollRun(t, s, pbGetTicket(t, s, ticket.ID), gh, tr)
+	if err != nil {
+		t.Fatalf("Run (tick 2): %v", err)
+	}
+	if commit2.Escalation == nil {
+		t.Fatal("want an escalation")
+	}
+	if commit2.Escalation.Payload.What != rerunNoLogWhat {
+		t.Errorf("What = %q, want %q", commit2.Escalation.Payload.What, rerunNoLogWhat)
+	}
+	if !strings.Contains(commit2.Escalation.Payload.Why, logErr.Error()) {
+		t.Errorf("Why = %q, want it to hold %q", commit2.Escalation.Payload.Why, logErr.Error())
+	}
+	if shipHasFixMarker(commit2) {
+		t.Errorf("commit2.Messages = %+v, want no fix marker", commit2.Messages)
+	}
+}
+
+// TestPollCIRerunNoLogThenReadableFailureSendsFix proves decideCIRerun's
+// own rule 4 and 5 together: a spent no_log re-run for the check also
+// counts as "used" once a later failure of the same check reads a log
+// just fine, so a draft pull request reaches the fix row on this very
+// tick.
+func TestPollCIRerunNoLogThenReadableFailureSendsFix(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow end-to-end flow; runs in the full suite")
+	}
+	t.Parallel()
+	s, ticket, gh, tr := shipPublished(t)
+	local := shipHeadSHA(t, s, ticket)
+	gh.required = shipCIRequired()
+	gh.runs = []orchestrator.CheckRun{shipCIRun(5, 10, 11, "failure")}
+	gh.prState = orchestrator.PRState{Draft: true, HeadSHA: local, BaseRef: pbFixtureDefaultBranch}
+	gh.logTail = func(context.Context, string, string, int64, int) (string, error) { return shipCILogTailText, nil }
+	seedCheckRerun(t, s, ticket.ID, response.CheckRerunEvent{
+		Check: "ci", SHA: local, RunID: 1, CheckRunID: 1, Reason: response.RerunReasonNoLog,
+	})
+
+	commit, err := shipPollRun(t, s, ticket, gh, tr)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	found := false
+	for _, m := range commit.Messages {
+		if strings.HasPrefix(m.Body, fixRequestedCILogPrefix) && strings.Contains(m.Body, shipCILogTailText) {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("commit.Messages = %+v, want a %q marker carrying the log tail", commit.Messages, fixRequestedCILogPrefix)
+	}
+	if len(gh.reruns) != 0 {
+		t.Errorf("reruns = %+v, want none", gh.reruns)
+	}
+}
+
+// TestPollCIRerunNewHeadGetsFreshRerun proves ciRerunDecision's own sha
+// filter: a check_rerun event seeded for an earlier head never counts
+// against a failure of the same check on a new head.
+func TestPollCIRerunNewHeadGetsFreshRerun(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow end-to-end flow; runs in the full suite")
+	}
+	t.Parallel()
+	s, ticket, gh, tr := shipPublished(t)
+	local := shipHeadSHA(t, s, ticket)
+	oldSHA := strings.Repeat("a", 40)
+	gh.runs, gh.required = shipFailedCI()
+	gh.prState = shipMergeReadyPR(local, "PR_node_new_head")
+	gh.logTail = func(context.Context, string, string, int64, int) (string, error) {
+		return shipFlakyLogText, nil
+	}
+	seedCheckRerun(t, s, ticket.ID, response.CheckRerunEvent{
+		Check: "ci", SHA: oldSHA, RunID: 1, CheckRunID: 1, Reason: response.RerunReasonFlaky,
+	})
+
+	commit, err := shipPollRun(t, s, ticket, gh, tr)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if len(gh.reruns) != 1 {
+		t.Fatalf("reruns = %+v, want exactly one", gh.reruns)
+	}
+	events := shipCheckRerunEvents(t, commit)
+	if len(events) != 1 || events[0].SHA != local {
+		t.Fatalf("check_rerun events = %+v, want exactly one event on sha %q", events, local)
+	}
+}
+
+// TestPollCIRerunRetryResetsBudget proves design Q1's own retry row: an
+// owner Retry resets a check's own infra budget, exactly as it resets the
+// review-bot clock (TestPollReviewBotRestartsAfterRetry).
+func TestPollCIRerunRetryResetsBudget(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow end-to-end flow; runs in the full suite")
+	}
+	t.Parallel()
+	s, ticket, gh, tr := shipPublished(t)
+	local := shipHeadSHA(t, s, ticket)
+	gh.required = shipCIRequired()
+	gh.prState = shipMergeReadyPR(local, "PR_node_retry_resets")
+
+	for i, checkRunID := range []int64{1, 2, 3} {
+		runID := int64(10 + i)
+		seedCheckRerun(t, s, ticket.ID, response.CheckRerunEvent{
+			Check: "ci", SHA: local, RunID: runID, CheckRunID: checkRunID, Reason: response.RerunReasonInfra,
+		})
+	}
+	if _, err := s.InsertMessage(t.Context(), store.Message{
+		TicketID: ticket.ID, Type: msgTypeUpdate, Author: authorSystem, Body: markerRetryRequested,
+	}); err != nil {
+		t.Fatalf("InsertMessage(retry requested): %v", err)
+	}
+
+	gh.runs = []orchestrator.CheckRun{shipCIRun(4, 20, 21, ghCancelled)}
+	commit, err := shipPollRun(t, s, ticket, gh, tr)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if len(gh.reruns) != 1 {
+		t.Fatalf("reruns = %+v, want exactly one", gh.reruns)
+	}
+	if commit.Escalation != nil {
+		t.Fatalf("got an escalation, want a re-run: %+v", commit.Escalation.Payload)
+	}
+}
+
+// TestPollCIRerunNonActionsCheckSendsFix proves decideCIRerun's own rule 3:
+// a failed check from an app other than github-actions sends the fix
+// request straight away -- Zing has no job id to re-run.
+func TestPollCIRerunNonActionsCheckSendsFix(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow end-to-end flow; runs in the full suite")
+	}
+	t.Parallel()
+	s, ticket, gh, tr := shipPublished(t)
+	local := shipHeadSHA(t, s, ticket)
+	gh.required = shipCIRequired()
+	gh.runs = []orchestrator.CheckRun{{
+		ID: 1, Name: "ci", Status: ghCompleted, Conclusion: "failure", AppSlug: "jenkins",
+		DetailsURL: "https://jenkins.example.com/job/ci/9",
+	}}
+	gh.prState = orchestrator.PRState{Draft: true, HeadSHA: local, BaseRef: pbFixtureDefaultBranch}
+
+	commit, err := shipPollRun(t, s, ticket, gh, tr)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if len(gh.reruns) != 0 {
+		t.Errorf("reruns = %+v, want none", gh.reruns)
+	}
+	want := "check ci (failure) https://jenkins.example.com/job/ci/9"
+	found := false
+	for i := range commit.Messages {
+		if strings.HasPrefix(commit.Messages[i].Body, fixRequestedCILogPrefix) && strings.Contains(commit.Messages[i].Body, want) {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("commit.Messages = %+v, want a %q marker carrying %q", commit.Messages, fixRequestedCILogPrefix, want)
+	}
+}
+
+// TestPollCIRerunAPIErrorEscalates proves pollRerun's own error row: a
+// plain RerunJob failure (neither a rate limit nor an unavailable GitHub)
+// escalates instead of leaving the budget silently unspent.
+func TestPollCIRerunAPIErrorEscalates(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow end-to-end flow; runs in the full suite")
+	}
+	t.Parallel()
+	s, ticket, gh, tr := shipPublished(t)
+	local := shipHeadSHA(t, s, ticket)
+	gh.runs, gh.required = shipFailedCI()
+	gh.prState = shipMergeReadyPR(local, "PR_node_api_error")
+	gh.logTail = func(context.Context, string, string, int64, int) (string, error) {
+		return shipFlakyLogText, nil
+	}
+	gh.rerunErr = errors.New("403 Forbidden")
+
+	commit, err := shipPollRun(t, s, ticket, gh, tr)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if commit.Escalation == nil {
+		t.Fatal("want an escalation")
+	}
+	if commit.Escalation.Payload.What != ciRerunAPIErrorWhat {
+		t.Errorf("What = %q, want %q", commit.Escalation.Payload.What, ciRerunAPIErrorWhat)
+	}
+	if !strings.Contains(commit.Escalation.Payload.Why, "ci") || !strings.Contains(commit.Escalation.Payload.Why, gh.rerunErr.Error()) {
+		t.Errorf("Why = %q, want it to name %q and %q", commit.Escalation.Payload.Why, "ci", gh.rerunErr.Error())
+	}
+	if events := shipCheckRerunEvents(t, commit); len(events) != 0 {
+		t.Errorf("check_rerun events = %+v, want none", events)
+	}
+	if shipHasFixMarker(commit) {
+		t.Errorf("commit.Messages = %+v, want no fix marker", commit.Messages)
 	}
 }
 
@@ -5028,6 +5647,7 @@ func TestDraftWhenLoopReopens(t *testing.T) {
 	gh.runs, gh.required = runs, required
 	gh.prState = orchestrator.PRState{Draft: false, HeadSHA: local, BaseRef: pbFixtureDefaultBranch, NodeID: "PR_node_reopen"}
 	gh.logTail = func(context.Context, string, string, int64, int) (string, error) { return shipCILogTailText, nil }
+	seedSpentFlakyCheckRerun(t, s, ticket.ID, local)
 
 	commit, err := shipPollRun(t, s, ticket, gh, tr)
 	if err != nil {
@@ -5185,6 +5805,7 @@ func TestReadyCrashConverges(t *testing.T) {
 	// A later red CI flips the (still not-draft) pull request back to draft.
 	gh.runs, gh.required = shipFailedCI()
 	gh.logTail = func(context.Context, string, string, int64, int) (string, error) { return shipCILogTailText, nil }
+	seedSpentFlakyCheckRerun(t, s, ticket.ID, local)
 	commit3, err := shipPollRun(t, s, pbGetTicket(t, s, ticket.ID), gh, tr)
 	if err != nil {
 		t.Fatalf("Run (CI failed poll): %v", err)
@@ -5873,6 +6494,7 @@ func TestMergeAskedAgainAfterReopenSameHead(t *testing.T) {
 
 	failedRuns, _ := shipFailedCI()
 	gh.runs = failedRuns
+	seedSpentFlakyCheckRerun(t, s, ticket.ID, local)
 	commit2, err := shipPollRun(t, s, pbGetTicket(t, s, ticket.ID), gh, tr)
 	if err != nil {
 		t.Fatalf("Run (CI fails): %v", err)
@@ -5934,6 +6556,7 @@ func TestLoopReopenWithdrawsMergeQuestion(t *testing.T) {
 
 	failedRuns, _ := shipFailedCI()
 	gh.runs = failedRuns
+	seedSpentFlakyCheckRerun(t, s, ticket.ID, local)
 	commit2, err := shipPollRun(t, s, pbGetTicket(t, s, ticket.ID), gh, tr)
 	if err != nil {
 		t.Fatalf("Run (CI fails): %v", err)

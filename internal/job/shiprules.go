@@ -463,14 +463,6 @@ func ciLogTextFrom(failed []failedCheck, failedStatuses []orchestrator.CommitSta
 	return strings.Join(parts, "\n\n")
 }
 
-// ciLogText is pollCIFailed's current entry point into the log-tail text,
-// kept as a one-line wrapper over readFailedChecks and ciLogTextFrom so
-// it keeps compiling and behaving the same until task 4 moves the read
-// into ciRerunDecision and deletes this wrapper.
-func ciLogText(ctx context.Context, checks Checks, owner, repo string, failedRuns []orchestrator.CheckRun, failedStatuses []orchestrator.CommitStatus) string {
-	return ciLogTextFrom(readFailedChecks(ctx, checks, owner, repo, failedRuns), failedStatuses)
-}
-
 // failedTestPattern matches a go test failure header.
 var failedTestPattern = regexp.MustCompile(`--- FAIL: (\S+)`)
 

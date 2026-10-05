@@ -706,15 +706,52 @@ func (h shipHandler) poll(ctx context.Context, t store.Ticket, d Deps) (store.Ha
 		return store.HandlerCommit{}, err
 	}
 
+	var rd rerunDecision
+	if result.State == CIFailed {
+		rd, err = h.ciRerunDecision(ctx, t, d, proj, result, local)
+		if err != nil {
+			return store.HandlerCommit{}, err
+		}
+	}
+
+	notes, err := h.rerunNotesFor(ctx, t, d, runs, local)
+	if err != nil {
+		return store.HandlerCommit{}, err
+	}
+
+	c, err := h.pollRoute(ctx, t, d, proj, wt, pr, number, local, fp, result, rd, actionable, leftover, unclassified, login, anyUnresolved, skipFlip)
+	if err != nil {
+		return store.HandlerCommit{}, err
+	}
+	c.Messages = append(c.Messages, notes...)
+	return c, nil
+}
+
+// pollRoute is poll's own row switch (design section 8.5): CIUnprotected's
+// escalation; the re-run rows a failed check's own rerunDecision picks
+// between (rerunNow, rerunEscalate, rerunWait -- all three ahead of the
+// draft flip, design Q4: a ready pull request stays ready while its one
+// re-run is pending, and only a fix request that actually follows flips it
+// to draft); the draft flip itself; the ci_log fix request once rd.Action
+// is rerunFix; and every row below unchanged from before this task.
+func (h shipHandler) pollRoute(ctx context.Context, t store.Ticket, d Deps, proj Project, wt orchestrator.Worktree, pr orchestrator.PRState, number int, local, fp string, result CIResult, rd rerunDecision, actionable, leftover, unclassified []orchestrator.Thread, login string, anyUnresolved, skipFlip bool) (store.HandlerCommit, error) {
 	switch {
 	case result.State == CIUnprotected:
 		c := shipEscalation(t, d, unprotectedWhat, unprotectedWhy, "")
 		c.ClearPoll = true
 		return c, nil
+	case result.State == CIFailed && rd.Action == rerunNow:
+		return h.pollRerun(ctx, t, d, proj, fp, rd.Reruns)
+	case result.State == CIFailed && rd.Action == rerunEscalate:
+		c := shipEscalation(t, d, rd.What, rd.Why, rd.Tried)
+		c.ClearPoll = true
+		return c, nil
+	case result.State == CIFailed && rd.Action == rerunWait:
+		return h.pollIdle(ctx, t, d, proj, pr, number, fp, result.Missing)
 	case !pr.Draft && (result.State == CIFailed || anyUnresolved) && !skipFlip:
 		return h.pollConvertToDraft(ctx, t, d, proj, pr, local)
 	case result.State == CIFailed:
-		return h.pollCIFailed(ctx, t, d, proj, result)
+		return h.pollCIFailed(ctx, t, d, rd.Text)
 	case len(actionable) > 0:
 		return h.startRespondBatch(ctx, t, d, local, actionable, login)
 	case len(leftover) > 0:
@@ -732,6 +769,132 @@ func (h shipHandler) poll(ctx context.Context, t store.Ticket, d Deps) (store.Ha
 	default: // CIGreen, zero unresolved threads, not draft: row 9 (MERGE or the merge question, M4 task 8).
 		return h.pollMergeGate(ctx, t, d, proj, wt, number, local, fp)
 	}
+}
+
+// ciRerunDecision reads the failed checks' own facts and logs
+// (readFailedChecks), this sha's own check_rerun events written since the
+// newest "retry requested" marker (Retry resets every check's own budget,
+// #91's Q1), and returns decideCIRerun's verdict with Text set to
+// ciLogTextFrom's text -- computed here, once, so both the fix row and a
+// loops_exhausted escalation built from it (pollCIFailed) see the same
+// text this tick decided on.
+func (h shipHandler) ciRerunDecision(ctx context.Context, t store.Ticket, d Deps, proj Project, result CIResult, sha string) (rerunDecision, error) {
+	failed := readFailedChecks(ctx, proj.Checks, proj.Owner, proj.Repo, result.FailedRuns)
+	text := ciLogTextFrom(failed, result.FailedStatuses)
+
+	retryRow, hasRetry, err := d.Store.Marker(ctx, t.ID, markerRetryRequested)
+	if err != nil {
+		return rerunDecision{}, fmt.Errorf("job: shipping: poll: retry requested marker: %w", err)
+	}
+
+	rows, err := d.Store.Events(ctx, t.ID, store.EventKindCheckRerun, store.EventFilter{SHA: sha})
+	if err != nil {
+		return rerunDecision{}, fmt.Errorf("job: shipping: poll: check_rerun events: %w", err)
+	}
+
+	prior := make([]priorRerun, 0, len(rows))
+	for i := range rows {
+		if hasRetry && rows[i].ID <= retryRow.ID {
+			continue
+		}
+		var ev response.CheckRerunEvent
+		if err := json.Unmarshal(rows[i].Payload, &ev); err != nil {
+			return rerunDecision{}, fmt.Errorf("job: shipping: poll: check_rerun event %d: %w", rows[i].ID, err)
+		}
+		at := time.Time{}
+		if rows[i].CreatedAt != nil {
+			at = rows[i].CreatedAt.UTC()
+		}
+		prior = append(prior, priorRerun{Event: ev, At: at})
+	}
+
+	rd := decideCIRerun(time.Now().UTC(), sha, failed, len(result.FailedStatuses), prior)
+	rd.Text = text
+	return rd, nil
+}
+
+// ciRerunAPIErrorWhat is pollRerun's own escalation What, once RerunJob
+// itself fails with neither a rate limit nor an unavailable GitHub.
+const ciRerunAPIErrorWhat = "Zing could not re-run a failed CI check"
+
+// pollRerun re-runs every planned job in order (design shape, "Per-check
+// rule"): RerunJob first, then the check_rerun event recording it, so a
+// crash between the two never records a re-run GitHub never made. A rate
+// limit or an unavailable GitHub reschedules this tick exactly as
+// pollReadFailure's own two such rows do, carrying no re-run events written
+// so far forward (the next tick re-reads check runs and re-decides from
+// scratch). Any other RerunJob failure escalates instead, with the
+// check_rerun events already written this tick still attached to the
+// commit, so a re-run GitHub did make before the one that failed is not
+// lost.
+func (h shipHandler) pollRerun(ctx context.Context, t store.Ticket, d Deps, proj Project, fp string, plan []plannedRerun) (store.HandlerCommit, error) {
+	written := make([]store.Message, 0, len(plan))
+	for _, p := range plan {
+		if err := proj.Checks.RerunJob(ctx, proj.Owner, proj.Repo, p.JobID); err != nil {
+			if errors.Is(err, orchestrator.ErrGitHubUnavailable) {
+				return pollScheduleOnly(t, d, time.Time{}), nil
+			}
+			if rle, ok := errors.AsType[orchestrator.RateLimitedError](err); ok {
+				return pollScheduleOnly(t, d, rle.ResetAt), nil
+			}
+			why := fmt.Sprintf("re-running %s (job %d) on %s failed: %s", p.Event.Check, p.JobID, shortSHA(p.Event.SHA), err)
+			c := shipEscalation(t, d, ciRerunAPIErrorWhat, why, "")
+			c.Messages = written
+			c.ClearPoll = true
+			return c, nil
+		}
+
+		msg, msgErr := store.NewEvent(t.ID, store.EventKindCheckRerun, p.Event)
+		if msgErr != nil {
+			return store.HandlerCommit{}, fmt.Errorf("job: shipping: poll: check_rerun event: %w", msgErr)
+		}
+		written = append(written, msg)
+		slog.Info("ci check re-run", "ticket_id", t.ID, "check", p.Event.Check, "sha", p.Event.SHA, "run_id", p.Event.RunID, "reason", p.Event.Reason)
+	}
+
+	iv := nextInterval(t.PollFingerprint, t.PollIntervalS, fp)
+	next := time.Now().UTC().Truncate(time.Second).Add(time.Duration(iv) * time.Second)
+
+	c := baseCommit(t, d)
+	c.Waiting = t.WaitingOn
+	c.Messages = written
+	c.Poll = &store.PollUpdate{NextAt: next, IntervalS: iv, Fingerprint: fp}
+	return c, nil
+}
+
+// rerunNotesFor reads every check_rerun and check_rerun_passed event on
+// sha and calls rerunPassedNotes (design shape, "rerunPassedNotes"): every
+// POLL tick, not only a CI-failed one, since a check that was re-run on an
+// earlier tick can pass on any later one, whichever row that tick's own
+// CI result otherwise routes to.
+func (h shipHandler) rerunNotesFor(ctx context.Context, t store.Ticket, d Deps, runs []orchestrator.CheckRun, sha string) ([]store.Message, error) {
+	rerunRows, err := d.Store.Events(ctx, t.ID, store.EventKindCheckRerun, store.EventFilter{SHA: sha})
+	if err != nil {
+		return nil, fmt.Errorf("job: shipping: poll: check_rerun events: %w", err)
+	}
+	passedRows, err := d.Store.Events(ctx, t.ID, store.EventKindCheckRerunPassed, store.EventFilter{SHA: sha})
+	if err != nil {
+		return nil, fmt.Errorf("job: shipping: poll: check_rerun_passed events: %w", err)
+	}
+
+	reruns := make([]response.CheckRerunEvent, 0, len(rerunRows))
+	for i := range rerunRows {
+		var ev response.CheckRerunEvent
+		if err := json.Unmarshal(rerunRows[i].Payload, &ev); err != nil {
+			return nil, fmt.Errorf("job: shipping: poll: check_rerun event %d: %w", rerunRows[i].ID, err)
+		}
+		reruns = append(reruns, ev)
+	}
+	passed := make([]response.CheckRerunPassedEvent, 0, len(passedRows))
+	for i := range passedRows {
+		var ev response.CheckRerunPassedEvent
+		if err := json.Unmarshal(passedRows[i].Payload, &ev); err != nil {
+			return nil, fmt.Errorf("job: shipping: poll: check_rerun_passed event %d: %w", passedRows[i].ID, err)
+		}
+		passed = append(passed, ev)
+	}
+
+	return rerunPassedNotes(t.ID, sha, runs, reruns, passed)
 }
 
 // pollConvertToDraft is design section 8.5 row 3 and 8.9 (M4 task 7): the
@@ -1012,14 +1175,14 @@ func (h shipHandler) pollHeadMismatch(ctx context.Context, t store.Ticket, d Dep
 }
 
 // pollCIFailed is design section 8.5 row 4: the shared gate of 8.7, then a
-// ci_log fix request with ciLogText's own log tails, or loops_exhausted
-// when the gate is already at jobs.respond.max_loops (D14). Rows 5 and 6a's
-// own merge-question withdrawal has nothing to withdraw in M3 (no code
+// ci_log fix request carrying text -- ciRerunDecision's own ciLogTextFrom
+// text, reached once a check's own flaky or no_log re-run budget is
+// already spent (rd.Action rerunFix) -- or loops_exhausted when the gate
+// is already at jobs.respond.max_loops (D14). Rows 5 and 6a's own
+// merge-question withdrawal has nothing to withdraw in M3 (no code
 // anywhere in this milestone ever writes a "merge asked" or "merge held"
 // marker), so it is not built here.
-func (h shipHandler) pollCIFailed(ctx context.Context, t store.Ticket, d Deps, proj Project, result CIResult) (store.HandlerCommit, error) {
-	text := ciLogText(ctx, proj.Checks, proj.Owner, proj.Repo, result.FailedRuns, result.FailedStatuses)
-
+func (h shipHandler) pollCIFailed(ctx context.Context, t store.Ticket, d Deps, text string) (store.HandlerCommit, error) {
 	ciReqs, err := d.Store.MarkersWithPrefix(ctx, t.ID, fixRequestedCILogPrefix)
 	if err != nil {
 		return store.HandlerCommit{}, fmt.Errorf("job: shipping: poll: ci_log fix requests: %w", err)
