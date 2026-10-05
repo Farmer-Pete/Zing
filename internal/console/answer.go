@@ -139,7 +139,7 @@ func (c *console) handleDraft(w http.ResponseWriter, r *http.Request) {
 	_, err := c.store.SaveDraft(r.Context(), in)
 	if err != nil {
 		if conflictErr, ok := errors.AsType[*store.ConflictError](err); ok {
-			writeConflict(w, conflictErr, req.Ticket, questionID(req.Question))
+			writeConflict(w, conflictErr)
 			return
 		}
 		slog.Error("console: save draft", "ticket_id", req.Ticket, "err", err)
@@ -150,16 +150,6 @@ func (c *console) handleDraft(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
-// questionID reads a draftRequest.Question into the 0-for-a-thread-reply
-// shape writeConflict's log line shares with logSaveDraftOutcome
-// (console_writes.go), rather than logging a nil pointer.
-func questionID(q *int64) int64 {
-	if q == nil {
-		return 0
-	}
-	return *q
-}
-
 // writeConflict writes ce as handleDraft's 409 (ticket #43): a conflict
 // with no Current (every reason but "changed in another tab") stays the
 // existing plain-text body, since console.js's other conflict handling
@@ -167,11 +157,10 @@ func questionID(q *int64) int64 {
 // that does carry Current -- the stale-base case -- answers a JSON body
 // instead, {"reason":..., "current":...}, so the client can learn the
 // stored text to show under the box and to record as its next base,
-// without a second round trip. ticketID and questionID are logged only on
-// the encode-failure path below, so that line can be matched to the
-// store's own "save draft conflict" line for the same ticket and question
-// (review fix: the line previously carried only reason and err).
-func writeConflict(w http.ResponseWriter, ce *store.ConflictError, ticketID, questionID int64) {
+// without a second round trip. The response header is already written by
+// the time Encode could fail, so there is nothing left to tell the client;
+// the error is logged and otherwise ignored (review fix, simplification).
+func writeConflict(w http.ResponseWriter, ce *store.ConflictError) {
 	if ce.Current == nil {
 		http.Error(w, ce.Reason, http.StatusConflict)
 		return
@@ -182,7 +171,7 @@ func writeConflict(w http.ResponseWriter, ce *store.ConflictError, ticketID, que
 		Reason  string `json:"reason"`
 		Current string `json:"current"`
 	}{Reason: ce.Reason, Current: *ce.Current}); err != nil {
-		slog.Error("console: write draft conflict", "ticket_id", ticketID, "question_id", questionID, "reason", ce.Reason, "err", err)
+		slog.Error("console: write draft conflict", "reason", ce.Reason, "err", err)
 	}
 }
 

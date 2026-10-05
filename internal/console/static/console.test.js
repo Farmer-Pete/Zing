@@ -46,6 +46,8 @@ import {
 	sendResultWithUnsent,
 	sendTargets,
 	sendConfirmText,
+	skipConflicted,
+	sendableQuestions,
 	AUTOSAVE_DEBOUNCE_MS,
 	replyAutosaveBody,
 	emptiedReplyBodies,
@@ -682,6 +684,40 @@ test('sendTargets: a conflicted entry with hasDraft true is left out of ids and 
 test('sendConfirmText: names the one question or lists several', () => {
 	assert.equal(sendConfirmText(['Q6']), 'Send 1 reply on Q6?');
 	assert.equal(sendConfirmText(['Q6', 'Q7', 'Q9']), 'Send 3 replies on Q6, Q7, Q9?');
+});
+
+// skipConflicted: postSendBatchLocked and rearmAutosaves (ticket #43, cause
+// 2, Q5) each run this over their own list, so a box holding a "changed in
+// another tab" note is neither saved nor sent until the owner's next
+// keystroke.
+
+test('skipConflicted: the middle of three conflicted items is dropped, order kept', () => {
+	const items = [{ id: 'a' }, { id: 'b' }, { id: 'c' }];
+	const result = skipConflicted(items, (item) => item.id === 'b');
+	assert.deepEqual(result, [{ id: 'a' }, { id: 'c' }]);
+});
+
+test('skipConflicted: an empty list returns an empty list', () => {
+	assert.deepEqual(
+		skipConflicted([], () => true),
+		[],
+	);
+});
+
+// sendableQuestions: postSendBatchLocked's own re-check right before the
+// /send fetch (ticket #43, cause 2, Q5), against boxes that may have turned
+// conflicted after sendTargets already fixed the list.
+
+test('sendableQuestions: a listed id whose box became conflicted after the list was built is dropped', () => {
+	const boxes = [{ question: 6 }, { question: 7 }];
+	const result = sendableQuestions([6, 7], boxes, (box) => box.question === 7);
+	assert.deepEqual(result, [6]);
+});
+
+test('sendableQuestions: an id with no reply box is kept', () => {
+	const boxes = [{ question: 6 }];
+	const result = sendableQuestions([6, 9], boxes, () => false);
+	assert.deepEqual(result, [6, 9]);
 });
 
 // replyAutosaveBody: installReplyAutosave (console.js) debounces on 'input'

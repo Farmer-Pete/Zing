@@ -299,8 +299,7 @@ func logSaveDraftOutcome(ctx context.Context, in DraftInput, result DraftResult,
 			return
 		}
 		attrs = append(attrs, "reason", ce.Reason)
-		staleBase := ce.Reason == changedInAnotherTabReason && hasBase && ce.Current != nil
-		if staleBase {
+		if ce.Current != nil {
 			attrs = append(attrs, "current_fp", draftFingerprint(*ce.Current))
 		}
 		slog.InfoContext(ctx, "save draft conflict", attrs...)
