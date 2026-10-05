@@ -537,6 +537,21 @@ func TestMergeResolvesConflictEndToEnd(t *testing.T) {
 	}
 }
 
+// mergeFixAppendLine is what mergeFixAppendCmd appends to hello.txt, so
+// TestMergeUnstagedResolutionWithFixCommandLands can tell, from the landed
+// merge commit's own blob, that fix actually ran on the tick that landed
+// the merge rather than being skipped (review r2f1): a noop fix command
+// would leave this same test green even if mergeCheck's FixCmd-clearing
+// guard, or StageResolvedPaths itself, were deleted outright.
+const mergeFixAppendLine = "fix applied\n"
+
+// mergeFixAppendCmd is a real shell command (shipClaim's own Commands runs
+// it unsandboxed) that appends mergeFixAppendLine to hello.txt, the one
+// path both the merge's own side (MergeSidePaths) and the merge agent's
+// resolution touch, so fix's own change stays in the merge's lane and is
+// never reverted as stray.
+const mergeFixAppendCmd = `printf 'fix applied\n' >> hello.txt`
+
 // TestMergeUnstagedResolutionWithFixCommandLands is TestMergeResolvesConflictEndToEnd
 // with a fix command set on the project: the fake merge agent resolves
 // hello.txt's conflict in the working tree (mergeAgentFS's own
@@ -548,7 +563,8 @@ func TestMergeResolvesConflictEndToEnd(t *testing.T) {
 // naming "the project commands could not run" -- mergeRunTick would fail the
 // test right there. After the fix, mergeCheck stages the marker-free path
 // before CHECK runs, so the merge still lands within 4 ticks with no
-// escalation.
+// escalation, and the fix command's own edit to hello.txt is in the landed
+// commit, proving fix ran rather than being skipped.
 func TestMergeUnstagedResolutionWithFixCommandLands(t *testing.T) {
 	if testing.Short() {
 		t.Skip("slow end-to-end flow; runs in the full suite")
@@ -570,7 +586,7 @@ func TestMergeUnstagedResolutionWithFixCommandLands(t *testing.T) {
 	for i := 0; i < 4 && !landed; i++ {
 		deps = shipClaim(t, s, rt, ticket.ID, gh, tr)
 		proj := deps.Projects[ticket.ProjectID]
-		proj.FixCmd = pbNoopShellCmd
+		proj.FixCmd = mergeFixAppendCmd
 		deps.Projects[ticket.ProjectID] = proj
 		ticket, last = mergeRunTick(t, s, deps, ticket, fmt.Sprintf("tick %d", i))
 		landed = shipHasMergeLanded(last)
@@ -600,6 +616,14 @@ func TestMergeUnstagedResolutionWithFixCommandLands(t *testing.T) {
 	}
 	if !signed {
 		t.Error("SignedStatus(merge commit) = false, want true")
+	}
+
+	helloAtMerge, err := gitfixture.Git(t.Context(), wt.Dir(), "show", mergeSHA+":hello.txt")
+	if err != nil {
+		t.Fatalf("git show %s:hello.txt: %v", mergeSHA, err)
+	}
+	if !strings.Contains(string(helloAtMerge), mergeFixAppendLine) {
+		t.Errorf("hello.txt at the merge commit = %q, want it to contain fix's own %q", helloAtMerge, mergeFixAppendLine)
 	}
 
 	gh.prState.HeadSHA = preMergeHead

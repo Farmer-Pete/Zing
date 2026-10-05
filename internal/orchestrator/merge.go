@@ -351,12 +351,6 @@ type StageResult struct {
 	Binary []string
 }
 
-// Unresolved reports whether any path stayed unstaged: a marked or binary
-// conflict the merge agent has not cleared.
-func (r StageResult) Unresolved() bool {
-	return len(r.Marked) > 0 || len(r.Binary) > 0
-}
-
 // StageResolvedPaths reads the index's own unmerged paths and sorts each one
 // into res.Binary (fileLooksBinary), res.Marked (fileHasConflictMarkers, the
 // same marker scan ConflictMarkerPaths uses), or res.Staged (neither). It

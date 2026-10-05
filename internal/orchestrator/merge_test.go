@@ -504,6 +504,27 @@ func TestPathsWithConflictMarkers(t *testing.T) {
 // StageResolvedPaths
 // -----------------------------------------------------------------------
 
+// assertPorcelainPrefix fails t unless "git status --porcelain" in dir has
+// a line for path whose first two columns are wantPrefix, the shape
+// TestStageResolvedPaths and its siblings each check for one path after
+// calling StageResolvedPaths.
+func assertPorcelainPrefix(ctx context.Context, t *testing.T, dir, path, wantPrefix string) {
+	t.Helper()
+	status := runGit(ctx, t, dir, "status", "--porcelain")
+	found := false
+	for line := range strings.SplitSeq(strings.TrimRight(status, "\n"), "\n") {
+		if strings.HasSuffix(line, path) {
+			found = true
+			if !strings.HasPrefix(line, wantPrefix) {
+				t.Errorf("status line for %s = %q, want prefix %q", path, line, wantPrefix)
+			}
+		}
+	}
+	if !found {
+		t.Errorf("git status --porcelain = %q, wanted a line for %s", status, path)
+	}
+}
+
 // TestStageResolvedPaths proves StageResolvedPaths' own Staged branch: a
 // conflict the merge agent resolved in the working tree, with no markers
 // left and no "git add", comes back in Staged and is actually staged, so
@@ -534,19 +555,7 @@ func TestStageResolvedPaths(t *testing.T) {
 		t.Errorf("StageResolvedPaths Binary = %v, want empty", res.Binary)
 	}
 
-	status := runGit(ctx, t, f.wt.Dir(), "status", "--porcelain")
-	found := false
-	for line := range strings.SplitSeq(strings.TrimRight(status, "\n"), "\n") {
-		if strings.HasSuffix(line, mergeSharedPath) {
-			found = true
-			if !strings.HasPrefix(line, "M  ") {
-				t.Errorf("status line for %s = %q, want prefix %q", mergeSharedPath, line, "M  ")
-			}
-		}
-	}
-	if !found {
-		t.Errorf("git status --porcelain = %q, wanted a line for %s", status, mergeSharedPath)
-	}
+	assertPorcelainPrefix(ctx, t, f.wt.Dir(), mergeSharedPath, "M  ")
 
 	if _, err := f.o.ChangedPaths(ctx, f.wt); err != nil {
 		t.Errorf("ChangedPaths (after staging): unexpected error: %v", err)
@@ -585,19 +594,7 @@ func TestStageResolvedPathsStagesRemovedPath(t *testing.T) {
 		t.Errorf("StageResolvedPaths Binary = %v, want empty", res.Binary)
 	}
 
-	status := runGit(ctx, t, f.wt.Dir(), "status", "--porcelain")
-	found := false
-	for line := range strings.SplitSeq(strings.TrimRight(status, "\n"), "\n") {
-		if strings.HasSuffix(line, mergeSharedPath) {
-			found = true
-			if !strings.HasPrefix(line, "D  ") {
-				t.Errorf("status line for %s = %q, want prefix %q", mergeSharedPath, line, "D  ")
-			}
-		}
-	}
-	if !found {
-		t.Errorf("git status --porcelain = %q, wanted a line for %s", status, mergeSharedPath)
-	}
+	assertPorcelainPrefix(ctx, t, f.wt.Dir(), mergeSharedPath, "D  ")
 
 	if _, err := f.o.ChangedPaths(ctx, f.wt); err != nil {
 		t.Errorf("ChangedPaths (after staging): unexpected error: %v", err)
@@ -631,19 +628,7 @@ func TestStageResolvedPathsKeepsMarkedPath(t *testing.T) {
 		t.Errorf("StageResolvedPaths Binary = %v, want empty", res.Binary)
 	}
 
-	status := runGit(ctx, t, f.wt.Dir(), "status", "--porcelain")
-	found := false
-	for line := range strings.SplitSeq(strings.TrimRight(status, "\n"), "\n") {
-		if strings.HasSuffix(line, mergeSharedPath) {
-			found = true
-			if !strings.HasPrefix(line, "UU ") {
-				t.Errorf("status line for %s = %q, want prefix %q", mergeSharedPath, line, "UU ")
-			}
-		}
-	}
-	if !found {
-		t.Errorf("git status --porcelain = %q, wanted a line for %s", status, mergeSharedPath)
-	}
+	assertPorcelainPrefix(ctx, t, f.wt.Dir(), mergeSharedPath, "UU ")
 }
 
 // TestStageResolvedPathsKeepsBinaryConflict proves StageResolvedPaths never
