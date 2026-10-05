@@ -21,6 +21,7 @@ type eventRule func(payload json.RawMessage) (string, error)
 // store.EventKinds().
 var eventRules = map[string]eventRule{
 	store.EventKindCheckRerun: checkRerunLine,
+	store.EventKindOwnerEdit:  ownerEditLine,
 }
 
 // eventLine renders an event row through its kind's rule. If the kind has
@@ -55,4 +56,13 @@ func checkRerunLine(payload json.RawMessage) (string, error) {
 		return "", errors.New("decode check_rerun: missing check or sha")
 	}
 	return "Zing re-ran the " + string(e.Check) + " check on " + sha7(e.SHA) + ".", nil
+}
+
+// ownerEditLine renders an owner_edit event (store.EventKindOwnerEdit).
+func ownerEditLine(payload json.RawMessage) (string, error) {
+	var e response.OwnerEditEvent
+	if err := json.Unmarshal(payload, &e); err != nil {
+		return "", fmt.Errorf("decode owner_edit: %w", err)
+	}
+	return response.OwnerEditLine(e), nil
 }

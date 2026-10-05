@@ -1,0 +1,7 @@
+{
+  "target": "scenario",
+  "ref": "s3",
+  "action": "edit",
+  "old": "{\"id\":\"s3\",\"kind\":\"api\",\"given\":\"a ticket\",\"when\":\"it is checked\",\"then\":\"it passes\",\"check_cmd\":\"old command\"}",
+  "new": "{\"id\":\"s3\",\"kind\":\"api\",\"given\":\"a ticket\",\"when\":\"it is checked\",\"then\":\"it passes\",\"check_cmd\":\"new command\"}"
+}
