@@ -345,6 +345,56 @@ func TestConflictMarkerPathsLongLine(t *testing.T) {
 	}
 }
 
+// TestConflictMarkerPathsWiderMarker proves hasConflictMarkerPrefix
+// recognizes a conflict marker wider than git's default seven characters:
+// a path or .gitattributes can raise conflict-marker-size, and git then
+// writes that many '<' or '>' characters instead of seven (review thread
+// t156d0ccb1d965314).
+func TestConflictMarkerPathsWiderMarker(t *testing.T) {
+	t.Parallel()
+	ctx := t.Context()
+	f := newMergeConflictFixture(t, 7)
+
+	if _, err := f.o.StartBaseMerge(ctx, f.wt, f.baseSHA); err != nil {
+		t.Fatalf("StartBaseMerge: unexpected error: %v", err)
+	}
+
+	wider := strings.Repeat("<", 12) + " HEAD\nline one TICKET\n" + strings.Repeat("=", 12) + "\nline one MAIN\n" + strings.Repeat(">", 12) + " " + f.baseSHA + "\n"
+	writeTestFile(t, filepath.Join(f.wt.Dir(), mergeSharedPath), wider)
+
+	marked, err := f.o.ConflictMarkerPaths(ctx, f.wt)
+	if err != nil {
+		t.Fatalf("ConflictMarkerPaths: unexpected error: %v", err)
+	}
+	if want := []string{mergeSharedPath}; !slices.Equal(marked, want) {
+		t.Fatalf("ConflictMarkerPaths = %v, want %v", marked, want)
+	}
+}
+
+// TestConflictMarkerPathsUntracked proves ConflictMarkerPaths still finds a
+// conflicting path once it is untracked (for example by "git rm --cached")
+// but left on disk still holding its markers: a tracked-only diff against
+// HEAD would miss it entirely (review thread t6abdd4b1b67ca490).
+func TestConflictMarkerPathsUntracked(t *testing.T) {
+	t.Parallel()
+	ctx := t.Context()
+	f := newMergeConflictFixture(t, 8)
+
+	if _, err := f.o.StartBaseMerge(ctx, f.wt, f.baseSHA); err != nil {
+		t.Fatalf("StartBaseMerge: unexpected error: %v", err)
+	}
+
+	runGit(ctx, t, f.wt.Dir(), "rm", "--cached", "--force", mergeSharedPath)
+
+	marked, err := f.o.ConflictMarkerPaths(ctx, f.wt)
+	if err != nil {
+		t.Fatalf("ConflictMarkerPaths: unexpected error: %v", err)
+	}
+	if want := []string{mergeSharedPath}; !slices.Equal(marked, want) {
+		t.Fatalf("ConflictMarkerPaths = %v, want %v", marked, want)
+	}
+}
+
 // TestPathsWithConflictMarkers proves PathsWithConflictMarkers over a real,
 // already-committed merge: adoptMerge's own use, once MERGE_HEAD no longer
 // resolves, scanning the commit's own changed paths rather than the index's
@@ -727,6 +777,75 @@ func TestCommitMergeStagesPathMadeUntracked(t *testing.T) {
 	}
 
 	status := runGit(ctx, t, f.wt.Dir(), "status", "--porcelain")
+	if strings.TrimSpace(status) != "" {
+		t.Errorf("working tree not clean after CommitMerge: %q", status)
+	}
+}
+
+// TestCommitMergeDirectoryReplacedByFile proves mergeSidePathsPresent
+// treats a merge-side path as absent when its own directory component is
+// resolved away into a plain file: Lstat on such a path fails with
+// ENOTDIR, which os.IsNotExist does not recognize, and CommitMerge must
+// not treat that as a real error (review thread t17445ba115e42a7c).
+func TestCommitMergeDirectoryReplacedByFile(t *testing.T) {
+	t.Parallel()
+	ctx := t.Context()
+
+	const nestedPath = "foo/bar.txt"
+
+	fixture := newSigningFixture(t, true)
+	repo := newSigningTestRepo(t, fixture)
+	o := newTestOrchestrator(t, repo, execRunner{})
+
+	writeTestFile(t, filepath.Join(repo, mergeSharedPath), "line one\n")
+	runGit(ctx, t, repo, "add", mergeSharedPath)
+	runGit(ctx, t, repo, "commit", "-q", "-m", "seed")
+
+	wt, err := o.PrepareWorktree(ctx, 76, "", nil)
+	if err != nil {
+		t.Fatalf("PrepareWorktree: %v", err)
+	}
+	writeTestFile(t, filepath.Join(wt.Dir(), mergeSharedPath), "line one TICKET\n")
+	runGit(ctx, t, wt.Dir(), "add", mergeSharedPath)
+	runGit(ctx, t, wt.Dir(), "commit", "-q", "-m", "ticket edits shared.txt")
+	ticketHead := strings.TrimSpace(runGit(ctx, t, wt.Dir(), "rev-parse", "HEAD"))
+
+	writeTestFile(t, filepath.Join(repo, mergeSharedPath), "line one MAIN\n")
+	writeTestFile(t, filepath.Join(repo, nestedPath), "nested\n")
+	runGit(ctx, t, repo, "add", mergeSharedPath, nestedPath)
+	runGit(ctx, t, repo, "commit", "-q", "-m", "main edits shared.txt and adds foo/bar.txt")
+	baseSHA := strings.TrimSpace(runGit(ctx, t, repo, "rev-parse", "HEAD"))
+
+	conflicted, err := o.StartBaseMerge(ctx, wt, baseSHA)
+	if err != nil {
+		t.Fatalf("StartBaseMerge: unexpected error: %v", err)
+	}
+	if want := []string{mergeSharedPath}; !slices.Equal(conflicted, want) {
+		t.Fatalf("StartBaseMerge conflicted = %v, want %v", conflicted, want)
+	}
+
+	// Resolve shared.txt, then replace the whole "foo" directory the base
+	// side added with a plain file of the same name: foo/bar.txt (a
+	// MergeSidePaths entry) is now an impossible path.
+	writeTestFile(t, filepath.Join(wt.Dir(), mergeSharedPath), "line one RESOLVED\n")
+	runGit(ctx, t, wt.Dir(), "rm", "-q", "-r", "-f", "foo")
+	writeTestFile(t, filepath.Join(wt.Dir(), "foo"), "foo is now a file\n")
+	runGit(ctx, t, wt.Dir(), "add", "foo")
+
+	sha, err := o.CommitMerge(ctx, wt, mergeTestMessage(), baseSHA)
+	if err != nil {
+		t.Fatalf("CommitMerge: unexpected error: %v", err)
+	}
+
+	parents, err := o.CommitParents(ctx, wt, sha)
+	if err != nil {
+		t.Fatalf("CommitParents: %v", err)
+	}
+	if want := []string{ticketHead, baseSHA}; !slices.Equal(parents, want) {
+		t.Errorf("CommitParents = %v, want %v", parents, want)
+	}
+
+	status := runGit(ctx, t, wt.Dir(), "status", "--porcelain")
 	if strings.TrimSpace(status) != "" {
 		t.Errorf("working tree not clean after CommitMerge: %q", status)
 	}

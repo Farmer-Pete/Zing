@@ -7,6 +7,7 @@
 package job
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -1279,6 +1280,96 @@ func TestMergeAfterErrorResumesExhaustedEscalates(t *testing.T) {
 	}
 }
 
+// mergeClaimFailingTestLowCheckLoops is mergeClaimFailingTest plus
+// jobs.merge.check_loops capped at checkLoops, with max_resumes pushed
+// well above it, the mirror of mergeClaimFailingTestLowMaxResumes for a
+// test that needs to reach the check_loops gate with room for an
+// intervening, unrelated charged resume.
+func mergeClaimFailingTestLowCheckLoops(t *testing.T, s *store.Store, rt runtime.Runtime, ticket store.Ticket, gh orchestrator.GitHub, tr ShipTracker, checkLoops int) Deps {
+	t.Helper()
+	deps := mergeClaimFailingTest(t, s, rt, ticket, gh, tr)
+	cfg := deps.Machine.Jobs[jobMergeName]
+	cfg.CheckLoops = checkLoops
+	cfg.MaxResumes = checkLoops + 10
+	deps.Machine.Jobs[jobMergeName] = cfg
+	return deps
+}
+
+// TestMergeCheckLoopsIgnoresInvalidOutputResume proves mergeCheck's own
+// check_loops gate counts only the charged resumes CHECK itself asked for
+// (mergeCheckLoopCount, gated on markerMergeCheckFailedDeliveredFmt), not
+// every charged resume sess.Resumes counts: mergeAfterError's own charged
+// resume after a first invalid output also bumps sess.Resumes, but must
+// not spend a jobs.merge.check_loops strike (review thread
+// t56713a5f2f98aa58). With check_loops at 2, the sequence here is CHECK
+// fails (charge 1) -> the resumed run comes back invalid (mergeAfterError's
+// own charge, sess.Resumes now 2) -> CHECK fails again (charge 2, allowed
+// only because mergeCheckLoopCount is still 1 going in) -> the next CHECK
+// finally escalates. Under the old sess.Resumes-based gate, the second
+// CHECK failure would already see sess.Resumes == check_loops and escalate
+// immediately, one real charged resume short.
+func TestMergeCheckLoopsIgnoresInvalidOutputResume(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow end-to-end flow; runs in the full suite")
+	}
+	t.Parallel()
+	s, ticket, _ := shipTicketReady(t)
+	mergeCommitOnMain(t, s, ticket, mergeOtherTxt, []byte("main only\n"))
+
+	const checkLoops = 2
+	const sessionID = "merge-check-loops-ignore-invalid-sess"
+	const invalidReason = "no zing element in final message"
+	scripted := &pbScriptedRuntime{t: t, steps: []pbScriptedStep{
+		pbBuildStep(nil, nil, sessionID), // turn 1: ok, CHECK still fails
+		{
+			res: runtime.RunResult{SessionID: sessionID, ExitCode: 0, AgentTime: time.Second},
+			err: &runtime.InvalidOutputError{Reason: invalidReason},
+		}, // turn 2: invalid, resumed by mergeAfterError, not mergeCheck
+		pbBuildStep(nil, nil, sessionID), // turn 3: ok, CHECK still fails
+		pbBuildStep(nil, nil, sessionID), // turn 4: ok, CHECK still fails
+	}}
+
+	gh := &shipGitHub{}
+	tr := &shipTracker{}
+	claim := func() Deps { return mergeClaimFailingTestLowCheckLoops(t, s, scripted, ticket, gh, tr, checkLoops) }
+
+	ticket = mergeDirtyAfterPublish(t, s, ticket, scripted, gh, tr)
+
+	deps := claim()
+	ticket, _ = mergeRunTick(t, s, deps, ticket, "poll writes request") // POLL
+
+	deps = claim()
+	ticket, _ = mergeRunTick(t, s, deps, ticket, "check with no run yet: runs the agent (turn 1), CHECK still fails") // turn 1
+
+	deps = claim()
+	ticket, _ = mergeRunTick(t, s, deps, ticket, "charged resume for the failing CHECK: comes back invalid (turn 2)") // turn 2
+
+	deps = claim()
+	ticket, _ = mergeRunTick(t, s, deps, ticket, "mergeAfterError's own charged resume after the invalid output (turn 3)") // turn 3
+
+	deps = claim()
+	ticket, last := mergeRunTick(t, s, deps, ticket, "charged resume for the still-failing CHECK (turn 4)") // turn 4
+	if shipHasMergeLanded(last) {
+		t.Fatal("turn 4 landed the merge, want one more charged resume before the cap")
+	}
+
+	deps = claim()
+	commit, err := (shipHandler{}).Run(t.Context(), ticket, deps) // the next CHECK: escalates
+	if err != nil {
+		t.Fatalf("final check: %v", err)
+	}
+	if commit.Escalation == nil {
+		t.Fatal("final check did not escalate")
+	}
+	if commit.Escalation.Payload.What != mergeCheckWhat {
+		t.Errorf("What = %q, want %q", commit.Escalation.Payload.What, mergeCheckWhat)
+	}
+	wantWhy := fmt.Sprintf(mergeCheckWhyFmt, checkLoops)
+	if commit.Escalation.Payload.Why != wantWhy {
+		t.Errorf("Why = %q, want %q", commit.Escalation.Payload.Why, wantWhy)
+	}
+}
+
 // ---- task 7: mergeAfterError, retryMerge, reopenMerge ---------------------
 
 // mergeQuestionScript is a minimal merge "question" turn (overview design,
@@ -2233,6 +2324,32 @@ func TestMergeAdoptTreeNotCleanEscalates(t *testing.T) {
 		"tree not clean")
 }
 
+// TestMergeAdoptMissingSidePathEscalates proves adoptMerge's own reverse
+// check: a commit whose tree is byte-identical to parents[0] -- dropping
+// every one of the base side's own changes entirely, with a clean working
+// tree -- must not pass by default just because it touches nothing outside
+// the merge and leaves no conflict markers to find (review thread
+// tcd9554c2fbfe8dbf): commitPaths is empty, so "outside the merge" and
+// "conflict markers remain" both pass trivially, and mergeOtherTxt is
+// never read by the project's own test or lint command, so "commands
+// failed" passes too. Only the reverse direction -- every mergeSidePaths
+// entry actually present in commitPaths -- catches it.
+func TestMergeAdoptMissingSidePathEscalates(t *testing.T) {
+	mergeAdoptEscalationCase(t, mergeOtherTxt, []byte("main only\n"),
+		func(t *testing.T, dir, head, baseSHA string) {
+			t.Helper()
+			commitOut, err := gitfixture.Git(t.Context(), dir, "commit-tree", head+"^{tree}", "-p", head, "-p", baseSHA, "-S", "-m", "drops the base side entirely")
+			if err != nil {
+				t.Fatalf("git commit-tree: %v: %s", err, commitOut)
+			}
+			sha := strings.TrimSpace(string(commitOut))
+			if out, resetErr := gitfixture.Git(t.Context(), dir, "reset", "--hard", sha); resetErr != nil {
+				t.Fatalf("git reset --hard: %v: %s", resetErr, out)
+			}
+		},
+		"merge side paths missing from commit")
+}
+
 // TestMergeAdoptOutsideMergeEscalates proves adoptMerge refuses a commit
 // that, alongside the two sides' own real changes, also touches a path
 // neither side ever changed.
@@ -2361,5 +2478,48 @@ func TestMergeAlreadyMergedClosesRequest(t *testing.T) {
 	wantWhat := "PR #1 conflicts with " + pbFixtureDefaultBranch
 	if !shipHasMessage(next, wantWhat) {
 		t.Errorf("commit.Messages = %+v, want a fresh %q notice", next.Messages, wantWhat)
+	}
+}
+
+// TestMergeMalformedRequestMarkerEscalates proves driveOpenMerge escalates
+// a request marker that fails to parse (malformedBaseMergeEscalation)
+// instead of propagating a bare Go error: left alone, the malformed row
+// would never parse on any later tick either, reclaiming and re-erroring
+// forever with no owner-visible notice (review thread ta15433844ef97a61).
+func TestMergeMalformedRequestMarkerEscalates(t *testing.T) {
+	t.Parallel()
+	s, ticket, gh, tr := mergePublished(t)
+	rt := runtime.NewFake(fstest.MapFS{})
+
+	deps := shipClaim(t, s, rt, ticket.ID, gh, tr)
+	c := baseCommit(ticket, deps)
+	c.Messages = []store.Message{{
+		TicketID: ticket.ID, Type: msgTypeUpdate, Author: authorSystem,
+		Body: "base merge requested after run 1\nnot a base line",
+	}}
+	pbApply(t, s, ticket, c)
+	ticket = pbGetTicket(t, s, ticket.ID)
+
+	_, _, openErr := openBaseMerge(t.Context(), ticket, Deps{Store: s})
+	if openErr == nil {
+		t.Fatal("openBaseMerge: want a malformed-marker error from the seeded row, got nil")
+	}
+	if !errors.Is(openErr, ErrMalformedBaseMergeRequest) {
+		t.Fatalf("openBaseMerge error = %v, want errors.Is ErrMalformedBaseMergeRequest", openErr)
+	}
+
+	deps = shipClaim(t, s, rt, ticket.ID, gh, tr)
+	commit, err := (shipHandler{}).Run(t.Context(), ticket, deps)
+	if err != nil {
+		t.Fatalf("merge tick: %v, want a handled escalation instead of a bare error", err)
+	}
+	if commit.Escalation == nil {
+		t.Fatal("merge tick did not escalate, want a malformed-marker escalation")
+	}
+	if commit.Escalation.Payload.What != malformedMergeMarkerWhat {
+		t.Errorf("What = %q, want %q", commit.Escalation.Payload.What, malformedMergeMarkerWhat)
+	}
+	if !commit.ClearPoll {
+		t.Error("commit.ClearPoll = false, want true")
 	}
 }

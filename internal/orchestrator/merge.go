@@ -2,7 +2,6 @@ package orchestrator
 
 import (
 	"bufio"
-	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -112,16 +111,36 @@ func splitNulPaths(out string) []string {
 	return paths
 }
 
-// conflictMarkerPrefixes are the two line prefixes git's "merge" conflict
-// style ever writes at the start of a conflict hunk's bounding lines; a
-// file still holding either one is not yet resolved.
-var conflictMarkerPrefixes = []string{"<<<<<<< ", ">>>>>>> "}
+// minConflictMarkerRun is git's default conflict-marker-size: the shortest
+// run of '<' or '>' a conflict hunk's bounding line ever starts with. A
+// path or .gitattributes can raise conflict-marker-size, which widens the
+// run git writes, so hasConflictMarkerPrefix matches seven or more, not
+// exactly seven.
+const minConflictMarkerRun = 7
+
+// hasConflictMarkerPrefix reports whether line starts with a run of seven
+// or more '<' characters, or seven or more '>' characters, followed by a
+// space: git's "merge" conflict style's own bounding lines, at any
+// conflict-marker-size.
+func hasConflictMarkerPrefix(line []byte) bool {
+	return hasConflictMarkerRun(line, '<') || hasConflictMarkerRun(line, '>')
+}
+
+func hasConflictMarkerRun(line []byte, b byte) bool {
+	n := 0
+	for n < len(line) && line[n] == b {
+		n++
+	}
+	return n >= minConflictMarkerRun && n < len(line) && line[n] == ' '
+}
 
 // ConflictMarkerPaths returns, sorted, every path among the index's
-// unmerged paths and the tracked paths that differ from HEAD whose
-// working-tree file has a line starting "<<<<<<< " or ">>>>>>> ".
-// An absent file or a non-regular file is skipped. Files are read through
-// os.OpenRoot(wt.dir), so a path never escapes the worktree.
+// unmerged paths and the working tree's changed paths (MergeChangedPaths:
+// tracked or untracked, since an agent can "git rm --cached" a conflicting
+// path and leave its markers on disk) whose working-tree file has a line
+// matching hasConflictMarkerPrefix. An absent file or a non-regular file
+// is skipped. Files are read through os.OpenRoot(wt.dir), so a path never
+// escapes the worktree.
 func (o *Orchestrator) ConflictMarkerPaths(ctx context.Context, wt Worktree) ([]string, error) {
 	if err := o.revalidate(ctx, wt); err != nil {
 		return nil, fmt.Errorf("orchestrator: conflict marker paths: %w", err)
@@ -131,12 +150,10 @@ func (o *Orchestrator) ConflictMarkerPaths(ctx context.Context, wt Worktree) ([]
 		return nil, fmt.Errorf("orchestrator: conflict marker paths: %w", err)
 	}
 
-	run := execRunner{drivers: wt.drivers}
-	out, err := run.Output(ctx, wt.dir, "git", "diff", "--name-only", "-z", "HEAD")
+	changed, err := o.MergeChangedPaths(ctx, wt)
 	if err != nil {
 		return nil, fmt.Errorf("orchestrator: conflict marker paths: %w", err)
 	}
-	changed := splitNulPaths(out)
 
 	seen := make(map[string]struct{}, len(unmerged)+len(changed))
 	for _, p := range unmerged {
@@ -201,8 +218,8 @@ func filterConflictMarkerPaths(dir string, candidates []string) ([]string, error
 }
 
 // fileHasConflictMarkers reports whether path, read through root, has a
-// line starting with one of conflictMarkerPrefixes. A path that does not
-// exist, or that is not a regular file, is reported false with no error.
+// line matching hasConflictMarkerPrefix. A path that does not exist, or
+// that is not a regular file, is reported false with no error.
 func fileHasConflictMarkers(root *os.Root, path string) (bool, error) {
 	info, err := root.Lstat(path)
 	if err != nil {
@@ -236,12 +253,8 @@ func fileHasConflictMarkers(root *os.Root, path string) (bool, error) {
 			}
 			return false, readErr
 		}
-		if atLineStart {
-			for _, prefix := range conflictMarkerPrefixes {
-				if bytes.HasPrefix(chunk, []byte(prefix)) {
-					return true, nil
-				}
-			}
+		if atLineStart && hasConflictMarkerPrefix(chunk) {
+			return true, nil
 		}
 		atLineStart = !isPrefix
 	}

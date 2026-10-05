@@ -10,6 +10,8 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"slices"
+	"strconv"
 	"strings"
 
 	"zing/internal/orchestrator"
@@ -44,6 +46,15 @@ const (
 	mergeCheckWhyFmt   = "check_loops for merge is %d; the last failing output is under Tried"
 	mergeResumesWhat   = "the merge session ran out of resumes"
 	mergeResumesWhyFmt = "max_resumes for merge is %d"
+
+	// markerMergeCheckFailedDeliveredFmt names one run whose failing CHECK
+	// mergeCheck actually sent back to the agent as a charged resume.
+	// mergeCheckLoopCount counts only these rows, so an invalid-output
+	// resume (mergeAfterError's own charged resume, which also bumps
+	// sess.Resumes) never eats into jobs.merge.check_loops, mirroring
+	// building's own checkLoopGate (checkloop.go) over "check failed
+	// delivered run %d" rather than the session's raw resume counter.
+	markerMergeCheckFailedDeliveredFmt = "merge check failed delivered run %d"
 )
 
 // pollConflict is POLL's own dirty row: GitHub builds no merge ref for a
@@ -106,6 +117,31 @@ func openBaseMerge(ctx context.Context, t store.Ticket, d Deps) (baseMergeReques
 	return openBaseMergeRequest(rows)
 }
 
+const (
+	malformedMergeMarkerWhat = "a base merge marker could not be read"
+	malformedMergeMarkerWhy  = "the ticket's one open base merge request marker failed to parse; a later tick would only fail the same way again"
+)
+
+// malformedBaseMergeEscalation reports whether err is
+// ErrMalformedBaseMergeRequest and, when it is, the escalation commit
+// driveOpenMerge should write for it instead of propagating the bare
+// error: left unescalated, a malformed marker would never parse on any
+// later tick either, deadlocking the ticket (driveOpenMerge would just
+// reclaim and re-error forever) while pollMergeCount still counts the row
+// toward jobs.merge.max_loops, so POLL could never open a fresh request to
+// supersede it (review thread ta15433844ef97a61). A genuine store I/O
+// failure (openBaseMerge's own MarkersWithPrefix error, or the "two open
+// requests" error) answers false, unchanged: that is the dispatcher's
+// normal transient-infrastructure-error path.
+func malformedBaseMergeEscalation(t store.Ticket, d Deps, err error) (store.HandlerCommit, bool) {
+	if !errors.Is(err, ErrMalformedBaseMergeRequest) {
+		return store.HandlerCommit{}, false
+	}
+	c := shipEscalation(t, d, malformedMergeMarkerWhat, malformedMergeMarkerWhy, err.Error())
+	c.ClearPoll = true
+	return c, true
+}
+
 // mergeTried is "base merge <id>", then "\n" and detail when detail is
 // non-empty: every merge-unit escalation's own Tried text, so a later
 // owner retry can find its way back to the request through baseMergeTriedID.
@@ -152,10 +188,18 @@ func mergeEscalationCode(t store.Ticket, d Deps, req baseMergeRequest, code, wha
 // driveOpenMerge runs one merge-unit step when a request is open; merging
 // is false, with nothing done, when none is (shipHandler.Run calls this
 // right after the post-build prelude, before anything else shipping does).
+// A malformed request marker escalates (malformedBaseMergeEscalation)
+// rather than propagating a bare error.
 func (h shipHandler) driveOpenMerge(ctx context.Context, t store.Ticket, d Deps) (c store.HandlerCommit, merging bool, err error) {
 	req, open, err := openBaseMerge(ctx, t, d)
-	if err != nil || !open {
+	if err != nil {
+		if mc, escalated := malformedBaseMergeEscalation(t, d, err); escalated {
+			return mc, true, nil
+		}
 		return store.HandlerCommit{}, false, err
+	}
+	if !open {
+		return store.HandlerCommit{}, false, nil
 	}
 	c, err = h.driveMerge(ctx, t, d, req)
 	return c, true, err
@@ -345,7 +389,11 @@ func (h shipHandler) mergeCheck(ctx context.Context, t store.Ticket, d Deps, pro
 	}
 
 	checkLoops := d.Machine.Jobs[jobMergeName].CheckLoops
-	if sess.Resumes >= checkLoops {
+	n, countErr := mergeCheckLoopCount(ctx, d, t, *sess)
+	if countErr != nil {
+		return store.HandlerCommit{}, fmt.Errorf("job: merge: check loop gate: %w", countErr)
+	}
+	if n >= checkLoops {
 		return mergeEscalationIDs(t, d, req, mergeCheckWhat, fmt.Sprintf(mergeCheckWhyFmt, checkLoops), text, &sess.ID, rid), nil
 	}
 	maxResumes := d.Machine.Jobs[jobMergeName].MaxResumes
@@ -353,7 +401,41 @@ func (h shipHandler) mergeCheck(ctx context.Context, t store.Ticket, d Deps, pro
 		return mergeEscalationIDs(t, d, req, mergeResumesWhat, fmt.Sprintf(mergeResumesWhyFmt, maxResumes), text, &sess.ID, rid), nil
 	}
 
-	return h.runMergeResume(ctx, t, d, wt, req, *sess, 0, []prompt.NamedInput{prompt.Check(text)}, true)
+	commit, runErr := h.runMergeResume(ctx, t, d, wt, req, *sess, 0, []prompt.NamedInput{prompt.Check(text)}, true)
+	if runErr != nil {
+		return commit, runErr
+	}
+	commit.Messages = append(commit.Messages, store.Message{
+		TicketID: t.ID, Type: msgTypeUpdate, Author: authorSystem,
+		Body: fmt.Sprintf(markerMergeCheckFailedDeliveredFmt, *rid),
+	})
+	return commit, nil
+}
+
+// mergeCheckLoopCount is mergeCheck's own jobs.merge.check_loops gate: n is
+// the number of markerMergeCheckFailedDeliveredFmt markers naming a run of
+// sess, the charged resumes CHECK itself asked for, as opposed to every
+// charged resume sess.Resumes counts (which also includes mergeAfterError's
+// own invalid-output resume). A fresh session starts the count at 0 again.
+func mergeCheckLoopCount(ctx context.Context, d Deps, t store.Ticket, sess store.Session) (int, error) {
+	runIDs, err := d.Store.SessionRunIDs(ctx, sess.ID)
+	if err != nil {
+		return 0, err
+	}
+	prefix := strings.TrimSuffix(markerMergeCheckFailedDeliveredFmt, "%d")
+	rows, err := d.Store.MarkersWithPrefix(ctx, t.ID, prefix)
+	if err != nil {
+		return 0, err
+	}
+	n := 0
+	for i := range rows {
+		head, _, _ := strings.Cut(rows[i].Body, "\n")
+		id, perr := strconv.ParseInt(strings.TrimPrefix(head, prefix), 10, 64)
+		if perr == nil && slices.Contains(runIDs, id) {
+			n++
+		}
+	}
+	return n, nil
 }
 
 // mergeOutsidePaths is mergeCheck's own outside-the-merge read: every path
@@ -594,6 +676,25 @@ func (h shipHandler) adoptMerge(ctx context.Context, t store.Ticket, d Deps, pro
 	}
 	if outside := pathsOutside(commitPaths, mergeSidePaths); len(outside) > 0 {
 		return fail("outside the merge"), nil
+	}
+	// The degenerate reverse case matters too: a commit whose tree is
+	// byte-identical to parents[0] -- commitPaths empty while the two
+	// sides actually differed (mergeSidePaths non-empty) -- would
+	// otherwise pass every check above, since "outside the merge" and the
+	// conflict-marker scan below both pass trivially with nothing to
+	// check. A real "git merge", even one that keeps the ticket's own
+	// side on every conflicting hunk, still auto-merges every
+	// non-conflicting change the base side brings (a path only the base
+	// added, for one), so a genuinely empty commitPaths here is not a
+	// legitimate resolution choice, only a forgery or a dropped merge
+	// (review thread tcd9554c2fbfe8dbf). A narrower, per-path version of
+	// this check (every mergeSidePaths entry present in commitPaths) was
+	// tried and rejected: mergeSidePaths also names every path that
+	// exists on only one side (for example, a file only the ticket
+	// added), which a correct merge leaves untouched and so never
+	// appears in commitPaths at all.
+	if len(commitPaths) == 0 && len(mergeSidePaths) > 0 {
+		return fail("merge side paths missing from commit"), nil
 	}
 
 	markers, err := proj.Orch.PathsWithConflictMarkers(ctx, wt, commitPaths)

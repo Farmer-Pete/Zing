@@ -604,11 +604,40 @@ func (r baseMergeRequest) body() string {
 	return strings.Join(lines, "\n")
 }
 
+// ErrMalformedBaseMergeRequest marks parseBaseMergeRequest's own "malformed
+// marker" failure (every error it returns answers errors.Is(err,
+// ErrMalformedBaseMergeRequest) true, through malformedBaseMergeRequestError's
+// own Is method), so openBaseMerge (merge.go) can tell it apart from an
+// ordinary store/infrastructure failure and escalate it instead of
+// propagating a bare error: left alone, the malformed row would never
+// parse on any later tick either, deadlocking the ticket (driveOpenMerge
+// just reclaims and re-errors forever) while pollMergeCount still counts
+// the row, so POLL can never open a fresh request to supersede it (review
+// thread ta15433844ef97a61).
+var ErrMalformedBaseMergeRequest = errors.New("job: malformed base merge request marker")
+
+// malformedBaseMergeRequestError is parseBaseMergeRequest's own error
+// value: its Error text stays exactly "job: base merge request <id>:
+// malformed marker", with no wrapped suffix, while its Is method still
+// lets errors.Is(err, ErrMalformedBaseMergeRequest) find it.
+type malformedBaseMergeRequestError struct {
+	rowID int64
+}
+
+func (e *malformedBaseMergeRequestError) Error() string {
+	return fmt.Sprintf("job: base merge request %d: malformed marker", e.rowID)
+}
+
+func (e *malformedBaseMergeRequestError) Is(target error) bool {
+	return target == ErrMalformedBaseMergeRequest
+}
+
 // parseBaseMergeRequest parses one request marker row. Line 1 or 2 not
 // matching, or a line 3 present but not "retry of <id>", is the error
-// "job: base merge request <id>: malformed marker".
+// "job: base merge request <id>: malformed marker", which answers
+// errors.Is(err, ErrMalformedBaseMergeRequest) true.
 func parseBaseMergeRequest(row store.MessageRow) (baseMergeRequest, error) {
-	malformed := fmt.Errorf("job: base merge request %d: malformed marker", row.ID)
+	malformed := &malformedBaseMergeRequestError{rowID: row.ID}
 
 	lines := strings.Split(row.Body, "\n")
 	if len(lines) < 2 {

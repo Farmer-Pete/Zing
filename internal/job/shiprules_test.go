@@ -699,6 +699,9 @@ func TestParseBaseMergeRequest(t *testing.T) {
 			if err == nil || err.Error() != wantErr {
 				t.Errorf("parseBaseMergeRequest() error = %v, want %q", err, wantErr)
 			}
+			if !errors.Is(err, ErrMalformedBaseMergeRequest) {
+				t.Errorf("errors.Is(%v, ErrMalformedBaseMergeRequest) = false, want true (review thread ta15433844ef97a61)", err)
+			}
 		})
 	}
 }

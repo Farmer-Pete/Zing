@@ -4,10 +4,12 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"sort"
 	"strings"
+	"syscall"
 	"time"
 
 	"zing/internal/response"
@@ -349,7 +351,9 @@ func (o *Orchestrator) CommitMerge(ctx context.Context, wt Worktree, m CommitMes
 // working tree nor the index makes git refuse the whole call with
 // "pathspec '<p>' did not match any files", and a resolved merge can
 // legitimately leave such a path behind, for example a file one side
-// deleted and the other left untouched.
+// deleted and the other left untouched, or a path a resolution turned
+// from a directory into a file, which makes Lstat on any path still nested
+// under it fail with ENOTDIR rather than ErrNotExist.
 func mergeSidePathsPresent(dir string, paths []string) ([]string, error) {
 	root, err := os.OpenRoot(dir)
 	if err != nil {
@@ -361,7 +365,7 @@ func mergeSidePathsPresent(dir string, paths []string) ([]string, error) {
 	for _, p := range paths {
 		if _, statErr := root.Lstat(p); statErr == nil {
 			present = append(present, p)
-		} else if !os.IsNotExist(statErr) {
+		} else if !errors.Is(statErr, fs.ErrNotExist) && !errors.Is(statErr, syscall.ENOTDIR) {
 			return nil, fmt.Errorf("%s: %w", p, statErr)
 		}
 	}
