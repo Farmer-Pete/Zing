@@ -23,6 +23,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 
 	"zing/internal/orchestrator"
 	"zing/internal/response"
@@ -837,4 +838,77 @@ func mergeQuestionText(qs []response.Question) string {
 		parts = append(parts, fmt.Sprintf("%s\n%s\nRecommended: %s", q.Title, q.Body, q.Recommended))
 	}
 	return strings.Join(parts, "\n\n")
+}
+
+// reviewBotStep is reviewBotAction's own verdict (design "Shape", review bot
+// clock markers).
+type reviewBotStep string
+
+const (
+	reviewBotStart    reviewBotStep = "start"
+	reviewBotWait     reviewBotStep = "wait"
+	reviewBotNudge    reviewBotStep = "nudge"
+	reviewBotEscalate reviewBotStep = "escalate"
+)
+
+// reviewBotSilentWhat is pollIdle's own escalation What, once a nudged check
+// still has not reported after a second wait.
+const reviewBotSilentWhat = "a required review check never reported"
+
+// reviewBotMissingHead and reviewBotNudgedHead are the exact first lines
+// Store.Marker matches for pollIdle's own review bot clock (design "Shape",
+// "Markers"): the first poll that finds check missing on head, and the
+// poll that posted check's trigger comment on head, respectively.
+func reviewBotMissingHead(head, check string) string {
+	return fmt.Sprintf("review bot missing %s %s", head, check)
+}
+
+func reviewBotNudgedHead(head, check string) string {
+	return fmt.Sprintf("review bot nudged %s %s", head, check)
+}
+
+// reviewBotMarkerBody renders a review bot clock marker: headKey (one of
+// reviewBotMissingHead or reviewBotNudgedHead) on its own first line, then
+// at as RFC 3339 UTC on the second.
+func reviewBotMarkerBody(headKey string, at time.Time) string {
+	return fmt.Sprintf("%s\n%s", headKey, at.UTC().Format(time.RFC3339))
+}
+
+// reviewBotMarkerTime parses a review bot clock marker's own second line
+// back into a time; ok is false when the body has no parseable second line
+// (a malformed row never happens in practice, since only reviewBotMarkerBody
+// ever writes one, but pollIdle treats it the same as no marker at all
+// rather than erroring the ticket over it).
+func reviewBotMarkerTime(body string) (at time.Time, ok bool) {
+	_, rest, found := strings.Cut(body, "\n")
+	if !found {
+		return time.Time{}, false
+	}
+	at, err := time.Parse(time.RFC3339, strings.TrimSpace(rest))
+	if err != nil {
+		return time.Time{}, false
+	}
+	return at, true
+}
+
+// reviewBotAction is pollIdle's own pure review-bot clock (design "Shape"):
+// since nil (no missing marker yet) starts the clock. Once since is set, an
+// elapsed time (now minus since) short of wait still waits; reached or past
+// wait with no nudge yet (nudgedAt nil) nudges; reached or past wait, and
+// nudgedAt's own elapsed time is also reached or past wait, escalates;
+// otherwise (nudged, but not yet that long) waits.
+func reviewBotAction(now time.Time, since, nudgedAt *time.Time, wait time.Duration) reviewBotStep {
+	if since == nil {
+		return reviewBotStart
+	}
+	if now.Sub(*since) < wait {
+		return reviewBotWait
+	}
+	if nudgedAt == nil {
+		return reviewBotNudge
+	}
+	if now.Sub(*nudgedAt) >= wait {
+		return reviewBotEscalate
+	}
+	return reviewBotWait
 }

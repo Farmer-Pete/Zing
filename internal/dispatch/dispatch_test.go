@@ -823,6 +823,10 @@ func (g *dispatchShipGitHub) Viewer(context.Context) (string, error) {
 	return dispatchShipGHViewerLogin, nil
 }
 
+func (g *dispatchShipGitHub) CommentOnPR(context.Context, string, string, int, string) error {
+	return errors.New("dispatchShipGitHub: not implemented")
+}
+
 var (
 	_ orchestrator.GitHub = (*dispatchShipGitHub)(nil)
 	_ job.PullRequests    = (*dispatchShipGitHub)(nil)

@@ -651,6 +651,17 @@ func (g *GitHubClient) Viewer(ctx context.Context) (string, error) {
 	return u.GetLogin(), nil
 }
 
+// CommentOnPR posts body as a plain conversation comment on the pull
+// request (job.ReviewThreads.CommentOnPR, M4; PKG9-PLAN.md section 10.3).
+// GitHub's issue comments endpoint also serves pull requests, since a pull
+// request is an issue under the hood.
+func (g *GitHubClient) CommentOnPR(ctx context.Context, owner, repo string, number int, body string) error {
+	if _, _, err := g.c.Issues.CreateComment(ctx, owner, repo, number, github.IssueCommentRequest{Body: body}); err != nil {
+		return classifyGitHubErr(err)
+	}
+	return nil
+}
+
 // maxLogLineBytes bounds one kept line of a job log (job.Checks.JobLogTail;
 // PKG9-PLAN.md section 10.3): a longer line is cut and ends "[line cut]".
 // It also sizes the bufio.Reader tailLog reads through, so no one line is

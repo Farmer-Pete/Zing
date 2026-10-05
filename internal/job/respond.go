@@ -61,6 +61,10 @@ type ReviewThreads interface {
 	// (orchestrator.GitHubClient.Viewer, REST, D10), cached by callers that
 	// need it more than once.
 	Viewer(ctx context.Context) (string, error)
+	// CommentOnPR posts body as a plain conversation comment on the pull
+	// request (orchestrator.GitHubClient.CommentOnPR, REST), used to nudge a
+	// required review bot that has gone missing (shipping.go's pollIdle).
+	CommentOnPR(ctx context.Context, owner, repo string, number int, body string) error
 }
 
 // artifactTypeRespond is the artifacts.type value every stored respond

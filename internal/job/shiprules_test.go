@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/google/go-cmp/cmp"
 	"github.com/google/go-cmp/cmp/cmpopts"
@@ -239,7 +240,7 @@ func TestEvaluateCINewerOtherAppRun(t *testing.T) {
 // -----------------------------------------------------------------------
 
 func basePR() orchestrator.PRState {
-	return orchestrator.PRState{State: "open", Merged: false, Draft: true, HeadSHA: ciSHA}
+	return orchestrator.PRState{State: shipPRStateOpen, Merged: false, Draft: true, HeadSHA: ciSHA}
 }
 
 func TestPollFingerprintStable(t *testing.T) {
@@ -879,5 +880,52 @@ func TestBaseMergePrefix(t *testing.T) {
 		if !strings.HasPrefix(body, baseMergePrefix) {
 			t.Errorf("%q does not have prefix %q", body, baseMergePrefix)
 		}
+	}
+}
+
+// -----------------------------------------------------------------------
+// Pure: reviewBotAction
+// -----------------------------------------------------------------------
+
+// TestReviewBotAction proves reviewBotAction's own rule (design "Shape",
+// review bot clock markers): no since marker starts the clock; under wait
+// since since just waits; past wait with no nudge yet nudges; nudged but
+// still under wait (measured from the nudge) waits again; nudged and past
+// wait escalates; a wait exactly reached counts as reached, for both since
+// and nudgedAt.
+func TestReviewBotAction(t *testing.T) {
+	t.Parallel()
+
+	now := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
+	wait := 20 * time.Minute
+
+	tm := func(d time.Duration) *time.Time {
+		t := now.Add(d)
+		return &t
+	}
+
+	tests := []struct {
+		name     string
+		since    *time.Time
+		nudgedAt *time.Time
+		want     reviewBotStep
+	}{
+		{"no since starts", nil, nil, reviewBotStart},
+		{"under wait, no nudge: wait", tm(-10 * time.Minute), nil, reviewBotWait},
+		{"past wait, no nudge: nudge", tm(-21 * time.Minute), nil, reviewBotNudge},
+		{"exactly at wait, no nudge: nudge", tm(-wait), nil, reviewBotNudge},
+		{"nudged under wait: wait", tm(-40 * time.Minute), tm(-10 * time.Minute), reviewBotWait},
+		{"nudged past wait: escalate", tm(-50 * time.Minute), tm(-21 * time.Minute), reviewBotEscalate},
+		{"nudged exactly at wait: escalate", tm(-50 * time.Minute), tm(-wait), reviewBotEscalate},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got := reviewBotAction(now, tc.since, tc.nudgedAt, wait)
+			if got != tc.want {
+				t.Errorf("reviewBotAction = %v, want %v", got, tc.want)
+			}
+		})
 	}
 }

@@ -880,6 +880,52 @@ func TestRequestReviewers(t *testing.T) {
 	}
 }
 
+func TestCommentOnPR(t *testing.T) {
+	t.Parallel()
+
+	t.Run("posts the body as an issue comment", func(t *testing.T) {
+		t.Parallel()
+		var gotMethod string
+		var gotBody map[string]any
+		mux := http.NewServeMux()
+		mux.HandleFunc("/repos/acme/widgets/issues/63/comments", func(w http.ResponseWriter, r *http.Request) {
+			gotMethod = r.Method
+			if err := json.NewDecoder(r.Body).Decode(&gotBody); err != nil {
+				t.Errorf("decode request body: %v", err)
+				return
+			}
+			fmt.Fprint(w, `{"id": 1}`)
+		})
+
+		g := newTestGHClient(t, mux)
+
+		if err := g.CommentOnPR(t.Context(), "acme", "widgets", 63, "@coderabbitai review"); err != nil {
+			t.Fatalf("CommentOnPR: unexpected error: %v", err)
+		}
+		if gotMethod != http.MethodPost {
+			t.Errorf("method = %q, want %q", gotMethod, http.MethodPost)
+		}
+		if gotBody["body"] != "@coderabbitai review" {
+			t.Errorf("request body body = %v, want %q", gotBody["body"], "@coderabbitai review")
+		}
+	})
+
+	t.Run("401 is ErrGitHubAuth", func(t *testing.T) {
+		t.Parallel()
+		mux := http.NewServeMux()
+		mux.HandleFunc("/repos/acme/widgets/issues/63/comments", func(w http.ResponseWriter, _ *http.Request) {
+			w.WriteHeader(http.StatusUnauthorized)
+			fmt.Fprint(w, `{"message": "Bad credentials"}`)
+		})
+		g := newTestGHClient(t, mux)
+
+		err := g.CommentOnPR(t.Context(), "acme", "widgets", 63, "@coderabbitai review")
+		if !errors.Is(err, ErrGitHubAuth) {
+			t.Errorf("error = %v, want errors.Is(err, ErrGitHubAuth)", err)
+		}
+	})
+}
+
 func TestMergePinsSha(t *testing.T) {
 	t.Parallel()
 

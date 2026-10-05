@@ -717,7 +717,7 @@ func (h shipHandler) poll(ctx context.Context, t store.Ticket, d Deps) (store.Ha
 		// run only once the pull request is ready, so mark it ready now.
 		return h.pollMarkReady(ctx, t, d, proj, pr, local)
 	case result.State == CIPending:
-		return h.pollIdle(ctx, t, d, fp, result.Missing)
+		return h.pollIdle(ctx, t, d, proj, pr, number, fp, result.Missing)
 	case pr.Draft: // CIGreen, zero unresolved threads, still draft: row 8
 		return h.pollMarkReady(ctx, t, d, proj, pr, local)
 	default: // CIGreen, zero unresolved threads, not draft: row 9 (MERGE or the merge question, M4 task 8).
@@ -1054,7 +1054,16 @@ func (h shipHandler) pollCIFailed(ctx context.Context, t store.Ticket, d Deps, p
 // otherwise silently clear a still-open merge question's own "merge"
 // wait -- nil carries forward as nil, the ordinary case, so this changes
 // nothing when nothing is waiting.
-func (h shipHandler) pollIdle(ctx context.Context, t store.Ticket, d Deps, fp string, missing []string) (store.HandlerCommit, error) {
+//
+// Task 6 adds the review-bot nudge: on a non-draft pull request, each
+// configured review-bot check still missing gets reviewBotAction's own
+// verdict (shiprules.go) applied to its own clock markers on pr.HeadSHA,
+// oldest config entry first. Start writes the missing marker; nudge posts
+// the bot's trigger comment and writes the nudged marker; escalate returns
+// an escalation commit instead of this one, stopping the loop over the
+// remaining checks (only one commit can be returned per tick); wait leaves
+// this tick's commit as it already is.
+func (h shipHandler) pollIdle(ctx context.Context, t store.Ticket, d Deps, proj Project, pr orchestrator.PRState, number int, fp string, missing []string) (store.HandlerCommit, error) {
 	iv := nextInterval(t.PollFingerprint, t.PollIntervalS, fp)
 	next := time.Now().UTC().Truncate(time.Second).Add(time.Duration(iv) * time.Second)
 
@@ -1072,7 +1081,86 @@ func (h shipHandler) pollIdle(ctx context.Context, t store.Ticket, d Deps, fp st
 			Body: ciWaitingPrefix + strings.Join(missing, ","),
 		}}
 	}
+
+	if pr.Draft {
+		return c, nil
+	}
+
+	retryRow, hasRetry, err := d.Store.Marker(ctx, t.ID, markerRetryRequested)
+	if err != nil {
+		return store.HandlerCommit{}, fmt.Errorf("job: shipping: poll: retry requested marker: %w", err)
+	}
+
+	for _, check := range d.ReviewBots.Checks {
+		if !slices.Contains(missing, check.Check) {
+			continue
+		}
+
+		missingHead := reviewBotMissingHead(pr.HeadSHA, check.Check)
+		sinceAt, hasSince, err := reviewBotMarkerSince(ctx, t, d, missingHead, retryRow.ID, hasRetry)
+		if err != nil {
+			return store.HandlerCommit{}, err
+		}
+		var since *time.Time
+		if hasSince {
+			since = &sinceAt
+		}
+		nudgedHead := reviewBotNudgedHead(pr.HeadSHA, check.Check)
+		nudgedAtTime, hasNudged, err := reviewBotMarkerSince(ctx, t, d, nudgedHead, retryRow.ID, hasRetry)
+		if err != nil {
+			return store.HandlerCommit{}, err
+		}
+		var nudgedAt *time.Time
+		if hasNudged {
+			nudgedAt = &nudgedAtTime
+		}
+
+		now := time.Now().UTC()
+		switch reviewBotAction(now, since, nudgedAt, d.ReviewBots.Wait) {
+		case reviewBotStart:
+			c.Messages = append(c.Messages, store.Message{
+				TicketID: t.ID, Type: msgTypeUpdate, Author: authorSystem,
+				Body: reviewBotMarkerBody(missingHead, now),
+			})
+		case reviewBotNudge:
+			if err := proj.Threads.CommentOnPR(ctx, proj.Owner, proj.Repo, number, check.Trigger); err != nil {
+				return store.HandlerCommit{}, fmt.Errorf("job: shipping: poll: comment on pr: %w", err)
+			}
+			slog.Info("review bot nudged", "ticket_id", t.ID, "check", check.Check)
+			c.Messages = append(c.Messages, store.Message{
+				TicketID: t.ID, Type: msgTypeUpdate, Author: authorSystem,
+				Body: reviewBotMarkerBody(nudgedHead, now),
+			})
+		case reviewBotEscalate:
+			why := fmt.Sprintf("required check %s has not reported on %s since %s", check.Check, shortSHA(pr.HeadSHA), since.UTC().Format(time.RFC3339))
+			tried := fmt.Sprintf("posted %s at %s", check.Trigger, nudgedAt.UTC().Format(time.RFC3339))
+			ec := shipEscalation(t, d, reviewBotSilentWhat, why, tried)
+			ec.ClearPoll = true
+			return ec, nil
+		case reviewBotWait:
+			// Nothing to do this tick; the backoff commit already built
+			// above stands.
+		}
+	}
+
 	return c, nil
+}
+
+// reviewBotMarkerSince reads headKey's own newest marker (one of
+// reviewBotMissingHead or reviewBotNudgedHead) and returns its own second
+// line's time; ok is false when there is none, or when it is older (by
+// message id) than the newest "retry requested" marker on the ticket --
+// Retry restarts the review-bot clock (design "Shape").
+func reviewBotMarkerSince(ctx context.Context, t store.Ticket, d Deps, headKey string, retryID int64, hasRetry bool) (at time.Time, ok bool, err error) {
+	row, found, err := d.Store.Marker(ctx, t.ID, headKey)
+	if err != nil {
+		return time.Time{}, false, fmt.Errorf("job: shipping: poll: review bot marker %q: %w", headKey, err)
+	}
+	if !found || (hasRetry && row.ID < retryID) {
+		return time.Time{}, false, nil
+	}
+	at, ok = reviewBotMarkerTime(row.Body)
+	return at, ok, nil
 }
 
 // previousCIWaiting returns the names the newest "ci waiting <names>"
