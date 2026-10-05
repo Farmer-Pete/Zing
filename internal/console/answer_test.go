@@ -122,6 +122,32 @@ func TestDraft_EmptyTextClearsTheReplyDraft(t *testing.T) {
 	}
 }
 
+// TestDraft_OmittedTextAgainstAQuestionIsMalformed proves POST /draft tells
+// an omitted "text" key apart from an explicit "text":"" (review fix): a
+// question draft naming none of option, item, or text names no mode at all,
+// so it is 400, while the explicit-empty-string case
+// (TestDraft_EmptyTextClearsTheReplyDraft) must keep returning 204 and
+// clearing the draft.
+func TestDraft_OmittedTextAgainstAQuestionIsMalformed(t *testing.T) {
+	t.Parallel()
+	s := newConsoleTestStore(t)
+	ticketID := seedTicket(t, s, "fake#1", "Add a hello endpoint")
+	questionID := seedOpenQuestion(t, s, ticketID)
+
+	srv, _ := newMutationTestServer(t, s, bus.New(), newTestLogHandler(t))
+
+	body := fmt.Sprintf(`{"ticket":%d,"question":%d}`, ticketID, questionID)
+	resp := doRequest(t, mutationRequest(t, srv, "/draft", body))
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusBadRequest {
+		respBody, readErr := io.ReadAll(resp.Body)
+		if readErr != nil {
+			t.Fatalf("status = %d, want 400 (read body: %v)", resp.StatusCode, readErr)
+		}
+		t.Fatalf("status = %d, want 400 (body: %s)", resp.StatusCode, respBody)
+	}
+}
+
 // TestDraft_RejectsMalformedAndOversizedBodies proves the transport-layer
 // checks POST /draft runs before SaveDraft ever sees the body (design
 // section 6.7): malformed JSON and an unknown field are 400, and a body
