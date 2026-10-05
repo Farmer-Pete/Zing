@@ -47,9 +47,6 @@ func Bindings() []KeyBinding {
 		{Keys: []string{"Cmd-Enter", "Ctrl-Enter"}, Action: "send"},
 		{Keys: []string{"a"}, Action: "toggle-rail"},
 		{Keys: []string{"b"}, Action: "focus-side"},
-		{Keys: []string{"s"}, Action: "stop"},
-		{Keys: []string{"S"}, Action: "stop-all"},
-		{Keys: []string{"x"}, Action: "mark-read"},
 		{Keys: []string{"?"}, Action: "help"},
 		{Keys: []string{"Esc"}, Action: "blur"},
 	}

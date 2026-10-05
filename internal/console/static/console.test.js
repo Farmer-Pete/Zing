@@ -498,7 +498,7 @@ test('buildItemDraftBody: reads ticket, question, item ref, and decision off the
 
 // describeAction / ACTION_LABELS: the "?" help overlay's copy for a raw
 // keys.json action name (console.js's buildHelpOverlay used to render the
-// bare identifier, e.g. "nav-inbox" or "stop-all", straight into the
+// bare identifier, e.g. "nav-inbox" or "toggle-rail", straight into the
 // overlay). allKeysGoActions mirrors internal/console/keys.go's Bindings()
 // action column one for one; keys_test.go already pins that file's own
 // shape (TestBindingsCoverEvery14KeyExactlyOnce and its neighbors), so this
@@ -520,9 +520,6 @@ const allKeysGoActions = [
 	'send',
 	'toggle-rail',
 	'focus-side',
-	'stop',
-	'stop-all',
-	'mark-read',
 	'help',
 	'blur',
 ];
@@ -539,11 +536,20 @@ test('ACTION_LABELS has a human label for every keys.go action', () => {
 
 test('describeAction returns the mapped label for a known action', () => {
 	assert.equal(describeAction('nav-inbox'), 'Go to inbox');
-	assert.equal(describeAction('stop-all'), 'Stop everything');
 });
 
 test('describeAction falls back to the raw action name for one outside ACTION_LABELS', () => {
 	assert.equal(describeAction('some-future-action'), 'some-future-action');
+});
+
+// ACTION_LABELS names no action outside keys.go: the inverse of "has a
+// human label for every keys.go action" above. Without this, a removed
+// binding's label (e.g. stop, stop-all, mark-read) could linger in
+// ACTION_LABELS and advertise a key the console no longer accepts.
+test('ACTION_LABELS names no action outside keys.go', () => {
+	for (const action of Object.keys(ACTION_LABELS)) {
+		assert.ok(allKeysGoActions.includes(action), `ACTION_LABELS has a label for ${JSON.stringify(action)}, which is not a keys.go action`);
+	}
 });
 
 // unsavedReplyBody: Cmd+Enter saves the focused reply box's typed text

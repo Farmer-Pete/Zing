@@ -904,7 +904,7 @@ async function postSendBatchLocked(ticket) {
 	}
 }
 
-// ---- rail, side box, stop, mark-read (Task 9/10/7 backends) -------------
+// ---- rail, side box (Task 9/10 backends) ---------------------------------
 
 function toggleRail() {
 	state.railOpen = !state.railOpen;
@@ -1160,8 +1160,8 @@ function installSandboxRunBox() {
 // postLogLevel handles a change on the Log rail's level select (design
 // section 6.11, 6.12, 7.1): POST /loglevel with the select's chosen value.
 // It is a small forward-wired affordance around the endpoint that is this
-// task's real substance, kept to the same postJSON/204 shape as stopTicket
-// and markRead below rather than the fixed-reply shape postSide needs.
+// task's real substance, kept to the same postJSON/204 shape as postDraft
+// below rather than the fixed-reply shape postSide needs.
 function postLogLevel(select) {
 	postJSON('/loglevel', { level: select.value });
 }
@@ -1198,34 +1198,6 @@ function installLogControls() {
 		event.preventDefault();
 		postDebugToggle();
 	});
-}
-
-function stopTicket() {
-	if (!state.nav.open) {
-		return false;
-	}
-	postJSON('/stop', { ticket: state.nav.open });
-	return true;
-}
-
-function stopEverything() {
-	if (!globalThis.confirm?.('Stop every running ticket?')) {
-		return false;
-	}
-	postJSON('/stop', { all: true });
-	return true;
-}
-
-function markRead() {
-	if (!state.focusedID.startsWith('message:')) {
-		return false;
-	}
-	const id = Number(state.focusedID.slice('message:'.length));
-	if (!Number.isFinite(id) || id <= 0) {
-		return false;
-	}
-	postJSON('/read', { message: id });
-	return true;
 }
 
 // ---- the help overlay ----------------------------------------------------
@@ -1300,9 +1272,6 @@ const actions = {
 	send: () => sendBatch(),
 	'toggle-rail': () => toggleRail(),
 	'focus-side': () => focusSideBox(),
-	stop: () => stopTicket(),
-	'stop-all': () => stopEverything(),
-	'mark-read': () => markRead(),
 	help: () => toggleHelp(),
 	blur: () => blurActive(),
 };

@@ -786,9 +786,6 @@ export const ACTION_LABELS = {
 	send: 'Send',
 	'toggle-rail': 'Toggle rail',
 	'focus-side': 'Focus side box',
-	stop: 'Stop ticket',
-	'stop-all': 'Stop everything',
-	'mark-read': 'Mark read',
 	help: 'Toggle this help',
 	blur: 'Close / leave input',
 };
