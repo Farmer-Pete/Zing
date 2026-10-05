@@ -68,6 +68,29 @@ func (c sandboxedCommands) Run(ctx context.Context, dir, repoGit, shellCmd strin
 	return runShellCommand(ctx, workDir, shellCmd, execPrefix, env, timeout, cio)
 }
 
+// hostCommands is the CommandRunner for host-kind scenario checks at
+// judging (design section 5): runShellCommand with no sandbox prefix, the
+// filtered parent environment, and TMPDIR set to a fresh directory removed
+// after the run.
+type hostCommands struct{}
+
+// NewHostCommandRunner returns the unsandboxed runner judging uses for
+// host-kind scenario checks (Deps.HostCommands).
+func NewHostCommandRunner() CommandRunner { return hostCommands{} }
+
+func (hostCommands) Run(ctx context.Context, dir, _, shellCmd string, timeout time.Duration, cio CommandIO) (int, error) {
+	tmp, err := os.MkdirTemp("", "zing-host-check-")
+	if err != nil {
+		return -1, fmt.Errorf("job: host command runner: temp dir: %w", err)
+	}
+	defer func() {
+		if rmErr := os.RemoveAll(tmp); rmErr != nil {
+			slog.Warn("host check temp dir removal failed", "dir", tmp, "error", rmErr)
+		}
+	}()
+	return runShellCommand(ctx, dir, shellCmd, nil, []string{"TMPDIR=" + tmp}, timeout, cio)
+}
+
 // runShellCommand runs "/bin/sh -c shellCmd" (behind execPrefix, when set),
 // in its own process group, the whole group killed after Wait returns on
 // every path (design section 5.5, mirroring runtime.Claude.run's own
