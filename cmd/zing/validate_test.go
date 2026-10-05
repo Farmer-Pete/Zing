@@ -250,6 +250,8 @@ func TestRunValidate_HookUsageErrorExitsOne(t *testing.T) {
 		{"unknown job", hookArgs("nonsense", filepath.Join(t.TempDir(), "s.json"))},
 		{"empty state", hookArgs("classify", "")},
 		{"positional argument", hookArgs("classify", filepath.Join(t.TempDir(), "s.json"), "unexpected-positional-arg")},
+		{"single-dash hook with unknown flag", []string{"-hook", "--bogus"}},
+		{"hook=value form with unknown flag", []string{"--hook=true", "--bogus"}},
 	}
 	for _, tc := range cases {
 		code, out := captureStderr(t, func() int { return runValidateFrom(tc.args, strings.NewReader("")) })
@@ -259,6 +261,50 @@ func TestRunValidate_HookUsageErrorExitsOne(t *testing.T) {
 		if out == "" {
 			t.Errorf("%s: stderr should report the hook usage error", tc.name)
 		}
+	}
+}
+
+// TestRunValidate_HookStateErrorExitsZero proves a StopHook error -- here a
+// corrupt state file -- still exits 0 with empty stdout: Claude Code reads
+// any non-zero exit from a Stop hook as a block, and the hook never blocks
+// just because its own state file could not be read. The error still
+// reaches stderr so it is visible in the run's logs.
+func TestRunValidate_HookStateErrorExitsZero(t *testing.T) {
+	statePath := filepath.Join(t.TempDir(), "s.json")
+	if err := os.WriteFile(statePath, []byte("not-json"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	var stdout bytes.Buffer
+	stderrR, stderrW, pipeErr := os.Pipe()
+	if pipeErr != nil {
+		t.Fatal(pipeErr)
+	}
+	captured := make(chan string, 1)
+	go func() {
+		var buf bytes.Buffer
+		_, _ = io.Copy(&buf, stderrR) //nolint:errcheck // the pipe read end closing is the only failure mode, and stderrW.Close below drives it
+		captured <- buf.String()
+	}()
+
+	code := runStopHook("classify", statePath, nil, strings.NewReader(`{"session_id":"s"}`), &stdout, stderrW)
+
+	if closeErr := stderrW.Close(); closeErr != nil {
+		t.Fatal(closeErr)
+	}
+	stderr := <-captured
+	if closeErr := stderrR.Close(); closeErr != nil {
+		t.Fatal(closeErr)
+	}
+
+	if code != 0 {
+		t.Errorf("code = %d, want 0", code)
+	}
+	if !strings.Contains(stderr, "validate --hook:") {
+		t.Errorf("stderr = %q, want it to contain %q", stderr, "validate --hook:")
+	}
+	if stdout.Len() != 0 {
+		t.Errorf("stdout = %q, want empty", stdout.String())
 	}
 }
 

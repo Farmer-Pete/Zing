@@ -88,19 +88,17 @@ func TestPlanRules_NamesEveryChecklistEntry(t *testing.T) {
 		t.Fatalf("LoadChecklists: %v", err)
 	}
 	block := renderPlanRules(lists)
-	for _, word := range lists.Vague {
-		if !strings.Contains(block, word) {
-			t.Errorf("renderPlanRules block missing vague word %q:\n%s", word, block)
-		}
-	}
-	for _, word := range lists.Placeholders {
-		if !strings.Contains(block, word) {
-			t.Errorf("renderPlanRules block missing placeholder %q:\n%s", word, block)
-		}
-	}
-	for _, unit := range lists.Units {
-		if !strings.Contains(block, unit) {
-			t.Errorf("renderPlanRules block missing unit %q:\n%s", unit, block)
+	// Checked as the whole joined list, not entry by entry: a short entry
+	// such as "s" or "ns" already occurs inside other words in the block
+	// (ns inside "mentions"), so a per-entry strings.Contains would still
+	// pass even if that entry were dropped or the list rendered wrongly.
+	for name, joined := range map[string]string{
+		"Vague":        strings.Join(lists.Vague, ", "),
+		"Placeholders": strings.Join(lists.Placeholders, ", "),
+		"Units":        strings.Join(lists.Units, ", "),
+	} {
+		if !strings.Contains(block, joined) {
+			t.Errorf("renderPlanRules block missing the whole %s list %q:\n%s", name, joined, block)
 		}
 	}
 

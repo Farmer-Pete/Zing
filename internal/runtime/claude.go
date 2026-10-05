@@ -584,7 +584,7 @@ func (c Claude) Run(ctx context.Context, req RunRequest) (RunResult, error) {
 
 	settings, statePath, err := c.stopHook(req, sessionID)
 	if err != nil {
-		slog.Error("claude run: stop hook settings", "job", req.Job, "error", err)
+		slog.Error("claude run: stop hook settings", "job", req.Job, "run_token", req.RunToken, "error", err)
 		return RunResult{ExitCode: -1, AgentTime: time.Since(start)}, ErrStart
 	}
 
@@ -622,8 +622,11 @@ func (c Claude) run(ctx context.Context, req RunRequest, argv []string, sessionI
 	if statePath != "" {
 		// A resumed session reuses its session id, so a stale state file
 		// from a prior run under the same TMPDIR must not leak its counts
-		// into this one.
-		_ = os.Remove(statePath) //nolint:errcheck // absent is the normal case
+		// into this one. The .tmp file is also removed: a prior run killed
+		// (by its own timeout) between writeStopHookState's write and its
+		// rename can leave one behind.
+		_ = os.Remove(statePath)          //nolint:errcheck // absent is the normal case
+		_ = os.Remove(statePath + ".tmp") //nolint:errcheck // absent is the normal case
 	}
 	// The token is appended after agentEnv, not passed through it, so
 	// FilteredEnv's own drop pass (which removes anything *_TOKEN-shaped,
@@ -669,8 +672,13 @@ func (c Claude) run(ctx context.Context, req RunRequest, argv []string, sessionI
 
 	var hookState stopHookState
 	if statePath != "" {
-		hookState, _ = readStopHookState(statePath) //nolint:errcheck // a missing or corrupt file gives zero counts, same as a run with no hook
-		_ = os.Remove(statePath)                    //nolint:errcheck // a leftover file is reset at the next run's own removal before Start
+		var stateErr error
+		hookState, stateErr = readStopHookState(statePath)
+		if stateErr != nil {
+			slog.Warn("claude run: stop hook state unreadable", "job", req.Job, "run_token", req.RunToken, "error", stateErr)
+		}
+		_ = os.Remove(statePath)          //nolint:errcheck // a leftover file is reset at the next run's own removal before Start
+		_ = os.Remove(statePath + ".tmp") //nolint:errcheck // a leftover file is reset at the next run's own removal before Start
 	}
 
 	res := RunResult{

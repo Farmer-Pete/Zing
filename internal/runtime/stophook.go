@@ -77,27 +77,33 @@ func readStopHookState(path string) (stopHookState, error) {
 		return stopHookState{}, nil
 	}
 	if err != nil {
-		return stopHookState{}, err
+		return stopHookState{}, fmt.Errorf("runtime: stop hook: read state %s: %w", path, err)
 	}
 	var st stopHookState
 	if err := json.Unmarshal(b, &st); err != nil {
-		return stopHookState{}, err
+		return stopHookState{}, fmt.Errorf("runtime: stop hook: decode state %s: %w", path, err)
 	}
 	return st, nil
 }
 
 // writeStopHookState writes st to path by writing a temp file and renaming
-// it over path, so a reader never sees a partially written state file.
+// it over path, so a reader never sees a partially written state file. On
+// a failed write or rename, it removes the temp file so a killed run (a
+// timeout, say) never leaves it behind in the host's TMPDIR.
 func writeStopHookState(path string, st stopHookState) error {
 	b, err := json.Marshal(st)
 	if err != nil {
-		return err
+		return fmt.Errorf("runtime: stop hook: encode state %s: %w", path, err)
 	}
 	tmp := path + ".tmp"
 	if err := os.WriteFile(tmp, b, 0o600); err != nil {
-		return err
+		return fmt.Errorf("runtime: stop hook: write state %s: %w", path, err)
 	}
-	return os.Rename(tmp, path)
+	if err := os.Rename(tmp, path); err != nil {
+		_ = os.Remove(tmp) //nolint:errcheck // best-effort cleanup; the rename error is what's reported
+		return fmt.Errorf("runtime: stop hook: rename state %s: %w", path, err)
+	}
+	return nil
 }
 
 // stopHookReason renders the Stop hook's block reason: which block out of

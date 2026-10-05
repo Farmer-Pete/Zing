@@ -15,7 +15,10 @@ const hookUsage = "usage: zing validate --hook --job JOB --state FILE"
 // and 1 on a usage error, never 2, which Claude Code reads as a block on
 // the end of the turn.
 func runStopHook(job, state string, rest []string, stdin io.Reader, stdout, stderr io.Writer) int {
-	if len(rest) != 0 || state == "" || !slices.Contains(response.Job("").Values(), job) {
+	hasPositional := len(rest) != 0
+	missingState := state == ""
+	unknownJob := !slices.Contains(response.Job("").Values(), job)
+	if hasPositional || missingState || unknownJob {
 		fmt.Fprintln(stderr, hookUsage)
 		return 1
 	}

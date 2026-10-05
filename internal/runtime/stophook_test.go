@@ -121,6 +121,29 @@ func TestStopHook_UnreadWithoutLastMessage(t *testing.T) {
 	}
 }
 
+// TestStopHook_BadInputAllows proves hook rule 3: stdin that is not JSON
+// still counts the event and writes the state, but returns no output and
+// the decode error, so a malformed Stop event never blocks the turn.
+func TestStopHook_BadInputAllows(t *testing.T) {
+	t.Parallel()
+
+	statePath := filepath.Join(t.TempDir(), "zing-stop-hook-s.json")
+
+	out, err := StopHook(strings.NewReader("not json"), response.JobClassify, statePath)
+	if err == nil {
+		t.Fatal("StopHook error = nil, want a decode error for non-JSON stdin")
+	}
+	if out != nil {
+		t.Errorf("out = %q, want nil for non-JSON stdin", out)
+	}
+
+	st := readState(t, statePath)
+	want := stopHookState{Events: 1, Blocks: 0, Unread: 0}
+	if st != want {
+		t.Errorf("state = %+v, want %+v", st, want)
+	}
+}
+
 func TestStopHook_CorruptStateAllows(t *testing.T) {
 	t.Parallel()
 

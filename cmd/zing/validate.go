@@ -6,6 +6,7 @@ import (
 	"io"
 	"os"
 	"slices"
+	"strings"
 
 	"zing/internal/response"
 )
@@ -33,7 +34,7 @@ func runValidateFrom(args []string, stdin io.Reader) int {
 	state := fs.String("state", "", "with --hook: the hook's state file")
 	fs.Usage = func() { fmt.Fprintln(os.Stderr, usage) }
 	if err := fs.Parse(args); err != nil {
-		if slices.Contains(args, "--hook") {
+		if hookInvoked(args) {
 			fmt.Fprintln(os.Stderr, hookUsage)
 			return 1 // a Stop hook's exit 2 would block the turn
 		}
@@ -83,4 +84,15 @@ func runValidateFrom(args []string, stdin io.Reader) int {
 		return 1
 	}
 	return 0
+}
+
+// hookInvoked reports whether args names the --hook flag in any form Go's
+// flag package accepts (-hook, --hook, or either with a =value), so a
+// malformed --hook invocation still exits 1, never 2, which Claude Code
+// reads as a block on the end of the turn.
+func hookInvoked(args []string) bool {
+	return slices.ContainsFunc(args, func(a string) bool {
+		name, _, _ := strings.Cut(a, "=")
+		return name == "-hook" || name == "--hook"
+	})
 }

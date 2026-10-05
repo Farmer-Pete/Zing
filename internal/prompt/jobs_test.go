@@ -96,7 +96,16 @@ func TestForPlanningFirst_TicketFenced(t *testing.T) {
 func TestForPlanningFirst_CarriesPlanRules(t *testing.T) {
 	t.Parallel()
 
-	styles := []string{testStyle}
+	// Built with spare capacity and a sentinel in that spare slot: an
+	// append(styles, ...) done in place, without copying first, would
+	// overwrite the sentinel, which a len-1-cap-1 slice could never catch
+	// (append would always allocate a new backing array).
+	styles := make([]string, 1, 2)
+	styles[0] = testStyle
+	styles = styles[:2]
+	styles[1] = "sentinel"
+	styles = styles[:1]
+
 	in := ForPlanningFirst("PROMPT", styles, "ticket body", nil)
 	in.Fence = testFence
 	got := Assemble(in)
@@ -114,6 +123,9 @@ func TestForPlanningFirst_CarriesPlanRules(t *testing.T) {
 	}
 	if len(styles) != 1 || styles[0] != testStyle {
 		t.Errorf("ForPlanningFirst mutated the caller's styles slice: %v", styles)
+	}
+	if got := styles[:2][1]; got != "sentinel" {
+		t.Errorf("ForPlanningFirst wrote into the caller's spare capacity: styles[1] = %q, want %q", got, "sentinel")
 	}
 }
 
