@@ -98,6 +98,40 @@ func TestRecordCheckStartRecordsFix(t *testing.T) {
 	}
 }
 
+// TestCheckKindsAccepted proves every value CheckKinds returns is accepted
+// by check_procs.kind's CHECK constraint (migration 0009) and read back
+// unchanged: a kind added to CheckKinds without widening the CHECK turns
+// this test red.
+func TestCheckKindsAccepted(t *testing.T) {
+	t.Parallel()
+	if got := CheckKinds(); len(got) != 3 || got[0] != CheckKindFix || got[1] != CheckKindLint || got[2] != CheckKindTest {
+		t.Fatalf("CheckKinds() = %v, want [fix lint test]", got)
+	}
+	s := newTestStore(t)
+	ctx := t.Context()
+	for _, k := range CheckKinds() {
+		_, ticketID := seedQueuedTicket(t, s, string(k))
+		expires := time.Now().Add(time.Hour).UTC().Truncate(time.Second)
+		if ok, err := s.Claim(ctx, ticketID, testForeignOwner, expires); err != nil || !ok {
+			t.Fatalf("Claim(%s) = (%v, %v), want (true, nil)", k, ok, err)
+		}
+		gen, err := s.RecordCheckStart(ctx, ticketID, testForeignOwner, expires, k, 4242, testCheckToken, time.Now(), time.Now())
+		if err != nil {
+			t.Fatalf("RecordCheckStart(%s): %v", k, err)
+		}
+		c, ok, err := s.CheckProc(ctx, ticketID)
+		if err != nil || !ok {
+			t.Fatalf("CheckProc(%s) = (%+v, %v, %v), want a row", k, c, ok, err)
+		}
+		if c.Kind != k {
+			t.Errorf("Kind = %q, want %q", c.Kind, k)
+		}
+		if err := s.ClearCheckStart(ctx, ticketID, gen); err != nil {
+			t.Fatalf("ClearCheckStart(%s): %v", k, err)
+		}
+	}
+}
+
 // TestCheckClearsNeedTheRecordGeneration proves a replacement command with
 // the same pgid and no start token is never cleared by a holder of the
 // earlier record: pgid and a NULL proc_start
