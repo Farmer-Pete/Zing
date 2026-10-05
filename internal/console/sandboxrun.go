@@ -72,7 +72,7 @@ func (c *console) handleSandboxRun(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if len(req.Cmd) > maxSandboxCmdBytes {
-		http.Error(w, "command is longer than 4096 bytes", http.StatusBadRequest)
+		http.Error(w, fmt.Sprintf("command is longer than %d bytes", maxSandboxCmdBytes), http.StatusBadRequest)
 		return
 	}
 	if c.run == nil {
@@ -86,14 +86,12 @@ func (c *console) handleSandboxRun(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "ticket not found", http.StatusNotFound)
 		return
 	case errors.Is(err, job.ErrNoProject):
-		slog.Warn("console: sandbox run refused", "ticket_id", ticketID, "err", err)
 		http.Error(w, fmt.Sprintf("ticket %d's project is not configured", ticketID), http.StatusConflict)
 		return
 	case errors.Is(err, orchestrator.ErrNoWorktree):
 		http.Error(w, fmt.Sprintf("ticket %d has no worktree", ticketID), http.StatusConflict)
 		return
 	case errors.Is(err, job.ErrSandbox):
-		slog.Warn("console: sandbox run refused", "ticket_id", ticketID, "err", err)
 		http.Error(w, "build sandbox unavailable", http.StatusServiceUnavailable)
 		return
 	case err != nil && r.Context().Err() != nil:
@@ -135,9 +133,5 @@ func isLoopbackRemote(remoteAddr string) bool {
 		return false
 	}
 	ip := net.ParseIP(host)
-	if ip == nil {
-		return false
-	}
-	isOwnerLoopback := ip.Equal(net.IPv4(127, 0, 0, 1)) || ip.Equal(net.IPv6loopback)
-	return isOwnerLoopback
+	return ip != nil && (ip.Equal(net.IPv4(127, 0, 0, 1)) || ip.Equal(net.IPv6loopback))
 }

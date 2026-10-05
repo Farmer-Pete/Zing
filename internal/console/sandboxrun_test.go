@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -317,11 +318,11 @@ func TestSandboxRunUnknownTicket(t *testing.T) {
 // anything.
 type countingCommands struct {
 	real  job.CommandRunner
-	calls int
+	calls atomic.Int64
 }
 
 func (c *countingCommands) Run(ctx context.Context, dir, repoGit, shellCmd string, timeout time.Duration, cio job.CommandIO) (int, error) {
-	c.calls++
+	c.calls.Add(1)
 	return c.real.Run(ctx, dir, repoGit, shellCmd, timeout, cio)
 }
 
@@ -337,8 +338,8 @@ func TestSandboxRunBadRequest(t *testing.T) {
 	// actually completed; checking counting.calls right after the loop
 	// would race against subtests that have only been scheduled, not run.
 	t.Cleanup(func() {
-		if counting.calls != 0 {
-			t.Errorf("runner calls = %d, want 0", counting.calls)
+		if calls := counting.calls.Load(); calls != 0 {
+			t.Errorf("runner calls = %d, want 0", calls)
 		}
 	})
 

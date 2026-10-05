@@ -729,10 +729,14 @@ async function runInSandbox(button) {
 	if (cmd === '') {
 		return;
 	}
+	suppressPatchSignal = true;
 	button.disabled = true;
+	suppressPatchSignal = false;
 	fillSandboxRunDialog(dialog, `Ticket ${ticketID}: ${cmd}`, 'Running…', '');
 	if (!dialog.open) {
+		suppressPatchSignal = true;
 		dialog.show();
+		suppressPatchSignal = false;
 	}
 	try {
 		const resp = await fetch(`/tickets/${ticketID}/sandbox-run`, {
@@ -758,9 +762,13 @@ async function runInSandbox(button) {
 		console.error('console.js: POST /tickets/{id}/sandbox-run', err);
 		fillSandboxRunDialog(dialog, `Ticket ${ticketID}: ${cmd}`, 'Request failed', '');
 	} finally {
+		suppressPatchSignal = true;
 		button.disabled = false;
+		suppressPatchSignal = false;
 		if (!dialog.open) {
+			suppressPatchSignal = true;
 			dialog.show();
+			suppressPatchSignal = false;
 		}
 	}
 }
@@ -789,7 +797,9 @@ function installSandboxRunBox() {
 		if (event.key !== 'Enter' || !event.target.closest?.('.sandbox-run-cmd')) {
 			return;
 		}
-		if (event.isComposing || event.keyCode === 229 || event.ctrlKey || event.metaKey || event.altKey) {
+		const composing = event.isComposing || event.keyCode === 229;
+		const chord = event.ctrlKey || event.metaKey || event.altKey;
+		if (composing || chord) {
 			return;
 		}
 		const box = event.target.closest('.sandbox-run-box');
