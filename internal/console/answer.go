@@ -9,9 +9,10 @@
 // client-only ".picked" highlight and collapsed the open question group
 // after every pick. This supersedes Package 3's POST /answer (server.go,
 // handlers.go), which answered one option at a time with no draft stage;
-// console.js's postDraft, sendBatch, and markRead (Task 4) were already
-// written against these three routes' JSON contract, ahead of this task
-// building them.
+// console.js's postDraft and sendBatch (Task 4) were already written
+// against these three routes' JSON contract, ahead of this task building
+// them. No key or client caller posts /read today (ticket #44 removed the
+// bare x binding that used to); the route stays for a future caller.
 package console
 
 import (
@@ -215,8 +216,7 @@ func sendResultText(result store.BatchResult) string {
 	return text
 }
 
-// readRequest is POST /read's body (design section 6.4: markRead posts
-// {message}).
+// readRequest is POST /read's body (design section 6.4, 6.8): {message}.
 type readRequest struct {
 	Message int64 `json:"message"`
 }

@@ -17,13 +17,9 @@
 
 import {
 	emptyChordState,
-	advanceChord,
-	resolveAction,
-	isInputContext,
 	isSendChord,
 	sendChordToken,
 	sendChordLabel,
-	resolveToken,
 	stepFocus,
 	reduceNav,
 	stepComposerIndex,
@@ -39,7 +35,8 @@ import {
 	partitionFailedSaves,
 	replyFocusSnapshot,
 	restoreFocusDecision,
-	collectPatchWork,
+	handleKeyEvent,
+	patchFocus,
 	describeAction,
 	nextPendingNav,
 	draftConflictMessage,
@@ -78,6 +75,14 @@ function isMac() {
 const state = {
 	bindings: [], // parsed keys.json; empty until it loads
 	chord: emptyChordState(),
+	// suppressUntil (owner decision on #44, Q5): a Date.now()-style deadline
+	// handleKeyEvent/decideKey compares against, armed by patchFocus when a
+	// /stream patch changes which id is focused. null until the first such
+	// patch.
+	suppressUntil: null,
+	// isMac is read once here, rather than on every keydown, since
+	// navigator.userAgentData/userAgent never changes mid-session.
+	isMac: false,
 	nav: { ...defaultNav }, // this module's mirror of view/open/project
 	navHistory: [], // for "u" (up one level); design section 6.4
 	focusedID: '',
@@ -224,7 +229,7 @@ function goUp() {
 // nothing more useful to open from inside the thread that already shows
 // them -- so this stays a no-op there, unchanged from before. Anything else
 // (no focus, or a focus id from a namespace this task does not yet make
-// focusable) is also a no-op, returning false so dispatchAction skips
+// focusable) is also a no-op, returning false so handleKeyEvent skips
 // preventDefault and any native behavior (e.g. a plain Enter inside a
 // non-composer control) still runs.
 function openFocused() {
@@ -904,7 +909,7 @@ async function postSendBatchLocked(ticket) {
 	}
 }
 
-// ---- rail, side box, stop, mark-read (Task 9/10/7 backends) -------------
+// ---- rail, side box (Task 9/10 backends) ---------------------------------
 
 function toggleRail() {
 	state.railOpen = !state.railOpen;
@@ -1233,8 +1238,9 @@ function installOwnerEdit() {
 // postLogLevel handles a change on the Log rail's level select (design
 // section 6.11, 6.12, 7.1): POST /loglevel with the select's chosen value.
 // It is a small forward-wired affordance around the endpoint that is this
-// task's real substance, kept to the same postJSON/204 shape as stopTicket
-// and markRead below rather than the fixed-reply shape postSide needs.
+// task's real substance, kept to the same plain postJSON fire-and-forget
+// shape as postDebugToggle below rather than the fixed-reply shape postSide
+// needs.
 function postLogLevel(select) {
 	postJSON('/loglevel', { level: select.value });
 }
@@ -1271,34 +1277,6 @@ function installLogControls() {
 		event.preventDefault();
 		postDebugToggle();
 	});
-}
-
-function stopTicket() {
-	if (!state.nav.open) {
-		return false;
-	}
-	postJSON('/stop', { ticket: state.nav.open });
-	return true;
-}
-
-function stopEverything() {
-	if (!globalThis.confirm?.('Stop every running ticket?')) {
-		return false;
-	}
-	postJSON('/stop', { all: true });
-	return true;
-}
-
-function markRead() {
-	if (!state.focusedID.startsWith('message:')) {
-		return false;
-	}
-	const id = Number(state.focusedID.slice('message:'.length));
-	if (!Number.isFinite(id) || id <= 0) {
-		return false;
-	}
-	postJSON('/read', { message: id });
-	return true;
 }
 
 // ---- the help overlay ----------------------------------------------------
@@ -1362,6 +1340,12 @@ const actions = {
 	'nav-inbox': () => navigate({ view: 'inbox', open: 0, project: 0 }),
 	'nav-recent': () => navigate({ view: 'recent', open: 0, project: 0 }),
 	'nav-feed': () => navigate({ view: 'feed', open: 0, project: 0 }),
+	'nav-project': () =>
+		navigate({
+			view: 'project',
+			open: 0,
+			project: state.nav.view === 'project' ? state.nav.project : 0,
+		}),
 	'focus-next': () => moveFocus('next'),
 	'focus-prev': () => moveFocus('prev'),
 	open: () => openFocused(),
@@ -1373,62 +1357,20 @@ const actions = {
 	send: () => sendBatch(),
 	'toggle-rail': () => toggleRail(),
 	'focus-side': () => focusSideBox(),
-	stop: () => stopTicket(),
-	'stop-all': () => stopEverything(),
-	'mark-read': () => markRead(),
 	help: () => toggleHelp(),
 	blur: () => blurActive(),
 };
 
-function dispatchAction(action, event) {
-	const handler = action ? actions[action] : null;
+// runAction is handleKeyEvent's run argument (keyboard.mjs, design section
+// 6.4, owner decision on #44, Q8): the lookup into actions, formerly
+// dispatchAction's job. preventDefault itself now runs in handleKeyEvent,
+// unless the handler returns false, the same rule dispatchAction applied.
+function runAction(action, event) {
+	const handler = actions[action];
 	if (!handler) {
-		return;
+		return false;
 	}
-	if (handler(event) !== false) {
-		event.preventDefault();
-	}
-}
-
-// ---- keydown: token resolution and the chord machine ---------------------
-
-// resolveToken (keyboard.mjs) turns the raw keydown event, plus whether it
-// landed in an input, into the token keys.json binds; it is pure and lives
-// there so node --test can cover its modifier handling directly (design
-// section 6.4, PR review: a Ctrl/Meta/Alt-held single key outside an input
-// must not resolve to a token, so Ctrl-1/Cmd-A/Ctrl-X etc. do not fire
-// console actions and block the browser's own shortcuts for them).
-
-// tokensNeverChorded are resolved directly, never fed through the "g"
-// chord machine: each already names a complete action on its own, and
-// running it through advanceChord would let a stray "g" arm just before
-// one of these and then misinterpret it as a chord's second key.
-const tokensNeverChorded = new Set(['Esc', 'Enter-in-input', 'Cmd-Enter', 'Ctrl-Enter', 'Tab', 'Shift-Tab']);
-
-function onKeyDown(event) {
-	const target = event.target;
-	const inInput = isInputContext({ tagName: target?.tagName, isContentEditable: target?.isContentEditable });
-	const token = resolveToken(event, inInput, isMac());
-	if (token === null) {
-		return; // suppressed while typing; let the input handle the keystroke
-	}
-
-	if (tokensNeverChorded.has(token)) {
-		state.chord = emptyChordState();
-		dispatchAction(resolveAction(token, state.bindings), event);
-		return;
-	}
-
-	const { state: nextChord, chord } = advanceChord(state.chord, token, Date.now());
-	state.chord = nextChord;
-	if (chord) {
-		dispatchAction(resolveAction(chord, state.bindings), event);
-		return;
-	}
-	if (state.chord.leader) {
-		return; // armed on this key (e.g. "g"), waiting for its second key
-	}
-	dispatchAction(resolveAction(token, state.bindings), event);
+	return handler(event);
 }
 
 // ---- the patch observer: focus reconcile, (guarded) mermaid, send-chord
@@ -1557,15 +1499,17 @@ function restoreReplyFocus() {
 
 // runPatchWork is the MutationObserver callback's one per-patch step
 // (design section 6.3): collect plain descriptors from the DOM, hand them
-// to the pure collectPatchWork, then apply its result as DOM effects.
+// to the pure patchFocus, then apply its result as DOM effects. patchFocus
+// also arms state.suppressUntil when the focused id itself changed (owner
+// decision on #44, Q5), so a patch that moves focus to a neighbouring row
+// cannot have a keypress already in flight land on the wrong one.
 function runPatchWork() {
 	const descriptors = {
 		diagramIDs: collectDiagramIDs(),
 		focusableIDs: collectFocusableIDs(),
 		previousFocusableIDs: state.previousFocusableIDs,
 	};
-	const { diagramIDs, focusID } = collectPatchWork(descriptors, state.focusedID);
-	state.previousFocusableIDs = descriptors.focusableIDs;
+	const { diagramIDs, focusID } = patchFocus(state, descriptors, Date.now());
 	setFocusedID(focusID);
 	runMermaidGuarded(diagramIDs);
 	runSendChordHints();
@@ -1725,11 +1669,12 @@ function installNavBridge() {
 // their listeners -- installNavBridge above all, the zing-nav bridge a
 // Threads-sidebar click needs live as early as possible -- sat behind an
 // unrelated network round trip. Only
-// onKeyDown needs the parsed bindings, so it alone waits on the fetch.
+// handleKeyEvent needs the parsed bindings, so it alone waits on the fetch.
 // installStreamWatch runs first (the reconnect plan): it must already be
 // bound before data-init's own @get('/stream') can fire the very first
 // datastar-fetch 'started' event.
 async function install() {
+	state.isMac = isMac();
 	installStreamWatch();
 	installNavBridge();
 	installPatchObserver();
@@ -1742,7 +1687,7 @@ async function install() {
 	installReplyAutosave();
 	installReplyFocusTracking();
 	await loadBindings();
-	document.addEventListener('keydown', onKeyDown);
+	document.addEventListener('keydown', (e) => handleKeyEvent(state, e, Date.now(), runAction));
 }
 
 install();
