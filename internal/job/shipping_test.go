@@ -4862,6 +4862,40 @@ func TestMergeNowMerges(t *testing.T) {
 	}
 }
 
+// TestMergeTitleIsPRTitle proves MERGE's own commit title (design section
+// 8.8): the merge commit title is prTitle(ticket.Title, ticket.TrackerRef)
+// plus " (#<number>)", not the plan's objective -- MERGE never reads the
+// stored plan at all.
+func TestMergeTitleIsPRTitle(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow end-to-end flow; runs in the full suite")
+	}
+	t.Parallel()
+	s, ticket, gh, tr := shipPublished(t)
+	local := shipHeadSHA(t, s, ticket)
+	runs, required := shipGreenCI()
+	gh.runs, gh.required = runs, required
+	gh.prState = shipMergeReadyPR(local, "PR_node_merge_title")
+
+	commit1, err := shipPollRun(t, s, ticket, gh, tr)
+	if err != nil {
+		t.Fatalf("Run (ask): %v", err)
+	}
+	pbApply(t, s, ticket, commit1)
+
+	shipAnswerMergeQuestion(t, s, ticket.ID, "a")
+	commit2, err := shipPollRun(t, s, pbGetTicket(t, s, ticket.ID), gh, tr)
+	if err != nil {
+		t.Fatalf("Run (merge now): %v", err)
+	}
+	pbApply(t, s, ticket, commit2)
+
+	want := prTitle(ticket.Title, ticket.TrackerRef) + " (#1)"
+	if len(gh.mergeCalls) != 1 || !strings.HasSuffix(gh.mergeCalls[0], "|"+want) {
+		t.Errorf("mergeCalls = %+v, want exactly one call ending with %q", gh.mergeCalls, want)
+	}
+}
+
 // TestMergeNowRefusedWhenHeadMoved proves MERGE's own same-tick re-read
 // (N4): between the ask and the owner's Merge now answer, the pull
 // request's head moved -- MERGE refuses with "the head moved", pinned to

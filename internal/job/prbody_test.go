@@ -29,6 +29,13 @@ const (
 	bareCGoPath = "c.go"
 )
 
+// Title literals reused across this file's title cases, pulled out as
+// constants so goconst does not flag the repeats.
+const (
+	prTestShipWidgets = "Ship widgets"
+	prTestFixLogin    = "Fix login"
+)
+
 // -----------------------------------------------------------------------
 // Pure: prBody
 // -----------------------------------------------------------------------
@@ -43,7 +50,7 @@ func TestPRBodySections(t *testing.T) {
 
 	plan := response.Plan{
 		Overview: response.Overview{
-			Objective: "Ship widgets",
+			Objective: prTestShipWidgets,
 			Goals:     []string{"goal one", "goal two"},
 		},
 		Design: response.Design{
@@ -93,11 +100,12 @@ func TestPRBodySections(t *testing.T) {
 		},
 	}
 
-	got := prBody(42, plan, verdicts, scenarios, reports, events)
+	ticket := store.Ticket{ID: 42, Title: prTestShipWidgets}
+	got := prBody(ticket, plan, verdicts, scenarios, reports, events)
 
 	want := orchestrator.PullRequest{
-		Title:       "Ship widgets",
-		What:        "Ship widgets\n\n- goal one\n- goal two",
+		Title:       prTestShipWidgets,
+		What:        prTestShipWidgets + "\n\n- goal one\n- goal two",
 		WorkingDemo: "`make demo`\n\nwidgets ship",
 		Scenarios: "2 scenarios, judged on abcdef1: 1 passed, 1 failed.\n\n" +
 			"| Scenario | Kind | Result |\n" +
@@ -122,49 +130,72 @@ func TestPRBodySections(t *testing.T) {
 	}
 }
 
-// TestPRBodyTitleCut drives 8.10's title rule: whitespace is collapsed
-// first; at or under 256 runes the (collapsed) objective is untouched;
-// past it, the title is cut at the last space at or before rune 253 and
-// gets "..."; with no such space, the cut falls hard at rune 253.
-func TestPRBodyTitleCut(t *testing.T) {
+// TestPRBodyTitleIsTicketTitle drives 8.10's title rule: the Title field
+// is the ticket's own title, not the plan's objective, with a suffix
+// naming its tracker ref -- "#REF" for a numeric ref, bare "REF"
+// otherwise, no suffix for an empty ref -- and, past 256 runes, cut on a
+// word boundary with the suffix preserved. Replaces TestPRBodyTitleCut's
+// objective cases.
+func TestPRBodyTitleIsTicketTitle(t *testing.T) {
 	t.Parallel()
 
+	plan := response.Plan{Overview: response.Overview{Objective: "an unrelated objective sentence", Goals: []string{"g"}}}
+
 	cases := []struct {
-		name      string
-		objective string
-		want      string
+		name  string
+		title string
+		ref   string
+		want  string
 	}{
 		{
-			name:      "whitespace collapses before the length check, so a short result is untouched",
-			objective: "Ship   \t widgets\nfaster",
-			want:      "Ship widgets faster",
+			name:  "a numeric ref gets a hash",
+			title: prTestFixLogin,
+			ref:   "42",
+			want:  prTestFixLogin + " (#42)",
 		},
 		{
-			name:      "256 runes exactly is untouched",
-			objective: strings.Repeat("a", 256),
-			want:      strings.Repeat("a", 256),
+			name:  "a non-numeric ref has no hash",
+			title: prTestFixLogin,
+			ref:   "ZIN-7",
+			want:  prTestFixLogin + " (ZIN-7)",
 		},
 		{
-			name:      "over 256 runes cuts at the last space at or before rune 253",
-			objective: strings.Repeat("a", 250) + " " + strings.Repeat("b", 20),
-			want:      strings.Repeat("a", 250) + "...",
+			name:  "an empty ref adds no suffix",
+			title: prTestFixLogin,
+			ref:   "",
+			want:  prTestFixLogin,
 		},
 		{
-			name:      "no space in the first 253 runes cuts hard at rune 253",
-			objective: strings.Repeat("a", 300),
-			want:      strings.Repeat("a", 253) + "...",
+			name:  "whitespace collapses before the length check, so a short result is untouched but for the suffix",
+			title: "Fix   \t login\nnow",
+			ref:   "",
+			want:  "Fix login now",
 		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			plan := response.Plan{Overview: response.Overview{Objective: tc.objective, Goals: []string{"g"}}}
-			got := prBody(1, plan, nil, nil, nil, nil)
+			ticket := store.Ticket{ID: 1, Title: tc.title, TrackerRef: tc.ref}
+			got := prBody(ticket, plan, nil, nil, nil, nil)
 			if got.Title != tc.want {
 				t.Errorf("Title = %q, want %q", got.Title, tc.want)
 			}
 		})
 	}
+
+	t.Run("a title past the budget cuts at the last space, keeping the suffix, within 256 runes", func(t *testing.T) {
+		t.Parallel()
+		title := strings.Repeat("a", 200) + " " + strings.Repeat("b", 99) // 300 runes
+		ticket := store.Ticket{ID: 1, Title: title, TrackerRef: "42"}
+		got := prBody(ticket, plan, nil, nil, nil, nil)
+		want := strings.Repeat("a", 200) + "... (#42)"
+		if got.Title != want {
+			t.Errorf("Title = %q, want %q", got.Title, want)
+		}
+		if n := len([]rune(got.Title)); n > 256 {
+			t.Errorf("Title length = %d runes, want <= 256", n)
+		}
+	})
 }
 
 // TestPRBodyScenariosHideText asserts the Scenarios field never carries a
@@ -181,7 +212,7 @@ func TestPRBodyScenariosHideText(t *testing.T) {
 		{Scenario: "s1", Result: response.ResultPass, Evidence: "evidence text", Kind: response.ScenarioKindBehavior, Round: 1, SHA: prTestSHA},
 	}
 
-	got := prBody(1, plan, verdicts, scenarios, nil, nil)
+	got := prBody(store.Ticket{ID: 1}, plan, verdicts, scenarios, nil, nil)
 
 	for _, leak := range []string{"GIVEN_SECRET_TEXT", "WHEN_SECRET_TEXT", "THEN_SECRET_TEXT"} {
 		if strings.Contains(got.Scenarios, leak) {
@@ -208,7 +239,7 @@ func TestPRBodyPerformanceEvidence(t *testing.T) {
 		verdicts := []response.VerdictArtifact{
 			{Scenario: "s1", Result: response.ResultPass, Evidence: "e", Kind: response.ScenarioKindBehavior, Round: 1, SHA: prTestSHA},
 		}
-		got := prBody(1, plan, verdicts, scenarios, nil, nil)
+		got := prBody(store.Ticket{ID: 1}, plan, verdicts, scenarios, nil, nil)
 		if strings.Contains(got.Scenarios, "Performance evidence:") {
 			t.Errorf("Scenarios has a performance block with no performance scenario:\n%s", got.Scenarios)
 		}
@@ -222,7 +253,7 @@ func TestPRBodyPerformanceEvidence(t *testing.T) {
 		verdicts := []response.VerdictArtifact{
 			{Scenario: "s9", Result: response.ResultFail, Evidence: firstLine + "\n" + longSecondLine, Kind: response.ScenarioKindPerformance, Round: 1, SHA: prTestSHA},
 		}
-		got := prBody(1, plan, verdicts, scenarios, nil, nil)
+		got := prBody(store.Ticket{ID: 1}, plan, verdicts, scenarios, nil, nil)
 		wantLine := "- s9: " + firstLine[:300]
 		if !strings.Contains(got.Scenarios, "Performance evidence:\n"+wantLine) {
 			t.Errorf("Scenarios missing the cut evidence line:\n%s", got.Scenarios)
@@ -274,7 +305,7 @@ func TestPRBodyFencesDeduped(t *testing.T) {
 		},
 	}
 
-	got := prBody(1, plan, nil, nil, reports, nil)
+	got := prBody(store.Ticket{ID: 1}, plan, nil, nil, reports, nil)
 
 	want := "| Path | Symbol | Existed because |\n" +
 		"| --- | --- | --- |\n" +
@@ -309,7 +340,7 @@ func TestPRBodyEscapesPipes(t *testing.T) {
 		},
 	}
 
-	got := prBody(1, plan, nil, nil, nil, nil)
+	got := prBody(store.Ticket{ID: 1}, plan, nil, nil, nil, nil)
 
 	if !strings.Contains(got.DeclaredFiles, "| "+bareAGoPath+` | modify | needs this file \| for the perimeter |`) {
 		t.Errorf("DeclaredFiles did not escape and collapse its cell:\n%s", got.DeclaredFiles)

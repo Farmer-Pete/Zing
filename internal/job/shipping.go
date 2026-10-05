@@ -239,7 +239,7 @@ func (h shipHandler) publish(ctx context.Context, t store.Ticket, d Deps) (store
 		return store.HandlerCommit{}, fmt.Errorf("job: shipping: file events: %w", err)
 	}
 
-	pr := prBody(t.ID, plan, final, cohort, reports, events)
+	pr := prBody(t, plan, final, cohort, reports, events)
 
 	url, number, openErr := proj.Orch.OpenDraftPR(ctx, wt, pr)
 	if openErr != nil {
@@ -1415,14 +1415,7 @@ func (h shipHandler) merge(ctx context.Context, t store.Ticket, d Deps, proj Pro
 		return h.mergePreconditionFailed(t, d, sha, reason, resolveIDs), nil
 	}
 
-	plan, _, havePlan, err := d.Store.StoredPlan(ctx, t.ID)
-	if err != nil {
-		return store.HandlerCommit{}, fmt.Errorf("job: shipping: merge: stored plan: %w", err)
-	}
-	if !havePlan {
-		return store.HandlerCommit{}, fmt.Errorf("job: shipping: merge: ticket %d has no stored plan", t.ID)
-	}
-	title := fmt.Sprintf("%s (#%d)", prTitle(plan.Overview.Objective), number)
+	title := fmt.Sprintf("%s (#%d)", prTitle(t.Title, t.TrackerRef), number)
 
 	if _, mergeErr := proj.PullRequests.Merge(ctx, proj.Owner, proj.Repo, number, sha, d.MergeRule.Method, title); mergeErr != nil {
 		if errors.Is(mergeErr, orchestrator.ErrMergeRefused) {
