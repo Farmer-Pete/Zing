@@ -661,6 +661,16 @@ func (g *GitHubClient) CommentOnPR(ctx context.Context, owner, repo string, numb
 	return nil
 }
 
+// RerunJob re-runs one Actions job (POST
+// /repos/OWNER/REPO/actions/jobs/JOB-ID/rerun), the per-job form of
+// "re-run failed jobs" (job.Checks.RerunJob).
+func (g *GitHubClient) RerunJob(ctx context.Context, owner, repo string, jobID int64) error {
+	if _, err := g.c.Actions.RerunJobByID(ctx, owner, repo, jobID); err != nil {
+		return classifyGitHubErr(err)
+	}
+	return nil
+}
+
 // maxLogLineBytes bounds one kept line of a job log (job.Checks.JobLogTail;
 // PKG9-PLAN.md section 10.3): a longer line is cut and ends "[line cut]".
 // It also sizes the bufio.Reader tailLog reads through, so no one line is

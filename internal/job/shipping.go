@@ -86,6 +86,9 @@ type Checks interface {
 	// JobLogTail returns the last lines lines of a failed Actions job's log
 	// (orchestrator.GitHubClient.JobLogTail).
 	JobLogTail(ctx context.Context, owner, repo string, jobID int64, lines int) (string, error)
+	// RerunJob re-runs one failed Actions job
+	// (orchestrator.GitHubClient.RerunJob).
+	RerunJob(ctx context.Context, owner, repo string, jobID int64) error
 }
 
 // ShipTracker is what the shipping handler needs from the tracker (design

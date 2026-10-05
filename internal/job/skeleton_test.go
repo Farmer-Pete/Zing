@@ -271,6 +271,10 @@ func (*jobTestShipGitHub) JobLogTail(context.Context, string, string, int64, int
 	return "", nil
 }
 
+func (*jobTestShipGitHub) RerunJob(context.Context, string, string, int64) error {
+	return nil
+}
+
 // jobTestShipTracker is a job.ShipTracker double that always succeeds: this
 // ring test cares that PUBLISH and POLL each reach job.Deps.Tracker, not
 // about the tracker's own comment text (tracker package's own fixture and

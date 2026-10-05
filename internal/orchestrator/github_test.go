@@ -918,6 +918,51 @@ func TestCommentOnPR(t *testing.T) {
 	})
 }
 
+// TestRerunJobPostsJobRerun checks GitHubClient.RerunJob against the same
+// httptest setup as the JobLogTail tests (newTestGHClient): a POST to the
+// job's own rerun endpoint, and a non-2xx response classified as an error.
+func TestRerunJobPostsJobRerun(t *testing.T) {
+	t.Parallel()
+
+	t.Run("sends exactly one POST to the job's rerun endpoint", func(t *testing.T) {
+		t.Parallel()
+		var gotMethod string
+		var hits int
+		mux := http.NewServeMux()
+		mux.HandleFunc("/repos/acme/widgets/actions/jobs/99/rerun", func(w http.ResponseWriter, r *http.Request) {
+			hits++
+			gotMethod = r.Method
+			w.WriteHeader(http.StatusCreated)
+		})
+
+		g := newTestGHClient(t, mux)
+
+		if err := g.RerunJob(t.Context(), "acme", "widgets", 99); err != nil {
+			t.Fatalf("RerunJob: unexpected error: %v", err)
+		}
+		if hits != 1 {
+			t.Errorf("rerun endpoint hits = %d, want 1", hits)
+		}
+		if gotMethod != http.MethodPost {
+			t.Errorf("method = %q, want %q", gotMethod, http.MethodPost)
+		}
+	})
+
+	t.Run("403 is a non-nil error", func(t *testing.T) {
+		t.Parallel()
+		mux := http.NewServeMux()
+		mux.HandleFunc("/repos/acme/widgets/actions/jobs/99/rerun", func(w http.ResponseWriter, _ *http.Request) {
+			w.WriteHeader(http.StatusForbidden)
+			fmt.Fprint(w, `{"message": "Resource not accessible by integration"}`)
+		})
+		g := newTestGHClient(t, mux)
+
+		if err := g.RerunJob(t.Context(), "acme", "widgets", 99); err == nil {
+			t.Error("RerunJob: expected an error, got nil")
+		}
+	})
+}
+
 func TestMergePinsSha(t *testing.T) {
 	t.Parallel()
 

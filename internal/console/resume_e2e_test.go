@@ -114,6 +114,10 @@ func (*resumeE2EShipGitHub) JobLogTail(context.Context, string, string, int64, i
 	return "", nil
 }
 
+func (*resumeE2EShipGitHub) RerunJob(context.Context, string, string, int64) error {
+	return nil
+}
+
 // resumeE2EMaxTicks and resumeE2EOwner mirror cmd/zing/selftest.go's own
 // e2eMaxTicks and e2eOwner: enough bounded ticks for intake plus one
 // handler call per pipeline transition, with headroom, so a stuck

@@ -121,6 +121,11 @@ type shipGitHub struct {
 	// own tests, shiprules_test.go, cover JobLogTail's real shape).
 	logTail func(ctx context.Context, owner, repo string, jobID int64, lines int) (string, error)
 
+	// reruns records every RerunJob call's job id, in call order; rerunErr,
+	// when set, fails every call instead (task 2's own job.Checks.RerunJob).
+	reruns   []int64
+	rerunErr error
+
 	// The fields below are respond.go's own configurable reads (M4 task 4):
 	// threads backs ListThreads (nil is "no threads", every pre-task-4 POLL
 	// test's own implicit expectation); viewerLogin backs Viewer, defaulting
@@ -294,6 +299,11 @@ func (g *shipGitHub) JobLogTail(ctx context.Context, owner, repo string, jobID i
 		return g.logTail(ctx, owner, repo, jobID, lines)
 	}
 	return "", nil
+}
+
+func (g *shipGitHub) RerunJob(_ context.Context, _, _ string, jobID int64) error {
+	g.reruns = append(g.reruns, jobID)
+	return g.rerunErr
 }
 
 // ListThreads, ThreadCommentsContain, ReplyToThread, ResolveThread,

@@ -429,6 +429,10 @@ func (f fakeLogChecks) JobLogTail(ctx context.Context, owner, repo string, jobID
 	return f.tail(ctx, owner, repo, jobID, lines)
 }
 
+func (f fakeLogChecks) RerunJob(context.Context, string, string, int64) error {
+	return nil
+}
+
 func TestCILogText(t *testing.T) {
 	t.Parallel()
 

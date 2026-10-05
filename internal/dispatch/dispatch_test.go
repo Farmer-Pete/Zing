@@ -756,6 +756,10 @@ func (g *dispatchShipGitHub) JobLogTail(context.Context, string, string, int64, 
 	return "", nil
 }
 
+func (g *dispatchShipGitHub) RerunJob(context.Context, string, string, int64) error {
+	return nil
+}
+
 // MarkReady and ConvertToDraft give dispatchShipGitHub job.DraftFlips too
 // (M4 task 7): this fake always reports Draft: true (GetPR, above), so
 // this file's own shipping e2e necessarily reaches row 8's ready flip on
