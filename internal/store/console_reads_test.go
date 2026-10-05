@@ -360,6 +360,154 @@ func inboxHasTicket(items []InboxItem, ticketID int64) bool {
 	return false
 }
 
+// TestLiveTickets_PlanningTicketWithNothingUnreadIsListed proves the
+// sidebar's new read picks up a quiet, non-terminal ticket that
+// InboxItems' blocking-or-unread filter would leave out (ticket, #106 bug
+// 4): a planning ticket with no messages at all still shows somewhere a
+// mouse can reach.
+func TestLiveTickets_PlanningTicketWithNothingUnreadIsListed(t *testing.T) {
+	t.Parallel()
+	s := newTestStore(t)
+	projectID := seedProjectNamed(t, s, testProjectAlpha)
+
+	ticketID, err := s.InsertTicket(t.Context(), Ticket{ProjectID: projectID, TrackerRef: "planning1", Title: "t planning1", State: ticketStateQueued})
+	if err != nil {
+		t.Fatalf("InsertTicket: %v", err)
+	}
+	setTicketState(t, s, ticketID, testStatePlanning)
+
+	terminal := []string{testStateDone, testStateEscalated, testStateAbandoned}
+	got, err := s.LiveTickets(t.Context(), terminal)
+	if err != nil {
+		t.Fatalf("LiveTickets: %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("LiveTickets returned %d tickets, want 1: %+v", len(got), got)
+	}
+	if got[0].Ticket.ID != ticketID {
+		t.Errorf("LiveTickets[0].Ticket.ID = %d, want %d", got[0].Ticket.ID, ticketID)
+	}
+	if got[0].Unread {
+		t.Error("LiveTickets[0].Unread = true, want false for a ticket with no messages")
+	}
+	if got[0].OpenQuestionCount != 0 {
+		t.Errorf("LiveTickets[0].OpenQuestionCount = %d, want 0", got[0].OpenQuestionCount)
+	}
+	if got[0].Ticket.WaitingOn != nil {
+		t.Errorf("LiveTickets[0].Ticket.WaitingOn = %v, want nil", got[0].Ticket.WaitingOn)
+	}
+}
+
+// TestLiveTickets_ExcludesTerminalUnlessBlocking proves LiveTickets' own
+// membership rule: a terminal ticket is excluded unless it is blocking, and
+// every ticket is included when terminal is nil.
+func TestLiveTickets_ExcludesTerminalUnlessBlocking(t *testing.T) {
+	t.Parallel()
+	s := newTestStore(t)
+	projectID := seedProjectNamed(t, s, testProjectAlpha)
+
+	done, err := s.InsertTicket(t.Context(), Ticket{ProjectID: projectID, TrackerRef: "done1", Title: "t done1", State: ticketStateQueued})
+	if err != nil {
+		t.Fatalf("InsertTicket(done): %v", err)
+	}
+	insertZingUpdate(t, s, done)
+	setTicketState(t, s, done, testStateDone)
+
+	escalated := insertWaitingTicket(t, s, projectID, "escalated1")
+	setTicketState(t, s, escalated, testStateEscalated)
+
+	queued, err := s.InsertTicket(t.Context(), Ticket{ProjectID: projectID, TrackerRef: "queued1", Title: "t queued1", State: ticketStateQueued})
+	if err != nil {
+		t.Fatalf("InsertTicket(queued): %v", err)
+	}
+
+	terminal := []string{testStateDone, testStateEscalated, testStateAbandoned}
+	got, err := s.LiveTickets(t.Context(), terminal)
+	if err != nil {
+		t.Fatalf("LiveTickets(terminal): %v", err)
+	}
+	if liveHasTicket(got, done) {
+		t.Errorf("LiveTickets(terminal) includes the done ticket %d: %+v", done, got)
+	}
+	if !liveHasTicket(got, escalated) {
+		t.Errorf("LiveTickets(terminal) excludes the blocking escalated ticket %d: %+v", escalated, got)
+	}
+	if !liveHasTicket(got, queued) {
+		t.Errorf("LiveTickets(terminal) excludes the queued ticket %d: %+v", queued, got)
+	}
+
+	gotAll, err := s.LiveTickets(t.Context(), nil)
+	if err != nil {
+		t.Fatalf("LiveTickets(nil): %v", err)
+	}
+	for _, id := range []int64{done, escalated, queued} {
+		if !liveHasTicket(gotAll, id) {
+			t.Errorf("LiveTickets(nil) excludes ticket %d: %+v", id, gotAll)
+		}
+	}
+}
+
+// TestLiveTickets_OrdersBlockingThenUnreadThenIssueNumber proves
+// LiveTickets' full ordering: blocking first, then unread, then quiet, each
+// by issueNumberOrder -- numeric refs of any length sorted correctly, then
+// non-numeric refs as text. It also proves the variadic extra destinations
+// land correctly: the blocking ticket's OpenQuestionCount matches its open
+// question rows.
+func TestLiveTickets_OrdersBlockingThenUnreadThenIssueNumber(t *testing.T) {
+	t.Parallel()
+	s := newTestStore(t)
+	projectID := seedProjectNamed(t, s, testProjectAlpha)
+
+	mkQuiet := func(ref string) int64 {
+		id, err := s.InsertTicket(t.Context(), Ticket{ProjectID: projectID, TrackerRef: ref, Title: "t " + ref, State: ticketStateQueued})
+		if err != nil {
+			t.Fatalf("InsertTicket(%s): %v", ref, err)
+		}
+		return id
+	}
+
+	mkQuiet("102")
+	mkQuiet("65")
+	unread := mkQuiet("9")
+	insertZingUpdate(t, s, unread)
+	blocking := insertWaitingTicket(t, s, projectID, "200")
+	insertQuestionWithBody(t, s, blocking, "Q1", "Question one", questionStateOpen)
+	insertQuestionWithBody(t, s, blocking, "Q2", "Question two", questionStateOpen)
+	mkQuiet("100000000000000000001")
+	mkQuiet("99999999999999999999")
+	mkQuiet("007")
+	const nonNumericRef = "zzz"
+	mkQuiet(nonNumericRef)
+
+	terminal := []string{testStateDone, testStateEscalated, testStateAbandoned}
+	got, err := s.LiveTickets(t.Context(), terminal)
+	if err != nil {
+		t.Fatalf("LiveTickets: %v", err)
+	}
+	wantRefs := []string{"200", "9", "007", "65", "102", "99999999999999999999", "100000000000000000001", nonNumericRef}
+	if len(got) != len(wantRefs) {
+		t.Fatalf("LiveTickets returned %d tickets, want %d: %+v", len(got), len(wantRefs), got)
+	}
+	for i, want := range wantRefs {
+		if got[i].Ticket.TrackerRef != want {
+			t.Errorf("LiveTickets[%d].Ticket.TrackerRef = %q, want %q", i, got[i].Ticket.TrackerRef, want)
+		}
+	}
+	if got[0].OpenQuestionCount != 2 {
+		t.Errorf("LiveTickets[0] (ref 200) OpenQuestionCount = %d, want 2", got[0].OpenQuestionCount)
+	}
+}
+
+// liveHasTicket reports whether items contains ticketID.
+func liveHasTicket(items []LiveTicket, ticketID int64) bool {
+	for i := range items {
+		if items[i].Ticket.ID == ticketID {
+			return true
+		}
+	}
+	return false
+}
+
 func TestTicketsByProject_OrderedByTrackerRefThenID(t *testing.T) {
 	t.Parallel()
 	s := newTestStore(t)

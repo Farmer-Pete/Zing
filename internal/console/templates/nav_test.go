@@ -7,6 +7,11 @@ import (
 	"zing/internal/store"
 )
 
+// testStatePlanning is TestNavThreadBadgeByKind's own "planning" ticket
+// state literal, named once so its three subtests' fixtures don't repeat
+// the bare string (goconst).
+const testStatePlanning = "planning"
+
 // renderNav renders Nav(nil, threads, "", openTicketID) to a string,
 // failing the test on a render error.
 func renderNav(t *testing.T, threads []NavThread, openTicketID int64) string {
@@ -53,6 +58,53 @@ func TestNavThreadSelected(t *testing.T) {
 		got := renderNav(t, threads, 0)
 		if strings.Contains(got, "selected") {
 			t.Errorf("rendered nav selected a row with no ticket open; got:\n%s", got)
+		}
+	})
+}
+
+// TestNavThreadBadgeByKind proves threadLink's three-way badge: blocking
+// renders the waiting badge, unread-but-not-blocking renders the unread
+// badge, and a quiet row renders its state pill instead (design section
+// 6.8, #106 bug 4).
+func TestNavThreadBadgeByKind(t *testing.T) {
+	t.Parallel()
+
+	t.Run("blocking renders the blocking badge", func(t *testing.T) {
+		t.Parallel()
+		th := NavThread{
+			Ticket:    store.Ticket{ID: 1, State: testStatePlanning},
+			Blocking:  true,
+			WaitingOn: "questions",
+		}
+		got := renderNav(t, []NavThread{th}, 0)
+		if !strings.Contains(got, "badge-blocking") {
+			t.Errorf("rendered nav missing badge-blocking for a blocking thread; got:\n%s", got)
+		}
+	})
+
+	t.Run("unread, non-blocking renders the unread badge", func(t *testing.T) {
+		t.Parallel()
+		th := NavThread{
+			Ticket: store.Ticket{ID: 2, State: testStatePlanning},
+			Unread: true,
+		}
+		got := renderNav(t, []NavThread{th}, 0)
+		if !strings.Contains(got, "badge-unread") {
+			t.Errorf("rendered nav missing badge-unread for an unread thread; got:\n%s", got)
+		}
+	})
+
+	t.Run("quiet renders the state pill, no badge", func(t *testing.T) {
+		t.Parallel()
+		th := NavThread{
+			Ticket: store.Ticket{ID: 3, State: testStatePlanning},
+		}
+		got := renderNav(t, []NavThread{th}, 0)
+		if !strings.Contains(got, `<span class="pill">planning</span>`) {
+			t.Errorf("rendered nav missing the state pill for a quiet thread; got:\n%s", got)
+		}
+		if strings.Contains(got, "badge-blocking") || strings.Contains(got, "badge-unread") {
+			t.Errorf("rendered nav shows a badge for a quiet thread; got:\n%s", got)
 		}
 	})
 }

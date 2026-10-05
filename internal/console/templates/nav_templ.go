@@ -14,8 +14,8 @@ import (
 	"zing/internal/store"
 )
 
-// Nav renders the #nav region: a view switcher, the project list, and the
-// per-thread blocking/unread badge list (design section 6.3, 6.5, 6.8).
+// Nav renders the #nav region: a view switcher, the project list, and every
+// live ticket (design section 6.3, 6.5, 6.8, #106 bug 4).
 //
 // Every link here is a temporary, clickable stand-in for the keyboard
 // module Task 4 builds (design section 12, Task 3 scope note: "the shell
@@ -199,11 +199,12 @@ func navLink(view string, open, project int64, label string) templ.Component {
 }
 
 // threadLink is one nav-threads row: the ticket's title, opening it on
-// click, with a badge showing the waiting flag when blocking or an unread
-// dot otherwise (design section 6.8). It carries "selected" (bug fix,
-// threadRowClass below) when it is the thread view's own open ticket, so
-// the sidebar's highlight is part of #nav's rendered HTML rather than a
-// client-only focus ring a later patch can drop.
+// click, with a badge showing the waiting flag when blocking, an unread
+// badge when not blocking but unread, or otherwise its state pill (design
+// section 6.8, #106 bug 4). It carries "selected" (bug fix, threadRowClass
+// below) when it is the thread view's own open ticket, so the sidebar's
+// highlight is part of #nav's rendered HTML rather than a client-only focus
+// ring a later patch can drop.
 func threadLink(th NavThread, openTicketID int64) templ.Component {
 	return templruntime.GeneratedTemplate(func(templ_7745c5c3_Input templruntime.GeneratedComponentInput) (templ_7745c5c3_Err error) {
 		templ_7745c5c3_W, ctx := templ_7745c5c3_Input.Writer, templ_7745c5c3_Input.Context
@@ -250,7 +251,7 @@ func threadLink(th NavThread, openTicketID int64) templ.Component {
 		var templ_7745c5c3_Var9 string
 		templ_7745c5c3_Var9, templ_7745c5c3_Err = templ.ResolveAttributeValue(zingNavExpr("thread", th.Ticket.ID, 0))
 		if templ_7745c5c3_Err != nil {
-			return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/console/templates/nav.templ`, Line: 80, Col: 129}
+			return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/console/templates/nav.templ`, Line: 81, Col: 129}
 		}
 		_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ_7745c5c3_Var9)
 		if templ_7745c5c3_Err != nil {
@@ -263,7 +264,7 @@ func threadLink(th NavThread, openTicketID int64) templ.Component {
 		var templ_7745c5c3_Var10 string
 		templ_7745c5c3_Var10, templ_7745c5c3_Err = templ.JoinStringErrs(th.Ticket.Title)
 		if templ_7745c5c3_Err != nil {
-			return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/console/templates/nav.templ`, Line: 81, Col: 39}
+			return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/console/templates/nav.templ`, Line: 82, Col: 39}
 		}
 		_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ.EscapeString(templ_7745c5c3_Var10))
 		if templ_7745c5c3_Err != nil {
@@ -282,7 +283,7 @@ func threadLink(th NavThread, openTicketID int64) templ.Component {
 				var templ_7745c5c3_Var11 string
 				templ_7745c5c3_Var11, templ_7745c5c3_Err = templ.JoinStringErrs(fmt.Sprintf("%s (%d)", th.WaitingOn, th.OpenQuestionCount))
 				if templ_7745c5c3_Err != nil {
-					return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/console/templates/nav.templ`, Line: 85, Col: 65}
+					return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/console/templates/nav.templ`, Line: 86, Col: 65}
 				}
 				_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ.EscapeString(templ_7745c5c3_Var11))
 				if templ_7745c5c3_Err != nil {
@@ -292,7 +293,7 @@ func threadLink(th NavThread, openTicketID int64) templ.Component {
 				var templ_7745c5c3_Var12 string
 				templ_7745c5c3_Var12, templ_7745c5c3_Err = templ.JoinStringErrs(th.WaitingOn)
 				if templ_7745c5c3_Err != nil {
-					return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/console/templates/nav.templ`, Line: 87, Col: 19}
+					return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/console/templates/nav.templ`, Line: 88, Col: 19}
 				}
 				_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ.EscapeString(templ_7745c5c3_Var12))
 				if templ_7745c5c3_Err != nil {
@@ -303,8 +304,13 @@ func threadLink(th NavThread, openTicketID int64) templ.Component {
 			if templ_7745c5c3_Err != nil {
 				return templ_7745c5c3_Err
 			}
-		} else {
+		} else if th.Unread {
 			templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 19, "<span class=\"badge badge-unread\">unread</span>")
+			if templ_7745c5c3_Err != nil {
+				return templ_7745c5c3_Err
+			}
+		} else {
+			templ_7745c5c3_Err = statePill(th.Ticket).Render(ctx, templ_7745c5c3_Buffer)
 			if templ_7745c5c3_Err != nil {
 				return templ_7745c5c3_Err
 			}

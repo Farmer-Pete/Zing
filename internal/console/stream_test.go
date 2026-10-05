@@ -283,8 +283,14 @@ func TestStreamOpeningAThreadMarksItRead(t *testing.T) {
 	defer func() { _ = inboxResp.Body.Close() }()
 	inboxNav, _, _, _ := readInitialFrames(t, inboxR)
 
-	if strings.Contains(inboxNav, "Unread thread") {
-		t.Errorf("post-open inbox nav frame still lists the ticket; got:\n%s", inboxNav)
+	// The ticket is still live (queued, non-terminal), so #nav still lists
+	// it (design section 6.3, 6.8, #106 bug 4); it is the badge-unread, not
+	// the row itself, that the mark-read clears.
+	if strings.Contains(inboxNav, "badge-unread") {
+		t.Errorf("post-open inbox nav frame still shows badge-unread; got:\n%s", inboxNav)
+	}
+	if !strings.Contains(inboxNav, "Unread thread") {
+		t.Errorf("post-open inbox nav frame no longer lists the still-live ticket; got:\n%s", inboxNav)
 	}
 }
 

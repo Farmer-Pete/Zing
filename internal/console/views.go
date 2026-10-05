@@ -1,8 +1,8 @@
 // views.go builds the five views' per-view models from the store reads
 // Task 2 added and renders them through the templ components in
 // internal/console/templates (design section 6.5, Task 3). #nav's model
-// (design section 6.3, 6.8) lives here too: it is not one of the five
-// views, but it is built the same way, from the same InboxItems read.
+// (design section 6.3, 6.8, #106 bug 4) lives here too: it is not one of
+// the five views, but it is built the same way, from store.LiveTickets.
 package console
 
 import (
@@ -85,21 +85,27 @@ func buildAlertLines(entries []LogEntry) []templates.AlertLine {
 	return lines
 }
 
-// navComponent builds the #nav region: every project, and the per-thread
-// blocking/unread badge list built from store.InboxItems, the same
-// blocking-or-unread predicate section 6.8 defines (design section 6.3).
-// open is the thread view's own open ticket, 0 when none is open (bug fix:
-// nav.templ's threadLink renders "selected" on this one row, so the
-// sidebar's highlight is part of #nav's own HTML and survives every patch).
+// navComponent builds the #nav region: every project, and every live
+// ticket (design section 6.3, 6.8, #106 bug 4), built from
+// store.LiveTickets so the sidebar shows a ticket the moment it stops
+// being terminal, not only once it is blocking or unread. open is the
+// thread view's own open ticket, 0 when none is open (bug fix: nav.templ's
+// threadLink renders "selected" on this one row, so the sidebar's
+// highlight is part of #nav's own HTML and survives every patch).
 func (c *console) navComponent(ctx context.Context, open int64) (templ.Component, error) {
 	projects, err := c.store.ListProjects(ctx)
 	if err != nil {
 		return nil, err
 	}
-	items, err := c.store.InboxItems(ctx, c.terminalStates())
+	items, err := c.store.LiveTickets(ctx, c.terminalStates())
 	if err != nil {
 		return nil, err
 	}
+	ids := make([]int64, len(items))
+	for i := range items {
+		ids[i] = items[i].Ticket.ID
+	}
+	slog.DebugContext(ctx, "console: nav live tickets", "count", len(items), "ticket_ids", ids)
 	return templates.Nav(projects, buildNavThreads(items), c.sandboxReason, open), nil
 }
 
@@ -115,14 +121,15 @@ func (c *console) terminalStates() []string {
 	return c.machine.States.Terminal
 }
 
-// buildNavThreads turns InboxItems into #nav's badge rows, preserving their
-// blocking-first, newest-first order (design section 7.2).
-func buildNavThreads(items []store.InboxItem) []templates.NavThread {
+// buildNavThreads turns LiveTickets into #nav's rows, preserving their
+// blocking, unread, issue-number order (design section 6.3, 6.8).
+func buildNavThreads(items []store.LiveTicket) []templates.NavThread {
 	out := make([]templates.NavThread, 0, len(items))
 	for i := range items {
 		th := templates.NavThread{
 			Ticket:            items[i].Ticket,
-			OpenQuestionCount: len(items[i].OpenQuestions),
+			Unread:            items[i].Unread,
+			OpenQuestionCount: items[i].OpenQuestionCount,
 		}
 		if items[i].Ticket.WaitingOn != nil {
 			th.Blocking = true

@@ -5,6 +5,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"zing/internal/bus"
 	"zing/internal/console"
@@ -96,6 +97,81 @@ func TestInboxGroupsByProjectBlockingFirst(t *testing.T) {
 	if got := strings.Count(main, `class="ib-q"`); got != 2 {
 		t.Errorf("ib-q row count = %d, want 2 (one per blocking ticket's open question); got:\n%s", got, main)
 	}
+}
+
+// TestNavListsEveryLiveTicket proves the sidebar's new membership rule
+// (design section 6.3, 6.8, #106 bug 4): a quiet, non-terminal ticket shows
+// in #nav even with no unread message, and a terminal ticket with an unread
+// message does not.
+func TestNavListsEveryLiveTicket(t *testing.T) {
+	t.Parallel()
+	s := newConsoleTestStore(t)
+
+	planMe := seedTicket(t, s, "live#1", "Plan me")
+	const owner = "test-owner"
+	expires := time.Now().Add(10 * time.Minute)
+	claimed, err := s.Claim(t.Context(), planMe, owner, expires)
+	if err != nil {
+		t.Fatalf("Claim: %v", err)
+	}
+	if !claimed {
+		t.Fatal("Claim: got false, want true")
+	}
+	applied, err := s.CommitHandlerResult(t.Context(), store.HandlerCommit{
+		TicketID: planMe, Owner: owner, Expires: expires,
+		Next: string(response.TicketStatePlanning), Reason: "test: start planning",
+	})
+	if err != nil {
+		t.Fatalf("CommitHandlerResult(planning): %v", err)
+	}
+	if !applied {
+		t.Fatal("CommitHandlerResult(planning): applied = false, want true")
+	}
+
+	shipped := seedTicket(t, s, "live#2", "Shipped")
+	claimed, err = s.Claim(t.Context(), shipped, owner, expires)
+	if err != nil {
+		t.Fatalf("Claim: %v", err)
+	}
+	if !claimed {
+		t.Fatal("Claim: got false, want true")
+	}
+	applied, err = s.CommitHandlerResult(t.Context(), store.HandlerCommit{
+		TicketID: shipped, Owner: owner, Expires: expires,
+		Next: string(response.TicketStateDone), Reason: "test: finished",
+	})
+	if err != nil {
+		t.Fatalf("CommitHandlerResult(done): %v", err)
+	}
+	if !applied {
+		t.Fatal("CommitHandlerResult(done): applied = false, want true")
+	}
+	seedUnreadUpdate(t, s, shipped, "an unread update")
+
+	srv := newTestServer(t, s, bus.New(), testMachine(t), newTestLogHandler(t))
+
+	nav := navFrame(t, srv.URL)
+
+	if !strings.Contains(nav, "Plan me") {
+		t.Errorf("nav frame missing the quiet planning ticket; got:\n%s", nav)
+	}
+	if !strings.Contains(nav, `<span class="pill">planning</span>`) {
+		t.Errorf("nav frame missing the planning ticket's state pill; got:\n%s", nav)
+	}
+	if strings.Contains(nav, "Shipped") {
+		t.Errorf("nav frame lists the done ticket; got:\n%s", nav)
+	}
+}
+
+// navFrame opens one /stream connection for the inbox view, reads its
+// initial frames, and returns just the #nav one.
+func navFrame(t *testing.T, base string) string {
+	t.Helper()
+	resp, r, cancel := openStream(t, base, "inbox", 0, 0)
+	defer cancel()
+	defer func() { _ = resp.Body.Close() }()
+	nav, _, _, _ := readInitialFrames(t, r)
+	return nav
 }
 
 // TestRecentOrdersByNewestMessageThenNoMessageLast proves Recent's order:
