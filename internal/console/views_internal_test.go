@@ -1832,12 +1832,6 @@ func TestGateShowsPlan(t *testing.T) {
 	}
 }
 
-// projectSectionsTicket builds a minimal store.Ticket with the given
-// tracker_ref and state, for TestProjectSections.
-func projectSectionsTicket(ref, state string) store.Ticket {
-	return store.Ticket{TrackerRef: ref, State: state}
-}
-
 // projectSectionsRefs returns tickets' tracker refs, in order, for
 // TestProjectSections' assertions.
 func projectSectionsRefs(tickets []store.Ticket) []string {
@@ -1864,13 +1858,13 @@ func TestProjectSections(t *testing.T) {
 	}
 
 	tickets := []store.Ticket{
-		projectSectionsTicket("65", "building"),
-		projectSectionsTicket("95", "queued"),
-		projectSectionsTicket("96", "done"),
-		projectSectionsTicket("102", "building"),
-		projectSectionsTicket("110", "reviewing"),
-		projectSectionsTicket("120", "escalated"),
-		projectSectionsTicket("130", "mystery"),
+		{TrackerRef: "65", State: string(response.TicketStateBuilding)},
+		{TrackerRef: "95", State: string(response.TicketStateQueued)},
+		{TrackerRef: "96", State: "done"},
+		{TrackerRef: "102", State: string(response.TicketStateBuilding)},
+		{TrackerRef: "110", State: "reviewing"},
+		{TrackerRef: "120", State: "escalated"},
+		{TrackerRef: "130", State: "mystery"},
 	}
 
 	t.Run("with a real machine's order and terminal", func(t *testing.T) {

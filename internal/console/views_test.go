@@ -1,7 +1,10 @@
 package console_test
 
 import (
+	"bytes"
 	"encoding/json"
+	"fmt"
+	"log/slog"
 	"strconv"
 	"strings"
 	"testing"
@@ -102,51 +105,25 @@ func TestInboxGroupsByProjectBlockingFirst(t *testing.T) {
 // TestNavListsEveryLiveTicket proves the sidebar's new membership rule
 // (design section 6.3, 6.8, #106 bug 4): a quiet, non-terminal ticket shows
 // in #nav even with no unread message, and a terminal ticket with an unread
-// message does not.
+// message does not. It also proves navComponent's Debug line carries only
+// the count and ticket ids, never a ticket's title.
+//
+// Not parallel: it calls slog.SetDefault below to capture a log line, which
+// swaps the process-wide default logger.
 func TestNavListsEveryLiveTicket(t *testing.T) {
-	t.Parallel()
 	s := newConsoleTestStore(t)
 
 	planMe := seedTicket(t, s, "live#1", "Plan me")
-	const owner = "test-owner"
-	expires := time.Now().Add(10 * time.Minute)
-	claimed, err := s.Claim(t.Context(), planMe, owner, expires)
-	if err != nil {
-		t.Fatalf("Claim: %v", err)
-	}
-	if !claimed {
-		t.Fatal("Claim: got false, want true")
-	}
-	applied, err := s.CommitHandlerResult(t.Context(), store.HandlerCommit{
-		TicketID: planMe, Owner: owner, Expires: expires,
-		Next: string(response.TicketStatePlanning), Reason: "test: start planning",
-	})
-	if err != nil {
-		t.Fatalf("CommitHandlerResult(planning): %v", err)
-	}
-	if !applied {
-		t.Fatal("CommitHandlerResult(planning): applied = false, want true")
-	}
+	transitionTicket(t, s, planMe, response.TicketStatePlanning)
 
 	shipped := seedTicket(t, s, "live#2", "Shipped")
-	claimed, err = s.Claim(t.Context(), shipped, owner, expires)
-	if err != nil {
-		t.Fatalf("Claim: %v", err)
-	}
-	if !claimed {
-		t.Fatal("Claim: got false, want true")
-	}
-	applied, err = s.CommitHandlerResult(t.Context(), store.HandlerCommit{
-		TicketID: shipped, Owner: owner, Expires: expires,
-		Next: string(response.TicketStateDone), Reason: "test: finished",
-	})
-	if err != nil {
-		t.Fatalf("CommitHandlerResult(done): %v", err)
-	}
-	if !applied {
-		t.Fatal("CommitHandlerResult(done): applied = false, want true")
-	}
+	transitionTicket(t, s, shipped, response.TicketStateDone)
 	seedUnreadUpdate(t, s, shipped, "an unread update")
+
+	var logBuf bytes.Buffer
+	prevDefault := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logBuf, &slog.HandlerOptions{Level: slog.LevelDebug})))
+	t.Cleanup(func() { slog.SetDefault(prevDefault) })
 
 	srv := newTestServer(t, s, bus.New(), testMachine(t), newTestLogHandler(t))
 
@@ -160,6 +137,20 @@ func TestNavListsEveryLiveTicket(t *testing.T) {
 	}
 	if strings.Contains(nav, "Shipped") {
 		t.Errorf("nav frame lists the done ticket; got:\n%s", nav)
+	}
+
+	logOut := logBuf.String()
+	if !strings.Contains(logOut, "console: nav live tickets") {
+		t.Fatalf("missing the nav live tickets debug line; got:\n%s", logOut)
+	}
+	if !strings.Contains(logOut, "count=1") {
+		t.Errorf("nav debug line missing count=1; got:\n%s", logOut)
+	}
+	if !strings.Contains(logOut, strconv.FormatInt(planMe, 10)) {
+		t.Errorf("nav debug line missing ticket_id %d; got:\n%s", planMe, logOut)
+	}
+	if strings.Contains(logOut, "Plan me") || strings.Contains(logOut, "Shipped") {
+		t.Errorf("nav debug line leaked a ticket title; got:\n%s", logOut)
 	}
 }
 
@@ -355,9 +346,12 @@ func transitionTicket(t *testing.T, s *store.Store, ticketID int64, state respon
 // bug 4): #110 reviewing, #65 building, #102 building, #95 queued render
 // live, in that order, and #96 done renders inside the collapsed details.
 // A second project holding only a live ticket renders no closed section at
-// all.
+// all. It also proves mainComponent's project-sections Debug line carries
+// only the project id and the live/closed counts, never a ticket's title.
+//
+// Not parallel: it calls slog.SetDefault below to capture a log line, which
+// swaps the process-wide default logger.
 func TestProjectShowsLiveFirstAndClosedCollapsed(t *testing.T) {
-	t.Parallel()
 	s := newConsoleTestStore(t)
 
 	ticket102 := seedTicketIn(t, s, testProject, "102", "Ticket 102")
@@ -369,6 +363,11 @@ func TestProjectShowsLiveFirstAndClosedCollapsed(t *testing.T) {
 	seedTicketIn(t, s, testProject, "95", "Ticket 95")
 	ticket96 := seedTicketIn(t, s, testProject, "96", "Ticket 96")
 	transitionTicket(t, s, ticket96, response.TicketStateDone)
+
+	var logBuf bytes.Buffer
+	prevDefault := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logBuf, &slog.HandlerOptions{Level: slog.LevelDebug})))
+	t.Cleanup(func() { slog.SetDefault(prevDefault) })
 
 	srv := newTestServer(t, s, bus.New(), testMachine(t), newTestLogHandler(t))
 
@@ -388,24 +387,48 @@ func TestProjectShowsLiveFirstAndClosedCollapsed(t *testing.T) {
 
 	main := mainFrame(t, srv.URL, "project", 0, projectID)
 
-	i110 := mustIndex(t, main, "Ticket 110")
-	i65 := mustIndex(t, main, "Ticket 65")
-	i102 := mustIndex(t, main, "Ticket 102")
-	i95 := mustIndex(t, main, "Ticket 95")
-	iClosed := mustIndex(t, main, `id="project-closed"`)
-	i96 := mustIndex(t, main, "Ticket 96")
-	if i110 >= i65 || i65 >= i102 || i102 >= i95 || i95 >= iClosed || iClosed >= i96 {
-		t.Errorf("expected order #110, #65, #102, #95, project-closed, #96; got:\n%s", main)
+	markers := []string{"Ticket 110", "Ticket 65", "Ticket 102", "Ticket 95", `id="project-closed"`, "Ticket 96"}
+	indices := make([]int, len(markers))
+	for i, m := range markers {
+		indices[i] = mustIndex(t, main, m)
+	}
+	for i := 1; i < len(indices); i++ {
+		if indices[i-1] >= indices[i] {
+			t.Errorf("expected %q before %q; got:\n%s", markers[i-1], markers[i], main)
+		}
 	}
 
 	if !strings.Contains(main, `data-preserve-attr="open"`) {
 		t.Errorf("closed details missing data-preserve-attr=\"open\"; got:\n%s", main)
 	}
-	if strings.Contains(main, `<details class="project-closed" id="project-closed" data-preserve-attr="open" open`) {
-		t.Errorf("closed details should start collapsed (no bare open attribute); got:\n%s", main)
+	detailsStart := mustIndex(t, main, "<details")
+	detailsTagEnd := strings.Index(main[detailsStart:], ">")
+	if detailsTagEnd < 0 {
+		t.Fatalf("closed details tag has no closing '>'; got:\n%s", main)
+	}
+	detailsTag := main[detailsStart : detailsStart+detailsTagEnd]
+	withoutPreserveAttr := strings.ReplaceAll(detailsTag, `data-preserve-attr="open"`, "")
+	if strings.Contains(withoutPreserveAttr, "open") {
+		t.Errorf("closed details should start collapsed (no bare open attribute); got tag:\n%s", detailsTag)
 	}
 	if !strings.Contains(main, "Closed (1)") {
 		t.Errorf("expected summary text \"Closed (1)\"; got:\n%s", main)
+	}
+
+	logOut := logBuf.String()
+	if !strings.Contains(logOut, "console: project sections") {
+		t.Fatalf("missing the project sections debug line; got:\n%s", logOut)
+	}
+	if !strings.Contains(logOut, fmt.Sprintf("project_id=%d", projectID)) {
+		t.Errorf("project sections debug line missing project_id=%d; got:\n%s", projectID, logOut)
+	}
+	if !strings.Contains(logOut, "live=4") || !strings.Contains(logOut, "closed=1") {
+		t.Errorf("project sections debug line missing live=4 closed=1; got:\n%s", logOut)
+	}
+	for _, title := range []string{"Ticket 110", "Ticket 65", "Ticket 102", "Ticket 95", "Ticket 96"} {
+		if strings.Contains(logOut, title) {
+			t.Errorf("project sections debug line leaked ticket title %q; got:\n%s", title, logOut)
+		}
 	}
 
 	otherProjectID, err := s.EnsureProject(t.Context(), otherProject)

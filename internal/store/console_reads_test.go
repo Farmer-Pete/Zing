@@ -476,15 +476,21 @@ func TestLiveTickets_OrdersBlockingThenUnreadThenIssueNumber(t *testing.T) {
 	mkQuiet("100000000000000000001")
 	mkQuiet("99999999999999999999")
 	mkQuiet("007")
-	const nonNumericRef = "zzz"
+	const nonNumericRef = "abc"
 	mkQuiet(nonNumericRef)
+	// nonNumericBeforeDigits sorts before every digit string in plain text
+	// order ('#' < '0' in ASCII), which exercises issueNumberOrder's
+	// numeric-refs-first partition: without it, this ref would otherwise
+	// sort before every numeric ref instead of after all of them.
+	const nonNumericBeforeDigits = "#5"
+	mkQuiet(nonNumericBeforeDigits)
 
 	terminal := []string{testStateDone, testStateEscalated, testStateAbandoned}
 	got, err := s.LiveTickets(t.Context(), terminal)
 	if err != nil {
 		t.Fatalf("LiveTickets: %v", err)
 	}
-	wantRefs := []string{"200", "9", "007", "65", "102", "99999999999999999999", "100000000000000000001", nonNumericRef}
+	wantRefs := []string{"200", "9", "007", "65", "102", "99999999999999999999", "100000000000000000001", nonNumericBeforeDigits, nonNumericRef}
 	if len(got) != len(wantRefs) {
 		t.Fatalf("LiveTickets returned %d tickets, want %d: %+v", len(got), len(wantRefs), got)
 	}
