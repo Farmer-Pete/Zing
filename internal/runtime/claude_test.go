@@ -3,6 +3,7 @@ package runtime
 import (
 	"context"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io/fs"
@@ -203,6 +204,69 @@ func TestClaude_ArgvResume(t *testing.T) {
 	}
 	if res.SessionID != testResumedSessionID {
 		t.Errorf("SessionID = %q, want the echoed %q", res.SessionID, testResumedSessionID)
+	}
+}
+
+// TestClaude_ArgvCarriesStopHookSettings proves WithStopHook makes Run
+// append --settings and its JSON as the argv's last two entries, and that
+// the one Stop command it carries names the configured zing binary, the
+// run's job, and a state path under the run's own TMPDIR, keyed by the
+// session id Run actually used.
+func TestClaude_ArgvCarriesStopHookSettings(t *testing.T) {
+	t.Parallel()
+	requireUnix(t)
+
+	dir := t.TempDir()
+	tmpDir := t.TempDir()
+	req := newFakeRequest(dir, "success", "TMPDIR="+tmpDir)
+	c := NewClaude(fakeClaudeScript, testOAuthToken).WithStopHook("/opt/zing bin")
+	res, err := c.Run(context.Background(), req)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	argv := readArgv(t, dir)
+	if len(argv) < 2 || argv[len(argv)-2] != "--settings" {
+		t.Fatalf("argv = %v, want the last two entries to be --settings and its JSON", argv)
+	}
+	var settings claudeSettings
+	if err := json.Unmarshal([]byte(argv[len(argv)-1]), &settings); err != nil {
+		t.Fatalf("decode --settings JSON %q: %v", argv[len(argv)-1], err)
+	}
+	groups, ok := settings.Hooks["Stop"]
+	if !ok || len(groups) != 1 || len(groups[0].Hooks) != 1 {
+		t.Fatalf("settings.Hooks = %+v, want one Stop group with one command", settings.Hooks)
+	}
+	wantStatePath := filepath.Join(tmpDir, "zing-stop-hook-"+res.SessionID+".json")
+	wantCmd := shellQuote("/opt/zing bin") + " validate --hook --job " + shellQuote("classify") + " --state " + shellQuote(wantStatePath)
+	if got := groups[0].Hooks[0].Command; got != wantCmd {
+		t.Errorf("command = %q, want %q", got, wantCmd)
+	}
+}
+
+// TestClaude_ArgvWithoutStopHookHasNoSettings proves a Claude built with
+// NewClaude alone (WithStopHook never called) sends claudeArgv an empty
+// settings string, so the resulting argv carries no --settings flag at
+// all, matching every test built before the Stop hook existed.
+func TestClaude_ArgvWithoutStopHookHasNoSettings(t *testing.T) {
+	t.Parallel()
+	requireUnix(t)
+
+	dir := t.TempDir()
+	req := newFakeRequest(dir, "success")
+	c := NewClaude(fakeClaudeScript, testOAuthToken)
+	res, err := c.Run(context.Background(), req)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	argv := readArgv(t, dir)
+	want := wantArgv("--session-id", res.SessionID)
+	if !slices.Equal(argv, want) {
+		t.Errorf("argv =\n%v\nwant\n%v", argv, want)
+	}
+	if slices.Contains(argv, "--settings") {
+		t.Errorf("argv = %v, want no --settings flag", argv)
 	}
 }
 

@@ -19,6 +19,8 @@ import (
 	"sync"
 	"syscall"
 	"time"
+
+	"zing/internal/response"
 )
 
 // maxOutputBytes is the 4 MiB cap stdout is held to (design section 4.1):
@@ -33,15 +35,26 @@ var _ Runtime = Claude{}
 // authenticates every run (PKG9-PLAN.md section 4.6, D26): the output of
 // `claude setup-token`, appended to the child's environment as
 // CLAUDE_CODE_OAUTH_TOKEN and never passed to any other runtime or command.
+// zingBin, set only through WithStopHook, is the Zing binary a run's Stop
+// hook settings invoke; "" turns the hook off.
 type Claude struct {
 	bin        string
 	oauthToken string
+	zingBin    string
 }
 
 // NewClaude returns a Claude that runs bin, or "claude" on PATH when bin is
 // "", authenticating every run with oauthToken (PKG9-PLAN.md section 4.6).
 func NewClaude(bin, oauthToken string) Claude {
 	return Claude{bin: bin, oauthToken: oauthToken}
+}
+
+// WithStopHook returns a copy of c whose runs carry a Stop hook that runs
+// zingBin validate --hook, passed through --settings only, so nothing is
+// written to the user's or the repo's settings. "" turns it off.
+func (c Claude) WithStopHook(zingBin string) Claude {
+	c.zingBin = zingBin
+	return c
 }
 
 // resolveBin returns the binary Run should execute: c.bin, or "claude" on
@@ -100,7 +113,7 @@ func claudeToolLists(tools []string) (names, patterns []string, err error) {
 // flag is --max-budget-usd, a dollar cap, not a turn cap), so the per-job
 // timeout runJob already applies through the context deadline is the only
 // bound on a run.
-func claudeArgv(req RunRequest, newSessionID string) ([]string, error) {
+func claudeArgv(req RunRequest, newSessionID, settings string) ([]string, error) {
 	names, patterns, err := claudeToolLists(req.Tools)
 	if err != nil {
 		return nil, err
@@ -125,7 +138,77 @@ func claudeArgv(req RunRequest, newSessionID string) ([]string, error) {
 		"--permission-mode", "dontAsk",
 		"--model", req.Model,
 	)
+	if settings != "" {
+		argv = append(argv, "--settings", settings)
+	}
 	return argv, nil
+}
+
+// claudeSettings is the JSON Claude.Command's --settings argument carries
+// (design section 11, the Stop hook): a run's own hooks, passed on the
+// command line only, so --restricted's own refusal of user, project and
+// local settings files never hides it.
+type claudeSettings struct {
+	Hooks map[string][]claudeHookGroup `json:"hooks"`
+}
+
+// claudeHookGroup is one Claude Code hook matcher group; the Stop hook
+// settings this package builds always hold exactly one.
+type claudeHookGroup struct {
+	Hooks []claudeHookCommand `json:"hooks"`
+}
+
+// claudeHookCommand is one Claude Code hook command entry.
+type claudeHookCommand struct {
+	Type    string `json:"type"`
+	Command string `json:"command"`
+}
+
+// stopHook returns the --settings JSON and the state file path for one
+// run; both "" when c has no zing binary configured (WithStopHook never
+// called).
+func (c Claude) stopHook(req RunRequest, sessionID string) (settings, statePath string, err error) {
+	if c.zingBin == "" {
+		return "", "", nil
+	}
+	statePath = stopHookStatePath(agentEnv(req), sessionID)
+	settings, err = stopHookSettings(c.zingBin, req.Job, statePath)
+	return settings, statePath, err
+}
+
+// stopHookStatePath names the Stop hook's state file for one run: the last
+// TMPDIR= entry in env, or os.TempDir() when none is set, joined with
+// "zing-stop-hook-" + sessionID + ".json" -- the session id keeps parallel
+// runs on a shared host TMPDIR apart.
+func stopHookStatePath(env []string, sessionID string) string {
+	dir := os.TempDir()
+	for _, kv := range env {
+		if v, ok := strings.CutPrefix(kv, "TMPDIR="); ok {
+			dir = v
+		}
+	}
+	return filepath.Join(dir, "zing-stop-hook-"+sessionID+".json")
+}
+
+// stopHookSettings renders the --settings JSON for one run's Stop hook: a
+// single Stop matcher group running zingBin validate --hook --job JOB
+// --state PATH, every value shell-quoted since Claude Code runs the
+// command through a shell.
+func stopHookSettings(zingBin string, job response.Job, statePath string) (string, error) {
+	cmd := shellQuote(zingBin) + " validate --hook --job " + shellQuote(string(job)) + " --state " + shellQuote(statePath)
+	b, err := json.Marshal(claudeSettings{Hooks: map[string][]claudeHookGroup{
+		"Stop": {{Hooks: []claudeHookCommand{{Type: "command", Command: cmd}}}},
+	}})
+	if err != nil {
+		return "", fmt.Errorf("runtime: claude: stop hook settings: %w", err)
+	}
+	return string(b), nil
+}
+
+// shellQuote wraps s in single quotes for a POSIX shell, escaping an
+// embedded single quote as close-quote, backslash-quote, open-quote.
+func shellQuote(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
 }
 
 // allowedParentEnv is the parent-process variables Run carries into the
@@ -466,13 +549,19 @@ func (c Claude) Run(ctx context.Context, req RunRequest) (RunResult, error) {
 		sessionID = uuid
 	}
 
-	argv, err := claudeArgv(req, newUUID)
+	settings, statePath, err := c.stopHook(req, sessionID)
+	if err != nil {
+		slog.Error("claude run: stop hook settings", "job", req.Job, "error", err)
+		return RunResult{ExitCode: -1, AgentTime: time.Since(start)}, ErrStart
+	}
+
+	argv, err := claudeArgv(req, newUUID, settings)
 	if err != nil {
 		slog.Error("claude run: build argv", "job", req.Job, "error", err)
 		return RunResult{ExitCode: -1, AgentTime: time.Since(start)}, ErrStart
 	}
 
-	res, runErr := c.run(ctx, req, argv, sessionID, start)
+	res, runErr := c.run(ctx, req, argv, sessionID, statePath, start)
 
 	if errors.Is(runErr, ErrStart) {
 		slog.Warn("claude run: start failed", "job", req.Job, "run_token", req.RunToken, "error", runErr)
@@ -493,10 +582,16 @@ func (c Claude) Run(ctx context.Context, req RunRequest) (RunResult, error) {
 // run is Run's process lifecycle, once argv is built: start the child,
 // wait for it, and classify however it ended (design section 4.1). It
 // never logs; Run does that once, for every path, after this returns.
-func (c Claude) run(ctx context.Context, req RunRequest, argv []string, sessionID string, start time.Time) (RunResult, error) {
+func (c Claude) run(ctx context.Context, req RunRequest, argv []string, sessionID, statePath string, start time.Time) (RunResult, error) {
 	name, args := c.commandNameArgs(req, argv)
 	cmd := exec.CommandContext(ctx, name, args...) //nolint:gosec // G204: bin is an operator-configured path (NewClaude), argv is built by claudeArgv from validated fields, and ExecPrefix (when set) is the sandbox's own prefix (sandbox.Sandbox.Prefix) -- never raw external input
 	cmd.Dir = req.WorkDir
+	if statePath != "" {
+		// A resumed session reuses its session id, so a stale state file
+		// from a prior run under the same TMPDIR must not leak its counts
+		// into this one.
+		_ = os.Remove(statePath) //nolint:errcheck // absent is the normal case
+	}
 	// The token is appended after agentEnv, not passed through it, so
 	// FilteredEnv's own drop pass (which removes anything *_TOKEN-shaped,
 	// including a parent or req.Env CLAUDE_CODE_OAUTH_TOKEN) never has to
@@ -539,6 +634,12 @@ func (c Claude) run(ctx context.Context, req RunRequest, argv []string, sessionI
 	waitErr := cmd.Wait()
 	killProcessGroup(cmd)
 
+	var hookState stopHookState
+	if statePath != "" {
+		hookState, _ = readStopHookState(statePath) //nolint:errcheck // a missing or corrupt file gives zero counts, same as a run with no hook
+		_ = os.Remove(statePath)                    //nolint:errcheck // a leftover file is reset at the next run's own removal before Start
+	}
+
 	res := RunResult{
 		AgentTime:      time.Since(start),
 		SessionID:      sessionID,
@@ -548,6 +649,9 @@ func (c Claude) run(ctx context.Context, req RunRequest, argv []string, sessionI
 		Stderr:         stderrCap.bytes(),
 		FinalMessage:   capFinalMessage(claudeFinalMessage(stdout.bytes())),
 		TranscriptPath: claudeTranscriptPath(cmd.Env, req.WorkDir, sessionID),
+		StopHookEvents: hookState.Events,
+		StopHookBlocks: hookState.Blocks,
+		StopHookUnread: hookState.Unread,
 	}
 
 	if outcomeErr := classifyProcessOutcome(ctx, stdout.overflowed(), waitErr, res.ExitCode); outcomeErr != nil {
@@ -613,7 +717,11 @@ func (c Claude) Command(req RunRequest) (name string, args []string, sessionID s
 		}
 		sessionID = newUUID
 	}
-	argv, err := claudeArgv(req, newUUID)
+	settings, _, err := c.stopHook(req, sessionID)
+	if err != nil {
+		return "", nil, "", err
+	}
+	argv, err := claudeArgv(req, newUUID, settings)
 	if err != nil {
 		return "", nil, "", err
 	}

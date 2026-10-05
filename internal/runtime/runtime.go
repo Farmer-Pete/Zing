@@ -97,6 +97,12 @@ type RunResult struct {
 	// TranscriptPath is where the runtime's own transcript lives (Claude
 	// only); "" for Codex, the Fake, and a process that never started.
 	TranscriptPath string
+	// StopHookEvents, StopHookBlocks and StopHookUnread are the Claude Code
+	// Stop hook's own counters for this run (Claude only, when a Stop hook
+	// ran); all 0 for Codex, the Fake, and a Claude run with no hook.
+	StopHookEvents int
+	StopHookBlocks int
+	StopHookUnread int
 }
 
 // maxStderrBytes caps RunResult.Stderr.

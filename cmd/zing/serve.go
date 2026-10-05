@@ -831,9 +831,20 @@ func sandboxBuildWritableRoots(sb sandbox.Sandbox) []string {
 // cfg.ClaudeOAuthToken, the only credential the claude runtime ever carries
 // to its child (PKG9-PLAN.md section 4.6, D26). Production never maps the
 // fake name; only selftest and the test suites still build a runtime.Fake.
+// The claude runtime carries a Stop hook (WithStopHook) that runs this same
+// zing binary, resolved from os.Executable with symlinks followed -- the
+// same path the sandbox profiles allow as ZING_BIN -- so every production
+// run validates its own final message before its turn ends.
 func productionRuntimes(oauthToken string) (runtime.Set, error) {
+	zingBin, err := os.Executable()
+	if err != nil {
+		return runtime.Set{}, fmt.Errorf("serve: zing executable: %w", err)
+	}
+	if resolved, evalErr := filepath.EvalSymlinks(zingBin); evalErr == nil {
+		zingBin = resolved
+	}
 	rts, err := runtime.NewSet(map[string]runtime.Runtime{
-		runtimeNameClaude: runtime.NewClaude("", oauthToken),
+		runtimeNameClaude: runtime.NewClaude("", oauthToken).WithStopHook(zingBin),
 		runtimeNameCodex:  runtime.NewCodex(""),
 	})
 	if err != nil {

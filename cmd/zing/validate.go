@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"slices"
 
 	"zing/internal/response"
 )
@@ -15,7 +16,9 @@ const usage = "usage: zing validate [--kind bug|feature] <file|->"
 // process exit code: 0 when it is valid (silently), 1 when it is invalid
 // (one error per line on stderr) or fails to parse, 2 for a usage or read
 // error. A file argument of "-" reads the document from standard input,
-// so a job whose sandbox cannot write files can still validate.
+// so a job whose sandbox cannot write files can still validate. --hook
+// routes to runStopHook instead: zing validate --hook is the Claude Code
+// Stop hook command a run's own --settings carries (internal/runtime).
 func runValidate(args []string) int {
 	return runValidateFrom(args, os.Stdin)
 }
@@ -25,9 +28,19 @@ func runValidateFrom(args []string, stdin io.Reader) int {
 	fs := flag.NewFlagSet("validate", flag.ContinueOnError)
 	fs.SetOutput(io.Discard) // Usage below prints our own single line to stderr
 	kind := fs.String("kind", string(response.KindFeature), "bug or feature")
+	hook := fs.Bool("hook", false, "run as the Claude Code Stop hook")
+	job := fs.String("job", "", "with --hook: the running job")
+	state := fs.String("state", "", "with --hook: the hook's state file")
 	fs.Usage = func() { fmt.Fprintln(os.Stderr, usage) }
 	if err := fs.Parse(args); err != nil {
+		if slices.Contains(args, "--hook") {
+			fmt.Fprintln(os.Stderr, hookUsage)
+			return 1 // a Stop hook's exit 2 would block the turn
+		}
 		return 2
+	}
+	if *hook {
+		return runStopHook(*job, *state, fs.Args(), stdin, os.Stdout, os.Stderr)
 	}
 
 	rest := fs.Args()

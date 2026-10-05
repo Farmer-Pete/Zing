@@ -229,6 +229,39 @@ func TestRunValidate_ParseFailureExitsOne(t *testing.T) {
 	}
 }
 
+// hookArgs builds a --hook invocation's argv: --hook, --job job, --state
+// state, then any trailing args, named once so the flag names appear only
+// here rather than once per TestRunValidate_HookUsageErrorExitsOne case.
+func hookArgs(job, state string, rest ...string) []string {
+	args := make([]string, 0, 5+len(rest))
+	args = append(args, "--hook", "--job", job, "--state", state)
+	return append(args, rest...)
+}
+
+// TestRunValidate_HookUsageErrorExitsOne proves a --hook usage error -- an
+// unknown job, an empty --state, or a positional argument -- exits 1, never
+// 2: Claude Code reads an exit code of 2 from a Stop hook as a block, so a
+// usage mistake in the hook's own argv must never look like one.
+func TestRunValidate_HookUsageErrorExitsOne(t *testing.T) {
+	cases := []struct {
+		name string
+		args []string
+	}{
+		{"unknown job", hookArgs("nonsense", filepath.Join(t.TempDir(), "s.json"))},
+		{"empty state", hookArgs("classify", "")},
+		{"positional argument", hookArgs("classify", filepath.Join(t.TempDir(), "s.json"), "unexpected-positional-arg")},
+	}
+	for _, tc := range cases {
+		code, out := captureStderr(t, func() int { return runValidateFrom(tc.args, strings.NewReader("")) })
+		if code != 1 {
+			t.Errorf("%s: code = %d, want 1", tc.name, code)
+		}
+		if out == "" {
+			t.Errorf("%s: stderr should report the hook usage error", tc.name)
+		}
+	}
+}
+
 // TestRunValidate_DashReadsStdin proves "-" validates a document from
 // standard input, the path a read-only job takes since its sandbox cannot
 // write the file the plain form needs.
