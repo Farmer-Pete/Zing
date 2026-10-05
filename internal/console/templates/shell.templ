@@ -57,8 +57,8 @@ templ Shell(nav, main, rail, alerts templ.Component) {
 				@main
 				@rail
 			</div>
-			<dialog id="sandbox-run-result" class="sandbox-run-result">
-				<h3 class="sandbox-run-title"></h3>
+			<dialog id="sandbox-run-result" class="sandbox-run-result" aria-labelledby="sandbox-run-title">
+				<h3 id="sandbox-run-title" class="sandbox-run-title"></h3>
 				<p class="sandbox-run-exit"></p>
 				<pre class="sandbox-run-output"></pre>
 				<button type="button" class="sandbox-run-close">Close</button>

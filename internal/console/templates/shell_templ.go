@@ -101,7 +101,7 @@ func Shell(nav, main, rail, alerts templ.Component) templ.Component {
 		if templ_7745c5c3_Err != nil {
 			return templ_7745c5c3_Err
 		}
-		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 4, "</div><dialog id=\"sandbox-run-result\" class=\"sandbox-run-result\"><h3 class=\"sandbox-run-title\"></h3><p class=\"sandbox-run-exit\"></p><pre class=\"sandbox-run-output\"></pre><button type=\"button\" class=\"sandbox-run-close\">Close</button></dialog> <span id=\"stream-ctl\" style=\"display:none\" data-init=\"@get('/stream', {retryMaxCount: 0})\" data-on:zing-nav=\"$view = evt.detail.view; $open = evt.detail.open; $project = evt.detail.project; @get('/stream', {retryMaxCount: 0})\"></span><script type=\"module\" src=\"/static/console.js\"></script><script type=\"module\" src=\"/static/datastar.js\"></script></body></html>")
+		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 4, "</div><dialog id=\"sandbox-run-result\" class=\"sandbox-run-result\" aria-labelledby=\"sandbox-run-title\"><h3 id=\"sandbox-run-title\" class=\"sandbox-run-title\"></h3><p class=\"sandbox-run-exit\"></p><pre class=\"sandbox-run-output\"></pre><button type=\"button\" class=\"sandbox-run-close\">Close</button></dialog> <span id=\"stream-ctl\" style=\"display:none\" data-init=\"@get('/stream', {retryMaxCount: 0})\" data-on:zing-nav=\"$view = evt.detail.view; $open = evt.detail.open; $project = evt.detail.project; @get('/stream', {retryMaxCount: 0})\"></span><script type=\"module\" src=\"/static/console.js\"></script><script type=\"module\" src=\"/static/datastar.js\"></script></body></html>")
 		if templ_7745c5c3_Err != nil {
 			return templ_7745c5c3_Err
 		}

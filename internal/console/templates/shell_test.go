@@ -56,6 +56,12 @@ func TestShellRendersSandboxRunDialog(t *testing.T) {
 	if !strings.Contains(got, `<dialog id="sandbox-run-result"`) {
 		t.Errorf("rendered shell missing the sandbox-run-result dialog; got:\n%s", got)
 	}
+	if !strings.Contains(got, `aria-labelledby="sandbox-run-title"`) {
+		t.Errorf("rendered shell's sandbox-run-result dialog missing aria-labelledby=\"sandbox-run-title\"; got:\n%s", got)
+	}
+	if !strings.Contains(got, `id="sandbox-run-title"`) {
+		t.Errorf("rendered shell's sandbox-run-title heading missing id=\"sandbox-run-title\"; got:\n%s", got)
+	}
 	markerIdx := strings.Index(got, `<div class="shell-test-marker"></div>`)
 	dialogIdx := strings.Index(got, `<dialog id="sandbox-run-result"`)
 	found := markerIdx >= 0 && dialogIdx >= 0
