@@ -41,10 +41,12 @@ const (
 	checkLoopsExhaustedWhyFmt     = "check_loops for build is %d; the last failing output is under Tried"
 )
 
-// The two CHECK command kinds, in run order.
+// The two CHECK command kinds, in run order: lint first, since it takes
+// seconds where test can take minutes, so a lint failure is reported
+// without paying for a full test run (#79).
 const (
-	checkKindTest = "test"
 	checkKindLint = "lint"
+	checkKindTest = "test"
 )
 
 // checkNow is the clock runCheckCommands measures its budget with; a test
@@ -52,17 +54,20 @@ const (
 var checkNow = time.Now
 
 // checkBudget is jobs.build.timeout_minutes as a Duration: the one budget
-// test and lint share (#55 plan D1), which keeps both inside the building
-// claim's lease of timeout_minutes plus claimGrace.
+// lint and test share, lint first (#55 plan D1), which keeps both inside
+// the building claim's lease of timeout_minutes plus claimGrace.
 func checkBudget(d Deps) time.Duration {
 	return time.Duration(d.Machine.Jobs[jobBuildName].TimeoutMinutes) * time.Minute
 }
 
-// runCheckCommands runs the project's test command, then its lint command,
-// under one shared checkBudget measured from the start of test (plan D1).
-// Lint gets only what test left. When test times out, lint does not run
-// and is left out; when test passes but leaves no budget, lint is reported
-// as not run, a failure, so CHECK never lands an unlinted tree. Each command's output is kept in a
+// runCheckCommands runs the project's lint command, then its test command,
+// under one shared checkBudget measured from the start of lint (plan D1),
+// and stops at the first failed result (a nonzero exit, a timeout, or a
+// command the budget left no time for): a lint failure is reported without
+// paying for a full test run (#79). Test gets only what lint left. When
+// lint fails or times out, test does not run and is left out; when lint
+// passes but leaves no budget, test is reported as not run, a failure, so
+// CHECK never lands an unlinted tree. Each command's output is kept in a
 // tailBuffer. Each command's process group is recorded in check_procs
 // while it runs and cleared once it ends (plan D10), so a later serve
 // never starts CHECK in this worktree while an orphaned command still
@@ -72,7 +77,7 @@ func checkBudget(d Deps) time.Duration {
 func runCheckCommands(ctx context.Context, d Deps, t store.Ticket, wt orchestrator.Worktree, proj Project, rid *int64) ([]commandResult, error) {
 	budget := checkBudget(d)
 	budgetStart := checkNow()
-	commands := []struct{ kind, cmd string }{{checkKindTest, proj.TestCmd}, {checkKindLint, proj.LintCmd}}
+	commands := []struct{ kind, cmd string }{{checkKindLint, proj.LintCmd}, {checkKindTest, proj.TestCmd}}
 	results := make([]commandResult, 0, len(commands))
 	for _, c := range commands {
 		remaining := budget - checkNow().Sub(budgetStart)
@@ -93,7 +98,7 @@ func runCheckCommands(ctx context.Context, d Deps, t store.Ticket, wt orchestrat
 		}
 		r.Budget = budget
 		results = append(results, r)
-		if r.TimedOut {
+		if r.failed() {
 			break
 		}
 	}
@@ -148,7 +153,7 @@ func checkInputText(results []commandResult) string {
 		var b strings.Builder
 		fmt.Fprintf(&b, "%s command: %s\n", r.Kind, r.Cmd)
 		if r.NotRun {
-			fmt.Fprintf(&b, "%s did not run: the CHECK budget ran out after the test command", r.Kind)
+			fmt.Fprintf(&b, "%s did not run: the CHECK budget ran out before it started", r.Kind)
 			sections = append(sections, b.String())
 			continue
 		}

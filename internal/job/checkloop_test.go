@@ -11,6 +11,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"testing"
 	"time"
@@ -308,6 +309,106 @@ func TestCheckClaimsAndCommandFailuresShareOneResume(t *testing.T) {
 	}
 }
 
+// recordingCommands is a job.CommandRunner that appends each shell command
+// it is asked to run to a mutex-guarded slice, in call order, then runs it
+// for real.
+type recordingCommands struct {
+	mu    sync.Mutex
+	calls []string
+	real  job.CommandRunner
+}
+
+func (c *recordingCommands) Run(ctx context.Context, dir, repoGit, shellCmd string, timeout time.Duration, cio job.CommandIO) (int, error) {
+	c.mu.Lock()
+	c.calls = append(c.calls, shellCmd)
+	c.mu.Unlock()
+	return c.real.Run(ctx, dir, repoGit, shellCmd, timeout, cio)
+}
+
+// TestCheckLintFailureSkipsTest proves CHECK runs lint before test and
+// stops at the first failed result: a failing lint command is reported and
+// the test command never runs (#79).
+func TestCheckLintFailureSkipsTest(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow end-to-end flow; runs in the full suite")
+	}
+	t.Parallel()
+	s, _, ticketID := buildTicketInBuilding(t)
+	script := &scriptedRuntime{t: t, steps: []scriptedStep{buildStep([]string{}, nil, "lint-fail-sess")}}
+	const failingLint = "echo 'lint: goconst'; exit 1"
+	cmds := &recordingCommands{real: job.NewCommandRunner(sandbox.Off(), false)}
+
+	var check store.HandlerCommit
+	for range 2 { // RUN, then CHECK
+		ticket := getTicket(t, s, ticketID)
+		deps := claimForBuild(t, s, script, ticketID)
+		proj := deps.Projects[ticket.ProjectID]
+		proj.LintCmd = failingLint
+		proj.TestCmd = testNoopShellCmd
+		deps.Projects = map[int64]job.Project{ticket.ProjectID: proj}
+		deps.Commands = cmds
+		commit, err := job.Registry()[testStateBuilding].Run(t.Context(), ticket, deps)
+		if err != nil {
+			t.Fatalf("building tick: %v", err)
+		}
+		apply(t, s, ticket, commit)
+		check = commit
+	}
+	m, ok := messageWithPrefix(check.Messages, checkPendingPrefix)
+	if !ok {
+		t.Fatalf("CHECK commit.Messages = %+v, want a check failed pending marker", check.Messages)
+	}
+	for _, want := range []string{"lint command: echo", "lint: goconst"} {
+		if !strings.Contains(m.Body, want) {
+			t.Errorf("marker body = %q, want %q", m.Body, want)
+		}
+	}
+	if strings.Contains(m.Body, "test command:") {
+		t.Errorf("marker body = %q, want no test command section", m.Body)
+	}
+	if want := []string{failingLint}; !slices.Equal(cmds.calls, want) {
+		t.Errorf("recorded commands = %v, want %v", cmds.calls, want)
+	}
+}
+
+// TestCheckRunsLintBeforeTest proves a passing lint command runs before the
+// test command, both recorded in that order, when test then fails.
+func TestCheckRunsLintBeforeTest(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow end-to-end flow; runs in the full suite")
+	}
+	t.Parallel()
+	s, _, ticketID := buildTicketInBuilding(t)
+	script := &scriptedRuntime{t: t, steps: []scriptedStep{buildStep([]string{}, nil, "lint-then-test-sess")}}
+	cmds := &recordingCommands{real: job.NewCommandRunner(sandbox.Off(), false)}
+
+	var check store.HandlerCommit
+	for range 2 { // RUN, then CHECK
+		ticket := getTicket(t, s, ticketID)
+		deps := withCheckTestCommand(claimForBuild(t, s, script, ticketID), ticket, checkFailingTestCmd)
+		deps.Commands = cmds
+		commit, err := job.Registry()[testStateBuilding].Run(t.Context(), ticket, deps)
+		if err != nil {
+			t.Fatalf("building tick: %v", err)
+		}
+		apply(t, s, ticket, commit)
+		check = commit
+	}
+	m, ok := messageWithPrefix(check.Messages, checkPendingPrefix)
+	if !ok {
+		t.Fatalf("CHECK commit.Messages = %+v, want a check failed pending marker", check.Messages)
+	}
+	if !strings.Contains(m.Body, checkFailLine) {
+		t.Errorf("marker body = %q, want %q", m.Body, checkFailLine)
+	}
+	if strings.Contains(m.Body, "lint command:") {
+		t.Errorf("marker body = %q, want no lint command section", m.Body)
+	}
+	if want := []string{testNoopShellCmd, checkFailingTestCmd}; !slices.Equal(cmds.calls, want) {
+		t.Errorf("recorded commands = %v, want %v", cmds.calls, want)
+	}
+}
+
 // timeoutTestCommands times out the test command after writing partial
 // output, and runs every other command for real, recording whether it did.
 type timeoutTestCommands struct {
@@ -329,9 +430,9 @@ func (c *timeoutTestCommands) Run(ctx context.Context, dir, repoGit, shellCmd st
 	return c.real.Run(ctx, dir, repoGit, shellCmd, timeout, cio)
 }
 
-// TestCheckCommandTimeoutResumesWithPartialOutput proves a test command
-// killed by the budget reports its partial output with the timeout line,
-// and lint does not run.
+// TestCheckCommandTimeoutResumesWithPartialOutput proves lint runs once
+// before a test command killed by the budget, which reports its partial
+// output with the timeout line.
 func TestCheckCommandTimeoutResumesWithPartialOutput(t *testing.T) {
 	if testing.Short() {
 		t.Skip("slow end-to-end flow; runs in the full suite")
@@ -363,8 +464,8 @@ func TestCheckCommandTimeoutResumesWithPartialOutput(t *testing.T) {
 			t.Errorf("marker body = %q, want %q", m.Body, want)
 		}
 	}
-	if cmds.otherCalls != 0 {
-		t.Errorf("lint ran %d times after the test command timed out, want 0", cmds.otherCalls)
+	if cmds.otherCalls != 1 {
+		t.Errorf("lint ran %d times before the test command timed out, want 1", cmds.otherCalls)
 	}
 }
 

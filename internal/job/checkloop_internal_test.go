@@ -90,71 +90,18 @@ const (
 
 func (c *budgetCommands) Run(_ context.Context, _, _, shellCmd string, timeout time.Duration, _ CommandIO) (int, error) {
 	c.timeouts[shellCmd] = timeout
-	if shellCmd == fakeTestCmd && c.advance != nil {
+	if shellCmd == fakeLintCmd && c.advance != nil {
 		c.advance()
 	}
 	r := c.results[shellCmd]
 	return r.exit, r.err
 }
 
-// TestCheckLintGetsOnlyRemainingBudget proves test and lint share one
-// budget of jobs.build.timeout_minutes (plan D1): after a test command that
-// used 40 of 45 minutes, lint gets the remaining 5, and a lint timeout is
+// TestCheckTestGetsOnlyRemainingBudget proves lint and test share one
+// budget of jobs.build.timeout_minutes (plan D1): after a lint command that
+// used 40 of 45 minutes, test gets the remaining 5, and a test timeout is
 // reported against the whole budget. Not parallel: it swaps checkNow.
-func TestCheckLintGetsOnlyRemainingBudget(t *testing.T) {
-	start := time.Date(2026, 10, 3, 9, 0, 0, 0, time.UTC)
-	now := start
-	orig := checkNow
-	checkNow = func() time.Time { return now }
-	t.Cleanup(func() { checkNow = orig })
-
-	d := Deps{Machine: &machine.Machine{Jobs: map[string]machine.Job{jobBuildName: {TimeoutMinutes: 45}}}}
-	proj := Project{TestCmd: fakeTestCmd, LintCmd: fakeLintCmd}
-	tk := store.Ticket{ID: 1}
-
-	run := func(t *testing.T, lintErr error) ([]commandResult, *budgetCommands) {
-		t.Helper()
-		now = start
-		fake := &budgetCommands{
-			timeouts: map[string]time.Duration{},
-			results: map[string]struct {
-				exit int
-				err  error
-			}{
-				fakeTestCmd: {exit: 1},
-				fakeLintCmd: {exit: -1, err: lintErr},
-			},
-			advance: func() { now = now.Add(40 * time.Minute) },
-		}
-		d.Commands = fake
-		results, err := runCheckCommands(t.Context(), d, tk, orchestrator.Worktree{}, proj, nil)
-		if err != nil {
-			t.Fatalf("runCheckCommands: %v", err)
-		}
-		return results, fake
-	}
-
-	_, fake := run(t, nil)
-	if got := fake.timeouts[fakeTestCmd]; got != 45*time.Minute {
-		t.Errorf("test timeout = %v, want 45m", got)
-	}
-	if got := fake.timeouts[fakeLintCmd]; got != 5*time.Minute {
-		t.Errorf("lint timeout = %v, want 5m (the budget left after test)", got)
-	}
-
-	results, _ := run(t, ErrCommandTimeout)
-	if len(results) != 2 || !results[0].failed() || results[0].TimedOut || !results[1].TimedOut {
-		t.Fatalf("results = %+v, want test failed (not timed out) and lint timed out", results)
-	}
-	if text := checkInputText(results); !strings.Contains(text, "lint command: the-lint\nexit code: none (killed when the 45m check budget ran out)") {
-		t.Errorf("check input = %q, want the lint timeout line", text)
-	}
-}
-
-// TestCheckLintNotRunIsAFailure proves a passing test command that uses the
-// whole shared budget does not let CHECK land: lint never ran, so the result is a failure with its own line, and the
-// builder is resumed or the cap escalates. Not parallel: it swaps checkNow.
-func TestCheckLintNotRunIsAFailure(t *testing.T) {
+func TestCheckTestGetsOnlyRemainingBudget(t *testing.T) {
 	start := time.Date(2026, 10, 3, 9, 0, 0, 0, time.UTC)
 	now := start
 	orig := checkNow
@@ -166,7 +113,50 @@ func TestCheckLintNotRunIsAFailure(t *testing.T) {
 		results: map[string]struct {
 			exit int
 			err  error
-		}{fakeTestCmd: {exit: 0}},
+		}{
+			fakeLintCmd: {exit: 0},
+			fakeTestCmd: {exit: -1, err: ErrCommandTimeout},
+		},
+		advance: func() { now = now.Add(40 * time.Minute) },
+	}
+	d := Deps{Commands: fake, Machine: &machine.Machine{Jobs: map[string]machine.Job{jobBuildName: {TimeoutMinutes: 45}}}}
+	proj := Project{TestCmd: fakeTestCmd, LintCmd: fakeLintCmd}
+	results, err := runCheckCommands(t.Context(), d, store.Ticket{ID: 1}, orchestrator.Worktree{}, proj, nil)
+	if err != nil {
+		t.Fatalf("runCheckCommands: %v", err)
+	}
+
+	if got := fake.timeouts[fakeLintCmd]; got != 45*time.Minute {
+		t.Errorf("lint timeout = %v, want 45m", got)
+	}
+	if got := fake.timeouts[fakeTestCmd]; got != 5*time.Minute {
+		t.Errorf("test timeout = %v, want 5m (the budget left after lint)", got)
+	}
+	if len(results) != 2 || results[0].failed() || !results[1].TimedOut {
+		t.Fatalf("results = %+v, want lint ok and test timed out", results)
+	}
+	if text := checkInputText(results); !strings.Contains(text, "test command: the-test\nexit code: none (killed when the 45m check budget ran out)") {
+		t.Errorf("check input = %q, want the test timeout line", text)
+	}
+}
+
+// TestCheckTestNotRunIsAFailure proves a passing lint command that uses the
+// whole shared budget does not let CHECK land: test never ran, so the
+// result is a failure with its own line, and the builder is resumed or the
+// cap escalates. Not parallel: it swaps checkNow.
+func TestCheckTestNotRunIsAFailure(t *testing.T) {
+	start := time.Date(2026, 10, 3, 9, 0, 0, 0, time.UTC)
+	now := start
+	orig := checkNow
+	checkNow = func() time.Time { return now }
+	t.Cleanup(func() { checkNow = orig })
+
+	fake := &budgetCommands{
+		timeouts: map[string]time.Duration{},
+		results: map[string]struct {
+			exit int
+			err  error
+		}{fakeLintCmd: {exit: 0}},
 		advance: func() { now = now.Add(45 * time.Minute) },
 	}
 	d := Deps{Commands: fake, Machine: &machine.Machine{Jobs: map[string]machine.Job{jobBuildName: {TimeoutMinutes: 45}}}}
@@ -174,13 +164,13 @@ func TestCheckLintNotRunIsAFailure(t *testing.T) {
 	if err != nil {
 		t.Fatalf("runCheckCommands: %v", err)
 	}
-	if _, ran := fake.timeouts[fakeLintCmd]; ran {
-		t.Error("lint ran with no budget left")
+	if _, ran := fake.timeouts[fakeTestCmd]; ran {
+		t.Error("test ran with no budget left")
 	}
-	if got := failedKinds(results); len(got) != 1 || got[0] != checkKindLint {
-		t.Fatalf("failed kinds = %v, want [lint]", got)
+	if got := failedKinds(results); len(got) != 1 || got[0] != checkKindTest {
+		t.Fatalf("failed kinds = %v, want [test]", got)
 	}
-	want := "lint command: the-lint\nlint did not run: the CHECK budget ran out after the test command"
+	want := "test command: the-test\ntest did not run: the CHECK budget ran out before it started"
 	if text := checkInputText(results); text != want {
 		t.Errorf("check input = %q, want %q", text, want)
 	}
