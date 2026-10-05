@@ -533,8 +533,8 @@ func shipReleaseClaim(t *testing.T, s *store.Store, ticketID int64, deps Deps) {
 // is exactly body, the one-line marker-presence check most of this file's
 // merge tests repeat (M4 task 8).
 func shipHasMessage(c store.HandlerCommit, body string) bool {
-	for _, m := range c.Messages {
-		if m.Body == body {
+	for i := range c.Messages {
+		if c.Messages[i].Body == body {
 			return true
 		}
 	}
@@ -680,8 +680,8 @@ func driveShipFixToLanding(t *testing.T, s *store.Store, ticketID int64, rt runt
 			t.Fatalf("driveShipFixToLanding: Run (step %d): %v", i, err)
 		}
 		pbApply(t, s, ticket, commit)
-		for _, m := range commit.Messages {
-			if strings.HasPrefix(m.Body, "fix landed ") {
+		for j := range commit.Messages {
+			if strings.HasPrefix(commit.Messages[j].Body, "fix landed ") {
 				return
 			}
 		}
@@ -2303,8 +2303,8 @@ func shipRespondReady(t *testing.T, commentAt time.Time) (s *store.Store, ticket
 		t.Fatalf("shipRespondReady: poll escalated: %+v", commit.Escalation.Payload)
 	}
 	found := false
-	for _, m := range commit.Messages {
-		if strings.HasPrefix(m.Body, "respond batch 1 started sha "+local+" after run ") {
+	for i := range commit.Messages {
+		if strings.HasPrefix(commit.Messages[i].Body, "respond batch 1 started sha "+local+" after run ") {
 			found = true
 		}
 	}
@@ -3896,8 +3896,8 @@ func shipPollUntilMarker(t *testing.T, s *store.Store, ticket store.Ticket, gh *
 			t.Fatalf("shipPollUntilMarker: Run (tick %d): %v", i, err)
 		}
 		pbApply(t, s, ticket, commit)
-		for _, m := range commit.Messages {
-			if strings.HasPrefix(m.Body, prefix) {
+		for j := range commit.Messages {
+			if strings.HasPrefix(commit.Messages[j].Body, prefix) {
 				return commit
 			}
 		}
@@ -4442,8 +4442,8 @@ func testReadyPRFlipsBackOnUnclassified(t *testing.T, thread orchestrator.Thread
 		t.Error("ResolveAll = false, want true (the open merge question is withdrawn)")
 	}
 	var sawDraft, sawWithdrawn bool
-	for _, m := range commit.Messages {
-		switch m.Body {
+	for i := range commit.Messages {
+		switch commit.Messages[i].Body {
 		case prDraftPrefix + local:
 			sawDraft = true
 		case "merge withdrawn " + local:

@@ -16,15 +16,15 @@ var update = flag.Bool("update", false, "update the committed schema files in in
 
 const schemaDir = "../store/schemas"
 
-func TestRegistry_Has17Entries(t *testing.T) {
+func TestRegistry_Has18Entries(t *testing.T) {
 	t.Parallel()
 
 	entries := Registry()
-	if len(entries) != 17 {
-		t.Fatalf("len(Registry()) = %d, want 17", len(entries))
+	if len(entries) != 18 {
+		t.Fatalf("len(Registry()) = %d, want 18", len(entries))
 	}
 
-	var messages, artifacts, pushSubscriptions int
+	var messages, artifacts, pushSubscriptions, events int
 	for _, e := range entries {
 		switch e.Table {
 		case "messages":
@@ -33,6 +33,8 @@ func TestRegistry_Has17Entries(t *testing.T) {
 			artifacts++
 		case "push_subscriptions":
 			pushSubscriptions++
+		case "events":
+			events++
 		default:
 			t.Errorf("unexpected table %q for %s", e.Table, e.Name)
 		}
@@ -45,6 +47,9 @@ func TestRegistry_Has17Entries(t *testing.T) {
 	}
 	if pushSubscriptions != 1 {
 		t.Errorf("push_subscriptions entries = %d, want 1", pushSubscriptions)
+	}
+	if events != 1 {
+		t.Errorf("events entries = %d, want 1", events)
 	}
 }
 
@@ -166,9 +171,10 @@ func TestEnumMapper_EmitsExactEnum(t *testing.T) {
 		{"Decision", response.Decision("")},
 		{"Result", response.Result("")},
 		{"ThreadVerb", response.ThreadVerb("")},
+		{"CheckName", response.CheckName("")},
 	}
-	if len(tests) != 18 {
-		t.Fatalf("18 enums documented in the plan, got %d test cases", len(tests))
+	if len(tests) != 19 {
+		t.Fatalf("19 enums documented in the plan, got %d test cases", len(tests))
 	}
 
 	reflector := newReflector()
@@ -194,7 +200,7 @@ func TestEnumMapper_EmitsExactEnum(t *testing.T) {
 	}
 }
 
-// enumFieldTests names one representative field, inside one of the 17
+// enumFieldTests names one representative field, inside one of the 18
 // generated STORED schemas, for every enum type that actually appears as a
 // field in a stored payload. TestEnumMapper_EmitsExactEnum above reflects
 // each enum type at the schema root; this test instead inspects the real
@@ -203,7 +209,7 @@ func TestEnumMapper_EmitsExactEnum(t *testing.T) {
 // property) cannot slip past the root-only check.
 //
 // ErrorCode, Job, and Outcome are Go enum types with a Values() method, but
-// none of them is a field on any of the 17 stored types: ErrorCode and Job
+// none of them is a field on any of the 18 stored types: ErrorCode and Job
 // only appear on RunError and Head, and Outcome only appears on Head, and
 // none of the response-wrapper types that embed Head or RunError are
 // stored types (see the schemagen.Registry doc comment). So those three
@@ -252,13 +258,14 @@ var enumFieldTests = []struct {
 	{"QuestionKind", response.QuestionKind(""), questionSchemaFile, []string{schemaProperties, schemaKind}},
 	{"QuestionState", response.QuestionState(""), questionSchemaFile, []string{schemaProperties, "state"}},
 	{"TicketState", response.TicketState(""), "messages/state.json", []string{schemaProperties, "from"}},
+	{"CheckName", response.CheckName(""), "events/check_rerun.json", []string{schemaProperties, "check"}},
 }
 
 func TestEnumMapper_StoredSchemaFieldsCarryExactEnum(t *testing.T) {
 	t.Parallel()
 
-	if len(enumFieldTests) != 15 {
-		t.Fatalf("15 of the 18 enum types appear in a stored schema field; got %d test cases", len(enumFieldTests))
+	if len(enumFieldTests) != 16 {
+		t.Fatalf("16 of the 19 enum types appear in a stored schema field; got %d test cases", len(enumFieldTests))
 	}
 
 	generated, err := Generate()

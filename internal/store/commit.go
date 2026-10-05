@@ -486,7 +486,8 @@ func (s *Store) CommitHandlerResult(ctx context.Context, c HandlerCommit) (bool,
 		}
 	}
 
-	for _, m := range c.Messages {
+	for i := range c.Messages {
+		m := &c.Messages[i]
 		// Force every inserted message's ticket_id to c.TicketID: a handler
 		// proposes messages but never writes, so this commit boundary, not
 		// the handler, is what a message can never be scoped away from.
@@ -511,7 +512,7 @@ func (s *Store) CommitHandlerResult(ctx context.Context, c HandlerCommit) (bool,
 				return false, fmt.Errorf("commit handler result: %w", err)
 			}
 		}
-		if err = s.insertMessageTx(ctx, tx, m); err != nil {
+		if err = s.insertMessageTx(ctx, tx, *m); err != nil {
 			return false, fmt.Errorf("commit handler result: %w", err)
 		}
 	}
@@ -1537,24 +1538,15 @@ func (s *Store) withdrawQuestionTx(ctx context.Context, tx *sql.Tx, ticketID, qu
 // (section 6.3), so CommitHandlerResult and AnswerQuestion cannot call it
 // directly.
 func (s *Store) insertMessageTx(ctx context.Context, tx *sql.Tx, m Message) error {
-	var payloadParam *string
-	if messagePayloadTypes[m.Type] {
-		if len(m.Payload) == 0 {
-			return fmt.Errorf("message type %s requires a payload", m.Type)
-		}
-		if err := s.schemas.validate("messages", m.Type, m.Payload); err != nil {
-			return err
-		}
-		text := string(m.Payload)
-		payloadParam = &text
-	} else if len(m.Payload) != 0 {
-		return fmt.Errorf("message type %s takes no payload", m.Type)
+	payloadParam, err := messagePayloadParam(s.schemas, m)
+	if err != nil {
+		return err
 	}
 
-	_, err := tx.ExecContext(ctx,
-		`INSERT INTO messages (ticket_id, run_id, parent_id, type, author, state, body, payload, batch_id, read_at)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		m.TicketID, m.RunID, m.ParentID, m.Type, m.Author, m.State, m.Body, payloadParam, m.BatchID, formatTimePtr(m.ReadAt),
+	_, err = tx.ExecContext(ctx,
+		`INSERT INTO messages (ticket_id, run_id, parent_id, type, author, state, body, payload, batch_id, read_at, event_kind)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		m.TicketID, m.RunID, m.ParentID, m.Type, m.Author, m.State, m.Body, payloadParam, m.BatchID, formatTimePtr(m.ReadAt), m.EventKind,
 	)
 	if err != nil {
 		return fmt.Errorf("insert message: %w", err)

@@ -62,14 +62,16 @@ type pushKeys struct {
 	Auth   string `json:"auth" jsonschema:"minLength=1,maxLength=512"`
 }
 
-// The three tables a stored type belongs to.
+// The four tables a stored type belongs to (events is the typed-event
+// namespace inside messages.payload).
 const (
 	tableMessages          = "messages"
 	tableArtifacts         = "artifacts"
 	tablePushSubscriptions = "push_subscriptions"
+	tableEvents            = "events"
 )
 
-// Registry lists the 17 stored types, each mapped to its committed schema path.
+// Registry lists the 18 stored types, each mapped to its committed schema path.
 func Registry() []Entry {
 	return []Entry{
 		{tableMessages, "question", response.QuestionPayload{}},
@@ -89,6 +91,7 @@ func Registry() []Entry {
 		{tableArtifacts, "verdict", response.VerdictArtifact{}},
 		{tableArtifacts, "respond", response.RespondArtifact{}},
 		{tablePushSubscriptions, "keys", pushKeys{}},
+		{tableEvents, "check_rerun", response.CheckRerunEvent{}},
 	}
 }
 

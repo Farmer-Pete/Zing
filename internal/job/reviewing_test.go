@@ -2563,8 +2563,8 @@ func driveReviewFixToLanding(t *testing.T, s *store.Store, ticketID int64, rt ru
 			t.Fatalf("driveReviewFixToLanding: Run (step %d): %v", i, err)
 		}
 		pbApply(t, s, ticket, commit)
-		for _, m := range commit.Messages {
-			if strings.HasPrefix(m.Body, "fix landed ") {
+		for j := range commit.Messages {
+			if strings.HasPrefix(commit.Messages[j].Body, "fix landed ") {
 				return
 			}
 		}
