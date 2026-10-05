@@ -13,9 +13,8 @@
 // left unsent or stale (unsavedReplyBodies, sendResultWithUnsent), the
 // debounced autosave decision (replyAutosaveBody), the send-time emptied-box
 // flush, failed-clear block, and failed/stale save split (emptiedReplyBodies,
-// sendBlockedByFailedClears, clearFailedResult, partitionFailedSaves), and
-// the patch-caused-blur-only focus restore decision (replyFocusSnapshot,
-// restoreFocusDecision).
+// clearFailedResult, partitionFailedSaves), and the patch-caused-blur-only
+// focus restore decision (replyFocusSnapshot, restoreFocusDecision).
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
@@ -48,7 +47,6 @@ import {
 	AUTOSAVE_DEBOUNCE_MS,
 	replyAutosaveBody,
 	emptiedReplyBodies,
-	sendBlockedByFailedClears,
 	clearFailedResult,
 	partitionFailedSaves,
 	replyFocusSnapshot,
@@ -683,15 +681,9 @@ test('emptiedReplyBodies: no inputs yields an empty list', () => {
 	assert.deepEqual(emptiedReplyBodies(undefined, () => ''), []);
 });
 
-// sendBlockedByFailedClears / clearFailedResult: a clear that failed leaves
-// its old, deleted text saved as the ticket's draft, so sending anyway would
-// silently resend text the owner just emptied the box of (bug fix).
-
-test('sendBlockedByFailedClears: any failed clear blocks the send', () => {
-	assert.equal(sendBlockedByFailedClears(0), false);
-	assert.equal(sendBlockedByFailedClears(1), true);
-	assert.equal(sendBlockedByFailedClears(2), true);
-});
+// clearFailedResult: a clear that failed leaves its old, deleted text saved
+// as the ticket's draft, so sending anyway would silently resend text the
+// owner just emptied the box of (bug fix).
 
 test('clearFailedResult: names how many clears failed', () => {
 	assert.equal(
@@ -730,6 +722,13 @@ test('partitionFailedSaves: a thread-level reply (no question) with a failed sav
 	const pending = [{ el: threadBox, body: { ticket: 1, question: null, text: 'a thread reply' } }];
 	const result = partitionFailedSaves(pending, [false], () => 'something saved earlier');
 	assert.deepEqual(result, { failed: [threadBox], stale: [] });
+});
+
+test('partitionFailedSaves: a failed save whose saved text already matches is neither unsent nor stale', () => {
+	const alreadySavedBox = { dataset: {}, value: 'unchanged' };
+	const pending = [{ el: alreadySavedBox, body: { ticket: 1, question: 11, text: 'unchanged' } }];
+	const lastSavedFor = () => 'unchanged';
+	assert.deepEqual(partitionFailedSaves(pending, [false], lastSavedFor), { failed: [], stale: [] });
 });
 
 // replyFocusSnapshot / restoreFocusDecision: a /stream patch that blurs or

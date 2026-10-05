@@ -587,22 +587,11 @@ export function emptiedReplyBodies(inputs, lastSavedFor) {
 }
 
 /**
- * sendBlockedByFailedClears reports whether postSendBatch must hold back
- * /send (bug fix: a clear that failed leaves its old, deleted text saved as
- * the ticket's draft, and sending anyway would silently resend text the
- * owner just emptied the box of). True whenever at least one emptied box's
- * clear failed to save.
- *
- * @param {number} failedClearCount
- * @returns {boolean}
- */
-export function sendBlockedByFailedClears(failedClearCount) {
-	return failedClearCount > 0;
-}
-
-/**
- * clearFailedResult is showSendResult's text when sendBlockedByFailedClears
- * holds the send back, naming how many emptied boxes' clears failed.
+ * clearFailedResult is showSendResult's text when postSendBatch holds /send
+ * back because at least one emptied box's clear failed to save (bug fix: a
+ * clear that failed leaves its old, deleted text saved as the ticket's
+ * draft, and sending anyway would silently resend text the owner just
+ * emptied the box of), naming how many emptied boxes' clears failed.
  *
  * @param {number} count
  * @returns {string}
@@ -623,7 +612,15 @@ export function clearFailedResult(count) {
  * only save ever was the server-rendered draft (never autosaved this page
  * session) is still counted as stale rather than failed.
  *
- * @param {{el: object, body: {question: number|null}}[]} pending
+ * A box whose earlier saved text already equals what this failed save was
+ * trying to post is left out of both lists (bug fix): that save's own
+ * failure changed nothing, since the exact text it would have written is
+ * already the one /send is about to read. Counting it as stale would wrongly
+ * warn that its "newest edit may be missing" when no edit was lost, and
+ * postSendBatch would then also leave its text sitting in the box after a
+ * send that in fact carried it.
+ *
+ * @param {{el: object, body: {question: number|null, text: string}}[]} pending
  * @param {boolean[]} results - postDraftRequest's outcome, by the same index as pending
  * @param {(el: object) => string} lastSavedFor
  * @returns {{failed: object[], stale: object[]}}
@@ -635,7 +632,11 @@ export function partitionFailedSaves(pending, results, lastSavedFor) {
 		if (results[i]) {
 			return;
 		}
-		if (body.question != null && lastSavedFor(el)) {
+		const saved = body.question != null ? lastSavedFor(el) : '';
+		if (saved === body.text) {
+			return;
+		}
+		if (saved) {
 			stale.push(el);
 		} else {
 			failed.push(el);
