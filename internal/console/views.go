@@ -1766,6 +1766,10 @@ func MarkerRecognized(m store.MessageRow) bool {
 	if m.Type != msgTypeUpdate {
 		return true
 	}
+	if m.EventKind != nil {
+		_, ok := eventRules[*m.EventKind]
+		return ok
+	}
 	// agentFallback: see displayBody's own identical call, same reasoning --
 	// cmd/zing's selftest guard has no per-ticket agent name to pass, and
 	// recognition never depends on which name a gate marker's sentence
@@ -1787,8 +1791,13 @@ func MarkerRecognized(m store.MessageRow) bool {
 // back true, the same defensive fallback stateLine, escalationLine, and
 // answerLine already use for a payload they cannot decode. Every true case
 // renders as a one-line timeline divider (buildThreadRows), not the full
-// card this function's callers used to feed into.
+// card this function's callers used to feed into. A typed event row
+// (EventKind set) renders through its kind's rule in events.go and is
+// always shown.
 func updateLine(m *store.MessageRow, agent string) (string, bool) {
+	if m.EventKind != nil {
+		return eventLine(m), true
+	}
 	body := m.Body
 	switch {
 	case strings.HasPrefix(body, updateMarkerConversationPendingPrefix):
