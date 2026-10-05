@@ -2873,6 +2873,72 @@ func TestPlanningHandler_Budget_ExhaustedBeforeResumeResolvesTheAnsweredRound(t 
 	}
 }
 
+// TestPlanningHandler_Budget_RetryAfterRaiseResumesFirstTurn is the
+// regression test for the retry-after-raise bug (#25): a wall_clock/
+// cap_budget escalation answered with Retry re-escalated unconditionally,
+// even once the owner raised budget.agent_minutes_per_ticket and restarted
+// serve, so the ticket could never resume (design section 6.7's retryCapBudget
+// row). It refuses the planning first turn on a zero budget, answers the
+// resulting escalation with Retry, then raises the budget back to the
+// suite's own default (claim's testBudget) and expects retryCapBudget to
+// resolve the round and write the marker instead of re-escalating, so the
+// next tick retakes the refused first turn.
+func TestPlanningHandler_Budget_RetryAfterRaiseResumesFirstTurn(t *testing.T) {
+	t.Parallel()
+	s := newJobTestStore(t)
+	ticketID := seedQueuedTicket(t, s)
+	rt := fakeRuntime(t)
+	advanceQueuedToPlanning(t, s, rt, ticketID)
+	apply(t, s, getTicket(t, s, ticketID), mustPlanning(t, s, claim(t, s, rt, ticketID), ticketID)) // classify sets kind
+
+	refused, err := runPlanning(t, s, claimWithBudget(t, s, rt, ticketID), ticketID)
+	if err != nil {
+		t.Fatalf("planning (first turn, budget exhausted) Run: %v", err)
+	}
+	assertWallClockEscalation(t, refused)
+	apply(t, s, getTicket(t, s, ticketID), refused)
+
+	open, err := s.QuestionsByState(t.Context(), ticketID, "open")
+	if err != nil {
+		t.Fatalf("QuestionsByState(open): %v", err)
+	}
+	if len(open) != 1 {
+		t.Fatalf("QuestionsByState(open) = %v, want exactly one (the wall_clock escalation's own question)", open)
+	}
+	qID := open[0].ID
+	answerGateQuestion(t, s, ticketID, qID, new("a"), "")
+
+	commit, err := runPlanning(t, s, claim(t, s, rt, ticketID), ticketID) // claim's testBudget: the raised budget
+	if err != nil {
+		t.Fatalf("planning (retry after raise) Run: %v", err)
+	}
+	if commit.Escalation != nil {
+		t.Errorf("commit.Escalation = %+v, want nil (budget raised)", commit.Escalation)
+	}
+	if commit.Waiting != nil {
+		t.Errorf("commit.Waiting = %v, want nil", commit.Waiting)
+	}
+	if len(commit.ResolveQuestions) != 1 || commit.ResolveQuestions[0] != qID {
+		t.Errorf("commit.ResolveQuestions = %v, want [%d]", commit.ResolveQuestions, qID)
+	}
+	if len(commit.Messages) != 1 || commit.Messages[0].Body != testMarkerRetryRequested {
+		t.Fatalf("commit.Messages = %+v, want one %q marker", commit.Messages, testMarkerRetryRequested)
+	}
+	apply(t, s, getTicket(t, s, ticketID), commit)
+
+	rec := &recordingRuntime{rt: rt}
+	nextCommit, err := runPlanning(t, s, claim(t, s, rec, ticketID), ticketID)
+	if err != nil {
+		t.Fatalf("planning (next tick, retakes the refused first turn) Run: %v", err)
+	}
+	if rec.lastReq.Prompt == "" {
+		t.Error("recordingRuntime got no request, want the next tick to retake the refused first turn")
+	}
+	if nextCommit.Escalation != nil {
+		t.Errorf("nextCommit.Escalation = %+v, want nil", nextCommit.Escalation)
+	}
+}
+
 // TestPlanningHandler_RepliesFailingConversationCheckTerminalizesRun is a
 // regression test for a live crash: a replies response that fails
 // checkConversation (here, it settles the only open thread, so "replies

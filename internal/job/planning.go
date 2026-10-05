@@ -1859,8 +1859,9 @@ func (h planningHandler) enterFromEscalationRound(ctx context.Context, t store.T
 		commit, err = resumeOrFresh(ctx, t, d, notesAndError, resolveIDs)
 
 	case origin == response.EscalationOriginCapBudget:
-		// Both a and b re-escalate wall_clock (design section 6.7).
-		commit = recapBudgetEscalation(t, d, resolveIDs)
+		// Both a and b retry once the budget has room, and re-escalate
+		// wall_clock while it does not (design section 6.7).
+		commit, err = retryCapBudget(ctx, t, d, resolveIDs)
 
 	default:
 		return store.HandlerCommit{}, fmt.Errorf("job: planning: escalation %d: unrecognized origin %q", escID, payload.Origin)
@@ -1886,7 +1887,7 @@ func abandonCommit(t store.Ticket, d Deps, code string) store.HandlerCommit {
 	return c
 }
 
-// recapBudgetEscalation is section 6.7's cap_budget retry/back row (design
+// recapBudgetEscalation is retryCapBudget's still-over-budget branch (design
 // section 6.7): re-escalate wall_clock in this same commit, with the
 // unchanged What/Why text budgetEscalationCommit itself uses, resolving the
 // round that led here.
@@ -1894,6 +1895,31 @@ func recapBudgetEscalation(t store.Ticket, d Deps, resolveIDs []int64) store.Han
 	c := escalationCommit(t, d, nil, nil, string(response.EscalationCodeWallClock), budgetExhaustedWhat, budgetExhaustedWhy, "", response.EscalationOriginCapBudget)
 	c.ResolveQuestions = resolveIDs
 	return c
+}
+
+// retryCapBudget is the cap_budget retry row (design section 6.7):
+// while the ticket's agent seconds still meet d.Budget, the comparison it
+// shares with runJobWith via budgetExhausted, it re-escalates wall_clock
+// (recapBudgetEscalation). Once the owner has raised
+// budget.agent_minutes_per_ticket and restarted serve, it resolves the
+// round and writes the "retry requested" marker instead, so the next tick
+// retakes the refused call; a shipping ticket also clears its poll. Both
+// branches log at INFO, so settings.log_level warn or error drops them.
+func retryCapBudget(ctx context.Context, t store.Ticket, d Deps, resolveIDs []int64) (store.HandlerCommit, error) {
+	agentSeconds, err := d.Store.AgentSecondsForTicket(ctx, t.ID)
+	if err != nil {
+		return store.HandlerCommit{}, fmt.Errorf("job: cap_budget retry: agent seconds for ticket %d: %w", t.ID, err)
+	}
+	exhausted, capSeconds := budgetExhausted(agentSeconds, d.Budget)
+	if exhausted {
+		slog.Info("cap_budget retry still over budget", "ticket_id", t.ID, "agent_seconds", agentSeconds, "cap_seconds", capSeconds)
+		return recapBudgetEscalation(t, d, resolveIDs), nil
+	}
+	slog.Info("cap_budget retry resumes", "ticket_id", t.ID, "state", t.State, "agent_seconds", agentSeconds, "cap_seconds", capSeconds)
+	if t.State == stateShipping {
+		return shipRetryMarkerCommit(t, d, resolveIDs), nil
+	}
+	return buildingHandler{}.retryMarkerCommit(t, d, resolveIDs), nil
 }
 
 // outstandingFloorFindings reads the current cohort's planreview artifact

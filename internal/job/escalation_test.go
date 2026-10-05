@@ -671,13 +671,15 @@ func TestEscalationResolve_CapLoops_BackResumesWithNotesAndErrorNoFindings(t *te
 	assertNoLabel(t, rec.lastReq.Prompt, "findings")
 }
 
-// ---- cap_budget origin: both choices re-escalate ---------------------------
+// ---- cap_budget origin: both choices resume once the budget has room -----
 
-// TestEscalationResolve_CapBudget_EveryChoiceReEscalatesWallClock proves
-// section 6.7's cap_budget row: "a retry | cap_budget | re-escalate
-// wall_clock in this commit ... resolve the round", and "b | cap_budget | as
-// retry" -- identical either way, with no runtime call at all.
-func TestEscalationResolve_CapBudget_EveryChoiceReEscalatesWallClock(t *testing.T) {
+// TestEscalationResolve_CapBudget_RetryResumesWhenBudgetHasRoom proves
+// section 6.7's cap_budget retry row once the owner has raised the budget
+// (retryCapBudget, #25): "a retry | cap_budget | the ticket's spent agent
+// seconds are below d.Budget | resolve the round, commit the marker 'retry
+// requested'" -- no re-escalation, no runtime call, for either explicit
+// choice.
+func TestEscalationResolve_CapBudget_RetryResumesWhenBudgetHasRoom(t *testing.T) {
 	t.Parallel()
 	for _, choice := range []string{"a", "b"} {
 		t.Run(choice, func(t *testing.T) {
@@ -687,11 +689,54 @@ func TestEscalationResolve_CapBudget_EveryChoiceReEscalatesWallClock(t *testing.
 			qID := escalateDirect(t, s, ticketID, nil, nil, response.EscalationCodeWallClock, response.EscalationOriginCapBudget)
 			answerGateQuestion(t, s, ticketID, qID, new(choice), "")
 
-			// No scripted steps: a runtime call here is a bug (cap_budget's
-			// retry/back never runs a job, design section 6.7).
+			// No scripted steps: retryCapBudget's own resume branch commits
+			// the marker and leaves the refused call for the next tick,
+			// with no runtime call in this commit either.
 			commit, err := runPlanning(t, s, claim(t, s, &scriptedRuntime{t: t}, ticketID), ticketID)
 			if err != nil {
-				t.Fatalf("escalation resolve (cap_budget %s) Run: %v", choice, err)
+				t.Fatalf("escalation resolve (cap_budget %s, budget has room) Run: %v", choice, err)
+			}
+			if commit.Escalation != nil {
+				t.Errorf("commit.Escalation = %+v, want nil (budget has room)", commit.Escalation)
+			}
+			if commit.Waiting != nil {
+				t.Errorf("commit.Waiting = %v, want nil", commit.Waiting)
+			}
+			if len(commit.Messages) != 1 || commit.Messages[0].Body != testMarkerRetryRequested {
+				t.Fatalf("commit.Messages = %+v, want one %q marker", commit.Messages, testMarkerRetryRequested)
+			}
+			if len(commit.ResolveQuestions) != 1 || commit.ResolveQuestions[0] != qID {
+				t.Errorf("commit.ResolveQuestions = %v, want [%d]", commit.ResolveQuestions, qID)
+			}
+		})
+	}
+}
+
+// TestEscalationResolve_CapBudget_EveryChoiceReEscalatesWhileOverBudget
+// proves section 6.7's cap_budget row while the budget still has no room:
+// "a retry | cap_budget | spent agent seconds still meet d.Budget |
+// re-escalate wall_clock in this commit ... resolve the round", and "b |
+// cap_budget | as retry" -- identical either way, with no runtime call at
+// all.
+func TestEscalationResolve_CapBudget_EveryChoiceReEscalatesWhileOverBudget(t *testing.T) {
+	t.Parallel()
+	for _, choice := range []string{"a", "b"} {
+		t.Run(choice, func(t *testing.T) {
+			t.Parallel()
+			s := newJobTestStore(t)
+			ticketID := seedFeatureTicketInPlanning(t, s)
+			qID := escalateDirect(t, s, ticketID, nil, nil, response.EscalationCodeWallClock, response.EscalationOriginCapBudget)
+			answerGateQuestion(t, s, ticketID, qID, new(choice), "")
+
+			deps := claim(t, s, &scriptedRuntime{t: t}, ticketID)
+			deps.Budget = 0 // still exhausted: retryCapBudget's own re-escalate branch
+
+			// No scripted steps: a runtime call here is a bug (cap_budget's
+			// still-over-budget retry/back never runs a job, design section
+			// 6.7).
+			commit, err := runPlanning(t, s, deps, ticketID)
+			if err != nil {
+				t.Fatalf("escalation resolve (cap_budget %s, still over budget) Run: %v", choice, err)
 			}
 			if commit.Escalation == nil {
 				t.Fatal("commit.Escalation is nil, want a re-escalated wall_clock")

@@ -2163,8 +2163,10 @@ func TestPollCIWaitingMarkerOnChange(t *testing.T) {
 }
 
 // TestShippingEscalationRetries proves design section 5.6's own shipping
-// rows for pr_closed and any other code: both write the plain "retry
-// requested" marker plus ClearPoll.
+// rows for pr_closed and any other code (both write the plain "retry
+// requested" marker plus ClearPoll), and cap_budget's row once the budget
+// has room: retryCapBudget's shipping branch (#25) gives the same marker
+// plus ClearPoll through shipRetryMarkerCommit, rather than re-escalating.
 func TestShippingEscalationRetries(t *testing.T) {
 	t.Parallel()
 	for _, code := range []response.EscalationCode{response.EscalationCodePRClosed, response.EscalationCodeEnvironment} {
@@ -2196,6 +2198,43 @@ func TestShippingEscalationRetries(t *testing.T) {
 			}
 		})
 	}
+
+	t.Run("cap_budget", func(t *testing.T) {
+		t.Parallel()
+		s, ticket, _ := shipTicketReady(t)
+
+		qID := pbEscalateDirect(t, s, ticket.ID, nil, nil, response.EscalationCodeWallClock, response.EscalationOriginCapBudget)
+		pbAnswerEscalation(t, s, ticket.ID, qID, "a")
+
+		gh := &shipGitHub{}
+		tr := &shipTracker{}
+		deps := shipClaim(t, s, pbFakeRuntime(t), ticket.ID, gh, tr)
+		commit, runErr := (shipHandler{}).Run(t.Context(), pbGetTicket(t, s, ticket.ID), deps)
+		if runErr != nil {
+			t.Fatalf("Run: %v", runErr)
+		}
+		if commit.Escalation != nil {
+			t.Errorf("commit.Escalation = %+v, want nil (budget has room)", commit.Escalation)
+		}
+		if commit.Waiting != nil {
+			t.Errorf("commit.Waiting = %v, want nil", commit.Waiting)
+		}
+		if !commit.ClearPoll {
+			t.Error("ClearPoll = false, want true")
+		}
+		if len(commit.ResolveQuestions) != 1 || commit.ResolveQuestions[0] != qID {
+			t.Errorf("commit.ResolveQuestions = %v, want [%d]", commit.ResolveQuestions, qID)
+		}
+		found := false
+		for _, m := range commit.Messages {
+			if m.Body == markerRetryRequested {
+				found = true
+			}
+		}
+		if !found {
+			t.Errorf("commit.Messages = %+v, want a %q marker", commit.Messages, markerRetryRequested)
+		}
+	})
 }
 
 // -----------------------------------------------------------------------
