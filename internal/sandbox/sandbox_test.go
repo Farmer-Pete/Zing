@@ -628,6 +628,39 @@ func TestLoadRejectsProfileBeforeResolvingHost(t *testing.T) {
 	}
 }
 
+// TestLoadRejectsUnsafeAgentSocket proves proves() actually carries the
+// host's own SSH_AUTH_SOCK into the Params literal it builds (#49): with
+// nothing else wrong, a parent environment whose SSH_AUTH_SOCK contains a
+// double quote must still fail the profile closed at Load, with the same
+// "profile rejected" reason an unsafe HOME or WORKTREE would produce, not
+// slip through unnoticed because proves() forgot to wire the pair in
+// (review r1f2). Skipped when already sandboxed (shouldSkipSandboxed, not
+// the darwin-only requireNotSandboxed, since this file builds on every
+// platform): unlike TestLoadRejectsProfileBeforeResolvingHost, this test
+// needs resolveHost's own cache-root chmod to actually succeed, so the
+// unsafe value is what proves() trips on, not an unrelated nested-sandbox
+// chmod denial.
+//
+// Not parallel: it calls t.Setenv("SSH_AUTH_SOCK", ...).
+func TestLoadRejectsUnsafeAgentSocket(t *testing.T) {
+	if runtime.GOOS != testGOOSDarwin {
+		t.Skip("SSH_AUTH_SOCK resolution is darwin-only")
+	}
+	if shouldSkipSandboxed() {
+		t.Skip("running inside a seatbelt sandbox: cannot start sandbox-exec")
+	}
+	t.Setenv("SSH_AUTH_SOCK", `/tmp/a"b`)
+
+	valid := []byte("(version 1)\n;;READ_PATHS;;\n;;CONSOLE_DENY;;\n")
+	sb := Load(valid, t.TempDir(), nil, 7420)
+	if sb.Available() {
+		t.Fatal("Load with an unsafe SSH_AUTH_SOCK: want unavailable")
+	}
+	if sb.Reason() != reasonProfileRejected {
+		t.Errorf("Reason() = %q, want %q", sb.Reason(), reasonProfileRejected)
+	}
+}
+
 // ---- Set: For, OffSet, FirstUnavailable (PKG9-PLAN.md section 4.7) --------
 
 // TestSetFor proves Set.For's own three-name lookup, and that any other
