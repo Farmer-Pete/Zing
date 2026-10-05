@@ -213,6 +213,8 @@ func TestLoad_TestsLensFlagsUnobservableScenarios(t *testing.T) {
 		"the owner's own config",
 		"a write under /tmp",
 		"a sandbox probe that skips when sandboxed",
+		"greps the skip line",
+		"A bare `go test` exits 0 whether or not the test skipped",
 	} {
 		if !strings.Contains(plan, want) {
 			t.Errorf("tests.Plan does not contain %q: %q", want, plan)
