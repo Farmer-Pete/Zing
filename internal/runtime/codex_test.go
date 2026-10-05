@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io/fs"
@@ -716,6 +717,45 @@ func TestCodex_TransientErrorSetsExecErrorTransient(t *testing.T) {
 	}
 }
 
+// TestTailWriter proves tailWriter keeps only the most recently written
+// bytes, up to its limit, unlike capWriter, which keeps the first bytes and
+// drops the rest: several writes totaling more than the limit, including one
+// write bigger than the limit by itself, must still leave bytes() holding
+// exactly limit bytes, equal to the tail of everything written.
+func TestTailWriter(t *testing.T) {
+	t.Parallel()
+
+	const limit = 100
+	w := &tailWriter{limit: limit}
+
+	var all []byte
+	writes := [][]byte{
+		bytes.Repeat([]byte("a"), 40),
+		bytes.Repeat([]byte("b"), 40),
+		bytes.Repeat([]byte("c"), 150), // bigger than limit by itself
+		bytes.Repeat([]byte("d"), 30),
+	}
+	for _, p := range writes {
+		n, err := w.Write(p)
+		if err != nil {
+			t.Fatalf("Write: %v", err)
+		}
+		if n != len(p) {
+			t.Errorf("Write returned %d, want %d", n, len(p))
+		}
+		all = append(all, p...)
+	}
+
+	got := w.bytes()
+	if len(got) != limit {
+		t.Fatalf("len(bytes()) = %d, want %d", len(got), limit)
+	}
+	want := all[len(all)-limit:]
+	if !bytes.Equal(got, want) {
+		t.Errorf("bytes() = %q, want %q", got, want)
+	}
+}
+
 // fakeCodexNonEmptyLines builds n non-blank lines, each "lineN", separated
 // by a blank line, so a test can prove codexFailureDetail both skips blank
 // lines and keeps only the last maxTailLines of them.
@@ -772,6 +812,26 @@ func TestCodexFailureDetail(t *testing.T) {
 			name:          "a 5000-byte message is cut to at most 2048 bytes on a rune boundary",
 			stdout:        `{"type":"error","message":"` + strings.Repeat("a", 5000) + `"}`,
 			wantDetail:    strings.Repeat("a", maxFailureDetailBytes),
+			wantFromEvent: true,
+		},
+		{
+			// A JSON message with 2047 ASCII bytes followed by a two-byte
+			// rune (é, U+00E9) straddles byte 2048: a cut that blindly took
+			// the first maxFailureDetailBytes bytes would split é in half
+			// and produce invalid UTF-8. json.Marshal below both builds the
+			// JSON event text (so é is escaped exactly as Codex's own JSON
+			// encoder would emit it) and gives wantDetail the same message
+			// before any cut, so the test does not hard-code JSON escaping.
+			name: "a multi-byte rune straddling the 2048-byte cut is kept whole",
+			stdout: func() string {
+				msg := strings.Repeat("a", 2047) + strings.Repeat("é", 10)
+				encoded, err := json.Marshal(msg)
+				if err != nil {
+					t.Fatalf("json.Marshal: %v", err)
+				}
+				return `{"type":"error","message":` + string(encoded) + `}`
+			}(),
+			wantDetail:    strings.Repeat("a", 2047),
 			wantFromEvent: true,
 		},
 	}

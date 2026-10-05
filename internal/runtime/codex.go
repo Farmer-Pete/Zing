@@ -339,23 +339,34 @@ func capFailureDetail(s string) string {
 	return s[:cut]
 }
 
+// CapFailureDetail is capFailureDetail, exported so job.retryTransient can
+// cut the retry note it builds from two attempts' FailureDetail to the same
+// maxFailureDetailBytes bound, on the same rune boundary, rather than
+// growing its own copy of this rule.
+func CapFailureDetail(s string) string {
+	return capFailureDetail(s)
+}
+
 // codexFailureDetail is Codex's own diagnosis of why a run with no final
 // message exited non-zero (design: RunResult.FailureDetail): it walks
-// stdout's JSONL lines and remembers the last line whose type is "error"
-// (its message) or "turn.failed" (its error.message). When it finds one, it
+// stdout's JSONL lines once, remembering the last line whose type is
+// "error" (its message) or "turn.failed" (its error.message), and every
+// trimmed non-empty line in case none is found. When it finds an event, it
 // returns that message with fromEvent true. Otherwise it returns the last
-// 20 non-empty lines of stdout (trimmed, joined by "\n"), or
-// noStdoutFailureDetail when stdout has no non-empty line at all, both with
-// fromEvent false. The result is always at most maxFailureDetailBytes,
-// cut on a rune boundary.
+// 20 non-empty lines of stdout (joined by "\n"), or noStdoutFailureDetail
+// when stdout has no non-empty line at all, both with fromEvent false. The
+// result is always at most maxFailureDetailBytes, cut on a rune boundary.
 func codexFailureDetail(stdout []byte) (detail string, fromEvent bool) {
 	var lastEventMessage string
 	haveEvent := false
+	var nonEmpty []string
 	for line := range bytes.SplitSeq(stdout, []byte("\n")) {
 		line = bytes.TrimSpace(line)
 		if len(line) == 0 {
 			continue
 		}
+		nonEmpty = append(nonEmpty, string(line))
+
 		var ev codexFailureEventLine
 		if err := json.Unmarshal(line, &ev); err != nil {
 			continue
@@ -371,13 +382,6 @@ func codexFailureDetail(stdout []byte) (detail string, fromEvent bool) {
 		return capFailureDetail(lastEventMessage), true
 	}
 
-	var nonEmpty []string
-	for line := range strings.SplitSeq(string(stdout), "\n") {
-		line = strings.TrimSpace(line)
-		if line != "" {
-			nonEmpty = append(nonEmpty, line)
-		}
-	}
 	if len(nonEmpty) == 0 {
 		return noStdoutFailureDetail, false
 	}

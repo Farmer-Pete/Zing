@@ -98,10 +98,13 @@ const (
 	fakeLintCmd = "the-lint"
 )
 
-// slogLevelWarn is slog's own rendering of its WARN level in a JSON log
-// record's "level" field, named once for every test here that checks a
-// captured record's level (goconst).
-const slogLevelWarn = "WARN"
+// slogLevelWarn and slogLevelInfo are slog's own rendering of its WARN and
+// INFO levels in a JSON log record's "level" field, named once for every
+// test in this package that checks a captured record's level (goconst).
+const (
+	slogLevelWarn = "WARN"
+	slogLevelInfo = "INFO"
+)
 
 func (c *budgetCommands) Run(_ context.Context, _, _, shellCmd string, timeout time.Duration, _ CommandIO) (int, error) {
 	c.timeouts[shellCmd] = timeout

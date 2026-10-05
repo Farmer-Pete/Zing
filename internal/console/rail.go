@@ -584,11 +584,11 @@ func (c *console) handleRunFile(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if kind == "stderr" {
-		c.serveRunsFile(w, ticketID, runID, kind, "stderr", "this run wrote no stderr", ev.StderrPath, store.StderrFileName(runID))
+		c.serveRunsFile(w, ticketID, runID, kind, "this run wrote no stderr", ev.StderrPath, store.StderrFileName(runID))
 		return
 	}
 
-	c.serveRunsFile(w, ticketID, runID, kind, "transcript", "this run kept no transcript", ev.TranscriptPath, store.StdoutFileName(runID))
+	c.serveRunsFile(w, ticketID, runID, kind, "this run kept no transcript", ev.TranscriptPath, store.StdoutFileName(runID))
 }
 
 // serveRunsFile is the shared body of the stderr and transcript branches of
@@ -597,30 +597,30 @@ func (c *console) handleRunFile(w http.ResponseWriter, r *http.Request) {
 // the exact same path checks. storedPath is the evidence row's own
 // StderrPath or TranscriptPath; wantName is the kind's one allowed file
 // name directly inside <store.Dir()>/runs (store.StderrFileName or
-// store.StdoutFileName). label names the kind in every body and log line
-// this serves: "LABEL file is gone", "LABEL file does not match this run",
-// "LABEL file is outside the data directory", and the reasons "no_LABEL"
-// and "LABEL_gone" -- so passing label "stderr" reproduces today's stderr
-// bodies and reasons byte-for-byte. missingBody is the 404 body for a nil
-// storedPath, which names the verb ("wrote" for stderr, "kept" for a
-// transcript) label alone cannot carry.
-func (c *console) serveRunsFile(w http.ResponseWriter, ticketID, runID int64, kind, label, missingBody string, storedPath *string, wantName string) {
+// store.StdoutFileName). kind, already "stderr" or "transcript" as
+// handleRunFile resolves it, names the kind in every body and log line
+// this serves: "KIND file is gone", "KIND file does not match this run",
+// "KIND file is outside the data directory", and the reasons "no_KIND" and
+// "KIND_gone" -- so today's stderr bodies and reasons stay byte-for-byte.
+// missingBody is the 404 body for a nil storedPath, which names the verb
+// ("wrote" for stderr, "kept" for a transcript) kind alone cannot carry.
+func (c *console) serveRunsFile(w http.ResponseWriter, ticketID, runID int64, kind, missingBody string, storedPath *string, wantName string) {
 	if storedPath == nil {
-		slog.Info("run file not found", "ticket_id", ticketID, "run_id", runID, "kind", kind, "reason", "no_"+label)
+		slog.Info("run file not found", "ticket_id", ticketID, "run_id", runID, "kind", kind, "reason", "no_"+kind)
 		http.Error(w, missingBody, http.StatusNotFound)
 		return
 	}
 
-	goneBody := label + " file is gone"
+	goneBody := kind + " file is gone"
 	dataDir, rootErr := filepath.EvalSymlinks(c.store.Dir())
 	if rootErr != nil {
-		slog.Info("run file not found", "ticket_id", ticketID, "run_id", runID, "kind", kind, "reason", label+"_gone", "error", rootErr)
+		slog.Info("run file not found", "ticket_id", ticketID, "run_id", runID, "kind", kind, "reason", kind+"_gone", "error", rootErr)
 		http.Error(w, goneBody, http.StatusNotFound)
 		return
 	}
 	p, pathErr := filepath.EvalSymlinks(*storedPath)
 	if pathErr != nil {
-		slog.Info("run file not found", "ticket_id", ticketID, "run_id", runID, "kind", kind, "reason", label+"_gone", "error", pathErr)
+		slog.Info("run file not found", "ticket_id", ticketID, "run_id", runID, "kind", kind, "reason", kind+"_gone", "error", pathErr)
 		http.Error(w, goneBody, http.StatusNotFound)
 		return
 	}
@@ -635,9 +635,9 @@ func (c *console) serveRunsFile(w http.ResponseWriter, ticketID, runID int64, ki
 	relToData, relErr := filepath.Rel(dataDir, p)
 	escapesDataDir := relErr != nil || relToData == ".." || strings.HasPrefix(relToData, ".."+string(filepath.Separator)) || filepath.IsAbs(relToData)
 	if escapesDataDir || relToData != wantRel {
-		reason, body := "unexpected_name", label+" file does not match this run"
+		reason, body := "unexpected_name", kind+" file does not match this run"
 		if escapesDataDir {
-			reason, body = "outside_data_dir", label+" file is outside the data directory"
+			reason, body = "outside_data_dir", kind+" file is outside the data directory"
 		}
 		slog.Warn("run file outside data dir", "ticket_id", ticketID, "run_id", runID, "kind", kind, "reason", reason, "path", *storedPath)
 		http.Error(w, body, http.StatusForbidden)
@@ -647,7 +647,7 @@ func (c *console) serveRunsFile(w http.ResponseWriter, ticketID, runID int64, ki
 	runsDir := filepath.Join(dataDir, "runs")
 	dirRoot, err := os.OpenRoot(runsDir)
 	if err != nil {
-		slog.Info("run file not found", "ticket_id", ticketID, "run_id", runID, "kind", kind, "reason", label+"_gone", "error", err)
+		slog.Info("run file not found", "ticket_id", ticketID, "run_id", runID, "kind", kind, "reason", kind+"_gone", "error", err)
 		http.Error(w, goneBody, http.StatusNotFound)
 		return
 	}
@@ -655,7 +655,7 @@ func (c *console) serveRunsFile(w http.ResponseWriter, ticketID, runID int64, ki
 
 	f, err := dirRoot.Open(wantName)
 	if err != nil {
-		slog.Info("run file not found", "ticket_id", ticketID, "run_id", runID, "kind", kind, "reason", label+"_gone", "error", err)
+		slog.Info("run file not found", "ticket_id", ticketID, "run_id", runID, "kind", kind, "reason", kind+"_gone", "error", err)
 		http.Error(w, goneBody, http.StatusNotFound)
 		return
 	}
@@ -663,7 +663,7 @@ func (c *console) serveRunsFile(w http.ResponseWriter, ticketID, runID int64, ki
 
 	switch fi, statErr := f.Stat(); {
 	case statErr != nil:
-		slog.Info("run file not found", "ticket_id", ticketID, "run_id", runID, "kind", kind, "reason", label+"_gone", "error", statErr)
+		slog.Info("run file not found", "ticket_id", ticketID, "run_id", runID, "kind", kind, "reason", kind+"_gone", "error", statErr)
 		http.Error(w, goneBody, http.StatusNotFound)
 		return
 	case !fi.Mode().IsRegular():

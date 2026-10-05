@@ -10,6 +10,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
@@ -319,6 +320,11 @@ func TestRunAndRoute_CodexPermanentErrorRunsOnce(t *testing.T) {
 	}
 }
 
+// wantFirstAttemptDetail is the FailureDetail every scriptedTransientRuntime
+// test below gives a first attempt that fails transiently, named once since
+// several tests assert it comes through unchanged (goconst).
+const wantFirstAttemptDetail = "first attempt detail"
+
 // scriptedTransientRuntime is a runtime.Runtime that returns one scripted
 // (RunResult, error) pair per call, by call order, repeating its last entry
 // for any call past len(results): the two runJob-level retry tests below
@@ -357,7 +363,7 @@ func TestRunJob_TransientRetrySkippedWhenContextEnds(t *testing.T) {
 		err error
 	}{
 		{
-			res: runtime.RunResult{Stdout: []byte("first attempt stdout\n"), FailureDetail: "first attempt detail"},
+			res: runtime.RunResult{Stdout: []byte("first attempt stdout\n"), FailureDetail: wantFirstAttemptDetail},
 			err: &runtime.ExecError{ExitCode: 1, Transient: "503"},
 		},
 	}}
@@ -388,8 +394,8 @@ func TestRunJob_TransientRetrySkippedWhenContextEnds(t *testing.T) {
 	if !errors.Is(err, runtime.ErrCanceled) {
 		t.Fatalf("err = %v, want errors.Is(err, runtime.ErrCanceled)", err)
 	}
-	if rr.Res.FailureDetail != "first attempt detail" {
-		t.Errorf("rr.Res.FailureDetail = %q, want %q (the first attempt's)", rr.Res.FailureDetail, "first attempt detail")
+	if rr.Res.FailureDetail != wantFirstAttemptDetail {
+		t.Errorf("rr.Res.FailureDetail = %q, want %q (the first attempt's)", rr.Res.FailureDetail, wantFirstAttemptDetail)
 	}
 	if rr.Res.ExitCode != -1 {
 		t.Errorf("rr.Res.ExitCode = %d, want -1", rr.Res.ExitCode)
@@ -463,5 +469,311 @@ func TestRunJob_TransientRetryCapsStdout(t *testing.T) {
 	const keptFromFirst = maxTranscriptBytes - chunk
 	if !bytes.Equal(data[:keptFromFirst], bytes.Repeat([]byte("a"), keptFromFirst)) {
 		t.Error("the first 24576 bytes are not all a")
+	}
+}
+
+// newTransientRetryStubDeps is the Deps and ticket every retryTransient test
+// below needs: a fresh store and claimed ticket, the scripted stub runtime
+// registered under every runtime name a job config might name, and a real
+// DataDir, exactly the shape TestRunJob_TransientRetrySkippedWhenContextEnds
+// and TestRunJob_TransientRetryCapsStdout each build inline.
+func newTransientRetryStubDeps(t *testing.T, stub *scriptedTransientRuntime) (Deps, store.Ticket) {
+	t.Helper()
+	s := newRunJobTestStore(t)
+	ticketID := seedRunJobTicket(t, s)
+	ticket := getRunJobTicket(t, s, ticketID)
+	owner, expires := claimRunJobTicket(t, s, ticketID)
+
+	set, err := runtime.NewSet(map[string]runtime.Runtime{testRuntimeClaude: stub, testRuntimeCodex: stub, runtimeFake: stub})
+	if err != nil {
+		t.Fatalf("runtime.NewSet: %v", err)
+	}
+
+	d := Deps{
+		Store: s, Runtimes: set, Machine: runJobTestMachine(t), Models: map[string]string{testModelAlias: testModelExact},
+		Budget: time.Hour, Owner: owner, Expires: expires, Reserve: realReserve(s, owner, expires),
+		DataDir: t.TempDir(),
+	}
+	return d, ticket
+}
+
+// TestRunJob_TransientRetrySkippedWhenJobDeadlineEnds is
+// TestRunJob_TransientRetrySkippedWhenContextEnds' sibling for the other way
+// runCtx can end during retryTransient's 2s wait (design goals: "returns
+// runtime.ErrCanceled for a parent cancel or runtime.ErrTimeout for the job
+// deadline"): a context.WithTimeout parent whose own deadline, not a
+// cancel, ends during the wait must still skip the second attempt, keep the
+// first attempt's result, set ExitCode to -1, and return
+// runtime.ErrTimeout, not runtime.ErrCanceled. deleting or swapping
+// retryTransient's errors.Is(ctx.Err(), context.DeadlineExceeded) mapping
+// would turn this red while leaving the sibling cancel test green.
+func TestRunJob_TransientRetrySkippedWhenJobDeadlineEnds(t *testing.T) {
+	t.Parallel()
+	stub := &scriptedTransientRuntime{results: []struct {
+		res runtime.RunResult
+		err error
+	}{
+		{
+			res: runtime.RunResult{Stdout: []byte("first attempt stdout\n"), FailureDetail: wantFirstAttemptDetail},
+			err: &runtime.ExecError{ExitCode: 1, Transient: "503"},
+		},
+	}}
+	d, ticket := newTransientRetryStubDeps(t, stub)
+
+	// Shorter than transientRetryDelay (2s), so retryTransient's select
+	// hits ctx.Done() from this deadline, not the 2s wait, while rt.Run's
+	// own first call (synchronous, no sleep) still has time to complete
+	// first.
+	ctx, cancel := context.WithTimeout(t.Context(), 100*time.Millisecond)
+	defer cancel()
+
+	rr, err := runJob(ctx, d, ticket, testJobClassify, store.SessionUpsert{Job: testJobClassify, Runtime: testRuntimeClaude},
+		runtime.RunRequest{Job: response.JobClassify}, nil, nil, 0)
+
+	if stub.calls != 1 {
+		t.Errorf("stub.calls = %d, want 1 (no second attempt)", stub.calls)
+	}
+	if !errors.Is(err, runtime.ErrTimeout) {
+		t.Fatalf("err = %v, want errors.Is(err, runtime.ErrTimeout)", err)
+	}
+	if rr.Res.FailureDetail != wantFirstAttemptDetail {
+		t.Errorf("rr.Res.FailureDetail = %q, want %q (the first attempt's)", rr.Res.FailureDetail, wantFirstAttemptDetail)
+	}
+	if rr.Res.ExitCode != -1 {
+		t.Errorf("rr.Res.ExitCode = %d, want -1", rr.Res.ExitCode)
+	}
+}
+
+// TestRunAndRoute_CodexTransientSkippedByJobDeadlineEscalatesFirstDetail
+// proves routeFailure's ErrTimeout branch, reached through retryTransient's
+// own skip, escalates runtime_exec_failed with Tried set to the skipped
+// retry's first-attempt FailureDetail (design goal: "An ErrTimeout
+// escalation's Tried is the first attempt's FailureDetail"), the same way
+// execFailureCommit already quotes it for an un-retried run.
+func TestRunAndRoute_CodexTransientSkippedByJobDeadlineEscalatesFirstDetail(t *testing.T) {
+	t.Parallel()
+	stub := &scriptedTransientRuntime{results: []struct {
+		res runtime.RunResult
+		err error
+	}{
+		{
+			res: runtime.RunResult{FailureDetail: wantFirstAttemptDetail},
+			err: &runtime.ExecError{ExitCode: 1, Transient: "503"},
+		},
+	}}
+	d, ticket := newTransientRetryStubDeps(t, stub)
+
+	ctx, cancel := context.WithTimeout(t.Context(), 100*time.Millisecond)
+	defer cancel()
+
+	su := store.SessionUpsert{Job: testJobClassify, Runtime: testRuntimeClaude}
+	commit, err := runAndRoute(ctx, d, ticket, testJobClassify, su, runtime.RunRequest{Job: response.JobClassify}, 0,
+		freshSessionRecord, nil, response.EscalationOriginClassify,
+		failIfSuccessCalled(t), nil, 0)
+	if err != nil {
+		t.Fatalf("runAndRoute: %v", err)
+	}
+
+	if stub.calls != 1 {
+		t.Errorf("stub.calls = %d, want 1 (no second attempt)", stub.calls)
+	}
+	if commit.Escalation == nil {
+		t.Fatal("commit.Escalation = nil, want a runtime_exec_failed escalation")
+	}
+	if got := commit.Escalation.Payload.Code; got != string(response.EscalationCodeRuntimeExecFailed) {
+		t.Errorf("Escalation.Payload.Code = %q, want %q", got, response.EscalationCodeRuntimeExecFailed)
+	}
+	if got := commit.Escalation.Payload.Tried; got != wantFirstAttemptDetail {
+		t.Errorf("Escalation.Payload.Tried = %q, want %q", got, wantFirstAttemptDetail)
+	}
+}
+
+// TestRunJob_TransientRetryLogsStartAndSuccess proves retryTransient's two
+// happy-path log lines (design goals: "the start is INFO runtime transient
+// retry, success is INFO runtime transient retry succeeded ... each with
+// ticket_id, run_id, job, and match") and the nongoal that the error text
+// itself is never logged ("Logs name the matched pattern and the run, ...
+// raw output is never logged"). Not t.Parallel: it swaps slog's
+// process-wide default to capture the records.
+func TestRunJob_TransientRetryLogsStartAndSuccess(t *testing.T) {
+	const firstDetail = "first attempt super secret detail"
+	stub := &scriptedTransientRuntime{results: []struct {
+		res runtime.RunResult
+		err error
+	}{
+		{res: runtime.RunResult{FailureDetail: firstDetail}, err: &runtime.ExecError{ExitCode: 1, Transient: "503"}},
+		{res: runtime.RunResult{FinalMessage: "ok"}},
+	}}
+	d, ticket := newTransientRetryStubDeps(t, stub)
+
+	var logBuf bytes.Buffer
+	prevDefault := slog.Default()
+	slog.SetDefault(slog.New(slog.NewJSONHandler(&logBuf, &slog.HandlerOptions{Level: slog.LevelInfo})))
+	t.Cleanup(func() { slog.SetDefault(prevDefault) })
+
+	rr, err := runJob(t.Context(), d, ticket, testJobClassify, store.SessionUpsert{Job: testJobClassify, Runtime: testRuntimeClaude},
+		runtime.RunRequest{Job: response.JobClassify}, nil, nil, 0)
+	if err != nil {
+		t.Fatalf("runJob: %v", err)
+	}
+
+	recs := jsonLogRecords(t, &logBuf)
+
+	start := findLogRecord(t, recs, "runtime transient retry")
+	if start["level"] != slogLevelInfo {
+		t.Errorf("start level = %v, want %s", start["level"], slogLevelInfo)
+	}
+	if got := logRecordInt64(t, start, "ticket_id"); got != ticket.ID {
+		t.Errorf("start ticket_id = %d, want %d", got, ticket.ID)
+	}
+	if got := logRecordInt64(t, start, "run_id"); got != rr.Reserved.RunID {
+		t.Errorf("start run_id = %d, want %d", got, rr.Reserved.RunID)
+	}
+	if got := logRecordString(t, start, "job"); got != testJobClassify {
+		t.Errorf("start job = %q, want %q", got, testJobClassify)
+	}
+	if got := logRecordString(t, start, "match"); got != "503" {
+		t.Errorf("start match = %q, want %q", got, "503")
+	}
+
+	success := findLogRecord(t, recs, "runtime transient retry succeeded")
+	if success["level"] != slogLevelInfo {
+		t.Errorf("succeeded level = %v, want %s", success["level"], slogLevelInfo)
+	}
+	if got := logRecordInt64(t, success, "ticket_id"); got != ticket.ID {
+		t.Errorf("succeeded ticket_id = %d, want %d", got, ticket.ID)
+	}
+	if got := logRecordInt64(t, success, "run_id"); got != rr.Reserved.RunID {
+		t.Errorf("succeeded run_id = %d, want %d", got, rr.Reserved.RunID)
+	}
+	if got := logRecordString(t, success, "job"); got != testJobClassify {
+		t.Errorf("succeeded job = %q, want %q", got, testJobClassify)
+	}
+	if got := logRecordString(t, success, "match"); got != "503" {
+		t.Errorf("succeeded match = %q, want %q", got, "503")
+	}
+
+	if strings.Contains(logBuf.String(), firstDetail) {
+		t.Errorf("log buffer contains the first attempt's own failure detail text:\n%s", logBuf.String())
+	}
+}
+
+// TestRunJob_TransientRetryLogsFailure proves the retry-failed branch's WARN
+// line (design goals: "failure is WARN runtime transient retry failed with
+// err_kind and exit_code", each retry branch line also carrying match) and
+// that neither attempt's own failure detail text ever reaches the log. Not
+// t.Parallel: it swaps slog's process-wide default to capture the records.
+func TestRunJob_TransientRetryLogsFailure(t *testing.T) {
+	const firstDetail = "first attempt super secret detail"
+	const secondDetail = "second attempt super secret detail"
+	stub := &scriptedTransientRuntime{results: []struct {
+		res runtime.RunResult
+		err error
+	}{
+		{res: runtime.RunResult{FailureDetail: firstDetail}, err: &runtime.ExecError{ExitCode: 1, Transient: "503"}},
+		{res: runtime.RunResult{FailureDetail: secondDetail, ExitCode: 7}, err: &runtime.ExecError{ExitCode: 7}},
+	}}
+	d, ticket := newTransientRetryStubDeps(t, stub)
+
+	var logBuf bytes.Buffer
+	prevDefault := slog.Default()
+	slog.SetDefault(slog.New(slog.NewJSONHandler(&logBuf, &slog.HandlerOptions{Level: slog.LevelInfo})))
+	t.Cleanup(func() { slog.SetDefault(prevDefault) })
+
+	rr, err := runJob(t.Context(), d, ticket, testJobClassify, store.SessionUpsert{Job: testJobClassify, Runtime: testRuntimeClaude},
+		runtime.RunRequest{Job: response.JobClassify}, nil, nil, 0)
+	if err == nil {
+		t.Fatal("runJob: err = nil, want the second attempt's own ExecError")
+	}
+
+	recs := jsonLogRecords(t, &logBuf)
+	failed := findLogRecord(t, recs, "runtime transient retry failed")
+	if failed["level"] != slogLevelWarn {
+		t.Errorf("level = %v, want %s", failed["level"], slogLevelWarn)
+	}
+	if got := logRecordInt64(t, failed, "ticket_id"); got != ticket.ID {
+		t.Errorf("ticket_id = %d, want %d", got, ticket.ID)
+	}
+	if got := logRecordInt64(t, failed, "run_id"); got != rr.Reserved.RunID {
+		t.Errorf("run_id = %d, want %d", got, rr.Reserved.RunID)
+	}
+	if got := logRecordString(t, failed, "job"); got != testJobClassify {
+		t.Errorf("job = %q, want %q", got, testJobClassify)
+	}
+	if got := logRecordString(t, failed, "match"); got != "503" {
+		t.Errorf("match = %q, want %q", got, "503")
+	}
+	if got := logRecordString(t, failed, "err_kind"); got != "ExecError" {
+		t.Errorf("err_kind = %q, want %q", got, "ExecError")
+	}
+	if got := logRecordInt64(t, failed, "exit_code"); got != 7 {
+		t.Errorf("exit_code = %d, want 7", got)
+	}
+
+	if strings.Contains(logBuf.String(), firstDetail) {
+		t.Errorf("log buffer contains the first attempt's own failure detail text:\n%s", logBuf.String())
+	}
+	if strings.Contains(logBuf.String(), secondDetail) {
+		t.Errorf("log buffer contains the second attempt's own failure detail text:\n%s", logBuf.String())
+	}
+}
+
+// TestRunJob_TransientRetryLogsSkipped proves the context-ended branch's
+// WARN line (design goals: "a skip is WARN runtime transient retry skipped
+// with err_kind when the run context ends during the 2s wait", each retry
+// branch line also carrying match) and that the first attempt's own failure
+// detail text never reaches the log. Not t.Parallel: it swaps slog's
+// process-wide default to capture the records.
+func TestRunJob_TransientRetryLogsSkipped(t *testing.T) {
+	const firstDetail = "first attempt super secret detail"
+	stub := &scriptedTransientRuntime{results: []struct {
+		res runtime.RunResult
+		err error
+	}{
+		{res: runtime.RunResult{FailureDetail: firstDetail}, err: &runtime.ExecError{ExitCode: 1, Transient: "503"}},
+	}}
+	d, ticket := newTransientRetryStubDeps(t, stub)
+
+	var logBuf bytes.Buffer
+	prevDefault := slog.Default()
+	slog.SetDefault(slog.New(slog.NewJSONHandler(&logBuf, &slog.HandlerOptions{Level: slog.LevelInfo})))
+	t.Cleanup(func() { slog.SetDefault(prevDefault) })
+
+	ctx, cancel := context.WithCancel(t.Context())
+	go func() {
+		time.Sleep(100 * time.Millisecond)
+		cancel()
+	}()
+	defer cancel()
+
+	rr, err := runJob(ctx, d, ticket, testJobClassify, store.SessionUpsert{Job: testJobClassify, Runtime: testRuntimeClaude},
+		runtime.RunRequest{Job: response.JobClassify}, nil, nil, 0)
+	if !errors.Is(err, runtime.ErrCanceled) {
+		t.Fatalf("err = %v, want errors.Is(err, runtime.ErrCanceled)", err)
+	}
+
+	recs := jsonLogRecords(t, &logBuf)
+	skipped := findLogRecord(t, recs, "runtime transient retry skipped")
+	if skipped["level"] != slogLevelWarn {
+		t.Errorf("level = %v, want %s", skipped["level"], slogLevelWarn)
+	}
+	if got := logRecordInt64(t, skipped, "ticket_id"); got != ticket.ID {
+		t.Errorf("ticket_id = %d, want %d", got, ticket.ID)
+	}
+	if got := logRecordInt64(t, skipped, "run_id"); got != rr.Reserved.RunID {
+		t.Errorf("run_id = %d, want %d", got, rr.Reserved.RunID)
+	}
+	if got := logRecordString(t, skipped, "job"); got != testJobClassify {
+		t.Errorf("job = %q, want %q", got, testJobClassify)
+	}
+	if got := logRecordString(t, skipped, "match"); got != "503" {
+		t.Errorf("match = %q, want %q", got, "503")
+	}
+	if got := logRecordString(t, skipped, "err_kind"); got != "ErrCanceled" {
+		t.Errorf("err_kind = %q, want %q", got, "ErrCanceled")
+	}
+
+	if strings.Contains(logBuf.String(), firstDetail) {
+		t.Errorf("log buffer contains the first attempt's own failure detail text:\n%s", logBuf.String())
 	}
 }

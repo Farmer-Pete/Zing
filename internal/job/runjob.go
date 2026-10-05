@@ -281,7 +281,8 @@ func runJobWith(
 	// where an early error that kills the run within seconds is actually
 	// reported, so it is the transcript worth keeping (design: "Codex runs
 	// that exit 1 within seconds leave no stderr, transcript, or cause").
-	if len(res.Stdout) > 0 && d.DataDir != "" && res.TranscriptPath == "" {
+	keepStdoutTranscript := len(res.Stdout) > 0 && d.DataDir != "" && res.TranscriptPath == ""
+	if keepStdoutTranscript {
 		path, writeErr := writeTranscriptFile(d.DataDir, rsv.RunID, res.Stdout)
 		if writeErr != nil {
 			slog.Warn("transcript file not written", "ticket_id", t.ID, "run_id", rsv.RunID, "error", writeErr)
@@ -327,14 +328,6 @@ const transientRetryDelay = 2 * time.Second
 // applies to one attempt's own tailWriter.
 const maxTranscriptBytes = 64 << 10
 
-// capTranscriptTail keeps at most the last maxTranscriptBytes of data.
-func capTranscriptTail(data []byte) []byte {
-	if len(data) <= maxTranscriptBytes {
-		return data
-	}
-	return data[len(data)-maxTranscriptBytes:]
-}
-
 // retryTransient is runJobWith's own single automatic retry (design goals:
 // a Codex ExecError whose Transient names a matched pattern -- 429, rate
 // limit, 500, 502, 503, 504, connection reset, or stream disconnected -- is
@@ -374,23 +367,39 @@ func retryTransient(
 		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
 			skipErr = runtime.ErrTimeout
 		}
-		slog.Warn("runtime transient retry skipped", "ticket_id", ticketID, "run_id", runID, "job", jobName, "err_kind", errKind(skipErr))
+		slog.Warn("runtime transient retry skipped", "ticket_id", ticketID, "run_id", runID, "job", jobName, "match", execErr.Transient, "err_kind", errKind(skipErr))
 		return res, skipErr
 	case <-time.After(transientRetryDelay):
 	}
 
-	firstAgentTime, firstStdout := res.AgentTime, res.Stdout
+	firstAgentTime, firstStdout, firstDetail := res.AgentTime, res.Stdout, res.FailureDetail
 	retryRes, retryErr := rt.Run(ctx, req)
 	retryRes.AgentTime += firstAgentTime
-	retryRes.Stdout = capTranscriptTail(append(append([]byte(nil), firstStdout...), retryRes.Stdout...))
+	joinedStdout := append(append([]byte(nil), firstStdout...), retryRes.Stdout...)
+	if len(joinedStdout) > maxTranscriptBytes {
+		joinedStdout = joinedStdout[len(joinedStdout)-maxTranscriptBytes:]
+	}
+	retryRes.Stdout = joinedStdout
 
 	if retryErr == nil {
 		slog.Info("runtime transient retry succeeded", "ticket_id", ticketID, "run_id", runID, "job", jobName, "match", execErr.Transient)
 		return retryRes, nil
 	}
 
-	slog.Warn("runtime transient retry failed", "ticket_id", ticketID, "run_id", runID, "job", jobName, "err_kind", errKind(retryErr), "exit_code", retryRes.ExitCode)
-	retryRes.FailureDetail = fmt.Sprintf("retried once after a transient failure matching %q; the retry failed with: %s", execErr.Transient, retryRes.FailureDetail)
+	slog.Warn("runtime transient retry failed", "ticket_id", ticketID, "run_id", runID, "job", jobName, "match", execErr.Transient, "err_kind", errKind(retryErr), "exit_code", retryRes.ExitCode)
+	// retryRes.FailureDetail is "" whenever the retry's own failure is not a
+	// Codex ExecError with no final message (an ErrTimeout from the job
+	// deadline, ErrStart, ErrOutputTooLarge, or a -o file with content):
+	// quoting retryErr.Error() and the first attempt's own detail there
+	// keeps execFailureCommit's Tried from ending in "the retry failed
+	// with: " with nothing after the colon.
+	quoted := retryRes.FailureDetail
+	if quoted == "" {
+		quoted = fmt.Sprintf("(first attempt: %s); the retry failed with: %s", firstDetail, retryErr.Error())
+	} else {
+		quoted = "the retry failed with: " + quoted
+	}
+	retryRes.FailureDetail = runtime.CapFailureDetail(fmt.Sprintf("retried once after a transient failure matching %q; %s", execErr.Transient, quoted))
 	return retryRes, retryErr
 }
 
