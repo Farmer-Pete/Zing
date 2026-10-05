@@ -58,7 +58,7 @@ func TestPrompts_MatchThePinnedDesignText(t *testing.T) {
 		{
 			name:   "judge",
 			path:   "prompts/judge.md",
-			sha256: "569191b96f3b28aab603cfb3ea7273c349b634b89c9bf1d6f9984ac1028a66c1",
+			sha256: "a62ec3e34432c9b7f610ee7414e7714ba322d315cadc11d3681aed795ba5494b",
 		},
 		{
 			name:   "respond",
@@ -218,9 +218,9 @@ func TestBuildPromptPlaceholders(t *testing.T) {
 
 // TestJudgePromptRunsChecksAsWritten proves prompts/judge.md tells the
 // judge to run each sealed check exactly as written rather than
-// repairing it, to use "$TMPDIR" instead of /tmp, to wait out a long
-// check instead of polling in short waits, and to treat a skipped test
-// as not observed (#78, #46).
+// repairing it, to use "$TMPDIR" instead of /tmp, to run a long check in
+// the background and poll it instead of waiting on one call, and to
+// treat a skipped test as not observed (#78, #46).
 func TestJudgePromptRunsChecksAsWritten(t *testing.T) {
 	t.Parallel()
 	text := unwrapped(t, "prompts/judge.md")
@@ -229,7 +229,7 @@ func TestJudgePromptRunsChecksAsWritten(t *testing.T) {
 		"do not repair it or run your own version",
 		"Return the error outcome with code cannot_run, naming the scenario and the defect in its check",
 		`Write temporary files under "$TMPDIR", never /tmp.`,
-		"Run it once and wait for it to finish, up to ten minutes",
+		"Run one like that in the background and poll it until it finishes",
 		"A test that reports SKIP was not observed.",
 	} {
 		if !strings.Contains(text, want) {

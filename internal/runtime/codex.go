@@ -70,25 +70,6 @@ func codexSandboxArgs(req RunRequest) ([]string, error) {
 	}
 }
 
-// codexJudgeCommandTimeout is job.checkCommandTimeout's value
-// (internal/job/building.go): the judge may wait as long for one command as
-// Zing's own CHECK re-run does. runtime cannot import job, so the value is
-// repeated here.
-const codexJudgeCommandTimeout = 10 * time.Minute
-
-// codexCommandTimeoutKey is the -c key that bounds how long Codex's shell
-// tool lets one command run before Codex stops waiting on it and moves it to
-// a background terminal: `background_terminal_max_timeout`, a top-level
-// config.toml field taking milliseconds (confirmed against the installed
-// Codex 0.160.0: it is one of the packaged client's own default fields,
-// shipped with `background_terminal_max_timeout = 300000` i.e. five
-// minutes; `codex exec -c background_terminal_max_timeout=600000
-// --strict-config` passes config validation -- unlike an invented key, which
-// --strict-config rejects as "unknown configuration field" -- and only
-// fails later, at model-provider resolution. No other top-level field in
-// the 104-field config schema names a shell or exec timeout).
-const codexCommandTimeoutKey = "background_terminal_max_timeout"
-
 // codexSkillsOffSetting is the -c pair that turns off the judge's attempt to
 // scan its own skill directories, including `~/.agents/skills` (confirmed on
 // the host against Codex 0.160.0: `codex features list` names
@@ -116,9 +97,14 @@ const codexSkillsOffSetting = "features.skip_host_skill_discovery=true"
 // 4.6, D20). The forbidden --dangerously-bypass-approvals-and-sandbox flag
 // (real, and present in both --help outputs) never appears.
 //
-// A judge-job request also carries two judge-only "-c" pairs right after
-// the sandbox flags: codexCommandTimeoutKey raised to codexJudgeCommandTimeout,
-// and codexSkillsOffSetting. Every other job's argv is unchanged.
+// A judge-job request also carries one judge-only "-c" pair right after the
+// sandbox flags: codexSkillsOffSetting. Codex 0.160.0's config schema (104
+// top-level fields) has no key that bounds how long one shell command may
+// run -- background_terminal_max_timeout only controls when a still-running
+// command is handed to a background terminal the agent polls, so it is not
+// a substitute -- and prompts/judge.md's own instruction to run a long check
+// in the background and poll it covers that case instead. Every other
+// job's argv is unchanged.
 //
 // req.Tools is deliberately not read here: codex exec has no per-tool
 // allowlist flag, so the sandbox mode above is the control instead
@@ -131,9 +117,7 @@ func codexArgv(req RunRequest, outPath string) ([]string, error) {
 	argv := []string{"exec", "--ignore-user-config", "--ignore-rules", "--skip-git-repo-check"}
 	argv = append(argv, sandboxArgs...)
 	if req.Job == response.JobJudge {
-		argv = append(argv,
-			"-c", fmt.Sprintf("%s=%d", codexCommandTimeoutKey, codexJudgeCommandTimeout.Milliseconds()),
-			"-c", codexSkillsOffSetting)
+		argv = append(argv, "-c", codexSkillsOffSetting)
 	}
 	argv = append(argv, "-m", req.Model, "--json", "-o", outPath)
 	if req.SessionID != "" {

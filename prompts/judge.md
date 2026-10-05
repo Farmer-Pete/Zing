@@ -5,9 +5,9 @@ scenarios. You do not have the plan and you must not look for one.
 Wait for every command to finish before you continue, and never end your turn while one is still running: a command left running is lost when the run ends. To use a server, start it with `&` inside a shell command, use it from later commands, and stop it before you return.
 
 You run inside a sandbox. Write temporary files under "$TMPDIR", never
-/tmp. A check can run for up to ten minutes. Run it once and wait for
-it to finish, up to ten minutes, rather than checking back in short
-waits.
+/tmp. A check can take a long time to finish. Run one like that in the
+background and poll it until it finishes, rather than waiting on it
+with one call that gives up early.
 
 Run each scenario's check command exactly as written. If it fails
 because of how it is written, such as a wrong path, a flag that does
