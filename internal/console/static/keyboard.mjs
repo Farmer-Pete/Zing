@@ -556,3 +556,118 @@ export const ACTION_LABELS = {
 export function describeAction(action) {
 	return ACTION_LABELS[action] ?? action;
 }
+
+// RECONNECT_BASE_MS and RECONNECT_MAX_MS bound reconnectDelay's exponential
+// backoff after /stream ends (bug fix: a stream that ended for good left the
+// page showing its last frame forever, with nothing re-dispatching the
+// current nav to open a fresh one). 1000ms is quick enough that a one-off
+// drop recovers almost at once; doubling, capped at 30000ms, keeps a server
+// that is actually down from being hammered.
+export const RECONNECT_BASE_MS = 1000;
+export const RECONNECT_MAX_MS = 30000;
+
+// STREAM_SETTLE_MS is how long a started /stream request must stay open
+// before reduceStreamStatus treats it as live (console.js's applyStreamEvent
+// schedules a "settled" event this far after "started"). A patch clears the
+// stale marker sooner, but an idiomorph morph of identical content can
+// produce no patch at all, so settling on time elapsed alone is the
+// fallback that still clears it.
+export const STREAM_SETTLE_MS = 1000;
+
+/**
+ * emptyStreamStatus is reduceStreamStatus's rest state: no /stream request
+ * in flight, no backoff attempt counted, and not stale.
+ * @returns {{inflight: number, gen: number, attempt: number, staleSince: number|null}}
+ */
+export function emptyStreamStatus() {
+	return { inflight: 0, gen: 0, attempt: 0, staleSince: null };
+}
+
+/**
+ * reconnectDelay returns the backoff, in milliseconds, before the attempt-th
+ * reconnect: RECONNECT_BASE_MS doubled per attempt, capped at
+ * RECONNECT_MAX_MS.
+ * @param {number} attempt - 0 for the first reconnect after a stream ends
+ * @returns {number}
+ */
+export function reconnectDelay(attempt) {
+	return Math.min(RECONNECT_BASE_MS * 2 ** attempt, RECONNECT_MAX_MS);
+}
+
+/**
+ * reduceStreamStatus is console.js's one reducer over every /stream
+ * lifecycle event (started, finished, error, retrying, retries-failed,
+ * reconnecting, settled, patched), driving both the reconnect backoff and
+ * the "Reconnecting. Stale since HH:MM." marker (bug fix: after a stream
+ * ended for good, nothing noticed, and the sidebar kept showing a frame
+ * that was no longer live). inflight counts /stream requests console.js has
+ * seen started but not yet finished, so a navigation's requestCancellation
+ * aborting an old stream while a new one is already open does not schedule
+ * a reconnect the new stream makes unnecessary. gen is bumped on every
+ * started request and on every failure, so a settle timer armed for an
+ * older request (event.gen) is a no-op once a newer one has started or
+ * failed. staleSince latches the first failure's or reconnect wait's time
+ * and holds it through repeats, so retriggering does not keep moving the
+ * "Stale since" clock forward.
+ *
+ * @param {{inflight: number, gen: number, attempt: number, staleSince: number|null}} status
+ * @param {{type: 'started'|'finished'|'error'|'retrying'|'retries-failed'|'reconnecting'|'settled'|'patched', gen?: number}} event
+ * @param {number} now - Date.now()-style milliseconds
+ * @returns {{status: object, effect: {settleGen: number|null, reconnectIn: number|null, cancelReconnect: boolean}}}
+ */
+export function reduceStreamStatus(status, event, now) {
+	const none = { settleGen: null, reconnectIn: null, cancelReconnect: false };
+	switch (event.type) {
+		case 'started': {
+			const gen = status.gen + 1;
+			return {
+				status: { ...status, inflight: status.inflight + 1, gen },
+				effect: { ...none, settleGen: gen, cancelReconnect: true },
+			};
+		}
+		case 'finished': {
+			const inflight = Math.max(0, status.inflight - 1);
+			if (inflight > 0) {
+				return { status: { ...status, inflight }, effect: none };
+			}
+			return {
+				status: { ...status, inflight, gen: status.gen + 1, attempt: status.attempt + 1 },
+				effect: { ...none, reconnectIn: reconnectDelay(status.attempt) },
+			};
+		}
+		case 'error':
+		case 'retrying':
+		case 'retries-failed':
+			return { status: { ...status, gen: status.gen + 1, staleSince: status.staleSince ?? now }, effect: none };
+		case 'reconnecting':
+			return { status: { ...status, staleSince: status.staleSince ?? now }, effect: none };
+		case 'settled':
+		case 'patched': {
+			const current = event.type === 'patched' || event.gen === status.gen;
+			if (status.inflight === 0 || !current) {
+				return { status, effect: none };
+			}
+			return { status: { ...status, attempt: 0, staleSince: null }, effect: none };
+		}
+		default:
+			return { status, effect: none };
+	}
+}
+
+/**
+ * staleMarkerText renders reduceStreamStatus's staleSince as the
+ * #stream-status marker's text: "" while live (staleSince null), else
+ * "Reconnecting. Stale since HH:MM." with the hour and minute staleSince's
+ * clock time fell on, zero-padded.
+ * @param {number|null} staleSince - epoch ms, or null while live
+ * @returns {string}
+ */
+export function staleMarkerText(staleSince) {
+	if (staleSince === null) {
+		return '';
+	}
+	const d = new Date(staleSince);
+	const hh = String(d.getHours()).padStart(2, '0');
+	const mm = String(d.getMinutes()).padStart(2, '0');
+	return `Reconnecting. Stale since ${hh}:${mm}.`;
+}
