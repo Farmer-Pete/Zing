@@ -77,6 +77,37 @@ func TestParseChecklists_RejectsMissingOrEmptyList(t *testing.T) {
 	}
 }
 
+// TestPlanRules_NamesEveryChecklistEntry pins that the rendered block
+// shares the validator's own word lists, so the planning prompt and the
+// plan checker cannot disagree (plan section "Decisions and additions").
+func TestPlanRules_NamesEveryChecklistEntry(t *testing.T) {
+	t.Parallel()
+
+	lists, err := LoadChecklists()
+	if err != nil {
+		t.Fatalf("LoadChecklists: %v", err)
+	}
+	block := renderPlanRules(lists)
+	// Checked as the whole joined list, not entry by entry: a short entry
+	// such as "s" or "ns" already occurs inside other words in the block
+	// (ns inside "mentions"), so a per-entry strings.Contains would still
+	// pass even if that entry were dropped or the list rendered wrongly.
+	for name, joined := range map[string]string{
+		"Vague":        strings.Join(lists.Vague, ", "),
+		"Placeholders": strings.Join(lists.Placeholders, ", "),
+		"Units":        strings.Join(lists.Units, ", "),
+	} {
+		if !strings.Contains(block, joined) {
+			t.Errorf("renderPlanRules block missing the whole %s list %q:\n%s", name, joined, block)
+		}
+	}
+
+	custom := Checklists{Placeholders: []string{"TODO"}, Vague: []string{"zork"}, Units: []string{"ms"}}
+	if got := renderPlanRules(custom); !strings.Contains(got, "zork") {
+		t.Errorf("renderPlanRules(custom) = %q, want it to contain %q", got, "zork")
+	}
+}
+
 func TestParseChecklists_LowercasesVague(t *testing.T) {
 	t.Parallel()
 

@@ -166,28 +166,100 @@ func navFrame(t *testing.T, base string) string {
 	return nav
 }
 
-// TestRecentOrdersByNewestMessageThenNoMessageLast proves Recent's order:
-// newest message id descending, a ticket with no message sorting last
-// (design section 7.2).
-func TestRecentOrdersByNewestMessageThenNoMessageLast(t *testing.T) {
+// TestNavOrderStable proves the sidebar's order is stable under the two
+// everyday events that used to reshuffle it (#106 bug 5, c8's owner
+// decision (a)): a ticket gaining a gate, and a ticket gaining an unread
+// message. Both tickets start as plain, quiet tickets whose refs ("s#1",
+// "s#2") are non-numeric, so issueNumberOrder sorts them as text with
+// "s#1" first; the event under test must not move "s#2" above "s#1".
+func TestNavOrderStable(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name  string
+		event string // names the event in failure messages
+		badge string
+		apply func(t *testing.T, s *store.Store, id int64)
+	}{
+		{
+			name:  "a gate does not move a row",
+			event: "a gate",
+			badge: "badge-blocking",
+			apply: func(t *testing.T, s *store.Store, id int64) {
+				t.Helper()
+				seedOpenQuestion(t, s, id)
+			},
+		},
+		{
+			name:  "an unread update does not move a row",
+			event: "an unread update",
+			badge: "badge-unread",
+			apply: func(t *testing.T, s *store.Store, id int64) {
+				t.Helper()
+				seedUnreadUpdate(t, s, id, "an update")
+			},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			s := newConsoleTestStore(t)
+
+			seedTicket(t, s, "s#1", "Nav first")
+			second := seedTicket(t, s, "s#2", "Nav second")
+
+			srv := newTestServer(t, s, bus.New(), nil, newTestLogHandler(t))
+
+			before := navFrame(t, srv.URL)
+			firstIdx := mustIndex(t, before, "Nav first")
+			secondIdx := mustIndex(t, before, "Nav second")
+			if firstIdx > secondIdx {
+				t.Fatalf("expected \"Nav first\" before \"Nav second\" before %s; got:\n%s", tc.event, before)
+			}
+
+			tc.apply(t, s, second)
+
+			after := navFrame(t, srv.URL)
+			firstIdx = mustIndex(t, after, "Nav first")
+			secondIdx = mustIndex(t, after, "Nav second")
+			if secondIdx < firstIdx {
+				t.Errorf("after %s, \"Nav second\" rendered before \"Nav first\"; got:\n%s", tc.event, after)
+			}
+			if !strings.Contains(after, tc.badge) {
+				t.Errorf("nav frame missing the updated ticket's %s; got:\n%s", tc.badge, after)
+			}
+		})
+	}
+}
+
+// TestRecentOrdersByNewestTicketFirst proves Recent's order: newest ticket
+// first (ticket id descending), unaffected by which ticket's messages
+// arrived most recently (#106 bug 5, c8's owner decision (a)). X, Y, and Z
+// are created in that order (X oldest, Z newest), then Y and Z each get a
+// state message, and X gets one last -- making X's message the newest if
+// the page still sorted by message recency. The order must still be Z, Y,
+// X, by ticket id alone.
+func TestRecentOrdersByNewestTicketFirst(t *testing.T) {
 	t.Parallel()
 	s := newConsoleTestStore(t)
 
-	seedTicket(t, s, "r#1", "Ticket X no messages")
-	ticketY := seedTicket(t, s, "r#2", "Ticket Y older message")
+	ticketX := seedTicket(t, s, "r#1", "Ticket X")
+	ticketY := seedTicket(t, s, "r#2", "Ticket Y")
 	seedStateMessage(t, s, ticketY, "queued", testPlanningLiteral, "start Y")
-	ticketZ := seedTicket(t, s, "r#3", "Ticket Z newer message")
+	ticketZ := seedTicket(t, s, "r#3", "Ticket Z")
 	seedStateMessage(t, s, ticketZ, "queued", testPlanningLiteral, "start Z")
+	seedStateMessage(t, s, ticketX, "queued", testPlanningLiteral, "start X")
 
 	srv := newTestServer(t, s, bus.New(), nil, newTestLogHandler(t))
 
 	main := mainFrame(t, srv.URL, "recent", 0, 0)
 
-	z := mustIndex(t, main, "Ticket Z newer message")
-	y := mustIndex(t, main, "Ticket Y older message")
-	x := mustIndex(t, main, "Ticket X no messages")
+	z := mustIndex(t, main, "Ticket Z")
+	y := mustIndex(t, main, "Ticket Y")
+	x := mustIndex(t, main, "Ticket X")
 	if z >= y || y >= x {
-		t.Errorf("expected order Z, Y, X (newest message first, no-message ticket last); got:\n%s", main)
+		t.Errorf("expected order Z, Y, X (newest ticket first); got:\n%s", main)
 	}
 }
 

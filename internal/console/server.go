@@ -116,6 +116,16 @@ type console struct {
 	tracker tracker.Tracker
 	user    string
 
+	// run backs POST /tickets/{id}/sandbox-run (sandboxrun.go): the owner's
+	// "run a command in this ticket's sandbox" console action. job.
+	// TicketCommands is the real TicketRunner, built in cmd/zing/serve.go
+	// with the same CommandRunner value the dispatcher's CHECK step uses,
+	// so the console can never drift from what CHECK itself runs. Nilable
+	// the way push and tracker already are: a nil run answers that route
+	// with 503 "sandbox runs are not available", and every test that does
+	// not itself exercise the route passes nil.
+	run TicketRunner
+
 	// startedAt is when New built this console (bug fix: the Log rail's
 	// empty state read as "No log lines yet." after every `zing serve`
 	// restart, since log.go's ring is in memory and a restart always starts
@@ -160,6 +170,7 @@ type console struct {
 //	POST /side                  the inert side box's fixed reply (design section 6.11, 7.1)
 //	POST /stop                  the s/S keyboard keys: stop everything, or one ticket (design section 6.11, 7.1)
 //	POST /projects/{id}/pickup  manual intake: pick up one issue by number (PKG9-PLAN.md D29)
+//	POST /tickets/{id}/sandbox-run  run one command in a ticket's worktree as CHECK runs it (loopback only)
 //	GET  /runs/{id}/{kind}      one run's final message or stderr, as plain text
 //	GET  /push/key               the VAPID public key (design section 6.13, 7.1)
 //	POST /push/subscribe        store one push subscription (design section 6.13, 7.1)
@@ -206,13 +217,19 @@ type console struct {
 // and user is cfg.User. Either may be left zero (nil, "") by a caller that
 // never exercises that one route.
 //
+// run backs POST /tickets/{id}/sandbox-run (sandboxrun.go): cmd/zing/serve.go
+// passes job.TicketCommands{..., Commands: cmds}, the same cmds value the
+// dispatcher's CHECK step runs with. A nil run (every other caller: selftest,
+// most tests) makes that route answer 503 "sandbox runs are not available".
+//
 // The returned handler is a *http.ServeMux, plain HTTP/1.1, with no timeouts
 // of its own; cmd/zing wraps it in an http.Server with the drain-aware
 // BaseContext and shutdown sequence (design section 6.14, cmd/zing/serve.go).
-func New(st *store.Store, b *bus.Broker, m *machine.Machine, hosts []string, port int, log *Handler, push PushKeys, pushToken string, floor response.Severity, sandboxReason string, tr tracker.Tracker, user string) http.Handler {
+func New(st *store.Store, b *bus.Broker, m *machine.Machine, hosts []string, port int, log *Handler, push PushKeys, pushToken string, floor response.Severity, sandboxReason string, tr tracker.Tracker, user string, run TicketRunner) http.Handler {
 	c := &console{
 		store: st, bus: b, machine: m, log: log, push: push, pushToken: pushToken,
 		floor: floor, sandboxReason: sandboxReason, tracker: tr, user: user,
+		run:                run,
 		startedAt:          time.Now(),
 		streamHeartbeat:    streamHeartbeatInterval,
 		streamWriteTimeout: streamFrameWriteTimeout,
@@ -230,6 +247,7 @@ func New(st *store.Store, b *bus.Broker, m *machine.Machine, hosts []string, por
 	mux.HandleFunc("POST /side", withWriteDeadline(guard.requireSameOrigin(c.handleSide)))
 	mux.HandleFunc("POST /stop", withWriteDeadline(guard.requireSameOrigin(c.handleStop)))
 	mux.HandleFunc("POST /projects/{id}/pickup", withWriteDeadline(guard.requireSameOrigin(c.handlePickup)))
+	mux.HandleFunc("POST /tickets/{id}/sandbox-run", requireLoopback(guard.requireSameOrigin(c.handleSandboxRun))) // long-running: no write deadline
 	mux.HandleFunc("GET /runs/{id}/{kind}", withWriteDeadline(guard.requireAllowedHost(c.handleRunFile)))
 	mux.HandleFunc("GET /push/key", withWriteDeadline(c.handlePushKey))
 	// POST /push/subscribe is token-only (push.go's checkPushToken), not

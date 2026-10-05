@@ -27,6 +27,11 @@ package templates
 // it here, once, is the only mermaid script on the page: render.go's
 // goldmark-diagram wiring never emits a second one (design section 6.10).
 //
+// #sandbox-run-result (console.js's runInSandbox) sits after .layout, like
+// #stream-ctl below it: a client-owned dialog no /stream patch ever
+// touches, so the owner's sandbox-run result survives every region morph
+// until the owner closes it or navigates away.
+//
 // console.js loads before datastar.js (the reconnect plan): its own
 // datastar-fetch listener (installStreamWatch) must already be bound before
 // datastar.js processes #stream-ctl's data-init and fires /stream's very
@@ -53,6 +58,12 @@ templ Shell(nav, main, rail, alerts templ.Component) {
 				@main
 				@rail
 			</div>
+			<dialog id="sandbox-run-result" class="sandbox-run-result" aria-labelledby="sandbox-run-title">
+				<h3 id="sandbox-run-title" class="sandbox-run-title"></h3>
+				<p class="sandbox-run-exit"></p>
+				<pre class="sandbox-run-output"></pre>
+				<button type="button" class="sandbox-run-close">Close</button>
+			</dialog>
 			<span
 				id="stream-ctl"
 				style="display:none"
@@ -549,6 +560,49 @@ templ palette() {
 			border: 1px solid var(--zing-border);
 			border-radius: 0.375rem;
 			font-size: 0.85rem;
+		}
+
+		/* .sandbox-run-box (thread.templ's sandboxRunBox): the owner's "run a
+		   command in this ticket's sandbox" form, styled like .pickup-box
+		   and .side-box above. */
+		.sandbox-run-box {
+			border: 1px solid var(--zing-border);
+			border-radius: 0.5rem;
+			padding: 0.75rem 1rem;
+			margin-bottom: 0.75rem;
+			background: var(--zing-surface);
+		}
+		.sandbox-run-box label { display: block; margin-bottom: 0.375rem; }
+		.sandbox-run-cmd {
+			width: 100%;
+			background: var(--zing-bg);
+			color: var(--zing-text);
+			border: 1px solid var(--zing-border);
+			border-radius: 0.375rem;
+			padding: 0.375rem 0.5rem;
+			font: inherit;
+			margin-bottom: 0.5rem;
+		}
+
+		/* #sandbox-run-result (shell.templ, console.js's runInSandbox): a
+		   client-owned dialog outside #main, so a /stream patch while the
+		   command runs never clobbers it. */
+		.sandbox-run-result {
+			background: var(--zing-surface);
+			color: var(--zing-text);
+			border: 1px solid var(--zing-border);
+			border-radius: 0.5rem;
+			padding: 1rem;
+			max-width: 40rem;
+		}
+		.sandbox-run-output {
+			max-height: 60vh;
+			overflow: auto;
+			white-space: pre-wrap;
+			background: var(--zing-bg);
+			border: 1px solid var(--zing-border);
+			border-radius: 0.375rem;
+			padding: 0.5rem;
 		}
 	</style>
 }

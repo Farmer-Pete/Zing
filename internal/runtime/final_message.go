@@ -44,9 +44,14 @@ type finalMessageHeader struct {
 // nothing else; the second return carries the detailed validation error
 // text for RunResult.Log alone.
 //
+// runToken rides on the repair log record via response.ExtractAll, so a
+// "repaired bare < in zing document" line can be tied to the run that
+// produced it. The Stop hook passes "", since its own log goes to the
+// hook's own stderr, not the run log.
+//
 //nolint:ireturn // parseFinalMessage's whole job is to hand back the dynamic response type response.Lookup resolves for the document's (job, outcome) pair.
-func parseFinalMessage(text string, job response.Job) (response.Response, string, error) {
-	roots := response.ExtractAll(text)
+func parseFinalMessage(text string, job response.Job, runToken string) (response.Response, string, error) {
+	roots := response.ExtractAll(text, "run_token", runToken)
 	switch {
 	case len(roots) == 0:
 		// Parse names the XML error when a <zing> header was found but its

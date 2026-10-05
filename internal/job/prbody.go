@@ -17,56 +17,76 @@ import (
 	"zing/internal/store"
 )
 
-// Title's own numbers (design 8.10): over prTitleRuneLimit runes, the
-// title is cut at the last space at or before rune prTitleCutWindow and
-// gets "...". prEvidenceRuneCap caps a performance scenario's evidence
-// line.
+// Title's own numbers (design 8.10): the title plus its " (#REF)" or
+// " (REF)" suffix never exceeds prTitleRuneLimit runes; past that, the
+// title is cut on a word boundary and gets "...". prEvidenceRuneCap caps a
+// performance scenario's evidence line.
 const (
 	prTitleRuneLimit  = 256
-	prTitleCutWindow  = 253
 	prEvidenceRuneCap = 300
 )
 
-// prBody renders the six-section PullRequest body (design 8.10): Title and
-// What from the plan's objective and goals; WorkingDemo from its demo;
-// Scenarios from the cohort and its selected verdicts, never the
-// scenarios' own given/when/then; DeclaredFiles from the plan's files plus
-// every accepted extra; ChestertonsFence from the plan's deletions plus
-// every landed build report's fences, deduplicated; PlanLink naming
-// ticketID. The body itself renders through orchestrator.PullRequest.Body
-// (Package 5).
-func prBody(ticketID int64, plan response.Plan, verdicts []response.VerdictArtifact, scenarios []response.Scenario, reports []store.BuildReportRow, events []store.FileEventRow) orchestrator.PullRequest {
+// prBody renders the six-section PullRequest body (design 8.10): Title
+// from the ticket's own title and ref; What from the plan's objective and
+// goals; WorkingDemo from its demo; Scenarios from the cohort and its
+// selected verdicts, never the scenarios' own given/when/then;
+// DeclaredFiles from the plan's files plus every accepted extra;
+// ChestertonsFence from the plan's deletions plus every landed build
+// report's fences, deduplicated; PlanLink naming t.ID. The body itself
+// renders through orchestrator.PullRequest.Body (Package 5).
+func prBody(t store.Ticket, plan response.Plan, verdicts []response.VerdictArtifact, scenarios []response.Scenario, reports []store.BuildReportRow, events []store.FileEventRow) orchestrator.PullRequest {
 	return orchestrator.PullRequest{
-		Title:            prTitle(plan.Overview.Objective),
+		Title:            prTitle(t.Title, t.TrackerRef),
 		What:             prWhat(plan.Overview.Objective, plan.Overview.Goals),
 		WorkingDemo:      prWorkingDemo(plan.Design.Demo),
 		Scenarios:        prScenarios(scenarios, verdicts),
 		DeclaredFiles:    prDeclaredFiles(plan, events),
 		ChestertonsFence: prChestertonsFence(plan, reports),
-		PlanLink:         fmt.Sprintf("The plan is ticket %d in the Zing console.", ticketID),
+		PlanLink:         fmt.Sprintf("The plan is ticket %d in the Zing console.", t.ID),
 	}
 }
 
-// prTitle collapses objective's whitespace and, past prTitleRuneLimit
-// runes, cuts it at the last space in its first prTitleCutWindow runes
-// (the last space at or before rune 253) and appends "...". With no space
-// in that window, it cuts hard at prTitleCutWindow.
-func prTitle(objective string) string {
-	collapsed := collapseWhitespace(objective)
+// prTitle collapses title's whitespace and appends a suffix naming ref:
+// " (#REF)" when ref is all ASCII digits, " (REF)" for any other
+// non-empty ref, and no suffix for an empty ref. When the collapsed title
+// plus suffix fits within prTitleRuneLimit runes, that is the result.
+// Otherwise the title is cut at the last space in its first
+// prTitleRuneLimit-len(suffix)-3 runes (a hard cut there if none), then
+// "..." and the suffix are appended.
+func prTitle(title, ref string) string {
+	suffix := prTitleSuffix(ref)
+	collapsed := collapseWhitespace(title)
 	runes := []rune(collapsed)
-	if len(runes) <= prTitleRuneLimit {
-		return collapsed
+	suffixRunes := len([]rune(suffix))
+	budget := prTitleRuneLimit - suffixRunes
+	if len(runes) <= budget {
+		return collapsed + suffix
 	}
 
-	window := runes[:prTitleCutWindow]
-	cut := prTitleCutWindow
+	cutAt := max(budget-3, 0)
+	window := runes[:cutAt]
+	cut := cutAt
 	for i, w := range slices.Backward(window) {
 		if w == ' ' {
 			cut = i
 			break
 		}
 	}
-	return string(runes[:cut]) + "..."
+	return string(runes[:cut]) + "..." + suffix
+}
+
+// prTitleSuffix is prTitle's own suffix rule: " (#REF)" for a ref that is
+// all ASCII digits, " (REF)" for any other non-empty ref, "" for an empty
+// ref.
+func prTitleSuffix(ref string) string {
+	switch {
+	case ref == "":
+		return ""
+	case strings.Trim(ref, "0123456789") == "":
+		return " (#" + ref + ")"
+	default:
+		return " (" + ref + ")"
+	}
 }
 
 // prWhat is the objective, a blank line, then one "- <goal>" line per goal.

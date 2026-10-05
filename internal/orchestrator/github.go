@@ -174,6 +174,9 @@ type PRState struct {
 	// "unstable", ...); "clean" means GitHub has seen every required check
 	// pass, app identities included.
 	MergeableState string
+	// MergeCommitSHA is GitHub's merge commit, 40 lowercase hex once Merged
+	// is true; empty otherwise.
+	MergeCommitSHA string
 }
 
 // CheckRun is one check run GitHub reports for a commit (PKG9-PLAN.md
@@ -369,6 +372,7 @@ func (g *GitHubClient) GetPR(ctx context.Context, owner, repo string, number int
 		BaseRef: pr.GetBase().GetRef(),
 
 		MergeableState: pr.GetMergeableState(),
+		MergeCommitSHA: pr.GetMergeCommitSHA(),
 	}, nil
 }
 
@@ -646,6 +650,17 @@ func (g *GitHubClient) Viewer(ctx context.Context) (string, error) {
 	return u.GetLogin(), nil
 }
 
+// CommentOnPR posts body as a plain conversation comment on the pull
+// request (job.ReviewThreads.CommentOnPR, M4; PKG9-PLAN.md section 10.3).
+// GitHub's issue comments endpoint also serves pull requests, since a pull
+// request is an issue under the hood.
+func (g *GitHubClient) CommentOnPR(ctx context.Context, owner, repo string, number int, body string) error {
+	if _, _, err := g.c.Issues.CreateComment(ctx, owner, repo, number, github.IssueCommentRequest{Body: body}); err != nil {
+		return classifyGitHubErr(err)
+	}
+	return nil
+}
+
 // maxLogLineBytes bounds one kept line of a job log (job.Checks.JobLogTail;
 // PKG9-PLAN.md section 10.3): a longer line is cut and ends "[line cut]".
 // It also sizes the bufio.Reader tailLog reads through, so no one line is
@@ -689,23 +704,67 @@ func (g *GitHubClient) JobLogTail(ctx context.Context, owner, repo string, jobID
 	return tail, nil
 }
 
-// tailLog reads r line by line and returns the last n lines, joined with
-// "\n". A line longer than maxLogLineBytes is cut to that many bytes and
-// ends "[line cut]"; the rest of that line is still counted toward
-// maxLogTotalBytes but not kept. Reading stops once maxLogTotalBytes have
-// been seen, and the result then ends with the line "[log cut at 64 MiB]".
-// r's own bufio.Reader buffer is sized to maxLogLineBytes, so ReadLine
-// returns isPrefix=true exactly when a line exceeds that size.
+// logGroupRunPrefix is an Actions "##[group]Run " step header.
+const logGroupRunPrefix = "##[group]Run "
+
+// logErrorPrefix is an Actions "##[error]" annotation line.
+const logErrorPrefix = "##[error]"
+
+// hasLogPrefix reports whether line starts with prefix, optionally after a
+// single leading timestamp token and a space, as Actions prefixes raw job
+// logs. It is the non-regexp equivalent of `^(\S+ )?` + prefix: tailLog
+// calls it per line of a job log that can run into the millions, where
+// under the race detector regexp's internal machine pool made the cost
+// enough to blow past JobLogTail's client timeout (observed: a 64 MiB log
+// of short lines took 33s under -race against 1.3s without it).
+func hasLogPrefix(line, prefix string) bool {
+	if strings.HasPrefix(line, prefix) {
+		return true
+	}
+	sp := strings.IndexByte(line, ' ')
+	return sp > 0 && strings.HasPrefix(line[sp+1:], prefix)
+}
+
+// tailLog reads r line by line and returns, by default, the last n lines
+// joined with "\n" -- the fallback ring below. A line longer than
+// maxLogLineBytes is cut to that many bytes and ends "[line cut]"; the
+// rest of that line is still counted toward maxLogTotalBytes but not kept.
+// Reading stops once maxLogTotalBytes have been seen, and the fallback
+// result then ends with the line "[log cut at 64 MiB]". r's own
+// bufio.Reader buffer is sized to maxLogLineBytes, so ReadLine returns
+// isPrefix=true exactly when a line exceeds that size.
+//
+// Alongside the fallback ring, tailLog tracks the first failed step: a
+// line starting with logGroupRunPrefix starts a new step, discarding any
+// step seen so far that had no error. A line starting with logErrorPrefix
+// marks the current step failed and flushes its pending lines (the lines
+// seen since the step header or the last error, also capped at n-1) into
+// that step's body. The header itself is kept outside that cap, so it is
+// never evicted by the step's own output, and the returned step is always
+// header-first and at most n lines total. Once a step has failed, reading
+// stops at the next step header, so a later step's output cannot replace
+// it. If any step failed, tailLog returns its header followed by its
+// body -- from its header to its last error line, capped at n -- instead
+// of the plain ring.
 func tailLog(r io.Reader, n int) (string, error) {
 	limited := &io.LimitedReader{R: r, N: maxLogTotalBytes + 1}
 	br := bufio.NewReaderSize(limited, maxLogLineBytes)
 
-	ring := make([]string, 0, n)
-	push := func(s string) {
-		ring = append(ring, s)
-		if len(ring) > n {
-			ring = ring[1:]
+	pushCapped := func(buf []string, s string, limit int) []string {
+		buf = append(buf, s)
+		if len(buf) > limit {
+			buf = buf[len(buf)-limit:]
 		}
+		return buf
+	}
+
+	ring := make([]string, 0, n)
+	var header string
+	var body, pending []string
+	failedStepFound := false
+
+	joinStep := func() string {
+		return strings.Join(append([]string{header}, body...), "\n")
 	}
 
 	for {
@@ -721,7 +780,26 @@ func tailLog(r io.Reader, n int) (string, error) {
 				}
 				line += "[line cut]"
 			}
-			push(line)
+			ring = pushCapped(ring, line, n)
+
+			switch {
+			case hasLogPrefix(line, logGroupRunPrefix):
+				if failedStepFound {
+					return joinStep(), nil
+				}
+				header = line
+				body = nil
+				pending = nil
+			case hasLogPrefix(line, logErrorPrefix):
+				for _, p := range pending {
+					body = pushCapped(body, p, n-1)
+				}
+				body = pushCapped(body, line, n-1)
+				pending = nil
+				failedStepFound = true
+			default:
+				pending = pushCapped(pending, line, n-1)
+			}
 		}
 		if err != nil {
 			if !errors.Is(err, io.EOF) {
@@ -731,8 +809,12 @@ func tailLog(r io.Reader, n int) (string, error) {
 		}
 	}
 
+	if failedStepFound {
+		return joinStep(), nil
+	}
+
 	if limited.N == 0 {
-		push("[log cut at 64 MiB]")
+		ring = pushCapped(ring, "[log cut at 64 MiB]", n)
 	}
 
 	return strings.Join(ring, "\n"), nil

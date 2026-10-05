@@ -281,12 +281,13 @@ func copyTag(out *bytes.Buffer, rest []byte, from int) (tagLen int, selfClosing 
 }
 
 // logRepair records a repaired document at INFO, so settings.log_level
-// warn or error drops it. Issue #94 adds the run token. roots is the
-// number of well-formed roots the repair produced: parseRepaired always
-// passes 1, but extractRepaired's candidate scan can repair more than one
-// candidate in a single message. runtime.parseFinalMessage then rejects
-// that as reasonMultipleZingDocs, so the count here keeps the record from
-// reading as a clean success when it wasn't one.
-func logRepair(escaped, roots int) {
-	slog.Info("repaired bare < in zing document", "escaped", escaped, "roots", roots)
+// warn or error drops it. attrs are extra slog key-value pairs appended to
+// the record, such as "run_token", token. roots is the number of
+// well-formed roots the repair produced: parseRepaired always passes 1,
+// but extractRepaired's candidate scan can repair more than one candidate
+// in a single message. runtime.parseFinalMessage then rejects that as
+// reasonMultipleZingDocs, so the count here keeps the record from reading
+// as a clean success when it wasn't one.
+func logRepair(escaped, roots int, attrs ...any) {
+	slog.Info("repaired bare < in zing document", append([]any{"escaped", escaped, "roots", roots}, attrs...)...)
 }

@@ -63,7 +63,7 @@ func TestPrompts_MatchThePinnedDesignText(t *testing.T) {
 		{
 			name:   "judge",
 			path:   "prompts/judge.md",
-			sha256: "61fac9e184103c064a0cf76c9933106dbd908329e5b88a1c58ad20e26162afe7",
+			sha256: "4f3a570983506de4fd530ab428f31600028a1c8ab7e52d21617c0883ca74c154",
 		},
 		{
 			name:   "respond",
@@ -225,7 +225,9 @@ func TestBuildPromptPlaceholders(t *testing.T) {
 // judge to run each sealed check exactly as written rather than
 // repairing it, to use "$TMPDIR" instead of /tmp, to run a long check in
 // the background and poll it instead of waiting on one call, and to
-// treat a skipped test as not observed (#78, #46).
+// treat a skip the scenario's own then names as expected as an observed
+// pass while a skip that hides the behavior under test stays unobserved
+// (#78, #46, #38).
 func TestJudgePromptRunsChecksAsWritten(t *testing.T) {
 	t.Parallel()
 	text := unwrapped(t, "prompts/judge.md")
@@ -235,7 +237,8 @@ func TestJudgePromptRunsChecksAsWritten(t *testing.T) {
 		"Return the error outcome with code cannot_run, naming the scenario and the defect in its check",
 		`Write temporary files under "$TMPDIR", never /tmp.`,
 		"Run one like that in the background and poll it until it finishes",
-		"A skipped test is not observed.",
+		"A skip that the scenario's own then names as the expected result is an observed pass.",
+		"A skip that hides the behavior under test is not observed.",
 	} {
 		if !strings.Contains(text, want) {
 			t.Errorf("prompts/judge.md lacks %q", want)

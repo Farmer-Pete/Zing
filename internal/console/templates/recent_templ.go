@@ -11,8 +11,8 @@ import templruntime "github.com/a-h/templ/runtime"
 import "zing/internal/store"
 
 // Recent renders the #main region for view=recent (design section 6.5):
-// every ticket ordered by newest message id descending, then ticket id,
-// read only, reusing the shared ticket row.
+// every ticket, newest ticket first (ticket id descending), read only,
+// reusing the shared ticket row.
 func Recent(tickets []store.Ticket) templ.Component {
 	return templruntime.GeneratedTemplate(func(templ_7745c5c3_Input templruntime.GeneratedComponentInput) (templ_7745c5c3_Err error) {
 		templ_7745c5c3_W, ctx := templ_7745c5c3_Input.Writer, templ_7745c5c3_Input.Context

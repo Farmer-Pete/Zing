@@ -7,6 +7,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -49,6 +50,53 @@ func TestProductionRuntimes_ResolvesClaudeAndCodexNotFake(t *testing.T) {
 	}
 	if _, err := rts.For(runtimeNameFake); err == nil {
 		t.Errorf("For(%q): want an error, production must never map %q", runtimeNameFake, runtimeNameFake)
+	}
+}
+
+// TestProductionRuntimes_ClaudeCarriesStopHook proves productionRuntimes
+// turns the Stop hook on for the claude runtime it builds: the argv
+// Claude.Command returns for a production run carries --settings, and the
+// hook command names this process's own resolved executable path plus
+// " validate --hook --job ".
+func TestProductionRuntimes_ClaudeCarriesStopHook(t *testing.T) {
+	t.Parallel()
+
+	rts, err := productionRuntimes("test-claude-oauth-token")
+	if err != nil {
+		t.Fatalf("productionRuntimes: %v", err)
+	}
+	rt, err := rts.For(runtimeNameClaude)
+	if err != nil {
+		t.Fatalf("For(%q): %v", runtimeNameClaude, err)
+	}
+	c, ok := rt.(runtime.Claude)
+	if !ok {
+		t.Fatalf("For(%q) = %T, want runtime.Claude", runtimeNameClaude, rt)
+	}
+
+	_, args, _, err := c.Command(runtime.RunRequest{Job: response.JobClassify, Model: "m"})
+	if err != nil {
+		t.Fatalf("Command: %v", err)
+	}
+
+	idx := slices.Index(args, "--settings")
+	if idx == -1 || idx+1 >= len(args) {
+		t.Fatalf("args = %v, want --settings followed by its JSON", args)
+	}
+
+	zingBin, err := os.Executable()
+	if err != nil {
+		t.Fatalf("os.Executable: %v", err)
+	}
+	if resolved, evalErr := filepath.EvalSymlinks(zingBin); evalErr == nil {
+		zingBin = resolved
+	}
+	settingsJSON := args[idx+1]
+	if !strings.Contains(settingsJSON, zingBin) {
+		t.Errorf("settings JSON = %q, want it to contain the resolved zing binary path %q", settingsJSON, zingBin)
+	}
+	if !strings.Contains(settingsJSON, " validate --hook --job ") {
+		t.Errorf("settings JSON = %q, want it to contain %q", settingsJSON, " validate --hook --job ")
 	}
 }
 

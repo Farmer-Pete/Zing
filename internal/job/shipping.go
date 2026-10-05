@@ -98,7 +98,7 @@ type Checks interface {
 // itself as Deps.Tracker (internal/dispatch/dispatch.go).
 type ShipTracker interface {
 	PostPRLink(ctx context.Context, projectID int64, ref, prURL string) error
-	PostDone(ctx context.Context, projectID int64, ref, prURL string) error
+	PostDone(ctx context.Context, projectID int64, ref, prURL, mergeSHA string) error
 }
 
 // shipHandler runs the real shipping state (design section 8). It is
@@ -239,7 +239,7 @@ func (h shipHandler) publish(ctx context.Context, t store.Ticket, d Deps) (store
 		return store.HandlerCommit{}, fmt.Errorf("job: shipping: file events: %w", err)
 	}
 
-	pr := prBody(t.ID, plan, final, cohort, reports, events)
+	pr := prBody(t, plan, final, cohort, reports, events)
 
 	url, number, openErr := proj.Orch.OpenDraftPR(ctx, wt, pr)
 	if openErr != nil {
@@ -599,7 +599,7 @@ func (h shipHandler) poll(ctx context.Context, t store.Ticket, d Deps) (store.Ha
 	}
 
 	if pr.Merged {
-		return h.pollDone(ctx, t, d, *t.PRURL)
+		return h.pollDone(ctx, t, d, *t.PRURL, pr.MergeCommitSHA)
 	}
 	if pr.State == "closed" {
 		return h.pollClosed(t, d, number), nil
@@ -717,7 +717,7 @@ func (h shipHandler) poll(ctx context.Context, t store.Ticket, d Deps) (store.Ha
 		// run only once the pull request is ready, so mark it ready now.
 		return h.pollMarkReady(ctx, t, d, proj, pr, local)
 	case result.State == CIPending:
-		return h.pollIdle(ctx, t, d, fp, result.Missing)
+		return h.pollIdle(ctx, t, d, proj, pr, number, fp, result.Missing)
 	case pr.Draft: // CIGreen, zero unresolved threads, still draft: row 8
 		return h.pollMarkReady(ctx, t, d, proj, pr, local)
 	default: // CIGreen, zero unresolved threads, not draft: row 9 (MERGE or the merge question, M4 task 8).
@@ -952,8 +952,8 @@ func pollScheduleOnly(t store.Ticket, d Deps, resetAt time.Time) store.HandlerCo
 // come first, the store commit last, so a crash before the commit repeats
 // step 1 safely (PostDone's own marker guard) and a crash after it has
 // nothing left to lose.
-func (h shipHandler) pollDone(ctx context.Context, t store.Ticket, d Deps, prURL string) (store.HandlerCommit, error) {
-	if err := d.Tracker.PostDone(ctx, t.ProjectID, t.TrackerRef, prURL); err != nil {
+func (h shipHandler) pollDone(ctx context.Context, t store.Ticket, d Deps, prURL, mergeSHA string) (store.HandlerCommit, error) {
+	if err := d.Tracker.PostDone(ctx, t.ProjectID, t.TrackerRef, prURL, mergeSHA); err != nil {
 		return store.HandlerCommit{}, fmt.Errorf("job: shipping: poll: post done: %w", err)
 	}
 
@@ -1054,7 +1054,18 @@ func (h shipHandler) pollCIFailed(ctx context.Context, t store.Ticket, d Deps, p
 // otherwise silently clear a still-open merge question's own "merge"
 // wait -- nil carries forward as nil, the ordinary case, so this changes
 // nothing when nothing is waiting.
-func (h shipHandler) pollIdle(ctx context.Context, t store.Ticket, d Deps, fp string, missing []string) (store.HandlerCommit, error) {
+//
+// Task 6 adds the review-bot nudge: on a non-draft pull request, each
+// configured review-bot check still missing gets reviewBotAction's own
+// verdict (shiprules.go) applied to its own clock markers on pr.HeadSHA.
+// Every check's verdict is worked out first, before any side effect: if
+// any one of them escalates, that escalation is returned in place of c,
+// before CommentOnPR is called for any check, so a later check's
+// escalation can never discard an earlier check's own already-decided
+// start or nudge marker. Otherwise, in config order, start writes the
+// missing marker, nudge posts the bot's trigger comment and writes the
+// nudged marker, and wait leaves this tick's commit as it already is.
+func (h shipHandler) pollIdle(ctx context.Context, t store.Ticket, d Deps, proj Project, pr orchestrator.PRState, number int, fp string, missing []string) (store.HandlerCommit, error) {
 	iv := nextInterval(t.PollFingerprint, t.PollIntervalS, fp)
 	next := time.Now().UTC().Truncate(time.Second).Add(time.Duration(iv) * time.Second)
 
@@ -1072,7 +1083,102 @@ func (h shipHandler) pollIdle(ctx context.Context, t store.Ticket, d Deps, fp st
 			Body: ciWaitingPrefix + strings.Join(missing, ","),
 		}}
 	}
+
+	if pr.Draft {
+		return c, nil
+	}
+
+	retryRow, hasRetry, err := d.Store.Marker(ctx, t.ID, markerRetryRequested)
+	if err != nil {
+		return store.HandlerCommit{}, fmt.Errorf("job: shipping: poll: retry requested marker: %w", err)
+	}
+
+	now := time.Now().UTC()
+	plans := make([]reviewBotPlan, 0, len(d.ReviewBots.Checks))
+	for _, check := range d.ReviewBots.Checks {
+		if !slices.Contains(missing, check.Check) {
+			continue
+		}
+
+		missingHead := reviewBotMissingHead(pr.HeadSHA, check.Check)
+		since, err := reviewBotMarkerSince(ctx, t, d, missingHead, retryRow.ID, hasRetry)
+		if err != nil {
+			return store.HandlerCommit{}, err
+		}
+		nudgedHead := reviewBotNudgedHead(pr.HeadSHA, check.Check)
+		nudgedAt, err := reviewBotMarkerSince(ctx, t, d, nudgedHead, retryRow.ID, hasRetry)
+		if err != nil {
+			return store.HandlerCommit{}, err
+		}
+
+		action := reviewBotAction(now, since, nudgedAt, d.ReviewBots.Wait)
+		if action == reviewBotEscalate {
+			why := fmt.Sprintf("required check %s has not reported on %s since %s", check.Check, shortSHA(pr.HeadSHA), since.UTC().Format(time.RFC3339))
+			tried := fmt.Sprintf("posted %s at %s", check.Trigger, nudgedAt.UTC().Format(time.RFC3339))
+			ec := shipEscalation(t, d, reviewBotSilentWhat, why, tried)
+			ec.ClearPoll = true
+			return ec, nil
+		}
+		plans = append(plans, reviewBotPlan{check: check, action: action, missingHead: missingHead, nudgedHead: nudgedHead})
+	}
+
+	for _, p := range plans {
+		switch p.action {
+		case reviewBotStart:
+			c.Messages = append(c.Messages, store.Message{
+				TicketID: t.ID, Type: msgTypeUpdate, Author: authorSystem,
+				Body: reviewBotMarkerBody(p.missingHead, now),
+			})
+		case reviewBotNudge:
+			if err := proj.Threads.CommentOnPR(ctx, proj.Owner, proj.Repo, number, p.check.Trigger); err != nil {
+				return store.HandlerCommit{}, fmt.Errorf("job: shipping: poll: comment on pr: %w", err)
+			}
+			slog.Info("review bot nudged", "ticket_id", t.ID, "check", p.check.Check)
+			c.Messages = append(c.Messages, store.Message{
+				TicketID: t.ID, Type: msgTypeUpdate, Author: authorSystem,
+				Body: reviewBotMarkerBody(p.nudgedHead, now),
+			})
+		case reviewBotWait, reviewBotEscalate:
+			// reviewBotWait: nothing to do this tick, the backoff commit
+			// already built above stands. reviewBotEscalate never reaches
+			// here: the loop above returns before appending it to plans.
+		}
+	}
+
 	return c, nil
+}
+
+// reviewBotPlan is one configured check's own reviewBotAction verdict,
+// worked out before any side effect (pollIdle, above): a later check's
+// escalation must never discard an earlier check's already-decided start
+// or nudge, so every check is decided first and only a non-escalating
+// plan is applied, in config order.
+type reviewBotPlan struct {
+	check                   ReviewBotCheck
+	action                  reviewBotStep
+	missingHead, nudgedHead string
+}
+
+// reviewBotMarkerSince reads headKey's own newest marker (one of
+// reviewBotMissingHead or reviewBotNudgedHead) and returns its own second
+// line's time, straight to the pointer shape reviewBotAction takes: nil
+// when there is none, or when it is older (by message id) than the newest
+// "retry requested" marker on the ticket -- Retry restarts the review-bot
+// clock (design "Shape").
+func reviewBotMarkerSince(ctx context.Context, t store.Ticket, d Deps, headKey string, retryID int64, hasRetry bool) (*time.Time, error) {
+	row, found, err := d.Store.Marker(ctx, t.ID, headKey)
+	if err != nil {
+		return nil, fmt.Errorf("job: shipping: poll: review bot marker %q: %w", headKey, err)
+	}
+	beforeRetry := hasRetry && row.ID < retryID
+	if !found || beforeRetry {
+		return nil, nil //nolint:nilnil // no marker (or one superseded by Retry) is a legitimate result, not an error
+	}
+	at, ok := reviewBotMarkerTime(row.Body)
+	if !ok {
+		return nil, nil //nolint:nilnil // a malformed marker body never happens in practice (reviewBotMarkerBody is its only writer); treated the same as no marker
+	}
+	return &at, nil
 }
 
 // previousCIWaiting returns the names the newest "ci waiting <names>"
@@ -1415,14 +1521,7 @@ func (h shipHandler) merge(ctx context.Context, t store.Ticket, d Deps, proj Pro
 		return h.mergePreconditionFailed(t, d, sha, reason, resolveIDs), nil
 	}
 
-	plan, _, havePlan, err := d.Store.StoredPlan(ctx, t.ID)
-	if err != nil {
-		return store.HandlerCommit{}, fmt.Errorf("job: shipping: merge: stored plan: %w", err)
-	}
-	if !havePlan {
-		return store.HandlerCommit{}, fmt.Errorf("job: shipping: merge: ticket %d has no stored plan", t.ID)
-	}
-	title := fmt.Sprintf("%s (#%d)", prTitle(plan.Overview.Objective), number)
+	title := fmt.Sprintf("%s (#%d)", prTitle(t.Title, t.TrackerRef), number)
 
 	if _, mergeErr := proj.PullRequests.Merge(ctx, proj.Owner, proj.Repo, number, sha, d.MergeRule.Method, title); mergeErr != nil {
 		if errors.Is(mergeErr, orchestrator.ErrMergeRefused) {

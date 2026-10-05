@@ -490,6 +490,8 @@ func TestGitHubClientSatisfiesInterfaces(t *testing.T) {
 	t.Parallel()
 }
 
+// TestGetPR proves GetPR fills PRState from GitHub's own fields, including
+// MergeCommitSHA from merge_commit_sha once the pull request is merged.
 func TestGetPR(t *testing.T) {
 	t.Parallel()
 
@@ -503,6 +505,18 @@ func TestGetPR(t *testing.T) {
 			"draft": true,
 			"head": {"sha": "deadbeefcafe0000111122223333444455556666"},
 			"base": {"ref": "main"}
+		}`)
+	})
+	mux.HandleFunc("/repos/acme/widgets/pulls/63", func(w http.ResponseWriter, _ *http.Request) {
+		fmt.Fprint(w, `{
+			"number": 63,
+			"node_id": "PR_kwXYZ",
+			"state": "closed",
+			"merged": true,
+			"draft": false,
+			"head": {"sha": "deadbeefcafe0000111122223333444455556666"},
+			"base": {"ref": "main"},
+			"merge_commit_sha": "0123456789abcdef0123456789abcdef01234567"
 		}`)
 	})
 
@@ -523,6 +537,14 @@ func TestGetPR(t *testing.T) {
 	}
 	if got != want {
 		t.Errorf("GetPR = %+v, want %+v", got, want)
+	}
+
+	gotMerged, err := g.GetPR(t.Context(), "acme", "widgets", 63)
+	if err != nil {
+		t.Fatalf("GetPR: unexpected error: %v", err)
+	}
+	if gotMerged.MergeCommitSHA != "0123456789abcdef0123456789abcdef01234567" {
+		t.Errorf("GetPR().MergeCommitSHA = %q, want the merge commit sha", gotMerged.MergeCommitSHA)
 	}
 }
 
@@ -850,6 +872,52 @@ func TestRequestReviewers(t *testing.T) {
 	}
 }
 
+func TestCommentOnPR(t *testing.T) {
+	t.Parallel()
+
+	t.Run("posts the body as an issue comment", func(t *testing.T) {
+		t.Parallel()
+		var gotMethod string
+		var gotBody map[string]any
+		mux := http.NewServeMux()
+		mux.HandleFunc("/repos/acme/widgets/issues/63/comments", func(w http.ResponseWriter, r *http.Request) {
+			gotMethod = r.Method
+			if err := json.NewDecoder(r.Body).Decode(&gotBody); err != nil {
+				t.Errorf("decode request body: %v", err)
+				return
+			}
+			fmt.Fprint(w, `{"id": 1}`)
+		})
+
+		g := newTestGHClient(t, mux)
+
+		if err := g.CommentOnPR(t.Context(), "acme", "widgets", 63, "@coderabbitai review"); err != nil {
+			t.Fatalf("CommentOnPR: unexpected error: %v", err)
+		}
+		if gotMethod != http.MethodPost {
+			t.Errorf("method = %q, want %q", gotMethod, http.MethodPost)
+		}
+		if gotBody["body"] != "@coderabbitai review" {
+			t.Errorf("request body body = %v, want %q", gotBody["body"], "@coderabbitai review")
+		}
+	})
+
+	t.Run("401 is ErrGitHubAuth", func(t *testing.T) {
+		t.Parallel()
+		mux := http.NewServeMux()
+		mux.HandleFunc("/repos/acme/widgets/issues/63/comments", func(w http.ResponseWriter, _ *http.Request) {
+			w.WriteHeader(http.StatusUnauthorized)
+			fmt.Fprint(w, `{"message": "Bad credentials"}`)
+		})
+		g := newTestGHClient(t, mux)
+
+		err := g.CommentOnPR(t.Context(), "acme", "widgets", 63, "@coderabbitai review")
+		if !errors.Is(err, ErrGitHubAuth) {
+			t.Errorf("error = %v, want errors.Is(err, ErrGitHubAuth)", err)
+		}
+	})
+}
+
 func TestMergePinsSha(t *testing.T) {
 	t.Parallel()
 
@@ -1060,6 +1128,130 @@ func TestJobLogTailLast200(t *testing.T) {
 		lines := strings.Split(got, "\n")
 		if lines[len(lines)-1] != "[log cut at 64 MiB]" {
 			t.Errorf("JobLogTail last line = %q, want %q", lines[len(lines)-1], "[log cut at 64 MiB]")
+		}
+	})
+}
+
+// TestJobLogTailCutsAtFailedStep checks that tailLog quotes the failed
+// step's own output -- from its "##[group]Run " header to its last
+// "##[error]" line -- rather than whatever happens to be the last n lines
+// of the whole job log, which on a real PR (#50) was git's unrelated
+// detached-HEAD notice and post-job cleanup.
+func TestJobLogTailCutsAtFailedStep(t *testing.T) {
+	t.Parallel()
+
+	ts := func(i int) string {
+		return fmt.Sprintf("2024-05-01T12:00:%02d.0000000Z", i%60)
+	}
+
+	serve := func(t *testing.T, body string) *GitHubClient {
+		t.Helper()
+		logServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			fmt.Fprint(w, body)
+		}))
+		t.Cleanup(logServer.Close)
+
+		mux := http.NewServeMux()
+		mux.HandleFunc("/repos/acme/widgets/actions/jobs/99/logs", func(w http.ResponseWriter, _ *http.Request) {
+			w.Header().Set("Location", logServer.URL+"/log")
+			w.WriteHeader(http.StatusFound)
+		})
+		return newTestGHClient(t, mux)
+	}
+
+	t.Run("keeps only the failed step, dropping an earlier step and later cleanup", func(t *testing.T) {
+		t.Parallel()
+		var b strings.Builder
+		fmt.Fprintf(&b, "%s ##[group]Run actions/checkout@v4\n", ts(0))
+		fmt.Fprintf(&b, "%s Note: switching to 'a1b2c3d'.\n", ts(1))
+		fmt.Fprintf(&b, "%s You are in 'detached HEAD' state. You can look around.\n", ts(2))
+		fmt.Fprintf(&b, "%s ##[endgroup]\n", ts(3))
+		fmt.Fprintf(&b, "%s ##[group]Run make lint\n", ts(4))
+		fmt.Fprintf(&b, "%s golangci-lint run ./...\n", ts(5))
+		fmt.Fprintf(&b, "%s ##[error]internal/job/shipping.go:10: unused variable x\n", ts(6))
+		fmt.Fprintf(&b, "%s ##[error]internal/job/respond.go:20: unused import\n", ts(7))
+		fmt.Fprintf(&b, "%s ##[error]Process completed with exit code 2.\n", ts(8))
+		for i := range 300 {
+			fmt.Fprintf(&b, "%s Cleaning up orphan processes\n", ts(9+i))
+		}
+
+		g := serve(t, b.String())
+
+		got, err := g.JobLogTail(t.Context(), "acme", "widgets", 99, 200)
+		if err != nil {
+			t.Fatalf("JobLogTail: unexpected error: %v", err)
+		}
+
+		lines := strings.Split(got, "\n")
+		if !strings.Contains(lines[0], "##[group]Run make lint") {
+			t.Errorf("JobLogTail first line = %q, want it to contain %q", lines[0], "##[group]Run make lint")
+		}
+		if !strings.Contains(lines[len(lines)-1], "##[error]Process completed with exit code 2.") {
+			t.Errorf("JobLogTail last line = %q, want it to contain %q", lines[len(lines)-1], "##[error]Process completed with exit code 2.")
+		}
+		if strings.Contains(got, "detached HEAD") {
+			t.Errorf("JobLogTail = %q, must not contain the checkout step's output", got)
+		}
+		if strings.Contains(got, "Cleaning up orphan processes") {
+			t.Errorf("JobLogTail = %q, must not contain the post-job cleanup lines", got)
+		}
+	})
+
+	t.Run("stops at the next step header, so a later step cannot replace the failure", func(t *testing.T) {
+		t.Parallel()
+		var b strings.Builder
+		fmt.Fprintf(&b, "%s ##[group]Run make lint\n", ts(0))
+		fmt.Fprintf(&b, "%s golangci-lint run ./...\n", ts(1))
+		fmt.Fprintf(&b, "%s ##[error]Process completed with exit code 2.\n", ts(2))
+		fmt.Fprintf(&b, "%s ##[group]Run post-job cleanup\n", ts(3))
+		fmt.Fprintf(&b, "%s removing temp directory\n", ts(4))
+		fmt.Fprintf(&b, "%s ##[error]some unrelated later failure\n", ts(5))
+
+		g := serve(t, b.String())
+
+		got, err := g.JobLogTail(t.Context(), "acme", "widgets", 99, 200)
+		if err != nil {
+			t.Fatalf("JobLogTail: unexpected error: %v", err)
+		}
+
+		lines := strings.Split(got, "\n")
+		if !strings.Contains(lines[0], "##[group]Run make lint") {
+			t.Errorf("JobLogTail first line = %q, want it to contain %q", lines[0], "##[group]Run make lint")
+		}
+		if !strings.Contains(lines[len(lines)-1], "##[error]Process completed with exit code 2.") {
+			t.Errorf("JobLogTail last line = %q, want it to contain %q", lines[len(lines)-1], "##[error]Process completed with exit code 2.")
+		}
+		laterStepLeaked := strings.Contains(got, "post-job cleanup") || strings.Contains(got, "removing temp directory") || strings.Contains(got, "unrelated later failure")
+		if laterStepLeaked {
+			t.Errorf("JobLogTail = %q, must not contain the later step's lines", got)
+		}
+	})
+
+	t.Run("caps the failed step at n lines, still ending at the last error", func(t *testing.T) {
+		t.Parallel()
+		var b strings.Builder
+		fmt.Fprintf(&b, "%s ##[group]Run make lint\n", ts(0))
+		for i := range 248 {
+			fmt.Fprintf(&b, "%s output line %d\n", ts(1+i), i)
+		}
+		fmt.Fprintf(&b, "%s ##[error]Process completed with exit code 2.\n", ts(249))
+
+		g := serve(t, b.String())
+
+		got, err := g.JobLogTail(t.Context(), "acme", "widgets", 99, 200)
+		if err != nil {
+			t.Fatalf("JobLogTail: unexpected error: %v", err)
+		}
+
+		lines := strings.Split(got, "\n")
+		if len(lines) != 200 {
+			t.Fatalf("JobLogTail lines = %d, want 200 (%q)", len(lines), got)
+		}
+		if !strings.Contains(lines[0], "##[group]Run make lint") {
+			t.Errorf("JobLogTail first line = %q, want it to contain %q", lines[0], "##[group]Run make lint")
+		}
+		if !strings.Contains(lines[len(lines)-1], "##[error]Process completed with exit code 2.") {
+			t.Errorf("JobLogTail last line = %q, want it to contain %q", lines[len(lines)-1], "##[error]Process completed with exit code 2.")
 		}
 	})
 }

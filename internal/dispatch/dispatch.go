@@ -196,6 +196,10 @@ type Config struct {
 	// into every job.Deps runAndCommit builds: mergeDecision's own input
 	// for the shipping handler's row 9 automatic merge gate.
 	MergeRule job.MergeRule
+	// ReviewBots is config.ReviewBots, copied into every job.Deps
+	// runAndCommit builds: pollIdle's own input for nudging, then
+	// escalating, a required review-bot check that has gone quiet.
+	ReviewBots job.ReviewBotRule
 	// Now is the clock Tick reads "the current instant" from for picking
 	// ready candidates (PKG9-PLAN.md section 17.1): serve leaves it nil, so
 	// New defaults it to time.Now; selftest injects a fake clock that
@@ -1146,7 +1150,7 @@ func (d *Dispatcher) runAndCommit(ctx context.Context, ticket store.Ticket, time
 		Owner: d.cfg.Owner, Expires: expires,
 		Projects: d.cfg.Projects, Sandboxes: d.cfg.Sandboxes, RequireSandbox: d.cfg.RequireSandbox, Commands: d.cfg.Commands,
 		DataDir: d.cfg.DataDir, LensesParallel: d.cfg.LensesParallel, JudgeCodexHome: d.cfg.JudgeCodexHome,
-		MergeRule: d.cfg.MergeRule,
+		MergeRule: d.cfg.MergeRule, ReviewBots: d.cfg.ReviewBots,
 		// Tracker is the dispatcher itself: PostPRLink and PostDone (below)
 		// already give it job.ShipTracker's own two methods, over its own
 		// tracker and bindings (PKG9-PLAN.md section 8.6, 17.1).
@@ -1470,9 +1474,9 @@ func (d *Dispatcher) PostPRLink(ctx context.Context, projectID int64, ref, prURL
 // already-closed issue succeeds (design 10.5), so a crash between the two
 // calls, or a retried tick, never fails on the second one -- PostDone always
 // calls Close, even when the comment step itself was a skip.
-func (d *Dispatcher) PostDone(ctx context.Context, projectID int64, ref, prURL string) error {
+func (d *Dispatcher) PostDone(ctx context.Context, projectID int64, ref, prURL, mergeSHA string) error {
 	b, err := d.postMarkedOnce(ctx, projectID, ref, "done", func(b Binding) string {
-		return tracker.DoneComment(b.User, prURL)
+		return tracker.DoneComment(b.User, prURL, mergeSHA)
 	})
 	if err != nil {
 		return err

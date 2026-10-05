@@ -37,10 +37,15 @@ func PRComment(owner, prURL string) string {
 	return "Zing opened a draft pull request: " + prURL + "\n\n" + disclosure(owner)
 }
 
-// DoneComment is posted when Zing finishes a ticket, with its pull
-// request at prURL ready for review.
-func DoneComment(owner, prURL string) string {
-	return "Zing finished this ticket. The pull request is ready for review: " + prURL + "\n\n" + disclosure(owner)
+// DoneComment is posted when Zing finishes a ticket. With mergeSHA set, the
+// pull request at prURL was merged, and the comment names that merge
+// commit; mergeSHA "" means the caller has none to report, and the comment
+// keeps its older "ready for review" wording.
+func DoneComment(owner, prURL, mergeSHA string) string {
+	if mergeSHA == "" {
+		return "Zing finished this ticket. The pull request is ready for review: " + prURL + "\n\n" + disclosure(owner)
+	}
+	return "Zing finished this ticket. The pull request was merged: " + prURL + " (merge commit " + mergeSHA + ")\n\n" + disclosure(owner)
 }
 
 // NothingToDoComment is posted when planning's nothing_to_do outcome, with
