@@ -310,10 +310,222 @@ func (s *Store) editScenarioTx(ctx context.Context, tx *sql.Tx, req OwnerEditReq
 	}, nil
 }
 
-// editPlanTaskTx edits or drops one task of the ticket's current plan.
-// Task 2 implements this; for now it refuses every request.
-func (s *Store) editPlanTaskTx(_ context.Context, _ *sql.Tx, _ OwnerEditRequest) (response.OwnerEditEvent, error) { //nolint:unparam // result 0 is always the zero value until task 2 implements this
-	return response.OwnerEditEvent{}, ownerEditErr(ownerEditCodeBadRequest, "not supported yet")
+// editPlanTaskTx edits or drops one task of the ticket's current (highest
+// version) plan: it loads the plan, checks that its cohort has at least one
+// sealed scenario, applies the edit or the drop, validates the result
+// against artifacts/plan plus checkPlanStructure, and writes it back in
+// place (the version is unchanged) guarded by the ticket's claim.
+func (s *Store) editPlanTaskTx(ctx context.Context, tx *sql.Tx, req OwnerEditRequest) (response.OwnerEditEvent, error) {
+	var id int64
+	var runID sql.NullInt64
+	var payload []byte
+	err := tx.QueryRowContext(ctx,
+		`SELECT id, run_id, payload FROM artifacts WHERE ticket_id = ? AND type = 'plan' ORDER BY version DESC LIMIT 1`,
+		req.TicketID,
+	).Scan(&id, &runID, &payload)
+	switch {
+	case errors.Is(err, sql.ErrNoRows):
+		return response.OwnerEditEvent{}, ownerEditErr(ownerEditCodeNotFound, "this ticket has no plan")
+	case err != nil:
+		return response.OwnerEditEvent{}, fmt.Errorf("owner edit: load plan: %w", err)
+	}
+
+	var sealedCount int
+	if err = tx.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM artifacts WHERE ticket_id = ? AND type = 'scenario' AND run_id = ? AND sealed_at IS NOT NULL`,
+		req.TicketID, runID,
+	).Scan(&sealedCount); err != nil {
+		return response.OwnerEditEvent{}, fmt.Errorf("owner edit: count sealed scenarios: %w", err)
+	}
+	if sealedCount < 1 {
+		return response.OwnerEditEvent{}, ownerEditErr(ownerEditCodeNotSealed, "the plan is not sealed; answer the gate instead")
+	}
+
+	n, err := strconv.Atoi(req.Ref)
+	if err != nil {
+		return response.OwnerEditEvent{}, ownerEditErr(ownerEditCodeNotFound, "no task "+req.Ref+" in the plan")
+	}
+
+	var plan response.Plan
+	if err = json.Unmarshal(payload, &plan); err != nil {
+		return response.OwnerEditEvent{}, fmt.Errorf("owner edit: unmarshal plan: %w", err)
+	}
+	oldPayload := string(payload)
+
+	found := false
+	for _, t := range plan.Delivery.Tasks {
+		if t.N == n {
+			found = true
+			break
+		}
+	}
+	if !found {
+		return response.OwnerEditEvent{}, ownerEditErr(ownerEditCodeNotFound, fmt.Sprintf("no task %d in the plan", n))
+	}
+
+	switch req.Action {
+	case OwnerEditActionEdit:
+		for i := range plan.Delivery.Tasks {
+			if plan.Delivery.Tasks[i].N != n {
+				continue
+			}
+			if req.Text != nil {
+				plan.Delivery.Tasks[i].Text = *req.Text
+			}
+			if req.Test != nil {
+				plan.Delivery.Tasks[i].Test = *req.Test
+			}
+			if req.Demo != nil {
+				plan.Delivery.Tasks[i].Demo = *req.Demo
+			}
+			break
+		}
+	case OwnerEditActionDrop:
+		landed, lerr := landedTaskNumbers(ctx, tx, req.TicketID)
+		if lerr != nil {
+			return response.OwnerEditEvent{}, lerr
+		}
+		for _, m := range landed {
+			if m >= n {
+				return response.OwnerEditEvent{}, ownerEditErr(ownerEditCodeLanded, fmt.Sprintf("task %d has landed; only tasks after it can be dropped", m))
+			}
+		}
+		plan = dropPlanTask(plan, n)
+	}
+
+	newPayload, err := json.Marshal(plan)
+	if err != nil {
+		return response.OwnerEditEvent{}, fmt.Errorf("owner edit: marshal plan: %w", err)
+	}
+	if err = s.schemas.validate("artifacts", "plan", newPayload); err != nil {
+		return response.OwnerEditEvent{}, ownerEditErr(ownerEditCodeInvalid, err.Error())
+	}
+	if fault := checkPlanStructure(plan); fault != "" {
+		return response.OwnerEditEvent{}, ownerEditErr(ownerEditCodeInvalid, fault)
+	}
+
+	res, err := tx.ExecContext(ctx,
+		`UPDATE artifacts SET payload = ? WHERE id = ? AND (SELECT claim_owner FROM tickets WHERE id = ?) IS NULL`,
+		string(newPayload), id, req.TicketID,
+	)
+	if err != nil {
+		return response.OwnerEditEvent{}, fmt.Errorf("owner edit: update plan: %w", err)
+	}
+	affected, err := res.RowsAffected()
+	if err != nil {
+		return response.OwnerEditEvent{}, fmt.Errorf("owner edit: update plan: %w", err)
+	}
+	if affected == 0 {
+		return response.OwnerEditEvent{}, ownerEditErr(ownerEditCodeClaimed, "ticket is claimed; edits are refused while a run holds it")
+	}
+
+	return response.OwnerEditEvent{
+		Target: OwnerEditPlanTask, Ref: req.Ref, Action: req.Action,
+		Old: oldPayload, New: string(newPayload),
+	}, nil
+}
+
+// landedTaskNumbers returns the task_n of every build_report artifact of
+// ticketID whose payload carries a commit_sha: the task numbers a drop must
+// not reach at or past (editPlanTaskTx's landed refusal).
+func landedTaskNumbers(ctx context.Context, tx *sql.Tx, ticketID int64) ([]int, error) {
+	rows, err := tx.QueryContext(ctx,
+		`SELECT payload FROM artifacts WHERE ticket_id = ? AND type = 'build_report' AND json_extract(payload, '$.commit_sha') IS NOT NULL`,
+		ticketID,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("owner edit: load landed tasks: %w", err)
+	}
+	defer rows.Close()
+
+	var out []int
+	for rows.Next() {
+		var payload []byte
+		if err := rows.Scan(&payload); err != nil {
+			return nil, fmt.Errorf("owner edit: load landed tasks: %w", err)
+		}
+		var report response.BuildReport
+		if err := json.Unmarshal(payload, &report); err != nil {
+			return nil, fmt.Errorf("owner edit: decode build report: %w", err)
+		}
+		out = append(out, report.TaskN)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("owner edit: load landed tasks: %w", err)
+	}
+	return out, nil
+}
+
+// dropPlanTask returns p without task n: every later task's N drops by
+// one, every file's task list loses n and shifts higher numbers down, and
+// a file left with no task is removed. A file with no task list is kept.
+// Pure: p is not modified.
+func dropPlanTask(p response.Plan, n int) response.Plan {
+	out := p
+
+	tasks := make([]response.Task, 0, len(p.Delivery.Tasks))
+	for _, t := range p.Delivery.Tasks {
+		switch {
+		case t.N == n:
+			continue
+		case t.N > n:
+			t.N--
+		}
+		tasks = append(tasks, t)
+	}
+	out.Delivery.Tasks = tasks
+
+	files := make([]response.FileChange, 0, len(p.Delivery.Files))
+	for _, f := range p.Delivery.Files {
+		if f.Task == "" {
+			files = append(files, f)
+			continue
+		}
+		var nums []string
+		for field := range strings.FieldsSeq(f.Task) {
+			m, err := strconv.Atoi(field)
+			if err != nil {
+				continue
+			}
+			switch {
+			case m == n:
+				continue
+			case m > n:
+				nums = append(nums, strconv.Itoa(m-1))
+			default:
+				nums = append(nums, strconv.Itoa(m))
+			}
+		}
+		if len(nums) == 0 {
+			continue
+		}
+		f.Task = strings.Join(nums, " ")
+		files = append(files, f)
+	}
+	out.Delivery.Files = files
+
+	return out
+}
+
+// checkPlanStructure reports the first structural fault the JSON Schema
+// cannot see: tasks not numbered 1..len in order, or a file task list
+// naming a number outside 1..len. Empty string means none.
+func checkPlanStructure(p response.Plan) string {
+	tasks := p.Delivery.Tasks
+	for i, t := range tasks {
+		if t.N != i+1 {
+			return fmt.Sprintf("tasks must be numbered 1..%d in order; position %d has n %d", len(tasks), i+1, t.N)
+		}
+	}
+	for _, f := range p.Delivery.Files {
+		for field := range strings.FieldsSeq(f.Task) {
+			m, err := strconv.Atoi(field)
+			if err != nil || m < 1 || m > len(tasks) {
+				return fmt.Sprintf("file %s names task %s, outside 1..%d", f.Path, field, len(tasks))
+			}
+		}
+	}
+	return ""
 }
 
 // editTicketBodyTx amends tickets.body. Task 3 implements this; for now it

@@ -138,6 +138,114 @@ func TestOwnerEditRoute_RefusesSchemaBreakingEdit(t *testing.T) {
 	}
 }
 
+// planWithTasks returns fixturePlan (plan_test.go) with its Delivery.Tasks
+// and Delivery.Files replaced by tasks and files: every other field, already
+// schema-valid, rides along unchanged.
+func planWithTasks(tasks []response.Task, files []response.FileChange) response.Plan {
+	plan := fixturePlan()
+	plan.Delivery.Tasks = tasks
+	plan.Delivery.Files = files
+	return plan
+}
+
+// seedSealedScenarioArtifactWithRun inserts one sealed scenario artifact on
+// ticketID, owned by runID: the shape editPlanTaskTx's seal check needs,
+// counting sealed scenarios by run_id.
+func seedSealedScenarioArtifactWithRun(t *testing.T, s *store.Store, ticketID, runID int64, sc response.Scenario) {
+	t.Helper()
+	payload, err := json.Marshal(sc)
+	if err != nil {
+		t.Fatalf("marshal scenario %s: %v", sc.ID, err)
+	}
+	sealedAt := time.Now().UTC()
+	if _, insErr := s.InsertArtifact(t.Context(), store.Artifact{
+		TicketID: ticketID, RunID: &runID, Type: testArtifactTypeScenario, Payload: payload, SealedAt: &sealedAt,
+	}); insErr != nil {
+		t.Fatalf("InsertArtifact(sealed scenario %s): %v", sc.ID, insErr)
+	}
+}
+
+// fileTaskByPath returns the Task field of the file named path, so the drop
+// test can check its post-drop task list by path rather than slice index.
+func fileTaskByPath(files []response.FileChange, path string) string {
+	for _, f := range files {
+		if f.Path == path {
+			return f.Task
+		}
+	}
+	return ""
+}
+
+// TestOwnerEditRoute_DropsPlanTask proves the done-when test: dropping a
+// sealed plan's task 2 of 3 through the console route renumbers task 3 down
+// to 2, rewrites every file's task list, leaves the version unchanged, and
+// answers 204.
+func TestOwnerEditRoute_DropsPlanTask(t *testing.T) {
+	t.Parallel()
+	s := newConsoleTestStore(t)
+	ticketID := seedTicket(t, s, "1", "fix the bug")
+	runID := seedRun(t, s, ticketID)
+
+	plan := planWithTasks(
+		[]response.Task{
+			{N: 1, Test: "T1", Demo: true, Text: "task one"},
+			{N: 2, Test: "T2", Demo: false, Text: "task two"},
+			{N: 3, Test: "T3", Demo: false, Text: "task three"},
+		},
+		[]response.FileChange{
+			{Path: "internal/one.go", Action: response.FileActionModify, Task: "1", Reason: "r1"},
+			{Path: "internal/two.go", Action: response.FileActionModify, Task: "2 3", Reason: "r2"},
+			{Path: "internal/three.go", Action: response.FileActionModify, Task: "3", Reason: "r3"},
+		},
+	)
+	payload, err := json.Marshal(plan)
+	if err != nil {
+		t.Fatalf("marshal plan: %v", err)
+	}
+	if _, insErr := s.InsertArtifact(t.Context(), store.Artifact{
+		TicketID: ticketID, RunID: &runID, Type: testArtifactTypePlan, Version: 1, Payload: payload,
+	}); insErr != nil {
+		t.Fatalf("InsertArtifact(plan): %v", insErr)
+	}
+	seedSealedScenarioArtifactWithRun(t, s, ticketID, runID, response.Scenario{
+		ID: "s1", Kind: response.ScenarioKindBehavior, Given: "g1", When: "w1", Then: "t1",
+	})
+	seedSealedScenarioArtifactWithRun(t, s, ticketID, runID, response.Scenario{
+		ID: "s2", Kind: response.ScenarioKindBehavior, Given: "g2", When: "w2", Then: "t2",
+	})
+
+	srv := newTestServer(t, s, bus.New(), nil, newTestLogHandler(t))
+	resp := doRequest(t, mutationRequest(t, srv, ownerEditPath(ticketID), `{"target":"plan_task","ref":"2","action":"drop"}`))
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusNoContent {
+		t.Fatalf("status = %d, want 204; body = %q", resp.StatusCode, readBody(t, resp))
+	}
+
+	got, version, ok, err := s.StoredPlan(t.Context(), ticketID)
+	if err != nil || !ok {
+		t.Fatalf("StoredPlan: ok=%v err=%v", ok, err)
+	}
+	if version != 1 {
+		t.Errorf("version = %d, want unchanged 1", version)
+	}
+	if len(got.Delivery.Tasks) != 2 {
+		t.Fatalf("tasks = %d, want 2", len(got.Delivery.Tasks))
+	}
+	if got.Delivery.Tasks[0].N != 1 || got.Delivery.Tasks[0].Text != "task one" {
+		t.Errorf("task 1 = %+v, want N 1 text %q", got.Delivery.Tasks[0], "task one")
+	}
+	if got.Delivery.Tasks[1].N != 2 || got.Delivery.Tasks[1].Text != "task three" {
+		t.Errorf("task 2 = %+v, want N 2 text %q (the old task 3)", got.Delivery.Tasks[1], "task three")
+	}
+
+	wantFileTasks := map[string]string{"internal/one.go": "1", "internal/two.go": "2", "internal/three.go": "2"}
+	for path, want := range wantFileTasks {
+		if got := fileTaskByPath(got.Delivery.Files, path); got != want {
+			t.Errorf("file %s task = %q, want %q", path, got, want)
+		}
+	}
+}
+
 // TestOwnerEditRoute_RefusesClaimedTicket proves an edit is refused 409
 // with the exact claimed text while a run holds the ticket's claim, and
 // that the payload is unchanged.
