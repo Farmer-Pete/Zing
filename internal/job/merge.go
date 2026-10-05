@@ -350,21 +350,42 @@ func mergeCommandInfraEscalation(t store.Ticket, d Deps, req baseMergeRequest, e
 	}
 }
 
-// mergeCheck runs the project's commands, then reads the conflict markers
-// and the outside-the-merge paths left in the tree (overview design "One
-// merge tick"): a clean result lands the merge (landMerge). A failing
-// result with rid nil (a clean merge that never ran the agent) runs the
-// agent for the first time, with the check input in place of any
-// conflicts (runMergeFirst); otherwise it resumes the merge session with
-// the check input, charged (runMergeResume), gated by jobs.merge.check_loops
-// then jobs.merge.max_resumes.
+// mergeCheck stages every resolved-but-unstaged path, then runs the
+// project's commands, then reads the conflict markers and the
+// outside-the-merge paths left in the tree (overview design "One merge
+// tick"): a clean result lands the merge (landMerge). A failing result with
+// rid nil (a clean merge that never ran the agent) runs the agent for the
+// first time, with the check input in place of any conflicts
+// (runMergeFirst); otherwise it resumes the merge session with the check
+// input, charged (runMergeResume), gated by jobs.merge.check_loops then
+// jobs.merge.max_resumes.
 func (h shipHandler) mergeCheck(ctx context.Context, t store.Ticket, d Deps, proj Project, wt orchestrator.Worktree, req baseMergeRequest, rid *int64, sess *store.Session) (store.HandlerCommit, error) {
 	var sessionID *int64
 	if sess != nil {
 		sessionID = &sess.ID
 	}
+	log := slog.With("ticket_id", t.ID, "request_id", req.MessageID, "run_id", int64OrZero(rid))
 
-	results, err := runCheckCommands(ctx, d, t, wt, proj, rid)
+	res, err := proj.Orch.StageResolvedPaths(ctx, wt)
+	if err != nil {
+		log.Warn("merge staging failed", "error", err)
+		return mergeEscalationIDs(t, d, req, mergeFailedWhat, mergeFailedWhy, err.Error(), sessionID, rid), nil
+	}
+	log.Debug("merge staging", "staged", res.Staged, "marked", res.Marked, "binary", res.Binary)
+	if len(res.Staged) > 0 {
+		log.Info("merge resolved paths staged", "count", len(res.Staged), "paths", res.Staged)
+	}
+
+	checkProj := proj
+	if proj.FixCmd != "" && (len(res.Marked) > 0 || len(res.Binary) > 0) {
+		// fix's own lane snapshot (runCheckCommands' ChangedPaths call)
+		// cannot read a path the index still carries unmerged, so fix is
+		// skipped for this tick while any such path remains.
+		checkProj.FixCmd = ""
+		log.Info("merge fix skipped", "marked", res.Marked, "binary", res.Binary)
+	}
+
+	results, err := runCheckCommands(ctx, d, t, wt, checkProj, rid)
 	if err != nil {
 		return mergeCommandInfraEscalation(t, d, req, err, sessionID, rid)
 	}

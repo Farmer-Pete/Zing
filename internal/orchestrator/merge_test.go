@@ -501,6 +501,195 @@ func TestPathsWithConflictMarkers(t *testing.T) {
 }
 
 // -----------------------------------------------------------------------
+// StageResolvedPaths
+// -----------------------------------------------------------------------
+
+// assertPorcelainPrefix fails t unless "git status --porcelain" in dir has
+// a line for path whose first two columns are wantPrefix, the shape
+// TestStageResolvedPaths and its siblings each check for one path after
+// calling StageResolvedPaths.
+func assertPorcelainPrefix(ctx context.Context, t *testing.T, dir, path, wantPrefix string) {
+	t.Helper()
+	status := runGit(ctx, t, dir, "status", "--porcelain")
+	found := false
+	for line := range strings.SplitSeq(strings.TrimRight(status, "\n"), "\n") {
+		if strings.HasSuffix(line, path) {
+			found = true
+			if !strings.HasPrefix(line, wantPrefix) {
+				t.Errorf("status line for %s = %q, want prefix %q", path, line, wantPrefix)
+			}
+		}
+	}
+	if !found {
+		t.Errorf("git status --porcelain = %q, wanted a line for %s", status, path)
+	}
+}
+
+// TestStageResolvedPaths proves StageResolvedPaths' own Staged branch: a
+// conflict the merge agent resolved in the working tree, with no markers
+// left and no "git add", comes back in Staged and is actually staged, so
+// ChangedPaths (which otherwise rejects a "UU" path outright) reads it as
+// an ordinary Modified path afterwards.
+func TestStageResolvedPaths(t *testing.T) {
+	t.Parallel()
+	ctx := t.Context()
+	f := newMergeConflictFixture(t, 52)
+
+	if _, err := f.o.StartBaseMerge(ctx, f.wt, f.baseSHA); err != nil {
+		t.Fatalf("StartBaseMerge: unexpected error: %v", err)
+	}
+
+	writeTestFile(t, filepath.Join(f.wt.Dir(), mergeSharedPath), "line one RESOLVED\n")
+
+	res, err := f.o.StageResolvedPaths(ctx, f.wt)
+	if err != nil {
+		t.Fatalf("StageResolvedPaths: unexpected error: %v", err)
+	}
+	if want := []string{mergeSharedPath}; !slices.Equal(res.Staged, want) {
+		t.Errorf("StageResolvedPaths Staged = %v, want %v", res.Staged, want)
+	}
+	if len(res.Marked) != 0 {
+		t.Errorf("StageResolvedPaths Marked = %v, want empty", res.Marked)
+	}
+	if len(res.Binary) != 0 {
+		t.Errorf("StageResolvedPaths Binary = %v, want empty", res.Binary)
+	}
+
+	assertPorcelainPrefix(ctx, t, f.wt.Dir(), mergeSharedPath, "M  ")
+
+	if _, err := f.o.ChangedPaths(ctx, f.wt); err != nil {
+		t.Errorf("ChangedPaths (after staging): unexpected error: %v", err)
+	}
+}
+
+// TestStageResolvedPathsStagesRemovedPath proves StageResolvedPaths' Staged
+// branch also covers a delete/modify conflict the merge agent settled by
+// removing the file: fileLooksBinary and fileHasConflictMarkers both report
+// false for an absent path, so it is staged too, and "git add -u" records
+// the removal rather than erroring on a missing pathspec target.
+func TestStageResolvedPathsStagesRemovedPath(t *testing.T) {
+	t.Parallel()
+	ctx := t.Context()
+	f := newMergeConflictFixture(t, 55)
+
+	if _, err := f.o.StartBaseMerge(ctx, f.wt, f.baseSHA); err != nil {
+		t.Fatalf("StartBaseMerge: unexpected error: %v", err)
+	}
+
+	if err := os.Remove(filepath.Join(f.wt.Dir(), mergeSharedPath)); err != nil {
+		t.Fatalf("os.Remove: unexpected error: %v", err)
+	}
+
+	res, err := f.o.StageResolvedPaths(ctx, f.wt)
+	if err != nil {
+		t.Fatalf("StageResolvedPaths: unexpected error: %v", err)
+	}
+	if want := []string{mergeSharedPath}; !slices.Equal(res.Staged, want) {
+		t.Errorf("StageResolvedPaths Staged = %v, want %v", res.Staged, want)
+	}
+	if len(res.Marked) != 0 {
+		t.Errorf("StageResolvedPaths Marked = %v, want empty", res.Marked)
+	}
+	if len(res.Binary) != 0 {
+		t.Errorf("StageResolvedPaths Binary = %v, want empty", res.Binary)
+	}
+
+	assertPorcelainPrefix(ctx, t, f.wt.Dir(), mergeSharedPath, "D  ")
+
+	if _, err := f.o.ChangedPaths(ctx, f.wt); err != nil {
+		t.Errorf("ChangedPaths (after staging): unexpected error: %v", err)
+	}
+}
+
+// TestStageResolvedPathsKeepsMarkedPath proves StageResolvedPaths never
+// stages a path whose working-tree file still holds a conflict marker
+// line: it comes back in Marked, left unstaged, so the index still shows
+// "UU" for it.
+func TestStageResolvedPathsKeepsMarkedPath(t *testing.T) {
+	t.Parallel()
+	ctx := t.Context()
+	f := newMergeConflictFixture(t, 53)
+
+	if _, err := f.o.StartBaseMerge(ctx, f.wt, f.baseSHA); err != nil {
+		t.Fatalf("StartBaseMerge: unexpected error: %v", err)
+	}
+
+	res, err := f.o.StageResolvedPaths(ctx, f.wt)
+	if err != nil {
+		t.Fatalf("StageResolvedPaths: unexpected error: %v", err)
+	}
+	if want := []string{mergeSharedPath}; !slices.Equal(res.Marked, want) {
+		t.Errorf("StageResolvedPaths Marked = %v, want %v", res.Marked, want)
+	}
+	if len(res.Staged) != 0 {
+		t.Errorf("StageResolvedPaths Staged = %v, want empty", res.Staged)
+	}
+	if len(res.Binary) != 0 {
+		t.Errorf("StageResolvedPaths Binary = %v, want empty", res.Binary)
+	}
+
+	assertPorcelainPrefix(ctx, t, f.wt.Dir(), mergeSharedPath, "UU ")
+}
+
+// TestStageResolvedPathsKeepsBinaryConflict proves StageResolvedPaths never
+// stages a binary conflict (TestConflictMarkerPathsBinaryConflict's own
+// setup): it comes back in Binary, left unstaged, so ConflictMarkerPaths
+// still reports it afterwards.
+func TestStageResolvedPathsKeepsBinaryConflict(t *testing.T) {
+	t.Parallel()
+	ctx := t.Context()
+
+	fixture := newSigningFixture(t, true)
+	repo := newSigningTestRepo(t, fixture)
+	o := newTestOrchestrator(t, repo, execRunner{})
+
+	const binPath = "image.bin"
+	writeTestBinaryFile(t, filepath.Join(repo, binPath), []byte{0x00, 0x01, 0x02})
+	runGit(ctx, t, repo, "add", binPath)
+	runGit(ctx, t, repo, "commit", "-q", "-m", "seed image.bin")
+
+	wt, err := o.PrepareWorktree(ctx, 54, "", nil)
+	if err != nil {
+		t.Fatalf("PrepareWorktree: %v", err)
+	}
+
+	writeTestBinaryFile(t, filepath.Join(wt.Dir(), binPath), []byte{0x00, 0x10, 0x11, 0x12})
+	runGit(ctx, t, wt.Dir(), "add", binPath)
+	runGit(ctx, t, wt.Dir(), "commit", "-q", "-m", "ticket edits image.bin")
+
+	writeTestBinaryFile(t, filepath.Join(repo, binPath), []byte{0x00, 0x20, 0x21, 0x22})
+	runGit(ctx, t, repo, "add", binPath)
+	runGit(ctx, t, repo, "commit", "-q", "-m", "main edits image.bin")
+	baseSHA := strings.TrimSpace(runGit(ctx, t, repo, "rev-parse", "HEAD"))
+
+	if _, mergeErr := o.StartBaseMerge(ctx, wt, baseSHA); mergeErr != nil {
+		t.Fatalf("StartBaseMerge: unexpected error: %v", mergeErr)
+	}
+
+	res, err := o.StageResolvedPaths(ctx, wt)
+	if err != nil {
+		t.Fatalf("StageResolvedPaths: unexpected error: %v", err)
+	}
+	if want := []string{binPath}; !slices.Equal(res.Binary, want) {
+		t.Errorf("StageResolvedPaths Binary = %v, want %v", res.Binary, want)
+	}
+	if len(res.Staged) != 0 {
+		t.Errorf("StageResolvedPaths Staged = %v, want empty", res.Staged)
+	}
+	if len(res.Marked) != 0 {
+		t.Errorf("StageResolvedPaths Marked = %v, want empty", res.Marked)
+	}
+
+	marked, err := o.ConflictMarkerPaths(ctx, wt)
+	if err != nil {
+		t.Fatalf("ConflictMarkerPaths: unexpected error: %v", err)
+	}
+	if want := []string{binPath}; !slices.Equal(marked, want) {
+		t.Errorf("ConflictMarkerPaths = %v, want %v", marked, want)
+	}
+}
+
+// -----------------------------------------------------------------------
 // MergeSidePaths
 // -----------------------------------------------------------------------
 
