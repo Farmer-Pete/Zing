@@ -10,6 +10,7 @@ import (
 const (
 	testCheckKindTest = "test"
 	testCheckKindLint = "lint"
+	testCheckKindFix  = "fix"
 	testCheckToken    = "77.000001"
 	testForeignOwner  = "other-1"
 )
@@ -60,6 +61,40 @@ func TestRecordCheckStartAndClear(t *testing.T) {
 	}
 	if n := checkProcCount(t, s, ticketID); n != 0 {
 		t.Errorf("rows after a clear with the right gen = %d, want 0", n)
+	}
+}
+
+// TestRecordCheckStartRecordsFix proves RecordCheckStart accepts kind fix
+// (#131 added the fix command to CHECK, but migration 0006's CHECK
+// constraint still refused anything but test and lint): the write succeeds,
+// CheckProc reads the row back with Kind fix and the recorded pgid, and
+// ClearCheckStart removes it.
+func TestRecordCheckStartRecordsFix(t *testing.T) {
+	t.Parallel()
+	s := newTestStore(t)
+	ctx := t.Context()
+	ticketID, expires := claimedTicket(t, s)
+	now := time.Now()
+
+	gen, err := s.RecordCheckStart(ctx, ticketID, testForeignOwner, expires, testCheckKindFix, 4242, testCheckToken, now, now)
+	if err != nil {
+		t.Fatalf("RecordCheckStart(fix): %v", err)
+	}
+	if gen <= 0 {
+		t.Errorf("gen = %d, want > 0", gen)
+	}
+	c, ok, err := s.CheckProc(ctx, ticketID)
+	if err != nil || !ok {
+		t.Fatalf("CheckProc = (%+v, %v, %v), want a row", c, ok, err)
+	}
+	if c.Kind != testCheckKindFix || c.PGID != 4242 {
+		t.Errorf("row = %+v, want kind fix, pgid 4242", c)
+	}
+	if err := s.ClearCheckStart(ctx, ticketID, gen); err != nil {
+		t.Fatalf("ClearCheckStart: %v", err)
+	}
+	if n := checkProcCount(t, s, ticketID); n != 0 {
+		t.Errorf("rows after clear = %d, want 0", n)
 	}
 }
 
