@@ -234,8 +234,8 @@ func TestBuildPromptCarriesApprovalNotes(t *testing.T) {
 
 	gateQID := findConfirmedGateQuestionID(t, s, ticketID)
 	if _, err := s.InsertMessage(t.Context(), store.Message{
-		TicketID: ticketID, ParentID: &gateQID, Type: "reply", Author: "you",
-		State: new("sent"), Body: "the JSON must stay stable",
+		TicketID: ticketID, ParentID: &gateQID, Type: testMsgTypeReply, Author: testAuthorYou,
+		State: new(testAnswerStateSent), Body: "the JSON must stay stable",
 	}); err != nil {
 		t.Fatalf("InsertMessage(approval note): %v", err)
 	}
@@ -1825,8 +1825,8 @@ func TestResolveDefaultsUnknownDecisionToReject(t *testing.T) {
 		t.Fatalf("marshal answer payload: %v", err)
 	}
 	if _, insertErr := s.InsertMessage(t.Context(), store.Message{
-		TicketID: ticketID, ParentID: &qID, Type: "answer", Author: "you",
-		State: new("sent"), Payload: answerPayload,
+		TicketID: ticketID, ParentID: &qID, Type: testMsgTypeAnswer, Author: testAuthorYou,
+		State: new(testAnswerStateSent), Payload: answerPayload,
 	}); insertErr != nil {
 		t.Fatalf("InsertMessage(answer): %v", insertErr)
 	}

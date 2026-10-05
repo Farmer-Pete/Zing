@@ -57,7 +57,7 @@ func (s *Store) OwnerAnswers(ctx context.Context, ticketID int64) ([]OwnerAnswer
 		qIDs[i] = questions[i].ID
 	}
 
-	escalated, err := escalationLinkedQuestions(ctx, s, ticketID, questions)
+	escalationIDs, err := escalationMessageIDs(ctx, s, ticketID, questions)
 	if err != nil {
 		return nil, fmt.Errorf("owner answers for ticket %d: %w", ticketID, err)
 	}
@@ -80,25 +80,25 @@ func (s *Store) OwnerAnswers(ctx context.Context, ticketID int64) ([]OwnerAnswer
 			continue
 		}
 		sort.Slice(owner, func(i, j int) bool { return owner[i].ID < owner[j].ID })
-		out = append(out, OwnerAnswer{Question: q, Escalation: escalated[q.ID], Owner: owner})
+		escalation := q.ParentID != nil && escalationIDs[*q.ParentID]
+		out = append(out, OwnerAnswer{Question: q, Escalation: escalation, Owner: owner})
 	}
 	return out, nil
 }
 
-// escalationLinkedQuestions reports, for each of questions, whether its
-// parent_id names a message of type "escalation" (design shape,
-// "Escalation=true when the question's parent_id names a message of type
-// escalation").
-func escalationLinkedQuestions(ctx context.Context, s *Store, ticketID int64, questions []MessageRow) (map[int64]bool, error) {
+// escalationMessageIDs returns the ids, among questions' own parent_ids,
+// that name a message of type "escalation" (design shape, "Escalation=true
+// when the question's parent_id names a message of type escalation").
+func escalationMessageIDs(ctx context.Context, s *Store, ticketID int64, questions []MessageRow) (map[int64]bool, error) {
 	var parentIDs []int64
 	for i := range questions {
 		if questions[i].ParentID != nil {
 			parentIDs = append(parentIDs, *questions[i].ParentID)
 		}
 	}
-	out := make(map[int64]bool)
+	escalationIDs := make(map[int64]bool)
 	if len(parentIDs) == 0 {
-		return out, nil
+		return escalationIDs, nil
 	}
 
 	inClause, idArgs := inClauseFor(parentIDs)
@@ -108,27 +108,19 @@ func escalationLinkedQuestions(ctx context.Context, s *Store, ticketID int64, qu
 
 	rows, err := s.db.QueryContext(ctx, query, args...)
 	if err != nil {
-		return nil, fmt.Errorf("escalation-linked questions: %w", err)
+		return nil, fmt.Errorf("escalation message ids: %w", err)
 	}
 	defer rows.Close()
 
-	escalationIDs := make(map[int64]bool)
 	for rows.Next() {
 		var id int64
 		if scanErr := rows.Scan(&id); scanErr != nil {
-			return nil, fmt.Errorf("escalation-linked questions: %w", scanErr)
+			return nil, fmt.Errorf("escalation message ids: %w", scanErr)
 		}
 		escalationIDs[id] = true
 	}
 	if rowsErr := rows.Err(); rowsErr != nil {
-		return nil, fmt.Errorf("escalation-linked questions: %w", rowsErr)
+		return nil, fmt.Errorf("escalation message ids: %w", rowsErr)
 	}
-
-	for i := range questions {
-		q := questions[i]
-		if q.ParentID != nil && escalationIDs[*q.ParentID] {
-			out[q.ID] = true
-		}
-	}
-	return out, nil
+	return escalationIDs, nil
 }

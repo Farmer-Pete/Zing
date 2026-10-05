@@ -38,9 +38,13 @@ const (
 
 	testMsgTypeQuestion   = "question"
 	testMsgTypeEscalation = "escalation"
+	testMsgTypeAnswer     = "answer"
+	testMsgTypeReply      = "reply"
 	testWaitingQuestions  = "questions"
 	testWaitingGate       = "gate"
 	testAuthorZing        = "zing"
+	testAuthorYou         = "you"
+	testAnswerStateSent   = "sent"
 	testRuntimeClaude     = "claude"
 	testRuntimeFake       = "fake"
 	testRuntimeCodex      = "codex"

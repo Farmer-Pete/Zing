@@ -1441,7 +1441,7 @@ func TestMergeFirstPromptCarriesOwnerDecisions(t *testing.T) {
 	t.Parallel()
 	s, ticket, _ := shipTicketReady(t)
 	mergeCommitOnMain(t, s, ticket, "hello.txt", []byte(mergeHelloConflict))
-	seedOwnerDecision(t, s, ticket.ID, "Keep the deadline clear as a guard only.")
+	seedOwnerDecision(t, s, ticket.ID, "Keep the test as a guard only.")
 
 	gh := &shipGitHub{}
 	tr := &shipTracker{}
@@ -1458,7 +1458,7 @@ func TestMergeFirstPromptCarriesOwnerDecisions(t *testing.T) {
 	}
 
 	gotPrompt := rec.lastRequest(t).Prompt
-	if !strings.Contains(gotPrompt, "Keep the deadline clear as a guard only.") {
+	if !strings.Contains(gotPrompt, "Keep the test as a guard only.") {
 		t.Errorf("merge prompt does not carry the owner's decision:\n%s", gotPrompt)
 	}
 }

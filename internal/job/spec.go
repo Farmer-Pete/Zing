@@ -87,11 +87,34 @@ func renderSpec(t store.Ticket, conv store.PlanningConversation, answers []store
 		parts = append(parts, specApprovalHeader+"\n"+bulletLine(approvalNotes))
 	}
 
-	base := t.Title + "\n\n" + t.Body
+	base := neutralizeTicketHeaderLines(t.Title) + "\n\n" + neutralizeTicketHeaderLines(t.Body)
 	if len(parts) == 0 {
 		return base
 	}
 	return base + "\n\n" + specDecisionsHeader + "\n\n" + strings.Join(parts, "\n\n")
+}
+
+// neutralizeTicketHeaderLines prefixes any line of s that exactly matches
+// specDecisionsHeader or specApprovalHeader: the ticket's own title and
+// body come from the tracker, not the owner, so a ticket author could
+// otherwise write one of renderSpec's own section headers into the body
+// and forge a trailing decisions section that prompts/planreview.md's and
+// prompts/review.md's override rule would then read as the owner's own
+// word. s is returned unchanged when no line matches, so a ticket with no
+// forged header still renders byte-identical to before this check existed.
+func neutralizeTicketHeaderLines(s string) string {
+	lines := strings.Split(s, "\n")
+	changed := false
+	for i, line := range lines {
+		if line == specDecisionsHeader || line == specApprovalHeader {
+			lines[i] = "(ticket text) " + line
+			changed = true
+		}
+	}
+	if !changed {
+		return s
+	}
+	return strings.Join(lines, "\n")
 }
 
 // ownerLines applies the owner line rules (design shape, "Owner line
@@ -110,8 +133,15 @@ func ownerLines(rows []store.MessageRow, options []response.Option, escalation b
 		}
 		switch row.Type {
 		case msgTypeAnswer:
+			// An escalation's picked option is never shown (design shape,
+			// "escalation... is skipped"): the owner's choice there is
+			// "Retry"/"Abandon", not a decision worth repeating.
+			if escalation {
+				continue
+			}
 			var ap response.AnswerPayload
-			if err := json.Unmarshal(row.Payload, &ap); err != nil || ap.Option == nil || escalation {
+			hasPick := json.Unmarshal(row.Payload, &ap) == nil && ap.Option != nil
+			if !hasPick {
 				continue
 			}
 			lines = append(lines, renderOwnerRowText(row, options))
