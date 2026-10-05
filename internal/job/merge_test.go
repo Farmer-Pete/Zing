@@ -2776,3 +2776,84 @@ func TestBaseModifiedThenDirtyStartsBaseMerge(t *testing.T) {
 		t.Errorf("mergeCalls = %d, want still 1 (the refused attempt only)", len(gh.mergeCalls))
 	}
 }
+
+// TestBaseModifiedThenBehindStartsBaseMerge is
+// TestBaseModifiedThenDirtyStartsBaseMerge's own "behind" twin: a strict
+// branch rule reports mergeable_state behind, rather than dirty, once main
+// has moved out from under a refused merge, and POLL's own behind row
+// starts the same base merge, with the "is behind" notice in place of
+// "conflicts with", and still no owner question.
+func TestBaseModifiedThenBehindStartsBaseMerge(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow end-to-end flow; runs in the full suite")
+	}
+	t.Parallel()
+	s, ticket, gh, tr := shipPublished(t)
+	local := shipHeadSHA(t, s, ticket)
+	runs, required := shipGreenCI()
+	gh.runs, gh.required = runs, required
+	gh.prState = shipMergeReadyPR(local, "PR_node_base_modified_behind")
+	gh.mergeErr = fmt.Errorf("%w: %s", orchestrator.ErrMergeRefused, shipBaseModifiedGHMessage)
+
+	rule := MergeRule{Auto: true, Method: shipMergeMethodSquash}
+	commit1, err := shipPollRunWithRule(t, s, ticket, gh, tr, rule)
+	if err != nil {
+		t.Fatalf("Run (tick 1): %v", err)
+	}
+	if !shipHasMessage(commit1, "merge retry "+local) {
+		t.Fatalf("commit1.Messages = %+v, want a %q marker", commit1.Messages, "merge retry "+local)
+	}
+	pbApply(t, s, ticket, commit1)
+
+	gh.prState.MergeableState = mergeableStateBehind
+	commit2, err := shipPollRunWithRule(t, s, pbGetTicket(t, s, ticket.ID), gh, tr, rule)
+	if err != nil {
+		t.Fatalf("Run (tick 2): %v", err)
+	}
+	wantWhat := "PR #1 is behind " + pbFixtureDefaultBranch
+	if len(commit2.Messages) < 2 || commit2.Messages[0].Body != wantWhat {
+		t.Fatalf("commit2.Messages = %+v, want [0].Body = %q", commit2.Messages, wantWhat)
+	}
+	if _, parseErr := parseBaseMergeRequest(store.MessageRow{ID: 1, Body: commit2.Messages[1].Body}); parseErr != nil {
+		t.Errorf("parseBaseMergeRequest(commit2.Messages[1]): %v", parseErr)
+	}
+	if shipHasQuestion(commit2) {
+		t.Errorf("commit2.Messages = %+v, want no question", commit2.Messages)
+	}
+	if len(gh.mergeCalls) != 1 {
+		t.Errorf("mergeCalls = %d, want still 1 (the refused attempt only)", len(gh.mergeCalls))
+	}
+}
+
+// TestPollBehindWithoutRetryAsks proves that a plain behind pull request,
+// with no pending merge retry marker, never starts a base merge on its
+// own: Q2's own decision confines the behind row to a head GitHub already
+// refused, so row 9 still just asks the owner the way it does today.
+func TestPollBehindWithoutRetryAsks(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow end-to-end flow; runs in the full suite")
+	}
+	t.Parallel()
+	s, ticket, gh, tr := shipPublished(t)
+	local := shipHeadSHA(t, s, ticket)
+	runs, required := shipGreenCI()
+	gh.runs, gh.required = runs, required
+	gh.prState = shipMergeReadyPR(local, "PR_node_behind_no_retry")
+	gh.prState.MergeableState = mergeableStateBehind
+
+	commit, err := shipPollRun(t, s, ticket, gh, tr)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if !shipHasQuestion(commit) {
+		t.Errorf("commit.Messages = %+v, want a merge question", commit.Messages)
+	}
+	if !shipHasMessage(commit, "merge asked "+local) {
+		t.Errorf("commit.Messages = %+v, want %q", commit.Messages, "merge asked "+local)
+	}
+	for i := range commit.Messages {
+		if _, parseErr := parseBaseMergeRequest(store.MessageRow{ID: 1, Body: commit.Messages[i].Body}); parseErr == nil {
+			t.Errorf("commit.Messages[%d] = %q, want no base merge request", i, commit.Messages[i].Body)
+		}
+	}
+}

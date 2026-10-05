@@ -6232,6 +6232,48 @@ func TestBaseModifiedRetryRefusedAgainAsks(t *testing.T) {
 	}
 }
 
+// TestBaseModifiedRetryWithdrawnOnReopen proves that a pending "merge
+// retry" marker is withdrawn exactly like "asked" or "held" once the loop
+// reopens: row 3 (pollConvertToDraft) converts the pull request back to
+// draft and writes "merge withdrawn <sha>" in the same commit, so this
+// head never gets an automatic retry MERGE call once it needs owner
+// attention again.
+func TestBaseModifiedRetryWithdrawnOnReopen(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow end-to-end flow; runs in the full suite")
+	}
+	t.Parallel()
+	s, ticket, gh, tr := shipPublished(t)
+	local := shipHeadSHA(t, s, ticket)
+	runs, required := shipGreenCI()
+	gh.runs, gh.required = runs, required
+	gh.prState = shipMergeReadyPR(local, "PR_node_base_modified_reopen")
+	gh.mergeErr = fmt.Errorf("%w: %s", orchestrator.ErrMergeRefused, shipBaseModifiedGHMessage)
+
+	rule := MergeRule{Auto: true, Method: shipMergeMethodSquash}
+	commit1, err := shipPollRunWithRule(t, s, ticket, gh, tr, rule)
+	if err != nil {
+		t.Fatalf("Run (tick 1): %v", err)
+	}
+	if !shipHasMessage(commit1, "merge retry "+local) {
+		t.Fatalf("commit1.Messages = %+v, want a %q marker", commit1.Messages, "merge retry "+local)
+	}
+	pbApply(t, s, ticket, commit1)
+
+	runs, required = shipFailedCI()
+	gh.runs, gh.required = runs, required
+	commit2, err := shipPollRunWithRule(t, s, pbGetTicket(t, s, ticket.ID), gh, tr, rule)
+	if err != nil {
+		t.Fatalf("Run (tick 2): %v", err)
+	}
+	if !shipHasMessage(commit2, "pr draft "+local) {
+		t.Errorf("commit2.Messages = %+v, want %q", commit2.Messages, "pr draft "+local)
+	}
+	if !shipHasMessage(commit2, "merge withdrawn "+local) {
+		t.Errorf("commit2.Messages = %+v, want %q", commit2.Messages, "merge withdrawn "+local)
+	}
+}
+
 // testMergeNowWithdraws is TestMergeNowCIPendingWithdraws' and
 // TestMergeNowDraftWithdraws' shared body (design section 8.8's own "once
 // clean, the question is asked again"): the owner chose Merge now, but by

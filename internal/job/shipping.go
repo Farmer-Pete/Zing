@@ -549,13 +549,14 @@ func newestMergeMarkerKind(markers []store.MessageRow, sha string) string {
 // (design section 8.5 rows 3 to 5, 8.9): the loop just reopened on a head
 // GitHub may still be showing a stale merge question for, so it is
 // withdrawn in the same commit that notices the reopen -- "so the head can
-// be asked about again once the loop is clean". c.ResolveAll is safe to
-// set unconditionally here because shipping's own POLL never asks any
-// other kind of question (pollDone, above, resolves every question the
-// same way).
+// be asked about again once the loop is clean". A pending "merge retry"
+// marker is withdrawn too, so a reopened loop never ends in a merge nobody
+// re-approved. c.ResolveAll is safe to set unconditionally here because
+// shipping's own POLL never asks any other kind of question (pollDone,
+// above, resolves every question the same way).
 func withdrawMergeQuestionIfAsked(c store.HandlerCommit, t store.Ticket, mergeMarkers []store.MessageRow, sha string) store.HandlerCommit {
 	switch newestMergeMarkerKind(mergeMarkers, sha) {
-	case "asked", "held":
+	case "asked", "held", mergeMarkerRetry:
 	default:
 		return c
 	}
@@ -614,6 +615,17 @@ func (h shipHandler) poll(ctx context.Context, t store.Ticket, d Deps) (store.Ha
 	// starts; waiting on it would wait forever.
 	if pr.MergeableState == mergeableStateDirty {
 		return h.pollConflict(ctx, t, d, proj, wt, pr, number)
+	}
+	// GitHub refused this head's merge because main moved, and a strict
+	// branch rule now reports it behind: merge main in rather than ask.
+	if pr.MergeableState == mergeableStateBehind {
+		mergeMarkers, markerErr := d.Store.MarkersWithPrefix(ctx, t.ID, mergeMarkerPrefix)
+		if markerErr != nil {
+			return store.HandlerCommit{}, fmt.Errorf("job: shipping: poll: merge markers: %w", markerErr)
+		}
+		if newestMergeMarkerKind(mergeMarkers, pr.HeadSHA) == mergeMarkerRetry {
+			return h.pollConflict(ctx, t, d, proj, wt, pr, number)
+		}
 	}
 
 	runs, err := proj.Checks.ListCheckRuns(ctx, proj.Owner, proj.Repo, local)

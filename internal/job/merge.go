@@ -22,11 +22,13 @@ import (
 )
 
 const (
-	jobMergeName        = "merge"
-	mergeRunLabel       = "merge"
-	mergeableStateDirty = "dirty"
+	jobMergeName         = "merge"
+	mergeRunLabel        = "merge"
+	mergeableStateDirty  = "dirty"
+	mergeableStateBehind = "behind"
 
 	conflictWhatFmt      = "PR #%d conflicts with %s"
+	behindWhatFmt        = "PR #%d is behind %s"
 	conflictOtherBaseWhy = "Zing merges only the project's default branch, %s, into a ticket branch"
 	conflictLoopsWhyFmt  = "Zing already merged %s into this branch %d times and the pull request conflicts again; jobs.merge.max_loops is %d"
 	baseNotFetchedWhy    = "Zing reads the base branch's sha before it starts a merge"
@@ -57,15 +59,23 @@ const (
 	markerMergeCheckFailedDeliveredFmt = "merge check failed delivered run %d"
 )
 
-// pollConflict is POLL's own dirty row: GitHub builds no merge ref for a
-// conflicting pull request, so CI never starts and waiting on it would wait
-// forever. A base other than the project's own default branch, or a ticket
-// that already opened jobs.merge.max_loops base merge requests, escalates
+// pollConflict is POLL's own dirty row, and, when a "Base branch was
+// modified" refusal left a pending merge retry marker on this head, its
+// behind row too: GitHub builds no merge ref for a conflicting pull
+// request, so CI never starts and waiting on it would wait forever, and a
+// behind head retrying a refused merge needs the same base merge rather
+// than a second automatic MERGE call that GitHub would just refuse again.
+// A base other than the project's own default branch, or a ticket that
+// already opened jobs.merge.max_loops base merge requests, escalates
 // instead of opening another one. Otherwise it fetches the base branch's
-// current sha and writes the conflict notice and the request marker
-// together, in one commit, with ClearPoll set.
+// current sha and writes the conflict or behind notice and the request
+// marker together, in one commit, with ClearPoll set.
 func (h shipHandler) pollConflict(ctx context.Context, t store.Ticket, d Deps, proj Project, wt orchestrator.Worktree, pr orchestrator.PRState, number int) (store.HandlerCommit, error) {
-	what := fmt.Sprintf(conflictWhatFmt, number, pr.BaseRef)
+	whatFmt := conflictWhatFmt
+	if pr.MergeableState == mergeableStateBehind {
+		whatFmt = behindWhatFmt
+	}
+	what := fmt.Sprintf(whatFmt, number, pr.BaseRef)
 	defaultBranch := proj.Orch.DefaultBranch()
 	if pr.BaseRef != defaultBranch {
 		c := shipEscalation(t, d, what, fmt.Sprintf(conflictOtherBaseWhy, defaultBranch), "")
@@ -103,7 +113,7 @@ func (h shipHandler) pollConflict(ctx context.Context, t store.Ticket, d Deps, p
 		{TicketID: t.ID, Type: msgTypeUpdate, Author: authorSystem, Body: req.body()},
 	}
 	c.ClearPoll = true
-	slog.Info("base merge requested", "ticket_id", t.ID, "pr", number, "base", pr.BaseRef, "base_sha", sha, "after_run", maxRunID)
+	slog.Info("base merge requested", "ticket_id", t.ID, "pr", number, "head_sha", pr.HeadSHA, "mergeable_state", pr.MergeableState, "base", pr.BaseRef, "base_sha", sha, "after_run", maxRunID)
 	return c, nil
 }
 
