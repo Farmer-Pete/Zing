@@ -1025,3 +1025,45 @@ func TestThreadOpenZeroOrMissingRendersEmptyThread(t *testing.T) {
 		})
 	}
 }
+
+// TestProjectWithoutIDShowsFirstProject proves that opening the Project
+// view with project 0 (a fresh page load, or g p with no project open,
+// ticket #44 "Added from #112") falls back to the first entry
+// store.ListProjects returns -- sorted by name, then id -- rather than
+// rendering project 0's (nonexistent) page (design section 6.5,
+// mainComponent).
+func TestProjectWithoutIDShowsFirstProject(t *testing.T) {
+	s := newConsoleTestStore(t)
+
+	testProjectID, err := s.EnsureProject(t.Context(), testProject)
+	if err != nil {
+		t.Fatalf("EnsureProject(testProject): %v", err)
+	}
+	if _, otherErr := s.EnsureProject(t.Context(), otherProject); otherErr != nil {
+		t.Fatalf("EnsureProject(otherProject): %v", otherErr)
+	}
+	seedTicketIn(t, s, testProject, "1", "Acme only ticket")
+	seedTicketIn(t, s, otherProject, "1", "Other only ticket")
+
+	projects, err := s.ListProjects(t.Context())
+	if err != nil {
+		t.Fatalf("ListProjects: %v", err)
+	}
+	if len(projects) != 2 || projects[0].ID != testProjectID {
+		t.Fatalf("ListProjects() = %+v, want testProject (id %d) first", projects, testProjectID)
+	}
+
+	srv := newTestServer(t, s, bus.New(), nil, newTestLogHandler(t))
+
+	main := mainFrame(t, srv.URL, "project", 0, 0)
+
+	if !strings.Contains(main, fmt.Sprintf(`data-pickup-project="%d"`, testProjectID)) {
+		t.Errorf("project view with project=0 did not default to the first project (id %d); got:\n%s", testProjectID, main)
+	}
+	if !strings.Contains(main, "Acme only ticket") {
+		t.Errorf("project view with project=0 missing the first project's ticket; got:\n%s", main)
+	}
+	if strings.Contains(main, "Other only ticket") {
+		t.Errorf("project view with project=0 leaked the other project's ticket; got:\n%s", main)
+	}
+}

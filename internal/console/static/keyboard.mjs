@@ -903,6 +903,7 @@ export const ACTION_LABELS = {
 	'nav-inbox': 'Go to inbox',
 	'nav-recent': 'Go to recent',
 	'nav-feed': 'Go to feed',
+	'nav-project': 'Go to project',
 	'focus-next': 'Focus next item',
 	'focus-prev': 'Focus previous item',
 	open: 'Open focused item',

@@ -514,6 +514,7 @@ const allKeysGoActions = [
 	'nav-inbox',
 	'nav-recent',
 	'nav-feed',
+	'nav-project',
 	'focus-next',
 	'focus-prev',
 	'open',
@@ -1088,4 +1089,15 @@ test('notePatchFocus sets a deadline only when the focused id changed', () => {
 
 	state = { suppressUntil: 1500 };
 	assert.equal(notePatchFocus(state, 'question:4', 'question:4', 1000), 1500);
+});
+
+test('handleKeyEvent: g p calls run with the project action', () => {
+	const state = freshKeyState();
+	const calls = [];
+	const run = (action) => calls.push(action);
+
+	handleKeyEvent(state, { key: 'g', target: { tagName: 'BODY' }, preventDefault: () => {} }, 0, run);
+	handleKeyEvent(state, { key: 'p', target: { tagName: 'BODY' }, preventDefault: () => {} }, 10, run);
+
+	assert.deepEqual(calls, ['nav-project']);
 });

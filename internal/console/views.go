@@ -196,6 +196,16 @@ func (c *console) mainComponent(ctx context.Context, view string, open, project 
 		}
 		return templates.Feed(rows), nil
 	case viewProject:
+		if project == 0 {
+			projects, err := c.store.ListProjects(ctx)
+			if err != nil {
+				return nil, err
+			}
+			if len(projects) > 0 {
+				project = projects[0].ID
+			}
+			slog.DebugContext(ctx, "console: project view defaulted", "project_id", project)
+		}
 		tickets, err := c.store.TicketsByProject(ctx, project)
 		if err != nil {
 			return nil, err

@@ -1266,6 +1266,12 @@ const actions = {
 	'nav-inbox': () => navigate({ view: 'inbox', open: 0, project: 0 }),
 	'nav-recent': () => navigate({ view: 'recent', open: 0, project: 0 }),
 	'nav-feed': () => navigate({ view: 'feed', open: 0, project: 0 }),
+	'nav-project': () =>
+		navigate({
+			view: 'project',
+			open: 0,
+			project: state.nav.view === 'project' ? state.nav.project : 0,
+		}),
 	'focus-next': () => moveFocus('next'),
 	'focus-prev': () => moveFocus('prev'),
 	open: () => openFocused(),

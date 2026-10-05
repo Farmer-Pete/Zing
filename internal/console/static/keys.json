@@ -19,6 +19,12 @@
   },
   {
     "keys": [
+      "g p"
+    ],
+    "action": "nav-project"
+  },
+  {
+    "keys": [
       "j"
     ],
     "action": "focus-next"

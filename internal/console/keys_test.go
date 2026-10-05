@@ -50,7 +50,7 @@ func TestKeysJSONMatchesCommitted(t *testing.T) {
 // list, not the prose, as the authoritative closed set to check Bindings
 // against.
 var every14Key = []string{
-	"g i", "g r", "g f",
+	"g i", "g r", "g f", "g p",
 	"j", "k",
 	"o", "Enter",
 	"u",
