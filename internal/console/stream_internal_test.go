@@ -25,20 +25,6 @@ import (
 	"zing/internal/store"
 )
 
-// newInternalTestStore opens a fresh Store on a temp-file database, closed on
-// test cleanup: the same pattern console_test.go's newConsoleTestStore uses,
-// duplicated here because that helper lives in package console_test and this
-// file needs package console's own unexported seams.
-func newInternalTestStore(t *testing.T) *store.Store {
-	t.Helper()
-	s, err := store.Open(t.Context(), filepath.Join(t.TempDir(), "zing.db"))
-	if err != nil {
-		t.Fatalf("store.Open: %v", err)
-	}
-	t.Cleanup(func() { _ = s.Close() })
-	return s
-}
-
 // streamTestServer serves c.handleStream directly from an httptest.Server.
 // When cancelBeforeHandle is true, the handler wraps the request context in
 // one that is already cancelled before handleStream runs (modeling Datastar
@@ -102,11 +88,15 @@ func newTestLogHandler(t *testing.T, w io.Writer) *Handler {
 }
 
 // newStreamTestConsole builds a console and its log Handler for a /stream
-// test: a fresh store plus newTestLogHandler's Handler, installed as slog's
-// default.
+// test: a fresh store, closed on test cleanup, plus newTestLogHandler's
+// Handler, installed as slog's default.
 func newStreamTestConsole(t *testing.T) (*console, *Handler) {
 	t.Helper()
-	s := newInternalTestStore(t)
+	s, err := store.Open(t.Context(), filepath.Join(t.TempDir(), "zing.db"))
+	if err != nil {
+		t.Fatalf("store.Open: %v", err)
+	}
+	t.Cleanup(func() { _ = s.Close() })
 	h := newTestLogHandler(t, io.Discard)
 	return &console{store: s, bus: bus.New(), log: h}, h
 }
@@ -119,41 +109,6 @@ func ringEntries(h *Handler) []LogEntry {
 	return append([]LogEntry(nil), h.ring.entries...)
 }
 
-// assertNoStreamError asserts the console log handler holds no ERROR (or
-// above) record and that alertsComponent would render no line, then asserts
-// the ring holds a Debug entry for each of wantDebugMessages: the cancelled
-// failure is still logged, just not loudly.
-func assertNoStreamError(t *testing.T, h *Handler, body string, wantDebugMessages []string) {
-	t.Helper()
-	if strings.Contains(body, `id="nav"`) {
-		t.Fatalf("response body carries a #nav frame; the store read did not observe the cancelled context:\n%s", body)
-	}
-
-	for _, e := range h.Warnings(RingCapacity) {
-		if e.Level >= slog.LevelError {
-			t.Errorf("ERROR record in ring: %q", e.Message)
-		}
-	}
-	if lines := buildAlertLines(h.Warnings(alertsLimit)); len(lines) != 0 {
-		t.Errorf("alertsComponent would render %d line(s), want none: %+v", len(lines), lines)
-	}
-
-	entries := ringEntries(h)
-
-	for _, want := range wantDebugMessages {
-		found := false
-		for _, e := range entries {
-			if e.Message == want && e.Level == slog.LevelDebug {
-				found = true
-				break
-			}
-		}
-		if !found {
-			t.Errorf("ring missing a Debug %q entry", want)
-		}
-	}
-}
-
 // TestStreamCancelLogsNoError is the regression test for the bug: a /stream
 // whose request context is already done (the owner navigated, or closed the
 // tab, and Datastar aborted the prior fetch) must log nothing at ERROR or
@@ -162,21 +117,63 @@ func assertNoStreamError(t *testing.T, h *Handler, body string, wantDebugMessage
 // build-nav failure). Not parallel: it swaps slog's process-wide default
 // logger (gate_test.go's own precedent for why that must stay sequential).
 func TestStreamCancelLogsNoError(t *testing.T) {
-	t.Run("inbox", func(t *testing.T) {
-		c, h := newStreamTestConsole(t)
-		srv := streamTestServer(t, c, true)
+	cases := []struct {
+		name           string
+		view           string
+		open           int64
+		datastarHeader bool
+		wantDebug      []string
+	}{
+		{
+			name:      "inbox",
+			view:      viewInbox,
+			open:      0,
+			wantDebug: []string{"console: stream: build nav"},
+		},
+		{
+			name:           "thread",
+			view:           viewThread,
+			open:           1,
+			datastarHeader: true,
+			wantDebug:      []string{"console: stream: mark thread read", "console: stream: build nav"},
+		},
+	}
 
-		body := doStreamRequest(t, srv.URL, viewInbox, 0, false)
-		assertNoStreamError(t, h, body, []string{logMsgBuildNav})
-	})
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			c, h := newStreamTestConsole(t)
+			srv := streamTestServer(t, c, true)
 
-	t.Run("thread", func(t *testing.T) {
-		c, h := newStreamTestConsole(t)
-		srv := streamTestServer(t, c, true)
+			body := doStreamRequest(t, srv.URL, tc.view, tc.open, tc.datastarHeader)
 
-		body := doStreamRequest(t, srv.URL, viewThread, 1, true)
-		assertNoStreamError(t, h, body, []string{"console: stream: mark thread read", logMsgBuildNav})
-	})
+			if strings.Contains(body, `id="nav"`) {
+				t.Fatalf("response body carries a #nav frame; the store read did not observe the cancelled context:\n%s", body)
+			}
+
+			for _, e := range h.Warnings(RingCapacity) {
+				if e.Level >= slog.LevelError {
+					t.Errorf("ERROR record in ring: %q", e.Message)
+				}
+			}
+			if lines := buildAlertLines(h.Warnings(alertsLimit)); len(lines) != 0 {
+				t.Errorf("alertsComponent would render %d line(s), want none: %+v", len(lines), lines)
+			}
+
+			entries := ringEntries(h)
+			for _, want := range tc.wantDebug {
+				found := false
+				for _, e := range entries {
+					if e.Message == want && e.Level == slog.LevelDebug {
+						found = true
+						break
+					}
+				}
+				if !found {
+					t.Errorf("ring missing a Debug %q entry", want)
+				}
+			}
+		})
+	}
 }
 
 // TestStreamStoreErrorStillLogsError proves the fix is scoped to a
@@ -192,14 +189,15 @@ func TestStreamStoreErrorStillLogsError(t *testing.T) {
 
 	doStreamRequest(t, srv.URL, viewInbox, 0, false)
 
+	const wantMsg = "console: stream: build nav"
 	found := false
 	for _, e := range h.Warnings(RingCapacity) {
-		if e.Message == logMsgBuildNav && e.Level == slog.LevelError {
+		if e.Message == wantMsg && e.Level == slog.LevelError {
 			found = true
 		}
 	}
 	if !found {
-		t.Errorf("ring missing an ERROR %q entry for a live-context store failure", logMsgBuildNav)
+		t.Errorf("ring missing an ERROR %q entry for a live-context store failure", wantMsg)
 	}
 }
 
