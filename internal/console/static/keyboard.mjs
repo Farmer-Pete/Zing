@@ -552,7 +552,8 @@ export function sendTargets(questions, focusedID) {
 	const targets = (questions ?? []).filter((q) => q.hasDraft && !q.conflicted);
 	const ids = targets.map((q) => q.id);
 	const keys = targets.map((q) => q.key);
-	const confirm = ids.length > 0 && !(ids.length === 1 && ids[0] === focusedID);
+	const onlyFocused = ids.length === 1 && ids[0] === focusedID;
+	const confirm = ids.length > 0 && !onlyFocused;
 	return { ids, keys, confirm };
 }
 
@@ -569,26 +570,6 @@ export function sendConfirmText(keys) {
 		return `Send 1 reply on ${keys[0]}?`;
 	}
 	return `Send ${keys.length} replies on ${keys.join(', ')}?`;
-}
-
-/**
- * skipConflicted filters a conflicted reply box out of whatever list
- * console.js is about to save or send (ticket #43, cause 2, Q5: a box that
- * just got a "changed in another tab" note stays neither saved nor sent
- * until the owner's next keystroke proves they have seen it and are typing
- * over it). console.js's postSendBatchLocked runs this over the pending
- * saves, the emptied-box clears, and the post-send clear list, and
- * rearmAutosaves runs it over every box it would otherwise re-arm, each
- * passing its own isConflicted(item) built from conflictedBoxes.has(key).
- * Items that pass through keep their original order, since none of those
- * callers depend on order but a stable one is the least surprising default.
- *
- * @param {object[]} items
- * @param {(item: object) => boolean} isConflicted
- * @returns {object[]}
- */
-export function skipConflicted(items, isConflicted) {
-	return (items ?? []).filter((item) => !isConflicted(item));
 }
 
 // AUTOSAVE_DEBOUNCE_MS is how long installReplyAutosave (console.js) waits

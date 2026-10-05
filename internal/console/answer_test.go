@@ -242,6 +242,26 @@ func TestDraft_RejectsMalformedAndOversizedBodies(t *testing.T) {
 		}
 	})
 
+	t.Run("base over 8000 characters", func(t *testing.T) {
+		t.Parallel()
+		body := fmt.Sprintf(`{"ticket":%d,"text":"hi","base":%q}`, ticketID, strings.Repeat("x", 8001))
+		resp := doRequest(t, mutationRequest(t, srv, "/draft", body))
+		defer func() { _ = resp.Body.Close() }()
+		if resp.StatusCode != http.StatusBadRequest {
+			t.Errorf("status = %d, want 400", resp.StatusCode)
+		}
+	})
+
+	t.Run("base of exactly 8000 characters is not rejected for its length", func(t *testing.T) {
+		t.Parallel()
+		body := fmt.Sprintf(`{"ticket":%d,"text":"hi","base":%q}`, ticketID, strings.Repeat("x", 8000))
+		resp := doRequest(t, mutationRequest(t, srv, "/draft", body))
+		defer func() { _ = resp.Body.Close() }()
+		if resp.StatusCode == http.StatusBadRequest {
+			t.Errorf("status = %d, want anything but 400 (length alone must not reject it)", resp.StatusCode)
+		}
+	})
+
 	t.Run("oversized body", func(t *testing.T) {
 		t.Parallel()
 		filler := strings.Repeat("x", 80<<10) // past the 64 KiB cap
@@ -492,16 +512,30 @@ func TestSend_RejectsOversizedOrInvalidQuestionList(t *testing.T) {
 	}
 	oversizedBody := fmt.Sprintf(`{"ticket":%d,"questions":[%s]}`, ticketID, strings.Join(oversizedIDs, ","))
 	oversizedResp := doRequest(t, mutationRequest(t, srv, "/send", oversizedBody))
+	oversizedRespBody, err := io.ReadAll(oversizedResp.Body)
 	_ = oversizedResp.Body.Close()
+	if err != nil {
+		t.Fatalf("read 51-id POST /send body: %v", err)
+	}
 	if oversizedResp.StatusCode != http.StatusBadRequest {
 		t.Errorf("51 ids: status = %d, want 400", oversizedResp.StatusCode)
+	}
+	if got := strings.TrimSpace(string(oversizedRespBody)); got != "bad request" {
+		t.Errorf("51 ids: body = %q, want %q", got, "bad request")
 	}
 
 	zeroBody := fmt.Sprintf(`{"ticket":%d,"questions":[%d,0]}`, ticketID, q1)
 	zeroResp := doRequest(t, mutationRequest(t, srv, "/send", zeroBody))
+	zeroRespBody, err := io.ReadAll(zeroResp.Body)
 	_ = zeroResp.Body.Close()
+	if err != nil {
+		t.Fatalf("read id-0 POST /send body: %v", err)
+	}
 	if zeroResp.StatusCode != http.StatusBadRequest {
 		t.Errorf("id 0: status = %d, want 400", zeroResp.StatusCode)
+	}
+	if got := strings.TrimSpace(string(zeroRespBody)); got != "bad request" {
+		t.Errorf("id 0: body = %q, want %q", got, "bad request")
 	}
 
 	if got := replyDraftState(t, s, ticketID, q1); got != testDraftState {

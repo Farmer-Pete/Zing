@@ -1,7 +1,9 @@
 package store
 
 import (
+	"crypto/sha256"
 	"database/sql"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -593,6 +595,11 @@ func TestSaveDraft_StaleBaseConflicts(t *testing.T) {
 	if same.MessageID != tabA.MessageID {
 		t.Errorf("SaveDraft(same text, stale base) MessageID = %d, want %d", same.MessageID, tabA.MessageID)
 	}
+	if m, getErr := s.GetMessage(t.Context(), tabA.MessageID); getErr != nil {
+		t.Fatalf("GetMessage: %v", getErr)
+	} else if m.Body != testReplyFromTabA {
+		t.Errorf("SaveDraft(same text, stale base) stored body = %q, want %q", m.Body, testReplyFromTabA)
+	}
 
 	// A nil base keeps overwriting unconditionally, as before this ticket.
 	overwritten, err := s.SaveDraft(t.Context(), DraftInput{TicketID: ticketID, QuestionID: &qID, Text: "no base at all"})
@@ -602,6 +609,11 @@ func TestSaveDraft_StaleBaseConflicts(t *testing.T) {
 	if overwritten.MessageID != tabA.MessageID || !overwritten.Replaced {
 		t.Errorf("SaveDraft(nil base) = %+v, want MessageID=%d Replaced=true", overwritten, tabA.MessageID)
 	}
+	if m, getErr := s.GetMessage(t.Context(), tabA.MessageID); getErr != nil {
+		t.Fatalf("GetMessage: %v", getErr)
+	} else if m.Body != "no base at all" {
+		t.Errorf("SaveDraft(nil base) stored body = %q, want %q", m.Body, "no base at all")
+	}
 
 	// A base equal to the stored body updates cleanly.
 	updated, err := s.SaveDraft(t.Context(), DraftInput{TicketID: ticketID, QuestionID: &qID, Text: "caught up", Base: new("no base at all")})
@@ -610,6 +622,11 @@ func TestSaveDraft_StaleBaseConflicts(t *testing.T) {
 	}
 	if updated.MessageID != tabA.MessageID {
 		t.Errorf("SaveDraft(base matches stored) MessageID = %d, want %d", updated.MessageID, tabA.MessageID)
+	}
+	if m, getErr := s.GetMessage(t.Context(), tabA.MessageID); getErr != nil {
+		t.Fatalf("GetMessage: %v", getErr)
+	} else if m.Body != "caught up" {
+		t.Errorf("SaveDraft(base matches stored) stored body = %q, want %q", m.Body, "caught up")
 	}
 
 	// With no row at all, a non-empty base that matches neither the (empty)
@@ -655,8 +672,14 @@ func TestDraftFingerprint(t *testing.T) {
 	if no == ok1 {
 		t.Errorf("draftFingerprint(%q) = draftFingerprint(%q) = %q, want different values", "no", "ok", ok1)
 	}
-	if strings.Contains(ok1, "ok") || strings.Contains(no, "no") {
-		t.Errorf("draftFingerprint leaked its input: ok=%q no=%q", ok1, no)
+	// An unkeyed hex(sha256(s))[:16] would pass every check above, but the
+	// key is the whole reason draftFingerprint exists instead of a plain
+	// hash (a reader of the log could otherwise recover "ok" by guessing).
+	// Comparing against that unkeyed digest catches a draftFingerprint that
+	// dropped the HMAC key.
+	unkeyed := sha256.Sum256([]byte("ok"))
+	if unkeyedHex := hex.EncodeToString(unkeyed[:])[:16]; ok1 == unkeyedHex {
+		t.Errorf("draftFingerprint(%q) = %q, matches the unkeyed sha256 digest: it is not keyed", "ok", ok1)
 	}
 
 	empty := draftFingerprint("")

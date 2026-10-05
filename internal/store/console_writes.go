@@ -64,13 +64,20 @@ const changedInAnotherTabReason = "changed in another tab"
 // checkDraftBase reports a *ConflictError when base names what a tab last
 // saw saved, but the stored value (current) has since moved away from both
 // that base and the value this call is about to write, text (empty for a
-// clear). A nil base never conflicts: the caller sent no base, so
+// clear). Current is captured by address into the returned ConflictError,
+// for the caller to learn as its next base (D4: "the client records the
+// stored text as the box's base"). The three ways this passes are each
+// named: noCheck is the caller sending no base at all, so
 // insertReplyDraftTx and clearReplyDraftTx keep overwriting unconditionally,
-// exactly as they did before this ticket. Current is captured by address
-// into the returned ConflictError, for the caller to learn as its next base
-// (D4: "the client records the stored text as the box's base").
+// exactly as they did before this ticket; unchanged is base still matching
+// what is stored; sameWrite is this write changing nothing regardless of
+// base, since there is then nothing tab B would overwrite that it did not
+// already intend to write.
 func checkDraftBase(base *string, current, text string) error {
-	if base == nil || current == *base || current == text {
+	noCheck := base == nil
+	unchanged := noCheck || current == *base
+	sameWrite := current == text
+	if unchanged || sameWrite {
 		return nil
 	}
 	return &ConflictError{Reason: changedInAnotherTabReason, Current: &current}
@@ -81,20 +88,13 @@ func checkDraftBase(base *string, current, text string) error {
 // would let a reader of the log recover a short draft such as "ok" by
 // hashing guesses; keying it with a secret that never leaves this process
 // stops that, at the cost of fingerprints never matching across a restart
-// (design section's own risk list).
-var fingerprintKey = randomFingerprintKey()
-
-// randomFingerprintKey panics on failure rather than returning an error:
-// crypto/rand.Read failing means the process has no usable entropy source,
-// which every other security-sensitive path in this codebase would also be
-// unable to tolerate, so there is no sane fallback to return instead.
-func randomFingerprintKey() []byte {
+// (design section's own risk list). crypto/rand.Read is documented to never
+// return an error, so there is no fallback branch to write.
+var fingerprintKey = func() []byte {
 	key := make([]byte, 32)
-	if _, err := rand.Read(key); err != nil {
-		panic(fmt.Sprintf("draft fingerprint key: %v", err))
-	}
+	_, _ = rand.Read(key)
 	return key
-}
+}()
 
 // draftFingerprint returns the first 16 hex characters of
 // HMAC-SHA256(fingerprintKey, s): logSaveDraftOutcome's own stand-in for a
@@ -288,47 +288,38 @@ func logSaveDraftOutcome(ctx context.Context, in DraftInput, result DraftResult,
 		questionID = *in.QuestionID
 	}
 	hasBase := in.Base != nil
+	attrs := []any{"ticket_id", in.TicketID, "question_id", questionID, "has_base", hasBase}
+	if hasBase {
+		attrs = append(attrs, "base_fp", draftFingerprint(*in.Base), "text_fp", draftFingerprint(in.Text))
+	}
+
 	if err != nil {
-		if ce, ok := errors.AsType[*ConflictError](err); ok {
-			if ce.Reason == changedInAnotherTabReason && hasBase && ce.Current != nil {
-				slog.InfoContext(ctx, "save draft conflict",
-					"ticket_id", in.TicketID, "question_id", questionID, "reason", ce.Reason, "has_base", hasBase,
-					"base_fp", draftFingerprint(*in.Base), "text_fp", draftFingerprint(in.Text), "current_fp", draftFingerprint(*ce.Current))
-			} else {
-				slog.InfoContext(ctx, "save draft conflict",
-					"ticket_id", in.TicketID, "question_id", questionID, "reason", ce.Reason, "has_base", hasBase)
-			}
+		ce, ok := errors.AsType[*ConflictError](err)
+		if !ok {
+			return
 		}
+		attrs = append(attrs, "reason", ce.Reason)
+		staleBase := ce.Reason == changedInAnotherTabReason && hasBase && ce.Current != nil
+		if staleBase {
+			attrs = append(attrs, "current_fp", draftFingerprint(*ce.Current))
+		}
+		slog.InfoContext(ctx, "save draft conflict", attrs...)
 		return
 	}
+
 	clearsReplyDraft := in.QuestionID != nil && in.Text == "" && in.Option == nil && in.Item == nil
 	if clearsReplyDraft {
-		switch {
-		case result.Cleared && hasBase:
-			slog.InfoContext(ctx, "draft cleared",
-				"ticket_id", in.TicketID, "question_id", questionID, "message_id", result.MessageID,
-				"cleared", result.Cleared, "has_base", hasBase,
-				"base_fp", draftFingerprint(*in.Base), "text_fp", draftFingerprint(in.Text))
-		case result.Cleared:
-			slog.InfoContext(ctx, "draft cleared",
-				"ticket_id", in.TicketID, "question_id", questionID, "message_id", result.MessageID,
-				"cleared", result.Cleared, "has_base", hasBase)
-		default:
-			slog.InfoContext(ctx, "draft clear: nothing to clear",
-				"ticket_id", in.TicketID, "question_id", questionID, "has_base", hasBase)
+		if !result.Cleared {
+			slog.InfoContext(ctx, "draft clear: nothing to clear", attrs...)
+			return
 		}
+		attrs = append(attrs, "message_id", result.MessageID, "cleared", result.Cleared)
+		slog.InfoContext(ctx, "draft cleared", attrs...)
 		return
 	}
-	if hasBase {
-		slog.InfoContext(ctx, "draft saved",
-			"ticket_id", in.TicketID, "question_id", questionID, "message_id", result.MessageID,
-			"replaced", result.Replaced, "has_base", hasBase,
-			"base_fp", draftFingerprint(*in.Base), "text_fp", draftFingerprint(in.Text))
-		return
-	}
-	slog.InfoContext(ctx, "draft saved",
-		"ticket_id", in.TicketID, "question_id", questionID, "message_id", result.MessageID,
-		"replaced", result.Replaced, "has_base", hasBase)
+
+	attrs = append(attrs, "message_id", result.MessageID, "replaced", result.Replaced)
+	slog.InfoContext(ctx, "draft saved", attrs...)
 }
 
 // openQuestionForTicketTx reads questionID and returns its parsed payload,
