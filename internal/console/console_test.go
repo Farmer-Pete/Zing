@@ -182,6 +182,20 @@ func newTestServerSandboxTracker(
 	floor response.Severity, sandboxReason string, tr tracker.Tracker, user string,
 ) *httptest.Server {
 	t.Helper()
+	return newTestServerConfig(t, s, b, m, log, floor, sandboxReason, tr, user, nil)
+}
+
+// newTestServerConfig is newTestServerSandboxTracker with one more hook,
+// configure, run on the *http.Server before Start: nil behaves exactly like
+// newTestServerSandboxTracker. stream_test.go's newReadTimeoutTestServer is
+// the one caller that passes a non-nil hook, to set ReadTimeout, rather than
+// duplicating this listener-reservation and placeholder-swap recipe.
+func newTestServerConfig(
+	t *testing.T, s *store.Store, b *bus.Broker, m *machine.Machine, log *console.Handler,
+	floor response.Severity, sandboxReason string, tr tracker.Tracker, user string,
+	configure func(*http.Server),
+) *httptest.Server {
+	t.Helper()
 
 	var lc net.ListenConfig
 	ln, err := lc.Listen(t.Context(), "tcp", testBindHost+":0")
@@ -199,6 +213,9 @@ func newTestServerSandboxTracker(
 		t.Fatalf("close the placeholder listener: %v", err)
 	}
 	srv.Listener = ln
+	if configure != nil {
+		configure(srv.Config)
+	}
 	srv.Start()
 	t.Cleanup(srv.Close)
 	return srv
@@ -454,15 +471,22 @@ func TestIndexRendersShellRegionsAndScript(t *testing.T) {
 		`id="rail"`,
 		`id="stream-ctl"`,
 		`data-signals="{view: 'inbox', open: 0, project: 0}"`,
-		`data-init="@get('/stream')"`,
-		`data-on:zing-nav="$view = evt.detail.view; $open = evt.detail.open; $project = evt.detail.project; @get('/stream')"`,
+		`data-init="@get('/stream', {retryMaxCount: 0})"`,
+		`data-on:zing-nav="$view = evt.detail.view; $open = evt.detail.open; $project = evt.detail.project; @get('/stream', {retryMaxCount: 0})"`,
 		"Add a hello endpoint",
+		`<script type="module" src="/static/console.js">`,
 		`<script type="module" src="/static/datastar.js">`,
 		`<meta name="viewport" content="width=device-width, initial-scale=1">`,
 	} {
 		if !strings.Contains(got, want) {
 			t.Errorf("GET / body missing %q; got:\n%s", want, got)
 		}
+	}
+
+	consoleIdx := strings.Index(got, `<script type="module" src="/static/console.js">`)
+	datastarIdx := strings.Index(got, `<script type="module" src="/static/datastar.js">`)
+	if consoleIdx > datastarIdx {
+		t.Errorf("GET / body: console.js (index %d) must load before datastar.js (index %d)", consoleIdx, datastarIdx)
 	}
 }
 

@@ -7,6 +7,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"net/http/httptest"
 	"net/url"
 	"runtime"
 	"strings"
@@ -60,6 +61,94 @@ func readInitialFrames(t *testing.T, r *bufio.Reader) (nav, main, rail, alerts s
 	rail = readFrame(t, r)
 	alerts = readFrame(t, r)
 	return nav, main, rail, alerts
+}
+
+// newReadTimeoutTestServer is newTestServerSandboxTracker (console_test.go)
+// with the underlying http.Server's ReadTimeout set to readTimeout before
+// Start, through newTestServerConfig's hook: the same field newServer
+// (cmd/zing/serve.go) sets to 10s, only shorter, so a stream opened against
+// this server hits the same net/http background-read deadline newServer's
+// real stream traffic does, just sooner.
+func newReadTimeoutTestServer(t *testing.T, s *store.Store, b *bus.Broker, readTimeout time.Duration) *httptest.Server {
+	t.Helper()
+	return newTestServerConfig(t, s, b, nil, newTestLogHandler(t), response.SeverityMinor, "", nil, "", func(c *http.Server) {
+		c.ReadTimeout = readTimeout
+	})
+}
+
+// TestStreamOutlivesServerReadTimeout pins the outcome the fix targets: a
+// /stream connection stays open and keeps patching past the server's own
+// ReadTimeout (200ms here, in place of newServer's 10s, so the test runs in
+// under a second). It is not a regression test of handleStream's own
+// SetReadDeadline(time.Time{}) call -- the test passes with or without that
+// call, because this request is a bodyless GET and go1.27's net/http
+// (server.go startBackgroundRead) already clears the read deadline before
+// the handler runs -- so it does not reproduce the 19:25:57 cancel (H1
+// remains unconfirmed).
+func TestStreamOutlivesServerReadTimeout(t *testing.T) {
+	t.Parallel()
+	s := newConsoleTestStore(t)
+	b := bus.New()
+
+	srv := newReadTimeoutTestServer(t, s, b, 200*time.Millisecond)
+
+	resp, r, cancel := openStream(t, srv.URL, "inbox", 0, 0)
+	defer cancel()
+	defer func() { _ = resp.Body.Close() }()
+
+	readInitialFrames(t, r)
+
+	time.Sleep(500 * time.Millisecond) // past the 200ms ReadTimeout
+	b.Publish()
+
+	nav, main, rail, alerts := readInitialFrames(t, r)
+	assertExactSSEFraming(t, nav)
+	assertExactSSEFraming(t, main)
+	assertExactSSEFraming(t, rail)
+	assertExactSSEFraming(t, alerts)
+	if !strings.Contains(nav, `id="nav"`) {
+		t.Errorf("post-ReadTimeout nav frame missing #nav; got:\n%s", nav)
+	}
+}
+
+// TestStreamEndsCleanlyWhenAFrameFailsToBuild proves a frame that fails to
+// build (here, a store read against a closed database) ends the stream with
+// a clean EOF rather than a hang or a write error: the client's fetch sees a
+// finished event it can reconnect on (design section's "the server half of
+// the reconnect contract"). newConsoleTestStore's own t.Cleanup double-closes
+// s and ignores that second error, so closing it early here is safe.
+func TestStreamEndsCleanlyWhenAFrameFailsToBuild(t *testing.T) {
+	t.Parallel()
+	s := newConsoleTestStore(t)
+	seedTicket(t, s, "fake#1", "Add a hello endpoint")
+	b := bus.New()
+
+	srv := newTestServer(t, s, b, nil, newTestLogHandler(t))
+
+	resp, r, cancel := openStream(t, srv.URL, "inbox", 0, 0)
+	defer cancel()
+	defer func() { _ = resp.Body.Close() }()
+
+	readInitialFrames(t, r)
+
+	if err := s.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	b.Publish()
+
+	ch := make(chan error, 1)
+	go func() {
+		_, err := io.ReadAll(r)
+		ch <- err
+	}()
+	select {
+	case err := <-ch:
+		if err != nil {
+			t.Errorf("io.ReadAll(body) after a frame failed to build: %v, want nil (a clean EOF)", err)
+		}
+	case <-time.After(frameTimeout):
+		t.Fatal("stream did not end within frameTimeout after a frame failed to build")
+	}
 }
 
 func TestStreamPatchesAllFourRegionsOnConnect(t *testing.T) {

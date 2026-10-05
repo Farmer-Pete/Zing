@@ -7,7 +7,9 @@
 // from a fixture keys.json, input-context suppression, the mac/non-mac
 // send chord, the id-based focus step (next, previous, from no focus,
 // empty list), reconcileFocus across insertion/removal/reorder (focused
-// first/middle/last row removed), and collectPatchWork.
+// first/middle/last row removed), collectPatchWork, and the /stream
+// reconnect-and-stale-marker decisions (reduceStreamStatus, reconnectDelay,
+// staleMarkerText).
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
@@ -37,6 +39,12 @@ import {
 	unsavedReplyBody,
 	describeAction,
 	ACTION_LABELS,
+	RECONNECT_BASE_MS,
+	RECONNECT_MAX_MS,
+	emptyStreamStatus,
+	reconnectDelay,
+	reduceStreamStatus,
+	staleMarkerText,
 } from './keyboard.mjs';
 
 // fixtureBindings is a small parsed-keys.json fixture, shaped the same as
@@ -535,4 +543,114 @@ test('unsavedReplyBody: an empty box, a non-reply element, or nothing focused yi
 	assert.equal(unsavedReplyBody({ dataset: { draftTicket: '7', draftQuestion: '9' }, value: '' }), null);
 	assert.equal(unsavedReplyBody({ dataset: {}, value: 'text' }), null);
 	assert.equal(unsavedReplyBody(null), null);
+});
+
+// reduceStreamStatus / reconnectDelay / staleMarkerText: console.js's
+// applyStreamEvent runs every /stream lifecycle event through this one
+// reducer, deciding both the reconnect backoff and the "Reconnecting.
+// Stale since HH:MM." marker (bug fix: after a stream ended for good,
+// nothing reconnected it, and the sidebar kept showing a frame that was no
+// longer live).
+
+test('reduceStreamStatus schedules a reconnect when the last /stream finishes', () => {
+	let status = emptyStreamStatus();
+	status = reduceStreamStatus(status, { type: 'started' }, 0).status;
+	let result = reduceStreamStatus(status, { type: 'finished' }, 0);
+	assert.equal(result.effect.reconnectIn, 1000);
+	status = result.status;
+
+	status = reduceStreamStatus(status, { type: 'started' }, 0).status;
+	result = reduceStreamStatus(status, { type: 'finished' }, 0);
+	assert.equal(result.effect.reconnectIn, 2000);
+	status = result.status;
+
+	status = reduceStreamStatus(status, { type: 'started' }, 0).status;
+	result = reduceStreamStatus(status, { type: 'finished' }, 0);
+	assert.equal(result.effect.reconnectIn, 4000);
+	status = result.status;
+
+	// Keep doubling past the cap: reconnectDelay clamps at RECONNECT_MAX_MS.
+	for (let i = 0; i < 5; i++) {
+		status = reduceStreamStatus(status, { type: 'started' }, 0).status;
+		result = reduceStreamStatus(status, { type: 'finished' }, 0);
+		status = result.status;
+	}
+	assert.equal(result.effect.reconnectIn, RECONNECT_MAX_MS);
+	assert.equal(reconnectDelay(0), RECONNECT_BASE_MS);
+});
+
+test('reduceStreamStatus ignores an aborted older stream', () => {
+	let status = emptyStreamStatus();
+	status = reduceStreamStatus(status, { type: 'started' }, 0).status; // old stream
+	status = reduceStreamStatus(status, { type: 'started' }, 0).status; // new stream, nav mid-frame
+	const result = reduceStreamStatus(status, { type: 'finished' }, 0); // old stream's finished
+	assert.equal(result.effect.reconnectIn, null);
+	assert.equal(result.status.staleSince, null);
+});
+
+test('reduceStreamStatus marks stale on reconnecting and failures, clears on settle or patch', () => {
+	let status = emptyStreamStatus();
+	let result = reduceStreamStatus(status, { type: 'reconnecting' }, 1000);
+	assert.equal(result.status.staleSince, 1000);
+	status = result.status;
+
+	// A second reconnecting keeps the first stale time, not the latest one.
+	result = reduceStreamStatus(status, { type: 'reconnecting' }, 2000);
+	assert.equal(result.status.staleSince, 1000);
+
+	status = emptyStreamStatus();
+	result = reduceStreamStatus(status, { type: 'retries-failed' }, 3000);
+	assert.equal(result.status.staleSince, 3000);
+	status = result.status;
+
+	// error and retrying mark stale the same way as retries-failed.
+	assert.equal(reduceStreamStatus(emptyStreamStatus(), { type: 'error' }, 7000).status.staleSince, 7000);
+	assert.equal(reduceStreamStatus(emptyStreamStatus(), { type: 'retrying' }, 8000).status.staleSince, 8000);
+
+	// A settled event whose gen no longer matches the current stream is ignored.
+	result = reduceStreamStatus({ ...status, inflight: 1, gen: 5 }, { type: 'settled', gen: 4 }, 4000);
+	assert.equal(result.status.staleSince, 3000);
+	assert.equal(result.status.attempt, status.attempt);
+
+	// A settled or patched event while nothing is inflight (a late event after
+	// the stream has already finished) must not clear a stale marker: finished
+	// bumps gen, so a settle timer armed by the old started is also stale by gen.
+	const stale = { ...status, inflight: 0, gen: 5, attempt: 2, staleSince: 3000 };
+	result = reduceStreamStatus(stale, { type: 'settled', gen: 5 }, 9000);
+	assert.equal(result.status.staleSince, 3000);
+	assert.equal(result.status.attempt, 2);
+	result = reduceStreamStatus(stale, { type: 'patched' }, 9000);
+	assert.equal(result.status.staleSince, 3000);
+	assert.equal(result.status.attempt, 2);
+
+	// A settled event with the current gen, while inflight is above 0, clears staleSince and resets attempt.
+	const live = { ...status, inflight: 1, gen: 5, attempt: 2 };
+	result = reduceStreamStatus(live, { type: 'settled', gen: 5 }, 5000);
+	assert.equal(result.status.staleSince, null);
+	assert.equal(result.status.attempt, 0);
+
+	// A patch clears it the same way, regardless of gen.
+	result = reduceStreamStatus(live, { type: 'patched' }, 6000);
+	assert.equal(result.status.staleSince, null);
+	assert.equal(result.status.attempt, 0);
+
+	// started always cancels any pending reconnect and arms a settle timer for its own gen.
+	const started = reduceStreamStatus(emptyStreamStatus(), { type: 'started' }, 0);
+	assert.equal(started.effect.cancelReconnect, true);
+	assert.equal(started.effect.settleGen, started.status.gen);
+
+	// finished bumps gen on the last in-flight request too, so a settle timer
+	// armed by that stream's own started cannot clear a stale marker set
+	// after it finished: the settle timer's captured gen is stale by then.
+	let seq = reduceStreamStatus(emptyStreamStatus(), { type: 'started' }, 0);
+	const settleGen = seq.effect.settleGen;
+	seq = reduceStreamStatus(seq.status, { type: 'finished' }, 0);
+	seq = reduceStreamStatus(seq.status, { type: 'reconnecting' }, 100);
+	result = reduceStreamStatus(seq.status, { type: 'settled', gen: settleGen }, 200);
+	assert.equal(result.status.staleSince, 100);
+});
+
+test('staleMarkerText formats the stale time', () => {
+	assert.equal(staleMarkerText(null), '');
+	assert.equal(staleMarkerText(new Date(2026, 9, 4, 19, 25).getTime()), 'Reconnecting. Stale since 19:25.');
 });
