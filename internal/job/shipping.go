@@ -119,6 +119,12 @@ func (h shipHandler) Run(ctx context.Context, t store.Ticket, d Deps) (store.Han
 		return c, err
 	}
 
+	// An open base merge (merge.go) owns the worktree until it lands or
+	// closes: nothing else in shipping may read or move the branch meanwhile.
+	if mc, merging, mergeErr := h.driveOpenMerge(ctx, t, d); merging || mergeErr != nil {
+		return mc, mergeErr
+	}
+
 	rounds, err := d.Store.AnsweredRounds(ctx, t.ID)
 	if err != nil {
 		return store.HandlerCommit{}, fmt.Errorf("job: shipping: answered rounds: %w", err)
@@ -601,6 +607,12 @@ func (h shipHandler) poll(ctx context.Context, t store.Ticket, d Deps) (store.Ha
 
 	if pr.HeadSHA != local {
 		return h.pollHeadMismatch(ctx, t, d, proj, wt, pr, local)
+	}
+
+	// GitHub builds no merge for a conflicting pull request, so CI never
+	// starts; waiting on it would wait forever.
+	if pr.MergeableState == mergeableStateDirty {
+		return h.pollConflict(ctx, t, d, proj, wt, pr, number)
 	}
 
 	runs, err := proj.Checks.ListCheckRuns(ctx, proj.Owner, proj.Repo, local)

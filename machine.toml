@@ -41,6 +41,18 @@ worktree = "sparse"
 outcomes = ["ok"]
 sandbox = "build"
 
+[jobs.merge]
+model = "opus"
+runtime = "claude"
+tools = ["read", "grep", "glob", "edit", "write", "bash"]
+prompt = "prompts/merge.md"
+timeout_minutes = 45
+max_resumes = 6
+max_loops = 2                        # base merge requests POLL may open per ticket
+check_loops = 5                      # charged resumes before the merge CHECK escalates
+outcomes = ["ok"]
+sandbox = "build"
+
 [jobs.perimeter]
 model = "sonnet"
 runtime = "claude"

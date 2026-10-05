@@ -198,6 +198,14 @@ const BuildResumeHeader = "Continue this build task in the same worktree. The in
 // or title to fill them with (plan section 9.1).
 const buildTaskLine = "Task {n} of {total}: {task title}"
 
+// placeholderTestCmd and placeholderLintCmd are the two tokens ForBuild,
+// ForFix, and ForMerge each fill, named once (goconst) since all three
+// repeat them.
+const (
+	placeholderTestCmd = "{test_cmd}"
+	placeholderLintCmd = "{lint_cmd}"
+)
+
 // placeholderPair pairs one token a job prompt must carry with the value
 // fillPlaceholders fills it with: the five of prompts/build.md (plan
 // section 12.1, section 9.1), or the two of prompts/review.md, {lens} and
@@ -284,8 +292,8 @@ func ForBuild(jobPrompt string, task BuildTask, testCmd, lintCmd, ticket, planXM
 		{"{n}", strconv.Itoa(task.N)},
 		{"{total}", strconv.Itoa(task.Total)},
 		{"{task title}", task.Title},
-		{"{test_cmd}", testCmd},
-		{"{lint_cmd}", lintCmd},
+		{placeholderTestCmd, testCmd},
+		{placeholderLintCmd, lintCmd},
 	})
 	if err != nil {
 		return Input{}, err
@@ -316,8 +324,8 @@ func ForFix(jobPrompt, subject, label, text, testCmd, lintCmd, ticket, planXML, 
 	filled := strings.Replace(jobPrompt, buildTaskLine, "Fix run: "+subject+"\n"+fixNoChangeLine, 1)
 
 	filled, err := fillPlaceholders(filled, "build", []placeholderPair{
-		{"{test_cmd}", testCmd},
-		{"{lint_cmd}", lintCmd},
+		{placeholderTestCmd, testCmd},
+		{placeholderLintCmd, lintCmd},
 	})
 	if err != nil {
 		return Input{}, err
@@ -336,6 +344,35 @@ func ForFix(jobPrompt, subject, label, text, testCmd, lintCmd, ticket, planXML, 
 // schema order.
 func ForBuildResume(inputs []NamedInput) Input {
 	return Input{JobPrompt: BuildResumeHeader, Inputs: inputs}
+}
+
+// ForMerge fills the merge job prompt's {test_cmd} and {lint_cmd} and
+// lists the inputs: ticket (fenced), plan (raw), conflicts (fenced, one
+// path per line, omitted when empty), base_log (fenced), then extra. A
+// prompt missing either placeholder is the error
+// "prompt: merge prompt lacks placeholder <name>". Called by
+// internal/job's merge turn; Schemas is set by the caller from
+// response.RenderTemplate(JobBuild, ...), since a merge answers in the
+// build response shape.
+func ForMerge(jobPrompt, testCmd, lintCmd, ticket, planXML, conflicts, baseLog string, extra []NamedInput) (Input, error) {
+	filled, err := fillPlaceholders(jobPrompt, "merge", []placeholderPair{
+		{placeholderTestCmd, testCmd},
+		{placeholderLintCmd, lintCmd},
+	})
+	if err != nil {
+		return Input{}, err
+	}
+	inputs := make([]NamedInput, 0, 4+len(extra))
+	inputs = append(inputs,
+		NamedInput{Label: labelTicket, Text: ticket, Untrusted: true},
+		NamedInput{Label: labelPlan, Text: planXML},
+	)
+	if conflicts != "" {
+		inputs = append(inputs, NamedInput{Label: "conflicts", Text: conflicts, Untrusted: true})
+	}
+	inputs = append(inputs, NamedInput{Label: "base_log", Text: baseLog, Untrusted: true})
+	inputs = append(inputs, extra...)
+	return Input{JobPrompt: filled, Inputs: inputs}, nil
 }
 
 // ForPerimeter builds the perimeter job's Input: the job prompt, then the

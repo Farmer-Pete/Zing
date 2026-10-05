@@ -4,9 +4,12 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
+	"path/filepath"
 	"sort"
 	"strings"
+	"syscall"
 	"time"
 
 	"zing/internal/response"
@@ -18,6 +21,11 @@ import (
 // trailer records that Zing did the work. Render always appends it, so no
 // caller can omit it or set a different one.
 const CoAuthorTrailer = "Co-Authored-By: Zing <zing@farmerpete.net>"
+
+// gitAddSubcommand is "git add"'s own subcommand name, shared by
+// CommitTask's and CommitMerge's own pathspecArgs calls so goconst sees one
+// named constant instead of two repeated literals.
+const gitAddSubcommand = "add"
 
 // CommitMessage is one commit's content. The caller supplies the title, the
 // function lines, and the fences; the model produces the last two in
@@ -153,7 +161,7 @@ func (o *Orchestrator) CommitTask(ctx context.Context, wt Worktree, approved []s
 	defer func() { _ = os.Remove(pathspecFile) }()
 
 	litRun := execRunner{extraEnv: literalPathspecEnv, drivers: wt.drivers}
-	addArgs := pathspecArgs([]string{"add"}, pathspecFile)
+	addArgs := pathspecArgs([]string{gitAddSubcommand}, pathspecFile)
 	if out, addErr := litRun.Run(ctx, wt.dir, "git", addArgs...); addErr != nil {
 		return "", fmt.Errorf("orchestrator: commit task: stage approved paths: %w: %s", addErr, strings.TrimSpace(out))
 	}
@@ -224,6 +232,204 @@ func (o *Orchestrator) resetAfterUnsignedCommit(ctx context.Context, wt Worktree
 			"err", resetErr, "output", strings.TrimSpace(out))
 	}
 	return errors.New("commit signing failed: " + reason)
+}
+
+// CommitMerge finishes the merge in progress as one signed merge commit:
+// git add -u (every already-tracked change, which marks resolved conflicts
+// and ordinary deletions as resolved), then git add -A scoped to the
+// subset of MergeSidePaths whose working-tree file still exists
+// (mergeSidePathsPresent) -- the extra pass "git add -u" alone would miss,
+// a merge-side path an agent's bash access turned untracked, for example
+// with "git rm --cached", leaving it out of the commit entirely even
+// though mergeCheck's own outside-the-merge gate had allowed it. The
+// explicit pass is scoped to paths that still exist because naming an
+// absent one -- a path a resolved merge removed entirely, for example a
+// file the ticket deleted and the base left alone, which "git add -u"
+// above already staged while the path was still tracked -- makes git
+// refuse the whole call with "pathspec '<p>' did not match any files";
+// the pass is skipped outright when no side path still exists. Then
+// git commit -S -F <msg> with no pathspec, because git refuses a partial
+// commit during a merge, which is why CommitTask cannot do this. wantBaseSHA
+// is the request's own base sha; a MERGE_HEAD that does not match it is
+// refused before anything is staged, so a merge session that rewrote
+// MERGE_HEAD (deliberately or not) never produces a commit whose second
+// parent is not the base the request named. It returns an error, touching
+// nothing, when no merge is in progress or MERGE_HEAD does not match
+// wantBaseSHA. A commit error, an unsigned result, or a failed verification
+// resets to the prior HEAD and puts MERGE_HEAD back
+// (resetAfterUnsignedMerge), so the resolved tree stays a merge in
+// progress the next tick can commit again.
+func (o *Orchestrator) CommitMerge(ctx context.Context, wt Worktree, m CommitMessage, wantBaseSHA string) (string, error) {
+	if err := o.revalidate(ctx, wt); err != nil {
+		return "", fmt.Errorf("orchestrator: commit merge: %w", err)
+	}
+	inProgress, err := o.mergeInProgress(ctx, wt)
+	if err != nil {
+		return "", fmt.Errorf("orchestrator: commit merge: %w", err)
+	}
+	if !inProgress {
+		return "", errors.New("orchestrator: commit merge: no merge in progress")
+	}
+	mergeHead, err := o.run.Output(ctx, wt.dir, "git", "rev-parse", "MERGE_HEAD")
+	if err != nil {
+		return "", fmt.Errorf("orchestrator: commit merge: read MERGE_HEAD: %w", err)
+	}
+	mergeHead = strings.TrimSpace(mergeHead)
+	if mergeHead != wantBaseSHA {
+		return "", fmt.Errorf("orchestrator: commit merge: MERGE_HEAD is %s, want %s", mergeHead, wantBaseSHA)
+	}
+	priorHead, err := o.run.Output(ctx, wt.dir, "git", "rev-parse", "HEAD")
+	if err != nil {
+		return "", fmt.Errorf("orchestrator: commit merge: record head: %w", err)
+	}
+	priorHead = strings.TrimSpace(priorHead)
+
+	sidePaths, err := o.MergeSidePaths(ctx, wt)
+	if err != nil {
+		return "", fmt.Errorf("orchestrator: commit merge: %w", err)
+	}
+
+	message, err := m.Render()
+	if err != nil {
+		return "", fmt.Errorf("orchestrator: commit merge: %w", err)
+	}
+	msgFile, err := writeCommitMessageFile(message)
+	if err != nil {
+		return "", fmt.Errorf("orchestrator: commit merge: %w", err)
+	}
+	defer func() { _ = os.Remove(msgFile) }()
+
+	run := execRunner{drivers: wt.drivers}
+	if out, addErr := run.Run(ctx, wt.dir, "git", "add", "-u"); addErr != nil {
+		return "", fmt.Errorf("orchestrator: commit merge: stage: %w: %s", addErr, strings.TrimSpace(out))
+	}
+	present, err := mergeSidePathsPresent(wt.dir, sidePaths)
+	if err != nil {
+		return "", fmt.Errorf("orchestrator: commit merge: %w", err)
+	}
+	if len(present) > 0 {
+		pathspecFile, pathspecErr := writePathspecFile(present)
+		if pathspecErr != nil {
+			return "", fmt.Errorf("orchestrator: commit merge: %w", pathspecErr)
+		}
+		defer func() { _ = os.Remove(pathspecFile) }()
+		litRun := execRunner{extraEnv: literalPathspecEnv, drivers: wt.drivers}
+		addArgs := pathspecArgs([]string{gitAddSubcommand, "-A"}, pathspecFile)
+		if out, addErr := litRun.Run(ctx, wt.dir, "git", addArgs...); addErr != nil {
+			return "", fmt.Errorf("orchestrator: commit merge: stage: %w: %s", addErr, strings.TrimSpace(out))
+		}
+	}
+	o.log.Info("committing merge", "branch", wt.branch, "merge_head", mergeHead)
+	if out, commitErr := run.Run(ctx, wt.dir, "git", "commit", "-S", "-F", msgFile); commitErr != nil {
+		return "", o.resetAfterUnsignedMerge(ctx, wt, priorHead, mergeHead,
+			fmt.Sprintf("git commit -S: %v: %s", commitErr, strings.TrimSpace(out)))
+	}
+	signed, verified, statusErr := o.signedStatus(ctx, wt.dir, "HEAD")
+	if statusErr != nil {
+		return "", o.resetAfterUnsignedMerge(ctx, wt, priorHead, mergeHead, fmt.Sprintf("verify signature: %v", statusErr))
+	}
+	if !signed {
+		return "", o.resetAfterUnsignedMerge(ctx, wt, priorHead, mergeHead, "commit at HEAD carries no signature")
+	}
+	if !verified {
+		o.log.Warn("commit signed but not locally verifiable (no gpg.ssh.allowedSignersFile on this host)",
+			"branch", wt.branch)
+	}
+	newSHA, err := o.run.Output(ctx, wt.dir, "git", "rev-parse", "HEAD")
+	if err != nil {
+		return "", fmt.Errorf("orchestrator: commit merge: read new sha: %w", err)
+	}
+	newSHA = strings.TrimSpace(newSHA)
+	o.log.Info("committed merge", "branch", wt.branch, "sha", newSHA, "verified", verified)
+	return newSHA, nil
+}
+
+// mergeSidePathsPresent filters paths (MergeSidePaths' own result) to the
+// ones whose working-tree file still exists, checked through
+// os.OpenRoot(dir) so a path never escapes it. CommitMerge's own explicit
+// "git add -A" pass needs this: naming a path that exists in neither the
+// working tree nor the index makes git refuse the whole call with
+// "pathspec '<p>' did not match any files", and a resolved merge can
+// legitimately leave such a path behind, for example a file one side
+// deleted and the other left untouched, or a path a resolution turned
+// from a directory into a file, which makes Lstat on any path still nested
+// under it fail with ENOTDIR rather than ErrNotExist.
+func mergeSidePathsPresent(dir string, paths []string) ([]string, error) {
+	root, err := os.OpenRoot(dir)
+	if err != nil {
+		return nil, err
+	}
+	defer root.Close()
+
+	present := make([]string, 0, len(paths))
+	for _, p := range paths {
+		if _, statErr := root.Lstat(p); statErr == nil {
+			present = append(present, p)
+		} else if !errors.Is(statErr, fs.ErrNotExist) && !errors.Is(statErr, syscall.ENOTDIR) {
+			return nil, fmt.Errorf("%s: %w", p, statErr)
+		}
+	}
+	return present, nil
+}
+
+// resetAfterUnsignedMerge is resetAfterUnsignedCommit plus writing
+// mergeHead directly to the MERGE_HEAD file (its path from
+// "git rev-parse --git-path MERGE_HEAD", the same way git merge itself
+// writes it) under the same detached, bounded context: git reset clears
+// MERGE_HEAD, and without it the resolved tree would stop being a merge.
+// "git update-ref MERGE_HEAD <sha>" cannot do this restore: MERGE_HEAD is
+// a pseudoref, not a ref under refs/, and git 2.55 refuses to create it
+// through update-ref, where older git silently wrote the file -- the gap
+// this diagnosed in CI (git 2.55) but not on a Mac running git 2.39. A
+// failed write is logged WARN ("merge head restore failed"), never
+// returned; the returned error is resetAfterUnsignedCommit's own "commit
+// signing failed: ..." error.
+//
+// When "git commit -S" itself failed outright -- a pre-commit hook or a
+// signing error that never produced a commit -- HEAD is still priorHead
+// and MERGE_HEAD still resolves to mergeHead: nothing moved, so there is
+// nothing to reset and no MERGE_HEAD to restore. Only an unsigned or
+// unverifiable commit, which did move HEAD, needs the soft reset and the
+// MERGE_HEAD restore.
+func (o *Orchestrator) resetAfterUnsignedMerge(ctx context.Context, wt Worktree, priorHead, mergeHead, reason string) error {
+	checkCtx, checkCancel := context.WithTimeout(context.WithoutCancel(ctx), resetUnsignedCommitTimeout)
+	defer checkCancel()
+	headNow, headErr := o.run.Output(checkCtx, wt.dir, "git", "rev-parse", "HEAD")
+	mergeHeadNow, mergeHeadErr := o.run.Output(checkCtx, wt.dir, "git", "rev-parse", "-q", "--verify", "MERGE_HEAD")
+	headUnmoved := headErr == nil && strings.TrimSpace(headNow) == priorHead
+	mergeHeadIntact := mergeHeadErr == nil && strings.TrimSpace(mergeHeadNow) == mergeHead
+	if headUnmoved && mergeHeadIntact {
+		return errors.New("commit signing failed: " + reason)
+	}
+
+	err := o.resetAfterUnsignedCommit(ctx, wt, priorHead, reason)
+
+	resetCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), resetUnsignedCommitTimeout)
+	defer cancel()
+	if restoreErr := o.writeMergeHeadFile(resetCtx, wt, mergeHead); restoreErr != nil {
+		o.log.Warn("merge head restore failed", "branch", wt.branch, "err", restoreErr)
+	}
+	return err
+}
+
+// writeMergeHeadFile writes mergeHead plus a trailing newline to the
+// MERGE_HEAD file at its git-path (found through
+// "git rev-parse --git-path MERGE_HEAD", which resolves correctly inside a
+// worktree), the same bytes git merge itself writes there. It leaves
+// MERGE_MSG untouched.
+func (o *Orchestrator) writeMergeHeadFile(ctx context.Context, wt Worktree, mergeHead string) error {
+	path, err := o.run.Output(ctx, wt.dir, "git", "rev-parse", "--git-path", "MERGE_HEAD")
+	if err != nil {
+		return fmt.Errorf("git-path MERGE_HEAD: %w", err)
+	}
+	path = strings.TrimSpace(path)
+	if !filepath.IsAbs(path) {
+		path = filepath.Join(wt.dir, path)
+	}
+	if err := os.WriteFile(path, []byte(mergeHead+"\n"), 0o600); err != nil {
+		return fmt.Errorf("write MERGE_HEAD: %w", err)
+	}
+	return nil
 }
 
 // pathspecArgs appends "--pathspec-from-file=<file> --pathspec-file-nul" to
