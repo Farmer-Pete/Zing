@@ -15,16 +15,20 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	zing "zing"
+	"zing/internal/gitbin"
 	"zing/internal/gitfixture"
 )
 
@@ -1059,4 +1063,602 @@ func TestJudgeCanonicalizesCodexHomeInsideDataDir(t *testing.T) {
 	if exitCode, out := runSandboxed(t, sb, p, "/bin/ls", dirs.dataDir); exitCode == 0 {
 		t.Errorf("list DATA_DIR under the judge profile: want a non-zero exit, got 0 (output %q)", out)
 	}
+}
+
+// ---- denying outbound git transports (#49) -----------------------------
+
+// gitPushListenerPort is git's own well-known port for the git:// protocol,
+// and the fixed (not ephemeral) port TestBuildDeniesGitPush and
+// TestJudgeDeniesGitPush bind their stand-in remote to: the push under
+// test must dial this exact port for the profile's own deny to be what is
+// under test. Neither test calls t.Parallel, since both bind it.
+const gitPushListenerPort = 9418
+
+// countingAccepts accepts and discards every connection ln receives,
+// incrementing *accepts for each, until Accept fails (the listener
+// closing). Run it in a goroutine the way acceptAndDiscard's callers do;
+// unlike acceptAndDiscard, this also counts, so a test can assert a denied
+// connect never reached the stand-in remote at all.
+func countingAccepts(ln net.Listener, accepts *int64) {
+	for {
+		conn, err := ln.Accept()
+		if err != nil {
+			return
+		}
+		atomic.AddInt64(accepts, 1)
+		_ = conn.Close()
+	}
+}
+
+// waitForAccept dials network/addr itself, from this test process (never
+// through the sandbox), and blocks, with a deadline, until *accepts has
+// counted that connection, then returns the total. countingAccepts' own Accept
+// loop drains its listener's backlog strictly in the order connections
+// arrived, so by the time this control connection's own accept is
+// counted, every connection a sandboxed command made earlier is already
+// counted too, whether that command's own connect was denied or not
+// (review r1f5): reading *accepts right after a sandboxed command returns
+// can otherwise race countingAccepts' own goroutine, in either direction
+// -- a denied connect's non-count might not be observed yet, and an
+// allowed connect's own count might not be either.
+func waitForAccept(t *testing.T, network, addr string, accepts *int64) int64 {
+	t.Helper()
+	before := atomic.LoadInt64(accepts)
+
+	ctx, cancel := context.WithTimeout(t.Context(), 2*time.Second)
+	defer cancel()
+	var d net.Dialer
+	conn, err := d.DialContext(ctx, network, addr)
+	if err != nil {
+		t.Fatalf("waitForAccept: control dial: %v", err)
+	}
+	_ = conn.Close()
+
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		if got := atomic.LoadInt64(accepts); got > before {
+			return got
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("waitForAccept: accept count never advanced past %d", before)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+// wantOperationNotPermitted is the text every denied connect or exec this
+// file's git-push probes assert on: seatbelt's own refusal text for both a
+// network-outbound deny and a process-exec deny (judge.sb's own file-deny
+// rules already quote it the same way).
+const wantOperationNotPermitted = "Operation not permitted"
+
+// testDeniesGitPush is TestBuildDeniesGitPush's and TestJudgeDeniesGitPush's
+// shared body (#49): a signed git repository under worktree and a stand-in
+// git:// remote listening on gitPushListenerPort, then three outbound
+// attempts the profile must refuse. It is not safe to call with
+// t.Parallel, since it binds that fixed port.
+func testDeniesGitPush(t *testing.T, sb Sandbox, p Params, worktree string) {
+	t.Helper()
+
+	if err := gitfixture.NewSigningRepo(t.Context(), worktree); err != nil {
+		t.Fatalf("NewSigningRepo: %v", err)
+	}
+
+	var lc net.ListenConfig
+	ln, err := lc.Listen(t.Context(), "tcp", fmt.Sprintf("127.0.0.1:%d", gitPushListenerPort))
+	if err != nil {
+		t.Fatalf("listen 127.0.0.1:%d: %v", gitPushListenerPort, err)
+	}
+	defer func() { _ = ln.Close() }()
+	var accepts int64
+	go countingAccepts(ln, &accepts)
+
+	// SSH_AUTH_SOCK is dropped, not merely left unset by gitfixture.Environ():
+	// this test's own parent process may run under a real agent, and the
+	// push under test must not be able to reach it.
+	env := slices.DeleteFunc(gitfixture.Environ(), func(kv string) bool {
+		return strings.HasPrefix(kv, "SSH_AUTH_SOCK=")
+	})
+	env = append(env,
+		"GIT_CONFIG_GLOBAL=/dev/null",
+		"GIT_CONFIG_NOSYSTEM=1",
+		"GIT_SSH_COMMAND=ssh -F /dev/null -o BatchMode=yes -o ConnectTimeout=2 -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o IdentityAgent=none",
+	)
+
+	exitCode, out := runSandboxedWithEnv(t, sb, p, env, gitbin.Path(), "-C", worktree, "push", "git://127.0.0.1:9418/x.git", "HEAD")
+	if exitCode == 0 {
+		t.Errorf("git push git://127.0.0.1:9418/x.git: want a non-zero exit, got 0 (output %q)", out)
+	}
+	if !strings.Contains(out, wantOperationNotPermitted) {
+		t.Errorf("git push git:// output = %q, want it to contain %q", out, wantOperationNotPermitted)
+	}
+	if got := waitForAccept(t, "tcp", fmt.Sprintf("127.0.0.1:%d", gitPushListenerPort), &accepts); got != 1 {
+		t.Errorf("git:// listener accepted %d connections (including this test's own control probe), want 1: the sandboxed push must never have reached it", got)
+	}
+
+	exitCode, out = runSandboxedWithEnv(t, sb, p, env, gitbin.Path(), "-C", worktree, "push", "ssh://git@127.0.0.1:22/x.git", "HEAD")
+	if exitCode == 0 {
+		t.Errorf("git push ssh://git@127.0.0.1:22/x.git: want a non-zero exit, got 0 (output %q)", out)
+	}
+	if !strings.Contains(out, wantOperationNotPermitted) {
+		t.Errorf("git push ssh:// output = %q, want it to contain %q", out, wantOperationNotPermitted)
+	}
+
+	exitCode, out = runSandboxedWithEnv(t, sb, p, env, "/usr/bin/nc", "-v", "-z", "-w", "2", "127.0.0.1", "22")
+	if exitCode == 0 {
+		t.Errorf("nc -z 127.0.0.1 22: want a non-zero exit, got 0 (output %q)", out)
+	}
+	if !strings.Contains(out, wantOperationNotPermitted) {
+		t.Errorf("nc -z 127.0.0.1 22 output = %q, want it to contain %q", out, wantOperationNotPermitted)
+	}
+
+	// Exec-only probes (review r4f1): the ssh:// push above dials
+	// 127.0.0.1:22, so it would still fail the same way with the
+	// process-exec deny removed -- ssh's own connect would still hit the
+	// port 22 deny. These two run ssh with no network target at all
+	// (-V just prints a version and exits), so only the exec deny can
+	// explain a refusal.
+	exitCode, out = runSandboxedWithEnv(t, sb, p, env, "/usr/bin/ssh", "-V")
+	if exitCode == 0 {
+		t.Errorf("exec /usr/bin/ssh -V: want a non-zero exit, got 0 (output %q)", out)
+	}
+	if !strings.Contains(out, wantOperationNotPermitted) {
+		t.Errorf("exec /usr/bin/ssh -V output = %q, want it to contain %q", out, wantOperationNotPermitted)
+	}
+
+	// A copy of ssh earlier in PATH (a Homebrew install, say) must be
+	// denied the same way: the rule matches any path ending in "/ssh",
+	// not just the literal /usr/bin/ssh.
+	altSSHDir := filepath.Join(p.RunDir, "bin")
+	if err := os.MkdirAll(altSSHDir, 0o755); err != nil {
+		t.Fatalf("mkdir %s: %v", altSSHDir, err)
+	}
+	altSSH := filepath.Join(altSSHDir, "ssh")
+	copyExecutable(t, "/usr/bin/ssh", altSSH)
+	exitCode, out = runSandboxedWithEnv(t, sb, p, env, altSSH, "-V")
+	if exitCode == 0 {
+		t.Errorf("exec %s -V: want a non-zero exit, got 0 (output %q)", altSSH, out)
+	}
+	if !strings.Contains(out, wantOperationNotPermitted) {
+		t.Errorf("exec %s -V output = %q, want it to contain %q", altSSH, out, wantOperationNotPermitted)
+	}
+
+	// Positive control: an executable in the same directory, under a name
+	// that doesn't end in "/ssh", must still run, showing the two denials
+	// above are what block the exec and not some other profile or binary
+	// reason. This is a plain shell script rather than a renamed copy of
+	// ssh's own bytes: the kernel kills a copy of that signed system
+	// binary on exec from an unexpected path regardless of the sandbox
+	// profile (observed on the build host as exit -1 with no output, the
+	// signal-killed shape, not "Operation not permitted"), which would
+	// fail this control for a reason that has nothing to do with the rule
+	// under test.
+	notSSH := filepath.Join(altSSHDir, "ssh2")
+	if err := os.WriteFile(notSSH, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil { //nolint:gosec // 0755: must be executable
+		t.Fatalf("write %s: %v", notSSH, err)
+	}
+	exitCode, out = runSandboxedWithEnv(t, sb, p, env, notSSH, "-V")
+	if exitCode != 0 {
+		t.Errorf("exec %s -V (not named ssh): exit %d, want 0 (output %q)", notSSH, exitCode, out)
+	}
+
+	// Positive control (review r2f2): an unrelated, allowed port must
+	// still be reachable from inside the same sandbox, Params, and env.
+	// Without this, a zero accept count or a non-zero exit on 9418 or 22
+	// above could just as well mean git or nc never reached the network
+	// stack at all, for some unrelated profile or binary reason, and the
+	// port-22/9418 denies would never have been exercised.
+	controlLn := listenLoopback(t)
+	defer func() { _ = controlLn.Close() }()
+	controlPort := tcpPort(t, controlLn.Addr())
+	var controlAccepts int64
+	go countingAccepts(controlLn, &controlAccepts)
+
+	_, _ = runSandboxedWithEnv(t, sb, p, env, gitbin.Path(), "-C", worktree, "push", fmt.Sprintf("git://127.0.0.1:%d/x.git", controlPort), "HEAD")
+	if got := waitForAccept(t, "tcp", fmt.Sprintf("127.0.0.1:%d", controlPort), &controlAccepts); got != 2 {
+		t.Errorf("control listener accepted %d connections (including this test's own control probe), want 2: the sandboxed push to an allowed port must have reached it", got)
+	}
+
+	exitCode, out = runSandboxedWithEnv(t, sb, p, env, "/usr/bin/nc", "-v", "-z", "-w", "2", "127.0.0.1", strconv.Itoa(controlPort))
+	if exitCode != 0 {
+		t.Errorf("nc -z 127.0.0.1 %d (an allowed port): exit %d, want 0 (output %q)", controlPort, exitCode, out)
+	}
+}
+
+// TestBuildDeniesGitPush is #49's own regression test under build.sb: run
+// outside the sandbox (requireNotSandboxed, through newLoadedSandbox), it
+// reproduces the pattern that pushed a real branch to GitHub -- a git push
+// over ssh:// or git://, plus a bare TCP connect to port 22 -- and proves
+// build.sb's new rules refuse every one of them.
+func TestBuildDeniesGitPush(t *testing.T) {
+	sb := newLoadedSandbox(t, nil, 7420)
+	dirs := newTestDirs(t)
+	testDeniesGitPush(t, sb, dirs.params(), dirs.worktree)
+}
+
+// TestJudgeDeniesGitPush is TestBuildDeniesGitPush's own counterpart under
+// judge.sb, the profile #49 actually ran inside.
+func TestJudgeDeniesGitPush(t *testing.T) {
+	sb := newLoadedJudgeSandbox(t)
+	dirs := newTestDirs(t)
+	testDeniesGitPush(t, sb, dirs.judgeParams(t), dirs.worktree)
+}
+
+// ---- denying a custom ssh-agent socket (#49) ---------------------------
+
+// listenUnix opens a unix-socket listener at path through
+// net.ListenConfig (noctx: a bare net.Listen is disallowed).
+func listenUnix(t *testing.T, path string) net.Listener {
+	t.Helper()
+	var lc net.ListenConfig
+	ln, err := lc.Listen(t.Context(), "unix", path)
+	if err != nil {
+		t.Fatalf("listen %s: %v", path, err)
+	}
+	return ln
+}
+
+// testDeniesAgentSocket is TestBuildDeniesAgentSocket's and
+// TestJudgeDeniesAgentSocket's shared body: two listeners standing in for
+// an ssh-agent, one reached directly (SSHAuthSockReal) and the other
+// reached through a symlink (SSHAuthSock), plus a sibling socket the deny
+// must not touch. Past the main case with both params set, it also tries
+// SSH_AUTH_SOCK alone, dialing the exact path the rule names, so each rule
+// has a case that fails without it (review r1f4). It does not try aliasing
+// the socket through an unnamed path (a different symlink, or a
+// non-canonical spelling); that belongs to the exploratory
+// testAgentSocketAliasing below, kept out of this function and out of the
+// plan's own demo loop because it rests on an assumption the plan does not
+// make: that seatbelt's path-literal match runs against the resolved vnode
+// rather than a connect's own sun_path (review r3f1). The socket directory
+// is created directly under /tmp, not under t.TempDir()'s own deeper base, to stay
+// well under a unix socket's 104-byte sun_path limit, and is also used as
+// p.RunDir so a write-gated false failure (the socket directory itself
+// being outside every write-allow) can never be mistaken for the network
+// deny this test is actually about.
+func testDeniesAgentSocket(t *testing.T, sb Sandbox, p Params) {
+	t.Helper()
+
+	dir, err := os.MkdirTemp("/tmp", "zsa") //nolint:usetesting // a unix socket's sun_path is 104 bytes; t.TempDir() nests too deep under macOS's own temp root
+	if err != nil {
+		t.Fatalf("MkdirTemp: %v", err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	if resolved, evalErr := filepath.EvalSymlinks(dir); evalErr == nil {
+		dir = resolved
+	}
+	p.RunDir = dir
+
+	agentSock := filepath.Join(dir, "agent.sock")
+	otherSock := filepath.Join(dir, "other.sock")
+	linkSock := filepath.Join(dir, "link.sock")
+
+	agentLn := listenUnix(t, agentSock)
+	defer func() { _ = agentLn.Close() }()
+	var agentAccepts int64
+	go countingAccepts(agentLn, &agentAccepts)
+
+	otherLn := listenUnix(t, otherSock)
+	defer func() { _ = otherLn.Close() }()
+	var otherAccepts int64
+	go countingAccepts(otherLn, &otherAccepts)
+
+	if symlinkErr := os.Symlink(agentSock, linkSock); symlinkErr != nil {
+		t.Fatalf("symlink: %v", symlinkErr)
+	}
+
+	// wantAgentTotal is agentLn's own running total, advanced by one with
+	// every denyAgentSock call below (review r1f5): a deny case that lets
+	// a connect through would add one of its own, on top of this
+	// function's own control connections.
+	wantAgentTotal := int64(0)
+	denyAgentSock := func(path, label string) {
+		if exitCode, out := runSandboxed(t, sb, p, "/usr/bin/nc", "-U", "-w", "2", path); exitCode == 0 {
+			t.Errorf("nc -U %s (%s): want a non-zero exit, got 0 (output %q)", path, label, out)
+		}
+		wantAgentTotal++
+		if got := waitForAccept(t, "unix", agentSock, &agentAccepts); got != wantAgentTotal {
+			t.Errorf("agent socket listener accepted %d connections (including this function's own control probes) after %s, want %d: the sandboxed connect must never have reached it", got, label, wantAgentTotal)
+		}
+	}
+
+	// Both fields set, the way a real run's ParamsFor carries them: the
+	// symlink and the real path must both be denied.
+	p.SSHAuthSock = linkSock
+	p.SSHAuthSockReal = agentSock
+	denyAgentSock(linkSock, "both params set, dialing the symlink")
+	denyAgentSock(agentSock, "both params set, dialing the real path")
+
+	// Only SSH_AUTH_SOCK names the socket; SSH_AUTH_SOCK_REAL is left at
+	// Prefix's own sentinel. The pair above never shows this rule matters
+	// on its own (review r1f4).
+	p.SSHAuthSock = agentSock
+	p.SSHAuthSockReal = ""
+	denyAgentSock(agentSock, "only SSH_AUTH_SOCK set")
+
+	// Restore both params, the way a real run carries them.
+	p.SSHAuthSock = linkSock
+	p.SSHAuthSockReal = agentSock
+
+	if exitCode, out := runSandboxed(t, sb, p, "/usr/bin/nc", "-U", "-w", "2", otherSock); exitCode != 0 {
+		t.Errorf("nc -U %s (a socket the profile does not name): exit %d, want 0 (output %q)", otherSock, exitCode, out)
+	}
+	if got := waitForAccept(t, "unix", otherSock, &otherAccepts); got != 2 {
+		t.Errorf("other socket listener accepted %d connections (including this test's own control probe), want 2: the sandboxed connect must have reached it once", got)
+	}
+}
+
+// TestBuildDeniesAgentSocket proves build.sb denies a connect to the
+// socket the parent's own SSH_AUTH_SOCK names, both through the path as
+// given and through its symlink-resolved path, while leaving an unrelated
+// socket reachable (#49's own agent-socket gap).
+func TestBuildDeniesAgentSocket(t *testing.T) {
+	t.Parallel()
+	sb := newLoadedSandbox(t, nil, 7420)
+	dirs := newTestDirs(t)
+	testDeniesAgentSocket(t, sb, dirs.params())
+}
+
+// TestJudgeDeniesAgentSocket is TestBuildDeniesAgentSocket's own
+// counterpart under judge.sb.
+func TestJudgeDeniesAgentSocket(t *testing.T) {
+	t.Parallel()
+	sb := newLoadedJudgeSandbox(t)
+	dirs := newTestDirs(t)
+	testDeniesAgentSocket(t, sb, dirs.judgeParams(t))
+}
+
+// testAgentSocketAliasing is exploratory, not part of the plan's own demo
+// loop (`Test(Build|Judge)Denies(GitPush|AgentSocket)`): both its cases
+// assume seatbelt's path-literal unix-socket match runs against the
+// resolved vnode rather than a connect's own sun_path, an assumption the
+// plan is explicit it does not know holds (review r3f1). If the kernel
+// matches sun_path instead, both cases below fail on their own, without
+// taking the plan's required TestBuildDeniesAgentSocket or
+// TestJudgeDeniesAgentSocket -- or its demo loop -- down with them. Kept
+// here as a standing probe of that assumption rather than deleted, so a
+// kernel change that starts allowing an alias is caught by name.
+func testAgentSocketAliasing(t *testing.T, sb Sandbox, p Params) {
+	t.Helper()
+
+	dir, err := os.MkdirTemp("/tmp", "zsa") //nolint:usetesting // a unix socket's sun_path is 104 bytes; t.TempDir() nests too deep under macOS's own temp root
+	if err != nil {
+		t.Fatalf("MkdirTemp: %v", err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	if resolved, evalErr := filepath.EvalSymlinks(dir); evalErr == nil {
+		dir = resolved
+	}
+	p.RunDir = dir
+
+	agentSock := filepath.Join(dir, "agent.sock")
+	linkSock := filepath.Join(dir, "link.sock")
+
+	agentLn := listenUnix(t, agentSock)
+	defer func() { _ = agentLn.Close() }()
+	var agentAccepts int64
+	go countingAccepts(agentLn, &agentAccepts)
+
+	if symlinkErr := os.Symlink(agentSock, linkSock); symlinkErr != nil {
+		t.Fatalf("symlink: %v", symlinkErr)
+	}
+
+	wantAgentTotal := int64(0)
+
+	// Only SSH_AUTH_SOCK_REAL names the socket; SSH_AUTH_SOCK is left at
+	// Prefix's own sentinel. Dialing through linkSock, a symlink the
+	// resolved-path rule does not name literally, shows whether the deny
+	// reaches an alias of the real path and not just the real path itself
+	// (review r1f4).
+	p.SSHAuthSock = ""
+	p.SSHAuthSockReal = agentSock
+	if exitCode, out := runSandboxed(t, sb, p, "/usr/bin/nc", "-U", "-w", "2", linkSock); exitCode == 0 {
+		t.Errorf("nc -U %s (only SSH_AUTH_SOCK_REAL set, dialing a symlink to it): want a non-zero exit, got 0 (output %q)", linkSock, out)
+	}
+	wantAgentTotal++
+	if got := waitForAccept(t, "unix", agentSock, &agentAccepts); got != wantAgentTotal {
+		t.Errorf("agent socket listener accepted %d connections after dialing a symlink with only SSH_AUTH_SOCK_REAL set, want %d", got, wantAgentTotal)
+	}
+
+	// Restore both params, the way a real run carries them.
+	p.SSHAuthSock = linkSock
+	p.SSHAuthSockReal = agentSock
+
+	// A symlink the sandboxed process itself creates, under its own
+	// writable RunDir, pointing straight at the real agent socket: if
+	// path-literal matched a connect's own sun_path rather than the
+	// resolved vnode, this alias would reach the agent neither named path
+	// denies (review r1f6).
+	aliasSock := filepath.Join(dir, "alias.sock")
+	aliasCmd := fmt.Sprintf("ln -s %s %s && exec /usr/bin/nc -U -w 2 %s", agentSock, aliasSock, aliasSock)
+	if exitCode, out := runSandboxed(t, sb, p, "/bin/sh", "-c", aliasCmd); exitCode == 0 {
+		t.Errorf("nc -U a sandbox-created alias symlink to the denied agent socket: want a non-zero exit, got 0 (output %q)", out)
+	}
+	wantAgentTotal++
+	if got := waitForAccept(t, "unix", agentSock, &agentAccepts); got != wantAgentTotal {
+		t.Errorf("agent socket listener accepted %d connections after the alias-symlink case, want %d: path-literal must match the resolved vnode, not a connect's own sun_path", got, wantAgentTotal)
+	}
+
+	// A non-canonical spelling of the same path (an extra "/./" element):
+	// if path-literal matched only the exact byte string, this would also
+	// slip past the deny despite naming the identical vnode (review
+	// r1f6).
+	noncanonical := dir + "/./agent.sock"
+	if exitCode, out := runSandboxed(t, sb, p, "/usr/bin/nc", "-U", "-w", "2", noncanonical); exitCode == 0 {
+		t.Errorf("nc -U %s (a non-canonical spelling of the denied agent socket): want a non-zero exit, got 0 (output %q)", noncanonical, out)
+	}
+	wantAgentTotal++
+	if got := waitForAccept(t, "unix", agentSock, &agentAccepts); got != wantAgentTotal {
+		t.Errorf("agent socket listener accepted %d connections after dialing a non-canonical spelling of the denied path, want %d", got, wantAgentTotal)
+	}
+}
+
+// TestBuildAgentSocketDenyMatchesResolvedPath is testAgentSocketAliasing
+// under build.sb. Not named to match the plan's demo loop regex, so it is
+// not one of the four probes the plan's design counts on (review r3f1).
+func TestBuildAgentSocketDenyMatchesResolvedPath(t *testing.T) {
+	t.Parallel()
+	sb := newLoadedSandbox(t, nil, 7420)
+	dirs := newTestDirs(t)
+	testAgentSocketAliasing(t, sb, dirs.params())
+}
+
+// TestJudgeAgentSocketDenyMatchesResolvedPath is
+// TestBuildAgentSocketDenyMatchesResolvedPath's own counterpart under
+// judge.sb.
+func TestJudgeAgentSocketDenyMatchesResolvedPath(t *testing.T) {
+	t.Parallel()
+	sb := newLoadedJudgeSandbox(t)
+	dirs := newTestDirs(t)
+	testAgentSocketAliasing(t, sb, dirs.judgeParams(t))
+}
+
+// captureSandboxAgentSocketLog swaps slog's default logger for a
+// debug-level text handler writing into the returned buffer, restoring the
+// previous default on t's cleanup. LoadProfile's own "sandbox agent
+// socket" debug record (review r1f1) is the only thing any caller here
+// reads back out of it.
+func captureSandboxAgentSocketLog(t *testing.T) *strings.Builder {
+	t.Helper()
+	prev := slog.Default()
+	var buf strings.Builder
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+	return &buf
+}
+
+// assertSandboxAgentSocketLog asserts logBuf holds exactly one "sandbox
+// agent socket" record, naming profile "build" and the given branch, and
+// that it contains none of secrets (the values resolveHost derived from
+// SSH_AUTH_SOCK in the subtest that built logBuf): LoadProfile's own
+// comment promises the socket path never appears in a log line (review
+// r1f1), and nothing before this change actually read the record back to
+// check it.
+func assertSandboxAgentSocketLog(t *testing.T, logBuf *strings.Builder, branch string, secrets ...string) {
+	t.Helper()
+	logged := logBuf.String()
+	if n := strings.Count(logged, "sandbox agent socket"); n != 1 {
+		t.Errorf("log contains %d %q records, want 1 (log: %s)", n, "sandbox agent socket", logged)
+	}
+	if !strings.Contains(logged, "profile=build") {
+		t.Errorf("log = %q, want it to contain %q", logged, "profile=build")
+	}
+	if !strings.Contains(logged, "branch="+branch) {
+		t.Errorf("log = %q, want it to contain %q", logged, "branch="+branch)
+	}
+	for _, secret := range secrets {
+		if strings.Contains(logged, secret) {
+			t.Errorf("log = %q, must not contain %q", logged, secret)
+		}
+	}
+}
+
+// TestParamsForCarriesAgentSocket proves resolveHost's own SSH_AUTH_SOCK
+// resolution, carried through LoadProfile and ParamsFor, for each of
+// resolveHost's three non-empty branches (#49). Not parallel: it calls
+// t.Setenv.
+func TestParamsForCarriesAgentSocket(t *testing.T) {
+	requireNotSandboxed(t)
+
+	t.Run("resolved", func(t *testing.T) {
+		logBuf := captureSandboxAgentSocketLog(t)
+		dir, mkdirErr := os.MkdirTemp("/tmp", "zsa") //nolint:usetesting // a unix socket's sun_path is 104 bytes; t.TempDir() nests too deep under macOS's own temp root
+		if mkdirErr != nil {
+			t.Fatalf("MkdirTemp: %v", mkdirErr)
+		}
+		t.Cleanup(func() { _ = os.RemoveAll(dir) })
+		if resolved, evalErr := filepath.EvalSymlinks(dir); evalErr == nil {
+			dir = resolved
+		}
+
+		agentSock := filepath.Join(dir, "agent.sock")
+		ln := listenUnix(t, agentSock)
+		t.Cleanup(func() { _ = ln.Close() })
+
+		linkSock := filepath.Join(dir, "link.sock")
+		if symlinkErr := os.Symlink(agentSock, linkSock); symlinkErr != nil {
+			t.Fatalf("symlink: %v", symlinkErr)
+		}
+
+		t.Setenv("SSH_AUTH_SOCK", linkSock)
+		sb := newLoadedSandbox(t, nil, 7420)
+		dirs := newTestDirs(t)
+		p, err := sb.ParamsFor(dirs.worktree, dirs.repoGit, dirs.runDir)
+		if err != nil {
+			t.Fatalf("ParamsFor: %v", err)
+		}
+		if p.SSHAuthSock != linkSock {
+			t.Errorf("SSHAuthSock = %q, want %q", p.SSHAuthSock, linkSock)
+		}
+		if p.SSHAuthSockReal != agentSock {
+			t.Errorf("SSHAuthSockReal = %q, want %q", p.SSHAuthSockReal, agentSock)
+		}
+		if sb.host.agentSockBranch != "resolved" {
+			t.Errorf("agentSockBranch = %q, want %q", sb.host.agentSockBranch, "resolved")
+		}
+		assertSandboxAgentSocketLog(t, logBuf, "resolved", linkSock, agentSock)
+	})
+
+	// A relative SSH_AUTH_SOCK fails the whole load closed, rather than
+	// being silently carried as if it were unset: the resolveHost error
+	// surfaces the same way any of its other failures do, before
+	// LoadProfile ever reaches its "sandbox agent socket" debug record,
+	// so no log capture is needed here.
+	t.Run("relative", func(t *testing.T) {
+		t.Setenv("SSH_AUTH_SOCK", "relative/agent.sock")
+		profile, err := zing.Assets.ReadFile("sandbox/build.sb")
+		if err != nil {
+			t.Fatalf("read sandbox/build.sb: %v", err)
+		}
+		sb := Load(profile, t.TempDir(), nil, 7420)
+		if sb.Available() {
+			t.Fatal("Load: want a relative SSH_AUTH_SOCK to make the sandbox unavailable, got available")
+		}
+		if sb.Reason() != reasonUserCacheDirNotFound {
+			t.Errorf("Reason() = %q, want %q", sb.Reason(), reasonUserCacheDirNotFound)
+		}
+	})
+
+	// A socket that has not been created yet -- common for a
+	// socket-activated or not-yet-started agent -- still canonicalizes
+	// through its deepest existing ancestor directory: a temp dir under
+	// /tmp, which macOS itself symlinks to /private/tmp, stands in for
+	// that ancestor, so SSHAuthSockReal must reflect the resolved
+	// ancestor rather than the raw /tmp-prefixed path.
+	t.Run("unresolved leaf, symlinked ancestor", func(t *testing.T) {
+		logBuf := captureSandboxAgentSocketLog(t)
+		dir, mkdirErr := os.MkdirTemp("/tmp", "zsa") //nolint:usetesting // see the "resolved" subtest above: needs a real /tmp ancestor, not t.TempDir()'s own root
+		if mkdirErr != nil {
+			t.Fatalf("MkdirTemp: %v", mkdirErr)
+		}
+		t.Cleanup(func() { _ = os.RemoveAll(dir) })
+
+		resolvedDir, evalErr := filepath.EvalSymlinks(dir)
+		if evalErr != nil {
+			t.Fatalf("EvalSymlinks(%q): %v", dir, evalErr)
+		}
+		if resolvedDir == dir {
+			t.Skipf("%q does not sit under a symlinked ancestor on this machine", dir)
+		}
+
+		missing := filepath.Join(dir, "does-not-exist.sock")
+		wantReal := filepath.Join(resolvedDir, "does-not-exist.sock")
+		t.Setenv("SSH_AUTH_SOCK", missing)
+		sb := newLoadedSandbox(t, nil, 7420)
+		dirs := newTestDirs(t)
+		p, err := sb.ParamsFor(dirs.worktree, dirs.repoGit, dirs.runDir)
+		if err != nil {
+			t.Fatalf("ParamsFor: %v", err)
+		}
+		if p.SSHAuthSock != missing {
+			t.Errorf("SSHAuthSock = %q, want %q", p.SSHAuthSock, missing)
+		}
+		if p.SSHAuthSockReal != wantReal {
+			t.Errorf("SSHAuthSockReal = %q, want %q (the canonicalized ancestor), not the raw path", p.SSHAuthSockReal, wantReal)
+		}
+		if sb.host.agentSockBranch != "resolved" {
+			t.Errorf("agentSockBranch = %q, want %q", sb.host.agentSockBranch, "resolved")
+		}
+		assertSandboxAgentSocketLog(t, logBuf, "resolved", missing, wantReal)
+	})
 }
