@@ -358,21 +358,12 @@ func (s *Store) TicketsByProject(ctx context.Context, projectID int64) ([]Ticket
 	return out, nil
 }
 
-// RecentTickets returns every ticket ordered by its greatest SENT message id
-// descending, then ticket id; a ticket with no sent message sorts last, by
-// ticket id (design section 7.2). The MAX(id) subquery yields NULL for a
-// ticket with no sent message, and SQLite sorts NULL last in a DESC
-// ordering, which is exactly this rule. The subquery excludes state='draft'
-// rows (code review fix, PR #16: Inbox and Feed already exclude a draft
-// from their own newest-message ordering, design section 7.2's "sent" rule
-// -- see inboxQuery and FeedMessages -- but Recent's own MAX(id) subquery
-// had not been updated to match, so saving a draft reordered Recent even
-// though the draft itself never renders anywhere).
+// RecentTickets returns every ticket, newest ticket first (ticket id
+// descending; #106 bug 5, c8's owner decision (a)): a new message on any
+// ticket never reorders this page, only filing a new ticket does.
 func (s *Store) RecentTickets(ctx context.Context) ([]Ticket, error) {
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT `+ticketColumns+` FROM tickets t
-		 ORDER BY (SELECT MAX(id) FROM messages WHERE ticket_id = t.id AND (state IS NULL OR state != ?)) DESC, t.id`,
-		draftState)
+		`SELECT `+ticketColumns+` FROM tickets t ORDER BY t.id DESC`)
 	if err != nil {
 		return nil, fmt.Errorf("recent tickets: %w", err)
 	}

@@ -596,11 +596,12 @@ func TestTicketsByProject_OrderedByIssueNumberThenID(t *testing.T) {
 	}
 }
 
-// TestRecentTickets_NewestMessageDescNoMessageLast proves the full
-// RecentTickets ordering: greatest message id descending, then ticket id,
-// with messageless tickets sorted last by their own id (design section
-// 7.2).
-func TestRecentTickets_NewestMessageDescNoMessageLast(t *testing.T) {
+// TestRecentTickets_NewestTicketFirst proves RecentTickets orders by ticket
+// id descending (#106 bug 5, c8's owner decision (a)), not by message
+// recency: ticketOld and ticketNew each get a sent update, in that order,
+// and ticketQuietFirst and ticketQuietSecond get none, yet the order is
+// purely newest-ticket-first.
+func TestRecentTickets_NewestTicketFirst(t *testing.T) {
 	t.Parallel()
 	s := newTestStore(t)
 	projectID := seedProjectNamed(t, s, testProjectAlpha)
@@ -630,7 +631,7 @@ func TestRecentTickets_NewestMessageDescNoMessageLast(t *testing.T) {
 	if err != nil {
 		t.Fatalf("RecentTickets: %v", err)
 	}
-	want := []int64{ticketNew, ticketOld, ticketQuietFirst, ticketQuietSecond}
+	want := []int64{ticketQuietSecond, ticketQuietFirst, ticketNew, ticketOld}
 	if len(got) != len(want) {
 		t.Fatalf("RecentTickets returned %d tickets, want %d: %+v", len(got), len(want), got)
 	}
@@ -641,15 +642,12 @@ func TestRecentTickets_NewestMessageDescNoMessageLast(t *testing.T) {
 	}
 }
 
-// TestRecentTickets_IgnoresDraftMessages proves RecentTickets' ordering
-// subquery excludes state='draft' rows, matching Inbox and Feed's own
-// newest-sent-message rule (design section 7.2; code review fix, PR #16).
-// ticketOld's only message is a real, sent update; ticketNew's is the same,
-// inserted after it, so ticketNew is genuinely newer. A draft saved on
-// ticketOld afterward gets the greatest message id of all three but must
-// not let ticketOld jump ahead of ticketNew, since a draft is never a real
-// message until POST /send flips it to sent.
-func TestRecentTickets_IgnoresDraftMessages(t *testing.T) {
+// TestRecentTickets_NewMessageDoesNotReorder proves a ticket's position on
+// the Recent page survives it gaining a new message (#106 bug 5): ticketOld
+// is created first (so it has the lower id), then ticketNew. A real, sent
+// update and a draft, both added to ticketOld afterward, must not move it
+// ahead of ticketNew.
+func TestRecentTickets_NewMessageDoesNotReorder(t *testing.T) {
 	t.Parallel()
 	s := newTestStore(t)
 	projectID := seedProjectNamed(t, s, testProjectAlpha)
@@ -658,15 +656,14 @@ func TestRecentTickets_IgnoresDraftMessages(t *testing.T) {
 	if err != nil {
 		t.Fatalf("InsertTicket(old): %v", err)
 	}
-	insertZingUpdate(t, s, ticketOld)
 
 	ticketNew, err := s.InsertTicket(t.Context(), Ticket{ProjectID: projectID, TrackerRef: "new", Title: "t", State: ticketStateQueued})
 	if err != nil {
 		t.Fatalf("InsertTicket(new): %v", err)
 	}
-	insertZingUpdate(t, s, ticketNew)
 
-	if _, err = s.SaveDraft(t.Context(), DraftInput{TicketID: ticketOld, Text: "a draft reply after both real updates"}); err != nil {
+	insertZingUpdate(t, s, ticketOld)
+	if _, err = s.SaveDraft(t.Context(), DraftInput{TicketID: ticketOld, Text: "a draft reply after the real update"}); err != nil {
 		t.Fatalf("SaveDraft: %v", err)
 	}
 
@@ -680,7 +677,7 @@ func TestRecentTickets_IgnoresDraftMessages(t *testing.T) {
 	}
 	for i, w := range want {
 		if got[i].ID != w {
-			t.Errorf("RecentTickets[%d].ID = %d, want %d (a later draft on ticketOld must not outrank ticketNew's real update)", i, got[i].ID, w)
+			t.Errorf("RecentTickets[%d].ID = %d, want %d (a later message on ticketOld must not outrank ticketNew)", i, got[i].ID, w)
 		}
 	}
 }

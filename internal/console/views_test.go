@@ -234,28 +234,33 @@ func TestNavOrderStable(t *testing.T) {
 	})
 }
 
-// TestRecentOrdersByNewestMessageThenNoMessageLast proves Recent's order:
-// newest message id descending, a ticket with no message sorting last
-// (design section 7.2).
-func TestRecentOrdersByNewestMessageThenNoMessageLast(t *testing.T) {
+// TestRecentOrdersByNewestTicketFirst proves Recent's order: newest ticket
+// first (ticket id descending), unaffected by which ticket's messages
+// arrived most recently (#106 bug 5, c8's owner decision (a)). X, Y, and Z
+// are created in that order (X oldest, Z newest), then Y and Z each get a
+// state message, and X gets one last -- making X's message the newest if
+// the page still sorted by message recency. The order must still be Z, Y,
+// X, by ticket id alone.
+func TestRecentOrdersByNewestTicketFirst(t *testing.T) {
 	t.Parallel()
 	s := newConsoleTestStore(t)
 
-	seedTicket(t, s, "r#1", "Ticket X no messages")
-	ticketY := seedTicket(t, s, "r#2", "Ticket Y older message")
+	ticketX := seedTicket(t, s, "r#1", "Ticket X")
+	ticketY := seedTicket(t, s, "r#2", "Ticket Y")
 	seedStateMessage(t, s, ticketY, "queued", testPlanningLiteral, "start Y")
-	ticketZ := seedTicket(t, s, "r#3", "Ticket Z newer message")
+	ticketZ := seedTicket(t, s, "r#3", "Ticket Z")
 	seedStateMessage(t, s, ticketZ, "queued", testPlanningLiteral, "start Z")
+	seedStateMessage(t, s, ticketX, "queued", testPlanningLiteral, "start X")
 
 	srv := newTestServer(t, s, bus.New(), nil, newTestLogHandler(t))
 
 	main := mainFrame(t, srv.URL, "recent", 0, 0)
 
-	z := mustIndex(t, main, "Ticket Z newer message")
-	y := mustIndex(t, main, "Ticket Y older message")
-	x := mustIndex(t, main, "Ticket X no messages")
+	z := mustIndex(t, main, "Ticket Z")
+	y := mustIndex(t, main, "Ticket Y")
+	x := mustIndex(t, main, "Ticket X")
 	if z >= y || y >= x {
-		t.Errorf("expected order Z, Y, X (newest message first, no-message ticket last); got:\n%s", main)
+		t.Errorf("expected order Z, Y, X (newest ticket first); got:\n%s", main)
 	}
 }
 
