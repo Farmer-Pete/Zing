@@ -1126,7 +1126,7 @@ func TestMarkerRecognized(t *testing.T) {
 			"a typed event with a registered rule is recognized",
 			store.MessageRow{Message: store.Message{ //nolint:modernize // keyed on purpose
 				Type: msgTypeUpdate, Author: authorSystem, EventKind: &checkRerun,
-				Payload: []byte(`{"check":"test","sha":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}`),
+				Payload: []byte(`{"check":"test","sha":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","run_id":1,"check_run_id":1,"reason":"flaky"}`),
 			}},
 			true,
 		},

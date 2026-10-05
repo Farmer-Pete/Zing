@@ -50,8 +50,13 @@ func TestEventLineFallbacks(t *testing.T) {
 		{"undecodable payload", store.EventKindCheckRerun, "{}", "Unreadable check_rerun event."},
 		{
 			"check_rerun happy path", store.EventKindCheckRerun,
-			`{"check":"lint","sha":"cccccccccccccccccccccccccccccccccccccccc"}`,
-			"Zing re-ran the lint check on ccccccc.",
+			`{"check":"Hooks and tests","sha":"cccccccccccccccccccccccccccccccccccccccc","run_id":37145043448,"check_run_id":5001,"reason":"flaky"}`,
+			"Zing re-ran the Hooks and tests check on ccccccc (workflow run 37145043448) because it failed.",
+		},
+		{
+			"check_rerun_passed happy path", store.EventKindCheckRerunPassed,
+			`{"check":"Hooks and tests","sha":"cccccccccccccccccccccccccccccccccccccccc","tests":["TestA"]}`,
+			"Hooks and tests failed once and passed on re-run (likely flaky): TestA.",
 		},
 		{
 			"owner_edit plan_task drop happy path", store.EventKindOwnerEdit,

@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"strings"
 
 	"zing/internal/response"
 	"zing/internal/store"
@@ -20,8 +21,9 @@ type eventRule func(payload json.RawMessage) (string, error)
 // TestEveryEventKindHasARenderRule fails when this disagrees with
 // store.EventKinds().
 var eventRules = map[string]eventRule{
-	store.EventKindCheckRerun: checkRerunLine,
-	store.EventKindOwnerEdit:  ownerEditLine,
+	store.EventKindCheckRerun:       checkRerunLine,
+	store.EventKindCheckRerunPassed: checkRerunPassedLine,
+	store.EventKindOwnerEdit:        ownerEditLine,
 }
 
 // eventLine renders an event row through its kind's rule. If the kind has
@@ -45,17 +47,43 @@ func eventLine(m *store.MessageRow) string {
 	return line
 }
 
+// checkRerunWhy explains each RerunReason in checkRerunLine's sentence.
+var checkRerunWhy = map[response.RerunReason]string{
+	response.RerunReasonFlaky: "it failed",
+	response.RerunReasonInfra: "it was cancelled or never started",
+	response.RerunReasonNoLog: "its log could not be read",
+}
+
 // checkRerunLine renders a check_rerun event (store.EventKindCheckRerun):
-// one re-run of a check on a sha.
+// one re-run of a GitHub check run on a sha, naming the workflow run and
+// why it was re-run.
 func checkRerunLine(payload json.RawMessage) (string, error) {
 	var e response.CheckRerunEvent
 	if err := json.Unmarshal(payload, &e); err != nil {
 		return "", fmt.Errorf("decode check_rerun: %w", err)
 	}
-	if e.Check == "" || e.SHA == "" {
-		return "", errors.New("decode check_rerun: missing check or sha")
+	why, ok := checkRerunWhy[e.Reason]
+	if e.Check == "" || e.SHA == "" || e.RunID == 0 || !ok {
+		return "", errors.New("decode check_rerun: missing check, sha, run_id, or reason")
 	}
-	return "Zing re-ran the " + string(e.Check) + " check on " + sha7(e.SHA) + ".", nil
+	return fmt.Sprintf("Zing re-ran the %s check on %s (workflow run %d) because %s.", e.Check, sha7(e.SHA), e.RunID, why), nil
+}
+
+// checkRerunPassedLine renders a check_rerun_passed event
+// (store.EventKindCheckRerunPassed): a check that failed once and passed
+// on re-run, likely flaky.
+func checkRerunPassedLine(payload json.RawMessage) (string, error) {
+	var e response.CheckRerunPassedEvent
+	if err := json.Unmarshal(payload, &e); err != nil {
+		return "", fmt.Errorf("decode check_rerun_passed: %w", err)
+	}
+	if e.Check == "" || e.SHA == "" {
+		return "", errors.New("decode check_rerun_passed: missing check or sha")
+	}
+	if len(e.Tests) == 0 {
+		return e.Check + " failed once and passed on re-run (likely flaky).", nil
+	}
+	return e.Check + " failed once and passed on re-run (likely flaky): " + strings.Join(e.Tests, ", ") + ".", nil
 }
 
 // ownerEditLine renders an owner_edit event (store.EventKindOwnerEdit).

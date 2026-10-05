@@ -1,11 +1,25 @@
 package response
 
 // CheckRerunEvent is the check_rerun typed event's payload (messages table,
-// event_kind "check_rerun"): check re-ran on sha. #91 writes it and gates on
-// its count per sha.
+// event_kind "check_rerun"): one re-run of a GitHub check run on sha. #91
+// writes it and gates re-runs on its count per check per sha.
 type CheckRerunEvent struct {
-	Check CheckName `json:"check"`
-	SHA   string    `json:"sha" jsonschema:"pattern=^[0-9a-f]{40}$"`
+	Check      string      `json:"check" jsonschema:"minLength=1,maxLength=200"`
+	SHA        string      `json:"sha" jsonschema:"pattern=^[0-9a-f]{40}$"`
+	RunID      int64       `json:"run_id" jsonschema:"minimum=1"`
+	CheckRunID int64       `json:"check_run_id" jsonschema:"minimum=1"`
+	Reason     RerunReason `json:"reason"`
+	Tests      []string    `json:"tests,omitempty" jsonschema:"maxItems=20"`
+}
+
+// CheckRerunPassedEvent is the check_rerun_passed typed event's payload
+// (messages table, event_kind "check_rerun_passed"): a check that had a
+// flaky or no_log check_rerun on sha passed once re-run, so the fix run it
+// would have spent is skipped.
+type CheckRerunPassedEvent struct {
+	Check string   `json:"check" jsonschema:"minLength=1,maxLength=200"`
+	SHA   string   `json:"sha" jsonschema:"pattern=^[0-9a-f]{40}$"`
+	Tests []string `json:"tests,omitempty" jsonschema:"maxItems=20"`
 }
 
 // OwnerEditEvent is the owner_edit typed event's payload (messages table,
