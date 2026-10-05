@@ -64,6 +64,15 @@ type DraftInput struct {
 	Text       string
 }
 
+// clearsReplyDraft reports whether in asks SaveDraft to delete an existing
+// question reply draft rather than write one (an empty Text against a
+// question, with neither Option nor Item set): SaveDraft's mode switch and
+// logSaveDraftOutcome below both need this same decision, named once so the
+// two cannot drift apart.
+func (in DraftInput) clearsReplyDraft() bool {
+	return in.QuestionID != nil && in.Text == "" && in.Option == nil && in.Item == nil
+}
+
 // DraftResult reports the draft row SaveDraft wrote, updated, or deleted.
 // Replaced is true only when this call changed an existing draft's stored
 // value; a fresh draft, and a repeat of the exact same option or item value,
@@ -171,7 +180,7 @@ func (s *Store) SaveDraft(ctx context.Context, in DraftInput) (result DraftResul
 				return DraftResult{}, conflict("a review item takes accept, drop, or discuss")
 			}
 			result, err = s.upsertItemDraftTx(ctx, tx, in.TicketID, *in.QuestionID, *in.Item)
-		case in.Text == "":
+		case in.clearsReplyDraft():
 			result, err = clearReplyDraftTx(ctx, tx, in.TicketID, *in.QuestionID)
 		default:
 			result, err = s.insertReplyDraftTx(ctx, tx, in.TicketID, in.QuestionID, in.Text)
@@ -195,6 +204,13 @@ func (s *Store) SaveDraft(ctx context.Context, in DraftInput) (result DraftResul
 // caller: the console handler already logs it (internal/console/answer.go),
 // so logging it again here would violate "log or return, never both".
 // question_id logs as 0 for a thread reply, which carries no question.
+//
+// "draft cleared" is logged only when result.Cleared is true, so a reader
+// searching the log for that message can count it as a deletion that
+// actually happened: autosave makes "clear a box that was never saved"
+// common (clearReplyDraftTx finds no row), and that outcome gets its own
+// "draft clear: nothing to clear" line instead of reusing the same message
+// with a misleading "cleared"=false.
 func logSaveDraftOutcome(ctx context.Context, in DraftInput, result DraftResult, err error) {
 	var questionID int64
 	if in.QuestionID != nil {
@@ -207,9 +223,13 @@ func logSaveDraftOutcome(ctx context.Context, in DraftInput, result DraftResult,
 		}
 		return
 	}
-	if in.QuestionID != nil && in.Text == "" && in.Option == nil && in.Item == nil {
+	if in.clearsReplyDraft() && !result.Cleared {
+		slog.InfoContext(ctx, "draft clear: nothing to clear", "ticket_id", in.TicketID, "question_id", questionID)
+		return
+	}
+	if in.clearsReplyDraft() {
 		slog.InfoContext(ctx, "draft cleared",
-			"ticket_id", in.TicketID, "question_id", questionID, "message_id", result.MessageID, "cleared", result.Cleared)
+			"ticket_id", in.TicketID, "question_id", questionID, "message_id", result.MessageID)
 		return
 	}
 	slog.InfoContext(ctx, "draft saved",

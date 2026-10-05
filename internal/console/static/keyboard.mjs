@@ -531,7 +531,12 @@ export const AUTOSAVE_DEBOUNCE_MS = 1000;
 export function replyAutosaveBody(el, lastSavedText) {
 	const ticket = el?.dataset?.draftTicket;
 	const question = el?.dataset?.draftQuestion;
-	if (!ticket || !question || typeof el.value !== 'string' || el.value === lastSavedText) {
+	const isQuestionReplyBox = Boolean(ticket && question) && typeof el?.value === 'string';
+	if (!isQuestionReplyBox) {
+		return null;
+	}
+	const unchanged = el.value === lastSavedText;
+	if (unchanged) {
 		return null;
 	}
 	return { ticket: Number(ticket), question: Number(question), text: el.value };
@@ -588,8 +593,8 @@ export function replyFocusSnapshot(el) {
  */
 export function restoreFocusDecision(snapshot, active, target) {
 	const focus = Boolean(snapshot) && Boolean(active?.isBody) && target != null;
-	const restoreValue = focus && target.value === '' && snapshot.value !== '';
-	return { focus, restoreValue };
+	const replacementLostText = focus && target.value === '' && snapshot.value !== '';
+	return { focus, restoreValue: replacementLostText };
 }
 
 /**

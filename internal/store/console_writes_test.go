@@ -451,6 +451,9 @@ func TestSaveDraft_EmptyTextClearsQuestionReplyDraft(t *testing.T) {
 	if !cleared.Cleared {
 		t.Error("SaveDraft (empty text): Cleared = false, want true")
 	}
+	if cleared.MessageID != saved.MessageID {
+		t.Errorf("SaveDraft (empty text): MessageID = %d, want the deleted row's id %d", cleared.MessageID, saved.MessageID)
+	}
 
 	messages, err := s.ListMessages(t.Context(), ticketID)
 	if err != nil {
@@ -470,6 +473,9 @@ func TestSaveDraft_EmptyTextClearsQuestionReplyDraft(t *testing.T) {
 	}
 	if again.Cleared {
 		t.Error("SaveDraft (second empty text): Cleared = true, want false (nothing left to clear)")
+	}
+	if again.MessageID != 0 {
+		t.Errorf("SaveDraft (second empty text): MessageID = %d, want 0 (nothing was deleted)", again.MessageID)
 	}
 }
 

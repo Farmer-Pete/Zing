@@ -683,6 +683,13 @@ test('restoreFocusDecision: restores only a patch-caused blur, and refills an em
 		focus: false,
 		restoreValue: false,
 	});
+
+	// The snapshot itself held no text (an empty box had focus): an empty
+	// replacement is not "lost text", so nothing is refilled.
+	assert.deepEqual(restoreFocusDecision({ ...snapshot, value: '' }, { isBody: true }, { value: '' }), {
+		focus: true,
+		restoreValue: false,
+	});
 });
 
 // reduceStreamStatus / reconnectDelay / staleMarkerText: console.js's
