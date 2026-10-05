@@ -75,13 +75,13 @@ type Params struct {
 type Host struct {
 	Home, DataDir, ZingBin, CacheRoot, CacheShared, MDSCache string
 	// SSHAuthSock and SSHAuthSockReal are resolveHost's own reading of the
-	// parent's SSH_AUTH_SOCK (#49): both empty when it was unset, empty,
-	// or relative.
+	// parent's SSH_AUTH_SOCK (#49): both empty only when it was unset or
+	// empty. A non-absolute value is refused outright (resolveHost returns
+	// an error), rather than silently carried as if it were unset.
 	SSHAuthSock, SSHAuthSockReal string
 	// agentSockBranch records which of resolveHost's own branches ran for
-	// SSH_AUTH_SOCK -- "unset", "relative", "resolved", or "unresolved" --
-	// so LoadProfile can log which one without ever logging the path
-	// itself.
+	// SSH_AUTH_SOCK -- "unset", "resolved", or "unresolved" -- so
+	// LoadProfile can log which one without ever logging the path itself.
 	agentSockBranch string
 }
 
@@ -310,29 +310,32 @@ func resolveHost(dataDir string) (Host, error) {
 		return Host{}, fmt.Errorf("sandbox: chmod cache shared dir: %w", err)
 	}
 
-	// SSH_AUTH_SOCK (#49's agent-socket gap): a relative value is treated
-	// the same as unset, since a relative path-literal would never match
-	// what the kernel resolves a connect against anyway. An absolute value
-	// is carried both as given and with its symlinks resolved, falling
-	// back to the raw value when resolution fails -- the same pattern this
-	// function already uses above for home and zingBin -- so a custom
-	// agent socket reached through a symlink is denied either way. No
-	// error ever comes from this: an unreadable or missing socket path
-	// still has a path, and the two profiles only need the path itself to
-	// build their deny rule from, never to open it here.
+	// SSH_AUTH_SOCK (#49's agent-socket gap): a relative value fails
+	// closed, the same way every other failure case in this function
+	// does, rather than being silently carried as if it were unset -- a
+	// relative value left unset would let the real (relative-valued)
+	// agent socket stay reachable from inside the sandbox, since Prefix
+	// would substitute the harmless noAgentSocket sentinel into the
+	// profile's deny rule instead. An absolute value is carried both as
+	// given and with its symlinks resolved via resolveAgentSockPath,
+	// which also canonicalizes a socket that does not exist yet by
+	// resolving its deepest existing ancestor directory, so a custom
+	// agent socket reached through a symlink is denied either way, even
+	// before the agent has created it.
+	rawSock := os.Getenv("SSH_AUTH_SOCK")
 	var sshAuthSock, sshAuthSockReal, agentSockBranch string
-	switch rawSock := os.Getenv("SSH_AUTH_SOCK"); {
+	switch {
 	case rawSock == "":
 		agentSockBranch = "unset"
 	case !filepath.IsAbs(rawSock):
-		agentSockBranch = "relative"
+		return Host{}, errors.New("sandbox: SSH_AUTH_SOCK must be absolute")
 	default:
 		sshAuthSock = rawSock
-		if resolved, evalErr := filepath.EvalSymlinks(rawSock); evalErr == nil {
-			sshAuthSockReal = resolved
+		resolved, resolvedOK := resolveAgentSockPath(rawSock)
+		sshAuthSockReal = resolved
+		if resolvedOK {
 			agentSockBranch = "resolved"
 		} else {
-			sshAuthSockReal = rawSock
 			agentSockBranch = "unresolved"
 		}
 	}
@@ -342,6 +345,39 @@ func resolveHost(dataDir string) (Host, error) {
 		CacheRoot: cacheRoot, CacheShared: cacheShared, MDSCache: mdsCache,
 		SSHAuthSock: sshAuthSock, SSHAuthSockReal: sshAuthSockReal, agentSockBranch: agentSockBranch,
 	}, nil
+}
+
+// resolveAgentSockPath canonicalizes rawSock the way filepath.EvalSymlinks
+// would if its socket file already existed. A socket-activated or
+// not-yet-started agent commonly hasn't created its socket file yet, so
+// filepath.EvalSymlinks(rawSock) itself fails with ENOENT even though
+// every directory above it is real. On macOS several common ancestors --
+// /tmp, /var, /etc -- are themselves symlinks to a /private/... path, and
+// seatbelt's path-literal match runs against what the kernel resolves a
+// connect's argument to, not the literal bytes a caller wrote down, so a
+// raw fallback could miss the deny once the agent actually starts and
+// creates the socket. resolveAgentSockPath instead walks upward from
+// rawSock, resolving the deepest ancestor directory that does exist and
+// joining the unresolved remainder back onto it. ok is false, and resolved
+// is rawSock itself, only if no ancestor down to the filesystem root
+// resolves.
+func resolveAgentSockPath(rawSock string) (resolved string, ok bool) {
+	if r, err := filepath.EvalSymlinks(rawSock); err == nil {
+		return r, true
+	}
+	suffix := filepath.Base(rawSock)
+	dir := filepath.Dir(rawSock)
+	for {
+		if r, err := filepath.EvalSymlinks(dir); err == nil {
+			return filepath.Join(r, suffix), true
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			return rawSock, false
+		}
+		suffix = filepath.Join(filepath.Base(dir), suffix)
+		dir = parent
+	}
 }
 
 // proves runs the section 5.4 proof command: sandbox-exec, every param
@@ -593,11 +629,14 @@ const noAgentSocket = "/var/empty/zing-no-ssh-agent"
 
 // agentParamArgs returns the "-D SSH_AUTH_SOCK=..." and "-D
 // SSH_AUTH_SOCK_REAL=..." pair Prefix appends after paramOrder's own flags,
-// for every profile (#49): an empty field becomes noAgentSocket rather than
-// being omitted, since every profile's deny rule always names both params.
-// It mirrors judgeParamArgs below, checking each value with the same
-// checkParamValue every other param goes through, so the error names only
-// the param and never the rejected value.
+// for every profile (#49), for consistency and simplicity across the three
+// profiles: an empty field becomes noAgentSocket rather than being omitted.
+// Only build.sb and judge.sb actually contain a deny rule naming these two
+// params; readonly.sb has none, by design and out of this ticket's scope
+// (the plan's own nongoal), so it receives both flags unused. It mirrors
+// judgeParamArgs below, checking each value with the same checkParamValue
+// every other param goes through, so the error names only the param and
+// never the rejected value.
 func agentParamArgs(p Params) ([]string, error) {
 	var argv []string
 	for _, kv := range []struct{ name, value string }{

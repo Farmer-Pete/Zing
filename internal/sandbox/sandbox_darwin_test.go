@@ -1599,27 +1599,50 @@ func TestParamsForCarriesAgentSocket(t *testing.T) {
 		assertSandboxAgentSocketLog(t, logBuf, "resolved", linkSock, agentSock)
 	})
 
+	// A relative SSH_AUTH_SOCK fails the whole load closed, rather than
+	// being silently carried as if it were unset: the resolveHost error
+	// surfaces the same way any of its other failures do, before
+	// LoadProfile ever reaches its "sandbox agent socket" debug record,
+	// so no log capture is needed here.
 	t.Run("relative", func(t *testing.T) {
-		logBuf := captureSandboxAgentSocketLog(t)
 		t.Setenv("SSH_AUTH_SOCK", "relative/agent.sock")
-		sb := newLoadedSandbox(t, nil, 7420)
-		dirs := newTestDirs(t)
-		p, err := sb.ParamsFor(dirs.worktree, dirs.repoGit, dirs.runDir)
+		profile, err := zing.Assets.ReadFile("sandbox/build.sb")
 		if err != nil {
-			t.Fatalf("ParamsFor: %v", err)
+			t.Fatalf("read sandbox/build.sb: %v", err)
 		}
-		if p.SSHAuthSock != "" || p.SSHAuthSockReal != "" {
-			t.Errorf("SSHAuthSock=%q SSHAuthSockReal=%q, want both empty", p.SSHAuthSock, p.SSHAuthSockReal)
+		sb := Load(profile, t.TempDir(), nil, 7420)
+		if sb.Available() {
+			t.Fatal("Load: want a relative SSH_AUTH_SOCK to make the sandbox unavailable, got available")
 		}
-		if sb.host.agentSockBranch != "relative" {
-			t.Errorf("agentSockBranch = %q, want %q", sb.host.agentSockBranch, "relative")
+		if sb.Reason() != reasonUserCacheDirNotFound {
+			t.Errorf("Reason() = %q, want %q", sb.Reason(), reasonUserCacheDirNotFound)
 		}
-		assertSandboxAgentSocketLog(t, logBuf, "relative", "relative/agent.sock")
 	})
 
-	t.Run("unresolved", func(t *testing.T) {
+	// A socket that has not been created yet -- common for a
+	// socket-activated or not-yet-started agent -- still canonicalizes
+	// through its deepest existing ancestor directory: a temp dir under
+	// /tmp, which macOS itself symlinks to /private/tmp, stands in for
+	// that ancestor, so SSHAuthSockReal must reflect the resolved
+	// ancestor rather than the raw /tmp-prefixed path.
+	t.Run("unresolved leaf, symlinked ancestor", func(t *testing.T) {
 		logBuf := captureSandboxAgentSocketLog(t)
-		missing := filepath.Join(t.TempDir(), "does-not-exist.sock")
+		dir, mkdirErr := os.MkdirTemp("/tmp", "zsa") //nolint:usetesting // see the "resolved" subtest above: needs a real /tmp ancestor, not t.TempDir()'s own root
+		if mkdirErr != nil {
+			t.Fatalf("MkdirTemp: %v", mkdirErr)
+		}
+		t.Cleanup(func() { _ = os.RemoveAll(dir) })
+
+		resolvedDir, evalErr := filepath.EvalSymlinks(dir)
+		if evalErr != nil {
+			t.Fatalf("EvalSymlinks(%q): %v", dir, evalErr)
+		}
+		if resolvedDir == dir {
+			t.Skipf("%q does not sit under a symlinked ancestor on this machine", dir)
+		}
+
+		missing := filepath.Join(dir, "does-not-exist.sock")
+		wantReal := filepath.Join(resolvedDir, "does-not-exist.sock")
 		t.Setenv("SSH_AUTH_SOCK", missing)
 		sb := newLoadedSandbox(t, nil, 7420)
 		dirs := newTestDirs(t)
@@ -1627,12 +1650,15 @@ func TestParamsForCarriesAgentSocket(t *testing.T) {
 		if err != nil {
 			t.Fatalf("ParamsFor: %v", err)
 		}
-		if p.SSHAuthSock != missing || p.SSHAuthSockReal != missing {
-			t.Errorf("SSHAuthSock=%q SSHAuthSockReal=%q, want both %q", p.SSHAuthSock, p.SSHAuthSockReal, missing)
+		if p.SSHAuthSock != missing {
+			t.Errorf("SSHAuthSock = %q, want %q", p.SSHAuthSock, missing)
 		}
-		if sb.host.agentSockBranch != "unresolved" {
-			t.Errorf("agentSockBranch = %q, want %q", sb.host.agentSockBranch, "unresolved")
+		if p.SSHAuthSockReal != wantReal {
+			t.Errorf("SSHAuthSockReal = %q, want %q (the canonicalized ancestor), not the raw path", p.SSHAuthSockReal, wantReal)
 		}
-		assertSandboxAgentSocketLog(t, logBuf, "unresolved", missing)
+		if sb.host.agentSockBranch != "resolved" {
+			t.Errorf("agentSockBranch = %q, want %q", sb.host.agentSockBranch, "resolved")
+		}
+		assertSandboxAgentSocketLog(t, logBuf, "resolved", missing, wantReal)
 	})
 }

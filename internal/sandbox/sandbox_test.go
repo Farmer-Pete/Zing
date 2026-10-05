@@ -55,7 +55,9 @@ func testParams() Params {
 }
 
 // TestPrefixOrder proves Prefix emits the ten -D flags in section 5.2's
-// table order, followed by -p <profile>, with "sandbox-exec" as argv[0].
+// table order, followed by the "-D SSH_AUTH_SOCK=..." / "-D
+// SSH_AUTH_SOCK_REAL=..." pair right after TRANSCRIPTS (#49's agent-socket
+// gap), followed by -p <profile>, with "sandbox-exec" as argv[0].
 func TestPrefixOrder(t *testing.T) {
 	t.Parallel()
 	sb := Sandbox{renderedProfile: testMinimalRenderedProfile}
