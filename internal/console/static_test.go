@@ -34,7 +34,7 @@ const (
 func TestStaticAssetsServeWithContentType(t *testing.T) {
 	t.Parallel()
 	s := newConsoleTestStore(t)
-	srv := httptest.NewServer(console.New(s, bus.New(), nil, testBindHosts, testConsolePort, newTestLogHandler(t), nil, testPushToken, response.SeverityMinor, "", nil, ""))
+	srv := httptest.NewServer(console.New(s, bus.New(), nil, testBindHosts, testConsolePort, newTestLogHandler(t), nil, testPushToken, response.SeverityMinor, "", nil, "", nil))
 	// t.Cleanup, not defer: this test's subtests below call t.Parallel(),
 	// which pauses them until this function returns, so a deferred
 	// srv.Close() would close the server before any subtest's GET runs.
@@ -85,7 +85,7 @@ func TestStaticAssetsServeWithContentType(t *testing.T) {
 func TestStaticAssetsRejectForbiddenPaths(t *testing.T) {
 	t.Parallel()
 	s := newConsoleTestStore(t)
-	srv := httptest.NewServer(console.New(s, bus.New(), nil, testBindHosts, testConsolePort, newTestLogHandler(t), nil, testPushToken, response.SeverityMinor, "", nil, ""))
+	srv := httptest.NewServer(console.New(s, bus.New(), nil, testBindHosts, testConsolePort, newTestLogHandler(t), nil, testPushToken, response.SeverityMinor, "", nil, "", nil))
 	// t.Cleanup, not defer: this test's subtests below call t.Parallel(),
 	// which pauses them until this function returns, so a deferred
 	// srv.Close() would close the server before any subtest's GET runs.
@@ -121,7 +121,7 @@ func TestStaticAssetsRejectForbiddenPaths(t *testing.T) {
 func TestMermaidAssetDigestMatchesRecorded(t *testing.T) {
 	t.Parallel()
 	s := newConsoleTestStore(t)
-	srv := httptest.NewServer(console.New(s, bus.New(), nil, testBindHosts, testConsolePort, newTestLogHandler(t), nil, testPushToken, response.SeverityMinor, "", nil, ""))
+	srv := httptest.NewServer(console.New(s, bus.New(), nil, testBindHosts, testConsolePort, newTestLogHandler(t), nil, testPushToken, response.SeverityMinor, "", nil, "", nil))
 	defer srv.Close()
 
 	resp, err := http.Get(srv.URL + "/static/mermaid.js") //nolint:noctx // a bare GET on a test server needs no deadline

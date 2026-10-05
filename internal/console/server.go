@@ -34,6 +34,22 @@ const (
 // bound on purpose (datastar skill, "Long-lived streams").
 const nonStreamWriteDeadline = 5 * time.Second
 
+// streamHeartbeatInterval is the interval New sets console.streamHeartbeat
+// to: an upper bound on how long a missed wake -- a dropped publish, a
+// wedged write recovering, a reconnect that never arrived -- can leave the
+// page showing stale content before the next full re-render corrects it.
+// keyboard.mjs's STREAM_IDLE_MS (45s) is three of these beats, so three
+// missed beats in a row, not one slow one, is what finally shows the stale
+// marker.
+const streamHeartbeatInterval = 15 * time.Second
+
+// streamFrameWriteTimeout is the interval New sets console.streamWriteTimeout
+// to: how long one region's write on /stream may block before
+// armFrameWriteDeadline's deadline fails it and handleStream ends the
+// stream, rather than leaving a wedged write to swallow every later wake
+// forever.
+const streamFrameWriteTimeout = 10 * time.Second
+
 // The five public static assets (design section 5, 12): the vendored
 // Datastar bundle (Package 3), the vendored mermaid.js (static/ASSETS.md
 // records its source, version, and digest), and three assets authored in
@@ -100,6 +116,16 @@ type console struct {
 	tracker tracker.Tracker
 	user    string
 
+	// run backs POST /tickets/{id}/sandbox-run (sandboxrun.go): the owner's
+	// "run a command in this ticket's sandbox" console action. job.
+	// TicketCommands is the real TicketRunner, built in cmd/zing/serve.go
+	// with the same CommandRunner value the dispatcher's CHECK step uses,
+	// so the console can never drift from what CHECK itself runs. Nilable
+	// the way push and tracker already are: a nil run answers that route
+	// with 503 "sandbox runs are not available", and every test that does
+	// not itself exercise the route passes nil.
+	run TicketRunner
+
 	// startedAt is when New built this console (bug fix: the Log rail's
 	// empty state read as "No log lines yet." after every `zing serve`
 	// restart, since log.go's ring is in memory and a restart always starts
@@ -107,6 +133,29 @@ type console struct {
 	// itself is not persisted -- buildLogRail (rail.go) uses startedAt only
 	// to say since when there is nothing to show).
 	startedAt time.Time
+
+	// streamHeartbeat is how often handleStream's select loop re-renders
+	// and patches all four regions with no bus wake at all (bug fix: a
+	// stream that goes silent without closing -- a half-open socket, a
+	// hidden-tab pause, or a wedged server write -- left the page showing
+	// stale content with no stale marker, since the client only notices a
+	// finished or error event, neither of which a silently stalled stream
+	// ever produces). New sets it to streamHeartbeatInterval; zero (a bare
+	// struct literal, every test that does not itself exercise the beat)
+	// disables it, so handleStream's ticker case never fires.
+	streamHeartbeat time.Duration
+
+	// streamWriteTimeout bounds how long patchRegions' armFrameWriteDeadline
+	// gives each of the four region writes on /stream (bug fix: handleStream
+	// clears the write deadline entirely on connect (stream.go's
+	// SetWriteDeadline(time.Time{})), so a write that wedges -- a half-open
+	// socket the kernel has not yet noticed -- blocked forever and the bus's
+	// one-slot buffer then dropped every later wake). New sets it to
+	// streamFrameWriteTimeout; zero (a bare struct literal, every test that
+	// does not itself exercise the deadline) disables it, so
+	// armFrameWriteDeadline arms nothing and a region write can still block
+	// as before.
+	streamWriteTimeout time.Duration
 }
 
 // New builds the console and returns it as an http.Handler:
@@ -121,6 +170,7 @@ type console struct {
 //	POST /side                  the inert side box's fixed reply (design section 6.11, 7.1)
 //	POST /stop                  the s/S keyboard keys: stop everything, or one ticket (design section 6.11, 7.1)
 //	POST /projects/{id}/pickup  manual intake: pick up one issue by number (PKG9-PLAN.md D29)
+//	POST /tickets/{id}/sandbox-run  run one command in a ticket's worktree as CHECK runs it (loopback only)
 //	GET  /runs/{id}/{kind}      one run's final message, stderr, or transcript, as plain text
 //	GET  /push/key               the VAPID public key (design section 6.13, 7.1)
 //	POST /push/subscribe        store one push subscription (design section 6.13, 7.1)
@@ -167,14 +217,22 @@ type console struct {
 // and user is cfg.User. Either may be left zero (nil, "") by a caller that
 // never exercises that one route.
 //
+// run backs POST /tickets/{id}/sandbox-run (sandboxrun.go): cmd/zing/serve.go
+// passes job.TicketCommands{..., Commands: cmds}, the same cmds value the
+// dispatcher's CHECK step runs with. A nil run (every other caller: selftest,
+// most tests) makes that route answer 503 "sandbox runs are not available".
+//
 // The returned handler is a *http.ServeMux, plain HTTP/1.1, with no timeouts
 // of its own; cmd/zing wraps it in an http.Server with the drain-aware
 // BaseContext and shutdown sequence (design section 6.14, cmd/zing/serve.go).
-func New(st *store.Store, b *bus.Broker, m *machine.Machine, hosts []string, port int, log *Handler, push PushKeys, pushToken string, floor response.Severity, sandboxReason string, tr tracker.Tracker, user string) http.Handler {
+func New(st *store.Store, b *bus.Broker, m *machine.Machine, hosts []string, port int, log *Handler, push PushKeys, pushToken string, floor response.Severity, sandboxReason string, tr tracker.Tracker, user string, run TicketRunner) http.Handler {
 	c := &console{
 		store: st, bus: b, machine: m, log: log, push: push, pushToken: pushToken,
 		floor: floor, sandboxReason: sandboxReason, tracker: tr, user: user,
-		startedAt: time.Now(),
+		run:                run,
+		startedAt:          time.Now(),
+		streamHeartbeat:    streamHeartbeatInterval,
+		streamWriteTimeout: streamFrameWriteTimeout,
 	}
 	guard := newMutationGuard(port, append(append([]string{}, hosts...), "localhost", "127.0.0.1")...)
 
@@ -189,6 +247,7 @@ func New(st *store.Store, b *bus.Broker, m *machine.Machine, hosts []string, por
 	mux.HandleFunc("POST /side", withWriteDeadline(guard.requireSameOrigin(c.handleSide)))
 	mux.HandleFunc("POST /stop", withWriteDeadline(guard.requireSameOrigin(c.handleStop)))
 	mux.HandleFunc("POST /projects/{id}/pickup", withWriteDeadline(guard.requireSameOrigin(c.handlePickup)))
+	mux.HandleFunc("POST /tickets/{id}/sandbox-run", requireLoopback(guard.requireSameOrigin(c.handleSandboxRun))) // long-running: no write deadline
 	mux.HandleFunc("GET /runs/{id}/{kind}", withWriteDeadline(guard.requireAllowedHost(c.handleRunFile)))
 	mux.HandleFunc("GET /push/key", withWriteDeadline(c.handlePushKey))
 	// POST /push/subscribe is token-only (push.go's checkPushToken), not

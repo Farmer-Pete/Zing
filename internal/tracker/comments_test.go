@@ -50,15 +50,30 @@ func TestPRComment_ExactBody(t *testing.T) {
 	}
 }
 
-// TestDoneComment_ExactBody proves DoneComment interpolates both owner and
-// prURL into the exact body from section 4.3.
-func TestDoneComment_ExactBody(t *testing.T) {
+// TestDoneCommentWithoutMergeKeepsReadyForReview proves DoneComment keeps
+// today's exact "ready for review" body when mergeSHA is "". Renames
+// TestDoneComment_ExactBody.
+func TestDoneCommentWithoutMergeKeepsReadyForReview(t *testing.T) {
 	t.Parallel()
 
-	got := tracker.DoneComment(testOwner, testURL)
+	got := tracker.DoneComment(testOwner, testURL, "")
 	want := "Zing finished this ticket. The pull request is ready for review: " + testURL + "\n\n" + disclosure
 	if got != want {
-		t.Errorf("DoneComment(%q, %q) =\n%q\nwant\n%q", testOwner, testURL, got, want)
+		t.Errorf("DoneComment(%q, %q, %q) =\n%q\nwant\n%q", testOwner, testURL, "", got, want)
+	}
+}
+
+// TestDoneCommentNamesMergeCommit proves DoneComment, given a merge sha,
+// says the pull request was merged and names that merge commit instead of
+// saying it is ready for review.
+func TestDoneCommentNamesMergeCommit(t *testing.T) {
+	t.Parallel()
+
+	const mergeSHA = "0123456789abcdef0123456789abcdef01234567"
+	got := tracker.DoneComment(testOwner, testURL, mergeSHA)
+	want := "Zing finished this ticket. The pull request was merged: " + testURL + " (merge commit " + mergeSHA + ")\n\n" + disclosure
+	if got != want {
+		t.Errorf("DoneComment(%q, %q, %q) =\n%q\nwant\n%q", testOwner, testURL, mergeSHA, got, want)
 	}
 }
 
@@ -104,7 +119,7 @@ func TestComments_DisclosureNamesADifferentOwner(t *testing.T) {
 		"PickupComment":      tracker.PickupComment(other),
 		"GateComment":        tracker.GateComment(other, testURL),
 		"PRComment":          tracker.PRComment(other, testURL),
-		"DoneComment":        tracker.DoneComment(other, testURL),
+		"DoneComment":        tracker.DoneComment(other, testURL, "0123456789abcdef0123456789abcdef01234567"),
 		"NothingToDoComment": tracker.NothingToDoComment(other, "notes"),
 	}
 	for name, got := range cases {

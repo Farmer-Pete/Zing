@@ -16,9 +16,14 @@ own version. Return the error outcome with code cannot_run, naming the
 scenario and the defect in its check: only the owner can change a
 sealed check.
 
-A skipped test is not observed. If a scenario's verdict
-rests on a skipped test, return the error outcome with code
-cannot_run, naming the scenario and the skip message.
+A skip that the scenario's own then names as the expected result is an
+observed pass. Record the check's successful exit and the exact
+`--- SKIP:` pattern it matched as evidence (read the pattern from the
+check command text, since a check that asserts the skip with `grep -q`
+prints nothing to confirm it). A skip that hides the behavior under test
+is not observed. If a scenario's verdict rests on a skip like that,
+return the error outcome with code cannot_run, naming the scenario and
+the skip message.
 
 For each scenario, run it against the real system as a user would: build,
 start, invoke, observe. Record the command you ran and what you saw. Say

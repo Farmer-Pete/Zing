@@ -100,6 +100,11 @@ type Deps struct {
 	// section 4.3, 8.8): mergeDecision's own input for row 9's automatic
 	// merge gate (shiprules.go). The zero value (Auto false) always asks.
 	MergeRule MergeRule
+	// ReviewBots is config.ReviewBots, resolved once at startup: pollIdle's
+	// own input for nudging, then escalating, a required review-bot check
+	// that has gone quiet (shipping.go). The zero value has no checks, so
+	// pollIdle never nudges.
+	ReviewBots ReviewBotRule
 }
 
 // MergeRule is design section 8.8's own merge rule (zing.toml's [merge]
@@ -113,6 +118,29 @@ type MergeRule struct {
 	Method          string
 	ManualPaths     []string
 	DependencyFiles []string
+}
+
+// ReviewBotRule is config.ReviewBots, resolved once at startup: pollIdle's
+// own input for a required check that belongs to a review bot and has gone
+// missing on a non-draft PR. Checks nil (the zero value) disables the
+// nudge entirely.
+type ReviewBotRule struct {
+	// Wait is how long a configured check may sit missing before pollIdle
+	// posts its Trigger comment, and again that long before it escalates.
+	// Only read when Checks is non-empty.
+	Wait time.Duration
+	// Checks is config.ReviewBots.Checks, one entry per required check that
+	// belongs to a review bot.
+	Checks []ReviewBotCheck
+}
+
+// ReviewBotCheck names one required check that belongs to a review bot
+// (Check, matched against a CIResult's Missing set by equality) and the
+// comment pollIdle posts once to nudge it (Trigger, posted verbatim as a PR
+// comment).
+type ReviewBotCheck struct {
+	Check   string
+	Trigger string
 }
 
 // Project is what building needs to know about one store project (design

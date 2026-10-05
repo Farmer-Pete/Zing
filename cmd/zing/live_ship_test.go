@@ -276,7 +276,7 @@ func (tr *liveShipTracker) PostPRLink(context.Context, int64, string, string) er
 	return nil
 }
 
-func (tr *liveShipTracker) PostDone(context.Context, int64, string, string) error {
+func (tr *liveShipTracker) PostDone(context.Context, int64, string, string, string) error {
 	tr.doneCount++
 	return nil
 }

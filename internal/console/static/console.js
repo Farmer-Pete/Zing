@@ -49,7 +49,7 @@ import {
 	emptyStreamStatus,
 	reduceStreamStatus,
 	staleMarkerText,
-	STREAM_SETTLE_MS,
+	STREAM_TICK_MS,
 } from './keyboard.mjs';
 
 // defaultNav is the shell's own data-signals default (templates/shell.templ:
@@ -1036,6 +1036,127 @@ function installPickupBox() {
 	});
 }
 
+// ---- run a command in this ticket's sandbox (split from #73) ------------
+
+// sandboxRunOutputCap is the number of bytes the server keeps (job's
+// checkOutputCap), repeated here only to recognize a cut response.
+const sandboxRunOutputCap = 16384;
+
+// fillSandboxRunDialog writes title, exit line, and output into
+// #sandbox-run-result, under suppressPatchSignal since this writes outside
+// any /stream-patched region but the patch observer still watches the whole
+// document (console.js's own convention, matching pickupIssue above).
+function fillSandboxRunDialog(dialog, title, exitLine, output) {
+	suppressPatchSignal = true;
+	dialog.querySelector('.sandbox-run-title').textContent = title;
+	dialog.querySelector('.sandbox-run-exit').textContent = exitLine;
+	dialog.querySelector('.sandbox-run-output').textContent = output;
+	suppressPatchSignal = false;
+}
+
+// runInSandbox handles a click on the sandbox-run box's "Run" button (split
+// from #73): posts the box's command to POST /tickets/{id}/sandbox-run and
+// shows the exit code and output in the shell's own #sandbox-run-result
+// dialog (shell.templ), which sits outside every region /stream patches.
+async function runInSandbox(button) {
+	if (button.disabled) {
+		return;
+	}
+	const box = button.closest('.sandbox-run-box');
+	const input = box?.querySelector('.sandbox-run-cmd');
+	const ticketID = box?.dataset?.sandboxRunTicket;
+	const dialog = document.getElementById('sandbox-run-result');
+	const boxWired = box && input && ticketID && dialog;
+	if (!boxWired) {
+		return;
+	}
+	const cmd = input.value.trim();
+	if (cmd === '') {
+		return;
+	}
+	suppressPatchSignal = true;
+	button.disabled = true;
+	suppressPatchSignal = false;
+	fillSandboxRunDialog(dialog, `Ticket ${ticketID}: ${cmd}`, 'Running…', '');
+	if (!dialog.open) {
+		suppressPatchSignal = true;
+		dialog.show();
+		suppressPatchSignal = false;
+	}
+	try {
+		const resp = await fetch(`/tickets/${ticketID}/sandbox-run`, {
+			method: 'POST',
+			headers: { 'Content-Type': 'application/json', 'Datastar-Request': 'true' },
+			body: JSON.stringify({ cmd }),
+		});
+		if (!resp.ok) {
+			const text = await resp.text();
+			fillSandboxRunDialog(dialog, `Ticket ${ticketID}: ${cmd}`, 'Refused', text);
+		} else {
+			const result = await resp.json();
+			const exitLine = result.timed_out ? 'Timed out: killed when the build timeout ran out' : `Exit ${result.exit}`;
+			let output = result.output;
+			if (result.cut) {
+				output = `(last ${sandboxRunOutputCap} of ${result.total} bytes)\n${output}`;
+			} else if (output === '') {
+				output = '(no output)';
+			}
+			fillSandboxRunDialog(dialog, `Ticket ${ticketID}: ${cmd}`, exitLine, output);
+		}
+	} catch (err) {
+		console.error('console.js: POST /tickets/{id}/sandbox-run', err);
+		fillSandboxRunDialog(dialog, `Ticket ${ticketID}: ${cmd}`, 'Request failed', '');
+	} finally {
+		suppressPatchSignal = true;
+		button.disabled = false;
+		suppressPatchSignal = false;
+		if (!dialog.open) {
+			suppressPatchSignal = true;
+			dialog.show();
+			suppressPatchSignal = false;
+		}
+	}
+}
+
+// installSandboxRunBox wires the thread view's sandbox-run box (split from
+// #73), delegated from document like installPickupBox above, because #main
+// is morphed by every /stream patch (design section 6.3): a click on its
+// Run button, the dialog's Close button, and Enter inside its command
+// input, which takes the same path as the button rather than falling
+// through to the global keydown handler's own Enter-in-input/draft action
+// (that action is a no-op here, since this input carries no
+// data-draft-ticket).
+function installSandboxRunBox() {
+	document.addEventListener('click', (event) => {
+		const runButton = event.target.closest?.('.sandbox-run-box button[type="submit"]');
+		if (runButton) {
+			event.preventDefault();
+			runInSandbox(runButton);
+			return;
+		}
+		if (event.target.closest?.('.sandbox-run-close')) {
+			document.getElementById('sandbox-run-result')?.close();
+		}
+	});
+	document.addEventListener('keydown', (event) => {
+		if (event.key !== 'Enter' || !event.target.closest?.('.sandbox-run-cmd')) {
+			return;
+		}
+		const composing = event.isComposing || event.keyCode === 229;
+		const chord = event.ctrlKey || event.metaKey || event.altKey;
+		if (composing || chord) {
+			return;
+		}
+		const box = event.target.closest('.sandbox-run-box');
+		const runButton = box?.querySelector('button[type="submit"]');
+		if (!runButton) {
+			return;
+		}
+		event.preventDefault();
+		runInSandbox(runButton);
+	});
+}
+
 // postLogLevel handles a change on the Log rail's level select (design
 // section 6.11, 6.12, 7.1): POST /loglevel with the select's chosen value.
 // It is a small forward-wired affordance around the endpoint that is this
@@ -1398,10 +1519,9 @@ let suppressPatchSignal = false;
 // applyStreamEvent is console.js's one entry point into reduceStreamStatus
 // (keyboard.mjs): it folds event into streamStatus, then applies the pure
 // result's effect as DOM/timer side effects -- canceling a pending
-// reconnect, scheduling the settle check that proves a started request
-// live, or scheduling the backoff reconnect itself (dispatchNav(state.nav),
-// so the server renders the full view again) -- before re-rendering the
-// stale marker.
+// reconnect, or scheduling the backoff reconnect itself
+// (dispatchNav(state.nav), so the server renders the full view again) --
+// before re-rendering the stale marker.
 function applyStreamEvent(event) {
 	const { status, effect } = reduceStreamStatus(streamStatus, event, Date.now());
 	streamStatus = status;
@@ -1409,12 +1529,8 @@ function applyStreamEvent(event) {
 		clearTimeout(reconnectTimerID);
 		reconnectTimerID = null;
 	}
-	if (effect.settleGen !== null) {
-		const gen = effect.settleGen;
-		setTimeout(() => applyStreamEvent({ type: 'settled', gen }), STREAM_SETTLE_MS);
-	}
 	if (effect.reconnectIn !== null) {
-		console.warn('console.js: /stream reconnecting', { delayMs: effect.reconnectIn, attempt: streamStatus.attempt });
+		console.warn('console.js: /stream reconnecting', { reason: event.type, delayMs: effect.reconnectIn, attempt: streamStatus.attempt });
 		clearTimeout(reconnectTimerID);
 		reconnectTimerID = setTimeout(() => {
 			reconnectTimerID = null;
@@ -1448,7 +1564,20 @@ function renderStreamStatus() {
 // attempt's started/finished/error/retrying/retries-failed to
 // applyStreamEvent instead of to Datastar's own retry). console.js loads
 // before datastar.js (shell.templ), so this listener is already bound
-// before data-init fires /stream's very first `started` event.
+// before data-init fires /stream's very first `started` event. The same
+// datastar-fetch event also fires once per SSE frame received while the
+// request stays open, with its detail.type set to the SSE event name
+// (datastar-patch-elements for every region patch), which is
+// reduceStreamStatus's live signal for a request that has frames arriving
+// but produced no observable DOM change (installPatchObserver's 'patched').
+//
+// The reconnect plan: a silent stream (one that stays open but delivers no
+// more frames -- a half-open socket, a hidden-tab pause, a wedged server
+// write) fires none of these events, so a 5s 'tick' interval re-checks
+// elapsed time against STREAM_IDLE_MS independently of any event arriving.
+// A 'visible' event on visibilitychange restarts that idle clock when a
+// hidden tab's paused stream comes back, since Datastar resumes it quietly
+// with no 'started' event of its own.
 function installStreamWatch() {
 	document.addEventListener('datastar-fetch', (event) => {
 		if (event.detail?.el?.id !== 'stream-ctl') {
@@ -1459,6 +1588,12 @@ function installStreamWatch() {
 			console.error('console.js: /stream', type, event.detail);
 		}
 		applyStreamEvent({ type });
+	});
+	setInterval(() => applyStreamEvent({ type: 'tick' }), STREAM_TICK_MS);
+	document.addEventListener('visibilitychange', () => {
+		if (!document.hidden) {
+			applyStreamEvent({ type: 'visible' });
+		}
 	});
 }
 
@@ -1512,10 +1647,11 @@ function installNavBridge() {
 // loadBindings' own /static/keys.json fetch (bug fix): none of
 // installStreamWatch, installNavBridge, installPatchObserver, installSideBox,
 // installLogControls, installChipActivation, installPickupBox,
-// installReplyAutosave, or installReplyFocusTracking reads state.bindings, so
-// there was no reason their listeners -- installNavBridge above all, the
-// zing-nav bridge a Threads-sidebar click needs live as early as possible --
-// sat behind an unrelated network round trip. Only
+// installSandboxRunBox, installReplyAutosave, or installReplyFocusTracking
+// reads state.bindings, so there was no reason their listeners --
+// installNavBridge above all, the zing-nav bridge a Threads-sidebar click
+// needs live as early as possible -- sat behind an unrelated network round
+// trip. Only
 // onKeyDown needs the parsed bindings, so it alone waits on the fetch.
 // installStreamWatch runs first (the reconnect plan): it must already be
 // bound before data-init's own @get('/stream') can fire the very first
@@ -1528,6 +1664,7 @@ async function install() {
 	installLogControls();
 	installChipActivation();
 	installPickupBox();
+	installSandboxRunBox();
 	installReplyAutosave();
 	installReplyFocusTracking();
 	await loadBindings();

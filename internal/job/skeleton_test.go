@@ -76,6 +76,11 @@ const (
 	// testFixtureGitHubOwner is the owner and repo name every orchestrator
 	// this file builds uses: a placeholder, never a real GitHub repository.
 	testFixtureGitHubOwner = "fixture"
+	// testFixtureDefaultBranch is the DefaultBranch every orchestrator.Project
+	// this package's tests build uses, matching gitfixture's own "main"
+	// (goconst: three or more call sites across this package compared the
+	// literal).
+	testFixtureDefaultBranch = "main"
 
 	// testOptionAText and testOptionBText are the two-option payload's own
 	// option text, shared across every hand-built question/questions
@@ -270,7 +275,8 @@ func (*jobTestShipGitHub) JobLogTail(context.Context, string, string, int64, int
 type jobTestShipTracker struct{}
 
 func (jobTestShipTracker) PostPRLink(context.Context, int64, string, string) error { return nil }
-func (jobTestShipTracker) PostDone(context.Context, int64, string, string) error   { return nil }
+
+func (jobTestShipTracker) PostDone(context.Context, int64, string, string, string) error { return nil }
 
 // addBareOriginForTicket gives ticketID's own project a bare origin remote
 // (gitfixture.WithBareOrigin), exactly once: git itself refuses a second
@@ -315,7 +321,7 @@ func shipCapableDeps(t *testing.T, s *store.Store, rt runtime.Runtime, ticketID 
 	// over it, not just an override of the small-interface fields POLL
 	// reads.
 	orch, orchErr := orchestrator.New(
-		orchestrator.Project{Owner: testFixtureGitHubOwner, Repo: testFixtureGitHubOwner, LocalPath: proj.LocalPath, DefaultBranch: "main"},
+		orchestrator.Project{Owner: testFixtureGitHubOwner, Repo: testFixtureGitHubOwner, LocalPath: proj.LocalPath, DefaultBranch: testFixtureDefaultBranch},
 		gh, orchestrator.NewRunner(), nil)
 	if orchErr != nil {
 		t.Fatalf("orchestrator.New: %v", orchErr)
@@ -348,7 +354,7 @@ func buildJobTestProjects(t *testing.T, s *store.Store) map[int64]job.Project {
 	out := make(map[int64]job.Project, len(projects))
 	for _, p := range projects {
 		orch, orchErr := orchestrator.New(
-			orchestrator.Project{Owner: testFixtureGitHubOwner, Repo: testFixtureGitHubOwner, LocalPath: p.LocalPath, DefaultBranch: "main"},
+			orchestrator.Project{Owner: testFixtureGitHubOwner, Repo: testFixtureGitHubOwner, LocalPath: p.LocalPath, DefaultBranch: testFixtureDefaultBranch},
 			jobTestGitHub{}, orchestrator.NewRunner(), nil)
 		if orchErr != nil {
 			continue

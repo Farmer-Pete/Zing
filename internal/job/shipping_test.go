@@ -24,6 +24,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"reflect"
 	"sort"
 	"strings"
 	"testing"
@@ -176,6 +177,12 @@ type shipGitHub struct {
 	mergeErr       error
 	mergeResultSHA string
 	mergeCalls     []string
+
+	// commentOnPRErr, when set, fails every CommentOnPR call instead (task
+	// 6's own review-bot nudge); commentOnPRCalls records number|body, in
+	// call order.
+	commentOnPRErr   error
+	commentOnPRCalls []string
 }
 
 // shipViewerLogin is shipGitHub's own default Viewer() result (M4 task 4):
@@ -192,6 +199,11 @@ const shipQuestionResolved = "resolved"
 // task 8 merge test configures, named once (goconst) and shared with
 // shiprules_test.go's own TestMergeDecision (same package).
 const shipMergeMethodSquash = "squash"
+
+// shipPRStateOpen is orchestrator.PRState.State's own "open" literal, named
+// once (goconst) and shared with shiprules_test.go's own basePR (same
+// package).
+const shipPRStateOpen = "open"
 
 var (
 	errShipGitHub         = errors.New("shipGitHub: not implemented")
@@ -384,6 +396,18 @@ func (g *shipGitHub) Viewer(context.Context) (string, error) {
 	return shipViewerLogin, nil
 }
 
+// CommentOnPR gives shipGitHub job.ReviewThreads.CommentOnPR too (task 6):
+// POLL's own review-bot tests configure commentOnPRErr the same way every
+// other write above is configured, and read commentOnPRCalls back to assert
+// which pull request number a nudge actually posted to.
+func (g *shipGitHub) CommentOnPR(_ context.Context, _, _ string, number int, body string) error {
+	if g.commentOnPRErr != nil {
+		return g.commentOnPRErr
+	}
+	g.commentOnPRCalls = append(g.commentOnPRCalls, fmt.Sprintf("%d|%s", number, body))
+	return nil
+}
+
 // shipTracker is a configurable ShipTracker double: PostPRLink posts at
 // most once, mirroring the dispatcher's own hidden-marker guard
 // (internal/dispatch/dispatch.go's postMarkedOnce), so a test can call
@@ -396,6 +420,7 @@ type shipTracker struct {
 	doneErr       error
 	donePosted    bool
 	donePostCount int
+	doneMergeSHA  string
 }
 
 func (tr *shipTracker) PostPRLink(_ context.Context, _ int64, _, _ string) error {
@@ -409,13 +434,14 @@ func (tr *shipTracker) PostPRLink(_ context.Context, _ int64, _, _ string) error
 	return nil
 }
 
-func (tr *shipTracker) PostDone(_ context.Context, _ int64, _, _ string) error {
+func (tr *shipTracker) PostDone(_ context.Context, _ int64, _, _, mergeSHA string) error {
 	if tr.doneErr != nil {
 		return tr.doneErr
 	}
 	if !tr.donePosted {
 		tr.donePosted = true
 		tr.donePostCount++
+		tr.doneMergeSHA = mergeSHA
 	}
 	return nil
 }
@@ -664,20 +690,19 @@ func shipHeadSHA(t *testing.T, s *store.Store, ticket store.Ticket) string {
 	return sha
 }
 
-// driveShipFixToLanding drives an already-open fix request through the fix
-// driver's own RUN then CHECK-and-LAND ticks while ticketID is in
-// "shipping" (fix.go's own DriveFix, reached through shipHandler.Run's own
-// postBuildPrelude): judging_test.go's own driveJudgeFixToLanding, shipping
-// instead of judging, and reusing its exact build fixture (judgeFixBuildScript,
-// judgeFixTestCmd) since the fix driver cares about neither state.
-func driveShipFixToLanding(t *testing.T, s *store.Store, ticketID int64, rt runtime.Runtime) {
+// driveShipFixToLandingWith is driveShipFixToLanding's own parametrized
+// twin (M4 task 4, TestFixRepliesNoopQuotesReason): testCmd replaces
+// judgeFixTestCmd, so a caller can drive a fix unit whose test command
+// leaves the tree unchanged ("true") through the same RUN then
+// CHECK-and-LAND ticks.
+func driveShipFixToLandingWith(t *testing.T, s *store.Store, ticketID int64, rt runtime.Runtime, testCmd string) {
 	t.Helper()
 	for i := range 4 {
 		ticket := pbGetTicket(t, s, ticketID)
-		deps := pbWithTestCmd(pbClaim(t, s, rt, ticketID), ticket, judgeFixTestCmd)
+		deps := pbWithTestCmd(pbClaim(t, s, rt, ticketID), ticket, testCmd)
 		commit, err := (shipHandler{}).Run(t.Context(), ticket, deps)
 		if err != nil {
-			t.Fatalf("driveShipFixToLanding: Run (step %d): %v", i, err)
+			t.Fatalf("driveShipFixToLandingWith: Run (step %d): %v", i, err)
 		}
 		pbApply(t, s, ticket, commit)
 		for j := range commit.Messages {
@@ -686,7 +711,18 @@ func driveShipFixToLanding(t *testing.T, s *store.Store, ticketID int64, rt runt
 			}
 		}
 	}
-	t.Fatal("driveShipFixToLanding: fix did not land within 4 ticks")
+	t.Fatal("driveShipFixToLandingWith: fix did not land within 4 ticks")
+}
+
+// driveShipFixToLanding drives an already-open fix request through the fix
+// driver's own RUN then CHECK-and-LAND ticks while ticketID is in
+// "shipping" (fix.go's own DriveFix, reached through shipHandler.Run's own
+// postBuildPrelude): judging_test.go's own driveJudgeFixToLanding, shipping
+// instead of judging, and reusing its exact build fixture (judgeFixBuildScript,
+// judgeFixTestCmd) since the fix driver cares about neither state.
+func driveShipFixToLanding(t *testing.T, s *store.Store, ticketID int64, rt runtime.Runtime) {
+	t.Helper()
+	driveShipFixToLandingWith(t, s, ticketID, rt, judgeFixTestCmd)
 }
 
 // -----------------------------------------------------------------------
@@ -1398,6 +1434,35 @@ func shipPollRunWithRule(t *testing.T, s *store.Store, ticket store.Ticket, gh *
 	return (shipHandler{}).Run(t.Context(), ticket, deps)
 }
 
+// shipPollRunWithReviewBots is shipPollRun with rule in place of Deps' own
+// zero-value ReviewBotRule (task 6's own review-bot nudge, pollIdle): a test
+// of the review-bot clock claims through this instead of shipPollRun.
+func shipPollRunWithReviewBots(t *testing.T, s *store.Store, ticket store.Ticket, gh *shipGitHub, tr *shipTracker, rule ReviewBotRule) (store.HandlerCommit, error) {
+	t.Helper()
+	deps := shipClaim(t, s, pbFakeRuntime(t), ticket.ID, gh, tr)
+	deps.ReviewBots = rule
+	return (shipHandler{}).Run(t.Context(), ticket, deps)
+}
+
+// shipInsertReviewBotMarker inserts a review bot clock marker directly,
+// dated age in the past, for a test to seed a marker older than the real
+// clock would ever let pollIdle write on its own (TestPollReviewBotNudgesThenEscalates,
+// TestPollReviewBotRestartsAfterRetry): the marker's own second line is the
+// one source of truth reviewBotMarkerTime reads, not the row's CreatedAt.
+// It returns the seeded time so a caller can assert an escalation's Why or
+// Tried names it exactly.
+func shipInsertReviewBotMarker(t *testing.T, s *store.Store, ticketID int64, headKey string, age time.Duration) time.Time {
+	t.Helper()
+	at := time.Now().UTC().Add(-age)
+	body := reviewBotMarkerBody(headKey, at)
+	if _, err := s.InsertMessage(t.Context(), store.Message{
+		TicketID: ticketID, Type: msgTypeUpdate, Author: authorSystem, Body: body,
+	}); err != nil {
+		t.Fatalf("shipInsertReviewBotMarker: InsertMessage: %v", err)
+	}
+	return at
+}
+
 // shipAnswerMergeQuestion answers ticketID's one open merge question with
 // option ("a" merges now, "b" holds), the same AnswerQuestion path the
 // console's own SendBatch uses (clearMatchingWaitTx clears waiting_on at
@@ -1424,7 +1489,7 @@ func shipAnswerMergeQuestion(t *testing.T, s *store.Store, ticketID int64, optio
 // pull-request state every row 9 test (M4 task 8) starts from: GetPR's own
 // read that lets POLL reach the merge gate at all.
 func shipMergeReadyPR(local, nodeID string) orchestrator.PRState {
-	return orchestrator.PRState{State: "open", Draft: false, HeadSHA: local, BaseRef: pbFixtureDefaultBranch, NodeID: nodeID}
+	return orchestrator.PRState{State: shipPRStateOpen, Draft: false, HeadSHA: local, BaseRef: pbFixtureDefaultBranch, NodeID: nodeID}
 }
 
 // shipCILogTailText is the canned JobLogTail text every failed-CI test
@@ -1438,7 +1503,7 @@ const shipCILogTailText = "FAIL: boom"
 // of this file's own cases, so, unlike runs and required, there is no
 // third return here.
 func shipGreenCI() (runs []orchestrator.CheckRun, required []orchestrator.RequiredCheck) {
-	return []orchestrator.CheckRun{{ID: 1, Name: "ci", Status: "completed", Conclusion: "success", AppSlug: "github-actions"}},
+	return []orchestrator.CheckRun{{ID: 1, Name: "ci", Status: ghCompleted, Conclusion: ghSuccess, AppSlug: ghGitHubActions}},
 		[]orchestrator.RequiredCheck{{Context: "ci"}}
 }
 
@@ -1446,7 +1511,7 @@ func shipGreenCI() (runs []orchestrator.CheckRun, required []orchestrator.Requir
 // completed with conclusion failure.
 func shipFailedCI() (runs []orchestrator.CheckRun, required []orchestrator.RequiredCheck) {
 	return []orchestrator.CheckRun{{
-			ID: 1, Name: "ci", Status: "completed", Conclusion: "failure", AppSlug: "github-actions",
+			ID: 1, Name: "ci", Status: ghCompleted, Conclusion: "failure", AppSlug: ghGitHubActions,
 			DetailsURL: "https://github.com/fixture/fixture/actions/runs/1/job/2",
 		}},
 		[]orchestrator.RequiredCheck{{Context: "ci"}}
@@ -1565,6 +1630,30 @@ func TestPollMergedGoesDone(t *testing.T) {
 	}
 }
 
+// TestPollMergedPostsMergeCommit proves POLL's DONE row passes GitHub's own
+// merge commit sha through to the tracker, instead of the empty string, so
+// the done comment can name it.
+func TestPollMergedPostsMergeCommit(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow end-to-end flow; runs in the full suite")
+	}
+	t.Parallel()
+	s, ticket, gh, tr := shipPublished(t)
+	const mergeSHA = "0123456789abcdef0123456789abcdef01234567"
+	gh.prState = orchestrator.PRState{Merged: true, Draft: true, MergeCommitSHA: mergeSHA}
+
+	commit, err := shipPollRun(t, s, ticket, gh, tr)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if commit.Next != stateDone || commit.Reason != reasonMerged {
+		t.Errorf("commit = (Next=%q, Reason=%q), want (done, %q)", commit.Next, commit.Reason, reasonMerged)
+	}
+	if tr.doneMergeSHA != mergeSHA {
+		t.Errorf("tr.doneMergeSHA = %q, want %q", tr.doneMergeSHA, mergeSHA)
+	}
+}
+
 // TestDoneCrashBeforeCommitConverges proves design section 11's own DONE
 // row, "after the post" half: PostDone already posted (simulated by calling
 // the tracker directly) but no commit ever landed; the next tick finds the
@@ -1577,7 +1666,7 @@ func TestDoneCrashBeforeCommitConverges(t *testing.T) {
 	s, ticket, gh, tr := shipPublished(t)
 	gh.prState = orchestrator.PRState{Merged: true, Draft: true}
 
-	if err := tr.PostDone(t.Context(), ticket.ProjectID, ticket.TrackerRef, *ticket.PRURL); err != nil {
+	if err := tr.PostDone(t.Context(), ticket.ProjectID, ticket.TrackerRef, *ticket.PRURL, ""); err != nil {
 		t.Fatalf("PostDone (pre-crash): %v", err)
 	}
 	if tr.donePostCount != 1 {
@@ -2159,6 +2248,369 @@ func TestPollCIWaitingMarkerOnChange(t *testing.T) {
 		if strings.HasPrefix(m.Body, ciWaitingPrefix) {
 			t.Errorf("commit3.Messages = %+v, want no %q marker (Missing unchanged)", commit3.Messages, ciWaitingPrefix)
 		}
+	}
+}
+
+// shipCodeRabbitCheck is the one review-bot check context every task 6
+// test names (goconst).
+const shipCodeRabbitCheck = "CodeRabbit"
+
+// shipReviewBotCIAndRequired is shipGreenCI's own twin for task 6's review-
+// bot tests: the same one required "ci" context, matched by one
+// completed/success run, plus a second required shipCodeRabbitCheck
+// context no run or status ever matches, so Missing is always exactly
+// [shipCodeRabbitCheck].
+func shipReviewBotCIAndRequired() (runs []orchestrator.CheckRun, required []orchestrator.RequiredCheck) {
+	runs, required = shipGreenCI()
+	return runs, append(required, orchestrator.RequiredCheck{Context: shipCodeRabbitCheck})
+}
+
+// shipCodeRabbitRule is the one ReviewBotRule every task 6 test configures:
+// a 20 minute wait and one check, shipCodeRabbitCheck, triggered by
+// "@coderabbitai review".
+func shipCodeRabbitRule() ReviewBotRule {
+	return ReviewBotRule{Wait: 20 * time.Minute, Checks: []ReviewBotCheck{{Check: shipCodeRabbitCheck, Trigger: "@coderabbitai review"}}}
+}
+
+// shipOtherBotCheck is a second review-bot check context, distinct from
+// shipCodeRabbitCheck, so TestPollReviewBotEscalateNeverTouchesAnotherChecksSideEffects
+// can configure two checks and control each one's own verdict independently.
+const shipOtherBotCheck = "OtherBot"
+
+// shipTwoBotChecksCIAndRequired is shipReviewBotCIAndRequired's own twin
+// with a second required bot check, shipOtherBotCheck, that no run or
+// status ever matches either, so Missing is always exactly
+// [shipOtherBotCheck, shipCodeRabbitCheck].
+func shipTwoBotChecksCIAndRequired() (runs []orchestrator.CheckRun, required []orchestrator.RequiredCheck) {
+	runs, required = shipGreenCI()
+	return runs, append(required, orchestrator.RequiredCheck{Context: shipOtherBotCheck}, orchestrator.RequiredCheck{Context: shipCodeRabbitCheck})
+}
+
+// shipTwoBotChecksRule configures shipOtherBotCheck before shipCodeRabbitCheck,
+// in that order, so a test can put the check that should nudge ahead of the
+// one that should escalate in the same tick.
+func shipTwoBotChecksRule() ReviewBotRule {
+	return ReviewBotRule{Wait: 20 * time.Minute, Checks: []ReviewBotCheck{
+		{Check: shipOtherBotCheck, Trigger: "@otherbot review"},
+		{Check: shipCodeRabbitCheck, Trigger: "@coderabbitai review"},
+	}}
+}
+
+// TestPollReviewBotEscalateNeverTouchesAnotherChecksSideEffects proves
+// pollIdle decides every configured check's own reviewBotAction verdict
+// before acting on any of them: with shipOtherBotCheck (config order
+// first) due to nudge and shipCodeRabbitCheck (config order second) due to
+// escalate on the very same tick, the poll must escalate on CodeRabbit
+// without ever calling CommentOnPR for OtherBot. A loop that nudges as it
+// goes would call CommentOnPR for OtherBot before reaching CodeRabbit's
+// escalate, posting a trigger comment the returned escalation commit then
+// has no marker for (the comment went out, but the store has no record of
+// it -- a real duplicate on retry).
+func TestPollReviewBotEscalateNeverTouchesAnotherChecksSideEffects(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow end-to-end flow; runs in the full suite")
+	}
+	t.Parallel()
+	s, ticket, gh, tr := shipPublished(t)
+	local := shipHeadSHA(t, s, ticket)
+	gh.prState = orchestrator.PRState{State: shipPRStateOpen, Draft: false, HeadSHA: local, BaseRef: pbFixtureDefaultBranch}
+	gh.runs, gh.required = shipTwoBotChecksCIAndRequired()
+	rule := shipTwoBotChecksRule()
+
+	// OtherBot: missing marker old enough to nudge, no nudge yet.
+	shipInsertReviewBotMarker(t, s, ticket.ID, reviewBotMissingHead(local, shipOtherBotCheck), 21*time.Minute)
+	// CodeRabbit: missing and nudged markers both old enough to escalate.
+	shipInsertReviewBotMarker(t, s, ticket.ID, reviewBotMissingHead(local, shipCodeRabbitCheck), 50*time.Minute)
+	shipInsertReviewBotMarker(t, s, ticket.ID, reviewBotNudgedHead(local, shipCodeRabbitCheck), 21*time.Minute)
+
+	commit, err := shipPollRunWithReviewBots(t, s, ticket, gh, tr, rule)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if commit.Escalation == nil {
+		t.Fatal("want an escalation")
+	}
+	if !strings.Contains(commit.Escalation.Payload.Why, shipCodeRabbitCheck) {
+		t.Errorf("Why = %q, want it to name CodeRabbit", commit.Escalation.Payload.Why)
+	}
+	if len(gh.commentOnPRCalls) != 0 {
+		t.Errorf("commentOnPRCalls = %v, want none: CommentOnPR must never run for a check decided before an escalating one", gh.commentOnPRCalls)
+	}
+}
+
+// TestPollReviewBotNudgesThenEscalates proves pollIdle's own review-bot
+// clock (design "Shape"): the first poll that finds CodeRabbit missing
+// writes the missing marker and posts nothing; once that marker is old
+// enough, the next poll posts the trigger comment once and writes the
+// nudged marker; once the nudged marker is old enough too, the poll after
+// that escalates instead of polling again.
+func TestPollReviewBotNudgesThenEscalates(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow end-to-end flow; runs in the full suite")
+	}
+	t.Parallel()
+	s, ticket, gh, tr := shipPublished(t)
+	local := shipHeadSHA(t, s, ticket)
+	gh.prState = orchestrator.PRState{State: shipPRStateOpen, Draft: false, HeadSHA: local, BaseRef: pbFixtureDefaultBranch}
+	gh.runs, gh.required = shipReviewBotCIAndRequired()
+	rule := shipCodeRabbitRule()
+
+	missingHead := reviewBotMissingHead(local, shipCodeRabbitCheck)
+	nudgedHead := reviewBotNudgedHead(local, shipCodeRabbitCheck)
+
+	commit1, err := shipPollRunWithReviewBots(t, s, ticket, gh, tr, rule)
+	if err != nil {
+		t.Fatalf("Run (poll 1): %v", err)
+	}
+	if len(gh.commentOnPRCalls) != 0 {
+		t.Errorf("poll 1: commentOnPRCalls = %v, want none", gh.commentOnPRCalls)
+	}
+	if commit1.Escalation != nil {
+		t.Fatalf("poll 1: escalated: %+v", commit1.Escalation.Payload)
+	}
+	foundMissing := false
+	for _, m := range commit1.Messages {
+		if strings.HasPrefix(m.Body, missingHead) {
+			foundMissing = true
+		}
+	}
+	if !foundMissing {
+		t.Errorf("poll 1: commit.Messages = %+v, want a %q marker", commit1.Messages, missingHead)
+	}
+	pbApply(t, s, ticket, commit1)
+
+	// Age the missing marker past the wait: a fresh row with the same first
+	// line wins Store.Marker's own "newest first" read.
+	sinceAt := shipInsertReviewBotMarker(t, s, ticket.ID, missingHead, 21*time.Minute)
+
+	commit2, err := shipPollRunWithReviewBots(t, s, pbGetTicket(t, s, ticket.ID), gh, tr, rule)
+	if err != nil {
+		t.Fatalf("Run (poll 2): %v", err)
+	}
+	if len(gh.commentOnPRCalls) != 1 {
+		t.Fatalf("poll 2: commentOnPRCalls = %v, want exactly one", gh.commentOnPRCalls)
+	}
+	wantCall := fmt.Sprintf("%d|%s", 1, "@coderabbitai review")
+	if gh.commentOnPRCalls[0] != wantCall {
+		t.Errorf("poll 2: commentOnPRCalls[0] = %q, want %q", gh.commentOnPRCalls[0], wantCall)
+	}
+	if commit2.Escalation != nil {
+		t.Fatalf("poll 2: escalated: %+v", commit2.Escalation.Payload)
+	}
+	foundNudged := false
+	for _, m := range commit2.Messages {
+		if strings.HasPrefix(m.Body, nudgedHead) {
+			foundNudged = true
+		}
+	}
+	if !foundNudged {
+		t.Errorf("poll 2: commit.Messages = %+v, want a %q marker", commit2.Messages, nudgedHead)
+	}
+	pbApply(t, s, ticket, commit2)
+
+	// Age the nudged marker past the wait too.
+	nudgedAt := shipInsertReviewBotMarker(t, s, ticket.ID, nudgedHead, 21*time.Minute)
+
+	commit3, err := shipPollRunWithReviewBots(t, s, pbGetTicket(t, s, ticket.ID), gh, tr, rule)
+	if err != nil {
+		t.Fatalf("Run (poll 3): %v", err)
+	}
+	if len(gh.commentOnPRCalls) != 1 {
+		t.Errorf("poll 3: commentOnPRCalls = %v, want still exactly one (no second nudge)", gh.commentOnPRCalls)
+	}
+	if commit3.Escalation == nil {
+		t.Fatal("poll 3: want an escalation")
+	}
+	if commit3.Escalation.Payload.What != reviewBotSilentWhat {
+		t.Errorf("poll 3: What = %q, want %q", commit3.Escalation.Payload.What, reviewBotSilentWhat)
+	}
+	if !strings.Contains(commit3.Escalation.Payload.Why, shipCodeRabbitCheck) {
+		t.Errorf("poll 3: Why = %q, want it to name CodeRabbit", commit3.Escalation.Payload.Why)
+	}
+	if !strings.Contains(commit3.Escalation.Payload.Why, sinceAt.Format(time.RFC3339)) {
+		t.Errorf("poll 3: Why = %q, want it to name the missing time %q", commit3.Escalation.Payload.Why, sinceAt.Format(time.RFC3339))
+	}
+	if !strings.Contains(commit3.Escalation.Payload.Tried, "@coderabbitai review") {
+		t.Errorf("poll 3: Tried = %q, want it to name the trigger", commit3.Escalation.Payload.Tried)
+	}
+	if !strings.Contains(commit3.Escalation.Payload.Tried, nudgedAt.Format(time.RFC3339)) {
+		t.Errorf("poll 3: Tried = %q, want it to name the nudged time %q", commit3.Escalation.Payload.Tried, nudgedAt.Format(time.RFC3339))
+	}
+	if !commit3.ClearPoll {
+		t.Error("poll 3: ClearPoll = false, want true")
+	}
+}
+
+// TestPollReviewBotQuietWhileWaiting proves pollIdle never nudges or
+// escalates before its own wait has elapsed, nor on a draft pull request,
+// nor for a missing required check no configured bot names: every case
+// below just backs off like any other CI-pending poll.
+func TestPollReviewBotQuietWhileWaiting(t *testing.T) {
+	t.Parallel()
+	if testing.Short() {
+		t.Skip("slow end-to-end flow; runs in the full suite")
+	}
+
+	t.Run("missing marker not yet old enough", func(t *testing.T) {
+		t.Parallel()
+		s, ticket, gh, tr := shipPublished(t)
+		local := shipHeadSHA(t, s, ticket)
+		gh.prState = orchestrator.PRState{State: shipPRStateOpen, Draft: false, HeadSHA: local, BaseRef: pbFixtureDefaultBranch}
+		gh.runs, gh.required = shipReviewBotCIAndRequired()
+		rule := shipCodeRabbitRule()
+
+		shipInsertReviewBotMarker(t, s, ticket.ID, reviewBotMissingHead(local, shipCodeRabbitCheck), 5*time.Minute)
+
+		commit, err := shipPollRunWithReviewBots(t, s, ticket, gh, tr, rule)
+		if err != nil {
+			t.Fatalf("Run: %v", err)
+		}
+		if len(gh.commentOnPRCalls) != 0 {
+			t.Errorf("commentOnPRCalls = %v, want none", gh.commentOnPRCalls)
+		}
+		if commit.Escalation != nil {
+			t.Fatalf("escalated: %+v", commit.Escalation.Payload)
+		}
+		if commit.Poll == nil {
+			t.Error("commit.Poll is nil, want the backoff commit")
+		}
+	})
+
+	t.Run("draft pull request", func(t *testing.T) {
+		t.Parallel()
+		s, ticket, gh, tr := shipPublished(t)
+		local := shipHeadSHA(t, s, ticket)
+		gh.prState = orchestrator.PRState{State: shipPRStateOpen, Draft: true, HeadSHA: local, BaseRef: pbFixtureDefaultBranch}
+		// "ci" itself is still in progress (not just missing CodeRabbit), so
+		// EvaluateCI's ReportedGreen is false and poll's own "draft, pending,
+		// reported green" row (pollMarkReady) does not fire first -- this
+		// case must reach pollIdle's own draft guard, not pollMarkReady's.
+		gh.runs = []orchestrator.CheckRun{{ID: 1, Name: "ci", Status: "in_progress", AppSlug: ghGitHubActions}}
+		gh.required = []orchestrator.RequiredCheck{{Context: "ci"}, {Context: shipCodeRabbitCheck}}
+		rule := shipCodeRabbitRule()
+
+		shipInsertReviewBotMarker(t, s, ticket.ID, reviewBotMissingHead(local, shipCodeRabbitCheck), 30*time.Minute)
+
+		commit, err := shipPollRunWithReviewBots(t, s, ticket, gh, tr, rule)
+		if err != nil {
+			t.Fatalf("Run: %v", err)
+		}
+		if len(gh.commentOnPRCalls) != 0 {
+			t.Errorf("commentOnPRCalls = %v, want none", gh.commentOnPRCalls)
+		}
+		if commit.Escalation != nil {
+			t.Fatalf("escalated: %+v", commit.Escalation.Payload)
+		}
+		if commit.Poll == nil {
+			t.Error("commit.Poll is nil, want the backoff commit")
+		}
+	})
+
+	t.Run("missing check is not a configured bot", func(t *testing.T) {
+		t.Parallel()
+		s, ticket, gh, tr := shipPublished(t)
+		local := shipHeadSHA(t, s, ticket)
+		gh.prState = orchestrator.PRState{State: shipPRStateOpen, Draft: false, HeadSHA: local, BaseRef: pbFixtureDefaultBranch}
+		gh.runs, _ = shipGreenCI()
+		gh.required = []orchestrator.RequiredCheck{{Context: "ci"}, {Context: "some-other-check"}}
+		rule := shipCodeRabbitRule()
+
+		commit, err := shipPollRunWithReviewBots(t, s, ticket, gh, tr, rule)
+		if err != nil {
+			t.Fatalf("Run: %v", err)
+		}
+		if len(gh.commentOnPRCalls) != 0 {
+			t.Errorf("commentOnPRCalls = %v, want none", gh.commentOnPRCalls)
+		}
+		if commit.Escalation != nil {
+			t.Fatalf("escalated: %+v", commit.Escalation.Payload)
+		}
+		if commit.Poll == nil {
+			t.Error("commit.Poll is nil, want the backoff commit")
+		}
+	})
+}
+
+// TestPollReviewBotCommentErrorPropagates proves a CommentOnPR failure
+// during the nudge step comes back as an error, wrapping it, rather than
+// being swallowed or written off as a successful nudge: with no commit
+// returned, the nudged marker is never written, so the trigger is retried
+// on the next poll.
+func TestPollReviewBotCommentErrorPropagates(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow end-to-end flow; runs in the full suite")
+	}
+	t.Parallel()
+	s, ticket, gh, tr := shipPublished(t)
+	local := shipHeadSHA(t, s, ticket)
+	gh.prState = orchestrator.PRState{State: shipPRStateOpen, Draft: false, HeadSHA: local, BaseRef: pbFixtureDefaultBranch}
+	gh.runs, gh.required = shipReviewBotCIAndRequired()
+	rule := shipCodeRabbitRule()
+
+	missingHead := reviewBotMissingHead(local, shipCodeRabbitCheck)
+	nudgedHead := reviewBotNudgedHead(local, shipCodeRabbitCheck)
+	shipInsertReviewBotMarker(t, s, ticket.ID, missingHead, 21*time.Minute)
+
+	wantErr := errors.New("boom: comment on pr failed")
+	gh.commentOnPRErr = wantErr
+
+	commit, err := shipPollRunWithReviewBots(t, s, ticket, gh, tr, rule)
+	if err == nil || !errors.Is(err, wantErr) {
+		t.Fatalf("Run: err = %v, want it to wrap %v", err, wantErr)
+	}
+	if !reflect.DeepEqual(commit, store.HandlerCommit{}) {
+		t.Errorf("Run: commit = %+v, want the zero value (nothing committed, so the nudge is retried)", commit)
+	}
+	for _, m := range commit.Messages {
+		if strings.HasPrefix(m.Body, nudgedHead) {
+			t.Errorf("commit.Messages = %+v, must not contain the nudged marker %q", commit.Messages, nudgedHead)
+		}
+	}
+}
+
+// TestPollReviewBotRestartsAfterRetry proves Retry restarts the review-bot
+// clock (design "Shape"): missing and nudged markers old enough to
+// escalate, but a newer "retry requested" marker, make the poll start the
+// clock fresh instead -- neither nudging again nor escalating.
+func TestPollReviewBotRestartsAfterRetry(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow end-to-end flow; runs in the full suite")
+	}
+	t.Parallel()
+	s, ticket, gh, tr := shipPublished(t)
+	local := shipHeadSHA(t, s, ticket)
+	gh.prState = orchestrator.PRState{State: shipPRStateOpen, Draft: false, HeadSHA: local, BaseRef: pbFixtureDefaultBranch}
+	gh.runs, gh.required = shipReviewBotCIAndRequired()
+	rule := shipCodeRabbitRule()
+
+	missingHead := reviewBotMissingHead(local, shipCodeRabbitCheck)
+	nudgedHead := reviewBotNudgedHead(local, shipCodeRabbitCheck)
+	shipInsertReviewBotMarker(t, s, ticket.ID, missingHead, 50*time.Minute)
+	shipInsertReviewBotMarker(t, s, ticket.ID, nudgedHead, 50*time.Minute)
+	if _, err := s.InsertMessage(t.Context(), store.Message{
+		TicketID: ticket.ID, Type: msgTypeUpdate, Author: authorSystem, Body: markerRetryRequested,
+	}); err != nil {
+		t.Fatalf("InsertMessage(retry requested): %v", err)
+	}
+
+	commit, err := shipPollRunWithReviewBots(t, s, ticket, gh, tr, rule)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if len(gh.commentOnPRCalls) != 0 {
+		t.Errorf("commentOnPRCalls = %v, want none", gh.commentOnPRCalls)
+	}
+	if commit.Escalation != nil {
+		t.Fatalf("escalated: %+v", commit.Escalation.Payload)
+	}
+	foundFreshMissing := false
+	for _, m := range commit.Messages {
+		if strings.HasPrefix(m.Body, missingHead) {
+			foundFreshMissing = true
+		}
+	}
+	if !foundFreshMissing {
+		t.Errorf("commit.Messages = %+v, want a fresh %q marker", commit.Messages, missingHead)
 	}
 }
 
@@ -3900,6 +4352,18 @@ type shipFixLanding struct {
 // drives.
 func shipFixThreadLanded(t *testing.T, thread orchestrator.Thread) shipFixLanding {
 	t.Helper()
+	return shipFixThreadLandedWith(t, thread, judgeFixBuildScript, judgeFixTestCmd)
+}
+
+// shipFixThreadLandedWith is shipFixThreadLanded's own parametrized twin
+// (M4 task 4, TestFixRepliesNoopQuotesReason): buildScript and testCmd
+// replace judgeFixBuildScript and judgeFixTestCmd, so a caller can drive a
+// fix unit whose build turn claims no changed file and whose test command
+// leaves the tree unchanged, taking building.go's own land "HEAD path"
+// (len(approved) == 0 && u.FixRequestID != nil) instead of a fresh commit
+// -- preFixSHA and postFixSHA then come back equal.
+func shipFixThreadLandedWith(t *testing.T, thread orchestrator.Thread, buildScript, testCmd string) shipFixLanding {
+	t.Helper()
 	s, ticket, gh, tr, aid := shipApplySeeded(t, []orchestrator.Thread{thread}, []response.ThreadAction{
 		{ID: tid(thread.ID), Action: response.ThreadVerbFix, Text: shipFixThreadLandedText},
 	})
@@ -3907,15 +4371,15 @@ func shipFixThreadLanded(t *testing.T, thread orchestrator.Thread) shipFixLandin
 
 	commit, err := shipPollRun(t, s, ticket, gh, tr)
 	if err != nil {
-		t.Fatalf("shipFixThreadLanded: apply: %v", err)
+		t.Fatalf("shipFixThreadLandedWith: apply: %v", err)
 	}
 	if commit.Escalation != nil {
-		t.Fatalf("shipFixThreadLanded: apply escalated: %+v", commit.Escalation.Payload)
+		t.Fatalf("shipFixThreadLandedWith: apply escalated: %+v", commit.Escalation.Payload)
 	}
 	pbApply(t, s, ticket, commit)
 
-	rt := runtime.NewFake(fstest.MapFS{shipFixBuildScriptPath: &fstest.MapFile{Data: []byte(judgeFixBuildScript)}})
-	driveShipFixToLanding(t, s, ticket.ID, rt)
+	rt := runtime.NewFake(fstest.MapFS{shipFixBuildScriptPath: &fstest.MapFile{Data: []byte(buildScript)}})
+	driveShipFixToLandingWith(t, s, ticket.ID, rt, testCmd)
 
 	ticket = pbGetTicket(t, s, ticket.ID)
 	postFixSHA := shipHeadSHA(t, s, ticket)
@@ -3997,6 +4461,138 @@ func TestFixRepliesAfterPush(t *testing.T) {
 	}
 	if !commit2.ClearPoll {
 		t.Error("ClearPoll = false, want true")
+	}
+}
+
+// shipFixNoopReportText is TestFixRepliesNoopQuotesReason's own builder
+// reason: the exact text a no-op fix reply must quote instead of a commit
+// sha (#37).
+const shipFixNoopReportText = "The bot misread the loop; the bound is already checked on line 12."
+
+// shipFixNoopBuildScript is a fix unit's own RUN turn that claims no
+// changed file at all (design section 9.4, M4 task 4): paired with the
+// test command "true" (which leaves the tree byte-identical), LAND then
+// takes building.go's own HEAD path instead of a fresh commit.
+const shipFixNoopBuildScript = `<zing job="build" outcome="ok">
+  <claims>
+    <files_changed>
+    </files_changed>
+  </claims>
+  <report>` + shipFixNoopReportText + `</report>
+  <notes></notes>
+</zing>`
+
+// TestFixRepliesNoopQuotesReason proves design section 9.4's own no-op
+// reply (#37): a fix that lands at the existing HEAD -- its build turn
+// claiming no changed file, its test command ("true") leaving the tree
+// unchanged -- replies with "No code change was needed." plus the
+// builder's own report text, never "Fixed in <sha>" (a reply that would
+// point at an old commit and hide the builder's explanation).
+func TestFixRepliesNoopQuotesReason(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow end-to-end flow; runs in the full suite")
+	}
+	t.Parallel()
+	when := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	thread := shipThread(shipApplyThreadA, "greet.go", 3, shipHumanComment("c1", "reviewer1", "please address this properly", when))
+	landing := shipFixThreadLandedWith(t, thread, shipFixNoopBuildScript, "true")
+	s, ticket, gh, tr := landing.s, landing.ticket, landing.gh, landing.tr
+
+	if landing.postFixSHA != landing.preFixSHA {
+		t.Fatalf("postFixSHA = %q, preFixSHA = %q, want them equal (the no-op fix lands at the current HEAD)", landing.postFixSHA, landing.preFixSHA)
+	}
+
+	gh.prState = orchestrator.PRState{Draft: true, HeadSHA: landing.postFixSHA, BaseRef: pbFixtureDefaultBranch}
+	commit, err := shipPollRun(t, s, pbGetTicket(t, s, ticket.ID), gh, tr)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if commit.Escalation != nil {
+		t.Fatalf("got an escalation: %+v", commit.Escalation.Payload)
+	}
+
+	if len(gh.replies) != 1 || !strings.HasPrefix(gh.replies[0], shipApplyThreadA+"|") {
+		t.Fatalf("replies = %+v, want exactly one for %q", gh.replies, shipApplyThreadA)
+	}
+	wantText := "No code change was needed.\n\n" + shipFixNoopReportText
+	if !strings.Contains(gh.replies[0], wantText) {
+		t.Errorf("reply body = %q, want it to contain %q", gh.replies[0], wantText)
+	}
+	if strings.Contains(gh.replies[0], "Fixed in") {
+		t.Errorf("reply body = %q, want no %q", gh.replies[0], "Fixed in")
+	}
+	if len(gh.resolves) != 1 || gh.resolves[0] != shipApplyThreadA {
+		t.Fatalf("resolves = %+v, want exactly [%q]", gh.resolves, shipApplyThreadA)
+	}
+	wantMarker := fmt.Sprintf("fix replies posted %d", landing.aid)
+	if len(commit.Messages) != 1 || commit.Messages[0].Body != wantMarker {
+		t.Errorf("commit.Messages = %+v, want exactly %q", commit.Messages, wantMarker)
+	}
+	if !commit.ClearPoll {
+		t.Error("ClearPoll = false, want true")
+	}
+}
+
+// shipFixNoopReservedMarkerReportText is a builder report that trips
+// replyBody's reserved marker check (threadrules.go), exercising
+// fixReplyText's own fallback to the bare no-op sentence. The "<!-- zing:"
+// sequence is written as entities (the XML comment syntax itself would be
+// stripped by the build turn's own XML decoder before it ever reached the
+// store) so the literal reserved marker text survives into report.Report.
+const shipFixNoopReservedMarkerReportText = "see &lt;!-- zing:forged --&gt; for details"
+
+// shipFixNoopBuildScriptReservedMarker is shipFixNoopBuildScript's own twin
+// whose report text itself holds a reserved "<!-- zing:" marker.
+const shipFixNoopBuildScriptReservedMarker = `<zing job="build" outcome="ok">
+  <claims>
+    <files_changed>
+    </files_changed>
+  </claims>
+  <report>` + shipFixNoopReservedMarkerReportText + `</report>
+  <notes></notes>
+</zing>`
+
+// TestFixRepliesNoopFallsBackOnReservedMarker proves fixReplyText's own
+// fallback (design section 9.4, M4 task 4): when the builder's own report
+// text itself trips replyBody's reserved marker check, FIX-REPLIES posts
+// the bare "No code change was needed." alone instead of failing, and the
+// thread is still resolved and the posted marker still written.
+func TestFixRepliesNoopFallsBackOnReservedMarker(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow end-to-end flow; runs in the full suite")
+	}
+	t.Parallel()
+	when := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	thread := shipThread(shipApplyThreadA, "greet.go", 3, shipHumanComment("c1", "reviewer1", "please address this properly", when))
+	landing := shipFixThreadLandedWith(t, thread, shipFixNoopBuildScriptReservedMarker, "true")
+	s, ticket, gh, tr := landing.s, landing.ticket, landing.gh, landing.tr
+
+	gh.prState = orchestrator.PRState{Draft: true, HeadSHA: landing.postFixSHA, BaseRef: pbFixtureDefaultBranch}
+	commit, err := shipPollRun(t, s, pbGetTicket(t, s, ticket.ID), gh, tr)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if commit.Escalation != nil {
+		t.Fatalf("got an escalation: %+v", commit.Escalation.Payload)
+	}
+
+	if len(gh.replies) != 1 || !strings.HasPrefix(gh.replies[0], shipApplyThreadA+"|") {
+		t.Fatalf("replies = %+v, want exactly one for %q", gh.replies, shipApplyThreadA)
+	}
+	marker := fmt.Sprintf("<!-- zing:fixed a%d %s -->", landing.aid, tid(shipApplyThreadA))
+	want := tracker.ReplyPrefix(shipViewerLogin) + "\n\nNo code change was needed.\n\n" + marker
+	if !strings.HasSuffix(gh.replies[0], "|"+want) {
+		t.Errorf("reply body = %q, want it to end with %q", gh.replies[0], want)
+	}
+	if strings.Contains(gh.replies[0], "see <!-- zing:forged -->") {
+		t.Errorf("reply body = %q, want it not to contain the rejected report text", gh.replies[0])
+	}
+	if len(gh.resolves) != 1 || gh.resolves[0] != shipApplyThreadA {
+		t.Fatalf("resolves = %+v, want exactly [%q]", gh.resolves, shipApplyThreadA)
+	}
+	wantMarker := fmt.Sprintf("fix replies posted %d", landing.aid)
+	if len(commit.Messages) != 1 || commit.Messages[0].Body != wantMarker {
+		t.Errorf("commit.Messages = %+v, want exactly %q", commit.Messages, wantMarker)
 	}
 }
 
@@ -4859,6 +5455,40 @@ func TestMergeNowMerges(t *testing.T) {
 	}
 	if question.State == nil || *question.State != shipQuestionResolved {
 		t.Errorf("merge question state = %v, want resolved", question.State)
+	}
+}
+
+// TestMergeTitleIsPRTitle proves MERGE's own commit title (design section
+// 8.8): the merge commit title is prTitle(ticket.Title, ticket.TrackerRef)
+// plus " (#<number>)", not the plan's objective -- MERGE never reads the
+// stored plan at all.
+func TestMergeTitleIsPRTitle(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow end-to-end flow; runs in the full suite")
+	}
+	t.Parallel()
+	s, ticket, gh, tr := shipPublished(t)
+	local := shipHeadSHA(t, s, ticket)
+	runs, required := shipGreenCI()
+	gh.runs, gh.required = runs, required
+	gh.prState = shipMergeReadyPR(local, "PR_node_merge_title")
+
+	commit1, err := shipPollRun(t, s, ticket, gh, tr)
+	if err != nil {
+		t.Fatalf("Run (ask): %v", err)
+	}
+	pbApply(t, s, ticket, commit1)
+
+	shipAnswerMergeQuestion(t, s, ticket.ID, "a")
+	commit2, err := shipPollRun(t, s, pbGetTicket(t, s, ticket.ID), gh, tr)
+	if err != nil {
+		t.Fatalf("Run (merge now): %v", err)
+	}
+	pbApply(t, s, ticket, commit2)
+
+	want := prTitle(ticket.Title, ticket.TrackerRef) + " (#1)"
+	if len(gh.mergeCalls) != 1 || !strings.HasSuffix(gh.mergeCalls[0], "|"+want) {
+		t.Errorf("mergeCalls = %+v, want exactly one call ending with %q", gh.mergeCalls, want)
 	}
 }
 

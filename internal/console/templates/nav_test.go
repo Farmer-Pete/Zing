@@ -33,7 +33,7 @@ func TestNavThreadSelected(t *testing.T) {
 	t.Parallel()
 
 	threads := []NavThread{
-		{Ticket: store.Ticket{ID: 5, Title: "Add a hello endpoint"}},
+		{Ticket: store.Ticket{ID: 5, Title: testHelloTicketTitle}},
 		{Ticket: store.Ticket{ID: 9, Title: "Fix the flaky test"}},
 	}
 

@@ -330,6 +330,11 @@ func serve(ctx context.Context, cfgPath, dbPath string, seedDemo bool) error {
 	dispCtx, cancelDisp := context.WithCancel(context.WithoutCancel(ctx))
 	defer cancelDisp()
 
+	// cmds is CHECK's own runner (job.Deps.Commands, design section 5.5); the
+	// console's POST /tickets/{id}/sandbox-run route (below) is wired to this
+	// same value, so a command it runs is run exactly as CHECK would run it.
+	cmds := job.NewCommandRunner(sbSet.Build, serveRequireSandbox)
+
 	d, err := zdispatch.New(st, tr, b, m, job.Registry(), bindings, zdispatch.Config{
 		Interval:    dispatchInterval(cfg.Dispatch.IntervalSeconds),
 		MaxParallel: dispatchMaxParallel(cfg.Dispatch.MaxParallel),
@@ -342,13 +347,17 @@ func serve(ctx context.Context, cfgPath, dbPath string, seedDemo bool) error {
 		Projects:       projects,
 		Sandboxes:      sbSet,
 		RequireSandbox: serveRequireSandbox,
-		Commands:       job.NewCommandRunner(sbSet.Build, serveRequireSandbox),
+		Commands:       cmds,
 		DataDir:        dataDir,
 		LensesParallel: cfg.Review.MaxLensesParallel,
 		JudgeCodexHome: judgeCodexHome,
 		MergeRule: job.MergeRule{
 			Auto: cfg.Merge.Auto, Method: cfg.Merge.Method,
 			ManualPaths: cfg.Merge.ManualPaths, DependencyFiles: cfg.Merge.DependencyFiles,
+		},
+		ReviewBots: job.ReviewBotRule{
+			Wait:   time.Duration(cfg.ReviewBots.WaitMinutes) * time.Minute,
+			Checks: reviewBotChecks(cfg.ReviewBots.Checks),
 		},
 		// ReclaimForeign is only safe once serve.lock proves every other
 		// claim owner is dead (design section 6.2, 6.3): serve took that
@@ -391,7 +400,8 @@ func serve(ctx context.Context, cfgPath, dbPath string, seedDemo bool) error {
 	allowedHosts = append(allowedHosts, hosts...)
 	allowedHosts = append(allowedHosts, cfg.Console.AllowedHosts...)
 
-	handler := console.New(st, b, m, allowedHosts, cfg.Console.Port, logHandler, push, pushToken, floor, sbSet.FirstUnavailable(usedSandboxProfiles(m)), tr, cfg.User)
+	handler := console.New(st, b, m, allowedHosts, cfg.Console.Port, logHandler, push, pushToken, floor, sbSet.FirstUnavailable(usedSandboxProfiles(m)), tr, cfg.User,
+		job.TicketCommands{Store: st, Machine: m, Projects: projects, Commands: cmds})
 	srv := newServer(ctx, handler)
 
 	listeners, err := listenOnAll(ctx, hosts, cfg.Console.Port)
@@ -1139,6 +1149,17 @@ func installLogHandler(ctx context.Context, st *store.Store, b *bus.Broker) (*co
 // time.NewTicker inside the dispatcher's goroutine, so a value above this
 // would wrap around to a bogus (often negative) duration and panic it.
 const maxDispatchIntervalSeconds = math.MaxInt64 / int64(time.Second)
+
+// reviewBotChecks converts config.ReviewBots.Checks into job.ReviewBotRule's
+// own check list, field by field (the two types stay separate so job never
+// imports config).
+func reviewBotChecks(checks []config.ReviewBotCheck) []job.ReviewBotCheck {
+	out := make([]job.ReviewBotCheck, len(checks))
+	for i, c := range checks {
+		out[i] = job.ReviewBotCheck{Check: c.Check, Trigger: c.Trigger}
+	}
+	return out
+}
 
 // dispatchInterval returns the dispatcher's tick interval for a configured
 // dispatch.interval_seconds, clamping a non-positive value (zero or
