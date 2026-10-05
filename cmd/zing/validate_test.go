@@ -205,6 +205,19 @@ func TestRunValidate_WrongArgCountExitsTwo(t *testing.T) {
 	}
 }
 
+// TestRunValidate_UnknownFlagBeforeHookExitsTwo proves hookInvoked checks
+// only args[0]: flag.Parse fails on the first flag it cannot parse, so
+// "--bogus --hook" fails on --bogus before --hook is ever read, and must
+// exit 2, the ordinary usage error, not 1, which would wrongly claim this
+// was a malformed Stop hook invocation.
+func TestRunValidate_UnknownFlagBeforeHookExitsTwo(t *testing.T) {
+	code, _ := captureStderr(t, func() int { return runValidateFrom([]string{flagBogus, flagHook}, strings.NewReader("")) })
+
+	if code != 2 {
+		t.Errorf("code = %d, want 2", code)
+	}
+}
+
 func TestRunValidate_TooManyArgsExitsTwo(t *testing.T) {
 	path := writeFile(t, validExample)
 
@@ -226,6 +239,67 @@ func TestRunValidate_ParseFailureExitsOne(t *testing.T) {
 	want := "validate: no zing element in final message\n"
 	if out != want {
 		t.Errorf("stderr = %q, want %q", out, want)
+	}
+}
+
+// flagHook, flagJob, flagState and flagBogus name the --hook invocation's
+// flags once, since golangci-lint's goconst flags a literal repeated
+// across the cases below that share them.
+const (
+	flagHook  = "--hook"
+	flagJob   = "--job"
+	flagState = "--state"
+	flagBogus = "--bogus"
+)
+
+// TestRunValidate_HookUsageErrorExitsOne proves a --hook usage error -- an
+// unknown job, an empty --state, or a positional argument -- exits 1, never
+// 2: Claude Code reads an exit code of 2 from a Stop hook as a block, so a
+// usage mistake in the hook's own argv must never look like one.
+func TestRunValidate_HookUsageErrorExitsOne(t *testing.T) {
+	cases := []struct {
+		name string
+		args []string
+	}{
+		{"unknown job", []string{flagHook, flagJob, "nonsense", flagState, filepath.Join(t.TempDir(), "s.json")}},
+		{"empty state", []string{flagHook, flagJob, "classify", flagState, ""}},
+		{"positional argument", []string{flagHook, flagJob, "classify", flagState, filepath.Join(t.TempDir(), "s.json"), "unexpected-positional-arg"}},
+		{"single-dash hook with unknown flag", []string{"-hook", flagBogus}},
+		{"hook=value form with unknown flag", []string{"--hook=true", flagBogus}},
+	}
+	for _, tc := range cases {
+		code, out := captureStderr(t, func() int { return runValidateFrom(tc.args, strings.NewReader("")) })
+		if code != 1 {
+			t.Errorf("%s: code = %d, want 1", tc.name, code)
+		}
+		if out == "" {
+			t.Errorf("%s: stderr should report the hook usage error", tc.name)
+		}
+	}
+}
+
+// TestRunValidate_HookStateErrorExitsZero proves a StopHook error -- here a
+// corrupt state file -- still exits 0 with empty stdout: Claude Code reads
+// any non-zero exit from a Stop hook as a block, and the hook never blocks
+// just because its own state file could not be read. The error still
+// reaches stderr so it is visible in the run's logs.
+func TestRunValidate_HookStateErrorExitsZero(t *testing.T) {
+	statePath := filepath.Join(t.TempDir(), "s.json")
+	if err := os.WriteFile(statePath, []byte("not-json"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := runStopHook("classify", statePath, nil, strings.NewReader(`{"session_id":"s"}`), &stdout, &stderr)
+
+	if code != 0 {
+		t.Errorf("code = %d, want 0", code)
+	}
+	if !strings.Contains(stderr.String(), "validate --hook:") {
+		t.Errorf("stderr = %q, want it to contain %q", stderr.String(), "validate --hook:")
+	}
+	if stdout.Len() != 0 {
+		t.Errorf("stdout = %q, want empty", stdout.String())
 	}
 }
 

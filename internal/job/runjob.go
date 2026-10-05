@@ -292,6 +292,10 @@ func runJobWith(
 		"stderr_file", stderrFile,
 		"final_message_len", len(res.FinalMessage),
 		"transcript_path", res.TranscriptPath,
+		"validate_denied", res.ValidateDenied,
+		"stop_hook_events", res.StopHookEvents,
+		"stop_hook_blocks", res.StopHookBlocks,
+		"stop_hook_unread", res.StopHookUnread,
 	)
 
 	return runResult{Res: res, Reserved: rsv, Started: started}, runErr

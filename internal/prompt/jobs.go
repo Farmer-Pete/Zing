@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+
+	"zing/internal/response"
 )
 
 // ResumeHeader replaces the prompt file on a planning resume turn: there
@@ -35,16 +37,22 @@ func ForClassify(jobPrompt, ticket string, extra []NamedInput) Input {
 }
 
 // ForPlanningFirst builds the planning job's first-turn Input: the
-// kind-specific prompt, the machine-configured styles, the ticket fenced,
-// then any carried inputs (answers, notes, and an error, all fenced, when
-// starting fresh from a resolution). Called by internal/job's planning
-// first turn (plan section 6.2); calls Assemble once Schemas is set from
+// kind-specific prompt, the machine-configured styles plus the plan
+// checker's rendered rules block (response.PlanRules, so the validator and
+// the prompt cannot disagree), the ticket fenced, then any carried inputs
+// (answers, notes, and an error, all fenced, when starting fresh from a
+// resolution). Called by internal/job's planning first turn (plan section
+// 6.2); calls Assemble once Schemas is set from
 // response.RenderTemplate(JobPlanning, ...) in planning schema order.
 func ForPlanningFirst(jobPrompt string, styles []string, ticket string, extra []NamedInput) Input {
+	allStyles := make([]string, 0, len(styles)+1)
+	allStyles = append(allStyles, styles...)
+	allStyles = append(allStyles, response.PlanRules())
+
 	inputs := make([]NamedInput, 0, 1+len(extra))
 	inputs = append(inputs, NamedInput{Label: labelTicket, Text: ticket, Untrusted: true})
 	inputs = append(inputs, extra...)
-	return Input{JobPrompt: jobPrompt, Styles: styles, Inputs: inputs}
+	return Input{JobPrompt: jobPrompt, Styles: allStyles, Inputs: inputs}
 }
 
 // ForPlanningResume builds a planning resume turn's Input: ResumeHeader in

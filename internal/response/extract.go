@@ -25,13 +25,17 @@ import (
 // free text holding a literal < does not cost a whole retry run. The cap
 // still applies, and hitting it in the strict pass returns nothing, as
 // before.
-func ExtractAll(text string) []string {
+//
+// logAttrs are extra slog key-value pairs appended to the repair record a
+// repaired pass logs, such as "run_token", token. Callers that have none
+// pass none.
+func ExtractAll(text string, logAttrs ...any) []string {
 	input := escapeBareAmpersands([]byte(text))
 	roots, capped := extractStrict(input)
 	if len(roots) > 0 || capped {
 		return roots
 	}
-	return extractRepaired(input)
+	return extractRepaired(input, logAttrs)
 }
 
 // extractStrict is ExtractAll's first pass over input exactly as written.
@@ -65,7 +69,7 @@ func extractStrict(input []byte) (roots []string, capped bool) {
 // extractRepaired is ExtractAll's second pass, run only when the strict
 // pass found no root: a candidate counts when its repaired bytes form a
 // well-formed root on their own.
-func extractRepaired(input []byte) []string {
+func extractRepaired(input []byte, logAttrs []any) []string {
 	excluded := excludedRanges(input)
 	var roots []string
 	total := 0
@@ -88,7 +92,7 @@ func extractRepaired(input []byte) []string {
 		}
 	}
 	if len(roots) > 0 {
-		logRepair(total, len(roots))
+		logRepair(total, len(roots), logAttrs...)
 	}
 	return roots
 }

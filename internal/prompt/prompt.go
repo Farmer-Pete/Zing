@@ -19,13 +19,23 @@ import (
 const Tail = "Your final message is exactly one <zing> document that follows the schema\n" +
 	"above. Nothing else in the final message is read. If you need a decision\n" +
 	"from the owner, return the question outcome. If you cannot continue, return\n" +
-	"the error outcome with what, why, and what you tried. Before you finish,\n" +
-	"run `zing validate -` with the document on standard input, or\n" +
-	"`zing validate FILE` if you can write files. Inside the document, write a\n" +
-	"literal < as &lt; and & as &amp;, even inside backticks. Fix every error it prints\n" +
-	"and run it again until it prints nothing. If your tools cannot run it,\n" +
-	"return the document anyway: Zing validates every document and sends any\n" +
-	"errors back. Every claim is checked by a program, not a person."
+	"the error outcome with what, why, and what you tried.\n" +
+	"\n" +
+	"Before you finish, check the document with this command, and put nothing\n" +
+	"before or after it on the command:\n" +
+	"\n" +
+	"zing validate - <<'ZING_DOCUMENT'\n" +
+	"THE WHOLE DOCUMENT\n" +
+	"ZING_DOCUMENT\n" +
+	"\n" +
+	"Fix every error it prints and run it again until it prints nothing. If\n" +
+	"your tools cannot run it, return the document anyway: Zing validates every\n" +
+	"document and sends any errors back.\n" +
+	"\n" +
+	"Write no angle brackets in prose. Write a placeholder in capitals, such as\n" +
+	"RUN-ID-stderr.log, and a comparison in words, such as at most 64 KiB.\n" +
+	"Where code needs a literal <, write it as &lt;, and write & as &amp;, even\n" +
+	"inside backticks. Every claim is checked by a program, not a person."
 
 // Input is everything Assemble needs for one prompt: the job prompt text,
 // the style files layered over it, the labeled inputs (a ticket, an
