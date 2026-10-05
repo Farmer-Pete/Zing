@@ -52,15 +52,9 @@ func TestNoTestWritesAnExecutable(t *testing.T) {
 	}
 }
 
-// chmodMethodName is the method name a value's own .Chmod(mode) call
-// carries, shared with its os.Chmod(path, mode) entry in osModeArg below so
-// the string literal appears once.
-const chmodMethodName = "Chmod"
-
 // osModeArg maps an os package function name that takes a file mode to that
-// mode argument's index, so the one isOSCall check below covers all three
-// instead of repeating "isPkg && pkgIdent.Name == \"os\"" per function.
-var osModeArg = map[string]int{"WriteFile": 2, "OpenFile": 2, chmodMethodName: 1}
+// mode argument's index.
+var osModeArg = map[string]int{"WriteFile": 2, "OpenFile": 2, "Chmod": 1}
 
 // checkExecutableModes parses filename (read from disk when src is nil, or
 // parsed from src otherwise, per go/parser.ParseFile) and returns one
@@ -97,8 +91,8 @@ func checkExecutableModes(filename string, src any) ([]string, error) {
 				callee = "os." + fun.Sel.Name
 				modeArg = call.Args[idx]
 			}
-		case fun.Sel.Name == chmodMethodName && len(call.Args) == 1:
-			callee = chmodMethodName
+		case fun.Sel.Name == "Chmod" && len(call.Args) == 1:
+			callee = fun.Sel.Name
 			modeArg = call.Args[0]
 		}
 

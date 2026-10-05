@@ -532,9 +532,16 @@ func TestRun_ErrStartLogsCause(t *testing.T) {
 		{"codex", string(response.JobPlanreview)},
 		{"claude", string(response.JobClassify)},
 	} {
-		line := findLogLine(logged, tc.runtime+" run: start failed")
+		want := tc.runtime + " run: start failed"
+		var line string
+		for candidate := range strings.SplitSeq(logged, "\n") {
+			if strings.Contains(candidate, want) {
+				line = candidate
+				break
+			}
+		}
 		if line == "" {
-			t.Fatalf("log missing a %q line; got:\n%s", tc.runtime+" run: start failed", logged)
+			t.Fatalf("log missing a %q line; got:\n%s", want, logged)
 		}
 		for _, want := range []string{
 			"level=WARN",
@@ -553,23 +560,6 @@ func TestRun_ErrStartLogsCause(t *testing.T) {
 	if strings.Contains(logged, prompt) {
 		t.Errorf("log leaks the prompt; got:\n%s", logged)
 	}
-}
-
-// findLogLine returns the single line of logged (a slog text handler's
-// output, one record per line) that contains want, or "" if no line does or
-// more than one does -- either way, the caller has nothing it can safely
-// assert against.
-func findLogLine(logged, want string) string {
-	var found string
-	for line := range strings.SplitSeq(logged, "\n") {
-		if strings.Contains(line, want) {
-			if found != "" {
-				return ""
-			}
-			found = line
-		}
-	}
-	return found
 }
 
 func TestCodex_ErrTimeout(t *testing.T) {
