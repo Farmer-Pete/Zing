@@ -10,7 +10,11 @@ package store
 
 import (
 	"context"
+	"crypto/hmac"
+	"crypto/rand"
+	"crypto/sha256"
 	"database/sql"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -37,7 +41,13 @@ const (
 // ambiguous or empty draft, or (SendBatch only) an empty batch. The console
 // handler maps it to 409; every other error maps to 500 with a generic body,
 // matching AnswerQuestion's own answerConflict/AnswerResult.Conflict split.
-type ConflictError struct{ Reason string }
+type ConflictError struct {
+	Reason string
+	// Current is set only for the "changed in another tab" conflict: the
+	// stored body the base check compared against, empty when no draft row
+	// existed. Every other conflict leaves it nil.
+	Current *string
+}
 
 func (e *ConflictError) Error() string { return e.Reason }
 
@@ -45,6 +55,58 @@ func (e *ConflictError) Error() string { return e.Reason }
 // named-conflict return path in this file shares (commit.go's
 // answerConflict does the same for AnswerQuestion's AnswerResult).
 func conflict(reason string) error { return &ConflictError{Reason: reason} }
+
+// changedInAnotherTabReason is checkDraftBase's one conflict reason (ticket
+// #43), named once so goconst has nothing to flag across its use here and
+// in logSaveDraftOutcome's own check for it.
+const changedInAnotherTabReason = "changed in another tab"
+
+// checkDraftBase reports a *ConflictError when base names what a tab last
+// saw saved, but the stored value (current) has since moved away from both
+// that base and the value this call is about to write, text (empty for a
+// clear). A nil base never conflicts: the caller sent no base, so
+// insertReplyDraftTx and clearReplyDraftTx keep overwriting unconditionally,
+// exactly as they did before this ticket. Current is captured by address
+// into the returned ConflictError, for the caller to learn as its next base
+// (D4: "the client records the stored text as the box's base").
+func checkDraftBase(base *string, current, text string) error {
+	if base == nil || current == *base || current == text {
+		return nil
+	}
+	return &ConflictError{Reason: changedInAnotherTabReason, Current: &current}
+}
+
+// fingerprintKey is draftFingerprint's HMAC key, 32 bytes drawn once per
+// process from crypto/rand (ticket #43). A plain hash of a draft's text
+// would let a reader of the log recover a short draft such as "ok" by
+// hashing guesses; keying it with a secret that never leaves this process
+// stops that, at the cost of fingerprints never matching across a restart
+// (design section's own risk list).
+var fingerprintKey = randomFingerprintKey()
+
+// randomFingerprintKey panics on failure rather than returning an error:
+// crypto/rand.Read failing means the process has no usable entropy source,
+// which every other security-sensitive path in this codebase would also be
+// unable to tolerate, so there is no sane fallback to return instead.
+func randomFingerprintKey() []byte {
+	key := make([]byte, 32)
+	if _, err := rand.Read(key); err != nil {
+		panic(fmt.Sprintf("draft fingerprint key: %v", err))
+	}
+	return key
+}
+
+// draftFingerprint returns the first 16 hex characters of
+// HMAC-SHA256(fingerprintKey, s): logSaveDraftOutcome's own stand-in for a
+// draft's text or base, short enough to read in a log line and keyed so it
+// cannot be reversed by guessing (ticket #43). The empty string gets a
+// fingerprint too, since an empty base or text is itself meaningful (a
+// fresh box, or a clear).
+func draftFingerprint(s string) string {
+	mac := hmac.New(sha256.New, fingerprintKey)
+	mac.Write([]byte(s))
+	return hex.EncodeToString(mac.Sum(nil))[:16]
+}
 
 // ItemDecision is one ref-to-decision pick for an item-kind question
 // (perimeter, review): SaveDraft merges it into the draft's
@@ -63,6 +125,11 @@ type DraftInput struct {
 	Option     *string
 	Item       *ItemDecision
 	Text       string
+	// Base is the reply text this tab last saw saved, so a save can detect
+	// another tab's write to the same draft in between (ticket #43). nil
+	// means no check (today's unconditional overwrite). It applies only to
+	// the reply-text and clear modes, and is ignored for Option and Item.
+	Base *string
 }
 
 // DraftResult reports the draft row SaveDraft wrote, updated, or deleted.
@@ -145,7 +212,7 @@ func (s *Store) SaveDraft(ctx context.Context, in DraftInput) (result DraftResul
 	defer rollback(tx)
 
 	if in.QuestionID == nil {
-		result, err = s.insertReplyDraftTx(ctx, tx, in.TicketID, nil, in.Text)
+		result, err = s.insertReplyDraftTx(ctx, tx, in.TicketID, nil, in.Text, in.Base)
 	} else {
 		var payload response.QuestionPayload
 		payload, err = openQuestionForTicketTx(ctx, tx, *in.QuestionID, in.TicketID)
@@ -177,9 +244,9 @@ func (s *Store) SaveDraft(ctx context.Context, in DraftInput) (result DraftResul
 			// cases above), so an empty Text here is specifically "clear this
 			// question's reply draft", not the ambiguous or empty-mode
 			// conflict draftModeCount already ruled out above.
-			result, err = clearReplyDraftTx(ctx, tx, in.TicketID, *in.QuestionID)
+			result, err = clearReplyDraftTx(ctx, tx, in.TicketID, *in.QuestionID, in.Base)
 		default:
-			result, err = s.insertReplyDraftTx(ctx, tx, in.TicketID, in.QuestionID, in.Text)
+			result, err = s.insertReplyDraftTx(ctx, tx, in.TicketID, in.QuestionID, in.Text, in.Base)
 		}
 	}
 	if err != nil {
@@ -207,30 +274,61 @@ func (s *Store) SaveDraft(ctx context.Context, in DraftInput) (result DraftResul
 // common (clearReplyDraftTx finds no row), and that outcome gets its own
 // "draft clear: nothing to clear" line instead of reusing the same message
 // with a misleading "cleared"=false.
+//
+// Every line also carries has_base, whether this call sent a base at all
+// (ticket #43). The "changed in another tab" conflict additionally carries
+// base_fp, text_fp, and current_fp -- draftFingerprint of in.Base, in.Text,
+// and ce.Current -- and "draft saved" and "draft cleared" carry base_fp and
+// text_fp whenever has_base is true, so a conflict's losing and winning
+// tabs can be matched up after the fact by fingerprint alone. Draft text is
+// never logged.
 func logSaveDraftOutcome(ctx context.Context, in DraftInput, result DraftResult, err error) {
 	var questionID int64
 	if in.QuestionID != nil {
 		questionID = *in.QuestionID
 	}
+	hasBase := in.Base != nil
 	if err != nil {
 		if ce, ok := errors.AsType[*ConflictError](err); ok {
-			slog.InfoContext(ctx, "save draft conflict",
-				"ticket_id", in.TicketID, "question_id", questionID, "reason", ce.Reason)
+			if ce.Reason == changedInAnotherTabReason && hasBase && ce.Current != nil {
+				slog.InfoContext(ctx, "save draft conflict",
+					"ticket_id", in.TicketID, "question_id", questionID, "reason", ce.Reason, "has_base", hasBase,
+					"base_fp", draftFingerprint(*in.Base), "text_fp", draftFingerprint(in.Text), "current_fp", draftFingerprint(*ce.Current))
+			} else {
+				slog.InfoContext(ctx, "save draft conflict",
+					"ticket_id", in.TicketID, "question_id", questionID, "reason", ce.Reason, "has_base", hasBase)
+			}
 		}
 		return
 	}
 	clearsReplyDraft := in.QuestionID != nil && in.Text == "" && in.Option == nil && in.Item == nil
 	if clearsReplyDraft {
-		if result.Cleared {
+		switch {
+		case result.Cleared && hasBase:
 			slog.InfoContext(ctx, "draft cleared",
-				"ticket_id", in.TicketID, "question_id", questionID, "message_id", result.MessageID, "cleared", result.Cleared)
-		} else {
-			slog.InfoContext(ctx, "draft clear: nothing to clear", "ticket_id", in.TicketID, "question_id", questionID)
+				"ticket_id", in.TicketID, "question_id", questionID, "message_id", result.MessageID,
+				"cleared", result.Cleared, "has_base", hasBase,
+				"base_fp", draftFingerprint(*in.Base), "text_fp", draftFingerprint(in.Text))
+		case result.Cleared:
+			slog.InfoContext(ctx, "draft cleared",
+				"ticket_id", in.TicketID, "question_id", questionID, "message_id", result.MessageID,
+				"cleared", result.Cleared, "has_base", hasBase)
+		default:
+			slog.InfoContext(ctx, "draft clear: nothing to clear",
+				"ticket_id", in.TicketID, "question_id", questionID, "has_base", hasBase)
 		}
 		return
 	}
+	if hasBase {
+		slog.InfoContext(ctx, "draft saved",
+			"ticket_id", in.TicketID, "question_id", questionID, "message_id", result.MessageID,
+			"replaced", result.Replaced, "has_base", hasBase,
+			"base_fp", draftFingerprint(*in.Base), "text_fp", draftFingerprint(in.Text))
+		return
+	}
 	slog.InfoContext(ctx, "draft saved",
-		"ticket_id", in.TicketID, "question_id", questionID, "message_id", result.MessageID, "replaced", result.Replaced)
+		"ticket_id", in.TicketID, "question_id", questionID, "message_id", result.MessageID,
+		"replaced", result.Replaced, "has_base", hasBase)
 }
 
 // openQuestionForTicketTx reads questionID and returns its parsed payload,
@@ -584,11 +682,17 @@ func findDraftReplyTx(ctx context.Context, tx *sql.Tx, ticketID int64, parentID 
 // always inserting, so a repeated Enter on the same free-text reply (the
 // composer resubmits the whole draft on every keystroke commit) never
 // accumulates duplicate rows that would all send. A reply carries no payload
-// (messagePayloadTypes, store.go), only Body.
-func (s *Store) insertReplyDraftTx(ctx context.Context, tx *sql.Tx, ticketID int64, parentID *int64, text string) (DraftResult, error) {
+// (messagePayloadTypes, store.go), only Body. base is checkDraftBase's own
+// check against the stored body (empty when no row exists yet), run before
+// any write (ticket #43): a nil base skips the check and keeps overwriting
+// unconditionally, as before this ticket.
+func (s *Store) insertReplyDraftTx(ctx context.Context, tx *sql.Tx, ticketID int64, parentID *int64, text string, base *string) (DraftResult, error) {
 	existingID, existingBody, found, err := findDraftReplyTx(ctx, tx, ticketID, parentID)
 	if err != nil {
 		return DraftResult{}, err
+	}
+	if baseErr := checkDraftBase(base, existingBody, text); baseErr != nil {
+		return DraftResult{}, baseErr
 	}
 
 	if found {
@@ -615,11 +719,17 @@ func (s *Store) insertReplyDraftTx(ctx context.Context, tx *sql.Tx, ticketID int
 // (design section 6.7's autosave contract): an emptied reply box has to undo
 // whatever text it last autosaved, or the deleted text would still send.
 // Cleared reports whether a row was found and deleted; MessageID is that
-// row's id, or 0 when there was nothing to clear.
-func clearReplyDraftTx(ctx context.Context, tx *sql.Tx, ticketID, questionID int64) (DraftResult, error) {
-	id, _, found, err := findDraftReplyTx(ctx, tx, ticketID, &questionID)
+// row's id, or 0 when there was nothing to clear. base is checkDraftBase's
+// own check against the stored body (empty when no row exists), run before
+// the DELETE (ticket #43): a nil base skips the check and keeps clearing
+// unconditionally, as before this ticket.
+func clearReplyDraftTx(ctx context.Context, tx *sql.Tx, ticketID, questionID int64, base *string) (DraftResult, error) {
+	id, body, found, err := findDraftReplyTx(ctx, tx, ticketID, &questionID)
 	if err != nil {
 		return DraftResult{}, err
+	}
+	if baseErr := checkDraftBase(base, body, ""); baseErr != nil {
+		return DraftResult{}, baseErr
 	}
 	if !found {
 		return DraftResult{}, nil
