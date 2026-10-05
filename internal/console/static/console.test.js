@@ -10,9 +10,12 @@
 // first/middle/last row removed), collectPatchWork, the /stream
 // reconnect-and-stale-marker decisions (reduceStreamStatus, reconnectDelay,
 // staleMarkerText), saving every unsaved reply box on send and naming any
-// left unsent (unsavedReplyBodies, sendResultWithUnsent), the debounced
-// autosave decision (replyAutosaveBody), and the patch-caused-blur-only
-// focus restore decision (replyFocusSnapshot, restoreFocusDecision).
+// left unsent or stale (unsavedReplyBodies, sendResultWithUnsent), the
+// debounced autosave decision (replyAutosaveBody), the send-time emptied-box
+// flush, failed-clear block, and failed/stale save split (emptiedReplyBodies,
+// sendBlockedByFailedClears, clearFailedResult, partitionFailedSaves), and
+// the patch-caused-blur-only focus restore decision (replyFocusSnapshot,
+// restoreFocusDecision).
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
@@ -44,6 +47,10 @@ import {
 	sendResultWithUnsent,
 	AUTOSAVE_DEBOUNCE_MS,
 	replyAutosaveBody,
+	emptiedReplyBodies,
+	sendBlockedByFailedClears,
+	clearFailedResult,
+	partitionFailedSaves,
 	replyFocusSnapshot,
 	restoreFocusDecision,
 	describeAction,
@@ -628,10 +635,6 @@ test('sendResultWithUnsent: unsent and stale both append, unsent first', () => {
 	);
 });
 
-test('sendResultWithUnsent: stale defaults to 0 when omitted', () => {
-	assert.equal(sendResultWithUnsent('Sent 1 message.', 0), 'Sent 1 message.');
-});
-
 // replyAutosaveBody: installReplyAutosave (console.js) debounces on 'input'
 // and posts this body a second after the owner stops typing, so a box's text
 // is never lost to a lost focus or an unmorphed send -- including an emptied
@@ -659,6 +662,74 @@ test('replyAutosaveBody: a missing data-draft-question yields null', () => {
 
 test('AUTOSAVE_DEBOUNCE_MS is a reasonable debounce window', () => {
 	assert.ok(AUTOSAVE_DEBOUNCE_MS >= 500 && AUTOSAVE_DEBOUNCE_MS <= 2000);
+});
+
+// emptiedReplyBodies: postSendBatch flushes an emptied box's clear through
+// /draft before /send runs, or the store's last-saved draft still goes out
+// (bug fix, Q3).
+
+test('emptiedReplyBodies: an emptied box with an earlier saved draft gets flushed', () => {
+	const emptied = { dataset: { draftTicket: '18', draftQuestion: '11' }, value: '' };
+	const neverSaved = { dataset: { draftTicket: '18', draftQuestion: '12' }, value: '' };
+	const stillTyped = { dataset: { draftTicket: '18', draftQuestion: '13' }, value: 'still here' };
+	const lastSavedFor = (el) => (el === emptied ? 'an earlier note' : '');
+	assert.deepEqual(emptiedReplyBodies([emptied, neverSaved, stillTyped], lastSavedFor), [
+		{ el: emptied, body: { ticket: 18, question: 11, text: '' } },
+	]);
+});
+
+test('emptiedReplyBodies: no inputs yields an empty list', () => {
+	assert.deepEqual(emptiedReplyBodies([], () => ''), []);
+	assert.deepEqual(emptiedReplyBodies(undefined, () => ''), []);
+});
+
+// sendBlockedByFailedClears / clearFailedResult: a clear that failed leaves
+// its old, deleted text saved as the ticket's draft, so sending anyway would
+// silently resend text the owner just emptied the box of (bug fix).
+
+test('sendBlockedByFailedClears: any failed clear blocks the send', () => {
+	assert.equal(sendBlockedByFailedClears(0), false);
+	assert.equal(sendBlockedByFailedClears(1), true);
+	assert.equal(sendBlockedByFailedClears(2), true);
+});
+
+test('clearFailedResult: names how many clears failed', () => {
+	assert.equal(
+		clearFailedResult(1),
+		'A deleted reply could not be cleared from the server, so sending was canceled. Try again.',
+	);
+	assert.equal(
+		clearFailedResult(2),
+		'2 deleted replies could not be cleared from the server, so sending was canceled. Try again.',
+	);
+});
+
+// partitionFailedSaves: a box whose save failed at send time but had an
+// earlier autosave already in the store (lastSavedFor non-empty) still sent
+// that older draft -- it is stale, not simply unsent (bug fix).
+
+test('partitionFailedSaves: a failed save with earlier saved text is stale, one with none is unsent', () => {
+	const staleBox = { dataset: {}, value: 'new edit' };
+	const unsentBox = { dataset: {}, value: 'never saved' };
+	const sentBox = { dataset: {}, value: 'saved fine' };
+	const pending = [
+		{ el: staleBox, body: { ticket: 1, question: 11, text: 'new edit' } },
+		{ el: unsentBox, body: { ticket: 1, question: 12, text: 'never saved' } },
+		{ el: sentBox, body: { ticket: 1, question: 13, text: 'saved fine' } },
+	];
+	const results = [false, false, true];
+	const lastSavedFor = (el) => (el === staleBox ? 'an earlier version' : '');
+	assert.deepEqual(partitionFailedSaves(pending, results, lastSavedFor), {
+		failed: [unsentBox],
+		stale: [staleBox],
+	});
+});
+
+test('partitionFailedSaves: a thread-level reply (no question) with a failed save is always unsent, never stale', () => {
+	const threadBox = { dataset: {}, value: 'a thread reply' };
+	const pending = [{ el: threadBox, body: { ticket: 1, question: null, text: 'a thread reply' } }];
+	const result = partitionFailedSaves(pending, [false], () => 'something saved earlier');
+	assert.deepEqual(result, { failed: [threadBox], stale: [] });
 });
 
 // replyFocusSnapshot / restoreFocusDecision: a /stream patch that blurs or

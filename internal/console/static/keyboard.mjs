@@ -560,6 +560,91 @@ export function replyAutosaveBody(el, lastSavedText) {
 }
 
 /**
+ * emptiedReplyBodies finds every input the owner emptied since its last save
+ * (console.js's postSendBatch, bug fix: canceling a pending autosave timer
+ * outright, rather than flushing it, left an emptied box's old, already-saved
+ * text as the ticket's draft, and /send still sent it). lastSavedFor(el)
+ * supplies the text last known saved for el, the same lookup
+ * installReplyAutosave's own fireReplyAutosave uses, so a box nobody has
+ * typed in since page load is not reported as needing a flush.
+ *
+ * @param {Iterable<{dataset?: {draftTicket?: string, draftQuestion?: string}, value?: unknown}>|null|undefined} inputs
+ * @param {(el: object) => string} lastSavedFor
+ * @returns {{el: object, body: {ticket: number, question: number, text: string}}[]}
+ */
+export function emptiedReplyBodies(inputs, lastSavedFor) {
+	const out = [];
+	for (const el of inputs ?? []) {
+		if (el?.value !== '') {
+			continue;
+		}
+		const body = replyAutosaveBody(el, lastSavedFor(el));
+		if (body) {
+			out.push({ el, body });
+		}
+	}
+	return out;
+}
+
+/**
+ * sendBlockedByFailedClears reports whether postSendBatch must hold back
+ * /send (bug fix: a clear that failed leaves its old, deleted text saved as
+ * the ticket's draft, and sending anyway would silently resend text the
+ * owner just emptied the box of). True whenever at least one emptied box's
+ * clear failed to save.
+ *
+ * @param {number} failedClearCount
+ * @returns {boolean}
+ */
+export function sendBlockedByFailedClears(failedClearCount) {
+	return failedClearCount > 0;
+}
+
+/**
+ * clearFailedResult is showSendResult's text when sendBlockedByFailedClears
+ * holds the send back, naming how many emptied boxes' clears failed.
+ *
+ * @param {number} count
+ * @returns {string}
+ */
+export function clearFailedResult(count) {
+	return count === 1
+		? 'A deleted reply could not be cleared from the server, so sending was canceled. Try again.'
+		: `${count} deleted replies could not be cleared from the server, so sending was canceled. Try again.`;
+}
+
+/**
+ * partitionFailedSaves splits the reply boxes whose save failed at send time
+ * into failed (nothing of theirs ever reached the store) and stale (an
+ * earlier autosave already did, so /send still sends that older draft) (bug
+ * fix: reporting a stale box as plain "not sent" told the owner nothing went
+ * out when an earlier edit actually had). lastSavedFor(el) must use the same
+ * fallback to el.defaultValue that fireReplyAutosave does, so a box whose
+ * only save ever was the server-rendered draft (never autosaved this page
+ * session) is still counted as stale rather than failed.
+ *
+ * @param {{el: object, body: {question: number|null}}[]} pending
+ * @param {boolean[]} results - postDraftRequest's outcome, by the same index as pending
+ * @param {(el: object) => string} lastSavedFor
+ * @returns {{failed: object[], stale: object[]}}
+ */
+export function partitionFailedSaves(pending, results, lastSavedFor) {
+	const failed = [];
+	const stale = [];
+	pending.forEach(({ el, body }, i) => {
+		if (results[i]) {
+			return;
+		}
+		if (body.question != null && lastSavedFor(el)) {
+			stale.push(el);
+		} else {
+			failed.push(el);
+		}
+	});
+	return { failed, stale };
+}
+
+/**
  * replyFocusSnapshot captures a reply box's identity, text, and selection at
  * the moment of a focusin, input, or select event (design: "Snapshot
  * document.activeElement ... and its selection before patch work"), so

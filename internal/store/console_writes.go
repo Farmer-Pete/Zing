@@ -222,7 +222,7 @@ func logSaveDraftOutcome(ctx context.Context, in DraftInput, result DraftResult,
 	if clearsReplyDraft {
 		if result.Cleared {
 			slog.InfoContext(ctx, "draft cleared",
-				"ticket_id", in.TicketID, "question_id", questionID, "message_id", result.MessageID, "cleared", result.Cleared)
+				"ticket_id", in.TicketID, "question_id", questionID, "message_id", result.MessageID)
 		} else {
 			slog.InfoContext(ctx, "draft clear: nothing to clear", "ticket_id", in.TicketID, "question_id", questionID)
 		}

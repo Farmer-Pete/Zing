@@ -34,6 +34,10 @@ import {
 	sendResultWithUnsent,
 	AUTOSAVE_DEBOUNCE_MS,
 	replyAutosaveBody,
+	emptiedReplyBodies,
+	sendBlockedByFailedClears,
+	clearFailedResult,
+	partitionFailedSaves,
 	replyFocusSnapshot,
 	restoreFocusDecision,
 	collectPatchWork,
@@ -554,7 +558,7 @@ function sendBatch() {
 // autosaveTimers maps a reply box's "ticket:question" key (replyAutosaveKeyFor
 // below) to its pending debounced-save timer id (installReplyAutosave).
 // autosaveInFlight maps the same key to the in-flight POST /draft promise a
-// timer has already fired, if any (bug fix, r2f1: cancelAutosaves only ever
+// timer has already fired, if any (bug fix: cancelAutosaves only ever
 // cleared a timer that had not fired yet; a timer that fired just before a
 // Cmd+Enter was already running its fetch by the time cancelAutosaves ran,
 // and postSendBatch never waited for it. If that fetch resolved after
@@ -576,12 +580,12 @@ function replyAutosaveKeyFor(el) {
 	return `${el.dataset.draftTicket}:${el.dataset.draftQuestion}`;
 }
 
-// mainReplyInput finds the "#main .reply-input" target closed over by the
-// box the owner is typing into, given an event target, or null when target
-// is not one: the one check installReplyAutosave, installReplyFocusTracking,
-// and clearReplyFocusUnlessInReplyBox each need, named once so the three do
-// not drift (design section 6.4, 6.7: autosave, focus tracking, and the
-// deliberate-blur check all key off the same reply box).
+// mainReplyInput returns the ".reply-input" at or above target when it sits
+// inside #main, or null otherwise: the one check installReplyAutosave,
+// installReplyFocusTracking, and clearReplyFocusUnlessInReplyBox each need,
+// named once so the three do not drift (design section 6.4, 6.7: autosave,
+// focus tracking, and the deliberate-blur check all key off the same reply
+// box).
 function mainReplyInput(target) {
 	const el = target?.closest?.('.reply-input');
 	return el && el.closest('#main') ? el : null;
@@ -608,6 +612,15 @@ function fireReplyAutosave(el, key) {
 	return postDraftRequest(el, body.ticket, body.question, body.text);
 }
 
+// trackAutosaveInFlight records promise as key's in-flight autosave
+// (scheduleReplyAutosave below) and drops it once it settles, so
+// postSendBatch's own await over autosaveInFlight.values() never waits on a
+// save that already finished.
+function trackAutosaveInFlight(key, promise) {
+	autosaveInFlight.set(key, promise);
+	promise.finally(() => autosaveInFlight.delete(key));
+}
+
 // scheduleReplyAutosave (re-)arms el's debounced save, keyed by
 // replyAutosaveKeyFor so a later keystroke in the same box clears and
 // replaces its own pending timer rather than stacking a second one
@@ -616,22 +629,19 @@ function fireReplyAutosave(el, key) {
 // shape showSendResult's toast dismiss already needed, rather than writing
 // clearTimeout/setTimeout out by hand a second time.
 //
-// The fired timer's own promise is kept in autosaveInFlight (bug fix, r2f1)
-// so postSendBatch can await it: a timer that has already fired by the time
-// Cmd+Enter runs is no longer in autosaveTimers for cancelAutosaves to
-// cancel, and its fetch may still resolve after postSendBatch's own
-// post-send reset, racing lastSavedText back to the just-sent text's old
-// value.
+// The fired timer's own promise is kept in autosaveInFlight (bug fix,
+// trackAutosaveInFlight) so postSendBatch can await it: a timer that has
+// already fired by the time Cmd+Enter runs is no longer in autosaveTimers
+// for cancelAutosaves to cancel, and its fetch may still resolve after
+// postSendBatch's own post-send reset, racing lastSavedText back to the
+// just-sent text's old value.
 function scheduleReplyAutosave(el) {
 	const key = replyAutosaveKeyFor(el);
 	const fire = () => {
 		autosaveTimers.delete(key);
 		const result = fireReplyAutosave(el, key);
 		if (result) {
-			autosaveInFlight.set(
-				key,
-				result.finally(() => autosaveInFlight.delete(key)),
-			);
+			trackAutosaveInFlight(key, result);
 		}
 	};
 	autosaveTimers.set(key, scheduleToastDismiss(autosaveTimers.get(key) ?? null, () => setTimeout(fire, AUTOSAVE_DEBOUNCE_MS), clearTimeout));
@@ -641,7 +651,7 @@ function scheduleReplyAutosave(el) {
 // postSendBatch below -- which saves and sends every box itself -- can never
 // race a stale autosave into re-posting a box the send is about to clear. It
 // does not wait for a timer that had already fired; postSendBatch awaits
-// autosaveInFlight separately for that (bug fix, r2f1).
+// autosaveInFlight separately for that (bug fix).
 function cancelAutosaves() {
 	for (const timerID of autosaveTimers.values()) {
 		clearTimeout(timerID);
@@ -698,6 +708,13 @@ function installReplyFocusTracking() {
 	document.addEventListener('focusin', (event) => snapshotFromTarget(event.target));
 	document.addEventListener('input', (event) => snapshotFromTarget(event.target));
 	document.addEventListener('select', (event) => snapshotFromTarget(event.target));
+	// 'select' only fires when a range of text is selected, not on a bare
+	// caret move (an arrow key, Home/End, or a click with nothing selected):
+	// without this, restoreReplyFocus could put the caret back at a stale
+	// position after a patch replaced the box. 'selectionchange' fires for
+	// every one of those too, document-wide, so it is routed back through
+	// document.activeElement rather than event.target (bug fix).
+	document.addEventListener('selectionchange', () => snapshotFromTarget(document.activeElement));
 	document.addEventListener('focusout', () => setTimeout(clearReplyFocusUnlessInReplyBox, 0));
 }
 
@@ -705,28 +722,36 @@ async function postSendBatch(ticket) {
 	cancelAutosaves();
 	// A timer that had already fired before cancelAutosaves ran is no
 	// longer in autosaveTimers for it to cancel -- it is already awaiting
-	// its own fetch. Waiting for those here (bug fix, r2f1) keeps their
+	// its own fetch. Waiting for those here (bug fix) keeps their
 	// lastSavedText.set calls from landing after this function's own
 	// post-send reset below, which would otherwise silently put a
 	// just-sent box's key back to its pre-send text.
 	await Promise.all(autosaveInFlight.values());
 
 	const inputs = Array.from(document.querySelectorAll('#main .reply-input'));
+	// Recorded before any further await below, so a box the owner keeps
+	// typing into while this function's own fetches are in flight is never
+	// cleared out from under them: the post-send clear only ever touches a
+	// box whose value still matches what was actually sent (bug fix).
+	const sentValues = new Map(inputs.map((el) => [el, el.value]));
 	const pending = unsavedReplyBodies(inputs);
+	const lastSavedFor = (el) => {
+		const key = replyAutosaveKeyFor(el);
+		return lastSavedText.has(key) ? lastSavedText.get(key) : el.defaultValue;
+	};
 
 	// A box the owner emptied in the second before Cmd+Enter has no
 	// "unsaved text" (unsavedReplyBodies, above, skips every empty box), but
 	// cancelAutosaves above just dropped the pending timer that would have
-	// cleared its saved draft. Flushing it here, through the same
-	// fireReplyAutosave the debounce timer uses, posts that clear before
+	// cleared its saved draft. Flushing it here posts that clear before
 	// /send runs, so /send -- which sends whatever the store still has
 	// saved -- never sends text the box no longer shows (bug fix, Q3: "an
 	// emptied box has to undo its saved draft, or the deleted text still
 	// sends").
-	const clearAttempts = inputs
-		.filter((el) => el.value === '')
-		.map((el) => ({ el, result: fireReplyAutosave(el, replyAutosaveKeyFor(el)) }))
-		.filter(({ result }) => result !== null);
+	const clearAttempts = emptiedReplyBodies(inputs, lastSavedFor).map(({ el, body }) => ({
+		el,
+		result: postDraftRequest(el, body.ticket, body.question, body.text),
+	}));
 
 	const [results, clearResults] = await Promise.all([
 		Promise.all(pending.map(({ el, body }) => postDraftRequest(el, body.ticket, body.question, body.text))),
@@ -734,38 +759,22 @@ async function postSendBatch(ticket) {
 	]);
 
 	const failedClears = clearAttempts.filter((_, i) => !clearResults[i]).map(({ el }) => el);
-	if (failedClears.length > 0) {
+	if (sendBlockedByFailedClears(failedClears.length)) {
 		// A clear that failed leaves its old, deleted text saved as the
 		// ticket's draft: sending now would silently resend text the owner
-		// just emptied the box of (bug fix, r2f8). The box itself stays
-		// empty -- there is no text left to show or keep -- but the send is
-		// held back rather than risk it going out unseen.
+		// just emptied the box of (bug fix). The box itself stays empty --
+		// there is no text left to show or keep -- but the send is held
+		// back rather than risk it going out unseen.
 		console.error('console.js: POST /draft (clear)', failedClears.length, 'box(es) failed to clear');
-		showSendResult(
-			failedClears.length === 1
-				? 'A deleted reply could not be cleared from the server, so sending was canceled. Try again.'
-				: `${failedClears.length} deleted replies could not be cleared from the server, so sending was canceled. Try again.`,
-		);
+		showSendResult(clearFailedResult(failedClears.length));
 		return;
 	}
 
 	// A box whose save just failed but already had an earlier autosave in
-	// the store (lastSavedText non-empty for its key) still sends that
-	// older draft: it is stale, not simply unsent (bug fix, r2f9). Both
-	// kinds keep their current text and are left out of the post-send
-	// clear below.
-	const failed = [];
-	const stale = [];
-	pending.forEach(({ el, body }, i) => {
-		if (results[i]) {
-			return;
-		}
-		if (body.question != null && lastSavedText.get(replyAutosaveKeyFor(el))) {
-			stale.push(el);
-		} else {
-			failed.push(el);
-		}
-	});
+	// the store still sends that older draft: it is stale, not simply unsent
+	// (bug fix). Both kinds keep their current text and are left out of the
+	// post-send clear below.
+	const { failed, stale } = partitionFailedSaves(pending, results, lastSavedFor);
 	const notSent = [...failed, ...stale];
 
 	try {
@@ -783,8 +792,13 @@ async function postSendBatch(ticket) {
 			// input, so this module clears it directly. A box in notSent
 			// keeps its text and (for failed) its conflict note: either
 			// nothing about it reached /send, or what did was an older
-			// version than what the box still shows.
-			const sent = inputs.filter((el) => !notSent.includes(el));
+			// version than what the box still shows. A box whose value has
+			// since changed (sentValues, above) is left alone either way: the
+			// owner kept typing during this function's own awaits, and that
+			// keystroke's own autosave timer is still armed to save it (bug
+			// fix: clearing it here, or resetting its lastSavedText, would
+			// otherwise drop that typing silently).
+			const sent = inputs.filter((el) => !notSent.includes(el) && el.value === sentValues.get(el));
 			clearReplyInputs(sent);
 			// lastSavedText otherwise still holds the text that was just
 			// sent, not the box's new, empty value: a later retype of that
