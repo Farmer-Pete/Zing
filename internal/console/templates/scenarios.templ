@@ -1,6 +1,9 @@
 package templates
 
-import "strconv"
+import (
+	"slices"
+	"strconv"
+)
 
 // scenariosSection renders the gate's scenario cohort table (design section
 // 7, D8, Task 11): id, kind, given, when, then, check, one row per scenario
@@ -11,9 +14,30 @@ import "strconv"
 // scenarios is empty, matching findingsSection's own "no empty table" rule:
 // a ticket with no cohort, or a cohort with none yet, shows no table at all.
 // The last cell holds a sealed scenario's own owner-edit box (#41,
-// ownerEditScenarioForm), empty for an unsealed scenario.
+// ownerEditScenarioForm), empty for an unsealed scenario. When any row is
+// kind host, the section first renders the "Runs on your machine at
+// judging" list of host ids and verbatim checks, in the slice's own order:
+// approving the gate approves those commands (host scenario kind, #137).
 templ scenariosSection(scenarios []ScenarioRow) {
 	if len(scenarios) > 0 {
+		if slices.ContainsFunc(scenarios, func(s ScenarioRow) bool { return s.Kind == "host" }) {
+			<section class="host-checks">
+				<h3>Runs on your machine at judging</h3>
+				<p>Approving this gate approves these commands. Zing runs each one on this machine, outside any sandbox, before the judge runs.</p>
+				<table class="host-checks">
+					<tbody>
+						for _, s := range scenarios {
+							if s.Kind == "host" {
+								<tr>
+									<td class="host-check-id">{ s.ID }</td>
+									<td><pre><code class="host-check">{ s.Check }</code></pre></td>
+								</tr>
+							}
+						}
+					</tbody>
+				</table>
+			</section>
+		}
 		<table class="scenarios">
 			<thead>
 				<tr>

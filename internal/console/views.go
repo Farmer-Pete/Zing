@@ -719,6 +719,7 @@ const (
 	updateMarkerJudgeCoverageFailedPrefix      = "judge coverage failed run "
 	updateMarkerJudgeCoverageDeliveredPrefix   = "judge coverage delivered run "
 	updateMarkerJudgeCheckPrefix               = "judge check "
+	updateMarkerJudgeHostPrefix                = "judge host "
 	updateMarkerPrOpenedPrefix                 = "pr opened "
 	updateMarkerCIWaitingPrefix                = "ci waiting "
 	updateMarkerReviewersReRequestedPrefix     = "reviewers re-requested "
@@ -2052,24 +2053,28 @@ func sha7(sha string) string {
 }
 
 // isJudgeMarker reports whether body carries one of judging.go's own
-// "judge round ", "judge coverage failed/delivered run ", or "judge check "
-// prefixes (design section 5.1, 7.1, 7.2, 7.5-7.7): judgeUpdateLine's own
-// exact-shape parse runs behind, the same two-step prefix-then-parse
-// pattern isReviewMarker and reviewUpdateLine already use.
+// "judge round ", "judge coverage failed/delivered run ", "judge check ", or
+// "judge host " prefixes (design section 5.1, 7.1, 7.2, 7.5-7.7; host
+// scenario kind, #137): judgeUpdateLine's own exact-shape parse runs behind,
+// the same two-step prefix-then-parse pattern isReviewMarker and
+// reviewUpdateLine already use.
 func isJudgeMarker(body string) bool {
 	return strings.HasPrefix(body, updateMarkerJudgeRoundPrefix) ||
 		strings.HasPrefix(body, updateMarkerJudgeCoverageFailedPrefix) ||
 		strings.HasPrefix(body, updateMarkerJudgeCoverageDeliveredPrefix) ||
-		strings.HasPrefix(body, updateMarkerJudgeCheckPrefix)
+		strings.HasPrefix(body, updateMarkerJudgeCheckPrefix) ||
+		strings.HasPrefix(body, updateMarkerJudgeHostPrefix)
 }
 
 // judgeUpdateLine renders one of judging.go's own marker shapes (design
 // section 5.1) as an owner-facing sentence: the five "judge round <n> ..."
 // shapes (started, verdicts, passed, failed, retry; judgeRoundLine),
-// "judge coverage failed/delivered run <rid>" (7.2 step 5), and "judge
-// check <n> <scenario_id> exit <code>" (7.5 step 4; judgeCheckLine). ok is
-// false when body's prefix matched but the rest of its shape did not, the
-// same defensive fallback reviewUpdateLine's own default case uses.
+// "judge coverage failed/delivered run <rid>" (7.2 step 5), "judge check
+// <n> <scenario_id> exit <code>" (7.5 step 4; judgeCheckLine), and "judge
+// host <n> <scenario_id> exit <code> cmd <hash>" (host scenario kind, #137;
+// judgeHostCheckLine). ok is false when body's prefix matched but the rest
+// of its shape did not, the same defensive fallback reviewUpdateLine's own
+// default case uses.
 func judgeUpdateLine(body string) (string, bool) {
 	first, rest, hasRest := strings.Cut(body, "\n")
 	switch {
@@ -2085,6 +2090,8 @@ func judgeUpdateLine(body string) (string, bool) {
 		return "Coverage errors sent back to run " + rid + ".", true
 	case strings.HasPrefix(first, updateMarkerJudgeCheckPrefix):
 		return judgeCheckLine(first)
+	case strings.HasPrefix(first, updateMarkerJudgeHostPrefix):
+		return judgeHostCheckLine(first)
 	case strings.HasPrefix(first, updateMarkerJudgeRoundPrefix):
 		return judgeRoundLine(first, rest, hasRest)
 	default:
@@ -2102,6 +2109,19 @@ func judgeCheckLine(first string) (string, bool) {
 	}
 	scenarioID, code := fields[1], fields[3]
 	return "Check for " + scenarioID + " exited " + code + ".", true
+}
+
+// judgeHostCheckLine renders "judge host <n> <scenario_id> exit <code> cmd
+// <hash>" (host scenario kind, #137) as its own sentence: the round number
+// and the command's hash play no part in it, the same elision judgeCheckLine
+// gives the round number.
+func judgeHostCheckLine(first string) (string, bool) {
+	fields := strings.Fields(strings.TrimPrefix(first, updateMarkerJudgeHostPrefix))
+	if len(fields) != 6 || fields[2] != "exit" || fields[4] != "cmd" {
+		return "", false
+	}
+	scenarioID, code := fields[1], fields[3]
+	return "Host check for " + scenarioID + " exited " + code + ".", true
 }
 
 // judgeRoundLine renders one "judge round <n> started/verdicts/passed/
