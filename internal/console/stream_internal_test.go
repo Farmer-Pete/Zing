@@ -382,10 +382,16 @@ func readUntilFrameContains(t *testing.T, r *bufio.Reader, want string, within t
 		err  error
 	}
 	ch := make(chan result, 1)
+	stop := make(chan struct{})
+	defer close(stop)
 	go func() {
 		for {
 			text, err := readOneFrame(r)
-			ch <- result{text, err}
+			select {
+			case ch <- result{text, err}:
+			case <-stop:
+				return
+			}
 			if err != nil {
 				return
 			}
