@@ -1,8 +1,12 @@
 package templates
 
 import (
+	"context"
+	"io"
 	"strings"
 	"testing"
+
+	"github.com/a-h/templ"
 )
 
 // TestMainScrollsWideContentInsteadOfThePage proves bug fix 17: the owner
@@ -27,6 +31,50 @@ func TestMainScrollsWideContentInsteadOfThePage(t *testing.T) {
 		if !strings.Contains(got, want) {
 			t.Errorf("rendered shell missing the wide-content scroll fix %q", want)
 		}
+	}
+}
+
+// shellTestMarkerHTML renders a nested div of its own, so
+// TestShellRendersSandboxRunDialog's search for .layout's closing tag has to
+// step past a closing div that is not .layout's own to prove the point.
+var shellTestMarkerHTML = templ.ComponentFunc(func(_ context.Context, w io.Writer) error {
+	_, err := io.WriteString(w, `<div class="shell-test-marker"></div>`)
+	return err
+})
+
+// TestShellRendersSandboxRunDialog proves the sandbox-run result dialog
+// (split from #73) renders after .layout's own closing tag, not merely
+// after some closing div nested inside nav, main, or rail, so it sits
+// outside #main and every other region /stream re-renders.
+func TestShellRendersSandboxRunDialog(t *testing.T) {
+	t.Parallel()
+	var sb strings.Builder
+	if err := Shell(emptyBodyHTML, shellTestMarkerHTML, emptyBodyHTML, emptyBodyHTML).Render(t.Context(), &sb); err != nil {
+		t.Fatalf("Shell.Render: %v", err)
+	}
+	got := sb.String()
+	if !strings.Contains(got, `<dialog id="sandbox-run-result"`) {
+		t.Errorf("rendered shell missing the sandbox-run-result dialog; got:\n%s", got)
+	}
+	if !strings.Contains(got, `aria-labelledby="sandbox-run-title"`) {
+		t.Errorf("rendered shell's sandbox-run-result dialog missing aria-labelledby=\"sandbox-run-title\"; got:\n%s", got)
+	}
+	if !strings.Contains(got, `id="sandbox-run-title"`) {
+		t.Errorf("rendered shell's sandbox-run-title heading missing id=\"sandbox-run-title\"; got:\n%s", got)
+	}
+	markerIdx := strings.Index(got, `<div class="shell-test-marker"></div>`)
+	dialogIdx := strings.Index(got, `<dialog id="sandbox-run-result"`)
+	found := markerIdx >= 0 && dialogIdx >= 0
+	if !found {
+		t.Fatalf("rendered shell missing the marker div or the dialog; got:\n%s", got)
+	}
+	// .layout's own closing div is the next "</div>" after the marker's
+	// own closing div, since nav and rail here render no div of their own.
+	afterMarker := markerIdx + len(`<div class="shell-test-marker"></div>`)
+	layoutClose := strings.Index(got[afterMarker:], "</div>")
+	afterLayout := layoutClose >= 0 && dialogIdx > afterMarker+layoutClose
+	if layoutClose < 0 || !afterLayout {
+		t.Errorf("rendered shell's sandbox-run-result dialog is not after .layout's own close; got:\n%s", got)
 	}
 }
 

@@ -574,7 +574,7 @@ func newLiveConsoleServer(st *store.Store, b *bus.Broker, m *machine.Machine, lo
 	const livePushToken = "live-harness-push-token" //nolint:gosec // not a credential: a fixed placeholder no route in this harness checks
 	// tracker and user are left zero (nil, ""): this live harness does not
 	// exercise POST /projects/{id}/pickup (PKG9-PLAN.md D29).
-	handler := console.New(st, b, m, []string{"127.0.0.1"}, addr.Port, logHandler, nil, livePushToken, e2eFloor, sandboxReason, nil, "")
+	handler := console.New(st, b, m, []string{"127.0.0.1"}, addr.Port, logHandler, nil, livePushToken, e2eFloor, sandboxReason, nil, "", nil)
 	srv := httptest.NewUnstartedServer(handler)
 	if err := srv.Listener.Close(); err != nil {
 		return nil, fmt.Errorf("close the placeholder listener: %w", err)

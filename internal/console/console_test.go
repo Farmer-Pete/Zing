@@ -207,7 +207,7 @@ func newTestServerConfig(
 		t.Fatalf("unexpected listener address type %T", ln.Addr())
 	}
 
-	handler := console.New(s, b, m, testBindHosts, addr.Port, log, nil, testPushToken, floor, sandboxReason, tr, user)
+	handler := console.New(s, b, m, testBindHosts, addr.Port, log, nil, testPushToken, floor, sandboxReason, tr, user, nil)
 	srv := httptest.NewUnstartedServer(handler)
 	if err := srv.Listener.Close(); err != nil {
 		t.Fatalf("close the placeholder listener: %v", err)
