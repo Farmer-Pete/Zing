@@ -11,7 +11,12 @@
 // console.js is the only module that touches the DOM, fetch, or the
 // keyboard event object itself; it normalizes those into the plain
 // descriptors these functions take (design section 6.4: "Each takes plain
-// data, not DOM nodes").
+// data, not DOM nodes"). Two exports are this module's state-writing entry
+// points, taking console.js's own state object and mutating its chord and
+// suppressUntil fields in place rather than returning a replacement: the
+// keydown listener's whole body, handleKeyEvent, and runPatchWork's focus
+// step, patchFocus (owner decision on #44, Q7/Q8, so node --test can drive
+// the real wiring, not only pure helpers underneath it).
 
 // CHORD_TIMEOUT_MS bounds how long a leading "g" stays armed waiting for
 // its second key (design section 6.4: "a leading g arms a chord with a
@@ -273,6 +278,81 @@ export function resolveToken(descriptor, inInput, isMac) {
 		return null;
 	}
 	return descriptor.key;
+}
+
+// TOKENS_NEVER_CHORDED are resolved directly, never fed through the "g"
+// chord machine: each already names a complete action on its own, and
+// running it through advanceChord would let a stray "g" arm just before one
+// of these and then misinterpret it as a chord's second key.
+export const TOKENS_NEVER_CHORDED = new Set(['Esc', 'Enter-in-input', 'Cmd-Enter', 'Ctrl-Enter', 'Tab', 'Shift-Tab']);
+
+/**
+ * decideKey is the keydown handler's whole decision, pure of the DOM event
+ * and of running anything (design section 6.4, owner decision on #44): given
+ * the already-resolved token, it says what should happen and what the next
+ * chord state is. The suppression check runs first, before the never-chorded
+ * set or the chord machine (owner decision, Q7/Q5): a key arriving within
+ * PATCH_SUPPRESS_MS of a patch that moved the focused id must not even arm or
+ * complete a chord, since the chord is about to be discarded anyway.
+ *
+ * @param {{chord: {leader: string|null, armedAt: number|null}, suppressUntil: number|null, bindings: {keys: string[], action: string}[]}} state
+ * @param {string|null} token
+ * @param {number} now
+ * @returns {{result: string|'suppressed'|null, chord: {leader: string|null, armedAt: number|null}}}
+ */
+export function decideKey(state, token, now) {
+	if (!token) {
+		return { result: null, chord: state.chord };
+	}
+	if (state.suppressUntil !== null && now < state.suppressUntil) {
+		return { result: 'suppressed', chord: emptyChordState() };
+	}
+	if (TOKENS_NEVER_CHORDED.has(token)) {
+		return { result: resolveAction(token, state.bindings), chord: emptyChordState() };
+	}
+	const { state: nextChord, chord } = advanceChord(state.chord, token, now);
+	if (chord) {
+		return { result: resolveAction(chord, state.bindings), chord: nextChord };
+	}
+	if (nextChord.leader) {
+		return { result: null, chord: nextChord };
+	}
+	return { result: resolveAction(token, state.bindings), chord: nextChord };
+}
+
+/**
+ * handleKeyEvent is the whole former body of console.js's onKeyDown, moved
+ * here so node --test can drive the wiring itself (owner decision on #44,
+ * Q8): event is any plain object shaped like a keydown KeyboardEvent, so a
+ * fake event exercises the same path a real one does. It writes state.chord
+ * back, logs and declines to run anything when decideKey reports
+ * 'suppressed', and otherwise calls run(result, event) and, matching
+ * console.js's old dispatchAction, calls event.preventDefault?.() unless run
+ * returned false.
+ *
+ * @param {{chord: object, suppressUntil: number|null, bindings: object[], isMac: boolean}} state
+ * @param {{key?: string, ctrlKey?: boolean, metaKey?: boolean, altKey?: boolean, shiftKey?: boolean, isComposing?: boolean, keyCode?: number, target?: {tagName?: string, isContentEditable?: boolean}, preventDefault?: Function}} event
+ * @param {number} now
+ * @param {(action: string, event: object) => (boolean|void)} run
+ * @returns {string|null}
+ */
+export function handleKeyEvent(state, event, now, run) {
+	const target = event.target;
+	const inInput = isInputContext({ tagName: target?.tagName, isContentEditable: target?.isContentEditable });
+	const token = resolveToken(event, inInput, state.isMac);
+	const { result, chord } = decideKey(state, token, now);
+	state.chord = chord;
+	if (result === 'suppressed') {
+		console.debug('keyboard.mjs: shortcut ignored, a patch moved focus', { token, msLeft: state.suppressUntil - now });
+		return result;
+	}
+	if (!result) {
+		return result;
+	}
+	if (run(result, event) !== false) {
+		event.preventDefault?.();
+	}
+	return result;
 }
 
 /**
@@ -761,6 +841,54 @@ export function collectPatchWork(descriptors, focusedID) {
 	const currentIDs = descriptors?.focusableIDs ?? [];
 	const previousIDs = descriptors?.previousFocusableIDs ?? [];
 	return { diagramIDs, focusID: reconcileFocus(previousIDs, currentIDs, focusedID) };
+}
+
+// PATCH_SUPPRESS_MS is how long handleKeyEvent ignores every key after a
+// patch changes the focused id (ticket #44: "Ignore shortcuts for 1 s after
+// a patch changed the element under the cursor"), so a /stream patch that
+// moves focus to a neighbouring row cannot have a chip digit, already in
+// flight from the owner's fingers, land on the wrong question.
+export const PATCH_SUPPRESS_MS = 1000;
+
+/**
+ * notePatchFocus is the suppression half of patchFocus (design section 6.4,
+ * owner decision on #44, Q5): it arms state.suppressUntil for
+ * PATCH_SUPPRESS_MS only when the focused id itself changed, not when a
+ * patch re-renders the same focused element under the same id. beforeID
+ * empty (nothing was focused) never arms it either, since there is no
+ * cursor position for a patch to have moved out from under.
+ *
+ * @param {{suppressUntil: number|null}} state
+ * @param {string} beforeID
+ * @param {string} afterID
+ * @param {number} now
+ * @returns {number|null} state.suppressUntil, after this call
+ */
+export function notePatchFocus(state, beforeID, afterID, now) {
+	if (beforeID && afterID !== beforeID) {
+		state.suppressUntil = now + PATCH_SUPPRESS_MS;
+	}
+	return state.suppressUntil;
+}
+
+/**
+ * patchFocus is the focus half of console.js's runPatchWork, moved here so
+ * node --test can drive it with fake patch descriptors (design section 6.4,
+ * owner decision on #44, Q7/Q8). It runs collectPatchWork as before, then
+ * notePatchFocus over the focusedID change that produced, and records
+ * descriptors' focusable ids as the next previousFocusableIDs the way
+ * runPatchWork did inline.
+ *
+ * @param {{focusedID: string, previousFocusableIDs: string[], suppressUntil: number|null}} state
+ * @param {{diagramIDs?: string[], focusableIDs?: string[], previousFocusableIDs?: string[]}} descriptors
+ * @param {number} now
+ * @returns {{diagramIDs: string[], focusID: string}}
+ */
+export function patchFocus(state, descriptors, now) {
+	const { diagramIDs, focusID } = collectPatchWork(descriptors, state.focusedID);
+	notePatchFocus(state, state.focusedID, focusID, now);
+	state.previousFocusableIDs = descriptors?.focusableIDs ?? [];
+	return { diagramIDs, focusID };
 }
 
 /**
