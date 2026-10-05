@@ -1655,6 +1655,7 @@ func TestRunJob_EndLogNamesEvidenceNotContents(t *testing.T) {
 func TestRetryCapBudget_LogsBranchAtInfo(t *testing.T) {
 	s := newRunJobTestStore(t)
 	ticketID := seedRunJobTicket(t, s)
+	seedAgentSeconds(t, s, ticketID, 10)
 	ticket := getRunJobTicket(t, s, ticketID)
 
 	var logBuf bytes.Buffer
@@ -1662,12 +1663,20 @@ func TestRetryCapBudget_LogsBranchAtInfo(t *testing.T) {
 	slog.SetDefault(slog.New(slog.NewJSONHandler(&logBuf, &slog.HandlerOptions{Level: slog.LevelInfo})))
 	t.Cleanup(func() { slog.SetDefault(prevDefault) })
 
-	marker := buildingHandler{}.retryMarkerCommit
-	if _, err := retryCapBudget(t.Context(), ticket, Deps{Store: s, Budget: time.Hour}, nil, marker); err != nil {
+	stillOverCommit, err := retryCapBudget(t.Context(), ticket, Deps{Store: s, Budget: 10 * time.Second}, nil)
+	if err != nil {
+		t.Fatalf("retryCapBudget (still over budget): %v", err)
+	}
+	if stillOverCommit.Escalation == nil || stillOverCommit.Escalation.Payload.Code != string(response.EscalationCodeWallClock) {
+		t.Errorf("still-over commit escalation = %+v, want wall_clock", stillOverCommit.Escalation)
+	}
+
+	resumesCommit, err := retryCapBudget(t.Context(), ticket, Deps{Store: s, Budget: 11 * time.Second}, nil)
+	if err != nil {
 		t.Fatalf("retryCapBudget (budget has room): %v", err)
 	}
-	if _, err := retryCapBudget(t.Context(), ticket, Deps{Store: s, Budget: 0}, nil, marker); err != nil {
-		t.Fatalf("retryCapBudget (still over budget): %v", err)
+	if resumesCommit.Escalation != nil {
+		t.Errorf("resumes commit escalation = %+v, want nil", resumesCommit.Escalation)
 	}
 
 	recs := jsonLogRecords(t, &logBuf)
@@ -1675,30 +1684,30 @@ func TestRetryCapBudget_LogsBranchAtInfo(t *testing.T) {
 	if got := logRecordInt64(t, resumes, "ticket_id"); got != ticket.ID {
 		t.Errorf("resumes ticket_id = %d, want %d", got, ticket.ID)
 	}
-	if got := logRecordInt64(t, resumes, "agent_seconds"); got != 0 {
-		t.Errorf("resumes agent_seconds = %d, want 0", got)
+	if got := logRecordInt64(t, resumes, "agent_seconds"); got != 10 {
+		t.Errorf("resumes agent_seconds = %d, want 10", got)
 	}
-	if got := logRecordInt64(t, resumes, "cap_seconds"); got != 3600 {
-		t.Errorf("resumes cap_seconds = %d, want 3600", got)
+	if got := logRecordInt64(t, resumes, "cap_seconds"); got != 11 {
+		t.Errorf("resumes cap_seconds = %d, want 11", got)
 	}
 
 	stillOver := findLogRecord(t, recs, "cap_budget retry still over budget")
 	if got := logRecordInt64(t, stillOver, "ticket_id"); got != ticket.ID {
 		t.Errorf("still-over ticket_id = %d, want %d", got, ticket.ID)
 	}
-	if got := logRecordInt64(t, stillOver, "agent_seconds"); got != 0 {
-		t.Errorf("still-over agent_seconds = %d, want 0", got)
+	if got := logRecordInt64(t, stillOver, "agent_seconds"); got != 10 {
+		t.Errorf("still-over agent_seconds = %d, want 10", got)
 	}
-	if got := logRecordInt64(t, stillOver, "cap_seconds"); got != 0 {
-		t.Errorf("still-over cap_seconds = %d, want 0", got)
+	if got := logRecordInt64(t, stillOver, "cap_seconds"); got != 10 {
+		t.Errorf("still-over cap_seconds = %d, want 10", got)
 	}
 
 	logBuf.Reset()
 	slog.SetDefault(slog.New(slog.NewJSONHandler(&logBuf, &slog.HandlerOptions{Level: slog.LevelWarn})))
-	if _, err := retryCapBudget(t.Context(), ticket, Deps{Store: s, Budget: time.Hour}, nil, marker); err != nil {
+	if _, err := retryCapBudget(t.Context(), ticket, Deps{Store: s, Budget: 11 * time.Second}, nil); err != nil {
 		t.Fatalf("retryCapBudget (budget has room, warn level): %v", err)
 	}
-	if _, err := retryCapBudget(t.Context(), ticket, Deps{Store: s, Budget: 0}, nil, marker); err != nil {
+	if _, err := retryCapBudget(t.Context(), ticket, Deps{Store: s, Budget: 10 * time.Second}, nil); err != nil {
 		t.Fatalf("retryCapBudget (still over budget, warn level): %v", err)
 	}
 	if logged := logBuf.String(); strings.Contains(logged, "cap_budget retry") {

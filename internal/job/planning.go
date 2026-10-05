@@ -1861,7 +1861,7 @@ func (h planningHandler) enterFromEscalationRound(ctx context.Context, t store.T
 	case origin == response.EscalationOriginCapBudget:
 		// Both a and b retry once the budget has room, and re-escalate
 		// wall_clock while it does not (design section 6.7).
-		commit, err = retryCapBudget(ctx, t, d, resolveIDs, buildingHandler{}.retryMarkerCommit)
+		commit, err = retryCapBudget(ctx, t, d, resolveIDs)
 
 	default:
 		return store.HandlerCommit{}, fmt.Errorf("job: planning: escalation %d: unrecognized origin %q", escID, payload.Origin)
@@ -1902,13 +1902,10 @@ func recapBudgetEscalation(t store.Ticket, d Deps, resolveIDs []int64) store.Han
 // runJob's own budget check makes, it re-escalates wall_clock
 // (recapBudgetEscalation). Once the owner has raised
 // budget.agent_minutes_per_ticket and restarted serve, it resolves the
-// round and writes the "retry requested" marker instead, through marker
-// (so each caller's own state keeps its own marker commit: shipping's
-// shipRetryMarkerCommit also clears its poll; every other state's
-// buildingHandler.retryMarkerCommit), so the next tick retakes the refused
-// call. Both branches log at INFO, so settings.log_level warn or error
-// drops them.
-func retryCapBudget(ctx context.Context, t store.Ticket, d Deps, resolveIDs []int64, marker func(store.Ticket, Deps, []int64) store.HandlerCommit) (store.HandlerCommit, error) {
+// round and writes the "retry requested" marker instead, so the next tick
+// retakes the refused call; a shipping ticket also clears its poll. Both
+// branches log at INFO, so settings.log_level warn or error drops them.
+func retryCapBudget(ctx context.Context, t store.Ticket, d Deps, resolveIDs []int64) (store.HandlerCommit, error) {
 	agentSeconds, err := d.Store.AgentSecondsForTicket(ctx, t.ID)
 	if err != nil {
 		return store.HandlerCommit{}, fmt.Errorf("job: cap_budget retry: agent seconds for ticket %d: %w", t.ID, err)
@@ -1919,7 +1916,10 @@ func retryCapBudget(ctx context.Context, t store.Ticket, d Deps, resolveIDs []in
 		return recapBudgetEscalation(t, d, resolveIDs), nil
 	}
 	slog.Info("cap_budget retry resumes", "ticket_id", t.ID, "state", t.State, "agent_seconds", agentSeconds, "cap_seconds", capSeconds)
-	return marker(t, d, resolveIDs), nil
+	if t.State == stateShipping {
+		return shipRetryMarkerCommit(t, d, resolveIDs), nil
+	}
+	return buildingHandler{}.retryMarkerCommit(t, d, resolveIDs), nil
 }
 
 // outstandingFloorFindings reads the current cohort's planreview artifact
