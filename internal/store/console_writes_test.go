@@ -361,7 +361,10 @@ func TestSaveDraft_Conflicts(t *testing.T) {
 			"missing item",
 		},
 		{"ambiguous mode", DraftInput{TicketID: ticketA, QuestionID: &qID, Option: &opt, Text: "also this"}, "ambiguous draft mode"},
-		{"empty text", DraftInput{TicketID: ticketA, QuestionID: &qID}, "empty text"},
+		// Empty text against a question clears its reply draft instead of
+		// conflicting (TestSaveDraft_EmptyTextClearsQuestionReplyDraft); only a
+		// thread reply (no question) keeps the "empty text" conflict.
+		{"empty text", DraftInput{TicketID: ticketA}, "empty text"},
 		{"question not found", DraftInput{TicketID: ticketA, QuestionID: new(int64(999999)), Option: &opt}, "question not found"},
 	}
 	for _, tc := range tests {
@@ -422,6 +425,102 @@ func TestSaveDraft_AnsweredQuestionConflictsOnceWaitCleared(t *testing.T) {
 	}
 	if got := conflictReason(t, err); got != testConflictQuestionClosed {
 		t.Errorf("conflict reason = %q, want %q", got, testConflictQuestionClosed)
+	}
+}
+
+// TestSaveDraft_EmptyTextClearsQuestionReplyDraft proves the autosave
+// contract (design section 6.7): an empty Text against a question deletes
+// that question's existing draft reply and reports Cleared=true, rather
+// than the "empty text" conflict a thread reply still gets. A second empty
+// save, with no draft left to clear, reports Cleared=false with no error.
+func TestSaveDraft_EmptyTextClearsQuestionReplyDraft(t *testing.T) {
+	t.Parallel()
+	s := newTestStore(t)
+	_, ticketID := seedQueuedTicket(t, s, "1")
+	qID := insertQuestionOption(t, s, ticketID, "Q1")
+
+	saved, err := s.SaveDraft(t.Context(), DraftInput{TicketID: ticketID, QuestionID: &qID, Text: testReplyWhyThough})
+	if err != nil {
+		t.Fatalf("SaveDraft (text): %v", err)
+	}
+
+	cleared, err := s.SaveDraft(t.Context(), DraftInput{TicketID: ticketID, QuestionID: &qID, Text: ""})
+	if err != nil {
+		t.Fatalf("SaveDraft (empty text): %v", err)
+	}
+	if !cleared.Cleared {
+		t.Error("SaveDraft (empty text): Cleared = false, want true")
+	}
+	if cleared.MessageID != saved.MessageID {
+		t.Errorf("SaveDraft (empty text): MessageID = %d, want the deleted row's id %d", cleared.MessageID, saved.MessageID)
+	}
+
+	messages, err := s.ListMessages(t.Context(), ticketID)
+	if err != nil {
+		t.Fatalf("ListMessages: %v", err)
+	}
+	for i := range messages {
+		m := &messages[i]
+		if m.ID == saved.MessageID {
+			t.Fatalf("draft reply %d still exists after an empty-text save", saved.MessageID)
+		}
+	}
+
+	// A second empty save finds no draft left to clear: no error, Cleared=false.
+	again, err := s.SaveDraft(t.Context(), DraftInput{TicketID: ticketID, QuestionID: &qID, Text: ""})
+	if err != nil {
+		t.Fatalf("SaveDraft (second empty text): %v", err)
+	}
+	if again.Cleared {
+		t.Error("SaveDraft (second empty text): Cleared = true, want false (nothing left to clear)")
+	}
+	if again.MessageID != 0 {
+		t.Errorf("SaveDraft (second empty text): MessageID = %d, want 0 (nothing was deleted)", again.MessageID)
+	}
+}
+
+// TestSaveDraft_EmptyTextAgainstClosedQuestionConflicts proves the relaxed
+// n==0 guard still runs openQuestionForTicketTx before it ever reaches
+// clearReplyDraftTx: an empty-text autosave against a question that has
+// already closed is still the ordinary "question closed" conflict, not a
+// silent delete of whatever draft reply that question still has. The
+// fixture saves a text draft before closing the question, and asserts that
+// draft row survives the conflict, proving the conflict path returned
+// before ever reaching clearReplyDraftTx.
+func TestSaveDraft_EmptyTextAgainstClosedQuestionConflicts(t *testing.T) {
+	t.Parallel()
+	s := newTestStore(t)
+	_, ticketID := seedQueuedTicket(t, s, "1")
+	qID := insertQuestionOption(t, s, ticketID, "Q1")
+
+	saved, err := s.SaveDraft(t.Context(), DraftInput{TicketID: ticketID, QuestionID: &qID, Text: testReplyWhyThough})
+	if err != nil {
+		t.Fatalf("SaveDraft (text): %v", err)
+	}
+
+	closeQuestion(t, s, qID, questionStateResolved)
+
+	_, err = s.SaveDraft(t.Context(), DraftInput{TicketID: ticketID, QuestionID: &qID, Text: ""})
+	if err == nil {
+		t.Fatal("SaveDraft (empty text, closed question): err = nil, want a ConflictError")
+	}
+	if got := conflictReason(t, err); got != testConflictQuestionClosed {
+		t.Errorf("conflict reason = %q, want %q", got, testConflictQuestionClosed)
+	}
+
+	messages, err := s.ListMessages(t.Context(), ticketID)
+	if err != nil {
+		t.Fatalf("ListMessages: %v", err)
+	}
+	found := false
+	for i := range messages {
+		if messages[i].ID == saved.MessageID {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("draft reply %d no longer exists after the closed-question conflict: clearReplyDraftTx ran despite the conflict", saved.MessageID)
 	}
 }
 

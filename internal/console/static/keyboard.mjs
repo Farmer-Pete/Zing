@@ -457,6 +457,255 @@ export function unsavedReplyBody(el) {
 }
 
 /**
+ * unsavedReplyBodies maps unsavedReplyBody over every given reply input,
+ * keeping only the ones that hold unsaved text (bug fix, Q11: the send chord
+ * saved only document.activeElement, through unsavedReplyBody, so a reply
+ * box that did not have focus never reached POST /draft and its text was
+ * silently left behind even though the send reported success). console.js's
+ * postSendBatch calls this over every "#main .reply-input", not just the
+ * focused one, so every box with text is saved before /send runs. Each
+ * result keeps el beside body so the caller can report or keep the text for
+ * whichever box a save fails against.
+ *
+ * @param {Iterable<{dataset?: {draftTicket?: string, draftQuestion?: string}, value?: unknown}>|null|undefined} inputs
+ * @returns {{el: object, body: {ticket: number, question: number|null, text: string}}[]}
+ */
+export function unsavedReplyBodies(inputs) {
+	const out = [];
+	for (const el of inputs ?? []) {
+		const body = unsavedReplyBody(el);
+		if (body) {
+			out.push({ el, body });
+		}
+	}
+	return out;
+}
+
+/**
+ * sendResultWithUnsent appends a sentence naming any reply box the send left
+ * unsent, and any box whose failed save still sent an earlier autosaved
+ * version, to showSendResult's text (bug fix, Q11: a save failure used to be
+ * silent, with the send still reporting plain success). text is returned
+ * unchanged when both unsent and stale are 0. Any trailing space on text is
+ * trimmed before appending, so the joined sentence never ends up with two
+ * spaces between.
+ *
+ * stale counts a failed-to-save box differently from unsent (bug fix): when
+ * an earlier autosave of the same box already reached the store, /send still
+ * sends that older draft, so "not sent" would be wrong -- something did go
+ * out, just not the latest edit.
+ *
+ * @param {string} text - the base result line, e.g. "Sent 1 message."
+ * @param {number} unsent - how many reply boxes failed to save, with nothing
+ *   earlier ever saved for them
+ * @param {number} [stale] - how many failed-to-save boxes still sent an
+ *   earlier autosaved version
+ * @returns {string}
+ */
+export function sendResultWithUnsent(text, unsent, stale = 0) {
+	if (unsent === 0 && stale === 0) {
+		return text;
+	}
+	let base = text.trimEnd();
+	if (unsent === 1) {
+		base = `${base} 1 reply not sent; its text is still in its box.`;
+	} else if (unsent > 1) {
+		base = `${base} ${unsent} replies not sent; their text is still in their boxes.`;
+	}
+	if (stale === 1) {
+		base = `${base} 1 reply sent an earlier version; its newest edit may be missing.`;
+	} else if (stale > 1) {
+		base = `${base} ${stale} replies sent an earlier version; their newest edits may be missing.`;
+	}
+	return base;
+}
+
+// AUTOSAVE_DEBOUNCE_MS is how long installReplyAutosave (console.js) waits
+// after the owner's last keystroke in a reply box before posting it as a
+// draft (design: "A Reply box autosaves one second after the owner stops
+// typing"). 1000ms is long enough that ordinary typing never fires a save
+// per keystroke, short enough that a blur, a morph, or a closed tab shortly
+// after typing stops rarely beats it.
+export const AUTOSAVE_DEBOUNCE_MS = 1000;
+
+/**
+ * replyAutosaveBody builds POST /draft's JSON body for installReplyAutosave's
+ * debounced save (design: "Autosave the reply box as a draft, debounced on
+ * input"), given the box and the text last posted for it. Unlike
+ * unsavedReplyBody, an empty value still yields a body -- with text '' --
+ * so emptying a box that had a saved draft clears it (SaveDraft's new
+ * "draft cleared" path) instead of leaving a stale draft the box no longer
+ * shows. Null when el is not a question-targeted reply box (both
+ * data-draft-ticket and data-draft-question are required: autosave only
+ * covers the per-question reply box this ticket adds it to), el.value is
+ * not a string, or el.value equals lastSavedText (nothing changed since the
+ * last save, so there is nothing to post).
+ *
+ * @param {{dataset?: {draftTicket?: string, draftQuestion?: string}, value?: unknown} | null | undefined} el
+ * @param {string} lastSavedText
+ * @returns {{ticket: number, question: number, text: string} | null}
+ */
+export function replyAutosaveBody(el, lastSavedText) {
+	const ticket = el?.dataset?.draftTicket;
+	const question = el?.dataset?.draftQuestion;
+	const isQuestionReplyBox = Boolean(ticket && question) && typeof el?.value === 'string';
+	if (!isQuestionReplyBox) {
+		return null;
+	}
+	const unchanged = el.value === lastSavedText;
+	if (unchanged) {
+		return null;
+	}
+	return { ticket: Number(ticket), question: Number(question), text: el.value };
+}
+
+/**
+ * emptiedReplyBodies finds every input the owner emptied since its last save
+ * (console.js's postSendBatch, bug fix: canceling a pending autosave timer
+ * outright, rather than flushing it, left an emptied box's old, already-saved
+ * text as the ticket's draft, and /send still sent it). lastSavedFor(el)
+ * supplies the text last known saved for el, the same lookup
+ * installReplyAutosave's own fireReplyAutosave uses, so a box nobody has
+ * typed in since page load is not reported as needing a flush.
+ *
+ * @param {Iterable<{dataset?: {draftTicket?: string, draftQuestion?: string}, value?: unknown}>|null|undefined} inputs
+ * @param {(el: object) => string} lastSavedFor
+ * @returns {{el: object, body: {ticket: number, question: number, text: string}}[]}
+ */
+export function emptiedReplyBodies(inputs, lastSavedFor) {
+	const out = [];
+	for (const el of inputs ?? []) {
+		if (el?.value !== '') {
+			continue;
+		}
+		const body = replyAutosaveBody(el, lastSavedFor(el));
+		if (body) {
+			out.push({ el, body });
+		}
+	}
+	return out;
+}
+
+/**
+ * clearFailedResult is showSendResult's text when postSendBatch holds /send
+ * back because at least one emptied box's clear failed to save (bug fix: a
+ * clear that failed leaves its old, deleted text saved as the ticket's
+ * draft, and sending anyway would silently resend text the owner just
+ * emptied the box of), naming how many emptied boxes' clears failed.
+ *
+ * @param {number} count
+ * @returns {string}
+ */
+export function clearFailedResult(count) {
+	return count === 1
+		? 'A deleted reply could not be cleared from the server, so sending was canceled. Try again.'
+		: `${count} deleted replies could not be cleared from the server, so sending was canceled. Try again.`;
+}
+
+/**
+ * partitionFailedSaves splits the reply boxes whose save failed at send time
+ * into failed (nothing of theirs ever reached the store) and stale (an
+ * earlier autosave already did, so /send still sends that older draft) (bug
+ * fix: reporting a stale box as plain "not sent" told the owner nothing went
+ * out when an earlier edit actually had). lastSavedFor(el) must use the same
+ * fallback to el.defaultValue that fireReplyAutosave does, so a box whose
+ * only save ever was the server-rendered draft (never autosaved this page
+ * session) is still counted as stale rather than failed.
+ *
+ * A box whose earlier saved text already equals what this failed save was
+ * trying to post is left out of both lists (bug fix): that save's own
+ * failure changed nothing, since the exact text it would have written is
+ * already the one /send is about to read. Counting it as stale would wrongly
+ * warn that its "newest edit may be missing" when no edit was lost, and
+ * postSendBatch would then also leave its text sitting in the box after a
+ * send that in fact carried it.
+ *
+ * @param {{el: object, body: {question: number|null, text: string}}[]} pending
+ * @param {boolean[]} results - postDraftRequest's outcome, by the same index as pending
+ * @param {(el: object) => string} lastSavedFor
+ * @returns {{failed: object[], stale: object[]}}
+ */
+export function partitionFailedSaves(pending, results, lastSavedFor) {
+	const failed = [];
+	const stale = [];
+	pending.forEach(({ el, body }, i) => {
+		if (results[i]) {
+			return;
+		}
+		const saved = body.question != null ? lastSavedFor(el) : '';
+		if (saved === body.text) {
+			return;
+		}
+		if (saved) {
+			stale.push(el);
+		} else {
+			failed.push(el);
+		}
+	});
+	return { failed, stale };
+}
+
+/**
+ * replyFocusSnapshot captures a reply box's identity, text, and selection at
+ * the moment of a focusin, input, or select event (design: "Snapshot
+ * document.activeElement ... and its selection before patch work"), so
+ * console.js's restoreReplyFocus can give it back after a /stream patch
+ * blurs or replaces the node. ticket and question are kept as the dataset's
+ * own strings, not coerced to numbers, since they are only ever used again
+ * to rebuild the same CSS attribute selector that found this box, never sent
+ * over the wire. Null when el is not a question-targeted reply box.
+ *
+ * @param {{dataset?: {draftTicket?: string, draftQuestion?: string}, value?: unknown, selectionStart?: number, selectionEnd?: number} | null | undefined} el
+ * @returns {{ticket: string, question: string, value: string, start: number, end: number} | null}
+ */
+export function replyFocusSnapshot(el) {
+	const ticket = el?.dataset?.draftTicket;
+	const question = el?.dataset?.draftQuestion;
+	if (!ticket || !question) {
+		return null;
+	}
+	return {
+		ticket,
+		question,
+		value: typeof el.value === 'string' ? el.value : '',
+		start: el.selectionStart ?? 0,
+		end: el.selectionEnd ?? 0,
+	};
+}
+
+/**
+ * restoreFocusDecision decides whether runPatchWork should give focus back
+ * to the reply box named by snapshot, and whether to refill its text first
+ * (design: "If the morph blurred it, restore focus and selection in
+ * runPatchWork"). active.isBody tells apart a patch-caused blur -- the morph
+ * leaves nothing focused, so document.activeElement falls back to
+ * document.body -- from a deliberate one (Esc, a click on some other real
+ * element), which must never be undone by an unrelated later patch. focus is
+ * true only when snapshot is non-null, active.isBody is true, and target
+ * (the box for the same ticket and question, or null if the patch rendered
+ * none) is non-null.
+ *
+ * restoreValue is true whenever focus is true and target's value differs
+ * from snapshot's at all, not only when target came up empty (bug fix: the
+ * replacement node's value comes from the server-rendered draftReply, which
+ * is only ever as fresh as the last autosave -- up to AUTOSAVE_DEBOUNCE_MS
+ * behind, or more while a save is in flight. snapshot.value is refreshed on
+ * every input event, so it is always the newest text regardless of what the
+ * replacement shows; trusting a non-empty-but-stale replacement instead
+ * silently lost whatever the owner typed since the last save).
+ *
+ * @param {{ticket: string, question: string, value: string, start: number, end: number} | null} snapshot
+ * @param {{isBody: boolean}} active
+ * @param {{value: string} | null} target
+ * @returns {{focus: boolean, restoreValue: boolean}}
+ */
+export function restoreFocusDecision(snapshot, active, target) {
+	const focus = Boolean(snapshot) && Boolean(active?.isBody) && target != null;
+	const staleReplacement = focus && target.value !== snapshot.value;
+	return { focus, restoreValue: staleReplacement };
+}
+
+/**
  * buildChipDraftBody builds POST /draft's JSON body for an option chip's
  * activation (design section 6.6, 6.7, code review fix 1): the chip's
  * data-draft-ticket, data-draft-question, and data-option, read off its

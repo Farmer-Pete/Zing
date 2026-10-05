@@ -67,6 +67,87 @@ func TestDraft_SucceedsThenConflictsOnAClosedQuestion(t *testing.T) {
 	}
 }
 
+// TestDraft_EmptyTextClearsTheReplyDraft proves POST /draft's autosave
+// contract (design section 6.7): a text draft against a question saves as
+// 204, and a follow-up POST with text "" is also 204 and removes that
+// question's draft reply row, rather than the 409 an empty text used to
+// return.
+func TestDraft_EmptyTextClearsTheReplyDraft(t *testing.T) {
+	t.Parallel()
+	s := newConsoleTestStore(t)
+	ticketID := seedTicket(t, s, "fake#1", "Add a hello endpoint")
+	questionID := seedOpenQuestion(t, s, ticketID)
+
+	srv, _ := newMutationTestServer(t, s, bus.New(), newTestLogHandler(t))
+
+	body := fmt.Sprintf(`{"ticket":%d,"question":%d,"text":"note"}`, ticketID, questionID)
+	resp := doRequest(t, mutationRequest(t, srv, "/draft", body))
+	_ = resp.Body.Close()
+	if resp.StatusCode != http.StatusNoContent {
+		t.Fatalf("POST /draft (text) status = %d, want 204", resp.StatusCode)
+	}
+
+	messagesAfterSave, err := s.ListMessages(t.Context(), ticketID)
+	if err != nil {
+		t.Fatalf("ListMessages: %v", err)
+	}
+	foundDraft := false
+	for i := range messagesAfterSave {
+		m := &messagesAfterSave[i]
+		if m.Type == "reply" && m.ParentID != nil && *m.ParentID == questionID {
+			foundDraft = true
+			break
+		}
+	}
+	if !foundDraft {
+		t.Fatalf("draft reply not found after POST /draft (text): the clear-side assertion below would pass vacuously")
+	}
+
+	emptyBody := fmt.Sprintf(`{"ticket":%d,"question":%d,"text":""}`, ticketID, questionID)
+	resp2 := doRequest(t, mutationRequest(t, srv, "/draft", emptyBody))
+	_ = resp2.Body.Close()
+	if resp2.StatusCode != http.StatusNoContent {
+		t.Fatalf("POST /draft (empty text) status = %d, want 204", resp2.StatusCode)
+	}
+
+	messages, err := s.ListMessages(t.Context(), ticketID)
+	if err != nil {
+		t.Fatalf("ListMessages: %v", err)
+	}
+	for i := range messages {
+		m := &messages[i]
+		if m.Type == "reply" && m.ParentID != nil && *m.ParentID == questionID {
+			t.Fatalf("draft reply still present after an empty-text POST /draft: %+v", m)
+		}
+	}
+}
+
+// TestDraft_OmittedTextAgainstAQuestionIsMalformed proves POST /draft tells
+// an omitted "text" key apart from an explicit "text":"" (review fix): a
+// question draft naming none of option, item, or text names no mode at all,
+// so it is 400, while the explicit-empty-string case
+// (TestDraft_EmptyTextClearsTheReplyDraft) must keep returning 204 and
+// clearing the draft.
+func TestDraft_OmittedTextAgainstAQuestionIsMalformed(t *testing.T) {
+	t.Parallel()
+	s := newConsoleTestStore(t)
+	ticketID := seedTicket(t, s, "fake#1", "Add a hello endpoint")
+	questionID := seedOpenQuestion(t, s, ticketID)
+
+	srv, _ := newMutationTestServer(t, s, bus.New(), newTestLogHandler(t))
+
+	body := fmt.Sprintf(`{"ticket":%d,"question":%d}`, ticketID, questionID)
+	resp := doRequest(t, mutationRequest(t, srv, "/draft", body))
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusBadRequest {
+		respBody, readErr := io.ReadAll(resp.Body)
+		if readErr != nil {
+			t.Fatalf("status = %d, want 400 (read body: %v)", resp.StatusCode, readErr)
+		}
+		t.Fatalf("status = %d, want 400 (body: %s)", resp.StatusCode, respBody)
+	}
+}
+
 // TestDraft_RejectsMalformedAndOversizedBodies proves the transport-layer
 // checks POST /draft runs before SaveDraft ever sees the body (design
 // section 6.7): malformed JSON and an unknown field are 400, and a body

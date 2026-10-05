@@ -64,14 +64,17 @@ type DraftInput struct {
 	Text       string
 }
 
-// DraftResult reports the draft row SaveDraft wrote or updated. Replaced is
-// true only when this call changed an existing draft's stored value; a
-// fresh draft, and a repeat of the exact same option or item value, both
-// report false (design section 6.7: "idempotent on a repeat with the same
-// value").
+// DraftResult reports the draft row SaveDraft wrote, updated, or deleted.
+// Replaced is true only when this call changed an existing draft's stored
+// value; a fresh draft, and a repeat of the exact same option or item value,
+// both report false (design section 6.7: "idempotent on a repeat with the
+// same value"). Cleared is true only when an empty Text against a question
+// deleted an existing draft reply row; MessageID is then that deleted row's
+// id, or 0 when an empty text found no draft to clear.
 type DraftResult struct {
 	MessageID int64
 	Replaced  bool
+	Cleared   bool
 }
 
 // BatchResult reports what SendBatch did: how many drafts it flipped to
@@ -124,7 +127,7 @@ func (s *Store) SaveDraft(ctx context.Context, in DraftInput) (result DraftResul
 	switch n := draftModeCount(in); {
 	case n > 1:
 		return DraftResult{}, conflict("ambiguous draft mode")
-	case n == 0:
+	case n == 0 && in.QuestionID == nil:
 		return DraftResult{}, conflict("empty text")
 	}
 	if in.QuestionID == nil && (in.Option != nil || in.Item != nil) {
@@ -168,6 +171,12 @@ func (s *Store) SaveDraft(ctx context.Context, in DraftInput) (result DraftResul
 				return DraftResult{}, conflict("a review item takes accept, drop, or discuss")
 			}
 			result, err = s.upsertItemDraftTx(ctx, tx, in.TicketID, *in.QuestionID, *in.Item)
+		case in.Text == "":
+			// Option and Item are already both nil in this branch (the two
+			// cases above), so an empty Text here is specifically "clear this
+			// question's reply draft", not the ambiguous or empty-mode
+			// conflict draftModeCount already ruled out above.
+			result, err = clearReplyDraftTx(ctx, tx, in.TicketID, *in.QuestionID)
 		default:
 			result, err = s.insertReplyDraftTx(ctx, tx, in.TicketID, in.QuestionID, in.Text)
 		}
@@ -184,11 +193,19 @@ func (s *Store) SaveDraft(ctx context.Context, in DraftInput) (result DraftResul
 
 // logSaveDraftOutcome logs SaveDraft's major branches with their ids
 // (CLAUDE.md: "log every major branch with the ids"): a successful save
-// reports the row it wrote or updated, and a named conflict reports its
-// reason. An unexpected (non-conflict) error is left to the caller: the
-// console handler already logs it (internal/console/answer.go), so logging
-// it again here would violate "log or return, never both". question_id logs
-// as 0 for a thread reply, which carries no question.
+// reports the row it wrote or updated, an empty text against a question
+// reports whether it cleared an existing draft reply, and a named conflict
+// reports its reason. An unexpected (non-conflict) error is left to the
+// caller: the console handler already logs it (internal/console/answer.go),
+// so logging it again here would violate "log or return, never both".
+// question_id logs as 0 for a thread reply, which carries no question.
+//
+// "draft cleared" is logged only when result.Cleared is true, so a reader
+// searching the log for that message can count it as a deletion that
+// actually happened: autosave makes "clear a box that was never saved"
+// common (clearReplyDraftTx finds no row), and that outcome gets its own
+// "draft clear: nothing to clear" line instead of reusing the same message
+// with a misleading "cleared"=false.
 func logSaveDraftOutcome(ctx context.Context, in DraftInput, result DraftResult, err error) {
 	var questionID int64
 	if in.QuestionID != nil {
@@ -198,6 +215,16 @@ func logSaveDraftOutcome(ctx context.Context, in DraftInput, result DraftResult,
 		if ce, ok := errors.AsType[*ConflictError](err); ok {
 			slog.InfoContext(ctx, "save draft conflict",
 				"ticket_id", in.TicketID, "question_id", questionID, "reason", ce.Reason)
+		}
+		return
+	}
+	clearsReplyDraft := in.QuestionID != nil && in.Text == "" && in.Option == nil && in.Item == nil
+	if clearsReplyDraft {
+		if result.Cleared {
+			slog.InfoContext(ctx, "draft cleared",
+				"ticket_id", in.TicketID, "question_id", questionID, "message_id", result.MessageID, "cleared", result.Cleared)
+		} else {
+			slog.InfoContext(ctx, "draft clear: nothing to clear", "ticket_id", in.TicketID, "question_id", questionID)
 		}
 		return
 	}
@@ -581,6 +608,25 @@ func (s *Store) insertReplyDraftTx(ctx context.Context, tx *sql.Tx, ticketID int
 		return DraftResult{}, fmt.Errorf("save draft: %w", err)
 	}
 	return DraftResult{MessageID: id}, nil
+}
+
+// clearReplyDraftTx deletes questionID's existing draft reply row, if any
+// (design section 6.7's autosave contract): an emptied reply box has to undo
+// whatever text it last autosaved, or the deleted text would still send.
+// Cleared reports whether a row was found and deleted; MessageID is that
+// row's id, or 0 when there was nothing to clear.
+func clearReplyDraftTx(ctx context.Context, tx *sql.Tx, ticketID, questionID int64) (DraftResult, error) {
+	id, _, found, err := findDraftReplyTx(ctx, tx, ticketID, &questionID)
+	if err != nil {
+		return DraftResult{}, err
+	}
+	if !found {
+		return DraftResult{}, nil
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM messages WHERE id = ?`, id); err != nil {
+		return DraftResult{}, fmt.Errorf("save draft: clear reply %d: %w", id, err)
+	}
+	return DraftResult{MessageID: id, Cleared: true}, nil
 }
 
 // kindForWaitReason maps a ticket.waiting_on value back to the question

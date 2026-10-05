@@ -30,6 +30,15 @@ import {
 	buildChipDraftBody,
 	buildItemDraftBody,
 	unsavedReplyBody,
+	unsavedReplyBodies,
+	sendResultWithUnsent,
+	AUTOSAVE_DEBOUNCE_MS,
+	replyAutosaveBody,
+	emptiedReplyBodies,
+	clearFailedResult,
+	partitionFailedSaves,
+	replyFocusSnapshot,
+	restoreFocusDecision,
 	collectPatchWork,
 	describeAction,
 	nextPendingNav,
@@ -89,6 +98,12 @@ const state = {
 	// once it is.
 	streamConnected: false,
 	pendingNav: null,
+	// replyFocus is the reply box the owner was last typing into (design:
+	// "Snapshot document.activeElement ... and its selection before patch
+	// work"), kept so runPatchWork's restoreReplyFocus can give it back if a
+	// /stream patch blurred or replaced the node. null when no reply box has
+	// focus, or once a deliberate blur's own focusout timeout has run.
+	replyFocus: null,
 };
 
 // ---- keys.json loading -----------------------------------------------
@@ -387,8 +402,6 @@ function postDraft() {
 	if (!body) {
 		return false;
 	}
-	showDraftConflict(el, '');
-	showDraftSaved(el, '');
 	postDraftRequest(el, body.ticket, body.question, body.text);
 	return true;
 }
@@ -398,13 +411,39 @@ function postDraft() {
 // flight, and a stale "Saved."/conflict for text that is no longer in the
 // box would be as misleading as the bug this fixes. It resolves true when
 // the draft saved, so sendBatch can wait for the save before it sends.
+//
+// Clearing el's own conflict/saved notes first, rather than at each call
+// site (postDraft, fireReplyAutosave, postSendBatch), keeps that reset
+// beside the one function that actually posts the draft it is about (bug
+// fix, quality: the two lines were copied at three call sites and could
+// drift).
 async function postDraftRequest(el, ticket, question, text) {
+	showDraftConflict(el, '');
+	showDraftSaved(el, '');
 	try {
 		const resp = await fetch('/draft', {
 			method: 'POST',
 			headers: { 'Content-Type': 'application/json', 'Datastar-Request': 'true' },
 			body: JSON.stringify({ ticket, question, text }),
 		});
+		// Recorded before the stale-UI check below, and unconditionally on
+		// resp.ok: this tracks what the server actually has, independent of
+		// what the box currently shows right now. If the owner kept typing
+		// (or emptied the box) while this request was in flight, el.value
+		// !== text below and we skip the "Saved." note, but lastSavedText
+		// must still learn that `text` is now on the server -- otherwise a
+		// later autosave or send could see el.value equal to the stale
+		// lastSavedText fallback (el.defaultValue) and wrongly treat the box
+		// as already clear, leaving the server's stale text unsent and never
+		// cleared.
+		//
+		// A box targets a question (data-draft-question); a thread-level
+		// reply (question === null, unsavedReplyBody) has no autosave key to
+		// record against, since replyAutosaveBody only ever covers
+		// question-targeted boxes.
+		if (resp.ok && question != null) {
+			lastSavedText.set(replyAutosaveKeyFor(el), text);
+		}
 		if (el.value !== text) {
 			return resp.ok;
 		}
@@ -514,27 +553,297 @@ function showSendResult(text) {
 // showSendResult -- "Sent N answer(s)." on 200, or the 409 body ("Nothing
 // to send.") otherwise -- so Cmd+Enter is never silent.
 //
-// Text typed into the focused reply box but not yet saved with Enter is
-// saved first (unsavedReplyBody), so typing then pressing Cmd+Enter sends
-// it. A failed save shows its conflict beside the box and sends nothing.
+// Every "#main .reply-input" holding unsaved text is saved first
+// (unsavedReplyBodies), not just whichever one has focus (bug fix, Q11: the
+// owner's note was in a box that had lost focus, and the old focused-only
+// save left it behind while the send still reported success).
 function sendBatch() {
 	if (!state.nav.open) {
 		return false;
 	}
-	postSendBatch(state.nav.open, document.activeElement);
+	postSendBatch(state.nav.open);
 	return true;
 }
 
-async function postSendBatch(ticket, focusedEl) {
-	const unsaved = unsavedReplyBody(focusedEl);
-	if (unsaved) {
-		showDraftConflict(focusedEl, '');
-		showDraftSaved(focusedEl, '');
-		const saved = await postDraftRequest(focusedEl, unsaved.ticket, unsaved.question, unsaved.text);
-		if (!saved) {
+// autosaveTimers maps a reply box's "ticket:question" key (replyAutosaveKeyFor
+// below) to its pending debounced-save timer id (installReplyAutosave).
+// autosaveInFlight maps the same key to the in-flight POST /draft promise a
+// timer has already fired, if any (bug fix: cancelAutosaves only ever
+// cleared a timer that had not fired yet; a timer that fired just before a
+// Cmd+Enter was already running its fetch by the time cancelAutosaves ran,
+// and postSendBatch never waited for it. If that fetch resolved after
+// postSendBatch's own post-send reset, its lastSavedText.set call silently
+// put the just-sent text's key back to the old, already-sent value, so a
+// later retype of that same text looked "unchanged" and never autosaved
+// again). lastSavedText maps the same key to the text last known saved for
+// that box, so a later keystroke that merely re-types what is already saved
+// does not re-post it.
+const autosaveTimers = new Map();
+const autosaveInFlight = new Map();
+const lastSavedText = new Map();
+
+// sendBatchInFlight is true for postSendBatch's entire body, set there in a
+// try/finally so it still resets if /send throws. scheduleReplyAutosave
+// checks it so no new autosave timer can be armed while a send batch is
+// running (bug fix): postSendBatch's own cancelAutosaves() and its await
+// over autosaveInFlight only clear out autosaves that existed before it
+// started. Without this flag, typing during postSendBatch's later awaits
+// (the draft posts, or the /send fetch itself) could arm a fresh timer that
+// fires and saves newer text to the store before /send resolves; /send would
+// then send that newer text in full, but the post-send clear compares
+// el.value against the sentValues snapshot taken before that typing, sees a
+// mismatch, and leaves the box uncleared even though its current text was
+// already fully sent -- making it eligible to go out again on a later
+// Cmd+Enter. postSendBatch's own finally block calls rearmAutosaves once
+// this flag drops back to false, so a keystroke this flag blocked is not
+// left unarmed for good (bug fix: scheduleReplyAutosave's early return above
+// silently dropped that keystroke from autosave, and nothing else re-armed
+// it, so the box sat unsaved until the owner typed again or sent again).
+let sendBatchInFlight = false;
+
+// replyAutosaveKeyFor builds the one "ticket:question" key every autosave
+// map above and postDraftRequest's own lastSavedText.set share, named once
+// so the several call sites cannot drift into different keys for the same
+// box (bug fix, quality).
+function replyAutosaveKeyFor(el) {
+	return `${el.dataset.draftTicket}:${el.dataset.draftQuestion}`;
+}
+
+// mainReplyInput returns the ".reply-input" at or above target when it sits
+// inside #main, or null otherwise: the one check installReplyAutosave,
+// installReplyFocusTracking, and clearReplyFocusUnlessInReplyBox each need,
+// named once so the three do not drift (design section 6.4, 6.7: autosave,
+// focus tracking, and the deliberate-blur check all key off the same reply
+// box).
+function mainReplyInput(target) {
+	const el = target?.closest?.('.reply-input');
+	return el && el.closest('#main') ? el : null;
+}
+
+// lastSavedFor returns the text last known saved for el's "ticket:question"
+// key, falling back to el's own defaultValue (the server-rendered draft) the
+// first time a key is seen, so a box no one has typed in since page load is
+// not treated as having no saved text at all. fireReplyAutosave and
+// postSendBatch share this one lookup, named once so the two call sites
+// cannot drift into different fallbacks (bug fix, quality).
+function lastSavedFor(el) {
+	const key = replyAutosaveKeyFor(el);
+	return lastSavedText.has(key) ? lastSavedText.get(key) : el.defaultValue;
+}
+
+// fireReplyAutosave posts el's current text as a draft if it differs from
+// lastSavedFor(el). It is the one place that decides and posts an autosave,
+// called both from scheduleReplyAutosave's debounce timer and from
+// postSendBatch flushing a box the owner emptied right before Cmd+Enter (bug
+// fix: cancelling that pending timer outright, rather than flushing it, left
+// the box's already-saved, now-deleted text as the ticket's draft, and
+// /send still sent it). Returns null, synchronously, when there is nothing
+// to post; otherwise the postDraftRequest promise, which the caller can
+// track.
+function fireReplyAutosave(el) {
+	const body = replyAutosaveBody(el, lastSavedFor(el));
+	if (!body) {
+		return null;
+	}
+	return postDraftRequest(el, body.ticket, body.question, body.text);
+}
+
+// scheduleReplyAutosave (re-)arms el's debounced save, keyed by
+// replyAutosaveKeyFor so a later keystroke in the same box clears and
+// replaces its own pending timer rather than stacking a second one
+// (AUTOSAVE_DEBOUNCE_MS after the owner stops typing). It reuses
+// scheduleToastDismiss's cancel-then-arm step, the same "replace, not stack"
+// shape showSendResult's toast dismiss already needed, rather than writing
+// clearTimeout/setTimeout out by hand a second time.
+//
+// The fired timer's own save is chained onto autosaveInFlight.get(key), not
+// just recorded there, so two saves for the same box -- one still in flight
+// when the next debounce fires -- run one after another instead of racing
+// (bug fix: recording the second save's promise over the first's let the
+// first's own `.finally` delete the second's still-pending entry once the
+// first settled, so postSendBatch's await over autosaveInFlight.values()
+// stopped waiting for it, and the two fetches could also reach the server
+// out of order). The `autosaveInFlight.get(key) === result` check in the
+// `finally` guards the same race the other way: only the most recent chain
+// for this key may clear the entry, so a superseded promise settling late
+// can never delete a newer one postSendBatch still needs to await.
+function scheduleReplyAutosave(el) {
+	if (sendBatchInFlight) {
+		return;
+	}
+	const key = replyAutosaveKeyFor(el);
+	const fire = () => {
+		autosaveTimers.delete(key);
+		const prior = autosaveInFlight.get(key) ?? Promise.resolve();
+		const result = prior.then(() => fireReplyAutosave(el));
+		autosaveInFlight.set(key, result);
+		result.finally(() => {
+			if (autosaveInFlight.get(key) === result) {
+				autosaveInFlight.delete(key);
+			}
+		});
+	};
+	autosaveTimers.set(key, scheduleToastDismiss(autosaveTimers.get(key) ?? null, () => setTimeout(fire, AUTOSAVE_DEBOUNCE_MS), clearTimeout));
+}
+
+// cancelAutosaves cancels every pending debounced autosave timer, so
+// postSendBatch below -- which saves and sends every box itself -- can never
+// race a stale autosave into re-posting a box the send is about to clear. It
+// does not wait for a timer that had already fired; postSendBatch awaits
+// autosaveInFlight separately for that (bug fix).
+function cancelAutosaves() {
+	for (const timerID of autosaveTimers.values()) {
+		clearTimeout(timerID);
+	}
+	autosaveTimers.clear();
+}
+
+// installReplyAutosave wires a delegated 'input' listener over every
+// "#main .reply-input" (design: "Autosave the reply box as a draft,
+// debounced on input"), delegated from document like installSideBox above
+// because #main is morphed by every /stream patch.
+function installReplyAutosave() {
+	document.addEventListener('input', (event) => {
+		const el = mainReplyInput(event.target);
+		if (el) {
+			scheduleReplyAutosave(el);
+		}
+	});
+}
+
+// installReplyFocusTracking keeps state.replyFocus current with whichever
+// "#main .reply-input" the owner is typing into (design: "Snapshot
+// document.activeElement ... and its selection before patch work"),
+// delegated from document like installReplyAutosave above, because #main is
+// morphed by every /stream patch.
+//
+// A deliberate blur (Esc, a click elsewhere, the post-send blur) and a
+// patch-caused one (the morph replacing or moving the focused node) both
+// fire the same focusout event, with nothing in the event itself telling
+// them apart. clearReplyFocusUnlessInReplyBox is deferred to the next task
+// via setTimeout(0), rather than run immediately, for the same reason: a
+// deliberate blur has no mutation in the same task, so this timeout is the
+// next thing to run and clears it; a patch-caused blur's MutationObserver
+// callback is a microtask, which runs before this timeout, so
+// restoreReplyFocus (runPatchWork, below) still finds the snapshot live and
+// can restore it. Checking document.activeElement again inside the timeout,
+// rather than clearing unconditionally, also covers the owner tabbing from
+// one reply box straight to another: that focusout must not clear the
+// snapshot the new box's own focusin just set.
+function clearReplyFocusUnlessInReplyBox() {
+	if (!mainReplyInput(document.activeElement)) {
+		state.replyFocus = null;
+	}
+}
+
+function installReplyFocusTracking() {
+	const snapshotFromTarget = (target) => {
+		const el = mainReplyInput(target);
+		if (!el) {
 			return;
 		}
+		state.replyFocus = replyFocusSnapshot(el);
+	};
+	document.addEventListener('focusin', (event) => snapshotFromTarget(event.target));
+	document.addEventListener('input', (event) => snapshotFromTarget(event.target));
+	// 'selectionchange' fires document-wide for every selection change,
+	// including a bare caret move (an arrow key, Home/End, or a click with
+	// nothing selected) that the narrower 'select' event misses: without
+	// this, restoreReplyFocus could put the caret back at a stale position
+	// after a patch replaced the box. It covers every case 'select' would
+	// have (a selected range fires both), so 'select' is not also listened
+	// for (bug fix, simplification). It is routed back through
+	// document.activeElement rather than an event target, since
+	// 'selectionchange' carries none.
+	document.addEventListener('selectionchange', () => snapshotFromTarget(document.activeElement));
+	document.addEventListener('focusout', () => setTimeout(clearReplyFocusUnlessInReplyBox, 0));
+}
+
+// rearmAutosaves re-arms the debounced autosave for every "#main
+// .reply-input" still holding text that differs from lastSavedFor(el), once
+// a send batch's sendBatchInFlight window has closed (bug fix:
+// scheduleReplyAutosave returns early for the whole window, so any keystroke
+// landing during postSendBatchLocked's own awaits -- the draft posts, the
+// /send fetch -- never armed a timer at all, and nothing else re-armed it
+// afterward; the box then sat unsaved until the owner typed again or sent
+// again, losing that edit if the tab closed first). It covers a box the
+// owner kept typing in during the send (the post-send clear above
+// deliberately left it alone, see "since changed" above) just as much as a
+// box whose own save failed or went stale (partitionFailedSaves), so either
+// kind gets another chance to reach the store without the owner having to
+// type again.
+function rearmAutosaves() {
+	for (const el of document.querySelectorAll('#main .reply-input')) {
+		if (replyAutosaveBody(el, lastSavedFor(el))) {
+			scheduleReplyAutosave(el);
+		}
 	}
+}
+
+// sendBatchInFlight is set true for the whole body below, in a try/finally
+// so it resets even if /send throws: see sendBatchInFlight's own comment for
+// why scheduleReplyAutosave must not arm a new timer during this window, and
+// rearmAutosaves' own comment for why the finally block re-arms every box
+// that window left unsaved.
+async function postSendBatch(ticket) {
+	sendBatchInFlight = true;
+	try {
+		await postSendBatchLocked(ticket);
+	} finally {
+		sendBatchInFlight = false;
+		rearmAutosaves();
+	}
+}
+
+async function postSendBatchLocked(ticket) {
+	cancelAutosaves();
+	// A timer that had already fired before cancelAutosaves ran is no
+	// longer in autosaveTimers for it to cancel -- it is already awaiting
+	// its own fetch. Waiting for those here (bug fix) keeps their
+	// lastSavedText.set calls from landing after this function's own
+	// post-send reset below, which would otherwise silently put a
+	// just-sent box's key back to its pre-send text.
+	await Promise.all(autosaveInFlight.values());
+
+	const inputs = Array.from(document.querySelectorAll('#main .reply-input'));
+	// Recorded before any further await below, so a box the owner keeps
+	// typing into while this function's own fetches are in flight is never
+	// cleared out from under them: the post-send clear only ever touches a
+	// box whose value still matches what was actually sent (bug fix).
+	const sentValues = new Map(inputs.map((el) => [el, el.value]));
+	const pending = unsavedReplyBodies(inputs);
+	// A box the owner emptied in the second before Cmd+Enter has no
+	// "unsaved text" (unsavedReplyBodies, above, skips every empty box), but
+	// cancelAutosaves above just dropped the pending timer that would have
+	// cleared its saved draft. Flushing it here posts that clear before
+	// /send runs, so /send -- which sends whatever the store still has
+	// saved -- never sends text the box no longer shows (bug fix, Q3: "an
+	// emptied box has to undo its saved draft, or the deleted text still
+	// sends").
+	const emptied = emptiedReplyBodies(inputs, lastSavedFor);
+	const post = ({ el, body }) => postDraftRequest(el, body.ticket, body.question, body.text);
+
+	const [results, clearResults] = await Promise.all([Promise.all(pending.map(post)), Promise.all(emptied.map(post))]);
+
+	const failedClears = emptied.filter((_, i) => !clearResults[i]).map(({ el }) => el);
+	if (failedClears.length > 0) {
+		// A clear that failed leaves its old, deleted text saved as the
+		// ticket's draft: sending now would silently resend text the owner
+		// just emptied the box of (bug fix). The box itself stays empty --
+		// there is no text left to show or keep -- but the send is held
+		// back rather than risk it going out unseen.
+		console.error('console.js: POST /draft (clear)', failedClears.length, 'box(es) failed to clear');
+		showSendResult(clearFailedResult(failedClears.length));
+		return;
+	}
+
+	// A box whose save just failed but already had an earlier autosave in
+	// the store still sends that older draft: it is stale, not simply unsent
+	// (bug fix). Both kinds keep their current text and are left out of the
+	// post-send clear below.
+	const { failed, stale } = partitionFailedSaves(pending, results, lastSavedFor);
+	const notSent = [...failed, ...stale];
+
 	try {
 		const resp = await fetch('/send', {
 			method: 'POST',
@@ -542,13 +851,49 @@ async function postSendBatch(ticket, focusedEl) {
 			body: JSON.stringify({ ticket }),
 		});
 		const text = await resp.text();
-		showSendResult(text);
+		showSendResult(sendResultWithUnsent(text, failed.length, stale.length));
 		if (resp.ok) {
-			// A 200 means every open draft just sent, so its own reply box
+			// A 200 means every saved draft just sent, so each of those boxes
 			// should not keep showing text the owner just sent (design
 			// section 22.7): Datastar's own morph never refills a focused
-			// input, so this module clears it directly.
-			clearReplyInputs(document.querySelectorAll('#main .reply-input'));
+			// input, so this module clears it directly. A box in notSent
+			// keeps its text and (for failed) its conflict note: either
+			// nothing about it reached /send, or what did was an older
+			// version than what the box still shows. A box whose value has
+			// since changed (sentValues, above) is left alone either way: the
+			// owner kept typing during this function's own awaits, and
+			// postSendBatch's finally block re-arms that keystroke's autosave
+			// once sendBatchInFlight drops (rearmAutosaves, below; bug fix:
+			// clearing it here, or resetting its lastSavedText, would
+			// otherwise drop that typing silently).
+			const sent = inputs.filter((el) => !notSent.includes(el) && el.value === sentValues.get(el));
+			clearReplyInputs(sent);
+			// lastSavedText otherwise still holds the text that was just
+			// sent, not the box's new, empty value: a later retype of that
+			// same text would then look "unchanged" to replyAutosaveBody and
+			// never autosave (bug fix: that retype would then depend on
+			// focus or another Cmd+Enter to ever reach the store again).
+			//
+			// state.replyFocus otherwise still names this box with the
+			// just-sent text as its value to restore (bug fix): the
+			// document.activeElement?.blur?.() below fires a focusout whose
+			// clearReplyFocusUnlessInReplyBox only runs on the next
+			// setTimeout(0), and the very send that got here also wakes the
+			// bus for a /stream patch, whose MutationObserver callback is a
+			// microtask that can run first. Left live, that patch's
+			// restoreReplyFocus would see the box now empty, differ from the
+			// stale snapshot's value, and silently put the just-sent text
+			// back in -- the next Cmd+Enter would then send it again.
+			// Clearing the snapshot here, synchronously, cannot race either
+			// path.
+			for (const el of sent) {
+				if (el.dataset.draftQuestion) {
+					lastSavedText.set(replyAutosaveKeyFor(el), '');
+				}
+				if (state.replyFocus && state.replyFocus.ticket === el.dataset.draftTicket && state.replyFocus.question === el.dataset.draftQuestion) {
+					state.replyFocus = null;
+				}
+			}
 			document.activeElement?.blur?.();
 		}
 		if (!resp.ok && resp.status !== 409) {
@@ -983,6 +1328,39 @@ function runSendChordHints() {
 	}
 }
 
+// restoreReplyFocus is runPatchWork's last step (design: "If the morph
+// blurred it, restore focus and selection in runPatchWork"): it looks up the
+// box for the same ticket and question state.replyFocus names, and -- only
+// when the patch itself left focus on document.body, per
+// restoreFocusDecision (keyboard.mjs) -- gives it back focus and selection,
+// refilling its value first if the replacement node came up empty. Running
+// last, after setFocusedID/runMermaidGuarded/runSendChordHints above have
+// already settled this patch's other DOM effects, keeps this the one step
+// that can move focus.
+function restoreReplyFocus() {
+	const snapshot = state.replyFocus;
+	if (!snapshot) {
+		return;
+	}
+	const target = document.querySelector(
+		`#main .reply-input[data-draft-ticket="${CSS.escape(snapshot.ticket)}"][data-draft-question="${CSS.escape(snapshot.question)}"]`,
+	);
+	const active = document.activeElement;
+	const { focus, restoreValue } = restoreFocusDecision(
+		snapshot,
+		{ isBody: active === null || active === document.body },
+		target ? { value: target.value } : null,
+	);
+	if (!focus) {
+		return;
+	}
+	if (restoreValue) {
+		target.value = snapshot.value;
+	}
+	target.focus({ preventScroll: true });
+	target.setSelectionRange(snapshot.start, snapshot.end);
+}
+
 // runPatchWork is the MutationObserver callback's one per-patch step
 // (design section 6.3): collect plain descriptors from the DOM, hand them
 // to the pure collectPatchWork, then apply its result as DOM effects.
@@ -997,6 +1375,7 @@ function runPatchWork() {
 	setFocusedID(focusID);
 	runMermaidGuarded(diagramIDs);
 	runSendChordHints();
+	restoreReplyFocus();
 }
 
 // ---- stream reconnect ---------------------------------------------------
@@ -1132,10 +1511,11 @@ function installNavBridge() {
 // install wires every delegated listener synchronously, before awaiting
 // loadBindings' own /static/keys.json fetch (bug fix): none of
 // installStreamWatch, installNavBridge, installPatchObserver, installSideBox,
-// installLogControls, installChipActivation, or installPickupBox reads
-// state.bindings, so there was no reason their listeners -- installNavBridge
-// above all, the zing-nav bridge a Threads-sidebar click needs live as
-// early as possible -- sat behind an unrelated network round trip. Only
+// installLogControls, installChipActivation, installPickupBox,
+// installReplyAutosave, or installReplyFocusTracking reads state.bindings, so
+// there was no reason their listeners -- installNavBridge above all, the
+// zing-nav bridge a Threads-sidebar click needs live as early as possible --
+// sat behind an unrelated network round trip. Only
 // onKeyDown needs the parsed bindings, so it alone waits on the fetch.
 // installStreamWatch runs first (the reconnect plan): it must already be
 // bound before data-init's own @get('/stream') can fire the very first
@@ -1148,6 +1528,8 @@ async function install() {
 	installLogControls();
 	installChipActivation();
 	installPickupBox();
+	installReplyAutosave();
+	installReplyFocusTracking();
 	await loadBindings();
 	document.addEventListener('keydown', onKeyDown);
 }
