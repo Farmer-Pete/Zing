@@ -1645,6 +1645,68 @@ func TestRunJob_EndLogNamesEvidenceNotContents(t *testing.T) {
 	}
 }
 
+// TestRunJob_EndLogCountsStopHook proves the "runJob end" INFO line
+// carries validate_denied, stop_hook_events, stop_hook_blocks and
+// stop_hook_unread from the runtime's RunResult, next to ticket_id and
+// run_id. Not t.Parallel: it swaps slog's process-wide default to
+// capture the record, the same constraint
+// TestRunJob_EndLogNamesEvidenceNotContents above has.
+func TestRunJob_EndLogCountsStopHook(t *testing.T) {
+	s := newRunJobTestStore(t)
+	ticketID := seedRunJobTicket(t, s)
+	ticket := getRunJobTicket(t, s, ticketID)
+	owner, expires := claimRunJobTicket(t, s, ticketID)
+
+	stub := stubRunResult{res: runtime.RunResult{
+		ValidateDenied: 2,
+		StopHookEvents: 3,
+		StopHookBlocks: 1,
+		StopHookUnread: 1,
+	}}
+	set, err := runtime.NewSet(map[string]runtime.Runtime{testRuntimeClaude: stub, testRuntimeCodex: stub, runtimeFake: stub})
+	if err != nil {
+		t.Fatalf("runtime.NewSet: %v", err)
+	}
+
+	d := Deps{
+		Store: s, Runtimes: set, Machine: runJobTestMachine(t), Models: map[string]string{testModelAlias: testModelExact},
+		Budget: time.Hour, Owner: owner, Expires: expires, Reserve: realReserve(s, owner, expires),
+		DataDir: t.TempDir(),
+	}
+
+	var logBuf bytes.Buffer
+	prevDefault := slog.Default()
+	slog.SetDefault(slog.New(slog.NewJSONHandler(&logBuf, &slog.HandlerOptions{Level: slog.LevelInfo})))
+	t.Cleanup(func() { slog.SetDefault(prevDefault) })
+
+	rr, err := runJob(t.Context(), d, ticket, testJobClassify, store.SessionUpsert{Job: testJobClassify, Runtime: testRuntimeClaude},
+		runtime.RunRequest{Job: response.JobClassify}, nil, nil, 0)
+	if err != nil {
+		t.Fatalf("runJob: %v", err)
+	}
+
+	recs := jsonLogRecords(t, &logBuf)
+	end := findLogRecord(t, recs, "runJob end")
+	if got := logRecordInt64(t, end, "validate_denied"); got != 2 {
+		t.Errorf("validate_denied = %d, want 2", got)
+	}
+	if got := logRecordInt64(t, end, "stop_hook_events"); got != 3 {
+		t.Errorf("stop_hook_events = %d, want 3", got)
+	}
+	if got := logRecordInt64(t, end, "stop_hook_blocks"); got != 1 {
+		t.Errorf("stop_hook_blocks = %d, want 1", got)
+	}
+	if got := logRecordInt64(t, end, "stop_hook_unread"); got != 1 {
+		t.Errorf("stop_hook_unread = %d, want 1", got)
+	}
+	if got := logRecordInt64(t, end, "ticket_id"); got != ticket.ID {
+		t.Errorf("ticket_id = %d, want %d", got, ticket.ID)
+	}
+	if got := logRecordInt64(t, end, "run_id"); got != rr.Reserved.RunID {
+		t.Errorf("run_id = %d, want %d", got, rr.Reserved.RunID)
+	}
+}
+
 // TestRetryCapBudget_LogsBranchAtInfo proves retryCapBudget's (#25,
 // planning.go) two INFO records -- "cap_budget retry resumes" when the
 // budget has room, "cap_budget retry still over budget" when it does not --

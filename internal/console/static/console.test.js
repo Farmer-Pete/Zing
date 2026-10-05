@@ -7,9 +7,14 @@
 // from a fixture keys.json, input-context suppression, the mac/non-mac
 // send chord, the id-based focus step (next, previous, from no focus,
 // empty list), reconcileFocus across insertion/removal/reorder (focused
-// first/middle/last row removed), collectPatchWork, and the /stream
+// first/middle/last row removed), collectPatchWork, the /stream
 // reconnect-and-stale-marker decisions (reduceStreamStatus, reconnectDelay,
-// staleMarkerText).
+// staleMarkerText), saving every unsaved reply box on send and naming any
+// left unsent or stale (unsavedReplyBodies, sendResultWithUnsent), the
+// debounced autosave decision (replyAutosaveBody), the send-time emptied-box
+// flush, failed-clear block, and failed/stale save split (emptiedReplyBodies,
+// clearFailedResult, partitionFailedSaves), and the patch-caused-blur-only
+// focus restore decision (replyFocusSnapshot, restoreFocusDecision).
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
@@ -37,6 +42,15 @@ import {
 	buildChipDraftBody,
 	buildItemDraftBody,
 	unsavedReplyBody,
+	unsavedReplyBodies,
+	sendResultWithUnsent,
+	AUTOSAVE_DEBOUNCE_MS,
+	replyAutosaveBody,
+	emptiedReplyBodies,
+	clearFailedResult,
+	partitionFailedSaves,
+	replyFocusSnapshot,
+	restoreFocusDecision,
 	describeAction,
 	ACTION_LABELS,
 	RECONNECT_BASE_MS,
@@ -543,6 +557,248 @@ test('unsavedReplyBody: an empty box, a non-reply element, or nothing focused yi
 	assert.equal(unsavedReplyBody({ dataset: { draftTicket: '7', draftQuestion: '9' }, value: '' }), null);
 	assert.equal(unsavedReplyBody({ dataset: {}, value: 'text' }), null);
 	assert.equal(unsavedReplyBody(null), null);
+});
+
+// unsavedReplyBodies: a box holding text is saved on send even when focus is
+// elsewhere (bug fix, Q11: Cmd+Enter saved only document.activeElement, so a
+// 459-character note in a reply box that did not have focus never reached
+// POST /draft, and the send still reported "Sent 1 message.").
+test('unsavedReplyBodies: a box holding text is saved on send even when focus is elsewhere', () => {
+	const noteBox = { dataset: { draftTicket: '18', draftQuestion: '11' }, value: 'x'.repeat(459) };
+	const emptyBox = { dataset: { draftTicket: '18', draftQuestion: '12' }, value: '' };
+	const notAReplyBox = { dataset: {}, value: 'x' };
+	assert.deepEqual(unsavedReplyBodies([noteBox, emptyBox, notAReplyBox]), [
+		{ el: noteBox, body: { ticket: 18, question: 11, text: 'x'.repeat(459) } },
+	]);
+	// With focus on the body rather than the box, the old focused-only path
+	// (unsavedReplyBody(document.activeElement)) found nothing to save.
+	assert.equal(unsavedReplyBody({ dataset: {} }), null);
+});
+
+test('unsavedReplyBodies: no inputs yields an empty list', () => {
+	assert.deepEqual(unsavedReplyBodies([]), []);
+	assert.deepEqual(unsavedReplyBodies(undefined), []);
+});
+
+// sendResultWithUnsent: the send result line names any reply left unsent so
+// the owner is told rather than finding out when the text is simply gone.
+test('sendResultWithUnsent: a clean send is unchanged', () => {
+	assert.equal(sendResultWithUnsent('Sent 1 message.', 0), 'Sent 1 message.');
+});
+
+test('sendResultWithUnsent: one unsent reply gets the singular sentence', () => {
+	assert.equal(
+		sendResultWithUnsent('Sent 1 message.', 1),
+		'Sent 1 message. 1 reply not sent; its text is still in its box.',
+	);
+});
+
+test('sendResultWithUnsent: more than one unsent reply gets the plural sentence', () => {
+	assert.equal(
+		sendResultWithUnsent('Sent 1 message.', 2),
+		'Sent 1 message. 2 replies not sent; their text is still in their boxes.',
+	);
+});
+
+test('sendResultWithUnsent: a trailing space on text is trimmed before appending', () => {
+	assert.equal(
+		sendResultWithUnsent('Sent 1 message. ', 1),
+		'Sent 1 message. 1 reply not sent; its text is still in its box.',
+	);
+});
+
+// sendResultWithUnsent's stale count: a box whose save failed at send time
+// but had an earlier autosave already in the store is not "unsent" -- an
+// older version did go out (bug fix, r2f9: reporting it as plain "not sent"
+// told the owner nothing went out when an earlier edit actually had).
+
+test('sendResultWithUnsent: a stale-sent reply gets its own sentence, distinct from unsent', () => {
+	assert.equal(
+		sendResultWithUnsent('Sent 1 message.', 0, 1),
+		'Sent 1 message. 1 reply sent an earlier version; its newest edit may be missing.',
+	);
+});
+
+test('sendResultWithUnsent: more than one stale-sent reply gets the plural sentence', () => {
+	assert.equal(
+		sendResultWithUnsent('Sent 1 message.', 0, 2),
+		'Sent 1 message. 2 replies sent an earlier version; their newest edits may be missing.',
+	);
+});
+
+test('sendResultWithUnsent: unsent and stale both append, unsent first', () => {
+	assert.equal(
+		sendResultWithUnsent('Sent 1 message.', 1, 1),
+		'Sent 1 message. 1 reply not sent; its text is still in its box. 1 reply sent an earlier version; its newest edit may be missing.',
+	);
+});
+
+// replyAutosaveBody: installReplyAutosave (console.js) debounces on 'input'
+// and posts this body a second after the owner stops typing, so a box's text
+// is never lost to a lost focus or an unmorphed send -- including an emptied
+// box, which clears a previously saved draft.
+
+test('replyAutosaveBody: changed text yields a body to post', () => {
+	const el = { dataset: { draftTicket: '18', draftQuestion: '11' }, value: 'hello' };
+	assert.deepEqual(replyAutosaveBody(el, ''), { ticket: 18, question: 11, text: 'hello' });
+});
+
+test('replyAutosaveBody: text unchanged from lastSavedText yields null', () => {
+	const el = { dataset: { draftTicket: '18', draftQuestion: '11' }, value: 'hello' };
+	assert.equal(replyAutosaveBody(el, 'hello'), null);
+});
+
+test('replyAutosaveBody: emptying a box that had saved text still yields a body, to clear the draft', () => {
+	const el = { dataset: { draftTicket: '18', draftQuestion: '11' }, value: '' };
+	assert.deepEqual(replyAutosaveBody(el, 'hello'), { ticket: 18, question: 11, text: '' });
+});
+
+test('replyAutosaveBody: a missing data-draft-question yields null', () => {
+	const el = { dataset: { draftTicket: '18' }, value: 'hello' };
+	assert.equal(replyAutosaveBody(el, ''), null);
+});
+
+test('AUTOSAVE_DEBOUNCE_MS is a reasonable debounce window', () => {
+	assert.ok(AUTOSAVE_DEBOUNCE_MS >= 500 && AUTOSAVE_DEBOUNCE_MS <= 2000);
+});
+
+// emptiedReplyBodies: postSendBatch flushes an emptied box's clear through
+// /draft before /send runs, or the store's last-saved draft still goes out
+// (bug fix, Q3).
+
+test('emptiedReplyBodies: an emptied box with an earlier saved draft gets flushed', () => {
+	const emptied = { dataset: { draftTicket: '18', draftQuestion: '11' }, value: '' };
+	const neverSaved = { dataset: { draftTicket: '18', draftQuestion: '12' }, value: '' };
+	const stillTyped = { dataset: { draftTicket: '18', draftQuestion: '13' }, value: 'still here' };
+	const lastSavedFor = (el) => (el === emptied ? 'an earlier note' : '');
+	assert.deepEqual(emptiedReplyBodies([emptied, neverSaved, stillTyped], lastSavedFor), [
+		{ el: emptied, body: { ticket: 18, question: 11, text: '' } },
+	]);
+});
+
+test('emptiedReplyBodies: no inputs yields an empty list', () => {
+	assert.deepEqual(emptiedReplyBodies([], () => ''), []);
+	assert.deepEqual(emptiedReplyBodies(undefined, () => ''), []);
+});
+
+// clearFailedResult: a clear that failed leaves its old, deleted text saved
+// as the ticket's draft, so sending anyway would silently resend text the
+// owner just emptied the box of (bug fix).
+
+test('clearFailedResult: names how many clears failed', () => {
+	assert.equal(
+		clearFailedResult(1),
+		'A deleted reply could not be cleared from the server, so sending was canceled. Try again.',
+	);
+	assert.equal(
+		clearFailedResult(2),
+		'2 deleted replies could not be cleared from the server, so sending was canceled. Try again.',
+	);
+});
+
+// partitionFailedSaves: a box whose save failed at send time but had an
+// earlier autosave already in the store (lastSavedFor non-empty) still sent
+// that older draft -- it is stale, not simply unsent (bug fix).
+
+test('partitionFailedSaves: a failed save with earlier saved text is stale, one with none is unsent', () => {
+	const staleBox = { dataset: {}, value: 'new edit' };
+	const unsentBox = { dataset: {}, value: 'never saved' };
+	const sentBox = { dataset: {}, value: 'saved fine' };
+	const pending = [
+		{ el: staleBox, body: { ticket: 1, question: 11, text: 'new edit' } },
+		{ el: unsentBox, body: { ticket: 1, question: 12, text: 'never saved' } },
+		{ el: sentBox, body: { ticket: 1, question: 13, text: 'saved fine' } },
+	];
+	const results = [false, false, true];
+	const lastSavedFor = (el) => (el === staleBox ? 'an earlier version' : '');
+	assert.deepEqual(partitionFailedSaves(pending, results, lastSavedFor), {
+		failed: [unsentBox],
+		stale: [staleBox],
+	});
+});
+
+test('partitionFailedSaves: a thread-level reply (no question) with a failed save is always unsent, never stale', () => {
+	const threadBox = { dataset: {}, value: 'a thread reply' };
+	const pending = [{ el: threadBox, body: { ticket: 1, question: null, text: 'a thread reply' } }];
+	const result = partitionFailedSaves(pending, [false], () => 'something saved earlier');
+	assert.deepEqual(result, { failed: [threadBox], stale: [] });
+});
+
+test('partitionFailedSaves: a failed save whose saved text already matches is neither unsent nor stale', () => {
+	const alreadySavedBox = { dataset: {}, value: 'unchanged' };
+	const pending = [{ el: alreadySavedBox, body: { ticket: 1, question: 11, text: 'unchanged' } }];
+	const lastSavedFor = () => 'unchanged';
+	assert.deepEqual(partitionFailedSaves(pending, [false], lastSavedFor), { failed: [], stale: [] });
+});
+
+// replyFocusSnapshot / restoreFocusDecision: a /stream patch that blurs or
+// replaces the reply box the owner is typing into (the morph swapping the
+// node, bug fix: "letters run as shortcuts" once focus silently lands on
+// body) must restore it, but a deliberate blur (Esc, a click elsewhere)
+// must not be undone by the next unrelated patch.
+
+test("replyFocusSnapshot: reads a reply box's ticket, question, value, and selection", () => {
+	const el = { dataset: { draftTicket: '18', draftQuestion: '11' }, value: 'hello', selectionStart: 1, selectionEnd: 3 };
+	assert.deepEqual(replyFocusSnapshot(el), { ticket: '18', question: '11', value: 'hello', start: 1, end: 3 });
+});
+
+test('replyFocusSnapshot: a non-reply element, or nothing, yields null', () => {
+	assert.equal(replyFocusSnapshot({ dataset: {}, value: 'x' }), null);
+	assert.equal(replyFocusSnapshot(null), null);
+});
+
+test('restoreFocusDecision: restores only a patch-caused blur, and refills an emptied replacement', () => {
+	const snapshot = { ticket: '18', question: '11', value: 'hello', start: 2, end: 4 };
+
+	// The morph blurred the box onto body, and the box for the same
+	// question is still there with its text: give it focus back, but there
+	// is nothing to refill.
+	assert.deepEqual(restoreFocusDecision(snapshot, { isBody: true }, { value: 'hello' }), {
+		focus: true,
+		restoreValue: false,
+	});
+
+	// The replacement node came up with no text at all (a fresh node built
+	// from a stale, draft-less render): the snapshot's own text is restored
+	// too.
+	assert.deepEqual(restoreFocusDecision(snapshot, { isBody: true }, { value: '' }), {
+		focus: true,
+		restoreValue: true,
+	});
+
+	// The replacement node is non-empty but stale -- it shows only what the
+	// last autosave captured, a prefix of what the owner has since typed
+	// (bug fix: refilling only an empty replacement lost every keystroke
+	// since that autosave once the morph swapped in this node).
+	assert.deepEqual(restoreFocusDecision(snapshot, { isBody: true }, { value: 'hel' }), {
+		focus: true,
+		restoreValue: true,
+	});
+
+	// A deliberate blur -- focus is on some other real element, not body --
+	// must not be restored by the next patch.
+	assert.deepEqual(restoreFocusDecision(snapshot, { isBody: false }, { value: 'hello' }), {
+		focus: false,
+		restoreValue: false,
+	});
+
+	// No snapshot (nothing was being typed into), or no target to restore
+	// into (the question's box no longer renders at all), each decline too.
+	assert.deepEqual(restoreFocusDecision(null, { isBody: true }, { value: 'hello' }), {
+		focus: false,
+		restoreValue: false,
+	});
+	assert.deepEqual(restoreFocusDecision(snapshot, { isBody: true }, null), {
+		focus: false,
+		restoreValue: false,
+	});
+
+	// The snapshot itself held no text (an empty box had focus): an empty
+	// replacement is not "lost text", so nothing is refilled.
+	assert.deepEqual(restoreFocusDecision({ ...snapshot, value: '' }, { isBody: true }, { value: '' }), {
+		focus: true,
+		restoreValue: false,
+	});
 });
 
 // reduceStreamStatus / reconnectDelay / staleMarkerText: console.js's

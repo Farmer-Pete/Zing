@@ -1,11 +1,14 @@
 package runtime
 
 import (
+	"bytes"
 	"context"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io/fs"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -203,6 +206,173 @@ func TestClaude_ArgvResume(t *testing.T) {
 	}
 	if res.SessionID != testResumedSessionID {
 		t.Errorf("SessionID = %q, want the echoed %q", res.SessionID, testResumedSessionID)
+	}
+}
+
+// TestClaude_ResumedRunDropsStaleStopHookState proves Run removes a stale
+// Stop hook state file before starting a resumed session: a resumed run
+// reuses its session id, so a prior run's leftover counts under the same
+// TMPDIR must not leak into this run's RunResult. The fake claude never
+// runs the hook itself, so any non-zero counts in the result could only
+// have come from the pre-seeded file surviving.
+func TestClaude_ResumedRunDropsStaleStopHookState(t *testing.T) {
+	t.Parallel()
+	requireUnix(t)
+
+	dir := t.TempDir()
+	tmpDir := t.TempDir()
+	req := newFakeRequest(dir, "success", "TMPDIR="+tmpDir)
+	req.SessionID = testResumedSessionID
+
+	statePath := filepath.Join(tmpDir, "zing-stop-hook-"+testResumedSessionID+".json")
+	stale := `{"events":5,"blocks":3,"unread":2}`
+	if err := os.WriteFile(statePath, []byte(stale), 0o600); err != nil {
+		t.Fatalf("seed stale state file: %v", err)
+	}
+
+	c := NewClaude(fakeClaudeScript, testOAuthToken).WithStopHook("/opt/zing")
+	res, err := c.Run(context.Background(), req)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	if res.StopHookEvents != 0 || res.StopHookBlocks != 0 || res.StopHookUnread != 0 {
+		t.Errorf("StopHookEvents/Blocks/Unread = %d/%d/%d, want 0/0/0 (the stale file's counts leaked)",
+			res.StopHookEvents, res.StopHookBlocks, res.StopHookUnread)
+	}
+	if _, err := os.Stat(statePath); !os.IsNotExist(err) {
+		t.Errorf("state file still exists at %q after the run", statePath)
+	}
+}
+
+// TestClaude_CorruptStopHookStateLogsWarn proves that when the Stop hook's
+// state file cannot be read after Wait, Run still reports zero counts (the
+// plan's edge case: a missing or corrupt state file gives zero counts and
+// no error) but logs a WARN naming the job, run_token, and the read error,
+// so this case is distinguishable in the logs from a hook that never fired
+// at all. Not parallel: it calls slog.SetDefault (codex_test.go's own
+// pattern, TestRun_ErrStartLogsCause).
+func TestClaude_CorruptStopHookStateLogsWarn(t *testing.T) {
+	requireUnix(t)
+
+	dir := t.TempDir()
+	tmpDir := t.TempDir()
+	// "success" mode's script blocks on `cat > stdin` until stdin closes, so
+	// writing the corrupt file inside OnStart -- which runs before the
+	// prompt is written and stdin closed -- lands before the child exits.
+	req := newFakeRequest(dir, "success", "TMPDIR="+tmpDir)
+	c := NewClaude(fakeClaudeScript, testOAuthToken).WithStopHook("/opt/zing")
+
+	req.OnStart = func(info StartInfo) {
+		statePath := filepath.Join(tmpDir, "zing-stop-hook-"+info.SessionID+".json")
+		if err := os.WriteFile(statePath, []byte("not-json"), 0o600); err != nil {
+			t.Errorf("seed corrupt state file: %v", err)
+		}
+	}
+
+	var logBuf bytes.Buffer
+	prevDefault := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logBuf, &slog.HandlerOptions{Level: slog.LevelWarn})))
+	t.Cleanup(func() { slog.SetDefault(prevDefault) })
+
+	res, err := c.Run(context.Background(), req)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if res.StopHookEvents != 0 || res.StopHookBlocks != 0 || res.StopHookUnread != 0 {
+		t.Errorf("counts = %d/%d/%d, want 0/0/0 for a corrupt state file", res.StopHookEvents, res.StopHookBlocks, res.StopHookUnread)
+	}
+
+	logged := logBuf.String()
+	for _, want := range []string{"stop hook state unreadable", "job=classify", "run_token=42"} {
+		if !strings.Contains(logged, want) {
+			t.Errorf("log = %q, want it to contain %q", logged, want)
+		}
+	}
+}
+
+// TestClaude_ArgvCarriesStopHookSettings proves WithStopHook makes Run
+// append --settings and its JSON as the argv's last two entries, and that
+// the one Stop command it carries names the configured zing binary, the
+// run's job, and a state path under the run's own TMPDIR, keyed by the
+// session id Run actually used.
+func TestClaude_ArgvCarriesStopHookSettings(t *testing.T) {
+	t.Parallel()
+	requireUnix(t)
+
+	dir := t.TempDir()
+	tmpDir := t.TempDir()
+	req := newFakeRequest(dir, "success", "TMPDIR="+tmpDir)
+	c := NewClaude(fakeClaudeScript, testOAuthToken).WithStopHook("/opt/zing bin")
+	res, err := c.Run(context.Background(), req)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	argv := readArgv(t, dir)
+	if len(argv) < 2 || argv[len(argv)-2] != "--settings" {
+		t.Fatalf("argv = %v, want the last two entries to be --settings and its JSON", argv)
+	}
+	var settings claudeSettings
+	if err := json.Unmarshal([]byte(argv[len(argv)-1]), &settings); err != nil {
+		t.Fatalf("decode --settings JSON %q: %v", argv[len(argv)-1], err)
+	}
+	groups, ok := settings.Hooks["Stop"]
+	if !ok || len(groups) != 1 || len(groups[0].Hooks) != 1 {
+		t.Fatalf("settings.Hooks = %+v, want one Stop group with one command", settings.Hooks)
+	}
+	wantStatePath := filepath.Join(tmpDir, "zing-stop-hook-"+res.SessionID+".json")
+	// Written as a literal, not through shellQuote itself, so a break in
+	// shellQuote's own escaping cannot move the expected and actual strings
+	// together and still pass.
+	wantCmd := "'/opt/zing bin' validate --hook --job 'classify' --state '" + wantStatePath + "'"
+	if got := groups[0].Hooks[0].Command; got != wantCmd {
+		t.Errorf("command = %q, want %q", got, wantCmd)
+	}
+}
+
+// TestShellQuote pins shellQuote's escaping with literal expectations, so a
+// regression in it cannot hide behind a test that also builds its own
+// expectation by calling shellQuote.
+func TestShellQuote(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{"plain", "zing", "'zing'"},
+		{"space", "/opt/zing bin", "'/opt/zing bin'"},
+		{"single quote", "it's", `'it'\''s'`},
+	}
+	for _, tc := range cases {
+		if got := shellQuote(tc.in); got != tc.want {
+			t.Errorf("%s: shellQuote(%q) = %q, want %q", tc.name, tc.in, got, tc.want)
+		}
+	}
+}
+
+// TestClaude_ArgvWithoutStopHookHasNoSettings proves a Claude built with
+// NewClaude alone (WithStopHook never called) sends claudeArgv an empty
+// settings string, so the resulting argv carries no --settings flag at
+// all, matching every test built before the Stop hook existed.
+func TestClaude_ArgvWithoutStopHookHasNoSettings(t *testing.T) {
+	t.Parallel()
+	requireUnix(t)
+
+	dir := t.TempDir()
+	req := newFakeRequest(dir, "success")
+	c := NewClaude(fakeClaudeScript, testOAuthToken)
+	res, err := c.Run(context.Background(), req)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	argv := readArgv(t, dir)
+	want := wantArgv("--session-id", res.SessionID) // the pre-hook baseline argv, which never had --settings
+	if !slices.Equal(argv, want) {
+		t.Errorf("argv =\n%v\nwant\n%v", argv, want)
 	}
 }
 
@@ -463,6 +633,25 @@ func TestClaude_FixtureParse_Resume(t *testing.T) {
 	}
 	if res.SessionID != "prior-session-id" {
 		t.Errorf("SessionID = %q, want echoed %q", res.SessionID, "prior-session-id")
+	}
+}
+
+// TestClaudeRun_CountsDeniedValidateCalls proves Run decodes a claude
+// result's permission_denials and reports how many of them were a denied
+// zing validate Bash call, through RunResult.ValidateDenied.
+func TestClaudeRun_CountsDeniedValidateCalls(t *testing.T) {
+	t.Parallel()
+	requireUnix(t)
+
+	dir := t.TempDir()
+	req := newFakeRequest(dir, "success", "FAKE_CLAUDE_RESULT_FILE=testdata/claude_result_denials.json")
+	c := NewClaude(fakeClaudeScript, testOAuthToken)
+	res, err := c.Run(context.Background(), req)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if res.ValidateDenied != 2 {
+		t.Errorf("ValidateDenied = %d, want 2", res.ValidateDenied)
 	}
 }
 
@@ -937,6 +1126,32 @@ func TestClaudeFinalMessage(t *testing.T) {
 			t.Parallel()
 			if got := claudeFinalMessage([]byte(tc.stdout)); got != tc.want {
 				t.Errorf("claudeFinalMessage(%q) = %q, want %q", tc.stdout, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestCountValidateDenials is countValidateDenials's own unit test: an
+// absent field gives 0, malformed JSON gives 0, a denied Bash command
+// containing "zing validate" counts, and a denied non-Bash tool does not.
+func TestCountValidateDenials(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name   string
+		stdout string
+		want   int
+	}{
+		{"absent field", `{"result":"hi"}`, 0},
+		{"malformed json", "not json", 0},
+		{"denied bash validate call", `{"permission_denials":[{"tool_name":"Bash","tool_input":{"command":"go run ./cmd/zing validate -"}}]}`, 1},
+		{"denied non-bash tool", `{"permission_denials":[{"tool_name":"Read","tool_input":{"command":"zing validate -"}}]}`, 0},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := countValidateDenials([]byte(tc.stdout)); got != tc.want {
+				t.Errorf("countValidateDenials(%q) = %d, want %d", tc.stdout, got, tc.want)
 			}
 		})
 	}

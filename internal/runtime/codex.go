@@ -418,7 +418,7 @@ func (c Codex) run(ctx context.Context, req RunRequest, argv []string, outPath s
 		return res, &InvalidOutputError{Reason: reasonNoZingElement}
 	}
 
-	resp, logText, ferr := parseFinalMessage(string(output), req.Job)
+	resp, logText, ferr := parseFinalMessage(string(output), req.Job, req.RunToken)
 	res.Log = logText
 	if ferr != nil {
 		return res, ferr

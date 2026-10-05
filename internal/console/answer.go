@@ -50,13 +50,16 @@ type draftItemRequest struct {
 // {ticket, question, text} for a free reply (design section 6.4); option
 // and item extend that same shape for a chip or item-decision draft.
 // Exactly one of Option, Item, or Text is meaningful, matching
-// store.DraftInput (design section 6.7).
+// store.DraftInput (design section 6.7). Text is a pointer so decodeStrict's
+// strict decode can tell an omitted "text" key, which names no mode at all
+// and is malformed when the request also names a question, apart from an
+// explicit "text":"", which clears that question's reply draft (review fix).
 type draftRequest struct {
 	Ticket   int64             `json:"ticket"`
 	Question *int64            `json:"question"`
 	Option   *string           `json:"option"`
 	Item     *draftItemRequest `json:"item"`
-	Text     string            `json:"text"`
+	Text     *string           `json:"text"`
 }
 
 // handleDraft is POST /draft (design section 6.7, 7.1): decode the body
@@ -82,7 +85,18 @@ func (c *console) handleDraft(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "bad request", http.StatusBadRequest)
 		return
 	}
-	if len([]rune(req.Text)) > maxDraftTextLen {
+	var text string
+	if req.Text != nil {
+		text = *req.Text
+	}
+	if len([]rune(text)) > maxDraftTextLen {
+		http.Error(w, "bad request", http.StatusBadRequest)
+		return
+	}
+	// A question draft naming none of option, item, or text (text omitted,
+	// not an explicit "") names no mode at all: SaveDraft's draftModeCount
+	// would otherwise read it as an empty-text clear (review fix).
+	if req.Question != nil && req.Option == nil && req.Item == nil && req.Text == nil {
 		http.Error(w, "bad request", http.StatusBadRequest)
 		return
 	}
@@ -107,7 +121,7 @@ func (c *console) handleDraft(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	in := store.DraftInput{TicketID: req.Ticket, QuestionID: req.Question, Option: req.Option, Text: req.Text}
+	in := store.DraftInput{TicketID: req.Ticket, QuestionID: req.Question, Option: req.Option, Text: text}
 	if req.Item != nil {
 		in.Item = &store.ItemDecision{Ref: req.Item.Ref, Decision: req.Item.Decision}
 	}
