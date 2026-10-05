@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 	"time"
@@ -367,12 +368,18 @@ func mergeSidePathsPresent(dir string, paths []string) ([]string, error) {
 	return present, nil
 }
 
-// resetAfterUnsignedMerge is resetAfterUnsignedCommit plus
-// "git update-ref MERGE_HEAD <mergeHead>" under the same detached,
-// bounded context: git reset clears MERGE_HEAD, and without it the
-// resolved tree would stop being a merge. A failed update-ref is logged
-// WARN ("merge head restore failed"), never returned; the returned error
-// is resetAfterUnsignedCommit's own "commit signing failed: ..." error.
+// resetAfterUnsignedMerge is resetAfterUnsignedCommit plus writing
+// mergeHead directly to the MERGE_HEAD file (its path from
+// "git rev-parse --git-path MERGE_HEAD", the same way git merge itself
+// writes it) under the same detached, bounded context: git reset clears
+// MERGE_HEAD, and without it the resolved tree would stop being a merge.
+// "git update-ref MERGE_HEAD <sha>" cannot do this restore: MERGE_HEAD is
+// a pseudoref, not a ref under refs/, and git 2.55 refuses to create it
+// through update-ref, where older git silently wrote the file -- the gap
+// this diagnosed in CI (git 2.55) but not on a Mac running git 2.39. A
+// failed write is logged WARN ("merge head restore failed"), never
+// returned; the returned error is resetAfterUnsignedCommit's own "commit
+// signing failed: ..." error.
 //
 // When "git commit -S" itself failed outright -- a pre-commit hook or a
 // signing error that never produced a commit -- HEAD is still priorHead
@@ -395,11 +402,30 @@ func (o *Orchestrator) resetAfterUnsignedMerge(ctx context.Context, wt Worktree,
 
 	resetCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), resetUnsignedCommitTimeout)
 	defer cancel()
-	if out, updateErr := o.run.Run(resetCtx, wt.dir, "git", "update-ref", "MERGE_HEAD", mergeHead); updateErr != nil {
-		o.log.Warn("merge head restore failed", "branch", wt.branch,
-			"err", updateErr, "output", strings.TrimSpace(out))
+	if restoreErr := o.writeMergeHeadFile(resetCtx, wt, mergeHead); restoreErr != nil {
+		o.log.Warn("merge head restore failed", "branch", wt.branch, "err", restoreErr)
 	}
 	return err
+}
+
+// writeMergeHeadFile writes mergeHead plus a trailing newline to the
+// MERGE_HEAD file at its git-path (found through
+// "git rev-parse --git-path MERGE_HEAD", which resolves correctly inside a
+// worktree), the same bytes git merge itself writes there. It leaves
+// MERGE_MSG untouched.
+func (o *Orchestrator) writeMergeHeadFile(ctx context.Context, wt Worktree, mergeHead string) error {
+	path, err := o.run.Output(ctx, wt.dir, "git", "rev-parse", "--git-path", "MERGE_HEAD")
+	if err != nil {
+		return fmt.Errorf("git-path MERGE_HEAD: %w", err)
+	}
+	path = strings.TrimSpace(path)
+	if !filepath.IsAbs(path) {
+		path = filepath.Join(wt.dir, path)
+	}
+	if err := os.WriteFile(path, []byte(mergeHead+"\n"), 0o600); err != nil {
+		return fmt.Errorf("write MERGE_HEAD: %w", err)
+	}
+	return nil
 }
 
 // pathspecArgs appends "--pathspec-from-file=<file> --pathspec-file-nul" to

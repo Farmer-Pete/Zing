@@ -70,6 +70,32 @@ func mergeTestMessage() CommitMessage {
 	return CommitMessage{Title: mergeTestTitle, FuncLines: []string{mergeTestFuncLine}}
 }
 
+// assertMergeHeadFile checks MERGE_HEAD the way git itself resolves a
+// pseudoref: by reading the file at its git-path directly, not through
+// "git update-ref", which on git 2.55 does not create a MERGE_HEAD file
+// (the gap this test exists to catch). It also checks that git's own
+// rev-parse agrees, now that the file is restored.
+func assertMergeHeadFile(ctx context.Context, t *testing.T, dir, wantSHA string) {
+	t.Helper()
+	gitPath := strings.TrimSpace(runGit(ctx, t, dir, "rev-parse", "--git-path", "MERGE_HEAD"))
+	path := gitPath
+	if !filepath.IsAbs(path) {
+		path = filepath.Join(dir, path)
+	}
+	content, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read MERGE_HEAD file %s: %v", path, err)
+	}
+	if got := strings.TrimSpace(string(content)); got != wantSHA {
+		t.Errorf("MERGE_HEAD file content = %q, want %q", got, wantSHA)
+	}
+
+	mergeHeadNow := strings.TrimSpace(runGit(ctx, t, dir, "rev-parse", "MERGE_HEAD"))
+	if mergeHeadNow != wantSHA {
+		t.Errorf("git rev-parse MERGE_HEAD = %q, want it restored to %q", mergeHeadNow, wantSHA)
+	}
+}
+
 // -----------------------------------------------------------------------
 // TestCommitMergeSignedTwoParents (task 1's named, demo test)
 // -----------------------------------------------------------------------
@@ -454,10 +480,7 @@ func TestCommitMergeUnsignedKeepsMergeInProgress(t *testing.T) {
 			t.Errorf("HEAD = %q after a failed CommitMerge, want it reset back to %q", afterHead, priorHead)
 		}
 
-		mergeHeadNow := strings.TrimSpace(runGit(ctx, t, wt.Dir(), "rev-parse", "MERGE_HEAD"))
-		if mergeHeadNow != baseSHA {
-			t.Errorf("MERGE_HEAD = %q after a failed CommitMerge, want it restored to %q", mergeHeadNow, baseSHA)
-		}
+		assertMergeHeadFile(ctx, t, wt.Dir(), baseSHA)
 	})
 
 	t.Run("a real signed commit the check misreports is reset and MERGE_HEAD restored", func(t *testing.T) {
@@ -484,10 +507,7 @@ func TestCommitMergeUnsignedKeepsMergeInProgress(t *testing.T) {
 		if afterHead != priorHead {
 			t.Errorf("HEAD = %q after the reset, want it back to %q", afterHead, priorHead)
 		}
-		mergeHeadNow := strings.TrimSpace(runGit(ctx, t, f.wt.Dir(), "rev-parse", "MERGE_HEAD"))
-		if mergeHeadNow != f.baseSHA {
-			t.Errorf("MERGE_HEAD = %q after the reset, want it restored to %q", mergeHeadNow, f.baseSHA)
-		}
+		assertMergeHeadFile(ctx, t, f.wt.Dir(), f.baseSHA)
 
 		// With the signature check reading real git output again, CommitMerge
 		// from the restored state succeeds.
