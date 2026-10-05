@@ -59,6 +59,7 @@ import {
 	reconnectDelay,
 	reduceStreamStatus,
 	staleMarkerText,
+	STREAM_IDLE_MS,
 } from './keyboard.mjs';
 
 // fixtureBindings is a small parsed-keys.json fixture, shaped the same as
@@ -844,7 +845,7 @@ test('reduceStreamStatus ignores an aborted older stream', () => {
 	assert.equal(result.status.staleSince, null);
 });
 
-test('reduceStreamStatus marks stale on reconnecting and failures, clears on settle or patch', () => {
+test('reduceStreamStatus marks stale on reconnecting and failures, clears on a frame or patch', () => {
 	let status = emptyStreamStatus();
 	let result = reduceStreamStatus(status, { type: 'reconnecting' }, 1000);
 	assert.equal(result.status.staleSince, 1000);
@@ -863,47 +864,87 @@ test('reduceStreamStatus marks stale on reconnecting and failures, clears on set
 	assert.equal(reduceStreamStatus(emptyStreamStatus(), { type: 'error' }, 7000).status.staleSince, 7000);
 	assert.equal(reduceStreamStatus(emptyStreamStatus(), { type: 'retrying' }, 8000).status.staleSince, 8000);
 
-	// A settled event whose gen no longer matches the current stream is ignored.
-	result = reduceStreamStatus({ ...status, inflight: 1, gen: 5 }, { type: 'settled', gen: 4 }, 4000);
-	assert.equal(result.status.staleSince, 3000);
-	assert.equal(result.status.attempt, status.attempt);
-
-	// A settled or patched event while nothing is inflight (a late event after
-	// the stream has already finished) must not clear a stale marker: finished
-	// bumps gen, so a settle timer armed by the old started is also stale by gen.
-	const stale = { ...status, inflight: 0, gen: 5, attempt: 2, staleSince: 3000 };
-	result = reduceStreamStatus(stale, { type: 'settled', gen: 5 }, 9000);
+	// A frame or patched event while nothing is inflight (a late event after
+	// the stream has already finished) must not clear a stale marker.
+	const stale = { ...status, inflight: 0, attempt: 2, staleSince: 3000 };
+	result = reduceStreamStatus(stale, { type: 'datastar-patch-elements' }, 9000);
 	assert.equal(result.status.staleSince, 3000);
 	assert.equal(result.status.attempt, 2);
 	result = reduceStreamStatus(stale, { type: 'patched' }, 9000);
 	assert.equal(result.status.staleSince, 3000);
 	assert.equal(result.status.attempt, 2);
 
-	// A settled event with the current gen, while inflight is above 0, clears staleSince and resets attempt.
-	const live = { ...status, inflight: 1, gen: 5, attempt: 2 };
-	result = reduceStreamStatus(live, { type: 'settled', gen: 5 }, 5000);
+	// A frame while inflight is above 0 clears staleSince and resets attempt.
+	const live = { ...status, inflight: 1, attempt: 2 };
+	result = reduceStreamStatus(live, { type: 'datastar-patch-elements' }, 5000);
 	assert.equal(result.status.staleSince, null);
 	assert.equal(result.status.attempt, 0);
 
-	// A patch clears it the same way, regardless of gen.
+	// A patch clears it the same way.
 	result = reduceStreamStatus(live, { type: 'patched' }, 6000);
 	assert.equal(result.status.staleSince, null);
 	assert.equal(result.status.attempt, 0);
 
-	// started always cancels any pending reconnect and arms a settle timer for its own gen.
+	// started always cancels any pending reconnect.
 	const started = reduceStreamStatus(emptyStreamStatus(), { type: 'started' }, 0);
 	assert.equal(started.effect.cancelReconnect, true);
-	assert.equal(started.effect.settleGen, started.status.gen);
+	assert.equal(started.effect.settleGen, undefined);
+});
 
-	// finished bumps gen on the last in-flight request too, so a settle timer
-	// armed by that stream's own started cannot clear a stale marker set
-	// after it finished: the settle timer's captured gen is stale by then.
-	let seq = reduceStreamStatus(emptyStreamStatus(), { type: 'started' }, 0);
-	const settleGen = seq.effect.settleGen;
-	seq = reduceStreamStatus(seq.status, { type: 'finished' }, 0);
-	seq = reduceStreamStatus(seq.status, { type: 'reconnecting' }, 100);
-	result = reduceStreamStatus(seq.status, { type: 'settled', gen: settleGen }, 200);
-	assert.equal(result.status.staleSince, 100);
+test('reduceStreamStatus marks a silent stream stale and reconnects after STREAM_IDLE_MS', () => {
+	let status = reduceStreamStatus(emptyStreamStatus(), { type: 'started' }, 0).status;
+	status = reduceStreamStatus(status, { type: 'datastar-patch-elements' }, 100).status;
+
+	// Just under the idle window: still live.
+	let result = reduceStreamStatus(status, { type: 'tick' }, 100 + STREAM_IDLE_MS - 1);
+	assert.equal(result.status.staleSince, null);
+	assert.equal(result.effect.reconnectIn, null);
+
+	// At the idle window: goes stale and schedules the first reconnect.
+	result = reduceStreamStatus(status, { type: 'tick' }, 100 + STREAM_IDLE_MS);
+	assert.equal(result.status.staleSince, 100 + STREAM_IDLE_MS);
+	assert.equal(result.effect.reconnectIn, reconnectDelay(0));
+	status = result.status;
+
+	// A second tick 1s later is still within the (restarted) idle window, so
+	// it does not schedule another reconnect.
+	result = reduceStreamStatus(status, { type: 'tick' }, 100 + STREAM_IDLE_MS + 1000);
+	assert.equal(result.effect.reconnectIn, null);
+});
+
+test('reduceStreamStatus keeps a reconnect stale until its first frame', () => {
+	let status = reduceStreamStatus(emptyStreamStatus(), { type: 'reconnecting' }, 1000).status;
+	assert.equal(status.staleSince, 1000);
+	status = reduceStreamStatus(status, { type: 'started' }, 1100).status;
+
+	// Within the idle window of the new request: stays stale at the original time.
+	let result = reduceStreamStatus(status, { type: 'tick' }, 3100);
+	assert.equal(result.status.staleSince, 1000);
+
+	// Past the idle window with still no frame: another reconnect is scheduled.
+	result = reduceStreamStatus(status, { type: 'tick' }, 1100 + STREAM_IDLE_MS);
+	assert.equal(result.effect.reconnectIn, reconnectDelay(0));
+	status = result.status;
+
+	// Only a frame clears it.
+	result = reduceStreamStatus(status, { type: 'datastar-patch-elements' }, 1100 + STREAM_IDLE_MS + 50);
+	assert.equal(result.status.staleSince, null);
+	assert.equal(result.status.attempt, 0);
+});
+
+test('reduceStreamStatus restarts the idle clock on visible', () => {
+	const status = { ...emptyStreamStatus(), inflight: 1, lastFrameAt: 0 };
+
+	let result = reduceStreamStatus(status, { type: 'visible' }, 60000);
+	assert.equal(result.status.lastFrameAt, 60000);
+
+	result = reduceStreamStatus(result.status, { type: 'tick' }, 61000);
+	assert.equal(result.status.staleSince, null);
+	assert.equal(result.effect.reconnectIn, null);
+
+	// visible with nothing inflight is a no-op.
+	const idle = emptyStreamStatus();
+	assert.deepEqual(reduceStreamStatus(idle, { type: 'visible' }, 60000).status, idle);
 });
 
 test('staleMarkerText formats the stale time', () => {

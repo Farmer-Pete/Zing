@@ -49,7 +49,7 @@ import {
 	emptyStreamStatus,
 	reduceStreamStatus,
 	staleMarkerText,
-	STREAM_SETTLE_MS,
+	STREAM_TICK_MS,
 } from './keyboard.mjs';
 
 // defaultNav is the shell's own data-signals default (templates/shell.templ:
@@ -1398,20 +1398,15 @@ let suppressPatchSignal = false;
 // applyStreamEvent is console.js's one entry point into reduceStreamStatus
 // (keyboard.mjs): it folds event into streamStatus, then applies the pure
 // result's effect as DOM/timer side effects -- canceling a pending
-// reconnect, scheduling the settle check that proves a started request
-// live, or scheduling the backoff reconnect itself (dispatchNav(state.nav),
-// so the server renders the full view again) -- before re-rendering the
-// stale marker.
+// reconnect, or scheduling the backoff reconnect itself
+// (dispatchNav(state.nav), so the server renders the full view again) --
+// before re-rendering the stale marker.
 function applyStreamEvent(event) {
 	const { status, effect } = reduceStreamStatus(streamStatus, event, Date.now());
 	streamStatus = status;
 	if (effect.cancelReconnect) {
 		clearTimeout(reconnectTimerID);
 		reconnectTimerID = null;
-	}
-	if (effect.settleGen !== null) {
-		const gen = effect.settleGen;
-		setTimeout(() => applyStreamEvent({ type: 'settled', gen }), STREAM_SETTLE_MS);
 	}
 	if (effect.reconnectIn !== null) {
 		console.warn('console.js: /stream reconnecting', { delayMs: effect.reconnectIn, attempt: streamStatus.attempt });
@@ -1448,7 +1443,20 @@ function renderStreamStatus() {
 // attempt's started/finished/error/retrying/retries-failed to
 // applyStreamEvent instead of to Datastar's own retry). console.js loads
 // before datastar.js (shell.templ), so this listener is already bound
-// before data-init fires /stream's very first `started` event.
+// before data-init fires /stream's very first `started` event. The same
+// datastar-fetch event also fires once per SSE frame received while the
+// request stays open, with its detail.type set to the SSE event name
+// (datastar-patch-elements for every region patch), which is
+// reduceStreamStatus's live signal for a request that has frames arriving
+// but produced no observable DOM change (installPatchObserver's 'patched').
+//
+// The reconnect plan: a silent stream (one that stays open but delivers no
+// more frames -- a half-open socket, a hidden-tab pause, a wedged server
+// write) fires none of these events, so a 5s 'tick' interval re-checks
+// elapsed time against STREAM_IDLE_MS independently of any event arriving.
+// A 'visible' event on visibilitychange restarts that idle clock when a
+// hidden tab's paused stream comes back, since Datastar resumes it quietly
+// with no 'started' event of its own.
 function installStreamWatch() {
 	document.addEventListener('datastar-fetch', (event) => {
 		if (event.detail?.el?.id !== 'stream-ctl') {
@@ -1459,6 +1467,12 @@ function installStreamWatch() {
 			console.error('console.js: /stream', type, event.detail);
 		}
 		applyStreamEvent({ type });
+	});
+	setInterval(() => applyStreamEvent({ type: 'tick' }), STREAM_TICK_MS);
+	document.addEventListener('visibilitychange', () => {
+		if (!document.hidden) {
+			applyStreamEvent({ type: 'visible' });
+		}
 	});
 }
 
