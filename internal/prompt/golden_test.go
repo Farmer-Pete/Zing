@@ -260,10 +260,12 @@ func goldenCases() []goldenCase {
 				if err != nil {
 					t.Fatalf("CodeLensSection: %v", err)
 				}
+				ticket := "Title: Add a health check\n\n" +
+					"Body: Add a ping endpoint so uptime monitoring has something to hit."
 				plan := healthCheckPlan
 				diff := "diff --git a/internal/health/ping.go b/internal/health/ping.go\n" +
 					"+func Ping() string { return \"pong\" }\n"
-				in, err := ForReview(jobPrompt, "correctness", "a1b2c3d", codeSection, plan, diff, nil)
+				in, err := ForReview(jobPrompt, "correctness", "a1b2c3d", codeSection, ticket, plan, diff, nil)
 				if err != nil {
 					t.Fatalf("ForReview: %v", err)
 				}

@@ -422,7 +422,7 @@ func TestForReviewFillsPlaceholders(t *testing.T) {
 	t.Parallel()
 
 	jobPrompt := "You are the {lens} reviewer for one diff."
-	_, err := ForReview(jobPrompt, "correctness", "abc123", "## In code\nFind logic errors.", "<plan/>", "diff body", nil)
+	_, err := ForReview(jobPrompt, "correctness", "abc123", "## In code\nFind logic errors.", "ticket", "<plan/>", "diff body", nil)
 	if err == nil {
 		t.Fatal("ForReview returned no error for a prompt missing {sha}")
 	}
@@ -431,7 +431,7 @@ func TestForReviewFillsPlaceholders(t *testing.T) {
 		t.Errorf("ForReview error = %q, want %q", err.Error(), want)
 	}
 
-	in, err := ForReview(reviewJobPrompt, "correctness", "abc123", "## In code\nFind logic errors.", "<plan/>", "diff body", nil)
+	in, err := ForReview(reviewJobPrompt, "correctness", "abc123", "## In code\nFind logic errors.", "ticket", "<plan/>", "diff body", nil)
 	if err != nil {
 		t.Fatalf("ForReview: %v", err)
 	}
@@ -453,7 +453,7 @@ func TestForReviewFencesPlanAndDiff(t *testing.T) {
 
 	planXML := testPlanXML
 	diff := "diff --git a/a.go b/a.go\n+added line"
-	in, err := ForReview(reviewJobPrompt, "correctness", "abc123", "## In code\nFind logic errors.", planXML, diff, nil)
+	in, err := ForReview(reviewJobPrompt, "correctness", "abc123", "## In code\nFind logic errors.", "ticket body", planXML, diff, nil)
 	if err != nil {
 		t.Fatalf("ForReview: %v", err)
 	}
@@ -462,6 +462,29 @@ func TestForReviewFencesPlanAndDiff(t *testing.T) {
 
 	assertFenced(t, got, "plan", planXML)
 	assertFenced(t, got, "diff", diff)
+}
+
+// TestForReviewFencesTicketBeforePlan pins the ticket row (task 3): fenced,
+// labelTicket, placed before plan, so a lens reads the owner's decisions
+// (job.specFor) before the plan and the diff.
+func TestForReviewFencesTicketBeforePlan(t *testing.T) {
+	t.Parallel()
+
+	ticket := "ticket body"
+	in, err := ForReview(reviewJobPrompt, "correctness", "abc123", "## In code\nFind logic errors.",
+		ticket, testPlanXML, "diff body", nil)
+	if err != nil {
+		t.Fatalf("ForReview: %v", err)
+	}
+	in.Fence = testFence
+	got := Assemble(in)
+
+	assertFenced(t, got, "ticket", ticket)
+	ticketIdx := strings.Index(got, "ticket:\n")
+	planIdx := strings.Index(got, "plan:\n")
+	if ticketIdx == -1 || planIdx == -1 || ticketIdx > planIdx {
+		t.Errorf("ticket input does not come before plan:\n%s", got)
+	}
 }
 
 // TestCodeLensSectionProblemHasNone pins CodeLensSection's fixed error for

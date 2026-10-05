@@ -15,7 +15,8 @@ const ResumeHeader = "Continue this planning session. The owner's messages, the 
 	"and return the next document."
 
 // labelTicket is the ticket input's label, shared by every constructor
-// that carries one (ForClassify, ForPlanningFirst, ForPlanReview).
+// that carries one (ForClassify, ForPlanningFirst, ForPlanReview,
+// ForBuild, ForFix, ForMerge, ForJudge, ForReview).
 const labelTicket = "ticket"
 
 // labelPlan is the plan input's label, shared by every constructor that
@@ -429,14 +430,16 @@ func CodeLensSection(text string) (string, error) {
 
 // ForReview builds one lens's review job Input: the job prompt with
 // {lens} and {sha} filled, the lens file's "## In code" section appended
-// (blank line between), then plan and diff, both fenced, then extra (D15)
-// — notes (fenced) among them on a retry that carries them (plan section
-// 6.2). A jobPrompt missing either placeholder is the fixed error
-// `prompt: review prompt lacks placeholder <name>`. Called once per lens
-// by internal/job's review round (plan section 6.2); calls Assemble once
-// Schemas is set from response.RenderTemplate(JobReview, ...) in review
-// schema order.
-func ForReview(jobPrompt, lensName, sha, codeSection, plan, diff string, extra []NamedInput) (Input, error) {
+// (blank line between), then ticket, plan, and diff, all fenced, then
+// extra (D15) — notes (fenced) among them on a retry that carries them
+// (plan section 6.2). ticket may carry the owner's decisions after the
+// ticket text (job.specFor); the ticket input comes first so a lens
+// reads the owner's decisions before the plan and the diff. A jobPrompt
+// missing either placeholder is the fixed error `prompt: review prompt
+// lacks placeholder <name>`. Called once per lens by internal/job's
+// review round (plan section 6.2); calls Assemble once Schemas is set
+// from response.RenderTemplate(JobReview, ...) in review schema order.
+func ForReview(jobPrompt, lensName, sha, codeSection, ticket, plan, diff string, extra []NamedInput) (Input, error) {
 	filled, err := fillPlaceholders(jobPrompt, "review", []placeholderPair{
 		{"{lens}", lensName},
 		{"{sha}", sha},
@@ -446,8 +449,9 @@ func ForReview(jobPrompt, lensName, sha, codeSection, plan, diff string, extra [
 	}
 	filled = strings.TrimRight(filled, "\n") + "\n\n" + strings.TrimRight(codeSection, "\n")
 
-	inputs := make([]NamedInput, 0, 2+len(extra))
+	inputs := make([]NamedInput, 0, 3+len(extra))
 	inputs = append(inputs,
+		NamedInput{Label: labelTicket, Text: ticket, Untrusted: true},
 		NamedInput{Label: labelPlan, Text: plan, Untrusted: true},
 		NamedInput{Label: "diff", Text: diff, Untrusted: true},
 	)
