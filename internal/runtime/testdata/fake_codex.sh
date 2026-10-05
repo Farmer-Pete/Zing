@@ -157,6 +157,17 @@ transient_once)
   printf '%s' "$default_result" > "$outfile"
   exit 0
   ;;
+plain_stdout_error)
+  # A run that exits 1 with plain text on stdout -- no JSON event at all --
+  # so codexFailureDetail falls back to its last-lines reading (fromEvent
+  # false) even when that text itself contains a transient-looking number
+  # such as 503: Codex.run must only call codexTransientMatch when
+  # codexFailureDetail's match came from an actual error or turn.failed
+  # event, never from this fallback.
+  msg="${FAKE_CODEX_ERROR_MESSAGE:-plain line mentioning 503 with no event}"
+  printf '%s\n' "$msg"
+  exit 1
+  ;;
 sleep)
   # A grandchild relative to the Go test process: this script (already the
   # direct child exec.CommandContext started) backgrounds sleep, inheriting

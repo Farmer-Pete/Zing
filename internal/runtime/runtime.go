@@ -99,7 +99,7 @@ type RunResult struct {
 	// Stdout to its own file under DATA_DIR/runs once Run returns. "" for
 	// the Fake and a process that never started.
 	TranscriptPath string
-	// Stdout holds the last maxStdoutBytes (64 KiB) of the child's raw
+	// Stdout holds the last maxCodexStdoutBytes (64 KiB) of the child's raw
 	// stdout (Codex only): the codex exec --json event stream, which is
 	// where an error that kills the run within seconds, before any final
 	// message exists, is actually reported. After job.runJobWith retries a

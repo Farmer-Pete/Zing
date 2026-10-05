@@ -717,6 +717,34 @@ func TestCodex_TransientErrorSetsExecErrorTransient(t *testing.T) {
 	}
 }
 
+// TestCodex_PlainStdoutMentioningPatternSetsNoTransient proves Codex.run
+// only calls codexTransientMatch when codexFailureDetail's result came from
+// an actual error or turn.failed event (fromEvent true), not from its
+// last-lines fallback: a run whose stdout is plain text mentioning 503,
+// with no JSON event at all, must leave ExecError.Transient empty even
+// though codexTransientMatch itself would match that text.
+func TestCodex_PlainStdoutMentioningPatternSetsNoTransient(t *testing.T) {
+	t.Parallel()
+	requireUnix(t)
+
+	const line = "plain line mentioning 503 with no event"
+	dir := t.TempDir()
+	req := newFakeCodexRequest(dir, "plain_stdout_error", "FAKE_CODEX_ERROR_MESSAGE="+line)
+	c := NewCodex(fakeCodexScript)
+	res, err := c.Run(context.Background(), req)
+
+	var execErr *ExecError
+	if !errors.As(err, &execErr) {
+		t.Fatalf("err = %v, want *ExecError", err)
+	}
+	if execErr.Transient != "" {
+		t.Errorf("ExecError.Transient = %q, want empty (the match came from the fallback, not an event)", execErr.Transient)
+	}
+	if res.FailureDetail != line {
+		t.Errorf("res.FailureDetail = %q, want %q", res.FailureDetail, line)
+	}
+}
+
 // TestTailWriter proves tailWriter keeps only the most recently written
 // bytes, up to its limit, unlike capWriter, which keeps the first bytes and
 // drops the rest: several writes totaling more than the limit, including one
@@ -788,6 +816,19 @@ func TestCodexFailureDetail(t *testing.T) {
 			stdout: `{"type":"thread.started","thread_id":"t1"}
 {"type":"turn.failed","error":{"message":"turn failed message"}}`,
 			wantDetail:    "turn failed message",
+			wantFromEvent: true,
+		},
+		{
+			name:          "an error event with an empty message is skipped, falling back to its own raw line",
+			stdout:        `{"type":"error","message":""}`,
+			wantDetail:    `{"type":"error","message":""}`,
+			wantFromEvent: false,
+		},
+		{
+			name: "an earlier event with a message wins over a later event with an empty message",
+			stdout: `{"type":"error","message":"first error"}
+{"type":"error","message":""}`,
+			wantDetail:    "first error",
 			wantFromEvent: true,
 		},
 		{

@@ -325,65 +325,95 @@ func TestRunAndRoute_CodexPermanentErrorRunsOnce(t *testing.T) {
 // several tests assert it comes through unchanged (goconst).
 const wantFirstAttemptDetail = "first attempt detail"
 
+// scriptedAttempt is one call's scripted (RunResult, error) pair for
+// scriptedTransientRuntime.results, named once so every test's literal
+// states the pair's shape only once rather than repeating an anonymous
+// struct type at each call site.
+type scriptedAttempt struct {
+	res runtime.RunResult
+	err error
+}
+
 // scriptedTransientRuntime is a runtime.Runtime that returns one scripted
 // (RunResult, error) pair per call, by call order, repeating its last entry
 // for any call past len(results): the two runJob-level retry tests below
 // drive it directly, in place of the real Codex runtime, to control exactly
 // what each of the two attempts returns -- real bytes and a real
 // *runtime.ExecError with Transient set, but no real process -- and to
-// count how many times rt.Run actually ran.
+// count how many times rt.Run actually ran. onRun, when set, runs
+// synchronously after each call's result is chosen and before Run returns
+// it, so a test can end runCtx (cancel it, or fire a scripted deadline) the
+// instant the attempt it cares about has actually run, rather than racing a
+// wall-clock timer against runJob's own Reserve and setup work, which can
+// take longer than a short timer under a loaded or race-enabled test run.
 type scriptedTransientRuntime struct {
-	results []struct {
-		res runtime.RunResult
-		err error
-	}
-	calls int
+	results []scriptedAttempt
+	calls   int
+	onRun   func(callIndex int)
 }
 
 func (s *scriptedTransientRuntime) Run(context.Context, runtime.RunRequest) (runtime.RunResult, error) {
 	i := min(s.calls, len(s.results)-1)
 	s.calls++
+	if s.onRun != nil {
+		s.onRun(i)
+	}
 	return s.results[i].res, s.results[i].err
+}
+
+// fakeDeadlineCtx is a context.Context whose Err() reports
+// context.DeadlineExceeded once fire is closed, letting a test end the
+// context from inside scriptedTransientRuntime's onRun hook -- right after
+// the first attempt actually ran -- rather than from a wall-clock
+// context.WithTimeout started before runJob's own Reserve and setup work,
+// which can outlast a short timeout under a loaded or race-enabled test
+// run.
+//
+//nolint:containedctx // this is a test-only context.Context implementation, not a long-lived struct holding a request-scoped context.
+type fakeDeadlineCtx struct {
+	context.Context
+	fire chan struct{}
+}
+
+// newFakeDeadlineCtx returns a fakeDeadlineCtx wrapping parent, and the func
+// that fires its deadline.
+func newFakeDeadlineCtx(parent context.Context) (ctx *fakeDeadlineCtx, fire func()) {
+	c := &fakeDeadlineCtx{Context: parent, fire: make(chan struct{})}
+	return c, func() { close(c.fire) }
+}
+
+func (c *fakeDeadlineCtx) Done() <-chan struct{} { return c.fire }
+
+func (c *fakeDeadlineCtx) Err() error {
+	select {
+	case <-c.fire:
+		return context.DeadlineExceeded
+	default:
+		return nil
+	}
 }
 
 // TestRunJob_TransientRetrySkippedWhenContextEnds is this task's named test
 // (design: TestRunJob_TransientRetrySkippedWhenContextEnds): canceling the
-// parent context 100ms into retryTransient's 2s wait must skip the second
+// parent context during retryTransient's 2s wait must skip the second
 // attempt, keep the first attempt's own result, set ExitCode to -1, and
-// return runtime.ErrCanceled.
+// return runtime.ErrCanceled. The cancel fires from the stub's onRun hook,
+// right after the first attempt has actually run, rather than from a
+// wall-clock timer that could fire during runJob's own Reserve and setup
+// work instead.
 func TestRunJob_TransientRetrySkippedWhenContextEnds(t *testing.T) {
 	t.Parallel()
-	s := newRunJobTestStore(t)
-	ticketID := seedRunJobTicket(t, s)
-	ticket := getRunJobTicket(t, s, ticketID)
-	owner, expires := claimRunJobTicket(t, s, ticketID)
-
-	stub := &scriptedTransientRuntime{results: []struct {
-		res runtime.RunResult
-		err error
-	}{
+	stub := &scriptedTransientRuntime{results: []scriptedAttempt{
 		{
 			res: runtime.RunResult{Stdout: []byte("first attempt stdout\n"), FailureDetail: wantFirstAttemptDetail},
 			err: &runtime.ExecError{ExitCode: 1, Transient: "503"},
 		},
 	}}
-	set, err := runtime.NewSet(map[string]runtime.Runtime{testRuntimeClaude: stub, testRuntimeCodex: stub, runtimeFake: stub})
-	if err != nil {
-		t.Fatalf("runtime.NewSet: %v", err)
-	}
-
-	d := Deps{
-		Store: s, Runtimes: set, Machine: runJobTestMachine(t), Models: map[string]string{testModelAlias: testModelExact},
-		Budget: time.Hour, Owner: owner, Expires: expires, Reserve: realReserve(s, owner, expires),
-		DataDir: t.TempDir(),
-	}
+	d, ticket := newTransientRetryStubDeps(t, stub)
 
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
-	go func() {
-		time.Sleep(100 * time.Millisecond)
-		cancel()
-	}()
+	stub.onRun = func(int) { cancel() }
 
 	rr, err := runJob(ctx, d, ticket, testJobClassify, store.SessionUpsert{Job: testJobClassify, Runtime: testRuntimeClaude},
 		runtime.RunRequest{Job: response.JobClassify}, nil, nil, 0)
@@ -401,7 +431,7 @@ func TestRunJob_TransientRetrySkippedWhenContextEnds(t *testing.T) {
 		t.Errorf("rr.Res.ExitCode = %d, want -1", rr.Res.ExitCode)
 	}
 
-	_, ev, err := s.RunEvidenceByID(t.Context(), rr.Reserved.RunID)
+	_, ev, err := d.Store.RunEvidenceByID(t.Context(), rr.Reserved.RunID)
 	if err != nil {
 		t.Fatalf("RunEvidenceByID: %v", err)
 	}
@@ -417,31 +447,14 @@ func TestRunJob_TransientRetrySkippedWhenContextEnds(t *testing.T) {
 // attempt's bytes at the start.
 func TestRunJob_TransientRetryCapsStdout(t *testing.T) {
 	t.Parallel()
-	s := newRunJobTestStore(t)
-	ticketID := seedRunJobTicket(t, s)
-	ticket := getRunJobTicket(t, s, ticketID)
-	owner, expires := claimRunJobTicket(t, s, ticketID)
-
 	const chunk = 40 * 1024
 	aBytes := bytes.Repeat([]byte("a"), chunk)
 	bBytes := bytes.Repeat([]byte("b"), chunk)
-	stub := &scriptedTransientRuntime{results: []struct {
-		res runtime.RunResult
-		err error
-	}{
+	stub := &scriptedTransientRuntime{results: []scriptedAttempt{
 		{res: runtime.RunResult{Stdout: aBytes}, err: &runtime.ExecError{ExitCode: 1, Transient: "503"}},
 		{res: runtime.RunResult{Stdout: bBytes}},
 	}}
-	set, err := runtime.NewSet(map[string]runtime.Runtime{testRuntimeClaude: stub, testRuntimeCodex: stub, runtimeFake: stub})
-	if err != nil {
-		t.Fatalf("runtime.NewSet: %v", err)
-	}
-
-	d := Deps{
-		Store: s, Runtimes: set, Machine: runJobTestMachine(t), Models: map[string]string{testModelAlias: testModelExact},
-		Budget: time.Hour, Owner: owner, Expires: expires, Reserve: realReserve(s, owner, expires),
-		DataDir: t.TempDir(),
-	}
+	d, ticket := newTransientRetryStubDeps(t, stub)
 
 	rr, err := runJob(t.Context(), d, ticket, testJobClassify, store.SessionUpsert{Job: testJobClassify, Runtime: testRuntimeClaude},
 		runtime.RunRequest{Job: response.JobClassify}, nil, nil, 0)
@@ -452,7 +465,7 @@ func TestRunJob_TransientRetryCapsStdout(t *testing.T) {
 		t.Errorf("stub.calls = %d, want 2", stub.calls)
 	}
 
-	_, ev, err := s.RunEvidenceByID(t.Context(), rr.Reserved.RunID)
+	_, ev, err := d.Store.RunEvidenceByID(t.Context(), rr.Reserved.RunID)
 	if err != nil {
 		t.Fatalf("RunEvidenceByID: %v", err)
 	}
@@ -475,8 +488,7 @@ func TestRunJob_TransientRetryCapsStdout(t *testing.T) {
 // newTransientRetryStubDeps is the Deps and ticket every retryTransient test
 // below needs: a fresh store and claimed ticket, the scripted stub runtime
 // registered under every runtime name a job config might name, and a real
-// DataDir, exactly the shape TestRunJob_TransientRetrySkippedWhenContextEnds
-// and TestRunJob_TransientRetryCapsStdout each build inline.
+// DataDir.
 func newTransientRetryStubDeps(t *testing.T, stub *scriptedTransientRuntime) (Deps, store.Ticket) {
 	t.Helper()
 	s := newRunJobTestStore(t)
@@ -501,18 +513,18 @@ func newTransientRetryStubDeps(t *testing.T, stub *scriptedTransientRuntime) (De
 // TestRunJob_TransientRetrySkippedWhenContextEnds' sibling for the other way
 // runCtx can end during retryTransient's 2s wait (design goals: "returns
 // runtime.ErrCanceled for a parent cancel or runtime.ErrTimeout for the job
-// deadline"): a context.WithTimeout parent whose own deadline, not a
-// cancel, ends during the wait must still skip the second attempt, keep the
-// first attempt's result, set ExitCode to -1, and return
-// runtime.ErrTimeout, not runtime.ErrCanceled. deleting or swapping
-// retryTransient's errors.Is(ctx.Err(), context.DeadlineExceeded) mapping
-// would turn this red while leaving the sibling cancel test green.
+// deadline"): a deadline that fires during the wait, not a cancel, must
+// still skip the second attempt, keep the first attempt's result, set
+// ExitCode to -1, and return runtime.ErrTimeout, not runtime.ErrCanceled.
+// deleting or swapping retryTransient's
+// errors.Is(ctx.Err(), context.DeadlineExceeded) mapping would turn this red
+// while leaving the sibling cancel test green. The deadline fires from the
+// stub's onRun hook, right after the first attempt has actually run, rather
+// than from a wall-clock context.WithTimeout that could elapse during
+// runJob's own Reserve and setup work instead.
 func TestRunJob_TransientRetrySkippedWhenJobDeadlineEnds(t *testing.T) {
 	t.Parallel()
-	stub := &scriptedTransientRuntime{results: []struct {
-		res runtime.RunResult
-		err error
-	}{
+	stub := &scriptedTransientRuntime{results: []scriptedAttempt{
 		{
 			res: runtime.RunResult{Stdout: []byte("first attempt stdout\n"), FailureDetail: wantFirstAttemptDetail},
 			err: &runtime.ExecError{ExitCode: 1, Transient: "503"},
@@ -520,12 +532,8 @@ func TestRunJob_TransientRetrySkippedWhenJobDeadlineEnds(t *testing.T) {
 	}}
 	d, ticket := newTransientRetryStubDeps(t, stub)
 
-	// Shorter than transientRetryDelay (2s), so retryTransient's select
-	// hits ctx.Done() from this deadline, not the 2s wait, while rt.Run's
-	// own first call (synchronous, no sleep) still has time to complete
-	// first.
-	ctx, cancel := context.WithTimeout(t.Context(), 100*time.Millisecond)
-	defer cancel()
+	ctx, fire := newFakeDeadlineCtx(t.Context())
+	stub.onRun = func(int) { fire() }
 
 	rr, err := runJob(ctx, d, ticket, testJobClassify, store.SessionUpsert{Job: testJobClassify, Runtime: testRuntimeClaude},
 		runtime.RunRequest{Job: response.JobClassify}, nil, nil, 0)
@@ -552,10 +560,7 @@ func TestRunJob_TransientRetrySkippedWhenJobDeadlineEnds(t *testing.T) {
 // execFailureCommit already quotes it for an un-retried run.
 func TestRunAndRoute_CodexTransientSkippedByJobDeadlineEscalatesFirstDetail(t *testing.T) {
 	t.Parallel()
-	stub := &scriptedTransientRuntime{results: []struct {
-		res runtime.RunResult
-		err error
-	}{
+	stub := &scriptedTransientRuntime{results: []scriptedAttempt{
 		{
 			res: runtime.RunResult{FailureDetail: wantFirstAttemptDetail},
 			err: &runtime.ExecError{ExitCode: 1, Transient: "503"},
@@ -563,8 +568,8 @@ func TestRunAndRoute_CodexTransientSkippedByJobDeadlineEscalatesFirstDetail(t *t
 	}}
 	d, ticket := newTransientRetryStubDeps(t, stub)
 
-	ctx, cancel := context.WithTimeout(t.Context(), 100*time.Millisecond)
-	defer cancel()
+	ctx, fire := newFakeDeadlineCtx(t.Context())
+	stub.onRun = func(int) { fire() }
 
 	su := store.SessionUpsert{Job: testJobClassify, Runtime: testRuntimeClaude}
 	commit, err := runAndRoute(ctx, d, ticket, testJobClassify, su, runtime.RunRequest{Job: response.JobClassify}, 0,
@@ -597,10 +602,7 @@ func TestRunAndRoute_CodexTransientSkippedByJobDeadlineEscalatesFirstDetail(t *t
 // process-wide default to capture the records.
 func TestRunJob_TransientRetryLogsStartAndSuccess(t *testing.T) {
 	const firstDetail = "first attempt super secret detail"
-	stub := &scriptedTransientRuntime{results: []struct {
-		res runtime.RunResult
-		err error
-	}{
+	stub := &scriptedTransientRuntime{results: []scriptedAttempt{
 		{res: runtime.RunResult{FailureDetail: firstDetail}, err: &runtime.ExecError{ExitCode: 1, Transient: "503"}},
 		{res: runtime.RunResult{FinalMessage: "ok"}},
 	}}
@@ -666,10 +668,7 @@ func TestRunJob_TransientRetryLogsStartAndSuccess(t *testing.T) {
 func TestRunJob_TransientRetryLogsFailure(t *testing.T) {
 	const firstDetail = "first attempt super secret detail"
 	const secondDetail = "second attempt super secret detail"
-	stub := &scriptedTransientRuntime{results: []struct {
-		res runtime.RunResult
-		err error
-	}{
+	stub := &scriptedTransientRuntime{results: []scriptedAttempt{
 		{res: runtime.RunResult{FailureDetail: firstDetail}, err: &runtime.ExecError{ExitCode: 1, Transient: "503"}},
 		{res: runtime.RunResult{FailureDetail: secondDetail, ExitCode: 7}, err: &runtime.ExecError{ExitCode: 7}},
 	}}
@@ -718,18 +717,50 @@ func TestRunJob_TransientRetryLogsFailure(t *testing.T) {
 	}
 }
 
+// TestRunJob_TransientRetryFailsWithNoFailureDetail proves retryTransient's
+// fallback when the retry's own failure is not a Codex ExecError with no
+// final message -- an ErrStart, here -- so retryRes.FailureDetail arrives
+// empty: the rewritten FailureDetail must still name the matched pattern
+// and end with the retry's own error text, not an empty "the retry failed
+// with: " tail.
+func TestRunJob_TransientRetryFailsWithNoFailureDetail(t *testing.T) {
+	t.Parallel()
+	stub := &scriptedTransientRuntime{results: []scriptedAttempt{
+		{res: runtime.RunResult{FailureDetail: wantFirstAttemptDetail}, err: &runtime.ExecError{ExitCode: 1, Transient: "503"}},
+		{res: runtime.RunResult{}, err: runtime.ErrStart},
+	}}
+	d, ticket := newTransientRetryStubDeps(t, stub)
+
+	rr, err := runJob(t.Context(), d, ticket, testJobClassify, store.SessionUpsert{Job: testJobClassify, Runtime: testRuntimeClaude},
+		runtime.RunRequest{Job: response.JobClassify}, nil, nil, 0)
+	if !errors.Is(err, runtime.ErrStart) {
+		t.Fatalf("err = %v, want errors.Is(err, runtime.ErrStart)", err)
+	}
+
+	const wantPrefix = `retried once after a transient failure matching "503"; the retry failed with: `
+	if !strings.HasPrefix(rr.Res.FailureDetail, wantPrefix) {
+		t.Errorf("FailureDetail = %q, want prefix %q", rr.Res.FailureDetail, wantPrefix)
+	}
+	if !strings.HasSuffix(rr.Res.FailureDetail, runtime.ErrStart.Error()) {
+		t.Errorf("FailureDetail = %q, want suffix %q", rr.Res.FailureDetail, runtime.ErrStart.Error())
+	}
+	if strings.Contains(rr.Res.FailureDetail, wantFirstAttemptDetail) {
+		t.Errorf("FailureDetail = %q, want it not to contain the first attempt's own detail", rr.Res.FailureDetail)
+	}
+}
+
 // TestRunJob_TransientRetryLogsSkipped proves the context-ended branch's
 // WARN line (design goals: "a skip is WARN runtime transient retry skipped
 // with err_kind when the run context ends during the 2s wait", each retry
 // branch line also carrying match) and that the first attempt's own failure
 // detail text never reaches the log. Not t.Parallel: it swaps slog's
-// process-wide default to capture the records.
+// process-wide default to capture the records. The cancel fires from the
+// stub's onRun hook, right after the first attempt has actually run, rather
+// than from a wall-clock timer that could fire during runJob's own Reserve
+// and setup work instead.
 func TestRunJob_TransientRetryLogsSkipped(t *testing.T) {
 	const firstDetail = "first attempt super secret detail"
-	stub := &scriptedTransientRuntime{results: []struct {
-		res runtime.RunResult
-		err error
-	}{
+	stub := &scriptedTransientRuntime{results: []scriptedAttempt{
 		{res: runtime.RunResult{FailureDetail: firstDetail}, err: &runtime.ExecError{ExitCode: 1, Transient: "503"}},
 	}}
 	d, ticket := newTransientRetryStubDeps(t, stub)
@@ -740,11 +771,8 @@ func TestRunJob_TransientRetryLogsSkipped(t *testing.T) {
 	t.Cleanup(func() { slog.SetDefault(prevDefault) })
 
 	ctx, cancel := context.WithCancel(t.Context())
-	go func() {
-		time.Sleep(100 * time.Millisecond)
-		cancel()
-	}()
 	defer cancel()
+	stub.onRun = func(int) { cancel() }
 
 	rr, err := runJob(ctx, d, ticket, testJobClassify, store.SessionUpsert{Job: testJobClassify, Runtime: testRuntimeClaude},
 		runtime.RunRequest{Job: response.JobClassify}, nil, nil, 0)

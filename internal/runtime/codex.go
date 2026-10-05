@@ -326,9 +326,11 @@ type codexFailureEventLine struct {
 	} `json:"error"`
 }
 
-// capFailureDetail cuts s on a rune boundary so the result is at most
-// maxFailureDetailBytes.
-func capFailureDetail(s string) string {
+// CapFailureDetail cuts s on a rune boundary so the result is at most
+// maxFailureDetailBytes. Exported so job.retryTransient can cut the retry
+// note it builds from two attempts' FailureDetail to the same bound, on the
+// same rune boundary, rather than growing its own copy of this rule.
+func CapFailureDetail(s string) string {
 	if len(s) <= maxFailureDetailBytes {
 		return s
 	}
@@ -339,23 +341,19 @@ func capFailureDetail(s string) string {
 	return s[:cut]
 }
 
-// CapFailureDetail is capFailureDetail, exported so job.retryTransient can
-// cut the retry note it builds from two attempts' FailureDetail to the same
-// maxFailureDetailBytes bound, on the same rune boundary, rather than
-// growing its own copy of this rule.
-func CapFailureDetail(s string) string {
-	return capFailureDetail(s)
-}
-
 // codexFailureDetail is Codex's own diagnosis of why a run with no final
 // message exited non-zero (design: RunResult.FailureDetail): it walks
 // stdout's JSONL lines once, remembering the last line whose type is
-// "error" (its message) or "turn.failed" (its error.message), and every
-// trimmed non-empty line in case none is found. When it finds an event, it
-// returns that message with fromEvent true. Otherwise it returns the last
-// 20 non-empty lines of stdout (joined by "\n"), or noStdoutFailureDetail
-// when stdout has no non-empty line at all, both with fromEvent false. The
-// result is always at most maxFailureDetailBytes, cut on a rune boundary.
+// "error" (its message) or "turn.failed" (its error.message) and whose
+// message is non-empty after TrimSpace, and every trimmed non-empty line in
+// case none is found. An event line with an empty message is skipped, so an
+// earlier event that did carry a message, or the last-20-lines fallback,
+// still applies rather than this function returning an empty detail. When
+// it finds a usable event, it returns that message with fromEvent true.
+// Otherwise it returns the last 20 non-empty lines of stdout (joined by
+// "\n"), or noStdoutFailureDetail when stdout has no non-empty line at all,
+// both with fromEvent false. The result is always at most
+// maxFailureDetailBytes, cut on a rune boundary.
 func codexFailureDetail(stdout []byte) (detail string, fromEvent bool) {
 	var lastEventMessage string
 	haveEvent := false
@@ -371,15 +369,21 @@ func codexFailureDetail(stdout []byte) (detail string, fromEvent bool) {
 		if err := json.Unmarshal(line, &ev); err != nil {
 			continue
 		}
+		var msg string
 		switch ev.Type {
 		case "error":
-			lastEventMessage, haveEvent = ev.Message, true
+			msg = ev.Message
 		case "turn.failed":
-			lastEventMessage, haveEvent = ev.Error.Message, true
+			msg = ev.Error.Message
+		default:
+			continue
+		}
+		if msg = strings.TrimSpace(msg); msg != "" {
+			lastEventMessage, haveEvent = msg, true
 		}
 	}
 	if haveEvent {
-		return capFailureDetail(lastEventMessage), true
+		return CapFailureDetail(lastEventMessage), true
 	}
 
 	if len(nonEmpty) == 0 {
@@ -389,7 +393,7 @@ func codexFailureDetail(stdout []byte) (detail string, fromEvent bool) {
 	if len(nonEmpty) > maxTailLines {
 		nonEmpty = nonEmpty[len(nonEmpty)-maxTailLines:]
 	}
-	return capFailureDetail(strings.Join(nonEmpty, "\n")), false
+	return CapFailureDetail(strings.Join(nonEmpty, "\n")), false
 }
 
 // codexTransientPatterns is codexTransientMatch's closed list (design

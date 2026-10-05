@@ -340,11 +340,11 @@ const maxTranscriptBytes = 64 << 10
 // un-retried run that hit the same wall. When the wait completes, it calls
 // rt.Run once more on the same req, adds the first attempt's AgentTime to
 // the retry's, and joins both attempts' stdout, kept to the last
-// maxTranscriptBytes (capTranscriptTail) so the eventual transcript file
-// never passes that bound. A retry that still fails rewrites FailureDetail
-// into a note naming the matched pattern and quoting the retry's own
-// detail, so execFailureCommit's Tried (planning.go) tells the owner a
-// retry was already tried, not just that the run failed twice silently.
+// maxTranscriptBytes so the eventual transcript file never passes that
+// bound. A retry that still fails rewrites FailureDetail into a note naming
+// the matched pattern and quoting the retry's own detail, so
+// execFailureCommit's Tried (planning.go) tells the owner a retry was
+// already tried, not just that the run failed twice silently.
 func retryTransient(
 	ctx context.Context, rt runtime.Runtime, req runtime.RunRequest,
 	ticketID, runID int64, jobName string, res runtime.RunResult, runErr error,
@@ -372,7 +372,7 @@ func retryTransient(
 	case <-time.After(transientRetryDelay):
 	}
 
-	firstAgentTime, firstStdout, firstDetail := res.AgentTime, res.Stdout, res.FailureDetail
+	firstAgentTime, firstStdout := res.AgentTime, res.Stdout
 	retryRes, retryErr := rt.Run(ctx, req)
 	retryRes.AgentTime += firstAgentTime
 	joinedStdout := append(append([]byte(nil), firstStdout...), retryRes.Stdout...)
@@ -390,16 +390,13 @@ func retryTransient(
 	// retryRes.FailureDetail is "" whenever the retry's own failure is not a
 	// Codex ExecError with no final message (an ErrTimeout from the job
 	// deadline, ErrStart, ErrOutputTooLarge, or a -o file with content):
-	// quoting retryErr.Error() and the first attempt's own detail there
-	// keeps execFailureCommit's Tried from ending in "the retry failed
-	// with: " with nothing after the colon.
+	// quoting retryErr.Error() there keeps execFailureCommit's Tried from
+	// ending in "the retry failed with: " with nothing after the colon.
 	quoted := retryRes.FailureDetail
 	if quoted == "" {
-		quoted = fmt.Sprintf("(first attempt: %s); the retry failed with: %s", firstDetail, retryErr.Error())
-	} else {
-		quoted = "the retry failed with: " + quoted
+		quoted = retryErr.Error()
 	}
-	retryRes.FailureDetail = runtime.CapFailureDetail(fmt.Sprintf("retried once after a transient failure matching %q; %s", execErr.Transient, quoted))
+	retryRes.FailureDetail = runtime.CapFailureDetail(fmt.Sprintf("retried once after a transient failure matching %q; the retry failed with: %s", execErr.Transient, quoted))
 	return retryRes, retryErr
 }
 
