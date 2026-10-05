@@ -9,8 +9,11 @@ import (
 )
 
 // Document is an extracted zing element: its dispatched, decoded Response
-// and the exact bytes of the element as it appeared in the input, opening
-// tag included.
+// and the bytes of the element, opening tag included. Elem holds the input
+// bytes exactly as written when Parse's strict pass finds the document; when
+// the repair pass finds it instead, Elem holds the repaired bytes, with bare
+// < escaped to &lt;, which can differ from the original input. See Parse's
+// doc comment for the two-pass behavior.
 type Document struct {
 	Response Response
 	Elem     []byte
