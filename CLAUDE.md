@@ -8,6 +8,14 @@ Go web service with a Datastar frontend. Module path `zing`, entrypoint `cmd/zin
 - While iterating, `make test-short` (`go test -short ./...`) skips the slow end-to-end flows for fast feedback; `make test`, `make test-race`, and `make ci` always run the full suite.
 - New clones need `make hooks-install` once.
 
+## Dogfood the console
+
+The owner runs Zing from the web console, so every owner action goes through it, and using it is how it gets tested.
+
+- When driving Zing (reading questions, answering, approving gates, deciding review and perimeter items, picking up issues, merging), act through the console with real clicks and typing. The database and logs are for reading state and diagnosis only.
+- When the console can't do a step, or does it badly, that is a console bug: file it and fix the console. A single logged workaround may unblock that one step; name the bug it works around.
+- When building an owner action, put it in one function its console route calls. Owner actions get no CLI verb.
+
 ## Style
 
 - Standard library first. Every new dependency is named in the plan with one line of why.
