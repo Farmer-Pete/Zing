@@ -2,6 +2,7 @@ package prompt
 
 import (
 	"regexp"
+	"strings"
 	"testing"
 )
 
@@ -61,6 +62,33 @@ func TestAssemble_TrimsTrailingNewlineBetweenBlocks(t *testing.T) {
 	want := "JOB\n\nS1\n\nSC\n\n" + Tail
 	if got != want {
 		t.Errorf("Assemble did not trim trailing newlines before joining\n--- got ---\n%s\n--- want ---\n%s", got, want)
+	}
+}
+
+// TestTail_NamesOneValidateForm asserts that Tail names the one allowed
+// zing validate command form (the heredoc, nothing else on the command),
+// drops the "zing validate FILE" variant, and states the capitals-
+// placeholder rule ahead of the escape rule.
+func TestTail_NamesOneValidateForm(t *testing.T) {
+	t.Parallel()
+
+	if !strings.Contains(Tail, "zing validate - <<'EOF'") {
+		t.Errorf("Tail does not contain the heredoc command form:\n%s", Tail)
+	}
+	if strings.Contains(Tail, "zing validate FILE") {
+		t.Errorf("Tail still offers the zing validate FILE variant:\n%s", Tail)
+	}
+
+	placeholderIdx := strings.Index(Tail, "Write a placeholder in capitals")
+	escapeIdx := strings.Index(Tail, "write it as &lt;")
+	if placeholderIdx < 0 {
+		t.Fatalf("Tail does not contain the capitals-placeholder rule:\n%s", Tail)
+	}
+	if escapeIdx < 0 {
+		t.Fatalf("Tail does not contain the escape rule:\n%s", Tail)
+	}
+	if placeholderIdx >= escapeIdx {
+		t.Errorf("capitals-placeholder rule (index %d) is not ahead of the escape rule (index %d)", placeholderIdx, escapeIdx)
 	}
 }
 
