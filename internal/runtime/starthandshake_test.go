@@ -2,6 +2,7 @@ package runtime
 
 import (
 	"context"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -170,5 +171,47 @@ func TestAgentWithoutPromptExits(t *testing.T) {
 
 	if _, err := os.Stat(filepath.Join(dir, "no_work")); err != nil {
 		t.Errorf("no_work marker missing: %v", err)
+	}
+}
+
+// TestAgentWithNewlineOnlyPromptDoesWork guards against a shell command
+// substitution pitfall in the stub: "$(cat)" strips every trailing newline,
+// so a prompt consisting only of newlines used to collapse to the empty
+// string and wrongly take the no_work branch. A real prompt of only
+// newlines must still be treated as work.
+func TestAgentWithNewlineOnlyPromptDoesWork(t *testing.T) {
+	t.Parallel()
+	requireUnix(t)
+
+	dir := t.TempDir()
+
+	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+	defer cancel()
+
+	cmd := exec.CommandContext(ctx, startHandshakeStub)
+	cmd.Env = append(os.Environ(), "STUB_DIR="+dir)
+	stdin, err := cmd.StdinPipe()
+	if err != nil {
+		t.Fatalf("StdinPipe: %v", err)
+	}
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+
+	if _, err := io.WriteString(stdin, "\n\n"); err != nil {
+		t.Fatalf("write prompt: %v", err)
+	}
+	if err := stdin.Close(); err != nil {
+		t.Fatalf("close stdin: %v", err)
+	}
+	if err := cmd.Wait(); err != nil {
+		t.Fatalf("Wait: %v", err)
+	}
+
+	if _, err := os.Stat(filepath.Join(dir, "stdin_done")); err != nil {
+		t.Fatalf("stub never reached stdin EOF: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "no_work")); err == nil {
+		t.Error("no_work marker present, want a newline-only prompt treated as real work")
 	}
 }

@@ -12,7 +12,8 @@ for arg in "$@"; do
   prev="$arg"
 done
 
-stdin="$(cat)"
+stdin="$(cat; printf x)"
+stdin=${stdin%?}
 : > "$dir/stdin_done"
 if [ -e "$dir/onstart_done" ]; then
   : > "$dir/ordered"
