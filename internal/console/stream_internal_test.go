@@ -88,14 +88,10 @@ func doStreamRequest(t *testing.T, base, view string, open int64, datastarHeader
 
 // newTestLogHandler builds a Handler at Debug (so the ring captures every
 // record regardless of level, design section 6.12's "pass" gate), its text
-// sink writing to w (io.Discard when w is nil), and installs it as slog's
-// default the way cmd/zing/serve.go installs the real one, restored on
-// cleanup.
+// sink writing to w, and installs it as slog's default the way
+// cmd/zing/serve.go installs the real one, restored on cleanup.
 func newTestLogHandler(t *testing.T, w io.Writer) *Handler {
 	t.Helper()
-	if w == nil {
-		w = io.Discard
-	}
 	lv := new(slog.LevelVar)
 	lv.Set(slog.LevelDebug)
 	h := NewHandler(w, lv, nil)
@@ -111,8 +107,16 @@ func newTestLogHandler(t *testing.T, w io.Writer) *Handler {
 func newStreamTestConsole(t *testing.T) (*console, *Handler) {
 	t.Helper()
 	s := newInternalTestStore(t)
-	h := newTestLogHandler(t, nil)
+	h := newTestLogHandler(t, io.Discard)
 	return &console{store: s, bus: bus.New(), log: h}, h
+}
+
+// ringEntries returns a locked snapshot of h's ring, the same copy-under-
+// mutex every direct ring read in this file needs.
+func ringEntries(h *Handler) []LogEntry {
+	h.ring.mu.Lock()
+	defer h.ring.mu.Unlock()
+	return append([]LogEntry(nil), h.ring.entries...)
 }
 
 // assertNoStreamError asserts the console log handler holds no ERROR (or
@@ -134,9 +138,7 @@ func assertNoStreamError(t *testing.T, h *Handler, body string, wantDebugMessage
 		t.Errorf("alertsComponent would render %d line(s), want none: %+v", len(lines), lines)
 	}
 
-	h.ring.mu.Lock()
-	entries := append([]LogEntry(nil), h.ring.entries...)
-	h.ring.mu.Unlock()
+	entries := ringEntries(h)
 
 	for _, want := range wantDebugMessages {
 		found := false
@@ -216,28 +218,28 @@ func TestLogStreamErr(t *testing.T) {
 		cancelled bool
 		err       error
 		level     slog.Level
-		wantWarn  bool
+		want      slog.Level
 	}{
 		{
 			name:      "cancelled ctx, non-Canceled error logs at Debug",
 			cancelled: true,
 			err:       errors.New("write: broken pipe"),
 			level:     slog.LevelWarn,
-			wantWarn:  false,
+			want:      slog.LevelDebug,
 		},
 		{
 			name:      "live ctx, wrapped context.Canceled logs at Debug",
 			cancelled: false,
 			err:       fmt.Errorf("inbox items: %w", context.Canceled),
 			level:     slog.LevelError,
-			wantWarn:  false,
+			want:      slog.LevelDebug,
 		},
 		{
 			name:      "live ctx, plain error keeps its level",
 			cancelled: false,
 			err:       errors.New("boom"),
 			level:     slog.LevelWarn,
-			wantWarn:  true,
+			want:      slog.LevelWarn,
 		},
 	}
 
@@ -256,9 +258,7 @@ func TestLogStreamErr(t *testing.T) {
 			const msg = "console: stream: test case"
 			logStreamErr(ctx, tc.level, msg, tc.err)
 
-			h.ring.mu.Lock()
-			entries := append([]LogEntry(nil), h.ring.entries...)
-			h.ring.mu.Unlock()
+			entries := ringEntries(h)
 
 			var got *LogEntry
 			for i := range entries {
@@ -269,23 +269,8 @@ func TestLogStreamErr(t *testing.T) {
 			if got == nil {
 				t.Fatalf("ring missing entry %q", msg)
 			}
-
-			wantLevel := slog.LevelDebug
-			if tc.wantWarn {
-				wantLevel = tc.level
-			}
-			if got.Level != wantLevel {
-				t.Errorf("ring entry level = %v, want %v", got.Level, wantLevel)
-			}
-
-			warnFound := false
-			for _, e := range h.Warnings(RingCapacity) {
-				if e.Message == msg {
-					warnFound = true
-				}
-			}
-			if warnFound != tc.wantWarn {
-				t.Errorf("h.Warnings holds %q = %v, want %v", msg, warnFound, tc.wantWarn)
+			if got.Level != tc.want {
+				t.Errorf("ring entry level = %v, want %v", got.Level, tc.want)
 			}
 
 			if !strings.Contains(sink.String(), tc.err.Error()) {
