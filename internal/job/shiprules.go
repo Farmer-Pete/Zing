@@ -647,6 +647,15 @@ func parseBaseMergeRequest(row store.MessageRow) (baseMergeRequest, error) {
 	return req, nil
 }
 
+// isBaseMergeRequestRow reports whether row's first line is a request
+// marker's own first line (baseMergeRequestedLine): the shared "is this a
+// request row, or an end marker" test openBaseMergeRequest, pollMergeCount
+// and baseMergeRequestByID all need.
+func isBaseMergeRequestRow(row store.MessageRow) bool {
+	firstLine, _, _ := strings.Cut(row.Body, "\n")
+	return baseMergeRequestedLine.MatchString(firstLine)
+}
+
 // openBaseMergeRequest reads every "base merge " marker row (oldest
 // first): request rows, and landed/closed rows naming a request id. It
 // returns the one request no landed or closed row names. Two open is the
@@ -656,11 +665,11 @@ func openBaseMergeRequest(rows []store.MessageRow) (baseMergeRequest, bool, erro
 	var requests []store.MessageRow
 	ended := make(map[int64]bool)
 	for i := range rows {
-		firstLine, _, _ := strings.Cut(rows[i].Body, "\n")
-		if baseMergeRequestedLine.MatchString(firstLine) {
+		if isBaseMergeRequestRow(rows[i]) {
 			requests = append(requests, rows[i])
 			continue
 		}
+		firstLine, _, _ := strings.Cut(rows[i].Body, "\n")
 		m := baseMergeEndLine.FindStringSubmatch(firstLine)
 		if m == nil {
 			continue
@@ -701,16 +710,33 @@ func openBaseMergeRequest(rows []store.MessageRow) (baseMergeRequest, bool, erro
 func pollMergeCount(rows []store.MessageRow) int {
 	count := 0
 	for i := range rows {
-		lines := strings.Split(rows[i].Body, "\n")
-		if len(lines) == 0 || !baseMergeRequestedLine.MatchString(lines[0]) {
+		if !isBaseMergeRequestRow(rows[i]) {
 			continue
 		}
+		lines := strings.Split(rows[i].Body, "\n")
 		if len(lines) >= 3 && baseMergeRetryLine.MatchString(lines[2]) {
 			continue
 		}
 		count++
 	}
 	return count
+}
+
+// baseMergeRequestByID finds and parses the one request row with the
+// given message id, for priorMergeRunID's (merge.go) own "carry over the
+// closed predecessor's report" lookup. found is false when no row has
+// that id. err is parseBaseMergeRequest's own error when the row's shape
+// does not parse; the caller decides what a malformed predecessor marker
+// means for it.
+func baseMergeRequestByID(rows []store.MessageRow, id int64) (req baseMergeRequest, found bool, err error) {
+	for i := range rows {
+		if rows[i].ID != id || !isBaseMergeRequestRow(rows[i]) {
+			continue
+		}
+		req, err = parseBaseMergeRequest(rows[i])
+		return req, true, err
+	}
+	return baseMergeRequest{}, false, nil
 }
 
 // baseMergeTriedID parses an escalation's Tried text: first line "base

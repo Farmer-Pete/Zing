@@ -124,17 +124,24 @@ func mergeEscalation(t store.Ticket, d Deps, req baseMergeRequest, what, why, de
 	return mergeEscalationIDs(t, d, req, what, why, detail, nil, nil)
 }
 
-// mergeEscalationIDs is every merge-unit escalation's own "escalation
-// written" log (design section 11) plus its commit, under code
-// "environment" and origin shipping, Tried = mergeTried(req, detail) and
-// ClearPoll set: the merge unit's equivalent of shipEscalationCode, except
-// that a merge escalation almost always does know which session and run it
-// is about, unlike PUBLISH and POLL's own escalations, which never make a
-// runtime call of their own. Logging through here instead of
-// shipEscalation (which always logs nil ids) is what lets a merge
-// escalation's log line be tied back to the session and run that caused it.
+// mergeEscalationIDs is mergeEscalationCode under code "environment", the
+// code every merge-unit escalation but the agent's own ErrorResponse uses.
 func mergeEscalationIDs(t store.Ticket, d Deps, req baseMergeRequest, what, why, detail string, sessionID, runID *int64) store.HandlerCommit {
-	code := string(response.EscalationCodeEnvironment)
+	return mergeEscalationCode(t, d, req, string(response.EscalationCodeEnvironment), what, why, detail, sessionID, runID)
+}
+
+// mergeEscalationCode is every merge-unit escalation's own "escalation
+// written" log (design section 11) plus its commit, under a caller-chosen
+// code, Tried = mergeTried(req, detail) and ClearPoll set: the merge
+// unit's equivalent of shipEscalationCode, except that a merge escalation
+// almost always does know which session and run it is about, unlike
+// PUBLISH and POLL's own escalations, which never make a runtime call of
+// their own. Logging through here instead of shipEscalation (which always
+// logs nil ids) is what lets a merge escalation's log line be tied back to
+// the session and run that caused it. mergeSuccessCommit's own
+// QuestionResponse and ErrorResponse branches call this directly, since
+// only they need a code other than "environment".
+func mergeEscalationCode(t store.Ticket, d Deps, req baseMergeRequest, code, what, why, detail string, sessionID, runID *int64) store.HandlerCommit {
 	slog.Warn("escalation written", "ticket_id", t.ID, "session_id", sessionID, "run_id", runID,
 		"code", code, "origin", string(response.EscalationOriginShipping), "request_id", req.MessageID)
 	c := escalationCommit(t, d, runID, sessionID, code, what, why, mergeTried(req, detail), response.EscalationOriginShipping)
@@ -191,7 +198,7 @@ func (h shipHandler) driveMerge(ctx context.Context, t store.Ticket, d Deps, req
 	unrecorded, prefixOK, err := unrecordedCommits(ctx, proj, wt, reports)
 	if err != nil {
 		log.Debug("base merge step", "step", "unrecorded_commits_error")
-		return store.HandlerCommit{}, err
+		return store.HandlerCommit{}, fmt.Errorf("job: merge: unrecorded commits: %w", err)
 	}
 	if !prefixOK {
 		log.Debug("base merge step", "step", "branch_missing_recorded")
@@ -284,14 +291,18 @@ func baseMergeClosedCommit(t store.Ticket, d Deps, req baseMergeRequest) store.H
 // the merge unit: ErrSandbox escalates sandbox_unavailable; a wrapped
 // context.Canceled returns runtime.ErrCanceled with no commit; anything
 // else escalates environment/"the project commands could not run".
-func mergeCommandInfraEscalation(t store.Ticket, d Deps, req baseMergeRequest, err error) (store.HandlerCommit, error) {
+// sessionID and runID are logged and stored on the escalation so it can be
+// tied back to the run whose CHECK commands failed to run at all; a
+// caller with no run yet (adoptMerge, before it knows which session the
+// commit belongs to) passes nil, nil.
+func mergeCommandInfraEscalation(t store.Ticket, d Deps, req baseMergeRequest, err error, sessionID, runID *int64) (store.HandlerCommit, error) {
 	switch {
 	case errors.Is(err, ErrSandbox):
-		return mergeEscalation(t, d, req, sandboxUnavailableWhat, d.Sandboxes.Build.Reason(), ""), nil
+		return mergeEscalationIDs(t, d, req, sandboxUnavailableWhat, d.Sandboxes.Build.Reason(), "", sessionID, runID), nil
 	case errors.Is(err, context.Canceled):
 		return store.HandlerCommit{}, runtime.ErrCanceled
 	default:
-		return mergeEscalation(t, d, req, projectCommandsNotRunWhat, projectCommandsNotRunWhy, err.Error()), nil
+		return mergeEscalationIDs(t, d, req, projectCommandsNotRunWhat, projectCommandsNotRunWhy, err.Error(), sessionID, runID), nil
 	}
 }
 
@@ -304,18 +315,23 @@ func mergeCommandInfraEscalation(t store.Ticket, d Deps, req baseMergeRequest, e
 // the check input, charged (runMergeResume), gated by jobs.merge.check_loops
 // then jobs.merge.max_resumes.
 func (h shipHandler) mergeCheck(ctx context.Context, t store.Ticket, d Deps, proj Project, wt orchestrator.Worktree, req baseMergeRequest, rid *int64, sess *store.Session) (store.HandlerCommit, error) {
+	var sessionID *int64
+	if sess != nil {
+		sessionID = &sess.ID
+	}
+
 	results, err := runCheckCommands(ctx, d, t, wt, proj, rid)
 	if err != nil {
-		return mergeCommandInfraEscalation(t, d, req, err)
+		return mergeCommandInfraEscalation(t, d, req, err, sessionID, rid)
 	}
 
 	markers, err := proj.Orch.ConflictMarkerPaths(ctx, wt)
 	if err != nil {
-		return mergeEscalation(t, d, req, treeNotDiffedWhat, treeNotDiffedWhy, err.Error()), nil
+		return mergeEscalationIDs(t, d, req, treeNotDiffedWhat, treeNotDiffedWhy, err.Error(), sessionID, rid), nil
 	}
 	outside, err := mergeOutsidePaths(ctx, proj, wt)
 	if err != nil {
-		return mergeEscalation(t, d, req, treeNotDiffedWhat, treeNotDiffedWhy, err.Error()), nil
+		return mergeEscalationIDs(t, d, req, treeNotDiffedWhat, treeNotDiffedWhy, err.Error(), sessionID, rid), nil
 	}
 
 	text := mergeCheckText(results, markers, outside)
@@ -351,13 +367,20 @@ func mergeOutsidePaths(ctx context.Context, proj Project, wt orchestrator.Worktr
 	if err != nil {
 		return nil, err
 	}
-	allowedSet := make(map[string]bool, len(allowed))
-	for _, p := range allowed {
-		allowedSet[p] = true
-	}
 	changed, err := proj.Orch.MergeChangedPaths(ctx, wt)
 	if err != nil {
 		return nil, err
+	}
+	return pathsOutside(changed, allowed), nil
+}
+
+// pathsOutside returns, in changed's own order, every path not in allowed:
+// mergeOutsidePaths' and adoptMerge's own shared "is this outside the
+// merge" set difference.
+func pathsOutside(changed, allowed []string) []string {
+	allowedSet := make(map[string]bool, len(allowed))
+	for _, p := range allowed {
+		allowedSet[p] = true
 	}
 	var outside []string
 	for _, p := range changed {
@@ -365,7 +388,7 @@ func mergeOutsidePaths(ctx context.Context, proj Project, wt orchestrator.Worktr
 			outside = append(outside, p)
 		}
 	}
-	return outside, nil
+	return outside
 }
 
 // landMerge commits and records the merge (overview design "One merge
@@ -400,7 +423,7 @@ func (h shipHandler) landMerge(ctx context.Context, t store.Ticket, d Deps, proj
 		if strings.Contains(commitErr.Error(), "commit signing failed") {
 			what, why = commitSigningFailedWhat, commitSigningFailedWhy
 		}
-		return mergeEscalation(t, d, req, what, why, commitErr.Error()), nil
+		return mergeEscalationIDs(t, d, req, what, why, commitErr.Error(), nil, rid), nil
 	}
 
 	slog.Info("base merge landed", "ticket_id", t.ID, "request_id", req.MessageID, "run_id", int64OrZero(rid), "commit_sha", sha)
@@ -454,22 +477,14 @@ func priorMergeRunID(ctx context.Context, t store.Ticket, d Deps, req baseMergeR
 	if err != nil {
 		return 0, false, fmt.Errorf("job: merge: prior run: base merge markers: %w", err)
 	}
-	var prior baseMergeRequest
-	found := false
-	for i := range rows {
-		if rows[i].ID != req.RetryOf {
-			continue
-		}
-		firstLine, _, _ := strings.Cut(rows[i].Body, "\n")
-		if !baseMergeRequestedLine.MatchString(firstLine) {
-			continue
-		}
-		p, perr := parseBaseMergeRequest(rows[i])
-		if perr != nil {
-			return 0, false, nil //nolint:nilerr // a malformed predecessor marker just means "no report to carry over", not a hard failure; landMerge falls back to its own synthesized report
-		}
-		prior, found = p, true
-		break
+	prior, found, perr := baseMergeRequestByID(rows, req.RetryOf)
+	if perr != nil {
+		// A malformed predecessor marker just means "no report to carry
+		// over", not a hard failure; landMerge falls back to its own
+		// synthesized report. Logged, since it silently discards whatever
+		// real report the predecessor's own agent run produced.
+		slog.Warn("base merge predecessor marker malformed", "ticket_id", t.ID, "request_id", req.MessageID, "retry_of", req.RetryOf, "err", perr)
+		return 0, false, nil
 	}
 	if !found {
 		return 0, false, nil
@@ -555,7 +570,7 @@ func (h shipHandler) adoptMerge(ctx context.Context, t store.Ticket, d Deps, pro
 
 	results, err := runCheckCommands(ctx, d, t, wt, proj, nil)
 	if err != nil {
-		return mergeCommandInfraEscalation(t, d, req, err)
+		return mergeCommandInfraEscalation(t, d, req, err, nil, nil)
 	}
 	if len(failedKinds(results)) > 0 {
 		return fail("commands failed"), nil
@@ -577,14 +592,8 @@ func (h shipHandler) adoptMerge(ctx context.Context, t store.Ticket, d Deps, pro
 	if err != nil {
 		return store.HandlerCommit{}, fmt.Errorf("job: merge: adopt: changed files between: %w", err)
 	}
-	allowed := make(map[string]bool, len(mergeSidePaths))
-	for _, p := range mergeSidePaths {
-		allowed[p] = true
-	}
-	for _, p := range commitPaths {
-		if !allowed[p] {
-			return fail("outside the merge"), nil
-		}
+	if outside := pathsOutside(commitPaths, mergeSidePaths); len(outside) > 0 {
+		return fail("outside the merge"), nil
 	}
 
 	markers, err := proj.Orch.PathsWithConflictMarkers(ctx, wt, commitPaths)
@@ -694,25 +703,16 @@ func mergeSuccessCommit(t store.Ticket, d Deps, rr runResult, sessionCommit *sto
 	case *response.BuildResponse:
 		return buildSuccessCommit(t, d, rr, sessionCommit, nil, unit{TaskN: 0, Title: mergeTitle(req)})
 	case *response.QuestionResponse:
-		code := string(response.EscalationCodeEnvironment)
-		slog.Warn("escalation written", "ticket_id", t.ID, "session_id", rr.Reserved.SessionID, "run_id", rr.Reserved.RunID,
-			"code", code, "origin", string(response.EscalationOriginShipping), "request_id", req.MessageID)
-		c := escalationCommit(t, d, &rr.Reserved.RunID, &rr.Reserved.SessionID,
-			code, mergeDecisionWhat, mergeDecisionWhy,
-			mergeTried(req, mergeQuestionText(resp.Questions)), response.EscalationOriginShipping)
+		c := mergeEscalationCode(t, d, req, string(response.EscalationCodeEnvironment), mergeDecisionWhat, mergeDecisionWhy,
+			mergeQuestionText(resp.Questions), &rr.Reserved.SessionID, &rr.Reserved.RunID)
 		c.Runs = terminalRuns(rr, string(response.OutcomeQuestion))
 		c.Session = sessionCommit
-		c.ClearPoll = true
 		return c, nil
 	case *response.ErrorResponse:
-		slog.Warn("escalation written", "ticket_id", t.ID, "session_id", rr.Reserved.SessionID, "run_id", rr.Reserved.RunID,
-			"code", string(resp.Error.Code), "origin", string(response.EscalationOriginShipping), "request_id", req.MessageID)
-		c := escalationCommit(t, d, &rr.Reserved.RunID, &rr.Reserved.SessionID,
-			string(resp.Error.Code), resp.Error.What, resp.Error.Why,
-			mergeTried(req, resp.Error.Tried), response.EscalationOriginShipping)
+		c := mergeEscalationCode(t, d, req, string(resp.Error.Code), resp.Error.What, resp.Error.Why,
+			resp.Error.Tried, &rr.Reserved.SessionID, &rr.Reserved.RunID)
 		c.Runs = terminalRuns(rr, string(response.OutcomeError))
 		c.Session = sessionCommit
-		c.ClearPoll = true
 		return c, nil
 	default:
 		return store.HandlerCommit{}, fmt.Errorf("job: merge: outcome %s not handled", rr.Res.Response.Header().Outcome)

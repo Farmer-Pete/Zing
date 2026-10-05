@@ -227,6 +227,36 @@ func TestStartBaseMergeClean(t *testing.T) {
 	}
 }
 
+// TestStartBaseMergeDirtyTreeRefuses proves StartBaseMerge's own error path
+// other than ErrAlreadyMerged: an uncommitted edit to the very file the
+// base side also changed makes "git merge" refuse outright ("local
+// changes ... would be overwritten by merge"), so StartBaseMerge returns
+// an error naming git's own output and starts no merge at all.
+func TestStartBaseMergeDirtyTreeRefuses(t *testing.T) {
+	t.Parallel()
+	ctx := t.Context()
+	f := newMergeConflictFixture(t, 75)
+
+	writeTestFile(t, filepath.Join(f.wt.Dir(), mergeSharedPath), "uncommitted local edit\n")
+
+	conflicted, err := f.o.StartBaseMerge(ctx, f.wt, f.baseSHA)
+	if err == nil {
+		t.Fatalf("StartBaseMerge: expected an error for a dirty tree, got conflicted=%v", conflicted)
+	}
+	if errors.Is(err, ErrAlreadyMerged) {
+		t.Errorf("StartBaseMerge error = %v, want something other than ErrAlreadyMerged", err)
+	}
+	if !strings.Contains(err.Error(), "git merge") {
+		t.Errorf("StartBaseMerge error = %q, want it to name git merge's own output", err.Error())
+	}
+
+	if inProgress, err := f.o.mergeInProgress(ctx, f.wt); err != nil {
+		t.Fatalf("mergeInProgress: %v", err)
+	} else if inProgress {
+		t.Error("mergeInProgress = true after a refused StartBaseMerge, want false")
+	}
+}
+
 // -----------------------------------------------------------------------
 // ConflictMarkerPaths
 // -----------------------------------------------------------------------
@@ -366,10 +396,12 @@ func (r signedStatusLiesUnsigned) Run(ctx context.Context, dir, name string, arg
 const gitShowSubcommand = "show"
 
 func (r signedStatusLiesUnsigned) Output(ctx context.Context, dir, name string, args ...string) (string, error) {
-	if name == "git" && len(args) > 0 && args[0] == gitShowSubcommand && slices.Contains(args, "--format=%G?") {
+	isSignatureShow := name == "git" && len(args) > 0 && args[0] == gitShowSubcommand && slices.Contains(args, "--format=%G?")
+	if isSignatureShow {
 		return "N\n", nil
 	}
-	if name == "git" && len(args) > 1 && args[0] == "cat-file" && args[1] == "-p" {
+	isCatFile := name == "git" && len(args) > 1 && args[0] == "cat-file" && args[1] == "-p"
+	if isCatFile {
 		return "tree deadbeef\nauthor a <a@example.com> 0 +0000\ncommitter a <a@example.com> 0 +0000\n\nno signature header here\n", nil
 	}
 	return r.inner.Output(ctx, dir, name, args...)
@@ -530,6 +562,126 @@ func TestCommitMergeRefusesWithoutMerge(t *testing.T) {
 	afterHead := strings.TrimSpace(runGit(ctx, t, wt.Dir(), "rev-parse", "HEAD"))
 	if afterHead != priorHead {
 		t.Errorf("HEAD = %q after a refused CommitMerge, want unchanged %q", afterHead, priorHead)
+	}
+}
+
+// TestCommitMergeStagesSidePathDeletions proves CommitMerge's own two-step
+// staging survives a merge-side path a resolved merge removes entirely:
+// one file the ticket branch deletes and main leaves untouched, and
+// another main deletes that the ticket branch never touched. Git resolves
+// both automatically -- gone from the index and the working tree before
+// CommitMerge ever runs -- so naming either one in an explicit "git add
+// -A" pathspec would make git refuse with "pathspec '<p>' did not match
+// any files" if CommitMerge did not filter them out first
+// (mergeSidePathsPresent).
+func TestCommitMergeStagesSidePathDeletions(t *testing.T) {
+	t.Parallel()
+	ctx := t.Context()
+
+	const (
+		ticketDeletesPath = "ticket-deletes-this.txt"
+		mainDeletesPath   = "main-deletes-this.txt"
+	)
+
+	fixture := newSigningFixture(t, true)
+	repo := newSigningTestRepo(t, fixture)
+	o := newTestOrchestrator(t, repo, execRunner{})
+
+	writeTestFile(t, filepath.Join(repo, mergeSharedPath), "line one\n")
+	writeTestFile(t, filepath.Join(repo, ticketDeletesPath), "present at the common ancestor\n")
+	writeTestFile(t, filepath.Join(repo, mainDeletesPath), "present at the common ancestor\n")
+	runGit(ctx, t, repo, "add", mergeSharedPath, ticketDeletesPath, mainDeletesPath)
+	runGit(ctx, t, repo, "commit", "-q", "-m", "seed")
+
+	wt, err := o.PrepareWorktree(ctx, 73, "", nil)
+	if err != nil {
+		t.Fatalf("PrepareWorktree: %v", err)
+	}
+	writeTestFile(t, filepath.Join(wt.Dir(), mergeSharedPath), "line one TICKET\n")
+	runGit(ctx, t, wt.Dir(), "rm", "-q", ticketDeletesPath)
+	runGit(ctx, t, wt.Dir(), "add", mergeSharedPath)
+	runGit(ctx, t, wt.Dir(), "commit", "-q", "-m", "ticket edits shared.txt and deletes its own file")
+	ticketHead := strings.TrimSpace(runGit(ctx, t, wt.Dir(), "rev-parse", "HEAD"))
+
+	writeTestFile(t, filepath.Join(repo, mergeSharedPath), "line one MAIN\n")
+	runGit(ctx, t, repo, "rm", "-q", mainDeletesPath)
+	runGit(ctx, t, repo, "add", mergeSharedPath)
+	runGit(ctx, t, repo, "commit", "-q", "-m", "main edits shared.txt and deletes its own file")
+	baseSHA := strings.TrimSpace(runGit(ctx, t, repo, "rev-parse", "HEAD"))
+
+	conflicted, err := o.StartBaseMerge(ctx, wt, baseSHA)
+	if err != nil {
+		t.Fatalf("StartBaseMerge: unexpected error: %v", err)
+	}
+	if want := []string{mergeSharedPath}; !slices.Equal(conflicted, want) {
+		t.Fatalf("StartBaseMerge conflicted = %v, want %v", conflicted, want)
+	}
+	for _, p := range []string{ticketDeletesPath, mainDeletesPath} {
+		if _, statErr := os.Lstat(filepath.Join(wt.Dir(), p)); !os.IsNotExist(statErr) {
+			t.Fatalf("%s: want it already resolved away by git merge, Lstat error = %v", p, statErr)
+		}
+	}
+
+	writeTestFile(t, filepath.Join(wt.Dir(), mergeSharedPath), "line one RESOLVED\n")
+
+	sha, err := o.CommitMerge(ctx, wt, mergeTestMessage(), baseSHA)
+	if err != nil {
+		t.Fatalf("CommitMerge: unexpected error: %v", err)
+	}
+
+	parents, err := o.CommitParents(ctx, wt, sha)
+	if err != nil {
+		t.Fatalf("CommitParents: %v", err)
+	}
+	if want := []string{ticketHead, baseSHA}; !slices.Equal(parents, want) {
+		t.Errorf("CommitParents = %v, want %v", parents, want)
+	}
+
+	tree := runGit(ctx, t, wt.Dir(), "ls-tree", "-r", "--name-only", sha)
+	for _, p := range []string{ticketDeletesPath, mainDeletesPath} {
+		if strings.Contains(tree, p) {
+			t.Errorf("ls-tree %s = %q, want it to omit the deleted %s", sha, tree, p)
+		}
+	}
+	if !strings.Contains(tree, mergeSharedPath) {
+		t.Errorf("ls-tree %s = %q, want it to include %s", sha, tree, mergeSharedPath)
+	}
+
+	status := runGit(ctx, t, wt.Dir(), "status", "--porcelain")
+	if strings.TrimSpace(status) != "" {
+		t.Errorf("working tree not clean after CommitMerge: %q", status)
+	}
+}
+
+// TestCommitMergeStagesPathMadeUntracked proves CommitMerge's own explicit
+// "git add -A" pass (mergeSidePathsPresent): once the agent runs
+// "git rm --cached" on a merge-side path -- still present on disk, no
+// longer tracked -- "git add -u" alone would leave it out of the commit
+// entirely, since -u only restages already-tracked changes.
+func TestCommitMergeStagesPathMadeUntracked(t *testing.T) {
+	t.Parallel()
+	ctx := t.Context()
+	f := newMergeConflictFixture(t, 74)
+
+	if _, err := f.o.StartBaseMerge(ctx, f.wt, f.baseSHA); err != nil {
+		t.Fatalf("StartBaseMerge: unexpected error: %v", err)
+	}
+	writeTestFile(t, filepath.Join(f.wt.Dir(), mergeSharedPath), "line one RESOLVED\n")
+	runGit(ctx, t, f.wt.Dir(), "rm", "-q", "--cached", mergeBaseOnlyPath)
+
+	sha, err := f.o.CommitMerge(ctx, f.wt, mergeTestMessage(), f.baseSHA)
+	if err != nil {
+		t.Fatalf("CommitMerge: unexpected error: %v", err)
+	}
+
+	tree := runGit(ctx, t, f.wt.Dir(), "ls-tree", "-r", "--name-only", sha)
+	if !strings.Contains(tree, mergeBaseOnlyPath) {
+		t.Errorf("ls-tree %s = %q, want it to include %s even though it was rm --cached before the commit", sha, tree, mergeBaseOnlyPath)
+	}
+
+	status := runGit(ctx, t, f.wt.Dir(), "status", "--porcelain")
+	if strings.TrimSpace(status) != "" {
+		t.Errorf("working tree not clean after CommitMerge: %q", status)
 	}
 }
 
