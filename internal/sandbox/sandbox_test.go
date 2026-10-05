@@ -2,6 +2,7 @@ package sandbox
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -1037,6 +1038,46 @@ func TestProfilesDenyGitTransports(t *testing.T) {
 		}
 		if !strings.Contains(text, wantAgentSocketDeny) {
 			t.Errorf("%s does not contain %q", name, wantAgentSocketDeny)
+		}
+	}
+}
+
+// ---- TLS probe profile check (credential_probe_darwin_test.go) -----------
+
+// tlsProbeProfile returns nil when profile's (sandbox/build.sb's text)
+// mach-lookup allow list names neither com.apple.SecurityServer nor
+// com.apple.trustd.agent, the state build.sb's own comment records (D26,
+// Package 8), and an error naming the first one it finds otherwise. It has
+// no build tag so TestTLSProbeMatchesBuildProfile below runs in CI on
+// every platform; TestProbeTLSWithoutSecurityServer (darwin-only, live)
+// calls it too, from the same package.
+func tlsProbeProfile(profile []byte) error {
+	for _, name := range []string{"com.apple.SecurityServer", "com.apple.trustd.agent"} {
+		if strings.Contains(string(profile), `(global-name "`+name+`")`) {
+			return fmt.Errorf("sandbox/build.sb allows mach-lookup of %s again; update this probe", name)
+		}
+	}
+	return nil
+}
+
+// TestTLSProbeMatchesBuildProfile runs without ZING_LIVE_CLI or sandbox-exec:
+// it proves TestProbeTLSWithoutSecurityServer's own profile check accepts
+// the checked-in build.sb and rejects it with either Mach service added
+// back, so the live probe and the profile cannot drift apart unseen.
+func TestTLSProbeMatchesBuildProfile(t *testing.T) {
+	t.Parallel()
+	profile, err := zing.Assets.ReadFile("sandbox/build.sb")
+	if err != nil {
+		t.Fatalf("read sandbox/build.sb: %v", err)
+	}
+	if err := tlsProbeProfile(profile); err != nil {
+		t.Fatalf("checked-in build.sb: %v", err)
+	}
+	for _, name := range []string{"com.apple.SecurityServer", "com.apple.trustd.agent"} {
+		readded := strings.Replace(string(profile), `(global-name "com.apple.system.opendirectoryd.libinfo")`,
+			`(global-name "com.apple.system.opendirectoryd.libinfo") (global-name "`+name+`")`, 1)
+		if err := tlsProbeProfile([]byte(readded)); err == nil || !strings.Contains(err.Error(), name) {
+			t.Errorf("build.sb with %s added back: err = %v, want an error naming it", name, err)
 		}
 	}
 }

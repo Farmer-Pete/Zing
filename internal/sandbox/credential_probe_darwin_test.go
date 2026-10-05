@@ -336,14 +336,12 @@ func TestProbeClaudeLoginWithToken(t *testing.T) {
 // ---- TestProbeTLSWithoutSecurityServer -------------------------------------
 
 // TestProbeTLSWithoutSecurityServer proves TLS still works (go mod
-// download of a fresh module, and curl to proxy.golang.org) with
-// com.apple.SecurityServer denied, and reports whether it also works with
-// com.apple.trustd.agent additionally denied: 7.3 says "trustd.agent stays
-// only if TLS verification fails without it"; this probe's own log is
-// what decides. It fails the test only on the checked-in profile (with
-// trustd.agent): the without-trustd.agent variant is diagnostic, logged,
-// not asserted, since either outcome is a legitimate answer to record in
-// sandbox/build.sb's own comment.
+// download of a fresh module, and curl to proxy.golang.org) under the
+// checked-in build.sb, with com.apple.SecurityServer denied and
+// com.apple.trustd.agent absent from its mach-lookup allow list
+// (sandbox/build.sb's own comment records why: Package 8 found both
+// clean). tlsProbeProfile fails this test first if either is allowed
+// again, before any TLS command runs.
 func TestProbeTLSWithoutSecurityServer(t *testing.T) {
 	requireLiveProbe(t)
 
@@ -351,54 +349,43 @@ func TestProbeTLSWithoutSecurityServer(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read sandbox/build.sb: %v", err)
 	}
-	const trustdLine = `(global-name "com.apple.trustd.agent")`
-	if !strings.Contains(string(profile), trustdLine) {
-		t.Fatal("sandbox/build.sb no longer carries the checked-in trustd.agent mach-lookup line; update this probe")
-	}
-	withoutTrustdText := strings.Replace(string(profile), trustdLine, "", 1)
-
-	variants := map[string][]byte{
-		"with trustd.agent (checked in)": profile,
-		"without trustd.agent":           []byte(withoutTrustdText),
+	if err := tlsProbeProfile(profile); err != nil {
+		t.Fatal(err)
 	}
 
-	for name, text := range variants {
-		t.Run(name, func(t *testing.T) {
-			sb := LoadProfile(profileNameBuild, text, t.TempDir(), nil, 7420)
-			if !sb.Available() {
-				t.Fatalf("LoadProfile: unavailable, reason %q", sb.Reason())
-			}
-			p := probeParams(t, sb)
-			env := probeEnv(sb, p)
+	sb := LoadProfile(profileNameBuild, profile, t.TempDir(), nil, 7420)
+	if !sb.Available() {
+		t.Fatalf("LoadProfile: unavailable, reason %q", sb.Reason())
+	}
+	p := probeParams(t, sb)
+	env := probeEnv(sb, p)
 
-			// modDir must be a sandbox-writable location, not an arbitrary
-			// t.TempDir(): `go mod download` writes go.sum back into its own
-			// working directory, and a dir outside the profile's own
-			// writable set (WORKTREE, TRANSCRIPTS, MDS_CACHE, RUN_DIR,
-			// CACHE_SHARED, /dev) fails that write with EPERM regardless of
-			// whether TLS itself works -- the bug this probe first turned
-			// up (go: updating go.sum: ... operation not permitted), unrelated
-			// to trustd.agent or GOPATH/GOMODCACHE (both already point at
-			// CACHE_SHARED's own writable subfolders through sb.Env()).
-			modDir := filepath.Join(p.Worktree, "probe-mod")
-			if mkErr := os.MkdirAll(modDir, 0o700); mkErr != nil {
-				t.Fatalf("mkdir %s: %v", modDir, mkErr)
-			}
-			goMod := "module probe.invalid/m\n\ngo 1.23\n\nrequire rsc.io/quote v1.5.2\n"
-			if err := os.WriteFile(filepath.Join(modDir, "go.mod"), []byte(goMod), 0o600); err != nil {
-				t.Fatalf("write go.mod: %v", err)
-			}
-			modExit, modOut := runProbeIn(t, sb, p, modDir, env, probeTimeout, "go", "mod", "download")
-			curlExit, _ := runProbe(t, sb, p, env, "curl", "-fsS", "--max-time", "15", "-o", os.DevNull, "https://proxy.golang.org")
-			t.Logf("%s: go mod download exit=%d, curl exit=%d", name, modExit, curlExit)
+	// modDir must be a sandbox-writable location, not an arbitrary
+	// t.TempDir(): `go mod download` writes go.sum back into its own
+	// working directory, and a dir outside the profile's own
+	// writable set (WORKTREE, TRANSCRIPTS, MDS_CACHE, RUN_DIR,
+	// CACHE_SHARED, /dev) fails that write with EPERM regardless of
+	// whether TLS itself works -- the bug this probe first turned
+	// up (go: updating go.sum: ... operation not permitted), unrelated
+	// to trustd.agent or GOPATH/GOMODCACHE (both already point at
+	// CACHE_SHARED's own writable subfolders through sb.Env()).
+	modDir := filepath.Join(p.Worktree, "probe-mod")
+	if mkErr := os.MkdirAll(modDir, 0o700); mkErr != nil {
+		t.Fatalf("mkdir %s: %v", modDir, mkErr)
+	}
+	goMod := "module probe.invalid/m\n\ngo 1.23\n\nrequire rsc.io/quote v1.5.2\n"
+	if err := os.WriteFile(filepath.Join(modDir, "go.mod"), []byte(goMod), 0o600); err != nil {
+		t.Fatalf("write go.mod: %v", err)
+	}
+	modExit, modOut := runProbeIn(t, sb, p, modDir, env, probeTimeout, "go", "mod", "download")
+	curlExit, curlOut := runProbe(t, sb, p, env, "curl", "-fsS", "--max-time", "15", "-o", os.DevNull, "https://proxy.golang.org")
+	t.Logf("go mod download exit=%d, curl exit=%d", modExit, curlExit)
 
-			if modExit != 0 {
-				t.Errorf("%s: go mod download exit=%d, want 0 (output %q)", name, modExit, modOut)
-			}
-			if curlExit != 0 {
-				t.Errorf("%s: curl exit=%d, want 0", name, curlExit)
-			}
-		})
+	if modExit != 0 {
+		t.Errorf("go mod download exit=%d, want 0 (output %q)", modExit, modOut)
+	}
+	if curlExit != 0 {
+		t.Errorf("curl exit=%d, want 0 (output %q)", curlExit, curlOut)
 	}
 }
 
