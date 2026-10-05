@@ -109,12 +109,19 @@ const (
 	ScenarioKindBehavior    ScenarioKind = "behavior"
 	ScenarioKindNegative    ScenarioKind = "negative"
 	ScenarioKindPerformance ScenarioKind = "performance"
+	ScenarioKindHost        ScenarioKind = "host"
 )
+
+// HostScenarioNeedsCheck is the one refusal text for a host scenario with a
+// blank check, shared by checkScenarioShape (internal/job/planning.go) and
+// Store.OwnerEdit (internal/store/owner_edit.go).
+const HostScenarioNeedsCheck = "a host scenario needs a check"
 
 // Values returns every valid ScenarioKind.
 func (ScenarioKind) Values() []string {
 	return []string{
 		string(ScenarioKindBehavior), string(ScenarioKindNegative), string(ScenarioKindPerformance),
+		string(ScenarioKindHost),
 	}
 }
 
