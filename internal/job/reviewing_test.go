@@ -41,6 +41,11 @@ import (
 // across so many of them (goconst).
 const lensFidelity = "fidelity"
 
+// simplificationRunLabel names the simplification lens's own first-turn
+// run label: several two-in-a-row escalation scenarios script that one
+// lens's exec failure, so it repeats across them (goconst).
+const simplificationRunLabel = "1-simplification"
+
 // lensTests, testsRunLabel, testsSessionID, and testsInvalidDetail name the
 // tests lens's own invalid-retry scenarios (issue #32): this file's task 1
 // tests all drive that lens through an invalid first turn and a same-tick
@@ -1032,7 +1037,7 @@ func TestRoundSecondFailureEscalates(t *testing.T) {
 	}
 	rt := &labelResultRuntime{
 		inner:   runtime.NewFake(reviewScriptsFS(nil)),
-		results: map[string]func() (runtime.RunResult, error){"1-simplification": execFn},
+		results: map[string]func() (runtime.RunResult, error){simplificationRunLabel: execFn},
 	}
 	deps := pbClaim(t, s, rt, ticket.ID)
 
@@ -1065,6 +1070,95 @@ func TestRoundSecondFailureEscalates(t *testing.T) {
 	}
 	if commit2.Escalation.Payload.Origin != string(response.EscalationOriginReview) {
 		t.Errorf("escalation origin = %q, want %q", commit2.Escalation.Payload.Origin, response.EscalationOriginReview)
+	}
+}
+
+// TestRoundRetryResetsFailedCount proves issue #32's own Retry reset: the
+// owner's Retry on the two-in-a-row escalation starts a fresh count, so the
+// very next failure only marks instead of escalating again at once
+// (enterRound's own "retry requested" check, newer than the newest "review
+// round <n>" marker).
+func TestRoundRetryResetsFailedCount(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow end-to-end flow; runs in the full suite")
+	}
+	t.Parallel()
+	s, ticket, _ := reviewTicketReady(t)
+	execFn := func() (runtime.RunResult, error) {
+		return runtime.RunResult{ExitCode: 1, AgentTime: time.Second}, &runtime.ExecError{ExitCode: 1}
+	}
+	rt := &labelResultRuntime{
+		inner:   runtime.NewFake(reviewScriptsFS(nil)),
+		results: map[string]func() (runtime.RunResult, error){simplificationRunLabel: execFn},
+	}
+
+	// 1st failure: only marks.
+	ticket1 := pbGetTicket(t, s, ticket.ID)
+	deps1 := pbClaim(t, s, rt, ticket.ID)
+	commit1, err := (reviewingHandler{}).Run(t.Context(), ticket1, deps1)
+	if err != nil {
+		t.Fatalf("Run (1st failure): %v", err)
+	}
+	if commit1.Escalation != nil {
+		t.Fatalf("commit1.Escalation = %+v, want nil", commit1.Escalation)
+	}
+	pbApply(t, s, ticket, commit1)
+
+	// 2nd failure in a row: escalates.
+	ticket2 := pbGetTicket(t, s, ticket.ID)
+	deps2 := pbClaim(t, s, rt, ticket.ID)
+	commit2, err := (reviewingHandler{}).Run(t.Context(), ticket2, deps2)
+	if err != nil {
+		t.Fatalf("Run (2nd failure): %v", err)
+	}
+	if commit2.Escalation == nil {
+		t.Fatal("commit2.Escalation = nil, want set (two failures in a row)")
+	}
+	pbApply(t, s, ticket, commit2)
+
+	// The owner answers Retry.
+	q := newestOpenQuestion(t, s, ticket.ID)
+	pbAnswerEscalation(t, s, ticket.ID, q.ID, escalationChoiceRetry)
+
+	// The prelude resolves the escalation: a plain "retry requested" marker.
+	ticket3 := pbGetTicket(t, s, ticket.ID)
+	deps3 := pbClaim(t, s, rt, ticket.ID)
+	commit3, err := (reviewingHandler{}).Run(t.Context(), ticket3, deps3)
+	if err != nil {
+		t.Fatalf("Run (retry): %v", err)
+	}
+	if len(commit3.Messages) != 1 || commit3.Messages[0].Body != markerRetryRequested {
+		t.Fatalf("commit3.Messages = %+v, want one %q marker", commit3.Messages, markerRetryRequested)
+	}
+	pbApply(t, s, ticket, commit3)
+
+	// The first failure after the Retry only marks, with no escalation.
+	ticket4 := pbGetTicket(t, s, ticket.ID)
+	deps4 := pbClaim(t, s, rt, ticket.ID)
+	commit4, err := (reviewingHandler{}).Run(t.Context(), ticket4, deps4)
+	if err != nil {
+		t.Fatalf("Run (1st failure after retry): %v", err)
+	}
+	if commit4.Escalation != nil {
+		t.Fatalf("commit4.Escalation = %+v, want nil (the Retry reset the count)", commit4.Escalation)
+	}
+	if _, ok := reviewMarker(t, s, ticket.ID, "review round 1 failed"); !ok {
+		t.Fatal(`no "review round 1 failed" marker after the first failure past the retry`)
+	}
+	pbApply(t, s, ticket, commit4)
+
+	// The second failure in a row past the Retry escalates again.
+	ticket5 := pbGetTicket(t, s, ticket.ID)
+	deps5 := pbClaim(t, s, rt, ticket.ID)
+	commit5, err := (reviewingHandler{}).Run(t.Context(), ticket5, deps5)
+	if err != nil {
+		t.Fatalf("Run (2nd failure after retry): %v", err)
+	}
+	if commit5.Escalation == nil {
+		t.Fatal("commit5.Escalation = nil, want set (two failures in a row, past the retry)")
+	}
+	if commit5.Escalation.Payload.What != lensFailedTwiceWhat {
+		t.Errorf("escalation What = %q, want %q", commit5.Escalation.Payload.What, lensFailedTwiceWhat)
 	}
 }
 
@@ -1389,7 +1483,7 @@ func TestRoundInvalidAfterCancelNotRetried(t *testing.T) {
 	rt := &labelStepsRuntime{
 		inner: runtime.NewFake(reviewScriptsFS(nil)),
 		steps: map[string][]func(ctx context.Context, req runtime.RunRequest) (runtime.RunResult, error){
-			"1-simplification": {
+			simplificationRunLabel: {
 				func(_ context.Context, _ runtime.RunRequest) (runtime.RunResult, error) {
 					<-obsBlocked
 					return runtime.RunResult{ExitCode: 1, AgentTime: time.Second}, &runtime.ExecError{ExitCode: 1}

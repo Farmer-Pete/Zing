@@ -212,7 +212,11 @@ func reviewRoundDoneCount(markers []store.MessageRow) int {
 // "asked" with its questions still open (no answered round reached
 // reviewingHandler.Run's own AnsweredRounds check, or it would have routed
 // to continueRound instead) waits; the newest is "done" for round n-1
-// enters enterFromDone.
+// enters enterFromDone. On the "failed" or "void" branch, an owner Retry
+// (markerRetryRequested, written by resolvePostBuildEscalation's review
+// row) newer than that round marker resets the two-in-a-row count: round
+// is called with priorFailedOrVoid false, so a fresh failure only marks
+// instead of escalating at once (issue #32).
 func (h reviewingHandler) enterRound(ctx context.Context, t store.Ticket, d Deps) (store.HandlerCommit, error) {
 	markers, err := d.Store.MarkersWithPrefix(ctx, t.ID, reviewRoundMarkerPrefix)
 	if err != nil {
@@ -232,7 +236,18 @@ func (h reviewingHandler) enterRound(ctx context.Context, t store.Ticket, d Deps
 	case reviewRoundAskedLine.MatchString(firstLine):
 		return store.HandlerCommit{}, ErrNoAction
 	case reviewRoundFailedLine.MatchString(firstLine), reviewRoundVoidLine.MatchString(firstLine):
-		return h.round(ctx, t, d, n, "", true)
+		retries, retryErr := d.Store.MarkersWithPrefix(ctx, t.ID, markerRetryRequested)
+		if retryErr != nil {
+			return store.HandlerCommit{}, fmt.Errorf("job: reviewing: retry requested markers: %w", retryErr)
+		}
+		priorFailedOrVoid := true
+		for i := range retries {
+			if retries[i].ID > newest.ID && retries[i].Body == markerRetryRequested {
+				priorFailedOrVoid = false
+				break
+			}
+		}
+		return h.round(ctx, t, d, n, "", priorFailedOrVoid)
 	default:
 		return store.HandlerCommit{}, fmt.Errorf("job: reviewing: unrecognized review round marker %q", firstLine)
 	}
@@ -1149,6 +1164,9 @@ func execFailureKind(a lensAttempt) (string, bool) {
 // empty outside a retry (task 12); priorFailedOrVoid is true when the
 // newest "review round <n>" marker already read "failed" or "void" before
 // this attempt, gating the two-in-a-row escalations of row 7 and row 8.
+// enterRound passes false instead when an owner Retry (markerRetryRequested)
+// is newer than that round marker, so a Retry always buys one fresh round
+// before the count can escalate again (issue #32).
 func (h reviewingHandler) round(ctx context.Context, t store.Ticket, d Deps, n int, notes string, priorFailedOrVoid bool) (store.HandlerCommit, error) {
 	plan, _, havePlan, err := d.Store.StoredPlan(ctx, t.ID)
 	if err != nil {
