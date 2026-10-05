@@ -798,7 +798,7 @@ func buildJobProjects(ctx context.Context, projects []config.Project, bindings [
 			return nil, fmt.Errorf("serve: project %s: git common dir: %w", p.Name, err)
 		}
 		out[id] = job.Project{
-			Orch: orch, RepoGit: repoGit, TestCmd: p.Commands.Test, LintCmd: p.Commands.Lint,
+			Orch: orch, RepoGit: repoGit, TestCmd: p.Commands.Test, LintCmd: p.Commands.Lint, FixCmd: p.Commands.Fix,
 			Owner: owner, Repo: repo, PullRequests: gh, Flips: gh, Checks: gh, Threads: gh,
 		}
 	}
