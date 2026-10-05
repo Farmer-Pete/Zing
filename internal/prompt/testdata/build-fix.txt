@@ -9,10 +9,10 @@ If the reported failure does not reproduce against the code, change nothing and 
 Work in this order.
 
 1. Read the plan's overview, the changes and types that this task touches,
-   and the test this task names. Read the code those changes name. When an
-   approval input is present, it is the owner's note from approving the
-   plan; follow it unless it contradicts the plan, and say so in your
-   report if it does.
+   and the test this task names. Read the code those changes name. When the
+   ticket input ends with owner decisions, they include the owner's note
+   from approving the plan; follow them unless one contradicts the plan,
+   and say so in your report if it does.
 
 2. Write the named test first. Run that one test and watch it fail for
    the right reason.
