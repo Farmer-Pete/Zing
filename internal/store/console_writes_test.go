@@ -540,6 +540,85 @@ func TestSendBatch_EmptyIsSafe(t *testing.T) {
 	}
 }
 
+// TestSendBatchOnly_SendsOnlyListedQuestion proves a scoped send leaves an
+// unlisted question's draft untouched (ticket #43: a forgotten draft on
+// another question must not go out with a later Cmd+Enter). The ticket
+// stays waiting on "questions" throughout, since q2 is never answered, so a
+// fresh draft on q1 is still draftable after its first answer round.
+func TestSendBatchOnly_SendsOnlyListedQuestion(t *testing.T) {
+	t.Parallel()
+	s := newTestStore(t)
+	_, ticketID := seedQueuedTicket(t, s, "1")
+	setTicketWaiting(t, s, ticketID, testWaitingQuestions)
+	q1 := insertQuestionOption(t, s, ticketID, "Q1")
+	q2 := insertQuestionOption(t, s, ticketID, "Q2")
+
+	r1, err := s.SaveDraft(t.Context(), DraftInput{TicketID: ticketID, QuestionID: &q1, Text: testReplyWhyThough})
+	if err != nil {
+		t.Fatalf("SaveDraft(q1): %v", err)
+	}
+	r2, err := s.SaveDraft(t.Context(), DraftInput{TicketID: ticketID, QuestionID: &q2, Text: testReplyWhyThough})
+	if err != nil {
+		t.Fatalf("SaveDraft(q2): %v", err)
+	}
+
+	res, err := s.SendBatchOnly(t.Context(), ticketID, []int64{q1})
+	if err != nil {
+		t.Fatalf("SendBatchOnly(q1): %v", err)
+	}
+	if res.Sent != 1 {
+		t.Fatalf("SendBatchOnly(q1) Sent = %d, want 1", res.Sent)
+	}
+
+	m1, err := s.GetMessage(t.Context(), r1.MessageID)
+	if err != nil {
+		t.Fatalf("GetMessage(q1 reply): %v", err)
+	}
+	if m1.State == nil || *m1.State != answerStateSent {
+		t.Errorf("q1 reply state = %v, want %q", m1.State, answerStateSent)
+	}
+
+	m2, err := s.GetMessage(t.Context(), r2.MessageID)
+	if err != nil {
+		t.Fatalf("GetMessage(q2 reply): %v", err)
+	}
+	if m2.State == nil || *m2.State != draftState {
+		t.Errorf("q2 reply state = %v, want %q", m2.State, draftState)
+	}
+	if m2.BatchID != nil {
+		t.Errorf("q2 reply batch id = %v, want nil", *m2.BatchID)
+	}
+
+	// A fresh draft on q1, listed twice, still sends once.
+	r1b, err := s.SaveDraft(t.Context(), DraftInput{TicketID: ticketID, QuestionID: &q1, Text: "one more time"})
+	if err != nil {
+		t.Fatalf("SaveDraft(q1, second round): %v", err)
+	}
+	res, err = s.SendBatchOnly(t.Context(), ticketID, []int64{q1, q1})
+	if err != nil {
+		t.Fatalf("SendBatchOnly([q1, q1]): %v", err)
+	}
+	if res.Sent != 1 {
+		t.Errorf("SendBatchOnly([q1, q1]) Sent = %d, want 1", res.Sent)
+	}
+	m1b, err := s.GetMessage(t.Context(), r1b.MessageID)
+	if err != nil {
+		t.Fatalf("GetMessage(q1 reply, second round): %v", err)
+	}
+	if m1b.State == nil || *m1b.State != answerStateSent {
+		t.Errorf("q1 reply (second round) state = %v, want %q", m1b.State, answerStateSent)
+	}
+
+	// A question id with no draft at all sends nothing.
+	res, err = s.SendBatchOnly(t.Context(), ticketID, []int64{999999999})
+	if err != nil {
+		t.Fatalf("SendBatchOnly(no draft): %v", err)
+	}
+	if !res.Empty {
+		t.Errorf("SendBatchOnly(no draft).Empty = %v, want true", res.Empty)
+	}
+}
+
 func TestSendBatch_LocksAllocatesOneBatchIDAndClearsAQuestionsWait(t *testing.T) {
 	t.Parallel()
 	s := newTestStore(t)

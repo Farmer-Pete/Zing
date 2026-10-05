@@ -16,6 +16,7 @@ import (
 	"fmt"
 	"log/slog"
 	"maps"
+	"slices"
 	"time"
 
 	"zing/internal/response"
@@ -648,16 +649,40 @@ func kindForWaitReason(reason string) (response.QuestionKind, bool) {
 
 // SendBatch flips every draft for ticketID to sent under one batch_id, marks
 // answered questions, and clears the matching question-backed wait when
-// none of that kind is open (design section 6.7). It runs inside one BEGIN
+// none of that kind is open (design section 6.7). It is sendBatch with no
+// question scope, kept for the store's own tests: no HTTP route reaches it,
+// since POST /send always names its questions (SendBatchOnly).
+func (s *Store) SendBatch(ctx context.Context, ticketID int64) (BatchResult, error) {
+	return s.sendBatch(ctx, ticketID, nil)
+}
+
+// SendBatchOnly is SendBatch scoped to questionIDs: a draft whose ParentID
+// is not in questionIDs is left a draft, however stale or old it is (ticket
+// #43: Cmd+Enter must never send a question the owner was not shown). A
+// duplicate id in questionIDs counts once. This is the only entry point
+// POST /send uses.
+func (s *Store) SendBatchOnly(ctx context.Context, ticketID int64, questionIDs []int64) (BatchResult, error) {
+	only := make(map[int64]bool, len(questionIDs))
+	for _, id := range questionIDs {
+		only[id] = true
+	}
+	return s.sendBatch(ctx, ticketID, only)
+}
+
+// sendBatch is SendBatch's body. only is nil for an unscoped send (SendBatch
+// itself); otherwise it holds the exact set of question ids SendBatchOnly
+// was given, and every draft whose ParentID is not in that set is skipped,
+// left a draft, and counted into leftUnsent. It runs inside one BEGIN
 // IMMEDIATE transaction (store.Open sets _txlock=immediate on the store's
 // one connection), so it takes the write lock before it reads and
 // max(batch_id)+1 is never racy.
-func (s *Store) SendBatch(ctx context.Context, ticketID int64) (result BatchResult, err error) {
+func (s *Store) sendBatch(ctx context.Context, ticketID int64, only map[int64]bool) (result BatchResult, err error) {
+	var leftUnsent int
 	// Named returns so one deferred call logs every branch's outcome
 	// (CLAUDE.md: "log every major branch with the ids"), without a log
-	// line at each of SendBatch's early returns.
+	// line at each of sendBatch's early returns.
 	defer func() {
-		logSendBatchOutcome(ctx, ticketID, result, err)
+		logSendBatchOutcome(ctx, ticketID, only, leftUnsent, result, err)
 	}()
 
 	tx, err := s.db.BeginTx(ctx, nil)
@@ -669,6 +694,17 @@ func (s *Store) SendBatch(ctx context.Context, ticketID int64) (result BatchResu
 	drafts, err := loadDraftsTx(ctx, tx, ticketID)
 	if err != nil {
 		return BatchResult{}, err
+	}
+	if only != nil {
+		kept := drafts[:0]
+		for i := range drafts {
+			if drafts[i].ParentID != nil && only[*drafts[i].ParentID] {
+				kept = append(kept, drafts[i])
+			} else {
+				leftUnsent++
+			}
+		}
+		drafts = kept
 	}
 	if len(drafts) == 0 {
 		return BatchResult{Empty: true}, nil
@@ -758,28 +794,36 @@ func (s *Store) SendBatch(ctx context.Context, ticketID int64) (result BatchResu
 	return BatchResult{Sent: len(valid), Discarded: len(stale) + reopenedDiscarded, BatchID: batchID, WaitCleared: waitCleared}, nil
 }
 
-// logSendBatchOutcome logs SendBatch's major branches with their ids
+// logSendBatchOutcome logs sendBatch's major branches with their ids
 // (CLAUDE.md: "log every major branch with the ids"): a successful send
 // reports batch_id, how many drafts it sent, how many it discarded as stale,
 // and whether it cleared the ticket's wait; an empty batch (nothing to send,
 // possibly because every draft turned out stale) and a named conflict each
-// get their own line. An unexpected (non-conflict) error is left to the
-// caller: the console handler already logs it (internal/console/answer.go),
-// so logging it again here would violate "log or return, never both".
-func logSendBatchOutcome(ctx context.Context, ticketID int64, result BatchResult, err error) {
+// get their own line. The "batch sent" and "send batch empty" lines also
+// carry question_ids, the sorted, deduplicated scope only named (empty for
+// an unscoped SendBatch), and left_unsent, how many drafts that scope left
+// behind; the conflict line is unchanged. An unexpected (non-conflict)
+// error is left to the caller: the console handler already logs it
+// (internal/console/answer.go), so logging it again here would violate
+// "log or return, never both".
+func logSendBatchOutcome(ctx context.Context, ticketID int64, only map[int64]bool, leftUnsent int, result BatchResult, err error) {
 	if err != nil {
 		if ce, ok := errors.AsType[*ConflictError](err); ok {
 			slog.InfoContext(ctx, "send batch conflict", "ticket_id", ticketID, "reason", ce.Reason)
 		}
 		return
 	}
+	questionIDs := slices.Sorted(maps.Keys(only))
 	if result.Empty {
-		slog.InfoContext(ctx, "send batch empty", "ticket_id", ticketID, "discarded", result.Discarded)
+		slog.InfoContext(ctx, "send batch empty",
+			"ticket_id", ticketID, "discarded", result.Discarded,
+			"question_ids", questionIDs, "left_unsent", leftUnsent)
 		return
 	}
 	slog.InfoContext(ctx, "batch sent",
 		"ticket_id", ticketID, "batch_id", result.BatchID, "sent", result.Sent,
-		"discarded", result.Discarded, "wait_cleared", result.WaitCleared)
+		"discarded", result.Discarded, "wait_cleared", result.WaitCleared,
+		"question_ids", questionIDs, "left_unsent", leftUnsent)
 }
 
 // loadDraftsTx returns every draft answer or reply row for ticketID, in id
