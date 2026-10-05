@@ -811,7 +811,11 @@ func (h judgeHandler) runFirst(ctx context.Context, t store.Ticket, d Deps, n in
 		return store.HandlerCommit{}, fmt.Errorf("job: judging: %w", err)
 	}
 
-	in := prompt.ForJudge(jobPromptText, t.Title+"\n\n"+t.Body, extra)
+	ticketText, err := specFor(ctx, d, t)
+	if err != nil {
+		return store.HandlerCommit{}, fmt.Errorf("job: judging: %w", err)
+	}
+	in := prompt.ForJudge(jobPromptText, ticketText, extra)
 	in.Schemas = schemas
 
 	req := runtime.RunRequest{

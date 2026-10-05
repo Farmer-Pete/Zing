@@ -1242,6 +1242,10 @@ func (h reviewingHandler) round(ctx context.Context, t store.Ticket, d Deps, n i
 	if err != nil {
 		return store.HandlerCommit{}, fmt.Errorf("job: reviewing: %w", err)
 	}
+	ticketText, err := specFor(ctx, d, t)
+	if err != nil {
+		return store.HandlerCommit{}, fmt.Errorf("job: reviewing: %w", err)
+	}
 	var extra []prompt.NamedInput
 	if notes != "" {
 		extra = append(extra, prompt.Notes(notes))
@@ -1252,7 +1256,7 @@ func (h reviewingHandler) round(ctx context.Context, t store.Ticket, d Deps, n i
 		if csErr != nil {
 			return store.SessionUpsert{Job: jobReviewName, Runtime: jobCfg.Runtime}, runtime.RunRequest{}, freshSessionRecord
 		}
-		in, buildErr := prompt.ForReview(jobPromptText, string(lens), sha, codeSection, planXML, diff, extra)
+		in, buildErr := prompt.ForReview(jobPromptText, string(lens), sha, codeSection, ticketText, planXML, diff, extra)
 		if buildErr != nil {
 			return store.SessionUpsert{Job: jobReviewName, Runtime: jobCfg.Runtime}, runtime.RunRequest{}, freshSessionRecord
 		}

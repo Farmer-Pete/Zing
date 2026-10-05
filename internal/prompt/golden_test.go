@@ -129,7 +129,12 @@ func goldenCases() []goldenCase {
 					planLensSection(t, readAsset(t, "prompts/lenses/correctness.md")),
 				}
 				ticket := "Title: Add dark mode\n\n" +
-					"Body: Users want a dark theme toggle in settings."
+					"Body: Users want a dark theme toggle in settings.\n\n" +
+					"Owner decisions, oldest first. They amend the ticket text above.\n\n" +
+					"Q1: Is dark mode on by default?\n" +
+					"The owner, oldest first:\n" +
+					"- picked option a: No, default off\n" +
+					"Decision: Dark mode defaults to off."
 				scenarios := "given the settings page, when the user toggles dark mode, " +
 					"then the theme switches immediately"
 				plan := "<plan><objective>Add a dark mode toggle.</objective></plan>"
@@ -154,7 +159,7 @@ func goldenCases() []goldenCase {
 					"Body: Add a ping endpoint so uptime monitoring has something to hit."
 				plan := healthCheckPlan
 				accepted := []string{"internal/health/ping.go", "internal/health/ping_test.go"}
-				in, err := ForBuild(jobPrompt, task, "go test ./...", "make lint", ticket, plan, "", accepted, nil)
+				in, err := ForBuild(jobPrompt, task, "go test ./...", "make lint", ticket, plan, accepted, nil)
 				if err != nil {
 					t.Fatalf("ForBuild: %v", err)
 				}
@@ -191,7 +196,7 @@ func goldenCases() []goldenCase {
 				plan := healthCheckPlan
 				findings := "problem: internal/health/ping.go returns 500 on success."
 				in, err := ForFix(jobPrompt, "Fix review findings", "findings", findings,
-					"go test ./...", "make lint", ticket, plan, "", nil, nil)
+					"go test ./...", "make lint", ticket, plan, nil, nil)
 				if err != nil {
 					t.Fatalf("ForFix: %v", err)
 				}
@@ -255,10 +260,12 @@ func goldenCases() []goldenCase {
 				if err != nil {
 					t.Fatalf("CodeLensSection: %v", err)
 				}
+				ticket := "Title: Add a health check\n\n" +
+					"Body: Add a ping endpoint so uptime monitoring has something to hit."
 				plan := healthCheckPlan
 				diff := "diff --git a/internal/health/ping.go b/internal/health/ping.go\n" +
 					"+func Ping() string { return \"pong\" }\n"
-				in, err := ForReview(jobPrompt, "correctness", "a1b2c3d", codeSection, plan, diff, nil)
+				in, err := ForReview(jobPrompt, "correctness", "a1b2c3d", codeSection, ticket, plan, diff, nil)
 				if err != nil {
 					t.Fatalf("ForReview: %v", err)
 				}

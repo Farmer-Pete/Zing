@@ -215,6 +215,29 @@ func TestPlanningHandler_Classify_StoresKindAndSessionExternalID(t *testing.T) {
 	}
 }
 
+// TestClassifyPromptCarriesOwnerDecisions proves runClassify builds the
+// classify agent's ticket input through specFor (goal "all seven stages
+// that read the ticket use specFor"): job.SeedOwnerDecision's own resolved
+// escalation, seeded before the ticket ever leaves queued, reaches the
+// recorded classify prompt.
+func TestClassifyPromptCarriesOwnerDecisions(t *testing.T) {
+	t.Parallel()
+	s := newJobTestStore(t)
+	ticketID := seedQueuedTicket(t, s)
+	job.SeedOwnerDecision(t, s, ticketID, "Keep the test as a guard only.")
+	rt := fakeRuntime(t)
+	advanceQueuedToPlanning(t, s, rt, ticketID)
+
+	rec := &recordingRuntime{rt: rt}
+	deps := claim(t, s, rec, ticketID)
+	if _, err := runPlanning(t, s, deps, ticketID); err != nil {
+		t.Fatalf("planning (classify) Run: %v", err)
+	}
+	if !strings.Contains(rec.lastReq.Prompt, "Keep the test as a guard only.") {
+		t.Errorf("classify prompt does not carry the owner's decision:\n%s", rec.lastReq.Prompt)
+	}
+}
+
 // TestPlanningHandler_FirstTurn_PostsRealQuestionsBatchWithAllocatedKeys
 // proves section 6.2's success path once classify has set a kind: a fresh
 // session with its own external_id, one question message per
@@ -296,6 +319,32 @@ func mustPlanning(t *testing.T, s *store.Store, deps job.Deps, ticketID int64) s
 		t.Fatalf("planning Run: %v", err)
 	}
 	return commit
+}
+
+// TestPlanningFirstPromptCarriesOwnerDecisions proves runPlanningFirst
+// builds the planning agent's ticket input through specFor (goal "all
+// seven stages that read the ticket use specFor"): job.SeedOwnerDecision's
+// own resolved escalation reaches the recorded first-turn prompt.
+func TestPlanningFirstPromptCarriesOwnerDecisions(t *testing.T) {
+	t.Parallel()
+	s := newJobTestStore(t)
+	ticketID := seedQueuedTicket(t, s)
+	rt := fakeRuntime(t)
+	advanceQueuedToPlanning(t, s, rt, ticketID)
+
+	// classify: real fixture, sets kind.
+	apply(t, s, getTicket(t, s, ticketID), mustPlanning(t, s, claim(t, s, rt, ticketID), ticketID))
+
+	job.SeedOwnerDecision(t, s, ticketID, "Keep the test as a guard only.")
+
+	rec := &recordingRuntime{rt: rt}
+	deps := claim(t, s, rec, ticketID)
+	if _, err := runPlanning(t, s, deps, ticketID); err != nil {
+		t.Fatalf("planning first-entry Run: %v", err)
+	}
+	if !strings.Contains(rec.lastReq.Prompt, "Keep the test as a guard only.") {
+		t.Errorf("planning first-turn prompt does not carry the owner's decision:\n%s", rec.lastReq.Prompt)
+	}
 }
 
 // ---- 6.2 first turn: the prompt file follows the classified kind ----------

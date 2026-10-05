@@ -334,6 +334,55 @@ func TestRoundRunsSevenLensesInParallel(t *testing.T) {
 	}
 }
 
+// ---- TestReviewPromptCarriesOwnerDecisions ---------------------------------
+
+// TestReviewPromptCarriesOwnerDecisions proves that round's specFor call
+// (task 3) reaches every lens's ForReview: a resolved build-time escalation,
+// seeded through seedOwnerDecision, carries its reply into every lens's
+// ticket input, ahead of the plan input, while its picked option is
+// suppressed (ownerLines' own escalation rule).
+func TestReviewPromptCarriesOwnerDecisions(t *testing.T) {
+	t.Parallel()
+	s, ticket, before := reviewTicketReady(t)
+	seedOwnerDecision(t, s, ticket.ID, "Keep the test as a guard only.")
+
+	rec := &recordingRuntime{inner: runtime.NewFake(reviewScriptsFS(nil))}
+	deps := pbClaim(t, s, rec, ticket.ID)
+
+	commit, err := (reviewingHandler{}).Run(t.Context(), ticket, deps)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	pbApply(t, s, ticket, commit)
+
+	runs := reviewRunsSince(t, s, ticket.ID, before)
+	if len(runs) != 7 {
+		t.Fatalf("review runs = %d, want 7", len(runs))
+	}
+
+	rec.mu.Lock()
+	reqs := append([]runtime.RunRequest(nil), rec.reqs...)
+	rec.mu.Unlock()
+	if len(reqs) != 7 {
+		t.Fatalf("recorded requests = %d, want 7", len(reqs))
+	}
+	for _, req := range reqs {
+		ticketIdx := strings.Index(req.Prompt, "ticket:\n")
+		planIdx := strings.Index(req.Prompt, "plan:\n")
+		bothPresent := ticketIdx != -1 && planIdx != -1
+		ticketFirst := bothPresent && ticketIdx < planIdx
+		if !ticketFirst {
+			t.Errorf("label %s: ticket input does not come before plan:\n%s", req.Label, req.Prompt)
+		}
+		if !strings.Contains(req.Prompt, "Keep the test as a guard only.") {
+			t.Errorf("label %s: prompt does not carry the owner's decision:\n%s", req.Label, req.Prompt)
+		}
+		if strings.Contains(req.Prompt, "picked option a") {
+			t.Errorf("label %s: prompt carries the escalation's picked option, want it suppressed:\n%s", req.Label, req.Prompt)
+		}
+	}
+}
+
 // ---- TestRoundRespectsMaxLensesParallel ------------------------------------
 
 // concurrencyTracker wraps another Runtime, recording the peak number of

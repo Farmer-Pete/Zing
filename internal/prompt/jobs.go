@@ -17,7 +17,8 @@ const ResumeHeader = "Continue this planning session. The owner's messages, the 
 	"and return the next document."
 
 // labelTicket is the ticket input's label, shared by every constructor
-// that carries one (ForClassify, ForPlanningFirst, ForPlanReview).
+// that carries one (ForClassify, ForPlanningFirst, ForPlanReview,
+// ForBuild, ForFix, ForMerge, ForJudge, ForReview).
 const labelTicket = "ticket"
 
 // labelPlan is the plan input's label, shared by every constructor that
@@ -257,26 +258,17 @@ type BuildTask struct {
 	Test     string // the task's named test, raw
 }
 
-// labelApproval is the gate approval notes input's label (D32, design
-// section 22.12.3b): buildInputs emits it right after plan, omitted when
-// empty, so a build or fix prompt that carries no approval notes renders no
-// "approval:" block at all.
-const labelApproval = "approval"
-
 // buildInputs assembles the inputs shared by ForBuild and ForFix: ticket
-// fenced, plan raw, the gate's approval notes fenced right after plan
-// (omitted when empty, D32), accepted raw (omitted when empty), the task or
-// fix input as given, then extra (plan section 9.1, design section
-// 22.12.3b).
-func buildInputs(ticket, planXML, approvalNotes string, accepted []string, taskInput NamedInput, extra []NamedInput) []NamedInput {
-	inputs := make([]NamedInput, 0, 4+len(extra))
+// fenced, plan raw, accepted raw (omitted when empty), the task or fix
+// input as given, then extra (plan section 9.1). ticket may carry the
+// owner's decisions after the ticket text (job.specFor), including the
+// gate's approval notes, so no separate approval input is needed.
+func buildInputs(ticket, planXML string, accepted []string, taskInput NamedInput, extra []NamedInput) []NamedInput {
+	inputs := make([]NamedInput, 0, 3+len(extra))
 	inputs = append(inputs,
 		NamedInput{Label: labelTicket, Text: ticket, Untrusted: true},
 		NamedInput{Label: labelPlan, Text: planXML},
 	)
-	if approvalNotes != "" {
-		inputs = append(inputs, NamedInput{Label: labelApproval, Text: approvalNotes, Untrusted: true})
-	}
 	if len(accepted) > 0 {
 		inputs = append(inputs, NamedInput{Label: "accepted", Text: strings.Join(accepted, "\n")})
 	}
@@ -287,15 +279,14 @@ func buildInputs(ticket, planXML, approvalNotes string, accepted []string, taskI
 
 // ForBuild fills the build job prompt's five placeholders (`{n}`,
 // `{total}`, `{task title}`, `{test_cmd}`, `{lint_cmd}`) and lists the
-// inputs: ticket (fenced), plan (raw), approval notes (fenced, omitted when
-// empty, D32), accepted (raw, omitted when none), task (raw, "Task <n> of
-// <total>\nTest: <test>\n\n<text>"), then extra.
+// inputs: ticket (fenced), plan (raw), accepted (raw, omitted when none),
+// task (raw, "Task <n> of <total>\nTest: <test>\n\n<text>"), then extra.
 // A jobPrompt missing one of the five placeholders is the error
 // `prompt: build prompt lacks placeholder <name>`. Called by
 // internal/job's build turn (plan section 6.3); calls Assemble once
 // Schemas is set from response.RenderTemplate(JobBuild, ...) in build
 // schema order.
-func ForBuild(jobPrompt string, task BuildTask, testCmd, lintCmd, ticket, planXML, approvalNotes string, accepted []string, extra []NamedInput) (Input, error) {
+func ForBuild(jobPrompt string, task BuildTask, testCmd, lintCmd, ticket, planXML string, accepted []string, extra []NamedInput) (Input, error) {
 	filled, err := fillPlaceholders(jobPrompt, "build", []placeholderPair{
 		{"{n}", strconv.Itoa(task.N)},
 		{"{total}", strconv.Itoa(task.Total)},
@@ -308,7 +299,7 @@ func ForBuild(jobPrompt string, task BuildTask, testCmd, lintCmd, ticket, planXM
 	}
 
 	taskText := fmt.Sprintf("Task %d of %d\nTest: %s\n\n%s", task.N, task.Total, task.Test, task.Text)
-	inputs := buildInputs(ticket, planXML, approvalNotes, accepted, NamedInput{Label: "task", Text: taskText}, extra)
+	inputs := buildInputs(ticket, planXML, accepted, NamedInput{Label: "task", Text: taskText}, extra)
 
 	return Input{JobPrompt: filled, Inputs: inputs}, nil
 }
@@ -325,7 +316,7 @@ func ForBuild(jobPrompt string, task BuildTask, testCmd, lintCmd, ticket, planXM
 // three times, since nothing told it a no-change outcome was allowed).
 const fixNoChangeLine = "If the reported failure does not reproduce against the code, change nothing and return outcome ok with an empty files_changed and a report that says why."
 
-func ForFix(jobPrompt, subject, label, text, testCmd, lintCmd, ticket, planXML, approvalNotes string, accepted []string, extra []NamedInput) (Input, error) {
+func ForFix(jobPrompt, subject, label, text, testCmd, lintCmd, ticket, planXML string, accepted []string, extra []NamedInput) (Input, error) {
 	if !strings.Contains(jobPrompt, buildTaskLine) {
 		return Input{}, fmt.Errorf("prompt: build prompt lacks placeholder %s", buildTaskLine)
 	}
@@ -339,7 +330,7 @@ func ForFix(jobPrompt, subject, label, text, testCmd, lintCmd, ticket, planXML, 
 		return Input{}, err
 	}
 
-	inputs := buildInputs(ticket, planXML, approvalNotes, accepted, NamedInput{Label: label, Text: text, Untrusted: true}, extra)
+	inputs := buildInputs(ticket, planXML, accepted, NamedInput{Label: label, Text: text, Untrusted: true}, extra)
 
 	return Input{JobPrompt: filled, Inputs: inputs}, nil
 }
@@ -437,14 +428,16 @@ func CodeLensSection(text string) (string, error) {
 
 // ForReview builds one lens's review job Input: the job prompt with
 // {lens} and {sha} filled, the lens file's "## In code" section appended
-// (blank line between), then plan and diff, both fenced, then extra (D15)
-// — notes (fenced) among them on a retry that carries them (plan section
-// 6.2). A jobPrompt missing either placeholder is the fixed error
-// `prompt: review prompt lacks placeholder <name>`. Called once per lens
-// by internal/job's review round (plan section 6.2); calls Assemble once
-// Schemas is set from response.RenderTemplate(JobReview, ...) in review
-// schema order.
-func ForReview(jobPrompt, lensName, sha, codeSection, plan, diff string, extra []NamedInput) (Input, error) {
+// (blank line between), then ticket, plan, and diff, all fenced, then
+// extra (D15) — notes (fenced) among them on a retry that carries them
+// (plan section 6.2). ticket may carry the owner's decisions after the
+// ticket text (job.specFor); the ticket input comes first so a lens
+// reads the owner's decisions before the plan and the diff. A jobPrompt
+// missing either placeholder is the fixed error `prompt: review prompt
+// lacks placeholder <name>`. Called once per lens by internal/job's
+// review round (plan section 6.2); calls Assemble once Schemas is set
+// from response.RenderTemplate(JobReview, ...) in review schema order.
+func ForReview(jobPrompt, lensName, sha, codeSection, ticket, plan, diff string, extra []NamedInput) (Input, error) {
 	filled, err := fillPlaceholders(jobPrompt, "review", []placeholderPair{
 		{"{lens}", lensName},
 		{"{sha}", sha},
@@ -454,8 +447,9 @@ func ForReview(jobPrompt, lensName, sha, codeSection, plan, diff string, extra [
 	}
 	filled = strings.TrimRight(filled, "\n") + "\n\n" + strings.TrimRight(codeSection, "\n")
 
-	inputs := make([]NamedInput, 0, 2+len(extra))
+	inputs := make([]NamedInput, 0, 3+len(extra))
 	inputs = append(inputs,
+		NamedInput{Label: labelTicket, Text: ticket, Untrusted: true},
 		NamedInput{Label: labelPlan, Text: plan, Untrusted: true},
 		NamedInput{Label: "diff", Text: diff, Untrusted: true},
 	)

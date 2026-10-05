@@ -758,7 +758,11 @@ func (h shipHandler) runMergeFirst(ctx context.Context, t store.Ticket, d Deps, 
 	if req.Notes != "" {
 		extra = append(extra, prompt.Notes(req.Notes))
 	}
-	in, err := prompt.ForMerge(promptText, proj.TestCmd, proj.LintCmd, t.Title+"\n\n"+t.Body, planXML, strings.Join(conflicted, "\n"), baseLog, extra)
+	ticketText, err := specFor(ctx, d, t)
+	if err != nil {
+		return store.HandlerCommit{}, fmt.Errorf("job: merge: %w", err)
+	}
+	in, err := prompt.ForMerge(promptText, proj.TestCmd, proj.LintCmd, ticketText, planXML, strings.Join(conflicted, "\n"), baseLog, extra)
 	if err != nil {
 		return store.HandlerCommit{}, fmt.Errorf("job: merge: %w", err)
 	}

@@ -6,6 +6,11 @@ plan reach its goals. Then apply every lens below to the plan. A finding is
 a question or a specific defect with a location and a fix. Style belongs to
 the style guide and is not a finding here.
 
+The ticket input may end with the owner's decisions. A decision
+overrides the ticket text and the plan wherever they conflict.
+A plan that follows a decision is not a finding; a plan that
+contradicts one is a fidelity finding.
+
 Location is the element path in the plan, for example
 plan/delivery/tasks/task[3]. A finding whose path does not resolve is
 discarded.

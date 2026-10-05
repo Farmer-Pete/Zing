@@ -200,6 +200,33 @@ func TestDriveFixRunsFirstTurn(t *testing.T) {
 	}
 }
 
+// TestFixPromptCarriesOwnerDecisions proves runFixFirst builds the fix
+// agent's ticket input through specFor (mirroring
+// TestBuildPromptCarriesApprovalNotes and TestJudgePromptCarriesOwnerDecisions):
+// job.SeedOwnerDecision's own resolved escalation reaches the recorded
+// prompt's ticket input, and there is no separate "approval" input.
+func TestFixPromptCarriesOwnerDecisions(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow end-to-end flow; runs in the full suite")
+	}
+	t.Parallel()
+	s, _, ticketID := buildTicketInBuilding(t)
+	job.SeedOwnerDecision(t, s, ticketID, "Keep the test as a guard only.")
+	mid := writeFixRequestMarker(t, s, ticketID, job.FixKindCILog, testFixCILogText, 0)
+	ticket := getTicket(t, s, ticketID)
+
+	scriptRT := &scriptedRuntime{t: t, steps: []scriptedStep{buildStep([]string{helloTxt}, nil, "fix-decision-sess")}}
+	rec := &recordingRuntime{rt: scriptRT}
+	deps := claimForBuild(t, s, rec, ticketID)
+
+	req := job.FixRequest{MessageID: mid, Kind: job.FixKindCILog, Text: testFixCILogText, AfterRunID: 0}
+	if _, err := job.DriveFix(t.Context(), ticket, deps, req); err != nil {
+		t.Fatalf("DriveFix: %v", err)
+	}
+	assertFenced(t, rec.lastReq.Prompt, "ticket", "Keep the test as a guard only.")
+	assertNoLabel(t, rec.lastReq.Prompt, "approval")
+}
+
 // TestDriveFixResumesAfterAnswer proves #28 gap 1's own new capability
 // (design section 5.4 change 1): an owner's answer to a fix run's own
 // build-job question resumes that same session (round.SessionID), with the

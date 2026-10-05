@@ -223,8 +223,8 @@ func findConfirmedGateQuestionID(t *testing.T, s *store.Store, ticketID int64) i
 
 // TestBuildPromptCarriesApprovalNotes proves design section 22.12.3b end to
 // end: the owner's reply on the gate question, sent alongside Approve,
-// reaches the build turn's own prompt as the fenced "approval" input, right
-// after plan.
+// reaches the build turn's own prompt inside the fenced "ticket" input, as
+// an owner decision, and there is no separate "approval" input.
 func TestBuildPromptCarriesApprovalNotes(t *testing.T) {
 	if testing.Short() {
 		t.Skip("slow end-to-end flow; runs in the full suite")
@@ -234,8 +234,8 @@ func TestBuildPromptCarriesApprovalNotes(t *testing.T) {
 
 	gateQID := findConfirmedGateQuestionID(t, s, ticketID)
 	if _, err := s.InsertMessage(t.Context(), store.Message{
-		TicketID: ticketID, ParentID: &gateQID, Type: "reply", Author: "you",
-		State: new("sent"), Body: "the JSON must stay stable",
+		TicketID: ticketID, ParentID: &gateQID, Type: testMsgTypeReply, Author: testAuthorYou,
+		State: new(testAnswerStateSent), Body: "the JSON must stay stable",
 	}); err != nil {
 		t.Fatalf("InsertMessage(approval note): %v", err)
 	}
@@ -246,7 +246,11 @@ func TestBuildPromptCarriesApprovalNotes(t *testing.T) {
 	if _, err := job.Registry()[testStateBuilding].Run(t.Context(), ticket, deps); err != nil {
 		t.Fatalf("building Run: %v", err)
 	}
-	assertFenced(t, rec.lastReq.Prompt, "approval", "the JSON must stay stable")
+	assertFenced(t, rec.lastReq.Prompt, "ticket", "the JSON must stay stable")
+	if !strings.Contains(rec.lastReq.Prompt, "At the gate, the owner approved the plan and wrote:") {
+		t.Errorf("prompt missing approval decision header: %s", rec.lastReq.Prompt)
+	}
+	assertNoLabel(t, rec.lastReq.Prompt, "approval")
 }
 
 // ---- RUN --------------------------------------------------------------------
@@ -1821,8 +1825,8 @@ func TestResolveDefaultsUnknownDecisionToReject(t *testing.T) {
 		t.Fatalf("marshal answer payload: %v", err)
 	}
 	if _, insertErr := s.InsertMessage(t.Context(), store.Message{
-		TicketID: ticketID, ParentID: &qID, Type: "answer", Author: "you",
-		State: new("sent"), Payload: answerPayload,
+		TicketID: ticketID, ParentID: &qID, Type: testMsgTypeAnswer, Author: testAuthorYou,
+		State: new(testAnswerStateSent), Payload: answerPayload,
 	}); insertErr != nil {
 		t.Fatalf("InsertMessage(answer): %v", insertErr)
 	}

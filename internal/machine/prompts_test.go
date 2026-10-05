@@ -38,12 +38,12 @@ func TestPrompts_MatchThePinnedDesignText(t *testing.T) {
 		{
 			name:   "planreview",
 			path:   "prompts/planreview.md",
-			sha256: "c0cc39368632ea2ffa0f4672e8c576d7d044b26a4cae9c43d7fc81c1c2320d7f",
+			sha256: "7eceaab2061d7c45cba821969aec91b736d019491efa1bcce2e1d73d26d79221",
 		},
 		{
 			name:   testJobNameBuild,
 			path:   "prompts/build.md",
-			sha256: "cebcf0accb70448e9fcb01669ca0e247c3a2f3a53a432953e41b104b33da6749",
+			sha256: "abd42e1ac7c2bd904dc54f8679c14cef7ee8d4f30b2b62c87f68bac95122348f",
 		},
 		{
 			name:   "merge",
@@ -58,7 +58,7 @@ func TestPrompts_MatchThePinnedDesignText(t *testing.T) {
 		{
 			name:   "review",
 			path:   "prompts/review.md",
-			sha256: "d4c75ff8d43b49fd59a273c8b1badc7dec2f2d913851a1a0f7e6ccc0bb725c49",
+			sha256: "1c53cc1d16e14603ebc9e920dcdcbf4d949f66194c2bda56ab5502fbfa774d97",
 		},
 		{
 			name:   "judge",

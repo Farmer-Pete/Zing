@@ -94,7 +94,7 @@ func seedConfirmedGate(t *testing.T, s *store.Store, ticketID, qID int64, planVe
 	var aID int64
 	found := false
 	for i := range msgs {
-		if msgs[i].Type == "answer" && msgs[i].ParentID != nil && *msgs[i].ParentID == qID {
+		if msgs[i].Type == testMsgTypeAnswer && msgs[i].ParentID != nil && *msgs[i].ParentID == qID {
 			aID = msgs[i].ID
 			found = true
 		}
