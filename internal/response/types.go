@@ -350,7 +350,7 @@ type RespondResponse struct { // outcome ok
 type ThreadAction struct {
 	ID     string     `xml:"id,attr"     json:"id"     doc:"the review thread id from the inputs"`
 	Action ThreadVerb `xml:"action,attr" json:"action"`
-	Text   string     `xml:",chardata"   json:"text"   jsonschema:"minLength=1" doc:"fix: what to change; reply: the reply; addressed: the commit that covers it"`
+	Text   string     `xml:",chardata"   json:"text"   jsonschema:"minLength=1" doc:"fix: what to change; reply: the reply; nit: the reply; addressed: the commit that covers it"`
 }
 
 type SideResponse struct { // outcome ok

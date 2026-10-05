@@ -16,12 +16,12 @@ var update = flag.Bool("update", false, "update the committed schema files in in
 
 const schemaDir = "../store/schemas"
 
-func TestRegistry_Has18Entries(t *testing.T) {
+func TestRegistry_Has19Entries(t *testing.T) {
 	t.Parallel()
 
 	entries := Registry()
-	if len(entries) != 18 {
-		t.Fatalf("len(Registry()) = %d, want 18", len(entries))
+	if len(entries) != 19 {
+		t.Fatalf("len(Registry()) = %d, want 19", len(entries))
 	}
 
 	var messages, artifacts, pushSubscriptions, events int
@@ -48,8 +48,8 @@ func TestRegistry_Has18Entries(t *testing.T) {
 	if pushSubscriptions != 1 {
 		t.Errorf("push_subscriptions entries = %d, want 1", pushSubscriptions)
 	}
-	if events != 1 {
-		t.Errorf("events entries = %d, want 1", events)
+	if events != 2 {
+		t.Errorf("events entries = %d, want 2", events)
 	}
 }
 

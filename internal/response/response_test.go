@@ -41,7 +41,7 @@ func TestValues(t *testing.T) {
 		{"TaskState", TaskState(""), []string{"pending", "running", "done", "failed"}},
 		{"Decision", Decision(""), []string{"accept", "reject", "drop", "discuss"}},
 		{"Result", Result(""), []string{"pass", "fail"}},
-		{"ThreadVerb", ThreadVerb(""), []string{"fix", "reply", "addressed"}},
+		{"ThreadVerb", ThreadVerb(""), []string{"fix", "reply", "nit", "addressed"}},
 	}
 
 	if len(tests) != 18 {

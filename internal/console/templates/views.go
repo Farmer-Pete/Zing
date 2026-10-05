@@ -78,8 +78,14 @@ type ThreadItem struct {
 // (design section 7, D8, Task 11): the current cohort's scenario set, in
 // the store's own insertion order, decoded straight from its stored
 // response.Scenario payload by internal/console/views.go's loadScenarios.
+// Check, Sealed, and TicketID (#41) feed scenariosSection's own owner-edit
+// box, rendered only when Sealed: Check is the scenario's check_cmd, Sealed
+// is whether the artifact's sealed_at is set, and TicketID is the owning
+// ticket, the box's data-ticket attribute.
 type ScenarioRow struct {
-	ID, Kind, Given, When, Then string
+	ID, Kind, Given, When, Then, Check string
+	Sealed                             bool
+	TicketID                           int64
 }
 
 // FindingRow is one above-floor plan-review finding in the gate's context

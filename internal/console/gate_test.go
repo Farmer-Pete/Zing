@@ -168,6 +168,78 @@ func TestGateScenariosTable_CurrentCohortOnly(t *testing.T) {
 	}
 }
 
+// TestGateOwnerEditControls_SealedCohortOnly proves the wiring views.go's
+// buildScenarioRows and loadPlan do for #41's owner-edit controls, driven
+// against a real store and the live GET /stream rather than a hand-built
+// view model: a cohort with at least one sealed scenario renders exactly
+// one data-target="scenario" box (for the sealed scenario, not the
+// unsealed one) and an owner-edit-drop control on every plan task, while a
+// cohort with no sealed scenario at all renders neither.
+func TestGateOwnerEditControls_SealedCohortOnly(t *testing.T) {
+	t.Parallel()
+
+	t.Run("sealed cohort shows the controls", func(t *testing.T) {
+		t.Parallel()
+		s := newConsoleTestStore(t)
+		ticketID := seedTicket(t, s, "fake#1", "Add a hello endpoint")
+
+		runID := seedRun(t, s, ticketID)
+		seedPlanArtifact(t, s, ticketID, &runID, 1)
+		seedSealedScenarioArtifact(t, s, ticketID, &runID, response.Scenario{
+			ID: "s1", Kind: response.ScenarioKindBehavior, Given: "g1", When: "w1", Then: "t1",
+		})
+		seedScenarioArtifact(t, s, ticketID, &runID, 2, response.Scenario{
+			ID: "s2", Kind: response.ScenarioKindBehavior, Given: "g2", When: "w2", Then: "t2",
+		}) // unsealed
+		seedGateQuestion(t, s, ticketID)
+
+		srv := newTestServer(t, s, bus.New(), nil, newTestLogHandler(t))
+		resp, r, cancel := openStream(t, srv.URL, "thread", ticketID, 0)
+		defer cancel()
+		defer func() { _ = resp.Body.Close() }()
+		_, main, _, _ := readInitialFrames(t, r)
+		assertExactSSEFraming(t, main)
+
+		gate := findGroup(t, splitQuestionGroups(t, main), gateQuestionTitle)
+
+		if n := strings.Count(gate, `data-target="scenario"`); n != 1 {
+			t.Errorf(`want exactly one data-target="scenario" box; got %d in:\n%s`, n, gate)
+		}
+		if n := strings.Count(gate, "owner-edit-drop"); n != 1 {
+			t.Errorf("want one owner-edit-drop control (fixturePlan's one task); got %d in:\n%s", n, gate)
+		}
+	})
+
+	t.Run("no sealed scenario shows neither", func(t *testing.T) {
+		t.Parallel()
+		s := newConsoleTestStore(t)
+		ticketID := seedTicket(t, s, "fake#2", "Add another endpoint")
+
+		runID := seedRun(t, s, ticketID)
+		seedPlanArtifact(t, s, ticketID, &runID, 1)
+		seedScenarioArtifact(t, s, ticketID, &runID, 1, response.Scenario{
+			ID: "s1", Kind: response.ScenarioKindBehavior, Given: "g1", When: "w1", Then: "t1",
+		}) // unsealed
+		seedGateQuestion(t, s, ticketID)
+
+		srv := newTestServer(t, s, bus.New(), nil, newTestLogHandler(t))
+		resp, r, cancel := openStream(t, srv.URL, "thread", ticketID, 0)
+		defer cancel()
+		defer func() { _ = resp.Body.Close() }()
+		_, main, _, _ := readInitialFrames(t, r)
+		assertExactSSEFraming(t, main)
+
+		gate := findGroup(t, splitQuestionGroups(t, main), gateQuestionTitle)
+
+		if strings.Contains(gate, `data-target="scenario"`) {
+			t.Errorf(`want no data-target="scenario" box; got:\n%s`, gate)
+		}
+		if strings.Contains(gate, "owner-edit-drop") {
+			t.Errorf("want no owner-edit-drop control; got:\n%s", gate)
+		}
+	})
+}
+
 func TestGateFindingsTable_FloorMinorShowsBlockerAndMajorOnly(t *testing.T) {
 	t.Parallel()
 	s := newConsoleTestStore(t)

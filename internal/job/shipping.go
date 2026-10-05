@@ -689,20 +689,26 @@ func (h shipHandler) poll(ctx context.Context, t store.Ticket, d Deps) (store.Ha
 	// fingerprint (pollThreadsFrom). Row 5 (M4 task 4) drives off actionable
 	// threads; rows 6 and 6a (this task) drive off leftover and unclassified
 	// ones; row 3 (this task) and row 9 (M4 task 8) both read whether any
-	// thread of any class is still unresolved.
+	// thread of any class is still unresolved. After readyCycleCap
+	// thread-caused cycles (respond.go, skipThreadDraftFlip), row 3 flips
+	// only for a failed CI.
 	_, actionable, leftover, unclassified := classifyThreads(threadsRaw, login)
 	pollThreads := pollThreadsFrom(threadsRaw)
 
 	fp := pollFingerprint(pr, runs, statuses, required, pollThreads)
 	result := prCI(pr, runs, statuses, required)
 	anyUnresolved := len(actionable) > 0 || len(leftover) > 0 || len(unclassified) > 0
+	skipFlip, err := skipThreadDraftFlip(ctx, t, d, pr, number, result.State == CIFailed, anyUnresolved)
+	if err != nil {
+		return store.HandlerCommit{}, err
+	}
 
 	switch {
 	case result.State == CIUnprotected:
 		c := shipEscalation(t, d, unprotectedWhat, unprotectedWhy, "")
 		c.ClearPoll = true
 		return c, nil
-	case !pr.Draft && (result.State == CIFailed || anyUnresolved):
+	case !pr.Draft && (result.State == CIFailed || anyUnresolved) && !skipFlip:
 		return h.pollConvertToDraft(ctx, t, d, proj, pr, local)
 	case result.State == CIFailed:
 		return h.pollCIFailed(ctx, t, d, proj, result)

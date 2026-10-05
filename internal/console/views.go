@@ -416,7 +416,35 @@ func (c *console) loadPlan(ctx context.Context, ticketID int64) (*templates.Rend
 	if err != nil {
 		return nil, fmt.Errorf("console: render plan artifact for ticket %d: %w", ticketID, err)
 	}
+	rendered.TicketID = ticketID
+	rendered.Editable, err = c.planSealed(ctx, ticketID)
+	if err != nil {
+		return nil, err
+	}
 	return &rendered, nil
+}
+
+// planSealed reports whether ticketID's current plan cohort (CurrentCohort)
+// has at least one sealed scenario (CohortSealState): loadPlan's own
+// RenderedPlan.Editable, the gate context's gate for showing the plan
+// task owner-edit controls (design section matching #41), matching
+// store.OwnerEdit's own not_sealed refusal for a plan_task edit. False,
+// with no error, when the ticket has no plan cohort yet, or its cohort's
+// run_id is nil (a legacy plan artifact stored before every artifact
+// carried run_id).
+func (c *console) planSealed(ctx context.Context, ticketID int64) (bool, error) {
+	cohort, ok, err := c.store.CurrentCohort(ctx, ticketID)
+	if err != nil {
+		return false, fmt.Errorf("console: current cohort for ticket %d: %w", ticketID, err)
+	}
+	if !ok || cohort.RunID == nil {
+		return false, nil
+	}
+	_, sealed, _, err := c.store.CohortSealState(ctx, ticketID, *cohort.RunID)
+	if err != nil {
+		return false, fmt.Errorf("console: cohort seal state for ticket %d: %w", ticketID, err)
+	}
+	return sealed >= 1, nil
 }
 
 // loadScenarios reads ticketID's current scenario cohort for the gate's
@@ -466,6 +494,7 @@ func buildScenarioRows(ticketID int64, artifacts []store.Artifact) ([]templates.
 		}
 		rows = append(rows, templates.ScenarioRow{
 			ID: sc.ID, Kind: string(sc.Kind), Given: sc.Given, When: sc.When, Then: sc.Then,
+			Check: sc.Check, Sealed: artifacts[i].SealedAt != nil, TicketID: ticketID,
 		})
 	}
 	return rows, nil

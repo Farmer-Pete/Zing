@@ -27,6 +27,7 @@ templ Thread(ticket *store.Ticket, rows []ThreadRow, wait WaitProgress, banner s
 	<main id="main" class="view-thread">
 		if ticket != nil {
 			<h2>{ ticket.Title }</h2>
+			@ticketBodyEditor(ticket)
 			if banner != "" {
 				<p class="agent-status">{ banner }</p>
 			} else if wait.Total > 0 {
@@ -53,6 +54,27 @@ templ Thread(ticket *store.Ticket, rows []ThreadRow, wait WaitProgress, banner s
 			<p class="empty">Select a ticket.</p>
 		}
 	</main>
+}
+
+// ticketBodyEditor is the owner's ticket-body owner-edit box (#41): a
+// <details class="owner-edit"> holding the stored body, posted by
+// console.js's ownerEditSubmit to POST /tickets/{id}/edit. Q6's decision
+// amends tickets.body only, so the tracker reference renders as a plain
+// note the owner edits the issue by hand against.
+// data-preserve-attr="open" keeps it open across a /stream patch while the
+// owner is editing, matching questionGroup's own use of the attribute. The
+// textarea's content opens with a "\n" (bug fix): the HTML parser drops
+// exactly one leading newline right after a textarea's opening tag, so
+// without it a stored body that itself starts with a newline would render
+// one character short; the prefix makes the parser's drop a no-op either way.
+templ ticketBodyEditor(ticket *store.Ticket) {
+	<details class="owner-edit" data-preserve-attr="open" data-ticket={ strconv.FormatInt(ticket.ID, 10) } data-target="ticket_body">
+		<summary>Ticket body</summary>
+		<textarea data-field="body">{ "\n" + ticket.Body }</textarea>
+		<p>The tracker issue { ticket.TrackerRef } is not updated; edit it by hand to match.</p>
+		<button type="button" class="owner-edit-save">Save</button>
+		<span class="owner-edit-error"></span>
+	</details>
 }
 
 // waitProgressBanner is the current round's progress line (bug fix: "After
