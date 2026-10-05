@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"zing/internal/machine"
 	"zing/internal/orchestrator"
 	"zing/internal/proc"
 	"zing/internal/prompt"
@@ -59,8 +60,12 @@ var checkNow = time.Now
 // checkBudget is jobs.build.timeout_minutes as a Duration: the one budget
 // lint and test share, lint first (#55 plan D1), which keeps both inside
 // the building claim's lease of timeout_minutes plus claimGrace.
-func checkBudget(d Deps) time.Duration {
-	return time.Duration(d.Machine.Jobs[jobBuildName].TimeoutMinutes) * time.Minute
+func checkBudget(d Deps) time.Duration { return buildTimeout(d.Machine) }
+
+// buildTimeout is jobs.build.timeout_minutes as a Duration: CHECK's shared
+// budget and TicketCommands' timeout.
+func buildTimeout(m *machine.Machine) time.Duration {
+	return time.Duration(m.Jobs[jobBuildName].TimeoutMinutes) * time.Minute
 }
 
 // runCheckCommands runs fix (when proj.FixCmd is set), then the project's
