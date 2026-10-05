@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"path"
 	"regexp"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -352,51 +353,107 @@ func shippingGate(k, maxLoops int, kind string, aid int64, request string) (ok b
 	return false, what, why, tried
 }
 
-// actionsJobIDPattern pulls the Actions job id out of a check run's
-// DetailsURL (design section 8.5's log tails).
-var actionsJobIDPattern = regexp.MustCompile(`/actions/runs/\d+/job/(\d+)`)
+// actionsJobIDPattern pulls the workflow run id and the job id out of a
+// check run's DetailsURL.
+var actionsJobIDPattern = regexp.MustCompile(`/actions/runs/(\d+)/job/(\d+)`)
 
-func jobIDFromDetailsURL(url string) (int64, bool) {
-	m := actionsJobIDPattern.FindStringSubmatch(url)
-	if m == nil {
-		return 0, false
-	}
-	id, err := strconv.ParseInt(m[1], 10, 64)
-	if err != nil {
-		return 0, false
-	}
-	return id, true
+// rerunAppearWait is how long a re-run may take to show up in the
+// check-run list before its old failed run counts again (decideCIRerun
+// rule 1).
+const rerunAppearWait = 10 * time.Minute
+
+// infraRerunCap is the most infrastructure re-runs per check per sha
+// (decideCIRerun rule 2).
+const infraRerunCap = 3
+
+// infraConclusions are the conclusions that mean the job never ran to a
+// verdict: re-run, never fix.
+var infraConclusions = map[string]bool{ghCancelled: true, ghStartupFailure: true, ghStale: true}
+
+// rerunInfraWhat is rerunDecision.What for both infra escalate branches of
+// decideCIRerun's per-check rule (rule 2).
+const rerunInfraWhat = "a CI check keeps failing to start"
+
+// rerunNoLogWhat is rerunDecision.What for decideCIRerun's no-log escalate
+// branch (rule 4).
+const rerunNoLogWhat = "a failed CI check has no readable log"
+
+// failedCheck is one failed check run together with what readFailedChecks
+// could learn about it.
+type failedCheck struct {
+	Run orchestrator.CheckRun // a run from CIResult.FailedRuns
+	// RunID is the Actions workflow run id; 0 unless AppSlug is
+	// github-actions and DetailsURL matches actionsJobIDPattern.
+	RunID int64
+	// JobID is the Actions job id; 0 under the same condition as RunID.
+	JobID int64
+	// Log is JobLogTail's text (200-line cap); empty when LogErr is set
+	// or no read happened.
+	Log string
+	// LogErr is JobLogTail's error; nil when read, or when no read was
+	// attempted.
+	LogErr error
 }
 
-// ciLogText is design section 8.5's log-tail text for a ci_log fix
-// request: at most 3 failed runs, by name, each followed by its failed
-// step's own log (checks.JobLogTail, up to 200 lines, from the step's
-// "##[group]Run " header to its last "##[error]" line, falling back to
-// the job log's plain last 200 lines when the log has no "##[error]")
-// when the run's app is github-actions and its DetailsURL names a job
-// id, a "the log could not be read" line when that fetch fails, or one
-// line naming its DetailsURL otherwise; then every failed status, one
-// line each.
-func ciLogText(ctx context.Context, checks Checks, owner, repo string, failedRuns []orchestrator.CheckRun, failedStatuses []orchestrator.CommitStatus) string {
-	runs := append([]orchestrator.CheckRun(nil), failedRuns...)
-	sort.Slice(runs, func(i, j int) bool { return runs[i].Name < runs[j].Name })
-	if len(runs) > 3 {
-		runs = runs[:3]
+// readFailedChecks reads every failed run's facts, sorted by name. For a
+// github-actions run whose DetailsURL matches actionsJobIDPattern, it
+// parses RunID and JobID from the two groups inline (a ParseInt error
+// leaves both 0). For such a run whose conclusion is not infrastructure,
+// it fetches JobLogTail(jobID, 200) into Log or LogErr. It never reads an
+// infrastructure run's log.
+func readFailedChecks(ctx context.Context, checks Checks, owner, repo string, runs []orchestrator.CheckRun) []failedCheck {
+	out := make([]failedCheck, 0, len(runs))
+	for _, r := range runs {
+		fc := failedCheck{Run: r}
+		if r.AppSlug == ghGitHubActions {
+			if m := actionsJobIDPattern.FindStringSubmatch(r.DetailsURL); m != nil {
+				runID, err1 := strconv.ParseInt(m[1], 10, 64)
+				jobID, err2 := strconv.ParseInt(m[2], 10, 64)
+				if err1 == nil && err2 == nil {
+					fc.RunID = runID
+					fc.JobID = jobID
+				}
+			}
+		}
+		if fc.JobID != 0 && !infraConclusions[r.Conclusion] {
+			tail, err := checks.JobLogTail(ctx, owner, repo, fc.JobID, 200)
+			if err != nil {
+				fc.LogErr = err
+			} else {
+				fc.Log = tail
+			}
+		}
+		out = append(out, fc)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Run.Name < out[j].Run.Name })
+	return out
+}
+
+// ciLogTextFrom is design section 8.5's ci_log text, built from what
+// readFailedChecks already read: the first 3 failed checks by name, each
+// "check NAME (CONCLUSION)" then a newline and its Log; "check NAME
+// (CONCLUSION): the log could not be read: ERR" when LogErr is set; or
+// "check NAME (CONCLUSION) DETAILS-URL" when no log was read; then one
+// "status CONTEXT (STATE) URL" line per failed status. Parts are joined
+// by a blank line.
+func ciLogTextFrom(failed []failedCheck, failedStatuses []orchestrator.CommitStatus) string {
+	checks := failed
+	if len(checks) > 3 {
+		checks = checks[:3]
 	}
 
 	var parts []string
-	for _, r := range runs {
-		jobID, ok := jobIDFromDetailsURL(r.DetailsURL)
-		if r.AppSlug == ghGitHubActions && ok {
-			tail, err := checks.JobLogTail(ctx, owner, repo, jobID, 200)
-			if err != nil {
-				parts = append(parts, fmt.Sprintf("check %s (%s): the log could not be read: %s", r.Name, r.Conclusion, err))
-				continue
-			}
-			parts = append(parts, fmt.Sprintf("check %s (%s)\n%s", r.Name, r.Conclusion, tail))
-			continue
+	for i := range checks {
+		fc := &checks[i]
+		r := fc.Run
+		switch {
+		case fc.LogErr != nil:
+			parts = append(parts, fmt.Sprintf("check %s (%s): the log could not be read: %s", r.Name, r.Conclusion, fc.LogErr))
+		case fc.JobID != 0 && !infraConclusions[r.Conclusion]:
+			parts = append(parts, fmt.Sprintf("check %s (%s)\n%s", r.Name, r.Conclusion, fc.Log))
+		default:
+			parts = append(parts, fmt.Sprintf("check %s (%s) %s", r.Name, r.Conclusion, r.DetailsURL))
 		}
-		parts = append(parts, fmt.Sprintf("check %s (%s) %s", r.Name, r.Conclusion, r.DetailsURL))
 	}
 
 	for _, s := range failedStatuses {
@@ -404,6 +461,298 @@ func ciLogText(ctx context.Context, checks Checks, owner, repo string, failedRun
 	}
 
 	return strings.Join(parts, "\n\n")
+}
+
+// ciLogText is pollCIFailed's current entry point into the log-tail text,
+// kept as a one-line wrapper over readFailedChecks and ciLogTextFrom so
+// it keeps compiling and behaving the same until task 4 moves the read
+// into ciRerunDecision and deletes this wrapper.
+func ciLogText(ctx context.Context, checks Checks, owner, repo string, failedRuns []orchestrator.CheckRun, failedStatuses []orchestrator.CommitStatus) string {
+	return ciLogTextFrom(readFailedChecks(ctx, checks, owner, repo, failedRuns), failedStatuses)
+}
+
+// failedTestPattern matches a go test failure header.
+var failedTestPattern = regexp.MustCompile(`--- FAIL: (\S+)`)
+
+// failedTestNames returns the distinct test names text's "--- FAIL: NAME"
+// lines carry, in first-seen order, at most 20, each cut to 200 bytes.
+func failedTestNames(text string) []string {
+	matches := failedTestPattern.FindAllStringSubmatch(text, -1)
+	seen := make(map[string]bool, len(matches))
+	var out []string
+	for _, m := range matches {
+		name := m[1]
+		if len(name) > 200 {
+			name = name[:200]
+		}
+		if seen[name] {
+			continue
+		}
+		seen[name] = true
+		out = append(out, name)
+		if len(out) == 20 {
+			break
+		}
+	}
+	return out
+}
+
+// priorRerun is one check_rerun event already on the ticket for the head
+// sha under consideration, decoded.
+type priorRerun struct {
+	Event response.CheckRerunEvent // decoded payload
+	At    time.Time                // the message row's CreatedAt, UTC
+}
+
+// plannedRerun is one check decideCIRerun has decided to re-run.
+type plannedRerun struct {
+	Event response.CheckRerunEvent // the event to write once RerunJob succeeds
+	JobID int64                    // the job RerunJob re-runs
+}
+
+// rerunAction is rerunDecision's own verdict.
+type rerunAction string
+
+const (
+	rerunFix      rerunAction = "fix"
+	rerunNow      rerunAction = "now"
+	rerunWait     rerunAction = "wait"
+	rerunEscalate rerunAction = "escalate"
+)
+
+// rerunDecision is decideCIRerun's own result (design shape, "Per-check
+// rule").
+type rerunDecision struct {
+	Action rerunAction
+	Reruns []plannedRerun // non-empty only for Action rerunNow, sorted by check name
+	What   string         // Action rerunEscalate only
+	Why    string         // Action rerunEscalate only
+	Tried  string         // Action rerunEscalate only
+	Text   string         // ciLogTextFrom's text, set by ciRerunDecision for every action
+}
+
+// triedRunsText renders rerunDecision.Tried for an escalation that
+// followed one or more prior re-runs: "re-ran workflow runs R1, R2, R3",
+// or "" when events is empty.
+func triedRunsText(events []priorRerun) string {
+	if len(events) == 0 {
+		return ""
+	}
+	ids := make([]string, len(events))
+	for i, e := range events {
+		ids[i] = strconv.FormatInt(e.Event.RunID, 10)
+	}
+	return "re-ran workflow runs " + strings.Join(ids, ", ")
+}
+
+// priorForCheck returns prior's events for one check name, in prior's own
+// order.
+func priorForCheck(prior []priorRerun, name string) []priorRerun {
+	var out []priorRerun
+	for _, p := range prior {
+		if p.Event.Check == name {
+			out = append(out, p)
+		}
+	}
+	return out
+}
+
+// decideCIRerun applies the per-check rule (design shape, "Per-check
+// rule") to every failed check and aggregates: escalate over rerun over
+// fix over wait.
+func decideCIRerun(now time.Time, sha string, failed []failedCheck, failedStatuses int, prior []priorRerun) rerunDecision {
+	sorted := append([]failedCheck(nil), failed...)
+	slices.SortFunc(sorted, func(a, b failedCheck) int { return strings.Compare(a.Run.Name, b.Run.Name) })
+
+	type verdict struct {
+		action rerunAction
+		rerun  plannedRerun
+		what   string
+		why    string
+		tried  string
+	}
+
+	sha7 := shortSHA(sha)
+	var verdicts []verdict
+	for i := range sorted {
+		fc := &sorted[i]
+		name := fc.Run.Name
+		own := priorForCheck(prior, name)
+
+		var infra, used []priorRerun
+		for _, p := range own {
+			switch p.Event.Reason {
+			case response.RerunReasonInfra:
+				infra = append(infra, p)
+			case response.RerunReasonFlaky, response.RerunReasonNoLog:
+				used = append(used, p)
+			}
+		}
+
+		waiting := false
+		for _, p := range own {
+			if p.Event.CheckRunID == fc.Run.ID && now.Sub(p.At) < rerunAppearWait {
+				waiting = true
+				break
+			}
+		}
+		if waiting {
+			verdicts = append(verdicts, verdict{action: rerunWait})
+			continue
+		}
+
+		isActionsJob := fc.RunID != 0 && fc.JobID != 0
+
+		if infraConclusions[fc.Run.Conclusion] {
+			if !isActionsJob {
+				verdicts = append(verdicts, verdict{
+					action: rerunEscalate,
+					what:   rerunInfraWhat,
+					why:    fmt.Sprintf("%s ended %s on %s and is not a GitHub Actions job, so Zing cannot re-run it", name, fc.Run.Conclusion, sha7),
+				})
+				continue
+			}
+			if len(infra) < infraRerunCap {
+				verdicts = append(verdicts, verdict{
+					action: rerunNow,
+					rerun: plannedRerun{
+						Event: response.CheckRerunEvent{Check: name, SHA: sha, RunID: fc.RunID, CheckRunID: fc.Run.ID, Reason: response.RerunReasonInfra},
+						JobID: fc.JobID,
+					},
+				})
+				continue
+			}
+			verdicts = append(verdicts, verdict{
+				action: rerunEscalate,
+				what:   rerunInfraWhat,
+				why:    fmt.Sprintf("%s ended %s on %s after %d re-runs", name, fc.Run.Conclusion, sha7, infraRerunCap),
+				tried:  triedRunsText(infra),
+			})
+			continue
+		}
+
+		if !isActionsJob {
+			verdicts = append(verdicts, verdict{action: rerunFix})
+			continue
+		}
+
+		if fc.LogErr != nil {
+			if len(used) == 0 {
+				verdicts = append(verdicts, verdict{
+					action: rerunNow,
+					rerun: plannedRerun{
+						Event: response.CheckRerunEvent{Check: name, SHA: sha, RunID: fc.RunID, CheckRunID: fc.Run.ID, Reason: response.RerunReasonNoLog},
+						JobID: fc.JobID,
+					},
+				})
+				continue
+			}
+			verdicts = append(verdicts, verdict{
+				action: rerunEscalate,
+				what:   rerunNoLogWhat,
+				why:    fmt.Sprintf("%s failed again on %s and its log could not be read: %s", name, sha7, fc.LogErr),
+				tried:  triedRunsText(used),
+			})
+			continue
+		}
+
+		if len(used) == 0 {
+			verdicts = append(verdicts, verdict{
+				action: rerunNow,
+				rerun: plannedRerun{
+					Event: response.CheckRerunEvent{Check: name, SHA: sha, RunID: fc.RunID, CheckRunID: fc.Run.ID, Reason: response.RerunReasonFlaky, Tests: failedTestNames(fc.Log)},
+					JobID: fc.JobID,
+				},
+			})
+			continue
+		}
+		verdicts = append(verdicts, verdict{action: rerunFix})
+	}
+
+	for i := range verdicts {
+		if verdicts[i].action == rerunEscalate {
+			v := &verdicts[i]
+			return rerunDecision{Action: rerunEscalate, What: v.what, Why: v.why, Tried: v.tried}
+		}
+	}
+
+	var reruns []plannedRerun
+	for i := range verdicts {
+		if verdicts[i].action == rerunNow {
+			reruns = append(reruns, verdicts[i].rerun)
+		}
+	}
+	if len(reruns) > 0 {
+		return rerunDecision{Action: rerunNow, Reruns: reruns}
+	}
+
+	for i := range verdicts {
+		if verdicts[i].action == rerunFix {
+			return rerunDecision{Action: rerunFix}
+		}
+	}
+	if failedStatuses > 0 {
+		return rerunDecision{Action: rerunFix}
+	}
+
+	return rerunDecision{Action: rerunWait}
+}
+
+// rerunPassedNotes returns one check_rerun_passed event message per check
+// that has a flaky or no_log check_rerun event in reruns, whose newest run
+// by id in runs (same Name) is completed with a good conclusion and an id
+// other than the event's check_run_id, and that has no event in passed
+// for the same check. Tests come from the newest such check_rerun event.
+// Messages are sorted by check name.
+func rerunPassedNotes(ticketID int64, sha string, runs []orchestrator.CheckRun, reruns []response.CheckRerunEvent, passed []response.CheckRerunPassedEvent) ([]store.Message, error) {
+	passedChecks := make(map[string]bool, len(passed))
+	for _, p := range passed {
+		passedChecks[p.Check] = true
+	}
+
+	newestEvent := make(map[string]response.CheckRerunEvent)
+	for _, e := range reruns {
+		if e.Reason != response.RerunReasonFlaky && e.Reason != response.RerunReasonNoLog {
+			continue
+		}
+		newestEvent[e.Check] = e
+	}
+
+	newestRun := make(map[string]orchestrator.CheckRun)
+	for _, r := range runs {
+		cur, ok := newestRun[r.Name]
+		if !ok || r.ID > cur.ID {
+			newestRun[r.Name] = r
+		}
+	}
+
+	names := make([]string, 0, len(newestEvent))
+	for name := range newestEvent {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+
+	var out []store.Message
+	for _, name := range names {
+		if passedChecks[name] {
+			continue
+		}
+		event := newestEvent[name]
+		run, ok := newestRun[name]
+		if !ok || run.ID == event.CheckRunID || run.Status != ghCompleted || !goodConclusions[run.Conclusion] {
+			continue
+		}
+		msg, err := store.NewEvent(ticketID, store.EventKindCheckRerunPassed, response.CheckRerunPassedEvent{
+			Check: name,
+			SHA:   sha,
+			Tests: event.Tests,
+		})
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, msg)
+	}
+	return out, nil
 }
 
 // prURLPattern is the shape tickets.pr_url must have for parsePRNumber to

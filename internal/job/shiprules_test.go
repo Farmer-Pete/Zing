@@ -1,10 +1,12 @@
 // shiprules_test.go tests M3 task 4's pure shipping rules (design section
 // 8.3, 8.4, 8.5, 8.7, shiprules.go): EvaluateCI, pollFingerprint,
-// nextInterval, shippingGate, ciLogText, and parsePRNumber.
+// nextInterval, shippingGate, ciLogTextFrom, decideCIRerun,
+// failedTestNames, rerunPassedNotes, and parsePRNumber.
 package job
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -24,12 +26,13 @@ import (
 // use, a second check name (not "lint" -- building.go's own check command
 // already carries that name), and two commit-status contexts.
 const (
-	ciSHA          = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
-	testRequiredCI = "ci"
-	testCheckB     = "typecheck"
-	testStatusA    = "deploy"
-	testStatusB    = "codecov"
-	testInProgress = "in_progress"
+	ciSHA             = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+	testRequiredCI    = "ci"
+	testCheckB        = "typecheck"
+	testStatusA       = "deploy"
+	testStatusB       = "codecov"
+	testInProgress    = "in_progress"
+	testFlakyTestName = "TestX"
 )
 
 // -----------------------------------------------------------------------
@@ -446,6 +449,10 @@ func TestCILogText(t *testing.T) {
 				return "line one\nline two", nil
 			case 222:
 				return "", errors.New("signed url expired")
+			case 333:
+				// readFailedChecks reads every failed Actions run's log,
+				// not just the 3 ciLogTextFrom later keeps.
+				return "fourth log", nil
 			default:
 				t.Fatalf("unexpected job id %d", jobID)
 				return "", nil
@@ -463,7 +470,7 @@ func TestCILogText(t *testing.T) {
 		{Context: testStatusB, State: ghError, TargetURL: "https://codecov.io/x"},
 	}
 
-	got := ciLogText(t.Context(), checks, "o", "r", failedRuns, failedStatuses)
+	got := ciLogTextFrom(readFailedChecks(t.Context(), checks, "o", "r", failedRuns), failedStatuses)
 
 	if want := "check ci (failure)\nline one\nline two"; !strings.Contains(got, want) {
 		t.Errorf("missing the readable Actions log block; got:\n%s", got)
@@ -479,6 +486,369 @@ func TestCILogText(t *testing.T) {
 	}
 	if want := "status codecov (error) https://codecov.io/x"; !strings.Contains(got, want) {
 		t.Errorf("missing the failed status line; got:\n%s", got)
+	}
+}
+
+// -----------------------------------------------------------------------
+// Pure: decideCIRerun
+// -----------------------------------------------------------------------
+
+// decideCIRerunNow is the fixed "now" every TestDecideCIRerun case
+// measures its prior events' At against.
+var decideCIRerunNow = time.Date(2026, 10, 5, 12, 0, 0, 0, time.UTC)
+
+// mkFailedCheck builds a failedCheck for a github-actions run with
+// checkRunID, runID, and jobID all consistent with actionsJobIDPattern's
+// own DetailsURL shape.
+func mkFailedCheck(name string, checkRunID, runID, jobID int64, conclusion, log string, logErr error) failedCheck {
+	return failedCheck{
+		Run: orchestrator.CheckRun{
+			ID:         checkRunID,
+			Name:       name,
+			Status:     ghCompleted,
+			Conclusion: conclusion,
+			AppSlug:    ghGitHubActions,
+			DetailsURL: fmt.Sprintf("https://github.com/o/r/actions/runs/%d/job/%d", runID, jobID),
+		},
+		RunID:  runID,
+		JobID:  jobID,
+		Log:    log,
+		LogErr: logErr,
+	}
+}
+
+// mkNonActionsFailedCheck builds a failedCheck for a check run from an app
+// other than github-actions, so it never carries Actions ids.
+func mkNonActionsFailedCheck(name string, checkRunID int64, conclusion string) failedCheck {
+	return failedCheck{
+		Run: orchestrator.CheckRun{
+			ID:         checkRunID,
+			Name:       name,
+			Status:     ghCompleted,
+			Conclusion: conclusion,
+			AppSlug:    "circleci",
+			DetailsURL: "https://circleci.com/gh/o/r/9",
+		},
+	}
+}
+
+// mkPrior builds one priorRerun for TestDecideCIRerun, agoFromNow before
+// decideCIRerunNow.
+func mkPrior(check string, checkRunID, runID int64, reason response.RerunReason, agoFromNow time.Duration) priorRerun {
+	return priorRerun{
+		Event: response.CheckRerunEvent{Check: check, SHA: ciSHA, RunID: runID, CheckRunID: checkRunID, Reason: reason},
+		At:    decideCIRerunNow.Add(-agoFromNow),
+	}
+}
+
+func TestDecideCIRerun(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name           string
+		failed         []failedCheck
+		failedStatuses int
+		prior          []priorRerun
+		want           rerunDecision
+	}{
+		{
+			name:   "first failure is re-run as flaky",
+			failed: []failedCheck{mkFailedCheck("ci", 1, 10, 100, ghFailure, "--- FAIL: TestX", nil)},
+			want: rerunDecision{
+				Action: rerunNow,
+				Reruns: []plannedRerun{{
+					Event: response.CheckRerunEvent{Check: "ci", SHA: ciSHA, RunID: 10, CheckRunID: 1, Reason: response.RerunReasonFlaky, Tests: []string{testFlakyTestName}},
+					JobID: 100,
+				}},
+			},
+		},
+		{
+			name:   "a spent flaky re-run on a new failure gives fix",
+			failed: []failedCheck{mkFailedCheck("ci", 2, 11, 101, ghFailure, "--- FAIL: TestX", nil)},
+			prior:  []priorRerun{mkPrior("ci", 1, 10, response.RerunReasonFlaky, 20*time.Minute)},
+			want:   rerunDecision{Action: rerunFix},
+		},
+		{
+			name:   "the same check run under 10 minutes old waits",
+			failed: []failedCheck{mkFailedCheck("ci", 1, 10, 100, ghFailure, "", nil)},
+			prior:  []priorRerun{mkPrior("ci", 1, 10, response.RerunReasonFlaky, 5*time.Minute)},
+			want:   rerunDecision{Action: rerunWait},
+		},
+		{
+			name:   "the same check run id past 10 minutes gives fix",
+			failed: []failedCheck{mkFailedCheck("ci", 1, 10, 100, ghFailure, "--- FAIL: TestY", nil)},
+			prior:  []priorRerun{mkPrior("ci", 1, 10, response.RerunReasonFlaky, 11*time.Minute)},
+			want:   rerunDecision{Action: rerunFix},
+		},
+		{
+			name:   "an infra conclusion with no prior re-runs is re-run",
+			failed: []failedCheck{mkFailedCheck("ci", 1, 10, 100, ghCancelled, "", nil)},
+			want: rerunDecision{
+				Action: rerunNow,
+				Reruns: []plannedRerun{{
+					Event: response.CheckRerunEvent{Check: "ci", SHA: ciSHA, RunID: 10, CheckRunID: 1, Reason: response.RerunReasonInfra},
+					JobID: 100,
+				}},
+			},
+		},
+		{
+			name:   "an infra conclusion with 2 prior re-runs is still re-run",
+			failed: []failedCheck{mkFailedCheck("ci", 3, 12, 102, ghCancelled, "", nil)},
+			prior: []priorRerun{
+				mkPrior("ci", 1, 10, response.RerunReasonInfra, 2*time.Hour),
+				mkPrior("ci", 2, 11, response.RerunReasonInfra, time.Hour),
+			},
+			want: rerunDecision{
+				Action: rerunNow,
+				Reruns: []plannedRerun{{
+					Event: response.CheckRerunEvent{Check: "ci", SHA: ciSHA, RunID: 12, CheckRunID: 3, Reason: response.RerunReasonInfra},
+					JobID: 102,
+				}},
+			},
+		},
+		{
+			name:   "an infra conclusion with 3 prior re-runs escalates",
+			failed: []failedCheck{mkFailedCheck("ci", 4, 13, 103, ghCancelled, "", nil)},
+			prior: []priorRerun{
+				mkPrior("ci", 1, 10, response.RerunReasonInfra, 3*time.Hour),
+				mkPrior("ci", 2, 11, response.RerunReasonInfra, 2*time.Hour),
+				mkPrior("ci", 3, 12, response.RerunReasonInfra, time.Hour),
+			},
+			want: rerunDecision{
+				Action: rerunEscalate,
+				What:   rerunInfraWhat,
+				Why:    "ci ended cancelled on bbbbbbb after 3 re-runs",
+				Tried:  "re-ran workflow runs 10, 11, 12",
+			},
+		},
+		{
+			name:   "an infra conclusion on a non-Actions check escalates immediately",
+			failed: []failedCheck{mkNonActionsFailedCheck("ci", 1, ghCancelled)},
+			want: rerunDecision{
+				Action: rerunEscalate,
+				What:   rerunInfraWhat,
+				Why:    "ci ended cancelled on bbbbbbb and is not a GitHub Actions job, so Zing cannot re-run it",
+			},
+		},
+		{
+			name:   "a first unreadable log is re-run as no_log",
+			failed: []failedCheck{mkFailedCheck("ci", 1, 10, 100, ghFailure, "", errors.New("boom"))},
+			want: rerunDecision{
+				Action: rerunNow,
+				Reruns: []plannedRerun{{
+					Event: response.CheckRerunEvent{Check: "ci", SHA: ciSHA, RunID: 10, CheckRunID: 1, Reason: response.RerunReasonNoLog},
+					JobID: 100,
+				}},
+			},
+		},
+		{
+			name:   "a second unreadable log escalates",
+			failed: []failedCheck{mkFailedCheck("ci", 2, 11, 101, ghFailure, "", errors.New("boom again"))},
+			prior:  []priorRerun{mkPrior("ci", 1, 10, response.RerunReasonNoLog, 20*time.Minute)},
+			want: rerunDecision{
+				Action: rerunEscalate,
+				What:   rerunNoLogWhat,
+				Why:    "ci failed again on bbbbbbb and its log could not be read: boom again",
+				Tried:  "re-ran workflow runs 10",
+			},
+		},
+		{
+			name:   "a non-Actions failure with a readable conclusion gives fix",
+			failed: []failedCheck{mkNonActionsFailedCheck("ci", 1, ghFailure)},
+			want:   rerunDecision{Action: rerunFix},
+		},
+		{
+			name: "an escalating check beats a re-runnable one",
+			failed: []failedCheck{
+				mkFailedCheck("a", 4, 13, 103, ghCancelled, "", nil),
+				mkFailedCheck("b", 1, 20, 200, ghFailure, "--- FAIL: TestZ", nil),
+			},
+			prior: []priorRerun{
+				mkPrior("a", 1, 10, response.RerunReasonInfra, 3*time.Hour),
+				mkPrior("a", 2, 11, response.RerunReasonInfra, 2*time.Hour),
+				mkPrior("a", 3, 12, response.RerunReasonInfra, time.Hour),
+			},
+			want: rerunDecision{
+				Action: rerunEscalate,
+				What:   rerunInfraWhat,
+				Why:    "a ended cancelled on bbbbbbb after 3 re-runs",
+				Tried:  "re-ran workflow runs 10, 11, 12",
+			},
+		},
+		{
+			name: "a re-runnable check beats one already due for fix",
+			failed: []failedCheck{
+				mkFailedCheck("a", 1, 10, 100, ghFailure, "--- FAIL: TestZ", nil),
+				mkFailedCheck("b", 2, 11, 101, ghFailure, "--- FAIL: TestW", nil),
+			},
+			prior: []priorRerun{mkPrior("b", 9, 90, response.RerunReasonFlaky, 20*time.Minute)},
+			want: rerunDecision{
+				Action: rerunNow,
+				Reruns: []plannedRerun{{
+					Event: response.CheckRerunEvent{Check: "a", SHA: ciSHA, RunID: 10, CheckRunID: 1, Reason: response.RerunReasonFlaky, Tests: []string{"TestZ"}},
+					JobID: 100,
+				}},
+			},
+		},
+		{
+			name:           "a failed status with no failed checks gives fix",
+			failedStatuses: 1,
+			want:           rerunDecision{Action: rerunFix},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got := decideCIRerun(decideCIRerunNow, ciSHA, tc.failed, tc.failedStatuses, tc.prior)
+			if diff := cmp.Diff(tc.want, got, cmpopts.EquateEmpty()); diff != "" {
+				t.Errorf("decideCIRerun() mismatch (-want +got):\n%s", diff)
+			}
+		})
+	}
+}
+
+// -----------------------------------------------------------------------
+// Pure: failedTestNames
+// -----------------------------------------------------------------------
+
+func TestFailedTestNames(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name string
+		text string
+		want []string
+	}{
+		{
+			name: "dedups in first-seen order and keeps subtests",
+			text: "--- FAIL: TestA (0.1s)\n--- FAIL: TestA/sub (0s)\n--- FAIL: TestA (0.1s)",
+			want: []string{"TestA", "TestA/sub"},
+		},
+		{
+			name: "caps at 20 names",
+			text: func() string {
+				var b strings.Builder
+				for i := range 25 {
+					fmt.Fprintf(&b, "--- FAIL: Test%d (0s)\n", i)
+				}
+				return b.String()
+			}(),
+			want: func() []string {
+				want := make([]string, 20)
+				for i := range 20 {
+					want[i] = fmt.Sprintf("Test%d", i)
+				}
+				return want
+			}(),
+		},
+		{
+			name: "cuts a long name to 200 bytes",
+			text: "--- FAIL: " + strings.Repeat("x", 300) + " (0s)",
+			want: []string{strings.Repeat("x", 200)},
+		},
+		{
+			name: "empty input gives nil",
+			text: "",
+			want: nil,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got := failedTestNames(tc.text)
+			if diff := cmp.Diff(tc.want, got); diff != "" {
+				t.Errorf("failedTestNames() mismatch (-want +got):\n%s", diff)
+			}
+		})
+	}
+}
+
+// -----------------------------------------------------------------------
+// Pure: rerunPassedNotes
+// -----------------------------------------------------------------------
+
+func TestRerunPassedNotes(t *testing.T) {
+	t.Parallel()
+
+	flakyEvent := response.CheckRerunEvent{Check: "ci", SHA: ciSHA, RunID: 10, CheckRunID: 1, Reason: response.RerunReasonFlaky, Tests: []string{testFlakyTestName}}
+	infraEvent := response.CheckRerunEvent{Check: "ci", SHA: ciSHA, RunID: 10, CheckRunID: 1, Reason: response.RerunReasonInfra}
+
+	cases := []struct {
+		name    string
+		runs    []orchestrator.CheckRun
+		reruns  []response.CheckRerunEvent
+		passed  []response.CheckRerunPassedEvent
+		wantLen int
+	}{
+		{
+			name:    "a newer successful run gives a note",
+			runs:    []orchestrator.CheckRun{{ID: 2, Name: "ci", Status: ghCompleted, Conclusion: ghSuccess}},
+			reruns:  []response.CheckRerunEvent{flakyEvent},
+			wantLen: 1,
+		},
+		{
+			name:    "the same check run id gives no note",
+			runs:    []orchestrator.CheckRun{{ID: 1, Name: "ci", Status: ghCompleted, Conclusion: ghSuccess}},
+			reruns:  []response.CheckRerunEvent{flakyEvent},
+			wantLen: 0,
+		},
+		{
+			name:    "a newer run still in progress gives no note",
+			runs:    []orchestrator.CheckRun{{ID: 2, Name: "ci", Status: testInProgress}},
+			reruns:  []response.CheckRerunEvent{flakyEvent},
+			wantLen: 0,
+		},
+		{
+			name:    "a newer run that failed again gives no note",
+			runs:    []orchestrator.CheckRun{{ID: 2, Name: "ci", Status: ghCompleted, Conclusion: ghFailure}},
+			reruns:  []response.CheckRerunEvent{flakyEvent},
+			wantLen: 0,
+		},
+		{
+			name:    "an existing passed event gives no second note",
+			runs:    []orchestrator.CheckRun{{ID: 2, Name: "ci", Status: ghCompleted, Conclusion: ghSuccess}},
+			reruns:  []response.CheckRerunEvent{flakyEvent},
+			passed:  []response.CheckRerunPassedEvent{{Check: "ci", SHA: ciSHA, Tests: []string{testFlakyTestName}}},
+			wantLen: 0,
+		},
+		{
+			name:    "an infra-only re-run gives no note",
+			runs:    []orchestrator.CheckRun{{ID: 2, Name: "ci", Status: ghCompleted, Conclusion: ghSuccess}},
+			reruns:  []response.CheckRerunEvent{infraEvent},
+			wantLen: 0,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got, err := rerunPassedNotes(99, ciSHA, tc.runs, tc.reruns, tc.passed)
+			if err != nil {
+				t.Fatalf("rerunPassedNotes: %v", err)
+			}
+			if len(got) != tc.wantLen {
+				t.Fatalf("len(got) = %d, want %d", len(got), tc.wantLen)
+			}
+			if tc.wantLen == 0 {
+				return
+			}
+			var payload response.CheckRerunPassedEvent
+			if err := json.Unmarshal(got[0].Payload, &payload); err != nil {
+				t.Fatalf("unmarshal payload: %v", err)
+			}
+			want := response.CheckRerunPassedEvent{Check: "ci", SHA: ciSHA, Tests: []string{testFlakyTestName}}
+			if !cmp.Equal(payload, want) {
+				t.Errorf("payload = %+v, want %+v", payload, want)
+			}
+			if got[0].TicketID != 99 {
+				t.Errorf("TicketID = %d, want 99", got[0].TicketID)
+			}
+			if got[0].EventKind == nil || *got[0].EventKind != store.EventKindCheckRerunPassed {
+				t.Errorf("EventKind = %v, want %s", got[0].EventKind, store.EventKindCheckRerunPassed)
+			}
+		})
 	}
 }
 
