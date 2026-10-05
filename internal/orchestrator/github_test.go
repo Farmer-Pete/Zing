@@ -526,6 +526,36 @@ func TestGetPR(t *testing.T) {
 	}
 }
 
+// TestGetPRMergeCommitSHA proves GetPR fills PRState.MergeCommitSHA from
+// GitHub's merge_commit_sha once the pull request is merged.
+func TestGetPRMergeCommitSHA(t *testing.T) {
+	t.Parallel()
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/repos/acme/widgets/pulls/63", func(w http.ResponseWriter, _ *http.Request) {
+		fmt.Fprint(w, `{
+			"number": 63,
+			"node_id": "PR_kwXYZ",
+			"state": "closed",
+			"merged": true,
+			"draft": false,
+			"head": {"sha": "deadbeefcafe0000111122223333444455556666"},
+			"base": {"ref": "main"},
+			"merge_commit_sha": "0123456789abcdef0123456789abcdef01234567"
+		}`)
+	})
+
+	g := newTestGHClient(t, mux)
+
+	got, err := g.GetPR(t.Context(), "acme", "widgets", 63)
+	if err != nil {
+		t.Fatalf("GetPR: unexpected error: %v", err)
+	}
+	if got.MergeCommitSHA != "0123456789abcdef0123456789abcdef01234567" {
+		t.Errorf("GetPR().MergeCommitSHA = %q, want the merge commit sha", got.MergeCommitSHA)
+	}
+}
+
 func TestListCheckRunsAllPages(t *testing.T) {
 	t.Parallel()
 

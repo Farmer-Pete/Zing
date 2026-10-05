@@ -1470,9 +1470,9 @@ func (d *Dispatcher) PostPRLink(ctx context.Context, projectID int64, ref, prURL
 // already-closed issue succeeds (design 10.5), so a crash between the two
 // calls, or a retried tick, never fails on the second one -- PostDone always
 // calls Close, even when the comment step itself was a skip.
-func (d *Dispatcher) PostDone(ctx context.Context, projectID int64, ref, prURL string) error {
+func (d *Dispatcher) PostDone(ctx context.Context, projectID int64, ref, prURL, mergeSHA string) error {
 	b, err := d.postMarkedOnce(ctx, projectID, ref, "done", func(b Binding) string {
-		return tracker.DoneComment(b.User, prURL)
+		return tracker.DoneComment(b.User, prURL, mergeSHA)
 	})
 	if err != nil {
 		return err

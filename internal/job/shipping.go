@@ -98,7 +98,7 @@ type Checks interface {
 // itself as Deps.Tracker (internal/dispatch/dispatch.go).
 type ShipTracker interface {
 	PostPRLink(ctx context.Context, projectID int64, ref, prURL string) error
-	PostDone(ctx context.Context, projectID int64, ref, prURL string) error
+	PostDone(ctx context.Context, projectID int64, ref, prURL, mergeSHA string) error
 }
 
 // shipHandler runs the real shipping state (design section 8). It is
@@ -599,7 +599,7 @@ func (h shipHandler) poll(ctx context.Context, t store.Ticket, d Deps) (store.Ha
 	}
 
 	if pr.Merged {
-		return h.pollDone(ctx, t, d, *t.PRURL)
+		return h.pollDone(ctx, t, d, *t.PRURL, pr.MergeCommitSHA)
 	}
 	if pr.State == "closed" {
 		return h.pollClosed(t, d, number), nil
@@ -952,8 +952,8 @@ func pollScheduleOnly(t store.Ticket, d Deps, resetAt time.Time) store.HandlerCo
 // come first, the store commit last, so a crash before the commit repeats
 // step 1 safely (PostDone's own marker guard) and a crash after it has
 // nothing left to lose.
-func (h shipHandler) pollDone(ctx context.Context, t store.Ticket, d Deps, prURL string) (store.HandlerCommit, error) {
-	if err := d.Tracker.PostDone(ctx, t.ProjectID, t.TrackerRef, prURL); err != nil {
+func (h shipHandler) pollDone(ctx context.Context, t store.Ticket, d Deps, prURL, mergeSHA string) (store.HandlerCommit, error) {
+	if err := d.Tracker.PostDone(ctx, t.ProjectID, t.TrackerRef, prURL, mergeSHA); err != nil {
 		return store.HandlerCommit{}, fmt.Errorf("job: shipping: poll: post done: %w", err)
 	}
 

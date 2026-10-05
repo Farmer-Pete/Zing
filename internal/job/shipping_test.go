@@ -396,6 +396,7 @@ type shipTracker struct {
 	doneErr       error
 	donePosted    bool
 	donePostCount int
+	doneMergeSHA  string
 }
 
 func (tr *shipTracker) PostPRLink(_ context.Context, _ int64, _, _ string) error {
@@ -409,13 +410,14 @@ func (tr *shipTracker) PostPRLink(_ context.Context, _ int64, _, _ string) error
 	return nil
 }
 
-func (tr *shipTracker) PostDone(_ context.Context, _ int64, _, _ string) error {
+func (tr *shipTracker) PostDone(_ context.Context, _ int64, _, _, mergeSHA string) error {
 	if tr.doneErr != nil {
 		return tr.doneErr
 	}
 	if !tr.donePosted {
 		tr.donePosted = true
 		tr.donePostCount++
+		tr.doneMergeSHA = mergeSHA
 	}
 	return nil
 }
@@ -1565,6 +1567,30 @@ func TestPollMergedGoesDone(t *testing.T) {
 	}
 }
 
+// TestPollMergedPostsMergeCommit proves POLL's DONE row passes GitHub's own
+// merge commit sha through to the tracker, instead of the empty string, so
+// the done comment can name it.
+func TestPollMergedPostsMergeCommit(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow end-to-end flow; runs in the full suite")
+	}
+	t.Parallel()
+	s, ticket, gh, tr := shipPublished(t)
+	const mergeSHA = "0123456789abcdef0123456789abcdef01234567"
+	gh.prState = orchestrator.PRState{Merged: true, Draft: true, MergeCommitSHA: mergeSHA}
+
+	commit, err := shipPollRun(t, s, ticket, gh, tr)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if commit.Next != stateDone || commit.Reason != reasonMerged {
+		t.Errorf("commit = (Next=%q, Reason=%q), want (done, %q)", commit.Next, commit.Reason, reasonMerged)
+	}
+	if tr.doneMergeSHA != mergeSHA {
+		t.Errorf("tr.doneMergeSHA = %q, want %q", tr.doneMergeSHA, mergeSHA)
+	}
+}
+
 // TestDoneCrashBeforeCommitConverges proves design section 11's own DONE
 // row, "after the post" half: PostDone already posted (simulated by calling
 // the tracker directly) but no commit ever landed; the next tick finds the
@@ -1577,7 +1603,7 @@ func TestDoneCrashBeforeCommitConverges(t *testing.T) {
 	s, ticket, gh, tr := shipPublished(t)
 	gh.prState = orchestrator.PRState{Merged: true, Draft: true}
 
-	if err := tr.PostDone(t.Context(), ticket.ProjectID, ticket.TrackerRef, *ticket.PRURL); err != nil {
+	if err := tr.PostDone(t.Context(), ticket.ProjectID, ticket.TrackerRef, *ticket.PRURL, ""); err != nil {
 		t.Fatalf("PostDone (pre-crash): %v", err)
 	}
 	if tr.donePostCount != 1 {

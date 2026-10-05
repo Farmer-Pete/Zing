@@ -848,7 +848,7 @@ func (tr *dispatchShipTracker) PostPRLink(context.Context, int64, string, string
 	return nil
 }
 
-func (tr *dispatchShipTracker) PostDone(context.Context, int64, string, string) error {
+func (tr *dispatchShipTracker) PostDone(context.Context, int64, string, string, string) error {
 	tr.mu.Lock()
 	defer tr.mu.Unlock()
 	tr.dones++
@@ -2825,7 +2825,7 @@ func TestPostDoneSkipsMarkedComment(t *testing.T) {
 	bindings := []dispatch.Binding{{StoreProjectID: projectID, TrackerProject: testProject.Name, User: testBindingUser}}
 	d := newDispatcher(t, s, tr, bus.New(), fakeRuntime(t), nil, bindings, dispatch.Config{MaxParallel: 2, Owner: testOwner})
 
-	if err := d.PostDone(t.Context(), projectID, testFixtureRef, testPRURL); err != nil {
+	if err := d.PostDone(t.Context(), projectID, testFixtureRef, testPRURL, ""); err != nil {
 		t.Fatalf("PostDone: %v", err)
 	}
 	if got := tr.postedComments(); len(got) != 0 {
@@ -2849,7 +2849,7 @@ func TestPostDoneIgnoresSpoofedMarker(t *testing.T) {
 	bindings := []dispatch.Binding{{StoreProjectID: projectID, TrackerProject: testProject.Name, User: testBindingUser}}
 	d := newDispatcher(t, s, tr, bus.New(), fakeRuntime(t), nil, bindings, dispatch.Config{MaxParallel: 2, Owner: testOwner})
 
-	if err := d.PostDone(t.Context(), projectID, testFixtureRef, testPRURL); err != nil {
+	if err := d.PostDone(t.Context(), projectID, testFixtureRef, testPRURL, ""); err != nil {
 		t.Fatalf("PostDone: %v", err)
 	}
 	got := tr.postedComments()
@@ -2871,12 +2871,36 @@ func TestPostDoneClosesAfterComment(t *testing.T) {
 	bindings := []dispatch.Binding{{StoreProjectID: projectID, TrackerProject: testProject.Name, User: testBindingUser}}
 	d := newDispatcher(t, s, tr, bus.New(), fakeRuntime(t), nil, bindings, dispatch.Config{MaxParallel: 2, Owner: testOwner})
 
-	if err := d.PostDone(t.Context(), projectID, testFixtureRef, testPRURL); err != nil {
+	if err := d.PostDone(t.Context(), projectID, testFixtureRef, testPRURL, ""); err != nil {
 		t.Fatalf("PostDone: %v", err)
 	}
 	want := []string{"comment:" + testFixtureRef, "close:" + testFixtureRef}
 	if got := tr.callSequence(); !slices.Equal(got, want) {
 		t.Errorf("call sequence = %v, want %v", got, want)
+	}
+}
+
+// TestPostDonePassesMergeSHA proves PostDone forwards its mergeSHA argument
+// into tracker.DoneComment, so the posted comment names the merge commit
+// instead of saying the pull request is ready for review.
+func TestPostDonePassesMergeSHA(t *testing.T) {
+	t.Parallel()
+
+	const mergeSHA = "0123456789abcdef0123456789abcdef01234567"
+	s, projectID, _, tr := shipTestFixture(t)
+
+	bindings := []dispatch.Binding{{StoreProjectID: projectID, TrackerProject: testProject.Name, User: testBindingUser}}
+	d := newDispatcher(t, s, tr, bus.New(), fakeRuntime(t), nil, bindings, dispatch.Config{MaxParallel: 2, Owner: testOwner})
+
+	if err := d.PostDone(t.Context(), projectID, testFixtureRef, testPRURL, mergeSHA); err != nil {
+		t.Fatalf("PostDone: %v", err)
+	}
+	got := tr.postedComments()
+	if len(got) != 1 {
+		t.Fatalf("posted comments = %+v, want 1", got)
+	}
+	if !strings.Contains(got[0].body, "was merged") || !strings.Contains(got[0].body, mergeSHA) {
+		t.Errorf("posted comment body = %q, want it to say \"was merged\" and name %q", got[0].body, mergeSHA)
 	}
 }
 
@@ -2892,7 +2916,7 @@ func TestPostDoneErrorReturned(t *testing.T) {
 	bindings := []dispatch.Binding{{StoreProjectID: projectID, TrackerProject: testProject.Name, User: testBindingUser}}
 	d := newDispatcher(t, s, tr, bus.New(), fakeRuntime(t), nil, bindings, dispatch.Config{MaxParallel: 2, Owner: testOwner})
 
-	if err := d.PostDone(t.Context(), projectID, testFixtureRef, testPRURL); err == nil {
+	if err := d.PostDone(t.Context(), projectID, testFixtureRef, testPRURL, ""); err == nil {
 		t.Error("PostDone err = nil, want an error")
 	}
 }
