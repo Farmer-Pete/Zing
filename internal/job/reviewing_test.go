@@ -1142,8 +1142,14 @@ func TestRoundRetryResetsFailedCount(t *testing.T) {
 	if commit4.Escalation != nil {
 		t.Fatalf("commit4.Escalation = %+v, want nil (the Retry reset the count)", commit4.Escalation)
 	}
-	if _, ok := reviewMarker(t, s, ticket.ID, "review round 1 failed"); !ok {
-		t.Fatal(`no "review round 1 failed" marker after the first failure past the retry`)
+	foundFailed := false
+	for _, m := range commit4.Messages {
+		if strings.HasPrefix(m.Body, "review round 1 failed") {
+			foundFailed = true
+		}
+	}
+	if !foundFailed {
+		t.Fatalf(`commit4.Messages = %+v, want a "review round 1 failed" message`, commit4.Messages)
 	}
 	pbApply(t, s, ticket, commit4)
 
@@ -1177,8 +1183,10 @@ func TestRoundInvalidLensRetriedKeepsFindings(t *testing.T) {
 	s, ticket, before := reviewTicketReady(t)
 
 	// Every lens but fidelity (whose own finding needs a PlanRef,
-	// FilterFindings) and tests reports one clean nit, so a round that kept
-	// every lens's own work stores more than just the tests lens's finding.
+	// FilterFindings) and tests reports one clean nit at the same location,
+	// so DedupFindings merges them into one artifact; tests's own retried
+	// finding, below, uses a distinct location so it stays a separate
+	// artifact and its own RunID can be checked.
 	overrides := map[string]string{}
 	for _, lens := range reviewLensNames {
 		if lens == lensFidelity || lens == lensTests {
@@ -1199,7 +1207,11 @@ func TestRoundInvalidLensRetriedKeepsFindings(t *testing.T) {
 				},
 				func(_ context.Context, req runtime.RunRequest) (runtime.RunResult, error) {
 					retryReq = req
-					doc, parseErr := response.Parse([]byte(findingScript(lensTests, "nit", "a nit from tests", "polish it")))
+					// A distinct location from the other lenses' shared
+					// greetGoLine5 nit, so DedupFindings keeps the tests
+					// lens's own finding as its own artifact rather than
+					// merging it into the other lenses' row.
+					doc, parseErr := response.Parse([]byte(findingScriptAt(lensTests, "nit", greetGoLine2, "a nit from tests", "polish it")))
 					if parseErr != nil {
 						t.Fatalf("parse tests retry script: %v", parseErr)
 					}
@@ -1243,12 +1255,11 @@ func TestRoundInvalidLensRetriedKeepsFindings(t *testing.T) {
 		t.Fatalf("reserved runs = %d, want 8 (seven lenses plus the tests retry)", len(runs))
 	}
 	var testsRuns []store.Run
-	var firstTestsRunID int64
 	errorCount := 0
 	for _, r := range runs {
-		if r.Outcome != nil && *r.Outcome == string(response.OutcomeError) {
+		isError := r.Outcome != nil && *r.Outcome == string(response.OutcomeError)
+		if isError {
 			errorCount++
-			firstTestsRunID = r.ID
 		}
 		if r.Lens != nil && *r.Lens == lensTests {
 			testsRuns = append(testsRuns, r)
@@ -1260,14 +1271,19 @@ func TestRoundInvalidLensRetriedKeepsFindings(t *testing.T) {
 	if len(testsRuns) != 2 {
 		t.Fatalf("tests runs = %d, want 2", len(testsRuns))
 	}
+	// reviewRunsSince returns runs in ascending id order, so testsRuns[0] is
+	// the discarded first turn and testsRuns[1] is the retry.
+	firstTestsRunID, retryTestsRunID := testsRuns[0].ID, testsRuns[1].ID
+	isError := func(r store.Run) bool { return r.Outcome != nil && *r.Outcome == string(response.OutcomeError) }
+	if !isError(testsRuns[0]) {
+		t.Errorf("tests run %d outcome = %v, want error (the discarded first turn)", testsRuns[0].ID, testsRuns[0].Outcome)
+	}
+	if isError(testsRuns[1]) {
+		t.Errorf("tests run %d outcome = error, want ok (the retry)", testsRuns[1].ID)
+	}
 	if testsRuns[0].SessionID != testsRuns[1].SessionID {
 		t.Errorf("tests runs session ids = %d, %d, want equal (the retry resumes the first turn's own session)",
 			testsRuns[0].SessionID, testsRuns[1].SessionID)
-	}
-	for _, r := range testsRuns {
-		if r.Outcome != nil && *r.Outcome == string(response.OutcomeError) && r.ID != firstTestsRunID {
-			t.Errorf("tests run %d outcome = error, want only run %d to be error", r.ID, firstTestsRunID)
-		}
 	}
 
 	invalidMarker, ok := reviewMarker(t, s, ticket.ID, fmt.Sprintf("response invalid run %d", firstTestsRunID))
@@ -1284,11 +1300,14 @@ func TestRoundInvalidLensRetriedKeepsFindings(t *testing.T) {
 	if retryReq.Label != testsRunLabel {
 		t.Errorf("retry request Label = %q, want %q", retryReq.Label, testsRunLabel)
 	}
-	if !strings.Contains(retryReq.Prompt, "did not parse") {
-		t.Errorf("retry prompt = %q, want it to say the last document did not parse", retryReq.Prompt)
+	if !strings.Contains(retryReq.Prompt, reviewInvalidRetryHeader) {
+		t.Errorf("retry prompt = %q, want it to contain %q", retryReq.Prompt, reviewInvalidRetryHeader)
 	}
-	if !strings.Contains(retryReq.Prompt, testsInvalidDetail) {
-		t.Errorf("retry prompt = %q, want it to carry the validator's detail", retryReq.Prompt)
+	openFence := strings.Index(retryReq.Prompt, "<<<UNTRUSTED")
+	detailIdx := strings.Index(retryReq.Prompt, testsInvalidDetail)
+	closeFence := strings.LastIndex(retryReq.Prompt, "<<<END")
+	if openFence == -1 || detailIdx == -1 || closeFence == -1 || openFence >= detailIdx || detailIdx >= closeFence {
+		t.Errorf("retry prompt = %q, want the validator's detail fenced between <<<UNTRUSTED and <<<END markers", retryReq.Prompt)
 	}
 
 	sess, _, sessErr := s.SessionByID(t.Context(), testsRuns[0].SessionID, deps.Machine.Jobs[jobReviewName].MaxResumes)
@@ -1297,6 +1316,46 @@ func TestRoundInvalidLensRetriedKeepsFindings(t *testing.T) {
 	}
 	if sess.Resumes != 0 {
 		t.Errorf("tests session Resumes = %d, want 0 (the retry does not charge a resume)", sess.Resumes)
+	}
+
+	findings := findingArtifactsByRound(t, s, ticket.ID)
+	gotLensSet := map[response.Lens]bool{}
+	for _, f := range findings {
+		for _, l := range f.Lenses {
+			gotLensSet[l] = true
+		}
+	}
+	for _, lens := range reviewLensNames {
+		if lens == lensFidelity {
+			continue
+		}
+		if !gotLensSet[response.Lens(lens)] {
+			t.Errorf("findings lenses = %v, missing %q", gotLensSet, lens)
+		}
+	}
+
+	rows, err := s.Findings(t.Context(), ticket.ID)
+	if err != nil {
+		t.Fatalf("Findings: %v", err)
+	}
+	foundTestsRow := false
+	for _, row := range rows {
+		if row.Finding.Round != 1 {
+			continue
+		}
+		for _, l := range row.Finding.Lenses {
+			if l == lensTests {
+				foundTestsRow = true
+				if row.RunID == nil {
+					t.Errorf("tests finding RunID = nil, want %d (the retry run, not the discarded first turn)", retryTestsRunID)
+				} else if *row.RunID != retryTestsRunID {
+					t.Errorf("tests finding RunID = %d, want %d (the retry run, not the discarded first turn)", *row.RunID, retryTestsRunID)
+				}
+			}
+		}
+	}
+	if !foundTestsRow {
+		t.Error("no stored finding names the tests lens")
 	}
 }
 
@@ -1448,17 +1507,24 @@ func TestRoundInvalidThenExecFailure(t *testing.T) {
 	pbApply(t, s, ticket, commit)
 
 	runs := reviewRunsSince(t, s, ticket.ID, before)
-	errCount := 0
+	var testsRuns []store.Run
 	for _, r := range runs {
 		if r.Lens != nil && *r.Lens == lensTests {
 			if r.Outcome == nil || *r.Outcome != string(response.OutcomeError) {
 				t.Errorf("tests run %d outcome = %v, want error", r.ID, r.Outcome)
 			}
-			errCount++
+			testsRuns = append(testsRuns, r)
 		}
 	}
-	if errCount != 2 {
-		t.Fatalf("tests runs = %d, want 2", errCount)
+	if len(testsRuns) != 2 {
+		t.Fatalf("tests runs = %d, want 2", len(testsRuns))
+	}
+	// reviewRunsSince returns runs in ascending id order: testsRuns[0] is
+	// the discarded first turn whose invalid marker this checks.
+	firstTestsRunID := testsRuns[0].ID
+	wantPrefix := fmt.Sprintf("response invalid run %d", firstTestsRunID)
+	if !strings.HasPrefix(invalidMarkers[0].Body, wantPrefix) {
+		t.Errorf("invalid marker body = %q, want it to start with %q", invalidMarkers[0].Body, wantPrefix)
 	}
 }
 
@@ -1560,7 +1626,7 @@ func TestRoundInvalidLensRetryLogs(t *testing.T) {
 	if testing.Short() {
 		t.Skip("slow end-to-end flow; runs in the full suite")
 	}
-	s, ticket, _ := reviewTicketReady(t)
+	s, ticket, before := reviewTicketReady(t)
 
 	overrides := map[string]string{}
 	for _, lens := range reviewLensNames {
@@ -1631,7 +1697,9 @@ func TestRoundInvalidLensRetryLogs(t *testing.T) {
 	if started[0].Lens != lensTests || started[0].Reason != testReasonFailedValidation {
 		t.Errorf("started record = %+v, want lens tests and the closed reason", started[0])
 	}
-	if finished[0].RunID == 0 || finished[0].FirstRunID == 0 || finished[0].RunID == finished[0].FirstRunID {
+	bothSet := finished[0].RunID != 0 && finished[0].FirstRunID != 0
+	distinct := finished[0].RunID != finished[0].FirstRunID
+	if !bothSet || !distinct {
 		t.Errorf("finished record = %+v, want distinct non-zero run_id and first_run_id", finished[0])
 	}
 	if finished[0].Outcome != string(response.OutcomeOk) {
@@ -1639,6 +1707,41 @@ func TestRoundInvalidLensRetryLogs(t *testing.T) {
 	}
 	if finished[0].ErrKind != "" {
 		t.Errorf("finished record err_kind = %q, want empty", finished[0].ErrKind)
+	}
+
+	runs := reviewRunsSince(t, s, ticket.ID, before)
+	var testsRuns []store.Run
+	for _, r := range runs {
+		if r.Lens != nil && *r.Lens == lensTests {
+			testsRuns = append(testsRuns, r)
+		}
+	}
+	if len(testsRuns) != 2 {
+		t.Fatalf("tests runs = %d, want 2", len(testsRuns))
+	}
+	firstRun, retryRun := testsRuns[0], testsRuns[1]
+
+	if started[0].TicketID != ticket.ID {
+		t.Errorf("started record ticket_id = %d, want %d", started[0].TicketID, ticket.ID)
+	}
+	if started[0].SessionID == 0 || started[0].SessionID != firstRun.SessionID {
+		t.Errorf("started record session_id = %d, want %d (the tests lens's own session)", started[0].SessionID, firstRun.SessionID)
+	}
+	if started[0].RunID != firstRun.ID {
+		t.Errorf("started record run_id = %d, want %d (the first, discarded turn)", started[0].RunID, firstRun.ID)
+	}
+
+	if finished[0].TicketID != ticket.ID {
+		t.Errorf("finished record ticket_id = %d, want %d", finished[0].TicketID, ticket.ID)
+	}
+	if finished[0].SessionID != started[0].SessionID {
+		t.Errorf("finished record session_id = %d, want %d (the same session as started)", finished[0].SessionID, started[0].SessionID)
+	}
+	if finished[0].RunID != retryRun.ID {
+		t.Errorf("finished record run_id = %d, want %d (the retry's own run)", finished[0].RunID, retryRun.ID)
+	}
+	if finished[0].FirstRunID != firstRun.ID {
+		t.Errorf("finished record first_run_id = %d, want %d (the first, discarded turn)", finished[0].FirstRunID, firstRun.ID)
 	}
 }
 

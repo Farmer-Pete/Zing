@@ -244,6 +244,8 @@ func (h reviewingHandler) enterRound(ctx context.Context, t store.Ticket, d Deps
 		for i := range retries {
 			if retries[i].ID > newest.ID && retries[i].Body == markerRetryRequested {
 				priorFailedOrVoid = false
+				slog.Info("review two-in-a-row count reset by retry", "ticket_id", t.ID, "round", n,
+					"round_marker_id", newest.ID, "retry_marker_id", retries[i].ID)
 				break
 			}
 		}
@@ -957,6 +959,19 @@ func (a lensAttempt) isGood() bool {
 	}
 }
 
+// invalidTwice reports whether a's first turn and its same-tick retry were
+// both invalid documents, returning the retry's own validator error.
+func (a lensAttempt) invalidTwice() (*runtime.InvalidOutputError, bool) {
+	if a.firstTry == nil {
+		return nil, false
+	}
+	var invErr *runtime.InvalidOutputError
+	if !errors.As(a.err, &invErr) { //nolint:modernize // see execFailureKind
+		return nil, false
+	}
+	return invErr, true
+}
+
 // errLensesParallelRange is runLensesParallel's own config error (a
 // Package 9 handoff bug fix): d.LensesParallel sizes the semaphore channel
 // below, and a value less than 1 -- the zero value a test helper or a caller
@@ -1410,11 +1425,10 @@ func (h reviewingHandler) tableCommit(
 	// only ever sees one invalid turn per lens per round, since a lens's
 	// second consecutive invalid turn is now always this row instead.
 	if at, ok := firstBadAttempt(attempts, func(a lensAttempt) bool {
-		var invErr *runtime.InvalidOutputError
-		return a.firstTry != nil && errors.As(a.err, &invErr) //nolint:modernize // see execFailureKind
+		_, isInvalidTwice := a.invalidTwice() //nolint:errcheck // ok itself is the result
+		return isInvalidTwice
 	}); ok {
-		var invErr *runtime.InvalidOutputError
-		errors.As(at.err, &invErr) //nolint:errcheck,modernize // the predicate above already matched
+		invErr, _ := at.invalidTwice()
 		// Why carries only the closed reason; the validator's own detail can
 		// quote model text and stays on the run's own invalid marker.
 		why := fmt.Sprintf("%s; validator errors in response invalid run %d", invErr.Reason, at.rr.Reserved.RunID)
