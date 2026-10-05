@@ -525,14 +525,26 @@ func TestRun_ErrStartLogsCause(t *testing.T) {
 	}
 
 	logged := logBuf.String()
-	for _, want := range []string{
-		"codex run: start failed",
-		"claude run: start failed",
-		"run_token=" + runToken,
-		"no such file or directory",
+	for _, tc := range []struct {
+		runtime string
+		job     string
+	}{
+		{"codex", string(response.JobPlanreview)},
+		{"claude", string(response.JobClassify)},
 	} {
-		if !strings.Contains(logged, want) {
-			t.Errorf("log missing %q; got:\n%s", want, logged)
+		line := findLogLine(logged, tc.runtime+" run: start failed")
+		if line == "" {
+			t.Fatalf("log missing a %q line; got:\n%s", tc.runtime+" run: start failed", logged)
+		}
+		for _, want := range []string{
+			"level=WARN",
+			"job=" + tc.job,
+			"run_token=" + runToken,
+			"no such file or directory",
+		} {
+			if !strings.Contains(line, want) {
+				t.Errorf("%s start-failed line missing %q; got:\n%s", tc.runtime, want, line)
+			}
 		}
 	}
 	if strings.Contains(logged, dir) {
@@ -541,6 +553,23 @@ func TestRun_ErrStartLogsCause(t *testing.T) {
 	if strings.Contains(logged, prompt) {
 		t.Errorf("log leaks the prompt; got:\n%s", logged)
 	}
+}
+
+// findLogLine returns the single line of logged (a slog text handler's
+// output, one record per line) that contains want, or "" if no line does or
+// more than one does -- either way, the caller has nothing it can safely
+// assert against.
+func findLogLine(logged, want string) string {
+	var found string
+	for line := range strings.SplitSeq(logged, "\n") {
+		if strings.Contains(line, want) {
+			if found != "" {
+				return ""
+			}
+			found = line
+		}
+	}
+	return found
 }
 
 func TestCodex_ErrTimeout(t *testing.T) {

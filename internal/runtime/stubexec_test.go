@@ -3,6 +3,7 @@ package runtime
 import (
 	"context"
 	"errors"
+	"fmt"
 	"go/ast"
 	"go/parser"
 	"go/token"
@@ -40,52 +41,65 @@ func TestNoTestWritesAnExecutable(t *testing.T) {
 	for _, file := range files {
 		t.Run(file, func(t *testing.T) {
 			t.Parallel()
-			checkNoExecutableMode(t, file)
+			violations, err := checkExecutableModes(file, nil)
+			if err != nil {
+				t.Fatalf("parse %s: %v", file, err)
+			}
+			for _, v := range violations {
+				t.Error(v)
+			}
 		})
 	}
 }
 
-// chmodMethod is the method name a value's own .Chmod(mode) call carries,
-// as opposed to the package-level os.Chmod(path, mode).
-const chmodMethod = "Chmod"
+// chmodMethodName is the method name a value's own .Chmod(mode) call
+// carries, shared with its os.Chmod(path, mode) entry in osModeArg below so
+// the string literal appears once.
+const chmodMethodName = "Chmod"
 
-// checkNoExecutableMode parses filename (relative to this package) and
-// fails t for every mode-bearing call whose mode is not an integer literal
-// or whose literal has an execute bit set.
-func checkNoExecutableMode(t *testing.T, filename string) {
-	t.Helper()
+// osModeArg maps an os package function name that takes a file mode to that
+// mode argument's index, so the one isOSCall check below covers all three
+// instead of repeating "isPkg && pkgIdent.Name == \"os\"" per function.
+var osModeArg = map[string]int{"WriteFile": 2, "OpenFile": 2, chmodMethodName: 1}
 
+// checkExecutableModes parses filename (read from disk when src is nil, or
+// parsed from src otherwise, per go/parser.ParseFile) and returns one
+// message per mode-bearing call whose mode is not an integer literal, or
+// whose literal has an execute bit set: a call to os.WriteFile, os.OpenFile,
+// os.Chmod, or a one-argument .Chmod method.
+func checkExecutableModes(filename string, src any) ([]string, error) {
 	fset := token.NewFileSet()
-	f, err := parser.ParseFile(fset, filename, nil, 0)
+	f, err := parser.ParseFile(fset, filename, src, 0)
 	if err != nil {
-		t.Fatalf("parse %s: %v", filename, err)
+		return nil, err
 	}
 
+	var violations []string
 	ast.Inspect(f, func(n ast.Node) bool {
 		call, ok := n.(*ast.CallExpr)
 		if !ok {
 			return true
 		}
 
+		fun, isSelector := call.Fun.(*ast.SelectorExpr)
+		if !isSelector {
+			return true
+		}
+
 		var callee string
 		var modeArg ast.Expr
 
-		if fun, isSelector := call.Fun.(*ast.SelectorExpr); isSelector {
-			pkgIdent, isPkg := fun.X.(*ast.Ident)
-			switch {
-			case isPkg && pkgIdent.Name == "os" && fun.Sel.Name == "WriteFile" && len(call.Args) >= 3:
-				callee = "os.WriteFile"
-				modeArg = call.Args[2]
-			case isPkg && pkgIdent.Name == "os" && fun.Sel.Name == "OpenFile" && len(call.Args) >= 3:
-				callee = "os.OpenFile"
-				modeArg = call.Args[2]
-			case isPkg && pkgIdent.Name == "os" && fun.Sel.Name == chmodMethod && len(call.Args) >= 2:
-				callee = "os." + chmodMethod
-				modeArg = call.Args[1]
-			case fun.Sel.Name == chmodMethod && len(call.Args) == 1:
-				callee = chmodMethod
-				modeArg = call.Args[0]
+		pkgIdent, isPkg := fun.X.(*ast.Ident)
+		isOSCall := isPkg && pkgIdent.Name == "os"
+		switch {
+		case isOSCall:
+			if idx, hasMode := osModeArg[fun.Sel.Name]; hasMode && len(call.Args) > idx {
+				callee = "os." + fun.Sel.Name
+				modeArg = call.Args[idx]
 			}
+		case fun.Sel.Name == chmodMethodName && len(call.Args) == 1:
+			callee = chmodMethodName
+			modeArg = call.Args[0]
 		}
 
 		if modeArg == nil {
@@ -94,23 +108,63 @@ func checkNoExecutableMode(t *testing.T, filename string) {
 
 		lit, ok := modeArg.(*ast.BasicLit)
 		if !ok || lit.Kind != token.INT {
-			t.Errorf("%s: %s mode must be an integer literal, at %s", filename, callee, fset.Position(modeArg.Pos()))
+			violations = append(violations, fmt.Sprintf("%s: %s mode must be an integer literal, at %s",
+				filename, callee, fset.Position(modeArg.Pos())))
 			return true
 		}
 
 		mode, err := strconv.ParseInt(lit.Value, 0, 64)
 		if err != nil {
-			t.Errorf("%s: %s mode literal %q: %v, at %s", filename, callee, lit.Value, err, fset.Position(lit.Pos()))
+			violations = append(violations, fmt.Sprintf("%s: %s mode literal %q: %v, at %s",
+				filename, callee, lit.Value, err, fset.Position(lit.Pos())))
 			return true
 		}
 
 		if mode&0o111 != 0 {
-			t.Errorf("%s: %s writes an executable mode (%s); commit the script under testdata instead, at %s",
-				filename, callee, lit.Value, fset.Position(lit.Pos()))
+			violations = append(violations, fmt.Sprintf("%s: %s writes an executable mode (%s); commit the script under testdata instead, at %s",
+				filename, callee, lit.Value, fset.Position(lit.Pos())))
 		}
 
 		return true
 	})
+
+	return violations, nil
+}
+
+// TestCheckExecutableModes is a self-test of checkExecutableModes: it feeds
+// small source snippets with a known verdict, so a broken selector match, a
+// wrong argument index, or a dropped 0o111 check would show up here even
+// though the real package's tests, once fixed, give the guard nothing left
+// to flag (review finding r1f4, #23).
+func TestCheckExecutableModes(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		body string
+		want int
+	}{
+		{"WriteFile executable", `os.WriteFile(p, b, 0o755)`, 1},
+		{"OpenFile executable", `os.OpenFile(p, f, 0o700)`, 1},
+		{"Chmod executable", `os.Chmod(p, 0o711)`, 1},
+		{"method Chmod executable", `file.Chmod(0o755)`, 1},
+		{"non-literal mode", `os.WriteFile(p, b, mode)`, 1},
+		{"clean literal", `os.WriteFile(p, b, 0o644)`, 0},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			src := "package p\n\nfunc f() {\n\t" + tc.body + "\n}\n"
+			got, err := checkExecutableModes("snippet.go", src)
+			if err != nil {
+				t.Fatalf("parse: %v", err)
+			}
+			if len(got) != tc.want {
+				t.Errorf("checkExecutableModes(%q) = %v, want %d violation(s)", tc.body, got, tc.want)
+			}
+		})
+	}
 }
 
 // leakedBinPath stands in for the operator-configured binary path that a
@@ -154,9 +208,19 @@ func TestStartErr(t *testing.T) {
 			cause: exec.ErrNotFound,
 		},
 		{
+			name:  "exec.ErrDot",
+			err:   &exec.Error{Name: leakedBinPath, Err: exec.ErrDot},
+			cause: exec.ErrDot,
+		},
+		{
 			name:  "context canceled",
 			err:   context.Canceled,
 			cause: context.Canceled,
+		},
+		{
+			name:  "context deadline exceeded",
+			err:   context.DeadlineExceeded,
+			cause: context.DeadlineExceeded,
 		},
 		{
 			name:  "unrecognized error",
