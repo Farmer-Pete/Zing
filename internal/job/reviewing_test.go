@@ -1182,14 +1182,19 @@ func TestRoundInvalidLensRetriedKeepsFindings(t *testing.T) {
 	t.Parallel()
 	s, ticket, before := reviewTicketReady(t)
 
-	// Every lens but fidelity (whose own finding needs a PlanRef,
-	// FilterFindings) and tests reports one clean nit at the same location,
-	// so DedupFindings merges them into one artifact; tests's own retried
+	// Every lens but tests reports one clean nit at the same location, so
+	// DedupFindings merges them into one artifact; tests's own retried
 	// finding, below, uses a distinct location so it stays a separate
-	// artifact and its own RunID can be checked.
+	// artifact and its own RunID can be checked. Fidelity's own finding
+	// uses fidelityFindingScript, which sets plan_ref, since FilterFindings
+	// drops a fidelity finding whose plan_ref is blank.
 	overrides := map[string]string{}
 	for _, lens := range reviewLensNames {
-		if lens == lensFidelity || lens == lensTests {
+		if lens == lensTests {
+			continue
+		}
+		if lens == lensFidelity {
+			overrides[reviewScriptKey(lens, 1)] = fidelityFindingScript("nit", greetGoLine5, "a nit from fidelity", "polish it")
 			continue
 		}
 		overrides[reviewScriptKey(lens, 1)] = findingScript(lens, "nit", "a nit from "+lens, "polish it")
@@ -1254,11 +1259,11 @@ func TestRoundInvalidLensRetriedKeepsFindings(t *testing.T) {
 	if len(runs) != 8 {
 		t.Fatalf("reserved runs = %d, want 8 (seven lenses plus the tests retry)", len(runs))
 	}
+	isError := func(r store.Run) bool { return r.Outcome != nil && *r.Outcome == string(response.OutcomeError) }
 	var testsRuns []store.Run
 	errorCount := 0
 	for _, r := range runs {
-		isError := r.Outcome != nil && *r.Outcome == string(response.OutcomeError)
-		if isError {
+		if isError(r) {
 			errorCount++
 		}
 		if r.Lens != nil && *r.Lens == lensTests {
@@ -1274,7 +1279,6 @@ func TestRoundInvalidLensRetriedKeepsFindings(t *testing.T) {
 	// reviewRunsSince returns runs in ascending id order, so testsRuns[0] is
 	// the discarded first turn and testsRuns[1] is the retry.
 	firstTestsRunID, retryTestsRunID := testsRuns[0].ID, testsRuns[1].ID
-	isError := func(r store.Run) bool { return r.Outcome != nil && *r.Outcome == string(response.OutcomeError) }
 	if !isError(testsRuns[0]) {
 		t.Errorf("tests run %d outcome = %v, want error (the discarded first turn)", testsRuns[0].ID, testsRuns[0].Outcome)
 	}
@@ -1306,7 +1310,9 @@ func TestRoundInvalidLensRetriedKeepsFindings(t *testing.T) {
 	openFence := strings.Index(retryReq.Prompt, "<<<UNTRUSTED")
 	detailIdx := strings.Index(retryReq.Prompt, testsInvalidDetail)
 	closeFence := strings.LastIndex(retryReq.Prompt, "<<<END")
-	if openFence == -1 || detailIdx == -1 || closeFence == -1 || openFence >= detailIdx || detailIdx >= closeFence {
+	allFound := openFence != -1 && detailIdx != -1 && closeFence != -1
+	inOrder := openFence < detailIdx && detailIdx < closeFence
+	if !allFound || !inOrder {
 		t.Errorf("retry prompt = %q, want the validator's detail fenced between <<<UNTRUSTED and <<<END markers", retryReq.Prompt)
 	}
 
@@ -1326,9 +1332,6 @@ func TestRoundInvalidLensRetriedKeepsFindings(t *testing.T) {
 		}
 	}
 	for _, lens := range reviewLensNames {
-		if lens == lensFidelity {
-			continue
-		}
 		if !gotLensSet[response.Lens(lens)] {
 			t.Errorf("findings lenses = %v, missing %q", gotLensSet, lens)
 		}
@@ -1538,8 +1541,11 @@ func TestRoundInvalidAfterCancelNotRetried(t *testing.T) {
 	if testing.Short() {
 		t.Skip("slow end-to-end flow; runs in the full suite")
 	}
-	t.Parallel()
+	// Swaps the global slog default (runjob_test.go's own slog-swap pattern,
+	// :1619), hence no t.Parallel here.
 	s, ticket, before := reviewTicketReady(t)
+
+	const obsLens = "observability"
 
 	// obsBlocked orders the two failures without a sleep: simplification's
 	// own failure (and so the round's own cancellation) cannot happen until
@@ -1572,6 +1578,11 @@ func TestRoundInvalidAfterCancelNotRetried(t *testing.T) {
 	deps := pbClaim(t, s, rt, ticket.ID)
 	deps.LensesParallel = 7
 
+	var buf bytes.Buffer
+	prior := slog.Default()
+	slog.SetDefault(slog.New(slog.NewJSONHandler(&buf, &slog.HandlerOptions{Level: slog.LevelInfo})))
+	t.Cleanup(func() { slog.SetDefault(prior) })
+
 	commit, err := (reviewingHandler{}).Run(t.Context(), ticket, deps)
 	if err != nil {
 		t.Fatalf("Run: %v", err)
@@ -1589,22 +1600,59 @@ func TestRoundInvalidAfterCancelNotRetried(t *testing.T) {
 	pbApply(t, s, ticket, commit)
 
 	runs := reviewRunsSince(t, s, ticket.ID, before)
-	obsCount := 0
+	var obsRuns []store.Run
 	for _, r := range runs {
-		if r.Lens != nil && *r.Lens == "observability" {
-			obsCount++
+		if r.Lens != nil && *r.Lens == obsLens {
+			obsRuns = append(obsRuns, r)
 		}
 	}
-	if obsCount != 1 {
-		t.Errorf("observability runs = %d, want 1 (no retry once the round is canceled)", obsCount)
+	if len(obsRuns) != 1 {
+		t.Fatalf("observability runs = %d, want 1 (no retry once the round is canceled)", len(obsRuns))
+	}
+
+	var started, skipped []jsonLogLine
+	for line := range strings.SplitSeq(strings.TrimRight(buf.String(), "\n"), "\n") {
+		if line == "" {
+			continue
+		}
+		var rec jsonLogLine
+		if err := json.Unmarshal([]byte(line), &rec); err != nil {
+			t.Fatalf("unmarshal log line %q: %v", line, err)
+		}
+		switch rec.Msg {
+		case "review lens retry started":
+			started = append(started, rec)
+		case "review lens retry skipped":
+			skipped = append(skipped, rec)
+		}
+	}
+	for _, rec := range started {
+		if rec.Lens == obsLens {
+			t.Errorf(`"review lens retry started" record = %+v, want none for observability (the retry's own cancellation guard)`, rec)
+		}
+	}
+	var obsSkipped []jsonLogLine
+	for _, rec := range skipped {
+		if rec.Lens == obsLens {
+			obsSkipped = append(obsSkipped, rec)
+		}
+	}
+	if len(obsSkipped) != 1 {
+		t.Fatalf(`"review lens retry skipped" records for observability = %d, want 1`, len(obsSkipped))
+	}
+	if obsSkipped[0].Cause != "round canceled" {
+		t.Errorf("skipped record cause = %q, want %q", obsSkipped[0].Cause, "round canceled")
+	}
+	if obsSkipped[0].RunID != obsRuns[0].ID {
+		t.Errorf("skipped record run_id = %d, want %d (observability's own run)", obsSkipped[0].RunID, obsRuns[0].ID)
 	}
 }
 
 // ---- TestRoundInvalidLensRetryLogs -------------------------------------------
 
-// jsonLogLine is one slog JSON record this test cares about: the handler
-// and level fields are irrelevant to it, so only Msg and the attributes it
-// asserts on are decoded.
+// jsonLogLine is one slog JSON record this file's log-capturing tests care
+// about: the handler and level fields are irrelevant to them, so only Msg
+// and the attributes they assert on are decoded.
 type jsonLogLine struct {
 	Msg        string `json:"msg"`
 	TicketID   int64  `json:"ticket_id"`
@@ -1615,6 +1663,7 @@ type jsonLogLine struct {
 	Reason     string `json:"reason"`
 	Outcome    string `json:"outcome"`
 	ErrKind    string `json:"err_kind"`
+	Cause      string `json:"cause"`
 }
 
 // TestRoundInvalidLensRetryLogs proves design section 9's own rule for the
