@@ -92,13 +92,6 @@ func buildTimeout(m *machine.Machine) time.Duration {
 // nothing (a nonzero exit from golangci-lint run --fix just means findings
 // remain, which lint reports next).
 //
-// checkCommand is one of runCheckCommands' three commands: its kind, for
-// check_procs and commandResult, and its shell command.
-type checkCommand struct {
-	kind store.CheckKind
-	cmd  string
-}
-
 // Each command's output is kept in a tailBuffer. Each command's process
 // group is recorded in check_procs while it runs and cleared once it ends
 // (plan D10), so a later serve never starts CHECK in this worktree while
@@ -109,9 +102,15 @@ type checkCommand struct {
 func runCheckCommands(ctx context.Context, d Deps, t store.Ticket, wt orchestrator.Worktree, proj Project, rid *int64) ([]commandResult, error) {
 	budget := checkBudget(d)
 	budgetStart := checkNow()
-	commands := []checkCommand{{store.CheckKindLint, proj.LintCmd}, {store.CheckKindTest, proj.TestCmd}}
+	commands := []struct {
+		kind store.CheckKind
+		cmd  string
+	}{{store.CheckKindLint, proj.LintCmd}, {store.CheckKindTest, proj.TestCmd}}
 	if proj.FixCmd != "" {
-		commands = append([]checkCommand{{store.CheckKindFix, proj.FixCmd}}, commands...)
+		commands = append([]struct {
+			kind store.CheckKind
+			cmd  string
+		}{{store.CheckKindFix, proj.FixCmd}}, commands...)
 	}
 	results := make([]commandResult, 0, len(commands))
 	for _, c := range commands {
