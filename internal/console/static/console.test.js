@@ -874,16 +874,21 @@ test('reduceStreamStatus marks stale on reconnecting and failures, clears on a f
 	assert.equal(result.status.staleSince, 3000);
 	assert.equal(result.status.attempt, 2);
 
-	// A frame while inflight is above 0 clears staleSince and resets attempt.
+	// A frame while inflight is above 0 clears staleSince and resets attempt,
+	// and cancels any reconnect a prior idle trip scheduled -- a late frame
+	// proving the stream recovered on its own must not let a stale reconnect
+	// timer later abort and reopen it (bug fix).
 	const live = { ...status, inflight: 1, attempt: 2 };
 	result = reduceStreamStatus(live, { type: 'datastar-patch-elements' }, 5000);
 	assert.equal(result.status.staleSince, null);
 	assert.equal(result.status.attempt, 0);
+	assert.equal(result.effect.cancelReconnect, true);
 
 	// A patch clears it the same way.
 	result = reduceStreamStatus(live, { type: 'patched' }, 6000);
 	assert.equal(result.status.staleSince, null);
 	assert.equal(result.status.attempt, 0);
+	assert.equal(result.effect.cancelReconnect, true);
 
 	// started always cancels any pending reconnect, and its effect carries
 	// only cancelReconnect/reconnectIn -- no settleGen.
@@ -941,10 +946,13 @@ test('reduceStreamStatus keeps a reconnect stale until its first frame', () => {
 	assert.equal(result.status.staleSince, 1000);
 	status = result.status;
 
-	// Only a frame clears it.
+	// Only a frame clears it, and it also cancels the reconnect the last
+	// idle trip armed, so that timer cannot later fire and abort a stream
+	// that has already recovered.
 	result = reduceStreamStatus(status, { type: 'datastar-patch-elements' }, 1100 + 2 * STREAM_IDLE_MS + 50);
 	assert.equal(result.status.staleSince, null);
 	assert.equal(result.status.attempt, 0);
+	assert.equal(result.effect.cancelReconnect, true);
 });
 
 test('reduceStreamStatus does not trip a tick when not inflight, not started, or never framed', () => {

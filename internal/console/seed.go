@@ -88,7 +88,7 @@ func SeedQuestionFixtures(ctx context.Context, s *store.Store, ticketID int64) e
 		if have[key] {
 			continue
 		}
-		if err := seedOneQuestion(ctx, s, ticketID, key, kind); err != nil {
+		if _, err := seedOneQuestion(ctx, s, ticketID, key, kind); err != nil {
 			return fmt.Errorf("seed question fixtures: %s %s: %w", key, kind, err)
 		}
 	}
@@ -97,21 +97,20 @@ func SeedQuestionFixtures(ctx context.Context, s *store.Store, ticketID int64) e
 
 // seedOneQuestion inserts one open "question" message of kind on ticketID,
 // through store.InsertMessage (design section 6.15: "through the store's
-// validated inserts").
-func seedOneQuestion(ctx context.Context, s *store.Store, ticketID int64, key string, kind response.QuestionKind) error {
+// validated inserts"), and returns the inserted message's id.
+func seedOneQuestion(ctx context.Context, s *store.Store, ticketID int64, key string, kind response.QuestionKind) (int64, error) {
 	title, body := seedQuestionText(kind)
 	payload, err := seedQuestionPayload(key, kind)
 	if err != nil {
-		return err
+		return 0, err
 	}
 	openState := msgStateOpen
-	_, err = s.InsertMessage(ctx, store.Message{
+	return s.InsertMessage(ctx, store.Message{
 		TicketID: ticketID, Type: msgTypeQuestion, Author: "zing",
 		State:   &openState,
 		Body:    title + "\n\n" + body,
 		Payload: payload,
 	})
-	return err
 }
 
 // seedQuestionText returns the title (the <details> summary line) and body

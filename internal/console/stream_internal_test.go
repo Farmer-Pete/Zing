@@ -429,24 +429,15 @@ func streamHeartbeatDemoTicket(t *testing.T, c *console) int64 {
 
 // streamHeartbeatSeedGateQuestion seeds one open gate question ("Q5") on
 // ticketID (seed.go's seedOneQuestion, with no Publish of its own) and
-// returns the question message's id, read back through ListMessages the
-// way a caller with no insert-result id to hand would.
+// returns the seeded question message's own id, straight from the insert,
+// not a re-read that could return some other pre-existing question.
 func streamHeartbeatSeedGateQuestion(t *testing.T, c *console, ticketID int64) int64 {
 	t.Helper()
-	if err := seedOneQuestion(t.Context(), c.store, ticketID, "Q5", response.QuestionKindGate); err != nil {
+	id, err := seedOneQuestion(t.Context(), c.store, ticketID, "Q5", response.QuestionKindGate)
+	if err != nil {
 		t.Fatalf("seedOneQuestion: %v", err)
 	}
-	msgs, err := c.store.ListMessages(t.Context(), ticketID)
-	if err != nil {
-		t.Fatalf("ListMessages: %v", err)
-	}
-	for i := range msgs {
-		if msgs[i].Type == msgTypeQuestion {
-			return msgs[i].ID
-		}
-	}
-	t.Fatal("seeded gate question not found in ListMessages")
-	return 0
+	return id
 }
 
 // TestStreamHeartbeatRepatchesWithoutAWake is the ticket's own regression

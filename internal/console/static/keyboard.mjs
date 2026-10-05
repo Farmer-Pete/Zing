@@ -897,7 +897,10 @@ export function reduceStreamStatus(status, event, now) {
 			if (status.inflight === 0) {
 				return { status, effect: none };
 			}
-			return { status: { ...status, attempt: 0, staleSince: null, lastFrameAt: now }, effect: none };
+			return {
+				status: { ...status, attempt: 0, staleSince: null, lastFrameAt: now },
+				effect: { ...none, cancelReconnect: true },
+			};
 		}
 		case 'visible': {
 			if (status.inflight === 0) {
