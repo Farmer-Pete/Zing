@@ -141,9 +141,9 @@ func TestBuildingEscalationTable(t *testing.T) {
 
 	t.Run("CapBudgetRetry", func(t *testing.T) {
 		t.Parallel()
-		// "a retry | cap_budget | recapBudgetEscalation": re-escalate
-		// wall_clock in this same commit, resolving the round, with no
-		// runtime call.
+		// "a retry | cap_budget | retryCapBudget, budget has room": resolve
+		// the round, commit the marker "retry requested"; no re-escalation,
+		// no runtime call.
 		s, _, ticketID := buildTicketInBuilding(t)
 		qID := escalateDirect(t, s, ticketID, nil, nil, response.EscalationCodeWallClock, response.EscalationOriginCapBudget)
 		answerGateQuestion(t, s, ticketID, qID, new("a"), "")
@@ -152,12 +152,11 @@ func TestBuildingEscalationTable(t *testing.T) {
 		if err != nil {
 			t.Fatalf("escalation resolve (cap_budget retry) Run: %v", err)
 		}
-		if commit.Escalation == nil {
-			t.Fatal("commit.Escalation = nil, want a re-escalated wall_clock")
+		if commit.Escalation != nil {
+			t.Errorf("commit.Escalation = %+v, want nil (budget has room)", commit.Escalation)
 		}
-		if commit.Escalation.Payload.Code != string(response.EscalationCodeWallClock) ||
-			commit.Escalation.Payload.Origin != string(response.EscalationOriginCapBudget) {
-			t.Errorf("payload = %+v, want (wall_clock, cap_budget)", commit.Escalation.Payload)
+		if len(commit.Messages) != 1 || commit.Messages[0].Body != testMarkerRetryRequested {
+			t.Fatalf("commit.Messages = %+v, want one %q marker", commit.Messages, testMarkerRetryRequested)
 		}
 		if len(commit.ResolveQuestions) != 1 || commit.ResolveQuestions[0] != qID {
 			t.Errorf("commit.ResolveQuestions = %v, want [%d]", commit.ResolveQuestions, qID)

@@ -188,7 +188,7 @@ func resolvePostBuildEscalation(ctx context.Context, t store.Ticket, d Deps, rou
 		commit = h.retryMarkerCommit(t, d, resolveIDs)
 
 	case origin == response.EscalationOriginCapBudget:
-		commit = recapBudgetEscalation(t, d, resolveIDs)
+		commit, err = retryCapBudget(ctx, t, d, resolveIDs)
 
 	case origin == response.EscalationOriginCapResumes:
 		commit, preserved, err = h.retryCapResumes(ctx, t, d, resolveIDs, notes, int64OrZero(payload.SessionID))
