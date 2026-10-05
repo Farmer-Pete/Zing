@@ -41,6 +41,7 @@ import (
 	"regexp"
 	"strings"
 	"time"
+	"unicode"
 
 	zing "zing"
 	"zing/internal/fence"
@@ -1035,8 +1036,93 @@ func checkScenarioShape(scenarios []response.Scenario) []*response.PathError {
 				Msg:  expectedSkipCheckMsg,
 			})
 		}
+		// Two of the three #86 sealed-check failures: a check that greps a
+		// multi-word phrase straight against hard-wrapped prose (the phrase
+		// can span the line break the prose wraps at) without joining the
+		// lines first, and a check with an unquoted glob (the judge
+		// agent's zsh login shell aborts on an unmatched glob, turning a
+		// leading "!" into a false pass).
+		if proseGrepWithoutJoin(sc.Check) {
+			errs = append(errs, &response.PathError{
+				Path: "scenarios/" + indexedScenario(i) + "/check",
+				Msg:  proseGrepCheckMsg,
+			})
+		}
+		if word, ok := unquotedGlob(sc.Check); ok {
+			errs = append(errs, &response.PathError{
+				Path: "scenarios/" + indexedScenario(i) + "/check",
+				Msg:  unquotedGlobCheckMsg(word),
+			})
+		}
 	}
 	return errs
+}
+
+// proseGrep matches a grep invocation whose flags include F or q, followed
+// (before the next pipe, semicolon, or ampersand) by a single- or
+// double-quoted argument that contains whitespace, i.e. a phrase of more
+// than one word.
+var proseGrep = regexp.MustCompile(`\bgrep\b[^|;&]*-[A-Za-z]*[Fq][A-Za-z]*[^|;&]*('[^'|;&]*\s[^'|;&]*'|"[^"|;&]*\s[^"|;&]*")`)
+
+// proseTarget matches a check that names a markdown file or a path under
+// prompts/, the hard-wrapped prose a multi-word grep can miss.
+var proseTarget = regexp.MustCompile(`\.md\b|prompts/`)
+
+// joinsLines matches a check that pipes a file through tr collapsing
+// newlines or any whitespace run (the [:space:] class) to a single space
+// before grepping it, the safe form that can't miss a phrase split across
+// a wrapped line.
+var joinsLines = regexp.MustCompile(`(?s)\btr\b.*?(\\n|\[:space:\])`)
+
+// proseGrepWithoutJoin is true when a check greps a multi-word phrase (per
+// proseGrep) against prose (per proseTarget) without first joining the
+// file's lines (per joinsLines).
+func proseGrepWithoutJoin(check string) bool {
+	return proseGrep.MatchString(check) && proseTarget.MatchString(check) && !joinsLines.MatchString(check)
+}
+
+const proseGrepCheckMsg = `check greps a phrase of more than one word in hard-wrapped prose, so the phrase can span a line break; join the lines first, such as tr -s '[:space:]' ' ' < FILE | grep -qF 'two words'`
+
+// unquotedGlob scans check rune by rune, tracking single-quote,
+// double-quote, and backslash-escape state, and returns the
+// whitespace-delimited word holding the first "*" or "?" that sits outside
+// any quoting and isn't immediately preceded by "$" (a shell parameter
+// such as "$?", not a glob). zsh (the judge agent's login shell) aborts on
+// such a glob when it matches nothing, rather than passing it through
+// literally the way bash does.
+func unquotedGlob(check string) (string, bool) {
+	runes := []rune(check)
+	var inSingle, inDouble, escaped bool
+	wordStart := 0
+	for i, r := range runes {
+		if escaped {
+			escaped = false
+			continue
+		}
+		switch {
+		case r == '\\' && !inSingle:
+			escaped = true
+		case r == '\'' && !inDouble:
+			inSingle = !inSingle
+		case r == '"' && !inSingle:
+			inDouble = !inDouble
+		case unicode.IsSpace(r):
+			wordStart = i + 1
+		case (r == '*' || r == '?') && !inSingle && !inDouble:
+			if i == 0 || runes[i-1] != '$' {
+				wordEnd := i
+				for wordEnd < len(runes) && !unicode.IsSpace(runes[wordEnd]) {
+					wordEnd++
+				}
+				return string(runes[wordStart:wordEnd]), true
+			}
+		}
+	}
+	return "", false
+}
+
+func unquotedGlobCheckMsg(word string) string {
+	return fmt.Sprintf(`check has an unquoted glob %s; zsh aborts on an unmatched glob, so quote it, such as --include='*.go'`, word)
 }
 
 const hostSandboxCheckMsg = "check runs the host sandbox (sandbox-exec or the internal/sandbox probes), which cannot start inside the sandbox Zing runs checks in, so its probes skip and prove nothing; leave it out of the sealed checks"
