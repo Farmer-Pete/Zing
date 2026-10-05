@@ -4402,7 +4402,7 @@ func TestRun_RunsTwoTicketsAtOnce(t *testing.T) {
 
 	close(release)
 	cancel()
-	_ = waitFor(t, runErrCh, "Run to return") //nolint:errcheck // this test only proves Run returns after cancel; the error itself is unchecked, as it was before the rewrite to waitFor
+	_ = waitFor(t, runErrCh, "Run to return") //nolint:errcheck // this test only proves Run returns after cancel
 }
 
 // TestRun_DrainWaitsForInflight proves a graceful drain does not return
