@@ -477,17 +477,20 @@ func TestParse_UnregisteredPairIsNotRepaired(t *testing.T) {
 
 // TestParse_StrictDocumentKeepsItsBytes guards goal 2: a document that
 // parses on the strict pass comes back byte for byte, untouched by the
-// repair pass. The input holds no bare <, but reason's unknown <code>
+// repair pass. The input holds no bare <, but reason's unknown <code/>
 // child distinguishes the two passes: the strict decoder simply skips it,
-// while a repair-first Parse would treat reason as free text, escape
-// <code>'s opening < (rule 5), and then fail to match its closing
-// </code> against the open reason frame, changing the bytes. Asserting
-// byte-for-byte equality here would hold even if Parse ran its passes in
-// the wrong order only by accident; this input makes the two passes
-// disagree, so the assertion actually pins which one ran.
+// while a repair-first Parse would treat reason as free text and escape
+// <code/>'s opening < (rule 5) into &lt;, changing the bytes. Because
+// <code/> is self-closing, that repaired text still decodes, so a
+// repair-first Parse would succeed with different bytes rather than fail
+// outright and fall back to the strict ones. Asserting byte-for-byte
+// equality here would hold even if Parse ran its passes in the wrong
+// order only by accident, unless the repair pass's output actually
+// differs from the input; this input makes the two passes disagree, so
+// the assertion actually pins which one ran.
 func TestParse_StrictDocumentKeepsItsBytes(t *testing.T) {
 	t.Parallel()
-	in := []byte(`<zing job="classify" outcome="bug"><reason>use <code>x</code></reason></zing>`)
+	in := []byte(`<zing job="classify" outcome="bug"><reason>use <code/>x</reason></zing>`)
 	doc, err := Parse(in)
 	if err != nil {
 		t.Fatalf("Parse: %v", err)
