@@ -105,6 +105,19 @@ type Deps struct {
 	// that has gone quiet (shipping.go). The zero value has no checks, so
 	// pollIdle never nudges.
 	ReviewBots ReviewBotRule
+	// Now is runJobWith's own clock for the claude_hold_until gate (#45):
+	// nil, its default, means time.Now. The dispatcher wires it to
+	// Config.Now, so a test that drives the dispatcher's own clock also
+	// drives the hold check.
+	Now func() time.Time
+}
+
+// now is d.Now(), or time.Now when Now is nil.
+func (d Deps) now() time.Time {
+	if d.Now == nil {
+		return time.Now()
+	}
+	return d.Now()
 }
 
 // MergeRule is design section 8.8's own merge rule (zing.toml's [merge]

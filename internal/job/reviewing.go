@@ -774,7 +774,7 @@ func (h reviewingHandler) discussRunAndRoute(
 
 	if runErr != nil {
 		switch {
-		case errors.Is(runErr, runtime.ErrCanceled), errors.Is(runErr, ErrConfig), errors.Is(runErr, store.ErrClaimLost):
+		case errors.Is(runErr, runtime.ErrCanceled), errors.Is(runErr, ErrConfig), errors.Is(runErr, store.ErrClaimLost), claudeCapped(runErr):
 			return store.HandlerCommit{}, runErr
 		case errors.Is(runErr, ErrBudget):
 			return budgetEscalationCommit(t, d, resolveIDs), nil
