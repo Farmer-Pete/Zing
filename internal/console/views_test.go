@@ -168,70 +168,69 @@ func navFrame(t *testing.T, base string) string {
 
 // TestNavOrderStable proves the sidebar's order is stable under the two
 // everyday events that used to reshuffle it (#106 bug 5, c8's owner
-// decision (a)): a ticket gaining a gate, and a ticket gaining (then
-// losing, on open) an unread message. Both tickets start as plain, quiet
-// tickets whose refs ("s#1", "s#2") are non-numeric, so issueNumberOrder
-// sorts them as text with "s#1" first; the event under test must not move
-// "s#2" above "s#1".
+// decision (a)): a ticket gaining a gate, and a ticket gaining an unread
+// message. Both tickets start as plain, quiet tickets whose refs ("s#1",
+// "s#2") are non-numeric, so issueNumberOrder sorts them as text with
+// "s#1" first; the event under test must not move "s#2" above "s#1".
 func TestNavOrderStable(t *testing.T) {
 	t.Parallel()
-	t.Run("a gate does not move a row", func(t *testing.T) {
-		t.Parallel()
-		s := newConsoleTestStore(t)
 
-		seedTicket(t, s, "s#1", "Nav first")
-		second := seedTicket(t, s, "s#2", "Nav second")
+	cases := []struct {
+		name  string
+		event string // used in the after-fix failure message
+		badge string
+		apply func(t *testing.T, s *store.Store, id int64)
+	}{
+		{
+			name:  "a gate does not move a row",
+			event: "a gate",
+			badge: "badge-blocking",
+			apply: func(t *testing.T, s *store.Store, id int64) {
+				t.Helper()
+				seedOpenQuestion(t, s, id)
+			},
+		},
+		{
+			name:  "an unread update does not move a row",
+			event: "an unread update",
+			badge: "badge-unread",
+			apply: func(t *testing.T, s *store.Store, id int64) {
+				t.Helper()
+				seedUnreadUpdate(t, s, id, "an update")
+			},
+		},
+	}
 
-		srv := newTestServer(t, s, bus.New(), nil, newTestLogHandler(t))
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			s := newConsoleTestStore(t)
 
-		before := navFrame(t, srv.URL)
-		firstIdx := mustIndex(t, before, "Nav first")
-		secondIdx := mustIndex(t, before, "Nav second")
-		if firstIdx > secondIdx {
-			t.Fatalf("expected \"Nav first\" before \"Nav second\" before the gate; got:\n%s", before)
-		}
+			seedTicket(t, s, "s#1", "Nav first")
+			second := seedTicket(t, s, "s#2", "Nav second")
 
-		seedOpenQuestion(t, s, second)
+			srv := newTestServer(t, s, bus.New(), nil, newTestLogHandler(t))
 
-		after := navFrame(t, srv.URL)
-		firstIdx = mustIndex(t, after, "Nav first")
-		secondIdx = mustIndex(t, after, "Nav second")
-		if secondIdx < firstIdx {
-			t.Errorf("after a gate, \"Nav second\" rendered before \"Nav first\"; got:\n%s", after)
-		}
-		if !strings.Contains(after, "badge-blocking") {
-			t.Errorf("nav frame missing the gated ticket's badge-blocking; got:\n%s", after)
-		}
-	})
+			before := navFrame(t, srv.URL)
+			firstIdx := mustIndex(t, before, "Nav first")
+			secondIdx := mustIndex(t, before, "Nav second")
+			if firstIdx > secondIdx {
+				t.Fatalf("expected \"Nav first\" before \"Nav second\" before %s; got:\n%s", tc.event, before)
+			}
 
-	t.Run("an unread update does not move a row", func(t *testing.T) {
-		t.Parallel()
-		s := newConsoleTestStore(t)
+			tc.apply(t, s, second)
 
-		seedTicket(t, s, "s#1", "Nav first")
-		second := seedTicket(t, s, "s#2", "Nav second")
-
-		srv := newTestServer(t, s, bus.New(), nil, newTestLogHandler(t))
-
-		before := navFrame(t, srv.URL)
-		firstIdx := mustIndex(t, before, "Nav first")
-		secondIdx := mustIndex(t, before, "Nav second")
-		if firstIdx > secondIdx {
-			t.Fatalf("expected \"Nav first\" before \"Nav second\" before the unread update; got:\n%s", before)
-		}
-
-		seedUnreadUpdate(t, s, second, "an update")
-
-		after := navFrame(t, srv.URL)
-		firstIdx = mustIndex(t, after, "Nav first")
-		secondIdx = mustIndex(t, after, "Nav second")
-		if secondIdx < firstIdx {
-			t.Errorf("after an unread update, \"Nav second\" rendered before \"Nav first\"; got:\n%s", after)
-		}
-		if !strings.Contains(after, "badge-unread") {
-			t.Errorf("nav frame missing the updated ticket's badge-unread; got:\n%s", after)
-		}
-	})
+			after := navFrame(t, srv.URL)
+			firstIdx = mustIndex(t, after, "Nav first")
+			secondIdx = mustIndex(t, after, "Nav second")
+			if secondIdx < firstIdx {
+				t.Errorf("after %s, \"Nav second\" rendered before \"Nav first\"; got:\n%s", tc.event, after)
+			}
+			if !strings.Contains(after, tc.badge) {
+				t.Errorf("nav frame missing the updated ticket's %s; got:\n%s", tc.badge, after)
+			}
+		})
+	}
 }
 
 // TestRecentOrdersByNewestTicketFirst proves Recent's order: newest ticket

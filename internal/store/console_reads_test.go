@@ -499,13 +499,8 @@ func TestLiveTickets_OrdersByIssueNumberOnly(t *testing.T) {
 			t.Errorf("LiveTickets[%d].Ticket.TrackerRef = %q, want %q", i, got[i].Ticket.TrackerRef, want)
 		}
 	}
-	for i, want := range wantRefs {
-		if want != "200" {
-			continue
-		}
-		if got[i].OpenQuestionCount != 2 {
-			t.Errorf("LiveTickets[%d] (ref 200) OpenQuestionCount = %d, want 2", i, got[i].OpenQuestionCount)
-		}
+	if got[4].OpenQuestionCount != 2 {
+		t.Errorf("LiveTickets[4] (ref 200) OpenQuestionCount = %d, want 2", got[4].OpenQuestionCount)
 	}
 }
 
