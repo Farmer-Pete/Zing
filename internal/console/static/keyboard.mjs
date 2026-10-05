@@ -163,10 +163,12 @@ export function sendChordLabel(isMac) {
  * still-rendered reply box -- most often a race with the owner's own
  * just-sent batch answer -- got a raw "question closed" 409 and the typed
  * text silently vanished, with nothing explaining why). "question closed"
- * is the one reason a reader hits often enough to need a plain sentence;
- * every other reason (a bad option or item ref, an ambiguous or missing
- * draft) is rare enough from the real console UI, which only ever sends
- * well-formed requests, that its own store wording is shown as-is.
+ * and "changed in another tab" (ticket #43, cause 2: two tabs' autosaves
+ * silently overwrote each other) are the two reasons a reader hits often
+ * enough to need a plain sentence; every other reason (a bad option or item
+ * ref, an ambiguous or missing draft) is rare enough from the real console
+ * UI, which only ever sends well-formed requests, that its own store
+ * wording is shown as-is.
  *
  * @param {string} reason
  * @returns {string}
@@ -174,6 +176,9 @@ export function sendChordLabel(isMac) {
 export function draftConflictMessage(reason) {
 	if (reason === 'question closed') {
 		return 'This question is already answered.';
+	}
+	if (reason === 'changed in another tab') {
+		return 'Changed in another tab.';
 	}
 	return reason;
 }
@@ -598,6 +603,98 @@ export function sendResultWithUnsent(text, unsent, stale = 0) {
 		base = `${base} ${stale} replies sent an earlier version; their newest edits may be missing.`;
 	}
 	return base;
+}
+
+/**
+ * sendTargets decides what console.js's Cmd+Enter should send and whether it
+ * must ask first (ticket #43, cause 1: POST /send carried only the ticket,
+ * so a send scoped to nothing went out against every draft on the ticket,
+ * including one typed and forgotten on another question earlier in the
+ * page's life). questions is console.js's collectSendQuestions() over every
+ * "#main .q": one descriptor per open question, in document order, with
+ * hasDraft true when it has unsent reply text or a picked chip/item, and
+ * conflicted true when console.js's conflictedBoxes (task 5) holds its reply
+ * box's key. A conflicted question is dropped even when it also has a
+ * draft, since the owner has not yet typed over the "changed in another
+ * tab" note and sending it would send the other tab's text.
+ *
+ * confirm is true whenever ids is non-empty and is not exactly the single
+ * focused question: sending only what the owner is looking at needs no
+ * prompt, but sending anything beyond that -- including a second question
+ * when nothing has focus -- must list what is about to go out first (Q3).
+ *
+ * @param {{id: number, key: string, hasDraft: boolean, conflicted: boolean}[]} questions
+ * @param {number|null} focusedID - the open question's id the owner is
+ *   looking at, or null when none has focus
+ * @returns {{ids: number[], keys: string[], confirm: boolean}}
+ */
+export function sendTargets(questions, focusedID) {
+	const targets = (questions ?? []).filter((q) => q.hasDraft && !q.conflicted);
+	const ids = targets.map((q) => q.id);
+	const keys = targets.map((q) => q.key);
+	const onlyFocused = ids.length === 1 && ids[0] === focusedID;
+	const confirm = ids.length > 0 && !onlyFocused;
+	return { ids, keys, confirm };
+}
+
+/**
+ * sendConfirmText writes openSendConfirm's dialog line naming the questions
+ * a Cmd+Enter is about to send (Q3: "Send 3 replies on Q6, Q7, Q9?"), given
+ * sendTargets' own keys in the same order.
+ *
+ * @param {string[]} keys
+ * @returns {string}
+ */
+export function sendConfirmText(keys) {
+	if (keys.length === 1) {
+		return `Send 1 reply on ${keys[0]}?`;
+	}
+	return `Send ${keys.length} replies on ${keys.join(', ')}?`;
+}
+
+/**
+ * skipConflicted filters a conflicted reply box out of whatever list
+ * console.js is about to save or send (ticket #43, cause 2, Q5: a box that
+ * just got a "changed in another tab" note stays neither saved nor sent
+ * until the owner's next keystroke proves they have seen it and are typing
+ * over it). console.js's postSendBatchLocked runs this over the pending
+ * saves, the emptied-box clears, and the post-send clear list, and
+ * rearmAutosaves runs it over every box it would otherwise re-arm, each
+ * passing its own isConflicted(item) built from conflictedBoxes.has(key).
+ * Items that pass through keep their original order, since none of those
+ * callers depend on order but a stable one is the least surprising default.
+ *
+ * @param {object[]} items
+ * @param {(item: object) => boolean} isConflicted
+ * @returns {object[]}
+ */
+export function skipConflicted(items, isConflicted) {
+	return (items ?? []).filter((item) => !isConflicted(item));
+}
+
+/**
+ * sendableQuestions re-checks questions (sendTargets' own ids) right before
+ * postSendBatchLocked's /send fetch (ticket #43, cause 2, Q5): either of its
+ * own earlier awaits -- the pending/emptied saves, or an autosave chained in
+ * autosaveInFlight from before Cmd+Enter was pressed -- can turn a listed
+ * question's reply box conflicted after sendTargets already fixed the list,
+ * and sending it unfiltered would still send the other tab's stored draft
+ * for that question. boxes is console.js's own reply inputs, each a
+ * {question, ...} descriptor keyed by Number(el.dataset.draftQuestion); a
+ * listed id with no matching box (an option or item answer with no reply
+ * box of its own) is kept, since there is nothing here to hold it back.
+ *
+ * @param {number[]} questions
+ * @param {{question: number}[]} boxes
+ * @param {(box: object) => boolean} isConflicted
+ * @returns {number[]}
+ */
+export function sendableQuestions(questions, boxes, isConflicted) {
+	const byQuestion = new Map((boxes ?? []).map((box) => [box.question, box]));
+	return (questions ?? []).filter((id) => {
+		const box = byQuestion.get(id);
+		return !box || !isConflicted(box);
+	});
 }
 
 // AUTOSAVE_DEBOUNCE_MS is how long installReplyAutosave (console.js) waits
