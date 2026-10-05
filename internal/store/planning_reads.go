@@ -240,11 +240,11 @@ func (s *Store) AnsweredRounds(ctx context.Context, ticketID int64) ([]Round, er
 		return nil, fmt.Errorf("answered rounds for ticket %d: %w", ticketID, fillErr)
 	}
 
-	answers, err := messagesByParent(ctx, s, ticketID, msgTypeAnswer, answerStateSent, questionIDs)
+	answers, err := messagesByParent(ctx, s, ticketID, msgTypeAnswer, questionIDs)
 	if err != nil {
 		return nil, fmt.Errorf("answered rounds for ticket %d: %w", ticketID, err)
 	}
-	replies, err := messagesByParent(ctx, s, ticketID, msgTypeReply, answerStateSent, questionIDs)
+	replies, err := messagesByParent(ctx, s, ticketID, msgTypeReply, questionIDs)
 	if err != nil {
 		return nil, fmt.Errorf("answered rounds for ticket %d: %w", ticketID, err)
 	}
@@ -297,24 +297,25 @@ func fillRunContexts(ctx context.Context, s *Store, groups map[roundKey]*Round) 
 	return nil
 }
 
-// messagesByParent returns every message of (typ, state), authored by the
+// messagesByParent returns every sent message of typ, authored by the
 // owner (author "you"), whose parent_id is one of parentIDs, bucketed by
 // parent id, each bucket ordered by id. The author filter (D31, design
 // section 22.3) is what keeps an agent's own zing-authored reply, parented
-// to a planning question, out of AnsweredRounds' Replies -- its two callers
-// are both AnsweredRounds' own answers and replies reads, and a round's
-// Replies must only ever hold what the owner wrote. The dynamic part of the
-// query is a fixed number of "?" placeholders, one per id; every value
-// rides as a bind argument, never concatenated into the query text (the
-// same pattern ListReadyCandidates uses, reads.go).
-func messagesByParent(ctx context.Context, s *Store, ticketID int64, typ, state string, parentIDs []int64) (map[int64][]MessageRow, error) {
+// to a planning question, out of AnsweredRounds' Replies -- its callers are
+// AnsweredRounds' own answers and replies reads and OwnerAnswers'
+// (owner_answers.go), and a round's Replies must only ever hold what the
+// owner wrote. The dynamic part of the query is a fixed number of "?"
+// placeholders, one per id; every value rides as a bind argument, never
+// concatenated into the query text (the same pattern ListReadyCandidates
+// uses, reads.go).
+func messagesByParent(ctx context.Context, s *Store, ticketID int64, typ string, parentIDs []int64) (map[int64][]MessageRow, error) {
 	out := make(map[int64][]MessageRow)
 	if len(parentIDs) == 0 {
 		return out, nil
 	}
 	placeholders := make([]string, len(parentIDs))
 	args := make([]any, 0, len(parentIDs)+4)
-	args = append(args, ticketID, typ, state, authorYou)
+	args = append(args, ticketID, typ, answerStateSent, authorYou)
 	for i, id := range parentIDs {
 		placeholders[i] = "?"
 		args = append(args, id)
