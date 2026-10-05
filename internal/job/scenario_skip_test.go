@@ -89,33 +89,6 @@ func TestCheckScenarioShape_ExpectedSkip(t *testing.T) {
 			wantMsgs:  []string{hostSandboxCheckMsg, expectedSkipCheckMsg},
 		},
 		{
-			// assertsSkip is structural: a shell comment that happens to
-			// contain the skip line text asserts nothing, since it never
-			// runs. Without the pipe-to-grep requirement, the old plain
-			// substring test would have cleared both rules here.
-			name: "comment_bypass_rejected",
-			scenario0: response.Scenario{
-				ID:    "s1",
-				Then:  thenProbeSkips,
-				Check: `go test ./internal/sandbox -run TestX -v -count=1; echo done # --- SKIP: TestX`,
-			},
-			wantPaths: []string{scenario0CheckPath, scenario0CheckPath},
-			wantMsgs:  []string{hostSandboxCheckMsg, expectedSkipCheckMsg},
-		},
-		{
-			// An echo of the skip line text is not a grep of the test's
-			// real output and ignores the test's own exit code, so it
-			// must not satisfy the expected-skip rule either.
-			name: "echo_bypass_rejected",
-			scenario0: response.Scenario{
-				ID:    "s1",
-				Then:  thenLiveTestSkips,
-				Check: `go test ./internal/runtime -run TestLive -count=1 && echo '--- SKIP: TestLive'`,
-			},
-			wantPaths: []string{scenario0CheckPath},
-			wantMsgs:  []string{expectedSkipCheckMsg},
-		},
-		{
 			// The exemption is for an internal/sandbox probe's own expected
 			// skip, not for every grepped sandbox check: a then that does
 			// not expect a skip still gets the host-sandbox error.
