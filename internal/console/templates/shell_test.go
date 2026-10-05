@@ -29,3 +29,34 @@ func TestMainScrollsWideContentInsteadOfThePage(t *testing.T) {
 		}
 	}
 }
+
+// TestAlertStripHasBoundedHeight proves the alert strip bug fix: #alerts
+// sits above .layout in normal flow and holds up to alertsLimit (20)
+// lines, so an unbounded .alert-lines pushed the whole page down with
+// every new warning. The rule now caps its height and scrolls instead,
+// and an empty strip still takes no space.
+func TestAlertStripHasBoundedHeight(t *testing.T) {
+	t.Parallel()
+	var sb strings.Builder
+	if err := Shell(emptyBodyHTML, emptyBodyHTML, emptyBodyHTML, emptyBodyHTML).Render(t.Context(), &sb); err != nil {
+		t.Fatalf("Shell.Render: %v", err)
+	}
+	got := sb.String()
+	start := strings.Index(got, ".alert-lines {")
+	if start < 0 {
+		t.Fatalf("rendered shell has no .alert-lines rule")
+	}
+	end := strings.Index(got[start:], "}")
+	if end < 0 {
+		t.Fatalf("rendered shell's .alert-lines rule is unterminated")
+	}
+	rule := got[start : start+end]
+	for _, want := range []string{"max-height: 5.5rem;", "overflow-y: auto;"} {
+		if !strings.Contains(rule, want) {
+			t.Errorf("rendered shell's .alert-lines rule missing %q", want)
+		}
+	}
+	if !strings.Contains(got, "#alerts:empty { display: none; }") {
+		t.Errorf("rendered shell missing the empty-strip rule")
+	}
+}
