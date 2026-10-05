@@ -60,6 +60,14 @@ const (
 // flag the repeats.
 const testZingProjectName = "zing"
 
+// testReviewBotCheck and testReviewBotTrigger are review_bots' own default
+// check name and trigger comment (config.go's defaultReviewBotChecks),
+// pulled out as constants so goconst does not flag the repeats.
+const (
+	testReviewBotCheck   = "CodeRabbit"
+	testReviewBotTrigger = "@coderabbitai review"
+)
+
 // writeTOML writes body to a fresh zing.toml under t.TempDir and returns its path.
 func writeTOML(t *testing.T, body string) string {
 	t.Helper()
@@ -118,6 +126,10 @@ func TestLoad_MinimalConfigGetsEveryDefault(t *testing.T) {
 			Method:          "squash",
 			ManualPaths:     []string{"deploy/**", "**/migrations/**", "Dockerfile", ".github/workflows/**"},
 			DependencyFiles: []string{"go.mod", "go.sum", "package.json", "pyproject.toml"},
+		},
+		ReviewBots: ReviewBots{
+			WaitMinutes: 20,
+			Checks:      []ReviewBotCheck{{Check: testReviewBotCheck, Trigger: testReviewBotTrigger}},
 		},
 		Projects: []Project{
 			{
@@ -220,6 +232,10 @@ lint = "golangci-lint run"
 			Method:          "merge",
 			ManualPaths:     []string{"a/**"},
 			DependencyFiles: []string{"go.mod"},
+		},
+		ReviewBots: ReviewBots{
+			WaitMinutes: 20,
+			Checks:      []ReviewBotCheck{{Check: testReviewBotCheck, Trigger: testReviewBotTrigger}},
 		},
 		Projects: []Project{
 			{
@@ -949,6 +965,121 @@ func TestLoad_FixCommandIsOptional(t *testing.T) {
 			t.Errorf("Commands.Fix = %q, want empty", cfg.Projects[0].Commands.Fix)
 		}
 	})
+}
+
+// TestLoadReviewBots proves review_bots' own defaults, explicit values, and
+// value checks (PKG9-PLAN.md, the shipping ticket's silent-review-bot nudge):
+// an absent table defaults to a 20-minute wait and CodeRabbit's own trigger;
+// explicit values are kept; an explicit empty checks list stays empty; and a
+// bad wait_minutes, an empty check or trigger, or a duplicate check each
+// fail with an error naming review_bots.
+func TestLoadReviewBots(t *testing.T) {
+	t.Parallel()
+
+	t.Run("absent table defaults wait and checks", func(t *testing.T) {
+		t.Parallel()
+		cfg, err := Load(writeTOML(t, minimalValidTOML))
+		if err != nil {
+			t.Fatalf("Load: %v", err)
+		}
+		want := ReviewBots{
+			WaitMinutes: 20,
+			Checks:      []ReviewBotCheck{{Check: testReviewBotCheck, Trigger: testReviewBotTrigger}},
+		}
+		if !reflect.DeepEqual(cfg.ReviewBots, want) {
+			t.Errorf("ReviewBots = %+v, want %+v", cfg.ReviewBots, want)
+		}
+	})
+
+	t.Run("explicit values are kept", func(t *testing.T) {
+		t.Parallel()
+		const withBots = minimalValidTOML + `
+[review_bots]
+wait_minutes = 45
+
+[[review_bots.checks]]
+check = "ci-sentry"
+trigger = "@ci-sentry recheck"
+`
+		cfg, err := Load(writeTOML(t, withBots))
+		if err != nil {
+			t.Fatalf("Load: %v", err)
+		}
+		want := ReviewBots{
+			WaitMinutes: 45,
+			Checks:      []ReviewBotCheck{{Check: "ci-sentry", Trigger: "@ci-sentry recheck"}},
+		}
+		if !reflect.DeepEqual(cfg.ReviewBots, want) {
+			t.Errorf("ReviewBots = %+v, want %+v", cfg.ReviewBots, want)
+		}
+	})
+
+	t.Run("explicit empty checks list stays empty", func(t *testing.T) {
+		t.Parallel()
+		const withEmptyChecks = minimalValidTOML + "\n[review_bots]\nchecks = []\n"
+		cfg, err := Load(writeTOML(t, withEmptyChecks))
+		if err != nil {
+			t.Fatalf("Load: %v", err)
+		}
+		if len(cfg.ReviewBots.Checks) != 0 {
+			t.Errorf("ReviewBots.Checks = %v, want empty", cfg.ReviewBots.Checks)
+		}
+		if cfg.ReviewBots.WaitMinutes != 20 {
+			t.Errorf("ReviewBots.WaitMinutes = %d, want the default 20", cfg.ReviewBots.WaitMinutes)
+		}
+	})
+
+	errTests := []struct {
+		name string
+		body string
+		want string
+	}{
+		{
+			name: "wait_minutes zero",
+			body: minimalValidTOML + "\n[review_bots]\nwait_minutes = 0\n",
+			want: "zing.toml: review_bots.wait_minutes: must be 1 to 1440",
+		},
+		{
+			name: "wait_minutes one past the cap",
+			body: minimalValidTOML + "\n[review_bots]\nwait_minutes = 1441\n",
+			want: "zing.toml: review_bots.wait_minutes: must be 1 to 1440",
+		},
+		{
+			name: "empty check",
+			body: minimalValidTOML + "\n[[review_bots.checks]]\ncheck = \"\"\ntrigger = \"@x review\"\n",
+			want: "zing.toml: review_bots.checks[0].check: must not be empty",
+		},
+		{
+			name: "empty trigger",
+			body: minimalValidTOML + "\n[[review_bots.checks]]\ncheck = \"CodeRabbit\"\ntrigger = \"\"\n",
+			want: "zing.toml: review_bots.checks[0].trigger: must not be empty",
+		},
+		{
+			name: "duplicate check",
+			body: minimalValidTOML + `
+[[review_bots.checks]]
+check = "CodeRabbit"
+trigger = "@coderabbitai review"
+
+[[review_bots.checks]]
+check = "CodeRabbit"
+trigger = "@coderabbitai review"
+`,
+			want: `zing.toml: review_bots.checks[1].check: duplicate check "CodeRabbit"`,
+		},
+	}
+	for _, tt := range errTests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			_, err := Load(writeTOML(t, tt.body))
+			if err == nil {
+				t.Fatalf("Load() = nil, want error %q", tt.want)
+			}
+			if err.Error() != tt.want {
+				t.Errorf("Load() = %q, want %q", err.Error(), tt.want)
+			}
+		})
+	}
 }
 
 func TestDefaultPath(t *testing.T) {

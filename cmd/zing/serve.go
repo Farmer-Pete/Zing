@@ -350,6 +350,10 @@ func serve(ctx context.Context, cfgPath, dbPath string, seedDemo bool) error {
 			Auto: cfg.Merge.Auto, Method: cfg.Merge.Method,
 			ManualPaths: cfg.Merge.ManualPaths, DependencyFiles: cfg.Merge.DependencyFiles,
 		},
+		ReviewBots: job.ReviewBotRule{
+			Wait:   time.Duration(cfg.ReviewBots.WaitMinutes) * time.Minute,
+			Checks: reviewBotChecks(cfg.ReviewBots.Checks),
+		},
 		// ReclaimForeign is only safe once serve.lock proves every other
 		// claim owner is dead (design section 6.2, 6.3): serve took that
 		// lock above, so it is the only caller that ever sets this true.
@@ -1136,6 +1140,17 @@ const maxDispatchIntervalSeconds = math.MaxInt64 / int64(time.Second)
 // (maxDispatchIntervalSeconds) to defaultDispatchInterval. Passed straight
 // through to time.Ticker, either an out-of-range value would otherwise
 // panic it.
+// reviewBotChecks converts config.ReviewBots.Checks into job.ReviewBotRule's
+// own check list, field by field (the two types stay separate so job never
+// imports config).
+func reviewBotChecks(checks []config.ReviewBotCheck) []job.ReviewBotCheck {
+	out := make([]job.ReviewBotCheck, len(checks))
+	for i, c := range checks {
+		out[i] = job.ReviewBotCheck{Check: c.Check, Trigger: c.Trigger}
+	}
+	return out
+}
+
 func dispatchInterval(seconds int) time.Duration {
 	switch {
 	case seconds <= 0:

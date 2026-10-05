@@ -38,15 +38,16 @@ type Config struct {
 	// absolute after expansion. serve alone checks it sits inside DATA_DIR
 	// and holds auth.json (config.Load never reads machine.toml or
 	// DATA_DIR, so it cannot make either check itself).
-	JudgeCodexHome string    `toml:"judge_codex_home"`
-	Console        Console   `toml:"console"`
-	Models         Models    `toml:"models"`
-	Dispatch       Dispatch  `toml:"dispatch"`
-	Budget         Budget    `toml:"budget"`
-	Review         Review    `toml:"review"`
-	Merge          Merge     `toml:"merge"`
-	Sandbox        Sandbox   `toml:"sandbox"`
-	Projects       []Project `toml:"projects"`
+	JudgeCodexHome string     `toml:"judge_codex_home"`
+	Console        Console    `toml:"console"`
+	Models         Models     `toml:"models"`
+	Dispatch       Dispatch   `toml:"dispatch"`
+	Budget         Budget     `toml:"budget"`
+	Review         Review     `toml:"review"`
+	Merge          Merge      `toml:"merge"`
+	Sandbox        Sandbox    `toml:"sandbox"`
+	ReviewBots     ReviewBots `toml:"review_bots"`
+	Projects       []Project  `toml:"projects"`
 }
 
 // Sandbox is the [sandbox] table (PKG8-PLAN.md section 5.4): ReadPaths
@@ -98,6 +99,25 @@ type Merge struct {
 	Method          string   `toml:"method"`
 	ManualPaths     []string `toml:"manual_paths"`
 	DependencyFiles []string `toml:"dependency_files"`
+}
+
+// ReviewBots is the [review_bots] table: a required check that belongs to a
+// review bot (CodeRabbit by default) can stop reporting when the bot is
+// rate-limited, leaving POLL waiting forever. WaitMinutes is how long a
+// configured check may sit missing before pollIdle posts that check's
+// Trigger comment once, and again that long before it escalates to the
+// owner (internal/job/shiprules.go's reviewBotAction).
+type ReviewBots struct {
+	WaitMinutes int              `toml:"wait_minutes"`
+	Checks      []ReviewBotCheck `toml:"checks"`
+}
+
+// ReviewBotCheck names one required check that belongs to a review bot
+// (Check, matched against a PR's missing required checks by equality) and
+// the comment pollIdle posts to nudge it (Trigger, posted verbatim).
+type ReviewBotCheck struct {
+	Check   string `toml:"check"`
+	Trigger string `toml:"trigger"`
 }
 
 type Project struct {
@@ -203,6 +223,21 @@ const (
 	minLensesParallel = 1
 	maxLensesParallel = 7
 )
+
+// minReviewBotWaitMinutes and maxReviewBotWaitMinutes bound
+// review_bots.wait_minutes: 1 minute at the floor, 1440 (one day) at the
+// ceiling.
+const (
+	minReviewBotWaitMinutes = 1
+	maxReviewBotWaitMinutes = 1440
+)
+
+// defaultReviewBotWaitMinutes and defaultReviewBotChecks are review_bots'
+// own defaults when the table, or just the checks key, is absent: a
+// 20-minute wait, and CodeRabbit's own trigger comment.
+const defaultReviewBotWaitMinutes = 20
+
+var defaultReviewBotChecks = []ReviewBotCheck{{Check: "CodeRabbit", Trigger: "@coderabbitai review"}}
 
 // Load reads and validates the zing.toml at path, in this exact order so the
 // first reported error is deterministic: mode repair, decode, unknown-key
@@ -538,6 +573,9 @@ func checkValues(md toml.MetaData, cfg Config) error {
 	if err := checkSandboxReadPaths(cfg.Sandbox.ReadPaths); err != nil {
 		return err
 	}
+	if err := checkReviewBots(md, cfg.ReviewBots); err != nil {
+		return err
+	}
 	if md.IsDefined("budget", "usage_hold_percent") &&
 		(cfg.Budget.UsageHoldPercent < 0 || cfg.Budget.UsageHoldPercent > 100) {
 		return errors.New("zing.toml: budget.usage_hold_percent: must be 0 to 100")
@@ -650,6 +688,30 @@ func checkSandboxReadPaths(paths []string) error {
 	return nil
 }
 
+// checkReviewBots rejects an explicit review_bots.wait_minutes outside
+// [1, 1440], and any review_bots.checks entry with an empty check or
+// trigger, or a check name repeated by an earlier entry.
+func checkReviewBots(md toml.MetaData, bots ReviewBots) error {
+	if md.IsDefined("review_bots", "wait_minutes") &&
+		(bots.WaitMinutes < minReviewBotWaitMinutes || bots.WaitMinutes > maxReviewBotWaitMinutes) {
+		return fmt.Errorf("zing.toml: review_bots.wait_minutes: must be %d to %d", minReviewBotWaitMinutes, maxReviewBotWaitMinutes)
+	}
+	seen := make(map[string]bool, len(bots.Checks))
+	for i := range bots.Checks {
+		c := &bots.Checks[i]
+		switch {
+		case c.Check == "":
+			return fmt.Errorf("zing.toml: review_bots.checks[%d].check: must not be empty", i)
+		case c.Trigger == "":
+			return fmt.Errorf("zing.toml: review_bots.checks[%d].trigger: must not be empty", i)
+		case seen[c.Check]:
+			return fmt.Errorf("zing.toml: review_bots.checks[%d].check: duplicate check %q", i, c.Check)
+		}
+		seen[c.Check] = true
+	}
+	return nil
+}
+
 func applyDefaults(md toml.MetaData, cfg *Config) {
 	if !md.IsDefined("console", "bind") {
 		cfg.Console.Bind = []string{"127.0.0.1", "tailscale"}
@@ -695,6 +757,12 @@ func applyDefaults(md toml.MetaData, cfg *Config) {
 	}
 	if !md.IsDefined("merge", "dependency_files") {
 		cfg.Merge.DependencyFiles = []string{"go.mod", "go.sum", "package.json", "pyproject.toml"}
+	}
+	if !md.IsDefined("review_bots", "wait_minutes") {
+		cfg.ReviewBots.WaitMinutes = defaultReviewBotWaitMinutes
+	}
+	if !md.IsDefined("review_bots", "checks") {
+		cfg.ReviewBots.Checks = defaultReviewBotChecks
 	}
 
 	for i := range cfg.Projects {
