@@ -530,6 +530,25 @@ func TestClaude_FixtureParse_Resume(t *testing.T) {
 	}
 }
 
+// TestClaudeRun_CountsDeniedValidateCalls proves Run decodes a claude
+// result's permission_denials and reports how many of them were a denied
+// zing validate Bash call, through RunResult.ValidateDenied.
+func TestClaudeRun_CountsDeniedValidateCalls(t *testing.T) {
+	t.Parallel()
+	requireUnix(t)
+
+	dir := t.TempDir()
+	req := newFakeRequest(dir, "success", "FAKE_CLAUDE_RESULT_FILE=testdata/claude_result_denials.json")
+	c := NewClaude(fakeClaudeScript, testOAuthToken)
+	res, err := c.Run(context.Background(), req)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if res.ValidateDenied != 2 {
+		t.Errorf("ValidateDenied = %d, want 2", res.ValidateDenied)
+	}
+}
+
 // ---- exit and errors --------------------------------------------------------
 
 func TestClaude_ErrStart(t *testing.T) {
@@ -1001,6 +1020,32 @@ func TestClaudeFinalMessage(t *testing.T) {
 			t.Parallel()
 			if got := claudeFinalMessage([]byte(tc.stdout)); got != tc.want {
 				t.Errorf("claudeFinalMessage(%q) = %q, want %q", tc.stdout, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestCountValidateDenials is countValidateDenials's own unit test: an
+// absent field gives 0, malformed JSON gives 0, a denied Bash command
+// containing "zing validate" counts, and a denied non-Bash tool does not.
+func TestCountValidateDenials(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name   string
+		stdout string
+		want   int
+	}{
+		{"absent field", `{"result":"hi"}`, 0},
+		{"malformed json", "not json", 0},
+		{"denied bash validate call", `{"permission_denials":[{"tool_name":"Bash","tool_input":{"command":"go run ./cmd/zing validate -"}}]}`, 1},
+		{"denied non-bash tool", `{"permission_denials":[{"tool_name":"Read","tool_input":{"command":"zing validate -"}}]}`, 0},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := countValidateDenials([]byte(tc.stdout)); got != tc.want {
+				t.Errorf("countValidateDenials(%q) = %d, want %d", tc.stdout, got, tc.want)
 			}
 		})
 	}

@@ -372,6 +372,39 @@ func (w *countingWriter) Write(p []byte) (int, error) {
 // caller asked to resume (design section 4.1).
 type claudeResult struct {
 	Result string `json:"result"`
+	// PermissionDenials lists the tool calls Claude Code's own permission
+	// check refused this run; absent gives nil, which countValidateDenials
+	// reads as 0 denials.
+	PermissionDenials []claudePermissionDenial `json:"permission_denials"`
+}
+
+// claudePermissionDenial is one entry of claude's own permission_denials
+// result field: the tool Claude Code refused to run and, for Bash, the
+// command it refused.
+type claudePermissionDenial struct {
+	ToolName  string `json:"tool_name"`
+	ToolInput struct {
+		Command string `json:"command"`
+	} `json:"tool_input"`
+}
+
+// countValidateDenials counts stdout's permission_denials entries whose
+// tool_name is Bash and whose tool_input.command contains "zing validate"
+// (design section 11): the Claude Code calls the agent's shell made up
+// instead of the one allowed Bash(zing validate:*) pattern. 0 when stdout
+// does not decode as JSON or the field is absent.
+func countValidateDenials(stdout []byte) int {
+	var cr claudeResult
+	if json.Unmarshal(stdout, &cr) != nil {
+		return 0
+	}
+	n := 0
+	for _, d := range cr.PermissionDenials {
+		if d.ToolName == "Bash" && strings.Contains(d.ToolInput.Command, "zing validate") {
+			n++
+		}
+	}
+	return n
 }
 
 // claudeFinalMessage returns the text Claude's run treats as the final
@@ -652,6 +685,7 @@ func (c Claude) run(ctx context.Context, req RunRequest, argv []string, sessionI
 		StopHookEvents: hookState.Events,
 		StopHookBlocks: hookState.Blocks,
 		StopHookUnread: hookState.Unread,
+		ValidateDenied: countValidateDenials(stdout.bytes()),
 	}
 
 	if outcomeErr := classifyProcessOutcome(ctx, stdout.overflowed(), waitErr, res.ExitCode); outcomeErr != nil {

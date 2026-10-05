@@ -103,6 +103,9 @@ type RunResult struct {
 	StopHookEvents int
 	StopHookBlocks int
 	StopHookUnread int
+	// ValidateDenied counts this run's denied Bash calls whose command
+	// contained "zing validate" (Claude only; 0 for Codex and the Fake).
+	ValidateDenied int
 }
 
 // maxStderrBytes caps RunResult.Stderr.
