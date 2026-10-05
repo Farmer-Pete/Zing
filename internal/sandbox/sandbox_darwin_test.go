@@ -1223,11 +1223,20 @@ func testDeniesGitPush(t *testing.T, sb Sandbox, p Params, worktree string) {
 		t.Errorf("exec %s -V output = %q, want it to contain %q", altSSH, out, wantOperationNotPermitted)
 	}
 
-	// Positive control: the same bytes under a name that doesn't end in
-	// "/ssh" must still run, showing the two denials above are what
-	// blocks the exec, and not some other profile or binary reason.
+	// Positive control: an executable in the same directory, under a name
+	// that doesn't end in "/ssh", must still run, showing the two denials
+	// above are what block the exec and not some other profile or binary
+	// reason. This is a plain shell script rather than a renamed copy of
+	// ssh's own bytes: the kernel kills a copy of that signed system
+	// binary on exec from an unexpected path regardless of the sandbox
+	// profile (observed on the build host as exit -1 with no output, the
+	// signal-killed shape, not "Operation not permitted"), which would
+	// fail this control for a reason that has nothing to do with the rule
+	// under test.
 	notSSH := filepath.Join(altSSHDir, "ssh2")
-	copyExecutable(t, "/usr/bin/ssh", notSSH)
+	if err := os.WriteFile(notSSH, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil { //nolint:gosec // 0755: must be executable
+		t.Fatalf("write %s: %v", notSSH, err)
+	}
 	exitCode, out = runSandboxedWithEnv(t, sb, p, env, notSSH, "-V")
 	if exitCode != 0 {
 		t.Errorf("exec %s -V (not named ssh): exit %d, want 0 (output %q)", notSSH, exitCode, out)
