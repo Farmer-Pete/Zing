@@ -457,6 +457,53 @@ export function unsavedReplyBody(el) {
 }
 
 /**
+ * unsavedReplyBodies maps unsavedReplyBody over every given reply input,
+ * keeping only the ones that hold unsaved text (bug fix, Q11: the send chord
+ * saved only document.activeElement, through unsavedReplyBody, so a reply
+ * box that did not have focus never reached POST /draft and its text was
+ * silently left behind even though the send reported success). console.js's
+ * postSendBatch calls this over every "#main .reply-input", not just the
+ * focused one, so every box with text is saved before /send runs. Each
+ * result keeps el beside body so the caller can report or keep the text for
+ * whichever box a save fails against.
+ *
+ * @param {Iterable<{dataset?: {draftTicket?: string, draftQuestion?: string}, value?: unknown}>|null|undefined} inputs
+ * @returns {{el: object, body: {ticket: number, question: number|null, text: string}}[]}
+ */
+export function unsavedReplyBodies(inputs) {
+	const out = [];
+	for (const el of inputs ?? []) {
+		const body = unsavedReplyBody(el);
+		if (body) {
+			out.push({ el, body });
+		}
+	}
+	return out;
+}
+
+/**
+ * sendResultWithUnsent appends a sentence naming any reply box the send left
+ * unsent to showSendResult's text (bug fix, Q11: a save failure used to be
+ * silent, with the send still reporting plain success). text is returned
+ * unchanged when unsent is 0. Any trailing space on text is trimmed before
+ * appending, so the joined sentence never ends up with two spaces between.
+ *
+ * @param {string} text - the base result line, e.g. "Sent 1 message."
+ * @param {number} unsent - how many reply boxes failed to save
+ * @returns {string}
+ */
+export function sendResultWithUnsent(text, unsent) {
+	if (unsent === 0) {
+		return text;
+	}
+	const base = text.trimEnd();
+	if (unsent === 1) {
+		return `${base} 1 reply not sent; its text is still in its box.`;
+	}
+	return `${base} ${unsent} replies not sent; their text is still in their boxes.`;
+}
+
+/**
  * buildChipDraftBody builds POST /draft's JSON body for an option chip's
  * activation (design section 6.6, 6.7, code review fix 1): the chip's
  * data-draft-ticket, data-draft-question, and data-option, read off its

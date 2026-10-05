@@ -37,6 +37,8 @@ import {
 	buildChipDraftBody,
 	buildItemDraftBody,
 	unsavedReplyBody,
+	unsavedReplyBodies,
+	sendResultWithUnsent,
 	describeAction,
 	ACTION_LABELS,
 	RECONNECT_BASE_MS,
@@ -543,6 +545,54 @@ test('unsavedReplyBody: an empty box, a non-reply element, or nothing focused yi
 	assert.equal(unsavedReplyBody({ dataset: { draftTicket: '7', draftQuestion: '9' }, value: '' }), null);
 	assert.equal(unsavedReplyBody({ dataset: {}, value: 'text' }), null);
 	assert.equal(unsavedReplyBody(null), null);
+});
+
+// unsavedReplyBodies: a box holding text is saved on send even when focus is
+// elsewhere (bug fix, Q11: Cmd+Enter saved only document.activeElement, so a
+// 459-character note in a reply box that did not have focus never reached
+// POST /draft, and the send still reported "Sent 1 message.").
+test('unsavedReplyBodies: a box holding text is saved on send even when focus is elsewhere', () => {
+	const noteBox = { dataset: { draftTicket: '18', draftQuestion: '11' }, value: 'x'.repeat(459) };
+	const emptyBox = { dataset: { draftTicket: '18', draftQuestion: '12' }, value: '' };
+	const notAReplyBox = { dataset: {}, value: 'x' };
+	assert.deepEqual(unsavedReplyBodies([noteBox, emptyBox, notAReplyBox]), [
+		{ el: noteBox, body: { ticket: 18, question: 11, text: 'x'.repeat(459) } },
+	]);
+	// With focus on the body rather than the box, the old focused-only path
+	// (unsavedReplyBody(document.activeElement)) found nothing to save.
+	assert.equal(unsavedReplyBody({ dataset: {} }), null);
+});
+
+test('unsavedReplyBodies: no inputs yields an empty list', () => {
+	assert.deepEqual(unsavedReplyBodies([]), []);
+	assert.deepEqual(unsavedReplyBodies(undefined), []);
+});
+
+// sendResultWithUnsent: the send result line names any reply left unsent so
+// the owner is told rather than finding out when the text is simply gone.
+test('sendResultWithUnsent: a clean send is unchanged', () => {
+	assert.equal(sendResultWithUnsent('Sent 1 message.', 0), 'Sent 1 message.');
+});
+
+test('sendResultWithUnsent: one unsent reply gets the singular sentence', () => {
+	assert.equal(
+		sendResultWithUnsent('Sent 1 message.', 1),
+		'Sent 1 message. 1 reply not sent; its text is still in its box.',
+	);
+});
+
+test('sendResultWithUnsent: more than one unsent reply gets the plural sentence', () => {
+	assert.equal(
+		sendResultWithUnsent('Sent 1 message.', 2),
+		'Sent 1 message. 2 replies not sent; their text is still in their boxes.',
+	);
+});
+
+test('sendResultWithUnsent: a trailing space on text is trimmed before appending', () => {
+	assert.equal(
+		sendResultWithUnsent('Sent 1 message. ', 1),
+		'Sent 1 message. 1 reply not sent; its text is still in its box.',
+	);
 });
 
 // reduceStreamStatus / reconnectDelay / staleMarkerText: console.js's

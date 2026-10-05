@@ -30,6 +30,8 @@ import {
 	buildChipDraftBody,
 	buildItemDraftBody,
 	unsavedReplyBody,
+	unsavedReplyBodies,
+	sendResultWithUnsent,
 	collectPatchWork,
 	describeAction,
 	nextPendingNav,
@@ -514,27 +516,36 @@ function showSendResult(text) {
 // showSendResult -- "Sent N answer(s)." on 200, or the 409 body ("Nothing
 // to send.") otherwise -- so Cmd+Enter is never silent.
 //
-// Text typed into the focused reply box but not yet saved with Enter is
-// saved first (unsavedReplyBody), so typing then pressing Cmd+Enter sends
-// it. A failed save shows its conflict beside the box and sends nothing.
+// Every "#main .reply-input" holding unsaved text is saved first
+// (unsavedReplyBodies), not just whichever one has focus (bug fix, Q11: the
+// owner's note was in a box that had lost focus, and the old focused-only
+// save left it behind while the send still reported success).
 function sendBatch() {
 	if (!state.nav.open) {
 		return false;
 	}
-	postSendBatch(state.nav.open, document.activeElement);
+	postSendBatch(state.nav.open);
 	return true;
 }
 
-async function postSendBatch(ticket, focusedEl) {
-	const unsaved = unsavedReplyBody(focusedEl);
-	if (unsaved) {
-		showDraftConflict(focusedEl, '');
-		showDraftSaved(focusedEl, '');
-		const saved = await postDraftRequest(focusedEl, unsaved.ticket, unsaved.question, unsaved.text);
-		if (!saved) {
-			return;
-		}
-	}
+// cancelAutosaves cancels every pending debounced autosave timer (task 3
+// fills this in), so postSendBatch below -- which saves and sends every box
+// itself -- can never race a stale autosave into re-posting a box the send
+// is about to clear.
+function cancelAutosaves() {}
+
+async function postSendBatch(ticket) {
+	cancelAutosaves();
+	const inputs = Array.from(document.querySelectorAll('#main .reply-input'));
+	const pending = unsavedReplyBodies(inputs);
+	const results = await Promise.all(
+		pending.map(({ el, body }) => {
+			showDraftConflict(el, '');
+			showDraftSaved(el, '');
+			return postDraftRequest(el, body.ticket, body.question, body.text);
+		}),
+	);
+	const failed = pending.filter((_, i) => !results[i]).map(({ el }) => el);
 	try {
 		const resp = await fetch('/send', {
 			method: 'POST',
@@ -542,13 +553,15 @@ async function postSendBatch(ticket, focusedEl) {
 			body: JSON.stringify({ ticket }),
 		});
 		const text = await resp.text();
-		showSendResult(text);
+		showSendResult(sendResultWithUnsent(text, failed.length));
 		if (resp.ok) {
-			// A 200 means every open draft just sent, so its own reply box
+			// A 200 means every saved draft just sent, so each of those boxes
 			// should not keep showing text the owner just sent (design
 			// section 22.7): Datastar's own morph never refills a focused
-			// input, so this module clears it directly.
-			clearReplyInputs(document.querySelectorAll('#main .reply-input'));
+			// input, so this module clears it directly. A box whose save
+			// failed above keeps its text and its conflict note; nothing
+			// about it reached /send.
+			clearReplyInputs(inputs.filter((el) => !failed.includes(el)));
 			document.activeElement?.blur?.();
 		}
 		if (!resp.ok && resp.status !== 409) {
