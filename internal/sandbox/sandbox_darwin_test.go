@@ -1192,6 +1192,47 @@ func testDeniesGitPush(t *testing.T, sb Sandbox, p Params, worktree string) {
 		t.Errorf("nc -z 127.0.0.1 22 output = %q, want it to contain %q", out, wantOperationNotPermitted)
 	}
 
+	// Exec-only probes (review r4f1): the ssh:// push above dials
+	// 127.0.0.1:22, so it would still fail the same way with the
+	// process-exec deny removed -- ssh's own connect would still hit the
+	// port 22 deny. These two run ssh with no network target at all
+	// (-V just prints a version and exits), so only the exec deny can
+	// explain a refusal.
+	exitCode, out = runSandboxedWithEnv(t, sb, p, env, "/usr/bin/ssh", "-V")
+	if exitCode == 0 {
+		t.Errorf("exec /usr/bin/ssh -V: want a non-zero exit, got 0 (output %q)", out)
+	}
+	if !strings.Contains(out, wantOperationNotPermitted) {
+		t.Errorf("exec /usr/bin/ssh -V output = %q, want it to contain %q", out, wantOperationNotPermitted)
+	}
+
+	// A copy of ssh earlier in PATH (a Homebrew install, say) must be
+	// denied the same way: the rule matches any path ending in "/ssh",
+	// not just the literal /usr/bin/ssh.
+	altSSHDir := filepath.Join(p.RunDir, "bin")
+	if err := os.MkdirAll(altSSHDir, 0o755); err != nil {
+		t.Fatalf("mkdir %s: %v", altSSHDir, err)
+	}
+	altSSH := filepath.Join(altSSHDir, "ssh")
+	copyExecutable(t, "/usr/bin/ssh", altSSH)
+	exitCode, out = runSandboxedWithEnv(t, sb, p, env, altSSH, "-V")
+	if exitCode == 0 {
+		t.Errorf("exec %s -V: want a non-zero exit, got 0 (output %q)", altSSH, out)
+	}
+	if !strings.Contains(out, wantOperationNotPermitted) {
+		t.Errorf("exec %s -V output = %q, want it to contain %q", altSSH, out, wantOperationNotPermitted)
+	}
+
+	// Positive control: the same bytes under a name that doesn't end in
+	// "/ssh" must still run, showing the two denials above are what
+	// blocks the exec, and not some other profile or binary reason.
+	notSSH := filepath.Join(altSSHDir, "ssh2")
+	copyExecutable(t, "/usr/bin/ssh", notSSH)
+	exitCode, out = runSandboxedWithEnv(t, sb, p, env, notSSH, "-V")
+	if exitCode != 0 {
+		t.Errorf("exec %s -V (not named ssh): exit %d, want 0 (output %q)", notSSH, exitCode, out)
+	}
+
 	// Positive control (review r2f2): an unrelated, allowed port must
 	// still be reachable from inside the same sandbox, Params, and env.
 	// Without this, a zero accept count or a non-zero exit on 9418 or 22
