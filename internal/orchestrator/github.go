@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"regexp"
 	"strings"
 	"time"
 
@@ -689,24 +690,47 @@ func (g *GitHubClient) JobLogTail(ctx context.Context, owner, repo string, jobID
 	return tail, nil
 }
 
-// tailLog reads r line by line and returns the last n lines, joined with
-// "\n". A line longer than maxLogLineBytes is cut to that many bytes and
-// ends "[line cut]"; the rest of that line is still counted toward
-// maxLogTotalBytes but not kept. Reading stops once maxLogTotalBytes have
-// been seen, and the result then ends with the line "[log cut at 64 MiB]".
-// r's own bufio.Reader buffer is sized to maxLogLineBytes, so ReadLine
-// returns isPrefix=true exactly when a line exceeds that size.
+// logGroupRunRe matches an Actions "##[group]Run " step header, with an
+// optional leading timestamp token (as Actions prefixes raw job logs).
+var logGroupRunRe = regexp.MustCompile(`^(\S+ )?##\[group\]Run `)
+
+// logErrorRe matches an Actions "##[error]" annotation line, with the same
+// optional leading timestamp token.
+var logErrorRe = regexp.MustCompile(`^(\S+ )?##\[error\]`)
+
+// tailLog reads r line by line and returns, by default, the last n lines
+// joined with "\n" -- the fallback ring below. A line longer than
+// maxLogLineBytes is cut to that many bytes and ends "[line cut]"; the
+// rest of that line is still counted toward maxLogTotalBytes but not kept.
+// Reading stops once maxLogTotalBytes have been seen, and the fallback
+// result then ends with the line "[log cut at 64 MiB]". r's own
+// bufio.Reader buffer is sized to maxLogLineBytes, so ReadLine returns
+// isPrefix=true exactly when a line exceeds that size.
+//
+// Alongside the fallback ring, tailLog tracks the first failed step: a
+// line matching logGroupRunRe starts a new step, discarding any step seen
+// so far that had no error. A line matching logErrorRe marks the current
+// step failed and flushes its pending lines (the lines seen since the
+// step header or the last error, also capped at n) into that step's
+// buffer. Once a step has failed, reading stops at the next step header,
+// so a later step's output cannot replace it. If any step failed, tailLog
+// returns that step's buffer -- from its header to its last error line,
+// capped at n -- instead of the plain ring.
 func tailLog(r io.Reader, n int) (string, error) {
 	limited := &io.LimitedReader{R: r, N: maxLogTotalBytes + 1}
 	br := bufio.NewReaderSize(limited, maxLogLineBytes)
 
-	ring := make([]string, 0, n)
-	push := func(s string) {
-		ring = append(ring, s)
-		if len(ring) > n {
-			ring = ring[1:]
+	pushCapped := func(buf []string, s string) []string {
+		buf = append(buf, s)
+		if len(buf) > n {
+			buf = buf[len(buf)-n:]
 		}
+		return buf
 	}
+
+	ring := make([]string, 0, n)
+	var stepBuf, pending []string
+	failedStepFound := false
 
 	for {
 		first, isPrefix, err := br.ReadLine()
@@ -721,7 +745,28 @@ func tailLog(r io.Reader, n int) (string, error) {
 				}
 				line += "[line cut]"
 			}
-			push(line)
+			ring = pushCapped(ring, line)
+
+			switch {
+			case logGroupRunRe.MatchString(line):
+				if failedStepFound {
+					if err == nil {
+						err = io.EOF
+					}
+					break
+				}
+				stepBuf = []string{line}
+				pending = nil
+			case logErrorRe.MatchString(line):
+				for _, p := range pending {
+					stepBuf = pushCapped(stepBuf, p)
+				}
+				stepBuf = pushCapped(stepBuf, line)
+				pending = nil
+				failedStepFound = true
+			default:
+				pending = pushCapped(pending, line)
+			}
 		}
 		if err != nil {
 			if !errors.Is(err, io.EOF) {
@@ -731,8 +776,12 @@ func tailLog(r io.Reader, n int) (string, error) {
 		}
 	}
 
+	if failedStepFound {
+		return strings.Join(stepBuf, "\n"), nil
+	}
+
 	if limited.N == 0 {
-		push("[log cut at 64 MiB]")
+		ring = pushCapped(ring, "[log cut at 64 MiB]")
 	}
 
 	return strings.Join(ring, "\n"), nil

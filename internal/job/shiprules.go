@@ -368,11 +368,14 @@ func jobIDFromDetailsURL(url string) (int64, bool) {
 }
 
 // ciLogText is design section 8.5's log-tail text for a ci_log fix
-// request: at most 3 failed runs, by name, each followed by its Actions
-// job log tail (checks.JobLogTail, 200 lines) when the run's app is
-// github-actions and its DetailsURL names a job id, a "the log could not
-// be read" line when that fetch fails, or one line naming its DetailsURL
-// otherwise; then every failed status, one line each.
+// request: at most 3 failed runs, by name, each followed by its failed
+// step's own log (checks.JobLogTail, up to 200 lines, from the step's
+// "##[group]Run " header to its last "##[error]" line, falling back to
+// the job log's plain last 200 lines when the log has no "##[error]")
+// when the run's app is github-actions and its DetailsURL names a job
+// id, a "the log could not be read" line when that fetch fails, or one
+// line naming its DetailsURL otherwise; then every failed status, one
+// line each.
 func ciLogText(ctx context.Context, checks Checks, owner, repo string, failedRuns []orchestrator.CheckRun, failedStatuses []orchestrator.CommitStatus) string {
 	runs := append([]orchestrator.CheckRun(nil), failedRuns...)
 	sort.Slice(runs, func(i, j int) bool { return runs[i].Name < runs[j].Name })
