@@ -129,69 +129,6 @@ func legacyEscalationQuestion(t *testing.T, s *store.Store, ticketID int64, code
 	return qID
 }
 
-// seedOwnerDecision inserts one resolved escalation question, with a sent
-// owner answer picking "a" and a sent owner reply, directly through
-// store.InsertMessage: the job_test package's own copy of internal/job's
-// unexported seedOwnerDecision (spec_internal_test.go), which package
-// job_test cannot reach, built from the same literal message types and
-// states TestBuildPromptCarriesApprovalNotes already uses in this package.
-// Shared by fix_test.go's and planning_test.go's own
-// TestFixPromptCarriesOwnerDecisions, TestClassifyPromptCarriesOwnerDecisions,
-// and TestPlanningFirstPromptCarriesOwnerDecisions.
-func seedOwnerDecision(t *testing.T, s *store.Store, ticketID int64, reply string) {
-	t.Helper()
-	ctx := t.Context()
-
-	escPayload, err := json.Marshal(response.EscalationPayload{
-		Code: string(response.EscalationCodePlanGap), What: "H1 is false", Why: "the red test passed",
-		Tried: "ran it", Options: []string{"retry", "abandon"}, Origin: string(response.EscalationOriginBuild),
-	})
-	if err != nil {
-		t.Fatalf("seedOwnerDecision: marshal escalation payload: %v", err)
-	}
-	escID, err := s.InsertMessage(ctx, store.Message{
-		TicketID: ticketID, Type: testMsgTypeEscalation, Author: testAuthorZing,
-		Body: "plan_gap: H1 is false", Payload: escPayload,
-	})
-	if err != nil {
-		t.Fatalf("seedOwnerDecision: insert escalation: %v", err)
-	}
-
-	qPayload, err := json.Marshal(response.QuestionPayload{
-		Key: "Q90", Kind: response.QuestionKindQuestion, State: response.QuestionStateResolved,
-		Recommended: "a",
-		Options:     []response.Option{{Key: "a", Text: "Keep going"}, {Key: "c", Text: "Give up"}},
-	})
-	if err != nil {
-		t.Fatalf("seedOwnerDecision: marshal question payload: %v", err)
-	}
-	qID, err := s.InsertMessage(ctx, store.Message{
-		TicketID: ticketID, ParentID: &escID, Type: testMsgTypeQuestion, Author: testAuthorZing,
-		State: new("resolved"), Body: "plan_gap: H1 is false\n\nHow should Zing proceed?", Payload: qPayload,
-	})
-	if err != nil {
-		t.Fatalf("seedOwnerDecision: insert question: %v", err)
-	}
-
-	answerPayload, err := json.Marshal(response.AnswerPayload{Option: new("a")})
-	if err != nil {
-		t.Fatalf("seedOwnerDecision: marshal answer payload: %v", err)
-	}
-	if _, err := s.InsertMessage(ctx, store.Message{
-		TicketID: ticketID, ParentID: &qID, Type: testMsgTypeAnswer, Author: testAuthorYou,
-		State: new(testAnswerStateSent), Payload: answerPayload,
-	}); err != nil {
-		t.Fatalf("seedOwnerDecision: insert answer: %v", err)
-	}
-
-	if _, err := s.InsertMessage(ctx, store.Message{
-		TicketID: ticketID, ParentID: &qID, Type: testMsgTypeReply, Author: testAuthorYou,
-		State: new(testAnswerStateSent), Body: reply,
-	}); err != nil {
-		t.Fatalf("seedOwnerDecision: insert reply: %v", err)
-	}
-}
-
 // reserveTerminalRun opens a fresh session for job (design section 4.5's
 // own Reserve, Session insert on su.ID == nil) and terminalizes its first
 // run as "error", the RunID a run-caused escalation's own Escalation.RunID

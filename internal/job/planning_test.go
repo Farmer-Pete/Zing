@@ -217,14 +217,14 @@ func TestPlanningHandler_Classify_StoresKindAndSessionExternalID(t *testing.T) {
 
 // TestClassifyPromptCarriesOwnerDecisions proves runClassify builds the
 // classify agent's ticket input through specFor (goal "all seven stages
-// that read the ticket use specFor"): seedOwnerDecision's own resolved
+// that read the ticket use specFor"): job.SeedOwnerDecision's own resolved
 // escalation, seeded before the ticket ever leaves queued, reaches the
 // recorded classify prompt.
 func TestClassifyPromptCarriesOwnerDecisions(t *testing.T) {
 	t.Parallel()
 	s := newJobTestStore(t)
 	ticketID := seedQueuedTicket(t, s)
-	seedOwnerDecision(t, s, ticketID, "Keep the test as a guard only.")
+	job.SeedOwnerDecision(t, s, ticketID, "Keep the test as a guard only.")
 	rt := fakeRuntime(t)
 	advanceQueuedToPlanning(t, s, rt, ticketID)
 
@@ -323,8 +323,8 @@ func mustPlanning(t *testing.T, s *store.Store, deps job.Deps, ticketID int64) s
 
 // TestPlanningFirstPromptCarriesOwnerDecisions proves runPlanningFirst
 // builds the planning agent's ticket input through specFor (goal "all
-// seven stages that read the ticket use specFor"): seedOwnerDecision's own
-// resolved escalation reaches the recorded first-turn prompt.
+// seven stages that read the ticket use specFor"): job.SeedOwnerDecision's
+// own resolved escalation reaches the recorded first-turn prompt.
 func TestPlanningFirstPromptCarriesOwnerDecisions(t *testing.T) {
 	t.Parallel()
 	s := newJobTestStore(t)
@@ -335,7 +335,7 @@ func TestPlanningFirstPromptCarriesOwnerDecisions(t *testing.T) {
 	// classify: real fixture, sets kind.
 	apply(t, s, getTicket(t, s, ticketID), mustPlanning(t, s, claim(t, s, rt, ticketID), ticketID))
 
-	seedOwnerDecision(t, s, ticketID, "Keep the test as a guard only.")
+	job.SeedOwnerDecision(t, s, ticketID, "Keep the test as a guard only.")
 
 	rec := &recordingRuntime{rt: rt}
 	deps := claim(t, s, rec, ticketID)

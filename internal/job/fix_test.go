@@ -203,7 +203,7 @@ func TestDriveFixRunsFirstTurn(t *testing.T) {
 // TestFixPromptCarriesOwnerDecisions proves runFixFirst builds the fix
 // agent's ticket input through specFor (mirroring
 // TestBuildPromptCarriesApprovalNotes and TestJudgePromptCarriesOwnerDecisions):
-// seedOwnerDecision's own resolved escalation reaches the recorded
+// job.SeedOwnerDecision's own resolved escalation reaches the recorded
 // prompt's ticket input, and there is no separate "approval" input.
 func TestFixPromptCarriesOwnerDecisions(t *testing.T) {
 	if testing.Short() {
@@ -211,7 +211,7 @@ func TestFixPromptCarriesOwnerDecisions(t *testing.T) {
 	}
 	t.Parallel()
 	s, _, ticketID := buildTicketInBuilding(t)
-	seedOwnerDecision(t, s, ticketID, "Keep the test as a guard only.")
+	job.SeedOwnerDecision(t, s, ticketID, "Keep the test as a guard only.")
 	mid := writeFixRequestMarker(t, s, ticketID, job.FixKindCILog, testFixCILogText, 0)
 	ticket := getTicket(t, s, ticketID)
 

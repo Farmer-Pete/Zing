@@ -369,7 +369,9 @@ func TestReviewPromptCarriesOwnerDecisions(t *testing.T) {
 	for _, req := range reqs {
 		ticketIdx := strings.Index(req.Prompt, "ticket:\n")
 		planIdx := strings.Index(req.Prompt, "plan:\n")
-		if ticketIdx == -1 || planIdx == -1 || ticketIdx > planIdx {
+		bothPresent := ticketIdx != -1 && planIdx != -1
+		ticketFirst := bothPresent && ticketIdx < planIdx
+		if !ticketFirst {
 			t.Errorf("label %s: ticket input does not come before plan:\n%s", req.Label, req.Prompt)
 		}
 		if !strings.Contains(req.Prompt, "Keep the test as a guard only.") {

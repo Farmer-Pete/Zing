@@ -427,7 +427,9 @@ func TestForReviewFencesTicketBeforePlan(t *testing.T) {
 	assertFenced(t, got, "ticket", ticket)
 	ticketIdx := strings.Index(got, "ticket:\n")
 	planIdx := strings.Index(got, "plan:\n")
-	if ticketIdx == -1 || planIdx == -1 || ticketIdx > planIdx {
+	bothPresent := ticketIdx != -1 && planIdx != -1
+	ticketFirst := bothPresent && ticketIdx < planIdx
+	if !ticketFirst {
 		t.Errorf("ticket input does not come before plan:\n%s", got)
 	}
 }
