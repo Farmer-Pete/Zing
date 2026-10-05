@@ -37,6 +37,10 @@ import {
 	TOAST_DISMISS_MS,
 	scheduleToastDismiss,
 	clearReplyInputs,
+	emptyStreamStatus,
+	reduceStreamStatus,
+	staleMarkerText,
+	STREAM_SETTLE_MS,
 } from './keyboard.mjs';
 
 // defaultNav is the shell's own data-signals default (templates/shell.templ:
@@ -984,6 +988,76 @@ function runPatchWork() {
 	runSendChordHints();
 }
 
+// ---- stream reconnect ---------------------------------------------------
+
+// streamStatus/reconnectTimerID (the reconnect plan): applyStreamEvent's own
+// state, mirroring reduceStreamStatus's StreamStatus across calls, and the
+// one pending reconnect/settle timer so a later event can cancel it.
+let streamStatus = emptyStreamStatus();
+let reconnectTimerID = null;
+
+// applyStreamEvent is console.js's one entry point into reduceStreamStatus
+// (keyboard.mjs): it folds event into streamStatus, then applies the pure
+// result's effect as DOM/timer side effects -- canceling a pending
+// reconnect, scheduling the settle check that proves a started request
+// live, or scheduling the backoff reconnect itself (dispatchNav(state.nav),
+// so the server renders the full view again) -- before re-rendering the
+// stale marker.
+function applyStreamEvent(event) {
+	const { status, effect } = reduceStreamStatus(streamStatus, event, Date.now());
+	streamStatus = status;
+	if (effect.cancelReconnect) {
+		clearTimeout(reconnectTimerID);
+		reconnectTimerID = null;
+	}
+	if (effect.settleGen !== null) {
+		const gen = effect.settleGen;
+		setTimeout(() => applyStreamEvent({ type: 'settled', gen }), STREAM_SETTLE_MS);
+	}
+	if (effect.reconnectIn !== null) {
+		clearTimeout(reconnectTimerID);
+		reconnectTimerID = setTimeout(() => {
+			reconnectTimerID = null;
+			applyStreamEvent({ type: 'reconnecting' });
+			dispatchNav(state.nav, false);
+		}, effect.reconnectIn);
+	}
+	renderStreamStatus();
+}
+
+// renderStreamStatus mirrors streamStatus.staleSince onto #stream-status (a
+// client-owned node outside #nav/#main/#rail, the #send-result pattern) and
+// onto body.stream-stale, which shell.templ's palette uses to dim
+// nav.templ's "All clear." while the page is stale.
+function renderStreamStatus() {
+	const text = staleMarkerText(streamStatus.staleSince);
+	document.body.classList.toggle('stream-stale', text !== '');
+	let el = document.getElementById('stream-status');
+	if (!el) {
+		el = document.createElement('div');
+		el.id = 'stream-status';
+		el.setAttribute('role', 'status');
+		el.setAttribute('aria-live', 'polite');
+		document.body.appendChild(el);
+	}
+	el.textContent = text;
+}
+
+// installStreamWatch listens for Datastar's datastar-fetch events on
+// #stream-ctl (design: shell.templ's retryMaxCount: 0 hands every /stream
+// attempt's started/finished/error/retrying/retries-failed to
+// applyStreamEvent instead of to Datastar's own retry). console.js loads
+// before datastar.js (shell.templ), so this listener is already bound
+// before data-init fires /stream's very first `started` event.
+function installStreamWatch() {
+	document.addEventListener('datastar-fetch', (event) => {
+		if (event.detail?.el?.id !== 'stream-ctl') {
+			return;
+		}
+		applyStreamEvent({ type: event.detail.type });
+	});
+}
+
 // installPatchObserver installs the one MutationObserver on #main and
 // #rail (design section 6.3): childList + subtree only, deliberately
 // without `attributes: true`, so the observer never reacts to its own
@@ -995,9 +1069,12 @@ function installPatchObserver() {
 	// for the installPatchObserver's own initial scan below, which calls
 	// runPatchWork() directly -- so reaching this callback is itself proof
 	// that a real /stream frame patched the page, the signal
-	// markStreamConnected (bug fix, state.streamConnected above) needs.
+	// markStreamConnected (bug fix, state.streamConnected above) needs, and
+	// also a live signal for applyStreamEvent's own reduceStreamStatus
+	// 'patched' case.
 	const observer = new MutationObserver(() => {
 		markStreamConnected();
+		applyStreamEvent({ type: 'patched' });
 		runPatchWork();
 	});
 	for (const id of ['main', 'rail']) {
@@ -1023,13 +1100,17 @@ function installNavBridge() {
 
 // install wires every delegated listener synchronously, before awaiting
 // loadBindings' own /static/keys.json fetch (bug fix): none of
-// installNavBridge, installPatchObserver, installSideBox,
+// installStreamWatch, installNavBridge, installPatchObserver, installSideBox,
 // installLogControls, installChipActivation, or installPickupBox reads
 // state.bindings, so there was no reason their listeners -- installNavBridge
 // above all, the zing-nav bridge a Threads-sidebar click needs live as
 // early as possible -- sat behind an unrelated network round trip. Only
 // onKeyDown needs the parsed bindings, so it alone waits on the fetch.
+// installStreamWatch runs first (the reconnect plan): it must already be
+// bound before data-init's own @get('/stream') can fire the very first
+// datastar-fetch 'started' event.
 async function install() {
+	installStreamWatch();
 	installNavBridge();
 	installPatchObserver();
 	installSideBox();

@@ -454,15 +454,22 @@ func TestIndexRendersShellRegionsAndScript(t *testing.T) {
 		`id="rail"`,
 		`id="stream-ctl"`,
 		`data-signals="{view: 'inbox', open: 0, project: 0}"`,
-		`data-init="@get('/stream')"`,
-		`data-on:zing-nav="$view = evt.detail.view; $open = evt.detail.open; $project = evt.detail.project; @get('/stream')"`,
+		`data-init="@get('/stream', {retryMaxCount: 0})"`,
+		`data-on:zing-nav="$view = evt.detail.view; $open = evt.detail.open; $project = evt.detail.project; @get('/stream', {retryMaxCount: 0})"`,
 		"Add a hello endpoint",
+		`<script type="module" src="/static/console.js">`,
 		`<script type="module" src="/static/datastar.js">`,
 		`<meta name="viewport" content="width=device-width, initial-scale=1">`,
 	} {
 		if !strings.Contains(got, want) {
 			t.Errorf("GET / body missing %q; got:\n%s", want, got)
 		}
+	}
+
+	consoleIdx := strings.Index(got, `<script type="module" src="/static/console.js">`)
+	datastarIdx := strings.Index(got, `<script type="module" src="/static/datastar.js">`)
+	if consoleIdx == -1 || datastarIdx == -1 || consoleIdx > datastarIdx {
+		t.Errorf("GET / body: console.js (index %d) must load before datastar.js (index %d)", consoleIdx, datastarIdx)
 	}
 }
 
