@@ -39,7 +39,8 @@ func PlanRules() string { return renderPlanRules(planChecklists) }
 func renderPlanRules(l Checklists) string {
 	return "Zing's plan checker rejects a ready plan whose prose breaks these rules. " +
 		"Prose is the objective, context, problem, goals, non-goals, demo, shape, callers, callees, " +
-		"file reasons, fences, test assertions, and tasks.\n" +
+		"file reasons, fences, test assertions, tasks, migration backfill, locks, compat, and " +
+		"rollback, and review trust root, alternatives, and risks.\n" +
 		"- Outside ``` code fences, write a number or a named threshold in place of these words: " +
 		strings.Join(l.Vague, ", ") + ".\n" +
 		"- Write none of these placeholders: " + strings.Join(l.Placeholders, ", ") + ".\n" +

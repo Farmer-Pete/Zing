@@ -106,9 +106,9 @@ the error outcome with what, why, and what you tried.
 Before you finish, check the document with this command, and put nothing
 before or after it on the command:
 
-zing validate - <<'EOF'
+zing validate - <<'ZING_DOCUMENT'
 THE WHOLE DOCUMENT
-EOF
+ZING_DOCUMENT
 
 Fix every error it prints and run it again until it prints nothing. If
 your tools cannot run it, return the document anyway: Zing validates every

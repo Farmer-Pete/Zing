@@ -24,9 +24,9 @@ const Tail = "Your final message is exactly one <zing> document that follows the
 	"Before you finish, check the document with this command, and put nothing\n" +
 	"before or after it on the command:\n" +
 	"\n" +
-	"zing validate - <<'EOF'\n" +
+	"zing validate - <<'ZING_DOCUMENT'\n" +
 	"THE WHOLE DOCUMENT\n" +
-	"EOF\n" +
+	"ZING_DOCUMENT\n" +
 	"\n" +
 	"Fix every error it prints and run it again until it prints nothing. If\n" +
 	"your tools cannot run it, return the document anyway: Zing validates every\n" +

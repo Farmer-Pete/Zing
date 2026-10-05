@@ -9,6 +9,7 @@ import (
 	"os"
 	"strings"
 
+	"zing/internal/fence"
 	"zing/internal/response"
 )
 
@@ -130,7 +131,10 @@ func stopHookReason(err error, block int) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "Zing could not accept your final message (block %d of %d): %s.\n", block, maxStopBlocks, reason)
 	if detail != "" {
-		b.WriteString(detail + "\n")
+		// detail can quote the model's own document text, so it is fenced
+		// like any other untrusted input (internal/job's invalidRetryText
+		// does the same for the retry prompt's copy of this text).
+		b.WriteString("The validator's errors, quoted from your document:\n" + fence.Wrap(detail) + "\n")
 	}
 	b.WriteString("Fix every error and end your turn again with the whole corrected zing document as your final message.")
 	return b.String()

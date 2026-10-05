@@ -246,7 +246,7 @@ You win twice: fewer tokens, and a sharper hook for the agent to hang its thinki
 - Check every line for **relevance**: does it still bear on what the document does? A line loses relevance by never bearing on the task (mere exposition, or a branch that should be disclosed) or by going stale as the behaviour or world it describes changes. Shorter documents are easier to keep relevant. Without a pruning discipline the default fate is **sediment**: stale layers that settle because adding feels safe and removing feels risky, until you must core down through them to find what is still live.
 - Hunt **no-ops** sentence by sentence: an instruction the model already obeys by default pays load to say nothing. The test (does it change behaviour versus the default?) is model-relative, not reader-relative: two people disagreeing about a no-op disagree about the default, and settle it by running the document, not by debate. When a sentence fails, delete the whole sentence rather than trim words from it. The test also grades leading words: a word too weak to beat the default (_be thorough_ when the agent is already thorough-ish) is a no-op, and the fix is a stronger word (_relentless_), not a different technique.
 
-Zing's plan checker rejects a ready plan whose prose breaks these rules. Prose is the objective, context, problem, goals, non-goals, demo, shape, callers, callees, file reasons, fences, test assertions, and tasks.
+Zing's plan checker rejects a ready plan whose prose breaks these rules. Prose is the objective, context, problem, goals, non-goals, demo, shape, callers, callees, file reasons, fences, test assertions, tasks, migration backfill, locks, compat, and rollback, and review trust root, alternatives, and risks.
 - Outside ``` code fences, write a number or a named threshold in place of these words: large, fast, recent, many, often, quickly, several, slow, soon, some.
 - Write none of these placeholders: TODO, TBD, handle appropriately.
 - A task that mentions performance or optimization names a measurement: a number followed by one of these units: ns, us, ms, s, B, KB, MB, GB, %, x, rps, qps, Hz, fps, ops, allocs.
@@ -415,9 +415,9 @@ the error outcome with what, why, and what you tried.
 Before you finish, check the document with this command, and put nothing
 before or after it on the command:
 
-zing validate - <<'EOF'
+zing validate - <<'ZING_DOCUMENT'
 THE WHOLE DOCUMENT
-EOF
+ZING_DOCUMENT
 
 Fix every error it prints and run it again until it prints nothing. If
 your tools cannot run it, return the document anyway: Zing validates every

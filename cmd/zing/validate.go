@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"slices"
 	"strings"
 
 	"zing/internal/response"
@@ -86,13 +85,18 @@ func runValidateFrom(args []string, stdin io.Reader) int {
 	return 0
 }
 
-// hookInvoked reports whether args names the --hook flag in any form Go's
-// flag package accepts (-hook, --hook, or either with a =value), so a
-// malformed --hook invocation still exits 1, never 2, which Claude Code
-// reads as a block on the end of the turn.
+// hookInvoked reports whether args starts with the --hook flag, in any
+// form Go's flag package accepts (-hook, --hook, or either with a
+// =value), so a malformed --hook invocation still exits 1, never 2, which
+// Claude Code reads as a block on the end of the turn. It checks only
+// args[0]: flag.Parse stops at the first flag it cannot parse, so a flag
+// named --hook anywhere after an earlier bad flag (for example
+// "--bogus --hook") never reaches --hook's own parsing and must exit 2,
+// the ordinary usage error, not 1.
 func hookInvoked(args []string) bool {
-	return slices.ContainsFunc(args, func(a string) bool {
-		name, _, _ := strings.Cut(a, "=")
-		return name == "-hook" || name == "--hook"
-	})
+	if len(args) == 0 {
+		return false
+	}
+	name, _, _ := strings.Cut(args[0], "=")
+	return name == "-hook" || name == "--hook"
 }

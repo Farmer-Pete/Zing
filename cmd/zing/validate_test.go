@@ -205,6 +205,19 @@ func TestRunValidate_WrongArgCountExitsTwo(t *testing.T) {
 	}
 }
 
+// TestRunValidate_UnknownFlagBeforeHookExitsTwo proves hookInvoked checks
+// only args[0]: flag.Parse fails on the first flag it cannot parse, so
+// "--bogus --hook" fails on --bogus before --hook is ever read, and must
+// exit 2, the ordinary usage error, not 1, which would wrongly claim this
+// was a malformed Stop hook invocation.
+func TestRunValidate_UnknownFlagBeforeHookExitsTwo(t *testing.T) {
+	code, _ := captureStderr(t, func() int { return runValidateFrom([]string{flagBogus, flagHook}, strings.NewReader("")) })
+
+	if code != 2 {
+		t.Errorf("code = %d, want 2", code)
+	}
+}
+
 func TestRunValidate_TooManyArgsExitsTwo(t *testing.T) {
 	path := writeFile(t, validExample)
 
@@ -229,13 +242,14 @@ func TestRunValidate_ParseFailureExitsOne(t *testing.T) {
 	}
 }
 
-// flagHook, flagJob and flagState name the --hook invocation's flags once,
-// since golangci-lint's goconst flags a literal repeated across the three
-// cases below that share them.
+// flagHook, flagJob, flagState and flagBogus name the --hook invocation's
+// flags once, since golangci-lint's goconst flags a literal repeated
+// across the cases below that share them.
 const (
 	flagHook  = "--hook"
 	flagJob   = "--job"
 	flagState = "--state"
+	flagBogus = "--bogus"
 )
 
 // TestRunValidate_HookUsageErrorExitsOne proves a --hook usage error -- an
@@ -250,8 +264,8 @@ func TestRunValidate_HookUsageErrorExitsOne(t *testing.T) {
 		{"unknown job", []string{flagHook, flagJob, "nonsense", flagState, filepath.Join(t.TempDir(), "s.json")}},
 		{"empty state", []string{flagHook, flagJob, "classify", flagState, ""}},
 		{"positional argument", []string{flagHook, flagJob, "classify", flagState, filepath.Join(t.TempDir(), "s.json"), "unexpected-positional-arg"}},
-		{"single-dash hook with unknown flag", []string{"-hook", "--bogus"}},
-		{"hook=value form with unknown flag", []string{"--hook=true", "--bogus"}},
+		{"single-dash hook with unknown flag", []string{"-hook", flagBogus}},
+		{"hook=value form with unknown flag", []string{"--hook=true", flagBogus}},
 	}
 	for _, tc := range cases {
 		code, out := captureStderr(t, func() int { return runValidateFrom(tc.args, strings.NewReader("")) })

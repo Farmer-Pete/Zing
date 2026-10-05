@@ -72,7 +72,7 @@ func TestAssemble_TrimsTrailingNewlineBetweenBlocks(t *testing.T) {
 func TestTail_NamesOneValidateForm(t *testing.T) {
 	t.Parallel()
 
-	if !strings.Contains(Tail, "zing validate - <<'EOF'") {
+	if !strings.Contains(Tail, "zing validate - <<'ZING_DOCUMENT'") {
 		t.Errorf("Tail does not contain the heredoc command form:\n%s", Tail)
 	}
 	if strings.Contains(Tail, "zing validate FILE") {
