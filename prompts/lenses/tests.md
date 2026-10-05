@@ -11,8 +11,9 @@ Check:
 - Every scenario's given and check can be observed by an agent inside the
   build sandbox. A scenario that needs a live `zing serve`, a machine
   outside the sandbox, the owner's own config (`~/.codex`, `~/.claude`,
-  the console), a write under /tmp, or a sandbox probe that skips when
-  sandboxed is a finding.
+  the console), a write under /tmp, a nested sandbox check it cannot
+  start (`sandbox-exec`), or a sandbox probe that skips when sandboxed
+  is a finding.
 
 ## In code
 Check that the tests exist and assert behavior, not implementation. A

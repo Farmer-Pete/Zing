@@ -58,7 +58,7 @@ func TestPrompts_MatchThePinnedDesignText(t *testing.T) {
 		{
 			name:   "judge",
 			path:   "prompts/judge.md",
-			sha256: "a62ec3e34432c9b7f610ee7414e7714ba322d315cadc11d3681aed795ba5494b",
+			sha256: "61fac9e184103c064a0cf76c9933106dbd908329e5b88a1c58ad20e26162afe7",
 		},
 		{
 			name:   "respond",
@@ -230,7 +230,7 @@ func TestJudgePromptRunsChecksAsWritten(t *testing.T) {
 		"Return the error outcome with code cannot_run, naming the scenario and the defect in its check",
 		`Write temporary files under "$TMPDIR", never /tmp.`,
 		"Run one like that in the background and poll it until it finishes",
-		"A test that reports SKIP was not observed.",
+		"A skipped test is not observed.",
 	} {
 		if !strings.Contains(text, want) {
 			t.Errorf("prompts/judge.md lacks %q", want)

@@ -16,7 +16,7 @@ own version. Return the error outcome with code cannot_run, naming the
 scenario and the defect in its check: only the owner can change a
 sealed check.
 
-A test that reports SKIP was not observed. If a scenario's verdict
+A skipped test is not observed. If a scenario's verdict
 rests on a skipped test, return the error outcome with code
 cannot_run, naming the scenario and the skip message.
 
