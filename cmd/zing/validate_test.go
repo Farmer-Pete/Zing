@@ -229,14 +229,14 @@ func TestRunValidate_ParseFailureExitsOne(t *testing.T) {
 	}
 }
 
-// hookArgs builds a --hook invocation's argv: --hook, --job job, --state
-// state, then any trailing args, named once so the flag names appear only
-// here rather than once per TestRunValidate_HookUsageErrorExitsOne case.
-func hookArgs(job, state string, rest ...string) []string {
-	args := make([]string, 0, 5+len(rest))
-	args = append(args, "--hook", "--job", job, "--state", state)
-	return append(args, rest...)
-}
+// flagHook, flagJob and flagState name the --hook invocation's flags once,
+// since golangci-lint's goconst flags a literal repeated across the three
+// cases below that share them.
+const (
+	flagHook  = "--hook"
+	flagJob   = "--job"
+	flagState = "--state"
+)
 
 // TestRunValidate_HookUsageErrorExitsOne proves a --hook usage error -- an
 // unknown job, an empty --state, or a positional argument -- exits 1, never
@@ -247,9 +247,9 @@ func TestRunValidate_HookUsageErrorExitsOne(t *testing.T) {
 		name string
 		args []string
 	}{
-		{"unknown job", hookArgs("nonsense", filepath.Join(t.TempDir(), "s.json"))},
-		{"empty state", hookArgs("classify", "")},
-		{"positional argument", hookArgs("classify", filepath.Join(t.TempDir(), "s.json"), "unexpected-positional-arg")},
+		{"unknown job", []string{flagHook, flagJob, "nonsense", flagState, filepath.Join(t.TempDir(), "s.json")}},
+		{"empty state", []string{flagHook, flagJob, "classify", flagState, ""}},
+		{"positional argument", []string{flagHook, flagJob, "classify", flagState, filepath.Join(t.TempDir(), "s.json"), "unexpected-positional-arg"}},
 		{"single-dash hook with unknown flag", []string{"-hook", "--bogus"}},
 		{"hook=value form with unknown flag", []string{"--hook=true", "--bogus"}},
 	}
@@ -275,33 +275,14 @@ func TestRunValidate_HookStateErrorExitsZero(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	var stdout bytes.Buffer
-	stderrR, stderrW, pipeErr := os.Pipe()
-	if pipeErr != nil {
-		t.Fatal(pipeErr)
-	}
-	captured := make(chan string, 1)
-	go func() {
-		var buf bytes.Buffer
-		_, _ = io.Copy(&buf, stderrR) //nolint:errcheck // the pipe read end closing is the only failure mode, and stderrW.Close below drives it
-		captured <- buf.String()
-	}()
-
-	code := runStopHook("classify", statePath, nil, strings.NewReader(`{"session_id":"s"}`), &stdout, stderrW)
-
-	if closeErr := stderrW.Close(); closeErr != nil {
-		t.Fatal(closeErr)
-	}
-	stderr := <-captured
-	if closeErr := stderrR.Close(); closeErr != nil {
-		t.Fatal(closeErr)
-	}
+	var stdout, stderr bytes.Buffer
+	code := runStopHook("classify", statePath, nil, strings.NewReader(`{"session_id":"s"}`), &stdout, &stderr)
 
 	if code != 0 {
 		t.Errorf("code = %d, want 0", code)
 	}
-	if !strings.Contains(stderr, "validate --hook:") {
-		t.Errorf("stderr = %q, want it to contain %q", stderr, "validate --hook:")
+	if !strings.Contains(stderr.String(), "validate --hook:") {
+		t.Errorf("stderr = %q, want it to contain %q", stderr.String(), "validate --hook:")
 	}
 	if stdout.Len() != 0 {
 		t.Errorf("stdout = %q, want empty", stdout.String())

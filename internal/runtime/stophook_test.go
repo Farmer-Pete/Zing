@@ -24,6 +24,11 @@ func stopHookStdin(t *testing.T, msg *string) *strings.Reader {
 	return strings.NewReader(string(b))
 }
 
+// invalidClassifyDoc is a classify document whose empty reason fails
+// response.Validate, shared by the tests below that need any invalid
+// document rather than a specific validation error.
+const invalidClassifyDoc = `<zing job="classify" outcome="bug"><reason></reason></zing>`
+
 // readState reads back the state file as a stopHookState, failing the test
 // on any error so callers can assert on the fields directly.
 func readState(t *testing.T, path string) stopHookState {
@@ -39,7 +44,7 @@ func TestStopHook_BlocksInvalidUntilCap(t *testing.T) {
 	t.Parallel()
 
 	statePath := filepath.Join(t.TempDir(), "zing-stop-hook-s.json")
-	text := `<zing job="classify" outcome="bug"><reason></reason></zing>`
+	text := invalidClassifyDoc
 
 	for i := 1; i <= maxStopBlocks; i++ {
 		out, err := StopHook(stopHookStdin(t, &text), response.JobClassify, statePath)
@@ -141,6 +146,24 @@ func TestStopHook_BadInputAllows(t *testing.T) {
 	want := stopHookState{Events: 1, Blocks: 0, Unread: 0}
 	if st != want {
 		t.Errorf("state = %+v, want %+v", st, want)
+	}
+}
+
+// TestStopHook_WriteFailureAllows proves hook rule 7's own guarantee: the
+// hook never blocks without counting. When the state write fails, StopHook
+// must return no output along with the error, never a block decision.
+func TestStopHook_WriteFailureAllows(t *testing.T) {
+	t.Parallel()
+
+	statePath := filepath.Join(t.TempDir(), "missing", "s.json")
+	text := invalidClassifyDoc
+
+	out, err := StopHook(stopHookStdin(t, &text), response.JobClassify, statePath)
+	if err == nil {
+		t.Fatal("StopHook error = nil, want an error when the state write fails")
+	}
+	if out != nil {
+		t.Errorf("out = %q, want nil when the state write fails", out)
 	}
 }
 

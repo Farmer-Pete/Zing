@@ -613,8 +613,10 @@ func (c Claude) Run(ctx context.Context, req RunRequest) (RunResult, error) {
 }
 
 // run is Run's process lifecycle, once argv is built: start the child,
-// wait for it, and classify however it ended (design section 4.1). It
-// never logs; Run does that once, for every path, after this returns.
+// wait for it, and classify however it ended (design section 4.1). Run
+// does the logging for every path, after this returns, with one
+// exception: an unreadable Stop hook state file is logged at WARN here,
+// because its counts fall back to zero rather than failing the run.
 func (c Claude) run(ctx context.Context, req RunRequest, argv []string, sessionID, statePath string, start time.Time) (RunResult, error) {
 	name, args := c.commandNameArgs(req, argv)
 	cmd := exec.CommandContext(ctx, name, args...) //nolint:gosec // G204: bin is an operator-configured path (NewClaude), argv is built by claudeArgv from validated fields, and ExecPrefix (when set) is the sandbox's own prefix (sandbox.Sandbox.Prefix) -- never raw external input
@@ -622,11 +624,10 @@ func (c Claude) run(ctx context.Context, req RunRequest, argv []string, sessionI
 	if statePath != "" {
 		// A resumed session reuses its session id, so a stale state file
 		// from a prior run under the same TMPDIR must not leak its counts
-		// into this one. The .tmp file is also removed: a prior run killed
-		// (by its own timeout) between writeStopHookState's write and its
-		// rename can leave one behind.
-		_ = os.Remove(statePath)          //nolint:errcheck // absent is the normal case
-		_ = os.Remove(statePath + ".tmp") //nolint:errcheck // absent is the normal case
+		// into this one. removeStopHookState also drops the .tmp file: a
+		// prior run killed (by its own timeout) between writeStopHookState's
+		// write and its rename can leave one behind.
+		removeStopHookState(statePath)
 	}
 	// The token is appended after agentEnv, not passed through it, so
 	// FilteredEnv's own drop pass (which removes anything *_TOKEN-shaped,
@@ -677,8 +678,7 @@ func (c Claude) run(ctx context.Context, req RunRequest, argv []string, sessionI
 		if stateErr != nil {
 			slog.Warn("claude run: stop hook state unreadable", "job", req.Job, "run_token", req.RunToken, "error", stateErr)
 		}
-		_ = os.Remove(statePath)          //nolint:errcheck // a leftover file is reset at the next run's own removal before Start
-		_ = os.Remove(statePath + ".tmp") //nolint:errcheck // a leftover file is reset at the next run's own removal before Start
+		removeStopHookState(statePath)
 	}
 
 	res := RunResult{

@@ -86,6 +86,10 @@ func readStopHookState(path string) (stopHookState, error) {
 	return st, nil
 }
 
+// stopHookTempPath is the temp file writeStopHookState renames over path,
+// named once so every remover of a state file uses the same suffix.
+func stopHookTempPath(path string) string { return path + ".tmp" }
+
 // writeStopHookState writes st to path by writing a temp file and renaming
 // it over path, so a reader never sees a partially written state file. On
 // a failed write or rename, it removes the temp file so a killed run (a
@@ -95,7 +99,7 @@ func writeStopHookState(path string, st stopHookState) error {
 	if err != nil {
 		return fmt.Errorf("runtime: stop hook: encode state %s: %w", path, err)
 	}
-	tmp := path + ".tmp"
+	tmp := stopHookTempPath(path)
 	if err := os.WriteFile(tmp, b, 0o600); err != nil {
 		return fmt.Errorf("runtime: stop hook: write state %s: %w", path, err)
 	}
@@ -104,6 +108,15 @@ func writeStopHookState(path string, st stopHookState) error {
 		return fmt.Errorf("runtime: stop hook: rename state %s: %w", path, err)
 	}
 	return nil
+}
+
+// removeStopHookState removes path and its temp file. It is the only
+// place Claude.run names the state file's on-disk shape: once before the
+// child starts, to drop a stale file from a resumed session's prior run,
+// and once after it exits, to leave nothing behind in the host's TMPDIR.
+func removeStopHookState(path string) {
+	_ = os.Remove(path)                   //nolint:errcheck // absent is the normal case
+	_ = os.Remove(stopHookTempPath(path)) //nolint:errcheck // absent is the normal case
 }
 
 // stopHookReason renders the Stop hook's block reason: which block out of
