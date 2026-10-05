@@ -70,6 +70,15 @@ func runJob(
 // an unsandboxed job.
 type afterReserve func(ctx context.Context, rsv store.Reserved, req *runtime.RunRequest) (scenariosFile string, cleanup func() error, err error)
 
+// budgetExhausted is the comparison runJobWith's refusal check and
+// retryCapBudget's retry check both make, kept in one place so the two
+// cannot drift (design section 6.7).
+func budgetExhausted(agentSeconds int64, budget time.Duration) (exhausted bool, capSeconds int64) {
+	capSeconds = int64(budget / time.Second)
+	exhausted = time.Duration(agentSeconds)*time.Second >= budget
+	return
+}
+
 // runJobWith is runJob with an afterReserve hook (PKG9-PLAN.md section
 // 7.3): runJob itself calls this with a nil hook, which reproduces its
 // exact former behavior byte for byte. For a job whose profile is
@@ -107,8 +116,8 @@ func runJobWith(
 	if err != nil {
 		return runResult{}, fmt.Errorf("job: %s: agent seconds for ticket %d: %w", jobName, t.ID, err)
 	}
-	capSeconds := int64(d.Budget / time.Second)
-	if time.Duration(agentSeconds)*time.Second >= d.Budget {
+	exhausted, capSeconds := budgetExhausted(agentSeconds, d.Budget)
+	if exhausted {
 		slog.Warn("budget refused a call", "ticket_id", t.ID, "job", jobName, "agent_seconds", agentSeconds, "cap_seconds", capSeconds)
 		return runResult{}, ErrBudget
 	}

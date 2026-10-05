@@ -1898,8 +1898,8 @@ func recapBudgetEscalation(t store.Ticket, d Deps, resolveIDs []int64) store.Han
 }
 
 // retryCapBudget is the cap_budget retry row (design section 6.7):
-// while the ticket's agent seconds still meet d.Budget, the same test
-// runJob's own budget check makes, it re-escalates wall_clock
+// while the ticket's agent seconds still meet d.Budget, the comparison it
+// shares with runJobWith via budgetExhausted, it re-escalates wall_clock
 // (recapBudgetEscalation). Once the owner has raised
 // budget.agent_minutes_per_ticket and restarted serve, it resolves the
 // round and writes the "retry requested" marker instead, so the next tick
@@ -1910,8 +1910,8 @@ func retryCapBudget(ctx context.Context, t store.Ticket, d Deps, resolveIDs []in
 	if err != nil {
 		return store.HandlerCommit{}, fmt.Errorf("job: cap_budget retry: agent seconds for ticket %d: %w", t.ID, err)
 	}
-	capSeconds := int64(d.Budget / time.Second)
-	if time.Duration(agentSeconds)*time.Second >= d.Budget {
+	exhausted, capSeconds := budgetExhausted(agentSeconds, d.Budget)
+	if exhausted {
 		slog.Info("cap_budget retry still over budget", "ticket_id", t.ID, "agent_seconds", agentSeconds, "cap_seconds", capSeconds)
 		return recapBudgetEscalation(t, d, resolveIDs), nil
 	}
