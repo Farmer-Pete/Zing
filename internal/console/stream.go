@@ -1,13 +1,22 @@
 // stream.go: GET /stream, the one live SSE stream per tab (design section
 // 6.3, Q6). It reads the three navigation signals, renders and patches
 // #nav, #main, and #rail once on connect, then again every time the bus
-// wakes it, until the request context is done.
+// wakes it or its own heartbeat ticker fires, until the request context is
+// done.
 //
 // bus.Subscribe's cancel deregisters the subscription but never closes the
 // channel (Task 1 reconciliation against merged Package 3, design section
 // 14: "the /stream loop must select on r.Context().Done() to exit; there is
 // no closed-channel branch"), so the loop below selects on the request
 // context alone; a !ok receive is never reachable and is not written.
+//
+// The heartbeat (bug fix, console.streamHeartbeat) re-renders and patches
+// all four regions on a fixed interval with no bus wake at all, so a
+// missed or swallowed wake -- the stream's own failure mode this fixes --
+// heals within one interval instead of leaving the page stale with nothing
+// on screen saying so. A zero streamHeartbeat (every test that does not
+// itself exercise the beat) leaves the ticker channel nil, and a nil
+// channel's select case never fires.
 package console
 
 import (
@@ -96,6 +105,16 @@ func (c *console) handleStream(w http.ResponseWriter, r *http.Request) {
 	ch, cancel := c.bus.Subscribe()
 	defer cancel()
 
+	// A zero streamHeartbeat (every test that does not itself exercise the
+	// beat) leaves beat nil, so its select case below never fires -- not a
+	// missing bug fix's worth of real behavior, just no ticker to stop.
+	var beat <-chan time.Time
+	if c.streamHeartbeat > 0 {
+		t := time.NewTicker(c.streamHeartbeat)
+		defer t.Stop()
+		beat = t.C
+	}
+
 	if !c.patchRegions(r.Context(), sse, sig) {
 		return
 	}
@@ -104,6 +123,10 @@ func (c *console) handleStream(w http.ResponseWriter, r *http.Request) {
 		case <-r.Context().Done():
 			return
 		case <-ch:
+			if !c.patchRegions(r.Context(), sse, sig) {
+				return
+			}
+		case <-beat:
 			if !c.patchRegions(r.Context(), sse, sig) {
 				return
 			}

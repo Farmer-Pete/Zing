@@ -107,7 +107,27 @@ type console struct {
 	// itself is not persisted -- buildLogRail (rail.go) uses startedAt only
 	// to say since when there is nothing to show).
 	startedAt time.Time
+
+	// streamHeartbeat is how often handleStream's select loop re-renders
+	// and patches all four regions with no bus wake at all (bug fix: a
+	// stream that goes silent without closing -- a half-open socket, a
+	// hidden-tab pause, or a wedged server write -- left the page showing
+	// stale content with no stale marker, since the client only notices a
+	// finished or error event, neither of which a silently stalled stream
+	// ever produces). New sets it to streamHeartbeatInterval; zero (a bare
+	// struct literal, every test that does not itself exercise the beat)
+	// disables it, so handleStream's ticker case never fires.
+	streamHeartbeat time.Duration
 }
+
+// streamHeartbeatInterval is the interval New sets console.streamHeartbeat
+// to: an upper bound on how long a missed wake -- a dropped publish, a
+// wedged write recovering, a reconnect that never arrived -- can leave the
+// page showing stale content before the next full re-render corrects it.
+// console.js's STREAM_IDLE_MS (45s) is three of these beats, so three
+// missed beats in a row, not one slow one, is what finally shows the stale
+// marker.
+const streamHeartbeatInterval = 15 * time.Second
 
 // New builds the console and returns it as an http.Handler:
 //
@@ -174,7 +194,8 @@ func New(st *store.Store, b *bus.Broker, m *machine.Machine, hosts []string, por
 	c := &console{
 		store: st, bus: b, machine: m, log: log, push: push, pushToken: pushToken,
 		floor: floor, sandboxReason: sandboxReason, tracker: tr, user: user,
-		startedAt: time.Now(),
+		startedAt:       time.Now(),
+		streamHeartbeat: streamHeartbeatInterval,
 	}
 	guard := newMutationGuard(port, append(append([]string{}, hosts...), "localhost", "127.0.0.1")...)
 

@@ -8,6 +8,7 @@
 package console
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"errors"
@@ -20,8 +21,10 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"zing/internal/bus"
+	"zing/internal/response"
 	"zing/internal/store"
 )
 
@@ -275,5 +278,254 @@ func TestLogStreamErr(t *testing.T) {
 				t.Errorf("sink output missing err %q:\n%s", tc.err.Error(), sink.String())
 			}
 		})
+	}
+}
+
+// streamBeatFrameTimeout bounds every SSE read the heartbeat tests below
+// make: long enough for a slow CI box, short enough that a hung stream
+// fails the test instead of the suite.
+const streamBeatFrameTimeout = 5 * time.Second
+
+// newHeartbeatTestConsole builds a console the way newStreamTestConsole
+// does, with heartbeat set as c.streamHeartbeat: the seam
+// TestStreamHeartbeatRepatchesWithoutAWake,
+// TestStreamGateQuestionWakePatchesMain, and
+// TestStreamHeartbeatDoesNotMarkRead each need their own value for (a
+// short beat to prove the ticker case fires; zero to prove the bus-wake
+// path still works alone).
+func newHeartbeatTestConsole(t *testing.T, heartbeat time.Duration) *console {
+	t.Helper()
+	s, err := store.Open(t.Context(), filepath.Join(t.TempDir(), "zing.db"))
+	if err != nil {
+		t.Fatalf("store.Open: %v", err)
+	}
+	t.Cleanup(func() { _ = s.Close() })
+	h := newTestLogHandler(t, io.Discard)
+	return &console{store: s, bus: bus.New(), log: h, streamHeartbeat: heartbeat}
+}
+
+// openInternalStream issues a GET /stream request for (view, open) against
+// base, carrying the Datastar-Request header handleStream's MarkThreadRead
+// branch requires (mw.go's isDatastarSameSite), and returns the response
+// and a buffered reader over its still-open body, without reading any
+// frame yet. This is console_test.go:36's openStream, reimplemented here
+// because this file is package console, not console_test, and so cannot
+// call it directly.
+func openInternalStream(t *testing.T, base, view string, open int64) (*http.Response, *bufio.Reader, context.CancelFunc) {
+	t.Helper()
+	ctx, cancel := context.WithCancel(t.Context())
+	v := url.Values{}
+	v.Set("datastar", fmt.Sprintf(`{"view":%q,"open":%d,"project":0}`, view, open))
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, base+"/stream?"+v.Encode(), http.NoBody)
+	if err != nil {
+		cancel()
+		t.Fatalf("new request: %v", err)
+	}
+	req.Header.Set("Datastar-Request", "true")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		cancel()
+		t.Fatalf("GET /stream: %v", err)
+	}
+	return resp, bufio.NewReader(resp.Body), cancel
+}
+
+// readStreamFrame reads one SSE frame from r, bounded by
+// streamBeatFrameTimeout so a hung stream fails fast instead of hanging the
+// test suite. This is console_test.go:382's readFrame pattern, reimplemented
+// here because this file is package console, not console_test: datastar-go
+// writes each event's data lines, then a blank line, then one extra blank
+// line ("write double newlines to separate events", sse.go), so a frame's
+// content is preceded by zero or more stray blank lines left over from the
+// previous frame, skipped before accumulating starts.
+func readStreamFrame(t *testing.T, r *bufio.Reader) string {
+	t.Helper()
+
+	type result struct {
+		text string
+		err  error
+	}
+	ch := make(chan result, 1)
+	go func() {
+		var sb strings.Builder
+		started := false
+		for {
+			line, err := r.ReadString('\n')
+			if !started {
+				if line == "\n" && err == nil {
+					continue // a stray separator blank line before the frame starts
+				}
+				started = true
+			}
+			sb.WriteString(line)
+			if err != nil {
+				ch <- result{sb.String(), err}
+				return
+			}
+			if line == "\n" {
+				ch <- result{sb.String(), nil}
+				return
+			}
+		}
+	}()
+
+	select {
+	case res := <-ch:
+		if res.err != nil {
+			t.Fatalf("read SSE frame: %v", res.err)
+		}
+		return res.text
+	case <-time.After(streamBeatFrameTimeout):
+		t.Fatal("timed out waiting for an SSE frame")
+		return ""
+	}
+}
+
+// streamHeartbeatDemoTicket ensures the demo project and ticket exist
+// (seed.go's EnsureProject plus ensureDemoTicket) and returns the ticket's
+// id, the one fixture the three heartbeat tests below each open a thread
+// stream on.
+func streamHeartbeatDemoTicket(t *testing.T, c *console) int64 {
+	t.Helper()
+	projectID, err := c.store.EnsureProject(t.Context(), store.Project{
+		Name: demoProjectName, RepoURL: demoProjectRepo, LocalPath: demoProjectPath, Tracker: "github",
+	})
+	if err != nil {
+		t.Fatalf("EnsureProject: %v", err)
+	}
+	ticketID, err := ensureDemoTicket(t.Context(), c.store, projectID)
+	if err != nil {
+		t.Fatalf("ensureDemoTicket: %v", err)
+	}
+	return ticketID
+}
+
+// streamHeartbeatSeedGateQuestion seeds one open gate question ("Q5") on
+// ticketID (seed.go's seedOneQuestion, with no Publish of its own) and
+// returns the question message's id, read back through ListMessages the
+// way a caller with no insert-result id to hand would.
+func streamHeartbeatSeedGateQuestion(t *testing.T, c *console, ticketID int64) int64 {
+	t.Helper()
+	if err := seedOneQuestion(t.Context(), c.store, ticketID, "Q5", response.QuestionKindGate); err != nil {
+		t.Fatalf("seedOneQuestion: %v", err)
+	}
+	msgs, err := c.store.ListMessages(t.Context(), ticketID)
+	if err != nil {
+		t.Fatalf("ListMessages: %v", err)
+	}
+	for i := range msgs {
+		if msgs[i].Type == msgTypeQuestion {
+			return msgs[i].ID
+		}
+	}
+	t.Fatal("seeded gate question not found in ListMessages")
+	return 0
+}
+
+// TestStreamHeartbeatRepatchesWithoutAWake is the ticket's own regression
+// test (bug: "An open thread stops showing new questions, with no stale
+// marker"): with no bus.Publish at all, a question committed for the open
+// thread must still reach #main within a couple of heartbeat intervals,
+// proving the beat -- not a wake the committer forgot to send -- is what
+// repatches the page.
+func TestStreamHeartbeatRepatchesWithoutAWake(t *testing.T) {
+	c := newHeartbeatTestConsole(t, 50*time.Millisecond)
+	ticketID := streamHeartbeatDemoTicket(t, c)
+
+	srv := streamTestServer(t, c, false)
+	resp, r, cancel := openInternalStream(t, srv.URL, viewThread, ticketID)
+	defer cancel()
+	defer func() { _ = resp.Body.Close() }()
+
+	for range 4 { // the initial connect: #nav, #main, #rail, #alerts
+		readStreamFrame(t, r)
+	}
+
+	questionID := streamHeartbeatSeedGateQuestion(t, c, ticketID)
+	want := fmt.Sprintf(`id="question-%d"`, questionID)
+
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		if time.Now().After(deadline) {
+			t.Fatalf("no frame carrying %s arrived within 2s of a heartbeat-only commit (no bus.Publish)", want)
+		}
+		frame := readStreamFrame(t, r)
+		if strings.Contains(frame, want) {
+			return
+		}
+	}
+}
+
+// TestStreamGateQuestionWakePatchesMain is the ticket's "Done when" test
+// (scope's own Find-first question: "Does a new question on the open
+// thread publish a bus wake that patches #main?"): with the heartbeat off
+// (streamHeartbeat 0), a gate question committed for the open ticket,
+// followed by one bus.Publish, still produces a #main frame carrying it --
+// the server-side wake path reading the code already ruled out as the
+// fault, kept here as a guard against it regressing.
+func TestStreamGateQuestionWakePatchesMain(t *testing.T) {
+	c := newHeartbeatTestConsole(t, 0)
+	ticketID := streamHeartbeatDemoTicket(t, c)
+
+	srv := streamTestServer(t, c, false)
+	resp, r, cancel := openInternalStream(t, srv.URL, viewThread, ticketID)
+	defer cancel()
+	defer func() { _ = resp.Body.Close() }()
+
+	for range 4 {
+		readStreamFrame(t, r)
+	}
+
+	questionID := streamHeartbeatSeedGateQuestion(t, c, ticketID)
+	c.bus.Publish()
+	want := fmt.Sprintf(`id="question-%d"`, questionID)
+
+	deadline := time.Now().Add(streamBeatFrameTimeout)
+	for {
+		if time.Now().After(deadline) {
+			t.Fatalf("no frame carrying %s arrived after a gate question commit plus bus.Publish", want)
+		}
+		frame := readStreamFrame(t, r)
+		if strings.Contains(frame, want) {
+			return
+		}
+	}
+}
+
+// TestStreamHeartbeatDoesNotMarkRead proves the beat case shares
+// patchRegions, not the connect-time MarkThreadRead branch (handleStream
+// runs that branch once, before the loop, never inside it): after connect,
+// an unread message inserted on the open ticket stays unread through at
+// least three heartbeat-only re-renders.
+func TestStreamHeartbeatDoesNotMarkRead(t *testing.T) {
+	c := newHeartbeatTestConsole(t, 50*time.Millisecond)
+	ticketID := streamHeartbeatDemoTicket(t, c)
+
+	srv := streamTestServer(t, c, false)
+	resp, r, cancel := openInternalStream(t, srv.URL, viewThread, ticketID)
+	defer cancel()
+	defer func() { _ = resp.Body.Close() }()
+
+	for range 4 {
+		readStreamFrame(t, r)
+	}
+
+	msgID, err := c.store.InsertMessage(t.Context(), store.Message{
+		TicketID: ticketID, Type: msgTypeUpdate, Author: "zing", Body: "progress",
+	})
+	if err != nil {
+		t.Fatalf("InsertMessage: %v", err)
+	}
+
+	for range 3 * 4 { // at least three beats' worth of four-region frames
+		readStreamFrame(t, r)
+	}
+
+	msg, err := c.store.GetMessage(t.Context(), msgID)
+	if err != nil {
+		t.Fatalf("GetMessage: %v", err)
+	}
+	if msg.ReadAt != nil {
+		t.Error("an unread message was marked read by a heartbeat-only re-render")
 	}
 }
