@@ -8,7 +8,9 @@
 package console
 
 import (
+	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -84,20 +86,32 @@ func doStreamRequest(t *testing.T, base, view string, open int64, datastarHeader
 	return string(body)
 }
 
-// newCancelTestConsole builds a console and its log Handler for one
-// cancel-logging subtest: a fresh store, a *slog.LevelVar at Debug (so the
-// ring captures every record regardless of level, design section 6.12's
-// "pass" gate), and the Handler installed as slog's default the way
-// cmd/zing/serve.go installs the real one, restored on cleanup.
-func newCancelTestConsole(t *testing.T) (*console, *Handler) {
+// newTestLogHandler builds a Handler at Debug (so the ring captures every
+// record regardless of level, design section 6.12's "pass" gate), its text
+// sink writing to w (io.Discard when w is nil), and installs it as slog's
+// default the way cmd/zing/serve.go installs the real one, restored on
+// cleanup.
+func newTestLogHandler(t *testing.T, w io.Writer) *Handler {
 	t.Helper()
-	s := newInternalTestStore(t)
+	if w == nil {
+		w = io.Discard
+	}
 	lv := new(slog.LevelVar)
 	lv.Set(slog.LevelDebug)
-	h := NewHandler(io.Discard, lv, nil)
+	h := NewHandler(w, lv, nil)
 	prev := slog.Default()
 	slog.SetDefault(slog.New(h))
 	t.Cleanup(func() { slog.SetDefault(prev) })
+	return h
+}
+
+// newStreamTestConsole builds a console and its log Handler for a /stream
+// test: a fresh store plus newTestLogHandler's Handler, installed as slog's
+// default.
+func newStreamTestConsole(t *testing.T) (*console, *Handler) {
+	t.Helper()
+	s := newInternalTestStore(t)
+	h := newTestLogHandler(t, nil)
 	return &console{store: s, bus: bus.New(), log: h}, h
 }
 
@@ -147,7 +161,7 @@ func assertNoStreamError(t *testing.T, h *Handler, body string, wantDebugMessage
 // logger (gate_test.go's own precedent for why that must stay sequential).
 func TestStreamCancelLogsNoError(t *testing.T) {
 	t.Run("inbox", func(t *testing.T) {
-		c, h := newCancelTestConsole(t)
+		c, h := newStreamTestConsole(t)
 		srv := streamTestServer(t, c, true)
 
 		body := doStreamRequest(t, srv.URL, viewInbox, 0, false)
@@ -155,7 +169,7 @@ func TestStreamCancelLogsNoError(t *testing.T) {
 	})
 
 	t.Run("thread", func(t *testing.T) {
-		c, h := newCancelTestConsole(t)
+		c, h := newStreamTestConsole(t)
 		srv := streamTestServer(t, c, true)
 
 		body := doStreamRequest(t, srv.URL, viewThread, 1, true)
@@ -168,19 +182,10 @@ func TestStreamCancelLogsNoError(t *testing.T) {
 // closed store) still logs at ERROR, so a genuine fault still reaches the
 // #alerts banner.
 func TestStreamStoreErrorStillLogsError(t *testing.T) {
-	s := newInternalTestStore(t)
-	if err := s.Close(); err != nil {
+	c, h := newStreamTestConsole(t)
+	if err := c.store.Close(); err != nil {
 		t.Fatalf("Close: %v", err)
 	}
-
-	lv := new(slog.LevelVar)
-	lv.Set(slog.LevelDebug)
-	h := NewHandler(io.Discard, lv, nil)
-	prev := slog.Default()
-	slog.SetDefault(slog.New(h))
-	t.Cleanup(func() { slog.SetDefault(prev) })
-
-	c := &console{store: s, bus: bus.New(), log: h}
 	srv := streamTestServer(t, c, false)
 
 	doStreamRequest(t, srv.URL, viewInbox, 0, false)
@@ -193,5 +198,99 @@ func TestStreamStoreErrorStillLogsError(t *testing.T) {
 	}
 	if !found {
 		t.Errorf("ring missing an ERROR %q entry for a live-context store failure", logMsgBuildNav)
+	}
+}
+
+// TestLogStreamErr is a direct whitebox table test of logStreamErr's two
+// independent triggers for dropping to Debug: errors.Is(err,
+// context.Canceled), and ctx.Err() != nil, each on its own. The two cases in
+// TestStreamCancelLogsNoError always hit both triggers together (a store
+// error wrapping context.Canceled under an already-cancelled context), so
+// neither proves the ctx.Err() branch matters on its own; that branch is the
+// only thing that drops a patch-write failure -- never itself
+// context.Canceled -- from WARN to Debug once the stream's context is done.
+// Not parallel: it swaps slog's process-wide default logger.
+func TestLogStreamErr(t *testing.T) {
+	cases := []struct {
+		name      string
+		cancelled bool
+		err       error
+		level     slog.Level
+		wantWarn  bool
+	}{
+		{
+			name:      "cancelled ctx, non-Canceled error logs at Debug",
+			cancelled: true,
+			err:       errors.New("write: broken pipe"),
+			level:     slog.LevelWarn,
+			wantWarn:  false,
+		},
+		{
+			name:      "live ctx, wrapped context.Canceled logs at Debug",
+			cancelled: false,
+			err:       fmt.Errorf("inbox items: %w", context.Canceled),
+			level:     slog.LevelError,
+			wantWarn:  false,
+		},
+		{
+			name:      "live ctx, plain error keeps its level",
+			cancelled: false,
+			err:       errors.New("boom"),
+			level:     slog.LevelWarn,
+			wantWarn:  true,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var sink bytes.Buffer
+			h := newTestLogHandler(t, &sink)
+
+			ctx := t.Context()
+			if tc.cancelled {
+				var cancel context.CancelFunc
+				ctx, cancel = context.WithCancel(ctx)
+				cancel()
+			}
+
+			const msg = "console: stream: test case"
+			logStreamErr(ctx, tc.level, msg, tc.err)
+
+			h.ring.mu.Lock()
+			entries := append([]LogEntry(nil), h.ring.entries...)
+			h.ring.mu.Unlock()
+
+			var got *LogEntry
+			for i := range entries {
+				if entries[i].Message == msg {
+					got = &entries[i]
+				}
+			}
+			if got == nil {
+				t.Fatalf("ring missing entry %q", msg)
+			}
+
+			wantLevel := slog.LevelDebug
+			if tc.wantWarn {
+				wantLevel = tc.level
+			}
+			if got.Level != wantLevel {
+				t.Errorf("ring entry level = %v, want %v", got.Level, wantLevel)
+			}
+
+			warnFound := false
+			for _, e := range h.Warnings(RingCapacity) {
+				if e.Message == msg {
+					warnFound = true
+				}
+			}
+			if warnFound != tc.wantWarn {
+				t.Errorf("h.Warnings holds %q = %v, want %v", msg, warnFound, tc.wantWarn)
+			}
+
+			if !strings.Contains(sink.String(), tc.err.Error()) {
+				t.Errorf("sink output missing err %q:\n%s", tc.err.Error(), sink.String())
+			}
+		})
 	}
 }

@@ -136,36 +136,36 @@ func (c *console) patchRegions(ctx context.Context, sse *datastar.ServerSentEven
 	}
 	nav, err := c.navComponent(ctx, navOpen)
 	if err != nil {
-		logStreamErr(ctx, slog.LevelError, logMsgBuildNav, err)
+		logStreamErr(ctx, slog.LevelError, logMsgBuildNav, err, "view", sig.View, "ticket_id", navOpen)
 		return false
 	}
 	if patchErr := sse.PatchElementTempl(nav); patchErr != nil {
-		logStreamErr(ctx, slog.LevelWarn, "console: stream: patch nav", patchErr, "view", sig.View, "open", sig.Open)
+		logStreamErr(ctx, slog.LevelWarn, "console: stream: patch nav", patchErr, "view", sig.View, "ticket_id", sig.Open)
 		return false
 	}
 
 	main, err := c.mainComponent(ctx, sig.View, sig.Open, sig.Project)
 	if err != nil {
-		logStreamErr(ctx, slog.LevelError, "console: stream: build main", err, "view", sig.View)
+		logStreamErr(ctx, slog.LevelError, "console: stream: build main", err, "view", sig.View, "ticket_id", sig.Open)
 		return false
 	}
 	if patchErr := sse.PatchElementTempl(main); patchErr != nil {
-		logStreamErr(ctx, slog.LevelWarn, "console: stream: patch main", patchErr, "view", sig.View, "open", sig.Open)
+		logStreamErr(ctx, slog.LevelWarn, "console: stream: patch main", patchErr, "view", sig.View, "ticket_id", sig.Open)
 		return false
 	}
 
 	rail, err := c.railComponent(ctx, sig.View, sig.Open)
 	if err != nil {
-		logStreamErr(ctx, slog.LevelError, "console: stream: build rail", err, "view", sig.View, "open", sig.Open)
+		logStreamErr(ctx, slog.LevelError, "console: stream: build rail", err, "view", sig.View, "ticket_id", sig.Open)
 		return false
 	}
 	if patchErr := sse.PatchElementTempl(rail); patchErr != nil {
-		logStreamErr(ctx, slog.LevelWarn, "console: stream: patch rail", patchErr, "view", sig.View, "open", sig.Open)
+		logStreamErr(ctx, slog.LevelWarn, "console: stream: patch rail", patchErr, "view", sig.View, "ticket_id", sig.Open)
 		return false
 	}
 
 	if patchErr := sse.PatchElementTempl(c.alertsComponent()); patchErr != nil {
-		logStreamErr(ctx, slog.LevelWarn, "console: stream: patch alerts", patchErr, "view", sig.View, "open", sig.Open)
+		logStreamErr(ctx, slog.LevelWarn, "console: stream: patch alerts", patchErr, "view", sig.View, "ticket_id", sig.Open)
 		return false
 	}
 	return true
