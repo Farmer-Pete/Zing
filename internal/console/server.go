@@ -118,6 +118,18 @@ type console struct {
 	// struct literal, every test that does not itself exercise the beat)
 	// disables it, so handleStream's ticker case never fires.
 	streamHeartbeat time.Duration
+
+	// streamWriteTimeout bounds how long patchRegions' armFrameWriteDeadline
+	// gives each of the four region writes on /stream (bug fix: handleStream
+	// clears the write deadline entirely on connect (stream.go's
+	// SetWriteDeadline(time.Time{})), so a write that wedges -- a half-open
+	// socket the kernel has not yet noticed -- blocked forever and the bus's
+	// one-slot buffer then dropped every later wake). New sets it to
+	// streamFrameWriteTimeout; zero (a bare struct literal, every test that
+	// does not itself exercise the deadline) disables it, so
+	// armFrameWriteDeadline arms nothing and a region write can still block
+	// as before.
+	streamWriteTimeout time.Duration
 }
 
 // streamHeartbeatInterval is the interval New sets console.streamHeartbeat
@@ -128,6 +140,13 @@ type console struct {
 // missed beats in a row, not one slow one, is what finally shows the stale
 // marker.
 const streamHeartbeatInterval = 15 * time.Second
+
+// streamFrameWriteTimeout is the interval New sets console.streamWriteTimeout
+// to: how long one region's write on /stream may block before
+// armFrameWriteDeadline's deadline fails it and handleStream ends the
+// stream, rather than leaving a wedged write to swallow every later wake
+// forever.
+const streamFrameWriteTimeout = 10 * time.Second
 
 // New builds the console and returns it as an http.Handler:
 //
@@ -194,8 +213,9 @@ func New(st *store.Store, b *bus.Broker, m *machine.Machine, hosts []string, por
 	c := &console{
 		store: st, bus: b, machine: m, log: log, push: push, pushToken: pushToken,
 		floor: floor, sandboxReason: sandboxReason, tracker: tr, user: user,
-		startedAt:       time.Now(),
-		streamHeartbeat: streamHeartbeatInterval,
+		startedAt:          time.Now(),
+		streamHeartbeat:    streamHeartbeatInterval,
+		streamWriteTimeout: streamFrameWriteTimeout,
 	}
 	guard := newMutationGuard(port, append(append([]string{}, hosts...), "localhost", "127.0.0.1")...)
 

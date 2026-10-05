@@ -529,3 +529,52 @@ func TestStreamHeartbeatDoesNotMarkRead(t *testing.T) {
 		t.Error("an unread message was marked read by a heartbeat-only re-render")
 	}
 }
+
+// TestStreamEndsWhenAFrameWriteTimesOut is the regression test for the
+// wedged-write hypothesis (stream.go's prior SetWriteDeadline(time.Time{}),
+// no deadline at all): with streamWriteTimeout already in the past (1ns),
+// armFrameWriteDeadline must fail the very first region write, and
+// handleStream must end the stream rather than hold the connection open
+// with nothing left to send. A client reading the body to its end must see
+// that end -- EOF or a read error, either way the read returns -- within a
+// few seconds, and the body it did get must carry no #main frame.
+func TestStreamEndsWhenAFrameWriteTimesOut(t *testing.T) {
+	c := newHeartbeatTestConsole(t, 0)
+	c.streamWriteTimeout = time.Nanosecond
+	ticketID := streamHeartbeatDemoTicket(t, c)
+
+	srv := streamTestServer(t, c, false)
+
+	type result struct {
+		body string
+		err  error
+	}
+	ch := make(chan result, 1)
+	go func() {
+		v := url.Values{}
+		v.Set("datastar", fmt.Sprintf(`{"view":%q,"open":%d,"project":0}`, viewThread, ticketID))
+		req, err := http.NewRequestWithContext(t.Context(), http.MethodGet, srv.URL+"/stream?"+v.Encode(), http.NoBody)
+		if err != nil {
+			ch <- result{err: err}
+			return
+		}
+		req.Header.Set("Datastar-Request", "true")
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			ch <- result{err: err}
+			return
+		}
+		defer func() { _ = resp.Body.Close() }()
+		body, err := io.ReadAll(resp.Body)
+		ch <- result{body: string(body), err: err}
+	}()
+
+	select {
+	case res := <-ch:
+		if strings.Contains(res.body, `id="main"`) {
+			t.Fatalf("body carries a #main frame despite a write deadline already in the past:\n%s", res.body)
+		}
+	case <-time.After(streamBeatFrameTimeout):
+		t.Fatal("reading /stream's body did not end within 5s of a timed-out write deadline")
+	}
+}
