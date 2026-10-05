@@ -503,6 +503,40 @@ export function sendResultWithUnsent(text, unsent) {
 	return `${base} ${unsent} replies not sent; their text is still in their boxes.`;
 }
 
+// AUTOSAVE_DEBOUNCE_MS is how long installReplyAutosave (console.js) waits
+// after the owner's last keystroke in a reply box before posting it as a
+// draft (design: "A Reply box autosaves one second after the owner stops
+// typing"). 1000ms is long enough that ordinary typing never fires a save
+// per keystroke, short enough that a blur, a morph, or a closed tab shortly
+// after typing stops rarely beats it.
+export const AUTOSAVE_DEBOUNCE_MS = 1000;
+
+/**
+ * replyAutosaveBody builds POST /draft's JSON body for installReplyAutosave's
+ * debounced save (design: "Autosave the reply box as a draft, debounced on
+ * input"), given the box and the text last posted for it. Unlike
+ * unsavedReplyBody, an empty value still yields a body -- with text '' --
+ * so emptying a box that had a saved draft clears it (SaveDraft's new
+ * "draft cleared" path) instead of leaving a stale draft the box no longer
+ * shows. Null when el is not a question-targeted reply box (both
+ * data-draft-ticket and data-draft-question are required: autosave only
+ * covers the per-question reply box this ticket adds it to), el.value is
+ * not a string, or el.value equals lastSavedText (nothing changed since the
+ * last save, so there is nothing to post).
+ *
+ * @param {{dataset?: {draftTicket?: string, draftQuestion?: string}, value?: unknown} | null | undefined} el
+ * @param {string} lastSavedText
+ * @returns {{ticket: number, question: number, text: string} | null}
+ */
+export function replyAutosaveBody(el, lastSavedText) {
+	const ticket = el?.dataset?.draftTicket;
+	const question = el?.dataset?.draftQuestion;
+	if (!ticket || !question || typeof el.value !== 'string' || el.value === lastSavedText) {
+		return null;
+	}
+	return { ticket: Number(ticket), question: Number(question), text: el.value };
+}
+
 /**
  * buildChipDraftBody builds POST /draft's JSON body for an option chip's
  * activation (design section 6.6, 6.7, code review fix 1): the chip's

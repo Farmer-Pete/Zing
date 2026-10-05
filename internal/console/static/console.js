@@ -32,6 +32,8 @@ import {
 	unsavedReplyBody,
 	unsavedReplyBodies,
 	sendResultWithUnsent,
+	AUTOSAVE_DEBOUNCE_MS,
+	replyAutosaveBody,
 	collectPatchWork,
 	describeAction,
 	nextPendingNav,
@@ -412,6 +414,13 @@ async function postDraftRequest(el, ticket, question, text) {
 		}
 		if (resp.ok) {
 			showDraftSaved(el, 'Saved.');
+			// A box targets a question (data-draft-question); a thread-level
+			// reply (question === null, unsavedReplyBody) has no autosave key to
+			// record against, since replyAutosaveBody only ever covers
+			// question-targeted boxes.
+			if (question != null) {
+				lastSavedText.set(replyAutosaveKey(ticket, question), text);
+			}
 			return true;
 		}
 		console.error('console.js: POST /draft', resp.status);
@@ -528,11 +537,68 @@ function sendBatch() {
 	return true;
 }
 
-// cancelAutosaves cancels every pending debounced autosave timer (task 3
-// fills this in), so postSendBatch below -- which saves and sends every box
-// itself -- can never race a stale autosave into re-posting a box the send
-// is about to clear.
-function cancelAutosaves() {}
+// autosaveTimers maps a reply box's "ticket:question" key (replyAutosaveKey)
+// to its pending debounced-save timer id (installReplyAutosave). lastSavedText
+// maps the same key to the text last known saved for that box, so a later
+// keystroke that merely re-types what is already saved does not re-post it.
+const autosaveTimers = new Map();
+const lastSavedText = new Map();
+
+// replyAutosaveKey matches postDraftRequest's recorded lastSavedText key
+// (ticket/question there are numbers, off body.ticket/body.question) against
+// installReplyAutosave's own key (built straight off the box's string
+// dataset): template-literal coercion makes "18:11" either way.
+function replyAutosaveKey(ticket, question) {
+	return `${ticket}:${question}`;
+}
+
+// cancelAutosaves cancels every pending debounced autosave timer, so
+// postSendBatch below -- which saves and sends every box itself -- can never
+// race a stale autosave into re-posting a box the send is about to clear.
+function cancelAutosaves() {
+	for (const timerID of autosaveTimers.values()) {
+		clearTimeout(timerID);
+	}
+	autosaveTimers.clear();
+}
+
+// installReplyAutosave wires a delegated 'input' listener over every
+// "#main .reply-input" (design: "Autosave the reply box as a draft,
+// debounced on input"), delegated from document like installSideBox above
+// because #main is morphed by every /stream patch. One timer per box (its
+// replyAutosaveKey) lives in autosaveTimers; scheduleToastDismiss's
+// cancel-then-arm (the same "replace, not stack" shape showSendResult's own
+// toast dismiss uses, not a toast here) debounces repeated keystrokes down to
+// one save, AUTOSAVE_DEBOUNCE_MS after the owner stops typing. fire reads
+// lastSavedText for the box, seeded from its own defaultValue (the
+// server-rendered draft) the first time this key is seen so a box no one has
+// typed in since page load does not immediately re-save its own
+// already-saved text, and posts only when replyAutosaveBody says the text
+// actually changed.
+function installReplyAutosave() {
+	document.addEventListener('input', (event) => {
+		const el = event.target.closest?.('.reply-input');
+		if (!el || !el.closest('#main')) {
+			return;
+		}
+		const key = replyAutosaveKey(el.dataset.draftTicket, el.dataset.draftQuestion);
+		const fire = () => {
+			autosaveTimers.delete(key);
+			const lastSaved = lastSavedText.has(key) ? lastSavedText.get(key) : el.defaultValue;
+			const body = replyAutosaveBody(el, lastSaved);
+			if (!body) {
+				return;
+			}
+			showDraftConflict(el, '');
+			showDraftSaved(el, '');
+			postDraftRequest(el, body.ticket, body.question, body.text);
+		};
+		autosaveTimers.set(
+			key,
+			scheduleToastDismiss(autosaveTimers.get(key) ?? null, () => setTimeout(fire, AUTOSAVE_DEBOUNCE_MS), clearTimeout),
+		);
+	});
+}
 
 async function postSendBatch(ticket) {
 	cancelAutosaves();
@@ -1145,10 +1211,11 @@ function installNavBridge() {
 // install wires every delegated listener synchronously, before awaiting
 // loadBindings' own /static/keys.json fetch (bug fix): none of
 // installStreamWatch, installNavBridge, installPatchObserver, installSideBox,
-// installLogControls, installChipActivation, or installPickupBox reads
-// state.bindings, so there was no reason their listeners -- installNavBridge
-// above all, the zing-nav bridge a Threads-sidebar click needs live as
-// early as possible -- sat behind an unrelated network round trip. Only
+// installLogControls, installChipActivation, installPickupBox, or
+// installReplyAutosave reads state.bindings, so there was no reason their
+// listeners -- installNavBridge above all, the zing-nav bridge a
+// Threads-sidebar click needs live as early as possible -- sat behind an
+// unrelated network round trip. Only
 // onKeyDown needs the parsed bindings, so it alone waits on the fetch.
 // installStreamWatch runs first (the reconnect plan): it must already be
 // bound before data-init's own @get('/stream') can fire the very first
@@ -1161,6 +1228,7 @@ async function install() {
 	installLogControls();
 	installChipActivation();
 	installPickupBox();
+	installReplyAutosave();
 	await loadBindings();
 	document.addEventListener('keydown', onKeyDown);
 }

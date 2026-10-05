@@ -39,6 +39,8 @@ import {
 	unsavedReplyBody,
 	unsavedReplyBodies,
 	sendResultWithUnsent,
+	AUTOSAVE_DEBOUNCE_MS,
+	replyAutosaveBody,
 	describeAction,
 	ACTION_LABELS,
 	RECONNECT_BASE_MS,
@@ -593,6 +595,35 @@ test('sendResultWithUnsent: a trailing space on text is trimmed before appending
 		sendResultWithUnsent('Sent 1 message. ', 1),
 		'Sent 1 message. 1 reply not sent; its text is still in its box.',
 	);
+});
+
+// replyAutosaveBody: installReplyAutosave (console.js) debounces on 'input'
+// and posts this body a second after the owner stops typing, so a box's text
+// is never lost to a lost focus or an unmorphed send -- including an emptied
+// box, which clears a previously saved draft.
+
+test('replyAutosaveBody: changed text yields a body to post', () => {
+	const el = { dataset: { draftTicket: '18', draftQuestion: '11' }, value: 'hello' };
+	assert.deepEqual(replyAutosaveBody(el, ''), { ticket: 18, question: 11, text: 'hello' });
+});
+
+test('replyAutosaveBody: text unchanged from lastSavedText yields null', () => {
+	const el = { dataset: { draftTicket: '18', draftQuestion: '11' }, value: 'hello' };
+	assert.equal(replyAutosaveBody(el, 'hello'), null);
+});
+
+test('replyAutosaveBody: emptying a box that had saved text still yields a body, to clear the draft', () => {
+	const el = { dataset: { draftTicket: '18', draftQuestion: '11' }, value: '' };
+	assert.deepEqual(replyAutosaveBody(el, 'hello'), { ticket: 18, question: 11, text: '' });
+});
+
+test('replyAutosaveBody: a missing data-draft-question yields null', () => {
+	const el = { dataset: { draftTicket: '18' }, value: 'hello' };
+	assert.equal(replyAutosaveBody(el, ''), null);
+});
+
+test('AUTOSAVE_DEBOUNCE_MS is a reasonable debounce window', () => {
+	assert.ok(AUTOSAVE_DEBOUNCE_MS >= 500 && AUTOSAVE_DEBOUNCE_MS <= 2000);
 });
 
 // reduceStreamStatus / reconnectDelay / staleMarkerText: console.js's
