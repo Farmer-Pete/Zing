@@ -12,6 +12,7 @@
 package job
 
 import (
+	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
@@ -1372,6 +1373,63 @@ func (h shipHandler) apply(ctx context.Context, t store.Ticket, d Deps, a store.
 	}
 	c.ClearPoll = true
 	return c, nil
+}
+
+// ---- the ready-cycle cap (design section 8.5 row 3, "Change" bullet 2) ----
+
+// readyCycleCap is how many thread-caused ready, draft, ready cycles a pull
+// request may go through. After that, POLL row 3 keeps it ready when the
+// only reason to flip is an unresolved thread; a failed CI still flips it.
+const readyCycleCap = 2
+
+// threadReadyCycles counts the finished thread-caused cycles in markers,
+// the ticket's "pr draft ", "pr ready ", and "respond batch " markers in
+// message id order: a "pr draft" marker whose next flip marker is "pr
+// ready", with a "respond batch N started" line between the two.
+func threadReadyCycles(markers []store.MessageRow) int {
+	cycles := 0
+	inDraft, sawBatch := false, false
+	for i := range markers {
+		firstLine, _, _ := strings.Cut(markers[i].Body, "\n")
+		switch {
+		case strings.HasPrefix(firstLine, prDraftPrefix):
+			inDraft, sawBatch = true, false
+		case strings.HasPrefix(firstLine, prReadyPrefix):
+			if inDraft && sawBatch {
+				cycles++
+			}
+			inDraft, sawBatch = false, false
+		case inDraft && respondBatchStartedLine.MatchString(firstLine):
+			sawBatch = true
+		}
+	}
+	return cycles
+}
+
+// skipThreadDraftFlip reports whether POLL row 3 should leave a ready pull
+// request ready: CI did not fail, the only reason to flip is an unresolved
+// thread, and t already finished readyCycleCap thread-caused cycles
+// (threadReadyCycles). Each skip logs one Info line with ids and counts.
+func skipThreadDraftFlip(ctx context.Context, t store.Ticket, d Deps, pr orchestrator.PRState, number int, ciFailed, anyUnresolved bool) (bool, error) {
+	if pr.Draft || ciFailed || !anyUnresolved {
+		return false, nil
+	}
+	var markers []store.MessageRow
+	for _, prefix := range []string{prDraftPrefix, prReadyPrefix, respondBatchMarkerPrefix} {
+		rows, err := d.Store.MarkersWithPrefix(ctx, t.ID, prefix)
+		if err != nil {
+			return false, fmt.Errorf("job: shipping: poll: ticket %d: ready cycle markers: %w", t.ID, err)
+		}
+		markers = append(markers, rows...)
+	}
+	slices.SortFunc(markers, func(a, b store.MessageRow) int { return cmp.Compare(a.ID, b.ID) })
+	cycles := threadReadyCycles(markers)
+	if cycles < readyCycleCap {
+		return false, nil
+	}
+	slog.Info("draft flip skipped", "ticket_id", t.ID, "pr_number", number, "head_sha", pr.HeadSHA,
+		"cycles", cycles, "cap", readyCycleCap, "reason", "ready_cycle_cap")
+	return true, nil
 }
 
 // ---- FIX-REPLIES and RE-REQUEST (design section 9.4, POLL rows 1 and 2 of
