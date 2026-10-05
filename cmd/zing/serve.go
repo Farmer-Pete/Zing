@@ -330,6 +330,11 @@ func serve(ctx context.Context, cfgPath, dbPath string, seedDemo bool) error {
 	dispCtx, cancelDisp := context.WithCancel(context.WithoutCancel(ctx))
 	defer cancelDisp()
 
+	// cmds is CHECK's own runner (job.Deps.Commands, design section 5.5); the
+	// console's POST /tickets/{id}/sandbox-run route (below) is wired to this
+	// same value, so a command it runs is run exactly as CHECK would run it.
+	cmds := job.NewCommandRunner(sbSet.Build, serveRequireSandbox)
+
 	d, err := zdispatch.New(st, tr, b, m, job.Registry(), bindings, zdispatch.Config{
 		Interval:    dispatchInterval(cfg.Dispatch.IntervalSeconds),
 		MaxParallel: dispatchMaxParallel(cfg.Dispatch.MaxParallel),
@@ -342,7 +347,7 @@ func serve(ctx context.Context, cfgPath, dbPath string, seedDemo bool) error {
 		Projects:       projects,
 		Sandboxes:      sbSet,
 		RequireSandbox: serveRequireSandbox,
-		Commands:       job.NewCommandRunner(sbSet.Build, serveRequireSandbox),
+		Commands:       cmds,
 		DataDir:        dataDir,
 		LensesParallel: cfg.Review.MaxLensesParallel,
 		JudgeCodexHome: judgeCodexHome,
@@ -391,7 +396,8 @@ func serve(ctx context.Context, cfgPath, dbPath string, seedDemo bool) error {
 	allowedHosts = append(allowedHosts, hosts...)
 	allowedHosts = append(allowedHosts, cfg.Console.AllowedHosts...)
 
-	handler := console.New(st, b, m, allowedHosts, cfg.Console.Port, logHandler, push, pushToken, floor, sbSet.FirstUnavailable(usedSandboxProfiles(m)), tr, cfg.User)
+	handler := console.New(st, b, m, allowedHosts, cfg.Console.Port, logHandler, push, pushToken, floor, sbSet.FirstUnavailable(usedSandboxProfiles(m)), tr, cfg.User,
+		job.TicketCommands{Store: st, Machine: m, Projects: projects, Commands: cmds})
 	srv := newServer(ctx, handler)
 
 	listeners, err := listenOnAll(ctx, hosts, cfg.Console.Port)
