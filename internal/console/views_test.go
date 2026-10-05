@@ -143,11 +143,12 @@ func TestNavListsEveryLiveTicket(t *testing.T) {
 	if !strings.Contains(logOut, "console: nav live tickets") {
 		t.Fatalf("missing the nav live tickets debug line; got:\n%s", logOut)
 	}
-	if !strings.Contains(logOut, "count=1") {
+	if !strings.Contains(logOut, "count=1 ") {
 		t.Errorf("nav debug line missing count=1; got:\n%s", logOut)
 	}
-	if !strings.Contains(logOut, strconv.FormatInt(planMe, 10)) {
-		t.Errorf("nav debug line missing ticket_id %d; got:\n%s", planMe, logOut)
+	wantIDs := fmt.Sprintf("ticket_ids=[%d]", planMe)
+	if !strings.Contains(logOut, wantIDs) {
+		t.Errorf("nav debug line missing %s; got:\n%s", wantIDs, logOut)
 	}
 	if strings.Contains(logOut, "Plan me") || strings.Contains(logOut, "Shipped") {
 		t.Errorf("nav debug line leaked a ticket title; got:\n%s", logOut)

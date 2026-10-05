@@ -122,6 +122,16 @@ func (c *console) terminalStates() []string {
 	return c.machine.States.Terminal
 }
 
+// stateOrder is the machine's state order, for projectSections' live-ticket
+// sort, nil when no machine is loaded, which leaves every ticket live and
+// in issue-number order (the same nil-machine guard as terminalStates).
+func (c *console) stateOrder() []string {
+	if c.machine == nil {
+		return nil
+	}
+	return c.machine.States.Order
+}
+
 // buildNavThreads turns LiveTickets into #nav's rows, preserving their
 // blocking, unread, issue-number order (design section 6.3, 6.8).
 func buildNavThreads(items []store.LiveTicket) []templates.NavThread {
@@ -190,11 +200,7 @@ func (c *console) mainComponent(ctx context.Context, view string, open, project 
 		if err != nil {
 			return nil, err
 		}
-		var order []string
-		if c.machine != nil {
-			order = c.machine.States.Order
-		}
-		live, closed := projectSections(tickets, order, c.terminalStates())
+		live, closed := projectSections(tickets, c.stateOrder(), c.terminalStates())
 		slog.DebugContext(ctx, "console: project sections", "project_id", project, "live", len(live), "closed", len(closed))
 		return templates.Project(project, live, closed), nil
 	case viewThread:

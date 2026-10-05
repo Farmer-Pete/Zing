@@ -135,13 +135,12 @@ func scanTicket(rs rowScanner, extra ...any) (Ticket, error) {
 	var nextPollAt, pollFingerprint sql.NullString
 	var pollIntervalS sql.NullInt64
 
-	dest := make([]any, 0, 16+len(extra))
-	dest = append(dest,
+	dest := []any{ //nolint:prealloc // the literal spells out ticketColumns's order; extra is variadic and appended once below, not grown in a loop
 		&t.ID, &t.ProjectID, &t.TrackerRef, &t.Title, &t.Body,
 		&kind, &t.State, &waitingOn, &parentTicketID,
 		&branch, &prURL, &claimOwner, &claimExpiresAt,
 		&nextPollAt, &pollIntervalS, &pollFingerprint,
-	)
+	}
 	if err := rs.Scan(append(dest, extra...)...); err != nil {
 		return Ticket{}, err
 	}
