@@ -92,6 +92,13 @@ func buildTimeout(m *machine.Machine) time.Duration {
 // nothing (a nonzero exit from golangci-lint run --fix just means findings
 // remain, which lint reports next).
 //
+// checkCommand is one of runCheckCommands' three commands: its kind, for
+// check_procs and commandResult, and its shell command.
+type checkCommand struct {
+	kind store.CheckKind
+	cmd  string
+}
+
 // Each command's output is kept in a tailBuffer. Each command's process
 // group is recorded in check_procs while it runs and cleared once it ends
 // (plan D10), so a later serve never starts CHECK in this worktree while
@@ -102,15 +109,9 @@ func buildTimeout(m *machine.Machine) time.Duration {
 func runCheckCommands(ctx context.Context, d Deps, t store.Ticket, wt orchestrator.Worktree, proj Project, rid *int64) ([]commandResult, error) {
 	budget := checkBudget(d)
 	budgetStart := checkNow()
-	commands := []struct {
-		kind store.CheckKind
-		cmd  string
-	}{{store.CheckKindLint, proj.LintCmd}, {store.CheckKindTest, proj.TestCmd}}
+	commands := []checkCommand{{store.CheckKindLint, proj.LintCmd}, {store.CheckKindTest, proj.TestCmd}}
 	if proj.FixCmd != "" {
-		commands = append([]struct {
-			kind store.CheckKind
-			cmd  string
-		}{{store.CheckKindFix, proj.FixCmd}}, commands...)
+		commands = append([]checkCommand{{store.CheckKindFix, proj.FixCmd}}, commands...)
 	}
 	results := make([]commandResult, 0, len(commands))
 	for _, c := range commands {
@@ -131,7 +132,7 @@ func runCheckCommands(ctx context.Context, d Deps, t store.Ticket, wt orchestrat
 		}
 		var gen int64
 		onStart := func(pgid int) {
-			gen = recordCheckStart(ctx, d, t.ID, c.kind, pgid, budgetStart)
+			gen = recordCheckStart(ctx, d, t.ID, rid, c.kind, pgid, budgetStart)
 		}
 		r, err := runCheckCommand(ctx, d, t, wt, proj, rid, string(c.kind), c.cmd, remaining, onStart)
 		if gen > 0 {
@@ -206,22 +207,24 @@ func runCheckCommands(ctx context.Context, d Deps, t store.Ticket, wt orchestrat
 // when it cannot) and records the group under the claim (plan D10). A
 // failed write is logged at ERROR and the command keeps running untracked:
 // no row means reclaim cannot find or reap it, so the failure counts as an
-// error rather than a warning (#46). It returns the record's generation, 0
-// when nothing was recorded.
-func recordCheckStart(ctx context.Context, d Deps, ticketID int64, kind store.CheckKind, pgid int, budgetStart time.Time) int64 {
+// error rather than a warning (#46). rid is the unit's newest ok run, or
+// nil during adoption, logged alongside runCheckCommands' own lines so an
+// untracked command can be tied to the run that started it (review r1f3).
+// It returns the record's generation, 0 when nothing was recorded.
+func recordCheckStart(ctx context.Context, d Deps, ticketID int64, rid *int64, kind store.CheckKind, pgid int, budgetStart time.Time) int64 {
 	token, err := proc.StartToken(pgid)
 	if err != nil {
-		slog.Warn("start token unavailable", "ticket_id", ticketID, "command", kind, "pgid", pgid, "error", err)
+		slog.Warn("start token unavailable", "ticket_id", ticketID, "run_id", int64OrZero(rid), "command", kind, "pgid", pgid, "error", err)
 		token = ""
 	}
 	startCtx, cancel := onStartContext(ctx)
 	defer cancel()
 	gen, err := d.Store.RecordCheckStart(startCtx, ticketID, d.Owner, d.Expires, kind, pgid, token, time.Now(), budgetStart)
 	if err != nil {
-		slog.Error("record check start failed", "ticket_id", ticketID, "command", kind, "pgid", pgid, "error", err)
+		slog.Error("record check start failed", "ticket_id", ticketID, "run_id", int64OrZero(rid), "command", kind, "pgid", pgid, "error", err)
 		return 0
 	}
-	slog.Info("check command started", "ticket_id", ticketID, "command", kind, "pgid", pgid, "gen", gen)
+	slog.Info("check command started", "ticket_id", ticketID, "run_id", int64OrZero(rid), "command", kind, "pgid", pgid, "gen", gen)
 	return gen
 }
 

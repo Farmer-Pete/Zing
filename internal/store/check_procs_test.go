@@ -2,6 +2,7 @@ package store
 
 import (
 	"errors"
+	"slices"
 	"testing"
 	"time"
 )
@@ -10,7 +11,6 @@ import (
 const (
 	testCheckKindTest = "test"
 	testCheckKindLint = "lint"
-	testCheckKindFix  = "fix"
 	testCheckToken    = "77.000001"
 	testForeignOwner  = "other-1"
 )
@@ -76,7 +76,7 @@ func TestRecordCheckStartRecordsFix(t *testing.T) {
 	ticketID, expires := claimedTicket(t, s)
 	now := time.Now()
 
-	gen, err := s.RecordCheckStart(ctx, ticketID, testForeignOwner, expires, testCheckKindFix, 4242, testCheckToken, now, now)
+	gen, err := s.RecordCheckStart(ctx, ticketID, testForeignOwner, expires, CheckKindFix, 4242, testCheckToken, now, now)
 	if err != nil {
 		t.Fatalf("RecordCheckStart(fix): %v", err)
 	}
@@ -87,7 +87,7 @@ func TestRecordCheckStartRecordsFix(t *testing.T) {
 	if err != nil || !ok {
 		t.Fatalf("CheckProc = (%+v, %v, %v), want a row", c, ok, err)
 	}
-	if c.Kind != testCheckKindFix || c.PGID != 4242 {
+	if c.Kind != CheckKindFix || c.PGID != 4242 {
 		t.Errorf("row = %+v, want kind fix, pgid 4242", c)
 	}
 	if err := s.ClearCheckStart(ctx, ticketID, gen); err != nil {
@@ -104,8 +104,9 @@ func TestRecordCheckStartRecordsFix(t *testing.T) {
 // this test red.
 func TestCheckKindsAccepted(t *testing.T) {
 	t.Parallel()
-	if got := CheckKinds(); len(got) != 3 || got[0] != CheckKindFix || got[1] != CheckKindLint || got[2] != CheckKindTest {
-		t.Fatalf("CheckKinds() = %v, want [fix lint test]", got)
+	want := []CheckKind{CheckKindFix, CheckKindLint, CheckKindTest}
+	if got := CheckKinds(); !slices.Equal(got, want) {
+		t.Fatalf("CheckKinds() = %v, want %v", got, want)
 	}
 	s := newTestStore(t)
 	ctx := t.Context()

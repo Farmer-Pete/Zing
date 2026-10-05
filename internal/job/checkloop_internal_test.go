@@ -689,9 +689,10 @@ func TestRunCheckCommandLogsFixDuration(t *testing.T) {
 }
 
 // TestRecordCheckStartFailureLogsError proves a failed check-start write is
-// logged at ERROR, not WARN (#46): the command then runs with no
-// check_procs row, so reclaim cannot reap it, and an operator must be able
-// to count that as an error. With no ticket seeded, RecordCheckStart's
+// logged at ERROR, not WARN (#46), with the run id that started the
+// command (review r1f3): the command then runs with no check_procs row, so
+// reclaim cannot reap it, and an operator must be able to count that as an
+// error and tie it to the run. With no ticket seeded, RecordCheckStart's
 // claim fence finds no row and the write fails. Not parallel: it swaps
 // slog.Default.
 func TestRecordCheckStartFailureLogsError(t *testing.T) {
@@ -707,7 +708,8 @@ func TestRecordCheckStartFailureLogsError(t *testing.T) {
 	t.Cleanup(func() { slog.SetDefault(orig) })
 
 	d := Deps{Store: s, Owner: "o", Expires: time.Now().Add(time.Hour)}
-	if gen := recordCheckStart(t.Context(), d, 1, store.CheckKindFix, os.Getpid(), time.Now()); gen != 0 {
+	rid := int64(9)
+	if gen := recordCheckStart(t.Context(), d, 1, &rid, store.CheckKindFix, os.Getpid(), time.Now()); gen != 0 {
 		t.Fatalf("recordCheckStart = %d, want 0", gen)
 	}
 
@@ -727,5 +729,8 @@ func TestRecordCheckStartFailureLogsError(t *testing.T) {
 	}
 	if records[0]["level"] != slogLevelError {
 		t.Errorf("level = %v, want %s", records[0]["level"], slogLevelError)
+	}
+	if records[0]["run_id"] != float64(9) {
+		t.Errorf("run_id = %v, want 9", records[0]["run_id"])
 	}
 }
