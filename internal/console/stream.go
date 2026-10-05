@@ -12,12 +12,19 @@ package console
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"net/http"
 	"time"
 
 	"github.com/starfederation/datastar-go/datastar"
 )
+
+// logMsgBuildNav is #nav's own build-failure log message, named once
+// (goconst) since stream_internal_test.go also matches on it verbatim to
+// prove the regression fix (TestStreamCancelLogsNoError,
+// TestStreamStoreErrorStillLogsError).
+const logMsgBuildNav = "console: stream: build nav"
 
 // streamSignals is the shape GET /stream reads from the client (design
 // section 6.3, 6.4): the three navigation signals the shell's body declares
@@ -66,7 +73,7 @@ func (c *console) handleStream(w http.ResponseWriter, r *http.Request) {
 			n, err := c.store.MarkThreadRead(r.Context(), sig.Open)
 			switch {
 			case err != nil:
-				slog.Error("console: stream: mark thread read", "ticket_id", sig.Open, "view", sig.View, "err", err)
+				logStreamErr(r.Context(), slog.LevelError, "console: stream: mark thread read", err, "ticket_id", sig.Open, "view", sig.View)
 			case n > 0:
 				slog.Info("console: stream: marked thread read", "ticket_id", sig.Open, "marked", n)
 				c.bus.Publish()
@@ -112,6 +119,11 @@ func (c *console) handleStream(w http.ResponseWriter, r *http.Request) {
 // and cascade into another wake. A patch failure here ends the stream, like
 // every other region's, rather than looping (design section 6a, "risk:
 // alerts onWarn re-entrancy").
+//
+// Every failure here is logged through logStreamErr, so a failure after the
+// stream's own context is done -- the owner navigated or closed the tab --
+// logs at Debug instead of its usual level, and so never reaches the
+// #alerts banner.
 func (c *console) patchRegions(ctx context.Context, sse *datastar.ServerSentEventGenerator, sig streamSignals) bool {
 	// nav's own open ticket is sig.Open only in the thread view: every other
 	// view's open is 0 in practice (console.js's reduceNav sets the whole
@@ -124,37 +136,49 @@ func (c *console) patchRegions(ctx context.Context, sse *datastar.ServerSentEven
 	}
 	nav, err := c.navComponent(ctx, navOpen)
 	if err != nil {
-		slog.Error("console: stream: build nav", "err", err)
+		logStreamErr(ctx, slog.LevelError, logMsgBuildNav, err)
 		return false
 	}
 	if patchErr := sse.PatchElementTempl(nav); patchErr != nil {
-		slog.Warn("console: stream: patch nav", "view", sig.View, "open", sig.Open, "err", patchErr)
+		logStreamErr(ctx, slog.LevelWarn, "console: stream: patch nav", patchErr, "view", sig.View, "open", sig.Open)
 		return false
 	}
 
 	main, err := c.mainComponent(ctx, sig.View, sig.Open, sig.Project)
 	if err != nil {
-		slog.Error("console: stream: build main", "view", sig.View, "err", err)
+		logStreamErr(ctx, slog.LevelError, "console: stream: build main", err, "view", sig.View)
 		return false
 	}
 	if patchErr := sse.PatchElementTempl(main); patchErr != nil {
-		slog.Warn("console: stream: patch main", "view", sig.View, "open", sig.Open, "err", patchErr)
+		logStreamErr(ctx, slog.LevelWarn, "console: stream: patch main", patchErr, "view", sig.View, "open", sig.Open)
 		return false
 	}
 
 	rail, err := c.railComponent(ctx, sig.View, sig.Open)
 	if err != nil {
-		slog.Error("console: stream: build rail", "view", sig.View, "open", sig.Open, "err", err)
+		logStreamErr(ctx, slog.LevelError, "console: stream: build rail", err, "view", sig.View, "open", sig.Open)
 		return false
 	}
 	if patchErr := sse.PatchElementTempl(rail); patchErr != nil {
-		slog.Warn("console: stream: patch rail", "view", sig.View, "open", sig.Open, "err", patchErr)
+		logStreamErr(ctx, slog.LevelWarn, "console: stream: patch rail", patchErr, "view", sig.View, "open", sig.Open)
 		return false
 	}
 
 	if patchErr := sse.PatchElementTempl(c.alertsComponent()); patchErr != nil {
-		slog.Warn("console: stream: patch alerts", "view", sig.View, "open", sig.Open, "err", patchErr)
+		logStreamErr(ctx, slog.LevelWarn, "console: stream: patch alerts", patchErr, "view", sig.View, "open", sig.Open)
 		return false
 	}
 	return true
+}
+
+// logStreamErr logs a /stream failure at level, or at Debug once the
+// stream's context is done: a cancelled stream means the owner navigated or
+// closed the tab, not a fault, and #alerts shows every WARN-and-above record
+// the ring holds (views.go's alertsComponent), so a cancellation must never
+// reach it at WARN or ERROR.
+func logStreamErr(ctx context.Context, level slog.Level, msg string, err error, args ...any) {
+	if errors.Is(err, context.Canceled) || ctx.Err() != nil {
+		level = slog.LevelDebug
+	}
+	slog.Log(ctx, level, msg, append(args, "err", err)...)
 }
