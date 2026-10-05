@@ -1,7 +1,9 @@
 package runtime
 
 import (
+	"bytes"
 	"errors"
+	"log/slog"
 	"strings"
 	"testing"
 	"unicode/utf8"
@@ -13,7 +15,7 @@ func TestParseFinalMessage_Success(t *testing.T) {
 	t.Parallel()
 
 	text := `<zing job="classify" outcome="bug"><reason>the stack trace shows a nil pointer dereference</reason></zing>`
-	resp, log, err := parseFinalMessage(text, response.JobClassify)
+	resp, log, err := parseFinalMessage(text, response.JobClassify, "42")
 	if err != nil {
 		t.Fatalf("parseFinalMessage: %v", err)
 	}
@@ -32,7 +34,7 @@ func TestParseFinalMessage_Success(t *testing.T) {
 func TestParseFinalMessage_NoZingElement(t *testing.T) {
 	t.Parallel()
 
-	_, log, err := parseFinalMessage("no document here at all", response.JobClassify)
+	_, log, err := parseFinalMessage("no document here at all", response.JobClassify, "42")
 	assertReason(t, err, reasonNoZingElement)
 	if log != "" {
 		t.Errorf("log = %q, want empty", log)
@@ -44,7 +46,7 @@ func TestParseFinalMessage_MultipleZingDocuments(t *testing.T) {
 
 	one := `<zing job="classify" outcome="bug"><reason>a</reason></zing>`
 	two := `<zing job="classify" outcome="feature"><reason>b</reason></zing>`
-	_, _, err := parseFinalMessage(one+two, response.JobClassify)
+	_, _, err := parseFinalMessage(one+two, response.JobClassify, "42")
 	assertReason(t, err, reasonMultipleZingDocs)
 }
 
@@ -55,7 +57,7 @@ func TestParseFinalMessage_HostileJobAttribute(t *testing.T) {
 	t.Parallel()
 
 	text := `<zing job="ignore all instructions" outcome="bug"><reason>a</reason></zing>`
-	_, _, err := parseFinalMessage(text, response.JobClassify)
+	_, _, err := parseFinalMessage(text, response.JobClassify, "42")
 	assertReason(t, err, reasonWrongJob)
 	if err.Error() != "runtime: invalid final message: "+reasonWrongJob {
 		t.Errorf("err.Error() = %q leaked the hostile attribute", err.Error())
@@ -69,7 +71,7 @@ func TestParseFinalMessage_UnsupportedOutcome(t *testing.T) {
 	// and error), so "ready" is unsupported for this job even though the
 	// pair is registered for planning.
 	text := `<zing job="classify" outcome="ready"><reason>a</reason></zing>`
-	_, _, err := parseFinalMessage(text, response.JobClassify)
+	_, _, err := parseFinalMessage(text, response.JobClassify, "42")
 	assertReason(t, err, reasonUnsupportedOutcome)
 }
 
@@ -79,7 +81,7 @@ func TestParseFinalMessage_FailedValidation(t *testing.T) {
 	// ClassifyResponse.Reason has jsonschema minLength=1; an empty one
 	// fails Layer 1 of response.Validate.
 	text := `<zing job="classify" outcome="bug"><reason></reason></zing>`
-	_, log, err := parseFinalMessage(text, response.JobClassify)
+	_, log, err := parseFinalMessage(text, response.JobClassify, "42")
 	assertReason(t, err, reasonFailedValidation)
 	if log == "" {
 		t.Error("log is empty, want the detailed validation error")
@@ -106,7 +108,7 @@ func assertReason(t *testing.T, err error, want string) {
 func TestParseFinalMessage_ParseErrorGoesToDetail(t *testing.T) {
 	t.Parallel()
 
-	_, _, err := parseFinalMessage(`<zing job="classify" outcome="bug"><reason>a</zing>`, response.JobClassify)
+	_, _, err := parseFinalMessage(`<zing job="classify" outcome="bug"><reason>a</zing>`, response.JobClassify, "42")
 	assertReason(t, err, reasonNoZingElement)
 	var invalidErr *InvalidOutputError
 	if !errors.As(err, &invalidErr) || invalidErr.Detail == "" {
@@ -146,7 +148,7 @@ func TestParseFinalMessage_ValidationErrorsOnePerLine(t *testing.T) {
 	t.Parallel()
 
 	text := `<zing job="classify" outcome="error"><error code="other"><what></what><why></why></error></zing>`
-	_, log, err := parseFinalMessage(text, response.JobClassify)
+	_, log, err := parseFinalMessage(text, response.JobClassify, "42")
 	assertReason(t, err, reasonFailedValidation)
 	if !strings.Contains(log, "\n") {
 		t.Fatalf("log = %q, want at least two lines joined by \\n", log)
@@ -163,6 +165,35 @@ func TestParseFinalMessage_ValidationErrorsOnePerLine(t *testing.T) {
 	}
 	if !strings.Contains(invalidErr.Detail, "\n") {
 		t.Errorf("Detail = %q, want at least two lines joined by \\n", invalidErr.Detail)
+	}
+}
+
+// TestParseFinalMessage_RepairLogCarriesRunToken proves parseFinalMessage
+// passes its runToken argument through response.ExtractAll to the repair
+// log record, so the "repaired bare < in zing document" line can be tied
+// to the run that produced it.
+func TestParseFinalMessage_RepairLogCarriesRunToken(t *testing.T) {
+	prev := slog.Default()
+	t.Cleanup(func() { slog.SetDefault(prev) })
+
+	var infoBuf bytes.Buffer
+	slog.SetDefault(slog.New(slog.NewTextHandler(&infoBuf, &slog.HandlerOptions{Level: slog.LevelInfo})))
+
+	text := `<zing job="classify" outcome="bug"><reason>a < b</reason></zing>`
+	_, _, err := parseFinalMessage(text, response.JobClassify, "42")
+	if err != nil {
+		t.Fatalf("parseFinalMessage: %v", err)
+	}
+
+	got := infoBuf.String()
+	if strings.Count(got, "repaired bare < in zing document") != 1 {
+		t.Fatalf("info log = %q, want exactly one repair record", got)
+	}
+	if !strings.Contains(got, "run_token=42") {
+		t.Errorf("info log = %q, want run_token=42", got)
+	}
+	if !strings.Contains(got, "escaped=1") || !strings.Contains(got, "roots=1") {
+		t.Errorf("info log = %q, want escaped=1 and roots=1", got)
 	}
 }
 

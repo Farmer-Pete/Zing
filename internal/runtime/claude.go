@@ -701,7 +701,7 @@ func (c Claude) run(ctx context.Context, req RunRequest, argv []string, sessionI
 		return res, &InvalidOutputError{Reason: reasonNoZingElement}
 	}
 
-	resp, logText, ferr := parseFinalMessage(cr.Result, req.Job)
+	resp, logText, ferr := parseFinalMessage(cr.Result, req.Job, req.RunToken)
 	res.Log = logText
 	if ferr != nil {
 		return res, ferr

@@ -56,7 +56,7 @@ func StopHook(stdin io.Reader, job response.Job, statePath string) (out []byte, 
 		st.Unread++
 		return nil, writeStopHookState(statePath, st)
 	}
-	_, _, perr := parseFinalMessage(*in.LastAssistantMessage, job)
+	_, _, perr := parseFinalMessage(*in.LastAssistantMessage, job, "")
 	if perr == nil || st.Blocks >= maxStopBlocks {
 		return nil, writeStopHookState(statePath, st)
 	}
