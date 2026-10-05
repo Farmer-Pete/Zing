@@ -90,7 +90,10 @@ templ palette() {
 		}
 		/* #alerts (design section 6a, D8): a live strip above .layout, empty
 		   (and so invisible, no border/padding to show) when there are no
-		   WARN-or-above lines. */
+		   WARN-or-above lines. Bug fix: the strip holds up to alertsLimit (20)
+		   lines in normal flow, so every new line pushed .layout down.
+		   max-height caps it at about three .alert-line rows (5.5rem, padding
+		   and border included under border-box) and the rest scroll inside. */
 		#alerts:empty { display: none; }
 		.alert-lines {
 			list-style: none;
@@ -98,6 +101,8 @@ templ palette() {
 			padding: 0.5rem 1rem;
 			border-bottom: 1px solid var(--zing-border);
 			background: var(--zing-surface);
+			max-height: 5.5rem;
+			overflow-y: auto;
 		}
 		.alert-line {
 			display: flex;

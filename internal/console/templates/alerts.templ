@@ -20,7 +20,7 @@ import "strconv"
 templ Alerts(lines []AlertLine) {
 	<div id="alerts" class="alerts" role="status" aria-live="polite" aria-atomic="false">
 		if len(lines) > 0 {
-			<ul class="alert-lines">
+			<ul class="alert-lines" tabindex="0">
 				for _, line := range lines {
 					<li class={ "alert-line alert-level-" + line.Level }>
 						<span class="alert-time">{ line.Time }</span>
