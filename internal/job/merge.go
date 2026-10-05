@@ -377,7 +377,7 @@ func (h shipHandler) mergeCheck(ctx context.Context, t store.Ticket, d Deps, pro
 	}
 
 	checkProj := proj
-	if proj.FixCmd != "" && (len(res.Marked) > 0 || len(res.Binary) > 0) {
+	if proj.FixCmd != "" && res.Unresolved() {
 		// fix's own lane snapshot (runCheckCommands' ChangedPaths call)
 		// cannot read a path the index still carries unmerged, so fix is
 		// skipped for this tick while any such path remains.

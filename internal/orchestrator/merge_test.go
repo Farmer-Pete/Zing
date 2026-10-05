@@ -553,6 +553,57 @@ func TestStageResolvedPaths(t *testing.T) {
 	}
 }
 
+// TestStageResolvedPathsStagesRemovedPath proves StageResolvedPaths' Staged
+// branch also covers a delete/modify conflict the merge agent settled by
+// removing the file: fileLooksBinary and fileHasConflictMarkers both report
+// false for an absent path, so it is staged too, and "git add -u" records
+// the removal rather than erroring on a missing pathspec target.
+func TestStageResolvedPathsStagesRemovedPath(t *testing.T) {
+	t.Parallel()
+	ctx := t.Context()
+	f := newMergeConflictFixture(t, 55)
+
+	if _, err := f.o.StartBaseMerge(ctx, f.wt, f.baseSHA); err != nil {
+		t.Fatalf("StartBaseMerge: unexpected error: %v", err)
+	}
+
+	if err := os.Remove(filepath.Join(f.wt.Dir(), mergeSharedPath)); err != nil {
+		t.Fatalf("os.Remove: unexpected error: %v", err)
+	}
+
+	res, err := f.o.StageResolvedPaths(ctx, f.wt)
+	if err != nil {
+		t.Fatalf("StageResolvedPaths: unexpected error: %v", err)
+	}
+	if want := []string{mergeSharedPath}; !slices.Equal(res.Staged, want) {
+		t.Errorf("StageResolvedPaths Staged = %v, want %v", res.Staged, want)
+	}
+	if len(res.Marked) != 0 {
+		t.Errorf("StageResolvedPaths Marked = %v, want empty", res.Marked)
+	}
+	if len(res.Binary) != 0 {
+		t.Errorf("StageResolvedPaths Binary = %v, want empty", res.Binary)
+	}
+
+	status := runGit(ctx, t, f.wt.Dir(), "status", "--porcelain")
+	found := false
+	for line := range strings.SplitSeq(strings.TrimRight(status, "\n"), "\n") {
+		if strings.HasSuffix(line, mergeSharedPath) {
+			found = true
+			if !strings.HasPrefix(line, "D  ") {
+				t.Errorf("status line for %s = %q, want prefix %q", mergeSharedPath, line, "D  ")
+			}
+		}
+	}
+	if !found {
+		t.Errorf("git status --porcelain = %q, wanted a line for %s", status, mergeSharedPath)
+	}
+
+	if _, err := f.o.ChangedPaths(ctx, f.wt); err != nil {
+		t.Errorf("ChangedPaths (after staging): unexpected error: %v", err)
+	}
+}
+
 // TestStageResolvedPathsKeepsMarkedPath proves StageResolvedPaths never
 // stages a path whose working-tree file still holds a conflict marker
 // line: it comes back in Marked, left unstaged, so the index still shows
