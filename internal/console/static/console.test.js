@@ -640,9 +640,14 @@ test('reduceStreamStatus marks stale on reconnecting and failures, clears on set
 	assert.equal(started.effect.settleGen, started.status.gen);
 
 	// finished bumps gen on the last in-flight request too, so a settle timer
-	// armed by that stream's own started is stale by the time it fires.
-	const lastFinished = reduceStreamStatus({ inflight: 1, gen: 3, attempt: 0, staleSince: null }, { type: 'finished' }, 0);
-	assert.equal(lastFinished.status.gen, 4);
+	// armed by that stream's own started cannot clear a stale marker set
+	// after it finished: the settle timer's captured gen is stale by then.
+	let seq = reduceStreamStatus(emptyStreamStatus(), { type: 'started' }, 0);
+	const settleGen = seq.effect.settleGen;
+	seq = reduceStreamStatus(seq.status, { type: 'finished' }, 0);
+	seq = reduceStreamStatus(seq.status, { type: 'reconnecting' }, 100);
+	result = reduceStreamStatus(seq.status, { type: 'settled', gen: settleGen }, 200);
+	assert.equal(result.status.staleSince, 100);
 });
 
 test('staleMarkerText formats the stale time', () => {

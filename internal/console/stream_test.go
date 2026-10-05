@@ -76,13 +76,15 @@ func newReadTimeoutTestServer(t *testing.T, s *store.Store, b *bus.Broker, readT
 	})
 }
 
-// TestStreamOutlivesServerReadTimeout proves a /stream connection survives
-// past the server's own ReadTimeout: newServer (cmd/zing/serve.go) sets
-// ReadTimeout to 10s, and handleStream cleared only the write deadline, so
-// net/http's background read against the (uncleared) read deadline canceled
-// r.Context() out from under a stream that was still open and healthy, and
-// the stream ended for good. This pins that mechanism with a 200ms
-// ReadTimeout instead of 10s, so the test runs in under a second.
+// TestStreamOutlivesServerReadTimeout is a non-regression guard: a /stream
+// connection stays open and keeps patching past the server's own
+// ReadTimeout (200ms here, in place of newServer's 10s, so the test runs in
+// under a second). It passes with or without handleStream's
+// SetReadDeadline(time.Time{}) call, because this request is a bodyless
+// GET and go1.27's net/http (server.go startBackgroundRead) already clears
+// the read deadline before the handler runs; it does not reproduce the
+// 19:25:57 cancel (H1 remains unconfirmed), but it does pin the outcome the
+// fix is for.
 func TestStreamOutlivesServerReadTimeout(t *testing.T) {
 	t.Parallel()
 	s := newConsoleTestStore(t)

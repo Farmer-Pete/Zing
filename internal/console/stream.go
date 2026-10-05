@@ -46,6 +46,7 @@ func (c *console) handleStream(w http.ResponseWriter, r *http.Request) {
 	// cause of the 19:25:57 cancel (H1 is unconfirmed). It guards against a
 	// request shape where net/http does not clear it first.
 	if err := rc.SetReadDeadline(time.Time{}); err != nil {
+		slog.Error("console: stream: clear read deadline", "err", err)
 		http.Error(w, "streaming unsupported", http.StatusInternalServerError)
 		return
 	}

@@ -1015,6 +1015,7 @@ function applyStreamEvent(event) {
 		setTimeout(() => applyStreamEvent({ type: 'settled', gen }), STREAM_SETTLE_MS);
 	}
 	if (effect.reconnectIn !== null) {
+		console.warn('console.js: /stream reconnecting', { delayMs: effect.reconnectIn, attempt: streamStatus.attempt });
 		clearTimeout(reconnectTimerID);
 		reconnectTimerID = setTimeout(() => {
 			reconnectTimerID = null;
@@ -1054,7 +1055,11 @@ function installStreamWatch() {
 		if (event.detail?.el?.id !== 'stream-ctl') {
 			return;
 		}
-		applyStreamEvent({ type: event.detail.type });
+		const { type } = event.detail;
+		if (type === 'error' || type === 'retries-failed') {
+			console.error('console.js: /stream', type, event.detail);
+		}
+		applyStreamEvent({ type });
 	});
 }
 
