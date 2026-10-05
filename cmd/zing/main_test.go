@@ -51,7 +51,7 @@ func TestShutdownCancelsRequests(t *testing.T) {
 		}
 	})
 
-	if err := srv.Shutdown(t.Context()); err != nil {
+	if err := srv.Shutdown(shutdownContext(t)); err != nil {
 		t.Fatalf("Shutdown: %v", err)
 	}
 
