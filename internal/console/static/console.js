@@ -602,7 +602,9 @@ async function postSide(button) {
 		const html = await resp.text();
 		const reply = box.querySelector('#side-reply');
 		if (reply) {
+			suppressPatchSignal = true;
 			reply.outerHTML = html;
+			suppressPatchSignal = false;
 		}
 	} catch (err) {
 		console.error('console.js: POST /side', err);
@@ -645,7 +647,9 @@ async function pickupIssue(button) {
 	}
 	const n = Number(input.value);
 	if (!Number.isInteger(n) || n <= 0) {
+		suppressPatchSignal = true;
 		errorSpan.textContent = 'enter a positive issue number';
+		suppressPatchSignal = false;
 		return;
 	}
 	try {
@@ -655,14 +659,21 @@ async function pickupIssue(button) {
 			body: JSON.stringify({ n }),
 		});
 		if (!resp.ok) {
-			errorSpan.textContent = await resp.text();
+			const text = await resp.text();
+			suppressPatchSignal = true;
+			errorSpan.textContent = text;
+			suppressPatchSignal = false;
 			return;
 		}
 		input.value = '';
+		suppressPatchSignal = true;
 		errorSpan.textContent = '';
+		suppressPatchSignal = false;
 	} catch (err) {
 		console.error('console.js: POST /projects/{id}/pickup', err);
+		suppressPatchSignal = true;
 		errorSpan.textContent = 'request failed';
+		suppressPatchSignal = false;
 	}
 }
 
@@ -996,6 +1007,15 @@ function runPatchWork() {
 let streamStatus = emptyStreamStatus();
 let reconnectTimerID = null;
 
+// suppressPatchSignal is true for the duration of a client-side write under
+// #main or #rail that is not a live /stream patch (postSide's
+// reply.outerHTML swap, pickupIssue's errorSpan.textContent writes):
+// installPatchObserver's MutationObserver fires for those too, and without
+// this flag it would wrongly read them as proof the stream is live, clearing
+// the stale marker and resetting the reconnect backoff while /stream itself
+// may still be down.
+let suppressPatchSignal = false;
+
 // applyStreamEvent is console.js's one entry point into reduceStreamStatus
 // (keyboard.mjs): it folds event into streamStatus, then applies the pure
 // result's effect as DOM/timer side effects -- canceling a pending
@@ -1076,10 +1096,16 @@ function installPatchObserver() {
 	// that a real /stream frame patched the page, the signal
 	// markStreamConnected (bug fix, state.streamConnected above) needs, and
 	// also a live signal for applyStreamEvent's own reduceStreamStatus
-	// 'patched' case.
+	// 'patched' case. The one exception is suppressPatchSignal: postSide and
+	// pickupIssue also write under #main/#rail outside of a /stream frame,
+	// so while that flag is set this skips only the 'patched' signal into
+	// the reconnect state machine, not markStreamConnected/runPatchWork,
+	// which stay correct for those writes too.
 	const observer = new MutationObserver(() => {
 		markStreamConnected();
-		applyStreamEvent({ type: 'patched' });
+		if (!suppressPatchSignal) {
+			applyStreamEvent({ type: 'patched' });
+		}
 		runPatchWork();
 	});
 	for (const id of ['main', 'rail']) {

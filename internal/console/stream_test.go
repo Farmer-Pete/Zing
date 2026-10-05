@@ -76,15 +76,15 @@ func newReadTimeoutTestServer(t *testing.T, s *store.Store, b *bus.Broker, readT
 	})
 }
 
-// TestStreamOutlivesServerReadTimeout is a non-regression guard: a /stream
-// connection stays open and keeps patching past the server's own
+// TestStreamOutlivesServerReadTimeout pins the outcome the fix targets: a
+// /stream connection stays open and keeps patching past the server's own
 // ReadTimeout (200ms here, in place of newServer's 10s, so the test runs in
-// under a second). It passes with or without handleStream's
-// SetReadDeadline(time.Time{}) call, because this request is a bodyless
-// GET and go1.27's net/http (server.go startBackgroundRead) already clears
-// the read deadline before the handler runs; it does not reproduce the
-// 19:25:57 cancel (H1 remains unconfirmed), but it does pin the outcome the
-// fix is for.
+// under a second). It is not a regression test of handleStream's own
+// SetReadDeadline(time.Time{}) call -- the test passes with or without that
+// call, because this request is a bodyless GET and go1.27's net/http
+// (server.go startBackgroundRead) already clears the read deadline before
+// the handler runs -- so it does not reproduce the 19:25:57 cancel (H1
+// remains unconfirmed).
 func TestStreamOutlivesServerReadTimeout(t *testing.T) {
 	t.Parallel()
 	s := newConsoleTestStore(t)
