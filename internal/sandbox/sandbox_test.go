@@ -641,6 +641,14 @@ func TestLoadRejectsProfileBeforeResolvingHost(t *testing.T) {
 // unsafe value is what proves() trips on, not an unrelated nested-sandbox
 // chmod denial.
 //
+// The profile carries "(allow default)" (review r3f3): without it, proves()
+// can never exec /usr/bin/true at all, and Load would report "profile
+// rejected" whatever SSH_AUTH_SOCK holds, so the test would pass even with
+// the proves() wiring it guards removed. The control step with a safe value
+// first proves the same profile loads Available() under this test's own
+// setup, so the later rejection can only come from the unsafe value reaching
+// Prefix through proves().
+//
 // Not parallel: it calls t.Setenv("SSH_AUTH_SOCK", ...).
 func TestLoadRejectsUnsafeAgentSocket(t *testing.T) {
 	if runtime.GOOS != testGOOSDarwin {
@@ -649,10 +657,17 @@ func TestLoadRejectsUnsafeAgentSocket(t *testing.T) {
 	if shouldSkipSandboxed() {
 		t.Skip("running inside a seatbelt sandbox: cannot start sandbox-exec")
 	}
-	t.Setenv("SSH_AUTH_SOCK", `/tmp/a"b`)
 
-	valid := []byte("(version 1)\n;;READ_PATHS;;\n;;CONSOLE_DENY;;\n")
+	valid := []byte("(version 1)\n(allow default)\n;;READ_PATHS;;\n;;CONSOLE_DENY;;\n")
+
+	t.Setenv("SSH_AUTH_SOCK", "/tmp/ok")
 	sb := Load(valid, t.TempDir(), nil, 7420)
+	if !sb.Available() {
+		t.Fatalf("Load with a safe SSH_AUTH_SOCK: want available, got unavailable (%q)", sb.Reason())
+	}
+
+	t.Setenv("SSH_AUTH_SOCK", `/tmp/a"b`)
+	sb = Load(valid, t.TempDir(), nil, 7420)
 	if sb.Available() {
 		t.Fatal("Load with an unsafe SSH_AUTH_SOCK: want unavailable")
 	}

@@ -1253,11 +1253,15 @@ func listenUnix(t *testing.T, path string) net.Listener {
 // an ssh-agent, one reached directly (SSHAuthSockReal) and the other
 // reached through a symlink (SSHAuthSock), plus a sibling socket the deny
 // must not touch. Past the main case with both params set, it also tries
-// each param alone, an alias symlink the sandboxed process creates for
-// itself, and a non-canonical spelling of the real path, so each rule and
-// each of seatbelt's own path-matching assumptions has a case that fails
-// without it (review r1f4, r1f6). The socket directory is created
-// directly under /tmp, not under t.TempDir()'s own deeper base, to stay
+// SSH_AUTH_SOCK alone, dialing the exact path the rule names, so each rule
+// has a case that fails without it (review r1f4). It does not try aliasing
+// the socket through an unnamed path (a different symlink, or a
+// non-canonical spelling); that belongs to the exploratory
+// testAgentSocketAliasing below, kept out of this function and out of the
+// plan's own demo loop because it rests on an assumption the plan does not
+// make: that seatbelt's path-literal match runs against the resolved vnode
+// rather than a connect's own sun_path (review r3f1). The socket directory
+// is created directly under /tmp, not under t.TempDir()'s own deeper base, to stay
 // well under a unix socket's 104-byte sun_path limit, and is also used as
 // p.RunDir so a write-gated false failure (the socket directory itself
 // being outside every write-allow) can never be mistaken for the network
@@ -1322,40 +1326,9 @@ func testDeniesAgentSocket(t *testing.T, sb Sandbox, p Params) {
 	p.SSHAuthSockReal = ""
 	denyAgentSock(agentSock, "only SSH_AUTH_SOCK set")
 
-	// Only SSH_AUTH_SOCK_REAL names the socket; SSH_AUTH_SOCK is left at
-	// the sentinel. Dialing through linkSock, a symlink the resolved-path
-	// rule does not name literally, shows whether seatbelt's path-literal
-	// match runs against a connect's own sun_path or against the vnode it
-	// resolves to (review r1f4).
-	p.SSHAuthSock = ""
-	p.SSHAuthSockReal = agentSock
-	denyAgentSock(linkSock, "only SSH_AUTH_SOCK_REAL set, dialing a symlink to it")
-
-	// Restore both params for the remaining alias cases, the way a real
-	// run carries them.
+	// Restore both params, the way a real run carries them.
 	p.SSHAuthSock = linkSock
 	p.SSHAuthSockReal = agentSock
-
-	// A symlink the sandboxed process itself creates, under its own
-	// writable RunDir, pointing straight at the real agent socket: if
-	// path-literal matched a connect's own sun_path rather than the
-	// resolved vnode, this alias would reach the agent neither named path
-	// denies (review r1f6).
-	aliasSock := filepath.Join(dir, "alias.sock")
-	aliasCmd := fmt.Sprintf("ln -s %s %s && exec /usr/bin/nc -U -w 2 %s", agentSock, aliasSock, aliasSock)
-	if exitCode, out := runSandboxed(t, sb, p, "/bin/sh", "-c", aliasCmd); exitCode == 0 {
-		t.Errorf("nc -U a sandbox-created alias symlink to the denied agent socket: want a non-zero exit, got 0 (output %q)", out)
-	}
-	wantAgentTotal++
-	if got := waitForAccept(t, "unix", agentSock, &agentAccepts); got != wantAgentTotal {
-		t.Errorf("agent socket listener accepted %d connections (including this function's own control probes) after the alias-symlink case, want %d: path-literal must match the resolved vnode, not a connect's own sun_path", got, wantAgentTotal)
-	}
-
-	// A non-canonical spelling of the same path (an extra "/./" element):
-	// if path-literal matched only the exact byte string, this would also
-	// slip past the deny despite naming the identical vnode (review
-	// r1f6).
-	denyAgentSock(dir+"/./agent.sock", "a non-canonical spelling of the denied agent socket")
 
 	if exitCode, out := runSandboxed(t, sb, p, "/usr/bin/nc", "-U", "-w", "2", otherSock); exitCode != 0 {
 		t.Errorf("nc -U %s (a socket the profile does not name): exit %d, want 0 (output %q)", otherSock, exitCode, out)
@@ -1383,6 +1356,111 @@ func TestJudgeDeniesAgentSocket(t *testing.T) {
 	sb := newLoadedJudgeSandbox(t)
 	dirs := newTestDirs(t)
 	testDeniesAgentSocket(t, sb, dirs.judgeParams(t))
+}
+
+// testAgentSocketAliasing is exploratory, not part of the plan's own demo
+// loop (`Test(Build|Judge)Denies(GitPush|AgentSocket)`): both its cases
+// assume seatbelt's path-literal unix-socket match runs against the
+// resolved vnode rather than a connect's own sun_path, an assumption the
+// plan is explicit it does not know holds (review r3f1). If the kernel
+// matches sun_path instead, both cases below fail on their own, without
+// taking the plan's required TestBuildDeniesAgentSocket or
+// TestJudgeDeniesAgentSocket -- or its demo loop -- down with them. Kept
+// here as a standing probe of that assumption rather than deleted, so a
+// kernel change that starts allowing an alias is caught by name.
+func testAgentSocketAliasing(t *testing.T, sb Sandbox, p Params) {
+	t.Helper()
+
+	dir, err := os.MkdirTemp("/tmp", "zsa") //nolint:usetesting // a unix socket's sun_path is 104 bytes; t.TempDir() nests too deep under macOS's own temp root
+	if err != nil {
+		t.Fatalf("MkdirTemp: %v", err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	if resolved, evalErr := filepath.EvalSymlinks(dir); evalErr == nil {
+		dir = resolved
+	}
+	p.RunDir = dir
+
+	agentSock := filepath.Join(dir, "agent.sock")
+	linkSock := filepath.Join(dir, "link.sock")
+
+	agentLn := listenUnix(t, agentSock)
+	defer func() { _ = agentLn.Close() }()
+	var agentAccepts int64
+	go countingAccepts(agentLn, &agentAccepts)
+
+	if symlinkErr := os.Symlink(agentSock, linkSock); symlinkErr != nil {
+		t.Fatalf("symlink: %v", symlinkErr)
+	}
+
+	wantAgentTotal := int64(0)
+
+	// Only SSH_AUTH_SOCK_REAL names the socket; SSH_AUTH_SOCK is left at
+	// Prefix's own sentinel. Dialing through linkSock, a symlink the
+	// resolved-path rule does not name literally, shows whether the deny
+	// reaches an alias of the real path and not just the real path itself
+	// (review r1f4).
+	p.SSHAuthSock = ""
+	p.SSHAuthSockReal = agentSock
+	if exitCode, out := runSandboxed(t, sb, p, "/usr/bin/nc", "-U", "-w", "2", linkSock); exitCode == 0 {
+		t.Errorf("nc -U %s (only SSH_AUTH_SOCK_REAL set, dialing a symlink to it): want a non-zero exit, got 0 (output %q)", linkSock, out)
+	}
+	wantAgentTotal++
+	if got := waitForAccept(t, "unix", agentSock, &agentAccepts); got != wantAgentTotal {
+		t.Errorf("agent socket listener accepted %d connections after dialing a symlink with only SSH_AUTH_SOCK_REAL set, want %d", got, wantAgentTotal)
+	}
+
+	// Restore both params, the way a real run carries them.
+	p.SSHAuthSock = linkSock
+	p.SSHAuthSockReal = agentSock
+
+	// A symlink the sandboxed process itself creates, under its own
+	// writable RunDir, pointing straight at the real agent socket: if
+	// path-literal matched a connect's own sun_path rather than the
+	// resolved vnode, this alias would reach the agent neither named path
+	// denies (review r1f6).
+	aliasSock := filepath.Join(dir, "alias.sock")
+	aliasCmd := fmt.Sprintf("ln -s %s %s && exec /usr/bin/nc -U -w 2 %s", agentSock, aliasSock, aliasSock)
+	if exitCode, out := runSandboxed(t, sb, p, "/bin/sh", "-c", aliasCmd); exitCode == 0 {
+		t.Errorf("nc -U a sandbox-created alias symlink to the denied agent socket: want a non-zero exit, got 0 (output %q)", out)
+	}
+	wantAgentTotal++
+	if got := waitForAccept(t, "unix", agentSock, &agentAccepts); got != wantAgentTotal {
+		t.Errorf("agent socket listener accepted %d connections after the alias-symlink case, want %d: path-literal must match the resolved vnode, not a connect's own sun_path", got, wantAgentTotal)
+	}
+
+	// A non-canonical spelling of the same path (an extra "/./" element):
+	// if path-literal matched only the exact byte string, this would also
+	// slip past the deny despite naming the identical vnode (review
+	// r1f6).
+	noncanonical := dir + "/./agent.sock"
+	if exitCode, out := runSandboxed(t, sb, p, "/usr/bin/nc", "-U", "-w", "2", noncanonical); exitCode == 0 {
+		t.Errorf("nc -U %s (a non-canonical spelling of the denied agent socket): want a non-zero exit, got 0 (output %q)", noncanonical, out)
+	}
+	wantAgentTotal++
+	if got := waitForAccept(t, "unix", agentSock, &agentAccepts); got != wantAgentTotal {
+		t.Errorf("agent socket listener accepted %d connections after dialing a non-canonical spelling of the denied path, want %d", got, wantAgentTotal)
+	}
+}
+
+// TestBuildAgentSocketDenyMatchesResolvedPath is testAgentSocketAliasing
+// under build.sb. Not named to match the plan's demo loop regex, so it is
+// not one of the four probes the plan's design counts on (review r3f1).
+func TestBuildAgentSocketDenyMatchesResolvedPath(t *testing.T) {
+	t.Parallel()
+	sb := newLoadedSandbox(t, nil, 7420)
+	dirs := newTestDirs(t)
+	testAgentSocketAliasing(t, sb, dirs.params())
+}
+
+// TestJudgeAgentSocketDenyMatchesResolvedPath is
+// TestBuildAgentSocketDenyMatchesResolvedPath's own counterpart under
+// judge.sb.
+func TestJudgeAgentSocketDenyMatchesResolvedPath(t *testing.T) {
+	t.Parallel()
+	sb := newLoadedJudgeSandbox(t)
+	dirs := newTestDirs(t)
+	testAgentSocketAliasing(t, sb, dirs.judgeParams(t))
 }
 
 // captureSandboxAgentSocketLog swaps slog's default logger for a
