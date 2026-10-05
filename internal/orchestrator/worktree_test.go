@@ -3115,3 +3115,53 @@ func TestFetchBaseRejectsInvalidDefaultBranch(t *testing.T) {
 		logFieldReason:   "invalid_default_branch",
 	})
 }
+
+// TestExistingWorktreeAbsent proves ExistingWorktree never creates anything:
+// a ticket with no worktree directory gets ErrNoWorktree, the directory is
+// still absent afterward, and no zing/ branch was cut for it.
+func TestExistingWorktreeAbsent(t *testing.T) {
+	t.Parallel()
+	repo := newTestRepo(t)
+	o := newTestOrchestrator(t, repo, execRunner{})
+	ctx := t.Context()
+
+	_, err := o.ExistingWorktree(ctx, 1)
+	if !errors.Is(err, ErrNoWorktree) {
+		t.Fatalf("ExistingWorktree: err = %v, want errors.Is(err, ErrNoWorktree)", err)
+	}
+
+	dir := filepath.Join(repo, ".zing", "wt", "1")
+	if _, statErr := os.Stat(dir); !errors.Is(statErr, os.ErrNotExist) {
+		t.Errorf("os.Stat(%s) = %v, want os.ErrNotExist", dir, statErr)
+	}
+
+	branches := runGit(ctx, t, repo, "branch", "--list", "zing/*")
+	if strings.TrimSpace(branches) != "" {
+		t.Errorf("expected no zing/ branch, got:\n%s", branches)
+	}
+}
+
+// TestExistingWorktreePresent proves ExistingWorktree reopens an already-
+// prepared worktree, returning the same Dir and Branch, with no error.
+func TestExistingWorktreePresent(t *testing.T) {
+	t.Parallel()
+	repo := newTestRepo(t)
+	o := newTestOrchestrator(t, repo, execRunner{})
+	ctx := t.Context()
+
+	prepared, err := o.PrepareWorktree(ctx, 1, "", nil)
+	if err != nil {
+		t.Fatalf("PrepareWorktree: %v", err)
+	}
+
+	wt, err := o.ExistingWorktree(ctx, 1)
+	if err != nil {
+		t.Fatalf("ExistingWorktree: %v", err)
+	}
+	if wt.Dir() != prepared.Dir() {
+		t.Errorf("Dir() = %q, want %q", wt.Dir(), prepared.Dir())
+	}
+	if wt.Branch() != prepared.Branch() {
+		t.Errorf("Branch() = %q, want %q", wt.Branch(), prepared.Branch())
+	}
+}

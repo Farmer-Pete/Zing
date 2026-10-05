@@ -701,6 +701,31 @@ func (o *Orchestrator) baseRev(ctx context.Context, ticketID int64) (string, err
 	return sha, nil
 }
 
+// worktreeDir is ticketID's worktree directory, <local_path>/.zing/wt/<id>.
+func (o *Orchestrator) worktreeDir(ticketID int64) string {
+	return filepath.Join(o.proj.LocalPath, ".zing", "wt", strconv.FormatInt(ticketID, 10))
+}
+
+// ErrNoWorktree is ExistingWorktree's error when the ticket has no
+// worktree directory.
+var ErrNoWorktree = errors.New("orchestrator: no worktree")
+
+// ExistingWorktree returns ticketID's worktree when its directory exists,
+// with the same checks EnsureWorktree applies to a present directory. It
+// never creates a directory, branch, or worktree: a missing directory
+// returns an error wrapping ErrNoWorktree.
+func (o *Orchestrator) ExistingWorktree(ctx context.Context, ticketID int64) (Worktree, error) {
+	dir := o.worktreeDir(ticketID)
+	_, statErr := os.Stat(dir)
+	switch {
+	case errors.Is(statErr, os.ErrNotExist):
+		return Worktree{}, fmt.Errorf("orchestrator: ticket %d: %w", ticketID, ErrNoWorktree)
+	case statErr != nil:
+		return Worktree{}, fmt.Errorf("orchestrator: existing worktree: stat %s: %w", dir, statErr)
+	}
+	return o.ensureWorktreePresent(ctx, ticketID, dir)
+}
+
 // PrepareWorktree creates the worktree directory and branch and applies the
 // sparse cone. cone is the list of cone paths to include; an empty cone
 // means a full checkout. It first ensures <local_path>/.git/info/exclude
@@ -739,7 +764,7 @@ func (o *Orchestrator) PrepareWorktree(ctx context.Context, ticketID int64, slug
 		return Worktree{}, fmt.Errorf("orchestrator: prepare worktree: branch %q must not be the default branch", branch)
 	}
 
-	dir := filepath.Join(o.proj.LocalPath, ".zing", "wt", strconv.FormatInt(ticketID, 10))
+	dir := o.worktreeDir(ticketID)
 	if _, statErr := os.Stat(dir); statErr == nil {
 		return Worktree{}, fmt.Errorf("orchestrator: prepare worktree: directory already exists: %s", dir)
 	} else if !errors.Is(statErr, os.ErrNotExist) {
@@ -1208,7 +1233,7 @@ func (o *Orchestrator) branchExists(ctx context.Context, branch string) (bool, e
 // (table row 2). It is false when the directory was already there and this
 // call only reopened it (table rows 4-5), and meaningless (false) on error.
 func (o *Orchestrator) EnsureWorktree(ctx context.Context, ticketID int64, slug string) (wt Worktree, created bool, err error) {
-	dir := filepath.Join(o.proj.LocalPath, ".zing", "wt", strconv.FormatInt(ticketID, 10))
+	dir := o.worktreeDir(ticketID)
 
 	_, statErr := os.Stat(dir)
 	switch {
