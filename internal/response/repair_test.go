@@ -15,6 +15,7 @@ func TestRepairBareLessThan(t *testing.T) {
 	classifyRoot := shapeOf(reflect.TypeFor[ClassifyResponse]())
 	buildRoot := shapeOf(reflect.TypeFor[BuildResponse]())
 	readyRoot := shapeOf(reflect.TypeFor[ReadyResponse]())
+	reviewRoot := shapeOf(reflect.TypeFor[FindingsResponse]())
 
 	cases := []struct {
 		name    string
@@ -141,6 +142,14 @@ func TestRepairBareLessThan(t *testing.T) {
 			elem: `<zing job="classify" outcome="bug"><reason>a <`,
 			root: classifyRoot,
 			ok:   false,
+		},
+		{
+			name:    "bare less-than inside a quoted attribute value",
+			elem:    `<zing job="review" outcome="ok"><finding lens="fidelity" severity="minor" location="x<-y"><text>t</text><fix>f</fix></finding></zing>`,
+			root:    reviewRoot,
+			want:    `<zing job="review" outcome="ok"><finding lens="fidelity" severity="minor" location="x&lt;-y"><text>t</text><fix>f</fix></finding></zing>`,
+			escaped: 1,
+			ok:      true,
 		},
 	}
 

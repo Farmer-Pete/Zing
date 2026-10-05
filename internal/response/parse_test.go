@@ -462,3 +462,19 @@ func TestParse_StrictDocumentKeepsItsBytes(t *testing.T) {
 		t.Fatalf("Reason = %#v, want %q", doc.Response, wantBareComparison)
 	}
 }
+
+// TestParse_RepairsLessThanInAttribute feeds run 75's shape, a bare < inside
+// a quoted attribute value, which the strict decoder reports as "unescaped <
+// inside quoted string".
+func TestParse_RepairsLessThanInAttribute(t *testing.T) {
+	t.Parallel()
+	in := []byte(`<zing job="review" outcome="ok"><finding lens="fidelity" severity="minor" location="x<-y"><text>t</text><fix>f</fix></finding></zing>`)
+	doc, err := Parse(in)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	fr, ok := doc.Response.(*FindingsResponse)
+	if !ok || len(fr.Findings) != 1 || fr.Findings[0].Location != "x<-y" {
+		t.Fatalf("Response = %#v, want one finding with Location %q", doc.Response, "x<-y")
+	}
+}

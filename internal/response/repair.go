@@ -237,9 +237,11 @@ func isNameStart(c byte) bool {
 }
 
 // copyTag copies the start tag at the start of rest into out. from is the
-// offset just past its name. ok is false for a raw < outside a quoted
-// attribute value or a tag cut off by the end of input.
-func copyTag(out *bytes.Buffer, rest []byte, from int) (tagLen int, selfClosing bool, escaped int, ok bool) { //nolint:unparam // escaped is always 0 until task 2 escapes < inside quoted attribute values; the signature already matches its final shape
+// offset just past its name. A quoted attribute value is copied with each <
+// in it escaped as &lt; (bug fix: run 75 failed with "unescaped < inside
+// quoted string"). ok is false for a raw < outside a quoted attribute value
+// or a tag cut off by the end of input.
+func copyTag(out *bytes.Buffer, rest []byte, from int) (tagLen int, selfClosing bool, escaped int, ok bool) {
 	out.Write(rest[:from])
 	for j := from; j < len(rest); j++ {
 		switch c := rest[j]; c {
@@ -249,8 +251,9 @@ func copyTag(out *bytes.Buffer, rest []byte, from int) (tagLen int, selfClosing 
 				return 0, false, 0, false
 			}
 			value := rest[j+1 : j+1+end]
+			escaped += bytes.Count(value, []byte("<"))
 			out.WriteByte(c)
-			out.Write(value)
+			out.Write(bytes.ReplaceAll(value, []byte("<"), []byte("&lt;")))
 			out.WriteByte(c)
 			j += 1 + end
 		case '>':
