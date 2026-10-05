@@ -511,21 +511,22 @@ const threadsBlockingPrefix = "threads blocking "
 
 // mergeMarkerPrefix groups every "merge " marker design section 8.8 writes
 // for one pull request head: "asked" (row 9, M4 task 8), "withdrawn" (rows
-// 3 to 5, this file), "held" (MERGE-ANSWER, M4 task 8), and "refused"
-// (MERGE, M4 task 8). Row 3 (below) is the one row task 7 builds that
-// reads this family back: a loop that just reopened on a head GitHub may
-// still be showing a stale merge question for.
+// 3 to 5, this file), "held" (MERGE-ANSWER, M4 task 8), "refused" (MERGE,
+// M4 task 8), and "retry" (MERGE's own "Base branch was modified" row).
+// Row 3 (below) is the one row task 7 builds that reads this family back: a
+// loop that just reopened on a head GitHub may still be showing a stale
+// merge question for.
 const mergeMarkerPrefix = "merge "
 
 // mergeMarkerLine matches one "merge " marker's own first line: its kind
 // and the sha it names.
-var mergeMarkerLine = regexp.MustCompile(`^merge (asked|withdrawn|held|refused) ([0-9a-f]{40})$`)
+var mergeMarkerLine = regexp.MustCompile(`^merge (asked|withdrawn|held|refused|retry) ([0-9a-f]{40})$`)
 
-// newestMergeMarkerKind returns the kind ("asked", "withdrawn", "held", or
-// "refused") of the newest "merge <kind> <sha>" marker among markers that
-// names exactly sha, "" when none does (design section 8.9: "this head's
-// own newest merge marker"). markers is MarkersWithPrefix's own oldest-
-// first order, so the last match is the newest.
+// newestMergeMarkerKind returns the kind ("asked", "withdrawn", "held",
+// "refused", or "retry") of the newest "merge <kind> <sha>" marker among
+// markers that names exactly sha, "" when none does (design section 8.9:
+// "this head's own newest merge marker"). markers is MarkersWithPrefix's
+// own oldest-first order, so the last match is the newest.
 func newestMergeMarkerKind(markers []store.MessageRow, sha string) string {
 	kind := ""
 	for i := range markers {
@@ -1308,13 +1309,26 @@ const (
 	mergeReasonDraft      = "the pull request is a draft"
 )
 
-// mergeMarkerLine's own four kinds, named once for mergeAskable and
+// mergeMarkerLine's own five kinds, named once for mergeAskable and
 // newestMergeAskedSHA.
 const (
 	mergeMarkerAsked     = "asked"
 	mergeMarkerWithdrawn = "withdrawn"
 	mergeMarkerHeld      = "held"
+	mergeMarkerRetry     = "retry"
 )
+
+// mergeBaseModified is the fixed substring GitHub's own merge refusal
+// carries when another pull request's merge moved main out from under this
+// one (the ticket's own repro); MERGE retries this refusal instead of
+// asking the owner (design section 8.8's "Base branch was modified" row).
+const mergeBaseModified = "Base branch was modified"
+
+// mergeRetryDelay is the floor MERGE waits before its own automatic retry
+// of a "Base branch was modified" refusal: a scheduled tick, not a sleep
+// inside this handler (Q1's own decision) -- the next POLL, at or after
+// this delay, decides whether to retry or to base-merge.
+const mergeRetryDelay = 10 * time.Second
 
 // mergeAskable is design section 8.5 row 9's own "the head is askable"
 // rule: the newest of a head's merge asked, merge withdrawn, and merge
@@ -1407,7 +1421,12 @@ func (h shipHandler) pollMergeGate(ctx context.Context, t store.Ticket, d Deps, 
 	if err != nil {
 		return store.HandlerCommit{}, fmt.Errorf("job: shipping: poll: merge markers: %w", err)
 	}
-	if kind := newestMergeMarkerKind(mergeMarkers, sha); !mergeAskable(kind) {
+	kind := newestMergeMarkerKind(mergeMarkers, sha)
+	if kind == mergeMarkerRetry {
+		slog.Info("merge retrying", "ticket_id", t.ID, "pr", number, "head_sha", sha)
+		return h.merge(ctx, t, d, proj, number, sha, nil)
+	}
+	if !mergeAskable(kind) {
 		return h.pollMergeWait(t, d, fp), nil
 	}
 
@@ -1531,10 +1550,39 @@ func (h shipHandler) merge(ctx context.Context, t store.Ticket, d Deps, proj Pro
 
 	if _, mergeErr := proj.PullRequests.Merge(ctx, proj.Owner, proj.Repo, number, sha, d.MergeRule.Method, title); mergeErr != nil {
 		if errors.Is(mergeErr, orchestrator.ErrMergeRefused) {
+			refusal := "other"
+			if strings.Contains(mergeErr.Error(), mergeBaseModified) {
+				refusal = "base_modified"
+				markers, markerErr := d.Store.MarkersWithPrefix(ctx, t.ID, mergeMarkerPrefix)
+				if markerErr != nil {
+					return store.HandlerCommit{}, fmt.Errorf("job: shipping: merge: merge markers: %w", markerErr)
+				}
+				retryLine := "merge " + mergeMarkerRetry + " " + sha
+				retried := slices.ContainsFunc(markers, func(m store.MessageRow) bool {
+					first, _, _ := strings.Cut(m.Body, "\n")
+					return first == retryLine
+				})
+				if !retried {
+					// Main moved under the merge: no question; the next POLL,
+					// at least mergeRetryDelay out, base-merges or retries once.
+					next := time.Now().UTC().Truncate(time.Second).Add(mergeRetryDelay + time.Second)
+					c := baseCommit(t, d)
+					c.WithdrawQuestions = resolveIDs
+					c.Messages = []store.Message{
+						{TicketID: t.ID, Type: msgTypeUpdate, Author: authorSystem, Body: "merge refused " + sha + "\n" + mergeBaseModified},
+						{TicketID: t.ID, Type: msgTypeUpdate, Author: authorSystem, Body: retryLine},
+					}
+					c.Poll = &store.PollUpdate{NextAt: next, IntervalS: 30, Fingerprint: fp}
+					slog.Info("merge refused, retrying", "ticket_id", t.ID, "pr", number, "head_sha", sha, "refusal", refusal, "retry_at", next)
+					return c, nil
+				}
+			}
+			slog.Info("merge refused, asking the owner", "ticket_id", t.ID, "pr", number, "head_sha", sha, "refusal", refusal)
 			return h.mergeGitHubRefused(t, d, number, sha, mergeErr, resolveIDs, fp)
 		}
 		return store.HandlerCommit{}, fmt.Errorf("job: shipping: merge: %w", mergeErr)
 	}
+	slog.Info("pr merged", "ticket_id", t.ID, "pr", number, "head_sha", sha)
 
 	c := baseCommit(t, d)
 	c.WithdrawQuestions = resolveIDs

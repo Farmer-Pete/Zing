@@ -205,6 +205,14 @@ const shipMergeMethodSquash = "squash"
 // package).
 const shipPRStateOpen = "open"
 
+// shipBaseModifiedGHMessage is GitHub's own verbatim merge-refusal text for
+// the ticket's own repro (every Base-modified test in this file and in
+// merge_test.go, same package): named as a separate constant, passed
+// through %s rather than written straight into an fmt.Errorf format
+// string, since revive's error-strings check would otherwise flag a format
+// literal with GitHub's own capitalized, punctuated wording baked in.
+const shipBaseModifiedGHMessage = "Base branch was modified. Review and try the merge again."
+
 var (
 	errShipGitHub         = errors.New("shipGitHub: not implemented")
 	errShipGitHubPRExists = errors.New("shipGitHub: a pull request already exists for this head")
@@ -6041,6 +6049,186 @@ func TestRefusedMergeNowAsksAgain(t *testing.T) {
 	}
 	if len(gh.mergeCalls) != 1 {
 		t.Errorf("mergeCalls after the third poll = %d, want still 1", len(gh.mergeCalls))
+	}
+}
+
+// shipHasQuestion reports whether c.Messages carries a question message.
+func shipHasQuestion(c store.HandlerCommit) bool {
+	for i := range c.Messages {
+		if c.Messages[i].Type == msgTypeQuestion {
+			return true
+		}
+	}
+	return false
+}
+
+// TestBaseModifiedAutoMergeRetries proves the ticket's own "Base branch was
+// modified" row on the automatic path: the first such refusal writes "merge
+// refused <sha>" with the fixed reason line, then "merge retry <sha>",
+// schedules the next poll at least 10s out, and asks no question; once
+// GitHub accepts the retry, the next tick merges with no question either.
+func TestBaseModifiedAutoMergeRetries(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow end-to-end flow; runs in the full suite")
+	}
+	t.Parallel()
+	s, ticket, gh, tr := shipPublished(t)
+	local := shipHeadSHA(t, s, ticket)
+	runs, required := shipGreenCI()
+	gh.runs, gh.required = runs, required
+	gh.prState = shipMergeReadyPR(local, "PR_node_base_modified")
+	gh.mergeErr = fmt.Errorf("%w: %s", orchestrator.ErrMergeRefused, shipBaseModifiedGHMessage)
+
+	rule := MergeRule{Auto: true, Method: shipMergeMethodSquash}
+	start := time.Now()
+	commit, err := shipPollRunWithRule(t, s, ticket, gh, tr, rule)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if len(gh.mergeCalls) != 1 {
+		t.Fatalf("mergeCalls = %+v, want exactly 1 (the refused attempt)", gh.mergeCalls)
+	}
+	if !shipHasMessage(commit, "merge refused "+local+"\nBase branch was modified") {
+		t.Errorf("commit.Messages = %+v, want %q", commit.Messages, "merge refused "+local+"\nBase branch was modified")
+	}
+	if !shipHasMessage(commit, "merge retry "+local) {
+		t.Errorf("commit.Messages = %+v, want %q", commit.Messages, "merge retry "+local)
+	}
+	if shipHasQuestion(commit) {
+		t.Errorf("commit.Messages = %+v, want no question", commit.Messages)
+	}
+	if commit.Waiting != nil {
+		t.Errorf("Waiting = %v, want nil", commit.Waiting)
+	}
+	if commit.Poll == nil {
+		t.Fatal("Poll is nil, want the retry's own backoff commit")
+	}
+	if commit.Poll.IntervalS != 30 {
+		t.Errorf("Poll.IntervalS = %d, want 30", commit.Poll.IntervalS)
+	}
+	if commit.Poll.NextAt.Before(start.Add(10*time.Second)) || commit.Poll.NextAt.After(start.Add(12*time.Second)) {
+		t.Errorf("Poll.NextAt = %v, want between start+10s (%v) and start+12s (%v)", commit.Poll.NextAt, start.Add(10*time.Second), start.Add(12*time.Second))
+	}
+	pbApply(t, s, ticket, commit)
+
+	gh.mergeErr = nil
+	commit2, err := shipPollRunWithRule(t, s, pbGetTicket(t, s, ticket.ID), gh, tr, rule)
+	if err != nil {
+		t.Fatalf("Run (second poll): %v", err)
+	}
+	if len(gh.mergeCalls) != 2 {
+		t.Errorf("mergeCalls after the second poll = %d, want 2", len(gh.mergeCalls))
+	}
+	if !shipHasMessage(commit2, "pr merged "+local) {
+		t.Errorf("commit2.Messages = %+v, want %q", commit2.Messages, "pr merged "+local)
+	}
+	if shipHasQuestion(commit2) {
+		t.Errorf("commit2.Messages = %+v, want no question", commit2.Messages)
+	}
+}
+
+// TestBaseModifiedMergeNowRetries is TestBaseModifiedAutoMergeRetries' own
+// Merge now twin: the owner answered a, GitHub refused with "Base branch
+// was modified", so MERGE writes the retry marker (resolving the round)
+// instead of re-asking, and the next clean poll merges on its own with no
+// question.
+func TestBaseModifiedMergeNowRetries(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow end-to-end flow; runs in the full suite")
+	}
+	t.Parallel()
+	s, ticket, gh, tr := shipPublished(t)
+	local := shipHeadSHA(t, s, ticket)
+	runs, required := shipGreenCI()
+	gh.runs, gh.required = runs, required
+	gh.prState = shipMergeReadyPR(local, "PR_node_now_base_modified")
+
+	commit1, err := shipPollRun(t, s, ticket, gh, tr)
+	if err != nil {
+		t.Fatalf("Run (ask): %v", err)
+	}
+	pbApply(t, s, ticket, commit1)
+	shipAnswerMergeQuestion(t, s, ticket.ID, "a")
+
+	gh.mergeErr = fmt.Errorf("%w: %s", orchestrator.ErrMergeRefused, shipBaseModifiedGHMessage)
+	commit2, err := shipPollRun(t, s, pbGetTicket(t, s, ticket.ID), gh, tr)
+	if err != nil {
+		t.Fatalf("Run (merge now, refused): %v", err)
+	}
+	if len(gh.mergeCalls) != 1 {
+		t.Fatalf("mergeCalls = %+v, want exactly 1", gh.mergeCalls)
+	}
+	if len(commit2.WithdrawQuestions) != 1 {
+		t.Errorf("WithdrawQuestions = %+v, want exactly one id (the Merge now round)", commit2.WithdrawQuestions)
+	}
+	if !shipHasMessage(commit2, "merge retry "+local) {
+		t.Errorf("commit2.Messages = %+v, want %q", commit2.Messages, "merge retry "+local)
+	}
+	if shipHasQuestion(commit2) {
+		t.Errorf("commit2.Messages = %+v, want no question", commit2.Messages)
+	}
+	pbApply(t, s, ticket, commit2)
+
+	gh.mergeErr = nil
+	commit3, err := shipPollRun(t, s, pbGetTicket(t, s, ticket.ID), gh, tr)
+	if err != nil {
+		t.Fatalf("Run (retry tick): %v", err)
+	}
+	if len(gh.mergeCalls) != 2 {
+		t.Errorf("mergeCalls after the retry tick = %d, want 2", len(gh.mergeCalls))
+	}
+	if !shipHasMessage(commit3, "pr merged "+local) {
+		t.Errorf("commit3.Messages = %+v, want %q", commit3.Messages, "pr merged "+local)
+	}
+	if shipHasQuestion(commit3) {
+		t.Errorf("commit3.Messages = %+v, want no question", commit3.Messages)
+	}
+}
+
+// TestBaseModifiedRetryRefusedAgainAsks proves a second "Base branch was
+// modified" refusal, on a head that already carries a "merge retry" marker,
+// asks the owner exactly as any other refusal would: the automatic retry is
+// a one-shot.
+func TestBaseModifiedRetryRefusedAgainAsks(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow end-to-end flow; runs in the full suite")
+	}
+	t.Parallel()
+	s, ticket, gh, tr := shipPublished(t)
+	local := shipHeadSHA(t, s, ticket)
+	runs, required := shipGreenCI()
+	gh.runs, gh.required = runs, required
+	gh.prState = shipMergeReadyPR(local, "PR_node_base_modified_twice")
+	gh.mergeErr = fmt.Errorf("%w: %s", orchestrator.ErrMergeRefused, shipBaseModifiedGHMessage)
+
+	rule := MergeRule{Auto: true, Method: shipMergeMethodSquash}
+	commit1, err := shipPollRunWithRule(t, s, ticket, gh, tr, rule)
+	if err != nil {
+		t.Fatalf("Run (tick 1): %v", err)
+	}
+	pbApply(t, s, ticket, commit1)
+
+	commit2, err := shipPollRunWithRule(t, s, pbGetTicket(t, s, ticket.ID), gh, tr, rule)
+	if err != nil {
+		t.Fatalf("Run (tick 2, refused again): %v", err)
+	}
+	if len(gh.mergeCalls) != 2 {
+		t.Fatalf("mergeCalls = %+v, want exactly 2", gh.mergeCalls)
+	}
+	q := shipQuestionMessage(t, commit2)
+	if !strings.Contains(q.Body, "GitHub refused the merge: Base branch was modified") {
+		t.Errorf("question body = %q, want the GitHub refusal reason", q.Body)
+	}
+	if commit2.Waiting == nil || *commit2.Waiting != waitingMerge {
+		t.Errorf("Waiting = %v, want %q", commit2.Waiting, waitingMerge)
+	}
+	pbApply(t, s, ticket, commit2)
+
+	if _, err := shipPollRunWithRule(t, s, pbGetTicket(t, s, ticket.ID), gh, tr, rule); err != nil {
+		t.Fatalf("Run (tick 3, unanswered): %v", err)
+	}
+	if len(gh.mergeCalls) != 2 {
+		t.Errorf("mergeCalls after the third poll = %d, want still 2", len(gh.mergeCalls))
 	}
 }
 
