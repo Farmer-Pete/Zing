@@ -504,6 +504,16 @@ func (s *Store) CommitHandlerResult(ctx context.Context, c HandlerCommit) (bool,
 				// A message with an explicit non-zero RunID keeps it.
 			}
 		}
+		if m.RunID != nil {
+			var owned bool
+			owned, err = runOwnedByTicketTx(ctx, tx, c.TicketID, *m.RunID)
+			if err != nil {
+				return false, fmt.Errorf("commit handler result: check message run %d: %w", *m.RunID, err)
+			}
+			if !owned {
+				return false, fmt.Errorf("commit handler result: message run %d not owned by ticket %d", *m.RunID, c.TicketID)
+			}
+		}
 		if m.ParentID != nil {
 			if err = verifyParentForTicket(ctx, tx, c.TicketID, *m.ParentID); err != nil {
 				return false, fmt.Errorf("commit handler result: %w", err)
