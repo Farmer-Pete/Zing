@@ -239,6 +239,23 @@ func TestForBuildMissingPlaceholder(t *testing.T) {
 	}
 }
 
+// TestForMergeMissingPlaceholder pins ForMerge's own fixed error for a job
+// prompt missing one of its two placeholders: here the prompt lacks
+// {lint_cmd}.
+func TestForMergeMissingPlaceholder(t *testing.T) {
+	t.Parallel()
+
+	jobPrompt := "Resolve the merge.\n\nProject commands: test `{test_cmd}`."
+	_, err := ForMerge(jobPrompt, "go test ./...", "make lint", "ticket body", "<plan/>", "a.go", "base log", nil)
+	if err == nil {
+		t.Fatal("ForMerge returned no error for a prompt missing {lint_cmd}")
+	}
+	want := "prompt: merge prompt lacks placeholder {lint_cmd}"
+	if err.Error() != want {
+		t.Errorf("ForMerge error = %q, want %q", err.Error(), want)
+	}
+}
+
 // TestForBuildPlanIsRaw pins the plan row of the fencing table: the
 // stored plan XML arrives raw, never fenced.
 func TestForBuildPlanIsRaw(t *testing.T) {

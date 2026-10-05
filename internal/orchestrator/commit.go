@@ -19,6 +19,11 @@ import (
 // caller can omit it or set a different one.
 const CoAuthorTrailer = "Co-Authored-By: Zing <zing@farmerpete.net>"
 
+// gitAddSubcommand is "git add"'s own subcommand name, shared by
+// CommitTask's and CommitMerge's own pathspecArgs calls so goconst sees one
+// named constant instead of two repeated literals.
+const gitAddSubcommand = "add"
+
 // CommitMessage is one commit's content. The caller supplies the title, the
 // function lines, and the fences; the model produces the last two in
 // Package 8. Package 5 renders them and never parses git config.
@@ -153,7 +158,7 @@ func (o *Orchestrator) CommitTask(ctx context.Context, wt Worktree, approved []s
 	defer func() { _ = os.Remove(pathspecFile) }()
 
 	litRun := execRunner{extraEnv: literalPathspecEnv, drivers: wt.drivers}
-	addArgs := pathspecArgs([]string{"add"}, pathspecFile)
+	addArgs := pathspecArgs([]string{gitAddSubcommand}, pathspecFile)
 	if out, addErr := litRun.Run(ctx, wt.dir, "git", addArgs...); addErr != nil {
 		return "", fmt.Errorf("orchestrator: commit task: stage approved paths: %w: %s", addErr, strings.TrimSpace(out))
 	}
@@ -227,15 +232,25 @@ func (o *Orchestrator) resetAfterUnsignedCommit(ctx context.Context, wt Worktree
 }
 
 // CommitMerge finishes the merge in progress as one signed merge commit:
-// git add -u (every tracked change, which marks resolved conflicts as
-// resolved), then git commit -S -F <msg> with no pathspec, because git
-// refuses a partial commit during a merge, which is why CommitTask cannot
-// do this. It returns an error, touching nothing, when no merge is in
-// progress. A commit error, an unsigned result, or a failed verification
+// git add -A scoped to MergeSidePaths (every path either side of the merge
+// may legitimately touch, staged whether git currently has it as modified,
+// added, deleted, or merely untracked -- unlike "git add -u", which only
+// restages already-tracked changes and so would silently drop a merge-side
+// path an agent's bash access turned untracked, for example with
+// "git rm --cached", leaving it out of the commit entirely even though
+// mergeCheck's own outside-the-merge gate had allowed it), then
+// git commit -S -F <msg> with no pathspec, because git refuses a partial
+// commit during a merge, which is why CommitTask cannot do this. wantBaseSHA
+// is the request's own base sha; a MERGE_HEAD that does not match it is
+// refused before anything is staged, so a merge session that rewrote
+// MERGE_HEAD (deliberately or not) never produces a commit whose second
+// parent is not the base the request named. It returns an error, touching
+// nothing, when no merge is in progress or MERGE_HEAD does not match
+// wantBaseSHA. A commit error, an unsigned result, or a failed verification
 // resets to the prior HEAD and puts MERGE_HEAD back
 // (resetAfterUnsignedMerge), so the resolved tree stays a merge in
 // progress the next tick can commit again.
-func (o *Orchestrator) CommitMerge(ctx context.Context, wt Worktree, m CommitMessage) (string, error) {
+func (o *Orchestrator) CommitMerge(ctx context.Context, wt Worktree, m CommitMessage, wantBaseSHA string) (string, error) {
 	if err := o.revalidate(ctx, wt); err != nil {
 		return "", fmt.Errorf("orchestrator: commit merge: %w", err)
 	}
@@ -251,11 +266,24 @@ func (o *Orchestrator) CommitMerge(ctx context.Context, wt Worktree, m CommitMes
 		return "", fmt.Errorf("orchestrator: commit merge: read MERGE_HEAD: %w", err)
 	}
 	mergeHead = strings.TrimSpace(mergeHead)
+	if mergeHead != wantBaseSHA {
+		return "", fmt.Errorf("orchestrator: commit merge: MERGE_HEAD is %s, want %s", mergeHead, wantBaseSHA)
+	}
 	priorHead, err := o.run.Output(ctx, wt.dir, "git", "rev-parse", "HEAD")
 	if err != nil {
 		return "", fmt.Errorf("orchestrator: commit merge: record head: %w", err)
 	}
 	priorHead = strings.TrimSpace(priorHead)
+
+	sidePaths, err := o.MergeSidePaths(ctx, wt)
+	if err != nil {
+		return "", fmt.Errorf("orchestrator: commit merge: %w", err)
+	}
+	pathspecFile, err := writePathspecFile(sidePaths)
+	if err != nil {
+		return "", fmt.Errorf("orchestrator: commit merge: %w", err)
+	}
+	defer func() { _ = os.Remove(pathspecFile) }()
 
 	message, err := m.Render()
 	if err != nil {
@@ -267,10 +295,12 @@ func (o *Orchestrator) CommitMerge(ctx context.Context, wt Worktree, m CommitMes
 	}
 	defer func() { _ = os.Remove(msgFile) }()
 
-	run := execRunner{drivers: wt.drivers}
-	if out, addErr := run.Run(ctx, wt.dir, "git", "add", "-u"); addErr != nil {
+	litRun := execRunner{extraEnv: literalPathspecEnv, drivers: wt.drivers}
+	addArgs := pathspecArgs([]string{gitAddSubcommand, "-A"}, pathspecFile)
+	if out, addErr := litRun.Run(ctx, wt.dir, "git", addArgs...); addErr != nil {
 		return "", fmt.Errorf("orchestrator: commit merge: stage: %w: %s", addErr, strings.TrimSpace(out))
 	}
+	run := execRunner{drivers: wt.drivers}
 	o.log.Info("committing merge", "branch", wt.branch, "merge_head", mergeHead)
 	if out, commitErr := run.Run(ctx, wt.dir, "git", "commit", "-S", "-F", msgFile); commitErr != nil {
 		return "", o.resetAfterUnsignedMerge(ctx, wt, priorHead, mergeHead,
@@ -314,8 +344,9 @@ func (o *Orchestrator) resetAfterUnsignedMerge(ctx context.Context, wt Worktree,
 	defer checkCancel()
 	headNow, headErr := o.run.Output(checkCtx, wt.dir, "git", "rev-parse", "HEAD")
 	mergeHeadNow, mergeHeadErr := o.run.Output(checkCtx, wt.dir, "git", "rev-parse", "-q", "--verify", "MERGE_HEAD")
-	if headErr == nil && strings.TrimSpace(headNow) == priorHead &&
-		mergeHeadErr == nil && strings.TrimSpace(mergeHeadNow) == mergeHead {
+	headUnmoved := headErr == nil && strings.TrimSpace(headNow) == priorHead
+	mergeHeadIntact := mergeHeadErr == nil && strings.TrimSpace(mergeHeadNow) == mergeHead
+	if headUnmoved && mergeHeadIntact {
 		return errors.New("commit signing failed: " + reason)
 	}
 

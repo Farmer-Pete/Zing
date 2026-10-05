@@ -1,6 +1,7 @@
 package orchestrator
 
 import (
+	"context"
 	"errors"
 	"os"
 	"path/filepath"
@@ -88,7 +89,7 @@ func TestCommitMergeSignedTwoParents(t *testing.T) {
 
 	writeTestFile(t, filepath.Join(f.wt.Dir(), mergeSharedPath), "line one RESOLVED\n")
 
-	sha, err := f.o.CommitMerge(ctx, f.wt, mergeTestMessage())
+	sha, err := f.o.CommitMerge(ctx, f.wt, mergeTestMessage(), f.baseSHA)
 	if err != nil {
 		t.Fatalf("CommitMerge: unexpected error: %v", err)
 	}
@@ -261,6 +262,43 @@ func TestConflictMarkerPaths(t *testing.T) {
 	}
 }
 
+// TestPathsWithConflictMarkers proves PathsWithConflictMarkers over a real,
+// already-committed merge: adoptMerge's own use, once MERGE_HEAD no longer
+// resolves, scanning the commit's own changed paths rather than the index's
+// unmerged ones. Given a candidate list naming both a file that still holds
+// a marker and one that does not, only the former comes back; a candidate
+// path that does not exist on disk is silently skipped.
+func TestPathsWithConflictMarkers(t *testing.T) {
+	t.Parallel()
+	ctx := t.Context()
+	f := newMergeConflictFixture(t, 51)
+
+	if _, err := f.o.StartBaseMerge(ctx, f.wt, f.baseSHA); err != nil {
+		t.Fatalf("StartBaseMerge: unexpected error: %v", err)
+	}
+	// Leave mergeSharedPath unresolved (still holding conflict markers);
+	// mergeTicketOnlyPath is clean and never touched by the merge at all.
+	runGit(ctx, t, f.wt.Dir(), "add", mergeSharedPath)
+
+	candidates := []string{mergeSharedPath, mergeTicketOnlyPath, "missing.txt"}
+	marked, err := f.o.PathsWithConflictMarkers(ctx, f.wt, candidates)
+	if err != nil {
+		t.Fatalf("PathsWithConflictMarkers: unexpected error: %v", err)
+	}
+	if want := []string{mergeSharedPath}; !slices.Equal(marked, want) {
+		t.Fatalf("PathsWithConflictMarkers = %v, want %v", marked, want)
+	}
+
+	writeTestFile(t, filepath.Join(f.wt.Dir(), mergeSharedPath), "line one RESOLVED\n")
+	marked, err = f.o.PathsWithConflictMarkers(ctx, f.wt, candidates)
+	if err != nil {
+		t.Fatalf("PathsWithConflictMarkers (after rewrite): unexpected error: %v", err)
+	}
+	if len(marked) != 0 {
+		t.Errorf("PathsWithConflictMarkers (after rewrite) = %v, want empty", marked)
+	}
+}
+
 // -----------------------------------------------------------------------
 // MergeSidePaths
 // -----------------------------------------------------------------------
@@ -300,53 +338,169 @@ func TestMergeSidePaths(t *testing.T) {
 // CommitMerge: unsigned and no-merge-in-progress
 // -----------------------------------------------------------------------
 
+// signedStatusLiesUnsigned wraps a real Runner and makes exactly the
+// post-commit signature check ("git show --no-patch --format=%G?" and its
+// "git cat-file -p" presence fallback, both run through o.run) report an
+// unsigned commit, while every other call -- including the commit itself --
+// passes through unchanged. It exists because the real "git add"/"git
+// commit -S" calls CommitMerge makes always run through a fresh execRunner
+// built at the call site (commit.go), never through o.run, so no Runner
+// substitution can make that commit itself fail or go unsigned; this is the
+// only seam that can make CommitMerge believe a commit that really was made,
+// and really is signed, came back unsigned, so the test below drives the
+// reset-and-restore path against a real commit rather than one that never
+// happened at all (a commit "git commit -S" refuses outright, as a genuinely
+// broken signing key does, never moves HEAD, so it never reaches that path
+// either -- see TestCommitMergeUnsignedKeepsMergeInProgress's first case).
+type signedStatusLiesUnsigned struct {
+	inner Runner
+}
+
+func (r signedStatusLiesUnsigned) Run(ctx context.Context, dir, name string, args ...string) (string, error) {
+	return r.inner.Run(ctx, dir, name, args...)
+}
+
+// gitShowSubcommand is "git show"'s own subcommand name, named so goconst
+// sees one constant instead of a literal repeated across this package's own
+// test files, each of which fakes a different git call by matching it.
+const gitShowSubcommand = "show"
+
+func (r signedStatusLiesUnsigned) Output(ctx context.Context, dir, name string, args ...string) (string, error) {
+	if name == "git" && len(args) > 0 && args[0] == gitShowSubcommand && slices.Contains(args, "--format=%G?") {
+		return "N\n", nil
+	}
+	if name == "git" && len(args) > 1 && args[0] == "cat-file" && args[1] == "-p" {
+		return "tree deadbeef\nauthor a <a@example.com> 0 +0000\ncommitter a <a@example.com> 0 +0000\n\nno signature header here\n", nil
+	}
+	return r.inner.Output(ctx, dir, name, args...)
+}
+
 func TestCommitMergeUnsignedKeepsMergeInProgress(t *testing.T) {
 	t.Parallel()
+
+	t.Run("git commit -S refuses outright, nothing moves", func(t *testing.T) {
+		t.Parallel()
+		ctx := t.Context()
+
+		repo := newUnsignedTestRepo(t)
+		o := newTestOrchestrator(t, repo, execRunner{})
+
+		writeTestFile(t, filepath.Join(repo, mergeSharedPath), "line one\n")
+		runGit(ctx, t, repo, "add", mergeSharedPath)
+		runGit(ctx, t, repo, "commit", "-q", "-m", "seed shared.txt")
+
+		wt, err := o.PrepareWorktree(ctx, 7, "", nil)
+		if err != nil {
+			t.Fatalf("PrepareWorktree: %v", err)
+		}
+
+		writeTestFile(t, filepath.Join(wt.Dir(), mergeSharedPath), "line one TICKET\n")
+		runGit(ctx, t, wt.Dir(), "add", mergeSharedPath)
+		runGit(ctx, t, wt.Dir(), "commit", "-q", "-m", "ticket edits shared.txt")
+		priorHead := strings.TrimSpace(runGit(ctx, t, wt.Dir(), "rev-parse", "HEAD"))
+
+		writeTestFile(t, filepath.Join(repo, mergeSharedPath), "line one MAIN\n")
+		runGit(ctx, t, repo, "add", mergeSharedPath)
+		runGit(ctx, t, repo, "commit", "-q", "-m", "main edits shared.txt")
+		baseSHA := strings.TrimSpace(runGit(ctx, t, repo, "rev-parse", "HEAD"))
+
+		if _, mergeErr := o.StartBaseMerge(ctx, wt, baseSHA); mergeErr != nil {
+			t.Fatalf("StartBaseMerge: unexpected error: %v", mergeErr)
+		}
+		writeTestFile(t, filepath.Join(wt.Dir(), mergeSharedPath), "line one RESOLVED\n")
+
+		_, err = o.CommitMerge(ctx, wt, mergeTestMessage(), baseSHA)
+		if err == nil {
+			t.Fatal("CommitMerge: expected an error for a genuinely unsigned commit, got nil")
+		}
+		if !strings.Contains(err.Error(), "commit signing failed") {
+			t.Errorf("CommitMerge error = %q, want it to mention %q", err.Error(), "commit signing failed")
+		}
+
+		afterHead := strings.TrimSpace(runGit(ctx, t, wt.Dir(), "rev-parse", "HEAD"))
+		if afterHead != priorHead {
+			t.Errorf("HEAD = %q after a failed CommitMerge, want it reset back to %q", afterHead, priorHead)
+		}
+
+		mergeHeadNow := strings.TrimSpace(runGit(ctx, t, wt.Dir(), "rev-parse", "MERGE_HEAD"))
+		if mergeHeadNow != baseSHA {
+			t.Errorf("MERGE_HEAD = %q after a failed CommitMerge, want it restored to %q", mergeHeadNow, baseSHA)
+		}
+	})
+
+	t.Run("a real signed commit the check misreports is reset and MERGE_HEAD restored", func(t *testing.T) {
+		t.Parallel()
+		ctx := t.Context()
+		f := newMergeConflictFixture(t, 71)
+
+		if _, err := f.o.StartBaseMerge(ctx, f.wt, f.baseSHA); err != nil {
+			t.Fatalf("StartBaseMerge: unexpected error: %v", err)
+		}
+		writeTestFile(t, filepath.Join(f.wt.Dir(), mergeSharedPath), "line one RESOLVED\n")
+		priorHead := strings.TrimSpace(runGit(ctx, t, f.wt.Dir(), "rev-parse", "HEAD"))
+
+		f.o.run = signedStatusLiesUnsigned{inner: f.o.run}
+		_, err := f.o.CommitMerge(ctx, f.wt, mergeTestMessage(), f.baseSHA)
+		if err == nil {
+			t.Fatal("CommitMerge: expected an error when the signature check reports unsigned, got nil")
+		}
+		if !strings.Contains(err.Error(), "commit signing failed") {
+			t.Errorf("CommitMerge error = %q, want it to mention %q", err.Error(), "commit signing failed")
+		}
+
+		afterHead := strings.TrimSpace(runGit(ctx, t, f.wt.Dir(), "rev-parse", "HEAD"))
+		if afterHead != priorHead {
+			t.Errorf("HEAD = %q after the reset, want it back to %q", afterHead, priorHead)
+		}
+		mergeHeadNow := strings.TrimSpace(runGit(ctx, t, f.wt.Dir(), "rev-parse", "MERGE_HEAD"))
+		if mergeHeadNow != f.baseSHA {
+			t.Errorf("MERGE_HEAD = %q after the reset, want it restored to %q", mergeHeadNow, f.baseSHA)
+		}
+
+		// With the signature check reading real git output again, CommitMerge
+		// from the restored state succeeds.
+		f.o.run = execRunner{}
+		sha, err := f.o.CommitMerge(ctx, f.wt, mergeTestMessage(), f.baseSHA)
+		if err != nil {
+			t.Fatalf("CommitMerge (retry): unexpected error: %v", err)
+		}
+		signed, err := f.o.SignedStatus(ctx, f.wt, sha)
+		if err != nil {
+			t.Fatalf("SignedStatus: %v", err)
+		}
+		if !signed {
+			t.Error("SignedStatus = false after the retry, want true")
+		}
+	})
+}
+
+func TestCommitMergeWrongMergeHeadRefuses(t *testing.T) {
+	t.Parallel()
 	ctx := t.Context()
+	f := newMergeConflictFixture(t, 72)
 
-	repo := newUnsignedTestRepo(t)
-	o := newTestOrchestrator(t, repo, execRunner{})
-
-	writeTestFile(t, filepath.Join(repo, mergeSharedPath), "line one\n")
-	runGit(ctx, t, repo, "add", mergeSharedPath)
-	runGit(ctx, t, repo, "commit", "-q", "-m", "seed shared.txt")
-
-	wt, err := o.PrepareWorktree(ctx, 7, "", nil)
-	if err != nil {
-		t.Fatalf("PrepareWorktree: %v", err)
+	if _, err := f.o.StartBaseMerge(ctx, f.wt, f.baseSHA); err != nil {
+		t.Fatalf("StartBaseMerge: unexpected error: %v", err)
 	}
+	writeTestFile(t, filepath.Join(f.wt.Dir(), mergeSharedPath), "line one RESOLVED\n")
+	priorHead := strings.TrimSpace(runGit(ctx, t, f.wt.Dir(), "rev-parse", "HEAD"))
 
-	writeTestFile(t, filepath.Join(wt.Dir(), mergeSharedPath), "line one TICKET\n")
-	runGit(ctx, t, wt.Dir(), "add", mergeSharedPath)
-	runGit(ctx, t, wt.Dir(), "commit", "-q", "-m", "ticket edits shared.txt")
-	priorHead := strings.TrimSpace(runGit(ctx, t, wt.Dir(), "rev-parse", "HEAD"))
-
-	writeTestFile(t, filepath.Join(repo, mergeSharedPath), "line one MAIN\n")
-	runGit(ctx, t, repo, "add", mergeSharedPath)
-	runGit(ctx, t, repo, "commit", "-q", "-m", "main edits shared.txt")
-	baseSHA := strings.TrimSpace(runGit(ctx, t, repo, "rev-parse", "HEAD"))
-
-	if _, mergeErr := o.StartBaseMerge(ctx, wt, baseSHA); mergeErr != nil {
-		t.Fatalf("StartBaseMerge: unexpected error: %v", mergeErr)
-	}
-	writeTestFile(t, filepath.Join(wt.Dir(), mergeSharedPath), "line one RESOLVED\n")
-
-	_, err = o.CommitMerge(ctx, wt, mergeTestMessage())
+	wrongSHA := strings.Repeat("b", 40)
+	_, err := f.o.CommitMerge(ctx, f.wt, mergeTestMessage(), wrongSHA)
 	if err == nil {
-		t.Fatal("CommitMerge: expected an error for a genuinely unsigned commit, got nil")
+		t.Fatal("CommitMerge: expected an error for a MERGE_HEAD mismatch, got nil")
 	}
-	if !strings.Contains(err.Error(), "commit signing failed") {
-		t.Errorf("CommitMerge error = %q, want it to mention %q", err.Error(), "commit signing failed")
+	if !strings.Contains(err.Error(), "MERGE_HEAD") {
+		t.Errorf("CommitMerge error = %q, want it to mention MERGE_HEAD", err.Error())
 	}
 
-	afterHead := strings.TrimSpace(runGit(ctx, t, wt.Dir(), "rev-parse", "HEAD"))
+	afterHead := strings.TrimSpace(runGit(ctx, t, f.wt.Dir(), "rev-parse", "HEAD"))
 	if afterHead != priorHead {
-		t.Errorf("HEAD = %q after a failed CommitMerge, want it reset back to %q", afterHead, priorHead)
+		t.Errorf("HEAD = %q after a refused CommitMerge, want unchanged %q", afterHead, priorHead)
 	}
-
-	mergeHeadNow := strings.TrimSpace(runGit(ctx, t, wt.Dir(), "rev-parse", "MERGE_HEAD"))
-	if mergeHeadNow != baseSHA {
-		t.Errorf("MERGE_HEAD = %q after a failed CommitMerge, want it restored to %q", mergeHeadNow, baseSHA)
+	mergeHeadNow := strings.TrimSpace(runGit(ctx, t, f.wt.Dir(), "rev-parse", "MERGE_HEAD"))
+	if mergeHeadNow != f.baseSHA {
+		t.Errorf("MERGE_HEAD = %q after a refused CommitMerge, want unchanged %q", mergeHeadNow, f.baseSHA)
 	}
 }
 
@@ -364,7 +518,7 @@ func TestCommitMergeRefusesWithoutMerge(t *testing.T) {
 	}
 	priorHead := strings.TrimSpace(runGit(ctx, t, wt.Dir(), "rev-parse", "HEAD"))
 
-	_, err = o.CommitMerge(ctx, wt, mergeTestMessage())
+	_, err = o.CommitMerge(ctx, wt, mergeTestMessage(), strings.Repeat("a", 40))
 	if err == nil {
 		t.Fatal("CommitMerge: expected an error with no merge in progress, got nil")
 	}
