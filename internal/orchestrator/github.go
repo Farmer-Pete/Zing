@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"regexp"
 	"strings"
 	"time"
 
@@ -705,13 +704,26 @@ func (g *GitHubClient) JobLogTail(ctx context.Context, owner, repo string, jobID
 	return tail, nil
 }
 
-// logGroupRunRe matches an Actions "##[group]Run " step header, with an
-// optional leading timestamp token (as Actions prefixes raw job logs).
-var logGroupRunRe = regexp.MustCompile(`^(\S+ )?##\[group\]Run `)
+// logGroupRunPrefix is an Actions "##[group]Run " step header.
+const logGroupRunPrefix = "##[group]Run "
 
-// logErrorRe matches an Actions "##[error]" annotation line, with the same
-// optional leading timestamp token.
-var logErrorRe = regexp.MustCompile(`^(\S+ )?##\[error\]`)
+// logErrorPrefix is an Actions "##[error]" annotation line.
+const logErrorPrefix = "##[error]"
+
+// hasLogPrefix reports whether line starts with prefix, optionally after a
+// single leading timestamp token and a space, as Actions prefixes raw job
+// logs. It is the non-regexp equivalent of `^(\S+ )?` + prefix: tailLog
+// calls it per line of a job log that can run into the millions, where
+// under the race detector regexp's internal machine pool made the cost
+// enough to blow past JobLogTail's client timeout (observed: a 64 MiB log
+// of short lines took 33s under -race against 1.3s without it).
+func hasLogPrefix(line, prefix string) bool {
+	if strings.HasPrefix(line, prefix) {
+		return true
+	}
+	sp := strings.IndexByte(line, ' ')
+	return sp > 0 && strings.HasPrefix(line[sp+1:], prefix)
+}
 
 // tailLog reads r line by line and returns, by default, the last n lines
 // joined with "\n" -- the fallback ring below. A line longer than
@@ -723,14 +735,14 @@ var logErrorRe = regexp.MustCompile(`^(\S+ )?##\[error\]`)
 // isPrefix=true exactly when a line exceeds that size.
 //
 // Alongside the fallback ring, tailLog tracks the first failed step: a
-// line matching logGroupRunRe starts a new step, discarding any step seen
-// so far that had no error. A line matching logErrorRe marks the current
-// step failed and flushes its pending lines (the lines seen since the
-// step header or the last error, also capped at n) into that step's
-// buffer. Once a step has failed, reading stops at the next step header,
-// so a later step's output cannot replace it. If any step failed, tailLog
-// returns that step's buffer -- from its header to its last error line,
-// capped at n -- instead of the plain ring.
+// line starting with logGroupRunPrefix starts a new step, discarding any
+// step seen so far that had no error. A line starting with logErrorPrefix
+// marks the current step failed and flushes its pending lines (the lines
+// seen since the step header or the last error, also capped at n) into
+// that step's buffer. Once a step has failed, reading stops at the next
+// step header, so a later step's output cannot replace it. If any step
+// failed, tailLog returns that step's buffer -- from its header to its
+// last error line, capped at n -- instead of the plain ring.
 func tailLog(r io.Reader, n int) (string, error) {
 	limited := &io.LimitedReader{R: r, N: maxLogTotalBytes + 1}
 	br := bufio.NewReaderSize(limited, maxLogLineBytes)
@@ -763,13 +775,13 @@ func tailLog(r io.Reader, n int) (string, error) {
 			ring = pushCapped(ring, line)
 
 			switch {
-			case logGroupRunRe.MatchString(line):
+			case hasLogPrefix(line, logGroupRunPrefix):
 				if failedStepFound {
 					return strings.Join(stepBuf, "\n"), nil
 				}
 				stepBuf = []string{line}
 				pending = nil
-			case logErrorRe.MatchString(line):
+			case hasLogPrefix(line, logErrorPrefix):
 				for _, p := range pending {
 					stepBuf = pushCapped(stepBuf, p)
 				}
