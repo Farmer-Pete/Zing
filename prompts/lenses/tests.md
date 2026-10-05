@@ -14,6 +14,10 @@ Check:
   the console), a write under /tmp, a nested sandbox check it cannot
   start (`sandbox-exec`), or a sandbox probe that skips when sandboxed
   is a finding.
+- A scenario whose then expects a skip has a check that runs `go test
+  -v` and greps the skip line, such as `--- SKIP: TestName`, and the
+  skip message. A bare `go test` exits 0 whether or not the test
+  skipped, so it is a finding.
 
 ## In code
 Check that the tests exist and assert behavior, not implementation. A
