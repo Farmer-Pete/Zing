@@ -204,10 +204,10 @@ func runCheckCommands(ctx context.Context, d Deps, t store.Ticket, wt orchestrat
 // recordCheckStart is a CHECK command's OnStart body, mirroring runjob.go's
 // recordRunStart: it reads the group leader's start token ("" with a WARN
 // when it cannot) and records the group under the claim (plan D10). A
-// failed write is logged at WARN and the command keeps running: the same
-// accepted risk #45 takes for runs, since no row means reclaim treats the
-// command as gone. It returns the record's generation, 0 when nothing was
-// recorded.
+// failed write is logged at ERROR and the command keeps running untracked:
+// no row means reclaim cannot find or reap it, so the failure counts as an
+// error rather than a warning (#46). It returns the record's generation, 0
+// when nothing was recorded.
 func recordCheckStart(ctx context.Context, d Deps, ticketID int64, kind store.CheckKind, pgid int, budgetStart time.Time) int64 {
 	token, err := proc.StartToken(pgid)
 	if err != nil {
@@ -218,7 +218,7 @@ func recordCheckStart(ctx context.Context, d Deps, ticketID int64, kind store.Ch
 	defer cancel()
 	gen, err := d.Store.RecordCheckStart(startCtx, ticketID, d.Owner, d.Expires, kind, pgid, token, time.Now(), budgetStart)
 	if err != nil {
-		slog.Warn("record check start failed", "ticket_id", ticketID, "command", kind, "pgid", pgid, "error", err)
+		slog.Error("record check start failed", "ticket_id", ticketID, "command", kind, "pgid", pgid, "error", err)
 		return 0
 	}
 	slog.Info("check command started", "ticket_id", ticketID, "command", kind, "pgid", pgid, "gen", gen)

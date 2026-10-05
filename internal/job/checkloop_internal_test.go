@@ -98,12 +98,14 @@ const (
 	fakeLintCmd = "the-lint"
 )
 
-// slogLevelWarn and slogLevelInfo are slog's own rendering of its WARN and
-// INFO levels in a JSON log record's "level" field, named once for every
-// test in this package that checks a captured record's level (goconst).
+// slogLevelWarn, slogLevelInfo and slogLevelError are slog's own rendering
+// of its WARN, INFO and ERROR levels in a JSON log record's "level" field,
+// named once for every test in this package that checks a captured
+// record's level (goconst).
 const (
-	slogLevelWarn = "WARN"
-	slogLevelInfo = "INFO"
+	slogLevelWarn  = "WARN"
+	slogLevelInfo  = "INFO"
+	slogLevelError = "ERROR"
 )
 
 func (c *budgetCommands) Run(_ context.Context, _, _, shellCmd string, timeout time.Duration, _ CommandIO) (int, error) {
@@ -683,5 +685,47 @@ func TestRunCheckCommandLogsFixDuration(t *testing.T) {
 	}
 	if records[1]["exit_code"] != float64(-1) || records[1]["timed_out"] != true {
 		t.Errorf("second record = %+v, want exit_code -1, timed_out true", records[1])
+	}
+}
+
+// TestRecordCheckStartFailureLogsError proves a failed check-start write is
+// logged at ERROR, not WARN (#46): the command then runs with no
+// check_procs row, so reclaim cannot reap it, and an operator must be able
+// to count that as an error. With no ticket seeded, RecordCheckStart's
+// claim fence finds no row and the write fails. Not parallel: it swaps
+// slog.Default.
+func TestRecordCheckStartFailureLogsError(t *testing.T) {
+	s, err := store.Open(t.Context(), filepath.Join(t.TempDir(), "zing.db"))
+	if err != nil {
+		t.Fatalf("store.Open: %v", err)
+	}
+	t.Cleanup(func() { s.Close() })
+
+	var buf bytes.Buffer
+	orig := slog.Default()
+	slog.SetDefault(slog.New(slog.NewJSONHandler(&buf, &slog.HandlerOptions{Level: slog.LevelWarn})))
+	t.Cleanup(func() { slog.SetDefault(orig) })
+
+	d := Deps{Store: s, Owner: "o", Expires: time.Now().Add(time.Hour)}
+	if gen := recordCheckStart(t.Context(), d, 1, store.CheckKindFix, os.Getpid(), time.Now()); gen != 0 {
+		t.Fatalf("recordCheckStart = %d, want 0", gen)
+	}
+
+	var records []map[string]any
+	dec := json.NewDecoder(&buf)
+	for dec.More() {
+		var rec map[string]any
+		if decErr := dec.Decode(&rec); decErr != nil {
+			t.Fatalf("decode log line: %v", decErr)
+		}
+		if rec["msg"] == "record check start failed" {
+			records = append(records, rec)
+		}
+	}
+	if len(records) != 1 {
+		t.Fatalf("records = %+v, want exactly 1", records)
+	}
+	if records[0]["level"] != slogLevelError {
+		t.Errorf("level = %v, want %s", records[0]["level"], slogLevelError)
 	}
 }
