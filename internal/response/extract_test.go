@@ -102,3 +102,50 @@ func TestExtractAll_ManyUnclosedStartsIsBoundedAndFast(t *testing.T) {
 		t.Fatal("ExtractAll did not return within 5s; the candidate scan is not bounded")
 	}
 }
+
+// TestExtractAll_RepairsBareLessThan is ExtractAll's half of the ticket's
+// live build/#69 shape: a bare <nil> inside <report> breaks the strict
+// scan, so the repair pass must still return exactly one root, with the
+// placeholder escaped and kept as text.
+func TestExtractAll_RepairsBareLessThan(t *testing.T) {
+	t.Parallel()
+
+	broken := `<zing job="build" outcome="ok"><report>x is <nil></report></zing>`
+	want := `<zing job="build" outcome="ok"><report>x is &lt;nil></report></zing>`
+	input := "log line\n" + broken + "\ndone"
+
+	got := ExtractAll(input)
+	if len(got) != 1 || got[0] != want {
+		t.Fatalf("ExtractAll = %v, want exactly [%q]", got, want)
+	}
+}
+
+// TestExtractAll_StrictRootSkipsRepair guards goal 2 for ExtractAll: once
+// the strict pass finds a well-formed root, the repair pass never runs, so
+// a broken candidate earlier in the text contributes nothing and the valid
+// root comes back unchanged.
+func TestExtractAll_StrictRootSkipsRepair(t *testing.T) {
+	t.Parallel()
+
+	broken := `<zing job="build" outcome="ok"><report>x is <nil></report></zing>`
+	input := broken + "\n" + wellFormedClassify
+
+	got := ExtractAll(input)
+	if len(got) != 1 || got[0] != wellFormedClassify {
+		t.Fatalf("ExtractAll = %v, want exactly [%q]", got, wellFormedClassify)
+	}
+}
+
+// TestExtractAll_UnregisteredPairIsNotRepaired mirrors
+// TestParse_UnregisteredPairIsNotRepaired: ExtractAll's repair pass also
+// needs the (job, outcome) pair's shape, so an unregistered pair gets no
+// root even though the strict pass also failed on the bare <.
+func TestExtractAll_UnregisteredPairIsNotRepaired(t *testing.T) {
+	t.Parallel()
+
+	doc := `<zing job="classify" outcome="ready"><reason>a < b</reason></zing>`
+	got := ExtractAll(doc)
+	if len(got) != 0 {
+		t.Fatalf("ExtractAll = %v, want zero roots", got)
+	}
+}

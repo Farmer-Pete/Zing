@@ -19,11 +19,26 @@ import (
 // come back as one root, for runtime.Run's final-message rule (design
 // section 4.1) to react to with its own named reason, rather than losing
 // the candidate to a generic "no zing element" result.
+//
+// When the strict pass finds no root, ExtractAll tries once more with each
+// registered candidate's bare < escaped (extractRepaired), so an agent's
+// free text holding a literal < does not cost a whole retry run. The cap
+// still applies, and hitting it in the strict pass returns nothing, as
+// before.
 func ExtractAll(text string) []string {
 	input := escapeBareAmpersands([]byte(text))
-	excluded := excludedRanges(input)
+	roots, capped := extractStrict(input)
+	if len(roots) > 0 || capped {
+		return roots
+	}
+	return extractRepaired(input)
+}
 
-	var roots []string
+// extractStrict is ExtractAll's first pass over input exactly as written.
+// capped is true when it stopped at maxRootCandidates, and then roots is
+// nil.
+func extractStrict(input []byte) (roots []string, capped bool) {
+	excluded := excludedRanges(input)
 	scanned := 0
 	for _, offset := range candidateOffsets(input) {
 		if inRanges(offset, excluded) {
@@ -37,12 +52,43 @@ func ExtractAll(text string) []string {
 		// failure rather than a stalled worker. A genuine document sits at the
 		// first well-formed candidate, far below this cap.
 		if scanned == maxRootCandidates {
-			return nil
+			return nil, true
 		}
 		scanned++
 		if end, ok := wellFormedRootExtent(input, offset); ok {
 			roots = append(roots, string(input[offset:end]))
 		}
+	}
+	return roots, false
+}
+
+// extractRepaired is ExtractAll's second pass, run only when the strict
+// pass found no root: a candidate counts when its repaired bytes form a
+// well-formed root on their own.
+func extractRepaired(input []byte) []string {
+	excluded := excludedRanges(input)
+	var roots []string
+	total := 0
+	scanned := 0
+	for _, offset := range candidateOffsets(input) {
+		if inRanges(offset, excluded) {
+			continue
+		}
+		if scanned == maxRootCandidates {
+			return nil
+		}
+		scanned++
+		repaired, escaped, ok := repairCandidate(input[offset:])
+		if !ok {
+			continue
+		}
+		if end, whole := wellFormedRootExtent(repaired, 0); whole {
+			roots = append(roots, string(repaired[:end]))
+			total += escaped
+		}
+	}
+	if len(roots) > 0 {
+		logRepair(total)
 	}
 	return roots
 }

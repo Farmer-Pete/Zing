@@ -31,8 +31,40 @@ type Document struct {
 //
 // A missing or malformed element both fall through to the same result:
 // Parse returns the exact string "no zing element in final message".
+//
+// When no candidate decodes, Parse tries once more with each candidate's
+// bare < escaped (parseRepaired), so an agent's free text holding a
+// literal < (bug fix: a quoted placeholder such as <nil>, or "a < b") does
+// not cost a whole retry run. A document that still fails to decode after
+// that reports the strict pass's own error, as before.
+//
+// The repair pass is skipped entirely when the strict pass already found a
+// well-formed candidate naming an unregistered pair: that candidate's own
+// "no response for job..." error takes precedence over repairing an
+// earlier, malformed one (TestParse_UnknownPairAfterMalformedCandidate). A
+// malformed candidate that happens to contain the literal text "<zing"
+// inside a free-text field would otherwise let the repair pass swallow the
+// unregistered candidate as mere text and decode successfully, silently
+// losing the more specific error.
 func Parse(input []byte) (*Document, error) {
 	input = escapeBareAmpersands(input)
+	doc, err := parseStrict(input)
+	if doc != nil {
+		return doc, nil
+	}
+	if unregistered, ok := errors.AsType[*unregisteredPairError](err); ok {
+		return nil, unregistered
+	}
+	if repaired := parseRepaired(input); repaired != nil {
+		return repaired, nil
+	}
+	return nil, err
+}
+
+// parseStrict is Parse's first pass: the candidate scan over input exactly
+// as written. It returns the first document that decodes, or the error
+// Parse reports when none does.
+func parseStrict(input []byte) (*Document, error) {
 	excluded := excludedRanges(input)
 	var firstLookupErr error
 	var lastBodyErr *bodyDecodeError
@@ -52,12 +84,47 @@ func Parse(input []byte) (*Document, error) {
 		}
 	}
 	if firstLookupErr != nil {
-		return nil, firstLookupErr
+		return nil, &unregisteredPairError{err: firstLookupErr}
 	}
 	if lastBodyErr != nil {
 		return nil, fmt.Errorf("no zing element in final message: %w; inside the document write a literal < as &lt; and & as &amp;", lastBodyErr.err)
 	}
 	return nil, errors.New("no zing element in final message")
+}
+
+// unregisteredPairError marks parseStrict's firstLookupErr result so Parse
+// can tell it apart from a generic or body-decode failure and skip the
+// repair pass for it (see Parse's doc comment).
+type unregisteredPairError struct{ err error }
+
+func (e *unregisteredPairError) Error() string { return e.err.Error() }
+func (e *unregisteredPairError) Unwrap() error { return e.err }
+
+// parseRepaired is Parse's second pass, run only when the strict pass
+// found no document: each candidate gets its bare < escaped
+// (repairCandidate) and is decoded again. It returns nil when no repaired
+// candidate decodes.
+func parseRepaired(input []byte) *Document {
+	excluded := excludedRanges(input)
+	tried := 0
+	for _, offset := range candidateOffsets(input) {
+		if inRanges(offset, excluded) {
+			continue
+		}
+		if tried == maxRootCandidates {
+			return nil
+		}
+		tried++
+		repaired, escaped, ok := repairCandidate(input[offset:])
+		if !ok {
+			continue
+		}
+		if doc, decodeErr := tryDecode(repaired, 0); decodeErr == nil {
+			logRepair(escaped)
+			return doc
+		}
+	}
+	return nil
 }
 
 const zingMarker = "<zing"
