@@ -349,7 +349,8 @@ func TestProbeTLSWithoutSecurityServer(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read sandbox/build.sb: %v", err)
 	}
-	if err := tlsProbeProfile(profile); err != nil {
+	profile, err = tlsProbeProfile(profile)
+	if err != nil {
 		t.Fatal(err)
 	}
 
@@ -389,22 +390,17 @@ func TestProbeTLSWithoutSecurityServer(t *testing.T) {
 	}
 }
 
-// tlsDeniedMachServices are the Mach services TestProbeTLSWithoutSecurityServer
-// and TestTLSProbeMatchesBuildProfile both require absent from build.sb's
-// mach-lookup allow list (sandbox/build.sb's own comment records why:
-// Package 8 found TLS clean without either).
-var tlsDeniedMachServices = []string{"com.apple.SecurityServer", "com.apple.trustd.agent"}
-
-// tlsProbeProfile returns an error naming the first of tlsDeniedMachServices
-// that profile (sandbox/build.sb's text) allows via mach-lookup, and nil
-// when it allows neither.
-func tlsProbeProfile(profile []byte) error {
-	for _, name := range tlsDeniedMachServices {
+// tlsProbeProfile returns profile (sandbox/build.sb's text) unchanged when
+// its mach-lookup allow list names neither com.apple.SecurityServer nor
+// com.apple.trustd.agent, the state build.sb's own comment records (D26,
+// Package 8), and an error naming the first one it finds otherwise.
+func tlsProbeProfile(profile []byte) ([]byte, error) {
+	for _, name := range []string{"com.apple.SecurityServer", "com.apple.trustd.agent"} {
 		if strings.Contains(string(profile), `(global-name "`+name+`")`) {
-			return fmt.Errorf("sandbox/build.sb allows mach-lookup of %s again; update this probe", name)
+			return nil, fmt.Errorf("sandbox/build.sb allows mach-lookup of %s again; update this probe", name)
 		}
 	}
-	return nil
+	return profile, nil
 }
 
 // TestTLSProbeMatchesBuildProfile runs without ZING_LIVE_CLI or sandbox-exec:
@@ -417,13 +413,13 @@ func TestTLSProbeMatchesBuildProfile(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read sandbox/build.sb: %v", err)
 	}
-	if err := tlsProbeProfile(profile); err != nil {
+	if _, err := tlsProbeProfile(profile); err != nil {
 		t.Fatalf("checked-in build.sb: %v", err)
 	}
-	for _, name := range tlsDeniedMachServices {
+	for _, name := range []string{"com.apple.SecurityServer", "com.apple.trustd.agent"} {
 		readded := strings.Replace(string(profile), `(global-name "com.apple.system.opendirectoryd.libinfo")`,
 			`(global-name "com.apple.system.opendirectoryd.libinfo") (global-name "`+name+`")`, 1)
-		if err := tlsProbeProfile([]byte(readded)); err == nil || !strings.Contains(err.Error(), name) {
+		if _, err := tlsProbeProfile([]byte(readded)); err == nil || !strings.Contains(err.Error(), name) {
 			t.Errorf("build.sb with %s added back: err = %v, want an error naming it", name, err)
 		}
 	}
