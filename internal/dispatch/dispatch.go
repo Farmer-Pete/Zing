@@ -1147,7 +1147,7 @@ func (d *Dispatcher) runAndCommit(ctx context.Context, ticket store.Ticket, time
 	deps := job.Deps{
 		Store: d.store, Runtimes: d.rts, Machine: d.machine,
 		Models: d.cfg.Models, Budget: d.cfg.Budget, Floor: d.cfg.Floor,
-		Owner: d.cfg.Owner, Expires: expires,
+		Owner: d.cfg.Owner, Expires: expires, Now: d.cfg.Now,
 		Projects: d.cfg.Projects, Sandboxes: d.cfg.Sandboxes, RequireSandbox: d.cfg.RequireSandbox, Commands: d.cfg.Commands,
 		DataDir: d.cfg.DataDir, LensesParallel: d.cfg.LensesParallel, JudgeCodexHome: d.cfg.JudgeCodexHome,
 		MergeRule: d.cfg.MergeRule, ReviewBots: d.cfg.ReviewBots,
@@ -1196,6 +1196,14 @@ func (d *Dispatcher) runAndCommit(ctx context.Context, ticket store.Ticket, time
 		err = job.ValidateCommit(ticket, commit)
 	}
 	if err != nil {
+		// job.CappedUntil (design shape, "Park write"): a Claude session
+		// limit hit, or a hold refusal for a lens that reserved a run before
+		// another lens in the same round hit the cap. This is checked ahead
+		// of runtime.ErrCanceled because a capped error is never that: the
+		// run is parked, not left for ExpireClaims to reconcile.
+		if until, capped := job.CappedUntil(err); capped {
+			return d.parkCapped(ctx, ticket, expires, until)
+		}
 		// runtime.ErrCanceled (design D13, section 4.5, 6.8): runCtx's own
 		// deadline expired (ctx itself is still live, or the branch above
 		// would already have returned), not a failure to escalate. The
@@ -1306,6 +1314,37 @@ func (d *Dispatcher) recordShutdownInterrupt(ctx context.Context, ticket store.T
 	if !applied {
 		slog.Warn("claim already lost", "ticket_id", ticket.ID)
 		return nil
+	}
+	d.bus.Publish()
+	return nil
+}
+
+// parkCapped records a Claude session limit (or a hold refusal) for ticket
+// (design shape, "Park write"): store.ParkRuns terminalizes every open run
+// of the ticket as interrupted with capped_until = until, raises the
+// claude_hold_until setting when until is later, writes one "parked until"
+// marker when any run was actually swept, and clears the claim, all under
+// a detached, bounded context so a cancelled handler context cannot abort
+// a write that must still land. Like recordShutdownInterrupt, it never
+// returns a non-nil error: a write failure is logged and the claim is left
+// to expire for ExpireClaims to reconcile.
+func (d *Dispatcher) parkCapped(ctx context.Context, ticket store.Ticket, expires, until time.Time) error {
+	postCtx, cancel := postHandlerContext(ctx)
+	defer cancel()
+
+	res, err := d.store.ParkRuns(postCtx, ticket.ID, d.cfg.Owner, expires, until)
+	resetAt := until.Format(time.RFC3339)
+	switch {
+	case err != nil:
+		slog.Error("claude session limit park failed", "ticket_id", ticket.ID, "reset_at", resetAt, "err", err)
+		return nil
+	case !res.Applied:
+		slog.Warn("claim already lost", "ticket_id", ticket.ID)
+		return nil
+	case len(res.RunIDs) == 0:
+		slog.Debug("claim released, claude held", "ticket_id", ticket.ID, "reset_at", resetAt)
+	default:
+		slog.Warn("claude session limit park", "ticket_id", ticket.ID, "run_ids", res.RunIDs, "reset_at", resetAt)
 	}
 	d.bus.Publish()
 	return nil
