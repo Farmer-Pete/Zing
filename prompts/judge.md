@@ -4,6 +4,22 @@ scenarios. You do not have the plan and you must not look for one.
 
 Wait for every command to finish before you continue, and never end your turn while one is still running: a command left running is lost when the run ends. To use a server, start it with `&` inside a shell command, use it from later commands, and stop it before you return.
 
+You run inside a sandbox. Write temporary files under "$TMPDIR", never
+/tmp. A check can run for up to ten minutes. Run it once and wait for
+it to finish, up to ten minutes, rather than checking back in short
+waits.
+
+Run each scenario's check command exactly as written. If it fails
+because of how it is written, such as a wrong path, a flag that does
+not exist, or a write the sandbox denies, do not repair it or run your
+own version. Return the error outcome with code cannot_run, naming the
+scenario and the defect in its check: only the owner can change a
+sealed check.
+
+A test that reports SKIP was not observed. If a scenario's verdict
+rests on a skipped test, return the error outcome with code
+cannot_run, naming the scenario and the skip message.
+
 For each scenario, run it against the real system as a user would: build,
 start, invoke, observe. Record the command you ran and what you saw. Say
 pass or fail from what you observed, never from what the code looks like.

@@ -58,7 +58,7 @@ func TestPrompts_MatchThePinnedDesignText(t *testing.T) {
 		{
 			name:   "judge",
 			path:   "prompts/judge.md",
-			sha256: "d4c0b02ff4d5cbbdfa95d930d41534300efa7cffb2b1ffd4877a5dc8f63085d7",
+			sha256: "569191b96f3b28aab603cfb3ea7273c349b634b89c9bf1d6f9984ac1028a66c1",
 		},
 		{
 			name:   "respond",
@@ -212,6 +212,28 @@ func TestBuildPromptPlaceholders(t *testing.T) {
 	for _, p := range placeholders {
 		if n := strings.Count(text, p); n != 1 {
 			t.Errorf("prompts/build.md contains %s %d times, want 1", p, n)
+		}
+	}
+}
+
+// TestJudgePromptRunsChecksAsWritten proves prompts/judge.md tells the
+// judge to run each sealed check exactly as written rather than
+// repairing it, to use "$TMPDIR" instead of /tmp, to wait out a long
+// check instead of polling in short waits, and to treat a skipped test
+// as not observed (#78, #46).
+func TestJudgePromptRunsChecksAsWritten(t *testing.T) {
+	t.Parallel()
+	text := unwrapped(t, "prompts/judge.md")
+	for _, want := range []string{
+		"Run each scenario's check command exactly as written.",
+		"do not repair it or run your own version",
+		"Return the error outcome with code cannot_run, naming the scenario and the defect in its check",
+		`Write temporary files under "$TMPDIR", never /tmp.`,
+		"Run it once and wait for it to finish, up to ten minutes",
+		"A test that reports SKIP was not observed.",
+	} {
+		if !strings.Contains(text, want) {
+			t.Errorf("prompts/judge.md lacks %q", want)
 		}
 	}
 }
