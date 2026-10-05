@@ -38,14 +38,6 @@ const testBodyConversationPending = "conversation pending run 31 batch 4"
 // TestUnknownMarkerIsADivider, and TestMarkerRecognized (goconst).
 const testBodyUnknownMarker = "some future bookkeeping marker nobody recognizes yet"
 
-// testEventKindCheckRerun and testBodyUnknownEventKind are
-// TestMarkerRecognized's two typed-event cases' EventKind values, held as
-// vars (not consts) so a *string can point at them.
-var (
-	testEventKindCheckRerun  = store.EventKindCheckRerun
-	testBodyUnknownEventKind = "not_a_kind"
-)
-
 // testEscalationBody is one escalation row's own Body, shared by
 // TestNoMessageKindRendersOutsideItsThread,
 // TestEscalationWithQuestionChildRendersNoCard, and
@@ -1103,6 +1095,7 @@ func TestConversationMarkersHidden(t *testing.T) {
 // recognize).
 func TestMarkerRecognized(t *testing.T) {
 	t.Parallel()
+	checkRerun, unknownKind := store.EventKindCheckRerun, "not_a_kind"
 	for _, tc := range []struct {
 		name string
 		row  store.MessageRow
@@ -1131,7 +1124,7 @@ func TestMarkerRecognized(t *testing.T) {
 		{
 			"a typed event with a registered rule is recognized",
 			store.MessageRow{Message: store.Message{ //nolint:modernize // keyed on purpose
-				Type: msgTypeUpdate, Author: authorSystem, EventKind: &testEventKindCheckRerun,
+				Type: msgTypeUpdate, Author: authorSystem, EventKind: &checkRerun,
 				Payload: []byte(`{"check":"test","sha":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}`),
 			}},
 			true,
@@ -1139,7 +1132,7 @@ func TestMarkerRecognized(t *testing.T) {
 		{
 			"a typed event with no registered rule is not recognized",
 			store.MessageRow{Message: store.Message{ //nolint:modernize // keyed on purpose
-				Type: msgTypeUpdate, Author: authorSystem, EventKind: &testBodyUnknownEventKind,
+				Type: msgTypeUpdate, Author: authorSystem, EventKind: &unknownKind,
 			}},
 			false,
 		},

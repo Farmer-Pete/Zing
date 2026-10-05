@@ -34,7 +34,11 @@ func eventLine(m *store.MessageRow) string {
 	}
 	line, err := rule(m.Payload)
 	if err != nil {
-		slog.Warn("event payload unreadable", "message_id", m.ID, "ticket_id", m.TicketID, "kind", kind, "err", err)
+		attrs := []any{"message_id", m.ID, "ticket_id", m.TicketID, "kind", kind, "err", err}
+		if m.RunID != nil {
+			attrs = append(attrs, "run_id", *m.RunID)
+		}
+		slog.Warn("console: event payload unreadable", attrs...)
 		return "Unreadable " + kind + " event."
 	}
 	return line

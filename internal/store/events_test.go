@@ -1,7 +1,6 @@
 package store
 
 import (
-	"context"
 	"encoding/json"
 	"strings"
 	"testing"
@@ -56,12 +55,21 @@ func TestEventsCountBySHAAndRun(t *testing.T) {
 	const ticketID = 1
 	seedSessionAndTwoRuns(t, s, ticketID)
 
+	const otherTicketID = 2
+	if _, err := s.db.ExecContext(ctx,
+		`INSERT INTO tickets (id, project_id, tracker_ref, title, state) VALUES (?, 1, '43', 'a second ticket', 'queued')`,
+		otherTicketID,
+	); err != nil {
+		t.Fatalf("seed second ticket: %v", err)
+	}
+
 	shaA := strings.Repeat("a", 40)
 	shaB := strings.Repeat("b", 40)
 
 	idTestA := insertCheckRerunEvent(t, s, ticketID, 1, response.CheckNameTest, shaA)
 	idLintA := insertCheckRerunEvent(t, s, ticketID, 1, response.CheckNameLint, shaA)
 	idTestB := insertCheckRerunEvent(t, s, ticketID, 2, response.CheckNameTest, shaB)
+	insertCheckRerunEvent(t, s, otherTicketID, 1, response.CheckNameTest, shaA)
 
 	if _, err := s.InsertMessage(ctx, Message{
 		TicketID: ticketID, Type: msgTypeUpdate, Author: authorSystem, Body: "check failed delivered run 1",
@@ -92,6 +100,13 @@ func TestEventsCountBySHAAndRun(t *testing.T) {
 				t.Errorf("CountEvents(%+v) = %d, want %d", tc.f, n, tc.want)
 			}
 		})
+	}
+
+	if n, err := s.CountEvents(ctx, otherTicketID, EventKindCheckRerun, EventFilter{}); err != nil || n != 1 {
+		t.Fatalf("CountEvents(otherTicket) = (%d, %v), want (1, nil)", n, err)
+	}
+	if rows, err := s.Events(ctx, otherTicketID, EventKindCheckRerun, EventFilter{}); err != nil || len(rows) != 1 {
+		t.Fatalf("Events(otherTicket) = (%d rows, %v), want (1, nil)", len(rows), err)
 	}
 
 	rows, err := s.Events(ctx, ticketID, EventKindCheckRerun, EventFilter{})
@@ -187,20 +202,35 @@ func TestCommitHandlerResultWritesEvent(t *testing.T) {
 // TestInsertEventRejects proves messagePayloadParam rejects an unknown
 // kind, a payload that fails its schema, a missing payload, a non-update
 // type, and an empty kind, each leaving the messages table unchanged, while
-// leaving the existing "plain update takes no payload" rule intact.
+// leaving the existing "plain update takes no payload" rule intact. Each
+// case's wantErr substring pins the rejection to messagePayloadParam's own
+// check, not to the DB's CHECK constraint backstop.
 func TestInsertEventRejects(t *testing.T) {
-	t.Parallel()
+	// Not t.Parallel(): the row-count check below reads after the subtests
+	// above run, which only holds if they run sequentially.
 	s := newTestStore(t)
 	ctx := t.Context()
 	seedProjectAndTicket(t, s)
 	const ticketID = 1
+	const wantSchemaErr = "does not match schema"
 
 	validSHA := strings.Repeat("a", 40)
 	bogusKind := "bogus"
 
+	// eventMessage builds a check_rerun event Message on ticketID with a
+	// raw payload, for the invalid-payload cases below.
+	eventMessage := func(payload string) Message {
+		kind := EventKindCheckRerun
+		return Message{
+			TicketID: ticketID, Type: msgTypeUpdate, Author: authorSystem, EventKind: &kind,
+			Payload: json.RawMessage(payload),
+		}
+	}
+
 	cases := []struct {
-		name string
-		msg  Message
+		name    string
+		msg     Message
+		wantErr string
 	}{
 		{
 			"unknown kind",
@@ -208,29 +238,36 @@ func TestInsertEventRejects(t *testing.T) {
 				TicketID: ticketID, Type: msgTypeUpdate, Author: authorSystem, EventKind: &bogusKind,
 				Payload: json.RawMessage(`{"check":"test","sha":"` + validSHA + `"}`),
 			},
+			wantSchemaErr,
 		},
 		{
 			"bad check enum",
-			mustEventMessage(t, ticketID, `{"check":"fmt","sha":"`+validSHA+`"}`),
+			eventMessage(`{"check":"fmt","sha":"` + validSHA + `"}`),
+			wantSchemaErr,
 		},
 		{
 			"bad sha pattern",
-			mustEventMessage(t, ticketID, `{"check":"test","sha":"deadbee"}`),
+			eventMessage(`{"check":"test","sha":"deadbee"}`),
+			wantSchemaErr,
 		},
 		{
 			"extra property",
-			mustEventMessage(t, ticketID, `{"check":"test","sha":"`+validSHA+`","x":1}`),
+			eventMessage(`{"check":"test","sha":"` + validSHA + `","x":1}`),
+			wantSchemaErr,
 		},
 		{
 			"event kind with no payload",
 			Message{TicketID: ticketID, Type: msgTypeUpdate, Author: authorSystem, EventKind: &[]string{EventKindCheckRerun}[0]},
+			"requires a payload",
 		},
 		{
 			"event kind with wrong message type",
-			Message{
-				TicketID: ticketID, Type: msgTypeState, Author: authorSystem, EventKind: &[]string{EventKindCheckRerun}[0],
-				Payload: json.RawMessage(`{"check":"test","sha":"` + validSHA + `"}`),
-			},
+			func() Message {
+				m := eventMessage(`{"check":"test","sha":"` + validSHA + `"}`)
+				m.Type = msgTypeState
+				return m
+			}(),
+			"want update",
 		},
 		{
 			"empty event kind",
@@ -238,6 +275,7 @@ func TestInsertEventRejects(t *testing.T) {
 				TicketID: ticketID, Type: msgTypeUpdate, Author: authorSystem, EventKind: &[]string{""}[0],
 				Payload: json.RawMessage(`{"check":"test","sha":"` + validSHA + `"}`),
 			},
+			"must not be empty",
 		},
 		{
 			"plain update takes no payload",
@@ -245,40 +283,27 @@ func TestInsertEventRejects(t *testing.T) {
 				TicketID: ticketID, Type: msgTypeUpdate, Author: authorSystem,
 				Payload: json.RawMessage(`{"check":"test","sha":"` + validSHA + `"}`),
 			},
+			"takes no payload",
 		},
 	}
 
 	before := countRows(t, s, `SELECT COUNT(*) FROM messages`)
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			if _, err := s.InsertMessage(ctx, tc.msg); err == nil {
-				t.Errorf("InsertMessage(%s) = nil error, want one", tc.name)
+			_, err := s.InsertMessage(ctx, tc.msg)
+			if err == nil {
+				t.Fatalf("InsertMessage(%s) = nil error, want one", tc.name)
+			}
+			if !strings.Contains(err.Error(), tc.wantErr) {
+				t.Errorf("InsertMessage(%s) error = %q, want substring %q", tc.name, err, tc.wantErr)
+			}
+			if strings.Contains(err.Error(), "CHECK constraint") {
+				t.Errorf("InsertMessage(%s) error = %q, want rejection before the DB CHECK backstop", tc.name, err)
 			}
 		})
 	}
-	t.Cleanup(func() {
-		// t.Context() is already canceled by the time Cleanup runs (it waits
-		// for the parallel subtests above), so this reads with
-		// context.Background() instead.
-		var after int
-		if err := s.db.QueryRowContext(context.Background(), `SELECT COUNT(*) FROM messages`).Scan(&after); err != nil {
-			t.Fatalf("count messages: %v", err)
-		}
-		if after != before {
-			t.Errorf("messages row count = %d, want unchanged %d", after, before)
-		}
-	})
-}
-
-// mustEventMessage builds a check_rerun event Message with a raw payload,
-// for TestInsertEventRejects' invalid-payload cases.
-func mustEventMessage(t *testing.T, ticketID int64, payload string) Message {
-	t.Helper()
-	kind := EventKindCheckRerun
-	return Message{
-		TicketID: ticketID, Type: msgTypeUpdate, Author: authorSystem, EventKind: &kind,
-		Payload: json.RawMessage(payload),
+	if after := countRows(t, s, `SELECT COUNT(*) FROM messages`); after != before {
+		t.Errorf("messages row count = %d, want unchanged %d", after, before)
 	}
 }
 

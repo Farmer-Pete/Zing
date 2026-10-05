@@ -487,10 +487,12 @@ func (s *Store) CommitHandlerResult(ctx context.Context, c HandlerCommit) (bool,
 	}
 
 	for i := range c.Messages {
-		m := &c.Messages[i]
+		m := c.Messages[i]
 		// Force every inserted message's ticket_id to c.TicketID: a handler
 		// proposes messages but never writes, so this commit boundary, not
 		// the handler, is what a message can never be scoped away from.
+		// m is a copy, not &c.Messages[i]: the caller's slice must never be
+		// mutated by this commit, even if the transaction rolls back.
 		m.TicketID = c.TicketID
 		if attachRunID != nil {
 			switch {
@@ -512,7 +514,7 @@ func (s *Store) CommitHandlerResult(ctx context.Context, c HandlerCommit) (bool,
 				return false, fmt.Errorf("commit handler result: %w", err)
 			}
 		}
-		if err = s.insertMessageTx(ctx, tx, *m); err != nil {
+		if err = s.insertMessageTx(ctx, tx, m); err != nil {
 			return false, fmt.Errorf("commit handler result: %w", err)
 		}
 	}
