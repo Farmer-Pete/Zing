@@ -689,6 +689,31 @@ func TestCodex_ErrorEventKeptInResult(t *testing.T) {
 	if res.TranscriptPath != "" {
 		t.Errorf("res.TranscriptPath = %q, want empty (Codex.run never sets it)", res.TranscriptPath)
 	}
+	if execErr.Transient != "" {
+		t.Errorf("ExecError.Transient = %q, want empty (the default message names no transient pattern)", execErr.Transient)
+	}
+}
+
+// TestCodex_TransientErrorSetsExecErrorTransient proves a Codex run whose
+// error event names a 503 sets ExecError.Transient to "503" (design:
+// codexTransientMatch, called by Codex.run only when codexFailureDetail
+// returned fromEvent true).
+func TestCodex_TransientErrorSetsExecErrorTransient(t *testing.T) {
+	t.Parallel()
+	requireUnix(t)
+
+	dir := t.TempDir()
+	req := newFakeCodexRequest(dir, "error_event", "FAKE_CODEX_ERROR_MESSAGE=unexpected status 503 Service Unavailable")
+	c := NewCodex(fakeCodexScript)
+	_, err := c.Run(context.Background(), req)
+
+	var execErr *ExecError
+	if !errors.As(err, &execErr) {
+		t.Fatalf("err = %v, want *ExecError", err)
+	}
+	if execErr.Transient != "503" {
+		t.Errorf("ExecError.Transient = %q, want %q", execErr.Transient, "503")
+	}
 }
 
 // fakeCodexNonEmptyLines builds n non-blank lines, each "lineN", separated
@@ -766,6 +791,31 @@ func TestCodexFailureDetail(t *testing.T) {
 			}
 			if !utf8.ValidString(detail) {
 				t.Error("detail is not valid UTF-8")
+			}
+		})
+	}
+}
+
+func TestCodexTransientMatch(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name   string
+		detail string
+		want   string
+	}{
+		{"503", "unexpected status 503 Service Unavailable", "503"},
+		{"rate limit", "Rate limit reached", "rate limit"},
+		{"stream disconnected", "stream disconnected before completion", "stream disconnected"},
+		{"usage limit carve-out", "You've hit your usage limit (429)", ""},
+		{"no match", "unexpected status 400 Bad Request", ""},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := codexTransientMatch(tc.detail); got != tc.want {
+				t.Errorf("codexTransientMatch(%q) = %q, want %q", tc.detail, got, tc.want)
 			}
 		})
 	}

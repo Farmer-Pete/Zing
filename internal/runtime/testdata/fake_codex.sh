@@ -20,6 +20,17 @@ printf '%s\n' "$@" > "$dir/argv"
 cat > "$dir/stdin"
 env > "$dir/env"
 
+# One line appended per invocation, in every mode, so a test driving a
+# retry (job.retryTransient calling rt.Run a second time on the same run)
+# can count how many times this script actually ran, and transient_once
+# below can tell its first call from its second.
+calls_file="$dir/calls"
+call_n=1
+if [ -f "$calls_file" ]; then
+  call_n=$(($(wc -l < "$calls_file") + 1))
+fi
+echo "$call_n" >> "$calls_file"
+
 # ---- self-check the host-isolation flags (design section 4.1, D18) --------
 
 has_ignore_user_config=false
@@ -126,6 +137,25 @@ error_event)
   printf '{"type":"error","message":"%s"}\n' "$msg"
   printf '{"type":"turn.failed","error":{"message":"%s"}}\n' "$msg"
   exit 1
+  ;;
+transient_once)
+  # The retry repro (design goal: a Codex failure matching a transient
+  # pattern is retried once on the same run): the first call sleeps 1s --
+  # long enough that a test can tell it apart from the second call's own
+  # near-instant return, proving retryTransient actually re-ran the
+  # process rather than just reusing the first result -- then fails with a
+  # 503 event, no stderr, and no -o content, the same repro shape
+  # error_event uses. Every call after the first succeeds normally.
+  if [ "$call_n" = "1" ]; then
+    sleep 1
+    printf '{"type":"thread.started","thread_id":"fake-codex-transient-thread-id"}\n'
+    printf '{"type":"error","message":"unexpected status 503 Service Unavailable"}\n'
+    printf '{"type":"turn.failed","error":{"message":"unexpected status 503 Service Unavailable"}}\n'
+    exit 1
+  fi
+  printf '%s\n' "$default_events"
+  printf '%s' "$default_result" > "$outfile"
+  exit 0
   ;;
 sleep)
   # A grandchild relative to the Go test process: this script (already the

@@ -265,6 +265,7 @@ func runJobWith(
 
 	started := time.Now()
 	res, runErr := rt.Run(runCtx, req)
+	res, runErr = retryTransient(runCtx, rt, req, t.ID, rsv.RunID, jobName, res, runErr)
 
 	stderrFile := ""
 	if len(res.Stderr) > 0 && d.DataDir != "" {
@@ -312,6 +313,85 @@ func runJobWith(
 	)
 
 	return runResult{Res: res, Reserved: rsv, Started: started}, runErr
+}
+
+// transientRetryDelay is retryTransient's own wait before its one retry
+// (design goals: "retried once ... after 2 s", nongoals: "No ... backoff
+// beyond the single 2 s wait").
+const transientRetryDelay = 2 * time.Second
+
+// maxTranscriptBytes caps the stdout retryTransient joins from both
+// attempts before runJobWith ever writes it to disk (design goals: "After a
+// retry, the file holds the last 64 KiB of both attempts' stdout combined,
+// so it never passes 65536 bytes"), the same bound runtime.Codex itself
+// applies to one attempt's own tailWriter.
+const maxTranscriptBytes = 64 << 10
+
+// capTranscriptTail keeps at most the last maxTranscriptBytes of data.
+func capTranscriptTail(data []byte) []byte {
+	if len(data) <= maxTranscriptBytes {
+		return data
+	}
+	return data[len(data)-maxTranscriptBytes:]
+}
+
+// retryTransient is runJobWith's own single automatic retry (design goals:
+// a Codex ExecError whose Transient names a matched pattern -- 429, rate
+// limit, 500, 502, 503, 504, connection reset, or stream disconnected -- is
+// retried once, on the same reserved run, after a 2s wait; every other
+// result or error passes through res and runErr unchanged. When runCtx ends
+// during the wait, there is no second attempt: it keeps the first result
+// (stdout, FailureDetail, AgentTime), sets ExitCode to -1, and returns
+// runtime.ErrTimeout for the job deadline or runtime.ErrCanceled for a
+// parent cancel, so routeFailure handles the retry exactly as it would an
+// un-retried run that hit the same wall. When the wait completes, it calls
+// rt.Run once more on the same req, adds the first attempt's AgentTime to
+// the retry's, and joins both attempts' stdout, kept to the last
+// maxTranscriptBytes (capTranscriptTail) so the eventual transcript file
+// never passes that bound. A retry that still fails rewrites FailureDetail
+// into a note naming the matched pattern and quoting the retry's own
+// detail, so execFailureCommit's Tried (planning.go) tells the owner a
+// retry was already tried, not just that the run failed twice silently.
+func retryTransient(
+	ctx context.Context, rt runtime.Runtime, req runtime.RunRequest,
+	ticketID, runID int64, jobName string, res runtime.RunResult, runErr error,
+) (runtime.RunResult, error) {
+	var execErr *runtime.ExecError
+	// errors.As, not the modernize-suggested errors.AsType: errcheck's
+	// check-blank (this repo's config) flags AsType's (E, bool) result
+	// since its discarded E is itself error-shaped, same as errKind's own
+	// comment.
+	if !errors.As(runErr, &execErr) || execErr.Transient == "" { //nolint:modernize // see comment above
+		return res, runErr
+	}
+
+	slog.Info("runtime transient retry", "ticket_id", ticketID, "run_id", runID, "job", jobName, "match", execErr.Transient)
+
+	select {
+	case <-ctx.Done():
+		res.ExitCode = -1
+		skipErr := runtime.ErrCanceled
+		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+			skipErr = runtime.ErrTimeout
+		}
+		slog.Warn("runtime transient retry skipped", "ticket_id", ticketID, "run_id", runID, "job", jobName, "err_kind", errKind(skipErr))
+		return res, skipErr
+	case <-time.After(transientRetryDelay):
+	}
+
+	firstAgentTime, firstStdout := res.AgentTime, res.Stdout
+	retryRes, retryErr := rt.Run(ctx, req)
+	retryRes.AgentTime += firstAgentTime
+	retryRes.Stdout = capTranscriptTail(append(append([]byte(nil), firstStdout...), retryRes.Stdout...))
+
+	if retryErr == nil {
+		slog.Info("runtime transient retry succeeded", "ticket_id", ticketID, "run_id", runID, "job", jobName, "match", execErr.Transient)
+		return retryRes, nil
+	}
+
+	slog.Warn("runtime transient retry failed", "ticket_id", ticketID, "run_id", runID, "job", jobName, "err_kind", errKind(retryErr), "exit_code", retryRes.ExitCode)
+	retryRes.FailureDetail = fmt.Sprintf("retried once after a transient failure matching %q; the retry failed with: %s", execErr.Transient, retryRes.FailureDetail)
+	return retryRes, retryErr
 }
 
 // writeRunsFile saves data to <dataDir>/runs/name, mode 0600 in a 0700

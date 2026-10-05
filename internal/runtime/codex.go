@@ -388,6 +388,37 @@ func codexFailureDetail(stdout []byte) (detail string, fromEvent bool) {
 	return capFailureDetail(strings.Join(nonEmpty, "\n")), false
 }
 
+// codexTransientPatterns is codexTransientMatch's closed list (design
+// goals: "A Codex failure whose error text matches..."), checked in this
+// order so the first match wins; none of them ever matches inside
+// usageLimitPhrase, which codexTransientMatch checks first.
+var codexTransientPatterns = []string{
+	"429", "rate limit", "500", "502", "503", "504", "connection reset", "stream disconnected",
+}
+
+// usageLimitPhrase is codexTransientMatch's own carve-out: Codex's usage-cap
+// message often contains "429" as a parenthetical, but running the same
+// prompt again 2s later never clears a usage cap the way it can a transient
+// 429 from the API itself.
+const usageLimitPhrase = "usage limit"
+
+// codexTransientMatch reports which of codexTransientPatterns appears in
+// detail, a codexFailureDetail result that came from an error or
+// turn.failed event (design: codexTransientMatch), or "" when none does or
+// detail itself names a usage limit. Case-insensitive.
+func codexTransientMatch(detail string) string {
+	lower := strings.ToLower(detail)
+	if strings.Contains(lower, usageLimitPhrase) {
+		return ""
+	}
+	for _, pattern := range codexTransientPatterns {
+		if strings.Contains(lower, pattern) {
+			return pattern
+		}
+	}
+	return ""
+}
+
 // Run runs one turn of req.Job through the codex CLI (design section 4.1):
 // argv per codexArgv, the prompt on stdin (never in argv), the environment
 // per agentEnv (identical to Claude's), stdout capped and drained the same
@@ -529,7 +560,11 @@ func (c Codex) run(ctx context.Context, req RunRequest, argv []string, outPath s
 		}
 		var execErr *ExecError
 		if errors.As(outcomeErr, &execErr) && res.FinalMessage == "" {
-			res.FailureDetail, _ = codexFailureDetail(res.Stdout)
+			var fromEvent bool
+			res.FailureDetail, fromEvent = codexFailureDetail(res.Stdout)
+			if fromEvent {
+				execErr.Transient = codexTransientMatch(res.FailureDetail)
+			}
 		}
 		return res, outcomeErr
 	}
