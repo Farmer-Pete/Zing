@@ -1165,8 +1165,9 @@ function installSandboxRunBox() {
 // postLogLevel handles a change on the Log rail's level select (design
 // section 6.11, 6.12, 7.1): POST /loglevel with the select's chosen value.
 // It is a small forward-wired affordance around the endpoint that is this
-// task's real substance, kept to the same postJSON/204 shape as postDraft
-// below rather than the fixed-reply shape postSide needs.
+// task's real substance, kept to the same plain postJSON fire-and-forget
+// shape as postDebugToggle below rather than the fixed-reply shape postSide
+// needs.
 function postLogLevel(select) {
 	postJSON('/loglevel', { level: select.value });
 }
@@ -1292,7 +1293,7 @@ const actions = {
 // dispatchAction's job. preventDefault itself now runs in handleKeyEvent,
 // unless the handler returns false, the same rule dispatchAction applied.
 function runAction(action, event) {
-	const handler = action ? actions[action] : null;
+	const handler = actions[action];
 	if (!handler) {
 		return false;
 	}
