@@ -236,7 +236,8 @@ func openRunsForTicket(ctx context.Context, q queryer, ticketID int64) ([]OpenRu
 // Reserve uses (design section 5.3). applied is false, err nil, when the
 // fence finds no matching claim.
 func (s *Store) InterruptRuns(ctx context.Context, ticketID int64, owner string, expires time.Time) (applied bool, err error) {
-	return s.interruptClaimedRuns(ctx, ticketID, owner, expires, nil)
+	_, applied, err = s.interruptClaimedRuns(ctx, ticketID, owner, expires, nil, nil)
+	return applied, err
 }
 
 // ReclaimClaim is InterruptRuns fenced on the foreign owner and expiry
@@ -249,27 +250,33 @@ func (s *Store) InterruptRuns(ctx context.Context, ticketID int64, owner string,
 // recorded since, or one that appeared where none was read, keeps the
 // claim (applied false) so a later pass can judge the new process (#55).
 func (s *Store) ReclaimClaim(ctx context.Context, ticketID int64, owner string, expires time.Time, check *OpenCheck) (applied bool, err error) {
-	return s.interruptClaimedRuns(ctx, ticketID, owner, expires, func(tx *sql.Tx) (bool, error) {
+	_, applied, err = s.interruptClaimedRuns(ctx, ticketID, owner, expires, func(tx *sql.Tx) (bool, error) {
 		if check != nil {
 			return deleteCheckIfSame(ctx, tx, ticketID, *check)
 		}
-		_, present, err := openCheckForTicket(ctx, tx, ticketID)
-		return !present, err
-	})
+		_, present, presentErr := openCheckForTicket(ctx, tx, ticketID)
+		return !present, presentErr
+	}, nil)
+	return applied, err
 }
 
-// interruptClaimedRuns is the shared transaction body behind InterruptRuns
-// and ReclaimClaim (design section 5.3): fence on the exact claim, run
-// afterFence when set (false keeps the claim and writes nothing), then
-// terminalize every open run of ticketID's sessions as interrupted, then
-// clear the claim.
-func (s *Store) interruptClaimedRuns(ctx context.Context, ticketID int64, owner string, expires time.Time, afterFence func(*sql.Tx) (bool, error)) (bool, error) {
+// interruptClaimedRuns is the shared transaction body behind InterruptRuns,
+// ReclaimClaim and ParkRuns (design section 5.3; #45 for park): fence on the
+// exact claim, run afterFence when set (false keeps the claim and writes
+// nothing), then terminalize every open run of ticketID's sessions as
+// interrupted, then clear the claim. park is nil for a plain interrupt
+// (InterruptRuns, ReclaimClaim); when set, every swept run's capped_until is
+// stamped with it, the settings claude_hold_until row rises to it if later,
+// and one "parked until" update is written -- all inside this same
+// transaction. runIDs is the ascending ids of the runs swept, nil when none
+// were open.
+func (s *Store) interruptClaimedRuns(ctx context.Context, ticketID int64, owner string, expires time.Time, afterFence func(*sql.Tx) (bool, error), park *time.Time) (runIDs []int64, applied bool, err error) {
 	expires = truncateExpires(expires)
 	now := time.Now()
 
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
-		return false, fmt.Errorf("interrupt runs: begin tx: %w", err)
+		return nil, false, fmt.Errorf("interrupt runs: begin tx: %w", err)
 	}
 	defer rollback(tx)
 
@@ -279,51 +286,62 @@ func (s *Store) interruptClaimedRuns(ctx context.Context, ticketID int64, owner 
 		ticketID, owner, formatTime(expires)).Scan(&fenced)
 	switch {
 	case errors.Is(err, sql.ErrNoRows):
-		return false, nil
+		return nil, false, nil
 	case err != nil:
-		return false, fmt.Errorf("interrupt runs: fence ticket %d: %w", ticketID, err)
+		return nil, false, fmt.Errorf("interrupt runs: fence ticket %d: %w", ticketID, err)
 	}
 
 	if afterFence != nil {
 		proceed, fenceErr := afterFence(tx)
 		if fenceErr != nil {
-			return false, fmt.Errorf("interrupt runs: ticket %d: %w", ticketID, fenceErr)
+			return nil, false, fmt.Errorf("interrupt runs: ticket %d: %w", ticketID, fenceErr)
 		}
 		if !proceed {
 			slog.Info("reclaim deferred: check command changed", "ticket_id", ticketID)
-			return false, nil
+			return nil, false, nil
 		}
 	}
 
 	targets, err := interruptTargetsTx(ctx, tx, ticketID)
 	if err != nil {
-		return false, fmt.Errorf("interrupt runs: %w", err)
+		return nil, false, fmt.Errorf("interrupt runs: %w", err)
 	}
 
+	parkParam := formatTimePtr(park)
 	for _, target := range targets {
 		seconds := interruptedAgentSeconds(target, now, expires)
 		if _, err := tx.ExecContext(ctx,
-			`UPDATE runs SET outcome = 'error', interrupted = 1, exit_code = -1, agent_seconds = ? WHERE id = ?`,
-			seconds, target.runID,
+			`UPDATE runs SET outcome = 'error', interrupted = 1, exit_code = -1, agent_seconds = ?, capped_until = ? WHERE id = ?`,
+			seconds, parkParam, target.runID,
 		); err != nil {
-			return false, fmt.Errorf("interrupt runs: update run %d: %w", target.runID, err)
+			return nil, false, fmt.Errorf("interrupt runs: update run %d: %w", target.runID, err)
+		}
+		runIDs = append(runIDs, target.runID)
+	}
+
+	if park != nil && len(runIDs) != 0 {
+		if err := upsertClaudeHoldTx(ctx, tx, *park); err != nil {
+			return nil, false, fmt.Errorf("interrupt runs: ticket %d: %w", ticketID, err)
+		}
+		if err := insertParkedMarkerTx(ctx, tx, s, ticketID, *park, runIDs); err != nil {
+			return nil, false, fmt.Errorf("interrupt runs: ticket %d: %w", ticketID, err)
 		}
 	}
 
 	if _, err := tx.ExecContext(ctx,
 		`UPDATE tickets SET claim_owner = NULL, claim_expires_at = NULL WHERE id = ?`, ticketID,
 	); err != nil {
-		return false, fmt.Errorf("interrupt runs: clear ticket %d: %w", ticketID, err)
+		return nil, false, fmt.Errorf("interrupt runs: clear ticket %d: %w", ticketID, err)
 	}
 
 	if err := tx.Commit(); err != nil {
-		return false, fmt.Errorf("interrupt runs: commit tx: %w", err)
+		return nil, false, fmt.Errorf("interrupt runs: commit tx: %w", err)
 	}
 
 	for _, target := range targets {
 		slog.Warn("run interrupted", "ticket_id", ticketID, "run_id", target.runID, "job", target.job)
 	}
-	return true, nil
+	return runIDs, true, nil
 }
 
 // interruptTarget is one open run interruptClaimedRuns is about to
@@ -338,11 +356,14 @@ type interruptTarget struct {
 // interruptTargetsTx returns every run with a null outcome on ticketID's
 // sessions, the exact set interruptClaimedRuns's UPDATE is about to
 // terminalize, read before the update so each can be logged by id and job.
+// Ordered by id ascending, so a park's own runIDs (and its marker body) are
+// deterministic.
 func interruptTargetsTx(ctx context.Context, tx *sql.Tx, ticketID int64) ([]interruptTarget, error) {
 	rows, err := tx.QueryContext(ctx,
 		`SELECT r.id, s.job, r.started_at, r.agent_seconds FROM runs r
 		 JOIN sessions s ON s.id = r.session_id
-		 WHERE r.outcome IS NULL AND r.session_id IN (SELECT id FROM sessions WHERE ticket_id = ?)`,
+		 WHERE r.outcome IS NULL AND r.session_id IN (SELECT id FROM sessions WHERE ticket_id = ?)
+		 ORDER BY r.id`,
 		ticketID)
 	if err != nil {
 		return nil, fmt.Errorf("select open runs for ticket %d: %w", ticketID, err)

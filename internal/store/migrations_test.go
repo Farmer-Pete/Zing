@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/adlio/schema"
 )
@@ -408,5 +409,63 @@ func TestMigration0008_AppliesOverPopulated0007(t *testing.T) {
 		`INSERT INTO messages (id, ticket_id, type, author, payload, event_kind) VALUES (5, 1, 'update', 'system', '{}', 'check_rerun')`,
 	); execErr != nil {
 		t.Errorf("insert valid event row: %v", execErr)
+	}
+}
+
+// TestMigration0009CappedUntil proves migration 0009_runs_capped_until.sql
+// installed runs.capped_until and its CHECK (#45): the column exists;
+// setting it on a row with interrupted = 0 is rejected (capped_until ties to
+// interrupted = 1); and a legal write round-trips through SessionNewestRun
+// as Run.CappedUntil.
+func TestMigration0009CappedUntil(t *testing.T) {
+	t.Parallel()
+	ctx := t.Context()
+	s, err := Open(ctx, dbPath(t))
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer func() { _ = s.Close() }()
+	seedProjectAndTicket(t, s)
+	if _, execErr := s.db.ExecContext(ctx,
+		`INSERT INTO sessions (id, ticket_id, job, runtime) VALUES (1, 1, 'planning', 'claude')`,
+	); execErr != nil {
+		t.Fatalf("seed session: %v", execErr)
+	}
+	if _, execErr := s.db.ExecContext(ctx,
+		`INSERT INTO runs (id, session_id, turn) VALUES (1, 1, 0)`,
+	); execErr != nil {
+		t.Fatalf("seed run: %v", execErr)
+	}
+
+	found := tableColumnNames(t, s, "runs")
+	if !found["capped_until"] {
+		t.Error("runs.capped_until column not found after migration 0009")
+	}
+
+	if _, execErr := s.db.ExecContext(ctx,
+		`UPDATE runs SET capped_until = '2026-10-05T16:20:00Z' WHERE id = 1`,
+	); execErr == nil {
+		t.Error("UPDATE capped_until with interrupted = 0: want a CHECK constraint error, got nil")
+	}
+
+	if _, execErr := s.db.ExecContext(ctx,
+		`UPDATE runs SET interrupted = 1, capped_until = '2026-10-05T16:20:00Z' WHERE id = 1`,
+	); execErr != nil {
+		t.Fatalf("UPDATE with legal values: %v", execErr)
+	}
+
+	run, ok, err := s.SessionNewestRun(ctx, 1)
+	if err != nil {
+		t.Fatalf("SessionNewestRun: %v", err)
+	}
+	if !ok {
+		t.Fatal("SessionNewestRun: ok = false, want true")
+	}
+	want, parseErr := time.Parse(time.RFC3339, "2026-10-05T16:20:00Z")
+	if parseErr != nil {
+		t.Fatalf("parse want: %v", parseErr)
+	}
+	if run.CappedUntil == nil || !run.CappedUntil.Equal(want) {
+		t.Errorf("run.CappedUntil = %v, want %v", run.CappedUntil, want)
 	}
 }
