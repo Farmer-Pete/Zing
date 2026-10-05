@@ -1,13 +1,17 @@
 package templates
 
+import "strconv"
+
 // scenariosSection renders the gate's scenario cohort table (design section
-// 7, D8, Task 11): id, kind, given, when, then, one row per scenario in the
-// order internal/console/views.go's loadScenarios returns them (the store's
-// own insertion order, ScenariosForRun/AllScenarios's own "ORDER BY
+// 7, D8, Task 11): id, kind, given, when, then, check, one row per scenario
+// in the order internal/console/views.go's loadScenarios returns them (the
+// store's own insertion order, ScenariosForRun/AllScenarios's own "ORDER BY
 // artifacts.id"). Every field renders raw -- a human reads a scenario, not
 // another agent -- escaped by templ as usual. Renders nothing when
 // scenarios is empty, matching findingsSection's own "no empty table" rule:
 // a ticket with no cohort, or a cohort with none yet, shows no table at all.
+// The last cell holds a sealed scenario's own owner-edit box (#41,
+// ownerEditScenarioForm), empty for an unsealed scenario.
 templ scenariosSection(scenarios []ScenarioRow) {
 	if len(scenarios) > 0 {
 		<table class="scenarios">
@@ -18,6 +22,8 @@ templ scenariosSection(scenarios []ScenarioRow) {
 					<th>Given</th>
 					<th>When</th>
 					<th>Then</th>
+					<th>Check</th>
+					<th></th>
 				</tr>
 			</thead>
 			<tbody>
@@ -28,9 +34,37 @@ templ scenariosSection(scenarios []ScenarioRow) {
 						<td>{ s.Given }</td>
 						<td>{ s.When }</td>
 						<td>{ s.Then }</td>
+						<td>{ s.Check }</td>
+						<td>
+							if s.Sealed {
+								@ownerEditScenarioForm(s)
+							}
+						</td>
 					</tr>
 				}
 			</tbody>
 		</table>
 	}
+}
+
+// ownerEditScenarioForm is one sealed scenario's owner-edit box (#41): a
+// <details class="owner-edit"> the owner opens to rewrite given, when,
+// then, or check, posted by console.js's ownerEditSubmit to POST
+// /tickets/{id}/edit. data-preserve-attr="open" keeps it open across a
+// /stream patch while the owner is editing, matching questionGroup's own
+// use of the attribute.
+templ ownerEditScenarioForm(s ScenarioRow) {
+	<details class="owner-edit" data-preserve-attr="open" data-ticket={ strconv.FormatInt(s.TicketID, 10) } data-target="scenario" data-ref={ s.ID }>
+		<summary>Edit</summary>
+		<label>Given</label>
+		<textarea data-field="given">{ s.Given }</textarea>
+		<label>When</label>
+		<textarea data-field="when">{ s.When }</textarea>
+		<label>Then</label>
+		<textarea data-field="then">{ s.Then }</textarea>
+		<label>Check</label>
+		<input type="text" data-field="check" value={ s.Check }/>
+		<button type="button" class="owner-edit-save">Save</button>
+		<span class="owner-edit-error"></span>
+	</details>
 }

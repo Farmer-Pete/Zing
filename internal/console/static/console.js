@@ -1157,6 +1157,72 @@ function installSandboxRunBox() {
 	});
 }
 
+// ---- owner edit: a sealed scenario, a sealed plan's task, or the ticket
+// body, with an audit trail (#41) ------------------------------------------
+
+// ownerEditSubmit posts one owner edit (POST /tickets/{id}/edit) from the
+// .owner-edit box around button: every [data-field] inside it becomes a
+// body field (a checkbox sends its checked boolean), action is "drop" for
+// .owner-edit-drop after a confirm(), else "edit". A non-2xx response
+// shows its body text in the box's .owner-edit-error span.
+async function ownerEditSubmit(button) {
+	const box = button.closest('.owner-edit');
+	const errorSpan = box?.querySelector('.owner-edit-error');
+	const ticketID = box?.dataset?.ticket;
+	const target = box?.dataset?.target;
+	if (!box || !errorSpan || !ticketID || !target) {
+		return;
+	}
+	const ref = box.dataset.ref ?? '';
+	const dropping = button.classList.contains('owner-edit-drop');
+	if (dropping && !window.confirm(`Drop task ${ref}? Later tasks move up one.`)) {
+		return;
+	}
+	const body = { target, ref, action: dropping ? 'drop' : 'edit' };
+	for (const field of box.querySelectorAll('[data-field]')) {
+		const name = field.dataset.field;
+		body[name] = field.type === 'checkbox' ? field.checked : field.value;
+	}
+	try {
+		const resp = await fetch(`/tickets/${ticketID}/edit`, {
+			method: 'POST',
+			headers: { 'Content-Type': 'application/json', 'Datastar-Request': 'true' },
+			body: JSON.stringify(body),
+		});
+		if (!resp.ok) {
+			const text = await resp.text();
+			suppressPatchSignal = true;
+			errorSpan.textContent = text;
+			suppressPatchSignal = false;
+			return;
+		}
+		suppressPatchSignal = true;
+		errorSpan.textContent = '';
+		suppressPatchSignal = false;
+	} catch (err) {
+		console.error('console.js: POST /tickets/{id}/edit', err);
+		suppressPatchSignal = true;
+		errorSpan.textContent = 'request failed';
+		suppressPatchSignal = false;
+	}
+}
+
+// installOwnerEdit wires every .owner-edit box's Save and Drop buttons
+// (#41), delegated from document like installPickupBox above, because
+// #main is morphed by every /stream patch (design section 6.3): a listener
+// bound directly to one box's button would need re-attaching after each
+// patch, while delegation from document does not.
+function installOwnerEdit() {
+	document.addEventListener('click', (event) => {
+		const button = event.target.closest?.('.owner-edit-save, .owner-edit-drop');
+		if (!button) {
+			return;
+		}
+		event.preventDefault();
+		ownerEditSubmit(button);
+	});
+}
+
 // postLogLevel handles a change on the Log rail's level select (design
 // section 6.11, 6.12, 7.1): POST /loglevel with the select's chosen value.
 // It is a small forward-wired affordance around the endpoint that is this
@@ -1633,11 +1699,11 @@ function installNavBridge() {
 // loadBindings' own /static/keys.json fetch (bug fix): none of
 // installStreamWatch, installNavBridge, installPatchObserver, installSideBox,
 // installLogControls, installChipActivation, installPickupBox,
-// installSandboxRunBox, installReplyAutosave, or installReplyFocusTracking
-// reads state.bindings, so there was no reason their listeners --
-// installNavBridge above all, the zing-nav bridge a Threads-sidebar click
-// needs live as early as possible -- sat behind an unrelated network round
-// trip. Only
+// installSandboxRunBox, installOwnerEdit, installReplyAutosave, or
+// installReplyFocusTracking reads state.bindings, so there was no reason
+// their listeners -- installNavBridge above all, the zing-nav bridge a
+// Threads-sidebar click needs live as early as possible -- sat behind an
+// unrelated network round trip. Only
 // onKeyDown needs the parsed bindings, so it alone waits on the fetch.
 // installStreamWatch runs first (the reconnect plan): it must already be
 // bound before data-init's own @get('/stream') can fire the very first
@@ -1651,6 +1717,7 @@ async function install() {
 	installChipActivation();
 	installPickupBox();
 	installSandboxRunBox();
+	installOwnerEdit();
 	installReplyAutosave();
 	installReplyFocusTracking();
 	await loadBindings();
