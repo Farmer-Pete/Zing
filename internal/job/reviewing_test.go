@@ -13,10 +13,12 @@
 package job
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"slices"
@@ -39,12 +41,23 @@ import (
 // across so many of them (goconst).
 const lensFidelity = "fidelity"
 
+// lensTests, testsRunLabel, testsSessionID, and testsInvalidDetail name the
+// tests lens's own invalid-retry scenarios (issue #32): this file's task 1
+// tests all drive that lens through an invalid first turn and a same-tick
+// retry, so each repeats across several of them (goconst).
+const (
+	lensTests          = "tests"
+	testsRunLabel      = "1-" + lensTests
+	testsSessionID     = "tests-sess"
+	testsInvalidDetail = "line 4: closing tag mismatch"
+)
+
 // reviewLensNames is machine.toml's own jobs.review.lenses, spelled out
 // literally: reviewing_test.go builds its own in-memory scripts keyed by
 // these names, and a handful of tests need the plain list to build a
 // tailored override.
 var reviewLensNames = []string{
-	"simplification", "correctness", "security", lensFidelity, "tests", "quality", "observability",
+	"simplification", "correctness", "security", lensFidelity, lensTests, "quality", "observability",
 }
 
 // reviewOKScript is the fake runtime's own minimal "ok" document: a review
@@ -445,7 +458,7 @@ func TestRunLensesParallelRejectsOutOfRangeConfig(t *testing.T) {
 			var attempts []lensAttempt
 			var err error
 			go func() {
-				attempts, err = runLensesParallel(t.Context(), deps, ticket, reviewLenses(deps), build)
+				attempts, err = runLensesParallel(t.Context(), deps, ticket, reviewLenses(deps), nil, build)
 				close(done)
 			}()
 			waitFor(t, done, "runLensesParallel to return (a deadlock hangs here)")
@@ -928,7 +941,10 @@ func TestRoundLensErrorEscalates(t *testing.T) {
 // LensesParallel 1, the very first lens to reach the runtime is the only
 // one guaranteed to run before roundCtx is ever cancelled, so scripting by
 // call order rather than by a named lens keeps this test free of any
-// assumption about which lens wins that initial race.
+// assumption about which lens wins that initial race. It returns an
+// ExecError, not an InvalidOutputError (issue #32): an invalid document no
+// longer cancels the round on its own turn -- it is retried in place first
+// -- so this test's own cancellation proof needs a failure that still does.
 type firstCallFailsRuntime struct {
 	inner runtime.Runtime
 	calls atomic.Int32
@@ -936,8 +952,7 @@ type firstCallFailsRuntime struct {
 
 func (r *firstCallFailsRuntime) Run(ctx context.Context, req runtime.RunRequest) (runtime.RunResult, error) {
 	if r.calls.Add(1) == 1 {
-		return runtime.RunResult{SessionID: "first-call-fails", ExitCode: 1, AgentTime: time.Second},
-			&runtime.InvalidOutputError{Reason: "not well-formed"}
+		return runtime.RunResult{ExitCode: 1, AgentTime: time.Second}, &runtime.ExecError{ExitCode: 1}
 	}
 	return r.inner.Run(ctx, req)
 }
@@ -1008,13 +1023,16 @@ func TestRoundSecondFailureEscalates(t *testing.T) {
 	}
 	t.Parallel()
 	s, ticket, _ := reviewTicketReady(t)
-	invalidFn := func() (runtime.RunResult, error) {
-		return runtime.RunResult{SessionID: "invalid-sess", ExitCode: 1, AgentTime: time.Second},
-			&runtime.InvalidOutputError{Reason: "not well-formed"}
+	// An ExecError, not an InvalidOutputError (issue #32): an invalid
+	// document is now retried in place on its first failure, so it never
+	// reaches a second round at all unless its own retry is also invalid
+	// (TestRoundInvalidLensTwiceEscalates covers that path instead).
+	execFn := func() (runtime.RunResult, error) {
+		return runtime.RunResult{ExitCode: 1, AgentTime: time.Second}, &runtime.ExecError{ExitCode: 1}
 	}
 	rt := &labelResultRuntime{
 		inner:   runtime.NewFake(reviewScriptsFS(nil)),
-		results: map[string]func() (runtime.RunResult, error){"1-simplification": invalidFn},
+		results: map[string]func() (runtime.RunResult, error){"1-simplification": execFn},
 	}
 	deps := pbClaim(t, s, rt, ticket.ID)
 
@@ -1039,14 +1057,494 @@ func TestRoundSecondFailureEscalates(t *testing.T) {
 	if commit2.Escalation == nil {
 		t.Fatal("commit2.Escalation = nil, want set (two failures in a row)")
 	}
-	if commit2.Escalation.Payload.Code != string(response.EscalationCodeResponseInvalid) {
-		t.Errorf("escalation code = %q, want %q", commit2.Escalation.Payload.Code, response.EscalationCodeResponseInvalid)
+	if commit2.Escalation.Payload.Code != string(response.EscalationCodeRuntimeExecFailed) {
+		t.Errorf("escalation code = %q, want %q", commit2.Escalation.Payload.Code, response.EscalationCodeRuntimeExecFailed)
 	}
 	if commit2.Escalation.Payload.What != lensFailedTwiceWhat {
 		t.Errorf("escalation What = %q, want %q", commit2.Escalation.Payload.What, lensFailedTwiceWhat)
 	}
 	if commit2.Escalation.Payload.Origin != string(response.EscalationOriginReview) {
 		t.Errorf("escalation origin = %q, want %q", commit2.Escalation.Payload.Origin, response.EscalationOriginReview)
+	}
+}
+
+// ---- TestRoundInvalidLensRetriedKeepsFindings ------------------------------
+
+// TestRoundInvalidLensRetriedKeepsFindings is task 1's own named test
+// (issue #32): the tests lens's first turn returns an invalid document
+// carrying a session id; today that cancels every other lens and fails the
+// whole round. Once the lens is retried in place instead, the round keeps
+// every lens's own work and escalates nothing.
+func TestRoundInvalidLensRetriedKeepsFindings(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow end-to-end flow; runs in the full suite")
+	}
+	t.Parallel()
+	s, ticket, before := reviewTicketReady(t)
+
+	// Every lens but fidelity (whose own finding needs a PlanRef,
+	// FilterFindings) and tests reports one clean nit, so a round that kept
+	// every lens's own work stores more than just the tests lens's finding.
+	overrides := map[string]string{}
+	for _, lens := range reviewLensNames {
+		if lens == lensFidelity || lens == lensTests {
+			continue
+		}
+		overrides[reviewScriptKey(lens, 1)] = findingScript(lens, "nit", "a nit from "+lens, "polish it")
+	}
+	fake := runtime.NewFake(reviewScriptsFS(overrides))
+
+	var retryReq runtime.RunRequest
+	rt := &labelStepsRuntime{
+		inner: fake,
+		steps: map[string][]func(ctx context.Context, req runtime.RunRequest) (runtime.RunResult, error){
+			testsRunLabel: {
+				func(_ context.Context, _ runtime.RunRequest) (runtime.RunResult, error) {
+					return runtime.RunResult{SessionID: testsSessionID, ExitCode: 1, AgentTime: time.Second},
+						&runtime.InvalidOutputError{Reason: testReasonFailedValidation, Detail: testsInvalidDetail}
+				},
+				func(_ context.Context, req runtime.RunRequest) (runtime.RunResult, error) {
+					retryReq = req
+					doc, parseErr := response.Parse([]byte(findingScript(lensTests, "nit", "a nit from tests", "polish it")))
+					if parseErr != nil {
+						t.Fatalf("parse tests retry script: %v", parseErr)
+					}
+					return runtime.RunResult{Response: doc.Response, SessionID: testsSessionID, ExitCode: 0, AgentTime: time.Second}, nil
+				},
+			},
+		},
+	}
+	deps := pbClaim(t, s, rt, ticket.ID)
+
+	commit, err := (reviewingHandler{}).Run(t.Context(), ticket, deps)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if commit.Escalation != nil {
+		t.Fatalf("commit.Escalation = %+v, want nil", commit.Escalation)
+	}
+	for _, m := range commit.Messages {
+		if strings.HasPrefix(m.Body, "review round 1 failed") {
+			t.Fatalf("commit carries a failed marker, want none: %q", m.Body)
+		}
+	}
+
+	pbApply(t, s, ticket, commit)
+
+	doneMarker, ok := reviewMarker(t, s, ticket.ID, "review round 1 done")
+	if !ok {
+		t.Fatal(`no "review round 1 done" marker`)
+	}
+	firstLine, _, _ := strings.Cut(doneMarker.Body, "\n")
+	match := reviewRoundDoneLine.FindStringSubmatch(firstLine)
+	if match == nil {
+		t.Fatalf("done marker first line = %q, did not match the done pattern", firstLine)
+	}
+	if gotLenses := strings.Split(match[3], ","); !slices.Equal(gotLenses, reviewLensNames) {
+		t.Errorf("done marker lenses = %v, want %v (all seven)", gotLenses, reviewLensNames)
+	}
+
+	runs := reviewRunsSince(t, s, ticket.ID, before)
+	if len(runs) != 8 {
+		t.Fatalf("reserved runs = %d, want 8 (seven lenses plus the tests retry)", len(runs))
+	}
+	var testsRuns []store.Run
+	var firstTestsRunID int64
+	errorCount := 0
+	for _, r := range runs {
+		if r.Outcome != nil && *r.Outcome == string(response.OutcomeError) {
+			errorCount++
+			firstTestsRunID = r.ID
+		}
+		if r.Lens != nil && *r.Lens == lensTests {
+			testsRuns = append(testsRuns, r)
+		}
+	}
+	if errorCount != 1 {
+		t.Errorf("runs with outcome error = %d, want 1 (only the discarded first tests turn)", errorCount)
+	}
+	if len(testsRuns) != 2 {
+		t.Fatalf("tests runs = %d, want 2", len(testsRuns))
+	}
+	if testsRuns[0].SessionID != testsRuns[1].SessionID {
+		t.Errorf("tests runs session ids = %d, %d, want equal (the retry resumes the first turn's own session)",
+			testsRuns[0].SessionID, testsRuns[1].SessionID)
+	}
+	for _, r := range testsRuns {
+		if r.Outcome != nil && *r.Outcome == string(response.OutcomeError) && r.ID != firstTestsRunID {
+			t.Errorf("tests run %d outcome = error, want only run %d to be error", r.ID, firstTestsRunID)
+		}
+	}
+
+	invalidMarker, ok := reviewMarker(t, s, ticket.ID, fmt.Sprintf("response invalid run %d", firstTestsRunID))
+	if !ok {
+		t.Fatalf("no %q marker", fmt.Sprintf("response invalid run %d", firstTestsRunID))
+	}
+	if !strings.Contains(invalidMarker.Body, testReasonFailedValidation) {
+		t.Errorf("invalid marker body = %q, want it to hold the validator's reason", invalidMarker.Body)
+	}
+
+	if retryReq.SessionID != testsSessionID {
+		t.Errorf("retry request SessionID = %q, want %q", retryReq.SessionID, testsSessionID)
+	}
+	if retryReq.Label != testsRunLabel {
+		t.Errorf("retry request Label = %q, want %q", retryReq.Label, testsRunLabel)
+	}
+	if !strings.Contains(retryReq.Prompt, "did not parse") {
+		t.Errorf("retry prompt = %q, want it to say the last document did not parse", retryReq.Prompt)
+	}
+	if !strings.Contains(retryReq.Prompt, testsInvalidDetail) {
+		t.Errorf("retry prompt = %q, want it to carry the validator's detail", retryReq.Prompt)
+	}
+
+	sess, _, sessErr := s.SessionByID(t.Context(), testsRuns[0].SessionID, deps.Machine.Jobs[jobReviewName].MaxResumes)
+	if sessErr != nil {
+		t.Fatalf("SessionByID: %v", sessErr)
+	}
+	if sess.Resumes != 0 {
+		t.Errorf("tests session Resumes = %d, want 0 (the retry does not charge a resume)", sess.Resumes)
+	}
+}
+
+// ---- TestRoundInvalidLensTwiceEscalates -------------------------------------
+
+// TestRoundInvalidLensTwiceEscalates proves the new "invalid twice" row
+// (design section 6.2 step 7, issue #32): a lens whose first turn and whose
+// same-tick retry are both invalid escalates response_invalid in that same
+// round, naming the lens and pointing at the retry's own marker, with no
+// second round ever needed.
+func TestRoundInvalidLensTwiceEscalates(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow end-to-end flow; runs in the full suite")
+	}
+	t.Parallel()
+	s, ticket, before := reviewTicketReady(t)
+	invalidFn := func() (runtime.RunResult, error) {
+		return runtime.RunResult{SessionID: testsSessionID, ExitCode: 1, AgentTime: time.Second},
+			&runtime.InvalidOutputError{Reason: testReasonFailedValidation, Detail: testsInvalidDetail}
+	}
+	rt := &labelResultRuntime{
+		inner:   runtime.NewFake(reviewScriptsFS(nil)),
+		results: map[string]func() (runtime.RunResult, error){testsRunLabel: invalidFn},
+	}
+	deps := pbClaim(t, s, rt, ticket.ID)
+
+	commit, err := (reviewingHandler{}).Run(t.Context(), ticket, deps)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if commit.Escalation == nil {
+		t.Fatal("commit.Escalation = nil, want set (invalid twice in a row)")
+	}
+	if commit.Escalation.Payload.Code != string(response.EscalationCodeResponseInvalid) {
+		t.Errorf("escalation code = %q, want %q", commit.Escalation.Payload.Code, response.EscalationCodeResponseInvalid)
+	}
+	wantWhat := fmt.Sprintf(lensInvalidTwiceWhat, lensTests)
+	if commit.Escalation.Payload.What != wantWhat {
+		t.Errorf("escalation What = %q, want %q", commit.Escalation.Payload.What, wantWhat)
+	}
+	if commit.Escalation.Payload.Origin != string(response.EscalationOriginReview) {
+		t.Errorf("escalation origin = %q, want %q", commit.Escalation.Payload.Origin, response.EscalationOriginReview)
+	}
+
+	found := false
+	for _, m := range commit.Messages {
+		if m.Body == "review round 1 failed\nlens tests: invalid output" {
+			found = true
+		}
+	}
+	if !found {
+		t.Error(`no "review round 1 failed\nlens tests: invalid output" message in the commit`)
+	}
+
+	var invalidMarkers []store.Message
+	for _, m := range commit.Messages {
+		if strings.HasPrefix(m.Body, "response invalid run ") {
+			invalidMarkers = append(invalidMarkers, m)
+		}
+	}
+	if len(invalidMarkers) != 2 {
+		t.Fatalf("invalid markers = %d, want 2", len(invalidMarkers))
+	}
+	if !strings.Contains(invalidMarkers[1].Body, testsInvalidDetail) {
+		t.Errorf("second invalid marker = %q, want it to hold the validator's detail", invalidMarkers[1].Body)
+	}
+
+	pbApply(t, s, ticket, commit)
+
+	runs := reviewRunsSince(t, s, ticket.ID, before)
+	var testsRuns []store.Run
+	for _, r := range runs {
+		if r.Lens != nil && *r.Lens == lensTests {
+			testsRuns = append(testsRuns, r)
+		}
+	}
+	if len(testsRuns) != 2 {
+		t.Fatalf("tests runs = %d, want 2", len(testsRuns))
+	}
+	secondRunID := testsRuns[1].ID
+	if commit.Escalation.RunID == nil || *commit.Escalation.RunID != secondRunID {
+		t.Errorf("escalation RunID = %v, want %d (the retry's own run)", commit.Escalation.RunID, secondRunID)
+	}
+	wantWhy := fmt.Sprintf("zing document failed validation; validator errors in response invalid run %d", secondRunID)
+	if commit.Escalation.Payload.Why != wantWhy {
+		t.Errorf("escalation Why = %q, want %q", commit.Escalation.Payload.Why, wantWhy)
+	}
+	if strings.Contains(commit.Escalation.Payload.Why, "closing tag mismatch") {
+		t.Errorf("escalation Why = %q, want it to hold no validator detail", commit.Escalation.Payload.Why)
+	}
+}
+
+// ---- TestRoundInvalidThenExecFailure ----------------------------------------
+
+// TestRoundInvalidThenExecFailure proves the invalid-twice row (above) only
+// ever matches a lens whose retry is itself invalid: a lens whose retry
+// instead fails to execute takes the ordinary exec-failure row, with no
+// escalation on a first failed round, and carries exactly the one invalid
+// marker its first turn wrote.
+func TestRoundInvalidThenExecFailure(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow end-to-end flow; runs in the full suite")
+	}
+	t.Parallel()
+	s, ticket, before := reviewTicketReady(t)
+	rt := &labelStepsRuntime{
+		inner: runtime.NewFake(reviewScriptsFS(nil)),
+		steps: map[string][]func(ctx context.Context, req runtime.RunRequest) (runtime.RunResult, error){
+			testsRunLabel: {
+				func(_ context.Context, _ runtime.RunRequest) (runtime.RunResult, error) {
+					return runtime.RunResult{SessionID: testsSessionID, ExitCode: 1, AgentTime: time.Second},
+						&runtime.InvalidOutputError{Reason: testReasonFailedValidation, Detail: testsInvalidDetail}
+				},
+				func(_ context.Context, _ runtime.RunRequest) (runtime.RunResult, error) {
+					return runtime.RunResult{ExitCode: 1, AgentTime: time.Second}, &runtime.ExecError{ExitCode: 1}
+				},
+			},
+		},
+	}
+	deps := pbClaim(t, s, rt, ticket.ID)
+
+	commit, err := (reviewingHandler{}).Run(t.Context(), ticket, deps)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if commit.Escalation != nil {
+		t.Fatalf("commit.Escalation = %+v, want nil (first failed round)", commit.Escalation)
+	}
+	found := false
+	for _, m := range commit.Messages {
+		if m.Body == "review round 1 failed\nlens tests: exec failed" {
+			found = true
+		}
+	}
+	if !found {
+		t.Error(`no "review round 1 failed\nlens tests: exec failed" message in the commit`)
+	}
+
+	var invalidMarkers []store.Message
+	for _, m := range commit.Messages {
+		if strings.HasPrefix(m.Body, "response invalid run ") {
+			invalidMarkers = append(invalidMarkers, m)
+		}
+	}
+	if len(invalidMarkers) != 1 {
+		t.Fatalf("invalid markers = %d, want 1", len(invalidMarkers))
+	}
+
+	pbApply(t, s, ticket, commit)
+
+	runs := reviewRunsSince(t, s, ticket.ID, before)
+	errCount := 0
+	for _, r := range runs {
+		if r.Lens != nil && *r.Lens == lensTests {
+			if r.Outcome == nil || *r.Outcome != string(response.OutcomeError) {
+				t.Errorf("tests run %d outcome = %v, want error", r.ID, r.Outcome)
+			}
+			errCount++
+		}
+	}
+	if errCount != 2 {
+		t.Fatalf("tests runs = %d, want 2", errCount)
+	}
+}
+
+// ---- TestRoundInvalidAfterCancelNotRetried ----------------------------------
+
+// TestRoundInvalidAfterCancelNotRetried proves the retry's own cancellation
+// guard (design section 6.2 step 7, issue #32): once another lens has
+// already failed the round, a lens whose own turn comes back invalid after
+// that is not retried at all.
+func TestRoundInvalidAfterCancelNotRetried(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow end-to-end flow; runs in the full suite")
+	}
+	t.Parallel()
+	s, ticket, before := reviewTicketReady(t)
+
+	// obsBlocked orders the two failures without a sleep: simplification's
+	// own failure (and so the round's own cancellation) cannot happen until
+	// observability has already reserved its run and is itself blocked on
+	// roundCtx, so this test never races the semaphore to prove its point.
+	obsBlocked := make(chan struct{})
+	rt := &labelStepsRuntime{
+		inner: runtime.NewFake(reviewScriptsFS(nil)),
+		steps: map[string][]func(ctx context.Context, req runtime.RunRequest) (runtime.RunResult, error){
+			"1-simplification": {
+				func(_ context.Context, _ runtime.RunRequest) (runtime.RunResult, error) {
+					<-obsBlocked
+					return runtime.RunResult{ExitCode: 1, AgentTime: time.Second}, &runtime.ExecError{ExitCode: 1}
+				},
+			},
+			"1-observability": {
+				func(ctx context.Context, _ runtime.RunRequest) (runtime.RunResult, error) {
+					close(obsBlocked)
+					<-ctx.Done()
+					return runtime.RunResult{SessionID: "obs-sess", ExitCode: 1, AgentTime: time.Second},
+						&runtime.InvalidOutputError{Reason: testReasonFailedValidation}
+				},
+				func(_ context.Context, _ runtime.RunRequest) (runtime.RunResult, error) {
+					t.Error("retry started after the round was already canceled")
+					return runtime.RunResult{}, errors.New("must not be called")
+				},
+			},
+		},
+	}
+	deps := pbClaim(t, s, rt, ticket.ID)
+	deps.LensesParallel = 7
+
+	commit, err := (reviewingHandler{}).Run(t.Context(), ticket, deps)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	found := false
+	for _, m := range commit.Messages {
+		if m.Body == "review round 1 failed\nlens simplification: exec failed" {
+			found = true
+		}
+	}
+	if !found {
+		t.Error(`no "review round 1 failed\nlens simplification: exec failed" message in the commit`)
+	}
+
+	pbApply(t, s, ticket, commit)
+
+	runs := reviewRunsSince(t, s, ticket.ID, before)
+	obsCount := 0
+	for _, r := range runs {
+		if r.Lens != nil && *r.Lens == "observability" {
+			obsCount++
+		}
+	}
+	if obsCount != 1 {
+		t.Errorf("observability runs = %d, want 1 (no retry once the round is canceled)", obsCount)
+	}
+}
+
+// ---- TestRoundInvalidLensRetryLogs -------------------------------------------
+
+// jsonLogLine is one slog JSON record this test cares about: the handler
+// and level fields are irrelevant to it, so only Msg and the attributes it
+// asserts on are decoded.
+type jsonLogLine struct {
+	Msg        string `json:"msg"`
+	TicketID   int64  `json:"ticket_id"`
+	Lens       string `json:"lens"`
+	SessionID  int64  `json:"session_id"`
+	RunID      int64  `json:"run_id"`
+	FirstRunID int64  `json:"first_run_id"`
+	Reason     string `json:"reason"`
+	Outcome    string `json:"outcome"`
+	ErrKind    string `json:"err_kind"`
+}
+
+// TestRoundInvalidLensRetryLogs proves design section 9's own rule for the
+// new retry records (issue #32): "started" and "finished" each log exactly
+// once, carrying the closed reason, the outcome, and both run ids, never
+// the validator's own detail (runjob_test.go's own slog-swap pattern,
+// :1619, hence no t.Parallel here).
+func TestRoundInvalidLensRetryLogs(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow end-to-end flow; runs in the full suite")
+	}
+	s, ticket, _ := reviewTicketReady(t)
+
+	overrides := map[string]string{}
+	for _, lens := range reviewLensNames {
+		if lens == lensFidelity || lens == lensTests {
+			continue
+		}
+		overrides[reviewScriptKey(lens, 1)] = findingScript(lens, "nit", "a nit from "+lens, "polish it")
+	}
+	fake := runtime.NewFake(reviewScriptsFS(overrides))
+	rt := &labelStepsRuntime{
+		inner: fake,
+		steps: map[string][]func(ctx context.Context, req runtime.RunRequest) (runtime.RunResult, error){
+			testsRunLabel: {
+				func(_ context.Context, _ runtime.RunRequest) (runtime.RunResult, error) {
+					return runtime.RunResult{SessionID: testsSessionID, ExitCode: 1, AgentTime: time.Second},
+						&runtime.InvalidOutputError{Reason: testReasonFailedValidation, Detail: testsInvalidDetail}
+				},
+				func(_ context.Context, _ runtime.RunRequest) (runtime.RunResult, error) {
+					doc, parseErr := response.Parse([]byte(findingScript(lensTests, "nit", "a nit from tests", "polish it")))
+					if parseErr != nil {
+						t.Fatalf("parse tests retry script: %v", parseErr)
+					}
+					return runtime.RunResult{Response: doc.Response, SessionID: testsSessionID, ExitCode: 0, AgentTime: time.Second}, nil
+				},
+			},
+		},
+	}
+	deps := pbClaim(t, s, rt, ticket.ID)
+
+	var buf bytes.Buffer
+	prior := slog.Default()
+	slog.SetDefault(slog.New(slog.NewJSONHandler(&buf, &slog.HandlerOptions{Level: slog.LevelInfo})))
+	t.Cleanup(func() { slog.SetDefault(prior) })
+
+	commit, err := (reviewingHandler{}).Run(t.Context(), ticket, deps)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	pbApply(t, s, ticket, commit)
+
+	raw := buf.String()
+	if strings.Contains(raw, testsInvalidDetail) {
+		t.Error("captured log carries the validator's own Detail, want it absent")
+	}
+
+	var started, finished []jsonLogLine
+	for line := range strings.SplitSeq(strings.TrimRight(raw, "\n"), "\n") {
+		if line == "" {
+			continue
+		}
+		var rec jsonLogLine
+		if err := json.Unmarshal([]byte(line), &rec); err != nil {
+			t.Fatalf("unmarshal log line %q: %v", line, err)
+		}
+		switch rec.Msg {
+		case "review lens retry started":
+			started = append(started, rec)
+		case "review lens retry finished":
+			finished = append(finished, rec)
+		}
+	}
+	if len(started) != 1 {
+		t.Fatalf("\"review lens retry started\" records = %d, want 1", len(started))
+	}
+	if len(finished) != 1 {
+		t.Fatalf("\"review lens retry finished\" records = %d, want 1", len(finished))
+	}
+	if started[0].Lens != lensTests || started[0].Reason != testReasonFailedValidation {
+		t.Errorf("started record = %+v, want lens tests and the closed reason", started[0])
+	}
+	if finished[0].RunID == 0 || finished[0].FirstRunID == 0 || finished[0].RunID == finished[0].FirstRunID {
+		t.Errorf("finished record = %+v, want distinct non-zero run_id and first_run_id", finished[0])
+	}
+	if finished[0].Outcome != string(response.OutcomeOk) {
+		t.Errorf("finished record outcome = %q, want %q", finished[0].Outcome, response.OutcomeOk)
+	}
+	if finished[0].ErrKind != "" {
+		t.Errorf("finished record err_kind = %q, want empty", finished[0].ErrKind)
 	}
 }
 
@@ -1449,6 +1947,84 @@ func TestContinueFailureDropsHeld(t *testing.T) {
 	}
 	if len(commit2.Artifacts) != 0 {
 		t.Errorf("commit2.Artifacts = %d, want 0 (a failed continuation stores no new findings)", len(commit2.Artifacts))
+	}
+}
+
+// ---- TestContinueInvalidLensRetried ------------------------------------------
+
+// TestContinueInvalidLensRetried proves the retry also fires on a CONTINUE
+// resume (design section 6.2a, issue #32), not just on ROUND's own first
+// turn: fidelity's resumed turn comes back invalid, carrying the resume's
+// own session id, and its own same-tick retry on that session succeeds, so
+// CONTINUE still ends the round done with no escalation.
+func TestContinueInvalidLensRetried(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow end-to-end flow; runs in the full suite")
+	}
+	t.Parallel()
+	s, ticket, _ := reviewTicketReady(t)
+	fake := runtime.NewFake(reviewScriptsFS(map[string]string{
+		reviewScriptKey(lensFidelity, 1): reviewQuestionScript("Q1", "first ask"),
+	}))
+	var invalidSessionID string
+	rt := &labelStepsRuntime{
+		inner: fake,
+		steps: map[string][]func(ctx context.Context, req runtime.RunRequest) (runtime.RunResult, error){
+			"1-fidelity": {
+				func(ctx context.Context, req runtime.RunRequest) (runtime.RunResult, error) {
+					return fake.Run(ctx, req)
+				},
+				func(_ context.Context, req runtime.RunRequest) (runtime.RunResult, error) {
+					invalidSessionID = req.SessionID
+					return runtime.RunResult{SessionID: req.SessionID, ExitCode: 1, AgentTime: time.Second},
+						&runtime.InvalidOutputError{Reason: testReasonFailedValidation, Detail: "bad doc"}
+				},
+				func(_ context.Context, req runtime.RunRequest) (runtime.RunResult, error) {
+					if req.SessionID != invalidSessionID {
+						t.Errorf("retry request SessionID = %q, want %q", req.SessionID, invalidSessionID)
+					}
+					doc, parseErr := response.Parse([]byte(reviewOKScript))
+					if parseErr != nil {
+						t.Fatalf("parse ok script: %v", parseErr)
+					}
+					return runtime.RunResult{Response: doc.Response, SessionID: req.SessionID, ExitCode: 0, AgentTime: time.Second}, nil
+				},
+			},
+		},
+	}
+	deps := pbClaim(t, s, rt, ticket.ID)
+
+	commit, err := (reviewingHandler{}).Run(t.Context(), ticket, deps)
+	if err != nil {
+		t.Fatalf("Run (round): %v", err)
+	}
+	pbApply(t, s, ticket, commit)
+
+	answerReviewQuestion(t, s, ticket.ID, newestOpenQuestion(t, s, ticket.ID).ID)
+
+	ticket2 := pbGetTicket(t, s, ticket.ID)
+	deps2 := pbClaim(t, s, rt, ticket.ID)
+	commit2, err := (reviewingHandler{}).Run(t.Context(), ticket2, deps2)
+	if err != nil {
+		t.Fatalf("Run (continue): %v", err)
+	}
+	if commit2.Escalation != nil {
+		t.Fatalf("commit2.Escalation = %+v, want nil", commit2.Escalation)
+	}
+	var sawFailed, sawDone bool
+	for _, m := range commit2.Messages {
+		if strings.HasPrefix(m.Body, "review round 1 failed") {
+			sawFailed = true
+		}
+		if strings.HasPrefix(m.Body, "review round 1 done") {
+			sawDone = true
+		}
+	}
+	if sawFailed {
+		t.Error("commit2 carries a \"review round 1 failed\" marker, want none")
+	}
+	if !sawDone {
+		t.Error(`no "review round 1 done" marker in commit2`)
 	}
 }
 

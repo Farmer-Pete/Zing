@@ -71,7 +71,15 @@ const (
 
 	lensFailedTwiceWhat = "two review rounds in a row failed"
 	headMovedTwiceWhat  = "the ticket branch moved during two review rounds"
+
+	lensInvalidTwiceWhat = "lens %s returned an invalid document twice in a row"
 )
+
+// reviewInvalidRetryHeader replaces the prompt file on a lens's same-tick
+// retry after an invalid document (design section 6.2 step 7, issue #32):
+// the retry carries no plan, diff, or code section again, only the
+// validator's own error.
+const reviewInvalidRetryHeader = "Your last document did not parse. The validator's errors follow. Return the next document."
 
 // errLensFailed is ROUND and CONTINUE's own roundCtx cancellation cause
 // (design section 6.2 step 7): the first lens result that is neither a
@@ -873,19 +881,34 @@ func (h reviewingHandler) discussOkCommit(
 
 // ---- ROUND (design section 6.2) -------------------------------------------
 
+// lensFirstTry is a lens's discarded first turn: the run that returned an
+// invalid document before its same-tick retry (runLensesParallel, design
+// section 6.2 step 7, issue #32).
+type lensFirstTry struct {
+	rr     runResult
+	invErr *runtime.InvalidOutputError
+}
+
 // lensAttempt is one lens's own runJob result, plus its position in the
 // lens set that round (or continueRound) launched it from: idx breaks a tie
 // among several lenses that failed the same way, in lens order, exactly as
-// every other "in lens order" rule in section 6 does. sessionRecord builds
-// that attempt's own terminalizing Session/Sessions entry: freshSessionRecord
-// for a first-turn ROUND lens, a resumeSessionRecord closure bound to its
-// own session id for a CONTINUE resume.
+// every other "in lens order" rule in section 6 does. rr and err are the
+// lens's own final turn: the retry's own result when firstTry is set,
+// otherwise its only turn. sessionRecord builds that attempt's own
+// terminalizing Session/Sessions entry: freshSessionRecord for a first-turn
+// ROUND lens, a resumeSessionRecord closure bound to its own session id for
+// a CONTINUE resume.
 type lensAttempt struct {
 	idx           int
 	lens          response.Lens
 	rr            runResult
 	err           error
 	sessionRecord func(runResult) *store.SessionUpsert
+	// firstTry is set only when this lens's first turn returned an invalid
+	// document with a reserved run and a session id, roundCtx was not
+	// already canceled, and the retry ran (design section 6.2 step 7, issue
+	// #32).
+	firstTry *lensFirstTry
 }
 
 // outcomeString classifies a's own parsed document into the terminal
@@ -930,17 +953,22 @@ var errLensesParallelRange = fmt.Errorf("%w: lenses parallel must be 1 to 7", Er
 
 // runLensesParallel runs one runtime turn per lens, bounded by
 // d.LensesParallel in flight at once (design section 6.2 step 7): a
-// semaphore channel sized to it gates each goroutine's own runJob call, and
-// the first result that is not a parsed ok or question document cancels
-// roundCtx, so a goroutine still waiting on the semaphore reserves nothing.
-// build is called once per lens, inside its own goroutine, to assemble that
-// lens's own SessionUpsert and RunRequest; it must not block. The returned
-// attempts are sorted by idx (lens order), regardless of the order they
-// actually finished in. d.LensesParallel outside [1,7] is refused before any
-// goroutine starts and before any run reserves (errLensesParallelRange).
+// semaphore channel sized to it gates each goroutine's own runJob call. An
+// invalid document with a reserved run and a session id is retried once, in
+// place, on that same session, carrying the validator's error (issue #32),
+// unless roundCtx is already canceled; the first final result that is
+// still not a parsed ok or question document cancels roundCtx, so a
+// goroutine still waiting on the semaphore reserves nothing. build is
+// called once per lens, inside its own goroutine, to assemble that lens's
+// own SessionUpsert and RunRequest; it must not block. schemas is the
+// retry's own schema list (the same one build's own closure already
+// rendered for the lens's first turn). The returned attempts are sorted by
+// idx (lens order), regardless of the order they actually finished in.
+// d.LensesParallel outside [1,7] is refused before any goroutine starts and
+// before any run reserves (errLensesParallelRange).
 func runLensesParallel(
 	ctx context.Context, d Deps, t store.Ticket,
-	lenses []response.Lens,
+	lenses []response.Lens, schemas []string,
 	build func(lens response.Lens) (store.SessionUpsert, runtime.RunRequest, func(runResult) *store.SessionUpsert),
 ) ([]lensAttempt, error) {
 	if d.LensesParallel < 1 || d.LensesParallel > 7 {
@@ -971,6 +999,38 @@ func runLensesParallel(
 			rr, err := runJob(roundCtx, d, t, jobReviewName, su, req, nil, &lensStr, 0)
 
 			at := lensAttempt{idx: idx, lens: lens, rr: rr, err: err, sessionRecord: sessionRecord}
+			var invErr *runtime.InvalidOutputError
+			if errors.As(err, &invErr) && rr.Reserved.RunID != 0 { //nolint:modernize // see execFailureKind
+				switch {
+				case rr.Res.SessionID == "":
+					slog.Info("review lens retry skipped", "ticket_id", t.ID, "lens", lensStr, "run_id", rr.Reserved.RunID, "cause", "no session id")
+				case roundCtx.Err() != nil:
+					slog.Info("review lens retry skipped", "ticket_id", t.ID, "lens", lensStr, "run_id", rr.Reserved.RunID, "cause", "round canceled")
+				default:
+					reason := invErr.Reason
+					if invErr.Detail != "" {
+						reason += "\n" + invErr.Detail
+					}
+					in := prompt.Input{
+						JobPrompt: reviewInvalidRetryHeader,
+						Inputs:    []prompt.NamedInput{prompt.Invalid(invalidRetryText(reason))},
+						Schemas:   schemas,
+					}
+					retryReq := runtime.RunRequest{
+						Job: response.JobReview, Label: req.Label, WorkDir: req.WorkDir,
+						SessionID: rr.Res.SessionID, Prompt: prompt.Assemble(in),
+					}
+					sessionID := rr.Reserved.SessionID
+					slog.Info("review lens retry started", "ticket_id", t.ID, "lens", lensStr, "session_id", sessionID,
+						"run_id", rr.Reserved.RunID, "reason", invErr.Reason)
+					rr2, err2 := runJob(roundCtx, d, t, jobReviewName, store.SessionUpsert{ID: &sessionID}, retryReq, nil, &lensStr, 0)
+					at.firstTry = &lensFirstTry{rr: rr, invErr: invErr}
+					at.rr, at.err = rr2, err2
+					slog.Info("review lens retry finished", "ticket_id", t.ID, "lens", lensStr, "session_id", sessionID,
+						"run_id", rr2.Reserved.RunID, "first_run_id", rr.Reserved.RunID,
+						"outcome", at.outcomeString(), "err_kind", errKind(err2))
+				}
+			}
 			if !at.isGood() {
 				cancel(errLensFailed)
 			}
@@ -990,16 +1050,27 @@ func runLensesParallel(
 // carries for every lens that actually reserved a run (design section 6.2:
 // "Session holds the first reserved run's session record in lens order and
 // Sessions holds the rest; a nil record (only on runtime.ErrStart) is
-// skipped"), in idx (lens) order.
+// skipped"), in idx (lens) order. A retried lens (firstTry set, issue #32)
+// terminalizes both of its own runs: the first turn as error, the retry as
+// its own outcome; its session record is built from the first turn, whose
+// own run carries the session's external id on creation, so the retry's own
+// run (a resume, D13) is the one skipped rather than double-recorded.
 func terminalizeAttempts(attempts []lensAttempt) (runs []store.Run, session *store.SessionUpsert, sessions []store.SessionUpsert) {
 	for i := range attempts {
 		a := &attempts[i]
-		if a.rr.Reserved.RunID == 0 {
+		recFrom := a.rr
+		if a.firstTry != nil {
+			runs = append(runs, terminalRuns(a.firstTry.rr, string(response.OutcomeError))...)
+			recFrom = a.firstTry.rr
+		}
+		if a.rr.Reserved.RunID != 0 {
+			runs = append(runs, terminalRuns(a.rr, a.outcomeString())...)
+		}
+		if a.firstTry == nil && a.rr.Reserved.RunID == 0 {
 			continue
 		}
-		runs = append(runs, terminalRuns(a.rr, a.outcomeString())...)
 
-		rec := a.sessionRecord(a.rr)
+		rec := a.sessionRecord(recFrom)
 		if rec == nil {
 			continue
 		}
@@ -1010,6 +1081,31 @@ func terminalizeAttempts(attempts []lensAttempt) (runs []store.Run, session *sto
 		sessions = append(sessions, *rec)
 	}
 	return runs, session, sessions
+}
+
+// applyAttempts terminalizes every lens run in attempts onto c (Runs,
+// Session, Sessions) and appends one "response invalid run N" marker per
+// run that returned an invalid document, in lens order, first turn before
+// retry, so the console shows each run's own validator error (design
+// section 6.2 step 7, issue #32).
+func applyAttempts(c *store.HandlerCommit, ticketID int64, attempts []lensAttempt) {
+	c.Runs, c.Session, c.Sessions = terminalizeAttempts(attempts)
+	for i := range attempts {
+		a := &attempts[i]
+		if a.firstTry != nil {
+			c.Messages = append(c.Messages, store.Message{
+				TicketID: ticketID, Type: msgTypeUpdate, Author: authorSystem,
+				Body: invalidMarkerBody(a.firstTry.rr.Reserved.RunID, a.firstTry.invErr),
+			})
+		}
+		var invErr *runtime.InvalidOutputError
+		if a.rr.Reserved.RunID != 0 && errors.As(a.err, &invErr) { //nolint:modernize // see execFailureKind
+			c.Messages = append(c.Messages, store.Message{
+				TicketID: ticketID, Type: msgTypeUpdate, Author: authorSystem,
+				Body: invalidMarkerBody(a.rr.Reserved.RunID, invErr),
+			})
+		}
+	}
 }
 
 // firstBadAttempt returns the first (lens order) attempt matching pred, in
@@ -1133,7 +1229,7 @@ func (h reviewingHandler) round(ctx context.Context, t store.Ticket, d Deps, n i
 		extra = append(extra, prompt.Notes(notes))
 	}
 
-	attempts, lensesErr := runLensesParallel(ctx, d, t, lenses, func(lens response.Lens) (store.SessionUpsert, runtime.RunRequest, func(runResult) *store.SessionUpsert) {
+	attempts, lensesErr := runLensesParallel(ctx, d, t, lenses, schemas, func(lens response.Lens) (store.SessionUpsert, runtime.RunRequest, func(runResult) *store.SessionUpsert) {
 		codeSection, csErr := lensCodeSection(lens)
 		if csErr != nil {
 			return store.SessionUpsert{Job: jobReviewName, Runtime: jobCfg.Runtime}, runtime.RunRequest{}, freshSessionRecord
@@ -1252,7 +1348,7 @@ func (h reviewingHandler) tableCommit(
 
 	if _, ok := firstBadAttempt(attempts, func(a lensAttempt) bool { return errors.Is(a.err, ErrBudget) }); ok {
 		c := budgetEscalationCommit(t, d, resolveIDs)
-		c.Runs, c.Session, c.Sessions = terminalizeAttempts(attempts)
+		applyAttempts(&c, t.ID, attempts)
 		return c, nil
 	}
 
@@ -1281,7 +1377,7 @@ func (h reviewingHandler) tableCommit(
 		}
 		c := escalationCommit(t, d, &at.rr.Reserved.RunID, &at.rr.Reserved.SessionID,
 			string(errResp.Error.Code), errResp.Error.What, errResp.Error.Why, errResp.Error.Tried, response.EscalationOriginReview)
-		c.Runs, c.Session, c.Sessions = terminalizeAttempts(attempts)
+		applyAttempts(&c, t.ID, attempts)
 		c.ResolveQuestions = resolveIDs
 		c.Messages = append(c.Messages, reviewRoundFailedMarker(t.ID, n, fmt.Sprintf(lensAgentErrorWhy, at.lens)))
 		slog.Warn("escalation written", "ticket_id", t.ID, "session_id", at.rr.Reserved.SessionID, "run_id", at.rr.Reserved.RunID,
@@ -1289,12 +1385,38 @@ func (h reviewingHandler) tableCommit(
 		return c, nil
 	}
 
+	// A lens whose first turn was invalid and whose same-tick retry (issue
+	// #32, runLensesParallel) is itself invalid escalates response_invalid
+	// now, naming the lens and the retry's own validator error: the
+	// response_invalid: two-in-a-row rule below (firstExecFailure's row)
+	// only ever sees one invalid turn per lens per round, since a lens's
+	// second consecutive invalid turn is now always this row instead.
+	if at, ok := firstBadAttempt(attempts, func(a lensAttempt) bool {
+		var invErr *runtime.InvalidOutputError
+		return a.firstTry != nil && errors.As(a.err, &invErr) //nolint:modernize // see execFailureKind
+	}); ok {
+		var invErr *runtime.InvalidOutputError
+		errors.As(at.err, &invErr) //nolint:errcheck,modernize // the predicate above already matched
+		// Why carries only the closed reason; the validator's own detail can
+		// quote model text and stays on the run's own invalid marker.
+		why := fmt.Sprintf("%s; validator errors in response invalid run %d", invErr.Reason, at.rr.Reserved.RunID)
+		code := string(response.EscalationCodeResponseInvalid)
+		c := escalationCommit(t, d, &at.rr.Reserved.RunID, &at.rr.Reserved.SessionID,
+			code, fmt.Sprintf(lensInvalidTwiceWhat, at.lens), why, "", response.EscalationOriginReview)
+		applyAttempts(&c, t.ID, attempts)
+		c.ResolveQuestions = resolveIDs
+		c.Messages = append(c.Messages, reviewRoundFailedMarker(t.ID, n, fmt.Sprintf("lens %s: invalid output", at.lens)))
+		slog.Warn("escalation written", "ticket_id", t.ID, "session_id", at.rr.Reserved.SessionID, "run_id", at.rr.Reserved.RunID,
+			"code", code, "origin", string(response.EscalationOriginReview))
+		return c, nil
+	}
+
 	if at, kind, ok := firstExecFailure(attempts); ok {
 		reason := fmt.Sprintf("lens %s: %s", at.lens, kind)
 		c := baseCommit(t, d)
-		c.Runs, c.Session, c.Sessions = terminalizeAttempts(attempts)
+		applyAttempts(&c, t.ID, attempts)
 		c.ResolveQuestions = resolveIDs
-		c.Messages = []store.Message{reviewRoundFailedMarker(t.ID, n, reason)}
+		c.Messages = append(c.Messages, reviewRoundFailedMarker(t.ID, n, reason))
 		if priorFailedOrVoid {
 			code := string(response.EscalationCodeRuntimeExecFailed)
 			if kind == "invalid output" {
@@ -1321,12 +1443,12 @@ func (h reviewingHandler) tableCommit(
 	if sha2 != sha {
 		reason := fmt.Sprintf("head moved from %s to %s", sha, sha2)
 		c := baseCommit(t, d)
-		c.Runs, c.Session, c.Sessions = terminalizeAttempts(attempts)
+		applyAttempts(&c, t.ID, attempts)
 		c.ResolveQuestions = resolveIDs
-		c.Messages = []store.Message{{
+		c.Messages = append(c.Messages, store.Message{
 			TicketID: t.ID, Type: msgTypeUpdate, Author: authorSystem,
 			Body: fmt.Sprintf("review round %d void\n%s", n, reason),
-		}}
+		})
 		if priorFailedOrVoid {
 			slog.Warn("escalation written", "ticket_id", t.ID, "session_id", nil, "run_id", nil,
 				"code", string(response.EscalationCodeEnvironment), "origin", string(response.EscalationOriginReview))
@@ -1552,7 +1674,7 @@ func (h reviewingHandler) successCommit(
 	stored := sortByID(append(append([]response.FindingArtifact{}, atOrBelow...), above...))
 
 	c := baseCommit(t, d)
-	c.Runs, c.Session, c.Sessions = terminalizeAttempts(attempts)
+	applyAttempts(&c, t.ID, attempts)
 	c.ResolveQuestions = resolveIDs
 
 	lensList := make([]string, len(attempts))
@@ -1619,7 +1741,7 @@ func (h reviewingHandler) askedCommit(
 	priorDone []response.Lens, heldSoFar int,
 ) (store.HandlerCommit, error) {
 	c := baseCommit(t, d)
-	c.Runs, c.Session, c.Sessions = terminalizeAttempts(attempts)
+	applyAttempts(&c, t.ID, attempts)
 	c.ResolveQuestions = resolveIDs
 
 	var askingRunIDs []int64
@@ -1913,7 +2035,7 @@ func (h reviewingHandler) continueRound(ctx context.Context, t store.Ticket, d D
 		byLens[askers[i].lens] = askers[i]
 	}
 
-	attempts, lensesErr := runLensesParallel(ctx, d, t, lenses, func(lens response.Lens) (store.SessionUpsert, runtime.RunRequest, func(runResult) *store.SessionUpsert) {
+	attempts, lensesErr := runLensesParallel(ctx, d, t, lenses, schemas, func(lens response.Lens) (store.SessionUpsert, runtime.RunRequest, func(runResult) *store.SessionUpsert) {
 		a := byLens[lens]
 		inputs := []prompt.NamedInput{prompt.Answers(a.answers)}
 		if a.interrupted {
