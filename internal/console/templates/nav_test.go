@@ -74,11 +74,15 @@ func TestNavThreadBadgeByKind(t *testing.T) {
 		th := NavThread{
 			Ticket:    store.Ticket{ID: 1, State: testStatePlanning},
 			Blocking:  true,
+			Unread:    true,
 			WaitingOn: "questions",
 		}
 		got := renderNav(t, []NavThread{th}, 0)
 		if !strings.Contains(got, "badge-blocking") {
 			t.Errorf("rendered nav missing badge-blocking for a blocking thread; got:\n%s", got)
+		}
+		if strings.Contains(got, "badge-unread") {
+			t.Errorf("rendered nav shows badge-unread for a blocking thread; got:\n%s", got)
 		}
 		if strings.Contains(got, `<span class="pill">planning</span>`) {
 			t.Errorf("rendered nav shows the state pill for a blocking thread; got:\n%s", got)

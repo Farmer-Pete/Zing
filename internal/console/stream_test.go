@@ -260,7 +260,9 @@ func TestStreamLeavingAThreadPatchesAnEmptyRail(t *testing.T) {
 // as Datastar's @get does) marks every unread message of that ticket read
 // in the store before the first frame renders, so neither that thread's own
 // nav frame nor a freshly opened inbox stream's nav frame still shows
-// badge-unread or the ticket's title (design section 6.8).
+// badge-unread (design section 6.8). The ticket stays live (queued,
+// non-terminal), so #nav still lists its row and title (#106 bug 4); only
+// the badge-unread clears.
 func TestStreamOpeningAThreadMarksItRead(t *testing.T) {
 	t.Parallel()
 	s := newConsoleTestStore(t)

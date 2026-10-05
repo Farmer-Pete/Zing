@@ -504,6 +504,40 @@ func TestLiveTickets_OrdersBlockingThenUnreadThenIssueNumber(t *testing.T) {
 	}
 }
 
+// TestLiveTickets_TiesOnNormalizedRefBreakByID proves that two refs
+// normalizing to the same stripped digit string (here "007" and "7", both
+// stripping to "7") tie all the way through issueNumberOrder's numeric
+// columns and fall through to ticket id, rather than falling back to
+// comparing the raw, zero-padded ref text.
+func TestLiveTickets_TiesOnNormalizedRefBreakByID(t *testing.T) {
+	t.Parallel()
+	s := newTestStore(t)
+	projectID := seedProjectNamed(t, s, testProjectAlpha)
+
+	mkQuiet := func(ref string) int64 {
+		id, err := s.InsertTicket(t.Context(), Ticket{ProjectID: projectID, TrackerRef: ref, Title: "t " + ref, State: ticketStateQueued})
+		if err != nil {
+			t.Fatalf("InsertTicket(%s): %v", ref, err)
+		}
+		return id
+	}
+
+	first := mkQuiet("7")
+	second := mkQuiet("007")
+
+	got, err := s.LiveTickets(t.Context(), nil)
+	if err != nil {
+		t.Fatalf("LiveTickets: %v", err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("LiveTickets returned %d tickets, want 2: %+v", len(got), got)
+	}
+	if got[0].Ticket.ID != first || got[1].Ticket.ID != second {
+		t.Errorf("LiveTickets order = [%d, %d], want [%d, %d] (lower id first)",
+			got[0].Ticket.ID, got[1].Ticket.ID, first, second)
+	}
+}
+
 // liveHasTicket reports whether items contains ticketID.
 func liveHasTicket(items []LiveTicket, ticketID int64) bool {
 	for i := range items {

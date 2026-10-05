@@ -280,7 +280,7 @@ const numericRef = `(t.tracker_ref GLOB '[0-9]*' AND t.tracker_ref NOT GLOB '*[^
 const issueNumberOrder = `CASE WHEN ` + numericRef + ` THEN 0 ELSE 1 END,
 	CASE WHEN ` + numericRef + ` THEN LENGTH(LTRIM(t.tracker_ref, '0')) END,
 	CASE WHEN ` + numericRef + ` THEN LTRIM(t.tracker_ref, '0') END,
-	t.tracker_ref, t.id`
+	CASE WHEN ` + numericRef + ` THEN NULL ELSE t.tracker_ref END, t.id`
 
 // LiveTicket is one ticket LiveTickets returns: the ticket itself, plus
 // whether it has an unread message and how many open questions it carries.
