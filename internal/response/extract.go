@@ -88,7 +88,7 @@ func extractRepaired(input []byte) []string {
 		}
 	}
 	if len(roots) > 0 {
-		logRepair(total)
+		logRepair(total, len(roots))
 	}
 	return roots
 }

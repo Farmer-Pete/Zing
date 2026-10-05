@@ -197,8 +197,8 @@ func childNamed(n *node, name string) *node {
 }
 
 // closeTagLen returns the length of the closing tag at the start of rest
-// when it closes the top frame, else 0. XML whitespace (space, tab, CR, LF)
-// may sit between the name and the >.
+// when it closes the top frame, else 0. XML whitespace (isXMLSpace) may
+// sit between the name and the >.
 func closeTagLen(rest []byte, stack []repairFrame) int {
 	if len(stack) == 0 {
 		return 0
@@ -208,13 +208,19 @@ func closeTagLen(rest []byte, stack []repairFrame) int {
 		return 0
 	}
 	j := 2 + n
-	for j < len(rest) && (rest[j] == ' ' || rest[j] == '\t' || rest[j] == '\r' || rest[j] == '\n') {
+	for j < len(rest) && isXMLSpace(rest[j]) {
 		j++
 	}
 	if j < len(rest) && rest[j] == '>' {
 		return j + 1
 	}
 	return 0
+}
+
+// isXMLSpace reports an XML whitespace byte: space, tab, carriage return,
+// or line feed (XML 1.0 section 2.3).
+func isXMLSpace(c byte) bool {
+	return c == ' ' || c == '\t' || c == '\r' || c == '\n'
 }
 
 // scanName reads the XML name at the start of b and its length, or "" and
@@ -224,7 +230,7 @@ func scanName(b []byte) (name string, length int) {
 		return "", 0
 	}
 	n := 1
-	for n < len(b) && (isNameStart(b[n]) || b[n] == '-' || b[n] == '.' || ('0' <= b[n] && b[n] <= '9')) {
+	for n < len(b) && isNameByte(b[n]) {
 		n++
 	}
 	return string(b[:n]), n
@@ -234,6 +240,12 @@ func scanName(b []byte) (name string, length int) {
 // '_', ':', or any byte of a multi-byte UTF-8 rune.
 func isNameStart(c byte) bool {
 	return ('a' <= c && c <= 'z') || ('A' <= c && c <= 'Z') || c == '_' || c == ':' || c >= 0x80
+}
+
+// isNameByte reports a byte that may continue an XML name: anything
+// isNameStart allows, plus '-', '.', or an ASCII digit.
+func isNameByte(c byte) bool {
+	return isNameStart(c) || c == '-' || c == '.' || ('0' <= c && c <= '9')
 }
 
 // copyTag copies the start tag at the start of rest into out. from is the
@@ -269,7 +281,12 @@ func copyTag(out *bytes.Buffer, rest []byte, from int) (tagLen int, selfClosing 
 }
 
 // logRepair records a repaired document at INFO, so settings.log_level
-// warn or error drops it. Issue #94 adds the run token.
-func logRepair(escaped int) {
-	slog.Info("repaired bare < in zing document", "escaped", escaped)
+// warn or error drops it. Issue #94 adds the run token. roots is the
+// number of well-formed roots the repair produced: parseRepaired always
+// passes 1, but extractRepaired's candidate scan can repair more than one
+// candidate in a single message. runtime.parseFinalMessage then rejects
+// that as reasonMultipleZingDocs, so the count here keeps the record from
+// reading as a clean success when it wasn't one.
+func logRepair(escaped, roots int) {
+	slog.Info("repaired bare < in zing document", "escaped", escaped, "roots", roots)
 }

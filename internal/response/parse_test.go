@@ -16,8 +16,14 @@ const (
 	// Shared across parse_test.go and registry_test.go.
 	classifyReadyUnregisteredErr = "no response for job classify outcome ready"
 
-	// wantBareComparison is the live "a < b" prose shape, shared with
-	// render_test.go's escaping table.
+	// classifyReadyDoc is a well-formed classify/ready document: classify
+	// has no ready outcome, so Parse always reports
+	// classifyReadyUnregisteredErr for it, while ExtractAll still counts it
+	// as one well-formed root. Shared across parse_test.go, extract_test.go,
+	// and validate_test.go.
+	classifyReadyDoc = `<zing job="classify" outcome="ready"><reason>x</reason></zing>`
+
+	// wantBareComparison is the live "a < b" prose shape.
 	wantBareComparison = "a < b"
 )
 
@@ -118,9 +124,25 @@ func TestParse_UnknownPairAfterMalformedCandidate(t *testing.T) {
 	// well-formed but names an unregistered pair: Parse must still report
 	// the specific "no response for..." error, not the generic catch-all,
 	// since the second candidate is otherwise well formed.
-	input := `<zing job="classify" outcome="bug"><reason>oops` +
-		`<zing job="classify" outcome="ready"><reason>x</reason></zing>`
+	input := `<zing job="classify" outcome="bug"><reason>oops` + classifyReadyDoc
 	_, err := Parse([]byte(input))
+	want := classifyReadyUnregisteredErr
+	if err == nil || err.Error() != want {
+		t.Fatalf("err = %v, want %q", err, want)
+	}
+}
+
+// TestParse_RepairableCandidateThenUnregisteredPairKeepsLookupError pins
+// Parse's doc comment: the repair pass is skipped entirely once the strict
+// pass has found any well-formed candidate naming an unregistered pair,
+// even when an earlier candidate is otherwise registered and the repair
+// could fix its bare <. The unregistered candidate's own "no response
+// for..." error must still win.
+func TestParse_RepairableCandidateThenUnregisteredPairKeepsLookupError(t *testing.T) {
+	t.Parallel()
+
+	registered := `<zing job="build" outcome="ok"><claims></claims><report>x is <nil> here</report><notes>n</notes></zing>`
+	_, err := Parse([]byte(registered + classifyReadyDoc))
 	want := classifyReadyUnregisteredErr
 	if err == nil || err.Error() != want {
 		t.Fatalf("err = %v, want %q", err, want)
@@ -130,8 +152,7 @@ func TestParse_UnknownPairAfterMalformedCandidate(t *testing.T) {
 func TestParse_WellFormedUnknownPairReturnsExactError(t *testing.T) {
 	t.Parallel()
 
-	input := `<zing job="classify" outcome="ready"><reason>x</reason></zing>`
-	_, err := Parse([]byte(input))
+	_, err := Parse([]byte(classifyReadyDoc))
 	want := classifyReadyUnregisteredErr
 	if err == nil || err.Error() != want {
 		t.Fatalf("err = %v, want %q", err, want)
@@ -366,6 +387,9 @@ func TestRepairLogsEscapedCount(t *testing.T) {
 	if !strings.Contains(got, "escaped=2") {
 		t.Errorf("info log = %q, want escaped=2", got)
 	}
+	if !strings.Contains(got, "roots=1") {
+		t.Errorf("info log = %q, want roots=1", got)
+	}
 
 	var warnBuf bytes.Buffer
 	slog.SetDefault(slog.New(slog.NewTextHandler(&warnBuf, &slog.HandlerOptions{Level: slog.LevelWarn})))
@@ -397,18 +421,21 @@ func TestParse_MisnestedElementKeepsOriginalError(t *testing.T) {
 }
 
 // TestParse_UnterminatedCommentKeepsOriginalError guards rule 1: an
-// unterminated comment opener stays markup. The repair must give up on this
-// candidate entirely rather than escape its way past the opener, so both
-// Parse and ExtractAll report the strict decoder's own failure.
+// unterminated comment opener stays markup even when the same field also
+// holds a bare < the repair could otherwise fix ("a < b" before the
+// opener). The repair must give up on the whole candidate rather than
+// escape its way past the opener, so both Parse and ExtractAll report the
+// strict decoder's own failure: here, the decoder rejects the leading bare
+// < itself, before it would ever reach the comment.
 func TestParse_UnterminatedCommentKeepsOriginalError(t *testing.T) {
 	t.Parallel()
-	in := []byte(`<zing job="classify" outcome="bug"><reason>a note <!-- unterminated</reason></zing>`)
+	in := []byte(`<zing job="classify" outcome="bug"><reason>a < b <!-- note</reason></zing>`)
 	doc, err := Parse(in)
 	if doc != nil {
 		t.Fatalf("Parse returned a document, want nil: %#v", doc)
 	}
-	if err == nil || !strings.HasPrefix(err.Error(), "no zing element in final message: ") || !strings.Contains(err.Error(), "unexpected EOF") {
-		t.Errorf("err = %v, want the no-zing prefix plus unexpected EOF", err)
+	if err == nil || !strings.HasPrefix(err.Error(), "no zing element in final message: ") || !strings.Contains(err.Error(), "expected element name after <") {
+		t.Errorf("err = %v, want the no-zing prefix plus the decoder's own error", err)
 	}
 	if roots := ExtractAll(string(in)); len(roots) != 0 {
 		t.Errorf("ExtractAll = %v, want zero roots", roots)
@@ -420,13 +447,13 @@ func TestParse_UnterminatedCommentKeepsOriginalError(t *testing.T) {
 // CDATA section.
 func TestParse_UnterminatedCDATAKeepsOriginalError(t *testing.T) {
 	t.Parallel()
-	in := []byte(`<zing job="classify" outcome="bug"><reason>a note <![CDATA[ unterminated</reason></zing>`)
+	in := []byte(`<zing job="classify" outcome="bug"><reason>a < b <![CDATA[ raw</reason></zing>`)
 	doc, err := Parse(in)
 	if doc != nil {
 		t.Fatalf("Parse returned a document, want nil: %#v", doc)
 	}
-	if err == nil || !strings.HasPrefix(err.Error(), "no zing element in final message: ") || !strings.Contains(err.Error(), "unexpected EOF") {
-		t.Errorf("err = %v, want the no-zing prefix plus unexpected EOF", err)
+	if err == nil || !strings.HasPrefix(err.Error(), "no zing element in final message: ") || !strings.Contains(err.Error(), "expected element name after <") {
+		t.Errorf("err = %v, want the no-zing prefix plus the decoder's own error", err)
 	}
 	if roots := ExtractAll(string(in)); len(roots) != 0 {
 		t.Errorf("ExtractAll = %v, want zero roots", roots)
@@ -436,12 +463,19 @@ func TestParse_UnterminatedCDATAKeepsOriginalError(t *testing.T) {
 // TestParse_UnregisteredPairIsNotRepaired guards that the repair only runs
 // for a (job, outcome) pair the registry holds: classify has no ready
 // outcome, so candidateShape has no shape to repair against, and Parse's
-// generic "no zing element" result stands.
+// generic "no zing element" result stands. Parse itself would report the
+// same result even if the registry gate were missing, since the repaired
+// candidate would still fail Lookup downstream in tryDecode; the direct
+// call below pins the gate itself, at repairCandidate.
 func TestParse_UnregisteredPairIsNotRepaired(t *testing.T) {
 	t.Parallel()
 	in := []byte(`<zing job="classify" outcome="ready"><reason>a < b</reason></zing>`)
 	_, err := Parse(in)
 	assertNoZing(t, err)
+
+	if repaired, escaped, ok := repairCandidate(in); ok {
+		t.Errorf("repairCandidate = (%q, %d, %v), want ok = false", repaired, escaped, ok)
+	}
 }
 
 // TestParse_StrictDocumentKeepsItsBytes guards goal 2: a document that

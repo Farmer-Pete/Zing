@@ -162,6 +162,12 @@ func TestRepairBareLessThan(t *testing.T) {
 				t.Fatalf("ok = %v, want %v (bytes = %q)", ok, tc.ok, got)
 			}
 			if !tc.ok {
+				if got != nil {
+					t.Errorf("bytes = %q, want nil alongside ok = false", got)
+				}
+				if escaped != 0 {
+					t.Errorf("escaped = %d, want 0 alongside ok = false", escaped)
+				}
 				return
 			}
 			if string(got) != tc.want {

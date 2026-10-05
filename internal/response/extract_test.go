@@ -1,10 +1,17 @@
 package response
 
 import (
+	"bytes"
+	"log/slog"
 	"strings"
 	"testing"
 	"time"
 )
+
+// brokenBuildReportNil is a build/ok document whose report holds a single
+// bare < placeholder, the live run 283 shape: the strict scan rejects it,
+// and the repair pass must turn it into exactly one well-formed root.
+const brokenBuildReportNil = `<zing job="build" outcome="ok"><report>x is <nil></report></zing>`
 
 func TestExtractAll_ZeroRoots(t *testing.T) {
 	t.Parallel()
@@ -58,10 +65,9 @@ func TestExtractAll_LogTextAroundOneRoot(t *testing.T) {
 func TestExtractAll_UnregisteredOutcomeStillCounts(t *testing.T) {
 	t.Parallel()
 
-	doc := `<zing job="classify" outcome="ready"><reason>x</reason></zing>`
-	got := ExtractAll(doc)
-	if len(got) != 1 || got[0] != doc {
-		t.Fatalf("ExtractAll = %v, want exactly [%q]", got, doc)
+	got := ExtractAll(classifyReadyDoc)
+	if len(got) != 1 || got[0] != classifyReadyDoc {
+		t.Fatalf("ExtractAll = %v, want exactly [%q]", got, classifyReadyDoc)
 	}
 }
 
@@ -110,9 +116,8 @@ func TestExtractAll_ManyUnclosedStartsIsBoundedAndFast(t *testing.T) {
 func TestExtractAll_RepairsBareLessThan(t *testing.T) {
 	t.Parallel()
 
-	broken := `<zing job="build" outcome="ok"><report>x is <nil></report></zing>`
 	want := `<zing job="build" outcome="ok"><report>x is &lt;nil></report></zing>`
-	input := "log line\n" + broken + "\ndone"
+	input := "log line\n" + brokenBuildReportNil + "\ndone"
 
 	got := ExtractAll(input)
 	if len(got) != 1 || got[0] != want {
@@ -127,8 +132,7 @@ func TestExtractAll_RepairsBareLessThan(t *testing.T) {
 func TestExtractAll_StrictRootSkipsRepair(t *testing.T) {
 	t.Parallel()
 
-	broken := `<zing job="build" outcome="ok"><report>x is <nil></report></zing>`
-	input := broken + "\n" + wellFormedClassify
+	input := brokenBuildReportNil + "\n" + wellFormedClassify
 
 	got := ExtractAll(input)
 	if len(got) != 1 || got[0] != wellFormedClassify {
@@ -147,5 +151,100 @@ func TestExtractAll_UnregisteredPairIsNotRepaired(t *testing.T) {
 	got := ExtractAll(doc)
 	if len(got) != 0 {
 		t.Fatalf("ExtractAll = %v, want zero roots", got)
+	}
+}
+
+// TestExtractStrict_HitsCapReturnsNilTrue pins extractStrict's own half of
+// the `|| capped` short-circuit: past maxRootCandidates candidates it
+// returns (nil, true), not whatever partial roots it had found, so
+// ExtractAll knows to stop rather than fall through to the repair pass.
+func TestExtractStrict_HitsCapReturnsNilTrue(t *testing.T) {
+	t.Parallel()
+
+	hostile := strings.Repeat("<zing >\n", 2000)
+	roots, capped := extractStrict([]byte(hostile))
+	if !capped {
+		t.Fatal("capped = false, want true past maxRootCandidates")
+	}
+	if roots != nil {
+		t.Errorf("roots = %v, want nil", roots)
+	}
+}
+
+// TestExtractAll_CappedSkipsRepair guards the `|| capped` half of
+// ExtractAll's condition: hitting maxRootCandidates in the strict pass
+// must return nothing outright, even when a well-formed, repairable
+// document follows the flood of broken candidates. Dropping `capped` from
+// that condition happens to still pass this test, since extractRepaired
+// scans the identical candidate list and is bounded by the same cap, so it
+// also returns nothing once the flood is large enough to cap the strict
+// pass (r1f1): this test pins the output both halves agree on, and
+// TestExtractStrict_HitsCapReturnsNilTrue above pins the signal ExtractAll
+// relies on to skip the repair pass's wasted work rather than redo it.
+func TestExtractAll_CappedSkipsRepair(t *testing.T) {
+	t.Parallel()
+
+	hostile := strings.Repeat("<zing >\n", 2000)
+	got := ExtractAll(hostile + brokenBuildReportNil)
+	if len(got) != 0 {
+		t.Fatalf("ExtractAll = %v, want zero roots (capped, repair must not run)", got)
+	}
+}
+
+// TestExtractAll_RepairLogsEscapedCount is TestRepairLogsEscapedCount's
+// ExtractAll half: the runtime calls ExtractAll before it ever calls
+// Parse, so extractRepaired's own logRepair call needs its own coverage.
+// Not parallel: it swaps slog's global default.
+func TestExtractAll_RepairLogsEscapedCount(t *testing.T) {
+	prev := slog.Default()
+	t.Cleanup(func() { slog.SetDefault(prev) })
+
+	var infoBuf bytes.Buffer
+	slog.SetDefault(slog.New(slog.NewTextHandler(&infoBuf, &slog.HandlerOptions{Level: slog.LevelInfo})))
+	if got := ExtractAll(brokenBuildReportNil); len(got) != 1 {
+		t.Fatalf("ExtractAll = %v, want one root", got)
+	}
+	got := infoBuf.String()
+	if strings.Count(got, "repaired bare < in zing document") != 1 {
+		t.Errorf("info log = %q, want exactly one repair record", got)
+	}
+	if !strings.Contains(got, "escaped=1") || !strings.Contains(got, "roots=1") {
+		t.Errorf("info log = %q, want escaped=1 and roots=1", got)
+	}
+
+	var warnBuf bytes.Buffer
+	slog.SetDefault(slog.New(slog.NewTextHandler(&warnBuf, &slog.HandlerOptions{Level: slog.LevelWarn})))
+	if got := ExtractAll(brokenBuildReportNil); len(got) != 1 {
+		t.Fatalf("ExtractAll = %v, want one root", got)
+	}
+	if warnBuf.Len() != 0 {
+		t.Errorf("warn-level log = %q, want nothing written", warnBuf.String())
+	}
+}
+
+// TestExtractAll_RepairLogsRootsOverOne guards the count r1f2 flagged: a
+// message holding two repairable candidates gives ExtractAll two roots,
+// which runtime.parseFinalMessage then rejects outright as
+// reasonMultipleZingDocs. The log record must say roots=2, not read like a
+// single clean repair, so an operator matching repair records to runs by
+// timestamp (the plan's workaround until issue #94) does not mistake this
+// for a successful one.
+func TestExtractAll_RepairLogsRootsOverOne(t *testing.T) {
+	prev := slog.Default()
+	t.Cleanup(func() { slog.SetDefault(prev) })
+
+	b2 := `<zing job="build" outcome="ok"><report>y is <branch></report></zing>`
+
+	var buf bytes.Buffer
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelInfo})))
+	if got := ExtractAll(brokenBuildReportNil + "\n" + b2); len(got) != 2 {
+		t.Fatalf("ExtractAll = %v, want two roots", got)
+	}
+	got := buf.String()
+	if !strings.Contains(got, "roots=2") {
+		t.Errorf("info log = %q, want roots=2", got)
+	}
+	if !strings.Contains(got, "escaped=2") {
+		t.Errorf("info log = %q, want escaped=2 (one < repaired in each root)", got)
 	}
 }
