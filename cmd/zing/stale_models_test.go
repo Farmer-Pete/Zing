@@ -5,6 +5,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"slices"
 	"testing"
 )
 
@@ -54,8 +55,10 @@ func staleFiles(root string, needle []byte) ([]string, error) {
 // move: no Go or TOML file outside internal/store may still carry the
 // retired default. internal/store is exempt entirely, not just its tests:
 // its tests store the id as an opaque string and never resolve it, and its
-// production code never embeds a model-id literal at all. The needle is
-// built from two halves so this file never matches itself.
+// production code never embeds a model-id literal at all. .zing is also
+// exempt, because it holds Zing's own worktrees: old checkouts of this repo
+// that can carry the retired id even when the live tree does not. The
+// needle is built from two halves so this file never matches itself.
 func TestNoFixturePinsOpus48(t *testing.T) {
 	t.Parallel()
 	stale := []byte("claude-opus-4-" + "8")
@@ -100,7 +103,7 @@ func TestStaleFiles_SkipsZingWorktrees(t *testing.T) {
 		t.Fatalf("staleFiles(%s): %v", root, err)
 	}
 	want := []string{filepath.Join("cmd", "x.go")}
-	if len(got) != len(want) || (len(got) > 0 && got[0] != want[0]) {
+	if !slices.Equal(got, want) {
 		t.Errorf("staleFiles = %v, want %v", got, want)
 	}
 }

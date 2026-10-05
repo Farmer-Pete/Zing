@@ -51,7 +51,10 @@ func TestShutdownCancelsRequests(t *testing.T) {
 		}
 	})
 
-	if err := srv.Shutdown(t.Context()); err != nil {
+	shutdownErr := make(chan error, 1)
+	go func() { shutdownErr <- srv.Shutdown(t.Context()) }()
+
+	if err := waitFor(t, shutdownErr, "Shutdown to return (handlers released)"); err != nil {
 		t.Fatalf("Shutdown: %v", err)
 	}
 
