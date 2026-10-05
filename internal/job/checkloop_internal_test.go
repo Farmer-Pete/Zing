@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
 	"math"
 	"os"
@@ -96,6 +97,11 @@ const (
 	fakeTestCmd = "the-test"
 	fakeLintCmd = "the-lint"
 )
+
+// slogLevelWarn is slog's own rendering of its WARN level in a JSON log
+// record's "level" field, named once for every test here that checks a
+// captured record's level (goconst).
+const slogLevelWarn = "WARN"
 
 func (c *budgetCommands) Run(_ context.Context, _, _, shellCmd string, timeout time.Duration, _ CommandIO) (int, error) {
 	c.timeouts[shellCmd] = timeout
@@ -272,6 +278,198 @@ func TestCheckFixSnapshotUsesBudget(t *testing.T) {
 	}
 }
 
+// failAfterRunner wraps a real orchestrator.Runner and fails its callAt'th
+// Output call (1-indexed) with failErr, passing every other call through to
+// real. revalidate (ChangedPaths and RevertPaths both call it first) makes
+// its own "git symbolic-ref" call through a Runner every time, but it also
+// calls checkGitPointer, which calls Orchestrator.GitCommonDir -- a "git
+// rev-parse --git-common-dir" through the same Runner, cached on the
+// Orchestrator after its first success, so it runs through this Runner only
+// once per Orchestrator instance. callAt therefore counts, in run order: 1
+// is that one-time GitCommonDir call, made by the pre-fix snapshot (the
+// first revalidate to run); 2 is the pre-fix snapshot's own symbolic-ref;
+// 3 is fix's post-fix snapshot's symbolic-ref (GitCommonDir is cached by
+// then); 4 is RevertPaths' own symbolic-ref, when stray paths are found.
+type failAfterRunner struct {
+	real    orchestrator.Runner
+	callAt  int
+	failErr error
+	n       int
+}
+
+func (r *failAfterRunner) Run(ctx context.Context, dir, name string, args ...string) (string, error) {
+	return r.real.Run(ctx, dir, name, args...)
+}
+
+func (r *failAfterRunner) Output(ctx context.Context, dir, name string, args ...string) (string, error) {
+	r.n++
+	if r.n == r.callAt {
+		return "", r.failErr
+	}
+	return r.real.Output(ctx, dir, name, args...)
+}
+
+// TestCheckFixBeforeSnapshotFailureSkipsFix proves a pre-fix ChangedPaths
+// failure returns "job: check: before fix" and never runs the fix command
+// at all (review r2f2): nothing a half-run fix might have written could
+// ever need the lane cleanup, since the snapshot it depends on never
+// existed.
+func TestCheckFixBeforeSnapshotFailureSkipsFix(t *testing.T) {
+	dir := t.TempDir()
+	if err := gitfixture.NewSigningRepo(t.Context(), dir); err != nil {
+		t.Fatalf("gitfixture.NewSigningRepo: %v", err)
+	}
+	setupOrch, repoGit, ok := pbOrchestratorFor(t, dir, orchestrator.NewRunner())
+	if !ok {
+		t.Fatal("pbOrchestratorFor: not a git repository")
+	}
+	wt, _, err := setupOrch.EnsureWorktree(t.Context(), 1, "fix-before-snapshot-fail")
+	if err != nil {
+		t.Fatalf("EnsureWorktree: %v", err)
+	}
+
+	wantGitErr := errors.New("boom: git symbolic-ref failed")
+	runner := &failAfterRunner{real: orchestrator.NewRunner(), callAt: 1, failErr: wantGitErr}
+	measureOrch, _, ok := pbOrchestratorFor(t, dir, runner)
+	if !ok {
+		t.Fatal("pbOrchestratorFor: not a git repository")
+	}
+
+	const theFix = "the-fix"
+	fake := &budgetCommands{timeouts: map[string]time.Duration{}, results: map[string]struct {
+		exit int
+		err  error
+	}{theFix: {exit: 0}}}
+	d := Deps{Commands: fake, Machine: &machine.Machine{Jobs: map[string]machine.Job{jobBuildName: {TimeoutMinutes: 45}}}}
+	proj := Project{Orch: measureOrch, RepoGit: repoGit, FixCmd: theFix, LintCmd: fakeLintCmd, TestCmd: fakeTestCmd}
+	_, err = runCheckCommands(t.Context(), d, store.Ticket{ID: 1}, wt, proj, nil)
+	if err == nil || !strings.Contains(err.Error(), "job: check: before fix") {
+		t.Fatalf("runCheckCommands err = %v, want it to wrap \"job: check: before fix\"", err)
+	}
+	if !errors.Is(err, wantGitErr) {
+		t.Errorf("runCheckCommands err = %v, want it to wrap %v", err, wantGitErr)
+	}
+	if _, ran := fake.timeouts[theFix]; ran {
+		t.Error("fix ran after its own pre-fix snapshot failed")
+	}
+}
+
+// TestCheckFixAfterSnapshotFailureStopsBeforeLint proves a post-fix
+// ChangedPaths failure, once fix itself has exited cleanly, returns "job:
+// check: keep fix in lane" and never runs lint (review r2f2): CHECK must
+// not land, or even keep checking, a tree whose lane it could not confirm.
+func TestCheckFixAfterSnapshotFailureStopsBeforeLint(t *testing.T) {
+	dir := t.TempDir()
+	if err := gitfixture.NewSigningRepo(t.Context(), dir); err != nil {
+		t.Fatalf("gitfixture.NewSigningRepo: %v", err)
+	}
+	setupOrch, repoGit, ok := pbOrchestratorFor(t, dir, orchestrator.NewRunner())
+	if !ok {
+		t.Fatal("pbOrchestratorFor: not a git repository")
+	}
+	wt, _, err := setupOrch.EnsureWorktree(t.Context(), 1, "fix-after-snapshot-fail")
+	if err != nil {
+		t.Fatalf("EnsureWorktree: %v", err)
+	}
+
+	// callAt=3: the pre-fix snapshot (calls 1-2) succeeds, so fix runs;
+	// fix's own post-fix snapshot's symbolic-ref (3) is what fails here.
+	wantGitErr := errors.New("boom: git symbolic-ref failed")
+	runner := &failAfterRunner{real: orchestrator.NewRunner(), callAt: 3, failErr: wantGitErr}
+	measureOrch, _, ok := pbOrchestratorFor(t, dir, runner)
+	if !ok {
+		t.Fatal("pbOrchestratorFor: not a git repository")
+	}
+
+	const theFix = "the-fix"
+	fake := &budgetCommands{timeouts: map[string]time.Duration{}, results: map[string]struct {
+		exit int
+		err  error
+	}{theFix: {exit: 0}}}
+	d := Deps{Commands: fake, Machine: &machine.Machine{Jobs: map[string]machine.Job{jobBuildName: {TimeoutMinutes: 45}}}}
+	proj := Project{Orch: measureOrch, RepoGit: repoGit, FixCmd: theFix, LintCmd: fakeLintCmd, TestCmd: fakeTestCmd}
+	_, err = runCheckCommands(t.Context(), d, store.Ticket{ID: 1}, wt, proj, nil)
+	if err == nil || !strings.Contains(err.Error(), "job: check: keep fix in lane") {
+		t.Fatalf("runCheckCommands err = %v, want it to wrap \"job: check: keep fix in lane\"", err)
+	}
+	if !errors.Is(err, wantGitErr) {
+		t.Errorf("runCheckCommands err = %v, want it to wrap %v", err, wantGitErr)
+	}
+	if _, ran := fake.timeouts[theFix]; !ran {
+		t.Error("fix never ran, want it to have run before its own post-fix snapshot failed")
+	}
+	if _, ran := fake.timeouts[fakeLintCmd]; ran {
+		t.Error("lint ran after fix's own lane could not be confirmed")
+	}
+}
+
+// TestCheckFixCleanupFailureAfterCanceledFixReturnsCanceled proves that when
+// fix's own run returns a wrapped context.Canceled and its cleanup's
+// post-fix ChangedPaths also fails, runCheckCommands still returns fix's
+// own error unchanged (so a canceled tick still ends as runtime.ErrCanceled
+// upstream) and logs the cleanup failure at WARN rather than returning it
+// (review r2f2). Not parallel: it swaps slog.Default.
+func TestCheckFixCleanupFailureAfterCanceledFixReturnsCanceled(t *testing.T) {
+	dir := t.TempDir()
+	if err := gitfixture.NewSigningRepo(t.Context(), dir); err != nil {
+		t.Fatalf("gitfixture.NewSigningRepo: %v", err)
+	}
+	setupOrch, repoGit, ok := pbOrchestratorFor(t, dir, orchestrator.NewRunner())
+	if !ok {
+		t.Fatal("pbOrchestratorFor: not a git repository")
+	}
+	wt, _, err := setupOrch.EnsureWorktree(t.Context(), 1, "fix-canceled-cleanup-fail")
+	if err != nil {
+		t.Fatalf("EnsureWorktree: %v", err)
+	}
+
+	// callAt=3: as in TestCheckFixAfterSnapshotFailureStopsBeforeLint, the
+	// pre-fix snapshot succeeds and fix's post-fix snapshot is what fails,
+	// but here fix's own run also errors with a wrapped context.Canceled.
+	wantGitErr := errors.New("boom: git symbolic-ref failed")
+	runner := &failAfterRunner{real: orchestrator.NewRunner(), callAt: 3, failErr: wantGitErr}
+	measureOrch, _, ok := pbOrchestratorFor(t, dir, runner)
+	if !ok {
+		t.Fatal("pbOrchestratorFor: not a git repository")
+	}
+
+	var buf bytes.Buffer
+	orig := slog.Default()
+	slog.SetDefault(slog.New(slog.NewJSONHandler(&buf, &slog.HandlerOptions{Level: slog.LevelWarn})))
+	t.Cleanup(func() { slog.SetDefault(orig) })
+
+	const theFix = "the-fix"
+	canceledErr := fmt.Errorf("job: command runner: %w", context.Canceled)
+	fake := &budgetCommands{timeouts: map[string]time.Duration{}, results: map[string]struct {
+		exit int
+		err  error
+	}{theFix: {exit: -1, err: canceledErr}}}
+	d := Deps{Commands: fake, Machine: &machine.Machine{Jobs: map[string]machine.Job{jobBuildName: {TimeoutMinutes: 45}}}}
+	proj := Project{Orch: measureOrch, RepoGit: repoGit, FixCmd: theFix, LintCmd: fakeLintCmd, TestCmd: fakeTestCmd}
+	_, err = runCheckCommands(t.Context(), d, store.Ticket{ID: 1}, wt, proj, nil)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("runCheckCommands err = %v, want it to wrap context.Canceled", err)
+	}
+
+	var records []map[string]any
+	dec := json.NewDecoder(&buf)
+	for dec.More() {
+		var rec map[string]any
+		if decErr := dec.Decode(&rec); decErr != nil {
+			t.Fatalf("decode log line: %v", decErr)
+		}
+		if rec["msg"] == "fix cleanup failed" {
+			records = append(records, rec)
+		}
+	}
+	if len(records) != 1 {
+		t.Fatalf("records = %+v, want exactly 1", records)
+	}
+	if records[0]["level"] != slogLevelWarn {
+		t.Errorf("level = %v, want %s", records[0]["level"], slogLevelWarn)
+	}
+}
+
 // plainShellCommands runs a shell command for real, with no sandbox and no
 // OnStart callback: TestCheckFixRevertLogsStrayPaths needs fix's own shell
 // command to actually write a file, but not the check_procs bookkeeping
@@ -318,7 +516,7 @@ func TestCheckFixRevertLogsStrayPaths(t *testing.T) {
 
 	const fixCmd = "printf x > stray.txt"
 	d := Deps{Commands: plainShellCommands{}, Machine: &machine.Machine{Jobs: map[string]machine.Job{jobBuildName: {TimeoutMinutes: 45}}}}
-	proj := Project{Orch: orch, RepoGit: repoGit, FixCmd: fixCmd, LintCmd: "true", TestCmd: "true"}
+	proj := Project{Orch: orch, RepoGit: repoGit, FixCmd: fixCmd, LintCmd: pbNoopShellCmd, TestCmd: pbNoopShellCmd}
 	results, err := runCheckCommands(t.Context(), d, store.Ticket{ID: 1}, wt, proj, nil)
 	if err != nil {
 		t.Fatalf("runCheckCommands: %v", err)
@@ -344,12 +542,74 @@ func TestCheckFixRevertLogsStrayPaths(t *testing.T) {
 	if len(records) != 1 {
 		t.Fatalf("records = %+v, want exactly 1", records)
 	}
-	if records[0]["level"] != "WARN" {
-		t.Errorf("level = %v, want WARN", records[0]["level"])
+	if records[0]["level"] != slogLevelWarn {
+		t.Errorf("level = %v, want %s", records[0]["level"], slogLevelWarn)
 	}
 	paths, ok := records[0]["paths"].([]any)
 	if !ok || len(paths) != 1 || paths[0] != "stray.txt" {
 		t.Errorf("paths = %v, want [stray.txt]", records[0]["paths"])
+	}
+}
+
+// TestCheckFixRevertFailureKeepsNoWarn proves the inverse of
+// TestCheckFixRevertLogsStrayPaths: when RevertPaths itself fails, no "fix
+// change reverted" WARN is logged (review r2f4) -- the record must never
+// claim stray paths are gone when they are not -- and stray.txt is left in
+// place for the next CHECK's snapshot to treat as already in the unit's
+// lane. runCheckCommands instead returns an error wrapping "job: check:
+// keep fix in lane". Not parallel: it swaps slog.Default.
+func TestCheckFixRevertFailureKeepsNoWarn(t *testing.T) {
+	dir := t.TempDir()
+	if err := gitfixture.NewSigningRepo(t.Context(), dir); err != nil {
+		t.Fatalf("gitfixture.NewSigningRepo: %v", err)
+	}
+	setupOrch, repoGit, ok := pbOrchestratorFor(t, dir, orchestrator.NewRunner())
+	if !ok {
+		t.Fatal("pbOrchestratorFor: not a git repository")
+	}
+	wt, _, err := setupOrch.EnsureWorktree(t.Context(), 1, "fix-revert-fail")
+	if err != nil {
+		t.Fatalf("EnsureWorktree: %v", err)
+	}
+
+	// callAt=4: the pre-fix snapshot (calls 1-2) and fix's own post-fix
+	// snapshot (call 3) both succeed and find stray.txt, so RevertPaths
+	// runs and its own revalidate (call 4) is what fails.
+	wantGitErr := errors.New("boom: git symbolic-ref failed")
+	runner := &failAfterRunner{real: orchestrator.NewRunner(), callAt: 4, failErr: wantGitErr}
+	measureOrch, _, ok := pbOrchestratorFor(t, dir, runner)
+	if !ok {
+		t.Fatal("pbOrchestratorFor: not a git repository")
+	}
+
+	var buf bytes.Buffer
+	orig := slog.Default()
+	slog.SetDefault(slog.New(slog.NewJSONHandler(&buf, &slog.HandlerOptions{Level: slog.LevelWarn})))
+	t.Cleanup(func() { slog.SetDefault(orig) })
+
+	const fixCmd = "printf x > stray.txt"
+	d := Deps{Commands: plainShellCommands{}, Machine: &machine.Machine{Jobs: map[string]machine.Job{jobBuildName: {TimeoutMinutes: 45}}}}
+	proj := Project{Orch: measureOrch, RepoGit: repoGit, FixCmd: fixCmd, LintCmd: pbNoopShellCmd, TestCmd: pbNoopShellCmd}
+	_, err = runCheckCommands(t.Context(), d, store.Ticket{ID: 1}, wt, proj, nil)
+	if err == nil || !strings.Contains(err.Error(), "job: check: keep fix in lane") {
+		t.Fatalf("runCheckCommands err = %v, want it to wrap \"job: check: keep fix in lane\"", err)
+	}
+	if !errors.Is(err, wantGitErr) {
+		t.Errorf("runCheckCommands err = %v, want it to wrap %v", err, wantGitErr)
+	}
+	if _, statErr := os.Stat(filepath.Join(wt.Dir(), "stray.txt")); statErr != nil {
+		t.Fatalf("stray.txt stat: %v, want it still present after a failed revert", statErr)
+	}
+
+	dec := json.NewDecoder(&buf)
+	for dec.More() {
+		var rec map[string]any
+		if decErr := dec.Decode(&rec); decErr != nil {
+			t.Fatalf("decode log line: %v", decErr)
+		}
+		if rec["msg"] == "fix change reverted" {
+			t.Fatalf("logged %+v, want no \"fix change reverted\" record for a failed revert", rec)
+		}
 	}
 }
 

@@ -145,6 +145,17 @@ func runCheckCommands(ctx context.Context, d Deps, t store.Ticket, wt orchestrat
 						stray = append(stray, a)
 					}
 				}
+				// The WARN is logged only once RevertPaths has actually
+				// removed stray, not before: an operator who reads "fix
+				// change reverted" must be able to trust the named paths
+				// are already gone (review r1f1). This is why the plan's
+				// own runCheckCommands listing, which logs the WARN before
+				// calling RevertPaths and passes RevertPaths' error through
+				// unchanged, is not followed literally here (review r2f1):
+				// that order would log a misleading WARN on a failed
+				// revert. A failed revert instead folds into laneErr with
+				// the path list, so "keep fix in lane" below still names
+				// what was left unreverted.
 				if len(stray) > 0 {
 					if revertErr := proj.Orch.RevertPaths(laneCtx, wt, stray); revertErr != nil {
 						laneErr = fmt.Errorf("revert %v: %w", changedPathList(stray), revertErr)
