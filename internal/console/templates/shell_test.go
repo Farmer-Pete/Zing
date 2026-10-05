@@ -109,4 +109,19 @@ func TestColumnsScrollOnTheirOwn(t *testing.T) {
 	if !strings.Contains(got, "#alerts { flex: none; }") {
 		t.Errorf("rendered shell missing #alerts { flex: none; }")
 	}
+
+	for _, sel := range []string{"#nav {", "#rail {"} {
+		start := strings.Index(got, sel)
+		if start < 0 {
+			t.Fatalf("rendered shell has no %s rule", sel)
+		}
+		end := strings.Index(got[start:], "}")
+		if end < 0 {
+			t.Fatalf("rendered shell's %s rule is unterminated", sel)
+		}
+		rule := got[start : start+end]
+		if !strings.Contains(rule, "overflow-y: auto;") {
+			t.Errorf("rendered shell's %s rule missing %q, got %q", sel, "overflow-y: auto;", rule)
+		}
+	}
 }
