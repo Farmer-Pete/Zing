@@ -315,6 +315,9 @@ func (s *Store) editScenarioTx(ctx context.Context, tx *sql.Tx, req OwnerEditReq
 	if req.Check != nil {
 		sc.Check = *req.Check
 	}
+	if sc.Kind == response.ScenarioKindHost && strings.TrimSpace(sc.Check) == "" {
+		return response.OwnerEditEvent{}, ownerEditErr(OwnerEditCodeInvalid, response.HostScenarioNeedsCheck)
+	}
 
 	newPayload, err := json.Marshal(sc)
 	if err != nil {
