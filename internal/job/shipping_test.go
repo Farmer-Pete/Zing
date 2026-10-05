@@ -666,20 +666,19 @@ func shipHeadSHA(t *testing.T, s *store.Store, ticket store.Ticket) string {
 	return sha
 }
 
-// driveShipFixToLanding drives an already-open fix request through the fix
-// driver's own RUN then CHECK-and-LAND ticks while ticketID is in
-// "shipping" (fix.go's own DriveFix, reached through shipHandler.Run's own
-// postBuildPrelude): judging_test.go's own driveJudgeFixToLanding, shipping
-// instead of judging, and reusing its exact build fixture (judgeFixBuildScript,
-// judgeFixTestCmd) since the fix driver cares about neither state.
-func driveShipFixToLanding(t *testing.T, s *store.Store, ticketID int64, rt runtime.Runtime) {
+// driveShipFixToLandingWith is driveShipFixToLanding's own parametrized
+// twin (M4 task 4, TestFixRepliesNoopQuotesReason): testCmd replaces
+// judgeFixTestCmd, so a caller can drive a fix unit whose test command
+// leaves the tree unchanged ("true") through the same RUN then
+// CHECK-and-LAND ticks.
+func driveShipFixToLandingWith(t *testing.T, s *store.Store, ticketID int64, rt runtime.Runtime, testCmd string) {
 	t.Helper()
 	for i := range 4 {
 		ticket := pbGetTicket(t, s, ticketID)
-		deps := pbWithTestCmd(pbClaim(t, s, rt, ticketID), ticket, judgeFixTestCmd)
+		deps := pbWithTestCmd(pbClaim(t, s, rt, ticketID), ticket, testCmd)
 		commit, err := (shipHandler{}).Run(t.Context(), ticket, deps)
 		if err != nil {
-			t.Fatalf("driveShipFixToLanding: Run (step %d): %v", i, err)
+			t.Fatalf("driveShipFixToLandingWith: Run (step %d): %v", i, err)
 		}
 		pbApply(t, s, ticket, commit)
 		for j := range commit.Messages {
@@ -688,7 +687,18 @@ func driveShipFixToLanding(t *testing.T, s *store.Store, ticketID int64, rt runt
 			}
 		}
 	}
-	t.Fatal("driveShipFixToLanding: fix did not land within 4 ticks")
+	t.Fatal("driveShipFixToLandingWith: fix did not land within 4 ticks")
+}
+
+// driveShipFixToLanding drives an already-open fix request through the fix
+// driver's own RUN then CHECK-and-LAND ticks while ticketID is in
+// "shipping" (fix.go's own DriveFix, reached through shipHandler.Run's own
+// postBuildPrelude): judging_test.go's own driveJudgeFixToLanding, shipping
+// instead of judging, and reusing its exact build fixture (judgeFixBuildScript,
+// judgeFixTestCmd) since the fix driver cares about neither state.
+func driveShipFixToLanding(t *testing.T, s *store.Store, ticketID int64, rt runtime.Runtime) {
+	t.Helper()
+	driveShipFixToLandingWith(t, s, ticketID, rt, judgeFixTestCmd)
 }
 
 // -----------------------------------------------------------------------
@@ -3926,6 +3936,18 @@ type shipFixLanding struct {
 // drives.
 func shipFixThreadLanded(t *testing.T, thread orchestrator.Thread) shipFixLanding {
 	t.Helper()
+	return shipFixThreadLandedWith(t, thread, judgeFixBuildScript, judgeFixTestCmd)
+}
+
+// shipFixThreadLandedWith is shipFixThreadLanded's own parametrized twin
+// (M4 task 4, TestFixRepliesNoopQuotesReason): buildScript and testCmd
+// replace judgeFixBuildScript and judgeFixTestCmd, so a caller can drive a
+// fix unit whose build turn claims no changed file and whose test command
+// leaves the tree unchanged, taking building.go's own land "HEAD path"
+// (len(approved) == 0 && u.FixRequestID != nil) instead of a fresh commit
+// -- preFixSHA and postFixSHA then come back equal.
+func shipFixThreadLandedWith(t *testing.T, thread orchestrator.Thread, buildScript, testCmd string) shipFixLanding {
+	t.Helper()
 	s, ticket, gh, tr, aid := shipApplySeeded(t, []orchestrator.Thread{thread}, []response.ThreadAction{
 		{ID: tid(thread.ID), Action: response.ThreadVerbFix, Text: shipFixThreadLandedText},
 	})
@@ -3933,15 +3955,15 @@ func shipFixThreadLanded(t *testing.T, thread orchestrator.Thread) shipFixLandin
 
 	commit, err := shipPollRun(t, s, ticket, gh, tr)
 	if err != nil {
-		t.Fatalf("shipFixThreadLanded: apply: %v", err)
+		t.Fatalf("shipFixThreadLandedWith: apply: %v", err)
 	}
 	if commit.Escalation != nil {
-		t.Fatalf("shipFixThreadLanded: apply escalated: %+v", commit.Escalation.Payload)
+		t.Fatalf("shipFixThreadLandedWith: apply escalated: %+v", commit.Escalation.Payload)
 	}
 	pbApply(t, s, ticket, commit)
 
-	rt := runtime.NewFake(fstest.MapFS{shipFixBuildScriptPath: &fstest.MapFile{Data: []byte(judgeFixBuildScript)}})
-	driveShipFixToLanding(t, s, ticket.ID, rt)
+	rt := runtime.NewFake(fstest.MapFS{shipFixBuildScriptPath: &fstest.MapFile{Data: []byte(buildScript)}})
+	driveShipFixToLandingWith(t, s, ticket.ID, rt, testCmd)
 
 	ticket = pbGetTicket(t, s, ticket.ID)
 	postFixSHA := shipHeadSHA(t, s, ticket)
@@ -4022,6 +4044,75 @@ func TestFixRepliesAfterPush(t *testing.T) {
 		t.Errorf("commit2.Messages = %+v, want exactly %q", commit2.Messages, want)
 	}
 	if !commit2.ClearPoll {
+		t.Error("ClearPoll = false, want true")
+	}
+}
+
+// shipFixNoopReportText is TestFixRepliesNoopQuotesReason's own builder
+// reason: the exact text a no-op fix reply must quote instead of a commit
+// sha (#37).
+const shipFixNoopReportText = "The bot misread the loop; the bound is already checked on line 12."
+
+// shipFixNoopBuildScript is a fix unit's own RUN turn that claims no
+// changed file at all (design section 9.4, M4 task 4): paired with the
+// test command "true" (which leaves the tree byte-identical), LAND then
+// takes building.go's own HEAD path instead of a fresh commit.
+const shipFixNoopBuildScript = `<zing job="build" outcome="ok">
+  <claims>
+    <files_changed>
+    </files_changed>
+  </claims>
+  <report>` + shipFixNoopReportText + `</report>
+  <notes></notes>
+</zing>`
+
+// TestFixRepliesNoopQuotesReason proves design section 9.4's own no-op
+// reply (#37): a fix that lands at the existing HEAD -- its build turn
+// claiming no changed file, its test command ("true") leaving the tree
+// unchanged -- replies with "No code change was needed." plus the
+// builder's own report text, never "Fixed in <sha>" (a reply that would
+// point at an old commit and hide the builder's explanation).
+func TestFixRepliesNoopQuotesReason(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow end-to-end flow; runs in the full suite")
+	}
+	t.Parallel()
+	when := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	thread := shipThread(shipApplyThreadA, "greet.go", 3, shipHumanComment("c1", "reviewer1", "please address this properly", when))
+	landing := shipFixThreadLandedWith(t, thread, shipFixNoopBuildScript, "true")
+	s, ticket, gh, tr := landing.s, landing.ticket, landing.gh, landing.tr
+
+	if landing.postFixSHA != landing.preFixSHA {
+		t.Fatalf("postFixSHA = %q, preFixSHA = %q, want them equal (the no-op fix lands at the current HEAD)", landing.postFixSHA, landing.preFixSHA)
+	}
+
+	gh.prState = orchestrator.PRState{Draft: true, HeadSHA: landing.postFixSHA, BaseRef: pbFixtureDefaultBranch}
+	commit, err := shipPollRun(t, s, pbGetTicket(t, s, ticket.ID), gh, tr)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if commit.Escalation != nil {
+		t.Fatalf("got an escalation: %+v", commit.Escalation.Payload)
+	}
+
+	if len(gh.replies) != 1 || !strings.HasPrefix(gh.replies[0], shipApplyThreadA+"|") {
+		t.Fatalf("replies = %+v, want exactly one for %q", gh.replies, shipApplyThreadA)
+	}
+	wantText := "No code change was needed.\n\n" + shipFixNoopReportText
+	if !strings.Contains(gh.replies[0], wantText) {
+		t.Errorf("reply body = %q, want it to contain %q", gh.replies[0], wantText)
+	}
+	if strings.Contains(gh.replies[0], "Fixed in") {
+		t.Errorf("reply body = %q, want no %q", gh.replies[0], "Fixed in")
+	}
+	if len(gh.resolves) != 1 || gh.resolves[0] != shipApplyThreadA {
+		t.Fatalf("resolves = %+v, want exactly [%q]", gh.resolves, shipApplyThreadA)
+	}
+	wantMarker := fmt.Sprintf("fix replies posted %d", landing.aid)
+	if len(commit.Messages) != 1 || commit.Messages[0].Body != wantMarker {
+		t.Errorf("commit.Messages = %+v, want exactly %q", commit.Messages, wantMarker)
+	}
+	if !commit.ClearPoll {
 		t.Error("ClearPoll = false, want true")
 	}
 }

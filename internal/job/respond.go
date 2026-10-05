@@ -1394,35 +1394,55 @@ func fixRepliesPostedMarkerFor(aid int64) string {
 	return fmt.Sprintf("fix replies posted %d", aid)
 }
 
-// respondFixLandedSHA is design section 9.4's own chain from a respond
-// artifact's own "respond applied <aid>" marker to the sha its collected
-// fix actions landed at: line 3 "fix request after run <R>" names the
-// request's own watermark; "fix requested threads after run <R>" is that
-// request's own marker, whose message id is the request's own identity
-// (fix.go's openFixRequest gives the same identity rule); "fix landed <mid>
-// sha <S>" is that request's own landing marker. ok is false when the
-// applied marker carries no such line 3 (this batch collected no fix
-// action), the request marker cannot be found, or the request has not
-// landed yet -- none of these are errors, only "not yet".
-func respondFixLandedSHA(ctx context.Context, t store.Ticket, d Deps, aid int64) (sha string, ok bool, err error) {
+// respondFixRequestRun reads a respond artifact's own "respond applied
+// <aid>" marker and returns the watermark its own line 3 ("fix request
+// after run <R>") names -- the request's own identity (fix.go's
+// openFixRequest gives the same identity rule to "fix requested threads
+// after run <R>"), shared by respondFixLandedSHA (design section 9.4) and
+// fixLandedReport (design section 9.4, M4 task 4). ok is false when the
+// applied marker cannot be found, or it carries no such line 3 (this
+// batch collected no fix action) -- neither is an error, only "not yet" or
+// "never".
+func respondFixRequestRun(ctx context.Context, t store.Ticket, d Deps, aid int64) (r int64, ok bool, err error) {
 	applied, found, err := d.Store.Marker(ctx, t.ID, fmt.Sprintf("respond applied %d", aid))
 	if err != nil {
-		return "", false, fmt.Errorf("job: shipping: respond applied marker: %w", err)
+		return 0, false, fmt.Errorf("job: shipping: respond applied marker: %w", err)
 	}
 	if !found {
-		return "", false, nil
+		return 0, false, nil
 	}
 	lines := strings.SplitN(applied.Body, "\n", 3)
 	if len(lines) < 3 {
-		return "", false, nil
+		return 0, false, nil
 	}
 	sub := respondAppliedFixRequestLine.FindStringSubmatch(lines[2])
 	if sub == nil {
-		return "", false, nil
+		return 0, false, nil
 	}
-	r, err := strconv.ParseInt(sub[1], 10, 64)
+	r, err = strconv.ParseInt(sub[1], 10, 64)
 	if err != nil {
-		return "", false, fmt.Errorf("job: shipping: parse %q: %w", lines[2], err)
+		return 0, false, fmt.Errorf("job: shipping: parse %q: %w", lines[2], err)
+	}
+	return r, true, nil
+}
+
+// respondFixLandedSHA is design section 9.4's own chain from a respond
+// artifact's own "respond applied <aid>" marker to the sha its collected
+// fix actions landed at: respondFixRequestRun's own watermark R;
+// "fix requested threads after run <R>" is that request's own marker,
+// whose message id is the request's own identity (fix.go's
+// openFixRequest gives the same identity rule); "fix landed <mid>
+// sha <S>" is that request's own landing marker. ok is false when
+// respondFixRequestRun itself is false, the request marker cannot be
+// found, or the request has not landed yet -- none of these are errors,
+// only "not yet".
+func respondFixLandedSHA(ctx context.Context, t store.Ticket, d Deps, aid int64) (sha string, ok bool, err error) {
+	r, found, err := respondFixRequestRun(ctx, t, d, aid)
+	if err != nil {
+		return "", false, err
+	}
+	if !found {
+		return "", false, nil
 	}
 
 	reqMarker, found, err := d.Store.Marker(ctx, t.ID, fmt.Sprintf("fix requested threads after run %d", r))
@@ -1452,6 +1472,41 @@ func respondFixLandedSHA(ctx context.Context, t store.Ticket, d Deps, aid int64)
 		}
 	}
 	return "", false, nil
+}
+
+// fixLandedReport returns the build report of the task-0 unit that landed
+// a respond artifact's own collected fix actions at sha (design section
+// 9.4, M4 task 4, the no-op reply's own source of truth): the first
+// report, in store order (Store.BuildReports' own ORDER BY artifacts.id),
+// whose TaskN is 0, whose RunID is newer than respondFixRequestRun's own
+// watermark R (the fix request's own run, never an earlier unit's), and
+// whose CommitSHA equals sha. ok is false when respondFixRequestRun
+// itself is false (this batch collected no fix action) or no report
+// matches -- fixReplies' own caller already knows the fix landed at sha
+// (fixRepliesPending), so "no report" never happens in practice, only in
+// a test driving fixReplies directly.
+func fixLandedReport(ctx context.Context, t store.Ticket, d Deps, aid int64, sha string) (response.BuildReport, bool, error) {
+	r, found, err := respondFixRequestRun(ctx, t, d, aid)
+	if err != nil {
+		return response.BuildReport{}, false, err
+	}
+	if !found {
+		return response.BuildReport{}, false, nil
+	}
+	reports, err := d.Store.BuildReports(ctx, t.ID)
+	if err != nil {
+		return response.BuildReport{}, false, fmt.Errorf("job: shipping: fix landed report: build reports: %w", err)
+	}
+	for i := range reports {
+		if reports[i].Report.TaskN != 0 || reports[i].RunID <= r {
+			continue
+		}
+		if reports[i].Report.CommitSHA == nil || *reports[i].Report.CommitSHA != sha {
+			continue
+		}
+		return reports[i].Report, true, nil
+	}
+	return response.BuildReport{}, false, nil
 }
 
 // fixRepliesPending is design section 8.5 row 1's own entry condition: the
@@ -1499,6 +1554,36 @@ func (h shipHandler) fixRepliesPending(ctx context.Context, t store.Ticket, d De
 	return store.RespondRow{}, "", false, nil
 }
 
+// fixReplyText is FIX-REPLIES' own per-batch reply text (design section
+// 9.4, M4 task 4, #37): fixLandedReport's own landed build report decides
+// which of the two wordings every one of this batch's fix threads gets. A
+// fix that changed no file at all (empty FilesChanged -- building.go's
+// land took its HEAD path) carries its own builder's reason instead of a
+// commit sha, since that sha would point at an old commit and hide the
+// reason. When no report is found, or it claims a changed file, the text
+// stays "Fixed in <sha7>." When the builder's own report text itself
+// trips replyBody's reserved marker check, the bare sentence stands alone
+// and a warning records why, rather than failing FIX-REPLIES outright.
+func fixReplyText(ctx context.Context, t store.Ticket, d Deps, login string, aid int64, sha string) (string, error) {
+	fixedText := fmt.Sprintf("Fixed in %s.", sha[:7])
+	report, found, err := fixLandedReport(ctx, t, d, aid, sha)
+	if err != nil {
+		return "", fmt.Errorf("job: shipping: fix replies: fix landed report: %w", err)
+	}
+	if !found || len(report.FilesChanged) > 0 {
+		return fixedText, nil
+	}
+	noop := "No code change was needed.\n\n" + report.Report
+	if _, bodyErr := replyBody(login, noop, ""); bodyErr != nil {
+		// Not a failed read: the builder's own report text tripped
+		// replyBody's reserved marker check, so the bare sentence is the
+		// designed fallback (design section 9.4), not an error.
+		slog.Warn("fix reply fell back to the bare no-op sentence", "ticket_id", t.ID, "aid", aid)
+		return "No code change was needed.", nil //nolint:nilerr // see the comment above
+	}
+	return noop, nil
+}
+
 // fixReplies is FIX-REPLIES (design section 9.4, POLL row 1 of 8.5): a's own
 // freshness check against the landed fix -- a.Respond.SHA must be an
 // ancestor of sha, and every one of a's own fix threads that still exists
@@ -1506,9 +1591,9 @@ func (h shipHandler) fixRepliesPending(ctx context.Context, t store.Ticket, d De
 // (respondStaleReason, the same shared helper APPLY's own freshness fence,
 // 9.3 step 1a, reuses) -- then, for each fix thread not resolved, with no
 // "<!-- zing:fixed a<aid> <tid> -->" marker from login yet
-// (ThreadCommentsContain pages every comment), replyBody(login, "Fixed in
-// <sha7>.", marker) -- every body built before the first write, 9.3 step
-// 1b's own rule, reused here too -- then resolve. Marker
+// (ThreadCommentsContain pages every comment), replyBody(login,
+// fixReplyText's own text, marker) -- every body built before the first
+// write, 9.3 step 1b's own rule, reused here too -- then resolve. Marker
 // "fix replies posted <aid>". A mismatch writes "respond batch <n> stale"
 // instead and posts nothing, same as 9.3 step 1a: the closing marker is
 // never written, so fixRepliesPending's own stale check retires this batch
@@ -1538,6 +1623,11 @@ func (h shipHandler) fixReplies(ctx context.Context, t store.Ticket, d Deps, pro
 		return respondStaleCommit(t, d, a.Respond.Batch, reason), nil
 	}
 
+	replyText, textErr := fixReplyText(ctx, t, d, login, a.ArtifactID, sha)
+	if textErr != nil {
+		return store.HandlerCommit{}, textErr
+	}
+
 	var replies []applyPendingReply
 	for _, id := range fixTIDs {
 		th, exists := byTID[id]
@@ -1545,7 +1635,7 @@ func (h shipHandler) fixReplies(ctx context.Context, t store.Ticket, d Deps, pro
 			continue
 		}
 		marker := fmt.Sprintf("<!-- zing:fixed a%d %s -->", a.ArtifactID, id)
-		body, bodyErr := replyBody(login, fmt.Sprintf("Fixed in %s.", sha[:7]), marker)
+		body, bodyErr := replyBody(login, replyText, marker)
 		if bodyErr != nil {
 			return store.HandlerCommit{}, fmt.Errorf("job: shipping: fix replies: reply body: %w", bodyErr)
 		}
