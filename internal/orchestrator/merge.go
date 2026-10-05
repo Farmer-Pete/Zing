@@ -336,6 +336,82 @@ func fileHasConflictMarkers(root *os.Root, path string) (bool, error) {
 	}
 }
 
+// StageResult sorts StageResolvedPaths' own unmerged paths into three
+// disjoint, sorted sets.
+type StageResult struct {
+	// Staged is every unmerged path that held no conflict marker and was
+	// not binary: StageResolvedPaths ran "git add -u" on these.
+	Staged []string
+	// Marked is every unmerged path whose working-tree file still has a
+	// conflict marker line. Left unstaged.
+	Marked []string
+	// Binary is every unmerged path fileLooksBinary reported binary. Left
+	// unstaged: a binary conflict's file never carries a text marker an
+	// agent could clear.
+	Binary []string
+}
+
+// StageResolvedPaths reads the index's own unmerged paths and sorts each one
+// into res.Binary (fileLooksBinary), res.Marked (fileHasConflictMarkers, the
+// same marker scan ConflictMarkerPaths uses), or res.Staged (neither). It
+// then runs "git add -u" on res.Staged, so a conflict the merge agent
+// resolved in the working tree but never told git about reaches CHECK
+// staged, exactly as CommitMerge's own "git add -u" would stage it at
+// commit time. It is an error when no merge is in progress.
+func (o *Orchestrator) StageResolvedPaths(ctx context.Context, wt Worktree) (StageResult, error) {
+	if err := o.revalidate(ctx, wt); err != nil {
+		return StageResult{}, fmt.Errorf("orchestrator: stage resolved paths: %w", err)
+	}
+	inProgress, err := o.mergeInProgress(ctx, wt)
+	if err != nil {
+		return StageResult{}, fmt.Errorf("orchestrator: stage resolved paths: %w", err)
+	}
+	if !inProgress {
+		return StageResult{}, errors.New("orchestrator: stage resolved paths: no merge in progress")
+	}
+
+	unmerged, err := o.unmergedIndexPaths(ctx, wt)
+	if err != nil {
+		return StageResult{}, fmt.Errorf("orchestrator: stage resolved paths: %w", err)
+	}
+
+	root, err := os.OpenRoot(wt.dir)
+	if err != nil {
+		return StageResult{}, fmt.Errorf("orchestrator: stage resolved paths: %w", err)
+	}
+	defer root.Close()
+
+	res := StageResult{Staged: make([]string, 0), Marked: make([]string, 0), Binary: make([]string, 0)}
+	for _, p := range unmerged {
+		binary, binErr := fileLooksBinary(root, p)
+		if binErr != nil {
+			return StageResult{}, fmt.Errorf("orchestrator: stage resolved paths: %s: %w", p, binErr)
+		}
+		if binary {
+			res.Binary = append(res.Binary, p)
+			continue
+		}
+		marked, markErr := fileHasConflictMarkers(root, p)
+		if markErr != nil {
+			return StageResult{}, fmt.Errorf("orchestrator: stage resolved paths: %s: %w", p, markErr)
+		}
+		if marked {
+			res.Marked = append(res.Marked, p)
+			continue
+		}
+		res.Staged = append(res.Staged, p)
+	}
+
+	if len(res.Staged) > 0 {
+		litRun := execRunner{extraEnv: literalPathspecEnv, drivers: wt.drivers}
+		if err := runPathspecCommand(ctx, litRun, wt.dir, res.Staged, "add", "-u"); err != nil {
+			return StageResult{}, fmt.Errorf("orchestrator: stage resolved paths: %w", err)
+		}
+	}
+
+	return res, nil
+}
+
 // MergeSidePaths returns, sorted, every path that differs between HEAD
 // and MERGE_HEAD: the set a merge may legitimately change. It is an error
 // when no merge is in progress.

@@ -537,6 +537,84 @@ func TestMergeResolvesConflictEndToEnd(t *testing.T) {
 	}
 }
 
+// TestMergeUnstagedResolutionWithFixCommandLands is TestMergeResolvesConflictEndToEnd
+// with a fix command set on the project: the fake merge agent resolves
+// hello.txt's conflict in the working tree (mergeAgentFS's own
+// build/merge/1.tree/hello.txt, written with no git call at all), leaving
+// the path unmerged (status "UU") in the index. Before the fix in
+// internal/orchestrator/merge.go and internal/job/merge.go, runCheckCommands'
+// own fix-snapshot ChangedPaths call rejected that UU path and
+// mergeCommandInfraEscalation turned it into an "environment" escalation
+// naming "the project commands could not run" -- mergeRunTick would fail the
+// test right there. After the fix, mergeCheck stages the marker-free path
+// before CHECK runs, so the merge still lands within 4 ticks with no
+// escalation.
+func TestMergeUnstagedResolutionWithFixCommandLands(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow end-to-end flow; runs in the full suite")
+	}
+	t.Parallel()
+	s, ticket, remoteDir := shipTicketReady(t)
+	baseSHA := mergeCommitOnMain(t, s, ticket, "hello.txt", []byte(mergeHelloConflict))
+
+	gh := &shipGitHub{}
+	tr := &shipTracker{}
+	rt := runtime.NewFake(mergeAgentFS())
+
+	ticket = mergeDirtyAfterPublish(t, s, ticket, rt, gh, tr)
+	preMergeHead := gh.prState.HeadSHA
+
+	var deps Deps
+	landed := false
+	var last store.HandlerCommit
+	for i := 0; i < 4 && !landed; i++ {
+		deps = shipClaim(t, s, rt, ticket.ID, gh, tr)
+		proj := deps.Projects[ticket.ProjectID]
+		proj.FixCmd = pbNoopShellCmd
+		deps.Projects[ticket.ProjectID] = proj
+		ticket, last = mergeRunTick(t, s, deps, ticket, fmt.Sprintf("tick %d", i))
+		landed = shipHasMergeLanded(last)
+	}
+	if !landed {
+		t.Fatal("base merge did not land within 4 ticks")
+	}
+
+	proj := deps.Projects[ticket.ProjectID]
+	wt, _, err := proj.Orch.EnsureWorktree(t.Context(), ticket.ID, ticket.Title)
+	if err != nil {
+		t.Fatalf("EnsureWorktree: %v", err)
+	}
+	mergeSHA := shipHeadSHA(t, s, ticket)
+
+	parents, err := proj.Orch.CommitParents(t.Context(), wt, mergeSHA)
+	if err != nil {
+		t.Fatalf("CommitParents: %v", err)
+	}
+	if len(parents) != 2 || parents[0] != preMergeHead || parents[1] != baseSHA {
+		t.Errorf("CommitParents(%s) = %v, want [%s %s]", mergeSHA, parents, preMergeHead, baseSHA)
+	}
+
+	signed, err := proj.Orch.SignedStatus(t.Context(), wt, mergeSHA)
+	if err != nil {
+		t.Fatalf("SignedStatus: %v", err)
+	}
+	if !signed {
+		t.Error("SignedStatus(merge commit) = false, want true")
+	}
+
+	gh.prState.HeadSHA = preMergeHead
+	deps = shipClaim(t, s, rt, ticket.ID, gh, tr)
+	ticket, _ = mergeRunTick(t, s, deps, ticket, "final POLL: push")
+
+	out, err := gitfixture.Git(t.Context(), remoteDir, "rev-parse", "refs/heads/"+*ticket.Branch)
+	if err != nil {
+		t.Fatalf("git rev-parse refs/heads/%s in origin: %v", *ticket.Branch, err)
+	}
+	if got := strings.TrimSpace(string(out)); got != mergeSHA {
+		t.Errorf("origin's %s = %s, want the merge sha %s", *ticket.Branch, got, mergeSHA)
+	}
+}
+
 // ---- task 6: mergeCheck's own no-run branch, the outside-the-merge read,
 // and the check_loops/max_resumes gates --------------------------------
 
