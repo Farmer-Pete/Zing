@@ -520,6 +520,52 @@ export function sendResultWithUnsent(text, unsent, stale = 0) {
 	return base;
 }
 
+/**
+ * sendTargets decides what console.js's Cmd+Enter should send and whether it
+ * must ask first (ticket #43, cause 1: POST /send carried only the ticket,
+ * so a send scoped to nothing went out against every draft on the ticket,
+ * including one typed and forgotten on another question earlier in the
+ * page's life). questions is console.js's collectSendQuestions() over every
+ * "#main .q": one descriptor per open question, in document order, with
+ * hasDraft true when it has unsent reply text or a picked chip/item, and
+ * conflicted true when console.js's conflictedBoxes (task 5) holds its reply
+ * box's key. A conflicted question is dropped even when it also has a
+ * draft, since the owner has not yet typed over the "changed in another
+ * tab" note and sending it would send the other tab's text.
+ *
+ * confirm is true whenever ids is non-empty and is not exactly the single
+ * focused question: sending only what the owner is looking at needs no
+ * prompt, but sending anything beyond that -- including a second question
+ * when nothing has focus -- must list what is about to go out first (Q3).
+ *
+ * @param {{id: number, key: string, hasDraft: boolean, conflicted: boolean}[]} questions
+ * @param {number|null} focusedID - the open question's id the owner is
+ *   looking at, or null when none has focus
+ * @returns {{ids: number[], keys: string[], confirm: boolean}}
+ */
+export function sendTargets(questions, focusedID) {
+	const targets = (questions ?? []).filter((q) => q.hasDraft && !q.conflicted);
+	const ids = targets.map((q) => q.id);
+	const keys = targets.map((q) => q.key);
+	const confirm = ids.length > 0 && !(ids.length === 1 && ids[0] === focusedID);
+	return { ids, keys, confirm };
+}
+
+/**
+ * sendConfirmText writes openSendConfirm's dialog line naming the questions
+ * a Cmd+Enter is about to send (Q3: "Send 3 replies on Q6, Q7, Q9?"), given
+ * sendTargets' own keys in the same order.
+ *
+ * @param {string[]} keys
+ * @returns {string}
+ */
+export function sendConfirmText(keys) {
+	if (keys.length === 1) {
+		return `Send 1 reply on ${keys[0]}?`;
+	}
+	return `Send ${keys.length} replies on ${keys.join(', ')}?`;
+}
+
 // AUTOSAVE_DEBOUNCE_MS is how long installReplyAutosave (console.js) waits
 // after the owner's last keystroke in a reply box before posting it as a
 // draft (design: "A Reply box autosaves one second after the owner stops

@@ -32,6 +32,8 @@ import {
 	unsavedReplyBody,
 	unsavedReplyBodies,
 	sendResultWithUnsent,
+	sendTargets,
+	sendConfirmText,
 	AUTOSAVE_DEBOUNCE_MS,
 	replyAutosaveBody,
 	emptiedReplyBodies,
@@ -547,21 +549,139 @@ function showSendResult(text) {
 	);
 }
 
-// sendBatch handles the send chord (design section 6.4, 6.7): POST /send
-// against the ticket this module's own nav state already tracks, then
-// shows its plain-text result (sendResultText, answer.go) via
-// showSendResult -- "Sent N answer(s)." on 200, or the 409 body ("Nothing
-// to send.") otherwise -- so Cmd+Enter is never silent.
+// collectSendQuestions reads every open question under #main (design
+// section 6.4, 6.7, ticket #43) into the plain descriptors sendTargets
+// decides over: id and key off the question's own data-focus-id and
+// .q-key, hasDraft true when its reply box holds text or it carries a
+// picked chip or item decision (both render ".picked[data-draft-question]",
+// optionChips' pickToggleExpr and itemRow's own), and conflicted always
+// false here -- task 5's conflictedBoxes gives this field meaning once a
+// reply box can be held back after a stale "changed in another tab" save.
+function collectSendQuestions() {
+	return Array.from(document.querySelectorAll('#main .q[data-focus-id^="question:"]')).map((q) => {
+		const id = Number(q.getAttribute('data-focus-id').slice('question:'.length));
+		const key = q.querySelector('.q-key')?.textContent ?? '';
+		const replyInput = q.querySelector('.reply-input');
+		const hasReply = Boolean(replyInput && replyInput.value !== '');
+		const hasPick = Boolean(q.querySelector('.picked[data-draft-question]'));
+		return { id, key, hasDraft: hasReply || hasPick, conflicted: false };
+	});
+}
+
+// focusedQuestionID names the question sendTargets treats as "what the
+// owner is looking at" (ticket #43): the reply box or chip/item they are
+// typing or clicking in, via its closest .q, takes priority over
+// state.focusedID, since a mouse click into a reply box does not move
+// state.focusedID (only j/k do). Falling back to state.focusedID covers a
+// Cmd+Enter fired right after a j/k focus move with nothing yet clicked
+// inside the question. Null when neither names an open question.
+function focusedQuestionID() {
+	const q = document.activeElement?.closest?.('.q');
+	const id = q ? q.getAttribute('data-focus-id') : state.focusedID;
+	return id?.startsWith('question:') ? Number(id.slice('question:'.length)) : null;
+}
+
+// openSendConfirm is Cmd+Enter's in-page confirm dialog (ticket #43, Q3:
+// never window.confirm, since a native dialog blocks the page and any
+// browser automation driving the console, and the owner often answers
+// several questions in one send). Built and appended to document.body on
+// each open, the same placement buildHelpOverlay above uses, and torn back
+// down on either resolution rather than kept around like that overlay's own
+// singleton. A capture-phase keydown listener on document means Enter and
+// Escape resolve the dialog before onKeyDown's own dispatch ever sees them
+// (preventDefault and stopPropagation on both); a second Cmd+Enter while the
+// dialog is open is itself an Enter keypress, so it confirms. Cancel -- by
+// Escape, its own button, or nothing at all -- returns focus to whatever had
+// it before the dialog opened, almost always the reply box the owner was
+// typing in.
+function openSendConfirm(ticket, ids, keys) {
+	const previouslyFocused = document.activeElement;
+	const dialog = document.createElement('div');
+	dialog.id = 'send-confirm';
+	dialog.setAttribute('role', 'dialog');
+	dialog.setAttribute('aria-modal', 'true');
+
+	const message = document.createElement('p');
+	message.textContent = sendConfirmText(keys);
+	dialog.appendChild(message);
+
+	const list = document.createElement('ul');
+	for (const key of keys) {
+		const item = document.createElement('li');
+		item.textContent = key;
+		list.appendChild(item);
+	}
+	dialog.appendChild(list);
+
+	const sendButton = document.createElement('button');
+	sendButton.type = 'button';
+	sendButton.textContent = 'Send';
+	const cancelButton = document.createElement('button');
+	cancelButton.type = 'button';
+	cancelButton.textContent = 'Cancel';
+	dialog.appendChild(sendButton);
+	dialog.appendChild(cancelButton);
+
+	function cleanup() {
+		document.removeEventListener('keydown', onKeyDown, true);
+		dialog.remove();
+	}
+	function confirmSend() {
+		cleanup();
+		postSendBatch(ticket, ids);
+	}
+	function cancel() {
+		cleanup();
+		previouslyFocused?.focus?.();
+	}
+	function onKeyDown(event) {
+		if (event.key === 'Enter') {
+			event.preventDefault();
+			event.stopPropagation();
+			confirmSend();
+		} else if (event.key === 'Escape') {
+			event.preventDefault();
+			event.stopPropagation();
+			cancel();
+		}
+	}
+	sendButton.addEventListener('click', confirmSend);
+	cancelButton.addEventListener('click', cancel);
+	document.addEventListener('keydown', onKeyDown, true);
+	document.body.appendChild(dialog);
+	sendButton.focus();
+}
+
+// sendBatch handles the send chord (design section 6.4, 6.7, ticket #43):
+// decides what Cmd+Enter would actually send (collectSendQuestions feeding
+// sendTargets), then either sends straight away, when the targets are
+// exactly the focused question, asks first with openSendConfirm's in-page
+// dialog otherwise, or -- with nothing to send -- says so and posts
+// nothing.
 //
-// Every "#main .reply-input" holding unsaved text is saved first
-// (unsavedReplyBodies), not just whichever one has focus (bug fix, Q11: the
-// owner's note was in a box that had lost focus, and the old focused-only
-// save left it behind while the send still reported success).
+// Every "#main .reply-input" holding unsaved text is still saved first
+// (unsavedReplyBodies, inside postSendBatchLocked), not just whichever one
+// has focus (bug fix, Q11: the owner's note was in a box that had lost
+// focus, and the old focused-only save left it behind while the send still
+// reported success); every box with text is now listed in the confirm
+// dialog first, rather than sent silently alongside whatever question has
+// focus (cause 1 of ticket #43: a send named only the ticket, so a draft
+// typed and forgotten on another question went out unseen).
 function sendBatch() {
 	if (!state.nav.open) {
 		return false;
 	}
-	postSendBatch(state.nav.open);
+	const ticket = state.nav.open;
+	const { ids, keys, confirm } = sendTargets(collectSendQuestions(), focusedQuestionID());
+	if (ids.length === 0) {
+		showSendResult('Nothing to send. Pick an option or type a reply first.');
+		return true;
+	}
+	if (!confirm) {
+		postSendBatch(ticket, ids);
+		return true;
+	}
+	openSendConfirm(ticket, ids, keys);
 	return true;
 }
 
@@ -785,17 +905,17 @@ function rearmAutosaves() {
 // why scheduleReplyAutosave must not arm a new timer during this window, and
 // rearmAutosaves' own comment for why the finally block re-arms every box
 // that window left unsaved.
-async function postSendBatch(ticket) {
+async function postSendBatch(ticket, questions) {
 	sendBatchInFlight = true;
 	try {
-		await postSendBatchLocked(ticket);
+		await postSendBatchLocked(ticket, questions);
 	} finally {
 		sendBatchInFlight = false;
 		rearmAutosaves();
 	}
 }
 
-async function postSendBatchLocked(ticket) {
+async function postSendBatchLocked(ticket, questions) {
 	cancelAutosaves();
 	// A timer that had already fired before cancelAutosaves ran is no
 	// longer in autosaveTimers for it to cancel -- it is already awaiting
@@ -848,7 +968,7 @@ async function postSendBatchLocked(ticket) {
 		const resp = await fetch('/send', {
 			method: 'POST',
 			headers: { 'Content-Type': 'application/json', 'Datastar-Request': 'true' },
-			body: JSON.stringify({ ticket }),
+			body: JSON.stringify({ ticket, questions }),
 		});
 		const text = await resp.text();
 		showSendResult(sendResultWithUnsent(text, failed.length, stale.length));
