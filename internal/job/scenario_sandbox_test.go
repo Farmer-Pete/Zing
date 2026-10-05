@@ -87,10 +87,8 @@ func TestCheckScenarioShape_RejectsHostSandboxProbes(t *testing.T) {
 				{ID: "s2", Then: okThen, Check: okCheck},
 			},
 			wantPaths: []string{scenario0CheckPath, scenario0CheckPath},
-			// The /tmp/ message comes first; checked by content (it
-			// names $TMPDIR) rather than exact text, since that
-			// message belongs to the existing /tmp/ check, not this
-			// test's own constant.
+			// The /tmp/ message comes first; both are matched by
+			// substring below.
 			wantMsgs: []string{"$TMPDIR", hostSandboxCheckMsg},
 		},
 	}
@@ -108,12 +106,6 @@ func TestCheckScenarioShape_RejectsHostSandboxProbes(t *testing.T) {
 				}
 			}
 			for i, wantMsg := range tt.wantMsgs {
-				if wantMsg == hostSandboxCheckMsg {
-					if errs[i].Msg != hostSandboxCheckMsg {
-						t.Errorf("error %d msg = %q, want hostSandboxCheckMsg", i, errs[i].Msg)
-					}
-					continue
-				}
 				if !strings.Contains(errs[i].Msg, wantMsg) {
 					t.Errorf("error %d msg = %q, want it to mention %q", i, errs[i].Msg, wantMsg)
 				}

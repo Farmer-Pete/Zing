@@ -29,6 +29,10 @@ const (
 	// wantCodexJudgeTimeoutArg is codexCommandTimeoutKey=codexJudgeCommandTimeout
 	// in milliseconds, the exact "-c" value a judge request's argv carries.
 	wantCodexJudgeTimeoutArg = "background_terminal_max_timeout=600000"
+	// wantCodexJudgeSkillsOffArg is codexSkillsOffSetting written out as a
+	// literal, so this file pins the exact argv independently of
+	// codex.go's own constant.
+	wantCodexJudgeSkillsOffArg = "features.skip_host_skill_discovery=true"
 )
 
 // judgeOkResultXML is a minimal, valid response.JudgeResponse "ok" document
@@ -851,7 +855,7 @@ func TestCodexArgvFullAccessOnlyWithPrefix(t *testing.T) {
 
 		argv := readArgv(t, dir)
 		outPath := outfileFromArgv(t, argv)
-		want := wantCodexArgv(outPath, []string{"-s", "danger-full-access", "-c", wantCodexJudgeTimeoutArg, "-c", codexSkillsOffSetting}, []string{"-"})
+		want := wantCodexArgv(outPath, []string{"-s", "danger-full-access", "-c", wantCodexJudgeTimeoutArg, "-c", wantCodexJudgeSkillsOffArg}, []string{"-"})
 		if !slices.Equal(argv, want) {
 			t.Errorf("argv =\n%v\nwant\n%v", argv, want)
 		}
@@ -870,7 +874,7 @@ func TestCodexArgvFullAccessOnlyWithPrefix(t *testing.T) {
 
 		argv := readArgv(t, dir)
 		outPath := outfileFromArgv(t, argv)
-		want := wantCodexArgv(outPath, []string{"-c", `sandbox_mode="danger-full-access"`, "-c", wantCodexJudgeTimeoutArg, "-c", codexSkillsOffSetting}, []string{"resume", testCodexResumeID, "-"})
+		want := wantCodexArgv(outPath, []string{"-c", `sandbox_mode="danger-full-access"`, "-c", wantCodexJudgeTimeoutArg, "-c", wantCodexJudgeSkillsOffArg}, []string{"resume", testCodexResumeID, "-"})
 		if !slices.Equal(argv, want) {
 			t.Errorf("argv =\n%v\nwant\n%v", argv, want)
 		}
@@ -904,11 +908,11 @@ func TestCodexJudgeArgsOnlyForJudge(t *testing.T) {
 			}
 
 			argv := readArgv(t, dir)
-			if !slices.Contains(argv, wantCodexJudgeTimeoutArg) {
-				t.Errorf("argv = %v, want it to contain -c %q", argv, wantCodexJudgeTimeoutArg)
-			}
-			if !slices.Contains(argv, codexSkillsOffSetting) {
-				t.Errorf("argv = %v, want it to contain -c %q", argv, codexSkillsOffSetting)
+			for _, value := range []string{wantCodexJudgeTimeoutArg, wantCodexJudgeSkillsOffArg} {
+				idx := slices.Index(argv, value)
+				if idx < 1 || argv[idx-1] != "-c" {
+					t.Errorf("argv = %v, want \"-c\" %q", argv, value)
+				}
 			}
 		})
 	}
@@ -999,7 +1003,7 @@ func TestCodexHonorsExecPrefix(t *testing.T) {
 
 	argv := readArgv(t, dir)
 	outPath := outfileFromArgv(t, argv)
-	want := wantCodexArgv(outPath, []string{"-s", "danger-full-access", "-c", wantCodexJudgeTimeoutArg, "-c", codexSkillsOffSetting}, []string{"-"})
+	want := wantCodexArgv(outPath, []string{"-s", "danger-full-access", "-c", wantCodexJudgeTimeoutArg, "-c", wantCodexJudgeSkillsOffArg}, []string{"-"})
 	if !slices.Equal(argv, want) {
 		t.Errorf("argv (after the prefix) =\n%v\nwant\n%v", argv, want)
 	}
