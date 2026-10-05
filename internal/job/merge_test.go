@@ -432,8 +432,8 @@ func mergeCommitOnMain(t *testing.T, s *store.Store, ticket store.Ticket, path s
 // shipHasMergeLanded reports whether c.Messages carries a "base merge
 // landed " marker.
 func shipHasMergeLanded(c store.HandlerCommit) bool {
-	for _, m := range c.Messages {
-		if strings.HasPrefix(m.Body, "base merge landed ") {
+	for i := range c.Messages {
+		if strings.HasPrefix(c.Messages[i].Body, "base merge landed ") {
 			return true
 		}
 	}
