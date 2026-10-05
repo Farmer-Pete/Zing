@@ -360,20 +360,211 @@ func inboxHasTicket(items []InboxItem, ticketID int64) bool {
 	return false
 }
 
-func TestTicketsByProject_OrderedByTrackerRefThenID(t *testing.T) {
+// TestLiveTickets_PlanningTicketWithNothingUnreadIsListed proves the
+// sidebar's new read picks up a quiet, non-terminal ticket that
+// InboxItems' blocking-or-unread filter would leave out (ticket, #106 bug
+// 4): a planning ticket with no messages at all still shows somewhere a
+// mouse can reach.
+func TestLiveTickets_PlanningTicketWithNothingUnreadIsListed(t *testing.T) {
+	t.Parallel()
+	s := newTestStore(t)
+	projectID := seedProjectNamed(t, s, testProjectAlpha)
+
+	ticketID, err := s.InsertTicket(t.Context(), Ticket{ProjectID: projectID, TrackerRef: "planning1", Title: "t planning1", State: ticketStateQueued})
+	if err != nil {
+		t.Fatalf("InsertTicket: %v", err)
+	}
+	setTicketState(t, s, ticketID, testStatePlanning)
+
+	terminal := []string{testStateDone, testStateEscalated, testStateAbandoned}
+	got, err := s.LiveTickets(t.Context(), terminal)
+	if err != nil {
+		t.Fatalf("LiveTickets: %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("LiveTickets returned %d tickets, want 1: %+v", len(got), got)
+	}
+	if got[0].Ticket.ID != ticketID {
+		t.Errorf("LiveTickets[0].Ticket.ID = %d, want %d", got[0].Ticket.ID, ticketID)
+	}
+	if got[0].Unread {
+		t.Error("LiveTickets[0].Unread = true, want false for a ticket with no messages")
+	}
+	if got[0].OpenQuestionCount != 0 {
+		t.Errorf("LiveTickets[0].OpenQuestionCount = %d, want 0", got[0].OpenQuestionCount)
+	}
+	if got[0].Ticket.WaitingOn != nil {
+		t.Errorf("LiveTickets[0].Ticket.WaitingOn = %v, want nil", got[0].Ticket.WaitingOn)
+	}
+}
+
+// TestLiveTickets_ExcludesTerminalUnlessBlocking proves LiveTickets' own
+// membership rule: a terminal ticket is excluded unless it is blocking, and
+// every ticket is included when terminal is nil.
+func TestLiveTickets_ExcludesTerminalUnlessBlocking(t *testing.T) {
+	t.Parallel()
+	s := newTestStore(t)
+	projectID := seedProjectNamed(t, s, testProjectAlpha)
+
+	done, err := s.InsertTicket(t.Context(), Ticket{ProjectID: projectID, TrackerRef: "done1", Title: "t done1", State: ticketStateQueued})
+	if err != nil {
+		t.Fatalf("InsertTicket(done): %v", err)
+	}
+	insertZingUpdate(t, s, done)
+	setTicketState(t, s, done, testStateDone)
+
+	escalated := insertWaitingTicket(t, s, projectID, "escalated1")
+	setTicketState(t, s, escalated, testStateEscalated)
+
+	queued, err := s.InsertTicket(t.Context(), Ticket{ProjectID: projectID, TrackerRef: "queued1", Title: "t queued1", State: ticketStateQueued})
+	if err != nil {
+		t.Fatalf("InsertTicket(queued): %v", err)
+	}
+
+	terminal := []string{testStateDone, testStateEscalated, testStateAbandoned}
+	got, err := s.LiveTickets(t.Context(), terminal)
+	if err != nil {
+		t.Fatalf("LiveTickets(terminal): %v", err)
+	}
+	if liveHasTicket(got, done) {
+		t.Errorf("LiveTickets(terminal) includes the done ticket %d: %+v", done, got)
+	}
+	if !liveHasTicket(got, escalated) {
+		t.Errorf("LiveTickets(terminal) excludes the blocking escalated ticket %d: %+v", escalated, got)
+	}
+	if !liveHasTicket(got, queued) {
+		t.Errorf("LiveTickets(terminal) excludes the queued ticket %d: %+v", queued, got)
+	}
+
+	gotAll, err := s.LiveTickets(t.Context(), nil)
+	if err != nil {
+		t.Fatalf("LiveTickets(nil): %v", err)
+	}
+	for _, id := range []int64{done, escalated, queued} {
+		if !liveHasTicket(gotAll, id) {
+			t.Errorf("LiveTickets(nil) excludes ticket %d: %+v", id, gotAll)
+		}
+	}
+}
+
+// TestLiveTickets_OrdersBlockingThenUnreadThenIssueNumber proves
+// LiveTickets' full ordering: blocking first, then unread, then quiet, each
+// by issueNumberOrder -- numeric refs of any length sorted correctly, then
+// non-numeric refs as text. It also proves the variadic extra destinations
+// land correctly: the blocking ticket's OpenQuestionCount matches its open
+// question rows.
+func TestLiveTickets_OrdersBlockingThenUnreadThenIssueNumber(t *testing.T) {
+	t.Parallel()
+	s := newTestStore(t)
+	projectID := seedProjectNamed(t, s, testProjectAlpha)
+
+	mkQuiet := func(ref string) int64 {
+		id, err := s.InsertTicket(t.Context(), Ticket{ProjectID: projectID, TrackerRef: ref, Title: "t " + ref, State: ticketStateQueued})
+		if err != nil {
+			t.Fatalf("InsertTicket(%s): %v", ref, err)
+		}
+		return id
+	}
+
+	mkQuiet("102")
+	mkQuiet("65")
+	unread := mkQuiet("9")
+	insertZingUpdate(t, s, unread)
+	blocking := insertWaitingTicket(t, s, projectID, "200")
+	insertQuestionWithBody(t, s, blocking, "Q1", "Question one", questionStateOpen)
+	insertQuestionWithBody(t, s, blocking, "Q2", "Question two", questionStateOpen)
+	mkQuiet("100000000000000000001")
+	mkQuiet("99999999999999999999")
+	mkQuiet("007")
+	const nonNumericRef = "abc"
+	mkQuiet(nonNumericRef)
+	// nonNumericBeforeDigits sorts before every digit string in plain text
+	// order ('#' < '0' in ASCII), which exercises issueNumberOrder's
+	// numeric-refs-first partition: without it, this ref would otherwise
+	// sort before every numeric ref instead of after all of them.
+	const nonNumericBeforeDigits = "#5"
+	mkQuiet(nonNumericBeforeDigits)
+
+	terminal := []string{testStateDone, testStateEscalated, testStateAbandoned}
+	got, err := s.LiveTickets(t.Context(), terminal)
+	if err != nil {
+		t.Fatalf("LiveTickets: %v", err)
+	}
+	wantRefs := []string{"200", "9", "007", "65", "102", "99999999999999999999", "100000000000000000001", nonNumericBeforeDigits, nonNumericRef}
+	if len(got) != len(wantRefs) {
+		t.Fatalf("LiveTickets returned %d tickets, want %d: %+v", len(got), len(wantRefs), got)
+	}
+	for i, want := range wantRefs {
+		if got[i].Ticket.TrackerRef != want {
+			t.Errorf("LiveTickets[%d].Ticket.TrackerRef = %q, want %q", i, got[i].Ticket.TrackerRef, want)
+		}
+	}
+	if got[0].OpenQuestionCount != 2 {
+		t.Errorf("LiveTickets[0] (ref 200) OpenQuestionCount = %d, want 2", got[0].OpenQuestionCount)
+	}
+}
+
+// TestLiveTickets_TiesOnNormalizedRefBreakByID proves that two refs
+// normalizing to the same stripped digit string (here "007" and "7", both
+// stripping to "7") tie all the way through issueNumberOrder's numeric
+// columns and fall through to ticket id, rather than falling back to
+// comparing the raw, zero-padded ref text.
+func TestLiveTickets_TiesOnNormalizedRefBreakByID(t *testing.T) {
+	t.Parallel()
+	s := newTestStore(t)
+	projectID := seedProjectNamed(t, s, testProjectAlpha)
+
+	mkQuiet := func(ref string) int64 {
+		id, err := s.InsertTicket(t.Context(), Ticket{ProjectID: projectID, TrackerRef: ref, Title: "t " + ref, State: ticketStateQueued})
+		if err != nil {
+			t.Fatalf("InsertTicket(%s): %v", ref, err)
+		}
+		return id
+	}
+
+	first := mkQuiet("7")
+	second := mkQuiet("007")
+
+	got, err := s.LiveTickets(t.Context(), nil)
+	if err != nil {
+		t.Fatalf("LiveTickets: %v", err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("LiveTickets returned %d tickets, want 2: %+v", len(got), got)
+	}
+	if got[0].Ticket.ID != first || got[1].Ticket.ID != second {
+		t.Errorf("LiveTickets order = [%d, %d], want [%d, %d] (lower id first)",
+			got[0].Ticket.ID, got[1].Ticket.ID, first, second)
+	}
+}
+
+// liveHasTicket reports whether items contains ticketID.
+func liveHasTicket(items []LiveTicket, ticketID int64) bool {
+	for i := range items {
+		if items[i].Ticket.ID == ticketID {
+			return true
+		}
+	}
+	return false
+}
+
+// TestTicketsByProject_OrderedByIssueNumberThenID proves TicketsByProject
+// orders by issueNumberOrder (Task 3), not by tracker_ref as text: refs 10,
+// 2, 31 come back as 2, 10, 31, not the text order 10, 2, 31.
+func TestTicketsByProject_OrderedByIssueNumberThenID(t *testing.T) {
 	t.Parallel()
 	s := newTestStore(t)
 	projectAID := seedProjectNamed(t, s, testProjectAlpha)
 	projectBID := seedProjectNamed(t, s, testProjectBeta)
 
 	refs := []string{"10", "2", "31"}
-	ids := make([]int64, 0, len(refs))
+	ids := make(map[string]int64, len(refs))
 	for _, ref := range refs {
 		id, err := s.InsertTicket(t.Context(), Ticket{ProjectID: projectAID, TrackerRef: ref, Title: "t", State: ticketStateQueued})
 		if err != nil {
 			t.Fatalf("InsertTicket(%s): %v", ref, err)
 		}
-		ids = append(ids, id)
+		ids[ref] = id
 	}
 	other, err := s.InsertTicket(t.Context(), Ticket{ProjectID: projectBID, TrackerRef: "1", Title: "other project", State: ticketStateQueued})
 	if err != nil {
@@ -384,14 +575,13 @@ func TestTicketsByProject_OrderedByTrackerRefThenID(t *testing.T) {
 	if err != nil {
 		t.Fatalf("TicketsByProject: %v", err)
 	}
-	// tracker_ref sorts as TEXT: "10" < "2" < "31".
-	wantOrder := []int64{ids[0], ids[1], ids[2]}
-	if len(got) != len(wantOrder) {
-		t.Fatalf("TicketsByProject returned %d tickets, want %d", len(got), len(wantOrder))
+	wantRefs := []string{"2", "10", "31"}
+	if len(got) != len(wantRefs) {
+		t.Fatalf("TicketsByProject returned %d tickets, want %d", len(got), len(wantRefs))
 	}
-	for i, w := range wantOrder {
-		if got[i].ID != w {
-			t.Errorf("TicketsByProject[%d].ID = %d, want %d (tracker_ref %q)", i, got[i].ID, w, refs[i])
+	for i, ref := range wantRefs {
+		if got[i].ID != ids[ref] {
+			t.Errorf("TicketsByProject[%d].ID = %d, want %d (tracker_ref %q)", i, got[i].ID, ids[ref], ref)
 		}
 	}
 	for _, item := range got {

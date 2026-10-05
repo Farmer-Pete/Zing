@@ -88,14 +88,23 @@ templ palette() {
 		* { box-sizing: border-box; }
 		body {
 			margin: 0;
+			height: 100vh;
+			display: flex;
+			flex-direction: column;
 			background: var(--zing-bg);
 			color: var(--zing-text);
 			font: 14px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
 		}
+		#alerts { flex: none; }
+		/* The columns scroll on their own (#nav/#main/#rail's overflow-y:
+		   auto below); the page itself never scrolls vertically, so the
+		   sidebar stays on screen through a thread of any length. */
 		.layout {
 			display: grid;
 			grid-template-columns: 18rem 1fr 18rem;
-			min-height: 100vh;
+			grid-template-rows: minmax(0, 1fr);
+			flex: 1;
+			min-height: 0;
 		}
 		/* #alerts (design section 6a, D8): a live strip above .layout, empty
 		   (and so invisible, no border/padding to show) when there are no
@@ -221,6 +230,17 @@ templ palette() {
 			display: flex;
 			align-items: center;
 			gap: 0.5rem;
+		}
+		a.ticket-row, a.ib-thread-row {
+			color: inherit;
+			text-decoration: none;
+			cursor: pointer;
+		}
+		a.ticket-row:hover {
+			border-color: var(--zing-accent);
+		}
+		a.ib-thread-row:hover {
+			color: var(--zing-accent);
 		}
 		.ib-q {
 			margin: 0.375rem 0 0 1rem;

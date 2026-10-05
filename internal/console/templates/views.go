@@ -42,12 +42,13 @@ type InboxGroup struct {
 	Items       []store.InboxItem
 }
 
-// NavThread is one blocking-or-unread ticket's row in #nav's per-thread
-// badge list (design section 6.3, 6.8): the badge shows the waiting flag
-// when blocking, an unread dot otherwise.
+// NavThread is one live ticket's row in #nav's per-ticket list (design
+// section 6.3, 6.8, #106 bug 4): the row shows the blocking badge when
+// Blocking, the unread badge when Unread, and otherwise its state pill.
 type NavThread struct {
 	Ticket            store.Ticket
 	Blocking          bool
+	Unread            bool   // threadLink reads it only when Blocking is false
 	WaitingOn         string // meaningful only when Blocking
 	OpenQuestionCount int
 }

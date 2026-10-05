@@ -1,8 +1,8 @@
 // views.go builds the five views' per-view models from the store reads
 // Task 2 added and renders them through the templ components in
 // internal/console/templates (design section 6.5, Task 3). #nav's model
-// (design section 6.3, 6.8) lives here too: it is not one of the five
-// views, but it is built the same way, from the same InboxItems read.
+// (design section 6.3, 6.8, #106 bug 4) lives here too: it is not one of
+// the five views, but it is built the same way, from store.LiveTickets.
 package console
 
 import (
@@ -12,6 +12,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -85,21 +86,27 @@ func buildAlertLines(entries []LogEntry) []templates.AlertLine {
 	return lines
 }
 
-// navComponent builds the #nav region: every project, and the per-thread
-// blocking/unread badge list built from store.InboxItems, the same
-// blocking-or-unread predicate section 6.8 defines (design section 6.3).
-// open is the thread view's own open ticket, 0 when none is open (bug fix:
-// nav.templ's threadLink renders "selected" on this one row, so the
-// sidebar's highlight is part of #nav's own HTML and survives every patch).
+// navComponent builds the #nav region: every project, and every live
+// ticket (design section 6.3, 6.8, #106 bug 4), built from
+// store.LiveTickets so the sidebar shows a ticket the moment it stops
+// being terminal, not only once it is blocking or unread. open is the
+// thread view's own open ticket, 0 when none is open (bug fix: nav.templ's
+// threadLink renders "selected" on this one row, so the sidebar's
+// highlight is part of #nav's own HTML and survives every patch).
 func (c *console) navComponent(ctx context.Context, open int64) (templ.Component, error) {
 	projects, err := c.store.ListProjects(ctx)
 	if err != nil {
 		return nil, err
 	}
-	items, err := c.store.InboxItems(ctx, c.terminalStates())
+	items, err := c.store.LiveTickets(ctx, c.terminalStates())
 	if err != nil {
 		return nil, err
 	}
+	ids := make([]int64, len(items))
+	for i := range items {
+		ids[i] = items[i].Ticket.ID
+	}
+	slog.DebugContext(ctx, "console: nav live tickets", "count", len(items), "ticket_ids", ids)
 	return templates.Nav(projects, buildNavThreads(items), c.sandboxReason, open), nil
 }
 
@@ -115,14 +122,25 @@ func (c *console) terminalStates() []string {
 	return c.machine.States.Terminal
 }
 
-// buildNavThreads turns InboxItems into #nav's badge rows, preserving their
-// blocking-first, newest-first order (design section 7.2).
-func buildNavThreads(items []store.InboxItem) []templates.NavThread {
+// stateOrder is the machine's state order, for projectSections' live-ticket
+// sort, nil when no machine is loaded, which leaves every ticket live and
+// in issue-number order (the same nil-machine guard as terminalStates).
+func (c *console) stateOrder() []string {
+	if c.machine == nil {
+		return nil
+	}
+	return c.machine.States.Order
+}
+
+// buildNavThreads turns LiveTickets into #nav's rows, preserving their
+// blocking, unread, issue-number order (design section 6.3, 6.8).
+func buildNavThreads(items []store.LiveTicket) []templates.NavThread {
 	out := make([]templates.NavThread, 0, len(items))
 	for i := range items {
 		th := templates.NavThread{
 			Ticket:            items[i].Ticket,
-			OpenQuestionCount: len(items[i].OpenQuestions),
+			Unread:            items[i].Unread,
+			OpenQuestionCount: items[i].OpenQuestionCount,
 		}
 		if items[i].Ticket.WaitingOn != nil {
 			th.Blocking = true
@@ -131,6 +149,27 @@ func buildNavThreads(items []store.InboxItem) []templates.NavThread {
 		out = append(out, th)
 	}
 	return out
+}
+
+// projectSections splits one project's tickets, already in issue-number
+// order (store.TicketsByProject), into live and closed (design section
+// 6.5, Task 3, #106 bug 4): closed is every ticket whose state is in
+// terminal, in issue-number order; live is the rest, furthest-along state
+// first by its index in order (a state missing from order sorts last,
+// rank -1), issue-number order within a state (the sort is stable, so ties
+// keep the input's own order).
+func projectSections(tickets []store.Ticket, order, terminal []string) (live, closed []store.Ticket) {
+	for i := range tickets {
+		if slices.Contains(terminal, tickets[i].State) {
+			closed = append(closed, tickets[i])
+		} else {
+			live = append(live, tickets[i])
+		}
+	}
+	sort.SliceStable(live, func(i, j int) bool {
+		return slices.Index(order, live[i].State) > slices.Index(order, live[j].State)
+	})
+	return live, closed
 }
 
 // mainComponent builds the #main region for the current view (design
@@ -161,7 +200,9 @@ func (c *console) mainComponent(ctx context.Context, view string, open, project 
 		if err != nil {
 			return nil, err
 		}
-		return templates.Project(project, tickets), nil
+		live, closed := projectSections(tickets, c.stateOrder(), c.terminalStates())
+		slog.DebugContext(ctx, "console: project sections", "project_id", project, "live", len(live), "closed", len(closed))
+		return templates.Project(project, live, closed), nil
 	case viewThread:
 		return c.threadComponent(ctx, open)
 	default:

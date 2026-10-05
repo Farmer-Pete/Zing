@@ -125,19 +125,23 @@ type rowScanner interface {
 }
 
 // scanTicket scans one row of ticketColumns, in that order, into a Ticket.
-func scanTicket(rs rowScanner) (Ticket, error) {
+// extra holds destinations for any columns a caller selects after
+// ticketColumns (LiveTickets' unread flag and open-question count); they
+// are scanned in the same call, in order.
+func scanTicket(rs rowScanner, extra ...any) (Ticket, error) {
 	var t Ticket
 	var kind, waitingOn, branch, prURL, claimOwner, claimExpiresAt sql.NullString
 	var parentTicketID sql.NullInt64
 	var nextPollAt, pollFingerprint sql.NullString
 	var pollIntervalS sql.NullInt64
 
-	if err := rs.Scan(
+	dest := []any{ //nolint:prealloc // the literal spells out ticketColumns's order; extra is variadic and appended once below, not grown in a loop
 		&t.ID, &t.ProjectID, &t.TrackerRef, &t.Title, &t.Body,
 		&kind, &t.State, &waitingOn, &parentTicketID,
 		&branch, &prURL, &claimOwner, &claimExpiresAt,
 		&nextPollAt, &pollIntervalS, &pollFingerprint,
-	); err != nil {
+	}
+	if err := rs.Scan(append(dest, extra...)...); err != nil {
 		return Ticket{}, err
 	}
 

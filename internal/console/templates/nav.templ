@@ -6,8 +6,8 @@ import (
 	"zing/internal/store"
 )
 
-// Nav renders the #nav region: a view switcher, the project list, and the
-// per-thread blocking/unread badge list (design section 6.3, 6.5, 6.8).
+// Nav renders the #nav region: a view switcher, the project list, and every
+// live ticket (design section 6.3, 6.5, 6.8, #106 bug 4).
 //
 // Every link here is a temporary, clickable stand-in for the keyboard
 // module Task 4 builds (design section 12, Task 3 scope note: "the shell
@@ -71,11 +71,12 @@ templ navLink(view string, open, project int64, label string) {
 }
 
 // threadLink is one nav-threads row: the ticket's title, opening it on
-// click, with a badge showing the waiting flag when blocking or an unread
-// dot otherwise (design section 6.8). It carries "selected" (bug fix,
-// threadRowClass below) when it is the thread view's own open ticket, so
-// the sidebar's highlight is part of #nav's rendered HTML rather than a
-// client-only focus ring a later patch can drop.
+// click, with a badge showing the waiting flag when blocking, an unread
+// badge when not blocking but unread, or otherwise its state pill (design
+// section 6.8, #106 bug 4). It carries "selected" (bug fix, threadRowClass
+// below) when it is the thread view's own open ticket, so the sidebar's
+// highlight is part of #nav's rendered HTML rather than a client-only focus
+// ring a later patch can drop.
 templ threadLink(th NavThread, openTicketID int64) {
 	<a href="#" class={ threadRowClass(th.Ticket.ID, openTicketID) } data-on:click__prevent={ zingNavExpr("thread", th.Ticket.ID, 0) }>
 		<span class="title">{ th.Ticket.Title }</span>
@@ -87,8 +88,10 @@ templ threadLink(th NavThread, openTicketID int64) {
 					{ th.WaitingOn }
 				}
 			</span>
-		} else {
+		} else if th.Unread {
 			<span class="badge badge-unread">unread</span>
+		} else {
+			@statePill(th.Ticket)
 		}
 	</a>
 }

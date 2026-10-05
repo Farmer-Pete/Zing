@@ -28,16 +28,19 @@ templ Inbox(groups []InboxGroup) {
 	</main>
 }
 
+// inboxCard renders one ticket's inbox card. Its top line opens the
+// ticket's thread on click, through the same zing-nav dispatch #nav's
+// threadLink uses; the ib-q rows below stay plain, non-clickable divs.
 templ inboxCard(item store.InboxItem) {
 	<article class="ib-thread" data-focus-id={ fmt.Sprintf("ticket:%d", item.Ticket.ID) }>
-		<div class="ib-thread-row">
+		<a href="#" class="ib-thread-row" data-on:click__prevent={ zingNavExpr("thread", item.Ticket.ID, 0) }>
 			<span class="ref">{ item.Ticket.TrackerRef }</span>
 			<span class="title">{ item.Ticket.Title }</span>
 			@statePill(item.Ticket)
 			if len(item.OpenQuestions) > 0 {
 				<span class="badge">{ fmt.Sprintf("%d open", len(item.OpenQuestions)) }</span>
 			}
-		</div>
+		</a>
 		for _, q := range item.OpenQuestions {
 			<div class="ib-q">
 				<span class="key">{ q.Key }</span>

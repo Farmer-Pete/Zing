@@ -60,3 +60,68 @@ func TestAlertStripHasBoundedHeight(t *testing.T) {
 		t.Errorf("rendered shell missing the empty-strip rule")
 	}
 }
+
+// TestColumnsScrollOnTheirOwn proves the sidebar-stays-visible fix: the page
+// itself must never scroll vertically, so #nav, #main and #rail's existing
+// overflow-y: auto rules can take effect on a fixed-height track instead of
+// a track that grows to fit a long thread.
+func TestColumnsScrollOnTheirOwn(t *testing.T) {
+	t.Parallel()
+	var sb strings.Builder
+	if err := Shell(emptyBodyHTML, emptyBodyHTML, emptyBodyHTML, emptyBodyHTML).Render(t.Context(), &sb); err != nil {
+		t.Fatalf("Shell.Render: %v", err)
+	}
+	got := sb.String()
+
+	bodyStart := strings.Index(got, "body {")
+	if bodyStart < 0 {
+		t.Fatalf("rendered shell has no body rule")
+	}
+	bodyEnd := strings.Index(got[bodyStart:], "}")
+	if bodyEnd < 0 {
+		t.Fatalf("rendered shell's body rule is unterminated")
+	}
+	bodyRule := got[bodyStart : bodyStart+bodyEnd]
+	for _, want := range []string{"height: 100vh;", "display: flex;", "flex-direction: column;"} {
+		if !strings.Contains(bodyRule, want) {
+			t.Errorf("rendered shell's body rule missing %q, got %q", want, bodyRule)
+		}
+	}
+
+	layoutStart := strings.Index(got, ".layout {")
+	if layoutStart < 0 {
+		t.Fatalf("rendered shell has no .layout rule")
+	}
+	layoutEnd := strings.Index(got[layoutStart:], "}")
+	if layoutEnd < 0 {
+		t.Fatalf("rendered shell's .layout rule is unterminated")
+	}
+	layoutRule := got[layoutStart : layoutStart+layoutEnd]
+	for _, want := range []string{"flex: 1;", "min-height: 0;", "grid-template-rows: minmax(0, 1fr);"} {
+		if !strings.Contains(layoutRule, want) {
+			t.Errorf("rendered shell's .layout rule missing %q, got %q", want, layoutRule)
+		}
+	}
+	if strings.Contains(layoutRule, "min-height: 100vh") {
+		t.Errorf("rendered shell's .layout rule still has min-height: 100vh")
+	}
+
+	if !strings.Contains(got, "#alerts { flex: none; }") {
+		t.Errorf("rendered shell missing #alerts { flex: none; }")
+	}
+
+	for _, sel := range []string{"#nav {", "#rail {"} {
+		start := strings.Index(got, sel)
+		if start < 0 {
+			t.Fatalf("rendered shell has no %s rule", sel)
+		}
+		end := strings.Index(got[start:], "}")
+		if end < 0 {
+			t.Fatalf("rendered shell's %s rule is unterminated", sel)
+		}
+		rule := got[start : start+end]
+		if !strings.Contains(rule, "overflow-y: auto;") {
+			t.Errorf("rendered shell's %s rule missing %q, got %q", sel, "overflow-y: auto;", rule)
+		}
+	}
+}

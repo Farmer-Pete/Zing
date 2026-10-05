@@ -267,11 +267,76 @@ func (s *Store) InboxItems(ctx context.Context, terminal []string) ([]InboxItem,
 	return out, nil
 }
 
-// TicketsByProject returns one project's tickets, ordered by tracker_ref
-// then id.
+// numericRef is true when t.tracker_ref is non-empty and every character is
+// a digit.
+const numericRef = `(t.tracker_ref GLOB '[0-9]*' AND t.tracker_ref NOT GLOB '*[^0-9]*')`
+
+// issueNumberOrder is the ORDER BY tail for a tickets t read. A ref that is
+// all digits is numeric: numeric refs sort first, by the length of the ref
+// with leading zeros stripped, then by that stripped string, which for
+// equal-length digit strings is numeric order with no INTEGER cast to
+// overflow. Every other ref sorts after them as text. Ticket id breaks
+// ties.
+const issueNumberOrder = `CASE WHEN ` + numericRef + ` THEN 0 ELSE 1 END,
+	CASE WHEN ` + numericRef + ` THEN LENGTH(LTRIM(t.tracker_ref, '0')) END,
+	CASE WHEN ` + numericRef + ` THEN LTRIM(t.tracker_ref, '0') END,
+	CASE WHEN ` + numericRef + ` THEN NULL ELSE t.tracker_ref END, t.id`
+
+// LiveTicket is one ticket LiveTickets returns: the ticket itself, plus
+// whether it has an unread message and how many open questions it carries.
+type LiveTicket struct {
+	Ticket            Ticket
+	Unread            bool
+	OpenQuestionCount int
+}
+
+// LiveTickets returns every ticket the sidebar lists (design section 6.3,
+// 6.8, #106 bug 4): blocking ones (waiting_on set) whatever their state,
+// and every ticket whose state is not in terminal. A nil or empty terminal
+// lists every ticket. Order is blocking first, then unread, then the rest,
+// each by issueNumberOrder.
+func (s *Store) LiveTickets(ctx context.Context, terminal []string) ([]LiveTicket, error) {
+	where := ``
+	args := make([]any, 0, len(terminal))
+	if len(terminal) > 0 {
+		ph := strings.TrimSuffix(strings.Repeat("?, ", len(terminal)), ", ")
+		where = `WHERE t.waiting_on IS NOT NULL OR t.state NOT IN (` + ph + `)` //nolint:gosec // G202: placeholders only, values are bind args
+		for _, st := range terminal {
+			args = append(args, st)
+		}
+	}
+	query := `SELECT ` + ticketColumns + `,
+		EXISTS (SELECT 1 FROM messages um WHERE um.ticket_id = t.id AND ` + unreadMessageWhere + `) AS unread,
+		(SELECT COUNT(*) FROM messages q WHERE q.ticket_id = t.id AND q.type = 'question' AND q.state = 'open')
+		FROM tickets t ` + where + `
+		ORDER BY (t.waiting_on IS NOT NULL) DESC, unread DESC, ` + issueNumberOrder
+	rows, err := s.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("live tickets: %w", err)
+	}
+	defer rows.Close()
+
+	var out []LiveTicket
+	for rows.Next() {
+		var lt LiveTicket
+		t, err := scanTicket(rows, &lt.Unread, &lt.OpenQuestionCount)
+		if err != nil {
+			return nil, fmt.Errorf("live tickets: scan: %w", err)
+		}
+		lt.Ticket = t
+		out = append(out, lt)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("live tickets: %w", err)
+	}
+	return out, nil
+}
+
+// TicketsByProject returns one project's tickets, ordered by issue number
+// (issueNumberOrder).
 func (s *Store) TicketsByProject(ctx context.Context, projectID int64) ([]Ticket, error) {
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT `+ticketColumns+` FROM tickets WHERE project_id = ? ORDER BY tracker_ref, id`, projectID)
+		`SELECT `+ticketColumns+` FROM tickets t WHERE t.project_id = ? ORDER BY `+issueNumberOrder, projectID)
 	if err != nil {
 		return nil, fmt.Errorf("tickets by project %d: %w", projectID, err)
 	}

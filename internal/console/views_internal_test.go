@@ -11,6 +11,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -1829,4 +1830,62 @@ func TestGateShowsPlan(t *testing.T) {
 			}
 		})
 	}
+}
+
+// projectSectionsRefs returns tickets' tracker refs, in order, for
+// TestProjectSections' assertions.
+func projectSectionsRefs(tickets []store.Ticket) []string {
+	out := make([]string, len(tickets))
+	for i := range tickets {
+		out[i] = tickets[i].TrackerRef
+	}
+	return out
+}
+
+// TestProjectSections proves projectSections splits a project's tickets
+// into live and closed (design section 6.5, Task 3): live tickets sort by
+// their state's index in order, highest first, ties broken by the input's
+// own issue-number order (TicketsByProject); a state missing from order
+// sorts last; closed tickets keep that input order unchanged. With nil
+// order and nil terminal (no machine loaded), everything is live, in input
+// order, and nothing is closed.
+func TestProjectSections(t *testing.T) {
+	t.Parallel()
+
+	realMachine, err := machine.Load(zing.Assets, "machine.toml")
+	if err != nil {
+		t.Fatalf("machine.Load: %v", err)
+	}
+
+	tickets := []store.Ticket{
+		{TrackerRef: "65", State: string(response.TicketStateBuilding)},
+		{TrackerRef: "95", State: string(response.TicketStateQueued)},
+		{TrackerRef: "96", State: "done"},
+		{TrackerRef: "102", State: string(response.TicketStateBuilding)},
+		{TrackerRef: "110", State: "reviewing"},
+		{TrackerRef: "120", State: "escalated"},
+		{TrackerRef: "130", State: "mystery"},
+	}
+
+	t.Run("with a real machine's order and terminal", func(t *testing.T) {
+		t.Parallel()
+		live, closed := projectSections(tickets, realMachine.States.Order, realMachine.States.Terminal)
+		if got, want := projectSectionsRefs(live), []string{"110", "65", "102", "95", "130"}; !slices.Equal(got, want) {
+			t.Errorf("live refs = %v, want %v", got, want)
+		}
+		if got, want := projectSectionsRefs(closed), []string{"96", "120"}; !slices.Equal(got, want) {
+			t.Errorf("closed refs = %v, want %v", got, want)
+		}
+	})
+
+	t.Run("with nil order and nil terminal, everything is live in input order", func(t *testing.T) {
+		t.Parallel()
+		live, closed := projectSections(tickets, nil, nil)
+		if got, want := projectSectionsRefs(live), projectSectionsRefs(tickets); !slices.Equal(got, want) {
+			t.Errorf("live refs = %v, want input order %v", got, want)
+		}
+		if len(closed) != 0 {
+			t.Errorf("closed = %v, want empty", closed)
+		}
+	})
 }
