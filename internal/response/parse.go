@@ -9,8 +9,11 @@ import (
 )
 
 // Document is an extracted zing element: its dispatched, decoded Response
-// and the exact bytes of the element as it appeared in the input, opening
-// tag included.
+// and the bytes of the element, opening tag included. Elem holds the input
+// bytes exactly as written when Parse's strict pass finds the document; when
+// the repair pass finds it instead, Elem holds the repaired bytes, with bare
+// < escaped to &lt;, which can differ from the original input. See Parse's
+// doc comment for the two-pass behavior.
 type Document struct {
 	Response Response
 	Elem     []byte
@@ -31,8 +34,42 @@ type Document struct {
 //
 // A missing or malformed element both fall through to the same result:
 // Parse returns the exact string "no zing element in final message".
+//
+// When no candidate decodes, Parse tries once more with each candidate's
+// bare < escaped (parseRepaired), so an agent's free text holding a
+// literal < (bug fix: a quoted placeholder such as <nil>, or "a < b") does
+// not cost a whole retry run. A document that still fails to decode after
+// that reports the strict pass's own error, as before.
+//
+// The repair pass is skipped entirely when the strict pass already found a
+// well-formed candidate naming an unregistered pair: that candidate's own
+// "no response for job..." error takes precedence over repairing an
+// earlier, malformed one (TestParse_UnknownPairAfterMalformedCandidate). A
+// malformed candidate that happens to contain the literal text "<zing"
+// inside a free-text field would otherwise let the repair pass swallow the
+// unregistered candidate as mere text and decode successfully, silently
+// losing the more specific error.
 func Parse(input []byte) (*Document, error) {
 	input = escapeBareAmpersands(input)
+	doc, repairable, err := parseStrict(input)
+	if doc != nil {
+		return doc, nil
+	}
+	if repairable {
+		if repaired := parseRepaired(input); repaired != nil {
+			return repaired, nil
+		}
+	}
+	return nil, err
+}
+
+// parseStrict is Parse's first pass: the candidate scan over input exactly
+// as written. It returns the first document that decodes, or the error
+// Parse reports when none does. repairable is false when that error is a
+// well-formed candidate's own unregistered-pair error, which Parse must
+// report as is rather than let the repair pass override (see Parse's doc
+// comment).
+func parseStrict(input []byte) (doc *Document, repairable bool, err error) {
 	excluded := excludedRanges(input)
 	var firstLookupErr error
 	var lastBodyErr *bodyDecodeError
@@ -42,7 +79,7 @@ func Parse(input []byte) (*Document, error) {
 		}
 		doc, err := tryDecode(input, offset)
 		if doc != nil {
-			return doc, nil
+			return doc, true, nil
 		}
 		if bodyErr, ok := errors.AsType[*bodyDecodeError](err); ok {
 			lastBodyErr = bodyErr
@@ -52,12 +89,39 @@ func Parse(input []byte) (*Document, error) {
 		}
 	}
 	if firstLookupErr != nil {
-		return nil, firstLookupErr
+		return nil, false, firstLookupErr
 	}
 	if lastBodyErr != nil {
-		return nil, fmt.Errorf("no zing element in final message: %w; inside the document write a literal < as &lt; and & as &amp;", lastBodyErr.err)
+		return nil, true, fmt.Errorf("no zing element in final message: %w; inside the document write a literal < as &lt; and & as &amp;", lastBodyErr.err)
 	}
-	return nil, errors.New("no zing element in final message")
+	return nil, true, errors.New("no zing element in final message")
+}
+
+// parseRepaired is Parse's second pass, run only when the strict pass
+// found no document: each candidate gets its bare < escaped
+// (repairCandidate) and is decoded again. It returns nil when no repaired
+// candidate decodes.
+func parseRepaired(input []byte) *Document {
+	excluded := excludedRanges(input)
+	tried := 0
+	for _, offset := range candidateOffsets(input) {
+		if inRanges(offset, excluded) {
+			continue
+		}
+		if tried == maxRootCandidates {
+			return nil
+		}
+		tried++
+		repaired, escaped, ok := repairCandidate(input[offset:])
+		if !ok {
+			continue
+		}
+		if doc, decodeErr := tryDecode(repaired, 0); decodeErr == nil {
+			logRepair(escaped, 1)
+			return doc
+		}
+	}
+	return nil
 }
 
 const zingMarker = "<zing"
@@ -66,6 +130,17 @@ const zingMarker = "<zing"
 // every zing document (Parse) and every well-formed root (ExtractAll)
 // must match.
 const zingElementName = "zing"
+
+// isZingStart reports whether tok is a start element named exactly
+// zingElementName in no namespace, the check Parse, ExtractAll, and the
+// repair pass all share for a candidate's opening token.
+func isZingStart(tok xml.Token) (xml.StartElement, bool) {
+	start, ok := tok.(xml.StartElement)
+	if !ok || start.Name.Local != zingElementName || start.Name.Space != "" {
+		return xml.StartElement{}, false
+	}
+	return start, true
+}
 
 // candidateOffsets returns every byte offset in input where the literal
 // <zing is immediately followed by a name-boundary byte (space, tab,
@@ -192,8 +267,8 @@ func tryDecode(input []byte, offset int) (*Document, error) {
 	if err != nil {
 		return nil, errMalformedCandidate
 	}
-	start, ok := tok.(xml.StartElement)
-	if !ok || start.Name.Local != zingElementName || start.Name.Space != "" {
+	start, ok := isZingStart(tok)
+	if !ok {
 		return nil, errMalformedCandidate
 	}
 
