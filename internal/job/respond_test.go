@@ -165,12 +165,6 @@ func TestApplyNitAndFixSplit(t *testing.T) {
 	}
 }
 
-// mustMessageRow builds one store.MessageRow for TestThreadReadyCycles,
-// which cares only about id order and body, never CreatedAt.
-func mustMessageRow(id int64, body string) store.MessageRow {
-	return store.MessageRow{ID: id, Body: body}
-}
-
 // TestThreadReadyCycles proves threadReadyCycles' own scan (design section
 // 8.5 row 3's shape table): a "pr draft" marker counts a finished cycle
 // only when a "respond batch N started" line falls between it and the next
@@ -192,51 +186,51 @@ func TestThreadReadyCycles(t *testing.T) {
 		{
 			name: "worked example",
 			markers: []store.MessageRow{
-				mustMessageRow(10, prReadyPrefix+"A"),
-				mustMessageRow(11, prDraftPrefix+"A"),
-				mustMessageRow(12, fmt.Sprintf("respond batch 1 started sha %s after run 4", shaA)),
-				mustMessageRow(15, prReadyPrefix+"B"),
-				mustMessageRow(16, prDraftPrefix+"B"),
-				mustMessageRow(18, prReadyPrefix+"C"),
-				mustMessageRow(19, prDraftPrefix+"C"),
-				mustMessageRow(20, fmt.Sprintf("respond batch 2 started sha %s after run 9", shaC)),
-				mustMessageRow(25, prReadyPrefix+"D"),
+				{ID: 10, Body: prReadyPrefix + "A"},
+				{ID: 11, Body: prDraftPrefix + "A"},
+				{ID: 12, Body: fmt.Sprintf("respond batch 1 started sha %s after run 4", shaA)},
+				{ID: 15, Body: prReadyPrefix + "B"},
+				{ID: 16, Body: prDraftPrefix + "B"},
+				{ID: 18, Body: prReadyPrefix + "C"},
+				{ID: 19, Body: prDraftPrefix + "C"},
+				{ID: 20, Body: fmt.Sprintf("respond batch 2 started sha %s after run 9", shaC)},
+				{ID: 25, Body: prReadyPrefix + "D"},
 			},
 			want: 2,
 		},
 		{
 			name: "draft then ready with no batch",
 			markers: []store.MessageRow{
-				mustMessageRow(1, prDraftPrefix+"X"),
-				mustMessageRow(2, prReadyPrefix+"X"),
+				{ID: 1, Body: prDraftPrefix + "X"},
+				{ID: 2, Body: prReadyPrefix + "X"},
 			},
 			want: 0,
 		},
 		{
 			name: "draft then a started batch with no ready",
 			markers: []store.MessageRow{
-				mustMessageRow(1, prDraftPrefix+"X"),
-				mustMessageRow(2, fmt.Sprintf("respond batch 1 started sha %s after run 0", shaX)),
+				{ID: 1, Body: prDraftPrefix + "X"},
+				{ID: 2, Body: fmt.Sprintf("respond batch 1 started sha %s after run 0", shaX)},
 			},
 			want: 0,
 		},
 		{
 			name: "draft, a skipped batch, a stale batch, then ready",
 			markers: []store.MessageRow{
-				mustMessageRow(1, prDraftPrefix+"X"),
-				mustMessageRow(2, "respond batch 1 skipped"),
-				mustMessageRow(3, "respond batch 2 stale"),
-				mustMessageRow(4, prReadyPrefix+"X"),
+				{ID: 1, Body: prDraftPrefix + "X"},
+				{ID: 2, Body: fmt.Sprintf("respond batch %d skipped", 1)},
+				{ID: 3, Body: "respond batch 2 stale"},
+				{ID: 4, Body: prReadyPrefix + "X"},
 			},
 			want: 0,
 		},
 		{
 			name: "draft, started batch, a second draft, then ready",
 			markers: []store.MessageRow{
-				mustMessageRow(1, prDraftPrefix+"X"),
-				mustMessageRow(2, fmt.Sprintf("respond batch 1 started sha %s after run 0", shaX)),
-				mustMessageRow(3, prDraftPrefix+"Y"),
-				mustMessageRow(4, prReadyPrefix+"Y"),
+				{ID: 1, Body: prDraftPrefix + "X"},
+				{ID: 2, Body: fmt.Sprintf("respond batch 1 started sha %s after run 0", shaX)},
+				{ID: 3, Body: prDraftPrefix + "Y"},
+				{ID: 4, Body: prReadyPrefix + "Y"},
 			},
 			want: 0,
 		},
@@ -288,54 +282,47 @@ func seedReadyCycles(t *testing.T, s *store.Store, ticketID int64, sha string, n
 // (goconst: repeated across the three cap tests).
 const shipNodeCapped = "PR_node_capped"
 
-// testPollReadyCycleCapKeepsPRReady is TestPollReadyCycleCapKeepsPRReady's
-// own body, run once per thread author: a bot's nit and a human's comment
-// both count as an unresolved actionable thread (design non-goal: every
-// thread-caused cycle counts, not only a bot's).
-func testPollReadyCycleCapKeepsPRReady(t *testing.T, author string) {
-	t.Helper()
-	s, ticket, gh, tr := shipPublished(t)
-	local := shipHeadSHA(t, s, ticket)
-	runs, required := shipGreenCI()
-	gh.runs, gh.required = runs, required
-	gh.prState = orchestrator.PRState{Draft: false, HeadSHA: local, BaseRef: pbFixtureDefaultBranch, NodeID: shipNodeCapped}
-	seedReadyCycles(t, s, ticket.ID, local, readyCycleCap)
-	gh.threads = []orchestrator.Thread{
-		shipThread("RT_capped", "greet.go", 3, shipHumanComment("c1", author, "nit: rename this", time.Now())),
-	}
-
-	commit, err := shipPollRun(t, s, pbGetTicket(t, s, ticket.ID), gh, tr)
-	if err != nil {
-		t.Fatalf("Run: %v", err)
-	}
-	if len(gh.convertToDraftCalls) != 0 {
-		t.Errorf("convertToDraftCalls = %+v, want none: the cap keeps the pull request ready", gh.convertToDraftCalls)
-	}
-	wantPrefix := "respond batch 3 started sha " + local + " after run"
-	found := false
-	for i := range commit.Messages {
-		if strings.HasPrefix(commit.Messages[i].Body, wantPrefix) {
-			found = true
-		}
-	}
-	if !found {
-		t.Errorf("commit.Messages = %+v, want a message with prefix %q", commit.Messages, wantPrefix)
-	}
-}
-
+// TestPollReadyCycleCapKeepsPRReady proves the cap once per thread author: a
+// bot's nit and a human's comment both count as an unresolved actionable
+// thread (design non-goal: every thread-caused cycle counts, not only a
+// bot's).
 func TestPollReadyCycleCapKeepsPRReady(t *testing.T) {
 	t.Parallel()
 	if testing.Short() {
 		t.Skip("slow end-to-end flow; runs in the full suite")
 	}
-	t.Run("coderabbitai", func(t *testing.T) {
-		t.Parallel()
-		testPollReadyCycleCapKeepsPRReady(t, "coderabbitai")
-	})
-	t.Run("reviewer1", func(t *testing.T) {
-		t.Parallel()
-		testPollReadyCycleCapKeepsPRReady(t, "reviewer1")
-	})
+	for _, author := range []string{"coderabbitai", "reviewer1"} {
+		t.Run(author, func(t *testing.T) {
+			t.Parallel()
+			s, ticket, gh, tr := shipPublished(t)
+			local := shipHeadSHA(t, s, ticket)
+			runs, required := shipGreenCI()
+			gh.runs, gh.required = runs, required
+			gh.prState = orchestrator.PRState{Draft: false, HeadSHA: local, BaseRef: pbFixtureDefaultBranch, NodeID: shipNodeCapped}
+			seedReadyCycles(t, s, ticket.ID, local, readyCycleCap)
+			gh.threads = []orchestrator.Thread{
+				shipThread("RT_capped", "greet.go", 3, shipHumanComment("c1", author, "nit: rename this", time.Now())),
+			}
+
+			commit, err := shipPollRun(t, s, pbGetTicket(t, s, ticket.ID), gh, tr)
+			if err != nil {
+				t.Fatalf("Run: %v", err)
+			}
+			if len(gh.convertToDraftCalls) != 0 {
+				t.Errorf("convertToDraftCalls = %+v, want none: the cap keeps the pull request ready", gh.convertToDraftCalls)
+			}
+			wantPrefix := "respond batch 3 started sha " + local + " after run"
+			found := false
+			for i := range commit.Messages {
+				if strings.HasPrefix(commit.Messages[i].Body, wantPrefix) {
+					found = true
+				}
+			}
+			if !found {
+				t.Errorf("commit.Messages = %+v, want a message with prefix %q", commit.Messages, wantPrefix)
+			}
+		})
+	}
 }
 
 // TestPollBelowReadyCycleCapFlipsToDraft proves the cap holds no effect
@@ -378,7 +365,9 @@ func TestPollBelowReadyCycleCapFlipsToDraft(t *testing.T) {
 
 // TestPollReadyCycleCapStillFlipsOnCIFailure proves design section 8.5 row
 // 3's own closing rule: whatever the cap already counted, a failed
-// required check still converts a ready pull request to draft.
+// required check still converts a ready pull request to draft, even with
+// an unresolved thread also in play (skipThreadDraftFlip must not skip the
+// flip just because the cap is reached).
 func TestPollReadyCycleCapStillFlipsOnCIFailure(t *testing.T) {
 	if testing.Short() {
 		t.Skip("slow end-to-end flow; runs in the full suite")
@@ -391,6 +380,9 @@ func TestPollReadyCycleCapStillFlipsOnCIFailure(t *testing.T) {
 	gh.prState = orchestrator.PRState{Draft: false, HeadSHA: local, BaseRef: pbFixtureDefaultBranch, NodeID: shipNodeCapped}
 	gh.logTail = func(context.Context, string, string, int64, int) (string, error) { return shipCILogTailText, nil }
 	seedReadyCycles(t, s, ticket.ID, local, readyCycleCap)
+	gh.threads = []orchestrator.Thread{
+		shipThread("RT_ci_capped", "greet.go", 3, shipHumanComment("c1", "reviewer1", "nit: rename this", time.Now())),
+	}
 
 	_, err := shipPollRun(t, s, pbGetTicket(t, s, ticket.ID), gh, tr)
 	if err != nil {
