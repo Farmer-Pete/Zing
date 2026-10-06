@@ -313,6 +313,10 @@ func (c *console) threadComponent(ctx context.Context, open int64) (templ.Compon
 		if listErr != nil {
 			return nil, listErr
 		}
+		rows, detailErr := c.withEscalationDetails(ctx, open, rows)
+		if detailErr != nil {
+			return nil, detailErr
+		}
 		plan, planErr := c.loadPlan(ctx, open)
 		if planErr != nil {
 			return nil, planErr
@@ -1823,6 +1827,132 @@ func ticketStillWaitingOnQuestions(ticket *store.Ticket) bool {
 func splitQuestionBody(raw string) (title, body string) {
 	title, rest, _ := strings.Cut(raw, "\n")
 	return title, strings.TrimPrefix(rest, "\n")
+}
+
+// withEscalationDetails rewrites, in place, the Body of every escalation's
+// own question row with detail read at render time from the data the
+// escalation points at (ticket 70, design section "Build the detail at read
+// time"): a plan review loops_exhausted question gets the planreview
+// artifact's remaining findings. rows is returned unchanged -- not even
+// reordered -- except for those Body rewrites, so threadComponent's later
+// buildThreadRows call sees the same rows it always did, with richer
+// question bodies. Only a store read failure is returned; every other
+// escalation whose payload, marker, or artifact is missing or unparseable
+// just keeps its stored body (buildThreadQuestion's own
+// "unparseable payload renders as a plain row" rule, extended here).
+func (c *console) withEscalationDetails(ctx context.Context, ticketID int64, rows []store.MessageRow) ([]store.MessageRow, error) {
+	for i := range rows {
+		esc := rows[i]
+		if esc.Type != msgTypeEscalation {
+			continue
+		}
+		var ep response.EscalationPayload
+		if err := json.Unmarshal(esc.Payload, &ep); err != nil {
+			continue
+		}
+
+		var detail string
+		if ep.Code == string(response.EscalationCodeLoopsExhausted) && ep.Origin == string(response.EscalationOriginCapLoops) {
+			d, err := c.loopsExhaustedDetail(ctx, ticketID, esc.ID, rows)
+			if err != nil {
+				return nil, err
+			}
+			detail = d
+		}
+		if detail == "" {
+			continue
+		}
+
+		for j := range rows {
+			q := rows[j]
+			if q.Type != msgTypeQuestion || q.ParentID == nil || *q.ParentID != esc.ID {
+				continue
+			}
+			title, body := splitQuestionBody(q.Body)
+			rows[j].Body = title + "\n\n" + detail + "\n\n" + body
+		}
+	}
+	return rows, nil
+}
+
+// loopsExhaustedDetail reads the plan review findings a cap_loops
+// loops_exhausted escalation (escalationID) never itself carries (design
+// H1): the version comes from the newest "planreview vN pending" marker
+// stored before the escalation, and the findings from the planreview
+// artifact at that version. It returns "" with no error when the marker is
+// missing or unparseable, or the artifact at that version does not exist --
+// each logged once at Debug rather than failing the render.
+func (c *console) loopsExhaustedDetail(ctx context.Context, ticketID, escalationID int64, rows []store.MessageRow) (string, error) {
+	version, ok := latestPlanreviewPendingVersion(rows, escalationID)
+	if !ok {
+		slog.DebugContext(ctx, "console: escalation detail source unavailable",
+			"ticket_id", ticketID, "escalation_id", escalationID, "reason", "marker")
+		return "", nil
+	}
+
+	artifact, found, err := c.store.PlanReviewAt(ctx, ticketID, version)
+	if err != nil {
+		return "", err
+	}
+	if !found {
+		slog.DebugContext(ctx, "console: escalation detail source unavailable",
+			"ticket_id", ticketID, "escalation_id", escalationID, "reason", "artifact", "plan_version", version)
+		return "", nil
+	}
+	var payload struct {
+		Findings []response.Finding `json:"findings"`
+	}
+	if err := json.Unmarshal(artifact.Payload, &payload); err != nil {
+		slog.DebugContext(ctx, "console: escalation detail source unavailable",
+			"ticket_id", ticketID, "escalation_id", escalationID, "reason", "artifact", "plan_version", version)
+		return "", nil //nolint:nilerr // an unparseable artifact leaves the question body unchanged, not an error
+	}
+	return findingsDetail(version, payload.Findings), nil
+}
+
+// latestPlanreviewPendingVersion returns the version named by the newest
+// "planreview vN pending" update row whose id is below beforeID -- rows is
+// ordered by id ascending (store.ListMessages), so the last match as this
+// scans in order is the newest one -- and false when there is none, or its
+// version fails strconv.Atoi.
+func latestPlanreviewPendingVersion(rows []store.MessageRow, beforeID int64) (int, bool) {
+	var body string
+	var found bool
+	for i := range rows {
+		if rows[i].Type != msgTypeUpdate || rows[i].ID >= beforeID {
+			continue
+		}
+		if !strings.HasPrefix(rows[i].Body, updateMarkerPlanreviewPrefix) || !strings.HasSuffix(rows[i].Body, updateMarkerPlanreviewPendingSuffix) {
+			continue
+		}
+		body, found = rows[i].Body, true
+	}
+	if !found {
+		return 0, false
+	}
+	v, err := strconv.Atoi(strings.TrimSuffix(strings.TrimPrefix(body, updateMarkerPlanreviewPrefix), updateMarkerPlanreviewPendingSuffix))
+	if err != nil {
+		return 0, false
+	}
+	return v, true
+}
+
+// findingsDetail renders a plan review's own remaining findings as a
+// markdown list, one item per finding ("- SEVERITY at `LOCATION`: TEXT"),
+// under a heading naming version. It returns "" for no findings, so a
+// caller can treat that as "no detail" the same way it treats a missing
+// marker or artifact.
+func findingsDetail(version int, findings []response.Finding) string {
+	if len(findings) == 0 {
+		return ""
+	}
+	lines := make([]string, 0, len(findings)+1)
+	lines = append(lines, fmt.Sprintf("Remaining findings from the plan review of v%d:", version))
+	for _, f := range findings {
+		text := strings.Join(strings.Fields(f.Text), " ")
+		lines = append(lines, fmt.Sprintf("- %s at `%s`: %s", f.Severity, f.Location, text))
+	}
+	return strings.Join(lines, "\n")
 }
 
 // displayBody returns what the Thread view renders for one message: a

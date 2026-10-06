@@ -108,7 +108,7 @@ func seedPlanReviewArtifact(t *testing.T, s *store.Store, ticketID, runID int64,
 		t.Fatalf("marshal planreview findings: %v", err)
 	}
 	if _, err := s.InsertArtifact(t.Context(), store.Artifact{
-		TicketID: ticketID, Type: "planreview", Version: 1, RunID: &runID, Payload: payload,
+		TicketID: ticketID, Type: testArtifactTypePlanreview, Version: 1, RunID: &runID, Payload: payload,
 	}); err != nil {
 		t.Fatalf("InsertArtifact(planreview): %v", err)
 	}
