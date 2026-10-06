@@ -1886,13 +1886,16 @@ func (h planningHandler) enterFromGateRound(ctx context.Context, t store.Ticket,
 // gateRejectExtra builds a rejected gate's resume extra (review P2 on issue
 // #48's own PR): the owner's notes alone give the planner nothing to act on
 // when the rejected gate was posted at the loop cap (gateCapMarker), since
-// those at-or-below-floor findings were never fed back into planning -- the
-// cap stopped the resume loop that would have done that. When the current
-// cohort carries that marker, this fetches its stored floor findings with
-// outstandingFloorFindings (the same helper the cap_loops escalation retry
-// already uses) and fences them ahead of the notes, exactly as the
-// floor-findings resume renders them; a clean-review gate (no marker)
-// carries notes alone, unchanged.
+// those stored findings were never fed back into planning -- the cap
+// stopped the resume loop that would have done that. When the current
+// cohort carries that marker, this fetches every finding still in the
+// stored planreview artifact with storedPlanreviewFindings and fences them
+// ahead of the notes, exactly as the floor-findings resume renders them. A
+// capped gate's stored findings are not always all at-or-below-floor: the
+// owner's own d pick on the cap_loops escalation (acceptPlanAtCap) posts
+// the gate with above-floor findings still open, and the owner decided a
+// reject should feed those back too (owner decision Q2). A clean-review
+// gate (no marker) carries notes alone, unchanged.
 func gateRejectExtra(ctx context.Context, t store.Ticket, d Deps, notes string) ([]prompt.NamedInput, error) {
 	capped, err := rejectedGateWasCapped(ctx, t, d)
 	if err != nil {
@@ -1901,7 +1904,7 @@ func gateRejectExtra(ctx context.Context, t store.Ticket, d Deps, notes string) 
 	if !capped {
 		return []prompt.NamedInput{prompt.Notes(notes)}, nil
 	}
-	findings, err := outstandingFloorFindings(ctx, t, d)
+	findings, err := storedPlanreviewFindings(ctx, t, d)
 	if err != nil {
 		return nil, err
 	}
