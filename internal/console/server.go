@@ -175,15 +175,17 @@ type console struct {
 //	GET  /runs/{id}/{kind}      one run's final message, stderr, or transcript, as plain text
 //	GET  /push/key               the VAPID public key (design section 6.13, 7.1)
 //	POST /push/subscribe        store one push subscription (design section 6.13, 7.1)
-//	GET  /static/datastar.js    the vendored Datastar bundle
-//	GET  /static/mermaid.js     the vendored mermaid bundle
-//	GET  /static/console.js     the console's DOM wiring (Task 1 skeleton)
-//	GET  /static/keyboard.mjs   the console's pure keyboard logic (Task 1 skeleton)
-//	GET  /static/keys.json      the keyboard binding table (Task 1 placeholder)
+//	GET  /static/datastar.js    the vendored Datastar bundle, with an optional ?v=
+//	GET  /static/mermaid.js     the vendored mermaid bundle, with an optional ?v=
+//	GET  /static/console.js     the console's DOM wiring, with an optional ?v=
+//	GET  /static/keyboard.mjs   the console's pure keyboard logic, with an optional ?v=
+//	GET  /static/keys.json      the keyboard binding table, with an optional ?v=
 //
 // /static/ is an explicit allowlist of exactly those five assets (design
 // section 5, 12): every other path, including console.test.js, package.json,
 // and ASSETS.md, has no registered route and so 404s from the mux itself.
+// ?v=, when present, selects the Cache-Control staticAsset answers with
+// (#59): immutable when it equals assetVersion, no-cache otherwise.
 //
 // hosts and port build the mutation guard's Host allowlist (mw.go, design
 // section 6.14): every entry in hosts, plus localhost and 127.0.0.1, each
@@ -235,6 +237,9 @@ func New(st *store.Store, b *bus.Broker, m *machine.Machine, hosts []string, por
 		streamHeartbeat:    streamHeartbeatInterval,
 		streamWriteTimeout: streamFrameWriteTimeout,
 	}
+	// asset_version is what every page this console serves carries in
+	// data-build and ?v=, so a stale tab can be matched to its deploy (#59).
+	slog.Info("console: serving static assets", "asset_version", assetVersion)
 	guard := newMutationGuard(port, append(append([]string{}, hosts...), "localhost", "127.0.0.1")...)
 
 	mux := http.NewServeMux()
@@ -299,10 +304,21 @@ func withWriteDeadline(next http.HandlerFunc) http.HandlerFunc {
 // fixed content type. Every asset served this way is either vendored and
 // reviewed once, not fetched at runtime (datastar.js, mermaid.js; design
 // section 0, dependency set, and static/ASSETS.md), or authored in this
-// repo (console.js, keyboard.mjs, keys.json).
+// repo (console.js, keyboard.mjs, keys.json). The response is immutable
+// only when the request's v query is this build's assetVersion, since only
+// then do the served bytes match the URL; it is no-cache otherwise (#59):
+// a missing v, an empty v, or another build's v.
 func staticAsset(body []byte, contentType string) http.HandlerFunc {
-	return func(w http.ResponseWriter, _ *http.Request) {
+	return func(w http.ResponseWriter, r *http.Request) {
+		v := r.URL.Query().Get("v")
+		cc := cacheControlNoCache
+		if v == assetVersion {
+			cc = cacheControlImmutable
+		} else if v != "" {
+			slog.Debug("console: static asset requested for another build", "path", r.URL.Path, "v", v, "current", assetVersion)
+		}
 		w.Header().Set("Content-Type", contentType)
+		w.Header().Set("Cache-Control", cc)
 		if _, err := w.Write(body); err != nil {
 			slog.Error("console: write static asset", "content_type", contentType, "err", err)
 		}

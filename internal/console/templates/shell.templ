@@ -41,7 +41,15 @@ package templates
 // console.js instead of to Datastar's own retry, which fires no `started`
 // event per retry and so gives the client no way to tell when a retry has
 // actually succeeded.
-templ Shell(nav, main, rail, alerts templ.Component) {
+//
+// build is the asset version (#59, Q2 decision): every script src carries
+// it as ?v=, staticAsset marks that URL immutable, and the body's
+// data-build lets console.js compare the page's own build against the
+// server's on every /stream frame. The import map, which rewrites
+// console.js's relative './keyboard.mjs' import at the same versioned URL,
+// must stay before the first module script, since the browser consults it
+// only while resolving module specifiers it has not yet fetched.
+templ Shell(nav, main, rail, alerts templ.Component, build string) {
 	<!DOCTYPE html>
 	<html lang="en">
 		<head>
@@ -49,9 +57,10 @@ templ Shell(nav, main, rail, alerts templ.Component) {
 			<meta name="viewport" content="width=device-width, initial-scale=1"/>
 			<title>Zing</title>
 			@palette()
-			<script src="/static/mermaid.js"></script>
+			@importMap(build)
+			<script src={ assetURL("/static/mermaid.js", build) }></script>
 		</head>
-		<body data-signals="{view: 'inbox', open: 0, project: 0}">
+		<body data-build={ build } data-signals="{view: 'inbox', open: 0, project: 0}">
 			@alerts
 			<div class="layout">
 				@nav
@@ -70,8 +79,8 @@ templ Shell(nav, main, rail, alerts templ.Component) {
 				data-init="@get('/stream', {retryMaxCount: 0})"
 				data-on:zing-nav="$view = evt.detail.view; $open = evt.detail.open; $project = evt.detail.project; @get('/stream', {retryMaxCount: 0})"
 			></span>
-			<script type="module" src="/static/console.js"></script>
-			<script type="module" src="/static/datastar.js"></script>
+			<script type="module" src={ assetURL("/static/console.js", build) }></script>
+			<script type="module" src={ assetURL("/static/datastar.js", build) }></script>
 		</body>
 	</html>
 }

@@ -1,16 +1,32 @@
 package console_test
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"regexp"
 	"testing"
 
 	"zing/internal/bus"
 	"zing/internal/console"
 	"zing/internal/response"
+)
+
+// assetVersionPattern is what console.AssetVersion() must always match:
+// the first 12 hex characters of a sha256 (design section 5, 12; #59's
+// Q2 decision).
+var assetVersionPattern = regexp.MustCompile(`^[0-9a-f]{12}$`)
+
+// cacheControlImmutable and cacheControlNoCache are the two Cache-Control
+// values the static mux and GET / choose between (#59, Q2 decision):
+// immutable for a URL whose ?v= matches console.AssetVersion(), no-cache
+// for every other static request and for GET /.
+const (
+	cacheControlImmutable = "public, max-age=31536000, immutable"
+	cacheControlNoCache   = "no-cache"
 )
 
 // wantMermaidSHA256 is the digest static/ASSETS.md records for the vendored
@@ -109,6 +125,102 @@ func TestStaticAssetsRejectForbiddenPaths(t *testing.T) {
 			if resp.StatusCode != http.StatusNotFound {
 				t.Errorf("GET %s status = %d, want 404", path, resp.StatusCode)
 			}
+		})
+	}
+}
+
+// TestStaticCacheControl proves the reconnect plan's cache rule (#59): a
+// static asset requested with ?v= equal to this build's AssetVersion
+// answers immutable, since only then do the served bytes match the URL;
+// every other static request -- no v at all, or another build's v --
+// answers no-cache with the current bytes, so a stale tab's reload never
+// gets a response the browser is allowed to keep past that reload.
+func TestStaticCacheControl(t *testing.T) {
+	t.Parallel()
+	s := newConsoleTestStore(t)
+	srv := httptest.NewServer(console.New(s, bus.New(), nil, testBindHosts, testConsolePort, newTestLogHandler(t), nil, testPushToken, response.SeverityMinor, "", nil, "", nil))
+	t.Cleanup(srv.Close)
+
+	paths := []string{
+		"/static/datastar.js",
+		"/static/mermaid.js",
+		"/static/console.js",
+		"/static/keyboard.mjs",
+		"/static/keys.json",
+	}
+
+	for _, path := range paths {
+		t.Run(path, func(t *testing.T) {
+			t.Parallel()
+
+			t.Run("versioned", func(t *testing.T) {
+				resp, err := http.Get(srv.URL + path + "?v=" + console.AssetVersion()) //nolint:noctx // a bare GET on a test server needs no deadline
+				if err != nil {
+					t.Fatalf("GET %s?v=...: %v", path, err)
+				}
+				defer func() { _ = resp.Body.Close() }()
+
+				if resp.StatusCode != http.StatusOK {
+					t.Fatalf("GET %s?v=... status = %d, want 200", path, resp.StatusCode)
+				}
+				body, err := io.ReadAll(resp.Body)
+				if err != nil {
+					t.Fatalf("GET %s?v=...: read body: %v", path, err)
+				}
+				if len(body) == 0 {
+					t.Errorf("GET %s?v=... returned an empty body", path)
+				}
+				if cc := resp.Header.Get("Cache-Control"); cc != cacheControlImmutable {
+					t.Errorf("GET %s?v=... Cache-Control = %q, want %q", path, cc, cacheControlImmutable)
+				}
+			})
+
+			t.Run("unversioned", func(t *testing.T) {
+				resp, err := http.Get(srv.URL + path) //nolint:noctx // a bare GET on a test server needs no deadline
+				if err != nil {
+					t.Fatalf("GET %s: %v", path, err)
+				}
+				defer func() { _ = resp.Body.Close() }()
+
+				if resp.StatusCode != http.StatusOK {
+					t.Fatalf("GET %s status = %d, want 200", path, resp.StatusCode)
+				}
+				if cc := resp.Header.Get("Cache-Control"); cc != cacheControlNoCache {
+					t.Errorf("GET %s Cache-Control = %q, want %q", path, cc, cacheControlNoCache)
+				}
+			})
+
+			t.Run("stale_version", func(t *testing.T) {
+				unversioned, err := http.Get(srv.URL + path) //nolint:noctx // a bare GET on a test server needs no deadline
+				if err != nil {
+					t.Fatalf("GET %s: %v", path, err)
+				}
+				defer func() { _ = unversioned.Body.Close() }()
+				wantBody, err := io.ReadAll(unversioned.Body)
+				if err != nil {
+					t.Fatalf("GET %s: read body: %v", path, err)
+				}
+
+				resp, err := http.Get(srv.URL + path + "?v=000000000000") //nolint:noctx // a bare GET on a test server needs no deadline
+				if err != nil {
+					t.Fatalf("GET %s?v=000000000000: %v", path, err)
+				}
+				defer func() { _ = resp.Body.Close() }()
+
+				if resp.StatusCode != http.StatusOK {
+					t.Fatalf("GET %s?v=000000000000 status = %d, want 200", path, resp.StatusCode)
+				}
+				body, err := io.ReadAll(resp.Body)
+				if err != nil {
+					t.Fatalf("GET %s?v=000000000000: read body: %v", path, err)
+				}
+				if !bytes.Equal(body, wantBody) {
+					t.Errorf("GET %s?v=000000000000 body differs from the unversioned body", path)
+				}
+				if cc := resp.Header.Get("Cache-Control"); cc != cacheControlNoCache {
+					t.Errorf("GET %s?v=000000000000 Cache-Control = %q, want %q", path, cc, cacheControlNoCache)
+				}
+			})
 		})
 	}
 }

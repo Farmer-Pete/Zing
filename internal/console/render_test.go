@@ -103,8 +103,8 @@ func TestRenderReturnsTemplComponent(t *testing.T) {
 // 6.10) and, load-bearingly, that goldmark-diagram's own document-level
 // script injection never fires (see render.go's diagramExtension doc
 // comment for why the stock NewMermaidClientRenderer cannot be used
-// directly): the design requires the classic <script src="/static/
-// mermaid.js"> in shell.templ's head to be the only mermaid load.
+// directly): the design requires the classic mermaid script tag in
+// shell.templ's head to be the only mermaid load.
 func TestRenderMermaidFenceBecomesClientSideBlock(t *testing.T) {
 	t.Parallel()
 	md := "```mermaid\ngraph TD\nA-->B\n```"

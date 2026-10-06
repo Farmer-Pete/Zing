@@ -49,13 +49,16 @@ func (c *console) handleIndex(w http.ResponseWriter, r *http.Request) {
 	// Rendered into a buffer first, not straight to w, so a render failure
 	// still reports 500 rather than sending a 200 with a half-written body.
 	var buf bytes.Buffer
-	if err := templates.Shell(nav, main, rail, alerts).Render(r.Context(), &buf); err != nil {
+	if err := templates.Shell(nav, main, rail, alerts, assetVersion).Render(r.Context(), &buf); err != nil {
 		slog.Error("console: render shell", "err", err)
 		http.Error(w, genericServerErrorBody, http.StatusInternalServerError)
 		return
 	}
 
 	w.Header().Set("Content-Type", contentTypeHTML)
+	// no-cache: the shell names this build's script URLs, so a reload must
+	// never reuse an older build's copy of it (#59).
+	w.Header().Set("Cache-Control", cacheControlNoCache)
 	if _, err := w.Write(buf.Bytes()); err != nil {
 		slog.Error("console: write shell page", "err", err)
 	}

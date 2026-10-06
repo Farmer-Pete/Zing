@@ -19,7 +19,7 @@ import (
 func TestMainScrollsWideContentInsteadOfThePage(t *testing.T) {
 	t.Parallel()
 	var sb strings.Builder
-	if err := Shell(emptyBodyHTML, emptyBodyHTML, emptyBodyHTML, emptyBodyHTML).Render(t.Context(), &sb); err != nil {
+	if err := Shell(emptyBodyHTML, emptyBodyHTML, emptyBodyHTML, emptyBodyHTML, testShellBuild).Render(t.Context(), &sb); err != nil {
 		t.Fatalf("Shell.Render: %v", err)
 	}
 	got := sb.String()
@@ -33,6 +33,11 @@ func TestMainScrollsWideContentInsteadOfThePage(t *testing.T) {
 		}
 	}
 }
+
+// testShellBuild is the asset version every Shell call in this file that
+// does not itself test the build parameter passes (#59): a fixed value, so
+// none of the pre-existing assertions below need to know it.
+const testShellBuild = "abc123def456"
 
 // shellTestMarkerHTML renders a nested div of its own, so
 // TestShellRendersSandboxRunDialog's search for .layout's closing tag has to
@@ -49,7 +54,7 @@ var shellTestMarkerHTML = templ.ComponentFunc(func(_ context.Context, w io.Write
 func TestShellRendersSandboxRunDialog(t *testing.T) {
 	t.Parallel()
 	var sb strings.Builder
-	if err := Shell(emptyBodyHTML, shellTestMarkerHTML, emptyBodyHTML, emptyBodyHTML).Render(t.Context(), &sb); err != nil {
+	if err := Shell(emptyBodyHTML, shellTestMarkerHTML, emptyBodyHTML, emptyBodyHTML, testShellBuild).Render(t.Context(), &sb); err != nil {
 		t.Fatalf("Shell.Render: %v", err)
 	}
 	got := sb.String()
@@ -86,7 +91,7 @@ func TestShellRendersSandboxRunDialog(t *testing.T) {
 func TestAlertStripHasBoundedHeight(t *testing.T) {
 	t.Parallel()
 	var sb strings.Builder
-	if err := Shell(emptyBodyHTML, emptyBodyHTML, emptyBodyHTML, emptyBodyHTML).Render(t.Context(), &sb); err != nil {
+	if err := Shell(emptyBodyHTML, emptyBodyHTML, emptyBodyHTML, emptyBodyHTML, testShellBuild).Render(t.Context(), &sb); err != nil {
 		t.Fatalf("Shell.Render: %v", err)
 	}
 	got := sb.String()
@@ -116,7 +121,7 @@ func TestAlertStripHasBoundedHeight(t *testing.T) {
 func TestColumnsScrollOnTheirOwn(t *testing.T) {
 	t.Parallel()
 	var sb strings.Builder
-	if err := Shell(emptyBodyHTML, emptyBodyHTML, emptyBodyHTML, emptyBodyHTML).Render(t.Context(), &sb); err != nil {
+	if err := Shell(emptyBodyHTML, emptyBodyHTML, emptyBodyHTML, emptyBodyHTML, testShellBuild).Render(t.Context(), &sb); err != nil {
 		t.Fatalf("Shell.Render: %v", err)
 	}
 	got := sb.String()
@@ -171,5 +176,40 @@ func TestColumnsScrollOnTheirOwn(t *testing.T) {
 		if !strings.Contains(rule, "overflow-y: auto;") {
 			t.Errorf("rendered shell's %s rule missing %q, got %q", sel, "overflow-y: auto;", rule)
 		}
+	}
+}
+
+// TestShellImportMapPrecedesModuleScripts proves the shell's script URLs
+// carry the build version (#59's acceptance criterion) and that the import
+// map rewriting console.js's relative './keyboard.mjs' import sits before
+// the first module script, since the browser only consults an import map
+// while resolving a specifier it has not yet fetched.
+func TestShellImportMapPrecedesModuleScripts(t *testing.T) {
+	t.Parallel()
+	var sb strings.Builder
+	if err := Shell(emptyBodyHTML, emptyBodyHTML, emptyBodyHTML, emptyBodyHTML, "abc123def456").Render(t.Context(), &sb); err != nil {
+		t.Fatalf("Shell.Render: %v", err)
+	}
+	got := sb.String()
+
+	const wantImportMap = `{"imports":{"/static/keyboard.mjs":"/static/keyboard.mjs?v=abc123def456"}}`
+	importMapIdx := strings.Index(got, wantImportMap)
+	if importMapIdx < 0 {
+		t.Fatalf("rendered shell missing the import map %q; got:\n%s", wantImportMap, got)
+	}
+	if !strings.Contains(got[:importMapIdx], `type="importmap"`) {
+		t.Errorf("rendered shell's import map is not inside a type=\"importmap\" script; got:\n%s", got)
+	}
+
+	moduleIdx := strings.Index(got, `type="module"`)
+	if moduleIdx < 0 {
+		t.Fatalf("rendered shell has no module script")
+	}
+	if importMapIdx > moduleIdx {
+		t.Errorf("rendered shell's import map (index %d) must precede the first module script (index %d)", importMapIdx, moduleIdx)
+	}
+
+	if !strings.Contains(got, `data-build="abc123def456"`) {
+		t.Errorf("rendered shell's body missing data-build=\"abc123def456\"; got:\n%s", got)
 	}
 }

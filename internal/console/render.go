@@ -60,10 +60,10 @@ import (
 // src=...> plus an inline mermaid.initialize call) once at the end of the
 // document. There is no option to register the client renderer without
 // that side effect. The design requires exactly one mermaid load, already
-// wired as the classic, non-module <script src="/static/mermaid.js"> in
-// shell.templ's head (section 6.10, the v10 change log), so this second,
-// library-injected load must never fire. renderMermaidBlock reproduces
-// NewMermaidClientRenderer's own HTML emission byte-for-byte (the escaped
+// wired as the classic, non-module mermaid script tag in shell.templ's
+// head (section 6.10, the v10 change log; its src now carries ?v=, #59),
+// so this second, library-injected load must never fire. renderMermaidBlock
+// reproduces NewMermaidClientRenderer's own HTML emission byte-for-byte (the escaped
 // fence body inside <pre class="mermaid">) but never calls the
 // renderer.Context.Set that arms the decorator, using the package's own
 // documented extension point for this instead (WithRenderer: "the extension
