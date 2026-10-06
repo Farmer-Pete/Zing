@@ -599,21 +599,33 @@ func shipHasMessage(c store.HandlerCommit, body string) bool {
 
 // shipTicketReady drives a ticket all the way to "shipping" through the
 // real planning, building, reviewing, and judging state machines (reusing
-// judging_test.go's own judgeTicketReady, judgeAdvanceStart,
-// judgeOkBothScript, and judgeScriptedCheckCommands, same package), exactly
-// TestJudgePassMovesToShipping's own sequence, then adds a bare git remote
-// (gitfixture.WithBareOrigin) so a real Push/OpenDraftPR has somewhere to
-// land. remoteDir is that bare repository's own directory.
+// judging_test.go's own judgeTicketReady), exactly
+// TestJudgePassMovesToShipping's own sequence, then calls
+// shipTicketReadyFrom for the judge-to-shipping leg and the bare git
+// remote.
 func shipTicketReady(t *testing.T) (s *store.Store, ticket store.Ticket, remoteDir string) {
 	t.Helper()
 	s, judgingTicket := judgeTicketReady(t)
+	ticket, remoteDir = shipTicketReadyFrom(t, s, judgingTicket)
+	return s, ticket, remoteDir
+}
+
+// shipTicketReadyFrom drives judgingTicket (already in the shape
+// judgeTicketReady leaves a ticket in) the rest of the way to "shipping"
+// through the real judge state machine (judgeAdvanceStart,
+// judgeOkBothScript, and judgeScriptedCheckCommands, same package), then
+// adds a bare git remote (gitfixture.WithBareOrigin) so a real
+// Push/OpenDraftPR has somewhere to land. remoteDir is that bare
+// repository's own directory.
+func shipTicketReadyFrom(t *testing.T, s *store.Store, judgingTicket store.Ticket) (ticket store.Ticket, remoteDir string) {
+	t.Helper()
 	rt := runtime.NewFake(judgeScriptsFS(judgeOkBothScript))
 	judgingTicket = judgeAdvanceStart(t, s, rt, judgingTicket) // START round 1
 
 	deps := pbClaim(t, s, rt, judgingTicket.ID)
 	runCommit, err := (judgeHandler{}).Run(t.Context(), judgingTicket, deps) // RUN
 	if err != nil {
-		t.Fatalf("shipTicketReady: judge RUN: %v", err)
+		t.Fatalf("shipTicketReadyFrom: judge RUN: %v", err)
 	}
 	pbApply(t, s, judgingTicket, runCommit)
 
@@ -622,32 +634,32 @@ func shipTicketReady(t *testing.T) (s *store.Store, ticket store.Ticket, remoteD
 	deps2.Commands = checks
 	checkCommit, err := (judgeHandler{}).Run(t.Context(), pbGetTicket(t, s, judgingTicket.ID), deps2) // CHECK
 	if err != nil {
-		t.Fatalf("shipTicketReady: judge CHECK: %v", err)
+		t.Fatalf("shipTicketReadyFrom: judge CHECK: %v", err)
 	}
 	pbApply(t, s, judgingTicket, checkCommit)
 
 	deps3 := pbClaim(t, s, rt, judgingTicket.ID)
 	evalCommit, err := (judgeHandler{}).Run(t.Context(), pbGetTicket(t, s, judgingTicket.ID), deps3) // EVALUATE: pass
 	if err != nil {
-		t.Fatalf("shipTicketReady: judge EVALUATE: %v", err)
+		t.Fatalf("shipTicketReadyFrom: judge EVALUATE: %v", err)
 	}
 	pbApply(t, s, judgingTicket, evalCommit)
 
 	ticket = pbGetTicket(t, s, judgingTicket.ID)
 	if ticket.State != stateShipping {
-		t.Fatalf("shipTicketReady: ticket state = %q, want shipping", ticket.State)
+		t.Fatalf("shipTicketReadyFrom: ticket state = %q, want shipping", ticket.State)
 	}
 
 	proj, err := s.ProjectForTicket(t.Context(), ticket.ID)
 	if err != nil {
-		t.Fatalf("shipTicketReady: ProjectForTicket: %v", err)
+		t.Fatalf("shipTicketReadyFrom: ProjectForTicket: %v", err)
 	}
 	remoteDir, err = gitfixture.WithBareOrigin(t.Context(), proj.LocalPath)
 	if err != nil {
-		t.Fatalf("shipTicketReady: gitfixture.WithBareOrigin: %v", err)
+		t.Fatalf("shipTicketReadyFrom: gitfixture.WithBareOrigin: %v", err)
 	}
 
-	return s, ticket, remoteDir
+	return ticket, remoteDir
 }
 
 // shipSeedPassedRound seeds ticketID (already in the shape judgeTicketReady
@@ -788,6 +800,72 @@ func TestPublishPushesAndOpensDraft(t *testing.T) {
 	}
 	if out, refErr := gitfixture.Git(t.Context(), remoteDir, "show-ref", "--verify", "refs/heads/"+*ticket.Branch); refErr != nil {
 		t.Errorf("bare remote did not receive refs/heads/%s: %v: %s", *ticket.Branch, refErr, out)
+	}
+	if strings.Contains(gh.lastBody, "## Accepted review findings") {
+		t.Errorf("gh.lastBody contains %q, want no section for a clean review", "## Accepted review findings")
+	}
+}
+
+// TestPublishListsAcceptedFindings proves issue #67: a ticket that reached
+// judging through acceptAtCap (every remaining finding at or below the
+// floor, reasonReviewAcceptedAtCap) ships a pull request whose body lists
+// that finding under "## Accepted review findings", right after "##
+// Scenarios" and before "## Declared files".
+func TestPublishListsAcceptedFindings(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow end-to-end flow; runs in the full suite")
+	}
+	t.Parallel()
+	const loopLens = "quality"
+	s, ticket, rt, scripts := driveReviewToCap(t)
+
+	scripts[reviewRoundScriptKey(3, lensFidelity)] = &fstest.MapFile{Data: []byte(reviewOKScript)}
+	scripts[reviewRoundScriptKey(3, loopLens)] = &fstest.MapFile{Data: []byte(findingScript(loopLens, "minor", "still not fixed", "add a comment"))}
+
+	ticket3 := pbGetTicket(t, s, ticket.ID)
+	deps3 := pbClaim(t, s, rt, ticket.ID)
+	commit3, err := (reviewingHandler{}).Run(t.Context(), ticket3, deps3) // round 3: gate reached
+	if err != nil {
+		t.Fatalf("TestPublishListsAcceptedFindings: Run (round 3): %v", err)
+	}
+	if commit3.Reason != reasonReviewAcceptedAtCap {
+		t.Fatalf("commit3.Reason = %q, want %q", commit3.Reason, reasonReviewAcceptedAtCap)
+	}
+	pbApply(t, s, ticket, commit3)
+
+	judgingTicket := pbGetTicket(t, s, ticket.ID)
+	shippingTicket, _ := shipTicketReadyFrom(t, s, judgingTicket)
+
+	gh := &shipGitHub{}
+	tr := &shipTracker{}
+	deps := shipClaim(t, s, pbFakeRuntime(t), shippingTicket.ID, gh, tr)
+
+	commit, err := (shipHandler{}).Run(t.Context(), shippingTicket, deps)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if commit.Escalation != nil {
+		t.Fatalf("got an escalation, want a clean publish: %+v", commit.Escalation.Payload)
+	}
+
+	if !strings.Contains(gh.lastBody, "## Accepted review findings") {
+		t.Fatalf("gh.lastBody does not contain %q:\n%s", "## Accepted review findings", gh.lastBody)
+	}
+	if !strings.Contains(gh.lastBody, prAcceptedZingLead) {
+		t.Errorf("gh.lastBody does not contain %q:\n%s", prAcceptedZingLead, gh.lastBody)
+	}
+	if !strings.Contains(gh.lastBody, "- r3f1 minor ") {
+		t.Errorf("gh.lastBody does not contain %q:\n%s", "- r3f1 minor ", gh.lastBody)
+	}
+
+	scenariosAt := strings.Index(gh.lastBody, "## Scenarios")
+	acceptedAt := strings.Index(gh.lastBody, "## Accepted review findings")
+	declaredAt := strings.Index(gh.lastBody, "## Declared files")
+	if scenariosAt == -1 || acceptedAt == -1 || declaredAt == -1 {
+		t.Fatalf("gh.lastBody is missing a section:\n%s", gh.lastBody)
+	}
+	if scenariosAt >= acceptedAt || acceptedAt >= declaredAt {
+		t.Errorf("section order = Scenarios %d, Accepted review findings %d, Declared files %d, want ascending", scenariosAt, acceptedAt, declaredAt)
 	}
 }
 

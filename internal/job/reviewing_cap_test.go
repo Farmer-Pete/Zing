@@ -930,3 +930,85 @@ func TestLoopGateReplyOnlyRetriesAtCap(t *testing.T) {
 		t.Errorf("fix request message = %q, want it to mention the owner's own reply %q", fixMsg.Body, "looking into it")
 	}
 }
+
+// ---- TestAcceptedAtCapFindingsOwnerPath -------------------------------------
+
+// TestAcceptedAtCapFindingsOwnerPath proves issue #67's reader over the
+// owner's own "d" pick path (TestLoopGateOwnerAcceptsRemainingFindings):
+// acceptedAtCapFindings reads Owner true and the one major finding the
+// owner chose to ship unfixed, from the stored rows, not the thread
+// message.
+func TestAcceptedAtCapFindingsOwnerPath(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow end-to-end flow; runs in the full suite")
+	}
+	t.Parallel()
+	s, ticket, rt, fixreqCommit := driveToReviewLoopsExhausted(t, noopFixScript, noopFixCmd)
+	pbApply(t, s, ticket, fixreqCommit)
+
+	q := newestOpenQuestion(t, s, ticket.ID)
+	pbAnswerEscalation(t, s, ticket.ID, q.ID, escalationChoiceAccept)
+
+	ticket2 := pbGetTicket(t, s, ticket.ID)
+	deps := pbClaim(t, s, rt, ticket.ID)
+	commit, err := (reviewingHandler{}).Run(t.Context(), ticket2, deps) // resolve the owner's own d pick
+	if err != nil {
+		t.Fatalf("Run (accept): %v", err)
+	}
+	if commit.Next != stateJudging {
+		t.Fatalf("commit.Next = %q, want %q", commit.Next, stateJudging)
+	}
+	pbApply(t, s, ticket, commit)
+
+	deps2 := pbClaim(t, s, rt, ticket.ID)
+	got, err := acceptedAtCapFindings(t.Context(), pbGetTicket(t, s, ticket.ID), deps2)
+	if err != nil {
+		t.Fatalf("acceptedAtCapFindings: %v", err)
+	}
+	if !got.Owner {
+		t.Errorf("Owner = %v, want true", got.Owner)
+	}
+	if len(got.Rows) != 1 {
+		t.Fatalf("Rows = %+v, want exactly one", got.Rows)
+	}
+	if got.Rows[0].Severity != response.SeverityMajor {
+		t.Errorf("Rows[0].Severity = %q, want %q", got.Rows[0].Severity, response.SeverityMajor)
+	}
+	if got.Rows[0].Text != "[fidelity] still broken" {
+		t.Errorf("Rows[0].Text = %q, want %q", got.Rows[0].Text, "[fidelity] still broken")
+	}
+	if !strings.HasPrefix(got.Rows[0].ID, "r3f") {
+		t.Errorf("Rows[0].ID = %q, want prefix %q", got.Rows[0].ID, "r3f")
+	}
+}
+
+// ---- TestAcceptedAtCapFindingsNoRows -----------------------------------------
+
+// TestAcceptedAtCapFindingsNoRows pins acceptedAtCapFindings' own empty-rows
+// branch (design shape, the Warn log line): an accept reason on the
+// reviewing-to-judging state change with no accepted finding rows stored
+// still returns Owner's own value and no error, leaving the section out.
+func TestAcceptedAtCapFindingsNoRows(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow end-to-end flow; runs in the full suite")
+	}
+	t.Parallel()
+	s, ticket, _ := reviewTicketReady(t)
+
+	deps := pbClaim(t, s, runtime.NewFake(reviewScriptsFS(nil)), ticket.ID)
+	c := baseCommit(ticket, deps)
+	c.Next = stateJudging
+	c.Reason = reasonReviewAcceptedAtCap
+	pbApply(t, s, ticket, c)
+
+	got, err := acceptedAtCapFindings(t.Context(), pbGetTicket(t, s, ticket.ID), deps)
+	if err != nil {
+		t.Fatalf("acceptedAtCapFindings: %v", err)
+	}
+	if got.Owner {
+		t.Errorf("Owner = %v, want false", got.Owner)
+	}
+	if len(got.Rows) != 0 {
+		t.Errorf("Rows = %+v, want none", got.Rows)
+	}
+}
