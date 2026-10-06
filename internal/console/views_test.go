@@ -1021,6 +1021,9 @@ func TestThreadDraftItemClearsAfterSend(t *testing.T) {
 		`" data-draft-question="`+strconv.FormatInt(questionID, 10)+`" data-item-ref="b.go" data-decision="drop"`) {
 		t.Errorf("b.go's still-unsent draft decision missing its picked rendering; got:\n%s", g)
 	}
+	if strings.Contains(g, `data-decision="reject"`) {
+		t.Errorf("perimeter group must never render a reject button; got:\n%s", g)
+	}
 }
 
 // reviewQuestionPayload builds a minimal, schema-valid review question

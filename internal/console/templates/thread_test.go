@@ -757,18 +757,6 @@ func TestThreadRendersSandboxRunBox(t *testing.T) {
 	})
 }
 
-// decisionButtonTexts returns the decision words rendered by itemRows, in
-// document order, by matching each decision button's own text content.
-func decisionButtonTexts(t *testing.T, rendered string) []string {
-	t.Helper()
-	matches := regexp.MustCompile(`>(accept|drop|discuss|reject)</button>`).FindAllStringSubmatch(rendered, -1)
-	words := make([]string, len(matches))
-	for i, m := range matches {
-		words[i] = m[1]
-	}
-	return words
-}
-
 // renderItemRows renders itemRows(1, 2, items, decisions, pickedItems, nil,
 // false, true) to a string, failing the test on a render error.
 func renderItemRows(t *testing.T, items []ThreadItem, decisions []response.Decision, pickedItems map[string]response.Decision) string {
@@ -789,14 +777,24 @@ func TestItemRowsSameDecisionLabels(t *testing.T) {
 	t.Parallel()
 	item := []ThreadItem{{Ref: "a.go", Text: "Builder: x Change: y"}}
 
-	perimeter := renderItemRows(t, item, itemDecisionsPerimeter, nil)
-	if got, want := decisionButtonTexts(t, perimeter), []string{"accept", "drop"}; !slices.Equal(got, want) {
-		t.Errorf("perimeter itemRows decision labels = %v, want %v; got:\n%s", got, want, perimeter)
+	buttonText := regexp.MustCompile(`>(accept|drop|discuss|reject)</button>`)
+	tests := []struct {
+		decisions []response.Decision
+		want      []string
+	}{
+		{itemDecisionsPerimeter, []string{"accept", "drop"}},
+		{itemDecisionsReview, []string{"accept", "drop", "discuss"}},
 	}
-
-	review := renderItemRows(t, item, itemDecisionsReview, nil)
-	if got, want := decisionButtonTexts(t, review), []string{"accept", "drop", "discuss"}; !slices.Equal(got, want) {
-		t.Errorf("review itemRows decision labels = %v, want %v; got:\n%s", got, want, review)
+	for _, tc := range tests {
+		rendered := renderItemRows(t, item, tc.decisions, nil)
+		matches := buttonText.FindAllStringSubmatch(rendered, -1)
+		got := make([]string, len(matches))
+		for i, m := range matches {
+			got[i] = m[1]
+		}
+		if !slices.Equal(got, tc.want) {
+			t.Errorf("itemRows decision labels = %v, want %v; got:\n%s", got, tc.want, rendered)
+		}
 	}
 
 	picked := renderItemRows(t, item, itemDecisionsPerimeter, map[string]response.Decision{"a.go": response.DecisionReject})
