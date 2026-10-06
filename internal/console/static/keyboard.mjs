@@ -629,25 +629,12 @@ export function sendResultWithUnsent(text, unsent, stale = 0) {
  * @returns {{ids: number[], keys: string[], confirm: boolean}}
  */
 export function sendTargets(questions, focusedID) {
-	const targets = (questions ?? []).filter(isSendTarget);
+	const targets = (questions ?? []).filter((q) => q.hasDraft && !q.conflicted);
 	const ids = targets.map((q) => q.id);
 	const keys = targets.map((q) => q.key);
 	const onlyFocused = ids.length === 1 && ids[0] === focusedID;
 	const confirm = ids.length > 0 && !onlyFocused;
 	return { ids, keys, confirm };
-}
-
-/**
- * isSendTarget is the one hasDraft-and-not-conflicted filter sendTargets and
- * reviewNoteTargets both apply to decide which of collectSendQuestions'
- * descriptors a send actually covers, named once so the two cannot drift
- * apart (review fix, quality).
- *
- * @param {{hasDraft: boolean, conflicted: boolean}} q
- * @returns {boolean}
- */
-export function isSendTarget(q) {
-	return q.hasDraft && !q.conflicted;
 }
 
 /**
@@ -688,7 +675,7 @@ export const reviewNoteWarningText = 'This sends your note to the lens and keeps
  * @returns {boolean}
  */
 export function reviewNoteTargets(questions) {
-	return (questions ?? []).some((q) => isSendTarget(q) && q.reviewNote);
+	return (questions ?? []).some((q) => q.hasDraft && !q.conflicted && q.reviewNote);
 }
 
 /**
@@ -968,6 +955,65 @@ export function buildItemDraftBody(dataset, note) {
 		question: Number(dataset?.draftQuestion),
 		item,
 	};
+}
+
+/**
+ * itemNoteBody builds POST /draft's JSON body for a review item's note box
+ * save (console.js's installItemNoteSave and postSendBatchLocked's pre-send
+ * flush, ticket #68): dataset is the note box's own data-note-ticket,
+ * data-note-question, and data-item-ref (thread.templ's itemRow), decision
+ * is the row's already-picked decision button's data-decision value, and
+ * note is the box's current value. Returns null when decision is empty or
+ * missing (owner decision Q2: a note needs a pick on its row before it can
+ * save), so the caller can show pickBeforeNoteText instead of posting a
+ * request the server would refuse.
+ *
+ * @param {{noteTicket?: string, noteQuestion?: string, itemRef?: string}} dataset
+ * @param {string} [decision]
+ * @param {string} [note]
+ * @returns {{ticket: number, question: number, item: {ref: string, decision: string, note: string}}|null}
+ */
+export function itemNoteBody(dataset, decision, note) {
+	if (!decision) {
+		return null;
+	}
+	return {
+		ticket: Number(dataset?.noteTicket),
+		question: Number(dataset?.noteQuestion),
+		item: { ref: dataset?.itemRef ?? '', decision, note: note ?? '' },
+	};
+}
+
+/**
+ * itemNoteFlushTargets decides which review item note boxes
+ * postSendBatchLocked must flush before /send runs (review fix, tests):
+ * boxes is one descriptor per "#main .item-note" box -- its current value,
+ * its defaultValue (what the page rendered), its own dataset
+ * (data-note-ticket, data-note-question, data-item-ref), and picked, the
+ * row's picked decision button's {decision, draftQuestion} or null when the
+ * row has none yet. questionIDs is the send's own target question ids
+ * (sendTargets' ids). A box is skipped, and flushes nothing, when its value
+ * has not changed from defaultValue, when its row has no picked decision,
+ * or when its question is not one of questionIDs: without these three
+ * checks, sending one question flushed every item-note box on the page,
+ * including one on a revisable, already-answered review question the owner
+ * never touched this send, creating an unintended new draft answer there.
+ *
+ * @param {{value: string, defaultValue: string, dataset: {noteTicket?: string, noteQuestion?: string, itemRef?: string}, picked: {decision: string, draftQuestion: string}|null}[]} boxes
+ * @param {number[]} questionIDs
+ * @returns {{ticket: number, question: number, item: {ref: string, decision: string, note: string}}[]}
+ */
+export function itemNoteFlushTargets(boxes, questionIDs) {
+	const ids = new Set(questionIDs ?? []);
+	return (boxes ?? [])
+		.filter((b) => b.value !== b.defaultValue)
+		.map((b) => {
+			if (!b.picked || !ids.has(Number(b.picked.draftQuestion))) {
+				return null;
+			}
+			return itemNoteBody(b.dataset, b.picked.decision, b.value);
+		})
+		.filter((body) => body != null);
 }
 
 /**

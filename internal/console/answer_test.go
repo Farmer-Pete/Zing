@@ -270,6 +270,27 @@ func TestDraft_ItemNoteOverLengthIsRejected(t *testing.T) {
 	}
 }
 
+// TestDraft_ItemNoteAtExactCapIsAccepted proves the 8000-rune cap counts
+// runes, not bytes: 8000 multi-byte runes is well past 8000 bytes but is
+// still accepted, pinning the cap to the handler's rune-length promise.
+func TestDraft_ItemNoteAtExactCapIsAccepted(t *testing.T) {
+	t.Parallel()
+	s := newConsoleTestStore(t)
+	ticketID := seedTicket(t, s, "fake#1", "Add a hello endpoint")
+	questionID := seedOpenReviewQuestion(t, s, ticketID)
+
+	srv, _ := newMutationTestServer(t, s, bus.New(), newTestLogHandler(t))
+
+	atCap := strings.Repeat("é", 8000)
+	body := fmt.Sprintf(`{"ticket":%d,"question":%d,"item":{"ref":"a.go","decision":"discuss","note":%q}}`,
+		ticketID, questionID, atCap)
+	resp := doRequest(t, mutationRequest(t, srv, "/draft", body))
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusNoContent {
+		t.Fatalf("status = %d, want 204", resp.StatusCode)
+	}
+}
+
 // TestDraft_RejectsMalformedAndOversizedBodies proves the transport-layer
 // checks POST /draft runs before SaveDraft ever sees the body (design
 // section 6.7): malformed JSON and an unknown field are 400, and a body

@@ -44,6 +44,8 @@ import {
 	stepComposerIndex,
 	buildChipDraftBody,
 	buildItemDraftBody,
+	itemNoteBody,
+	itemNoteFlushTargets,
 	pickBeforeNoteText,
 	unsavedReplyBody,
 	unsavedReplyBodies,
@@ -540,6 +542,63 @@ test('buildItemDraftBody: omitting the note argument leaves item.note off the bo
 
 test('pickBeforeNoteText: is the hint shown before any decision is picked', () => {
 	assert.equal(pickBeforeNoteText, 'Pick a decision to save this note');
+});
+
+// itemNoteBody: the review item note box's own /draft body (installItemNoteSave
+// and postSendBatchLocked's pre-send flush), reading the note box's own
+// data-note-ticket, data-note-question, and data-item-ref, plus the row's
+// picked decision.
+
+test('itemNoteBody: returns null without a decision', () => {
+	const dataset = { noteTicket: '12', noteQuestion: '34', itemRef: 'src/main.go' };
+	assert.equal(itemNoteBody(dataset, '', 'out of scope'), null);
+	assert.equal(itemNoteBody(dataset, undefined, 'out of scope'), null);
+});
+
+test('itemNoteBody: returns the full body with a decision', () => {
+	const dataset = { noteTicket: '12', noteQuestion: '34', itemRef: 'src/main.go' };
+	assert.deepEqual(itemNoteBody(dataset, 'drop', 'out of scope'), {
+		ticket: 12,
+		question: 34,
+		item: { ref: 'src/main.go', decision: 'drop', note: 'out of scope' },
+	});
+});
+
+// itemNoteFlushTargets: postSendBatchLocked's pre-send decision over which
+// item-note boxes to flush (review fix, tests): a box whose value has not
+// changed, one with no picked decision on its row, and one on a question
+// outside this send are each skipped, so one send cannot create an
+// unintended draft answer on a review question the owner never touched.
+
+function noteBox({ value, defaultValue, decision, questionID, noteTicket = '1', noteQuestion = '5', itemRef = 'a.go' }) {
+	return {
+		value,
+		defaultValue,
+		dataset: { noteTicket, noteQuestion, itemRef },
+		picked: decision ? { decision, draftQuestion: String(questionID) } : null,
+	};
+}
+
+test('itemNoteFlushTargets: skips a box whose value has not changed', () => {
+	const box = noteBox({ value: 'same', defaultValue: 'same', decision: 'drop', questionID: 5 });
+	assert.deepEqual(itemNoteFlushTargets([box], [5]), []);
+});
+
+test('itemNoteFlushTargets: skips a row with no picked decision', () => {
+	const box = noteBox({ value: 'new text', defaultValue: '', decision: null, questionID: 5 });
+	assert.deepEqual(itemNoteFlushTargets([box], [5]), []);
+});
+
+test('itemNoteFlushTargets: skips a question outside this send', () => {
+	const box = noteBox({ value: 'new text', defaultValue: '', decision: 'drop', questionID: 5 });
+	assert.deepEqual(itemNoteFlushTargets([box], [9]), []);
+});
+
+test('itemNoteFlushTargets: posts a changed, picked, in-send box with its note', () => {
+	const box = noteBox({ value: 'out of scope', defaultValue: '', decision: 'drop', questionID: 5 });
+	assert.deepEqual(itemNoteFlushTargets([box], [5]), [
+		{ ticket: 1, question: 5, item: { ref: 'a.go', decision: 'drop', note: 'out of scope' } },
+	]);
 });
 
 // ownerEditFieldEntries: the owner-edit box's own field-to-body decision

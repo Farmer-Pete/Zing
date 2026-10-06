@@ -25,6 +25,8 @@ import {
 	stepComposerIndex,
 	buildChipDraftBody,
 	buildItemDraftBody,
+	itemNoteBody,
+	itemNoteFlushTargets,
 	pickBeforeNoteText,
 	unsavedReplyBody,
 	unsavedReplyBodies,
@@ -529,27 +531,6 @@ async function postDraftRequest(el, ticket, question, text) {
 	}
 }
 
-// installChipActivation wires a delegated click listener for the
-// composer's option chips (thread.templ's optionChips) and per-item
-// accept/reject/drop/discuss controls (itemRow) -- the missing half of
-// "pick then save" (design section 6.6, 6.7, code review fix 1). Each
-// control's own data-on:click (thread.templ's pickToggleExpr) already
-// toggles its "picked" class; this listener is what actually POSTs /draft
-// with the picked value, so an option or item answer queues before /send
-// runs. Delegated from document, like installSideBox and
-// installLogControls, because #main is morphed by every /stream patch. A
-// direct mouse click and pickChip's chip.click() (the 1..9 key path) both
-// dispatch the same bubbling click event, so this one listener covers both
-// activation paths.
-// pickedDecisionFor returns noteEl's row's picked decision button, or null
-// when the row has none yet (review fix, quality): installItemNoteSave and
-// postSendBatchLocked's note flush both need the row's already-picked
-// decision to build a /draft body for its note, and this is the one lookup
-// both now share rather than each writing it out separately.
-function pickedDecisionFor(noteEl) {
-	return noteEl.closest('.item-row')?.querySelector('.item-decisions .decision.picked') ?? null;
-}
-
 // itemRowDraftChains serializes /draft posts for the same review item row
 // (review fix, correctness): a note edit's 'change' and a decision click on
 // the same row can land in the same tick -- blurring the note box to click a
@@ -562,6 +543,8 @@ function pickedDecisionFor(noteEl) {
 // posts always land in the order they were made.
 const itemRowDraftChains = new Map();
 
+// postItemDraft posts body to /draft, chained after any earlier post for the
+// same ticket, question, and ref (itemRowDraftChains above).
 function postItemDraft(dataset, body) {
 	const key = `${dataset.draftTicket}:${dataset.draftQuestion}:${dataset.itemRef}`;
 	const prior = itemRowDraftChains.get(key) ?? Promise.resolve();
@@ -575,6 +558,18 @@ function postItemDraft(dataset, body) {
 	return result;
 }
 
+// installChipActivation wires a delegated click listener for the
+// composer's option chips (thread.templ's optionChips) and per-item
+// accept/reject/drop/discuss controls (itemRow) -- the missing half of
+// "pick then save" (design section 6.6, 6.7, code review fix 1). Each
+// control's own data-on:click (thread.templ's pickToggleExpr) already
+// toggles its "picked" class; this listener is what actually POSTs /draft
+// with the picked value, so an option or item answer queues before /send
+// runs. Delegated from document, like installSideBox and
+// installLogControls, because #main is morphed by every /stream patch. A
+// direct mouse click and pickChip's chip.click() (the 1..9 key path) both
+// dispatch the same bubbling click event, so this one listener covers both
+// activation paths.
 function installChipActivation() {
 	document.addEventListener('click', (event) => {
 		const chip = event.target.closest?.('.chip');
@@ -610,10 +605,9 @@ function installChipActivation() {
 // item's note box (thread.templ's itemRow, task 3; owner decision Q2): a
 // decision must already be picked on the same row for the note to save.
 // Without one, it shows pickBeforeNoteText in the row's .item-note-hint
-// instead of posting a request the server would refuse. The note box
-// carries no data-draft-* of its own (review fix, simplification): the
-// row's already-picked decision button is where buildItemDraftBody reads
-// ticket, question, and ref from, the same as installChipActivation above.
+// instead of posting a request the server would refuse. itemNoteBody reads
+// the note box's own data-note-ticket, data-note-question, and
+// data-item-ref, plus the row's already-picked decision button's decision.
 function installItemNoteSave() {
 	document.addEventListener('change', (event) => {
 		const noteEl = event.target.closest?.('.item-note');
@@ -622,8 +616,9 @@ function installItemNoteSave() {
 		}
 		const row = noteEl.closest('.item-row');
 		const hint = row?.querySelector('.item-note-hint');
-		const picked = pickedDecisionFor(noteEl);
-		if (!picked) {
+		const picked = row?.querySelector('.item-decisions .decision.picked');
+		const body = picked ? itemNoteBody(noteEl.dataset, picked.dataset.decision, noteEl.value) : null;
+		if (!body) {
 			if (hint) {
 				hint.textContent = pickBeforeNoteText;
 			}
@@ -632,7 +627,7 @@ function installItemNoteSave() {
 		if (hint) {
 			hint.textContent = '';
 		}
-		postItemDraft(picked.dataset, buildItemDraftBody(picked.dataset, noteEl.value));
+		postItemDraft(picked.dataset, body);
 	});
 }
 
@@ -706,7 +701,7 @@ function showSendResult(text) {
 // cause 2, Q5): sendTargets drops such a question even though it has a
 // draft, since sending it would send the other tab's text, not what the
 // owner has not yet typed over. reviewNote is true when the question's own
-// data-kind (thread.templ's itemRow) is "review" and its reply box holds
+// data-kind (thread.templ's questionGroup) is "review" and its reply box holds
 // text: a free reply there is still a discussion note to the lens and does
 // not answer the question, so reviewNoteTargets uses this to decide whether
 // sendBatch's confirm dialog must warn about it (Q4).
@@ -1153,25 +1148,26 @@ async function postSendBatchLocked(ticket, questions) {
 	// and left unblurred would otherwise still be sitting only in the DOM
 	// when /send runs below. Flushing every such box's note here, ahead of
 	// the reply saves, means /send always sees the note the box currently
-	// shows. Only a row with a picked decision has anything to save, and
-	// only a note that actually changed from what the page rendered (el.value
-	// differs from el.defaultValue), and only for a question actually in
-	// questions (review fix, correctness): without those checks, sending one
-	// question flushed every item-note box on the page, including one on a
-	// revisable, already-answered review question whose picks come only from
-	// the last sent answer (views.go's buildThreadQuestion fallback), never a
-	// draft -- creating an unintended new draft answer on a question the
-	// owner never touched this send.
-	const noteSaves = Array.from(document.querySelectorAll('#main .item-note'))
-		.filter((el) => el.value !== el.defaultValue)
-		.map((el) => {
-			const picked = pickedDecisionFor(el);
-			if (!picked || !questions.includes(Number(picked.dataset.draftQuestion))) {
-				return null;
-			}
-			return postItemDraft(picked.dataset, buildItemDraftBody(picked.dataset, el.value));
-		})
-		.filter((p) => p != null);
+	// shows. itemNoteFlushTargets (review fix, tests) is the pure decision
+	// over which boxes qualify -- changed, picked, and in this send -- kept
+	// in keyboard.mjs so it has its own Node coverage: without those checks,
+	// sending one question flushed every item-note box on the page,
+	// including one on a revisable, already-answered review question whose
+	// picks come only from the last sent answer (views.go's
+	// buildThreadQuestion fallback), never a draft -- creating an unintended
+	// new draft answer on a question the owner never touched this send.
+	const boxes = Array.from(document.querySelectorAll('#main .item-note')).map((el) => {
+		const picked = el.closest('.item-row')?.querySelector('.item-decisions .decision.picked');
+		return {
+			value: el.value,
+			defaultValue: el.defaultValue,
+			dataset: el.dataset,
+			picked: picked ? { decision: picked.dataset.decision, draftQuestion: picked.dataset.draftQuestion } : null,
+		};
+	});
+	const noteSaves = itemNoteFlushTargets(boxes, questions).map((body) =>
+		postItemDraft({ draftTicket: String(body.ticket), draftQuestion: String(body.question), itemRef: body.item.ref }, body),
+	);
 	await Promise.all(noteSaves);
 
 	const inputs = Array.from(document.querySelectorAll('#main .reply-input'));
