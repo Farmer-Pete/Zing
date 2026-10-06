@@ -446,6 +446,61 @@ func TestRunJob_HappyPathReservesFillsRequestAndRuns(t *testing.T) {
 	}
 }
 
+// TestRunJob_BuildRunCarriesDenyList proves runJobWith fills req.DenyBash
+// from the ticket's project (TestCmd, LintCmd, then Deny, duplicates
+// dropped) only for the build job, and that req.Timeout always comes from
+// jobTimeout, the machine's own timeout_minutes for that job.
+func TestRunJob_BuildRunCarriesDenyList(t *testing.T) {
+	t.Parallel()
+	const (
+		denyTestCmd = "make test"
+		denyLintCmd = "make lint"
+		denyGoTest  = "go test ./..."
+	)
+	s := newRunJobTestStore(t)
+	ticketID := seedRunJobTicket(t, s)
+	ticket := getRunJobTicket(t, s, ticketID)
+	owner, expires := claimRunJobTicket(t, s, ticketID)
+
+	counting := &countingRuntime{rt: stubRunResult{}}
+	set, err := runtime.NewSet(map[string]runtime.Runtime{testRuntimeClaude: counting, testRuntimeCodex: counting, runtimeFake: counting})
+	if err != nil {
+		t.Fatalf("runtime.NewSet: %v", err)
+	}
+
+	d := Deps{
+		Store: s, Runtimes: set, Machine: runJobTestMachine(t), Models: map[string]string{testModelAlias: testModelExact},
+		Budget: time.Hour, Owner: owner, Expires: expires, Reserve: realReserve(s, owner, expires),
+		DataDir: t.TempDir(), Sandboxes: sandbox.OffSet(),
+		Projects: map[int64]Project{
+			ticket.ProjectID: {TestCmd: denyTestCmd, LintCmd: denyLintCmd, Deny: []string{denyGoTest, denyTestCmd}},
+		},
+	}
+
+	_, err = runJob(t.Context(), d, ticket, jobBuildName, store.SessionUpsert{Job: jobBuildName, Runtime: testRuntimeClaude},
+		runtime.RunRequest{Job: response.JobBuild, Label: "1"}, nil, nil, 0)
+	if err != nil {
+		t.Fatalf("runJob (build): %v", err)
+	}
+	wantDeny := []string{denyTestCmd, denyLintCmd, denyGoTest}
+	if !slices.Equal(counting.lastReq.DenyBash, wantDeny) {
+		t.Errorf("build DenyBash = %v, want %v", counting.lastReq.DenyBash, wantDeny)
+	}
+	const wantBuildTimeout = 45 * time.Minute // machine.toml jobs.build.timeout_minutes
+	if counting.lastReq.Timeout != wantBuildTimeout {
+		t.Errorf("build Timeout = %v, want %v", counting.lastReq.Timeout, wantBuildTimeout)
+	}
+
+	_, err = runJob(t.Context(), d, ticket, testJobClassify, store.SessionUpsert{Job: testJobClassify, Runtime: testRuntimeClaude},
+		runtime.RunRequest{Job: response.JobClassify}, nil, nil, 0)
+	if err != nil {
+		t.Fatalf("runJob (classify): %v", err)
+	}
+	if len(counting.lastReq.DenyBash) != 0 {
+		t.Errorf("classify DenyBash = %v, want empty", counting.lastReq.DenyBash)
+	}
+}
+
 // TestRunJobWith_OnStartRecordsRunStart proves runJobWith's own OnStart
 // closure (design section 7.1, #45): the fake runtime calls it with PID 0
 // and the session id it minted, before running the fake's scripted turn,

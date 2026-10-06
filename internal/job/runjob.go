@@ -12,6 +12,7 @@ import (
 	"strconv"
 	"time"
 
+	"zing/internal/machine"
 	"zing/internal/proc"
 	"zing/internal/runtime"
 	"zing/internal/sandbox"
@@ -79,6 +80,12 @@ func budgetExhausted(agentSeconds int64, budget time.Duration) (exhausted bool, 
 	return
 }
 
+// jobTimeout is the one place a job's run timeout comes from: runJobWith's
+// context deadline and deadlineInput's told deadline (task 5) both read it.
+func jobTimeout(jobCfg machine.Job) time.Duration {
+	return time.Duration(jobCfg.TimeoutMinutes) * time.Minute
+}
+
 // runJobWith is runJob with an afterReserve hook (PKG9-PLAN.md section
 // 7.3): runJob itself calls this with a nil hook, which reproduces its
 // exact former behavior byte for byte. For a job whose profile is
@@ -134,7 +141,10 @@ func runJobWith(
 	}
 
 	req.Tools = jobCfg.Tools
-	req.Timeout = time.Duration(jobCfg.TimeoutMinutes) * time.Minute
+	req.Timeout = jobTimeout(jobCfg)
+	if jobName == jobBuildName {
+		req.DenyBash = d.Projects[t.ProjectID].DenyCommands()
+	}
 
 	// rsv is declared here, ahead of the sandbox/temp-root step's own defer,
 	// so a cleanup closure (below) can log the run id Reserve fixes further

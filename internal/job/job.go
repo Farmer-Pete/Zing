@@ -14,6 +14,7 @@ import (
 	"io"
 	"slices"
 	"strconv"
+	"strings"
 	"time"
 
 	"zing/internal/machine"
@@ -157,8 +158,12 @@ type Project struct {
 	// FixCmd is config projects[i].commands.fix: owner-set, trusted like
 	// test and lint, run in the build sandbox; empty runs no fix.
 	FixCmd string
-	Owner  string // the GitHub repository owner serve fills every project with (PKG9-PLAN.md section 10.3)
-	Repo   string // the GitHub repository name serve fills every project with (PKG9-PLAN.md section 10.3)
+	// Deny is config projects[i].commands.deny: additional Bash command
+	// prefixes a build or fix run may not run, on top of TestCmd and
+	// LintCmd (DenyCommands).
+	Deny  []string
+	Owner string // the GitHub repository owner serve fills every project with (PKG9-PLAN.md section 10.3)
+	Repo  string // the GitHub repository name serve fills every project with (PKG9-PLAN.md section 10.3)
 	// PullRequests, Flips, Checks, and Threads are the shipping and respond
 	// handlers' own window onto GitHub (PKG9-PLAN.md section 10.3): serve
 	// fills all four from one shared *orchestrator.GitHubClient; a test fake
@@ -167,6 +172,23 @@ type Project struct {
 	Flips        DraftFlips
 	Checks       Checks
 	Threads      ReviewThreads
+}
+
+// DenyCommands returns p's deny list for a build run's PreToolUse hook:
+// TestCmd, LintCmd, then Deny, each normalized to single spaces, empties
+// dropped, and a later duplicate of an earlier entry dropped.
+func (p Project) DenyCommands() []string {
+	seen := make(map[string]bool, len(p.Deny)+2)
+	var out []string
+	for _, cmd := range append([]string{p.TestCmd, p.LintCmd}, p.Deny...) {
+		norm := strings.Join(strings.Fields(cmd), " ")
+		if norm == "" || seen[norm] {
+			continue
+		}
+		seen[norm] = true
+		out = append(out, norm)
+	}
+	return out
 }
 
 // CommandIO is what a CommandRunner caller can attach to one command. The
