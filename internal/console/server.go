@@ -168,8 +168,9 @@ type console struct {
 //	POST /loglevel               change the runtime log level (design section 6.12, 7.1)
 //	POST /debug                  toggle one ticket's per-ticket debug override (design section 6.12, 7.1)
 //	POST /side                  the inert side box's fixed reply (design section 6.11, 7.1)
-//	POST /stop                  the s/S keyboard keys: stop everything, or one ticket (design section 6.11, 7.1)
+//	POST /stop                  stop everything, or one ticket; no keyboard key offers this yet (design section 6.11, 7.1)
 //	POST /projects/{id}/pickup  manual intake: pick up one issue by number (PKG9-PLAN.md D29)
+//	POST /tickets/{id}/edit     the owner edits a sealed scenario, a sealed plan's task, or the ticket body
 //	POST /tickets/{id}/sandbox-run  run one command in a ticket's worktree as CHECK runs it (loopback only)
 //	GET  /runs/{id}/{kind}      one run's final message, stderr, or transcript, as plain text
 //	GET  /push/key               the VAPID public key (design section 6.13, 7.1)
@@ -247,6 +248,7 @@ func New(st *store.Store, b *bus.Broker, m *machine.Machine, hosts []string, por
 	mux.HandleFunc("POST /side", withWriteDeadline(guard.requireSameOrigin(c.handleSide)))
 	mux.HandleFunc("POST /stop", withWriteDeadline(guard.requireSameOrigin(c.handleStop)))
 	mux.HandleFunc("POST /projects/{id}/pickup", withWriteDeadline(guard.requireSameOrigin(c.handlePickup)))
+	mux.HandleFunc("POST /tickets/{id}/edit", withWriteDeadline(guard.requireSameOrigin(c.handleOwnerEdit)))
 	mux.HandleFunc("POST /tickets/{id}/sandbox-run", requireLoopback(guard.requireSameOrigin(c.handleSandboxRun))) // long-running: no write deadline
 	mux.HandleFunc("GET /runs/{id}/{kind}", withWriteDeadline(guard.requireAllowedHost(c.handleRunFile)))
 	mux.HandleFunc("GET /push/key", withWriteDeadline(c.handlePushKey))

@@ -48,9 +48,9 @@ const (
 // runs first because it can repair the very findings lint would otherwise
 // fail on (#79 plan task 2).
 const (
-	checkKindFix  = "fix"
-	checkKindLint = "lint"
-	checkKindTest = "test"
+	checkKindFix  = string(store.CheckKindFix)
+	checkKindLint = string(store.CheckKindLint)
+	checkKindTest = string(store.CheckKindTest)
 )
 
 // checkNow is the clock runCheckCommands measures its budget with; a test
@@ -102,14 +102,20 @@ func buildTimeout(m *machine.Machine) time.Duration {
 func runCheckCommands(ctx context.Context, d Deps, t store.Ticket, wt orchestrator.Worktree, proj Project, rid *int64) ([]commandResult, error) {
 	budget := checkBudget(d)
 	budgetStart := checkNow()
-	commands := []struct{ kind, cmd string }{{checkKindLint, proj.LintCmd}, {checkKindTest, proj.TestCmd}}
+	commands := []struct {
+		kind store.CheckKind
+		cmd  string
+	}{{store.CheckKindLint, proj.LintCmd}, {store.CheckKindTest, proj.TestCmd}}
 	if proj.FixCmd != "" {
-		commands = append([]struct{ kind, cmd string }{{checkKindFix, proj.FixCmd}}, commands...)
+		commands = append([]struct {
+			kind store.CheckKind
+			cmd  string
+		}{{store.CheckKindFix, proj.FixCmd}}, commands...)
 	}
 	results := make([]commandResult, 0, len(commands))
 	for _, c := range commands {
 		var before []orchestrator.Change
-		if c.kind == checkKindFix {
+		if c.kind == store.CheckKindFix {
 			var snapErr error
 			if before, snapErr = proj.Orch.ChangedPaths(ctx, wt); snapErr != nil {
 				return nil, fmt.Errorf("job: check: before fix: %w", snapErr)
@@ -120,18 +126,18 @@ func runCheckCommands(ctx context.Context, d Deps, t store.Ticket, wt orchestrat
 		// budget.
 		remaining := budget - checkNow().Sub(budgetStart)
 		if remaining <= 0 {
-			results = append(results, commandResult{Kind: c.kind, Cmd: c.cmd, Exit: -1, NotRun: true, Budget: budget})
+			results = append(results, commandResult{Kind: string(c.kind), Cmd: c.cmd, Exit: -1, NotRun: true, Budget: budget})
 			break
 		}
 		var gen int64
 		onStart := func(pgid int) {
-			gen = recordCheckStart(ctx, d, t.ID, c.kind, pgid, budgetStart)
+			gen = recordCheckStart(ctx, d, t.ID, rid, c.kind, pgid, budgetStart)
 		}
-		r, err := runCheckCommand(ctx, d, t, wt, proj, rid, c.kind, c.cmd, remaining, onStart)
+		r, err := runCheckCommand(ctx, d, t, wt, proj, rid, string(c.kind), c.cmd, remaining, onStart)
 		if gen > 0 {
 			clearCheckStart(ctx, d, t.ID, gen)
 		}
-		if c.kind == checkKindFix {
+		if c.kind == store.CheckKindFix {
 			// Keep fix inside the unit's lane (owner decision Q3): restore
 			// every path it changed that was not changed before it ran.
 			// Git-ignored paths are not listed and never reach a commit.
@@ -198,24 +204,26 @@ func runCheckCommands(ctx context.Context, d Deps, t store.Ticket, wt orchestrat
 // recordCheckStart is a CHECK command's OnStart body, mirroring runjob.go's
 // recordRunStart: it reads the group leader's start token ("" with a WARN
 // when it cannot) and records the group under the claim (plan D10). A
-// failed write is logged at WARN and the command keeps running: the same
-// accepted risk #45 takes for runs, since no row means reclaim treats the
-// command as gone. It returns the record's generation, 0 when nothing was
-// recorded.
-func recordCheckStart(ctx context.Context, d Deps, ticketID int64, kind string, pgid int, budgetStart time.Time) int64 {
+// failed write is logged at ERROR and the command keeps running untracked:
+// no row means reclaim cannot find or reap it, so the failure counts as an
+// error rather than a warning (#46). rid is the unit's newest ok run, or
+// nil during adoption, logged alongside runCheckCommands' own lines so an
+// untracked command can be tied to the run that started it (review r1f3).
+// It returns the record's generation, 0 when nothing was recorded.
+func recordCheckStart(ctx context.Context, d Deps, ticketID int64, rid *int64, kind store.CheckKind, pgid int, budgetStart time.Time) int64 {
 	token, err := proc.StartToken(pgid)
 	if err != nil {
-		slog.Warn("start token unavailable", "ticket_id", ticketID, "command", kind, "pgid", pgid, "error", err)
+		slog.Warn("start token unavailable", "ticket_id", ticketID, "run_id", int64OrZero(rid), "command", kind, "pgid", pgid, "error", err)
 		token = ""
 	}
 	startCtx, cancel := onStartContext(ctx)
 	defer cancel()
 	gen, err := d.Store.RecordCheckStart(startCtx, ticketID, d.Owner, d.Expires, kind, pgid, token, time.Now(), budgetStart)
 	if err != nil {
-		slog.Warn("record check start failed", "ticket_id", ticketID, "command", kind, "pgid", pgid, "error", err)
+		slog.Error("record check start failed", "ticket_id", ticketID, "run_id", int64OrZero(rid), "command", kind, "pgid", pgid, "error", err)
 		return 0
 	}
-	slog.Info("check command started", "ticket_id", ticketID, "command", kind, "pgid", pgid, "gen", gen)
+	slog.Info("check command started", "ticket_id", ticketID, "run_id", int64OrZero(rid), "command", kind, "pgid", pgid, "gen", gen)
 	return gen
 }
 

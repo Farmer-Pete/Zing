@@ -11,7 +11,12 @@
 // console.js is the only module that touches the DOM, fetch, or the
 // keyboard event object itself; it normalizes those into the plain
 // descriptors these functions take (design section 6.4: "Each takes plain
-// data, not DOM nodes").
+// data, not DOM nodes"). Two exports are this module's state-writing entry
+// points, taking console.js's own state object and mutating its chord and
+// suppressUntil fields in place rather than returning a replacement: the
+// keydown listener's whole body, handleKeyEvent, and runPatchWork's focus
+// step, patchFocus (owner decision on #44, Q7/Q8, so node --test can drive
+// the real wiring, not only pure helpers underneath it).
 
 // CHORD_TIMEOUT_MS bounds how long a leading "g" stays armed waiting for
 // its second key (design section 6.4: "a leading g arms a chord with a
@@ -158,10 +163,12 @@ export function sendChordLabel(isMac) {
  * still-rendered reply box -- most often a race with the owner's own
  * just-sent batch answer -- got a raw "question closed" 409 and the typed
  * text silently vanished, with nothing explaining why). "question closed"
- * is the one reason a reader hits often enough to need a plain sentence;
- * every other reason (a bad option or item ref, an ambiguous or missing
- * draft) is rare enough from the real console UI, which only ever sends
- * well-formed requests, that its own store wording is shown as-is.
+ * and "changed in another tab" (ticket #43, cause 2: two tabs' autosaves
+ * silently overwrote each other) are the two reasons a reader hits often
+ * enough to need a plain sentence; every other reason (a bad option or item
+ * ref, an ambiguous or missing draft) is rare enough from the real console
+ * UI, which only ever sends well-formed requests, that its own store
+ * wording is shown as-is.
  *
  * @param {string} reason
  * @returns {string}
@@ -169,6 +176,9 @@ export function sendChordLabel(isMac) {
 export function draftConflictMessage(reason) {
 	if (reason === 'question closed') {
 		return 'This question is already answered.';
+	}
+	if (reason === 'changed in another tab') {
+		return 'Changed in another tab.';
 	}
 	return reason;
 }
@@ -273,6 +283,81 @@ export function resolveToken(descriptor, inInput, isMac) {
 		return null;
 	}
 	return descriptor.key;
+}
+
+// TOKENS_NEVER_CHORDED are resolved directly, never fed through the "g"
+// chord machine: each already names a complete action on its own, and
+// running it through advanceChord would let a stray "g" arm just before one
+// of these and then misinterpret it as a chord's second key.
+export const TOKENS_NEVER_CHORDED = new Set(['Esc', 'Enter-in-input', 'Cmd-Enter', 'Ctrl-Enter', 'Tab', 'Shift-Tab']);
+
+/**
+ * decideKey is the keydown handler's whole decision, pure of the DOM event
+ * and of running anything (design section 6.4, owner decision on #44): given
+ * the already-resolved token, it says what should happen and what the next
+ * chord state is. The suppression check runs first, before the never-chorded
+ * set or the chord machine (owner decision, Q7/Q5): a key arriving within
+ * PATCH_SUPPRESS_MS of a patch that moved the focused id must not even arm or
+ * complete a chord, since the chord is about to be discarded anyway.
+ *
+ * @param {{chord: {leader: string|null, armedAt: number|null}, suppressUntil: number|null, bindings: {keys: string[], action: string}[]}} state
+ * @param {string|null} token
+ * @param {number} now
+ * @returns {{result: string|'suppressed'|null, chord: {leader: string|null, armedAt: number|null}}}
+ */
+export function decideKey(state, token, now) {
+	if (!token) {
+		return { result: null, chord: state.chord };
+	}
+	if (state.suppressUntil !== null && now < state.suppressUntil) {
+		return { result: 'suppressed', chord: emptyChordState() };
+	}
+	if (TOKENS_NEVER_CHORDED.has(token)) {
+		return { result: resolveAction(token, state.bindings), chord: emptyChordState() };
+	}
+	const { state: nextChord, chord } = advanceChord(state.chord, token, now);
+	if (chord) {
+		return { result: resolveAction(chord, state.bindings), chord: nextChord };
+	}
+	if (nextChord.leader) {
+		return { result: null, chord: nextChord };
+	}
+	return { result: resolveAction(token, state.bindings), chord: nextChord };
+}
+
+/**
+ * handleKeyEvent is the whole former body of console.js's onKeyDown, moved
+ * here so node --test can drive the wiring itself (owner decision on #44,
+ * Q8): event is any plain object shaped like a keydown KeyboardEvent, so a
+ * fake event exercises the same path a real one does. It writes state.chord
+ * back, logs and declines to run anything when decideKey reports
+ * 'suppressed', and otherwise calls run(result, event) and, matching
+ * console.js's old dispatchAction, calls event.preventDefault?.() unless run
+ * returned false.
+ *
+ * @param {{chord: object, suppressUntil: number|null, bindings: object[], isMac: boolean}} state
+ * @param {{key?: string, ctrlKey?: boolean, metaKey?: boolean, altKey?: boolean, shiftKey?: boolean, isComposing?: boolean, keyCode?: number, target?: {tagName?: string, isContentEditable?: boolean}, preventDefault?: Function}} event
+ * @param {number} now
+ * @param {(action: string, event: object) => (boolean|void)} run
+ * @returns {string|null}
+ */
+export function handleKeyEvent(state, event, now, run) {
+	const target = event.target;
+	const inInput = isInputContext({ tagName: target?.tagName, isContentEditable: target?.isContentEditable });
+	const token = resolveToken(event, inInput, state.isMac);
+	const { result, chord } = decideKey(state, token, now);
+	state.chord = chord;
+	if (result === 'suppressed') {
+		console.debug('keyboard.mjs: shortcut ignored, a patch moved focus', { token, msLeft: state.suppressUntil - now });
+		return result;
+	}
+	if (!result) {
+		return result;
+	}
+	if (run(result, event) !== false) {
+		event.preventDefault?.();
+	}
+	return result;
 }
 
 /**
@@ -520,6 +605,98 @@ export function sendResultWithUnsent(text, unsent, stale = 0) {
 	return base;
 }
 
+/**
+ * sendTargets decides what console.js's Cmd+Enter should send and whether it
+ * must ask first (ticket #43, cause 1: POST /send carried only the ticket,
+ * so a send scoped to nothing went out against every draft on the ticket,
+ * including one typed and forgotten on another question earlier in the
+ * page's life). questions is console.js's collectSendQuestions() over every
+ * "#main .q": one descriptor per open question, in document order, with
+ * hasDraft true when it has unsent reply text or a picked chip/item, and
+ * conflicted true when console.js's conflictedBoxes (task 5) holds its reply
+ * box's key. A conflicted question is dropped even when it also has a
+ * draft, since the owner has not yet typed over the "changed in another
+ * tab" note and sending it would send the other tab's text.
+ *
+ * confirm is true whenever ids is non-empty and is not exactly the single
+ * focused question: sending only what the owner is looking at needs no
+ * prompt, but sending anything beyond that -- including a second question
+ * when nothing has focus -- must list what is about to go out first (Q3).
+ *
+ * @param {{id: number, key: string, hasDraft: boolean, conflicted: boolean}[]} questions
+ * @param {number|null} focusedID - the open question's id the owner is
+ *   looking at, or null when none has focus
+ * @returns {{ids: number[], keys: string[], confirm: boolean}}
+ */
+export function sendTargets(questions, focusedID) {
+	const targets = (questions ?? []).filter((q) => q.hasDraft && !q.conflicted);
+	const ids = targets.map((q) => q.id);
+	const keys = targets.map((q) => q.key);
+	const onlyFocused = ids.length === 1 && ids[0] === focusedID;
+	const confirm = ids.length > 0 && !onlyFocused;
+	return { ids, keys, confirm };
+}
+
+/**
+ * sendConfirmText writes openSendConfirm's dialog line naming the questions
+ * a Cmd+Enter is about to send (Q3: "Send 3 replies on Q6, Q7, Q9?"), given
+ * sendTargets' own keys in the same order.
+ *
+ * @param {string[]} keys
+ * @returns {string}
+ */
+export function sendConfirmText(keys) {
+	if (keys.length === 1) {
+		return `Send 1 reply on ${keys[0]}?`;
+	}
+	return `Send ${keys.length} replies on ${keys.join(', ')}?`;
+}
+
+/**
+ * skipConflicted filters a conflicted reply box out of whatever list
+ * console.js is about to save or send (ticket #43, cause 2, Q5: a box that
+ * just got a "changed in another tab" note stays neither saved nor sent
+ * until the owner's next keystroke proves they have seen it and are typing
+ * over it). console.js's postSendBatchLocked runs this over the pending
+ * saves, the emptied-box clears, and the post-send clear list, and
+ * rearmAutosaves runs it over every box it would otherwise re-arm, each
+ * passing its own isConflicted(item) built from conflictedBoxes.has(key).
+ * Items that pass through keep their original order, since none of those
+ * callers depend on order but a stable one is the least surprising default.
+ *
+ * @param {object[]} items
+ * @param {(item: object) => boolean} isConflicted
+ * @returns {object[]}
+ */
+export function skipConflicted(items, isConflicted) {
+	return (items ?? []).filter((item) => !isConflicted(item));
+}
+
+/**
+ * sendableQuestions re-checks questions (sendTargets' own ids) right before
+ * postSendBatchLocked's /send fetch (ticket #43, cause 2, Q5): either of its
+ * own earlier awaits -- the pending/emptied saves, or an autosave chained in
+ * autosaveInFlight from before Cmd+Enter was pressed -- can turn a listed
+ * question's reply box conflicted after sendTargets already fixed the list,
+ * and sending it unfiltered would still send the other tab's stored draft
+ * for that question. boxes is console.js's own reply inputs, each a
+ * {question, ...} descriptor keyed by Number(el.dataset.draftQuestion); a
+ * listed id with no matching box (an option or item answer with no reply
+ * box of its own) is kept, since there is nothing here to hold it back.
+ *
+ * @param {number[]} questions
+ * @param {{question: number}[]} boxes
+ * @param {(box: object) => boolean} isConflicted
+ * @returns {number[]}
+ */
+export function sendableQuestions(questions, boxes, isConflicted) {
+	const byQuestion = new Map((boxes ?? []).map((box) => [box.question, box]));
+	return (questions ?? []).filter((id) => {
+		const box = byQuestion.get(id);
+		return !box || !isConflicted(box);
+	});
+}
+
 // AUTOSAVE_DEBOUNCE_MS is how long installReplyAutosave (console.js) waits
 // after the owner's last keystroke in a reply box before posting it as a
 // draft (design: "A Reply box autosaves one second after the owner stops
@@ -763,6 +940,54 @@ export function collectPatchWork(descriptors, focusedID) {
 	return { diagramIDs, focusID: reconcileFocus(previousIDs, currentIDs, focusedID) };
 }
 
+// PATCH_SUPPRESS_MS is how long handleKeyEvent ignores every key after a
+// patch changes the focused id (ticket #44: "Ignore shortcuts for 1 s after
+// a patch changed the element under the cursor"), so a /stream patch that
+// moves focus to a neighbouring row cannot have a chip digit, already in
+// flight from the owner's fingers, land on the wrong question.
+export const PATCH_SUPPRESS_MS = 1000;
+
+/**
+ * notePatchFocus is the suppression half of patchFocus (design section 6.4,
+ * owner decision on #44, Q5): it arms state.suppressUntil for
+ * PATCH_SUPPRESS_MS only when the focused id itself changed, not when a
+ * patch re-renders the same focused element under the same id. beforeID
+ * empty (nothing was focused) never arms it either, since there is no
+ * cursor position for a patch to have moved out from under.
+ *
+ * @param {{suppressUntil: number|null}} state
+ * @param {string} beforeID
+ * @param {string} afterID
+ * @param {number} now
+ * @returns {number|null} state.suppressUntil, after this call
+ */
+export function notePatchFocus(state, beforeID, afterID, now) {
+	if (beforeID && afterID !== beforeID) {
+		state.suppressUntil = now + PATCH_SUPPRESS_MS;
+	}
+	return state.suppressUntil;
+}
+
+/**
+ * patchFocus is the focus half of console.js's runPatchWork, moved here so
+ * node --test can drive it with fake patch descriptors (design section 6.4,
+ * owner decision on #44, Q7/Q8). It runs collectPatchWork as before, then
+ * notePatchFocus over the focusedID change that produced, and records
+ * descriptors' focusable ids as the next previousFocusableIDs the way
+ * runPatchWork did inline.
+ *
+ * @param {{focusedID: string, previousFocusableIDs: string[], suppressUntil: number|null}} state
+ * @param {{diagramIDs?: string[], focusableIDs?: string[], previousFocusableIDs?: string[]}} descriptors
+ * @param {number} now
+ * @returns {{diagramIDs: string[], focusID: string}}
+ */
+export function patchFocus(state, descriptors, now) {
+	const { diagramIDs, focusID } = collectPatchWork(descriptors, state.focusedID);
+	notePatchFocus(state, state.focusedID, focusID, now);
+	state.previousFocusableIDs = descriptors?.focusableIDs ?? [];
+	return { diagramIDs, focusID };
+}
+
 /**
  * ACTION_LABELS maps every keys.json action name (internal/console/keys.go's
  * Bindings, the closed set design section 8 names) to the plain-English
@@ -775,6 +1000,7 @@ export const ACTION_LABELS = {
 	'nav-inbox': 'Go to inbox',
 	'nav-recent': 'Go to recent',
 	'nav-feed': 'Go to feed',
+	'nav-project': 'Go to project',
 	'focus-next': 'Focus next item',
 	'focus-prev': 'Focus previous item',
 	open: 'Open focused item',
@@ -786,9 +1012,6 @@ export const ACTION_LABELS = {
 	send: 'Send',
 	'toggle-rail': 'Toggle rail',
 	'focus-side': 'Focus side box',
-	stop: 'Stop ticket',
-	'stop-all': 'Stop everything',
-	'mark-read': 'Mark read',
 	help: 'Toggle this help',
 	blur: 'Close / leave input',
 };

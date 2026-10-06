@@ -21,6 +21,10 @@ const tableEvents = "events"
 // gate): one re-run of a check on a sha.
 const EventKindCheckRerun = "check_rerun"
 
+// EventKindOwnerEdit names the owner_edit event kind (#41): one owner edit
+// to a sealed scenario, a sealed plan's task, or the ticket body.
+const EventKindOwnerEdit = "owner_edit"
+
 // EventFilter narrows Events and CountEvents beyond ticket and kind.
 type EventFilter struct {
 	RunID *int64 // nil: any run

@@ -76,6 +76,10 @@ type Deps struct {
 	// Commands runs the test and lint re-runs a build unit's CHECK step
 	// makes (task 9). Wired by dispatch.Config.Commands.
 	Commands CommandRunner
+	// HostCommands runs a host-kind scenario's check at judging, unsandboxed,
+	// on the owner's machine (#49 task 2). Wired by dispatch.Config.HostCommands;
+	// nil makes a judging run with a pending host check return ErrConfig.
+	HostCommands CommandRunner
 	// DataDir is the resolved data directory (PKG9-PLAN.md section 4.3,
 	// 7.3): the private temp root runJob gives every run whose job names no
 	// sandbox lives under it. Empty is ErrConfig for a run that needs one.

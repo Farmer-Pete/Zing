@@ -1,0 +1,39 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "properties": {
+    "target": {
+      "type": "string",
+      "enum": [
+        "scenario",
+        "plan_task",
+        "plan_file",
+        "ticket_body"
+      ]
+    },
+    "ref": {
+      "type": "string"
+    },
+    "action": {
+      "type": "string",
+      "enum": [
+        "edit",
+        "drop"
+      ]
+    },
+    "old": {
+      "type": "string"
+    },
+    "new": {
+      "type": "string"
+    }
+  },
+  "additionalProperties": false,
+  "type": "object",
+  "required": [
+    "target",
+    "ref",
+    "action",
+    "old",
+    "new"
+  ]
+}

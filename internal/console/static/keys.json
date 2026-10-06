@@ -19,6 +19,12 @@
   },
   {
     "keys": [
+      "g p"
+    ],
+    "action": "nav-project"
+  },
+  {
+    "keys": [
       "j"
     ],
     "action": "focus-next"
@@ -92,24 +98,6 @@
       "b"
     ],
     "action": "focus-side"
-  },
-  {
-    "keys": [
-      "s"
-    ],
-    "action": "stop"
-  },
-  {
-    "keys": [
-      "S"
-    ],
-    "action": "stop-all"
-  },
-  {
-    "keys": [
-      "x"
-    ],
-    "action": "mark-read"
   },
   {
     "keys": [

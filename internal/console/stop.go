@@ -1,11 +1,14 @@
-// stop.go: POST /stop (design section 6.11, the s/S keyboard keys), sat
-// behind the same mutation guard as every other state-changing route
-// (mw.go). {"all": true} sets the store's persisted "stopped" flag, the
-// same flag the dispatcher's own Tick loop already honors before claiming
-// further work (internal/store/spine.go's SetStopped). {"ticket": N} has no
-// schema column to write yet: Package 4 tracks no per-ticket stop state, so
-// this handler answers 501 rather than claiming a stop it cannot perform,
-// leaving the actual per-ticket cancellation to Package 5's orchestrator.
+// stop.go: POST /stop (design section 6.11), sat behind the same mutation
+// guard as every other state-changing route (mw.go). No keyboard key offers
+// this route today (ticket #44 removed the bare s/S bindings that used to:
+// a stray letter must never change state); the endpoint stays as the hook
+// Package 5's orchestrator builds on. {"all": true} sets the store's
+// persisted "stopped" flag, the same flag the dispatcher's own Tick loop
+// already honors before claiming further work (internal/store/spine.go's
+// SetStopped). {"ticket": N} has no schema column to write yet: Package 4
+// tracks no per-ticket stop state, so this handler answers 501 rather than
+// claiming a stop it cannot perform, leaving the actual per-ticket
+// cancellation to Package 5's orchestrator.
 package console
 
 import (
@@ -13,10 +16,10 @@ import (
 	"net/http"
 )
 
-// stopRequest is POST /stop's body: console.js's stopEverything posts
-// {all: true} and stopTicket posts {ticket: N} (design section 6.11).
-// Exactly one of All and a positive Ticket is meaningful; a body naming
-// both, or naming neither, is rejected with 400.
+// stopRequest is POST /stop's body (design section 6.11): {all: true} stops
+// every running ticket, {ticket: N} stops one. Exactly one of All and a
+// positive Ticket is meaningful; a body naming both, or naming neither, is
+// rejected with 400.
 type stopRequest struct {
 	All    bool  `json:"all"`
 	Ticket int64 `json:"ticket"`

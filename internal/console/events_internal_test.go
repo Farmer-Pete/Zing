@@ -53,6 +53,11 @@ func TestEventLineFallbacks(t *testing.T) {
 			`{"check":"lint","sha":"cccccccccccccccccccccccccccccccccccccccc"}`,
 			"Zing re-ran the lint check on ccccccc.",
 		},
+		{
+			"owner_edit plan_task drop happy path", store.EventKindOwnerEdit,
+			`{"target":"plan_task","ref":"2","action":"drop","old":"old plan","new":"new plan"}`,
+			"Owner dropped plan task 2; later tasks moved up one.",
+		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()

@@ -10,7 +10,8 @@
       "enum": [
         "behavior",
         "negative",
-        "performance"
+        "performance",
+        "host"
       ]
     },
     "check_cmd": {

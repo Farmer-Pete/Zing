@@ -180,6 +180,9 @@ type Config struct {
 	Sandboxes      sandbox.Set
 	RequireSandbox bool
 	Commands       job.CommandRunner
+	// HostCommands runs a host-kind scenario's check at judging, unsandboxed
+	// (#49): serve wires job.NewHostCommandRunner(); selftest leaves it nil.
+	HostCommands job.CommandRunner
 	// DataDir is the resolved data directory (PKG9-PLAN.md section 4.3,
 	// 7.3): the private temp root of every unsandboxed run lives under it.
 	DataDir string
@@ -1149,7 +1152,8 @@ func (d *Dispatcher) runAndCommit(ctx context.Context, ticket store.Ticket, time
 		Models: d.cfg.Models, Budget: d.cfg.Budget, Floor: d.cfg.Floor,
 		Owner: d.cfg.Owner, Expires: expires, Now: d.cfg.Now,
 		Projects: d.cfg.Projects, Sandboxes: d.cfg.Sandboxes, RequireSandbox: d.cfg.RequireSandbox, Commands: d.cfg.Commands,
-		DataDir: d.cfg.DataDir, LensesParallel: d.cfg.LensesParallel, JudgeCodexHome: d.cfg.JudgeCodexHome,
+		HostCommands: d.cfg.HostCommands,
+		DataDir:      d.cfg.DataDir, LensesParallel: d.cfg.LensesParallel, JudgeCodexHome: d.cfg.JudgeCodexHome,
 		MergeRule: d.cfg.MergeRule, ReviewBots: d.cfg.ReviewBots,
 		// Tracker is the dispatcher itself: PostPRLink and PostDone (below)
 		// already give it job.ShipTracker's own two methods, over its own

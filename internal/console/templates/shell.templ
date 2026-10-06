@@ -159,6 +159,24 @@ templ palette() {
 		   never scrolls sideways. */
 		#main table { display: block; max-width: 100%; overflow-x: auto; }
 		#main pre { max-width: 100%; overflow-x: auto; }
+		/* scenariosSection's host-checks pre (r2f2): a host check runs
+		   unsandboxed with the gate's own reading of it as its only
+		   approval, so it must never sit behind a horizontal scrollbar --
+		   #main pre's own rule above wraps a long line; here it is pinned
+		   off, overridden with equal specificity. Any run of more than 4
+		   spaces or a tab (.host-check-ws, scenarios.templ's own
+		   hostCheckWSRun) still gets a visible marker, since pre-wrap alone
+		   would still let that stretch of blank space read as empty. */
+		#main .host-checks pre {
+			white-space: pre-wrap;
+			overflow-wrap: anywhere;
+			overflow-x: visible;
+		}
+		.host-check-ws {
+			background: var(--zing-warn);
+			color: var(--zing-bg);
+			border-radius: 0.15rem;
+		}
 		/* .change-block (bug fix: the plan's Changes table rendered one row
 		   per change, with Before/After whole source files in a <pre> table
 		   cell; a row grew hundreds of pixels tall and mostly empty in the

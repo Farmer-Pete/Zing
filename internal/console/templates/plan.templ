@@ -38,14 +38,14 @@ templ PlanView(p RenderedPlan) {
 		@migrationsSection(p.Design.Migrations)
 		<h2>Delivery</h2>
 		<h3>Files</h3>
-		@filesTable(p.Delivery.Files)
+		@filesTable(p.TicketID, p.Editable, p.Delivery.Files)
 		@decidedFilesSection(p.Delivery.DecidedFiles)
 		<h3>Deletions</h3>
 		@deletionsSection(p.Delivery.Deletions)
 		<h3>Tests</h3>
 		@testsTable(p.Delivery.Tests)
 		<h3>Tasks</h3>
-		@tasksTable(p.Delivery.Tasks)
+		@tasksTable(p.TicketID, p.Editable, p.Delivery.Tasks)
 		<h2>Review</h2>
 		<h3>Trust root</h3>
 		<p>{ p.Review.TrustRoot }</p>
@@ -244,15 +244,22 @@ templ migrationsSection(m response.Migrations) {
 }
 
 // filesTable renders Delivery.Files (design section 6.9): a table of path,
-// action, reason. Delivery.Files carries no "none" case (jsonschema
+// action, tasks, reason. Delivery.Files carries no "none" case (jsonschema
 // minItems=1, internal/response/types.go): the perimeter is never empty.
-templ filesTable(files []response.FileChange) {
+// editable is RenderedPlan.Editable (#41, extended by the file-grant
+// change): only then does each row gain a last cell holding ticketID's own
+// owner-edit box (ownerEditFileForm) for that file.
+templ filesTable(ticketID int64, editable bool, files []response.FileChange) {
 	<table class="files">
 		<thead>
 			<tr>
 				<th>Path</th>
 				<th>Action</th>
+				<th>Tasks</th>
 				<th>Reason</th>
+				if editable {
+					<th></th>
+				}
 			</tr>
 		</thead>
 		<tbody>
@@ -260,11 +267,32 @@ templ filesTable(files []response.FileChange) {
 				<tr>
 					<td>{ f.Path }</td>
 					<td>{ string(f.Action) }</td>
+					<td>{ f.Task }</td>
 					<td>{ f.Reason }</td>
+					if editable {
+						<td>
+							@ownerEditFileForm(ticketID, f)
+						</td>
+					}
 				</tr>
 			}
 		</tbody>
 	</table>
+}
+
+// ownerEditFileForm is one delivery file's owner-edit box (#51): a
+// <details class="owner-edit"> the owner opens to rewrite which tasks may
+// change f.Path, posted by console.js's ownerEditSubmit to POST
+// /tickets/{id}/edit, the same box ownerEditTaskForm already uses for a
+// plan task.
+templ ownerEditFileForm(ticketID int64, f response.FileChange) {
+	<details class="owner-edit" data-preserve-attr="open" data-ticket={ strconv.FormatInt(ticketID, 10) } data-target="plan_file" data-ref={ f.Path }>
+		<summary>Edit tasks</summary>
+		<label>Tasks</label>
+		<input type="text" data-field="tasks" value={ f.Task }/>
+		<button type="button" class="owner-edit-save">Save</button>
+		<span class="owner-edit-error"></span>
+	</details>
 }
 
 // decidedFilesSection renders Delivery.DecidedFiles (design section 9.2): a
@@ -371,7 +399,11 @@ templ testsTable(tests []response.TestCase) {
 
 // tasksTable renders Delivery.Tasks (design section 6.9): a table of n,
 // demo, test, text, with each task's markdown Text pre-rendered onto it.
-templ tasksTable(tasks []RenderedTask) {
+// editable is RenderedPlan.Editable (#41): only then does each row gain a
+// last cell holding ticketID's own owner-edit box (ownerEditTaskForm) for
+// that task, so a plan with no sealed scenario -- or the artifacts rail's
+// own read-only copy, ticketID 0 -- renders no edit controls at all.
+templ tasksTable(ticketID int64, editable bool, tasks []RenderedTask) {
 	<table class="tasks">
 		<thead>
 			<tr>
@@ -379,6 +411,9 @@ templ tasksTable(tasks []RenderedTask) {
 				<th>Demo</th>
 				<th>Test</th>
 				<th>Text</th>
+				if editable {
+					<th></th>
+				}
 			</tr>
 		</thead>
 		<tbody>
@@ -390,8 +425,39 @@ templ tasksTable(tasks []RenderedTask) {
 					<td>
 						@t.TextHTML
 					</td>
+					if editable {
+						<td>
+							@ownerEditTaskForm(ticketID, t)
+						</td>
+					}
 				</tr>
 			}
 		</tbody>
 	</table>
+}
+
+// ownerEditTaskForm is one plan task's owner-edit box (#41): a <details
+// class="owner-edit"> the owner opens to rewrite text, test, or demo, or
+// drop the task, posted by console.js's ownerEditSubmit to POST
+// /tickets/{id}/edit. t.Text, not t.TextHTML, prefills the textarea -- the
+// owner edits the raw markdown, not its rendered HTML.
+// data-preserve-attr="open" keeps it open across a /stream patch while the
+// owner is editing, matching questionGroup's own use of the attribute. The
+// textarea's content opens with a "\n" (bug fix): the HTML parser drops
+// exactly one leading newline right after a textarea's opening tag, so
+// without it a stored text that itself starts with a newline would render
+// one character short; the prefix makes the parser's drop a no-op either way.
+templ ownerEditTaskForm(ticketID int64, t RenderedTask) {
+	<details class="owner-edit" data-preserve-attr="open" data-ticket={ strconv.FormatInt(ticketID, 10) } data-target="plan_task" data-ref={ strconv.Itoa(t.N) }>
+		<summary>Edit</summary>
+		<label>Text</label>
+		<textarea data-field="text">{ "\n" + t.Text }</textarea>
+		<label>Test</label>
+		<input type="text" data-field="test" value={ t.Test }/>
+		<label>Demo</label>
+		<input type="checkbox" data-field="demo" checked?={ t.Demo }/>
+		<button type="button" class="owner-edit-save">Save</button>
+		<button type="button" class="owner-edit-drop">Drop</button>
+		<span class="owner-edit-error"></span>
+	</details>
 }

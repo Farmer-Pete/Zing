@@ -27,7 +27,7 @@ func TestValues(t *testing.T) {
 		}},
 		{"ClaimKind", ClaimKind(""), []string{"code", "env"}},
 		{"ClaimVerdict", ClaimVerdict(""), []string{"true", "false", "unchecked"}},
-		{"ScenarioKind", ScenarioKind(""), []string{"behavior", "negative", "performance"}},
+		{"ScenarioKind", ScenarioKind(""), []string{"behavior", "negative", "performance", "host"}},
 		{"ChangeKind", ChangeKind(""), []string{"new", "modified"}},
 		{"FileAction", FileAction(""), []string{"create", "modify", "delete"}},
 		{"TestKind", TestKind(""), []string{"integration", "unit", "regression", "e2e"}},

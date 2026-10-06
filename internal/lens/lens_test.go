@@ -215,6 +215,8 @@ func TestLoad_TestsLensFlagsUnobservableScenarios(t *testing.T) {
 		"a sandbox probe that skips when sandboxed",
 		"greps the skip line",
 		"A bare `go test` exits 0 whether or not the test skipped",
+		"A scenario of kind host is the exception to the bullet above",
+		"A host scenario with no check is a finding",
 	} {
 		if !strings.Contains(plan, want) {
 			t.Errorf("tests.Plan does not contain %q: %q", want, plan)

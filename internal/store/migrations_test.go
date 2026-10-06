@@ -9,6 +9,23 @@ import (
 	"github.com/adlio/schema"
 )
 
+// Migration file names shared by the tests that apply a prefix of them by
+// hand through a raw sql.Open handle.
+const (
+	migFile0001 = "0001_init.sql"
+	migFile0002 = "0002_message_created_at.sql"
+	migFile0003 = "0003_sessions_external_id_nonempty.sql"
+	migFile0004 = "0004_ticket_poll.sql"
+	migFile0005 = "0005_runs_interrupt.sql"
+	migFile0006 = "0006_check_procs.sql"
+	migFile0007 = "0007_run_evidence.sql"
+	migFile0008 = "0008_message_event_kind.sql"
+
+	// testTimestamp is an arbitrary fixed timestamp used where a test needs
+	// one but the value itself is not under test.
+	testTimestamp = "2026-10-03T00:00:00Z"
+)
+
 // TestMigration0004Columns proves migration 0004_ticket_poll.sql installed
 // the three nullable poll columns and their CHECK constraints, and the
 // tickets_next_poll_idx index (design section 16, DD1): on a database that
@@ -247,8 +264,8 @@ func TestMigration0007_AppliesOverPopulated0006(t *testing.T) {
 	}
 
 	for _, file := range []string{
-		"0001_init.sql", "0002_message_created_at.sql", "0003_sessions_external_id_nonempty.sql",
-		"0004_ticket_poll.sql", "0005_runs_interrupt.sql", "0006_check_procs.sql",
+		migFile0001, migFile0002, migFile0003,
+		migFile0004, migFile0005, migFile0006,
 	} {
 		applyMigration("migrations/" + file)
 	}
@@ -279,7 +296,7 @@ func TestMigration0007_AppliesOverPopulated0006(t *testing.T) {
 		t.Fatalf("seed run 2: %v", execErr)
 	}
 
-	applyMigration("migrations/0007_run_evidence.sql")
+	applyMigration("migrations/" + migFile0007)
 
 	rows, err := db.QueryContext(ctx,
 		`SELECT id, final_message, stderr_path, transcript_path FROM runs ORDER BY id`)
@@ -350,8 +367,8 @@ func TestMigration0008_AppliesOverPopulated0007(t *testing.T) {
 	}
 
 	for _, file := range []string{
-		"0001_init.sql", "0002_message_created_at.sql", "0003_sessions_external_id_nonempty.sql",
-		"0004_ticket_poll.sql", "0005_runs_interrupt.sql", "0006_check_procs.sql", "0007_run_evidence.sql",
+		migFile0001, migFile0002, migFile0003,
+		migFile0004, migFile0005, migFile0006, migFile0007,
 	} {
 		applyMigration("migrations/" + file)
 	}
@@ -372,7 +389,7 @@ func TestMigration0008_AppliesOverPopulated0007(t *testing.T) {
 		t.Fatalf("seed update message: %v", execErr)
 	}
 
-	applyMigration("migrations/0008_message_event_kind.sql")
+	applyMigration("migrations/" + migFile0008)
 
 	var eventKind sql.NullString
 	if scanErr := db.QueryRowContext(ctx, `SELECT event_kind FROM messages WHERE id = 1`).Scan(&eventKind); scanErr != nil {
@@ -409,6 +426,176 @@ func TestMigration0008_AppliesOverPopulated0007(t *testing.T) {
 		`INSERT INTO messages (id, ticket_id, type, author, payload, event_kind) VALUES (5, 1, 'update', 'system', '{}', 'check_rerun')`,
 	); execErr != nil {
 		t.Errorf("insert valid event row: %v", execErr)
+	}
+}
+
+// TestMigration0009_AppliesOverPopulated0008 proves migration
+// 0009_check_procs_fix_kind.sql rebuilds check_procs over a database already
+// carrying rows through 0008, with foreign_keys ON as store.Open runs it
+// (migration 0003's rebuild failed under that same condition): every
+// existing row survives with its gen and every other column unchanged, the
+// AUTOINCREMENT high-water mark carries over so a new row gets a fresh gen
+// rather than reusing a deleted one, the widened CHECK accepts kind fix
+// while still rejecting an unknown kind, a non-positive pgid and an empty
+// proc_start, the UNIQUE constraint on ticket_id still refuses a second row
+// for the same ticket, PRAGMA foreign_key_check finds nothing broken, and
+// check_procs still cascades on a deleted ticket.
+func TestMigration0009_AppliesOverPopulated0008(t *testing.T) {
+	t.Parallel()
+	ctx := t.Context()
+	path := dbPath(t)
+
+	db, err := sql.Open("sqlite", "file:"+path)
+	if err != nil {
+		t.Fatalf("sql.Open: %v", err)
+	}
+
+	applyMigration := func(pattern string) {
+		t.Helper()
+		migrator := schema.NewMigrator(schema.WithDialect(schema.SQLite), schema.WithContext(ctx))
+		migs, fsErr := schema.FSMigrations(migrationsFS, pattern)
+		if fsErr != nil {
+			t.Fatalf("FSMigrations(%s): %v", pattern, fsErr)
+		}
+		if applyErr := migrator.Apply(db, migs); applyErr != nil {
+			t.Fatalf("apply %s: %v", pattern, applyErr)
+		}
+	}
+
+	for _, file := range []string{
+		migFile0001, migFile0002, migFile0003,
+		migFile0004, migFile0005, migFile0006, migFile0007,
+		migFile0008,
+	} {
+		applyMigration("migrations/" + file)
+	}
+
+	if _, execErr := db.ExecContext(ctx,
+		`INSERT INTO projects (id, name, repo_url, local_path, tracker) VALUES (1, 'zing', 'https://github.com/x/zing', '/tmp/zing', 'github')`,
+	); execErr != nil {
+		t.Fatalf("seed project: %v", execErr)
+	}
+	for _, id := range []int{1, 2, 3} {
+		if _, execErr := db.ExecContext(ctx,
+			`INSERT INTO tickets (id, project_id, tracker_ref, title, state) VALUES (?, 1, ?, 'fix the bug', 'queued')`,
+			id, id,
+		); execErr != nil {
+			t.Fatalf("seed ticket %d: %v", id, execErr)
+		}
+	}
+	if _, execErr := db.ExecContext(ctx,
+		`INSERT INTO check_procs (ticket_id, kind, pgid, proc_start, started_at, budget_started_at) VALUES (1, 'test', 4242, '77.000001', '2026-10-03T00:00:00Z', '2026-10-03T00:00:00Z')`,
+	); execErr != nil {
+		t.Fatalf("seed check_procs for ticket 1: %v", execErr)
+	}
+	if _, execErr := db.ExecContext(ctx,
+		`INSERT INTO check_procs (ticket_id, kind, pgid, proc_start, started_at, budget_started_at) VALUES (2, 'lint', 4300, NULL, '2026-10-03T00:00:00Z', '2026-10-03T00:00:00Z')`,
+	); execErr != nil {
+		t.Fatalf("seed check_procs for ticket 2: %v", execErr)
+	}
+	if _, execErr := db.ExecContext(ctx,
+		`INSERT INTO check_procs (ticket_id, kind, pgid, proc_start, started_at, budget_started_at) VALUES (3, 'test', 4400, NULL, '2026-10-03T00:00:00Z', '2026-10-03T00:00:00Z')`,
+	); execErr != nil {
+		t.Fatalf("seed check_procs for ticket 3: %v", execErr)
+	}
+	if _, execErr := db.ExecContext(ctx, `DELETE FROM check_procs WHERE ticket_id = 3`); execErr != nil {
+		t.Fatalf("delete check_procs for ticket 3: %v", execErr)
+	}
+
+	if closeErr := db.Close(); closeErr != nil {
+		t.Fatalf("close raw handle: %v", closeErr)
+	}
+
+	s, err := Open(ctx, path)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer func() { _ = s.Close() }()
+
+	type row struct {
+		gen                                    int64
+		kind, procStart, startedAt, budgetedAt string
+		pgid                                   int
+	}
+	read := func(ticketID int64) row {
+		t.Helper()
+		var r row
+		var procStart sql.NullString
+		if scanErr := s.db.QueryRowContext(ctx,
+			`SELECT gen, kind, pgid, proc_start, started_at, budget_started_at FROM check_procs WHERE ticket_id = ?`, ticketID,
+		).Scan(&r.gen, &r.kind, &r.pgid, &procStart, &r.startedAt, &r.budgetedAt); scanErr != nil {
+			t.Fatalf("read check_procs for ticket %d: %v", ticketID, scanErr)
+		}
+		if procStart.Valid {
+			r.procStart = procStart.String
+		}
+		return r
+	}
+
+	got1 := read(1)
+	want1 := row{gen: 1, kind: "test", pgid: 4242, procStart: "77.000001", startedAt: testTimestamp, budgetedAt: testTimestamp}
+	if got1 != want1 {
+		t.Errorf("ticket 1 row = %+v, want %+v", got1, want1)
+	}
+	got2 := read(2)
+	want2 := row{gen: 2, kind: "lint", pgid: 4300, startedAt: testTimestamp, budgetedAt: testTimestamp}
+	if got2 != want2 {
+		t.Errorf("ticket 2 row = %+v, want %+v", got2, want2)
+	}
+
+	res, err := s.db.ExecContext(ctx,
+		`INSERT INTO check_procs (ticket_id, kind, pgid, proc_start, started_at, budget_started_at) VALUES (3, 'fix', 4500, NULL, '2026-10-03T00:00:00Z', '2026-10-03T00:00:00Z')`,
+	)
+	if err != nil {
+		t.Fatalf("insert fix row for ticket 3: %v", err)
+	}
+	gen3, err := res.LastInsertId()
+	if err != nil {
+		t.Fatalf("LastInsertId: %v", err)
+	}
+	if gen3 != 4 {
+		t.Errorf("fix row gen = %d, want 4 (the deleted ticket 3 row's gen is never reused)", gen3)
+	}
+
+	rejects := []struct {
+		name string
+		stmt string
+	}{
+		{"unknown kind", `INSERT INTO check_procs (ticket_id, kind, pgid, proc_start, started_at, budget_started_at) VALUES (1, 'fmt', 4242, NULL, '2026-10-03T00:00:00Z', '2026-10-03T00:00:00Z')`},
+		{"non-positive pgid", `INSERT INTO check_procs (ticket_id, kind, pgid, proc_start, started_at, budget_started_at) VALUES (1, 'fix', 0, NULL, '2026-10-03T00:00:00Z', '2026-10-03T00:00:00Z')`},
+		{"empty proc_start", `INSERT INTO check_procs (ticket_id, kind, pgid, proc_start, started_at, budget_started_at) VALUES (1, 'fix', 4242, '', '2026-10-03T00:00:00Z', '2026-10-03T00:00:00Z')`},
+		{"second row for ticket 1", `INSERT INTO check_procs (ticket_id, kind, pgid, proc_start, started_at, budget_started_at) VALUES (1, 'lint', 4600, NULL, '2026-10-03T00:00:00Z', '2026-10-03T00:00:00Z')`},
+	}
+	for _, tc := range rejects {
+		if _, execErr := s.db.ExecContext(ctx, tc.stmt); execErr == nil {
+			t.Errorf("%s: want a constraint error, got nil", tc.name)
+		}
+	}
+
+	// fkRows is scoped to this closure so its defer closes it before the
+	// DELETE below runs: the store limits itself to one connection
+	// (SetMaxOpenConns(1)), and that DELETE would block forever waiting for
+	// it if a failing foreign_key_check left rows open until the test ended
+	// (review r1f8).
+	func() {
+		fkRows, err := s.db.QueryContext(ctx, `PRAGMA foreign_key_check`)
+		if err != nil {
+			t.Fatalf("PRAGMA foreign_key_check: %v", err)
+		}
+		defer fkRows.Close()
+		if fkRows.Next() {
+			t.Error("PRAGMA foreign_key_check: want no rows, got at least one")
+		}
+		if fkErr := fkRows.Err(); fkErr != nil {
+			t.Fatalf("foreign_key_check rows: %v", fkErr)
+		}
+	}()
+
+	if _, execErr := s.db.ExecContext(ctx, `DELETE FROM tickets WHERE id = 2`); execErr != nil {
+		t.Fatalf("delete ticket 2: %v", execErr)
+	}
+	if n := checkProcCount(t, s, 2); n != 0 {
+		t.Errorf("check_procs rows for ticket 2 after its deletion = %d, want 0 (ON DELETE CASCADE)", n)
 	}
 }
 

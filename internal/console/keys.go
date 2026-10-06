@@ -36,6 +36,7 @@ func Bindings() []KeyBinding {
 		{Keys: []string{"g i"}, Action: "nav-inbox"},
 		{Keys: []string{"g r"}, Action: "nav-recent"},
 		{Keys: []string{"g f"}, Action: "nav-feed"},
+		{Keys: []string{"g p"}, Action: "nav-project"},
 		{Keys: []string{"j"}, Action: "focus-next"},
 		{Keys: []string{"k"}, Action: "focus-prev"},
 		{Keys: []string{"o", "Enter"}, Action: "open"},
@@ -47,9 +48,6 @@ func Bindings() []KeyBinding {
 		{Keys: []string{"Cmd-Enter", "Ctrl-Enter"}, Action: "send"},
 		{Keys: []string{"a"}, Action: "toggle-rail"},
 		{Keys: []string{"b"}, Action: "focus-side"},
-		{Keys: []string{"s"}, Action: "stop"},
-		{Keys: []string{"S"}, Action: "stop-all"},
-		{Keys: []string{"x"}, Action: "mark-read"},
 		{Keys: []string{"?"}, Action: "help"},
 		{Keys: []string{"Esc"}, Action: "blur"},
 	}

@@ -348,6 +348,7 @@ func serve(ctx context.Context, cfgPath, dbPath string, seedDemo bool) error {
 		Sandboxes:      sbSet,
 		RequireSandbox: serveRequireSandbox,
 		Commands:       cmds,
+		HostCommands:   job.NewHostCommandRunner(),
 		DataDir:        dataDir,
 		LensesParallel: cfg.Review.MaxLensesParallel,
 		JudgeCodexHome: judgeCodexHome,
