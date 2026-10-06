@@ -76,18 +76,12 @@ func (c *console) handlePickup(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	tk, err := c.tracker.Issue(r.Context(), trackerProject, ref)
-	switch {
-	case errors.Is(err, tracker.ErrIssueNotFound):
-		http.Error(w, fmt.Sprintf("issue #%d not found", req.N), http.StatusConflict)
+	tk, err := c.fetchIssue(r.Context(), trackerProject, ref)
+	if refusal, ok := errors.AsType[*actionRefusal](err); ok {
+		http.Error(w, refusal.Reason, refusal.Status)
 		return
-	case errors.Is(err, tracker.ErrIssueClosed):
-		http.Error(w, fmt.Sprintf("issue #%d is closed", req.N), http.StatusConflict)
-		return
-	case errors.Is(err, tracker.ErrIssueIsPullRequest):
-		http.Error(w, fmt.Sprintf("#%d is a pull request, not an issue", req.N), http.StatusConflict)
-		return
-	case err != nil:
+	}
+	if err != nil {
 		slog.Error("console: pickup: issue", "project_id", projectID, "ref", ref, "err", err)
 		http.Error(w, genericServerErrorBody, http.StatusInternalServerError)
 		return
@@ -101,6 +95,27 @@ func (c *console) handlePickup(w http.ResponseWriter, r *http.Request) {
 
 	c.bus.Publish()
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// fetchIssue reads ref from the tracker, or refuses with pickup's exact
+// messages: missing, closed, or a pull request is a 409 *actionRefusal, and
+// a nil tracker is a 503 one. Any other error is returned wrapped.
+func (c *console) fetchIssue(ctx context.Context, trackerProject, ref string) (tracker.Ticket, error) {
+	if c.tracker == nil {
+		return tracker.Ticket{}, &actionRefusal{Status: http.StatusServiceUnavailable, Reason: "the tracker is not available"}
+	}
+	tk, err := c.tracker.Issue(ctx, trackerProject, ref)
+	switch {
+	case errors.Is(err, tracker.ErrIssueNotFound):
+		return tracker.Ticket{}, &actionRefusal{Status: http.StatusConflict, Reason: fmt.Sprintf("issue #%s not found", ref)}
+	case errors.Is(err, tracker.ErrIssueClosed):
+		return tracker.Ticket{}, &actionRefusal{Status: http.StatusConflict, Reason: fmt.Sprintf("issue #%s is closed", ref)}
+	case errors.Is(err, tracker.ErrIssueIsPullRequest):
+		return tracker.Ticket{}, &actionRefusal{Status: http.StatusConflict, Reason: fmt.Sprintf("#%s is a pull request, not an issue", ref)}
+	case err != nil:
+		return tracker.Ticket{}, fmt.Errorf("console: issue %s: %w", ref, err)
+	}
+	return tk, nil
 }
 
 // projectName returns the Name of the store project id -- the
