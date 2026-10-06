@@ -1175,6 +1175,145 @@ func TestClaudeRun_FinalMessageOnTimeout(t *testing.T) {
 	}
 }
 
+// TestClaudeRun_LogsLongTurnWithRunID proves Claude.run calls logLongTurns
+// on every outcome (design shape, the long-turn path): a transcript with a
+// 300 s turn logs one INFO "claude long turn" record carrying the run's
+// own run_id, and a run with no transcript file logs one DEBUG "claude
+// long turns: no transcript" record instead, with no error either way. Not
+// parallel: it calls slog.SetDefault (TestClaude_CorruptStopHookStateLogsWarn's
+// own pattern).
+func TestClaudeRun_LogsLongTurnWithRunID(t *testing.T) {
+	requireUnix(t)
+
+	// Absolute, not fakeClaudeScript's bare relative path: cmd.Dir below is
+	// a temp WorkDir, not this package's directory, and exec resolves a
+	// relative binary path against cmd.Dir, not the test's own cwd.
+	absFakeClaudeScript, err := filepath.Abs(fakeClaudeScript)
+	if err != nil {
+		t.Fatalf("resolve fake claude script path: %v", err)
+	}
+
+	t.Run("with transcript", func(t *testing.T) {
+		dir := t.TempDir()
+		home := t.TempDir()
+		workDir := t.TempDir()
+		req := newFakeRequest(dir, "success", "HOME="+home)
+		req.WorkDir = workDir
+		req.SessionID = "s1"
+		req.RunToken = "459"
+
+		resolvedWorkDir, err := filepath.EvalSymlinks(workDir)
+		if err != nil {
+			t.Fatalf("resolve workdir: %v", err)
+		}
+		transcriptDir := filepath.Join(home, ".claude", "projects", encodeClaudeTranscriptDir(resolvedWorkDir))
+		if mkdirErr := os.MkdirAll(transcriptDir, 0o755); mkdirErr != nil {
+			t.Fatalf("mkdir transcript dir: %v", mkdirErr)
+		}
+		fixture, err := os.ReadFile("testdata/claude_transcript_long.jsonl")
+		if err != nil {
+			t.Fatalf("read fixture: %v", err)
+		}
+		transcriptPath := filepath.Join(transcriptDir, "s1.jsonl")
+		if writeErr := os.WriteFile(transcriptPath, fixture, 0o600); writeErr != nil {
+			t.Fatalf("write transcript: %v", writeErr)
+		}
+
+		var logBuf bytes.Buffer
+		prevDefault := slog.Default()
+		slog.SetDefault(slog.New(slog.NewJSONHandler(&logBuf, &slog.HandlerOptions{Level: slog.LevelDebug})))
+		t.Cleanup(func() { slog.SetDefault(prevDefault) })
+
+		c := NewClaude(absFakeClaudeScript, testOAuthToken)
+		res, err := c.Run(context.Background(), req)
+		if err != nil {
+			t.Fatalf("Run: %v", err)
+		}
+		if res.TranscriptPath != transcriptPath {
+			t.Fatalf("TranscriptPath = %q, want %q", res.TranscriptPath, transcriptPath)
+		}
+
+		var turnRecords []map[string]any
+		for line := range strings.SplitSeq(strings.TrimSpace(logBuf.String()), "\n") {
+			var rec map[string]any
+			if decodeErr := json.Unmarshal([]byte(line), &rec); decodeErr != nil {
+				t.Fatalf("decode log line %q: %v", line, decodeErr)
+			}
+			if rec["msg"] == "claude long turn" {
+				turnRecords = append(turnRecords, rec)
+			}
+		}
+		if len(turnRecords) != 1 {
+			t.Fatalf("got %d claude long turn records, want 1: %v", len(turnRecords), turnRecords)
+		}
+		rec := turnRecords[0]
+		if rec["run_id"] != "459" {
+			t.Errorf("run_id = %v, want 459", rec["run_id"])
+		}
+		if rec["rank"] != float64(1) {
+			t.Errorf("rank = %v, want 1", rec["rank"])
+		}
+		if rec["seconds"] != float64(300) {
+			t.Errorf("seconds = %v, want 300", rec["seconds"])
+		}
+		if rec["output_tokens"] != float64(841) {
+			t.Errorf("output_tokens = %v, want 841", rec["output_tokens"])
+		}
+		startedAt, ok := rec["started_at"].(string)
+		if !ok {
+			t.Fatalf("started_at missing or not a string: %v", rec["started_at"])
+		}
+		gotStart, err := time.Parse(time.RFC3339Nano, startedAt)
+		if err != nil {
+			t.Fatalf("parse started_at %q: %v", startedAt, err)
+		}
+		wantStart := time.Date(2026, 10, 5, 10, 0, 0, 0, time.UTC)
+		if !gotStart.Equal(wantStart) {
+			t.Errorf("started_at = %v, want %v", gotStart, wantStart)
+		}
+	})
+
+	t.Run("without transcript", func(t *testing.T) {
+		dir := t.TempDir()
+		home := t.TempDir()
+		workDir := t.TempDir()
+		req := newFakeRequest(dir, "success", "HOME="+home)
+		req.WorkDir = workDir
+		req.SessionID = "s2"
+		req.RunToken = "459"
+
+		var logBuf bytes.Buffer
+		prevDefault := slog.Default()
+		slog.SetDefault(slog.New(slog.NewJSONHandler(&logBuf, &slog.HandlerOptions{Level: slog.LevelDebug})))
+		t.Cleanup(func() { slog.SetDefault(prevDefault) })
+
+		c := NewClaude(absFakeClaudeScript, testOAuthToken)
+		if _, err := c.Run(context.Background(), req); err != nil {
+			t.Fatalf("Run: %v", err)
+		}
+
+		var sawNoTranscript bool
+		for line := range strings.SplitSeq(strings.TrimSpace(logBuf.String()), "\n") {
+			var rec map[string]any
+			if decodeErr := json.Unmarshal([]byte(line), &rec); decodeErr != nil {
+				t.Fatalf("decode log line %q: %v", line, decodeErr)
+			}
+			if rec["msg"] == "claude long turn" {
+				t.Errorf("got a claude long turn record with no transcript file: %v", rec)
+			}
+			if rec["msg"] == "claude long turns: no transcript" {
+				sawNoTranscript = true
+				if rec["run_id"] != "459" {
+					t.Errorf("run_id = %v, want 459", rec["run_id"])
+				}
+			}
+		}
+		if !sawNoTranscript {
+			t.Errorf("log = %q, want a claude long turns: no transcript record", logBuf.String())
+		}
+	})
+}
+
 // TestClaudeFinalMessage is claudeFinalMessage's own unit test (no process):
 // the JSON result object's "result" field wins when present and non-empty,
 // otherwise stdout itself comes back unchanged.

@@ -710,6 +710,8 @@ func (c Claude) run(ctx context.Context, req RunRequest, argv []string, sessionI
 		ValidateDenied: countValidateDenials(stdout.bytes()),
 	}
 
+	logLongTurns(req, res.TranscriptPath)
+
 	if outcomeErr := classifyProcessOutcome(ctx, stdout.overflowed(), waitErr, res.ExitCode); outcomeErr != nil {
 		if errors.Is(outcomeErr, ErrTimeout) || errors.Is(outcomeErr, ErrCanceled) {
 			res.ExitCode = -1
