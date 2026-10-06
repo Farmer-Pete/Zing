@@ -2201,6 +2201,7 @@ func (h reviewingHandler) retryCapResumesDiscuss(t store.Ticket, d Deps, resolve
 		row := &pending[i]
 		finding := row.Finding
 		finding.Decision = &accept
+		finding.OwnerPicked = false // Zing's recovery accept, not the owner's pick on the review question
 		if notes != "" {
 			finding.Fix = strings.TrimRight(finding.Fix, "\n") + "\n\n" + notes
 		}

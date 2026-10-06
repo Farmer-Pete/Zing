@@ -3787,6 +3787,18 @@ func TestReviewCapResumesRetryAccepts(t *testing.T) {
 	}
 	pbApply(t, s, ticket, commit)
 
+	sourceRows, err := s.Findings(t.Context(), ticket.ID)
+	if err != nil {
+		t.Fatalf("Findings (before retry): %v", err)
+	}
+	sourceRow, ok := newestFindingRowPerID(sourceRows)[findingID]
+	if !ok {
+		t.Fatalf("no finding row for %q before retry", findingID)
+	}
+	if !sourceRow.Finding.OwnerPicked {
+		t.Errorf("source row OwnerPicked = false, want true (triage's own discuss pick)")
+	}
+
 	qID := newestOpenQuestion(t, s, ticket.ID).ID
 	const note = "owner says accept it as is"
 	option := escalationChoiceRetry
@@ -3821,6 +3833,12 @@ func TestReviewCapResumesRetryAccepts(t *testing.T) {
 	}
 	if !strings.Contains(finding.Fix, discussFix) || !strings.Contains(finding.Fix, note) {
 		t.Errorf("finding.Fix = %q, want it to carry both the original fix text and the owner's own note", finding.Fix)
+	}
+	if finding.OwnerPicked {
+		t.Errorf("retry finding.OwnerPicked = true, want false (Zing's own recovery accept, not the owner's pick)")
+	}
+	if strings.Contains(string(retryCommit.Artifacts[0].Payload), "owner_picked") {
+		t.Errorf("retry artifact payload = %q, want no owner_picked key", retryCommit.Artifacts[0].Payload)
 	}
 	if len(retryCommit.ResolveQuestions) != 1 || retryCommit.ResolveQuestions[0] != qID {
 		t.Errorf("retryCommit.ResolveQuestions = %v, want [%d]", retryCommit.ResolveQuestions, qID)
