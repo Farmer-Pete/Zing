@@ -1,6 +1,8 @@
 package response
 
 import (
+	"fmt"
+	"slices"
 	"strconv"
 	"strings"
 )
@@ -49,4 +51,42 @@ func TaskMapped(p Plan) bool {
 		}
 	}
 	return false
+}
+
+// FileTaskChange is one file whose task list GrantFileTasks changed.
+type FileTaskChange struct {
+	Path string
+	Old  string
+	New  string
+}
+
+// GrantFileTasks returns p with g.Task added to the task list of every
+// delivery file entry named in g.Paths whose list is non-empty and lacks
+// it, plus one change per path that moved. Pure: p is not modified.
+func GrantFileTasks(p Plan, g FileGrant) (Plan, []FileTaskChange) {
+	out := p
+	files := slices.Clone(p.Delivery.Files)
+	var changes []FileTaskChange
+	for i, f := range files {
+		nums := FileTasks(f)
+		if !slices.Contains(g.Paths, f.Path) || len(nums) == 0 || slices.Contains(nums, g.Task) {
+			continue
+		}
+		nums = slices.Compact(slices.Sorted(slices.Values(append(nums, g.Task))))
+		parts := make([]string, len(nums))
+		for j, n := range nums {
+			parts[j] = strconv.Itoa(n)
+		}
+		files[i].Task = strings.Join(parts, " ")
+		if !slices.ContainsFunc(changes, func(c FileTaskChange) bool { return c.Path == f.Path }) {
+			changes = append(changes, FileTaskChange{Path: f.Path, Old: f.Task, New: files[i].Task})
+		}
+	}
+	out.Delivery.Files = files
+	return out, changes
+}
+
+// FileGrantOptionText is option d's text for g.
+func FileGrantOptionText(g FileGrant) string {
+	return fmt.Sprintf("Let task %d also change %s", g.Task, strings.Join(g.Paths, ", "))
 }

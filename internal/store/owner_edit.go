@@ -22,10 +22,11 @@ import (
 	"zing/internal/response"
 )
 
-// The three OwnerEditRequest.Target values OwnerEdit accepts.
+// The four OwnerEditRequest.Target values OwnerEdit accepts.
 const (
 	OwnerEditScenario   = "scenario"
 	OwnerEditPlanTask   = "plan_task"
+	OwnerEditPlanFile   = "plan_file"
 	OwnerEditTicketBody = "ticket_body"
 )
 
@@ -504,6 +505,51 @@ func checkPlanStructure(p response.Plan) string {
 		}
 	}
 	return ""
+}
+
+// grantPlanFilesTx applies a HandlerCommit's GrantFiles to the ticket's
+// newest plan in place and writes one owner_edit event per changed file
+// (plan #51). It needs no claim guard: CommitHandlerResult's own fenced
+// UPDATE, at the end of the same transaction, is what proves the handler
+// still holds the claim. It writes no event and no UPDATE when
+// GrantFileTasks reports no change.
+func (s *Store) grantPlanFilesTx(ctx context.Context, tx *sql.Tx, ticketID int64, g response.FileGrant) error {
+	var id int64
+	var payload []byte
+	if err := tx.QueryRowContext(ctx,
+		`SELECT id, payload FROM artifacts WHERE ticket_id = ? AND type = 'plan' ORDER BY version DESC LIMIT 1`,
+		ticketID).Scan(&id, &payload); err != nil {
+		return fmt.Errorf("grant plan files: load plan: %w", err)
+	}
+	var plan response.Plan
+	if err := json.Unmarshal(payload, &plan); err != nil {
+		return fmt.Errorf("grant plan files: unmarshal plan: %w", err)
+	}
+	granted, changes := response.GrantFileTasks(plan, g)
+	if len(changes) == 0 {
+		return nil
+	}
+	newPayload, err := json.Marshal(granted)
+	if err != nil {
+		return fmt.Errorf("grant plan files: marshal plan: %w", err)
+	}
+	if err = s.schemas.validate("artifacts", "plan", newPayload); err != nil {
+		return fmt.Errorf("grant plan files: %w", err)
+	}
+	if fault := checkPlanStructure(granted); fault != "" {
+		return fmt.Errorf("grant plan files: %s", fault)
+	}
+	if _, err = tx.ExecContext(ctx, `UPDATE artifacts SET payload = ? WHERE id = ?`, string(newPayload), id); err != nil {
+		return fmt.Errorf("grant plan files: update plan: %w", err)
+	}
+	for _, ch := range changes {
+		ev := response.OwnerEditEvent{Target: OwnerEditPlanFile, Ref: ch.Path, Action: OwnerEditActionEdit, Old: ch.Old, New: ch.New}
+		if err := s.insertOwnerEditEventTx(ctx, tx, ticketID, ev); err != nil {
+			return err
+		}
+	}
+	slog.InfoContext(ctx, "file grant applied", "ticket_id", ticketID, "task_n", g.Task, "paths", g.Paths, "changed", len(changes))
+	return nil
 }
 
 // editTicketBodyTx amends tickets.body: checkOwnerEditShape has already
