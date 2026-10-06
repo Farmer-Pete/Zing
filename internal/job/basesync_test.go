@@ -224,6 +224,115 @@ func TestBaseSyncBeforeReviewMergesOverlap(t *testing.T) {
 	}
 }
 
+// basesyncJudgeTick runs one judgeHandler.Run tick, fails the test if it
+// escalates, applies the commit, and returns the refreshed ticket plus the
+// commit itself (basesyncReviewTick's own shape, for judging's handler
+// instead of reviewing's).
+func basesyncJudgeTick(t *testing.T, s *store.Store, deps Deps, ticket store.Ticket, label string) (store.Ticket, store.HandlerCommit) {
+	t.Helper()
+	commit, err := (judgeHandler{}).Run(t.Context(), ticket, deps)
+	if err != nil {
+		t.Fatalf("%s: %v", label, err)
+	}
+	if commit.Escalation != nil {
+		t.Fatalf("%s escalated: %+v", label, commit.Escalation.Payload)
+	}
+	pbApply(t, s, ticket, commit)
+	return pbGetTicket(t, s, ticket.ID), commit
+}
+
+// TestBaseSyncBeforeJudgeRoundMerges proves the judge point (overview
+// design, judgeStartOrSync): after the ticket has entered judging, main
+// changes hello.txt with exactly the content the ticket branch already
+// carries (a clean merge) and an unrelated other.txt. START opens a base
+// merge request with point judge before it ever writes round 1's own
+// started marker; once the request lands, the next tick writes "judge
+// round 1 started" at the merged sha.
+func TestBaseSyncBeforeJudgeRoundMerges(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow end-to-end flow; runs in the full suite")
+	}
+	t.Parallel()
+	s, ticket := judgeTicketReady(t)
+	basesyncAddOrigin(t, s, ticket)
+
+	orch, wt := basesyncTicketWorktree(t, s, ticket)
+	helloContent, err := gitfixture.Git(t.Context(), wt.Dir(), "show", "HEAD:hello.txt")
+	if err != nil {
+		t.Fatalf("git show HEAD:hello.txt: %v", err)
+	}
+
+	mergeCommitOnMain(t, s, ticket, "hello.txt", helloContent)
+	baseSHA := mergeCommitOnMain(t, s, ticket, "other.txt", []byte("main only\n"))
+
+	rt := runtime.NewFake(judgeScriptsFS())
+
+	deps := pbClaim(t, s, rt, ticket.ID)
+	commit1, err := (judgeHandler{}).Run(t.Context(), ticket, deps)
+	if err != nil {
+		t.Fatalf("tick 1: %v", err)
+	}
+	if commit1.Escalation != nil {
+		t.Fatalf("tick 1 escalated: %+v", commit1.Escalation.Payload)
+	}
+	if _, found := basesyncFindMessage(commit1, "judge round 1 started"); found {
+		t.Errorf("tick 1 commit.Messages = %+v, want no started marker (the merge runs first)", commit1.Messages)
+	}
+	reqBody, found := basesyncFindMessage(commit1, "base merge requested after run ")
+	if !found {
+		t.Fatalf("tick 1 commit.Messages = %+v, want a base merge request", commit1.Messages)
+	}
+	req, err := parseBaseMergeRequest(store.MessageRow{ID: 1, Body: reqBody})
+	if err != nil {
+		t.Fatalf("parseBaseMergeRequest: %v", err)
+	}
+	if req.Point != syncPointJudge {
+		t.Errorf("req.Point = %q, want %q", req.Point, syncPointJudge)
+	}
+	if req.BaseSHA != baseSHA {
+		t.Errorf("req.BaseSHA = %s, want %s", req.BaseSHA, baseSHA)
+	}
+
+	pbApply(t, s, ticket, commit1)
+	ticket = pbGetTicket(t, s, ticket.ID)
+
+	landed := false
+	var last store.HandlerCommit
+	for i := 0; i < 4 && !landed; i++ {
+		deps = pbClaim(t, s, rt, ticket.ID)
+		ticket, last = basesyncJudgeTick(t, s, deps, ticket, "merge tick")
+		landed = shipHasMergeLanded(last)
+	}
+	if !landed {
+		t.Fatal("base merge did not land within 4 ticks")
+	}
+
+	mergedSHA, err := orch.HeadSHA(t.Context(), wt)
+	if err != nil {
+		t.Fatalf("HeadSHA: %v", err)
+	}
+	parents, err := orch.CommitParents(t.Context(), wt, mergedSHA)
+	if err != nil {
+		t.Fatalf("CommitParents: %v", err)
+	}
+	if len(parents) != 2 {
+		t.Errorf("CommitParents(%s) = %v, want 2 parents", mergedSHA, parents)
+	}
+
+	deps = pbClaim(t, s, rt, ticket.ID)
+	commit2, err := (judgeHandler{}).Run(t.Context(), ticket, deps)
+	if err != nil {
+		t.Fatalf("tick after landed: %v", err)
+	}
+	if commit2.Escalation != nil {
+		t.Fatalf("tick after landed escalated: %+v", commit2.Escalation.Payload)
+	}
+	wantPrefix := "judge round 1 started sha " + mergedSHA
+	if _, found := basesyncFindMessage(commit2, wantPrefix); !found {
+		t.Fatalf("tick after landed commit.Messages = %+v, want a message starting %q", commit2.Messages, wantPrefix)
+	}
+}
+
 // TestBaseSyncBeforeReviewSkipsUnrelated proves the review point's own
 // overlap condition (overview design's second integration test): main
 // changes only a path the ticket never touched, so no merge opens and

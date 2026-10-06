@@ -357,7 +357,7 @@ func (h judgeHandler) Run(ctx context.Context, t store.Ticket, d Deps) (store.Ha
 			}
 		}
 
-		return judgeStartCommit(t, d, m+1, sha, maxRunID), nil
+		return judgeStartOrSync(ctx, t, d, m+1, sha, maxRunID)
 
 	case judgeRoundStartedLine.MatchString(firstLine):
 		sub := judgeRoundStartedLine.FindStringSubmatch(firstLine)
@@ -580,7 +580,8 @@ func judgeStartChecks(ctx context.Context, t store.Ticket, d Deps) (sha string, 
 }
 
 // start is START (design section 7.2): judgeStartChecks' own four checks,
-// then judgeStartCommit's own no-runtime-call commit.
+// then judgeStartOrSync's own judge-point merge or judgeStartCommit's
+// no-runtime-call commit.
 func (h judgeHandler) start(ctx context.Context, t store.Ticket, d Deps, n int) (store.HandlerCommit, error) {
 	sha, maxRunID, escalation, err := judgeStartChecks(ctx, t, d)
 	if err != nil {
@@ -588,6 +589,18 @@ func (h judgeHandler) start(ctx context.Context, t store.Ticket, d Deps, n int) 
 	}
 	if escalation != nil {
 		return *escalation, nil
+	}
+	return judgeStartOrSync(ctx, t, d, n, sha, maxRunID)
+}
+
+// judgeStartOrSync is START's last step (overview design, judge point): the
+// judge point's base merge when main moved under a file the ticket changed,
+// otherwise the round's own started marker. A merge moves HEAD, so a later
+// tick starts round n at the merged sha instead.
+func judgeStartOrSync(ctx context.Context, t store.Ticket, d Deps, n int, sha string, maxRunID int64) (store.HandlerCommit, error) {
+	c, opened, err := baseSync(ctx, t, d, syncPointJudge)
+	if err != nil || opened {
+		return c, err
 	}
 	return judgeStartCommit(t, d, n, sha, maxRunID), nil
 }
