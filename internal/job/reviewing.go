@@ -412,13 +412,23 @@ func newestFindingRowPerID(findings []store.FindingRow) map[string]*store.Findin
 	return out
 }
 
+// acceptedInRound is the let-through rule shared by acceptedRoundFindings
+// and acceptedAtCapFindings (shipping.go): f belongs to round, was never
+// held, and was decided accept.
+func acceptedInRound(f response.FindingArtifact, round int) bool {
+	inRound := f.Round == round
+	unheld := !f.Held
+	accepted := f.Decision != nil && *f.Decision == response.FindingAccept
+	return inRound && unheld && accepted
+}
+
 // acceptedRoundFindings returns every finding of round with Decision accept,
 // unheld, in Findings' own order (artifact id order).
 func acceptedRoundFindings(findings []store.FindingRow, round int) []response.FindingArtifact {
 	var out []response.FindingArtifact
 	for i := range findings {
 		f := findings[i].Finding
-		if f.Round == round && !f.Held && f.Decision != nil && *f.Decision == response.FindingAccept {
+		if acceptedInRound(f, round) {
 			out = append(out, f)
 		}
 	}

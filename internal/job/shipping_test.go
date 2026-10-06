@@ -857,6 +857,12 @@ func TestPublishListsAcceptedFindings(t *testing.T) {
 	if !strings.Contains(gh.lastBody, "- r3f1 minor ") {
 		t.Errorf("gh.lastBody does not contain %q:\n%s", "- r3f1 minor ", gh.lastBody)
 	}
+	if strings.Contains(gh.lastBody, "- r1f1 ") {
+		t.Errorf("gh.lastBody contains round 1's already-fixed finding %q:\n%s", "- r1f1 ", gh.lastBody)
+	}
+	if strings.Contains(gh.lastBody, "- r2f1 ") {
+		t.Errorf("gh.lastBody contains round 2's already-fixed finding %q:\n%s", "- r2f1 ", gh.lastBody)
+	}
 
 	scenariosAt := strings.Index(gh.lastBody, "## Scenarios")
 	acceptedAt := strings.Index(gh.lastBody, "## Accepted review findings")

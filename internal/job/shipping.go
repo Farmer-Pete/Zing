@@ -314,9 +314,8 @@ func acceptedAtCapFindings(ctx context.Context, t store.Ticket, d Deps) (accepte
 	}
 	var rows []response.FindingArtifact
 	for _, row := range newestFindingRowPerID(findings) {
-		f := row.Finding
-		if f.Round == round && !f.Held && f.Decision != nil && *f.Decision == response.FindingAccept {
-			rows = append(rows, f)
+		if acceptedInRound(row.Finding, round) {
+			rows = append(rows, row.Finding)
 		}
 	}
 	if len(rows) == 0 {
