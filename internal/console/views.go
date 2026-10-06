@@ -2192,9 +2192,11 @@ func updateLine(m *store.MessageRow, agent string) (string, bool) {
 	case strings.HasPrefix(body, updateMarkerSealRefusedPrefix):
 		return sealRefusedLine(body), true
 	case strings.HasPrefix(body, updateMarkerPlanreviewPrefix) && strings.HasSuffix(body, updateMarkerPlanreviewPendingSuffix):
-		return "Plan review found only minor findings. Planning resumes automatically to address them.", true
+		version := strings.TrimSuffix(strings.TrimPrefix(body, updateMarkerPlanreviewPrefix), updateMarkerPlanreviewPendingSuffix)
+		return "Plan review of v" + version + " found minor findings. Planning resumes automatically to address them.", true
 	case strings.HasPrefix(body, updateMarkerPlanreviewPrefix) && strings.HasSuffix(body, updateMarkerPlanreviewDeliveredSuffix):
-		return "Planning resumed with the review findings.", true
+		version := strings.TrimSuffix(strings.TrimPrefix(body, updateMarkerPlanreviewPrefix), updateMarkerPlanreviewDeliveredSuffix)
+		return "Planning resumed with the v" + version + " review findings.", true
 	case strings.HasPrefix(body, updateMarkerValidationPendingPrefix):
 		return validationErrorsLine(body), true
 	case strings.HasPrefix(body, updateMarkerValidationDeliveredPrefix):

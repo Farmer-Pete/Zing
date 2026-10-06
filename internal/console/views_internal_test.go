@@ -50,23 +50,22 @@ const testEscalationBody = "escalation summary"
 // TestDisplayBody_PlanreviewPendingMarkerIsHumanReadable proves a
 // "planreview vN pending" marker (job.planreviewPendingMarker) no longer
 // renders as-is, and instead reads as the owner-facing sentence explaining
-// that planning is about to resume on its own.
+// that planning is about to resume on its own, naming the version so the
+// owner never reads a stale version's line (#87).
 func TestDisplayBody_PlanreviewPendingMarkerIsHumanReadable(t *testing.T) {
 	t.Parallel()
-	got := displayBody(updateRow("planreview v3 pending"))
-	if got == "planreview v3 pending" {
-		t.Fatalf("displayBody returned the raw marker unchanged: %q", got)
-	}
-	if !strings.Contains(got, "Planning resumes") {
-		t.Errorf("displayBody(%q) = %q, want it to contain %q", "planreview v3 pending", got, "Planning resumes")
+	const want = "Plan review of v3 found minor findings. Planning resumes automatically to address them."
+	if got := displayBody(updateRow("planreview v3 pending")); got != want {
+		t.Errorf("displayBody(%q) = %q, want %q", "planreview v3 pending", got, want)
 	}
 }
 
 // TestDisplayBody_PlanreviewDeliveredMarkerIsHumanReadable proves a
-// "planreview vN delivered" marker renders as a plain sentence too.
+// "planreview vN delivered" marker renders as a plain sentence too, naming
+// the version.
 func TestDisplayBody_PlanreviewDeliveredMarkerIsHumanReadable(t *testing.T) {
 	t.Parallel()
-	const want = "Planning resumed with the review findings."
+	const want = "Planning resumed with the v3 review findings."
 	if got := displayBody(updateRow("planreview v3 delivered")); got != want {
 		t.Errorf("displayBody(%q) = %q, want %q", "planreview v3 delivered", got, want)
 	}
