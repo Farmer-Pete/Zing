@@ -1164,3 +1164,56 @@ export function staleMarkerText(staleSince) {
 	const mm = String(d.getMinutes()).padStart(2, '0');
 	return `Reconnecting. Stale since ${hh}:${mm}.`;
 }
+
+/**
+ * versionedURL is path with build as its v query, the URL the server marks
+ * immutable; path unchanged when build is '' (a page from before data-build).
+ * @param {string} path
+ * @param {string} build
+ * @returns {string}
+ */
+export function versionedURL(path, build) {
+	return build === '' ? path : `${path}?v=${encodeURIComponent(build)}`;
+}
+
+// UPDATED_MARKER_TEXT is #stream-status's text, ahead of its Reload link,
+// once the server's build differs from the page's.
+export const UPDATED_MARKER_TEXT = 'Zing was updated.';
+
+/**
+ * buildChanged is true when both builds are known and differ: the page's
+ * scripts are older than the server's. An empty build (a page or server
+ * from before data-build) never counts as changed.
+ * @param {string} pageBuild - body's data-build
+ * @param {string} serverBuild - #alerts' data-build from the latest frame
+ * @returns {boolean}
+ */
+export function buildChanged(pageBuild, serverBuild) {
+	if (pageBuild === '' || serverBuild === '') {
+		return false;
+	}
+	return pageBuild !== serverBuild;
+}
+
+/**
+ * streamStatusView composes renderStreamStatus's two markers into what
+ * #stream-status should show. The update marker (#59: a redeploy left an
+ * open tab running its old cached script against the new server) wins over
+ * the reconnect marker whenever both apply, since the fix for either is the
+ * same reload and the owner only needs to be told once.
+ * @param {string} pageBuild - body's data-build
+ * @param {string} serverBuild - #alerts' data-build from the latest frame
+ * @param {number|null} staleSince - reduceStreamStatus's staleSince, epoch
+ *   ms, or null while live
+ * @returns {{text: string, showReload: boolean, stale: boolean}} text is
+ *   the marker's own words, with a trailing space before the Reload link
+ *   when showReload is true; stale is what body.stream-stale should be set
+ *   to.
+ */
+export function streamStatusView(pageBuild, serverBuild, staleSince) {
+	if (buildChanged(pageBuild, serverBuild)) {
+		return { text: `${UPDATED_MARKER_TEXT} `, showReload: true, stale: true };
+	}
+	const text = staleMarkerText(staleSince);
+	return { text, showReload: false, stale: text !== '' };
+}

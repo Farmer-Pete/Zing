@@ -1,0 +1,16 @@
+title = "Zing gitleaks config"
+
+[extend]
+# Keep every default rule; only add a narrow allowlist entry below.
+useDefault = true
+
+[allowlist]
+description = "False positives: test fixtures that look like secrets but are not"
+regexTarget = "line"
+regexes = [
+  # internal/console/static/console.test.js asserts versionedURL against a
+  # 12-hex-character build-version fixture (the asset-version query string
+  # from #59). The literal "keys.json" contains "key", which trips
+  # generic-api-key's keyword heuristic on the adjacent quoted hex string.
+  '''versionedURL\('/static/keys\.json', '[0-9a-f]{12}'\)''',
+]
