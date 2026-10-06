@@ -2,12 +2,18 @@
 // (reviewingHandler.enterRound), wired through the post-build prelude's own
 // new driveOpenMerge call. It reuses reviewing_test.go's own
 // reviewTicketReady and reviewScriptsFS, and merge_test.go's own
-// mergeCommitOnMain and shipHasMergeLanded, all package job.
+// mergeCommitOnMain and shipHasMergeLanded, all package job. Task 5 adds the
+// CI point (shipHandler.pollCIFailed), reusing shipping_test.go's own
+// shipTicketReady, shipGitHub, shipTracker, shipFailedCI and shipHeadSHA,
+// and merge_test.go's own shipClaim and mergeRunTick.
 package job
 
 import (
+	"context"
+	"fmt"
 	"strings"
 	"testing"
+	"testing/fstest"
 
 	"zing/internal/gitfixture"
 	"zing/internal/orchestrator"
@@ -421,5 +427,130 @@ func TestBaseSyncBeforeReviewSkipsAtPointLimit(t *testing.T) {
 	}
 	if body, found := basesyncFindMessage(commit, "base merge requested after run "); found {
 		t.Errorf("commit.Messages has a base merge request %q, want none (the point is at its limit)", body)
+	}
+}
+
+// TestBaseSyncOnCIFailureMergesBeforeFix proves the CI point (overview
+// design, owner's Q1 note): once CI reports failed, pollCIFailed merges a
+// moved main first -- with no shared-path condition, unlike review and
+// judge -- and asks for a ci_log fix only once CI still fails after the
+// merge lands, matching the #91/PR #179 case the ticket names.
+func TestBaseSyncOnCIFailureMergesBeforeFix(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow end-to-end flow; runs in the full suite")
+	}
+	t.Parallel()
+	s, ticket, remoteDir := shipTicketReady(t)
+
+	gh := &shipGitHub{}
+	tr := &shipTracker{}
+	rt := runtime.NewFake(fstest.MapFS{})
+
+	deps := shipClaim(t, s, rt, ticket.ID, gh, tr)
+	publishCommit, err := (shipHandler{}).Run(t.Context(), ticket, deps) // PUBLISH
+	if err != nil {
+		t.Fatalf("PUBLISH: %v", err)
+	}
+	if publishCommit.Escalation != nil {
+		t.Fatalf("PUBLISH escalated: %+v", publishCommit.Escalation.Payload)
+	}
+	pbApply(t, s, ticket, publishCommit)
+	ticket = pbGetTicket(t, s, ticket.ID)
+	preMergeHead := shipHeadSHA(t, s, ticket)
+
+	baseSHA := mergeCommitOnMain(t, s, ticket, "other.txt", []byte("main only\n"))
+
+	runs, required := shipFailedCI()
+	gh.runs, gh.required = runs, required
+	gh.prState = orchestrator.PRState{Draft: true, HeadSHA: preMergeHead, BaseRef: pbFixtureDefaultBranch}
+	gh.logTail = func(context.Context, string, string, int64, int) (string, error) { return shipCILogTailText, nil }
+
+	deps = shipClaim(t, s, rt, ticket.ID, gh, tr)
+	commit1, err := (shipHandler{}).Run(t.Context(), ticket, deps)
+	if err != nil {
+		t.Fatalf("tick 1: %v", err)
+	}
+	if commit1.Escalation != nil {
+		t.Fatalf("tick 1 escalated: %+v", commit1.Escalation.Payload)
+	}
+	if !commit1.ClearPoll {
+		t.Error("tick 1 ClearPoll = false, want true")
+	}
+	if body, found := basesyncFindMessage(commit1, fixRequestedCILogPrefix); found {
+		t.Errorf("tick 1 commit.Messages has a %q marker %q, want none (the merge runs first)", fixRequestedCILogPrefix, body)
+	}
+	reqBody, found := basesyncFindMessage(commit1, "base merge requested after run ")
+	if !found {
+		t.Fatalf("tick 1 commit.Messages = %+v, want a base merge request", commit1.Messages)
+	}
+	req, err := parseBaseMergeRequest(store.MessageRow{ID: 1, Body: reqBody})
+	if err != nil {
+		t.Fatalf("parseBaseMergeRequest: %v", err)
+	}
+	if req.Point != syncPointCI {
+		t.Errorf("req.Point = %q, want %q", req.Point, syncPointCI)
+	}
+	if req.BaseSHA != baseSHA {
+		t.Errorf("req.BaseSHA = %s, want %s", req.BaseSHA, baseSHA)
+	}
+
+	pbApply(t, s, ticket, commit1)
+	ticket = pbGetTicket(t, s, ticket.ID)
+
+	landed := false
+	var last store.HandlerCommit
+	for i := 0; i < 4 && !landed; i++ {
+		deps = shipClaim(t, s, rt, ticket.ID, gh, tr)
+		ticket, last = mergeRunTick(t, s, deps, ticket, fmt.Sprintf("merge tick %d", i))
+		landed = shipHasMergeLanded(last)
+	}
+	if !landed {
+		t.Fatal("base merge did not land within 4 ticks")
+	}
+	mergedSHA := shipHeadSHA(t, s, ticket)
+
+	// gh.prState.HeadSHA is still the pre-merge sha: the next POLL pushes
+	// the merged branch to the pull request, the same head-mismatch path
+	// every other POLL push takes.
+	deps = shipClaim(t, s, rt, ticket.ID, gh, tr)
+	pushCommit, err := (shipHandler{}).Run(t.Context(), ticket, deps)
+	if err != nil {
+		t.Fatalf("push tick: %v", err)
+	}
+	if pushCommit.Escalation != nil {
+		t.Fatalf("push tick escalated: %+v", pushCommit.Escalation.Payload)
+	}
+	pbApply(t, s, ticket, pushCommit)
+	ticket = pbGetTicket(t, s, ticket.ID)
+
+	out, err := gitfixture.Git(t.Context(), remoteDir, "rev-parse", "refs/heads/"+*ticket.Branch)
+	if err != nil {
+		t.Fatalf("git rev-parse refs/heads/%s in origin: %v", *ticket.Branch, err)
+	}
+	if got := strings.TrimSpace(string(out)); got != mergedSHA {
+		t.Errorf("origin's %s = %s, want the merged sha %s", *ticket.Branch, got, mergedSHA)
+	}
+
+	// CI still fails at the merged head: the next POLL writes the ci_log
+	// fix request, carrying the log tail, and opens no second base merge
+	// request (the base is already an ancestor of HEAD).
+	gh.prState.HeadSHA = mergedSHA
+	deps = shipClaim(t, s, rt, ticket.ID, gh, tr)
+	commit2, err := (shipHandler{}).Run(t.Context(), ticket, deps)
+	if err != nil {
+		t.Fatalf("tick after merged: %v", err)
+	}
+	if commit2.Escalation != nil {
+		t.Fatalf("tick after merged escalated: %+v", commit2.Escalation.Payload)
+	}
+	fixBody, found := basesyncFindMessage(commit2, fixRequestedCILogPrefix)
+	if !found {
+		t.Fatalf("tick after merged commit.Messages = %+v, want a %q marker", commit2.Messages, fixRequestedCILogPrefix)
+	}
+	if !strings.Contains(fixBody, shipCILogTailText) {
+		t.Errorf("fix request body = %q, want it to contain %q", fixBody, shipCILogTailText)
+	}
+	if body, found := basesyncFindMessage(commit2, "base merge requested after run "); found {
+		t.Errorf("tick after merged commit.Messages has a base merge request %q, want none", body)
 	}
 }
