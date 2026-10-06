@@ -1663,7 +1663,22 @@ func (s *Store) AnswerQuestion(ctx context.Context, in AnswerInput) (AnswerResul
 		return AnswerResult{}, fmt.Errorf("answer question: begin tx: %w", err)
 	}
 	defer rollback(tx)
+	res, err := s.answerQuestionTx(ctx, tx, in)
+	if err != nil || !res.Accepted {
+		return res, err
+	}
+	if err = tx.Commit(); err != nil {
+		return AnswerResult{}, fmt.Errorf("answer question: commit tx: %w", err)
+	}
+	return res, nil
+}
 
+// answerQuestionTx is AnswerQuestion's body, tx-scoped (#57): it runs the
+// same checks and writes inside a transaction the caller already opened, so
+// Store.OwnerEdit's own "Edit it" path (answerAmendedEscalationTx) can
+// answer a question in the same transaction as the scenario edit it goes
+// with. It never commits; the caller does.
+func (s *Store) answerQuestionTx(ctx context.Context, tx *sql.Tx, in AnswerInput) (AnswerResult, error) {
 	row := tx.QueryRowContext(ctx, `SELECT `+messageColumns+` FROM messages WHERE id = ?`, in.QuestionID)
 	q, err := scanMessage(row)
 	if err != nil {
@@ -1763,9 +1778,6 @@ func (s *Store) AnswerQuestion(ctx context.Context, in AnswerInput) (AnswerResul
 		waitCleared = n > 0
 	}
 
-	if err = tx.Commit(); err != nil {
-		return AnswerResult{}, fmt.Errorf("answer question: commit tx: %w", err)
-	}
 	return AnswerResult{Accepted: true, WaitCleared: waitCleared}, nil
 }
 

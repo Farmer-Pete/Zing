@@ -558,3 +558,75 @@ func TestJudgeAmendmentAcceptHostKind(t *testing.T) {
 		t.Errorf("host runner cmd = %q, want %q", got, judgeAmendmentHostCheck)
 	}
 }
+
+// ---- TestJudgeAmendmentEditItStartsRound ------------------------------------
+
+// judgeAmendmentOwnerCheck is the owner's own replacement check
+// TestJudgeAmendmentEditItStartsRound saves through the edit box, in place
+// of the judge's own proposed judgeAmendmentS2Check.
+const judgeAmendmentOwnerCheck = "! curl -sf -X POST localhost:8080/hello -d 'owner wrote this'"
+
+// TestJudgeAmendmentEditItStartsRound proves #57's "Edit it" path (Q3): the
+// owner saves the amended-check box with their own text and
+// Store.OwnerEdit's AnswerQuestion field, landing the edit and answering
+// option b in one transaction; the next Run starts a fresh judge round
+// through retryFreshRound, reserving a judge run, rather than the judge's
+// own proposed check.
+func TestJudgeAmendmentEditItStartsRound(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow end-to-end flow; runs in the full suite")
+	}
+	t.Parallel()
+	s, ticket := judgeTicketReady(t)
+	rt := runtime.NewFake(judgeScriptsFS(judgeAmendmentS2ErrorScript))
+	ticket = judgeAdvanceStart(t, s, rt, ticket)
+
+	deps := pbClaim(t, s, rt, ticket.ID)
+	commit, err := (judgeHandler{}).Run(t.Context(), ticket, deps)
+	if err != nil {
+		t.Fatalf("RUN: %v", err)
+	}
+	pbApply(t, s, ticket, commit)
+	ticket = pbGetTicket(t, s, ticket.ID)
+
+	qID, _ := judgeOpenAmendedQuestion(t, s, ticket.ID)
+
+	if editErr := s.OwnerEdit(t.Context(), store.OwnerEditRequest{
+		TicketID: ticket.ID, Target: store.OwnerEditScenario, Ref: "s2", Action: store.OwnerEditActionEdit,
+		Check: new(judgeAmendmentOwnerCheck), AnswerQuestion: &qID,
+	}); editErr != nil {
+		t.Fatalf("OwnerEdit (edit it): %v", editErr)
+	}
+
+	deps2 := pbClaim(t, s, rt, ticket.ID)
+	sc := judgeScenarioS2(t, deps2, ticket)
+	if sc.Check != judgeAmendmentOwnerCheck {
+		t.Fatalf("s2 check = %q, want the owner's own %q", sc.Check, judgeAmendmentOwnerCheck)
+	}
+
+	if open, openErr := s.QuestionsByState(t.Context(), ticket.ID, "open"); openErr != nil || len(open) != 0 {
+		t.Fatalf("open questions = %+v (err %v), want none", open, openErr)
+	}
+
+	roundCommit, handled := pbRunPrelude(t, s, deps2, ticket.ID)
+	if !handled {
+		t.Fatal("handled = false, want true")
+	}
+	if len(roundCommit.Runs) == 0 {
+		t.Error("roundCommit.Runs is empty, want retryFreshRound to reserve a judge run")
+	}
+	ticket = pbGetTicket(t, s, ticket.ID)
+
+	markers, err := s.MarkersWithPrefix(t.Context(), ticket.ID, judgeRoundMarkerPrefix)
+	if err != nil {
+		t.Fatalf("MarkersWithPrefix: %v", err)
+	}
+	newest, _, _ := strings.Cut(markers[len(markers)-1].Body, "\n")
+	if !strings.HasPrefix(newest, "judge round 2 started sha ") {
+		t.Errorf("newest judge round marker = %q, want it to start with %q", newest, "judge round 2 started sha ")
+	}
+
+	if events := judgeOwnerEditEvents(t, s, ticket.ID); len(events) != 1 {
+		t.Errorf("owner_edit events = %+v, want exactly 1 (the owner's own edit, not an amendment accept)", events)
+	}
+}

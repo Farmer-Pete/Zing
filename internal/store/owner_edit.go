@@ -50,6 +50,11 @@ const (
 	OwnerEditCodeLanded     OwnerEditCode = "landed"
 	OwnerEditCodeClaimed    OwnerEditCode = "claimed"
 	OwnerEditCodeInvalid    OwnerEditCode = "invalid"
+	// OwnerEditCodeAnswerRefused is AnswerQuestion's own refusal (#57,
+	// "Edit it"): the named question is not an open amended-check escalation
+	// for this same scenario, or answering it conflicted. The console maps
+	// it to 409.
+	OwnerEditCodeAnswerRefused OwnerEditCode = "answer_refused"
 )
 
 // maxPlanTaskRef is the highest task number a plan may carry (response.
@@ -82,6 +87,13 @@ type OwnerEditRequest struct {
 
 	// ticket_body edit only.
 	Body *string
+
+	// AnswerQuestion, when set, answers option b ("Edit it") on the named
+	// open amended-check escalation question in the same transaction as
+	// this scenario edit (#57 Q3): scenario target only, else bad_request.
+	// The question's payload must carry an amendment naming this same Ref,
+	// else the edit is refused answer_refused and nothing changes.
+	AnswerQuestion *int64
 }
 
 // OwnerEditError is OwnerEdit's one refusal shape: Code picks the HTTP
@@ -212,6 +224,10 @@ func checkOwnerEditShape(req OwnerEditRequest) *OwnerEditError {
 		return ownerEditErr(OwnerEditCodeBadRequest, "body must not be blank")
 	}
 
+	if req.AnswerQuestion != nil && req.Target != OwnerEditScenario {
+		return ownerEditErr(OwnerEditCodeBadRequest, "answer_question is allowed only for a scenario edit")
+	}
+
 	return nil
 }
 
@@ -269,11 +285,62 @@ func (s *Store) OwnerEdit(ctx context.Context, req OwnerEditRequest) error {
 	if insErr := s.insertOwnerEditEventTx(ctx, tx, req.TicketID, ev); insErr != nil {
 		return insErr
 	}
+	var answered int64
+	if req.AnswerQuestion != nil {
+		if ansErr := s.answerAmendedEscalationTx(ctx, tx, req.TicketID, req.Ref, *req.AnswerQuestion); ansErr != nil {
+			return ansErr
+		}
+		answered = *req.AnswerQuestion
+	}
 	if commitErr := tx.Commit(); commitErr != nil {
 		return fmt.Errorf("owner edit: commit: %w", commitErr)
 	}
 
-	slog.InfoContext(ctx, "owner edit applied", "ticket_id", req.TicketID, "target", req.Target, "ref", req.Ref, "action", req.Action)
+	slog.InfoContext(ctx, "owner edit applied", "ticket_id", req.TicketID, "target", req.Target, "ref", req.Ref, "action", req.Action, "answer_question", answered)
+	return nil
+}
+
+// answerAmendedEscalationTx answers option b ("Edit it") on questionID in
+// the same transaction as the scenario edit req.Ref just applied (#57 Q3):
+// the owner saved the console's amended-check box, so the edit and the
+// answer land together, and the next tick's retryFreshRound reads the
+// owner's own text. questionID must name an open question of ticketID whose
+// payload carries an amendment for this same ref; any other case, including
+// a genuine answer conflict (already answered, question closed), is refused
+// OwnerEditCodeAnswerRefused and leaves the edit unapplied (the caller rolls
+// the whole transaction back).
+func (s *Store) answerAmendedEscalationTx(ctx context.Context, tx *sql.Tx, ticketID int64, ref string, questionID int64) error {
+	notAnAmendment := ownerEditErr(OwnerEditCodeAnswerRefused, fmt.Sprintf("question %d is not an amended-check escalation", questionID))
+
+	row := tx.QueryRowContext(ctx, `SELECT `+messageColumns+` FROM messages WHERE id = ?`, questionID)
+	q, err := scanMessage(row)
+	switch {
+	case errors.Is(err, sql.ErrNoRows):
+		return notAnAmendment
+	case err != nil:
+		return fmt.Errorf("owner edit: load question %d: %w", questionID, err)
+	case q.Type != msgTypeQuestion, q.TicketID != ticketID:
+		return notAnAmendment
+	}
+
+	var payload response.QuestionPayload
+	if err = json.Unmarshal(q.Payload, &payload); err != nil {
+		return fmt.Errorf("owner edit: unmarshal question %d payload: %w", questionID, err)
+	}
+	if payload.Amendment == nil {
+		return notAnAmendment
+	}
+	if payload.Amendment.Scenario != ref {
+		return ownerEditErr(OwnerEditCodeAnswerRefused, fmt.Sprintf("question %d amends %s, not %s", questionID, payload.Amendment.Scenario, ref))
+	}
+
+	res, err := s.answerQuestionTx(ctx, tx, AnswerInput{TicketID: ticketID, QuestionID: questionID, Option: "b"})
+	if err != nil {
+		return fmt.Errorf("owner edit: answer question %d: %w", questionID, err)
+	}
+	if !res.Accepted {
+		return ownerEditErr(OwnerEditCodeAnswerRefused, fmt.Sprintf("question %d: %s", questionID, res.Conflict))
+	}
 	return nil
 }
 
