@@ -1308,10 +1308,16 @@ func TestCodexOutputDirUnderRunTmp(t *testing.T) {
 
 // assertCodexShellEnvPair proves argv has "-c" immediately followed by
 // shell_environment_policy.set.NAME="VALUE" (TOML-quoted), for the given
-// name and raw value.
+// name and raw value. It escapes value with strings.ReplaceAll rather than
+// codexTOMLString, so a broken escaper in codexShellEnvArgs cannot pass by
+// agreeing with itself; value is only ever a test temp path, which never
+// contains a backslash, so quote-escaping alone is the whole expectation.
 func assertCodexShellEnvPair(t *testing.T, argv []string, name, value string) {
 	t.Helper()
-	wantArg := `shell_environment_policy.set.` + name + `="` + codexTOMLString.Replace(value) + `"`
+	if strings.Contains(value, `\`) {
+		t.Fatalf("test value %q contains a backslash, which this helper's escaping does not cover", value)
+	}
+	wantArg := `shell_environment_policy.set.` + name + `="` + strings.ReplaceAll(value, `"`, `\"`) + `"`
 	idx := slices.Index(argv, wantArg)
 	if idx < 1 || argv[idx-1] != "-c" {
 		t.Errorf("argv = %v, want \"-c\" %q", argv, wantArg)

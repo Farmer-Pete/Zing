@@ -15,6 +15,18 @@
 // Codex is out of usage quota until 2026-10-30 (ticket Q4), so this test
 // cannot run until then; until it does, codexShellEnvArgs's key is
 // unconfirmed against the real CLI.
+//
+// This run is NOT sandboxed: ExecPrefix is judgeExecPrefix, a dummy
+// "env PREFIX_MARKER=1" that only satisfies codexWantsFullAccess's own
+// non-empty precondition (codex.go) and wraps nothing real, so
+// codexSandboxArgs hands the real model "-s danger-full-access" -- full
+// read/write/network access to this host, under whatever account runs the
+// test, for the one shell command the prompt names. Building a real
+// seatbelt prefix here (sandbox.Sandbox's judge profile) was left out: it
+// would pull internal/sandbox's judge.sb loading into this package only
+// for a test that cannot even run before 2026-10-30, and the ticket's own
+// Q4 keeps a real codex host scenario out of scope until then. Know this
+// before setting ZING_LIVE_CLI=1.
 package runtime
 
 import (
@@ -66,6 +78,9 @@ func TestLive_CodexShellEnvTmpdir(t *testing.T) {
 		// codexWantsFullAccess's judge-only precondition (PKG9-PLAN.md
 		// section 4.6, D20); judgeExecPrefix (codex_test.go) is reused here
 		// rather than a fresh "env" literal, to keep goconst's count at two.
+		// It wraps nothing real, so this run is unsandboxed danger-full-access
+		// (see the file header comment) -- not the seatbelt-wrapped prefix a
+		// real judge run gets.
 		ExecPrefix: judgeExecPrefix,
 		Env:        []string{"TMPDIR=" + runTmp},
 		Timeout:    3 * time.Minute,
