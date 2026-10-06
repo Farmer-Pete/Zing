@@ -1295,3 +1295,90 @@ func TestPreludeBackToPlanningReplanUnsupported(t *testing.T) {
 		t.Errorf("commit.Escalation.Payload.Origin = %q, want fix (unchanged)", commit.Escalation.Payload.Origin)
 	}
 }
+
+// pbAcceptOptionEscalationQuestion inserts an escalation message plus its
+// linked question directly through store.InsertMessage (ticket 60, like
+// pbLegacyEscalationQuestion), carrying the review loops_exhausted shape:
+// options a Retry, d "Accept the remaining findings and continue to
+// judging", c Abandon, Recommended a. Returns the linked question's id.
+func pbAcceptOptionEscalationQuestion(t *testing.T, s *store.Store, ticketID int64, code response.EscalationCode, origin response.EscalationOrigin) int64 {
+	t.Helper()
+	payload := pbTestEscalationPayload(code, origin)
+	body := string(code) + ": " + payload.What
+	escPayload, err := json.Marshal(payload)
+	if err != nil {
+		t.Fatalf("pbAcceptOptionEscalationQuestion: marshal escalation payload: %v", err)
+	}
+	escID, err := s.InsertMessage(t.Context(), store.Message{
+		TicketID: ticketID, Type: "escalation", Author: authorZing, Body: body, Payload: escPayload,
+	})
+	if err != nil {
+		t.Fatalf("pbAcceptOptionEscalationQuestion: InsertMessage(escalation): %v", err)
+	}
+
+	qPayload, err := json.Marshal(response.QuestionPayload{
+		Key: "Q1", Kind: response.QuestionKindQuestion, State: response.QuestionStateOpen,
+		Recommended: escalationChoiceRetry,
+		Options: []response.Option{
+			{Key: escalationChoiceRetry, Text: pbEscalationTextRetry},
+			{Key: escalationChoiceAccept, Text: reviewAcceptRemainingOptionText},
+			{Key: escalationChoiceAbandon, Text: pbEscalationTextAbandon},
+		},
+	})
+	if err != nil {
+		t.Fatalf("pbAcceptOptionEscalationQuestion: marshal question payload: %v", err)
+	}
+	qID, err := s.InsertMessage(t.Context(), store.Message{
+		TicketID: ticketID, ParentID: &escID, Type: msgTypeQuestion, Author: authorZing,
+		State: new(questionStateOpen), Body: body + "\n\nHow should Zing proceed?", Payload: qPayload,
+	})
+	if err != nil {
+		t.Fatalf("pbAcceptOptionEscalationQuestion: InsertMessage(question): %v", err)
+	}
+	return qID
+}
+
+// TestPreludeAcceptPickOnOtherEscalationReplans proves ticket 60's own last
+// goal: choice d is offered only on a review loops_exhausted question, so
+// resolvePostBuildEscalation treats a d pick on any other escalation like
+// b, re-escalating replan_unsupported with the origin unchanged, exactly as
+// TestPreludeBackToPlanningReplanUnsupported's own choice b does.
+func TestPreludeAcceptPickOnOtherEscalationReplans(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name   string
+		code   response.EscalationCode
+		origin response.EscalationOrigin
+	}{
+		{"origin review, code environment", response.EscalationCodeEnvironment, response.EscalationOriginReview},
+		{"origin fix, code loops_exhausted", response.EscalationCodeLoopsExhausted, response.EscalationOriginFix},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			s := newFixTestStore(t)
+			ticket := pbSeedTicketInState(t, s, stateReviewing)
+
+			qID := pbAcceptOptionEscalationQuestion(t, s, ticket.ID, tc.code, tc.origin)
+			pbAnswerEscalation(t, s, ticket.ID, qID, escalationChoiceAccept)
+
+			deps := pbClaim(t, s, pbFakeRuntime(t), ticket.ID)
+			commit, handled := pbRunPrelude(t, s, deps, ticket.ID)
+			if !handled {
+				t.Fatal("handled = false, want true")
+			}
+			if commit.Escalation == nil {
+				t.Fatal("commit.Escalation = nil, want a re-escalation")
+			}
+			if commit.Escalation.Payload.Code != string(response.EscalationCodeReplanUnsupported) {
+				t.Errorf("commit.Escalation.Payload.Code = %q, want %q", commit.Escalation.Payload.Code, response.EscalationCodeReplanUnsupported)
+			}
+			if commit.Escalation.Payload.Origin != string(tc.origin) {
+				t.Errorf("commit.Escalation.Payload.Origin = %q, want %q (unchanged)", commit.Escalation.Payload.Origin, tc.origin)
+			}
+			if commit.Next != "" {
+				t.Errorf("commit.Next = %q, want %q", commit.Next, "")
+			}
+		})
+	}
+}

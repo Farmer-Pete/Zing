@@ -1821,6 +1821,12 @@ func findingsFixRequest(ctx context.Context, t store.Ticket, d Deps, accepted []
 // that findings were let through unfixed.
 const reasonReviewAcceptedAtCap = "review findings accepted at loop cap"
 
+// reasonReviewOwnerAcceptedAtCap is the reviewing to judging state reason
+// when the owner picks option d, accept the remaining findings and continue
+// to judging, on a review loops_exhausted question (ticket 60), distinct
+// from reasonReviewAcceptedAtCap's own default-accept path.
+const reasonReviewOwnerAcceptedAtCap = "owner accepted review findings at loop cap"
+
 // acceptedAtCapTextRunes caps each finding's one-line text in acceptAtCap's
 // message, "..." appended when cut.
 const acceptedAtCapTextRunes = 200
@@ -1835,6 +1841,27 @@ func allAtOrBelowFloor(rows []response.FindingArtifact, floor response.Severity)
 		}
 	}
 	return true
+}
+
+// acceptedFindingLines renders accepted, sorted by id, one "- <id> <severity>
+// <location> <text>" line each (shared by acceptAtCap, issue #68, and
+// reviewingHandler.acceptReviewLoopsExhausted, ticket 60): location and text
+// are lens output, so both are whitespace-collapsed -- no finding can break
+// its own line or forge another -- and text is cut at acceptedAtCapTextRunes
+// runes with "..." appended when cut.
+func acceptedFindingLines(accepted []response.FindingArtifact) []string {
+	sorted := sortByID(accepted)
+	lines := make([]string, len(sorted))
+	for i := range sorted {
+		f := &sorted[i]
+		location := collapseWhitespace(f.Location)
+		text := collapseWhitespace(f.Text)
+		if cut := cutRunes(text, acceptedAtCapTextRunes); cut != text {
+			text = cut + "..."
+		}
+		lines[i] = fmt.Sprintf("- %s %s %s %s", f.ID, f.Severity, location, text)
+	}
+	return lines
 }
 
 // acceptAtCap is the FIXREQ gate's own outcome when every accepted finding
@@ -1852,16 +1879,7 @@ func acceptAtCap(c store.HandlerCommit, t store.Ticket, d Deps, k, maxLoops int,
 		fmt.Sprintf("Review reached max_loops (%d) after %d fix runs, and every finding left is at or below the floor (%s). "+
 			"Zing moved the ticket to judging without fixing these:", maxLoops, k, d.Floor),
 	)
-	sorted := sortByID(accepted)
-	for i := range sorted {
-		f := &sorted[i]
-		location := collapseWhitespace(f.Location)
-		text := collapseWhitespace(f.Text)
-		if cut := cutRunes(text, acceptedAtCapTextRunes); cut != text {
-			text = cut + "..."
-		}
-		lines = append(lines, fmt.Sprintf("- %s %s %s %s", f.ID, f.Severity, location, text))
-	}
+	lines = append(lines, acceptedFindingLines(accepted)...)
 	slog.Info("review findings accepted at loop cap", "ticket_id", t.ID, "fix_runs", k, "findings", len(accepted))
 	c.Messages = append(c.Messages, store.Message{TicketID: t.ID, Type: msgTypeUpdate, Author: authorSystem, Body: strings.Join(lines, "\n")})
 	c.Next, c.Reason = stateJudging, reasonReviewAcceptedAtCap
@@ -2459,6 +2477,42 @@ func (h reviewingHandler) retryReviewLoopsExhausted(ctx context.Context, t store
 	c := baseCommit(t, d)
 	c.ResolveQuestions = resolveIDs
 	c.Messages = []store.Message{msg}
+	return c, nil
+}
+
+// acceptReviewLoopsExhausted resolves the owner's own explicit d pick on a
+// review loops_exhausted question (ticket 60): it lists the newest done
+// round's own accepted findings in one update message, in acceptAtCap's own
+// line format, and moves the ticket from reviewing to judging.
+func (h reviewingHandler) acceptReviewLoopsExhausted(ctx context.Context, t store.Ticket, d Deps, resolveIDs []int64) (store.HandlerCommit, error) {
+	markers, err := d.Store.MarkersWithPrefix(ctx, t.ID, reviewRoundMarkerPrefix)
+	if err != nil {
+		return store.HandlerCommit{}, fmt.Errorf("job: reviewing: owner accept at cap: review round markers: %w", err)
+	}
+	findings, err := d.Store.Findings(ctx, t.ID)
+	if err != nil {
+		return store.HandlerCommit{}, fmt.Errorf("job: reviewing: owner accept at cap: findings: %w", err)
+	}
+	accepted := acceptedRoundFindings(findings, reviewRoundDoneCount(markers))
+
+	reqs, err := d.Store.MarkersWithPrefix(ctx, t.ID, "fix requested findings")
+	if err != nil {
+		return store.HandlerCommit{}, fmt.Errorf("job: reviewing: owner accept at cap: fix requested findings markers: %w", err)
+	}
+	k, maxLoops := len(reqs), d.Machine.Jobs[jobReviewName].MaxLoops
+
+	lines := make([]string, 0, 2+len(accepted))
+	lines = append(lines,
+		"The owner accepted "+orchestrator.CountNoun(len(accepted), "finding", "findings")+" at the review fix loop cap",
+		fmt.Sprintf("Review reached max_loops (%d) after %d fix runs, and the owner chose to continue to judging without fixing these:", maxLoops, k),
+	)
+	lines = append(lines, acceptedFindingLines(accepted)...)
+	slog.Info("review findings accepted by owner at loop cap", "ticket_id", t.ID, "fix_runs", k, "findings", len(accepted))
+
+	c := baseCommit(t, d)
+	c.ResolveQuestions = resolveIDs
+	c.Messages = []store.Message{{TicketID: t.ID, Type: msgTypeUpdate, Author: authorSystem, Body: strings.Join(lines, "\n")}}
+	c.Next, c.Reason = stateJudging, reasonReviewOwnerAcceptedAtCap
 	return c, nil
 }
 

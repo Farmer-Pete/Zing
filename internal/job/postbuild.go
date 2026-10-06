@@ -171,6 +171,14 @@ func postBuildRoundOwnedByOpenFix(ctx context.Context, t store.Ticket, d Deps, r
 // cap_resumes row for job respond is shipHandler.retryCapResumesRespond,
 // dispatched from retryCapResumes' own job switch (building.go), the same
 // way judge's is.
+//
+// Choice d on a review loops_exhausted escalation, while the ticket is still
+// reviewing, accepts the findings left and moves the ticket on to judging
+// (reviewingHandler.acceptReviewLoopsExhausted, ticket 60) -- but only as an
+// explicit pick: a reply with no chosen option on that one question resolves
+// as Retry even when d is recommended (owner decision Q3), rewritten ahead
+// of this switch. Choice d on any other escalation is treated like b, and
+// reaches the choice != escalationChoiceRetry row below.
 func resolvePostBuildEscalation(ctx context.Context, t store.Ticket, d Deps, round store.Round, escID int64) (store.HandlerCommit, error) {
 	h := buildingHandler{}
 	escMsg, payload, err := d.Store.EscalationByID(ctx, escID)
@@ -182,6 +190,11 @@ func resolvePostBuildEscalation(ctx context.Context, t store.Ticket, d Deps, rou
 	notes := joinReplies(round.Replies)
 	errorText := payload.What + "\n" + payload.Why + "\n" + payload.Tried
 	origin := response.EscalationOrigin(payload.Origin)
+	reviewLoops := origin == response.EscalationOriginReview && payload.Code == string(response.EscalationCodeLoopsExhausted)
+
+	if reviewLoops && choice == escalationChoiceAccept && newestChosenOption(round.Answers) == "" {
+		choice = escalationChoiceRetry
+	}
 
 	var commit store.HandlerCommit
 	preserved := 0
@@ -189,6 +202,9 @@ func resolvePostBuildEscalation(ctx context.Context, t store.Ticket, d Deps, rou
 	switch {
 	case choice == escalationChoiceAbandon:
 		commit = abandonCommit(t, d, payload.Code)
+
+	case choice == escalationChoiceAccept && reviewLoops && t.State == stateReviewing:
+		commit, err = reviewingHandler{}.acceptReviewLoopsExhausted(ctx, t, d, resolveIDs)
 
 	case choice != escalationChoiceRetry:
 		commit = replanUnsupportedEscalation(t, d, resolveIDs, origin)
