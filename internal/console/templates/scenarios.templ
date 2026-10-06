@@ -111,19 +111,49 @@ templ scenariosSection(scenarios []ScenarioRow) {
 	}
 }
 
-// ownerEditScenarioForm is one sealed scenario's owner-edit box (#41): a
+// ownerEditScenarioForm is the scenarios table's own owner-edit box (#41):
+// ownerEditScenarioBox with no pending answer, summary "Edit".
+templ ownerEditScenarioForm(s ScenarioRow) {
+	@ownerEditScenarioBox(s, 0, "Edit")
+}
+
+// scenarioKindOptions is the kind select's own closed set (response.
+// ScenarioKind's four values, mirrored here the same way this package
+// already copies other job and store literals it cannot import): behavior,
+// negative, performance, host, in that order.
+var scenarioKindOptions = []string{"behavior", "negative", "performance", "host"}
+
+// ownerEditScenarioBox is one sealed scenario's owner-edit box (#41, #57): a
 // <details class="owner-edit"> the owner opens to rewrite given, when,
-// then, or check, posted by console.js's ownerEditSubmit to POST
+// then, check, or kind, posted by console.js's ownerEditSubmit to POST
 // /tickets/{id}/edit. data-preserve-attr="open" keeps it open across a
 // /stream patch while the owner is editing, matching questionGroup's own
 // use of the attribute. Each textarea's content opens with a "\n" (bug
 // fix): the HTML parser drops exactly one leading newline right after a
 // textarea's opening tag, so without it a stored value that itself starts
 // with a newline would render one character short; the prefix makes the
-// parser's drop a no-op either way.
-templ ownerEditScenarioForm(s ScenarioRow) {
-	<details class="owner-edit" data-preserve-attr="open" data-ticket={ strconv.FormatInt(s.TicketID, 10) } data-target="scenario" data-ref={ s.ID }>
-		<summary>Edit</summary>
+// parser's drop a no-op either way. The kind select's data-initial lets
+// console.js's ownerEditSubmit detect a change the same way it already does
+// for every other field's defaultValue (a select's own value has no such
+// browser-native default). summary is the box's own <summary> text: plain
+// "Edit" from the scenarios table, "Edit it" from an amended escalation's
+// card (questionGroup). answerQuestionID, when non-zero, is the open
+// amended-check escalation this box's Save should also answer option b on,
+// in the same store transaction (#57 Q3): console.js reads it off
+// data-answer-question and sends every field, changed or not, plus
+// answer_question.
+templ ownerEditScenarioBox(s ScenarioRow, answerQuestionID int64, summary string) {
+	<details
+		class="owner-edit"
+		data-preserve-attr="open"
+		data-ticket={ strconv.FormatInt(s.TicketID, 10) }
+		data-target="scenario"
+		data-ref={ s.ID }
+		if answerQuestionID != 0 {
+			data-answer-question={ strconv.FormatInt(answerQuestionID, 10) }
+		}
+	>
+		<summary>{ summary }</summary>
 		<label>Given</label>
 		<textarea data-field="given">{ "\n" + s.Given }</textarea>
 		<label>When</label>
@@ -132,6 +162,12 @@ templ ownerEditScenarioForm(s ScenarioRow) {
 		<textarea data-field="then">{ "\n" + s.Then }</textarea>
 		<label>Check</label>
 		<input type="text" data-field="check" value={ s.Check }/>
+		<label>Kind</label>
+		<select data-field="kind" data-initial={ s.Kind }>
+			for _, k := range scenarioKindOptions {
+				<option value={ k } selected?={ k == s.Kind }>{ k }</option>
+			}
+		</select>
 		<button type="button" class="owner-edit-save">Save</button>
 		<span class="owner-edit-error"></span>
 	</details>

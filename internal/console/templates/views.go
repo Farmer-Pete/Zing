@@ -165,6 +165,14 @@ type ThreadQuestion struct {
 	Scenarios []ScenarioRow
 	Findings  []FindingRow
 
+	// Amendment is the judge's proposed scenario rewrite (#57), set when the
+	// question payload carries one (an amended cannot_run escalation):
+	// questionGroup renders it as a prefilled scenario edit box, inline in
+	// the question's card, letting the owner save the judge's rewrite,
+	// their own edit, or nothing at all before answering "Edit it". Nil for
+	// every other question.
+	Amendment *ScenarioRow
+
 	// DraftReply, DraftOption, and DraftItems are the ticket's own
 	// in-progress, unsent draft against this question, if any (bug fix: the
 	// owner typed a reply, it saved, but the thread never rendered it back,
