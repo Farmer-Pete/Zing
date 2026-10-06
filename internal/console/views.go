@@ -387,7 +387,7 @@ func displayFeedMessages(messages []store.MessageRow) ([]templates.FeedRow, erro
 // 6.6, carried over from Package 3's patchThread guard).
 func (c *console) threadComponent(ctx context.Context, open int64) (templ.Component, error) {
 	if open <= 0 {
-		return templates.Thread(nil, nil, templates.WaitProgress{}, "", templates.TicketActions{}), nil
+		return templates.Thread(nil, nil, templates.WaitProgress{}, "", templates.TicketActions{}, nil), nil
 	}
 	ticket, err := c.store.GetTicket(ctx, open)
 	switch {
@@ -412,6 +412,13 @@ func (c *console) threadComponent(ctx context.Context, open int64) (templ.Compon
 		if findingsErr != nil {
 			return nil, findingsErr
 		}
+		claimed := ticket.ClaimOwner != nil
+		if plan != nil {
+			plan.Claimed = claimed
+		}
+		for i := range scenarios {
+			scenarios[i].Claimed = claimed
+		}
 		conv, convErr := c.store.PlanningConversation(ctx, open)
 		if convErr != nil {
 			return nil, fmt.Errorf("console: planning conversation for ticket %d: %w", open, convErr)
@@ -429,9 +436,13 @@ func (c *console) threadComponent(ctx context.Context, open int64) (templ.Compon
 		if actionsErr != nil {
 			return nil, actionsErr
 		}
-		return templates.Thread(&ticket, threadRows, buildWaitProgress(&ticket, rows, conv), banner, actions), nil
+		var sealed *templates.SealedSection
+		if plan != nil && showSealedSection(ticket.State, plan.Editable, rows) {
+			sealed = &templates.SealedSection{Plan: plan, Scenarios: scenarios}
+		}
+		return templates.Thread(&ticket, threadRows, buildWaitProgress(&ticket, rows, conv), banner, actions, sealed), nil
 	case errors.Is(err, sql.ErrNoRows):
-		return templates.Thread(nil, nil, templates.WaitProgress{}, "", templates.TicketActions{}), nil
+		return templates.Thread(nil, nil, templates.WaitProgress{}, "", templates.TicketActions{}, nil), nil
 	default:
 		return nil, err
 	}
@@ -936,6 +947,41 @@ func questionStateLabel(state *string, revisable bool) string {
 // the plan stays in the rail's Plan artifact.
 func gateShowsPlan(kind response.QuestionKind, state *string) bool {
 	return kind == response.QuestionKindGate && (state == nil || *state != msgStateResolved)
+}
+
+// sealedSectionStates is every ticket state the post-gate "Sealed plan and
+// scenarios" section renders in (#75 Q1): each post-seal state a ticket can
+// still change in. done and abandoned have no run left to use an edit.
+var sealedSectionStates = map[string]bool{
+	"building": true, "reviewing": true, "judging": true, "shipping": true, "escalated": true,
+}
+
+// showSealedSection reports whether the thread renders the post-gate sealed
+// section (#75): the state is in sealedSectionStates, the cohort is sealed
+// (RenderedPlan.Editable), and no visible gate question still shows the
+// plan (gateShowsPlan), so the gate's boxes and the section's never both
+// render. Only gate questions count: an open amended escalation keeps its
+// own "Edit it" box beside the section's plain one. A question whose
+// payload does not decode is skipped, matching gateApprovalInProgress.
+func showSealedSection(state string, sealed bool, rows []store.MessageRow) bool {
+	if !sealed || !sealedSectionStates[state] {
+		return false
+	}
+	visible := visibleRows(rows)
+	for i := range visible {
+		m := &visible[i]
+		if m.Type != msgTypeQuestion {
+			continue
+		}
+		var p response.QuestionPayload
+		if err := json.Unmarshal(m.Payload, &p); err != nil {
+			continue
+		}
+		if gateShowsPlan(p.Kind, m.State) {
+			return false
+		}
+	}
+	return true
 }
 
 // isWithdrawnGate reports whether a question is a gate that closed without
@@ -1857,6 +1903,7 @@ func buildThreadQuestion(ticket *store.Ticket, m *store.MessageRow, messageCount
 		q.Amendment = &templates.ScenarioRow{
 			ID: a.Scenario, Kind: string(a.Kind), Given: a.Given, When: a.When, Then: a.Then,
 			Check: a.Check, Sealed: true, TicketID: m.TicketID,
+			Claimed: ticket != nil && ticket.ClaimOwner != nil,
 		}
 	}
 	if draft, ok := drafts[m.ID]; ok {
