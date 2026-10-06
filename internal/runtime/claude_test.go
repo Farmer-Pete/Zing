@@ -40,6 +40,14 @@ const (
 	// input and expected output (claudeFinalMessage falls back to stdout
 	// unchanged), named once so goconst does not flag the repeated literal.
 	notJSONStdout = "not json"
+	// settingsFlag is the --settings argv flag every hook-settings test in
+	// this file checks for, named once so goconst does not flag it.
+	settingsFlag = "--settings"
+	// denyTestCmd and denyLintCmd are the DenyBash entries
+	// TestClaude_ArgvCarriesDenyHook checks, named once so goconst does not
+	// flag the repeated literal.
+	denyTestCmd = "make test"
+	denyLintCmd = "make lint"
 )
 
 // testTools and its two derived lists (design section 4.1's tool map) are
@@ -310,7 +318,7 @@ func TestClaude_ArgvCarriesStopHookSettings(t *testing.T) {
 	}
 
 	argv := readArgv(t, dir)
-	if len(argv) < 2 || argv[len(argv)-2] != "--settings" {
+	if len(argv) < 2 || argv[len(argv)-2] != settingsFlag {
 		t.Fatalf("argv = %v, want the last two entries to be --settings and its JSON", argv)
 	}
 	var settings claudeSettings
@@ -328,6 +336,68 @@ func TestClaude_ArgvCarriesStopHookSettings(t *testing.T) {
 	wantCmd := "'/opt/zing bin' validate --hook --job 'classify' --state '" + wantStatePath + "'"
 	if got := groups[0].Hooks[0].Command; got != wantCmd {
 		t.Errorf("command = %q, want %q", got, wantCmd)
+	}
+}
+
+// TestClaude_ArgvCarriesDenyHook proves that a run with DenyBash set gets a
+// PreToolUse hook group, matcher Bash, running the configured zing binary's
+// deny-hook subcommand with one --deny per entry in order, while the Stop
+// group stays exactly as TestClaude_ArgvCarriesStopHookSettings expects. A
+// run with DenyBash empty carries no PreToolUse key at all.
+func TestClaude_ArgvCarriesDenyHook(t *testing.T) {
+	t.Parallel()
+	requireUnix(t)
+
+	dir := t.TempDir()
+	req := newFakeRequest(dir, "success")
+	req.DenyBash = []string{denyTestCmd, denyLintCmd}
+	c := NewClaude(fakeClaudeScript, testOAuthToken).WithStopHook("/bin/zing")
+	if _, err := c.Run(context.Background(), req); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	argv := readArgv(t, dir)
+	if len(argv) < 2 || argv[len(argv)-2] != settingsFlag {
+		t.Fatalf("argv = %v, want the last two entries to be --settings and its JSON", argv)
+	}
+	var settings claudeSettings
+	if err := json.Unmarshal([]byte(argv[len(argv)-1]), &settings); err != nil {
+		t.Fatalf("decode --settings JSON %q: %v", argv[len(argv)-1], err)
+	}
+
+	stopGroups, ok := settings.Hooks["Stop"]
+	if !ok || len(stopGroups) != 1 || len(stopGroups[0].Hooks) != 1 {
+		t.Fatalf("settings.Hooks[Stop] = %+v, want one group with one command", settings.Hooks["Stop"])
+	}
+
+	denyGroups, ok := settings.Hooks["PreToolUse"]
+	if !ok || len(denyGroups) != 1 || len(denyGroups[0].Hooks) != 1 {
+		t.Fatalf("settings.Hooks[PreToolUse] = %+v, want one group with one command", settings.Hooks["PreToolUse"])
+	}
+	if denyGroups[0].Matcher != bashToolCheck {
+		t.Errorf("PreToolUse matcher = %q, want %q", denyGroups[0].Matcher, bashToolCheck)
+	}
+	wantCmd := "'/bin/zing' deny-hook --deny 'make test' --deny 'make lint'"
+	if got := denyGroups[0].Hooks[0].Command; got != wantCmd {
+		t.Errorf("command = %q, want %q", got, wantCmd)
+	}
+
+	dir2 := t.TempDir()
+	req2 := newFakeRequest(dir2, "success")
+	c2 := NewClaude(fakeClaudeScript, testOAuthToken).WithStopHook("/bin/zing")
+	if _, err := c2.Run(context.Background(), req2); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	argv2 := readArgv(t, dir2)
+	if len(argv2) < 2 || argv2[len(argv2)-2] != settingsFlag {
+		t.Fatalf("argv = %v, want the last two entries to be --settings and its JSON", argv2)
+	}
+	var settings2 claudeSettings
+	if err := json.Unmarshal([]byte(argv2[len(argv2)-1]), &settings2); err != nil {
+		t.Fatalf("decode --settings JSON %q: %v", argv2[len(argv2)-1], err)
+	}
+	if _, ok := settings2.Hooks["PreToolUse"]; ok {
+		t.Errorf("settings.Hooks = %+v, want no PreToolUse key when DenyBash is empty", settings2.Hooks)
 	}
 }
 
