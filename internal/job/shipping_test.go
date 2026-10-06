@@ -7345,17 +7345,31 @@ func TestBaseModifiedRetryWithdrawnOnReopen(t *testing.T) {
 	}
 	pbApply(t, s, ticket, commit1)
 
+	// A failed check is re-run once before the loop reopens (#91), so the
+	// first failing poll spends the re-run and the draft flip comes on the
+	// poll that sees the re-run fail too.
 	runs, required = shipFailedCI()
 	gh.runs, gh.required = runs, required
 	commit2, err := shipPollRunWithRule(t, s, pbGetTicket(t, s, ticket.ID), gh, tr, rule)
 	if err != nil {
 		t.Fatalf("Run (tick 2): %v", err)
 	}
-	if !shipHasMessage(commit2, "pr draft "+local) {
-		t.Errorf("commit2.Messages = %+v, want %q", commit2.Messages, "pr draft "+local)
+	if len(gh.reruns) != 1 {
+		t.Fatalf("reruns = %+v, want exactly one", gh.reruns)
 	}
-	if !shipHasMessage(commit2, "merge withdrawn "+local) {
-		t.Errorf("commit2.Messages = %+v, want %q", commit2.Messages, "merge withdrawn "+local)
+	pbApply(t, s, ticket, commit2)
+
+	gh.runs = []orchestrator.CheckRun{shipCIRun(3, 4, 5, "failure")}
+	gh.logTail = func(context.Context, string, string, int64, int) (string, error) { return shipCILogTailText, nil }
+	commit3, err := shipPollRunWithRule(t, s, pbGetTicket(t, s, ticket.ID), gh, tr, rule)
+	if err != nil {
+		t.Fatalf("Run (tick 3): %v", err)
+	}
+	if !shipHasMessage(commit3, "pr draft "+local) {
+		t.Errorf("commit3.Messages = %+v, want %q", commit3.Messages, "pr draft "+local)
+	}
+	if !shipHasMessage(commit3, "merge withdrawn "+local) {
+		t.Errorf("commit3.Messages = %+v, want %q", commit3.Messages, "merge withdrawn "+local)
 	}
 }
 
