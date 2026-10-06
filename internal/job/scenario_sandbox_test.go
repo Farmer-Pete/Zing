@@ -16,6 +16,7 @@ const (
 	scenario0CheckPath = "scenarios/scenario[0]/check"
 	okThen             = "passes"
 	okCheck            = `go test ./internal/job -run TestX`
+	noMatchThen        = "no match"
 )
 
 // TestCheckScenarioShape_RejectsHostSandboxProbes is a regression test for

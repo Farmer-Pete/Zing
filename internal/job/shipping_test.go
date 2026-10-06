@@ -1192,7 +1192,7 @@ func TestFinalVerdictsAfterFailFixPass(t *testing.T) {
 	}
 	pbApply(t, s, ticket, evalCommit)
 
-	driveJudgeFixToLanding(t, s, ticket.ID, rt, checks)
+	driveJudgeFixToLanding(t, s, ticket.ID, rt, checks, judgeFixTestCmd)
 
 	ticket = pbGetTicket(t, s, ticket.ID)
 	deps4 := pbWithTestCmd(pbClaim(t, s, rt, ticket.ID), ticket, judgeFixTestCmd)
