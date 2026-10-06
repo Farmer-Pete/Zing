@@ -517,3 +517,10 @@ type ThreadSeen struct {
 	TID         string `json:"tid"          jsonschema:"pattern=^t[0-9a-f]{16}$"`
 	LastComment string `json:"last_comment" jsonschema:"pattern=^[0-9a-f]{64}$" doc:"commentDigest of the last comment that is not a Zing reply"`
 }
+
+// ChildrenArtifact is the stored form of a planner's children outcome
+// (artifact type "children"): the proposed split, shown at the split gate.
+type ChildrenArtifact struct {
+	Children []Child `json:"children" jsonschema:"minItems=2"`
+	Notes    string  `json:"notes"`
+}

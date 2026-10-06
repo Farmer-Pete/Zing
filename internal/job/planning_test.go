@@ -815,66 +815,6 @@ func TestPlanningHandler_NothingToDo_NoCodeClaimsEscalates(t *testing.T) {
 	}
 }
 
-// ---- 6.8 children: escalate split_unsupported ------------------------------
-
-// TestPlanningHandler_Children_EscalatesSplitUnsupported proves design D6:
-// planning's children outcome is not yet built, so it always escalates
-// split_unsupported naming the run that returned it, and leaves the ticket
-// waiting on the owner rather than transitioning it.
-func TestPlanningHandler_Children_EscalatesSplitUnsupported(t *testing.T) {
-	t.Parallel()
-	s := newJobTestStore(t)
-	ticketID := seedQueuedTicket(t, s)
-	answeredRoundReadyForResume(t, s, ticketID)
-
-	children := &response.ChildrenResponse{
-		Job: response.JobPlanning, Outcome: response.OutcomeChildren,
-		Children: []response.Child{
-			{Key: "c1", Title: "Part one", Body: "build the read path"},
-			{Key: "c2", Title: "Part two", Body: "build the write path"},
-		},
-		Notes: "the two halves share no code",
-		// D31 (design section 22.2): children needs every planning question
-		// settled, or checkConversation rejects the response before this
-		// outcome's own escalation logic is ever reached. The resumed
-		// session carries one open thread, Q1 (answeredRoundReadyForResume).
-		Replies: []response.Reply{
-			{Question: "Q1", Settled: true, Decision: testQ1SettledDecision},
-		},
-	}
-	resumeRT := readyScriptedRuntime(t, readyStep(children, "children-sess"))
-
-	commit, err := runPlanning(t, s, claimWithRuntimes(t, s, resumeRT, ticketID), ticketID)
-	if err != nil {
-		t.Fatalf("planning resume (children) Run: %v", err)
-	}
-	if commit.Next != "" {
-		t.Errorf("commit.Next = %q, want empty (stays in planning)", commit.Next)
-	}
-	if commit.Escalation == nil {
-		t.Fatal("commit.Escalation is nil, want split_unsupported")
-	}
-	if commit.Escalation.RunID == nil {
-		t.Error("commit.Escalation.RunID is nil, want the run that returned children")
-	}
-	var payload response.EscalationPayload
-	if err := json.Unmarshal(mustEscalationPayload(t, commit), &payload); err != nil {
-		t.Fatalf("unmarshal escalation payload: %v", err)
-	}
-	if payload.Code != string(response.EscalationCodeSplitUnsupported) || payload.Origin != string(response.EscalationOriginSplit) {
-		t.Errorf("payload = (Code=%q, Origin=%q), want (split_unsupported, split)", payload.Code, payload.Origin)
-	}
-	if commit.Waiting == nil || *commit.Waiting != testWaitingQuestions {
-		t.Errorf("commit.Waiting = %v, want questions", commit.Waiting)
-	}
-
-	apply(t, s, getTicket(t, s, ticketID), commit)
-	final := getTicket(t, s, ticketID)
-	if final.State != testStatePlanning {
-		t.Errorf("final ticket state = %q, want planning", final.State)
-	}
-}
-
 // ---- an answered classify round re-runs classify fresh --------------------
 
 // TestPlanningHandler_Classify_AnsweredQuestionRoundRerunsClassifyFresh
@@ -2324,7 +2264,7 @@ func TestPlanningHandler_ReviewTick_CleanFloorPostsTheGate(t *testing.T) {
 	if qp.Recommended != "a" {
 		t.Errorf("gate question Recommended = %q, want a", qp.Recommended)
 	}
-	wantOptions := []response.Option{{Key: "a", Text: "Approve"}, {Key: "b", Text: "Reject"}}
+	wantOptions := []response.Option{{Key: "a", Text: testApproveOptionText}, {Key: "b", Text: testRejectOptionText}}
 	if !slices.Equal(qp.Options, wantOptions) {
 		t.Errorf("gate question Options = %+v, want %+v", qp.Options, wantOptions)
 	}
