@@ -206,7 +206,7 @@ func resolvePostBuildEscalation(ctx context.Context, t store.Ticket, d Deps, rou
 		commit = h.retryMarkerCommit(t, d, resolveIDs)
 
 	case origin == response.EscalationOriginFix && escMsg.RunID != nil:
-		commit, err = h.retryFreshRun(ctx, t, d, resolveIDs, notes, errorText)
+		commit, err = h.retryFreshRun(ctx, t, d, resolveIDs, notes, errorText, nil)
 
 	case origin == response.EscalationOriginFix:
 		commit = h.retryMarkerCommit(t, d, resolveIDs)

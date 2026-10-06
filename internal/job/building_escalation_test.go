@@ -29,8 +29,10 @@
 package job_test
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -611,4 +613,269 @@ func containsAll(s string, subs ...string) bool {
 		}
 	}
 	return true
+}
+
+// ---- plan #51: a sealed plan's file grant unblocks the builder ------------
+
+// wantFileGrantGreet is the grant TestFileGrant_ForeignPathEscalationOffersOption
+// and TestFileGrant_PickLetsNextSubmissionPass both build their scenario
+// around (design "shape" rule 1): task 1's builder also changes greet.go,
+// a file the fixture plan (fixtures/scripts/planning/2.xml) gives only to
+// task 2.
+var wantFileGrantGreet = &response.FileGrant{Task: 1, Paths: []string{greetGo}}
+
+// withGreetAndHelloProject overrides ticket's own project commands to write
+// both hello.txt and greet.go, exactly as TestCheckRejectsAnotherTasksFile's
+// own override does.
+func withGreetAndHelloProject(deps job.Deps, ticket store.Ticket) job.Deps {
+	proj := deps.Projects[ticket.ProjectID]
+	proj.TestCmd = "printf 'hello, world\\n' > hello.txt && printf 'package greet\\n' > greet.go && test -f hello.txt"
+	proj.LintCmd = testNoopShellCmd
+	deps.Projects = map[int64]job.Project{ticket.ProjectID: proj}
+	return deps
+}
+
+// planGapErrorStep builds a scriptedStep whose Response is a minimal
+// ErrorResponse code plan_gap (design section 6.8's universal "error"
+// outcome): the shape a builder sends when it cannot work around CHECK's
+// own claim-errors marker.
+func planGapErrorStep(sessionID string) scriptedStep {
+	return scriptedStep{res: runtime.RunResult{
+		Response: &response.ErrorResponse{
+			Job: response.JobBuild, Outcome: response.OutcomeError,
+			Error: response.RunError{Code: response.ErrorCodePlanGap, What: "greet.go belongs to another task", Why: "the plan assigns it to task 2"},
+		},
+		SessionID: sessionID, ExitCode: 0, AgentTime: time.Second,
+	}}
+}
+
+// fileGrantEscalatedTicket drives a fresh ticket through the shape
+// TestFileGrant_ForeignPathEscalationOffersOption and
+// TestFileGrant_PickLetsNextSubmissionPass both continue (plan #51): task
+// 1's builder also changes greet.go; CHECK rejects it with "greet.go
+// belongs to task 2, not task 1"; the resumed builder gives up with an
+// ErrorResponse plan_gap, so building escalates with Grant set
+// (attachFileGrant). Returns the store, ticket id, and the escalation's
+// own open question, already applied.
+func fileGrantEscalatedTicket(t *testing.T) (*store.Store, int64, store.MessageRow) {
+	t.Helper()
+	s, _, ticketID := buildTicketInBuilding(t)
+	ticket := getTicket(t, s, ticketID)
+
+	scriptRT := &scriptedRuntime{t: t, steps: []scriptedStep{buildStep([]string{helloTxt, greetGo}, nil, "grant-sess")}}
+	deps := withGreetAndHelloProject(claimForBuild(t, s, scriptRT, ticketID), ticket)
+	commit, err := job.Registry()[testStateBuilding].Run(t.Context(), ticket, deps) // RUN: claims hello.txt, greet.go
+	if err != nil {
+		t.Fatalf("RUN: %v", err)
+	}
+	apply(t, s, ticket, commit)
+
+	ticket = getTicket(t, s, ticketID)
+	deps2 := withGreetAndHelloProject(claimForBuild(t, s, scriptRT, ticketID), ticket)
+	checkCommit, err := job.Registry()[testStateBuilding].Run(t.Context(), ticket, deps2) // CHECK: claim errors pending
+	if err != nil {
+		t.Fatalf("CHECK: %v", err)
+	}
+	wantLine := "claims/files_changed: greet.go belongs to task 2, not task 1"
+	if len(checkCommit.Messages) != 1 || !strings.Contains(checkCommit.Messages[0].Body, wantLine) {
+		t.Fatalf("CHECK commit.Messages = %+v, want it to contain %q", checkCommit.Messages, wantLine)
+	}
+	apply(t, s, ticket, checkCommit)
+
+	resumeRT := &scriptedRuntime{t: t, steps: []scriptedStep{planGapErrorStep("grant-sess")}}
+	ticket = getTicket(t, s, ticketID)
+	deps3 := claimForBuild(t, s, resumeRT, ticketID)
+	escCommit, err := job.Registry()[testStateBuilding].Run(t.Context(), ticket, deps3) // resume: error outcome plan_gap
+	if err != nil {
+		t.Fatalf("resume: %v", err)
+	}
+	if escCommit.Escalation == nil {
+		t.Fatal("commit.Escalation = nil, want an escalation")
+	}
+	if !reflect.DeepEqual(escCommit.Escalation.Payload.Grant, wantFileGrantGreet) {
+		t.Fatalf("commit.Escalation.Payload.Grant = %+v, want %+v", escCommit.Escalation.Payload.Grant, wantFileGrantGreet)
+	}
+	apply(t, s, ticket, escCommit)
+
+	q := findOpenQuestionByKind(t, s, ticketID, response.QuestionKindQuestion)
+	return s, ticketID, q
+}
+
+// TestFileGrant_ForeignPathEscalationOffersOption proves attachFileGrant and
+// escalateTx's own option d (plan #51, design "shape" rules 1-2): a build
+// escalation whose newest claim-errors marker names a foreign path offers
+// "Let task 1 also change greet.go" after Retry and Abandon, Recommended
+// unchanged at "a".
+func TestFileGrant_ForeignPathEscalationOffersOption(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow end-to-end flow; runs in the full suite")
+	}
+	t.Parallel()
+	_, _, q := fileGrantEscalatedTicket(t)
+
+	var qp response.QuestionPayload
+	if err := json.Unmarshal(q.Payload, &qp); err != nil {
+		t.Fatalf("unmarshal question payload: %v", err)
+	}
+	wantOptions := []response.Option{
+		{Key: "a", Text: testEscalationTextRetry},
+		{Key: "c", Text: testEscalationTextAbandon},
+		{Key: "d", Text: "Let task 1 also change greet.go"},
+	}
+	if !reflect.DeepEqual(qp.Options, wantOptions) {
+		t.Errorf("question.Options = %+v, want %+v", qp.Options, wantOptions)
+	}
+	if qp.Recommended != "a" {
+		t.Errorf("question.Recommended = %q, want a", qp.Recommended)
+	}
+}
+
+// TestFileGrant_PickLetsNextSubmissionPass proves picking option d applies
+// the grant and reruns task 1 fresh (plan #51, design "shape" rules 3-6):
+// the fresh run's own prompt carries the grant note, commit.GrantFiles is
+// set and the question resolves, the stored plan ends up with greet.go
+// task "1 2" plus one owner_edit event, and the next CHECK accepts
+// greet.go for task 1 and lands it.
+func TestFileGrant_PickLetsNextSubmissionPass(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow end-to-end flow; runs in the full suite")
+	}
+	t.Parallel()
+	s, ticketID, q := fileGrantEscalatedTicket(t)
+
+	answerGateQuestion(t, s, ticketID, q.ID, new("d"), "")
+
+	scriptRT := &scriptedRuntime{t: t, steps: []scriptedStep{buildStep([]string{helloTxt, greetGo}, nil, "grant-fresh-sess")}}
+	rec := &recordingRuntime{rt: scriptRT}
+	ticket := getTicket(t, s, ticketID)
+	deps := withGreetAndHelloProject(claimForBuild(t, s, rec, ticketID), ticket)
+	commit, err := job.Registry()[testStateBuilding].Run(t.Context(), ticket, deps) // pick d: fresh run carrying the grant
+	if err != nil {
+		t.Fatalf("grant pick Run: %v", err)
+	}
+	if rec.lastReq.SessionID != "" {
+		t.Errorf("RunRequest.SessionID = %q, want empty (a fresh session)", rec.lastReq.SessionID)
+	}
+	const wantGrantText = "Let task 1 also change greet.go"
+	if !strings.Contains(rec.lastReq.Prompt, wantGrantText) {
+		t.Errorf("prompt = %q, want it to contain %q", rec.lastReq.Prompt, wantGrantText)
+	}
+	if commit.GrantFiles == nil || !reflect.DeepEqual(commit.GrantFiles, wantFileGrantGreet) {
+		t.Errorf("commit.GrantFiles = %+v, want %+v", commit.GrantFiles, wantFileGrantGreet)
+	}
+	if len(commit.ResolveQuestions) != 1 || commit.ResolveQuestions[0] != q.ID {
+		t.Errorf("commit.ResolveQuestions = %v, want [%d]", commit.ResolveQuestions, q.ID)
+	}
+	apply(t, s, ticket, commit)
+
+	plan, _, ok, err := s.StoredPlan(t.Context(), ticketID)
+	if err != nil || !ok {
+		t.Fatalf("StoredPlan: ok=%v err=%v", ok, err)
+	}
+	greetTask := ""
+	for _, f := range plan.Delivery.Files {
+		if f.Path == greetGo {
+			greetTask = f.Task
+		}
+	}
+	if greetTask != "1 2" {
+		t.Errorf("stored plan's greet.go task = %q, want %q", greetTask, "1 2")
+	}
+
+	events, err := s.Events(t.Context(), ticketID, store.EventKindOwnerEdit, store.EventFilter{})
+	if err != nil {
+		t.Fatalf("Events(owner_edit): %v", err)
+	}
+	if len(events) != 1 {
+		t.Fatalf("owner_edit events = %d, want 1", len(events))
+	}
+	var ev response.OwnerEditEvent
+	if err = json.Unmarshal(events[0].Payload, &ev); err != nil {
+		t.Fatalf("unmarshal owner_edit event: %v", err)
+	}
+	if ev.Target != "plan_file" || ev.Ref != greetGo || ev.Old != "2" || ev.New != "1 2" {
+		t.Errorf("event = %+v, want target plan_file ref greet.go old 2 new 1 2", ev)
+	}
+
+	ticket = getTicket(t, s, ticketID)
+	deps2 := withGreetAndHelloProject(claimForBuild(t, s, scriptRT, ticketID), ticket)
+	checkCommit, err := job.Registry()[testStateBuilding].Run(t.Context(), ticket, deps2) // CHECK: greet.go now accepted for task 1
+	if err != nil {
+		t.Fatalf("CHECK: %v", err)
+	}
+	for _, m := range checkCommit.Messages {
+		if strings.Contains(m.Body, "claim errors pending") {
+			t.Fatalf("CHECK commit.Messages = %+v, want no claim errors pending", checkCommit.Messages)
+		}
+	}
+	if len(checkCommit.Artifacts) != 1 {
+		t.Fatalf("CHECK commit.Artifacts = %+v, want exactly one landed build_report", checkCommit.Artifacts)
+	}
+	var landed response.BuildReport
+	if err := json.Unmarshal(checkCommit.Artifacts[0].Payload, &landed); err != nil {
+		t.Fatalf("unmarshal landed build_report: %v", err)
+	}
+	if landed.CommitSHA == nil {
+		t.Error("landed.CommitSHA = nil, want a sha")
+	}
+	if landed.TaskN != 1 {
+		t.Errorf("landed.TaskN = %d, want 1", landed.TaskN)
+	}
+}
+
+// TestFileGrant_NoOptionWithoutForeignLines proves attachFileGrant's own
+// negative case (plan #51, design "shape" rule 1): a claim-errors marker
+// with no "belongs to" line (a files_changed mismatch, not a foreign path)
+// leaves Grant nil, so escalateTx offers only Retry and Abandon.
+func TestFileGrant_NoOptionWithoutForeignLines(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow end-to-end flow; runs in the full suite")
+	}
+	t.Parallel()
+	s, rt, ticketID := buildTicketInBuilding(t)
+	ticket := getTicket(t, s, ticketID)
+
+	mismatchRT := &scriptedRuntime{t: t, steps: []scriptedStep{buildStep([]string{helloTxt, phantomTxt}, nil, "no-grant-sess")}}
+	deps := withHelloAlwaysProject(claimForBuild(t, s, mismatchRT, ticketID), ticket)
+	commit, err := job.Registry()[testStateBuilding].Run(t.Context(), ticket, deps) // RUN
+	if err != nil {
+		t.Fatalf("RUN: %v", err)
+	}
+	apply(t, s, ticket, commit)
+
+	ticket = getTicket(t, s, ticketID)
+	deps2 := withHelloAlwaysProject(claimForBuild(t, s, rt, ticketID), ticket)
+	checkCommit, err := job.Registry()[testStateBuilding].Run(t.Context(), ticket, deps2) // CHECK: claim errors pending, no foreign line
+	if err != nil {
+		t.Fatalf("CHECK: %v", err)
+	}
+	if len(checkCommit.Messages) != 1 || strings.Contains(checkCommit.Messages[0].Body, "belongs to") {
+		t.Fatalf("CHECK commit.Messages = %+v, want a pending marker with no \"belongs to\" line", checkCommit.Messages)
+	}
+	apply(t, s, ticket, checkCommit)
+
+	resumeRT := &scriptedRuntime{t: t, steps: []scriptedStep{planGapErrorStep("no-grant-sess")}}
+	ticket = getTicket(t, s, ticketID)
+	deps3 := withHelloAlwaysProject(claimForBuild(t, s, resumeRT, ticketID), ticket)
+	escCommit, err := job.Registry()[testStateBuilding].Run(t.Context(), ticket, deps3) // resume: error outcome plan_gap
+	if err != nil {
+		t.Fatalf("resume: %v", err)
+	}
+	if escCommit.Escalation == nil {
+		t.Fatal("commit.Escalation = nil, want an escalation")
+	}
+	if escCommit.Escalation.Payload.Grant != nil {
+		t.Errorf("commit.Escalation.Payload.Grant = %+v, want nil", escCommit.Escalation.Payload.Grant)
+	}
+	apply(t, s, ticket, escCommit)
+
+	q := findOpenQuestionByKind(t, s, ticketID, response.QuestionKindQuestion)
+	var qp response.QuestionPayload
+	if err := json.Unmarshal(q.Payload, &qp); err != nil {
+		t.Fatalf("unmarshal question payload: %v", err)
+	}
+	wantOptions := []response.Option{{Key: "a", Text: testEscalationTextRetry}, {Key: "c", Text: testEscalationTextAbandon}}
+	if !reflect.DeepEqual(qp.Options, wantOptions) {
+		t.Errorf("question.Options = %+v, want %+v", qp.Options, wantOptions)
+	}
 }
