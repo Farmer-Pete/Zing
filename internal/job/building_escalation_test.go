@@ -30,6 +30,7 @@ package job_test
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -48,6 +49,12 @@ import (
 // testMarkerRetryRequested is building.go's own unexported marker text
 // (job.markerRetryRequested), design section 6.9's own retry marker.
 const testMarkerRetryRequested = "retry requested"
+
+// testForeignLineGreet is foreignTaskPaths' own error line for greet.go
+// (plan #51's own fixture plan, fixtures/scripts/planning/2.xml, gives it
+// only to task 2): shared across building_test.go and this file's own
+// TestFileGrant_ tests so goconst sees one definition, not several copies.
+const testForeignLineGreet = "claims/files_changed: greet.go belongs to task 2, not task 1"
 
 // runBuilding runs job.Registry()["building"] once against deps built for
 // ticketID, mirroring planning_test.go's own runPlanning.
@@ -676,7 +683,7 @@ func fileGrantEscalatedTicket(t *testing.T) (*store.Store, int64, store.MessageR
 	if err != nil {
 		t.Fatalf("CHECK: %v", err)
 	}
-	wantLine := "claims/files_changed: greet.go belongs to task 2, not task 1"
+	wantLine := testForeignLineGreet
 	if len(checkCommit.Messages) != 1 || !strings.Contains(checkCommit.Messages[0].Body, wantLine) {
 		t.Fatalf("CHECK commit.Messages = %+v, want it to contain %q", checkCommit.Messages, wantLine)
 	}
@@ -877,5 +884,213 @@ func TestFileGrant_NoOptionWithoutForeignLines(t *testing.T) {
 	wantOptions := []response.Option{{Key: "a", Text: testEscalationTextRetry}, {Key: "c", Text: testEscalationTextAbandon}}
 	if !reflect.DeepEqual(qp.Options, wantOptions) {
 		t.Errorf("question.Options = %+v, want %+v", qp.Options, wantOptions)
+	}
+}
+
+// TestFileGrant_NewestMarkerOfSessionWinsOverOlderForeignLine proves
+// attachFileGrant's own "newest" qualifier (design "shape" rule 1, review
+// r1f5): a marker naming a run outside the escalated session, even the
+// newest row in the table, is skipped; once the newest in-session marker is
+// found, an older in-session marker's own foreign line is never consulted.
+func TestFileGrant_NewestMarkerOfSessionWinsOverOlderForeignLine(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow end-to-end flow; runs in the full suite")
+	}
+	t.Parallel()
+	s, _, ticketID := buildTicketInBuilding(t)
+	ticket := getTicket(t, s, ticketID)
+
+	scriptRT := &scriptedRuntime{t: t, steps: []scriptedStep{buildStep([]string{helloTxt, greetGo}, nil, "newest-marker-sess")}}
+	deps := withGreetAndHelloProject(claimForBuild(t, s, scriptRT, ticketID), ticket)
+	commit, err := job.Registry()[testStateBuilding].Run(t.Context(), ticket, deps) // RUN: claims hello.txt, greet.go
+	if err != nil {
+		t.Fatalf("RUN: %v", err)
+	}
+	apply(t, s, ticket, commit)
+
+	ticket = getTicket(t, s, ticketID)
+	deps2 := withGreetAndHelloProject(claimForBuild(t, s, scriptRT, ticketID), ticket)
+	checkCommit, err := job.Registry()[testStateBuilding].Run(t.Context(), ticket, deps2) // CHECK: the real foreign-line marker
+	if err != nil {
+		t.Fatalf("CHECK: %v", err)
+	}
+	wantLine := testForeignLineGreet
+	if len(checkCommit.Messages) != 1 || !strings.Contains(checkCommit.Messages[0].Body, wantLine) {
+		t.Fatalf("CHECK commit.Messages = %+v, want it to contain %q", checkCommit.Messages, wantLine)
+	}
+	apply(t, s, ticket, checkCommit)
+
+	sessions, err := s.SessionsForTicket(t.Context(), ticketID)
+	if err != nil {
+		t.Fatalf("SessionsForTicket: %v", err)
+	}
+	var sessionID int64
+	for _, sess := range sessions {
+		if sess.ExternalID != nil && *sess.ExternalID == "newest-marker-sess" {
+			sessionID = sess.ID
+		}
+	}
+	if sessionID == 0 {
+		t.Fatal(`session "newest-marker-sess" not found`)
+	}
+	runIDs, err := s.SessionRunIDs(t.Context(), sessionID)
+	if err != nil || len(runIDs) == 0 {
+		t.Fatalf("SessionRunIDs(%d) = %v, %v, want at least one", sessionID, runIDs, err)
+	}
+	inSessionRunID := runIDs[len(runIDs)-1]
+
+	// A newer, in-session marker with no foreign line: what the resumed
+	// builder's own next CHECK would write had it dropped greet.go but hit
+	// a different claim mismatch instead. It must win over the older
+	// marker's own foreign line.
+	insertUpdateMarker(t, s, ticketID, fmt.Sprintf("claim errors pending run %d\nclaims/files_changed: missing phantom.txt", inSessionRunID))
+
+	// An even newer marker naming a run outside the escalated session
+	// entirely: it must be skipped, falling through to the in-session
+	// marker above, not the real CHECK marker further back.
+	outsideRunID, _ := reserveTerminalRun(t, s, ticketID, string(response.JobBuild), false)
+	insertUpdateMarker(t, s, ticketID, fmt.Sprintf("claim errors pending run %d\n%s", outsideRunID, wantLine))
+
+	resumeRT := &scriptedRuntime{t: t, steps: []scriptedStep{planGapErrorStep("newest-marker-sess")}}
+	ticket = getTicket(t, s, ticketID)
+	deps3 := claimForBuild(t, s, resumeRT, ticketID)
+	escCommit, err := job.Registry()[testStateBuilding].Run(t.Context(), ticket, deps3) // resume: error outcome plan_gap
+	if err != nil {
+		t.Fatalf("resume: %v", err)
+	}
+	if escCommit.Escalation == nil {
+		t.Fatal("commit.Escalation = nil, want an escalation")
+	}
+	if escCommit.Escalation.Payload.Grant != nil {
+		t.Errorf("commit.Escalation.Payload.Grant = %+v, want nil (the newest in-session marker has no foreign line)", escCommit.Escalation.Payload.Grant)
+	}
+}
+
+// TestFileGrant_CapResumesOriginAlsoOffersOption proves owner decision Q2
+// (review r1f4): attachFileGrant offers the grant on a cap_resumes
+// escalation too, not only a build escalation's own error outcome. Task 1's
+// resume budget runs out while a "greet.go belongs to task 2" claim-errors
+// marker is still pending, so RESOLVE escalates resumes_exhausted instead of
+// ever calling the runtime again, and that escalation's own payload still
+// carries the grant.
+func TestFileGrant_CapResumesOriginAlsoOffersOption(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow end-to-end flow; runs in the full suite")
+	}
+	t.Parallel()
+	s, _, ticketID := buildTicketInBuilding(t)
+	ticket := getTicket(t, s, ticketID)
+
+	scriptRT := &scriptedRuntime{t: t, steps: []scriptedStep{buildStep([]string{helloTxt, greetGo}, nil, "cap-resumes-grant-sess")}}
+	deps := withGreetAndHelloProject(claimForBuild(t, s, scriptRT, ticketID), ticket)
+	commit, err := job.Registry()[testStateBuilding].Run(t.Context(), ticket, deps) // RUN: claims hello.txt, greet.go
+	if err != nil {
+		t.Fatalf("RUN: %v", err)
+	}
+	apply(t, s, ticket, commit)
+
+	ticket = getTicket(t, s, ticketID)
+	deps2 := withGreetAndHelloProject(claimForBuild(t, s, scriptRT, ticketID), ticket)
+	checkCommit, err := job.Registry()[testStateBuilding].Run(t.Context(), ticket, deps2) // CHECK: claim errors pending
+	if err != nil {
+		t.Fatalf("CHECK: %v", err)
+	}
+	wantLine := testForeignLineGreet
+	if len(checkCommit.Messages) != 1 || !strings.Contains(checkCommit.Messages[0].Body, wantLine) {
+		t.Fatalf("CHECK commit.Messages = %+v, want it to contain %q", checkCommit.Messages, wantLine)
+	}
+	apply(t, s, ticket, checkCommit)
+
+	const maxResumes = 3
+	sess, _, err := s.LatestSession(t.Context(), ticketID, "build", maxResumes)
+	if err != nil {
+		t.Fatalf("LatestSession: %v", err)
+	}
+	owner := "cap-resumes-grant-owner"
+	expires := time.Now().Add(10 * time.Minute).UTC().Truncate(time.Second)
+	bumpResumesToCap(t, s, ticketID, sess.ID, maxResumes, owner, expires)
+
+	ticket = getTicket(t, s, ticketID)
+	deps3 := withGreetAndHelloProject(claimForBuild(t, s, scriptRT, ticketID), ticket)
+	escCommit, err := job.Registry()[testStateBuilding].Run(t.Context(), ticket, deps3) // RESOLVE: exhausted, escalates cap_resumes
+	if err != nil {
+		t.Fatalf("RESOLVE: %v", err)
+	}
+	if escCommit.Escalation == nil {
+		t.Fatal("commit.Escalation = nil, want resumes_exhausted")
+	}
+	if escCommit.Escalation.Payload.Origin != string(response.EscalationOriginCapResumes) {
+		t.Fatalf("payload.Origin = %q, want cap_resumes", escCommit.Escalation.Payload.Origin)
+	}
+	if !reflect.DeepEqual(escCommit.Escalation.Payload.Grant, wantFileGrantGreet) {
+		t.Fatalf("commit.Escalation.Payload.Grant = %+v, want %+v", escCommit.Escalation.Payload.Grant, wantFileGrantGreet)
+	}
+}
+
+// grantlessDOptionQuestion inserts an escalation message carrying a Grant-
+// less payload (payload.Grant stays nil, exactly as every stored escalation
+// predating plan #51 reads back), plus a linked question whose Options
+// still include "d" -- the shape a row stored before this feature shipped,
+// or one escalateTx wrote for a Grant that was valid then and is gone now,
+// would carry. Mirrors legacyEscalationQuestion's own direct-InsertMessage
+// construction. Returns the linked question's id.
+func grantlessDOptionQuestion(t *testing.T, s *store.Store, ticketID int64, code response.EscalationCode, origin response.EscalationOrigin) int64 {
+	t.Helper()
+	payload := testEscalationPayload(code, origin)
+	body := string(code) + ": " + payload.What
+	escPayload, err := json.Marshal(payload)
+	if err != nil {
+		t.Fatalf("grantlessDOptionQuestion: marshal escalation payload: %v", err)
+	}
+	escID, err := s.InsertMessage(t.Context(), store.Message{
+		TicketID: ticketID, Type: testMsgTypeEscalation, Author: testAuthorZing, Body: body, Payload: escPayload,
+	})
+	if err != nil {
+		t.Fatalf("grantlessDOptionQuestion: InsertMessage(escalation): %v", err)
+	}
+
+	qPayload, err := json.Marshal(response.QuestionPayload{
+		Key: "Q1", Kind: response.QuestionKindQuestion, State: response.QuestionStateOpen,
+		Recommended: "a",
+		Options: []response.Option{
+			{Key: "a", Text: testEscalationTextRetry},
+			{Key: "c", Text: testEscalationTextAbandon},
+			{Key: "d", Text: "Let task 1 also change greet.go"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("grantlessDOptionQuestion: marshal question payload: %v", err)
+	}
+	qID, err := s.InsertMessage(t.Context(), store.Message{
+		TicketID: ticketID, ParentID: &escID, Type: testMsgTypeQuestion, Author: testAuthorZing,
+		State: new("open"), Body: body + "\n\nHow should Zing proceed?", Payload: qPayload,
+	})
+	if err != nil {
+		t.Fatalf("grantlessDOptionQuestion: InsertMessage(question): %v", err)
+	}
+	return qID
+}
+
+// TestFileGrant_PickWithoutGrantFallsBackToReplan proves design "shape" rule
+// 4's own negative half (review r1f1): answering "d" on an escalation whose
+// payload carries no Grant at all takes the existing "anything but retry"
+// branch (enterFromEscalationRound), exactly as any other non-retry,
+// non-abandon choice does, instead of calling retryFreshRun with a nil
+// grant.
+func TestFileGrant_PickWithoutGrantFallsBackToReplan(t *testing.T) {
+	t.Parallel()
+	s, rt, ticketID := buildTicketInBuilding(t)
+	qID := grantlessDOptionQuestion(t, s, ticketID, response.EscalationCodePlanGap, response.EscalationOriginBuild)
+	answerGateQuestion(t, s, ticketID, qID, new("d"), "")
+
+	commit, err := runBuilding(t, s, claimForBuild(t, s, rt, ticketID), ticketID)
+	if err != nil {
+		t.Fatalf("escalation resolve (d, no grant) Run: %v", err)
+	}
+	if commit.Escalation == nil || commit.Escalation.Payload.Code != string(response.EscalationCodeReplanUnsupported) {
+		t.Fatalf("commit.Escalation = %+v, want replan_unsupported", commit.Escalation)
+	}
+	if len(commit.ResolveQuestions) != 1 || commit.ResolveQuestions[0] != qID {
+		t.Errorf("commit.ResolveQuestions = %v, want [%d]", commit.ResolveQuestions, qID)
 	}
 }

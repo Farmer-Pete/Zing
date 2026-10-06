@@ -596,8 +596,9 @@ func (s *Store) editPlanFileTx(ctx context.Context, tx *sql.Tx, req OwnerEditReq
 }
 
 // normalizeTaskList returns s's task numbers ascending, unique, joined by
-// single spaces. checkOwnerEditShape has already matched s against
-// planFileTasksPattern.
+// single spaces (response.FormatTaskList, the same format GrantFileTasks
+// writes). checkOwnerEditShape has already matched s against
+// planFileTasksPattern, so every field is a valid number.
 func normalizeTaskList(s string) string {
 	var nums []int
 	for field := range strings.FieldsSeq(s) {
@@ -607,12 +608,7 @@ func normalizeTaskList(s string) string {
 		}
 		nums = append(nums, n)
 	}
-	nums = slices.Compact(slices.Sorted(slices.Values(nums)))
-	parts := make([]string, len(nums))
-	for i, n := range nums {
-		parts[i] = strconv.Itoa(n)
-	}
-	return strings.Join(parts, " ")
+	return response.FormatTaskList(nums)
 }
 
 // grantPlanFilesTx applies a HandlerCommit's GrantFiles to the ticket's
@@ -620,21 +616,28 @@ func normalizeTaskList(s string) string {
 // (plan #51). It needs no claim guard: CommitHandlerResult's own fenced
 // UPDATE, at the end of the same transaction, is what proves the handler
 // still holds the claim. It writes no event and no UPDATE when
-// GrantFileTasks reports no change.
+// GrantFileTasks reports no change, or when the ticket has no plan at all
+// (sql.ErrNoRows): a commit's GrantFiles must never refuse an otherwise
+// valid commit over a grant that no longer applies.
 func (s *Store) grantPlanFilesTx(ctx context.Context, tx *sql.Tx, ticketID int64, g response.FileGrant) error {
 	var id int64
 	var payload []byte
-	if err := tx.QueryRowContext(ctx,
+	err := tx.QueryRowContext(ctx,
 		`SELECT id, payload FROM artifacts WHERE ticket_id = ? AND type = 'plan' ORDER BY version DESC LIMIT 1`,
-		ticketID).Scan(&id, &payload); err != nil {
+		ticketID).Scan(&id, &payload)
+	switch {
+	case errors.Is(err, sql.ErrNoRows):
+		return nil
+	case err != nil:
 		return fmt.Errorf("grant plan files: load plan: %w", err)
 	}
 	var plan response.Plan
-	if err := json.Unmarshal(payload, &plan); err != nil {
+	if err = json.Unmarshal(payload, &plan); err != nil {
 		return fmt.Errorf("grant plan files: unmarshal plan: %w", err)
 	}
 	granted, changes := response.GrantFileTasks(plan, g)
 	if len(changes) == 0 {
+		slog.DebugContext(ctx, "file grant no change", "ticket_id", ticketID, "task_n", g.Task, "paths", g.Paths)
 		return nil
 	}
 	newPayload, err := json.Marshal(granted)

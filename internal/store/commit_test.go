@@ -3742,8 +3742,14 @@ func TestCommitHandlerResult_GrantFilesUpdatesPlanAndAudits(t *testing.T) {
 	if err == nil {
 		t.Fatal("CommitHandlerResult(grant task 9): err = nil, want error")
 	}
+	if !strings.Contains(err.Error(), "grant plan files") {
+		t.Errorf("err = %q, want it to name grant plan files (checkPlanStructure's own fault)", err.Error())
+	}
 	if got := readPlanPayload(t, s, ticketID); !bytes.Equal(got, beforeSecond) {
 		t.Errorf("plan bytes changed after the refused grant")
+	}
+	if got := ownerEditEvents(t, s, ticketID); len(got) != 1 {
+		t.Errorf("owner_edit events after the refused grant = %d, want still 1 (the rollback wrote none)", len(got))
 	}
 }
 

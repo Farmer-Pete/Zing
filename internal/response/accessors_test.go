@@ -99,6 +99,14 @@ func TestFileTasks(t *testing.T) {
 // test files.
 const testTasks2And6 = "2 6"
 
+// testTasks6And3 and testTasks2And3And6 are TestGrantFileTasks' own
+// "insertsBetween" case literals (goconst), its own task field and the
+// change it asserts against.
+const (
+	testTasks6And3     = "6 3"
+	testTasks2And3And6 = "2 3 6"
+)
+
 // TestGrantFileTasks proves GrantFileTasks' task-list arithmetic (design
 // plan #51, rule 3): a new task number is inserted in ascending, unique
 // order, a file already carrying it is left unchanged, an empty task list
@@ -108,21 +116,25 @@ const testTasks2And6 = "2 6"
 func TestGrantFileTasks(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
-		name string
-		task string
-		want string
+		name        string
+		task        string
+		want        string
+		wantChanges []FileTaskChange
 	}{
-		{"appendsAscending", "6", testTasks2And6},
-		{"insertsBetween", "6 3", "2 3 6"},
-		{"noChangeWhenAlreadyPresent", testTasks2And6, testTasks2And6},
+		{"appendsAscending", "6", testTasks2And6, []FileTaskChange{{Path: testFileA, Old: "6", New: testTasks2And6}}},
+		{"insertsBetween", testTasks6And3, testTasks2And3And6, []FileTaskChange{{Path: testFileA, Old: testTasks6And3, New: testTasks2And3And6}}},
+		{"noChangeWhenAlreadyPresent", testTasks2And6, testTasks2And6, nil},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			p := Plan{Delivery: Delivery{Files: []FileChange{{Path: testFileA, Task: tt.task}}}}
-			got, _ := GrantFileTasks(p, FileGrant{Task: 2, Paths: []string{testFileA}})
+			got, changes := GrantFileTasks(p, FileGrant{Task: 2, Paths: []string{testFileA}})
 			if got.Delivery.Files[0].Task != tt.want {
 				t.Errorf("Task = %q, want %q", got.Delivery.Files[0].Task, tt.want)
+			}
+			if !bytes.Equal(mustJSON(t, changes), mustJSON(t, tt.wantChanges)) {
+				t.Errorf("changes = %+v, want %+v", changes, tt.wantChanges)
 			}
 		})
 	}
@@ -155,14 +167,14 @@ func TestGrantFileTasks(t *testing.T) {
 		t.Parallel()
 		p := Plan{Delivery: Delivery{Files: []FileChange{
 			{Path: testFileA, Task: "6", Reason: "reason one"},
-			{Path: testFileA, Task: "6 3", Reason: "reason two"},
+			{Path: testFileA, Task: testTasks6And3, Reason: "reason two"},
 		}}}
 		got, changes := GrantFileTasks(p, FileGrant{Task: 2, Paths: []string{testFileA}})
 		if got.Delivery.Files[0].Task != testTasks2And6 {
 			t.Errorf("Files[0].Task = %q, want %q", got.Delivery.Files[0].Task, testTasks2And6)
 		}
-		if got.Delivery.Files[1].Task != "2 3 6" {
-			t.Errorf("Files[1].Task = %q, want %q", got.Delivery.Files[1].Task, "2 3 6")
+		if got.Delivery.Files[1].Task != testTasks2And3And6 {
+			t.Errorf("Files[1].Task = %q, want %q", got.Delivery.Files[1].Task, testTasks2And3And6)
 		}
 		if len(changes) != 1 {
 			t.Fatalf("changes = %+v, want exactly 1", changes)

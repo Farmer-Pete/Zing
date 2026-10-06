@@ -875,21 +875,19 @@ func replanUnsupportedEscalation(t store.Ticket, d Deps, resolveIDs []int64, ori
 // which retryFreshFixRun runs instead. grant is non-nil only for the
 // owner's "let task N also change PATH" pick (plan #51, design "shape"
 // rules 4-5): it is applied to the in-memory plan before the builder's
-// prompt is built, and set on the returned commit's GrantFiles so
-// CommitHandlerResult applies the same edit to the stored plan -- on every
-// return from this point on, even the escalations before runFirst ever
-// runs, so the grant is not lost.
+// prompt is built, and set on every return from this point on so
+// CommitHandlerResult applies the same edit to the stored plan, even an
+// escalation before runFirst ever runs -- except the no-stored-plan
+// escalation just below, whose commit must not carry a grant at all:
+// grantPlanFilesTx has no plan row to apply it to there, and a commit it
+// refuses can never land (review r1f3).
 func (h buildingHandler) retryFreshRun(ctx context.Context, t store.Ticket, d Deps, resolveIDs []int64, notes, errorText string, grant *response.FileGrant) (store.HandlerCommit, error) {
 	plan, _, ok, err := d.Store.StoredPlan(ctx, t.ID)
 	if err != nil {
 		return store.HandlerCommit{}, fmt.Errorf("job: building: escalation retry: stored plan: %w", err)
 	}
 	if !ok {
-		c := buildEscalation(t, d, noStoredPlanWhat, noStoredPlanWhy, "")
-		if grant != nil {
-			c.GrantFiles = grant
-		}
-		return c, nil
+		return buildEscalation(t, d, noStoredPlanWhat, noStoredPlanWhy, ""), nil
 	}
 	if grant != nil {
 		plan, _ = response.GrantFileTasks(plan, *grant)
@@ -915,15 +913,13 @@ func (h buildingHandler) retryFreshRun(ctx context.Context, t store.Ticket, d De
 	}
 	if escalation != nil {
 		c := *escalation
-		if grant != nil {
-			c.GrantFiles = grant
-		}
+		c.GrantFiles = grant
 		return c, nil
 	}
 
 	extra := []prompt.NamedInput{prompt.Notes(notes), prompt.Error(errorText)}
 	commit, runErr := h.runFirst(ctx, t, d, proj, wt, plan, u, len(response.Tasks(plan)), extra, resolveIDs)
-	if runErr == nil && grant != nil {
+	if runErr == nil {
 		commit.GrantFiles = grant
 	}
 	return withBranchResult(commit, runErr, wt)
@@ -2000,6 +1996,11 @@ func attachFileGrant(ctx context.Context, t store.Ticket, d Deps, c store.Handle
 		}
 		if taskN, paths := parseForeignLines(body); len(paths) > 0 {
 			c.Escalation.Payload.Grant = &response.FileGrant{Task: taskN, Paths: paths}
+			slog.Info("file grant offered", "ticket_id", t.ID, "session_id", *c.Escalation.Payload.SessionID,
+				"run_id", rid, "task_n", taskN, "paths", paths)
+		} else {
+			slog.Debug("file grant: newest marker has no belongs-to line", "ticket_id", t.ID,
+				"session_id", *c.Escalation.Payload.SessionID, "run_id", rid)
 		}
 		return c, nil
 	}

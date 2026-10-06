@@ -60,6 +60,19 @@ type FileTaskChange struct {
 	New  string
 }
 
+// FormatTaskList returns nums ascending, unique, joined by single spaces:
+// the one canonical task-list format GrantFileTasks and the console's
+// plan_file owner edit (store.normalizeTaskList) both write, so a granted
+// file and a console-edited one can never drift onto different shapes.
+func FormatTaskList(nums []int) string {
+	nums = slices.Compact(slices.Sorted(slices.Values(nums)))
+	parts := make([]string, len(nums))
+	for i, n := range nums {
+		parts[i] = strconv.Itoa(n)
+	}
+	return strings.Join(parts, " ")
+}
+
 // GrantFileTasks returns p with g.Task added to the task list of every
 // delivery file entry named in g.Paths whose list is non-empty and lacks
 // it, plus one change per path that moved. Pure: p is not modified.
@@ -69,17 +82,16 @@ func GrantFileTasks(p Plan, g FileGrant) (Plan, []FileTaskChange) {
 	var changes []FileTaskChange
 	for i, f := range files {
 		nums := FileTasks(f)
-		if !slices.Contains(g.Paths, f.Path) || len(nums) == 0 || slices.Contains(nums, g.Task) {
+		named := slices.Contains(g.Paths, f.Path)
+		mapped := len(nums) > 0
+		has := slices.Contains(nums, g.Task)
+		if !named || !mapped || has {
 			continue
 		}
-		nums = slices.Compact(slices.Sorted(slices.Values(append(nums, g.Task))))
-		parts := make([]string, len(nums))
-		for j, n := range nums {
-			parts[j] = strconv.Itoa(n)
-		}
-		files[i].Task = strings.Join(parts, " ")
+		old := f.Task
+		files[i].Task = FormatTaskList(append(nums, g.Task))
 		if !slices.ContainsFunc(changes, func(c FileTaskChange) bool { return c.Path == f.Path }) {
-			changes = append(changes, FileTaskChange{Path: f.Path, Old: f.Task, New: files[i].Task})
+			changes = append(changes, FileTaskChange{Path: f.Path, Old: old, New: files[i].Task})
 		}
 	}
 	out.Delivery.Files = files

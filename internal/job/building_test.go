@@ -439,7 +439,7 @@ func TestCheckRejectsAnotherTasksFile(t *testing.T) {
 	if len(checkCommit.Artifacts) != 0 || checkCommit.Next != "" {
 		t.Fatalf("CHECK commit = %+v, want no artifacts and no transition", checkCommit)
 	}
-	wantLine := "claims/files_changed: greet.go belongs to task 2, not task 1"
+	wantLine := testForeignLineGreet
 	if len(checkCommit.Messages) != 1 || !strings.HasPrefix(checkCommit.Messages[0].Body, "claim errors pending run ") {
 		t.Fatalf("CHECK commit.Messages = %+v, want the pending marker", checkCommit.Messages)
 	}
