@@ -117,8 +117,8 @@ const (
 	budgetExhaustedWhat = "raise budget.agent_minutes_per_ticket or abandon"
 	budgetExhaustedWhy  = "the ticket's spent agent time has reached the configured budget"
 
-	resumesExhaustedWhat = "raise machine.toml's planning max_resumes, or abandon"
-	resumesExhaustedWhy  = "the planning session has resumed the maximum number of times machine.toml allows"
+	resumesExhaustedWhatFmt = "raise machine.toml's %s max_resumes, or abandon"
+	resumesExhaustedWhyFmt  = "the %s session has resumed the maximum number of times machine.toml allows"
 
 	splitUnsupportedWhat = "the plan says this ticket should be split into several tickets, which Zing does not yet build"
 	splitUnsupportedWhy  = "the planning run returned a children outcome"
@@ -264,7 +264,7 @@ func (h planningHandler) Run(ctx context.Context, t store.Ticket, d Deps) (store
 		if has {
 			return store.HandlerCommit{}, ErrNoAction
 		}
-		return capResumesEscalation(t, d, sess.ID), nil
+		return capResumesEscalation(t, d, jobPlanningName, sess.ID), nil
 	case store.SessionOpen:
 		// Design section 7.5 bug 3: before the ordinary D14 n==1 check,
 		// handle a newest run that is itself a stalled invalid retry -- one
@@ -2807,11 +2807,13 @@ func sandboxEscalationCommit(t store.Ticket, d Deps, resolveIDs []int64, origin 
 	return c
 }
 
-// capResumesEscalation is the resumes_exhausted escalation entry steps 1(c)
-// and 3 both write (design D17, section 5.1): RunID is nil (no run caused
-// it, the session cap did), SessionID names the exhausted session.
-func capResumesEscalation(t store.Ticket, d Deps, sessionID int64) store.HandlerCommit {
-	return escalationCommit(t, d, nil, &sessionID, string(response.EscalationCodeResumesExhausted), resumesExhaustedWhat, resumesExhaustedWhy, "", response.EscalationOriginCapResumes)
+// capResumesEscalation is the resumes_exhausted escalation every job's
+// exhausted session writes (design D17): RunID is nil (no run caused it,
+// the session cap did), SessionID names the exhausted session, and What and
+// Why name jobName, that session's own job.
+func capResumesEscalation(t store.Ticket, d Deps, jobName string, sessionID int64) store.HandlerCommit {
+	return escalationCommit(t, d, nil, &sessionID, string(response.EscalationCodeResumesExhausted),
+		fmt.Sprintf(resumesExhaustedWhatFmt, jobName), fmt.Sprintf(resumesExhaustedWhyFmt, jobName), "", response.EscalationOriginCapResumes)
 }
 
 // execFailureCommit terminalizes the reserved run as an error and escalates

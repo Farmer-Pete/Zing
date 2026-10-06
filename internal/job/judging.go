@@ -241,7 +241,7 @@ func judgeEscalation(t store.Ticket, d Deps, what, why, tried string) store.Hand
 func judgeCapResumesEscalation(t store.Ticket, d Deps, sessionID int64) store.HandlerCommit {
 	slog.Warn("escalation written", "ticket_id", t.ID, "session_id", sessionID, "run_id", nil,
 		"code", string(response.EscalationCodeResumesExhausted), "origin", string(response.EscalationOriginCapResumes))
-	return capResumesEscalation(t, d, sessionID)
+	return capResumesEscalation(t, d, jobJudgeName, sessionID)
 }
 
 // Run is the judging state's own decision tree (design section 7.1).
@@ -824,24 +824,21 @@ func (h judgeHandler) resumeAnswered(ctx context.Context, t store.Ticket, d Deps
 		return store.HandlerCommit{}, err
 	}
 
+	capped, capErr := answerResume(ctx, t, d, sess, state, round)
+	if capErr != nil {
+		return store.HandlerCommit{}, capErr
+	}
+	if capped {
+		slog.Debug("judging entry decision", "ticket_id", t.ID, "session_id", sess.ID, "step", "answer_resume_capped", "session_state", sessionStateName(state))
+		return store.HandlerCommit{}, ErrNoAction
+	}
+
 	// resumeCharge (job.go, design D5, section 7.4): an interrupted latest
-	// run resumes this round free and bypasses the exhausted-cap gate
-	// below, even on a session already at max_resumes.
+	// run's own input is still added to the prompt, even though the answer
+	// resume itself is free.
 	newestRun, foundRun, newestErr := d.Store.SessionNewestRun(ctx, sess.ID)
 	if newestErr != nil {
 		return store.HandlerCommit{}, fmt.Errorf("job: judging: answered round: newest run: %w", newestErr)
-	}
-	bump, gate := true, true
-	if foundRun {
-		bump, gate = resumeCharge(newestRun)
-	}
-
-	if gate {
-		capCommit, mayResume, capErr := h.resumeCapGate(ctx, t, d, sess, state)
-		if !mayResume {
-			capCommit.ResolveQuestions = resolveIDs
-			return capCommit, capErr
-		}
 	}
 
 	scenarios, err := judgeScenariosFor(ctx, t, d)
@@ -861,7 +858,7 @@ func (h judgeHandler) resumeAnswered(ctx context.Context, t store.Ticket, d Deps
 		inputs = append(inputs, prompt.NamedInput{Label: labelInterrupted, Text: interruptedResumeText, Untrusted: false})
 	}
 
-	return h.judgeResumeTurn(ctx, t, d, n, sha, sess, 0, resolveIDs, inputs, bump,
+	return h.judgeResumeTurn(ctx, t, d, n, sha, sess, 0, resolveIDs, inputs, false,
 		func(rr runResult, sessionCommit *store.SessionUpsert) (store.HandlerCommit, error) {
 			return judgeOkCommit(t, d, n, sha, scenarios, rr, sessionCommit, resolveIDs, false)
 		})

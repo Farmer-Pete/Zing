@@ -1280,6 +1280,12 @@ func TestPlanningHandler_SessionExhausted_EscalatesResumesExhaustedExactlyOnce(t
 	if payload.SessionID == nil || *payload.SessionID != sess.ID {
 		t.Errorf("payload.SessionID = %v, want %d", payload.SessionID, sess.ID)
 	}
+	if payload.What != "raise machine.toml's planning max_resumes, or abandon" {
+		t.Errorf("payload.What = %q, want planning's own text", payload.What)
+	}
+	if payload.Why != "the planning session has resumed the maximum number of times machine.toml allows" {
+		t.Errorf("payload.Why = %q, want planning's own text", payload.Why)
+	}
 	apply(t, s, getTicket(t, s, ticketID), commit)
 
 	_, err = runPlanning(t, s, claim(t, s, fake, ticketID), ticketID)

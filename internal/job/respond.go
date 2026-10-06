@@ -810,24 +810,21 @@ func (h shipHandler) resumeRespondAnswered(ctx context.Context, t store.Ticket, 
 		return store.HandlerCommit{}, err
 	}
 
+	capped, capErr := answerResume(ctx, t, d, sess, state, round)
+	if capErr != nil {
+		return store.HandlerCommit{}, capErr
+	}
+	if capped {
+		slog.Debug("shipping entry decision", "ticket_id", t.ID, "session_id", sess.ID, "step", "respond_answer_resume_capped", "session_state", sessionStateName(state))
+		return store.HandlerCommit{}, ErrNoAction
+	}
+
 	// resumeCharge (job.go, design D5, section 7.4): an interrupted latest
-	// run resumes this round free and bypasses the exhausted-cap gate
-	// below, even on a session already at max_resumes.
+	// run's own input is still added to the prompt, even though the answer
+	// resume itself is free.
 	newestRun, foundRun, newestErr := d.Store.SessionNewestRun(ctx, sess.ID)
 	if newestErr != nil {
 		return store.HandlerCommit{}, fmt.Errorf("job: shipping: answered round: newest run: %w", newestErr)
-	}
-	bump, gate := true, true
-	if foundRun {
-		bump, gate = resumeCharge(newestRun)
-	}
-
-	if gate {
-		capCommit, mayResume, capErr := h.respondCapGate(ctx, t, d, sess, state)
-		if !mayResume {
-			capCommit.ResolveQuestions = resolveIDs
-			return capCommit, capErr
-		}
 	}
 
 	answers, ansErr := renderRoundAnswers(round)
@@ -839,7 +836,7 @@ func (h shipHandler) resumeRespondAnswered(ctx context.Context, t store.Ticket, 
 		inputs = append(inputs, prompt.NamedInput{Label: labelInterrupted, Text: interruptedResumeText, Untrusted: false})
 	}
 
-	return h.respondResumeTurn(ctx, t, d, n, sha, ids, seen, sess, 0, resolveIDs, inputs, false, bump)
+	return h.respondResumeTurn(ctx, t, d, n, sha, ids, seen, sess, 0, resolveIDs, inputs, false, false)
 }
 
 // respondCapGate is the decision tree's own shared "needs a resume" gate
@@ -860,7 +857,7 @@ func (h shipHandler) respondCapGate(ctx context.Context, t store.Ticket, d Deps,
 	}
 	slog.Warn("escalation written", "ticket_id", t.ID, "session_id", sess.ID, "run_id", nil,
 		"code", string(response.EscalationCodeResumesExhausted), "origin", string(response.EscalationOriginCapResumes))
-	c := capResumesEscalation(t, d, sess.ID)
+	c := capResumesEscalation(t, d, jobRespondName, sess.ID)
 	c.ClearPoll = true
 	return c, false, nil
 }

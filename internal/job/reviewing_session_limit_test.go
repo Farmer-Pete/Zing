@@ -613,8 +613,8 @@ func TestContinueCapped_FreeResumeForEveryAsker(t *testing.T) {
 	if err != nil {
 		t.Fatalf("SessionByID: %v", err)
 	}
-	if sess.Resumes != 1 {
-		t.Fatalf("quality session resumes after continue 1 = %d, want 1", sess.Resumes)
+	if sess.Resumes != 0 {
+		t.Fatalf("quality session resumes after continue 1 = %d, want 0 (answer resumes are free)", sess.Resumes)
 	}
 
 	// The reset already passed, the same way
@@ -640,8 +640,8 @@ func TestContinueCapped_FreeResumeForEveryAsker(t *testing.T) {
 	if err != nil {
 		t.Fatalf("SessionByID: %v", err)
 	}
-	if sessAfter.Resumes != 1 {
-		t.Errorf("quality session resumes after continue 2 = %d, want still 1 (free resume, not charged)", sessAfter.Resumes)
+	if sessAfter.Resumes != 0 {
+		t.Errorf("quality session resumes after continue 2 = %d, want still 0 (answer resumes are free)", sessAfter.Resumes)
 	}
 
 	has, err := s.HasEscalation(t.Context(), ticket.ID, string(response.EscalationOriginCapResumes), qualitySessionID)
