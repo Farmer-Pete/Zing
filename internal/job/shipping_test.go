@@ -19,13 +19,16 @@ package job
 // "passed").
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"reflect"
 	"sort"
+	"strconv"
 	"strings"
 	"testing"
 	"testing/fstest"
@@ -6124,6 +6127,82 @@ func TestBaseModifiedAutoMergeRetries(t *testing.T) {
 	}
 	if shipHasQuestion(commit2) {
 		t.Errorf("commit2.Messages = %+v, want no question", commit2.Messages)
+	}
+}
+
+// TestBaseModifiedAutoMergeRetriesLogs proves the ticket's own "Log the
+// refusal, the retry and the outcome" requirement: the refuse-then-accept
+// flow writes exactly one "merge refused, retrying" record, one "merge
+// retrying" record and one "pr merged" record, each carrying ticket_id,
+// pr and head_sha, and none of them carries GitHub's own refusal text.
+// Not parallel: it calls slog.SetDefault to capture the process-wide
+// default logger.
+func TestBaseModifiedAutoMergeRetriesLogs(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow end-to-end flow; runs in the full suite")
+	}
+	s, ticket, gh, tr := shipPublished(t)
+	local := shipHeadSHA(t, s, ticket)
+	runs, required := shipGreenCI()
+	gh.runs, gh.required = runs, required
+	gh.prState = shipMergeReadyPR(local, "PR_node_base_modified_logs")
+	gh.mergeErr = fmt.Errorf("%w: %s", orchestrator.ErrMergeRefused, shipBaseModifiedGHMessage)
+
+	var buf bytes.Buffer
+	prevDefault := slog.Default()
+	slog.SetDefault(slog.New(slog.NewJSONHandler(&buf, &slog.HandlerOptions{Level: slog.LevelInfo})))
+	t.Cleanup(func() { slog.SetDefault(prevDefault) })
+
+	rule := MergeRule{Auto: true, Method: shipMergeMethodSquash}
+	commit, err := shipPollRunWithRule(t, s, ticket, gh, tr, rule)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	pbApply(t, s, ticket, commit)
+
+	gh.mergeErr = nil
+	if _, err := shipPollRunWithRule(t, s, pbGetTicket(t, s, ticket.ID), gh, tr, rule); err != nil {
+		t.Fatalf("Run (second poll): %v", err)
+	}
+
+	records := map[string][]map[string]any{}
+	dec := json.NewDecoder(&buf)
+	for dec.More() {
+		var rec map[string]any
+		if decErr := dec.Decode(&rec); decErr != nil {
+			t.Fatalf("decode log line: %v", decErr)
+		}
+		if msg, ok := rec["msg"].(string); ok {
+			switch msg {
+			case "merge refused, retrying", "merge retrying", "pr merged":
+				records[msg] = append(records[msg], rec)
+			}
+		}
+		for _, v := range rec {
+			if s, ok := v.(string); ok && strings.Contains(s, "Review and try the merge again") {
+				t.Errorf("log record %+v carries GitHub's own refusal text", rec)
+			}
+		}
+	}
+
+	for _, msg := range []string{"merge refused, retrying", "merge retrying", "pr merged"} {
+		recs := records[msg]
+		if len(recs) != 1 {
+			t.Fatalf("%q records = %d, want exactly 1: %+v", msg, len(recs), recs)
+		}
+		rec := recs[0]
+		if got, want := fmt.Sprint(rec["ticket_id"]), strconv.FormatInt(ticket.ID, 10); got != want {
+			t.Errorf("%q ticket_id = %v, want %v", msg, rec["ticket_id"], want)
+		}
+		if got, want := fmt.Sprint(rec["pr"]), "1"; got != want {
+			t.Errorf("%q pr = %v, want %v", msg, rec["pr"], want)
+		}
+		if got := rec["head_sha"]; got != local {
+			t.Errorf("%q head_sha = %v, want %v", msg, got, local)
+		}
+	}
+	if got := records["merge refused, retrying"][0]["refusal"]; got != "base_modified" {
+		t.Errorf("merge refused, retrying refusal = %v, want base_modified", got)
 	}
 }
 

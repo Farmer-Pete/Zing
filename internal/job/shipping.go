@@ -555,10 +555,14 @@ func newestMergeMarkerKind(markers []store.MessageRow, sha string) string {
 // shipping's own POLL never asks any other kind of question (pollDone,
 // above, resolves every question the same way).
 func withdrawMergeQuestionIfAsked(c store.HandlerCommit, t store.Ticket, mergeMarkers []store.MessageRow, sha string) store.HandlerCommit {
-	switch newestMergeMarkerKind(mergeMarkers, sha) {
-	case "asked", "held", mergeMarkerRetry:
+	kind := newestMergeMarkerKind(mergeMarkers, sha)
+	switch kind {
+	case mergeMarkerAsked, mergeMarkerHeld, mergeMarkerRetry:
 	default:
 		return c
+	}
+	if kind == mergeMarkerRetry {
+		slog.Info("merge retry withdrawn", "ticket_id", t.ID, "head_sha", sha)
 	}
 	c.ResolveAll = true
 	c.Messages = append(c.Messages, store.Message{
@@ -1476,16 +1480,55 @@ func (h shipHandler) mergePreconditionFailed(t store.Ticket, d Deps, sha, reason
 	return c
 }
 
-// mergeGitHubRefused is design section 8.8's own ErrMergeRefused row: the
-// bare informational "merge refused <sha>" marker (no reason line -- the
-// reason goes in the re-asked question's own body instead), then the
-// merge question asked again with "GitHub refused the merge: <GitHub's
-// own message>" as its reason, waiting "merge", and Poll with 8.3's own
-// backoff (the second of design section 8.1's two ClearPoll exceptions:
-// this re-asks). ghErr's own message is read by trimming
-// orchestrator.ErrMergeRefused's own sentinel text off the wrapped
-// error's Error() string, rather than hardcoding it a second time.
-func (h shipHandler) mergeGitHubRefused(t store.Ticket, d Deps, number int, sha string, ghErr error, resolveIDs []int64, fp string) (store.HandlerCommit, error) {
+// mergeGitHubRefused is design section 8.8's own ErrMergeRefused row. A
+// refusal whose message contains mergeBaseModified, on a head with no
+// earlier "merge retry <sha>" marker, is the ticket's own "main moved
+// under the merge" row: it writes "merge refused <sha>" with the fixed
+// reason line, then "merge retry <sha>", and schedules the next poll at
+// least mergeRetryDelay out -- no question. Every other refusal, and a
+// second "Base branch was modified" refusal on a head that already
+// carries a retry marker, asks as it always has: the bare informational
+// "merge refused <sha>" marker (no reason line -- the reason goes in the
+// re-asked question's own body instead), then the merge question asked
+// again with "GitHub refused the merge: <GitHub's own message>" as its
+// reason, waiting "merge", and Poll with 8.3's own backoff (the second of
+// design section 8.1's two ClearPoll exceptions: this re-asks). ghErr's
+// own message is read by trimming orchestrator.ErrMergeRefused's own
+// sentinel text off the wrapped error's Error() string, rather than
+// hardcoding it a second time.
+func (h shipHandler) mergeGitHubRefused(ctx context.Context, t store.Ticket, d Deps, number int, sha string, ghErr error, resolveIDs []int64, fp string) (store.HandlerCommit, error) {
+	refusal := "other"
+	if strings.Contains(ghErr.Error(), mergeBaseModified) {
+		refusal = "base_modified"
+		markers, err := d.Store.MarkersWithPrefix(ctx, t.ID, mergeMarkerPrefix)
+		if err != nil {
+			return store.HandlerCommit{}, fmt.Errorf("job: shipping: merge: merge markers: %w", err)
+		}
+		retried := slices.ContainsFunc(markers, func(m store.MessageRow) bool {
+			firstLine, _, _ := strings.Cut(m.Body, "\n")
+			sub := mergeMarkerLine.FindStringSubmatch(firstLine)
+			if sub == nil {
+				return false
+			}
+			return sub[1] == mergeMarkerRetry && sub[2] == sha
+		})
+		if !retried {
+			// Main moved under the merge: no question; the next POLL,
+			// at least mergeRetryDelay out, base-merges or retries once.
+			next := time.Now().UTC().Truncate(time.Second).Add(mergeRetryDelay + time.Second)
+			c := baseCommit(t, d)
+			c.WithdrawQuestions = resolveIDs
+			c.Messages = []store.Message{
+				{TicketID: t.ID, Type: msgTypeUpdate, Author: authorSystem, Body: "merge refused " + sha + "\n" + mergeBaseModified},
+				{TicketID: t.ID, Type: msgTypeUpdate, Author: authorSystem, Body: "merge " + mergeMarkerRetry + " " + sha},
+			}
+			c.Poll = &store.PollUpdate{NextAt: next, IntervalS: 30, Fingerprint: fp}
+			slog.Info("merge refused, retrying", "ticket_id", t.ID, "pr", number, "head_sha", sha, "refusal", refusal, "retry_at", next)
+			return c, nil
+		}
+	}
+	slog.Info("merge refused, asking the owner", "ticket_id", t.ID, "pr", number, "head_sha", sha, "refusal", refusal)
+
 	reason := "GitHub refused the merge: " + strings.TrimPrefix(ghErr.Error(), orchestrator.ErrMergeRefused.Error()+": ")
 	askMsgs, err := mergeQuestionMessages(t, number, sha, reason)
 	if err != nil {
@@ -1562,35 +1605,7 @@ func (h shipHandler) merge(ctx context.Context, t store.Ticket, d Deps, proj Pro
 
 	if _, mergeErr := proj.PullRequests.Merge(ctx, proj.Owner, proj.Repo, number, sha, d.MergeRule.Method, title); mergeErr != nil {
 		if errors.Is(mergeErr, orchestrator.ErrMergeRefused) {
-			refusal := "other"
-			if strings.Contains(mergeErr.Error(), mergeBaseModified) {
-				refusal = "base_modified"
-				markers, markerErr := d.Store.MarkersWithPrefix(ctx, t.ID, mergeMarkerPrefix)
-				if markerErr != nil {
-					return store.HandlerCommit{}, fmt.Errorf("job: shipping: merge: merge markers: %w", markerErr)
-				}
-				retryLine := "merge " + mergeMarkerRetry + " " + sha
-				retried := slices.ContainsFunc(markers, func(m store.MessageRow) bool {
-					first, _, _ := strings.Cut(m.Body, "\n")
-					return first == retryLine
-				})
-				if !retried {
-					// Main moved under the merge: no question; the next POLL,
-					// at least mergeRetryDelay out, base-merges or retries once.
-					next := time.Now().UTC().Truncate(time.Second).Add(mergeRetryDelay + time.Second)
-					c := baseCommit(t, d)
-					c.WithdrawQuestions = resolveIDs
-					c.Messages = []store.Message{
-						{TicketID: t.ID, Type: msgTypeUpdate, Author: authorSystem, Body: "merge refused " + sha + "\n" + mergeBaseModified},
-						{TicketID: t.ID, Type: msgTypeUpdate, Author: authorSystem, Body: retryLine},
-					}
-					c.Poll = &store.PollUpdate{NextAt: next, IntervalS: 30, Fingerprint: fp}
-					slog.Info("merge refused, retrying", "ticket_id", t.ID, "pr", number, "head_sha", sha, "refusal", refusal, "retry_at", next)
-					return c, nil
-				}
-			}
-			slog.Info("merge refused, asking the owner", "ticket_id", t.ID, "pr", number, "head_sha", sha, "refusal", refusal)
-			return h.mergeGitHubRefused(t, d, number, sha, mergeErr, resolveIDs, fp)
+			return h.mergeGitHubRefused(ctx, t, d, number, sha, mergeErr, resolveIDs, fp)
 		}
 		return store.HandlerCommit{}, fmt.Errorf("job: shipping: merge: %w", mergeErr)
 	}
