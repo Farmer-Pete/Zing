@@ -2072,11 +2072,141 @@ func withHelloAlwaysProject(deps job.Deps, ticket store.Ticket) job.Deps {
 	return deps
 }
 
+// TestBuildAnswerAtCapResumesFree proves #147's own case (answerResume,
+// job.go): a build session already at max_resumes still takes the owner's
+// answer to its own question and resumes, free and uncapped, rather than
+// escalating resumes_exhausted.
+func TestBuildAnswerAtCapResumesFree(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow end-to-end flow; runs in the full suite")
+	}
+	t.Parallel()
+	s, _, ticketID := buildTicketInBuilding(t)
+	ticket := getTicket(t, s, ticketID)
+
+	scriptRT := &scriptedRuntime{t: t, steps: []scriptedStep{
+		questionResult(response.JobBuild, "cap-answer-sess"),
+		buildStep([]string{helloTxt}, nil, "cap-answer-sess"),
+	}}
+	deps := claimForBuild(t, s, scriptRT, ticketID)
+	commit, err := job.Registry()[testStateBuilding].Run(t.Context(), ticket, deps) // RUN: question
+	if err != nil {
+		t.Fatalf("RUN: %v", err)
+	}
+	apply(t, s, ticket, commit)
+
+	maxResumes := deps.Machine.Jobs["build"].MaxResumes
+	sess, _, err := s.LatestSession(t.Context(), ticketID, "build", maxResumes)
+	if err != nil {
+		t.Fatalf("LatestSession: %v", err)
+	}
+	bumpResumesToCap(t, s, ticketID, sess.ID, maxResumes, deps.Owner, deps.Expires)
+
+	sess, state, err := s.LatestSession(t.Context(), ticketID, "build", maxResumes)
+	if err != nil {
+		t.Fatalf("LatestSession: %v", err)
+	}
+	if state != store.SessionExhausted {
+		t.Fatalf("session state = %v, want SessionExhausted", state)
+	}
+
+	q := findOpenQuestionByKind(t, s, ticketID, response.QuestionKindQuestion)
+	if _, draftErr := s.SaveDraft(t.Context(), store.DraftInput{TicketID: ticketID, QuestionID: &q.ID, Text: testAnswerUseSQLite}); draftErr != nil {
+		t.Fatalf("SaveDraft: %v", draftErr)
+	}
+	if _, sendErr := s.SendBatch(t.Context(), ticketID); sendErr != nil {
+		t.Fatalf("SendBatch: %v", sendErr)
+	}
+
+	ticket = getTicket(t, s, ticketID)
+	deps = claimForBuild(t, s, scriptRT, ticketID)
+	resumeCommit, resumeErr := job.Registry()[testStateBuilding].Run(t.Context(), ticket, deps) // resume: answer, at the cap
+	if resumeErr != nil {
+		t.Fatalf("resume: %v", resumeErr)
+	}
+	if resumeCommit.Escalation != nil {
+		t.Fatalf("resumeCommit.Escalation = %+v, want nil (the owner's answer is free)", resumeCommit.Escalation)
+	}
+	if len(resumeCommit.Runs) != 1 {
+		t.Fatalf("resumeCommit.Runs = %+v, want exactly one", resumeCommit.Runs)
+	}
+	if len(resumeCommit.ResolveQuestions) == 0 {
+		t.Error("resumeCommit.ResolveQuestions is empty, want the round resolved")
+	}
+
+	lastReq := scriptRT.reqs[len(scriptRT.reqs)-1]
+	if !strings.Contains(lastReq.Prompt, testAnswerUseSQLite) {
+		t.Errorf("resume prompt = %q, want the owner's own reply text", lastReq.Prompt)
+	}
+	if lastReq.SessionID != "cap-answer-sess" {
+		t.Errorf("resume request SessionID = %q, want %q", lastReq.SessionID, "cap-answer-sess")
+	}
+	apply(t, s, ticket, resumeCommit)
+
+	sess, _, err = s.LatestSession(t.Context(), ticketID, "build", maxResumes)
+	if err != nil {
+		t.Fatalf("LatestSession: %v", err)
+	}
+	if sess.Resumes != maxResumes {
+		t.Errorf("sessions.resumes after the free answer resume = %d, want %d (unchanged)", sess.Resumes, maxResumes)
+	}
+}
+
+// TestBuildAnswerAtCapWithLegacyEscalationWaits proves answerResume's own
+// legacy branch (job.go): a session that already carries a cap_resumes
+// escalation from before this rule existed keeps today's handling, rather
+// than running the owner's answer free.
+func TestBuildAnswerAtCapWithLegacyEscalationWaits(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow end-to-end flow; runs in the full suite")
+	}
+	t.Parallel()
+	s, _, ticketID := buildTicketInBuilding(t)
+	ticket := getTicket(t, s, ticketID)
+
+	scriptRT := &scriptedRuntime{t: t, steps: []scriptedStep{
+		questionResult(response.JobBuild, "legacy-cap-sess"),
+	}}
+	deps := claimForBuild(t, s, scriptRT, ticketID)
+	commit, err := job.Registry()[testStateBuilding].Run(t.Context(), ticket, deps) // RUN: question
+	if err != nil {
+		t.Fatalf("RUN: %v", err)
+	}
+	apply(t, s, ticket, commit)
+
+	maxResumes := deps.Machine.Jobs["build"].MaxResumes
+	sess, _, err := s.LatestSession(t.Context(), ticketID, "build", maxResumes)
+	if err != nil {
+		t.Fatalf("LatestSession: %v", err)
+	}
+	bumpResumesToCap(t, s, ticketID, sess.ID, maxResumes, deps.Owner, deps.Expires)
+
+	q := findOpenQuestionByKind(t, s, ticketID, response.QuestionKindQuestion)
+	if _, draftErr := s.SaveDraft(t.Context(), store.DraftInput{TicketID: ticketID, QuestionID: &q.ID, Text: testAnswerUseSQLite}); draftErr != nil {
+		t.Fatalf("SaveDraft: %v", draftErr)
+	}
+	if _, sendErr := s.SendBatch(t.Context(), ticketID); sendErr != nil {
+		t.Fatalf("SendBatch: %v", sendErr)
+	}
+
+	escalateDirect(t, s, ticketID, nil, &sess.ID, response.EscalationCodeResumesExhausted, response.EscalationOriginCapResumes)
+
+	ticket = getTicket(t, s, ticketID)
+	deps = claimForBuild(t, s, scriptRT, ticketID)
+	_, err = job.Registry()[testStateBuilding].Run(t.Context(), ticket, deps)
+	if !errors.Is(err, job.ErrNoAction) {
+		t.Fatalf("err = %v, want errors.Is(err, job.ErrNoAction)", err)
+	}
+	if len(scriptRT.reqs) != 1 {
+		t.Fatalf("scriptRT.reqs = %d, want exactly one (the first turn only)", len(scriptRT.reqs))
+	}
+}
+
 // TestBuildQuestionWaitsAndResumes proves design section 6.2's round.Job==
 // "build" branch: a build run's own question waits, and the owner's answer
 // resumes that same session with one answer input (answerInputsForRound),
-// charging exactly one resume (design section 4.2's own "a resume is
-// charged in Reserve" rule, task 4).
+// free: an owner's own answer never charges sessions.resumes (answerResume,
+// job.go).
 func TestBuildQuestionWaitsAndResumes(t *testing.T) {
 	if testing.Short() {
 		t.Skip("slow end-to-end flow; runs in the full suite")
@@ -2142,8 +2272,8 @@ func TestBuildQuestionWaitsAndResumes(t *testing.T) {
 	if err != nil {
 		t.Fatalf("LatestSession: %v", err)
 	}
-	if sess.Resumes != 1 {
-		t.Errorf("sessions.resumes after the resume = %d, want 1", sess.Resumes)
+	if sess.Resumes != 0 {
+		t.Errorf("sessions.resumes after the resume = %d, want 0 (answer resumes are free)", sess.Resumes)
 	}
 }
 
@@ -2934,11 +3064,11 @@ func TestBuildInterruptedClaimsResumeBypassesExhaustedCap(t *testing.T) {
 
 // TestBuildAnsweredRoundInterruptedBypassesExhaustedCap proves the same
 // design D5 bypass for resumeBuildRound (section 7.4's answered-round
-// branch): a build session exhausted by its own cancelled, interrupted
-// third answered-round resume still resumes that same round on the next
-// tick, free and uncapped, carrying the owner's own answer plus the
-// interrupted input (design section 7.4: "re-sends its original inputs
-// plus the interrupted input").
+// branch): a build session already exhausted when its own answered round
+// is cancelled, interrupted mid-flight, still resumes that same round on
+// the next tick, free and uncapped, carrying the owner's own answer plus
+// the interrupted input (design section 7.4: "re-sends its original
+// inputs plus the interrupted input").
 func TestBuildAnsweredRoundInterruptedBypassesExhaustedCap(t *testing.T) {
 	if testing.Short() {
 		t.Skip("slow end-to-end flow; runs in the full suite")
@@ -2960,39 +3090,15 @@ func TestBuildAnsweredRoundInterruptedBypassesExhaustedCap(t *testing.T) {
 		t.Fatalf("machine.toml build max_resumes = %d, want 3 (design D15)", maxResumes)
 	}
 
-	// Two answered-round resumes, each itself asking a further question,
-	// bring sessions.resumes to 2, one short of the cap.
-	for i := range maxResumes - 1 {
-		q := findOpenQuestionByKind(t, s, ticketID, response.QuestionKindQuestion)
-		if _, draftErr := s.SaveDraft(t.Context(), store.DraftInput{TicketID: ticketID, QuestionID: &q.ID, Text: testAnswerUseSQLite}); draftErr != nil {
-			t.Fatalf("SaveDraft %d: %v", i+1, draftErr)
-		}
-		if _, sendErr := s.SendBatch(t.Context(), ticketID); sendErr != nil {
-			t.Fatalf("SendBatch %d: %v", i+1, sendErr)
-		}
-
-		scriptRT.steps = append(scriptRT.steps, questionResult(response.JobBuild, "round-cap-sess"))
-		ticket = getTicket(t, s, ticketID)
-		deps = claimForBuild(t, s, scriptRT, ticketID)
-		resumeCommit, resumeErr := job.Registry()[testStateBuilding].Run(t.Context(), ticket, deps) // resume: answer, new question
-		if resumeErr != nil {
-			t.Fatalf("resume %d: %v", i+1, resumeErr)
-		}
-		apply(t, s, ticket, resumeCommit)
-	}
-
 	sess, _, err := s.LatestSession(t.Context(), ticketID, "build", maxResumes)
 	if err != nil {
 		t.Fatalf("LatestSession: %v", err)
 	}
-	if sess.Resumes != maxResumes-1 {
-		t.Fatalf("sessions.resumes before the final resume = %d, want %d", sess.Resumes, maxResumes-1)
-	}
+	bumpResumesToCap(t, s, ticketID, sess.ID, maxResumes, deps.Owner, deps.Expires)
 
-	// The third round's own answer resume is cancelled mid-flight. Reserve
-	// charges its resume regardless (design section 4.2), pushing
-	// sessions.resumes to maxResumes, but the round is never resolved: it
-	// stays answered for the next tick.
+	// The round's own answer resume is cancelled mid-flight, on a session
+	// already at the cap. The round is never resolved: it stays answered
+	// for the next tick.
 	q := findOpenQuestionByKind(t, s, ticketID, response.QuestionKindQuestion)
 	if _, draftErr := s.SaveDraft(t.Context(), store.DraftInput{TicketID: ticketID, QuestionID: &q.ID, Text: testAnswerUseSQLite}); draftErr != nil {
 		t.Fatalf("final SaveDraft: %v", draftErr)
@@ -3024,7 +3130,7 @@ func TestBuildAnsweredRoundInterruptedBypassesExhaustedCap(t *testing.T) {
 		t.Fatalf("LatestSession: %v", err)
 	}
 	if sess.Resumes != maxResumes {
-		t.Fatalf("sessions.resumes after the interrupted resume = %d, want %d (charged at Reserve)", sess.Resumes, maxResumes)
+		t.Fatalf("sessions.resumes after the interrupted resume = %d, want %d (unchanged: answer resumes are free)", sess.Resumes, maxResumes)
 	}
 	if state != store.SessionExhausted {
 		t.Fatalf("session state = %v, want SessionExhausted", state)

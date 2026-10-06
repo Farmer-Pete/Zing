@@ -679,28 +679,22 @@ func (h buildingHandler) resumeBuildRound(ctx context.Context, t store.Ticket, d
 		return store.HandlerCommit{}, false, fmt.Errorf("job: building: answered round: session by id: %w", err)
 	}
 
-	// resumeCharge (job.go, design D5, section 7.4): an interrupted latest
-	// run resumes this round free and bypasses the exhausted-cap escalation
-	// below, even on a session already at max_resumes.
+	// answerResume (job.go): the owner's answer resumes this round free and
+	// bypasses the exhausted-cap escalation, even on a session already at
+	// max_resumes, unless that session already carries its cap_resumes
+	// escalation from before this rule existed.
 	newestRun, foundRun, newestErr := d.Store.SessionNewestRun(ctx, sess.ID)
 	if newestErr != nil {
 		return store.HandlerCommit{}, false, fmt.Errorf("job: building: answered round: newest run: %w", newestErr)
 	}
-	bump, gate := true, true
-	if foundRun {
-		bump, gate = resumeCharge(newestRun)
-	}
 
-	if state == store.SessionExhausted && gate {
-		has, hasErr := d.Store.HasEscalation(ctx, t.ID, string(response.EscalationOriginCapResumes), sess.ID)
-		if hasErr != nil {
-			return store.HandlerCommit{}, false, fmt.Errorf("job: building: answered round: has escalation: %w", hasErr)
-		}
-		if has {
-			slog.Debug("building entry decision", "ticket_id", t.ID, "step", "build_round_capped_again", "session_state", sessionStateName(state))
-			return store.HandlerCommit{}, true, nil
-		}
-		return buildCapResumesEscalation(t, d, sess.ID), false, nil
+	capped, capErr := answerResume(ctx, t, d, sess, state, round)
+	if capErr != nil {
+		return store.HandlerCommit{}, false, capErr
+	}
+	if capped {
+		slog.Debug("building entry decision", "ticket_id", t.ID, "step", "build_round_capped_again", "session_state", sessionStateName(state))
+		return store.HandlerCommit{}, true, nil
 	}
 
 	_, wt, escalation, err := ensureUnitWorktreeFor(ctx, t, d, u)
@@ -719,7 +713,7 @@ func (h buildingHandler) resumeBuildRound(ctx context.Context, t store.Ticket, d
 		answers = append(answers, prompt.NamedInput{Label: labelInterrupted, Text: interruptedResumeText, Untrusted: false})
 	}
 
-	runCommit, runErr := h.runBuildResume(ctx, t, d, wt, u, sess, 0, questionIDs(round), answers, bump)
+	runCommit, runErr := h.runBuildResume(ctx, t, d, wt, u, sess, 0, questionIDs(round), answers, false)
 	result, resultErr := withBranchResult(runCommit, runErr, wt)
 	return result, false, resultErr
 }
