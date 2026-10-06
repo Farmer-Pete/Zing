@@ -879,8 +879,12 @@ func replanUnsupportedEscalation(t store.Ticket, d Deps, resolveIDs []int64, ori
 // CommitHandlerResult applies the same edit to the stored plan, even an
 // escalation before runFirst ever runs -- except the no-stored-plan
 // escalation just below, whose commit must not carry a grant at all:
-// grantPlanFilesTx has no plan row to apply it to there, and a commit it
-// refuses can never land (review r1f3).
+// grantPlanFilesTx has no plan row to apply it to there, and the whole
+// commit would otherwise roll back over a grant nothing can apply. A
+// grant is also dropped, and the pick behaves as a plain Retry, when the
+// unit in flight no longer matches it: the ticket is unclaimed between
+// the escalation and the owner's pick, so an owner_edit can renumber or
+// drop tasks in between (review r2f3).
 func (h buildingHandler) retryFreshRun(ctx context.Context, t store.Ticket, d Deps, resolveIDs []int64, notes, errorText string, grant *response.FileGrant) (store.HandlerCommit, error) {
 	plan, _, ok, err := d.Store.StoredPlan(ctx, t.ID)
 	if err != nil {
@@ -888,9 +892,6 @@ func (h buildingHandler) retryFreshRun(ctx context.Context, t store.Ticket, d De
 	}
 	if !ok {
 		return buildEscalation(t, d, noStoredPlanWhat, noStoredPlanWhy, ""), nil
-	}
-	if grant != nil {
-		plan, _ = response.GrantFileTasks(plan, *grant)
 	}
 	reports, err := d.Store.BuildReports(ctx, t.ID)
 	if err != nil {
@@ -902,6 +903,13 @@ func (h buildingHandler) retryFreshRun(ctx context.Context, t store.Ticket, d De
 	}
 	if !hasUnit {
 		return store.HandlerCommit{}, fmt.Errorf("job: building: escalation retry: ticket %d: no unit in flight", t.ID)
+	}
+	if grant != nil && (grant.Task != u.TaskN || grant.Task > len(response.Tasks(plan))) {
+		slog.WarnContext(ctx, "file grant no longer applies to the unit in flight", "ticket_id", t.ID, "grant_task", grant.Task, "unit_task_n", u.TaskN)
+		grant = nil
+	}
+	if grant != nil {
+		plan, _ = response.GrantFileTasks(plan, *grant)
 	}
 	if u.FixRequestID != nil {
 		return h.retryFreshFixRun(ctx, t, d, plan, resolveIDs, notes, errorText)

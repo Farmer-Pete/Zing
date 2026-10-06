@@ -683,9 +683,8 @@ func fileGrantEscalatedTicket(t *testing.T) (*store.Store, int64, store.MessageR
 	if err != nil {
 		t.Fatalf("CHECK: %v", err)
 	}
-	wantLine := testForeignLineGreet
-	if len(checkCommit.Messages) != 1 || !strings.Contains(checkCommit.Messages[0].Body, wantLine) {
-		t.Fatalf("CHECK commit.Messages = %+v, want it to contain %q", checkCommit.Messages, wantLine)
+	if len(checkCommit.Messages) != 1 || !strings.Contains(checkCommit.Messages[0].Body, testForeignLineGreet) {
+		t.Fatalf("CHECK commit.Messages = %+v, want it to contain %q", checkCommit.Messages, testForeignLineGreet)
 	}
 	apply(t, s, ticket, checkCommit)
 
@@ -914,9 +913,8 @@ func TestFileGrant_NewestMarkerOfSessionWinsOverOlderForeignLine(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CHECK: %v", err)
 	}
-	wantLine := testForeignLineGreet
-	if len(checkCommit.Messages) != 1 || !strings.Contains(checkCommit.Messages[0].Body, wantLine) {
-		t.Fatalf("CHECK commit.Messages = %+v, want it to contain %q", checkCommit.Messages, wantLine)
+	if len(checkCommit.Messages) != 1 || !strings.Contains(checkCommit.Messages[0].Body, testForeignLineGreet) {
+		t.Fatalf("CHECK commit.Messages = %+v, want it to contain %q", checkCommit.Messages, testForeignLineGreet)
 	}
 	apply(t, s, ticket, checkCommit)
 
@@ -949,7 +947,7 @@ func TestFileGrant_NewestMarkerOfSessionWinsOverOlderForeignLine(t *testing.T) {
 	// entirely: it must be skipped, falling through to the in-session
 	// marker above, not the real CHECK marker further back.
 	outsideRunID, _ := reserveTerminalRun(t, s, ticketID, string(response.JobBuild), false)
-	insertUpdateMarker(t, s, ticketID, fmt.Sprintf("claim errors pending run %d\n%s", outsideRunID, wantLine))
+	insertUpdateMarker(t, s, ticketID, fmt.Sprintf("claim errors pending run %d\n%s", outsideRunID, testForeignLineGreet))
 
 	resumeRT := &scriptedRuntime{t: t, steps: []scriptedStep{planGapErrorStep("newest-marker-sess")}}
 	ticket = getTicket(t, s, ticketID)
@@ -958,11 +956,81 @@ func TestFileGrant_NewestMarkerOfSessionWinsOverOlderForeignLine(t *testing.T) {
 	if err != nil {
 		t.Fatalf("resume: %v", err)
 	}
+	if len(resumeRT.reqs) != 1 {
+		t.Fatalf("resumeRT.reqs = %d, want 1 (its scripted step must have run)", len(resumeRT.reqs))
+	}
 	if escCommit.Escalation == nil {
 		t.Fatal("commit.Escalation = nil, want an escalation")
 	}
-	if escCommit.Escalation.Payload.Grant != nil {
-		t.Errorf("commit.Escalation.Payload.Grant = %+v, want nil (the newest in-session marker has no foreign line)", escCommit.Escalation.Payload.Grant)
+	payload := escCommit.Escalation.Payload
+	if payload.Origin != string(response.EscalationOriginBuild) {
+		t.Errorf("commit.Escalation.Payload.Origin = %q, want %q", payload.Origin, response.EscalationOriginBuild)
+	}
+	if payload.Code != "plan_gap" {
+		t.Errorf("commit.Escalation.Payload.Code = %q, want %q", payload.Code, "plan_gap")
+	}
+	if payload.SessionID == nil || *payload.SessionID != sessionID {
+		t.Errorf("commit.Escalation.Payload.SessionID = %v, want %d", payload.SessionID, sessionID)
+	}
+	if payload.Grant != nil {
+		t.Errorf("commit.Escalation.Payload.Grant = %+v, want nil (the newest in-session marker has no foreign line)", payload.Grant)
+	}
+}
+
+// TestFileGrant_OutOfSessionMarkerAloneIsIgnored is
+// TestFileGrant_NewestMarkerOfSessionWinsOverOlderForeignLine's control: with
+// no newer in-session marker to shadow it, a newer marker naming a run
+// outside the escalated session is still skipped, so attachFileGrant falls
+// through to the real CHECK marker further back and still builds a Grant
+// from its foreign line. This shows the walk actually consults session
+// membership, not just marker recency: with attachFileGrant's session
+// filter removed, this test would instead see Grant built from the
+// out-of-session marker, which happens to match here too, so the sibling
+// test's nil is this test's non-nil, not the other way around.
+func TestFileGrant_OutOfSessionMarkerAloneIsIgnored(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow end-to-end flow; runs in the full suite")
+	}
+	t.Parallel()
+	s, _, ticketID := buildTicketInBuilding(t)
+	ticket := getTicket(t, s, ticketID)
+
+	scriptRT := &scriptedRuntime{t: t, steps: []scriptedStep{buildStep([]string{helloTxt, greetGo}, nil, "out-of-session-sess")}}
+	deps := withGreetAndHelloProject(claimForBuild(t, s, scriptRT, ticketID), ticket)
+	commit, err := job.Registry()[testStateBuilding].Run(t.Context(), ticket, deps) // RUN: claims hello.txt, greet.go
+	if err != nil {
+		t.Fatalf("RUN: %v", err)
+	}
+	apply(t, s, ticket, commit)
+
+	ticket = getTicket(t, s, ticketID)
+	deps2 := withGreetAndHelloProject(claimForBuild(t, s, scriptRT, ticketID), ticket)
+	checkCommit, err := job.Registry()[testStateBuilding].Run(t.Context(), ticket, deps2) // CHECK: the real foreign-line marker
+	if err != nil {
+		t.Fatalf("CHECK: %v", err)
+	}
+	if len(checkCommit.Messages) != 1 || !strings.Contains(checkCommit.Messages[0].Body, testForeignLineGreet) {
+		t.Fatalf("CHECK commit.Messages = %+v, want it to contain %q", checkCommit.Messages, testForeignLineGreet)
+	}
+	apply(t, s, ticket, checkCommit)
+
+	// A newer marker naming a run outside the escalated session, with its
+	// own distinct foreign line (a different path than the real marker's
+	// greet.go): if attachFileGrant's session filter let this through, the
+	// resulting Grant would name other.go, not greet.go.
+	const outOfSessionForeignLine = "claims/files_changed: other.go belongs to task 2, not task 1"
+	outsideRunID, _ := reserveTerminalRun(t, s, ticketID, string(response.JobBuild), false)
+	insertUpdateMarker(t, s, ticketID, fmt.Sprintf("claim errors pending run %d\n%s", outsideRunID, outOfSessionForeignLine))
+
+	resumeRT := &scriptedRuntime{t: t, steps: []scriptedStep{planGapErrorStep("out-of-session-sess")}}
+	ticket = getTicket(t, s, ticketID)
+	deps3 := claimForBuild(t, s, resumeRT, ticketID)
+	escCommit, err := job.Registry()[testStateBuilding].Run(t.Context(), ticket, deps3) // resume: error outcome plan_gap
+	if err != nil {
+		t.Fatalf("resume: %v", err)
+	}
+	if !reflect.DeepEqual(escCommit.Escalation.Payload.Grant, wantFileGrantGreet) {
+		t.Errorf("commit.Escalation.Payload.Grant = %+v, want %+v (the real CHECK marker, since the only newer marker belongs to a different session)", escCommit.Escalation.Payload.Grant, wantFileGrantGreet)
 	}
 }
 
@@ -995,9 +1063,8 @@ func TestFileGrant_CapResumesOriginAlsoOffersOption(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CHECK: %v", err)
 	}
-	wantLine := testForeignLineGreet
-	if len(checkCommit.Messages) != 1 || !strings.Contains(checkCommit.Messages[0].Body, wantLine) {
-		t.Fatalf("CHECK commit.Messages = %+v, want it to contain %q", checkCommit.Messages, wantLine)
+	if len(checkCommit.Messages) != 1 || !strings.Contains(checkCommit.Messages[0].Body, testForeignLineGreet) {
+		t.Fatalf("CHECK commit.Messages = %+v, want it to contain %q", checkCommit.Messages, testForeignLineGreet)
 	}
 	apply(t, s, ticket, checkCommit)
 

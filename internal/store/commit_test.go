@@ -3753,6 +3753,37 @@ func TestCommitHandlerResult_GrantFilesUpdatesPlanAndAudits(t *testing.T) {
 	}
 }
 
+// TestCommitHandlerResult_GrantFilesNoPlanRefusesCommit proves
+// grantPlanFilesTx's own load failure branch: a commit whose GrantFiles
+// names a ticket with no plan artifact at all errors (sql.ErrNoRows is
+// not special-cased), and the whole commit rolls back, writing neither an
+// artifact nor an owner_edit event.
+func TestCommitHandlerResult_GrantFilesNoPlanRefusesCommit(t *testing.T) {
+	t.Parallel()
+	s := newTestStore(t)
+	ctx := t.Context()
+	_, ticketID := seedQueuedTicket(t, s, "1")
+	setTicketState(t, s, ticketID, testStateBuilding)
+
+	owner, expires := claimForCommit(t, s, ticketID)
+	_, err := s.CommitHandlerResult(ctx, HandlerCommit{
+		TicketID: ticketID, Owner: owner, Expires: expires,
+		GrantFiles: &response.FileGrant{Task: 2, Paths: []string{testRefAGo}},
+	})
+	if err == nil {
+		t.Fatal("CommitHandlerResult: err = nil, want error (no plan artifact)")
+	}
+	if !strings.Contains(err.Error(), "grant plan files") {
+		t.Errorf("err = %q, want it to name grant plan files", err.Error())
+	}
+	if n := countPlanArtifacts(t, s, ticketID); n != 0 {
+		t.Errorf("plan artifacts = %d, want 0", n)
+	}
+	if got := ownerEditEvents(t, s, ticketID); len(got) != 0 {
+		t.Errorf("owner_edit events = %d, want 0 (the rollback wrote none)", len(got))
+	}
+}
+
 // TestCommitHandlerResult_TrackerEffectDoesNotChangeTheTransactionsWrites
 // proves TrackerEffect is carried, never applied, by CommitHandlerResult
 // (design D12): a commit with and without an identical TrackerEffect writes

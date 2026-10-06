@@ -220,7 +220,8 @@ func checkOwnerEditShape(req OwnerEditRequest) *OwnerEditError {
 		return ownerEditErr(OwnerEditCodeBadRequest, "an edit must set at least one field")
 	}
 
-	if req.Target == OwnerEditPlanFile && req.Tasks != nil && !planFileTasksPattern.MatchString(*req.Tasks) {
+	badTasks := req.Tasks != nil && !planFileTasksPattern.MatchString(*req.Tasks)
+	if req.Target == OwnerEditPlanFile && badTasks {
 		return ownerEditErr(OwnerEditCodeBadRequest, "tasks must be task numbers separated by single spaces, such as 2 6")
 	}
 
@@ -602,10 +603,9 @@ func (s *Store) editPlanFileTx(ctx context.Context, tx *sql.Tx, req OwnerEditReq
 func normalizeTaskList(s string) string {
 	var nums []int
 	for field := range strings.FieldsSeq(s) {
-		n, err := strconv.Atoi(field)
-		if err != nil {
-			continue
-		}
+		// checkOwnerEditShape has already matched s against
+		// planFileTasksPattern, so the error is unreachable here.
+		n, _ := strconv.Atoi(field) //nolint:errcheck // unreachable, see above
 		nums = append(nums, n)
 	}
 	return response.FormatTaskList(nums)
@@ -616,23 +616,21 @@ func normalizeTaskList(s string) string {
 // (plan #51). It needs no claim guard: CommitHandlerResult's own fenced
 // UPDATE, at the end of the same transaction, is what proves the handler
 // still holds the claim. It writes no event and no UPDATE when
-// GrantFileTasks reports no change, or when the ticket has no plan at all
-// (sql.ErrNoRows): a commit's GrantFiles must never refuse an otherwise
-// valid commit over a grant that no longer applies.
+// GrantFileTasks reports no change. Any load failure, including the
+// ticket having no plan at all (sql.ErrNoRows), is an error: callers that
+// set GrantFiles have just read a stored plan themselves, so a missing
+// plan row here means something is wrong, and the whole commit rolls
+// back rather than silently drop the grant.
 func (s *Store) grantPlanFilesTx(ctx context.Context, tx *sql.Tx, ticketID int64, g response.FileGrant) error {
 	var id int64
 	var payload []byte
-	err := tx.QueryRowContext(ctx,
+	if err := tx.QueryRowContext(ctx,
 		`SELECT id, payload FROM artifacts WHERE ticket_id = ? AND type = 'plan' ORDER BY version DESC LIMIT 1`,
-		ticketID).Scan(&id, &payload)
-	switch {
-	case errors.Is(err, sql.ErrNoRows):
-		return nil
-	case err != nil:
+		ticketID).Scan(&id, &payload); err != nil {
 		return fmt.Errorf("grant plan files: load plan: %w", err)
 	}
 	var plan response.Plan
-	if err = json.Unmarshal(payload, &plan); err != nil {
+	if err := json.Unmarshal(payload, &plan); err != nil {
 		return fmt.Errorf("grant plan files: unmarshal plan: %w", err)
 	}
 	granted, changes := response.GrantFileTasks(plan, g)
@@ -659,7 +657,9 @@ func (s *Store) grantPlanFilesTx(ctx context.Context, tx *sql.Tx, ticketID int64
 			return err
 		}
 	}
-	slog.InfoContext(ctx, "file grant applied", "ticket_id", ticketID, "task_n", g.Task, "paths", g.Paths, "changed", len(changes))
+	// Logged before tx.Commit runs: this only says the grant was staged
+	// in this transaction, not that it landed.
+	slog.DebugContext(ctx, "file grant staged", "ticket_id", ticketID, "task_n", g.Task, "paths", g.Paths, "changed", len(changes))
 	return nil
 }
 

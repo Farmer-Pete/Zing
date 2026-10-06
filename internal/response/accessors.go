@@ -82,16 +82,12 @@ func GrantFileTasks(p Plan, g FileGrant) (Plan, []FileTaskChange) {
 	var changes []FileTaskChange
 	for i, f := range files {
 		nums := FileTasks(f)
-		named := slices.Contains(g.Paths, f.Path)
-		mapped := len(nums) > 0
-		has := slices.Contains(nums, g.Task)
-		if !named || !mapped || has {
+		if !slices.Contains(g.Paths, f.Path) || len(nums) == 0 || slices.Contains(nums, g.Task) {
 			continue
 		}
-		old := f.Task
 		files[i].Task = FormatTaskList(append(nums, g.Task))
 		if !slices.ContainsFunc(changes, func(c FileTaskChange) bool { return c.Path == f.Path }) {
-			changes = append(changes, FileTaskChange{Path: f.Path, Old: old, New: files[i].Task})
+			changes = append(changes, FileTaskChange{Path: f.Path, Old: f.Task, New: files[i].Task})
 		}
 	}
 	out.Delivery.Files = files

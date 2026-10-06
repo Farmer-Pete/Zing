@@ -130,8 +130,10 @@ func TestOwnerEditControls_FileTasksWhenEditable(t *testing.T) {
 				t.Errorf("want a box with data-ref=%q; got:\n%s", f.Path, got)
 			}
 		}
-		if !strings.Contains(got, `data-field="tasks" value="1"`) {
-			t.Errorf(`want an input data-field="tasks" value="1"; got:\n%s`, got)
+		for _, f := range files {
+			if !strings.Contains(got, `data-field="tasks" value="`+f.Task+`"`) {
+				t.Errorf(`want an input data-field="tasks" value=%q; got:\n%s`, f.Task, got)
+			}
 		}
 	})
 
