@@ -1,9 +1,12 @@
 // basesync_test.go tests task 3: baseSync's own review point
 // (reviewingHandler.enterRound), wired through the post-build prelude's own
-// new driveOpenMerge call. It reuses reviewing_test.go's own
-// reviewTicketReady and reviewScriptsFS, and merge_test.go's own
-// mergeCommitOnMain and shipHasMergeLanded, all package job. Task 5 adds the
-// CI point (shipHandler.pollCIFailed), reusing shipping_test.go's own
+// call to shipHandler.driveOpenMerge in every post-build state. It reuses
+// reviewing_test.go's own reviewTicketReady and reviewScriptsFS, and
+// merge_test.go's own mergeCommitOnMain and shipHasMergeLanded, all package
+// job. Task 4 adds the judge point (judgeStartOrSync, at both its round 1
+// and failed-round call sites), reusing judging_test.go's own
+// judgeTicketReady and judgeFailRoundOne. Task 5 adds the CI point
+// (shipHandler.pollCIFailed), reusing shipping_test.go's own
 // shipTicketReady, shipGitHub, shipTracker, shipFailedCI and shipHeadSHA,
 // and merge_test.go's own shipClaim and mergeRunTick.
 package job
@@ -64,8 +67,8 @@ func basesyncTicketWorktree(t *testing.T, s *store.Store, ticket store.Ticket) (
 }
 
 // basesyncNoticePrefix is the start of every syncNotice's own review line
-// (basesync.go), named once so the three tests below never repeat the
-// literal.
+// (basesync.go), named once so TestBaseSyncBeforeReviewMergesOverlap never
+// repeats the literal.
 const basesyncNoticePrefix = "Merging " + pbFixtureDefaultBranch + " at"
 
 // basesyncFindMessage returns the first of c.Messages whose Body has

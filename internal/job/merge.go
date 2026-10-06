@@ -195,14 +195,6 @@ func mergeEscalationCode(t store.Ticket, d Deps, req baseMergeRequest, code, wha
 	return c
 }
 
-// driveOpenMerge is postBuildPrelude's own entry point into the merge unit:
-// a package-level wrapper so reviewing's and judging's own preludes don't
-// need to build a shipHandler just to reach shipHandler.driveOpenMerge,
-// which belongs to every post-build state now, not only shipping's.
-func driveOpenMerge(ctx context.Context, t store.Ticket, d Deps) (c store.HandlerCommit, merging bool, err error) {
-	return shipHandler{}.driveOpenMerge(ctx, t, d)
-}
-
 // driveOpenMerge runs one merge-unit step when a request is open; merging
 // is false, with nothing done, when none is (postBuildPrelude, basesync.go
 // task 3, calls this in every post-build state, right after its own open

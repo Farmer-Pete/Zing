@@ -23,7 +23,7 @@ import (
 // appears once: a commit sha, the one required-check context most cases
 // use, a second check name (not "lint" -- building.go's own check command
 // already carries that name), two commit-status contexts, and a two-line
-// text used both as a log tail and as retry notes.
+// retry-notes text used by TestBaseMergeRequestPointRoundTrip.
 const (
 	ciSHA           = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
 	testRequiredCI  = "ci"
@@ -441,7 +441,7 @@ func TestCILogText(t *testing.T) {
 			}
 			switch jobID {
 			case 111:
-				return testTwoLineText, nil
+				return "line one\nline two", nil
 			case 222:
 				return "", errors.New("signed url expired")
 			default:
@@ -670,7 +670,7 @@ func TestParseBaseMergeRequest(t *testing.T) {
 		}
 	})
 
-	retry := baseMergeRequest{MessageID: 9, AfterRunID: 4, BaseBranch: pbFixtureDefaultBranch, BaseSHA: strings.Repeat("b", 40), RetryOf: 7, Notes: testTwoLineText}
+	retry := baseMergeRequest{MessageID: 9, AfterRunID: 4, BaseBranch: pbFixtureDefaultBranch, BaseSHA: strings.Repeat("b", 40), RetryOf: 7, Notes: "line one\nline two"}
 	t.Run("retry request round-trips", func(t *testing.T) {
 		t.Parallel()
 		row := store.MessageRow{ID: retry.MessageID, Message: store.Message{Body: retry.body()}} //nolint:modernize // keyed on purpose: MessageRow's ID and CreatedAt fields precede the embedded Message, so the key cannot be dropped
