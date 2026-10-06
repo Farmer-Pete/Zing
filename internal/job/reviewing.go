@@ -358,8 +358,10 @@ const fixRequestedFindingsPrefix = "fix requested findings after run "
 // fixreq is FIXREQ (design section 6.8) entered from enterFromDone: under
 // jobs.review.max_loops it opens a fix request with accepted's own fix
 // text. At the gate, an accepted list wholly at or below the floor moves on
-// to judging (acceptAtCap, issue #68); one where the owner accepted an
-// above-floor finding escalates loops_exhausted as before.
+// to judging (acceptAtCap, issue #68); otherwise an accepted row the owner
+// picked (OwnerPicked) opens the fix request anyway, bypassing the gate,
+// because the review question already asked the owner this once; otherwise
+// the gate escalates loops_exhausted as before.
 func (h reviewingHandler) fixreq(ctx context.Context, t store.Ticket, d Deps, accepted []response.FindingArtifact) (store.HandlerCommit, error) {
 	msg, k, maxLoops, err := fixRequestOrLoopsExhausted(ctx, t, d, accepted)
 	if err != nil {
@@ -368,6 +370,26 @@ func (h reviewingHandler) fixreq(ctx context.Context, t store.Ticket, d Deps, ac
 	if msg == nil {
 		if allAtOrBelowFloor(accepted, d.Floor) {
 			return acceptAtCap(baseCommit(t, d), t, d, k, maxLoops, accepted), nil
+		}
+		if slices.ContainsFunc(accepted, func(f response.FindingArtifact) bool { return f.OwnerPicked }) {
+			maxRunID, runErr := d.Store.MaxRunID(ctx, t.ID)
+			if runErr != nil {
+				return store.HandlerCommit{}, fmt.Errorf("job: reviewing: owner accept at cap: max run id: %w", runErr)
+			}
+			m, msgErr := fixRequestMessage(t, FixKindFindings, renderFixFindings(accepted), maxRunID)
+			if msgErr != nil {
+				return store.HandlerCommit{}, fmt.Errorf("job: reviewing: owner accept at cap: fix request message: %w", msgErr)
+			}
+			sorted := sortByID(accepted)
+			ids := make([]string, len(sorted))
+			for i := range sorted {
+				ids[i] = sorted[i].ID
+			}
+			slog.Info("review owner accept past loop cap starts fix", "ticket_id", t.ID, "fix_runs", k, "max_loops", maxLoops,
+				"after_run_id", maxRunID, "finding_ids", strings.Join(ids, ","))
+			c := baseCommit(t, d)
+			c.Messages = []store.Message{m}
+			return c, nil
 		}
 		what := fmt.Sprintf("review findings remain after %d fix runs", k)
 		why := fmt.Sprintf("max_loops for review is %d", maxLoops)
@@ -424,12 +446,14 @@ func replyTexts(replies []store.MessageRow) []string {
 // own "newest question kind review" branch, once the owner has answered the
 // review question (6.4). It stores one new finding row per item, carrying
 // the owner's own decision or the safe default accept (a missing or
-// out-of-set decision, logged at warn), writes one "review note <id>"
-// marker per discussed item (D24: the owner's reply on the question applies
-// to every finding discussed in that answer), and resolves the round's own
-// question. No state transition and no new Waiting (baseCommit's own nil
-// clears it): the next tick's decision tree step (2) or (3) routes the
-// ticket on from the decisions this commit just stored.
+// out-of-set decision, logged at warn); the row's own OwnerPicked is true
+// only for the owner's own valid decision, never for the defaulted accept.
+// It also writes one "review note <id>" marker per discussed item (D24: the
+// owner's reply on the question applies to every finding discussed in that
+// answer), and resolves the round's own question. No state transition and
+// no new Waiting (baseCommit's own nil clears it): the next tick's decision
+// tree step (2) or (3) routes the ticket on from the decisions this commit
+// just stored.
 func (h reviewingHandler) triage(ctx context.Context, t store.Ticket, d Deps, round store.Round) (store.HandlerCommit, error) {
 	if len(round.Questions) != 1 {
 		return store.HandlerCommit{}, fmt.Errorf("job: reviewing: triage: review round carries %d questions, want 1", len(round.Questions))
@@ -464,6 +488,7 @@ func (h reviewingHandler) triage(ctx context.Context, t store.Ticket, d Deps, ro
 
 		finding := row.Finding
 		finding.Decision = &fd
+		finding.OwnerPicked = validDecision
 		payload, marshalErr := json.Marshal(finding)
 		if marshalErr != nil {
 			return store.HandlerCommit{}, fmt.Errorf("job: reviewing: triage: marshal finding %s: %w", finding.ID, marshalErr)
