@@ -16,6 +16,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/a-h/templ"
 
@@ -107,7 +108,16 @@ func (c *console) navComponent(ctx context.Context, open int64) (templ.Component
 		ids[i] = items[i].Ticket.ID
 	}
 	slog.DebugContext(ctx, "console: nav live tickets", "count", len(items), "ticket_ids", ids)
-	return templates.Nav(projects, buildNavThreads(items), c.sandboxReason, open), nil
+	now := time.Now()
+	until, held, err := c.store.ClaudeHold(ctx)
+	if err != nil {
+		return nil, err
+	}
+	claudeHold := ""
+	if held && until.After(now) {
+		claudeHold = clockLabel(until)
+	}
+	return templates.Nav(projects, buildNavThreads(items, now), c.sandboxReason, claudeHold, open), nil
 }
 
 // terminalStates is the machine's terminal state list for InboxItems
@@ -133,8 +143,10 @@ func (c *console) stateOrder() []string {
 }
 
 // buildNavThreads turns LiveTickets into #nav's rows, preserving their
-// issue-number order (design section 6.3, 6.8, #106 bug 5).
-func buildNavThreads(items []store.LiveTicket) []templates.NavThread {
+// issue-number order (design section 6.3, 6.8, #106 bug 5). now is
+// compared against each item's ParkedUntil (#45): a past value is that
+// ticket's own parked history, not a reason to show the badge again.
+func buildNavThreads(items []store.LiveTicket, now time.Time) []templates.NavThread {
 	out := make([]templates.NavThread, 0, len(items))
 	for i := range items {
 		th := templates.NavThread{
@@ -146,9 +158,19 @@ func buildNavThreads(items []store.LiveTicket) []templates.NavThread {
 			th.Blocking = true
 			th.WaitingOn = *items[i].Ticket.WaitingOn
 		}
+		if items[i].ParkedUntil != nil && items[i].ParkedUntil.After(now) {
+			th.ParkedUntil = clockLabel(*items[i].ParkedUntil)
+		}
 		out = append(out, th)
 	}
 	return out
+}
+
+// clockLabel formats t in time.Local as "3:04pm" (#45): the sidebar's own
+// parked-badge and claude-hold clock, matching store.parkedMarkerBody's own
+// clock format in the thread.
+func clockLabel(t time.Time) string {
+	return t.In(time.Local).Format("3:04pm")
 }
 
 // projectSections splits one project's tickets, already in issue-number
@@ -196,6 +218,16 @@ func (c *console) mainComponent(ctx context.Context, view string, open, project 
 		}
 		return templates.Feed(rows), nil
 	case viewProject:
+		if project == 0 {
+			projects, err := c.store.ListProjects(ctx)
+			if err != nil {
+				return nil, err
+			}
+			if len(projects) > 0 {
+				project = projects[0].ID
+			}
+			slog.DebugContext(ctx, "console: project view defaulted", "project_id", project)
+		}
 		tickets, err := c.store.TicketsByProject(ctx, project)
 		if err != nil {
 			return nil, err
@@ -719,6 +751,7 @@ const (
 	updateMarkerJudgeCoverageFailedPrefix      = "judge coverage failed run "
 	updateMarkerJudgeCoverageDeliveredPrefix   = "judge coverage delivered run "
 	updateMarkerJudgeCheckPrefix               = "judge check "
+	updateMarkerJudgeHostPrefix                = "judge host "
 	updateMarkerPrOpenedPrefix                 = "pr opened "
 	updateMarkerCIWaitingPrefix                = "ci waiting "
 	updateMarkerReviewersReRequestedPrefix     = "reviewers re-requested "
@@ -728,6 +761,7 @@ const (
 	updateMarkerMergeAskedPrefix               = "merge asked "
 	updateMarkerMergeHeldPrefix                = "merge held "
 	updateMarkerMergeWithdrawnPrefix           = "merge withdrawn "
+	updateMarkerMergeRetryPrefix               = "merge retry "
 	updateMarkerMergeRefusedPrefix             = "merge refused "
 	updateMarkerPrMergedPrefix                 = "pr merged "
 	updateMarkerRespondBatchPrefix             = "respond batch "
@@ -2052,24 +2086,28 @@ func sha7(sha string) string {
 }
 
 // isJudgeMarker reports whether body carries one of judging.go's own
-// "judge round ", "judge coverage failed/delivered run ", or "judge check "
-// prefixes (design section 5.1, 7.1, 7.2, 7.5-7.7): judgeUpdateLine's own
-// exact-shape parse runs behind, the same two-step prefix-then-parse
-// pattern isReviewMarker and reviewUpdateLine already use.
+// "judge round ", "judge coverage failed/delivered run ", "judge check ", or
+// "judge host " prefixes (design section 5.1, 7.1, 7.2, 7.5-7.7; host
+// scenario kind, #137): judgeUpdateLine's own exact-shape parse runs behind,
+// the same two-step prefix-then-parse pattern isReviewMarker and
+// reviewUpdateLine already use.
 func isJudgeMarker(body string) bool {
 	return strings.HasPrefix(body, updateMarkerJudgeRoundPrefix) ||
 		strings.HasPrefix(body, updateMarkerJudgeCoverageFailedPrefix) ||
 		strings.HasPrefix(body, updateMarkerJudgeCoverageDeliveredPrefix) ||
-		strings.HasPrefix(body, updateMarkerJudgeCheckPrefix)
+		strings.HasPrefix(body, updateMarkerJudgeCheckPrefix) ||
+		strings.HasPrefix(body, updateMarkerJudgeHostPrefix)
 }
 
 // judgeUpdateLine renders one of judging.go's own marker shapes (design
 // section 5.1) as an owner-facing sentence: the five "judge round <n> ..."
 // shapes (started, verdicts, passed, failed, retry; judgeRoundLine),
-// "judge coverage failed/delivered run <rid>" (7.2 step 5), and "judge
-// check <n> <scenario_id> exit <code>" (7.5 step 4; judgeCheckLine). ok is
-// false when body's prefix matched but the rest of its shape did not, the
-// same defensive fallback reviewUpdateLine's own default case uses.
+// "judge coverage failed/delivered run <rid>" (7.2 step 5), "judge check
+// <n> <scenario_id> exit <code>" (7.5 step 4; judgeCheckLine), and "judge
+// host <n> <scenario_id> exit <code> cmd <hash>" (host scenario kind, #137;
+// judgeHostCheckLine). ok is false when body's prefix matched but the rest
+// of its shape did not, the same defensive fallback reviewUpdateLine's own
+// default case uses.
 func judgeUpdateLine(body string) (string, bool) {
 	first, rest, hasRest := strings.Cut(body, "\n")
 	switch {
@@ -2085,6 +2123,8 @@ func judgeUpdateLine(body string) (string, bool) {
 		return "Coverage errors sent back to run " + rid + ".", true
 	case strings.HasPrefix(first, updateMarkerJudgeCheckPrefix):
 		return judgeCheckLine(first)
+	case strings.HasPrefix(first, updateMarkerJudgeHostPrefix):
+		return judgeHostCheckLine(first)
 	case strings.HasPrefix(first, updateMarkerJudgeRoundPrefix):
 		return judgeRoundLine(first, rest, hasRest)
 	default:
@@ -2102,6 +2142,20 @@ func judgeCheckLine(first string) (string, bool) {
 	}
 	scenarioID, code := fields[1], fields[3]
 	return "Check for " + scenarioID + " exited " + code + ".", true
+}
+
+// judgeHostCheckLine renders "judge host <n> <scenario_id> exit <code> cmd
+// <hash>" (host scenario kind, #137) as its own sentence: the round number
+// and the command's hash play no part in it, the same elision judgeCheckLine
+// gives the round number.
+func judgeHostCheckLine(first string) (string, bool) {
+	fields := strings.Fields(strings.TrimPrefix(first, updateMarkerJudgeHostPrefix))
+	isHostShape := len(fields) == 6 && fields[2] == "exit" && fields[4] == "cmd"
+	if !isHostShape {
+		return "", false
+	}
+	scenarioID, code := fields[1], fields[3]
+	return "Host check for " + scenarioID + " exited " + code + ".", true
 }
 
 // judgeRoundLine renders one "judge round <n> started/verdicts/passed/
@@ -2137,9 +2191,10 @@ func judgeRoundLine(first, rest string, hasRest bool) (string, bool) {
 
 // isShippingMarker reports whether body carries one of shipping.go's own
 // "pr opened/ready/draft/merged ", "ci waiting ", "reviewers re-requested
-// ", "threads blocking ", or "merge asked/held/withdrawn/refused " prefixes
-// (design section 5.1, 8.2-8.9): shippingUpdateLine's own exact-shape parse
-// runs behind, the same two-step pattern isReviewMarker uses.
+// ", "threads blocking ", or "merge asked/held/withdrawn/retry/refused "
+// prefixes (design section 5.1, 8.2-8.9): shippingUpdateLine's own
+// exact-shape parse runs behind, the same two-step pattern isReviewMarker
+// uses.
 func isShippingMarker(body string) bool {
 	return strings.HasPrefix(body, updateMarkerPrOpenedPrefix) ||
 		strings.HasPrefix(body, updateMarkerCIWaitingPrefix) ||
@@ -2150,6 +2205,7 @@ func isShippingMarker(body string) bool {
 		strings.HasPrefix(body, updateMarkerMergeAskedPrefix) ||
 		strings.HasPrefix(body, updateMarkerMergeHeldPrefix) ||
 		strings.HasPrefix(body, updateMarkerMergeWithdrawnPrefix) ||
+		strings.HasPrefix(body, updateMarkerMergeRetryPrefix) ||
 		strings.HasPrefix(body, updateMarkerMergeRefusedPrefix) ||
 		strings.HasPrefix(body, updateMarkerPrMergedPrefix)
 }
@@ -2159,10 +2215,11 @@ func isShippingMarker(body string) bool {
 // 6), "ci waiting <names>" (8.4), "reviewers re-requested <sha>" with its
 // own logins line (9.4), "pr ready/draft <sha>" (8.5 rows 3 and 8, 8.9),
 // "threads blocking <tids>" (8.5 row 6a), "merge asked/held/withdrawn
-// <sha>" and "merge refused <sha>" with its own reason line (8.8), and "pr
-// merged <sha>" (8.8). ok is false when body's prefix matched but the rest
-// of its shape did not, the same defensive fallback reviewUpdateLine's own
-// default case uses.
+// <sha>", "merge retry <sha>" (the automatic retry after a "Base branch
+// was modified" refusal), and "merge refused <sha>" with its own reason
+// line (8.8), and "pr merged <sha>" (8.8). ok is false when body's prefix
+// matched but the rest of its shape did not, the same defensive fallback
+// reviewUpdateLine's own default case uses.
 func shippingUpdateLine(body string) (string, bool) {
 	first, rest, hasRest := strings.Cut(body, "\n")
 	switch {
@@ -2195,6 +2252,8 @@ func shippingUpdateLine(body string) (string, bool) {
 		return "Merge held at " + sha7(sha) + ".", true
 	case strings.HasPrefix(first, updateMarkerMergeWithdrawnPrefix):
 		return "The merge question was withdrawn; the loop reopened.", true
+	case strings.HasPrefix(first, updateMarkerMergeRetryPrefix):
+		return "Main moved during the merge; Zing checks the pull request again in 10 seconds.", true
 	case strings.HasPrefix(first, updateMarkerMergeRefusedPrefix):
 		header := "Merge refused:"
 		if hasRest {

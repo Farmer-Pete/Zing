@@ -45,6 +45,8 @@ func dispatch(args []string) int {
 		return runProject(subArgs(args))
 	case "scenarios":
 		return runScenarios()
+	case "check":
+		return runCheck()
 	case "version":
 		return runVersion(subArgs(args))
 	case "serve":

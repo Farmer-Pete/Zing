@@ -18,6 +18,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import {
 	CHORD_TIMEOUT_MS,
 	emptyChordState,
@@ -44,6 +45,10 @@ import {
 	unsavedReplyBody,
 	unsavedReplyBodies,
 	sendResultWithUnsent,
+	sendTargets,
+	sendConfirmText,
+	skipConflicted,
+	sendableQuestions,
 	AUTOSAVE_DEBOUNCE_MS,
 	replyAutosaveBody,
 	emptiedReplyBodies,
@@ -60,6 +65,10 @@ import {
 	reduceStreamStatus,
 	staleMarkerText,
 	STREAM_IDLE_MS,
+	PATCH_SUPPRESS_MS,
+	handleKeyEvent,
+	notePatchFocus,
+	patchFocus,
 } from './keyboard.mjs';
 
 // fixtureBindings is a small parsed-keys.json fixture, shaped the same as
@@ -200,6 +209,10 @@ test('sendChordLabel renders the platform-correct glyph', () => {
 // conflict reason.
 test('draftConflictMessage: "question closed" reads as a plain sentence', () => {
 	assert.equal(draftConflictMessage('question closed'), 'This question is already answered.');
+});
+
+test('draftConflictMessage: "changed in another tab" reads as a plain sentence', () => {
+	assert.equal(draftConflictMessage('changed in another tab'), 'Changed in another tab.');
 });
 
 test('draftConflictMessage: any other reason is shown as-is', () => {
@@ -498,7 +511,7 @@ test('buildItemDraftBody: reads ticket, question, item ref, and decision off the
 
 // describeAction / ACTION_LABELS: the "?" help overlay's copy for a raw
 // keys.json action name (console.js's buildHelpOverlay used to render the
-// bare identifier, e.g. "nav-inbox" or "stop-all", straight into the
+// bare identifier, e.g. "nav-inbox" or "toggle-rail", straight into the
 // overlay). allKeysGoActions mirrors internal/console/keys.go's Bindings()
 // action column one for one; keys_test.go already pins that file's own
 // shape (TestBindingsCoverEvery14KeyExactlyOnce and its neighbors), so this
@@ -509,6 +522,7 @@ const allKeysGoActions = [
 	'nav-inbox',
 	'nav-recent',
 	'nav-feed',
+	'nav-project',
 	'focus-next',
 	'focus-prev',
 	'open',
@@ -520,9 +534,6 @@ const allKeysGoActions = [
 	'send',
 	'toggle-rail',
 	'focus-side',
-	'stop',
-	'stop-all',
-	'mark-read',
 	'help',
 	'blur',
 ];
@@ -539,11 +550,20 @@ test('ACTION_LABELS has a human label for every keys.go action', () => {
 
 test('describeAction returns the mapped label for a known action', () => {
 	assert.equal(describeAction('nav-inbox'), 'Go to inbox');
-	assert.equal(describeAction('stop-all'), 'Stop everything');
 });
 
 test('describeAction falls back to the raw action name for one outside ACTION_LABELS', () => {
 	assert.equal(describeAction('some-future-action'), 'some-future-action');
+});
+
+// ACTION_LABELS names no action outside keys.go: the inverse of "has a
+// human label for every keys.go action" above. Without this, a removed
+// binding's label (e.g. stop, stop-all, mark-read) could linger in
+// ACTION_LABELS and advertise a key the console no longer accepts.
+test('ACTION_LABELS names no action outside keys.go', () => {
+	for (const action of Object.keys(ACTION_LABELS)) {
+		assert.ok(allKeysGoActions.includes(action), `ACTION_LABELS has a label for ${JSON.stringify(action)}, which is not a keys.go action`);
+	}
 });
 
 // unsavedReplyBody: Cmd+Enter saves the focused reply box's typed text
@@ -632,6 +652,84 @@ test('sendResultWithUnsent: unsent and stale both append, unsent first', () => {
 		sendResultWithUnsent('Sent 1 message.', 1, 1),
 		'Sent 1 message. 1 reply not sent; its text is still in its box. 1 reply sent an earlier version; its newest edit may be missing.',
 	);
+});
+
+// sendTargets: Cmd+Enter's own "what will this send" decision (ticket #43,
+// cause 1: a send with no question list went out against every draft on the
+// ticket, including ones typed and forgotten on another question). Confirm
+// is required whenever the listed ids are not exactly the focused question
+// alone, so a send that covers more than what the owner is looking at is
+// never silent.
+
+test('sendTargets: three drafts with one focused give confirm true and ids in DOM order', () => {
+	const questions = [
+		{ id: 6, key: 'Q6', hasDraft: true, conflicted: false },
+		{ id: 7, key: 'Q7', hasDraft: true, conflicted: false },
+		{ id: 9, key: 'Q9', hasDraft: true, conflicted: false },
+	];
+	assert.deepEqual(sendTargets(questions, 7), { ids: [6, 7, 9], keys: ['Q6', 'Q7', 'Q9'], confirm: true });
+});
+
+test('sendTargets: one draft that is the focused question gives confirm false', () => {
+	const questions = [{ id: 7, key: 'Q7', hasDraft: true, conflicted: false }];
+	assert.deepEqual(sendTargets(questions, 7), { ids: [7], keys: ['Q7'], confirm: false });
+});
+
+test('sendTargets: one draft with no focus gives confirm true', () => {
+	const questions = [{ id: 7, key: 'Q7', hasDraft: true, conflicted: false }];
+	assert.deepEqual(sendTargets(questions, null), { ids: [7], keys: ['Q7'], confirm: true });
+});
+
+test('sendTargets: no drafts give ids empty and confirm false', () => {
+	const questions = [{ id: 7, key: 'Q7', hasDraft: false, conflicted: false }];
+	assert.deepEqual(sendTargets(questions, 7), { ids: [], keys: [], confirm: false });
+});
+
+test('sendTargets: a conflicted entry with hasDraft true is left out of ids and keys', () => {
+	const questions = [
+		{ id: 6, key: 'Q6', hasDraft: true, conflicted: false },
+		{ id: 7, key: 'Q7', hasDraft: true, conflicted: true },
+	];
+	assert.deepEqual(sendTargets(questions, 6), { ids: [6], keys: ['Q6'], confirm: false });
+});
+
+test('sendConfirmText: names the one question or lists several', () => {
+	assert.equal(sendConfirmText(['Q6']), 'Send 1 reply on Q6?');
+	assert.equal(sendConfirmText(['Q6', 'Q7', 'Q9']), 'Send 3 replies on Q6, Q7, Q9?');
+});
+
+// skipConflicted: postSendBatchLocked and rearmAutosaves (ticket #43, cause
+// 2, Q5) each run this over their own list, so a box holding a "changed in
+// another tab" note is neither saved nor sent until the owner's next
+// keystroke.
+
+test('skipConflicted: the middle of three conflicted items is dropped, order kept', () => {
+	const items = [{ id: 'a' }, { id: 'b' }, { id: 'c' }];
+	const result = skipConflicted(items, (item) => item.id === 'b');
+	assert.deepEqual(result, [{ id: 'a' }, { id: 'c' }]);
+});
+
+test('skipConflicted: an empty list returns an empty list', () => {
+	assert.deepEqual(
+		skipConflicted([], () => true),
+		[],
+	);
+});
+
+// sendableQuestions: postSendBatchLocked's own re-check right before the
+// /send fetch (ticket #43, cause 2, Q5), against boxes that may have turned
+// conflicted after sendTargets already fixed the list.
+
+test('sendableQuestions: a listed id whose box became conflicted after the list was built is dropped', () => {
+	const boxes = [{ question: 6 }, { question: 7 }];
+	const result = sendableQuestions([6, 7], boxes, (box) => box.question === 7);
+	assert.deepEqual(result, [6]);
+});
+
+test('sendableQuestions: an id with no reply box is kept', () => {
+	const boxes = [{ question: 6 }];
+	const result = sendableQuestions([6, 9], boxes, () => false);
+	assert.deepEqual(result, [6, 9]);
 });
 
 // replyAutosaveBody: installReplyAutosave (console.js) debounces on 'input'
@@ -996,4 +1094,96 @@ test('reduceStreamStatus restarts the idle clock on visible', () => {
 test('staleMarkerText formats the stale time', () => {
 	assert.equal(staleMarkerText(null), '');
 	assert.equal(staleMarkerText(new Date(2026, 9, 4, 19, 25).getTime()), 'Reconnecting. Stale since 19:25.');
+});
+
+// handleKeyEvent / decideKey / notePatchFocus / patchFocus: the whole former
+// body of console.js's onKeyDown and the focus step of runPatchWork, moved
+// here so node --test drives the wiring itself, not only its helpers (design
+// section 6.4, owner decision on #44: "the whole keydown body moves into
+// handleKeyEvent(state, event, now, run)"). realBindings is the committed
+// static/keys.json, loaded from disk rather than a fixture, so these tests
+// prove the real s/S/x removal and the real chip/blur bindings, not a
+// hand-written stand-in that could drift from keys.go.
+const realBindings = JSON.parse(readFileSync(new URL('./keys.json', import.meta.url), 'utf8'));
+
+function freshKeyState(overrides) {
+	return { bindings: realBindings, chord: emptyChordState(), suppressUntil: null, isMac: false, focusedID: '', previousFocusableIDs: [], ...overrides };
+}
+
+test('handleKeyEvent: s, S and x do nothing, since keys.json binds none of them', () => {
+	const state = freshKeyState();
+	const calls = [];
+	let preventDefaultCalls = 0;
+	for (const key of ['s', 'S', 'x']) {
+		const event = { key, target: { tagName: 'BODY' }, preventDefault: () => { preventDefaultCalls++; } };
+		handleKeyEvent(state, event, 0, (action) => calls.push(action));
+	}
+	assert.deepEqual(calls, []);
+	assert.equal(preventDefaultCalls, 0);
+});
+
+test('handleKeyEvent: a key within 1000 ms after a focus change is ignored', () => {
+	const state = freshKeyState({ focusedID: 'question:4' });
+
+	const { focusID } = patchFocus(state, { previousFocusableIDs: ['question:4', 'question:5'], focusableIDs: ['question:5'] }, 1000);
+	assert.equal(focusID, 'question:5');
+	assert.equal(state.suppressUntil, 2000);
+
+	const calls = [];
+	const run = (action) => calls.push(action);
+	for (const key of ['1', 'Escape']) {
+		const event = { key, target: { tagName: 'BODY' }, preventDefault: () => assert.fail('preventDefault should not run while suppressed') };
+		handleKeyEvent(state, event, 1999, run);
+	}
+	assert.deepEqual(calls, []);
+
+	let prevented = false;
+	const event = { key: '1', target: { tagName: 'BODY' }, preventDefault: () => { prevented = true; } };
+	handleKeyEvent(state, event, 2000, run);
+	assert.deepEqual(calls, ['chip']);
+	assert.equal(prevented, true);
+});
+
+test('patchFocus leaves no deadline when the focused id is unchanged', () => {
+	const state = freshKeyState({ focusedID: 'question:4', previousFocusableIDs: ['question:4', 'question:5'] });
+
+	const { focusID } = patchFocus(state, { previousFocusableIDs: ['question:4', 'question:5'], focusableIDs: ['question:4', 'question:5'] }, 1000);
+	assert.equal(focusID, 'question:4');
+	assert.equal(state.suppressUntil, null);
+
+	const calls = [];
+	const event = { key: 'j', target: { tagName: 'BODY' }, preventDefault: () => {} };
+	handleKeyEvent(state, event, 1001, (action) => calls.push(action));
+	assert.deepEqual(calls, ['focus-next']);
+});
+
+test('notePatchFocus sets a deadline only when the focused id changed', () => {
+	assert.equal(PATCH_SUPPRESS_MS, 1000);
+
+	let state = { suppressUntil: null };
+	assert.equal(notePatchFocus(state, 'question:4', 'question:5', 1000), 2000);
+	assert.equal(state.suppressUntil, 2000);
+
+	state = { suppressUntil: null };
+	assert.equal(notePatchFocus(state, 'question:4', 'question:4', 1000), null);
+
+	state = { suppressUntil: null };
+	assert.equal(notePatchFocus(state, '', 'question:5', 1000), null);
+
+	state = { suppressUntil: null };
+	assert.equal(notePatchFocus(state, 'question:4', '', 1000), 2000);
+
+	state = { suppressUntil: 1500 };
+	assert.equal(notePatchFocus(state, 'question:4', 'question:4', 1000), 1500);
+});
+
+test('handleKeyEvent: g p calls run with the project action', () => {
+	const state = freshKeyState();
+	const calls = [];
+	const run = (action) => calls.push(action);
+
+	handleKeyEvent(state, { key: 'g', target: { tagName: 'BODY' }, preventDefault: () => {} }, 0, run);
+	handleKeyEvent(state, { key: 'p', target: { tagName: 'BODY' }, preventDefault: () => {} }, 10, run);
+
+	assert.deepEqual(calls, ['nav-project']);
 });

@@ -247,6 +247,53 @@ func TestCommandRunnerEnvHasNoOAuthToken(t *testing.T) {
 	}
 }
 
+// TestHostCommandRunnerEnv proves the unsandboxed host runner (design
+// section 5, task 2) sets TMPDIR to a fresh, writable directory per run,
+// distinct from the parent's own TMPDIR, removed once Run returns, and
+// otherwise runs with the filtered environment: a secret-shaped variable
+// inherited from this test process must not reach the command. Not
+// parallel: t.Setenv cannot combine with t.Parallel.
+func TestHostCommandRunnerEnv(t *testing.T) {
+	t.Setenv("GITHUB_TOKEN", "secret")
+	r := NewHostCommandRunner()
+	dir := t.TempDir()
+
+	runOnce := func(name string) string {
+		out := filepath.Join(dir, name)
+		exitCode, err := r.Run(t.Context(), dir, "", "echo \"$TMPDIR\" >"+out+" && test -w \"$TMPDIR\" && test -z \"$GITHUB_TOKEN\"", commandRunnerTimeout, CommandIO{})
+		if err != nil {
+			t.Fatalf("Run: %v", err)
+		}
+		if exitCode != 0 {
+			t.Fatalf("exitCode = %d, want 0", exitCode)
+		}
+		got, readErr := os.ReadFile(out)
+		if readErr != nil {
+			t.Fatalf("read %s: %v", out, readErr)
+		}
+		return strings.TrimSpace(string(got))
+	}
+
+	tmp1 := runOnce("1.txt")
+	tmp2 := runOnce("2.txt")
+
+	if tmp1 == "" || tmp2 == "" {
+		t.Fatalf("TMPDIR was empty: %q, %q", tmp1, tmp2)
+	}
+	if tmp1 == tmp2 {
+		t.Errorf("both runs got the same TMPDIR %q, want distinct fresh directories", tmp1)
+	}
+	if tmp1 == os.Getenv("TMPDIR") || tmp2 == os.Getenv("TMPDIR") {
+		t.Error("the run's TMPDIR equals the parent process's own TMPDIR")
+	}
+	if _, statErr := os.Stat(tmp1); !errors.Is(statErr, os.ErrNotExist) {
+		t.Errorf("Stat(%s) after Run = %v, want not-exist", tmp1, statErr)
+	}
+	if _, statErr := os.Stat(tmp2); !errors.Is(statErr, os.ErrNotExist) {
+		t.Errorf("Stat(%s) after Run = %v, want not-exist", tmp2, statErr)
+	}
+}
+
 // TestSandboxedCommandsErrSandbox proves the real CommandRunner refuses to
 // run anything when the sandbox is unavailable and required (design section
 // 5.5).
@@ -288,6 +335,30 @@ func TestCommandRunnerCapturesOutput(t *testing.T) {
 	}
 	if exitCode != 3 {
 		t.Errorf("exitCode with zero CommandIO = %d, want 3", exitCode)
+	}
+}
+
+// TestRunShellUnquotedGlobIgnoresLoginShell proves RunShell always runs a
+// check through /bin/sh, never the caller's own login shell (#86): with
+// SHELL set to /bin/zsh, a negated grep with an unquoted include glob over
+// a directory holding a matching .go file behaves the same as it does
+// under bash, instead of aborting on the unmatched-glob error zsh raises
+// before grep ever runs (which would turn the negated check's real
+// failure into a false pass). Not parallel: it calls t.Setenv on the real
+// process SHELL.
+func TestRunShellUnquotedGlobIgnoresLoginShell(t *testing.T) {
+	t.Setenv("SHELL", "/bin/zsh")
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "a.go"), []byte("foo\n"), 0o600); err != nil {
+		t.Fatalf("write a.go: %v", err)
+	}
+
+	exitCode, err := RunShell(t.Context(), dir, `! grep -rn foo . --include=*.go`, nil, commandRunnerTimeout, CommandIO{})
+	if err != nil {
+		t.Fatalf("RunShell: %v", err)
+	}
+	if exitCode != 1 {
+		t.Errorf("exitCode = %d, want 1", exitCode)
 	}
 }
 

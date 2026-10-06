@@ -40,7 +40,13 @@ Work in this order. Each step has a completion criterion.
    sandbox. Write temporary files under "$TMPDIR", never /tmp. Write only
    givens and checks an agent inside that sandbox can observe: no live zing
    serve, no machine outside the sandbox, and none of the owner's own
-   config such as ~/.codex, ~/.claude, or the console.
+   config such as ~/.codex, ~/.claude, or the console. The exception is
+   kind host. Zing runs a host scenario's check on the owner's machine at
+   judging, outside any sandbox, once the owner approves it at the gate.
+   Use it for a live sandbox probe, a live zing serve, or wall-clock
+   timing. A host scenario needs a check. Quote a check's glob, such as
+   --include='*.go', and join a prose file's lines before a multi-word
+   grep, such as tr -s '[:space:]' ' ' < FILE | grep -qF 'two words'.
 
 5. Plan. Fill the plan schema. Put the proof in the plan: the problem
    element carries the loop command, the repro, and the hypothesis that

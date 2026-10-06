@@ -381,13 +381,22 @@ type AnswerPayload struct {
 }
 
 type EscalationPayload struct {
-	Code      string   `json:"code"    jsonschema:"enum=resumes_exhausted,enum=loops_exhausted,enum=wall_clock,enum=usage_hold,enum=plan_gap,enum=cannot_run,enum=environment,enum=other,enum=split_unsupported,enum=nothing_to_do_with_true_claims,enum=runtime_exec_failed,enum=response_invalid,enum=seal_failed,enum=post_run_failed,enum=sandbox_unavailable,enum=replan_unsupported,enum=pr_closed"`
-	What      string   `json:"what"    jsonschema:"minLength=1"`
-	Why       string   `json:"why"     jsonschema:"minLength=1"`
-	Tried     string   `json:"tried"`
-	Options   []string `json:"options" jsonschema:"enum=retry,enum=planning,enum=abandon"`
-	SessionID *int64   `json:"session_id,omitempty" doc:"the session the escalated run belongs to, when a run or session caused it"`
-	Origin    string   `json:"origin"  jsonschema:"enum=classify,enum=planning_first,enum=planning_resume,enum=planreview,enum=gate_approve,enum=seal,enum=cap_resumes,enum=cap_loops,enum=cap_budget,enum=split,enum=nothing_to_do_claims,enum=build,enum=perimeter,enum=fix,enum=review,enum=judge,enum=shipping,enum=respond" doc:"the step that produced this escalation (design section 6.7)"`
+	Code      string     `json:"code"    jsonschema:"enum=resumes_exhausted,enum=loops_exhausted,enum=wall_clock,enum=usage_hold,enum=plan_gap,enum=cannot_run,enum=environment,enum=other,enum=split_unsupported,enum=nothing_to_do_with_true_claims,enum=runtime_exec_failed,enum=response_invalid,enum=seal_failed,enum=post_run_failed,enum=sandbox_unavailable,enum=replan_unsupported,enum=pr_closed"`
+	What      string     `json:"what"    jsonschema:"minLength=1"`
+	Why       string     `json:"why"     jsonschema:"minLength=1"`
+	Tried     string     `json:"tried"`
+	Options   []string   `json:"options" jsonschema:"enum=retry,enum=planning,enum=abandon"`
+	SessionID *int64     `json:"session_id,omitempty" doc:"the session the escalated run belongs to, when a run or session caused it"`
+	Origin    string     `json:"origin"  jsonschema:"enum=classify,enum=planning_first,enum=planning_resume,enum=planreview,enum=gate_approve,enum=seal,enum=cap_resumes,enum=cap_loops,enum=cap_budget,enum=split,enum=nothing_to_do_claims,enum=build,enum=perimeter,enum=fix,enum=review,enum=judge,enum=shipping,enum=respond" doc:"the step that produced this escalation (design section 6.7)"`
+	Grant     *FileGrant `json:"grant,omitempty" doc:"set only by attachFileGrant; when set, escalateTx adds option d"`
+}
+
+// FileGrant is one task number plus the delivery file paths another task's
+// CHECK rejected it for: escalateTx's option d, and grantPlanFilesTx's and
+// GrantFileTasks' input, for letting Task also change Paths (plan #51).
+type FileGrant struct {
+	Task  int      `json:"task"  jsonschema:"minimum=1,maximum=12" doc:"the unit number the files are granted to"`
+	Paths []string `json:"paths" jsonschema:"minItems=1" doc:"a repository-relative path as it appears in delivery.files; unique; marker order"`
 }
 
 type StatePayload struct {
@@ -436,13 +445,14 @@ type BuildReport struct {
 type FindingArtifact struct {
 	// The six fields of Finding, copied rather than embedded, so Decision can
 	// have its own narrower type:
-	Lens     Lens             `json:"lens"`
-	Severity Severity         `json:"severity"`
-	Location string           `json:"location" jsonschema:"minLength=1"`
-	Text     string           `json:"text"     jsonschema:"minLength=1"`
-	Fix      string           `json:"fix"      jsonschema:"minLength=1"`
-	PlanRef  string           `json:"plan_ref,omitempty"`
-	Decision *FindingDecision `json:"decision,omitempty" doc:"set when routed: accept at or below the floor, else the owner's triage"`
+	Lens        Lens             `json:"lens"`
+	Severity    Severity         `json:"severity"`
+	Location    string           `json:"location" jsonschema:"minLength=1"`
+	Text        string           `json:"text"     jsonschema:"minLength=1"`
+	Fix         string           `json:"fix"      jsonschema:"minLength=1"`
+	PlanRef     string           `json:"plan_ref,omitempty"`
+	Decision    *FindingDecision `json:"decision,omitempty" doc:"set when routed: accept at or below the floor, else the owner's triage"`
+	OwnerPicked bool             `json:"owner_picked,omitempty" doc:"true when TRIAGE stored the owner's own item decision; absent for a default accept, a floor accept, a lens row, or a row stored before this field"`
 
 	Held       bool     `json:"held,omitempty"       doc:"a lens output kept while the round waits on a lens question (6.2a); not yet filtered, never routed"`
 	ID         string   `json:"id"                   jsonschema:"pattern=^r[1-9][0-9]*[fh][1-9][0-9]*$" doc:"r<round>f<k>, or r<round>h<k> for a held row"`

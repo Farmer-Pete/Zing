@@ -68,6 +68,29 @@ func (c sandboxedCommands) Run(ctx context.Context, dir, repoGit, shellCmd strin
 	return runShellCommand(ctx, workDir, shellCmd, execPrefix, env, timeout, cio)
 }
 
+// hostCommands is the CommandRunner for host-kind scenario checks at
+// judging (design section 5): runShellCommand with no sandbox prefix, the
+// filtered parent environment, and TMPDIR set to a fresh directory removed
+// after the run.
+type hostCommands struct{}
+
+// NewHostCommandRunner returns the unsandboxed runner judging uses for
+// host-kind scenario checks (Deps.HostCommands).
+func NewHostCommandRunner() CommandRunner { return hostCommands{} }
+
+func (hostCommands) Run(ctx context.Context, dir, _, shellCmd string, timeout time.Duration, cio CommandIO) (int, error) {
+	tmp, err := os.MkdirTemp("", "zing-host-check-")
+	if err != nil {
+		return -1, fmt.Errorf("job: host command runner: temp dir: %w", err)
+	}
+	defer func() {
+		if rmErr := os.RemoveAll(tmp); rmErr != nil {
+			slog.Warn("host check temp dir removal failed", "dir", tmp, "error", rmErr)
+		}
+	}()
+	return runShellCommand(ctx, dir, shellCmd, nil, []string{"TMPDIR=" + tmp}, timeout, cio)
+}
+
 // runShellCommand runs "/bin/sh -c shellCmd" (behind execPrefix, when set),
 // in its own process group, the whole group killed after Wait returns on
 // every path (design section 5.5, mirroring runtime.Claude.run's own
@@ -125,6 +148,20 @@ func runShellCommand(ctx context.Context, dir, shellCmd string, execPrefix, extr
 		}
 		return -1, fmt.Errorf("job: command runner: wait: %w", waitErr)
 	}
+}
+
+// RunShell runs shellCmd through "/bin/sh -c", the same shell Zing's own
+// CHECK re-run uses, with no sandbox prefix and no process-group discipline
+// beyond runShellCommand's own: cmd/zing's "zing check" subcommand calls
+// this so the judge's own run of a sealed check never depends on the
+// judge agent's login shell (#86: zsh aborts on an unmatched glob before a
+// negated grep ever runs, turning a real failure into a false pass under
+// bash/sh). env is the caller's whole environment (os.Environ()), not just
+// the extras the real CommandRunner adds on top of a filtered allowlist,
+// so a sandbox's own variables (sandbox.go) survive runShellCommand's call
+// to runtime.FilteredEnv instead of being dropped.
+func RunShell(ctx context.Context, dir, shellCmd string, env []string, timeout time.Duration, cio CommandIO) (int, error) {
+	return runShellCommand(ctx, dir, shellCmd, nil, env, timeout, cio)
 }
 
 // shellCommandNameArgs mirrors runtime.Claude's own commandNameArgs (design
@@ -224,4 +261,15 @@ func (b *tailBuffer) Total() int64 {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	return b.total
+}
+
+// TailBytes returns a copy of the last limit bytes written, oldest first,
+// with no UTF-8 repair: judgeCapOutput (judging.go) repairs on bytes so its
+// own result stays within its own byte limit.
+func (b *tailBuffer) TailBytes() []byte {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	out := make([]byte, 0, len(b.buf))
+	out = append(out, b.buf[b.next:]...)
+	return append(out, b.buf[:b.next]...)
 }

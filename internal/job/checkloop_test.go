@@ -919,3 +919,55 @@ func TestCheckRecordsAndClearsCommandGroup(t *testing.T) {
 		t.Errorf("budget_started_at %v is after started_at %v", c.BudgetStartedAt, c.StartedAt)
 	}
 }
+
+// TestCheckRecordsAndClearsFixCommandGroup proves CHECK records the fix
+// command's process group in check_procs with kind fix while it runs, and
+// clears it once the command ends: the ticket's first acceptance criterion
+// names the fix command specifically (review r1f2), and no test that
+// configures one otherwise asserts the recorded row's kind, so a fix
+// command tagged with the wrong kind would still pass every other test in
+// this file.
+func TestCheckRecordsAndClearsFixCommandGroup(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow end-to-end flow; runs in the full suite")
+	}
+	t.Parallel()
+	s, _, ticketID := buildTicketInBuilding(t)
+	script := &scriptedRuntime{t: t, steps: []scriptedStep{buildStep([]string{}, nil, "group-fix-sess")}}
+	const groupFix = "the group fix"
+	cmds := &groupLeaderCommands{t: t, s: s, ticketID: ticketID, testCmd: groupFix}
+
+	for range 2 { // RUN, then CHECK
+		ticket := getTicket(t, s, ticketID)
+		deps := claimForBuild(t, s, script, ticketID)
+		proj := deps.Projects[ticket.ProjectID]
+		proj.FixCmd = groupFix
+		proj.LintCmd = testNoopShellCmd
+		proj.TestCmd = testNoopShellCmd
+		deps.Projects = map[int64]job.Project{ticket.ProjectID: proj}
+		deps.Commands = cmds
+		commit, err := job.Registry()[testStateBuilding].Run(t.Context(), ticket, deps)
+		if err != nil {
+			t.Fatalf("building tick: %v", err)
+		}
+		if cmds.pid != 0 { // CHECK ran; read the row before the claim is released
+			claims, cerr := s.ForeignClaims(t.Context(), "nobody")
+			if cerr != nil {
+				t.Fatalf("ForeignClaims: %v", cerr)
+			}
+			for i := range claims {
+				if claims[i].TicketID == ticketID && claims[i].Check != nil {
+					t.Errorf("check_procs row %+v after the fix command ended, want none", claims[i].Check)
+				}
+			}
+		}
+		apply(t, s, ticket, commit)
+	}
+	c := cmds.seen
+	if c == nil {
+		t.Fatal("no check_procs row while the fix command ran")
+	}
+	if c.Kind != store.CheckKindFix || c.PGID != cmds.pid {
+		t.Errorf("row = %+v, want kind fix and pgid %d", c, cmds.pid)
+	}
+}

@@ -1,7 +1,9 @@
 package store
 
 import (
+	"crypto/sha256"
 	"database/sql"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -524,6 +526,168 @@ func TestSaveDraft_EmptyTextAgainstClosedQuestionConflicts(t *testing.T) {
 	}
 }
 
+// testReplyFromTabA is the stored body TestSaveDraft_StaleBaseConflicts
+// drives its whole fixture around, named once so goconst has nothing to
+// flag across its several assertions.
+const testReplyFromTabA = "from tab A"
+
+// TestSaveDraft_StaleBaseConflicts proves the base check (ticket #43): a
+// save that carries the text this tab last saw stored (Base) is refused,
+// with the stored text returned as ConflictError.Current, when another
+// tab's save has since moved the stored body away from both Base and the
+// text this call is about to write. Base is ignored, as always, when it is
+// nil, matching every SaveDraft call before this ticket.
+func TestSaveDraft_StaleBaseConflicts(t *testing.T) {
+	t.Parallel()
+	s := newTestStore(t)
+	_, ticketID := seedQueuedTicket(t, s, "1")
+	qID := insertQuestionOption(t, s, ticketID, "Q1")
+
+	tabA, err := s.SaveDraft(t.Context(), DraftInput{TicketID: ticketID, QuestionID: &qID, Text: testReplyFromTabA})
+	if err != nil {
+		t.Fatalf("SaveDraft(tab A): %v", err)
+	}
+
+	// Tab B never saw tab A's save: its base is still the page-load value,
+	// empty. The stored body ("from tab A") differs from both that base and
+	// tab B's own text, so the save conflicts and the row is untouched.
+	_, err = s.SaveDraft(t.Context(), DraftInput{TicketID: ticketID, QuestionID: &qID, Text: "from tab B", Base: new("")})
+	if err == nil {
+		t.Fatal("SaveDraft(tab B) err = nil, want a ConflictError")
+	}
+	var ce *ConflictError
+	if !errors.As(err, &ce) {
+		t.Fatalf("SaveDraft(tab B) error = %v (%T), want a *ConflictError", err, err)
+	}
+	if ce.Reason != changedInAnotherTabReason {
+		t.Errorf("SaveDraft(tab B) conflict reason = %q, want %q", ce.Reason, changedInAnotherTabReason)
+	}
+	if ce.Current == nil || *ce.Current != testReplyFromTabA {
+		t.Errorf("SaveDraft(tab B) conflict Current = %v, want %q", ce.Current, testReplyFromTabA)
+	}
+	m, getErr := s.GetMessage(t.Context(), tabA.MessageID)
+	if getErr != nil {
+		t.Fatalf("GetMessage: %v", getErr)
+	}
+	if got := m.Body; got != testReplyFromTabA {
+		t.Errorf("stored body = %q, want %q", got, testReplyFromTabA)
+	}
+
+	// Clearing (empty text) against the same stale base conflicts too.
+	_, err = s.SaveDraft(t.Context(), DraftInput{TicketID: ticketID, QuestionID: &qID, Text: "", Base: new("")})
+	if err == nil {
+		t.Fatal("SaveDraft(tab B clear) err = nil, want a ConflictError")
+	}
+	if got := conflictReason(t, err); got != changedInAnotherTabReason {
+		t.Errorf("SaveDraft(tab B clear) conflict reason = %q, want %q", got, changedInAnotherTabReason)
+	}
+	if _, getErr := s.GetMessage(t.Context(), tabA.MessageID); getErr != nil {
+		t.Errorf("draft reply %d gone after a clear that should have conflicted: %v", tabA.MessageID, getErr)
+	}
+
+	// Saving the exact stored text, even with a stale base, is not a
+	// conflict: there is nothing tab B would overwrite that it did not
+	// already intend to write.
+	same, err := s.SaveDraft(t.Context(), DraftInput{TicketID: ticketID, QuestionID: &qID, Text: testReplyFromTabA, Base: new("something stale")})
+	if err != nil {
+		t.Fatalf("SaveDraft(same text, stale base): %v", err)
+	}
+	if same.MessageID != tabA.MessageID {
+		t.Errorf("SaveDraft(same text, stale base) MessageID = %d, want %d", same.MessageID, tabA.MessageID)
+	}
+	if m, getErr := s.GetMessage(t.Context(), tabA.MessageID); getErr != nil {
+		t.Fatalf("GetMessage: %v", getErr)
+	} else if m.Body != testReplyFromTabA {
+		t.Errorf("SaveDraft(same text, stale base) stored body = %q, want %q", m.Body, testReplyFromTabA)
+	}
+
+	// A nil base keeps overwriting unconditionally, as before this ticket.
+	overwritten, err := s.SaveDraft(t.Context(), DraftInput{TicketID: ticketID, QuestionID: &qID, Text: "no base at all"})
+	if err != nil {
+		t.Fatalf("SaveDraft(nil base): %v", err)
+	}
+	if overwritten.MessageID != tabA.MessageID || !overwritten.Replaced {
+		t.Errorf("SaveDraft(nil base) = %+v, want MessageID=%d Replaced=true", overwritten, tabA.MessageID)
+	}
+	if m, getErr := s.GetMessage(t.Context(), tabA.MessageID); getErr != nil {
+		t.Fatalf("GetMessage: %v", getErr)
+	} else if m.Body != "no base at all" {
+		t.Errorf("SaveDraft(nil base) stored body = %q, want %q", m.Body, "no base at all")
+	}
+
+	// A base equal to the stored body updates cleanly.
+	updated, err := s.SaveDraft(t.Context(), DraftInput{TicketID: ticketID, QuestionID: &qID, Text: "caught up", Base: new("no base at all")})
+	if err != nil {
+		t.Fatalf("SaveDraft(base matches stored): %v", err)
+	}
+	if updated.MessageID != tabA.MessageID {
+		t.Errorf("SaveDraft(base matches stored) MessageID = %d, want %d", updated.MessageID, tabA.MessageID)
+	}
+	if m, getErr := s.GetMessage(t.Context(), tabA.MessageID); getErr != nil {
+		t.Fatalf("GetMessage: %v", getErr)
+	} else if m.Body != "caught up" {
+		t.Errorf("SaveDraft(base matches stored) stored body = %q, want %q", m.Body, "caught up")
+	}
+
+	// With no row at all, a non-empty base that matches neither the (empty)
+	// current body nor the new text still conflicts, with Current empty.
+	q2 := insertQuestionOption(t, s, ticketID, "Q2")
+	_, err = s.SaveDraft(t.Context(), DraftInput{TicketID: ticketID, QuestionID: &q2, Text: "first text ever", Base: new("x")})
+	if err == nil {
+		t.Fatal("SaveDraft(no row, stale base) err = nil, want a ConflictError")
+	}
+	if got := conflictReason(t, err); got != changedInAnotherTabReason {
+		t.Errorf("SaveDraft(no row, stale base) conflict reason = %q, want %q", got, changedInAnotherTabReason)
+	}
+	var ce2 *ConflictError
+	if !errors.As(err, &ce2) {
+		t.Fatalf("SaveDraft(no row, stale base) error = %v (%T), want a *ConflictError", err, err)
+	}
+	if ce2.Current == nil || *ce2.Current != "" {
+		t.Errorf("SaveDraft(no row, stale base) conflict Current = %v, want empty", ce2.Current)
+	}
+}
+
+// TestDraftFingerprint proves draftFingerprint (ticket #43's own log-safe
+// stand-in for a draft's text or base) is a stable, 16-character hex digest
+// that never contains the text it fingerprints -- a reader of the log must
+// not be able to recover a short draft such as "ok" by hashing guesses.
+func TestDraftFingerprint(t *testing.T) {
+	t.Parallel()
+	ok1 := draftFingerprint("ok")
+	ok2 := draftFingerprint("ok")
+	if ok1 != ok2 {
+		t.Errorf("draftFingerprint(%q) = %q then %q, want the same value both times", "ok", ok1, ok2)
+	}
+	if len(ok1) != 16 {
+		t.Errorf("len(draftFingerprint(%q)) = %d, want 16", "ok", len(ok1))
+	}
+	for _, c := range ok1 {
+		if !strings.ContainsRune("0123456789abcdef", c) {
+			t.Errorf("draftFingerprint(%q) = %q, want lowercase hex only", "ok", ok1)
+			break
+		}
+	}
+	no := draftFingerprint("no")
+	if no == ok1 {
+		t.Errorf("draftFingerprint(%q) = draftFingerprint(%q) = %q, want different values", "no", "ok", ok1)
+	}
+	// An unkeyed hex(sha256(s))[:16] would pass every check above, but the
+	// key is the whole reason draftFingerprint exists instead of a plain
+	// hash (a reader of the log could otherwise recover "ok" by guessing).
+	// Comparing against that unkeyed digest catches a draftFingerprint that
+	// dropped the HMAC key.
+	unkeyed := sha256.Sum256([]byte("ok"))
+	if unkeyedHex := hex.EncodeToString(unkeyed[:])[:16]; ok1 == unkeyedHex {
+		t.Errorf("draftFingerprint(%q) = %q, matches the unkeyed sha256 digest: it is not keyed", "ok", ok1)
+	}
+
+	empty := draftFingerprint("")
+	if len(empty) != 16 {
+		t.Errorf("len(draftFingerprint(%q)) = %d, want 16", "", len(empty))
+	}
+}
+
 // ---- SendBatch --------------------------------------------------------------
 
 func TestSendBatch_EmptyIsSafe(t *testing.T) {
@@ -537,6 +701,85 @@ func TestSendBatch_EmptyIsSafe(t *testing.T) {
 	}
 	if !res.Empty || res.Sent != 0 || res.BatchID != 0 || res.WaitCleared {
 		t.Errorf("SendBatch on an empty ticket = %+v, want Empty=true and everything else zero", res)
+	}
+}
+
+// TestSendBatchOnly_SendsOnlyListedQuestion proves a scoped send leaves an
+// unlisted question's draft untouched (ticket #43: a forgotten draft on
+// another question must not go out with a later Cmd+Enter). The ticket
+// stays waiting on "questions" throughout, since q2 is never answered, so a
+// fresh draft on q1 is still draftable after its first answer round.
+func TestSendBatchOnly_SendsOnlyListedQuestion(t *testing.T) {
+	t.Parallel()
+	s := newTestStore(t)
+	_, ticketID := seedQueuedTicket(t, s, "1")
+	setTicketWaiting(t, s, ticketID, testWaitingQuestions)
+	q1 := insertQuestionOption(t, s, ticketID, "Q1")
+	q2 := insertQuestionOption(t, s, ticketID, "Q2")
+
+	r1, err := s.SaveDraft(t.Context(), DraftInput{TicketID: ticketID, QuestionID: &q1, Text: testReplyWhyThough})
+	if err != nil {
+		t.Fatalf("SaveDraft(q1): %v", err)
+	}
+	r2, err := s.SaveDraft(t.Context(), DraftInput{TicketID: ticketID, QuestionID: &q2, Text: testReplyWhyThough})
+	if err != nil {
+		t.Fatalf("SaveDraft(q2): %v", err)
+	}
+
+	res, err := s.SendBatchOnly(t.Context(), ticketID, []int64{q1})
+	if err != nil {
+		t.Fatalf("SendBatchOnly(q1): %v", err)
+	}
+	if res.Sent != 1 {
+		t.Fatalf("SendBatchOnly(q1) Sent = %d, want 1", res.Sent)
+	}
+
+	m1, err := s.GetMessage(t.Context(), r1.MessageID)
+	if err != nil {
+		t.Fatalf("GetMessage(q1 reply): %v", err)
+	}
+	if m1.State == nil || *m1.State != answerStateSent {
+		t.Errorf("q1 reply state = %v, want %q", m1.State, answerStateSent)
+	}
+
+	m2, err := s.GetMessage(t.Context(), r2.MessageID)
+	if err != nil {
+		t.Fatalf("GetMessage(q2 reply): %v", err)
+	}
+	if m2.State == nil || *m2.State != draftState {
+		t.Errorf("q2 reply state = %v, want %q", m2.State, draftState)
+	}
+	if m2.BatchID != nil {
+		t.Errorf("q2 reply batch id = %v, want nil", *m2.BatchID)
+	}
+
+	// A fresh draft on q1, listed twice, still sends once.
+	r1b, err := s.SaveDraft(t.Context(), DraftInput{TicketID: ticketID, QuestionID: &q1, Text: "one more time"})
+	if err != nil {
+		t.Fatalf("SaveDraft(q1, second round): %v", err)
+	}
+	res, err = s.SendBatchOnly(t.Context(), ticketID, []int64{q1, q1})
+	if err != nil {
+		t.Fatalf("SendBatchOnly([q1, q1]): %v", err)
+	}
+	if res.Sent != 1 {
+		t.Errorf("SendBatchOnly([q1, q1]) Sent = %d, want 1", res.Sent)
+	}
+	m1b, err := s.GetMessage(t.Context(), r1b.MessageID)
+	if err != nil {
+		t.Fatalf("GetMessage(q1 reply, second round): %v", err)
+	}
+	if m1b.State == nil || *m1b.State != answerStateSent {
+		t.Errorf("q1 reply (second round) state = %v, want %q", m1b.State, answerStateSent)
+	}
+
+	// A question id with no draft at all sends nothing.
+	res, err = s.SendBatchOnly(t.Context(), ticketID, []int64{999999999})
+	if err != nil {
+		t.Fatalf("SendBatchOnly(no draft): %v", err)
+	}
+	if !res.Empty {
+		t.Errorf("SendBatchOnly(no draft).Empty = %v, want true", res.Empty)
 	}
 }
 

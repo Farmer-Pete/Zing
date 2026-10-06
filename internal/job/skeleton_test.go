@@ -104,6 +104,12 @@ const (
 	// roundRecommendedOption, planning.go), shared across
 	// building_escalation_test.go and escalation_test.go.
 	testCaseReplyOnly = "ReplyOnly"
+	// testEscalationTextRetry and testEscalationTextAbandon are
+	// escalationOptionsFor's own two option texts (store/commit.go),
+	// shared across escalation_test.go and building_escalation_test.go
+	// (goconst: three or more occurrences of each literal).
+	testEscalationTextRetry   = "Retry"
+	testEscalationTextAbandon = "Abandon"
 )
 
 // testProject is the one project every test in this file seeds. LocalPath

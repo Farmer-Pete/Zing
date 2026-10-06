@@ -28,12 +28,12 @@ func TestPrompts_MatchThePinnedDesignText(t *testing.T) {
 		{
 			name:   "planning-feature",
 			path:   planningFeaturePromptPath,
-			sha256: "e603319479edd10f7e3e162aa052e26e99b8671286d8956a0675f2a2748c857f",
+			sha256: "0f11778d598981cc345710b1f6e85f24df5e5c1eb8465ea8a50cee563bf18b71",
 		},
 		{
 			name:   "planning-bug",
 			path:   planningBugPromptPath,
-			sha256: "97bf910bd76569b20ade58e34d77c2e9048221937f2cf5c6cc93668e273fb20c",
+			sha256: "92d0323e54dbce8dc8fae25c3376367038104aa13d6369a0dc28827fcf953721",
 		},
 		{
 			name:   "planreview",
@@ -63,7 +63,7 @@ func TestPrompts_MatchThePinnedDesignText(t *testing.T) {
 		{
 			name:   "judge",
 			path:   "prompts/judge.md",
-			sha256: "4f3a570983506de4fd530ab428f31600028a1c8ab7e52d21617c0883ca74c154",
+			sha256: "934b46bcf9a8b04601634027b3d5d5ae9978289d729e0f659f7bfb6ff5406dcc",
 		},
 		{
 			name:   "respond",
@@ -222,17 +222,18 @@ func TestBuildPromptPlaceholders(t *testing.T) {
 }
 
 // TestJudgePromptRunsChecksAsWritten proves prompts/judge.md tells the
-// judge to run each sealed check exactly as written rather than
-// repairing it, to use "$TMPDIR" instead of /tmp, to run a long check in
-// the background and poll it instead of waiting on one call, and to
-// treat a skip the scenario's own then names as expected as an observed
-// pass while a skip that hides the behavior under test stays unobserved
-// (#78, #46, #38).
+// judge to run each sealed check through "zing check SID" rather than
+// pasting it into its own shell or repairing it, to use "$TMPDIR" instead
+// of /tmp, to run a long check in the background and poll it instead of
+// waiting on one call, and to treat a skip the scenario's own then names
+// as expected as an observed pass while a skip that hides the behavior
+// under test stays unobserved (#78, #46, #38, #86).
 func TestJudgePromptRunsChecksAsWritten(t *testing.T) {
 	t.Parallel()
 	text := unwrapped(t, "prompts/judge.md")
 	for _, want := range []string{
-		"Run each scenario's check command exactly as written.",
+		"Run each scenario's check with `zing check SID`",
+		"Never paste a check into your own shell.",
 		"do not repair it or run your own version",
 		"Return the error outcome with code cannot_run, naming the scenario and the defect in its check",
 		`Write temporary files under "$TMPDIR", never /tmp.`,
@@ -267,6 +268,49 @@ func TestPlanningPromptsTeachSandboxChecks(t *testing.T) {
 	for _, path := range []string{planningFeaturePromptPath, planningBugPromptPath} {
 		if !strings.Contains(unwrapped(t, path), sandboxChecksSentence) {
 			t.Errorf("%s lacks the sandbox-checks sentence", path)
+		}
+	}
+}
+
+// hostKindSentence is what both planning prompts say about kind host
+// (#49): Zing runs a host scenario's check on the owner's machine at
+// judging, outside any sandbox, once the owner approves it at the gate,
+// for a live sandbox probe, a live zing serve, or wall-clock timing, and
+// a host scenario needs a check.
+const hostKindSentence = "The exception is kind host. " +
+	"Zing runs a host scenario's check on the owner's machine at judging, " +
+	"outside any sandbox, once the owner approves it at the gate. " +
+	"Use it for a live sandbox probe, a live zing serve, or wall-clock timing. " +
+	"A host scenario needs a check."
+
+// TestPlanningPromptsTeachHostKind proves both planning prompts offer kind
+// host right after the sandbox-checks sentence, and that planning-feature.md
+// lists it as the fourth kind in its scenarios step (#49).
+func TestPlanningPromptsTeachHostKind(t *testing.T) {
+	t.Parallel()
+	for _, path := range []string{planningFeaturePromptPath, planningBugPromptPath} {
+		if !strings.Contains(unwrapped(t, path), hostKindSentence) {
+			t.Errorf("%s lacks the host-kind sentence", path)
+		}
+	}
+	if !strings.Contains(unwrapped(t, planningFeaturePromptPath), "behavior, negative, performance, or host") {
+		t.Errorf("%s does not list host as the fourth kind", planningFeaturePromptPath)
+	}
+}
+
+// TestJudgePromptTrustsHostChecks proves prompts/judge.md tells the judge
+// that a host scenario arrives already run, with its exit code and
+// output in host_checks, that the judge must not re-run it, and that it
+// must never return cannot_run for one (#49).
+func TestJudgePromptTrustsHostChecks(t *testing.T) {
+	t.Parallel()
+	text := unwrapped(t, "prompts/judge.md")
+	for _, want := range []string{
+		"Do not run a host scenario's check, and never return cannot_run for a host scenario.",
+		"The host_checks input gives each one's exit code and the tail of its output.",
+	} {
+		if !strings.Contains(text, want) {
+			t.Errorf("prompts/judge.md lacks %q", want)
 		}
 	}
 }

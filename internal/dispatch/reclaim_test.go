@@ -527,6 +527,52 @@ func TestReclaimForeign_WaitsForLiveCheckCommand(t *testing.T) {
 	}
 }
 
+// TestReclaimForeign_ReapsStaleFixCheck proves a dead serve's claim is kept
+// while its orphaned fix command is alive, and is reclaimed, with the row
+// deleted, once the command's group exits: the same reclaim rule
+// TestReclaimForeign_WaitsForLiveCheckCommand proves for kind test applies
+// unchanged to kind fix (#131 added fix to CHECK; migration 0009 widened
+// check_procs.kind to accept it).
+func TestReclaimForeign_ReapsStaleFixCheck(t *testing.T) {
+	t.Parallel()
+	s := newDispatchTestStore(t)
+	ticketID := seedQueuedTicket(t, s, testFixtureRef)
+	cmd := startGroupLeader(t)
+	pgid := cmd.Process.Pid
+	token, err := proc.StartToken(pgid)
+	if err != nil {
+		killGroup(t, cmd)
+		t.Skipf("proc.StartToken unsupported on this platform: %v", err)
+	}
+	const owner = "dead-check-fix-1"
+	expires := time.Now().Add(10 * time.Minute).UTC().Truncate(time.Second)
+	seedForeignClaim(t, s, ticketID, owner, expires)
+	now := time.Now()
+	if _, err := s.RecordCheckStart(t.Context(), ticketID, owner, expires, store.CheckKindFix, pgid, token, now, now); err != nil {
+		t.Fatalf("RecordCheckStart(fix): %v", err)
+	}
+
+	d := reclaimingDispatcher(t, s)
+	if err := d.Tick(t.Context()); err != nil {
+		t.Fatalf("Tick (command alive): %v", err)
+	}
+	if !claimOwnerIs(t, s, ticketID, owner) {
+		t.Fatal("claim reclaimed while the fix command is alive, want it kept")
+	}
+
+	killGroup(t, cmd)
+	waitGroupGone(t, pgid)
+	if err := d.Tick(t.Context()); err != nil {
+		t.Fatalf("Tick (command gone): %v", err)
+	}
+	if claimOwnerIs(t, s, ticketID, owner) {
+		t.Error("claim kept after the fix command exited, want reclaimed")
+	}
+	if hasCheckProc(t, s, ticketID) {
+		t.Error("check_procs row kept after the reclaim, want it deleted")
+	}
+}
+
 // TestReclaimForeign_CheckLiveDescendantAfterLeaderExit proves a CHECK
 // command whose leader exited but whose descendant lives keeps the claim.
 func TestReclaimForeign_CheckLiveDescendantAfterLeaderExit(t *testing.T) {

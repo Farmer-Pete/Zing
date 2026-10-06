@@ -1,10 +1,11 @@
 // owner_edit.go: Store.OwnerEdit (#41), the one store method behind every
 // owner console action that edits a sealed scenario's given/when/then/
-// check, a sealed plan's task (edit or drop), or the ticket body. Each
-// accepted edit runs in one transaction, validates the new payload against
-// its JSON Schema (plus, for a plan, the structural 1..N check), is
-// refused with *OwnerEditError while a run holds the ticket's claim, and
-// writes exactly one owner_edit event holding the old and new text.
+// check, a sealed plan's task (edit or drop), a sealed plan's file's task
+// list, or the ticket body. Each accepted edit runs in one transaction,
+// validates the new payload against its JSON Schema (plus, for a plan, the
+// structural 1..N check), is refused with *OwnerEditError while a run
+// holds the ticket's claim, and writes exactly one owner_edit event
+// holding the old and new text.
 package store
 
 import (
@@ -22,10 +23,11 @@ import (
 	"zing/internal/response"
 )
 
-// The three OwnerEditRequest.Target values OwnerEdit accepts.
+// The four OwnerEditRequest.Target values OwnerEdit accepts.
 const (
 	OwnerEditScenario   = "scenario"
 	OwnerEditPlanTask   = "plan_task"
+	OwnerEditPlanFile   = "plan_file"
 	OwnerEditTicketBody = "ticket_body"
 )
 
@@ -58,10 +60,10 @@ const (
 const maxPlanTaskRef = 12
 
 // OwnerEditRequest is one owner edit: an edit to one scenario's given,
-// when, then, or check, an edit or drop of one plan task, or an amendment
-// to the ticket body (design section matching #41). Exactly the fields
-// named for Target are meaningful; any other non-nil field is refused
-// bad_request.
+// when, then, or check, an edit or drop of one plan task, an edit of one
+// plan file's task list, or an amendment to the ticket body (design
+// section matching #41). Exactly the fields named for Target are
+// meaningful; any other non-nil field is refused bad_request.
 type OwnerEditRequest struct {
 	TicketID int64
 	Target   string
@@ -78,6 +80,11 @@ type OwnerEditRequest struct {
 	Text *string
 	Test *string
 	Demo *bool
+
+	// plan_file edit only. Must match planFileTasksPattern; every number
+	// must name an existing task (checkPlanStructure). Stored normalized
+	// ascending and unique.
+	Tasks *string
 
 	// ticket_body edit only.
 	Body *string
@@ -127,11 +134,18 @@ func execClaimGuardedTx(ctx context.Context, tx *sql.Tx, what, query string, arg
 // scenario target, matching response.Scenario.ID's own pattern.
 var scenarioRefPattern = regexp.MustCompile(`^s\d+$`)
 
+// planFileTasksPattern is OwnerEditRequest.Tasks' required shape for a
+// plan_file edit: one or more task numbers (1 to 99), separated by single
+// spaces. Whether each number names a task that actually exists on the
+// plan is checked later, by checkPlanStructure.
+var planFileTasksPattern = regexp.MustCompile(`^[1-9]\d?( [1-9]\d?)*$`)
+
 // ownerEditFieldsByTarget names, for each target, exactly the
 // OwnerEditRequest fields an edit may set.
 var ownerEditFieldsByTarget = map[string]map[string]bool{
 	OwnerEditScenario:   {"given": true, "when": true, "then": true, "check": true},
 	OwnerEditPlanTask:   {"text": true, "test": true, "demo": true},
+	OwnerEditPlanFile:   {"tasks": true},
 	OwnerEditTicketBody: {"body": true},
 }
 
@@ -160,6 +174,9 @@ func ownerEditSetFields(req OwnerEditRequest) []string {
 	if req.Demo != nil {
 		names = append(names, "demo")
 	}
+	if req.Tasks != nil {
+		names = append(names, "tasks")
+	}
 	if req.Body != nil {
 		names = append(names, "body")
 	}
@@ -176,7 +193,7 @@ func checkOwnerEditShape(req OwnerEditRequest) *OwnerEditError {
 
 	allowed, ok := ownerEditFieldsByTarget[req.Target]
 	if !ok {
-		return ownerEditErr(OwnerEditCodeBadRequest, "target must be one of scenario, plan_task, ticket_body")
+		return ownerEditErr(OwnerEditCodeBadRequest, "target must be one of scenario, plan_task, plan_file, ticket_body")
 	}
 
 	switch req.Action {
@@ -203,6 +220,11 @@ func checkOwnerEditShape(req OwnerEditRequest) *OwnerEditError {
 		return ownerEditErr(OwnerEditCodeBadRequest, "an edit must set at least one field")
 	}
 
+	badTasks := req.Tasks != nil && !planFileTasksPattern.MatchString(*req.Tasks)
+	if req.Target == OwnerEditPlanFile && badTasks {
+		return ownerEditErr(OwnerEditCodeBadRequest, "tasks must be task numbers separated by single spaces, such as 2 6")
+	}
+
 	blankBody := req.Body != nil && strings.TrimSpace(*req.Body) == ""
 	if req.Target == OwnerEditTicketBody && blankBody {
 		return ownerEditErr(OwnerEditCodeBadRequest, "body must not be blank")
@@ -212,8 +234,8 @@ func checkOwnerEditShape(req OwnerEditRequest) *OwnerEditError {
 }
 
 // checkOwnerEditRef validates Ref's format for target: a scenario id
-// (^s[0-9]+$), a plan task number (decimal, 1 to maxPlanTaskRef), or, for
-// ticket_body, the empty string.
+// (^s[0-9]+$), a plan task number (decimal, 1 to maxPlanTaskRef), a
+// non-blank file path for plan_file, or, for ticket_body, the empty string.
 func checkOwnerEditRef(target, ref string) *OwnerEditError {
 	switch target {
 	case OwnerEditScenario:
@@ -226,6 +248,10 @@ func checkOwnerEditRef(target, ref string) *OwnerEditError {
 		if !inRange {
 			return ownerEditErr(OwnerEditCodeBadRequest, fmt.Sprintf("ref must be a decimal from 1 to %d", maxPlanTaskRef))
 		}
+	case OwnerEditPlanFile:
+		if strings.TrimSpace(ref) == "" {
+			return ownerEditErr(OwnerEditCodeBadRequest, "ref must name a file path")
+		}
 	case OwnerEditTicketBody:
 		if ref != "" {
 			return ownerEditErr(OwnerEditCodeBadRequest, "ref must be empty for ticket_body")
@@ -235,9 +261,10 @@ func checkOwnerEditRef(target, ref string) *OwnerEditError {
 }
 
 // OwnerEdit applies one owner edit to a sealed scenario, a sealed plan's
-// task, or the ticket body, in one transaction, and records an owner_edit
-// event holding the old and new text. It refuses while a run holds the
-// ticket's claim. A refusal returns *OwnerEditError and changes nothing.
+// task, a sealed plan's file's task list, or the ticket body, in one
+// transaction, and records an owner_edit event holding the old and new
+// text. It refuses while a run holds the ticket's claim. A refusal returns
+// *OwnerEditError and changes nothing.
 func (s *Store) OwnerEdit(ctx context.Context, req OwnerEditRequest) error {
 	if err := checkOwnerEditShape(req); err != nil {
 		return err
@@ -255,6 +282,8 @@ func (s *Store) OwnerEdit(ctx context.Context, req OwnerEditRequest) error {
 		ev, err = s.editScenarioTx(ctx, tx, req)
 	case OwnerEditPlanTask:
 		ev, err = s.editPlanTaskTx(ctx, tx, req)
+	case OwnerEditPlanFile:
+		ev, err = s.editPlanFileTx(ctx, tx, req)
 	case OwnerEditTicketBody:
 		ev, err = editTicketBodyTx(ctx, tx, req)
 	}
@@ -315,6 +344,9 @@ func (s *Store) editScenarioTx(ctx context.Context, tx *sql.Tx, req OwnerEditReq
 	if req.Check != nil {
 		sc.Check = *req.Check
 	}
+	if sc.Kind == response.ScenarioKindHost && strings.TrimSpace(sc.Check) == "" {
+		return response.OwnerEditEvent{}, ownerEditErr(OwnerEditCodeInvalid, response.HostScenarioNeedsCheck)
+	}
 
 	newPayload, err := json.Marshal(sc)
 	if err != nil {
@@ -337,45 +369,54 @@ func (s *Store) editScenarioTx(ctx context.Context, tx *sql.Tx, req OwnerEditReq
 	}, nil
 }
 
+// loadSealedPlanTx loads the ticket's newest plan artifact and refuses it
+// unless its cohort (the run that produced it) has at least one sealed
+// scenario.
+func loadSealedPlanTx(ctx context.Context, tx *sql.Tx, ticketID int64) (id int64, payload []byte, plan response.Plan, err error) {
+	var runID sql.NullInt64
+	err = tx.QueryRowContext(ctx,
+		`SELECT id, run_id, payload FROM artifacts WHERE ticket_id = ? AND type = 'plan' ORDER BY version DESC LIMIT 1`,
+		ticketID,
+	).Scan(&id, &runID, &payload)
+	switch {
+	case errors.Is(err, sql.ErrNoRows):
+		return 0, nil, response.Plan{}, ownerEditErr(OwnerEditCodeNotFound, "this ticket has no plan")
+	case err != nil:
+		return 0, nil, response.Plan{}, fmt.Errorf("owner edit: load plan: %w", err)
+	}
+
+	var sealedCount int
+	if err = tx.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM artifacts WHERE ticket_id = ? AND type = 'scenario' AND run_id = ? AND sealed_at IS NOT NULL`,
+		ticketID, runID,
+	).Scan(&sealedCount); err != nil {
+		return 0, nil, response.Plan{}, fmt.Errorf("owner edit: count sealed scenarios: %w", err)
+	}
+	if sealedCount < 1 {
+		return 0, nil, response.Plan{}, ownerEditErr(OwnerEditCodeNotSealed, "the plan is not sealed; answer the gate instead")
+	}
+
+	if err = json.Unmarshal(payload, &plan); err != nil {
+		return 0, nil, response.Plan{}, fmt.Errorf("owner edit: unmarshal plan: %w", err)
+	}
+	return id, payload, plan, nil
+}
+
 // editPlanTaskTx edits or drops one task of the ticket's current (highest
 // version) plan: it loads the plan, checks that its cohort has at least one
 // sealed scenario, applies the edit or the drop, validates the result
 // against artifacts/plan plus checkPlanStructure, and writes it back in
 // place (the version is unchanged) guarded by the ticket's claim.
 func (s *Store) editPlanTaskTx(ctx context.Context, tx *sql.Tx, req OwnerEditRequest) (response.OwnerEditEvent, error) {
-	var id int64
-	var runID sql.NullInt64
-	var payload []byte
-	err := tx.QueryRowContext(ctx,
-		`SELECT id, run_id, payload FROM artifacts WHERE ticket_id = ? AND type = 'plan' ORDER BY version DESC LIMIT 1`,
-		req.TicketID,
-	).Scan(&id, &runID, &payload)
-	switch {
-	case errors.Is(err, sql.ErrNoRows):
-		return response.OwnerEditEvent{}, ownerEditErr(OwnerEditCodeNotFound, "this ticket has no plan")
-	case err != nil:
-		return response.OwnerEditEvent{}, fmt.Errorf("owner edit: load plan: %w", err)
-	}
-
-	var sealedCount int
-	if err = tx.QueryRowContext(ctx,
-		`SELECT COUNT(*) FROM artifacts WHERE ticket_id = ? AND type = 'scenario' AND run_id = ? AND sealed_at IS NOT NULL`,
-		req.TicketID, runID,
-	).Scan(&sealedCount); err != nil {
-		return response.OwnerEditEvent{}, fmt.Errorf("owner edit: count sealed scenarios: %w", err)
-	}
-	if sealedCount < 1 {
-		return response.OwnerEditEvent{}, ownerEditErr(OwnerEditCodeNotSealed, "the plan is not sealed; answer the gate instead")
+	id, payload, plan, err := loadSealedPlanTx(ctx, tx, req.TicketID)
+	if err != nil {
+		return response.OwnerEditEvent{}, err
 	}
 
 	// checkOwnerEditRef has already confirmed req.Ref parses as a decimal
 	// from 1 to maxPlanTaskRef, so the error is unreachable here.
 	n, _ := strconv.Atoi(req.Ref) //nolint:errcheck // unreachable, see above
 
-	var plan response.Plan
-	if err = json.Unmarshal(payload, &plan); err != nil {
-		return response.OwnerEditEvent{}, fmt.Errorf("owner edit: unmarshal plan: %w", err)
-	}
 	oldPayload := string(payload)
 
 	idx := slices.IndexFunc(plan.Delivery.Tasks, func(t response.Task) bool { return t.N == n })
@@ -504,6 +545,125 @@ func checkPlanStructure(p response.Plan) string {
 		}
 	}
 	return ""
+}
+
+// editPlanFileTx sets the task list of every delivery file entry whose path
+// is req.Ref, on the ticket's newest sealed, task-mapped plan. It writes
+// the whole plan back in place (the version is unchanged) guarded by the
+// ticket's claim.
+func (s *Store) editPlanFileTx(ctx context.Context, tx *sql.Tx, req OwnerEditRequest) (response.OwnerEditEvent, error) {
+	id, _, plan, err := loadSealedPlanTx(ctx, tx, req.TicketID)
+	if err != nil {
+		return response.OwnerEditEvent{}, err
+	}
+	if !response.TaskMapped(plan) {
+		return response.OwnerEditEvent{}, ownerEditErr(OwnerEditCodeInvalid, "this plan's files name no tasks; a task list cannot be set")
+	}
+
+	newTasks := normalizeTaskList(*req.Tasks)
+	old, found := "", false
+	for i, f := range plan.Delivery.Files {
+		if f.Path != req.Ref {
+			continue
+		}
+		if !found {
+			old, found = f.Task, true
+		}
+		plan.Delivery.Files[i].Task = newTasks
+	}
+	if !found {
+		return response.OwnerEditEvent{}, ownerEditErr(OwnerEditCodeNotFound, "no file "+req.Ref+" in the plan")
+	}
+
+	newPayload, err := json.Marshal(plan)
+	if err != nil {
+		return response.OwnerEditEvent{}, fmt.Errorf("owner edit: marshal plan: %w", err)
+	}
+	if err = s.schemas.validate("artifacts", "plan", newPayload); err != nil {
+		return response.OwnerEditEvent{}, ownerEditErr(OwnerEditCodeInvalid, err.Error())
+	}
+	if fault := checkPlanStructure(plan); fault != "" {
+		return response.OwnerEditEvent{}, ownerEditErr(OwnerEditCodeInvalid, fault)
+	}
+
+	if err := execClaimGuardedTx(ctx, tx, "plan",
+		`UPDATE artifacts SET payload = ? WHERE id = ? AND (SELECT claim_owner FROM tickets WHERE id = ?) IS NULL`,
+		string(newPayload), id, req.TicketID,
+	); err != nil {
+		return response.OwnerEditEvent{}, err
+	}
+
+	return response.OwnerEditEvent{
+		Target: OwnerEditPlanFile, Ref: req.Ref, Action: OwnerEditActionEdit,
+		Old: old, New: newTasks,
+	}, nil
+}
+
+// normalizeTaskList returns s's task numbers ascending, unique, joined by
+// single spaces (response.FormatTaskList, the same format GrantFileTasks
+// writes). checkOwnerEditShape has already matched s against
+// planFileTasksPattern, so every field is a valid number.
+func normalizeTaskList(s string) string {
+	var nums []int
+	for field := range strings.FieldsSeq(s) {
+		// checkOwnerEditShape has already matched s against
+		// planFileTasksPattern, so the error is unreachable here.
+		n, _ := strconv.Atoi(field) //nolint:errcheck // unreachable, see above
+		nums = append(nums, n)
+	}
+	return response.FormatTaskList(nums)
+}
+
+// grantPlanFilesTx applies a HandlerCommit's GrantFiles to the ticket's
+// newest plan in place and writes one owner_edit event per changed file
+// (plan #51). It needs no claim guard: CommitHandlerResult's own fenced
+// UPDATE, at the end of the same transaction, is what proves the handler
+// still holds the claim. It writes no event and no UPDATE when
+// GrantFileTasks reports no change. Any load failure, including the
+// ticket having no plan at all (sql.ErrNoRows), is an error: callers that
+// set GrantFiles have just read a stored plan themselves, so a missing
+// plan row here means something is wrong, and the whole commit rolls
+// back rather than silently drop the grant.
+func (s *Store) grantPlanFilesTx(ctx context.Context, tx *sql.Tx, ticketID int64, g response.FileGrant) error {
+	var id int64
+	var payload []byte
+	if err := tx.QueryRowContext(ctx,
+		`SELECT id, payload FROM artifacts WHERE ticket_id = ? AND type = 'plan' ORDER BY version DESC LIMIT 1`,
+		ticketID).Scan(&id, &payload); err != nil {
+		return fmt.Errorf("grant plan files: load plan: %w", err)
+	}
+	var plan response.Plan
+	if err := json.Unmarshal(payload, &plan); err != nil {
+		return fmt.Errorf("grant plan files: unmarshal plan: %w", err)
+	}
+	granted, changes := response.GrantFileTasks(plan, g)
+	if len(changes) == 0 {
+		slog.DebugContext(ctx, "file grant no change", "ticket_id", ticketID, "task_n", g.Task, "paths", g.Paths)
+		return nil
+	}
+	newPayload, err := json.Marshal(granted)
+	if err != nil {
+		return fmt.Errorf("grant plan files: marshal plan: %w", err)
+	}
+	if err = s.schemas.validate("artifacts", "plan", newPayload); err != nil {
+		return fmt.Errorf("grant plan files: %w", err)
+	}
+	if fault := checkPlanStructure(granted); fault != "" {
+		return fmt.Errorf("grant plan files: %s", fault)
+	}
+	if _, err = tx.ExecContext(ctx, `UPDATE artifacts SET payload = ? WHERE id = ?`, string(newPayload), id); err != nil {
+		return fmt.Errorf("grant plan files: update plan: %w", err)
+	}
+	for _, ch := range changes {
+		ev := response.OwnerEditEvent{Target: OwnerEditPlanFile, Ref: ch.Path, Action: OwnerEditActionEdit, Old: ch.Old, New: ch.New}
+		if err := s.insertOwnerEditEventTx(ctx, tx, ticketID, ev); err != nil {
+			return err
+		}
+	}
+	// Logged before tx.Commit runs: this only says the grant was staged
+	// in this transaction, not that it landed.
+	slog.DebugContext(ctx, "file grant staged", "ticket_id", ticketID, "task_n", g.Task, "paths", g.Paths, "changed", len(changes))
+	return nil
 }
 
 // editTicketBodyTx amends tickets.body: checkOwnerEditShape has already

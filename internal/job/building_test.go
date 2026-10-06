@@ -439,12 +439,11 @@ func TestCheckRejectsAnotherTasksFile(t *testing.T) {
 	if len(checkCommit.Artifacts) != 0 || checkCommit.Next != "" {
 		t.Fatalf("CHECK commit = %+v, want no artifacts and no transition", checkCommit)
 	}
-	wantLine := "claims/files_changed: greet.go belongs to task 2, not task 1"
 	if len(checkCommit.Messages) != 1 || !strings.HasPrefix(checkCommit.Messages[0].Body, "claim errors pending run ") {
 		t.Fatalf("CHECK commit.Messages = %+v, want the pending marker", checkCommit.Messages)
 	}
-	if !strings.Contains(checkCommit.Messages[0].Body, wantLine) {
-		t.Fatalf("CHECK marker body = %q, want it to contain %q", checkCommit.Messages[0].Body, wantLine)
+	if !strings.Contains(checkCommit.Messages[0].Body, testForeignLineGreet) {
+		t.Fatalf("CHECK marker body = %q, want it to contain %q", checkCommit.Messages[0].Body, testForeignLineGreet)
 	}
 	apply(t, s, ticket, checkCommit)
 
@@ -459,8 +458,8 @@ func TestCheckRejectsAnotherTasksFile(t *testing.T) {
 	if lastReq.SessionID != "scope-sess" {
 		t.Errorf("resume request SessionID = %q, want %q", lastReq.SessionID, "scope-sess")
 	}
-	if !strings.Contains(lastReq.Prompt, wantLine) {
-		t.Errorf("resume prompt = %q, want it to contain %q", lastReq.Prompt, wantLine)
+	if !strings.Contains(lastReq.Prompt, testForeignLineGreet) {
+		t.Errorf("resume prompt = %q, want it to contain %q", lastReq.Prompt, testForeignLineGreet)
 	}
 }
 

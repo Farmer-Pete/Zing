@@ -111,9 +111,9 @@ func legacyEscalationQuestion(t *testing.T, s *store.Store, ticketID int64, code
 		Key: "Q1", Kind: response.QuestionKindQuestion, State: response.QuestionStateOpen,
 		Recommended: "b",
 		Options: []response.Option{
-			{Key: "a", Text: "Retry"},
+			{Key: "a", Text: testEscalationTextRetry},
 			{Key: "b", Text: "Back to planning"},
-			{Key: "c", Text: "Abandon"},
+			{Key: "c", Text: testEscalationTextAbandon},
 		},
 	})
 	if err != nil {
@@ -257,7 +257,7 @@ func TestEscalationResolve_Classify_EveryChoiceClassifiesFreshWithNotesAndError(
 		name   string
 		option *string
 	}{
-		{"Retry", new("a")},
+		{testEscalationTextRetry, new("a")},
 		{"Back", new("b")},
 		{testCaseReplyOnly, nil},
 	} {

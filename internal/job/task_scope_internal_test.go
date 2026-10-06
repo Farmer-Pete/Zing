@@ -152,6 +152,101 @@ func TestForeignTaskPaths(t *testing.T) {
 	}
 }
 
+// TestParseForeignLines proves parseForeignLines' own round trip with
+// foreignTaskPaths (design "shape" rule 1, plan #51): the exact marker
+// lines CHECK writes parse back to the path and unit number that produced
+// them.
+func TestParseForeignLines(t *testing.T) {
+	t.Parallel()
+
+	t.Run("round trip", func(t *testing.T) {
+		t.Parallel()
+		cases := []struct {
+			name    string
+			plan    response.Plan
+			taskN   int
+			changed []string
+		}{
+			{
+				name: "single owner",
+				plan: response.Plan{Delivery: response.Delivery{Files: []response.FileChange{
+					fileTask(pbHelloTxt, "1"), fileTask(testScopeGreetPath, "2"),
+				}}},
+				taskN:   1,
+				changed: []string{testScopeGreetPath},
+			},
+			{
+				name: "two owners",
+				plan: response.Plan{Delivery: response.Delivery{Files: []response.FileChange{
+					fileTask(testScopeHelperPath, "2 3"),
+				}}},
+				taskN:   1,
+				changed: []string{testScopeHelperPath},
+			},
+			{
+				name: "three owners",
+				plan: response.Plan{Delivery: response.Delivery{Files: []response.FileChange{
+					fileTask(testScopeHelperPath, "1 2 4"),
+				}}},
+				taskN:   3,
+				changed: []string{testScopeHelperPath},
+			},
+		}
+		for _, tc := range cases {
+			t.Run(tc.name, func(t *testing.T) {
+				t.Parallel()
+				errs := foreignTaskPaths(tc.plan, tc.taskN, tc.changed)
+				if len(errs) != 1 {
+					t.Fatalf("foreignTaskPaths = %v, want exactly one error", errs)
+				}
+				gotN, gotPaths := parseForeignLines(errs[0].Error())
+				if gotN != tc.taskN {
+					t.Errorf("parseForeignLines taskN = %d, want %d", gotN, tc.taskN)
+				}
+				if len(gotPaths) != 1 || gotPaths[0] != tc.changed[0] {
+					t.Errorf("parseForeignLines paths = %v, want [%s]", gotPaths, tc.changed[0])
+				}
+			})
+		}
+	})
+
+	t.Run("mixed with a non-foreign line", func(t *testing.T) {
+		t.Parallel()
+		body := "claims/files_changed: missing x\nclaims/files_changed: greet.go belongs to task 2, not task 1"
+		taskN, paths := parseForeignLines(body)
+		if taskN != 1 || len(paths) != 1 || paths[0] != testScopeGreetPath {
+			t.Errorf("parseForeignLines(%q) = %d, %v, want 1, [%s]", body, taskN, paths, testScopeGreetPath)
+		}
+	})
+
+	t.Run("duplicate lines yield one path", func(t *testing.T) {
+		t.Parallel()
+		line := "claims/files_changed: greet.go belongs to task 2, not task 1"
+		taskN, paths := parseForeignLines(line + "\n" + line)
+		if taskN != 1 || len(paths) != 1 || paths[0] != testScopeGreetPath {
+			t.Errorf("parseForeignLines(duplicate) = %d, %v, want 1, [%s]", taskN, paths, testScopeGreetPath)
+		}
+	})
+
+	t.Run("a second not-task number keeps only the first's paths", func(t *testing.T) {
+		t.Parallel()
+		body := "claims/files_changed: greet.go belongs to task 2, not task 1\n" +
+			"claims/files_changed: helper.go belongs to task 3, not task 2"
+		taskN, paths := parseForeignLines(body)
+		if taskN != 1 || len(paths) != 1 || paths[0] != testScopeGreetPath {
+			t.Errorf("parseForeignLines(two not-task numbers) = %d, %v, want 1, [%s]", taskN, paths, testScopeGreetPath)
+		}
+	})
+
+	t.Run("empty body", func(t *testing.T) {
+		t.Parallel()
+		taskN, paths := parseForeignLines("")
+		if taskN != 0 || paths != nil {
+			t.Errorf("parseForeignLines(\"\") = %d, %v, want 0, nil", taskN, paths)
+		}
+	})
+}
+
 const testScopeExtraPath = "extra.go"
 
 func acceptedExtraEvent(path string, taskN int) store.FileEventRow {

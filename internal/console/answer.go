@@ -9,9 +9,10 @@
 // client-only ".picked" highlight and collapsed the open question group
 // after every pick. This supersedes Package 3's POST /answer (server.go,
 // handlers.go), which answered one option at a time with no draft stage;
-// console.js's postDraft, sendBatch, and markRead (Task 4) were already
-// written against these three routes' JSON contract, ahead of this task
-// building them.
+// console.js's postDraft and sendBatch (Task 4) were already written
+// against these three routes' JSON contract, ahead of this task building
+// them. No key or client caller posts /read today (ticket #44 removed the
+// bare x binding that used to); the route stays for a future caller.
 package console
 
 import (
@@ -54,12 +55,18 @@ type draftItemRequest struct {
 // strict decode can tell an omitted "text" key, which names no mode at all
 // and is malformed when the request also names a question, apart from an
 // explicit "text":"", which clears that question's reply draft (review fix).
+// Base is the reply text the tab last saw saved (ticket #43): nil means the
+// caller sent none and SaveDraft keeps overwriting unconditionally; a
+// non-nil value that no longer matches what is stored becomes a 409
+// "changed in another tab" instead of a silent overwrite. It shares Text's
+// 8000-rune cap, since it is itself a previous save's text.
 type draftRequest struct {
 	Ticket   int64             `json:"ticket"`
 	Question *int64            `json:"question"`
 	Option   *string           `json:"option"`
 	Item     *draftItemRequest `json:"item"`
 	Text     *string           `json:"text"`
+	Base     *string           `json:"base"`
 }
 
 // handleDraft is POST /draft (design section 6.7, 7.1): decode the body
@@ -93,6 +100,10 @@ func (c *console) handleDraft(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "bad request", http.StatusBadRequest)
 		return
 	}
+	if req.Base != nil && len([]rune(*req.Base)) > maxDraftTextLen {
+		http.Error(w, "bad request", http.StatusBadRequest)
+		return
+	}
 	// A question draft naming none of option, item, or text (text omitted,
 	// not an explicit "") names no mode at all: SaveDraft's draftModeCount
 	// would otherwise read it as an empty-text clear (review fix).
@@ -121,7 +132,7 @@ func (c *console) handleDraft(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	in := store.DraftInput{TicketID: req.Ticket, QuestionID: req.Question, Option: req.Option, Text: text}
+	in := store.DraftInput{TicketID: req.Ticket, QuestionID: req.Question, Option: req.Option, Text: text, Base: req.Base}
 	if req.Item != nil {
 		in.Item = &store.ItemDecision{Ref: req.Item.Ref, Decision: req.Item.Decision}
 	}
@@ -129,7 +140,7 @@ func (c *console) handleDraft(w http.ResponseWriter, r *http.Request) {
 	_, err := c.store.SaveDraft(r.Context(), in)
 	if err != nil {
 		if conflictErr, ok := errors.AsType[*store.ConflictError](err); ok {
-			http.Error(w, conflictErr.Reason, http.StatusConflict)
+			writeConflict(w, conflictErr)
 			return
 		}
 		slog.Error("console: save draft", "ticket_id", req.Ticket, "err", err)
@@ -140,23 +151,64 @@ func (c *console) handleDraft(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
-// sendRequest is POST /send's body (design section 6.4: sendBatch posts
-// {ticket}).
-type sendRequest struct {
-	Ticket int64 `json:"ticket"`
+// writeConflict writes ce as handleDraft's 409 (ticket #43): a conflict
+// with no Current (every reason but "changed in another tab") stays the
+// existing plain-text body, since console.js's other conflict handling
+// (draftConflictMessage) only reads the status and the text. A conflict
+// that does carry Current -- the stale-base case -- answers a JSON body
+// instead, {"reason":..., "current":...}, so the client can learn the
+// stored text to show under the box and to record as its next base,
+// without a second round trip. The response header is already written by
+// the time Encode could fail, so there is nothing left to tell the client;
+// the error is logged and otherwise ignored (review fix, simplification).
+func writeConflict(w http.ResponseWriter, ce *store.ConflictError) {
+	if ce.Current == nil {
+		http.Error(w, ce.Reason, http.StatusConflict)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusConflict)
+	if err := json.NewEncoder(w).Encode(struct {
+		Reason  string `json:"reason"`
+		Current string `json:"current"`
+	}{Reason: ce.Reason, Current: *ce.Current}); err != nil {
+		slog.Error("console: write draft conflict", "reason", ce.Reason, "err", err)
+	}
 }
 
-// handleSend is POST /send (design section 6.7, 7.1): send the ticket's
-// drafted batch. 400 on a malformed body or non-positive ticket, 409 when
-// SendBatch reports Empty (nothing drafted) or a typed conflict, 200 with a
-// plain result line and a bus publish on success.
+// maxSendQuestions bounds sendRequest.Questions (ticket #43: Cmd+Enter must
+// name what it sends). 50 is comfortably above any one ticket's open
+// question count in practice; the cap exists to keep a malformed or
+// malicious body from asking SendBatchOnly to build an arbitrarily large
+// set, not to express a real limit the console would ever approach.
+const maxSendQuestions = 50
+
+// sendRequest is POST /send's body (design section 6.4, ticket #43:
+// sendBatch now posts {ticket, questions}, having collected the ids itself
+// from what the page shows -- never a blanket "send everything drafted").
+// Questions is required and non-empty: a body naming none would otherwise
+// read as "send nothing's own scope", which SendBatchOnly has no way to
+// tell apart from "send every draft on the ticket", the exact bug this
+// ticket closes.
+type sendRequest struct {
+	Ticket    int64   `json:"ticket"`
+	Questions []int64 `json:"questions"`
+}
+
+// handleSend is POST /send (design section 6.7, 7.1; ticket #43): send only
+// the drafts on req.Questions. 400 on a malformed body, a non-positive
+// ticket, an absent or empty Questions ("questions required"), more than
+// maxSendQuestions ids, or any id at or below 0 (both "bad request"). 409
+// when SendBatchOnly reports Empty (nothing drafted on those questions) or
+// a typed conflict, 200 with a plain result line and a bus publish on
+// success.
 //
 // The success response carries a body (bug fix: Cmd+Enter sent the batch,
 // but console.js's postJSON ignored a 204's empty body, so the console
 // showed nothing and the owner could not tell whether the chord had done
 // anything), so it is 200 rather than 204, which forbids one. "Nothing to
 // send." (the Empty branch) reads the same whether a question answers
-// vanished after SendBatch's own revalidation discarded them as stale.
+// vanished after SendBatchOnly's own revalidation discarded them as stale.
 func (c *console) handleSend(w http.ResponseWriter, r *http.Request) {
 	r.Body = http.MaxBytesReader(w, r.Body, maxDraftBodyBytes)
 
@@ -169,8 +221,22 @@ func (c *console) handleSend(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "bad request", http.StatusBadRequest)
 		return
 	}
+	if len(req.Questions) == 0 {
+		http.Error(w, "questions required", http.StatusBadRequest)
+		return
+	}
+	if len(req.Questions) > maxSendQuestions {
+		http.Error(w, "bad request", http.StatusBadRequest)
+		return
+	}
+	for _, id := range req.Questions {
+		if id <= 0 {
+			http.Error(w, "bad request", http.StatusBadRequest)
+			return
+		}
+	}
 
-	result, err := c.store.SendBatch(r.Context(), req.Ticket)
+	result, err := c.store.SendBatchOnly(r.Context(), req.Ticket, req.Questions)
 	if err != nil {
 		if conflictErr, ok := errors.AsType[*store.ConflictError](err); ok {
 			http.Error(w, conflictErr.Reason, http.StatusConflict)
@@ -215,8 +281,7 @@ func sendResultText(result store.BatchResult) string {
 	return text
 }
 
-// readRequest is POST /read's body (design section 6.4: markRead posts
-// {message}).
+// readRequest is POST /read's body (design section 6.4, 6.8): {message}.
 type readRequest struct {
 	Message int64 `json:"message"`
 }

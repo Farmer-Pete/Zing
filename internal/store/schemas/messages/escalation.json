@@ -70,6 +70,28 @@
         "shipping",
         "respond"
       ]
+    },
+    "grant": {
+      "properties": {
+        "task": {
+          "type": "integer",
+          "maximum": 12,
+          "minimum": 1
+        },
+        "paths": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array",
+          "minItems": 1
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "required": [
+        "task",
+        "paths"
+      ]
     }
   },
   "additionalProperties": false,

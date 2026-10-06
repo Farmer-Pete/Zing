@@ -180,6 +180,9 @@ type Config struct {
 	Sandboxes      sandbox.Set
 	RequireSandbox bool
 	Commands       job.CommandRunner
+	// HostCommands runs a host-kind scenario's check at judging, unsandboxed
+	// (#49): serve wires job.NewHostCommandRunner(); selftest leaves it nil.
+	HostCommands job.CommandRunner
 	// DataDir is the resolved data directory (PKG9-PLAN.md section 4.3,
 	// 7.3): the private temp root of every unsandboxed run lives under it.
 	DataDir string
@@ -1147,9 +1150,10 @@ func (d *Dispatcher) runAndCommit(ctx context.Context, ticket store.Ticket, time
 	deps := job.Deps{
 		Store: d.store, Runtimes: d.rts, Machine: d.machine,
 		Models: d.cfg.Models, Budget: d.cfg.Budget, Floor: d.cfg.Floor,
-		Owner: d.cfg.Owner, Expires: expires,
+		Owner: d.cfg.Owner, Expires: expires, Now: d.cfg.Now,
 		Projects: d.cfg.Projects, Sandboxes: d.cfg.Sandboxes, RequireSandbox: d.cfg.RequireSandbox, Commands: d.cfg.Commands,
-		DataDir: d.cfg.DataDir, LensesParallel: d.cfg.LensesParallel, JudgeCodexHome: d.cfg.JudgeCodexHome,
+		HostCommands: d.cfg.HostCommands,
+		DataDir:      d.cfg.DataDir, LensesParallel: d.cfg.LensesParallel, JudgeCodexHome: d.cfg.JudgeCodexHome,
 		MergeRule: d.cfg.MergeRule, ReviewBots: d.cfg.ReviewBots,
 		// Tracker is the dispatcher itself: PostPRLink and PostDone (below)
 		// already give it job.ShipTracker's own two methods, over its own
@@ -1196,6 +1200,14 @@ func (d *Dispatcher) runAndCommit(ctx context.Context, ticket store.Ticket, time
 		err = job.ValidateCommit(ticket, commit)
 	}
 	if err != nil {
+		// job.Capped (design shape, "Park write"): a Claude session limit
+		// hit, or a hold refusal for a lens that reserved a run before
+		// another lens in the same round hit the cap. This is checked ahead
+		// of runtime.ErrCanceled because a capped error is never that: the
+		// run is parked, not left for ExpireClaims to reconcile.
+		if capped, ok := job.Capped(err); ok {
+			return d.parkCapped(ctx, ticket, expires, capped)
+		}
 		// runtime.ErrCanceled (design D13, section 4.5, 6.8): runCtx's own
 		// deadline expired (ctx itself is still live, or the branch above
 		// would already have returned), not a failure to escalate. The
@@ -1307,6 +1319,62 @@ func (d *Dispatcher) recordShutdownInterrupt(ctx context.Context, ticket store.T
 		slog.Warn("claim already lost", "ticket_id", ticket.ID)
 		return nil
 	}
+	d.bus.Publish()
+	return nil
+}
+
+// parkCapped records a Claude session limit (or a hold refusal) for ticket
+// (design shape, "Park write"): store.ParkRuns terminalizes capped.Finish (a
+// capped review round's own already-finished lens runs, owner decision Q6)
+// by their real outcome, then every run of the ticket still open as
+// interrupted with capped_until = capped.Until, raises the claude_hold_until
+// setting when that is later, writes one "parked until" marker when any
+// run was actually swept, writes one further "discarded review round"
+// marker in the same transaction when capped.Round is non-zero (a capped
+// review round, job.Capped) and something was actually parked or finished
+// -- so a reviewing ticket held only by some other ticket's hold, with
+// every lens refused before Reserve and nothing of its own to park, never
+// floods the thread with a marker for a round that never ran -- and clears
+// the claim, all under a detached, bounded context so a cancelled handler
+// context cannot abort a write that must still land. That marker is scoped
+// to review's own capped round alone, never for a plain capped run of some
+// other job, so reviewingHandler's own cappedRoundNote cannot mistake an
+// unrelated job's park for a discarded review round. Like
+// recordShutdownInterrupt, it never returns a non-nil error: a write
+// failure is logged and the claim is left to expire for ExpireClaims to
+// reconcile.
+func (d *Dispatcher) parkCapped(ctx context.Context, ticket store.Ticket, expires time.Time, capped job.CappedInfo) error {
+	postCtx, cancel := postHandlerContext(ctx)
+	defer cancel()
+
+	discardMarker := ""
+	if capped.Round != 0 {
+		discardMarker = job.CappedRoundDiscardedMarker(capped.Round)
+	}
+	res, err := d.store.ParkRuns(postCtx, ticket.ID, d.cfg.Owner, expires, capped.Until, discardMarker, capped.Finish...)
+	resetAt := capped.Until.UTC().Format(time.RFC3339)
+	switch {
+	case err != nil:
+		slog.Error("claude session limit park failed", "ticket_id", ticket.ID, "reset_at", resetAt, "err", err)
+		return nil
+	case !res.Applied:
+		slog.Warn("claude session limit park skipped: claim already lost", "ticket_id", ticket.ID, "reset_at", resetAt)
+		return nil
+	case len(res.RunIDs) == 0 && len(capped.Finish) == 0:
+		// Nothing was actually parked or finished: every lens (or the lone
+		// job) was refused before Reserve, with no run of its own to sweep.
+		// This repeats on every tick for a held, unparked ticket until the
+		// reset, so it logs at DEBUG rather than flooding WARN.
+		slog.Debug("claim released, claude held", "ticket_id", ticket.ID, "reset_at", resetAt)
+	default:
+		finishedIDs := make([]int64, len(capped.Finish))
+		for i, r := range capped.Finish {
+			finishedIDs[i] = r.ID
+		}
+		slog.Warn("claude session limit park", "ticket_id", ticket.ID, "run_ids", res.RunIDs,
+			"finished_run_ids", finishedIDs, "reset_at", resetAt, "round", capped.Round)
+	}
+
 	d.bus.Publish()
 	return nil
 }

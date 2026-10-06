@@ -443,7 +443,7 @@ func answerOpenQuestionViaConsole(t *testing.T, st *store.Store, srv *httptest.S
 		t.Fatalf("POST /draft status = %d, want 204", draftResp.StatusCode)
 	}
 
-	sendBody := fmt.Sprintf(`{"ticket":%d}`, ticketID)
+	sendBody := fmt.Sprintf(`{"ticket":%d,"questions":[%d]}`, ticketID, open[0].ID)
 	sendReq := mutationRequest(t, srv, "/send", sendBody)
 	sendReq.Close = true
 	sendResp := doRequest(t, sendReq)

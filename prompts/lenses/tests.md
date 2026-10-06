@@ -15,10 +15,22 @@ Check:
   start (`sandbox-exec`), or a sandbox probe that skips when sandboxed
   is a finding, unless the then names that skip as the expected result
   and the check proves it per the next bullet.
+- A scenario of kind host is the exception to the bullet above: Zing
+  runs its check on the owner's machine at judging, so a live
+  `zing serve`, a sandbox probe, or timing belongs there. A host
+  scenario with no check is a finding.
 - A scenario whose then expects a skip has a check that runs `go test
   -v` and greps the skip line, such as `--- SKIP: TestName`, and the
   skip message. A bare `go test` exits 0 whether or not the test
   skipped, so it is a finding.
+- An unquoted glob in a check, such as `--include=*.go`, is a major
+  finding: a login shell that aborts on an unmatched glob turns the
+  check into a false pass. Quote it: `--include='*.go'`.
+- A check that greps a phrase of more than one word with `grep -F` or
+  `grep -q` straight against a `.md` file or a file under `prompts/`,
+  without joining its lines first, is a major finding: the phrase can
+  span the line break the prose wraps at. Join the lines first, such
+  as `tr -s '[:space:]' ' ' < FILE | grep -qF 'two words'`.
 
 ## In code
 Check that the tests exist and assert behavior, not implementation. A
