@@ -10,6 +10,15 @@ import (
 	"zing/internal/store"
 )
 
+// ownerEditClaimNote is an owner-edit box's claim note (#75 Q2): the
+// store's own refusal sentence, shown only while a run holds the ticket's
+// claim, when the box's controls render disabled.
+templ ownerEditClaimNote(claimed bool) {
+	if claimed {
+		<p class="owner-edit-claim-note">{ store.OwnerEditClaimedReason }</p>
+	}
+}
+
 // Thread renders the #main region for view=thread (design section 6.6):
 // the ticket's messages in id order, read only except for the question
 // groups, which dispatch on QuestionPayload.Kind into interactive controls
@@ -74,9 +83,10 @@ templ Thread(ticket *store.Ticket, rows []ThreadRow, wait WaitProgress, banner s
 templ ticketBodyEditor(ticket *store.Ticket) {
 	<details class="owner-edit" data-preserve-attr="open" data-ticket={ strconv.FormatInt(ticket.ID, 10) } data-target="ticket_body">
 		<summary>Ticket body</summary>
-		<textarea data-field="body">{ "\n" + ticket.Body }</textarea>
+		@ownerEditClaimNote(ticket.ClaimOwner != nil)
+		<textarea data-field="body" disabled?={ ticket.ClaimOwner != nil }>{ "\n" + ticket.Body }</textarea>
 		<p>The tracker issue { ticket.TrackerRef } is not updated; edit it by hand to match.</p>
-		<button type="button" class="owner-edit-save">Save</button>
+		<button type="button" class="owner-edit-save" disabled?={ ticket.ClaimOwner != nil }>Save</button>
 		<span class="owner-edit-error"></span>
 	</details>
 }

@@ -13,6 +13,7 @@ import (
 	"log/slog"
 	"strings"
 	"testing"
+	"time"
 
 	"zing/internal/bus"
 	"zing/internal/response"
@@ -414,6 +415,69 @@ func TestGateScenariosTable_LegacyNullCohortRendersAllAndLogsDebug(t *testing.T)
 	if !strings.Contains(logOut, fmt.Sprintf("ticket_id=%d", ticketID)) {
 		t.Errorf("legacy debug log line missing ticket_id=%d; got:\n%s", ticketID, logOut)
 	}
+}
+
+// TestGateOwnerEditControls_ClaimedRendersDisabled proves #75's Q2: while a
+// run holds the ticket's claim, the gate's own owner-edit boxes (the
+// scenario, task and file boxes gateContext renders) render every Save and
+// Drop control disabled and show the store's own claim sentence.
+// gateShowsPlan ignores ticket state, so the ticket is left queued.
+func TestGateOwnerEditControls_ClaimedRendersDisabled(t *testing.T) {
+	t.Parallel()
+	s := newConsoleTestStore(t)
+	ticketID := seedTicket(t, s, "fake#1", "Add a hello endpoint")
+	runID := seedRun(t, s, ticketID)
+	seedPlanArtifact(t, s, ticketID, &runID, 1)
+	seedSealedScenarioArtifact(t, s, ticketID, &runID, response.Scenario{
+		ID: "s1", Kind: response.ScenarioKindBehavior, Given: "g1", When: "w1", Then: "t1",
+	})
+	seedGateQuestion(t, s, ticketID)
+
+	claimed, err := s.Claim(t.Context(), ticketID, "runner-1", time.Now().Add(time.Hour))
+	if err != nil || !claimed {
+		t.Fatalf("Claim: claimed=%v err=%v", claimed, err)
+	}
+
+	srv := newTestServer(t, s, bus.New(), nil, newTestLogHandler(t))
+	resp, r, cancel := openStream(t, srv.URL, "thread", ticketID, 0)
+	defer cancel()
+	defer func() { _ = resp.Body.Close() }()
+	_, main, _, _ := readInitialFrames(t, r)
+
+	gate := findGroup(t, splitQuestionGroups(t, main), gateQuestionTitle)
+
+	if n, want := strings.Count(gate, `class="owner-edit-save" disabled`), strings.Count(gate, `class="owner-edit-save"`); n != want || want == 0 {
+		t.Errorf(`owner-edit-save disabled count = %d, want %d (all of them, at least one); gate:\n%s`, n, want, gate)
+	}
+	if n, want := strings.Count(gate, `class="owner-edit-drop" disabled`), strings.Count(gate, `class="owner-edit-drop"`); n != want || want == 0 {
+		t.Errorf(`owner-edit-drop disabled count = %d, want %d (all of them, at least one); gate:\n%s`, n, want, gate)
+	}
+	if !strings.Contains(gate, store.OwnerEditClaimedReason) {
+		t.Errorf("gate group missing the claim sentence; got:\n%s", gate)
+	}
+
+	t.Run("unclaimed twin shows no claim note", func(t *testing.T) {
+		t.Parallel()
+		s2 := newConsoleTestStore(t)
+		ticketID2 := seedTicket(t, s2, "fake#2", "Add another endpoint")
+		runID2 := seedRun(t, s2, ticketID2)
+		seedPlanArtifact(t, s2, ticketID2, &runID2, 1)
+		seedSealedScenarioArtifact(t, s2, ticketID2, &runID2, response.Scenario{
+			ID: "s1", Kind: response.ScenarioKindBehavior, Given: "g1", When: "w1", Then: "t1",
+		})
+		seedGateQuestion(t, s2, ticketID2)
+
+		srv2 := newTestServer(t, s2, bus.New(), nil, newTestLogHandler(t))
+		resp2, r2, cancel2 := openStream(t, srv2.URL, "thread", ticketID2, 0)
+		defer cancel2()
+		defer func() { _ = resp2.Body.Close() }()
+		_, main2, _, _ := readInitialFrames(t, r2)
+
+		gate2 := findGroup(t, splitQuestionGroups(t, main2), gateQuestionTitle)
+		if strings.Contains(gate2, "owner-edit-claim-note") {
+			t.Errorf("unclaimed gate group contains owner-edit-claim-note; got:\n%s", gate2)
+		}
+	})
 }
 
 func TestGateContext_NoCohortRendersNeitherTable(t *testing.T) {

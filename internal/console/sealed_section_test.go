@@ -311,3 +311,47 @@ func TestThreadSealedSection_HiddenOutsidePostGateStates(t *testing.T) {
 		}
 	})
 }
+
+// TestThreadSealedSection_ClaimedRendersDisabled proves #75's Q2: while a
+// run holds the ticket's claim, every owner-edit box on the page -- the
+// ticket body, the sealed section's scenario and plan-file boxes, and the
+// plan task box -- renders its Save and Drop controls disabled and shows
+// the store's own claim sentence. advanceTicketToState's own commit clears
+// the claim, so the claim is taken again afterwards.
+func TestThreadSealedSection_ClaimedRendersDisabled(t *testing.T) {
+	t.Parallel()
+	s := newConsoleTestStore(t)
+	ticketID := seedSealedSectionFixture(t, s)
+	advanceTicketToState(t, s, ticketID, "building")
+
+	claimed, err := s.Claim(t.Context(), ticketID, "runner-1", time.Now().Add(time.Hour))
+	if err != nil || !claimed {
+		t.Fatalf("Claim: claimed=%v err=%v", claimed, err)
+	}
+
+	srv := newTestServer(t, s, bus.New(), nil, newTestLogHandler(t))
+	resp, r, cancel := openStream(t, srv.URL, "thread", ticketID, 0)
+	defer cancel()
+	defer func() { _ = resp.Body.Close() }()
+	_, main, _, _ := readInitialFrames(t, r)
+
+	saveCount := strings.Count(main, `class="owner-edit-save"`)
+	saveDisabledCount := strings.Count(main, `class="owner-edit-save" disabled`)
+	if saveCount < 4 {
+		t.Errorf(`owner-edit-save count = %d, want at least 4 (ticket body, scenario, task, file); main:\n%s`, saveCount, main)
+	}
+	if saveDisabledCount != saveCount {
+		t.Errorf("owner-edit-save disabled count = %d, want %d (all of them)", saveDisabledCount, saveCount)
+	}
+
+	dropCount := strings.Count(main, `class="owner-edit-drop"`)
+	dropDisabledCount := strings.Count(main, `class="owner-edit-drop" disabled`)
+	if dropDisabledCount != dropCount {
+		t.Errorf("owner-edit-drop disabled count = %d, want %d (all of them)", dropDisabledCount, dropCount)
+	}
+
+	noteCount := strings.Count(main, store.OwnerEditClaimedReason)
+	if noteCount != saveCount {
+		t.Errorf("claim sentence count = %d, want %d (one per owner-edit-save box)", noteCount, saveCount)
+	}
+}

@@ -88,11 +88,15 @@ type ThreadItem struct {
 // Check, Sealed, and TicketID (#41) feed scenariosSection's own owner-edit
 // box, rendered only when Sealed: Check is the scenario's check_cmd, Sealed
 // is whether the artifact's sealed_at is set, and TicketID is the owning
-// ticket, the box's data-ticket attribute.
+// ticket, the box's data-ticket attribute. Claimed (#75) is true only when
+// the owning ticket's ClaimOwner is non-nil; set by console.threadComponent
+// and console.buildThreadQuestion (the Amendment row), it renders the
+// scenario's owner-edit box disabled with the store's own claim sentence.
 type ScenarioRow struct {
 	ID, Kind, Given, When, Then, Check string
 	Sealed                             bool
 	TicketID                           int64
+	Claimed                            bool
 }
 
 // SealedSection is the post-gate "Sealed plan and scenarios" section's view

@@ -329,6 +329,13 @@ func (c *console) threadComponent(ctx context.Context, open int64) (templ.Compon
 		if findingsErr != nil {
 			return nil, findingsErr
 		}
+		claimed := ticket.ClaimOwner != nil
+		if plan != nil {
+			plan.Claimed = claimed
+		}
+		for i := range scenarios {
+			scenarios[i].Claimed = claimed
+		}
 		conv, convErr := c.store.PlanningConversation(ctx, open)
 		if convErr != nil {
 			return nil, fmt.Errorf("console: planning conversation for ticket %d: %w", open, convErr)
@@ -1809,6 +1816,7 @@ func buildThreadQuestion(ticket *store.Ticket, m *store.MessageRow, messageCount
 		q.Amendment = &templates.ScenarioRow{
 			ID: a.Scenario, Kind: string(a.Kind), Given: a.Given, When: a.When, Then: a.Then,
 			Check: a.Check, Sealed: true, TicketID: m.TicketID,
+			Claimed: ticket != nil && ticket.ClaimOwner != nil,
 		}
 	}
 	if draft, ok := drafts[m.ID]; ok {
