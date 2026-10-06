@@ -53,6 +53,7 @@ import {
 	ownerEditFieldEntries,
 	versionedURL,
 	streamStatusView,
+	pickupResultView,
 } from './keyboard.mjs';
 
 // defaultNav is the shell's own data-signals default (templates/shell.templ:
@@ -1247,27 +1248,44 @@ function installSideBox() {
 
 // ---- manual intake pickup (PKG9-PLAN.md D29) ------------------------------
 
+// showPickupMessage writes view (keyboard.mjs's pickupResultView) into the
+// pickup box's one message span: the text, then a link to the new ticket's
+// thread when view.ticketID names one. installPickupBox's delegated click
+// handler opens the link.
+function showPickupMessage(span, view) {
+	suppressPatchSignal = true;
+	span.textContent = view.text;
+	if (view.ticketID > 0) {
+		const link = document.createElement('a');
+		link.className = 'pickup-ticket-link';
+		link.href = '#';
+		link.dataset.ticketId = String(view.ticketID);
+		link.textContent = view.linkText;
+		span.appendChild(link);
+	}
+	suppressPatchSignal = false;
+}
+
 // pickupIssue handles a click on the project view's "Pick up" button
 // (PKG9-PLAN.md D29): reads the issue number from the box's own number
 // input and the project id off the box's data-pickup-project attribute,
-// posts POST /projects/{id}/pickup, and on a non-2xx response shows the
-// response body -- D29's own exact refusal text -- in the box's error span.
-// Unlike postJSON's other callers, the response body matters on failure, so
-// this builds its own fetch rather than using postJSON, the same reason
-// postSide above does.
+// posts POST /projects/{id}/pickup, and on any response shows
+// pickupResultView's message (the refusal text, or "Picked up #N as
+// ticket T" with a link) in the box's message span. Unlike postJSON's
+// other callers, the response body matters on failure, so this builds its
+// own fetch rather than using postJSON, the same reason postSide above
+// does.
 async function pickupIssue(button) {
 	const box = button.closest('.pickup-box');
 	const input = box?.querySelector('.pickup-n');
-	const errorSpan = box?.querySelector('.pickup-error');
+	const messageSpan = box?.querySelector('.pickup-message');
 	const projectID = box?.dataset?.pickupProject;
-	if (!box || !input || !errorSpan || !projectID) {
+	if (!box || !input || !messageSpan || !projectID) {
 		return;
 	}
 	const n = Number(input.value);
 	if (!Number.isInteger(n) || n <= 0) {
-		suppressPatchSignal = true;
-		errorSpan.textContent = 'enter a positive issue number';
-		suppressPatchSignal = false;
+		showPickupMessage(messageSpan, { text: 'enter a positive issue number', linkText: '', ticketID: 0 });
 		return;
 	}
 	try {
@@ -1276,30 +1294,33 @@ async function pickupIssue(button) {
 			headers: { 'Content-Type': 'application/json', 'Datastar-Request': 'true' },
 			body: JSON.stringify({ n }),
 		});
-		if (!resp.ok) {
-			const text = await resp.text();
-			suppressPatchSignal = true;
-			errorSpan.textContent = text;
-			suppressPatchSignal = false;
-			return;
+		const view = pickupResultView(resp.ok, await resp.text(), n);
+		if (resp.ok) {
+			input.value = '';
 		}
-		input.value = '';
-		suppressPatchSignal = true;
-		errorSpan.textContent = '';
-		suppressPatchSignal = false;
+		showPickupMessage(messageSpan, view);
 	} catch (err) {
 		console.error('console.js: POST /projects/{id}/pickup', err);
-		suppressPatchSignal = true;
-		errorSpan.textContent = 'request failed';
-		suppressPatchSignal = false;
+		showPickupMessage(messageSpan, { text: 'request failed', linkText: '', ticketID: 0 });
 	}
 }
 
 // installPickupBox wires the project view's pickup button (PKG9-PLAN.md
 // D29), delegated from document like installSideBox above, because #main
-// is morphed by every /stream patch (design section 6.3).
+// is morphed by every /stream patch (design section 6.3). It also opens
+// the success message's ticket link through navigate, the same zing-nav
+// path a ticket row click takes.
 function installPickupBox() {
 	document.addEventListener('click', (event) => {
+		const link = event.target.closest?.('.pickup-box a.pickup-ticket-link');
+		if (link) {
+			const id = Number(link.dataset.ticketId);
+			if (Number.isInteger(id) && id > 0) {
+				event.preventDefault();
+				navigate({ view: 'thread', open: id, project: 0 });
+			}
+			return;
+		}
 		const button = event.target.closest?.('.pickup-box button[type="submit"]');
 		if (!button) {
 			return;
@@ -1803,7 +1824,7 @@ let reconnectTimerID = null;
 
 // suppressPatchSignal is true for the duration of a client-side write under
 // #main or #rail that is not a live /stream patch (postSide's
-// reply.outerHTML swap, pickupIssue's errorSpan.textContent writes):
+// reply.outerHTML swap, pickupIssue's showPickupMessage writes):
 // installPatchObserver's MutationObserver fires for those too, and without
 // this flag it would wrongly read them as proof the stream is live, clearing
 // the stale marker and resetting the reconnect backoff while /stream itself

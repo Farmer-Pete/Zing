@@ -115,10 +115,11 @@ func Project(projectID int64, live, closed []store.Ticket) templ.Component {
 // input for the issue number and a submit button, no <form> element (mw.go
 // rejects every plain-form content type; console.js's installPickupBox
 // wires the button's click the same delegated way installSideBox wires the
-// side box's submit). pickupError is the refusal or error text POST
-// /projects/{id}/pickup's non-2xx response body carries verbatim
-// (PKG9-PLAN.md D29: "with the exact console message"); empty on first
-// paint.
+// side box's submit). The pickup-message span is the box's one message
+// spot: console.js's pickupIssue writes the refusal text, or "Picked up
+// #N as ticket T" with a link to that ticket's thread. It is empty on
+// first paint. data-ignore-morph plus the per-project id keep the message
+// across the /stream patch that every pickup's bus publish causes.
 func pickupBox(projectID int64) templ.Component {
 	return templruntime.GeneratedTemplate(func(templ_7745c5c3_Input templruntime.GeneratedComponentInput) (templ_7745c5c3_Err error) {
 		templ_7745c5c3_W, ctx := templ_7745c5c3_Input.Writer, templ_7745c5c3_Input.Context
@@ -147,13 +148,26 @@ func pickupBox(projectID int64) templ.Component {
 		var templ_7745c5c3_Var4 string
 		templ_7745c5c3_Var4, templ_7745c5c3_Err = templ.ResolveAttributeValue(strconv.FormatInt(projectID, 10))
 		if templ_7745c5c3_Err != nil {
-			return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/console/templates/project.templ`, Line: 51, Col: 83}
+			return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/console/templates/project.templ`, Line: 52, Col: 83}
 		}
 		_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ_7745c5c3_Var4)
 		if templ_7745c5c3_Err != nil {
 			return templ_7745c5c3_Err
 		}
-		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 10, "\"><label for=\"pickup-n\">Pick up issue #</label> <input type=\"number\" id=\"pickup-n\" class=\"pickup-n\" min=\"1\" step=\"1\" aria-label=\"Issue number to pick up\"> <button type=\"submit\">Pick up</button> <span class=\"pickup-error\" role=\"alert\"></span></section>")
+		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 10, "\"><label for=\"pickup-n\">Pick up issue #</label> <input type=\"number\" id=\"pickup-n\" class=\"pickup-n\" min=\"1\" step=\"1\" aria-label=\"Issue number to pick up\"> <button type=\"submit\">Pick up</button> <span class=\"pickup-message\" id=\"")
+		if templ_7745c5c3_Err != nil {
+			return templ_7745c5c3_Err
+		}
+		var templ_7745c5c3_Var5 string
+		templ_7745c5c3_Var5, templ_7745c5c3_Err = templ.ResolveAttributeValue("pickup-message-" + strconv.FormatInt(projectID, 10))
+		if templ_7745c5c3_Err != nil {
+			return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/console/templates/project.templ`, Line: 56, Col: 88}
+		}
+		_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ_7745c5c3_Var5)
+		if templ_7745c5c3_Err != nil {
+			return templ_7745c5c3_Err
+		}
+		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 11, "\" role=\"alert\" data-ignore-morph></span></section>")
 		if templ_7745c5c3_Err != nil {
 			return templ_7745c5c3_Err
 		}

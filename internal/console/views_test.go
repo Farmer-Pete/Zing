@@ -387,6 +387,39 @@ func TestProjectScopesAndOrdersByTrackerRef(t *testing.T) {
 	}
 }
 
+// TestProjectViewPickupMessageSurvivesMorph proves the project view's
+// pickup box renders a message span that a /stream morph will not wipe:
+// class "pickup-message", a per-project id, and data-ignore-morph, with
+// no trace of the old "pickup-error" class (design section 6.5, Task 3,
+// bug 3 of #107).
+func TestProjectViewPickupMessageSurvivesMorph(t *testing.T) {
+	t.Parallel()
+	s := newConsoleTestStore(t)
+
+	projectID, err := s.EnsureProject(t.Context(), testProject)
+	if err != nil {
+		t.Fatalf("EnsureProject: %v", err)
+	}
+
+	srv := newTestServer(t, s, bus.New(), nil, newTestLogHandler(t))
+
+	main := mainFrame(t, srv.URL, "project", 0, projectID)
+
+	if !strings.Contains(main, `class="pickup-message"`) {
+		t.Errorf("expected pickup-message class; got:\n%s", main)
+	}
+	wantID := fmt.Sprintf(`id="pickup-message-%d"`, projectID)
+	if !strings.Contains(main, wantID) {
+		t.Errorf("expected %s; got:\n%s", wantID, main)
+	}
+	if !strings.Contains(main, "data-ignore-morph") {
+		t.Errorf("expected data-ignore-morph; got:\n%s", main)
+	}
+	if strings.Contains(main, "pickup-error") {
+		t.Errorf("expected no pickup-error class; got:\n%s", main)
+	}
+}
+
 // transitionTicket claims ticketID and commits a transition to state, the
 // only way (besides queued at intake) a real ticket reaches a given state
 // (design section 6.3's commit path).
