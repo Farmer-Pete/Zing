@@ -1,17 +1,23 @@
 // split.go builds a planner's children outcome into the split gate (design
 // section 6.6's own split variant, plan #74): childrenCommit stores the
 // proposed children as the children artifact and posts the split question,
-// exactly as postGateCommit posts the plan gate.
+// exactly as postGateCommit posts the plan gate. enterFromSplitRound reads
+// the owner's answered split round, mirroring enterFromGateRound: reject
+// resumes or restarts planning with the owner's note, approve files each
+// child as a tracker issue (task 6).
 package job
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"log/slog"
 	"strings"
 
+	"zing/internal/prompt"
 	"zing/internal/response"
 	"zing/internal/store"
+	"zing/internal/tracker"
 )
 
 const (
@@ -31,6 +37,11 @@ const (
 	splitOptionReject  = "b"
 
 	splitApproveExplains = "Approve files each child below as a tracker issue that links back to this one, queues the children in dependency order (a child waits until every issue it depends on is done), and closes this ticket as split. Reject sends this ticket back to planning with your note."
+
+	// splitRejectedNote prefixes a rejected split's resume notes (design
+	// section 6.7, mirroring the gate's own rejection note), followed by the
+	// owner's joined replies.
+	splitRejectedNote = "The owner rejected your proposed split into child tickets. Plan this ticket again. The owner's note follows.\n\n"
 )
 
 // childrenCommit is the children outcome's own commit (design section 6.6's
@@ -149,4 +160,44 @@ func splitOrder(children []response.Child) ([]response.Child, error) {
 		}
 	}
 	return order, nil
+}
+
+// enterFromSplitRound is enterFromRound's own split branch (design section
+// 6.6's split variant, mirroring enterFromGateRound): round is the answered
+// split round enterFromRound just identified by its newest question's kind.
+// Option b, or a round carrying replies and no option at all, is a reject --
+// "resume or fresh" with the owner's joined replies as notes, prefixed by
+// splitRejectedNote, the same as the gate's own rejection (design section
+// 6.7). Option a (approve) files the children; for now (task 5) it returns
+// ErrNoAction, replaced by fileNextSplitChild in task 6.
+func (h planningHandler) enterFromSplitRound(ctx context.Context, t store.Ticket, d Deps, round store.Round) (store.HandlerCommit, error) {
+	resolveIDs := questionIDs(round)
+	if newestChosenOption(round.Answers) != splitOptionApprove {
+		slog.Info("split rejected", "ticket_id", t.ID)
+		notes := splitRejectedNote + joinReplies(round.Replies)
+		return resumeOrFresh(ctx, t, d, []prompt.NamedInput{prompt.Notes(notes)}, resolveIDs)
+	}
+	return store.HandlerCommit{}, ErrNoAction
+}
+
+// splitChildBody renders one split child's issue body (design section
+// 6.6's split variant): body trimmed, then, only when notes is non-blank, a
+// "Shared notes from the split" heading followed by notes trimmed (owner
+// decision Q4), then "Split from" the parent's human-readable ref, then,
+// only when depRefs is non-empty, "Depends on" each ref joined by ", ".
+// Parts are joined by a blank line.
+func splitChildBody(body, notes, parentRef string, depRefs []string) string {
+	parts := []string{strings.TrimSpace(body)}
+	if strings.TrimSpace(notes) != "" {
+		parts = append(parts, "## Shared notes from the split\n\n"+strings.TrimSpace(notes))
+	}
+	parts = append(parts, fmt.Sprintf("Split from %s.", tracker.IssueRef(parentRef)))
+	if len(depRefs) > 0 {
+		refs := make([]string, len(depRefs))
+		for i, ref := range depRefs {
+			refs[i] = tracker.IssueRef(ref)
+		}
+		parts = append(parts, fmt.Sprintf("Depends on %s.", strings.Join(refs, ", ")))
+	}
+	return strings.Join(parts, "\n\n")
 }

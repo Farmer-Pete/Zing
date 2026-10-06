@@ -59,6 +59,53 @@ func TestSplitOrder(t *testing.T) {
 	})
 }
 
+// TestSplitChildBody proves splitChildBody's rendering rule (design section
+// 6.6's split variant, owner decision Q4): body trimmed, then the shared
+// notes under their own heading when notes is non-blank, then "Split from"
+// the parent's human ref, then "Depends on" the dep refs when there are
+// any, each part separated by a blank line.
+func TestSplitChildBody(t *testing.T) {
+	t.Parallel()
+
+	t.Run("notes and two dependencies", func(t *testing.T) {
+		t.Parallel()
+		got := splitChildBody("Do X", "N", "65", []string{"70", "71"})
+		want := "Do X\n\n## Shared notes from the split\n\nN\n\nSplit from #65.\n\nDepends on #70, #71."
+		if got != want {
+			t.Errorf("splitChildBody = %q, want %q", got, want)
+		}
+	})
+
+	t.Run("blank notes leave out the heading", func(t *testing.T) {
+		t.Parallel()
+		got := splitChildBody("Detect the conflict", "", "65", []string{"70"})
+		if strings.Contains(got, "Shared notes") {
+			t.Errorf("splitChildBody = %q, want no Shared notes heading", got)
+		}
+	})
+
+	t.Run("no dependencies leave out the Depends on line", func(t *testing.T) {
+		t.Parallel()
+		got := splitChildBody("Build the merge unit", "", "65", nil)
+		want := "Build the merge unit\n\nSplit from #65."
+		if got != want {
+			t.Errorf("splitChildBody = %q, want %q", got, want)
+		}
+		if strings.Contains(got, "Depends on") {
+			t.Errorf("splitChildBody = %q, want no Depends on line", got)
+		}
+	})
+
+	t.Run("non-numeric parent ref renders unchanged", func(t *testing.T) {
+		t.Parallel()
+		got := splitChildBody("Merge earlier", "", "fake#3", nil)
+		want := "Merge earlier\n\nSplit from fake#3."
+		if got != want {
+			t.Errorf("splitChildBody = %q, want %q", got, want)
+		}
+	})
+}
+
 func wantKeys(t *testing.T, got []response.Child, want ...string) {
 	t.Helper()
 	if len(got) != len(want) {

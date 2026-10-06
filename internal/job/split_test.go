@@ -19,6 +19,32 @@ import (
 // across this package compared the literal).
 const testSplitSharedNotes = "the two halves share no code"
 
+// seedSplitQuestion inserts one open split question directly (design
+// section 6.6's split variant), mirroring gate_test.go's own
+// seedGateQuestion: kind split, options a/b, recommended "a", key fixed
+// since this bypasses CommitHandlerResult's own fillQuestionKeyTx
+// allocation, which only the real split-posting commit (childrenCommit)
+// goes through.
+func seedSplitQuestion(t *testing.T, s *store.Store, ticketID int64) int64 {
+	t.Helper()
+	payload, err := json.Marshal(response.QuestionPayload{
+		Key: "Q1", Kind: response.QuestionKindSplit, State: response.QuestionStateOpen,
+		Recommended: "a",
+		Options:     []response.Option{{Key: "a", Text: testApproveOptionText}, {Key: "b", Text: testRejectOptionText}},
+	})
+	if err != nil {
+		t.Fatalf("marshal split question payload: %v", err)
+	}
+	id, err := s.InsertMessage(t.Context(), store.Message{
+		TicketID: ticketID, Type: testMsgTypeQuestion, Author: testAuthorZing,
+		State: new("open"), Body: "Split this ticket into 2 tickets?", Payload: payload,
+	})
+	if err != nil {
+		t.Fatalf("InsertMessage(split question): %v", err)
+	}
+	return id
+}
+
 // TestPlanningHandler_Children_PostsSplitGate proves childrenCommit (design
 // section 6.6's split variant, plan #74): a children outcome stores the
 // children artifact, deduplicating a key repeated inside one child's own
@@ -146,4 +172,58 @@ func TestPlanningHandler_Children_PostsSplitGate(t *testing.T) {
 
 		apply(t, s, getTicket(t, s, ticketID), commit)
 	})
+}
+
+// TestPlanningHandler_SplitRejected_ResumesWithNotes proves
+// enterFromSplitRound's reject branch (design section 6.6/6.7's split
+// variant, mirroring the gate's own rejection): a split question answered
+// with option b plus a reply resumes the open planning session with the
+// reply's body fenced as notes under splitRejectedNote, and resolves the
+// split question.
+func TestPlanningHandler_SplitRejected_ResumesWithNotes(t *testing.T) {
+	t.Parallel()
+	s := newJobTestStore(t)
+	ticketID := seedQueuedTicket(t, s)
+	rt := fakeRuntime(t)
+	advanceQueuedToPlanning(t, s, rt, ticketID)
+	apply(t, s, getTicket(t, s, ticketID), mustPlanning(t, s, claim(t, s, rt, ticketID), ticketID)) // classify
+	apply(t, s, getTicket(t, s, ticketID), mustPlanning(t, s, claim(t, s, rt, ticketID), ticketID)) // first turn: posts Q1
+	answerFixtureQuestion(t, s, ticketID)                                                           // Q1: opens the planning session, still open after
+
+	qID := seedSplitQuestion(t, s, ticketID)
+	const notes = "keep it as one ticket"
+	option := "b"
+	if _, draftErr := s.SaveDraft(t.Context(), store.DraftInput{TicketID: ticketID, QuestionID: &qID, Option: &option}); draftErr != nil {
+		t.Fatalf("SaveDraft(option): %v", draftErr)
+	}
+	if _, draftErr := s.SaveDraft(t.Context(), store.DraftInput{TicketID: ticketID, QuestionID: &qID, Text: notes}); draftErr != nil {
+		t.Fatalf("SaveDraft(text): %v", draftErr)
+	}
+	if _, sendErr := s.SendBatch(t.Context(), ticketID); sendErr != nil {
+		t.Fatalf("SendBatch: %v", sendErr)
+	}
+
+	openSess, _, err := s.LatestSession(t.Context(), ticketID, testStatePlanning, 12)
+	if err != nil {
+		t.Fatalf("LatestSession: %v", err)
+	}
+
+	resumeRT := &scriptedRuntime{t: t, steps: []scriptedStep{questionResult(response.JobPlanning, "split-reject-sess")}}
+	rec := &recordingRuntime{rt: resumeRT}
+	commit, err := runPlanning(t, s, claim(t, s, rec, ticketID), ticketID)
+	if err != nil {
+		t.Fatalf("split reject Run: %v", err)
+	}
+	if commit.Session == nil || commit.Session.ID == nil || *commit.Session.ID != openSess.ID {
+		t.Fatalf("commit.Session = %+v, want the already-open session %d (a resume, not fresh)", commit.Session, openSess.ID)
+	}
+	if len(commit.ResolveQuestions) != 1 || commit.ResolveQuestions[0] != qID {
+		t.Errorf("commit.ResolveQuestions = %v, want [%d]", commit.ResolveQuestions, qID)
+	}
+	if rec.lastReq.Prompt == "" {
+		t.Fatal("recordingRuntime saw an empty resume prompt")
+	}
+	if !strings.Contains(rec.lastReq.Prompt, "rejected your proposed split") || !strings.Contains(rec.lastReq.Prompt, notes) {
+		t.Errorf("resume prompt does not carry the rejection note and the owner's text:\n%s", rec.lastReq.Prompt)
+	}
 }

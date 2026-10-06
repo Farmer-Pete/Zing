@@ -379,6 +379,8 @@ func (h planningHandler) enterFromRound(ctx context.Context, t store.Ticket, d D
 	switch {
 	case qp.Kind == response.QuestionKindGate:
 		return h.enterFromGateRound(ctx, t, d, round)
+	case qp.Kind == response.QuestionKindSplit:
+		return h.enterFromSplitRound(ctx, t, d, round)
 	case newest.ParentID != nil:
 		// The newest question's own parent id, not round.ParentID: a
 		// run-caused escalation's linked question carries the same run_id
