@@ -71,7 +71,7 @@ func TestSeedDemo_SeededTicketWaitsOnItsGateNotQueued(t *testing.T) {
 		t.Fatalf("tickets = %d, want exactly 1", len(tickets))
 	}
 	tk := tickets[0]
-	if tk.State != "planning" {
+	if tk.State != testPlanningLiteral {
 		t.Errorf("seeded ticket state = %q, want planning (a queued ticket would be dispatched)", tk.State)
 	}
 	if tk.WaitingOn == nil || *tk.WaitingOn != string(response.QuestionKindGate) {
@@ -142,7 +142,7 @@ func assertSeedDemoArtifacts(ctx context.Context, t *testing.T, s *store.Store, 
 			if artifacts[i].RunID == nil || *artifacts[i].RunID != *plan.RunID {
 				t.Errorf("scenario artifact run_id = %v, want the plan's own run %d", artifacts[i].RunID, *plan.RunID)
 			}
-		case "planreview":
+		case testArtifactTypePlanreview:
 			planreview = &artifacts[i]
 		}
 	}
@@ -647,7 +647,7 @@ func assertSeedDemoBuildMarkerCount(ctx context.Context, t *testing.T, s *store.
 	}
 	var got int
 	for i := range messages {
-		if messages[i].Type == "update" && demoBuildMarkerBodies[messages[i].Body] {
+		if messages[i].Type == testMsgTypeUpdate && demoBuildMarkerBodies[messages[i].Body] {
 			got++
 		}
 	}

@@ -313,6 +313,10 @@ func (c *console) threadComponent(ctx context.Context, open int64) (templ.Compon
 		if listErr != nil {
 			return nil, listErr
 		}
+		rows, detailErr := c.withEscalationDetails(ctx, open, rows)
+		if detailErr != nil {
+			return nil, detailErr
+		}
 		plan, planErr := c.loadPlan(ctx, open)
 		if planErr != nil {
 			return nil, planErr
@@ -1825,6 +1829,277 @@ func splitQuestionBody(raw string) (title, body string) {
 	return title, strings.TrimPrefix(rest, "\n")
 }
 
+// withEscalationDetails rewrites, in place, the Body of every escalation's
+// own question row with detail read at render time from the data the
+// escalation points at (ticket 70, design section "Build the detail at read
+// time"): a plan review loops_exhausted question gets the planreview
+// artifact's remaining findings, and a response_invalid question whose
+// escalation row has a RunID gets that run's job, lens and validator errors
+// read from its own "response invalid run <id>" marker. rows is returned
+// unchanged -- not even reordered -- except for those Body rewrites, so
+// threadComponent's later buildThreadRows call sees the same rows it always
+// did, with richer question bodies. Only a store read failure is returned;
+// every other escalation whose payload, marker, or artifact is missing or
+// unparseable just keeps its stored body (buildThreadQuestion's own
+// "unparseable payload renders as a plain row" rule, extended here).
+func (c *console) withEscalationDetails(ctx context.Context, ticketID int64, rows []store.MessageRow) ([]store.MessageRow, error) {
+	var runs []store.Run
+	var sessions []store.Session
+	runsLoaded := false
+
+	for i := range rows {
+		esc := rows[i]
+		if esc.Type != msgTypeEscalation {
+			continue
+		}
+		var ep response.EscalationPayload
+		if err := json.Unmarshal(esc.Payload, &ep); err != nil {
+			attrs := []any{"ticket_id", ticketID, "escalation_id", esc.ID, "reason", "payload"}
+			if esc.RunID != nil {
+				attrs = append(attrs, "run_id", *esc.RunID)
+			}
+			slog.DebugContext(ctx, "console: escalation detail source unavailable", attrs...)
+			continue
+		}
+
+		var detail string
+		switch {
+		case ep.Code == string(response.EscalationCodeLoopsExhausted) && ep.Origin == string(response.EscalationOriginCapLoops):
+			d, err := c.loopsExhaustedDetail(ctx, ticketID, esc.ID, rows)
+			if err != nil {
+				return nil, err
+			}
+			detail = d
+		case ep.Code == string(response.EscalationCodeResponseInvalid) && esc.RunID != nil:
+			if !runsLoaded {
+				var err error
+				runs, err = c.store.RunsForTicket(ctx, ticketID)
+				if err != nil {
+					return nil, fmt.Errorf("console: escalation detail runs for ticket %d: %w", ticketID, err)
+				}
+				sessions, err = c.store.SessionsForTicket(ctx, ticketID)
+				if err != nil {
+					return nil, fmt.Errorf("console: escalation detail sessions for ticket %d: %w", ticketID, err)
+				}
+				runsLoaded = true
+			}
+			detail = responseInvalidDetailFor(ctx, ticketID, esc.ID, *esc.RunID, rows, runs, sessions)
+		}
+		if detail == "" {
+			continue
+		}
+
+		for j := range rows {
+			if !isQuestionFor(rows[j], esc.ID) {
+				continue
+			}
+			title, body := splitQuestionBody(rows[j].Body)
+			rows[j].Body = title + "\n\n" + detail + "\n\n" + body
+		}
+	}
+	return rows, nil
+}
+
+// isQuestionFor reports whether q is the open-ended question child of the
+// escalation row whose id is escID -- the only link a question row has back
+// to the escalation that spawned it (its own ParentID).
+func isQuestionFor(q store.MessageRow, escID int64) bool {
+	return q.Type == msgTypeQuestion && q.ParentID != nil && *q.ParentID == escID
+}
+
+// loopsExhaustedDetail reads the plan review findings a cap_loops
+// loops_exhausted escalation (escalationID) never itself carries (design
+// H1): the version comes from the newest "planreview vN pending" marker
+// stored before the escalation, and the findings from the planreview
+// artifact at that version. It returns "" with no error when the marker is
+// missing or unparseable, or the artifact at that version does not exist --
+// each logged once at Debug rather than failing the render.
+func (c *console) loopsExhaustedDetail(ctx context.Context, ticketID, escalationID int64, rows []store.MessageRow) (string, error) {
+	version, ok := latestPlanreviewPendingVersion(rows, escalationID)
+	if !ok {
+		slog.DebugContext(ctx, "console: escalation detail source unavailable",
+			"ticket_id", ticketID, "escalation_id", escalationID, "reason", "marker")
+		return "", nil
+	}
+
+	artifact, found, err := c.store.PlanReviewAt(ctx, ticketID, version)
+	if err != nil {
+		return "", fmt.Errorf("console: escalation %d planreview at version %d for ticket %d: %w", escalationID, version, ticketID, err)
+	}
+	if !found {
+		slog.DebugContext(ctx, "console: escalation detail source unavailable",
+			"ticket_id", ticketID, "escalation_id", escalationID, "reason", "artifact", "plan_version", version)
+		return "", nil
+	}
+	var payload struct {
+		Findings []response.Finding `json:"findings"`
+	}
+	if err := json.Unmarshal(artifact.Payload, &payload); err != nil {
+		slog.DebugContext(ctx, "console: escalation detail source unavailable",
+			"ticket_id", ticketID, "escalation_id", escalationID, "reason", "artifact", "plan_version", version)
+		return "", nil //nolint:nilerr // an unparseable artifact leaves the question body unchanged, not an error
+	}
+	return findingsDetail(version, payload.Findings), nil
+}
+
+// latestPlanreviewPendingVersion returns the version named by the newest
+// "planreview vN pending" update row whose id is below beforeID -- rows is
+// ordered by id ascending (store.ListMessages), so the last match as this
+// scans in order is the newest one -- and false when there is none, or its
+// version fails strconv.Atoi.
+func latestPlanreviewPendingVersion(rows []store.MessageRow, beforeID int64) (int, bool) {
+	var body string
+	var found bool
+	for i := range rows {
+		if rows[i].Type != msgTypeUpdate || rows[i].ID >= beforeID {
+			continue
+		}
+		if !strings.HasPrefix(rows[i].Body, updateMarkerPlanreviewPrefix) || !strings.HasSuffix(rows[i].Body, updateMarkerPlanreviewPendingSuffix) {
+			continue
+		}
+		body, found = rows[i].Body, true
+	}
+	if !found {
+		return 0, false
+	}
+	v, err := strconv.Atoi(planreviewMarkerVersion(body, updateMarkerPlanreviewPendingSuffix))
+	if err != nil {
+		return 0, false
+	}
+	return v, true
+}
+
+// planreviewMarkerVersion cuts the "N" out of a "planreview vN pending" or
+// "planreview vN delivered" marker body, given that marker's own suffix. The
+// result is not guaranteed to parse as a number; callers that need the
+// version as an int run it through strconv.Atoi themselves.
+func planreviewMarkerVersion(body, suffix string) string {
+	return strings.TrimSuffix(strings.TrimPrefix(body, updateMarkerPlanreviewPrefix), suffix)
+}
+
+// findingsDetail renders a plan review's own remaining findings as a
+// markdown list, one item per finding ("- SEVERITY at `LOCATION`: TEXT"),
+// under a heading naming version. It returns "" for no findings, so a
+// caller can treat that as "no detail" the same way it treats a missing
+// marker or artifact.
+func findingsDetail(version int, findings []response.Finding) string {
+	if len(findings) == 0 {
+		return ""
+	}
+	lines := make([]string, 0, len(findings)+1)
+	lines = append(lines, fmt.Sprintf("Remaining findings from the plan review of v%d:", version))
+	for _, f := range findings {
+		text := strings.Join(strings.Fields(f.Text), " ")
+		lines = append(lines, fmt.Sprintf("- %s at `%s`: %s", f.Severity, f.Location, text))
+	}
+	return strings.Join(lines, "\n")
+}
+
+// responseInvalidDetailFor reads the job, lens and validator errors a
+// response_invalid escalation's own why never carries (design H2): the
+// run's own session names the job, the run itself carries the lens when
+// one applies, and the validator's errors sit on that run's own "response
+// invalid run <id>" marker (invalidMarkerBody, internal/job/planning.go).
+// It returns "" with no error when the marker, the run, or its session is
+// missing -- each logged once at Debug rather than failing the render, the
+// same fallback loopsExhaustedDetail uses for its own missing sources.
+func responseInvalidDetailFor(
+	ctx context.Context, ticketID, escalationID, runID int64, rows []store.MessageRow, runs []store.Run, sessions []store.Session,
+) string {
+	marker, ok := findResponseInvalidMarker(rows, runID)
+	if !ok {
+		slog.DebugContext(ctx, "console: escalation detail source unavailable",
+			"ticket_id", ticketID, "escalation_id", escalationID, "reason", "marker", "run_id", runID)
+		return ""
+	}
+
+	runIdx := slices.IndexFunc(runs, func(r store.Run) bool { return r.ID == runID })
+	if runIdx < 0 {
+		slog.DebugContext(ctx, "console: escalation detail source unavailable",
+			"ticket_id", ticketID, "escalation_id", escalationID, "reason", "run", "run_id", runID)
+		return ""
+	}
+	run := runs[runIdx]
+
+	sessionIdx := slices.IndexFunc(sessions, func(s store.Session) bool { return s.ID == run.SessionID })
+	if sessionIdx < 0 {
+		slog.DebugContext(ctx, "console: escalation detail source unavailable",
+			"ticket_id", ticketID, "escalation_id", escalationID, "reason", "session", "run_id", runID)
+		return ""
+	}
+
+	return responseInvalidDetail(sessions[sessionIdx].Job, run.Lens, runID, marker)
+}
+
+// findResponseInvalidMarker returns the body of the update row among rows
+// whose own first line is exactly "response invalid run <runID>"
+// (invalidMarkerBody), matching on the full first line rather than a bare
+// prefix so run 9's marker is never mistaken for run 91's.
+func findResponseInvalidMarker(rows []store.MessageRow, runID int64) (string, bool) {
+	want := updateMarkerResponseInvalidPrefix + strconv.FormatInt(runID, 10)
+	for i := range rows {
+		if rows[i].Type != msgTypeUpdate {
+			continue
+		}
+		first, _, _ := strings.Cut(rows[i].Body, "\n")
+		if first == want {
+			return rows[i].Body, true
+		}
+	}
+	return "", false
+}
+
+// responseInvalidDetail renders a response_invalid escalation's own job,
+// lens, run id, and the run's own "response invalid run <id>" marker body
+// (invalidMarkerBody, internal/job/planning.go) into the detail
+// withEscalationDetails appends to the question body (design H2). marker's
+// first line (the marker's own run id) is discarded in favor of the
+// caller's own authoritative runID; its second line is the closed reason,
+// shown only when there are no validator errors. The validator's errors --
+// model text that can hold anything, including a markdown fence of its own
+// -- sit in a fenced code block one backtick longer than the longest
+// backtick run they contain, so they always render as inert text rather
+// than breaking out of the fence early.
+func responseInvalidDetail(job string, lens *string, runID int64, marker string) string {
+	_, rest, _ := strings.Cut(marker, "\n")
+	reason, errs, hasErrs := strings.Cut(rest, "\n")
+
+	head := "Job: " + job
+	if lens != nil {
+		head += ", lens " + *lens
+	}
+	head += fmt.Sprintf(". Run %d.", runID)
+
+	if !hasErrs || errs == "" {
+		if reason == "" {
+			return head
+		}
+		return head + "\n\nReason: " + reason + "."
+	}
+
+	fence := backtickFence(errs)
+	return head + "\n\nValidator errors:\n\n" + fence + "\n" + errs + "\n" + fence
+}
+
+// backtickFence returns a markdown code-fence delimiter for text: backticks
+// one longer than the longest run of consecutive backticks text contains,
+// and never fewer than 3 (CommonMark's own minimum fence length).
+func backtickFence(text string) string {
+	longest, cur := 0, 0
+	for _, r := range text {
+		if r == '`' {
+			cur++
+			if cur > longest {
+				longest = cur
+			}
+		} else {
+			cur = 0
+		}
+	}
+	n := max(longest+1, 3)
+	return strings.Repeat("`", n)
+}
+
 // displayBody returns what the Thread view renders for one message: a
 // decoded system line for "state" and "escalation" (whose Body a commit
 // leaves empty, the transition or the report living in Payload instead), a
@@ -1922,9 +2197,11 @@ func updateLine(m *store.MessageRow, agent string) (string, bool) {
 	case strings.HasPrefix(body, updateMarkerSealRefusedPrefix):
 		return sealRefusedLine(body), true
 	case strings.HasPrefix(body, updateMarkerPlanreviewPrefix) && strings.HasSuffix(body, updateMarkerPlanreviewPendingSuffix):
-		return "Plan review found only minor findings. Planning resumes automatically to address them.", true
+		version := planreviewMarkerVersion(body, updateMarkerPlanreviewPendingSuffix)
+		return "Plan review of v" + version + " found minor findings. Planning resumes automatically to address them.", true
 	case strings.HasPrefix(body, updateMarkerPlanreviewPrefix) && strings.HasSuffix(body, updateMarkerPlanreviewDeliveredSuffix):
-		return "Planning resumed with the review findings.", true
+		version := planreviewMarkerVersion(body, updateMarkerPlanreviewDeliveredSuffix)
+		return "Planning resumed with the v" + version + " review findings.", true
 	case strings.HasPrefix(body, updateMarkerValidationPendingPrefix):
 		return validationErrorsLine(body), true
 	case strings.HasPrefix(body, updateMarkerValidationDeliveredPrefix):
