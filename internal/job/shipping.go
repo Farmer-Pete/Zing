@@ -554,7 +554,7 @@ func newestMergeMarkerKind(markers []store.MessageRow, sha string) string {
 // re-approved. c.ResolveAll is safe to set unconditionally here because
 // shipping's own POLL never asks any other kind of question (pollDone,
 // above, resolves every question the same way).
-func withdrawMergeQuestionIfAsked(c store.HandlerCommit, t store.Ticket, mergeMarkers []store.MessageRow, sha string) store.HandlerCommit {
+func withdrawMergeQuestionIfAsked(c store.HandlerCommit, t store.Ticket, mergeMarkers []store.MessageRow, number int, sha string) store.HandlerCommit {
 	kind := newestMergeMarkerKind(mergeMarkers, sha)
 	switch kind {
 	case mergeMarkerAsked, mergeMarkerHeld, mergeMarkerRetry:
@@ -562,7 +562,7 @@ func withdrawMergeQuestionIfAsked(c store.HandlerCommit, t store.Ticket, mergeMa
 		return c
 	}
 	if kind == mergeMarkerRetry {
-		slog.Info("merge retry withdrawn", "ticket_id", t.ID, "head_sha", sha)
+		slog.Info("merge retry withdrawn", "ticket_id", t.ID, "pr", number, "head_sha", sha)
 	}
 	c.ResolveAll = true
 	c.Messages = append(c.Messages, store.Message{
@@ -726,7 +726,7 @@ func (h shipHandler) poll(ctx context.Context, t store.Ticket, d Deps) (store.Ha
 		c.ClearPoll = true
 		return c, nil
 	case !pr.Draft && (result.State == CIFailed || anyUnresolved) && !skipFlip:
-		return h.pollConvertToDraft(ctx, t, d, proj, pr, local)
+		return h.pollConvertToDraft(ctx, t, d, proj, pr, number, local)
 	case result.State == CIFailed:
 		return h.pollCIFailed(ctx, t, d, proj, result)
 	case len(actionable) > 0:
@@ -755,7 +755,7 @@ func (h shipHandler) poll(ctx context.Context, t store.Ticket, d Deps) (store.Ha
 // marker, and, in the same commit, withdraws any merge question this
 // exact head's own newest merge marker still shows as asked or held
 // (withdrawMergeQuestionIfAsked).
-func (h shipHandler) pollConvertToDraft(ctx context.Context, t store.Ticket, d Deps, proj Project, pr orchestrator.PRState, sha string) (store.HandlerCommit, error) {
+func (h shipHandler) pollConvertToDraft(ctx context.Context, t store.Ticket, d Deps, proj Project, pr orchestrator.PRState, number int, sha string) (store.HandlerCommit, error) {
 	if err := proj.Flips.ConvertToDraft(ctx, pr.NodeID); err != nil {
 		return store.HandlerCommit{}, fmt.Errorf("job: shipping: poll: convert to draft: %w", err)
 	}
@@ -770,7 +770,7 @@ func (h shipHandler) pollConvertToDraft(ctx context.Context, t store.Ticket, d D
 		TicketID: t.ID, Type: msgTypeUpdate, Author: authorSystem,
 		Body: prDraftPrefix + sha,
 	}}
-	c = withdrawMergeQuestionIfAsked(c, t, mergeMarkers, sha)
+	c = withdrawMergeQuestionIfAsked(c, t, mergeMarkers, number, sha)
 	c.ClearPoll = true
 	return c, nil
 }

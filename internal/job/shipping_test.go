@@ -6085,6 +6085,7 @@ func TestBaseModifiedAutoMergeRetries(t *testing.T) {
 	rule := MergeRule{Auto: true, Method: shipMergeMethodSquash}
 	start := time.Now()
 	commit, err := shipPollRunWithRule(t, s, ticket, gh, tr, rule)
+	end := time.Now()
 	if err != nil {
 		t.Fatalf("Run: %v", err)
 	}
@@ -6109,8 +6110,12 @@ func TestBaseModifiedAutoMergeRetries(t *testing.T) {
 	if commit.Poll.IntervalS != 30 {
 		t.Errorf("Poll.IntervalS = %d, want 30", commit.Poll.IntervalS)
 	}
-	if commit.Poll.NextAt.Before(start.Add(10*time.Second)) || commit.Poll.NextAt.After(start.Add(12*time.Second)) {
-		t.Errorf("Poll.NextAt = %v, want between start+10s (%v) and start+12s (%v)", commit.Poll.NextAt, start.Add(10*time.Second), start.Add(12*time.Second))
+	// The lower bound pins the ticket's 10s floor from start, taken before
+	// the tick ran; the upper bound uses end, taken right after it
+	// returned, so a slow tick (t.Parallel, -race, a loaded host) cannot
+	// fail a test whose behavior is correct.
+	if commit.Poll.NextAt.Before(start.Add(10*time.Second)) || commit.Poll.NextAt.After(end.Truncate(time.Second).Add(11*time.Second)) {
+		t.Errorf("Poll.NextAt = %v, want between start+10s (%v) and end+11s (%v)", commit.Poll.NextAt, start.Add(10*time.Second), end.Truncate(time.Second).Add(11*time.Second))
 	}
 	pbApply(t, s, ticket, commit)
 
@@ -6130,13 +6135,67 @@ func TestBaseModifiedAutoMergeRetries(t *testing.T) {
 	}
 }
 
+// shipCaptureLogs installs a JSON slog default logger for the duration of
+// fn, then decodes every record it wrote, grouped by its "msg" field, and
+// fails the test if any record carries GitHub's own refusal text (the
+// ticket's own "no GitHub response text in the log line" requirement).
+// Not parallel: it calls slog.SetDefault to capture the process-wide
+// default logger.
+func shipCaptureLogs(t *testing.T, fn func()) map[string][]map[string]any {
+	t.Helper()
+	var buf bytes.Buffer
+	prevDefault := slog.Default()
+	slog.SetDefault(slog.New(slog.NewJSONHandler(&buf, &slog.HandlerOptions{Level: slog.LevelInfo})))
+	t.Cleanup(func() { slog.SetDefault(prevDefault) })
+
+	fn()
+
+	records := map[string][]map[string]any{}
+	dec := json.NewDecoder(&buf)
+	for dec.More() {
+		var rec map[string]any
+		if decErr := dec.Decode(&rec); decErr != nil {
+			t.Fatalf("decode log line: %v", decErr)
+		}
+		if msg, ok := rec["msg"].(string); ok {
+			records[msg] = append(records[msg], rec)
+		}
+		for _, v := range rec {
+			if str, ok := v.(string); ok && strings.Contains(str, "Review and try the merge again") {
+				t.Errorf("log record %+v carries GitHub's own refusal text", rec)
+			}
+		}
+	}
+	return records
+}
+
+// shipWantOneLogRecord looks up exactly one record for msg in records,
+// asserts its ticket_id, pr and head_sha, and returns it for any
+// msg-specific assertion the caller still needs to make.
+func shipWantOneLogRecord(t *testing.T, records map[string][]map[string]any, msg string, ticketID int64, pr int, headSHA string) map[string]any {
+	t.Helper()
+	recs := records[msg]
+	if len(recs) != 1 {
+		t.Fatalf("%q records = %d, want exactly 1: %+v", msg, len(recs), recs)
+	}
+	rec := recs[0]
+	if got, want := fmt.Sprint(rec["ticket_id"]), strconv.FormatInt(ticketID, 10); got != want {
+		t.Errorf("%q ticket_id = %v, want %v", msg, rec["ticket_id"], want)
+	}
+	if got, want := fmt.Sprint(rec["pr"]), strconv.Itoa(pr); got != want {
+		t.Errorf("%q pr = %v, want %v", msg, rec["pr"], want)
+	}
+	if got := rec["head_sha"]; got != headSHA {
+		t.Errorf("%q head_sha = %v, want %v", msg, got, headSHA)
+	}
+	return rec
+}
+
 // TestBaseModifiedAutoMergeRetriesLogs proves the ticket's own "Log the
 // refusal, the retry and the outcome" requirement: the refuse-then-accept
 // flow writes exactly one "merge refused, retrying" record, one "merge
 // retrying" record and one "pr merged" record, each carrying ticket_id,
 // pr and head_sha, and none of them carries GitHub's own refusal text.
-// Not parallel: it calls slog.SetDefault to capture the process-wide
-// default logger.
 func TestBaseModifiedAutoMergeRetriesLogs(t *testing.T) {
 	if testing.Short() {
 		t.Skip("slow end-to-end flow; runs in the full suite")
@@ -6148,61 +6207,101 @@ func TestBaseModifiedAutoMergeRetriesLogs(t *testing.T) {
 	gh.prState = shipMergeReadyPR(local, "PR_node_base_modified_logs")
 	gh.mergeErr = fmt.Errorf("%w: %s", orchestrator.ErrMergeRefused, shipBaseModifiedGHMessage)
 
-	var buf bytes.Buffer
-	prevDefault := slog.Default()
-	slog.SetDefault(slog.New(slog.NewJSONHandler(&buf, &slog.HandlerOptions{Level: slog.LevelInfo})))
-	t.Cleanup(func() { slog.SetDefault(prevDefault) })
-
 	rule := MergeRule{Auto: true, Method: shipMergeMethodSquash}
-	commit, err := shipPollRunWithRule(t, s, ticket, gh, tr, rule)
-	if err != nil {
-		t.Fatalf("Run: %v", err)
-	}
-	pbApply(t, s, ticket, commit)
+	records := shipCaptureLogs(t, func() {
+		commit, err := shipPollRunWithRule(t, s, ticket, gh, tr, rule)
+		if err != nil {
+			t.Fatalf("Run: %v", err)
+		}
+		pbApply(t, s, ticket, commit)
 
-	gh.mergeErr = nil
-	if _, err := shipPollRunWithRule(t, s, pbGetTicket(t, s, ticket.ID), gh, tr, rule); err != nil {
-		t.Fatalf("Run (second poll): %v", err)
-	}
-
-	records := map[string][]map[string]any{}
-	dec := json.NewDecoder(&buf)
-	for dec.More() {
-		var rec map[string]any
-		if decErr := dec.Decode(&rec); decErr != nil {
-			t.Fatalf("decode log line: %v", decErr)
+		gh.mergeErr = nil
+		if _, err := shipPollRunWithRule(t, s, pbGetTicket(t, s, ticket.ID), gh, tr, rule); err != nil {
+			t.Fatalf("Run (second poll): %v", err)
 		}
-		if msg, ok := rec["msg"].(string); ok {
-			switch msg {
-			case "merge refused, retrying", "merge retrying", "pr merged":
-				records[msg] = append(records[msg], rec)
-			}
-		}
-		for _, v := range rec {
-			if s, ok := v.(string); ok && strings.Contains(s, "Review and try the merge again") {
-				t.Errorf("log record %+v carries GitHub's own refusal text", rec)
-			}
-		}
-	}
+	})
 
 	for _, msg := range []string{"merge refused, retrying", "merge retrying", "pr merged"} {
-		recs := records[msg]
-		if len(recs) != 1 {
-			t.Fatalf("%q records = %d, want exactly 1: %+v", msg, len(recs), recs)
-		}
-		rec := recs[0]
-		if got, want := fmt.Sprint(rec["ticket_id"]), strconv.FormatInt(ticket.ID, 10); got != want {
-			t.Errorf("%q ticket_id = %v, want %v", msg, rec["ticket_id"], want)
-		}
-		if got, want := fmt.Sprint(rec["pr"]), "1"; got != want {
-			t.Errorf("%q pr = %v, want %v", msg, rec["pr"], want)
-		}
-		if got := rec["head_sha"]; got != local {
-			t.Errorf("%q head_sha = %v, want %v", msg, got, local)
-		}
+		shipWantOneLogRecord(t, records, msg, ticket.ID, 1, local)
 	}
 	if got := records["merge refused, retrying"][0]["refusal"]; got != "base_modified" {
 		t.Errorf("merge refused, retrying refusal = %v, want base_modified", got)
+	}
+}
+
+// TestBaseModifiedThenDirtyStartsBaseMergeLogs proves the ticket's own
+// "log the outcome" requirement for the base-merge ending: once the
+// refusal's own retry tick finds the pull request dirty, the "base merge
+// requested" record carries ticket_id, pr, head_sha and the dirty
+// mergeable_state, and the earlier "merge refused, retrying" record from
+// tick 1 is the only refusal logged -- the retry tick itself never asks
+// the owner, so no "asking the owner" record exists.
+func TestBaseModifiedThenDirtyStartsBaseMergeLogs(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow end-to-end flow; runs in the full suite")
+	}
+	s, ticket, gh, tr := shipPublished(t)
+	local := shipHeadSHA(t, s, ticket)
+	runs, required := shipGreenCI()
+	gh.runs, gh.required = runs, required
+	gh.prState = shipMergeReadyPR(local, "PR_node_base_modified_dirty_logs")
+	gh.mergeErr = fmt.Errorf("%w: %s", orchestrator.ErrMergeRefused, shipBaseModifiedGHMessage)
+
+	rule := MergeRule{Auto: true, Method: shipMergeMethodSquash}
+	commit1, err := shipPollRunWithRule(t, s, ticket, gh, tr, rule)
+	if err != nil {
+		t.Fatalf("Run (tick 1): %v", err)
+	}
+	pbApply(t, s, ticket, commit1)
+
+	gh.prState.MergeableState = mergeableStateDirty
+	records := shipCaptureLogs(t, func() {
+		if _, err := shipPollRunWithRule(t, s, pbGetTicket(t, s, ticket.ID), gh, tr, rule); err != nil {
+			t.Fatalf("Run (tick 2): %v", err)
+		}
+	})
+
+	rec := shipWantOneLogRecord(t, records, "base merge requested", ticket.ID, 1, local)
+	if got := rec["mergeable_state"]; got != mergeableStateDirty {
+		t.Errorf("base merge requested mergeable_state = %v, want %v", got, mergeableStateDirty)
+	}
+	if len(records["merge refused, asking the owner"]) != 0 {
+		t.Errorf("merge refused, asking the owner records = %+v, want none", records["merge refused, asking the owner"])
+	}
+}
+
+// TestBaseModifiedRetryRefusedAgainLogs proves the ticket's own "log the
+// outcome" requirement for the ask-the-owner ending: a second "Base
+// branch was modified" refusal, on a head that already carries a retry
+// marker, logs exactly one "merge refused, asking the owner" record with
+// refusal base_modified and the usual ticket_id, pr and head_sha.
+func TestBaseModifiedRetryRefusedAgainLogs(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow end-to-end flow; runs in the full suite")
+	}
+	s, ticket, gh, tr := shipPublished(t)
+	local := shipHeadSHA(t, s, ticket)
+	runs, required := shipGreenCI()
+	gh.runs, gh.required = runs, required
+	gh.prState = shipMergeReadyPR(local, "PR_node_base_modified_twice_logs")
+	gh.mergeErr = fmt.Errorf("%w: %s", orchestrator.ErrMergeRefused, shipBaseModifiedGHMessage)
+
+	rule := MergeRule{Auto: true, Method: shipMergeMethodSquash}
+	commit1, err := shipPollRunWithRule(t, s, ticket, gh, tr, rule)
+	if err != nil {
+		t.Fatalf("Run (tick 1): %v", err)
+	}
+	pbApply(t, s, ticket, commit1)
+
+	records := shipCaptureLogs(t, func() {
+		if _, err := shipPollRunWithRule(t, s, pbGetTicket(t, s, ticket.ID), gh, tr, rule); err != nil {
+			t.Fatalf("Run (tick 2, refused again): %v", err)
+		}
+	})
+
+	rec := shipWantOneLogRecord(t, records, "merge refused, asking the owner", ticket.ID, 1, local)
+	if got := rec["refusal"]; got != "base_modified" {
+		t.Errorf("merge refused, asking the owner refusal = %v, want base_modified", got)
 	}
 }
 
