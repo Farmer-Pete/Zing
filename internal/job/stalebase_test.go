@@ -316,6 +316,40 @@ func TestJudgingTickNotesStaleBase(t *testing.T) {
 	}
 }
 
+// TestShippingTickNotesStaleBase proves shipHandler.Run's own shim (task
+// 6) notes a stale base exactly like withStaleBaseNote does when driven
+// directly: shipTicketReady's bare origin, broken by staleBaseBreakOrigin,
+// then one shipHandler tick with pr_url still unset, which reaches PUBLISH
+// and fetches through Push. The resulting commit (an escalation or not) is
+// applied either way, then exactly one stale_base event for step shipping
+// with reason no_origin.
+func TestShippingTickNotesStaleBase(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow end-to-end flow; runs in the full suite")
+	}
+	t.Parallel()
+	s, ticket, _ := shipTicketReady(t)
+	staleBaseBreakOrigin(t, s, ticket.ID)
+
+	gh := &shipGitHub{}
+	tr := &shipTracker{}
+	deps := shipClaim(t, s, pbFakeRuntime(t), ticket.ID, gh, tr)
+
+	commit, err := (shipHandler{}).Run(t.Context(), ticket, deps)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	pbApply(t, s, ticket, commit)
+
+	events := staleBaseEventsFor(t, s, ticket.ID, stateShipping)
+	if len(events) != 1 {
+		t.Fatalf("staleBaseEventsFor(shipping) = %+v, want exactly one", events)
+	}
+	if got := events[0]; got.Reason != "no_origin" {
+		t.Errorf("shipping event = %+v, want reason no_origin", got)
+	}
+}
+
 // TestStaleBaseSkip is a table test over staleBaseSkip's pure decision
 // (design shape): the sha and branch validity checks it repeats from the
 // stale_base schema, and the already-noted check over a set of rows.
