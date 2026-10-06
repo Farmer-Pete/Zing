@@ -1758,6 +1758,26 @@ func renderFindings(findings []response.Finding) string {
 	return strings.Join(lines, "\n")
 }
 
+// gateFindingTextMaxRunes caps each finding's text on the owner-chose gate
+// acceptPlanAtCap posts (ticket 66).
+const gateFindingTextMaxRunes = 200
+
+// renderGateFindings renders findings, in stored order, one markdown list
+// line each: "- SEVERITY LOCATION TEXT", every whitespace run collapsed to
+// one space and TEXT cut to its first gateFindingTextMaxRunes runes; "" for
+// no findings.
+func renderGateFindings(findings []response.Finding) string {
+	lines := make([]string, len(findings))
+	for i, f := range findings {
+		text := []rune(strings.Join(strings.Fields(f.Text), " "))
+		if len(text) > gateFindingTextMaxRunes {
+			text = text[:gateFindingTextMaxRunes]
+		}
+		lines[i] = strings.Join(strings.Fields(fmt.Sprintf("- %s %s %s", f.Severity, f.Location, string(text))), " ")
+	}
+	return strings.Join(lines, "\n")
+}
+
 // ---- 6.6 the gate: post, approve/seal, reject -----------------------------
 
 // gateQuestionMessage builds the section 6.6 "Post" message: kind gate,
@@ -2147,7 +2167,15 @@ func acceptPlanAtCap(ctx context.Context, t store.Ticket, d Deps, resolveIDs []i
 	if err = json.Unmarshal(planArtifact.Payload, &plan); err != nil {
 		return store.HandlerCommit{}, fmt.Errorf("job: planning: cap_loops accept: unmarshal plan artifact: %w", err)
 	}
-	c, err := postGateCommit(ctx, t, d, plan.Overview.Objective, gateApproveExplainsOwnerChose)
+	findings, err := storedPlanreviewFindings(ctx, t, d)
+	if err != nil {
+		return store.HandlerCommit{}, err
+	}
+	explains := gateApproveExplainsOwnerChose
+	if list := renderGateFindings(findings); list != "" {
+		explains += "\n\n" + list
+	}
+	c, err := postGateCommit(ctx, t, d, plan.Overview.Objective, explains)
 	if err != nil {
 		return store.HandlerCommit{}, err
 	}
@@ -2155,7 +2183,7 @@ func acceptPlanAtCap(ctx context.Context, t store.Ticket, d Deps, resolveIDs []i
 	c.Messages = append(c.Messages, store.Message{
 		TicketID: t.ID, Type: msgTypeUpdate, Author: authorSystem, Body: gateCapMarker(cohort.PlanVersion),
 	})
-	slog.Info("gate posted at loop cap by owner choice", "ticket_id", t.ID, "plan_version", cohort.PlanVersion)
+	slog.Info("gate posted at loop cap by owner choice", "ticket_id", t.ID, "plan_version", cohort.PlanVersion, "findings", len(findings))
 	return c, nil
 }
 
@@ -2205,6 +2233,31 @@ func retryCapBudget(ctx context.Context, t store.Ticket, d Deps, resolveIDs []in
 	return buildingHandler{}.retryMarkerCommit(t, d, resolveIDs), nil
 }
 
+// storedPlanreviewFindings returns every finding in the planreview artifact
+// at the current cohort's exact version, in stored order; nil, nil when
+// there is no cohort or no artifact at that version.
+func storedPlanreviewFindings(ctx context.Context, t store.Ticket, d Deps) ([]response.Finding, error) {
+	cohort, ok, err := d.Store.CurrentCohort(ctx, t.ID)
+	if err != nil {
+		return nil, fmt.Errorf("job: planning: stored planreview findings: current cohort: %w", err)
+	}
+	if !ok {
+		return nil, nil
+	}
+	review, exists, err := d.Store.PlanReviewAt(ctx, t.ID, cohort.PlanVersion)
+	if err != nil {
+		return nil, fmt.Errorf("job: planning: stored planreview findings: planreview at version %d: %w", cohort.PlanVersion, err)
+	}
+	if !exists {
+		return nil, nil
+	}
+	var payload planreviewArtifactPayload
+	if unmarshalErr := json.Unmarshal(review.Payload, &payload); unmarshalErr != nil {
+		return nil, fmt.Errorf("job: planning: stored planreview findings: unmarshal planreview artifact: %w", unmarshalErr)
+	}
+	return payload.Findings, nil
+}
+
 // outstandingFloorFindings reads the current cohort's planreview artifact
 // and returns its at-or-below-floor survivors (design section 6.7's
 // cap_loops retry row): the same set maybeResumeFloorFindings itself
@@ -2214,26 +2267,12 @@ func retryCapBudget(ctx context.Context, t store.Ticket, d Deps, resolveIDs []in
 // cohort or no planreview artifact at its version yet (unreachable in
 // practice: a cap_loops escalation cannot exist without one).
 func outstandingFloorFindings(ctx context.Context, t store.Ticket, d Deps) ([]response.Finding, error) {
-	cohort, ok, err := d.Store.CurrentCohort(ctx, t.ID)
+	findings, err := storedPlanreviewFindings(ctx, t, d)
 	if err != nil {
-		return nil, fmt.Errorf("job: planning: cap_loops retry: current cohort: %w", err)
+		return nil, err
 	}
-	if !ok {
-		return nil, nil
-	}
-	review, exists, err := d.Store.PlanReviewAt(ctx, t.ID, cohort.PlanVersion)
-	if err != nil {
-		return nil, fmt.Errorf("job: planning: cap_loops retry: planreview at version %d: %w", cohort.PlanVersion, err)
-	}
-	if !exists {
-		return nil, nil
-	}
-	var payload planreviewArtifactPayload
-	if unmarshalErr := json.Unmarshal(review.Payload, &payload); unmarshalErr != nil {
-		return nil, fmt.Errorf("job: planning: cap_loops retry: unmarshal planreview artifact: %w", unmarshalErr)
-	}
-	atOrBelow := make([]response.Finding, 0, len(payload.Findings))
-	for _, f := range payload.Findings {
+	atOrBelow := make([]response.Finding, 0, len(findings))
+	for _, f := range findings {
 		if f.Severity.Rank() <= d.Floor.Rank() {
 			atOrBelow = append(atOrBelow, f)
 		}

@@ -173,6 +173,38 @@ func TestPlanCapLoops_AcceptPostsGate(t *testing.T) {
 	}
 }
 
+// TestPlanCapLoops_AcceptGateListsEveryFinding proves acceptPlanAtCap lists
+// every stored planreview finding, above-floor included, on the owner-chose
+// gate, in stored order after the owner-chose text and a blank line.
+func TestPlanCapLoops_AcceptGateListsEveryFinding(t *testing.T) {
+	t.Parallel()
+	s, ticketID, _, q := seedCapLoopsEscalation(t, "Cap loops, gate lists every finding.")
+
+	answerGateQuestion(t, s, ticketID, q.ID, new("d"), "")
+
+	commit, err := runPlanning(t, s, claim(t, s, &scriptedRuntime{t: t}, ticketID), ticketID)
+	if err != nil {
+		t.Fatalf("planning Run (accept d): %v", err)
+	}
+	if len(commit.Messages) == 0 {
+		t.Fatalf("commit.Messages = empty, want the gate question first")
+	}
+	body := commit.Messages[0].Body
+	wantMinor := "- minor plan/design/shape still wrong"
+	wantMajor := "- major plan/design/other worse"
+	minorIdx := strings.Index(body, wantMinor)
+	majorIdx := strings.Index(body, wantMajor)
+	if minorIdx < 0 || majorIdx < 0 {
+		t.Fatalf("gate message body = %q, want it to contain %q and %q", body, wantMinor, wantMajor)
+	}
+	if minorIdx > majorIdx {
+		t.Errorf("gate message body lists the major finding before the minor one, want stored order:\n%s", body)
+	}
+	if !strings.Contains(body, "you chose to see this gate anyway.\n\n"+wantMinor) {
+		t.Errorf("gate message body = %q, want the list after the owner-chose text and a blank line", body)
+	}
+}
+
 // TestPlanCapLoops_RetryBackAbandonUnchanged proves options a, b, and c on
 // the cap_loops loops_exhausted question behave exactly as they did before
 // ticket 66 added option d: no subtest posts a gate.

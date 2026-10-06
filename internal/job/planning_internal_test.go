@@ -98,6 +98,41 @@ func TestGateQuestionMessage_LoopsExhaustedUsesDifferentExplainsText(t *testing.
 	}
 }
 
+// TestRenderGateFindings proves renderGateFindings' rendering rules for
+// acceptPlanAtCap's gate list: one "- SEVERITY LOCATION TEXT" line per
+// finding in input order, whitespace collapsed, and TEXT cut at
+// gateFindingTextMaxRunes runes.
+func TestRenderGateFindings(t *testing.T) {
+	t.Parallel()
+
+	if got := renderGateFindings(nil); got != "" {
+		t.Errorf("renderGateFindings(nil) = %q, want %q", got, "")
+	}
+
+	one := []response.Finding{{Severity: response.SeverityMajor, Location: "plan/design/other", Text: "worse\n  than   before"}}
+	if got, want := renderGateFindings(one), "- major plan/design/other worse than before"; got != want {
+		t.Errorf("renderGateFindings(one) = %q, want %q", got, want)
+	}
+
+	longText := strings.Repeat("x", 250) + "é"
+	long := []response.Finding{{Severity: response.SeverityMinor, Location: "plan/design/shape", Text: longText}}
+	gotLong := renderGateFindings(long)
+	wantPrefix := "- minor plan/design/shape " + strings.Repeat("x", gateFindingTextMaxRunes)
+	if gotLong != wantPrefix {
+		t.Errorf("renderGateFindings(long) = %q, want %q", gotLong, wantPrefix)
+	}
+
+	two := []response.Finding{
+		{Severity: response.SeverityMinor, Location: "plan/design/shape", Text: "still wrong"},
+		{Severity: response.SeverityMajor, Location: "plan/design/other", Text: "worse"},
+	}
+	gotTwo := renderGateFindings(two)
+	wantTwo := "- minor plan/design/shape still wrong\n- major plan/design/other worse"
+	if gotTwo != wantTwo {
+		t.Errorf("renderGateFindings(two) = %q, want %q", gotTwo, wantTwo)
+	}
+}
+
 // TestPostRunFailedWhatFor covers postRunFailedWhatFor's own table (design
 // section 4.1): the four origins runAndRoute already threads through
 // postRunFailure, the three origins Package 8 adds ahead of their own
