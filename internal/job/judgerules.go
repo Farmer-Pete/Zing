@@ -55,9 +55,24 @@ func CheckCoverage(scenarios []response.Scenario, verdicts []response.Verdict) [
 // judged's own evidence plus a blank line and the re-run note; CheckExit
 // holds exit.
 func applyCheckExit(judged response.VerdictArtifact, exit int) response.VerdictArtifact {
-	note := fmt.Sprintf("Zing re-ran the check command: exit %d.", exit)
+	return checkExitRow(judged, exit, "Zing re-ran the check command")
+}
+
+// applyHostCheckExit is hostVerdict's own check override (#49 task 3): the
+// same exit rule as applyCheckExit, with evidence naming the host run
+// Zing already made before judging, rather than a re-run CHECK makes now.
+func applyHostCheckExit(judged response.VerdictArtifact, exit int) response.VerdictArtifact {
+	return checkExitRow(judged, exit, "Zing ran the check command on the host before judging")
+}
+
+// checkExitRow is applyCheckExit's and applyHostCheckExit's shared exit
+// rule: lead plus ": exit N." (or ": timed out after 10m." for exit -1)
+// appended to judged's evidence after a blank line, Result pass iff exit
+// is 0, CheckExit set to exit.
+func checkExitRow(judged response.VerdictArtifact, exit int, lead string) response.VerdictArtifact {
+	note := fmt.Sprintf("%s: exit %d.", lead, exit)
 	if exit == -1 {
-		note = "Zing re-ran the check command: timed out after 10m."
+		note = lead + ": timed out after 10m."
 	}
 
 	row := judged
@@ -73,10 +88,10 @@ func applyCheckExit(judged response.VerdictArtifact, exit int) response.VerdictA
 
 // JudgePasses is 7.4's pass rule. final is the newest verdict row per
 // scenario of the round (the caller dedups before calling this). The
-// round passes when every behavior and negative row is Result pass; a
-// performance row never counts toward the pass, failing or not. failures
-// lists every behavior or negative row whose Result is not pass, in
-// final's order.
+// round passes when every behavior, negative, and host row is Result
+// pass; a performance row never counts toward the pass, failing or not.
+// failures lists every behavior, negative, or host row whose Result is
+// not pass, in final's order.
 func JudgePasses(final []response.VerdictArtifact) (pass bool, failures []response.VerdictArtifact) {
 	pass = true
 	for _, row := range final {

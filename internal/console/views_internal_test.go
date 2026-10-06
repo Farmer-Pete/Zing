@@ -261,6 +261,11 @@ func TestUpdateLineJudgeShippingRespondMarkers(t *testing.T) {
 		{"judge coverage delivered", "judge coverage delivered run 12", "Coverage errors sent back to run 12."},
 		{"judge check pass", "judge check 1 s2 exit 0", "Check for s2 exited 0."},
 		{"judge check timeout", "judge check 1 s3 exit -1", "Check for s3 exited -1."},
+		{
+			"judge host check",
+			"judge host 1 s1 exit 3 cmd " + strings.Repeat("ab", 32) + "\nFAIL",
+			"Host check for s1 exited 3.",
+		},
 		// shipping markers (design section 5.1, 8.2-8.9).
 		{"pr opened", "pr opened 42", "Draft pull request #42 opened."},
 		{"ci waiting", "ci waiting ci,lint", "CI is waiting for ci,lint."},
@@ -800,6 +805,7 @@ var markerShapeCases = []struct{ name, body string }{
 	{"judge coverage failed", "judge coverage failed run 12\nmissing verdict for scenario s2"},
 	{"judge coverage delivered", "judge coverage delivered run 12"},
 	{"judge check", "judge check 1 s2 exit 0"},
+	{"judge host check", "judge host 1 s1 exit 0 cmd " + strings.Repeat("ab", 32)},
 	{"pr opened", "pr opened 42"},
 	{"ci waiting", "ci waiting ci,lint"},
 	{"reviewers re-requested", "reviewers re-requested 0123456789abcdef0123456789abcdef01234567\nalice,bob"},

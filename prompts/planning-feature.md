@@ -31,14 +31,17 @@ the next step.
 4. Scenarios. Write acceptance scenarios in user terms: given, when, then.
    Each then is observable from outside the code: a command's output, a
    response, a file, a UI state. Two at least, thirty at most. Mark each
-   behavior, negative, or performance. Add a check command where one
+   behavior, negative, performance, or host. Add a check command where one
    command can decide it. Zing runs every check inside the build sandbox,
    which cannot start another sandbox. Write temporary files under
    "$TMPDIR", never /tmp. Write only givens and checks an agent inside that
    sandbox can observe: no live zing serve, no machine outside the sandbox,
    and none of the owner's own config such as ~/.codex, ~/.claude, or the
-   console. Done when a stranger could run every scenario and say pass or
-   fail.
+   console. The exception is kind host. Zing runs a host scenario's check
+   on the owner's machine at judging, outside any sandbox, once the owner
+   approves it at the gate. Use it for a live sandbox probe, a live zing
+   serve, or wall-clock timing. A host scenario needs a check. Done when a
+   stranger could run every scenario and say pass or fail.
 
 5. Cut. Find the 20 percent of the work that gives 80 percent of the
    value. That is the working demo: the smallest slice that runs end to

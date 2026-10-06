@@ -227,7 +227,7 @@ func TestRenderTemplate_EachFieldShowsItsType(t *testing.T) {
 		{"string (Overview.Objective)", "<objective>...</objective> <!-- string,"},
 		{"int (Hypothesis.Rank)", `rank: int`},
 		{"bool (Task.Demo)", `demo: bool`},
-		{"enum (Scenario.Kind)", "kind: ScenarioKind, one of: behavior | negative | performance"},
+		{"enum (Scenario.Kind)", "kind: ScenarioKind, one of: behavior | negative | performance | host"},
 		{"struct (Design.Demo)", `<demo cmd="...">...</demo> <!-- Demo;`},
 	}
 	for _, tt := range tests {
