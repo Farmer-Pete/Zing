@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"regexp"
 	"slices"
 	"strings"
 	"time"
@@ -189,6 +190,21 @@ type HandlerCommit struct {
 	// the ticket's newest plan (plan #51): applied by grantPlanFilesTx,
 	// right after Artifacts and before Seal. nil changes nothing.
 	GrantFiles *response.FileGrant
+	// SplitChild, when set, inserts one queued child ticket under this
+	// commit's ticket: project_id copied from the parent, parent_ticket_id
+	// the parent's id, split_key Key, plus one ticket_dependencies row per
+	// DependsOn key (#74's planner split). Applied by applySplitChildTx,
+	// right after GrantFiles and before checkGateApprovalTx.
+	SplitChild *SplitChild
+}
+
+// SplitChild is one approved split child, filed on the tracker and ready to
+// become a queued ticket row (#74). Key matches ^c[0-9]+$ and is unique per
+// parent (tickets_split_key_uk); Ref is the tracker ref FileTicket returned;
+// DependsOn names sibling keys already filed under the same parent.
+type SplitChild struct {
+	Key, Ref, Title, Body string
+	DependsOn             []string
 }
 
 // ConversationCommit is one planning turn's thread effects (design section
@@ -520,6 +536,12 @@ func (s *Store) CommitHandlerResult(ctx context.Context, c HandlerCommit) (bool,
 
 	if c.GrantFiles != nil {
 		if err = s.grantPlanFilesTx(ctx, tx, c.TicketID, *c.GrantFiles); err != nil {
+			return false, fmt.Errorf("commit handler result: %w", err)
+		}
+	}
+
+	if c.SplitChild != nil {
+		if err = applySplitChildTx(ctx, tx, ticket, *c.SplitChild); err != nil {
 			return false, fmt.Errorf("commit handler result: %w", err)
 		}
 	}
@@ -1058,6 +1080,54 @@ func (s *Store) insertArtifactTx(ctx context.Context, tx *sql.Tx, a Artifact) (i
 		return 0, fmt.Errorf("insert artifact: %w", err)
 	}
 	return id, nil
+}
+
+// splitKeyPattern is the split child key shape migration 0010's own CHECK
+// constraint enforces at the column (tickets.split_key GLOB 'c[0-9]*'):
+// checked again here so a malformed key fails with a plain Go error rather
+// than a SQLite CHECK violation.
+var splitKeyPattern = regexp.MustCompile(`^c\d+$`)
+
+// applySplitChildTx inserts sc as a queued ticket under parent (#74's
+// planner split): project_id copied from parent, parent_ticket_id set to
+// parent.ID, split_key sc.Key, plus one ticket_dependencies row per
+// DependsOn key, resolved against parent's already-filed children (siblings
+// sharing the same parent_ticket_id). A DependsOn key naming a child not yet
+// filed under this parent is the error "split child %s depends on %s, which
+// is not filed".
+func applySplitChildTx(ctx context.Context, tx *sql.Tx, parent Ticket, sc SplitChild) error {
+	if !splitKeyPattern.MatchString(sc.Key) || sc.Ref == "" || sc.Title == "" || sc.Body == "" {
+		return fmt.Errorf("split child %q: key must match c[0-9]+ and ref, title, body must be non-empty", sc.Key)
+	}
+	depIDs := make([]int64, len(sc.DependsOn))
+	for i, k := range sc.DependsOn {
+		err := tx.QueryRowContext(ctx,
+			`SELECT id FROM tickets WHERE parent_ticket_id = ? AND split_key = ?`, parent.ID, k).Scan(&depIDs[i])
+		if errors.Is(err, sql.ErrNoRows) {
+			return fmt.Errorf("split child %s depends on %s, which is not filed", sc.Key, k)
+		}
+		if err != nil {
+			return fmt.Errorf("split child %s: dependency %s: %w", sc.Key, k, err)
+		}
+	}
+	res, err := tx.ExecContext(ctx,
+		`INSERT INTO tickets (project_id, tracker_ref, title, body, state, parent_ticket_id, split_key)
+		 VALUES (?, ?, ?, ?, ?, ?, ?)`,
+		parent.ProjectID, sc.Ref, sc.Title, sc.Body, ticketStateQueued, parent.ID, sc.Key)
+	if err != nil {
+		return fmt.Errorf("split child %s: insert ticket: %w", sc.Key, err)
+	}
+	childID, err := res.LastInsertId()
+	if err != nil {
+		return fmt.Errorf("split child %s: last insert id: %w", sc.Key, err)
+	}
+	for _, depID := range depIDs {
+		if _, err = tx.ExecContext(ctx,
+			`INSERT INTO ticket_dependencies (ticket_id, depends_on_ticket_id) VALUES (?, ?)`, childID, depID); err != nil {
+			return fmt.Errorf("split child %s: insert dependency: %w", sc.Key, err)
+		}
+	}
+	return nil
 }
 
 // checkGateApprovalTx enforces the seal invariant (D32, design section

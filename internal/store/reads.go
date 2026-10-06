@@ -454,6 +454,42 @@ func (s *Store) OpenRunIDs(ctx context.Context) (map[int64]bool, error) {
 	return out, nil
 }
 
+// SplitChildRow is one child ticket already filed under a split's parent
+// (#74): the tickets row's id, split_key, tracker_ref, and state.
+type SplitChildRow struct {
+	TicketID int64
+	Key      string
+	Ref      string
+	State    string
+}
+
+// SplitChildren returns every child ticket already filed under parentID,
+// ordered by id: the tickets whose parent_ticket_id is parentID and whose
+// split_key is not NULL. A parent with no filed children returns an empty
+// slice and a nil error.
+func (s *Store) SplitChildren(ctx context.Context, parentID int64) ([]SplitChildRow, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT id, split_key, tracker_ref, state FROM tickets WHERE parent_ticket_id = ? AND split_key IS NOT NULL ORDER BY id`,
+		parentID)
+	if err != nil {
+		return nil, fmt.Errorf("split children for ticket %d: %w", parentID, err)
+	}
+	defer rows.Close()
+
+	out := []SplitChildRow{}
+	for rows.Next() {
+		var row SplitChildRow
+		if err := rows.Scan(&row.TicketID, &row.Key, &row.Ref, &row.State); err != nil {
+			return nil, fmt.Errorf("split children for ticket %d: %w", parentID, err)
+		}
+		out = append(out, row)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("split children for ticket %d: %w", parentID, err)
+	}
+	return out, nil
+}
+
 // GetMessage reads the message with id, or a wrapped sql.ErrNoRows if none exists.
 func (s *Store) GetMessage(ctx context.Context, id int64) (MessageRow, error) {
 	row := s.db.QueryRowContext(ctx, `SELECT `+messageColumns+` FROM messages WHERE id = ?`, id)
