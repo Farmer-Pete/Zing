@@ -108,12 +108,13 @@ func (c *console) handlePickup(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err != nil {
-		slog.Error("console: pickup: insert ticket", "project_id", projectID, "ref", ref, "err", err)
+		slog.Error("console: pickup: insert ticket",
+			"project_id", projectID, "ref", ref, "old_ticket_id", existingTicket.ID, "retired_ref", retiredRef, "err", err)
 		http.Error(w, genericServerErrorBody, http.StatusInternalServerError)
 		return
 	}
 	if retiredRef != "" {
-		slog.Info("console: pickup retired abandoned ticket",
+		slog.InfoContext(r.Context(), "console: pickup retired abandoned ticket",
 			"old_ticket_id", existingTicket.ID, "new_ticket_id", newID, "new_ref", retiredRef, "project_id", projectID, "ref", ref)
 	}
 
@@ -165,10 +166,16 @@ func (c *console) insertFresh(ctx context.Context, projectID int64, trackerProje
 }
 
 // liveHolder returns a 409 *actionRefusal when a non-abandoned ticket now
-// holds ref, and cause otherwise (including when the re-read itself fails).
+// holds ref, and cause otherwise. When the re-read itself fails, that
+// failure is joined onto cause rather than dropped, so the caller's one log
+// line carries both errors.
 func (c *console) liveHolder(ctx context.Context, projectID int64, ref string, cause error) error {
 	cur, found, err := c.store.TicketByRef(ctx, projectID, ref)
-	if err != nil || !found || cur.State == ticketStateAbandoned {
+	if err != nil {
+		return errors.Join(cause, fmt.Errorf("console: recheck ref %s: %w", ref, err))
+	}
+	holderIsLive := found && cur.State != ticketStateAbandoned
+	if !holderIsLive {
 		return cause
 	}
 	return &actionRefusal{Status: http.StatusConflict, Reason: fmt.Sprintf("issue #%s is already ticket %d", ref, cur.ID)}

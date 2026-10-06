@@ -1842,17 +1842,29 @@ func TestGateShowsPlan(t *testing.T) {
 	}
 }
 
-// TestActionsFor proves actionsFor (#65) reads Abandon straight off
-// store.CanAbandon for every one of the machine's nine states, offers
-// Restart wherever Abandon does and also on an abandoned ticket with no
-// live successor (never on an abandoned ticket that has one), reads Held
-// off the claim alone, and strips an attempt suffix from Ref.
+// TestActionsFor proves actionsFor (#65) offers Abandon and Restart on
+// every queued-through-shipping state, never on done or escalated (even if
+// store.CanAbandon's own list drifted, r1f11 pins these two by name rather
+// than by re-deriving the expectation from the function under test), offers
+// Restart but not Abandon on an abandoned ticket with no live successor,
+// offers neither on an abandoned ticket that has one, reads Held off the
+// claim alone, and strips an attempt suffix from Ref.
 func TestActionsFor(t *testing.T) {
 	t.Parallel()
 
+	// wantAbandon is spelled out per state, not derived from
+	// store.CanAbandon, so a state wrongly added to or dropped from that
+	// list cannot also move this test's expectation (r1f11).
+	wantAbandon := map[string]bool{
+		testQueuedState: true, demoTicketState: true, string(response.TicketStateBuilding): true,
+		string(response.TicketStateReviewing): true, string(response.TicketStateJudging): true, string(response.TicketStateShipping): true,
+		string(response.TicketStateDone): false, string(response.TicketStateEscalated): false, ticketStateAbandoned: false,
+	}
 	states := []string{
-		testQueuedState, demoTicketState, "building", "reviewing", "judging", "shipping",
-		"done", "escalated", "abandoned",
+		testQueuedState, demoTicketState,
+		string(response.TicketStateBuilding), string(response.TicketStateReviewing),
+		string(response.TicketStateJudging), string(response.TicketStateShipping),
+		string(response.TicketStateDone), string(response.TicketStateEscalated), ticketStateAbandoned,
 	}
 	claims := []*string{nil, new("some-owner")}
 
@@ -1865,11 +1877,14 @@ func TestActionsFor(t *testing.T) {
 					ticket := store.Ticket{TrackerRef: "41-abandoned-2", State: state, ClaimOwner: claim}
 					got := actionsFor(ticket, liveSuccessor)
 
-					if want := store.CanAbandon(state); got.Abandon != want {
+					if want := wantAbandon[state]; got.Abandon != want {
 						t.Errorf("Abandon = %v, want %v", got.Abandon, want)
 					}
 
-					wantRestart := store.CanAbandon(state) || (state == ticketStateAbandoned && !liveSuccessor)
+					wantRestart := wantAbandon[state]
+					if state == ticketStateAbandoned {
+						wantRestart = !liveSuccessor
+					}
 					if got.Restart != wantRestart {
 						t.Errorf("Restart = %v, want %v", got.Restart, wantRestart)
 					}
@@ -1953,6 +1968,57 @@ func TestThreadRendersTicketActions(t *testing.T) {
 	}
 	if !strings.Contains(got, store.AbandonClaimedReason) {
 		t.Errorf("claimed ticket missing claim note; got:\n%s", got)
+	}
+
+	// An abandoned ticket with no live successor still offers Restart, but
+	// not Abandon, so ticketActions' own TicketByRef lookup must run (r1f10:
+	// the two cases below were previously untested, so ticketActions could
+	// always pass liveSuccessor=false and still pass every other test).
+	abandonedID, err := s.InsertTicket(t.Context(), store.Ticket{
+		ProjectID: projectID, TrackerRef: "99", Title: "restart me too", State: testQueuedState,
+	})
+	if err != nil {
+		t.Fatalf("InsertTicket: %v", err)
+	}
+	if err := s.AbandonTicket(t.Context(), abandonedID, "test abandon"); err != nil {
+		t.Fatalf("AbandonTicket: %v", err)
+	}
+	c2 := &console{store: s}
+	renderTicket := func(id int64) string {
+		t.Helper()
+		comp, compErr := c2.threadComponent(t.Context(), id)
+		if compErr != nil {
+			t.Fatalf("threadComponent: %v", compErr)
+		}
+		var sb strings.Builder
+		if renderErr := comp.Render(t.Context(), &sb); renderErr != nil {
+			t.Fatalf("Render: %v", renderErr)
+		}
+		return sb.String()
+	}
+
+	gotAbandoned := renderTicket(abandonedID)
+	if strings.Contains(gotAbandoned, "ticket-abandon") {
+		t.Errorf("abandoned ticket with no live successor offers Abandon; got:\n%s", gotAbandoned)
+	}
+	if !strings.Contains(gotAbandoned, "ticket-restart") {
+		t.Errorf("abandoned ticket with no live successor missing Restart; got:\n%s", gotAbandoned)
+	}
+
+	// Once a live successor exists at the retired ref, the old abandoned
+	// ticket offers neither action.
+	if _, err := s.RetireAbandonedRef(t.Context(), projectID, "99"); err != nil {
+		t.Fatalf("RetireAbandonedRef: %v", err)
+	}
+	if _, err := s.InsertTicket(t.Context(), store.Ticket{
+		ProjectID: projectID, TrackerRef: "99", Title: "the live successor", State: testQueuedState,
+	}); err != nil {
+		t.Fatalf("InsertTicket: %v", err)
+	}
+
+	gotSuperseded := renderTicket(abandonedID)
+	if strings.Contains(gotSuperseded, "ticket-actions") {
+		t.Errorf("abandoned ticket with a live successor renders an action bar; got:\n%s", gotSuperseded)
 	}
 }
 
@@ -2172,7 +2238,11 @@ func TestBuildNavThreads_ParkedUntil(t *testing.T) {
 // issue: one head per base ref -- the attempt-0 ticket when one exists, in
 // the input's own order -- and every other ticket sharing that base under
 // earlier[head.ID], oldest attempt first; a base with no attempt-0 ticket at
-// all (53-abandoned-1 alone) is still its own head, with no earlier entry.
+// all is still its own head, with every other attempt sharing that base
+// under earlier -- 53-abandoned-1 alone (no earlier entry), and 53's own two
+// attempts (53-abandoned-1, 53-abandoned-2, so the head is the
+// highest-attempt ticket 10, not simply attempts[0], and earlier[10] holds
+// the one older attempt, ticket 6) (r1f12).
 func TestGroupAttempts(t *testing.T) {
 	t.Parallel()
 
@@ -2181,21 +2251,23 @@ func TestGroupAttempts(t *testing.T) {
 	ticket8 := store.Ticket{ID: 8, TrackerRef: "41-abandoned-2"}
 	ticket4 := store.Ticket{ID: 4, TrackerRef: "41-abandoned-1"}
 	ticket6 := store.Ticket{ID: 6, TrackerRef: "53-abandoned-1"}
+	ticket10 := store.Ticket{ID: 10, TrackerRef: "53-abandoned-2"}
 
-	heads, earlier := groupAttempts([]store.Ticket{ticket9, ticket3, ticket8, ticket4, ticket6})
+	heads, earlier := groupAttempts([]store.Ticket{ticket9, ticket3, ticket8, ticket4, ticket6, ticket10})
 
 	if len(heads) != 3 {
 		t.Fatalf("groupAttempts heads = %+v, want 3 entries", heads)
 	}
-	if heads[0].ID != 9 || heads[1].ID != 3 || heads[2].ID != 6 {
-		t.Errorf("groupAttempts heads = %d, %d, %d; want 9, 3, 6", heads[0].ID, heads[1].ID, heads[2].ID)
+	if heads[0].ID != 9 || heads[1].ID != 3 || heads[2].ID != 10 {
+		t.Errorf("groupAttempts heads = %d, %d, %d; want 9, 3, 10", heads[0].ID, heads[1].ID, heads[2].ID)
 	}
 
 	got9 := earlier[9]
 	if len(got9) != 2 || got9[0].ID != 4 || got9[1].ID != 8 {
 		t.Errorf("earlier[9] = %+v, want [ticket 4, ticket 8] in that order", got9)
 	}
-	if got6 := earlier[6]; len(got6) != 0 {
-		t.Errorf("earlier[6] = %+v, want no entry", got6)
+	got10 := earlier[10]
+	if len(got10) != 1 || got10[0].ID != 6 {
+		t.Errorf("earlier[10] = %+v, want [ticket 6]", got10)
 	}
 }

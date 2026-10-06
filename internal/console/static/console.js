@@ -1358,7 +1358,8 @@ function installPickupBox() {
 async function postTicketAction(box, action) {
 	const ticketID = box?.dataset?.ticket;
 	const errorSpan = box?.querySelector('.ticket-actions-error');
-	if (!box || !ticketID || !errorSpan) {
+	const actionBarReady = box && ticketID && errorSpan;
+	if (!actionBarReady) {
 		return;
 	}
 	try {

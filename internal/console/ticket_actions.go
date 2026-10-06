@@ -26,15 +26,6 @@ const reasonConsoleAbandon = "owner abandoned from the console"
 // ticket when the owner restarts it from planning.
 const reasonConsoleRestart = "owner restarted from planning"
 
-// ticketStateDone and ticketStateEscalated are the two terminal states
-// restartTicket refuses outright: neither is abandonable (store.CanAbandon)
-// nor, unlike ticketStateAbandoned (pickup.go), does it ever make sense to
-// restart one.
-const (
-	ticketStateDone      = "done"
-	ticketStateEscalated = "escalated"
-)
-
 // actionRefusal is a console action's own refusal: Status is the HTTP
 // status to answer with, Reason is the exact response body. Unlike
 // *store.AbandonError, this is raised by the console package itself (for
@@ -46,16 +37,6 @@ type actionRefusal struct {
 
 func (e *actionRefusal) Error() string { return e.Reason }
 
-// abandonErrorStatus maps a *store.AbandonError's Code to the HTTP status
-// writeActionError answers with, keyed by store's own exported constants so
-// a renamed or added code fails to compile here instead of silently falling
-// back to status 0.
-var abandonErrorStatus = map[store.AbandonCode]int{
-	store.AbandonCodeNotFound: http.StatusNotFound,
-	store.AbandonCodeTerminal: http.StatusConflict,
-	store.AbandonCodeClaimed:  http.StatusConflict,
-}
-
 // writeActionError answers w for err, raised by the named action on
 // ticketID: a *store.AbandonError or an *actionRefusal answers its own
 // status with Reason as the body, logged at INFO as a refusal; any other
@@ -66,7 +47,11 @@ func (c *console) writeActionError(w http.ResponseWriter, action string, ticketI
 	switch {
 	case errors.As(err, &abandonErr):
 		slog.Info("console: ticket action refused", "action", action, "ticket_id", ticketID, "reason", abandonErr.Reason)
-		http.Error(w, abandonErr.Reason, abandonErrorStatus[abandonErr.Code])
+		status := http.StatusConflict
+		if abandonErr.Code == store.AbandonCodeNotFound {
+			status = http.StatusNotFound
+		}
+		http.Error(w, abandonErr.Reason, status)
 	case errors.As(err, &refusal):
 		slog.Info("console: ticket action refused", "action", action, "ticket_id", ticketID, "reason", refusal.Reason)
 		http.Error(w, refusal.Reason, refusal.Status)
@@ -141,19 +126,23 @@ func (c *console) restartTicket(ctx context.Context, id int64) (int64, error) {
 
 	base, _ := store.SplitAttemptRef(t.TrackerRef)
 
-	switch {
-	case t.ClaimOwner != nil:
+	if t.ClaimOwner != nil {
 		return 0, &actionRefusal{Status: http.StatusConflict, Reason: store.AbandonClaimedReason}
-	case t.State == ticketStateDone || t.State == ticketStateEscalated:
+	}
+
+	var succ store.Ticket
+	var succFound bool
+	if t.State == ticketStateAbandoned {
+		succ, succFound, err = c.liveSuccessorTicket(ctx, t.ProjectID, id, base)
+		if err != nil {
+			return 0, err
+		}
+	}
+	if !canRestart(t.State, succFound) {
+		if succFound {
+			return 0, &actionRefusal{Status: http.StatusConflict, Reason: fmt.Sprintf("issue #%s is already ticket %d", base, succ.ID)}
+		}
 		return 0, &actionRefusal{Status: http.StatusConflict, Reason: fmt.Sprintf("ticket %d is %s; only a live or abandoned ticket restarts", id, t.State)}
-	case t.State == ticketStateAbandoned:
-		cur, found, curErr := c.store.TicketByRef(ctx, t.ProjectID, base)
-		if curErr != nil {
-			return 0, curErr
-		}
-		if found && cur.State != ticketStateAbandoned {
-			return 0, &actionRefusal{Status: http.StatusConflict, Reason: fmt.Sprintf("issue #%s is already ticket %d", base, cur.ID)}
-		}
 	}
 
 	trackerProject, found, err := c.projectName(ctx, t.ProjectID)
@@ -177,10 +166,10 @@ func (c *console) restartTicket(ctx context.Context, id int64) (int64, error) {
 
 	newID, retiredRef, err := c.insertFresh(ctx, t.ProjectID, trackerProject, tk)
 	if err != nil {
-		return 0, err
+		return 0, fmt.Errorf("console: restart ticket %d: insert fresh ticket for ref %s (old ticket retired to %q): %w", id, base, retiredRef, err)
 	}
 
-	slog.Info("console: ticket restarted",
+	slog.InfoContext(ctx, "console: ticket restarted",
 		"old_ticket_id", id, "new_ticket_id", newID, "project_id", t.ProjectID, "ref", base, "retired_ref", retiredRef)
 	return newID, nil
 }
