@@ -7,10 +7,11 @@
 //
 // It never runs by default, in CI, or from any other test in this
 // repository: TestLive_CodexShellEnvTmpdir skips unless ZING_LIVE_CLI=1 is
-// set, and skips again unless codex is on PATH. Run it explicitly,
+// set, skips again unless ZING_LIVE_CLI_UNSANDBOXED=1 is also set (see
+// below), and skips again unless codex is on PATH. Run it explicitly,
 // deliberately:
 //
-//	ZING_LIVE_CLI=1 go test ./internal/runtime -run TestLive_CodexShellEnvTmpdir -v
+//	ZING_LIVE_CLI=1 ZING_LIVE_CLI_UNSANDBOXED=1 go test ./internal/runtime -run TestLive_CodexShellEnvTmpdir -v
 //
 // Codex is out of usage quota until 2026-10-30 (ticket Q4), so this test
 // cannot run until then; until it does, codexShellEnvArgs's key is
@@ -25,8 +26,11 @@
 // seatbelt prefix here (sandbox.Sandbox's judge profile) was left out: it
 // would pull internal/sandbox's judge.sb loading into this package only
 // for a test that cannot even run before 2026-10-30, and the ticket's own
-// Q4 keeps a real codex host scenario out of scope until then. Know this
-// before setting ZING_LIVE_CLI=1.
+// Q4 keeps a real codex host scenario out of scope until then. Because of
+// that, this test checks a second, explicit opt-in on top of the usual
+// ZING_LIVE_CLI=1 live-test gate, so turning on every other live test in
+// this package never also grants full, unconfined host access: see
+// ZING_LIVE_CLI_UNSANDBOXED below.
 package runtime
 
 import (
@@ -60,6 +64,9 @@ func liveCodexModel() string {
 // before parsing it.
 func TestLive_CodexShellEnvTmpdir(t *testing.T) {
 	skipUnlessLive(t)
+	if os.Getenv("ZING_LIVE_CLI_UNSANDBOXED") != "1" {
+		t.Skip("this run is unsandboxed danger-full-access (see the file header comment); set ZING_LIVE_CLI_UNSANDBOXED=1, in addition to ZING_LIVE_CLI=1, to run it")
+	}
 	if _, err := exec.LookPath("codex"); err != nil {
 		t.Skip("codex not found on PATH")
 	}

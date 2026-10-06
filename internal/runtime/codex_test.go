@@ -1420,3 +1420,42 @@ func TestCodexArgvShellEnvPolicy(t *testing.T) {
 		}
 	})
 }
+
+// TestCodexShellEnvArgs is a direct table test of codexShellEnvArgs itself,
+// rather than through Codex.Run: it is the only test that exercises
+// codexTOMLString's backslash replacement (every TestCodexArgvShellEnvPolicy
+// value is a temp path, which never contains one), and the only one that
+// proves two TMPDIR or TMPPREFIX entries resolve to the last.
+func TestCodexShellEnvArgs(t *testing.T) {
+	t.Parallel()
+
+	for _, tt := range []struct {
+		name string
+		env  []string
+		want []string
+	}{
+		{
+			name: "backslash and quote are both escaped",
+			env:  []string{`TMPDIR=a\b"c`},
+			want: []string{"-c", `shell_environment_policy.set.TMPDIR="a\\b\"c"`},
+		},
+		{
+			name: "last TMPPREFIX wins",
+			env:  []string{"TMPPREFIX=/first", "TMPPREFIX=/second"},
+			want: []string{"-c", `shell_environment_policy.set.TMPPREFIX="/second"`},
+		},
+		{
+			name: "no temp vars, no pairs",
+			env:  []string{"PATH=/usr/bin"},
+			want: nil,
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got := codexShellEnvArgs(tt.env)
+			if !slices.Equal(got, tt.want) {
+				t.Errorf("codexShellEnvArgs(%v) = %v, want %v", tt.env, got, tt.want)
+			}
+		})
+	}
+}
