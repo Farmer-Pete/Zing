@@ -123,8 +123,8 @@ func TestPlanCapLoops_AcceptPostsGate(t *testing.T) {
 	if commit.Waiting == nil || *commit.Waiting != testWaitingGate {
 		t.Fatalf("commit.Waiting = %v, want gate", commit.Waiting)
 	}
-	if len(commit.ResolveQuestions) == 0 {
-		t.Error("commit.ResolveQuestions = empty, want the escalation round's question id")
+	if want := []int64{q.ID}; !reflect.DeepEqual(commit.ResolveQuestions, want) {
+		t.Errorf("commit.ResolveQuestions = %v, want %v", commit.ResolveQuestions, want)
 	}
 	if len(commit.Messages) != 2 {
 		t.Fatalf("commit.Messages = %+v, want exactly 2 (the gate question, then the cap marker)", commit.Messages)

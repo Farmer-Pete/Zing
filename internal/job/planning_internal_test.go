@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
+	"unicode/utf8"
 
 	"zing/internal/response"
 	"zing/internal/store"
@@ -105,6 +106,8 @@ func TestGateQuestionMessage_LoopsExhaustedUsesDifferentExplainsText(t *testing.
 func TestRenderGateFindings(t *testing.T) {
 	t.Parallel()
 
+	const shapeLocation = "plan/design/shape"
+
 	if got := renderGateFindings(nil); got != "" {
 		t.Errorf("renderGateFindings(nil) = %q, want %q", got, "")
 	}
@@ -115,19 +118,31 @@ func TestRenderGateFindings(t *testing.T) {
 	}
 
 	longText := strings.Repeat("x", 250) + "é"
-	long := []response.Finding{{Severity: response.SeverityMinor, Location: "plan/design/shape", Text: longText}}
+	long := []response.Finding{{Severity: response.SeverityMinor, Location: shapeLocation, Text: longText}}
 	gotLong := renderGateFindings(long)
-	wantPrefix := "- minor plan/design/shape " + strings.Repeat("x", gateFindingTextMaxRunes)
+	wantPrefix := "- minor " + shapeLocation + " " + strings.Repeat("x", gateFindingTextMaxRunes)
 	if gotLong != wantPrefix {
 		t.Errorf("renderGateFindings(long) = %q, want %q", gotLong, wantPrefix)
 	}
 
+	multibyteText := strings.Repeat("é", 250)
+	multibyte := []response.Finding{{Severity: response.SeverityMinor, Location: shapeLocation, Text: multibyteText}}
+	gotMultibyte := renderGateFindings(multibyte)
+	wantMultibyteText := strings.Repeat("é", gateFindingTextMaxRunes)
+	wantMultibyte := "- minor " + shapeLocation + " " + wantMultibyteText
+	if gotMultibyte != wantMultibyte {
+		t.Errorf("renderGateFindings(multibyte) = %q, want %q", gotMultibyte, wantMultibyte)
+	}
+	if !utf8.ValidString(gotMultibyte) {
+		t.Errorf("renderGateFindings(multibyte) = %q, want valid UTF-8", gotMultibyte)
+	}
+
 	two := []response.Finding{
-		{Severity: response.SeverityMinor, Location: "plan/design/shape", Text: "still wrong"},
+		{Severity: response.SeverityMinor, Location: shapeLocation, Text: "still wrong"},
 		{Severity: response.SeverityMajor, Location: "plan/design/other", Text: "worse"},
 	}
 	gotTwo := renderGateFindings(two)
-	wantTwo := "- minor plan/design/shape still wrong\n- major plan/design/other worse"
+	wantTwo := "- minor " + shapeLocation + " still wrong\n- major plan/design/other worse"
 	if gotTwo != wantTwo {
 		t.Errorf("renderGateFindings(two) = %q, want %q", gotTwo, wantTwo)
 	}

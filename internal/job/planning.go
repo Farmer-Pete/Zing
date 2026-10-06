@@ -2106,7 +2106,8 @@ func (h planningHandler) enterFromEscalationRound(ctx context.Context, t store.T
 	// resolves as Retry even though d is recommended -- a note is for the
 	// planner, and the gate cannot act on it (review's own rule,
 	// postbuild.go's resolvePostBuildEscalation).
-	if capLoops && choice == escalationChoiceAccept && newestChosenOption(round.Answers) == "" {
+	replyOnlyDefaultedToAccept := choice == escalationChoiceAccept && newestChosenOption(round.Answers) == ""
+	if capLoops && replyOnlyDefaultedToAccept {
 		slog.Info("plan review loops_exhausted reply-only answer resolves as retry", "ticket_id", t.ID, "recommended", escalationChoiceAccept)
 		choice = escalationChoiceRetry
 	}
