@@ -2046,8 +2046,8 @@ func TestContinueResumesAskingSession(t *testing.T) {
 	if err != nil {
 		t.Fatalf("SessionByID: %v", err)
 	}
-	if sess.Resumes != 1 {
-		t.Errorf("session resumes = %d, want 1", sess.Resumes)
+	if sess.Resumes != 0 {
+		t.Errorf("session resumes = %d, want 0 (answer resumes are free)", sess.Resumes)
 	}
 }
 
@@ -2329,16 +2329,21 @@ func TestContinueInvalidLensRetried(t *testing.T) {
 // cap gate: jobs.review.max_resumes is 2, so a third resume attempt on the
 // same asking session finds it exhausted and escalates resumes_exhausted,
 // origin cap_resumes, with no run started at all.
-func TestContinueCapExhaustedEscalates(t *testing.T) {
+// TestContinueAnswerResumesAreFree proves that every CONTINUE resume
+// delivering the owner's own answer is free (answerResume, job.go): three
+// continues in a row never escalate resumes_exhausted and leave the
+// fidelity session's own resumes at 0, well past review's max_resumes of 2.
+func TestContinueAnswerResumesAreFree(t *testing.T) {
 	if testing.Short() {
 		t.Skip("slow end-to-end flow; runs in the full suite")
 	}
 	t.Parallel()
-	s, ticket, _ := reviewTicketReady(t)
+	s, ticket, before := reviewTicketReady(t)
 	scripts := reviewScriptsFS(map[string]string{
 		reviewScriptKey(lensFidelity, 1): reviewQuestionScript("Q1", "ask 1"),
 		reviewScriptKey(lensFidelity, 2): reviewQuestionScript("Q2", "ask 2"),
 		reviewScriptKey(lensFidelity, 3): reviewQuestionScript("Q3", "ask 3"),
+		reviewScriptKey(lensFidelity, 4): reviewQuestionScript("Q4", "ask 4"),
 	})
 	rt := runtime.NewFake(scripts)
 	deps := pbClaim(t, s, rt, ticket.ID)
@@ -2349,55 +2354,54 @@ func TestContinueCapExhaustedEscalates(t *testing.T) {
 		t.Fatalf("Run (round): %v", err)
 	}
 	pbApply(t, s, ticket, commit)
+
+	roundRuns := reviewRunsSince(t, s, ticket.ID, before)
+	var fidelitySessionID int64
+	for _, r := range roundRuns {
+		if *r.Lens == lensFidelity {
+			fidelitySessionID = r.SessionID
+		}
+	}
+	if fidelitySessionID == 0 {
+		t.Fatal("fidelity's own run not found in round 1")
+	}
 	answerReviewQuestion(t, s, ticket.ID, newestOpenQuestion(t, s, ticket.ID).ID)
 
-	// Continue #1: resumes 0 -> 1, asks again.
-	ticket = pbGetTicket(t, s, ticket.ID)
-	deps = pbClaim(t, s, rt, ticket.ID)
-	commit, err = (reviewingHandler{}).Run(t.Context(), ticket, deps)
-	if err != nil {
-		t.Fatalf("Run (continue 1): %v", err)
+	for i := 1; i <= 3; i++ {
+		var beforeRun, afterRun int64
+		beforeRun, err = s.MaxRunID(t.Context(), ticket.ID)
+		if err != nil {
+			t.Fatalf("MaxRunID (before continue %d): %v", i, err)
+		}
+		ticket = pbGetTicket(t, s, ticket.ID)
+		deps = pbClaim(t, s, rt, ticket.ID)
+		commit, err = (reviewingHandler{}).Run(t.Context(), ticket, deps)
+		if err != nil {
+			t.Fatalf("Run (continue %d): %v", i, err)
+		}
+		if commit.Escalation != nil {
+			t.Fatalf("continue %d: commit.Escalation = %+v, want nil", i, commit.Escalation)
+		}
+		pbApply(t, s, ticket, commit)
+		afterRun, err = s.MaxRunID(t.Context(), ticket.ID)
+		if err != nil {
+			t.Fatalf("MaxRunID (after continue %d): %v", i, err)
+		}
+		if afterRun != beforeRun+1 {
+			t.Errorf("continue %d: MaxRunID went from %d to %d, want exactly one run", i, beforeRun, afterRun)
+		}
+		if i < 3 {
+			answerReviewQuestion(t, s, ticket.ID, newestOpenQuestion(t, s, ticket.ID).ID)
+		}
 	}
-	pbApply(t, s, ticket, commit)
-	answerReviewQuestion(t, s, ticket.ID, newestOpenQuestion(t, s, ticket.ID).ID)
 
-	// Continue #2: resumes 1 -> 2, asks again.
-	ticket = pbGetTicket(t, s, ticket.ID)
-	deps = pbClaim(t, s, rt, ticket.ID)
-	commit, err = (reviewingHandler{}).Run(t.Context(), ticket, deps)
+	maxResumes := deps.Machine.Jobs[jobReviewName].MaxResumes
+	sess, _, err := s.SessionByID(t.Context(), fidelitySessionID, maxResumes)
 	if err != nil {
-		t.Fatalf("Run (continue 2): %v", err)
+		t.Fatalf("SessionByID: %v", err)
 	}
-	pbApply(t, s, ticket, commit)
-	answerReviewQuestion(t, s, ticket.ID, newestOpenQuestion(t, s, ticket.ID).ID)
-
-	// Continue #3: the session's own resumes is now 2, at max_resumes:
-	// exhausted, no run started.
-	beforeThird, err := s.MaxRunID(t.Context(), ticket.ID)
-	if err != nil {
-		t.Fatalf("MaxRunID: %v", err)
-	}
-	ticket = pbGetTicket(t, s, ticket.ID)
-	deps = pbClaim(t, s, rt, ticket.ID)
-	commit, err = (reviewingHandler{}).Run(t.Context(), ticket, deps)
-	if err != nil {
-		t.Fatalf("Run (continue 3): %v", err)
-	}
-	if commit.Escalation == nil {
-		t.Fatal("commit.Escalation = nil, want set")
-	}
-	if commit.Escalation.Payload.Code != string(response.EscalationCodeResumesExhausted) {
-		t.Errorf("escalation code = %q, want %q", commit.Escalation.Payload.Code, response.EscalationCodeResumesExhausted)
-	}
-	if commit.Escalation.Payload.Origin != string(response.EscalationOriginCapResumes) {
-		t.Errorf("escalation origin = %q, want %q", commit.Escalation.Payload.Origin, response.EscalationOriginCapResumes)
-	}
-	afterThird, err := s.MaxRunID(t.Context(), ticket.ID)
-	if err != nil {
-		t.Fatalf("MaxRunID: %v", err)
-	}
-	if afterThird != beforeThird {
-		t.Errorf("MaxRunID changed from %d to %d, want unchanged (no run started)", beforeThird, afterThird)
+	if sess.Resumes != 0 {
+		t.Errorf("fidelity session resumes = %d, want 0 (answer resumes are free)", sess.Resumes)
 	}
 }
 

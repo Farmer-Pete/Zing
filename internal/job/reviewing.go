@@ -2284,16 +2284,14 @@ func (h reviewingHandler) continueRound(ctx context.Context, t store.Ticket, d D
 		return c, nil
 	}
 
-	// Step 2: for each asking run, the cap gate; an exhausted session
-	// escalates once with no run started for any lens, unless its newest
-	// run was itself cut short (resumeCharge, design D5, section 7.4),
-	// which bypasses the cap for that one asker and resumes it free. When
-	// this same continue attempt was already discarded once by the cap
-	// (continueCappedNote, r4f8), every asker resumes free too, whether its
-	// own newest run was the one that got capped or one that finished
-	// before the round was discarded: a lens that already answered in the
-	// discarded attempt must not be charged, or cap-gated, for answering
-	// the same question again.
+	// Step 2 (answerResume, job.go): every asking run delivers the owner's
+	// own answer, so each one resumes free regardless of max_resumes,
+	// unless its session already carries a cap_resumes escalation from
+	// before this rule existed. discardNote still carries forward when this
+	// same continue attempt was already discarded once by the cap
+	// (continueCappedNote, r4f8): it is added to the prompt below so a lens
+	// that already answered in the discarded attempt knows why it is asked
+	// again.
 	discardNote, err := h.continueCappedNote(ctx, t, d, n, newest.ID)
 	if err != nil {
 		return store.HandlerCommit{}, err
@@ -2303,7 +2301,6 @@ func (h reviewingHandler) continueRound(ctx context.Context, t store.Ticket, d D
 		lens        response.Lens
 		sess        store.Session
 		answers     string
-		bump        bool
 		interrupted bool
 	}
 	askers := make([]asker, 0, len(answered))
@@ -2323,22 +2320,12 @@ func (h reviewingHandler) continueRound(ctx context.Context, t store.Ticket, d D
 		if newestErr != nil {
 			return store.HandlerCommit{}, fmt.Errorf("job: reviewing: continue: newest run: %w", newestErr)
 		}
-		bump, gate := true, true
-		if foundRun {
-			bump, gate = resumeCharge(newestRun)
+		capped, capErr := answerResume(ctx, t, d, sess, state, r)
+		if capErr != nil {
+			return store.HandlerCommit{}, capErr
 		}
-		if discardNote != "" {
-			bump, gate = false, false
-		}
-		if state == store.SessionExhausted && gate {
-			has, hasErr := d.Store.HasEscalation(ctx, t.ID, string(response.EscalationOriginCapResumes), sess.ID)
-			if hasErr != nil {
-				return store.HandlerCommit{}, fmt.Errorf("job: reviewing: continue: has escalation: %w", hasErr)
-			}
-			if has {
-				return store.HandlerCommit{}, ErrNoAction
-			}
-			return reviewCapResumesEscalation(t, d, sess.ID), nil
+		if capped {
+			return store.HandlerCommit{}, ErrNoAction
 		}
 		answers, ansErr := renderRoundAnswers(r)
 		if ansErr != nil {
@@ -2346,7 +2333,7 @@ func (h reviewingHandler) continueRound(ctx context.Context, t store.Ticket, d D
 		}
 		askers = append(askers, asker{
 			lens: response.Lens(*run.Lens), sess: sess, answers: answers,
-			bump: bump, interrupted: foundRun && newestRun.Interrupted,
+			interrupted: foundRun && newestRun.Interrupted,
 		})
 	}
 
@@ -2383,7 +2370,7 @@ func (h reviewingHandler) continueRound(ctx context.Context, t store.Ticket, d D
 			Job: response.JobReview, Label: fmt.Sprintf("%d-%s", n, lens), WorkDir: wt.Dir(),
 			SessionID: derefString(a.sess.ExternalID), Prompt: prompt.Assemble(in),
 		}
-		su := store.SessionUpsert{ID: &a.sess.ID, BumpResumes: a.bump}
+		su := store.SessionUpsert{ID: &a.sess.ID, BumpResumes: false}
 		sessionID := a.sess.ID
 		return su, req, func(rr runResult) *store.SessionUpsert { return resumeSessionRecord(sessionID, rr) }
 	})
