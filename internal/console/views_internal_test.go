@@ -9,6 +9,7 @@ package console
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"slices"
@@ -1838,6 +1839,51 @@ func TestGateShowsPlan(t *testing.T) {
 				t.Errorf("gateShowsPlan = %v, want %v", got, tc.want)
 			}
 		})
+	}
+}
+
+// TestActionsFor proves actionsFor (#65) reads Abandon straight off
+// store.CanAbandon for every one of the machine's nine states, offers
+// Restart wherever Abandon does and also on an abandoned ticket with no
+// live successor (never on an abandoned ticket that has one), reads Held
+// off the claim alone, and strips an attempt suffix from Ref.
+func TestActionsFor(t *testing.T) {
+	t.Parallel()
+
+	states := []string{
+		testQueuedState, demoTicketState, "building", "reviewing", "judging", "shipping",
+		"done", "escalated", "abandoned",
+	}
+	claims := []*string{nil, new("some-owner")}
+
+	for _, state := range states {
+		for _, claim := range claims {
+			for _, liveSuccessor := range []bool{false, true} {
+				name := fmt.Sprintf("state=%s claimed=%v liveSuccessor=%v", state, claim != nil, liveSuccessor)
+				t.Run(name, func(t *testing.T) {
+					t.Parallel()
+					ticket := store.Ticket{TrackerRef: "41-abandoned-2", State: state, ClaimOwner: claim}
+					got := actionsFor(ticket, liveSuccessor)
+
+					if want := store.CanAbandon(state); got.Abandon != want {
+						t.Errorf("Abandon = %v, want %v", got.Abandon, want)
+					}
+
+					wantRestart := store.CanAbandon(state) || (state == ticketStateAbandoned && !liveSuccessor)
+					if got.Restart != wantRestart {
+						t.Errorf("Restart = %v, want %v", got.Restart, wantRestart)
+					}
+
+					if wantHeld := claim != nil; got.Held != wantHeld {
+						t.Errorf("Held = %v, want %v", got.Held, wantHeld)
+					}
+
+					if got.Ref != "41" {
+						t.Errorf("Ref = %q, want %q", got.Ref, "41")
+					}
+				})
+			}
+		}
 	}
 }
 

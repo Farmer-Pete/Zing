@@ -194,6 +194,23 @@ func projectSections(tickets []store.Ticket, order, terminal []string) (live, cl
 	return live, closed
 }
 
+// actionsFor builds t's action bar (#65): Abandon wherever store.CanAbandon
+// accepts t.State, Restart there too and also on an abandoned ticket while
+// liveSuccessor is false, and Held while t is claimed. It calls
+// store.CanAbandon and store.SplitAttemptRef directly, keeping no state list
+// of its own, so the store's own abandonable-states list stays the single
+// source of truth.
+func actionsFor(t store.Ticket, liveSuccessor bool) templates.TicketActions {
+	live := store.CanAbandon(t.State)
+	base, _ := store.SplitAttemptRef(t.TrackerRef)
+	return templates.TicketActions{
+		Abandon: live,
+		Restart: live || (t.State == ticketStateAbandoned && !liveSuccessor),
+		Held:    t.ClaimOwner != nil,
+		Ref:     base,
+	}
+}
+
 // mainComponent builds the #main region for the current view (design
 // section 6.3, 6.5): Inbox, Recent, Feed, and Project each read straight
 // from their store method; Thread additionally reads the ticket and its
