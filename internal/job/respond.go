@@ -856,7 +856,7 @@ func (h shipHandler) respondCapGate(ctx context.Context, t store.Ticket, d Deps,
 	}
 	slog.Warn("escalation written", "ticket_id", t.ID, "session_id", sess.ID, "run_id", nil,
 		"code", string(response.EscalationCodeResumesExhausted), "origin", string(response.EscalationOriginCapResumes))
-	c := capResumesEscalation(t, d, sess.ID)
+	c := capResumesEscalation(t, d, jobRespondName, sess.ID)
 	c.ClearPoll = true
 	return c, false, nil
 }

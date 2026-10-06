@@ -206,7 +206,7 @@ func originFor(u unit) response.EscalationOrigin {
 func buildCapResumesEscalation(t store.Ticket, d Deps, sessionID int64) store.HandlerCommit {
 	slog.Warn("escalation written", "ticket_id", t.ID, "session_id", sessionID, "run_id", nil,
 		"code", string(response.EscalationCodeResumesExhausted), "origin", string(response.EscalationOriginCapResumes))
-	return capResumesEscalation(t, d, sessionID)
+	return capResumesEscalation(t, d, jobBuildName, sessionID)
 }
 
 // ensureUnitWorktree is design section 6's own repeated step, shared by

@@ -2207,7 +2207,7 @@ func heldFindingsForRound(ctx context.Context, d Deps, ticketID int64, n int) (f
 func reviewCapResumesEscalation(t store.Ticket, d Deps, sessionID int64) store.HandlerCommit {
 	slog.Warn("escalation written", "ticket_id", t.ID, "session_id", sessionID, "run_id", nil,
 		"code", string(response.EscalationCodeResumesExhausted), "origin", string(response.EscalationOriginCapResumes))
-	return capResumesEscalation(t, d, sessionID)
+	return capResumesEscalation(t, d, jobReviewName, sessionID)
 }
 
 // continueRound is CONTINUE (design section 6.2a): once every question of

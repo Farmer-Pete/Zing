@@ -3290,6 +3290,12 @@ func TestExhaustedEscalatesOnce(t *testing.T) {
 	if commit.Escalation.Payload.SessionID == nil {
 		t.Error("commit.Escalation.Payload.SessionID = nil, want the exhausted session's id")
 	}
+	if commit.Escalation.Payload.What != "raise machine.toml's build max_resumes, or abandon" {
+		t.Errorf("commit.Escalation.Payload.What = %q, want build's own text", commit.Escalation.Payload.What)
+	}
+	if commit.Escalation.Payload.Why != "the build session has resumed the maximum number of times machine.toml allows" {
+		t.Errorf("commit.Escalation.Payload.Why = %q, want build's own text", commit.Escalation.Payload.Why)
+	}
 	apply(t, s, ticket, commit)
 
 	ticket = getTicket(t, s, ticketID)

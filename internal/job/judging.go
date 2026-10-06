@@ -241,7 +241,7 @@ func judgeEscalation(t store.Ticket, d Deps, what, why, tried string) store.Hand
 func judgeCapResumesEscalation(t store.Ticket, d Deps, sessionID int64) store.HandlerCommit {
 	slog.Warn("escalation written", "ticket_id", t.ID, "session_id", sessionID, "run_id", nil,
 		"code", string(response.EscalationCodeResumesExhausted), "origin", string(response.EscalationOriginCapResumes))
-	return capResumesEscalation(t, d, sessionID)
+	return capResumesEscalation(t, d, jobJudgeName, sessionID)
 }
 
 // Run is the judging state's own decision tree (design section 7.1).
