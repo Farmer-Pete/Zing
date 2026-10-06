@@ -32,6 +32,7 @@ import {
 	sendResultWithUnsent,
 	sendTargets,
 	sendConfirmText,
+	reviewNoteTargets,
 	skipConflicted,
 	sendableQuestions,
 	AUTOSAVE_DEBOUNCE_MS,
@@ -659,7 +660,11 @@ function showSendResult(text) {
 // the question's own reply box's key is in conflictedBoxes (ticket #43,
 // cause 2, Q5): sendTargets drops such a question even though it has a
 // draft, since sending it would send the other tab's text, not what the
-// owner has not yet typed over.
+// owner has not yet typed over. reviewNote is true when the question's own
+// data-kind (thread.templ's itemRow) is "review" and its reply box holds
+// text: a free reply there is still a discussion note to the lens and does
+// not answer the question, so reviewNoteTargets uses this to decide whether
+// sendBatch's confirm dialog must warn about it (Q4).
 function collectSendQuestions() {
 	return Array.from(document.querySelectorAll('#main .q[data-focus-id^="question:"]')).map((q) => {
 		const id = Number(q.getAttribute('data-focus-id').slice('question:'.length));
@@ -668,7 +673,8 @@ function collectSendQuestions() {
 		const hasReply = Boolean(replyInput && replyInput.value !== '');
 		const hasPick = Boolean(q.querySelector('.picked[data-draft-question]'));
 		const conflicted = Boolean(replyInput && isConflicted(replyInput));
-		return { id, key, hasDraft: hasReply || hasPick, conflicted };
+		const reviewNote = q.dataset.kind === 'review' && hasReply;
+		return { id, key, hasDraft: hasReply || hasPick, conflicted, reviewNote };
 	});
 }
 
@@ -701,8 +707,10 @@ function focusedQuestionID() {
 // the same way regardless of what was focused. Cancel -- by Escape, its own
 // button, Enter while it has focus, or nothing at all -- returns focus to
 // whatever had it before the dialog opened, almost always the reply box the
-// owner was typing in.
-function openSendConfirm(ticket, ids, keys) {
+// owner was typing in. A true warn (reviewNoteTargets) adds
+// reviewNoteWarningText to the dialog's message via sendConfirmText's own
+// second argument (Q4).
+function openSendConfirm(ticket, ids, keys, warn) {
 	const previouslyFocused = document.activeElement;
 	const dialog = document.createElement('div');
 	dialog.id = 'send-confirm';
@@ -710,7 +718,7 @@ function openSendConfirm(ticket, ids, keys) {
 	dialog.setAttribute('aria-modal', 'true');
 
 	const message = document.createElement('p');
-	message.textContent = sendConfirmText(keys);
+	message.textContent = sendConfirmText(keys, warn);
 	dialog.appendChild(message);
 
 	const list = document.createElement('ul');
@@ -767,9 +775,9 @@ function openSendConfirm(ticket, ids, keys) {
 // sendBatch handles the send chord (design section 6.4, 6.7, ticket #43):
 // decides what Cmd+Enter would actually send (collectSendQuestions feeding
 // sendTargets), then either sends straight away, when the targets are
-// exactly the focused question, asks first with openSendConfirm's in-page
-// dialog otherwise, or -- with nothing to send -- says so and posts
-// nothing.
+// exactly the focused question and none of them would leak a review note,
+// asks first with openSendConfirm's in-page dialog otherwise, or -- with
+// nothing to send -- says so and posts nothing.
 //
 // Every "#main .reply-input" holding unsaved text is still saved first
 // (unsavedReplyBodies, inside postSendBatchLocked), not just whichever one
@@ -779,21 +787,29 @@ function openSendConfirm(ticket, ids, keys) {
 // dialog first, rather than sent silently alongside whatever question has
 // focus (cause 1 of ticket #43: a send named only the ticket, so a draft
 // typed and forgotten on another question went out unseen).
+//
+// warn (reviewNoteTargets) forces the confirm dialog open even for the
+// single-focused-question case sendTargets would otherwise send silently
+// (Q4): a review question's reply box holding text is still a note to a
+// lens that also keeps the question open, and the owner is told that
+// before it goes out.
 function sendBatch() {
 	if (!state.nav.open) {
 		return false;
 	}
 	const ticket = state.nav.open;
-	const { ids, keys, confirm } = sendTargets(collectSendQuestions(), focusedQuestionID());
+	const questions = collectSendQuestions();
+	const { ids, keys, confirm } = sendTargets(questions, focusedQuestionID());
 	if (ids.length === 0) {
 		showSendResult('Nothing to send. Pick an option or type a reply first.');
 		return true;
 	}
-	if (!confirm) {
+	const warn = reviewNoteTargets(questions);
+	if (!confirm && !warn) {
 		postSendBatch(ticket, ids);
 		return true;
 	}
-	openSendConfirm(ticket, ids, keys);
+	openSendConfirm(ticket, ids, keys, warn);
 	return true;
 }
 

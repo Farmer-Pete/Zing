@@ -50,6 +50,8 @@ import {
 	sendResultWithUnsent,
 	sendTargets,
 	sendConfirmText,
+	reviewNoteTargets,
+	reviewNoteWarningText,
 	skipConflicted,
 	sendableQuestions,
 	AUTOSAVE_DEBOUNCE_MS,
@@ -776,6 +778,48 @@ test('sendTargets: a conflicted entry with hasDraft true is left out of ids and 
 test('sendConfirmText: names the one question or lists several', () => {
 	assert.equal(sendConfirmText(['Q6']), 'Send 1 reply on Q6?');
 	assert.equal(sendConfirmText(['Q6', 'Q7', 'Q9']), 'Send 3 replies on Q6, Q7, Q9?');
+});
+
+test('sendConfirmText: a true warn argument appends the review note warning', () => {
+	assert.equal(sendConfirmText(['Q6'], true), `Send 1 reply on Q6? ${reviewNoteWarningText}`);
+	assert.equal(
+		sendConfirmText(['Q6', 'Q7', 'Q9'], true),
+		`Send 3 replies on Q6, Q7, Q9? ${reviewNoteWarningText}`,
+	);
+});
+
+test('sendConfirmText: a false or omitted warn argument leaves the text unchanged', () => {
+	assert.equal(sendConfirmText(['Q6'], false), 'Send 1 reply on Q6?');
+	assert.equal(sendConfirmText(['Q6']), 'Send 1 reply on Q6?');
+});
+
+// reviewNoteTargets: Cmd+Enter's "does this send also leak a note to a lens
+// and keep its question open" check (Q4). True only for an entry that would
+// actually be sent (hasDraft, not conflicted) and that the caller has marked
+// reviewNote: true, meaning it is a review question whose reply box holds
+// text right now.
+
+test('reviewNoteTargets: true when a sendable entry has reviewNote true', () => {
+	const questions = [{ id: 6, key: 'Q6', hasDraft: true, conflicted: false, reviewNote: true }];
+	assert.equal(reviewNoteTargets(questions), true);
+});
+
+test('reviewNoteTargets: false when the reviewNote entry is conflicted', () => {
+	const questions = [{ id: 6, key: 'Q6', hasDraft: true, conflicted: true, reviewNote: true }];
+	assert.equal(reviewNoteTargets(questions), false);
+});
+
+test('reviewNoteTargets: false when no entry has reviewNote true', () => {
+	const questions = [{ id: 6, key: 'Q6', hasDraft: true, conflicted: false, reviewNote: false }];
+	assert.equal(reviewNoteTargets(questions), false);
+});
+
+test('reviewNoteTargets: false for an empty list', () => {
+	assert.equal(reviewNoteTargets([]), false);
+});
+
+test('reviewNoteWarningText: is the line shown when a send would leak a note', () => {
+	assert.equal(reviewNoteWarningText, 'This sends your note to the lens and keeps the question open.');
 });
 
 // skipConflicted: postSendBatchLocked and rearmAutosaves (ticket #43, cause

@@ -640,16 +640,42 @@ export function sendTargets(questions, focusedID) {
 /**
  * sendConfirmText writes openSendConfirm's dialog line naming the questions
  * a Cmd+Enter is about to send (Q3: "Send 3 replies on Q6, Q7, Q9?"), given
- * sendTargets' own keys in the same order.
+ * sendTargets' own keys in the same order. A true warn appends a space and
+ * reviewNoteWarningText (Q4: a review question's reply box held text, so
+ * this send also leaks a note to a lens and leaves the question open);
+ * omitting warn, or passing false, leaves the text exactly as before.
  *
  * @param {string[]} keys
+ * @param {boolean} [warn]
  * @returns {string}
  */
-export function sendConfirmText(keys) {
-	if (keys.length === 1) {
-		return `Send 1 reply on ${keys[0]}?`;
-	}
-	return `Send ${keys.length} replies on ${keys.join(', ')}?`;
+export function sendConfirmText(keys, warn) {
+	const base =
+		keys.length === 1 ? `Send 1 reply on ${keys[0]}?` : `Send ${keys.length} replies on ${keys.join(', ')}?`;
+	return warn ? `${base} ${reviewNoteWarningText}` : base;
+}
+
+// reviewNoteWarningText is openSendConfirm's extra line (Q4) when the send
+// also goes out from a review question's reply box: a free reply there is
+// still a discussion note to the lens, and it does not answer the question
+// (markAnsweredQuestionsTx's review rule), so the owner is told both things
+// before they confirm.
+export const reviewNoteWarningText = 'This sends your note to the lens and keeps the question open.';
+
+/**
+ * reviewNoteTargets decides whether sendBatch's confirm dialog must warn
+ * that this send also leaks a note to a lens and leaves its question open
+ * (Q4). questions is the same list sendTargets reads (collectSendQuestions'
+ * descriptors), each now also carrying reviewNote: true when it is a
+ * review-kind question whose reply box currently holds text. True when any
+ * entry that would actually be sent -- hasDraft and not conflicted, the same
+ * filter sendTargets applies -- has reviewNote true.
+ *
+ * @param {{hasDraft: boolean, conflicted: boolean, reviewNote?: boolean}[]} questions
+ * @returns {boolean}
+ */
+export function reviewNoteTargets(questions) {
+	return (questions ?? []).some((q) => q.hasDraft && !q.conflicted && q.reviewNote);
 }
 
 /**
