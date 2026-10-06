@@ -496,6 +496,9 @@ func retryTimeout(
 	ticketID, runID int64, jobName string, retries int, res runtime.RunResult, runErr error,
 ) (runtime.RunResult, error) {
 	stalled := errors.Is(runErr, runtime.ErrStalled)
+	if stalled {
+		logStall(ticketID, runID, jobName, 1, res.LastEvent)
+	}
 	if retries < 1 || (!stalled && !errors.Is(runErr, runtime.ErrTimeout)) {
 		return res, runErr
 	}
@@ -505,6 +508,8 @@ func retryTimeout(
 	if ctx.Err() != nil {
 		return skipRetry(ctx, ticketID, runID, jobName, lastEvent, res)
 	}
+	slog.Info("runtime timeout retry", "ticket_id", ticketID, "run_id", runID, "job", jobName,
+		"err_kind", errKind(runErr), "last_event", lastEvent, "agent_seconds", runtime.Seconds(res.AgentTime))
 
 	select {
 	case <-ctx.Done():
@@ -520,8 +525,15 @@ func retryTimeout(
 	retryRes = combineAttempts(res, retryRes)
 
 	if retryErr == nil {
+		slog.Info("runtime timeout retry succeeded", "ticket_id", ticketID, "run_id", runID, "job", jobName,
+			"last_event", lastEvent, "outcome", "ok", "agent_seconds", runtime.Seconds(retryRes.AgentTime))
 		return retryRes, nil
 	}
+	if errors.Is(retryErr, runtime.ErrStalled) {
+		logStall(ticketID, runID, jobName, 2, retryRes.LastEvent)
+	}
+	slog.Warn("runtime timeout retry failed", "ticket_id", ticketID, "run_id", runID, "job", jobName,
+		"last_event", lastEvent, "outcome", errKind(retryErr), "err_kind", errKind(retryErr), "exit_code", retryRes.ExitCode)
 	// retryRes.FailureDetail is "" whenever the retry's own failure carries
 	// no detail of its own (an ErrTimeout from the job deadline, ErrStart,
 	// ErrOutputTooLarge, or a -o file with no content): quoting retryErr's
@@ -539,13 +551,19 @@ func retryTimeout(
 // before the 2 s wait or during it (owner decision Q10): no retry, ExitCode
 // -1, the first result otherwise kept, and ErrCanceled for a cancel or
 // ErrTimeout for the parent's own deadline.
-func skipRetry(ctx context.Context, _, _ int64, _, _ string, res runtime.RunResult) (runtime.RunResult, error) {
+func skipRetry(ctx context.Context, ticketID, runID int64, jobName, lastEvent string, res runtime.RunResult) (runtime.RunResult, error) {
 	res.ExitCode = -1
 	skipErr := runtime.ErrCanceled
 	if errors.Is(ctx.Err(), context.DeadlineExceeded) {
 		skipErr = runtime.ErrTimeout
 	}
+	slog.Warn("runtime timeout retry skipped", "ticket_id", ticketID, "run_id", runID, "job", jobName, "last_event", lastEvent, "err_kind", errKind(skipErr))
 	return res, skipErr
+}
+
+// logStall is the WARN "run stalled" line for attempt 1 or 2 of a turn.
+func logStall(ticketID, runID int64, jobName string, attempt int, last time.Time) {
+	slog.Warn("run stalled", "ticket_id", ticketID, "run_id", runID, "job", jobName, "attempt", attempt, "last_event", lastEventText(last))
 }
 
 // firstAttemptText names how the first attempt ended, for the retry's

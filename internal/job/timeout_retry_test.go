@@ -6,8 +6,10 @@ package job
 // package job rather than job_test.
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"log/slog"
 	"maps"
 	"strings"
 	"testing"
@@ -391,5 +393,160 @@ func TestRunJob_TimeoutRetrySkippedOnParentDeadline(t *testing.T) {
 	}
 	if rr.Res.ExitCode != -1 {
 		t.Errorf("rr.Res.ExitCode = %d, want -1", rr.Res.ExitCode)
+	}
+}
+
+// TestRunJob_TimeoutRetryLogs is this task's named test (design goals: "Log
+// both ... Each stall logs WARN 'run stalled'. Each retry logs its start and
+// its end"): a first attempt that stalls and a retry that succeeds must log
+// WARN "run stalled" for attempt 1, INFO "runtime timeout retry" before the
+// wait, and INFO "runtime timeout retry succeeded" with outcome "ok", each
+// carrying ticket_id, run_id, job and last_event. Not t.Parallel: it swaps
+// slog's process-wide default to capture the records.
+func TestRunJob_TimeoutRetryLogs(t *testing.T) {
+	lastEvent, err := time.Parse(time.RFC3339, lastEventStamp)
+	if err != nil {
+		t.Fatalf("time.Parse: %v", err)
+	}
+	stub := &timeoutStubRuntime{results: []scriptedAttempt{
+		{res: runtime.RunResult{LastEvent: lastEvent}, err: runtime.ErrStalled},
+		{res: runtime.RunResult{FinalMessage: "ok"}},
+	}}
+	d, ticket := newTimeoutRetryStubDeps(t, stub)
+
+	var logBuf bytes.Buffer
+	prevDefault := slog.Default()
+	slog.SetDefault(slog.New(slog.NewJSONHandler(&logBuf, &slog.HandlerOptions{Level: slog.LevelInfo})))
+	t.Cleanup(func() { slog.SetDefault(prevDefault) })
+
+	rr, runErr := runJob(t.Context(), d, ticket, testJobClassify, store.SessionUpsert{Job: testJobClassify, Runtime: testRuntimeClaude},
+		runtime.RunRequest{Job: response.JobClassify}, nil, nil, 0)
+	if runErr != nil {
+		t.Fatalf("runJob: %v", runErr)
+	}
+	if stub.calls != 2 {
+		t.Fatalf("stub.calls = %d, want 2", stub.calls)
+	}
+
+	recs := jsonLogRecords(t, &logBuf)
+
+	checkCommon := func(rec map[string]any) {
+		if got := logRecordInt64(t, rec, "ticket_id"); got != ticket.ID {
+			t.Errorf("ticket_id = %d, want %d", got, ticket.ID)
+		}
+		if got := logRecordInt64(t, rec, "run_id"); got != rr.Reserved.RunID {
+			t.Errorf("run_id = %d, want %d", got, rr.Reserved.RunID)
+		}
+		if got := logRecordString(t, rec, "job"); got != testJobClassify {
+			t.Errorf("job = %q, want %q", got, testJobClassify)
+		}
+		if got := logRecordString(t, rec, "last_event"); got != lastEventStamp {
+			t.Errorf("last_event = %q, want %q", got, lastEventStamp)
+		}
+	}
+
+	stall := findLogRecord(t, recs, "run stalled")
+	if stall["level"] != slogLevelWarn {
+		t.Errorf("stall level = %v, want %s", stall["level"], slogLevelWarn)
+	}
+	if got := logRecordInt64(t, stall, "attempt"); got != 1 {
+		t.Errorf("stall attempt = %d, want 1", got)
+	}
+	checkCommon(stall)
+
+	start := findLogRecord(t, recs, "runtime timeout retry")
+	if start["level"] != slogLevelInfo {
+		t.Errorf("start level = %v, want %s", start["level"], slogLevelInfo)
+	}
+	checkCommon(start)
+
+	success := findLogRecord(t, recs, "runtime timeout retry succeeded")
+	if success["level"] != slogLevelInfo {
+		t.Errorf("succeeded level = %v, want %s", success["level"], slogLevelInfo)
+	}
+	if got := logRecordString(t, success, "outcome"); got != "ok" {
+		t.Errorf("succeeded outcome = %q, want %q", got, "ok")
+	}
+	checkCommon(success)
+}
+
+// TestRunJob_TimeoutRetryRequest is this task's named test (design shape:
+// "the retry's deadline is whichever comes first: req.Timeout from now, or
+// ctx's own deadline"; owner decision Q7: "a first turn keeps an empty
+// session id, so Claude starts a fresh session"): a first turn whose first
+// attempt times out must retry with the note line in front of the original
+// prompt, an empty session id, classify's own IdleTimeout, and a deadline
+// req.Timeout (classify's 5 minutes) out from the retry's own call.
+func TestRunJob_TimeoutRetryRequest(t *testing.T) {
+	t.Parallel()
+	stub := &timeoutStubRuntime{results: []scriptedAttempt{
+		{res: runtime.RunResult{AgentTime: 180 * time.Second}, err: runtime.ErrTimeout},
+		{res: runtime.RunResult{FinalMessage: "ok"}},
+	}}
+	d, ticket := newTimeoutRetryStubDeps(t, stub)
+
+	var secondCallTime time.Time
+	stub.onRun = func(i int) {
+		if i == 1 {
+			secondCallTime = time.Now()
+		}
+	}
+
+	_, err := runJob(t.Context(), d, ticket, testJobClassify, store.SessionUpsert{Job: testJobClassify, Runtime: testRuntimeClaude},
+		runtime.RunRequest{Job: response.JobClassify, Prompt: "PROMPT"}, nil, nil, 0)
+	if err != nil {
+		t.Fatalf("runJob: %v", err)
+	}
+	if stub.calls != 2 {
+		t.Fatalf("stub.calls = %d, want 2", stub.calls)
+	}
+
+	const wantNote = "Note from Zing: the previous attempt at this turn timed out after 180 s. Zing is running the turn again."
+	wantPrompt := wantNote + "\n\nPROMPT"
+	if got := stub.requests[1].Prompt; got != wantPrompt {
+		t.Errorf("second request Prompt = %q, want %q", got, wantPrompt)
+	}
+	if got := stub.requests[1].SessionID; got != "" {
+		t.Errorf("second request SessionID = %q, want empty", got)
+	}
+	if got := stub.requests[1].IdleTimeout; got != 2*time.Minute {
+		t.Errorf("second request IdleTimeout = %v, want 2m (classify's own idle_minutes)", got)
+	}
+
+	delta := stub.deadlines[1].Sub(secondCallTime)
+	if delta < 4*time.Minute+58*time.Second || delta > 5*time.Minute {
+		t.Errorf("second request deadline - call time = %v, want between 4m58s and 5m", delta)
+	}
+}
+
+// TestRunJob_TimeoutRetryResumeKeepsSession is this task's named test (owner
+// decision Q7: "a retried resume turn resumes the same session id with the
+// note line in front of the resume input"): a resume turn's first attempt
+// that stalls must retry on the same session id, with the note line naming
+// the stall in front of the original (resume) prompt.
+func TestRunJob_TimeoutRetryResumeKeepsSession(t *testing.T) {
+	t.Parallel()
+	stub := &timeoutStubRuntime{results: []scriptedAttempt{
+		{res: runtime.RunResult{AgentTime: 125 * time.Second}, err: runtime.ErrStalled},
+		{res: runtime.RunResult{FinalMessage: "ok"}},
+	}}
+	d, ticket := newTimeoutRetryStubDeps(t, stub)
+
+	_, err := runJob(t.Context(), d, ticket, testJobClassify, store.SessionUpsert{Job: testJobClassify, Runtime: testRuntimeClaude},
+		runtime.RunRequest{Job: response.JobClassify, Prompt: "RESUME", SessionID: "SESSION-1"}, nil, nil, 0)
+	if err != nil {
+		t.Fatalf("runJob: %v", err)
+	}
+	if stub.calls != 2 {
+		t.Fatalf("stub.calls = %d, want 2", stub.calls)
+	}
+
+	const wantNote = "Note from Zing: the previous attempt at this turn stalled after 125 s with no transcript growth since the process started. Zing is running the turn again."
+	wantPrompt := wantNote + "\n\nRESUME"
+	if got := stub.requests[1].Prompt; got != wantPrompt {
+		t.Errorf("second request Prompt = %q, want %q", got, wantPrompt)
+	}
+	if got := stub.requests[1].SessionID; got != "SESSION-1" {
+		t.Errorf("second request SessionID = %q, want %q", got, "SESSION-1")
 	}
 }
