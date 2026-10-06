@@ -63,7 +63,7 @@ func TestPrompts_MatchThePinnedDesignText(t *testing.T) {
 		{
 			name:   "judge",
 			path:   "prompts/judge.md",
-			sha256: "64092ad52905e96d4a09b236f9209b008b7d09ad7de3602bcbd107fdddbcb0b1",
+			sha256: "478cf003ec1cb99b6f4bfc248903f97c8669bef6c284e12e42994802c962e9e1",
 		},
 		{
 			name:   "respond",
@@ -307,6 +307,27 @@ func TestJudgePromptTrustsHostChecks(t *testing.T) {
 	for _, want := range []string{
 		"Do not run a host scenario's check, and never return cannot_run for a host scenario.",
 		"The host_checks input gives each one's exit code and the tail of its output.",
+	} {
+		if !strings.Contains(text, want) {
+			t.Errorf("prompts/judge.md lacks %q", want)
+		}
+	}
+}
+
+// TestJudgePromptAmendsWrongChecks proves prompts/judge.md tells the
+// judge to amend a sealed check that is wrong as written, naming the
+// scenario id, the given, when, then and check it proposes, the kind
+// only if it should change, and a reason, to amend at most one
+// scenario, and to fail the scenario instead when the check is right
+// and the code is wrong.
+func TestJudgePromptAmendsWrongChecks(t *testing.T) {
+	t.Parallel()
+	text := unwrapped(t, "prompts/judge.md")
+	for _, want := range []string{
+		"add an amendment to that error",
+		"the scenario id, the given, when, then, and check you propose, the kind only if it should change, and a reason",
+		"Amend at most one scenario.",
+		"When the check is right and the code is wrong, fail the scenario instead.",
 	} {
 		if !strings.Contains(text, want) {
 			t.Errorf("prompts/judge.md lacks %q", want)
