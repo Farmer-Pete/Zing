@@ -2,6 +2,7 @@ package store
 
 import (
 	"bytes"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -466,6 +467,120 @@ func TestOwnerEdit_HostScenarioEmptyCheckRefused(t *testing.T) {
 	}
 }
 
+// TestOwnerEditKind proves OwnerEditRequest.Kind (#57): a host kind with a
+// non-blank check is stored, and a bogus kind is refused invalid (the
+// schema's enum) with nothing changed.
+func TestOwnerEditKind(t *testing.T) {
+	t.Parallel()
+	s := newTestStore(t)
+	_, ticketID := seedQueuedTicket(t, s, "1")
+	seedSealedScenario(t, s, ticketID)
+
+	if err := s.OwnerEdit(t.Context(), OwnerEditRequest{
+		TicketID: ticketID, Target: OwnerEditScenario, Ref: "s1", Action: OwnerEditActionEdit,
+		Kind: new("host"), Check: new("go test ./host"),
+	}); err != nil {
+		t.Fatalf("OwnerEdit(kind host): %v", err)
+	}
+	var sc response.Scenario
+	if err := json.Unmarshal(readScenarioPayload(t, s, ticketID, "s1"), &sc); err != nil {
+		t.Fatalf("unmarshal scenario s1: %v", err)
+	}
+	if sc.Kind != response.ScenarioKindHost || sc.Check != "go test ./host" {
+		t.Errorf("scenario s1 = %+v, want kind host, check %q", sc, "go test ./host")
+	}
+
+	before := readScenarioPayload(t, s, ticketID, "s1")
+	err := s.OwnerEdit(t.Context(), OwnerEditRequest{
+		TicketID: ticketID, Target: OwnerEditScenario, Ref: "s1", Action: OwnerEditActionEdit,
+		Kind: new("bogus"),
+	})
+	refusal, ok := errors.AsType[*OwnerEditError](err)
+	if !ok {
+		t.Fatalf("OwnerEdit(kind bogus) error = %v (%T), want *OwnerEditError", err, err)
+	}
+	if refusal.Code != OwnerEditCodeInvalid {
+		t.Errorf("code = %q, want %q", refusal.Code, OwnerEditCodeInvalid)
+	}
+	if after := readScenarioPayload(t, s, ticketID, "s1"); !bytes.Equal(after, before) {
+		t.Errorf("payload = %s, want unchanged %s", after, before)
+	}
+
+	// A host check runs unsandboxed with only the owner's reading of its
+	// rendered text as approval, so switching an existing check to kind
+	// host, without changing the check text, still refuses a check that
+	// hides its true meaning behind a bidi override (#57, r1f13).
+	at := time.Now().UTC().Truncate(time.Second)
+	insertScenarioArtifact(t, s, ticketID, nil, "s2", &at)
+	unsafeCheck := "go test ./old\u202e"
+	if editErr := s.OwnerEdit(t.Context(), OwnerEditRequest{
+		TicketID: ticketID, Target: OwnerEditScenario, Ref: "s2", Action: OwnerEditActionEdit,
+		Check: &unsafeCheck,
+	}); editErr != nil {
+		t.Fatalf("OwnerEdit(check with bidi override, kind behavior): %v", editErr)
+	}
+
+	before = readScenarioPayload(t, s, ticketID, "s2")
+	err = s.OwnerEdit(t.Context(), OwnerEditRequest{
+		TicketID: ticketID, Target: OwnerEditScenario, Ref: "s2", Action: OwnerEditActionEdit,
+		Kind: new("host"),
+	})
+	refusal, ok = errors.AsType[*OwnerEditError](err)
+	if !ok {
+		t.Fatalf("OwnerEdit(kind host, unsafe check) error = %v (%T), want *OwnerEditError", err, err)
+	}
+	if refusal.Code != OwnerEditCodeInvalid {
+		t.Errorf("code = %q, want %q", refusal.Code, OwnerEditCodeInvalid)
+	}
+	if after := readScenarioPayload(t, s, ticketID, "s2"); !bytes.Equal(after, before) {
+		t.Errorf("payload = %s, want unchanged %s", after, before)
+	}
+
+	// Q16 drops the owner-typed exemption entirely: an edit that sets kind
+	// host and, in the same edit, types an unsafe check is refused too,
+	// whoever wrote the check (#57, r4f8).
+	ownedUnsafe := "go test ./typed\u202e"
+	before = readScenarioPayload(t, s, ticketID, "s2")
+	err = s.OwnerEdit(t.Context(), OwnerEditRequest{
+		TicketID: ticketID, Target: OwnerEditScenario, Ref: "s2", Action: OwnerEditActionEdit,
+		Kind: new("host"), Check: &ownedUnsafe,
+	})
+	refusal, ok = errors.AsType[*OwnerEditError](err)
+	if !ok {
+		t.Fatalf("OwnerEdit(kind host, owner-typed bidi check) error = %v (%T), want *OwnerEditError", err, err)
+	}
+	if refusal.Code != OwnerEditCodeInvalid {
+		t.Errorf("code = %q, want %q", refusal.Code, OwnerEditCodeInvalid)
+	}
+	if after := readScenarioPayload(t, s, ticketID, "s2"); !bytes.Equal(after, before) {
+		t.Errorf("payload = %s, want unchanged %s", after, before)
+	}
+
+	// Switch s2 to host with a safe check, then prove an edit to only
+	// given, when or then on a scenario that is already host still runs
+	// HostCheckUnsafe against the resulting (already-stored, safe) check
+	// and so is unaffected (#57, Q16).
+	safeCheck := "go test ./safe"
+	if editErr := s.OwnerEdit(t.Context(), OwnerEditRequest{
+		TicketID: ticketID, Target: OwnerEditScenario, Ref: "s2", Action: OwnerEditActionEdit,
+		Kind: new("host"), Check: &safeCheck,
+	}); editErr != nil {
+		t.Fatalf("OwnerEdit(kind host, safe check): %v", editErr)
+	}
+	if editErr := s.OwnerEdit(t.Context(), OwnerEditRequest{
+		TicketID: ticketID, Target: OwnerEditScenario, Ref: "s2", Action: OwnerEditActionEdit,
+		Given: new(amendedGiven),
+	}); editErr != nil {
+		t.Fatalf("OwnerEdit(given only, already host): %v", editErr)
+	}
+	if err := json.Unmarshal(readScenarioPayload(t, s, ticketID, "s2"), &sc); err != nil {
+		t.Fatalf("unmarshal scenario s2: %v", err)
+	}
+	if sc.Given != amendedGiven || sc.Check != safeCheck {
+		t.Errorf("scenario s2 = %+v, want given %q, check unchanged %q", sc, amendedGiven, safeCheck)
+	}
+}
+
 // --- plan task edits (#41, task 2) ------------------------------------------
 
 // TestOwnerEdit_EditsPlanTaskInPlace proves a plan_task edit updates the one
@@ -738,6 +853,349 @@ func TestOwnerEdit_AmendsTicketBody(t *testing.T) {
 	if refusal.Code != OwnerEditCodeBadRequest {
 		t.Errorf("code = %q, want %q", refusal.Code, OwnerEditCodeBadRequest)
 	}
+}
+
+// --- AnswerQuestion (#57, "Edit it") -----------------------------------------
+
+// seedAmendedEscalation claims ticketID and commits one escalation whose
+// linked question carries an amendment for scenario ref (no amendment at
+// all when ref is ""), returning that question's id. CommitHandlerResult's
+// own final ticket UPDATE always clears the claim it just took, so the
+// ticket is unclaimed again by the time this returns -- OwnerEdit's own
+// claim guard would otherwise refuse every edit below.
+func seedAmendedEscalation(t *testing.T, s *Store, ticketID int64, ref string) int64 {
+	t.Helper()
+	payload := escalationTestPayload(response.EscalationCodeCannotRun, response.EscalationOriginJudge)
+	if ref != "" {
+		payload.Amendment = &response.Amendment{
+			Scenario: ref, Kind: response.ScenarioKindNegative,
+			Given: "g2", When: "w2", Then: "t2", Check: amendedCheck, Reason: amendedReason,
+		}
+	}
+	owner, expires := claimForCommit(t, s, ticketID)
+	if _, err := s.CommitHandlerResult(t.Context(), HandlerCommit{
+		TicketID: ticketID, Owner: owner, Expires: expires,
+		Escalation: &EscalationCommit{Body: amendedEscalationBody, Payload: payload},
+	}); err != nil {
+		t.Fatalf("CommitHandlerResult(escalation): %v", err)
+	}
+	open, err := s.QuestionsByState(t.Context(), ticketID, questionStateOpen)
+	if err != nil {
+		t.Fatalf("QuestionsByState(open): %v", err)
+	}
+	if len(open) != 1 {
+		t.Fatalf("open questions = %d, want 1", len(open))
+	}
+	return open[0].ID
+}
+
+// TestOwnerEditAnswersAmendedEscalation proves OwnerEditRequest.AnswerQuestion
+// (#57 Q3, "Edit it"): saving the owner's own edit with AnswerQuestion set
+// to the amended escalation's question lands the edit and answers the
+// question "b" in one transaction. A question with no amendment, one that
+// amends a different scenario, or one already answered is refused
+// answer_refused, and every refusal leaves the scenario, the events, and the
+// question's state all unchanged.
+func TestOwnerEditAnswersAmendedEscalation(t *testing.T) {
+	t.Parallel()
+
+	t.Run("lands the edit and answers b", func(t *testing.T) {
+		t.Parallel()
+		s := newTestStore(t)
+		_, ticketID := seedQueuedTicket(t, s, "1")
+		seedSealedScenario(t, s, ticketID) // s1
+		qID := seedAmendedEscalation(t, s, ticketID, "s1")
+
+		const ownerCheck = "go test ./owner-written"
+		if err := s.OwnerEdit(t.Context(), OwnerEditRequest{
+			TicketID: ticketID, Target: OwnerEditScenario, Ref: "s1", Action: OwnerEditActionEdit,
+			Check: new(ownerCheck), AnswerQuestion: &qID,
+		}); err != nil {
+			t.Fatalf("OwnerEdit: %v", err)
+		}
+
+		if got := scenarioCheck(t, s, ticketID, "s1"); got != ownerCheck {
+			t.Errorf("check_cmd = %q, want the owner's own %q", got, ownerCheck)
+		}
+		if events := ownerEditEvents(t, s, ticketID); len(events) != 1 {
+			t.Errorf("owner_edit events = %d, want 1", len(events))
+		}
+		if open, err := s.QuestionsByState(t.Context(), ticketID, questionStateOpen); err != nil || len(open) != 0 {
+			t.Errorf("open questions = %+v (err %v), want none", open, err)
+		}
+		answered, err := s.QuestionsByState(t.Context(), ticketID, questionStateAnswered)
+		if err != nil || len(answered) != 1 || answered[0].ID != qID {
+			t.Errorf("answered questions = %+v (err %v), want exactly [%d]", answered, err, qID)
+		}
+	})
+
+	t.Run("a draft picked on the question before Save is cleared", func(t *testing.T) {
+		t.Parallel()
+		s := newTestStore(t)
+		_, ticketID := seedQueuedTicket(t, s, "1")
+		seedSealedScenario(t, s, ticketID) // s1
+		qID := seedAmendedEscalation(t, s, ticketID, "s1")
+
+		// The owner picked the Accept chip (draft option "a") before opening
+		// the box and saving it, the same way a chip pick drafts against any
+		// other question (#57, r1f12): Save's own answer must not leave that
+		// draft stranded against a now-answered question.
+		draftOption := "a"
+		if _, err := s.SaveDraft(t.Context(), DraftInput{TicketID: ticketID, QuestionID: &qID, Option: &draftOption}); err != nil {
+			t.Fatalf("SaveDraft: %v", err)
+		}
+
+		const ownerCheck = "go test ./owner-written"
+		if err := s.OwnerEdit(t.Context(), OwnerEditRequest{
+			TicketID: ticketID, Target: OwnerEditScenario, Ref: "s1", Action: OwnerEditActionEdit,
+			Check: new(ownerCheck), AnswerQuestion: &qID,
+		}); err != nil {
+			t.Fatalf("OwnerEdit: %v", err)
+		}
+
+		var remaining int
+		if err := s.db.QueryRowContext(t.Context(),
+			`SELECT COUNT(*) FROM messages WHERE parent_id = ? AND state = 'draft'`, qID,
+		).Scan(&remaining); err != nil {
+			t.Fatalf("count drafts on question %d: %v", qID, err)
+		}
+		if remaining != 0 {
+			t.Errorf("drafts on question %d = %d, want 0", qID, remaining)
+		}
+
+		var readAt sql.NullString
+		if err := s.db.QueryRowContext(t.Context(),
+			`SELECT read_at FROM messages WHERE id = ?`, qID,
+		).Scan(&readAt); err != nil {
+			t.Fatalf("read read_at for question %d: %v", qID, err)
+		}
+		if !readAt.Valid {
+			t.Errorf("question %d read_at is NULL, want set", qID)
+		}
+	})
+
+	t.Run("a question with no amendment is refused", func(t *testing.T) {
+		t.Parallel()
+		s := newTestStore(t)
+		_, ticketID := seedQueuedTicket(t, s, "1")
+		seedSealedScenario(t, s, ticketID)
+		qID := seedAmendedEscalation(t, s, ticketID, "")
+		before := readScenarioPayload(t, s, ticketID, "s1")
+
+		err := s.OwnerEdit(t.Context(), OwnerEditRequest{
+			TicketID: ticketID, Target: OwnerEditScenario, Ref: "s1", Action: OwnerEditActionEdit,
+			Check: new("x"), AnswerQuestion: &qID,
+		})
+		refusal, ok := errors.AsType[*OwnerEditError](err)
+		if !ok {
+			t.Fatalf("OwnerEdit error = %v (%T), want *OwnerEditError", err, err)
+		}
+		if refusal.Code != OwnerEditCodeAnswerRefused {
+			t.Errorf("code = %q, want %q", refusal.Code, OwnerEditCodeAnswerRefused)
+		}
+		if after := readScenarioPayload(t, s, ticketID, "s1"); !bytes.Equal(after, before) {
+			t.Errorf("payload = %s, want unchanged %s (the refusal rolls the edit back too)", after, before)
+		}
+		if n, countErr := s.CountEvents(t.Context(), ticketID, EventKindOwnerEdit, EventFilter{}); countErr != nil || n != 0 {
+			t.Errorf("owner_edit events = %d (err %v), want 0", n, countErr)
+		}
+		if open, openErr := s.QuestionsByState(t.Context(), ticketID, questionStateOpen); openErr != nil || len(open) != 1 || open[0].ID != qID {
+			t.Errorf("open questions = %+v (err %v), want still exactly [%d]", open, openErr, qID)
+		}
+	})
+
+	t.Run("an amendment for another scenario is refused", func(t *testing.T) {
+		t.Parallel()
+		s := newTestStore(t)
+		_, ticketID := seedQueuedTicket(t, s, "1")
+		seedSealedScenario(t, s, ticketID) // s1
+		at := time.Now().UTC().Truncate(time.Second)
+		insertScenarioArtifact(t, s, ticketID, nil, "s2", &at)
+		qID := seedAmendedEscalation(t, s, ticketID, "s2")
+		before := readScenarioPayload(t, s, ticketID, "s1")
+
+		err := s.OwnerEdit(t.Context(), OwnerEditRequest{
+			TicketID: ticketID, Target: OwnerEditScenario, Ref: "s1", Action: OwnerEditActionEdit,
+			Check: new("x"), AnswerQuestion: &qID,
+		})
+		refusal, ok := errors.AsType[*OwnerEditError](err)
+		if !ok {
+			t.Fatalf("OwnerEdit error = %v (%T), want *OwnerEditError", err, err)
+		}
+		if refusal.Code != OwnerEditCodeAnswerRefused {
+			t.Errorf("code = %q, want %q", refusal.Code, OwnerEditCodeAnswerRefused)
+		}
+		if after := readScenarioPayload(t, s, ticketID, "s1"); !bytes.Equal(after, before) {
+			t.Errorf("payload = %s, want unchanged %s", after, before)
+		}
+	})
+
+	t.Run("an already-answered question is refused", func(t *testing.T) {
+		t.Parallel()
+		s := newTestStore(t)
+		_, ticketID := seedQueuedTicket(t, s, "1")
+		seedSealedScenario(t, s, ticketID)
+		qID := seedAmendedEscalation(t, s, ticketID, "s1")
+
+		if err := s.OwnerEdit(t.Context(), OwnerEditRequest{
+			TicketID: ticketID, Target: OwnerEditScenario, Ref: "s1", Action: OwnerEditActionEdit,
+			Check: new("first"), AnswerQuestion: &qID,
+		}); err != nil {
+			t.Fatalf("OwnerEdit(first): %v", err)
+		}
+
+		err := s.OwnerEdit(t.Context(), OwnerEditRequest{
+			TicketID: ticketID, Target: OwnerEditScenario, Ref: "s1", Action: OwnerEditActionEdit,
+			Check: new("second"), AnswerQuestion: &qID,
+		})
+		refusal, ok := errors.AsType[*OwnerEditError](err)
+		if !ok {
+			t.Fatalf("OwnerEdit(second) error = %v (%T), want *OwnerEditError", err, err)
+		}
+		if refusal.Code != OwnerEditCodeAnswerRefused {
+			t.Errorf("code = %q, want %q", refusal.Code, OwnerEditCodeAnswerRefused)
+		}
+		if got := scenarioCheck(t, s, ticketID, "s1"); got != "first" {
+			t.Errorf("check_cmd = %q, want unchanged %q (the second edit rolled back)", got, "first")
+		}
+		if events := ownerEditEvents(t, s, ticketID); len(events) != 1 {
+			t.Errorf("owner_edit events = %d, want 1 (only the first edit)", len(events))
+		}
+	})
+
+	t.Run("a check unchanged from the judge's own unsafe amendment is refused under kind host", func(t *testing.T) {
+		t.Parallel()
+		s := newTestStore(t)
+		_, ticketID := seedQueuedTicket(t, s, "1")
+		seedSealedScenario(t, s, ticketID) // s1, kind behavior
+
+		unsafeCheck := "go test ./amended\u202e"
+		payload := escalationTestPayload(response.EscalationCodeCannotRun, response.EscalationOriginJudge)
+		payload.Amendment = &response.Amendment{
+			Scenario: "s1", Kind: response.ScenarioKindBehavior,
+			Given: "g2", When: "w2", Then: "t2", Check: unsafeCheck, Reason: amendedReason,
+		}
+		owner, expires := claimForCommit(t, s, ticketID)
+		if _, err := s.CommitHandlerResult(t.Context(), HandlerCommit{
+			TicketID: ticketID, Owner: owner, Expires: expires,
+			Escalation: &EscalationCommit{Body: amendedEscalationBody, Payload: payload},
+		}); err != nil {
+			t.Fatalf("CommitHandlerResult(escalation): %v", err)
+		}
+		open, err := s.QuestionsByState(t.Context(), ticketID, questionStateOpen)
+		if err != nil || len(open) != 1 {
+			t.Fatalf("QuestionsByState(open) = %+v (err %v), want exactly 1", open, err)
+		}
+		qID := open[0].ID
+		before := readScenarioPayload(t, s, ticketID, "s1")
+
+		// The owner only switched the kind select to host; the "Edit it"
+		// box resends every field, so Check still carries the judge's own
+		// unsafe text byte for byte -- never typed by the owner.
+		err = s.OwnerEdit(t.Context(), OwnerEditRequest{
+			TicketID: ticketID, Target: OwnerEditScenario, Ref: "s1", Action: OwnerEditActionEdit,
+			Kind: new("host"), Check: new(unsafeCheck), AnswerQuestion: &qID,
+		})
+		refusal, ok := errors.AsType[*OwnerEditError](err)
+		if !ok {
+			t.Fatalf("OwnerEdit error = %v (%T), want *OwnerEditError", err, err)
+		}
+		if refusal.Code != OwnerEditCodeInvalid {
+			t.Errorf("code = %q, want %q", refusal.Code, OwnerEditCodeInvalid)
+		}
+		if after := readScenarioPayload(t, s, ticketID, "s1"); !bytes.Equal(after, before) {
+			t.Errorf("payload = %s, want unchanged %s", after, before)
+		}
+		if n, countErr := s.CountEvents(t.Context(), ticketID, EventKindOwnerEdit, EventFilter{}); countErr != nil || n != 0 {
+			t.Errorf("owner_edit events = %d (err %v), want 0", n, countErr)
+		}
+		if openAfter, openErr := s.QuestionsByState(t.Context(), ticketID, questionStateOpen); openErr != nil || len(openAfter) != 1 || openAfter[0].ID != qID {
+			t.Errorf("open questions = %+v (err %v), want still exactly [%d]", openAfter, openErr, qID)
+		}
+	})
+
+	t.Run("saving an already-host scenario's edit with the judge's unsafe check unchanged is refused (#57, r4f8)", func(t *testing.T) {
+		t.Parallel()
+		s := newTestStore(t)
+		_, ticketID := seedQueuedTicket(t, s, "1")
+		seedSealedScenario(t, s, ticketID) // s1, kind behavior
+
+		// The scenario is already host before the judge's amendment.
+		if err := s.OwnerEdit(t.Context(), OwnerEditRequest{
+			TicketID: ticketID, Target: OwnerEditScenario, Ref: "s1", Action: OwnerEditActionEdit,
+			Kind: new("host"), Check: new("go test ./host"),
+		}); err != nil {
+			t.Fatalf("OwnerEdit(kind host, safe check): %v", err)
+		}
+
+		// The judge's own amendment proposes kind behavior with an unsafe
+		// check; checkScenarioRules runs HostCheckUnsafe only for kind
+		// host, so an amendment resolving to behavior passes and is
+		// offered even though its check is unsafe for host.
+		unsafeCheck := "go test ./amended\u202e"
+		payload := escalationTestPayload(response.EscalationCodeCannotRun, response.EscalationOriginJudge)
+		payload.Amendment = &response.Amendment{
+			Scenario: "s1", Kind: response.ScenarioKindBehavior,
+			Given: "g2", When: "w2", Then: "t2", Check: unsafeCheck, Reason: amendedReason,
+		}
+		owner, expires := claimForCommit(t, s, ticketID)
+		if _, err := s.CommitHandlerResult(t.Context(), HandlerCommit{
+			TicketID: ticketID, Owner: owner, Expires: expires,
+			Escalation: &EscalationCommit{Body: amendedEscalationBody, Payload: payload},
+		}); err != nil {
+			t.Fatalf("CommitHandlerResult(escalation): %v", err)
+		}
+		open, err := s.QuestionsByState(t.Context(), ticketID, questionStateOpen)
+		if err != nil || len(open) != 1 {
+			t.Fatalf("QuestionsByState(open) = %+v (err %v), want exactly 1", open, err)
+		}
+		qID := open[0].ID
+		before := readScenarioPayload(t, s, ticketID, "s1")
+
+		// The owner leaves the kind select at host (the scenario's own
+		// current kind) and saves the box, which resends the judge's
+		// check unchanged. The resulting kind is host, so HostCheckUnsafe
+		// must run on it regardless of the kind having "switched".
+		err = s.OwnerEdit(t.Context(), OwnerEditRequest{
+			TicketID: ticketID, Target: OwnerEditScenario, Ref: "s1", Action: OwnerEditActionEdit,
+			Kind: new("host"), Check: new(unsafeCheck), AnswerQuestion: &qID,
+		})
+		refusal, ok := errors.AsType[*OwnerEditError](err)
+		if !ok {
+			t.Fatalf("OwnerEdit error = %v (%T), want *OwnerEditError", err, err)
+		}
+		if refusal.Code != OwnerEditCodeInvalid {
+			t.Errorf("code = %q, want %q", refusal.Code, OwnerEditCodeInvalid)
+		}
+		if after := readScenarioPayload(t, s, ticketID, "s1"); !bytes.Equal(after, before) {
+			t.Errorf("payload = %s, want unchanged %s", after, before)
+		}
+		if n, countErr := s.CountEvents(t.Context(), ticketID, EventKindOwnerEdit, EventFilter{}); countErr != nil || n != 1 {
+			t.Errorf("owner_edit events = %d (err %v), want 1 (only the earlier switch-to-host edit)", n, countErr)
+		}
+		if openAfter, openErr := s.QuestionsByState(t.Context(), ticketID, questionStateOpen); openErr != nil || len(openAfter) != 1 || openAfter[0].ID != qID {
+			t.Errorf("open questions = %+v (err %v), want still exactly [%d]", openAfter, openErr, qID)
+		}
+	})
+
+	t.Run("answer_question is allowed only for a scenario edit", func(t *testing.T) {
+		t.Parallel()
+		s := newTestStore(t)
+		_, ticketID := seedQueuedTicketWithBody(t, s, "1", "old body")
+		qID := int64(1)
+
+		err := s.OwnerEdit(t.Context(), OwnerEditRequest{
+			TicketID: ticketID, Target: OwnerEditTicketBody, Action: OwnerEditActionEdit,
+			Body: new("new body"), AnswerQuestion: &qID,
+		})
+		refusal, ok := errors.AsType[*OwnerEditError](err)
+		if !ok {
+			t.Fatalf("OwnerEdit error = %v (%T), want *OwnerEditError", err, err)
+		}
+		if refusal.Code != OwnerEditCodeBadRequest {
+			t.Errorf("code = %q, want %q", refusal.Code, OwnerEditCodeBadRequest)
+		}
+	})
 }
 
 // TestDropPlanTask_RenumbersTasksAndFileLists proves the worked example: a

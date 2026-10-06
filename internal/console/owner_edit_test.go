@@ -5,6 +5,7 @@ package console_test
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strconv"
@@ -53,9 +54,16 @@ func seedSealedScenarioArtifact(t *testing.T, s *store.Store, ticketID int64, ru
 	}
 }
 
-// readScenario reads back ticketID's scenario "s1" in full, through the
-// exported AllScenarios read.
+// readScenario reads back ticketID's scenario "s1" in full, through
+// readScenarioByID.
 func readScenario(t *testing.T, s *store.Store, ticketID int64) response.Scenario {
+	t.Helper()
+	return readScenarioByID(t, s, ticketID, "s1")
+}
+
+// readScenarioByID reads back ticketID's scenario id in full, through the
+// exported AllScenarios read.
+func readScenarioByID(t *testing.T, s *store.Store, ticketID int64, id string) response.Scenario {
 	t.Helper()
 	artifacts, err := s.AllScenarios(t.Context(), ticketID)
 	if err != nil {
@@ -66,11 +74,11 @@ func readScenario(t *testing.T, s *store.Store, ticketID int64) response.Scenari
 		if err := json.Unmarshal(a.Payload, &sc); err != nil {
 			t.Fatalf("unmarshal scenario: %v", err)
 		}
-		if sc.ID == "s1" {
+		if sc.ID == id {
 			return sc
 		}
 	}
-	t.Fatalf("no scenario s1 on ticket %d", ticketID)
+	t.Fatalf("no scenario %s on ticket %d", id, ticketID)
 	return response.Scenario{}
 }
 
@@ -418,7 +426,7 @@ func TestOwnerEditRoute_RefusesNonLoopbackCheckEdit(t *testing.T) {
 	if rec.Code != http.StatusForbidden {
 		t.Fatalf("status = %d, want 403; body = %q", rec.Code, rec.Body.String())
 	}
-	if got, want := strings.TrimSpace(rec.Body.String()), "editing a check or test command is allowed from this machine only"; got != want {
+	if got, want := strings.TrimSpace(rec.Body.String()), "editing a check, test, or kind is allowed from this machine only"; got != want {
 		t.Errorf("body = %q, want %q", got, want)
 	}
 
@@ -460,4 +468,148 @@ func TestOwnerEditRoute_AllowsNonLoopbackThenEdit(t *testing.T) {
 	if got := readScenario(t, s, ticketID).Then; got != "new then" {
 		t.Errorf("s1 then = %q, want %q", got, "new then")
 	}
+}
+
+// TestHandleOwnerEditKindLoopbackOnly proves kind joins check and test
+// under POST /tickets/{id}/edit's loopback-only boundary (#57, c1 point 4:
+// kind host makes a check run on this machine outside any sandbox): a
+// non-loopback request setting kind is refused 403 with the same reason
+// check and test already carry, and a loopback request setting kind
+// succeeds.
+func TestHandleOwnerEditKindLoopbackOnly(t *testing.T) {
+	s := newConsoleTestStore(t)
+	ticketID := seedTicket(t, s, "1", "fix the bug")
+	seedSealedScenarioArtifact(t, s, ticketID, nil, response.Scenario{
+		ID: "s1", Kind: response.ScenarioKindBehavior, Check: testOldCheck, Given: "g", When: "w", Then: "t",
+	})
+	seedSealedScenarioArtifact(t, s, ticketID, nil, response.Scenario{
+		ID: "s2", Kind: response.ScenarioKindBehavior, Check: testOldCheck, Given: "g", When: "w", Then: "t",
+	})
+
+	srv := newTestServer(t, s, bus.New(), nil, newTestLogHandler(t))
+
+	t.Run("non-loopback refused", func(t *testing.T) {
+		authority := strings.TrimPrefix(srv.URL, "http://")
+		body := `{"target":"scenario","ref":"s1","action":"edit","kind":"negative"}`
+		req := httptest.NewRequestWithContext(t.Context(), http.MethodPost, srv.URL+ownerEditPath(ticketID), strings.NewReader(body))
+		req.Host = authority
+		req.RemoteAddr = testNonLoopbackRemoteAddr
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Datastar-Request", "true")
+		req.Header.Set("Origin", srv.URL)
+
+		rec := httptest.NewRecorder()
+		srv.Config.Handler.ServeHTTP(rec, req)
+		if rec.Code != http.StatusForbidden {
+			t.Fatalf("status = %d, want 403; body = %q", rec.Code, rec.Body.String())
+		}
+		if got, want := strings.TrimSpace(rec.Body.String()), "editing a check, test, or kind is allowed from this machine only"; got != want {
+			t.Errorf("body = %q, want %q", got, want)
+		}
+		if got := readScenario(t, s, ticketID).Kind; got != response.ScenarioKindBehavior {
+			t.Errorf("s1 kind = %q, want unchanged %q", got, response.ScenarioKindBehavior)
+		}
+	})
+
+	t.Run("loopback allowed", func(t *testing.T) {
+		resp := doRequest(t, mutationRequest(t, srv, ownerEditPath(ticketID), `{"target":"scenario","ref":"s2","action":"edit","kind":"host","check":"`+testNewCheck+`"}`))
+		defer func() { _ = resp.Body.Close() }()
+		if resp.StatusCode != http.StatusNoContent {
+			t.Fatalf("status = %d, want 204; body = %q", resp.StatusCode, readBody(t, resp))
+		}
+		if got := readScenarioByID(t, s, ticketID, "s2").Kind; got != response.ScenarioKindHost {
+			t.Errorf("s2 kind = %q, want %q", got, response.ScenarioKindHost)
+		}
+	})
+}
+
+// seedAmendedQuestion inserts one open question on ticketID, with options a
+// ("Accept the amended check"), b ("Edit it"), and c ("Abandon"); its
+// payload carries an amendment for ref when ref is non-empty, and none at
+// all (an ordinary option question) when ref is empty -- the shape
+// answerAmendedEscalationTx's refusal path needs. Returns the question's id.
+func seedAmendedQuestion(t *testing.T, s *store.Store, ticketID int64, ref string) int64 {
+	t.Helper()
+	openState := testQuestionStateOpen
+	options := `"options":[{"key":"a","text":"Accept the amended check"},{"key":"b","text":"Edit it"},{"key":"c","text":"Abandon"}]`
+	amendment := ""
+	if ref != "" {
+		amendment = `,"amendment":{"scenario":"` + ref + `","given":"amended given","when":"amended when","then":"amended then","check":"amended check","reason":"why"}`
+	}
+	payload := []byte(`{"key":"Q1","kind":"question","state":"open","recommended":"a",` + options + amendment + `}`)
+	id, err := s.InsertMessage(t.Context(), store.Message{
+		TicketID: ticketID, Type: testMsgTypeQuestion, Author: testAuthorZing, State: &openState,
+		Body:    "Amended check\n\nwhy",
+		Payload: payload,
+	})
+	if err != nil {
+		t.Fatalf("InsertMessage(amended question): %v", err)
+	}
+	return id
+}
+
+// TestHandleOwnerEditAnswerQuestion proves answer_question (#57 Q3) reaches
+// Store.OwnerEdit and answers the named open amended-check escalation in the
+// same edit, and that a refusal -- here, a question with no amendment at
+// all -- maps to 409 with its reason as the body, leaving the scenario and
+// the question both unchanged.
+func TestHandleOwnerEditAnswerQuestion(t *testing.T) {
+	s := newConsoleTestStore(t)
+	ticketID := seedTicket(t, s, "1", "fix the bug")
+	srv := newTestServer(t, s, bus.New(), nil, newTestLogHandler(t))
+
+	t.Run("answers the question", func(t *testing.T) {
+		seedSealedScenarioArtifact(t, s, ticketID, nil, response.Scenario{
+			ID: "s1", Kind: response.ScenarioKindBehavior, Check: testOldCheck, Given: "g", When: "w", Then: "t",
+		})
+		questionID := seedAmendedQuestion(t, s, ticketID, "s1")
+
+		body := fmt.Sprintf(`{"target":"scenario","ref":"s1","action":"edit","check":%q,"answer_question":%d}`, testNewCheck, questionID)
+		resp := doRequest(t, mutationRequest(t, srv, ownerEditPath(ticketID), body))
+		defer func() { _ = resp.Body.Close() }()
+		if resp.StatusCode != http.StatusNoContent {
+			t.Fatalf("status = %d, want 204; body = %q", resp.StatusCode, readBody(t, resp))
+		}
+
+		if got := readScenarioCheck(t, s, ticketID); got != testNewCheck {
+			t.Errorf("s1 check = %q, want %q", got, testNewCheck)
+		}
+		got, err := s.GetMessage(t.Context(), questionID)
+		if err != nil {
+			t.Fatalf("GetMessage: %v", err)
+		}
+		if got.State == nil || *got.State != testQuestionStateAnswered {
+			t.Errorf("question state = %v, want answered", got.State)
+		}
+	})
+
+	t.Run("answer refused", func(t *testing.T) {
+		seedSealedScenarioArtifact(t, s, ticketID, nil, response.Scenario{
+			ID: "s3", Kind: response.ScenarioKindBehavior, Check: testOldCheck, Given: "g", When: "w", Then: "t",
+		})
+		questionID := seedAmendedQuestion(t, s, ticketID, "") // no amendment at all
+
+		body := fmt.Sprintf(`{"target":"scenario","ref":"s3","action":"edit","check":%q,"answer_question":%d}`, testNewCheck, questionID)
+		resp := doRequest(t, mutationRequest(t, srv, ownerEditPath(ticketID), body))
+		defer func() { _ = resp.Body.Close() }()
+		if resp.StatusCode != http.StatusConflict {
+			t.Fatalf("status = %d, want 409; body = %q", resp.StatusCode, readBody(t, resp))
+		}
+		wantReason := fmt.Sprintf("question %d is not an amended-check escalation", questionID)
+		if got := readBody(t, resp); got != wantReason {
+			t.Errorf("body = %q, want %q", got, wantReason)
+		}
+
+		if got := readScenarioByID(t, s, ticketID, "s3").Check; got != testOldCheck {
+			t.Errorf("s3 check = %q, want unchanged %q", got, testOldCheck)
+		}
+
+		got, err := s.GetMessage(t.Context(), questionID)
+		if err != nil {
+			t.Fatalf("GetMessage: %v", err)
+		}
+		if got.State == nil || *got.State != testQuestionStateOpen {
+			t.Errorf("question state = %v, want unchanged open", got.State)
+		}
+	})
 }

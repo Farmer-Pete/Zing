@@ -156,11 +156,22 @@ func layer2(doc *Document, ctx ValidateContext, present map[string]bool) []*Path
 		return checkReviewFindingsShape(r.Findings, present)
 	case *JudgeResponse:
 		return checkJudgeDuplicateVerdicts(r.Verdicts, present)
+	case *JudgeErrorResponse:
+		return checkJudgeAmendment(r)
 	case *RespondResponse:
 		return checkRespondThreadsShape(r.Threads, present)
 	default:
 		return nil
 	}
+}
+
+// checkJudgeAmendment refuses an amendment on any error code but
+// cannot_run.
+func checkJudgeAmendment(r *JudgeErrorResponse) []*PathError {
+	if r.Error.Amendment == nil || r.Error.Code == ErrorCodeCannotRun {
+		return nil
+	}
+	return []*PathError{{Path: "error/amendment", Msg: "an amendment is allowed only with code cannot_run"}}
 }
 
 // filterPresent keeps only the errs whose own Path Layer 1 found present in

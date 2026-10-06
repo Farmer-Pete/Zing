@@ -1,0 +1,14 @@
+<zing job="judge" outcome="error">
+  <error code="cannot_run">
+    <what>s9's check refuses every internal/job change</what>
+    <why>the owner accepted five lint-only _test.go files at the perimeter step, so the check fails although the scenario's then holds</why>
+    <tried>ran the check as written</tried>
+    <amendment scenario="s2">
+      <given>A branch whose only internal/job changes are lint fixes in _test.go files</given>
+      <when>The perimeter step accepts them</when>
+      <then>No non-test file under internal/job changed</then>
+      <check>! git diff --name-only origin/main...HEAD -- internal/job | grep -v '_test[.]go$' | grep -q .</check>
+      <reason>the check bans test files the then does not mention</reason>
+    </amendment>
+  </error>
+</zing>

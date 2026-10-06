@@ -38,7 +38,7 @@ func TestEscalationOptionsFor(t *testing.T) {
 				response.EscalationCodeNothingToDoWithTrueClaims, response.EscalationCodeOther,
 				response.EscalationCodeReplanUnsupported,
 			} {
-				opts, recommended := escalationOptionsFor(state, string(code))
+				opts, recommended := escalationOptionsFor(state, string(code), false)
 				if !reflect.DeepEqual(opts, wantPostSeal) {
 					t.Errorf("escalationOptionsFor(%q, %q) options = %+v, want %+v", state, code, opts, wantPostSeal)
 				}
@@ -54,7 +54,7 @@ func TestEscalationOptionsFor(t *testing.T) {
 		for _, code := range []response.EscalationCode{
 			response.EscalationCodeSplitUnsupported, response.EscalationCodeNothingToDoWithTrueClaims,
 		} {
-			opts, recommended := escalationOptionsFor(ticketStatePlanning, string(code))
+			opts, recommended := escalationOptionsFor(ticketStatePlanning, string(code), false)
 			if !reflect.DeepEqual(opts, wantPlanningAll) {
 				t.Errorf("escalationOptionsFor(planning, %q) options = %+v, want %+v", code, opts, wantPlanningAll)
 			}
@@ -74,7 +74,7 @@ func TestEscalationOptionsFor(t *testing.T) {
 			response.EscalationCodePlanGap, response.EscalationCodeCannotRun,
 			response.EscalationCodeOther, response.EscalationCodePostRunFailed,
 		} {
-			opts, recommended := escalationOptionsFor(ticketStatePlanning, string(code))
+			opts, recommended := escalationOptionsFor(ticketStatePlanning, string(code), false)
 			if !reflect.DeepEqual(opts, wantPlanningAll) {
 				t.Errorf("escalationOptionsFor(planning, %q) options = %+v, want %+v", code, opts, wantPlanningAll)
 			}

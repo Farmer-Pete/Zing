@@ -1303,3 +1303,159 @@ func TestCodexOutputDirUnderRunTmp(t *testing.T) {
 		t.Errorf("-o file's directory's parent = %q, want %q (TMPDIR)", got, runTmp)
 	}
 }
+
+// ---- Codex's shell_environment_policy.set (run 1459) -----------------------
+
+// assertCodexShellEnvPair proves argv has "-c" immediately followed by
+// shell_environment_policy.set.NAME="VALUE" (TOML-quoted), for the given
+// name and raw value. It escapes value with strings.ReplaceAll rather than
+// codexTOMLString, so a broken escaper in codexShellEnvArgs cannot pass by
+// agreeing with itself; value is only ever a test temp path, which never
+// contains a backslash, so quote-escaping alone is the whole expectation.
+func assertCodexShellEnvPair(t *testing.T, argv []string, name, value string) {
+	t.Helper()
+	if strings.Contains(value, `\`) {
+		t.Fatalf("test value %q contains a backslash, which this helper's escaping does not cover", value)
+	}
+	wantArg := `shell_environment_policy.set.` + name + `="` + strings.ReplaceAll(value, `"`, `\"`) + `"`
+	idx := slices.Index(argv, wantArg)
+	if idx < 1 || argv[idx-1] != "-c" {
+		t.Errorf("argv = %v, want \"-c\" %q", argv, wantArg)
+	}
+}
+
+// TestCodexArgvShellEnvPolicy proves codexArgv appends Codex's
+// shell_environment_policy.set pairs for TMPDIR and TMPPREFIX, from the
+// last entry of each in req.Env, on every job and both first turn and
+// resume (run 1459: judge.sb denied a check's mktemp -d because the
+// commands Codex's shell ran saw the Darwin per-user TMPDIR, not the
+// run's own).
+func TestCodexArgvShellEnvPolicy(t *testing.T) {
+	t.Parallel()
+	requireUnix(t)
+
+	// oldTMPDIR need not exist: only the last TMPDIR entry is ever read.
+	const oldTMPDIR = "/nonexistent/old-tmpdir"
+
+	// newRunTmp builds RUN_TMP with a double quote in its name, to exercise
+	// codexShellEnvArgs's TOML escaping, and creates it: codexOutputDir runs
+	// os.MkdirTemp under the last TMPDIR, so a missing RUN_TMP would fail
+	// Run before fake_codex.sh ever starts.
+	newRunTmp := func(t *testing.T) string {
+		t.Helper()
+		runTmp := filepath.Join(t.TempDir(), `run"tmp`)
+		if err := os.Mkdir(runTmp, 0o700); err != nil {
+			t.Fatalf("mkdir %s: %v", runTmp, err)
+		}
+		return runTmp
+	}
+
+	t.Run("judge_first_turn", func(t *testing.T) {
+		t.Parallel()
+		dir := t.TempDir()
+		runTmp := newRunTmp(t)
+		tmpPrefix := filepath.Join(runTmp, "zsh")
+		req := newFakeJudgeRequest(t, dir)
+		req.ExecPrefix = judgeExecPrefix
+		req.Env = append(req.Env, "TMPDIR="+oldTMPDIR, "TMPDIR="+runTmp, "TMPPREFIX="+tmpPrefix)
+		c := NewCodex(fakeCodexScript)
+		if _, err := c.Run(context.Background(), req); err != nil {
+			t.Fatalf("Run: %v", err)
+		}
+
+		argv := readArgv(t, dir)
+		assertCodexShellEnvPair(t, argv, "TMPDIR", runTmp)
+		assertCodexShellEnvPair(t, argv, "TMPPREFIX", tmpPrefix)
+	})
+
+	t.Run("judge_resume", func(t *testing.T) {
+		t.Parallel()
+		dir := t.TempDir()
+		runTmp := newRunTmp(t)
+		tmpPrefix := filepath.Join(runTmp, "zsh")
+		req := newFakeJudgeRequest(t, dir)
+		req.ExecPrefix = judgeExecPrefix
+		req.SessionID = testCodexResumeID
+		req.Env = append(req.Env, "TMPDIR="+oldTMPDIR, "TMPDIR="+runTmp, "TMPPREFIX="+tmpPrefix)
+		c := NewCodex(fakeCodexScript)
+		if _, err := c.Run(context.Background(), req); err != nil {
+			t.Fatalf("Run: %v", err)
+		}
+
+		argv := readArgv(t, dir)
+		assertCodexShellEnvPair(t, argv, "TMPDIR", runTmp)
+		assertCodexShellEnvPair(t, argv, "TMPPREFIX", tmpPrefix)
+	})
+
+	t.Run("planreview", func(t *testing.T) {
+		t.Parallel()
+		dir := t.TempDir()
+		runTmp := newRunTmp(t)
+		tmpPrefix := filepath.Join(runTmp, "zsh")
+		req := newFakeCodexRequest(dir, "success", "TMPDIR="+oldTMPDIR, "TMPDIR="+runTmp, "TMPPREFIX="+tmpPrefix)
+		c := NewCodex(fakeCodexScript)
+		if _, err := c.Run(context.Background(), req); err != nil {
+			t.Fatalf("Run: %v", err)
+		}
+
+		argv := readArgv(t, dir)
+		assertCodexShellEnvPair(t, argv, "TMPDIR", runTmp)
+		assertCodexShellEnvPair(t, argv, "TMPPREFIX", tmpPrefix)
+	})
+
+	t.Run("no_temp_vars", func(t *testing.T) {
+		t.Parallel()
+		dir := t.TempDir()
+		req := newFakeCodexRequest(dir, "success")
+		c := NewCodex(fakeCodexScript)
+		if _, err := c.Run(context.Background(), req); err != nil {
+			t.Fatalf("Run: %v", err)
+		}
+
+		argv := readArgv(t, dir)
+		for _, a := range argv {
+			if strings.Contains(a, "shell_environment_policy") {
+				t.Errorf("argv = %v, carries shell_environment_policy with no temp vars in req.Env", argv)
+			}
+		}
+	})
+}
+
+// TestCodexShellEnvArgs is a direct table test of codexShellEnvArgs itself,
+// rather than through Codex.Run: it is the only test that exercises
+// codexTOMLString's backslash replacement (every TestCodexArgvShellEnvPolicy
+// value is a temp path, which never contains one), and the only one that
+// proves two TMPDIR or TMPPREFIX entries resolve to the last.
+func TestCodexShellEnvArgs(t *testing.T) {
+	t.Parallel()
+
+	for _, tt := range []struct {
+		name string
+		env  []string
+		want []string
+	}{
+		{
+			name: "backslash and quote are both escaped",
+			env:  []string{`TMPDIR=a\b"c`},
+			want: []string{"-c", `shell_environment_policy.set.TMPDIR="a\\b\"c"`},
+		},
+		{
+			name: "last TMPPREFIX wins",
+			env:  []string{"TMPPREFIX=/first", "TMPPREFIX=/second"},
+			want: []string{"-c", `shell_environment_policy.set.TMPPREFIX="/second"`},
+		},
+		{
+			name: "no temp vars, no pairs",
+			env:  []string{"PATH=/usr/bin"},
+			want: nil,
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got := codexShellEnvArgs(tt.env)
+			if !slices.Equal(got, tt.want) {
+				t.Errorf("codexShellEnvArgs(%v) = %v, want %v", tt.env, got, tt.want)
+			}
+		})
+	}
+}
