@@ -236,7 +236,7 @@ func (h shipHandler) publish(ctx context.Context, t store.Ticket, d Deps) (store
 		return store.HandlerCommit{}, fmt.Errorf("job: shipping: file events: %w", err)
 	}
 
-	pr := prBody(t, plan, final, cohort, reports, events)
+	pr := prBody(t, plan, final, cohort, reports, events, acceptedFindings{})
 
 	url, number, openErr := proj.Orch.OpenDraftPR(ctx, wt, pr)
 	if openErr != nil {
