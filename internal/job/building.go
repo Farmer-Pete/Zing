@@ -2680,22 +2680,21 @@ func (h buildingHandler) resolve(ctx context.Context, t store.Ticket, d Deps, ro
 	if err != nil {
 		return store.HandlerCommit{}, fmt.Errorf("job: building: resolve: latest session: %w", err)
 	}
-	if state == store.SessionExhausted {
-		// The cap is consulted before anything is stored or reverted
-		// (design section 6.6 step 5): the round stays answered and
-		// unresolved, no file artifact is written, and no path is
-		// reverted, whichever way the escalation check comes out. The cap
-		// resolution that re-applies this preserved round is task 13's job
-		// (design section 6.9).
-		has, hasErr := d.Store.HasEscalation(ctx, t.ID, string(response.EscalationOriginCapResumes), sess.ID)
-		if hasErr != nil {
-			return store.HandlerCommit{}, fmt.Errorf("job: building: resolve: has escalation: %w", hasErr)
-		}
-		if has {
-			slog.Debug("building entry decision", "ticket_id", t.ID, "task_n", report.Report.TaskN, "step", "resolve_resume_capped", "session_state", sessionStateName(state))
-			return store.HandlerCommit{}, ErrNoAction
-		}
-		return withBranch(buildCapResumesEscalation(t, d, sess.ID), wt), nil
+	// answerResume (job.go): a perimeter decision is the owner's own
+	// answer, so RESOLVE's revert-and-resume is free and bypasses the
+	// exhausted-cap escalation, even on a session already at max_resumes,
+	// unless that session already carries its cap_resumes escalation from
+	// before this rule existed (design section 6.6 step 5).
+	capped, capErr := answerResume(ctx, t, d, sess, state, round)
+	if capErr != nil {
+		return store.HandlerCommit{}, capErr
+	}
+	if capped {
+		// Checked before anything is stored or reverted (design section
+		// 6.6 step 5): the round stays answered for the escalation's
+		// retry.
+		slog.Debug("building entry decision", "ticket_id", t.ID, "task_n", report.Report.TaskN, "step", "resolve_resume_capped", "session_state", sessionStateName(state))
+		return store.HandlerCommit{}, ErrNoAction
 	}
 	if sess.ExternalID == nil {
 		return store.HandlerCommit{}, fmt.Errorf("job: building: resolve: session %d has no external id", sess.ID)
@@ -2708,7 +2707,7 @@ func (h buildingHandler) resolve(ctx context.Context, t store.Ticket, d Deps, ro
 
 	notice := orchestrator.PerimeterNotice(revertExtras)
 	inputs := []prompt.NamedInput{{Label: labelPerimeter, Text: notice}, deadlineInput(d, time.Now())}
-	su := store.SessionUpsert{ID: &sess.ID, BumpResumes: true}
+	su := store.SessionUpsert{ID: &sess.ID, BumpResumes: false}
 	req := runtime.RunRequest{
 		Job: response.JobBuild, Label: buildLabel(report.Report.TaskN), WorkDir: wt.Dir(),
 		SessionID: *sess.ExternalID, Prompt: prompt.Assemble(prompt.ForBuildResume(inputs)),
@@ -2792,19 +2791,17 @@ func (h buildingHandler) resolvePerimeterQuestion(ctx context.Context, t store.T
 	if err != nil {
 		return store.HandlerCommit{}, fmt.Errorf("job: building: resolve perimeter round: session by id: %w", err)
 	}
-	if state == store.SessionExhausted {
-		// As above (resolve): the perimeter session's own cap escalates
-		// once, origin cap_resumes, naming the perimeter session; folding
-		// this round back in is task 13's job (design section 6.9).
-		has, hasErr := d.Store.HasEscalation(ctx, t.ID, string(response.EscalationOriginCapResumes), sess.ID)
-		if hasErr != nil {
-			return store.HandlerCommit{}, fmt.Errorf("job: building: resolve perimeter round: has escalation: %w", hasErr)
-		}
-		if has {
-			slog.Debug("building entry decision", "ticket_id", t.ID, "task_n", taskN, "step", "resolve_perimeter_resume_capped", "session_state", sessionStateName(state))
-			return store.HandlerCommit{}, ErrNoAction
-		}
-		return withBranch(buildCapResumesEscalation(t, d, sess.ID), wt), nil
+	// answerResume (job.go): as above (resolve), the owner's answer to
+	// the perimeter run's own question is free and bypasses the
+	// exhausted-cap escalation, unless the perimeter session already
+	// carries its cap_resumes escalation from before this rule existed.
+	capped, capErr := answerResume(ctx, t, d, sess, state, round)
+	if capErr != nil {
+		return store.HandlerCommit{}, capErr
+	}
+	if capped {
+		slog.Debug("building entry decision", "ticket_id", t.ID, "task_n", taskN, "step", "resolve_perimeter_resume_capped", "session_state", sessionStateName(state))
+		return store.HandlerCommit{}, ErrNoAction
 	}
 	if sess.ExternalID == nil {
 		return store.HandlerCommit{}, fmt.Errorf("job: building: resolve perimeter round: session %d has no external id", sess.ID)
@@ -2837,7 +2834,7 @@ func (h buildingHandler) resolvePerimeterQuestion(ctx context.Context, t store.T
 	}
 	assembled := prompt.Assemble(prompt.ForPerimeterResume(answers))
 
-	su := store.SessionUpsert{ID: &sess.ID, BumpResumes: true}
+	su := store.SessionUpsert{ID: &sess.ID, BumpResumes: false}
 	req := runtime.RunRequest{Job: response.JobPerimeter, Label: perimeterLabel(taskN, extraIndex+1), WorkDir: wt.Dir(), SessionID: *sess.ExternalID, Prompt: assembled}
 	sessionRecord := func(rr runResult) *store.SessionUpsert { return resumeSessionRecord(sess.ID, rr) }
 	commit, runErr := runAndRoute(ctx, d, t, jobPerimeterName, su, req, priorInvalid, sessionRecord, resolveIDs, response.EscalationOriginPerimeter,

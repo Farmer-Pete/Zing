@@ -3391,20 +3391,11 @@ func TestLastResumeReturningOkLands(t *testing.T) {
 	}
 }
 
-// TestResolveExhaustedEscalatesOnceAndKeepsRound proves design section 6.6
-// step 5, in place of task 11's ErrNoAction: RESOLVE, finding the build
-// session exhausted while a rejected decision needs a resume, escalates
-// resumes_exhausted once (SessionID the build session, no run), and a
-// second tick -- finding that escalation already recorded -- returns
-// job.ErrNoAction rather than escalating again.
-//
-// Deviation from PKG8-PLAN.md section 18's task 12 paragraph: the plan
-// names this test for internal/prompt/jobs_test.go, but it exercises
-// building.go's own RESOLVE (job.Registry, a real store and worktree),
-// which the prompt package cannot reach (it imports neither internal/job
-// nor internal/store). It lives here, in internal/job/building_test.go,
-// alongside its sibling TestPerimeterQuestionExhaustedEscalates.
-func TestResolveExhaustedEscalatesOnceAndKeepsRound(t *testing.T) {
+// TestResolveAnswerAtCapResumesFree proves answerResume (job.go) in RESOLVE:
+// a perimeter decision is the owner's own answer, so a rejected decision
+// that needs a resume runs free even with the build session already
+// exhausted, instead of escalating resumes_exhausted.
+func TestResolveAnswerAtCapResumesFree(t *testing.T) {
 	if testing.Short() {
 		t.Skip("slow end-to-end flow; runs in the full suite")
 	}
@@ -3425,49 +3416,48 @@ func TestResolveExhaustedEscalatesOnceAndKeepsRound(t *testing.T) {
 	expires := time.Now().Add(10 * time.Minute).UTC().Truncate(time.Second)
 	bumpResumesToCap(t, s, ticketID, sess.ID, maxResumes, owner, expires)
 
+	scriptRT.steps = append(scriptRT.steps, buildStep([]string{helloTxt}, nil, "run-sess"))
+
 	ticket := getTicket(t, s, ticketID)
 	deps := claimForBuild(t, s, scriptRT, ticketID)
-	commit, err := job.Registry()[testStateBuilding].Run(t.Context(), ticket, deps) // RESOLVE: exhausted
+	commit, err := job.Registry()[testStateBuilding].Run(t.Context(), ticket, deps) // RESOLVE: free answer resume
 	if err != nil {
 		t.Fatalf("RESOLVE: %v", err)
 	}
-	if commit.Escalation == nil {
-		t.Fatal("commit.Escalation = nil, want resumes_exhausted")
+	if commit.Escalation != nil {
+		t.Fatalf("commit.Escalation = %+v, want nil (the owner's decision is free)", commit.Escalation)
 	}
-	if commit.Escalation.RunID != nil {
-		t.Errorf("commit.Escalation.RunID = %v, want nil (the cap raised it, not a run)", *commit.Escalation.RunID)
-	}
-	if commit.Escalation.Payload.Code != testCodeResumesExhausted || commit.Escalation.Payload.Origin != testOriginCapResumes {
-		t.Errorf("payload = (Code=%q, Origin=%q), want (resumes_exhausted, cap_resumes)", commit.Escalation.Payload.Code, commit.Escalation.Payload.Origin)
-	}
-	if commit.Escalation.Payload.SessionID == nil || *commit.Escalation.Payload.SessionID != sess.ID {
-		t.Errorf("payload.SessionID = %v, want %d", commit.Escalation.Payload.SessionID, sess.ID)
+	if len(commit.Runs) != 1 {
+		t.Fatalf("commit.Runs = %+v, want exactly one", commit.Runs)
 	}
 	apply(t, s, ticket, commit)
 
-	ticket = getTicket(t, s, ticketID)
-	deps2 := claimForBuild(t, s, scriptRT, ticketID)
-	_, err = job.Registry()[testStateBuilding].Run(t.Context(), ticket, deps2)
-	if !errors.Is(err, job.ErrNoAction) {
-		t.Fatalf("second tick after the cap escalation: err = %v, want job.ErrNoAction", err)
+	_, wt := buildWorktreeFor(t, deps, getTicket(t, s, ticketID))
+	if _, statErr := os.Stat(filepath.Join(wt.Dir(), testExtraPath)); !os.IsNotExist(statErr) {
+		t.Errorf("stat %s after RESOLVE: err=%v, want os.IsNotExist (reverted)", testExtraPath, statErr)
+	}
+
+	lastReq := scriptRT.reqs[len(scriptRT.reqs)-1]
+	if !strings.Contains(lastReq.Prompt, "were reverted") {
+		t.Errorf("resume prompt = %q, want it to mention the reverted paths", lastReq.Prompt)
+	}
+
+	sess, _, err = s.LatestSession(t.Context(), ticketID, "build", maxResumes)
+	if err != nil {
+		t.Fatalf("LatestSession: %v", err)
+	}
+	if sess.Resumes != maxResumes {
+		t.Errorf("sessions.resumes after the free answer resume = %d, want %d (unchanged)", sess.Resumes, maxResumes)
 	}
 }
 
-// TestExhaustedKeepsRejectedDecision proves design section 6.6 step 5's own
-// preservation half: once RESOLVE escalates resumes_exhausted instead of
-// applying a rejected decision, that decision is not lost. The round stays
-// answered (AnsweredRounds still returns it) and the rejected path stays in
-// the tree, exactly as the escalation left it, ready for a later retry to
-// apply.
-//
-// Deviation from PKG8-PLAN.md section 18's task 12 paragraph: its own gloss
-// for this test ("the fresh session after the cap retry receives the
-// perimeter notice, the file is reverted, and both rounds are resolved")
-// describes design section 6.9's cap_resumes retry row -- resolving an
-// escalation, which the task's own "Boundaries" section assigns to task 13
-// (its TestCapResumesRetryCarriesAnswers exercises exactly that). This test
-// instead proves the half of that story task 12 owns: what RESOLVE itself
-// leaves behind for that later retry to find.
+// TestExhaustedKeepsRejectedDecision proves answerResume's own legacy
+// branch (job.go) in RESOLVE: a build session that already carries a
+// cap_resumes escalation from before the free-answer rule existed returns
+// job.ErrNoAction in place of a new escalation, and the rejected decision
+// is not lost. The round stays answered (AnsweredRounds still returns it)
+// and the rejected path stays in the tree, ready for the escalation's own
+// retry to apply.
 func TestExhaustedKeepsRejectedDecision(t *testing.T) {
 	if testing.Short() {
 		t.Skip("slow end-to-end flow; runs in the full suite")
@@ -3489,22 +3479,14 @@ func TestExhaustedKeepsRejectedDecision(t *testing.T) {
 	expires := time.Now().Add(10 * time.Minute).UTC().Truncate(time.Second)
 	bumpResumesToCap(t, s, ticketID, sess.ID, maxResumes, owner, expires)
 
+	escalateDirect(t, s, ticketID, nil, &sess.ID, response.EscalationCodeResumesExhausted, response.EscalationOriginCapResumes)
+
 	ticket := getTicket(t, s, ticketID)
 	deps := claimForBuild(t, s, scriptRT, ticketID)
-	commit, err := job.Registry()[testStateBuilding].Run(t.Context(), ticket, deps) // RESOLVE: exhausted
-	if err != nil {
-		t.Fatalf("RESOLVE: %v", err)
+	_, err = job.Registry()[testStateBuilding].Run(t.Context(), ticket, deps) // RESOLVE: legacy escalation waits
+	if !errors.Is(err, job.ErrNoAction) {
+		t.Fatalf("RESOLVE: err = %v, want errors.Is(err, job.ErrNoAction)", err)
 	}
-	if commit.Escalation == nil {
-		t.Fatal("commit.Escalation = nil, want resumes_exhausted")
-	}
-	if len(commit.Artifacts) != 0 {
-		t.Errorf("commit.Artifacts = %+v, want none (nothing stored while capped)", commit.Artifacts)
-	}
-	if len(commit.ResolveQuestions) != 0 {
-		t.Errorf("commit.ResolveQuestions = %v, want none (the round stays answered)", commit.ResolveQuestions)
-	}
-	apply(t, s, ticket, commit)
 
 	_, wt := buildWorktreeFor(t, deps, getTicket(t, s, ticketID))
 	if _, statErr := os.Stat(filepath.Join(wt.Dir(), testExtraPath)); statErr != nil {
@@ -3526,14 +3508,12 @@ func TestExhaustedKeepsRejectedDecision(t *testing.T) {
 	}
 }
 
-// TestPerimeterQuestionExhaustedEscalates proves design section 6.2's
-// round.Job=="perimeter" branch's own exhaustion case, in place of task
-// 11's ErrNoAction: the owner's answer to a perimeter run's own question,
-// found with that perimeter session already exhausted (machine.toml's own
-// pool of 1 for "perimeter"), escalates resumes_exhausted once naming the
-// perimeter session, with no runtime call, and a second tick returns
-// job.ErrNoAction.
-func TestPerimeterQuestionExhaustedEscalates(t *testing.T) {
+// TestPerimeterQuestionAnswerAtCapResumesFree proves answerResume (job.go)
+// in resolvePerimeterQuestion: the owner's answer to a perimeter run's own
+// question resumes that perimeter session free, even with it already
+// exhausted (machine.toml's own pool of 1 for "perimeter"), instead of
+// escalating resumes_exhausted.
+func TestPerimeterQuestionAnswerAtCapResumesFree(t *testing.T) {
 	if testing.Short() {
 		t.Skip("slow end-to-end flow; runs in the full suite")
 	}
@@ -3559,30 +3539,30 @@ func TestPerimeterQuestionExhaustedEscalates(t *testing.T) {
 	expires := time.Now().Add(10 * time.Minute).UTC().Truncate(time.Second)
 	bumpResumesToCap(t, s, ticketID, perimSess.ID, perimeterMaxResumes, owner, expires)
 
+	scriptRT.steps = append(scriptRT.steps, perimeterStep("Adds a small helper.", "perim-q-cap-sess"))
+
 	ticket := getTicket(t, s, ticketID)
 	deps := claimForBuild(t, s, scriptRT, ticketID)
-	commit, err := job.Registry()[testStateBuilding].Run(t.Context(), ticket, deps) // resolvePerimeterQuestion: exhausted
+	commit, err := job.Registry()[testStateBuilding].Run(t.Context(), ticket, deps) // resolvePerimeterQuestion: free answer resume
 	if err != nil {
 		t.Fatalf("resolve perimeter round: %v", err)
 	}
-	if commit.Escalation == nil {
-		t.Fatal("commit.Escalation = nil, want resumes_exhausted")
+	if commit.Escalation != nil {
+		t.Fatalf("commit.Escalation = %+v, want nil (the owner's answer is free)", commit.Escalation)
 	}
-	if len(commit.Runs) != 0 {
-		t.Errorf("commit.Runs = %+v, want none (no runtime call while capped)", commit.Runs)
+	if len(commit.Runs) != 1 {
+		t.Fatalf("commit.Runs = %+v, want exactly one", commit.Runs)
 	}
-	if commit.Escalation.Payload.Code != testCodeResumesExhausted || commit.Escalation.Payload.Origin != testOriginCapResumes {
-		t.Errorf("payload = (Code=%q, Origin=%q), want (resumes_exhausted, cap_resumes)", commit.Escalation.Payload.Code, commit.Escalation.Payload.Origin)
-	}
-	if commit.Escalation.Payload.SessionID == nil || *commit.Escalation.Payload.SessionID != perimSess.ID {
-		t.Errorf("payload.SessionID = %v, want %d (the perimeter session)", commit.Escalation.Payload.SessionID, perimSess.ID)
+	if len(commit.ResolveQuestions) == 0 {
+		t.Error("commit.ResolveQuestions is empty, want the answered question id")
 	}
 	apply(t, s, ticket, commit)
 
-	ticket = getTicket(t, s, ticketID)
-	deps2 := claimForBuild(t, s, scriptRT, ticketID)
-	_, err = job.Registry()[testStateBuilding].Run(t.Context(), ticket, deps2)
-	if !errors.Is(err, job.ErrNoAction) {
-		t.Fatalf("second tick after the cap escalation: err = %v, want job.ErrNoAction", err)
+	perimSess, _, err = s.LatestSession(t.Context(), ticketID, "perimeter", perimeterMaxResumes)
+	if err != nil {
+		t.Fatalf("LatestSession(perimeter): %v", err)
+	}
+	if perimSess.Resumes != perimeterMaxResumes {
+		t.Errorf("sessions.resumes after the free answer resume = %d, want %d (unchanged)", perimSess.Resumes, perimeterMaxResumes)
 	}
 }
