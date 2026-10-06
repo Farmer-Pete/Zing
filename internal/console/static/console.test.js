@@ -14,8 +14,9 @@
 // debounced autosave decision (replyAutosaveBody), the send-time emptied-box
 // flush, failed-clear block, and failed/stale save split (emptiedReplyBodies,
 // clearFailedResult, partitionFailedSaves), the patch-caused-blur-only
-// focus restore decision (replyFocusSnapshot, restoreFocusDecision), and
-// the owner-edit box's field-to-body decision (ownerEditFieldEntries).
+// focus restore decision (replyFocusSnapshot, restoreFocusDecision), the
+// owner-edit box's field-to-body decision (ownerEditFieldEntries), and the
+// pickup box's result message (pickupResultView).
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
@@ -59,6 +60,7 @@ import {
 	restoreFocusDecision,
 	describeAction,
 	ACTION_LABELS,
+	pickupResultView,
 	RECONNECT_BASE_MS,
 	RECONNECT_MAX_MS,
 	emptyStreamStatus,
@@ -543,6 +545,32 @@ test('ownerEditFieldEntries: a box answering a question sends every field whethe
 		given: 'g', when: 'w', then: 't', check: 'c', kind: 'behavior', answer_question: 42,
 	});
 	assert.equal(typeof got.answer_question, 'number');
+});
+
+// pickupResultView: POST /projects/{id}/pickup's response turned into the
+// pickup box's one message (console.js's pickupIssue).
+
+test('pickupResultView: success names the issue and links the ticket', () => {
+	assert.deepEqual(pickupResultView(true, '{"n":5,"ticket_id":12}\n', 5), {
+		text: 'Picked up #5 as ', linkText: 'ticket 12', ticketID: 12,
+	});
+});
+
+test("pickupResultView: a refusal shows the server's text with no link", () => {
+	assert.deepEqual(pickupResultView(false, 'issue #5 is closed\n', 5), {
+		text: 'issue #5 is closed', linkText: '', ticketID: 0,
+	});
+	assert.deepEqual(pickupResultView(false, '', 5), {
+		text: 'request failed', linkText: '', ticketID: 0,
+	});
+});
+
+test('pickupResultView: an unreadable 200 still says picked up', () => {
+	for (const body of ['', 'not json', '{"ticket_id":"12"}', '{"ticket_id":0}']) {
+		assert.deepEqual(pickupResultView(true, body, 5), {
+			text: 'Picked up #5', linkText: '', ticketID: 0,
+		});
+	}
 });
 
 // describeAction / ACTION_LABELS: the "?" help overlay's copy for a raw
