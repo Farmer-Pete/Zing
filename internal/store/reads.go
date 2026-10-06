@@ -56,6 +56,12 @@ func (s *Store) ListAllTickets(ctx context.Context) ([]Ticket, error) {
 	return out, nil
 }
 
+// ticketStateDone is the terminal state ListReadyCandidates' dependency
+// hold clause checks a split child's dependencies against (#74): a child
+// is not a candidate while any ticket it depends on is in some other
+// state.
+const ticketStateDone = "done"
+
 // ListReadyCandidates returns every unclaimed, non-terminal ticket that is
 // dispatchable at now (design section 4.2, D21/OQ7):
 //
@@ -78,6 +84,12 @@ func (s *Store) ListAllTickets(ctx context.Context) ([]Ticket, error) {
 // question was asked. The store applies no priority order: tracker_ref is
 // TEXT, so SQL would sort "fake#10" before "fake#2"; the dispatcher parses
 // the numeric external id and orders candidates in Go (section 6.2).
+//
+// A ticket with any row in ticket_dependencies whose depended-on ticket is
+// not in state done is never a candidate (#74, owner decision Q2): a split
+// child waits before classify and planning, not only before building, so
+// it holds whatever its dependency's state is -- including abandoned
+// (owner decision Q3) -- until that dependency reaches done.
 func (s *Store) ListReadyCandidates(ctx context.Context, terminal []string, now time.Time) ([]Ticket, error) {
 	nowStr := formatTime(now)
 	query := `SELECT ` + ticketColumns + ` FROM tickets WHERE claim_owner IS NULL`
@@ -103,8 +115,11 @@ func (s *Store) ListReadyCandidates(ctx context.Context, terminal []string, now 
 	) AND NOT EXISTS (
 		SELECT 1 FROM runs r JOIN sessions s ON s.id = r.session_id
 		WHERE s.ticket_id = tickets.id AND r.capped_until IS NOT NULL AND r.capped_until > ?
+	) AND NOT EXISTS (
+		SELECT 1 FROM ticket_dependencies dep JOIN tickets dt ON dt.id = dep.depends_on_ticket_id
+		WHERE dep.ticket_id = tickets.id AND dt.state != ?
 	) ORDER BY id`
-	args = append(args, nowStr, nowStr, msgTypeQuestion, questionStateAnswered, nowStr)
+	args = append(args, nowStr, nowStr, msgTypeQuestion, questionStateAnswered, nowStr, ticketStateDone)
 
 	rows, err := s.db.QueryContext(ctx, query, args...)
 	if err != nil {
@@ -486,6 +501,43 @@ func (s *Store) SplitChildren(ctx context.Context, parentID int64) ([]SplitChild
 	}
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("split children for ticket %d: %w", parentID, err)
+	}
+	return out, nil
+}
+
+// DependencyRow is one ticket named in another ticket's ticket_dependencies
+// row (#74): the depended-on ticket's id, tracker_ref, and state.
+type DependencyRow struct {
+	TicketID int64
+	Ref      string
+	State    string
+}
+
+// Dependencies returns every ticket ticketID depends on, ordered by id,
+// whatever its state: console.threadBanner filters for the ones not yet
+// done itself (holdBanner). A ticket with no dependencies returns an empty
+// slice and a nil error.
+func (s *Store) Dependencies(ctx context.Context, ticketID int64) ([]DependencyRow, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT t.id, t.tracker_ref, t.state FROM ticket_dependencies dep
+		 JOIN tickets t ON t.id = dep.depends_on_ticket_id
+		 WHERE dep.ticket_id = ? ORDER BY t.id`,
+		ticketID)
+	if err != nil {
+		return nil, fmt.Errorf("dependencies for ticket %d: %w", ticketID, err)
+	}
+	defer rows.Close()
+
+	out := []DependencyRow{}
+	for rows.Next() {
+		var row DependencyRow
+		if err := rows.Scan(&row.TicketID, &row.Ref, &row.State); err != nil {
+			return nil, fmt.Errorf("dependencies for ticket %d: %w", ticketID, err)
+		}
+		out = append(out, row)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("dependencies for ticket %d: %w", ticketID, err)
 	}
 	return out, nil
 }
