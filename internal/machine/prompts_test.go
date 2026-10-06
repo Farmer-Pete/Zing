@@ -28,12 +28,12 @@ func TestPrompts_MatchThePinnedDesignText(t *testing.T) {
 		{
 			name:   "planning-feature",
 			path:   planningFeaturePromptPath,
-			sha256: "15e48dc5785c8ff9adb45c29a9022217b86e480754e9044a505e8cd223e48829",
+			sha256: "bfd291b0af204468b0a2fb152f8f69ba6e0af7063df83ca43019f0fdd5823886",
 		},
 		{
 			name:   "planning-bug",
 			path:   planningBugPromptPath,
-			sha256: "dfb939ffc6bbc027fa6984d793f5a635a35305325e61bbb98bb7f5c9866d500c",
+			sha256: "38aa8ae017c1c54323a7f3dfddd68e4576d48349da925751a13dbd4960df34a4",
 		},
 		{
 			name:   "planreview",
@@ -63,7 +63,7 @@ func TestPrompts_MatchThePinnedDesignText(t *testing.T) {
 		{
 			name:   "judge",
 			path:   "prompts/judge.md",
-			sha256: "64092ad52905e96d4a09b236f9209b008b7d09ad7de3602bcbd107fdddbcb0b1",
+			sha256: "934b46bcf9a8b04601634027b3d5d5ae9978289d729e0f659f7bfb6ff5406dcc",
 		},
 		{
 			name:   "respond",
@@ -299,17 +299,18 @@ func TestBuildPromptPlaceholders(t *testing.T) {
 }
 
 // TestJudgePromptRunsChecksAsWritten proves prompts/judge.md tells the
-// judge to run each sealed check exactly as written rather than
-// repairing it, to use "$TMPDIR" instead of /tmp, to run a long check in
-// the background and poll it instead of waiting on one call, and to
-// treat a skip the scenario's own then names as expected as an observed
-// pass while a skip that hides the behavior under test stays unobserved
-// (#78, #46, #38).
+// judge to run each sealed check through "zing check SID" rather than
+// pasting it into its own shell or repairing it, to use "$TMPDIR" instead
+// of /tmp, to run a long check in the background and poll it instead of
+// waiting on one call, and to treat a skip the scenario's own then names
+// as expected as an observed pass while a skip that hides the behavior
+// under test stays unobserved (#78, #46, #38, #86).
 func TestJudgePromptRunsChecksAsWritten(t *testing.T) {
 	t.Parallel()
 	text := unwrapped(t, "prompts/judge.md")
 	for _, want := range []string{
-		"Run each scenario's check command exactly as written.",
+		"Run each scenario's check with `zing check SID`",
+		"Never paste a check into your own shell.",
 		"do not repair it or run your own version",
 		"Return the error outcome with code cannot_run, naming the scenario and the defect in its check",
 		`Write temporary files under "$TMPDIR", never /tmp.`,

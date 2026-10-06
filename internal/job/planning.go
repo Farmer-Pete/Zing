@@ -41,6 +41,7 @@ import (
 	"regexp"
 	"strings"
 	"time"
+	"unicode"
 
 	zing "zing"
 	"zing/internal/fence"
@@ -76,10 +77,12 @@ const (
 	gateOptionApprove = "a"
 	gateOptionReject  = "b"
 
-	// escalationChoiceRetry, escalationChoiceBack, and escalationChoiceAbandon
-	// are the three option keys escalateTx's own linked question ever offers
-	// (design D10, section 6.7): "retry", "back to planning", and "abandon".
-	// An escalation round carrying replies and no option at all resolves as
+	// escalationChoiceRetry, escalationChoiceBack, escalationChoiceAbandon,
+	// and escalationChoiceGrant are the option keys escalateTx's own linked
+	// question ever offers (design D10, section 6.7; plan #51): "retry",
+	// "back to planning", "abandon", and, only when the escalation's own
+	// payload carries a FileGrant, "let task N also change PATH". An
+	// escalation round carrying replies and no option at all resolves as
 	// that question's own stored Recommended option, falling back to
 	// escalationChoiceRetry when none is stored (roundChoice's own default,
 	// #47 follow-up: it used to hardcode escalationChoiceBack here, which
@@ -93,6 +96,7 @@ const (
 	escalationChoiceRetry   = "a"
 	escalationChoiceBack    = "b"
 	escalationChoiceAbandon = "c"
+	escalationChoiceGrant   = "d"
 
 	responseInvalidWhat = "the model's final message failed validation twice in a row"
 
@@ -1063,8 +1067,116 @@ func checkScenarioShape(scenarios []response.Scenario) []*response.PathError {
 				Msg:  expectedSkipCheckMsg,
 			})
 		}
+		// Two of the three #86 sealed-check failures: a check that greps a
+		// multi-word phrase straight against hard-wrapped prose (the phrase
+		// can span the line break the prose wraps at) without joining the
+		// lines first, and a check with an unquoted glob (the judge
+		// agent's zsh login shell aborts on an unmatched glob, turning a
+		// leading "!" into a false pass).
+		if proseGrepWithoutJoin(sc.Check) {
+			errs = append(errs, &response.PathError{
+				Path: "scenarios/" + indexedScenario(i) + "/check",
+				Msg:  proseGrepCheckMsg,
+			})
+		}
+		if word, ok := unquotedGlob(sc.Check); ok {
+			errs = append(errs, &response.PathError{
+				Path: "scenarios/" + indexedScenario(i) + "/check",
+				Msg:  unquotedGlobCheckMsg(word),
+			})
+		}
 	}
 	return errs
+}
+
+// proseGrep matches a grep invocation whose flags include F or q, followed
+// (before the next pipe, semicolon, or ampersand) by a single- or
+// double-quoted argument that contains whitespace, i.e. a phrase of more
+// than one word.
+var proseGrep = regexp.MustCompile(`\bgrep\b[^|;&]*-[A-Za-z]*[Fq][A-Za-z]*[^|;&]*('[^'|;&]*\s[^'|;&]*'|"[^"|;&]*\s[^"|;&]*")`)
+
+// proseTarget matches a check that names a markdown file or a path under
+// prompts/, the hard-wrapped prose a multi-word grep can miss.
+var proseTarget = regexp.MustCompile(`\.md\b|prompts/`)
+
+// joinsLines matches a check that pipes a file through tr replacing
+// newlines or any whitespace run (the [:space:] class) with a single
+// space before grepping it, the safe form that can't miss a phrase split
+// across a wrapped line. It requires tr's own second operand to be a
+// quoted single space, not just the newline or [:space:] class anywhere
+// in the check: tr -d '\n' or tr -d '[:space:]' deletes the line break
+// instead of replacing it with a space, so
+// "two\nwords" becomes "twowords" and a phrase grep still misses it, and
+// requiring the literal replacement rules that out (tr -d's one operand
+// can never match the second, quoted-single-space group below).
+var joinsLines = regexp.MustCompile(`\btr\b(?:\s+-s)?\s+('\\n'|"\\n"|'\[:space:\]'|"\[:space:\]")\s+(' '|" ")`)
+
+// proseGrepWithoutJoin is true when a check greps a multi-word phrase (per
+// proseGrep) against prose (per proseTarget) without first joining the
+// file's lines (per joinsLines).
+func proseGrepWithoutJoin(check string) bool {
+	return proseGrep.MatchString(check) && proseTarget.MatchString(check) && !joinsLines.MatchString(check)
+}
+
+const proseGrepCheckMsg = `check greps a phrase of more than one word in hard-wrapped prose, so the phrase can span a line break; join the lines first, such as tr -s '[:space:]' ' ' < FILE | grep -qF 'two words'`
+
+// unquotedGlob scans check rune by rune, tracking single-quote,
+// double-quote, and backslash-escape state, and returns the
+// whitespace-delimited word holding the first "*" or "?" that sits outside
+// any quoting and isn't immediately preceded by "$" (a shell parameter
+// such as "$?", not a glob). zsh (the judge agent's login shell) aborts on
+// such a glob when it matches nothing, rather than passing it through
+// literally the way bash does. wordStart only moves on whitespace outside
+// both quote kinds, and the one loop keeps tracking that same quote state
+// past the glob rune itself, all the way to the word's own end, so a shell
+// word holding a quoted space, such as grep "a b"*.go, is reported whole
+// rather than cut at the space inside its own quotes.
+func unquotedGlob(check string) (string, bool) {
+	runes := []rune(check)
+	var inSingle, inDouble, escaped bool
+	// paramDepth counts how many "${...}" parameter expansions the scan is
+	// currently inside: a bare "*" or "?" there, such as the "?" in
+	// "${VAR:?msg}", is shell syntax, not a filename glob, so it must not
+	// be flagged (review thread t7c41ccb4b641b4ba). It only opens on "${",
+	// never bare "{", so an ordinary brace expansion like {a,b}*.go still
+	// gets its glob flagged.
+	var paramDepth int
+	wordStart, globAt := 0, -1
+	for i, r := range runes {
+		if escaped {
+			escaped = false
+			continue
+		}
+		switch {
+		case r == '\\' && !inSingle:
+			escaped = true
+		case r == '\'' && !inDouble:
+			inSingle = !inSingle
+		case r == '"' && !inSingle:
+			inDouble = !inDouble
+		case r == '{' && !inSingle && !inDouble && (paramDepth > 0 || (i > 0 && runes[i-1] == '$')):
+			paramDepth++
+		case r == '}' && !inSingle && !inDouble && paramDepth > 0:
+			paramDepth--
+		case unicode.IsSpace(r) && !inSingle && !inDouble:
+			if globAt >= 0 {
+				return string(runes[wordStart:i]), true
+			}
+			wordStart = i + 1
+		case (r == '*' || r == '?') && !inSingle && !inDouble:
+			if globAt < 0 && paramDepth == 0 && (i == 0 || runes[i-1] != '$') {
+				globAt = i
+			}
+		}
+	}
+	if globAt >= 0 {
+		return string(runes[wordStart:]), true
+	}
+	return "", false
+}
+
+func unquotedGlobCheckMsg(word string) string {
+	return fmt.Sprintf(`check has an unquoted glob %s; zsh aborts on an unmatched glob, so quote it, such as --include='*.go'`, word)
 }
 
 const hostSandboxCheckMsg = "check runs the host sandbox (sandbox-exec or the internal/sandbox probes), which cannot start inside the sandbox Zing runs checks in, so its probes skip and prove nothing; leave it out of the sealed checks"
@@ -2547,7 +2659,7 @@ func routeFailure(
 	sessionCommit *store.SessionUpsert, resolveIDs []int64, origin response.EscalationOrigin,
 ) (commit store.HandlerCommit, ok bool, err error) {
 	switch {
-	case errors.Is(runErr, runtime.ErrCanceled):
+	case errors.Is(runErr, runtime.ErrCanceled), claudeCapped(runErr):
 		return store.HandlerCommit{}, true, runErr
 	case errors.Is(runErr, ErrBudget):
 		return budgetEscalationCommit(t, d, resolveIDs), true, nil

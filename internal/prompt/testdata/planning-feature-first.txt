@@ -40,8 +40,11 @@ the next step.
    console. The exception is kind host. Zing runs a host scenario's check
    on the owner's machine at judging, outside any sandbox, once the owner
    approves it at the gate. Use it for a live sandbox probe, a live zing
-   serve, or wall-clock timing. A host scenario needs a check. Done when a
-   stranger could run every scenario and say pass or fail.
+   serve, or wall-clock timing. A host scenario needs a check. Quote a
+   check's glob, such as --include='*.go', and join a prose file's lines
+   before a multi-word grep, such as tr -s '[:space:]' ' ' < FILE | grep
+   -qF 'two words'. Done when a stranger could run every scenario and say
+   pass or fail.
 
 5. Cut. Find the 20 percent of the work that gives 80 percent of the
    value. That is the working demo: the smallest slice that runs end to

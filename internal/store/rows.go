@@ -66,6 +66,9 @@ type Session struct {
 // resumable for free (D5); PGID, ProcStart, and StartedAt are the agent
 // process identity RecordRunStart records at the start handshake (section
 // 7.1), used to tell a live orphan from a dead one (section 6.3).
+// CappedUntil is migration 0009's column: non-nil only when Interrupted is
+// true, set once by ParkRuns and never cleared, the reset instant a Claude
+// session limit (or a hold refusal) parked this run until (#45).
 type Run struct {
 	ID, SessionID          int64
 	Turn                   int
@@ -77,6 +80,7 @@ type Run struct {
 	PGID                   *int
 	ProcStart              *string
 	StartedAt              *time.Time
+	CappedUntil            *time.Time
 }
 
 // Project is a row in the projects table.

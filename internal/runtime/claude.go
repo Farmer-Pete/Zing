@@ -718,6 +718,10 @@ func (c Claude) run(ctx context.Context, req RunRequest, argv []string, sessionI
 		if errors.Is(outcomeErr, ErrTimeout) || errors.Is(outcomeErr, ErrCanceled) {
 			res.ExitCode = -1
 		}
+		var execErr *ExecError
+		if errors.As(outcomeErr, &execErr) { //nolint:modernize // see exitCodeFrom
+			outcomeErr = exitFailure(execErr.ExitCode, res.FinalMessage, time.Now())
+		}
 		return res, outcomeErr
 	}
 

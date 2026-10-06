@@ -23,6 +23,14 @@ Check:
   -v` and greps the skip line, such as `--- SKIP: TestName`, and the
   skip message. A bare `go test` exits 0 whether or not the test
   skipped, so it is a finding.
+- An unquoted glob in a check, such as `--include=*.go`, is a major
+  finding: a login shell that aborts on an unmatched glob turns the
+  check into a false pass. Quote it: `--include='*.go'`.
+- A check that greps a phrase of more than one word with `grep -F` or
+  `grep -q` straight against a `.md` file or a file under `prompts/`,
+  without joining its lines first, is a major finding: the phrase can
+  span the line break the prose wraps at. Join the lines first, such
+  as `tr -s '[:space:]' ' ' < FILE | grep -qF 'two words'`.
 
 ## In code
 Check that the tests exist and assert behavior, not implementation. A

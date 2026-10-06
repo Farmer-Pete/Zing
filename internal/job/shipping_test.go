@@ -1192,7 +1192,7 @@ func TestFinalVerdictsAfterFailFixPass(t *testing.T) {
 	}
 	pbApply(t, s, ticket, evalCommit)
 
-	driveJudgeFixToLanding(t, s, ticket.ID, rt, checks)
+	driveJudgeFixToLanding(t, s, ticket.ID, rt, checks, judgeFixTestCmd)
 
 	ticket = pbGetTicket(t, s, ticket.ID)
 	deps4 := pbWithTestCmd(pbClaim(t, s, rt, ticket.ID), ticket, judgeFixTestCmd)
@@ -3160,6 +3160,35 @@ func TestRespondInterruptedIdlessFirstTurnRunsFresh(t *testing.T) {
 	}
 	if len(commit.Artifacts) != 1 {
 		t.Fatalf("commit.Artifacts = %+v, want exactly one", commit.Artifacts)
+	}
+}
+
+// ---- TestRespondRunAndRouteRaw_PassesCappedThrough --------------------------
+
+// TestRespondRunAndRouteRaw_PassesCappedThrough proves
+// shipHandler.respondRunAndRouteRaw's own passthrough case still carries
+// claudeCapped (r4f3): without it, this regresses to escalating
+// runtime_exec_failed and asking the owner, exactly the bug issue #45
+// fixes. pbScriptedRuntime hands runJobWith a *runtime.SessionLimitError
+// directly, the same shape Claude.run itself returns.
+func TestRespondRunAndRouteRaw_PassesCappedThrough(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow end-to-end flow; runs in the full suite")
+	}
+	t.Parallel()
+	when := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	s, ticket, gh, tr, _ := shipRespondReady(t, when)
+
+	cappedRT := &pbScriptedRuntime{t: t, steps: []pbScriptedStep{
+		{res: runtime.RunResult{}, err: &runtime.SessionLimitError{ResetAt: time.Now().Add(time.Hour), Parsed: true}},
+	}}
+	deps := shipClaim(t, s, cappedRT, ticket.ID, gh, tr)
+	commit, err := (shipHandler{}).Run(t.Context(), ticket, deps)
+	if _, capped := Capped(err); !capped {
+		t.Fatalf("Capped(%v) = (_, false), want true", err)
+	}
+	if !reflect.DeepEqual(commit, store.HandlerCommit{}) {
+		t.Errorf("commit = %+v, want the zero value", commit)
 	}
 }
 

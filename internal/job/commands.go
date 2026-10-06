@@ -150,6 +150,20 @@ func runShellCommand(ctx context.Context, dir, shellCmd string, execPrefix, extr
 	}
 }
 
+// RunShell runs shellCmd through "/bin/sh -c", the same shell Zing's own
+// CHECK re-run uses, with no sandbox prefix and no process-group discipline
+// beyond runShellCommand's own: cmd/zing's "zing check" subcommand calls
+// this so the judge's own run of a sealed check never depends on the
+// judge agent's login shell (#86: zsh aborts on an unmatched glob before a
+// negated grep ever runs, turning a real failure into a false pass under
+// bash/sh). env is the caller's whole environment (os.Environ()), not just
+// the extras the real CommandRunner adds on top of a filtered allowlist,
+// so a sandbox's own variables (sandbox.go) survive runShellCommand's call
+// to runtime.FilteredEnv instead of being dropped.
+func RunShell(ctx context.Context, dir, shellCmd string, env []string, timeout time.Duration, cio CommandIO) (int, error) {
+	return runShellCommand(ctx, dir, shellCmd, nil, env, timeout, cio)
+}
+
 // shellCommandNameArgs mirrors runtime.Claude's own commandNameArgs (design
 // section 4.4): with no execPrefix, "/bin/sh -c shellCmd" unchanged; with
 // one, execPrefix[0] as name and execPrefix[1:] plus "/bin/sh -c shellCmd"
