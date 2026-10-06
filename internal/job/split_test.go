@@ -6,10 +6,13 @@
 package job_test
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"strings"
 	"testing"
 
+	"zing/internal/job"
 	"zing/internal/response"
 	"zing/internal/store"
 )
@@ -18,6 +21,16 @@ import (
 // reused across this file's subtests (goconst: three or more call sites
 // across this package compared the literal).
 const testSplitSharedNotes = "the two halves share no code"
+
+// testSplitPartOneTitle, testSplitPartOneBody, testSplitPartTwoTitle, and
+// testSplitPartTwoBody are c1 and c2's own title and body, reused across
+// this file's subtests (goconst).
+const (
+	testSplitPartOneTitle = "Part one"
+	testSplitPartOneBody  = "build the read path"
+	testSplitPartTwoTitle = "Part two"
+	testSplitPartTwoBody  = "build the write path"
+)
 
 // seedSplitQuestion inserts one open split question directly (design
 // section 6.6's split variant), mirroring gate_test.go's own
@@ -45,6 +58,84 @@ func seedSplitQuestion(t *testing.T, s *store.Store, ticketID int64) int64 {
 	return id
 }
 
+// seedChildrenArtifact inserts a children artifact directly
+// (store.InsertArtifact), standing in for childrenCommit's own write: task
+// 6's tests drive fileNextSplitChild straight from an answered split round,
+// without replaying the planner's own first turn.
+func seedChildrenArtifact(t *testing.T, s *store.Store, ticketID int64, children []response.Child, notes string) {
+	t.Helper()
+	payload, err := json.Marshal(response.ChildrenArtifact{Children: children, Notes: notes})
+	if err != nil {
+		t.Fatalf("marshal children artifact: %v", err)
+	}
+	if _, err := s.InsertArtifact(t.Context(), store.Artifact{TicketID: ticketID, Type: "children", Payload: payload}); err != nil {
+		t.Fatalf("InsertArtifact(children): %v", err)
+	}
+}
+
+// approveSplitQuestion seeds an open split question (seedSplitQuestion),
+// then answers it with option a (Approve) and sends it, so the next
+// planning tick's AnsweredRounds carries an approved split round.
+func approveSplitQuestion(t *testing.T, s *store.Store, ticketID int64) {
+	t.Helper()
+	qID := seedSplitQuestion(t, s, ticketID)
+	option := "a"
+	if _, err := s.SaveDraft(t.Context(), store.DraftInput{TicketID: ticketID, QuestionID: &qID, Option: &option}); err != nil {
+		t.Fatalf("SaveDraft(option a): %v", err)
+	}
+	if _, err := s.SendBatch(t.Context(), ticketID); err != nil {
+		t.Fatalf("SendBatch: %v", err)
+	}
+}
+
+// fakeSplitTracker is a job.SplitTracker double (task 6): FileSplitChild
+// returns refs in order from refs, recording every title and body it was
+// called with, including a failed call; failAt, when non-zero, fails the
+// failAt'th FileSplitChild call (1-based) once, with no ref consumed.
+// CloseSplitParent always succeeds, recording its own arguments.
+type fakeSplitTracker struct {
+	t    *testing.T
+	refs []string
+
+	calls      int
+	filed      int
+	projectIDs []int64
+	titles     []string
+	bodies     []string
+	failAt     int
+
+	closeCalls     int
+	closeProjectID int64
+	closeRef       string
+	closeBody      string
+}
+
+func (f *fakeSplitTracker) FileSplitChild(_ context.Context, projectID int64, title, body string) (string, error) {
+	f.t.Helper()
+	f.calls++
+	f.projectIDs = append(f.projectIDs, projectID)
+	f.titles = append(f.titles, title)
+	if f.failAt != 0 && f.calls == f.failAt {
+		return "", errors.New("fake split tracker: file failed")
+	}
+	if f.filed >= len(f.refs) {
+		f.t.Fatalf("fakeSplitTracker.FileSplitChild: call %d has no ref left (only %d)", f.calls, len(f.refs))
+	}
+	ref := f.refs[f.filed]
+	f.filed++
+	f.bodies = append(f.bodies, body)
+	return ref, nil
+}
+
+func (f *fakeSplitTracker) CloseSplitParent(_ context.Context, projectID int64, ref, body string) error {
+	f.t.Helper()
+	f.closeCalls++
+	f.closeProjectID = projectID
+	f.closeRef = ref
+	f.closeBody = body
+	return nil
+}
+
 // TestPlanningHandler_Children_PostsSplitGate proves childrenCommit (design
 // section 6.6's split variant, plan #74): a children outcome stores the
 // children artifact, deduplicating a key repeated inside one child's own
@@ -61,8 +152,8 @@ func TestPlanningHandler_Children_PostsSplitGate(t *testing.T) {
 		children := &response.ChildrenResponse{
 			Job: response.JobPlanning, Outcome: response.OutcomeChildren,
 			Children: []response.Child{
-				{Key: "c1", Title: "Part one", Body: "build the read path"},
-				{Key: "c2", Title: "Part two", Body: "build the write path", DependsOn: []string{"c1"}},
+				{Key: "c1", Title: testSplitPartOneTitle, Body: testSplitPartOneBody},
+				{Key: "c2", Title: testSplitPartTwoTitle, Body: testSplitPartTwoBody, DependsOn: []string{"c1"}},
 			},
 			Notes: testSplitSharedNotes,
 			Replies: []response.Reply{
@@ -144,8 +235,8 @@ func TestPlanningHandler_Children_PostsSplitGate(t *testing.T) {
 		children := &response.ChildrenResponse{
 			Job: response.JobPlanning, Outcome: response.OutcomeChildren,
 			Children: []response.Child{
-				{Key: "c1", Title: "Part one", Body: "build the read path"},
-				{Key: "c2", Title: "Part two", Body: "build the write path", DependsOn: []string{"c1", "c1"}},
+				{Key: "c1", Title: testSplitPartOneTitle, Body: testSplitPartOneBody},
+				{Key: "c2", Title: testSplitPartTwoTitle, Body: testSplitPartTwoBody, DependsOn: []string{"c1", "c1"}},
 			},
 			Notes: testSplitSharedNotes,
 			Replies: []response.Reply{
@@ -225,5 +316,239 @@ func TestPlanningHandler_SplitRejected_ResumesWithNotes(t *testing.T) {
 	}
 	if !strings.Contains(rec.lastReq.Prompt, "rejected your proposed split") || !strings.Contains(rec.lastReq.Prompt, notes) {
 		t.Errorf("resume prompt does not carry the rejection note and the owner's text:\n%s", rec.lastReq.Prompt)
+	}
+}
+
+// TestPlanningHandler_SplitApproved_FilesOneChildPerTickThenClosesParent
+// proves fileNextSplitChild and closeSplitParent (task 6, design section
+// 6.6's split variant): an approved split files one child per tick, in
+// dependency order, each child's body carrying its filed dependency's own
+// human-readable ref, then closes the parent once every child is filed.
+func TestPlanningHandler_SplitApproved_FilesOneChildPerTickThenClosesParent(t *testing.T) {
+	t.Parallel()
+	t.Run("basic", func(t *testing.T) {
+		t.Parallel()
+		s := newJobTestStore(t)
+		ticketID := seedQueuedTicket(t, s)
+		rt := &scriptedRuntime{t: t} // never called: approve files children without the agent
+		advanceQueuedToPlanning(t, s, rt, ticketID)
+		seedChildrenArtifact(t, s, ticketID, []response.Child{
+			{Key: "c1", Title: "Detect the conflict", Body: "do c1", DependsOn: []string{}},
+			{Key: "c2", Title: "The merge unit", Body: "do c2", DependsOn: []string{"c1"}},
+		}, testSplitSharedNotes)
+		approveSplitQuestion(t, s, ticketID)
+
+		fake := &fakeSplitTracker{t: t, refs: []string{"70", "71"}}
+
+		deps := claimWithRuntimes(t, s, rt, ticketID)
+		deps.Splitter = fake
+		commit1, err := runPlanning(t, s, deps, ticketID)
+		if err != nil {
+			t.Fatalf("run 1: %v", err)
+		}
+		if commit1.SplitChild == nil || commit1.SplitChild.Key != "c1" || commit1.SplitChild.Ref != "70" {
+			t.Fatalf("run 1: commit.SplitChild = %+v, want key c1, ref 70", commit1.SplitChild)
+		}
+		apply(t, s, getTicket(t, s, ticketID), commit1)
+
+		deps = claimWithRuntimes(t, s, rt, ticketID)
+		deps.Splitter = fake
+		commit2, err := runPlanning(t, s, deps, ticketID)
+		if err != nil {
+			t.Fatalf("run 2: %v", err)
+		}
+		if commit2.SplitChild == nil || commit2.SplitChild.Key != "c2" || commit2.SplitChild.Ref != "71" {
+			t.Fatalf("run 2: commit.SplitChild = %+v, want key c2, ref 71", commit2.SplitChild)
+		}
+		if len(commit2.SplitChild.DependsOn) != 1 || commit2.SplitChild.DependsOn[0] != "c1" {
+			t.Errorf("run 2: commit.SplitChild.DependsOn = %v, want [c1]", commit2.SplitChild.DependsOn)
+		}
+		if !strings.Contains(commit2.SplitChild.Body, "Depends on #70") {
+			t.Errorf("run 2: commit.SplitChild.Body = %q, want it to contain %q", commit2.SplitChild.Body, "Depends on #70")
+		}
+		apply(t, s, getTicket(t, s, ticketID), commit2)
+
+		deps = claimWithRuntimes(t, s, rt, ticketID)
+		deps.Splitter = fake
+		commit3, err := runPlanning(t, s, deps, ticketID)
+		if err != nil {
+			t.Fatalf("run 3: %v", err)
+		}
+		if fake.closeCalls != 1 {
+			t.Fatalf("CloseSplitParent called %d times, want 1", fake.closeCalls)
+		}
+		if !strings.Contains(fake.closeBody, "#70, #71") {
+			t.Errorf("CloseSplitParent body = %q, want it to name #70, #71", fake.closeBody)
+		}
+		if commit3.Next != "done" {
+			t.Errorf("run 3: commit.Next = %q, want done", commit3.Next)
+		}
+		if commit3.Reason != "split into #70, #71" {
+			t.Errorf("run 3: commit.Reason = %q, want %q", commit3.Reason, "split into #70, #71")
+		}
+		apply(t, s, getTicket(t, s, ticketID), commit3)
+
+		if fake.calls != 2 {
+			t.Errorf("FileSplitChild called %d times, want exactly 2", fake.calls)
+		}
+	})
+
+	t.Run("repeated dependency from planner", func(t *testing.T) {
+		t.Parallel()
+		s := newJobTestStore(t)
+		ticketID := seedQueuedTicket(t, s)
+		answeredRoundReadyForResume(t, s, ticketID)
+
+		children := &response.ChildrenResponse{
+			Job: response.JobPlanning, Outcome: response.OutcomeChildren,
+			Children: []response.Child{
+				{Key: "c1", Title: testSplitPartOneTitle, Body: testSplitPartOneBody},
+				{Key: "c2", Title: testSplitPartTwoTitle, Body: testSplitPartTwoBody, DependsOn: []string{"c1", "c1"}},
+			},
+			Notes: testSplitSharedNotes,
+			Replies: []response.Reply{
+				{Question: "Q1", Settled: true, Decision: testQ1SettledDecision},
+			},
+		}
+		resumeRT := readyScriptedRuntime(t, readyStep(children, "children-sess2"))
+		postCommit, err := runPlanning(t, s, claimWithRuntimes(t, s, resumeRT, ticketID), ticketID)
+		if err != nil {
+			t.Fatalf("planning resume (children) Run: %v", err)
+		}
+		apply(t, s, getTicket(t, s, ticketID), postCommit)
+
+		open, err := s.QuestionsByState(t.Context(), ticketID, "open")
+		if err != nil {
+			t.Fatalf("QuestionsByState(open): %v", err)
+		}
+		if len(open) != 1 {
+			t.Fatalf("QuestionsByState(open) = %+v, want exactly one open split question", open)
+		}
+		if res, answerErr := s.AnswerQuestion(t.Context(), store.AnswerInput{TicketID: ticketID, QuestionID: open[0].ID, Option: "a"}); answerErr != nil {
+			t.Fatalf("AnswerQuestion: %v", answerErr)
+		} else if !res.Accepted {
+			t.Fatalf("AnswerQuestion: Accepted = false, Conflict = %q, want accepted", res.Conflict)
+		}
+
+		rt := &scriptedRuntime{t: t}
+		fake := &fakeSplitTracker{t: t, refs: []string{"70", "71"}}
+
+		deps := claimWithRuntimes(t, s, rt, ticketID)
+		deps.Splitter = fake
+		commit1, err := runPlanning(t, s, deps, ticketID)
+		if err != nil {
+			t.Fatalf("file c1: %v", err)
+		}
+		if applied, applyErr := s.CommitHandlerResult(t.Context(), commit1); applyErr != nil || !applied {
+			t.Fatalf("CommitHandlerResult(c1): applied=%v err=%v", applied, applyErr)
+		}
+
+		deps = claimWithRuntimes(t, s, rt, ticketID)
+		deps.Splitter = fake
+		commit2, err := runPlanning(t, s, deps, ticketID)
+		if err != nil {
+			t.Fatalf("file c2: %v", err)
+		}
+		if applied, applyErr := s.CommitHandlerResult(t.Context(), commit2); applyErr != nil || !applied {
+			t.Fatalf("CommitHandlerResult(c2): applied=%v err=%v", applied, applyErr)
+		}
+
+		if commit2.SplitChild == nil {
+			t.Fatalf("commit2.SplitChild = nil, want the c2 child")
+		}
+		childTicketID := int64(0)
+		filed, err := s.SplitChildren(t.Context(), ticketID)
+		if err != nil {
+			t.Fatalf("SplitChildren: %v", err)
+		}
+		for _, f := range filed {
+			if f.Key == "c2" {
+				childTicketID = f.TicketID
+			}
+		}
+		if childTicketID == 0 {
+			t.Fatalf("SplitChildren = %+v, want a filed c2", filed)
+		}
+		deps2, err := s.Dependencies(t.Context(), childTicketID)
+		if err != nil {
+			t.Fatalf("Dependencies: %v", err)
+		}
+		if len(deps2) != 1 {
+			t.Fatalf("Dependencies(c2) = %+v, want exactly one row (c1)", deps2)
+		}
+	})
+}
+
+// TestPlanningHandler_SplitApproved_TrackerFailureRetriesWithoutDuplicate
+// proves fileNextSplitChild's own retry rule (design section 6.6's split
+// variant): a tracker failure logs a warning and returns ErrNoAction with
+// no commit, and the next tick resumes from the store's filed children
+// without filing the already-filed child again.
+func TestPlanningHandler_SplitApproved_TrackerFailureRetriesWithoutDuplicate(t *testing.T) {
+	t.Parallel()
+	s := newJobTestStore(t)
+	ticketID := seedQueuedTicket(t, s)
+	rt := &scriptedRuntime{t: t}
+	advanceQueuedToPlanning(t, s, rt, ticketID)
+	seedChildrenArtifact(t, s, ticketID, []response.Child{
+		{Key: "c1", Title: "c1", Body: "do c1", DependsOn: []string{}},
+		{Key: "c2", Title: "c2", Body: "do c2", DependsOn: []string{"c1"}},
+	}, "")
+	approveSplitQuestion(t, s, ticketID)
+
+	fake := &fakeSplitTracker{t: t, refs: []string{"70", "71"}, failAt: 2}
+
+	deps := claimWithRuntimes(t, s, rt, ticketID)
+	deps.Splitter = fake
+	commit1, err := runPlanning(t, s, deps, ticketID)
+	if err != nil {
+		t.Fatalf("run 1: %v", err)
+	}
+	if commit1.SplitChild == nil || commit1.SplitChild.Key != "c1" {
+		t.Fatalf("run 1: commit.SplitChild = %+v, want key c1", commit1.SplitChild)
+	}
+	apply(t, s, getTicket(t, s, ticketID), commit1)
+
+	deps = claimWithRuntimes(t, s, rt, ticketID)
+	deps.Splitter = fake
+	_, err = runPlanning(t, s, deps, ticketID)
+	if !errors.Is(err, job.ErrNoAction) {
+		t.Fatalf("run 2: err = %v, want ErrNoAction", err)
+	}
+
+	// Run 2's failure applied no commit, so the claim from run 2 is still
+	// held: reuse it rather than re-claiming, the same as a dispatcher tick
+	// that retries within one lease.
+	commit3, err := runPlanning(t, s, deps, ticketID)
+	if err != nil {
+		t.Fatalf("run 3: %v", err)
+	}
+	if commit3.SplitChild == nil || commit3.SplitChild.Key != "c2" {
+		t.Fatalf("run 3: commit.SplitChild = %+v, want key c2", commit3.SplitChild)
+	}
+	apply(t, s, getTicket(t, s, ticketID), commit3)
+
+	wantTitles := []string{"c1", "c2", "c2"}
+	if len(fake.titles) != len(wantTitles) {
+		t.Fatalf("fake.titles = %v, want %v", fake.titles, wantTitles)
+	}
+	for i, want := range wantTitles {
+		if fake.titles[i] != want {
+			t.Errorf("fake.titles[%d] = %q, want %q", i, fake.titles[i], want)
+		}
+	}
+
+	rows, err := s.SplitChildren(t.Context(), ticketID)
+	if err != nil {
+		t.Fatalf("SplitChildren: %v", err)
+	}
+	count := 0
+	for _, r := range rows {
+		if r.Key == "c1" {
+			count++
+		}
+	}
+	if count != 1 {
+		t.Errorf("split children rows with key c1 = %d, want exactly 1", count)
 	}
 }

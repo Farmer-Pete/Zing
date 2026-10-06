@@ -10,6 +10,7 @@ package job
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"strings"
@@ -168,8 +169,8 @@ func splitOrder(children []response.Child) ([]response.Child, error) {
 // Option b, or a round carrying replies and no option at all, is a reject --
 // "resume or fresh" with the owner's joined replies as notes, prefixed by
 // splitRejectedNote, the same as the gate's own rejection (design section
-// 6.7). Option a (approve) files the children; for now (task 5) it returns
-// ErrNoAction, replaced by fileNextSplitChild in task 6.
+// 6.7). Option a (approve) files the children, one per tick
+// (fileNextSplitChild).
 func (h planningHandler) enterFromSplitRound(ctx context.Context, t store.Ticket, d Deps, round store.Round) (store.HandlerCommit, error) {
 	resolveIDs := questionIDs(round)
 	if newestChosenOption(round.Answers) != splitOptionApprove {
@@ -177,7 +178,105 @@ func (h planningHandler) enterFromSplitRound(ctx context.Context, t store.Ticket
 		notes := splitRejectedNote + joinReplies(round.Replies)
 		return resumeOrFresh(ctx, t, d, []prompt.NamedInput{prompt.Notes(notes)}, resolveIDs)
 	}
-	return store.HandlerCommit{}, ErrNoAction
+	return fileNextSplitChild(ctx, t, d, resolveIDs)
+}
+
+// SplitTracker is what an approved split needs from the tracker (design
+// section 6.6's split variant): FileSplitChild files one child as a new
+// tracker issue under projectID, returning its ref; CloseSplitParent posts
+// comment on ref once (idempotent, like postMarkedOnce) and closes it. The
+// dispatcher implements it over its own tracker and bindings and passes
+// itself as Deps.Splitter (internal/dispatch/split.go).
+type SplitTracker interface {
+	FileSplitChild(ctx context.Context, projectID int64, title, body string) (ref string, err error)
+	CloseSplitParent(ctx context.Context, projectID int64, ref, body string) error
+}
+
+// fileNextSplitChild files the next unfiled child, in dependency order, one
+// per tick (design section 6.6's split variant): it reads the stored
+// children artifact and the children already filed under t
+// (Store.SplitChildren), computes splitOrder, and files the first child not
+// yet in that set. A tracker failure logs a warning and returns
+// ErrNoAction, so the next tick resumes from the store's filed children
+// without filing a duplicate. Once every child is filed, it closes the
+// parent (closeSplitParent).
+func fileNextSplitChild(ctx context.Context, t store.Ticket, d Deps, resolveIDs []int64) (store.HandlerCommit, error) {
+	if d.Splitter == nil {
+		return store.HandlerCommit{}, errors.New("job: split: no split tracker wired")
+	}
+	art, found, err := d.Store.GetArtifact(ctx, t.ID, artifactTypeChildren)
+	if err != nil {
+		return store.HandlerCommit{}, fmt.Errorf("job: split: get children artifact: %w", err)
+	}
+	if !found {
+		return store.HandlerCommit{}, fmt.Errorf("job: split: ticket %d has a split round but no children artifact", t.ID)
+	}
+	var ca response.ChildrenArtifact
+	if err = json.Unmarshal(art.Payload, &ca); err != nil {
+		return store.HandlerCommit{}, fmt.Errorf("job: split: unmarshal children artifact: %w", err)
+	}
+	order, err := splitOrder(ca.Children)
+	if err != nil {
+		return store.HandlerCommit{}, fmt.Errorf("job: split: %w", err)
+	}
+	filed, err := d.Store.SplitChildren(ctx, t.ID)
+	if err != nil {
+		return store.HandlerCommit{}, fmt.Errorf("job: split: split children: %w", err)
+	}
+	refByKey := make(map[string]string, len(filed))
+	for _, f := range filed {
+		refByKey[f.Key] = f.Ref
+	}
+	for _, c := range order {
+		if _, ok := refByKey[c.Key]; ok {
+			continue
+		}
+		depRefs := make([]string, len(c.DependsOn))
+		for i, k := range c.DependsOn {
+			depRefs[i] = refByKey[k]
+		}
+		body := splitChildBody(c.Body, ca.Notes, t.TrackerRef, depRefs)
+		ref, fileErr := d.Splitter.FileSplitChild(ctx, t.ProjectID, c.Title, body)
+		if fileErr != nil {
+			slog.Warn("split child filing failed", "ticket_id", t.ID, "child_key", c.Key, "err", fileErr)
+			return store.HandlerCommit{}, ErrNoAction
+		}
+		slog.Info("split child filed", "ticket_id", t.ID, "child_key", c.Key, "ref", ref)
+		commit := baseCommit(t, d)
+		commit.SplitChild = &store.SplitChild{Key: c.Key, Ref: ref, Title: c.Title, Body: body, DependsOn: c.DependsOn}
+		commit.Messages = []store.Message{{
+			TicketID: t.ID, Type: msgTypeUpdate, Author: authorSystem,
+			Body: fmt.Sprintf("Filed %s as %s: %s", c.Key, tracker.IssueRef(ref), c.Title),
+		}}
+		return commit, nil
+	}
+	return closeSplitParent(ctx, t, d, order, refByKey, resolveIDs)
+}
+
+// closeSplitParent runs once every child is filed (design section 6.6's
+// split variant, owner decision Q1): it posts one comment on the parent's
+// issue listing every child's human-readable ref, closes the issue, and
+// moves the parent ticket to done with reason "split into #A, #B". A
+// tracker failure logs a warning and returns ErrNoAction, so the next tick
+// retries; CloseSplitParent is idempotent, so a retried tick never posts
+// the comment twice.
+func closeSplitParent(ctx context.Context, t store.Ticket, d Deps, order []response.Child, refByKey map[string]string, resolveIDs []int64) (store.HandlerCommit, error) {
+	refs := make([]string, len(order))
+	for i, c := range order {
+		refs[i] = tracker.IssueRef(refByKey[c.Key])
+	}
+	list := strings.Join(refs, ", ")
+	comment := "Zing split this ticket into " + list + ". Each child is queued in dependency order."
+	if err := d.Splitter.CloseSplitParent(ctx, t.ProjectID, t.TrackerRef, comment); err != nil {
+		slog.Warn("split parent close failed", "ticket_id", t.ID, "err", err)
+		return store.HandlerCommit{}, ErrNoAction
+	}
+	c := baseCommit(t, d)
+	c.Next = stateDone
+	c.Reason = "split into " + list
+	c.ResolveQuestions = resolveIDs
+	slog.Info("split parent closed", "ticket_id", t.ID, "children", len(order))
+	return c, nil
 }
 
 // splitChildBody renders one split child's issue body (design section
