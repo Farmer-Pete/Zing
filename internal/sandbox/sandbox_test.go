@@ -263,7 +263,7 @@ func TestLoadRejectsBadPort(t *testing.T) {
 
 // ---- Env ---------------------------------------------------------------
 
-// TestEnvValues proves Env renders section 5.3's ten variables, in table
+// TestEnvValues proves Env renders section 5.3's eleven variables, in table
 // order, from RunDir, CacheShared, ZingBin, and parentPath.
 func TestEnvValues(t *testing.T) {
 	t.Parallel()
@@ -274,6 +274,7 @@ func TestEnvValues(t *testing.T) {
 
 	want := []string{
 		"TMPDIR=" + filepath.Join(p.RunDir, "tmp"),
+		"TMPPREFIX=" + filepath.Join(p.RunDir, "tmp", "zsh"),
 		"CLAUDE_CODE_TMPDIR=" + filepath.Join(p.RunDir, "claude-tmp"),
 		"GOPATH=" + filepath.Join(p.CacheShared, "gopath"),
 		"GOCACHE=" + filepath.Join(p.CacheShared, "go-build"),
