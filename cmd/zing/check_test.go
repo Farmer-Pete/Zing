@@ -2,11 +2,13 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 )
 
 // TestCheckRunsThroughSh proves "zing check SID" runs a sealed check
@@ -28,7 +30,7 @@ func TestCheckRunsThroughSh(t *testing.T) {
 	}
 
 	var out, errOut bytes.Buffer
-	code := check([]string{"s1"}, scenariosGetenv(map[string]string{
+	code := check(context.Background(), []string{"s1"}, scenariosGetenv(map[string]string{
 		scenariosTokenEnv: strconv.FormatInt(runID, 10),
 		scenariosFileEnv:  path,
 	}), workDir, nil, &out, &errOut)
@@ -57,14 +59,14 @@ func TestCheckPassesCallerEnvironment(t *testing.T) {
 	})
 
 	var out, errOut bytes.Buffer
-	code := check([]string{"s1"}, getenv, t.TempDir(), []string{"ZING_CHECK_PROBE=yes"}, &out, &errOut)
+	code := check(context.Background(), []string{"s1"}, getenv, t.TempDir(), []string{"ZING_CHECK_PROBE=yes"}, &out, &errOut)
 	if code != 0 {
 		t.Errorf("code = %d, want 0 with ZING_CHECK_PROBE=yes in env (stderr: %q)", code, errOut.String())
 	}
 
 	out.Reset()
 	errOut.Reset()
-	code = check([]string{"s1"}, getenv, t.TempDir(), nil, &out, &errOut)
+	code = check(context.Background(), []string{"s1"}, getenv, t.TempDir(), nil, &out, &errOut)
 	if code != 1 {
 		t.Errorf("code = %d, want 1 with no env (stderr: %q)", code, errOut.String())
 	}
@@ -81,7 +83,7 @@ func TestCheckKilledBySignal(t *testing.T) {
 	path := writeScenariosFixture(t, t.TempDir(), runID, content)
 
 	var out, errOut bytes.Buffer
-	code := check([]string{"s1"}, scenariosGetenv(map[string]string{
+	code := check(context.Background(), []string{"s1"}, scenariosGetenv(map[string]string{
 		scenariosTokenEnv: strconv.FormatInt(runID, 10),
 		scenariosFileEnv:  path,
 	}), t.TempDir(), nil, &out, &errOut)
@@ -91,6 +93,42 @@ func TestCheckKilledBySignal(t *testing.T) {
 	}
 	if !strings.Contains(errOut.String(), "killed by signal") {
 		t.Errorf("stderr = %q, want it to mention a signal kill", errOut.String())
+	}
+}
+
+// TestCheckRespectsCallerContext is a regression test for review thread
+// teec8691cea073242: check used to run its command with
+// context.Background(), so only its own 10 minute timeout could stop the
+// child; a SIGINT/SIGTERM to "zing check" itself left the child orphaned.
+// With a context the caller cancels, the child must stop promptly instead
+// of running to completion.
+func TestCheckRespectsCallerContext(t *testing.T) {
+	const runID = int64(24)
+	content := `<scenario id="s1" kind="behavior" check="sleep 5"><given>g</given><when>w</when><then>t</then></scenario>` + "\n"
+	path := writeScenariosFixture(t, t.TempDir(), runID, content)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() {
+		time.Sleep(50 * time.Millisecond)
+		cancel()
+	}()
+
+	var out, errOut bytes.Buffer
+	start := time.Now()
+	code := check(ctx, []string{"s1"}, scenariosGetenv(map[string]string{
+		scenariosTokenEnv: strconv.FormatInt(runID, 10),
+		scenariosFileEnv:  path,
+	}), t.TempDir(), nil, &out, &errOut)
+	elapsed := time.Since(start)
+
+	if elapsed > 2*time.Second {
+		t.Errorf("elapsed = %s, want well under the 5s sleep: cancelling the caller's context did not stop the check", elapsed)
+	}
+	if code == 0 {
+		t.Errorf("code = %d, want non-zero: the check was cancelled, not completed", code)
+	}
+	if strings.Contains(errOut.String(), checkTimeoutMsg) {
+		t.Errorf("stderr = %q, want no timeout message: this was a caller cancel, not the 10m timeout", errOut.String())
 	}
 }
 
@@ -154,7 +192,7 @@ func TestCheckRefusesOutsideJudgeRun(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
 			var out, errOut bytes.Buffer
-			code := check(tc.args, scenariosGetenv(tc.env), t.TempDir(), nil, &out, &errOut)
+			code := check(context.Background(), tc.args, scenariosGetenv(tc.env), t.TempDir(), nil, &out, &errOut)
 
 			if code != 2 {
 				t.Errorf("code = %d, want 2", code)

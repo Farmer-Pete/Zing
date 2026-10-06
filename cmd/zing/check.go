@@ -13,7 +13,9 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/signal"
 	"regexp"
+	"syscall"
 	"time"
 
 	"zing/internal/job"
@@ -34,14 +36,21 @@ var checkTimeoutMsg = fmt.Sprintf("zing check: timed out after %s", checkTimeout
 var checkIDPattern = regexp.MustCompile(`^s\d+$`)
 
 // runCheck is "zing check SID"'s real entry point: the process's real
-// arguments, environment, working directory, and stdout/stderr.
+// arguments, environment, working directory, and stdout/stderr. Its
+// context is cancelled on SIGINT/SIGTERM, the same signal-derived base
+// context cmd/zing serve's own run gives serve, so a signal to this
+// process stops the check's child process group instead of leaving it
+// orphaned under the command's own 10 minute timeout.
 func runCheck() int {
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
 	dir, err := os.Getwd()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "zing check: %v\n", err)
 		return 1
 	}
-	return check(os.Args[2:], os.Getenv, dir, os.Environ(), os.Stdout, os.Stderr)
+	return check(ctx, os.Args[2:], os.Getenv, dir, os.Environ(), os.Stdout, os.Stderr)
 }
 
 // check runs one sealed scenario's check command (PKG9-PLAN.md section 7.3):
@@ -53,11 +62,14 @@ func runCheck() int {
 //     digits); else checkUsage, exit 2.
 //  3. The named scenario is read from the scenarios file; an unknown id
 //     or a scenario with no check command each exit 2.
-//  4. The check command runs through job.RunShell in dir, with env as its
-//     whole environment and a 10 minute timeout, its output copied to
-//     stdout as it runs. A timeout exits 124; any other run error exits
-//     1; otherwise check returns the command's own exit code.
-func check(args []string, getenv func(string) string, dir string, env []string, stdout, stderr io.Writer) int {
+//  4. The check command runs through job.RunShell in dir, under ctx, with
+//     env as its whole environment and a 10 minute timeout, its output
+//     copied to stdout as it runs. ctx cancelled early (review thread
+//     teec8691cea073242: runCheck's own SIGINT/SIGTERM) stops the child
+//     the same way the timeout does, just earlier. A timeout exits 124;
+//     any other run error exits 1; otherwise check returns the command's
+//     own exit code.
+func check(ctx context.Context, args []string, getenv func(string) string, dir string, env []string, stdout, stderr io.Writer) int {
 	runID, ok := parseRunToken(getenv("ZING_RUN_TOKEN"))
 	if !ok {
 		fmt.Fprintln(stderr, scenariosNoRunContext)
@@ -89,7 +101,7 @@ func check(args []string, getenv func(string) string, dir string, env []string, 
 		return 2
 	}
 
-	exitCode, runErr := job.RunShell(context.Background(), dir, sc.Check, env, checkTimeout, job.CommandIO{Out: stdout})
+	exitCode, runErr := job.RunShell(ctx, dir, sc.Check, env, checkTimeout, job.CommandIO{Out: stdout})
 	switch {
 	case errors.Is(runErr, job.ErrCommandTimeout):
 		fmt.Fprintln(stderr, checkTimeoutMsg)

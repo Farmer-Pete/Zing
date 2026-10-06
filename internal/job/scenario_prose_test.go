@@ -83,7 +83,7 @@ func TestCheckScenarioShape_AllowsJoinedProseGrep(t *testing.T) {
 func TestCheckScenarioShape_RejectsUnquotedGlob(t *testing.T) {
 	t.Parallel()
 	scenarios := []response.Scenario{
-		{ID: "s1", Then: "no match", Check: `! grep -rn foo . --include=*.go`},
+		{ID: "s1", Then: noMatchThen, Check: `! grep -rn foo . --include=*.go`},
 		{ID: "s2", Then: okThen, Check: okCheck},
 	}
 	errs := checkScenarioShape(scenarios)
@@ -92,7 +92,7 @@ func TestCheckScenarioShape_RejectsUnquotedGlob(t *testing.T) {
 	}
 
 	noneScenarios := []response.Scenario{
-		{ID: "s1", Then: "no match", Check: `! grep -rn foo . --include='*.go'`},
+		{ID: "s1", Then: noMatchThen, Check: `! grep -rn foo . --include='*.go'`},
 		{ID: "s2", Then: okThen, Check: `echo $?`},
 		{ID: "s3", Then: okThen, Check: `go test -run 'TestX$' ./internal/job`},
 	}
@@ -118,6 +118,34 @@ func TestCheckScenarioShape_UnquotedGlobKeepsQuotedSpace(t *testing.T) {
 	}
 	if !strings.Contains(errs[0].Msg, `"a b"*.go`) {
 		t.Fatalf("checkScenarioShape Msg = %q, want it to name the whole word \"a b\"*.go", errs[0].Msg)
+	}
+}
+
+// TestCheckScenarioShape_UnquotedGlobIgnoresParamExpansion is a regression
+// test for review thread t7c41ccb4b641b4ba: unquotedGlob flagged the "?" in
+// "${VAR:?msg}" as an unquoted glob, a false positive, because the rune
+// just before that "?" is ":", not "$". A bare glob character inside a
+// "${...}" parameter expansion is not a filename glob at all, so it must
+// not be flagged, while a real unquoted glob outside any "${...}" still
+// must be.
+func TestCheckScenarioShape_UnquotedGlobIgnoresParamExpansion(t *testing.T) {
+	t.Parallel()
+	scenarios := []response.Scenario{
+		{ID: "s1", Then: okThen, Check: `VAR=${VAR:?msg}`},
+		{ID: "s2", Then: okThen, Check: `echo ${a:-${b:?c}}`},
+		{ID: "s3", Then: okThen, Check: okCheck},
+	}
+	if errs := checkScenarioShape(scenarios); len(errs) != 0 {
+		t.Fatalf("checkScenarioShape = %+v, want no errors", errs)
+	}
+
+	withGlob := []response.Scenario{
+		{ID: "s1", Then: noMatchThen, Check: `: "${VAR:?msg}"; grep -rn foo . --include=*.go`},
+		{ID: "s2", Then: okThen, Check: okCheck},
+	}
+	errs := checkScenarioShape(withGlob)
+	if len(errs) != 1 || errs[0].Path != scenario0CheckPath || !strings.Contains(errs[0].Msg, "--include=*.go") {
+		t.Fatalf("checkScenarioShape = %+v, want one error on %s naming --include=*.go", errs, scenario0CheckPath)
 	}
 }
 

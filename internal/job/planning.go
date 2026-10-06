@@ -1127,6 +1127,13 @@ const proseGrepCheckMsg = `check greps a phrase of more than one word in hard-wr
 func unquotedGlob(check string) (string, bool) {
 	runes := []rune(check)
 	var inSingle, inDouble, escaped bool
+	// paramDepth counts how many "${...}" parameter expansions the scan is
+	// currently inside: a bare "*" or "?" there, such as the "?" in
+	// "${VAR:?msg}", is shell syntax, not a filename glob, so it must not
+	// be flagged (review thread t7c41ccb4b641b4ba). It only opens on "${",
+	// never bare "{", so an ordinary brace expansion like {a,b}*.go still
+	// gets its glob flagged.
+	var paramDepth int
 	wordStart, globAt := 0, -1
 	for i, r := range runes {
 		if escaped {
@@ -1140,13 +1147,17 @@ func unquotedGlob(check string) (string, bool) {
 			inSingle = !inSingle
 		case r == '"' && !inSingle:
 			inDouble = !inDouble
+		case r == '{' && !inSingle && !inDouble && (paramDepth > 0 || (i > 0 && runes[i-1] == '$')):
+			paramDepth++
+		case r == '}' && !inSingle && !inDouble && paramDepth > 0:
+			paramDepth--
 		case unicode.IsSpace(r) && !inSingle && !inDouble:
 			if globAt >= 0 {
 				return string(runes[wordStart:i]), true
 			}
 			wordStart = i + 1
 		case (r == '*' || r == '?') && !inSingle && !inDouble:
-			if globAt < 0 && (i == 0 || runes[i-1] != '$') {
+			if globAt < 0 && paramDepth == 0 && (i == 0 || runes[i-1] != '$') {
 				globAt = i
 			}
 		}
