@@ -586,7 +586,7 @@ func TestThreadAnsweredAndResolvedQuestionsRenderReadOnly(t *testing.T) {
 
 	answeredPayload := []byte(`{"key":"Q1","kind":"question","state":"answered","recommended":"a",` +
 		`"options":[{"key":"a","text":"Plain hello"},{"key":"b","text":"hello, world"}]}`)
-	answeredState := "answered"
+	answeredState := testQuestionStateAnswered
 	if _, err := s.InsertMessage(t.Context(), store.Message{
 		TicketID: ticketID, Type: testMsgTypeQuestion, Author: "zing", State: &answeredState,
 		Body: "Answered question\n\nAlready decided.", Payload: answeredPayload,
@@ -673,6 +673,56 @@ func TestThreadGateContextRendersStoredPlan(t *testing.T) {
 	} {
 		if !strings.Contains(gate, want) {
 			t.Errorf("gate context missing %q from the stored plan; got:\n%s", want, gate)
+		}
+	}
+}
+
+// TestThreadAmendedEscalationEditBox proves an open amended cannot_run
+// escalation's question card renders a prefilled scenario edit box (#57 Q3):
+// the judge's own amendment, not the scenario's old sealed text, with a kind
+// select and the box wired to answer this same question's option b ("Edit
+// it") on Save.
+func TestThreadAmendedEscalationEditBox(t *testing.T) {
+	t.Parallel()
+	s := newConsoleTestStore(t)
+	ticketID := seedTicket(t, s, "t#57", "Amended escalation ticket")
+
+	openState := testQuestionStateOpen
+	payload := []byte(`{"key":"Q1","kind":"question","state":"open","recommended":"a",` +
+		`"options":[{"key":"a","text":"Accept the amended check"},{"key":"b","text":"Edit it"},{"key":"c","text":"Abandon"}],` +
+		`"amendment":{"scenario":"s2","kind":"host","given":"amended given","when":"amended when","then":"amended then","check":"amended check","reason":"the check bans test files the then does not mention"}}`)
+	questionID, err := s.InsertMessage(t.Context(), store.Message{
+		TicketID: ticketID, Type: testMsgTypeQuestion, Author: testAuthorZing, State: &openState,
+		Body:    "Amended check\n\ns9's check refuses every internal/job change.",
+		Payload: payload,
+	})
+	if err != nil {
+		t.Fatalf("InsertMessage(amended question): %v", err)
+	}
+
+	srv := newTestServer(t, s, bus.New(), nil, newTestLogHandler(t))
+	main := mainFrame(t, srv.URL, "thread", ticketID, 0)
+
+	groups := splitQuestionGroups(t, main)
+	g := findGroup(t, groups, "Amended check")
+
+	if !strings.Contains(g, `class="owner-edit"`) {
+		t.Fatalf("amended question missing its owner-edit box; got:\n%s", g)
+	}
+	if !strings.Contains(g, `data-ref="s2"`) {
+		t.Errorf("owner-edit box missing data-ref=\"s2\"; got:\n%s", g)
+	}
+	wantAnswerQuestion := `data-answer-question="` + strconv.FormatInt(questionID, 10) + `"`
+	if !strings.Contains(g, wantAnswerQuestion) {
+		t.Errorf("owner-edit box missing %s; got:\n%s", wantAnswerQuestion, g)
+	}
+	for _, want := range []string{
+		"amended given", "amended when", "amended then",
+		`value="amended check"`,
+		`<option value="host" selected>host</option>`,
+	} {
+		if !strings.Contains(g, want) {
+			t.Errorf("owner-edit box missing %q; got:\n%s", want, g)
 		}
 	}
 }

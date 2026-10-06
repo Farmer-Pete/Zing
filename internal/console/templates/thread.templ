@@ -234,6 +234,13 @@ templ questionGroup(ticketID int64, row ThreadRow) {
 			case string(response.QuestionKindMerge):
 				@mergeContext(row.Question.PRURL)
 		}
+		// An amended cannot_run escalation's own prefilled scenario edit box
+		// (#57 Q3): shown only while the question is still open, since
+		// answering it (Accept, Edit it, or Abandon) resolves the escalation
+		// this box's own answer_question would otherwise still name.
+		if row.Question.Amendment != nil && row.Question.Interactive {
+			@ownerEditScenarioBox(*row.Question.Amendment, row.ID, "Edit it")
+		}
 		// The options or items always render (bug fix: "options vanish once
 		// locked", design section 22.7 item 4) -- clickable while
 		// Interactive, a locked numbered list with the sent pick marked

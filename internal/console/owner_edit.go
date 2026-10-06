@@ -31,19 +31,25 @@ type ownerEditBody struct {
 	When   *string `json:"when"`
 	Then   *string `json:"then"`
 	Check  *string `json:"check"`
+	Kind   *string `json:"kind"`
 	Text   *string `json:"text"`
 	Test   *string `json:"test"`
 	Demo   *bool   `json:"demo"`
 	Tasks  *string `json:"tasks"`
 	Body   *string `json:"body"`
+
+	// AnswerQuestion answers an amended escalation's option b ("Edit it",
+	// #57) in the same transaction as this scenario edit.
+	AnswerQuestion *int64 `json:"answer_question"`
 }
 
 // request builds b's store.OwnerEditRequest for ticketID.
 func (b ownerEditBody) request(ticketID int64) store.OwnerEditRequest {
 	return store.OwnerEditRequest{
 		TicketID: ticketID, Target: b.Target, Ref: b.Ref, Action: b.Action,
-		Given: b.Given, When: b.When, Then: b.Then, Check: b.Check,
+		Given: b.Given, When: b.When, Then: b.Then, Check: b.Check, Kind: b.Kind,
 		Text: b.Text, Test: b.Test, Demo: b.Demo, Tasks: b.Tasks, Body: b.Body,
+		AnswerQuestion: b.AnswerQuestion,
 	}
 }
 
@@ -52,21 +58,24 @@ func (b ownerEditBody) request(ticketID int64) store.OwnerEditRequest {
 // renamed or added code fails to compile here instead of silently falling
 // back to status 0.
 var ownerEditStatus = map[store.OwnerEditCode]int{
-	store.OwnerEditCodeBadRequest: http.StatusBadRequest,
-	store.OwnerEditCodeNotFound:   http.StatusNotFound,
-	store.OwnerEditCodeNotSealed:  http.StatusConflict,
-	store.OwnerEditCodeLanded:     http.StatusConflict,
-	store.OwnerEditCodeClaimed:    http.StatusConflict,
-	store.OwnerEditCodeInvalid:    http.StatusUnprocessableEntity,
+	store.OwnerEditCodeBadRequest:    http.StatusBadRequest,
+	store.OwnerEditCodeNotFound:      http.StatusNotFound,
+	store.OwnerEditCodeNotSealed:     http.StatusConflict,
+	store.OwnerEditCodeLanded:        http.StatusConflict,
+	store.OwnerEditCodeClaimed:       http.StatusConflict,
+	store.OwnerEditCodeInvalid:       http.StatusUnprocessableEntity,
+	store.OwnerEditCodeAnswerRefused: http.StatusConflict,
 }
 
 // ownerEditSandboxCmdOnlyReason is handleOwnerEdit's refusal when a remote,
-// non-loopback caller sets check or test: both become shell commands CHECK
-// and the build later run in the ticket's sandbox, the same owner-decided
-// local-only boundary sandboxrun.go's requireLoopback draws around POST
-// /tickets/{id}/sandbox-run. Every other field (given, when, then, text,
-// demo, body) carries no such risk and stays open to any same-origin caller.
-const ownerEditSandboxCmdOnlyReason = "editing a check or test command is allowed from this machine only"
+// non-loopback caller sets check, test, or kind: check and test both become
+// shell commands CHECK and the build later run in the ticket's sandbox, and
+// kind host makes a scenario's check run on this machine outside any sandbox
+// at all (#57, c1 point 4) -- the same owner-decided local-only boundary
+// sandboxrun.go's requireLoopback draws around POST /tickets/{id}/sandbox-run.
+// Every other field (given, when, then, text, demo, body) carries no such
+// risk and stays open to any same-origin caller.
+const ownerEditSandboxCmdOnlyReason = "editing a check, test, or kind is allowed from this machine only"
 
 // handleOwnerEdit is POST /tickets/{id}/edit: the owner edits a sealed
 // scenario, a sealed plan's task, a sealed plan's delivery file task list,
@@ -87,7 +96,11 @@ func (c *console) handleOwnerEdit(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if (body.Check != nil || body.Test != nil) && !isLoopbackRemote(r.RemoteAddr) {
+	// kind host makes a check run outside any sandbox, so kind joins check
+	// and test under the same local-only boundary.
+	setsSandboxedCommand := body.Check != nil || body.Test != nil || body.Kind != nil
+	if setsSandboxedCommand && !isLoopbackRemote(r.RemoteAddr) {
+		slog.Info("console: owner edit refused", "ticket_id", id, "target", body.Target, "ref", body.Ref, "action", body.Action, "code", "loopback_only")
 		http.Error(w, ownerEditSandboxCmdOnlyReason, http.StatusForbidden)
 		return
 	}

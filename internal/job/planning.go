@@ -998,101 +998,111 @@ func checkScenarioShape(scenarios []response.Scenario) []*response.PathError {
 		})
 	}
 	for i, sc := range scenarios {
-		if strings.TrimSpace(sc.Then) == "" {
-			errs = append(errs, &response.PathError{
-				Path: "scenarios/" + indexedScenario(i) + "/then",
-				Msg:  "then must not be empty",
-			})
-		}
-		host := sc.Kind == response.ScenarioKindHost
-		hasCheck := strings.TrimSpace(sc.Check) != ""
-		// A host check runs on the owner's machine at judging, outside any
-		// sandbox, so the /tmp and nested-sandbox refusals below do not
-		// apply to it; it must still have a check to run.
-		if host && !hasCheck {
-			errs = append(errs, &response.PathError{
-				Path: "scenarios/" + indexedScenario(i) + "/check",
-				Msg:  response.HostScenarioNeedsCheck,
-			})
-		}
-		// A host check runs unsandboxed with only the gate's own reading of
-		// its rendered text as approval, so a control or Unicode format
-		// character (a bidi override, a zero-width character) that could
-		// make the rendered command differ from what the shell runs is
-		// refused here too.
-		if host && hasCheck && response.HostCheckUnsafe(sc.Check) {
-			errs = append(errs, &response.PathError{
-				Path: "scenarios/" + indexedScenario(i) + "/check",
-				Msg:  response.HostCheckUnsafeMsg,
-			})
-		}
-		// Zing re-runs every check under the build sandbox, which denies
-		// writes to the host /tmp (bug fix: a live judge round failed every
-		// check that built into /tmp, though the judge, which rewrote the
-		// path, saw them pass).
-		if !host && strings.Contains(sc.Check, "/tmp/") {
-			errs = append(errs, &response.PathError{
-				Path: "scenarios/" + indexedScenario(i) + "/check",
-				Msg:  "check must not write under /tmp, which the sandbox denies; use \"$TMPDIR\" instead",
-			})
-		}
-		// Zing runs every check inside a seatbelt sandbox (the judge's, then
-		// CHECK's build sandbox), and seatbelt cannot start sandbox-exec, so
-		// the sandbox probes skip and exit 0 (#78). A check that greps the
-		// "--- SKIP:" line asserts the skip itself, so it proves the probe
-		// skipped rather than hiding behind the sandbox's own skip.
-		expectsSkip := skipWord.MatchString(sc.Then)
-		assertsSkip := strings.Contains(sc.Check, skipLine)
-		startsSeatbelt := strings.Contains(sc.Check, "sandbox-exec")
-		runsSandboxProbes := strings.Contains(sc.Check, "internal/sandbox")
-		// A then like "the test no longer skips" matches skipWord but
-		// expects the opposite result, so the host-sandbox exemption below
-		// must not fire for it: a grepped "--- SKIP:" would then prove the
-		// wrong thing and reopen #78's hole. expectedSkipCheckMsg below
-		// still fires on this same then (Q3, no_longer_skips_flagged); only
-		// the exemption's affirmative check is narrowed.
-		affirmsSkip := expectsSkip && !negatedSkipWord.MatchString(sc.Then)
-		// sandbox-exec is never exempt: the fix only needs to let an
-		// internal/sandbox probe's own expected skip through, and starting
-		// the seatbelt directly is the exact nested-sandbox invocation #78
-		// refused. An internal/sandbox check is exempt only when the check
-		// proves the skip (assertsSkip) and the scenario affirmatively
-		// expects it (affirmsSkip); a skip the then doesn't name, or
-		// negates, still hides the behavior under test.
-		exemptSandboxProbe := runsSandboxProbes && assertsSkip && affirmsSkip
-		if !host && (startsSeatbelt || (runsSandboxProbes && !exemptSandboxProbe)) {
-			errs = append(errs, &response.PathError{
-				Path: "scenarios/" + indexedScenario(i) + "/check",
-				Msg:  hostSandboxCheckMsg,
-			})
-		}
-		// A bare go test exits 0 whether or not the test skipped, so a then
-		// that expects a skip needs a check that greps the skip line (#80,
-		// #129 s5).
-		if hasCheck && expectsSkip && !assertsSkip {
-			errs = append(errs, &response.PathError{
-				Path: "scenarios/" + indexedScenario(i) + "/check",
-				Msg:  expectedSkipCheckMsg,
-			})
-		}
-		// Two of the three #86 sealed-check failures: a check that greps a
-		// multi-word phrase straight against hard-wrapped prose (the phrase
-		// can span the line break the prose wraps at) without joining the
-		// lines first, and a check with an unquoted glob (the judge
-		// agent's zsh login shell aborts on an unmatched glob, turning a
-		// leading "!" into a false pass).
-		if proseGrepWithoutJoin(sc.Check) {
-			errs = append(errs, &response.PathError{
-				Path: "scenarios/" + indexedScenario(i) + "/check",
-				Msg:  proseGrepCheckMsg,
-			})
-		}
-		if word, ok := unquotedGlob(sc.Check); ok {
-			errs = append(errs, &response.PathError{
-				Path: "scenarios/" + indexedScenario(i) + "/check",
-				Msg:  unquotedGlobCheckMsg(word),
-			})
-		}
+		errs = append(errs, checkScenarioRules(i, sc)...)
+	}
+	return errs
+}
+
+// checkScenarioRules is checkScenarioShape's own per-scenario half (#57):
+// every rule that reads one scenario alone, with no dependency on the rest
+// of the cohort, so judgeAmendment (judging.go) can run the same rules
+// against a judge-proposed amendment before the owner ever sees it.
+func checkScenarioRules(i int, sc response.Scenario) []*response.PathError {
+	var errs []*response.PathError
+	if strings.TrimSpace(sc.Then) == "" {
+		errs = append(errs, &response.PathError{
+			Path: "scenarios/" + indexedScenario(i) + "/then",
+			Msg:  "then must not be empty",
+		})
+	}
+	host := sc.Kind == response.ScenarioKindHost
+	hasCheck := strings.TrimSpace(sc.Check) != ""
+	// A host check runs on the owner's machine at judging, outside any
+	// sandbox, so the /tmp and nested-sandbox refusals below do not
+	// apply to it; it must still have a check to run.
+	if host && !hasCheck {
+		errs = append(errs, &response.PathError{
+			Path: "scenarios/" + indexedScenario(i) + "/check",
+			Msg:  response.HostScenarioNeedsCheck,
+		})
+	}
+	// A host check runs unsandboxed with only the gate's own reading of
+	// its rendered text as approval, so a control or Unicode format
+	// character (a bidi override, a zero-width character) that could
+	// make the rendered command differ from what the shell runs is
+	// refused here too.
+	if host && hasCheck && response.HostCheckUnsafe(sc.Check) {
+		errs = append(errs, &response.PathError{
+			Path: "scenarios/" + indexedScenario(i) + "/check",
+			Msg:  response.HostCheckUnsafeMsg,
+		})
+	}
+	// Zing re-runs every check under the build sandbox, which denies
+	// writes to the host /tmp (bug fix: a live judge round failed every
+	// check that built into /tmp, though the judge, which rewrote the
+	// path, saw them pass).
+	if !host && strings.Contains(sc.Check, "/tmp/") {
+		errs = append(errs, &response.PathError{
+			Path: "scenarios/" + indexedScenario(i) + "/check",
+			Msg:  "check must not write under /tmp, which the sandbox denies; use \"$TMPDIR\" instead",
+		})
+	}
+	// Zing runs every check inside a seatbelt sandbox (the judge's, then
+	// CHECK's build sandbox), and seatbelt cannot start sandbox-exec, so
+	// the sandbox probes skip and exit 0 (#78). A check that greps the
+	// "--- SKIP:" line asserts the skip itself, so it proves the probe
+	// skipped rather than hiding behind the sandbox's own skip.
+	expectsSkip := skipWord.MatchString(sc.Then)
+	assertsSkip := strings.Contains(sc.Check, skipLine)
+	startsSeatbelt := strings.Contains(sc.Check, "sandbox-exec")
+	runsSandboxProbes := strings.Contains(sc.Check, "internal/sandbox")
+	// A then like "the test no longer skips" matches skipWord but
+	// expects the opposite result, so the host-sandbox exemption below
+	// must not fire for it: a grepped "--- SKIP:" would then prove the
+	// wrong thing and reopen #78's hole. expectedSkipCheckMsg below
+	// still fires on this same then (Q3, no_longer_skips_flagged); only
+	// the exemption's affirmative check is narrowed.
+	affirmsSkip := expectsSkip && !negatedSkipWord.MatchString(sc.Then)
+	// sandbox-exec is never exempt: the fix only needs to let an
+	// internal/sandbox probe's own expected skip through, and starting
+	// the seatbelt directly is the exact nested-sandbox invocation #78
+	// refused. An internal/sandbox check is exempt only when the check
+	// proves the skip (assertsSkip) and the scenario affirmatively
+	// expects it (affirmsSkip); a skip the then doesn't name, or
+	// negates, still hides the behavior under test.
+	exemptSandboxProbe := runsSandboxProbes && assertsSkip && affirmsSkip
+	if !host && (startsSeatbelt || (runsSandboxProbes && !exemptSandboxProbe)) {
+		errs = append(errs, &response.PathError{
+			Path: "scenarios/" + indexedScenario(i) + "/check",
+			Msg:  hostSandboxCheckMsg,
+		})
+	}
+	// A bare go test exits 0 whether or not the test skipped, so a then
+	// that expects a skip needs a check that greps the skip line (#80,
+	// #129 s5).
+	if hasCheck && expectsSkip && !assertsSkip {
+		errs = append(errs, &response.PathError{
+			Path: "scenarios/" + indexedScenario(i) + "/check",
+			Msg:  expectedSkipCheckMsg,
+		})
+	}
+	// Two of the three #86 sealed-check failures: a check that greps a
+	// multi-word phrase straight against hard-wrapped prose (the phrase
+	// can span the line break the prose wraps at) without joining the
+	// lines first, and a check with an unquoted glob (the judge
+	// agent's zsh login shell aborts on an unmatched glob, turning a
+	// leading "!" into a false pass).
+	if proseGrepWithoutJoin(sc.Check) {
+		errs = append(errs, &response.PathError{
+			Path: "scenarios/" + indexedScenario(i) + "/check",
+			Msg:  proseGrepCheckMsg,
+		})
+	}
+	if word, ok := unquotedGlob(sc.Check); ok {
+		errs = append(errs, &response.PathError{
+			Path: "scenarios/" + indexedScenario(i) + "/check",
+			Msg:  unquotedGlobCheckMsg(word),
+		})
 	}
 	return errs
 }
@@ -1997,6 +2007,15 @@ func roundChoice(round store.Round) string {
 // "hold" for a merge round (shipping.go's mergeAnswer: anything but
 // escalationChoiceRetry holds), so this is not a new behavior for those
 // kinds, only a name for the one they already had.
+//
+// An amended escalation (qp.Amendment != nil) is the one exception to
+// reading Recommended straight back: escalationOptionsFor recommends "a"
+// (Accept) there only to steer the owner's chip in the UI, and a reply
+// with no option picked must never silently accept a judge-written check
+// (#57, r1f9 triage: "a reply with no picked option must never accept an
+// amendment"). So a reply with no option on an amended escalation always
+// falls back to escalationChoiceBack (Edit it), which starts a fresh judge
+// round with the scenario unchanged rather than applying anything.
 func roundRecommendedOption(round store.Round) string {
 	if len(round.Questions) == 0 {
 		return escalationChoiceBack
@@ -2004,6 +2023,10 @@ func roundRecommendedOption(round store.Round) string {
 	var qp response.QuestionPayload
 	q := round.Questions[len(round.Questions)-1]
 	if err := json.Unmarshal(q.Payload, &qp); err != nil || qp.Kind != response.QuestionKindQuestion {
+		return escalationChoiceBack
+	}
+	if qp.Amendment != nil {
+		slog.Info("amended escalation reply without option, falling back to edit", "ticket_id", q.TicketID, "question_id", q.ID)
 		return escalationChoiceBack
 	}
 	if qp.Recommended == "" {

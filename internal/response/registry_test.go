@@ -72,6 +72,15 @@ func TestLookup_UniversalOutcomes(t *testing.T) {
 			if err != nil {
 				t.Fatalf("Lookup(%s, error) = %v, want no error", job, err)
 			}
+			// The judge's own error outcome carries an optional amendment
+			// (JudgeErrorResponse); every other job keeps the plain
+			// universal ErrorResponse.
+			if job == JobJudge {
+				if _, ok := r.(*JudgeErrorResponse); !ok {
+					t.Errorf("Lookup(judge, error) type = %T, want *JudgeErrorResponse", r)
+				}
+				return
+			}
 			if _, ok := r.(*ErrorResponse); !ok {
 				t.Errorf("Lookup(%s, error) type = %T, want *ErrorResponse", job, r)
 			}

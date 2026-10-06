@@ -43,6 +43,32 @@ type RunError struct {
 	Tried string    `xml:"tried"     json:"tried" doc:"what was tried"`
 }
 
+// JudgeRunError is the judge's own error outcome: RunError plus an optional
+// amendment, allowed only with code cannot_run (checkJudgeAmendment).
+type JudgeRunError struct {
+	RunError
+	Amendment *Amendment `xml:"amendment,omitempty" json:"amendment,omitempty" doc:"cannot_run only: your rewrite of the one sealed scenario whose check is wrong as written"`
+}
+
+// JudgeErrorResponse is the judge's own error response, registered for the
+// pair job judge and outcome error. Every other job keeps ErrorResponse.
+type JudgeErrorResponse struct {
+	Head
+	Error JudgeRunError `xml:"error" json:"error"`
+}
+
+// Amendment is the judge's proposed rewrite of one sealed scenario whose
+// check is wrong as written (JudgeRunError.Amendment).
+type Amendment struct {
+	Scenario string       `xml:"scenario,attr" json:"scenario" jsonschema:"pattern=^s[0-9]+$"`
+	Kind     ScenarioKind `xml:"kind,attr,omitempty" json:"kind,omitempty" doc:"omit to keep the scenario's current kind"`
+	Given    string       `xml:"given"  json:"given"  jsonschema:"minLength=1" doc:"the starting state"`
+	When     string       `xml:"when"   json:"when"   jsonschema:"minLength=1" doc:"the action"`
+	Then     string       `xml:"then"   json:"then"   jsonschema:"minLength=1" doc:"what a stranger would observe, from outside the code"`
+	Check    string       `xml:"check"  json:"check"  jsonschema:"minLength=1" doc:"one command whose exit code decides it"`
+	Reason   string       `xml:"reason" json:"reason" jsonschema:"minLength=1" doc:"why the sealed check is wrong as written"`
+}
+
 // ---- classify ------------------------------------------------------------
 
 type ClassifyResponse struct { // outcome: bug | feature
@@ -367,6 +393,7 @@ type QuestionPayload struct {
 	Recommended string        `json:"recommended" jsonschema:"minLength=1"`
 	Options     []Option      `json:"options"     jsonschema:"maxItems=4"`
 	Items       []Item        `json:"items,omitempty" doc:"perimeter and review: one per file or finding"`
+	Amendment   *Amendment    `json:"amendment,omitempty" doc:"copied by escalateTx from the escalation payload; the console reads it to prefill the edit box"`
 }
 
 type Item struct {
@@ -389,6 +416,7 @@ type EscalationPayload struct {
 	SessionID *int64     `json:"session_id,omitempty" doc:"the session the escalated run belongs to, when a run or session caused it"`
 	Origin    string     `json:"origin"  jsonschema:"enum=classify,enum=planning_first,enum=planning_resume,enum=planreview,enum=gate_approve,enum=seal,enum=cap_resumes,enum=cap_loops,enum=cap_budget,enum=split,enum=nothing_to_do_claims,enum=build,enum=perimeter,enum=fix,enum=review,enum=judge,enum=shipping,enum=respond" doc:"the step that produced this escalation (design section 6.7)"`
 	Grant     *FileGrant `json:"grant,omitempty" doc:"set only by attachFileGrant; when set, escalateTx adds option d"`
+	Amendment *Amendment `json:"amendment,omitempty" doc:"set only by judgeErrorCommit for a usable amendment, with Kind already resolved; stored escalations without it stay valid"`
 }
 
 // FileGrant is one task number plus the delivery file paths another task's

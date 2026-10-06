@@ -5,11 +5,13 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/http/httptest"
 	"strconv"
 	"strings"
 	"testing"
 
 	"zing/internal/bus"
+	"zing/internal/response"
 	"zing/internal/store"
 )
 
@@ -552,6 +554,77 @@ func TestSend_RejectsOversizedOrInvalidQuestionList(t *testing.T) {
 	_ = okResp.Body.Close()
 	if okResp.StatusCode != http.StatusOK {
 		t.Errorf("50 ids including q1: status = %d, want 200", okResp.StatusCode)
+	}
+}
+
+// TestSend_RefusesAmendmentAcceptFromNonLoopback proves POST /send holds
+// Accept on an amended escalation to the same loopback-only boundary
+// handleOwnerEdit already holds a check, test, or kind edit to (#57, r1f9
+// triage): a non-loopback send of a drafted "a" (Accept) is refused 409 with
+// SendBatchOnly's own reason, the question stays open, and the scenario is
+// unchanged. The same send, from loopback, succeeds and answers "a".
+func TestSend_RefusesAmendmentAcceptFromNonLoopback(t *testing.T) {
+	t.Parallel()
+	s := newConsoleTestStore(t)
+	ticketID := seedTicket(t, s, "fake#1", "Add a hello endpoint")
+	seedSealedScenarioArtifact(t, s, ticketID, nil, response.Scenario{
+		ID: "s1", Kind: response.ScenarioKindBehavior, Check: testOldCheck, Given: "g", When: "w", Then: "t",
+	})
+	questionID := seedAmendedQuestion(t, s, ticketID, "s1")
+
+	srv := newTestServer(t, s, bus.New(), nil, newTestLogHandler(t))
+
+	draftBody := fmt.Sprintf(`{"ticket":%d,"question":%d,"option":"a"}`, ticketID, questionID)
+	draftResp := doRequest(t, mutationRequest(t, srv, "/draft", draftBody))
+	_ = draftResp.Body.Close()
+	if draftResp.StatusCode != http.StatusNoContent {
+		t.Fatalf("POST /draft status = %d, want 204", draftResp.StatusCode)
+	}
+
+	authority := strings.TrimPrefix(srv.URL, "http://")
+	sendBody := fmt.Sprintf(`{"ticket":%d,"questions":[%d]}`, ticketID, questionID)
+	req, err := http.NewRequestWithContext(t.Context(), http.MethodPost, srv.URL+"/send", strings.NewReader(sendBody))
+	if err != nil {
+		t.Fatalf("build POST /send request: %v", err)
+	}
+	req.Host = authority
+	req.RemoteAddr = testNonLoopbackRemoteAddr
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Datastar-Request", "true")
+	req.Header.Set("Origin", srv.URL)
+
+	rec := httptest.NewRecorder()
+	srv.Config.Handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("non-loopback send status = %d, want 409; body = %q", rec.Code, rec.Body.String())
+	}
+	wantReason := "accepting a judge amendment is allowed from this machine only"
+	if got := strings.TrimSpace(rec.Body.String()); got != wantReason {
+		t.Errorf("non-loopback send body = %q, want %q", got, wantReason)
+	}
+
+	got, err := s.GetMessage(t.Context(), questionID)
+	if err != nil {
+		t.Fatalf("GetMessage: %v", err)
+	}
+	if got.State == nil || *got.State != testQuestionStateOpen {
+		t.Errorf("question state after non-loopback send = %v, want unchanged open", got.State)
+	}
+	if got := readScenarioByID(t, s, ticketID, "s1").Check; got != testOldCheck {
+		t.Errorf("s1 check after non-loopback send = %q, want unchanged %q", got, testOldCheck)
+	}
+
+	loopbackResp := doRequest(t, mutationRequest(t, srv, "/send", sendBody))
+	_ = loopbackResp.Body.Close()
+	if loopbackResp.StatusCode != http.StatusOK {
+		t.Fatalf("loopback send status = %d, want 200", loopbackResp.StatusCode)
+	}
+	got, err = s.GetMessage(t.Context(), questionID)
+	if err != nil {
+		t.Fatalf("GetMessage: %v", err)
+	}
+	if got.State == nil || *got.State != testQuestionStateAnswered {
+		t.Errorf("question state after loopback send = %v, want answered", got.State)
 	}
 }
 
