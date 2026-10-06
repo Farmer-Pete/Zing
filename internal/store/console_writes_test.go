@@ -318,8 +318,20 @@ func TestSendBatch_PerimeterDropSendsReject(t *testing.T) {
 		t.Fatalf("SaveDraft: %v", err)
 	}
 
-	if _, err := s.SendBatch(t.Context(), ticketID); err != nil {
+	batchRes, err := s.SendBatch(t.Context(), ticketID)
+	if err != nil {
 		t.Fatalf("SendBatch: %v", err)
+	}
+	if batchRes.Empty || batchRes.Sent != 1 {
+		t.Errorf("SendBatch = %+v, want Sent=1 Empty=false", batchRes)
+	}
+
+	m, err := s.GetMessage(t.Context(), res.MessageID)
+	if err != nil {
+		t.Fatalf("GetMessage(%d): %v", res.MessageID, err)
+	}
+	if m.State == nil || *m.State != answerStateSent {
+		t.Errorf("message state = %v, want %q", m.State, answerStateSent)
 	}
 
 	got := draftPayloadOf(t, s, res.MessageID)
@@ -349,6 +361,8 @@ func TestItemDecisionForKind(t *testing.T) {
 		{response.QuestionKindReview, response.DecisionReject, "", "a review item takes accept, drop, or discuss"},
 		{response.QuestionKindGate, response.DecisionAccept, response.DecisionAccept, ""},
 		{response.QuestionKindGate, response.DecisionDiscuss, response.DecisionDiscuss, ""},
+		{response.QuestionKindGate, response.DecisionReject, response.DecisionReject, ""},
+		{response.QuestionKindGate, response.DecisionDrop, response.DecisionDrop, ""},
 	}
 	for _, tc := range tests {
 		t.Run(string(tc.kind)+"/"+string(tc.decision), func(t *testing.T) {

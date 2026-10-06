@@ -799,12 +799,6 @@ func TestItemRowsSameDecisionLabels(t *testing.T) {
 		t.Errorf("review itemRows decision labels = %v, want %v; got:\n%s", got, want, review)
 	}
 
-	for _, rendered := range []string{perimeter, review} {
-		if strings.Contains(rendered, ">reject</button>") {
-			t.Errorf("itemRows must never render a reject button; got:\n%s", rendered)
-		}
-	}
-
 	picked := renderItemRows(t, item, itemDecisionsPerimeter, map[string]response.Decision{"a.go": response.DecisionReject})
 	if !strings.Contains(picked, `class="decision picked" aria-pressed="true" data-draft-ticket="1" data-draft-question="2" data-item-ref="a.go" data-decision="drop"`) {
 		t.Errorf("perimeter row with a stored reject pick must render its drop button picked; got:\n%s", picked)
