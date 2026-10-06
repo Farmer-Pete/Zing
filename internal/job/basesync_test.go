@@ -18,6 +18,7 @@ import (
 	"zing/internal/gitfixture"
 	"zing/internal/orchestrator"
 	"zing/internal/runtime"
+	"zing/internal/sandbox"
 	"zing/internal/store"
 )
 
@@ -79,13 +80,14 @@ func basesyncFindMessage(c store.HandlerCommit, prefix string) (string, bool) {
 	return "", false
 }
 
-// basesyncReviewTick runs one reviewingHandler.Run tick, fails the test if
-// it escalates, applies the commit, and returns the refreshed ticket plus
-// the commit itself (mergeRunTick's own shape, merge_test.go, for
-// reviewing's handler instead of shipping's).
-func basesyncReviewTick(t *testing.T, s *store.Store, deps Deps, ticket store.Ticket, label string) (store.Ticket, store.HandlerCommit) {
+// basesyncTick runs one tick of h.Run, fails the test if it escalates,
+// applies the commit, and returns the refreshed ticket plus the commit
+// itself. Shared by the review and judge point tests below (h is
+// reviewingHandler{} or judgeHandler{}); mergeRunTick (merge_test.go) is
+// the same shape again, for shipping's handler.
+func basesyncTick(t *testing.T, s *store.Store, deps Deps, ticket store.Ticket, h Handler, label string) (store.Ticket, store.HandlerCommit) {
 	t.Helper()
-	commit, err := (reviewingHandler{}).Run(t.Context(), ticket, deps)
+	commit, err := h.Run(t.Context(), ticket, deps)
 	if err != nil {
 		t.Fatalf("%s: %v", label, err)
 	}
@@ -168,7 +170,7 @@ func TestBaseSyncBeforeReviewMergesOverlap(t *testing.T) {
 	var last store.HandlerCommit
 	for i := 0; i < 4 && !landed; i++ {
 		deps = pbClaim(t, s, rt, ticket.ID)
-		ticket, last = basesyncReviewTick(t, s, deps, ticket, "merge tick")
+		ticket, last = basesyncTick(t, s, deps, ticket, reviewingHandler{}, "merge tick")
 		landed = shipHasMergeLanded(last)
 	}
 	if !landed {
@@ -230,23 +232,6 @@ func TestBaseSyncBeforeReviewMergesOverlap(t *testing.T) {
 	}
 }
 
-// basesyncJudgeTick runs one judgeHandler.Run tick, fails the test if it
-// escalates, applies the commit, and returns the refreshed ticket plus the
-// commit itself (basesyncReviewTick's own shape, for judging's handler
-// instead of reviewing's).
-func basesyncJudgeTick(t *testing.T, s *store.Store, deps Deps, ticket store.Ticket, label string) (store.Ticket, store.HandlerCommit) {
-	t.Helper()
-	commit, err := (judgeHandler{}).Run(t.Context(), ticket, deps)
-	if err != nil {
-		t.Fatalf("%s: %v", label, err)
-	}
-	if commit.Escalation != nil {
-		t.Fatalf("%s escalated: %+v", label, commit.Escalation.Payload)
-	}
-	pbApply(t, s, ticket, commit)
-	return pbGetTicket(t, s, ticket.ID), commit
-}
-
 // TestBaseSyncBeforeJudgeRoundMerges proves the judge point (overview
 // design, judgeStartOrSync): after the ticket has entered judging, main
 // changes hello.txt with exactly the content the ticket branch already
@@ -284,6 +269,10 @@ func TestBaseSyncBeforeJudgeRoundMerges(t *testing.T) {
 	if _, found := basesyncFindMessage(commit1, "judge round 1 started"); found {
 		t.Errorf("tick 1 commit.Messages = %+v, want no started marker (the merge runs first)", commit1.Messages)
 	}
+	wantNoticePrefix := "Merging " + pbFixtureDefaultBranch + " at " + baseSHA[:7] + " before judging:"
+	if _, found := basesyncFindMessage(commit1, wantNoticePrefix); !found {
+		t.Errorf("tick 1 commit.Messages = %+v, want a message starting %q", commit1.Messages, wantNoticePrefix)
+	}
 	reqBody, found := basesyncFindMessage(commit1, "base merge requested after run ")
 	if !found {
 		t.Fatalf("tick 1 commit.Messages = %+v, want a base merge request", commit1.Messages)
@@ -306,7 +295,7 @@ func TestBaseSyncBeforeJudgeRoundMerges(t *testing.T) {
 	var last store.HandlerCommit
 	for i := 0; i < 4 && !landed; i++ {
 		deps = pbClaim(t, s, rt, ticket.ID)
-		ticket, last = basesyncJudgeTick(t, s, deps, ticket, "merge tick")
+		ticket, last = basesyncTick(t, s, deps, ticket, judgeHandler{}, "merge tick")
 		landed = shipHasMergeLanded(last)
 	}
 	if !landed {
@@ -334,6 +323,107 @@ func TestBaseSyncBeforeJudgeRoundMerges(t *testing.T) {
 		t.Fatalf("tick after landed escalated: %+v", commit2.Escalation.Payload)
 	}
 	wantPrefix := "judge round 1 started sha " + mergedSHA
+	if _, found := basesyncFindMessage(commit2, wantPrefix); !found {
+		t.Fatalf("tick after landed commit.Messages = %+v, want a message starting %q", commit2.Messages, wantPrefix)
+	}
+}
+
+// TestBaseSyncBeforeJudgeRoundAfterFailedRound proves the judge point's
+// other call site: judging.go's failed-round branch, which restarts round
+// m+1 after round m's own "failure" fix lands. Round 1 fails, its fix
+// lands (moving HEAD), main then changes hello.txt (with the content the
+// branch's own fix already left there, so the merge is clean) while an
+// unrelated other.txt also moves. The branch that would otherwise write
+// "judge round 2 started" opens a base merge request with point judge
+// first, and only once it lands does round 2 actually start, at the
+// merged sha.
+func TestBaseSyncBeforeJudgeRoundAfterFailedRound(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow end-to-end flow; runs in the full suite")
+	}
+	t.Parallel()
+	s, ticket := judgeTicketReady(t)
+	basesyncAddOrigin(t, s, ticket)
+
+	scripts := judgeScriptsFS(judgeOkBothScript)
+	scripts["build/fix/1.xml"] = &fstest.MapFile{Data: []byte(judgeFixBuildScript)}
+	rt := runtime.NewFake(scripts)
+
+	checks := &judgeScriptedCheckCommands{real: NewCommandRunner(sandbox.Off(), false), steps: []judgeCheckStep{{exit: 1}}}
+
+	ticket = judgeFailRoundOne(t, s, ticket, rt, checks) // START, RUN, CHECK (exit 1), EVALUATE round 1
+	driveJudgeFixToLanding(t, s, ticket.ID, rt, checks, judgeFixTestCmd)
+	ticket = pbGetTicket(t, s, ticket.ID)
+	if ticket.State != stateJudging {
+		t.Fatalf("after the fix landed: ticket state = %q, want judging", ticket.State)
+	}
+
+	orch, wt := basesyncTicketWorktree(t, s, ticket)
+	helloContent, err := gitfixture.Git(t.Context(), wt.Dir(), "show", "HEAD:hello.txt")
+	if err != nil {
+		t.Fatalf("git show HEAD:hello.txt: %v", err)
+	}
+	mergeCommitOnMain(t, s, ticket, "hello.txt", helloContent)
+	baseSHA := mergeCommitOnMain(t, s, ticket, "other.txt", []byte("main only\n"))
+
+	// From here on the ticket's own default test command runs (not
+	// judgeFixTestCmd, which appends to hello.txt on every call and would
+	// dirty the tree during the merge's own CHECK with a change outside
+	// the merge).
+	deps := pbClaim(t, s, rt, ticket.ID)
+	commit1, err := (judgeHandler{}).Run(t.Context(), ticket, deps) // round 1 failed branch: round 2 start attempt
+	if err != nil {
+		t.Fatalf("tick 1: %v", err)
+	}
+	if commit1.Escalation != nil {
+		t.Fatalf("tick 1 escalated: %+v", commit1.Escalation.Payload)
+	}
+	if _, found := basesyncFindMessage(commit1, "judge round 2 started"); found {
+		t.Errorf("tick 1 commit.Messages = %+v, want no started marker (the merge runs first)", commit1.Messages)
+	}
+	reqBody, found := basesyncFindMessage(commit1, "base merge requested after run ")
+	if !found {
+		t.Fatalf("tick 1 commit.Messages = %+v, want a base merge request", commit1.Messages)
+	}
+	req, err := parseBaseMergeRequest(store.MessageRow{ID: 1, Body: reqBody})
+	if err != nil {
+		t.Fatalf("parseBaseMergeRequest: %v", err)
+	}
+	if req.Point != syncPointJudge {
+		t.Errorf("req.Point = %q, want %q", req.Point, syncPointJudge)
+	}
+	if req.BaseSHA != baseSHA {
+		t.Errorf("req.BaseSHA = %s, want %s", req.BaseSHA, baseSHA)
+	}
+
+	pbApply(t, s, ticket, commit1)
+	ticket = pbGetTicket(t, s, ticket.ID)
+
+	landed := false
+	var last store.HandlerCommit
+	for i := 0; i < 4 && !landed; i++ {
+		deps = pbClaim(t, s, rt, ticket.ID)
+		ticket, last = basesyncTick(t, s, deps, ticket, judgeHandler{}, "merge tick")
+		landed = shipHasMergeLanded(last)
+	}
+	if !landed {
+		t.Fatal("base merge did not land within 4 ticks")
+	}
+
+	mergedSHA, err := orch.HeadSHA(t.Context(), wt)
+	if err != nil {
+		t.Fatalf("HeadSHA: %v", err)
+	}
+
+	deps = pbClaim(t, s, rt, ticket.ID)
+	commit2, err := (judgeHandler{}).Run(t.Context(), ticket, deps)
+	if err != nil {
+		t.Fatalf("tick after landed: %v", err)
+	}
+	if commit2.Escalation != nil {
+		t.Fatalf("tick after landed escalated: %+v", commit2.Escalation.Payload)
+	}
+	wantPrefix := "judge round 2 started sha " + mergedSHA
 	if _, found := basesyncFindMessage(commit2, wantPrefix); !found {
 		t.Fatalf("tick after landed commit.Messages = %+v, want a message starting %q", commit2.Messages, wantPrefix)
 	}
@@ -492,6 +582,16 @@ func TestBaseSyncOnCIFailureMergesBeforeFix(t *testing.T) {
 	}
 	if req.BaseSHA != baseSHA {
 		t.Errorf("req.BaseSHA = %s, want %s", req.BaseSHA, baseSHA)
+	}
+	wantNotice := syncNotice(req, nil)
+	foundNotice := false
+	for _, m := range commit1.Messages {
+		if m.Body == wantNotice {
+			foundNotice = true
+		}
+	}
+	if !foundNotice {
+		t.Errorf("tick 1 commit.Messages = %+v, want a message equal to %q", commit1.Messages, wantNotice)
 	}
 
 	pbApply(t, s, ticket, commit1)

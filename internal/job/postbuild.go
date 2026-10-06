@@ -50,7 +50,7 @@ func postBuildPrelude(ctx context.Context, t store.Ticket, d Deps, origin respon
 	// basesync.go's review and judge points; every post-build state can
 	// carry one now, so this prelude drives it for all three rather than
 	// leaving it to shipHandler.Run alone.
-	mc, merging, mergeErr := shipHandler{}.driveOpenMerge(ctx, t, d)
+	mc, merging, mergeErr := driveOpenMerge(ctx, t, d)
 	if merging || mergeErr != nil {
 		return mc, true, mergeErr
 	}

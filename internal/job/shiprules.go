@@ -791,17 +791,7 @@ func requestRowFlags(row store.MessageRow) (point syncPoint, retry bool) {
 // baseSync point opened (point line set) is counted apart, by
 // pointMergeCount, not here.
 func pollMergeCount(rows []store.MessageRow) int {
-	count := 0
-	for i := range rows {
-		if !isBaseMergeRequestRow(rows[i]) {
-			continue
-		}
-		point, retry := requestRowFlags(rows[i])
-		if point == "" && !retry {
-			count++
-		}
-	}
-	return count
+	return pointMergeCount(rows, "")
 }
 
 // pointMergeCount is the number of request rows baseSync opened at point: a
