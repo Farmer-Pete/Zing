@@ -250,10 +250,10 @@ func TestLogLongTurns_TranscriptReadFailed(t *testing.T) {
 // errAfterReader that yields one complete 300s turn before its error
 // (r3f13: without this, a logLongTurns that returned right after logging
 // the read error would also pass TestLogLongTurns_TranscriptReadFailed
-// above, since that case keeps zero turns).
+// above, since that case keeps zero turns). Not parallel: it calls
+// slog.SetDefault to capture the line, which races with any other test
+// logging through the global default at the same time.
 func TestLogLongTurns_LogsKeptTurnsAfterReadFailure(t *testing.T) {
-	t.Parallel()
-
 	base := time.Date(2026, 10, 5, 10, 0, 0, 0, time.UTC)
 	body := turnLine(base, "", 0) + "\n" +
 		turnLine(base.Add(300*time.Second), "msgZ", 11) + "\n"
