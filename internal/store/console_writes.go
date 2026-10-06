@@ -635,7 +635,9 @@ func (s *Store) upsertItemDraftTx(ctx context.Context, tx *sql.Tx, ticketID, que
 			return DraftResult{}, fmt.Errorf("save draft: decode existing item answer: %w", decodeErr)
 		}
 	}
-	same := found && payload.Items != nil && payload.Items[item.Ref] == item.Decision && payload.Notes[item.Ref] == item.Note
+	sameDecision := payload.Items[item.Ref] == item.Decision
+	sameNote := payload.Notes[item.Ref] == item.Note
+	same := found && sameDecision && sameNote
 	if payload.Items == nil {
 		payload.Items = make(map[string]response.Decision, 1)
 	}

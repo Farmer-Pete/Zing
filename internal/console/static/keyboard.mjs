@@ -629,12 +629,25 @@ export function sendResultWithUnsent(text, unsent, stale = 0) {
  * @returns {{ids: number[], keys: string[], confirm: boolean}}
  */
 export function sendTargets(questions, focusedID) {
-	const targets = (questions ?? []).filter((q) => q.hasDraft && !q.conflicted);
+	const targets = (questions ?? []).filter(isSendTarget);
 	const ids = targets.map((q) => q.id);
 	const keys = targets.map((q) => q.key);
 	const onlyFocused = ids.length === 1 && ids[0] === focusedID;
 	const confirm = ids.length > 0 && !onlyFocused;
 	return { ids, keys, confirm };
+}
+
+/**
+ * isSendTarget is the one hasDraft-and-not-conflicted filter sendTargets and
+ * reviewNoteTargets both apply to decide which of collectSendQuestions'
+ * descriptors a send actually covers, named once so the two cannot drift
+ * apart (review fix, quality).
+ *
+ * @param {{hasDraft: boolean, conflicted: boolean}} q
+ * @returns {boolean}
+ */
+export function isSendTarget(q) {
+	return q.hasDraft && !q.conflicted;
 }
 
 /**
@@ -675,7 +688,7 @@ export const reviewNoteWarningText = 'This sends your note to the lens and keeps
  * @returns {boolean}
  */
 export function reviewNoteTargets(questions) {
-	return (questions ?? []).some((q) => q.hasDraft && !q.conflicted && q.reviewNote);
+	return (questions ?? []).some((q) => isSendTarget(q) && q.reviewNote);
 }
 
 /**
@@ -964,34 +977,6 @@ export function buildItemDraftBody(dataset, note) {
  * the box, unsaved, until a decision exists to save it with.
  */
 export const pickBeforeNoteText = 'Pick a decision to save this note';
-
-/**
- * itemNoteBody builds POST /draft's JSON body for a review item's note
- * box (thread.templ's itemRow note input, task 3; owner decision Q2):
- * the box's own data-note-ticket, data-note-question, and data-item-ref,
- * plus decision -- the row's already-picked decision, read by the caller
- * off its .decision.picked element, not off the note box itself, which
- * carries no data-decision. Returns null when decision is empty or
- * missing, so a note typed before any pick exists saves nothing (Q2: "the
- * server refuses a note with no decision" -- this is the client-side half
- * of that rule, which also lets console.js show pickBeforeNoteText instead
- * of posting a request doomed to be refused).
- *
- * @param {{noteTicket?: string, noteQuestion?: string, itemRef?: string}} dataset
- * @param {string} [decision]
- * @param {string} [note]
- * @returns {{ticket: number, question: number, item: {ref: string, decision: string, note: string}} | null}
- */
-export function itemNoteBody(dataset, decision, note) {
-	if (!decision) {
-		return null;
-	}
-	return {
-		ticket: Number(dataset?.noteTicket),
-		question: Number(dataset?.noteQuestion),
-		item: { ref: dataset?.itemRef ?? '', decision, note: note ?? '' },
-	};
-}
 
 /**
  * collectPatchWork is the one call the MutationObserver callback makes each

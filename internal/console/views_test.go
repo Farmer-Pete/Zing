@@ -1083,12 +1083,52 @@ func TestThreadRendersReviewItemNote(t *testing.T) {
 	if !strings.Contains(reviewGroup, `data-kind="review"`) {
 		t.Errorf("review question group missing data-kind=\"review\"; got:\n%s", reviewGroup)
 	}
-	if !strings.Contains(reviewGroup, `class="item-note" data-note-ticket="`+strconv.FormatInt(ticketID, 10)+
-		`" data-note-question="`+strconv.FormatInt(reviewQID, 10)+`" data-item-ref="a.go" value="out of scope"`) {
+	if !strings.Contains(reviewGroup, `class="item-note" value="out of scope"`) {
 		t.Errorf("review question missing a.go's drafted note rendered back; got:\n%s", reviewGroup)
 	}
 	if strings.Contains(perimeterGroup, "item-note") {
 		t.Errorf("perimeter question renders an item-note control; got:\n%s", perimeterGroup)
+	}
+}
+
+// TestThreadRendersReviewItemNote_Locked proves the locked path
+// TestThreadRendersReviewItemNote above does not reach (review fix, tests):
+// once a review question is fully decided and no longer Interactive, its
+// dropped finding's note renders read-only as span.item-note-text, with no
+// item-note input at all.
+func TestThreadRendersReviewItemNote_Locked(t *testing.T) {
+	t.Parallel()
+	s := newConsoleTestStore(t)
+	ticketID := seedTicket(t, s, "t#12", "Thread review item note locked ticket")
+	reviewQID := seedOpenReviewQuestion(t, s, ticketID)
+
+	if _, err := s.SaveDraft(t.Context(), store.DraftInput{
+		TicketID: ticketID, QuestionID: &reviewQID,
+		Item: &store.ItemDecision{Ref: testItemRefAGo, Decision: response.DecisionDrop, Note: "out of scope"},
+	}); err != nil {
+		t.Fatalf("SaveDraft(a.go drop with note): %v", err)
+	}
+	if _, err := s.SaveDraft(t.Context(), store.DraftInput{
+		TicketID: ticketID, QuestionID: &reviewQID,
+		Item: &store.ItemDecision{Ref: "b.go", Decision: response.DecisionAccept},
+	}); err != nil {
+		t.Fatalf("SaveDraft(b.go accept): %v", err)
+	}
+	if _, err := s.SendBatch(t.Context(), ticketID); err != nil {
+		t.Fatalf("SendBatch: %v", err)
+	}
+
+	srv := newTestServer(t, s, bus.New(), nil, newTestLogHandler(t))
+	main := mainFrame(t, srv.URL, "thread", ticketID, 0)
+
+	groups := splitQuestionGroups(t, main)
+	reviewGroup := findGroup(t, groups, "Review these findings")
+
+	if strings.Contains(reviewGroup, "item-note\" value=") {
+		t.Errorf("locked review question still renders an editable item-note input; got:\n%s", reviewGroup)
+	}
+	if !strings.Contains(reviewGroup, `<span class="item-note-text">out of scope</span>`) {
+		t.Errorf("locked review question missing a.go's note as read-only text; got:\n%s", reviewGroup)
 	}
 }
 

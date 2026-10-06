@@ -1447,6 +1447,34 @@ func TestSaveDraft_ItemNoteReplacesAndClears(t *testing.T) {
 	if ap.Notes != nil {
 		t.Errorf("Notes = %v, want nil (cleared)", ap.Notes)
 	}
+
+	// A note-only edit (same decision, different note) must still report
+	// Replaced true: this is the save installItemNoteSave's own 'change'
+	// listener makes most often, keeping today's pick and only touching the
+	// note (review fix, tests).
+	fourth, err := s.SaveDraft(t.Context(), DraftInput{
+		TicketID: ticketID, QuestionID: &qID,
+		Item: &ItemDecision{Ref: testRefAGo, Decision: response.DecisionAccept, Note: "fourth"},
+	})
+	if err != nil {
+		t.Fatalf("SaveDraft(fourth): %v", err)
+	}
+	if !fourth.Replaced {
+		t.Error("fourth.Replaced = false, want true (note changed, decision unchanged)")
+	}
+
+	// Saving the exact same decision and note again changes nothing, so
+	// Replaced must be false.
+	fifth, err := s.SaveDraft(t.Context(), DraftInput{
+		TicketID: ticketID, QuestionID: &qID,
+		Item: &ItemDecision{Ref: testRefAGo, Decision: response.DecisionAccept, Note: "fourth"},
+	})
+	if err != nil {
+		t.Fatalf("SaveDraft(fifth): %v", err)
+	}
+	if fifth.Replaced {
+		t.Error("fifth.Replaced = true, want false (decision and note both unchanged)")
+	}
 }
 
 // TestSendBatch_RevisedAnswerStaysAnsweredAndDoesNotClearAnEarlyWait proves

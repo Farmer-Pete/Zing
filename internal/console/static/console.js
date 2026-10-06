@@ -25,7 +25,6 @@ import {
 	stepComposerIndex,
 	buildChipDraftBody,
 	buildItemDraftBody,
-	itemNoteBody,
 	pickBeforeNoteText,
 	unsavedReplyBody,
 	unsavedReplyBodies,
@@ -542,6 +541,40 @@ async function postDraftRequest(el, ticket, question, text) {
 // direct mouse click and pickChip's chip.click() (the 1..9 key path) both
 // dispatch the same bubbling click event, so this one listener covers both
 // activation paths.
+// pickedDecisionFor returns noteEl's row's picked decision button, or null
+// when the row has none yet (review fix, quality): installItemNoteSave and
+// postSendBatchLocked's note flush both need the row's already-picked
+// decision to build a /draft body for its note, and this is the one lookup
+// both now share rather than each writing it out separately.
+function pickedDecisionFor(noteEl) {
+	return noteEl.closest('.item-row')?.querySelector('.item-decisions .decision.picked') ?? null;
+}
+
+// itemRowDraftChains serializes /draft posts for the same review item row
+// (review fix, correctness): a note edit's 'change' and a decision click on
+// the same row can land in the same tick -- blurring the note box to click a
+// decision fires 'change' just before the click's own listener runs -- and
+// two concurrent POST /draft requests for the same ref could reach the
+// server out of order, letting the later response's decision lose to the
+// earlier one. installChipActivation's decision branch and
+// installItemNoteSave below both post through postItemDraft, which chains
+// onto the same promise here, keyed by "ticket:question:ref", so a row's
+// posts always land in the order they were made.
+const itemRowDraftChains = new Map();
+
+function postItemDraft(dataset, body) {
+	const key = `${dataset.draftTicket}:${dataset.draftQuestion}:${dataset.itemRef}`;
+	const prior = itemRowDraftChains.get(key) ?? Promise.resolve();
+	const result = prior.then(() => postJSON('/draft', body));
+	itemRowDraftChains.set(key, result);
+	result.finally(() => {
+		if (itemRowDraftChains.get(key) === result) {
+			itemRowDraftChains.delete(key);
+		}
+	});
+	return result;
+}
+
 function installChipActivation() {
 	document.addEventListener('click', (event) => {
 		const chip = event.target.closest?.('.chip');
@@ -553,11 +586,22 @@ function installChipActivation() {
 		if (decision) {
 			// The row's own note box (review items only, task 3's itemRow)
 			// rides this same pick: a note typed before the owner clicks a
-			// decision has nowhere else to save (itemNoteBody requires a
-			// decision), so it goes out with the pick instead of waiting
-			// for a 'change' on the note box that may never come.
-			const noteEl = decision.closest('.item-row')?.querySelector('.item-note');
-			postJSON('/draft', buildItemDraftBody(decision.dataset, noteEl?.value));
+			// decision has nowhere else to save (buildItemDraftBody only ever
+			// carries a note via this click or installItemNoteSave's own
+			// 'change', both of which need a picked decision first), so it
+			// goes out with the pick instead of waiting for a 'change' that
+			// may never come. The row's hint is cleared here too (review fix,
+			// correctness): a note typed before any pick left
+			// pickBeforeNoteText showing in installItemNoteSave's hint, and
+			// this click -- which gives the row its first decision -- is what
+			// makes that hint stale.
+			const row = decision.closest('.item-row');
+			const noteEl = row?.querySelector('.item-note');
+			const hint = row?.querySelector('.item-note-hint');
+			if (hint) {
+				hint.textContent = '';
+			}
+			postItemDraft(decision.dataset, buildItemDraftBody(decision.dataset, noteEl?.value));
 		}
 	});
 }
@@ -566,7 +610,10 @@ function installChipActivation() {
 // item's note box (thread.templ's itemRow, task 3; owner decision Q2): a
 // decision must already be picked on the same row for the note to save.
 // Without one, it shows pickBeforeNoteText in the row's .item-note-hint
-// instead of posting a request the server would refuse.
+// instead of posting a request the server would refuse. The note box
+// carries no data-draft-* of its own (review fix, simplification): the
+// row's already-picked decision button is where buildItemDraftBody reads
+// ticket, question, and ref from, the same as installChipActivation above.
 function installItemNoteSave() {
 	document.addEventListener('change', (event) => {
 		const noteEl = event.target.closest?.('.item-note');
@@ -575,7 +622,7 @@ function installItemNoteSave() {
 		}
 		const row = noteEl.closest('.item-row');
 		const hint = row?.querySelector('.item-note-hint');
-		const picked = row?.querySelector('.item-decisions .decision.picked');
+		const picked = pickedDecisionFor(noteEl);
 		if (!picked) {
 			if (hint) {
 				hint.textContent = pickBeforeNoteText;
@@ -585,10 +632,7 @@ function installItemNoteSave() {
 		if (hint) {
 			hint.textContent = '';
 		}
-		const body = itemNoteBody(noteEl.dataset, picked.dataset.decision, noteEl.value);
-		if (body) {
-			postJSON('/draft', body);
-		}
+		postItemDraft(picked.dataset, buildItemDraftBody(picked.dataset, noteEl.value));
 	});
 }
 
@@ -1109,16 +1153,26 @@ async function postSendBatchLocked(ticket, questions) {
 	// and left unblurred would otherwise still be sitting only in the DOM
 	// when /send runs below. Flushing every such box's note here, ahead of
 	// the reply saves, means /send always sees the note the box currently
-	// shows. Only a row with a picked decision has anything to save
-	// (itemNoteBody returns null otherwise); an unpicked row's note stays
-	// in the box, same as it already did before this send.
+	// shows. Only a row with a picked decision has anything to save, and
+	// only a note that actually changed from what the page rendered (el.value
+	// differs from el.defaultValue), and only for a question actually in
+	// questions (review fix, correctness): without those checks, sending one
+	// question flushed every item-note box on the page, including one on a
+	// revisable, already-answered review question whose picks come only from
+	// the last sent answer (views.go's buildThreadQuestion fallback), never a
+	// draft -- creating an unintended new draft answer on a question the
+	// owner never touched this send.
 	const noteSaves = Array.from(document.querySelectorAll('#main .item-note'))
+		.filter((el) => el.value !== el.defaultValue)
 		.map((el) => {
-			const picked = el.closest('.item-row')?.querySelector('.item-decisions .decision.picked');
-			return picked ? itemNoteBody(el.dataset, picked.dataset.decision, el.value) : null;
+			const picked = pickedDecisionFor(el);
+			if (!picked || !questions.includes(Number(picked.dataset.draftQuestion))) {
+				return null;
+			}
+			return postItemDraft(picked.dataset, buildItemDraftBody(picked.dataset, el.value));
 		})
-		.filter((body) => body != null);
-	await Promise.all(noteSaves.map((body) => postJSON('/draft', body)));
+		.filter((p) => p != null);
+	await Promise.all(noteSaves);
 
 	const inputs = Array.from(document.querySelectorAll('#main .reply-input'));
 	// Recorded before any further await below, so a box the owner keeps

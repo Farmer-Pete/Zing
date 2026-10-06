@@ -678,7 +678,7 @@ func (h reviewingHandler) triage(ctx context.Context, t store.Ticket, d Deps, ro
 				noteSource = "reply"
 				noteText = reply
 			}
-			slog.DebugContext(ctx, "review note source", "ticket_id", t.ID, "question_id", q.ID, "finding_id", finding.ID, "note_source", noteSource)
+			slog.DebugContext(ctx, "review note source", "ticket_id", t.ID, "run_id", row.RunID, "question_id", q.ID, "finding_id", finding.ID, "note_source", noteSource)
 			body := "review note " + finding.ID + "\n" + noteText
 			c.Messages = append(c.Messages, store.Message{TicketID: t.ID, Type: msgTypeUpdate, Author: authorSystem, Body: body})
 		}

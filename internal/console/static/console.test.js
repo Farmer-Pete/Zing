@@ -44,7 +44,6 @@ import {
 	stepComposerIndex,
 	buildChipDraftBody,
 	buildItemDraftBody,
-	itemNoteBody,
 	pickBeforeNoteText,
 	unsavedReplyBody,
 	unsavedReplyBodies,
@@ -536,26 +535,6 @@ test('buildItemDraftBody: omitting the note argument leaves item.note off the bo
 		ticket: 12,
 		question: 34,
 		item: { ref: 'src/main.go', decision: 'accept' },
-	});
-});
-
-// itemNoteBody: the /draft POST body a review item's note box builds on
-// change (console.js's installItemNoteSave, task 4, ticket #68) -- null
-// without a decision already picked on the row (owner decision Q2), so
-// the caller can show pickBeforeNoteText instead of posting.
-
-test('itemNoteBody: returns null without a decision', () => {
-	const dataset = { noteTicket: '12', noteQuestion: '34', itemRef: 'src/main.go' };
-	assert.equal(itemNoteBody(dataset, undefined, 'out of scope'), null);
-	assert.equal(itemNoteBody(dataset, '', 'out of scope'), null);
-});
-
-test('itemNoteBody: reads ticket, question, and item ref off the dataset, plus the given decision and note', () => {
-	const dataset = { noteTicket: '12', noteQuestion: '34', itemRef: 'src/main.go' };
-	assert.deepEqual(itemNoteBody(dataset, 'drop', 'out of scope'), {
-		ticket: 12,
-		question: 34,
-		item: { ref: 'src/main.go', decision: 'drop', note: 'out of scope' },
 	});
 });
 

@@ -565,11 +565,15 @@ func splitItemText(text string) (itemTextParts, bool) {
 // start, the same way optionChips' own pickedOption does. A locked control
 // (interactive false) carries no data-draft-*, data-item-ref, data-decision,
 // or data-on:click (bug fix: "options vanish once locked"). withNotes and
-// note (ticket #68) add a review finding's own note box: an input,
-// data-note-ticket, data-note-question, data-item-ref, and an empty note
-// hint, while interactive, or the note's text alone, read-only, once
-// locked and non-empty. withNotes is false for every other item kind,
-// which renders neither.
+// note (ticket #68) add a review finding's own note box: a plain input and
+// an empty note hint, while interactive, or the note's text alone,
+// read-only, once locked and non-empty. The note input carries no
+// data-note-* of its own (review fix, simplification): console.js reads the
+// row's already-picked decision button's data-draft-ticket,
+// data-draft-question, data-item-ref, and data-decision instead, via
+// buildItemDraftBody, since a note can only ever save once that button
+// exists. withNotes is false for every other item kind, which renders
+// neither.
 templ itemRow(ticketID, questionID int64, item ThreadItem, decisions []response.Decision, pickedDecision response.Decision, note string, withNotes, interactive bool) {
 	<div class="item-row" data-item-ref={ item.Ref }>
 		<span class="item-ref">{ item.Ref }</span>
@@ -592,7 +596,7 @@ templ itemRow(ticketID, questionID int64, item ThreadItem, decisions []response.
 			}
 		</div>
 		if withNotes && interactive {
-			<input type="text" class="item-note" data-note-ticket={ strconv.FormatInt(ticketID, 10) } data-note-question={ strconv.FormatInt(questionID, 10) } data-item-ref={ item.Ref } value={ note } maxlength="8000" placeholder="Note on this finding"/>
+			<input type="text" class="item-note" value={ note } maxlength="8000" placeholder="Note on this finding"/>
 			<p class="item-note-hint" aria-live="polite"></p>
 		} else if withNotes && note != "" {
 			<span class="item-note-text">{ note }</span>
