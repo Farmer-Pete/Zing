@@ -52,6 +52,13 @@ sleep)
   sleep "${FAKE_CLAUDE_SLEEP_SECONDS:-5}"
   exit 0
   ;;
+event_then_sleep)
+  transcript="${FAKE_CLAUDE_TRANSCRIPT:?FAKE_CLAUDE_TRANSCRIPT not set}"
+  mkdir -p "$(dirname "$transcript")"
+  printf '%s\n' '{"type":"assistant"}' >> "$transcript"
+  sleep "${FAKE_CLAUDE_SLEEP_SECONDS:-30}"
+  exit 0
+  ;;
 partial_then_sleep)
   printf '%s' "${FAKE_CLAUDE_PARTIAL_OUTPUT:-partial output}"
   sleep "${FAKE_CLAUDE_SLEEP_SECONDS:-5}"

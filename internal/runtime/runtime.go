@@ -35,6 +35,12 @@ type RunRequest struct {
 	Env []string
 	// Timeout bounds the run.
 	Timeout time.Duration
+	// IdleTimeout, when above 0, arms Claude's idle watchdog (Claude only):
+	// the run is killed and reported as ErrStalled once its session
+	// transcript has not grown for this long. 0 turns the watchdog off.
+	// runJobWith sets it from machine.toml's idle_minutes. Codex and the
+	// Fake ignore it.
+	IdleTimeout time.Duration
 	// MaxTurns caps the turns in one run (default 20). Claude does not read
 	// this field in Claude Code 2.1.274: that CLI has no --max-turns flag
 	// (verified against --help; the closest related flag, --max-budget-usd,
@@ -111,15 +117,22 @@ type RunResult struct {
 	// joined. nil for Claude, the Fake, and a process that never started.
 	// Never logged.
 	Stdout []byte
-	// FailureDetail is Codex's own diagnosis of why a run with no final
-	// message exited non-zero (Codex only): the message of the last error
-	// or turn.failed event on Stdout, or, when no such event is found, the
-	// last 20 non-empty lines of Stdout. At most 2048 bytes of valid
-	// UTF-8. Empty unless the runtime returned a non-nil *ExecError with an
-	// empty FinalMessage. job.runJobWith's retryTransient may rewrite it
-	// into a note naming the matched transient pattern and the retry's own
-	// failure.
+	// FailureDetail is the runtime's own diagnosis of a failed run. For
+	// Codex, Codex's own diagnosis of why a run with no final message
+	// exited non-zero: the message of the last error or turn.failed event
+	// on Stdout, or, when no such event is found, the last 20 non-empty
+	// lines of Stdout. For Claude, stallDetail's text on ErrStalled. At
+	// most 2048 bytes of valid UTF-8. Empty unless the runtime returned a
+	// non-nil *ExecError or ErrStalled with an empty FinalMessage.
+	// job.runJobWith's retryTransient and retryTimeout may rewrite it into
+	// a note naming the matched transient pattern, or the first attempt and
+	// the retry's own failure.
 	FailureDetail string
+	// LastEvent is the poll time of the last transcript growth Claude's
+	// idle watchdog saw (Claude only, and only when RunRequest.IdleTimeout
+	// was above 0); the zero time when the watchdog was off or saw no
+	// growth.
+	LastEvent time.Time
 	// StopHookEvents, StopHookBlocks and StopHookUnread are the Claude Code
 	// Stop hook's own counters for this run (Claude only, when a Stop hook
 	// ran); all 0 for Codex, the Fake, and a Claude run with no hook.

@@ -1522,3 +1522,58 @@ func TestAgentEnvBashTimeoutsSurviveFilterDrop(t *testing.T) {
 	wantEnvValue(t, env, "BASH_DEFAULT_TIMEOUT_MS", "2640000")
 	wantEnvValue(t, env, "BASH_MAX_TIMEOUT_MS", "2640000")
 }
+
+// ---- idle watchdog (task 1) -------------------------------------------------
+
+// TestClaude_IdleWatchdogKillsStalledRun proves the idle watchdog kills a
+// Claude run whose session transcript stops growing: the fake CLI writes one
+// transcript line and then sleeps well past the 1s IdleTimeout, so Run must
+// report ErrStalled, not wait for the much longer context deadline.
+func TestClaude_IdleWatchdogKillsStalledRun(t *testing.T) {
+	t.Parallel()
+	requireUnix(t)
+
+	// Absolute, not fakeClaudeScript's bare relative path: cmd.Dir below is
+	// req.WorkDir, a temp dir, not this package's directory, and exec
+	// resolves a relative binary path against cmd.Dir, not the test's own
+	// cwd (TestClaudeRun_LogsLongTurnWithRunID's own pattern).
+	absFakeClaudeScript, err := filepath.Abs(fakeClaudeScript)
+	if err != nil {
+		t.Fatalf("resolve fake claude script path: %v", err)
+	}
+
+	dir := t.TempDir()
+	home := filepath.Join(dir, "home")
+	req := newFakeRequest(dir, "event_then_sleep", "HOME="+home, "FAKE_CLAUDE_SLEEP_SECONDS=30")
+	req.WorkDir = dir
+	req.SessionID = testResumedSessionID
+	req.IdleTimeout = time.Second
+
+	transcriptPath := claudeTranscriptPath(req.Env, req.WorkDir, req.SessionID)
+	req.Env = append(req.Env, "FAKE_CLAUDE_TRANSCRIPT="+transcriptPath)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+
+	c := NewClaude(absFakeClaudeScript, testOAuthToken)
+	start := time.Now()
+	res, err := c.Run(ctx, req)
+	elapsed := time.Since(start)
+
+	if !errors.Is(err, ErrStalled) {
+		t.Fatalf("err = %v, want ErrStalled", err)
+	}
+	if res.ExitCode != -1 {
+		t.Errorf("ExitCode = %d, want -1", res.ExitCode)
+	}
+	if res.LastEvent.IsZero() {
+		t.Error("LastEvent is zero, want the time of the one transcript line")
+	}
+	const wantPrefix = "no transcript growth for 1 s"
+	if !strings.HasPrefix(res.FailureDetail, wantPrefix) {
+		t.Errorf("FailureDetail = %q, want a prefix of %q", res.FailureDetail, wantPrefix)
+	}
+	if elapsed > 10*time.Second {
+		t.Errorf("Run took %v, want well under the 20s deadline (watchdog should fire within ~1s)", elapsed)
+	}
+}
