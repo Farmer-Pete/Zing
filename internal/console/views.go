@@ -245,15 +245,6 @@ func groupAttempts(tickets []store.Ticket) (heads []store.Ticket, earlier map[in
 	return heads, earlier
 }
 
-// canRestart reports whether a ticket in state may be restarted (#65):
-// store.CanAbandon accepts it outright, or it is abandoned with no live
-// successor already at its ref. actionsFor and console.restartTicket both
-// call this instead of each keeping its own list, so the button offered
-// and the route accepted can never drift (r1f7).
-func canRestart(state string, liveSuccessor bool) bool {
-	return store.CanAbandon(state) || (state == ticketStateAbandoned && !liveSuccessor)
-}
-
 // actionsFor builds t's action bar (#65): Abandon wherever store.CanAbandon
 // accepts t.State, Restart per canRestart, and Held while t is claimed. It
 // calls store.CanAbandon and store.SplitAttemptRef directly, keeping no
@@ -267,22 +258,6 @@ func actionsFor(t store.Ticket, liveSuccessor bool) templates.TicketActions {
 		Held:    t.ClaimOwner != nil,
 		Ref:     base,
 	}
-}
-
-// liveSuccessorTicket returns the ticket currently holding base in
-// projectID, when it is not id itself and not abandoned -- the live
-// successor console.ticketActions and console.restartTicket both need to
-// decide whether a restart is offered, or already taken (r1f7). found is
-// false when no such ticket exists.
-func (c *console) liveSuccessorTicket(ctx context.Context, projectID, id int64, base string) (succ store.Ticket, found bool, err error) {
-	cur, exists, err := c.store.TicketByRef(ctx, projectID, base)
-	if err != nil {
-		return store.Ticket{}, false, fmt.Errorf("console: live successor for ref %s: %w", base, err)
-	}
-	if !exists || cur.ID == id || cur.State == ticketStateAbandoned {
-		return store.Ticket{}, false, nil
-	}
-	return cur, true, nil
 }
 
 // ticketActions builds t's action bar (#65): every state but abandoned

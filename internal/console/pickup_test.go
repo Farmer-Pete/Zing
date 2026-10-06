@@ -317,7 +317,7 @@ func TestPickup_AcceptsAnIssueWhoseTicketIsAbandoned(t *testing.T) {
 	if newTicket == nil || newTicket.TrackerRef != "5" || newTicket.State != testStateQueued {
 		t.Errorf("new ticket = %+v, want ref=5 state=%s", newTicket, testStateQueued)
 	}
-	if oldTicket == nil || oldTicket.TrackerRef != "5-abandoned-1" || oldTicket.State != "abandoned" {
+	if oldTicket == nil || oldTicket.TrackerRef != testRetiredRef5First || oldTicket.State != "abandoned" {
 		t.Errorf("old ticket = %+v, want ref=5-abandoned-1 state=abandoned", oldTicket)
 	}
 

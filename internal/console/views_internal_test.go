@@ -1860,15 +1860,9 @@ func TestActionsFor(t *testing.T) {
 		string(response.TicketStateReviewing): true, string(response.TicketStateJudging): true, string(response.TicketStateShipping): true,
 		string(response.TicketStateDone): false, string(response.TicketStateEscalated): false, ticketStateAbandoned: false,
 	}
-	states := []string{
-		testQueuedState, demoTicketState,
-		string(response.TicketStateBuilding), string(response.TicketStateReviewing),
-		string(response.TicketStateJudging), string(response.TicketStateShipping),
-		string(response.TicketStateDone), string(response.TicketStateEscalated), ticketStateAbandoned,
-	}
 	claims := []*string{nil, new("some-owner")}
 
-	for _, state := range states {
+	for state, wantState := range wantAbandon {
 		for _, claim := range claims {
 			for _, liveSuccessor := range []bool{false, true} {
 				name := fmt.Sprintf("state=%s claimed=%v liveSuccessor=%v", state, claim != nil, liveSuccessor)
@@ -1877,11 +1871,11 @@ func TestActionsFor(t *testing.T) {
 					ticket := store.Ticket{TrackerRef: "41-abandoned-2", State: state, ClaimOwner: claim}
 					got := actionsFor(ticket, liveSuccessor)
 
-					if want := wantAbandon[state]; got.Abandon != want {
-						t.Errorf("Abandon = %v, want %v", got.Abandon, want)
+					if got.Abandon != wantState {
+						t.Errorf("Abandon = %v, want %v", got.Abandon, wantState)
 					}
 
-					wantRestart := wantAbandon[state]
+					wantRestart := wantState
 					if state == ticketStateAbandoned {
 						wantRestart = !liveSuccessor
 					}
@@ -1929,9 +1923,9 @@ func TestThreadRendersTicketActions(t *testing.T) {
 		t.Fatalf("InsertTicket: %v", err)
 	}
 
-	render := func() string {
+	render := func(id int64) string {
 		t.Helper()
-		comp, compErr := c.threadComponent(t.Context(), ticketID)
+		comp, compErr := c.threadComponent(t.Context(), id)
 		if compErr != nil {
 			t.Fatalf("threadComponent: %v", compErr)
 		}
@@ -1942,7 +1936,7 @@ func TestThreadRendersTicketActions(t *testing.T) {
 		return sb.String()
 	}
 
-	got := render()
+	got := render(ticketID)
 	if !strings.Contains(got, "ticket-abandon") || !strings.Contains(got, "ticket-restart") {
 		t.Errorf("unclaimed ticket missing action buttons; got:\n%s", got)
 	}
@@ -1959,7 +1953,7 @@ func TestThreadRendersTicketActions(t *testing.T) {
 		t.Fatal("Claim: got false, want true")
 	}
 
-	got = render()
+	got = render(ticketID)
 	if !strings.Contains(got, "ticket-abandon") || !strings.Contains(got, "ticket-restart") {
 		t.Errorf("claimed ticket missing action buttons; got:\n%s", got)
 	}
@@ -1983,21 +1977,8 @@ func TestThreadRendersTicketActions(t *testing.T) {
 	if err := s.AbandonTicket(t.Context(), abandonedID, "test abandon"); err != nil {
 		t.Fatalf("AbandonTicket: %v", err)
 	}
-	c2 := &console{store: s}
-	renderTicket := func(id int64) string {
-		t.Helper()
-		comp, compErr := c2.threadComponent(t.Context(), id)
-		if compErr != nil {
-			t.Fatalf("threadComponent: %v", compErr)
-		}
-		var sb strings.Builder
-		if renderErr := comp.Render(t.Context(), &sb); renderErr != nil {
-			t.Fatalf("Render: %v", renderErr)
-		}
-		return sb.String()
-	}
 
-	gotAbandoned := renderTicket(abandonedID)
+	gotAbandoned := render(abandonedID)
 	if strings.Contains(gotAbandoned, "ticket-abandon") {
 		t.Errorf("abandoned ticket with no live successor offers Abandon; got:\n%s", gotAbandoned)
 	}
@@ -2016,7 +1997,7 @@ func TestThreadRendersTicketActions(t *testing.T) {
 		t.Fatalf("InsertTicket: %v", err)
 	}
 
-	gotSuperseded := renderTicket(abandonedID)
+	gotSuperseded := render(abandonedID)
 	if strings.Contains(gotSuperseded, "ticket-actions") {
 		t.Errorf("abandoned ticket with a live successor renders an action bar; got:\n%s", gotSuperseded)
 	}
@@ -2238,11 +2219,7 @@ func TestBuildNavThreads_ParkedUntil(t *testing.T) {
 // issue: one head per base ref -- the attempt-0 ticket when one exists, in
 // the input's own order -- and every other ticket sharing that base under
 // earlier[head.ID], oldest attempt first; a base with no attempt-0 ticket at
-// all is still its own head, with every other attempt sharing that base
-// under earlier -- 53-abandoned-1 alone (no earlier entry), and 53's own two
-// attempts (53-abandoned-1, 53-abandoned-2, so the head is the
-// highest-attempt ticket 10, not simply attempts[0], and earlier[10] holds
-// the one older attempt, ticket 6) (r1f12).
+// all (53-abandoned-1 alone) is still its own head, with no earlier entry.
 func TestGroupAttempts(t *testing.T) {
 	t.Parallel()
 
@@ -2251,20 +2228,40 @@ func TestGroupAttempts(t *testing.T) {
 	ticket8 := store.Ticket{ID: 8, TrackerRef: "41-abandoned-2"}
 	ticket4 := store.Ticket{ID: 4, TrackerRef: "41-abandoned-1"}
 	ticket6 := store.Ticket{ID: 6, TrackerRef: "53-abandoned-1"}
-	ticket10 := store.Ticket{ID: 10, TrackerRef: "53-abandoned-2"}
 
-	heads, earlier := groupAttempts([]store.Ticket{ticket9, ticket3, ticket8, ticket4, ticket6, ticket10})
+	heads, earlier := groupAttempts([]store.Ticket{ticket9, ticket3, ticket8, ticket4, ticket6})
 
 	if len(heads) != 3 {
 		t.Fatalf("groupAttempts heads = %+v, want 3 entries", heads)
 	}
-	if heads[0].ID != 9 || heads[1].ID != 3 || heads[2].ID != 10 {
-		t.Errorf("groupAttempts heads = %d, %d, %d; want 9, 3, 10", heads[0].ID, heads[1].ID, heads[2].ID)
+	if heads[0].ID != 9 || heads[1].ID != 3 || heads[2].ID != 6 {
+		t.Errorf("groupAttempts heads = %d, %d, %d; want 9, 3, 6", heads[0].ID, heads[1].ID, heads[2].ID)
 	}
 
 	got9 := earlier[9]
 	if len(got9) != 2 || got9[0].ID != 4 || got9[1].ID != 8 {
 		t.Errorf("earlier[9] = %+v, want [ticket 4, ticket 8] in that order", got9)
+	}
+	if got6 := earlier[6]; len(got6) != 0 {
+		t.Errorf("earlier[6] = %+v, want no entry", got6)
+	}
+}
+
+// TestGroupAttempts_AllAttemptsRetiredHeadIsHighest proves that when every
+// ticket sharing a base has been retired, groupAttempts (#65) still picks
+// one head for that base -- the highest-attempt ticket, not simply the
+// first one seen -- and files every other retired attempt under it in
+// earlier (r1f12).
+func TestGroupAttempts_AllAttemptsRetiredHeadIsHighest(t *testing.T) {
+	t.Parallel()
+
+	ticket6 := store.Ticket{ID: 6, TrackerRef: "60-abandoned-1"}
+	ticket10 := store.Ticket{ID: 10, TrackerRef: "60-abandoned-2"}
+
+	heads, earlier := groupAttempts([]store.Ticket{ticket6, ticket10})
+
+	if len(heads) != 1 || heads[0].ID != 10 {
+		t.Fatalf("groupAttempts heads = %+v, want [ticket 10]", heads)
 	}
 	got10 := earlier[10]
 	if len(got10) != 1 || got10[0].ID != 6 {

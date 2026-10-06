@@ -108,8 +108,12 @@ func (c *console) handlePickup(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err != nil {
-		slog.Error("console: pickup: insert ticket",
-			"project_id", projectID, "ref", ref, "old_ticket_id", existingTicket.ID, "retired_ref", retiredRef, "err", err)
+		if alreadyTicketed {
+			slog.Error("console: pickup: insert ticket",
+				"project_id", projectID, "ref", ref, "old_ticket_id", existingTicket.ID, "retired_ref", retiredRef, "err", err)
+		} else {
+			slog.Error("console: pickup: insert ticket", "project_id", projectID, "ref", ref, "err", err)
+		}
 		http.Error(w, genericServerErrorBody, http.StatusInternalServerError)
 		return
 	}

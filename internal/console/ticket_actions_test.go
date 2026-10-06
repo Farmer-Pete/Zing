@@ -19,8 +19,9 @@ import (
 // single test here does not read as a repeated literal to goconst, without
 // adding a package-wide constant only this file would use.
 const (
-	testTicketActionsAbandoned = "abandoned"
-	testTicketActionsFreshBody = "do it again"
+	testTicketActionsAbandoned  = "abandoned"
+	testTicketActionsFreshBody  = "do it again"
+	testTicketActionsFreshTitle = "fresh look"
 )
 
 // abandonPath builds POST /tickets/{id}/abandon's path.
@@ -155,7 +156,7 @@ func TestRestartRoute_NewQueuedTicketOldAbandonedWithHistory(t *testing.T) {
 	seedStateMessage(t, s, oldID, testStateQueued, testPlanningLiteral, "started planning")
 
 	tr := newPickupTestTracker()
-	tr.issues["5"] = tracker.Ticket{Ref: "5", Title: "fresh look", Body: testTicketActionsFreshBody}
+	tr.issues["5"] = tracker.Ticket{Ref: "5", Title: testTicketActionsFreshTitle, Body: testTicketActionsFreshBody}
 
 	srv := newTestServerPickup(t, s, bus.New(), newTestLogHandler(t), tr)
 
@@ -188,7 +189,7 @@ func TestRestartRoute_NewQueuedTicketOldAbandonedWithHistory(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetTicket(old): %v", err)
 	}
-	if oldTicket.TrackerRef != "5-abandoned-1" || oldTicket.State != testTicketActionsAbandoned {
+	if oldTicket.TrackerRef != testRetiredRef5First || oldTicket.State != testTicketActionsAbandoned {
 		t.Errorf("old ticket = %+v, want ref=5-abandoned-1 state=abandoned", oldTicket)
 	}
 	oldMsgs, err := s.ListMessages(t.Context(), oldID)
@@ -298,6 +299,66 @@ func TestRestartRoute_ClaimedTicketIs409(t *testing.T) {
 	}
 }
 
+// TestRestartRoute_AbandonedTicketWithNoLiveSuccessorSucceeds proves that
+// restarting a ticket that is already abandoned, with no live successor at
+// its ref, succeeds: it is the retry path offered on an abandoned thread
+// (restartTicket's own AbandonTicket call is skipped, since the ticket is
+// abandoned already), and it must not double the old ticket's abandon
+// message.
+func TestRestartRoute_AbandonedTicketWithNoLiveSuccessorSucceeds(t *testing.T) {
+	t.Parallel()
+	s := newConsoleTestStore(t)
+	seedPickupProject(t, s)
+
+	oldID := seedTicket(t, s, "5", "fix the bug")
+	if err := s.AbandonTicket(t.Context(), oldID, "test abandon"); err != nil {
+		t.Fatalf("AbandonTicket: %v", err)
+	}
+
+	tr := newPickupTestTracker()
+	tr.issues["5"] = tracker.Ticket{Ref: "5", Title: testTicketActionsFreshTitle, Body: testTicketActionsFreshBody}
+
+	srv := newTestServerPickup(t, s, bus.New(), newTestLogHandler(t), tr)
+
+	resp := doRequest(t, mutationRequest(t, srv, restartPath(oldID), "{}"))
+	if resp.StatusCode != http.StatusOK {
+		_ = resp.Body.Close()
+		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	}
+	newID := restartResponse(t, resp)
+	if newID == 0 || newID == oldID {
+		t.Fatalf("new ticket id = %d, want a fresh id distinct from %d", newID, oldID)
+	}
+
+	newTicket, err := s.GetTicket(t.Context(), newID)
+	if err != nil {
+		t.Fatalf("GetTicket(new): %v", err)
+	}
+	if newTicket.TrackerRef != "5" || newTicket.State != testStateQueued {
+		t.Errorf("new ticket = %+v, want ref=5 state=queued", newTicket)
+	}
+
+	oldTicket, err := s.GetTicket(t.Context(), oldID)
+	if err != nil {
+		t.Fatalf("GetTicket(old): %v", err)
+	}
+	if oldTicket.TrackerRef != testRetiredRef5First || oldTicket.State != testTicketActionsAbandoned {
+		t.Errorf("old ticket = %+v, want ref=5-abandoned-1 state=abandoned", oldTicket)
+	}
+	oldMsgs, err := s.ListMessages(t.Context(), oldID)
+	if err != nil {
+		t.Fatalf("ListMessages(old): %v", err)
+	}
+	if len(oldMsgs) != 1 {
+		t.Fatalf("old ticket messages = %d, want exactly 1 (no second abandon message): %+v", len(oldMsgs), oldMsgs)
+	}
+
+	comments := tr.recordedComments()
+	if len(comments) != 1 {
+		t.Fatalf("pickup comments posted = %d, want exactly 1: %+v", len(comments), comments)
+	}
+}
+
 // TestRestartRoute_AbandonedTicketWithLiveSuccessorIs409 proves a second
 // restart of the same abandoned ticket, once a live successor exists,
 // refuses naming the successor and leaves the ticket count unchanged.
@@ -309,7 +370,7 @@ func TestRestartRoute_AbandonedTicketWithLiveSuccessorIs409(t *testing.T) {
 	ticketA := seedTicket(t, s, "5", "fix the bug")
 
 	tr := newPickupTestTracker()
-	tr.issues["5"] = tracker.Ticket{Ref: "5", Title: "fresh look", Body: testTicketActionsFreshBody}
+	tr.issues["5"] = tracker.Ticket{Ref: "5", Title: testTicketActionsFreshTitle, Body: testTicketActionsFreshBody}
 
 	srv := newTestServerPickup(t, s, bus.New(), newTestLogHandler(t), tr)
 

@@ -94,3 +94,26 @@ func TestProjectRendersEarlierAttempts(t *testing.T) {
 		t.Errorf("Project rendered the raw -abandoned-K ref; got:\n%s", got)
 	}
 }
+
+// TestProjectStripsSuffixFromHeadRef proves that when the head ticket
+// itself still carries a retired ref -- every attempt for that issue is
+// retired, so groupAttempts picked the highest-attempt ticket as the head
+// -- Project's row for it shows the stripped base, never the raw suffix.
+func TestProjectStripsSuffixFromHeadRef(t *testing.T) {
+	t.Parallel()
+
+	head := store.Ticket{ID: 6, TrackerRef: "53-abandoned-1", Title: "retired issue", State: "abandoned"}
+
+	var sb strings.Builder
+	if err := Project(1, []store.Ticket{head}, nil, nil).Render(t.Context(), &sb); err != nil {
+		t.Fatalf("Project.Render: %v", err)
+	}
+	got := sb.String()
+
+	if !strings.Contains(got, `<span class="ref">53</span>`) {
+		t.Errorf("Project row ref span = want 53; got:\n%s", got)
+	}
+	if strings.Contains(got, "53-abandoned-1") {
+		t.Errorf("Project rendered the raw -abandoned-K ref; got:\n%s", got)
+	}
+}
