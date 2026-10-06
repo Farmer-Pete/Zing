@@ -499,7 +499,8 @@ func retryTimeout(
 	if stalled {
 		logStall(ticketID, runID, jobName, 1, res.LastEvent)
 	}
-	if retries < 1 || (!stalled && !errors.Is(runErr, runtime.ErrTimeout)) {
+	retryable := stalled || errors.Is(runErr, runtime.ErrTimeout)
+	if retries < 1 || !retryable {
 		return res, runErr
 	}
 	first := firstAttemptText(res, stalled)

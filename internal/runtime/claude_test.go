@@ -1650,7 +1650,7 @@ func TestClaude_IdleWatchdogOffWhenUnset(t *testing.T) {
 
 	c := NewClaude(absFakeClaudeScript, testOAuthToken)
 	start := time.Now()
-	_, runErr := c.Run(ctx, req)
+	res, runErr := c.Run(ctx, req)
 	elapsed := time.Since(start)
 
 	if errors.Is(runErr, ErrStalled) {
@@ -1658,5 +1658,8 @@ func TestClaude_IdleWatchdogOffWhenUnset(t *testing.T) {
 	}
 	if elapsed < 2*time.Second {
 		t.Errorf("Run took %v, want at least the 2s sleep (watchdog must not have fired)", elapsed)
+	}
+	if !res.LastEvent.IsZero() {
+		t.Errorf("LastEvent = %v, want zero when IdleTimeout is 0", res.LastEvent)
 	}
 }

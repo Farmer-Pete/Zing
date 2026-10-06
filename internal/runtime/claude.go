@@ -818,7 +818,9 @@ func (c Claude) run(ctx context.Context, req RunRequest, argv []string, sessionI
 		res.LastEvent = watch.last
 		// A clean exit that raced the watch keeps its result: only a
 		// process the watch actually killed is a stall.
-		if watch.fired && ctx.Err() == nil && waitErr != nil {
+		killedByWatch := watch.fired && waitErr != nil
+		parentAlive := ctx.Err() == nil
+		if killedByWatch && parentAlive {
 			res.ExitCode = -1
 			res.FailureDetail = stallDetail(req.IdleTimeout, watch.last)
 			return res, ErrStalled

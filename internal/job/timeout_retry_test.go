@@ -94,14 +94,7 @@ func TestRunAndRoute_NoTimeoutRetryEscalatesAtOnce(t *testing.T) {
 	if buildRetries != 0 {
 		t.Fatalf("build job's TimeoutRetries = %d, want 0", buildRetries)
 	}
-	jobs := make(map[string]machine.Job, len(d.Machine.Jobs))
-	maps.Copy(jobs, d.Machine.Jobs)
-	classifyCfg := jobs[testJobClassify]
-	classifyCfg.TimeoutRetries = buildRetries
-	jobs[testJobClassify] = classifyCfg
-	machineCopy := *d.Machine
-	machineCopy.Jobs = jobs
-	d.Machine = &machineCopy
+	d = withClassifyTimeoutRetries(d, buildRetries)
 
 	su := store.SessionUpsert{Job: testJobClassify, Runtime: testRuntimeClaude}
 	commit, err := runAndRoute(t.Context(), d, ticket, testJobClassify, su, runtime.RunRequest{Job: response.JobClassify}, 0,
@@ -468,6 +461,121 @@ func TestRunJob_TimeoutRetryLogs(t *testing.T) {
 		t.Errorf("succeeded outcome = %q, want %q", got, "ok")
 	}
 	checkCommon(success)
+}
+
+// TestRunJob_TimeoutRetryFailureLogs proves the retry-failed branch's WARN
+// lines (design goals: "Log both ... Each stall logs WARN 'run stalled'"):
+// a first attempt that times out and a retry that itself stalls must log
+// WARN "run stalled" for attempt 2, and WARN "runtime timeout retry failed"
+// with outcome and err_kind "ErrStalled". Not t.Parallel: it swaps slog's
+// process-wide default to capture the records.
+func TestRunJob_TimeoutRetryFailureLogs(t *testing.T) {
+	lastEvent, err := time.Parse(time.RFC3339, lastEventStamp)
+	if err != nil {
+		t.Fatalf("time.Parse: %v", err)
+	}
+	stub := &timeoutStubRuntime{results: []scriptedAttempt{
+		{res: runtime.RunResult{LastEvent: lastEvent}, err: runtime.ErrTimeout},
+		{res: runtime.RunResult{}, err: runtime.ErrStalled},
+	}}
+	d, ticket := newTimeoutRetryStubDeps(t, stub)
+
+	var logBuf bytes.Buffer
+	prevDefault := slog.Default()
+	slog.SetDefault(slog.New(slog.NewJSONHandler(&logBuf, &slog.HandlerOptions{Level: slog.LevelInfo})))
+	t.Cleanup(func() { slog.SetDefault(prevDefault) })
+
+	rr, runErr := runJob(t.Context(), d, ticket, testJobClassify, store.SessionUpsert{Job: testJobClassify, Runtime: testRuntimeClaude},
+		runtime.RunRequest{Job: response.JobClassify}, nil, nil, 0)
+	if !errors.Is(runErr, runtime.ErrStalled) {
+		t.Fatalf("runJob: err = %v, want errors.Is(err, runtime.ErrStalled)", runErr)
+	}
+	if stub.calls != 2 {
+		t.Fatalf("stub.calls = %d, want 2", stub.calls)
+	}
+
+	recs := jsonLogRecords(t, &logBuf)
+
+	checkCommon := func(rec map[string]any) {
+		if got := logRecordInt64(t, rec, "ticket_id"); got != ticket.ID {
+			t.Errorf("ticket_id = %d, want %d", got, ticket.ID)
+		}
+		if got := logRecordInt64(t, rec, "run_id"); got != rr.Reserved.RunID {
+			t.Errorf("run_id = %d, want %d", got, rr.Reserved.RunID)
+		}
+		if got := logRecordString(t, rec, "job"); got != testJobClassify {
+			t.Errorf("job = %q, want %q", got, testJobClassify)
+		}
+	}
+
+	stall := findLogRecord(t, recs, "run stalled")
+	if stall["level"] != slogLevelWarn {
+		t.Errorf("stall level = %v, want %s", stall["level"], slogLevelWarn)
+	}
+	if got := logRecordInt64(t, stall, "attempt"); got != 2 {
+		t.Errorf("stall attempt = %d, want 2", got)
+	}
+	checkCommon(stall)
+
+	failed := findLogRecord(t, recs, "runtime timeout retry failed")
+	if failed["level"] != slogLevelWarn {
+		t.Errorf("failed level = %v, want %s", failed["level"], slogLevelWarn)
+	}
+	if got := logRecordString(t, failed, "outcome"); got != "ErrStalled" {
+		t.Errorf("failed outcome = %q, want %q", got, "ErrStalled")
+	}
+	if got := logRecordString(t, failed, "err_kind"); got != "ErrStalled" {
+		t.Errorf("failed err_kind = %q, want %q", got, "ErrStalled")
+	}
+	if got := logRecordString(t, failed, "last_event"); got != lastEventStamp {
+		t.Errorf("failed last_event = %q, want %q", got, lastEventStamp)
+	}
+	checkCommon(failed)
+}
+
+// TestRunJob_TimeoutRetrySkippedLogsCanceled proves the skipped branch's
+// WARN line (design goals: "Log both"; owner decision Q10): a parent cancel
+// before the 2s wait starts must log WARN "runtime timeout retry skipped"
+// with err_kind "ErrCanceled". Not t.Parallel: it swaps slog's process-wide
+// default to capture the records.
+func TestRunJob_TimeoutRetrySkippedLogsCanceled(t *testing.T) {
+	stub := &timeoutStubRuntime{results: []scriptedAttempt{
+		{res: runtime.RunResult{}, err: runtime.ErrTimeout},
+	}}
+	d, ticket := newTimeoutRetryStubDeps(t, stub)
+
+	var logBuf bytes.Buffer
+	prevDefault := slog.Default()
+	slog.SetDefault(slog.New(slog.NewJSONHandler(&logBuf, &slog.HandlerOptions{Level: slog.LevelInfo})))
+	t.Cleanup(func() { slog.SetDefault(prevDefault) })
+
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	stub.onRun = func(int) { cancel() }
+
+	rr, err := runJob(ctx, d, ticket, testJobClassify, store.SessionUpsert{Job: testJobClassify, Runtime: testRuntimeClaude},
+		runtime.RunRequest{Job: response.JobClassify}, nil, nil, 0)
+	if !errors.Is(err, runtime.ErrCanceled) {
+		t.Fatalf("err = %v, want errors.Is(err, runtime.ErrCanceled)", err)
+	}
+
+	recs := jsonLogRecords(t, &logBuf)
+	skipped := findLogRecord(t, recs, "runtime timeout retry skipped")
+	if skipped["level"] != slogLevelWarn {
+		t.Errorf("skipped level = %v, want %s", skipped["level"], slogLevelWarn)
+	}
+	if got := logRecordString(t, skipped, "err_kind"); got != "ErrCanceled" {
+		t.Errorf("skipped err_kind = %q, want %q", got, "ErrCanceled")
+	}
+	if got := logRecordInt64(t, skipped, "ticket_id"); got != ticket.ID {
+		t.Errorf("ticket_id = %d, want %d", got, ticket.ID)
+	}
+	if got := logRecordInt64(t, skipped, "run_id"); got != rr.Reserved.RunID {
+		t.Errorf("run_id = %d, want %d", got, rr.Reserved.RunID)
+	}
+	if got := logRecordString(t, skipped, "job"); got != testJobClassify {
+		t.Errorf("job = %q, want %q", got, testJobClassify)
+	}
 }
 
 // TestRunJob_TimeoutRetryRequest is this task's named test (design shape:
