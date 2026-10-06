@@ -243,3 +243,58 @@ func TestLogLongTurns_TranscriptReadFailed(t *testing.T) {
 		t.Errorf("log = %q, want a claude long turns: transcript read failed record", logBuf.String())
 	}
 }
+
+// TestLogLongTurns_LogsKeptTurnsAfterReadFailure proves that, after the
+// "transcript read failed" DEBUG record, the turns already read are still
+// logged as usual (design shape, the long-turn path), using an
+// errAfterReader that yields one complete 300s turn before its error
+// (r3f13: without this, a logLongTurns that returned right after logging
+// the read error would also pass TestLogLongTurns_TranscriptReadFailed
+// above, since that case keeps zero turns).
+func TestLogLongTurns_LogsKeptTurnsAfterReadFailure(t *testing.T) {
+	t.Parallel()
+
+	base := time.Date(2026, 10, 5, 10, 0, 0, 0, time.UTC)
+	body := turnLine(base, "", 0) + "\n" +
+		turnLine(base.Add(300*time.Second), "msgZ", 11) + "\n"
+	r := &errAfterReader{r: strings.NewReader(body), err: errors.New("boom")}
+
+	var logBuf bytes.Buffer
+	prevDefault := slog.Default()
+	slog.SetDefault(slog.New(slog.NewJSONHandler(&logBuf, &slog.HandlerOptions{Level: slog.LevelDebug})))
+	t.Cleanup(func() { slog.SetDefault(prevDefault) })
+
+	logLongTurnsFrom(RunRequest{RunToken: "459"}, r)
+
+	var sawReadFailed, sawLongTurn bool
+	for line := range strings.SplitSeq(strings.TrimSpace(logBuf.String()), "\n") {
+		var rec map[string]any
+		if err := json.Unmarshal([]byte(line), &rec); err != nil {
+			t.Fatalf("decode log line %q: %v", line, err)
+		}
+		switch rec["msg"] {
+		case "claude long turns: transcript read failed":
+			sawReadFailed = true
+			if rec["run_id"] != "459" {
+				t.Errorf("run_id = %v, want 459", rec["run_id"])
+			}
+			if rec["turns_kept"] != float64(1) {
+				t.Errorf("turns_kept = %v, want 1", rec["turns_kept"])
+			}
+		case claudeLongTurnLogMsg:
+			sawLongTurn = true
+			if rec["run_id"] != "459" {
+				t.Errorf("run_id = %v, want 459", rec["run_id"])
+			}
+			if rec["seconds"] != float64(300) {
+				t.Errorf("seconds = %v, want 300", rec["seconds"])
+			}
+		}
+	}
+	if !sawReadFailed {
+		t.Errorf("log = %q, want a claude long turns: transcript read failed record", logBuf.String())
+	}
+	if !sawLongTurn {
+		t.Errorf("log = %q, want a %s record", logBuf.String(), claudeLongTurnLogMsg)
+	}
+}

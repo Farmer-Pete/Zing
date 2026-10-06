@@ -65,21 +65,40 @@ func TestDeniedCommand(t *testing.T) {
 	}
 }
 
-// TestDeniedCommand_EntryNotStrippedOrSplit pins the matching rule's own
-// treatment of the deny entry itself: it is normalized to single spaces,
-// but never stripped of a leading time or VAR=value, and never split on a
-// shell operator (#53 r2f5, r2f8). A compound entry such as "cd web &&
-// npm test" is matched against the whole normalized command, not against
-// one of its segments, so a targeted call through the same shell operator
-// still runs.
-func TestDeniedCommand_EntryNotStrippedOrSplit(t *testing.T) {
+// TestDeniedCommand_EntryNormalizedNotSplit pins the matching rule's own
+// treatment of the deny entry itself (owner Q11, #53 r3f8, r3f10): it is
+// normalized the same way a command segment is, whitespace collapsed and
+// a leading "time" or VAR=value stripped, so an entry like
+// "CGO_ENABLED=0 go test ./..." also blocks a plain "go test ./..." call,
+// but it is never split on a shell operator. A compound entry such as "cd
+// web && npm test" is matched against the whole normalized command, not
+// against one of its segments, so a targeted call through the same shell
+// operator still runs, and a "time"-prefixed call through it is still
+// denied.
+func TestDeniedCommand_EntryNormalizedNotSplit(t *testing.T) {
 	t.Parallel()
 
-	t.Run("entry's own env prefix is not stripped", func(t *testing.T) {
+	t.Run("entry's own env prefix is stripped before matching", func(t *testing.T) {
 		t.Parallel()
 		deny := []string{"CGO_ENABLED=0 go test ./..."}
-		if entry, ok := DeniedCommand("go test ./...", deny); ok {
-			t.Errorf("DeniedCommand(%q) = %q, true; want no match", "go test ./...", entry)
+		entry, ok := DeniedCommand("go test ./...", deny)
+		if !ok {
+			t.Fatal("DeniedCommand ok = false, want true")
+		}
+		if entry != deny[0] {
+			t.Errorf("entry = %q, want %q", entry, deny[0])
+		}
+	})
+
+	t.Run("entry's own leading time is stripped before matching", func(t *testing.T) {
+		t.Parallel()
+		deny := []string{"time make ci"}
+		entry, ok := DeniedCommand("make ci", deny)
+		if !ok {
+			t.Fatal("DeniedCommand ok = false, want true")
+		}
+		if entry != deny[0] {
+			t.Errorf("entry = %q, want %q", entry, deny[0])
 		}
 	})
 
@@ -87,6 +106,19 @@ func TestDeniedCommand_EntryNotStrippedOrSplit(t *testing.T) {
 		t.Parallel()
 		deny := []string{cdWebNpmTestCmd}
 		entry, ok := DeniedCommand(cdWebNpmTestCmd, deny)
+		if !ok {
+			t.Fatal("DeniedCommand ok = false, want true")
+		}
+		if entry != deny[0] {
+			t.Errorf("entry = %q, want %q", entry, deny[0])
+		}
+	})
+
+	t.Run("time-prefixed compound command is denied", func(t *testing.T) {
+		t.Parallel()
+		deny := []string{cdWebNpmTestCmd}
+		command := "time " + cdWebNpmTestCmd
+		entry, ok := DeniedCommand(command, deny)
 		if !ok {
 			t.Fatal("DeniedCommand ok = false, want true")
 		}

@@ -22,33 +22,38 @@ type denyHookInput struct {
 }
 
 // DeniedCommand reports the first deny entry that command matches; ok is
-// false when none matches. Each deny entry is normalized to single spaces
-// but never split or stripped itself. An entry with no shell operator is
-// compared against each segment of command (split on &&, ||, ;, |, and
-// newline, each stripped of a leading time and VAR=value and
-// whitespace-collapsed): a segment matches the entry on equality, or on a
-// prefix followed by a space, so a targeted call like "go test -run TestX
-// ./a" is not denied by the entry "go test ./...". An entry that still
-// holds a shell operator after normalizing, such as "cd web && npm test",
-// is compared whole, against command's own normalized whitespace, by
+// false when none matches. Both command and every deny entry are
+// normalized the same way (normalizeSegment): whitespace collapsed to
+// single spaces, and a leading "time" and VAR=value assignments stripped
+// -- so an entry like "CGO_ENABLED=0 go test ./..." also blocks a plain
+// "go test ./..." call, and "time go test ./... | tail -40" is still
+// caught even though neither its own leading "time" nor a deny entry's
+// own env prefix survives normalizing. A normalized entry with no shell
+// operator is compared against each normalized segment of command (split
+// on &&, ||, ;, |, and newline, each normalized on its own): a segment
+// matches the entry on equality, or on a prefix followed by a space, so a
+// targeted call like "go test -run TestX ./a" is not denied by the entry
+// "go test ./...". A normalized entry that still holds a shell operator,
+// such as "cd web && npm test", is never split; it is compared whole,
+// against command's own normalization (not split into segments), by
 // equality only: a targeted call through the same operator, such as "cd
 // web && npm test -- foo.spec", stays allowed.
 func DeniedCommand(command string, deny []string) (entry string, ok bool) {
-	normCommand := strings.Join(strings.Fields(command), " ")
+	normCommand := NormalizeCommand(command)
 
 	var normSegments []string
-	for _, seg := range splitCommandSegments(command) {
-		if norm := normalizeSegment(seg); norm != "" {
+	for seg := range strings.SplitSeq(segmentSplitter.Replace(command), "\n") {
+		if norm := NormalizeCommand(seg); norm != "" {
 			normSegments = append(normSegments, norm)
 		}
 	}
 
 	for _, d := range deny {
-		normEntry := strings.Join(strings.Fields(d), " ")
+		normEntry := NormalizeCommand(d)
 		if normEntry == "" {
 			continue
 		}
-		if strings.ContainsAny(normEntry, "&|;\n") {
+		if strings.ContainsAny(normEntry, "&|;") {
 			if normCommand == normEntry {
 				return d, true
 			}
@@ -63,18 +68,17 @@ func DeniedCommand(command string, deny []string) (entry string, ok bool) {
 	return "", false
 }
 
-// strippablePrefix reports whether field is a leading "time" or a
-// VAR=value assignment, the parts normalizeSegment drops before a segment
-// or deny entry is compared.
-func strippablePrefix(field string) bool {
-	return field == "time" || envAssignment.MatchString(field)
-}
-
-// normalizeSegment strips any leading time and VAR=value fields from seg,
-// then joins what remains with single spaces.
-func normalizeSegment(seg string) string {
+// NormalizeCommand strips a leading "time" and any leading VAR=value
+// fields from seg, then joins what remains with single spaces. It never
+// splits seg on a shell operator; a mid-string operator such as the "&&"
+// in "cd web && npm test" survives as its own field. DeniedCommand applies
+// it to every command segment and deny entry; Project.DenyCommands
+// (internal/job/job.go) applies it to a project's own configured commands,
+// so a configured command and a deny entry that differ only by one of
+// these prefixes are recognized as the same duplicate.
+func NormalizeCommand(seg string) string {
 	fields := strings.Fields(seg)
-	for len(fields) > 0 && strippablePrefix(fields[0]) {
+	for len(fields) > 0 && (fields[0] == "time" || envAssignment.MatchString(fields[0])) {
 		fields = fields[1:]
 	}
 	return strings.Join(fields, " ")
@@ -84,11 +88,6 @@ func normalizeSegment(seg string) string {
 // two-character operators are tried first, so "||" is not split into two
 // empty segments around a stray "|".
 var segmentSplitter = strings.NewReplacer("&&", "\n", "||", "\n", ";", "\n", "|", "\n")
-
-// splitCommandSegments splits command on &&, ||, ;, |, and newline.
-func splitCommandSegments(command string) []string {
-	return strings.Split(segmentSplitter.Replace(command), "\n")
-}
 
 // DenyHook decides one PreToolUse event. reason is non-empty when the Bash
 // command matches deny; err is a decode failure, which never blocks.

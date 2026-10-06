@@ -2,7 +2,6 @@ package runtime
 
 import (
 	"bufio"
-	"bytes"
 	"encoding/json"
 	"io"
 	"log/slog"
@@ -44,28 +43,20 @@ type transcriptLine struct {
 	} `json:"message"`
 }
 
-// parsedLine is one transcript JSONL line, decoded and timestamped.
-type parsedLine struct {
-	Time time.Time
-	Line transcriptLine
-}
-
 // parseTranscriptLine decodes one raw JSONL line and parses its timestamp;
 // ok is false when either fails, per the turn timing rule ("skip any line
-// that does not decode or whose timestamp does not parse as RFC 3339").
-func parseTranscriptLine(raw []byte) (parsedLine, bool) {
-	if len(bytes.TrimSpace(raw)) == 0 {
-		return parsedLine{}, false
-	}
-	var tl transcriptLine
+// that does not decode or whose timestamp does not parse as RFC 3339"). An
+// empty or whitespace-only raw already fails json.Unmarshal on its own, so
+// this needs no separate blank-line check.
+func parseTranscriptLine(raw []byte) (tl transcriptLine, ts time.Time, ok bool) {
 	if err := json.Unmarshal(raw, &tl); err != nil {
-		return parsedLine{}, false
+		return transcriptLine{}, time.Time{}, false
 	}
 	ts, err := time.Parse(time.RFC3339Nano, tl.Timestamp)
 	if err != nil {
-		return parsedLine{}, false
+		return transcriptLine{}, time.Time{}, false
 	}
-	return parsedLine{Time: ts, Line: tl}, true
+	return tl, ts, true
 }
 
 // openTurn is a turn longTurns is still accumulating lines for.
@@ -76,34 +67,20 @@ type openTurn struct {
 	tokens int
 }
 
-// extend grows t with another line of the same message id: end moves to
-// ts, and tokens becomes the larger of its current value and tokens.
-func (t *openTurn) extend(ts time.Time, tokens int) {
-	t.end = ts
-	if tokens > t.tokens {
-		t.tokens = tokens
-	}
-}
-
-// finalize turns t into the longTurn it represents, per the turn timing
-// rule: seconds is end minus start, rounded to the nearest whole second.
-func (t *openTurn) finalize() longTurn {
-	return longTurn{
-		Start:        t.start,
-		Seconds:      int(math.Round(t.end.Sub(t.start).Seconds())),
-		OutputTokens: t.tokens,
-	}
-}
-
 // flushInto appends t's finalized turn to out, unless t is nil or has no
 // start: a turn with no previous line is dropped, per the turn timing
-// rule. longTurns calls this both mid-stream, when a new assistant message
-// id starts a turn, and at the end of the transcript.
+// rule. Seconds is end minus start, rounded to the nearest whole second.
+// longTurns calls this both mid-stream, when a new assistant message id
+// starts a turn, and at the end of the transcript.
 func (t *openTurn) flushInto(out []longTurn) []longTurn {
 	if t == nil || t.start.IsZero() {
 		return out
 	}
-	return append(out, t.finalize())
+	return append(out, longTurn{
+		Start:        t.start,
+		Seconds:      int(math.Round(t.end.Sub(t.start).Seconds())),
+		OutputTokens: t.tokens,
+	})
 }
 
 // longTurns reads a Claude transcript line by line and returns up to
@@ -119,19 +96,22 @@ func longTurns(r io.Reader) ([]longTurn, error) {
 
 	for {
 		raw, readErr := br.ReadBytes('\n')
-		pl, ok := parseTranscriptLine(raw)
+		tl, ts, ok := parseTranscriptLine(raw)
 		switch {
 		case !ok:
 			// skip: empty, undecodable, or an unparsable timestamp
-		case pl.Line.Type != "assistant" || pl.Line.Message.ID == "":
-			prevTime = pl.Time
-		case current != nil && current.id == pl.Line.Message.ID:
-			current.extend(pl.Time, pl.Line.Message.Usage.OutputTokens)
-			prevTime = pl.Time
+		case tl.Type != "assistant" || tl.Message.ID == "":
+			prevTime = ts
+		case current != nil && current.id == tl.Message.ID:
+			current.end = ts
+			if tokens := tl.Message.Usage.OutputTokens; tokens > current.tokens {
+				current.tokens = tokens
+			}
+			prevTime = ts
 		default:
 			finalized = current.flushInto(finalized)
-			current = &openTurn{id: pl.Line.Message.ID, start: prevTime, end: pl.Time, tokens: pl.Line.Message.Usage.OutputTokens}
-			prevTime = pl.Time
+			current = &openTurn{id: tl.Message.ID, start: prevTime, end: ts, tokens: tl.Message.Usage.OutputTokens}
+			prevTime = ts
 		}
 		if readErr != nil {
 			finalized = current.flushInto(finalized)
@@ -186,8 +166,14 @@ func logLongTurns(req RunRequest, path string) {
 		return
 	}
 	defer f.Close()
+	logLongTurnsFrom(req, f)
+}
 
-	turns, err := longTurns(f)
+// logLongTurnsFrom is logLongTurns' own reader-level core, split out so a
+// test can drive a read failure after some turns are already read (an
+// errAfterReader) without needing a file on disk that fails mid-read.
+func logLongTurnsFrom(req RunRequest, r io.Reader) {
+	turns, err := longTurns(r)
 	if err != nil {
 		slog.Debug("claude long turns: transcript read failed",
 			"job", req.Job, "run_id", req.RunToken, "turns_kept", len(turns), "error", err)

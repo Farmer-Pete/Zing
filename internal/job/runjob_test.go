@@ -501,6 +501,27 @@ func TestRunJob_BuildRunCarriesDenyList(t *testing.T) {
 	}
 }
 
+// TestProject_DenyCommands proves DenyCommands collapses each entry's
+// internal and outer whitespace to single spaces, drops an empty LintCmd
+// rather than keeping a blank entry, and drops a Deny entry that differs
+// from TestCmd only in whitespace as the duplicate it is (r3f4: without
+// the strings.Fields normalization, the padded TestCmd below would reach
+// the deny hook with its internal double space intact, where it would
+// never match a normally-spaced Bash call).
+func TestProject_DenyCommands(t *testing.T) {
+	t.Parallel()
+
+	p := Project{
+		TestCmd: "  make  test  ",
+		LintCmd: "",
+		Deny:    []string{"make test", "make ci"},
+	}
+	want := []string{"make test", "make ci"}
+	if got := p.DenyCommands(); !slices.Equal(got, want) {
+		t.Errorf("DenyCommands() = %v, want %v", got, want)
+	}
+}
+
 // TestDeadlineInput_UsesBuildTimeout proves deadlineInput reads the
 // machine's own build job.timeout_minutes through jobTimeout, the one
 // function runJobWith's own req.Timeout also reads, so the two never

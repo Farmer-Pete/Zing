@@ -14,7 +14,6 @@ import (
 	"io"
 	"slices"
 	"strconv"
-	"strings"
 	"time"
 
 	"zing/internal/machine"
@@ -175,13 +174,15 @@ type Project struct {
 }
 
 // DenyCommands returns p's deny list for a build run's PreToolUse hook:
-// TestCmd, LintCmd, then Deny, each normalized to single spaces, empties
-// dropped, and a later duplicate of an earlier entry dropped.
+// TestCmd, LintCmd, then Deny, each normalized the same way
+// runtime.DeniedCommand normalizes a deny entry (runtime.NormalizeCommand:
+// whitespace collapsed, a leading "time" and VAR=value fields stripped),
+// empties dropped, and a later duplicate of an earlier entry dropped.
 func (p Project) DenyCommands() []string {
 	seen := make(map[string]bool, len(p.Deny)+2)
 	var out []string
 	for _, cmd := range append([]string{p.TestCmd, p.LintCmd}, p.Deny...) {
-		norm := strings.Join(strings.Fields(cmd), " ")
+		norm := runtime.NormalizeCommand(cmd)
 		if norm == "" || seen[norm] {
 			continue
 		}

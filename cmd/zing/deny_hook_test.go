@@ -85,6 +85,9 @@ func TestDenyHook_AllowsNonBashTool(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("code = %d, want 0; stderr = %q", code, stderr.String())
 	}
+	if stderr.String() != "" {
+		t.Errorf("stderr = %q, want empty", stderr.String())
+	}
 }
 
 func TestDenyHook_MalformedStdinAllows(t *testing.T) {

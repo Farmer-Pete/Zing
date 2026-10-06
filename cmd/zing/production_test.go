@@ -268,14 +268,18 @@ func TestServeLoadsJudge(t *testing.T) {
 
 // TestServeBuildsOneOrchestratorPerProject proves buildJobProjects builds
 // exactly one job.Project per configured project, keyed by its store
-// project id, each carrying its own repository's real git common dir.
+// project id, each carrying its own repository's real git common dir, and
+// its configured commands.deny list (r3f3: without this, a project's
+// commands.deny would load from zing.toml and reach Project.DenyCommands
+// in isolation, but never actually join a running build's deny list).
 func TestServeBuildsOneOrchestratorPerProject(t *testing.T) {
 	t.Parallel()
 
 	repoA := newTestGitRepo(t)
 	repoB := newTestGitRepo(t)
+	wantDeny := []string{"go test ./...", "make ci"}
 	cfgProjects := []config.Project{
-		{Name: "alpha", Repo: "acme/alpha", Path: repoA, Tracker: testServeTracker},
+		{Name: "alpha", Repo: "acme/alpha", Path: repoA, Tracker: testServeTracker, Commands: config.Commands{Deny: wantDeny}},
 		{Name: "beta", Repo: "acme/beta", Path: repoB, Tracker: testServeTracker},
 	}
 	bindings := []zdispatch.Binding{
@@ -313,6 +317,17 @@ func TestServeBuildsOneOrchestratorPerProject(t *testing.T) {
 		if p.RepoGit != wantGitDir {
 			t.Errorf("projects[%d].RepoGit = %q, want %q", id, p.RepoGit, wantGitDir)
 		}
+	}
+
+	alpha := projects[10]
+	if !slices.Equal(alpha.Deny, wantDeny) {
+		t.Errorf("projects[10].Deny = %v, want %v", alpha.Deny, wantDeny)
+	}
+	if got := alpha.DenyCommands(); !slices.Contains(got, wantDeny[0]) || !slices.Contains(got, wantDeny[1]) {
+		t.Errorf("projects[10].DenyCommands() = %v, want it to contain %v", got, wantDeny)
+	}
+	if beta := projects[20]; len(beta.Deny) != 0 {
+		t.Errorf("projects[20].Deny = %v, want empty", beta.Deny)
 	}
 }
 

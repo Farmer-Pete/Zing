@@ -367,7 +367,8 @@ func TestClaude_ArgvCarriesDenyHook(t *testing.T) {
 	}
 
 	stopGroups, ok := settings.Hooks["Stop"]
-	if !ok || len(stopGroups) != 1 || len(stopGroups[0].Hooks) != 1 {
+	oneStopCommand := ok && len(stopGroups) == 1 && len(stopGroups[0].Hooks) == 1
+	if !oneStopCommand {
 		t.Fatalf("settings.Hooks[Stop] = %+v, want one group with one command", settings.Hooks["Stop"])
 	}
 	if stopGroups[0].Matcher != "" {
@@ -380,7 +381,8 @@ func TestClaude_ArgvCarriesDenyHook(t *testing.T) {
 	}
 
 	denyGroups, ok := settings.Hooks["PreToolUse"]
-	if !ok || len(denyGroups) != 1 || len(denyGroups[0].Hooks) != 1 {
+	oneDenyCommand := ok && len(denyGroups) == 1 && len(denyGroups[0].Hooks) == 1
+	if !oneDenyCommand {
 		t.Fatalf("settings.Hooks[PreToolUse] = %+v, want one group with one command", settings.Hooks["PreToolUse"])
 	}
 	if denyGroups[0].Matcher != claudeBashTool {
