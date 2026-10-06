@@ -379,6 +379,7 @@ func TestPollReadyCycleCapStillFlipsOnCIFailure(t *testing.T) {
 	gh.prState = orchestrator.PRState{Draft: false, HeadSHA: local, BaseRef: pbFixtureDefaultBranch, NodeID: shipNodeCapped}
 	gh.logTail = func(context.Context, string, string, int64, int) (string, error) { return shipCILogTailText, nil }
 	seedReadyCycles(t, s, ticket.ID, local, readyCycleCap)
+	seedSpentFlakyCheckRerun(t, s, ticket.ID, local)
 
 	_, err := shipPollRun(t, s, pbGetTicket(t, s, ticket.ID), gh, tr)
 	if err != nil {

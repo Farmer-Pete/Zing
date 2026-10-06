@@ -510,16 +510,20 @@ func (ThreadVerb) Values() []string {
 	return []string{string(ThreadVerbFix), string(ThreadVerbReply), string(ThreadVerbNit), string(ThreadVerbAddressed)}
 }
 
-// CheckName is which CI check a typed event names (first used by the
-// check_rerun event, #91's once-per-sha gate).
-type CheckName string
+// RerunReason is why a failed CI check was re-run instead of sent straight
+// to a fix request (first used by the check_rerun event, #91's
+// once-per-sha gate): flaky (a readable failure, re-run on the flaky
+// budget), infra (cancelled, startup_failure, or stale: the job never ran
+// to a verdict), or no_log (the failed job's log could not be read).
+type RerunReason string
 
 const (
-	CheckNameTest CheckName = "test"
-	CheckNameLint CheckName = "lint"
+	RerunReasonFlaky RerunReason = "flaky"
+	RerunReasonInfra RerunReason = "infra"
+	RerunReasonNoLog RerunReason = "no_log"
 )
 
-// Values returns test, lint, in that order.
-func (CheckName) Values() []string {
-	return []string{string(CheckNameTest), string(CheckNameLint)}
+// Values returns flaky, infra, no_log, in that order.
+func (RerunReason) Values() []string {
+	return []string{string(RerunReasonFlaky), string(RerunReasonInfra), string(RerunReasonNoLog)}
 }

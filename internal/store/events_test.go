@@ -2,6 +2,7 @@ package store
 
 import (
 	"encoding/json"
+	"reflect"
 	"slices"
 	"strings"
 	"testing"
@@ -30,9 +31,11 @@ func seedSessionAndTwoRuns(t *testing.T, s *Store, ticketID int64) {
 
 // insertCheckRerunEvent builds and inserts a check_rerun event on ticketID
 // for runID, returning the inserted message id.
-func insertCheckRerunEvent(t *testing.T, s *Store, ticketID, runID int64, check response.CheckName, sha string) int64 {
+func insertCheckRerunEvent(t *testing.T, s *Store, ticketID, runID int64, check, sha string) int64 {
 	t.Helper()
-	msg, err := NewEvent(ticketID, EventKindCheckRerun, response.CheckRerunEvent{Check: check, SHA: sha})
+	msg, err := NewEvent(ticketID, EventKindCheckRerun, response.CheckRerunEvent{
+		Check: check, SHA: sha, RunID: 1, CheckRunID: 1, Reason: response.RerunReasonFlaky,
+	})
 	if err != nil {
 		t.Fatalf("NewEvent: %v", err)
 	}
@@ -67,10 +70,10 @@ func TestEventsCountBySHAAndRun(t *testing.T) {
 	shaA := strings.Repeat("a", 40)
 	shaB := strings.Repeat("b", 40)
 
-	idTestA := insertCheckRerunEvent(t, s, ticketID, 1, response.CheckNameTest, shaA)
-	idLintA := insertCheckRerunEvent(t, s, ticketID, 1, response.CheckNameLint, shaA)
-	idTestB := insertCheckRerunEvent(t, s, ticketID, 2, response.CheckNameTest, shaB)
-	insertCheckRerunEvent(t, s, otherTicketID, 1, response.CheckNameTest, shaA)
+	idTestA := insertCheckRerunEvent(t, s, ticketID, 1, testCheckKindTest, shaA)
+	idLintA := insertCheckRerunEvent(t, s, ticketID, 1, testCheckKindLint, shaA)
+	idTestB := insertCheckRerunEvent(t, s, ticketID, 2, testCheckKindTest, shaB)
+	insertCheckRerunEvent(t, s, otherTicketID, 1, testCheckKindTest, shaA)
 
 	if _, err := s.InsertMessage(ctx, Message{
 		TicketID: ticketID, Type: msgTypeUpdate, Author: authorSystem, Body: "check failed delivered run 1",
@@ -116,9 +119,9 @@ func TestEventsCountBySHAAndRun(t *testing.T) {
 	}
 	wantIDs := []int64{idTestA, idLintA, idTestB}
 	wantPayloads := []response.CheckRerunEvent{
-		{Check: response.CheckNameTest, SHA: shaA},
-		{Check: response.CheckNameLint, SHA: shaA},
-		{Check: response.CheckNameTest, SHA: shaB},
+		{Check: testCheckKindTest, SHA: shaA, RunID: 1, CheckRunID: 1, Reason: response.RerunReasonFlaky},
+		{Check: testCheckKindLint, SHA: shaA, RunID: 1, CheckRunID: 1, Reason: response.RerunReasonFlaky},
+		{Check: testCheckKindTest, SHA: shaB, RunID: 1, CheckRunID: 1, Reason: response.RerunReasonFlaky},
 	}
 	if len(rows) != len(wantIDs) {
 		t.Fatalf("Events = %d rows, want %d", len(rows), len(wantIDs))
@@ -137,7 +140,7 @@ func TestEventsCountBySHAAndRun(t *testing.T) {
 		if unmarshalErr := json.Unmarshal(row.Payload, &got); unmarshalErr != nil {
 			t.Fatalf("unmarshal rows[%d].Payload: %v", i, unmarshalErr)
 		}
-		if got != wantPayloads[i] {
+		if !reflect.DeepEqual(got, wantPayloads[i]) {
 			t.Errorf("rows[%d] payload = %+v, want %+v", i, got, wantPayloads[i])
 		}
 	}
@@ -168,7 +171,9 @@ func TestCommitHandlerResultWritesEvent(t *testing.T) {
 	ticketID, expires := claimedTicket(t, s)
 
 	sha := strings.Repeat("a", 40)
-	msg, err := NewEvent(ticketID, EventKindCheckRerun, response.CheckRerunEvent{Check: response.CheckNameTest, SHA: sha})
+	msg, err := NewEvent(ticketID, EventKindCheckRerun, response.CheckRerunEvent{
+		Check: testCheckKindTest, SHA: sha, RunID: 1, CheckRunID: 1, Reason: response.RerunReasonFlaky,
+	})
 	if err != nil {
 		t.Fatalf("NewEvent: %v", err)
 	}
@@ -186,7 +191,9 @@ func TestCommitHandlerResultWritesEvent(t *testing.T) {
 		t.Fatalf("CountEvents after valid commit = (%d, %v), want (1, nil)", n, countErr)
 	}
 
-	badMsg, err := NewEvent(ticketID, EventKindCheckRerun, response.CheckRerunEvent{Check: response.CheckNameTest, SHA: "deadbee"})
+	badMsg, err := NewEvent(ticketID, EventKindCheckRerun, response.CheckRerunEvent{
+		Check: testCheckKindTest, SHA: "deadbee", RunID: 1, CheckRunID: 1, Reason: response.RerunReasonFlaky,
+	})
 	if err != nil {
 		t.Fatalf("NewEvent: %v", err)
 	}
@@ -216,6 +223,7 @@ func TestInsertEventRejects(t *testing.T) {
 	const wantSchemaErr = "does not match schema"
 
 	validSHA := strings.Repeat("a", 40)
+	const validRest = `,"run_id":1,"check_run_id":1,"reason":"flaky"`
 
 	// eventMessage builds a check_rerun event Message on ticketID with a
 	// raw payload, for the invalid-payload cases below.
@@ -236,23 +244,33 @@ func TestInsertEventRejects(t *testing.T) {
 			"unknown kind",
 			Message{
 				TicketID: ticketID, Type: msgTypeUpdate, Author: authorSystem, EventKind: new("bogus"),
-				Payload: json.RawMessage(`{"check":"test","sha":"` + validSHA + `"}`),
+				Payload: json.RawMessage(`{"check":"test","sha":"` + validSHA + `"` + validRest + `}`),
 			},
 			wantSchemaErr,
 		},
 		{
-			"bad check enum",
-			eventMessage(`{"check":"fmt","sha":"` + validSHA + `"}`),
+			"empty check",
+			eventMessage(`{"check":"","sha":"` + validSHA + `"` + validRest + `}`),
 			wantSchemaErr,
 		},
 		{
 			"bad sha pattern",
-			eventMessage(`{"check":"test","sha":"deadbee"}`),
+			eventMessage(`{"check":"test","sha":"deadbee"` + validRest + `}`),
+			wantSchemaErr,
+		},
+		{
+			"bad reason enum",
+			eventMessage(`{"check":"test","sha":"` + validSHA + `","run_id":1,"check_run_id":1,"reason":"maybe"}`),
+			wantSchemaErr,
+		},
+		{
+			"missing check_run_id",
+			eventMessage(`{"check":"test","sha":"` + validSHA + `","run_id":1,"reason":"flaky"}`),
 			wantSchemaErr,
 		},
 		{
 			"extra property",
-			eventMessage(`{"check":"test","sha":"` + validSHA + `","x":1}`),
+			eventMessage(`{"check":"test","sha":"` + validSHA + `"` + validRest + `,"x":1}`),
 			wantSchemaErr,
 		},
 		{
@@ -263,7 +281,7 @@ func TestInsertEventRejects(t *testing.T) {
 		{
 			"event kind with wrong message type",
 			func() Message {
-				m := eventMessage(`{"check":"test","sha":"` + validSHA + `"}`)
+				m := eventMessage(`{"check":"test","sha":"` + validSHA + `"` + validRest + `}`)
 				m.Type = msgTypeState
 				return m
 			}(),
@@ -273,7 +291,7 @@ func TestInsertEventRejects(t *testing.T) {
 			"empty event kind",
 			Message{
 				TicketID: ticketID, Type: msgTypeUpdate, Author: authorSystem, EventKind: new(""),
-				Payload: json.RawMessage(`{"check":"test","sha":"` + validSHA + `"}`),
+				Payload: json.RawMessage(`{"check":"test","sha":"` + validSHA + `"` + validRest + `}`),
 			},
 			"must not be empty",
 		},
@@ -281,7 +299,7 @@ func TestInsertEventRejects(t *testing.T) {
 			"plain update takes no payload",
 			Message{
 				TicketID: ticketID, Type: msgTypeUpdate, Author: authorSystem,
-				Payload: json.RawMessage(`{"check":"test","sha":"` + validSHA + `"}`),
+				Payload: json.RawMessage(`{"check":"test","sha":"` + validSHA + `"` + validRest + `}`),
 			},
 			"takes no payload",
 		},
@@ -312,7 +330,7 @@ func TestInsertEventRejects(t *testing.T) {
 func TestEventKinds(t *testing.T) {
 	t.Parallel()
 	got := EventKinds()
-	want := []string{"check_rerun", "owner_edit"}
+	want := []string{"check_rerun", "check_rerun_passed", "owner_edit"}
 	if !slices.Equal(got, want) {
 		t.Errorf("EventKinds() = %v, want %v", got, want)
 	}

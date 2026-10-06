@@ -918,6 +918,66 @@ func TestCommentOnPR(t *testing.T) {
 	})
 }
 
+// TestRerunJobPostsJobRerun checks GitHubClient.RerunJob against the same
+// httptest setup as the JobLogTail tests (newTestGHClient): a POST to the
+// job's own rerun endpoint, and a non-2xx response classified as an error.
+func TestRerunJobPostsJobRerun(t *testing.T) {
+	t.Parallel()
+
+	t.Run("sends exactly one POST to the job's rerun endpoint", func(t *testing.T) {
+		t.Parallel()
+		var gotMethod string
+		var hits int
+		mux := http.NewServeMux()
+		mux.HandleFunc("/repos/acme/widgets/actions/jobs/99/rerun", func(w http.ResponseWriter, r *http.Request) {
+			hits++
+			gotMethod = r.Method
+			w.WriteHeader(http.StatusCreated)
+		})
+
+		g := newTestGHClient(t, mux)
+
+		if err := g.RerunJob(t.Context(), "acme", "widgets", 99); err != nil {
+			t.Fatalf("RerunJob: unexpected error: %v", err)
+		}
+		if hits != 1 {
+			t.Errorf("rerun endpoint hits = %d, want 1", hits)
+		}
+		if gotMethod != http.MethodPost {
+			t.Errorf("method = %q, want %q", gotMethod, http.MethodPost)
+		}
+	})
+
+	t.Run("403 is a non-nil error", func(t *testing.T) {
+		t.Parallel()
+		mux := http.NewServeMux()
+		mux.HandleFunc("/repos/acme/widgets/actions/jobs/99/rerun", func(w http.ResponseWriter, _ *http.Request) {
+			w.WriteHeader(http.StatusForbidden)
+			fmt.Fprint(w, `{"message": "Resource not accessible by integration"}`)
+		})
+		g := newTestGHClient(t, mux)
+
+		if err := g.RerunJob(t.Context(), "acme", "widgets", 99); err == nil {
+			t.Error("RerunJob: expected an error, got nil")
+		}
+	})
+
+	t.Run("a workflow-still-running 403 is ErrWorkflowRunIncomplete", func(t *testing.T) {
+		t.Parallel()
+		mux := http.NewServeMux()
+		mux.HandleFunc("/repos/acme/widgets/actions/jobs/99/rerun", func(w http.ResponseWriter, _ *http.Request) {
+			w.WriteHeader(http.StatusForbidden)
+			fmt.Fprint(w, `{"message": "This workflow is already running"}`)
+		})
+		g := newTestGHClient(t, mux)
+
+		err := g.RerunJob(t.Context(), "acme", "widgets", 99)
+		if !errors.Is(err, ErrWorkflowRunIncomplete) {
+			t.Errorf("RerunJob error = %v, want ErrWorkflowRunIncomplete", err)
+		}
+	})
+}
+
 func TestMergePinsSha(t *testing.T) {
 	t.Parallel()
 
@@ -1106,6 +1166,29 @@ func TestJobLogTailLast200(t *testing.T) {
 		}
 	})
 
+	t.Run("redacts the signed URL from a fetch error", func(t *testing.T) {
+		t.Parallel()
+		logServer := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+		badURL := logServer.URL + "/log?sig=super-secret-signature"
+		logServer.Close() // now refuses connections, so the fetch fails
+
+		mux := http.NewServeMux()
+		mux.HandleFunc("/repos/acme/widgets/actions/jobs/99/logs", func(w http.ResponseWriter, _ *http.Request) {
+			w.Header().Set("Location", badURL)
+			w.WriteHeader(http.StatusFound)
+		})
+
+		g := newTestGHClient(t, mux)
+
+		_, err := g.JobLogTail(t.Context(), "acme", "widgets", 99, 10)
+		if err == nil {
+			t.Fatal("JobLogTail: want an error")
+		}
+		if strings.Contains(err.Error(), "super-secret-signature") {
+			t.Errorf("JobLogTail error = %q, want it to not hold the signed log URL's query", err)
+		}
+	})
+
 	t.Run("stops at 64 MiB and ends with the cut marker", func(t *testing.T) {
 		t.Parallel()
 		logServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
@@ -1254,6 +1337,213 @@ func TestJobLogTailCutsAtFailedStep(t *testing.T) {
 			t.Errorf("JobLogTail last line = %q, want it to contain %q", lines[len(lines)-1], "##[error]Process completed with exit code 2.")
 		}
 	})
+}
+
+// TestJobLogTailKeepsFailureLinesFromLongStep checks that a long go test
+// step's failure lines survive tailLog's cap even when they sit thousands
+// of lines before the step's final "##[error]" annotation (the "send the
+// failure, not the log head" gap: a 200-line tail of such a step would
+// otherwise hold nothing but unrelated setup or filler output).
+func TestJobLogTailKeepsFailureLinesFromLongStep(t *testing.T) {
+	t.Parallel()
+
+	const failureLine1 = "--- FAIL: TestResumeE2E_AnswerViaConsoleAdvancesTicketToDoneWithNoLeak (0.42s)"
+	const failureLine2 = "    merge_test.go:487: git rev-parse MERGE_HEAD: exit status 128"
+	const failSummaryLine = "FAIL\tzing/internal/job\t12.340s"
+
+	var b strings.Builder
+	fmt.Fprintln(&b, "##[group]Run go test")
+	filler := 0
+	writeFiller := func(n int) {
+		for range n {
+			fmt.Fprintf(&b, "filler %d\n", filler)
+			filler++
+		}
+	}
+	writeFiller(1000)
+	fmt.Fprintln(&b, failureLine1)
+	fmt.Fprintln(&b, failureLine2)
+	writeFiller(1000)
+	fmt.Fprintln(&b, failSummaryLine)
+	writeFiller(4000)
+	fmt.Fprint(&b, "##[error]Process completed with exit code 1.\n")
+
+	g := serveLog(t, b.String())
+
+	got, err := g.JobLogTail(t.Context(), "acme", "widgets", 99, 200)
+	if err != nil {
+		t.Fatalf("JobLogTail: unexpected error: %v", err)
+	}
+
+	lines := strings.Split(got, "\n")
+	if !strings.Contains(lines[0], "##[group]Run go test") {
+		t.Errorf("JobLogTail first line = %q, want it to contain %q", lines[0], "##[group]Run go test")
+	}
+	if !strings.Contains(got, failureLine1) {
+		t.Errorf("JobLogTail = %q, want it to contain %q", got, failureLine1)
+	}
+	if !strings.Contains(got, failureLine2) {
+		t.Errorf("JobLogTail = %q, want it to contain %q", got, failureLine2)
+	}
+	if !strings.Contains(got, "FAIL\tzing/internal/job") {
+		t.Errorf("JobLogTail = %q, want it to contain %q", got, "FAIL\tzing/internal/job")
+	}
+	if !strings.Contains(lines[len(lines)-1], "##[error]Process completed with exit code 1.") {
+		t.Errorf("JobLogTail last line = %q, want it to contain %q", lines[len(lines)-1], "##[error]Process completed with exit code 1.")
+	}
+	if len(lines) > 200 {
+		t.Errorf("JobLogTail lines = %d, want at most 200", len(lines))
+	}
+	if strings.Contains(got, "filler 5000") {
+		t.Errorf("JobLogTail = %q, must not contain %q", got, "filler 5000")
+	}
+	if !strings.Contains(got, "\n...\n") {
+		t.Errorf("JobLogTail = %q, want a \"...\" line between the non-adjacent failure windows", got)
+	}
+}
+
+// serveLog spins up an httptest server that serves body as a job's raw
+// log text, wires it behind the signed-URL redirect JobLogTail follows,
+// and returns a *GitHubClient pointed at it.
+func serveLog(t *testing.T, body string) *GitHubClient {
+	t.Helper()
+	logServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		fmt.Fprint(w, body)
+	}))
+	t.Cleanup(logServer.Close)
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/repos/acme/widgets/actions/jobs/99/logs", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Location", logServer.URL+"/log")
+		w.WriteHeader(http.StatusFound)
+	})
+	return newTestGHClient(t, mux)
+}
+
+// TestJobLogTailHitsKeepsHitWhenWindowOverflows proves a second failure
+// window is never dropped just because the hits cap has little room left
+// for it: with n=7 (hitsCap=5), the first hit and its own 3 lines of
+// after-context already fill 4 of the 5 slots, so the second hit's own
+// window ("...", 3 lines of before-context, the hit line) does not fit --
+// but the hit line itself always must, with its context trimmed first.
+func TestJobLogTailHitsKeepsHitWhenWindowOverflows(t *testing.T) {
+	t.Parallel()
+
+	const hit1 = "--- FAIL: TestA (0s)"
+	const hit2 = "--- FAIL: TestB (0s)"
+	lines := []string{
+		"##[group]Run go test",
+		hit1,
+		"after1", "after2", "after3",
+		"filler1", "filler2", "filler3", "filler4", "filler5",
+		hit2,
+		"##[error]Process completed with exit code 1.",
+	}
+	g := serveLog(t, strings.Join(lines, "\n")+"\n")
+
+	got, err := g.JobLogTail(t.Context(), "acme", "widgets", 99, 7)
+	if err != nil {
+		t.Fatalf("JobLogTail: unexpected error: %v", err)
+	}
+	if !strings.Contains(got, hit1) {
+		t.Errorf("JobLogTail = %q, want it to contain %q", got, hit1)
+	}
+	if !strings.Contains(got, hit2) {
+		t.Errorf("JobLogTail = %q, want it to contain %q", got, hit2)
+	}
+	gotLines := strings.Split(got, "\n")
+	if len(gotLines) > 7 {
+		t.Errorf("JobLogTail lines = %d, want at most 7", len(gotLines))
+	}
+	if !strings.Contains(gotLines[len(gotLines)-1], "##[error]Process completed with exit code 1.") {
+		t.Errorf("JobLogTail last line = %q, want it to contain %q", gotLines[len(gotLines)-1], "##[error]Process completed with exit code 1.")
+	}
+}
+
+// TestJobLogTailHitsCapKeepsEarliest proves hits are capped at n-2,
+// keeping the earliest ones: a run of 250 back-to-back failure lines
+// (no filler between them, so each becomes the previous hit's own
+// after-context rather than a fresh window) fills the cap with the first
+// ones and never reaches the later ones.
+func TestJobLogTailHitsCapKeepsEarliest(t *testing.T) {
+	t.Parallel()
+
+	var b strings.Builder
+	fmt.Fprintln(&b, "##[group]Run go test")
+	for i := range 250 {
+		fmt.Fprintf(&b, "--- FAIL: Test%d (0s)\n", i)
+	}
+	fmt.Fprint(&b, "##[error]Process completed with exit code 1.\n")
+
+	g := serveLog(t, b.String())
+
+	got, err := g.JobLogTail(t.Context(), "acme", "widgets", 99, 200)
+	if err != nil {
+		t.Fatalf("JobLogTail: unexpected error: %v", err)
+	}
+	lines := strings.Split(got, "\n")
+	if len(lines) > 200 {
+		t.Errorf("JobLogTail lines = %d, want at most 200", len(lines))
+	}
+	if !strings.Contains(got, "Test0 ") {
+		t.Errorf("JobLogTail = %q, want it to keep the earliest failure lines", got)
+	}
+	if strings.Contains(got, "Test249 ") {
+		t.Errorf("JobLogTail = %q, must not keep the latest failure lines past the cap", got)
+	}
+	if !strings.Contains(lines[len(lines)-1], "##[error]Process completed with exit code 1.") {
+		t.Errorf("JobLogTail last line = %q, want it to contain %q", lines[len(lines)-1], "##[error]Process completed with exit code 1.")
+	}
+}
+
+// TestJobLogTailHitsResetOnNewStep proves a new step header clears hits
+// collected by an earlier, non-failed step: a passing "go vet" step's own
+// "file.go:N:" line must not leak into the hits of a later failed step.
+func TestJobLogTailHitsResetOnNewStep(t *testing.T) {
+	t.Parallel()
+
+	lines := []string{
+		"##[group]Run go vet",
+		"vet_warning.go:12: shadowed variable",
+		"##[group]Run go test",
+		"--- FAIL: TestX (0s)",
+		"##[error]Process completed with exit code 1.",
+	}
+	g := serveLog(t, strings.Join(lines, "\n")+"\n")
+
+	got, err := g.JobLogTail(t.Context(), "acme", "widgets", 99, 200)
+	if err != nil {
+		t.Fatalf("JobLogTail: unexpected error: %v", err)
+	}
+	if !strings.Contains(got, "TestX") {
+		t.Errorf("JobLogTail = %q, want it to contain %q", got, "TestX")
+	}
+	if strings.Contains(got, "vet_warning.go") {
+		t.Errorf("JobLogTail = %q, must not contain the earlier passing step's line", got)
+	}
+}
+
+func TestIsFailureLine(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		line string
+		want bool
+	}{
+		{"--- FAIL: TestX (0.1s)", true},
+		{"2026-10-05T01:02:03Z FAIL\tzing/x\t1.2s", true},
+		{"panic: runtime error", true},
+		{"WARNING: DATA RACE", true},
+		{"    merge_test.go:487: boom", true},
+		{"ok  \tzing/x\t0.1s", false},
+		{"go: downloading x", false},
+		{"FAILED to fetch", false},
+	}
+	for _, tt := range tests {
+		if got := isFailureLine(tt.line); got != tt.want {
+			t.Errorf("isFailureLine(%q) = %v, want %v", tt.line, got, tt.want)
+		}
+	}
 }
 
 func TestClassifyGitHubErr(t *testing.T) {
