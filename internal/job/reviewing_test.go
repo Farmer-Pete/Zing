@@ -2744,12 +2744,14 @@ func TestTriageStoresDecisions(t *testing.T) {
 // ---- TestTriageDefaultsToAccept ----------------------------------------------
 
 // TestTriageDefaultsToAccept proves design section 6.5 step 2 and section
-// 14's own edge case: an item the owner leaves undecided defaults to
-// accept. The owner decides only one of the round's two above-floor
-// findings and sends a free reply on the question, which
-// markAnsweredQuestionsTx marks answered on its own (the other path design
-// section 14 names: "the console marks the question answered only when
-// every item has a decision" -- a reply is the other one).
+// 14's own edge case: an item whose own decision is out-of-set for review
+// (reviewFindingDecision's own fallback) defaults to accept. The owner
+// decides only one of the round's two above-floor findings; the other
+// reaches triage with the out-of-set decision insertRawReviewSentDecision
+// (reviewing_cap_test.go) gave it, since ticket #68 narrowed
+// markAnsweredQuestionsTx to require a decision for every item before a
+// review question answers at all, with a free reply alone no longer
+// enough.
 func TestTriageDefaultsToAccept(t *testing.T) {
 	if testing.Short() {
 		t.Skip("slow end-to-end flow; runs in the full suite")
@@ -2776,6 +2778,11 @@ func TestTriageDefaultsToAccept(t *testing.T) {
 	decided := itemRefByText(t, payload, "unchecked input")
 	undecided := itemRefByText(t, payload, "breaks the build")
 
+	// A review question now answers only once every item has a decision
+	// (ticket #68), so "undecided" needs a decision of its own to close the
+	// question at all; reject is out-of-set for review (SaveDraft itself
+	// refuses it), which is exactly what exercises triage's own default.
+	insertRawReviewSentDecision(t, s, ticket.ID, q.ID, undecided, response.DecisionReject)
 	answerReviewItems(t, s, ticket.ID, q.ID, map[string]response.Decision{decided: response.DecisionDrop}, "going with the recommendation for the rest")
 
 	ticket2 := pbGetTicket(t, s, ticket.ID)
