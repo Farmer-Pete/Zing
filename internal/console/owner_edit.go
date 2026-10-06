@@ -34,6 +34,7 @@ type ownerEditBody struct {
 	Text   *string `json:"text"`
 	Test   *string `json:"test"`
 	Demo   *bool   `json:"demo"`
+	Tasks  *string `json:"tasks"`
 	Body   *string `json:"body"`
 }
 
@@ -42,7 +43,7 @@ func (b ownerEditBody) request(ticketID int64) store.OwnerEditRequest {
 	return store.OwnerEditRequest{
 		TicketID: ticketID, Target: b.Target, Ref: b.Ref, Action: b.Action,
 		Given: b.Given, When: b.When, Then: b.Then, Check: b.Check,
-		Text: b.Text, Test: b.Test, Demo: b.Demo, Body: b.Body,
+		Text: b.Text, Test: b.Test, Demo: b.Demo, Tasks: b.Tasks, Body: b.Body,
 	}
 }
 
@@ -68,8 +69,9 @@ var ownerEditStatus = map[store.OwnerEditCode]int{
 const ownerEditSandboxCmdOnlyReason = "editing a check or test command is allowed from this machine only"
 
 // handleOwnerEdit is POST /tickets/{id}/edit: the owner edits a sealed
-// scenario, a sealed plan's task, or the ticket body (store.OwnerEdit).
-// 204 on success; a refusal answers its status with the reason as body.
+// scenario, a sealed plan's task, a sealed plan's delivery file task list,
+// or the ticket body (store.OwnerEdit). 204 on success; a refusal answers
+// its status with the reason as body.
 func (c *console) handleOwnerEdit(w http.ResponseWriter, r *http.Request) {
 	r.Body = http.MaxBytesReader(w, r.Body, maxOwnerEditBodyBytes)
 
