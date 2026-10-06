@@ -21,6 +21,12 @@ import (
 	"zing/internal/tracker"
 )
 
+// ticketStateAbandoned is the store's own terminal "abandoned" state
+// (store.AbandonTicket's own ticketStateAbandoned, unexported there): the
+// one console package copy liveHolder, handlePickup, and later routes
+// check tickets.state against.
+const ticketStateAbandoned = "abandoned"
+
 // pickupRequest is POST /projects/{id}/pickup's body: {"n": <issue number>}.
 type pickupRequest struct {
 	N int `json:"n"`
@@ -71,7 +77,7 @@ func (c *console) handlePickup(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, genericServerErrorBody, http.StatusInternalServerError)
 		return
 	}
-	if alreadyTicketed {
+	if alreadyTicketed && existingTicket.State != ticketStateAbandoned {
 		http.Error(w, fmt.Sprintf("issue #%d is already ticket %d", req.N, existingTicket.ID), http.StatusConflict)
 		return
 	}
@@ -87,10 +93,19 @@ func (c *console) handlePickup(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if _, err := dispatch.InsertAndAnnounce(r.Context(), c.store, c.tracker, projectID, trackerProject, c.user, tk); err != nil {
+	newID, retiredRef, err := c.insertFresh(r.Context(), projectID, trackerProject, tk)
+	if refusal, ok := errors.AsType[*actionRefusal](err); ok {
+		http.Error(w, refusal.Reason, refusal.Status)
+		return
+	}
+	if err != nil {
 		slog.Error("console: pickup: insert ticket", "project_id", projectID, "ref", ref, "err", err)
 		http.Error(w, genericServerErrorBody, http.StatusInternalServerError)
 		return
+	}
+	if retiredRef != "" {
+		slog.Info("console: pickup retired abandoned ticket",
+			"old_ticket_id", existingTicket.ID, "new_ticket_id", newID, "new_ref", retiredRef, "project_id", projectID, "ref", ref)
 	}
 
 	c.bus.Publish()
@@ -116,6 +131,35 @@ func (c *console) fetchIssue(ctx context.Context, trackerProject, ref string) (t
 		return tracker.Ticket{}, fmt.Errorf("console: issue %s: %w", ref, err)
 	}
 	return tk, nil
+}
+
+// insertFresh retires an abandoned ticket holding tk.Ref, then inserts the
+// new queued ticket and posts the pickup comment exactly as intake does.
+// retiredRef is the old ticket's new ref, or "" when nothing held tk.Ref.
+// Retire and insert are two commits, so a live ticket can take tk.Ref in
+// between (auto intake, or a second click). When retire reports ErrRefLive
+// or the insert fails, liveHolder re-reads the ref; a live holder turns the
+// failure into a 409 naming that ticket.
+func (c *console) insertFresh(ctx context.Context, projectID int64, trackerProject string, tk tracker.Ticket) (newID int64, retiredRef string, err error) {
+	retiredRef, err = c.store.RetireAbandonedRef(ctx, projectID, tk.Ref)
+	if err != nil {
+		return 0, "", c.liveHolder(ctx, projectID, tk.Ref, fmt.Errorf("console: retire ref %s: %w", tk.Ref, err))
+	}
+	newID, err = dispatch.InsertAndAnnounce(ctx, c.store, c.tracker, projectID, trackerProject, c.user, tk)
+	if err != nil {
+		return 0, retiredRef, c.liveHolder(ctx, projectID, tk.Ref, err)
+	}
+	return newID, retiredRef, nil
+}
+
+// liveHolder returns a 409 *actionRefusal when a non-abandoned ticket now
+// holds ref, and cause otherwise (including when the re-read itself fails).
+func (c *console) liveHolder(ctx context.Context, projectID int64, ref string, cause error) error {
+	cur, found, err := c.store.TicketByRef(ctx, projectID, ref)
+	if err != nil || !found || cur.State == ticketStateAbandoned {
+		return cause
+	}
+	return &actionRefusal{Status: http.StatusConflict, Reason: fmt.Sprintf("issue #%s is already ticket %d", ref, cur.ID)}
 }
 
 // projectName returns the Name of the store project id -- the

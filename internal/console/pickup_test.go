@@ -247,6 +247,68 @@ func TestPickup_SucceedsAndPostsOnePickupComment(t *testing.T) {
 	}
 }
 
+// TestPickup_AcceptsAnIssueWhoseTicketIsAbandoned proves pickup accepts an
+// issue whose only ticket is abandoned (#65): it retires the old ticket's
+// ref to "5-abandoned-1" and inserts a fresh queued ticket at "5", exactly
+// as a restart does.
+func TestPickup_AcceptsAnIssueWhoseTicketIsAbandoned(t *testing.T) {
+	t.Parallel()
+	s := newConsoleTestStore(t)
+	projectID := seedPickupProject(t, s)
+
+	oldID, err := s.InsertTicket(t.Context(), store.Ticket{
+		ProjectID: projectID, TrackerRef: "5", Title: "first attempt", State: testStateQueued,
+	})
+	if err != nil {
+		t.Fatalf("InsertTicket: %v", err)
+	}
+	if err = s.AbandonTicket(t.Context(), oldID, "test setup"); err != nil {
+		t.Fatalf("AbandonTicket: %v", err)
+	}
+
+	tr := newPickupTestTracker()
+	tr.issues["5"] = tracker.Ticket{Ref: "5", Title: "a fresh attempt", Body: "do it again"}
+
+	srv := newTestServerPickup(t, s, bus.New(), newTestLogHandler(t), tr)
+	resp := doRequest(t, mutationRequest(t, srv, pickupPath(projectID), `{"n":5}`))
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusNoContent {
+		t.Fatalf("status = %d, want 204", resp.StatusCode)
+	}
+
+	tickets, err := s.TicketsByProject(t.Context(), projectID)
+	if err != nil {
+		t.Fatalf("TicketsByProject: %v", err)
+	}
+	if len(tickets) != 2 {
+		t.Fatalf("tickets after pickup = %d, want 2: %+v", len(tickets), tickets)
+	}
+
+	var newTicket, oldTicket *store.Ticket
+	for i := range tickets {
+		switch tickets[i].ID {
+		case oldID:
+			oldTicket = &tickets[i]
+		default:
+			newTicket = &tickets[i]
+		}
+	}
+	if newTicket == nil || newTicket.TrackerRef != "5" || newTicket.State != testStateQueued {
+		t.Errorf("new ticket = %+v, want ref=5 state=%s", newTicket, testStateQueued)
+	}
+	if oldTicket == nil || oldTicket.TrackerRef != "5-abandoned-1" || oldTicket.State != "abandoned" {
+		t.Errorf("old ticket = %+v, want ref=5-abandoned-1 state=abandoned", oldTicket)
+	}
+
+	comments := tr.recordedComments()
+	if len(comments) != 1 {
+		t.Fatalf("pickup comments posted = %d, want exactly 1: %+v", len(comments), comments)
+	}
+	if comments[0].ref != "5" {
+		t.Errorf("pickup comment ref = %q, want 5", comments[0].ref)
+	}
+}
+
 // TestPickup_RejectsNonPositiveN proves n must be a positive integer (400),
 // before any tracker or store call.
 func TestPickup_RejectsNonPositiveN(t *testing.T) {
