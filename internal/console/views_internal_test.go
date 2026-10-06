@@ -159,21 +159,15 @@ func TestResponseInvalidDetailFence(t *testing.T) {
 	if !strings.Contains(got, "Job: planning. Run 5.") {
 		t.Errorf("responseInvalidDetail(nil lens) = %q, want it to contain %q", got, "Job: planning. Run 5.")
 	}
+	if !strings.Contains(got, "\n\n```\nplan/goals: required\n```") {
+		t.Errorf("responseInvalidDetail(nil lens) = %q, want a three-backtick fence", got)
+	}
 
 	noErrors := "response invalid run 5\nthe final message failed validation"
 	got = responseInvalidDetail("planning", nil, 5, noErrors)
 	const want = "Job: planning. Run 5.\n\nReason: the final message failed validation."
 	if got != want {
 		t.Errorf("responseInvalidDetail(no errors) = %q, want %q", got, want)
-	}
-	if strings.Contains(got, "Validator errors") {
-		t.Errorf("responseInvalidDetail(no errors) = %q, want no \"Validator errors\" heading", got)
-	}
-
-	plain := "response invalid run 5\nthe final message failed validation\nplan/goals: required"
-	got = responseInvalidDetail("planning", nil, 5, plain)
-	if !strings.Contains(got, "\n\n```\nplan/goals: required\n```") {
-		t.Errorf("responseInvalidDetail(plain errors) = %q, want a three-backtick fence", got)
 	}
 
 	backtickRun := "response invalid run 5\nthe final message failed validation\nplan/goals: required\n```\nplan/review: required"

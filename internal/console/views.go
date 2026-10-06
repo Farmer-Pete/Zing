@@ -1854,8 +1854,11 @@ func (c *console) withEscalationDetails(ctx context.Context, ticketID int64, row
 		}
 		var ep response.EscalationPayload
 		if err := json.Unmarshal(esc.Payload, &ep); err != nil {
-			slog.DebugContext(ctx, "console: escalation detail source unavailable",
-				"ticket_id", ticketID, "escalation_id", esc.ID, "reason", "payload")
+			attrs := []any{"ticket_id", ticketID, "escalation_id", esc.ID, "reason", "payload"}
+			if esc.RunID != nil {
+				attrs = append(attrs, "run_id", *esc.RunID)
+			}
+			slog.DebugContext(ctx, "console: escalation detail source unavailable", attrs...)
 			continue
 		}
 
@@ -1880,7 +1883,7 @@ func (c *console) withEscalationDetails(ctx context.Context, ticketID int64, row
 				}
 				runsLoaded = true
 			}
-			detail = c.responseInvalidDetailFor(ctx, ticketID, esc.ID, *esc.RunID, rows, runs, sessions)
+			detail = responseInvalidDetailFor(ctx, ticketID, esc.ID, *esc.RunID, rows, runs, sessions)
 		}
 		if detail == "" {
 			continue
@@ -2000,7 +2003,7 @@ func findingsDetail(version int, findings []response.Finding) string {
 // It returns "" with no error when the marker, the run, or its session is
 // missing -- each logged once at Debug rather than failing the render, the
 // same fallback loopsExhaustedDetail uses for its own missing sources.
-func (c *console) responseInvalidDetailFor(
+func responseInvalidDetailFor(
 	ctx context.Context, ticketID, escalationID, runID int64, rows []store.MessageRow, runs []store.Run, sessions []store.Session,
 ) string {
 	marker, ok := findResponseInvalidMarker(rows, runID)
@@ -2010,21 +2013,22 @@ func (c *console) responseInvalidDetailFor(
 		return ""
 	}
 
-	run, ok := findRun(runs, runID)
-	if !ok {
+	runIdx := slices.IndexFunc(runs, func(r store.Run) bool { return r.ID == runID })
+	if runIdx < 0 {
 		slog.DebugContext(ctx, "console: escalation detail source unavailable",
 			"ticket_id", ticketID, "escalation_id", escalationID, "reason", "run", "run_id", runID)
 		return ""
 	}
+	run := runs[runIdx]
 
-	session, ok := findSession(sessions, run.SessionID)
-	if !ok {
+	sessionIdx := slices.IndexFunc(sessions, func(s store.Session) bool { return s.ID == run.SessionID })
+	if sessionIdx < 0 {
 		slog.DebugContext(ctx, "console: escalation detail source unavailable",
 			"ticket_id", ticketID, "escalation_id", escalationID, "reason", "session", "run_id", runID)
 		return ""
 	}
 
-	return responseInvalidDetail(session.Job, run.Lens, runID, marker)
+	return responseInvalidDetail(sessions[sessionIdx].Job, run.Lens, runID, marker)
 }
 
 // findResponseInvalidMarker returns the body of the update row among rows
@@ -2043,26 +2047,6 @@ func findResponseInvalidMarker(rows []store.MessageRow, runID int64) (string, bo
 		}
 	}
 	return "", false
-}
-
-// findRun returns the run in runs whose ID is runID.
-func findRun(runs []store.Run, runID int64) (store.Run, bool) {
-	for _, r := range runs {
-		if r.ID == runID {
-			return r, true
-		}
-	}
-	return store.Run{}, false
-}
-
-// findSession returns the session in sessions whose ID is sessionID.
-func findSession(sessions []store.Session, sessionID int64) (store.Session, bool) {
-	for _, s := range sessions {
-		if s.ID == sessionID {
-			return s, true
-		}
-	}
-	return store.Session{}, false
 }
 
 // responseInvalidDetail renders a response_invalid escalation's own job,

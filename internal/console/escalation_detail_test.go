@@ -142,7 +142,7 @@ func TestEscalationQuestion_LoopsExhaustedListsFindings(t *testing.T) {
 	// only looks at marker rows below the escalation's own id, so a later
 	// retry's own v4 pending marker must never leak into this escalation's
 	// findings (the #87 failure the design guards against). Without that
-	// bound, this would still pass today since nothing else seeds a v4.
+	// bound, v4 would be read and the unwanted v4 assertions below would fail.
 	seedPlanReviewArtifact(t, s, ticketID, runID, 4, []response.Finding{
 		{Lens: response.LensQuality, Severity: response.SeverityMinor, Location: findingLocation, Text: "v4 later finding text", Fix: findingFixPlaceholder},
 	})
@@ -162,7 +162,11 @@ func TestEscalationQuestion_LoopsExhaustedListsFindings(t *testing.T) {
 	group := findGroup(t, splitQuestionGroups(t, main), "loops_exhausted: raise machine.toml")
 	body := qBody(t, group)
 
-	for _, want := range []string{"plan review of v3", "major", findingLocation, "v3 major finding text", "v3 minor finding text"} {
+	for _, want := range []string{
+		"plan review of v3",
+		"major at <code>" + findingLocation + "</code>: v3 major finding text",
+		"minor at <code>" + findingLocation + "</code>: v3 minor finding text",
+	} {
 		if !strings.Contains(body, want) {
 			t.Errorf("q-body missing %q; got:\n%s", want, body)
 		}
