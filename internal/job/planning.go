@@ -93,10 +93,18 @@ const (
 	// always had (PR #60 review, P1: only an escalation's own Kind may read
 	// its Recommended back this way -- a merge question's Recommended is
 	// always "a", meaning something else entirely there).
+	//
+	// escalationChoiceAccept is "accept the remaining findings", offered
+	// only as an EscalationCommit.ExtraOptions entry on a review
+	// loops_exhausted question (ticket 60). It shares the "d" key with
+	// escalationChoiceGrant because the two never appear on one question: a
+	// grant comes only from a build escalation, and checkEscalationOptions
+	// (store/commit.go) rejects a duplicate key if that ever changed.
 	escalationChoiceRetry   = "a"
 	escalationChoiceBack    = "b"
 	escalationChoiceAbandon = "c"
 	escalationChoiceGrant   = "d"
+	escalationChoiceAccept  = "d"
 
 	responseInvalidWhat = "the model's final message failed validation twice in a row"
 

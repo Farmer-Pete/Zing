@@ -431,7 +431,9 @@ const fixRequestedFindingsPrefix = "fix requested findings after run "
 // to judging (acceptAtCap, issue #68); otherwise an accepted row the owner
 // picked (OwnerPicked) opens the fix request anyway, bypassing the gate,
 // because the review question already asked the owner this once; otherwise
-// the gate escalates loops_exhausted as before.
+// the gate escalates loops_exhausted, offering the owner option d, accept
+// the findings left and continue to judging, alongside retry and abandon
+// (ticket 60).
 func (h reviewingHandler) fixreq(ctx context.Context, t store.Ticket, d Deps, accepted []response.FindingArtifact) (store.HandlerCommit, error) {
 	msg, k, maxLoops, err := fixRequestOrLoopsExhausted(ctx, t, d, accepted)
 	if err != nil {
@@ -444,9 +446,13 @@ func (h reviewingHandler) fixreq(ctx context.Context, t store.Ticket, d Deps, ac
 		case slices.ContainsFunc(accepted, func(f response.FindingArtifact) bool { return f.OwnerPicked }):
 			return ownerAcceptAtCap(ctx, t, d, k, maxLoops, accepted)
 		default:
+			rec, recErr := loopsExhaustedRecommendationFor(ctx, t, d, accepted)
+			if recErr != nil {
+				return store.HandlerCommit{}, recErr
+			}
 			what := fmt.Sprintf("review findings remain after %d fix runs", k)
 			why := fmt.Sprintf("max_loops for review is %d", maxLoops)
-			return reviewLoopsExhausted(t, d, what, why, renderFixFindings(accepted)), nil
+			return reviewLoopsExhausted(t, d, what, why, renderFixFindings(accepted), rec), nil
 		}
 	}
 	c := baseCommit(t, d)
@@ -454,12 +460,64 @@ func (h reviewingHandler) fixreq(ctx context.Context, t store.Ticket, d Deps, ac
 	return c, nil
 }
 
+// reviewAcceptRemainingOptionText is option d's text on the review
+// loops_exhausted question (ticket 60: accept the remaining findings and
+// continue to judging).
+const reviewAcceptRemainingOptionText = "Accept the remaining findings and continue to judging"
+
 // reviewLoopsExhausted is FIXREQ's own loops_exhausted escalation (design
-// section 6.8): no run caused it, so RunID and SessionID are both nil.
-func reviewLoopsExhausted(t store.Ticket, d Deps, what, why, tried string) store.HandlerCommit {
+// section 6.8): no run caused it, so RunID and SessionID are both nil. It
+// adds option d, accept the remaining findings and continue to judging, to
+// escalationOptionsFor's own Retry/Abandon pair, and overrides the picked
+// recommendation with recommended (ticket 60).
+func reviewLoopsExhausted(t store.Ticket, d Deps, what, why, tried, recommended string) store.HandlerCommit {
 	code := string(response.EscalationCodeLoopsExhausted)
 	slog.Warn("escalation written", "ticket_id", t.ID, "session_id", nil, "run_id", nil, "code", code, "origin", string(response.EscalationOriginReview))
-	return escalationCommit(t, d, nil, nil, code, what, why, tried, response.EscalationOriginReview)
+	c := escalationCommit(t, d, nil, nil, code, what, why, tried, response.EscalationOriginReview)
+	c.Escalation.ExtraOptions = []response.Option{{Key: escalationChoiceAccept, Text: reviewAcceptRemainingOptionText}}
+	c.Escalation.Recommended = recommended
+	return c
+}
+
+// newestFixChangedFiles reports whether the newest fix run's build report
+// (TaskN 0, newest artifact id) lists at least one changed path; found is
+// false when no fix report exists yet (ticket 60, owner decision Q2).
+// FilesChanged is the builder's own claim, which CHECK has already
+// cross-checked against the real diff.
+func newestFixChangedFiles(reports []store.BuildReportRow) (changed, found bool) {
+	for i := len(reports) - 1; i != -1; i-- {
+		if reports[i].Report.TaskN == 0 {
+			return len(reports[i].Report.FilesChanged) != 0, true
+		}
+	}
+	return false, false
+}
+
+// loopsExhaustedRecommendation is the review loops_exhausted question's own
+// recommendation (ticket 60): accept (d) when every accepted finding is at
+// or below minor, or when the newest fix run changed no file, since
+// another fix run is unlikely to help; retry (a) when a major or blocker
+// finding remains and the newest fix run did change a file, or when no fix
+// run has happened yet (owner decision Q2).
+func loopsExhaustedRecommendation(accepted []response.FindingArtifact, changed, found bool) string {
+	if allAtOrBelowFloor(accepted, response.SeverityMinor) {
+		return escalationChoiceAccept
+	}
+	if !found || changed {
+		return escalationChoiceRetry
+	}
+	return escalationChoiceAccept
+}
+
+// loopsExhaustedRecommendationFor reads the ticket's own build reports and
+// returns loopsExhaustedRecommendation's pick for accepted (ticket 60).
+func loopsExhaustedRecommendationFor(ctx context.Context, t store.Ticket, d Deps, accepted []response.FindingArtifact) (string, error) {
+	reports, err := d.Store.BuildReports(ctx, t.ID)
+	if err != nil {
+		return "", fmt.Errorf("job: reviewing: loops_exhausted recommendation: build reports: %w", err)
+	}
+	changed, found := newestFixChangedFiles(reports)
+	return loopsExhaustedRecommendation(accepted, changed, found), nil
 }
 
 // ---- TRIAGE (design section 6.5) ------------------------------------------

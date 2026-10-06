@@ -11,6 +11,7 @@ package job
 import (
 	"encoding/json"
 	"fmt"
+	"reflect"
 	"strings"
 	"testing"
 	"testing/fstest"
@@ -318,6 +319,103 @@ func TestLoopGateDefaultAcceptEscalates(t *testing.T) {
 			t.Errorf("commit5.Messages carries %q, want neither a fix request nor an accepted-at-cap message", m.Body)
 		}
 	}
+	wantExtra := []response.Option{{Key: escalationChoiceAccept, Text: reviewAcceptRemainingOptionText}}
+	if !reflect.DeepEqual(commit5.Escalation.ExtraOptions, wantExtra) {
+		t.Errorf("Escalation.ExtraOptions = %+v, want %+v", commit5.Escalation.ExtraOptions, wantExtra)
+	}
+	if commit5.Escalation.Recommended != escalationChoiceRetry {
+		t.Errorf("Escalation.Recommended = %q, want %q (driveReviewToCap's second fix changed greet.go)", commit5.Escalation.Recommended, escalationChoiceRetry)
+	}
+}
+
+// ---- TestLoopsExhaustedRecommendation ---------------------------------------
+
+// TestLoopsExhaustedRecommendation proves loopsExhaustedRecommendation and
+// newestFixChangedFiles as pure functions (ticket 60, owner decisions Q2
+// and Q3's companion rule section 5).
+func TestLoopsExhaustedRecommendation(t *testing.T) {
+	accept := response.FindingAccept
+	minor := response.FindingArtifact{ID: "r3f1", Severity: response.SeverityMinor, Decision: &accept}
+	nit := response.FindingArtifact{ID: "r3f2", Severity: response.SeverityNit, Decision: &accept}
+	major := response.FindingArtifact{ID: "r3f3", Severity: response.SeverityMajor, Decision: &accept}
+	blocker := response.FindingArtifact{ID: "r3f4", Severity: response.SeverityBlocker, Decision: &accept}
+
+	t.Run("recommendation", func(t *testing.T) {
+		cases := []struct {
+			name     string
+			accepted []response.FindingArtifact
+			changed  bool
+			found    bool
+			want     string
+		}{
+			{"minor and nit, changed, found: accept", []response.FindingArtifact{minor, nit}, true, true, escalationChoiceAccept},
+			{"major, changed, found: retry", []response.FindingArtifact{major}, true, true, escalationChoiceRetry},
+			{"blocker, unchanged, found: accept", []response.FindingArtifact{blocker}, false, true, escalationChoiceAccept},
+			{"major, not found: retry", []response.FindingArtifact{major}, false, false, escalationChoiceRetry},
+		}
+		for _, tc := range cases {
+			t.Run(tc.name, func(t *testing.T) {
+				got := loopsExhaustedRecommendation(tc.accepted, tc.changed, tc.found)
+				if got != tc.want {
+					t.Errorf("loopsExhaustedRecommendation(...) = %q, want %q", got, tc.want)
+				}
+			})
+		}
+	})
+
+	t.Run("newestFixChangedFiles", func(t *testing.T) {
+		withFiles := response.BuildReport{FilesChanged: []string{"fix.go"}}
+		noFiles := response.BuildReport{}
+		task1WithFiles := withFiles
+		task1WithFiles.TaskN = 1
+		task2WithFiles := withFiles
+		task2WithFiles.TaskN = 2
+
+		cases := []struct {
+			name        string
+			reports     []store.BuildReportRow
+			wantChanged bool
+			wantFound   bool
+		}{
+			{
+				name: "task report, fix with files, fix with none: newest fix wins",
+				reports: []store.BuildReportRow{
+					{Report: task1WithFiles},
+					{Report: withFiles},
+					{Report: noFiles},
+				},
+				wantChanged: false,
+				wantFound:   true,
+			},
+			{
+				name: "fix with none, then task report: fix still newest",
+				reports: []store.BuildReportRow{
+					{Report: noFiles},
+					{Report: task2WithFiles},
+				},
+				wantChanged: false,
+				wantFound:   true,
+			},
+			{
+				name:      "task report only: not found",
+				reports:   []store.BuildReportRow{{Report: task1WithFiles}},
+				wantFound: false,
+			},
+			{
+				name:      "nil: not found",
+				reports:   nil,
+				wantFound: false,
+			},
+		}
+		for _, tc := range cases {
+			t.Run(tc.name, func(t *testing.T) {
+				changed, found := newestFixChangedFiles(tc.reports)
+				if changed != tc.wantChanged || found != tc.wantFound {
+					t.Errorf("newestFixChangedFiles(...) = (%v, %v), want (%v, %v)", changed, found, tc.wantChanged, tc.wantFound)
+				}
+			})
+		}
+	})
 }
 
 // ---- TestLoopGateLegacyAcceptRowEscalates -----------------------------------
