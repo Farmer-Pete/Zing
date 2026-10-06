@@ -523,6 +523,119 @@ terminal = ["done"]
 	}
 }
 
+// TestLoad_IdleMinutesAndTimeoutRetries covers the idle_minutes and
+// timeout_retries fields: both default to 0 when absent, idle_minutes is
+// claude-only and must be at least 1 and less than timeout_minutes, and
+// timeout_retries must be 0 or 1.
+func TestLoad_IdleMinutesAndTimeoutRetries(t *testing.T) {
+	t.Parallel()
+
+	t.Run("idle_minutes and timeout_retries set", func(t *testing.T) {
+		t.Parallel()
+		m, err := Load(machineFixture(t, validJobFragment+"\nidle_minutes = 2\ntimeout_retries = 1\n"), machineTOMLPath)
+		if err != nil {
+			t.Fatalf("Load(): %v", err)
+		}
+		if got := m.Jobs["test"].IdleMinutes; got != 2 {
+			t.Errorf("IdleMinutes = %d, want 2", got)
+		}
+		if got := m.Jobs["test"].TimeoutRetries; got != 1 {
+			t.Errorf("TimeoutRetries = %d, want 1", got)
+		}
+	})
+
+	t.Run("absent keys default to zero", func(t *testing.T) {
+		t.Parallel()
+		m, err := Load(machineFixture(t, validJobFragment), machineTOMLPath)
+		if err != nil {
+			t.Fatalf("Load(): %v", err)
+		}
+		if got := m.Jobs["test"].IdleMinutes; got != 0 {
+			t.Errorf("IdleMinutes = %d, want 0 (the absent-key default)", got)
+		}
+		if got := m.Jobs["test"].TimeoutRetries; got != 0 {
+			t.Errorf("TimeoutRetries = %d, want 0 (the absent-key default)", got)
+		}
+	})
+
+	t.Run("idle_minutes zero", func(t *testing.T) {
+		t.Parallel()
+		_, err := Load(machineFixture(t, validJobFragment+"\nidle_minutes = 0\n"), machineTOMLPath)
+		want := "machine.toml: job test: idle_minutes: must be at least 1 and less than timeout_minutes"
+		if err == nil || err.Error() != want {
+			t.Errorf("Load() = %v, want %q", err, want)
+		}
+	})
+
+	t.Run("idle_minutes not less than timeout_minutes", func(t *testing.T) {
+		t.Parallel()
+		_, err := Load(machineFixture(t, validJobFragment+"\nidle_minutes = 5\n"), machineTOMLPath)
+		want := "machine.toml: job test: idle_minutes: must be at least 1 and less than timeout_minutes"
+		if err == nil || err.Error() != want {
+			t.Errorf("Load() = %v, want %q", err, want)
+		}
+	})
+
+	t.Run("idle_minutes on a codex job", func(t *testing.T) {
+		t.Parallel()
+		_, err := Load(machineFixture(t, "model = \"codex\"\nruntime = \"codex\"\ntools = [\"read\"]\nprompt = \"classify.md\"\ntimeout_minutes = 5\nidle_minutes = 2\n"), machineTOMLPath)
+		want := "machine.toml: job test: idle_minutes: only the claude runtime supports it"
+		if err == nil || err.Error() != want {
+			t.Errorf("Load() = %v, want %q", err, want)
+		}
+	})
+
+	t.Run("timeout_retries out of range high", func(t *testing.T) {
+		t.Parallel()
+		_, err := Load(machineFixture(t, validJobFragment+"\ntimeout_retries = 2\n"), machineTOMLPath)
+		want := "machine.toml: job test: timeout_retries: must be 0 or 1"
+		if err == nil || err.Error() != want {
+			t.Errorf("Load() = %v, want %q", err, want)
+		}
+	})
+
+	t.Run("timeout_retries out of range low", func(t *testing.T) {
+		t.Parallel()
+		_, err := Load(machineFixture(t, validJobFragment+"\ntimeout_retries = -1\n"), machineTOMLPath)
+		want := "machine.toml: job test: timeout_retries: must be 0 or 1"
+		if err == nil || err.Error() != want {
+			t.Errorf("Load() = %v, want %q", err, want)
+		}
+	})
+}
+
+// TestLoad_ShippedMachineTimeoutKeys proves the real machine.toml sets
+// idle_minutes = 2 and timeout_retries = 1 on classify and perimeter only;
+// every other job keeps both at their absent-key default of 0.
+func TestLoad_ShippedMachineTimeoutKeys(t *testing.T) {
+	t.Parallel()
+
+	m, err := Load(zing.Assets, machineTOMLPath)
+	if err != nil {
+		t.Fatalf("Load(real machine.toml): %v", err)
+	}
+
+	for _, name := range []string{"classify", "perimeter"} {
+		job := m.Jobs[name]
+		if job.IdleMinutes != 2 {
+			t.Errorf("%s.IdleMinutes = %d, want 2", name, job.IdleMinutes)
+		}
+		if job.TimeoutRetries != 1 {
+			t.Errorf("%s.TimeoutRetries = %d, want 1", name, job.TimeoutRetries)
+		}
+	}
+
+	for _, name := range []string{testJobNameBuild, "merge", "planning", "review", "respond", "side"} {
+		job := m.Jobs[name]
+		if job.IdleMinutes != 0 {
+			t.Errorf("%s.IdleMinutes = %d, want 0", name, job.IdleMinutes)
+		}
+		if job.TimeoutRetries != 0 {
+			t.Errorf("%s.TimeoutRetries = %d, want 0", name, job.TimeoutRetries)
+		}
+	}
+}
+
 func TestPromptRef_AcceptsStringAndFeatureBugPair(t *testing.T) {
 	t.Parallel()
 
