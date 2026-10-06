@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"regexp"
 	"slices"
 	"strings"
 	"testing"
@@ -754,4 +755,58 @@ func TestThreadRendersSandboxRunBox(t *testing.T) {
 			t.Errorf("rendered thread has a sandbox run box with no open ticket; got:\n%s", got)
 		}
 	})
+}
+
+// decisionButtonTexts returns the decision words rendered by itemRows, in
+// document order, by matching each decision button's own text content.
+func decisionButtonTexts(t *testing.T, rendered string) []string {
+	t.Helper()
+	matches := regexp.MustCompile(`>(accept|drop|discuss|reject)</button>`).FindAllStringSubmatch(rendered, -1)
+	words := make([]string, len(matches))
+	for i, m := range matches {
+		words[i] = m[1]
+	}
+	return words
+}
+
+// renderItemRows renders itemRows(1, 2, items, decisions, pickedItems, nil,
+// false, true) to a string, failing the test on a render error.
+func renderItemRows(t *testing.T, items []ThreadItem, decisions []response.Decision, pickedItems map[string]response.Decision) string {
+	t.Helper()
+	var sb strings.Builder
+	if err := itemRows(1, 2, items, decisions, pickedItems, nil, false, true).Render(t.Context(), &sb); err != nil {
+		t.Fatalf("itemRows.Render: %v", err)
+	}
+	return sb.String()
+}
+
+// TestItemRowsSameDecisionLabels proves perimeter and review item rows now
+// share one set of decision words (bug fix, #78): a perimeter row renders
+// accept and drop, a review row renders accept, drop, and discuss, and
+// neither ever renders the word reject, even though a perimeter item whose
+// stored pick is reject still shows its drop button picked (DisplayDecision).
+func TestItemRowsSameDecisionLabels(t *testing.T) {
+	t.Parallel()
+	item := []ThreadItem{{Ref: "a.go", Text: "Builder: x Change: y"}}
+
+	perimeter := renderItemRows(t, item, itemDecisionsPerimeter, nil)
+	if got, want := decisionButtonTexts(t, perimeter), []string{"accept", "drop"}; !slices.Equal(got, want) {
+		t.Errorf("perimeter itemRows decision labels = %v, want %v; got:\n%s", got, want, perimeter)
+	}
+
+	review := renderItemRows(t, item, itemDecisionsReview, nil)
+	if got, want := decisionButtonTexts(t, review), []string{"accept", "drop", "discuss"}; !slices.Equal(got, want) {
+		t.Errorf("review itemRows decision labels = %v, want %v; got:\n%s", got, want, review)
+	}
+
+	for _, rendered := range []string{perimeter, review} {
+		if strings.Contains(rendered, ">reject</button>") {
+			t.Errorf("itemRows must never render a reject button; got:\n%s", rendered)
+		}
+	}
+
+	picked := renderItemRows(t, item, itemDecisionsPerimeter, map[string]response.Decision{"a.go": response.DecisionReject})
+	if !strings.Contains(picked, `class="decision picked" aria-pressed="true" data-draft-ticket="1" data-draft-question="2" data-item-ref="a.go" data-decision="drop"`) {
+		t.Errorf("perimeter row with a stored reject pick must render its drop button picked; got:\n%s", picked)
+	}
 }
