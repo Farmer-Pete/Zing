@@ -16,7 +16,9 @@
 package job
 
 import (
+	"context"
 	"errors"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -49,27 +51,24 @@ func reviewCappedExitKey(lens string) string {
 // parkCapped (internal/dispatch/dispatch.go): package job cannot import
 // package dispatch (the reverse direction compiles the real thing), so this
 // calls the exact store methods parkCapped itself calls -- Capped for the
-// reset, the finish rows, and the discard marker body; store.ParkRuns; and,
-// when ParkRuns actually recorded something, the one "discarded review
-// round" InsertMessage parkCapped itself writes -- under the same (owner,
-// expires) the attempt's own claim just used, and fails the test if any of
-// them returns an error.
+// reset and the finish rows, CappedRoundDiscardedMarker for the discard
+// marker body, and store.ParkRuns, which now writes that marker itself, in
+// the same transaction as the park, once something was actually parked or
+// finished (r4f2) -- under the same (owner, expires) the attempt's own
+// claim just used, and fails the test if that returns an error.
 func reviewParkRound(t *testing.T, s *store.Store, ticketID int64, deps Deps, err error) store.ParkResult {
 	t.Helper()
 	info, capped := Capped(err)
 	if !capped {
 		t.Fatalf("reviewParkRound: Capped(%v) = (_, false), want true", err)
 	}
-	res, parkErr := s.ParkRuns(t.Context(), ticketID, deps.Owner, deps.Expires, info.Until, info.Finish)
+	discardMarker := ""
+	if info.Round != 0 {
+		discardMarker = CappedRoundDiscardedMarker(info.Round)
+	}
+	res, parkErr := s.ParkRuns(t.Context(), ticketID, deps.Owner, deps.Expires, info.Until, discardMarker, info.Finish...)
 	if parkErr != nil {
 		t.Fatalf("ParkRuns: %v", parkErr)
-	}
-	if info.DiscardMarker != "" && res.Applied && (len(res.RunIDs) != 0 || len(info.Finish) != 0) {
-		if _, insErr := s.InsertMessage(t.Context(), store.Message{
-			TicketID: ticketID, Type: msgTypeUpdate, Author: authorSystem, Body: info.DiscardMarker,
-		}); insErr != nil {
-			t.Fatalf("InsertMessage (discarded review round): %v", insErr)
-		}
 	}
 	return res
 }
@@ -459,5 +458,183 @@ func TestReviewRound_CappedRoundRerunsEveryLensFresh(t *testing.T) {
 		if !strings.Contains(req.Prompt, wantNote) {
 			t.Errorf("rerun request (label %q) prompt = %q, want it to contain %q", req.Label, req.Prompt, wantNote)
 		}
+	}
+
+	// recordCappedRoundResume (r4f4): the rerun's own fresh sessions never
+	// resume a capped one, so runJobWith's own per-session resume marker
+	// never fires for them; round() writes its own equivalent once, keyed
+	// on whichever rerun lens reserved first.
+	const resumedPrefix = "resumed after the Claude session limit (run "
+	messages, err := s.ListMessages(t.Context(), ticket.ID)
+	if err != nil {
+		t.Fatalf("ListMessages: %v", err)
+	}
+	var resumed []store.MessageRow
+	for _, m := range messages {
+		if strings.HasPrefix(m.Body, resumedPrefix) {
+			resumed = append(resumed, m)
+		}
+	}
+	if len(resumed) != 1 {
+		t.Fatalf("resumed-after-cap markers = %+v, want exactly 1", resumed)
+	}
+	rerunRunIDs := make(map[int64]bool, len(rerunRuns))
+	for _, r := range rerunRuns {
+		rerunRunIDs[r.ID] = true
+	}
+	named := strings.TrimSuffix(strings.TrimPrefix(resumed[0].Body, resumedPrefix), ")")
+	namedID, convErr := strconv.ParseInt(named, 10, 64)
+	if convErr != nil || !rerunRunIDs[namedID] {
+		t.Errorf("resumed marker %q names run %q, want one of the rerun's own lens runs %+v", resumed[0].Body, named, rerunRuns)
+	}
+}
+
+// orderedCappedRuntime forces one label's own turn (releaseLabel) to finish
+// before another (waitLabel) is even attempted: runLensesParallel cancels
+// every other in-flight lens as soon as one attempt's own result is bad
+// (TestReviewRound_CappedRoundRerunsEveryLensFresh's own comment: "this
+// round's own session count is not deterministic"), so a test that needs
+// one lens to reliably finish in the very same attempt that another hits
+// the cap cannot leave their relative order to the Go scheduler. The gate
+// only wraps rt.Run, after Reserve already ran, so waitLabel's own run row
+// still exists even while its own turn blocks.
+type orderedCappedRuntime struct {
+	inner        runtime.Runtime
+	waitLabel    string
+	releaseLabel string
+	done         chan struct{}
+}
+
+func (r *orderedCappedRuntime) Run(ctx context.Context, req runtime.RunRequest) (runtime.RunResult, error) {
+	if req.Label == r.waitLabel {
+		<-r.done
+	}
+	res, err := r.inner.Run(ctx, req)
+	if req.Label == r.releaseLabel {
+		close(r.done)
+	}
+	return res, err
+}
+
+// TestContinueCapped_FreeResumeForEveryAsker proves the r4f8 correctness
+// fix: when a CONTINUE attempt is itself discarded by the cap -- one
+// asker (fidelity) hits the session limit while another (quality) already
+// finished its own resume in that same attempt -- the next CONTINUE after
+// the reset resumes every asker free, including the one that already
+// finished, instead of charging it a second real resume for answering the
+// very same question again. Without continueCappedNote's bump/gate
+// override, quality's own session.Resumes would rise to 2 on the second
+// continue; with it, it stays at 1 (its one real resume, the first
+// continue attempt itself).
+func TestContinueCapped_FreeResumeForEveryAsker(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow end-to-end flow; runs in the full suite")
+	}
+	t.Parallel()
+	s, ticket, _ := reviewTicketReady(t)
+	const otherLens = "quality"
+	fidelityCapKey := strings.TrimSuffix(reviewScriptKey(lensFidelity, 2), ".xml") + ".exit1"
+	overrides := map[string]string{
+		reviewScriptKey(lensFidelity, 1): reviewQuestionScript("Q-fidelity", "pick one"),
+		reviewScriptKey(otherLens, 1):    reviewQuestionScript("Q-quality", "pick one"),
+		fidelityCapKey:                   reviewCappedLensMessage,
+		reviewScriptKey(otherLens, 2):    reviewOKScript,
+		reviewScriptKey(lensFidelity, 3): reviewOKScript,
+		reviewScriptKey(otherLens, 3):    reviewOKScript,
+	}
+	rt := runtime.NewFake(reviewScriptsFS(overrides))
+	deps := pbClaim(t, s, rt, ticket.ID)
+
+	commit, err := (reviewingHandler{}).Run(t.Context(), ticket, deps)
+	if err != nil {
+		t.Fatalf("Run (round): %v", err)
+	}
+	pbApply(t, s, ticket, commit)
+
+	open, err := s.QuestionsByState(t.Context(), ticket.ID, "open")
+	if err != nil {
+		t.Fatalf("QuestionsByState(open): %v", err)
+	}
+	if len(open) != 2 {
+		t.Fatalf("open questions = %d, want 2", len(open))
+	}
+	for _, q := range open {
+		answerReviewQuestion(t, s, ticket.ID, q.ID)
+	}
+	afterRound1, err := s.MaxRunID(t.Context(), ticket.ID)
+	if err != nil {
+		t.Fatalf("MaxRunID: %v", err)
+	}
+
+	// Continue 1: fidelity's own resume hits the cap, quality's own resume
+	// finishes clean in the same attempt -- forced by orderedCappedRuntime,
+	// not left to the Go scheduler, so quality's own run is guaranteed to
+	// land before fidelity's cap cancels the round.
+	ticket2 := pbGetTicket(t, s, ticket.ID)
+	ordered := &orderedCappedRuntime{inner: rt, waitLabel: "1-" + lensFidelity, releaseLabel: "1-" + otherLens, done: make(chan struct{})}
+	deps2 := pbClaim(t, s, ordered, ticket.ID)
+	_, err = (reviewingHandler{}).Run(t.Context(), ticket2, deps2)
+	if err == nil {
+		t.Fatal("Run (continue 1): err = nil, want a capped error")
+	}
+	if _, capped := Capped(err); !capped {
+		t.Fatalf("Capped(%v) = (_, false), want true", err)
+	}
+	if res := reviewParkRound(t, s, ticket.ID, deps2, err); !res.Applied {
+		t.Fatal("ParkRuns: Applied = false, want true")
+	}
+
+	continue1Runs := reviewRunsSince(t, s, ticket.ID, afterRound1)
+	var qualitySessionID int64
+	for _, r := range continue1Runs {
+		if *r.Lens == otherLens {
+			qualitySessionID = r.SessionID
+		}
+	}
+	if qualitySessionID == 0 {
+		t.Fatal("quality's own resume run not found in continue 1")
+	}
+	maxResumes := deps.Machine.Jobs[jobReviewName].MaxResumes
+	sess, _, err := s.SessionByID(t.Context(), qualitySessionID, maxResumes)
+	if err != nil {
+		t.Fatalf("SessionByID: %v", err)
+	}
+	if sess.Resumes != 1 {
+		t.Fatalf("quality session resumes after continue 1 = %d, want 1", sess.Resumes)
+	}
+
+	// The reset already passed, the same way
+	// TestReviewRound_CappedRoundRerunsEveryLensFresh's own second attempt
+	// stands in for a real reset without waiting on a real clock.
+	if setErr := s.SetSettings(t.Context(), "claude_hold_until", "2000-01-01T00:00:00Z"); setErr != nil {
+		t.Fatalf("SetSettings(claude_hold_until): %v", setErr)
+	}
+
+	ticket3 := pbGetTicket(t, s, ticket.ID)
+	deps3 := pbClaim(t, s, rt, ticket.ID)
+	commit3, err := (reviewingHandler{}).Run(t.Context(), ticket3, deps3)
+	if err != nil {
+		t.Fatalf("Run (continue 2, after reset): %v", err)
+	}
+	if commit3.Next != stateJudging || commit3.Reason != reasonReviewClean {
+		t.Fatalf("commit3 = {Next: %q, Reason: %q}, want {%q, %q} (both askers now clean)",
+			commit3.Next, commit3.Reason, stateJudging, reasonReviewClean)
+	}
+	pbApply(t, s, ticket, commit3)
+
+	sessAfter, _, err := s.SessionByID(t.Context(), qualitySessionID, maxResumes)
+	if err != nil {
+		t.Fatalf("SessionByID: %v", err)
+	}
+	if sessAfter.Resumes != 1 {
+		t.Errorf("quality session resumes after continue 2 = %d, want still 1 (free resume, not charged)", sessAfter.Resumes)
+	}
+
+	has, err := s.HasEscalation(t.Context(), ticket.ID, string(response.EscalationOriginCapResumes), qualitySessionID)
+	if err != nil {
+		t.Fatalf("HasEscalation: %v", err)
+	}
+	if has {
+		t.Error("cap_resumes escalation written for quality's own session, want none")
 	}
 }

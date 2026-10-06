@@ -347,7 +347,7 @@ func TestListReadyCandidates_SkipsParkedTicket(t *testing.T) {
 		t.Fatalf("Reserve: %v", err)
 	}
 	cappedUntil := now.Add(time.Minute)
-	if _, err := s.ParkRuns(ctx, ticketID, owner, expires, cappedUntil, nil); err != nil {
+	if _, err := s.ParkRuns(ctx, ticketID, owner, expires, cappedUntil, ""); err != nil {
 		t.Fatalf("ParkRuns: %v", err)
 	}
 

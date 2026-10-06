@@ -1325,31 +1325,30 @@ func (d *Dispatcher) recordShutdownInterrupt(ctx context.Context, ticket store.T
 // by their real outcome, then every run of the ticket still open as
 // interrupted with capped_until = capped.Until, raises the claude_hold_until
 // setting when that is later, writes one "parked until" marker when any
-// run was actually swept, and clears the claim, all under a detached,
-// bounded context so a cancelled handler context cannot abort a write that
-// must still land. When capped.DiscardMarker is non-empty (a capped review
-// round, job.Capped), one further "discarded review round" marker is
-// written, but only once ParkRuns actually recorded something -- a run
-// swept or a lens finish terminalized -- so a reviewing ticket held only by
-// some other ticket's hold, with every lens refused before Reserve and
-// nothing of its own to park, never floods the thread with a marker for a
-// round that never ran. That marker is scoped to review's own capped round
-// alone, never for a plain capped run of some other job, so
-// reviewingHandler's own cappedRoundNote cannot mistake an unrelated job's
-// park for a discarded review round. Like recordShutdownInterrupt, it never
-// returns a non-nil error: a write failure is logged and the claim is left
-// to expire for ExpireClaims to reconcile.
+// run was actually swept, writes one further "discarded review round"
+// marker in the same transaction when capped.Round is non-zero (a capped
+// review round, job.Capped) and something was actually parked or finished
+// -- so a reviewing ticket held only by some other ticket's hold, with
+// every lens refused before Reserve and nothing of its own to park, never
+// floods the thread with a marker for a round that never ran -- and clears
+// the claim, all under a detached, bounded context so a cancelled handler
+// context cannot abort a write that must still land. That marker is scoped
+// to review's own capped round alone, never for a plain capped run of some
+// other job, so reviewingHandler's own cappedRoundNote cannot mistake an
+// unrelated job's park for a discarded review round. Like
+// recordShutdownInterrupt, it never returns a non-nil error: a write
+// failure is logged and the claim is left to expire for ExpireClaims to
+// reconcile.
 func (d *Dispatcher) parkCapped(ctx context.Context, ticket store.Ticket, expires time.Time, capped job.CappedInfo) error {
 	postCtx, cancel := postHandlerContext(ctx)
 	defer cancel()
 
-	res, err := d.store.ParkRuns(postCtx, ticket.ID, d.cfg.Owner, expires, capped.Until, capped.Finish)
-	resetAt := capped.Until.UTC().Format(time.RFC3339)
-	isRound := capped.DiscardMarker != ""
-	finishedIDs := make([]int64, len(capped.Finish))
-	for i, r := range capped.Finish {
-		finishedIDs[i] = r.ID
+	discardMarker := ""
+	if capped.Round != 0 {
+		discardMarker = job.CappedRoundDiscardedMarker(capped.Round)
 	}
+	res, err := d.store.ParkRuns(postCtx, ticket.ID, d.cfg.Owner, expires, capped.Until, discardMarker, capped.Finish...)
+	resetAt := capped.Until.UTC().Format(time.RFC3339)
 	switch {
 	case err != nil:
 		slog.Error("claude session limit park failed", "ticket_id", ticket.ID, "reset_at", resetAt, "err", err)
@@ -1357,24 +1356,19 @@ func (d *Dispatcher) parkCapped(ctx context.Context, ticket store.Ticket, expire
 	case !res.Applied:
 		slog.Warn("claude session limit park skipped: claim already lost", "ticket_id", ticket.ID, "reset_at", resetAt)
 		return nil
-	case !isRound && len(res.RunIDs) == 0:
+	case len(res.RunIDs) == 0 && len(capped.Finish) == 0:
+		// Nothing was actually parked or finished: every lens (or the lone
+		// job) was refused before Reserve, with no run of its own to sweep.
+		// This repeats on every tick for a held, unparked ticket until the
+		// reset, so it logs at DEBUG rather than flooding WARN.
 		slog.Debug("claim released, claude held", "ticket_id", ticket.ID, "reset_at", resetAt)
-		d.bus.Publish()
-		return nil
-	case isRound:
+	default:
+		finishedIDs := make([]int64, len(capped.Finish))
+		for i, r := range capped.Finish {
+			finishedIDs[i] = r.ID
+		}
 		slog.Warn("claude session limit park", "ticket_id", ticket.ID, "run_ids", res.RunIDs,
 			"finished_run_ids", finishedIDs, "reset_at", resetAt, "round", capped.Round)
-	default:
-		slog.Warn("claude session limit park", "ticket_id", ticket.ID, "run_ids", res.RunIDs,
-			"finished_run_ids", finishedIDs, "reset_at", resetAt)
-	}
-
-	if isRound && (len(res.RunIDs) != 0 || len(capped.Finish) != 0) {
-		if _, insErr := d.store.InsertMessage(postCtx, store.Message{
-			TicketID: ticket.ID, Type: msgTypeUpdate, Author: authorSystem, Body: capped.DiscardMarker,
-		}); insErr != nil {
-			slog.Warn("discarded review round marker not written", "ticket_id", ticket.ID, "round", capped.Round, "err", insErr)
-		}
 	}
 
 	d.bus.Publish()

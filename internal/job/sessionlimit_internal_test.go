@@ -255,7 +255,27 @@ func TestCapped(t *testing.T) {
 	if got3.Round != 3 {
 		t.Errorf("Capped(CappedRoundError).Round = %d, want 3", got3.Round)
 	}
-	if got3.DiscardMarker != CappedRoundDiscardedPrefix+"3: Claude session limit" {
-		t.Errorf("Capped(CappedRoundError).DiscardMarker = %q, want %q", got3.DiscardMarker, CappedRoundDiscardedPrefix+"3: Claude session limit")
+	if got := CappedRoundDiscardedMarker(got3.Round); got != CappedRoundDiscardedPrefix+"3: Claude session limit" {
+		t.Errorf("CappedRoundDiscardedMarker(Capped(CappedRoundError).Round) = %q, want %q", got, CappedRoundDiscardedPrefix+"3: Claude session limit")
+	}
+}
+
+// --- errKind --------------------------------------------------------------
+
+// TestErrKind_SessionLimitAndHeld proves errKind's own SessionLimitError and
+// HeldError cases (r4f10): without them, either falls through to the
+// ExecError or "other" case below, which the runJobWith resume log's own
+// err_kind attribute would then misreport.
+func TestErrKind_SessionLimitAndHeld(t *testing.T) {
+	t.Parallel()
+
+	wrapped := fmt.Errorf("wrap: %w", &runtime.SessionLimitError{ResetAt: time.Now(), Parsed: true})
+	if got := errKind(wrapped); got != "SessionLimitError" {
+		t.Errorf("errKind(wrapped SessionLimitError) = %q, want %q", got, "SessionLimitError")
+	}
+
+	held := &HeldError{Until: time.Now()}
+	if got := errKind(held); got != "HeldError" {
+		t.Errorf("errKind(HeldError) = %q, want %q", got, "HeldError")
 	}
 }

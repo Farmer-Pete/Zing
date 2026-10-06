@@ -33,7 +33,6 @@ import (
 	"strconv"
 	"strings"
 	"sync"
-	"time"
 
 	"zing/internal/orchestrator"
 	"zing/internal/prompt"
@@ -185,15 +184,26 @@ func (h reviewingHandler) Run(ctx context.Context, t store.Ticket, d Deps) (stor
 const reviewRoundMarkerPrefix = "review round "
 
 // CappedRoundDiscardedPrefix is the dispatcher's own "discarded review round
-// <n>: Claude session limit" marker's shared prefix (job.Capped's
-// DiscardMarker, written only for a capped review round, never for a plain
-// capped run of some other job), exported so the dispatcher and this
-// package share the one literal: deliberately not "review round ", so
-// MarkersWithPrefix(reviewRoundMarkerPrefix) never picks it up alongside the
-// done/failed/void/asked markers enterRound's own regexes expect. The marker
-// is written only for a capped review round and must never fire for some
-// other job's own plain "parked until" marker.
+// <n>: Claude session limit" marker's shared prefix, written only for a
+// capped review round, never for a plain capped run of some other job),
+// exported so the dispatcher and this package share the one literal:
+// deliberately not "review round ", so MarkersWithPrefix(reviewRoundMarker
+// Prefix) never picks it up alongside the done/failed/void/asked markers
+// enterRound's own regexes expect. The marker is written only for a capped
+// review round and must never fire for some other job's own plain "parked
+// until" marker.
 const CappedRoundDiscardedPrefix = "discarded review round "
+
+// CappedRoundDiscardedMarker builds the "discarded review round n: Claude
+// session limit" marker body a capped review round writes once it is
+// actually parked (dispatch.Dispatcher.parkCapped, store.ParkRuns): the one
+// place that assembles this text, from CappedInfo.Round alone, so the
+// dispatcher and this package's own test stand-in never carry a second,
+// separately-tracked copy of the same fact that could drift from it
+// (r4f11).
+func CappedRoundDiscardedMarker(round int) string {
+	return fmt.Sprintf("%s%d: Claude session limit", CappedRoundDiscardedPrefix, round)
+}
 
 // cappedRoundNote reports the note round's own capped-discard rerun (owner
 // decision Q6) adds to its lens prompts when round n is being entered again
@@ -216,6 +226,28 @@ func (h reviewingHandler) cappedRoundNote(ctx context.Context, t store.Ticket, d
 	}
 	newestDiscarded := discarded[len(discarded)-1]
 	if len(rounds) != 0 && newestDiscarded.ID < rounds[len(rounds)-1].ID {
+		return "", nil
+	}
+	return "the previous review round was discarded because of the Claude session limit", nil
+}
+
+// continueCappedNote is cappedRoundNote's own counterpart for CONTINUE
+// (r4f8): round n's own "discarded review round n" marker is specific to
+// that round number (CappedRoundDiscardedMarker's own body), so unlike
+// cappedRoundNote's ticket-wide newest-marker comparison, this checks for
+// one newer than askedID, the very "review round n asked" marker this
+// continue resumes. A non-empty note means this continue attempt was
+// already tried once and discarded by the cap: every asker must resume
+// free (bump and gate both false, even for a lens whose own run already
+// finished before the cap hit some other lens), and every lens's own
+// resumed prompt carries the note, so a lens that already answered in the
+// discarded attempt knows this is not its first time seeing the question.
+func (h reviewingHandler) continueCappedNote(ctx context.Context, t store.Ticket, d Deps, n int, askedID int64) (string, error) {
+	discarded, err := d.Store.MarkersWithPrefix(ctx, t.ID, fmt.Sprintf("%s%d:", CappedRoundDiscardedPrefix, n))
+	if err != nil {
+		return "", fmt.Errorf("job: reviewing: continue: discarded round markers: %w", err)
+	}
+	if len(discarded) == 0 || discarded[len(discarded)-1].ID < askedID {
 		return "", nil
 	}
 	return "the previous review round was discarded because of the Claude session limit", nil
@@ -1366,39 +1398,34 @@ func (h reviewingHandler) round(ctx context.Context, t store.Ticket, d Deps, n i
 // runs on its own fresh session, not a resume, so runJobWith's own
 // per-session resume marker (recordCappedResume) never fires for it; this
 // is the round's own equivalent, keyed on the first lens that actually
-// reserved a run, with the reset taken from the newest capped_until on the
-// ticket (the round this rerun discards). RecordCappedResume's own
-// once-per-park rule keeps repeated calls, one per round entry while the
-// discard note still applies, to one marker. A write failure only logs: the
-// free rerun itself is never gated on it.
+// reserved a run, reusing recordCappedResume itself (r4f5) rather than
+// repeating its marker write and its two log lines by hand. The reset time
+// and the run id that carries it come from TicketParkedUntil (r4f6), the
+// same MAX(capped_until) subquery LiveTickets already uses, instead of
+// walking RunsForTicket and reducing it in a loop. Nothing is written or
+// logged when the ticket carries no capped run at all (found false): that
+// should not happen once a discard note applies, but recordCappedResume
+// itself requires a real prev.CappedUntil to log.
 func (h reviewingHandler) recordCappedRoundResume(ctx context.Context, t store.Ticket, d Deps, attempts []lensAttempt) {
-	var runID int64
+	var rsv store.Reserved
 	for i := range attempts {
 		if attempts[i].rr.Reserved.RunID != 0 {
-			runID = attempts[i].rr.Reserved.RunID
+			rsv = attempts[i].rr.Reserved
 			break
 		}
 	}
-	if runID == 0 {
+	if rsv.RunID == 0 {
 		return
 	}
-	runs, err := d.Store.RunsForTicket(ctx, t.ID)
+	resetAt, cappedRunID, found, err := d.Store.TicketParkedUntil(ctx, t.ID)
 	if err != nil {
-		slog.Warn("capped resume marker not written", "ticket_id", t.ID, "run_id", runID, "error", err)
+		slog.Warn("capped resume marker not written", "ticket_id", t.ID, "run_id", rsv.RunID, "error", err)
 		return
 	}
-	var resetAt time.Time
-	for _, r := range runs {
-		if r.CappedUntil != nil && r.CappedUntil.After(resetAt) {
-			resetAt = *r.CappedUntil
-		}
+	if !found {
+		return
 	}
-	written, err := d.Store.RecordCappedResume(ctx, t.ID, runID)
-	if err != nil {
-		slog.Warn("capped resume marker not written", "ticket_id", t.ID, "run_id", runID, "error", err)
-	}
-	slog.Info("claude session limit resume",
-		"ticket_id", t.ID, "run_id", runID, "reset_at", resetAt.UTC().Format(time.RFC3339), "marker_written", written)
+	recordCappedResume(ctx, d, t.ID, rsv, store.Run{ID: cappedRunID, CappedUntil: &resetAt})
 }
 
 // lensCodeSection reads lens's own prompt file and returns its "## In code"
@@ -2134,7 +2161,17 @@ func (h reviewingHandler) continueRound(ctx context.Context, t store.Ticket, d D
 	// Step 2: for each asking run, the cap gate; an exhausted session
 	// escalates once with no run started for any lens, unless its newest
 	// run was itself cut short (resumeCharge, design D5, section 7.4),
-	// which bypasses the cap for that one asker and resumes it free.
+	// which bypasses the cap for that one asker and resumes it free. When
+	// this same continue attempt was already discarded once by the cap
+	// (continueCappedNote, r4f8), every asker resumes free too, whether its
+	// own newest run was the one that got capped or one that finished
+	// before the round was discarded: a lens that already answered in the
+	// discarded attempt must not be charged, or cap-gated, for answering
+	// the same question again.
+	discardNote, err := h.continueCappedNote(ctx, t, d, n, newest.ID)
+	if err != nil {
+		return store.HandlerCommit{}, err
+	}
 	maxResumes := d.Machine.Jobs[jobReviewName].MaxResumes
 	type asker struct {
 		lens        response.Lens
@@ -2163,6 +2200,9 @@ func (h reviewingHandler) continueRound(ctx context.Context, t store.Ticket, d D
 		bump, gate := true, true
 		if foundRun {
 			bump, gate = resumeCharge(newestRun)
+		}
+		if discardNote != "" {
+			bump, gate = false, false
 		}
 		if state == store.SessionExhausted && gate {
 			has, hasErr := d.Store.HasEscalation(ctx, t.ID, string(response.EscalationOriginCapResumes), sess.ID)
@@ -2207,6 +2247,9 @@ func (h reviewingHandler) continueRound(ctx context.Context, t store.Ticket, d D
 		inputs := []prompt.NamedInput{prompt.Answers(a.answers)}
 		if a.interrupted {
 			inputs = append(inputs, prompt.NamedInput{Label: labelInterrupted, Text: interruptedResumeText, Untrusted: false})
+		}
+		if discardNote != "" {
+			inputs = append(inputs, prompt.Notes(discardNote))
 		}
 		in := prompt.ForReviewResume(inputs)
 		in.Schemas = schemas

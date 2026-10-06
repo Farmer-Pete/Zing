@@ -106,7 +106,7 @@ func TestParkRuns_StampsOpenRunsAndHold(t *testing.T) {
 	laterHold := until.Add(time.Hour)
 	seedClaudeHold(t, s, laterHold)
 
-	res, err := s.ParkRuns(ctx, ticketID, owner, expires, until, nil)
+	res, err := s.ParkRuns(ctx, ticketID, owner, expires, until, "")
 	if err != nil {
 		t.Fatalf("ParkRuns: %v", err)
 	}
@@ -162,7 +162,7 @@ func TestParkRuns_StampsOpenRunsAndHold(t *testing.T) {
 	runC := reserveOpenRun(t, s, ticketID, owner2, expires2, testStateJudging)
 	until2 := laterHold.Add(time.Hour)
 
-	res2, err := s.ParkRuns(ctx, ticketID, owner2, expires2, until2, nil)
+	res2, err := s.ParkRuns(ctx, ticketID, owner2, expires2, until2, "")
 	if err != nil {
 		t.Fatalf("second ParkRuns: %v", err)
 	}
@@ -200,8 +200,8 @@ func TestParkRuns_FinishTerminalizesGoodRunsFirst(t *testing.T) {
 	agentSeconds := 5
 	until := time.Now().Add(20 * time.Minute).UTC().Truncate(time.Second)
 
-	res, err := s.ParkRuns(ctx, ticketID, owner, expires, until, []Run{
-		{ID: goodRun, Outcome: &outcome, ExitCode: &exitCode, AgentSeconds: &agentSeconds},
+	res, err := s.ParkRuns(ctx, ticketID, owner, expires, until, "", Run{
+		ID: goodRun, Outcome: &outcome, ExitCode: &exitCode, AgentSeconds: &agentSeconds,
 	})
 	if err != nil {
 		t.Fatalf("ParkRuns: %v", err)
@@ -255,7 +255,7 @@ func TestParkRuns_FenceMissWritesNothing(t *testing.T) {
 	runID := reserveOpenRun(t, s, ticketID, owner, expires, testStatePlanning)
 
 	until := time.Now().Add(30 * time.Minute)
-	res, err := s.ParkRuns(ctx, ticketID, testOwnerOther, expires, until, nil)
+	res, err := s.ParkRuns(ctx, ticketID, testOwnerOther, expires, until, "")
 	if err != nil {
 		t.Fatalf("ParkRuns: %v", err)
 	}
@@ -307,7 +307,7 @@ func TestParkRuns_NoOpenRunsOnlyReleasesClaim(t *testing.T) {
 	owner, expires := claimForCommit(t, s, ticketID)
 
 	until := time.Now().Add(30 * time.Minute)
-	res, err := s.ParkRuns(ctx, ticketID, owner, expires, until, nil)
+	res, err := s.ParkRuns(ctx, ticketID, owner, expires, until, "")
 	if err != nil {
 		t.Fatalf("ParkRuns: %v", err)
 	}
@@ -354,7 +354,7 @@ func TestClaudeHold_ReadsSetting(t *testing.T) {
 	reserveOpenRun(t, s, ticketID, owner, expires, testStatePlanning)
 
 	until := time.Now().Add(45 * time.Minute).UTC().Truncate(time.Second)
-	if _, err := s.ParkRuns(ctx, ticketID, owner, expires, until, nil); err != nil {
+	if _, err := s.ParkRuns(ctx, ticketID, owner, expires, until, ""); err != nil {
 		t.Fatalf("ParkRuns: %v", err)
 	}
 
@@ -393,7 +393,7 @@ func TestRecordCappedResume_OncePerPark(t *testing.T) {
 	owner, expires := claimForCommit(t, s, ticketID)
 	runA := reserveOpenRun(t, s, ticketID, owner, expires, testStatePlanning)
 	until := time.Now().Add(20 * time.Minute)
-	if _, err := s.ParkRuns(ctx, ticketID, owner, expires, until, nil); err != nil {
+	if _, err := s.ParkRuns(ctx, ticketID, owner, expires, until, ""); err != nil {
 		t.Fatalf("ParkRuns: %v", err)
 	}
 
@@ -415,7 +415,7 @@ func TestRecordCappedResume_OncePerPark(t *testing.T) {
 
 	owner2, expires2 := claimForCommit(t, s, ticketID)
 	runB := reserveOpenRun(t, s, ticketID, owner2, expires2, testStateBuilding)
-	if _, parkErr := s.ParkRuns(ctx, ticketID, owner2, expires2, time.Now().Add(20*time.Minute), nil); parkErr != nil {
+	if _, parkErr := s.ParkRuns(ctx, ticketID, owner2, expires2, time.Now().Add(20*time.Minute), ""); parkErr != nil {
 		t.Fatalf("second ParkRuns: %v", parkErr)
 	}
 

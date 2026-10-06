@@ -280,6 +280,11 @@ type interruptOpts struct {
 	// Q6), terminalized by their own real outcome before the sweep below
 	// ever sees them, so they keep it instead of being swept as capped.
 	Finish []Run
+	// DiscardMarker is ParkRuns' own capped-review-round marker body
+	// (job.CappedRoundDiscardedMarker), empty outside a round. Written in
+	// this same transaction, but only when at least one run was actually
+	// swept or finished (r4f2).
+	DiscardMarker string
 }
 
 // interruptClaimedRuns is the shared transaction body behind InterruptRuns,
@@ -353,6 +358,14 @@ func (s *Store) interruptClaimedRuns(
 		}
 		if err := s.insertParkedMarkerTx(ctx, tx, ticketID, *opts.Park, runIDs); err != nil {
 			return nil, false, fmt.Errorf("interrupt runs: ticket %d: %w", ticketID, err)
+		}
+	}
+
+	if opts.DiscardMarker != "" && (len(runIDs) != 0 || len(opts.Finish) != 0) {
+		if err := s.insertMessageTx(ctx, tx, Message{
+			TicketID: ticketID, Type: msgTypeUpdate, Author: authorSystem, Body: opts.DiscardMarker,
+		}); err != nil {
+			return nil, false, fmt.Errorf("interrupt runs: ticket %d: discard marker: %w", ticketID, err)
 		}
 	}
 

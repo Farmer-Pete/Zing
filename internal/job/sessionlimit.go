@@ -7,7 +7,6 @@ package job
 import (
 	"context"
 	"errors"
-	"fmt"
 	"log/slog"
 	"time"
 
@@ -35,15 +34,15 @@ func (e *HeldError) Error() string {
 // for; Finish carries a capped review round's own already-finished lens
 // runs (CappedRoundError.Finish, owner decision Q6) to terminalize before
 // the park sweep, nil outside a round; Round is the review round number a
-// round error discards, zero outside a round; DiscardMarker is the
-// dispatcher's own "discarded review round N" marker body, built here so
-// the review marker text stays in this package, empty outside a round
-// (r2f9: scoped to review alone, never for some other job's own plain cap).
+// round error discards, zero outside a round (r2f9: scoped to review
+// alone, never for some other job's own plain cap). The marker body a
+// non-zero Round writes is CappedRoundDiscardedMarker(Round), built on
+// demand rather than carried as a field here, so there is one fact (Round)
+// instead of two that could drift apart (r4f11).
 type CappedInfo struct {
-	Until         time.Time
-	Finish        []store.Run
-	Round         int
-	DiscardMarker string
+	Until  time.Time
+	Finish []store.Run
+	Round  int
 }
 
 // Capped reports whether err is a Claude session-limit hit, a capped review
@@ -65,7 +64,6 @@ func Capped(err error) (CappedInfo, bool) {
 	if errors.As(err, &round) { //nolint:modernize // same
 		info.Finish = round.Finish
 		info.Round = round.Round
-		info.DiscardMarker = fmt.Sprintf("%s%d: Claude session limit", CappedRoundDiscardedPrefix, round.Round)
 	}
 	return info, true
 }
@@ -85,9 +83,10 @@ func claudeCapped(err error) bool {
 // it sweeps whatever lens run is still open as capped, so a lens that
 // already finished is never rewritten as interrupted, and Round is the
 // review round number this discards, so the dispatcher's own "discarded
-// review round" marker (Capped's DiscardMarker) can be scoped to review
-// alone: any other capped run (planning, build, discuss, a lone review
-// lens's own HeldError) never writes that marker.
+// review round" marker (CappedRoundDiscardedMarker, built from CappedInfo.
+// Round) can be scoped to review alone: any other capped run (planning,
+// build, discuss, a lone review lens's own HeldError) never writes that
+// marker.
 type CappedRoundError struct {
 	Err    error
 	Finish []store.Run

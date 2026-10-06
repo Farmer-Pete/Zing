@@ -8,6 +8,7 @@ package store
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"strconv"
 	"strings"
@@ -43,13 +44,47 @@ type ParkResult struct {
 // becomes interrupted with capped_until = until, the settings
 // claude_hold_until row rises to until when later, one "parked until"
 // update is written, and the claim is cleared, all in one transaction
-// fenced on owner and expires exactly like InterruptRuns.
-func (s *Store) ParkRuns(ctx context.Context, ticketID int64, owner string, expires, until time.Time, finish []Run) (ParkResult, error) {
-	runIDs, applied, err := s.interruptClaimedRuns(ctx, ticketID, owner, expires, interruptOpts{Park: &until, Finish: finish})
+// fenced on owner and expires exactly like InterruptRuns. discardMarker, a
+// capped review round's own "discarded review round N" body (job.
+// CappedRoundDiscardedMarker, empty outside a round), is written in the
+// same transaction too, but only once something was actually parked or
+// finished (r4f2: the park and its own discard marker commit or fail
+// together, instead of a second, best-effort write after the fact).
+// finish is variadic so the common call, with none, needs no positional
+// nil (r4f12).
+func (s *Store) ParkRuns(ctx context.Context, ticketID int64, owner string, expires, until time.Time, discardMarker string, finish ...Run) (ParkResult, error) {
+	runIDs, applied, err := s.interruptClaimedRuns(ctx, ticketID, owner, expires, interruptOpts{Park: &until, Finish: finish, DiscardMarker: discardMarker})
 	if err != nil {
 		return ParkResult{}, err
 	}
 	return ParkResult{Applied: applied, RunIDs: runIDs}, nil
+}
+
+// TicketParkedUntil returns the MAX(capped_until) over every run of
+// ticketID's own sessions, past or future, the same subquery LiveTickets
+// uses for its own ParkedUntil field, and the id of the run that carries
+// it (r4f5, r4f6, r4f7): ok is false when the ticket has never been
+// parked, and runID is then 0.
+func (s *Store) TicketParkedUntil(ctx context.Context, ticketID int64) (until time.Time, runID int64, ok bool, err error) {
+	var parkedUntil sql.NullString
+	var id sql.NullInt64
+	err = s.db.QueryRowContext(ctx,
+		`SELECT r.capped_until, r.id FROM runs r JOIN sessions s ON s.id = r.session_id
+		 WHERE s.ticket_id = ? AND r.capped_until IS NOT NULL
+		 ORDER BY r.capped_until DESC, r.id DESC LIMIT 1`,
+		ticketID,
+	).Scan(&parkedUntil, &id)
+	switch {
+	case errors.Is(err, sql.ErrNoRows):
+		return time.Time{}, 0, false, nil
+	case err != nil:
+		return time.Time{}, 0, false, fmt.Errorf("ticket parked until %d: %w", ticketID, err)
+	}
+	t, perr := time.Parse(fixedTimeLayout, parkedUntil.String)
+	if perr != nil {
+		return time.Time{}, 0, false, fmt.Errorf("ticket parked until %d: parse: %w", ticketID, perr)
+	}
+	return t, id.Int64, true, nil
 }
 
 // ClaudeHold returns the claude_hold_until setting in time.Local; ok is

@@ -1931,7 +1931,7 @@ func navParkRun(t *testing.T, s *store.Store, ref string, until time.Time) int64
 		store.SessionUpsert{Job: "nav-park-fixture", Runtime: "claude"}, store.RunSeed{Model: "test-model"}); err != nil {
 		t.Fatalf("Reserve: %v", err)
 	}
-	if _, err := s.ParkRuns(t.Context(), ticketID, owner, expires, until, nil); err != nil {
+	if _, err := s.ParkRuns(t.Context(), ticketID, owner, expires, until, ""); err != nil {
 		t.Fatalf("ParkRuns: %v", err)
 	}
 	return ticketID
