@@ -501,6 +501,23 @@ func TestRunJob_BuildRunCarriesDenyList(t *testing.T) {
 	}
 }
 
+// TestDeadlineInput_UsesBuildTimeout proves deadlineInput reads the
+// machine's own build job.timeout_minutes through jobTimeout, the one
+// function runJobWith's own req.Timeout also reads (task 3), so the two
+// never drift.
+func TestDeadlineInput_UsesBuildTimeout(t *testing.T) {
+	t.Parallel()
+	d := Deps{Machine: runJobTestMachine(t)}
+	now := time.Date(2026, 10, 5, 14, 0, 0, 0, time.UTC)
+
+	in := deadlineInput(d, jobBuildName, now)
+
+	const want = "This run ends at 14:45 UTC, in 45 minutes." // machine.toml jobs.build.timeout_minutes
+	if in.Text != want {
+		t.Errorf("deadlineInput text = %q, want %q", in.Text, want)
+	}
+}
+
 // TestRunJobWith_OnStartRecordsRunStart proves runJobWith's own OnStart
 // closure (design section 7.1, #45): the fake runtime calls it with PID 0
 // and the session id it minted, before running the fake's scripted turn,

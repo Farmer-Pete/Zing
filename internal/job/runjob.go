@@ -14,6 +14,7 @@ import (
 
 	"zing/internal/machine"
 	"zing/internal/proc"
+	"zing/internal/prompt"
 	"zing/internal/runtime"
 	"zing/internal/sandbox"
 	"zing/internal/store"
@@ -84,6 +85,15 @@ func budgetExhausted(agentSeconds int64, budget time.Duration) (exhausted bool, 
 // context deadline and deadlineInput's told deadline (task 5) both read it.
 func jobTimeout(jobCfg machine.Job) time.Duration {
 	return time.Duration(jobCfg.TimeoutMinutes) * time.Minute
+}
+
+// deadlineInput is the deadline input for a run of jobName started at now:
+// prompt.Deadline between now and now plus that job's own jobTimeout, the
+// same timeout runJobWith's own req.Timeout reads, so the told deadline and
+// the real one never drift apart by more than the gap between assembling
+// the prompt and this call reaching Reserve.
+func deadlineInput(d Deps, jobName string, now time.Time) prompt.NamedInput { //nolint:unparam // every caller passes jobBuildName today -- the deadline input is build-only (design nongoals) -- but the parameter names which job's timeout this reads, matching jobTimeout's own machine.Job parameter rather than hardcoding the one job name this file otherwise repeats as a literal
+	return prompt.Deadline(now, now.Add(jobTimeout(d.Machine.Jobs[jobName])))
 }
 
 // runJobWith is runJob with an afterReserve hook (PKG9-PLAN.md section
