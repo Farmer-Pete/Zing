@@ -35,7 +35,7 @@ func TestTicketRowsCarryThreadNav(t *testing.T) {
 	t.Run("Project row", func(t *testing.T) {
 		t.Parallel()
 		var sb strings.Builder
-		if err := Project(1, []store.Ticket{ticket}, nil).Render(t.Context(), &sb); err != nil {
+		if err := Project(1, []store.Ticket{ticket}, nil, nil).Render(t.Context(), &sb); err != nil {
 			t.Fatalf("Project.Render: %v", err)
 		}
 		got := sb.String()
@@ -64,4 +64,33 @@ func TestTicketRowsCarryThreadNav(t *testing.T) {
 			t.Errorf("Inbox card row is not an ib-thread-row link; got:\n%s", got)
 		}
 	})
+}
+
+// TestProjectRendersEarlierAttempts proves Project's earlier argument (#65)
+// renders a head ticket's older attempts behind an "earlier attempts (N)"
+// toggle with a thread link to each, and never shows the raw -abandoned-K
+// ref anywhere on the page.
+func TestProjectRendersEarlierAttempts(t *testing.T) {
+	t.Parallel()
+
+	head := store.Ticket{ID: 9, TrackerRef: "41", Title: "restart me", State: "planning"}
+	old := store.Ticket{ID: 4, TrackerRef: "41-abandoned-1", Title: "restart me", State: "abandoned"}
+	earlier := map[int64][]store.Ticket{9: {old}}
+
+	var sb strings.Builder
+	if err := Project(1, []store.Ticket{head}, nil, earlier).Render(t.Context(), &sb); err != nil {
+		t.Fatalf("Project.Render: %v", err)
+	}
+	got := sb.String()
+
+	if !strings.Contains(got, "earlier attempts (1)") {
+		t.Errorf(`Project missing "earlier attempts (1)"; got:\n%s`, got)
+	}
+	wantLink := `data-on:click__prevent="document.getElementById(&#39;stream-ctl&#39;).dispatchEvent(new CustomEvent(&#39;zing-nav&#39;,{detail:{view:&#39;thread&#39;,open:4,project:0}}))"`
+	if !strings.Contains(got, wantLink) {
+		t.Errorf("Project missing a thread link to the earlier attempt (ticket 4); got:\n%s", got)
+	}
+	if strings.Contains(got, "41-abandoned-1") {
+		t.Errorf("Project rendered the raw -abandoned-K ref; got:\n%s", got)
+	}
 }

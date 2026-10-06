@@ -356,9 +356,9 @@ func ticketBodyEditor(ticket *store.Ticket) templ.Component {
 			return templ_7745c5c3_Err
 		}
 		var templ_7745c5c3_Var11 string
-		templ_7745c5c3_Var11, templ_7745c5c3_Err = templ.JoinStringErrs(ticket.TrackerRef)
+		templ_7745c5c3_Var11, templ_7745c5c3_Err = templ.JoinStringErrs(displayRef(ticket.TrackerRef))
 		if templ_7745c5c3_Err != nil {
-			return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/console/templates/thread.templ`, Line: 102, Col: 42}
+			return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/console/templates/thread.templ`, Line: 102, Col: 54}
 		}
 		_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ.EscapeString(templ_7745c5c3_Var11))
 		if templ_7745c5c3_Err != nil {

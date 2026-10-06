@@ -2167,3 +2167,35 @@ func TestBuildNavThreads_ParkedUntil(t *testing.T) {
 		t.Errorf("buildNavThreads[2].ParkedUntil = %q, want \"\" (nil)", got[2].ParkedUntil)
 	}
 }
+
+// TestGroupAttempts proves groupAttempts (#65) folds a project's tickets by
+// issue: one head per base ref -- the attempt-0 ticket when one exists, in
+// the input's own order -- and every other ticket sharing that base under
+// earlier[head.ID], oldest attempt first; a base with no attempt-0 ticket at
+// all (53-abandoned-1 alone) is still its own head, with no earlier entry.
+func TestGroupAttempts(t *testing.T) {
+	t.Parallel()
+
+	ticket9 := store.Ticket{ID: 9, TrackerRef: "41"}
+	ticket3 := store.Ticket{ID: 3, TrackerRef: "7"}
+	ticket8 := store.Ticket{ID: 8, TrackerRef: "41-abandoned-2"}
+	ticket4 := store.Ticket{ID: 4, TrackerRef: "41-abandoned-1"}
+	ticket6 := store.Ticket{ID: 6, TrackerRef: "53-abandoned-1"}
+
+	heads, earlier := groupAttempts([]store.Ticket{ticket9, ticket3, ticket8, ticket4, ticket6})
+
+	if len(heads) != 3 {
+		t.Fatalf("groupAttempts heads = %+v, want 3 entries", heads)
+	}
+	if heads[0].ID != 9 || heads[1].ID != 3 || heads[2].ID != 6 {
+		t.Errorf("groupAttempts heads = %d, %d, %d; want 9, 3, 6", heads[0].ID, heads[1].ID, heads[2].ID)
+	}
+
+	got9 := earlier[9]
+	if len(got9) != 2 || got9[0].ID != 4 || got9[1].ID != 8 {
+		t.Errorf("earlier[9] = %+v, want [ticket 4, ticket 8] in that order", got9)
+	}
+	if got6 := earlier[6]; len(got6) != 0 {
+		t.Errorf("earlier[6] = %+v, want no entry", got6)
+	}
+}

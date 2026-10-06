@@ -150,9 +150,9 @@ func ticketRow(t store.Ticket) templ.Component {
 			return templ_7745c5c3_Err
 		}
 		var templ_7745c5c3_Var8 string
-		templ_7745c5c3_Var8, templ_7745c5c3_Err = templ.JoinStringErrs(t.TrackerRef)
+		templ_7745c5c3_Var8, templ_7745c5c3_Err = templ.JoinStringErrs(displayRef(t.TrackerRef))
 		if templ_7745c5c3_Err != nil {
-			return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/console/templates/shared.templ`, Line: 28, Col: 34}
+			return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/console/templates/shared.templ`, Line: 28, Col: 46}
 		}
 		_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ.EscapeString(templ_7745c5c3_Var8))
 		if templ_7745c5c3_Err != nil {
@@ -185,6 +185,14 @@ func ticketRow(t store.Ticket) templ.Component {
 		}
 		return nil
 	})
+}
+
+// displayRef strips a tracker_ref's -abandoned-K suffix (#65,
+// store.SplitAttemptRef): every ref the console renders is the issue's own
+// ref, never the renamed one a restart or pickup gave an abandoned ticket.
+func displayRef(ref string) string {
+	base, _ := store.SplitAttemptRef(ref)
+	return base
 }
 
 var _ = templruntime.GeneratedTemplate
