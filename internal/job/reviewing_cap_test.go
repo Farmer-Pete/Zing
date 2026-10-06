@@ -998,15 +998,15 @@ func TestAcceptedAtCapFindingsNoRows(t *testing.T) {
 	deps := pbClaim(t, s, runtime.NewFake(reviewScriptsFS(nil)), ticket.ID)
 	c := baseCommit(ticket, deps)
 	c.Next = stateJudging
-	c.Reason = reasonReviewOwnerAcceptedAtCap
+	c.Reason = reasonReviewAcceptedAtCap
 	pbApply(t, s, ticket, c)
 
 	got, err := acceptedAtCapFindings(t.Context(), pbGetTicket(t, s, ticket.ID), deps)
 	if err != nil {
 		t.Fatalf("acceptedAtCapFindings: %v", err)
 	}
-	if !got.Owner {
-		t.Errorf("Owner = %v, want true", got.Owner)
+	if got.Owner {
+		t.Errorf("Owner = %v, want false", got.Owner)
 	}
 	if len(got.Rows) != 0 {
 		t.Errorf("Rows = %+v, want none", got.Rows)

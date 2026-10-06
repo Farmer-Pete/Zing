@@ -867,7 +867,8 @@ func TestPublishListsAcceptedFindings(t *testing.T) {
 	scenariosAt := strings.Index(gh.lastBody, "## Scenarios")
 	acceptedAt := strings.Index(gh.lastBody, "## Accepted review findings")
 	declaredAt := strings.Index(gh.lastBody, "## Declared files")
-	if scenariosAt == -1 || acceptedAt == -1 || declaredAt == -1 {
+	allPresent := scenariosAt != -1 && acceptedAt != -1 && declaredAt != -1
+	if !allPresent {
 		t.Fatalf("gh.lastBody is missing a section:\n%s", gh.lastBody)
 	}
 	if scenariosAt >= acceptedAt || acceptedAt >= declaredAt {
