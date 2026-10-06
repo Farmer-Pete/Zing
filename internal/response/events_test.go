@@ -28,6 +28,11 @@ func TestOwnerEditLine(t *testing.T) {
 			OwnerEditEvent{Target: "ticket_body", Ref: "", Action: testOwnerEditActionEdit},
 			"Owner amended the ticket body.",
 		},
+		{
+			"plan_file edit",
+			OwnerEditEvent{Target: "plan_file", Ref: testFileA, Action: testOwnerEditActionEdit, Old: "6", New: testTasks2And6},
+			"Owner set the tasks for a.go to 2 6 (was 6).",
+		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {

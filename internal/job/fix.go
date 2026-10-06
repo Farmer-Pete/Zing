@@ -22,8 +22,10 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"slices"
 	"strconv"
 	"strings"
+	"time"
 
 	"zing/internal/orchestrator"
 	"zing/internal/prompt"
@@ -346,6 +348,7 @@ func runFixFirst(ctx context.Context, t store.Ticket, d Deps, proj Project, wt o
 		return store.HandlerCommit{}, fmt.Errorf("job: fix: %w", err)
 	}
 
+	extra = append(slices.Clone(extra), deadlineInput(d, time.Now()))
 	in, err := prompt.ForFix(promptText, subject, label, req.Text, proj.TestCmd, proj.LintCmd, ticketText, planXML, accepted, extra)
 	if err != nil {
 		return store.HandlerCommit{}, fmt.Errorf("job: fix: %w", err)

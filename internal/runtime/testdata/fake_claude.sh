@@ -40,6 +40,14 @@ success)
 exit_nonzero)
   exit "${FAKE_CLAUDE_EXIT_CODE:-3}"
   ;;
+result_then_exit)
+  if [ -n "${FAKE_CLAUDE_RESULT_FILE:-}" ]; then
+    cat "$FAKE_CLAUDE_RESULT_FILE"
+  else
+    printf '%s' "$default_result"
+  fi
+  exit "${FAKE_CLAUDE_EXIT_CODE:-1}"
+  ;;
 sleep)
   sleep "${FAKE_CLAUDE_SLEEP_SECONDS:-5}"
   exit 0

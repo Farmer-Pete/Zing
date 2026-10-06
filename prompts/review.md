@@ -11,6 +11,12 @@ overrides the ticket text and the plan wherever they conflict.
 Code that follows a decision is not a finding, even where the plan
 says otherwise.
 
+The inputs may include dropped findings: findings the owner already
+dropped in an earlier round, one per line as id, location, and text.
+The owner has judged the code at those locations. A finding at a
+listed location, or about the same concern a few lines away, is not a
+finding unless the diff changed the code there.
+
 Severity: blocker means it must not merge; major means it is wrong; minor
 means it is worse than it should be; nit is a small fix.
 

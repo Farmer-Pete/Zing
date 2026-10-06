@@ -74,7 +74,11 @@ const (
 	testMsgTypeUpdate     = "update"
 	testArtifactTypePlan  = "plan"
 	testOutcomeError      = "error"
-	testModelClaudeX      = "claude-x"
+	// testQuestionLiteral is "question" itself, shared by every literal
+	// that needs the exact string (a message Type or a run Outcome) so
+	// goconst sees one definition, not three (no story behind the value).
+	testQuestionLiteral = "question"
+	testModelClaudeX    = "claude-x"
 )
 
 // testProject is the one project every test in this file seeds. LocalPath
@@ -754,6 +758,10 @@ func (g *dispatchShipGitHub) RequiredCheckRules(context.Context, string, string,
 
 func (g *dispatchShipGitHub) JobLogTail(context.Context, string, string, int64, int) (string, error) {
 	return "", nil
+}
+
+func (g *dispatchShipGitHub) RerunJob(context.Context, string, string, int64) error {
+	return nil
 }
 
 // MarkReady and ConvertToDraft give dispatchShipGitHub job.DraftFlips too
@@ -3293,7 +3301,7 @@ func gateApprovalFixture(ctx context.Context, s *store.Store, ticketID int64) (g
 		return 0, 0, err
 	}
 	gateQID, err = s.InsertMessage(ctx, store.Message{
-		TicketID: ticketID, Type: "question", Author: authorZing, State: new("answered"), Body: "Q1", Payload: gatePayload,
+		TicketID: ticketID, Type: testQuestionLiteral, Author: authorZing, State: new("answered"), Body: "Q1", Payload: gatePayload,
 	})
 	if err != nil {
 		return 0, 0, err
@@ -3528,7 +3536,7 @@ func seedGateReadyTicket(t *testing.T, s *store.Store, n int) (ticketID, runID i
 	}
 	const authorZing = "zing" // avoids a third bare "zing" literal (goconst)
 	qID, err := s.InsertMessage(ctx, store.Message{
-		TicketID: ticketID, RunID: &rsv.RunID, Type: "question", Author: authorZing,
+		TicketID: ticketID, RunID: &rsv.RunID, Type: testQuestionLiteral, Author: authorZing,
 		State: new("open"), Body: "the plan objective", Payload: qPayload,
 	})
 	if err != nil {

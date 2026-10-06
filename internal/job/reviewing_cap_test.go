@@ -1,13 +1,17 @@
 // reviewing_cap_test.go tests issue #68: at the review fix loop cap
 // (jobs.review.max_loops), a ticket whose remaining accepted findings are
 // all at or below the configured floor moves on to judging instead of
-// escalating loops_exhausted. A finding above the floor at the cap still
-// escalates exactly as before (reviewing.go's own fixreq).
+// escalating loops_exhausted. It also tests ticket 55: an above-floor
+// finding at the cap starts a fix run, with no escalation, when at least
+// one accepted row carries an owner's own explicit pick (OwnerPicked); a
+// defaulted accept, or a row stored before OwnerPicked existed, still
+// escalates loops_exhausted exactly as before (reviewing.go's own fixreq).
 package job
 
 import (
 	"encoding/json"
 	"fmt"
+	"reflect"
 	"strings"
 	"testing"
 	"testing/fstest"
@@ -32,13 +36,39 @@ func fidelityFindingScript(severity, location, text, fix string) string {
 }
 
 // driveReviewToCap drives a fresh reviewing ticket through two rounds of
-// FIXREQ, lifted out of what was TestLoopGateEscalatesAfterTwoFixes (now
-// TestLoopGateMinorFindingsMoveToJudging): round 1 keeps one minor "quality"
-// finding -- at or below the floor, so it routes straight to FIXREQ with no
-// question -- request 1; the fix lands but leaves the same defect; round 2
-// keeps it again, request 2. It returns the live scripts map so a caller
-// can add its own round 3 keys and drive the gate itself.
+// FIXREQ with two real, file-changing fixes (reReviewFixScript and
+// reReviewFixCmd for both), lifted out of what was
+// TestLoopGateEscalatesAfterTwoFixes (now TestLoopGateMinorFindingsMoveToJudging).
 func driveReviewToCap(t *testing.T) (s *store.Store, ticket store.Ticket, rt *runtime.Fake, scripts fstest.MapFS) {
+	t.Helper()
+	return driveReviewToCapWithFix(t, reReviewFixScript, reReviewFixCmd)
+}
+
+// noopFixScript is a fix driver turn (job "build") that changes no file:
+// ticket 60's own "the newest fix run changed nothing" scenario, paired with
+// noopFixCmd.
+const noopFixScript = `<zing job="build" outcome="ok">
+  <claims>
+    <files_changed>
+    </files_changed>
+  </claims>
+  <report>Nothing to change in greet.go.</report>
+  <notes></notes>
+</zing>`
+
+// noopFixCmd is reReviewFixCmd's own no-op counterpart: it touches no file,
+// matching noopFixScript's own empty files_changed, so CHECK's own
+// cross-check of claimed against real changed paths still agrees.
+const noopFixCmd = "test -f greet.go"
+
+// driveReviewToCapWithFix is driveReviewToCap generalized over its own
+// second fix (ticket 60): round 1 keeps one minor "quality" finding -- at or
+// below the floor, so it routes straight to FIXREQ with no question --
+// request 1, landed with reReviewFixScript/reReviewFixCmd; round 2 keeps it
+// again, request 2, landed with secondFixScript/secondFixCmd. It returns the
+// live scripts map so a caller can add its own round 3 keys and drive the
+// gate itself.
+func driveReviewToCapWithFix(t *testing.T, secondFixScript, secondFixCmd string) (s *store.Store, ticket store.Ticket, rt *runtime.Fake, scripts fstest.MapFS) {
 	t.Helper()
 	const loopLens = "quality"
 	s, ticket, _ = reviewTicketReady(t)
@@ -50,10 +80,10 @@ func driveReviewToCap(t *testing.T) (s *store.Store, ticket store.Ticket, rt *ru
 	deps := pbClaim(t, s, rt, ticket.ID)
 	commit, err := (reviewingHandler{}).Run(t.Context(), ticket, deps) // round 1
 	if err != nil {
-		t.Fatalf("driveReviewToCap: Run (round 1): %v", err)
+		t.Fatalf("driveReviewToCapWithFix: Run (round 1): %v", err)
 	}
 	if len(commit.Messages) != 2 || !strings.HasPrefix(commit.Messages[1].Body, fixRequestedFindingsPrefix) {
-		t.Fatalf("driveReviewToCap: round 1 commit.Messages = %+v, want [done marker, %q message]", commit.Messages, fixRequestedFindingsPrefix)
+		t.Fatalf("driveReviewToCapWithFix: round 1 commit.Messages = %+v, want [done marker, %q message]", commit.Messages, fixRequestedFindingsPrefix)
 	}
 	pbApply(t, s, ticket, commit)
 
@@ -67,17 +97,67 @@ func driveReviewToCap(t *testing.T) (s *store.Store, ticket store.Ticket, rt *ru
 	deps2 := pbClaim(t, s, rt, ticket.ID)
 	commit2, err := (reviewingHandler{}).Run(t.Context(), ticket2, deps2) // round 2
 	if err != nil {
-		t.Fatalf("driveReviewToCap: Run (round 2): %v", err)
+		t.Fatalf("driveReviewToCapWithFix: Run (round 2): %v", err)
 	}
 	if len(commit2.Messages) != 2 || !strings.HasPrefix(commit2.Messages[1].Body, fixRequestedFindingsPrefix) {
-		t.Fatalf("driveReviewToCap: round 2 commit.Messages = %+v, want [done marker, %q message]", commit2.Messages, fixRequestedFindingsPrefix)
+		t.Fatalf("driveReviewToCapWithFix: round 2 commit.Messages = %+v, want [done marker, %q message]", commit2.Messages, fixRequestedFindingsPrefix)
 	}
 	pbApply(t, s, ticket, commit2)
 
-	scripts["build/fix/1.xml"] = &fstest.MapFile{Data: []byte(reReviewFixScript)}
-	driveReviewFixToLanding(t, s, ticket.ID, rt, reReviewFixCmd)
+	scripts["build/fix/1.xml"] = &fstest.MapFile{Data: []byte(secondFixScript)}
+	driveReviewFixToLanding(t, s, ticket.ID, rt, secondFixCmd)
 
 	return s, pbGetTicket(t, s, ticket.ID), rt, scripts
+}
+
+// driveToReviewLoopsExhausted drives driveReviewToCapWithFix's own ticket
+// one further round (round 3, an above-floor "quality" major finding, "still
+// broken") through the review question, triaged with no item decision and a
+// free reply ("going with the recommendation", so the accept is the safe
+// default, same as TestLoopGateDefaultAcceptEscalates), then into fixreq,
+// which escalates loops_exhausted (ticket 60). Returns the store, ticket,
+// fake runtime, and fixreq's own escalating commit, not yet applied.
+func driveToReviewLoopsExhausted(t *testing.T, secondFixScript, secondFixCmd string) (s *store.Store, ticket store.Ticket, rt *runtime.Fake, fixreqCommit store.HandlerCommit) {
+	t.Helper()
+	s, ticket, rt, scripts := driveReviewToCapWithFix(t, secondFixScript, secondFixCmd)
+
+	// Round 3's own major finding comes from lensFidelity, not the "quality"
+	// loop lens: lensesForRound/selectLenses (6.7) always re-selects fidelity
+	// regardless of which files changed, but re-selects "quality" only when
+	// the fix actually touched greet.go -- not true when secondFixScript is
+	// noopFixScript, this helper's own reason for existing.
+	scripts[reviewRoundScriptKey(3, lensFidelity)] = &fstest.MapFile{Data: []byte(fidelityFindingScript("major", greetGoLine2, "still broken", "fix it"))}
+
+	ticket3 := pbGetTicket(t, s, ticket.ID)
+	deps3 := pbClaim(t, s, rt, ticket.ID)
+	commit3, err := (reviewingHandler{}).Run(t.Context(), ticket3, deps3) // round 3: above floor, posts a question
+	if err != nil {
+		t.Fatalf("driveToReviewLoopsExhausted: Run (round 3): %v", err)
+	}
+	pbApply(t, s, ticket, commit3)
+
+	q := newestOpenQuestion(t, s, ticket.ID)
+	answerReviewItems(t, s, ticket.ID, q.ID, map[string]response.Decision{}, "going with the recommendation")
+
+	ticket4 := pbGetTicket(t, s, ticket.ID)
+	deps4 := pbClaim(t, s, rt, ticket.ID)
+	commit4, err := (reviewingHandler{}).Run(t.Context(), ticket4, deps4) // triage: defaults to accept
+	if err != nil {
+		t.Fatalf("driveToReviewLoopsExhausted: Run (triage): %v", err)
+	}
+	pbApply(t, s, ticket, commit4)
+
+	ticket5 := pbGetTicket(t, s, ticket.ID)
+	deps5 := pbClaim(t, s, rt, ticket.ID)
+	commit5, err := (reviewingHandler{}).Run(t.Context(), ticket5, deps5) // fixreq: gate reached, defaulted accept
+	if err != nil {
+		t.Fatalf("driveToReviewLoopsExhausted: Run (fixreq): %v", err)
+	}
+	if commit5.Escalation == nil {
+		t.Fatalf("driveToReviewLoopsExhausted: commit5.Escalation = nil, want loops_exhausted")
+	}
+
+	return s, pbGetTicket(t, s, ticket.ID), rt, commit5
 }
 
 // ---- TestAcceptAtCap --------------------------------------------------------
@@ -164,16 +244,14 @@ func TestAcceptAtCap(t *testing.T) {
 	}
 }
 
-// ---- TestLoopGateMajorFindingEscalates -------------------------------------
+// ---- TestLoopGateOwnerAcceptStartsFix ---------------------------------------
 
-// TestLoopGateMajorFindingEscalates proves fixreq's own fallback still
-// escalates loops_exhausted at the cap when the owner accepted an
-// above-floor finding (hypothesis 2, issue #68): round 3 keeps one major
-// quality finding, the owner accepts it in triage, and the following
-// fixreq tick hits k = 2 = max_loops with an accepted list that is not
-// wholly at or below the floor, so allAtOrBelowFloor is false and the gate
-// escalates exactly as it did before this change.
-func TestLoopGateMajorFindingEscalates(t *testing.T) {
+// TestLoopGateOwnerAcceptStartsFix proves ticket 55: when the owner's own
+// explicit accept on the review question leaves an above-floor finding in
+// the round's accepted list, the following fixreq tick at the cap (k = 2 =
+// max_loops) starts a fix run instead of escalating loops_exhausted, since
+// the review question already asked the owner this once.
+func TestLoopGateOwnerAcceptStartsFix(t *testing.T) {
 	if testing.Short() {
 		t.Skip("slow end-to-end flow; runs in the full suite")
 	}
@@ -210,13 +288,89 @@ func TestLoopGateMajorFindingEscalates(t *testing.T) {
 
 	ticket5 := pbGetTicket(t, s, ticket.ID)
 	deps5 := pbClaim(t, s, rt, ticket.ID)
-	commit5, err := (reviewingHandler{}).Run(t.Context(), ticket5, deps5) // fixreq: gate reached, major accepted
+	commit5, err := (reviewingHandler{}).Run(t.Context(), ticket5, deps5) // fixreq: gate reached, owner picked accept
+	if err != nil {
+		t.Fatalf("Run (fixreq): %v", err)
+	}
+
+	if commit5.Escalation != nil {
+		t.Fatalf("commit5.Escalation = %+v, want nil (the owner's own accept starts a fix run)", commit5.Escalation)
+	}
+	if commit5.Next != "" {
+		t.Errorf("commit5.Next = %q, want %q", commit5.Next, "")
+	}
+	if commit5.Waiting != nil {
+		t.Errorf("commit5.Waiting = %q, want nil", *commit5.Waiting)
+	}
+	if len(commit5.Messages) != 1 {
+		t.Fatalf("commit5.Messages = %+v, want exactly one", commit5.Messages)
+	}
+	if !strings.HasPrefix(commit5.Messages[0].Body, fixRequestedFindingsPrefix) {
+		t.Errorf("commit5.Messages[0].Body = %q, want prefix %q", commit5.Messages[0].Body, fixRequestedFindingsPrefix)
+	}
+	if !strings.Contains(commit5.Messages[0].Body, "still broken") {
+		t.Errorf("commit5.Messages[0].Body = %q, want it to mention %q", commit5.Messages[0].Body, "still broken")
+	}
+	for _, m := range commit5.Messages {
+		if strings.HasPrefix(m.Body, "Zing accepted ") {
+			t.Errorf("commit5.Messages carries %q, want no accepted-at-cap message", m.Body)
+		}
+	}
+
+	pbApply(t, s, ticket, commit5)
+	ticket6 := pbGetTicket(t, s, ticket.ID)
+	if ticket6.State != ticket5.State || ticket6.State != stateReviewing {
+		t.Errorf("ticket.State = %q, want %q unchanged", ticket6.State, stateReviewing)
+	}
+}
+
+// ---- TestLoopGateDefaultAcceptEscalates -------------------------------------
+
+// TestLoopGateDefaultAcceptEscalates proves fixreq's own fallback still
+// escalates loops_exhausted at the cap when the above-floor finding's own
+// accept is the safe default (no OwnerPicked), not the owner's own pick:
+// the owner answers the review question with a free reply and no item
+// decision, so triage defaults the item to accept with OwnerPicked false,
+// and the following fixreq tick at the cap escalates exactly as before.
+func TestLoopGateDefaultAcceptEscalates(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow end-to-end flow; runs in the full suite")
+	}
+	t.Parallel()
+	const loopLens = "quality"
+	s, ticket, rt, scripts := driveReviewToCap(t)
+
+	scripts[reviewRoundScriptKey(3, lensFidelity)] = &fstest.MapFile{Data: []byte(reviewOKScript)}
+	scripts[reviewRoundScriptKey(3, loopLens)] = &fstest.MapFile{Data: []byte(findingScript(loopLens, "major", "still broken", "fix it"))}
+
+	ticket3 := pbGetTicket(t, s, ticket.ID)
+	deps3 := pbClaim(t, s, rt, ticket.ID)
+	commit3, err := (reviewingHandler{}).Run(t.Context(), ticket3, deps3) // round 3: above floor, posts a question
+	if err != nil {
+		t.Fatalf("Run (round 3): %v", err)
+	}
+	pbApply(t, s, ticket, commit3)
+
+	q := newestOpenQuestion(t, s, ticket.ID)
+	answerReviewItems(t, s, ticket.ID, q.ID, map[string]response.Decision{}, "going with the recommendation")
+
+	ticket4 := pbGetTicket(t, s, ticket.ID)
+	deps4 := pbClaim(t, s, rt, ticket.ID)
+	commit4, err := (reviewingHandler{}).Run(t.Context(), ticket4, deps4) // triage: defaults to accept
+	if err != nil {
+		t.Fatalf("Run (triage): %v", err)
+	}
+	pbApply(t, s, ticket, commit4)
+
+	ticket5 := pbGetTicket(t, s, ticket.ID)
+	deps5 := pbClaim(t, s, rt, ticket.ID)
+	commit5, err := (reviewingHandler{}).Run(t.Context(), ticket5, deps5) // fixreq: gate reached, defaulted accept
 	if err != nil {
 		t.Fatalf("Run (fixreq): %v", err)
 	}
 
 	if commit5.Escalation == nil {
-		t.Fatalf("commit5.Escalation = nil, want loops_exhausted (an accepted finding is above the floor)")
+		t.Fatalf("commit5.Escalation = nil, want loops_exhausted (the accept is a default, not an owner pick)")
 	}
 	if commit5.Escalation.Payload.Code != string(response.EscalationCodeLoopsExhausted) {
 		t.Errorf("Escalation.Payload.Code = %q, want %q", commit5.Escalation.Payload.Code, response.EscalationCodeLoopsExhausted)
@@ -237,8 +391,297 @@ func TestLoopGateMajorFindingEscalates(t *testing.T) {
 		t.Errorf("commit5.Next = %q, want %q", commit5.Next, "")
 	}
 	for _, m := range commit5.Messages {
-		if strings.HasPrefix(m.Body, "Zing accepted ") {
-			t.Errorf("commit5.Messages carries %q, want no accepted-findings message", m.Body)
+		if strings.HasPrefix(m.Body, fixRequestedFindingsPrefix) || strings.HasPrefix(m.Body, "Zing accepted ") {
+			t.Errorf("commit5.Messages carries %q, want neither a fix request nor an accepted-at-cap message", m.Body)
+		}
+	}
+	wantExtra := []response.Option{{Key: escalationChoiceAccept, Text: reviewAcceptRemainingOptionText}}
+	if !reflect.DeepEqual(commit5.Escalation.ExtraOptions, wantExtra) {
+		t.Errorf("Escalation.ExtraOptions = %+v, want %+v", commit5.Escalation.ExtraOptions, wantExtra)
+	}
+	if commit5.Escalation.Recommended != escalationChoiceRetry {
+		t.Errorf("Escalation.Recommended = %q, want %q (driveReviewToCap's second fix changed greet.go)", commit5.Escalation.Recommended, escalationChoiceRetry)
+	}
+}
+
+// ---- TestLoopsExhaustedRecommendation ---------------------------------------
+
+// TestLoopsExhaustedRecommendation proves loopsExhaustedRecommendation and
+// newestFixChangedFiles as pure functions (ticket 60, owner decisions Q2
+// and Q3's companion rule section 5).
+func TestLoopsExhaustedRecommendation(t *testing.T) {
+	accept := response.FindingAccept
+	minor := response.FindingArtifact{ID: "r3f1", Severity: response.SeverityMinor, Decision: &accept}
+	nit := response.FindingArtifact{ID: "r3f2", Severity: response.SeverityNit, Decision: &accept}
+	major := response.FindingArtifact{ID: "r3f3", Severity: response.SeverityMajor, Decision: &accept}
+	blocker := response.FindingArtifact{ID: "r3f4", Severity: response.SeverityBlocker, Decision: &accept}
+
+	t.Run("recommendation", func(t *testing.T) {
+		cases := []struct {
+			name     string
+			accepted []response.FindingArtifact
+			changed  bool
+			found    bool
+			want     string
+		}{
+			{"minor and nit, changed, found: accept", []response.FindingArtifact{minor, nit}, true, true, escalationChoiceAccept},
+			{"major, changed, found: retry", []response.FindingArtifact{major}, true, true, escalationChoiceRetry},
+			{"blocker, unchanged, found: accept", []response.FindingArtifact{blocker}, false, true, escalationChoiceAccept},
+			{"major, not found: retry", []response.FindingArtifact{major}, false, false, escalationChoiceRetry},
+		}
+		for _, tc := range cases {
+			t.Run(tc.name, func(t *testing.T) {
+				got := loopsExhaustedRecommendation(tc.accepted, tc.changed, tc.found)
+				if got != tc.want {
+					t.Errorf("loopsExhaustedRecommendation(...) = %q, want %q", got, tc.want)
+				}
+			})
+		}
+	})
+
+	t.Run("newestFixChangedFiles", func(t *testing.T) {
+		withFiles := response.BuildReport{FilesChanged: []string{"fix.go"}}
+		noFiles := response.BuildReport{}
+		task1WithFiles := withFiles
+		task1WithFiles.TaskN = 1
+		task2WithFiles := withFiles
+		task2WithFiles.TaskN = 2
+
+		cases := []struct {
+			name        string
+			reports     []store.BuildReportRow
+			minRunID    int64
+			wantChanged bool
+			wantFound   bool
+		}{
+			{
+				name: "task report, fix with files, fix with none: newest fix wins",
+				reports: []store.BuildReportRow{
+					{RunID: 1, Report: task1WithFiles},
+					{RunID: 2, Report: withFiles},
+					{RunID: 3, Report: noFiles},
+				},
+				wantChanged: false,
+				wantFound:   true,
+			},
+			{
+				name: "fix with none, then task report: fix still newest",
+				reports: []store.BuildReportRow{
+					{RunID: 1, Report: noFiles},
+					{RunID: 2, Report: task2WithFiles},
+				},
+				wantChanged: false,
+				wantFound:   true,
+			},
+			{
+				name:      "task report only: not found",
+				reports:   []store.BuildReportRow{{RunID: 1, Report: task1WithFiles}},
+				wantFound: false,
+			},
+			{
+				name:      "nil: not found",
+				reports:   nil,
+				wantFound: false,
+			},
+			{
+				// A building-stage CHECK fix landed before review's own first
+				// fix request watermark (minRunID): it must not stand in for a
+				// review fix run that has not happened yet (r1f4).
+				name:      "fix report from before review, no review fix report: not found",
+				reports:   []store.BuildReportRow{{RunID: 5, Report: withFiles}},
+				minRunID:  5,
+				wantFound: false,
+			},
+		}
+		for _, tc := range cases {
+			t.Run(tc.name, func(t *testing.T) {
+				changed, found := newestFixChangedFiles(tc.reports, tc.minRunID)
+				if changed != tc.wantChanged || found != tc.wantFound {
+					t.Errorf("newestFixChangedFiles(...) = (%v, %v), want (%v, %v)", changed, found, tc.wantChanged, tc.wantFound)
+				}
+			})
+		}
+	})
+}
+
+// preReviewBuildReportPayload is a minimal, schema-valid "build_report"
+// artifact payload (internal/store/schemas/artifacts/build_report.json)
+// for a task-0 (fix) run that changed no file when filesChanged is false,
+// used to plant a report that must not stand in for a review fix
+// (review findings r2f1, r2f3).
+func preReviewBuildReportPayload(filesChanged bool) []byte {
+	files := `[]`
+	if filesChanged {
+		files = `["greet.go"]`
+	}
+	return []byte(fmt.Sprintf(`{"task_n":0,"files_changed":%s,"extras":[],"fences":[],"report":"r","title":"t"}`, files))
+}
+
+// TestLoopsExhaustedRecommendationForSkipsPreReviewReports proves
+// loopsExhaustedRecommendationFor's own wiring from a real "fix requested
+// findings" marker into newestFixChangedFiles, not just the two pure
+// functions it calls (review finding r2f3).
+func TestLoopsExhaustedRecommendationForSkipsPreReviewReports(t *testing.T) {
+	accept := response.FindingAccept
+	major := []response.FindingArtifact{{ID: "r9f1", Severity: response.SeverityMajor, Decision: &accept}}
+
+	t.Run("no review fix request yet: a building-stage report does not stand in for one", func(t *testing.T) {
+		// jobs.review.max_loops 0 reaches the gate before any "fix requested
+		// findings" marker exists: reqs is empty, so there is no watermark to
+		// read, and the scan must not run at all (review finding r2f1, owner
+		// decision Q2), not even when a stray pre-review report changed
+		// nothing and so would otherwise recommend accept.
+		s, ticket, before := reviewTicketReady(t)
+		if _, err := s.InsertArtifact(t.Context(), store.Artifact{
+			TicketID: ticket.ID, RunID: &before, Type: "build_report", Payload: preReviewBuildReportPayload(false),
+		}); err != nil {
+			t.Fatalf("InsertArtifact: %v", err)
+		}
+		deps := pbClaim(t, s, pbFakeRuntime(t), ticket.ID)
+
+		got, err := loopsExhaustedRecommendationFor(t.Context(), ticket, deps, major)
+		if err != nil {
+			t.Fatalf("loopsExhaustedRecommendationFor: %v", err)
+		}
+		if got != escalationChoiceRetry {
+			t.Errorf("loopsExhaustedRecommendationFor(...) = %q, want %q", got, escalationChoiceRetry)
+		}
+	})
+
+	t.Run("review fix requests exist: a late-arriving pre-review report at or before the watermark is still skipped", func(t *testing.T) {
+		// The first "fix requested findings" marker's own watermark (minRunID)
+		// must be read from the real marker, not left at 0: a report whose
+		// run id is at or before that watermark must lose to the newer review
+		// fix's own report even when BuildReports returns the stray report
+		// last (highest artifact id), ordered after it.
+		s, ticket, rt, _ := driveReviewToCap(t)
+		deps := pbClaim(t, s, rt, ticket.ID)
+		reqs, err := reviewFixLoops(t.Context(), ticket, deps)
+		if err != nil {
+			t.Fatalf("reviewFixLoops: %v", err)
+		}
+		if len(reqs) == 0 {
+			t.Fatal("reviewFixLoops: no fix requests, want at least one")
+		}
+		firstLine, _, _ := strings.Cut(reqs[0].Body, "\n")
+		_, minRunID, ok := parseFixRequestLine(firstLine)
+		if !ok {
+			t.Fatalf("parseFixRequestLine(%q): ok = false", firstLine)
+		}
+		if _, insertErr := s.InsertArtifact(t.Context(), store.Artifact{
+			TicketID: ticket.ID, RunID: &minRunID, Type: "build_report", Payload: preReviewBuildReportPayload(false),
+		}); insertErr != nil {
+			t.Fatalf("InsertArtifact: %v", insertErr)
+		}
+
+		got, err := loopsExhaustedRecommendationFor(t.Context(), ticket, deps, major)
+		if err != nil {
+			t.Fatalf("loopsExhaustedRecommendationFor: %v", err)
+		}
+		if got != escalationChoiceRetry {
+			t.Errorf("loopsExhaustedRecommendationFor(...) = %q, want %q (driveReviewToCap's own second fix changed greet.go)", got, escalationChoiceRetry)
+		}
+	})
+}
+
+// TestLoopsExhaustedRecommendationForMalformedMarker proves review finding
+// r2f2: a malformed first "fix requested findings" marker is an error, not
+// a silent fall back to minRunID 0.
+func TestLoopsExhaustedRecommendationForMalformedMarker(t *testing.T) {
+	s, ticket, _ := reviewTicketReady(t)
+	if _, err := s.InsertMessage(t.Context(), store.Message{
+		TicketID: ticket.ID, Type: msgTypeUpdate, Author: authorSystem, Body: "fix requested findings garbled marker",
+	}); err != nil {
+		t.Fatalf("InsertMessage: %v", err)
+	}
+	deps := pbClaim(t, s, pbFakeRuntime(t), ticket.ID)
+
+	accept := response.FindingAccept
+	major := []response.FindingArtifact{{ID: "r9f1", Severity: response.SeverityMajor, Decision: &accept}}
+	_, err := loopsExhaustedRecommendationFor(t.Context(), ticket, deps, major)
+	if err == nil || !strings.Contains(err.Error(), "malformed marker") {
+		t.Fatalf("loopsExhaustedRecommendationFor(...) error = %v, want an error containing %q", err, "malformed marker")
+	}
+}
+
+// ---- TestLoopGateLegacyAcceptRowEscalates -----------------------------------
+
+// TestLoopGateLegacyAcceptRowEscalates proves a finding row stored before
+// OwnerPicked existed (no "owner_picked" key at all, decoding as false)
+// still escalates loops_exhausted at the cap: this test writes round 3's
+// triage result itself, the same shape the old binary wrote, instead of
+// calling triage.
+func TestLoopGateLegacyAcceptRowEscalates(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow end-to-end flow; runs in the full suite")
+	}
+	t.Parallel()
+	const loopLens = "quality"
+	s, ticket, rt, scripts := driveReviewToCap(t)
+
+	scripts[reviewRoundScriptKey(3, lensFidelity)] = &fstest.MapFile{Data: []byte(reviewOKScript)}
+	scripts[reviewRoundScriptKey(3, loopLens)] = &fstest.MapFile{Data: []byte(findingScript(loopLens, "major", "still broken", "fix it"))}
+
+	ticket3 := pbGetTicket(t, s, ticket.ID)
+	deps3 := pbClaim(t, s, rt, ticket.ID)
+	commit3, err := (reviewingHandler{}).Run(t.Context(), ticket3, deps3) // round 3: above floor, posts a question
+	if err != nil {
+		t.Fatalf("Run (round 3): %v", err)
+	}
+	pbApply(t, s, ticket, commit3)
+
+	q := newestOpenQuestion(t, s, ticket.ID)
+	var payload response.QuestionPayload
+	if err = json.Unmarshal(q.Payload, &payload); err != nil {
+		t.Fatalf("unmarshal question payload: %v", err)
+	}
+	ref := itemRefByText(t, payload, "still broken")
+	answerReviewItems(t, s, ticket.ID, q.ID, map[string]response.Decision{ref: response.DecisionAccept}, "")
+
+	findings, err := s.Findings(t.Context(), ticket.ID)
+	if err != nil {
+		t.Fatalf("Findings: %v", err)
+	}
+	row, ok := newestFindingRowPerID(findings)[ref]
+	if !ok {
+		t.Fatalf("no stored finding row for %q", ref)
+	}
+	accept := response.FindingAccept
+	finding := row.Finding
+	finding.Decision = &accept
+	fPayload, marshalErr := json.Marshal(finding)
+	if marshalErr != nil {
+		t.Fatalf("marshal finding: %v", marshalErr)
+	}
+	if strings.Contains(string(fPayload), "owner_picked") {
+		t.Fatalf("legacy payload = %s, want no %q key", fPayload, "owner_picked")
+	}
+
+	deps4 := pbClaim(t, s, rt, ticket.ID)
+	c := baseCommit(ticket, deps4)
+	c.ResolveQuestions = []int64{q.ID}
+	c.Artifacts = []store.Artifact{{Type: artifactTypeFinding, RunID: row.RunID, Payload: fPayload}}
+	pbApply(t, s, ticket, c)
+
+	ticket5 := pbGetTicket(t, s, ticket.ID)
+	deps5 := pbClaim(t, s, rt, ticket.ID)
+	commit5, err := (reviewingHandler{}).Run(t.Context(), ticket5, deps5) // fixreq: gate reached, legacy accept row
+	if err != nil {
+		t.Fatalf("Run (fixreq): %v", err)
+	}
+
+	if commit5.Escalation == nil {
+		t.Fatalf("commit5.Escalation = nil, want loops_exhausted (the accept row carries no owner_picked)")
+	}
+	if commit5.Escalation.Payload.What != "review findings remain after 2 fix runs" {
+		t.Errorf("Escalation.Payload.What = %q, want %q", commit5.Escalation.Payload.What, "review findings remain after 2 fix runs")
+	}
+	if commit5.Escalation.Payload.Why != "max_loops for review is 2" {
+		t.Errorf("Escalation.Payload.Why = %q, want %q", commit5.Escalation.Payload.Why, "max_loops for review is 2")
+	}
+	for _, m := range commit5.Messages {
+		if strings.HasPrefix(m.Body, fixRequestedFindingsPrefix) {
+			t.Errorf("commit5.Messages carries %q, want no fix request message", m.Body)
 		}
 	}
 }
@@ -318,5 +761,172 @@ func TestLoopGateDroppedMajorMovesToJudging(t *testing.T) {
 	}
 	if strings.Contains(acceptMsg.Body, "still broken") {
 		t.Errorf("accept message = %q, want it to exclude the dropped major finding", acceptMsg.Body)
+	}
+}
+
+// ---- TestLoopGateOwnerAcceptsRemainingFindings ------------------------------
+
+// TestLoopGateOwnerAcceptsRemainingFindings proves ticket 60's own accept
+// path end to end: at the review loop cap, with a major finding left and
+// the newest fix run (noopFixScript/noopFixCmd) changing no file, the
+// escalation offers a, d, c and recommends d; the owner's own explicit pick
+// of d moves the ticket to judging, writes the accepted-findings message,
+// and leaves no open question, with no database edit.
+func TestLoopGateOwnerAcceptsRemainingFindings(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow end-to-end flow; runs in the full suite")
+	}
+	t.Parallel()
+	s, ticket, rt, fixreqCommit := driveToReviewLoopsExhausted(t, noopFixScript, noopFixCmd)
+
+	wantExtra := []response.Option{{Key: escalationChoiceAccept, Text: reviewAcceptRemainingOptionText}}
+	if !reflect.DeepEqual(fixreqCommit.Escalation.ExtraOptions, wantExtra) {
+		t.Errorf("Escalation.ExtraOptions = %+v, want %+v", fixreqCommit.Escalation.ExtraOptions, wantExtra)
+	}
+	if fixreqCommit.Escalation.Recommended != escalationChoiceAccept {
+		t.Errorf("Escalation.Recommended = %q, want %q (noopFixScript changed no file)", fixreqCommit.Escalation.Recommended, escalationChoiceAccept)
+	}
+	pbApply(t, s, ticket, fixreqCommit)
+
+	q := newestOpenQuestion(t, s, ticket.ID)
+	var payload response.QuestionPayload
+	if err := json.Unmarshal(q.Payload, &payload); err != nil {
+		t.Fatalf("unmarshal question payload: %v", err)
+	}
+	wantKeys := []string{"a", "d", "c"}
+	gotKeys := make([]string, len(payload.Options))
+	for i, o := range payload.Options {
+		gotKeys[i] = o.Key
+	}
+	if !reflect.DeepEqual(gotKeys, wantKeys) {
+		t.Errorf("question option keys = %v, want %v", gotKeys, wantKeys)
+	}
+	if payload.Recommended != escalationChoiceAccept {
+		t.Errorf("question Recommended = %q, want %q", payload.Recommended, escalationChoiceAccept)
+	}
+
+	pbAnswerEscalation(t, s, ticket.ID, q.ID, escalationChoiceAccept)
+
+	ticket2 := pbGetTicket(t, s, ticket.ID)
+	deps2 := pbClaim(t, s, rt, ticket.ID)
+	commit, err := (reviewingHandler{}).Run(t.Context(), ticket2, deps2) // resolve the owner's own d pick
+	if err != nil {
+		t.Fatalf("Run (accept): %v", err)
+	}
+
+	if commit.Next != stateJudging {
+		t.Errorf("commit.Next = %q, want %q", commit.Next, stateJudging)
+	}
+	if commit.Reason != reasonReviewOwnerAcceptedAtCap {
+		t.Errorf("commit.Reason = %q, want %q", commit.Reason, reasonReviewOwnerAcceptedAtCap)
+	}
+	if commit.Escalation != nil {
+		t.Errorf("commit.Escalation = %+v, want nil", commit.Escalation)
+	}
+	if len(commit.ResolveQuestions) == 0 {
+		t.Error("commit.ResolveQuestions = empty, want non-empty")
+	}
+
+	var acceptMsg *store.Message
+	for i := range commit.Messages {
+		if strings.HasPrefix(commit.Messages[i].Body, "The owner accepted ") {
+			if acceptMsg != nil {
+				t.Fatalf("commit.Messages carries more than one message starting %q", "The owner accepted ")
+			}
+			acceptMsg = &commit.Messages[i]
+		}
+	}
+	if acceptMsg == nil {
+		t.Fatalf("commit.Messages = %+v, want exactly one starting %q", commit.Messages, "The owner accepted ")
+	}
+	maxLoops := pbMachine(t).Jobs[jobReviewName].MaxLoops
+	wantBody := "The owner accepted one finding at the review fix loop cap\n" +
+		fmt.Sprintf("Review reached max_loops (%d) after %d fix runs, and the owner chose to continue to judging without fixing these:\n", maxLoops, maxLoops) +
+		"- r3f1 major greet.go:2 [fidelity] still broken"
+	if acceptMsg.Body != wantBody {
+		t.Errorf("accept message body = %q, want %q", acceptMsg.Body, wantBody)
+	}
+
+	pbApply(t, s, ticket, commit)
+	ticket3 := pbGetTicket(t, s, ticket.ID)
+	if ticket3.State != stateJudging {
+		t.Errorf("ticket.State = %q, want %q", ticket3.State, stateJudging)
+	}
+	open, err := s.QuestionsByState(t.Context(), ticket.ID, "open")
+	if err != nil {
+		t.Fatalf("QuestionsByState(open): %v", err)
+	}
+	if len(open) != 0 {
+		t.Errorf("QuestionsByState(open) = %+v, want zero rows", open)
+	}
+	answered, err := s.QuestionsByState(t.Context(), ticket.ID, "answered")
+	if err != nil {
+		t.Fatalf("QuestionsByState(answered): %v", err)
+	}
+	if len(answered) != 0 {
+		t.Errorf("QuestionsByState(answered) = %+v, want zero rows", answered)
+	}
+}
+
+// ---- TestLoopGateReplyOnlyRetriesAtCap --------------------------------------
+
+// TestLoopGateReplyOnlyRetriesAtCap proves owner decision Q3: a reply with
+// no picked option on a review loops_exhausted question resolves as Retry,
+// opening fix request k+1 with the reply appended as notes, even though the
+// question recommends d.
+func TestLoopGateReplyOnlyRetriesAtCap(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow end-to-end flow; runs in the full suite")
+	}
+	t.Parallel()
+	s, ticket, rt, fixreqCommit := driveToReviewLoopsExhausted(t, noopFixScript, noopFixCmd)
+	pbApply(t, s, ticket, fixreqCommit)
+
+	q := newestOpenQuestion(t, s, ticket.ID)
+	if _, err := s.SaveDraft(t.Context(), store.DraftInput{TicketID: ticket.ID, QuestionID: &q.ID, Text: "looking into it"}); err != nil {
+		t.Fatalf("SaveDraft: %v", err)
+	}
+	if _, err := s.SendBatch(t.Context(), ticket.ID); err != nil {
+		t.Fatalf("SendBatch: %v", err)
+	}
+
+	ticket2 := pbGetTicket(t, s, ticket.ID)
+	deps2 := pbClaim(t, s, rt, ticket.ID)
+	commit, err := (reviewingHandler{}).Run(t.Context(), ticket2, deps2) // resolve the reply-only answer
+	if err != nil {
+		t.Fatalf("Run (reply only): %v", err)
+	}
+
+	if commit.Next != "" {
+		t.Errorf("commit.Next = %q, want %q", commit.Next, "")
+	}
+	if commit.Escalation != nil {
+		t.Errorf("commit.Escalation = %+v, want nil", commit.Escalation)
+	}
+	if len(commit.ResolveQuestions) == 0 {
+		t.Error("commit.ResolveQuestions = empty, want non-empty")
+	}
+
+	var fixMsg *store.Message
+	for i := range commit.Messages {
+		body := commit.Messages[i].Body
+		if strings.HasPrefix(body, fixRequestedFindingsPrefix) {
+			if fixMsg != nil {
+				t.Fatalf("commit.Messages carries more than one message starting %q", fixRequestedFindingsPrefix)
+			}
+			fixMsg = &commit.Messages[i]
+		}
+		if strings.HasPrefix(body, "The owner accepted ") {
+			t.Errorf("commit.Messages carries %q, want no accepted-at-cap message", body)
+		}
+	}
+	if fixMsg == nil {
+		t.Fatalf("commit.Messages = %+v, want one starting %q", commit.Messages, fixRequestedFindingsPrefix)
+	}
+	if !strings.Contains(fixMsg.Body, "still broken") {
+		t.Errorf("fix request message = %q, want it to mention %q", fixMsg.Body, "still broken")
+	}
+	if !strings.Contains(fixMsg.Body, "looking into it") {
+		t.Errorf("fix request message = %q, want it to mention the owner's own reply %q", fixMsg.Body, "looking into it")
 	}
 }

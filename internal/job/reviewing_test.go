@@ -21,6 +21,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"strconv"
 	"strings"
@@ -167,8 +168,11 @@ const greetGoLine2 = "greet.go:2"
 
 // twoFindingScript is one lens's own "ok" document carrying two findings at
 // two distinct locations (design section 6.6's own batching tests: two
-// findings of one lens, both discussed, carried in one resume).
-func twoFindingScript(lens, sev1, loc1, text1, fix1, sev2, loc2, text2, fix2 string) string {
+// findings of one lens, both discussed, carried in one resume). Every call
+// site today passes "major" for both severities, but the parameters stay:
+// a caller needing a different severity (to cross or stay under the floor)
+// should not have to fork this helper.
+func twoFindingScript(lens, sev1, loc1, text1, fix1, sev2, loc2, text2, fix2 string) string { //nolint:unparam // see above: kept general on purpose
 	return fmt.Sprintf(`<zing job="review" outcome="ok">
 <finding lens="%s" severity="%s" location="%s">
 <text>%s</text>
@@ -265,11 +269,7 @@ func reviewMarker(t *testing.T, s *store.Store, ticketID int64, prefix string) (
 
 // findingArtifactsByRound returns every stored finding artifact of round,
 // held or not, in Findings' own artifact-id order.
-// findingArtifactsByRound returns round 1's own stored finding artifacts:
-// every test in this file drives round 1 only (re-review, round 2+, is
-// task 12's own work), so this reads that round directly rather than
-// taking a round number no caller varies.
-func findingArtifactsByRound(t *testing.T, s *store.Store, ticketID int64) []response.FindingArtifact {
+func findingArtifactsByRound(t *testing.T, s *store.Store, ticketID int64, round int) []response.FindingArtifact {
 	t.Helper()
 	rows, err := s.Findings(t.Context(), ticketID)
 	if err != nil {
@@ -277,7 +277,7 @@ func findingArtifactsByRound(t *testing.T, s *store.Store, ticketID int64) []res
 	}
 	var out []response.FindingArtifact
 	for i := range rows {
-		if rows[i].Finding.Round == 1 {
+		if rows[i].Finding.Round == round {
 			out = append(out, rows[i].Finding)
 		}
 	}
@@ -598,7 +598,7 @@ func TestRoundBelowFloorRequestsFix(t *testing.T) {
 		t.Errorf("fix request body = %q, want it to quote the finding's own location %s", fixReq.Body, greetGoLine5)
 	}
 
-	findings := findingArtifactsByRound(t, s, ticket.ID)
+	findings := findingArtifactsByRound(t, s, ticket.ID, 1)
 	if len(findings) != 1 {
 		t.Fatalf("round 1 findings = %d, want 1", len(findings))
 	}
@@ -657,7 +657,7 @@ func TestRoundAboveFloorAsks(t *testing.T) {
 		t.Errorf("item text = %q, want it to hold %q", payload.Items[0].Text, findingText)
 	}
 
-	findings := findingArtifactsByRound(t, s, ticket.ID)
+	findings := findingArtifactsByRound(t, s, ticket.ID, 1)
 	if len(findings) != 1 || findings[0].Decision != nil {
 		t.Errorf("findings = %+v, want one undecided finding", findings)
 	}
@@ -1373,7 +1373,7 @@ func TestRoundInvalidLensRetriedKeepsFindings(t *testing.T) {
 		t.Errorf("tests session Resumes = %d, want 0 (the retry does not charge a resume)", sess.Resumes)
 	}
 
-	findings := findingArtifactsByRound(t, s, ticket.ID)
+	findings := findingArtifactsByRound(t, s, ticket.ID, 1)
 	gotLensSet := map[response.Lens]bool{}
 	for _, f := range findings {
 		for _, l := range f.Lenses {
@@ -1951,7 +1951,7 @@ func TestRoundLensQuestionHoldsOthers(t *testing.T) {
 		t.Errorf("asked marker line 3 = %q, want %q", lines[2], wantDone)
 	}
 
-	held := findingArtifactsByRound(t, s, ticket.ID)
+	held := findingArtifactsByRound(t, s, ticket.ID, 1)
 	if len(held) != 6 {
 		t.Fatalf("held findings = %d, want 6", len(held))
 	}
@@ -2046,8 +2046,8 @@ func TestContinueResumesAskingSession(t *testing.T) {
 	if err != nil {
 		t.Fatalf("SessionByID: %v", err)
 	}
-	if sess.Resumes != 1 {
-		t.Errorf("session resumes = %d, want 1", sess.Resumes)
+	if sess.Resumes != 0 {
+		t.Errorf("session resumes = %d, want 0 (answer resumes are free)", sess.Resumes)
 	}
 }
 
@@ -2124,7 +2124,7 @@ func TestContinueAsksAgainCarriesHeld(t *testing.T) {
 	}
 	pbApply(t, s, ticket, commit)
 
-	heldRound1 := findingArtifactsByRound(t, s, ticket.ID)
+	heldRound1 := findingArtifactsByRound(t, s, ticket.ID, 1)
 	if len(heldRound1) != 6 {
 		t.Fatalf("held findings after round 1 = %d, want 6", len(heldRound1))
 	}
@@ -2151,7 +2151,7 @@ func TestContinueAsksAgainCarriesHeld(t *testing.T) {
 		t.Errorf("re-ask marker line 3 = %q, want the original six lenses carried forward", lines[2])
 	}
 
-	heldRound1After := findingArtifactsByRound(t, s, ticket.ID)
+	heldRound1After := findingArtifactsByRound(t, s, ticket.ID, 1)
 	if len(heldRound1After) != 6 {
 		t.Errorf("held findings after the re-ask = %d, want still 6 (fidelity asking again adds none)", len(heldRound1After))
 	}
@@ -2323,22 +2323,23 @@ func TestContinueInvalidLensRetried(t *testing.T) {
 	}
 }
 
-// ---- TestContinueCapExhaustedEscalates -------------------------------------------
+// ---- TestContinueAnswerResumesAreFree -------------------------------------------
 
-// TestContinueCapExhaustedEscalates proves design section 6.2a step 2's own
-// cap gate: jobs.review.max_resumes is 2, so a third resume attempt on the
-// same asking session finds it exhausted and escalates resumes_exhausted,
-// origin cap_resumes, with no run started at all.
-func TestContinueCapExhaustedEscalates(t *testing.T) {
+// TestContinueAnswerResumesAreFree proves that every CONTINUE resume
+// delivering the owner's own answer is free (answerResume, job.go): three
+// continues in a row never escalate resumes_exhausted and leave the
+// fidelity session's own resumes at 0, well past review's max_resumes of 2.
+func TestContinueAnswerResumesAreFree(t *testing.T) {
 	if testing.Short() {
 		t.Skip("slow end-to-end flow; runs in the full suite")
 	}
 	t.Parallel()
-	s, ticket, _ := reviewTicketReady(t)
+	s, ticket, before := reviewTicketReady(t)
 	scripts := reviewScriptsFS(map[string]string{
 		reviewScriptKey(lensFidelity, 1): reviewQuestionScript("Q1", "ask 1"),
 		reviewScriptKey(lensFidelity, 2): reviewQuestionScript("Q2", "ask 2"),
 		reviewScriptKey(lensFidelity, 3): reviewQuestionScript("Q3", "ask 3"),
+		reviewScriptKey(lensFidelity, 4): reviewQuestionScript("Q4", "ask 4"),
 	})
 	rt := runtime.NewFake(scripts)
 	deps := pbClaim(t, s, rt, ticket.ID)
@@ -2349,55 +2350,158 @@ func TestContinueCapExhaustedEscalates(t *testing.T) {
 		t.Fatalf("Run (round): %v", err)
 	}
 	pbApply(t, s, ticket, commit)
+
+	roundRuns := reviewRunsSince(t, s, ticket.ID, before)
+	var fidelitySessionID int64
+	for _, r := range roundRuns {
+		if *r.Lens == lensFidelity {
+			fidelitySessionID = r.SessionID
+		}
+	}
+	if fidelitySessionID == 0 {
+		t.Fatal("fidelity's own run not found in round 1")
+	}
 	answerReviewQuestion(t, s, ticket.ID, newestOpenQuestion(t, s, ticket.ID).ID)
 
-	// Continue #1: resumes 0 -> 1, asks again.
-	ticket = pbGetTicket(t, s, ticket.ID)
-	deps = pbClaim(t, s, rt, ticket.ID)
-	commit, err = (reviewingHandler{}).Run(t.Context(), ticket, deps)
+	for i := 1; i <= 3; i++ {
+		var beforeRun, afterRun int64
+		beforeRun, err = s.MaxRunID(t.Context(), ticket.ID)
+		if err != nil {
+			t.Fatalf("MaxRunID (before continue %d): %v", i, err)
+		}
+		ticket = pbGetTicket(t, s, ticket.ID)
+		deps = pbClaim(t, s, rt, ticket.ID)
+		commit, err = (reviewingHandler{}).Run(t.Context(), ticket, deps)
+		if err != nil {
+			t.Fatalf("Run (continue %d): %v", i, err)
+		}
+		if commit.Escalation != nil {
+			t.Fatalf("continue %d: commit.Escalation = %+v, want nil", i, commit.Escalation)
+		}
+		pbApply(t, s, ticket, commit)
+		afterRun, err = s.MaxRunID(t.Context(), ticket.ID)
+		if err != nil {
+			t.Fatalf("MaxRunID (after continue %d): %v", i, err)
+		}
+		if afterRun != beforeRun+1 {
+			t.Errorf("continue %d: MaxRunID went from %d to %d, want exactly one run", i, beforeRun, afterRun)
+		}
+		if i < 3 {
+			answerReviewQuestion(t, s, ticket.ID, newestOpenQuestion(t, s, ticket.ID).ID)
+		}
+	}
+
+	maxResumes := deps.Machine.Jobs[jobReviewName].MaxResumes
+	sess, _, err := s.SessionByID(t.Context(), fidelitySessionID, maxResumes)
 	if err != nil {
-		t.Fatalf("Run (continue 1): %v", err)
+		t.Fatalf("SessionByID: %v", err)
+	}
+	if sess.Resumes != 0 {
+		t.Errorf("fidelity session resumes = %d, want 0 (answer resumes are free)", sess.Resumes)
+	}
+}
+
+// TestContinueAnswerAtCapWithLegacyEscalationWaits proves continueRound's
+// legacy branch of answerResume (job.go): an asking lens session already
+// exhausted and already carrying its own cap_resumes escalation (written
+// before this rule existed) leaves the round to that escalation's retry,
+// returning ErrNoAction with no run started for any lens, instead of
+// resuming free.
+func TestContinueAnswerAtCapWithLegacyEscalationWaits(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow end-to-end flow; runs in the full suite")
+	}
+	t.Parallel()
+	s, ticket, before := reviewTicketReady(t)
+	scripts := reviewScriptsFS(map[string]string{
+		reviewScriptKey(lensFidelity, 1): reviewQuestionScript("Q1", "ask 1"),
+	})
+	rt := runtime.NewFake(scripts)
+	deps := pbClaim(t, s, rt, ticket.ID)
+
+	commit, err := (reviewingHandler{}).Run(t.Context(), ticket, deps)
+	if err != nil {
+		t.Fatalf("Run (round): %v", err)
 	}
 	pbApply(t, s, ticket, commit)
+
+	roundRuns := reviewRunsSince(t, s, ticket.ID, before)
+	var fidelitySessionID int64
+	for _, r := range roundRuns {
+		if *r.Lens == lensFidelity {
+			fidelitySessionID = r.SessionID
+		}
+	}
+	if fidelitySessionID == 0 {
+		t.Fatal("fidelity's own run not found in round 1")
+	}
+
+	owner := "continue-legacy-cap-owner"
+	expires := time.Now().Add(10 * time.Minute).UTC().Truncate(time.Second)
+	maxResumes := deps.Machine.Jobs[jobReviewName].MaxResumes
+	for range maxResumes {
+		claimed, claimErr := s.Claim(t.Context(), ticket.ID, owner, expires)
+		if claimErr != nil || !claimed {
+			t.Fatalf("bump claim: claimed=%v err=%v", claimed, claimErr)
+		}
+		applied, bumpErr := s.CommitHandlerResult(t.Context(), store.HandlerCommit{
+			TicketID: ticket.ID, Owner: owner, Expires: expires,
+			Session: &store.SessionUpsert{ID: &fidelitySessionID, BumpResumes: true},
+		})
+		if bumpErr != nil || !applied {
+			t.Fatalf("bump CommitHandlerResult: applied=%v err=%v", applied, bumpErr)
+		}
+	}
+
+	sess, state, err := s.SessionByID(t.Context(), fidelitySessionID, maxResumes)
+	if err != nil {
+		t.Fatalf("SessionByID: %v", err)
+	}
+	if state != store.SessionExhausted {
+		t.Fatalf("session state = %v, want SessionExhausted (at the cap)", state)
+	}
+	if sess.Resumes != maxResumes {
+		t.Fatalf("sess.Resumes = %d, want %d (at the cap)", sess.Resumes, maxResumes)
+	}
+
 	answerReviewQuestion(t, s, ticket.ID, newestOpenQuestion(t, s, ticket.ID).ID)
 
-	// Continue #2: resumes 1 -> 2, asks again.
-	ticket = pbGetTicket(t, s, ticket.ID)
-	deps = pbClaim(t, s, rt, ticket.ID)
-	commit, err = (reviewingHandler{}).Run(t.Context(), ticket, deps)
-	if err != nil {
-		t.Fatalf("Run (continue 2): %v", err)
+	claimed2, claimErr2 := s.Claim(t.Context(), ticket.ID, owner, expires)
+	if claimErr2 != nil || !claimed2 {
+		t.Fatalf("escalate claim: claimed=%v err=%v", claimed2, claimErr2)
 	}
-	pbApply(t, s, ticket, commit)
-	answerReviewQuestion(t, s, ticket.ID, newestOpenQuestion(t, s, ticket.ID).ID)
+	escCommit := capResumesEscalation(ticket, Deps{Owner: owner, Expires: expires}, jobReviewName, fidelitySessionID)
+	applied, escErr := s.CommitHandlerResult(t.Context(), escCommit)
+	if escErr != nil || !applied {
+		t.Fatalf("escalate CommitHandlerResult: applied=%v err=%v", applied, escErr)
+	}
 
-	// Continue #3: the session's own resumes is now 2, at max_resumes:
-	// exhausted, no run started.
-	beforeThird, err := s.MaxRunID(t.Context(), ticket.ID)
+	beforeRun, err := s.MaxRunID(t.Context(), ticket.ID)
 	if err != nil {
-		t.Fatalf("MaxRunID: %v", err)
+		t.Fatalf("MaxRunID (before): %v", err)
 	}
+
 	ticket = pbGetTicket(t, s, ticket.ID)
 	deps = pbClaim(t, s, rt, ticket.ID)
-	commit, err = (reviewingHandler{}).Run(t.Context(), ticket, deps)
+	_, err = (reviewingHandler{}).Run(t.Context(), ticket, deps)
+	if !errors.Is(err, ErrNoAction) {
+		t.Fatalf("err = %v, want ErrNoAction (already escalated once)", err)
+	}
+
+	afterRun, err := s.MaxRunID(t.Context(), ticket.ID)
 	if err != nil {
-		t.Fatalf("Run (continue 3): %v", err)
+		t.Fatalf("MaxRunID (after): %v", err)
 	}
-	if commit.Escalation == nil {
-		t.Fatal("commit.Escalation = nil, want set")
+	if afterRun != beforeRun {
+		t.Errorf("MaxRunID moved from %d to %d, want no new run", beforeRun, afterRun)
 	}
-	if commit.Escalation.Payload.Code != string(response.EscalationCodeResumesExhausted) {
-		t.Errorf("escalation code = %q, want %q", commit.Escalation.Payload.Code, response.EscalationCodeResumesExhausted)
-	}
-	if commit.Escalation.Payload.Origin != string(response.EscalationOriginCapResumes) {
-		t.Errorf("escalation origin = %q, want %q", commit.Escalation.Payload.Origin, response.EscalationOriginCapResumes)
-	}
-	afterThird, err := s.MaxRunID(t.Context(), ticket.ID)
+
+	sess, _, err = s.SessionByID(t.Context(), fidelitySessionID, maxResumes)
 	if err != nil {
-		t.Fatalf("MaxRunID: %v", err)
+		t.Fatalf("SessionByID (after): %v", err)
 	}
-	if afterThird != beforeThird {
-		t.Errorf("MaxRunID changed from %d to %d, want unchanged (no run started)", beforeThird, afterThird)
+	if sess.Resumes != maxResumes {
+		t.Errorf("sess.Resumes = %d, want %d (unchanged)", sess.Resumes, maxResumes)
 	}
 }
 
@@ -2609,8 +2713,14 @@ func TestTriageStoresDecisions(t *testing.T) {
 	if d := newest[accepted].Finding.Decision; d == nil || *d != response.FindingAccept {
 		t.Errorf("accepted finding %s decision = %v, want accept", accepted, d)
 	}
+	if !newest[accepted].Finding.OwnerPicked {
+		t.Errorf("accepted finding %s OwnerPicked = false, want true (an explicit owner pick)", accepted)
+	}
 	if d := newest[dropped].Finding.Decision; d == nil || *d != response.FindingDrop {
 		t.Errorf("dropped finding %s decision = %v, want drop", dropped, d)
+	}
+	if !newest[dropped].Finding.OwnerPicked {
+		t.Errorf("dropped finding %s OwnerPicked = false, want true (an explicit owner pick)", dropped)
 	}
 
 	resolved, err := s.QuestionsByState(t.Context(), ticket.ID, "resolved")
@@ -2684,8 +2794,21 @@ func TestTriageDefaultsToAccept(t *testing.T) {
 	if d := newest[decided].Finding.Decision; d == nil || *d != response.FindingDrop {
 		t.Errorf("decided finding %s decision = %v, want drop (unaffected by the default)", decided, d)
 	}
+	if !newest[decided].Finding.OwnerPicked {
+		t.Errorf("decided finding %s OwnerPicked = false, want true (an explicit owner pick)", decided)
+	}
 	if d := newest[undecided].Finding.Decision; d == nil || *d != response.FindingAccept {
 		t.Errorf("undecided finding %s decision = %v, want accept (the safe default)", undecided, d)
+	}
+	if newest[undecided].Finding.OwnerPicked {
+		t.Errorf("undecided finding %s OwnerPicked = true, want false (the safe default, not an owner pick)", undecided)
+	}
+	undecidedPayload, marshalErr := json.Marshal(newest[undecided].Finding)
+	if marshalErr != nil {
+		t.Fatalf("marshal undecided finding: %v", marshalErr)
+	}
+	if strings.Contains(string(undecidedPayload), "owner_picked") {
+		t.Errorf("undecided finding payload = %s, want no %q key", undecidedPayload, "owner_picked")
 	}
 }
 
@@ -2836,6 +2959,34 @@ func TestDiscussResumesLensSession(t *testing.T) {
 	}
 	if resumed.Lens == nil || *resumed.Lens != "security" {
 		t.Errorf("resumed run lens = %v, want security", resumed.Lens)
+	}
+}
+
+// ---- TestDiscussRunAndRoute_PassesCappedThrough -----------------------------
+
+// TestDiscussRunAndRoute_PassesCappedThrough proves
+// reviewingHandler.discussRunAndRoute's own passthrough case still carries
+// claudeCapped (r4f3): without it, this regresses to escalating
+// runtime_exec_failed and asking the owner, exactly the bug issue #45
+// fixes. pbScriptedRuntime hands runJobWith a *runtime.SessionLimitError
+// directly, the same shape Claude.run itself returns.
+func TestDiscussRunAndRoute_PassesCappedThrough(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow end-to-end flow; runs in the full suite")
+	}
+	t.Parallel()
+	s, ticket, _, _, _ := discussGroupReady(t, "please check the error path again")
+
+	cappedRT := &pbScriptedRuntime{t: t, steps: []pbScriptedStep{
+		{res: runtime.RunResult{}, err: &runtime.SessionLimitError{ResetAt: time.Now().Add(time.Hour), Parsed: true}},
+	}}
+	deps := pbClaim(t, s, cappedRT, ticket.ID)
+	commit, err := (reviewingHandler{}).Run(t.Context(), ticket, deps)
+	if _, capped := Capped(err); !capped {
+		t.Fatalf("Capped(%v) = (_, false), want true", err)
+	}
+	if !reflect.DeepEqual(commit, store.HandlerCommit{}) {
+		t.Errorf("commit = %+v, want the zero value", commit)
 	}
 }
 
@@ -3182,30 +3333,28 @@ func TestDiscussExhaustedEscalatesOnce(t *testing.T) {
 		t.Skip("slow end-to-end flow; runs in the full suite")
 	}
 	t.Parallel()
-	s, ticket, rt, scripts, _ := discussGroupReady(t, "")
-	scripts[reviewScriptKey("security", 2)] = &fstest.MapFile{Data: []byte(reviewQuestionScript("Q1", "which way?"))}
-	scripts[reviewScriptKey("security", 3)] = &fstest.MapFile{Data: []byte(reviewQuestionScript("Q2", "which way now?"))}
+	s, ticket, rt, _, findingID := discussGroupReady(t, "")
+
+	sessionID := runByFindingID(t, s, ticket.ID, findingID).SessionID
+	owner := "discuss-cap-owner"
+	expires := time.Now().Add(10 * time.Minute).UTC().Truncate(time.Second)
+	maxResumes := pbMachine(t).Jobs[jobReviewName].MaxResumes
+	for range maxResumes {
+		claimed, claimErr := s.Claim(t.Context(), ticket.ID, owner, expires)
+		if claimErr != nil || !claimed {
+			t.Fatalf("bump claim: claimed=%v err=%v", claimed, claimErr)
+		}
+		applied, bumpErr := s.CommitHandlerResult(t.Context(), store.HandlerCommit{
+			TicketID: ticket.ID, Owner: owner, Expires: expires,
+			Session: &store.SessionUpsert{ID: &sessionID, BumpResumes: true},
+		})
+		if bumpErr != nil || !applied {
+			t.Fatalf("bump CommitHandlerResult: applied=%v err=%v", applied, bumpErr)
+		}
+	}
 
 	deps := pbClaim(t, s, rt, ticket.ID)
 	commit, err := (reviewingHandler{}).Run(t.Context(), ticket, deps)
-	if err != nil {
-		t.Fatalf("Run (discuss 1): %v", err)
-	}
-	pbApply(t, s, ticket, commit)
-	answerReviewQuestion(t, s, ticket.ID, newestOpenQuestion(t, s, ticket.ID).ID)
-
-	ticket = pbGetTicket(t, s, ticket.ID)
-	deps = pbClaim(t, s, rt, ticket.ID)
-	commit, err = (reviewingHandler{}).Run(t.Context(), ticket, deps)
-	if err != nil {
-		t.Fatalf("Run (discuss 2): %v", err)
-	}
-	pbApply(t, s, ticket, commit)
-	answerReviewQuestion(t, s, ticket.ID, newestOpenQuestion(t, s, ticket.ID).ID)
-
-	ticket = pbGetTicket(t, s, ticket.ID)
-	deps = pbClaim(t, s, rt, ticket.ID)
-	commit, err = (reviewingHandler{}).Run(t.Context(), ticket, deps)
 	if err != nil {
 		t.Fatalf("Run (cap): %v", err)
 	}
@@ -3225,6 +3374,180 @@ func TestDiscussExhaustedEscalatesOnce(t *testing.T) {
 	_, err = (reviewingHandler{}).Run(t.Context(), ticket, deps)
 	if !errors.Is(err, ErrNoAction) {
 		t.Fatalf("err = %v, want ErrNoAction (already escalated once)", err)
+	}
+}
+
+// ---- TestDiscussAnswerResumesAreFree -----------------------------------------
+
+// TestDiscussAnswerResumesAreFree proves answerResume (job.go) in discuss:
+// an answered round's own resume is free, even once the lens session sits
+// at the cap, unlike a fresh discuss turn (TestDiscussExhaustedEscalatesOnce).
+func TestDiscussAnswerResumesAreFree(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow end-to-end flow; runs in the full suite")
+	}
+	t.Parallel()
+	s, ticket, rt, scripts, findingID := discussGroupReady(t, "")
+	scripts[reviewScriptKey(discussLens, 2)] = &fstest.MapFile{Data: []byte(reviewQuestionScript("Q1", "which way?"))}
+	scripts[reviewScriptKey(discussLens, 3)] = &fstest.MapFile{Data: []byte(findingScript(discussLens, "minor", "revised", "fix"))}
+
+	deps := pbClaim(t, s, rt, ticket.ID)
+	commit, err := (reviewingHandler{}).Run(t.Context(), ticket, deps)
+	if err != nil {
+		t.Fatalf("Run (discuss 1): %v", err)
+	}
+	pbApply(t, s, ticket, commit)
+
+	sid := runByFindingID(t, s, ticket.ID, findingID).SessionID
+	owner := "discuss-free-owner"
+	expires := time.Now().Add(10 * time.Minute).UTC().Truncate(time.Second)
+	claimed, claimErr := s.Claim(t.Context(), ticket.ID, owner, expires)
+	if claimErr != nil || !claimed {
+		t.Fatalf("bump claim: claimed=%v err=%v", claimed, claimErr)
+	}
+	applied, bumpErr := s.CommitHandlerResult(t.Context(), store.HandlerCommit{
+		TicketID: ticket.ID, Owner: owner, Expires: expires,
+		Session: &store.SessionUpsert{ID: &sid, BumpResumes: true},
+	})
+	if bumpErr != nil || !applied {
+		t.Fatalf("bump CommitHandlerResult: applied=%v err=%v", applied, bumpErr)
+	}
+
+	maxResumes := pbMachine(t).Jobs[jobReviewName].MaxResumes
+	sess, state, err := s.SessionByID(t.Context(), sid, maxResumes)
+	if err != nil {
+		t.Fatalf("SessionByID: %v", err)
+	}
+	if state != store.SessionExhausted {
+		t.Fatalf("session state = %v, want SessionExhausted (at the cap)", state)
+	}
+	if sess.Resumes != 2 {
+		t.Fatalf("sess.Resumes = %d, want 2 (at the cap)", sess.Resumes)
+	}
+
+	qID := newestOpenQuestion(t, s, ticket.ID).ID
+	answerReviewQuestion(t, s, ticket.ID, qID)
+
+	before, err := s.MaxRunID(t.Context(), ticket.ID)
+	if err != nil {
+		t.Fatalf("MaxRunID (before): %v", err)
+	}
+
+	ticket = pbGetTicket(t, s, ticket.ID)
+	deps = pbClaim(t, s, rt, ticket.ID)
+	commit, err = (reviewingHandler{}).Run(t.Context(), ticket, deps)
+	if err != nil {
+		t.Fatalf("Run (discuss 2, free): %v", err)
+	}
+	if commit.Escalation != nil {
+		t.Fatalf("commit.Escalation = %+v, want nil (the owner's answer is free)", commit.Escalation)
+	}
+	after, err := s.MaxRunID(t.Context(), ticket.ID)
+	if err != nil {
+		t.Fatalf("MaxRunID (after): %v", err)
+	}
+	if after != before+1 {
+		t.Errorf("MaxRunID moved from %d to %d, want exactly one new run", before, after)
+	}
+	if !slices.Contains(commit.ResolveQuestions, qID) {
+		t.Errorf("commit.ResolveQuestions = %v, want it to contain %d", commit.ResolveQuestions, qID)
+	}
+
+	sess, _, err = s.SessionByID(t.Context(), sid, maxResumes)
+	if err != nil {
+		t.Fatalf("SessionByID (after): %v", err)
+	}
+	if sess.Resumes != 2 {
+		t.Errorf("sess.Resumes after the free answer resume = %d, want 2 (unchanged)", sess.Resumes)
+	}
+}
+
+// TestDiscussAnswerAtCapWithLegacyEscalationWaits proves discuss's legacy
+// branch of answerResume (job.go): a discuss session already exhausted and
+// already carrying its own cap_resumes escalation (written before this
+// rule existed) leaves the round to that escalation's retry, returning
+// ErrNoAction with no run started, instead of resuming free.
+func TestDiscussAnswerAtCapWithLegacyEscalationWaits(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow end-to-end flow; runs in the full suite")
+	}
+	t.Parallel()
+	s, ticket, rt, scripts, findingID := discussGroupReady(t, "")
+	scripts[reviewScriptKey(discussLens, 2)] = &fstest.MapFile{Data: []byte(reviewQuestionScript("Q1", "which way?"))}
+
+	deps := pbClaim(t, s, rt, ticket.ID)
+	commit, err := (reviewingHandler{}).Run(t.Context(), ticket, deps)
+	if err != nil {
+		t.Fatalf("Run (discuss 1): %v", err)
+	}
+	pbApply(t, s, ticket, commit)
+
+	sid := runByFindingID(t, s, ticket.ID, findingID).SessionID
+	owner := "discuss-legacy-cap-owner"
+	expires := time.Now().Add(10 * time.Minute).UTC().Truncate(time.Second)
+	claimed, claimErr := s.Claim(t.Context(), ticket.ID, owner, expires)
+	if claimErr != nil || !claimed {
+		t.Fatalf("bump claim: claimed=%v err=%v", claimed, claimErr)
+	}
+	applied, bumpErr := s.CommitHandlerResult(t.Context(), store.HandlerCommit{
+		TicketID: ticket.ID, Owner: owner, Expires: expires,
+		Session: &store.SessionUpsert{ID: &sid, BumpResumes: true},
+	})
+	if bumpErr != nil || !applied {
+		t.Fatalf("bump CommitHandlerResult: applied=%v err=%v", applied, bumpErr)
+	}
+
+	maxResumes := pbMachine(t).Jobs[jobReviewName].MaxResumes
+	sess, state, err := s.SessionByID(t.Context(), sid, maxResumes)
+	if err != nil {
+		t.Fatalf("SessionByID: %v", err)
+	}
+	if state != store.SessionExhausted {
+		t.Fatalf("session state = %v, want SessionExhausted (at the cap)", state)
+	}
+	if sess.Resumes != 2 {
+		t.Fatalf("sess.Resumes = %d, want 2 (at the cap)", sess.Resumes)
+	}
+
+	qID := newestOpenQuestion(t, s, ticket.ID).ID
+	answerReviewQuestion(t, s, ticket.ID, qID)
+
+	claimed2, claimErr2 := s.Claim(t.Context(), ticket.ID, owner, expires)
+	if claimErr2 != nil || !claimed2 {
+		t.Fatalf("escalate claim: claimed=%v err=%v", claimed2, claimErr2)
+	}
+	escCommit := capResumesEscalation(ticket, Deps{Owner: owner, Expires: expires}, jobReviewName, sid)
+	applied, escErr := s.CommitHandlerResult(t.Context(), escCommit)
+	if escErr != nil || !applied {
+		t.Fatalf("escalate CommitHandlerResult: applied=%v err=%v", applied, escErr)
+	}
+
+	before, err := s.MaxRunID(t.Context(), ticket.ID)
+	if err != nil {
+		t.Fatalf("MaxRunID (before): %v", err)
+	}
+
+	ticket = pbGetTicket(t, s, ticket.ID)
+	deps = pbClaim(t, s, rt, ticket.ID)
+	_, err = (reviewingHandler{}).Run(t.Context(), ticket, deps)
+	if !errors.Is(err, ErrNoAction) {
+		t.Fatalf("err = %v, want ErrNoAction (already escalated once)", err)
+	}
+
+	after, err := s.MaxRunID(t.Context(), ticket.ID)
+	if err != nil {
+		t.Fatalf("MaxRunID (after): %v", err)
+	}
+	if after != before {
+		t.Errorf("MaxRunID moved from %d to %d, want no new run", before, after)
+	}
+
+	sess, _, err = s.SessionByID(t.Context(), sid, maxResumes)
+	if err != nil {
+		t.Fatalf("SessionByID (after): %v", err)
+	}
+	if sess.Resumes != 2 {
+		t.Errorf("sess.Resumes = %d, want 2 (unchanged)", sess.Resumes)
 	}
 }
 
@@ -3412,6 +3735,23 @@ const reReviewFixScript = `<zing job="build" outcome="ok">
     </files_changed>
   </claims>
   <report>Reviewed and touched up greet.go.</report>
+  <notes></notes>
+</zing>`
+
+// reReviewHelloFixCmd is reReviewFixCmd for hello.txt: a fix run that
+// touches only hello.txt, leaving greet.go unchanged, so the suppression
+// tests (ticket 56) can drive a round 2 whose diff never names greet.go.
+const reReviewHelloFixCmd = "printf '\\nreviewed\\n' >> hello.txt && test -f hello.txt"
+
+// reReviewHelloFixScript is reReviewFixScript for hello.txt, matching
+// reReviewHelloFixCmd's own edit.
+const reReviewHelloFixScript = `<zing job="build" outcome="ok">
+  <claims>
+    <files_changed>
+      <path>hello.txt</path>
+    </files_changed>
+  </claims>
+  <report>Reviewed and touched up hello.txt.</report>
   <notes></notes>
 </zing>`
 
@@ -3736,30 +4076,28 @@ func TestReviewCapResumesRetryAccepts(t *testing.T) {
 		t.Skip("slow end-to-end flow; runs in the full suite")
 	}
 	t.Parallel()
-	s, ticket, rt, scripts, findingID := discussGroupReady(t, "")
-	scripts[reviewScriptKey(discussLens, 2)] = &fstest.MapFile{Data: []byte(reviewQuestionScript("Q1", "which way?"))}
-	scripts[reviewScriptKey(discussLens, 3)] = &fstest.MapFile{Data: []byte(reviewQuestionScript("Q2", "which way now?"))}
+	s, ticket, rt, _, findingID := discussGroupReady(t, "")
+
+	sessionID := runByFindingID(t, s, ticket.ID, findingID).SessionID
+	owner := "discuss-retry-cap-owner"
+	expires := time.Now().Add(10 * time.Minute).UTC().Truncate(time.Second)
+	maxResumes := pbMachine(t).Jobs[jobReviewName].MaxResumes
+	for range maxResumes {
+		claimed, claimErr := s.Claim(t.Context(), ticket.ID, owner, expires)
+		if claimErr != nil || !claimed {
+			t.Fatalf("bump claim: claimed=%v err=%v", claimed, claimErr)
+		}
+		applied, bumpErr := s.CommitHandlerResult(t.Context(), store.HandlerCommit{
+			TicketID: ticket.ID, Owner: owner, Expires: expires,
+			Session: &store.SessionUpsert{ID: &sessionID, BumpResumes: true},
+		})
+		if bumpErr != nil || !applied {
+			t.Fatalf("bump CommitHandlerResult: applied=%v err=%v", applied, bumpErr)
+		}
+	}
 
 	deps := pbClaim(t, s, rt, ticket.ID)
 	commit, err := (reviewingHandler{}).Run(t.Context(), ticket, deps)
-	if err != nil {
-		t.Fatalf("Run (discuss 1): %v", err)
-	}
-	pbApply(t, s, ticket, commit)
-	answerReviewQuestion(t, s, ticket.ID, newestOpenQuestion(t, s, ticket.ID).ID)
-
-	ticket = pbGetTicket(t, s, ticket.ID)
-	deps = pbClaim(t, s, rt, ticket.ID)
-	commit, err = (reviewingHandler{}).Run(t.Context(), ticket, deps)
-	if err != nil {
-		t.Fatalf("Run (discuss 2): %v", err)
-	}
-	pbApply(t, s, ticket, commit)
-	answerReviewQuestion(t, s, ticket.ID, newestOpenQuestion(t, s, ticket.ID).ID)
-
-	ticket = pbGetTicket(t, s, ticket.ID)
-	deps = pbClaim(t, s, rt, ticket.ID)
-	commit, err = (reviewingHandler{}).Run(t.Context(), ticket, deps)
 	if err != nil {
 		t.Fatalf("Run (cap): %v", err)
 	}
@@ -3767,6 +4105,18 @@ func TestReviewCapResumesRetryAccepts(t *testing.T) {
 		t.Fatal("commit.Escalation = nil, want set")
 	}
 	pbApply(t, s, ticket, commit)
+
+	sourceRows, err := s.Findings(t.Context(), ticket.ID)
+	if err != nil {
+		t.Fatalf("Findings (before retry): %v", err)
+	}
+	sourceRow, ok := newestFindingRowPerID(sourceRows)[findingID]
+	if !ok {
+		t.Fatalf("no finding row for %q before retry", findingID)
+	}
+	if !sourceRow.Finding.OwnerPicked {
+		t.Errorf("source row OwnerPicked = false, want true (triage's own discuss pick)")
+	}
 
 	qID := newestOpenQuestion(t, s, ticket.ID).ID
 	const note = "owner says accept it as is"
@@ -3803,7 +4153,461 @@ func TestReviewCapResumesRetryAccepts(t *testing.T) {
 	if !strings.Contains(finding.Fix, discussFix) || !strings.Contains(finding.Fix, note) {
 		t.Errorf("finding.Fix = %q, want it to carry both the original fix text and the owner's own note", finding.Fix)
 	}
+	if finding.OwnerPicked {
+		t.Errorf("retry finding.OwnerPicked = true, want false (Zing's own recovery accept, not the owner's pick)")
+	}
+	if strings.Contains(string(retryCommit.Artifacts[0].Payload), "owner_picked") {
+		t.Errorf("retry artifact payload = %q, want no owner_picked key", retryCommit.Artifacts[0].Payload)
+	}
 	if len(retryCommit.ResolveQuestions) != 1 || retryCommit.ResolveQuestions[0] != qID {
 		t.Errorf("retryCommit.ResolveQuestions = %v, want [%d]", retryCommit.ResolveQuestions, qID)
+	}
+}
+
+// ---- ticket 56: suppress a re-raised finding at a dropped, unchanged location ----
+
+// driveReviewRoundToFixreq drives a ticket from a freshly answered review
+// question (every item either accept or drop, no discuss) through TRIAGE
+// and on into FIXREQ's own fix request: TestReReviewSuppressesDroppedAtUnchangedFile
+// and TestReReviewKeepsDroppedWhenFileChanged both open round 1 the same
+// way, so this carries the two ticks they share.
+func driveReviewRoundToFixreq(t *testing.T, s *store.Store, ticket store.Ticket, rt runtime.Runtime) {
+	t.Helper()
+	ticket1 := pbGetTicket(t, s, ticket.ID)
+	deps1 := pbClaim(t, s, rt, ticket.ID)
+	commit1, err := (reviewingHandler{}).Run(t.Context(), ticket1, deps1) // TRIAGE
+	if err != nil {
+		t.Fatalf("Run (triage): %v", err)
+	}
+	pbApply(t, s, ticket, commit1)
+
+	ticket2 := pbGetTicket(t, s, ticket.ID)
+	deps2 := pbClaim(t, s, rt, ticket.ID)
+	commit2, err := (reviewingHandler{}).Run(t.Context(), ticket2, deps2) // decided round -> FIXREQ
+	if err != nil {
+		t.Fatalf("Run (fixreq): %v", err)
+	}
+	if len(commit2.Messages) != 1 || !strings.HasPrefix(commit2.Messages[0].Body, fixRequestedFindingsPrefix) {
+		t.Fatalf("commit2.Messages = %+v, want one %q message", commit2.Messages, fixRequestedFindingsPrefix)
+	}
+	pbApply(t, s, ticket, commit2)
+}
+
+// TestReReviewSuppressesDroppedAtUnchangedFile proves the ticket 56 code
+// filter end to end: round 1's quality lens reports a major at greet.go:5
+// (unchecked input, dropped by the owner) and a major at hello.txt:1
+// (breaks the build, accepted); the fix lands on hello.txt only, so
+// greet.go never changes. Round 2's quality lens re-reports the same
+// greet.go:5 concern; suppressRepeated removes it before any id is
+// assigned, so round 2 posts no review question, stores no finding row at
+// that location, and the round moves straight on to judging.
+func TestReReviewSuppressesDroppedAtUnchangedFile(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow end-to-end flow; runs in the full suite")
+	}
+	t.Parallel()
+	s, ticket, _ := reviewTicketReady(t)
+	scripts := reviewScriptsFS(map[string]string{
+		reviewScriptKey("quality", 1): twoFindingScript(
+			"quality", "major", greetGoLine5, "unchecked input", "validate it",
+			"major", pbHelloTxt+":1", "breaks the build", "fix the build",
+		),
+	})
+	rt := runtime.NewFake(scripts)
+
+	deps := pbClaim(t, s, rt, ticket.ID)
+	commit, err := (reviewingHandler{}).Run(t.Context(), ticket, deps) // ROUND 1
+	if err != nil {
+		t.Fatalf("Run (round 1): %v", err)
+	}
+	pbApply(t, s, ticket, commit)
+
+	q := newestOpenQuestion(t, s, ticket.ID)
+	var payload response.QuestionPayload
+	if err = json.Unmarshal(q.Payload, &payload); err != nil {
+		t.Fatalf("unmarshal question payload: %v", err)
+	}
+	dropID := itemRefByText(t, payload, "unchecked input")
+	acceptID := itemRefByText(t, payload, "breaks the build")
+	answerReviewItems(t, s, ticket.ID, q.ID, map[string]response.Decision{
+		dropID:   response.DecisionDrop,
+		acceptID: response.DecisionAccept,
+	}, "")
+
+	driveReviewRoundToFixreq(t, s, ticket, rt)
+
+	scripts["build/fix/1.xml"] = &fstest.MapFile{Data: []byte(reReviewHelloFixScript)}
+	driveReviewFixToLanding(t, s, ticket.ID, rt, reReviewHelloFixCmd)
+
+	scripts[reviewRoundScriptKey(2, "quality")] = &fstest.MapFile{
+		Data: []byte(findingScriptAt("quality", "major", greetGoLine5, "unchecked input", "validate it")),
+	}
+	scripts[reviewRoundScriptKey(2, lensFidelity)] = &fstest.MapFile{Data: []byte(reviewOKScript)}
+
+	ticket3 := pbGetTicket(t, s, ticket.ID)
+	deps3 := pbClaim(t, s, rt, ticket.ID)
+	commit3, err := (reviewingHandler{}).Run(t.Context(), ticket3, deps3) // ROUND 2
+	if err != nil {
+		t.Fatalf("Run (round 2): %v", err)
+	}
+	if commit3.Next != stateJudging {
+		t.Fatalf("commit3.Next = %q, want %q (the lone survivor was suppressed)", commit3.Next, stateJudging)
+	}
+	for i := range commit3.Messages {
+		if commit3.Messages[i].Type == msgTypeQuestion {
+			t.Errorf("commit3.Messages[%d].Type = %q, want no question message", i, commit3.Messages[i].Type)
+		}
+	}
+	pbApply(t, s, ticket, commit3)
+
+	round2 := findingArtifactsByRound(t, s, ticket.ID, 2)
+	for _, f := range round2 {
+		if f.Location == greetGoLine5 {
+			t.Errorf("round 2 findings = %+v, want no row at %s", round2, greetGoLine5)
+		}
+	}
+
+	marker, ok := reviewMarker(t, s, ticket.ID, "review round 2 done")
+	if !ok {
+		t.Fatal(`no "review round 2 done" marker`)
+	}
+	if !strings.Contains(marker.Body, "kept 0 dropped 0 merged 0 repeated 1") {
+		t.Errorf("done marker body = %q, want it to report kept 0 dropped 0 merged 0 repeated 1", marker.Body)
+	}
+}
+
+// TestReReviewKeepsDroppedWhenFileChanged is
+// TestReReviewSuppressesDroppedAtUnchangedFile's own companion: round 1
+// drops greet.go:5 and accepts greet.go:2, both quality findings; the fix
+// lands on greet.go itself, so round 2's re-raised greet.go:5 is not
+// suppressed -- ChangedFilesBetween lists greet.go as changed -- and the
+// ticket asks the owner about it again.
+func TestReReviewKeepsDroppedWhenFileChanged(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow end-to-end flow; runs in the full suite")
+	}
+	t.Parallel()
+	s, ticket, _ := reviewTicketReady(t)
+	scripts := reviewScriptsFS(map[string]string{
+		reviewScriptKey("quality", 1): twoFindingScript(
+			"quality", "major", greetGoLine5, "unchecked input", "validate it",
+			"major", greetGoLine2, "second concern", "fix the second",
+		),
+	})
+	rt := runtime.NewFake(scripts)
+
+	deps := pbClaim(t, s, rt, ticket.ID)
+	commit, err := (reviewingHandler{}).Run(t.Context(), ticket, deps) // ROUND 1
+	if err != nil {
+		t.Fatalf("Run (round 1): %v", err)
+	}
+	pbApply(t, s, ticket, commit)
+
+	q := newestOpenQuestion(t, s, ticket.ID)
+	var payload response.QuestionPayload
+	if err = json.Unmarshal(q.Payload, &payload); err != nil {
+		t.Fatalf("unmarshal question payload: %v", err)
+	}
+	dropID := itemRefByText(t, payload, "unchecked input")
+	acceptID := itemRefByText(t, payload, "second concern")
+	answerReviewItems(t, s, ticket.ID, q.ID, map[string]response.Decision{
+		dropID:   response.DecisionDrop,
+		acceptID: response.DecisionAccept,
+	}, "")
+
+	driveReviewRoundToFixreq(t, s, ticket, rt)
+
+	scripts["build/fix/1.xml"] = &fstest.MapFile{Data: []byte(reReviewFixScript)}
+	driveReviewFixToLanding(t, s, ticket.ID, rt, reReviewFixCmd)
+
+	scripts[reviewRoundScriptKey(2, "quality")] = &fstest.MapFile{
+		Data: []byte(findingScriptAt("quality", "major", greetGoLine5, "unchecked input", "validate it")),
+	}
+	scripts[reviewRoundScriptKey(2, lensFidelity)] = &fstest.MapFile{Data: []byte(reviewOKScript)}
+
+	ticket3 := pbGetTicket(t, s, ticket.ID)
+	deps3 := pbClaim(t, s, rt, ticket.ID)
+	commit3, err := (reviewingHandler{}).Run(t.Context(), ticket3, deps3) // ROUND 2
+	if err != nil {
+		t.Fatalf("Run (round 2): %v", err)
+	}
+	if commit3.Waiting == nil || *commit3.Waiting != waitingFlagReview {
+		t.Fatalf("commit3.Waiting = %v, want %q (greet.go changed, so the finding survives)", commit3.Waiting, waitingFlagReview)
+	}
+
+	var qMsg *store.Message
+	for i := range commit3.Messages {
+		if commit3.Messages[i].Type == msgTypeQuestion {
+			qMsg = &commit3.Messages[i]
+		}
+	}
+	if qMsg == nil {
+		t.Fatalf("commit3.Messages = %+v, want one question message", commit3.Messages)
+	}
+	var qPayload response.QuestionPayload
+	if err = json.Unmarshal(qMsg.Payload, &qPayload); err != nil {
+		t.Fatalf("unmarshal round 2 question payload: %v", err)
+	}
+	if len(qPayload.Items) != 1 || !strings.Contains(qPayload.Items[0].Text, "unchecked input") {
+		t.Errorf("round 2 question items = %+v, want exactly one item mentioning %q", qPayload.Items, "unchecked input")
+	}
+	pbApply(t, s, ticket, commit3)
+
+	round2 := findingArtifactsByRound(t, s, ticket.ID, 2)
+	found := false
+	for _, f := range round2 {
+		if f.Location == greetGoLine5 {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("round 2 findings = %+v, want a row at %s", round2, greetGoLine5)
+	}
+
+	marker, ok := reviewMarker(t, s, ticket.ID, "review round 2 done")
+	if !ok {
+		t.Fatal(`no "review round 2 done" marker`)
+	}
+	if !strings.Contains(marker.Body, "repeated 0") {
+		t.Errorf("done marker body = %q, want it to report repeated 0", marker.Body)
+	}
+}
+
+// TestSuppressRepeatedFailsOpenOnUnresolvableSHA proves Q3's own fail-open
+// branch: suppressRepeated runs against the real Orchestrator every
+// integration test in this file already claims through (pbBuildProjects),
+// and a dropped row whose SHA git cannot resolve must block nothing,
+// report zero repeats, and return no error, rather than failing the tick
+// or (wrongly) blocking every location because its own ChangedFilesBetween
+// came back empty. It also proves the warning Q3 requires names the
+// unresolved commit, and that suppressRepeated returns ctx.Err() instead of
+// failing open when the comparison fails because the context is done. Not
+// parallel: it swaps the process-wide default logger to capture the
+// warning.
+func TestSuppressRepeatedFailsOpenOnUnresolvableSHA(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow end-to-end flow; runs in the full suite")
+	}
+	s, ticket, _ := reviewTicketReady(t)
+	rt := runtime.NewFake(reviewScriptsFS(nil))
+	deps := pbClaim(t, s, rt, ticket.ID)
+
+	proj, wt, escalation, err := ensureWorktreeOrEscalate(t.Context(), ticket, deps, func(errText string) store.HandlerCommit {
+		t.Fatalf("ensureWorktreeOrEscalate: onFail: %s", errText)
+		return store.HandlerCommit{}
+	})
+	if err != nil {
+		t.Fatalf("ensureWorktreeOrEscalate: %v", err)
+	}
+	if escalation != nil {
+		t.Fatalf("ensureWorktreeOrEscalate: escalation = %+v, want nil", escalation)
+	}
+
+	sha, err := proj.Orch.HeadSHA(t.Context(), wt)
+	if err != nil {
+		t.Fatalf("HeadSHA: %v", err)
+	}
+
+	const unresolvable = "0000000000000000000000000000000000000000"
+	dropped := []response.FindingArtifact{{ID: findingID1, Location: greetGoLine5, SHA: unresolvable}}
+	merged := []response.FindingArtifact{{ID: findingID1, Severity: response.SeverityMajor, Location: greetGoLine5}}
+
+	var logBuf bytes.Buffer
+	prevDefault := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logBuf, &slog.HandlerOptions{Level: slog.LevelWarn})))
+	t.Cleanup(func() { slog.SetDefault(prevDefault) })
+
+	kept, repeated, err := suppressRepeated(t.Context(), ticket, proj, wt, sha, dropped, merged)
+	if err != nil {
+		t.Fatalf("suppressRepeated: %v", err)
+	}
+	if repeated != 0 {
+		t.Errorf("repeated = %d, want 0 (an unresolvable sha blocks nothing)", repeated)
+	}
+	if len(kept) != 1 || kept[0].ID != findingID1 {
+		t.Errorf("kept = %+v, want the merged row kept", kept)
+	}
+	if got := logBuf.String(); !strings.Contains(got, "review dropped findings not compared") || !strings.Contains(got, "sha="+unresolvable) {
+		t.Errorf("log = %q, want a warning naming sha=%s", got, unresolvable)
+	}
+
+	t.Run("a cancelled context returns ctx.Err() instead of failing open", func(t *testing.T) {
+		cancelCtx, cancel := context.WithCancel(t.Context())
+		cancel()
+		cancelled := []response.FindingArtifact{{ID: findingID1, Location: greetGoLine5, SHA: sha}}
+		kept, _, err := suppressRepeated(cancelCtx, ticket, proj, wt, sha, cancelled, merged)
+		if !errors.Is(err, context.Canceled) {
+			t.Errorf("suppressRepeated error = %v, want context.Canceled", err)
+		}
+		if kept != nil {
+			t.Errorf("kept = %+v, want nil", kept)
+		}
+	})
+}
+
+// TestSuppressRepeatedLogsRepeatedFinding proves each removal is logged at
+// info with ticket_id, the dropped row's own finding_id, and location
+// (ticket 56): the dropped row's own SHA equal to the current sha makes
+// ChangedFilesBetween's own diff empty, so the merged row at the same
+// location is blocked. Not parallel: it swaps the process-wide default
+// logger to capture the line.
+func TestSuppressRepeatedLogsRepeatedFinding(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow end-to-end flow; runs in the full suite")
+	}
+	s, ticket, _ := reviewTicketReady(t)
+	rt := runtime.NewFake(reviewScriptsFS(nil))
+	deps := pbClaim(t, s, rt, ticket.ID)
+
+	proj, wt, escalation, err := ensureWorktreeOrEscalate(t.Context(), ticket, deps, func(errText string) store.HandlerCommit {
+		t.Fatalf("ensureWorktreeOrEscalate: onFail: %s", errText)
+		return store.HandlerCommit{}
+	})
+	if err != nil {
+		t.Fatalf("ensureWorktreeOrEscalate: %v", err)
+	}
+	if escalation != nil {
+		t.Fatalf("ensureWorktreeOrEscalate: escalation = %+v, want nil", escalation)
+	}
+
+	sha, err := proj.Orch.HeadSHA(t.Context(), wt)
+	if err != nil {
+		t.Fatalf("HeadSHA: %v", err)
+	}
+
+	dropped := []response.FindingArtifact{{ID: findingID1, Location: greetGoLine5, SHA: sha}}
+	merged := []response.FindingArtifact{{ID: findingIDRound2, Severity: response.SeverityMajor, Location: greetGoLine5}}
+
+	var logBuf bytes.Buffer
+	prevDefault := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logBuf, &slog.HandlerOptions{Level: slog.LevelInfo})))
+	t.Cleanup(func() { slog.SetDefault(prevDefault) })
+
+	kept, repeated, err := suppressRepeated(t.Context(), ticket, proj, wt, sha, dropped, merged)
+	if err != nil {
+		t.Fatalf("suppressRepeated: %v", err)
+	}
+	if repeated != 1 || len(kept) != 0 {
+		t.Fatalf("suppressRepeated = (%+v, %d), want (none, 1)", kept, repeated)
+	}
+
+	got := logBuf.String()
+	if !strings.Contains(got, "review finding repeats a dropped finding") ||
+		!strings.Contains(got, "finding_id="+findingID1) ||
+		!strings.Contains(got, "location="+greetGoLine5) {
+		t.Errorf("log = %q, want a line naming finding_id=%s location=%s", got, findingID1, greetGoLine5)
+	}
+}
+
+// requestsByLabel returns, in call order, every RunRequest rec has
+// recorded whose Label equals label exactly.
+func requestsByLabel(rec *recordingRuntime, label string) []runtime.RunRequest {
+	rec.mu.Lock()
+	defer rec.mu.Unlock()
+	var out []runtime.RunRequest
+	for i := range rec.reqs {
+		if rec.reqs[i].Label == label {
+			out = append(out, rec.reqs[i])
+		}
+	}
+	return out
+}
+
+// requestsByLabelPrefix is requestsByLabel, matching a Label prefix instead
+// of an exact Label (TestReReviewPromptListsDroppedFindings's own round 1
+// check: "1-" covers every lens the round ran, not just quality).
+func requestsByLabelPrefix(rec *recordingRuntime, prefix string) []runtime.RunRequest {
+	rec.mu.Lock()
+	defer rec.mu.Unlock()
+	var out []runtime.RunRequest
+	for i := range rec.reqs {
+		if strings.HasPrefix(rec.reqs[i].Label, prefix) {
+			out = append(out, rec.reqs[i])
+		}
+	}
+	return out
+}
+
+// TestReReviewPromptListsDroppedFindings proves the ticket 56 prompt input:
+// round 2's own quality lens, the one that re-raises the dropped
+// greet.go:5 concern, receives a "dropped findings" input naming that
+// dropped row by id, location, and text; round 1, which has no dropped
+// row yet (nothing has been dropped before round 1 starts), carries no
+// such input at all.
+func TestReReviewPromptListsDroppedFindings(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow end-to-end flow; runs in the full suite")
+	}
+	t.Parallel()
+	s, ticket, _ := reviewTicketReady(t)
+	scripts := reviewScriptsFS(map[string]string{
+		reviewScriptKey("quality", 1): twoFindingScript(
+			"quality", "major", greetGoLine5, "unchecked input", "validate it",
+			"major", pbHelloTxt+":1", "breaks the build", "fix the build",
+		),
+	})
+	rt := &recordingRuntime{inner: runtime.NewFake(scripts)}
+
+	deps := pbClaim(t, s, rt, ticket.ID)
+	commit, err := (reviewingHandler{}).Run(t.Context(), ticket, deps) // ROUND 1
+	if err != nil {
+		t.Fatalf("Run (round 1): %v", err)
+	}
+	pbApply(t, s, ticket, commit)
+
+	q := newestOpenQuestion(t, s, ticket.ID)
+	var payload response.QuestionPayload
+	if err = json.Unmarshal(q.Payload, &payload); err != nil {
+		t.Fatalf("unmarshal question payload: %v", err)
+	}
+	dropID := itemRefByText(t, payload, "unchecked input")
+	acceptID := itemRefByText(t, payload, "breaks the build")
+	answerReviewItems(t, s, ticket.ID, q.ID, map[string]response.Decision{
+		dropID:   response.DecisionDrop,
+		acceptID: response.DecisionAccept,
+	}, "")
+
+	driveReviewRoundToFixreq(t, s, ticket, rt)
+
+	scripts["build/fix/1.xml"] = &fstest.MapFile{Data: []byte(reReviewHelloFixScript)}
+	driveReviewFixToLanding(t, s, ticket.ID, rt, reReviewHelloFixCmd)
+
+	scripts[reviewRoundScriptKey(2, "quality")] = &fstest.MapFile{
+		Data: []byte(findingScriptAt("quality", "major", greetGoLine5, "unchecked input", "validate it")),
+	}
+	scripts[reviewRoundScriptKey(2, lensFidelity)] = &fstest.MapFile{Data: []byte(reviewOKScript)}
+
+	ticket3 := pbGetTicket(t, s, ticket.ID)
+	deps3 := pbClaim(t, s, rt, ticket.ID)
+	if _, err = (reviewingHandler{}).Run(t.Context(), ticket3, deps3); err != nil { // ROUND 2
+		t.Fatalf("Run (round 2): %v", err)
+	}
+
+	// The job prompt's own fixed text mentions "dropped findings:" (the
+	// prose paragraph added for this ticket) in every request, so only the
+	// rendered input block's own "label:\n" header -- never followed by a
+	// space, the way the prose paragraph's colon is -- tells the two apart.
+	const droppedInputHeader = "dropped findings:\n"
+
+	round1 := requestsByLabelPrefix(rt, "1-")
+	if len(round1) == 0 {
+		t.Fatal("requests labelled 1-*, = 0, want at least one (round 1 ran at least one lens)")
+	}
+	for _, req := range round1 {
+		if strings.Contains(req.Prompt, droppedInputHeader) {
+			t.Errorf("round 1 %q Prompt = %q, want no dropped findings input (nothing dropped yet)", req.Label, req.Prompt)
+		}
+	}
+
+	round2Quality := requestsByLabel(rt, "2-quality")
+	if len(round2Quality) != 1 {
+		t.Fatalf("requests labelled 2-quality = %d, want exactly 1", len(round2Quality))
+	}
+	prompt := round2Quality[0].Prompt
+	if !strings.Contains(prompt, droppedInputHeader) {
+		t.Errorf("round 2 quality Prompt = %q, want it to contain %q", prompt, droppedInputHeader)
+	}
+	if !strings.Contains(prompt, "- "+dropID+" "+greetGoLine5+" [quality] unchecked input") {
+		t.Errorf("round 2 quality Prompt = %q, want a dropped findings line for %s at %s", prompt, dropID, greetGoLine5)
 	}
 }

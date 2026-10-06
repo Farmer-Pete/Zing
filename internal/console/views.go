@@ -16,6 +16,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/a-h/templ"
 
@@ -62,7 +63,7 @@ const alertLineTimeFormat = "15:04:05"
 // same content on every frame regardless of which view or ticket is open,
 // so patchRegions (stream.go) can call it without sig.
 func (c *console) alertsComponent() templ.Component {
-	return templates.Alerts(buildAlertLines(c.log.Warnings(alertsLimit)))
+	return templates.Alerts(buildAlertLines(c.log.Warnings(alertsLimit)), assetVersion)
 }
 
 // buildAlertLines turns the handler's ring entries into the #alerts
@@ -107,7 +108,16 @@ func (c *console) navComponent(ctx context.Context, open int64) (templ.Component
 		ids[i] = items[i].Ticket.ID
 	}
 	slog.DebugContext(ctx, "console: nav live tickets", "count", len(items), "ticket_ids", ids)
-	return templates.Nav(projects, buildNavThreads(items), c.sandboxReason, open), nil
+	now := time.Now()
+	until, held, err := c.store.ClaudeHold(ctx)
+	if err != nil {
+		return nil, err
+	}
+	claudeHold := ""
+	if held && until.After(now) {
+		claudeHold = clockLabel(until)
+	}
+	return templates.Nav(projects, buildNavThreads(items, now), c.sandboxReason, claudeHold, open), nil
 }
 
 // terminalStates is the machine's terminal state list for InboxItems
@@ -133,8 +143,10 @@ func (c *console) stateOrder() []string {
 }
 
 // buildNavThreads turns LiveTickets into #nav's rows, preserving their
-// issue-number order (design section 6.3, 6.8, #106 bug 5).
-func buildNavThreads(items []store.LiveTicket) []templates.NavThread {
+// issue-number order (design section 6.3, 6.8, #106 bug 5). now is
+// compared against each item's ParkedUntil (#45): a past value is that
+// ticket's own parked history, not a reason to show the badge again.
+func buildNavThreads(items []store.LiveTicket, now time.Time) []templates.NavThread {
 	out := make([]templates.NavThread, 0, len(items))
 	for i := range items {
 		th := templates.NavThread{
@@ -146,9 +158,19 @@ func buildNavThreads(items []store.LiveTicket) []templates.NavThread {
 			th.Blocking = true
 			th.WaitingOn = *items[i].Ticket.WaitingOn
 		}
+		if items[i].ParkedUntil != nil && items[i].ParkedUntil.After(now) {
+			th.ParkedUntil = clockLabel(*items[i].ParkedUntil)
+		}
 		out = append(out, th)
 	}
 	return out
+}
+
+// clockLabel formats t in time.Local as "3:04pm" (#45): the sidebar's own
+// parked-badge and claude-hold clock, matching store.parkedMarkerBody's own
+// clock format in the thread.
+func clockLabel(t time.Time) string {
+	return t.In(time.Local).Format("3:04pm")
 }
 
 // projectSections splits one project's tickets, already in issue-number

@@ -1,0 +1,5 @@
+{"type":"user","timestamp":"2026-10-05T10:00:00Z"}
+{"type":"assistant","timestamp":"2026-10-05T10:04:30Z","message":{"id":"msg_a","usage":{"output_tokens":12}}}
+{"type":"assistant","timestamp":"2026-10-05T10:05:00Z","message":{"id":"msg_a","usage":{"output_tokens":841}}}
+{"type":"user","timestamp":"2026-10-05T10:05:01Z"}
+{"type":"assistant","timestamp":"2026-10-05T10:05:06Z","message":{"id":"msg_b","usage":{"output_tokens":40}}}

@@ -483,6 +483,45 @@ func TestFindingArtifactSchema(t *testing.T) {
 	}
 }
 
+// TestFindingArtifactOwnerPicked proves the finding artifact schema's own
+// owner_picked field (ticket 55) is an optional boolean: an explicit true
+// validates, the key's absence (every row stored before this field) still
+// validates, and a non-boolean value is refused.
+func TestFindingArtifactOwnerPicked(t *testing.T) {
+	t.Parallel()
+
+	schemas, err := loadSchemas()
+	if err != nil {
+		t.Fatalf("loadSchemas: %v", err)
+	}
+
+	base := findingArtifactPayload("r1f1", string(response.FindingAccept))
+	trimmed := strings.TrimSuffix(base, "}")
+
+	tests := []struct {
+		name    string
+		payload string
+		wantOK  bool
+	}{
+		{"explicit owner_picked true validates", trimmed + `,"owner_picked":true}`, true},
+		{"no owner_picked key validates", base, true},
+		{"non-bool owner_picked is refused", trimmed + `,"owner_picked":"yes"}`, false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			err := schemas.validate(testTableArtifacts, "finding", []byte(tt.payload))
+			if tt.wantOK && err != nil {
+				t.Errorf("validate(%s) = %v, want nil", tt.name, err)
+			}
+			if !tt.wantOK && err == nil {
+				t.Errorf("validate(%s) = nil, want error", tt.name)
+			}
+		})
+	}
+}
+
 // TestFindingDecisionValues proves response.FindingDecision's own Values()
 // holds exactly accept, drop, discuss, in that order (section 4.1): reject
 // cannot be stored, unlike the owner's triage Decision type.

@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"log/slog"
 	"maps"
+	"regexp"
 	"slices"
 	"sort"
 	"strconv"
@@ -205,7 +206,7 @@ func originFor(u unit) response.EscalationOrigin {
 func buildCapResumesEscalation(t store.Ticket, d Deps, sessionID int64) store.HandlerCommit {
 	slog.Warn("escalation written", "ticket_id", t.ID, "session_id", sessionID, "run_id", nil,
 		"code", string(response.EscalationCodeResumesExhausted), "origin", string(response.EscalationOriginCapResumes))
-	return capResumesEscalation(t, d, sessionID)
+	return capResumesEscalation(t, d, jobBuildName, sessionID)
 }
 
 // ensureUnitWorktree is design section 6's own repeated step, shared by
@@ -280,6 +281,17 @@ type unit struct {
 type buildingHandler struct{}
 
 func (h buildingHandler) Run(ctx context.Context, t store.Ticket, d Deps) (store.HandlerCommit, error) {
+	c, err := h.run(ctx, t, d)
+	if err != nil {
+		return c, err
+	}
+	return attachFileGrant(ctx, t, d, c)
+}
+
+// run is building's own tick (design section 6): the answered-round
+// entry, step 0, step 2, and the unit switch, unchanged from Run's old
+// body. Run wraps it with attachFileGrant (plan #51).
+func (h buildingHandler) run(ctx context.Context, t store.Ticket, d Deps) (store.HandlerCommit, error) {
 	// Step (E)/1: an answered round (design section 6.2). The newest
 	// question's kind decides the branch before round.Job does: a
 	// perimeter-kind question is always RESOLVE (section 6.6), whichever
@@ -667,28 +679,25 @@ func (h buildingHandler) resumeBuildRound(ctx context.Context, t store.Ticket, d
 		return store.HandlerCommit{}, false, fmt.Errorf("job: building: answered round: session by id: %w", err)
 	}
 
+	// answerResume (job.go): the owner's answer resumes this round free and
+	// bypasses the exhausted-cap escalation, even on a session already at
+	// max_resumes, unless that session already carries its cap_resumes
+	// escalation from before this rule existed.
+	capped, capErr := answerResume(ctx, t, d, sess, state, round)
+	if capErr != nil {
+		return store.HandlerCommit{}, false, capErr
+	}
+	if capped {
+		slog.Debug("building entry decision", "ticket_id", t.ID, "step", "build_round_capped_again", "session_state", sessionStateName(state))
+		return store.HandlerCommit{}, true, nil
+	}
+
 	// resumeCharge (job.go, design D5, section 7.4): an interrupted latest
-	// run resumes this round free and bypasses the exhausted-cap escalation
-	// below, even on a session already at max_resumes.
+	// run's own input is still added to the prompt, even though the answer
+	// resume itself is free.
 	newestRun, foundRun, newestErr := d.Store.SessionNewestRun(ctx, sess.ID)
 	if newestErr != nil {
 		return store.HandlerCommit{}, false, fmt.Errorf("job: building: answered round: newest run: %w", newestErr)
-	}
-	bump, gate := true, true
-	if foundRun {
-		bump, gate = resumeCharge(newestRun)
-	}
-
-	if state == store.SessionExhausted && gate {
-		has, hasErr := d.Store.HasEscalation(ctx, t.ID, string(response.EscalationOriginCapResumes), sess.ID)
-		if hasErr != nil {
-			return store.HandlerCommit{}, false, fmt.Errorf("job: building: answered round: has escalation: %w", hasErr)
-		}
-		if has {
-			slog.Debug("building entry decision", "ticket_id", t.ID, "step", "build_round_capped_again", "session_state", sessionStateName(state))
-			return store.HandlerCommit{}, true, nil
-		}
-		return buildCapResumesEscalation(t, d, sess.ID), false, nil
 	}
 
 	_, wt, escalation, err := ensureUnitWorktreeFor(ctx, t, d, u)
@@ -707,7 +716,7 @@ func (h buildingHandler) resumeBuildRound(ctx context.Context, t store.Ticket, d
 		answers = append(answers, prompt.NamedInput{Label: labelInterrupted, Text: interruptedResumeText, Untrusted: false})
 	}
 
-	runCommit, runErr := h.runBuildResume(ctx, t, d, wt, u, sess, 0, questionIDs(round), answers, bump)
+	runCommit, runErr := h.runBuildResume(ctx, t, d, wt, u, sess, 0, questionIDs(round), answers, false)
 	result, resultErr := withBranchResult(runCommit, runErr, wt)
 	return result, false, resultErr
 }
@@ -746,6 +755,7 @@ func (h buildingHandler) runBuildResume(ctx context.Context, t store.Ticket, d D
 	if sess.ExternalID == nil {
 		return store.HandlerCommit{}, fmt.Errorf("job: building: resume: session %d has no external id", sess.ID)
 	}
+	inputs = append(slices.Clone(inputs), deadlineInput(d, time.Now()))
 	su := store.SessionUpsert{ID: &sess.ID, BumpResumes: bump}
 	req := runtime.RunRequest{
 		Job: response.JobBuild, Label: buildLabel(u.TaskN), WorkDir: wt.Dir(),
@@ -790,6 +800,10 @@ func (h buildingHandler) enterFromEscalationRound(ctx context.Context, t store.T
 	case choice == escalationChoiceAbandon:
 		commit = abandonCommit(t, d, payload.Code)
 
+	case choice == escalationChoiceGrant && payload.Grant != nil:
+		grantNote := response.FileGrantOptionText(*payload.Grant) + ": the owner approved this; the plan now lists these files for this task."
+		commit, err = h.retryFreshRun(ctx, t, d, resolveIDs, strings.TrimSpace(grantNote+"\n"+notes), errorText, payload.Grant)
+
 	case choice != escalationChoiceRetry:
 		commit = replanUnsupportedEscalation(t, d, resolveIDs, origin)
 
@@ -806,7 +820,7 @@ func (h buildingHandler) enterFromEscalationRound(ctx context.Context, t store.T
 		commit = h.retryMarkerCommit(t, d, resolveIDs)
 
 	case (origin == response.EscalationOriginBuild || origin == response.EscalationOriginFix) && escMsg.RunID != nil:
-		commit, err = h.retryFreshRun(ctx, t, d, resolveIDs, notes, errorText)
+		commit, err = h.retryFreshRun(ctx, t, d, resolveIDs, notes, errorText, nil)
 
 	case origin == response.EscalationOriginBuild, origin == response.EscalationOriginFix:
 		commit = h.retryMarkerCommit(t, d, resolveIDs)
@@ -856,8 +870,20 @@ func replanUnsupportedEscalation(t store.Ticket, d Deps, resolveIDs []int64, ori
 // build_report, so unitInFlight's own nextTaskN still names it, exactly as
 // resumeBuildRound draws the identical conclusion for an answered build
 // question), or the open fix request's own unit in a post-build state,
-// which retryFreshFixRun runs instead.
-func (h buildingHandler) retryFreshRun(ctx context.Context, t store.Ticket, d Deps, resolveIDs []int64, notes, errorText string) (store.HandlerCommit, error) {
+// which retryFreshFixRun runs instead. grant is non-nil only for the
+// owner's "let task N also change PATH" pick (plan #51, design "shape"
+// rules 4-5): it is applied to the in-memory plan before the builder's
+// prompt is built, and set on every return from this point on so
+// CommitHandlerResult applies the same edit to the stored plan, even an
+// escalation before runFirst ever runs -- except the no-stored-plan
+// escalation just below, whose commit must not carry a grant at all:
+// grantPlanFilesTx has no plan row to apply it to there, and the whole
+// commit would otherwise roll back over a grant nothing can apply. A
+// grant is also dropped, and the pick behaves as a plain Retry, when the
+// unit in flight no longer matches it: the ticket is unclaimed between
+// the escalation and the owner's pick, so an owner_edit can renumber or
+// drop tasks in between (review r2f3).
+func (h buildingHandler) retryFreshRun(ctx context.Context, t store.Ticket, d Deps, resolveIDs []int64, notes, errorText string, grant *response.FileGrant) (store.HandlerCommit, error) {
 	plan, _, ok, err := d.Store.StoredPlan(ctx, t.ID)
 	if err != nil {
 		return store.HandlerCommit{}, fmt.Errorf("job: building: escalation retry: stored plan: %w", err)
@@ -876,6 +902,13 @@ func (h buildingHandler) retryFreshRun(ctx context.Context, t store.Ticket, d De
 	if !hasUnit {
 		return store.HandlerCommit{}, fmt.Errorf("job: building: escalation retry: ticket %d: no unit in flight", t.ID)
 	}
+	if grant != nil && (grant.Task != u.TaskN || grant.Task > len(response.Tasks(plan))) {
+		slog.WarnContext(ctx, "file grant no longer applies to the unit in flight", "ticket_id", t.ID, "grant_task", grant.Task, "unit_task_n", u.TaskN)
+		grant = nil
+	}
+	if grant != nil {
+		plan, _ = response.GrantFileTasks(plan, *grant)
+	}
 	if u.FixRequestID != nil {
 		return h.retryFreshFixRun(ctx, t, d, plan, resolveIDs, notes, errorText)
 	}
@@ -885,11 +918,16 @@ func (h buildingHandler) retryFreshRun(ctx context.Context, t store.Ticket, d De
 		return store.HandlerCommit{}, err
 	}
 	if escalation != nil {
-		return *escalation, nil
+		c := *escalation
+		c.GrantFiles = grant
+		return c, nil
 	}
 
 	extra := []prompt.NamedInput{prompt.Notes(notes), prompt.Error(errorText)}
 	commit, runErr := h.runFirst(ctx, t, d, proj, wt, plan, u, len(response.Tasks(plan)), extra, resolveIDs)
+	if runErr == nil {
+		commit.GrantFiles = grant
+	}
 	return withBranchResult(commit, runErr, wt)
 }
 
@@ -1726,6 +1764,7 @@ func (h buildingHandler) runFirst(ctx context.Context, t store.Ticket, d Deps, p
 		return store.HandlerCommit{}, fmt.Errorf("job: building: %w", err)
 	}
 
+	extra = append(slices.Clone(extra), deadlineInput(d, time.Now()))
 	in, err := prompt.ForBuild(promptText, bt, proj.TestCmd, proj.LintCmd, ticketText, planXML, accepted, extra)
 	if err != nil {
 		return store.HandlerCommit{}, fmt.Errorf("job: building: %w", err)
@@ -1901,6 +1940,78 @@ func pathErrorMsgs(errs []*response.PathError) []string {
 		out[i] = e.Msg
 	}
 	return out
+}
+
+// foreignLine matches one foreignTaskPaths error as CHECK writes it into
+// the claim-errors marker (PathError.Error: "claims/files_changed: MSG"),
+// plan #51's own input to the owner's "let task N also change PATH" grant.
+var foreignLine = regexp.MustCompile(`^claims/files_changed: (.+) belongs to tasks? [0-9]+(?:, [0-9]+)*(?: and [0-9]+)?, not task ([0-9]+)$`)
+
+// parseForeignLines returns the unit number and paths of body's foreignLine
+// lines (design "shape" rule 1): taskN from the first match, paths in
+// order, unique, keeping only lines with that same taskN. 0 and nil when
+// none match.
+func parseForeignLines(body string) (taskN int, paths []string) {
+	for line := range strings.SplitSeq(body, "\n") {
+		m := foreignLine.FindStringSubmatch(line)
+		if m == nil {
+			continue
+		}
+		n, err := strconv.Atoi(m[2])
+		if err != nil {
+			continue
+		}
+		if taskN == 0 {
+			taskN = n
+		}
+		if n != taskN || slices.Contains(paths, m[1]) {
+			continue
+		}
+		paths = append(paths, m[1])
+	}
+	return taskN, paths
+}
+
+// attachFileGrant sets c's escalation Grant (design "shape" rule 1) when c
+// escalates a build session whose newest claim-errors marker names files
+// another task owns. Every other commit passes through unchanged. Reached
+// only after h.run has already produced an escalation, so this never
+// duplicates foreignTaskPaths' own check -- it only reads back the marker
+// CHECK already wrote.
+func attachFileGrant(ctx context.Context, t store.Ticket, d Deps, c store.HandlerCommit) (store.HandlerCommit, error) {
+	if c.Escalation == nil || c.Escalation.Payload.SessionID == nil {
+		return c, nil
+	}
+	origin := response.EscalationOrigin(c.Escalation.Payload.Origin)
+	if origin != response.EscalationOriginBuild && origin != response.EscalationOriginCapResumes {
+		return c, nil
+	}
+	runIDs, err := d.Store.SessionRunIDs(ctx, *c.Escalation.Payload.SessionID)
+	if err != nil {
+		return store.HandlerCommit{}, fmt.Errorf("job: building: file grant: %w", err)
+	}
+	prefix := strings.TrimSuffix(markerClaimErrorsPendingFmt, "%d")
+	rows, err := d.Store.MarkersWithPrefix(ctx, t.ID, prefix)
+	if err != nil {
+		return store.HandlerCommit{}, fmt.Errorf("job: building: file grant: %w", err)
+	}
+	for i := range slices.Backward(rows) {
+		head, body, _ := strings.Cut(rows[i].Body, "\n")
+		rid, perr := strconv.ParseInt(strings.TrimPrefix(head, prefix), 10, 64)
+		if perr != nil || !slices.Contains(runIDs, rid) {
+			continue
+		}
+		if taskN, paths := parseForeignLines(body); len(paths) > 0 {
+			c.Escalation.Payload.Grant = &response.FileGrant{Task: taskN, Paths: paths}
+			slog.Info("file grant offered", "ticket_id", t.ID, "session_id", *c.Escalation.Payload.SessionID,
+				"run_id", rid, "task_n", taskN, "paths", paths)
+		} else {
+			slog.Debug("file grant: newest marker has no belongs-to line", "ticket_id", t.ID,
+				"session_id", *c.Escalation.Payload.SessionID, "run_id", rid)
+		}
+		return c, nil
+	}
+	return c, nil
 }
 
 // check runs design section 6.4's CHECK, shared by the first check and the
@@ -2572,22 +2683,21 @@ func (h buildingHandler) resolve(ctx context.Context, t store.Ticket, d Deps, ro
 	if err != nil {
 		return store.HandlerCommit{}, fmt.Errorf("job: building: resolve: latest session: %w", err)
 	}
-	if state == store.SessionExhausted {
-		// The cap is consulted before anything is stored or reverted
-		// (design section 6.6 step 5): the round stays answered and
-		// unresolved, no file artifact is written, and no path is
-		// reverted, whichever way the escalation check comes out. The cap
-		// resolution that re-applies this preserved round is task 13's job
-		// (design section 6.9).
-		has, hasErr := d.Store.HasEscalation(ctx, t.ID, string(response.EscalationOriginCapResumes), sess.ID)
-		if hasErr != nil {
-			return store.HandlerCommit{}, fmt.Errorf("job: building: resolve: has escalation: %w", hasErr)
-		}
-		if has {
-			slog.Debug("building entry decision", "ticket_id", t.ID, "task_n", report.Report.TaskN, "step", "resolve_resume_capped", "session_state", sessionStateName(state))
-			return store.HandlerCommit{}, ErrNoAction
-		}
-		return withBranch(buildCapResumesEscalation(t, d, sess.ID), wt), nil
+	// answerResume (job.go): a perimeter decision is the owner's own
+	// answer, so RESOLVE's revert-and-resume is free and bypasses the
+	// exhausted-cap escalation, even on a session already at max_resumes,
+	// unless that session already carries its cap_resumes escalation from
+	// before this rule existed (design section 6.6 step 5).
+	capped, capErr := answerResume(ctx, t, d, sess, state, round)
+	if capErr != nil {
+		return store.HandlerCommit{}, capErr
+	}
+	if capped {
+		// Checked before anything is stored or reverted (design section
+		// 6.6 step 5): the round stays answered for the escalation's
+		// retry.
+		slog.Debug("building entry decision", "ticket_id", t.ID, "task_n", report.Report.TaskN, "step", "resolve_resume_capped", "session_state", sessionStateName(state))
+		return store.HandlerCommit{}, ErrNoAction
 	}
 	if sess.ExternalID == nil {
 		return store.HandlerCommit{}, fmt.Errorf("job: building: resolve: session %d has no external id", sess.ID)
@@ -2599,10 +2709,11 @@ func (h buildingHandler) resolve(ctx context.Context, t store.Ticket, d Deps, ro
 	slog.Warn("paths reverted", "ticket_id", t.ID, "run_id", rid, "count", len(revertChanges))
 
 	notice := orchestrator.PerimeterNotice(revertExtras)
-	su := store.SessionUpsert{ID: &sess.ID, BumpResumes: true}
+	inputs := []prompt.NamedInput{{Label: labelPerimeter, Text: notice}, deadlineInput(d, time.Now())}
+	su := store.SessionUpsert{ID: &sess.ID, BumpResumes: false}
 	req := runtime.RunRequest{
 		Job: response.JobBuild, Label: buildLabel(report.Report.TaskN), WorkDir: wt.Dir(),
-		SessionID: *sess.ExternalID, Prompt: prompt.Assemble(prompt.ForBuildResume([]prompt.NamedInput{{Label: labelPerimeter, Text: notice}})),
+		SessionID: *sess.ExternalID, Prompt: prompt.Assemble(prompt.ForBuildResume(inputs)),
 	}
 	sessionRecord := func(rr runResult) *store.SessionUpsert { return resumeSessionRecord(sess.ID, rr) }
 	commit, runErr := runAndRoute(ctx, d, t, jobBuildName, su, req, 0, sessionRecord, resolveIDs, originFor(u),
@@ -2683,19 +2794,17 @@ func (h buildingHandler) resolvePerimeterQuestion(ctx context.Context, t store.T
 	if err != nil {
 		return store.HandlerCommit{}, fmt.Errorf("job: building: resolve perimeter round: session by id: %w", err)
 	}
-	if state == store.SessionExhausted {
-		// As above (resolve): the perimeter session's own cap escalates
-		// once, origin cap_resumes, naming the perimeter session; folding
-		// this round back in is task 13's job (design section 6.9).
-		has, hasErr := d.Store.HasEscalation(ctx, t.ID, string(response.EscalationOriginCapResumes), sess.ID)
-		if hasErr != nil {
-			return store.HandlerCommit{}, fmt.Errorf("job: building: resolve perimeter round: has escalation: %w", hasErr)
-		}
-		if has {
-			slog.Debug("building entry decision", "ticket_id", t.ID, "task_n", taskN, "step", "resolve_perimeter_resume_capped", "session_state", sessionStateName(state))
-			return store.HandlerCommit{}, ErrNoAction
-		}
-		return withBranch(buildCapResumesEscalation(t, d, sess.ID), wt), nil
+	// answerResume (job.go): as above (resolve), the owner's answer to
+	// the perimeter run's own question is free and bypasses the
+	// exhausted-cap escalation, unless the perimeter session already
+	// carries its cap_resumes escalation from before this rule existed.
+	capped, capErr := answerResume(ctx, t, d, sess, state, round)
+	if capErr != nil {
+		return store.HandlerCommit{}, capErr
+	}
+	if capped {
+		slog.Debug("building entry decision", "ticket_id", t.ID, "task_n", taskN, "step", "resolve_perimeter_resume_capped", "session_state", sessionStateName(state))
+		return store.HandlerCommit{}, ErrNoAction
 	}
 	if sess.ExternalID == nil {
 		return store.HandlerCommit{}, fmt.Errorf("job: building: resolve perimeter round: session %d has no external id", sess.ID)
@@ -2728,7 +2837,7 @@ func (h buildingHandler) resolvePerimeterQuestion(ctx context.Context, t store.T
 	}
 	assembled := prompt.Assemble(prompt.ForPerimeterResume(answers))
 
-	su := store.SessionUpsert{ID: &sess.ID, BumpResumes: true}
+	su := store.SessionUpsert{ID: &sess.ID, BumpResumes: false}
 	req := runtime.RunRequest{Job: response.JobPerimeter, Label: perimeterLabel(taskN, extraIndex+1), WorkDir: wt.Dir(), SessionID: *sess.ExternalID, Prompt: assembled}
 	sessionRecord := func(rr runResult) *store.SessionUpsert { return resumeSessionRecord(sess.ID, rr) }
 	commit, runErr := runAndRoute(ctx, d, t, jobPerimeterName, su, req, priorInvalid, sessionRecord, resolveIDs, response.EscalationOriginPerimeter,

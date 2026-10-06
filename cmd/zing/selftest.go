@@ -256,6 +256,10 @@ func (*selftestShipGitHub) JobLogTail(context.Context, string, string, int64, in
 	return "", nil
 }
 
+func (*selftestShipGitHub) RerunJob(context.Context, string, string, int64) error {
+	return nil
+}
+
 // MarkReady and ConvertToDraft give selftestShipGitHub job.DraftFlips too
 // (M4 task 7, task 8): this fake's own draft field is real state, read
 // back by the very next GetPR (design section 8.9's own convergence

@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"slices"
 	"strings"
 	"time"
 
@@ -184,6 +185,10 @@ type HandlerCommit struct {
 	// behind a Waiting this commit would otherwise set. Applied right after
 	// Messages and before ResolveQuestions.
 	Conversation *ConversationCommit
+	// GrantFiles adds Task to the task list of every named delivery file of
+	// the ticket's newest plan (plan #51): applied by grantPlanFilesTx,
+	// right after Artifacts and before Seal. nil changes nothing.
+	GrantFiles *response.FileGrant
 }
 
 // ConversationCommit is one planning turn's thread effects (design section
@@ -220,10 +225,20 @@ type SealRequest struct {
 // escalation message and, with the standing question appended, the question
 // message. Payload is the escalation's own validated shape; RunID is nil for
 // a cap escalation no run caused.
+//
+// ExtraOptions and Recommended (ticket 60) let a caller add to and override
+// what escalationOptionsFor alone would pick: ExtraOptions is inserted,
+// in order, just before Abandon (escalationOptionsFor's own last option);
+// a non-empty Recommended replaces the picked recommendation. Every
+// existing caller leaves both empty, so every other escalation is
+// unchanged. checkEscalationOptions rejects a duplicate option key or a
+// Recommended naming no option key, rolling the whole commit back.
 type EscalationCommit struct {
-	RunID   *int64
-	Body    string
-	Payload response.EscalationPayload
+	RunID        *int64
+	Body         string
+	Payload      response.EscalationPayload
+	ExtraOptions []response.Option
+	Recommended  string
 }
 
 // ScenarioEdit is HandlerCommit.ScenarioEdit (#57): the amended fields for
@@ -499,6 +514,12 @@ func (s *Store) CommitHandlerResult(ctx context.Context, c HandlerCommit) (bool,
 		}
 		ev.Reason = se.Reason
 		if err = s.insertOwnerEditEventTx(ctx, tx, c.TicketID, ev); err != nil {
+			return false, fmt.Errorf("commit handler result: %w", err)
+		}
+	}
+
+	if c.GrantFiles != nil {
+		if err = s.grantPlanFilesTx(ctx, tx, c.TicketID, *c.GrantFiles); err != nil {
 			return false, fmt.Errorf("commit handler result: %w", err)
 		}
 	}
@@ -1272,6 +1293,11 @@ const (
 	escalationOptionEditAmendment   = "Edit it"
 )
 
+// escalationOptionGrantKey is option d's key (plan #51): added after
+// escalationOptionsFor's own a/b/c, whenever the escalation carries a file
+// grant.
+const escalationOptionGrantKey = "d"
+
 // escalationOptionsFor picks the question's options and recommendation
 // (#47, #57): amended overrides everything else, offering the judge's
 // proposed fix, an edit, and abandon, and recommending accept. Otherwise,
@@ -1312,13 +1338,33 @@ var escalationBackToPlanningCodes = map[string]bool{
 	string(response.EscalationCodeNothingToDoWithTrueClaims): true,
 }
 
+// checkEscalationOptions rejects an escalation question whose option keys
+// repeat, or whose recommendation names no option: a caller's ExtraOptions
+// must not collide with a/b/c or the grant's d.
+func checkEscalationOptions(options []response.Option, recommended string) error {
+	seen := make(map[string]bool, len(options))
+	for _, o := range options {
+		if seen[o.Key] {
+			return fmt.Errorf("duplicate option key %q", o.Key)
+		}
+		seen[o.Key] = true
+	}
+	if !seen[recommended] {
+		return fmt.Errorf("recommended %q is not an option key", recommended)
+	}
+	return nil
+}
+
 // escalateTx inserts ec's escalation message, then its linked question
 // (design D10, section 6.7): the question is parented to the escalation's
 // own id, carries the same run id, and offers whichever options and
 // recommendation escalationOptionsFor picks for ticketState and the
 // escalation's own code (#47 item 2: post-seal, back to planning cannot
-// run, so it is dropped). Both payloads are validated by insertMessageTx
-// against their committed schemas.
+// run, so it is dropped), with ec.ExtraOptions inserted before Abandon and
+// ec.Recommended overriding the pick when set (ticket 60). Both payloads
+// are validated by insertMessageTx against their committed schemas;
+// checkEscalationOptions additionally rejects a duplicate option key or an
+// unresolvable Recommended, rolling the whole commit back.
 func (s *Store) escalateTx(ctx context.Context, tx *sql.Tx, ticketID int64, ticketState string, ec EscalationCommit) error {
 	// A non-nil RunID must name a run on one of this ticket's own sessions,
 	// the same scoping every Artifact.RunID passes: the foreign key alone only
@@ -1355,6 +1401,19 @@ func (s *Store) escalateTx(ctx context.Context, tx *sql.Tx, ticketID int64, tick
 	}
 
 	options, recommended := escalationOptionsFor(ticketState, ec.Payload.Code, ec.Payload.Amendment != nil)
+	if len(ec.ExtraOptions) > 0 {
+		// Abandon is always escalationOptionsFor's last option.
+		options = slices.Insert(options, len(options)-1, ec.ExtraOptions...)
+	}
+	if ec.Payload.Grant != nil {
+		options = append(options, response.Option{Key: escalationOptionGrantKey, Text: response.FileGrantOptionText(*ec.Payload.Grant)})
+	}
+	if ec.Recommended != "" {
+		recommended = ec.Recommended
+	}
+	if err = checkEscalationOptions(options, recommended); err != nil {
+		return fmt.Errorf("escalation: %w", err)
+	}
 	qPayload, err := json.Marshal(response.QuestionPayload{
 		Key:         fmt.Sprintf("Q%d", n),
 		Kind:        response.QuestionKindQuestion,

@@ -41,6 +41,7 @@ import (
 	"regexp"
 	"strings"
 	"time"
+	"unicode"
 
 	zing "zing"
 	"zing/internal/fence"
@@ -76,10 +77,12 @@ const (
 	gateOptionApprove = "a"
 	gateOptionReject  = "b"
 
-	// escalationChoiceRetry, escalationChoiceBack, and escalationChoiceAbandon
-	// are the three option keys escalateTx's own linked question ever offers
-	// (design D10, section 6.7): "retry", "back to planning", and "abandon".
-	// An escalation round carrying replies and no option at all resolves as
+	// escalationChoiceRetry, escalationChoiceBack, escalationChoiceAbandon,
+	// and escalationChoiceGrant are the option keys escalateTx's own linked
+	// question ever offers (design D10, section 6.7; plan #51): "retry",
+	// "back to planning", "abandon", and, only when the escalation's own
+	// payload carries a FileGrant, "let task N also change PATH". An
+	// escalation round carrying replies and no option at all resolves as
 	// that question's own stored Recommended option, falling back to
 	// escalationChoiceRetry when none is stored (roundChoice's own default,
 	// #47 follow-up: it used to hardcode escalationChoiceBack here, which
@@ -90,9 +93,18 @@ const (
 	// always had (PR #60 review, P1: only an escalation's own Kind may read
 	// its Recommended back this way -- a merge question's Recommended is
 	// always "a", meaning something else entirely there).
+	//
+	// escalationChoiceAccept is "accept the remaining findings", offered
+	// only as an EscalationCommit.ExtraOptions entry on a review
+	// loops_exhausted question (ticket 60). It shares the "d" key with
+	// escalationChoiceGrant because the two never appear on one question: a
+	// grant comes only from a build escalation, and checkEscalationOptions
+	// (store/commit.go) rejects a duplicate key if that ever changed.
 	escalationChoiceRetry   = "a"
 	escalationChoiceBack    = "b"
 	escalationChoiceAbandon = "c"
+	escalationChoiceGrant   = "d"
+	escalationChoiceAccept  = "d"
 
 	responseInvalidWhat = "the model's final message failed validation twice in a row"
 
@@ -105,8 +117,8 @@ const (
 	budgetExhaustedWhat = "raise budget.agent_minutes_per_ticket or abandon"
 	budgetExhaustedWhy  = "the ticket's spent agent time has reached the configured budget"
 
-	resumesExhaustedWhat = "raise machine.toml's planning max_resumes, or abandon"
-	resumesExhaustedWhy  = "the planning session has resumed the maximum number of times machine.toml allows"
+	resumesExhaustedWhatFmt = "raise machine.toml's %s max_resumes, or abandon"
+	resumesExhaustedWhyFmt  = "the %s session has resumed the maximum number of times machine.toml allows"
 
 	splitUnsupportedWhat = "the plan says this ticket should be split into several tickets, which Zing does not yet build"
 	splitUnsupportedWhy  = "the planning run returned a children outcome"
@@ -252,7 +264,7 @@ func (h planningHandler) Run(ctx context.Context, t store.Ticket, d Deps) (store
 		if has {
 			return store.HandlerCommit{}, ErrNoAction
 		}
-		return capResumesEscalation(t, d, sess.ID), nil
+		return capResumesEscalation(t, d, jobPlanningName, sess.ID), nil
 	case store.SessionOpen:
 		// Design section 7.5 bug 3: before the ordinary D14 n==1 check,
 		// handle a newest run that is itself a stalled invalid retry -- one
@@ -514,7 +526,11 @@ func runPlanningFirst(ctx context.Context, t store.Ticket, d Deps, extra []promp
 	if err != nil {
 		return store.HandlerCommit{}, fmt.Errorf("job: planning: %w", err)
 	}
-	in := prompt.ForPlanningFirst(promptText, styles, ticketText, append(append([]prompt.NamedInput{}, extra...), convExtra...))
+	in, err := prompt.ForPlanningFirst(promptText, styles, d.Machine.Jobs[jobBuildName].TimeoutMinutes, ticketText,
+		append(append([]prompt.NamedInput{}, extra...), convExtra...))
+	if err != nil {
+		return store.HandlerCommit{}, fmt.Errorf("job: planning: first turn: %w", err)
+	}
 	in.Schemas = schemas
 	assembled := prompt.Assemble(in)
 
@@ -1070,7 +1086,115 @@ func checkScenarioRules(i int, sc response.Scenario) []*response.PathError {
 			Msg:  expectedSkipCheckMsg,
 		})
 	}
+	// Two of the three #86 sealed-check failures: a check that greps a
+	// multi-word phrase straight against hard-wrapped prose (the phrase
+	// can span the line break the prose wraps at) without joining the
+	// lines first, and a check with an unquoted glob (the judge
+	// agent's zsh login shell aborts on an unmatched glob, turning a
+	// leading "!" into a false pass).
+	if proseGrepWithoutJoin(sc.Check) {
+		errs = append(errs, &response.PathError{
+			Path: "scenarios/" + indexedScenario(i) + "/check",
+			Msg:  proseGrepCheckMsg,
+		})
+	}
+	if word, ok := unquotedGlob(sc.Check); ok {
+		errs = append(errs, &response.PathError{
+			Path: "scenarios/" + indexedScenario(i) + "/check",
+			Msg:  unquotedGlobCheckMsg(word),
+		})
+	}
 	return errs
+}
+
+// proseGrep matches a grep invocation whose flags include F or q, followed
+// (before the next pipe, semicolon, or ampersand) by a single- or
+// double-quoted argument that contains whitespace, i.e. a phrase of more
+// than one word.
+var proseGrep = regexp.MustCompile(`\bgrep\b[^|;&]*-[A-Za-z]*[Fq][A-Za-z]*[^|;&]*('[^'|;&]*\s[^'|;&]*'|"[^"|;&]*\s[^"|;&]*")`)
+
+// proseTarget matches a check that names a markdown file or a path under
+// prompts/, the hard-wrapped prose a multi-word grep can miss.
+var proseTarget = regexp.MustCompile(`\.md\b|prompts/`)
+
+// joinsLines matches a check that pipes a file through tr replacing
+// newlines or any whitespace run (the [:space:] class) with a single
+// space before grepping it, the safe form that can't miss a phrase split
+// across a wrapped line. It requires tr's own second operand to be a
+// quoted single space, not just the newline or [:space:] class anywhere
+// in the check: tr -d '\n' or tr -d '[:space:]' deletes the line break
+// instead of replacing it with a space, so
+// "two\nwords" becomes "twowords" and a phrase grep still misses it, and
+// requiring the literal replacement rules that out (tr -d's one operand
+// can never match the second, quoted-single-space group below).
+var joinsLines = regexp.MustCompile(`\btr\b(?:\s+-s)?\s+('\\n'|"\\n"|'\[:space:\]'|"\[:space:\]")\s+(' '|" ")`)
+
+// proseGrepWithoutJoin is true when a check greps a multi-word phrase (per
+// proseGrep) against prose (per proseTarget) without first joining the
+// file's lines (per joinsLines).
+func proseGrepWithoutJoin(check string) bool {
+	return proseGrep.MatchString(check) && proseTarget.MatchString(check) && !joinsLines.MatchString(check)
+}
+
+const proseGrepCheckMsg = `check greps a phrase of more than one word in hard-wrapped prose, so the phrase can span a line break; join the lines first, such as tr -s '[:space:]' ' ' < FILE | grep -qF 'two words'`
+
+// unquotedGlob scans check rune by rune, tracking single-quote,
+// double-quote, and backslash-escape state, and returns the
+// whitespace-delimited word holding the first "*" or "?" that sits outside
+// any quoting and isn't immediately preceded by "$" (a shell parameter
+// such as "$?", not a glob). zsh (the judge agent's login shell) aborts on
+// such a glob when it matches nothing, rather than passing it through
+// literally the way bash does. wordStart only moves on whitespace outside
+// both quote kinds, and the one loop keeps tracking that same quote state
+// past the glob rune itself, all the way to the word's own end, so a shell
+// word holding a quoted space, such as grep "a b"*.go, is reported whole
+// rather than cut at the space inside its own quotes.
+func unquotedGlob(check string) (string, bool) {
+	runes := []rune(check)
+	var inSingle, inDouble, escaped bool
+	// paramDepth counts how many "${...}" parameter expansions the scan is
+	// currently inside: a bare "*" or "?" there, such as the "?" in
+	// "${VAR:?msg}", is shell syntax, not a filename glob, so it must not
+	// be flagged (review thread t7c41ccb4b641b4ba). It only opens on "${",
+	// never bare "{", so an ordinary brace expansion like {a,b}*.go still
+	// gets its glob flagged.
+	var paramDepth int
+	wordStart, globAt := 0, -1
+	for i, r := range runes {
+		if escaped {
+			escaped = false
+			continue
+		}
+		switch {
+		case r == '\\' && !inSingle:
+			escaped = true
+		case r == '\'' && !inDouble:
+			inSingle = !inSingle
+		case r == '"' && !inSingle:
+			inDouble = !inDouble
+		case r == '{' && !inSingle && !inDouble && (paramDepth > 0 || (i > 0 && runes[i-1] == '$')):
+			paramDepth++
+		case r == '}' && !inSingle && !inDouble && paramDepth > 0:
+			paramDepth--
+		case unicode.IsSpace(r) && !inSingle && !inDouble:
+			if globAt >= 0 {
+				return string(runes[wordStart:i]), true
+			}
+			wordStart = i + 1
+		case (r == '*' || r == '?') && !inSingle && !inDouble:
+			if globAt < 0 && paramDepth == 0 && (i == 0 || runes[i-1] != '$') {
+				globAt = i
+			}
+		}
+	}
+	if globAt >= 0 {
+		return string(runes[wordStart:]), true
+	}
+	return "", false
+}
+
+func unquotedGlobCheckMsg(word string) string {
+	return fmt.Sprintf(`check has an unquoted glob %s; zsh aborts on an unmatched glob, so quote it, such as --include='*.go'`, word)
 }
 
 const hostSandboxCheckMsg = "check runs the host sandbox (sandbox-exec or the internal/sandbox probes), which cannot start inside the sandbox Zing runs checks in, so its probes skip and prove nothing; leave it out of the sealed checks"
@@ -2566,7 +2690,7 @@ func routeFailure(
 	sessionCommit *store.SessionUpsert, resolveIDs []int64, origin response.EscalationOrigin,
 ) (commit store.HandlerCommit, ok bool, err error) {
 	switch {
-	case errors.Is(runErr, runtime.ErrCanceled):
+	case errors.Is(runErr, runtime.ErrCanceled), claudeCapped(runErr):
 		return store.HandlerCommit{}, true, runErr
 	case errors.Is(runErr, ErrBudget):
 		return budgetEscalationCommit(t, d, resolveIDs), true, nil
@@ -2706,11 +2830,13 @@ func sandboxEscalationCommit(t store.Ticket, d Deps, resolveIDs []int64, origin 
 	return c
 }
 
-// capResumesEscalation is the resumes_exhausted escalation entry steps 1(c)
-// and 3 both write (design D17, section 5.1): RunID is nil (no run caused
-// it, the session cap did), SessionID names the exhausted session.
-func capResumesEscalation(t store.Ticket, d Deps, sessionID int64) store.HandlerCommit {
-	return escalationCommit(t, d, nil, &sessionID, string(response.EscalationCodeResumesExhausted), resumesExhaustedWhat, resumesExhaustedWhy, "", response.EscalationOriginCapResumes)
+// capResumesEscalation is the resumes_exhausted escalation every job's
+// exhausted session writes (design D17): RunID is nil (no run caused it,
+// the session cap did), SessionID names the exhausted session, and What and
+// Why name jobName, that session's own job.
+func capResumesEscalation(t store.Ticket, d Deps, jobName string, sessionID int64) store.HandlerCommit {
+	return escalationCommit(t, d, nil, &sessionID, string(response.EscalationCodeResumesExhausted),
+		fmt.Sprintf(resumesExhaustedWhatFmt, jobName), fmt.Sprintf(resumesExhaustedWhyFmt, jobName), "", response.EscalationOriginCapResumes)
 }
 
 // execFailureCommit terminalizes the reserved run as an error and escalates

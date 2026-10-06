@@ -196,10 +196,12 @@ func mergeEscalationCode(t store.Ticket, d Deps, req baseMergeRequest, code, wha
 }
 
 // driveOpenMerge runs one merge-unit step when a request is open; merging
-// is false, with nothing done, when none is (shipHandler.Run calls this
-// right after the post-build prelude, before anything else shipping does).
-// A malformed request marker escalates (malformedBaseMergeEscalation)
-// rather than propagating a bare error.
+// is false, with nothing done, when none is (postBuildPrelude, basesync.go
+// task 3, calls this in every post-build state, right after its own open
+// fix request check, before anything else that state does -- not only
+// shipping's own POLL-opened requests, now that review and judge each open
+// their own through basesync.go). A malformed request marker escalates
+// (malformedBaseMergeEscalation) rather than propagating a bare error.
 func (h shipHandler) driveOpenMerge(ctx context.Context, t store.Ticket, d Deps) (c store.HandlerCommit, merging bool, err error) {
 	req, open, err := openBaseMerge(ctx, t, d)
 	if err != nil {
@@ -616,9 +618,12 @@ func priorMergeRunID(ctx context.Context, t store.Ticket, d Deps, req baseMergeR
 
 // mergeLandedCommit is landMerge's own terminal commit: one build_report
 // artifact (RunID rid, the report with CommitSHA set to sha) plus "base
-// merge landed <id> sha <sha>", with ClearPoll. The ticket stays in
-// shipping: the next POLL finds the pull request's head an ancestor of
-// local HEAD and pushes.
+// merge landed <id> sha <sha>", with ClearPoll. The ticket stays in its
+// current state, whichever point opened the request: in shipping, the next
+// POLL finds the pull request's head an ancestor of local HEAD and pushes;
+// in reviewing or judging (basesync.go task 3), the next tick's own point
+// finds the base already an ancestor of HEAD and goes on to the round it
+// was about to start.
 func mergeLandedCommit(t store.Ticket, d Deps, req baseMergeRequest, rid *int64, report response.BuildReport, sha string) (store.HandlerCommit, error) {
 	landed := report
 	landed.CommitSHA = &sha
@@ -927,11 +932,13 @@ func (h shipHandler) retryMerge(ctx context.Context, t store.Ticket, d Deps, res
 
 // reopenMerge closes req and opens its successor in one commit (overview
 // design "Request lifecycle" and "Markers" table): "base merge closed <req
-// id>", then a fresh request carrying req's own base branch and sha,
+// id>", then a fresh request carrying req's own base branch, sha and Point,
 // RetryOf req's id, and Notes the two notes joined by a blank line with
-// empty parts dropped. The worktree is left exactly as it is: StartBaseMerge
-// finds the merge still in progress and the fresh run continues from the
-// half-resolved tree.
+// empty parts dropped. The successor keeps the point, so the marker still
+// shows where the merge came from, while its retry line keeps it out of
+// both pollMergeCount and pointMergeCount. The worktree is left exactly as
+// it is: StartBaseMerge finds the merge still in progress and the fresh run
+// continues from the half-resolved tree.
 func (h shipHandler) reopenMerge(ctx context.Context, t store.Ticket, d Deps, req baseMergeRequest, notes string, resolveIDs []int64) (store.HandlerCommit, error) {
 	maxRunID, err := d.Store.MaxRunID(ctx, t.ID)
 	if err != nil {
@@ -945,7 +952,7 @@ func (h shipHandler) reopenMerge(ctx context.Context, t store.Ticket, d Deps, re
 		parts = append(parts, notes)
 	}
 	next := baseMergeRequest{
-		AfterRunID: maxRunID, BaseBranch: req.BaseBranch, BaseSHA: req.BaseSHA,
+		AfterRunID: maxRunID, BaseBranch: req.BaseBranch, BaseSHA: req.BaseSHA, Point: req.Point,
 		RetryOf: req.MessageID, Notes: strings.Join(parts, "\n\n"),
 	}
 

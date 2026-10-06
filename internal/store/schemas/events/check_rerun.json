@@ -3,20 +3,44 @@
   "properties": {
     "check": {
       "type": "string",
-      "enum": [
-        "test",
-        "lint"
-      ]
+      "maxLength": 200,
+      "minLength": 1
     },
     "sha": {
       "type": "string",
       "pattern": "^[0-9a-f]{40}$"
+    },
+    "run_id": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "check_run_id": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "reason": {
+      "type": "string",
+      "enum": [
+        "flaky",
+        "infra",
+        "no_log"
+      ]
+    },
+    "tests": {
+      "items": {
+        "type": "string"
+      },
+      "type": "array",
+      "maxItems": 20
     }
   },
   "additionalProperties": false,
   "type": "object",
   "required": [
     "check",
-    "sha"
+    "sha",
+    "run_id",
+    "check_run_id",
+    "reason"
   ]
 }

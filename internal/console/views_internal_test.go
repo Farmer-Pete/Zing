@@ -14,6 +14,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	zing "zing"
 	"zing/internal/console/templates"
@@ -1134,7 +1135,7 @@ func TestMarkerRecognized(t *testing.T) {
 			"a typed event with a registered rule is recognized",
 			store.MessageRow{Message: store.Message{ //nolint:modernize // keyed on purpose
 				Type: msgTypeUpdate, Author: authorSystem, EventKind: &checkRerun,
-				Payload: []byte(`{"check":"test","sha":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}`),
+				Payload: []byte(`{"check":"test","sha":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","run_id":1,"check_run_id":1,"reason":"flaky"}`),
 			}},
 			true,
 		},
@@ -1896,4 +1897,158 @@ func TestProjectSections(t *testing.T) {
 			t.Errorf("closed = %v, want empty", closed)
 		}
 	})
+}
+
+// navParkFixtureState is InsertTicket's own required starting state
+// (goconst: a bare "queued" literal here would be this file's third,
+// alongside the "queued" turn-status label TestXxx's own table tests
+// already use twice, for an unrelated concept).
+const navParkFixtureState = "queued"
+
+// navParkRun claims a fresh ticket on testNavProject, reserves one open run
+// on it, and parks it through the real store.ParkRuns, returning the
+// ticket's own id: TestNavComponent_ClaudeHold's own fixture for a ticket
+// whose sidebar row carries a real ParkedUntil, the same write path a
+// genuine Claude session limit uses, rather than a buildNavThreads-only
+// proof (r2f2).
+func navParkRun(t *testing.T, s *store.Store, ref string, until time.Time) int64 {
+	t.Helper()
+	projectID, err := s.EnsureProject(t.Context(), store.Project{
+		Name: "nav-claude-hold", RepoURL: "https://example.invalid/nav-claude-hold.git",
+		LocalPath: t.TempDir(), Tracker: "github",
+	})
+	if err != nil {
+		t.Fatalf("EnsureProject: %v", err)
+	}
+	ticketID, err := s.InsertTicket(t.Context(), store.Ticket{
+		ProjectID: projectID, TrackerRef: ref, Title: "nav claude hold fixture", State: navParkFixtureState,
+	})
+	if err != nil {
+		t.Fatalf("InsertTicket(%s): %v", ref, err)
+	}
+	owner := "nav-park-" + ref
+	expires := time.Now().Add(10 * time.Minute).UTC().Truncate(time.Second)
+	claimed, err := s.Claim(t.Context(), ticketID, owner, expires)
+	if err != nil {
+		t.Fatalf("Claim: %v", err)
+	}
+	if !claimed {
+		t.Fatal("Claim: got false, want true")
+	}
+	if _, err := s.Reserve(t.Context(), ticketID, owner, expires,
+		store.SessionUpsert{Job: "nav-park-fixture", Runtime: "claude"}, store.RunSeed{Model: "test-model"}); err != nil {
+		t.Fatalf("Reserve: %v", err)
+	}
+	if _, err := s.ParkRuns(t.Context(), ticketID, owner, expires, until, ""); err != nil {
+		t.Fatalf("ParkRuns: %v", err)
+	}
+	return ticketID
+}
+
+// TestNavComponent_ClaudeHold proves navComponent's own ClaudeHold read and
+// its own now comparison (review fix r1f1: the previous test only covered
+// buildNavThreads, never navComponent's own call to c.store.ClaudeHold or
+// its own "still in the future" check): rendering #nav shows "claude:
+// capped until" while the stored hold is in the future, and shows neither
+// that line nor a parked badge once the hold (seeded here directly, the
+// same store.ParkRuns a real park would use) has passed. It also proves the
+// sidebar's own per-ticket parked badge (r2f2, not just buildNavThreads in
+// isolation): a ticket real store.ParkRuns parked with a future reset shows
+// the badge, and one parked with a reset already past does not.
+func TestNavComponent_ClaudeHold(t *testing.T) {
+	t.Parallel()
+	s, err := store.Open(t.Context(), filepath.Join(t.TempDir(), "zing.db"))
+	if err != nil {
+		t.Fatalf("store.Open: %v", err)
+	}
+	t.Cleanup(func() { _ = s.Close() })
+	c := &console{store: s}
+
+	render := func() string {
+		t.Helper()
+		comp, err := c.navComponent(t.Context(), 0)
+		if err != nil {
+			t.Fatalf("navComponent: %v", err)
+		}
+		var buf strings.Builder
+		if err := comp.Render(t.Context(), &buf); err != nil {
+			t.Fatalf("Render: %v", err)
+		}
+		return buf.String()
+	}
+
+	if got := render(); strings.Contains(got, "claude: capped") {
+		t.Errorf("navComponent with no hold set shows a claude-hold line; got:\n%s", got)
+	}
+
+	future := time.Now().Add(20 * time.Minute)
+	if err := s.SetSettings(t.Context(), "claude_hold_until", future.UTC().Truncate(time.Second).Format("2006-01-02T15:04:05Z")); err != nil {
+		t.Fatalf("SetSettings: %v", err)
+	}
+	gotFuture := render()
+	if !strings.Contains(gotFuture, "claude: capped until "+clockLabel(future)) {
+		t.Errorf("navComponent with a future hold missing the claude-hold line %q; got:\n%s", "claude: capped until "+clockLabel(future), gotFuture)
+	}
+
+	past := time.Now().Add(-20 * time.Minute)
+	if err := s.SetSettings(t.Context(), "claude_hold_until", past.UTC().Truncate(time.Second).Format("2006-01-02T15:04:05Z")); err != nil {
+		t.Fatalf("SetSettings: %v", err)
+	}
+	if gotPast := render(); strings.Contains(gotPast, "claude: capped") {
+		t.Errorf("navComponent with a past hold still shows a claude-hold line; got:\n%s", gotPast)
+	}
+
+	parkedFutureUntil := time.Now().Add(20 * time.Minute)
+	navParkRun(t, s, "nav-parked-future", parkedFutureUntil)
+	gotParkedFuture := render()
+	if !strings.Contains(gotParkedFuture, `class="badge badge-parked"`) {
+		t.Errorf("navComponent with a ticket parked until the future shows no parked badge; got:\n%s", gotParkedFuture)
+	}
+	if !strings.Contains(gotParkedFuture, "parked until "+clockLabel(parkedFutureUntil)) {
+		t.Errorf("navComponent with a ticket parked until the future missing %q; got:\n%s",
+			"parked until "+clockLabel(parkedFutureUntil), gotParkedFuture)
+	}
+
+	// A second ticket parked with a reset already past must not add a
+	// second parked badge: the first ticket's own future park is still
+	// live, so the count must stay 1, not drop to 0 or rise to 2.
+	parkedPastUntil := time.Now().Add(-20 * time.Minute)
+	navParkRun(t, s, "nav-parked-past", parkedPastUntil)
+	gotParkedPast := render()
+	if n := strings.Count(gotParkedPast, `class="badge badge-parked"`); n != 1 {
+		t.Errorf("navComponent parked-badge count = %d, want 1 (only the still-future ticket); got:\n%s", n, gotParkedPast)
+	}
+}
+
+// TestBuildNavThreads_ParkedUntil proves buildNavThreads' own now comparison
+// (#45): a LiveTicket.ParkedUntil still after now gives NavThread.ParkedUntil
+// equal to the literal "3:04pm"-style clock (not clockLabel itself, the
+// function under test: review fix r1f1); one at or before now gives the
+// empty string. future and past are built directly in time.Local, so the
+// literal "4:01pm" is correct regardless of the test machine's own zone.
+func TestBuildNavThreads_ParkedUntil(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 10, 5, 16, 0, 0, 0, time.Local)
+
+	future := time.Date(2026, 10, 5, 16, 1, 0, 0, time.Local)
+	past := now.Add(-time.Minute)
+	items := []store.LiveTicket{
+		{Ticket: store.Ticket{ID: 1}, ParkedUntil: &future},
+		{Ticket: store.Ticket{ID: 2}, ParkedUntil: &past},
+		{Ticket: store.Ticket{ID: 3}},
+	}
+
+	got := buildNavThreads(items, now)
+	if len(got) != 3 {
+		t.Fatalf("buildNavThreads returned %d threads, want 3", len(got))
+	}
+	if got[0].ParkedUntil != "4:01pm" {
+		t.Errorf("buildNavThreads[0].ParkedUntil = %q, want %q (future)", got[0].ParkedUntil, "4:01pm")
+	}
+	if got[1].ParkedUntil != "" {
+		t.Errorf("buildNavThreads[1].ParkedUntil = %q, want \"\" (past)", got[1].ParkedUntil)
+	}
+	if got[2].ParkedUntil != "" {
+		t.Errorf("buildNavThreads[2].ParkedUntil = %q, want \"\" (nil)", got[2].ParkedUntil)
+	}
 }

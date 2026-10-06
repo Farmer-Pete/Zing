@@ -17,6 +17,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -354,7 +355,8 @@ func TestPlanningFirstPromptCarriesOwnerDecisions(t *testing.T) {
 // machine.Jobs["planning"].Prompt.Bug for a bug-kind ticket and .Feature for
 // a feature-kind one, and prompt.Assemble puts JobPrompt first with nothing
 // ahead of it (design section 4.2's assembly order), so the pinned prompt
-// file's own text reaches the runtime as the assembled prompt's exact
+// file's own text, with {build_minutes} filled from machine.toml's build
+// job timeout (#53), reaches the runtime as the assembled prompt's exact
 // prefix.
 func TestPlanningHandler_FirstTurn_PromptFileFollowsKind(t *testing.T) {
 	t.Parallel()
@@ -388,7 +390,9 @@ func TestPlanningHandler_FirstTurn_PromptFileFollowsKind(t *testing.T) {
 			if err != nil {
 				t.Fatalf("read asset %s: %v", tc.asset, err)
 			}
-			if !strings.HasPrefix(rec.lastReq.Prompt, string(want)) {
+			wantText := strings.Replace(string(want), "{build_minutes}",
+				strconv.Itoa(testMachine(t).Jobs[string(response.JobBuild)].TimeoutMinutes), 1)
+			if !strings.HasPrefix(rec.lastReq.Prompt, wantText) {
 				t.Fatalf("first-turn prompt for kind %s does not start with %s's own text:\n%s", tc.name, tc.asset, rec.lastReq.Prompt)
 			}
 		})
@@ -1275,6 +1279,12 @@ func TestPlanningHandler_SessionExhausted_EscalatesResumesExhaustedExactlyOnce(t
 	}
 	if payload.SessionID == nil || *payload.SessionID != sess.ID {
 		t.Errorf("payload.SessionID = %v, want %d", payload.SessionID, sess.ID)
+	}
+	if payload.What != "raise machine.toml's planning max_resumes, or abandon" {
+		t.Errorf("payload.What = %q, want planning's own text", payload.What)
+	}
+	if payload.Why != "the planning session has resumed the maximum number of times machine.toml allows" {
+		t.Errorf("payload.Why = %q, want planning's own text", payload.Why)
 	}
 	apply(t, s, getTicket(t, s, ticketID), commit)
 

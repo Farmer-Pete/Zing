@@ -66,6 +66,7 @@ const (
 	cmdServe        = "serve"
 	cmdSelftest     = "selftest"
 	cmdValidate     = "validate"
+	cmdDenyHook     = "deny-hook"
 	cmdUnrecognized = "bogus"
 )
 
@@ -176,6 +177,21 @@ func TestDispatch_Project(t *testing.T) {
 
 	if got := dispatch([]string{argv0, "project"}); got != 2 {
 		t.Errorf("dispatch(project, no args) = %d, want 2 (usage error)", got)
+	}
+}
+
+// TestDispatch_DenyHook proves dispatch routes "deny-hook" to runDenyHook
+// rather than falling through to the default "unknown command" branch
+// (r3f2): that default branch returns 2, which Claude Code's PreToolUse
+// hook protocol reads as a block, so a dispatch regression that dropped
+// the deny-hook case would silently block every Bash call in every build
+// and fix run. Omitting --deny makes runDenyHook itself return 1, the
+// usage error, which this test tells apart from the default branch's 2.
+func TestDispatch_DenyHook(t *testing.T) {
+	t.Parallel()
+
+	if got := dispatch([]string{argv0, cmdDenyHook}); got != 1 {
+		t.Errorf("dispatch(deny-hook, no args) = %d, want 1 (usage error, not the unknown-command 2)", got)
 	}
 }
 

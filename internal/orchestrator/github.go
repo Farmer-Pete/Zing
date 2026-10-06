@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	neturl "net/url"
+	"regexp"
 	"strings"
 	"time"
 
@@ -661,6 +663,40 @@ func (g *GitHubClient) CommentOnPR(ctx context.Context, owner, repo string, numb
 	return nil
 }
 
+// ErrWorkflowRunIncomplete is RerunJob's own classification of GitHub's
+// refusal to re-run a job whose workflow run has not finished yet
+// (observed: a 403 reading "This workflow is already running"). GitHub
+// requires every job in a run to be complete before any one of them can be
+// re-run, so this can happen even after job.decideCIRerun's own checks
+// (workflowRunsInFlight, and planning at most one re-run per run id per
+// tick), on a race between reading CI and calling RerunJob: another job in
+// the same run finished and GitHub re-queued the run, or a human re-ran it
+// first. job.shipHandler.pollRerun reschedules on it rather than
+// escalating, the same as ErrGitHubUnavailable.
+var ErrWorkflowRunIncomplete = errors.New("orchestrator: workflow run not complete yet")
+
+// workflowRunIncompletePattern matches GitHub's own wording, case
+// insensitive, for the 403 or 409 RerunJob gets back when a job's workflow
+// run has not finished (observed: "This workflow is already running").
+var workflowRunIncompletePattern = regexp.MustCompile(`(?i)workflow.*(already running|is running|not (yet )?complete)`)
+
+// RerunJob re-runs one Actions job (POST
+// /repos/OWNER/REPO/actions/jobs/JOB-ID/rerun), the per-job form of
+// "re-run failed jobs" (job.Checks.RerunJob).
+func (g *GitHubClient) RerunJob(ctx context.Context, owner, repo string, jobID int64) error {
+	if _, err := g.c.Actions.RerunJobByID(ctx, owner, repo, jobID); err != nil {
+		if ere, ok := errors.AsType[*github.ErrorResponse](err); ok && ere.Response != nil {
+			refusalStatus := ere.Response.StatusCode == http.StatusForbidden || ere.Response.StatusCode == http.StatusConflict
+			runStillRunning := workflowRunIncompletePattern.MatchString(ere.Message)
+			if refusalStatus && runStillRunning {
+				return ErrWorkflowRunIncomplete
+			}
+		}
+		return classifyGitHubErr(err)
+	}
+	return nil
+}
+
 // maxLogLineBytes bounds one kept line of a job log (job.Checks.JobLogTail;
 // PKG9-PLAN.md section 10.3): a longer line is cut and ends "[line cut]".
 // It also sizes the bufio.Reader tailLog reads through, so no one line is
@@ -690,7 +726,7 @@ func (g *GitHubClient) JobLogTail(ctx context.Context, owner, repo string, jobID
 	client := &http.Client{Timeout: 30 * time.Second}
 	resp, err := client.Do(req)
 	if err != nil {
-		return "", fmt.Errorf("orchestrator: job log tail: fetch: %w", err)
+		return "", fmt.Errorf("orchestrator: job log tail: fetch: %w", redactSignedLogURL(err))
 	}
 	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
@@ -702,6 +738,18 @@ func (g *GitHubClient) JobLogTail(ctx context.Context, owner, repo string, jobID
 		return "", fmt.Errorf("orchestrator: job log tail: %w", err)
 	}
 	return tail, nil
+}
+
+// redactSignedLogURL strips the signed log URL -- query string, signature
+// included -- out of a *url.Error from fetching it, so a transport failure
+// (dial, timeout, TLS) never carries that credential-bearing URL into
+// stored CI text (fix requests, escalations). Any other error passes
+// through unchanged.
+func redactSignedLogURL(err error) error {
+	if ue, ok := errors.AsType[*neturl.Error](err); ok {
+		return fmt.Errorf("%s signed log url: %w", ue.Op, ue.Err)
+	}
+	return err
 }
 
 // logGroupRunPrefix is an Actions "##[group]Run " step header.
@@ -725,6 +773,110 @@ func hasLogPrefix(line, prefix string) bool {
 	return sp > 0 && strings.HasPrefix(line[sp+1:], prefix)
 }
 
+// goFileLinePattern matches a go source position, "name.go:N:".
+var goFileLinePattern = regexp.MustCompile(`[A-Za-z0-9_./-]+\.go:\d+:`)
+
+// isFailureLine reports whether line is a go test failure line: it holds
+// "--- FAIL", "panic:", or "DATA RACE"; it starts "FAIL" then a tab (after
+// an optional timestamp, hasLogPrefix); or it holds ".go:" and matches
+// goFileLinePattern. The regexp runs only on ".go:" lines, so a log of
+// millions of lines stays within JobLogTail's 30s client timeout under
+// -race.
+func isFailureLine(line string) bool {
+	switch {
+	case strings.Contains(line, "--- FAIL"):
+		return true
+	case strings.Contains(line, "panic:"):
+		return true
+	case strings.Contains(line, "DATA RACE"):
+		return true
+	case hasLogPrefix(line, "FAIL\t"):
+		return true
+	case strings.Contains(line, ".go:"):
+		return goFileLinePattern.MatchString(line)
+	default:
+		return false
+	}
+}
+
+// failureHits collects tailLog's own failure-line excerpt windows for the
+// current step (see tailLog's doc comment): each hit is kept with up to 3
+// lines of context before and after it, with a "..." line marking a gap
+// between two non-adjacent windows, capped at cap entries in all, keeping
+// the earliest. buf is the running excerpt; recent is the current
+// before-window; afterRemain counts the after-window lines still owed to
+// the most recent hit; lastPos is that hit's own pos (-1 before the first
+// one); pos is the position, within the current step, of the next line
+// add will see.
+type failureHits struct {
+	cap         int
+	buf         []string
+	recent      []string
+	afterRemain int
+	lastPos     int
+	pos         int
+}
+
+// newFailureHits returns a failureHits capped at n-2 entries -- tailLog
+// reserves the other 2 lines of its own n-line budget for the step's
+// header and its last error line.
+func newFailureHits(n int) *failureHits {
+	return &failureHits{cap: max(n-2, 0), lastPos: -1}
+}
+
+// reset clears every hit collected so far, for a new step.
+func (h *failureHits) reset() {
+	h.buf = nil
+	h.recent = nil
+	h.afterRemain = 0
+	h.lastPos = -1
+	h.pos = 0
+}
+
+// add considers one more line of the current step's non-error output.
+// Once buf already holds cap lines, add is a no-op: an earlier hit always
+// outranks a later one. A window that does not fit in what is left of cap
+// is trimmed from the front -- dropping context, then the "..." marker --
+// never from the back, so the hit line itself, always the window's last
+// element, is never the one dropped.
+func (h *failureHits) add(line string) {
+	pos := h.pos
+	h.pos++
+	if len(h.buf) >= h.cap {
+		return
+	}
+	isHit := isFailureLine(line)
+	switch {
+	case h.afterRemain > 0:
+		h.buf = append(h.buf, line)
+		h.afterRemain--
+		h.lastPos = pos
+		h.recent = nil
+		if isHit {
+			h.afterRemain = 3
+		}
+	case isHit:
+		var add []string
+		if h.lastPos >= 0 && pos-h.lastPos-1 > 3 {
+			add = append(add, "...")
+		}
+		add = append(add, h.recent...)
+		add = append(add, line)
+		if remaining := h.cap - len(h.buf); len(add) > remaining {
+			add = add[len(add)-remaining:]
+		}
+		h.buf = append(h.buf, add...)
+		h.recent = nil
+		h.afterRemain = 3
+		h.lastPos = pos
+	default:
+		h.recent = append(h.recent, line)
+		if len(h.recent) > 3 {
+			h.recent = h.recent[1:]
+		}
+	}
+}
+
 // tailLog reads r line by line and returns, by default, the last n lines
 // joined with "\n" -- the fallback ring below. A line longer than
 // maxLogLineBytes is cut to that many bytes and ends "[line cut]"; the
@@ -743,9 +895,19 @@ func hasLogPrefix(line, prefix string) bool {
 // never evicted by the step's own output, and the returned step is always
 // header-first and at most n lines total. Once a step has failed, reading
 // stops at the next step header, so a later step's output cannot replace
-// it. If any step failed, tailLog returns its header followed by its
-// body -- from its header to its last error line, capped at n -- instead
-// of the plain ring.
+// it.
+//
+// tailLog also keeps hits within the current step's non-error output: a
+// hit is a line for which isFailureLine is true, kept with the 3 lines
+// before it (a before-window) and the 3 lines after it (an after-count),
+// with a "..." line marking a gap between two non-adjacent windows. Hits
+// are capped at n-2 lines, keeping the earliest; a new step header clears
+// them unless the step already failed. If the failed step has hits,
+// tailLog returns the header, then the hits, then the step's last
+// logErrorPrefix line (unless that line is already the final hit line).
+// When the failed step has no hits, tailLog returns its header followed
+// by its body -- from its header to its last error line, capped at n --
+// as above. With no failed step, tailLog returns the plain ring.
 func tailLog(r io.Reader, n int) (string, error) {
 	limited := &io.LimitedReader{R: r, N: maxLogTotalBytes + 1}
 	br := bufio.NewReaderSize(limited, maxLogLineBytes)
@@ -762,9 +924,23 @@ func tailLog(r io.Reader, n int) (string, error) {
 	var header string
 	var body, pending []string
 	failedStepFound := false
+	var lastErrorLine string
+
+	hits := newFailureHits(n)
 
 	joinStep := func() string {
 		return strings.Join(append([]string{header}, body...), "\n")
+	}
+
+	finalStep := func() string {
+		if len(hits.buf) == 0 {
+			return joinStep()
+		}
+		out := append([]string{header}, hits.buf...)
+		if lastErrorLine != "" && hits.buf[len(hits.buf)-1] != lastErrorLine {
+			out = append(out, lastErrorLine)
+		}
+		return strings.Join(out, "\n")
 	}
 
 	for {
@@ -785,11 +961,13 @@ func tailLog(r io.Reader, n int) (string, error) {
 			switch {
 			case hasLogPrefix(line, logGroupRunPrefix):
 				if failedStepFound {
-					return joinStep(), nil
+					return finalStep(), nil
 				}
 				header = line
 				body = nil
 				pending = nil
+				lastErrorLine = ""
+				hits.reset()
 			case hasLogPrefix(line, logErrorPrefix):
 				for _, p := range pending {
 					body = pushCapped(body, p, n-1)
@@ -797,8 +975,10 @@ func tailLog(r io.Reader, n int) (string, error) {
 				body = pushCapped(body, line, n-1)
 				pending = nil
 				failedStepFound = true
+				lastErrorLine = line
 			default:
 				pending = pushCapped(pending, line, n-1)
+				hits.add(line)
 			}
 		}
 		if err != nil {
@@ -810,7 +990,7 @@ func tailLog(r io.Reader, n int) (string, error) {
 	}
 
 	if failedStepFound {
-		return joinStep(), nil
+		return finalStep(), nil
 	}
 
 	if limited.N == 0 {

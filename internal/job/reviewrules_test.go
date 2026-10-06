@@ -17,7 +17,9 @@ import (
 	"github.com/google/go-cmp/cmp"
 
 	"zing/internal/orchestrator"
+	"zing/internal/prompt"
 	"zing/internal/response"
+	"zing/internal/store"
 )
 
 // Location and id literals reused across this file's cases, pulled out as
@@ -34,6 +36,8 @@ const (
 	findingID2      = "r1f2"
 	findingID3      = "r1f3"
 	findingID4      = "r1f4"
+	findingID10     = "r1f10"
+	findingIDRound2 = "r2f1"
 	wordFinding     = "finding"
 )
 
@@ -377,7 +381,7 @@ func TestRenderFixFindings(t *testing.T) {
 	drop := response.FindingDrop
 
 	rows := []response.FindingArtifact{
-		{ID: "r1f10", Severity: response.SeverityNit, Lens: response.LensTests, Location: "c.go:5", Text: "t4", Fix: "f4", Decision: &accept},
+		{ID: findingID10, Severity: response.SeverityNit, Lens: response.LensTests, Location: "c.go:5", Text: "t4", Fix: "f4", Decision: &accept},
 		{ID: findingID3, Severity: response.SeverityBlocker, Lens: response.LensSecurity, Location: "b.go:1", Text: "sql injection", Fix: "parameterize", Decision: &accept},
 		{ID: findingID2, Severity: response.SeverityMajor, Lens: response.LensCorrectness, Location: "a.go:20", Text: "dropped one", Fix: "n/a", Decision: &drop},
 		{ID: findingID1, Severity: response.SeverityMinor, Lens: response.LensCorrectness, Location: aGoLine12, Text: "nil map write", Fix: "add nil check", Decision: &accept},
@@ -432,4 +436,207 @@ func TestCountNoun(t *testing.T) {
 			t.Errorf("CountNoun(%d, %q, %q) = %q, want %q", tc.n, wordFinding, many, got, tc.want)
 		}
 	}
+}
+
+// -----------------------------------------------------------------------
+// Pure: droppedFindings
+// -----------------------------------------------------------------------
+
+// TestDroppedFindings proves the round cutoff, the held exclusion, and that
+// a later row (TRIAGE's own decided row over ROUND's undecided one, or a
+// decision later changed) wins over an earlier one for the same id (ticket
+// 56).
+func TestDroppedFindings(t *testing.T) {
+	t.Parallel()
+	drop := response.FindingDrop
+	accept := response.FindingAccept
+
+	rows := []store.FindingRow{
+		{ArtifactID: 1, Finding: response.FindingArtifact{ID: findingID1, Location: aGoLine1, Round: 1}},
+		{ArtifactID: 2, Finding: response.FindingArtifact{ID: findingID2, Location: aGoLine12, Round: 1, Decision: &drop}},
+		{ArtifactID: 3, Finding: response.FindingArtifact{ID: "r1h1", Location: aGoLine44, Round: 1, Held: true, Decision: &drop}},
+		{ArtifactID: 4, Finding: response.FindingArtifact{ID: findingIDRound2, Location: bareAGoPath + ":2", Round: 2, Decision: &drop}},
+		{ArtifactID: 5, Finding: response.FindingArtifact{ID: findingID1, Location: aGoLine1, Round: 1, Decision: &drop}},
+		{ArtifactID: 6, Finding: response.FindingArtifact{ID: findingID2, Location: aGoLine12, Round: 1, Decision: &accept}},
+	}
+
+	idsOf := func(rows []response.FindingArtifact) []string {
+		ids := make([]string, len(rows))
+		for i, r := range rows {
+			ids[i] = r.ID
+		}
+		return ids
+	}
+
+	cases := []struct {
+		name  string
+		round int
+		want  []string
+	}{
+		{"round 2: only r1f1 (r1f2's newest row accepted, r1h1 held, r2f1 not yet before round 2)", 2, []string{findingID1}},
+		{"round 3: r1f1 then r2f1, id order", 3, []string{findingID1, findingIDRound2}},
+		{"round 1: nothing is before round 1", 1, nil},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got := idsOf(droppedFindings(rows, tc.round))
+			if !equalStrings(got, tc.want) {
+				t.Errorf("droppedFindings(rows, %d) ids = %v, want %v", tc.round, got, tc.want)
+			}
+		})
+	}
+}
+
+// -----------------------------------------------------------------------
+// Pure: splitRepeated
+// -----------------------------------------------------------------------
+
+// TestSplitRepeated drives the worked example from the plan: a dropped row
+// blocks its own normalized location regardless of the merged row's own
+// severity (ticket 56, Q1); a dropped row whose file changed blocks
+// nothing; a dropped row whose own SHA comparison failed (absent from
+// changedBySHA) blocks nothing either (fail open, Q3); a merged row at a
+// different line is untouched.
+func TestSplitRepeated(t *testing.T) {
+	t.Parallel()
+
+	idsOf := func(rows []response.FindingArtifact) []string {
+		ids := make([]string, len(rows))
+		for i, r := range rows {
+			ids[i] = r.ID
+		}
+		return ids
+	}
+
+	t.Run("blocks only an unchanged location, fails open on an unresolved sha", func(t *testing.T) {
+		t.Parallel()
+		dropped := []response.FindingArtifact{
+			{ID: findingID1, Location: greetGoLine5, SHA: "A"},
+			{ID: findingID2, Location: "a.go:3", SHA: "A"},
+			{ID: findingID3, Location: "c.go:7", SHA: "B"},
+		}
+		changedBySHA := map[string]map[string]bool{
+			"A": {bareAGoPath: true},
+		}
+		merged := []response.FindingArtifact{
+			{ID: findingIDRound2, Severity: response.SeverityBlocker, Location: "./greet.go:5"},
+			{ID: "r2f2", Severity: response.SeverityMajor, Location: "a.go:3"},
+			{ID: "r2f3", Severity: response.SeverityMajor, Location: "c.go:7"},
+			{ID: "r2f4", Severity: response.SeverityMajor, Location: "greet.go:6"},
+		}
+
+		kept, repeats := splitRepeated(merged, dropped, changedBySHA)
+
+		wantKept := []string{"r2f2", "r2f3", "r2f4"}
+		if got := idsOf(kept); !equalStrings(got, wantKept) {
+			t.Errorf("kept ids = %v, want %v", got, wantKept)
+		}
+
+		if len(repeats) != 1 {
+			t.Fatalf("repeats = %+v, want exactly one", repeats)
+		}
+		if repeats[0].DroppedID != findingID1 || repeats[0].Location != greetGoLine5 {
+			t.Errorf("repeats[0] = %+v, want {DroppedID: r1f1, Location: %s}", repeats[0], greetGoLine5)
+		}
+	})
+
+	t.Run("lowest id wins when two dropped rows share a location", func(t *testing.T) {
+		t.Parallel()
+		dropped := []response.FindingArtifact{
+			{ID: findingID10, Location: greetGoLine5, SHA: "A"},
+			{ID: findingID2, Location: greetGoLine5, SHA: "A"},
+		}
+		changedBySHA := map[string]map[string]bool{
+			"A": {},
+		}
+		merged := []response.FindingArtifact{
+			{ID: findingIDRound2, Severity: response.SeverityMajor, Location: greetGoLine5},
+		}
+
+		kept, repeats := splitRepeated(merged, dropped, changedBySHA)
+
+		if len(kept) != 0 {
+			t.Errorf("kept = %+v, want none", kept)
+		}
+		if len(repeats) != 1 || repeats[0].DroppedID != findingID2 {
+			t.Errorf("repeats = %+v, want exactly one with DroppedID %s", repeats, findingID2)
+		}
+	})
+}
+
+// -----------------------------------------------------------------------
+// Pure: renderDroppedInput
+// -----------------------------------------------------------------------
+
+// TestRenderDroppedInput proves the dropped findings input's own
+// rendering (ticket 56): rows sort by id regardless of input order, a
+// newline in Text collapses onto one line, Text beyond
+// acceptedAtCapTextRunes is cut with "..." appended, and an empty dropped
+// gives ok false with the zero NamedInput.
+func TestRenderDroppedInput(t *testing.T) {
+	t.Parallel()
+
+	t.Run("two rows render in id order", func(t *testing.T) {
+		t.Parallel()
+		dropped := []response.FindingArtifact{
+			{ID: findingID10, Location: aGoLine1, Text: "second by id"},
+			{ID: findingID2, Location: aGoLine12, Text: "first by id"},
+		}
+		in, ok := renderDroppedInput(dropped)
+		if !ok {
+			t.Fatal("renderDroppedInput(dropped) ok = false, want true")
+		}
+		want := "- " + findingID2 + " " + aGoLine12 + " first by id\n" +
+			"- r1f10 " + aGoLine1 + " second by id"
+		if in.Text != want {
+			t.Errorf("renderDroppedInput(dropped).Text = %q, want %q", in.Text, want)
+		}
+		if in.Label != droppedFindingsLabel {
+			t.Errorf("renderDroppedInput(dropped).Label = %q, want %q", in.Label, droppedFindingsLabel)
+		}
+		if !in.Untrusted {
+			t.Error("renderDroppedInput(dropped).Untrusted = false, want true")
+		}
+	})
+
+	t.Run("a newline in text renders on one line", func(t *testing.T) {
+		t.Parallel()
+		in, ok := renderDroppedInput([]response.FindingArtifact{
+			{ID: findingID1, Location: aGoLine1, Text: "first line\nsecond line"},
+		})
+		if !ok {
+			t.Fatal("renderDroppedInput ok = false, want true")
+		}
+		want := "- " + findingID1 + " " + aGoLine1 + " first line second line"
+		if in.Text != want {
+			t.Errorf("renderDroppedInput(...).Text = %q, want %q", in.Text, want)
+		}
+	})
+
+	t.Run("text beyond the cap is cut with an ellipsis", func(t *testing.T) {
+		t.Parallel()
+		long := strings.Repeat("x", 250)
+		in, ok := renderDroppedInput([]response.FindingArtifact{
+			{ID: findingID1, Location: aGoLine1, Text: long},
+		})
+		if !ok {
+			t.Fatal("renderDroppedInput ok = false, want true")
+		}
+		want := "- " + findingID1 + " " + aGoLine1 + " " + strings.Repeat("x", acceptedAtCapTextRunes) + "..."
+		if in.Text != want {
+			t.Errorf("renderDroppedInput(...).Text = %q, want %q", in.Text, want)
+		}
+	})
+
+	t.Run("nil gives ok false", func(t *testing.T) {
+		t.Parallel()
+		in, ok := renderDroppedInput(nil)
+		if ok {
+			t.Errorf("renderDroppedInput(nil) ok = true, want false")
+		}
+		if in != (prompt.NamedInput{}) {
+			t.Errorf("renderDroppedInput(nil) input = %+v, want the zero NamedInput", in)
+		}
+	})
 }

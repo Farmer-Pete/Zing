@@ -338,6 +338,30 @@ func TestCommandRunnerCapturesOutput(t *testing.T) {
 	}
 }
 
+// TestRunShellUnquotedGlobIgnoresLoginShell proves RunShell always runs a
+// check through /bin/sh, never the caller's own login shell (#86): with
+// SHELL set to /bin/zsh, a negated grep with an unquoted include glob over
+// a directory holding a matching .go file behaves the same as it does
+// under bash, instead of aborting on the unmatched-glob error zsh raises
+// before grep ever runs (which would turn the negated check's real
+// failure into a false pass). Not parallel: it calls t.Setenv on the real
+// process SHELL.
+func TestRunShellUnquotedGlobIgnoresLoginShell(t *testing.T) {
+	t.Setenv("SHELL", "/bin/zsh")
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "a.go"), []byte("foo\n"), 0o600); err != nil {
+		t.Fatalf("write a.go: %v", err)
+	}
+
+	exitCode, err := RunShell(t.Context(), dir, `! grep -rn foo . --include=*.go`, nil, commandRunnerTimeout, CommandIO{})
+	if err != nil {
+		t.Fatalf("RunShell: %v", err)
+	}
+	if exitCode != 1 {
+		t.Errorf("exitCode = %d, want 1", exitCode)
+	}
+}
+
 // TestCommandRunnerOnStartGivesGroupLeader proves OnStart runs once, before
 // Run returns, with the pid of the command's process group leader.
 func TestCommandRunnerOnStartGivesGroupLeader(t *testing.T) {

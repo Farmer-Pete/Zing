@@ -34,6 +34,7 @@ import (
 	"testing/fstest"
 	"time"
 
+	"github.com/google/go-cmp/cmp"
 	"github.com/google/go-github/v92/github"
 
 	"zing/internal/gitfixture"
@@ -123,6 +124,16 @@ type shipGitHub struct {
 	// logTail, when set, backs JobLogTail; nil returns "", nil (ciLogText's
 	// own tests, shiprules_test.go, cover JobLogTail's real shape).
 	logTail func(ctx context.Context, owner, repo string, jobID int64, lines int) (string, error)
+
+	// reruns records every RerunJob call's job id, in call order; rerunErr,
+	// when set, fails every call instead (task 2's own job.Checks.RerunJob).
+	// rerunErrAtCall, when non-zero, limits that failure to the call whose
+	// 1-based number (len(reruns) after recording it) equals it, letting a
+	// multi-check plan's first RerunJob call succeed before a later one
+	// fails.
+	reruns         []int64
+	rerunErr       error
+	rerunErrAtCall int
 
 	// The fields below are respond.go's own configurable reads (M4 task 4):
 	// threads backs ListThreads (nil is "no threads", every pre-task-4 POLL
@@ -305,6 +316,14 @@ func (g *shipGitHub) JobLogTail(ctx context.Context, owner, repo string, jobID i
 		return g.logTail(ctx, owner, repo, jobID, lines)
 	}
 	return "", nil
+}
+
+func (g *shipGitHub) RerunJob(_ context.Context, _, _ string, jobID int64) error {
+	g.reruns = append(g.reruns, jobID)
+	if g.rerunErrAtCall != 0 && len(g.reruns) != g.rerunErrAtCall {
+		return nil
+	}
+	return g.rerunErr
 }
 
 // ListThreads, ThreadCommentsContain, ReplyToThread, ResolveThread,
@@ -1192,7 +1211,7 @@ func TestFinalVerdictsAfterFailFixPass(t *testing.T) {
 	}
 	pbApply(t, s, ticket, evalCommit)
 
-	driveJudgeFixToLanding(t, s, ticket.ID, rt, checks)
+	driveJudgeFixToLanding(t, s, ticket.ID, rt, checks, judgeFixTestCmd)
 
 	ticket = pbGetTicket(t, s, ticket.ID)
 	deps4 := pbWithTestCmd(pbClaim(t, s, rt, ticket.ID), ticket, judgeFixTestCmd)
@@ -1508,6 +1527,11 @@ func shipMergeReadyPR(local, nodeID string) orchestrator.PRState {
 // fix-request test and task 7's own draft-flip tests).
 const shipCILogTailText = "FAIL: boom"
 
+// shipFlakyLogText is the canned JobLogTail text every TestPollCIRerun test
+// below configures a flaky re-run with (goconst: repeated across several
+// of that test family's own ticks).
+const shipFlakyLogText = "--- FAIL: TestFlaky (0.1s)"
+
 // shipGreenCI is the Checks reads a ticket.ID's own POLL needs to reach
 // EvaluateCI's green branch: one required "ci" context, matched by one
 // completed/success run of the same name. Statuses are never used by any
@@ -1526,6 +1550,37 @@ func shipFailedCI() (runs []orchestrator.CheckRun, required []orchestrator.Requi
 			DetailsURL: "https://github.com/fixture/fixture/actions/runs/1/job/2",
 		}},
 		[]orchestrator.RequiredCheck{{Context: "ci"}}
+}
+
+// seedCheckRerun writes one check_rerun event directly through
+// InsertMessage, the shape pollRerun itself writes (task 4), the same way
+// shipInsertReviewBotMarker seeds a review-bot clock marker: a test of a
+// row below the rerun rows (the fix request, or a draft flip) seeds one
+// here first, so decideCIRerun's own "used" rule already finds a spent
+// flaky or no_log re-run for the check and sha under test.
+func seedCheckRerun(t *testing.T, s *store.Store, ticketID int64, event response.CheckRerunEvent) {
+	t.Helper()
+	msg, err := store.NewEvent(ticketID, store.EventKindCheckRerun, event)
+	if err != nil {
+		t.Fatalf("seedCheckRerun: NewEvent: %v", err)
+	}
+	if _, err := s.InsertMessage(t.Context(), msg); err != nil {
+		t.Fatalf("seedCheckRerun: InsertMessage: %v", err)
+	}
+}
+
+// seedSpentFlakyCheckRerun seeds a "ci" check_rerun event, reason flaky,
+// under check_run_id 999 -- distinct from shipFailedCI's own check run id
+// 1, so decideCIRerun's own rule 1 (the same check run id, under 10
+// minutes old, waits) never matches it -- so every pre-task-4 failed-CI
+// test that expects a fix request or a draft flip on its very first
+// shipFailedCI tick keeps reaching that same row instead of a fresh
+// re-run (task 4's own addition to shipFailedCI's callers).
+func seedSpentFlakyCheckRerun(t *testing.T, s *store.Store, ticketID int64, sha string) {
+	t.Helper()
+	seedCheckRerun(t, s, ticketID, response.CheckRerunEvent{
+		Check: "ci", SHA: sha, RunID: 1, CheckRunID: 999, Reason: response.RerunReasonFlaky,
+	})
 }
 
 // seedReReqHandled writes "reviewers re-requested <headSHA>" directly
@@ -1855,6 +1910,7 @@ func TestPollCIFailedRequestsFix(t *testing.T) {
 	gh.runs, gh.required = runs, required
 	gh.prState = orchestrator.PRState{Draft: true, HeadSHA: local, BaseRef: pbFixtureDefaultBranch}
 	gh.logTail = func(context.Context, string, string, int64, int) (string, error) { return shipCILogTailText, nil }
+	seedSpentFlakyCheckRerun(t, s, ticket.ID, local)
 
 	commit, err := shipPollRun(t, s, ticket, gh, tr)
 	if err != nil {
@@ -1899,6 +1955,7 @@ func TestPollSharedGateEscalates(t *testing.T) {
 	gh.runs, gh.required = runs, required
 	gh.prState = orchestrator.PRState{Draft: true, HeadSHA: local, BaseRef: pbFixtureDefaultBranch}
 	seedReReqHandled(t, s, ticket.ID, local)
+	seedSpentFlakyCheckRerun(t, s, ticket.ID, local)
 
 	commit, err := shipPollRun(t, s, pbGetTicket(t, s, ticket.ID), gh, tr)
 	if err != nil {
@@ -1912,6 +1969,823 @@ func TestPollSharedGateEscalates(t *testing.T) {
 	}
 	if commit.Escalation.Payload.Origin != string(response.EscalationOriginShipping) {
 		t.Errorf("Origin = %q, want %q", commit.Escalation.Payload.Origin, response.EscalationOriginShipping)
+	}
+}
+
+// -----------------------------------------------------------------------
+// Re-run a failed CI job once before spending a fix run on it (#91, task 4)
+// -----------------------------------------------------------------------
+
+// shipCIRun builds one "ci" Actions check run with checkRunID, backed by
+// workflow run runID and job jobID (both embedded in DetailsURL, the shape
+// actionsJobIDPattern parses), under conclusion.
+func shipCIRun(checkRunID, runID, jobID int64, conclusion string) orchestrator.CheckRun {
+	return orchestrator.CheckRun{
+		ID: checkRunID, Name: "ci", Status: ghCompleted, Conclusion: conclusion, AppSlug: ghGitHubActions,
+		DetailsURL: fmt.Sprintf("https://github.com/fixture/fixture/actions/runs/%d/job/%d", runID, jobID),
+	}
+}
+
+// shipCIRequired is the one required "ci" check every TestPollCIRerun test
+// below reads back (shipFailedCI's own required, named here so a test that
+// never calls shipFailedCI still has it).
+func shipCIRequired() []orchestrator.RequiredCheck {
+	return []orchestrator.RequiredCheck{{Context: "ci"}}
+}
+
+// shipCheckRerunEvents decodes every check_rerun event message in c.Messages,
+// in order.
+func shipCheckRerunEvents(t *testing.T, c store.HandlerCommit) []response.CheckRerunEvent {
+	t.Helper()
+	var out []response.CheckRerunEvent
+	for i := range c.Messages {
+		if c.Messages[i].EventKind == nil || *c.Messages[i].EventKind != store.EventKindCheckRerun {
+			continue
+		}
+		var ev response.CheckRerunEvent
+		if err := json.Unmarshal(c.Messages[i].Payload, &ev); err != nil {
+			t.Fatalf("decode check_rerun event: %v", err)
+		}
+		out = append(out, ev)
+	}
+	return out
+}
+
+// shipCheckRerunPassedEvents decodes every check_rerun_passed event message
+// in c.Messages, in order.
+func shipCheckRerunPassedEvents(t *testing.T, c store.HandlerCommit) []response.CheckRerunPassedEvent {
+	t.Helper()
+	var out []response.CheckRerunPassedEvent
+	for i := range c.Messages {
+		if c.Messages[i].EventKind == nil || *c.Messages[i].EventKind != store.EventKindCheckRerunPassed {
+			continue
+		}
+		var ev response.CheckRerunPassedEvent
+		if err := json.Unmarshal(c.Messages[i].Payload, &ev); err != nil {
+			t.Fatalf("decode check_rerun_passed event: %v", err)
+		}
+		out = append(out, ev)
+	}
+	return out
+}
+
+// shipHasFixMarker reports whether c.Messages carries a "fix requested
+// ci_log after run " marker.
+func shipHasFixMarker(c store.HandlerCommit) bool {
+	for i := range c.Messages {
+		if strings.HasPrefix(c.Messages[i].Body, fixRequestedCILogPrefix) {
+			return true
+		}
+	}
+	return false
+}
+
+// TestPollCIRerunFlakyPassReachesMergeQuestion proves the ticket's own demo
+// (design "demo"): a required check that fails once, is re-run, and then
+// passes reaches the merge question with no fix run ever sent, and the
+// pass itself leaves exactly one check_rerun_passed event, never a second.
+func TestPollCIRerunFlakyPassReachesMergeQuestion(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow end-to-end flow; runs in the full suite")
+	}
+	t.Parallel()
+	s, ticket, gh, tr := shipPublished(t)
+	local := shipHeadSHA(t, s, ticket)
+	gh.runs, gh.required = shipFailedCI()
+	gh.prState = shipMergeReadyPR(local, "PR_node_flaky_pass")
+	gh.logTail = func(context.Context, string, string, int64, int) (string, error) {
+		return shipFlakyLogText, nil
+	}
+
+	commit1, err := shipPollRun(t, s, ticket, gh, tr)
+	if err != nil {
+		t.Fatalf("Run (tick 1): %v", err)
+	}
+	if diff := cmp.Diff([]int64{2}, gh.reruns); diff != "" {
+		t.Errorf("reruns mismatch (-want +got):\n%s", diff)
+	}
+	wantEvent := response.CheckRerunEvent{Check: "ci", SHA: local, RunID: 1, CheckRunID: 1, Reason: response.RerunReasonFlaky, Tests: []string{"TestFlaky"}}
+	if diff := cmp.Diff([]response.CheckRerunEvent{wantEvent}, shipCheckRerunEvents(t, commit1)); diff != "" {
+		t.Errorf("check_rerun event mismatch (-want +got):\n%s", diff)
+	}
+	if shipHasFixMarker(commit1) {
+		t.Errorf("commit1.Messages = %+v, want no fix marker", commit1.Messages)
+	}
+	if len(gh.convertToDraftCalls) != 0 {
+		t.Errorf("convertToDraftCalls = %+v, want none", gh.convertToDraftCalls)
+	}
+	pbApply(t, s, ticket, commit1)
+
+	gh.runs = []orchestrator.CheckRun{shipCIRun(3, 1, 2, ghSuccess)}
+	commit2, err := shipPollRun(t, s, pbGetTicket(t, s, ticket.ID), gh, tr)
+	if err != nil {
+		t.Fatalf("Run (tick 2): %v", err)
+	}
+	if !shipHasMessage(commit2, "merge asked "+local) {
+		t.Fatalf("commit2.Messages = %+v, want %q", commit2.Messages, "merge asked "+local)
+	}
+	wantPassed := response.CheckRerunPassedEvent{Check: "ci", SHA: local, Tests: []string{"TestFlaky"}}
+	if diff := cmp.Diff([]response.CheckRerunPassedEvent{wantPassed}, shipCheckRerunPassedEvents(t, commit2)); diff != "" {
+		t.Errorf("check_rerun_passed event mismatch (-want +got):\n%s", diff)
+	}
+	if shipHasFixMarker(commit2) {
+		t.Errorf("commit2.Messages = %+v, want no fix marker", commit2.Messages)
+	}
+	pbApply(t, s, ticket, commit2)
+
+	commit3, err := shipPollRun(t, s, pbGetTicket(t, s, ticket.ID), gh, tr)
+	if err != nil {
+		t.Fatalf("Run (tick 3): %v", err)
+	}
+	if passed3 := shipCheckRerunPassedEvents(t, commit3); len(passed3) != 0 {
+		t.Errorf("commit3 check_rerun_passed events = %+v, want none", passed3)
+	}
+}
+
+// TestPollCIRerunFailsAgainSendsFixRequest proves the ticket's own "A test
+// where the check fails twice sends the fix request": the re-run's own
+// budget spent, a second failure converts the still-ready pull request to
+// draft (design Q4: the re-run rows outrank the draft flip, but the draft
+// flip still outranks the fix row once the budget is gone), and the next
+// tick -- now draft -- sends the fix request, with no second re-run.
+func TestPollCIRerunFailsAgainSendsFixRequest(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow end-to-end flow; runs in the full suite")
+	}
+	t.Parallel()
+	s, ticket, gh, tr := shipPublished(t)
+	local := shipHeadSHA(t, s, ticket)
+	gh.runs, gh.required = shipFailedCI()
+	gh.prState = shipMergeReadyPR(local, "PR_node_fails_again")
+	gh.logTail = func(context.Context, string, string, int64, int) (string, error) {
+		return shipFlakyLogText, nil
+	}
+
+	commit1, err := shipPollRun(t, s, ticket, gh, tr)
+	if err != nil {
+		t.Fatalf("Run (tick 1): %v", err)
+	}
+	if len(gh.reruns) != 1 {
+		t.Fatalf("reruns = %+v, want exactly one", gh.reruns)
+	}
+	pbApply(t, s, ticket, commit1)
+
+	gh.runs = []orchestrator.CheckRun{shipCIRun(3, 4, 5, "failure")}
+	gh.logTail = func(context.Context, string, string, int64, int) (string, error) { return shipCILogTailText, nil }
+	commit2, err := shipPollRun(t, s, pbGetTicket(t, s, ticket.ID), gh, tr)
+	if err != nil {
+		t.Fatalf("Run (tick 2): %v", err)
+	}
+	if len(gh.convertToDraftCalls) != 1 {
+		t.Fatalf("convertToDraftCalls = %+v, want exactly one call", gh.convertToDraftCalls)
+	}
+	if shipHasFixMarker(commit2) {
+		t.Errorf("commit2.Messages = %+v, want no fix marker yet", commit2.Messages)
+	}
+	pbApply(t, s, ticket, commit2)
+	gh.prState.Draft = true
+
+	commit3, err := shipPollRun(t, s, pbGetTicket(t, s, ticket.ID), gh, tr)
+	if err != nil {
+		t.Fatalf("Run (tick 3): %v", err)
+	}
+	found := false
+	for _, m := range commit3.Messages {
+		if strings.HasPrefix(m.Body, fixRequestedCILogPrefix) && strings.Contains(m.Body, shipCILogTailText) {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("commit3.Messages = %+v, want a %q marker carrying the log tail", commit3.Messages, fixRequestedCILogPrefix)
+	}
+	if len(gh.reruns) != 1 {
+		t.Errorf("reruns = %+v, want still exactly one", gh.reruns)
+	}
+}
+
+// TestPollCIRerunKeepsReadyPRReady proves design Q4: a first-time failure
+// on a non-draft pull request re-runs the check instead of flipping to
+// draft.
+func TestPollCIRerunKeepsReadyPRReady(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow end-to-end flow; runs in the full suite")
+	}
+	t.Parallel()
+	s, ticket, gh, tr := shipPublished(t)
+	local := shipHeadSHA(t, s, ticket)
+	gh.runs, gh.required = shipFailedCI()
+	gh.prState = shipMergeReadyPR(local, "PR_node_keeps_ready")
+	gh.logTail = func(context.Context, string, string, int64, int) (string, error) {
+		return shipFlakyLogText, nil
+	}
+
+	_, err := shipPollRun(t, s, ticket, gh, tr)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if len(gh.convertToDraftCalls) != 0 {
+		t.Errorf("convertToDraftCalls = %+v, want none", gh.convertToDraftCalls)
+	}
+	if len(gh.reruns) != 1 {
+		t.Errorf("reruns = %+v, want exactly one", gh.reruns)
+	}
+}
+
+// TestPollCIRerunWaitsForRerunToAppear proves decideCIRerun's own rule 1
+// (design shape): the same check run id, seeded just now, makes POLL wait
+// instead of re-running again or sending a fix request.
+func TestPollCIRerunWaitsForRerunToAppear(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow end-to-end flow; runs in the full suite")
+	}
+	t.Parallel()
+	s, ticket, gh, tr := shipPublished(t)
+	local := shipHeadSHA(t, s, ticket)
+	gh.runs, gh.required = shipFailedCI()
+	gh.prState = shipMergeReadyPR(local, "PR_node_waits")
+	seedCheckRerun(t, s, ticket.ID, response.CheckRerunEvent{
+		Check: "ci", SHA: local, RunID: 1, CheckRunID: 1, Reason: response.RerunReasonFlaky,
+	})
+
+	before := time.Now().UTC()
+	commit, err := shipPollRun(t, s, ticket, gh, tr)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if len(gh.reruns) != 0 {
+		t.Errorf("reruns = %+v, want none", gh.reruns)
+	}
+	if shipHasFixMarker(commit) {
+		t.Errorf("commit.Messages = %+v, want no fix marker", commit.Messages)
+	}
+	if commit.Poll == nil {
+		t.Fatal("commit.Poll is nil, want the idle backoff commit")
+	}
+	if !commit.Poll.NextAt.After(before) {
+		t.Errorf("Poll.NextAt = %v, want it after %v", commit.Poll.NextAt, before)
+	}
+}
+
+// TestPollCIRerunInfraCapsAtThreeThenEscalates proves decideCIRerun's own
+// rule 2 (design shape): an infrastructure conclusion re-runs up to its own
+// cap of 3 per check per head sha, then escalates, never a fix request, and
+// never reads a log.
+func TestPollCIRerunInfraCapsAtThreeThenEscalates(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow end-to-end flow; runs in the full suite")
+	}
+	t.Parallel()
+	s, ticket, gh, tr := shipPublished(t)
+	local := shipHeadSHA(t, s, ticket)
+	gh.required = shipCIRequired()
+	gh.prState = shipMergeReadyPR(local, "PR_node_infra_cap")
+	gh.logTail = func(context.Context, string, string, int64, int) (string, error) {
+		t.Fatal("JobLogTail must not be called for an infrastructure conclusion")
+		return "", nil
+	}
+
+	for i, checkRunID := range []int64{2, 3, 4} {
+		runID := int64(100 + i)
+		gh.runs = []orchestrator.CheckRun{shipCIRun(checkRunID, runID, runID+1000, ghCancelled)}
+		commit, err := shipPollRun(t, s, pbGetTicket(t, s, ticket.ID), gh, tr)
+		if err != nil {
+			t.Fatalf("Run (tick %d): %v", i+1, err)
+		}
+		if len(gh.reruns) != i+1 {
+			t.Fatalf("tick %d: reruns = %+v, want %d", i+1, gh.reruns, i+1)
+		}
+		events := shipCheckRerunEvents(t, commit)
+		if len(events) != 1 || events[0].Reason != response.RerunReasonInfra {
+			t.Fatalf("tick %d: check_rerun events = %+v, want exactly one reason infra", i+1, events)
+		}
+		if shipHasFixMarker(commit) {
+			t.Errorf("tick %d: commit.Messages = %+v, want no fix marker", i+1, commit.Messages)
+		}
+		pbApply(t, s, ticket, commit)
+	}
+
+	gh.runs = []orchestrator.CheckRun{shipCIRun(5, 103, 1103, ghCancelled)}
+	commit, err := shipPollRun(t, s, pbGetTicket(t, s, ticket.ID), gh, tr)
+	if err != nil {
+		t.Fatalf("Run (tick 4): %v", err)
+	}
+	if commit.Escalation == nil {
+		t.Fatal("want an escalation")
+	}
+	if commit.Escalation.Payload.What != rerunInfraWhat {
+		t.Errorf("What = %q, want %q", commit.Escalation.Payload.What, rerunInfraWhat)
+	}
+	for _, runID := range []string{"100", "101", "102"} {
+		if !strings.Contains(commit.Escalation.Payload.Tried, runID) {
+			t.Errorf("Tried = %q, want it to list workflow run %s", commit.Escalation.Payload.Tried, runID)
+		}
+	}
+	if shipHasFixMarker(commit) {
+		t.Errorf("commit.Messages = %+v, want no fix marker", commit.Messages)
+	}
+	if len(gh.reruns) != 3 {
+		t.Errorf("reruns = %+v, want still exactly 3", gh.reruns)
+	}
+}
+
+// TestPollCIRerunInfraDoesNotSpendFlakyRerun proves decideCIRerun keeps an
+// infra re-run's own count separate from a flaky or no_log one: a prior
+// infra event for the check never counts as its "used" flaky budget.
+func TestPollCIRerunInfraDoesNotSpendFlakyRerun(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow end-to-end flow; runs in the full suite")
+	}
+	t.Parallel()
+	s, ticket, gh, tr := shipPublished(t)
+	local := shipHeadSHA(t, s, ticket)
+	gh.required = shipCIRequired()
+	gh.prState = shipMergeReadyPR(local, "PR_node_infra_not_spent")
+	gh.runs = []orchestrator.CheckRun{shipCIRun(7, 10, 11, "failure")}
+	gh.logTail = func(context.Context, string, string, int64, int) (string, error) {
+		return "--- FAIL: TestY (0.1s)", nil
+	}
+	seedCheckRerun(t, s, ticket.ID, response.CheckRerunEvent{
+		Check: "ci", SHA: local, RunID: 1, CheckRunID: 6, Reason: response.RerunReasonInfra,
+	})
+
+	commit, err := shipPollRun(t, s, ticket, gh, tr)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if len(gh.reruns) != 1 {
+		t.Fatalf("reruns = %+v, want exactly one", gh.reruns)
+	}
+	events := shipCheckRerunEvents(t, commit)
+	if len(events) != 1 || events[0].Reason != response.RerunReasonFlaky {
+		t.Fatalf("check_rerun events = %+v, want exactly one reason flaky", events)
+	}
+}
+
+// TestPollCIRerunNoLogTwiceEscalates proves decideCIRerun's own rule 4
+// (design shape): a failed check whose log cannot be read gets the check's
+// one re-run, and escalates -- never a fix request -- once that re-run
+// also has no log.
+func TestPollCIRerunNoLogTwiceEscalates(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow end-to-end flow; runs in the full suite")
+	}
+	t.Parallel()
+	s, ticket, gh, tr := shipPublished(t)
+	local := shipHeadSHA(t, s, ticket)
+	gh.runs, gh.required = shipFailedCI()
+	gh.prState = shipMergeReadyPR(local, "PR_node_no_log_twice")
+	logErr := errors.New("signed url expired")
+	gh.logTail = func(context.Context, string, string, int64, int) (string, error) { return "", logErr }
+
+	commit1, err := shipPollRun(t, s, ticket, gh, tr)
+	if err != nil {
+		t.Fatalf("Run (tick 1): %v", err)
+	}
+	events := shipCheckRerunEvents(t, commit1)
+	if len(events) != 1 || events[0].Reason != response.RerunReasonNoLog {
+		t.Fatalf("tick 1 check_rerun events = %+v, want exactly one reason no_log", events)
+	}
+	pbApply(t, s, ticket, commit1)
+
+	gh.runs = []orchestrator.CheckRun{shipCIRun(3, 4, 5, "failure")}
+	commit2, err := shipPollRun(t, s, pbGetTicket(t, s, ticket.ID), gh, tr)
+	if err != nil {
+		t.Fatalf("Run (tick 2): %v", err)
+	}
+	if commit2.Escalation == nil {
+		t.Fatal("want an escalation")
+	}
+	if commit2.Escalation.Payload.What != rerunNoLogWhat {
+		t.Errorf("What = %q, want %q", commit2.Escalation.Payload.What, rerunNoLogWhat)
+	}
+	if !strings.Contains(commit2.Escalation.Payload.Why, logErr.Error()) {
+		t.Errorf("Why = %q, want it to hold %q", commit2.Escalation.Payload.Why, logErr.Error())
+	}
+	if shipHasFixMarker(commit2) {
+		t.Errorf("commit2.Messages = %+v, want no fix marker", commit2.Messages)
+	}
+}
+
+// TestPollCIRerunNoLogThenReadableFailureSendsFix proves decideCIRerun's
+// own rule 4 and 5 together: a spent no_log re-run for the check also
+// counts as "used" once a later failure of the same check reads a log
+// just fine, so a draft pull request reaches the fix row on this very
+// tick.
+func TestPollCIRerunNoLogThenReadableFailureSendsFix(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow end-to-end flow; runs in the full suite")
+	}
+	t.Parallel()
+	s, ticket, gh, tr := shipPublished(t)
+	local := shipHeadSHA(t, s, ticket)
+	gh.required = shipCIRequired()
+	gh.runs = []orchestrator.CheckRun{shipCIRun(5, 10, 11, "failure")}
+	gh.prState = orchestrator.PRState{Draft: true, HeadSHA: local, BaseRef: pbFixtureDefaultBranch}
+	gh.logTail = func(context.Context, string, string, int64, int) (string, error) { return shipCILogTailText, nil }
+	seedCheckRerun(t, s, ticket.ID, response.CheckRerunEvent{
+		Check: "ci", SHA: local, RunID: 1, CheckRunID: 1, Reason: response.RerunReasonNoLog,
+	})
+
+	commit, err := shipPollRun(t, s, ticket, gh, tr)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	found := false
+	for _, m := range commit.Messages {
+		if strings.HasPrefix(m.Body, fixRequestedCILogPrefix) && strings.Contains(m.Body, shipCILogTailText) {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("commit.Messages = %+v, want a %q marker carrying the log tail", commit.Messages, fixRequestedCILogPrefix)
+	}
+	if len(gh.reruns) != 0 {
+		t.Errorf("reruns = %+v, want none", gh.reruns)
+	}
+}
+
+// TestPollCIRerunNewHeadGetsFreshRerun proves ciRerunDecision's own sha
+// filter: a check_rerun event seeded for an earlier head never counts
+// against a failure of the same check on a new head.
+func TestPollCIRerunNewHeadGetsFreshRerun(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow end-to-end flow; runs in the full suite")
+	}
+	t.Parallel()
+	s, ticket, gh, tr := shipPublished(t)
+	local := shipHeadSHA(t, s, ticket)
+	oldSHA := strings.Repeat("a", 40)
+	gh.runs, gh.required = shipFailedCI()
+	gh.prState = shipMergeReadyPR(local, "PR_node_new_head")
+	gh.logTail = func(context.Context, string, string, int64, int) (string, error) {
+		return shipFlakyLogText, nil
+	}
+	seedCheckRerun(t, s, ticket.ID, response.CheckRerunEvent{
+		Check: "ci", SHA: oldSHA, RunID: 1, CheckRunID: 1, Reason: response.RerunReasonFlaky,
+	})
+
+	commit, err := shipPollRun(t, s, ticket, gh, tr)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if len(gh.reruns) != 1 {
+		t.Fatalf("reruns = %+v, want exactly one", gh.reruns)
+	}
+	events := shipCheckRerunEvents(t, commit)
+	if len(events) != 1 || events[0].SHA != local {
+		t.Fatalf("check_rerun events = %+v, want exactly one event on sha %q", events, local)
+	}
+}
+
+// TestPollCIRerunRetryResetsBudget proves design Q1's own retry row: an
+// owner Retry resets a check's own infra budget, exactly as it resets the
+// review-bot clock (TestPollReviewBotRestartsAfterRetry).
+func TestPollCIRerunRetryResetsBudget(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow end-to-end flow; runs in the full suite")
+	}
+	t.Parallel()
+	s, ticket, gh, tr := shipPublished(t)
+	local := shipHeadSHA(t, s, ticket)
+	gh.required = shipCIRequired()
+	gh.prState = shipMergeReadyPR(local, "PR_node_retry_resets")
+
+	for i, checkRunID := range []int64{1, 2, 3} {
+		runID := int64(10 + i)
+		seedCheckRerun(t, s, ticket.ID, response.CheckRerunEvent{
+			Check: "ci", SHA: local, RunID: runID, CheckRunID: checkRunID, Reason: response.RerunReasonInfra,
+		})
+	}
+	if _, err := s.InsertMessage(t.Context(), store.Message{
+		TicketID: ticket.ID, Type: msgTypeUpdate, Author: authorSystem, Body: markerRetryRequested,
+	}); err != nil {
+		t.Fatalf("InsertMessage(retry requested): %v", err)
+	}
+
+	gh.runs = []orchestrator.CheckRun{shipCIRun(4, 20, 21, ghCancelled)}
+	commit, err := shipPollRun(t, s, ticket, gh, tr)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if len(gh.reruns) != 1 {
+		t.Fatalf("reruns = %+v, want exactly one", gh.reruns)
+	}
+	if commit.Escalation != nil {
+		t.Fatalf("got an escalation, want a re-run: %+v", commit.Escalation.Payload)
+	}
+}
+
+// TestPollCIRerunNonActionsCheckSendsFix proves decideCIRerun's own rule 3:
+// a failed check from an app other than github-actions sends the fix
+// request straight away -- Zing has no job id to re-run.
+func TestPollCIRerunNonActionsCheckSendsFix(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow end-to-end flow; runs in the full suite")
+	}
+	t.Parallel()
+	s, ticket, gh, tr := shipPublished(t)
+	local := shipHeadSHA(t, s, ticket)
+	gh.required = shipCIRequired()
+	gh.runs = []orchestrator.CheckRun{{
+		ID: 1, Name: "ci", Status: ghCompleted, Conclusion: "failure", AppSlug: "jenkins",
+		DetailsURL: "https://jenkins.example.com/job/ci/9",
+	}}
+	gh.prState = orchestrator.PRState{Draft: true, HeadSHA: local, BaseRef: pbFixtureDefaultBranch}
+
+	commit, err := shipPollRun(t, s, ticket, gh, tr)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if len(gh.reruns) != 0 {
+		t.Errorf("reruns = %+v, want none", gh.reruns)
+	}
+	want := "check ci (failure) https://jenkins.example.com/job/ci/9"
+	found := false
+	for i := range commit.Messages {
+		if strings.HasPrefix(commit.Messages[i].Body, fixRequestedCILogPrefix) && strings.Contains(commit.Messages[i].Body, want) {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("commit.Messages = %+v, want a %q marker carrying %q", commit.Messages, fixRequestedCILogPrefix, want)
+	}
+}
+
+// TestPollCIRerunAPIErrorEscalates proves pollRerun's own error row: a
+// RerunJob failure that is neither a rate limit, an unavailable GitHub,
+// nor an incomplete workflow run escalates instead of leaving the budget
+// silently unspent -- a refused token included (r3f2), since the plan's
+// own risk (a token that can read but lacks actions write permission) is
+// exactly a classified orchestrator.ErrGitHubAuth, not a generic error.
+func TestPollCIRerunAPIErrorEscalates(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow end-to-end flow; runs in the full suite")
+	}
+	t.Parallel()
+	s, ticket, gh, tr := shipPublished(t)
+	local := shipHeadSHA(t, s, ticket)
+	gh.runs, gh.required = shipFailedCI()
+	gh.prState = shipMergeReadyPR(local, "PR_node_api_error")
+	gh.logTail = func(context.Context, string, string, int64, int) (string, error) {
+		return shipFlakyLogText, nil
+	}
+	gh.rerunErr = fmt.Errorf("%w: 403 Forbidden", orchestrator.ErrGitHubAuth)
+
+	commit, err := shipPollRun(t, s, ticket, gh, tr)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if commit.Escalation == nil {
+		t.Fatal("want an escalation")
+	}
+	if commit.Escalation.Payload.What != ciRerunAPIErrorWhat {
+		t.Errorf("What = %q, want %q", commit.Escalation.Payload.What, ciRerunAPIErrorWhat)
+	}
+	if !strings.Contains(commit.Escalation.Payload.Why, "ci") || !strings.Contains(commit.Escalation.Payload.Why, gh.rerunErr.Error()) {
+		t.Errorf("Why = %q, want it to name %q and %q", commit.Escalation.Payload.Why, "ci", gh.rerunErr.Error())
+	}
+	if events := shipCheckRerunEvents(t, commit); len(events) != 0 {
+		t.Errorf("check_rerun events = %+v, want none", events)
+	}
+	if shipHasFixMarker(commit) {
+		t.Errorf("commit.Messages = %+v, want no fix marker", commit.Messages)
+	}
+}
+
+// TestPollCIRerunUnavailableReschedulesWithoutEscalation proves pollRerun's
+// own reschedule row for an unavailable GitHub: no escalation, no
+// check_rerun event (RerunJob never reached GitHub, so nothing to record),
+// just a later poll.
+func TestPollCIRerunUnavailableReschedulesWithoutEscalation(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow end-to-end flow; runs in the full suite")
+	}
+	t.Parallel()
+	s, ticket, gh, tr := shipPublished(t)
+	local := shipHeadSHA(t, s, ticket)
+	gh.runs, gh.required = shipFailedCI()
+	gh.prState = shipMergeReadyPR(local, "PR_node_unavailable")
+	gh.logTail = func(context.Context, string, string, int64, int) (string, error) {
+		return shipFlakyLogText, nil
+	}
+	gh.rerunErr = orchestrator.ErrGitHubUnavailable
+
+	commit, err := shipPollRun(t, s, ticket, gh, tr)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if commit.Escalation != nil {
+		t.Errorf("Escalation = %+v, want none", commit.Escalation)
+	}
+	if events := shipCheckRerunEvents(t, commit); len(events) != 0 {
+		t.Errorf("check_rerun events = %+v, want none", events)
+	}
+	if commit.PollSchedule == nil {
+		t.Fatal("commit.PollSchedule is nil, want a rescheduled poll")
+	}
+}
+
+// TestPollCIRerunRateLimitReschedulesAtResetAt proves pollRerun's own
+// reschedule row for a rate-limited GitHub: the next poll lands at the
+// rate limit's own reset time, at least.
+func TestPollCIRerunRateLimitReschedulesAtResetAt(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow end-to-end flow; runs in the full suite")
+	}
+	t.Parallel()
+	s, ticket, gh, tr := shipPublished(t)
+	local := shipHeadSHA(t, s, ticket)
+	gh.runs, gh.required = shipFailedCI()
+	gh.prState = shipMergeReadyPR(local, "PR_node_rate_limited")
+	gh.logTail = func(context.Context, string, string, int64, int) (string, error) {
+		return shipFlakyLogText, nil
+	}
+	resetAt := time.Now().UTC().Add(time.Hour).Truncate(time.Second)
+	gh.rerunErr = orchestrator.RateLimitedError{ResetAt: resetAt}
+
+	commit, err := shipPollRun(t, s, ticket, gh, tr)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if commit.Escalation != nil {
+		t.Errorf("Escalation = %+v, want none", commit.Escalation)
+	}
+	if commit.PollSchedule == nil {
+		t.Fatal("commit.PollSchedule is nil, want a rescheduled poll")
+	}
+	if commit.PollSchedule.NextAt.Before(resetAt) {
+		t.Errorf("PollSchedule.NextAt = %v, want it at or after %v", commit.PollSchedule.NextAt, resetAt)
+	}
+}
+
+// TestPollCIRerunAPIErrorKeepsEarlierRerunEvents proves pollRerun's own
+// escalation row keeps the check_rerun events of re-runs that already
+// succeeded this tick: with two failed Actions checks, "ci" re-runs first
+// and succeeds, "lint" re-runs second and fails, so the escalation still
+// carries "ci"'s own check_rerun event.
+func TestPollCIRerunAPIErrorKeepsEarlierRerunEvents(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow end-to-end flow; runs in the full suite")
+	}
+	t.Parallel()
+	s, ticket, gh, tr := shipPublished(t)
+	local := shipHeadSHA(t, s, ticket)
+	gh.runs = []orchestrator.CheckRun{
+		shipCIRun(1, 10, 11, ghFailure),
+		{
+			ID: 2, Name: "lint", Status: ghCompleted, Conclusion: ghFailure, AppSlug: ghGitHubActions,
+			DetailsURL: "https://github.com/fixture/fixture/actions/runs/20/job/21",
+		},
+	}
+	gh.required = []orchestrator.RequiredCheck{{Context: "ci"}, {Context: "lint"}}
+	gh.prState = shipMergeReadyPR(local, "PR_node_two_checks")
+	gh.logTail = func(context.Context, string, string, int64, int) (string, error) {
+		return shipFlakyLogText, nil
+	}
+	gh.rerunErr = errors.New("403 Forbidden")
+	gh.rerunErrAtCall = 2
+
+	commit, err := shipPollRun(t, s, ticket, gh, tr)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if commit.Escalation == nil {
+		t.Fatal("want an escalation")
+	}
+	events := shipCheckRerunEvents(t, commit)
+	if len(events) != 1 || events[0].Check != "ci" {
+		t.Fatalf("check_rerun events = %+v, want exactly one, for ci", events)
+	}
+	if len(gh.reruns) != 2 {
+		t.Errorf("reruns = %+v, want exactly two calls", gh.reruns)
+	}
+}
+
+// TestPollCIRerunSharedWorkflowRunPlansOnlyOne proves decideCIRerun's own
+// per-tick dedupe (r2f1): two failed Actions checks from the same workflow
+// run only ever get one RerunJob call this tick, since GitHub refuses to
+// re-run a second job in a run it has just put back in progress. The
+// dropped check waits for a later tick instead of racing the first one.
+func TestPollCIRerunSharedWorkflowRunPlansOnlyOne(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow end-to-end flow; runs in the full suite")
+	}
+	t.Parallel()
+	s, ticket, gh, tr := shipPublished(t)
+	local := shipHeadSHA(t, s, ticket)
+	gh.runs = []orchestrator.CheckRun{
+		{
+			ID: 1, Name: "a", Status: ghCompleted, Conclusion: ghFailure, AppSlug: ghGitHubActions,
+			DetailsURL: "https://github.com/fixture/fixture/actions/runs/10/job/11",
+		},
+		{
+			ID: 2, Name: "b", Status: ghCompleted, Conclusion: ghFailure, AppSlug: ghGitHubActions,
+			DetailsURL: "https://github.com/fixture/fixture/actions/runs/10/job/12",
+		},
+	}
+	gh.required = []orchestrator.RequiredCheck{{Context: "a"}, {Context: "b"}}
+	gh.prState = shipMergeReadyPR(local, "PR_node_shared_run")
+	gh.logTail = func(context.Context, string, string, int64, int) (string, error) {
+		return shipFlakyLogText, nil
+	}
+
+	commit, err := shipPollRun(t, s, ticket, gh, tr)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if commit.Escalation != nil {
+		t.Errorf("Escalation = %+v, want none", commit.Escalation)
+	}
+	if len(gh.reruns) != 1 {
+		t.Fatalf("reruns = %+v, want exactly one call", gh.reruns)
+	}
+	events := shipCheckRerunEvents(t, commit)
+	if len(events) != 1 || events[0].Check != "a" {
+		t.Fatalf("check_rerun events = %+v, want exactly one, for a", events)
+	}
+}
+
+// TestPollCIRerunWaitsForInFlightSibling proves workflowRunsInFlight
+// (r3f5): a required check that failed shares its workflow run with a
+// not-yet-complete, non-required sibling job. GitHub refuses to re-run a
+// job until its whole workflow run is complete, so POLL waits instead of
+// calling RerunJob, writing no check_rerun event and sending no fix
+// request or escalation.
+func TestPollCIRerunWaitsForInFlightSibling(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow end-to-end flow; runs in the full suite")
+	}
+	t.Parallel()
+	s, ticket, gh, tr := shipPublished(t)
+	local := shipHeadSHA(t, s, ticket)
+	gh.runs = []orchestrator.CheckRun{
+		{
+			ID: 1, Name: "ci", Status: ghCompleted, Conclusion: ghFailure, AppSlug: ghGitHubActions,
+			DetailsURL: "https://github.com/fixture/fixture/actions/runs/10/job/11",
+		},
+		{
+			ID: 2, Name: checkKindLint, Status: testInProgress, AppSlug: ghGitHubActions,
+			DetailsURL: "https://github.com/fixture/fixture/actions/runs/10/job/12",
+		},
+	}
+	gh.required = []orchestrator.RequiredCheck{{Context: "ci"}}
+	gh.prState = shipMergeReadyPR(local, "PR_node_in_flight_sibling")
+	gh.logTail = func(context.Context, string, string, int64, int) (string, error) {
+		return shipFlakyLogText, nil
+	}
+
+	commit, err := shipPollRun(t, s, ticket, gh, tr)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if commit.Escalation != nil {
+		t.Errorf("Escalation = %+v, want none", commit.Escalation)
+	}
+	if len(gh.reruns) != 0 {
+		t.Errorf("reruns = %+v, want none", gh.reruns)
+	}
+	if events := shipCheckRerunEvents(t, commit); len(events) != 0 {
+		t.Errorf("check_rerun events = %+v, want none", events)
+	}
+	if shipHasFixMarker(commit) {
+		t.Errorf("commit.Messages = %+v, want no fix marker", commit.Messages)
+	}
+	if commit.Poll == nil {
+		t.Fatal("commit.Poll is nil, want a rescheduled poll")
+	}
+}
+
+// TestPollCIRerunWorkflowRunIncompleteReschedules proves pollRerun's own
+// reschedule row for orchestrator.ErrWorkflowRunIncomplete (r2f1): GitHub
+// refusing a re-run because the job's workflow run has not finished yet
+// reschedules the same way an unavailable GitHub does, instead of
+// escalating or recording a check_rerun event that never happened.
+func TestPollCIRerunWorkflowRunIncompleteReschedules(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow end-to-end flow; runs in the full suite")
+	}
+	t.Parallel()
+	s, ticket, gh, tr := shipPublished(t)
+	local := shipHeadSHA(t, s, ticket)
+	gh.runs, gh.required = shipFailedCI()
+	gh.prState = shipMergeReadyPR(local, "PR_node_run_incomplete")
+	gh.logTail = func(context.Context, string, string, int64, int) (string, error) {
+		return shipFlakyLogText, nil
+	}
+	gh.rerunErr = orchestrator.ErrWorkflowRunIncomplete
+
+	commit, err := shipPollRun(t, s, ticket, gh, tr)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if commit.Escalation != nil {
+		t.Errorf("Escalation = %+v, want none", commit.Escalation)
+	}
+	if events := shipCheckRerunEvents(t, commit); len(events) != 0 {
+		t.Errorf("check_rerun events = %+v, want none", events)
+	}
+	if commit.PollSchedule == nil {
+		t.Fatal("commit.PollSchedule is nil, want a rescheduled poll")
 	}
 }
 
@@ -3106,6 +3980,160 @@ func TestRespondQuestionResumes(t *testing.T) {
 	}
 }
 
+// ---- TestRespondAnswerAtCapResumesFree --------------------------------------
+
+// TestRespondAnswerAtCapResumesFree proves the owner's answer to a respond
+// question resumes free even on an already-exhausted session (#62's own
+// repeat of #147 for the respond job): resumeRespondAnswered's own
+// answerResume call never gates on max_resumes for an answer resume, so
+// sessions.resumes stays at the cap instead of escalating resumes_exhausted.
+func TestRespondAnswerAtCapResumesFree(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow end-to-end flow; runs in the full suite")
+	}
+	t.Parallel()
+	when := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	s, ticket, gh, tr, _ := shipRespondReady(t, when)
+
+	rt := runtime.NewFake(respondScriptsFS(shipRespondQuestionScript, shipRespondReplyScript))
+	deps := shipClaim(t, s, rt, ticket.ID, gh, tr)
+	askCommit, err := (shipHandler{}).Run(t.Context(), ticket, deps)
+	if err != nil {
+		t.Fatalf("ask Run: %v", err)
+	}
+	pbApply(t, s, ticket, askCommit)
+
+	if askCommit.Session == nil || askCommit.Session.ID == nil {
+		t.Fatalf("askCommit.Session = %+v, want a session id", askCommit.Session)
+	}
+	sessionID := *askCommit.Session.ID
+
+	owner := "ship-respond-answer-cap-owner"
+	expires := time.Now().Add(10 * time.Minute).UTC().Truncate(time.Second)
+	maxResumes := pbMachine(t).Jobs[jobRespondName].MaxResumes
+	if maxResumes != 2 {
+		t.Fatalf("machine.toml respond max_resumes = %d, want 2", maxResumes)
+	}
+	for range maxResumes {
+		claimed, claimErr := s.Claim(t.Context(), ticket.ID, owner, expires)
+		if claimErr != nil || !claimed {
+			t.Fatalf("bump claim: claimed=%v err=%v", claimed, claimErr)
+		}
+		applied, bumpErr := s.CommitHandlerResult(t.Context(), store.HandlerCommit{
+			TicketID: ticket.ID, Owner: owner, Expires: expires,
+			Session: &store.SessionUpsert{ID: &sessionID, BumpResumes: true},
+		})
+		if bumpErr != nil || !applied {
+			t.Fatalf("bump CommitHandlerResult: applied=%v err=%v", applied, bumpErr)
+		}
+	}
+
+	open, err := s.QuestionsByState(t.Context(), ticket.ID, "open")
+	if err != nil || len(open) == 0 {
+		t.Fatalf("QuestionsByState(open): rows=%d err=%v", len(open), err)
+	}
+	pbAnswerEscalation(t, s, ticket.ID, open[len(open)-1].ID, "a")
+
+	deps2 := shipClaim(t, s, rt, ticket.ID, gh, tr)
+	secondCommit, err := (shipHandler{}).Run(t.Context(), pbGetTicket(t, s, ticket.ID), deps2)
+	if err != nil {
+		t.Fatalf("RUN (answered resume at the cap): %v", err)
+	}
+	if secondCommit.Escalation != nil {
+		t.Fatalf("second commit.Escalation = %+v, want nil (an owner answer is free)", secondCommit.Escalation)
+	}
+	if len(secondCommit.Artifacts) != 1 {
+		t.Fatalf("second commit.Artifacts = %+v, want exactly one", secondCommit.Artifacts)
+	}
+	if secondCommit.Session == nil || secondCommit.Session.ID == nil || *secondCommit.Session.ID != sessionID {
+		t.Errorf("second commit.Session = %+v, want the same session %d the question's own run belonged to", secondCommit.Session, sessionID)
+	}
+	pbApply(t, s, ticket, secondCommit)
+
+	sess, _, err := s.SessionByID(t.Context(), sessionID, maxResumes)
+	if err != nil {
+		t.Fatalf("SessionByID: %v", err)
+	}
+	if sess.Resumes != maxResumes {
+		t.Errorf("sessions.resumes after the free answer resume = %d, want %d (unchanged; answer resumes are free)", sess.Resumes, maxResumes)
+	}
+}
+
+// TestRespondAnswerAtCapWithLegacyEscalationWaits proves
+// resumeRespondAnswered's legacy branch of answerResume (job.go): a respond
+// session already exhausted and already carrying its own cap_resumes
+// escalation (written before this rule existed) leaves the round to that
+// escalation's retry, returning ErrNoAction with no run started, instead
+// of resuming free.
+func TestRespondAnswerAtCapWithLegacyEscalationWaits(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow end-to-end flow; runs in the full suite")
+	}
+	t.Parallel()
+	when := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	s, ticket, gh, tr, _ := shipRespondReady(t, when)
+
+	rt := runtime.NewFake(respondScriptsFS(shipRespondQuestionScript, shipRespondReplyScript))
+	deps := shipClaim(t, s, rt, ticket.ID, gh, tr)
+	askCommit, err := (shipHandler{}).Run(t.Context(), ticket, deps)
+	if err != nil {
+		t.Fatalf("ask Run: %v", err)
+	}
+	pbApply(t, s, ticket, askCommit)
+
+	if askCommit.Session == nil || askCommit.Session.ID == nil {
+		t.Fatalf("askCommit.Session = %+v, want a session id", askCommit.Session)
+	}
+	sessionID := *askCommit.Session.ID
+
+	owner := "ship-respond-answer-legacy-cap-owner"
+	expires := time.Now().Add(10 * time.Minute).UTC().Truncate(time.Second)
+	maxResumes := pbMachine(t).Jobs[jobRespondName].MaxResumes
+	for range maxResumes {
+		claimed, claimErr := s.Claim(t.Context(), ticket.ID, owner, expires)
+		if claimErr != nil || !claimed {
+			t.Fatalf("bump claim: claimed=%v err=%v", claimed, claimErr)
+		}
+		applied, bumpErr := s.CommitHandlerResult(t.Context(), store.HandlerCommit{
+			TicketID: ticket.ID, Owner: owner, Expires: expires,
+			Session: &store.SessionUpsert{ID: &sessionID, BumpResumes: true},
+		})
+		if bumpErr != nil || !applied {
+			t.Fatalf("bump CommitHandlerResult: applied=%v err=%v", applied, bumpErr)
+		}
+	}
+
+	open, err := s.QuestionsByState(t.Context(), ticket.ID, "open")
+	if err != nil || len(open) == 0 {
+		t.Fatalf("QuestionsByState(open): rows=%d err=%v", len(open), err)
+	}
+	pbAnswerEscalation(t, s, ticket.ID, open[len(open)-1].ID, "a")
+
+	claimed, claimErr := s.Claim(t.Context(), ticket.ID, owner, expires)
+	if claimErr != nil || !claimed {
+		t.Fatalf("escalate claim: claimed=%v err=%v", claimed, claimErr)
+	}
+	escCommit := capResumesEscalation(ticket, Deps{Owner: owner, Expires: expires}, jobRespondName, sessionID)
+	applied, escErr := s.CommitHandlerResult(t.Context(), escCommit)
+	if escErr != nil || !applied {
+		t.Fatalf("escalate CommitHandlerResult: applied=%v err=%v", applied, escErr)
+	}
+
+	deps2 := shipClaim(t, s, rt, ticket.ID, gh, tr)
+	_, err = (shipHandler{}).Run(t.Context(), pbGetTicket(t, s, ticket.ID), deps2)
+	if !errors.Is(err, ErrNoAction) {
+		t.Fatalf("err = %v, want ErrNoAction (already escalated once)", err)
+	}
+
+	sess, _, err := s.SessionByID(t.Context(), sessionID, maxResumes)
+	if err != nil {
+		t.Fatalf("SessionByID: %v", err)
+	}
+	if sess.Resumes != maxResumes {
+		t.Errorf("sessions.resumes = %d, want %d (unchanged)", sess.Resumes, maxResumes)
+	}
+}
+
 // ---- TestRespondInterruptedIdlessFirstTurnRunsFresh -------------------------
 
 // TestRespondInterruptedIdlessFirstTurnRunsFresh proves design section 7.5
@@ -3160,6 +4188,35 @@ func TestRespondInterruptedIdlessFirstTurnRunsFresh(t *testing.T) {
 	}
 	if len(commit.Artifacts) != 1 {
 		t.Fatalf("commit.Artifacts = %+v, want exactly one", commit.Artifacts)
+	}
+}
+
+// ---- TestRespondRunAndRouteRaw_PassesCappedThrough --------------------------
+
+// TestRespondRunAndRouteRaw_PassesCappedThrough proves
+// shipHandler.respondRunAndRouteRaw's own passthrough case still carries
+// claudeCapped (r4f3): without it, this regresses to escalating
+// runtime_exec_failed and asking the owner, exactly the bug issue #45
+// fixes. pbScriptedRuntime hands runJobWith a *runtime.SessionLimitError
+// directly, the same shape Claude.run itself returns.
+func TestRespondRunAndRouteRaw_PassesCappedThrough(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow end-to-end flow; runs in the full suite")
+	}
+	t.Parallel()
+	when := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	s, ticket, gh, tr, _ := shipRespondReady(t, when)
+
+	cappedRT := &pbScriptedRuntime{t: t, steps: []pbScriptedStep{
+		{res: runtime.RunResult{}, err: &runtime.SessionLimitError{ResetAt: time.Now().Add(time.Hour), Parsed: true}},
+	}}
+	deps := shipClaim(t, s, cappedRT, ticket.ID, gh, tr)
+	commit, err := (shipHandler{}).Run(t.Context(), ticket, deps)
+	if _, capped := Capped(err); !capped {
+		t.Fatalf("Capped(%v) = (_, false), want true", err)
+	}
+	if !reflect.DeepEqual(commit, store.HandlerCommit{}) {
+		t.Errorf("commit = %+v, want the zero value", commit)
 	}
 }
 
@@ -3357,13 +4414,12 @@ func TestRespondAnsweredRoundInterruptedBypassesExhaustedCap(t *testing.T) {
 	when := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
 	s, ticket, gh, tr, _ := shipRespondReady(t, when)
 
-	// rt serves the first turn's own question, the first answered-round
-	// resume's own further question, and the free resume's own reply, in
-	// that order: the cancelled second answered-round resume below goes
+	// rt serves the first turn's own question and the free resume's own
+	// reply, in that order: the cancelled answered-round resume below goes
 	// through a separate canceledRT, never touching rt's own internal turn
-	// count, so rt's own third script is still the next one it serves this
+	// count, so rt's own second script is still the next one it serves this
 	// same external session id when the free resume reaches it.
-	rt := runtime.NewFake(respondScriptsFS(shipRespondQuestionScript, shipRespondQuestionScript, shipRespondReplyScript))
+	rt := runtime.NewFake(respondScriptsFS(shipRespondQuestionScript, shipRespondReplyScript))
 	deps := shipClaim(t, s, rt, ticket.ID, gh, tr)
 	askCommit, err := (shipHandler{}).Run(t.Context(), ticket, deps) // RUN: question (round 1)
 	if err != nil {
@@ -3376,34 +4432,44 @@ func TestRespondAnsweredRoundInterruptedBypassesExhaustedCap(t *testing.T) {
 		t.Fatalf("machine.toml respond max_resumes = %d, want 2", maxResumes)
 	}
 
-	open, err := s.QuestionsByState(t.Context(), ticket.ID, "open")
-	if err != nil || len(open) == 0 {
-		t.Fatalf("QuestionsByState(open): rows=%d err=%v", len(open), err)
+	if askCommit.Session == nil || askCommit.Session.ID == nil {
+		t.Fatalf("askCommit.Session = %+v, want a session id", askCommit.Session)
 	}
-	pbAnswerEscalation(t, s, ticket.ID, open[len(open)-1].ID, "a")
+	sessionID := *askCommit.Session.ID
 
-	deps2 := shipClaim(t, s, rt, ticket.ID, gh, tr)
-	secondCommit, err := (shipHandler{}).Run(t.Context(), pbGetTicket(t, s, ticket.ID), deps2) // resume: answer, new question (round 2)
-	if err != nil {
-		t.Fatalf("round 1 answer Run: %v", err)
+	// Bump the session directly to the cap: an owner's answer resume is
+	// free now, so it can no longer be relied on to charge sessions.resumes.
+	owner, expires := deps.Owner, deps.Expires
+	for range maxResumes {
+		claimed, claimErr := s.Claim(t.Context(), ticket.ID, owner, expires)
+		if claimErr != nil || !claimed {
+			t.Fatalf("bump claim: claimed=%v err=%v", claimed, claimErr)
+		}
+		applied, bumpErr := s.CommitHandlerResult(t.Context(), store.HandlerCommit{
+			TicketID: ticket.ID, Owner: owner, Expires: expires,
+			Session: &store.SessionUpsert{ID: &sessionID, BumpResumes: true},
+		})
+		if bumpErr != nil || !applied {
+			t.Fatalf("bump CommitHandlerResult: applied=%v err=%v", applied, bumpErr)
+		}
 	}
-	pbApply(t, s, ticket, secondCommit)
 
-	sess, _, err := s.LatestSession(t.Context(), ticket.ID, jobRespondName, maxResumes)
+	sess, state, err := s.LatestSession(t.Context(), ticket.ID, jobRespondName, maxResumes)
 	if err != nil {
 		t.Fatalf("LatestSession: %v", err)
 	}
-	if sess.Resumes != 1 {
-		t.Fatalf("sessions.resumes before the final resume = %d, want 1", sess.Resumes)
+	if sess.Resumes != maxResumes {
+		t.Fatalf("sessions.resumes before the cancelled resume = %d, want %d", sess.Resumes, maxResumes)
+	}
+	if state != store.SessionExhausted {
+		t.Fatalf("session state = %v, want SessionExhausted", state)
 	}
 
-	// Round 2's own answer resume is cancelled mid-flight. Reserve charges
-	// its resume regardless (design section 4.2), pushing sessions.resumes
-	// to maxResumes, but the round is never resolved: it stays answered
-	// for the next tick.
-	open, err = s.QuestionsByState(t.Context(), ticket.ID, "open")
+	// The answered round's own resume is cancelled mid-flight. The round is
+	// never resolved: it stays answered for the next tick.
+	open, err := s.QuestionsByState(t.Context(), ticket.ID, "open")
 	if err != nil || len(open) == 0 {
-		t.Fatalf("QuestionsByState(open) round 2: rows=%d err=%v", len(open), err)
+		t.Fatalf("QuestionsByState(open): rows=%d err=%v", len(open), err)
 	}
 	pbAnswerEscalation(t, s, ticket.ID, open[len(open)-1].ID, "a")
 
@@ -3424,12 +4490,12 @@ func TestRespondAnsweredRoundInterruptedBypassesExhaustedCap(t *testing.T) {
 		t.Fatal("InterruptRuns: applied = false, want true")
 	}
 
-	sess, state, err := s.LatestSession(t.Context(), ticket.ID, jobRespondName, maxResumes)
+	sess, state, err = s.LatestSession(t.Context(), ticket.ID, jobRespondName, maxResumes)
 	if err != nil {
 		t.Fatalf("LatestSession: %v", err)
 	}
 	if sess.Resumes != maxResumes {
-		t.Fatalf("sessions.resumes after the interrupted resume = %d, want %d (charged at Reserve)", sess.Resumes, maxResumes)
+		t.Fatalf("sessions.resumes after the cancelled answer resume = %d, want %d (unchanged: answer resumes are free)", sess.Resumes, maxResumes)
 	}
 	if state != store.SessionExhausted {
 		t.Fatalf("session state = %v, want SessionExhausted", state)
@@ -5029,6 +6095,7 @@ func TestDraftWhenLoopReopens(t *testing.T) {
 	gh.runs, gh.required = runs, required
 	gh.prState = orchestrator.PRState{Draft: false, HeadSHA: local, BaseRef: pbFixtureDefaultBranch, NodeID: "PR_node_reopen"}
 	gh.logTail = func(context.Context, string, string, int64, int) (string, error) { return shipCILogTailText, nil }
+	seedSpentFlakyCheckRerun(t, s, ticket.ID, local)
 
 	commit, err := shipPollRun(t, s, ticket, gh, tr)
 	if err != nil {
@@ -5186,6 +6253,7 @@ func TestReadyCrashConverges(t *testing.T) {
 	// A later red CI flips the (still not-draft) pull request back to draft.
 	gh.runs, gh.required = shipFailedCI()
 	gh.logTail = func(context.Context, string, string, int64, int) (string, error) { return shipCILogTailText, nil }
+	seedSpentFlakyCheckRerun(t, s, ticket.ID, local)
 	commit3, err := shipPollRun(t, s, pbGetTicket(t, s, ticket.ID), gh, tr)
 	if err != nil {
 		t.Fatalf("Run (CI failed poll): %v", err)
@@ -5874,6 +6942,7 @@ func TestMergeAskedAgainAfterReopenSameHead(t *testing.T) {
 
 	failedRuns, _ := shipFailedCI()
 	gh.runs = failedRuns
+	seedSpentFlakyCheckRerun(t, s, ticket.ID, local)
 	commit2, err := shipPollRun(t, s, pbGetTicket(t, s, ticket.ID), gh, tr)
 	if err != nil {
 		t.Fatalf("Run (CI fails): %v", err)
@@ -5935,6 +7004,7 @@ func TestLoopReopenWithdrawsMergeQuestion(t *testing.T) {
 
 	failedRuns, _ := shipFailedCI()
 	gh.runs = failedRuns
+	seedSpentFlakyCheckRerun(t, s, ticket.ID, local)
 	commit2, err := shipPollRun(t, s, pbGetTicket(t, s, ticket.ID), gh, tr)
 	if err != nil {
 		t.Fatalf("Run (CI fails): %v", err)
@@ -6438,17 +7508,31 @@ func TestBaseModifiedRetryWithdrawnOnReopen(t *testing.T) {
 	}
 	pbApply(t, s, ticket, commit1)
 
+	// A failed check is re-run once before the loop reopens (#91), so the
+	// first failing poll spends the re-run and the draft flip comes on the
+	// poll that sees the re-run fail too.
 	runs, required = shipFailedCI()
 	gh.runs, gh.required = runs, required
 	commit2, err := shipPollRunWithRule(t, s, pbGetTicket(t, s, ticket.ID), gh, tr, rule)
 	if err != nil {
 		t.Fatalf("Run (tick 2): %v", err)
 	}
-	if !shipHasMessage(commit2, "pr draft "+local) {
-		t.Errorf("commit2.Messages = %+v, want %q", commit2.Messages, "pr draft "+local)
+	if len(gh.reruns) != 1 {
+		t.Fatalf("reruns = %+v, want exactly one", gh.reruns)
 	}
-	if !shipHasMessage(commit2, "merge withdrawn "+local) {
-		t.Errorf("commit2.Messages = %+v, want %q", commit2.Messages, "merge withdrawn "+local)
+	pbApply(t, s, ticket, commit2)
+
+	gh.runs = []orchestrator.CheckRun{shipCIRun(3, 4, 5, "failure")}
+	gh.logTail = func(context.Context, string, string, int64, int) (string, error) { return shipCILogTailText, nil }
+	commit3, err := shipPollRunWithRule(t, s, pbGetTicket(t, s, ticket.ID), gh, tr, rule)
+	if err != nil {
+		t.Fatalf("Run (tick 3): %v", err)
+	}
+	if !shipHasMessage(commit3, "pr draft "+local) {
+		t.Errorf("commit3.Messages = %+v, want %q", commit3.Messages, "pr draft "+local)
+	}
+	if !shipHasMessage(commit3, "merge withdrawn "+local) {
+		t.Errorf("commit3.Messages = %+v, want %q", commit3.Messages, "merge withdrawn "+local)
 	}
 }
 

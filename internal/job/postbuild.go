@@ -16,9 +16,11 @@ import (
 	"zing/internal/store"
 )
 
-// postBuildPrelude runs steps E, R, and F (design section 5.5). handled is
-// false when none applies and the caller's own state step machine should
-// run instead.
+// postBuildPrelude runs steps E, R, F, and M (design section 5.5, basesync.go
+// task 3): an open base merge request owns the worktree until it lands or
+// closes, exactly as an open fix request does, in every post-build state.
+// handled is false when none applies and the caller's own state step
+// machine should run instead.
 func postBuildPrelude(ctx context.Context, t store.Ticket, d Deps, origin response.EscalationOrigin) (c store.HandlerCommit, handled bool, err error) {
 	slog.Debug("postbuild entry decision", "ticket_id", t.ID, "state", t.State, "origin", string(origin))
 
@@ -37,12 +39,22 @@ func postBuildPrelude(ctx context.Context, t store.Ticket, d Deps, origin respon
 	if err != nil {
 		return store.HandlerCommit{}, false, fmt.Errorf("job: postbuild: open fix request: %w", err)
 	}
-	if !open {
-		return store.HandlerCommit{}, false, nil
+	if open {
+		commit, driveErr := DriveFix(ctx, t, d, req)
+		return commit, true, driveErr
 	}
 
-	commit, driveErr := DriveFix(ctx, t, d, req)
-	return commit, true, driveErr
+	// An open base merge (merge.go) owns the worktree until it lands or
+	// closes, in every post-build state: nothing else may read or move the
+	// branch meanwhile. Only shipping's own POLL ever opened one before
+	// basesync.go's review and judge points; every post-build state can
+	// carry one now, so this prelude drives it for all three rather than
+	// leaving it to shipHandler.Run alone.
+	mc, merging, mergeErr := shipHandler{}.driveOpenMerge(ctx, t, d)
+	if merging || mergeErr != nil {
+		return mc, true, mergeErr
+	}
+	return store.HandlerCommit{}, false, nil
 }
 
 // postBuildEnterFromRounds is steps E and R (design section 5.5), applied in
@@ -171,6 +183,14 @@ func postBuildRoundOwnedByOpenFix(ctx context.Context, t store.Ticket, d Deps, r
 // cap_resumes row for job respond is shipHandler.retryCapResumesRespond,
 // dispatched from retryCapResumes' own job switch (building.go), the same
 // way judge's is.
+//
+// Choice d on a review loops_exhausted escalation, while the ticket is still
+// reviewing, accepts the findings left and moves the ticket on to judging
+// (reviewingHandler.acceptReviewLoopsExhausted, ticket 60) -- but only as an
+// explicit pick: a reply with no chosen option on that one question resolves
+// as Retry even when d is recommended (owner decision Q3), rewritten ahead
+// of this switch. Choice d on any other escalation is treated like b, and
+// reaches the choice != escalationChoiceRetry row below.
 func resolvePostBuildEscalation(ctx context.Context, t store.Ticket, d Deps, round store.Round, escID int64) (store.HandlerCommit, error) {
 	h := buildingHandler{}
 	escMsg, payload, err := d.Store.EscalationByID(ctx, escID)
@@ -182,6 +202,12 @@ func resolvePostBuildEscalation(ctx context.Context, t store.Ticket, d Deps, rou
 	notes := joinReplies(round.Replies)
 	errorText := payload.What + "\n" + payload.Why + "\n" + payload.Tried
 	origin := response.EscalationOrigin(payload.Origin)
+	reviewLoops := origin == response.EscalationOriginReview && payload.Code == string(response.EscalationCodeLoopsExhausted)
+
+	if reviewLoops && choice == escalationChoiceAccept && newestChosenOption(round.Answers) == "" {
+		slog.Info("review loops_exhausted reply-only answer resolves as retry", "ticket_id", t.ID, "run_id", int64OrZero(escMsg.RunID), "recommended", escalationChoiceAccept)
+		choice = escalationChoiceRetry
+	}
 
 	var commit store.HandlerCommit
 	preserved := 0
@@ -195,6 +221,9 @@ func resolvePostBuildEscalation(ctx context.Context, t store.Ticket, d Deps, rou
 
 	case payload.Amendment != nil && choice == escalationChoiceBack:
 		commit, err = judgeHandler{}.retryFreshRound(ctx, t, d, resolveIDs, notes, errorText)
+
+	case choice == escalationChoiceAccept && reviewLoops && t.State == stateReviewing:
+		commit, err = reviewingHandler{}.acceptReviewLoopsExhausted(ctx, t, d, resolveIDs)
 
 	case choice != escalationChoiceRetry:
 		commit = replanUnsupportedEscalation(t, d, resolveIDs, origin)
@@ -212,7 +241,7 @@ func resolvePostBuildEscalation(ctx context.Context, t store.Ticket, d Deps, rou
 		commit = h.retryMarkerCommit(t, d, resolveIDs)
 
 	case origin == response.EscalationOriginFix && escMsg.RunID != nil:
-		commit, err = h.retryFreshRun(ctx, t, d, resolveIDs, notes, errorText)
+		commit, err = h.retryFreshRun(ctx, t, d, resolveIDs, notes, errorText, nil)
 
 	case origin == response.EscalationOriginFix:
 		commit = h.retryMarkerCommit(t, d, resolveIDs)

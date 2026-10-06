@@ -63,19 +63,21 @@ func (s *Store) ListAllTickets(ctx context.Context) ([]Ticket, error) {
 //	OR (waiting_on = 'merge' AND next_poll_at IS NOT NULL AND next_poll_at <= now)
 //	OR (waiting_on IS NULL AND EXISTS an answered question of the ticket)
 //
-// ordered by id for a deterministic result. The first clause is the
-// ordinary case: a ticket not waiting on anything is a candidate right away
-// unless it carries a future poll schedule (shipping's own backoff, 8.3).
-// The second clause is what keeps a ticket waiting on merge a candidate
-// while its poll is due, so a merge on GitHub or a reopened loop is still
-// seen (D21). The third clause lets an answered question skip a poll
-// schedule that has not come due yet (merge's own question is answered
-// through SendBatch, which already clears waiting_on itself, design section
-// 6.7) -- without it, the owner's answer would otherwise wait out whatever
-// backoff interval was in force when the question was asked. The store
-// applies no priority order: tracker_ref is TEXT, so SQL would sort
-// "fake#10" before "fake#2"; the dispatcher parses the numeric external id
-// and orders candidates in Go (section 6.2).
+// and NOT parked: no run on the ticket's sessions has a capped_until still
+// after now (#45, ParkRuns) -- a ticket a Claude session limit parked is not
+// a dispatch candidate again until its reset passes. Ordered by id for a
+// deterministic result. The first clause is the ordinary case: a ticket not
+// waiting on anything is a candidate right away unless it carries a future
+// poll schedule (shipping's own backoff, 8.3). The second clause is what
+// keeps a ticket waiting on merge a candidate while its poll is due, so a
+// merge on GitHub or a reopened loop is still seen (D21). The third clause
+// lets an answered question skip a poll schedule that has not come due yet
+// (merge's own question is answered through SendBatch, which already clears
+// waiting_on itself, design section 6.7) -- without it, the owner's answer
+// would otherwise wait out whatever backoff interval was in force when the
+// question was asked. The store applies no priority order: tracker_ref is
+// TEXT, so SQL would sort "fake#10" before "fake#2"; the dispatcher parses
+// the numeric external id and orders candidates in Go (section 6.2).
 func (s *Store) ListReadyCandidates(ctx context.Context, terminal []string, now time.Time) ([]Ticket, error) {
 	nowStr := formatTime(now)
 	query := `SELECT ` + ticketColumns + ` FROM tickets WHERE claim_owner IS NULL`
@@ -98,8 +100,11 @@ func (s *Store) ListReadyCandidates(ctx context.Context, terminal []string, now 
 			SELECT 1 FROM messages
 			WHERE messages.ticket_id = tickets.id AND messages.type = ? AND messages.state = ?
 		))
+	) AND NOT EXISTS (
+		SELECT 1 FROM runs r JOIN sessions s ON s.id = r.session_id
+		WHERE s.ticket_id = tickets.id AND r.capped_until IS NOT NULL AND r.capped_until > ?
 	) ORDER BY id`
-	args = append(args, nowStr, nowStr, msgTypeQuestion, questionStateAnswered)
+	args = append(args, nowStr, nowStr, msgTypeQuestion, questionStateAnswered, nowStr)
 
 	rows, err := s.db.QueryContext(ctx, query, args...)
 	if err != nil {
@@ -314,8 +319,9 @@ func (s *Store) QuestionsByState(ctx context.Context, ticketID int64, state stri
 }
 
 // runColumns is the runs column list, in table-declaration order, including
-// migration 0005's four interrupt/identity columns (design section 5.1).
-const runColumns = `id, session_id, turn, lens, task_n, model, outcome, agent_seconds, exit_code, interrupted, pgid, proc_start, started_at`
+// migration 0005's four interrupt/identity columns (design section 5.1) and
+// migration 0009's capped_until (#45).
+const runColumns = `id, session_id, turn, lens, task_n, model, outcome, agent_seconds, exit_code, interrupted, pgid, proc_start, started_at, capped_until`
 
 // scanRun scans one row of runColumns, in that order, into a Run.
 func scanRun(rs rowScanner) (Run, error) {
@@ -323,11 +329,11 @@ func scanRun(rs rowScanner) (Run, error) {
 	var lens, model, outcome sql.NullString
 	var taskN, agentSeconds, exitCode, pgid sql.NullInt64
 	var interrupted int
-	var procStart, startedAt sql.NullString
+	var procStart, startedAt, cappedUntil sql.NullString
 
 	if err := rs.Scan(
 		&r.ID, &r.SessionID, &r.Turn, &lens, &taskN, &model, &outcome, &agentSeconds, &exitCode,
-		&interrupted, &pgid, &procStart, &startedAt,
+		&interrupted, &pgid, &procStart, &startedAt, &cappedUntil,
 	); err != nil {
 		return Run{}, err
 	}
@@ -366,6 +372,13 @@ func scanRun(rs rowScanner) (Run, error) {
 			return Run{}, fmt.Errorf("parse started_at: %w", err)
 		}
 		r.StartedAt = &ts
+	}
+	if cappedUntil.Valid {
+		ts, err := time.Parse(fixedTimeLayout, cappedUntil.String)
+		if err != nil {
+			return Run{}, fmt.Errorf("parse capped_until: %w", err)
+		}
+		r.CappedUntil = &ts
 	}
 	return r, nil
 }

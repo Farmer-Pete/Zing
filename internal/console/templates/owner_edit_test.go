@@ -31,11 +31,12 @@ func TestOwnerEditControls_SealedScenarioOnly(t *testing.T) {
 }
 
 // minimalRenderedPlan is RenderedPlan's minimal valid fixture for
-// TestOwnerEditControls_TasksWhenEditable: every templ.Component field
+// TestOwnerEditControls_TasksWhenEditable and
+// TestOwnerEditControls_FileTasksWhenEditable: every templ.Component field
 // PlanView unconditionally renders (ContextHTML, Problem.TextHTML,
-// Design.ShapeHTML) is a non-nil stand-in, and Delivery.Tasks is the only
-// field this test varies.
-func minimalRenderedPlan(tasks []RenderedTask, editable bool) RenderedPlan {
+// Design.ShapeHTML) is a non-nil stand-in, and Delivery.Tasks and
+// Delivery.Files are the only fields these tests vary.
+func minimalRenderedPlan(tasks []RenderedTask, files []response.FileChange, editable bool) RenderedPlan {
 	return RenderedPlan{
 		Overview: RenderedOverview{
 			Objective:   "Ship it.",
@@ -45,6 +46,7 @@ func minimalRenderedPlan(tasks []RenderedTask, editable bool) RenderedPlan {
 		Design: RenderedDesign{ShapeHTML: textComponent("")},
 		Delivery: RenderedDelivery{
 			Tasks: tasks,
+			Files: files,
 		},
 		TicketID: 7,
 		Editable: editable,
@@ -66,7 +68,7 @@ func TestOwnerEditControls_TasksWhenEditable(t *testing.T) {
 	t.Run("editable true shows save and drop on every row", func(t *testing.T) {
 		t.Parallel()
 		var sb strings.Builder
-		if err := PlanView(minimalRenderedPlan(tasks, true)).Render(t.Context(), &sb); err != nil {
+		if err := PlanView(minimalRenderedPlan(tasks, nil, true)).Render(t.Context(), &sb); err != nil {
 			t.Fatalf("PlanView.Render: %v", err)
 		}
 		got := sb.String()
@@ -81,12 +83,77 @@ func TestOwnerEditControls_TasksWhenEditable(t *testing.T) {
 	t.Run("editable false shows neither", func(t *testing.T) {
 		t.Parallel()
 		var sb strings.Builder
-		if err := PlanView(minimalRenderedPlan(tasks, false)).Render(t.Context(), &sb); err != nil {
+		if err := PlanView(minimalRenderedPlan(tasks, nil, false)).Render(t.Context(), &sb); err != nil {
 			t.Fatalf("PlanView.Render: %v", err)
 		}
 		got := sb.String()
 		if strings.Contains(got, "owner-edit-save") || strings.Contains(got, "owner-edit-drop") {
 			t.Errorf("want no owner-edit controls when not editable; got:\n%s", got)
+		}
+	})
+}
+
+// TestOwnerEditControls_FileTasksWhenEditable proves filesTable's own
+// per-file owner-edit box (#51, ownerEditFileForm) renders only when
+// RenderedPlan.Editable is true: every render shows the Tasks header and
+// each file's task list, the editable render carries one
+// data-target="plan_file" box per file with data-ref set to the path and an
+// input data-field="tasks" holding the file's task list, and the read-only
+// render carries no data-target="plan_file" at all.
+func TestOwnerEditControls_FileTasksWhenEditable(t *testing.T) {
+	t.Parallel()
+	files := []response.FileChange{
+		{Path: "internal/one.go", Action: response.FileActionModify, Task: "1", Reason: "r1"},
+		{Path: "internal/store/console_reads.go", Action: response.FileActionModify, Task: "6", Reason: "r2"},
+	}
+
+	t.Run("editable true shows a box per file", func(t *testing.T) {
+		t.Parallel()
+		var sb strings.Builder
+		if err := PlanView(minimalRenderedPlan(nil, files, true)).Render(t.Context(), &sb); err != nil {
+			t.Fatalf("PlanView.Render: %v", err)
+		}
+		got := sb.String()
+		if !strings.Contains(got, "<th>Tasks</th>") {
+			t.Errorf("want a Tasks header; got:\n%s", got)
+		}
+		for _, f := range files {
+			if !strings.Contains(got, "<td>"+f.Task+"</td>") {
+				t.Errorf("want the file's task list %q rendered; got:\n%s", f.Task, got)
+			}
+		}
+		if n := strings.Count(got, `data-target="plan_file"`); n != len(files) {
+			t.Errorf(`want %d data-target="plan_file" boxes; got %d in:\n%s`, len(files), n, got)
+		}
+		for _, f := range files {
+			if !strings.Contains(got, `data-ref="`+f.Path+`"`) {
+				t.Errorf("want a box with data-ref=%q; got:\n%s", f.Path, got)
+			}
+		}
+		for _, f := range files {
+			if !strings.Contains(got, `data-field="tasks" value="`+f.Task+`"`) {
+				t.Errorf(`want an input data-field="tasks" value=%q; got:\n%s`, f.Task, got)
+			}
+		}
+	})
+
+	t.Run("editable false shows none", func(t *testing.T) {
+		t.Parallel()
+		var sb strings.Builder
+		if err := PlanView(minimalRenderedPlan(nil, files, false)).Render(t.Context(), &sb); err != nil {
+			t.Fatalf("PlanView.Render: %v", err)
+		}
+		got := sb.String()
+		if !strings.Contains(got, "<th>Tasks</th>") {
+			t.Errorf("want a Tasks header; got:\n%s", got)
+		}
+		for _, f := range files {
+			if !strings.Contains(got, "<td>"+f.Task+"</td>") {
+				t.Errorf("want the file's task list %q rendered; got:\n%s", f.Task, got)
+			}
+		}
+		if strings.Contains(got, `data-target="plan_file"`) {
+			t.Errorf(`want no data-target="plan_file" box when not editable; got:\n%s`, got)
 		}
 	})
 }

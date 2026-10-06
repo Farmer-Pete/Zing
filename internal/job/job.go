@@ -12,6 +12,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"slices"
 	"strconv"
 	"time"
@@ -109,6 +110,19 @@ type Deps struct {
 	// that has gone quiet (shipping.go). The zero value has no checks, so
 	// pollIdle never nudges.
 	ReviewBots ReviewBotRule
+	// Now is runJobWith's own clock for the claude_hold_until gate (#45):
+	// nil, its default, means time.Now. The dispatcher wires it to
+	// Config.Now, so a test that drives the dispatcher's own clock also
+	// drives the hold check.
+	Now func() time.Time
+}
+
+// now is d.Now(), or time.Now when Now is nil.
+func (d Deps) now() time.Time {
+	if d.Now == nil {
+		return time.Now()
+	}
+	return d.Now()
 }
 
 // MergeRule is design section 8.8's own merge rule (zing.toml's [merge]
@@ -157,8 +171,12 @@ type Project struct {
 	// FixCmd is config projects[i].commands.fix: owner-set, trusted like
 	// test and lint, run in the build sandbox; empty runs no fix.
 	FixCmd string
-	Owner  string // the GitHub repository owner serve fills every project with (PKG9-PLAN.md section 10.3)
-	Repo   string // the GitHub repository name serve fills every project with (PKG9-PLAN.md section 10.3)
+	// Deny is config projects[i].commands.deny: additional Bash command
+	// prefixes a build or fix run may not run, on top of TestCmd and
+	// LintCmd (DenyCommands).
+	Deny  []string
+	Owner string // the GitHub repository owner serve fills every project with (PKG9-PLAN.md section 10.3)
+	Repo  string // the GitHub repository name serve fills every project with (PKG9-PLAN.md section 10.3)
 	// PullRequests, Flips, Checks, and Threads are the shipping and respond
 	// handlers' own window onto GitHub (PKG9-PLAN.md section 10.3): serve
 	// fills all four from one shared *orchestrator.GitHubClient; a test fake
@@ -167,6 +185,25 @@ type Project struct {
 	Flips        DraftFlips
 	Checks       Checks
 	Threads      ReviewThreads
+}
+
+// DenyCommands returns p's deny list for a build run's PreToolUse hook:
+// TestCmd, LintCmd, then Deny, each normalized the same way
+// runtime.DeniedCommand normalizes a deny entry (runtime.NormalizeCommand:
+// whitespace collapsed, a leading "time" and VAR=value fields stripped),
+// empties dropped, and a later duplicate of an earlier entry dropped.
+func (p Project) DenyCommands() []string {
+	seen := make(map[string]bool, len(p.Deny)+2)
+	var out []string
+	for _, cmd := range append([]string{p.TestCmd, p.LintCmd}, p.Deny...) {
+		norm := runtime.NormalizeCommand(cmd)
+		if norm == "" || seen[norm] {
+			continue
+		}
+		seen[norm] = true
+		out = append(out, norm)
+	}
+	return out
 }
 
 // CommandIO is what a CommandRunner caller can attach to one command. The
@@ -273,6 +310,41 @@ func resumeCharge(latest store.Run) (bump, gate bool) {
 		return false, false
 	}
 	return true, true
+}
+
+// answerResumeCapped is answerResume's cap check alone, with no "free
+// answer resume" log: a caller that must check several sessions before
+// committing to any of them (continueRound, one per asking lens) calls
+// this first for every one, and only logs once it knows none of them is
+// capped, so a later capped session's ErrNoAction never leaves an earlier
+// session's log line for a resume that never ran.
+func answerResumeCapped(ctx context.Context, t store.Ticket, d Deps, sess store.Session, state store.SessionState) (capped bool, err error) {
+	if state != store.SessionExhausted {
+		return false, nil
+	}
+	has, hasErr := d.Store.HasEscalation(ctx, t.ID, string(response.EscalationOriginCapResumes), sess.ID)
+	if hasErr != nil {
+		return false, fmt.Errorf("job: answer resume: has escalation: %w", hasErr)
+	}
+	return has, nil
+}
+
+// answerResume is how every post-seal resume that delivers the owner's
+// own answers is charged: free, and never gated by max_resumes, since an
+// owner answer is not the agent going in circles. capped is true only for a
+// session that is already exhausted and already carries its cap_resumes
+// escalation, one written before this rule existed: the caller then leaves
+// the round to that escalation's own retry, exactly as before.
+func answerResume(ctx context.Context, t store.Ticket, d Deps, sess store.Session, state store.SessionState, round store.Round) (capped bool, err error) {
+	capped, err = answerResumeCapped(ctx, t, d, sess, state)
+	if err != nil {
+		return false, err
+	}
+	if capped {
+		return true, nil
+	}
+	slog.Info("free answer resume", "ticket_id", t.ID, "session_id", sess.ID, "question_ids", questionIDs(round))
+	return false, nil
 }
 
 // priorNonInterruptedRun returns sessionID's own newest run strictly before

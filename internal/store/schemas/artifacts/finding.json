@@ -46,6 +46,9 @@
         "discuss"
       ]
     },
+    "owner_picked": {
+      "type": "boolean"
+    },
     "held": {
       "type": "boolean"
     },

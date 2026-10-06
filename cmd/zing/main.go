@@ -41,10 +41,14 @@ func dispatch(args []string) int {
 		return runSelftest()
 	case "validate":
 		return runValidate(subArgs(args))
+	case "deny-hook":
+		return runDenyHook(subArgs(args), os.Stdin, os.Stderr)
 	case "project":
 		return runProject(subArgs(args))
 	case "scenarios":
 		return runScenarios()
+	case "check":
+		return runCheck()
 	case "version":
 		return runVersion(subArgs(args))
 	case "serve":

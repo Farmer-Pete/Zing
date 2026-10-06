@@ -183,6 +183,76 @@ func (h reviewingHandler) Run(ctx context.Context, t store.Ticket, d Deps) (stor
 // so Store.MarkersWithPrefix returns every one of them, oldest first.
 const reviewRoundMarkerPrefix = "review round "
 
+// CappedRoundDiscardedPrefix is the dispatcher's own "discarded review round
+// <n>: Claude session limit" marker's shared prefix, written only for a
+// capped review round, never for a plain capped run of some other job),
+// exported so the dispatcher and this package share the one literal:
+// deliberately not "review round ", so MarkersWithPrefix(reviewRoundMarker
+// Prefix) never picks it up alongside the done/failed/void/asked markers
+// enterRound's own regexes expect. The marker is written only for a capped
+// review round and must never fire for some other job's own plain "parked
+// until" marker.
+const CappedRoundDiscardedPrefix = "discarded review round "
+
+// CappedRoundDiscardedMarker builds the "discarded review round n: Claude
+// session limit" marker body a capped review round writes once it is
+// actually parked (dispatch.Dispatcher.parkCapped, store.ParkRuns): the one
+// place that assembles this text, from CappedInfo.Round alone, so the
+// dispatcher and this package's own test stand-in never carry a second,
+// separately-tracked copy of the same fact that could drift from it
+// (r4f11).
+func CappedRoundDiscardedMarker(round int) string {
+	return fmt.Sprintf("%s%d: Claude session limit", CappedRoundDiscardedPrefix, round)
+}
+
+// cappedRoundNote reports the note round's own capped-discard rerun (owner
+// decision Q6) adds to its lens prompts when round n is being entered again
+// after a Claude session limit discarded its own earlier attempt: the
+// ticket's newest "discarded review round" marker (written only for a
+// review round's own cap) is newer than its newest "review round" marker,
+// or no round marker exists at all yet. Empty, with no error, when this
+// round entry is not a capped-discard rerun.
+func (h reviewingHandler) cappedRoundNote(ctx context.Context, t store.Ticket, d Deps) (string, error) {
+	discarded, err := d.Store.MarkersWithPrefix(ctx, t.ID, CappedRoundDiscardedPrefix)
+	if err != nil {
+		return "", fmt.Errorf("job: reviewing: discarded round markers: %w", err)
+	}
+	if len(discarded) == 0 {
+		return "", nil
+	}
+	rounds, err := d.Store.MarkersWithPrefix(ctx, t.ID, reviewRoundMarkerPrefix)
+	if err != nil {
+		return "", fmt.Errorf("job: reviewing: review round markers: %w", err)
+	}
+	newestDiscarded := discarded[len(discarded)-1]
+	if len(rounds) != 0 && newestDiscarded.ID < rounds[len(rounds)-1].ID {
+		return "", nil
+	}
+	return "the previous review round was discarded because of the Claude session limit", nil
+}
+
+// continueCappedNote is cappedRoundNote's own counterpart for CONTINUE
+// (r4f8): round n's own "discarded review round n" marker is specific to
+// that round number (CappedRoundDiscardedMarker's own body), so unlike
+// cappedRoundNote's ticket-wide newest-marker comparison, this checks for
+// one newer than askedID, the very "review round n asked" marker this
+// continue resumes. A non-empty note means this continue attempt was
+// already tried once and discarded by the cap: every asker must resume
+// free (bump and gate both false, even for a lens whose own run already
+// finished before the cap hit some other lens), and every lens's own
+// resumed prompt carries the note, so a lens that already answered in the
+// discarded attempt knows this is not its first time seeing the question.
+func (h reviewingHandler) continueCappedNote(ctx context.Context, t store.Ticket, d Deps, n int, askedID int64) (string, error) {
+	discarded, err := d.Store.MarkersWithPrefix(ctx, t.ID, fmt.Sprintf("%s%d:", CappedRoundDiscardedPrefix, n))
+	if err != nil {
+		return "", fmt.Errorf("job: reviewing: continue: discarded round markers: %w", err)
+	}
+	if len(discarded) == 0 || discarded[len(discarded)-1].ID < askedID {
+		return "", nil
+	}
+	return "the previous review round was discarded because of the Claude session limit", nil
+}
+
 // The four "review round " marker first-line shapes (design section 5.1).
 var (
 	reviewRoundDoneLine   = regexp.MustCompile(`^review round ([1-9]\d*) done sha ([0-9a-f]{40}) lenses (.+)$`)
@@ -225,6 +295,12 @@ func (h reviewingHandler) enterRound(ctx context.Context, t store.Ticket, d Deps
 	n := reviewRoundDoneCount(markers) + 1
 
 	if len(markers) == 0 {
+		// Review round 1 reads the branch against current main
+		// (basesync.go, the review point): a request opened here merges
+		// before this round ever reads the diff.
+		if c, opened, err := baseSync(ctx, t, d, syncPointReview); err != nil || opened {
+			return c, err
+		}
 		return h.round(ctx, t, d, n, "", false)
 	}
 	newest := markers[len(markers)-1]
@@ -358,32 +434,122 @@ const fixRequestedFindingsPrefix = "fix requested findings after run "
 // fixreq is FIXREQ (design section 6.8) entered from enterFromDone: under
 // jobs.review.max_loops it opens a fix request with accepted's own fix
 // text. At the gate, an accepted list wholly at or below the floor moves on
-// to judging (acceptAtCap, issue #68); one where the owner accepted an
-// above-floor finding escalates loops_exhausted as before.
+// to judging (acceptAtCap, issue #68); otherwise an accepted row the owner
+// picked (OwnerPicked) opens the fix request anyway, bypassing the gate,
+// because the review question already asked the owner this once; otherwise
+// the gate escalates loops_exhausted, offering the owner option d, accept
+// the findings left and continue to judging, alongside retry and abandon
+// (ticket 60).
 func (h reviewingHandler) fixreq(ctx context.Context, t store.Ticket, d Deps, accepted []response.FindingArtifact) (store.HandlerCommit, error) {
 	msg, k, maxLoops, err := fixRequestOrLoopsExhausted(ctx, t, d, accepted)
 	if err != nil {
 		return store.HandlerCommit{}, err
 	}
 	if msg == nil {
-		if allAtOrBelowFloor(accepted, d.Floor) {
+		switch {
+		case allAtOrBelowFloor(accepted, d.Floor):
 			return acceptAtCap(baseCommit(t, d), t, d, k, maxLoops, accepted), nil
+		case slices.ContainsFunc(accepted, func(f response.FindingArtifact) bool { return f.OwnerPicked }):
+			return ownerAcceptAtCap(ctx, t, d, k, maxLoops, accepted)
+		default:
+			rec, recErr := loopsExhaustedRecommendationFor(ctx, t, d, accepted)
+			if recErr != nil {
+				return store.HandlerCommit{}, recErr
+			}
+			what := fmt.Sprintf("review findings remain after %d fix runs", k)
+			why := fmt.Sprintf("max_loops for review is %d", maxLoops)
+			return reviewLoopsExhausted(t, d, what, why, renderFixFindings(accepted), rec), nil
 		}
-		what := fmt.Sprintf("review findings remain after %d fix runs", k)
-		why := fmt.Sprintf("max_loops for review is %d", maxLoops)
-		return reviewLoopsExhausted(t, d, what, why, renderFixFindings(accepted)), nil
 	}
 	c := baseCommit(t, d)
 	c.Messages = []store.Message{*msg}
 	return c, nil
 }
 
+// reviewAcceptRemainingOptionText is option d's text on the review
+// loops_exhausted question (ticket 60: accept the remaining findings and
+// continue to judging).
+const reviewAcceptRemainingOptionText = "Accept the remaining findings and continue to judging"
+
 // reviewLoopsExhausted is FIXREQ's own loops_exhausted escalation (design
-// section 6.8): no run caused it, so RunID and SessionID are both nil.
-func reviewLoopsExhausted(t store.Ticket, d Deps, what, why, tried string) store.HandlerCommit {
+// section 6.8): no run caused it, so RunID and SessionID are both nil. It
+// adds option d, accept the remaining findings and continue to judging, to
+// escalationOptionsFor's own Retry/Abandon pair, and overrides the picked
+// recommendation with recommended (ticket 60).
+func reviewLoopsExhausted(t store.Ticket, d Deps, what, why, tried, recommended string) store.HandlerCommit {
 	code := string(response.EscalationCodeLoopsExhausted)
-	slog.Warn("escalation written", "ticket_id", t.ID, "session_id", nil, "run_id", nil, "code", code, "origin", string(response.EscalationOriginReview))
-	return escalationCommit(t, d, nil, nil, code, what, why, tried, response.EscalationOriginReview)
+	slog.Warn("escalation written", "ticket_id", t.ID, "session_id", nil, "run_id", nil, "code", code, "origin", string(response.EscalationOriginReview), "recommended", recommended)
+	c := escalationCommit(t, d, nil, nil, code, what, why, tried, response.EscalationOriginReview)
+	c.Escalation.ExtraOptions = []response.Option{{Key: escalationChoiceAccept, Text: reviewAcceptRemainingOptionText}}
+	c.Escalation.Recommended = recommended
+	return c
+}
+
+// newestFixChangedFiles reports whether the newest review fix run's build
+// report (TaskN 0, newest artifact id, run id after minRunID) lists at
+// least one changed path; found is false when no review fix report exists
+// yet (ticket 60, owner decision Q2). minRunID excludes any fix report
+// from before review's own first fix request, such as a building-stage
+// CHECK fix landed on the same ticket (review finding r1f4): without it, a
+// fix unrelated to the review findings could stand in for one.
+// FilesChanged is the builder's own claim, which CHECK has already
+// cross-checked against the real diff.
+func newestFixChangedFiles(reports []store.BuildReportRow, minRunID int64) (changed, found bool) {
+	for i := len(reports) - 1; i != -1; i-- {
+		if reports[i].Report.TaskN == 0 && reports[i].RunID > minRunID {
+			return len(reports[i].Report.FilesChanged) != 0, true
+		}
+	}
+	return false, false
+}
+
+// loopsExhaustedRecommendation is the review loops_exhausted question's own
+// recommendation (ticket 60): accept (d) when every accepted finding is at
+// or below minor, or when the newest fix run changed no file, since
+// another fix run is unlikely to help; retry (a) when a major or blocker
+// finding remains and the newest fix run did change a file, or when no fix
+// run has happened yet (owner decision Q2).
+func loopsExhaustedRecommendation(accepted []response.FindingArtifact, changed, found bool) string {
+	if allAtOrBelowFloor(accepted, response.SeverityMinor) {
+		return escalationChoiceAccept
+	}
+	if !found || changed {
+		return escalationChoiceRetry
+	}
+	return escalationChoiceAccept
+}
+
+// loopsExhaustedRecommendationFor reads the ticket's own build reports and
+// returns loopsExhaustedRecommendation's pick for accepted (ticket 60).
+// minRunID, the first "fix requested findings" marker's own watermark,
+// keeps a building-stage fix from before review ever opened out of
+// newestFixChangedFiles (review finding r1f4). With no review fix request
+// yet, such as jobs.review.max_loops 0, there is no watermark to read and
+// so no review fix report to find: the build-report scan is skipped
+// outright rather than run with minRunID 0, which would let a
+// building-stage fix stand in for one (review finding r2f1, owner decision
+// Q2). A malformed first marker is an error, matching fix.go's own read of
+// the same marker family, rather than a silent fall back to minRunID 0
+// (review finding r2f2).
+func loopsExhaustedRecommendationFor(ctx context.Context, t store.Ticket, d Deps, accepted []response.FindingArtifact) (string, error) {
+	reqs, err := reviewFixLoops(ctx, t, d)
+	if err != nil {
+		return "", err
+	}
+	if len(reqs) == 0 {
+		return loopsExhaustedRecommendation(accepted, false, false), nil
+	}
+	firstLine, _, _ := strings.Cut(reqs[0].Body, "\n")
+	_, minRunID, ok := parseFixRequestLine(firstLine)
+	if !ok {
+		return "", fmt.Errorf("job: reviewing: loops_exhausted recommendation: fix request %d: malformed marker", reqs[0].ID)
+	}
+	reports, err := d.Store.BuildReports(ctx, t.ID)
+	if err != nil {
+		return "", fmt.Errorf("job: reviewing: loops_exhausted recommendation: build reports: %w", err)
+	}
+	changed, found := newestFixChangedFiles(reports, minRunID)
+	return loopsExhaustedRecommendation(accepted, changed, found), nil
 }
 
 // ---- TRIAGE (design section 6.5) ------------------------------------------
@@ -424,12 +590,14 @@ func replyTexts(replies []store.MessageRow) []string {
 // own "newest question kind review" branch, once the owner has answered the
 // review question (6.4). It stores one new finding row per item, carrying
 // the owner's own decision or the safe default accept (a missing or
-// out-of-set decision, logged at warn), writes one "review note <id>"
-// marker per discussed item (D24: the owner's reply on the question applies
-// to every finding discussed in that answer), and resolves the round's own
-// question. No state transition and no new Waiting (baseCommit's own nil
-// clears it): the next tick's decision tree step (2) or (3) routes the
-// ticket on from the decisions this commit just stored.
+// out-of-set decision, logged at warn); the row's own OwnerPicked is true
+// only for the owner's own valid decision, never for the defaulted accept.
+// It also writes one "review note <id>" marker per discussed item (D24: the
+// owner's reply on the question applies to every finding discussed in that
+// answer), and resolves the round's own question. No state transition and
+// no new Waiting (baseCommit's own nil clears it): the next tick's decision
+// tree step (2) or (3) routes the ticket on from the decisions this commit
+// just stored.
 func (h reviewingHandler) triage(ctx context.Context, t store.Ticket, d Deps, round store.Round) (store.HandlerCommit, error) {
 	if len(round.Questions) != 1 {
 		return store.HandlerCommit{}, fmt.Errorf("job: reviewing: triage: review round carries %d questions, want 1", len(round.Questions))
@@ -464,6 +632,7 @@ func (h reviewingHandler) triage(ctx context.Context, t store.Ticket, d Deps, ro
 
 		finding := row.Finding
 		finding.Decision = &fd
+		finding.OwnerPicked = validDecision
 		payload, marshalErr := json.Marshal(finding)
 		if marshalErr != nil {
 			return store.HandlerCommit{}, fmt.Errorf("job: reviewing: triage: marshal finding %s: %w", finding.ID, marshalErr)
@@ -688,6 +857,22 @@ func (h reviewingHandler) discuss(ctx context.Context, t store.Ticket, d Deps, g
 	if foundRun {
 		bump, gate = resumeCharge(newestRun)
 	}
+	// answerResume (job.go): an answered round delivers the owner's own
+	// answer, so this discuss resume is free and bypasses the exhausted-cap
+	// escalation below, even on a session already at max_resumes, unless
+	// that session already carries its cap_resumes escalation from before
+	// this rule existed. A fresh discuss turn (round nil) keeps the gate.
+	if round != nil {
+		capped, capErr := answerResume(ctx, t, d, sess, state, *round)
+		if capErr != nil {
+			return store.HandlerCommit{}, capErr
+		}
+		if capped {
+			slog.Debug("reviewing entry decision", "ticket_id", t.ID, "session_id", sess.ID, "step", "discuss_resume_capped", "session_state", sessionStateName(state))
+			return store.HandlerCommit{}, ErrNoAction
+		}
+		bump, gate = false, false
+	}
 
 	if state == store.SessionExhausted && gate {
 		has, hasErr := d.Store.HasEscalation(ctx, t.ID, string(response.EscalationOriginCapResumes), sess.ID)
@@ -748,7 +933,7 @@ func (h reviewingHandler) discuss(ctx context.Context, t store.Ticket, d Deps, g
 
 	return h.discussRunAndRoute(ctx, t, d, su, req, group.lens, priorInvalid, sess.ID, resolveIDs,
 		func(rr runResult, sessionCommit *store.SessionUpsert) (store.HandlerCommit, error) {
-			return h.discussOkCommit(ctx, t, d, proj, wt, group, rr, sessionCommit)
+			return h.discussOkCommit(ctx, t, d, proj, wt, group, rr, sessionCommit, resolveIDs)
 		})
 }
 
@@ -774,7 +959,7 @@ func (h reviewingHandler) discussRunAndRoute(
 
 	if runErr != nil {
 		switch {
-		case errors.Is(runErr, runtime.ErrCanceled), errors.Is(runErr, ErrConfig), errors.Is(runErr, store.ErrClaimLost):
+		case errors.Is(runErr, runtime.ErrCanceled), errors.Is(runErr, ErrConfig), errors.Is(runErr, store.ErrClaimLost), claudeCapped(runErr):
 			return store.HandlerCommit{}, runErr
 		case errors.Is(runErr, ErrBudget):
 			return budgetEscalationCommit(t, d, resolveIDs), nil
@@ -815,10 +1000,13 @@ func (h reviewingHandler) discussRunAndRoute(
 // group (design section 6.6: "One marker ... per finding of the group"),
 // each carrying the same run id, batch, and kept count. Survivors above the
 // floor post a new review question (6.4); zero survivors means the lens
-// withdrew every finding of the group, and no question follows.
+// withdrew every finding of the group, and no question follows. resolveIDs
+// is non-empty only when this turn answered a round's own generic question
+// (discuss's non-nil round): this commit resolves that question here, the
+// same way every other job's answered-round ok outcome resolves its own.
 func (h reviewingHandler) discussOkCommit(
 	ctx context.Context, t store.Ticket, d Deps, proj Project, wt orchestrator.Worktree,
-	group pendingDiscussGroup, rr runResult, sessionCommit *store.SessionUpsert,
+	group pendingDiscussGroup, rr runResult, sessionCommit *store.SessionUpsert, resolveIDs []int64,
 ) (store.HandlerCommit, error) {
 	fr, ok := rr.Res.Response.(*response.FindingsResponse)
 	if !ok {
@@ -858,6 +1046,7 @@ func (h reviewingHandler) discussOkCommit(
 	c := baseCommit(t, d)
 	c.Runs = terminalRuns(rr, string(response.OutcomeOk))
 	c.Session = sessionCommit
+	c.ResolveQuestions = resolveIDs
 
 	runIDStr := strconv.FormatInt(rr.Reserved.RunID, 10)
 	batchStr := strings.Join(groupIDs, ",")
@@ -1123,6 +1312,44 @@ func applyAttempts(c *store.HandlerCommit, ticketID int64, attempts []lensAttemp
 	}
 }
 
+// cappedOrCanceled reports whether a's attempt should be left open for the
+// dispatcher's own park sweep rather than terminalized by tableCommit's
+// capped-lens row (CappedRoundError.Finish, owner decision Q6): a lens that
+// hit the cap itself, or one runLensesParallel's own roundCtx cancel ended
+// with runtime.ErrCanceled -- that lens did not fail on its own, the cap
+// ended it, so its run record would not stay true as a plain "error"
+// outcome (r2f11).
+func cappedOrCanceled(a lensAttempt) bool {
+	return claudeCapped(a.err) || errors.Is(a.err, runtime.ErrCanceled)
+}
+
+// finishedLensRuns returns the terminal Run rows tableCommit's capped-lens
+// row carries as CappedRoundError.Finish (owner decision Q6): a good
+// attempt's own run, terminalized by its real outcome, the same way
+// terminalizeAttempts builds it; and, for a retried attempt whose own retry
+// hit the cap or was canceled by the round (cappedOrCanceled), its own
+// first-try run too -- that turn already failed on its own, with its own
+// real "error" outcome, not because of the cap, so it must not be left for
+// the park sweep to rewrite as interrupted with capped_until. Only a capped
+// or canceled attempt's own final run (and any attempt that never reserved
+// a run at all) is left out, for that sweep to terminalize instead.
+func finishedLensRuns(attempts []lensAttempt) []store.Run {
+	var runs []store.Run
+	for i := range attempts {
+		a := &attempts[i]
+		if a.firstTry != nil {
+			runs = append(runs, terminalRuns(a.firstTry.rr, string(response.OutcomeError))...)
+		}
+		if cappedOrCanceled(*a) {
+			continue
+		}
+		if a.rr.Reserved.RunID != 0 {
+			runs = append(runs, terminalRuns(a.rr, a.outcomeString())...)
+		}
+	}
+	return runs
+}
+
 // firstBadAttempt returns the first (lens order) attempt matching pred, in
 // idx order, so the table's several "any lens X" rows and their own "lens
 // <l>: <reason>" text all name the same lens deterministically when more
@@ -1246,9 +1473,23 @@ func (h reviewingHandler) round(ctx context.Context, t store.Ticket, d Deps, n i
 	if err != nil {
 		return store.HandlerCommit{}, fmt.Errorf("job: reviewing: %w", err)
 	}
+	cappedNote, err := h.cappedRoundNote(ctx, t, d)
+	if err != nil {
+		return store.HandlerCommit{}, err
+	}
 	var extra []prompt.NamedInput
+	if cappedNote != "" {
+		extra = append(extra, prompt.Notes(cappedNote))
+	}
 	if notes != "" {
 		extra = append(extra, prompt.Notes(notes))
+	}
+	prior, err := d.Store.Findings(ctx, t.ID)
+	if err != nil {
+		return store.HandlerCommit{}, fmt.Errorf("job: reviewing: findings: %w", err)
+	}
+	if in, ok := renderDroppedInput(droppedFindings(prior, n)); ok {
+		extra = append(extra, in)
 	}
 
 	attempts, lensesErr := runLensesParallel(ctx, d, t, lenses, schemas, func(lens response.Lens) (store.SessionUpsert, runtime.RunRequest, func(runResult) *store.SessionUpsert) {
@@ -1270,8 +1511,47 @@ func (h reviewingHandler) round(ctx context.Context, t store.Ticket, d Deps, n i
 	if lensesErr != nil {
 		return store.HandlerCommit{}, lensesErr
 	}
+	if cappedNote != "" {
+		h.recordCappedRoundResume(ctx, t, d, attempts)
+	}
 
 	return h.roundCommit(ctx, t, d, proj, wt, n, sha, idx, attempts, priorFailedOrVoid)
+}
+
+// recordCappedRoundResume writes the "resumed after the Claude session
+// limit" marker and its matching "claude session limit resume" log line for
+// a capped-discard rerun (owner decision Q6, Q17): every lens of this round
+// runs on its own fresh session, not a resume, so runJobWith's own
+// per-session resume marker (recordCappedResume) never fires for it; this
+// is the round's own equivalent, keyed on the first lens that actually
+// reserved a run, reusing recordCappedResume itself (r4f5) rather than
+// repeating its marker write and its two log lines by hand. The reset time
+// and the run id that carries it come from TicketParkedUntil (r4f6), the
+// same MAX(capped_until) subquery LiveTickets already uses, instead of
+// walking RunsForTicket and reducing it in a loop. Nothing is written or
+// logged when the ticket carries no capped run at all (found false): that
+// should not happen once a discard note applies, but recordCappedResume
+// itself requires a real prev.CappedUntil to log.
+func (h reviewingHandler) recordCappedRoundResume(ctx context.Context, t store.Ticket, d Deps, attempts []lensAttempt) {
+	var rsv store.Reserved
+	for i := range attempts {
+		if attempts[i].rr.Reserved.RunID != 0 {
+			rsv = attempts[i].rr.Reserved
+			break
+		}
+	}
+	if rsv.RunID == 0 {
+		return
+	}
+	resetAt, cappedRunID, found, err := d.Store.TicketParkedUntil(ctx, t.ID)
+	if err != nil {
+		slog.Warn("capped resume marker not written", "ticket_id", t.ID, "run_id", rsv.RunID, "error", err)
+		return
+	}
+	if !found {
+		return
+	}
+	recordCappedResume(ctx, d, t.ID, rsv, store.Run{ID: cappedRunID, CappedUntil: &resetAt})
 }
 
 // lensCodeSection reads lens's own prompt file and returns its "## In code"
@@ -1366,6 +1646,24 @@ func (h reviewingHandler) tableCommit(
 			return store.HandlerCommit{}, at.err
 		}
 		return store.HandlerCommit{}, ctx.Err()
+	}
+
+	// A capped lens (the Claude session limit, or the dispatcher's own hold
+	// refusal) discards the whole round: no commit, so no "review round N
+	// failed" marker and no two-in-a-row count. The round's own good
+	// results -- every other lens that already finished -- are carried on
+	// the error as CappedRoundError.Finish, so the dispatcher's park write
+	// terminalizes them with their own real outcome instead of sweeping
+	// them as capped too (owner decision Q6); only the capped lens's own
+	// run (and any lens that never got to Reserve) is left open for that
+	// sweep, and every lens re-runs after the reset (design shape, owner
+	// decision Q3).
+	if at, ok := firstBadAttempt(attempts, func(a lensAttempt) bool { return claudeCapped(a.err) }); ok {
+		return store.HandlerCommit{}, &CappedRoundError{
+			Err:    fmt.Errorf("job: reviewing: lens %s: %w", at.lens, at.err),
+			Finish: finishedLensRuns(attempts),
+			Round:  n,
+		}
 	}
 
 	if _, ok := firstBadAttempt(attempts, func(a lensAttempt) bool { return errors.Is(a.err, ErrBudget) }); ok {
@@ -1498,7 +1796,7 @@ func (h reviewingHandler) tableCommit(
 		return h.askedCommit(t, d, n, sha, attempts, resolveIDs, priorDone, len(heldFindings))
 	}
 
-	return h.successCommit(ctx, t, d, n, sha, idx, attempts, resolveIDs, heldFindings)
+	return h.successCommit(ctx, t, d, proj, wt, n, sha, idx, attempts, resolveIDs, heldFindings)
 }
 
 // firstExecFailure returns the first (lens order) attempt whose own error
@@ -1528,6 +1826,18 @@ func reviewRoundFailedMarker(ticketID int64, n int, reason string) store.Message
 	}
 }
 
+// reviewFixLoops reads review's own "fix requested findings" marker
+// family, oldest first (ticket 60, review finding r2f4): every caller's own
+// loop count is len(reqs), and jobs.review.max_loops is one field read, so
+// neither is worth a return slot of its own.
+func reviewFixLoops(ctx context.Context, t store.Ticket, d Deps) (reqs []store.MessageRow, err error) {
+	reqs, err = d.Store.MarkersWithPrefix(ctx, t.ID, "fix requested findings")
+	if err != nil {
+		return nil, fmt.Errorf("job: reviewing: fix requested findings markers: %w", err)
+	}
+	return reqs, nil
+}
+
 // fixRequestOrLoopsExhausted is FIXREQ's own body (design section 6.8),
 // shared by fixreq and successCommit's inline FIXREQ: under
 // jobs.review.max_loops, it returns a "fix requested findings" marker (msg
@@ -1535,25 +1845,37 @@ func reviewRoundFailedMarker(ticketID int64, n int, reason string) store.Message
 // nil and the caller decides between acceptAtCap and a loops_exhausted
 // escalation. k and maxLoops are returned either way.
 func fixRequestOrLoopsExhausted(ctx context.Context, t store.Ticket, d Deps, accepted []response.FindingArtifact) (msg *store.Message, k, maxLoops int, err error) {
-	allReqs, err := d.Store.MarkersWithPrefix(ctx, t.ID, "fix requested findings")
+	reqs, err := reviewFixLoops(ctx, t, d)
 	if err != nil {
-		return nil, 0, 0, fmt.Errorf("job: reviewing: fix requested findings markers: %w", err)
+		return nil, 0, 0, err
 	}
-	k = len(allReqs)
-	maxLoops = d.Machine.Jobs[jobReviewName].MaxLoops
+	k, maxLoops = len(reqs), d.Machine.Jobs[jobReviewName].MaxLoops
 	if k >= maxLoops {
 		return nil, k, maxLoops, nil
 	}
 
-	maxRunID, err := d.Store.MaxRunID(ctx, t.ID)
+	m, _, err := findingsFixRequest(ctx, t, d, accepted)
 	if err != nil {
-		return nil, 0, 0, fmt.Errorf("job: reviewing: max run id: %w", err)
-	}
-	m, msgErr := fixRequestMessage(t, FixKindFindings, renderFixFindings(accepted), maxRunID)
-	if msgErr != nil {
-		return nil, 0, 0, fmt.Errorf("job: reviewing: fix request message: %w", msgErr)
+		return nil, 0, 0, fmt.Errorf("job: reviewing: %w", err)
 	}
 	return &m, k, maxLoops, nil
+}
+
+// findingsFixRequest builds the one fix request message FIXREQ sends for
+// accepted, against the ticket's latest run (design section 6.8): both the
+// under-cap path (fixRequestOrLoopsExhausted) and the owner-pick path past
+// the cap (ownerAcceptAtCap) open the same kind of fix request, so they
+// share this build.
+func findingsFixRequest(ctx context.Context, t store.Ticket, d Deps, accepted []response.FindingArtifact) (store.Message, int64, error) {
+	maxRunID, err := d.Store.MaxRunID(ctx, t.ID)
+	if err != nil {
+		return store.Message{}, 0, fmt.Errorf("max run id: %w", err)
+	}
+	m, err := fixRequestMessage(t, FixKindFindings, renderFixFindings(accepted), maxRunID)
+	if err != nil {
+		return store.Message{}, 0, fmt.Errorf("fix request message: %w", err)
+	}
+	return m, maxRunID, nil
 }
 
 // reasonReviewAcceptedAtCap is the reviewing → judging state reason when
@@ -1561,6 +1883,12 @@ func fixRequestOrLoopsExhausted(ctx context.Context, t store.Ticket, d Deps, acc
 // (issue #68), distinct from reasonReviewClean so the state history shows
 // that findings were let through unfixed.
 const reasonReviewAcceptedAtCap = "review findings accepted at loop cap"
+
+// reasonReviewOwnerAcceptedAtCap is the reviewing to judging state reason
+// when the owner picks option d, accept the remaining findings and continue
+// to judging, on a review loops_exhausted question (ticket 60), distinct
+// from reasonReviewAcceptedAtCap's own default-accept path.
+const reasonReviewOwnerAcceptedAtCap = "owner accepted review findings at loop cap"
 
 // acceptedAtCapTextRunes caps each finding's one-line text in acceptAtCap's
 // message, "..." appended when cut.
@@ -1578,6 +1906,27 @@ func allAtOrBelowFloor(rows []response.FindingArtifact, floor response.Severity)
 	return true
 }
 
+// acceptedFindingLines renders accepted, sorted by id, one "- <id> <severity>
+// <location> <text>" line each (shared by acceptAtCap, issue #68, and
+// reviewingHandler.acceptReviewLoopsExhausted, ticket 60): location and text
+// are lens output, so both are whitespace-collapsed -- no finding can break
+// its own line or forge another -- and text is cut at acceptedAtCapTextRunes
+// runes with "..." appended when cut.
+func acceptedFindingLines(accepted []response.FindingArtifact) []string {
+	sorted := sortByID(accepted)
+	lines := make([]string, len(sorted))
+	for i := range sorted {
+		f := &sorted[i]
+		location := collapseWhitespace(f.Location)
+		text := collapseWhitespace(f.Text)
+		if cut := cutRunes(text, acceptedAtCapTextRunes); cut != text {
+			text = cut + "..."
+		}
+		lines[i] = fmt.Sprintf("- %s %s %s %s", f.ID, f.Severity, location, text)
+	}
+	return lines
+}
+
 // acceptAtCap is the FIXREQ gate's own outcome when every accepted finding
 // is at or below the floor (issue #68, mirroring maybeResumeFloorFindings'
 // cap gate in planning.go): c, the caller's own commit so far, moves to
@@ -1593,20 +1942,34 @@ func acceptAtCap(c store.HandlerCommit, t store.Ticket, d Deps, k, maxLoops int,
 		fmt.Sprintf("Review reached max_loops (%d) after %d fix runs, and every finding left is at or below the floor (%s). "+
 			"Zing moved the ticket to judging without fixing these:", maxLoops, k, d.Floor),
 	)
-	sorted := sortByID(accepted)
-	for i := range sorted {
-		f := &sorted[i]
-		location := collapseWhitespace(f.Location)
-		text := collapseWhitespace(f.Text)
-		if cut := cutRunes(text, acceptedAtCapTextRunes); cut != text {
-			text = cut + "..."
-		}
-		lines = append(lines, fmt.Sprintf("- %s %s %s %s", f.ID, f.Severity, location, text))
-	}
+	lines = append(lines, acceptedFindingLines(accepted)...)
 	slog.Info("review findings accepted at loop cap", "ticket_id", t.ID, "fix_runs", k, "findings", len(accepted))
 	c.Messages = append(c.Messages, store.Message{TicketID: t.ID, Type: msgTypeUpdate, Author: authorSystem, Body: strings.Join(lines, "\n")})
 	c.Next, c.Reason = stateJudging, reasonReviewAcceptedAtCap
 	return c
+}
+
+// ownerAcceptAtCap is the FIXREQ gate's own outcome when the gate is at or
+// past max_loops, the accepted list has an above-floor finding, and at
+// least one accepted row's OwnerPicked is true: the owner already decided
+// to fix it on the review question, so this opens the fix request anyway,
+// bypassing the gate, instead of asking loops_exhausted the same thing
+// again (ticket 55).
+func ownerAcceptAtCap(ctx context.Context, t store.Ticket, d Deps, k, maxLoops int, accepted []response.FindingArtifact) (store.HandlerCommit, error) {
+	m, maxRunID, err := findingsFixRequest(ctx, t, d, accepted)
+	if err != nil {
+		return store.HandlerCommit{}, fmt.Errorf("job: reviewing: owner accept at cap: %w", err)
+	}
+	sorted := sortByID(accepted)
+	ids := make([]string, len(sorted))
+	for i := range sorted {
+		ids[i] = sorted[i].ID
+	}
+	slog.Info("review owner accept past loop cap starts fix", "ticket_id", t.ID, "fix_runs", k, "max_loops", maxLoops,
+		"after_run_id", maxRunID, "finding_ids", strings.Join(ids, ","))
+	c := baseCommit(t, d)
+	c.Messages = []store.Message{m}
+	return c, nil
 }
 
 // waitingFlagReview is the review question's own waiting_on value (design
@@ -1662,17 +2025,61 @@ func reviewQuestionMessage(t store.Ticket, d Deps, n int, runID int64, above []r
 	}, nil
 }
 
+// suppressRepeated removes merged rows that repeat a dropped finding at a
+// location whose file has not changed since that finding's own SHA (ticket
+// 56): one Orchestrator.ChangedFilesBetween call per distinct dropped SHA.
+// A failed comparison is logged at warn, naming the SHA, and blocks nothing
+// (fail open, Q3) unless ctx itself is done, which this returns as an
+// error. Each row splitRepeated removes is logged at info with the
+// dropped row's own finding_id and location.
+func suppressRepeated(ctx context.Context, t store.Ticket, proj Project, wt orchestrator.Worktree, sha string,
+	dropped, merged []response.FindingArtifact,
+) ([]response.FindingArtifact, int, error) {
+	if len(dropped) == 0 {
+		return merged, 0, nil
+	}
+	changedBySHA := make(map[string]map[string]bool)
+	attempted := make(map[string]bool)
+	for i := range dropped {
+		from := dropped[i].SHA
+		if attempted[from] {
+			continue
+		}
+		attempted[from] = true
+		paths, err := proj.Orch.ChangedFilesBetween(ctx, wt, from, sha)
+		if err != nil {
+			if ctx.Err() != nil {
+				return nil, 0, ctx.Err()
+			}
+			slog.Warn("review dropped findings not compared", "ticket_id", t.ID, "sha", from, "err", err)
+			continue
+		}
+		set := make(map[string]bool, len(paths))
+		for _, p := range paths {
+			set[p] = true
+		}
+		changedBySHA[from] = set
+	}
+	kept, repeats := splitRepeated(merged, dropped, changedBySHA)
+	for _, r := range repeats {
+		slog.Info("review finding repeats a dropped finding", "ticket_id", t.ID, "finding_id", r.DroppedID, "location", r.Location)
+	}
+	return kept, len(repeats), nil
+}
+
 // successCommit is ROUND's own success commit (design section 6.2 step 9's
 // last row) and CONTINUE's own "all ok" outcome (6.2a step 3): extra is the
 // round's own held findings (nil for a fresh ROUND; CONTINUE's held rows,
 // converted back to response.Finding, for a completed continuation).
 // Findings: survivors := FilterFindings(all, idx), then DedupFindings, then
-// ids r<n>f<k>. At-or-below d.Floor get Decision accept. Then the first
+// suppressRepeated removes a row that repeats a finding the owner already
+// dropped at a location whose file has not changed (ticket 56), then ids
+// r<n>f<k>. At-or-below d.Floor get Decision accept. Then the first
 // matching row: findings above the floor post the review question (6.4);
 // else one or more survivors call FIXREQ (6.8); else Next = judging.
 func (h reviewingHandler) successCommit(
-	ctx context.Context, t store.Ticket, d Deps, n int, sha string, idx orchestrator.DiffIndex,
-	attempts []lensAttempt, resolveIDs []int64, extra []response.Finding,
+	ctx context.Context, t store.Ticket, d Deps, proj Project, wt orchestrator.Worktree, n int, sha string,
+	idx orchestrator.DiffIndex, attempts []lensAttempt, resolveIDs []int64, extra []response.Finding,
 ) (store.HandlerCommit, error) {
 	runIDByLens := make(map[response.Lens]int64, len(attempts))
 	all := append([]response.Finding(nil), extra...)
@@ -1686,7 +2093,15 @@ func (h reviewingHandler) successCommit(
 	}
 
 	survivors := FilterFindings(all, idx)
-	merged := DedupFindings(survivors, reviewLenses(d))
+	deduped := DedupFindings(survivors, reviewLenses(d))
+	prior, err := d.Store.Findings(ctx, t.ID)
+	if err != nil {
+		return store.HandlerCommit{}, fmt.Errorf("job: reviewing: findings: %w", err)
+	}
+	merged, repeated, err := suppressRepeated(ctx, t, proj, wt, sha, droppedFindings(prior, n), deduped)
+	if err != nil {
+		return store.HandlerCommit{}, err
+	}
 	for i := range merged {
 		merged[i].ID = fmt.Sprintf("r%df%d", n, i+1)
 		merged[i].Round = n
@@ -1705,8 +2120,8 @@ func (h reviewingHandler) successCommit(
 	}
 	c.Messages = append(c.Messages, store.Message{
 		TicketID: t.ID, Type: msgTypeUpdate, Author: authorSystem,
-		Body: fmt.Sprintf("review round %d done sha %s lenses %s\nkept %d dropped %d merged %d",
-			n, sha, strings.Join(lensList, ","), len(merged), len(all)-len(survivors), len(survivors)-len(merged)),
+		Body: fmt.Sprintf("review round %d done sha %s lenses %s\nkept %d dropped %d merged %d repeated %d",
+			n, sha, strings.Join(lensList, ","), len(merged), len(all)-len(survivors), len(survivors)-len(deduped), repeated),
 	})
 
 	artifacts := make([]store.Artifact, len(stored))
@@ -1909,7 +2324,7 @@ func heldFindingsForRound(ctx context.Context, d Deps, ticketID int64, n int) (f
 func reviewCapResumesEscalation(t store.Ticket, d Deps, sessionID int64) store.HandlerCommit {
 	slog.Warn("escalation written", "ticket_id", t.ID, "session_id", sessionID, "run_id", nil,
 		"code", string(response.EscalationCodeResumesExhausted), "origin", string(response.EscalationOriginCapResumes))
-	return capResumesEscalation(t, d, sessionID)
+	return capResumesEscalation(t, d, jobReviewName, sessionID)
 }
 
 // continueRound is CONTINUE (design section 6.2a): once every question of
@@ -1986,16 +2401,24 @@ func (h reviewingHandler) continueRound(ctx context.Context, t store.Ticket, d D
 		return c, nil
 	}
 
-	// Step 2: for each asking run, the cap gate; an exhausted session
-	// escalates once with no run started for any lens, unless its newest
-	// run was itself cut short (resumeCharge, design D5, section 7.4),
-	// which bypasses the cap for that one asker and resumes it free.
+	// Step 2 (answerResume, job.go): every asking run delivers the owner's
+	// own answer, so each one resumes free regardless of max_resumes,
+	// unless its session already carries a cap_resumes escalation from
+	// before this rule existed. discardNote still carries forward when this
+	// same continue attempt was already discarded once by the cap
+	// (continueCappedNote, r4f8): it is added to the prompt below so a lens
+	// that already answered in the discarded attempt knows why it is asked
+	// again.
+	discardNote, err := h.continueCappedNote(ctx, t, d, n, newest.ID)
+	if err != nil {
+		return store.HandlerCommit{}, err
+	}
 	maxResumes := d.Machine.Jobs[jobReviewName].MaxResumes
 	type asker struct {
 		lens        response.Lens
 		sess        store.Session
 		answers     string
-		bump        bool
+		round       store.Round
 		interrupted bool
 	}
 	askers := make([]asker, 0, len(answered))
@@ -2015,28 +2438,29 @@ func (h reviewingHandler) continueRound(ctx context.Context, t store.Ticket, d D
 		if newestErr != nil {
 			return store.HandlerCommit{}, fmt.Errorf("job: reviewing: continue: newest run: %w", newestErr)
 		}
-		bump, gate := true, true
-		if foundRun {
-			bump, gate = resumeCharge(newestRun)
+		// answerResumeCapped (job.go): checked for every asker before any of
+		// them is logged free, so one capped asker further down the list
+		// doesn't leave an earlier asker's "free answer resume" line for a
+		// run that never starts (this whole attempt returns ErrNoAction).
+		capped, capErr := answerResumeCapped(ctx, t, d, sess, state)
+		if capErr != nil {
+			return store.HandlerCommit{}, capErr
 		}
-		if state == store.SessionExhausted && gate {
-			has, hasErr := d.Store.HasEscalation(ctx, t.ID, string(response.EscalationOriginCapResumes), sess.ID)
-			if hasErr != nil {
-				return store.HandlerCommit{}, fmt.Errorf("job: reviewing: continue: has escalation: %w", hasErr)
-			}
-			if has {
-				return store.HandlerCommit{}, ErrNoAction
-			}
-			return reviewCapResumesEscalation(t, d, sess.ID), nil
+		if capped {
+			slog.Debug("reviewing entry decision", "ticket_id", t.ID, "step", "continue_resume_capped", "session_state", sessionStateName(state), "session_id", sess.ID, "lens", *run.Lens)
+			return store.HandlerCommit{}, ErrNoAction
 		}
 		answers, ansErr := renderRoundAnswers(r)
 		if ansErr != nil {
 			return store.HandlerCommit{}, ansErr
 		}
 		askers = append(askers, asker{
-			lens: response.Lens(*run.Lens), sess: sess, answers: answers,
-			bump: bump, interrupted: foundRun && newestRun.Interrupted,
+			lens: response.Lens(*run.Lens), sess: sess, answers: answers, round: r,
+			interrupted: foundRun && newestRun.Interrupted,
 		})
+	}
+	for i := range askers {
+		slog.Info("free answer resume", "ticket_id", t.ID, "session_id", askers[i].sess.ID, "question_ids", questionIDs(askers[i].round))
 	}
 
 	diff, err := proj.Orch.Diff(ctx, wt, sha)
@@ -2063,13 +2487,16 @@ func (h reviewingHandler) continueRound(ctx context.Context, t store.Ticket, d D
 		if a.interrupted {
 			inputs = append(inputs, prompt.NamedInput{Label: labelInterrupted, Text: interruptedResumeText, Untrusted: false})
 		}
+		if discardNote != "" {
+			inputs = append(inputs, prompt.Notes(discardNote))
+		}
 		in := prompt.ForReviewResume(inputs)
 		in.Schemas = schemas
 		req := runtime.RunRequest{
 			Job: response.JobReview, Label: fmt.Sprintf("%d-%s", n, lens), WorkDir: wt.Dir(),
 			SessionID: derefString(a.sess.ExternalID), Prompt: prompt.Assemble(in),
 		}
-		su := store.SessionUpsert{ID: &a.sess.ID, BumpResumes: a.bump}
+		su := store.SessionUpsert{ID: &a.sess.ID, BumpResumes: false}
 		sessionID := a.sess.ID
 		return su, req, func(rr runResult) *store.SessionUpsert { return resumeSessionRecord(sessionID, rr) }
 	})
@@ -2109,6 +2536,42 @@ func (h reviewingHandler) retryReviewLoopsExhausted(ctx context.Context, t store
 	c := baseCommit(t, d)
 	c.ResolveQuestions = resolveIDs
 	c.Messages = []store.Message{msg}
+	return c, nil
+}
+
+// acceptReviewLoopsExhausted resolves the owner's own explicit d pick on a
+// review loops_exhausted question (ticket 60): it lists the newest done
+// round's own accepted findings in one update message, in acceptAtCap's own
+// line format, and moves the ticket from reviewing to judging.
+func (h reviewingHandler) acceptReviewLoopsExhausted(ctx context.Context, t store.Ticket, d Deps, resolveIDs []int64) (store.HandlerCommit, error) {
+	markers, err := d.Store.MarkersWithPrefix(ctx, t.ID, reviewRoundMarkerPrefix)
+	if err != nil {
+		return store.HandlerCommit{}, fmt.Errorf("job: reviewing: owner accept at cap: review round markers: %w", err)
+	}
+	findings, err := d.Store.Findings(ctx, t.ID)
+	if err != nil {
+		return store.HandlerCommit{}, fmt.Errorf("job: reviewing: owner accept at cap: findings: %w", err)
+	}
+	accepted := acceptedRoundFindings(findings, reviewRoundDoneCount(markers))
+
+	reqs, err := reviewFixLoops(ctx, t, d)
+	if err != nil {
+		return store.HandlerCommit{}, err
+	}
+	k, maxLoops := len(reqs), d.Machine.Jobs[jobReviewName].MaxLoops
+
+	lines := make([]string, 0, 2+len(accepted))
+	lines = append(lines,
+		"The owner accepted "+orchestrator.CountNoun(len(accepted), "finding", "findings")+" at the review fix loop cap",
+		fmt.Sprintf("Review reached max_loops (%d) after %d fix runs, and the owner chose to continue to judging without fixing these:", maxLoops, k),
+	)
+	lines = append(lines, acceptedFindingLines(accepted)...)
+	slog.Info("review findings accepted by owner at loop cap", "ticket_id", t.ID, "fix_runs", k, "findings", len(accepted))
+
+	c := baseCommit(t, d)
+	c.ResolveQuestions = resolveIDs
+	c.Messages = []store.Message{{TicketID: t.ID, Type: msgTypeUpdate, Author: authorSystem, Body: strings.Join(lines, "\n")}}
+	c.Next, c.Reason = stateJudging, reasonReviewOwnerAcceptedAtCap
 	return c, nil
 }
 
@@ -2176,6 +2639,7 @@ func (h reviewingHandler) retryCapResumesDiscuss(t store.Ticket, d Deps, resolve
 		row := &pending[i]
 		finding := row.Finding
 		finding.Decision = &accept
+		finding.OwnerPicked = false // Zing's recovery accept, not the owner's pick on the review question
 		if notes != "" {
 			finding.Fix = strings.TrimRight(finding.Fix, "\n") + "\n\n" + notes
 		}

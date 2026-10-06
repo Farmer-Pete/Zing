@@ -10,7 +10,6 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -46,9 +45,9 @@ func mergeBaseRefSHA(t *testing.T, s *store.Store, ticket store.Ticket, branch s
 	if err != nil {
 		t.Fatalf("ProjectForTicket: %v", err)
 	}
-	cmd := exec.CommandContext(t.Context(), "git", "rev-parse", "refs/zing/base/"+branch)
-	cmd.Dir = proj.LocalPath
-	out, err := cmd.Output()
+	// gitfixture.Git scrubs GIT_DIR and its siblings, so this reads the
+	// fixture repository even when the test runs under a git hook.
+	out, err := gitfixture.Git(t.Context(), proj.LocalPath, "rev-parse", "refs/zing/base/"+branch)
 	if err != nil {
 		t.Fatalf("git rev-parse refs/zing/base/%s: %v", branch, err)
 	}

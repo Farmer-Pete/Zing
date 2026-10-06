@@ -62,6 +62,10 @@ type RunRequest struct {
 	// before running the scripted turn. OnStart must not block
 	// indefinitely; runJobWith's own closure bounds its store write to 10s.
 	OnStart func(StartInfo)
+	// DenyBash lists the Bash command prefixes a build run may not run
+	// (Claude only): Claude's PreToolUse hook blocks a call one matches.
+	// Empty adds no hook. Codex and the Fake ignore it.
+	DenyBash []string
 }
 
 // StartInfo is what a runtime reports to RunRequest.OnStart right after its

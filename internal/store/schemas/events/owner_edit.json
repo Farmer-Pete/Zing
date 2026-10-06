@@ -6,6 +6,7 @@
       "enum": [
         "scenario",
         "plan_task",
+        "plan_file",
         "ticket_body"
       ]
     },

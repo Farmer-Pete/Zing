@@ -477,8 +477,10 @@ func TestIndexRendersShellRegionsAndScript(t *testing.T) {
 		`data-init="@get('/stream', {retryMaxCount: 0})"`,
 		`data-on:zing-nav="$view = evt.detail.view; $open = evt.detail.open; $project = evt.detail.project; @get('/stream', {retryMaxCount: 0})"`,
 		"Add a hello endpoint",
-		`<script type="module" src="/static/console.js">`,
-		`<script type="module" src="/static/datastar.js">`,
+		`<script type="module" src="/static/console.js?v=` + console.AssetVersion() + `">`,
+		`<script type="module" src="/static/datastar.js?v=` + console.AssetVersion() + `">`,
+		`<script src="/static/mermaid.js?v=` + console.AssetVersion() + `">`,
+		`data-build="` + console.AssetVersion() + `"`,
 		`<meta name="viewport" content="width=device-width, initial-scale=1">`,
 	} {
 		if !strings.Contains(got, want) {
@@ -486,10 +488,36 @@ func TestIndexRendersShellRegionsAndScript(t *testing.T) {
 		}
 	}
 
-	consoleIdx := strings.Index(got, `<script type="module" src="/static/console.js">`)
-	datastarIdx := strings.Index(got, `<script type="module" src="/static/datastar.js">`)
+	if !assetVersionPattern.MatchString(console.AssetVersion()) {
+		t.Fatalf("console.AssetVersion() = %q, want 12 hex characters", console.AssetVersion())
+	}
+
+	consoleIdx := strings.Index(got, `<script type="module" src="/static/console.js?v=`)
+	datastarIdx := strings.Index(got, `<script type="module" src="/static/datastar.js?v=`)
 	if consoleIdx > datastarIdx {
 		t.Errorf("GET / body: console.js (index %d) must load before datastar.js (index %d)", consoleIdx, datastarIdx)
+	}
+}
+
+// TestIndexSendsNoCache proves GET / always answers no-cache (the
+// reconnect plan, #59): the shell page names this build's own script URLs,
+// so a reload must never reuse an older build's cached copy of it.
+func TestIndexSendsNoCache(t *testing.T) {
+	t.Parallel()
+	s := newConsoleTestStore(t)
+	srv := newTestServer(t, s, bus.New(), nil, newTestLogHandler(t))
+
+	resp, err := http.Get(srv.URL + "/") //nolint:noctx // a bare GET on a test server needs no deadline
+	if err != nil {
+		t.Fatalf("GET /: %v", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("GET / status = %d, want 200", resp.StatusCode)
+	}
+	if cc := resp.Header.Get("Cache-Control"); cc != cacheControlNoCache {
+		t.Errorf("GET / Cache-Control = %q, want %q", cc, cacheControlNoCache)
 	}
 }
 
