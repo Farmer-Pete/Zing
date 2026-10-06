@@ -39,15 +39,26 @@ func ForClassify(jobPrompt, ticket string, extra []NamedInput) Input {
 	return Input{JobPrompt: jobPrompt, Inputs: inputs}
 }
 
+// placeholderBuildMinutes is the token ForPlanningFirst fills with the
+// build job's timeout, so the planner can size tasks to fit one run (#53).
+const placeholderBuildMinutes = "{build_minutes}"
+
 // ForPlanningFirst builds the planning job's first-turn Input: the
-// kind-specific prompt, the machine-configured styles plus the plan
-// checker's rendered rules block (response.PlanRules, so the validator and
-// the prompt cannot disagree), the ticket fenced, then any carried inputs
-// (answers, notes, and an error, all fenced, when starting fresh from a
-// resolution). Called by internal/job's planning first turn (plan section
-// 6.2); calls Assemble once Schemas is set from
+// kind-specific prompt with {build_minutes} filled from buildMinutes, the
+// machine-configured styles plus the plan checker's rendered rules block
+// (response.PlanRules, so the validator and the prompt cannot disagree),
+// the ticket fenced, then any carried inputs (answers, notes, and an
+// error, all fenced, when starting fresh from a resolution). A jobPrompt
+// missing {build_minutes} is the error "prompt: planning prompt lacks
+// placeholder {build_minutes}". Called by internal/job's planning first
+// turn (plan section 6.2); calls Assemble once Schemas is set from
 // response.RenderTemplate(JobPlanning, ...) in planning schema order.
-func ForPlanningFirst(jobPrompt string, styles []string, ticket string, extra []NamedInput) Input {
+func ForPlanningFirst(jobPrompt string, styles []string, buildMinutes int, ticket string, extra []NamedInput) (Input, error) {
+	filled, err := fillPlaceholder(jobPrompt, "planning", placeholderBuildMinutes, strconv.Itoa(buildMinutes))
+	if err != nil {
+		return Input{}, err
+	}
+
 	allStyles := make([]string, 0, len(styles)+1)
 	allStyles = append(allStyles, styles...)
 	allStyles = append(allStyles, response.PlanRules())
@@ -55,7 +66,7 @@ func ForPlanningFirst(jobPrompt string, styles []string, ticket string, extra []
 	inputs := make([]NamedInput, 0, 1+len(extra))
 	inputs = append(inputs, NamedInput{Label: labelTicket, Text: ticket, Untrusted: true})
 	inputs = append(inputs, extra...)
-	return Input{JobPrompt: jobPrompt, Styles: allStyles, Inputs: inputs}
+	return Input{JobPrompt: filled, Styles: allStyles, Inputs: inputs}, nil
 }
 
 // ForPlanningResume builds a planning resume turn's Input: ResumeHeader in

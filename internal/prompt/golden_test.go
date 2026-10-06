@@ -101,7 +101,10 @@ func goldenCases() []goldenCase {
 				}
 				ticket := "Title: Add dark mode\n\n" +
 					"Body: Users want a dark theme toggle in settings."
-				in := ForPlanningFirst(jobPrompt, styles, ticket, nil)
+				in, err := ForPlanningFirst(jobPrompt, styles, 45, ticket, nil)
+				if err != nil {
+					t.Fatal(err)
+				}
 				in.Schemas = schemasFor(t, response.JobPlanning,
 					response.OutcomeQuestions, response.OutcomeReady, response.OutcomeChildren,
 					response.OutcomeNothingToDo, response.OutcomeQuestion, response.OutcomeError)

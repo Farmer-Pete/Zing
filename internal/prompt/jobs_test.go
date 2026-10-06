@@ -81,7 +81,10 @@ func TestForClassify_TicketFenced(t *testing.T) {
 func TestForPlanningFirst_TicketFenced(t *testing.T) {
 	t.Parallel()
 
-	in := ForPlanningFirst("PROMPT", []string{testStyle}, "ticket body", nil)
+	in, err := ForPlanningFirst("PROMPT {build_minutes}", []string{testStyle}, 45, "ticket body", nil)
+	if err != nil {
+		t.Fatalf("ForPlanningFirst: %v", err)
+	}
 	in.Fence = testFence
 	got := Assemble(in)
 
@@ -107,7 +110,10 @@ func TestForPlanningFirst_CarriesPlanRules(t *testing.T) {
 	styles[1] = "sentinel"
 	styles = styles[:1]
 
-	in := ForPlanningFirst("PROMPT", styles, "ticket body", nil)
+	in, err := ForPlanningFirst("PROMPT {build_minutes}", styles, 45, "ticket body", nil)
+	if err != nil {
+		t.Fatalf("ForPlanningFirst: %v", err)
+	}
 	in.Fence = testFence
 	got := Assemble(in)
 
@@ -127,6 +133,30 @@ func TestForPlanningFirst_CarriesPlanRules(t *testing.T) {
 	}
 	if got := styles[:2][1]; got != "sentinel" {
 		t.Errorf("ForPlanningFirst wrote into the caller's spare capacity: styles[1] = %q, want %q", got, "sentinel")
+	}
+}
+
+// TestForPlanningFirst_FillsBuildMinutes pins that ForPlanningFirst fills
+// {build_minutes} with buildMinutes, leaving no placeholder behind, and
+// that a prompt missing the placeholder is the fixed error (#53).
+func TestForPlanningFirst_FillsBuildMinutes(t *testing.T) {
+	t.Parallel()
+
+	in, err := ForPlanningFirst("Split big tasks. {build_minutes} minutes per run.", nil, 45, "ticket body", nil)
+	if err != nil {
+		t.Fatalf("ForPlanningFirst: %v", err)
+	}
+	if !strings.Contains(in.JobPrompt, "45 minutes per run") {
+		t.Errorf("ForPlanningFirst.JobPrompt = %q, want it to contain %q", in.JobPrompt, "45 minutes per run")
+	}
+	if strings.Contains(in.JobPrompt, "{build_minutes}") {
+		t.Errorf("ForPlanningFirst.JobPrompt still contains {build_minutes}: %q", in.JobPrompt)
+	}
+
+	if _, err := ForPlanningFirst("no placeholder here", nil, 45, "ticket body", nil); err == nil {
+		t.Fatal("ForPlanningFirst returned no error for a prompt missing {build_minutes}")
+	} else if want := "prompt: planning prompt lacks placeholder {build_minutes}"; err.Error() != want {
+		t.Errorf("ForPlanningFirst error = %q, want %q", err.Error(), want)
 	}
 }
 

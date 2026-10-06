@@ -28,12 +28,12 @@ func TestPrompts_MatchThePinnedDesignText(t *testing.T) {
 		{
 			name:   "planning-feature",
 			path:   planningFeaturePromptPath,
-			sha256: "535243076bcffd12da0b8f89ab675f120786b0f072c78c460b3e31edfbb181e3",
+			sha256: "15e48dc5785c8ff9adb45c29a9022217b86e480754e9044a505e8cd223e48829",
 		},
 		{
 			name:   "planning-bug",
 			path:   planningBugPromptPath,
-			sha256: "e949246c56e771cd56aa29b85c5e66e95077e55e22a65a5dc0069cb46aa9ffd9",
+			sha256: "dfb939ffc6bbc027fa6984d793f5a635a35305325e61bbb98bb7f5c9866d500c",
 		},
 		{
 			name:   "planreview",
@@ -217,6 +217,36 @@ func TestPlanningPromptsRequireGreenTasks(t *testing.T) {
 	for _, path := range []string{planningFeaturePromptPath, planningBugPromptPath} {
 		if !strings.Contains(unwrapped(t, path), greenTasksSentence) {
 			t.Errorf("%s lacks the green-tasks sentence", path)
+		}
+	}
+}
+
+// taskSizeSentence is what both planning prompts say right after
+// greenTasksSentence (#53): Zing stops each build run after
+// {build_minutes} minutes, so a task expected to need more than half of
+// that, or one that adds three or more new functions with their tests,
+// needs splitting.
+const taskSizeSentence = "Zing builds each task in one run that it stops after {build_minutes} minutes. " +
+	"Split any task you expect to need more than half of that. " +
+	"A task that adds three or more new functions with their tests needs splitting."
+
+// TestPlanningPromptsSizeTasksToRun proves both planning prompts tell the
+// planner the build run's time limit and ask it to split an oversized
+// task, right after the green-tasks sentence, and that each prompt names
+// {build_minutes} exactly once (#53).
+func TestPlanningPromptsSizeTasksToRun(t *testing.T) {
+	t.Parallel()
+	for _, path := range []string{planningFeaturePromptPath, planningBugPromptPath} {
+		text := unwrapped(t, path)
+		if !strings.Contains(text, greenTasksSentence+" "+taskSizeSentence) {
+			t.Errorf("%s lacks the task-size sentence right after the green-tasks sentence", path)
+		}
+		got, err := zing.Assets.ReadFile(path)
+		if err != nil {
+			t.Fatalf("ReadFile(%s): %v", path, err)
+		}
+		if n := strings.Count(string(got), "{build_minutes}"); n != 1 {
+			t.Errorf("%s contains {build_minutes} %d times, want 1", path, n)
 		}
 	}
 }
