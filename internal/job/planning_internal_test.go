@@ -91,6 +91,9 @@ func TestGateQuestionMessage_LoopsExhaustedUsesDifferentExplainsText(t *testing.
 			}
 		})
 	}
+	if strings.Contains(gateApproveExplains, "chose") {
+		t.Errorf("gateApproveExplains = %q, want it to not contain chose", gateApproveExplains)
+	}
 	if !strings.Contains(gateApproveExplainsLoopsExhausted, "max_loops") || strings.Contains(gateApproveExplainsLoopsExhausted, "chose") {
 		t.Errorf("gateApproveExplainsLoopsExhausted = %q, want max_loops and not chose", gateApproveExplainsLoopsExhausted)
 	}

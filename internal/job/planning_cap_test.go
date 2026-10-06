@@ -26,11 +26,10 @@ import (
 // plan review's own loop cap (CountDeliveredReviews already at
 // machine.toml's max_loops) with a stored planreview artifact carrying one
 // at-or-below-floor minor finding ("still wrong") and one above-floor major
-// finding ("worse"), drives planning once (producing and applying the
-// cap_loops loops_exhausted escalation), and returns the store, the ticket
-// id, the escalation commit itself (not yet applied by the time the caller
-// reads it, but already applied against s), and the escalation's own linked
-// question row.
+// finding ("worse"), drives planning once (producing the cap_loops
+// loops_exhausted escalation), and returns the store, the ticket id, the
+// escalation commit it already applied against s, and the escalation's own
+// linked question row.
 func seedCapLoopsEscalation(t *testing.T, objective string) (s *store.Store, ticketID int64, escCommit store.HandlerCommit, q store.MessageRow) {
 	t.Helper()
 	s = newJobTestStore(t)
