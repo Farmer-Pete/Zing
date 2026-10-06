@@ -64,6 +64,52 @@ func TestLongTurns(t *testing.T) {
 		}
 	})
 
+	t.Run("a 59s turn is dropped and a 60s turn is kept", func(t *testing.T) {
+		t.Parallel()
+		base := time.Date(2026, 10, 5, 10, 0, 0, 0, time.UTC)
+		input := turnLine(base, "", 0) + "\n" +
+			turnLine(base.Add(59*time.Second), "msg59", 1) + "\n" +
+			turnLine(base.Add(59*time.Second), "", 0) + "\n" +
+			turnLine(base.Add(119*time.Second), "msg60", 2) + "\n"
+
+		got, err := longTurns(strings.NewReader(input))
+		if err != nil {
+			t.Fatalf("longTurns: %v", err)
+		}
+		if len(got) != 1 {
+			t.Fatalf("got %d turns, want 1: %+v", len(got), got)
+		}
+		if got[0].Seconds != 60 {
+			t.Errorf("Seconds = %d, want 60", got[0].Seconds)
+		}
+	})
+
+	t.Run("a tie between equal-length turns keeps the earlier start first", func(t *testing.T) {
+		t.Parallel()
+		base := time.Date(2026, 10, 5, 10, 0, 0, 0, time.UTC)
+		earlierStart := base
+		laterStart := base.Add(1000 * time.Second)
+		input := turnLine(laterStart, "", 0) + "\n" +
+			turnLine(laterStart.Add(60*time.Second), "msgLater", 1) + "\n" +
+			turnLine(laterStart.Add(61*time.Second), "", 0) + "\n" +
+			turnLine(earlierStart, "", 0) + "\n" +
+			turnLine(earlierStart.Add(60*time.Second), "msgEarlier", 2) + "\n"
+
+		got, err := longTurns(strings.NewReader(input))
+		if err != nil {
+			t.Fatalf("longTurns: %v", err)
+		}
+		if len(got) != 2 {
+			t.Fatalf("got %d turns, want 2: %+v", len(got), got)
+		}
+		if !got[0].Start.Equal(earlierStart) {
+			t.Errorf("turn 0 Start = %v, want %v (the earlier start, though it is written second)", got[0].Start, earlierStart)
+		}
+		if !got[1].Start.Equal(laterStart) {
+			t.Errorf("turn 1 Start = %v, want %v", got[1].Start, laterStart)
+		}
+	})
+
 	t.Run("message split over two lines times to its last line and larger tokens", func(t *testing.T) {
 		t.Parallel()
 		base := time.Date(2026, 10, 5, 10, 0, 0, 0, time.UTC)

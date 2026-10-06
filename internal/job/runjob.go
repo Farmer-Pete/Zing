@@ -91,7 +91,10 @@ func jobTimeout(jobCfg machine.Job) time.Duration {
 // prompt.Deadline between now and now plus the build job's own jobTimeout,
 // the same timeout runJobWith's own req.Timeout reads, so the told deadline
 // and the real one never drift apart by more than the gap between
-// assembling the prompt and this call reaching Reserve.
+// assembling the prompt and this call reaching Reserve. Every caller today
+// is a build or fix run, and fix runs use the build job too, so this reads
+// jobBuildName directly rather than taking a jobName parameter unparam
+// would flag as always the one value (#53 lint resume).
 func deadlineInput(d Deps, now time.Time) prompt.NamedInput {
 	return prompt.Deadline(now, now.Add(jobTimeout(d.Machine.Jobs[jobBuildName])))
 }

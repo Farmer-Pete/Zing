@@ -269,7 +269,8 @@ func TestSimplificationLensProposesSplittingOversizedTasks(t *testing.T) {
 	inPlanIdx := strings.Index(text, "In a plan")
 	inCodeIdx := strings.Index(text, "In code")
 	lineIdx := strings.Index(text, simplificationLensTaskSplitLine)
-	if inPlanIdx < 0 || inCodeIdx < 0 || lineIdx < 0 {
+	anyMissing := inPlanIdx < 0 || inCodeIdx < 0 || lineIdx < 0
+	if anyMissing {
 		t.Fatalf("%s: In a plan at %d, In code at %d, task-split line at %d, want all present", path, inPlanIdx, inCodeIdx, lineIdx)
 	}
 	if inPlanIdx >= lineIdx || lineIdx >= inCodeIdx {

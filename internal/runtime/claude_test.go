@@ -1248,7 +1248,7 @@ func TestClaudeRun_LogsLongTurnWithRunID(t *testing.T) {
 			if decodeErr := json.Unmarshal([]byte(line), &rec); decodeErr != nil {
 				t.Fatalf("decode log line %q: %v", line, decodeErr)
 			}
-			if rec["msg"] == "claude long turn" {
+			if rec["msg"] == claudeLongTurnLogMsg {
 				turnRecords = append(turnRecords, rec)
 			}
 		}
@@ -1282,6 +1282,72 @@ func TestClaudeRun_LogsLongTurnWithRunID(t *testing.T) {
 		}
 	})
 
+	t.Run("on timeout", func(t *testing.T) {
+		// #53 r2f3: logLongTurns sits ahead of classifyProcessOutcome in
+		// Claude.run precisely so a run the job deadline kills still logs
+		// its long turns; this proves that placement, not just the
+		// success path above.
+		dir := t.TempDir()
+		home := t.TempDir()
+		workDir := t.TempDir()
+		req := newFakeRequest(dir, "sleep", "HOME="+home, "FAKE_CLAUDE_SLEEP_SECONDS=30")
+		req.WorkDir = workDir
+		req.SessionID = "s3"
+		req.RunToken = "459"
+
+		resolvedWorkDir, err := filepath.EvalSymlinks(workDir)
+		if err != nil {
+			t.Fatalf("resolve workdir: %v", err)
+		}
+		transcriptDir := filepath.Join(home, ".claude", "projects", encodeClaudeTranscriptDir(resolvedWorkDir))
+		if mkdirErr := os.MkdirAll(transcriptDir, 0o755); mkdirErr != nil {
+			t.Fatalf("mkdir transcript dir: %v", mkdirErr)
+		}
+		fixture, err := os.ReadFile("testdata/claude_transcript_long.jsonl")
+		if err != nil {
+			t.Fatalf("read fixture: %v", err)
+		}
+		transcriptPath := filepath.Join(transcriptDir, "s3.jsonl")
+		if writeErr := os.WriteFile(transcriptPath, fixture, 0o600); writeErr != nil {
+			t.Fatalf("write transcript: %v", writeErr)
+		}
+
+		var logBuf bytes.Buffer
+		prevDefault := slog.Default()
+		slog.SetDefault(slog.New(slog.NewJSONHandler(&logBuf, &slog.HandlerOptions{Level: slog.LevelDebug})))
+		t.Cleanup(func() { slog.SetDefault(prevDefault) })
+
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+
+		c := NewClaude(absFakeClaudeScript, testOAuthToken)
+		_, runErr := c.Run(ctx, req)
+		if !errors.Is(runErr, ErrTimeout) {
+			t.Fatalf("err = %v, want ErrTimeout", runErr)
+		}
+
+		var turnRecords []map[string]any
+		for line := range strings.SplitSeq(strings.TrimSpace(logBuf.String()), "\n") {
+			var rec map[string]any
+			if decodeErr := json.Unmarshal([]byte(line), &rec); decodeErr != nil {
+				t.Fatalf("decode log line %q: %v", line, decodeErr)
+			}
+			if rec["msg"] == claudeLongTurnLogMsg {
+				turnRecords = append(turnRecords, rec)
+			}
+		}
+		if len(turnRecords) != 1 {
+			t.Fatalf("got %d claude long turn records, want 1: %v", len(turnRecords), turnRecords)
+		}
+		rec := turnRecords[0]
+		if rec["run_id"] != "459" {
+			t.Errorf("run_id = %v, want 459", rec["run_id"])
+		}
+		if rec["seconds"] != float64(300) {
+			t.Errorf("seconds = %v, want 300", rec["seconds"])
+		}
+	})
+
 	t.Run("without transcript", func(t *testing.T) {
 		dir := t.TempDir()
 		home := t.TempDir()
@@ -1307,7 +1373,7 @@ func TestClaudeRun_LogsLongTurnWithRunID(t *testing.T) {
 			if decodeErr := json.Unmarshal([]byte(line), &rec); decodeErr != nil {
 				t.Fatalf("decode log line %q: %v", line, decodeErr)
 			}
-			if rec["msg"] == "claude long turn" {
+			if rec["msg"] == claudeLongTurnLogMsg {
 				t.Errorf("got a claude long turn record with no transcript file: %v", rec)
 			}
 			if rec["msg"] == "claude long turns: no transcript" {

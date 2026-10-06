@@ -21,39 +21,42 @@ type denyHookInput struct {
 	} `json:"tool_input"`
 }
 
-// denyPiece is one normalized, matchable piece of a deny entry, kept next
-// to the original entry text so a match can report what the owner wrote
-// even when the entry itself held several segments or a leading env
-// assignment.
-type denyPiece struct {
-	normalized string
-	entry      string
-}
-
-// DeniedCommand reports the first deny entry that a segment of command
-// matches, after stripping a leading time and VAR=value assignments from
-// each segment; ok is false when none matches. Each deny entry is split
-// and stripped the same way, so an entry that is itself a compound command
-// (such as "go vet ./... && go test ./...") or starts with an env
-// assignment (such as "CGO_ENABLED=0 go test ./...") still matches the
-// bare segment a build run tries to run.
+// DeniedCommand reports the first deny entry that command matches; ok is
+// false when none matches. Each deny entry is normalized to single spaces
+// but never split or stripped itself. An entry with no shell operator is
+// compared against each segment of command (split on &&, ||, ;, |, and
+// newline, each stripped of a leading time and VAR=value and
+// whitespace-collapsed): a segment matches the entry on equality, or on a
+// prefix followed by a space, so a targeted call like "go test -run TestX
+// ./a" is not denied by the entry "go test ./...". An entry that still
+// holds a shell operator after normalizing, such as "cd web && npm test",
+// is compared whole, against command's own normalized whitespace, by
+// equality only: a targeted call through the same operator, such as "cd
+// web && npm test -- foo.spec", stays allowed.
 func DeniedCommand(command string, deny []string) (entry string, ok bool) {
-	var pieces []denyPiece
-	for _, d := range deny {
-		for _, seg := range splitCommandSegments(d) {
-			if norm := normalizeSegment(seg); norm != "" {
-				pieces = append(pieces, denyPiece{normalized: norm, entry: d})
-			}
+	normCommand := strings.Join(strings.Fields(command), " ")
+
+	var normSegments []string
+	for _, seg := range splitCommandSegments(command) {
+		if norm := normalizeSegment(seg); norm != "" {
+			normSegments = append(normSegments, norm)
 		}
 	}
-	for _, seg := range splitCommandSegments(command) {
-		normSeg := normalizeSegment(seg)
-		if normSeg == "" {
+
+	for _, d := range deny {
+		normEntry := strings.Join(strings.Fields(d), " ")
+		if normEntry == "" {
 			continue
 		}
-		for _, p := range pieces {
-			if normSeg == p.normalized || strings.HasPrefix(normSeg, p.normalized+" ") {
-				return p.entry, true
+		if strings.ContainsAny(normEntry, "&|;\n") {
+			if normCommand == normEntry {
+				return d, true
+			}
+			continue
+		}
+		for _, normSeg := range normSegments {
+			if normSeg == normEntry || strings.HasPrefix(normSeg, normEntry+" ") {
+				return d, true
 			}
 		}
 	}
@@ -77,44 +80,14 @@ func normalizeSegment(seg string) string {
 	return strings.Join(fields, " ")
 }
 
-// commandOperator reports the two-character shell operator command starts
-// with at i, or "" when there is none; checked before the single-character
-// operators so "||" is not split into two empty segments around a stray
-// "|".
-func commandOperator(command string, i int) string {
-	if i+1 >= len(command) {
-		return ""
-	}
-	switch pair := command[i : i+2]; pair {
-	case "&&", "||":
-		return pair
-	default:
-		return ""
-	}
-}
+// segmentSplitter splits a command on &&, ||, ;, |, and newline. The
+// two-character operators are tried first, so "||" is not split into two
+// empty segments around a stray "|".
+var segmentSplitter = strings.NewReplacer("&&", "\n", "||", "\n", ";", "\n", "|", "\n")
 
 // splitCommandSegments splits command on &&, ||, ;, |, and newline.
 func splitCommandSegments(command string) []string {
-	var segments []string
-	var cur strings.Builder
-	for i := 0; i < len(command); {
-		if op := commandOperator(command, i); op != "" {
-			segments = append(segments, cur.String())
-			cur.Reset()
-			i += len(op)
-			continue
-		}
-		switch c := command[i]; c {
-		case ';', '|', '\n':
-			segments = append(segments, cur.String())
-			cur.Reset()
-		default:
-			cur.WriteByte(c)
-		}
-		i++
-	}
-	segments = append(segments, cur.String())
-	return segments
+	return strings.Split(segmentSplitter.Replace(command), "\n")
 }
 
 // DenyHook decides one PreToolUse event. reason is non-empty when the Bash

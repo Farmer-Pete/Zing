@@ -6,6 +6,11 @@ import "testing"
 // the table below doesn't repeat the literal past goconst's threshold.
 const goTestAllCmd = "go test ./..."
 
+// cdWebNpmTestCmd is a compound deny entry, named once so
+// TestDeniedCommand_EntryNotStrippedOrSplit doesn't repeat the literal
+// past goconst's threshold.
+const cdWebNpmTestCmd = "cd web && npm test"
+
 // TestDeniedCommand exercises the matching rule in shape exactly: split on
 // &&, ||, ;, |, and newline, strip a leading time and VAR=value
 // assignments from each segment, normalize whitespace, then compare
@@ -60,18 +65,28 @@ func TestDeniedCommand(t *testing.T) {
 	}
 }
 
-// TestDeniedCommand_EntryItselfNeedsNormalizing proves a deny entry that
-// carries an env assignment or is itself a compound command still matches
-// the bare segment a build run tries to run (the project's own configured
-// test or lint command, which this hook exists to block, often looks
-// exactly like this).
-func TestDeniedCommand_EntryItselfNeedsNormalizing(t *testing.T) {
+// TestDeniedCommand_EntryNotStrippedOrSplit pins the matching rule's own
+// treatment of the deny entry itself: it is normalized to single spaces,
+// but never stripped of a leading time or VAR=value, and never split on a
+// shell operator (#53 r2f5, r2f8). A compound entry such as "cd web &&
+// npm test" is matched against the whole normalized command, not against
+// one of its segments, so a targeted call through the same shell operator
+// still runs.
+func TestDeniedCommand_EntryNotStrippedOrSplit(t *testing.T) {
 	t.Parallel()
 
-	t.Run("entry has a leading env assignment", func(t *testing.T) {
+	t.Run("entry's own env prefix is not stripped", func(t *testing.T) {
 		t.Parallel()
 		deny := []string{"CGO_ENABLED=0 go test ./..."}
-		entry, ok := DeniedCommand("CGO_ENABLED=0 go test ./...", deny)
+		if entry, ok := DeniedCommand("go test ./...", deny); ok {
+			t.Errorf("DeniedCommand(%q) = %q, true; want no match", "go test ./...", entry)
+		}
+	})
+
+	t.Run("compound entry denies the whole command", func(t *testing.T) {
+		t.Parallel()
+		deny := []string{cdWebNpmTestCmd}
+		entry, ok := DeniedCommand(cdWebNpmTestCmd, deny)
 		if !ok {
 			t.Fatal("DeniedCommand ok = false, want true")
 		}
@@ -80,15 +95,20 @@ func TestDeniedCommand_EntryItselfNeedsNormalizing(t *testing.T) {
 		}
 	})
 
-	t.Run("entry is a compound command", func(t *testing.T) {
+	t.Run("compound entry's own first segment stays allowed", func(t *testing.T) {
 		t.Parallel()
-		deny := []string{"go vet ./... && go test ./..."}
-		entry, ok := DeniedCommand("go test ./...", deny)
-		if !ok {
-			t.Fatal("DeniedCommand ok = false, want true")
+		deny := []string{cdWebNpmTestCmd}
+		if entry, ok := DeniedCommand("cd web", deny); ok {
+			t.Errorf("DeniedCommand(%q) = %q, true; want no match", "cd web", entry)
 		}
-		if entry != deny[0] {
-			t.Errorf("entry = %q, want %q", entry, deny[0])
+	})
+
+	t.Run("targeted call through the same operator stays allowed", func(t *testing.T) {
+		t.Parallel()
+		deny := []string{cdWebNpmTestCmd}
+		command := "cd web && npm test -- foo.spec"
+		if entry, ok := DeniedCommand(command, deny); ok {
+			t.Errorf("DeniedCommand(%q) = %q, true; want no match", command, entry)
 		}
 	})
 }

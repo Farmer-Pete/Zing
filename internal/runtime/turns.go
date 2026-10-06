@@ -95,6 +95,17 @@ func (t *openTurn) finalize() longTurn {
 	}
 }
 
+// flushInto appends t's finalized turn to out, unless t is nil or has no
+// start: a turn with no previous line is dropped, per the turn timing
+// rule. longTurns calls this both mid-stream, when a new assistant message
+// id starts a turn, and at the end of the transcript.
+func (t *openTurn) flushInto(out []longTurn) []longTurn {
+	if t == nil || t.start.IsZero() {
+		return out
+	}
+	return append(out, t.finalize())
+}
+
 // longTurns reads a Claude transcript line by line and returns up to
 // longTurnMax turns of at least longTurnMinSeconds, longest first (ties by
 // start ascending), per the turn timing rule. A read error other than
@@ -118,16 +129,12 @@ func longTurns(r io.Reader) ([]longTurn, error) {
 			current.extend(pl.Time, pl.Line.Message.Usage.OutputTokens)
 			prevTime = pl.Time
 		default:
-			if current != nil && !current.start.IsZero() {
-				finalized = append(finalized, current.finalize())
-			}
+			finalized = current.flushInto(finalized)
 			current = &openTurn{id: pl.Line.Message.ID, start: prevTime, end: pl.Time, tokens: pl.Line.Message.Usage.OutputTokens}
 			prevTime = pl.Time
 		}
 		if readErr != nil {
-			if current != nil && !current.start.IsZero() {
-				finalized = append(finalized, current.finalize())
-			}
+			finalized = current.flushInto(finalized)
 			if readErr == io.EOF {
 				readErr = nil
 			}
@@ -158,9 +165,14 @@ func keepLongTurns(turns []longTurn) []longTurn {
 	return kept
 }
 
+// claudeLongTurnLogMsg is the INFO log message logLongTurns writes for
+// each kept turn, named once so claude_test.go's own assertions share it
+// rather than repeating the literal (goconst).
+const claudeLongTurnLogMsg = "claude long turn"
+
 // logLongTurns logs a run's longest model turns (design shape, the
-// long-turn path): one INFO "claude long turn" record per kept turn, or a
-// single DEBUG record when the transcript is missing or only partly
+// long-turn path): one claudeLongTurnLogMsg INFO record per kept turn, or
+// a single DEBUG record when the transcript is missing or only partly
 // readable. It never changes the run's result; it only logs. Every record
 // carries job and run_id (req.RunToken).
 func logLongTurns(req RunRequest, path string) {
@@ -181,7 +193,7 @@ func logLongTurns(req RunRequest, path string) {
 			"job", req.Job, "run_id", req.RunToken, "turns_kept", len(turns), "error", err)
 	}
 	for i, t := range turns {
-		slog.Info("claude long turn",
+		slog.Info(claudeLongTurnLogMsg,
 			"job", req.Job,
 			"run_id", req.RunToken,
 			"rank", i+1,
