@@ -2711,14 +2711,23 @@ func routeFailure(
 	return store.HandlerCommit{}, false, nil
 }
 
+// execFailureSentinels are four of the five runtime failures section 6.8
+// escalates as runtime_exec_failed: the process could not start, the job
+// deadline killed it, Claude's idle watchdog killed a stalled run, or its
+// output exceeded the 4 MiB cap. The fifth, exiting with no parseable
+// result, is runtime.ExecError, which isExecFailure matches separately.
+var execFailureSentinels = []error{runtime.ErrStart, runtime.ErrTimeout, runtime.ErrStalled, runtime.ErrOutputTooLarge}
+
 // isExecFailure reports whether err is one of the five runtime failures
 // section 6.8 escalates as runtime_exec_failed: the process could not
 // start, the job deadline killed it, Claude's idle watchdog killed a
 // stalled run, its output exceeded the 4 MiB cap, or it exited with no
 // parseable result.
 func isExecFailure(err error) bool {
-	if errors.Is(err, runtime.ErrStart) || errors.Is(err, runtime.ErrTimeout) || errors.Is(err, runtime.ErrStalled) || errors.Is(err, runtime.ErrOutputTooLarge) {
-		return true
+	for _, sentinel := range execFailureSentinels {
+		if errors.Is(err, sentinel) {
+			return true
+		}
 	}
 	var execErr *runtime.ExecError
 	return errors.As(err, &execErr) //nolint:modernize // see routeFailure's comment

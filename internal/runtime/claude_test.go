@@ -1578,6 +1578,48 @@ func TestClaude_IdleWatchdogKillsStalledRun(t *testing.T) {
 	}
 }
 
+// TestClaude_IdleWatchdogParentCancelWins proves that when the parent
+// context's own deadline has also passed, Run reports the parent's own
+// outcome, not ErrStalled, even though the watchdog's idle limit would
+// otherwise have fired too (r2f3): the parent ctx and IdleTimeout share the
+// same 1s bound, so by the time the kill-and-wait sequence finishes, the
+// parent's deadline has certainly passed as well.
+func TestClaude_IdleWatchdogParentCancelWins(t *testing.T) {
+	t.Parallel()
+	requireUnix(t)
+
+	absFakeClaudeScript, err := filepath.Abs(fakeClaudeScript)
+	if err != nil {
+		t.Fatalf("resolve fake claude script path: %v", err)
+	}
+
+	dir := t.TempDir()
+	home := filepath.Join(dir, "home")
+	req := newFakeRequest(dir, "event_then_sleep", "HOME="+home, "FAKE_CLAUDE_SLEEP_SECONDS=30")
+	req.WorkDir = dir
+	req.SessionID = testResumedSessionID
+	req.IdleTimeout = time.Second
+
+	transcriptPath := claudeTranscriptPath(req.Env, req.WorkDir, req.SessionID)
+	req.Env = append(req.Env, "FAKE_CLAUDE_TRANSCRIPT="+transcriptPath)
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+
+	c := NewClaude(absFakeClaudeScript, testOAuthToken)
+	res, err := c.Run(ctx, req)
+
+	if !errors.Is(err, ErrTimeout) {
+		t.Fatalf("err = %v, want ErrTimeout", err)
+	}
+	if errors.Is(err, ErrStalled) {
+		t.Errorf("err = %v, want anything but ErrStalled (the parent's own deadline must win)", err)
+	}
+	if res.ExitCode != -1 {
+		t.Errorf("ExitCode = %d, want -1", res.ExitCode)
+	}
+}
+
 // TestClaude_IdleWatchdogSparesGrowingTranscript proves the idle watchdog
 // never fires on a run whose transcript keeps growing: the fake CLI appends
 // 8 lines 0.3s apart, each well inside the 1s IdleTimeout, then prints its

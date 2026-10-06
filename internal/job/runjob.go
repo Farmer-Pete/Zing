@@ -497,7 +497,7 @@ func retryTimeout(
 ) (runtime.RunResult, error) {
 	stalled := errors.Is(runErr, runtime.ErrStalled)
 	if stalled {
-		logStall(ticketID, runID, jobName, 1, res.LastEvent)
+		slog.Warn("run stalled", "ticket_id", ticketID, "run_id", runID, "job", jobName, "attempt", 1, "last_event", lastEventText(res.LastEvent))
 	}
 	retryable := stalled || errors.Is(runErr, runtime.ErrTimeout)
 	if retries < 1 || !retryable {
@@ -531,7 +531,7 @@ func retryTimeout(
 		return retryRes, nil
 	}
 	if errors.Is(retryErr, runtime.ErrStalled) {
-		logStall(ticketID, runID, jobName, 2, retryRes.LastEvent)
+		slog.Warn("run stalled", "ticket_id", ticketID, "run_id", runID, "job", jobName, "attempt", 2, "last_event", lastEventText(retryRes.LastEvent))
 	}
 	slog.Warn("runtime timeout retry failed", "ticket_id", ticketID, "run_id", runID, "job", jobName,
 		"last_event", lastEvent, "outcome", errKind(retryErr), "err_kind", errKind(retryErr), "exit_code", retryRes.ExitCode)
@@ -560,11 +560,6 @@ func skipRetry(ctx context.Context, ticketID, runID int64, jobName, lastEvent st
 	}
 	slog.Warn("runtime timeout retry skipped", "ticket_id", ticketID, "run_id", runID, "job", jobName, "last_event", lastEvent, "err_kind", errKind(skipErr))
 	return res, skipErr
-}
-
-// logStall is the WARN "run stalled" line for attempt 1 or 2 of a turn.
-func logStall(ticketID, runID int64, jobName string, attempt int, last time.Time) {
-	slog.Warn("run stalled", "ticket_id", ticketID, "run_id", runID, "job", jobName, "attempt", attempt, "last_event", lastEventText(last))
 }
 
 // firstAttemptText names how the first attempt ended, for the retry's
