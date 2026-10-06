@@ -557,6 +557,9 @@ func TestBaseSyncOnCIFailureMergesBeforeFix(t *testing.T) {
 	gh.runs, gh.required = runs, required
 	gh.prState = orchestrator.PRState{Draft: true, HeadSHA: preMergeHead, BaseRef: pbFixtureDefaultBranch}
 	gh.logTail = func(context.Context, string, string, int64, int) (string, error) { return shipCILogTailText, nil }
+	// The check's one flaky re-run (#91) is already spent at this sha, so
+	// the failed CI reaches pollCIFailed's own row on this tick.
+	seedSpentFlakyCheckRerun(t, s, ticket.ID, preMergeHead)
 
 	deps = shipClaim(t, s, rt, ticket.ID, gh, tr)
 	commit1, err := (shipHandler{}).Run(t.Context(), ticket, deps)
@@ -638,6 +641,7 @@ func TestBaseSyncOnCIFailureMergesBeforeFix(t *testing.T) {
 	// fix request, carrying the log tail, and opens no second base merge
 	// request (the base is already an ancestor of HEAD).
 	gh.prState.HeadSHA = mergedSHA
+	seedSpentFlakyCheckRerun(t, s, ticket.ID, mergedSHA)
 	deps = shipClaim(t, s, rt, ticket.ID, gh, tr)
 	commit2, err := (shipHandler{}).Run(t.Context(), ticket, deps)
 	if err != nil {

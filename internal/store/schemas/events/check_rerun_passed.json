@@ -10,22 +10,6 @@
       "type": "string",
       "pattern": "^[0-9a-f]{40}$"
     },
-    "run_id": {
-      "type": "integer",
-      "minimum": 1
-    },
-    "check_run_id": {
-      "type": "integer",
-      "minimum": 1
-    },
-    "reason": {
-      "type": "string",
-      "enum": [
-        "flaky",
-        "infra",
-        "no_log"
-      ]
-    },
     "tests": {
       "items": {
         "type": "string"
@@ -38,9 +22,6 @@
   "type": "object",
   "required": [
     "check",
-    "sha",
-    "run_id",
-    "check_run_id",
-    "reason"
+    "sha"
   ]
 }

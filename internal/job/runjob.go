@@ -112,6 +112,17 @@ func runJobWith(
 	}
 	req.Model = model
 
+	if jobCfg.Runtime == runtimeClaude {
+		until, held, holdErr := d.Store.ClaudeHold(ctx)
+		if holdErr != nil {
+			return runResult{}, fmt.Errorf("job: %s: claude hold: %w", jobName, holdErr)
+		}
+		if held && until.After(d.now()) {
+			slog.Debug("claude run held", "ticket_id", t.ID, "job", jobName, "reset_at", until.UTC().Format(time.RFC3339))
+			return runResult{}, &HeldError{Until: until}
+		}
+	}
+
 	agentSeconds, err := d.Store.AgentSecondsForTicket(ctx, t.ID)
 	if err != nil {
 		return runResult{}, fmt.Errorf("job: %s: agent seconds for ticket %d: %w", jobName, t.ID, err)
@@ -229,6 +240,22 @@ func runJobWith(
 	runCtx, cancel := context.WithTimeout(ctx, req.Timeout)
 	defer cancel()
 
+	// cappedPrev is su's own session's newest run, read before Reserve,
+	// only when that run was left capped by a park (design shape, "Resume
+	// marker"): non-nil means this call's own Reserve is about to resume a
+	// parked session for free, and runJobWith owes it one capped-resume
+	// marker after Reserve returns.
+	var cappedPrev *store.Run
+	if su.ID != nil {
+		prev, found, prevErr := d.Store.SessionNewestRun(ctx, *su.ID)
+		if prevErr != nil {
+			return runResult{}, fmt.Errorf("job: %s: newest run: %w", jobName, prevErr)
+		}
+		if found && prev.CappedUntil != nil {
+			cappedPrev = &prev
+		}
+	}
+
 	var reserveErr error
 	rsv, reserveErr = d.Reserve(runCtx, t.ID, su, store.RunSeed{Model: req.Model, TaskN: taskN, Lens: lens, ThroughBatch: throughBatch})
 	if reserveErr != nil {
@@ -237,6 +264,9 @@ func runJobWith(
 	req.RunToken = strconv.FormatInt(rsv.RunID, 10)
 	req.OnStart = func(info runtime.StartInfo) {
 		recordRunStart(ctx, d, t.ID, rsv.RunID, info)
+	}
+	if cappedPrev != nil {
+		recordCappedResume(ctx, d, t.ID, rsv, *cappedPrev)
 	}
 
 	if sandboxed && hook != nil {
@@ -266,6 +296,13 @@ func runJobWith(
 	started := time.Now()
 	res, runErr := rt.Run(runCtx, req)
 	res, runErr = retryTransient(runCtx, rt, req, t.ID, rsv.RunID, jobName, res, runErr)
+
+	var sl *runtime.SessionLimitError
+	if errors.As(runErr, &sl) { //nolint:modernize // see errKind's own comment
+		slog.Warn("claude session limit hit",
+			"ticket_id", t.ID, "session_id", rsv.SessionID, "run_id", rsv.RunID,
+			"job", jobName, "reset_at", sl.ResetAt.UTC().Format(time.RFC3339), "reset_parsed", sl.Parsed)
+	}
 
 	stderrFile := ""
 	if len(res.Stderr) > 0 && d.DataDir != "" {
@@ -640,6 +677,14 @@ func errKind(err error) string {
 	// errors.As, not the modernize-suggested errors.AsType: AsType's (E, bool)
 	// result has E discarded via _, and errcheck's check-blank (this repo's
 	// config) flags that discard since E is itself error-shaped.
+	var sl *runtime.SessionLimitError
+	if errors.As(err, &sl) { //nolint:modernize // see comment above
+		return "SessionLimitError"
+	}
+	var held *HeldError
+	if errors.As(err, &held) { //nolint:modernize // see comment above
+		return "HeldError"
+	}
 	var execErr *runtime.ExecError
 	if errors.As(err, &execErr) { //nolint:modernize // see comment above
 		return "ExecError"

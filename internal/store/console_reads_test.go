@@ -538,6 +538,63 @@ func TestLiveTickets_TiesOnNormalizedRefBreakByID(t *testing.T) {
 	}
 }
 
+// TestLiveTickets_ParkedUntil proves LiveTickets' own MAX(capped_until)
+// subquery (#45): ParkedUntil is nil for a ticket with no capped run, and
+// equals the greatest capped_until for a ticket with two parked runs.
+func TestLiveTickets_ParkedUntil(t *testing.T) {
+	t.Parallel()
+	s := newTestStore(t)
+	ctx := t.Context()
+
+	_, quiet := seedQueuedTicket(t, s, "1")
+
+	_, parked := seedQueuedTicket(t, s, "2")
+	owner, expires := claimForCommit(t, s, parked)
+	reserveOpenRun(t, s, parked, owner, expires, testStatePlanning)
+	earlier := time.Now().Add(time.Hour).UTC().Truncate(time.Second)
+	if _, err := s.ParkRuns(ctx, parked, owner, expires, earlier, ""); err != nil {
+		t.Fatalf("ParkRuns(earlier): %v", err)
+	}
+
+	owner, expires = claimForCommit(t, s, parked)
+	reserveOpenRun(t, s, parked, owner, expires, testStateBuilding)
+	later := earlier.Add(time.Hour)
+	if _, err := s.ParkRuns(ctx, parked, owner, expires, later, ""); err != nil {
+		t.Fatalf("ParkRuns(later): %v", err)
+	}
+
+	got, err := s.LiveTickets(ctx, nil)
+	if err != nil {
+		t.Fatalf("LiveTickets: %v", err)
+	}
+
+	quietLT := liveTicketByID(got, quiet)
+	if quietLT == nil {
+		t.Fatalf("LiveTickets excludes quiet ticket %d: %+v", quiet, got)
+	}
+	if quietLT.ParkedUntil != nil {
+		t.Errorf("quiet ticket ParkedUntil = %v, want nil", quietLT.ParkedUntil)
+	}
+
+	parkedLT := liveTicketByID(got, parked)
+	if parkedLT == nil {
+		t.Fatalf("LiveTickets excludes parked ticket %d: %+v", parked, got)
+	}
+	if parkedLT.ParkedUntil == nil || !parkedLT.ParkedUntil.Equal(later) {
+		t.Errorf("parked ticket ParkedUntil = %v, want %v", parkedLT.ParkedUntil, later)
+	}
+}
+
+// liveTicketByID returns the item in items naming ticketID, or nil.
+func liveTicketByID(items []LiveTicket, ticketID int64) *LiveTicket {
+	for i := range items {
+		if items[i].Ticket.ID == ticketID {
+			return &items[i]
+		}
+	}
+	return nil
+}
+
 // liveHasTicket reports whether items contains ticketID.
 func liveHasTicket(items []LiveTicket, ticketID int64) bool {
 	for i := range items {

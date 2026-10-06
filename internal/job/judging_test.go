@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"strconv"
 	"strings"
@@ -1210,6 +1211,35 @@ func TestJudgeErrorEscalatesOriginJudge(t *testing.T) {
 	}
 	if commit.Escalation.Payload.Tried != "zing scenarios" {
 		t.Errorf("escalation tried = %q", commit.Escalation.Payload.Tried)
+	}
+}
+
+// ---- TestJudgeRunAndRoute_PassesCappedThrough -------------------------------
+
+// TestJudgeRunAndRoute_PassesCappedThrough proves judgeRunAndRoute's own
+// passthrough case still carries claudeCapped (r4f3): without it, this
+// regresses to escalating runtime_exec_failed and asking the owner, which
+// is exactly the bug issue #45 fixes. pbScriptedRuntime hands runJobWith a
+// *runtime.SessionLimitError directly, the same shape Claude.run itself
+// returns, so judgeRunAndRoute's switch sees exactly what production does.
+func TestJudgeRunAndRoute_PassesCappedThrough(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow end-to-end flow; runs in the full suite")
+	}
+	t.Parallel()
+	s, ticket := judgeTicketReady(t)
+	ticket = judgeAdvanceStart(t, s, runtime.NewFake(fstest.MapFS{}), ticket)
+
+	cappedRT := &pbScriptedRuntime{t: t, steps: []pbScriptedStep{
+		{res: runtime.RunResult{}, err: &runtime.SessionLimitError{ResetAt: time.Now().Add(time.Hour), Parsed: true}},
+	}}
+	deps := pbClaim(t, s, cappedRT, ticket.ID)
+	commit, err := (judgeHandler{}).Run(t.Context(), ticket, deps)
+	if _, capped := Capped(err); !capped {
+		t.Fatalf("Capped(%v) = (_, false), want true", err)
+	}
+	if !reflect.DeepEqual(commit, store.HandlerCommit{}) {
+		t.Errorf("commit = %+v, want the zero value", commit)
 	}
 }
 

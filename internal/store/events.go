@@ -21,6 +21,10 @@ const tableEvents = "events"
 // gate): one re-run of a check on a sha.
 const EventKindCheckRerun = "check_rerun"
 
+// EventKindCheckRerunPassed names the check_rerun_passed event kind (#91):
+// a check that had a check_rerun passed once re-run, so no fix run follows.
+const EventKindCheckRerunPassed = "check_rerun_passed"
+
 // EventKindOwnerEdit names the owner_edit event kind (#41): one owner edit
 // to a sealed scenario, a sealed plan's task, or the ticket body.
 const EventKindOwnerEdit = "owner_edit"

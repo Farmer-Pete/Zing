@@ -143,6 +143,45 @@ func TestFake_ResumeAfterApplyEffectsErrorRetriesSameTurn(t *testing.T) {
 	}
 }
 
+// TestFake_Exit1Sibling proves a "JOB/LABEL/N.exit1" sibling scripts a
+// turn whose process exits 1 with the file's own text as its final
+// message and a SessionLimitError, and that the session still advances so
+// a resume serves the next turn's script.
+func TestFake_Exit1Sibling(t *testing.T) {
+	t.Parallel()
+
+	const sessionLimitMsg = "You've hit your session limit · resets 12:20pm (America/New_York)"
+	fsys := fstest.MapFS{
+		"planning/1.exit1": &fstest.MapFile{Data: []byte(sessionLimitMsg)},
+		"planning/2.xml":   &fstest.MapFile{Data: []byte(classifyBugXML)},
+	}
+	f := NewFake(fsys)
+	ctx := context.Background()
+
+	res1, err := f.Run(ctx, RunRequest{Job: response.JobPlanning})
+	var sl *SessionLimitError
+	if !errors.As(err, &sl) { //nolint:modernize // see errors.go's exitCodeFrom comment
+		t.Fatalf("turn 1 err = %v, want *SessionLimitError", err)
+	}
+	if res1.ExitCode != 1 {
+		t.Errorf("ExitCode = %d, want 1", res1.ExitCode)
+	}
+	if res1.FinalMessage != sessionLimitMsg {
+		t.Errorf("FinalMessage = %q, want %q", res1.FinalMessage, sessionLimitMsg)
+	}
+	if res1.SessionID == "" {
+		t.Fatal("turn 1 returned an empty SessionID")
+	}
+
+	res2, err := f.Run(ctx, RunRequest{Job: response.JobPlanning, SessionID: res1.SessionID})
+	if err != nil {
+		t.Fatalf("resume: %v", err)
+	}
+	if got := res2.Response.Header().Outcome; got != response.OutcomeBug {
+		t.Errorf("resumed turn outcome = %s, want %s", got, response.OutcomeBug)
+	}
+}
+
 func TestFake_HonorsCancellation(t *testing.T) {
 	t.Parallel()
 

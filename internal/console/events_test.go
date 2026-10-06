@@ -21,7 +21,9 @@ func TestCheckRerunEventsRenderInThread(t *testing.T) {
 	shaB := strings.Repeat("b", 40)
 
 	for _, sha := range []string{shaA, shaA} {
-		msg, err := store.NewEvent(ticketID, store.EventKindCheckRerun, response.CheckRerunEvent{Check: response.CheckNameTest, SHA: sha})
+		msg, err := store.NewEvent(ticketID, store.EventKindCheckRerun, response.CheckRerunEvent{
+			Check: "test", SHA: sha, RunID: 1, CheckRunID: 1, Reason: response.RerunReasonFlaky,
+		})
 		if err != nil {
 			t.Fatalf("NewEvent(test, %s): %v", sha, err)
 		}
@@ -29,7 +31,9 @@ func TestCheckRerunEventsRenderInThread(t *testing.T) {
 			t.Fatalf("InsertMessage(test, %s): %v", sha, err)
 		}
 	}
-	lintMsg, err := store.NewEvent(ticketID, store.EventKindCheckRerun, response.CheckRerunEvent{Check: response.CheckNameLint, SHA: shaB})
+	lintMsg, err := store.NewEvent(ticketID, store.EventKindCheckRerun, response.CheckRerunEvent{
+		Check: "lint", SHA: shaB, RunID: 2, CheckRunID: 2, Reason: response.RerunReasonFlaky,
+	})
 	if err != nil {
 		t.Fatalf("NewEvent(lint, %s): %v", shaB, err)
 	}
@@ -48,10 +52,10 @@ func TestCheckRerunEventsRenderInThread(t *testing.T) {
 	srv := newTestServer(t, s, bus.New(), nil, newTestLogHandler(t))
 	main := mainFrame(t, srv.URL, "thread", ticketID, 0)
 
-	if got := strings.Count(main, "Zing re-ran the test check on aaaaaaa."); got != 2 {
-		t.Errorf(`thread frame has %d copies of "Zing re-ran the test check on aaaaaaa.", want 2; got:%s`, got, main)
+	if got := strings.Count(main, "Zing re-ran the test check on aaaaaaa (workflow run 1) because it failed."); got != 2 {
+		t.Errorf(`thread frame has %d copies of "Zing re-ran the test check on aaaaaaa (workflow run 1) because it failed.", want 2; got:%s`, got, main)
 	}
-	if got := strings.Count(main, "Zing re-ran the lint check on bbbbbbb."); got != 1 {
-		t.Errorf(`thread frame has %d copies of "Zing re-ran the lint check on bbbbbbb.", want 1; got:%s`, got, main)
+	if got := strings.Count(main, "Zing re-ran the lint check on bbbbbbb (workflow run 2) because it failed."); got != 1 {
+		t.Errorf(`thread frame has %d copies of "Zing re-ran the lint check on bbbbbbb (workflow run 2) because it failed.", want 1; got:%s`, got, main)
 	}
 }
