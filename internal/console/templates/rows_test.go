@@ -66,6 +66,10 @@ func TestTicketRowsCarryThreadNav(t *testing.T) {
 	})
 }
 
+// testAbandonedState is store.Ticket.State's "abandoned" value, repeated
+// across this file's #65 tests (goconst).
+const testAbandonedState = "abandoned"
+
 // TestProjectRendersEarlierAttempts proves Project's earlier argument (#65)
 // renders a head ticket's older attempts behind an "earlier attempts (N)"
 // toggle with a thread link to each, and never shows the raw -abandoned-K
@@ -74,7 +78,7 @@ func TestProjectRendersEarlierAttempts(t *testing.T) {
 	t.Parallel()
 
 	head := store.Ticket{ID: 9, TrackerRef: "41", Title: "restart me", State: "planning"}
-	old := store.Ticket{ID: 4, TrackerRef: "41-abandoned-1", Title: "restart me", State: "abandoned"}
+	old := store.Ticket{ID: 4, TrackerRef: "41-abandoned-1", Title: "restart me", State: testAbandonedState}
 	earlier := map[int64][]store.Ticket{9: {old}}
 
 	var sb strings.Builder
@@ -102,7 +106,7 @@ func TestProjectRendersEarlierAttempts(t *testing.T) {
 func TestProjectStripsSuffixFromHeadRef(t *testing.T) {
 	t.Parallel()
 
-	head := store.Ticket{ID: 6, TrackerRef: "53-abandoned-1", Title: "retired issue", State: "abandoned"}
+	head := store.Ticket{ID: 6, TrackerRef: "53-abandoned-1", Title: "retired issue", State: testAbandonedState}
 
 	var sb strings.Builder
 	if err := Project(1, []store.Ticket{head}, nil, nil).Render(t.Context(), &sb); err != nil {
@@ -115,5 +119,29 @@ func TestProjectStripsSuffixFromHeadRef(t *testing.T) {
 	}
 	if strings.Contains(got, "53-abandoned-1") {
 		t.Errorf("Project rendered the raw -abandoned-K ref; got:\n%s", got)
+	}
+}
+
+// TestInboxStripsSuffixFromRef proves the Inbox card's ref span (#65) shows
+// a retired ticket's base ref, never the raw -abandoned-K suffix.
+func TestInboxStripsSuffixFromRef(t *testing.T) {
+	t.Parallel()
+
+	ticket := store.Ticket{ID: 6, TrackerRef: "53-abandoned-1", Title: "retired issue", State: testAbandonedState}
+	groups := []InboxGroup{
+		{ProjectName: "demo", Items: []store.InboxItem{{Ticket: ticket}}},
+	}
+
+	var sb strings.Builder
+	if err := Inbox(groups).Render(t.Context(), &sb); err != nil {
+		t.Fatalf("Inbox.Render: %v", err)
+	}
+	got := sb.String()
+
+	if !strings.Contains(got, `<span class="ref">53</span>`) {
+		t.Errorf("Inbox card ref span = want 53; got:\n%s", got)
+	}
+	if strings.Contains(got, "53-abandoned-1") {
+		t.Errorf("Inbox rendered the raw -abandoned-K ref; got:\n%s", got)
 	}
 }

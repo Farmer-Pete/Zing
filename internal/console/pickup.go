@@ -108,12 +108,8 @@ func (c *console) handlePickup(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err != nil {
-		if alreadyTicketed {
-			slog.Error("console: pickup: insert ticket",
-				"project_id", projectID, "ref", ref, "old_ticket_id", existingTicket.ID, "retired_ref", retiredRef, "err", err)
-		} else {
-			slog.Error("console: pickup: insert ticket", "project_id", projectID, "ref", ref, "err", err)
-		}
+		slog.Error("console: pickup: insert ticket",
+			"project_id", projectID, "ref", ref, "old_ticket_id", existingTicket.ID, "retired_ref", retiredRef, "err", err)
 		http.Error(w, genericServerErrorBody, http.StatusInternalServerError)
 		return
 	}
@@ -164,7 +160,7 @@ func (c *console) insertFresh(ctx context.Context, projectID int64, trackerProje
 	}
 	newID, err = dispatch.InsertAndAnnounce(ctx, c.store, c.tracker, projectID, trackerProject, c.user, tk)
 	if err != nil {
-		return 0, retiredRef, c.liveHolder(ctx, projectID, tk.Ref, err)
+		return 0, retiredRef, c.liveHolder(ctx, projectID, tk.Ref, fmt.Errorf("console: insert ticket ref %s: %w", tk.Ref, err))
 	}
 	return newID, retiredRef, nil
 }

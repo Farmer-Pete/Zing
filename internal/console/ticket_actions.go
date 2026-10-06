@@ -42,22 +42,22 @@ func (e *actionRefusal) Error() string { return e.Reason }
 // ticketID: a *store.AbandonError or an *actionRefusal answers its own
 // status with Reason as the body, logged at INFO as a refusal; any other
 // error is logged at ERROR and answered 500 with genericServerErrorBody.
-func (c *console) writeActionError(w http.ResponseWriter, action string, ticketID int64, err error) {
+func (c *console) writeActionError(ctx context.Context, w http.ResponseWriter, action string, ticketID int64, err error) {
 	var abandonErr *store.AbandonError
 	var refusal *actionRefusal
 	switch {
 	case errors.As(err, &abandonErr):
-		slog.Info("console: ticket action refused", "action", action, "ticket_id", ticketID, "reason", abandonErr.Reason)
+		slog.InfoContext(ctx, "console: ticket action refused", "action", action, "ticket_id", ticketID, "reason", abandonErr.Reason)
 		status := http.StatusConflict
 		if abandonErr.Code == store.AbandonCodeNotFound {
 			status = http.StatusNotFound
 		}
 		http.Error(w, abandonErr.Reason, status)
 	case errors.As(err, &refusal):
-		slog.Info("console: ticket action refused", "action", action, "ticket_id", ticketID, "reason", refusal.Reason)
+		slog.InfoContext(ctx, "console: ticket action refused", "action", action, "ticket_id", ticketID, "reason", refusal.Reason)
 		http.Error(w, refusal.Reason, refusal.Status)
 	default:
-		slog.Error("console: ticket action", "action", action, "ticket_id", ticketID, "err", err)
+		slog.ErrorContext(ctx, "console: ticket action", "action", action, "ticket_id", ticketID, "err", err)
 		http.Error(w, genericServerErrorBody, http.StatusInternalServerError)
 	}
 }
@@ -73,7 +73,7 @@ func (c *console) handleAbandon(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := c.abandonTicket(r.Context(), id); err != nil {
-		c.writeActionError(w, "abandon", id, err)
+		c.writeActionError(r.Context(), w, "abandon", id, err)
 		return
 	}
 
@@ -101,14 +101,14 @@ func (c *console) handleRestart(w http.ResponseWriter, r *http.Request) {
 
 	newID, err := c.restartTicket(r.Context(), id)
 	if err != nil {
-		c.writeActionError(w, "restart", id, err)
+		c.writeActionError(r.Context(), w, "restart", id, err)
 		return
 	}
 
 	c.bus.Publish()
 	w.Header().Set("Content-Type", contentTypeJSON)
 	if err := json.NewEncoder(w).Encode(restartResponseBody{Ticket: newID}); err != nil {
-		slog.Error("console: write restart response", "old_ticket_id", id, "new_ticket_id", newID, "err", err)
+		slog.ErrorContext(r.Context(), "console: write restart response", "old_ticket_id", id, "new_ticket_id", newID, "err", err)
 	}
 }
 
@@ -200,9 +200,7 @@ func (c *console) restartTicket(ctx context.Context, id int64) (int64, error) {
 
 	newID, retiredRef, err := c.insertFresh(ctx, t.ProjectID, trackerProject, tk)
 	if err != nil {
-		slog.WarnContext(ctx, "console: restart abandoned old ticket but insert failed",
-			"old_ticket_id", id, "project_id", t.ProjectID, "ref", base, "retired_ref", retiredRef, "err", err)
-		return 0, fmt.Errorf("console: restart ticket %d: insert fresh ticket for ref %s (old ticket retired to %q): %w", id, base, retiredRef, err)
+		return 0, err
 	}
 
 	slog.InfoContext(ctx, "console: ticket restarted",

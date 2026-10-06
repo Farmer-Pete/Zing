@@ -701,7 +701,7 @@ function openConfirmDialog({ id, text, items, confirmLabel, onConfirm }) {
 		document.removeEventListener('keydown', onKeyDown, true);
 		dialog.remove();
 	}
-	function confirm() {
+	function confirmAction() {
 		cleanup();
 		onConfirm();
 	}
@@ -716,7 +716,7 @@ function openConfirmDialog({ id, text, items, confirmLabel, onConfirm }) {
 			if (event.target === cancelButton) {
 				cancel();
 			} else {
-				confirm();
+				confirmAction();
 			}
 		} else if (event.key === 'Escape') {
 			event.preventDefault();
@@ -724,7 +724,7 @@ function openConfirmDialog({ id, text, items, confirmLabel, onConfirm }) {
 			cancel();
 		}
 	}
-	confirmButton.addEventListener('click', confirm);
+	confirmButton.addEventListener('click', confirmAction);
 	cancelButton.addEventListener('click', cancel);
 	document.addEventListener('keydown', onKeyDown, true);
 	document.body.appendChild(dialog);
