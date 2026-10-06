@@ -21,10 +21,13 @@ import (
 )
 
 const (
-	checkUsage      = "usage: zing check SID"
-	checkTimeout    = 10 * time.Minute
-	checkTimeoutMsg = "zing check: timed out after 10m"
+	checkUsage   = "usage: zing check SID"
+	checkTimeout = 10 * time.Minute
 )
+
+// checkTimeoutMsg is built from checkTimeout, rather than naming "10m" a
+// second time, so the two can never drift apart (review finding r1f1).
+var checkTimeoutMsg = fmt.Sprintf("zing check: timed out after %s", checkTimeout)
 
 // checkIDPattern mirrors response.Scenario's own id shape
 // (jsonschema:"pattern=^s[0-9]+$").
@@ -74,7 +77,7 @@ func check(args []string, getenv func(string) string, dir string, env []string, 
 
 	sc, found, err := readScenario(path, id)
 	if err != nil {
-		fmt.Fprintf(stderr, "zing check: %v\n", err)
+		fmt.Fprintf(stderr, "zing check: read scenarios: %v\n", err)
 		return 1
 	}
 	if !found {
@@ -94,6 +97,14 @@ func check(args []string, getenv func(string) string, dir string, env []string, 
 	case runErr != nil:
 		fmt.Fprintf(stderr, "zing check: %v\n", runErr)
 		return 1
+	case exitCode < 0:
+		// job.RunShell gives a negative exitCode with a nil error when the
+		// shell was killed by a signal rather than exiting on its own
+		// (exec.ExitError.ExitCode(), review finding r1f2): returning that
+		// unchanged would exit this process with status 255, a number the
+		// judge cannot tell apart from a real check exit of 255.
+		fmt.Fprintln(stderr, "zing check: killed by signal")
+		return 1
 	default:
 		return exitCode
 	}
@@ -105,7 +116,7 @@ func check(args []string, getenv func(string) string, dir string, env []string, 
 func readScenario(path, id string) (sc response.Scenario, found bool, err error) {
 	f, openErr := os.Open(path) //nolint:gosec // G304: path is checked by scenariosFilePathOK, above, against this process's own ZING_RUN_TOKEN before this is ever called
 	if openErr != nil {
-		return response.Scenario{}, false, openErr
+		return response.Scenario{}, false, fmt.Errorf("open %s: %w", path, openErr)
 	}
 	defer func() { _ = f.Close() }()
 
@@ -116,7 +127,7 @@ func readScenario(path, id string) (sc response.Scenario, found bool, err error)
 			return response.Scenario{}, false, nil
 		}
 		if tokErr != nil {
-			return response.Scenario{}, false, tokErr
+			return response.Scenario{}, false, fmt.Errorf("%s: next token: %w", path, tokErr)
 		}
 		start, ok := tok.(xml.StartElement)
 		if !ok || start.Name.Local != "scenario" {
@@ -124,7 +135,7 @@ func readScenario(path, id string) (sc response.Scenario, found bool, err error)
 		}
 		var cur response.Scenario
 		if decErr := dec.DecodeElement(&cur, &start); decErr != nil {
-			return response.Scenario{}, false, decErr
+			return response.Scenario{}, false, fmt.Errorf("%s: decode scenario: %w", path, decErr)
 		}
 		if cur.ID == id {
 			return cur, true, nil

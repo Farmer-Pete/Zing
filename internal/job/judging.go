@@ -306,13 +306,35 @@ func (h judgeHandler) Run(ctx context.Context, t store.Ticket, d Deps) (store.Ha
 		}
 
 		if sha == prevSHA {
+			// review finding r1f5: the fix that lands round m's own fix
+			// request runs as an ordinary build/fix round, and anything it
+			// escalates along the way (a sandbox hiccup, judgeStartChecks's
+			// own worktree or branch check on an earlier tick) carries this
+			// same origin "judge" and, retried, writes the very same bare
+			// markerRetryRequested this guard looks for. Comparing against
+			// "newest" (round m's own failed marker, written before the fix
+			// ever opened) would mistake that unrelated retry for the
+			// owner's own answer to this guard. The newest "fix landed"
+			// marker -- round m's fix landing is always the latest one by
+			// the time this branch ever runs -- sits after every one of
+			// those mid-fix retries, so only a retry requested after it can
+			// be the owner's answer to this guard.
+			floor := newest.ID
+			landed, landedErr := d.Store.MarkersWithPrefix(ctx, t.ID, fixLandedPrefix)
+			if landedErr != nil {
+				return store.HandlerCommit{}, fmt.Errorf("job: judging: fix landed markers: %w", landedErr)
+			}
+			if n := len(landed); n > 0 && landed[n-1].ID > floor {
+				floor = landed[n-1].ID
+			}
+
 			retries, retryErr := d.Store.MarkersWithPrefix(ctx, t.ID, markerRetryRequested)
 			if retryErr != nil {
 				return store.HandlerCommit{}, fmt.Errorf("job: judging: retry requested markers: %w", retryErr)
 			}
 			retried := false
 			for i := range retries {
-				if retries[i].ID > newest.ID && retries[i].Body == markerRetryRequested {
+				if retries[i].ID > floor && retries[i].Body == markerRetryRequested {
 					retried = true
 					break
 				}

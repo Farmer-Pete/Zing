@@ -41,6 +41,59 @@ func TestCheckRunsThroughSh(t *testing.T) {
 	}
 }
 
+// TestCheckPassesCallerEnvironment proves check runs the scenario's check
+// command with env as its own whole environment, not nil (review finding
+// r1f4): the plan's own goal is that the caller's environment, sandbox
+// variables included, survives into the check (RunShell's own doc,
+// commands.go), and a check that only ever ran with env nil would still
+// pass every other test in this file.
+func TestCheckPassesCallerEnvironment(t *testing.T) {
+	const runID = int64(22)
+	content := `<scenario id="s1" kind="behavior" check="test &quot;$ZING_CHECK_PROBE&quot; = yes"><given>g</given><when>w</when><then>t</then></scenario>` + "\n"
+	path := writeScenariosFixture(t, t.TempDir(), runID, content)
+	getenv := scenariosGetenv(map[string]string{
+		scenariosTokenEnv: strconv.FormatInt(runID, 10),
+		scenariosFileEnv:  path,
+	})
+
+	var out, errOut bytes.Buffer
+	code := check([]string{"s1"}, getenv, t.TempDir(), []string{"ZING_CHECK_PROBE=yes"}, &out, &errOut)
+	if code != 0 {
+		t.Errorf("code = %d, want 0 with ZING_CHECK_PROBE=yes in env (stderr: %q)", code, errOut.String())
+	}
+
+	out.Reset()
+	errOut.Reset()
+	code = check([]string{"s1"}, getenv, t.TempDir(), nil, &out, &errOut)
+	if code != 1 {
+		t.Errorf("code = %d, want 1 with no env (stderr: %q)", code, errOut.String())
+	}
+}
+
+// TestCheckKilledBySignal proves a check that dies by signal (rather than
+// exiting on its own) exits 1 with a message naming the signal kill, not
+// the raw exec.ExitError.ExitCode() of -1 (review finding r1f2): returned
+// unchanged, -1 becomes the process's own exit status 255, a number the
+// judge cannot tell apart from a real check exit of 255.
+func TestCheckKilledBySignal(t *testing.T) {
+	const runID = int64(23)
+	content := `<scenario id="s1" kind="behavior" check="kill -9 $$"><given>g</given><when>w</when><then>t</then></scenario>` + "\n"
+	path := writeScenariosFixture(t, t.TempDir(), runID, content)
+
+	var out, errOut bytes.Buffer
+	code := check([]string{"s1"}, scenariosGetenv(map[string]string{
+		scenariosTokenEnv: strconv.FormatInt(runID, 10),
+		scenariosFileEnv:  path,
+	}), t.TempDir(), nil, &out, &errOut)
+
+	if code != 1 {
+		t.Errorf("code = %d, want 1 (stderr: %q)", code, errOut.String())
+	}
+	if !strings.Contains(errOut.String(), "killed by signal") {
+		t.Errorf("stderr = %q, want it to mention a signal kill", errOut.String())
+	}
+}
+
 // TestCheckRefusesOutsideJudgeRun proves every refusal path exits 2 with a
 // one-line stderr message and runs nothing: a canary check that would
 // touch a file, reachable only past every one of these checks, must leave

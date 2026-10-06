@@ -2333,3 +2333,62 @@ func TestJudgeNoChangeFixRetryRejudges(t *testing.T) {
 		t.Errorf("finalCommit.Messages = %+v, want a message starting %q", finalCommit.Messages, want)
 	}
 }
+
+// TestJudgeNoChangeFixEscalatesDespiteEarlierRetry proves the same-sha
+// guard does not mistake a markerRetryRequested written for some earlier,
+// unrelated escalation during the fix's own run (here, inserted directly
+// after round 1 fails but before the no-change fix lands, standing in for
+// an owner Retry on, say, a worktree or branch check judgeStartChecks
+// raised while landing the fix) for the owner's own answer to the
+// same-sha escalation (review finding r1f5): that stale marker already
+// sits newer than round 1's own "failed" marker, so without
+// judgeSameSHAEscalation's own fresh "failed" marker, the failed-round
+// branch's retried check would start round 2 on the sha round 1 already
+// judged.
+func TestJudgeNoChangeFixEscalatesDespiteEarlierRetry(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow end-to-end flow; runs in the full suite")
+	}
+	t.Parallel()
+	s, ticket := judgeTicketReady(t)
+
+	scripts := judgeScriptsFS(judgeOkBothScript)
+	scripts["build/fix/1.xml"] = &fstest.MapFile{Data: []byte(judgeNoChangeFixBuildScript)}
+	rt := runtime.NewFake(scripts)
+
+	checks := &judgeScriptedCheckCommands{real: NewCommandRunner(sandbox.Off(), false), steps: []judgeCheckStep{{exit: 1}}}
+
+	ticket = judgeFailRoundOne(t, s, ticket, rt, checks)
+
+	if _, err := s.InsertMessage(t.Context(), store.Message{
+		TicketID: ticket.ID, Type: msgTypeUpdate, Author: authorSystem, Body: markerRetryRequested,
+	}); err != nil {
+		t.Fatalf("InsertMessage(stale retry requested): %v", err)
+	}
+
+	driveJudgeFixToLanding(t, s, ticket.ID, rt, checks, pbNoopShellCmd)
+
+	ticket = pbGetTicket(t, s, ticket.ID)
+	if ticket.State != stateJudging {
+		t.Fatalf("after the no-change fix landed: ticket state = %q, want judging", ticket.State)
+	}
+
+	deps := pbWithTestCmd(pbClaim(t, s, rt, ticket.ID), ticket, judgeFixTestCmd)
+	deps.Commands = checks
+	commit, err := (judgeHandler{}).Run(t.Context(), ticket, deps) // next tick after the no-change fix
+	if err != nil {
+		t.Fatalf("Run after no-change fix: %v", err)
+	}
+
+	for _, m := range commit.Messages {
+		if strings.HasPrefix(m.Body, "judge round 2 started") {
+			t.Errorf("commit.Messages = %+v, want no \"judge round 2 started\" marker (the stale retry is unrelated to the same-sha escalation)", commit.Messages)
+		}
+	}
+	if commit.Escalation == nil {
+		t.Fatal("commit.Escalation = nil, want a cannot_run escalation")
+	}
+	if commit.Escalation.Payload.Code != string(response.EscalationCodeCannotRun) {
+		t.Errorf("escalation code = %q, want %q", commit.Escalation.Payload.Code, response.EscalationCodeCannotRun)
+	}
+}

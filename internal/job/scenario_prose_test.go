@@ -23,7 +23,12 @@ func TestCheckScenarioShape_RejectsProseGrep(t *testing.T) {
 		check string
 	}{
 		{name: "grep -qF against a .md file", check: `grep -qF 'two words' prompts/x.md`},
-		{name: "grep -F against a prompts/ file", check: `grep -F 'a b' docs/y.md`},
+		{name: "grep -F against a .md file outside prompts/", check: `grep -F 'a b' docs/y.md`},
+		{name: "double-quoted phrase against a prompts/ file", check: `grep -qF "two words" prompts/x.md`},
+		{name: "grep -q without F against a .md file", check: `grep -q 'two words' docs/y.md`},
+		{name: "grep -F against a non-.md prompts/ file", check: `grep -F 'two words' prompts/x.txt`},
+		{name: "tr -d newline escape does not join", check: `tr -d '\n' < prompts/x.md | grep -qF 'two words'`},
+		{name: "tr -d space class does not join", check: `tr -d '[:space:]' < prompts/x.md | grep -qF 'two words'`},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -93,6 +98,26 @@ func TestCheckScenarioShape_RejectsUnquotedGlob(t *testing.T) {
 	}
 	if errs := checkScenarioShape(noneScenarios); len(errs) != 0 {
 		t.Fatalf("checkScenarioShape = %+v, want no errors", errs)
+	}
+}
+
+// TestCheckScenarioShape_UnquotedGlobKeepsQuotedSpace is a regression test
+// for review finding r1f7: a shell word that opens a quote holding a
+// space, such as grep "a b"*.go, must be reported whole. Before the fix,
+// wordStart (and the word's own end) moved on every space, quoted or not,
+// so the reported word was the mangled b"*.go instead of "a b"*.go.
+func TestCheckScenarioShape_UnquotedGlobKeepsQuotedSpace(t *testing.T) {
+	t.Parallel()
+	scenarios := []response.Scenario{
+		{ID: "s1", Then: okThen, Check: `grep "a b"*.go main.go`},
+		{ID: "s2", Then: okThen, Check: okCheck},
+	}
+	errs := checkScenarioShape(scenarios)
+	if len(errs) != 1 || errs[0].Path != scenario0CheckPath {
+		t.Fatalf("checkScenarioShape = %+v, want one error on %s", errs, scenario0CheckPath)
+	}
+	if !strings.Contains(errs[0].Msg, `"a b"*.go`) {
+		t.Fatalf("checkScenarioShape Msg = %q, want it to name the whole word \"a b\"*.go", errs[0].Msg)
 	}
 }
 

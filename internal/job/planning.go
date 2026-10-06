@@ -1068,11 +1068,17 @@ var proseGrep = regexp.MustCompile(`\bgrep\b[^|;&]*-[A-Za-z]*[Fq][A-Za-z]*[^|;&]
 // prompts/, the hard-wrapped prose a multi-word grep can miss.
 var proseTarget = regexp.MustCompile(`\.md\b|prompts/`)
 
-// joinsLines matches a check that pipes a file through tr collapsing
-// newlines or any whitespace run (the [:space:] class) to a single space
-// before grepping it, the safe form that can't miss a phrase split across
-// a wrapped line.
-var joinsLines = regexp.MustCompile(`(?s)\btr\b.*?(\\n|\[:space:\])`)
+// joinsLines matches a check that pipes a file through tr replacing
+// newlines or any whitespace run (the [:space:] class) with a single
+// space before grepping it, the safe form that can't miss a phrase split
+// across a wrapped line. It requires tr's own second operand to be a
+// quoted single space, not just the newline or [:space:] class anywhere
+// in the check (review finding r1f6): tr -d '\n' or tr -d '[:space:]'
+// deletes the line break instead of replacing it with a space, so
+// "two\nwords" becomes "twowords" and a phrase grep still misses it, and
+// requiring the literal replacement rules that out (tr -d's one operand
+// can never match the second, quoted-single-space group below).
+var joinsLines = regexp.MustCompile(`\btr\b(?:\s+-s)?\s+('\\n'|"\\n"|'\[:space:\]'|"\[:space:\]")\s+(' '|" ")`)
 
 // proseGrepWithoutJoin is true when a check greps a multi-word phrase (per
 // proseGrep) against prose (per proseTarget) without first joining the
@@ -1089,7 +1095,11 @@ const proseGrepCheckMsg = `check greps a phrase of more than one word in hard-wr
 // any quoting and isn't immediately preceded by "$" (a shell parameter
 // such as "$?", not a glob). zsh (the judge agent's login shell) aborts on
 // such a glob when it matches nothing, rather than passing it through
-// literally the way bash does.
+// literally the way bash does. wordStart only moves on whitespace outside
+// both quote kinds, and the word's own end (scanWordEnd) is found the same
+// quote-aware way, so a shell word holding a quoted space, such as
+// grep "a b"*.go, is reported whole rather than cut at the space inside
+// its own quotes (review finding r1f7).
 func unquotedGlob(check string) (string, bool) {
 	runes := []rune(check)
 	var inSingle, inDouble, escaped bool
@@ -1106,19 +1116,43 @@ func unquotedGlob(check string) (string, bool) {
 			inSingle = !inSingle
 		case r == '"' && !inSingle:
 			inDouble = !inDouble
-		case unicode.IsSpace(r):
+		case unicode.IsSpace(r) && !inSingle && !inDouble:
 			wordStart = i + 1
 		case (r == '*' || r == '?') && !inSingle && !inDouble:
 			if i == 0 || runes[i-1] != '$' {
-				wordEnd := i
-				for wordEnd < len(runes) && !unicode.IsSpace(runes[wordEnd]) {
-					wordEnd++
-				}
+				wordEnd := scanWordEnd(runes, i, inSingle, inDouble)
 				return string(runes[wordStart:wordEnd]), true
 			}
 		}
 	}
 	return "", false
+}
+
+// scanWordEnd returns the index just past the shell word that starts
+// somewhere at or before start (inSingle, inDouble: start's own quote
+// state), continuing past start the same quote-aware way unquotedGlob's
+// own loop does, so whitespace inside a quote the word has already opened
+// does not end the word early.
+func scanWordEnd(runes []rune, start int, inSingle, inDouble bool) int {
+	var escaped bool
+	i := start
+	for i < len(runes) {
+		r := runes[i]
+		switch {
+		case escaped:
+			escaped = false
+		case r == '\\' && !inSingle:
+			escaped = true
+		case r == '\'' && !inDouble:
+			inSingle = !inSingle
+		case r == '"' && !inSingle:
+			inDouble = !inDouble
+		case unicode.IsSpace(r) && !inSingle && !inDouble:
+			return i
+		}
+		i++
+	}
+	return i
 }
 
 func unquotedGlobCheckMsg(word string) string {
