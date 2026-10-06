@@ -22,14 +22,16 @@ import (
 // Test-only stand-ins, reused across this file's cases so each raw string
 // appears once: a commit sha, the one required-check context most cases
 // use, a second check name (not "lint" -- building.go's own check command
-// already carries that name), and two commit-status contexts.
+// already carries that name), two commit-status contexts, and a two-line
+// text used both as a log tail and as retry notes.
 const (
-	ciSHA          = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
-	testRequiredCI = "ci"
-	testCheckB     = "typecheck"
-	testStatusA    = "deploy"
-	testStatusB    = "codecov"
-	testInProgress = "in_progress"
+	ciSHA           = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+	testRequiredCI  = "ci"
+	testCheckB      = "typecheck"
+	testStatusA     = "deploy"
+	testStatusB     = "codecov"
+	testInProgress  = "in_progress"
+	testTwoLineText = "line one\nline two"
 )
 
 // -----------------------------------------------------------------------
@@ -439,7 +441,7 @@ func TestCILogText(t *testing.T) {
 			}
 			switch jobID {
 			case 111:
-				return "line one\nline two", nil
+				return testTwoLineText, nil
 			case 222:
 				return "", errors.New("signed url expired")
 			default:
@@ -668,7 +670,7 @@ func TestParseBaseMergeRequest(t *testing.T) {
 		}
 	})
 
-	retry := baseMergeRequest{MessageID: 9, AfterRunID: 4, BaseBranch: pbFixtureDefaultBranch, BaseSHA: strings.Repeat("b", 40), RetryOf: 7, Notes: "line one\nline two"}
+	retry := baseMergeRequest{MessageID: 9, AfterRunID: 4, BaseBranch: pbFixtureDefaultBranch, BaseSHA: strings.Repeat("b", 40), RetryOf: 7, Notes: testTwoLineText}
 	t.Run("retry request round-trips", func(t *testing.T) {
 		t.Parallel()
 		row := store.MessageRow{ID: retry.MessageID, Message: store.Message{Body: retry.body()}} //nolint:modernize // keyed on purpose: MessageRow's ID and CreatedAt fields precede the embedded Message, so the key cannot be dropped
@@ -705,6 +707,56 @@ func TestParseBaseMergeRequest(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestBaseMergeRequestPointRoundTrip proves the Point field round-trips
+// through body/parseBaseMergeRequest for each syncPoint, with and without a
+// retry, and that an unrecognized point name is malformed the same way the
+// existing malformed cases are.
+func TestBaseMergeRequestPointRoundTrip(t *testing.T) {
+	t.Parallel()
+
+	for _, point := range []syncPoint{syncPointReview, syncPointJudge, syncPointCI} {
+		t.Run(string(point)+" request round-trips", func(t *testing.T) {
+			t.Parallel()
+			req := baseMergeRequest{MessageID: 7, AfterRunID: 3, BaseBranch: pbFixtureDefaultBranch, BaseSHA: strings.Repeat("a", 40), Point: point}
+			row := store.MessageRow{ID: req.MessageID, Message: store.Message{Body: req.body()}} //nolint:modernize // keyed on purpose: MessageRow's ID and CreatedAt fields precede the embedded Message, so the key cannot be dropped
+			got, err := parseBaseMergeRequest(row)
+			if err != nil {
+				t.Fatalf("parseBaseMergeRequest() error = %v", err)
+			}
+			if got != req {
+				t.Errorf("parseBaseMergeRequest() = %+v, want %+v", got, req)
+			}
+		})
+	}
+
+	retry := baseMergeRequest{MessageID: 9, AfterRunID: 4, BaseBranch: pbFixtureDefaultBranch, BaseSHA: strings.Repeat("b", 40), Point: syncPointCI, RetryOf: 7, Notes: testTwoLineText}
+	t.Run("point ci retry request round-trips", func(t *testing.T) {
+		t.Parallel()
+		row := store.MessageRow{ID: retry.MessageID, Message: store.Message{Body: retry.body()}} //nolint:modernize // keyed on purpose: MessageRow's ID and CreatedAt fields precede the embedded Message, so the key cannot be dropped
+		got, err := parseBaseMergeRequest(row)
+		if err != nil {
+			t.Fatalf("parseBaseMergeRequest() error = %v", err)
+		}
+		if got != retry {
+			t.Errorf("parseBaseMergeRequest() = %+v, want %+v", got, retry)
+		}
+	})
+
+	t.Run("bogus point name is malformed", func(t *testing.T) {
+		t.Parallel()
+		body := "base merge requested after run 1\nbase main " + strings.Repeat("a", 40) + "\npoint bogus"
+		row := store.MessageRow{ID: 42, Message: store.Message{Body: body}} //nolint:modernize // keyed on purpose: MessageRow's ID and CreatedAt fields precede the embedded Message, so the key cannot be dropped
+		_, err := parseBaseMergeRequest(row)
+		wantErr := "job: base merge request 42: malformed marker"
+		if err == nil || err.Error() != wantErr {
+			t.Errorf("parseBaseMergeRequest() error = %v, want %q", err, wantErr)
+		}
+		if !errors.Is(err, ErrMalformedBaseMergeRequest) {
+			t.Errorf("errors.Is(%v, ErrMalformedBaseMergeRequest) = false, want true", err)
+		}
+	})
 }
 
 func TestOpenBaseMergeRequest(t *testing.T) {
@@ -809,6 +861,60 @@ func TestPollMergeCount(t *testing.T) {
 	}
 	if got := pollMergeCount(rows); got != 2 {
 		t.Errorf("pollMergeCount() = %d, want 2", got)
+	}
+}
+
+// TestPollMergeCountSkipsPointRequests proves a baseSync point's own
+// requests (a point line, with or without a retry line) never count toward
+// POLL's own budget; a malformed row still counts, as today.
+func TestPollMergeCountSkipsPointRequests(t *testing.T) {
+	t.Parallel()
+
+	pollA := baseMergeRequest{MessageID: 1, AfterRunID: 1, BaseBranch: pbFixtureDefaultBranch, BaseSHA: strings.Repeat("a", 40)}
+	pollB := baseMergeRequest{MessageID: 2, AfterRunID: 2, BaseBranch: pbFixtureDefaultBranch, BaseSHA: strings.Repeat("b", 40)}
+	pointReview := baseMergeRequest{MessageID: 3, AfterRunID: 3, BaseBranch: pbFixtureDefaultBranch, BaseSHA: strings.Repeat("c", 40), Point: syncPointReview}
+	pointJudgeRetry := baseMergeRequest{MessageID: 4, AfterRunID: 4, BaseBranch: pbFixtureDefaultBranch, BaseSHA: strings.Repeat("d", 40), Point: syncPointJudge, RetryOf: 3}
+	malformed := store.MessageRow{ID: 5, Message: store.Message{Body: "base merge requested after run 5\nnot a base line"}} //nolint:modernize // keyed on purpose: MessageRow's ID and CreatedAt fields precede the embedded Message, so the key cannot be dropped
+
+	rows := []store.MessageRow{
+		{ID: pollA.MessageID, Message: store.Message{Body: pollA.body()}},                     //nolint:modernize // keyed on purpose: MessageRow's ID and CreatedAt fields precede the embedded Message, so the key cannot be dropped
+		{ID: pollB.MessageID, Message: store.Message{Body: pollB.body()}},                     //nolint:modernize // keyed on purpose: MessageRow's ID and CreatedAt fields precede the embedded Message, so the key cannot be dropped
+		{ID: pointReview.MessageID, Message: store.Message{Body: pointReview.body()}},         //nolint:modernize // keyed on purpose: MessageRow's ID and CreatedAt fields precede the embedded Message, so the key cannot be dropped
+		{ID: pointJudgeRetry.MessageID, Message: store.Message{Body: pointJudgeRetry.body()}}, //nolint:modernize // keyed on purpose: MessageRow's ID and CreatedAt fields precede the embedded Message, so the key cannot be dropped
+		malformed,
+	}
+	if got := pollMergeCount(rows); got != 3 {
+		t.Errorf("pollMergeCount() = %d, want 3", got)
+	}
+}
+
+// TestPointMergeCount proves pointMergeCount counts only the rows a given
+// point opened (a point line naming it, no retry line), apart per point.
+func TestPointMergeCount(t *testing.T) {
+	t.Parallel()
+
+	reviewA := baseMergeRequest{MessageID: 1, AfterRunID: 1, BaseBranch: pbFixtureDefaultBranch, BaseSHA: strings.Repeat("a", 40), Point: syncPointReview}
+	reviewB := baseMergeRequest{MessageID: 2, AfterRunID: 2, BaseBranch: pbFixtureDefaultBranch, BaseSHA: strings.Repeat("b", 40), Point: syncPointReview}
+	reviewRetry := baseMergeRequest{MessageID: 3, AfterRunID: 3, BaseBranch: pbFixtureDefaultBranch, BaseSHA: strings.Repeat("c", 40), Point: syncPointReview, RetryOf: 1}
+	judgeA := baseMergeRequest{MessageID: 4, AfterRunID: 4, BaseBranch: pbFixtureDefaultBranch, BaseSHA: strings.Repeat("d", 40), Point: syncPointJudge}
+	pollA := baseMergeRequest{MessageID: 5, AfterRunID: 5, BaseBranch: pbFixtureDefaultBranch, BaseSHA: strings.Repeat("e", 40)}
+
+	rows := []store.MessageRow{
+		{ID: reviewA.MessageID, Message: store.Message{Body: reviewA.body()}},         //nolint:modernize // keyed on purpose: MessageRow's ID and CreatedAt fields precede the embedded Message, so the key cannot be dropped
+		{ID: reviewB.MessageID, Message: store.Message{Body: reviewB.body()}},         //nolint:modernize // keyed on purpose: MessageRow's ID and CreatedAt fields precede the embedded Message, so the key cannot be dropped
+		{ID: reviewRetry.MessageID, Message: store.Message{Body: reviewRetry.body()}}, //nolint:modernize // keyed on purpose: MessageRow's ID and CreatedAt fields precede the embedded Message, so the key cannot be dropped
+		{ID: judgeA.MessageID, Message: store.Message{Body: judgeA.body()}},           //nolint:modernize // keyed on purpose: MessageRow's ID and CreatedAt fields precede the embedded Message, so the key cannot be dropped
+		{ID: pollA.MessageID, Message: store.Message{Body: pollA.body()}},             //nolint:modernize // keyed on purpose: MessageRow's ID and CreatedAt fields precede the embedded Message, so the key cannot be dropped
+	}
+
+	if got := pointMergeCount(rows, syncPointReview); got != 2 {
+		t.Errorf("pointMergeCount(review) = %d, want 2", got)
+	}
+	if got := pointMergeCount(rows, syncPointJudge); got != 1 {
+		t.Errorf("pointMergeCount(judge) = %d, want 1", got)
+	}
+	if got := pointMergeCount(rows, syncPointCI); got != 0 {
+		t.Errorf("pointMergeCount(ci) = %d, want 0", got)
 	}
 }
 

@@ -927,11 +927,13 @@ func (h shipHandler) retryMerge(ctx context.Context, t store.Ticket, d Deps, res
 
 // reopenMerge closes req and opens its successor in one commit (overview
 // design "Request lifecycle" and "Markers" table): "base merge closed <req
-// id>", then a fresh request carrying req's own base branch and sha,
+// id>", then a fresh request carrying req's own base branch, sha and Point,
 // RetryOf req's id, and Notes the two notes joined by a blank line with
-// empty parts dropped. The worktree is left exactly as it is: StartBaseMerge
-// finds the merge still in progress and the fresh run continues from the
-// half-resolved tree.
+// empty parts dropped. The successor keeps the point, so the marker still
+// shows where the merge came from, while its retry line keeps it out of
+// both pollMergeCount and pointMergeCount. The worktree is left exactly as
+// it is: StartBaseMerge finds the merge still in progress and the fresh run
+// continues from the half-resolved tree.
 func (h shipHandler) reopenMerge(ctx context.Context, t store.Ticket, d Deps, req baseMergeRequest, notes string, resolveIDs []int64) (store.HandlerCommit, error) {
 	maxRunID, err := d.Store.MaxRunID(ctx, t.ID)
 	if err != nil {
@@ -945,7 +947,7 @@ func (h shipHandler) reopenMerge(ctx context.Context, t store.Ticket, d Deps, re
 		parts = append(parts, notes)
 	}
 	next := baseMergeRequest{
-		AfterRunID: maxRunID, BaseBranch: req.BaseBranch, BaseSHA: req.BaseSHA,
+		AfterRunID: maxRunID, BaseBranch: req.BaseBranch, BaseSHA: req.BaseSHA, Point: req.Point,
 		RetryOf: req.MessageID, Notes: strings.Join(parts, "\n\n"),
 	}
 
