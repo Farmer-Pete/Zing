@@ -44,18 +44,21 @@ const (
 // no reason to assert on.
 func seedGateQuestion(t *testing.T, s *store.Store, ticketID int64) {
 	t.Helper()
-	seedGateQuestionInState(t, s, ticketID, response.QuestionStateOpen, testQuestionStateOpen)
+	seedGateQuestionInState(t, s, ticketID, response.QuestionStateOpen)
 }
 
 // seedGateQuestionInState is seedGateQuestion's shared implementation,
-// parameterized on the gate's own payload and message state, so a fixture
-// needing a gate question already resolved -- the shape a sealed ticket's
-// own gate leaves behind (sealed_section_test.go) -- defines the gate's
-// shape once rather than copying it (r1f1).
-func seedGateQuestionInState(t *testing.T, s *store.Store, ticketID int64, payloadState response.QuestionState, msgState string) {
+// parameterized on the gate's own payload state, so a fixture needing a
+// gate question already resolved -- the shape a sealed ticket's own gate
+// leaves behind (sealed_section_test.go) -- defines the gate's shape once
+// rather than copying it (r1f1). The message's own State mirrors the
+// payload's state (r2f1): the two never disagree, since there is only one
+// caller-supplied state to derive both from.
+func seedGateQuestionInState(t *testing.T, s *store.Store, ticketID int64, state response.QuestionState) {
 	t.Helper()
+	msgState := string(state)
 	payload, err := json.Marshal(response.QuestionPayload{
-		Key: "Q1", Kind: response.QuestionKindGate, State: payloadState,
+		Key: "Q1", Kind: response.QuestionKindGate, State: state,
 		Recommended: "a",
 		Options:     []response.Option{{Key: "a", Text: "Approve"}, {Key: "b", Text: "Reject"}},
 	})

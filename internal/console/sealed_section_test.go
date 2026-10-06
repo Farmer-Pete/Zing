@@ -83,8 +83,39 @@ func seedSealedSectionFixture(t *testing.T, s *store.Store) int64 {
 		ID: "s1", Kind: response.ScenarioKindHost, Check: sealedSectionHostCheck,
 		Given: "g1", When: "w1", Then: "t1",
 	})
-	seedGateQuestionInState(t, s, ticketID, response.QuestionStateResolved, string(response.QuestionStateResolved))
+	seedGateQuestionInState(t, s, ticketID, response.QuestionStateResolved)
 	return ticketID
+}
+
+// assertSealedSectionCollapsed fails the test unless the sealed section's
+// own opening <details> tag in main carries no bare "open" attribute,
+// whatever position templ wrote it in (r2f2: a single ordered substring
+// match would miss an "open" attribute templ wrote before id or between
+// the other attributes). It locates the last "<details" before
+// id="sealed-section", takes the tag up to its closing '>', splits it into
+// whitespace-separated attribute tokens, and fails if any token is exactly
+// "open" -- matching the whole token so data-preserve-attr="open" (an
+// attribute value, not a token of its own) never counts.
+func assertSealedSectionCollapsed(t *testing.T, main string) {
+	t.Helper()
+	before, _, ok := strings.Cut(main, `id="sealed-section"`)
+	if !ok {
+		t.Fatalf(`assertSealedSectionCollapsed: no id="sealed-section" in:\n%s`, main)
+	}
+	tagStart := strings.LastIndex(before, "<details")
+	if tagStart < 0 {
+		t.Fatalf(`assertSealedSectionCollapsed: no "<details" before id="sealed-section" in:\n%s`, main)
+	}
+	tagEndRel := strings.IndexByte(main[tagStart:], '>')
+	if tagEndRel < 0 {
+		t.Fatalf("assertSealedSectionCollapsed: no closing '>' for the sealed section's <details> tag in:\n%s", main)
+	}
+	tag := main[tagStart : tagStart+tagEndRel]
+	for token := range strings.FieldsSeq(tag) {
+		if token == "open" {
+			t.Errorf("sealed-section rendered open, want collapsed by default; tag: %s", tag)
+		}
+	}
 }
 
 // sealedSectionHTML extracts the post-gate section's own fragment from a
@@ -131,9 +162,7 @@ func TestThreadSealedSection_PostGateStatesShowBoxes(t *testing.T) {
 			if !strings.Contains(main, "Sealed plan and scenarios") {
 				t.Error(`main frame missing "Sealed plan and scenarios"`)
 			}
-			if strings.Contains(section, `id="sealed-section" class="sealed-section" data-preserve-attr="open" open`) {
-				t.Error("sealed-section rendered open, want collapsed by default")
-			}
+			assertSealedSectionCollapsed(t, main)
 
 			if n := strings.Count(section, `data-target="scenario"`); n != 1 {
 				t.Errorf(`data-target="scenario" count = %d, want 1`, n)
