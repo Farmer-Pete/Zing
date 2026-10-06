@@ -971,7 +971,7 @@ func judgeRunAndRoute(
 		c, err := questionOutcomeCommit(t, d, rr, resp.Questions, sessionCommit, resolveIDs)
 		return c, rr, err
 	case *response.JudgeErrorResponse:
-		c, err := judgeErrorCommit(t, d, rr, resp, sessionCommit, resolveIDs)
+		c, err := judgeErrorCommit(ctx, t, d, rr, resp, sessionCommit, resolveIDs)
 		return c, rr, err
 	case *response.ErrorResponse:
 		// Unreachable once the registry maps judge errors to
@@ -982,13 +982,141 @@ func judgeRunAndRoute(
 	}
 }
 
-// judgeErrorCommit routes the judge's own error outcome (JudgeErrorResponse):
-// its RunError half is terminalized exactly as errorOutcomeCommit does for
-// every other job's plain ErrorResponse. The amendment half lands in a
-// later task; today it carries only the no-amendment path.
-func judgeErrorCommit(t store.Ticket, d Deps, rr runResult, resp *response.JudgeErrorResponse, sessionCommit *store.SessionUpsert, resolveIDs []int64) (store.HandlerCommit, error) { //nolint:unparam // error is always nil today; a later task's amendment lookup can fail, and the signature already matches judgeRunAndRoute's other onOk-style callees
+// judgeAmendmentDroppedPrefix starts the Tried line a refused or unresolvable
+// amendment adds (#57, Q2): "amendment dropped: " plus the refusal text,
+// appended to the plain cannot_run escalation's own Tried.
+const judgeAmendmentDroppedPrefix = "amendment dropped: "
+
+// judgeErrorCommit routes the judge's own error outcome (JudgeErrorResponse,
+// #57): its RunError half is terminalized exactly as errorOutcomeCommit does
+// for every other job's plain ErrorResponse, which also writes the plain
+// cannot_run escalation every amendment branch below starts from. A nil
+// Amendment (every code but cannot_run, checkJudgeAmendment) leaves that
+// escalation untouched. Otherwise judgeAmendment resolves it against the
+// ticket's sealed cohort: a refusal (an unknown scenario id, or a check
+// checkScenarioRules refuses) drops the amendment and adds "amendment
+// dropped: REFUSAL" to the escalation's own Tried; a usable one sets
+// Payload.Amendment (escalateTx reads it to offer Accept/Edit it/Abandon
+// instead of Retry/Abandon) and appends judgeAmendmentDiff's rendered old and
+// new text to the escalation body.
+func judgeErrorCommit(ctx context.Context, t store.Ticket, d Deps, rr runResult, resp *response.JudgeErrorResponse, sessionCommit *store.SessionUpsert, resolveIDs []int64) (store.HandlerCommit, error) {
 	plain := &response.ErrorResponse{Head: resp.Head, Error: resp.Error.RunError}
-	return errorOutcomeCommit(t, d, rr, plain, sessionCommit, resolveIDs, response.EscalationOriginJudge), nil
+	c := errorOutcomeCommit(t, d, rr, plain, sessionCommit, resolveIDs, response.EscalationOriginJudge)
+	a := resp.Error.Amendment
+	if a == nil {
+		return c, nil
+	}
+
+	scenarios, err := judgeScenariosFor(ctx, t, d)
+	if err != nil {
+		return store.HandlerCommit{}, err
+	}
+	old, amended, refusal := judgeAmendment(scenarios, *a)
+	if refusal != "" {
+		slog.Info("judge amendment dropped", "ticket_id", t.ID, "run_id", rr.Reserved.RunID, "scenario_id", a.Scenario, "refusal", refusal)
+		c.Escalation.Payload.Tried = appendTried(c.Escalation.Payload.Tried, judgeAmendmentDroppedPrefix+refusal)
+		return c, nil
+	}
+
+	slog.Info("judge amendment offered", "ticket_id", t.ID, "run_id", rr.Reserved.RunID, "scenario_id", amended.Scenario, "kind", string(amended.Kind))
+	c.Escalation.Payload.Amendment = &amended
+	c.Escalation.Body += "\n\n" + judgeAmendmentDiff(old, amended)
+	return c, nil
+}
+
+// appendTried adds line to tried on its own line (#57): an empty tried
+// becomes line, so a plain cannot_run with no prior Tried text still gets a
+// clean single-line "amendment dropped: ..." rather than a leading blank.
+func appendTried(tried, line string) string {
+	if tried == "" {
+		return line
+	}
+	return tried + "\n" + line
+}
+
+// judgeNoSealedScenarioRefusal is judgeAmendment's own unknown-id refusal
+// prefix (#57, Q2): "no sealed scenario " plus the amendment's own scenario
+// id, the owner's own wording for "amendment dropped: no sealed scenario
+// <id>".
+const judgeNoSealedScenarioRefusal = "no sealed scenario "
+
+// judgeAmendment resolves a judge-proposed amendment against the ticket's
+// sealed scenarios (#57): it fills an empty Kind from the named scenario's
+// current kind, then runs checkScenarioRules -- the same per-scenario rules
+// a ready cohort's own scenarios must pass -- against the result. Pure.
+// refusal is "" when a is usable, in which case amended carries a's own
+// fields with Kind resolved; old is the sealed scenario a would replace,
+// zero only alongside the unknown-id refusal. A scenario id this cohort
+// does not have refuses with judgeNoSealedScenarioRefusal plus that id,
+// before checkScenarioRules ever runs (there is no scenario to check against).
+func judgeAmendment(scenarios []response.Scenario, a response.Amendment) (old response.Scenario, amended response.Amendment, refusal string) {
+	i := slices.IndexFunc(scenarios, func(sc response.Scenario) bool { return sc.ID == a.Scenario })
+	if i == -1 {
+		return response.Scenario{}, response.Amendment{}, judgeNoSealedScenarioRefusal + a.Scenario
+	}
+	old = scenarios[i]
+	if a.Kind == "" {
+		a.Kind = old.Kind
+	}
+	sc := response.Scenario{ID: a.Scenario, Kind: a.Kind, Given: a.Given, When: a.When, Then: a.Then, Check: a.Check}
+	errs := checkScenarioRules(i, sc)
+	if len(errs) != 0 {
+		msgs := make([]string, len(errs))
+		for j, e := range errs {
+			msgs[j] = e.Msg
+		}
+		return old, response.Amendment{}, strings.Join(msgs, "; ")
+	}
+	return old, a, ""
+}
+
+// judgeAmendmentFenceFor picks the backtick fence judgeAmendmentDiff wraps
+// one field's value in: a run one longer than the longest run of backticks
+// already in text, never shorter than three, so the fence itself can never
+// be mistaken for part of the fenced text.
+func judgeAmendmentFenceFor(text string) string {
+	longest, run := 0, 0
+	for _, r := range text {
+		if r == '`' {
+			run++
+			if run > longest {
+				longest = run
+			}
+		} else {
+			run = 0
+		}
+	}
+	return strings.Repeat("`", max(longest+1, 3))
+}
+
+// judgeAmendmentDiff renders the markdown the escalation body appends below
+// the judge's own What/Why/Tried (#57): "Reason: " plus amended.Reason, a
+// blank line, then, in order, Given, When, Then, Check and Kind, each as a
+// "**Field**" heading followed by the old value fenced under "Now:" and the
+// amended value fenced under "Amended:" -- the console's markdown parser is
+// plain CommonMark, so this is paired code blocks per field rather than a
+// table (design nongoal). Pure.
+func judgeAmendmentDiff(old response.Scenario, amended response.Amendment) string {
+	fields := []struct{ name, oldVal, newVal string }{
+		{"Given", old.Given, amended.Given},
+		{"When", old.When, amended.When},
+		{"Then", old.Then, amended.Then},
+		{"Check", old.Check, amended.Check},
+		{"Kind", string(old.Kind), string(amended.Kind)},
+	}
+
+	var b strings.Builder
+	b.WriteString("Reason: " + amended.Reason + "\n")
+	for _, f := range fields {
+		oldFence := judgeAmendmentFenceFor(f.oldVal)
+		newFence := judgeAmendmentFenceFor(f.newVal)
+		b.WriteString("\n**" + f.name + "**\n\n")
+		b.WriteString("Now:\n\n")
+		b.WriteString(oldFence + "\n" + f.oldVal + "\n" + oldFence + "\n\n")
+		b.WriteString("Amended:\n\n")
+		b.WriteString(newFence + "\n" + f.newVal + "\n" + newFence + "\n")
+	}
+	return b.String()
 }
 
 // judgeOkCommit is RUN's own "ok" outcome (design section 7.2 step 5):
@@ -1766,4 +1894,60 @@ func (h judgeHandler) retryFreshRound(ctx context.Context, t store.Ticket, d Dep
 	commit.Messages = append([]store.Message{startMsg}, commit.Messages...)
 	commit.ResolveQuestions = resolveIDs
 	return commit, nil
+}
+
+// acceptAmendment is resolvePostBuildEscalation's own "Accept the amended
+// check" row (#57, Q1): it never runs the judge in the same tick (a judge
+// run here would read the sealed scenarios before this commit's own edit
+// lands, and so would run the old check) -- it only commits the amendment
+// through HandlerCommit.ScenarioEdit and the "judge round <n> started"
+// marker together, the same no-runtime-call shape START's own start method
+// gives round 1. The next tick's decision tree reads that marker as a fresh
+// round and runs RUN's first turn itself (enterAfterStart), the same path
+// retryFreshRound already relies on for a pending host check. judgeAmendment
+// runs again here, against the ticket's current sealed cohort, because the
+// rules or the scenario can have changed between the escalation and this
+// answer; a refusal here re-escalates plain cannot_run exactly as a refusal
+// at judgeErrorCommit's own first attempt does.
+func (h judgeHandler) acceptAmendment(ctx context.Context, t store.Ticket, d Deps, resolveIDs []int64, payload response.EscalationPayload) (store.HandlerCommit, error) {
+	scenarios, err := judgeScenariosFor(ctx, t, d)
+	if err != nil {
+		return store.HandlerCommit{}, err
+	}
+	_, a, refusal := judgeAmendment(scenarios, *payload.Amendment)
+	if refusal != "" {
+		slog.Warn("judge amendment refused at accept", "ticket_id", t.ID, "scenario_id", payload.Amendment.Scenario, "question_ids", resolveIDs, "refusal", refusal)
+		tried := appendTried(payload.Tried, judgeAmendmentDroppedPrefix+refusal)
+		c := escalationCommit(t, d, nil, nil, string(response.EscalationCodeCannotRun), payload.What, payload.Why, tried, response.EscalationOriginJudge)
+		c.ResolveQuestions = resolveIDs
+		return c, nil
+	}
+
+	markers, err := d.Store.MarkersWithPrefix(ctx, t.ID, judgeRoundMarkerPrefix)
+	if err != nil {
+		return store.HandlerCommit{}, fmt.Errorf("job: judging: accept amendment: judge round markers: %w", err)
+	}
+	prevN, err := judgeNewestRoundNumber(markers)
+	if err != nil {
+		return store.HandlerCommit{}, err
+	}
+
+	sha, maxRunID, escalation, err := judgeStartChecks(ctx, t, d)
+	if err != nil {
+		return store.HandlerCommit{}, err
+	}
+	if escalation != nil {
+		return *escalation, nil
+	}
+
+	n := prevN + 1
+	slog.Info("judge amendment accepted", "ticket_id", t.ID, "scenario_id", a.Scenario, "kind", string(a.Kind), "round", n, "question_ids", resolveIDs)
+	c := baseCommit(t, d)
+	c.ScenarioEdit = &store.ScenarioEdit{Ref: a.Scenario, Kind: a.Kind, Given: a.Given, When: a.When, Then: a.Then, Check: a.Check, Reason: a.Reason}
+	c.Messages = []store.Message{{
+		TicketID: t.ID, Type: msgTypeUpdate, Author: authorSystem,
+		Body: fmt.Sprintf("judge round %d started sha %s after run %d", n, sha, maxRunID),
+	}}
+	c.ResolveQuestions = resolveIDs
+	return c, nil
 }
