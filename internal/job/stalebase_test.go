@@ -286,6 +286,36 @@ func TestReviewingTickNotesStaleBase(t *testing.T) {
 	}
 }
 
+// TestJudgingTickNotesStaleBase proves judgeHandler.Run's own shim (task 5)
+// notes a stale base exactly like withStaleBaseNote does when driven
+// directly: an unreachable origin, START, then one RUN tick through the
+// real handler, then exactly one stale_base event for step judging with
+// reason no_origin. The assertion covers both ticks, so it doesn't depend
+// on whether START also fetched.
+func TestJudgingTickNotesStaleBase(t *testing.T) {
+	t.Parallel()
+	s, ticket := judgeTicketReady(t)
+	staleBaseBreakOrigin(t, s, ticket.ID)
+	rt := runtime.NewFake(judgeScriptsFS(judgeOkBothScript))
+
+	ticket = judgeAdvanceStart(t, s, rt, ticket)
+
+	deps := pbClaim(t, s, rt, ticket.ID)
+	commit, err := (judgeHandler{}).Run(t.Context(), ticket, deps)
+	if err != nil {
+		t.Fatalf("RUN: %v", err)
+	}
+	pbApply(t, s, ticket, commit)
+
+	events := staleBaseEventsFor(t, s, ticket.ID, stateJudging)
+	if len(events) != 1 {
+		t.Fatalf("staleBaseEventsFor(judging) = %+v, want exactly one", events)
+	}
+	if got := events[0]; got.Reason != "no_origin" {
+		t.Errorf("judging event = %+v, want reason no_origin", got)
+	}
+}
+
 // TestStaleBaseSkip is a table test over staleBaseSkip's pure decision
 // (design shape): the sha and branch validity checks it repeats from the
 // stale_base schema, and the already-noted check over a set of rows.
