@@ -3,6 +3,7 @@ package prompt
 import (
 	"strings"
 	"testing"
+	"time"
 
 	"zing/internal/response"
 )
@@ -80,7 +81,10 @@ func TestForClassify_TicketFenced(t *testing.T) {
 func TestForPlanningFirst_TicketFenced(t *testing.T) {
 	t.Parallel()
 
-	in := ForPlanningFirst("PROMPT", []string{testStyle}, "ticket body", nil)
+	in, err := ForPlanningFirst("PROMPT {build_minutes}", []string{testStyle}, 45, "ticket body", nil)
+	if err != nil {
+		t.Fatalf("ForPlanningFirst: %v", err)
+	}
 	in.Fence = testFence
 	got := Assemble(in)
 
@@ -106,7 +110,10 @@ func TestForPlanningFirst_CarriesPlanRules(t *testing.T) {
 	styles[1] = "sentinel"
 	styles = styles[:1]
 
-	in := ForPlanningFirst("PROMPT", styles, "ticket body", nil)
+	in, err := ForPlanningFirst("PROMPT {build_minutes}", styles, 45, "ticket body", nil)
+	if err != nil {
+		t.Fatalf("ForPlanningFirst: %v", err)
+	}
 	in.Fence = testFence
 	got := Assemble(in)
 
@@ -126,6 +133,30 @@ func TestForPlanningFirst_CarriesPlanRules(t *testing.T) {
 	}
 	if got := styles[:2][1]; got != "sentinel" {
 		t.Errorf("ForPlanningFirst wrote into the caller's spare capacity: styles[1] = %q, want %q", got, "sentinel")
+	}
+}
+
+// TestForPlanningFirst_FillsBuildMinutes pins that ForPlanningFirst fills
+// {build_minutes} with buildMinutes, leaving no placeholder behind, and
+// that a prompt missing the placeholder is the fixed error (#53).
+func TestForPlanningFirst_FillsBuildMinutes(t *testing.T) {
+	t.Parallel()
+
+	in, err := ForPlanningFirst("Split big tasks. {build_minutes} minutes per run.", nil, 45, "ticket body", nil)
+	if err != nil {
+		t.Fatalf("ForPlanningFirst: %v", err)
+	}
+	if !strings.Contains(in.JobPrompt, "45 minutes per run") {
+		t.Errorf("ForPlanningFirst.JobPrompt = %q, want it to contain %q", in.JobPrompt, "45 minutes per run")
+	}
+	if strings.Contains(in.JobPrompt, "{build_minutes}") {
+		t.Errorf("ForPlanningFirst.JobPrompt still contains {build_minutes}: %q", in.JobPrompt)
+	}
+
+	if _, err := ForPlanningFirst("no placeholder here", nil, 45, "ticket body", nil); err == nil {
+		t.Fatal("ForPlanningFirst returned no error for a prompt missing {build_minutes}")
+	} else if want := "prompt: planning prompt lacks placeholder {build_minutes}"; err.Error() != want {
+		t.Errorf("ForPlanningFirst error = %q, want %q", err.Error(), want)
 	}
 }
 
@@ -656,4 +687,32 @@ func TestForRespondResumeHeader(t *testing.T) {
 		t.Errorf("ForRespondResume did not lead with RespondResumeHeader; got:\n%s", got)
 	}
 	assertFenced(t, got, "answers", answers)
+}
+
+// TestDeadline pins Deadline's label, raw (untrusted-false) text, and its
+// minute rounding: a build run's deadline is never fenced, since it is
+// Zing's own text, not owner- or model-supplied.
+func TestDeadline(t *testing.T) {
+	t.Parallel()
+
+	now := time.Date(2026, 10, 5, 14, 0, 0, 0, time.UTC)
+	end := time.Date(2026, 10, 5, 14, 45, 0, 0, time.UTC)
+
+	in := Deadline(now, end)
+	if in.Label != "deadline" {
+		t.Errorf("Deadline.Label = %q, want deadline", in.Label)
+	}
+	if in.Untrusted {
+		t.Error("Deadline.Untrusted = true, want false")
+	}
+	const want = "This run ends at 14:45 UTC, in 45 minutes."
+	if in.Text != want {
+		t.Errorf("Deadline.Text = %q, want %q", in.Text, want)
+	}
+
+	soon := Deadline(now, now.Add(-30*time.Second))
+	const wantSoon = "This run ends at 13:59 UTC, in 0 minutes."
+	if soon.Text != wantSoon {
+		t.Errorf("Deadline.Text = %q, want %q", soon.Text, wantSoon)
+	}
 }

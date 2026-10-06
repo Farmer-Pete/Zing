@@ -28,12 +28,12 @@ func TestPrompts_MatchThePinnedDesignText(t *testing.T) {
 		{
 			name:   "planning-feature",
 			path:   planningFeaturePromptPath,
-			sha256: "0f11778d598981cc345710b1f6e85f24df5e5c1eb8465ea8a50cee563bf18b71",
+			sha256: "bfd291b0af204468b0a2fb152f8f69ba6e0af7063df83ca43019f0fdd5823886",
 		},
 		{
 			name:   "planning-bug",
 			path:   planningBugPromptPath,
-			sha256: "92d0323e54dbce8dc8fae25c3376367038104aa13d6369a0dc28827fcf953721",
+			sha256: "38aa8ae017c1c54323a7f3dfddd68e4576d48349da925751a13dbd4960df34a4",
 		},
 		{
 			name:   "planreview",
@@ -43,7 +43,7 @@ func TestPrompts_MatchThePinnedDesignText(t *testing.T) {
 		{
 			name:   testJobNameBuild,
 			path:   "prompts/build.md",
-			sha256: "abd42e1ac7c2bd904dc54f8679c14cef7ee8d4f30b2b62c87f68bac95122348f",
+			sha256: "c474c2de970139242c79d3ccdfd4411034c1c8c659a9259bd54818ef1e18607d",
 		},
 		{
 			name:   "merge",
@@ -190,6 +190,26 @@ const greenTasksSentence = "Every task ends with its named tests passing; " +
 	"a test written in a task is made to pass in that same task, never left failing for a later one. " +
 	"Zing runs the project's full test and lint commands after each task."
 
+// TestBuildPromptStopsBeforeDeadline proves prompts/build.md tells the
+// builder what the deadline input means and what to do with 10 minutes
+// left: stop, commit nothing, and return the error outcome with code other
+// (#53).
+func TestBuildPromptStopsBeforeDeadline(t *testing.T) {
+	t.Parallel()
+	text := unwrapped(t, "prompts/build.md")
+	for _, want := range []string{
+		"The deadline input says when this run ends.",
+		"Zing stops the run then and keeps nothing from it.",
+		"Check the time with date between steps.",
+		"When 10 minutes remain, stop: commit nothing, start no new command, and return the error outcome with code other.",
+		"In what, list the parts of this task that remain; in tried, list what is done and the files you changed.",
+	} {
+		if !strings.Contains(text, want) {
+			t.Errorf("prompts/build.md lacks %q", want)
+		}
+	}
+}
+
 // TestPlanningPromptsRequireGreenTasks proves both planning prompts tell
 // the planner that no task may end with a failing test (#55).
 func TestPlanningPromptsRequireGreenTasks(t *testing.T) {
@@ -198,6 +218,63 @@ func TestPlanningPromptsRequireGreenTasks(t *testing.T) {
 		if !strings.Contains(unwrapped(t, path), greenTasksSentence) {
 			t.Errorf("%s lacks the green-tasks sentence", path)
 		}
+	}
+}
+
+// taskSizeSentence is what both planning prompts say right after
+// greenTasksSentence (#53): Zing stops each build run after
+// {build_minutes} minutes, so a task expected to need more than half of
+// that, or one that adds three or more new functions with their tests,
+// needs splitting.
+const taskSizeSentence = "Zing builds each task in one run that it stops after {build_minutes} minutes. " +
+	"Split any task you expect to need more than half of that. " +
+	"A task that adds three or more new functions with their tests needs splitting."
+
+// TestPlanningPromptsSizeTasksToRun proves both planning prompts tell the
+// planner the build run's time limit and ask it to split an oversized
+// task, right after the green-tasks sentence, and that each prompt names
+// {build_minutes} exactly once (#53).
+func TestPlanningPromptsSizeTasksToRun(t *testing.T) {
+	t.Parallel()
+	for _, path := range []string{planningFeaturePromptPath, planningBugPromptPath} {
+		text := unwrapped(t, path)
+		if !strings.Contains(text, greenTasksSentence+" "+taskSizeSentence) {
+			t.Errorf("%s lacks the task-size sentence right after the green-tasks sentence", path)
+		}
+		got, err := zing.Assets.ReadFile(path)
+		if err != nil {
+			t.Fatalf("ReadFile(%s): %v", path, err)
+		}
+		if n := strings.Count(string(got), "{build_minutes}"); n != 1 {
+			t.Errorf("%s contains {build_minutes} %d times, want 1", path, n)
+		}
+	}
+}
+
+// simplificationLensTaskSplitLine is the line prompts/lenses/simplification.md
+// adds to its "In a plan" section (#53): plan review proposes splitting an
+// oversized task the same way the task-size sentence above asks the
+// planner itself to.
+const simplificationLensTaskSplitLine = "Find each task that adds three or more new functions with their tests, " +
+	"and propose splitting it so each part fits one build run."
+
+// TestSimplificationLensProposesSplittingOversizedTasks proves
+// prompts/lenses/simplification.md carries the task-split line in its "In
+// a plan" section, before "In code" (#53): deleting or rewording the line
+// would otherwise pass every other test.
+func TestSimplificationLensProposesSplittingOversizedTasks(t *testing.T) {
+	t.Parallel()
+	const path = "prompts/lenses/simplification.md"
+	text := unwrapped(t, path)
+	inPlanIdx := strings.Index(text, "In a plan")
+	inCodeIdx := strings.Index(text, "In code")
+	lineIdx := strings.Index(text, simplificationLensTaskSplitLine)
+	anyMissing := inPlanIdx < 0 || inCodeIdx < 0 || lineIdx < 0
+	if anyMissing {
+		t.Fatalf("%s: In a plan at %d, In code at %d, task-split line at %d, want all present", path, inPlanIdx, inCodeIdx, lineIdx)
+	}
+	if inPlanIdx >= lineIdx || lineIdx >= inCodeIdx {
+		t.Errorf("%s: want the task-split line between In a plan and In code, got In a plan=%d, line=%d, In code=%d", path, inPlanIdx, lineIdx, inCodeIdx)
 	}
 }
 

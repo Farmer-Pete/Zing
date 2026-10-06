@@ -251,6 +251,18 @@ func TestBuildPromptCarriesApprovalNotes(t *testing.T) {
 		t.Errorf("prompt missing approval decision header: %s", rec.lastReq.Prompt)
 	}
 	assertNoLabel(t, rec.lastReq.Prompt, "approval")
+	assertDeadlineIn45Minutes(t, rec.lastReq.Prompt)
+}
+
+// assertDeadlineIn45Minutes proves prompt carries the deadline input built
+// from machine.toml's own build job.timeout_minutes (45): runFirst,
+// runFixFirst, runBuildResume, and the perimeter-revert resume all append
+// it last, so any one of them being dropped would leave this missing.
+func assertDeadlineIn45Minutes(t *testing.T, prompt string) {
+	t.Helper()
+	if !strings.Contains(prompt, "This run ends at") || !strings.Contains(prompt, "in 45 minutes.") {
+		t.Errorf("prompt = %q, want it to contain the deadline input (\"This run ends at\" ... \"in 45 minutes.\")", prompt)
+	}
 }
 
 // ---- RUN --------------------------------------------------------------------
@@ -461,6 +473,7 @@ func TestCheckRejectsAnotherTasksFile(t *testing.T) {
 	if !strings.Contains(lastReq.Prompt, testForeignLineGreet) {
 		t.Errorf("resume prompt = %q, want it to contain %q", lastReq.Prompt, testForeignLineGreet)
 	}
+	assertDeadlineIn45Minutes(t, lastReq.Prompt)
 }
 
 // ---- LAND -------------------------------------------------------------------
@@ -1596,6 +1609,7 @@ func TestResolveRejectedIsRevertedAndResumed(t *testing.T) {
 	if lastReq.SessionID == "" {
 		t.Error("resume request carries no session id, want the build session's own external id")
 	}
+	assertDeadlineIn45Minutes(t, lastReq.Prompt)
 
 	deps := claimForBuild(t, s, scriptRT, ticketID)
 	ticket := getTicket(t, s, ticketID)

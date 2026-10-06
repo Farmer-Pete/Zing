@@ -758,6 +758,7 @@ func (h buildingHandler) runBuildResume(ctx context.Context, t store.Ticket, d D
 	if sess.ExternalID == nil {
 		return store.HandlerCommit{}, fmt.Errorf("job: building: resume: session %d has no external id", sess.ID)
 	}
+	inputs = append(slices.Clone(inputs), deadlineInput(d, time.Now()))
 	su := store.SessionUpsert{ID: &sess.ID, BumpResumes: bump}
 	req := runtime.RunRequest{
 		Job: response.JobBuild, Label: buildLabel(u.TaskN), WorkDir: wt.Dir(),
@@ -1766,6 +1767,7 @@ func (h buildingHandler) runFirst(ctx context.Context, t store.Ticket, d Deps, p
 		return store.HandlerCommit{}, fmt.Errorf("job: building: %w", err)
 	}
 
+	extra = append(slices.Clone(extra), deadlineInput(d, time.Now()))
 	in, err := prompt.ForBuild(promptText, bt, proj.TestCmd, proj.LintCmd, ticketText, planXML, accepted, extra)
 	if err != nil {
 		return store.HandlerCommit{}, fmt.Errorf("job: building: %w", err)
@@ -2711,10 +2713,11 @@ func (h buildingHandler) resolve(ctx context.Context, t store.Ticket, d Deps, ro
 	slog.Warn("paths reverted", "ticket_id", t.ID, "run_id", rid, "count", len(revertChanges))
 
 	notice := orchestrator.PerimeterNotice(revertExtras)
+	inputs := []prompt.NamedInput{{Label: labelPerimeter, Text: notice}, deadlineInput(d, time.Now())}
 	su := store.SessionUpsert{ID: &sess.ID, BumpResumes: true}
 	req := runtime.RunRequest{
 		Job: response.JobBuild, Label: buildLabel(report.Report.TaskN), WorkDir: wt.Dir(),
-		SessionID: *sess.ExternalID, Prompt: prompt.Assemble(prompt.ForBuildResume([]prompt.NamedInput{{Label: labelPerimeter, Text: notice}})),
+		SessionID: *sess.ExternalID, Prompt: prompt.Assemble(prompt.ForBuildResume(inputs)),
 	}
 	sessionRecord := func(rr runResult) *store.SessionUpsert { return resumeSessionRecord(sess.ID, rr) }
 	commit, runErr := runAndRoute(ctx, d, t, jobBuildName, su, req, 0, sessionRecord, resolveIDs, originFor(u),

@@ -518,7 +518,11 @@ func runPlanningFirst(ctx context.Context, t store.Ticket, d Deps, extra []promp
 	if err != nil {
 		return store.HandlerCommit{}, fmt.Errorf("job: planning: %w", err)
 	}
-	in := prompt.ForPlanningFirst(promptText, styles, ticketText, append(append([]prompt.NamedInput{}, extra...), convExtra...))
+	in, err := prompt.ForPlanningFirst(promptText, styles, d.Machine.Jobs[jobBuildName].TimeoutMinutes, ticketText,
+		append(append([]prompt.NamedInput{}, extra...), convExtra...))
+	if err != nil {
+		return store.HandlerCommit{}, fmt.Errorf("job: planning: first turn: %w", err)
+	}
 	in.Schemas = schemas
 	assembled := prompt.Assemble(in)
 

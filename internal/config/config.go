@@ -175,6 +175,9 @@ type Commands struct {
 	// it, the same as Test and Lint. "omitempty" keeps AppendProject from
 	// writing an explicit fix = "" for a project that never set one.
 	Fix string `toml:"fix,omitempty"`
+	// Deny is projects[i].commands.deny: optional Bash command prefixes
+	// build and fix runs may not run, on top of Test and Lint.
+	Deny []string `toml:"deny,omitempty"`
 }
 
 // DefaultPath returns the default config path, ~/.zing/zing.toml.
@@ -524,6 +527,11 @@ func checkRequiredKeys(cfg Config, allowEmptyProjects bool) error {
 			return fmt.Errorf("zing.toml: missing required key projects[%d].commands.test", i)
 		case p.Commands.Lint == "":
 			return fmt.Errorf("zing.toml: missing required key projects[%d].commands.lint", i)
+		}
+		for j, entry := range p.Commands.Deny {
+			if strings.TrimSpace(entry) == "" {
+				return fmt.Errorf("zing.toml: projects[%d].commands.deny[%d] is empty", i, j)
+			}
 		}
 	}
 	return nil

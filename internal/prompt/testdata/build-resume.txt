@@ -24,6 +24,9 @@ output:
 invalid:
 output was not one <zing> document
 
+deadline:
+This run ends at 14:45 UTC, in 45 minutes.
+
 <zing job="build" outcome="ok"> <!-- job: Job, one of: classify | planning | planreview | build | perimeter | review | judge | respond | side, the running job; must match; outcome: Outcome, one of: ok | question | error, one of this job's outcomes, or question, or error -->
   <claims> <!-- BuildClaims -->
     <files_changed>

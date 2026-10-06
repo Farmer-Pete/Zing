@@ -967,6 +967,46 @@ func TestLoad_FixCommandIsOptional(t *testing.T) {
 	})
 }
 
+// TestLoad_CommandsDeny proves projects[i].commands.deny: an explicit list
+// loads back in order, an absent list loads back empty with no error, and a
+// blank entry fails with an error naming its project and entry index.
+func TestLoad_CommandsDeny(t *testing.T) {
+	t.Parallel()
+
+	t.Run("set", func(t *testing.T) {
+		t.Parallel()
+		const withDeny = minimalValidTOML + "deny = [\"go test ./...\", \"make ci\"]\n"
+		cfg, err := Load(writeTOML(t, withDeny))
+		if err != nil {
+			t.Fatalf("Load: %v", err)
+		}
+		want := []string{"go test ./...", "make ci"}
+		if !reflect.DeepEqual(cfg.Projects[0].Commands.Deny, want) {
+			t.Errorf("Commands.Deny = %+v, want %+v", cfg.Projects[0].Commands.Deny, want)
+		}
+	})
+
+	t.Run("absent", func(t *testing.T) {
+		t.Parallel()
+		cfg, err := Load(writeTOML(t, minimalValidTOML))
+		if err != nil {
+			t.Fatalf("Load: %v", err)
+		}
+		if cfg.Projects[0].Commands.Deny != nil {
+			t.Errorf("Commands.Deny = %+v, want nil", cfg.Projects[0].Commands.Deny)
+		}
+	})
+
+	t.Run("blank entry fails", func(t *testing.T) {
+		t.Parallel()
+		const withBlankDeny = minimalValidTOML + "deny = [\"go test ./...\", \"   \"]\n"
+		_, err := Load(writeTOML(t, withBlankDeny))
+		if err == nil || err.Error() != "zing.toml: projects[0].commands.deny[1] is empty" {
+			t.Errorf("Load() error = %v, want projects[0].commands.deny[1] is empty", err)
+		}
+	})
+}
+
 // TestLoadReviewBots proves review_bots' own defaults, explicit values, and
 // value checks (PKG9-PLAN.md, the shipping ticket's silent-review-bot nudge):
 // an absent table defaults to a 20-minute wait and CodeRabbit's own trigger;
@@ -1146,7 +1186,7 @@ func TestAppendProject_AppendsAndLoadsBack(t *testing.T) {
 	want := testAppendedProject
 	want.Intake.AssignedTo = testUser
 	want.Intake.Mode = IntakeModeAuto
-	if got := cfg.Projects[0]; got != want {
+	if got := cfg.Projects[0]; !reflect.DeepEqual(got, want) {
 		t.Errorf("appended project = %+v, want %+v", got, want)
 	}
 }
@@ -1252,7 +1292,7 @@ func TestAppendProject_SecondProjectDoesNotDisturbFirst(t *testing.T) {
 	if len(after.Projects) != 2 {
 		t.Fatalf("Projects = %+v, want two", after.Projects)
 	}
-	if after.Projects[0] != before.Projects[0] {
+	if !reflect.DeepEqual(after.Projects[0], before.Projects[0]) {
 		t.Errorf("first project changed after appending a second: got %+v, want %+v", after.Projects[0], before.Projects[0])
 	}
 	if after.Projects[1].Name != testAppendedProject.Name {

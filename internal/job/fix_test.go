@@ -176,6 +176,7 @@ func TestDriveFixRunsFirstTurn(t *testing.T) {
 		t.Errorf("RunRequest.Label = %q, want \"fix\"", rec.lastReq.Label)
 	}
 	assertFenced(t, rec.lastReq.Prompt, "ci_log", testFixCILogText)
+	assertDeadlineIn45Minutes(t, rec.lastReq.Prompt)
 	if len(commit.Runs) != 1 {
 		t.Fatalf("commit.Runs = %+v, want exactly one", commit.Runs)
 	}

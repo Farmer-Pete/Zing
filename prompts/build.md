@@ -3,6 +3,12 @@ tasks are already committed. You hold nothing from them except the code.
 
 Wait for every command to finish before you continue, and never end your turn while one is still running: a command left running is lost when the run ends. To use a server, start it with `&` inside a shell command, use it from later commands, and stop it before you return.
 
+The deadline input says when this run ends. Zing stops the run then and
+keeps nothing from it. Check the time with date between steps. When 10
+minutes remain, stop: commit nothing, start no new command, and return
+the error outcome with code other. In what, list the parts of this task
+that remain; in tried, list what is done and the files you changed.
+
 Task {n} of {total}: {task title}
 
 Work in this order.

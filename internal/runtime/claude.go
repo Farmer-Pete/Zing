@@ -66,6 +66,9 @@ func (c Claude) resolveBin() string {
 	return c.bin
 }
 
+// claudeBashTool is Claude Code's tool name for a Bash call.
+const claudeBashTool = "Bash"
+
 // claudeToolNames maps a machine.toml tool name to its CLI spelling
 // (design section 4.1): read/grep/glob/edit/write/bash pass straight
 // through to their built-in tool name, and bash_readonly narrows Bash to
@@ -76,7 +79,7 @@ var claudeToolNames = map[string]string{
 	"glob":          "Glob",
 	"edit":          "Edit",
 	"write":         "Write",
-	"bash":          "Bash",
+	"bash":          claudeBashTool,
 	"bash_readonly": "Bash(zing validate:*)",
 }
 
@@ -155,7 +158,10 @@ type claudeSettings struct {
 // claudeHookGroup is one Claude Code hook matcher group; the Stop hook
 // settings this package builds always hold exactly one.
 type claudeHookGroup struct {
-	Hooks []claudeHookCommand `json:"hooks"`
+	// Matcher restricts which tool calls this group's hooks run for; empty
+	// for the Stop group, "Bash" for the PreToolUse deny group.
+	Matcher string              `json:"matcher,omitempty"`
+	Hooks   []claudeHookCommand `json:"hooks"`
 }
 
 // claudeHookCommand is one Claude Code hook command entry.
@@ -172,7 +178,7 @@ func (c Claude) stopHook(req RunRequest, sessionID string) (settings, statePath 
 		return "", "", nil
 	}
 	statePath = stopHookStatePath(agentEnv(req), sessionID)
-	settings, err = stopHookSettings(c.zingBin, req.Job, statePath)
+	settings, err = hookSettings(c.zingBin, req.Job, statePath, req.DenyBash)
 	return settings, statePath, err
 }
 
@@ -190,17 +196,27 @@ func stopHookStatePath(env []string, sessionID string) string {
 	return filepath.Join(dir, "zing-stop-hook-"+sessionID+".json")
 }
 
-// stopHookSettings renders the --settings JSON for one run's Stop hook: a
-// single Stop matcher group running zingBin validate --hook --job JOB
-// --state PATH, every value shell-quoted since Claude Code runs the
-// command through a shell.
-func stopHookSettings(zingBin string, job response.Job, statePath string) (string, error) {
-	cmd := shellQuote(zingBin) + " validate --hook --job " + shellQuote(string(job)) + " --state " + shellQuote(statePath)
-	b, err := json.Marshal(claudeSettings{Hooks: map[string][]claudeHookGroup{
-		"Stop": {{Hooks: []claudeHookCommand{{Type: "command", Command: cmd}}}},
-	}})
+// hookSettings renders the --settings JSON for one run: a single Stop
+// matcher group running zingBin validate --hook --job JOB --state PATH,
+// and, when deny is non-empty, a PreToolUse group matching Bash that runs
+// zingBin deny-hook with one --deny per entry, in order. Every value is
+// shell-quoted since Claude Code runs each command through a shell.
+func hookSettings(zingBin string, job response.Job, statePath string, deny []string) (string, error) {
+	stopCmd := shellQuote(zingBin) + " validate --hook --job " + shellQuote(string(job)) + " --state " + shellQuote(statePath)
+	hooks := map[string][]claudeHookGroup{
+		"Stop": {{Hooks: []claudeHookCommand{{Type: "command", Command: stopCmd}}}},
+	}
+	if len(deny) > 0 {
+		var b strings.Builder
+		b.WriteString(shellQuote(zingBin) + " deny-hook")
+		for _, entry := range deny {
+			b.WriteString(" --deny " + shellQuote(entry))
+		}
+		hooks["PreToolUse"] = []claudeHookGroup{{Matcher: claudeBashTool, Hooks: []claudeHookCommand{{Type: "command", Command: b.String()}}}}
+	}
+	b, err := json.Marshal(claudeSettings{Hooks: hooks})
 	if err != nil {
-		return "", fmt.Errorf("runtime: claude: stop hook settings: %w", err)
+		return "", fmt.Errorf("runtime: claude: hook settings: %w", err)
 	}
 	return string(b), nil
 }
@@ -400,7 +416,7 @@ func countValidateDenials(stdout []byte) int {
 	}
 	n := 0
 	for _, d := range cr.PermissionDenials {
-		if d.ToolName == "Bash" && strings.Contains(d.ToolInput.Command, "zing validate") {
+		if d.ToolName == claudeBashTool && strings.Contains(d.ToolInput.Command, "zing validate") {
 			n++
 		}
 	}
@@ -695,6 +711,8 @@ func (c Claude) run(ctx context.Context, req RunRequest, argv []string, sessionI
 		StopHookUnread: hookState.Unread,
 		ValidateDenied: countValidateDenials(stdout.bytes()),
 	}
+
+	logLongTurns(req, res.TranscriptPath)
 
 	if outcomeErr := classifyProcessOutcome(ctx, stdout.overflowed(), waitErr, res.ExitCode); outcomeErr != nil {
 		if errors.Is(outcomeErr, ErrTimeout) || errors.Is(outcomeErr, ErrCanceled) {
