@@ -178,17 +178,17 @@ func judgeAdvanceHostCheck(t *testing.T, s *store.Store, rt runtime.Runtime, tic
 	return pbGetTicket(t, s, ticket.ID)
 }
 
-// judgeRoundSHA reads round n's own frozen sha back from ticketID's "judge
-// round " markers (judgeStartedSHA).
-func judgeRoundSHA(t *testing.T, s *store.Store, ticketID int64, n int) string { //nolint:unparam // every test below reads round 1's own sha, but the helper mirrors judgeStartedSHA's own general n parameter
+// judgeRound1SHA reads round 1's own frozen sha back from ticketID's "judge
+// round " markers (judgeStartedSHA): every test below needs only round 1's.
+func judgeRound1SHA(t *testing.T, s *store.Store, ticketID int64) string {
 	t.Helper()
 	markers, err := s.MarkersWithPrefix(t.Context(), ticketID, judgeRoundMarkerPrefix)
 	if err != nil {
-		t.Fatalf("judgeRoundSHA: MarkersWithPrefix: %v", err)
+		t.Fatalf("judgeRound1SHA: MarkersWithPrefix: %v", err)
 	}
-	sha, err := judgeStartedSHA(markers, n)
+	sha, err := judgeStartedSHA(markers, 1)
 	if err != nil {
-		t.Fatalf("judgeRoundSHA: judgeStartedSHA: %v", err)
+		t.Fatalf("judgeRound1SHA: judgeStartedSHA: %v", err)
 	}
 	return sha
 }
@@ -208,11 +208,9 @@ func judgeInsertRoundStartedMarker(t *testing.T, s *store.Store, ticket store.Ti
 	}
 }
 
-// hostMarkerRow and roundMarkerRow build a bare store.MessageRow around
-// body, for judgeHostResults' own pure-function tests, which read only
-// Body.
-func hostMarkerRow(body string) store.MessageRow  { return store.MessageRow{Body: body} }
-func roundMarkerRow(body string) store.MessageRow { return store.MessageRow{Body: body} }
+// markerRow builds a bare store.MessageRow around body, for
+// judgeHostResults' own pure-function tests, which read only Body.
+func markerRow(body string) store.MessageRow { return store.MessageRow{Body: body} }
 
 // ---- TestJudgeHostCheckFlow -------------------------------------------------
 
@@ -426,7 +424,7 @@ func TestJudgeHostCheckReusedAtSameSha(t *testing.T) {
 	hostCommands := &judgeScriptedHostCommands{steps: []judgeHostCheckStep{{exit: 3, output: judgeHostOutputRefused}}}
 	ticket = judgeAdvanceHostCheck(t, s, rt, ticket, hostCommands)
 
-	sha := judgeRoundSHA(t, s, ticket.ID, 1)
+	sha := judgeRound1SHA(t, s, ticket.ID)
 	maxRunID, err := s.MaxRunID(t.Context(), ticket.ID)
 	if err != nil {
 		t.Fatalf("MaxRunID: %v", err)
@@ -472,7 +470,7 @@ func TestJudgeHostCheckRerunAfterOwnerEdit(t *testing.T) {
 	}}
 	ticket = judgeAdvanceHostCheck(t, s, rt, ticket, hostCommands)
 
-	sha := judgeRoundSHA(t, s, ticket.ID, 1)
+	sha := judgeRound1SHA(t, s, ticket.ID)
 	newCheck := judgeCheckScenarioCmd + "2"
 	if err := s.OwnerEdit(t.Context(), store.OwnerEditRequest{
 		TicketID: ticket.ID, Target: store.OwnerEditScenario, Ref: "s1", Action: store.OwnerEditActionEdit, Check: &newCheck,
@@ -487,8 +485,7 @@ func TestJudgeHostCheckRerunAfterOwnerEdit(t *testing.T) {
 	judgeInsertRoundStartedMarker(t, s, ticket, 2, sha, maxRunID)
 	ticket = pbGetTicket(t, s, ticket.ID)
 
-	commit := judgeAdvanceHostCheck(t, s, rt, ticket, hostCommands)
-	_ = commit
+	judgeAdvanceHostCheck(t, s, rt, ticket, hostCommands)
 
 	if hostCommands.callCount() != 2 {
 		t.Fatalf("host runner called %d times, want 2", hostCommands.callCount())
@@ -537,7 +534,7 @@ func TestJudgeHostVerdictStaleCommandStartsFreshRound(t *testing.T) {
 	pbApply(t, s, ticket, runCommit)
 	ticket = pbGetTicket(t, s, ticket.ID)
 
-	sha := judgeRoundSHA(t, s, ticket.ID, 1)
+	sha := judgeRound1SHA(t, s, ticket.ID)
 	newCheck := judgeCheckScenarioCmd + "2"
 	if editErr := s.OwnerEdit(t.Context(), store.OwnerEditRequest{
 		TicketID: ticket.ID, Target: store.OwnerEditScenario, Ref: "s1", Action: store.OwnerEditActionEdit, Check: &newCheck,
@@ -564,8 +561,85 @@ func TestJudgeHostVerdictStaleCommandStartsFreshRound(t *testing.T) {
 	pbApply(t, s, ticket, checkCommit)
 	ticket = pbGetTicket(t, s, ticket.ID)
 
-	nextTicket := judgeAdvanceHostCheck(t, s, rt, ticket, hostCommands)
-	_ = nextTicket
+	judgeAdvanceHostCheck(t, s, rt, ticket, hostCommands)
+	if hostCommands.callCount() != 2 {
+		t.Fatalf("host runner called %d times, want 2", hostCommands.callCount())
+	}
+	gotCall := hostCommands.lastCall()
+	if gotCall.cmd != newCheck {
+		t.Errorf("host runner cmd = %q, want the edited check %q", gotCall.cmd, newCheck)
+	}
+}
+
+// TestJudgeRetryFreshRoundDefersPendingHostCheck proves retryFreshRound's
+// own pending-host guard (design section 5): an owner edit of a host check
+// between a judge-origin, run-attached escalation and the owner's retry
+// leaves no result for the new round's sha, so the retry commits only the
+// started marker and the resolved question, deferring the edited check's
+// run -- and the retry notes that would otherwise ride along with it -- to
+// the next tick.
+func TestJudgeRetryFreshRoundDefersPendingHostCheck(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow end-to-end flow; runs in the full suite")
+	}
+	t.Parallel()
+	s, ticket := judgeHostTicketReady(t)
+	rt := runtime.NewFake(judgeScriptsFS(judgeOkBothScript))
+	ticket = judgeAdvanceStart(t, s, rt, ticket)
+
+	hostCommands := &judgeScriptedHostCommands{steps: []judgeHostCheckStep{
+		{exit: 3, output: judgeHostOutputRefused},
+		{exit: 0},
+	}}
+	ticket = judgeAdvanceHostCheck(t, s, rt, ticket, hostCommands)
+
+	deps := pbClaim(t, s, rt, ticket.ID)
+	deps.HostCommands = hostCommands
+	runCommit, err := (judgeHandler{}).Run(t.Context(), ticket, deps)
+	if err != nil {
+		t.Fatalf("judge run: %v", err)
+	}
+	pbApply(t, s, ticket, runCommit)
+	ticket = pbGetTicket(t, s, ticket.ID)
+
+	sha := judgeRound1SHA(t, s, ticket.ID)
+	runID, err := s.MaxRunID(t.Context(), ticket.ID)
+	if err != nil {
+		t.Fatalf("MaxRunID: %v", err)
+	}
+
+	newCheck := judgeCheckScenarioCmd + "2"
+	if editErr := s.OwnerEdit(t.Context(), store.OwnerEditRequest{
+		TicketID: ticket.ID, Target: store.OwnerEditScenario, Ref: "s1", Action: store.OwnerEditActionEdit, Check: &newCheck,
+	}); editErr != nil {
+		t.Fatalf("OwnerEdit: %v", editErr)
+	}
+
+	qID := pbEscalateDirect(t, s, ticket.ID, &runID, nil, response.EscalationCodeResponseInvalid, response.EscalationOriginJudge)
+	pbAnswerEscalation(t, s, ticket.ID, qID, "a")
+
+	deps2 := pbClaim(t, s, rt, ticket.ID)
+	deps2.HostCommands = hostCommands
+	retryCommit, handled := pbRunPrelude(t, s, deps2, ticket.ID)
+	if !handled {
+		t.Fatal("handled = false, want true")
+	}
+	if len(retryCommit.Runs) != 0 {
+		t.Errorf("retryCommit.Runs = %+v, want none (deferred to the next tick)", retryCommit.Runs)
+	}
+	if len(retryCommit.Messages) != 1 {
+		t.Fatalf("retryCommit.Messages = %+v, want exactly one", retryCommit.Messages)
+	}
+	wantPrefix := "judge round 2 started sha " + sha + " after run "
+	if !strings.HasPrefix(retryCommit.Messages[0].Body, wantPrefix) {
+		t.Errorf("message = %q, want it to start with %q", retryCommit.Messages[0].Body, wantPrefix)
+	}
+	if hostCommands.callCount() != 1 {
+		t.Errorf("host runner called %d times, want still 1 (the edited check's run is deferred)", hostCommands.callCount())
+	}
+
+	ticket = pbGetTicket(t, s, ticket.ID)
+	judgeAdvanceHostCheck(t, s, rt, ticket, hostCommands)
 	if hostCommands.callCount() != 2 {
 		t.Fatalf("host runner called %d times, want 2", hostCommands.callCount())
 	}
@@ -654,6 +728,72 @@ func TestJudgeHostCheckNoRunnerIsConfigError(t *testing.T) {
 	}
 	if len(commit.Messages) != 0 {
 		t.Errorf("commit.Messages = %+v, want none", commit.Messages)
+	}
+}
+
+// TestJudgeHostCheckCanceled proves hostCheck's own canceled branch (design
+// section 5): a runner error wrapping context.Canceled returns
+// runtime.ErrCanceled and commits nothing, the same way a canceled judge
+// run does.
+func TestJudgeHostCheckCanceled(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow end-to-end flow; runs in the full suite")
+	}
+	t.Parallel()
+	s, ticket := judgeHostTicketReady(t)
+	rt := runtime.NewFake(judgeScriptsFS(judgeOkBothScript))
+	ticket = judgeAdvanceStart(t, s, rt, ticket)
+
+	hostCommands := &judgeScriptedHostCommands{steps: []judgeHostCheckStep{
+		{exit: -1, err: fmt.Errorf("wrapped: %w", context.Canceled)},
+	}}
+	deps := pbClaim(t, s, rt, ticket.ID)
+	deps.HostCommands = hostCommands
+	commit, err := (judgeHandler{}).Run(t.Context(), ticket, deps)
+	if !errors.Is(err, runtime.ErrCanceled) {
+		t.Fatalf("err = %v, want errors.Is(err, runtime.ErrCanceled)", err)
+	}
+	if len(commit.Messages) != 0 {
+		t.Errorf("commit.Messages = %+v, want none", commit.Messages)
+	}
+}
+
+// TestJudgeHostCheckCouldNotRun proves hostCheck's own default failure
+// branch (design section 5): a runner error that is neither a timeout nor
+// a cancellation escalates environment, with judgeHostCheckCouldNotRunWhat
+// as What and the scenario id as Tried, and no "judge host " marker is
+// written.
+func TestJudgeHostCheckCouldNotRun(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow end-to-end flow; runs in the full suite")
+	}
+	t.Parallel()
+	s, ticket := judgeHostTicketReady(t)
+	rt := runtime.NewFake(judgeScriptsFS(judgeOkBothScript))
+	ticket = judgeAdvanceStart(t, s, rt, ticket)
+
+	hostCommands := &judgeScriptedHostCommands{steps: []judgeHostCheckStep{
+		{exit: -1, err: errors.New("exec: fork/exec: no such file or directory")},
+	}}
+	deps := pbClaim(t, s, rt, ticket.ID)
+	deps.HostCommands = hostCommands
+	commit, err := (judgeHandler{}).Run(t.Context(), ticket, deps)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if commit.Escalation == nil {
+		t.Fatal("commit.Escalation = nil, want an escalation")
+	}
+	if commit.Escalation.Payload.What != judgeHostCheckCouldNotRunWhat {
+		t.Errorf("escalation what = %q, want %q", commit.Escalation.Payload.What, judgeHostCheckCouldNotRunWhat)
+	}
+	if commit.Escalation.Payload.Tried != "s1" {
+		t.Errorf("escalation tried = %q, want %q", commit.Escalation.Payload.Tried, "s1")
+	}
+	for _, m := range commit.Messages {
+		if strings.HasPrefix(m.Body, judgeHostMarkerPrefix) {
+			t.Errorf("commit.Messages = %+v, want no %q marker", commit.Messages, judgeHostMarkerPrefix)
+		}
 	}
 }
 
@@ -810,7 +950,7 @@ func TestJudgeHostCheckLogs(t *testing.T) {
 	pbApply(t, s, ticket, checkCommit)
 	ticket = pbGetTicket(t, s, ticket.ID)
 
-	sha := judgeRoundSHA(t, s, ticket.ID, 1)
+	sha := judgeRound1SHA(t, s, ticket.ID)
 	wantHash := judgeHostCmdHash(judgeCheckScenarioCmd)
 
 	started, ok := rec.byMessage("judge host check started")
@@ -860,21 +1000,24 @@ func TestJudgeCapOutput(t *testing.T) {
 		}
 	})
 
-	t.Run("a_cut_landing_inside_a_multibyte_rune_keeps_it_whole", func(t *testing.T) {
+	t.Run("a_byte_slice_cut_landing_inside_a_multibyte_rune_drops_the_remnant", func(t *testing.T) {
 		t.Parallel()
-		raw := append(bytes.Repeat([]byte("a"), 10+65535), []byte("€")...)
+		// The euro sign's 3 bytes come first, so raw's last limit bytes
+		// (len(raw) - limit = 2 bytes over) cut off its first 2 bytes,
+		// leaving its lone trailing continuation byte in front of the a's:
+		// the byte-slice cut itself, not the leading-continuation-byte
+		// skip, is what lands inside this rune.
+		raw := append([]byte("€"), bytes.Repeat([]byte("a"), 65535)...)
+		if len(raw) <= limit {
+			t.Fatalf("raw is %d bytes, want more than limit %d so the cut actually lands inside the rune", len(raw), limit)
+		}
 		got := judgeCapOutput(raw, limit)
 		if !utf8.ValidString(got) {
 			t.Fatalf("result is not valid UTF-8: %q", got)
 		}
-		if len(got) > limit {
-			t.Errorf("len(got) = %d, want at most %d", len(got), limit)
-		}
-		if !strings.HasSuffix(got, "€") {
-			t.Errorf("result does not end with the euro sign: %q", got)
-		}
-		if r, _ := utf8.DecodeRuneInString(got); r == utf8.RuneError {
-			t.Errorf("result does not start on a rune boundary: %q", got)
+		want := strings.Repeat("a", 65535)
+		if got != want {
+			t.Errorf("got %d bytes starting %q, want exactly 65535 a's", len(got), got[:min(4, len(got))])
 		}
 	})
 
@@ -894,18 +1037,21 @@ func TestJudgeCapOutput(t *testing.T) {
 
 	t.Run("invalid_utf8_becomes_u_fffd_capped_at_the_limit", func(t *testing.T) {
 		t.Parallel()
-		raw := bytes.Repeat([]byte{0xff}, limit)
+		// Each 0xff sits between two 'a's, so strings.ToValidUTF8 replaces
+		// each one as its own run (one U+FFFD, 3 bytes) rather than
+		// coalescing them into a single replacement: repairing limit bytes
+		// this way grows the string past limit, exercising the trim loop
+		// that drops runes from the front until it fits.
+		raw := bytes.Repeat([]byte{0xff, 'a'}, limit/2)
 		got := judgeCapOutput(raw, limit)
 		if !utf8.ValidString(got) {
 			t.Fatalf("result is not valid UTF-8: %q", got)
 		}
-		if got == "" || len(got) > limit {
-			t.Fatalf("len(got) = %d, want (0, %d]", len(got), limit)
+		if len(got) > limit {
+			t.Fatalf("len(got) = %d, want at most %d", len(got), limit)
 		}
-		for _, r := range got {
-			if r != utf8.RuneError {
-				t.Errorf("result contains a rune other than U+FFFD: %q", r)
-			}
+		if len(got) <= limit-4 {
+			t.Fatalf("len(got) = %d, want close to the limit %d (the trim loop should cut to fit, not overshoot)", len(got), limit)
 		}
 	})
 
@@ -930,16 +1076,16 @@ func TestJudgeHostResults(t *testing.T) {
 	hashA := judgeHostCmdHash("cmd a")
 	hashB := judgeHostCmdHash("cmd b")
 	roundMarkers := []store.MessageRow{
-		roundMarkerRow("judge round 1 started sha " + shaA + " after run 1"),
-		roundMarkerRow("judge round 2 started sha " + shaA + " after run 2"),
-		roundMarkerRow("judge round 3 started sha " + shaB + " after run 3"),
+		markerRow("judge round 1 started sha " + shaA + " after run 1"),
+		markerRow("judge round 2 started sha " + shaA + " after run 2"),
+		markerRow("judge round 3 started sha " + shaB + " after run 3"),
 	}
 
 	t.Run("newest_marker_per_key_wins", func(t *testing.T) {
 		t.Parallel()
 		hostMarkers := []store.MessageRow{
-			hostMarkerRow(fmt.Sprintf("judge host 1 s1 exit 3 cmd %s\nround1 output", hashA)),
-			hostMarkerRow(fmt.Sprintf("judge host 2 s1 exit 0 cmd %s\nround2 output", hashA)),
+			markerRow(fmt.Sprintf("judge host 1 s1 exit 3 cmd %s\nround1 output", hashA)),
+			markerRow(fmt.Sprintf("judge host 2 s1 exit 0 cmd %s\nround2 output", hashA)),
 		}
 		got, err := judgeHostResults(hostMarkers, roundMarkers, shaA)
 		if err != nil {
@@ -957,8 +1103,8 @@ func TestJudgeHostResults(t *testing.T) {
 	t.Run("different_hashes_give_separate_entries", func(t *testing.T) {
 		t.Parallel()
 		hostMarkers := []store.MessageRow{
-			hostMarkerRow(fmt.Sprintf("judge host 1 s1 exit 3 cmd %s\nfirst", hashA)),
-			hostMarkerRow(fmt.Sprintf("judge host 1 s1 exit 0 cmd %s\nsecond", hashB)),
+			markerRow(fmt.Sprintf("judge host 1 s1 exit 3 cmd %s\nfirst", hashA)),
+			markerRow(fmt.Sprintf("judge host 1 s1 exit 0 cmd %s\nsecond", hashB)),
 		}
 		got, err := judgeHostResults(hostMarkers, roundMarkers, shaA)
 		if err != nil {
@@ -972,7 +1118,7 @@ func TestJudgeHostResults(t *testing.T) {
 	t.Run("a_marker_from_a_round_started_at_a_different_sha_is_ignored", func(t *testing.T) {
 		t.Parallel()
 		hostMarkers := []store.MessageRow{
-			hostMarkerRow(fmt.Sprintf("judge host 3 s1 exit 0 cmd %s\nthird", hashA)),
+			markerRow(fmt.Sprintf("judge host 3 s1 exit 0 cmd %s\nthird", hashA)),
 		}
 		got, err := judgeHostResults(hostMarkers, roundMarkers, shaA)
 		if err != nil {
@@ -989,7 +1135,7 @@ func TestJudgeHostResults(t *testing.T) {
 			"judge host 1 s1 exit x cmd " + hashA,
 			"judge host 1 s1 exit 0",
 		} {
-			if _, err := judgeHostResults([]store.MessageRow{hostMarkerRow(body)}, roundMarkers, shaA); err == nil {
+			if _, err := judgeHostResults([]store.MessageRow{markerRow(body)}, roundMarkers, shaA); err == nil {
 				t.Errorf("judgeHostResults(%q): want an error", body)
 			}
 		}
@@ -997,7 +1143,7 @@ func TestJudgeHostResults(t *testing.T) {
 
 	t.Run("a_marker_whose_round_has_no_started_marker_is_an_error", func(t *testing.T) {
 		t.Parallel()
-		hostMarkers := []store.MessageRow{hostMarkerRow("judge host 9 s1 exit 0 cmd " + hashA)}
+		hostMarkers := []store.MessageRow{markerRow("judge host 9 s1 exit 0 cmd " + hashA)}
 		if _, err := judgeHostResults(hostMarkers, roundMarkers, shaA); err == nil {
 			t.Error("want an error for a round with no started marker")
 		}

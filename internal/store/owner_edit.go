@@ -318,6 +318,9 @@ func (s *Store) editScenarioTx(ctx context.Context, tx *sql.Tx, req OwnerEditReq
 	if sc.Kind == response.ScenarioKindHost && strings.TrimSpace(sc.Check) == "" {
 		return response.OwnerEditEvent{}, ownerEditErr(OwnerEditCodeInvalid, response.HostScenarioNeedsCheck)
 	}
+	if sc.Kind == response.ScenarioKindHost && response.HostCheckUnsafe(sc.Check) {
+		return response.OwnerEditEvent{}, ownerEditErr(OwnerEditCodeInvalid, response.HostCheckUnsafeMsg)
+	}
 
 	newPayload, err := json.Marshal(sc)
 	if err != nil {

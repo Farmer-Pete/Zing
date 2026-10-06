@@ -1,6 +1,9 @@
 package response
 
-import "fmt"
+import (
+	"fmt"
+	"unicode"
+)
 
 // Job identifies which job produced a response.
 type Job string
@@ -116,6 +119,30 @@ const (
 // blank check, shared by checkScenarioShape (internal/job/planning.go) and
 // Store.OwnerEdit (internal/store/owner_edit.go).
 const HostScenarioNeedsCheck = "a host scenario needs a check"
+
+// HostCheckUnsafeMsg is the one refusal text for a host check that carries a
+// control or Unicode format character, shared the same way
+// HostScenarioNeedsCheck is: the gate's only approval of a host check is an
+// owner reading its rendered text, and a bidi override, a zero-width
+// character, or a stray control character can make what is rendered differ
+// from the bytes the shell runs.
+const HostCheckUnsafeMsg = "a host check must not contain control or invisible characters"
+
+// HostCheckUnsafe reports whether check contains a rune that could hide its
+// true meaning from an owner reading it at the gate: any control character
+// other than tab (unicode.IsControl), or any Unicode format character
+// (unicode.Cf, which covers bidi overrides and zero-width characters).
+func HostCheckUnsafe(check string) bool {
+	for _, r := range check {
+		if r == '\t' {
+			continue
+		}
+		if unicode.IsControl(r) || unicode.Is(unicode.Cf, r) {
+			return true
+		}
+	}
+	return false
+}
 
 // Values returns every valid ScenarioKind.
 func (ScenarioKind) Values() []string {

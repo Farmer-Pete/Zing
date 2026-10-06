@@ -2117,7 +2117,8 @@ func judgeCheckLine(first string) (string, bool) {
 // gives the round number.
 func judgeHostCheckLine(first string) (string, bool) {
 	fields := strings.Fields(strings.TrimPrefix(first, updateMarkerJudgeHostPrefix))
-	if len(fields) != 6 || fields[2] != "exit" || fields[4] != "cmd" {
+	isHostShape := len(fields) == 6 && fields[2] == "exit" && fields[4] == "cmd"
+	if !isHostShape {
 		return "", false
 	}
 	scenarioID, code := fields[1], fields[3]

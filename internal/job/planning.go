@@ -999,6 +999,17 @@ func checkScenarioShape(scenarios []response.Scenario) []*response.PathError {
 				Msg:  response.HostScenarioNeedsCheck,
 			})
 		}
+		// A host check runs unsandboxed with only the gate's own reading of
+		// its rendered text as approval, so a control or Unicode format
+		// character (a bidi override, a zero-width character) that could
+		// make the rendered command differ from what the shell runs is
+		// refused here too.
+		if host && hasCheck && response.HostCheckUnsafe(sc.Check) {
+			errs = append(errs, &response.PathError{
+				Path: "scenarios/" + indexedScenario(i) + "/check",
+				Msg:  response.HostCheckUnsafeMsg,
+			})
+		}
 		// Zing re-runs every check under the build sandbox, which denies
 		// writes to the host /tmp (bug fix: a live judge round failed every
 		// check that built into /tmp, though the judge, which rewrote the
