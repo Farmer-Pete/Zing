@@ -392,6 +392,7 @@ func (s *Store) editScenarioTx(ctx context.Context, tx *sql.Tx, req OwnerEditReq
 		return response.OwnerEditEvent{}, fmt.Errorf("owner edit: unmarshal scenario %s: %w", req.Ref, err)
 	}
 	oldPayload := string(payload)
+	oldKind := sc.Kind
 
 	if req.Given != nil {
 		sc.Given = *req.Given
@@ -411,11 +412,15 @@ func (s *Store) editScenarioTx(ctx context.Context, tx *sql.Tx, req OwnerEditReq
 	if sc.Kind == response.ScenarioKindHost && strings.TrimSpace(sc.Check) == "" {
 		return response.OwnerEditEvent{}, ownerEditErr(OwnerEditCodeInvalid, response.HostScenarioNeedsCheck)
 	}
-	// A host check runs unsandboxed with only the owner's reading of its
-	// rendered text as approval (#57, #159), so the owner's own switch to
+	// A host check runs unsandboxed, so switching an existing scenario to
 	// kind host applies the same control/invisible-character refusal to
-	// the existing check that checkScenarioRules applies to a judge's.
-	if sc.Kind == response.ScenarioKindHost && response.HostCheckUnsafe(sc.Check) {
+	// its already-stored check that checkScenarioRules applies to a
+	// judge's (#57, r1f13 triage). A check the owner types in the same
+	// edit is exempt (the owner read what they typed), and so is an edit
+	// to a scenario that was already host (#57, r2f9 triage): only the
+	// switch itself, leaving the check as it was, re-checks it.
+	if req.Kind != nil && sc.Kind == response.ScenarioKindHost && oldKind != response.ScenarioKindHost &&
+		req.Check == nil && response.HostCheckUnsafe(sc.Check) {
 		return response.OwnerEditEvent{}, ownerEditErr(OwnerEditCodeInvalid, response.HostCheckUnsafeMsg)
 	}
 

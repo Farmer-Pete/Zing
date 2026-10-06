@@ -24,10 +24,23 @@ import (
 
 // judgeAmendmentS2Reason and judgeAmendmentS2Check are the reason and check
 // text TestJudgeAmendmentAccept's own script proposes for judgeTicketReady's
-// s2 (kind negative, no check of its own).
+// s2 (kind negative, no check of its own). judgeAmendmentS2OldCheck is the
+// check TestJudgeAmendmentAccept gives s2 before running the judge, through
+// Store.OwnerEdit, so the escalation's Now/Amended diff and the owner_edit
+// event's old text both have a real old check to carry (#57, r2f5 triage).
 const (
-	judgeAmendmentS2Reason = "s2 had no check at all; a non-2xx POST response proves the then"
-	judgeAmendmentS2Check  = "! curl -sf -X POST localhost:8080/hello"
+	judgeAmendmentS2Reason   = "s2 had no check at all; a non-2xx POST response proves the then"
+	judgeAmendmentS2Check    = "! curl -sf -X POST localhost:8080/hello"
+	judgeAmendmentS2OldCheck = "! curl -sf localhost:8080/hello"
+)
+
+// judgeAmendmentNowLabel and judgeAmendmentAmendedLabel are
+// judgeAmendmentDiff's own "Now:" and "Amended:" headings (judging.go),
+// named once so goconst has nothing to flag across this file's and
+// judging_amend_internal_test.go's own assertions against them.
+const (
+	judgeAmendmentNowLabel     = "Now:"
+	judgeAmendmentAmendedLabel = "Amended:"
 )
 
 // judgeAmendmentS2ErrorScript is a judge cannot_run document proposing a
@@ -241,11 +254,20 @@ func TestJudgeAmendmentAccept(t *testing.T) {
 	}
 	t.Parallel()
 	s, ticket := judgeTicketReady(t)
+	if err := s.OwnerEdit(t.Context(), store.OwnerEditRequest{
+		TicketID: ticket.ID, Target: store.OwnerEditScenario, Ref: "s2", Action: store.OwnerEditActionEdit,
+		Check: new(judgeAmendmentS2OldCheck),
+	}); err != nil {
+		t.Fatalf("OwnerEdit (give s2 an old check): %v", err)
+	}
 	rt := runtime.NewFake(judgeScriptsFS(judgeAmendmentS2ErrorScript))
 	ticket = judgeAdvanceStart(t, s, rt, ticket)
 
 	deps := pbClaim(t, s, rt, ticket.ID)
 	oldS2 := judgeScenarioS2(t, deps, ticket)
+	if oldS2.Check != judgeAmendmentS2OldCheck {
+		t.Fatalf("s2 check = %q before the run, want %q", oldS2.Check, judgeAmendmentS2OldCheck)
+	}
 	commit, err := (judgeHandler{}).Run(t.Context(), ticket, deps)
 	if err != nil {
 		t.Fatalf("RUN: %v", err)
@@ -259,7 +281,7 @@ func TestJudgeAmendmentAccept(t *testing.T) {
 	body := commit.Escalation.Body
 	for _, want := range []string{
 		"Reason: " + judgeAmendmentS2Reason,
-		"Now:", "Amended:", judgeAmendmentS2Check,
+		judgeAmendmentNowLabel, judgeAmendmentAmendedLabel, judgeAmendmentS2OldCheck, judgeAmendmentS2Check,
 	} {
 		if !strings.Contains(body, want) {
 			t.Errorf("escalation body = %q, want it to contain %q", body, want)
@@ -270,6 +292,19 @@ func TestJudgeAmendmentAccept(t *testing.T) {
 
 	qID, qp := judgeOpenAmendedQuestion(t, s, ticket.ID)
 	judgeAssertAmendedOptions(t, qp)
+
+	open, openErr := s.QuestionsByState(t.Context(), ticket.ID, "open")
+	if openErr != nil || len(open) != 1 {
+		t.Fatalf("QuestionsByState(open) = %+v (err %v), want exactly 1", open, openErr)
+	}
+	for _, want := range []string{
+		"Reason: " + judgeAmendmentS2Reason,
+		judgeAmendmentNowLabel, judgeAmendmentAmendedLabel, judgeAmendmentS2OldCheck, judgeAmendmentS2Check,
+	} {
+		if !strings.Contains(open[0].Body, want) {
+			t.Errorf("stored question body = %q, want it to contain %q", open[0].Body, want)
+		}
+	}
 
 	pbAnswerEscalation(t, s, ticket.ID, qID, "a")
 
@@ -288,21 +323,28 @@ func TestJudgeAmendmentAccept(t *testing.T) {
 		t.Errorf("s2 check = %q, want %q", sc.Check, judgeAmendmentS2Check)
 	}
 
+	// Two events: the test's own setup edit that gave s2 its old check, and
+	// the accept's own amendment edit, which is the one every assertion
+	// below reads.
 	events := judgeOwnerEditEvents(t, s, ticket.ID)
-	if len(events) != 1 {
-		t.Fatalf("owner_edit events = %d, want 1", len(events))
+	if len(events) != 2 {
+		t.Fatalf("owner_edit events = %d, want 2 (the setup edit and the accept)", len(events))
 	}
-	if !strings.Contains(events[0].New, judgeAmendmentS2Check) {
-		t.Errorf("event new = %q, want it to contain %q", events[0].New, judgeAmendmentS2Check)
+	accept := events[1]
+	if !strings.Contains(accept.New, judgeAmendmentS2Check) {
+		t.Errorf("event new = %q, want it to contain %q", accept.New, judgeAmendmentS2Check)
 	}
-	if events[0].Reason != judgeAmendmentS2Reason {
-		t.Errorf("event reason = %q, want %q", events[0].Reason, judgeAmendmentS2Reason)
+	if accept.Reason != judgeAmendmentS2Reason {
+		t.Errorf("event reason = %q, want %q", accept.Reason, judgeAmendmentS2Reason)
 	}
-	if !strings.Contains(events[0].Old, oldS2.Then) {
-		t.Errorf("event old = %q, want it to contain the pre-accept s2 then %q", events[0].Old, oldS2.Then)
+	if !strings.Contains(accept.Old, oldS2.Then) {
+		t.Errorf("event old = %q, want it to contain the pre-accept s2 then %q", accept.Old, oldS2.Then)
 	}
-	if strings.Contains(events[0].Old, judgeAmendmentS2Check) {
-		t.Errorf("event old = %q, want it not to contain the amended check %q", events[0].Old, judgeAmendmentS2Check)
+	if !strings.Contains(accept.Old, judgeAmendmentS2OldCheck) {
+		t.Errorf("event old = %q, want it to contain the pre-accept s2 check %q", accept.Old, judgeAmendmentS2OldCheck)
+	}
+	if strings.Contains(accept.Old, judgeAmendmentS2Check) {
+		t.Errorf("event old = %q, want it not to contain the amended check %q", accept.Old, judgeAmendmentS2Check)
 	}
 
 	markers, err := s.MarkersWithPrefix(t.Context(), ticket.ID, judgeRoundMarkerPrefix)
@@ -721,5 +763,69 @@ func TestJudgeAmendmentEditItStartsRound(t *testing.T) {
 
 	if events := judgeOwnerEditEvents(t, s, ticket.ID); len(events) != 1 {
 		t.Errorf("owner_edit events = %+v, want exactly 1 (the owner's own edit, not an amendment accept)", events)
+	}
+}
+
+// TestJudgeAmendmentReplyOnlyNeverAccepts proves Q12's own rule (#57,
+// r1f9 triage): a reply with no picked option must never accept an
+// amendment. roundRecommendedOption's own qp.Amendment check (planning.go)
+// falls an amended escalation's unanswered reply back to
+// escalationChoiceBack ("Edit it"), not the stored Recommended "a", even
+// though a plain escalation's own unanswered reply does read Recommended
+// straight back.
+func TestJudgeAmendmentReplyOnlyNeverAccepts(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow end-to-end flow; runs in the full suite")
+	}
+	t.Parallel()
+	s, ticket := judgeTicketReady(t)
+	rt := runtime.NewFake(judgeScriptsFS(judgeAmendmentS2ErrorScript))
+	ticket = judgeAdvanceStart(t, s, rt, ticket)
+
+	deps := pbClaim(t, s, rt, ticket.ID)
+	commit, err := (judgeHandler{}).Run(t.Context(), ticket, deps)
+	if err != nil {
+		t.Fatalf("RUN: %v", err)
+	}
+	pbApply(t, s, ticket, commit)
+	ticket = pbGetTicket(t, s, ticket.ID)
+
+	before := judgeScenarioS2(t, deps, ticket)
+
+	qID, _ := judgeOpenAmendedQuestion(t, s, ticket.ID)
+	if _, draftErr := s.SaveDraft(t.Context(), store.DraftInput{
+		TicketID: ticket.ID, QuestionID: &qID, Text: "I'm not sure about this one.",
+	}); draftErr != nil {
+		t.Fatalf("SaveDraft(reply, no option): %v", draftErr)
+	}
+	if _, sendErr := s.SendBatch(t.Context(), ticket.ID); sendErr != nil {
+		t.Fatalf("SendBatch: %v", sendErr)
+	}
+
+	deps2 := pbClaim(t, s, rt, ticket.ID)
+	roundCommit, handled := pbRunPrelude(t, s, deps2, ticket.ID)
+	if !handled {
+		t.Fatal("handled = false, want true")
+	}
+	if len(roundCommit.Runs) == 0 {
+		t.Error("roundCommit.Runs is empty, want retryFreshRound to reserve a judge run")
+	}
+	ticket = pbGetTicket(t, s, ticket.ID)
+
+	after := judgeScenarioS2(t, deps2, ticket)
+	if after != before {
+		t.Errorf("s2 = %+v, want unchanged %+v (a reply with no option must never accept)", after, before)
+	}
+	if events := judgeOwnerEditEvents(t, s, ticket.ID); len(events) != 0 {
+		t.Errorf("owner_edit events = %+v, want none", events)
+	}
+
+	markers, err := s.MarkersWithPrefix(t.Context(), ticket.ID, judgeRoundMarkerPrefix)
+	if err != nil {
+		t.Fatalf("MarkersWithPrefix: %v", err)
+	}
+	newest, _, _ := strings.Cut(markers[len(markers)-1].Body, "\n")
+	if !strings.HasPrefix(newest, "judge round 2 started sha ") {
+		t.Errorf("newest judge round marker = %q, want it to start with %q (retryFreshRound, not accept)", newest, "judge round 2 started sha ")
 	}
 }

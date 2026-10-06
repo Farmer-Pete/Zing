@@ -371,7 +371,7 @@ func TestOwnerEditRoute_RefusesNonLoopbackCheckEdit(t *testing.T) {
 	if rec.Code != http.StatusForbidden {
 		t.Fatalf("status = %d, want 403; body = %q", rec.Code, rec.Body.String())
 	}
-	if got, want := strings.TrimSpace(rec.Body.String()), "editing a check or test command is allowed from this machine only"; got != want {
+	if got, want := strings.TrimSpace(rec.Body.String()), "editing a check, test, or kind is allowed from this machine only"; got != want {
 		t.Errorf("body = %q, want %q", got, want)
 	}
 
@@ -448,7 +448,7 @@ func TestHandleOwnerEditKindLoopbackOnly(t *testing.T) {
 		if rec.Code != http.StatusForbidden {
 			t.Fatalf("status = %d, want 403; body = %q", rec.Code, rec.Body.String())
 		}
-		if got, want := strings.TrimSpace(rec.Body.String()), "editing a check or test command is allowed from this machine only"; got != want {
+		if got, want := strings.TrimSpace(rec.Body.String()), "editing a check, test, or kind is allowed from this machine only"; got != want {
 			t.Errorf("body = %q, want %q", got, want)
 		}
 		if got := readScenario(t, s, ticketID).Kind; got != response.ScenarioKindBehavior {

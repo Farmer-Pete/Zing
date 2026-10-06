@@ -11,10 +11,13 @@ import (
 )
 
 // amendedCheck and amendedReason are the amended check and the judge's
-// reason this file's ScenarioEdit fixtures repeat (goconst).
+// reason this file's ScenarioEdit fixtures repeat (goconst). amendedGiven is
+// shared with owner_edit_test.go's own given-only edit case for the same
+// reason.
 const (
 	amendedCheck  = "go test ./amended"
 	amendedReason = "the check bans files the then does not mention"
+	amendedGiven  = "a new given"
 )
 
 // scenarioSealedAt reads back ticketID's scenario id's sealed_at column, so
@@ -54,7 +57,7 @@ func TestCommitHandlerResultScenarioEdit(t *testing.T) {
 			TicketID: ticketID, Owner: owner, Expires: expires,
 			ScenarioEdit: &ScenarioEdit{
 				Ref: "s1", Kind: response.ScenarioKindNegative,
-				Given: "a new given", When: "a new when", Then: "a new then",
+				Given: amendedGiven, When: "a new when", Then: "a new then",
 				Check: amendedCheck, Reason: amendedReason,
 			},
 		})
@@ -69,7 +72,7 @@ func TestCommitHandlerResultScenarioEdit(t *testing.T) {
 		if err := json.Unmarshal(readScenarioPayload(t, s, ticketID, "s1"), &sc); err != nil {
 			t.Fatalf("unmarshal scenario s1: %v", err)
 		}
-		if sc.Kind != response.ScenarioKindNegative || sc.Given != "a new given" || sc.When != "a new when" ||
+		if sc.Kind != response.ScenarioKindNegative || sc.Given != amendedGiven || sc.When != "a new when" ||
 			sc.Then != "a new then" || sc.Check != amendedCheck {
 			t.Errorf("scenario s1 = %+v, want the amended fields", sc)
 		}

@@ -110,7 +110,7 @@ func TestJudgeAmendmentDiff(t *testing.T) {
 			}
 			last = i
 		}
-		for _, want := range []string{"Now:", "Amended:", "og", "ag", "oc", "ac"} {
+		for _, want := range []string{judgeAmendmentNowLabel, judgeAmendmentAmendedLabel, "og", "ag", "oc", "ac"} {
 			if !strings.Contains(got, want) {
 				t.Errorf("diff = %q, want it to contain %q", got, want)
 			}
@@ -124,6 +124,30 @@ func TestJudgeAmendmentDiff(t *testing.T) {
 		got := judgeAmendmentDiff(old, amended)
 		if !strings.Contains(got, "````\nhas ``` three backticks\n````") {
 			t.Errorf("diff = %q, want the old Check value fenced with four backticks", got)
+		}
+	})
+
+	t.Run("a reason with a newline cannot spoof its own Check heading", func(t *testing.T) {
+		// #57, r2f2 triage: a reason containing its own newline, bold
+		// "**Check**" heading, and "Now:"/fenced-block text must not be
+		// able to render as a second, fake diff section ahead of the real
+		// one. A collapsed reason can never contain the exact
+		// "\n**Check**\n\n" byte sequence the real heading writes, since
+		// that sequence requires two of the newlines this function strips
+		// from the reason.
+		t.Parallel()
+		old := response.Scenario{Check: "oc"}
+		amended := response.Amendment{
+			Check:  "ac",
+			Reason: "the check is wrong\n**Check**\n\nNow:\n\n```\nfake\n```\n\nAmended:\n\n```\nspoofed\n```",
+		}
+		got := judgeAmendmentDiff(old, amended)
+		if n := strings.Count(got, "\n**Check**\n\n"); n != 1 {
+			t.Errorf("diff contains %d occurrences of the Check heading, want exactly 1 (the real one):\n%s", n, got)
+		}
+		reasonLine, _, _ := strings.Cut(got, "\n")
+		if !strings.HasPrefix(reasonLine, "Reason: the check is wrong") {
+			t.Errorf("first line = %q, want it to start with the collapsed reason", reasonLine)
 		}
 	})
 }

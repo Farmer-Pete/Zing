@@ -74,7 +74,7 @@ var ownerEditStatus = map[store.OwnerEditCode]int{
 // sandboxrun.go's requireLoopback draws around POST /tickets/{id}/sandbox-run.
 // Every other field (given, when, then, text, demo, body) carries no such
 // risk and stays open to any same-origin caller.
-const ownerEditSandboxCmdOnlyReason = "editing a check or test command is allowed from this machine only"
+const ownerEditSandboxCmdOnlyReason = "editing a check, test, or kind is allowed from this machine only"
 
 // handleOwnerEdit is POST /tickets/{id}/edit: the owner edits a sealed
 // scenario, a sealed plan's task, or the ticket body (store.OwnerEdit).

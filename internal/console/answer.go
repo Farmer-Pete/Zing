@@ -240,7 +240,11 @@ func (c *console) handleSend(w http.ResponseWriter, r *http.Request) {
 	// boundary handleOwnerEdit checks for a check, test, or kind edit
 	// (#57, r1f9 triage): SendBatchOnly refuses with *store.ConflictError
 	// when this send would do that from somewhere else.
-	result, err := c.store.SendBatchOnly(r.Context(), req.Ticket, req.Questions, isLoopbackRemote(r.RemoteAddr))
+	origin := store.SendFromRemote
+	if isLoopbackRemote(r.RemoteAddr) {
+		origin = store.SendFromLoopback
+	}
+	result, err := c.store.SendBatchOnly(r.Context(), req.Ticket, req.Questions, origin)
 	if err != nil {
 		if conflictErr, ok := errors.AsType[*store.ConflictError](err); ok {
 			http.Error(w, conflictErr.Reason, http.StatusConflict)

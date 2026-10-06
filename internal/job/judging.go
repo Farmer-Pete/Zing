@@ -1096,6 +1096,15 @@ func judgeAmendmentFenceFor(text string) string {
 // amended value fenced under "Amended:" -- the console's markdown parser is
 // plain CommonMark, so this is paired code blocks per field rather than a
 // table (design nongoal). Pure.
+//
+// The reason is agent-written text shown next to the owner's one-click
+// Accept, so unlike every fenced field it is never allowed a line of its
+// own: a newline in it could open its own "**Check**" heading, "Now:" and
+// "Amended:" lines, and fenced blocks ahead of the real ones, spoofing the
+// diff an owner reads before approving a check -- including, with kind
+// host, a command that then runs unsandboxed (#57, r2f2 triage). Collapsing
+// every CR and LF to a space keeps the reason on its own single line, so it
+// can never start a markdown block of its own.
 func judgeAmendmentDiff(old response.Scenario, amended response.Amendment) string {
 	fields := []struct{ name, oldVal, newVal string }{
 		{"Given", old.Given, amended.Given},
@@ -1104,9 +1113,15 @@ func judgeAmendmentDiff(old response.Scenario, amended response.Amendment) strin
 		{"Check", old.Check, amended.Check},
 		{"Kind", string(old.Kind), string(amended.Kind)},
 	}
+	reason := strings.Map(func(r rune) rune {
+		if r == '\n' || r == '\r' {
+			return ' '
+		}
+		return r
+	}, amended.Reason)
 
 	var b strings.Builder
-	b.WriteString("Reason: " + amended.Reason + "\n")
+	b.WriteString("Reason: " + reason + "\n")
 	for _, f := range fields {
 		oldFence := judgeAmendmentFenceFor(f.oldVal)
 		newFence := judgeAmendmentFenceFor(f.newVal)
@@ -1940,22 +1955,27 @@ func (h judgeHandler) acceptAmendment(ctx context.Context, t store.Ticket, d Dep
 		return store.HandlerCommit{}, err
 	}
 
-	sha, maxRunID, escalation, err := judgeStartChecks(ctx, t, d)
+	// h.start is RUN's own round-start commit (judging.go): one marker
+	// message, or the escalation judgeStartChecks itself raised (no stored
+	// plan, or the worktree not ready). Reusing it keeps the marker format
+	// written in exactly one place (#57, r2f3 triage).
+	c, err := h.start(ctx, t, d, prevN+1)
 	if err != nil {
 		return store.HandlerCommit{}, err
 	}
-	if escalation != nil {
-		return *escalation, nil
+	if c.Escalation != nil {
+		// judgeStartChecks escalated instead of starting the round: the
+		// owner's Accept is discarded along with it, since nothing below
+		// applies the amendment. Without this line the only trace is
+		// judgeEscalation's own generic "escalation written" Warn, which
+		// carries no scenario_id or question_ids and does not say an
+		// accepted amendment went unapplied (#57, r2f4 triage).
+		slog.Warn("judge amendment not applied: start checks escalated", "ticket_id", t.ID, "scenario_id", a.Scenario, "question_ids", resolveIDs)
+		return c, nil
 	}
 
-	n := prevN + 1
-	slog.Info("judge amendment accepted", "ticket_id", t.ID, "scenario_id", a.Scenario, "kind", string(a.Kind), "round", n, "question_ids", resolveIDs)
-	c := baseCommit(t, d)
+	slog.Info("judge amendment accepted", "ticket_id", t.ID, "scenario_id", a.Scenario, "kind", string(a.Kind), "round", prevN+1, "question_ids", resolveIDs)
 	c.ScenarioEdit = &store.ScenarioEdit{Ref: a.Scenario, Kind: a.Kind, Given: a.Given, When: a.When, Then: a.Then, Check: a.Check, Reason: a.Reason}
-	c.Messages = []store.Message{{
-		TicketID: t.ID, Type: msgTypeUpdate, Author: authorSystem,
-		Body: fmt.Sprintf("judge round %d started sha %s after run %d", n, sha, maxRunID),
-	}}
 	c.ResolveQuestions = resolveIDs
 	return c, nil
 }

@@ -535,6 +535,38 @@ func TestOwnerEditKind(t *testing.T) {
 	if after := readScenarioPayload(t, s, ticketID, "s2"); !bytes.Equal(after, before) {
 		t.Errorf("payload = %s, want unchanged %s", after, before)
 	}
+
+	// A check the owner types in the same edit is exempt: the owner read
+	// what they typed, so the switch to kind host does not re-run
+	// HostCheckUnsafe against it (#57, r2f9).
+	ownedUnsafe := "go test ./typed\u202e"
+	if editErr := s.OwnerEdit(t.Context(), OwnerEditRequest{
+		TicketID: ticketID, Target: OwnerEditScenario, Ref: "s2", Action: OwnerEditActionEdit,
+		Kind: new("host"), Check: &ownedUnsafe,
+	}); editErr != nil {
+		t.Fatalf("OwnerEdit(kind host, owner-typed bidi check): %v", editErr)
+	}
+	if err := json.Unmarshal(readScenarioPayload(t, s, ticketID, "s2"), &sc); err != nil {
+		t.Fatalf("unmarshal scenario s2: %v", err)
+	}
+	if sc.Kind != response.ScenarioKindHost || sc.Check != ownedUnsafe {
+		t.Errorf("scenario s2 = %+v, want kind host, check %q", sc, ownedUnsafe)
+	}
+
+	// An edit to only given, when or then on a scenario that is already
+	// host is exempt: it neither switches kind nor sets check (#57, r2f9).
+	if editErr := s.OwnerEdit(t.Context(), OwnerEditRequest{
+		TicketID: ticketID, Target: OwnerEditScenario, Ref: "s2", Action: OwnerEditActionEdit,
+		Given: new(amendedGiven),
+	}); editErr != nil {
+		t.Fatalf("OwnerEdit(given only, already host): %v", editErr)
+	}
+	if err := json.Unmarshal(readScenarioPayload(t, s, ticketID, "s2"), &sc); err != nil {
+		t.Fatalf("unmarshal scenario s2: %v", err)
+	}
+	if sc.Given != amendedGiven || sc.Check != ownedUnsafe {
+		t.Errorf("scenario s2 = %+v, want given %q, check unchanged %q", sc, amendedGiven, ownedUnsafe)
+	}
 }
 
 // --- plan task edits (#41, task 2) ------------------------------------------
