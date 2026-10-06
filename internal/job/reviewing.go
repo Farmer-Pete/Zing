@@ -523,18 +523,26 @@ func loopsExhaustedRecommendation(accepted []response.FindingArtifact, changed, 
 // returns loopsExhaustedRecommendation's pick for accepted (ticket 60).
 // minRunID, the first "fix requested findings" marker's own watermark,
 // keeps a building-stage fix from before review ever opened out of
-// newestFixChangedFiles (review finding r1f4).
+// newestFixChangedFiles (review finding r1f4). With no review fix request
+// yet, such as jobs.review.max_loops 0, there is no watermark to read and
+// so no review fix report to find: the build-report scan is skipped
+// outright rather than run with minRunID 0, which would let a
+// building-stage fix stand in for one (review finding r2f1, owner decision
+// Q2). A malformed first marker is an error, matching fix.go's own read of
+// the same marker family, rather than a silent fall back to minRunID 0
+// (review finding r2f2).
 func loopsExhaustedRecommendationFor(ctx context.Context, t store.Ticket, d Deps, accepted []response.FindingArtifact) (string, error) {
-	reqs, _, _, err := reviewFixLoops(ctx, t, d)
+	reqs, err := reviewFixLoops(ctx, t, d)
 	if err != nil {
 		return "", err
 	}
-	var minRunID int64
-	if len(reqs) > 0 {
-		firstLine, _, _ := strings.Cut(reqs[0].Body, "\n")
-		if _, afterRunID, ok := parseFixRequestLine(firstLine); ok {
-			minRunID = afterRunID
-		}
+	if len(reqs) == 0 {
+		return loopsExhaustedRecommendation(accepted, false, false), nil
+	}
+	firstLine, _, _ := strings.Cut(reqs[0].Body, "\n")
+	_, minRunID, ok := parseFixRequestLine(firstLine)
+	if !ok {
+		return "", fmt.Errorf("job: reviewing: loops_exhausted recommendation: fix request %d: malformed marker", reqs[0].ID)
 	}
 	reports, err := d.Store.BuildReports(ctx, t.ID)
 	if err != nil {
@@ -1799,16 +1807,15 @@ func reviewRoundFailedMarker(ticketID int64, n int, reason string) store.Message
 }
 
 // reviewFixLoops reads review's own "fix requested findings" marker
-// family, oldest first, and the loop count (k, len(reqs)) and
-// jobs.review.max_loops that go with it: fixRequestOrLoopsExhausted and
-// acceptReviewLoopsExhausted both need the same count, from the same
-// marker family, so they share this read (ticket 60, review finding r1f5).
-func reviewFixLoops(ctx context.Context, t store.Ticket, d Deps) (reqs []store.MessageRow, k, maxLoops int, err error) {
+// family, oldest first (ticket 60, review finding r2f4): every caller's own
+// loop count is len(reqs), and jobs.review.max_loops is one field read, so
+// neither is worth a return slot of its own.
+func reviewFixLoops(ctx context.Context, t store.Ticket, d Deps) (reqs []store.MessageRow, err error) {
 	reqs, err = d.Store.MarkersWithPrefix(ctx, t.ID, "fix requested findings")
 	if err != nil {
-		return nil, 0, 0, fmt.Errorf("job: reviewing: fix requested findings markers: %w", err)
+		return nil, fmt.Errorf("job: reviewing: fix requested findings markers: %w", err)
 	}
-	return reqs, len(reqs), d.Machine.Jobs[jobReviewName].MaxLoops, nil
+	return reqs, nil
 }
 
 // fixRequestOrLoopsExhausted is FIXREQ's own body (design section 6.8),
@@ -1818,10 +1825,11 @@ func reviewFixLoops(ctx context.Context, t store.Ticket, d Deps) (reqs []store.M
 // nil and the caller decides between acceptAtCap and a loops_exhausted
 // escalation. k and maxLoops are returned either way.
 func fixRequestOrLoopsExhausted(ctx context.Context, t store.Ticket, d Deps, accepted []response.FindingArtifact) (msg *store.Message, k, maxLoops int, err error) {
-	_, k, maxLoops, err = reviewFixLoops(ctx, t, d)
+	reqs, err := reviewFixLoops(ctx, t, d)
 	if err != nil {
 		return nil, 0, 0, err
 	}
+	k, maxLoops = len(reqs), d.Machine.Jobs[jobReviewName].MaxLoops
 	if k >= maxLoops {
 		return nil, k, maxLoops, nil
 	}
@@ -2530,10 +2538,11 @@ func (h reviewingHandler) acceptReviewLoopsExhausted(ctx context.Context, t stor
 	}
 	accepted := acceptedRoundFindings(findings, reviewRoundDoneCount(markers))
 
-	_, k, maxLoops, err := reviewFixLoops(ctx, t, d)
+	reqs, err := reviewFixLoops(ctx, t, d)
 	if err != nil {
 		return store.HandlerCommit{}, err
 	}
+	k, maxLoops := len(reqs), d.Machine.Jobs[jobReviewName].MaxLoops
 
 	lines := make([]string, 0, 2+len(accepted))
 	lines = append(lines,

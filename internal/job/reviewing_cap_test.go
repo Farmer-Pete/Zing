@@ -504,6 +504,106 @@ func TestLoopsExhaustedRecommendation(t *testing.T) {
 	})
 }
 
+// preReviewBuildReportPayload is a minimal, schema-valid "build_report"
+// artifact payload (internal/store/schemas/artifacts/build_report.json)
+// for a task-0 (fix) run that changed no file when filesChanged is false,
+// used to plant a report that must not stand in for a review fix
+// (review findings r2f1, r2f3).
+func preReviewBuildReportPayload(filesChanged bool) []byte {
+	files := `[]`
+	if filesChanged {
+		files = `["greet.go"]`
+	}
+	return []byte(fmt.Sprintf(`{"task_n":0,"files_changed":%s,"extras":[],"fences":[],"report":"r","title":"t"}`, files))
+}
+
+// TestLoopsExhaustedRecommendationForSkipsPreReviewReports proves
+// loopsExhaustedRecommendationFor's own wiring from a real "fix requested
+// findings" marker into newestFixChangedFiles, not just the two pure
+// functions it calls (review finding r2f3).
+func TestLoopsExhaustedRecommendationForSkipsPreReviewReports(t *testing.T) {
+	accept := response.FindingAccept
+	major := []response.FindingArtifact{{ID: "r9f1", Severity: response.SeverityMajor, Decision: &accept}}
+
+	t.Run("no review fix request yet: a building-stage report does not stand in for one", func(t *testing.T) {
+		// jobs.review.max_loops 0 reaches the gate before any "fix requested
+		// findings" marker exists: reqs is empty, so there is no watermark to
+		// read, and the scan must not run at all (review finding r2f1, owner
+		// decision Q2), not even when a stray pre-review report changed
+		// nothing and so would otherwise recommend accept.
+		s, ticket, before := reviewTicketReady(t)
+		if _, err := s.InsertArtifact(t.Context(), store.Artifact{
+			TicketID: ticket.ID, RunID: &before, Type: "build_report", Payload: preReviewBuildReportPayload(false),
+		}); err != nil {
+			t.Fatalf("InsertArtifact: %v", err)
+		}
+		deps := pbClaim(t, s, pbFakeRuntime(t), ticket.ID)
+
+		got, err := loopsExhaustedRecommendationFor(t.Context(), ticket, deps, major)
+		if err != nil {
+			t.Fatalf("loopsExhaustedRecommendationFor: %v", err)
+		}
+		if got != escalationChoiceRetry {
+			t.Errorf("loopsExhaustedRecommendationFor(...) = %q, want %q", got, escalationChoiceRetry)
+		}
+	})
+
+	t.Run("review fix requests exist: a late-arriving pre-review report at or before the watermark is still skipped", func(t *testing.T) {
+		// The first "fix requested findings" marker's own watermark (minRunID)
+		// must be read from the real marker, not left at 0: a report whose
+		// run id is at or before that watermark must lose to the newer review
+		// fix's own report even when BuildReports returns the stray report
+		// last (highest artifact id), ordered after it.
+		s, ticket, rt, _ := driveReviewToCap(t)
+		deps := pbClaim(t, s, rt, ticket.ID)
+		reqs, err := reviewFixLoops(t.Context(), ticket, deps)
+		if err != nil {
+			t.Fatalf("reviewFixLoops: %v", err)
+		}
+		if len(reqs) == 0 {
+			t.Fatal("reviewFixLoops: no fix requests, want at least one")
+		}
+		firstLine, _, _ := strings.Cut(reqs[0].Body, "\n")
+		_, minRunID, ok := parseFixRequestLine(firstLine)
+		if !ok {
+			t.Fatalf("parseFixRequestLine(%q): ok = false", firstLine)
+		}
+		if _, insertErr := s.InsertArtifact(t.Context(), store.Artifact{
+			TicketID: ticket.ID, RunID: &minRunID, Type: "build_report", Payload: preReviewBuildReportPayload(false),
+		}); insertErr != nil {
+			t.Fatalf("InsertArtifact: %v", insertErr)
+		}
+
+		got, err := loopsExhaustedRecommendationFor(t.Context(), ticket, deps, major)
+		if err != nil {
+			t.Fatalf("loopsExhaustedRecommendationFor: %v", err)
+		}
+		if got != escalationChoiceRetry {
+			t.Errorf("loopsExhaustedRecommendationFor(...) = %q, want %q (driveReviewToCap's own second fix changed greet.go)", got, escalationChoiceRetry)
+		}
+	})
+}
+
+// TestLoopsExhaustedRecommendationForMalformedMarker proves review finding
+// r2f2: a malformed first "fix requested findings" marker is an error, not
+// a silent fall back to minRunID 0.
+func TestLoopsExhaustedRecommendationForMalformedMarker(t *testing.T) {
+	s, ticket, _ := reviewTicketReady(t)
+	if _, err := s.InsertMessage(t.Context(), store.Message{
+		TicketID: ticket.ID, Type: msgTypeUpdate, Author: authorSystem, Body: "fix requested findings garbled marker",
+	}); err != nil {
+		t.Fatalf("InsertMessage: %v", err)
+	}
+	deps := pbClaim(t, s, pbFakeRuntime(t), ticket.ID)
+
+	accept := response.FindingAccept
+	major := []response.FindingArtifact{{ID: "r9f1", Severity: response.SeverityMajor, Decision: &accept}}
+	_, err := loopsExhaustedRecommendationFor(t.Context(), ticket, deps, major)
+	if err == nil || !strings.Contains(err.Error(), "malformed marker") {
+		t.Fatalf("loopsExhaustedRecommendationFor(...) error = %v, want an error containing %q", err, "malformed marker")
+	}
+}
+
 // ---- TestLoopGateLegacyAcceptRowEscalates -----------------------------------
 
 // TestLoopGateLegacyAcceptRowEscalates proves a finding row stored before
