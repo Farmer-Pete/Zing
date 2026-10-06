@@ -1,6 +1,7 @@
 package store
 
 import (
+	"bytes"
 	"database/sql"
 	"encoding/json"
 	"errors"
@@ -3577,6 +3578,209 @@ func TestCommitHandlerResult_EscalationPlanningDefaultsToRetry(t *testing.T) {
 				t.Errorf("question.Recommended = %q, want a", qp.Recommended)
 			}
 		})
+	}
+}
+
+// TestCommitHandlerResult_EscalationOffersFileGrant proves an escalation
+// whose payload carries a Grant adds option d, "Let task N also change
+// PATH", after Retry and Abandon, without disturbing the recommendation;
+// an escalation with no Grant offers only Retry and Abandon (plan #51,
+// design rule 2).
+func TestCommitHandlerResult_EscalationOffersFileGrant(t *testing.T) {
+	t.Parallel()
+	s := newTestStore(t)
+	ctx := t.Context()
+	_, ticketID := seedQueuedTicket(t, s, "1")
+	setTicketState(t, s, ticketID, testStateBuilding)
+
+	owner, expires := claimForCommit(t, s, ticketID)
+	payload := escalationTestPayload(response.EscalationCodePlanGap, response.EscalationOriginBuild)
+	payload.Grant = &response.FileGrant{Task: 2, Paths: []string{"x.go"}}
+	applied, err := s.CommitHandlerResult(ctx, HandlerCommit{
+		TicketID: ticketID, Owner: owner, Expires: expires,
+		Escalation: &EscalationCommit{Body: "plan_gap: x.go belongs to another task", Payload: payload},
+	})
+	if err != nil {
+		t.Fatalf("CommitHandlerResult: %v", err)
+	}
+	if !applied {
+		t.Fatal("applied = false, want true")
+	}
+
+	qp := latestQuestionPayload(t, s, ticketID)
+	wantWithGrant := []response.Option{
+		{Key: "a", Text: escalationOptionRetry},
+		{Key: "c", Text: escalationOptionAbandon},
+		{Key: "d", Text: "Let task 2 also change x.go"},
+	}
+	if !reflect.DeepEqual(qp.Options, wantWithGrant) {
+		t.Errorf("question.Options = %+v, want %+v", qp.Options, wantWithGrant)
+	}
+	if qp.Recommended != "a" {
+		t.Errorf("question.Recommended = %q, want a", qp.Recommended)
+	}
+
+	_, ticketID2 := seedQueuedTicket(t, s, "2")
+	setTicketState(t, s, ticketID2, testStateBuilding)
+	owner2, expires2 := claimForCommit(t, s, ticketID2)
+	applied, err = s.CommitHandlerResult(ctx, HandlerCommit{
+		TicketID: ticketID2, Owner: owner2, Expires: expires2,
+		Escalation: &EscalationCommit{
+			Body:    "plan_gap: no grant here",
+			Payload: escalationTestPayload(response.EscalationCodePlanGap, response.EscalationOriginBuild),
+		},
+	})
+	if err != nil {
+		t.Fatalf("CommitHandlerResult: %v", err)
+	}
+	if !applied {
+		t.Fatal("applied = false, want true")
+	}
+	qp2 := latestQuestionPayload(t, s, ticketID2)
+	if !reflect.DeepEqual(qp2.Options, wantEscalationOptionsPostSeal) {
+		t.Errorf("question.Options = %+v, want %+v", qp2.Options, wantEscalationOptionsPostSeal)
+	}
+}
+
+// grantTestPlan returns a 6-task plan whose a.go names task "6" and whose
+// b.go names task "2 6", the fixture TestCommitHandlerResult_
+// GrantFilesUpdatesPlanAndAudits grants task 2 against.
+func grantTestPlan(t *testing.T) response.Plan {
+	t.Helper()
+	tasks := make([]response.Task, 6)
+	for i := range tasks {
+		tasks[i] = response.Task{N: i + 1, Test: "TestX", Text: "do it"}
+	}
+	files := []response.FileChange{
+		{Path: testRefAGo, Action: response.FileActionModify, Task: "6", Reason: "task 6 touches a.go"},
+		{Path: testRefBGo, Action: response.FileActionModify, Task: testTasks2And6, Reason: "task 2 and 6 touch b.go"},
+	}
+	return planWithTasks(t, tasks, files)
+}
+
+// testTasks2And6 is grantTestPlan's and TestCommitHandlerResult_
+// GrantFilesUpdatesPlanAndAudits' own "2 6" result literal (goconst).
+const testTasks2And6 = "2 6"
+
+// readPlanPayload reads back ticketID's newest plan artifact's raw payload
+// bytes, for a byte-for-byte unchanged check.
+func readPlanPayload(t *testing.T, s *Store, ticketID int64) []byte {
+	t.Helper()
+	var payload []byte
+	if err := s.db.QueryRowContext(t.Context(),
+		`SELECT payload FROM artifacts WHERE ticket_id = ? AND type = 'plan' ORDER BY version DESC LIMIT 1`,
+		ticketID,
+	).Scan(&payload); err != nil {
+		t.Fatalf("read back plan: %v", err)
+	}
+	return payload
+}
+
+// TestCommitHandlerResult_GrantFilesUpdatesPlanAndAudits proves
+// CommitHandlerResult's GrantFiles step (plan #51, design rule 6): it
+// rewrites the stored plan in place (no new plan artifact row), grants
+// every named path whose task list is non-empty and lacks the grantee,
+// ignores a path the plan does not declare, and writes exactly one
+// owner_edit event per file that actually changed. A grant that fails
+// checkPlanStructure (task 9 does not exist on a 6-task plan) errors and
+// leaves the stored plan's bytes untouched.
+func TestCommitHandlerResult_GrantFilesUpdatesPlanAndAudits(t *testing.T) {
+	t.Parallel()
+	s := newTestStore(t)
+	ctx := t.Context()
+	_, ticketID := seedQueuedTicket(t, s, "1")
+	setTicketState(t, s, ticketID, testStateBuilding)
+	insertPlanArtifactPayload(t, s, ticketID, nil, grantTestPlan(t))
+
+	owner, expires := claimForCommit(t, s, ticketID)
+	applied, err := s.CommitHandlerResult(ctx, HandlerCommit{
+		TicketID: ticketID, Owner: owner, Expires: expires,
+		GrantFiles: &response.FileGrant{Task: 2, Paths: []string{testRefAGo, testRefBGo, "missing.go"}},
+	})
+	if err != nil {
+		t.Fatalf("CommitHandlerResult: %v", err)
+	}
+	if !applied {
+		t.Fatal("applied = false, want true")
+	}
+
+	if n := countPlanArtifacts(t, s, ticketID); n != 1 {
+		t.Errorf("plan artifacts = %d, want 1 (rewritten in place)", n)
+	}
+	plan, _, ok, err := s.StoredPlan(ctx, ticketID)
+	if err != nil {
+		t.Fatalf("StoredPlan: %v", err)
+	}
+	if !ok {
+		t.Fatal("StoredPlan: ok = false, want true")
+	}
+	if got := fileTaskByPath(plan.Delivery.Files, testRefAGo); got != testTasks2And6 {
+		t.Errorf("a.go task = %q, want %q", got, testTasks2And6)
+	}
+	if got := fileTaskByPath(plan.Delivery.Files, testRefBGo); got != testTasks2And6 {
+		t.Errorf("b.go task = %q, want %q", got, testTasks2And6)
+	}
+
+	events := ownerEditEvents(t, s, ticketID)
+	if len(events) != 1 {
+		t.Fatalf("owner_edit events = %d, want 1", len(events))
+	}
+	var ev response.OwnerEditEvent
+	if err = json.Unmarshal(events[0].Payload, &ev); err != nil {
+		t.Fatalf("unmarshal owner_edit event: %v", err)
+	}
+	if ev.Target != OwnerEditPlanFile || ev.Ref != testRefAGo || ev.Old != "6" || ev.New != testTasks2And6 {
+		t.Errorf("event = %+v, want target plan_file ref a.go old 6 new 2 6", ev)
+	}
+
+	beforeSecond := readPlanPayload(t, s, ticketID)
+	owner2, expires2 := claimForCommit(t, s, ticketID)
+	_, err = s.CommitHandlerResult(ctx, HandlerCommit{
+		TicketID: ticketID, Owner: owner2, Expires: expires2,
+		GrantFiles: &response.FileGrant{Task: 9, Paths: []string{testRefAGo}},
+	})
+	if err == nil {
+		t.Fatal("CommitHandlerResult(grant task 9): err = nil, want error")
+	}
+	if !strings.Contains(err.Error(), "grant plan files") {
+		t.Errorf("err = %q, want it to name grant plan files (checkPlanStructure's own fault)", err.Error())
+	}
+	if got := readPlanPayload(t, s, ticketID); !bytes.Equal(got, beforeSecond) {
+		t.Errorf("plan bytes changed after the refused grant")
+	}
+	if got := ownerEditEvents(t, s, ticketID); len(got) != 1 {
+		t.Errorf("owner_edit events after the refused grant = %d, want still 1 (the rollback wrote none)", len(got))
+	}
+}
+
+// TestCommitHandlerResult_GrantFilesNoPlanRefusesCommit proves
+// grantPlanFilesTx's own load failure branch: a commit whose GrantFiles
+// names a ticket with no plan artifact at all errors (sql.ErrNoRows is
+// not special-cased), and the whole commit rolls back, writing neither an
+// artifact nor an owner_edit event.
+func TestCommitHandlerResult_GrantFilesNoPlanRefusesCommit(t *testing.T) {
+	t.Parallel()
+	s := newTestStore(t)
+	ctx := t.Context()
+	_, ticketID := seedQueuedTicket(t, s, "1")
+	setTicketState(t, s, ticketID, testStateBuilding)
+
+	owner, expires := claimForCommit(t, s, ticketID)
+	_, err := s.CommitHandlerResult(ctx, HandlerCommit{
+		TicketID: ticketID, Owner: owner, Expires: expires,
+		GrantFiles: &response.FileGrant{Task: 2, Paths: []string{testRefAGo}},
+	})
+	if err == nil {
+		t.Fatal("CommitHandlerResult: err = nil, want error (no plan artifact)")
+	}
+	if !strings.Contains(err.Error(), "grant plan files") {
+		t.Errorf("err = %q, want it to name grant plan files", err.Error())
+	}
+	if n := countPlanArtifacts(t, s, ticketID); n != 0 {
+		t.Errorf("plan artifacts = %d, want 0", n)
+	}
+	if got := ownerEditEvents(t, s, ticketID); len(got) != 0 {
+		t.Errorf("owner_edit events = %d, want 0 (the rollback wrote none)", len(got))
 	}
 }
 

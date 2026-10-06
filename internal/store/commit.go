@@ -178,6 +178,10 @@ type HandlerCommit struct {
 	// behind a Waiting this commit would otherwise set. Applied right after
 	// Messages and before ResolveQuestions.
 	Conversation *ConversationCommit
+	// GrantFiles adds Task to the task list of every named delivery file of
+	// the ticket's newest plan (plan #51): applied by grantPlanFilesTx,
+	// right after Artifacts and before Seal. nil changes nothing.
+	GrantFiles *response.FileGrant
 }
 
 // ConversationCommit is one planning turn's thread effects (design section
@@ -457,6 +461,12 @@ func (s *Store) CommitHandlerResult(ctx context.Context, c HandlerCommit) (bool,
 			}
 		}
 		if _, err = s.insertArtifactTx(ctx, tx, a); err != nil {
+			return false, fmt.Errorf("commit handler result: %w", err)
+		}
+	}
+
+	if c.GrantFiles != nil {
+		if err = s.grantPlanFilesTx(ctx, tx, c.TicketID, *c.GrantFiles); err != nil {
 			return false, fmt.Errorf("commit handler result: %w", err)
 		}
 	}
@@ -1227,6 +1237,11 @@ const (
 	escalationOptionAbandon        = "Abandon"
 )
 
+// escalationOptionGrantKey is option d's key (plan #51): added after
+// escalationOptionsFor's own a/b/c, whenever the escalation carries a file
+// grant.
+const escalationOptionGrantKey = "d"
+
 // escalationOptionsFor picks the question's options and recommendation
 // (#47): post-seal, back to planning cannot run (replanUnsupportedEscalation
 // is the only thing it does there), so it's dropped and Retry is always
@@ -1301,6 +1316,9 @@ func (s *Store) escalateTx(ctx context.Context, tx *sql.Tx, ticketID int64, tick
 	}
 
 	options, recommended := escalationOptionsFor(ticketState, ec.Payload.Code)
+	if ec.Payload.Grant != nil {
+		options = append(options, response.Option{Key: escalationOptionGrantKey, Text: response.FileGrantOptionText(*ec.Payload.Grant)})
+	}
 	qPayload, err := json.Marshal(response.QuestionPayload{
 		Key:         fmt.Sprintf("Q%d", n),
 		Kind:        response.QuestionKindQuestion,

@@ -76,10 +76,12 @@ const (
 	gateOptionApprove = "a"
 	gateOptionReject  = "b"
 
-	// escalationChoiceRetry, escalationChoiceBack, and escalationChoiceAbandon
-	// are the three option keys escalateTx's own linked question ever offers
-	// (design D10, section 6.7): "retry", "back to planning", and "abandon".
-	// An escalation round carrying replies and no option at all resolves as
+	// escalationChoiceRetry, escalationChoiceBack, escalationChoiceAbandon,
+	// and escalationChoiceGrant are the option keys escalateTx's own linked
+	// question ever offers (design D10, section 6.7; plan #51): "retry",
+	// "back to planning", "abandon", and, only when the escalation's own
+	// payload carries a FileGrant, "let task N also change PATH". An
+	// escalation round carrying replies and no option at all resolves as
 	// that question's own stored Recommended option, falling back to
 	// escalationChoiceRetry when none is stored (roundChoice's own default,
 	// #47 follow-up: it used to hardcode escalationChoiceBack here, which
@@ -93,6 +95,7 @@ const (
 	escalationChoiceRetry   = "a"
 	escalationChoiceBack    = "b"
 	escalationChoiceAbandon = "c"
+	escalationChoiceGrant   = "d"
 
 	responseInvalidWhat = "the model's final message failed validation twice in a row"
 

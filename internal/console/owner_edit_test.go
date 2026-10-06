@@ -242,6 +242,61 @@ func TestOwnerEditRoute_DropsPlanTask(t *testing.T) {
 	}
 }
 
+// TestOwnerEditRoute_SetsPlanFileTasks proves the done-when test: posting a
+// plan_file edit through the console route rewrites the named delivery
+// file's task list, leaves the version unchanged, and answers 204.
+func TestOwnerEditRoute_SetsPlanFileTasks(t *testing.T) {
+	t.Parallel()
+	s := newConsoleTestStore(t)
+	ticketID := seedTicket(t, s, "1", "fix the bug")
+	runID := seedRun(t, s, ticketID)
+
+	const filePath = "internal/store/console_reads.go"
+	plan := planWithTasks(
+		[]response.Task{
+			{N: 1, Test: "T1", Demo: true, Text: "do task 1"},
+			{N: 2, Test: "T2", Demo: false, Text: "do task 2"},
+			{N: 3, Test: "T3", Demo: false, Text: "do task 3"},
+			{N: 4, Test: "T4", Demo: false, Text: "do task 4"},
+			{N: 5, Test: "T5", Demo: false, Text: "do task 5"},
+			{N: 6, Test: "T6", Demo: false, Text: "do task 6"},
+		},
+		[]response.FileChange{
+			{Path: filePath, Action: response.FileActionModify, Task: "6", Reason: "r1"},
+		},
+	)
+	payload, err := json.Marshal(plan)
+	if err != nil {
+		t.Fatalf("marshal plan: %v", err)
+	}
+	if _, insErr := s.InsertArtifact(t.Context(), store.Artifact{
+		TicketID: ticketID, RunID: &runID, Type: testArtifactTypePlan, Version: 1, Payload: payload,
+	}); insErr != nil {
+		t.Fatalf("InsertArtifact(plan): %v", insErr)
+	}
+	seedSealedScenarioArtifact(t, s, ticketID, &runID, response.Scenario{
+		ID: "s1", Kind: response.ScenarioKindBehavior, Given: "g1", When: "w1", Then: "t1",
+	})
+
+	srv := newTestServer(t, s, bus.New(), nil, newTestLogHandler(t))
+	resp := doRequest(t, mutationRequest(t, srv, ownerEditPath(ticketID), `{"target":"plan_file","ref":"`+filePath+`","action":"edit","tasks":"2 6"}`))
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusNoContent {
+		t.Fatalf("status = %d, want 204; body = %q", resp.StatusCode, readBody(t, resp))
+	}
+
+	got, version, ok, err := s.StoredPlan(t.Context(), ticketID)
+	if err != nil || !ok {
+		t.Fatalf("StoredPlan: ok=%v err=%v", ok, err)
+	}
+	if version != 1 {
+		t.Errorf("version = %d, want unchanged 1", version)
+	}
+	if gotTask := fileTaskByPath(got.Delivery.Files, filePath); gotTask != "2 6" {
+		t.Errorf("file %s task = %q, want %q", filePath, gotTask, "2 6")
+	}
+}
+
 // seedTicketWithBody inserts one queued ticket under testProject and ref,
 // with body as its stored body, returning its id: the fixture
 // TestOwnerEditRoute_AmendsTicketBody needs an old body to assert against.

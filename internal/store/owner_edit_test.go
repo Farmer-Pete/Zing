@@ -807,6 +807,217 @@ func TestDropPlanTask_RenumbersTasksAndFileLists(t *testing.T) {
 	}
 }
 
+// --- plan file edits (#51, task 3) ------------------------------------------
+
+// planFileTasksTestPath is the delivery file path TestOwnerEdit_
+// SetsPlanFileTasks and TestOwnerEdit_PlanFileRefusals edit, matching
+// plan #51's own acceptance example.
+const planFileTasksTestPath = "internal/store/console_reads.go"
+
+// sealedSixTaskPlanWithFile seeds ticketID with a sealed, six-task plan
+// whose only delivery file is planFileTasksTestPath, with task list "6".
+func sealedSixTaskPlanWithFile(t *testing.T, s *Store, ticketID int64) {
+	t.Helper()
+	runID := seedPlanRun(t, s, ticketID)
+	tasks := make([]response.Task, 6)
+	for i := range tasks {
+		tasks[i] = response.Task{N: i + 1, Test: "TestX", Text: "do it"}
+	}
+	files := []response.FileChange{
+		{Path: planFileTasksTestPath, Action: response.FileActionModify, Task: "6", Reason: "r"},
+	}
+	insertPlanArtifactPayload(t, s, ticketID, &runID, planWithTasks(t, tasks, files))
+	sealedAt := time.Now().UTC()
+	insertScenarioArtifact(t, s, ticketID, &runID, "s1", &sealedAt)
+}
+
+// TestOwnerEdit_SetsPlanFileTasks proves a plan_file edit normalizes and
+// stores the new task list in place, with no new plan artifact row, and
+// writes exactly one owner_edit event whose body equals OwnerEditLine's
+// sentence.
+func TestOwnerEdit_SetsPlanFileTasks(t *testing.T) {
+	t.Parallel()
+	s := newTestStore(t)
+	_, ticketID := seedQueuedTicket(t, s, "1")
+	sealedSixTaskPlanWithFile(t, s, ticketID)
+
+	if err := s.OwnerEdit(t.Context(), OwnerEditRequest{
+		TicketID: ticketID, Target: OwnerEditPlanFile, Ref: planFileTasksTestPath, Action: OwnerEditActionEdit,
+		Tasks: new("6 2"),
+	}); err != nil {
+		t.Fatalf("OwnerEdit: %v", err)
+	}
+
+	if n := countPlanArtifacts(t, s, ticketID); n != 1 {
+		t.Errorf("plan artifacts = %d, want 1", n)
+	}
+
+	got, _, ok, err := s.StoredPlan(t.Context(), ticketID)
+	if err != nil || !ok {
+		t.Fatalf("StoredPlan: ok=%v err=%v", ok, err)
+	}
+	if task := fileTaskByPath(got.Delivery.Files, planFileTasksTestPath); task != testTasks2And6 {
+		t.Errorf("file task = %q, want %q", task, testTasks2And6)
+	}
+
+	events := ownerEditEvents(t, s, ticketID)
+	if len(events) != 1 {
+		t.Fatalf("owner_edit events = %d, want 1", len(events))
+	}
+	var ev response.OwnerEditEvent
+	if err := json.Unmarshal(events[0].Payload, &ev); err != nil {
+		t.Fatalf("unmarshal owner_edit event: %v", err)
+	}
+	if ev.Target != OwnerEditPlanFile || ev.Ref != planFileTasksTestPath || ev.Action != OwnerEditActionEdit {
+		t.Errorf("event target/ref/action = %q/%q/%q, want %q/%q/%q",
+			ev.Target, ev.Ref, ev.Action, OwnerEditPlanFile, planFileTasksTestPath, OwnerEditActionEdit)
+	}
+	if ev.Old != "6" || ev.New != testTasks2And6 {
+		t.Errorf("event old/new = %q/%q, want %q/%q", ev.Old, ev.New, "6", testTasks2And6)
+	}
+	if events[0].Body != response.OwnerEditLine(ev) {
+		t.Errorf("event body = %q, want %q", events[0].Body, response.OwnerEditLine(ev))
+	}
+}
+
+// TestOwnerEdit_PlanFileRefusals is a table test over every plan_file
+// refusal: each case asserts *OwnerEditError's Code, that the stored plan's
+// bytes are unchanged, and that no owner_edit event is written.
+func TestOwnerEdit_PlanFileRefusals(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		wantCode OwnerEditCode
+		seed     func(t *testing.T, s *Store, ticketID int64)
+		req      func(ticketID int64) OwnerEditRequest
+	}{
+		{
+			name:     "task number outside plan",
+			wantCode: OwnerEditCodeInvalid,
+			seed:     sealedSixTaskPlanWithFile,
+			req: func(ticketID int64) OwnerEditRequest {
+				return OwnerEditRequest{TicketID: ticketID, Target: OwnerEditPlanFile, Ref: planFileTasksTestPath, Action: OwnerEditActionEdit, Tasks: new("2 9")}
+			},
+		},
+		{
+			name:     "blank tasks",
+			wantCode: OwnerEditCodeBadRequest,
+			seed:     sealedSixTaskPlanWithFile,
+			req: func(ticketID int64) OwnerEditRequest {
+				return OwnerEditRequest{TicketID: ticketID, Target: OwnerEditPlanFile, Ref: planFileTasksTestPath, Action: OwnerEditActionEdit, Tasks: new("")}
+			},
+		},
+		{
+			name:     "double space in tasks",
+			wantCode: OwnerEditCodeBadRequest,
+			seed:     sealedSixTaskPlanWithFile,
+			req: func(ticketID int64) OwnerEditRequest {
+				return OwnerEditRequest{TicketID: ticketID, Target: OwnerEditPlanFile, Ref: planFileTasksTestPath, Action: OwnerEditActionEdit, Tasks: new("2  6")}
+			},
+		},
+		{
+			name:     "unknown file",
+			wantCode: OwnerEditCodeNotFound,
+			seed:     sealedSixTaskPlanWithFile,
+			req: func(ticketID int64) OwnerEditRequest {
+				return OwnerEditRequest{TicketID: ticketID, Target: OwnerEditPlanFile, Ref: "nope.go", Action: OwnerEditActionEdit, Tasks: new("2")}
+			},
+		},
+		{
+			name:     "blank ref",
+			wantCode: OwnerEditCodeBadRequest,
+			seed:     sealedSixTaskPlanWithFile,
+			req: func(ticketID int64) OwnerEditRequest {
+				return OwnerEditRequest{TicketID: ticketID, Target: OwnerEditPlanFile, Ref: "", Action: OwnerEditActionEdit, Tasks: new("2")}
+			},
+		},
+		{
+			name:     "unsealed plan",
+			wantCode: OwnerEditCodeNotSealed,
+			seed: func(t *testing.T, s *Store, ticketID int64) {
+				t.Helper()
+				runID := seedPlanRun(t, s, ticketID)
+				plan := planWithTasks(t,
+					[]response.Task{{N: 1, Test: "T1", Demo: true, Text: planTaskText1}},
+					[]response.FileChange{{Path: planFileTasksTestPath, Action: response.FileActionModify, Task: "1", Reason: "r"}},
+				)
+				insertPlanArtifactPayload(t, s, ticketID, &runID, plan)
+				insertScenarioArtifact(t, s, ticketID, &runID, "s1", nil) // unsealed
+			},
+			req: func(ticketID int64) OwnerEditRequest {
+				return OwnerEditRequest{TicketID: ticketID, Target: OwnerEditPlanFile, Ref: planFileTasksTestPath, Action: OwnerEditActionEdit, Tasks: new("1")}
+			},
+		},
+		{
+			name:     "plan not task-mapped",
+			wantCode: OwnerEditCodeInvalid,
+			seed: func(t *testing.T, s *Store, ticketID int64) {
+				t.Helper()
+				runID := seedPlanRun(t, s, ticketID)
+				plan := planWithTasks(t,
+					[]response.Task{{N: 1, Test: "T1", Demo: true, Text: planTaskText1}},
+					[]response.FileChange{{Path: planFileTasksTestPath, Action: response.FileActionModify, Reason: "r"}},
+				)
+				insertPlanArtifactPayload(t, s, ticketID, &runID, plan)
+				sealedAt := time.Now().UTC()
+				insertScenarioArtifact(t, s, ticketID, &runID, "s1", &sealedAt)
+			},
+			req: func(ticketID int64) OwnerEditRequest {
+				return OwnerEditRequest{TicketID: ticketID, Target: OwnerEditPlanFile, Ref: planFileTasksTestPath, Action: OwnerEditActionEdit, Tasks: new("1")}
+			},
+		},
+		{
+			name:     "claimed ticket",
+			wantCode: OwnerEditCodeClaimed,
+			seed: func(t *testing.T, s *Store, ticketID int64) {
+				t.Helper()
+				sealedSixTaskPlanWithFile(t, s, ticketID)
+				claimed, err := s.Claim(t.Context(), ticketID, "runner-1", time.Now().Add(time.Hour))
+				if err != nil || !claimed {
+					t.Fatalf("Claim: claimed=%v err=%v", claimed, err)
+				}
+			},
+			req: func(ticketID int64) OwnerEditRequest {
+				return OwnerEditRequest{TicketID: ticketID, Target: OwnerEditPlanFile, Ref: planFileTasksTestPath, Action: OwnerEditActionEdit, Tasks: new("2")}
+			},
+		},
+		{
+			name:     "drop not allowed",
+			wantCode: OwnerEditCodeBadRequest,
+			seed:     sealedSixTaskPlanWithFile,
+			req: func(ticketID int64) OwnerEditRequest {
+				return OwnerEditRequest{TicketID: ticketID, Target: OwnerEditPlanFile, Ref: planFileTasksTestPath, Action: OwnerEditActionDrop}
+			},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			s := newTestStore(t)
+			_, ticketID := seedQueuedTicket(t, s, "1")
+			tc.seed(t, s, ticketID)
+			before := readPlanPayload(t, s, ticketID)
+
+			err := s.OwnerEdit(t.Context(), tc.req(ticketID))
+			refusal, ok := errors.AsType[*OwnerEditError](err)
+			if !ok {
+				t.Fatalf("OwnerEdit error = %v (%T), want *OwnerEditError", err, err)
+			}
+			if refusal.Code != tc.wantCode {
+				t.Errorf("code = %q, want %q", refusal.Code, tc.wantCode)
+			}
+			if after := readPlanPayload(t, s, ticketID); !bytes.Equal(after, before) {
+				t.Errorf("plan payload changed, want unchanged")
+			}
+			if n, err := s.CountEvents(t.Context(), ticketID, EventKindOwnerEdit, EventFilter{}); err != nil || n != 0 {
+				t.Errorf("owner_edit events = %d (err %v), want 0", n, err)
+			}
+		})
+	}
+}
+
 // TestCheckPlanStructure proves checkPlanStructure's two faults -- tasks not
 // numbered 1..len in order, and a file task list naming a number outside
 // 1..len -- and that a well-formed plan reports no fault.

@@ -38,7 +38,7 @@ templ PlanView(p RenderedPlan) {
 		@migrationsSection(p.Design.Migrations)
 		<h2>Delivery</h2>
 		<h3>Files</h3>
-		@filesTable(p.Delivery.Files)
+		@filesTable(p.TicketID, p.Editable, p.Delivery.Files)
 		@decidedFilesSection(p.Delivery.DecidedFiles)
 		<h3>Deletions</h3>
 		@deletionsSection(p.Delivery.Deletions)
@@ -244,15 +244,22 @@ templ migrationsSection(m response.Migrations) {
 }
 
 // filesTable renders Delivery.Files (design section 6.9): a table of path,
-// action, reason. Delivery.Files carries no "none" case (jsonschema
+// action, tasks, reason. Delivery.Files carries no "none" case (jsonschema
 // minItems=1, internal/response/types.go): the perimeter is never empty.
-templ filesTable(files []response.FileChange) {
+// editable is RenderedPlan.Editable (#41, extended by the file-grant
+// change): only then does each row gain a last cell holding ticketID's own
+// owner-edit box (ownerEditFileForm) for that file.
+templ filesTable(ticketID int64, editable bool, files []response.FileChange) {
 	<table class="files">
 		<thead>
 			<tr>
 				<th>Path</th>
 				<th>Action</th>
+				<th>Tasks</th>
 				<th>Reason</th>
+				if editable {
+					<th></th>
+				}
 			</tr>
 		</thead>
 		<tbody>
@@ -260,11 +267,32 @@ templ filesTable(files []response.FileChange) {
 				<tr>
 					<td>{ f.Path }</td>
 					<td>{ string(f.Action) }</td>
+					<td>{ f.Task }</td>
 					<td>{ f.Reason }</td>
+					if editable {
+						<td>
+							@ownerEditFileForm(ticketID, f)
+						</td>
+					}
 				</tr>
 			}
 		</tbody>
 	</table>
+}
+
+// ownerEditFileForm is one delivery file's owner-edit box (#51): a
+// <details class="owner-edit"> the owner opens to rewrite which tasks may
+// change f.Path, posted by console.js's ownerEditSubmit to POST
+// /tickets/{id}/edit, the same box ownerEditTaskForm already uses for a
+// plan task.
+templ ownerEditFileForm(ticketID int64, f response.FileChange) {
+	<details class="owner-edit" data-preserve-attr="open" data-ticket={ strconv.FormatInt(ticketID, 10) } data-target="plan_file" data-ref={ f.Path }>
+		<summary>Edit tasks</summary>
+		<label>Tasks</label>
+		<input type="text" data-field="tasks" value={ f.Task }/>
+		<button type="button" class="owner-edit-save">Save</button>
+		<span class="owner-edit-error"></span>
+	</details>
 }
 
 // decidedFilesSection renders Delivery.DecidedFiles (design section 9.2): a
