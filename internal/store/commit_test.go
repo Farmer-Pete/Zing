@@ -3151,6 +3151,14 @@ func TestSealRefusedWithPlanVersionMismatch(t *testing.T) {
 
 // --- CommitHandlerResult: Escalation (design D10, section 6.7) -------------
 
+// testEscalationBodyPlanGap and testExtraOptionAcceptXText are escalation
+// test fixtures repeated often enough across this section's own tests that
+// goconst asks for a constant.
+const (
+	testEscalationBodyPlanGap  = "plan_gap: x.go belongs to another task"
+	testExtraOptionAcceptXText = "Accept X"
+)
+
 // escalationTestPayload is a minimal, schema-valid EscalationPayload with
 // the given code and origin.
 func escalationTestPayload(code response.EscalationCode, origin response.EscalationOrigin) response.EscalationPayload {
@@ -3598,7 +3606,7 @@ func TestCommitHandlerResult_EscalationOffersFileGrant(t *testing.T) {
 	payload.Grant = &response.FileGrant{Task: 2, Paths: []string{"x.go"}}
 	applied, err := s.CommitHandlerResult(ctx, HandlerCommit{
 		TicketID: ticketID, Owner: owner, Expires: expires,
-		Escalation: &EscalationCommit{Body: "plan_gap: x.go belongs to another task", Payload: payload},
+		Escalation: &EscalationCommit{Body: testEscalationBodyPlanGap, Payload: payload},
 	})
 	if err != nil {
 		t.Fatalf("CommitHandlerResult: %v", err)
@@ -3640,6 +3648,154 @@ func TestCommitHandlerResult_EscalationOffersFileGrant(t *testing.T) {
 	if !reflect.DeepEqual(qp2.Options, wantEscalationOptionsPostSeal) {
 		t.Errorf("question.Options = %+v, want %+v", qp2.Options, wantEscalationOptionsPostSeal)
 	}
+}
+
+// TestCommitHandlerResult_EscalationExtraOptions proves EscalationCommit's
+// ExtraOptions and Recommended fields (ticket 60): ExtraOptions insert
+// before Abandon, in slice order, on both the post-seal two-option table and
+// the planning three-option table; Recommended overrides
+// escalationOptionsFor's own pick; a duplicate option key (ExtraOptions
+// colliding with the file grant's own "d") rolls the whole commit back; and
+// a Recommended naming no option key does too.
+func TestCommitHandlerResult_EscalationExtraOptions(t *testing.T) {
+	t.Parallel()
+
+	t.Run("reviewing inserts before abandon and recommends", func(t *testing.T) {
+		t.Parallel()
+		s := newTestStore(t)
+		ctx := t.Context()
+		_, ticketID := seedQueuedTicket(t, s, "1")
+		setTicketState(t, s, ticketID, testStateReviewing)
+
+		owner, expires := claimForCommit(t, s, ticketID)
+		applied, err := s.CommitHandlerResult(ctx, HandlerCommit{
+			TicketID: ticketID, Owner: owner, Expires: expires,
+			Escalation: &EscalationCommit{
+				Body:         "loops_exhausted: review findings remain",
+				Payload:      escalationTestPayload(response.EscalationCodeLoopsExhausted, response.EscalationOriginReview),
+				ExtraOptions: []response.Option{{Key: "d", Text: testExtraOptionAcceptXText}},
+				Recommended:  "d",
+			},
+		})
+		if err != nil {
+			t.Fatalf("CommitHandlerResult: %v", err)
+		}
+		if !applied {
+			t.Fatal("applied = false, want true")
+		}
+
+		qp := latestQuestionPayload(t, s, ticketID)
+		want := []response.Option{
+			{Key: "a", Text: escalationOptionRetry},
+			{Key: "d", Text: testExtraOptionAcceptXText},
+			{Key: "c", Text: escalationOptionAbandon},
+		}
+		if !reflect.DeepEqual(qp.Options, want) {
+			t.Errorf("question.Options = %+v, want %+v", qp.Options, want)
+		}
+		if qp.Recommended != "d" {
+			t.Errorf("question.Recommended = %q, want d", qp.Recommended)
+		}
+	})
+
+	t.Run("planning inserts before abandon and recommends", func(t *testing.T) {
+		t.Parallel()
+		s := newTestStore(t)
+		ctx := t.Context()
+		_, ticketID := seedQueuedTicket(t, s, "1")
+		setTicketState(t, s, ticketID, testStatePlanning)
+
+		owner, expires := claimForCommit(t, s, ticketID)
+		applied, err := s.CommitHandlerResult(ctx, HandlerCommit{
+			TicketID: ticketID, Owner: owner, Expires: expires,
+			Escalation: &EscalationCommit{
+				Body:         "loops_exhausted: review findings remain",
+				Payload:      escalationTestPayload(response.EscalationCodeLoopsExhausted, response.EscalationOriginReview),
+				ExtraOptions: []response.Option{{Key: "d", Text: testExtraOptionAcceptXText}},
+				Recommended:  "d",
+			},
+		})
+		if err != nil {
+			t.Fatalf("CommitHandlerResult: %v", err)
+		}
+		if !applied {
+			t.Fatal("applied = false, want true")
+		}
+
+		qp := latestQuestionPayload(t, s, ticketID)
+		want := []response.Option{
+			{Key: "a", Text: escalationOptionRetry},
+			{Key: "b", Text: escalationOptionBackToPlanning},
+			{Key: "d", Text: testExtraOptionAcceptXText},
+			{Key: "c", Text: escalationOptionAbandon},
+		}
+		if !reflect.DeepEqual(qp.Options, want) {
+			t.Errorf("question.Options = %+v, want %+v", qp.Options, want)
+		}
+		if qp.Recommended != "d" {
+			t.Errorf("question.Recommended = %q, want d", qp.Recommended)
+		}
+	})
+
+	t.Run("extra option colliding with grant key rolls back", func(t *testing.T) {
+		t.Parallel()
+		s := newTestStore(t)
+		ctx := t.Context()
+		_, ticketID := seedQueuedTicket(t, s, "1")
+		setTicketState(t, s, ticketID, testStateBuilding)
+
+		owner, expires := claimForCommit(t, s, ticketID)
+		payload := escalationTestPayload(response.EscalationCodePlanGap, response.EscalationOriginBuild)
+		payload.Grant = &response.FileGrant{Task: 2, Paths: []string{"x.go"}}
+		_, err := s.CommitHandlerResult(ctx, HandlerCommit{
+			TicketID: ticketID, Owner: owner, Expires: expires,
+			Escalation: &EscalationCommit{
+				Body:         testEscalationBodyPlanGap,
+				Payload:      payload,
+				ExtraOptions: []response.Option{{Key: "d", Text: testExtraOptionAcceptXText}},
+			},
+		})
+		if err == nil || !strings.Contains(err.Error(), "duplicate option key") {
+			t.Fatalf("CommitHandlerResult error = %v, want duplicate option key", err)
+		}
+
+		open, err := s.QuestionsByState(ctx, ticketID, string(response.QuestionStateOpen))
+		if err != nil {
+			t.Fatalf("QuestionsByState: %v", err)
+		}
+		if len(open) != 0 {
+			t.Errorf("QuestionsByState(open) = %d rows, want 0", len(open))
+		}
+	})
+
+	t.Run("bad recommendation rolls back", func(t *testing.T) {
+		t.Parallel()
+		s := newTestStore(t)
+		ctx := t.Context()
+		_, ticketID := seedQueuedTicket(t, s, "1")
+		setTicketState(t, s, ticketID, testStateBuilding)
+
+		owner, expires := claimForCommit(t, s, ticketID)
+		_, err := s.CommitHandlerResult(ctx, HandlerCommit{
+			TicketID: ticketID, Owner: owner, Expires: expires,
+			Escalation: &EscalationCommit{
+				Body:        testEscalationBodyPlanGap,
+				Payload:     escalationTestPayload(response.EscalationCodePlanGap, response.EscalationOriginBuild),
+				Recommended: "z",
+			},
+		})
+		if err == nil || !strings.Contains(err.Error(), "is not an option key") {
+			t.Fatalf("CommitHandlerResult error = %v, want is not an option key", err)
+		}
+
+		open, err := s.QuestionsByState(ctx, ticketID, string(response.QuestionStateOpen))
+		if err != nil {
+			t.Fatalf("QuestionsByState: %v", err)
+		}
+		if len(open) != 0 {
+			t.Errorf("QuestionsByState(open) = %d rows, want 0", len(open))
+		}
+	})
 }
 
 // grantTestPlan returns a 6-task plan whose a.go names task "6" and whose
