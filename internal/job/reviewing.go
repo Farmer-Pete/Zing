@@ -1556,7 +1556,7 @@ func fixRequestOrLoopsExhausted(ctx context.Context, t store.Ticket, d Deps, acc
 
 	m, _, err := findingsFixRequest(ctx, t, d, accepted)
 	if err != nil {
-		return nil, 0, 0, err
+		return nil, 0, 0, fmt.Errorf("job: reviewing: %w", err)
 	}
 	return &m, k, maxLoops, nil
 }
@@ -1569,11 +1569,11 @@ func fixRequestOrLoopsExhausted(ctx context.Context, t store.Ticket, d Deps, acc
 func findingsFixRequest(ctx context.Context, t store.Ticket, d Deps, accepted []response.FindingArtifact) (store.Message, int64, error) {
 	maxRunID, err := d.Store.MaxRunID(ctx, t.ID)
 	if err != nil {
-		return store.Message{}, 0, fmt.Errorf("job: reviewing: max run id: %w", err)
+		return store.Message{}, 0, fmt.Errorf("max run id: %w", err)
 	}
 	m, err := fixRequestMessage(t, FixKindFindings, renderFixFindings(accepted), maxRunID)
 	if err != nil {
-		return store.Message{}, 0, fmt.Errorf("job: reviewing: fix request message: %w", err)
+		return store.Message{}, 0, fmt.Errorf("fix request message: %w", err)
 	}
 	return m, maxRunID, nil
 }
