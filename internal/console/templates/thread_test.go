@@ -499,7 +499,7 @@ func TestThreadShowsWaitProgress(t *testing.T) {
 	t.Run("a blocked ticket shows the progress line", func(t *testing.T) {
 		t.Parallel()
 		var sb strings.Builder
-		if err := Thread(ticket, nil, WaitProgress{Answered: 1, Total: 2}, "", nil).Render(t.Context(), &sb); err != nil {
+		if err := Thread(ticket, nil, WaitProgress{Answered: 1, Total: 2}, "", TicketActions{}, nil).Render(t.Context(), &sb); err != nil {
 			t.Fatalf("Thread.Render: %v", err)
 		}
 		got := sb.String()
@@ -512,7 +512,7 @@ func TestThreadShowsWaitProgress(t *testing.T) {
 	t.Run("an unblocked ticket shows no progress line", func(t *testing.T) {
 		t.Parallel()
 		var sb strings.Builder
-		if err := Thread(ticket, nil, WaitProgress{}, "", nil).Render(t.Context(), &sb); err != nil {
+		if err := Thread(ticket, nil, WaitProgress{}, "", TicketActions{}, nil).Render(t.Context(), &sb); err != nil {
 			t.Fatalf("Thread.Render: %v", err)
 		}
 		if strings.Contains(sb.String(), "wait-progress") {
@@ -728,7 +728,7 @@ func TestThreadRendersSandboxRunBox(t *testing.T) {
 		t.Parallel()
 		ticket := &store.Ticket{ID: 7, Title: testHelloTicketTitle}
 		var sb strings.Builder
-		if err := Thread(ticket, nil, WaitProgress{}, "", nil).Render(t.Context(), &sb); err != nil {
+		if err := Thread(ticket, nil, WaitProgress{}, "", TicketActions{}, nil).Render(t.Context(), &sb); err != nil {
 			t.Fatalf("Thread.Render: %v", err)
 		}
 		got := sb.String()
@@ -747,7 +747,7 @@ func TestThreadRendersSandboxRunBox(t *testing.T) {
 	t.Run("no open ticket renders no sandbox run box", func(t *testing.T) {
 		t.Parallel()
 		var sb strings.Builder
-		if err := Thread(nil, nil, WaitProgress{}, "", nil).Render(t.Context(), &sb); err != nil {
+		if err := Thread(nil, nil, WaitProgress{}, "", TicketActions{}, nil).Render(t.Context(), &sb); err != nil {
 			t.Fatalf("Thread.Render: %v", err)
 		}
 		if got := sb.String(); strings.Contains(got, "sandbox-run") {

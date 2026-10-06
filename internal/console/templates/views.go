@@ -267,6 +267,31 @@ type ThreadQuestion struct {
 	SettledHTML  templ.Component
 }
 
+// TicketActions is the thread view's action bar (#65, design section 6.6's
+// owner actions): console.actionsFor builds it from one ticket's own state,
+// claim, and (for an abandoned ticket) whether a live successor exists at
+// its ref.
+type TicketActions struct {
+	// Abandon reports whether the Abandon button renders at all: exactly
+	// store.CanAbandon(ticket.State).
+	Abandon bool
+
+	// Restart reports whether the Restart from planning button renders:
+	// wherever Abandon does, and also on an abandoned ticket while no live
+	// ticket holds its ref.
+	Restart bool
+
+	// Held reports whether a run currently holds the ticket (claim_owner is
+	// set): both buttons render disabled, with AbandonClaimedReason as the
+	// note, while this is true.
+	Held bool
+
+	// Ref is the ticket's issue ref with any -abandoned-K suffix stripped
+	// (store.SplitAttemptRef), the action bar's data-ref attribute and the
+	// confirm dialog's own wording.
+	Ref string
+}
+
 // Turn is one line of a question's own conversation (design section 22.7):
 // an owner pick or text, the agent's reply, or -- unlabeled, Author "" --
 // a bare system note such as "Resolved." (design/threading-design.md (d)'s

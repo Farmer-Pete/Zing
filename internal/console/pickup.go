@@ -22,6 +22,12 @@ import (
 	"zing/internal/tracker"
 )
 
+// ticketStateAbandoned is the store's own terminal "abandoned" state
+// (store.AbandonTicket's own ticketStateAbandoned, unexported there): the
+// one console package copy liveHolder, handlePickup, and later routes
+// check tickets.state against.
+const ticketStateAbandoned = "abandoned"
+
 // pickupRequest is POST /projects/{id}/pickup's body: {"n": <issue number>}.
 type pickupRequest struct {
 	N int `json:"n"`
@@ -80,40 +86,99 @@ func (c *console) handlePickup(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, genericServerErrorBody, http.StatusInternalServerError)
 		return
 	}
-	if alreadyTicketed {
+	if alreadyTicketed && existingTicket.State != ticketStateAbandoned {
 		http.Error(w, fmt.Sprintf("issue #%d is already ticket %d", req.N, existingTicket.ID), http.StatusConflict)
 		return
 	}
 
-	tk, err := c.tracker.Issue(r.Context(), trackerProject, ref)
-	switch {
-	case errors.Is(err, tracker.ErrIssueNotFound):
-		http.Error(w, fmt.Sprintf("issue #%d not found", req.N), http.StatusConflict)
+	tk, err := c.fetchIssue(r.Context(), trackerProject, ref)
+	if refusal, ok := errors.AsType[*actionRefusal](err); ok {
+		http.Error(w, refusal.Reason, refusal.Status)
 		return
-	case errors.Is(err, tracker.ErrIssueClosed):
-		http.Error(w, fmt.Sprintf("issue #%d is closed", req.N), http.StatusConflict)
-		return
-	case errors.Is(err, tracker.ErrIssueIsPullRequest):
-		http.Error(w, fmt.Sprintf("#%d is a pull request, not an issue", req.N), http.StatusConflict)
-		return
-	case err != nil:
+	}
+	if err != nil {
 		slog.Error("console: pickup: issue", "project_id", projectID, "ref", ref, "err", err)
 		http.Error(w, genericServerErrorBody, http.StatusInternalServerError)
 		return
 	}
 
-	ticketID, err := dispatch.InsertAndAnnounce(r.Context(), c.store, c.tracker, projectID, trackerProject, c.user, tk)
+	newID, retiredRef, err := c.insertFresh(r.Context(), projectID, trackerProject, tk)
+	if refusal, ok := errors.AsType[*actionRefusal](err); ok {
+		http.Error(w, refusal.Reason, refusal.Status)
+		return
+	}
 	if err != nil {
-		slog.Error("console: pickup: insert ticket", "project_id", projectID, "ref", ref, "err", err)
+		slog.Error("console: pickup: insert ticket",
+			"project_id", projectID, "ref", ref, "old_ticket_id", existingTicket.ID, "retired_ref", retiredRef, "err", err)
 		http.Error(w, genericServerErrorBody, http.StatusInternalServerError)
 		return
+	}
+	if retiredRef != "" {
+		slog.InfoContext(r.Context(), "console: pickup retired abandoned ticket",
+			"old_ticket_id", existingTicket.ID, "new_ticket_id", newID, "new_ref", retiredRef, "project_id", projectID, "ref", ref)
 	}
 
 	c.bus.Publish()
 	w.Header().Set("Content-Type", contentTypeJSON)
-	if err := json.NewEncoder(w).Encode(pickupResponse{N: req.N, TicketID: ticketID}); err != nil {
-		slog.Error("console: write pickup response", "project_id", projectID, "ticket_id", ticketID, "err", err)
+	if err := json.NewEncoder(w).Encode(pickupResponse{N: req.N, TicketID: newID}); err != nil {
+		slog.Error("console: write pickup response", "project_id", projectID, "ticket_id", newID, "err", err)
 	}
+}
+
+// fetchIssue reads ref from the tracker, or refuses with pickup's exact
+// messages: missing, closed, or a pull request is a 409 *actionRefusal, and
+// a nil tracker is a 503 one. Any other error is returned wrapped.
+func (c *console) fetchIssue(ctx context.Context, trackerProject, ref string) (tracker.Ticket, error) {
+	if c.tracker == nil {
+		return tracker.Ticket{}, &actionRefusal{Status: http.StatusServiceUnavailable, Reason: "the tracker is not available"}
+	}
+	tk, err := c.tracker.Issue(ctx, trackerProject, ref)
+	switch {
+	case errors.Is(err, tracker.ErrIssueNotFound):
+		return tracker.Ticket{}, &actionRefusal{Status: http.StatusConflict, Reason: fmt.Sprintf("issue #%s not found", ref)}
+	case errors.Is(err, tracker.ErrIssueClosed):
+		return tracker.Ticket{}, &actionRefusal{Status: http.StatusConflict, Reason: fmt.Sprintf("issue #%s is closed", ref)}
+	case errors.Is(err, tracker.ErrIssueIsPullRequest):
+		return tracker.Ticket{}, &actionRefusal{Status: http.StatusConflict, Reason: fmt.Sprintf("#%s is a pull request, not an issue", ref)}
+	case err != nil:
+		return tracker.Ticket{}, fmt.Errorf("console: issue %s: %w", ref, err)
+	}
+	return tk, nil
+}
+
+// insertFresh retires an abandoned ticket holding tk.Ref, then inserts the
+// new queued ticket and posts the pickup comment exactly as intake does.
+// retiredRef is the old ticket's new ref, or "" when nothing held tk.Ref.
+// Retire and insert are two commits, so a live ticket can take tk.Ref in
+// between (auto intake, or a second click). When retire reports ErrRefLive
+// or the insert fails, liveHolder re-reads the ref; a live holder turns the
+// failure into a 409 naming that ticket.
+func (c *console) insertFresh(ctx context.Context, projectID int64, trackerProject string, tk tracker.Ticket) (newID int64, retiredRef string, err error) {
+	retiredRef, err = c.store.RetireAbandonedRef(ctx, projectID, tk.Ref)
+	if err != nil {
+		return 0, "", c.liveHolder(ctx, projectID, tk.Ref, fmt.Errorf("console: retire ref %s: %w", tk.Ref, err))
+	}
+	newID, err = dispatch.InsertAndAnnounce(ctx, c.store, c.tracker, projectID, trackerProject, c.user, tk)
+	if err != nil {
+		return 0, retiredRef, c.liveHolder(ctx, projectID, tk.Ref, fmt.Errorf("console: insert ticket ref %s: %w", tk.Ref, err))
+	}
+	return newID, retiredRef, nil
+}
+
+// liveHolder returns a 409 *actionRefusal when a non-abandoned ticket now
+// holds ref, and cause otherwise. When the re-read itself fails, that
+// failure is joined onto cause rather than dropped, so the caller's one log
+// line carries both errors.
+func (c *console) liveHolder(ctx context.Context, projectID int64, ref string, cause error) error {
+	cur, found, err := c.store.TicketByRef(ctx, projectID, ref)
+	if err != nil {
+		return errors.Join(cause, fmt.Errorf("console: recheck ref %s: %w", ref, err))
+	}
+	holderIsLive := found && cur.State != ticketStateAbandoned
+	if !holderIsLive {
+		return cause
+	}
+	return &actionRefusal{Status: http.StatusConflict, Reason: fmt.Sprintf("issue #%s is already ticket %d", ref, cur.ID)}
 }
 
 // projectName returns the Name of the store project id -- the

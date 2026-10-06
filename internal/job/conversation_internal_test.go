@@ -387,3 +387,22 @@ func TestRenderFreshReopenedThread(t *testing.T) {
 		t.Errorf("renderFreshConversation =\n%q\nwant\n%q", got, want)
 	}
 }
+
+// ---- questionMessagesFor -----------------------------------------------
+
+// A planner question with no options (a free-text ask, such as "attach the
+// transcript") must store "options": []. The question message schema wants an
+// array, and a null fails the commit and stops the dispatcher.
+func TestQuestionMessagesFor_NoOptionsStoresEmptyArray(t *testing.T) {
+	msgs, err := questionMessagesFor(1, []response.Question{{Key: "q1", Title: "Attach the transcript", Recommended: "Attach it"}})
+	if err != nil {
+		t.Fatalf("questionMessagesFor: %v", err)
+	}
+	var payload map[string]json.RawMessage
+	if err := json.Unmarshal(msgs[0].Payload, &payload); err != nil {
+		t.Fatalf("unmarshal payload: %v", err)
+	}
+	if got := string(payload["options"]); got != "[]" {
+		t.Fatalf("options = %s, want []", got)
+	}
+}

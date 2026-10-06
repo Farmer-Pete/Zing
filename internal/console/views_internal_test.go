@@ -9,6 +9,7 @@ package console
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"slices"
@@ -1889,6 +1890,169 @@ func TestGateShowsPlan(t *testing.T) {
 	}
 }
 
+// TestActionsFor proves actionsFor (#65) offers Abandon and Restart on
+// every queued-through-shipping state, never on done or escalated (even if
+// store.CanAbandon's own list drifted, r1f11 pins these two by name rather
+// than by re-deriving the expectation from the function under test), offers
+// Restart but not Abandon on an abandoned ticket with no live successor,
+// offers neither on an abandoned ticket that has one, reads Held off the
+// claim alone, and strips an attempt suffix from Ref.
+func TestActionsFor(t *testing.T) {
+	t.Parallel()
+
+	// wantAbandon is spelled out per state, not derived from
+	// store.CanAbandon, so a state wrongly added to or dropped from that
+	// list cannot also move this test's expectation (r1f11).
+	wantAbandon := map[string]bool{
+		testQueuedState: true, demoTicketState: true, string(response.TicketStateBuilding): true,
+		string(response.TicketStateReviewing): true, string(response.TicketStateJudging): true, string(response.TicketStateShipping): true,
+		string(response.TicketStateDone): false, string(response.TicketStateEscalated): false, ticketStateAbandoned: false,
+	}
+	claims := []*string{nil, new("some-owner")}
+
+	for state, wantState := range wantAbandon {
+		for _, claim := range claims {
+			for _, liveSuccessor := range []bool{false, true} {
+				name := fmt.Sprintf("state=%s claimed=%v liveSuccessor=%v", state, claim != nil, liveSuccessor)
+				t.Run(name, func(t *testing.T) {
+					t.Parallel()
+					ticket := store.Ticket{TrackerRef: "41-abandoned-2", State: state, ClaimOwner: claim}
+					got := actionsFor(ticket, liveSuccessor)
+
+					if got.Abandon != wantState {
+						t.Errorf("Abandon = %v, want %v", got.Abandon, wantState)
+					}
+
+					wantRestart := wantState
+					if state == ticketStateAbandoned {
+						wantRestart = !liveSuccessor
+					}
+					if got.Restart != wantRestart {
+						t.Errorf("Restart = %v, want %v", got.Restart, wantRestart)
+					}
+
+					if wantHeld := claim != nil; got.Held != wantHeld {
+						t.Errorf("Held = %v, want %v", got.Held, wantHeld)
+					}
+
+					if got.Ref != "41" {
+						t.Errorf("Ref = %q, want %q", got.Ref, "41")
+					}
+				})
+			}
+		}
+	}
+}
+
+// TestThreadRendersTicketActions proves threadComponent wires ticketActions
+// into Thread's action bar (#65): an unclaimed queued ticket renders both
+// buttons without disabled, and a claimed ticket renders both disabled with
+// the claim note.
+func TestThreadRendersTicketActions(t *testing.T) {
+	t.Parallel()
+	s, err := store.Open(t.Context(), filepath.Join(t.TempDir(), "zing.db"))
+	if err != nil {
+		t.Fatalf("store.Open: %v", err)
+	}
+	t.Cleanup(func() { _ = s.Close() })
+	c := &console{store: s}
+
+	projectID, err := s.EnsureProject(t.Context(), store.Project{
+		Name: "thread-actions", RepoURL: "https://example.invalid/thread-actions.git",
+		LocalPath: t.TempDir(), Tracker: testGitHubTracker,
+	})
+	if err != nil {
+		t.Fatalf("EnsureProject: %v", err)
+	}
+	ticketID, err := s.InsertTicket(t.Context(), store.Ticket{
+		ProjectID: projectID, TrackerRef: "41", Title: "restart me", State: testQueuedState,
+	})
+	if err != nil {
+		t.Fatalf("InsertTicket: %v", err)
+	}
+
+	render := func(id int64) string {
+		t.Helper()
+		comp, compErr := c.threadComponent(t.Context(), id)
+		if compErr != nil {
+			t.Fatalf("threadComponent: %v", compErr)
+		}
+		var sb strings.Builder
+		if renderErr := comp.Render(t.Context(), &sb); renderErr != nil {
+			t.Fatalf("Render: %v", renderErr)
+		}
+		return sb.String()
+	}
+
+	got := render(ticketID)
+	if !strings.Contains(got, "ticket-abandon") || !strings.Contains(got, "ticket-restart") {
+		t.Errorf("unclaimed ticket missing action buttons; got:\n%s", got)
+	}
+	if strings.Contains(got, "disabled") {
+		t.Errorf("unclaimed ticket renders disabled; got:\n%s", got)
+	}
+
+	expires := time.Now().Add(10 * time.Minute).UTC().Truncate(time.Second)
+	claimed, err := s.Claim(t.Context(), ticketID, "some-owner", expires)
+	if err != nil {
+		t.Fatalf("Claim: %v", err)
+	}
+	if !claimed {
+		t.Fatal("Claim: got false, want true")
+	}
+
+	got = render(ticketID)
+	if !strings.Contains(got, "ticket-abandon") || !strings.Contains(got, "ticket-restart") {
+		t.Errorf("claimed ticket missing action buttons; got:\n%s", got)
+	}
+	// Count only the action bar's buttons: the ticket body box is disabled
+	// too while claimed (#75 Q2).
+	if !strings.Contains(got, `data-action="abandon" disabled`) || !strings.Contains(got, `data-action="restart" disabled`) {
+		t.Errorf("claimed ticket want both action buttons disabled; got:\n%s", got)
+	}
+	if !strings.Contains(got, store.AbandonClaimedReason) {
+		t.Errorf("claimed ticket missing claim note; got:\n%s", got)
+	}
+
+	// An abandoned ticket with no live successor still offers Restart, but
+	// not Abandon, so ticketActions' own TicketByRef lookup must run (r1f10:
+	// the two cases below were previously untested, so ticketActions could
+	// always pass liveSuccessor=false and still pass every other test).
+	abandonedID, err := s.InsertTicket(t.Context(), store.Ticket{
+		ProjectID: projectID, TrackerRef: "99", Title: "restart me too", State: testQueuedState,
+	})
+	if err != nil {
+		t.Fatalf("InsertTicket: %v", err)
+	}
+	if err := s.AbandonTicket(t.Context(), abandonedID, "test abandon"); err != nil {
+		t.Fatalf("AbandonTicket: %v", err)
+	}
+
+	gotAbandoned := render(abandonedID)
+	if strings.Contains(gotAbandoned, "ticket-abandon") {
+		t.Errorf("abandoned ticket with no live successor offers Abandon; got:\n%s", gotAbandoned)
+	}
+	if !strings.Contains(gotAbandoned, "ticket-restart") {
+		t.Errorf("abandoned ticket with no live successor missing Restart; got:\n%s", gotAbandoned)
+	}
+
+	// Once a live successor exists at the retired ref, the old abandoned
+	// ticket offers neither action.
+	if _, err := s.RetireAbandonedRef(t.Context(), projectID, "99"); err != nil {
+		t.Fatalf("RetireAbandonedRef: %v", err)
+	}
+	if _, err := s.InsertTicket(t.Context(), store.Ticket{
+		ProjectID: projectID, TrackerRef: "99", Title: "the live successor", State: testQueuedState,
+	}); err != nil {
+		t.Fatalf("InsertTicket: %v", err)
+	}
+
+	gotSuperseded := render(abandonedID)
+	if strings.Contains(gotSuperseded, "ticket-actions") {
+		t.Errorf("abandoned ticket with a live successor renders an action bar; got:\n%s", gotSuperseded)
+	}
+}
+
 // projectSectionsRefs returns tickets' tracker refs, in order, for
 // TestProjectSections' assertions.
 func projectSectionsRefs(tickets []store.Ticket) []string {
@@ -2198,4 +2362,58 @@ func TestShowSealedSection(t *testing.T) {
 			t.Error("showSealedSection = false, want true")
 		}
 	})
+}
+
+// TestGroupAttempts proves groupAttempts (#65) folds a project's tickets by
+// issue: one head per base ref -- the attempt-0 ticket when one exists, in
+// the input's own order -- and every other ticket sharing that base under
+// earlier[head.ID], oldest attempt first; a base with no attempt-0 ticket at
+// all (53-abandoned-1 alone) is still its own head, with no earlier entry.
+func TestGroupAttempts(t *testing.T) {
+	t.Parallel()
+
+	ticket9 := store.Ticket{ID: 9, TrackerRef: "41"}
+	ticket3 := store.Ticket{ID: 3, TrackerRef: "7"}
+	ticket8 := store.Ticket{ID: 8, TrackerRef: "41-abandoned-2"}
+	ticket4 := store.Ticket{ID: 4, TrackerRef: "41-abandoned-1"}
+	ticket6 := store.Ticket{ID: 6, TrackerRef: "53-abandoned-1"}
+
+	heads, earlier := groupAttempts([]store.Ticket{ticket9, ticket3, ticket8, ticket4, ticket6})
+
+	if len(heads) != 3 {
+		t.Fatalf("groupAttempts heads = %+v, want 3 entries", heads)
+	}
+	if heads[0].ID != 9 || heads[1].ID != 3 || heads[2].ID != 6 {
+		t.Errorf("groupAttempts heads = %d, %d, %d; want 9, 3, 6", heads[0].ID, heads[1].ID, heads[2].ID)
+	}
+
+	got9 := earlier[9]
+	if len(got9) != 2 || got9[0].ID != 4 || got9[1].ID != 8 {
+		t.Errorf("earlier[9] = %+v, want [ticket 4, ticket 8] in that order", got9)
+	}
+	if got6 := earlier[6]; len(got6) != 0 {
+		t.Errorf("earlier[6] = %+v, want no entry", got6)
+	}
+}
+
+// TestGroupAttempts_AllAttemptsRetiredHeadIsHighest proves that when every
+// ticket sharing a base has been retired, groupAttempts (#65) still picks
+// one head for that base -- the highest-attempt ticket, not simply the
+// first one seen -- and files every other retired attempt under it in
+// earlier (r1f12).
+func TestGroupAttempts_AllAttemptsRetiredHeadIsHighest(t *testing.T) {
+	t.Parallel()
+
+	ticket6 := store.Ticket{ID: 6, TrackerRef: "60-abandoned-1"}
+	ticket10 := store.Ticket{ID: 10, TrackerRef: "60-abandoned-2"}
+
+	heads, earlier := groupAttempts([]store.Ticket{ticket6, ticket10})
+
+	if len(heads) != 1 || heads[0].ID != 10 {
+		t.Fatalf("groupAttempts heads = %+v, want [ticket 10]", heads)
+	}
+	got10 := earlier[10]
+	if len(got10) != 1 || got10[0].ID != 6 {
+		t.Errorf("earlier[10] = %+v, want [ticket 6]", got10)
+	}
 }

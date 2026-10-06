@@ -33,6 +33,7 @@ import {
 	sendResultWithUnsent,
 	sendTargets,
 	sendConfirmText,
+	ticketActionConfirmText,
 	reviewNoteTargets,
 	skipConflicted,
 	sendableQuestions,
@@ -731,60 +732,61 @@ function focusedQuestionID() {
 	return id?.startsWith('question:') ? Number(id.slice('question:'.length)) : null;
 }
 
-// openSendConfirm is Cmd+Enter's in-page confirm dialog (ticket #43, Q3:
-// never window.confirm, since a native dialog blocks the page and any
-// browser automation driving the console, and the owner often answers
-// several questions in one send). Built and appended to document.body on
-// each open, the same placement buildHelpOverlay above uses, and torn back
-// down on either resolution rather than kept around like that overlay's own
-// singleton. A capture-phase keydown listener on document means Enter and
-// Escape resolve the dialog before onKeyDown's own dispatch ever sees them
-// (preventDefault and stopPropagation on both); a second Cmd+Enter while the
-// dialog is open is itself an Enter keypress, so it confirms. Enter cancels
-// instead, same as clicking it, when the Cancel button itself has focus
-// (review fix, correctness): without that check, tabbing to Cancel and
-// pressing Enter still confirmed the send, since onKeyDown read every Enter
-// the same way regardless of what was focused. Cancel -- by Escape, its own
-// button, Enter while it has focus, or nothing at all -- returns focus to
-// whatever had it before the dialog opened, almost always the reply box the
-// owner was typing in. A true warn (reviewNoteTargets) adds
-// reviewNoteWarningText to the dialog's message via sendConfirmText's own
-// second argument (Q4).
-function openSendConfirm(ticket, ids, keys, warn) {
+// openConfirmDialog is every in-page confirm dialog's whole body (ticket
+// #43, Q3: never window.confirm, since a native dialog blocks the page and
+// any browser automation driving the console). Built and appended to
+// document.body on each open, the same placement buildHelpOverlay above
+// uses, and torn back down on either resolution rather than kept around
+// like that overlay's own singleton. A capture-phase keydown listener on
+// document means Enter and Escape resolve the dialog before onKeyDown's own
+// dispatch ever sees them (preventDefault and stopPropagation on both); a
+// second Cmd+Enter while the dialog is open is itself an Enter keypress, so
+// it confirms. Enter cancels instead, same as clicking it, when the Cancel
+// button itself has focus (review fix, correctness): without that check,
+// tabbing to Cancel and pressing Enter still confirmed the action, since
+// onKeyDown read every Enter the same way regardless of what was focused.
+// Cancel -- by Escape, its own button, Enter while it has focus, or nothing
+// at all -- returns focus to whatever had it before the dialog opened,
+// almost always the reply box the owner was typing in.
+//
+// @param {{id: string, text: string, items: string[], confirmLabel: string, onConfirm: () => void}} opts
+function openConfirmDialog({ id, text, items, confirmLabel, onConfirm }) {
 	const previouslyFocused = document.activeElement;
 	const dialog = document.createElement('div');
-	dialog.id = 'send-confirm';
+	dialog.id = id;
 	dialog.setAttribute('role', 'dialog');
 	dialog.setAttribute('aria-modal', 'true');
 
 	const message = document.createElement('p');
-	message.textContent = sendConfirmText(keys, warn);
+	message.textContent = text;
 	dialog.appendChild(message);
 
-	const list = document.createElement('ul');
-	for (const key of keys) {
-		const item = document.createElement('li');
-		item.textContent = key;
-		list.appendChild(item);
+	if (items.length > 0) {
+		const list = document.createElement('ul');
+		for (const item of items) {
+			const li = document.createElement('li');
+			li.textContent = item;
+			list.appendChild(li);
+		}
+		dialog.appendChild(list);
 	}
-	dialog.appendChild(list);
 
-	const sendButton = document.createElement('button');
-	sendButton.type = 'button';
-	sendButton.textContent = 'Send';
+	const confirmButton = document.createElement('button');
+	confirmButton.type = 'button';
+	confirmButton.textContent = confirmLabel;
 	const cancelButton = document.createElement('button');
 	cancelButton.type = 'button';
 	cancelButton.textContent = 'Cancel';
-	dialog.appendChild(sendButton);
+	dialog.appendChild(confirmButton);
 	dialog.appendChild(cancelButton);
 
 	function cleanup() {
 		document.removeEventListener('keydown', onKeyDown, true);
 		dialog.remove();
 	}
-	function confirmSend() {
+	function confirmAction() {
 		cleanup();
-		postSendBatch(ticket, ids);
+		onConfirm();
 	}
 	function cancel() {
 		cleanup();
@@ -797,7 +799,7 @@ function openSendConfirm(ticket, ids, keys, warn) {
 			if (event.target === cancelButton) {
 				cancel();
 			} else {
-				confirmSend();
+				confirmAction();
 			}
 		} else if (event.key === 'Escape') {
 			event.preventDefault();
@@ -805,11 +807,25 @@ function openSendConfirm(ticket, ids, keys, warn) {
 			cancel();
 		}
 	}
-	sendButton.addEventListener('click', confirmSend);
+	confirmButton.addEventListener('click', confirmAction);
 	cancelButton.addEventListener('click', cancel);
 	document.addEventListener('keydown', onKeyDown, true);
 	document.body.appendChild(dialog);
-	sendButton.focus();
+	confirmButton.focus();
+}
+
+// openSendConfirm is Cmd+Enter's in-page confirm dialog (ticket #43, Q3),
+// listing the replies it is about to send. A true warn (reviewNoteTargets)
+// adds reviewNoteWarningText to the dialog's message via sendConfirmText's
+// own second argument (Q4).
+function openSendConfirm(ticket, ids, keys, warn) {
+	openConfirmDialog({
+		id: 'send-confirm',
+		text: sendConfirmText(keys, warn),
+		items: keys,
+		confirmLabel: 'Send',
+		onConfirm: () => postSendBatch(ticket, ids),
+	});
 }
 
 // sendBatch handles the send chord (design section 6.4, 6.7, ticket #43):
@@ -1447,6 +1463,78 @@ function installPickupBox() {
 		}
 		event.preventDefault();
 		pickupIssue(button);
+	});
+}
+
+// ---- ticket actions: abandon, restart from planning (ticket #65) ---------
+
+// postTicketAction handles the confirmed Abandon/Restart click: posts
+// POST /tickets/{id}/{action} and, on a non-2xx response, shows the
+// response body -- ticket_actions.go's own exact refusal text -- in the
+// action bar's error span, the same pattern pickupIssue above uses for
+// POST /projects/{id}/pickup. A successful restart answers {"ticket":
+// NEW-ID}; this navigates straight there, since the old ticket (now
+// abandoned) is no longer what the owner wants open.
+async function postTicketAction(box, action) {
+	const ticketID = box?.dataset?.ticket;
+	const errorSpan = box?.querySelector('.ticket-actions-error');
+	const actionBarReady = box && ticketID && errorSpan;
+	if (!actionBarReady) {
+		return;
+	}
+	try {
+		const resp = await fetch(`/tickets/${ticketID}/${action}`, {
+			method: 'POST',
+			headers: { 'Content-Type': 'application/json', 'Datastar-Request': 'true' },
+			body: '{}',
+		});
+		if (!resp.ok) {
+			const text = await resp.text();
+			suppressPatchSignal = true;
+			errorSpan.textContent = text;
+			suppressPatchSignal = false;
+			return;
+		}
+		suppressPatchSignal = true;
+		errorSpan.textContent = '';
+		suppressPatchSignal = false;
+		if (action === 'restart') {
+			const body = await resp.json();
+			navigate({ view: 'thread', open: body.ticket, project: 0 });
+		}
+	} catch (err) {
+		console.error(`console.js: POST /tickets/{id}/${action}`, err);
+		suppressPatchSignal = true;
+		errorSpan.textContent = 'request failed';
+		suppressPatchSignal = false;
+	}
+}
+
+// installTicketActions wires the thread view's action bar (ticket #65,
+// Q3), delegated from document like installPickupBox above, because
+// #main is morphed by every /stream patch. Every Abandon/Restart click
+// confirms first through openConfirmDialog's in-page dialog -- never
+// window.confirm, which blocks the page and any browser automation
+// driving the console -- before postTicketAction ever runs.
+function installTicketActions() {
+	document.addEventListener('click', (event) => {
+		const button = event.target.closest?.('.ticket-actions button[data-action]:not([disabled])');
+		if (!button) {
+			return;
+		}
+		event.preventDefault();
+		const box = button.closest('.ticket-actions');
+		const action = button.dataset.action;
+		if (!box || !action) {
+			return;
+		}
+		openConfirmDialog({
+			id: 'ticket-action-confirm',
+			text: ticketActionConfirmText(action, box.dataset.ref),
+			items: [],
+			confirmLabel: action === 'abandon' ? 'Abandon' : 'Restart',
+			onConfirm: () => postTicketAction(box, action),
+		});
 	});
 }
 
@@ -2096,12 +2184,11 @@ function installNavBridge() {
 // loadBindings' own /static/keys.json fetch (bug fix): none of
 // installStreamWatch, installNavBridge, installPatchObserver, installSideBox,
 // installLogControls, installChipActivation, installItemNoteSave,
-// installPickupBox, installSandboxRunBox, installOwnerEdit,
-// installReplyAutosave, or installReplyFocusTracking reads state.bindings,
-// so there was no reason
-// their listeners -- installNavBridge above all, the zing-nav bridge a
-// Threads-sidebar click needs live as early as possible -- sat behind an
-// unrelated network round trip. Only
+// installPickupBox, installTicketActions, installSandboxRunBox,
+// installOwnerEdit, installReplyAutosave, or installReplyFocusTracking reads
+// state.bindings, so there was no reason their listeners -- installNavBridge
+// above all, the zing-nav bridge a Threads-sidebar click needs live as early
+// as possible -- sat behind an unrelated network round trip. Only
 // handleKeyEvent needs the parsed bindings, so it alone waits on the fetch.
 // installStreamWatch runs first (the reconnect plan): it must already be
 // bound before data-init's own @get('/stream') can fire the very first
@@ -2116,6 +2203,7 @@ async function install() {
 	installChipActivation();
 	installItemNoteSave();
 	installPickupBox();
+	installTicketActions();
 	installSandboxRunBox();
 	installOwnerEdit();
 	installReplyAutosave();
