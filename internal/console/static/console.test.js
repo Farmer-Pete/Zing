@@ -44,11 +44,17 @@ import {
 	stepComposerIndex,
 	buildChipDraftBody,
 	buildItemDraftBody,
+	itemNoteBody,
+	itemNoteFlushTargets,
+	pickBeforeNoteText,
 	unsavedReplyBody,
 	unsavedReplyBodies,
 	sendResultWithUnsent,
 	sendTargets,
 	sendConfirmText,
+	ticketActionConfirmText,
+	reviewNoteTargets,
+	reviewNoteWarningText,
 	skipConflicted,
 	sendableQuestions,
 	AUTOSAVE_DEBOUNCE_MS,
@@ -517,6 +523,85 @@ test('buildItemDraftBody: reads ticket, question, item ref, and decision off the
 	});
 });
 
+test('buildItemDraftBody: a string note argument is carried on item.note', () => {
+	const dataset = { draftTicket: '12', draftQuestion: '34', itemRef: 'src/main.go', decision: 'drop' };
+	assert.deepEqual(buildItemDraftBody(dataset, 'out of scope'), {
+		ticket: 12,
+		question: 34,
+		item: { ref: 'src/main.go', decision: 'drop', note: 'out of scope' },
+	});
+});
+
+test('buildItemDraftBody: omitting the note argument leaves item.note off the body', () => {
+	const dataset = { draftTicket: '12', draftQuestion: '34', itemRef: 'src/main.go', decision: 'accept' };
+	assert.deepEqual(buildItemDraftBody(dataset), {
+		ticket: 12,
+		question: 34,
+		item: { ref: 'src/main.go', decision: 'accept' },
+	});
+});
+
+test('pickBeforeNoteText: is the hint shown before any decision is picked', () => {
+	assert.equal(pickBeforeNoteText, 'Pick a decision to save this note');
+});
+
+// itemNoteBody: the review item note box's own /draft body (installItemNoteSave
+// and postSendBatchLocked's pre-send flush), reading the note box's own
+// data-note-ticket, data-note-question, and data-item-ref, plus the row's
+// picked decision.
+
+test('itemNoteBody: returns null without a decision', () => {
+	const dataset = { noteTicket: '12', noteQuestion: '34', itemRef: 'src/main.go' };
+	assert.equal(itemNoteBody(dataset, '', 'out of scope'), null);
+	assert.equal(itemNoteBody(dataset, undefined, 'out of scope'), null);
+});
+
+test('itemNoteBody: returns the full body with a decision', () => {
+	const dataset = { noteTicket: '12', noteQuestion: '34', itemRef: 'src/main.go' };
+	assert.deepEqual(itemNoteBody(dataset, 'drop', 'out of scope'), {
+		ticket: 12,
+		question: 34,
+		item: { ref: 'src/main.go', decision: 'drop', note: 'out of scope' },
+	});
+});
+
+// itemNoteFlushTargets: postSendBatchLocked's pre-send decision over which
+// item-note boxes to flush (review fix, tests): a box whose value has not
+// changed, one with no picked decision on its row, and one on a question
+// outside this send are each skipped, so one send cannot create an
+// unintended draft answer on a review question the owner never touched.
+
+function noteBox({ value, defaultValue, decision, questionID, noteTicket = '1', noteQuestion = '5', itemRef = 'a.go' }) {
+	return {
+		value,
+		defaultValue,
+		dataset: { noteTicket, noteQuestion, itemRef },
+		picked: decision ? { decision, draftQuestion: String(questionID) } : null,
+	};
+}
+
+test('itemNoteFlushTargets: skips a box whose value has not changed', () => {
+	const box = noteBox({ value: 'same', defaultValue: 'same', decision: 'drop', questionID: 5 });
+	assert.deepEqual(itemNoteFlushTargets([box], [5]), []);
+});
+
+test('itemNoteFlushTargets: skips a row with no picked decision', () => {
+	const box = noteBox({ value: 'new text', defaultValue: '', decision: null, questionID: 5 });
+	assert.deepEqual(itemNoteFlushTargets([box], [5]), []);
+});
+
+test('itemNoteFlushTargets: skips a question outside this send', () => {
+	const box = noteBox({ value: 'new text', defaultValue: '', decision: 'drop', questionID: 5 });
+	assert.deepEqual(itemNoteFlushTargets([box], [9]), []);
+});
+
+test('itemNoteFlushTargets: posts a changed, picked, in-send box with its note', () => {
+	const box = noteBox({ value: 'out of scope', defaultValue: '', decision: 'drop', questionID: 5 });
+	assert.deepEqual(itemNoteFlushTargets([box], [5]), [
+		{ ticket: 1, question: 5, item: { ref: 'a.go', decision: 'drop', note: 'out of scope' } },
+	]);
+});
+
 // ownerEditFieldEntries: the owner-edit box's own field-to-body decision
 // (console.js's ownerEditSubmit, #41, #57 Q3) -- a select counts as changed
 // against its own data-initial, not a browser-native default, and a box
@@ -760,6 +845,57 @@ test('sendTargets: a conflicted entry with hasDraft true is left out of ids and 
 test('sendConfirmText: names the one question or lists several', () => {
 	assert.equal(sendConfirmText(['Q6']), 'Send 1 reply on Q6?');
 	assert.equal(sendConfirmText(['Q6', 'Q7', 'Q9']), 'Send 3 replies on Q6, Q7, Q9?');
+});
+
+test('ticketActionConfirmText: names the action and the issue', () => {
+	assert.equal(ticketActionConfirmText('abandon', '41'), 'Abandon #41? Its thread stays as history.');
+	assert.equal(
+		ticketActionConfirmText('restart', '41'),
+		'Restart #41 from planning? This ticket is abandoned and a new one starts.',
+	);
+	assert.equal(ticketActionConfirmText('other', '41'), '');
+});
+
+test('sendConfirmText: a true warn argument appends the review note warning', () => {
+	assert.equal(sendConfirmText(['Q6'], true), `Send 1 reply on Q6? ${reviewNoteWarningText}`);
+	assert.equal(
+		sendConfirmText(['Q6', 'Q7', 'Q9'], true),
+		`Send 3 replies on Q6, Q7, Q9? ${reviewNoteWarningText}`,
+	);
+});
+
+test('sendConfirmText: a false or omitted warn argument leaves the text unchanged', () => {
+	assert.equal(sendConfirmText(['Q6'], false), 'Send 1 reply on Q6?');
+	assert.equal(sendConfirmText(['Q6']), 'Send 1 reply on Q6?');
+});
+
+// reviewNoteTargets: Cmd+Enter's "does this send also leak a note to a lens
+// and keep its question open" check (Q4). True only for an entry that would
+// actually be sent (hasDraft, not conflicted) and that the caller has marked
+// reviewNote: true, meaning it is a review question whose reply box holds
+// text right now.
+
+test('reviewNoteTargets: true when a sendable entry has reviewNote true', () => {
+	const questions = [{ id: 6, key: 'Q6', hasDraft: true, conflicted: false, reviewNote: true }];
+	assert.equal(reviewNoteTargets(questions), true);
+});
+
+test('reviewNoteTargets: false when the reviewNote entry is conflicted', () => {
+	const questions = [{ id: 6, key: 'Q6', hasDraft: true, conflicted: true, reviewNote: true }];
+	assert.equal(reviewNoteTargets(questions), false);
+});
+
+test('reviewNoteTargets: false when no entry has reviewNote true', () => {
+	const questions = [{ id: 6, key: 'Q6', hasDraft: true, conflicted: false, reviewNote: false }];
+	assert.equal(reviewNoteTargets(questions), false);
+});
+
+test('reviewNoteTargets: false for an empty list', () => {
+	assert.equal(reviewNoteTargets([]), false);
+});
+
+test('reviewNoteWarningText: is the line shown when a send would leak a note', () => {
+	assert.equal(reviewNoteWarningText, 'This sends your note to the lens and keeps the question open.');
 });
 
 // skipConflicted: postSendBatchLocked and rearmAutosaves (ticket #43, cause
@@ -1291,4 +1427,46 @@ test('handleKeyEvent: g p calls run with the project action', () => {
 	handleKeyEvent(state, { key: 'p', target: { tagName: 'BODY' }, preventDefault: () => {} }, 10, run);
 
 	assert.deepEqual(calls, ['nav-project']);
+});
+
+// ---- ticket actions confirm in-page (ticket #65, Q3: never window.confirm) ----
+//
+// console.js itself is not loaded or unit-tested under Node (file-top
+// comment above): this test instead reads its source text directly, the
+// only way to pin that installTicketActions' abandon/restart buttons always
+// route through openConfirmDialog's in-page dialog rather than some other,
+// easier-to-add-by-accident confirm path (e.g. window.confirm).
+const consoleJsSource = readFileSync(new URL('./console.js', import.meta.url), 'utf8');
+
+// functionBody extracts name's balanced-brace body out of source, so the
+// first assertion below can look inside installTicketActions specifically
+// rather than the whole file.
+function functionBody(source, name) {
+	const match = source.match(new RegExp(`function ${name}\\s*\\([^)]*\\)\\s*\\{`));
+	assert.ok(match, `function ${name} not found`);
+	let depth = 1;
+	let i = match.index + match[0].length;
+	while (depth > 0) {
+		if (source[i] === '{') {
+			depth++;
+		} else if (source[i] === '}') {
+			depth--;
+		}
+		i++;
+	}
+	return source.slice(match.index + match[0].length, i - 1);
+}
+
+test('ticket actions confirm in-page', () => {
+	const body = functionBody(consoleJsSource, 'installTicketActions');
+	assert.match(body, /openConfirmDialog\(/);
+
+	for (const line of consoleJsSource.split('\n')) {
+		if (line.includes('openConfirmDialog(')) {
+			continue;
+		}
+		const lower = line.toLowerCase();
+		const callsConfirmDirectly = lower.includes('confirm(') && (lower.includes('abandon') || lower.includes('restart'));
+		assert.ok(!callsConfirmDirectly, `line bypasses openConfirmDialog: ${line}`);
+	}
 });

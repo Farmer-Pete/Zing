@@ -200,6 +200,13 @@ type ThreadQuestion struct {
 	DraftOption string
 	DraftItems  map[string]response.Decision
 
+	// DraftNotes is the ticket's own in-progress, unsent per-finding notes
+	// against this question (ticket #68), review kind only: DraftItems'
+	// ref->decision alongside DraftNotes' ref->note, both keyed the same.
+	// effectiveItemNotes (thread.templ) reads it the same way
+	// effectivePickedItems reads DraftItems.
+	DraftNotes map[string]string
+
 	// PickedOption and PickedItems are this question's own sent answer,
 	// decoded once (console.collectSentAnswers) and kept separate from
 	// DraftOption/DraftItems (bug fix: "options vanish once locked" --
@@ -212,6 +219,10 @@ type ThreadQuestion struct {
 	// question is still open.
 	PickedOption string
 	PickedItems  map[string]response.Decision
+
+	// PickedNotes is this question's own sent per-finding notes (ticket
+	// #68), set only once not Interactive, mirroring PickedItems above.
+	PickedNotes map[string]string
 
 	// AnsweredHTML is a closed, state=answered question's own sent answer,
 	// pre-rendered as markdown (bug fix: raw backticks showed literally;
@@ -266,6 +277,31 @@ type SplitChildView struct {
 	Key, Title string
 	BodyHTML   templ.Component
 	DependsOn  []string
+}
+
+// TicketActions is the thread view's action bar (#65, design section 6.6's
+// owner actions): console.actionsFor builds it from one ticket's own state,
+// claim, and (for an abandoned ticket) whether a live successor exists at
+// its ref.
+type TicketActions struct {
+	// Abandon reports whether the Abandon button renders at all: exactly
+	// store.CanAbandon(ticket.State).
+	Abandon bool
+
+	// Restart reports whether the Restart from planning button renders:
+	// wherever Abandon does, and also on an abandoned ticket while no live
+	// ticket holds its ref.
+	Restart bool
+
+	// Held reports whether a run currently holds the ticket (claim_owner is
+	// set): both buttons render disabled, with AbandonClaimedReason as the
+	// note, while this is true.
+	Held bool
+
+	// Ref is the ticket's issue ref with any -abandoned-K suffix stripped
+	// (store.SplitAttemptRef), the action bar's data-ref attribute and the
+	// confirm dialog's own wording.
+	Ref string
 }
 
 // Turn is one line of a question's own conversation (design section 22.7):

@@ -891,7 +891,7 @@ func TestSendBatch_ClearsAGateWaitButNeverErrorOrChildren(t *testing.T) {
 		_, ticketID := seedQueuedTicket(t, s, "err")
 		setTicketWaiting(t, s, ticketID, "error")
 		items := []response.Item{{Ref: "f1", Text: "finding"}}
-		qID := insertQuestionOfKind(t, s, ticketID, "Q1", response.QuestionKindReview, nil, items)
+		qID := insertQuestionOfKind(t, s, ticketID, "Q1", response.QuestionKindPerimeter, nil, items)
 		if _, err := s.SaveDraft(t.Context(), DraftInput{TicketID: ticketID, QuestionID: &qID, Text: "looking into it"}); err != nil {
 			t.Fatalf("SaveDraft: %v", err)
 		}
@@ -1201,6 +1201,279 @@ func TestSendBatch_ItemCompletenessAccumulatesAcrossSends(t *testing.T) {
 	}
 	if ticket.WaitingOn != nil {
 		t.Errorf("ticket.WaitingOn = %q, want nil", *ticket.WaitingOn)
+	}
+}
+
+// TestSendBatch_ReviewReplyLeavesQuestionOpen proves the ticket's fix 2: a
+// free reply on a review question no longer answers it on its own. a.go is
+// dropped, b.go is left undecided, and a question-level reply is sent in the
+// same batch. The question must stay open, since one finding still lacks a
+// decision; only the item-completeness check may close a review question.
+func TestSendBatch_ReviewReplyLeavesQuestionOpen(t *testing.T) {
+	t.Parallel()
+	s := newTestStore(t)
+	_, ticketID := seedQueuedTicket(t, s, "1")
+	items := []response.Item{{Ref: testRefAGo, Text: "a"}, {Ref: testRefBGo, Text: "b"}}
+	qID := insertQuestionOfKind(t, s, ticketID, "Q1", response.QuestionKindReview, nil, items)
+
+	itemDraft, err := s.SaveDraft(t.Context(), DraftInput{
+		TicketID: ticketID, QuestionID: &qID, Item: &ItemDecision{Ref: testRefAGo, Decision: response.DecisionDrop},
+	})
+	if err != nil {
+		t.Fatalf("SaveDraft(item): %v", err)
+	}
+	replyDraft, err := s.SaveDraft(t.Context(), DraftInput{
+		TicketID: ticketID, QuestionID: &qID, Text: testReplyWhyThough,
+	})
+	if err != nil {
+		t.Fatalf("SaveDraft(reply): %v", err)
+	}
+
+	if _, err = s.SendBatch(t.Context(), ticketID); err != nil {
+		t.Fatalf("SendBatch: %v", err)
+	}
+
+	q, err := s.GetMessage(t.Context(), qID)
+	if err != nil {
+		t.Fatalf("GetMessage(question): %v", err)
+	}
+	if q.State == nil || *q.State != questionStateOpen {
+		t.Errorf("question state = %v, want unchanged %q (a review reply does not answer, and b.go is still undecided)", q.State, questionStateOpen)
+	}
+
+	item, err := s.GetMessage(t.Context(), itemDraft.MessageID)
+	if err != nil {
+		t.Fatalf("GetMessage(item answer): %v", err)
+	}
+	if item.State == nil || *item.State != answerStateSent {
+		t.Errorf("item answer state = %v, want %q", item.State, answerStateSent)
+	}
+
+	reply, err := s.GetMessage(t.Context(), replyDraft.MessageID)
+	if err != nil {
+		t.Fatalf("GetMessage(reply): %v", err)
+	}
+	if reply.State == nil || *reply.State != answerStateSent {
+		t.Errorf("reply state = %v, want %q", reply.State, answerStateSent)
+	}
+}
+
+// TestSendBatch_FullyDecidedReviewWithReplyAnswers guards the fix in
+// TestSendBatch_ReviewReplyLeavesQuestionOpen against over-reach: once every
+// finding on a review question has a decision, the question is still marked
+// answered by the item-completeness check, whether or not the same batch
+// also carries a free reply.
+func TestSendBatch_FullyDecidedReviewWithReplyAnswers(t *testing.T) {
+	t.Parallel()
+	s := newTestStore(t)
+	_, ticketID := seedQueuedTicket(t, s, "1")
+	items := []response.Item{{Ref: testRefAGo, Text: "a"}, {Ref: testRefBGo, Text: "b"}}
+	qID := insertQuestionOfKind(t, s, ticketID, "Q1", response.QuestionKindReview, nil, items)
+
+	if _, err := s.SaveDraft(t.Context(), DraftInput{
+		TicketID: ticketID, QuestionID: &qID, Item: &ItemDecision{Ref: testRefAGo, Decision: response.DecisionDrop},
+	}); err != nil {
+		t.Fatalf("SaveDraft(a.go): %v", err)
+	}
+	if _, err := s.SaveDraft(t.Context(), DraftInput{
+		TicketID: ticketID, QuestionID: &qID, Item: &ItemDecision{Ref: testRefBGo, Decision: response.DecisionAccept},
+	}); err != nil {
+		t.Fatalf("SaveDraft(b.go): %v", err)
+	}
+	if _, err := s.SaveDraft(t.Context(), DraftInput{
+		TicketID: ticketID, QuestionID: &qID, Text: testReplyWhyThough,
+	}); err != nil {
+		t.Fatalf("SaveDraft(reply): %v", err)
+	}
+
+	if _, err := s.SendBatch(t.Context(), ticketID); err != nil {
+		t.Fatalf("SendBatch: %v", err)
+	}
+
+	q, err := s.GetMessage(t.Context(), qID)
+	if err != nil {
+		t.Fatalf("GetMessage(question): %v", err)
+	}
+	if q.State == nil || *q.State != questionStateAnswered {
+		t.Errorf("question state = %v, want %q (every finding is decided)", q.State, questionStateAnswered)
+	}
+}
+
+// TestSendBatch_ReviewItemNoteStaysWithItsFinding proves a note typed on one
+// finding's row is stored under that finding's own ref, not the question's
+// joined reply, and a finding left undecided gets no note at all.
+func TestSendBatch_ReviewItemNoteStaysWithItsFinding(t *testing.T) {
+	t.Parallel()
+	s := newTestStore(t)
+	_, ticketID := seedQueuedTicket(t, s, "1")
+	items := []response.Item{{Ref: testRefAGo, Text: "a"}, {Ref: testRefBGo, Text: "b"}}
+	qID := insertQuestionOfKind(t, s, ticketID, "Q1", response.QuestionKindReview, nil, items)
+
+	itemDraft, err := s.SaveDraft(t.Context(), DraftInput{
+		TicketID: ticketID, QuestionID: &qID,
+		Item: &ItemDecision{Ref: testRefAGo, Decision: response.DecisionDrop, Note: "out of scope"},
+	})
+	if err != nil {
+		t.Fatalf("SaveDraft(a.go): %v", err)
+	}
+
+	if _, err = s.SendBatch(t.Context(), ticketID); err != nil {
+		t.Fatalf("SendBatch: %v", err)
+	}
+
+	q, err := s.GetMessage(t.Context(), qID)
+	if err != nil {
+		t.Fatalf("GetMessage(question): %v", err)
+	}
+	if q.State == nil || *q.State != questionStateOpen {
+		t.Errorf("question state = %v, want unchanged %q (b.go is still undecided)", q.State, questionStateOpen)
+	}
+
+	ap := draftPayloadOf(t, s, itemDraft.MessageID)
+	if ap.Items[testRefAGo] != response.DecisionDrop {
+		t.Errorf("Items[a.go] = %v, want drop", ap.Items[testRefAGo])
+	}
+	if ap.Notes[testRefAGo] != "out of scope" {
+		t.Errorf("Notes[a.go] = %q, want %q", ap.Notes[testRefAGo], "out of scope")
+	}
+	if _, ok := ap.Notes[testRefBGo]; ok {
+		t.Errorf("Notes[b.go] = %q, want no entry", ap.Notes[testRefBGo])
+	}
+}
+
+// TestSendBatch_ReplyStillAnswersNonReviewQuestion proves the fix is scoped
+// to review questions only: a free reply on a kind=question question still
+// answers it, exactly as before.
+func TestSendBatch_ReplyStillAnswersNonReviewQuestion(t *testing.T) {
+	t.Parallel()
+	s := newTestStore(t)
+	_, ticketID := seedQueuedTicket(t, s, "1")
+	qID := insertQuestionOption(t, s, ticketID, "Q1")
+
+	if _, err := s.SaveDraft(t.Context(), DraftInput{
+		TicketID: ticketID, QuestionID: &qID, Text: testReplyWhyThough,
+	}); err != nil {
+		t.Fatalf("SaveDraft(reply): %v", err)
+	}
+
+	if _, err := s.SendBatch(t.Context(), ticketID); err != nil {
+		t.Fatalf("SendBatch: %v", err)
+	}
+
+	q, err := s.GetMessage(t.Context(), qID)
+	if err != nil {
+		t.Fatalf("GetMessage(question): %v", err)
+	}
+	if q.State == nil || *q.State != questionStateAnswered {
+		t.Errorf("question state = %v, want %q (a reply still answers a non-review question)", q.State, questionStateAnswered)
+	}
+}
+
+// TestSaveDraft_NoteOnNonReviewItemRefused proves SaveDraft refuses a note
+// on an item-kind question other than review (perimeter here), and writes
+// nothing: the owner's note on an accept/reject pick belongs to a review
+// finding only.
+func TestSaveDraft_NoteOnNonReviewItemRefused(t *testing.T) {
+	t.Parallel()
+	s := newTestStore(t)
+	_, ticketID := seedQueuedTicket(t, s, "1")
+	items := []response.Item{{Ref: testRefAGo, Text: "a"}}
+	qID := insertQuestionOfKind(t, s, ticketID, "Q1", response.QuestionKindPerimeter, nil, items)
+
+	_, err := s.SaveDraft(t.Context(), DraftInput{
+		TicketID: ticketID, QuestionID: &qID,
+		Item: &ItemDecision{Ref: testRefAGo, Decision: response.DecisionAccept, Note: "looks fine"},
+	})
+	var ce *ConflictError
+	if !errors.As(err, &ce) || ce.Reason != "a note is for a review item" {
+		t.Fatalf("SaveDraft err = %v, want conflict %q", err, "a note is for a review item")
+	}
+
+	var count int
+	if err := s.db.QueryRowContext(t.Context(),
+		`SELECT COUNT(*) FROM messages WHERE parent_id = ? AND type = 'answer'`, qID,
+	).Scan(&count); err != nil {
+		t.Fatalf("count answers: %v", err)
+	}
+	if count != 0 {
+		t.Errorf("answer row count = %d, want 0 (nothing written on a refused note)", count)
+	}
+}
+
+// TestSaveDraft_ItemNoteReplacesAndClears proves a later pick on the same
+// ref replaces its note, and a pick with an empty note clears it: a note
+// never outlives the pick the owner made it against.
+func TestSaveDraft_ItemNoteReplacesAndClears(t *testing.T) {
+	t.Parallel()
+	s := newTestStore(t)
+	_, ticketID := seedQueuedTicket(t, s, "1")
+	items := []response.Item{{Ref: testRefAGo, Text: "a"}}
+	qID := insertQuestionOfKind(t, s, ticketID, "Q1", response.QuestionKindReview, nil, items)
+
+	first, err := s.SaveDraft(t.Context(), DraftInput{
+		TicketID: ticketID, QuestionID: &qID,
+		Item: &ItemDecision{Ref: testRefAGo, Decision: response.DecisionDrop, Note: "first"},
+	})
+	if err != nil {
+		t.Fatalf("SaveDraft(first): %v", err)
+	}
+	if first.Replaced {
+		t.Error("first.Replaced = true, want false (fresh draft)")
+	}
+
+	second, err := s.SaveDraft(t.Context(), DraftInput{
+		TicketID: ticketID, QuestionID: &qID,
+		Item: &ItemDecision{Ref: testRefAGo, Decision: response.DecisionDiscuss, Note: "second"},
+	})
+	if err != nil {
+		t.Fatalf("SaveDraft(second): %v", err)
+	}
+	if !second.Replaced {
+		t.Error("second.Replaced = false, want true (decision and note both changed)")
+	}
+	ap := draftPayloadOf(t, s, second.MessageID)
+	if ap.Notes[testRefAGo] != "second" {
+		t.Errorf("Notes[a.go] = %q, want %q", ap.Notes[testRefAGo], "second")
+	}
+
+	third, err := s.SaveDraft(t.Context(), DraftInput{
+		TicketID: ticketID, QuestionID: &qID,
+		Item: &ItemDecision{Ref: testRefAGo, Decision: response.DecisionAccept, Note: ""},
+	})
+	if err != nil {
+		t.Fatalf("SaveDraft(third): %v", err)
+	}
+	ap = draftPayloadOf(t, s, third.MessageID)
+	if ap.Notes != nil {
+		t.Errorf("Notes = %v, want nil (cleared)", ap.Notes)
+	}
+
+	// A note-only edit (same decision, different note) must still report
+	// Replaced true: this is the save installItemNoteSave's own 'change'
+	// listener makes most often, keeping today's pick and only touching the
+	// note (review fix, tests).
+	fourth, err := s.SaveDraft(t.Context(), DraftInput{
+		TicketID: ticketID, QuestionID: &qID,
+		Item: &ItemDecision{Ref: testRefAGo, Decision: response.DecisionAccept, Note: "fourth"},
+	})
+	if err != nil {
+		t.Fatalf("SaveDraft(fourth): %v", err)
+	}
+	if !fourth.Replaced {
+		t.Error("fourth.Replaced = false, want true (note changed, decision unchanged)")
+	}
+
+	// Saving the exact same decision and note again changes nothing, so
+	// Replaced must be false.
+	fifth, err := s.SaveDraft(t.Context(), DraftInput{
+		TicketID: ticketID, QuestionID: &qID,
+		Item: &ItemDecision{Ref: testRefAGo, Decision: response.DecisionAccept, Note: "fourth"},
+	})
+	if err != nil {
+		t.Fatalf("SaveDraft(fifth): %v", err)
+	}
+	if fifth.Replaced {
+		t.Error("fifth.Replaced = true, want false (decision and note both unchanged)")
 	}
 }
 

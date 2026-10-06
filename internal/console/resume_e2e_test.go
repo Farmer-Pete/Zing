@@ -614,7 +614,7 @@ func assertResumeE2EStateSequence(t *testing.T, st *store.Store, ticketID int64)
 			states = append(states, string(sp.To))
 		case testMsgTypeQuestion:
 			questions++
-		case "answer":
+		case testMsgTypeAnswer:
 			answers++
 		case "resolved":
 			resolved++

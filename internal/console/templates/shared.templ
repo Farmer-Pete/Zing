@@ -25,8 +25,16 @@ templ statePill(t store.Ticket) {
 // renders messages, not tickets, so it does not use this.
 templ ticketRow(t store.Ticket) {
 	<a href="#" class="ticket-row" data-focus-id={ fmt.Sprintf("ticket:%d", t.ID) } data-on:click__prevent={ zingNavExpr("thread", t.ID, 0) }>
-		<span class="ref">{ t.TrackerRef }</span>
+		<span class="ref">{ displayRef(t.TrackerRef) }</span>
 		<span class="title">{ t.Title }</span>
 		@statePill(t)
 	</a>
+}
+
+// displayRef strips a tracker_ref's -abandoned-K suffix (#65,
+// store.SplitAttemptRef): every ref the console renders is the issue's own
+// ref, never the renamed one a restart or pickup gave an abandoned ticket.
+func displayRef(ref string) string {
+	base, _ := store.SplitAttemptRef(ref)
+	return base
 }

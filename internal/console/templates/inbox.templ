@@ -34,7 +34,7 @@ templ Inbox(groups []InboxGroup) {
 templ inboxCard(item store.InboxItem) {
 	<article class="ib-thread" data-focus-id={ fmt.Sprintf("ticket:%d", item.Ticket.ID) }>
 		<a href="#" class="ib-thread-row" data-on:click__prevent={ zingNavExpr("thread", item.Ticket.ID, 0) }>
-			<span class="ref">{ item.Ticket.TrackerRef }</span>
+			<span class="ref">{ displayRef(item.Ticket.TrackerRef) }</span>
 			<span class="title">{ item.Ticket.Title }</span>
 			@statePill(item.Ticket)
 			if len(item.OpenQuestions) > 0 {

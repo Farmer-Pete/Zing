@@ -14,12 +14,12 @@ import (
 	"zing/internal/store"
 )
 
-// renderItemRow renders itemRow(1, 2, item, itemDecisionsPerimeter, "",
-// true) to a string, failing the test on a render error.
+// renderItemRow renders itemRow(1, 2, item, itemDecisionsPerimeter, "", "",
+// false, true) to a string, failing the test on a render error.
 func renderItemRow(t *testing.T, item ThreadItem) string {
 	t.Helper()
 	var sb strings.Builder
-	if err := itemRow(1, 2, item, itemDecisionsPerimeter, "", true).Render(t.Context(), &sb); err != nil {
+	if err := itemRow(1, 2, item, itemDecisionsPerimeter, "", "", false, true).Render(t.Context(), &sb); err != nil {
 		t.Fatalf("itemRow.Render: %v", err)
 	}
 	return sb.String()
@@ -499,7 +499,7 @@ func TestThreadShowsWaitProgress(t *testing.T) {
 	t.Run("a blocked ticket shows the progress line", func(t *testing.T) {
 		t.Parallel()
 		var sb strings.Builder
-		if err := Thread(ticket, nil, WaitProgress{Answered: 1, Total: 2}, "").Render(t.Context(), &sb); err != nil {
+		if err := Thread(ticket, nil, WaitProgress{Answered: 1, Total: 2}, "", TicketActions{}).Render(t.Context(), &sb); err != nil {
 			t.Fatalf("Thread.Render: %v", err)
 		}
 		got := sb.String()
@@ -512,7 +512,7 @@ func TestThreadShowsWaitProgress(t *testing.T) {
 	t.Run("an unblocked ticket shows no progress line", func(t *testing.T) {
 		t.Parallel()
 		var sb strings.Builder
-		if err := Thread(ticket, nil, WaitProgress{}, "").Render(t.Context(), &sb); err != nil {
+		if err := Thread(ticket, nil, WaitProgress{}, "", TicketActions{}).Render(t.Context(), &sb); err != nil {
 			t.Fatalf("Thread.Render: %v", err)
 		}
 		if strings.Contains(sb.String(), "wait-progress") {
@@ -728,7 +728,7 @@ func TestThreadRendersSandboxRunBox(t *testing.T) {
 		t.Parallel()
 		ticket := &store.Ticket{ID: 7, Title: testHelloTicketTitle}
 		var sb strings.Builder
-		if err := Thread(ticket, nil, WaitProgress{}, "").Render(t.Context(), &sb); err != nil {
+		if err := Thread(ticket, nil, WaitProgress{}, "", TicketActions{}).Render(t.Context(), &sb); err != nil {
 			t.Fatalf("Thread.Render: %v", err)
 		}
 		got := sb.String()
@@ -747,7 +747,7 @@ func TestThreadRendersSandboxRunBox(t *testing.T) {
 	t.Run("no open ticket renders no sandbox run box", func(t *testing.T) {
 		t.Parallel()
 		var sb strings.Builder
-		if err := Thread(nil, nil, WaitProgress{}, "").Render(t.Context(), &sb); err != nil {
+		if err := Thread(nil, nil, WaitProgress{}, "", TicketActions{}).Render(t.Context(), &sb); err != nil {
 			t.Fatalf("Thread.Render: %v", err)
 		}
 		if got := sb.String(); strings.Contains(got, "sandbox-run") {

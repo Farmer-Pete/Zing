@@ -112,11 +112,12 @@ func driveReviewToCapWithFix(t *testing.T, secondFixScript, secondFixCmd string)
 
 // driveToReviewLoopsExhausted drives driveReviewToCapWithFix's own ticket
 // one further round (round 3, an above-floor "quality" major finding, "still
-// broken") through the review question, triaged with no item decision and a
-// free reply ("going with the recommendation", so the accept is the safe
-// default, same as TestLoopGateDefaultAcceptEscalates), then into fixreq,
-// which escalates loops_exhausted (ticket 60). Returns the store, ticket,
-// fake runtime, and fixreq's own escalating commit, not yet applied.
+// broken") through the review question, triaged with an out-of-set decision
+// (insertRawReviewSentDecision) plus a free reply (so the accept triage
+// gives it is the safe default, same as TestLoopGateDefaultAcceptEscalates),
+// then into fixreq, which escalates loops_exhausted (ticket 60). Returns the
+// store, ticket, fake runtime, and fixreq's own escalating commit, not yet
+// applied.
 func driveToReviewLoopsExhausted(t *testing.T, secondFixScript, secondFixCmd string) (s *store.Store, ticket store.Ticket, rt *runtime.Fake, fixreqCommit store.HandlerCommit) {
 	t.Helper()
 	s, ticket, rt, scripts := driveReviewToCapWithFix(t, secondFixScript, secondFixCmd)
@@ -137,6 +138,15 @@ func driveToReviewLoopsExhausted(t *testing.T, secondFixScript, secondFixCmd str
 	pbApply(t, s, ticket, commit3)
 
 	q := newestOpenQuestion(t, s, ticket.ID)
+	var qPayload response.QuestionPayload
+	if err = json.Unmarshal(q.Payload, &qPayload); err != nil {
+		t.Fatalf("driveToReviewLoopsExhausted: unmarshal question payload: %v", err)
+	}
+	ref := itemRefByText(t, qPayload, "still broken")
+	// A review question now answers only once every item has a decision
+	// (ticket #68); reject is out-of-set for review, which is exactly what
+	// exercises triage's own default-to-accept fallback.
+	insertRawReviewSentDecision(t, s, ticket.ID, q.ID, ref, response.DecisionReject)
 	answerReviewItems(t, s, ticket.ID, q.ID, map[string]response.Decision{}, "going with the recommendation")
 
 	ticket4 := pbGetTicket(t, s, ticket.ID)
@@ -158,6 +168,32 @@ func driveToReviewLoopsExhausted(t *testing.T, secondFixScript, secondFixCmd str
 	}
 
 	return s, pbGetTicket(t, s, ticket.ID), rt, commit5
+}
+
+// insertRawReviewSentDecision inserts an already-"sent" answer row for
+// questionID directly, bypassing SaveDraft's own review-kind restriction to
+// accept, drop, or discuss (console_writes.go's SaveDraft item branch): it
+// is this file's own way to construct reviewFindingDecision's "out-of-set"
+// case (reviewing.go) now that the console itself can never produce one for
+// a review item. markAnsweredQuestionsTx's completeness check only asks
+// that every item ref appear in some sent answer's Items map, not that the
+// value be one reviewFindingDecision recognizes, so this row still counts
+// toward closing the question; triage then defaults this one item to
+// accept with OwnerPicked false, same as a genuinely missing decision did
+// before ticket #68 narrowed how a review question answers.
+func insertRawReviewSentDecision(t *testing.T, s *store.Store, ticketID, questionID int64, ref string, decision response.Decision) {
+	t.Helper()
+	payload, err := json.Marshal(response.AnswerPayload{Items: map[string]response.Decision{ref: decision}})
+	if err != nil {
+		t.Fatalf("insertRawReviewSentDecision: marshal: %v", err)
+	}
+	sent := answerStateSent
+	if _, err := s.InsertMessage(t.Context(), store.Message{
+		TicketID: ticketID, ParentID: &questionID, Type: msgTypeAnswer, Author: authorYou,
+		State: &sent, Payload: payload,
+	}); err != nil {
+		t.Fatalf("insertRawReviewSentDecision: InsertMessage: %v", err)
+	}
 }
 
 // ---- TestAcceptAtCap --------------------------------------------------------
@@ -329,9 +365,10 @@ func TestLoopGateOwnerAcceptStartsFix(t *testing.T) {
 // TestLoopGateDefaultAcceptEscalates proves fixreq's own fallback still
 // escalates loops_exhausted at the cap when the above-floor finding's own
 // accept is the safe default (no OwnerPicked), not the owner's own pick:
-// the owner answers the review question with a free reply and no item
-// decision, so triage defaults the item to accept with OwnerPicked false,
-// and the following fixreq tick at the cap escalates exactly as before.
+// the owner answers the review question with an out-of-set decision
+// (insertRawReviewSentDecision) and a free reply, so triage defaults the
+// item to accept with OwnerPicked false, and the following fixreq tick at
+// the cap escalates exactly as before.
 func TestLoopGateDefaultAcceptEscalates(t *testing.T) {
 	if testing.Short() {
 		t.Skip("slow end-to-end flow; runs in the full suite")
@@ -352,6 +389,15 @@ func TestLoopGateDefaultAcceptEscalates(t *testing.T) {
 	pbApply(t, s, ticket, commit3)
 
 	q := newestOpenQuestion(t, s, ticket.ID)
+	var qPayload response.QuestionPayload
+	if err = json.Unmarshal(q.Payload, &qPayload); err != nil {
+		t.Fatalf("unmarshal question payload: %v", err)
+	}
+	ref := itemRefByText(t, qPayload, "still broken")
+	// A review question now answers only once every item has a decision
+	// (ticket #68); reject is out-of-set for review, which is exactly what
+	// exercises triage's own default-to-accept fallback.
+	insertRawReviewSentDecision(t, s, ticket.ID, q.ID, ref, response.DecisionReject)
 	answerReviewItems(t, s, ticket.ID, q.ID, map[string]response.Decision{}, "going with the recommendation")
 
 	ticket4 := pbGetTicket(t, s, ticket.ID)

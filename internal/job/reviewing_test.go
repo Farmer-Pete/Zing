@@ -2744,12 +2744,14 @@ func TestTriageStoresDecisions(t *testing.T) {
 // ---- TestTriageDefaultsToAccept ----------------------------------------------
 
 // TestTriageDefaultsToAccept proves design section 6.5 step 2 and section
-// 14's own edge case: an item the owner leaves undecided defaults to
-// accept. The owner decides only one of the round's two above-floor
-// findings and sends a free reply on the question, which
-// markAnsweredQuestionsTx marks answered on its own (the other path design
-// section 14 names: "the console marks the question answered only when
-// every item has a decision" -- a reply is the other one).
+// 14's own edge case: an item whose own decision is out-of-set for review
+// (reviewFindingDecision's own fallback) defaults to accept. The owner
+// decides only one of the round's two above-floor findings; the other
+// reaches triage with the out-of-set decision insertRawReviewSentDecision
+// (reviewing_cap_test.go) gave it, since ticket #68 narrowed
+// markAnsweredQuestionsTx to require a decision for every item before a
+// review question answers at all, with a free reply alone no longer
+// enough.
 func TestTriageDefaultsToAccept(t *testing.T) {
 	if testing.Short() {
 		t.Skip("slow end-to-end flow; runs in the full suite")
@@ -2776,6 +2778,11 @@ func TestTriageDefaultsToAccept(t *testing.T) {
 	decided := itemRefByText(t, payload, "unchecked input")
 	undecided := itemRefByText(t, payload, "breaks the build")
 
+	// A review question now answers only once every item has a decision
+	// (ticket #68), so "undecided" needs a decision of its own to close the
+	// question at all; reject is out-of-set for review (SaveDraft itself
+	// refuses it), which is exactly what exercises triage's own default.
+	insertRawReviewSentDecision(t, s, ticket.ID, q.ID, undecided, response.DecisionReject)
 	answerReviewItems(t, s, ticket.ID, q.ID, map[string]response.Decision{decided: response.DecisionDrop}, "going with the recommendation for the rest")
 
 	ticket2 := pbGetTicket(t, s, ticket.ID)
@@ -2893,6 +2900,172 @@ func TestTriageWritesNotes(t *testing.T) {
 		}
 		if !strings.Contains(marker.Body, reviewNoteNone) {
 			t.Errorf("note marker body = %q, want it to contain %q", marker.Body, reviewNoteNone)
+		}
+	})
+}
+
+// ---- TestTriageUsesPerFindingNote --------------------------------------------
+
+// TestTriageUsesPerFindingNote proves ticket #68: a discussed finding's own
+// note (saved on its item draft, design section 6.7) wins over the
+// question's joined reply in its "review note <id>" marker, and a later
+// pick that carries no note clears an earlier one rather than leaving it in
+// place (mergedItemNotes' own per-ref set-or-delete rule).
+func TestTriageUsesPerFindingNote(t *testing.T) {
+	t.Parallel()
+	t.Run("own note wins", func(t *testing.T) {
+		t.Parallel()
+		s, ticket, _ := reviewTicketReady(t)
+		scripts := reviewScriptsFS(map[string]string{
+			reviewScriptKey("security", 1): twoFindingScript(
+				"security", "major", greetGoLine5, "unchecked input", "validate it",
+				"major", greetGoLine2, "missing lock", "add a lock",
+			),
+		})
+		deps := pbClaim(t, s, runtime.NewFake(scripts), ticket.ID)
+		commit, err := (reviewingHandler{}).Run(t.Context(), ticket, deps)
+		if err != nil {
+			t.Fatalf("Run (round): %v", err)
+		}
+		pbApply(t, s, ticket, commit)
+
+		q := newestOpenQuestion(t, s, ticket.ID)
+		var payload response.QuestionPayload
+		if err = json.Unmarshal(q.Payload, &payload); err != nil {
+			t.Fatalf("unmarshal question payload: %v", err)
+		}
+		refOwnNote := itemRefByText(t, payload, "unchecked input")
+		refReplyOnly := itemRefByText(t, payload, "missing lock")
+
+		if _, err = s.SaveDraft(t.Context(), store.DraftInput{
+			TicketID: ticket.ID, QuestionID: &q.ID,
+			Item: &store.ItemDecision{Ref: refOwnNote, Decision: response.DecisionDiscuss, Note: "its own note"},
+		}); err != nil {
+			t.Fatalf("SaveDraft(item with its own note): %v", err)
+		}
+		if _, err = s.SaveDraft(t.Context(), store.DraftInput{
+			TicketID: ticket.ID, QuestionID: &q.ID,
+			Item: &store.ItemDecision{Ref: refReplyOnly, Decision: response.DecisionDiscuss},
+		}); err != nil {
+			t.Fatalf("SaveDraft(item with no note): %v", err)
+		}
+		if _, err = s.SaveDraft(t.Context(), store.DraftInput{
+			TicketID: ticket.ID, QuestionID: &q.ID, Text: "the joined question reply",
+		}); err != nil {
+			t.Fatalf("SaveDraft(reply): %v", err)
+		}
+		if _, err = s.SendBatch(t.Context(), ticket.ID); err != nil {
+			t.Fatalf("SendBatch: %v", err)
+		}
+
+		ticket2 := pbGetTicket(t, s, ticket.ID)
+		deps2 := pbClaim(t, s, runtime.NewFake(scripts), ticket.ID)
+		commit2, err := (reviewingHandler{}).Run(t.Context(), ticket2, deps2)
+		if err != nil {
+			t.Fatalf("Run (triage): %v", err)
+		}
+		pbApply(t, s, ticket, commit2)
+
+		ownNoteMarker, ok := reviewMarker(t, s, ticket.ID, "review note "+refOwnNote)
+		if !ok {
+			t.Fatalf("no %q marker", "review note "+refOwnNote)
+		}
+		if !strings.Contains(ownNoteMarker.Body, "its own note") {
+			t.Errorf("own-note marker body = %q, want it to contain the finding's own note", ownNoteMarker.Body)
+		}
+		if strings.Contains(ownNoteMarker.Body, "the joined question reply") {
+			t.Errorf("own-note marker body = %q, want no trace of the joined reply", ownNoteMarker.Body)
+		}
+
+		replyOnlyMarker, ok := reviewMarker(t, s, ticket.ID, "review note "+refReplyOnly)
+		if !ok {
+			t.Fatalf("no %q marker", "review note "+refReplyOnly)
+		}
+		if !strings.Contains(replyOnlyMarker.Body, "the joined question reply") {
+			t.Errorf("reply-only marker body = %q, want it to contain the joined reply", replyOnlyMarker.Body)
+		}
+	})
+
+	t.Run("a later pick clears the note", func(t *testing.T) {
+		t.Parallel()
+		s, ticket, _ := reviewTicketReady(t)
+		scripts := reviewScriptsFS(map[string]string{
+			reviewScriptKey("security", 1): twoFindingScript(
+				"security", "major", greetGoLine5, "unchecked input", "validate it",
+				"major", greetGoLine2, "missing lock", "add a lock",
+			),
+		})
+		deps := pbClaim(t, s, runtime.NewFake(scripts), ticket.ID)
+		commit, err := (reviewingHandler{}).Run(t.Context(), ticket, deps)
+		if err != nil {
+			t.Fatalf("Run (round): %v", err)
+		}
+		pbApply(t, s, ticket, commit)
+
+		q := newestOpenQuestion(t, s, ticket.ID)
+		var payload response.QuestionPayload
+		if err = json.Unmarshal(q.Payload, &payload); err != nil {
+			t.Fatalf("unmarshal question payload: %v", err)
+		}
+		refNoted := itemRefByText(t, payload, "unchecked input")
+		refOther := itemRefByText(t, payload, "missing lock")
+
+		// Send 1: discuss refNoted with a note, leave refOther undecided. The
+		// question stays open (not every item is decided), so TRIAGE must not
+		// run yet.
+		if _, err = s.SaveDraft(t.Context(), store.DraftInput{
+			TicketID: ticket.ID, QuestionID: &q.ID,
+			Item: &store.ItemDecision{Ref: refNoted, Decision: response.DecisionDiscuss, Note: "old"},
+		}); err != nil {
+			t.Fatalf("SaveDraft(send 1 item): %v", err)
+		}
+		if _, err = s.SendBatch(t.Context(), ticket.ID); err != nil {
+			t.Fatalf("SendBatch (send 1): %v", err)
+		}
+
+		stillOpen, err := s.GetMessage(t.Context(), q.ID)
+		if err != nil {
+			t.Fatalf("GetMessage(question after send 1): %v", err)
+		}
+		if stillOpen.State == nil || *stillOpen.State != "open" {
+			t.Fatalf("question state after send 1 = %v, want open (refOther is still undecided)", stillOpen.State)
+		}
+
+		// Send 2: discuss refNoted again, this time with no note (clearing
+		// it), and decide refOther. The question now answers.
+		if _, err = s.SaveDraft(t.Context(), store.DraftInput{
+			TicketID: ticket.ID, QuestionID: &q.ID,
+			Item: &store.ItemDecision{Ref: refNoted, Decision: response.DecisionDiscuss},
+		}); err != nil {
+			t.Fatalf("SaveDraft(send 2 item refNoted): %v", err)
+		}
+		if _, err = s.SaveDraft(t.Context(), store.DraftInput{
+			TicketID: ticket.ID, QuestionID: &q.ID,
+			Item: &store.ItemDecision{Ref: refOther, Decision: response.DecisionAccept},
+		}); err != nil {
+			t.Fatalf("SaveDraft(send 2 item refOther): %v", err)
+		}
+		if _, err = s.SendBatch(t.Context(), ticket.ID); err != nil {
+			t.Fatalf("SendBatch (send 2): %v", err)
+		}
+
+		ticket2 := pbGetTicket(t, s, ticket.ID)
+		deps2 := pbClaim(t, s, runtime.NewFake(scripts), ticket.ID)
+		commit2, err := (reviewingHandler{}).Run(t.Context(), ticket2, deps2)
+		if err != nil {
+			t.Fatalf("Run (triage): %v", err)
+		}
+		pbApply(t, s, ticket, commit2)
+
+		marker, ok := reviewMarker(t, s, ticket.ID, "review note "+refNoted)
+		if !ok {
+			t.Fatalf("no %q marker", "review note "+refNoted)
+		}
+		if !strings.Contains(marker.Body, reviewNoteNone) {
+			t.Errorf("marker body = %q, want it to contain %q (the later pick cleared the note)", marker.Body, reviewNoteNone)
+		}
+		if strings.Contains(marker.Body, "old") {
+			t.Errorf("marker body = %q, want no trace of the cleared note %q", marker.Body, "old")
 		}
 	})
 }

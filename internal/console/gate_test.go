@@ -94,12 +94,11 @@ func seedScenarioArtifact(t *testing.T, s *store.Store, ticketID int64, runID *i
 	}
 }
 
-// seedPlanReviewArtifact inserts one "planreview" artifact at version 1 (every
-// caller in this file seeds a single-cohort fixture), carrying runID and
-// findings, wrapped exactly as job/planning.go's own planReviewOkCommit
-// stores them (internal/store/schemas/artifacts/planreview.json:
-// {"findings": [...]}).
-func seedPlanReviewArtifact(t *testing.T, s *store.Store, ticketID, runID int64, findings []response.Finding) {
+// seedPlanReviewArtifact inserts one "planreview" artifact at version,
+// carrying runID and findings, wrapped exactly as job/planning.go's own
+// planReviewOkCommit stores them
+// (internal/store/schemas/artifacts/planreview.json: {"findings": [...]}).
+func seedPlanReviewArtifact(t *testing.T, s *store.Store, ticketID, runID int64, version int, findings []response.Finding) {
 	t.Helper()
 	payload, err := json.Marshal(struct {
 		Findings []response.Finding `json:"findings"`
@@ -108,9 +107,9 @@ func seedPlanReviewArtifact(t *testing.T, s *store.Store, ticketID, runID int64,
 		t.Fatalf("marshal planreview findings: %v", err)
 	}
 	if _, err := s.InsertArtifact(t.Context(), store.Artifact{
-		TicketID: ticketID, Type: "planreview", Version: 1, RunID: &runID, Payload: payload,
+		TicketID: ticketID, Type: testArtifactTypePlanreview, Version: version, RunID: &runID, Payload: payload,
 	}); err != nil {
-		t.Fatalf("InsertArtifact(planreview): %v", err)
+		t.Fatalf("InsertArtifact(planreview v%d): %v", version, err)
 	}
 }
 
@@ -246,7 +245,7 @@ func TestGateFindingsTable_FloorMinorShowsBlockerAndMajorOnly(t *testing.T) {
 	ticketID := seedTicket(t, s, "fake#1", "Add a hello endpoint")
 	runID := seedRun(t, s, ticketID)
 	seedPlanArtifact(t, s, ticketID, &runID, 1)
-	seedPlanReviewArtifact(t, s, ticketID, runID, fourSeverityFindings())
+	seedPlanReviewArtifact(t, s, ticketID, runID, 1, fourSeverityFindings())
 	seedGateQuestion(t, s, ticketID)
 
 	srv := newTestServerFloor(t, s, bus.New(), nil, newTestLogHandler(t), response.SeverityMinor)
@@ -274,7 +273,7 @@ func TestGateFindingsTable_FloorNitShowsBlockerMajorAndMinor(t *testing.T) {
 	ticketID := seedTicket(t, s, "fake#1", "Add a hello endpoint")
 	runID := seedRun(t, s, ticketID)
 	seedPlanArtifact(t, s, ticketID, &runID, 1)
-	seedPlanReviewArtifact(t, s, ticketID, runID, fourSeverityFindings())
+	seedPlanReviewArtifact(t, s, ticketID, runID, 1, fourSeverityFindings())
 	seedGateQuestion(t, s, ticketID)
 
 	srv := newTestServerFloor(t, s, bus.New(), nil, newTestLogHandler(t), response.SeverityNit)
@@ -310,7 +309,7 @@ func TestGateFindingsTable_LoopExhaustedShowsFloorFindings(t *testing.T) {
 	ticketID := seedTicket(t, s, "fake#1", "Add a hello endpoint")
 	runID := seedRun(t, s, ticketID)
 	seedPlanArtifact(t, s, ticketID, &runID, 1)
-	seedPlanReviewArtifact(t, s, ticketID, runID, fourSeverityFindings())
+	seedPlanReviewArtifact(t, s, ticketID, runID, 1, fourSeverityFindings())
 	seedGateQuestion(t, s, ticketID)
 	seedUnreadUpdate(t, s, ticketID, "gate cap reached plan v1")
 
@@ -344,7 +343,7 @@ func TestGateFindingsTable_CapMarkerDrivesCappedRegardlessOfCurrentConfig(t *tes
 	ticketID := seedTicket(t, s, "fake#1", "Add a hello endpoint")
 	runID := seedRun(t, s, ticketID)
 	seedPlanArtifact(t, s, ticketID, &runID, 1)
-	seedPlanReviewArtifact(t, s, ticketID, runID, fourSeverityFindings())
+	seedPlanReviewArtifact(t, s, ticketID, runID, 1, fourSeverityFindings())
 	seedGateQuestion(t, s, ticketID)
 	seedUnreadUpdate(t, s, ticketID, "gate cap reached plan v1")
 
