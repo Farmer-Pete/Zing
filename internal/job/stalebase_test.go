@@ -263,6 +263,29 @@ func staleBaseRow(t *testing.T, step string) store.MessageRow {
 	return store.MessageRow{Message: msg}
 }
 
+// TestReviewingTickNotesStaleBase proves reviewingHandler.Run's own shim
+// (task 4) notes a stale base exactly like withStaleBaseNote does when
+// driven directly: an unreachable origin, one reviewing tick through the
+// real handler, then exactly one stale_base event for step reviewing with
+// reason no_origin.
+func TestReviewingTickNotesStaleBase(t *testing.T) {
+	t.Parallel()
+	s, ticket, _ := reviewTicketReady(t)
+	staleBaseBreakOrigin(t, s, ticket.ID)
+	rt := runtime.NewFake(reviewScriptsFS(nil))
+	deps := pbClaim(t, s, rt, ticket.ID)
+
+	ticket, _ = basesyncTick(t, s, deps, ticket, reviewingHandler{}, "reviewing")
+
+	events := staleBaseEventsFor(t, s, ticket.ID, stateReviewing)
+	if len(events) != 1 {
+		t.Fatalf("staleBaseEventsFor(reviewing) = %+v, want exactly one", events)
+	}
+	if got := events[0]; got.Reason != "no_origin" {
+		t.Errorf("reviewing event = %+v, want reason no_origin", got)
+	}
+}
+
 // TestStaleBaseSkip is a table test over staleBaseSkip's pure decision
 // (design shape): the sha and branch validity checks it repeats from the
 // stale_base schema, and the already-noted check over a set of rows.

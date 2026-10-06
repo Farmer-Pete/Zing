@@ -82,7 +82,7 @@ func driveReviewToCapWithFix(t *testing.T, secondFixScript, secondFixCmd string)
 	if err != nil {
 		t.Fatalf("driveReviewToCapWithFix: Run (round 1): %v", err)
 	}
-	if len(commit.Messages) != 2 || !strings.HasPrefix(commit.Messages[1].Body, fixRequestedFindingsPrefix) {
+	if msgs := withoutStaleBase(commit.Messages); len(msgs) != 2 || !strings.HasPrefix(msgs[1].Body, fixRequestedFindingsPrefix) {
 		t.Fatalf("driveReviewToCapWithFix: round 1 commit.Messages = %+v, want [done marker, %q message]", commit.Messages, fixRequestedFindingsPrefix)
 	}
 	pbApply(t, s, ticket, commit)
@@ -99,7 +99,7 @@ func driveReviewToCapWithFix(t *testing.T, secondFixScript, secondFixCmd string)
 	if err != nil {
 		t.Fatalf("driveReviewToCapWithFix: Run (round 2): %v", err)
 	}
-	if len(commit2.Messages) != 2 || !strings.HasPrefix(commit2.Messages[1].Body, fixRequestedFindingsPrefix) {
+	if msgs := withoutStaleBase(commit2.Messages); len(msgs) != 2 || !strings.HasPrefix(msgs[1].Body, fixRequestedFindingsPrefix) {
 		t.Fatalf("driveReviewToCapWithFix: round 2 commit.Messages = %+v, want [done marker, %q message]", commit2.Messages, fixRequestedFindingsPrefix)
 	}
 	pbApply(t, s, ticket, commit2)
