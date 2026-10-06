@@ -29,10 +29,13 @@ const (
 
 // ParkResult is what ParkRuns did: Applied false when the claim fence
 // missed (nothing written); RunIDs the open runs it parked, ascending, nil
-// when the claim had none open.
+// when the claim had none open; FinishedRunIDs the finish rows it
+// terminalized by their own real outcome first (owner decision Q6), in the
+// same order given, for a caller's own logging (r2f21).
 type ParkResult struct {
-	Applied bool
-	RunIDs  []int64
+	Applied        bool
+	RunIDs         []int64
+	FinishedRunIDs []int64
 }
 
 // ParkRuns is InterruptRuns for a Claude session limit (or a hold refusal,
@@ -44,11 +47,11 @@ type ParkResult struct {
 // update is written, and the claim is cleared, all in one transaction
 // fenced on owner and expires exactly like InterruptRuns.
 func (s *Store) ParkRuns(ctx context.Context, ticketID int64, owner string, expires, until time.Time, finish []Run) (ParkResult, error) {
-	runIDs, applied, err := s.interruptClaimedRuns(ctx, ticketID, owner, expires, nil, &until, finish)
+	runIDs, finishedIDs, applied, err := s.interruptClaimedRuns(ctx, ticketID, owner, expires, interruptOpts{Park: &until, Finish: finish})
 	if err != nil {
 		return ParkResult{}, err
 	}
-	return ParkResult{Applied: applied, RunIDs: runIDs}, nil
+	return ParkResult{Applied: applied, RunIDs: runIDs, FinishedRunIDs: finishedIDs}, nil
 }
 
 // ClaudeHold returns the claude_hold_until setting in time.Local; ok is

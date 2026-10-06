@@ -9,9 +9,11 @@
 package dispatch_test
 
 import (
+	"context"
 	"fmt"
 	"io/fs"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"testing/fstest"
 	"time"
@@ -19,7 +21,10 @@ import (
 	"zing/fixtures"
 	"zing/internal/bus"
 	"zing/internal/dispatch"
+	"zing/internal/job"
+	"zing/internal/response"
 	"zing/internal/runtime"
+	"zing/internal/sandbox"
 	"zing/internal/store"
 )
 
@@ -132,12 +137,19 @@ func TestTick_SessionLimitParksThenResumes(t *testing.T) {
 	}
 
 	// Tick 2: the planning handler opens a session and exits 1 with the
-	// session-limit message.
+	// session-limit message. beforeTick2 and afterTick2 bracket the real
+	// time.Now() parseSessionLimit itself reads (runJobWith's Deps.Now is not
+	// wired here): either candidate reset being close enough to run.CappedUntil
+	// is accepted, so the real clock crossing the reset's own wall-clock
+	// instant between the two reads cannot flake this test (r2f5).
+	beforeTick2 := time.Now()
 	if err := d.Tick(t.Context()); err != nil {
 		t.Fatalf("Tick 2 (planning, session limit): %v", err)
 	}
+	afterTick2 := time.Now()
 
-	wantReset := nextSessionLimitReset(t, before, "America/New_York", 12, 20)
+	wantResetBefore := nextSessionLimitReset(t, beforeTick2, "America/New_York", 12, 20)
+	wantResetAfter := nextSessionLimitReset(t, afterTick2, "America/New_York", 12, 20)
 
 	runs := planningRuns(t, s, ticketID)
 	if len(runs) != 1 {
@@ -153,8 +165,16 @@ func TestTick_SessionLimitParksThenResumes(t *testing.T) {
 	if run.CappedUntil == nil {
 		t.Fatal("run.CappedUntil = nil, want the parsed reset")
 	}
-	if diff := run.CappedUntil.Sub(wantReset); diff < -5*time.Second || diff > 5*time.Second {
-		t.Errorf("run.CappedUntil = %v, want close to %v (diff %v)", run.CappedUntil, wantReset, diff)
+	diffBefore := run.CappedUntil.Sub(wantResetBefore)
+	diffAfter := run.CappedUntil.Sub(wantResetAfter)
+	closeEnough := func(d time.Duration) bool { return d >= -5*time.Second && d <= 5*time.Second }
+	if !closeEnough(diffBefore) && !closeEnough(diffAfter) {
+		t.Errorf("run.CappedUntil = %v, want close to %v or %v (diffs %v, %v)",
+			run.CappedUntil, wantResetBefore, wantResetAfter, diffBefore, diffAfter)
+	}
+	wantReset := wantResetBefore
+	if !closeEnough(diffBefore) {
+		wantReset = wantResetAfter
 	}
 
 	parked := getTicket(t, s, ticketID)
@@ -199,7 +219,15 @@ func TestTick_SessionLimitParksThenResumes(t *testing.T) {
 		t.Error(`no "parked until" marker found`)
 	}
 
-	// Tick 3: one minute before the reset, the parked ticket is skipped.
+	// Tick 3: one minute before the reset, the parked ticket is skipped. The
+	// global claude_hold_until setting is pushed into the past first, so
+	// runJobWith's own hold gate cannot be what refuses this ticket: only
+	// ListReadyCandidates' own NOT EXISTS clause, keyed on this run's own
+	// capped_until, can still be skipping it (r2f6). If that clause were
+	// dropped, the ticket would be claimed and a new run reserved here.
+	if setErr := s.SetSettings(t.Context(), "claude_hold_until", "2000-01-01T00:00:00Z"); setErr != nil {
+		t.Fatalf("SetSettings(claude_hold_until): %v", setErr)
+	}
 	clock = run.CappedUntil.Add(-time.Minute)
 	if err = d.Tick(t.Context()); err != nil {
 		t.Fatalf("Tick 3 (held): %v", err)
@@ -402,5 +430,132 @@ func TestTick_SessionLimitUnparseableParks30Minutes(t *testing.T) {
 		if m.Type == testMsgTypeEscalation {
 			t.Fatalf("escalation message found: %q, want none", m.Body)
 		}
+	}
+}
+
+// capAfterN is a runtime.Runtime that returns a parsed "ok" review document
+// for every call but its own Nth, which returns the session-limit error
+// instead: with LensesParallel 1, runLensesParallel's own semaphore
+// serializes every lens's call to Run one at a time (design shape), so
+// counting calls identifies a real call order this test does not otherwise
+// control -- which actual lens wins the race for the Nth call is
+// irrelevant to what TestTick_ReviewRoundCappedLensParksOnlyThatRun checks
+// (r2f3).
+type capAfterN struct {
+	n     int32
+	calls atomic.Int32
+}
+
+func (c *capAfterN) Run(_ context.Context, _ runtime.RunRequest) (runtime.RunResult, error) {
+	call := c.calls.Add(1)
+	sessionID := fmt.Sprintf("cap-after-n-sess-%d", call)
+	if call == c.n {
+		return runtime.RunResult{SessionID: sessionID, ExitCode: 1, FinalMessage: sessionLimitMsg},
+			&runtime.SessionLimitError{ResetAt: time.Now().Add(time.Hour), Parsed: true}
+	}
+	return runtime.RunResult{
+		SessionID: sessionID, ExitCode: 0, AgentTime: time.Second,
+		Response: &response.FindingsResponse{Job: response.JobReview, Outcome: response.OutcomeOk},
+	}, nil
+}
+
+// TestTick_ReviewRoundCappedLensParksOnlyThatRun proves the dispatcher's own
+// wiring of job.CappedFinish(err) into store.ParkRuns (design shape, owner
+// decision Q6, review fix r2f3): with the review lenses forced serial
+// (LensesParallel 1), a lens that completes before another lens hits the
+// session limit keeps its own real "ok" outcome, not interrupted and with
+// no capped_until, while only the capped lens's own run is parked. Were the
+// dispatcher to pass nil instead of job.CappedFinish(err) at this call
+// site, ParkRuns would sweep every open run -- including the lens that
+// already finished -- as interrupted with capped_until set, failing the
+// "finished, not interrupted" assertion below.
+func TestTick_ReviewRoundCappedLensParksOnlyThatRun(t *testing.T) {
+	t.Parallel()
+
+	s := newDispatchTestStore(t)
+	rt := fakeRuntime(t)
+	ticketID := seedQueuedGitBackedTicket(t, s, testFixtureRef)
+	advanceTicket(t, s, rt, ticketID, testStateQueued, testStatePlanning, testStateBuilding)
+
+	beforeMaxID, err := s.MaxRunID(t.Context(), ticketID)
+	if err != nil {
+		t.Fatalf("MaxRunID (before): %v", err)
+	}
+
+	capRT := &capAfterN{n: 3}
+	d := newDispatcher(t, s, newFixtureTracker(t), bus.New(), capRT, nil, nil,
+		dispatch.Config{
+			MaxParallel: 1, Owner: testOwner, LensesParallel: 1,
+			Projects: buildTestProjects(t, s), Sandboxes: sandbox.OffSet(),
+		})
+
+	if err = d.Tick(t.Context()); err != nil {
+		t.Fatalf("Tick (review round, session limit): %v", err)
+	}
+
+	parked := getTicket(t, s, ticketID)
+	if parked.State != testStateReviewing {
+		t.Fatalf("ticket.State = %q, want still reviewing (a capped round writes no commit)", parked.State)
+	}
+	if parked.ClaimOwner != nil {
+		t.Errorf("ticket.ClaimOwner = %v, want nil (parked)", *parked.ClaimOwner)
+	}
+	if parked.WaitingOn != nil {
+		t.Errorf("ticket.WaitingOn = %v, want nil (no owner question)", *parked.WaitingOn)
+	}
+
+	all, err := s.RunsForTicket(t.Context(), ticketID)
+	if err != nil {
+		t.Fatalf("RunsForTicket: %v", err)
+	}
+	var newRuns []store.Run
+	for _, r := range all {
+		if r.ID > beforeMaxID {
+			newRuns = append(newRuns, r)
+		}
+	}
+	if len(newRuns) != 3 {
+		t.Fatalf("new runs = %+v, want 3 (two finished lenses, one capped)", newRuns)
+	}
+
+	var sawCapped, sawFinished int
+	for _, r := range newRuns {
+		switch {
+		case r.Interrupted && r.CappedUntil != nil:
+			sawCapped++
+			if r.Outcome == nil || *r.Outcome != "error" {
+				t.Errorf("capped run.Outcome = %v, want error", r.Outcome)
+			}
+		case !r.Interrupted && r.CappedUntil == nil:
+			sawFinished++
+			if r.Outcome == nil || *r.Outcome != "ok" {
+				t.Errorf("finished run.Outcome = %v, want ok", r.Outcome)
+			}
+		default:
+			t.Errorf("run %+v, want either finished (ok, not interrupted) or capped (interrupted, capped_until set)", r)
+		}
+	}
+	if sawCapped != 1 {
+		t.Errorf("saw %d capped runs, want 1", sawCapped)
+	}
+	if sawFinished != 2 {
+		t.Errorf("saw %d finished runs, want 2 (ParkRuns' Finish, from job.CappedFinish, kept their real outcome)", sawFinished)
+	}
+
+	msgs, err := s.ListMessages(t.Context(), ticketID)
+	if err != nil {
+		t.Fatalf("ListMessages: %v", err)
+	}
+	var sawDiscarded bool
+	for _, m := range msgs {
+		if strings.HasPrefix(m.Body, "review round") {
+			t.Errorf("message %+v starts with %q, want none (a capped round writes no round marker)", m, "review round")
+		}
+		if m.Body == job.CappedRoundDiscardedPrefix+"1: Claude session limit" {
+			sawDiscarded = true
+		}
+	}
+	if !sawDiscarded {
+		t.Errorf(`no %q marker found for round 1 (r2f9)`, job.CappedRoundDiscardedPrefix+"1: Claude session limit")
 	}
 }

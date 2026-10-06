@@ -183,33 +183,39 @@ func (h reviewingHandler) Run(ctx context.Context, t store.Ticket, d Deps) (stor
 // so Store.MarkersWithPrefix returns every one of them, oldest first.
 const reviewRoundMarkerPrefix = "review round "
 
-// parkedRoundMarkerPrefix mirrors store's own cappedParkedPrefix
-// (unexported there, internal/store/park.go): the "parked until " system
-// update ParkRuns writes when a Claude session limit discards a review
-// round (owner decision Q6), read here by prefix the same way
-// reviewRoundMarkerPrefix and markerRetryRequested already are.
-const parkedRoundMarkerPrefix = "parked until "
+// CappedRoundDiscardedPrefix is the dispatcher's own "discarded review round
+// <n>: Claude session limit" marker's shared prefix (dispatch.go's
+// parkCapped, written only when the capped error is a *CappedRoundError,
+// never for a plain capped run of some other job), exported so the
+// dispatcher and this package share the one literal (r2f8, r2f9):
+// deliberately not "review round ", so
+// MarkersWithPrefix(reviewRoundMarkerPrefix) never picks it up alongside
+// the done/failed/void/asked markers enterRound's own regexes expect
+// (r2f9's own predecessor bug: a "parked until " marker from any job's own
+// cap, not just review's, used to trigger this note).
+const CappedRoundDiscardedPrefix = "discarded review round "
 
 // cappedRoundNote reports the note round's own capped-discard rerun (owner
 // decision Q6) adds to its lens prompts when round n is being entered again
 // after a Claude session limit discarded its own earlier attempt: the
-// ticket's newest "parked until" marker is newer than its newest "review
-// round" marker, or no round marker exists at all yet. Empty, with no
-// error, when this round entry is not a capped-discard rerun.
+// ticket's newest "discarded review round" marker (written only for a
+// review round's own cap, r2f9) is newer than its newest "review round"
+// marker, or no round marker exists at all yet. Empty, with no error, when
+// this round entry is not a capped-discard rerun.
 func (h reviewingHandler) cappedRoundNote(ctx context.Context, t store.Ticket, d Deps) (string, error) {
-	parked, err := d.Store.MarkersWithPrefix(ctx, t.ID, parkedRoundMarkerPrefix)
+	discarded, err := d.Store.MarkersWithPrefix(ctx, t.ID, CappedRoundDiscardedPrefix)
 	if err != nil {
-		return "", fmt.Errorf("job: reviewing: parked markers: %w", err)
+		return "", fmt.Errorf("job: reviewing: discarded round markers: %w", err)
 	}
-	if len(parked) == 0 {
+	if len(discarded) == 0 {
 		return "", nil
 	}
 	rounds, err := d.Store.MarkersWithPrefix(ctx, t.ID, reviewRoundMarkerPrefix)
 	if err != nil {
 		return "", fmt.Errorf("job: reviewing: review round markers: %w", err)
 	}
-	newestParked := parked[len(parked)-1]
-	if len(rounds) != 0 && newestParked.ID < rounds[len(rounds)-1].ID {
+	newestDiscarded := discarded[len(discarded)-1]
+	if len(rounds) != 0 && newestDiscarded.ID < rounds[len(rounds)-1].ID {
 		return "", nil
 	}
 	return "the previous review round was discarded because of the Claude session limit", nil
@@ -806,7 +812,7 @@ func (h reviewingHandler) discussRunAndRoute(
 
 	if runErr != nil {
 		switch {
-		case passThroughErr(runErr):
+		case errors.Is(runErr, runtime.ErrCanceled), errors.Is(runErr, ErrConfig), errors.Is(runErr, store.ErrClaimLost), claudeCapped(runErr):
 			return store.HandlerCommit{}, runErr
 		case errors.Is(runErr, ErrBudget):
 			return budgetEscalationCommit(t, d, resolveIDs), nil
@@ -1155,26 +1161,15 @@ func applyAttempts(c *store.HandlerCommit, ticketID int64, attempts []lensAttemp
 	}
 }
 
-// goodAttemptRuns returns the terminal Run rows of every attempt that is
-// not itself capped (CappedRoundError.Finish, owner decision Q6): the same
-// per-attempt rows terminalizeAttempts would build, skipping a capped
-// lens's own run (and its first try, if any) so the dispatcher's park
-// write leaves that run open for its own sweep instead.
-func goodAttemptRuns(attempts []lensAttempt) []store.Run {
-	var runs []store.Run
-	for i := range attempts {
-		a := &attempts[i]
-		if claudeCapped(a.err) {
-			continue
-		}
-		if a.firstTry != nil {
-			runs = append(runs, terminalRuns(a.firstTry.rr, string(response.OutcomeError))...)
-		}
-		if a.rr.Reserved.RunID != 0 {
-			runs = append(runs, terminalRuns(a.rr, a.outcomeString())...)
-		}
-	}
-	return runs
+// cappedOrCanceled reports whether a's attempt should be left open for the
+// dispatcher's own park sweep rather than terminalized by tableCommit's
+// capped-lens row (CappedRoundError.Finish, owner decision Q6): a lens that
+// hit the cap itself, or one runLensesParallel's own roundCtx cancel ended
+// with runtime.ErrCanceled -- that lens did not fail on its own, the cap
+// ended it, so its run record would not stay true as a plain "error"
+// outcome (r2f11).
+func cappedOrCanceled(a lensAttempt) bool {
+	return claudeCapped(a.err) || errors.Is(a.err, runtime.ErrCanceled)
 }
 
 // firstBadAttempt returns the first (lens order) attempt matching pred, in
@@ -1440,9 +1435,11 @@ func (h reviewingHandler) tableCommit(
 	// sweep, and every lens re-runs after the reset (design shape, owner
 	// decision Q3).
 	if at, ok := firstBadAttempt(attempts, func(a lensAttempt) bool { return claudeCapped(a.err) }); ok {
+		finish, _, _ := terminalizeAttempts(slices.DeleteFunc(slices.Clone(attempts), cappedOrCanceled))
 		return store.HandlerCommit{}, &CappedRoundError{
 			Err:    fmt.Errorf("job: reviewing: lens %s: %w", at.lens, at.err),
-			Finish: goodAttemptRuns(attempts),
+			Finish: finish,
+			Round:  n,
 		}
 	}
 

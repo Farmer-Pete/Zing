@@ -1891,13 +1891,62 @@ func TestProjectSections(t *testing.T) {
 	})
 }
 
+// navParkFixtureState is InsertTicket's own required starting state
+// (goconst: a bare "queued" literal here would be this file's third,
+// alongside the "queued" turn-status label TestXxx's own table tests
+// already use twice, for an unrelated concept).
+const navParkFixtureState = "queued"
+
+// navParkRun claims a fresh ticket on testNavProject, reserves one open run
+// on it, and parks it through the real store.ParkRuns, returning the
+// ticket's own id: TestNavComponent_ClaudeHold's own fixture for a ticket
+// whose sidebar row carries a real ParkedUntil, the same write path a
+// genuine Claude session limit uses, rather than a buildNavThreads-only
+// proof (r2f2).
+func navParkRun(t *testing.T, s *store.Store, ref string, until time.Time) int64 {
+	t.Helper()
+	projectID, err := s.EnsureProject(t.Context(), store.Project{
+		Name: "nav-claude-hold", RepoURL: "https://example.invalid/nav-claude-hold.git",
+		LocalPath: t.TempDir(), Tracker: "github",
+	})
+	if err != nil {
+		t.Fatalf("EnsureProject: %v", err)
+	}
+	ticketID, err := s.InsertTicket(t.Context(), store.Ticket{
+		ProjectID: projectID, TrackerRef: ref, Title: "nav claude hold fixture", State: navParkFixtureState,
+	})
+	if err != nil {
+		t.Fatalf("InsertTicket(%s): %v", ref, err)
+	}
+	owner := "nav-park-" + ref
+	expires := time.Now().Add(10 * time.Minute).UTC().Truncate(time.Second)
+	claimed, err := s.Claim(t.Context(), ticketID, owner, expires)
+	if err != nil {
+		t.Fatalf("Claim: %v", err)
+	}
+	if !claimed {
+		t.Fatal("Claim: got false, want true")
+	}
+	if _, err := s.Reserve(t.Context(), ticketID, owner, expires,
+		store.SessionUpsert{Job: "nav-park-fixture", Runtime: "claude"}, store.RunSeed{Model: "test-model"}); err != nil {
+		t.Fatalf("Reserve: %v", err)
+	}
+	if _, err := s.ParkRuns(t.Context(), ticketID, owner, expires, until, nil); err != nil {
+		t.Fatalf("ParkRuns: %v", err)
+	}
+	return ticketID
+}
+
 // TestNavComponent_ClaudeHold proves navComponent's own ClaudeHold read and
 // its own now comparison (review fix r1f1: the previous test only covered
 // buildNavThreads, never navComponent's own call to c.store.ClaudeHold or
 // its own "still in the future" check): rendering #nav shows "claude:
 // capped until" while the stored hold is in the future, and shows neither
 // that line nor a parked badge once the hold (seeded here directly, the
-// same store.ParkRuns a real park would use) has passed.
+// same store.ParkRuns a real park would use) has passed. It also proves the
+// sidebar's own per-ticket parked badge (r2f2, not just buildNavThreads in
+// isolation): a ticket real store.ParkRuns parked with a future reset shows
+// the badge, and one parked with a reset already past does not.
 func TestNavComponent_ClaudeHold(t *testing.T) {
 	t.Parallel()
 	s, err := store.Open(t.Context(), filepath.Join(t.TempDir(), "zing.db"))
@@ -1939,6 +1988,27 @@ func TestNavComponent_ClaudeHold(t *testing.T) {
 	}
 	if gotPast := render(); strings.Contains(gotPast, "claude: capped") {
 		t.Errorf("navComponent with a past hold still shows a claude-hold line; got:\n%s", gotPast)
+	}
+
+	parkedFutureUntil := time.Now().Add(20 * time.Minute)
+	navParkRun(t, s, "nav-parked-future", parkedFutureUntil)
+	gotParkedFuture := render()
+	if !strings.Contains(gotParkedFuture, `class="badge badge-parked"`) {
+		t.Errorf("navComponent with a ticket parked until the future shows no parked badge; got:\n%s", gotParkedFuture)
+	}
+	if !strings.Contains(gotParkedFuture, "parked until "+clockLabel(parkedFutureUntil)) {
+		t.Errorf("navComponent with a ticket parked until the future missing %q; got:\n%s",
+			"parked until "+clockLabel(parkedFutureUntil), gotParkedFuture)
+	}
+
+	// A second ticket parked with a reset already past must not add a
+	// second parked badge: the first ticket's own future park is still
+	// live, so the count must stay 1, not drop to 0 or rise to 2.
+	parkedPastUntil := time.Now().Add(-20 * time.Minute)
+	navParkRun(t, s, "nav-parked-past", parkedPastUntil)
+	gotParkedPast := render()
+	if n := strings.Count(gotParkedPast, `class="badge badge-parked"`); n != 1 {
+		t.Errorf("navComponent parked-badge count = %d, want 1 (only the still-future ticket); got:\n%s", n, gotParkedPast)
 	}
 }
 

@@ -98,7 +98,7 @@ templ threadLink(th NavThread, openTicketID int64) {
 				}
 			</span>
 		} else if th.ParkedUntil != "" {
-			<span class="badge badge-parked">{ fmt.Sprintf("parked until %s", th.ParkedUntil) }</span>
+			<span class="badge badge-parked">parked until { th.ParkedUntil }</span>
 		} else if th.Unread {
 			<span class="badge badge-unread">unread</span>
 		} else {

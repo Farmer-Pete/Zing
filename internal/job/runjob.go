@@ -266,7 +266,7 @@ func runJobWith(
 		recordRunStart(ctx, d, t.ID, rsv.RunID, info)
 	}
 	if cappedPrev != nil {
-		recordCappedResume(ctx, d, t.ID, rsv, cappedPrev.ID, *cappedPrev.CappedUntil)
+		recordCappedResume(ctx, d, t.ID, rsv, *cappedPrev)
 	}
 
 	if sandboxed && hook != nil {

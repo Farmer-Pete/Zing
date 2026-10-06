@@ -16,6 +16,7 @@
 package job
 
 import (
+	"slices"
 	"strings"
 	"testing"
 
@@ -64,11 +65,22 @@ func reviewParkRound(t *testing.T, s *store.Store, ticketID int64, deps Deps, er
 	return res
 }
 
-// TestGoodAttemptRuns proves goodAttemptRuns deterministically, with no
-// runtime concurrency involved (review fix r1f6): a capped attempt's own
-// run is excluded, a good attempt's own run is terminalized by its real
-// outcome, and an attempt that never reserved (no HeldError Reserve call)
-// contributes nothing.
+// goodAttemptRuns is tableCommit's own capped-lens row expression
+// (reviewing.go), reproduced here so this test can assert on it without
+// exporting it from production code: terminalizeAttempts over every attempt
+// but the capped and canceled ones (cappedOrCanceled).
+func goodAttemptRuns(attempts []lensAttempt) []store.Run {
+	runs, _, _ := terminalizeAttempts(slices.DeleteFunc(slices.Clone(attempts), cappedOrCanceled))
+	return runs
+}
+
+// TestGoodAttemptRuns proves cappedOrCanceled's own filter deterministically,
+// with no runtime concurrency involved (review fix r1f6, r2f11): a capped
+// attempt's own run is excluded, a canceled attempt's own run (one
+// runLensesParallel's roundCtx cut off after another lens hit the cap) is
+// excluded too since it did not fail on its own, a good attempt's own run is
+// terminalized by its real outcome, and an attempt that never reserved (no
+// HeldError Reserve call) contributes nothing.
 func TestGoodAttemptRuns(t *testing.T) {
 	t.Parallel()
 
@@ -83,18 +95,24 @@ func TestGoodAttemptRuns(t *testing.T) {
 			Reserved: store.Reserved{RunID: 2, Turn: 0},
 			Res:      runtime.RunResult{Response: &response.FindingsResponse{}},
 		},
+		sessionRecord: freshSessionRecord,
 	}
 	neverReserved := lensAttempt{
 		idx: 2, lens: "quality",
 		err: &HeldError{},
 	}
+	canceled := lensAttempt{
+		idx: 3, lens: "completeness",
+		rr:  runResult{Reserved: store.Reserved{RunID: 4, Turn: 0}},
+		err: runtime.ErrCanceled,
+	}
 
-	runs := goodAttemptRuns([]lensAttempt{capped, good, neverReserved})
+	runs := goodAttemptRuns([]lensAttempt{capped, good, neverReserved, canceled})
 	if len(runs) != 1 {
 		t.Fatalf("goodAttemptRuns = %+v, want exactly one run (the good lens's own)", runs)
 	}
 	if runs[0].ID != 2 {
-		t.Errorf("goodAttemptRuns[0].ID = %d, want 2 (the good lens's run id, not the capped one's)", runs[0].ID)
+		t.Errorf("goodAttemptRuns[0].ID = %d, want 2 (the good lens's run id, not the capped or canceled one's)", runs[0].ID)
 	}
 	if runs[0].Outcome == nil || *runs[0].Outcome != string(response.OutcomeOk) {
 		t.Errorf("goodAttemptRuns[0].Outcome = %v, want %q", runs[0].Outcome, response.OutcomeOk)
@@ -102,11 +120,14 @@ func TestGoodAttemptRuns(t *testing.T) {
 }
 
 // TestCappedRoundNote proves cappedRoundNote's own ordering rule (owner
-// decision Q6, the rerun's own input note): empty with no "parked until"
-// marker at all; non-empty once one exists with no later "review round"
-// marker; empty again once a "review round ... done" marker lands after
-// it, since that round closed normally and the next round entry is not a
-// capped-discard rerun.
+// decision Q6, the rerun's own input note) and its own scope fix (r2f9):
+// empty with no "discarded review round" marker at all; still empty once a
+// "parked until" marker lands for some other job's own cap, since that
+// marker never names a review round; non-empty once a "discarded review
+// round" marker itself lands with no later "review round" marker; empty
+// again once a "review round ... done" marker lands after it, since that
+// round closed normally and the next round entry is not a capped-discard
+// rerun.
 func TestCappedRoundNote(t *testing.T) {
 	t.Parallel()
 	s, ticket, _ := reviewTicketReady(t)
@@ -121,19 +142,37 @@ func TestCappedRoundNote(t *testing.T) {
 		t.Errorf("cappedRoundNote (no markers) = %q, want empty", note)
 	}
 
+	// A "parked until" marker from some other job's own cap (planning,
+	// build, a lone HeldError lens) must not trigger the note: only a
+	// review round's own CappedRoundDiscardedPrefix marker does (r2f9).
 	if _, insertErr := s.InsertMessage(t.Context(), store.Message{
 		TicketID: ticket.ID, Type: msgTypeUpdate, Author: authorSystem,
 		Body: "parked until 12:20pm America/New_York (run 9): Claude session limit",
 	}); insertErr != nil {
-		t.Fatalf("InsertMessage (parked): %v", insertErr)
+		t.Fatalf("InsertMessage (parked, unrelated job): %v", insertErr)
+	}
+
+	noteUnrelated, err := h.cappedRoundNote(t.Context(), ticket, d)
+	if err != nil {
+		t.Fatalf("cappedRoundNote (after unrelated park): %v", err)
+	}
+	if noteUnrelated != "" {
+		t.Errorf("cappedRoundNote (after unrelated park) = %q, want empty (not a review round's own cap)", noteUnrelated)
+	}
+
+	if _, insertErr := s.InsertMessage(t.Context(), store.Message{
+		TicketID: ticket.ID, Type: msgTypeUpdate, Author: authorSystem,
+		Body: CappedRoundDiscardedPrefix + "1: Claude session limit",
+	}); insertErr != nil {
+		t.Fatalf("InsertMessage (discarded round): %v", insertErr)
 	}
 
 	note2, err := h.cappedRoundNote(t.Context(), ticket, d)
 	if err != nil {
-		t.Fatalf("cappedRoundNote (after park): %v", err)
+		t.Fatalf("cappedRoundNote (after discarded round): %v", err)
 	}
 	if note2 != "the previous review round was discarded because of the Claude session limit" {
-		t.Errorf("cappedRoundNote (after park) = %q, want the discard note", note2)
+		t.Errorf("cappedRoundNote (after discarded round) = %q, want the discard note", note2)
 	}
 
 	if _, insertErr := s.InsertMessage(t.Context(), store.Message{
@@ -215,12 +254,17 @@ func TestReviewRound_CappedLensDiscardsRound(t *testing.T) {
 		if !res.Applied {
 			t.Fatalf("attempt %d: ParkRuns: Applied = false, want true", attempt)
 		}
-		if len(res.RunIDs) != 1 {
-			t.Fatalf("attempt %d: ParkRuns.RunIDs = %v, want exactly one (the capped lens's own run)", attempt, res.RunIDs)
+		// At least the capped lens's own run is swept here. A lens
+		// runLensesParallel's own cancel cut off mid-flight (design section
+		// 6.2 step 7, a genuine scheduler race this test does not control)
+		// is excluded from Finish the same way (r2f11), so it is swept here
+		// too, which can make len(res.RunIDs) more than 1.
+		if len(res.RunIDs) < 1 {
+			t.Fatalf("attempt %d: ParkRuns.RunIDs = %v, want at least one (the capped lens's own run)", attempt, res.RunIDs)
 		}
 
 		runs := reviewRunsSince(t, s, ticket.ID, before)
-		var sawCapped, sawGood int
+		var sawCapped int
 		for _, r := range runs {
 			if r.Lens == nil {
 				continue
@@ -232,33 +276,21 @@ func TestReviewRound_CappedLensDiscardsRound(t *testing.T) {
 				}
 				continue
 			}
-			sawGood++
-			// Not "ok" specifically: runLensesParallel's own cancel on the
-			// first bad attempt (design section 6.2 step 7) can also abort
-			// a lens that was still mid-flight when the capped one failed
-			// fast, and Q6 keeps that lens's own real outcome, whatever it
-			// is, rather than forcing it to "ok". The property under test
-			// is that it is never swept as capped.
-			if r.Outcome == nil {
-				t.Errorf("attempt %d: good lens %q run.Outcome = nil, want a real outcome", attempt, *r.Lens)
-			}
-			if r.Interrupted || r.CappedUntil != nil {
-				t.Errorf("attempt %d: good lens %q run %+v, want not interrupted and no capped_until", attempt, *r.Lens, r)
+			// A lens that already finished (isGood, Q6) keeps its own real
+			// outcome and is never swept. A lens the round's own cancel cut
+			// off mid-flight is recorded the same way as the capped one:
+			// interrupted with capped_until set (r2f11), not as a plain
+			// "error" outcome, since the cap ended it, not its own failure.
+			switch {
+			case r.Interrupted && r.CappedUntil != nil:
+			case !r.Interrupted && r.CappedUntil == nil && r.Outcome != nil:
+			default:
+				t.Errorf("attempt %d: lens %q run %+v, want either finished with a real outcome or interrupted with capped_until set", attempt, *r.Lens, r)
 			}
 		}
 		if sawCapped != 1 {
 			t.Errorf("attempt %d: saw %d capped-lens runs since the last attempt, want 1", attempt, sawCapped)
 		}
-		// sawGood is not asserted against a fixed count, or even > 0:
-		// runLensesParallel launches every lens at once and cancels on the
-		// first bad attempt (design section 6.2 step 7, runLensesParallel),
-		// so whether any other lens's own goroutine reaches its own
-		// Reserve call before the capped lens's cancel fires is a genuine
-		// scheduler race, not something this test controls. TestGoodAttemptRuns
-		// (below) proves the Finish-building logic itself deterministically;
-		// this end-to-end test's own always-true property is res.RunIDs
-		// above: exactly the capped lens's own run, whatever else raced.
-		_ = sawGood
 		before, err = s.MaxRunID(t.Context(), ticket.ID)
 		if err != nil {
 			t.Fatalf("attempt %d: MaxRunID: %v", attempt, err)

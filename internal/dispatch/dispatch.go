@@ -1202,7 +1202,8 @@ func (d *Dispatcher) runAndCommit(ctx context.Context, ticket store.Ticket, time
 		// of runtime.ErrCanceled because a capped error is never that: the
 		// run is parked, not left for ExpireClaims to reconcile.
 		if until, capped := job.CappedUntil(err); capped {
-			return d.parkCapped(ctx, ticket, expires, until, job.CappedFinish(err))
+			round, isRound := job.CappedRound(err)
+			return d.parkCapped(ctx, ticket, expires, until, job.CappedFinish(err), round, isRound)
 		}
 		// runtime.ErrCanceled (design D13, section 4.5, 6.8): runCtx's own
 		// deadline expired (ctx itself is still live, or the branch above
@@ -1327,10 +1328,14 @@ func (d *Dispatcher) recordShutdownInterrupt(ctx context.Context, ticket store.T
 // setting when until is later, writes one "parked until" marker when any
 // run was actually swept, and clears the claim, all under a detached,
 // bounded context so a cancelled handler context cannot abort a write that
-// must still land. Like recordShutdownInterrupt, it never returns a
-// non-nil error: a write failure is logged and the claim is left to expire
-// for ExpireClaims to reconcile.
-func (d *Dispatcher) parkCapped(ctx context.Context, ticket store.Ticket, expires, until time.Time, finish []store.Run) error {
+// must still land. When isRound (job.CappedRound, r2f9), one further
+// "discarded review round" marker is written, scoped to review's own
+// capped round alone -- never for a plain capped run of some other job --
+// so reviewingHandler's own cappedRoundNote cannot mistake an unrelated
+// job's park for a discarded review round. Like recordShutdownInterrupt, it
+// never returns a non-nil error: a write failure is logged and the claim is
+// left to expire for ExpireClaims to reconcile.
+func (d *Dispatcher) parkCapped(ctx context.Context, ticket store.Ticket, expires, until time.Time, finish []store.Run, round int, isRound bool) error {
 	postCtx, cancel := postHandlerContext(ctx)
 	defer cancel()
 
@@ -1341,13 +1346,24 @@ func (d *Dispatcher) parkCapped(ctx context.Context, ticket store.Ticket, expire
 		slog.Error("claude session limit park failed", "ticket_id", ticket.ID, "reset_at", resetAt, "err", err)
 		return nil
 	case !res.Applied:
-		slog.Warn("claim already lost", "ticket_id", ticket.ID)
+		slog.Warn("claude session limit park skipped: claim already lost", "ticket_id", ticket.ID, "reset_at", resetAt)
 		return nil
 	case len(res.RunIDs) == 0:
 		slog.Debug("claim released, claude held", "ticket_id", ticket.ID, "reset_at", resetAt)
 	default:
-		slog.Warn("claude session limit park", "ticket_id", ticket.ID, "run_ids", res.RunIDs, "reset_at", resetAt)
+		slog.Warn("claude session limit park", "ticket_id", ticket.ID, "run_ids", res.RunIDs,
+			"finished_run_ids", res.FinishedRunIDs, "reset_at", resetAt)
 	}
+
+	if isRound {
+		body := fmt.Sprintf("%s%d: Claude session limit", job.CappedRoundDiscardedPrefix, round)
+		if _, insErr := d.store.InsertMessage(postCtx, store.Message{
+			TicketID: ticket.ID, Type: msgTypeUpdate, Author: authorSystem, Body: body,
+		}); insErr != nil {
+			slog.Warn("discarded review round marker not written", "ticket_id", ticket.ID, "round", round, "err", insErr)
+		}
+	}
+
 	d.bus.Publish()
 	return nil
 }
