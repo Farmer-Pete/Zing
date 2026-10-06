@@ -51,6 +51,9 @@ import {
 	reduceStreamStatus,
 	staleMarkerText,
 	STREAM_TICK_MS,
+	versionedURL,
+	buildChanged,
+	UPDATED_MARKER_TEXT,
 } from './keyboard.mjs';
 
 // defaultNav is the shell's own data-signals default (templates/shell.templ:
@@ -59,6 +62,11 @@ import {
 // very first keyboard nav (before any zing-nav has fired) agrees with what
 // the page already shows.
 const defaultNav = { view: 'inbox', open: 0, project: 0 };
+
+// pageBuild is the asset version GET / rendered this page with (shell.templ's
+// body data-build). The body is never patched, so it is fixed for the page's
+// life; renderStreamStatus compares it to each frame's #alerts data-build.
+const pageBuild = document.body.dataset.build ?? '';
 
 // isMac decides the platform for the send chord (design section 6.4: "Cmd
 // on mac, Ctrl elsewhere"). userAgentData is preferred where available;
@@ -123,7 +131,7 @@ const state = {
 // action rather than throwing out of the keydown handler.
 async function loadBindings() {
 	try {
-		const resp = await fetch('/static/keys.json');
+		const resp = await fetch(versionedURL('/static/keys.json', pageBuild));
 		if (!resp.ok) {
 			console.error('console.js: GET /static/keys.json', resp.status);
 			return;
@@ -1822,10 +1830,16 @@ function applyStreamEvent(event) {
 // renderStreamStatus mirrors streamStatus.staleSince onto #stream-status (a
 // client-owned node outside #nav/#main/#rail, the #send-result pattern) and
 // onto body.stream-stale, which shell.templ's palette uses to dim
-// nav.templ's "All clear." while the page is stale.
+// nav.templ's "All clear." while the page is stale. The update marker (#59:
+// a redeploy left an open tab running its old cached script against the new
+// server) takes priority over the reconnect text, and it is built only when
+// the link is missing, so the 5000 ms tick never replaces a link the owner
+// is about to click.
 function renderStreamStatus() {
+	const serverBuild = document.getElementById('alerts')?.dataset.build ?? '';
+	const updated = buildChanged(pageBuild, serverBuild);
 	const text = staleMarkerText(streamStatus.staleSince);
-	document.body.classList.toggle('stream-stale', text !== '');
+	document.body.classList.toggle('stream-stale', updated || text !== '');
 	let el = document.getElementById('stream-status');
 	if (!el) {
 		el = document.createElement('div');
@@ -1833,6 +1847,17 @@ function renderStreamStatus() {
 		el.setAttribute('role', 'status');
 		el.setAttribute('aria-live', 'polite');
 		document.body.appendChild(el);
+	}
+	if (updated) {
+		if (el.querySelector('a.stream-reload') === null) {
+			el.textContent = `${UPDATED_MARKER_TEXT} `;
+			const link = document.createElement('a');
+			link.className = 'stream-reload';
+			link.href = '/';
+			link.textContent = 'Reload';
+			el.appendChild(link);
+		}
+		return;
 	}
 	el.textContent = text;
 }

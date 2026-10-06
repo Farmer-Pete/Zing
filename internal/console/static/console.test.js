@@ -64,6 +64,9 @@ import {
 	reconnectDelay,
 	reduceStreamStatus,
 	staleMarkerText,
+	versionedURL,
+	buildChanged,
+	UPDATED_MARKER_TEXT,
 	STREAM_IDLE_MS,
 	PATCH_SUPPRESS_MS,
 	handleKeyEvent,
@@ -1094,6 +1097,23 @@ test('reduceStreamStatus restarts the idle clock on visible', () => {
 test('staleMarkerText formats the stale time', () => {
 	assert.equal(staleMarkerText(null), '');
 	assert.equal(staleMarkerText(new Date(2026, 9, 4, 19, 25).getTime()), 'Reconnecting. Stale since 19:25.');
+});
+
+test('versionedURL: appends ?v= for a known build, else returns the path', () => {
+	assert.equal(versionedURL('/static/keys.json', 'abc123def456'), '/static/keys.json?v=abc123def456');
+	assert.equal(versionedURL('/static/keys.json', ''), '/static/keys.json');
+});
+
+test('buildChanged: true when both builds are known and differ', () => {
+	assert.equal(buildChanged('3f9a1c0b7d21', '9b20e7c4aa10'), true);
+	assert.equal(buildChanged('3f9a1c0b7d21', '3f9a1c0b7d21'), false);
+	assert.equal(UPDATED_MARKER_TEXT, 'Zing was updated.');
+});
+
+test('buildChanged: an unknown build never counts as changed', () => {
+	assert.equal(buildChanged('', '9b20e7c4aa10'), false);
+	assert.equal(buildChanged('3f9a1c0b7d21', ''), false);
+	assert.equal(buildChanged('', ''), false);
 });
 
 // handleKeyEvent / decideKey / notePatchFocus / patchFocus: the whole former

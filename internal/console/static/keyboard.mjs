@@ -1164,3 +1164,33 @@ export function staleMarkerText(staleSince) {
 	const mm = String(d.getMinutes()).padStart(2, '0');
 	return `Reconnecting. Stale since ${hh}:${mm}.`;
 }
+
+/**
+ * versionedURL is path with build as its v query, the URL the server marks
+ * immutable; path unchanged when build is '' (a page from before data-build).
+ * @param {string} path
+ * @param {string} build
+ * @returns {string}
+ */
+export function versionedURL(path, build) {
+	return build === '' ? path : `${path}?v=${encodeURIComponent(build)}`;
+}
+
+// UPDATED_MARKER_TEXT is #stream-status's text, ahead of its Reload link,
+// once the server's build differs from the page's.
+export const UPDATED_MARKER_TEXT = 'Zing was updated.';
+
+/**
+ * buildChanged is true when both builds are known and differ: the page's
+ * scripts are older than the server's. An empty build (a page or server
+ * from before data-build) never counts as changed.
+ * @param {string} pageBuild - body's data-build
+ * @param {string} serverBuild - #alerts' data-build from the latest frame
+ * @returns {boolean}
+ */
+export function buildChanged(pageBuild, serverBuild) {
+	if (pageBuild === '' || serverBuild === '') {
+		return false;
+	}
+	return pageBuild !== serverBuild;
+}
