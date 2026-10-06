@@ -168,8 +168,11 @@ const greetGoLine2 = "greet.go:2"
 
 // twoFindingScript is one lens's own "ok" document carrying two findings at
 // two distinct locations (design section 6.6's own batching tests: two
-// findings of one lens, both discussed, carried in one resume).
-func twoFindingScript(lens, sev1, loc1, text1, fix1, sev2, loc2, text2, fix2 string) string {
+// findings of one lens, both discussed, carried in one resume). Every call
+// site today passes "major" for both severities, but the parameters stay:
+// a caller needing a different severity (to cross or stay under the floor)
+// should not have to fork this helper.
+func twoFindingScript(lens, sev1, loc1, text1, fix1, sev2, loc2, text2, fix2 string) string { //nolint:unparam // see above: kept general on purpose
 	return fmt.Sprintf(`<zing job="review" outcome="ok">
 <finding lens="%s" severity="%s" location="%s">
 <text>%s</text>
@@ -266,11 +269,7 @@ func reviewMarker(t *testing.T, s *store.Store, ticketID int64, prefix string) (
 
 // findingArtifactsByRound returns every stored finding artifact of round,
 // held or not, in Findings' own artifact-id order.
-// findingArtifactsByRound returns round 1's own stored finding artifacts:
-// every test in this file drives round 1 only (re-review, round 2+, is
-// task 12's own work), so this reads that round directly rather than
-// taking a round number no caller varies.
-func findingArtifactsByRound(t *testing.T, s *store.Store, ticketID int64) []response.FindingArtifact {
+func findingArtifactsByRound(t *testing.T, s *store.Store, ticketID int64, round int) []response.FindingArtifact {
 	t.Helper()
 	rows, err := s.Findings(t.Context(), ticketID)
 	if err != nil {
@@ -278,7 +277,7 @@ func findingArtifactsByRound(t *testing.T, s *store.Store, ticketID int64) []res
 	}
 	var out []response.FindingArtifact
 	for i := range rows {
-		if rows[i].Finding.Round == 1 {
+		if rows[i].Finding.Round == round {
 			out = append(out, rows[i].Finding)
 		}
 	}
@@ -599,7 +598,7 @@ func TestRoundBelowFloorRequestsFix(t *testing.T) {
 		t.Errorf("fix request body = %q, want it to quote the finding's own location %s", fixReq.Body, greetGoLine5)
 	}
 
-	findings := findingArtifactsByRound(t, s, ticket.ID)
+	findings := findingArtifactsByRound(t, s, ticket.ID, 1)
 	if len(findings) != 1 {
 		t.Fatalf("round 1 findings = %d, want 1", len(findings))
 	}
@@ -658,7 +657,7 @@ func TestRoundAboveFloorAsks(t *testing.T) {
 		t.Errorf("item text = %q, want it to hold %q", payload.Items[0].Text, findingText)
 	}
 
-	findings := findingArtifactsByRound(t, s, ticket.ID)
+	findings := findingArtifactsByRound(t, s, ticket.ID, 1)
 	if len(findings) != 1 || findings[0].Decision != nil {
 		t.Errorf("findings = %+v, want one undecided finding", findings)
 	}
@@ -1374,7 +1373,7 @@ func TestRoundInvalidLensRetriedKeepsFindings(t *testing.T) {
 		t.Errorf("tests session Resumes = %d, want 0 (the retry does not charge a resume)", sess.Resumes)
 	}
 
-	findings := findingArtifactsByRound(t, s, ticket.ID)
+	findings := findingArtifactsByRound(t, s, ticket.ID, 1)
 	gotLensSet := map[response.Lens]bool{}
 	for _, f := range findings {
 		for _, l := range f.Lenses {
@@ -1952,7 +1951,7 @@ func TestRoundLensQuestionHoldsOthers(t *testing.T) {
 		t.Errorf("asked marker line 3 = %q, want %q", lines[2], wantDone)
 	}
 
-	held := findingArtifactsByRound(t, s, ticket.ID)
+	held := findingArtifactsByRound(t, s, ticket.ID, 1)
 	if len(held) != 6 {
 		t.Fatalf("held findings = %d, want 6", len(held))
 	}
@@ -2125,7 +2124,7 @@ func TestContinueAsksAgainCarriesHeld(t *testing.T) {
 	}
 	pbApply(t, s, ticket, commit)
 
-	heldRound1 := findingArtifactsByRound(t, s, ticket.ID)
+	heldRound1 := findingArtifactsByRound(t, s, ticket.ID, 1)
 	if len(heldRound1) != 6 {
 		t.Fatalf("held findings after round 1 = %d, want 6", len(heldRound1))
 	}
@@ -2152,7 +2151,7 @@ func TestContinueAsksAgainCarriesHeld(t *testing.T) {
 		t.Errorf("re-ask marker line 3 = %q, want the original six lenses carried forward", lines[2])
 	}
 
-	heldRound1After := findingArtifactsByRound(t, s, ticket.ID)
+	heldRound1After := findingArtifactsByRound(t, s, ticket.ID, 1)
 	if len(heldRound1After) != 6 {
 		t.Errorf("held findings after the re-ask = %d, want still 6 (fidelity asking again adds none)", len(heldRound1After))
 	}
@@ -3463,6 +3462,23 @@ const reReviewFixScript = `<zing job="build" outcome="ok">
   <notes></notes>
 </zing>`
 
+// reReviewHelloFixCmd is reReviewFixCmd for hello.txt: a fix run that
+// touches only hello.txt, leaving greet.go unchanged, so the suppression
+// tests (ticket 56) can drive a round 2 whose diff never names greet.go.
+const reReviewHelloFixCmd = "printf '\\nreviewed\\n' >> hello.txt && test -f hello.txt"
+
+// reReviewHelloFixScript is reReviewFixScript for hello.txt, matching
+// reReviewHelloFixCmd's own edit.
+const reReviewHelloFixScript = `<zing job="build" outcome="ok">
+  <claims>
+    <files_changed>
+      <path>hello.txt</path>
+    </files_changed>
+  </claims>
+  <report>Reviewed and touched up hello.txt.</report>
+  <notes></notes>
+</zing>`
+
 // driveReviewFixToLanding drives an already-open fix request (FIXREQ's own
 // "fix requested findings" marker, already applied) through the fix
 // driver's own RUN then CHECK-and-LAND ticks (fix.go's own DriveFix,
@@ -3871,5 +3887,453 @@ func TestReviewCapResumesRetryAccepts(t *testing.T) {
 	}
 	if len(retryCommit.ResolveQuestions) != 1 || retryCommit.ResolveQuestions[0] != qID {
 		t.Errorf("retryCommit.ResolveQuestions = %v, want [%d]", retryCommit.ResolveQuestions, qID)
+	}
+}
+
+// ---- ticket 56: suppress a re-raised finding at a dropped, unchanged location ----
+
+// driveReviewRoundToFixreq drives a ticket from a freshly answered review
+// question (every item either accept or drop, no discuss) through TRIAGE
+// and on into FIXREQ's own fix request: TestReReviewSuppressesDroppedAtUnchangedFile
+// and TestReReviewKeepsDroppedWhenFileChanged both open round 1 the same
+// way, so this carries the two ticks they share.
+func driveReviewRoundToFixreq(t *testing.T, s *store.Store, ticket store.Ticket, rt runtime.Runtime) {
+	t.Helper()
+	ticket1 := pbGetTicket(t, s, ticket.ID)
+	deps1 := pbClaim(t, s, rt, ticket.ID)
+	commit1, err := (reviewingHandler{}).Run(t.Context(), ticket1, deps1) // TRIAGE
+	if err != nil {
+		t.Fatalf("Run (triage): %v", err)
+	}
+	pbApply(t, s, ticket, commit1)
+
+	ticket2 := pbGetTicket(t, s, ticket.ID)
+	deps2 := pbClaim(t, s, rt, ticket.ID)
+	commit2, err := (reviewingHandler{}).Run(t.Context(), ticket2, deps2) // decided round -> FIXREQ
+	if err != nil {
+		t.Fatalf("Run (fixreq): %v", err)
+	}
+	if len(commit2.Messages) != 1 || !strings.HasPrefix(commit2.Messages[0].Body, fixRequestedFindingsPrefix) {
+		t.Fatalf("commit2.Messages = %+v, want one %q message", commit2.Messages, fixRequestedFindingsPrefix)
+	}
+	pbApply(t, s, ticket, commit2)
+}
+
+// TestReReviewSuppressesDroppedAtUnchangedFile proves the ticket 56 code
+// filter end to end: round 1's quality lens reports a major at greet.go:5
+// (unchecked input, dropped by the owner) and a major at hello.txt:1
+// (breaks the build, accepted); the fix lands on hello.txt only, so
+// greet.go never changes. Round 2's quality lens re-reports the same
+// greet.go:5 concern; suppressRepeated removes it before any id is
+// assigned, so round 2 posts no review question, stores no finding row at
+// that location, and the round moves straight on to judging.
+func TestReReviewSuppressesDroppedAtUnchangedFile(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow end-to-end flow; runs in the full suite")
+	}
+	t.Parallel()
+	s, ticket, _ := reviewTicketReady(t)
+	scripts := reviewScriptsFS(map[string]string{
+		reviewScriptKey("quality", 1): twoFindingScript(
+			"quality", "major", greetGoLine5, "unchecked input", "validate it",
+			"major", pbHelloTxt+":1", "breaks the build", "fix the build",
+		),
+	})
+	rt := runtime.NewFake(scripts)
+
+	deps := pbClaim(t, s, rt, ticket.ID)
+	commit, err := (reviewingHandler{}).Run(t.Context(), ticket, deps) // ROUND 1
+	if err != nil {
+		t.Fatalf("Run (round 1): %v", err)
+	}
+	pbApply(t, s, ticket, commit)
+
+	q := newestOpenQuestion(t, s, ticket.ID)
+	var payload response.QuestionPayload
+	if err = json.Unmarshal(q.Payload, &payload); err != nil {
+		t.Fatalf("unmarshal question payload: %v", err)
+	}
+	dropID := itemRefByText(t, payload, "unchecked input")
+	acceptID := itemRefByText(t, payload, "breaks the build")
+	answerReviewItems(t, s, ticket.ID, q.ID, map[string]response.Decision{
+		dropID:   response.DecisionDrop,
+		acceptID: response.DecisionAccept,
+	}, "")
+
+	driveReviewRoundToFixreq(t, s, ticket, rt)
+
+	scripts["build/fix/1.xml"] = &fstest.MapFile{Data: []byte(reReviewHelloFixScript)}
+	driveReviewFixToLanding(t, s, ticket.ID, rt, reReviewHelloFixCmd)
+
+	scripts[reviewRoundScriptKey(2, "quality")] = &fstest.MapFile{
+		Data: []byte(findingScriptAt("quality", "major", greetGoLine5, "unchecked input", "validate it")),
+	}
+	scripts[reviewRoundScriptKey(2, lensFidelity)] = &fstest.MapFile{Data: []byte(reviewOKScript)}
+
+	ticket3 := pbGetTicket(t, s, ticket.ID)
+	deps3 := pbClaim(t, s, rt, ticket.ID)
+	commit3, err := (reviewingHandler{}).Run(t.Context(), ticket3, deps3) // ROUND 2
+	if err != nil {
+		t.Fatalf("Run (round 2): %v", err)
+	}
+	if commit3.Next != stateJudging {
+		t.Fatalf("commit3.Next = %q, want %q (the lone survivor was suppressed)", commit3.Next, stateJudging)
+	}
+	for i := range commit3.Messages {
+		if commit3.Messages[i].Type == msgTypeQuestion {
+			t.Errorf("commit3.Messages[%d].Type = %q, want no question message", i, commit3.Messages[i].Type)
+		}
+	}
+	pbApply(t, s, ticket, commit3)
+
+	round2 := findingArtifactsByRound(t, s, ticket.ID, 2)
+	for _, f := range round2 {
+		if f.Location == greetGoLine5 {
+			t.Errorf("round 2 findings = %+v, want no row at %s", round2, greetGoLine5)
+		}
+	}
+
+	marker, ok := reviewMarker(t, s, ticket.ID, "review round 2 done")
+	if !ok {
+		t.Fatal(`no "review round 2 done" marker`)
+	}
+	if !strings.Contains(marker.Body, "kept 0 dropped 0 merged 0 repeated 1") {
+		t.Errorf("done marker body = %q, want it to report kept 0 dropped 0 merged 0 repeated 1", marker.Body)
+	}
+}
+
+// TestReReviewKeepsDroppedWhenFileChanged is
+// TestReReviewSuppressesDroppedAtUnchangedFile's own companion: round 1
+// drops greet.go:5 and accepts greet.go:2, both quality findings; the fix
+// lands on greet.go itself, so round 2's re-raised greet.go:5 is not
+// suppressed -- ChangedFilesBetween lists greet.go as changed -- and the
+// ticket asks the owner about it again.
+func TestReReviewKeepsDroppedWhenFileChanged(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow end-to-end flow; runs in the full suite")
+	}
+	t.Parallel()
+	s, ticket, _ := reviewTicketReady(t)
+	scripts := reviewScriptsFS(map[string]string{
+		reviewScriptKey("quality", 1): twoFindingScript(
+			"quality", "major", greetGoLine5, "unchecked input", "validate it",
+			"major", greetGoLine2, "second concern", "fix the second",
+		),
+	})
+	rt := runtime.NewFake(scripts)
+
+	deps := pbClaim(t, s, rt, ticket.ID)
+	commit, err := (reviewingHandler{}).Run(t.Context(), ticket, deps) // ROUND 1
+	if err != nil {
+		t.Fatalf("Run (round 1): %v", err)
+	}
+	pbApply(t, s, ticket, commit)
+
+	q := newestOpenQuestion(t, s, ticket.ID)
+	var payload response.QuestionPayload
+	if err = json.Unmarshal(q.Payload, &payload); err != nil {
+		t.Fatalf("unmarshal question payload: %v", err)
+	}
+	dropID := itemRefByText(t, payload, "unchecked input")
+	acceptID := itemRefByText(t, payload, "second concern")
+	answerReviewItems(t, s, ticket.ID, q.ID, map[string]response.Decision{
+		dropID:   response.DecisionDrop,
+		acceptID: response.DecisionAccept,
+	}, "")
+
+	driveReviewRoundToFixreq(t, s, ticket, rt)
+
+	scripts["build/fix/1.xml"] = &fstest.MapFile{Data: []byte(reReviewFixScript)}
+	driveReviewFixToLanding(t, s, ticket.ID, rt, reReviewFixCmd)
+
+	scripts[reviewRoundScriptKey(2, "quality")] = &fstest.MapFile{
+		Data: []byte(findingScriptAt("quality", "major", greetGoLine5, "unchecked input", "validate it")),
+	}
+	scripts[reviewRoundScriptKey(2, lensFidelity)] = &fstest.MapFile{Data: []byte(reviewOKScript)}
+
+	ticket3 := pbGetTicket(t, s, ticket.ID)
+	deps3 := pbClaim(t, s, rt, ticket.ID)
+	commit3, err := (reviewingHandler{}).Run(t.Context(), ticket3, deps3) // ROUND 2
+	if err != nil {
+		t.Fatalf("Run (round 2): %v", err)
+	}
+	if commit3.Waiting == nil || *commit3.Waiting != waitingFlagReview {
+		t.Fatalf("commit3.Waiting = %v, want %q (greet.go changed, so the finding survives)", commit3.Waiting, waitingFlagReview)
+	}
+
+	var qMsg *store.Message
+	for i := range commit3.Messages {
+		if commit3.Messages[i].Type == msgTypeQuestion {
+			qMsg = &commit3.Messages[i]
+		}
+	}
+	if qMsg == nil {
+		t.Fatalf("commit3.Messages = %+v, want one question message", commit3.Messages)
+	}
+	var qPayload response.QuestionPayload
+	if err = json.Unmarshal(qMsg.Payload, &qPayload); err != nil {
+		t.Fatalf("unmarshal round 2 question payload: %v", err)
+	}
+	if len(qPayload.Items) != 1 || !strings.Contains(qPayload.Items[0].Text, "unchecked input") {
+		t.Errorf("round 2 question items = %+v, want exactly one item mentioning %q", qPayload.Items, "unchecked input")
+	}
+	pbApply(t, s, ticket, commit3)
+
+	round2 := findingArtifactsByRound(t, s, ticket.ID, 2)
+	found := false
+	for _, f := range round2 {
+		if f.Location == greetGoLine5 {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("round 2 findings = %+v, want a row at %s", round2, greetGoLine5)
+	}
+
+	marker, ok := reviewMarker(t, s, ticket.ID, "review round 2 done")
+	if !ok {
+		t.Fatal(`no "review round 2 done" marker`)
+	}
+	if !strings.Contains(marker.Body, "repeated 0") {
+		t.Errorf("done marker body = %q, want it to report repeated 0", marker.Body)
+	}
+}
+
+// TestSuppressRepeatedFailsOpenOnUnresolvableSHA proves Q3's own fail-open
+// branch: suppressRepeated runs against the real Orchestrator every
+// integration test in this file already claims through (pbBuildProjects),
+// and a dropped row whose SHA git cannot resolve must block nothing,
+// report zero repeats, and return no error, rather than failing the tick
+// or (wrongly) blocking every location because its own ChangedFilesBetween
+// came back empty. It also proves the warning Q3 requires names the
+// unresolved commit, and that suppressRepeated returns ctx.Err() instead of
+// failing open when the comparison fails because the context is done. Not
+// parallel: it swaps the process-wide default logger to capture the
+// warning.
+func TestSuppressRepeatedFailsOpenOnUnresolvableSHA(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow end-to-end flow; runs in the full suite")
+	}
+	s, ticket, _ := reviewTicketReady(t)
+	rt := runtime.NewFake(reviewScriptsFS(nil))
+	deps := pbClaim(t, s, rt, ticket.ID)
+
+	proj, wt, escalation, err := ensureWorktreeOrEscalate(t.Context(), ticket, deps, func(errText string) store.HandlerCommit {
+		t.Fatalf("ensureWorktreeOrEscalate: onFail: %s", errText)
+		return store.HandlerCommit{}
+	})
+	if err != nil {
+		t.Fatalf("ensureWorktreeOrEscalate: %v", err)
+	}
+	if escalation != nil {
+		t.Fatalf("ensureWorktreeOrEscalate: escalation = %+v, want nil", escalation)
+	}
+
+	sha, err := proj.Orch.HeadSHA(t.Context(), wt)
+	if err != nil {
+		t.Fatalf("HeadSHA: %v", err)
+	}
+
+	const unresolvable = "0000000000000000000000000000000000000000"
+	dropped := []response.FindingArtifact{{ID: findingID1, Location: greetGoLine5, SHA: unresolvable}}
+	merged := []response.FindingArtifact{{ID: findingID1, Severity: response.SeverityMajor, Location: greetGoLine5}}
+
+	var logBuf bytes.Buffer
+	prevDefault := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logBuf, &slog.HandlerOptions{Level: slog.LevelWarn})))
+	t.Cleanup(func() { slog.SetDefault(prevDefault) })
+
+	kept, repeated, err := suppressRepeated(t.Context(), ticket, proj, wt, sha, dropped, merged)
+	if err != nil {
+		t.Fatalf("suppressRepeated: %v", err)
+	}
+	if repeated != 0 {
+		t.Errorf("repeated = %d, want 0 (an unresolvable sha blocks nothing)", repeated)
+	}
+	if len(kept) != 1 || kept[0].ID != findingID1 {
+		t.Errorf("kept = %+v, want the merged row kept", kept)
+	}
+	if got := logBuf.String(); !strings.Contains(got, "review dropped findings not compared") || !strings.Contains(got, "sha="+unresolvable) {
+		t.Errorf("log = %q, want a warning naming sha=%s", got, unresolvable)
+	}
+
+	t.Run("a cancelled context returns ctx.Err() instead of failing open", func(t *testing.T) {
+		cancelCtx, cancel := context.WithCancel(t.Context())
+		cancel()
+		cancelled := []response.FindingArtifact{{ID: findingID1, Location: greetGoLine5, SHA: sha}}
+		kept, _, err := suppressRepeated(cancelCtx, ticket, proj, wt, sha, cancelled, merged)
+		if !errors.Is(err, context.Canceled) {
+			t.Errorf("suppressRepeated error = %v, want context.Canceled", err)
+		}
+		if kept != nil {
+			t.Errorf("kept = %+v, want nil", kept)
+		}
+	})
+}
+
+// TestSuppressRepeatedLogsRepeatedFinding proves each removal is logged at
+// info with ticket_id, the dropped row's own finding_id, and location
+// (ticket 56): the dropped row's own SHA equal to the current sha makes
+// ChangedFilesBetween's own diff empty, so the merged row at the same
+// location is blocked. Not parallel: it swaps the process-wide default
+// logger to capture the line.
+func TestSuppressRepeatedLogsRepeatedFinding(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow end-to-end flow; runs in the full suite")
+	}
+	s, ticket, _ := reviewTicketReady(t)
+	rt := runtime.NewFake(reviewScriptsFS(nil))
+	deps := pbClaim(t, s, rt, ticket.ID)
+
+	proj, wt, escalation, err := ensureWorktreeOrEscalate(t.Context(), ticket, deps, func(errText string) store.HandlerCommit {
+		t.Fatalf("ensureWorktreeOrEscalate: onFail: %s", errText)
+		return store.HandlerCommit{}
+	})
+	if err != nil {
+		t.Fatalf("ensureWorktreeOrEscalate: %v", err)
+	}
+	if escalation != nil {
+		t.Fatalf("ensureWorktreeOrEscalate: escalation = %+v, want nil", escalation)
+	}
+
+	sha, err := proj.Orch.HeadSHA(t.Context(), wt)
+	if err != nil {
+		t.Fatalf("HeadSHA: %v", err)
+	}
+
+	dropped := []response.FindingArtifact{{ID: findingID1, Location: greetGoLine5, SHA: sha}}
+	merged := []response.FindingArtifact{{ID: findingIDRound2, Severity: response.SeverityMajor, Location: greetGoLine5}}
+
+	var logBuf bytes.Buffer
+	prevDefault := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logBuf, &slog.HandlerOptions{Level: slog.LevelInfo})))
+	t.Cleanup(func() { slog.SetDefault(prevDefault) })
+
+	kept, repeated, err := suppressRepeated(t.Context(), ticket, proj, wt, sha, dropped, merged)
+	if err != nil {
+		t.Fatalf("suppressRepeated: %v", err)
+	}
+	if repeated != 1 || len(kept) != 0 {
+		t.Fatalf("suppressRepeated = (%+v, %d), want (none, 1)", kept, repeated)
+	}
+
+	got := logBuf.String()
+	if !strings.Contains(got, "review finding repeats a dropped finding") ||
+		!strings.Contains(got, "finding_id="+findingID1) ||
+		!strings.Contains(got, "location="+greetGoLine5) {
+		t.Errorf("log = %q, want a line naming finding_id=%s location=%s", got, findingID1, greetGoLine5)
+	}
+}
+
+// requestsByLabel returns, in call order, every RunRequest rec has
+// recorded whose Label equals label exactly.
+func requestsByLabel(rec *recordingRuntime, label string) []runtime.RunRequest {
+	rec.mu.Lock()
+	defer rec.mu.Unlock()
+	var out []runtime.RunRequest
+	for i := range rec.reqs {
+		if rec.reqs[i].Label == label {
+			out = append(out, rec.reqs[i])
+		}
+	}
+	return out
+}
+
+// requestsByLabelPrefix is requestsByLabel, matching a Label prefix instead
+// of an exact Label (TestReReviewPromptListsDroppedFindings's own round 1
+// check: "1-" covers every lens the round ran, not just quality).
+func requestsByLabelPrefix(rec *recordingRuntime, prefix string) []runtime.RunRequest {
+	rec.mu.Lock()
+	defer rec.mu.Unlock()
+	var out []runtime.RunRequest
+	for i := range rec.reqs {
+		if strings.HasPrefix(rec.reqs[i].Label, prefix) {
+			out = append(out, rec.reqs[i])
+		}
+	}
+	return out
+}
+
+// TestReReviewPromptListsDroppedFindings proves the ticket 56 prompt input:
+// round 2's own quality lens, the one that re-raises the dropped
+// greet.go:5 concern, receives a "dropped findings" input naming that
+// dropped row by id, location, and text; round 1, which has no dropped
+// row yet (nothing has been dropped before round 1 starts), carries no
+// such input at all.
+func TestReReviewPromptListsDroppedFindings(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow end-to-end flow; runs in the full suite")
+	}
+	t.Parallel()
+	s, ticket, _ := reviewTicketReady(t)
+	scripts := reviewScriptsFS(map[string]string{
+		reviewScriptKey("quality", 1): twoFindingScript(
+			"quality", "major", greetGoLine5, "unchecked input", "validate it",
+			"major", pbHelloTxt+":1", "breaks the build", "fix the build",
+		),
+	})
+	rt := &recordingRuntime{inner: runtime.NewFake(scripts)}
+
+	deps := pbClaim(t, s, rt, ticket.ID)
+	commit, err := (reviewingHandler{}).Run(t.Context(), ticket, deps) // ROUND 1
+	if err != nil {
+		t.Fatalf("Run (round 1): %v", err)
+	}
+	pbApply(t, s, ticket, commit)
+
+	q := newestOpenQuestion(t, s, ticket.ID)
+	var payload response.QuestionPayload
+	if err = json.Unmarshal(q.Payload, &payload); err != nil {
+		t.Fatalf("unmarshal question payload: %v", err)
+	}
+	dropID := itemRefByText(t, payload, "unchecked input")
+	acceptID := itemRefByText(t, payload, "breaks the build")
+	answerReviewItems(t, s, ticket.ID, q.ID, map[string]response.Decision{
+		dropID:   response.DecisionDrop,
+		acceptID: response.DecisionAccept,
+	}, "")
+
+	driveReviewRoundToFixreq(t, s, ticket, rt)
+
+	scripts["build/fix/1.xml"] = &fstest.MapFile{Data: []byte(reReviewHelloFixScript)}
+	driveReviewFixToLanding(t, s, ticket.ID, rt, reReviewHelloFixCmd)
+
+	scripts[reviewRoundScriptKey(2, "quality")] = &fstest.MapFile{
+		Data: []byte(findingScriptAt("quality", "major", greetGoLine5, "unchecked input", "validate it")),
+	}
+	scripts[reviewRoundScriptKey(2, lensFidelity)] = &fstest.MapFile{Data: []byte(reviewOKScript)}
+
+	ticket3 := pbGetTicket(t, s, ticket.ID)
+	deps3 := pbClaim(t, s, rt, ticket.ID)
+	if _, err = (reviewingHandler{}).Run(t.Context(), ticket3, deps3); err != nil { // ROUND 2
+		t.Fatalf("Run (round 2): %v", err)
+	}
+
+	// The job prompt's own fixed text mentions "dropped findings:" (the
+	// prose paragraph added for this ticket) in every request, so only the
+	// rendered input block's own "label:\n" header -- never followed by a
+	// space, the way the prose paragraph's colon is -- tells the two apart.
+	const droppedInputHeader = "dropped findings:\n"
+
+	round1 := requestsByLabelPrefix(rt, "1-")
+	if len(round1) == 0 {
+		t.Fatal("requests labelled 1-*, = 0, want at least one (round 1 ran at least one lens)")
+	}
+	for _, req := range round1 {
+		if strings.Contains(req.Prompt, droppedInputHeader) {
+			t.Errorf("round 1 %q Prompt = %q, want no dropped findings input (nothing dropped yet)", req.Label, req.Prompt)
+		}
+	}
+
+	round2Quality := requestsByLabel(rt, "2-quality")
+	if len(round2Quality) != 1 {
+		t.Fatalf("requests labelled 2-quality = %d, want exactly 1", len(round2Quality))
+	}
+	prompt := round2Quality[0].Prompt
+	if !strings.Contains(prompt, droppedInputHeader) {
+		t.Errorf("round 2 quality Prompt = %q, want it to contain %q", prompt, droppedInputHeader)
+	}
+	if !strings.Contains(prompt, "- "+dropID+" "+greetGoLine5+" [quality] unchecked input") {
+		t.Errorf("round 2 quality Prompt = %q, want a dropped findings line for %s at %s", prompt, dropID, greetGoLine5)
 	}
 }
