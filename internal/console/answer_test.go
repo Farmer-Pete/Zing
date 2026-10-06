@@ -20,8 +20,9 @@ import (
 // views.go's own msgTypeReply and draftMessageState live in package
 // console, unreachable from this file's package console_test.
 const (
-	testMsgTypeReply = "reply"
-	testDraftState   = "draft"
+	testMsgTypeReply  = "reply"
+	testMsgTypeAnswer = "answer"
+	testDraftState    = "draft"
 )
 
 // seedExtraOpenQuestion inserts one more open "question" message directly
@@ -92,7 +93,7 @@ func TestDraft_SucceedsThenConflictsOnAClosedQuestion(t *testing.T) {
 	var found bool
 	for i := range messages {
 		m := &messages[i]
-		if m.Type == "answer" && m.ParentID != nil && *m.ParentID == questionID {
+		if m.Type == testMsgTypeAnswer && m.ParentID != nil && *m.ParentID == questionID {
 			found = true
 			if m.Author != "you" || m.State == nil || *m.State != testDraftState {
 				t.Errorf("draft row = author=%s state=%v, want author=you state=draft", m.Author, m.State)
@@ -201,6 +202,71 @@ func TestDraft_OmittedTextAgainstAQuestionIsMalformed(t *testing.T) {
 			t.Fatalf("status = %d, want 400 (read body: %v)", resp.StatusCode, readErr)
 		}
 		t.Fatalf("status = %d, want 400 (body: %s)", resp.StatusCode, respBody)
+	}
+}
+
+// TestDraft_ItemNoteReachesTheStore proves POST /draft's item mode carries
+// an optional note through to the stored draft (ticket #68, design section
+// 6.7): a ref, decision discuss, and note returns 204, and the draft answer
+// row's payload reads that note back under the ref in its notes map.
+func TestDraft_ItemNoteReachesTheStore(t *testing.T) {
+	t.Parallel()
+	s := newConsoleTestStore(t)
+	ticketID := seedTicket(t, s, "fake#1", "Add a hello endpoint")
+	questionID := seedOpenReviewQuestion(t, s, ticketID)
+
+	srv, _ := newMutationTestServer(t, s, bus.New(), newTestLogHandler(t))
+
+	body := fmt.Sprintf(`{"ticket":%d,"question":%d,"item":{"ref":"a.go","decision":"discuss","note":"needs a second look"}}`,
+		ticketID, questionID)
+	resp := doRequest(t, mutationRequest(t, srv, "/draft", body))
+	_ = resp.Body.Close()
+	if resp.StatusCode != http.StatusNoContent {
+		t.Fatalf("POST /draft status = %d, want 204", resp.StatusCode)
+	}
+
+	messages, err := s.ListMessages(t.Context(), ticketID)
+	if err != nil {
+		t.Fatalf("ListMessages: %v", err)
+	}
+	var found bool
+	for i := range messages {
+		m := &messages[i]
+		if m.Type != testMsgTypeAnswer || m.ParentID == nil || *m.ParentID != questionID {
+			continue
+		}
+		var ap response.AnswerPayload
+		if unmarshalErr := json.Unmarshal(m.Payload, &ap); unmarshalErr != nil {
+			t.Fatalf("json.Unmarshal(draft answer payload): %v", unmarshalErr)
+		}
+		if ap.Items[testItemRefAGo] != response.DecisionDiscuss || ap.Notes[testItemRefAGo] != "needs a second look" {
+			t.Errorf("draft answer payload = items %v notes %v, want a.go discuss with its note", ap.Items, ap.Notes)
+		}
+		found = true
+	}
+	if !found {
+		t.Fatal("no draft answer row found after POST /draft")
+	}
+}
+
+// TestDraft_ItemNoteOverLengthIsRejected proves POST /draft's item note
+// shares Text's 8000-rune cap (ticket #68, design section 6.7): a note of
+// 8001 runes is 400, checked before SaveDraft ever sees it.
+func TestDraft_ItemNoteOverLengthIsRejected(t *testing.T) {
+	t.Parallel()
+	s := newConsoleTestStore(t)
+	ticketID := seedTicket(t, s, "fake#1", "Add a hello endpoint")
+	questionID := seedOpenReviewQuestion(t, s, ticketID)
+
+	srv, _ := newMutationTestServer(t, s, bus.New(), newTestLogHandler(t))
+
+	overLong := strings.Repeat("a", 8001)
+	body := fmt.Sprintf(`{"ticket":%d,"question":%d,"item":{"ref":"a.go","decision":"discuss","note":%q}}`,
+		ticketID, questionID, overLong)
+	resp := doRequest(t, mutationRequest(t, srv, "/draft", body))
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400", resp.StatusCode)
 	}
 }
 

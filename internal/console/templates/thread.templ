@@ -209,8 +209,18 @@ func effectivePickedItems(q *ThreadQuestion) map[string]response.Decision {
 	return q.PickedItems
 }
 
+// effectiveItemNotes mirrors effectivePickedItems for a review question's
+// per-finding notes (ticket #68): the ticket's own in-progress draft notes
+// while still Interactive, or its last sent answer's notes once not.
+func effectiveItemNotes(q *ThreadQuestion) map[string]string {
+	if q.Interactive {
+		return q.DraftNotes
+	}
+	return q.PickedNotes
+}
+
 templ questionGroup(ticketID int64, row ThreadRow) {
-	<details class="q" id={ questionDOMID(row.ID) } data-focus-id={ fmtFocusID("question", row.ID) } data-preserve-attr="open" open?={ row.Question.Interactive }>
+	<details class="q" id={ questionDOMID(row.ID) } data-focus-id={ fmtFocusID("question", row.ID) } data-preserve-attr="open" data-kind={ row.Question.Kind } open?={ row.Question.Interactive }>
 		<summary>
 			<span class="q-key">{ row.Question.Key }</span>
 			<span class="q-title">{ row.Question.Title }</span>
@@ -247,9 +257,9 @@ templ questionGroup(ticketID int64, row ThreadRow) {
 		// picked otherwise -- whatever the question's kind or lifecycle.
 		switch row.Question.Kind {
 			case string(response.QuestionKindPerimeter):
-				@itemRows(ticketID, row.ID, row.Question.Items, itemDecisionsPerimeter, effectivePickedItems(row.Question), row.Question.Interactive)
+				@itemRows(ticketID, row.ID, row.Question.Items, itemDecisionsPerimeter, effectivePickedItems(row.Question), nil, false, row.Question.Interactive)
 			case string(response.QuestionKindReview):
-				@itemRows(ticketID, row.ID, row.Question.Items, itemDecisionsReview, effectivePickedItems(row.Question), row.Question.Interactive)
+				@itemRows(ticketID, row.ID, row.Question.Items, itemDecisionsReview, effectivePickedItems(row.Question), effectiveItemNotes(row.Question), true, row.Question.Interactive)
 			default:
 				@optionChips(ticketID, row.ID, row.Question.Options, effectivePickedOption(row.Question), row.Question.Interactive)
 		}
@@ -473,12 +483,15 @@ var itemDecisionsPerimeter = []response.Decision{
 // (console.effectivePickedItems): the ticket's own in-progress draft
 // answer while interactive is true, or its last sent answer once it is
 // false (bug fix: "options vanish once locked"); a ref absent from it
-// renders no control picked.
-templ itemRows(ticketID, questionID int64, items []ThreadItem, decisions []response.Decision, pickedItems map[string]response.Decision, interactive bool) {
+// renders no control picked. notes and withNotes (ticket #68) are the
+// review kind's own per-finding note box: withNotes is true only for a
+// review question (questionGroup), false for perimeter, which renders no
+// note box or text at all.
+templ itemRows(ticketID, questionID int64, items []ThreadItem, decisions []response.Decision, pickedItems map[string]response.Decision, notes map[string]string, withNotes, interactive bool) {
 	if len(items) > 0 {
 		<div class="items">
 			for _, item := range items {
-				@itemRow(ticketID, questionID, item, decisions, pickedItems[item.Ref], interactive)
+				@itemRow(ticketID, questionID, item, decisions, pickedItems[item.Ref], notes[item.Ref], withNotes, interactive)
 			}
 		</div>
 	}
@@ -551,8 +564,13 @@ func splitItemText(text string) (itemTextParts, bool) {
 // shows picked (bug fix): that decision's button renders "picked" from the
 // start, the same way optionChips' own pickedOption does. A locked control
 // (interactive false) carries no data-draft-*, data-item-ref, data-decision,
-// or data-on:click (bug fix: "options vanish once locked").
-templ itemRow(ticketID, questionID int64, item ThreadItem, decisions []response.Decision, pickedDecision response.Decision, interactive bool) {
+// or data-on:click (bug fix: "options vanish once locked"). withNotes and
+// note (ticket #68) add a review finding's own note box: an input,
+// data-note-ticket, data-note-question, data-item-ref, and an empty note
+// hint, while interactive, or the note's text alone, read-only, once
+// locked and non-empty. withNotes is false for every other item kind,
+// which renders neither.
+templ itemRow(ticketID, questionID int64, item ThreadItem, decisions []response.Decision, pickedDecision response.Decision, note string, withNotes, interactive bool) {
 	<div class="item-row" data-item-ref={ item.Ref }>
 		<span class="item-ref">{ item.Ref }</span>
 		if parts, ok := splitItemText(item.Text); ok {
@@ -573,6 +591,12 @@ templ itemRow(ticketID, questionID int64, item ThreadItem, decisions []response.
 				}
 			}
 		</div>
+		if withNotes && interactive {
+			<input type="text" class="item-note" data-note-ticket={ strconv.FormatInt(ticketID, 10) } data-note-question={ strconv.FormatInt(questionID, 10) } data-item-ref={ item.Ref } value={ note } maxlength="8000" placeholder="Note on this finding"/>
+			<p class="item-note-hint" aria-live="polite"></p>
+		} else if withNotes && note != "" {
+			<span class="item-note-text">{ note }</span>
+		}
 	</div>
 }
 
