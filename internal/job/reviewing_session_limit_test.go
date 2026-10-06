@@ -259,8 +259,22 @@ func TestReviewRound_CappedLensDiscardsRound(t *testing.T) {
 		if roundErr.Round != 1 {
 			t.Errorf("attempt %d: CappedRoundError.Round = %d, want 1", attempt, roundErr.Round)
 		}
-		for _, r := range roundErr.Finish {
+		// terminalRuns (planning.go) never sets store.Run.Lens, so
+		// roundErr.Finish's own rows never carry a Lens either: find the
+		// capped lens's own run id through reviewRunsSince (which reads
+		// back from the store, so it does set Lens) and compare by id
+		// instead, so this check can actually fail on a regression.
+		var cappedRunID int64
+		for _, r := range reviewRunsSince(t, s, ticket.ID, before) {
 			if r.Lens != nil && *r.Lens == cappedLens {
+				cappedRunID = r.ID
+			}
+		}
+		if cappedRunID == 0 {
+			t.Fatalf("attempt %d: capped lens %q run not found since run %d", attempt, cappedLens, before)
+		}
+		for _, r := range roundErr.Finish {
+			if r.ID == cappedRunID {
 				t.Errorf("attempt %d: CappedRoundError.Finish contains the capped lens's own run %+v, want it excluded", attempt, r)
 			}
 		}
