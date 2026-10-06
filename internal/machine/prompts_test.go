@@ -28,12 +28,12 @@ func TestPrompts_MatchThePinnedDesignText(t *testing.T) {
 		{
 			name:   "planning-feature",
 			path:   planningFeaturePromptPath,
-			sha256: "bfd291b0af204468b0a2fb152f8f69ba6e0af7063df83ca43019f0fdd5823886",
+			sha256: "ba5a81b1c4aca45862f02935db3a319edc2681baa2dc7709d79af6c3d5e42350",
 		},
 		{
 			name:   "planning-bug",
 			path:   planningBugPromptPath,
-			sha256: "38aa8ae017c1c54323a7f3dfddd68e4576d48349da925751a13dbd4960df34a4",
+			sha256: "dc2e46bca4ac10034abe296cb3653faad1eeb86eb8fdae562f75afed52f22412",
 		},
 		{
 			name:   "planreview",
@@ -278,6 +278,33 @@ func TestSimplificationLensProposesSplittingOversizedTasks(t *testing.T) {
 	}
 }
 
+// testsLensPureFunctionLine is the bullet prompts/lenses/tests.md adds to
+// its "In a plan" section (#111): plan review flags changed wiring whose
+// decision has no test.
+const testsLensPureFunctionLine = "If a changed handler, a callback, or another call site with no test harness " +
+	"has no test of its decision, that is a major finding, even when the plan tests helpers or other cut points. " +
+	"The fix names the pure function to extract and the test for it."
+
+// TestTestsLensRequiresPureFunctionSeam proves prompts/lenses/tests.md
+// carries the pure-function-seam bullet in its "In a plan" section, before
+// "In code" (#111): deleting or rewording the line would otherwise pass
+// every other test.
+func TestTestsLensRequiresPureFunctionSeam(t *testing.T) {
+	t.Parallel()
+	const path = "prompts/lenses/tests.md"
+	text := unwrapped(t, path)
+	inPlanIdx := strings.Index(text, "In a plan")
+	inCodeIdx := strings.Index(text, "In code")
+	lineIdx := strings.Index(text, testsLensPureFunctionLine)
+	anyMissing := inPlanIdx < 0 || inCodeIdx < 0 || lineIdx < 0
+	if anyMissing {
+		t.Fatalf("%s: In a plan at %d, In code at %d, pure-function line at %d, want all present", path, inPlanIdx, inCodeIdx, lineIdx)
+	}
+	if inPlanIdx >= lineIdx || lineIdx >= inCodeIdx {
+		t.Errorf("%s: want the pure-function line between In a plan and In code, got In a plan=%d, line=%d, In code=%d", path, inPlanIdx, lineIdx, inCodeIdx)
+	}
+}
+
 // TestBuildPromptPlaceholders checks that prompts/build.md carries each of
 // its five placeholders exactly once, so ForBuild's single replacement of
 // each cannot silently miss or double up.
@@ -372,6 +399,24 @@ func TestPlanningPromptsTeachHostKind(t *testing.T) {
 	}
 	if !strings.Contains(unwrapped(t, planningFeaturePromptPath), "behavior, negative, performance, or host") {
 		t.Errorf("%s does not list host as the fourth kind", planningFeaturePromptPath)
+	}
+}
+
+// pureFunctionSeamSentence is what both planning prompts say in their
+// Plan step (#111, #130): a decision inside a handler or callback moves
+// into a pure function the plan tests.
+const pureFunctionSeamSentence = "If behavior lives in an event handler, a UI callback, " +
+	"or other code with no test harness, move the decision into a pure function " +
+	"and test that function; the handler stays a shim of about one line that calls it."
+
+// TestPlanningPromptsRequirePureFunctionSeam proves both planning prompts
+// ask for a pure-function seam behind handler and callback logic (#111).
+func TestPlanningPromptsRequirePureFunctionSeam(t *testing.T) {
+	t.Parallel()
+	for _, path := range []string{planningFeaturePromptPath, planningBugPromptPath} {
+		if !strings.Contains(unwrapped(t, path), pureFunctionSeamSentence) {
+			t.Errorf("%s lacks the pure-function seam sentence", path)
+		}
 	}
 }
 
