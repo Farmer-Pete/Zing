@@ -279,3 +279,34 @@ func TestPlanCapLoops_RetryBackAbandonUnchanged(t *testing.T) {
 		}
 	})
 }
+
+// TestPlanCapLoops_ReplyOnlyResolvesAsRetry proves owner decision Q1: a
+// reply with no chip on the cap_loops loops_exhausted question resolves as
+// Retry, not as the question's own recommended d, since a note is for the
+// planner and the gate cannot act on it.
+func TestPlanCapLoops_ReplyOnlyResolvesAsRetry(t *testing.T) {
+	t.Parallel()
+	s, ticketID, _, q := seedCapLoopsEscalation(t, "Cap loops reply-only resolves as retry.")
+	answerGateQuestion(t, s, ticketID, q.ID, nil, "try splitting the task")
+
+	rec := &recordingRuntime{rt: &scriptedRuntime{t: t, steps: []scriptedStep{questionResult(response.JobPlanning, "cap-reply-only-sess")}}}
+	commit, err := runPlanning(t, s, claim(t, s, rec, ticketID), ticketID)
+	if err != nil {
+		t.Fatalf("planning Run (reply-only): %v", err)
+	}
+	if !strings.Contains(rec.lastReq.Prompt, "still wrong") {
+		t.Errorf("resume prompt does not carry the floor finding:\n%s", rec.lastReq.Prompt)
+	}
+	if !strings.Contains(rec.lastReq.Prompt, "try splitting the task") {
+		t.Errorf("resume prompt does not carry the owner's note:\n%s", rec.lastReq.Prompt)
+	}
+	if commit.Waiting != nil && *commit.Waiting == testWaitingGate {
+		t.Errorf("commit.Waiting = %q, want not gate", *commit.Waiting)
+	}
+	for _, m := range commit.Messages {
+		var qp response.QuestionPayload
+		if json.Unmarshal(m.Payload, &qp) == nil && qp.Kind == response.QuestionKindGate {
+			t.Errorf("commit.Messages carries a gate-kind question, want none")
+		}
+	}
+}

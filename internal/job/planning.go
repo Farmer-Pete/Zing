@@ -2076,6 +2076,14 @@ func (h planningHandler) enterFromEscalationRound(ctx context.Context, t store.T
 	errorText := payload.What + "\n" + payload.Why + "\n" + payload.Tried
 	origin := response.EscalationOrigin(payload.Origin)
 	capLoops := origin == response.EscalationOriginCapLoops && payload.Code == string(response.EscalationCodeLoopsExhausted)
+	// Owner decision Q1: a reply with no chip on the cap_loops question
+	// resolves as Retry even though d is recommended -- a note is for the
+	// planner, and the gate cannot act on it (review's own rule,
+	// postbuild.go's resolvePostBuildEscalation).
+	if capLoops && choice == escalationChoiceAccept && newestChosenOption(round.Answers) == "" {
+		slog.Info("plan review loops_exhausted reply-only answer resolves as retry", "ticket_id", t.ID, "recommended", escalationChoiceAccept)
+		choice = escalationChoiceRetry
+	}
 	notesAndError := []prompt.NamedInput{prompt.Notes(notes), prompt.Error(errorText)}
 
 	var commit store.HandlerCommit
