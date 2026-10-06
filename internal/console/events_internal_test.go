@@ -49,14 +49,34 @@ func TestEventLineFallbacks(t *testing.T) {
 		{"unknown kind", "not_a_kind", "{}", "Unrecognized event not_a_kind."},
 		{"undecodable payload", store.EventKindCheckRerun, "{}", "Unreadable check_rerun event."},
 		{
+			"check_rerun unknown reason", store.EventKindCheckRerun,
+			`{"check":"Hooks and tests","sha":"cccccccccccccccccccccccccccccccccccccccc","run_id":37145043448,"check_run_id":5001,"reason":""}`,
+			"Unreadable check_rerun event.",
+		},
+		{
 			"check_rerun happy path", store.EventKindCheckRerun,
 			`{"check":"Hooks and tests","sha":"cccccccccccccccccccccccccccccccccccccccc","run_id":37145043448,"check_run_id":5001,"reason":"flaky"}`,
 			"Zing re-ran the Hooks and tests check on ccccccc (workflow run 37145043448) because it failed.",
 		},
 		{
+			"check_rerun happy path, infra", store.EventKindCheckRerun,
+			`{"check":"ci","sha":"cccccccccccccccccccccccccccccccccccccccc","run_id":37145043448,"check_run_id":5001,"reason":"infra"}`,
+			"Zing re-ran the ci check on ccccccc (workflow run 37145043448) because it was cancelled or never started.",
+		},
+		{
+			"check_rerun happy path, no_log", store.EventKindCheckRerun,
+			`{"check":"ci","sha":"cccccccccccccccccccccccccccccccccccccccc","run_id":37145043448,"check_run_id":5001,"reason":"no_log"}`,
+			"Zing re-ran the ci check on ccccccc (workflow run 37145043448) because its log could not be read.",
+		},
+		{
 			"check_rerun_passed happy path", store.EventKindCheckRerunPassed,
 			`{"check":"Hooks and tests","sha":"cccccccccccccccccccccccccccccccccccccccc","tests":["TestA"]}`,
 			"Hooks and tests failed once and passed on re-run (likely flaky): TestA.",
+		},
+		{
+			"check_rerun_passed happy path, no tests", store.EventKindCheckRerunPassed,
+			`{"check":"Hooks and tests","sha":"cccccccccccccccccccccccccccccccccccccccc"}`,
+			"Hooks and tests failed once and passed on re-run (likely flaky).",
 		},
 		{
 			"owner_edit plan_task drop happy path", store.EventKindOwnerEdit,

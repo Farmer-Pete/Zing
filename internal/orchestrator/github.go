@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	neturl "net/url"
 	"regexp"
 	"strings"
 	"time"
@@ -701,7 +702,7 @@ func (g *GitHubClient) JobLogTail(ctx context.Context, owner, repo string, jobID
 	client := &http.Client{Timeout: 30 * time.Second}
 	resp, err := client.Do(req)
 	if err != nil {
-		return "", fmt.Errorf("orchestrator: job log tail: fetch: %w", err)
+		return "", fmt.Errorf("orchestrator: job log tail: fetch: %w", redactSignedLogURL(err))
 	}
 	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
@@ -713,6 +714,18 @@ func (g *GitHubClient) JobLogTail(ctx context.Context, owner, repo string, jobID
 		return "", fmt.Errorf("orchestrator: job log tail: %w", err)
 	}
 	return tail, nil
+}
+
+// redactSignedLogURL strips the signed log URL -- query string, signature
+// included -- out of a *url.Error from fetching it, so a transport failure
+// (dial, timeout, TLS) never carries that credential-bearing URL into
+// stored CI text (fix requests, escalations). Any other error passes
+// through unchanged.
+func redactSignedLogURL(err error) error {
+	if ue, ok := errors.AsType[*neturl.Error](err); ok {
+		return fmt.Errorf("%s signed log url: %w", ue.Op, ue.Err)
+	}
+	return err
 }
 
 // logGroupRunPrefix is an Actions "##[group]Run " step header.
@@ -759,6 +772,84 @@ func isFailureLine(line string) bool {
 		return goFileLinePattern.MatchString(line)
 	default:
 		return false
+	}
+}
+
+// failureHits collects tailLog's own failure-line excerpt windows for the
+// current step (see tailLog's doc comment): each hit is kept with up to 3
+// lines of context before and after it, with a "..." line marking a gap
+// between two non-adjacent windows, capped at cap entries in all, keeping
+// the earliest. buf is the running excerpt; recent is the current
+// before-window; afterRemain counts the after-window lines still owed to
+// the most recent hit; lastPos is that hit's own pos (-1 before the first
+// one); pos is the position, within the current step, of the next line
+// add will see.
+type failureHits struct {
+	cap         int
+	buf         []string
+	recent      []string
+	afterRemain int
+	lastPos     int
+	pos         int
+}
+
+// newFailureHits returns a failureHits capped at n-2 entries -- tailLog
+// reserves the other 2 lines of its own n-line budget for the step's
+// header and its last error line.
+func newFailureHits(n int) *failureHits {
+	return &failureHits{cap: max(n-2, 0), lastPos: -1}
+}
+
+// reset clears every hit collected so far, for a new step.
+func (h *failureHits) reset() {
+	h.buf = nil
+	h.recent = nil
+	h.afterRemain = 0
+	h.lastPos = -1
+	h.pos = 0
+}
+
+// add considers one more line of the current step's non-error output.
+// Once buf already holds cap lines, add is a no-op: an earlier hit always
+// outranks a later one. A window that does not fit in what is left of cap
+// is trimmed from the front -- dropping context, then the "..." marker --
+// never from the back, so the hit line itself, always the window's last
+// element, is never the one dropped.
+func (h *failureHits) add(line string) {
+	pos := h.pos
+	h.pos++
+	if len(h.buf) >= h.cap {
+		return
+	}
+	isHit := isFailureLine(line)
+	switch {
+	case h.afterRemain > 0:
+		h.buf = append(h.buf, line)
+		h.afterRemain--
+		h.lastPos = pos
+		h.recent = nil
+		if isHit {
+			h.afterRemain = 3
+		}
+	case isHit:
+		var add []string
+		if h.lastPos >= 0 && pos-h.lastPos-1 > 3 {
+			add = append(add, "...")
+		}
+		add = append(add, h.recent...)
+		add = append(add, line)
+		if remaining := h.cap - len(h.buf); len(add) > remaining {
+			add = add[len(add)-remaining:]
+		}
+		h.buf = append(h.buf, add...)
+		h.recent = nil
+		h.afterRemain = 3
+		h.lastPos = pos
+	default:
+		h.recent = append(h.recent, line)
+		if len(h.recent) > 3 {
+			h.recent = h.recent[1:]
+		}
 	}
 }
 
@@ -811,69 +902,18 @@ func tailLog(r io.Reader, n int) (string, error) {
 	failedStepFound := false
 	var lastErrorLine string
 
-	hitsCap := max(n-2, 0)
-	var hitsBuf, hitsRecent []string
-	hitsAfterRemain := 0
-	hitsLastPos := -1
-	hitsPos := 0
-
-	resetHits := func() {
-		hitsBuf = nil
-		hitsRecent = nil
-		hitsAfterRemain = 0
-		hitsLastPos = -1
-		hitsPos = 0
-	}
-
-	addHit := func(line string) {
-		defer func() { hitsPos++ }()
-		if len(hitsBuf) >= hitsCap {
-			return
-		}
-		isHit := isFailureLine(line)
-		switch {
-		case hitsAfterRemain > 0:
-			hitsBuf = append(hitsBuf, line)
-			hitsAfterRemain--
-			hitsLastPos = hitsPos
-			hitsRecent = nil
-			if isHit {
-				hitsAfterRemain = 3
-			}
-		case isHit:
-			var add []string
-			if hitsLastPos >= 0 && hitsPos-hitsLastPos-1 > 3 {
-				add = append(add, "...")
-			}
-			add = append(add, hitsRecent...)
-			add = append(add, line)
-			if remaining := hitsCap - len(hitsBuf); remaining > 0 {
-				if len(add) > remaining {
-					add = add[:remaining]
-				}
-				hitsBuf = append(hitsBuf, add...)
-			}
-			hitsRecent = nil
-			hitsAfterRemain = 3
-			hitsLastPos = hitsPos
-		default:
-			hitsRecent = append(hitsRecent, line)
-			if len(hitsRecent) > 3 {
-				hitsRecent = hitsRecent[1:]
-			}
-		}
-	}
+	hits := newFailureHits(n)
 
 	joinStep := func() string {
 		return strings.Join(append([]string{header}, body...), "\n")
 	}
 
 	finalStep := func() string {
-		if len(hitsBuf) == 0 {
+		if len(hits.buf) == 0 {
 			return joinStep()
 		}
-		out := append([]string{header}, hitsBuf...)
-		if lastErrorLine != "" && hitsBuf[len(hitsBuf)-1] != lastErrorLine {
+		out := append([]string{header}, hits.buf...)
+		if lastErrorLine != "" && hits.buf[len(hits.buf)-1] != lastErrorLine {
 			out = append(out, lastErrorLine)
 		}
 		return strings.Join(out, "\n")
@@ -903,7 +943,7 @@ func tailLog(r io.Reader, n int) (string, error) {
 				body = nil
 				pending = nil
 				lastErrorLine = ""
-				resetHits()
+				hits.reset()
 			case hasLogPrefix(line, logErrorPrefix):
 				for _, p := range pending {
 					body = pushCapped(body, p, n-1)
@@ -914,7 +954,7 @@ func tailLog(r io.Reader, n int) (string, error) {
 				lastErrorLine = line
 			default:
 				pending = pushCapped(pending, line, n-1)
-				addHit(line)
+				hits.add(line)
 			}
 		}
 		if err != nil {

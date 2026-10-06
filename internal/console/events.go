@@ -62,8 +62,9 @@ func checkRerunLine(payload json.RawMessage) (string, error) {
 	if err := json.Unmarshal(payload, &e); err != nil {
 		return "", fmt.Errorf("decode check_rerun: %w", err)
 	}
-	why, ok := checkRerunWhy[e.Reason]
-	if e.Check == "" || e.SHA == "" || e.RunID == 0 || !ok {
+	why, knownReason := checkRerunWhy[e.Reason]
+	complete := e.Check != "" && e.SHA != "" && e.RunID != 0
+	if !complete || !knownReason {
 		return "", errors.New("decode check_rerun: missing check, sha, run_id, or reason")
 	}
 	return fmt.Sprintf("Zing re-ran the %s check on %s (workflow run %d) because %s.", e.Check, sha7(e.SHA), e.RunID, why), nil

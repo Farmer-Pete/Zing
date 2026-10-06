@@ -124,8 +124,13 @@ type shipGitHub struct {
 
 	// reruns records every RerunJob call's job id, in call order; rerunErr,
 	// when set, fails every call instead (task 2's own job.Checks.RerunJob).
-	reruns   []int64
-	rerunErr error
+	// rerunErrAtCall, when non-zero, limits that failure to the call whose
+	// 1-based number (len(reruns) after recording it) equals it, letting a
+	// multi-check plan's first RerunJob call succeed before a later one
+	// fails.
+	reruns         []int64
+	rerunErr       error
+	rerunErrAtCall int
 
 	// The fields below are respond.go's own configurable reads (M4 task 4):
 	// threads backs ListThreads (nil is "no threads", every pre-task-4 POLL
@@ -304,6 +309,9 @@ func (g *shipGitHub) JobLogTail(ctx context.Context, owner, repo string, jobID i
 
 func (g *shipGitHub) RerunJob(_ context.Context, _, _ string, jobID int64) error {
 	g.reruns = append(g.reruns, jobID)
+	if g.rerunErrAtCall != 0 && len(g.reruns) != g.rerunErrAtCall {
+		return nil
+	}
 	return g.rerunErr
 }
 
@@ -2530,6 +2538,115 @@ func TestPollCIRerunAPIErrorEscalates(t *testing.T) {
 	}
 	if shipHasFixMarker(commit) {
 		t.Errorf("commit.Messages = %+v, want no fix marker", commit.Messages)
+	}
+}
+
+// TestPollCIRerunUnavailableReschedulesWithoutEscalation proves pollRerun's
+// own reschedule row for an unavailable GitHub: no escalation, no
+// check_rerun event (RerunJob never reached GitHub, so nothing to record),
+// just a later poll.
+func TestPollCIRerunUnavailableReschedulesWithoutEscalation(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow end-to-end flow; runs in the full suite")
+	}
+	t.Parallel()
+	s, ticket, gh, tr := shipPublished(t)
+	local := shipHeadSHA(t, s, ticket)
+	gh.runs, gh.required = shipFailedCI()
+	gh.prState = shipMergeReadyPR(local, "PR_node_unavailable")
+	gh.logTail = func(context.Context, string, string, int64, int) (string, error) {
+		return shipFlakyLogText, nil
+	}
+	gh.rerunErr = orchestrator.ErrGitHubUnavailable
+
+	commit, err := shipPollRun(t, s, ticket, gh, tr)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if commit.Escalation != nil {
+		t.Errorf("Escalation = %+v, want none", commit.Escalation)
+	}
+	if events := shipCheckRerunEvents(t, commit); len(events) != 0 {
+		t.Errorf("check_rerun events = %+v, want none", events)
+	}
+	if commit.PollSchedule == nil {
+		t.Fatal("commit.PollSchedule is nil, want a rescheduled poll")
+	}
+}
+
+// TestPollCIRerunRateLimitReschedulesAtResetAt proves pollRerun's own
+// reschedule row for a rate-limited GitHub: the next poll lands at the
+// rate limit's own reset time, at least.
+func TestPollCIRerunRateLimitReschedulesAtResetAt(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow end-to-end flow; runs in the full suite")
+	}
+	t.Parallel()
+	s, ticket, gh, tr := shipPublished(t)
+	local := shipHeadSHA(t, s, ticket)
+	gh.runs, gh.required = shipFailedCI()
+	gh.prState = shipMergeReadyPR(local, "PR_node_rate_limited")
+	gh.logTail = func(context.Context, string, string, int64, int) (string, error) {
+		return shipFlakyLogText, nil
+	}
+	resetAt := time.Now().UTC().Add(time.Hour).Truncate(time.Second)
+	gh.rerunErr = orchestrator.RateLimitedError{ResetAt: resetAt}
+
+	commit, err := shipPollRun(t, s, ticket, gh, tr)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if commit.Escalation != nil {
+		t.Errorf("Escalation = %+v, want none", commit.Escalation)
+	}
+	if commit.PollSchedule == nil {
+		t.Fatal("commit.PollSchedule is nil, want a rescheduled poll")
+	}
+	if commit.PollSchedule.NextAt.Before(resetAt) {
+		t.Errorf("PollSchedule.NextAt = %v, want it at or after %v", commit.PollSchedule.NextAt, resetAt)
+	}
+}
+
+// TestPollCIRerunAPIErrorKeepsEarlierRerunEvents proves pollRerun's own
+// escalation row keeps the check_rerun events of re-runs that already
+// succeeded this tick: with two failed Actions checks, "ci" re-runs first
+// and succeeds, "lint" re-runs second and fails, so the escalation still
+// carries "ci"'s own check_rerun event.
+func TestPollCIRerunAPIErrorKeepsEarlierRerunEvents(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow end-to-end flow; runs in the full suite")
+	}
+	t.Parallel()
+	s, ticket, gh, tr := shipPublished(t)
+	local := shipHeadSHA(t, s, ticket)
+	gh.runs = []orchestrator.CheckRun{
+		shipCIRun(1, 10, 11, ghFailure),
+		{
+			ID: 2, Name: "lint", Status: ghCompleted, Conclusion: ghFailure, AppSlug: ghGitHubActions,
+			DetailsURL: "https://github.com/fixture/fixture/actions/runs/20/job/21",
+		},
+	}
+	gh.required = []orchestrator.RequiredCheck{{Context: "ci"}, {Context: "lint"}}
+	gh.prState = shipMergeReadyPR(local, "PR_node_two_checks")
+	gh.logTail = func(context.Context, string, string, int64, int) (string, error) {
+		return shipFlakyLogText, nil
+	}
+	gh.rerunErr = errors.New("403 Forbidden")
+	gh.rerunErrAtCall = 2
+
+	commit, err := shipPollRun(t, s, ticket, gh, tr)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if commit.Escalation == nil {
+		t.Fatal("want an escalation")
+	}
+	events := shipCheckRerunEvents(t, commit)
+	if len(events) != 1 || events[0].Check != "ci" {
+		t.Fatalf("check_rerun events = %+v, want exactly one, for ci", events)
+	}
+	if len(gh.reruns) != 2 {
+		t.Errorf("reruns = %+v, want exactly two calls", gh.reruns)
 	}
 }
 

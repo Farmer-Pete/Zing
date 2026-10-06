@@ -537,18 +537,6 @@ func triedRunsText(events []priorRerun) string {
 	return "re-ran workflow runs " + strings.Join(ids, ", ")
 }
 
-// priorForCheck returns prior's events for one check name, in prior's own
-// order.
-func priorForCheck(prior []priorRerun, name string) []priorRerun {
-	var out []priorRerun
-	for _, p := range prior {
-		if p.Event.Check == name {
-			out = append(out, p)
-		}
-	}
-	return out
-}
-
 // decideCIRerun applies the per-check rule (design shape, "Per-check
 // rule") to every failed check and aggregates: escalate over rerun over
 // fix over wait.
@@ -569,10 +557,12 @@ func decideCIRerun(now time.Time, sha string, failed []failedCheck, failedStatus
 	for i := range sorted {
 		fc := &sorted[i]
 		name := fc.Run.Name
-		own := priorForCheck(prior, name)
 
 		var infra, used []priorRerun
-		for _, p := range own {
+		for _, p := range prior {
+			if p.Event.Check != name {
+				continue
+			}
 			switch p.Event.Reason {
 			case response.RerunReasonInfra:
 				infra = append(infra, p)
@@ -582,8 +572,8 @@ func decideCIRerun(now time.Time, sha string, failed []failedCheck, failedStatus
 		}
 
 		waiting := false
-		for _, p := range own {
-			if p.Event.CheckRunID == fc.Run.ID && now.Sub(p.At) < rerunAppearWait {
+		for _, p := range prior {
+			if p.Event.Check == name && p.Event.CheckRunID == fc.Run.ID && now.Sub(p.At) < rerunAppearWait {
 				waiting = true
 				break
 			}
@@ -731,7 +721,9 @@ func rerunPassedNotes(ticketID int64, sha string, runs []orchestrator.CheckRun, 
 		}
 		event := newestEvent[name]
 		run, ok := newestRun[name]
-		if !ok || run.ID == event.CheckRunID || run.Status != ghCompleted || !goodConclusions[run.Conclusion] {
+		isNewRun := ok && run.ID != event.CheckRunID
+		passed := run.Status == ghCompleted && goodConclusions[run.Conclusion]
+		if !isNewRun || !passed {
 			continue
 		}
 		msg, err := store.NewEvent(ticketID, store.EventKindCheckRerunPassed, response.CheckRerunPassedEvent{
@@ -740,7 +732,7 @@ func rerunPassedNotes(ticketID int64, sha string, runs []orchestrator.CheckRun, 
 			Tests: event.Tests,
 		})
 		if err != nil {
-			return nil, err
+			return nil, fmt.Errorf("job: shipping: poll: check_rerun_passed event for %s: %w", name, err)
 		}
 		out = append(out, msg)
 	}

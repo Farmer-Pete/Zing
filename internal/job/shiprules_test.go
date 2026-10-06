@@ -819,6 +819,39 @@ func TestRerunPassedNotes(t *testing.T) {
 			reruns:  []response.CheckRerunEvent{infraEvent},
 			wantLen: 0,
 		},
+		{
+			name: "the newest run by id wins even listed before the old one",
+			runs: []orchestrator.CheckRun{
+				{ID: 2, Name: "ci", Status: ghCompleted, Conclusion: ghSuccess},
+				{ID: 1, Name: "ci", Status: ghCompleted, Conclusion: ghFailure},
+			},
+			reruns:  []response.CheckRerunEvent{flakyEvent},
+			wantLen: 1,
+		},
+		{
+			name: "the newest run by id wins even listed after the old one",
+			runs: []orchestrator.CheckRun{
+				{ID: 1, Name: "ci", Status: ghCompleted, Conclusion: ghFailure},
+				{ID: 2, Name: "ci", Status: ghCompleted, Conclusion: ghSuccess},
+			},
+			reruns:  []response.CheckRerunEvent{flakyEvent},
+			wantLen: 1,
+		},
+		{
+			name: "a newer failure beats an older success and gives no note",
+			runs: []orchestrator.CheckRun{
+				{ID: 1, Name: "ci", Status: ghCompleted, Conclusion: ghSuccess},
+				{ID: 2, Name: "ci", Status: ghCompleted, Conclusion: ghFailure},
+			},
+			reruns:  []response.CheckRerunEvent{flakyEvent},
+			wantLen: 0,
+		},
+		{
+			name:    "a no_log re-run with a newer successful run gives a note",
+			runs:    []orchestrator.CheckRun{{ID: 2, Name: "ci", Status: ghCompleted, Conclusion: ghSuccess}},
+			reruns:  []response.CheckRerunEvent{{Check: "ci", SHA: ciSHA, RunID: 10, CheckRunID: 1, Reason: response.RerunReasonNoLog, Tests: []string{testFlakyTestName}}},
+			wantLen: 1,
+		},
 	}
 
 	for _, tc := range cases {
