@@ -1258,3 +1258,34 @@ export function streamStatusView(pageBuild, serverBuild, staleSince) {
 	const text = staleMarkerText(staleSince);
 	return { text, showReload: false, stale: text !== '' };
 }
+
+/**
+ * pickupResultView turns a POST /projects/{id}/pickup response into the
+ * pickup box's one message (console.js's pickupIssue). A refusal shows the
+ * server's own text; a success names the issue and links the new ticket;
+ * a 200 whose body has no positive integer ticket_id still says the
+ * pickup happened, without a link.
+ *
+ * @param {boolean} ok resp.ok
+ * @param {string} bodyText the response body, read with resp.text()
+ * @param {number} n the issue number the owner asked for
+ * @returns {{text: string, linkText: string, ticketID: number}}
+ */
+export function pickupResultView(ok, bodyText, n) {
+	if (!ok) {
+		return { text: bodyText.trim() || 'request failed', linkText: '', ticketID: 0 };
+	}
+	let ticketID = 0;
+	try {
+		const id = JSON.parse(bodyText)?.ticket_id;
+		if (Number.isInteger(id) && id > 0) {
+			ticketID = id;
+		}
+	} catch {
+		// An unreadable 200 body still means the ticket was created.
+	}
+	if (ticketID === 0) {
+		return { text: `Picked up #${n}`, linkText: '', ticketID: 0 };
+	}
+	return { text: `Picked up #${n} as `, linkText: `ticket ${ticketID}`, ticketID };
+}
