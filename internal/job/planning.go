@@ -965,6 +965,18 @@ func readyCommit(ctx context.Context, t store.Ticket, d Deps, rr runResult, resp
 		planVersion = cohort.PlanVersion + 1
 	}
 	slog.Info("artifacts stored", "ticket_id", t.ID, "run_id", rr.Reserved.RunID, "plan_version", planVersion, "scenario_count", len(resp.Scenarios))
+
+	questions, err := disputeQuestionMessages(t.ID, required, resp.Plan.Dispositions)
+	if err != nil {
+		return store.HandlerCommit{}, fmt.Errorf("job: planning: ready: %w", err)
+	}
+	if len(questions) > 0 {
+		c.Messages = questions
+		c.AttachRunToMsgs = true
+		waiting := waitingFlagQuestions
+		c.Waiting = &waiting
+		slog.Info("disputed findings posted", "ticket_id", t.ID, "run_id", rr.Reserved.RunID, "count", len(questions))
+	}
 	return c, nil
 }
 
@@ -2541,6 +2553,59 @@ func checkDispositions(required []response.Finding, ds []response.Disposition, p
 		}
 	}
 	return errs
+}
+
+// disputeOptionKeep and disputeOptionChange are the fixed Keep/Change chip
+// pair a dispute question offers the owner (ticket 72 task 4, owner
+// decision Q4), the same shape as gateQuestionMessage's Approve/Reject
+// pair above.
+const (
+	disputeOptionKeep   = "a"
+	disputeOptionChange = "b"
+)
+
+// disputeQuestionMessages builds one open planning question per disputed
+// disposition in ds, in plan order, each naming the finding it disputes
+// (design section 6.5, ticket 72 task 4). Key is left empty for
+// CommitHandlerResult's own fillQuestionKeyTx to allocate, the same
+// convention questionMessagesFor and gateQuestionMessage use. Recommended
+// is "b" (change the plan), since an above-floor finding stands unless the
+// owner agrees with the planner's reason. required is dispositionsRequired's
+// result for this same ready plan, so byID always has an entry for every
+// disputed finding reaching here: checkDispositions has already rejected
+// any disposition naming an id outside required.
+func disputeQuestionMessages(ticketID int64, required []response.Finding, ds []response.Disposition) ([]store.Message, error) {
+	byID := make(map[string]response.Finding, len(required))
+	for i := range required {
+		byID[required[i].ID] = required[i]
+	}
+	var msgs []store.Message
+	for _, disp := range ds {
+		if disp.Kind != response.DispositionDisputed {
+			continue
+		}
+		f := byID[disp.Finding]
+		payload, err := json.Marshal(response.QuestionPayload{
+			Kind:        response.QuestionKindQuestion,
+			State:       response.QuestionStateOpen,
+			Recommended: disputeOptionChange,
+			Options: []response.Option{
+				{Key: disputeOptionKeep, Text: "Keep the plan: the planner's reason holds"},
+				{Key: disputeOptionChange, Text: "Change the plan: the finding stands"},
+			},
+		})
+		if err != nil {
+			return nil, fmt.Errorf("job: marshal dispute question %s: %w", disp.Finding, err)
+		}
+		body := fmt.Sprintf(
+			"Plan review finding %s is disputed\n\nThe reviewer raised this %s finding at %s:\n\n%s\n\nSuggested fix: %s\n\nThe planner disputes it:\n\n%s",
+			f.ID, f.Severity, f.Location, f.Text, f.Fix, disp.Reason)
+		msgs = append(msgs, store.Message{
+			TicketID: ticketID, Type: msgTypeQuestion, Author: authorZing,
+			State: new(questionStateOpen), Body: body, Payload: payload,
+		})
+	}
+	return msgs, nil
 }
 
 // resolveCapResumesEscalation is section 6.7's cap_resumes retry/back row

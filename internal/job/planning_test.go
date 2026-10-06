@@ -2500,6 +2500,103 @@ func TestPlanningHandler_Ready_FixedDispositionIsStored(t *testing.T) {
 	}
 }
 
+// TestPlanningHandler_Ready_DisputedPostsOneOwnerQuestion proves ticket 72
+// task 4: a ready plan that disputes its one required major is stored (the
+// plan artifact, with its disposition), but posts exactly one owner
+// question naming the finding and the planner's reason, attached to the
+// run, leaving the ticket waiting on "questions" rather than reviewing the
+// disputed plan.
+func TestPlanningHandler_Ready_DisputedPostsOneOwnerQuestion(t *testing.T) {
+	t.Parallel()
+	s := newJobTestStore(t)
+	ticketID := seedFeatureTicketInPlanning(t, s)
+	const objective = "Disputed posts one owner question."
+	planVersion, _ := seedCohort(t, s, ticketID, validPlan(objective), validScenarios(2, "disputed"))
+
+	minor := finding(response.SeverityMinor, "plan/design/shape", "needs a name", "name it")
+	major := finding(response.SeverityMajor, testObjectiveLocation, "wrong goal", "restate it")
+	reviewRT := &scriptedRuntime{t: t, steps: []scriptedStep{readyStep(findingsResponse(minor, major), "disputed-sess-1")}}
+	reviewCommit, err := runPlanning(t, s, claim(t, s, reviewRT, ticketID), ticketID)
+	if err != nil {
+		t.Fatalf("review tick Run: %v", err)
+	}
+	apply(t, s, getTicket(t, s, ticketID), reviewCommit)
+
+	wantMajorID := fmt.Sprintf("p%d-f2", planVersion)
+	const reason = "the objective already says this"
+
+	plan := validPlan(objective)
+	plan.Dispositions = []response.Disposition{{Finding: wantMajorID, Kind: response.DispositionDisputed, Reason: reason}}
+	resp := readyResponse(plan, validClaims(), validScenarios(2, "disputed"))
+	resumeRT := &scriptedRuntime{t: t, steps: []scriptedStep{readyStep(resp, "disputed-resume-sess")}}
+	commit, err := runPlanning(t, s, claim(t, s, resumeRT, ticketID), ticketID)
+	if err != nil {
+		t.Fatalf("resume Run: %v", err)
+	}
+
+	var questions []store.Message
+	for _, m := range commit.Messages {
+		if m.Type == testMsgTypeQuestion {
+			questions = append(questions, m)
+		}
+	}
+	if len(questions) != 1 {
+		t.Fatalf("commit.Messages question count = %d, want exactly 1: %+v", len(questions), commit.Messages)
+	}
+	q := questions[0]
+	if !strings.Contains(q.Body, wantMajorID) || !strings.Contains(q.Body, reason) {
+		t.Errorf("question body = %q, want it to contain %q and %q", q.Body, wantMajorID, reason)
+	}
+	var qp response.QuestionPayload
+	if err = json.Unmarshal(q.Payload, &qp); err != nil {
+		t.Fatalf("unmarshal dispute question payload: %v", err)
+	}
+	if qp.Kind != response.QuestionKindQuestion {
+		t.Errorf("dispute question Kind = %q, want question", qp.Kind)
+	}
+	if qp.Recommended != "b" {
+		t.Errorf("dispute question Recommended = %q, want b", qp.Recommended)
+	}
+	wantOptions := []response.Option{
+		{Key: "a", Text: "Keep the plan: the planner's reason holds"},
+		{Key: "b", Text: "Change the plan: the finding stands"},
+	}
+	if !slices.Equal(qp.Options, wantOptions) {
+		t.Errorf("dispute question Options = %+v, want %+v", qp.Options, wantOptions)
+	}
+	if !commit.AttachRunToMsgs {
+		t.Error("commit.AttachRunToMsgs = false, want true")
+	}
+	if commit.Waiting == nil || *commit.Waiting != testWaitingQuestions {
+		t.Fatalf("commit.Waiting = %v, want questions", commit.Waiting)
+	}
+
+	var planPayload json.RawMessage
+	for _, a := range commit.Artifacts {
+		if a.Type == testArtifactTypePlan {
+			planPayload = a.Payload
+		}
+	}
+	if planPayload == nil {
+		t.Fatalf("commit.Artifacts = %+v, want a stored plan artifact", commit.Artifacts)
+	}
+
+	apply(t, s, getTicket(t, s, ticketID), commit)
+
+	conv, err := s.PlanningConversation(t.Context(), ticketID)
+	if err != nil {
+		t.Fatalf("PlanningConversation: %v", err)
+	}
+	if unsettled := conv.Unsettled(); len(unsettled) != 1 {
+		t.Fatalf("PlanningConversation.Unsettled() = %+v, want exactly 1 thread", unsettled)
+	}
+
+	nextPlanVersion := planVersion + 1
+	if _, ok, err := s.PlanReviewAt(t.Context(), ticketID, nextPlanVersion); err != nil || ok {
+		t.Fatalf("PlanReviewAt(%d) = (_, %v, %v), want no artifact (a disputed plan is never reviewed)", nextPlanVersion, ok, err)
+	}
+}
+
 // TestPlanningHandler_ReviewTick_SameMajorAfterFixedStaysOpen proves ticket
 // 72 task 3: a plan that lists a required major only under risks, rather
 // than fixing it, does not stop the finding from being raised again -- the
