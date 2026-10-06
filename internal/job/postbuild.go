@@ -191,7 +191,7 @@ func resolvePostBuildEscalation(ctx context.Context, t store.Ticket, d Deps, rou
 		commit = abandonCommit(t, d, payload.Code)
 
 	case payload.Amendment != nil && choice == escalationChoiceRetry:
-		commit, err = judgeHandler{}.acceptAmendment(ctx, t, d, resolveIDs, payload)
+		commit, err = judgeHandler{}.acceptAmendment(ctx, t, d, resolveIDs, payload, escMsg.RunID, payload.SessionID)
 
 	case payload.Amendment != nil && choice == escalationChoiceBack:
 		commit, err = judgeHandler{}.retryFreshRound(ctx, t, d, resolveIDs, notes, errorText)

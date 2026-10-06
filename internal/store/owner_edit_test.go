@@ -1051,6 +1051,57 @@ func TestOwnerEditAnswersAmendedEscalation(t *testing.T) {
 		}
 	})
 
+	t.Run("a check unchanged from the judge's own unsafe amendment is refused under kind host", func(t *testing.T) {
+		t.Parallel()
+		s := newTestStore(t)
+		_, ticketID := seedQueuedTicket(t, s, "1")
+		seedSealedScenario(t, s, ticketID) // s1, kind behavior
+
+		unsafeCheck := "go test ./amended\u202e"
+		payload := escalationTestPayload(response.EscalationCodeCannotRun, response.EscalationOriginJudge)
+		payload.Amendment = &response.Amendment{
+			Scenario: "s1", Kind: response.ScenarioKindBehavior,
+			Given: "g2", When: "w2", Then: "t2", Check: unsafeCheck, Reason: amendedReason,
+		}
+		owner, expires := claimForCommit(t, s, ticketID)
+		if _, err := s.CommitHandlerResult(t.Context(), HandlerCommit{
+			TicketID: ticketID, Owner: owner, Expires: expires,
+			Escalation: &EscalationCommit{Body: "cannot_run: amended", Payload: payload},
+		}); err != nil {
+			t.Fatalf("CommitHandlerResult(escalation): %v", err)
+		}
+		open, err := s.QuestionsByState(t.Context(), ticketID, questionStateOpen)
+		if err != nil || len(open) != 1 {
+			t.Fatalf("QuestionsByState(open) = %+v (err %v), want exactly 1", open, err)
+		}
+		qID := open[0].ID
+		before := readScenarioPayload(t, s, ticketID, "s1")
+
+		// The owner only switched the kind select to host; the "Edit it"
+		// box resends every field, so Check still carries the judge's own
+		// unsafe text byte for byte -- never typed by the owner.
+		err = s.OwnerEdit(t.Context(), OwnerEditRequest{
+			TicketID: ticketID, Target: OwnerEditScenario, Ref: "s1", Action: OwnerEditActionEdit,
+			Kind: new("host"), Check: new(unsafeCheck), AnswerQuestion: &qID,
+		})
+		refusal, ok := errors.AsType[*OwnerEditError](err)
+		if !ok {
+			t.Fatalf("OwnerEdit error = %v (%T), want *OwnerEditError", err, err)
+		}
+		if refusal.Code != OwnerEditCodeInvalid {
+			t.Errorf("code = %q, want %q", refusal.Code, OwnerEditCodeInvalid)
+		}
+		if after := readScenarioPayload(t, s, ticketID, "s1"); !bytes.Equal(after, before) {
+			t.Errorf("payload = %s, want unchanged %s", after, before)
+		}
+		if n, countErr := s.CountEvents(t.Context(), ticketID, EventKindOwnerEdit, EventFilter{}); countErr != nil || n != 0 {
+			t.Errorf("owner_edit events = %d (err %v), want 0", n, countErr)
+		}
+		if openAfter, openErr := s.QuestionsByState(t.Context(), ticketID, questionStateOpen); openErr != nil || len(openAfter) != 1 || openAfter[0].ID != qID {
+			t.Errorf("open questions = %+v (err %v), want still exactly [%d]", openAfter, openErr, qID)
+		}
+	})
+
 	t.Run("answer_question is allowed only for a scenario edit", func(t *testing.T) {
 		t.Parallel()
 		s := newTestStore(t)

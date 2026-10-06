@@ -1902,6 +1902,7 @@ func roundRecommendedOption(round store.Round) string {
 		return escalationChoiceBack
 	}
 	if qp.Amendment != nil {
+		slog.Info("amended escalation reply without option, falling back to edit", "ticket_id", q.TicketID, "question_id", q.ID)
 		return escalationChoiceBack
 	}
 	if qp.Recommended == "" {

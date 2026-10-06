@@ -98,6 +98,7 @@ func (c *console) handleOwnerEdit(w http.ResponseWriter, r *http.Request) {
 	// and test under the same local-only boundary.
 	setsSandboxedCommand := body.Check != nil || body.Test != nil || body.Kind != nil
 	if setsSandboxedCommand && !isLoopbackRemote(r.RemoteAddr) {
+		slog.Info("console: owner edit refused", "ticket_id", id, "target", body.Target, "ref", body.Ref, "action", body.Action, "code", "loopback_only")
 		http.Error(w, ownerEditSandboxCmdOnlyReason, http.StatusForbidden)
 		return
 	}

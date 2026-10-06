@@ -12,10 +12,12 @@ package job
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"slices"
 	"strings"
 	"testing"
+	"testing/fstest"
 
 	"zing/internal/response"
 	"zing/internal/runtime"
@@ -372,23 +374,44 @@ func TestJudgeAmendmentAccept(t *testing.T) {
 // scenario at escalation time but no longer resolves (here, an escalation
 // built by hand naming s12, which judgeTicketReady's cohort never had)
 // re-escalates plain cannot_run with the refusal appended to Tried, rather
-// than writing a ScenarioEdit or starting a new round.
+// than writing a ScenarioEdit or starting a new round. The hand-built
+// escalation carries a real run and session id (from a Reserve the test
+// makes directly, the same seam escalation_test.go and postbuild_test.go
+// use), not nil, nil, so this also proves the re-escalation carries them
+// forward (#57, r3f3 review): answering "a" again routes to retryFreshRound
+// exactly as Retry on any other judge-origin cannot_run with a run does,
+// and judge round 2 starts.
 func TestJudgeAmendmentAcceptRefusedAtAccept(t *testing.T) {
 	if testing.Short() {
 		t.Skip("slow end-to-end flow; runs in the full suite")
 	}
 	t.Parallel()
 	s, ticket := judgeTicketReady(t)
-	rt := runtime.NewFake(judgeScriptsFS())
+	scripts := judgeScriptsFS()
+	rt := runtime.NewFake(scripts)
 	deps := pbClaim(t, s, rt, ticket.ID)
 
-	commit := escalationCommit(ticket, deps, nil, nil, string(response.EscalationCodeCannotRun),
+	rsv, err := s.Reserve(t.Context(), ticket.ID, deps.Owner, deps.Expires,
+		store.SessionUpsert{Job: jobJudgeName, Runtime: pbRuntimeClaude}, store.RunSeed{Model: pbModelClaudeX})
+	if err != nil {
+		t.Fatalf("Reserve: %v", err)
+	}
+
+	commit := escalationCommit(ticket, deps, &rsv.RunID, &rsv.SessionID, string(response.EscalationCodeCannotRun),
 		"s12's check cannot run", "testing the accept-time refusal", "",
 		response.EscalationOriginJudge)
 	commit.Escalation.Payload.Amendment = &response.Amendment{
 		Scenario: "s12", Given: "g", When: "w", Then: "th", Check: "true",
 		Reason: "testing the accept-time refusal",
 	}
+	// retryFreshRound (which the second retry below exercises) reads the
+	// newest "judge round " marker to number the next round, so round 1's
+	// own marker has to exist even though this test never drives a real
+	// round 1 turn.
+	commit.Messages = append(commit.Messages, store.Message{
+		TicketID: ticket.ID, Type: msgTypeUpdate, Author: authorSystem,
+		Body: fmt.Sprintf("judge round 1 started sha %s after run %d", strings.Repeat("0", 40), rsv.RunID),
+	})
 	pbApply(t, s, ticket, commit)
 	ticket = pbGetTicket(t, s, ticket.ID)
 
@@ -410,9 +433,12 @@ func TestJudgeAmendmentAcceptRefusedAtAccept(t *testing.T) {
 	if reCommit.Escalation.Payload.Tried != want {
 		t.Errorf("Tried = %q, want %q", reCommit.Escalation.Payload.Tried, want)
 	}
+	if reCommit.Escalation.RunID == nil || *reCommit.Escalation.RunID != rsv.RunID {
+		t.Errorf("reCommit.Escalation.RunID = %v, want %d (carried from the original escalation)", reCommit.Escalation.RunID, rsv.RunID)
+	}
 	ticket = pbGetTicket(t, s, ticket.ID)
 
-	_, qp := judgeOpenQuestionPayload(t, s, ticket.ID)
+	qID2, qp := judgeOpenQuestionPayload(t, s, ticket.ID)
 	judgeAssertPlainOptions(t, qp)
 
 	if events := judgeOwnerEditEvents(t, s, ticket.ID); len(events) != 0 {
@@ -422,8 +448,34 @@ func TestJudgeAmendmentAcceptRefusedAtAccept(t *testing.T) {
 	if err != nil {
 		t.Fatalf("MarkersWithPrefix: %v", err)
 	}
-	if len(markers) != 0 {
-		t.Errorf("judge round markers = %+v, want none (no new round started)", markers)
+	if len(markers) != 1 {
+		t.Errorf("judge round markers = %+v, want exactly the seeded round 1 marker (no new round started)", markers)
+	}
+
+	// Answering "a" again on this plain cannot_run (Retry, since Amendment
+	// is now nil) must route through resolvePostBuildEscalation's own
+	// "origin judge, escMsg.RunID != nil" case (retryFreshRound), which
+	// writes the "judge round 2 started" marker in the very same commit as
+	// its first turn, rather than the no-run case's marker-only
+	// retryMarkerCommit -- because this escalation carries the original
+	// run and session (#57, r3f3 review). Round 2's own label ("2", RUN's
+	// own Label: strconv.Itoa(n)) gets a script of its own so that first
+	// turn has something to read.
+	scripts["judge/2/1.xml"] = &fstest.MapFile{Data: []byte(judgeAmendmentUnknownScenarioScript)}
+	pbAnswerEscalation(t, s, ticket.ID, qID2, "a")
+	deps3 := pbClaim(t, s, rt, ticket.ID)
+	retryCommit, handled2 := pbRunPrelude(t, s, deps3, ticket.ID)
+	if !handled2 {
+		t.Fatal("handled = false, want true (second retry)")
+	}
+	foundStart := false
+	for _, m := range retryCommit.Messages {
+		if strings.HasPrefix(m.Body, "judge round 2 started sha ") {
+			foundStart = true
+		}
+	}
+	if !foundStart {
+		t.Errorf("retryCommit.Messages = %+v, want one starting %q", retryCommit.Messages, "judge round 2 started sha ")
 	}
 }
 

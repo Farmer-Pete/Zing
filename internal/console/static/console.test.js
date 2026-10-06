@@ -515,10 +515,8 @@ test('buildItemDraftBody: reads ticket, question, item ref, and decision off the
 // (console.js's ownerEditSubmit, #41, #57 Q3) -- a select counts as changed
 // against its own data-initial, not a browser-native default, and a box
 // answering an amended escalation (a non-empty answerQuestion) sends every
-// field whether changed or not. ownerEditSubmit itself appends
-// answer_question as Number(box.dataset.answerQuestion) alongside this
-// function's result; that one line is DOM glue console.js's own header
-// comment already excludes from Node coverage.
+// field whether changed or not, plus answer_question as
+// Number(answerQuestion).
 
 test('ownerEditFieldEntries: an unchanged select against its data-initial sends no kind', () => {
 	const fields = [
@@ -528,7 +526,7 @@ test('ownerEditFieldEntries: an unchanged select against its data-initial sends 
 	assert.deepEqual(ownerEditFieldEntries(fields, undefined), { then: 'a new then' });
 });
 
-test('ownerEditFieldEntries: a box answering a question sends every field whether changed or not', () => {
+test('ownerEditFieldEntries: a box answering a question sends every field whether changed or not, plus answer_question as a number', () => {
 	const fields = [
 		{ name: 'given', kind: 'text', value: 'g', defaultValue: 'g' },
 		{ name: 'when', kind: 'text', value: 'w', defaultValue: 'w' },
@@ -536,9 +534,11 @@ test('ownerEditFieldEntries: a box answering a question sends every field whethe
 		{ name: 'check', kind: 'text', value: 'c', defaultValue: 'c' },
 		{ name: 'kind', kind: 'select', value: 'behavior', initial: 'behavior' },
 	];
-	assert.deepEqual(ownerEditFieldEntries(fields, '42'), {
-		given: 'g', when: 'w', then: 't', check: 'c', kind: 'behavior',
+	const got = ownerEditFieldEntries(fields, '42');
+	assert.deepEqual(got, {
+		given: 'g', when: 'w', then: 't', check: 'c', kind: 'behavior', answer_question: 42,
 	});
+	assert.equal(typeof got.answer_question, 'number');
 });
 
 // describeAction / ACTION_LABELS: the "?" help overlay's copy for a raw

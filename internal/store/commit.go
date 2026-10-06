@@ -494,7 +494,7 @@ func (s *Store) CommitHandlerResult(ctx context.Context, c HandlerCommit) (bool,
 			return false, fmt.Errorf("commit handler result: scenario edit: %w", shapeErr)
 		}
 		var ev response.OwnerEditEvent
-		if ev, err = s.editScenarioTx(ctx, tx, req, false); err != nil {
+		if ev, err = s.editScenarioTx(ctx, tx, req, false, nil); err != nil {
 			return false, fmt.Errorf("commit handler result: scenario edit: %w", err)
 		}
 		ev.Reason = se.Reason

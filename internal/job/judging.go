@@ -1923,8 +1923,11 @@ func (h judgeHandler) retryFreshRound(ctx context.Context, t store.Ticket, d Dep
 // runs again here, against the ticket's current sealed cohort, because the
 // rules or the scenario can have changed between the escalation and this
 // answer; a refusal here re-escalates plain cannot_run exactly as a refusal
-// at judgeErrorCommit's own first attempt does.
-func (h judgeHandler) acceptAmendment(ctx context.Context, t store.Ticket, d Deps, resolveIDs []int64, payload response.EscalationPayload) (store.HandlerCommit, error) {
+// at judgeErrorCommit's own first attempt does, carrying the same runID and
+// sessionID the original escalation carried, so a later Retry on it takes
+// the same origin-judge-with-a-run path (retryFreshRound) that Retry on the
+// escalation it replaces would have taken (#57, r3f3 review).
+func (h judgeHandler) acceptAmendment(ctx context.Context, t store.Ticket, d Deps, resolveIDs []int64, payload response.EscalationPayload, runID, sessionID *int64) (store.HandlerCommit, error) {
 	scenarios, err := judgeScenariosFor(ctx, t, d)
 	if err != nil {
 		return store.HandlerCommit{}, err
@@ -1934,14 +1937,12 @@ func (h judgeHandler) acceptAmendment(ctx context.Context, t store.Ticket, d Dep
 		slog.Warn("judge amendment refused at accept", "ticket_id", t.ID, "scenario_id", payload.Amendment.Scenario, "question_ids", resolveIDs, "refusal", refusal)
 		tried := appendTried(payload.Tried, judgeAmendmentDroppedPrefix+refusal)
 		code := string(response.EscalationCodeCannotRun)
-		// No run caused this re-escalation (the owner's own answer did), so
-		// session_id and run_id are both nil, the same shape
-		// judgeLoopsExhausted's own re-escalation gives this file's
-		// "escalation written" log (design section 11): every escalation
-		// this file writes logs that line once, and acceptAmendment's own
-		// escalationCommit call below would otherwise be the one exception.
-		slog.Warn("escalation written", "ticket_id", t.ID, "session_id", nil, "run_id", nil, "code", code, "origin", string(response.EscalationOriginJudge))
-		c := escalationCommit(t, d, nil, nil, code, payload.What, payload.Why, tried, response.EscalationOriginJudge)
+		// judgeEscalation's own generic "escalation written" Warn (design
+		// section 11) does not fire for an escalation built directly
+		// through escalationCommit the way this one is, so acceptAmendment
+		// writes it itself.
+		slog.Warn("escalation written", "ticket_id", t.ID, "session_id", int64OrZero(sessionID), "run_id", int64OrZero(runID), "code", code, "origin", string(response.EscalationOriginJudge))
+		c := escalationCommit(t, d, runID, sessionID, code, payload.What, payload.Why, tried, response.EscalationOriginJudge)
 		c.ResolveQuestions = resolveIDs
 		return c, nil
 	}

@@ -270,10 +270,15 @@ func (s *Store) OwnerEdit(ctx context.Context, req OwnerEditRequest) error {
 	}
 	defer rollback(tx)
 
+	var amendmentCheck *string
+	if req.Target == OwnerEditScenario && req.AnswerQuestion != nil {
+		amendmentCheck = s.amendmentCheckForAnswerTx(ctx, tx, req.Ref, *req.AnswerQuestion)
+	}
+
 	var ev response.OwnerEditEvent
 	switch req.Target {
 	case OwnerEditScenario:
-		ev, err = s.editScenarioTx(ctx, tx, req, true)
+		ev, err = s.editScenarioTx(ctx, tx, req, true, amendmentCheck)
 	case OwnerEditPlanTask:
 		ev, err = s.editPlanTaskTx(ctx, tx, req)
 	case OwnerEditTicketBody:
@@ -299,6 +304,30 @@ func (s *Store) OwnerEdit(ctx context.Context, req OwnerEditRequest) error {
 
 	slog.InfoContext(ctx, "owner edit applied", "ticket_id", req.TicketID, "target", req.Target, "ref", req.Ref, "action", req.Action, "answer_question", answered)
 	return nil
+}
+
+// amendmentCheckForAnswerTx returns questionID's amendment's check text
+// when it names an open question amending ref, or nil otherwise (a missing
+// or mismatched question, a non-question message, or unparseable payload
+// all return nil): editScenarioTx's own host-check exemption is the only
+// reader, and answerAmendedEscalationTx below refuses the whole edit on
+// the very same mismatches, so a nil here changes nothing but which text
+// counts as "owner-typed".
+func (s *Store) amendmentCheckForAnswerTx(ctx context.Context, tx *sql.Tx, ref string, questionID int64) *string {
+	row := tx.QueryRowContext(ctx, `SELECT `+messageColumns+` FROM messages WHERE id = ?`, questionID)
+	q, err := scanMessage(row)
+	if err != nil || q.Type != msgTypeQuestion {
+		return nil
+	}
+	var payload response.QuestionPayload
+	if err := json.Unmarshal(q.Payload, &payload); err != nil {
+		return nil
+	}
+	if payload.Amendment == nil || payload.Amendment.Scenario != ref {
+		return nil
+	}
+	check := payload.Amendment.Check
+	return &check
 }
 
 // answerAmendedEscalationTx answers option b ("Edit it") on questionID in
@@ -366,8 +395,13 @@ func (s *Store) answerAmendedEscalationTx(ctx context.Context, tx *sql.Tx, ticke
 // artifacts/scenario, and writes it back. claimGuard true (the console's own
 // OwnerEdit call) guards the write against the ticket's claim; claimGuard
 // false (CommitHandlerResult's ScenarioEdit step, already inside that
-// commit's own lease fence) writes unconditionally.
-func (s *Store) editScenarioTx(ctx context.Context, tx *sql.Tx, req OwnerEditRequest, claimGuard bool) (response.OwnerEditEvent, error) {
+// commit's own lease fence) writes unconditionally. amendmentCheck is the
+// judge's own amendment check text when req answers that amended
+// escalation's question (OwnerEdit's own lookup, nil otherwise): a check
+// equal to it is the box's own prefill resent unchanged, not the owner's
+// own text, so it is not exempt from HostCheckUnsafe below (#57, r3f6
+// review).
+func (s *Store) editScenarioTx(ctx context.Context, tx *sql.Tx, req OwnerEditRequest, claimGuard bool, amendmentCheck *string) (response.OwnerEditEvent, error) {
 	var id int64
 	var payload []byte
 	var sealedAt sql.NullString
@@ -393,6 +427,7 @@ func (s *Store) editScenarioTx(ctx context.Context, tx *sql.Tx, req OwnerEditReq
 	}
 	oldPayload := string(payload)
 	oldKind := sc.Kind
+	oldCheck := sc.Check
 
 	if req.Given != nil {
 		sc.Given = *req.Given
@@ -418,9 +453,14 @@ func (s *Store) editScenarioTx(ctx context.Context, tx *sql.Tx, req OwnerEditReq
 	// judge's (#57, r1f13 triage). A check the owner types in the same
 	// edit is exempt (the owner read what they typed), and so is an edit
 	// to a scenario that was already host (#57, r2f9 triage): only the
-	// switch itself, leaving the check as it was, re-checks it.
-	if req.Kind != nil && sc.Kind == response.ScenarioKindHost && oldKind != response.ScenarioKindHost &&
-		req.Check == nil && response.HostCheckUnsafe(sc.Check) {
+	// switch itself, leaving the check as it was, re-checks it. A check
+	// text equal to what was already stored, or (answering an amended
+	// escalation) equal to the judge's own amendment, is the box's prefill
+	// resent unchanged, not owner-typed, so it is not exempt either (#57,
+	// r3f6 review: the "Edit it" box always resends every field).
+	switchesToHost := req.Kind != nil && sc.Kind == response.ScenarioKindHost && oldKind != response.ScenarioKindHost
+	ownerTypedCheck := req.Check != nil && *req.Check != oldCheck && (amendmentCheck == nil || *req.Check != *amendmentCheck)
+	if switchesToHost && !ownerTypedCheck && response.HostCheckUnsafe(sc.Check) {
 		return response.OwnerEditEvent{}, ownerEditErr(OwnerEditCodeInvalid, response.HostCheckUnsafeMsg)
 	}
 

@@ -1177,11 +1177,13 @@ export function staleMarkerText(staleSince) {
  * (a non-empty answerQuestion) both rewrites the scenario and answers the
  * escalation in the same store transaction, so a field the owner left
  * exactly as the judge proposed it must still land, not be treated as
- * unchanged and dropped.
+ * unchanged and dropped. A non-empty answerQuestion also adds
+ * answer_question to the result, as Number(answerQuestion), so the escalation
+ * it names is answered in that same POST.
  *
  * @param {{name: string, kind: 'checkbox'|'select'|'text', value?: string, defaultValue?: string, initial?: string, checked?: boolean, defaultChecked?: boolean}[]} fields
  * @param {string|undefined} answerQuestion
- * @returns {Object<string, string|boolean>}
+ * @returns {Object<string, string|boolean|number>}
  */
 export function ownerEditFieldEntries(fields, answerQuestion) {
 	const entries = {};
@@ -1197,6 +1199,9 @@ export function ownerEditFieldEntries(fields, answerQuestion) {
 		} else if (answerQuestion || f.value !== f.defaultValue) {
 			entries[f.name] = f.value;
 		}
+	}
+	if (answerQuestion) {
+		entries.answer_question = Number(answerQuestion);
 	}
 	return entries;
 }

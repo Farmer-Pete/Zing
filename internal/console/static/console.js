@@ -1470,9 +1470,6 @@ async function ownerEditSubmit(button) {
 			defaultChecked: field.defaultChecked,
 		}));
 		Object.assign(body, ownerEditFieldEntries(fields, answerQuestion));
-		if (answerQuestion) {
-			body.answer_question = Number(answerQuestion);
-		}
 	}
 	let message = '';
 	try {
