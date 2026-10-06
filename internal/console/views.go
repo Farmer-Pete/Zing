@@ -1761,6 +1761,13 @@ func buildThreadQuestion(ticket *store.Ticket, m *store.MessageRow, messageCount
 		q.Scenarios = scenarios
 		q.Findings = findings
 	}
+	if payload.Amendment != nil {
+		a := payload.Amendment
+		q.Amendment = &templates.ScenarioRow{
+			ID: a.Scenario, Kind: string(a.Kind), Given: a.Given, When: a.When, Then: a.Then,
+			Check: a.Check, Sealed: true, TicketID: m.TicketID,
+		}
+	}
 	if draft, ok := drafts[m.ID]; ok {
 		q.DraftReply = draft.Reply
 		if draft.Answer.Option != nil {

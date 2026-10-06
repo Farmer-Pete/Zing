@@ -50,6 +50,7 @@ import {
 	emptyStreamStatus,
 	reduceStreamStatus,
 	STREAM_TICK_MS,
+	ownerEditFieldEntries,
 	versionedURL,
 	streamStatusView,
 } from './keyboard.mjs';
@@ -1435,11 +1436,19 @@ function installSandboxRunBox() {
 // ownerEditSubmit posts one owner edit (POST /tickets/{id}/edit) from the
 // .owner-edit box around button: every [data-field] inside it whose value
 // has changed since the box loaded becomes a body field (a checkbox sends
-// its checked boolean; an unchanged field is left out, so saving given,
-// when, then, text, or demo never also sends an untouched check or test,
-// which would need a loopback caller for no reason). action is "drop" for
-// .owner-edit-drop after a confirm(), and a drop sends no fields at all. A
-// non-2xx response shows its body text in the box's .owner-edit-error span.
+// its checked boolean; a select counts as changed against its own
+// data-initial, since a select's value carries no browser-native
+// defaultValue the way an input or textarea's does; an unchanged field is
+// left out, so saving given, when, then, text, or demo never also sends an
+// untouched check, test, or kind, which would need a loopback caller for no
+// reason). action is "drop" for .owner-edit-drop after a confirm(), and a
+// drop sends no fields at all. When the box carries data-answer-question
+// (#57 Q3, an amended escalation's "Edit it" box), every field is sent
+// whether changed or not -- the owner's Save both rewrites the scenario and
+// answers the escalation in one store transaction, so a field left
+// unchanged from the judge's own amendment must still land -- and
+// answer_question names the question that answers. A non-2xx response shows
+// its body text in the box's .owner-edit-error span.
 async function ownerEditSubmit(button) {
 	const box = button.closest('.owner-edit');
 	const errorSpan = box?.querySelector('.owner-edit-error');
@@ -1454,18 +1463,19 @@ async function ownerEditSubmit(button) {
 	if (dropping && !window.confirm(`Drop task ${ref}? Later tasks move up one.`)) {
 		return;
 	}
+	const answerQuestion = box.dataset.answerQuestion;
 	const body = { target, ref, action: dropping ? 'drop' : 'edit' };
 	if (!dropping) {
-		for (const field of box.querySelectorAll('[data-field]')) {
-			const name = field.dataset.field;
-			if (field.type === 'checkbox') {
-				if (field.checked !== field.defaultChecked) {
-					body[name] = field.checked;
-				}
-			} else if (field.value !== field.defaultValue) {
-				body[name] = field.value;
-			}
-		}
+		const fields = [...box.querySelectorAll('[data-field]')].map((field) => ({
+			name: field.dataset.field,
+			kind: field.type === 'checkbox' ? 'checkbox' : field.tagName === 'SELECT' ? 'select' : 'text',
+			value: field.value,
+			defaultValue: field.defaultValue,
+			initial: field.dataset.initial,
+			checked: field.checked,
+			defaultChecked: field.defaultChecked,
+		}));
+		Object.assign(body, ownerEditFieldEntries(fields, answerQuestion));
 	}
 	let message = '';
 	try {

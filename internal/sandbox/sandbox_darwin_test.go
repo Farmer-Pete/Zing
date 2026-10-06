@@ -485,6 +485,52 @@ func TestChildSeesSandboxTmpdir(t *testing.T) {
 	}
 }
 
+// TestChildZshHeredocUnderBuildProfile proves a sandboxed zsh can write its
+// heredoc temp file under the run's own TMPPREFIX, and cannot without it
+// (section 5.3's /tmp denial, surfaced as zsh's own heredoc temp file,
+// default /tmp/zsh, which both profiles deny).
+func TestChildZshHeredocUnderBuildProfile(t *testing.T) {
+	t.Parallel()
+	if _, err := os.Stat("/bin/zsh"); err != nil {
+		t.Skip("/bin/zsh not present on this machine")
+	}
+	sb := newLoadedSandbox(t, nil, 7420)
+	dirs := newTestDirs(t)
+	p := dirs.params()
+	if err := os.MkdirAll(filepath.Join(p.RunDir, "tmp"), 0o700); err != nil {
+		t.Fatalf("mkdir %s/tmp: %v", p.RunDir, err)
+	}
+
+	heredocScript := "cat <<'EOF'\nheredoc-ok\nEOF\n"
+
+	t.Run("with_tmpprefix", func(t *testing.T) {
+		t.Parallel()
+		env := append(gitfixture.Environ(), sb.Env(p, os.Getenv("PATH"))...)
+		exitCode, out := runSandboxedWithEnv(t, sb, p, env, "/bin/zsh", "-f", "-c", heredocScript)
+		if exitCode != 0 {
+			t.Fatalf("zsh heredoc with TMPPREFIX: exit %d, want 0 (output %q)", exitCode, out)
+		}
+		if got := strings.TrimSpace(out); got != "heredoc-ok" {
+			t.Errorf("zsh heredoc output = %q, want %q", got, "heredoc-ok")
+		}
+	})
+
+	t.Run("without_tmpprefix", func(t *testing.T) {
+		t.Parallel()
+		var env []string
+		for _, kv := range append(gitfixture.Environ(), sb.Env(p, os.Getenv("PATH"))...) {
+			if strings.HasPrefix(kv, "TMPPREFIX=") {
+				continue
+			}
+			env = append(env, kv)
+		}
+		exitCode, out := runSandboxedWithEnv(t, sb, p, env, "/bin/zsh", "-f", "-c", heredocScript)
+		if exitCode == 0 {
+			t.Errorf("zsh heredoc without TMPPREFIX: want a non-zero exit (the /tmp denial), got 0 (output %q)", out)
+		}
+	})
+}
+
 // TestReadPathsAllowsExtra proves a sandbox.read_paths entry inside HOME is
 // readable despite HOME's own blanket deny (section 5.4: "It exists for a
 // toolchain installed under home").

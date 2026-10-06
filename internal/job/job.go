@@ -12,6 +12,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"slices"
 	"strconv"
 	"time"
@@ -309,6 +310,41 @@ func resumeCharge(latest store.Run) (bump, gate bool) {
 		return false, false
 	}
 	return true, true
+}
+
+// answerResumeCapped is answerResume's cap check alone, with no "free
+// answer resume" log: a caller that must check several sessions before
+// committing to any of them (continueRound, one per asking lens) calls
+// this first for every one, and only logs once it knows none of them is
+// capped, so a later capped session's ErrNoAction never leaves an earlier
+// session's log line for a resume that never ran.
+func answerResumeCapped(ctx context.Context, t store.Ticket, d Deps, sess store.Session, state store.SessionState) (capped bool, err error) {
+	if state != store.SessionExhausted {
+		return false, nil
+	}
+	has, hasErr := d.Store.HasEscalation(ctx, t.ID, string(response.EscalationOriginCapResumes), sess.ID)
+	if hasErr != nil {
+		return false, fmt.Errorf("job: answer resume: has escalation: %w", hasErr)
+	}
+	return has, nil
+}
+
+// answerResume is how every post-seal resume that delivers the owner's
+// own answers is charged: free, and never gated by max_resumes, since an
+// owner answer is not the agent going in circles. capped is true only for a
+// session that is already exhausted and already carries its cap_resumes
+// escalation, one written before this rule existed: the caller then leaves
+// the round to that escalation's own retry, exactly as before.
+func answerResume(ctx context.Context, t store.Ticket, d Deps, sess store.Session, state store.SessionState, round store.Round) (capped bool, err error) {
+	capped, err = answerResumeCapped(ctx, t, d, sess, state)
+	if err != nil {
+		return false, err
+	}
+	if capped {
+		return true, nil
+	}
+	slog.Info("free answer resume", "ticket_id", t.ID, "session_id", sess.ID, "question_ids", questionIDs(round))
+	return false, nil
 }
 
 // priorNonInterruptedRun returns sessionID's own newest run strictly before

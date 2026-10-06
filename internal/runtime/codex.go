@@ -79,6 +79,38 @@ func codexSandboxArgs(req RunRequest) ([]string, error) {
 // read at the OS level, so this is a second, best-effort layer).
 const codexSkillsOffSetting = "features.skip_host_skill_discovery=true"
 
+// codexShellEnvVars are the req.Env names codexShellEnvArgs copies into
+// Codex's shell_environment_policy.set, in this order.
+var codexShellEnvVars = []string{"TMPDIR", "TMPPREFIX"}
+
+// codexTOMLString escapes a value for a TOML basic string.
+var codexTOMLString = strings.NewReplacer(`\`, `\\`, `"`, `\"`)
+
+// codexShellEnvArgs returns one -c shell_environment_policy.set.NAME="VALUE"
+// pair per codexShellEnvVars name present in env, last entry winning as in
+// codexOutputBase. Codex builds the environment of the commands it runs
+// from this policy, not from its own environment: run 1459's judge check
+// saw the Darwin per-user TMPDIR, which judge.sb denies. The key follows
+// Codex's config docs. Planning could not run it against 0.160.0
+// (Codex out of quota until 2026-10-30), and codexArgv passes no
+// --strict-config, so a misnamed key would be ignored silently.
+// TestLive_CodexShellEnvTmpdir is its proof.
+func codexShellEnvArgs(env []string) []string {
+	var args []string
+	for _, name := range codexShellEnvVars {
+		value, found := "", false
+		for _, kv := range env {
+			if v, ok := strings.CutPrefix(kv, name+"="); ok {
+				value, found = v, true
+			}
+		}
+		if found {
+			args = append(args, "-c", "shell_environment_policy.set."+name+`="`+codexTOMLString.Replace(value)+`"`)
+		}
+	}
+	return args
+}
+
 // codexArgv assembles Codex's argv exactly per design section 4.1. The
 // prompt never appears here: Run writes it to stdin, and the trailing "-"
 // argument tells codex to read the prompt from there instead of a
@@ -107,6 +139,13 @@ const codexSkillsOffSetting = "features.skip_host_skill_discovery=true"
 // in the background and poll it covers that case instead. Every other
 // job's argv is unchanged.
 //
+// Every job, first turn and resume, also carries codexShellEnvArgs's own
+// "-c" pairs right before -m: shell_environment_policy.set.TMPDIR and
+// .TMPPREFIX, built from req.Env, so the commands Codex's shell runs (a
+// judge's sealed `zing check SID`, among others) see the run's own temp
+// directories rather than the host's shared ones the sandbox profiles deny.
+// TestLive_CodexShellEnvTmpdir is the live proof that Codex applies them.
+//
 // req.Tools is deliberately not read here: codex exec has no per-tool
 // allowlist flag, so the sandbox mode above is the control instead
 // (PKG7-PLAN.md section 4).
@@ -120,6 +159,7 @@ func codexArgv(req RunRequest, outPath string) ([]string, error) {
 	if req.Job == response.JobJudge {
 		argv = append(argv, "-c", codexSkillsOffSetting)
 	}
+	argv = append(argv, codexShellEnvArgs(req.Env)...)
 	argv = append(argv, "-m", req.Model, "--json", "-o", outPath)
 	if req.SessionID != "" {
 		argv = append(argv, "resume", req.SessionID)

@@ -236,7 +236,15 @@ func (c *console) handleSend(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	result, err := c.store.SendBatchOnly(r.Context(), req.Ticket, req.Questions)
+	// Accepting a judge amendment is held to the same loopback-only
+	// boundary handleOwnerEdit checks for a check, test, or kind edit
+	// (#57, r1f9 triage): SendBatchOnly refuses with *store.ConflictError
+	// when this send would do that from somewhere else.
+	origin := store.SendFromRemote
+	if isLoopbackRemote(r.RemoteAddr) {
+		origin = store.SendFromLoopback
+	}
+	result, err := c.store.SendBatchOnly(r.Context(), req.Ticket, req.Questions, origin)
 	if err != nil {
 		if conflictErr, ok := errors.AsType[*store.ConflictError](err); ok {
 			http.Error(w, conflictErr.Reason, http.StatusConflict)

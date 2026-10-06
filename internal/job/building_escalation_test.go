@@ -359,7 +359,8 @@ func TestBuildingAbandonResolvesAll(t *testing.T) {
 // EscalationPayload.SessionID", and the row's own "a preserved round of
 // kind perimeter is applied here" sentence): it continues exactly where
 // TestExhaustedKeepsRejectedDecision (task 12) leaves off. Once the owner
-// retries the resulting resumes_exhausted escalation, the fresh session's
+// retries a resumes_exhausted escalation already recorded for the build
+// session (answerResume's own legacy branch, job.go), the fresh session's
 // own prompt carries the perimeter notice raw (not fenced: design section
 // 6.3's own resume input table), the rejected path is actually reverted
 // from the tree, and both the escalation round and the preserved perimeter
@@ -383,27 +384,12 @@ func TestCapResumesRetryCarriesAnswers(t *testing.T) {
 	expires := time.Now().Add(10 * time.Minute).UTC().Truncate(time.Second)
 	bumpResumesToCap(t, s, ticketID, sess.ID, maxResumes, owner, expires)
 
-	ticket := getTicket(t, s, ticketID)
-	deps := claimForBuild(t, s, scriptRT, ticketID)
-	commit, err := job.Registry()[testStateBuilding].Run(t.Context(), ticket, deps) // RESOLVE: exhausted, escalates
-	if err != nil {
-		t.Fatalf("RESOLVE: %v", err)
-	}
-	if commit.Escalation == nil {
-		t.Fatal("commit.Escalation = nil, want resumes_exhausted")
-	}
-	apply(t, s, ticket, commit)
-
-	open, err := s.QuestionsByState(t.Context(), ticketID, "open")
-	if err != nil || len(open) != 1 {
-		t.Fatalf("QuestionsByState(open) = %v, %v, want exactly one (the escalation's own question)", open, err)
-	}
-	escQID := open[0].ID
+	escQID := escalateDirect(t, s, ticketID, nil, &sess.ID, response.EscalationCodeResumesExhausted, response.EscalationOriginCapResumes)
 	answerGateQuestion(t, s, ticketID, escQID, new("a"), "please retry")
 
 	scriptRT.steps = append(scriptRT.steps, buildStep([]string{helloTxt}, nil, "cap-retry-fresh-sess"))
 	rec := &recordingRuntime{rt: scriptRT}
-	ticket = getTicket(t, s, ticketID)
+	ticket := getTicket(t, s, ticketID)
 	deps2 := claimForBuild(t, s, rec, ticketID)
 	retryCommit, err := job.Registry()[testStateBuilding].Run(t.Context(), ticket, deps2) // cap_resumes retry
 	if err != nil {

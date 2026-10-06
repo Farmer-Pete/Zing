@@ -89,17 +89,20 @@ func newTestLogHandler(t *testing.T) *console.Handler {
 // sessions.job (a run's own job name) and tickets.state (design section
 // 5.2's own name for the ticket's state while planning runs) happen to
 // share, named once rather than twice for two meanings that collide.
+// testQuestionStateAnswered is the question lifecycle's own "answered"
+// state, read back after Save/Send resolves a question's chip.
 const (
-	testTrackerGitHub        = "github"
-	testAuthorZing           = "zing"
-	testMsgTypeQuestion      = "question"
-	testWaitingQuestions     = "questions"
-	testRuntimeFake          = "fake"
-	testArtifactTypePlan     = "plan"
-	testArtifactTypeScenario = "scenario"
-	testPlanningLiteral      = "planning"
-	testStateQueued          = "queued"
-	testQuestionStateOpen    = "open"
+	testTrackerGitHub         = "github"
+	testAuthorZing            = "zing"
+	testMsgTypeQuestion       = "question"
+	testWaitingQuestions      = "questions"
+	testRuntimeFake           = "fake"
+	testArtifactTypePlan      = "plan"
+	testArtifactTypeScenario  = "scenario"
+	testPlanningLiteral       = "planning"
+	testStateQueued           = "queued"
+	testQuestionStateOpen     = "open"
+	testQuestionStateAnswered = "answered"
 )
 
 var testProject = store.Project{

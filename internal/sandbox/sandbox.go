@@ -686,9 +686,11 @@ func (s Sandbox) judgeParamArgs(p Params) ([]string, error) {
 	return argv, nil
 }
 
-// envOrder is section 5.3's table order.
+// envOrder is section 5.3's table order. TMPPREFIX is zsh's own heredoc
+// temp-file prefix (default /tmp/zsh): both profiles deny /tmp, so without
+// a run-private TMPPREFIX a heredoc in a sandboxed zsh fails.
 var envOrder = []string{
-	"TMPDIR", "CLAUDE_CODE_TMPDIR", "GOPATH", "GOCACHE", "GOMODCACHE",
+	"TMPDIR", "TMPPREFIX", "CLAUDE_CODE_TMPDIR", "GOPATH", "GOCACHE", "GOMODCACHE",
 	"GOLANGCI_LINT_CACHE", "XDG_CACHE_HOME", "GIT_CONFIG_GLOBAL", "ZING_SANDBOXED", "PATH",
 }
 
@@ -697,6 +699,7 @@ var envOrder = []string{
 func (s Sandbox) Env(p Params, parentPath string) []string {
 	values := []string{
 		filepath.Join(p.RunDir, "tmp"),
+		filepath.Join(p.RunDir, "tmp", "zsh"),
 		filepath.Join(p.RunDir, "claude-tmp"),
 		filepath.Join(p.CacheShared, "gopath"),
 		filepath.Join(p.CacheShared, "go-build"),
