@@ -3,7 +3,6 @@ package job
 import (
 	"errors"
 	"fmt"
-	"math/rand"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -259,9 +258,9 @@ func TestHostCommandRunnerEnv(t *testing.T) {
 	r := NewHostCommandRunner()
 	dir := t.TempDir()
 
-	runOnce := func() string {
-		out := filepath.Join(dir, strconv.Itoa(rand.Int())+".txt")
-		exitCode, err := r.Run(t.Context(), dir, "", "echo \"$TMPDIR\" >"+out+"; test -w \"$TMPDIR\"; test -z \"$GITHUB_TOKEN\"", commandRunnerTimeout, CommandIO{})
+	runOnce := func(name string) string {
+		out := filepath.Join(dir, name)
+		exitCode, err := r.Run(t.Context(), dir, "", "echo \"$TMPDIR\" >"+out+" && test -w \"$TMPDIR\" && test -z \"$GITHUB_TOKEN\"", commandRunnerTimeout, CommandIO{})
 		if err != nil {
 			t.Fatalf("Run: %v", err)
 		}
@@ -275,8 +274,8 @@ func TestHostCommandRunnerEnv(t *testing.T) {
 		return strings.TrimSpace(string(got))
 	}
 
-	tmp1 := runOnce()
-	tmp2 := runOnce()
+	tmp1 := runOnce("1.txt")
+	tmp2 := runOnce("2.txt")
 
 	if tmp1 == "" || tmp2 == "" {
 		t.Fatalf("TMPDIR was empty: %q, %q", tmp1, tmp2)

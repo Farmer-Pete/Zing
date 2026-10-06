@@ -634,6 +634,9 @@ func TestJudgeRetryFreshRoundDefersPendingHostCheck(t *testing.T) {
 	if !strings.HasPrefix(retryCommit.Messages[0].Body, wantPrefix) {
 		t.Errorf("message = %q, want it to start with %q", retryCommit.Messages[0].Body, wantPrefix)
 	}
+	if len(retryCommit.ResolveQuestions) != 1 || retryCommit.ResolveQuestions[0] != qID {
+		t.Errorf("retryCommit.ResolveQuestions = %v, want [%d]", retryCommit.ResolveQuestions, qID)
+	}
 	if hostCommands.callCount() != 1 {
 		t.Errorf("host runner called %d times, want still 1 (the edited check's run is deferred)", hostCommands.callCount())
 	}
@@ -1060,6 +1063,44 @@ func TestJudgeCapOutput(t *testing.T) {
 		got := judgeCapOutput([]byte("hello world"), 5)
 		if got != "world" {
 			t.Errorf("got %q, want %q", got, "world")
+		}
+	})
+
+	t.Run("euro_sign_at_the_end_survives_the_cut", func(t *testing.T) {
+		t.Parallel()
+		// 10 a's, then 65535 a's, then the euro sign: raw's last limit
+		// bytes drop the 10 leading a's, leaving a rune start, a result of
+		// at most limit bytes, and the euro sign intact at the end.
+		raw := append(bytes.Repeat([]byte("a"), 10+65535), "€"...)
+		got := judgeCapOutput(raw, limit)
+		if !utf8.ValidString(got) {
+			t.Fatalf("result is not valid UTF-8: %q", got)
+		}
+		if len(got) > limit {
+			t.Fatalf("len(got) = %d, want at most %d", len(got), limit)
+		}
+		if !utf8.RuneStart(got[0]) {
+			t.Fatalf("result does not start on a rune: %q", got[:4])
+		}
+		if !strings.HasSuffix(got, "€") {
+			t.Errorf("got does not end with the euro sign: %q", got[max(0, len(got)-8):])
+		}
+	})
+
+	t.Run("all_invalid_bytes_become_u_fffd", func(t *testing.T) {
+		t.Parallel()
+		raw := bytes.Repeat([]byte{0xff}, limit)
+		got := judgeCapOutput(raw, limit)
+		if !utf8.ValidString(got) {
+			t.Fatalf("result is not valid UTF-8: %q", got)
+		}
+		if len(got) > limit {
+			t.Fatalf("len(got) = %d, want at most %d", len(got), limit)
+		}
+		for _, r := range got {
+			if r != '�' {
+				t.Fatalf("got a rune other than U+FFFD: %q", got)
+			}
 		}
 	})
 }

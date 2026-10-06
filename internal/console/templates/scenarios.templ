@@ -1,9 +1,43 @@
 package templates
 
 import (
+	"regexp"
 	"slices"
 	"strconv"
 )
+
+// hostCheckWSRun matches a tab, or a run of more than 4 consecutive
+// spaces: either can push the rest of a long host check off screen behind
+// #main pre's own horizontal scrollbar, with nothing at the gate to show
+// it is there (r2f2), so the gate marks a run like that visibly instead of
+// letting it blend into ordinary spacing.
+var hostCheckWSRun = regexp.MustCompile(`\t+| {5,}`)
+
+// hostCheckSegment is one piece of a host check's display text: ordinary
+// text, rendered plain, or a run hostCheckWSRun matched, rendered inside
+// .host-check-ws so no part of the command can hide off screen.
+type hostCheckSegment struct {
+	Text   string
+	Marked bool
+}
+
+// hostCheckSegments splits check into alternating ordinary and marked
+// segments, in order, on every match of hostCheckWSRun.
+func hostCheckSegments(check string) []hostCheckSegment {
+	var segs []hostCheckSegment
+	idx := 0
+	for _, loc := range hostCheckWSRun.FindAllStringIndex(check, -1) {
+		if loc[0] > idx {
+			segs = append(segs, hostCheckSegment{Text: check[idx:loc[0]]})
+		}
+		segs = append(segs, hostCheckSegment{Text: check[loc[0]:loc[1]], Marked: true})
+		idx = loc[1]
+	}
+	if idx < len(check) {
+		segs = append(segs, hostCheckSegment{Text: check[idx:]})
+	}
+	return segs
+}
 
 // scenariosSection renders the gate's scenario cohort table (design section
 // 7, D8, Task 11): id, kind, given, when, then, check, one row per scenario
@@ -30,7 +64,13 @@ templ scenariosSection(scenarios []ScenarioRow) {
 							if s.Kind == "host" {
 								<tr>
 									<td class="host-check-id">{ s.ID }</td>
-									<td><pre><code class="host-check">{ s.Check }</code></pre></td>
+									<td><pre><code class="host-check">for _, seg := range hostCheckSegments(s.Check) {
+										if seg.Marked {
+											<span class="host-check-ws">{ seg.Text }</span>
+										} else {
+											{ seg.Text }
+										}
+									}</code></pre></td>
 								</tr>
 							}
 						}

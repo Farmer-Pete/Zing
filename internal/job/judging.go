@@ -1372,16 +1372,18 @@ func judgePendingHost(scenarios []response.Scenario, results map[judgeHostKey]ju
 }
 
 // judgeHostChecksText renders the host_checks input: one block per host
-// scenario in cohort order, joined by a blank line; each block is
-// "scenario <id> exit <code>" (plus " (timed out after 10m)" when code is
-// -1), a newline, then the output with trailing newlines trimmed. A host
-// scenario with no result for its current key is an error naming it:
-// runPendingHostCheck already ran every pending one in the same tick
-// runFirst reads this from, so that should not happen.
+// scenario with a non-blank check, in cohort order (the same filter
+// judgePendingHost uses, so the two never disagree about which scenarios
+// need a result), joined by a blank line; each block is "scenario <id>
+// exit <code>" (plus " (timed out after 10m)" when code is -1), a newline,
+// then the output with trailing newlines trimmed. A host scenario with no
+// result for its current key is an error naming it: runPendingHostCheck
+// already ran every pending one in the same tick runFirst reads this
+// from, so that should not happen.
 func judgeHostChecksText(scenarios []response.Scenario, results map[judgeHostKey]judgeHostResult) (string, error) {
 	var blocks []string
 	for _, sc := range scenarios {
-		if sc.Kind != response.ScenarioKindHost {
+		if sc.Kind != response.ScenarioKindHost || strings.TrimSpace(sc.Check) == "" {
 			continue
 		}
 		res, ok := judgeHostResultFor(results, sc)
@@ -1430,10 +1432,8 @@ func (h judgeHandler) hostCheck(ctx context.Context, t store.Ticket, d Deps, n i
 	cmdHash := judgeHostCmdHash(sc.Check)
 	ids := []any{"ticket_id", t.ID, "round", n, "scenario_id", sc.ID, "sha", sha, "cmd_sha256", cmdHash}
 	if d.HostCommands == nil {
-		// The dispatcher logs every returned handler error at error level
-		// (ticket_id, state) already; logging here too would double it, so
-		// the scenario and round go into the wrapped error instead.
-		return store.HandlerCommit{}, fmt.Errorf("job: judging: ticket %d round %d scenario %s: no host command runner: %w", t.ID, n, sc.ID, ErrConfig)
+		slog.Error("judge host check has no runner", ids...)
+		return store.HandlerCommit{}, ErrConfig
 	}
 	proj, ok := d.Projects[t.ProjectID]
 	if !ok {
@@ -1501,7 +1501,7 @@ func (h judgeHandler) hostVerdict(ctx context.Context, t store.Ticket, d Deps, n
 			return *escalation, nil
 		}
 		slog.Warn("judge host check changed after it ran; starting a fresh round", "ticket_id", t.ID, "round", n,
-			"scenario_id", sc.ID, "sha", sha, "cmd_sha256", cmdHash, "new_round", n+1, "run_id", int64OrZero(judged.RunID))
+			"scenario_id", sc.ID, "sha", sha, "cmd_sha256", cmdHash, "new_round", n+1)
 		c := baseCommit(t, d)
 		c.Messages = []store.Message{{
 			TicketID: t.ID, Type: msgTypeUpdate, Author: authorSystem,
@@ -1512,7 +1512,7 @@ func (h judgeHandler) hostVerdict(ctx context.Context, t store.Ticket, d Deps, n
 
 	row := applyHostCheckExit(judged.Verdict, res.Exit)
 	slog.Info("judge host verdict", "ticket_id", t.ID, "round", n, "scenario_id", sc.ID, "sha", sha,
-		"cmd_sha256", cmdHash, "exit", res.Exit, "result", string(row.Result), "run_id", int64OrZero(judged.RunID))
+		"cmd_sha256", cmdHash, "exit", res.Exit, "result", string(row.Result))
 	payload, marshalErr := json.Marshal(row)
 	if marshalErr != nil {
 		return store.HandlerCommit{}, fmt.Errorf("job: judging: marshal host check override for scenario %s: %w", sc.ID, marshalErr)

