@@ -24,6 +24,7 @@ import (
 	"zing/internal/machine"
 	"zing/internal/response"
 	"zing/internal/store"
+	"zing/internal/tracker"
 )
 
 // The five views' names, the closed set design section 8 names. keys.go
@@ -364,6 +365,13 @@ func (c *console) threadComponent(ctx context.Context, open int64) (templ.Compon
 // nothing once every planning thread is settled and no approval is
 // running.
 func (c *console) threadBanner(ctx context.Context, ticketID int64, rows []store.MessageRow, conv store.PlanningConversation, agent string) (string, error) {
+	deps, err := c.store.Dependencies(ctx, ticketID)
+	if err != nil {
+		return "", fmt.Errorf("console: dependencies for ticket %d: %w", ticketID, err)
+	}
+	if held := holdBanner(deps); held != "" {
+		return held, nil
+	}
 	if gateApprovalInProgress(rows) {
 		cohort, ok, err := c.store.CurrentCohort(ctx, ticketID)
 		if err != nil {
@@ -415,6 +423,30 @@ func gateApprovalInProgress(rows []store.MessageRow) bool {
 		}
 	}
 	return false
+}
+
+// holdBanner reports the banner text for a ticket held on one or more split
+// dependencies not yet done (#74 owner decision Q3): a dependency in state
+// "abandoned" reads "..., which was abandoned", every other unfinished
+// dependency reads "... (state)". It returns "" once every dependency is
+// done, so threadBanner falls through to its other banners.
+func holdBanner(deps []store.DependencyRow) string {
+	var parts []string
+	for _, dep := range deps {
+		if dep.State == string(response.TicketStateDone) {
+			continue
+		}
+		ref := tracker.IssueRef(dep.Ref)
+		if dep.State == string(response.TicketStateAbandoned) {
+			parts = append(parts, ref+", which was abandoned")
+		} else {
+			parts = append(parts, ref+" ("+dep.State+")")
+		}
+	}
+	if len(parts) == 0 {
+		return ""
+	}
+	return "Waits on " + strings.Join(parts, "; ") + "."
 }
 
 // planArtifactType is the artifacts.type literal a planning commit writes

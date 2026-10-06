@@ -10,11 +10,39 @@ import (
 	"regexp"
 	"strings"
 	"testing"
+	"time"
 
 	"zing/internal/bus"
 	"zing/internal/response"
 	"zing/internal/store"
 )
+
+// seedSplitChild commits one queued child ticket under parentID through
+// store.CommitHandlerResult, the same SplitChild commit shape
+// internal/job/split.go's fileNextSplitChild produces (#74), re-claiming
+// the parent as the dispatcher's own retried tick does between children.
+func seedSplitChild(t *testing.T, s *store.Store, parentID int64, sc store.SplitChild) {
+	t.Helper()
+	const owner = "test-owner"
+	expires := time.Now().Add(10 * time.Minute)
+	claimed, err := s.Claim(t.Context(), parentID, owner, expires)
+	if err != nil {
+		t.Fatalf("Claim: %v", err)
+	}
+	if !claimed {
+		t.Fatalf("Claim(%d): got false, want true", parentID)
+	}
+	applied, err := s.CommitHandlerResult(t.Context(), store.HandlerCommit{
+		TicketID: parentID, Owner: owner, Expires: expires,
+		SplitChild: &sc,
+	})
+	if err != nil {
+		t.Fatalf("CommitHandlerResult(SplitChild %s): %v", sc.Key, err)
+	}
+	if !applied {
+		t.Fatalf("CommitHandlerResult(SplitChild %s): applied = false, want true", sc.Key)
+	}
+}
 
 // splitQuestionTitle is the fixed heading this file's seeded split question
 // carries, distinct from every other fixture title in this package, so
@@ -95,5 +123,58 @@ func TestSplitGate_RendersChildrenAndNotes(t *testing.T) {
 		if !re.MatchString(group) {
 			t.Errorf("split group missing split-key span for %q; got:\n%s", key, group)
 		}
+	}
+}
+
+// TestThreadBanner_HeldTicketNamesAbandonedDependency proves holdBanner
+// (#74 owner decision Q3): a child ticket held on a dependency that ends
+// abandoned stays held, and its thread banner names the dependency and
+// says it was abandoned, until that dependency reaches done.
+func TestThreadBanner_HeldTicketNamesAbandonedDependency(t *testing.T) {
+	t.Parallel()
+	s := newConsoleTestStore(t)
+	parentID := seedTicket(t, s, "fake#65", "Split this big ticket")
+
+	seedSplitChild(t, s, parentID, store.SplitChild{Key: "c1", Ref: "12", Title: "First child", Body: "do c1"})
+	seedSplitChild(t, s, parentID, store.SplitChild{Key: "c2", Ref: "13", Title: "Second child", Body: "do c2", DependsOn: []string{"c1"}})
+
+	children, err := s.SplitChildren(t.Context(), parentID)
+	if err != nil {
+		t.Fatalf("SplitChildren: %v", err)
+	}
+	var c1ID, c2ID int64
+	for _, c := range children {
+		switch c.Key {
+		case "c1":
+			c1ID = c.TicketID
+		case "c2":
+			c2ID = c.TicketID
+		}
+	}
+	if c1ID == 0 || c2ID == 0 {
+		t.Fatalf("missing child ticket ids: %+v", children)
+	}
+
+	transitionTicket(t, s, c1ID, response.TicketStateAbandoned)
+
+	srv := newTestServer(t, s, bus.New(), nil, newTestLogHandler(t))
+	resp, r, cancel := openStream(t, srv.URL, "thread", c2ID, 0)
+	_, main, _, _ := readInitialFrames(t, r)
+	cancel()
+	_ = resp.Body.Close()
+
+	if !strings.Contains(main, "Waits on #12, which was abandoned.") {
+		t.Errorf("expected held banner naming #12 as abandoned; got:\n%s", main)
+	}
+
+	transitionTicket(t, s, c1ID, response.TicketStateDone)
+
+	resp2, r2, cancel2 := openStream(t, srv.URL, "thread", c2ID, 0)
+	_, main2, _, _ := readInitialFrames(t, r2)
+	cancel2()
+	_ = resp2.Body.Close()
+
+	if strings.Contains(main2, "Waits on") {
+		t.Errorf("expected no held banner once the dependency is done; got:\n%s", main2)
 	}
 }
