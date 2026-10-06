@@ -17,8 +17,12 @@ import "strconv"
 // that would log a body-shaped value uses FencedAttr (length plus hash)
 // instead of the message. This view is exactly as safe as that existing
 // discipline; see AlertLine's own doc comment.
-templ Alerts(lines []AlertLine) {
-	<div id="alerts" class="alerts" role="status" aria-live="polite" aria-atomic="false">
+//
+// build is the server's asset version (assets.go's AssetVersion). console.js
+// compares it with the page's own data-build on every patched frame, and
+// shows "Zing was updated." once they differ (#59).
+templ Alerts(lines []AlertLine, build string) {
+	<div id="alerts" class="alerts" data-build={ build } role="status" aria-live="polite" aria-atomic="false">
 		if len(lines) > 0 {
 			<ul class="alert-lines" tabindex="0">
 				for _, line := range lines {

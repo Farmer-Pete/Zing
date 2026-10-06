@@ -49,8 +49,9 @@ import {
 	clearReplyInputs,
 	emptyStreamStatus,
 	reduceStreamStatus,
-	staleMarkerText,
 	STREAM_TICK_MS,
+	versionedURL,
+	streamStatusView,
 } from './keyboard.mjs';
 
 // defaultNav is the shell's own data-signals default (templates/shell.templ:
@@ -59,6 +60,11 @@ import {
 // very first keyboard nav (before any zing-nav has fired) agrees with what
 // the page already shows.
 const defaultNav = { view: 'inbox', open: 0, project: 0 };
+
+// pageBuild is the asset version GET / rendered this page with (shell.templ's
+// body data-build). The body is never patched, so it is fixed for the page's
+// life; renderStreamStatus compares it to each frame's #alerts data-build.
+const pageBuild = document.body.dataset.build ?? '';
 
 // isMac decides the platform for the send chord (design section 6.4: "Cmd
 // on mac, Ctrl elsewhere"). userAgentData is preferred where available;
@@ -123,7 +129,7 @@ const state = {
 // action rather than throwing out of the keydown handler.
 async function loadBindings() {
 	try {
-		const resp = await fetch('/static/keys.json');
+		const resp = await fetch(versionedURL('/static/keys.json', pageBuild));
 		if (!resp.ok) {
 			console.error('console.js: GET /static/keys.json', resp.status);
 			return;
@@ -1819,13 +1825,16 @@ function applyStreamEvent(event) {
 	renderStreamStatus();
 }
 
-// renderStreamStatus mirrors streamStatus.staleSince onto #stream-status (a
-// client-owned node outside #nav/#main/#rail, the #send-result pattern) and
-// onto body.stream-stale, which shell.templ's palette uses to dim
-// nav.templ's "All clear." while the page is stale.
+// renderStreamStatus mirrors streamStatusView's (keyboard.mjs) verdict onto
+// #stream-status (a client-owned node outside #nav/#main/#rail, the
+// #send-result pattern) and onto body.stream-stale, which shell.templ's
+// palette uses to dim nav.templ's "All clear." while the page is stale. The
+// Reload link is built only when it is missing, so the 5000 ms tick never
+// replaces a link the owner is about to click.
 function renderStreamStatus() {
-	const text = staleMarkerText(streamStatus.staleSince);
-	document.body.classList.toggle('stream-stale', text !== '');
+	const serverBuild = document.getElementById('alerts')?.dataset.build ?? '';
+	const view = streamStatusView(pageBuild, serverBuild, streamStatus.staleSince);
+	document.body.classList.toggle('stream-stale', view.stale);
 	let el = document.getElementById('stream-status');
 	if (!el) {
 		el = document.createElement('div');
@@ -1834,7 +1843,18 @@ function renderStreamStatus() {
 		el.setAttribute('aria-live', 'polite');
 		document.body.appendChild(el);
 	}
-	el.textContent = text;
+	if (view.showReload) {
+		if (el.querySelector('a.stream-reload') === null) {
+			el.textContent = view.text;
+			const link = document.createElement('a');
+			link.className = 'stream-reload';
+			link.href = '/';
+			link.textContent = 'Reload';
+			el.appendChild(link);
+		}
+		return;
+	}
+	el.textContent = view.text;
 }
 
 // installStreamWatch listens for Datastar's datastar-fetch events on

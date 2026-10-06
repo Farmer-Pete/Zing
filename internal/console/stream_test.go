@@ -186,6 +186,27 @@ func TestStreamPatchesAllFourRegionsOnConnect(t *testing.T) {
 	}
 }
 
+// TestStreamAlertsFrameCarriesAssetVersion proves the #alerts frame carries
+// this build's asset version, so console.js can compare it with the page's
+// own data-build and show "Zing was updated." once they differ (#128/#59).
+func TestStreamAlertsFrameCarriesAssetVersion(t *testing.T) {
+	t.Parallel()
+	s := newConsoleTestStore(t)
+	seedTicket(t, s, "fake#1", "Ticket one")
+
+	srv := newTestServer(t, s, bus.New(), nil, newTestLogHandler(t))
+
+	resp, r, cancel := openStream(t, srv.URL, "inbox", 0, 0)
+	defer cancel()
+	defer func() { _ = resp.Body.Close() }()
+
+	_, _, _, alerts := readInitialFrames(t, r)
+	want := `data-build="` + console.AssetVersion() + `"`
+	if !strings.Contains(alerts, want) {
+		t.Errorf("initial alerts frame missing %s; got:\n%s", want, alerts)
+	}
+}
+
 func TestStreamReRendersOnPublish(t *testing.T) {
 	t.Parallel()
 	s := newConsoleTestStore(t)

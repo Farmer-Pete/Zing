@@ -313,3 +313,48 @@ func TestIsAncestor(t *testing.T) {
 		}
 	})
 }
+
+// -----------------------------------------------------------------------
+// MergeBase
+// -----------------------------------------------------------------------
+
+func TestMergeBase(t *testing.T) {
+	t.Parallel()
+	o, wt, ctx := preparePerimeterWorktree(t, 907)
+	root := repoRootFor(wt)
+
+	c, err := o.HeadSHA(ctx, wt)
+	if err != nil {
+		t.Fatalf("HeadSHA: %v", err)
+	}
+
+	branchSHA := commitFile(ctx, t, wt.Dir(), "feature.go", "package feature\n", "add feature.go")
+	mainSHA := commitFile(ctx, t, root, "README.md", "# main moved on\n", "advance main independently")
+
+	// Diverge an orphan branch off root before the parallel subtests run,
+	// so no subtest races with this checkout of root's working tree.
+	runGit(ctx, t, root, "checkout", "-q", "--orphan", "orphan")
+	orphanSHA := commitFile(ctx, t, root, "orphan.txt", "orphan\n", "orphan commit, shares no history with main")
+
+	t.Run("the merge base of a branch tip and a main tip that diverged from it is their shared commit", func(t *testing.T) {
+		t.Parallel()
+		got, err := o.MergeBase(ctx, wt, branchSHA, mainSHA)
+		if err != nil {
+			t.Fatalf("MergeBase: %v", err)
+		}
+		if got != c {
+			t.Errorf("MergeBase(branchSHA, mainSHA) = %s, want %s", got, c)
+		}
+	})
+
+	t.Run("an orphan commit shares no history with main, so merge-base errors", func(t *testing.T) {
+		t.Parallel()
+		_, err := o.MergeBase(ctx, wt, orphanSHA, mainSHA)
+		if err == nil {
+			t.Fatal("MergeBase(orphanSHA, mainSHA) = nil error, want an error")
+		}
+		if !strings.HasPrefix(err.Error(), "orchestrator: merge base:") {
+			t.Errorf("MergeBase(orphanSHA, mainSHA) error = %q, want it to start with %q", err.Error(), "orchestrator: merge base:")
+		}
+	})
+}

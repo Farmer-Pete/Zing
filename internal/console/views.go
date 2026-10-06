@@ -63,7 +63,7 @@ const alertLineTimeFormat = "15:04:05"
 // same content on every frame regardless of which view or ticket is open,
 // so patchRegions (stream.go) can call it without sig.
 func (c *console) alertsComponent() templ.Component {
-	return templates.Alerts(buildAlertLines(c.log.Warnings(alertsLimit)))
+	return templates.Alerts(buildAlertLines(c.log.Warnings(alertsLimit)), assetVersion)
 }
 
 // buildAlertLines turns the handler's ring entries into the #alerts
