@@ -482,6 +482,21 @@ func (FindingDecision) Values() []string {
 	return []string{string(FindingAccept), string(FindingDrop), string(FindingDiscuss)}
 }
 
+// DispositionKind is what the planner did with a finding the planning
+// resume required a disposition for: fixed names the plan element it
+// changed, disputed gives the reason the finding is wrong.
+type DispositionKind string
+
+const (
+	DispositionFixed    DispositionKind = "fixed"
+	DispositionDisputed DispositionKind = "disputed"
+)
+
+// Values returns fixed, disputed, in that order.
+func (DispositionKind) Values() []string {
+	return []string{string(DispositionFixed), string(DispositionDisputed)}
+}
+
 // Result is a scenario verdict's pass/fail result.
 type Result string
 

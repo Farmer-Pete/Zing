@@ -15,6 +15,11 @@ import (
 	"zing/internal/store"
 )
 
+// testObjectiveLocation is the plan element path this file's finding and
+// disposition fixtures repeat (goconst): a plan review major at the plan's
+// own objective, the shape every "needs a disposition" test below uses.
+const testObjectiveLocation = "plan/overview/objective"
+
 // TestGateQuestionMessage_StatesWhatApproveDoes proves F013: the gate
 // question's body carries a plain-language paragraph explaining what
 // approving does, not just the bare plan objective, while leaving the two
@@ -159,7 +164,7 @@ func TestFloorResumeInputs(t *testing.T) {
 	t.Parallel()
 
 	minor := response.Finding{Severity: response.SeverityMinor, Location: "plan/design/shape", Text: "needs a name", Fix: "name it"}
-	major := response.Finding{Severity: response.SeverityMajor, Location: "plan/overview/objective", Text: "wrong goal", Fix: "restate it"}
+	major := response.Finding{Severity: response.SeverityMajor, Location: testObjectiveLocation, Text: "wrong goal", Fix: "restate it"}
 
 	t.Run("minor and major", func(t *testing.T) {
 		t.Parallel()
@@ -197,6 +202,141 @@ func TestFloorResumeInputs(t *testing.T) {
 			t.Errorf("floorResumeInputs(nil) = %+v, want nil", got)
 		}
 	})
+}
+
+// checkDispositionsTestPlan builds a minimal valid response.Plan with one
+// task, so planXMLFor's rendering gives checkDispositions a real plan/...
+// element tree to resolve a fixed disposition's path against.
+func checkDispositionsTestPlan() response.Plan {
+	return response.Plan{
+		Overview: response.Overview{
+			Objective: "x", Context: "y",
+			Problem:  response.Problem{Text: "z"},
+			Goals:    []string{"g"},
+			NonGoals: []string{"n"},
+		},
+		Design: response.Design{Demo: response.Demo{Cmd: "c", Text: "d"}, Shape: "s"},
+		Delivery: response.Delivery{
+			Files: []response.FileChange{{Path: "f", Action: response.FileActionModify, Reason: "r"}},
+			Tests: []response.TestCase{{Name: "t", Seam: "s", Kind: response.TestKindIntegration, Asserts: "a"}},
+			Tasks: []response.Task{{N: 1, Test: "t", Text: "do it"}},
+		},
+		Review: response.Review{TrustRoot: "none", Alternatives: []string{"alt"}, Risks: []string{"risk"}},
+	}
+}
+
+// TestCheckDispositions proves checkDispositions' own table of rules
+// (ticket 72 task 2): a valid fixed or disputed entry gives no errors; a
+// required finding with no disposition gives one error at
+// plan/dispositions naming it; an id not in the needs_disposition input
+// gives an error at its own disposition[n] path, in addition to the
+// missing-required error; a repeated id gives an error at the second
+// disposition[n]; fixed with no path, or with a path that does not
+// resolve in the plan, gives an error; disputed with a blank reason gives
+// an error; an unknown kind -- the one branch Layer 1 already refuses in
+// a real run -- gives an error too; and with nothing required and nothing
+// delivered, it returns nil.
+func TestCheckDispositions(t *testing.T) {
+	t.Parallel()
+
+	planXML, err := planXMLFor(checkDispositionsTestPlan())
+	if err != nil {
+		t.Fatalf("planXMLFor: %v", err)
+	}
+
+	const (
+		requiredID     = "p1-f2"
+		dispositionOne = "plan/dispositions/disposition[1]"
+	)
+	required := []response.Finding{{
+		ID: requiredID, Severity: response.SeverityMajor, Location: testObjectiveLocation,
+		Text: "wrong goal", Fix: "restate it",
+	}}
+
+	tests := []struct {
+		name      string
+		required  []response.Finding
+		ds        []response.Disposition
+		wantPaths []string // one PathError per entry, Path values, in order
+	}{
+		{
+			name:     "valid fixed",
+			required: required,
+			ds:       []response.Disposition{{Finding: requiredID, Kind: response.DispositionFixed, Path: testObjectiveLocation}},
+		},
+		{
+			name:     "valid disputed",
+			required: required,
+			ds:       []response.Disposition{{Finding: requiredID, Kind: response.DispositionDisputed, Reason: "the objective already says this"}},
+		},
+		{
+			name:      "missing disposition",
+			required:  required,
+			ds:        nil,
+			wantPaths: []string{"plan/dispositions"},
+		},
+		{
+			name:     "undelivered id",
+			required: required,
+			ds:       []response.Disposition{{Finding: "p9-f9", Kind: response.DispositionFixed, Path: testObjectiveLocation}},
+			wantPaths: []string{
+				dispositionOne,      // p9-f9 not in the input
+				"plan/dispositions", // requiredID still missing
+			},
+		},
+		{
+			name:     "repeated id",
+			required: required,
+			ds: []response.Disposition{
+				{Finding: requiredID, Kind: response.DispositionFixed, Path: testObjectiveLocation},
+				{Finding: requiredID, Kind: response.DispositionFixed, Path: testObjectiveLocation},
+			},
+			wantPaths: []string{"plan/dispositions/disposition[2]"},
+		},
+		{
+			name:      "fixed with no path",
+			required:  required,
+			ds:        []response.Disposition{{Finding: requiredID, Kind: response.DispositionFixed}},
+			wantPaths: []string{dispositionOne},
+		},
+		{
+			name:      "fixed path does not resolve",
+			required:  required,
+			ds:        []response.Disposition{{Finding: requiredID, Kind: response.DispositionFixed, Path: "plan/delivery/tasks/task[9]"}},
+			wantPaths: []string{dispositionOne},
+		},
+		{
+			name:      "disputed with blank reason",
+			required:  required,
+			ds:        []response.Disposition{{Finding: requiredID, Kind: response.DispositionDisputed}},
+			wantPaths: []string{dispositionOne},
+		},
+		{
+			name:      "kind ignored",
+			required:  required,
+			ds:        []response.Disposition{{Finding: requiredID, Kind: response.DispositionKind("ignored")}},
+			wantPaths: []string{dispositionOne},
+		},
+		{
+			name:     "nothing required, nothing delivered",
+			required: nil,
+			ds:       nil,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			errs := checkDispositions(tt.required, tt.ds, []byte(planXML))
+			if len(errs) != len(tt.wantPaths) {
+				t.Fatalf("checkDispositions = %+v, want %d error(s) at %v", errs, len(tt.wantPaths), tt.wantPaths)
+			}
+			for i, wantPath := range tt.wantPaths {
+				if errs[i].Path != wantPath {
+					t.Errorf("errs[%d].Path = %q, want %q (full: %+v)", i, errs[i].Path, wantPath, errs)
+				}
+			}
+		})
+	}
 }
 
 // TestPostRunFailedWhatFor covers postRunFailedWhatFor's own table (design

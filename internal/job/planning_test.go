@@ -29,6 +29,11 @@ import (
 	"zing/internal/store"
 )
 
+// testObjectiveLocation is the plan element path this file's and
+// planning_cap_test.go's finding and disposition fixtures repeat
+// (goconst): a plan review major at the plan's own objective.
+const testObjectiveLocation = "plan/overview/objective"
+
 // ---- scripted and dispatching test runtimes --------------------------------
 
 // scriptedStep is one canned (RunResult, error) pair a scriptedRuntime
@@ -2304,7 +2309,7 @@ func TestPlanningHandler_ReviewTick_FloorResumeDeliversAboveFloorFindings(t *tes
 	planVersion, _ := seedCohort(t, s, ticketID, validPlan("Floor resume delivers above-floor findings."), validScenarios(2, "abovefloor"))
 
 	minor := finding(response.SeverityMinor, "plan/design/shape", "needs a name", "name it")
-	major := finding(response.SeverityMajor, "plan/overview/objective", "wrong goal", "restate it")
+	major := finding(response.SeverityMajor, testObjectiveLocation, "wrong goal", "restate it")
 	reviewRT := &scriptedRuntime{t: t, steps: []scriptedStep{readyStep(findingsResponse(minor, major), "abovefloor-sess-1")}}
 
 	firstCommit, err := runPlanning(t, s, claim(t, s, reviewRT, ticketID), ticketID)
@@ -2365,7 +2370,7 @@ func TestPlanningHandler_ReviewTick_OnlyAboveFloorFindingsPostsGate(t *testing.T
 	ticketID := seedFeatureTicketInPlanning(t, s)
 	planVersion, _ := seedCohort(t, s, ticketID, validPlan("Only above-floor findings post the gate."), validScenarios(2, "onlyabove"))
 
-	major := finding(response.SeverityMajor, "plan/overview/objective", "wrong goal", "restate it")
+	major := finding(response.SeverityMajor, testObjectiveLocation, "wrong goal", "restate it")
 	rt := &scriptedRuntime{t: t, steps: []scriptedStep{readyStep(findingsResponse(major), "onlyabove-sess")}}
 
 	commit, err := runPlanning(t, s, claim(t, s, rt, ticketID), ticketID)
@@ -2393,6 +2398,105 @@ func TestPlanningHandler_ReviewTick_OnlyAboveFloorFindingsPostsGate(t *testing.T
 	wantID := fmt.Sprintf("p%d-f1", planVersion)
 	if len(payload.Findings) != 1 || payload.Findings[0].ID != wantID {
 		t.Fatalf("stored findings = %+v, want exactly one finding with id %q", payload.Findings, wantID)
+	}
+}
+
+// TestPlanningHandler_Ready_MissingDispositionIsRejected proves ticket 72
+// task 2: once a floor loop has started for the current plan version (its
+// "planreview vV pending" marker is live), a ready plan that leaves out a
+// disposition for a required above-floor finding is rejected through the
+// existing "validation errors pending" resume -- not stored -- and the
+// message names the missing finding's id and says it needs a disposition.
+func TestPlanningHandler_Ready_MissingDispositionIsRejected(t *testing.T) {
+	t.Parallel()
+	s := newJobTestStore(t)
+	ticketID := seedFeatureTicketInPlanning(t, s)
+	const objective = "Missing disposition is rejected."
+	planVersion, _ := seedCohort(t, s, ticketID, validPlan(objective), validScenarios(2, "missingdisp"))
+
+	minor := finding(response.SeverityMinor, "plan/design/shape", "needs a name", "name it")
+	major := finding(response.SeverityMajor, testObjectiveLocation, "wrong goal", "restate it")
+	reviewRT := &scriptedRuntime{t: t, steps: []scriptedStep{readyStep(findingsResponse(minor, major), "missingdisp-sess-1")}}
+	reviewCommit, err := runPlanning(t, s, claim(t, s, reviewRT, ticketID), ticketID)
+	if err != nil {
+		t.Fatalf("review tick Run: %v", err)
+	}
+	apply(t, s, getTicket(t, s, ticketID), reviewCommit)
+
+	wantMajorID := fmt.Sprintf("p%d-f2", planVersion)
+
+	resp := readyResponse(validPlan(objective), validClaims(), validScenarios(2, "missingdisp"))
+	resumeRT := &scriptedRuntime{t: t, steps: []scriptedStep{readyStep(resp, "missingdisp-resume-sess")}}
+	commit, err := runPlanning(t, s, claim(t, s, resumeRT, ticketID), ticketID)
+	if err != nil {
+		t.Fatalf("resume Run: %v", err)
+	}
+	if len(commit.Artifacts) != 0 {
+		t.Fatalf("commit.Artifacts = %+v, want none (rejected before storing)", commit.Artifacts)
+	}
+	found := false
+	for _, m := range commit.Messages {
+		if strings.HasPrefix(m.Body, "validation errors pending run ") && strings.Contains(m.Body, wantMajorID) && strings.Contains(m.Body, "needs a disposition") {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("commit.Messages = %+v, want a validation errors pending message naming %s and needing a disposition", commit.Messages, wantMajorID)
+	}
+}
+
+// TestPlanningHandler_Ready_FixedDispositionIsStored proves ticket 72 task
+// 2's success path: a ready plan that carries a valid fixed disposition
+// for the one required major is stored as usual, with that disposition
+// round-tripping in the stored plan artifact, and posts no question (task
+// 4 adds questions, only for disputed).
+func TestPlanningHandler_Ready_FixedDispositionIsStored(t *testing.T) {
+	t.Parallel()
+	s := newJobTestStore(t)
+	ticketID := seedFeatureTicketInPlanning(t, s)
+	const objective = "Fixed disposition is stored."
+	planVersion, _ := seedCohort(t, s, ticketID, validPlan(objective), validScenarios(2, "fixeddisp"))
+
+	minor := finding(response.SeverityMinor, "plan/design/shape", "needs a name", "name it")
+	major := finding(response.SeverityMajor, testObjectiveLocation, "wrong goal", "restate it")
+	reviewRT := &scriptedRuntime{t: t, steps: []scriptedStep{readyStep(findingsResponse(minor, major), "fixeddisp-sess-1")}}
+	reviewCommit, err := runPlanning(t, s, claim(t, s, reviewRT, ticketID), ticketID)
+	if err != nil {
+		t.Fatalf("review tick Run: %v", err)
+	}
+	apply(t, s, getTicket(t, s, ticketID), reviewCommit)
+
+	wantMajorID := fmt.Sprintf("p%d-f2", planVersion)
+
+	plan := validPlan(objective)
+	plan.Dispositions = []response.Disposition{{Finding: wantMajorID, Kind: response.DispositionFixed, Path: testObjectiveLocation}}
+	resp := readyResponse(plan, validClaims(), validScenarios(2, "fixeddisp"))
+	resumeRT := &scriptedRuntime{t: t, steps: []scriptedStep{readyStep(resp, "fixeddisp-resume-sess")}}
+	commit, err := runPlanning(t, s, claim(t, s, resumeRT, ticketID), ticketID)
+	if err != nil {
+		t.Fatalf("resume Run: %v", err)
+	}
+	for _, m := range commit.Messages {
+		if m.Type == testMsgTypeQuestion {
+			t.Errorf("commit.Messages contains a question %+v, want none (only disputed findings post questions)", m)
+		}
+	}
+	var planPayload json.RawMessage
+	for _, a := range commit.Artifacts {
+		if a.Type == testArtifactTypePlan {
+			planPayload = a.Payload
+		}
+	}
+	if planPayload == nil {
+		t.Fatalf("commit.Artifacts = %+v, want a stored plan artifact", commit.Artifacts)
+	}
+	var stored response.Plan
+	if err := json.Unmarshal(planPayload, &stored); err != nil {
+		t.Fatalf("unmarshal stored plan payload: %v", err)
+	}
+	wantDispositions := []response.Disposition{{Finding: wantMajorID, Kind: response.DispositionFixed, Path: testObjectiveLocation}}
+	if !slices.Equal(stored.Dispositions, wantDispositions) {
+		t.Errorf("stored plan dispositions = %+v, want %+v", stored.Dispositions, wantDispositions)
 	}
 }
 

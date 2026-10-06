@@ -933,6 +933,15 @@ func readyCommit(ctx context.Context, t store.Ticket, d Deps, rr runResult, resp
 	if err != nil {
 		return store.HandlerCommit{}, fmt.Errorf("job: planning: ready: %w", err)
 	}
+	required, err := dispositionsRequired(ctx, t, d)
+	if err != nil {
+		return store.HandlerCommit{}, fmt.Errorf("job: planning: ready: %w", err)
+	}
+	planXML, err := planXMLFor(resp.Plan)
+	if err != nil {
+		return store.HandlerCommit{}, fmt.Errorf("job: planning: ready: %w", err)
+	}
+	errs = append(errs, checkDispositions(required, resp.Plan.Dispositions, []byte(planXML))...)
 	if len(errs) > 0 {
 		c.Messages = []store.Message{{
 			TicketID: t.ID, Type: msgTypeUpdate, Author: authorSystem,
@@ -2329,6 +2338,90 @@ func storedPlanreviewFindings(ctx context.Context, t store.Ticket, d Deps) ([]re
 		return nil, fmt.Errorf("job: planning: stored planreview findings: unmarshal planreview artifact: %w", unmarshalErr)
 	}
 	return payload.Findings, nil
+}
+
+// dispositionsRequired returns the above-floor findings, with ids, of the
+// current cohort's planreview artifact when a floor loop started for that
+// version (its pending marker exists); nil, nil when there is no cohort or
+// no loop started. It does not depend on which path produced the ready
+// plan: the pending marker, not the delivered one, is the one source
+// readyCommit can read regardless of whether maybeResumeFloorFindings,
+// gateRejectExtra, or the cap_loops retry produced this turn's resume.
+func dispositionsRequired(ctx context.Context, t store.Ticket, d Deps) ([]response.Finding, error) {
+	cohort, ok, err := d.Store.CurrentCohort(ctx, t.ID)
+	if err != nil {
+		return nil, fmt.Errorf("job: planning: dispositions required: current cohort: %w", err)
+	}
+	if !ok {
+		return nil, nil
+	}
+	_, looped, err := d.Store.Marker(ctx, t.ID, planreviewPendingMarker(cohort.PlanVersion))
+	if err != nil {
+		return nil, fmt.Errorf("job: planning: dispositions required: pending marker: %w", err)
+	}
+	if !looped {
+		return nil, nil
+	}
+	findings, err := storedPlanreviewFindings(ctx, t, d)
+	if err != nil {
+		return nil, err
+	}
+	var required []response.Finding
+	for _, f := range findings {
+		if f.Severity.Rank() > d.Floor.Rank() && f.ID != "" {
+			required = append(required, f)
+		}
+	}
+	return required, nil
+}
+
+// checkDispositions checks a ready plan's dispositions against required:
+// one valid entry per required finding, none for any other id (design
+// section 6.5, ticket 72 task 2). The default kind branch is defensive:
+// Layer 1 (response.validate.go's Values enum check) already rejects an
+// unknown DispositionKind as invalid output before this runs; only
+// TestCheckDispositions, calling this directly, reaches it.
+func checkDispositions(required []response.Finding, ds []response.Disposition, planXML []byte) []*response.PathError {
+	byID := make(map[string]response.Finding, len(required))
+	for _, f := range required {
+		byID[f.ID] = f
+	}
+	var errs []*response.PathError
+	seen := make(map[string]bool, len(ds))
+	for i, disp := range ds {
+		path := fmt.Sprintf("plan/dispositions/disposition[%d]", i+1)
+		if _, ok := byID[disp.Finding]; !ok {
+			errs = append(errs, &response.PathError{Path: path, Msg: fmt.Sprintf("finding %s was not in the needs_disposition input; remove this disposition", disp.Finding)})
+			continue
+		}
+		if seen[disp.Finding] {
+			errs = append(errs, &response.PathError{Path: path, Msg: fmt.Sprintf("finding %s already has a disposition; keep one", disp.Finding)})
+			continue
+		}
+		seen[disp.Finding] = true
+		switch disp.Kind {
+		case response.DispositionFixed:
+			if disp.Path == "" {
+				errs = append(errs, &response.PathError{Path: path, Msg: "a fixed disposition names the plan element path you changed"})
+			} else if !response.ResolvesInPlan(planXML, disp.Path) {
+				errs = append(errs, &response.PathError{Path: path, Msg: fmt.Sprintf("path %s does not resolve in this plan", disp.Path)})
+			}
+		case response.DispositionDisputed:
+			if strings.TrimSpace(disp.Reason) == "" {
+				errs = append(errs, &response.PathError{Path: path, Msg: "a disputed disposition gives the reason the finding is wrong"})
+			}
+		default:
+			errs = append(errs, &response.PathError{Path: path, Msg: fmt.Sprintf("kind %q must be fixed or disputed", disp.Kind)})
+		}
+	}
+	for _, f := range required {
+		if !seen[f.ID] {
+			errs = append(errs, &response.PathError{Path: "plan/dispositions", Msg: fmt.Sprintf(
+				"finding %s (%s at %s: %s) needs a disposition: fixed with the path you changed, or disputed with a reason",
+				f.ID, f.Severity, f.Location, f.Text)})
+		}
+	}
+	return errs
 }
 
 // resolveCapResumesEscalation is section 6.7's cap_resumes retry/back row

@@ -125,10 +125,20 @@ type ReadyResponse struct {
 
 // The plan. Four parts. The console shows each part as a heading and each child as a sub-heading.
 type Plan struct {
-	Overview Overview `xml:"overview" json:"overview" doc:"for the owner first; a reader with no prior context must follow it"`
-	Design   Design   `xml:"design"   json:"design"`
-	Delivery Delivery `xml:"delivery" json:"delivery"`
-	Review   Review   `xml:"review"   json:"review"`
+	Overview     Overview      `xml:"overview"                json:"overview" doc:"for the owner first; a reader with no prior context must follow it"`
+	Design       Design        `xml:"design"                  json:"design"`
+	Delivery     Delivery      `xml:"delivery"                json:"delivery"`
+	Review       Review        `xml:"review"                  json:"review"`
+	Dispositions []Disposition `xml:"dispositions>disposition" json:"dispositions,omitempty" doc:"one per finding in the needs_disposition input, or named in a validation message; leave out when there is none"`
+}
+
+// Disposition is the planner's fixed-or-disputed call on one finding the
+// planning resume's needs_disposition input required an answer for.
+type Disposition struct {
+	Finding string          `xml:"finding,attr" json:"finding" jsonschema:"pattern=^p[0-9]+-f[0-9]+$" doc:"the id of a finding in the needs_disposition input, such as p2-f1"`
+	Kind    DispositionKind `xml:"kind,attr"    json:"kind"`
+	Path    string          `xml:"path,attr,omitempty" json:"path,omitempty" doc:"fixed only: the plan element path you changed, such as plan/delivery/tasks/task[2]"`
+	Reason  string          `xml:",chardata"    json:"reason,omitempty" doc:"disputed only: why the finding is wrong"`
 }
 
 type Overview struct {
