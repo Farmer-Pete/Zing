@@ -143,9 +143,9 @@ func inboxCard(item store.InboxItem) templ.Component {
 			return templ_7745c5c3_Err
 		}
 		var templ_7745c5c3_Var6 string
-		templ_7745c5c3_Var6, templ_7745c5c3_Err = templ.JoinStringErrs(item.Ticket.TrackerRef)
+		templ_7745c5c3_Var6, templ_7745c5c3_Err = templ.JoinStringErrs(displayRef(item.Ticket.TrackerRef))
 		if templ_7745c5c3_Err != nil {
-			return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/console/templates/inbox.templ`, Line: 37, Col: 45}
+			return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/console/templates/inbox.templ`, Line: 37, Col: 57}
 		}
 		_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ.EscapeString(templ_7745c5c3_Var6))
 		if templ_7745c5c3_Err != nil {

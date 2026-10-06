@@ -194,6 +194,88 @@ func projectSections(tickets []store.Ticket, order, terminal []string) (live, cl
 	return live, closed
 }
 
+// groupAttempts folds tickets by issue (#65, store.SplitAttemptRef): each
+// base ref gets one head -- the attempt-0 ticket, or the highest-attempt
+// ticket when no live one exists -- and every other ticket sharing that
+// base lands in earlier[head.ID], sorted oldest attempt first. Heads come
+// back in the order their base ref first appears in tickets, so the
+// project view's own issue-number ordering survives grouping.
+func groupAttempts(tickets []store.Ticket) (heads []store.Ticket, earlier map[int64][]store.Ticket) {
+	type group struct {
+		head     store.Ticket
+		hasHead  bool
+		attempts []store.Ticket
+	}
+	order := make([]string, 0, len(tickets))
+	groups := make(map[string]*group, len(tickets))
+	for i := range tickets {
+		base, attempt := store.SplitAttemptRef(tickets[i].TrackerRef)
+		g, ok := groups[base]
+		if !ok {
+			g = &group{}
+			groups[base] = g
+			order = append(order, base)
+		}
+		if attempt == 0 {
+			g.head = tickets[i]
+			g.hasHead = true
+		} else {
+			g.attempts = append(g.attempts, tickets[i])
+		}
+	}
+	earlier = make(map[int64][]store.Ticket)
+	for _, base := range order {
+		g := groups[base]
+		attempts := g.attempts
+		sort.SliceStable(attempts, func(i, j int) bool {
+			_, ai := store.SplitAttemptRef(attempts[i].TrackerRef)
+			_, aj := store.SplitAttemptRef(attempts[j].TrackerRef)
+			return ai < aj
+		})
+		head := g.head
+		if !g.hasHead {
+			head = attempts[len(attempts)-1]
+			attempts = attempts[:len(attempts)-1]
+		}
+		heads = append(heads, head)
+		if len(attempts) > 0 {
+			earlier[head.ID] = attempts
+		}
+	}
+	return heads, earlier
+}
+
+// actionsFor builds t's action bar (#65): Abandon wherever store.CanAbandon
+// accepts t.State, Restart per canRestart, and Held while t is claimed. It
+// calls store.CanAbandon and store.SplitAttemptRef directly, keeping no
+// state list of its own, so the store's own abandonable-states list stays
+// the single source of truth.
+func actionsFor(t store.Ticket, liveSuccessor bool) templates.TicketActions {
+	base, _ := store.SplitAttemptRef(t.TrackerRef)
+	return templates.TicketActions{
+		Abandon: store.CanAbandon(t.State),
+		Restart: canRestart(t.State, liveSuccessor),
+		Held:    t.ClaimOwner != nil,
+		Ref:     base,
+	}
+}
+
+// ticketActions builds t's action bar (#65): every state but abandoned
+// skips the extra read and calls actionsFor directly; an abandoned ticket
+// looks up its own base ref through liveSuccessorTicket to tell whether a
+// live successor already exists at it.
+func (c *console) ticketActions(ctx context.Context, t store.Ticket) (templates.TicketActions, error) {
+	if t.State != ticketStateAbandoned {
+		return actionsFor(t, false), nil
+	}
+	base, _ := store.SplitAttemptRef(t.TrackerRef)
+	_, found, err := c.liveSuccessorTicket(ctx, t.ProjectID, t.ID, base)
+	if err != nil {
+		return templates.TicketActions{}, fmt.Errorf("console: ticket actions for ticket %d: %w", t.ID, err)
+	}
+	return actionsFor(t, found), nil
+}
+
 // mainComponent builds the #main region for the current view (design
 // section 6.3, 6.5): Inbox, Recent, Feed, and Project each read straight
 // from their store method; Thread additionally reads the ticket and its
@@ -232,9 +314,10 @@ func (c *console) mainComponent(ctx context.Context, view string, open, project 
 		if err != nil {
 			return nil, err
 		}
-		live, closed := projectSections(tickets, c.stateOrder(), c.terminalStates())
+		heads, earlier := groupAttempts(tickets)
+		live, closed := projectSections(heads, c.stateOrder(), c.terminalStates())
 		slog.DebugContext(ctx, "console: project sections", "project_id", project, "live", len(live), "closed", len(closed))
-		return templates.Project(project, live, closed), nil
+		return templates.Project(project, live, closed, earlier), nil
 	case viewThread:
 		return c.threadComponent(ctx, open)
 	default:
@@ -304,7 +387,7 @@ func displayFeedMessages(messages []store.MessageRow) ([]templates.FeedRow, erro
 // 6.6, carried over from Package 3's patchThread guard).
 func (c *console) threadComponent(ctx context.Context, open int64) (templ.Component, error) {
 	if open <= 0 {
-		return templates.Thread(nil, nil, templates.WaitProgress{}, ""), nil
+		return templates.Thread(nil, nil, templates.WaitProgress{}, "", templates.TicketActions{}), nil
 	}
 	ticket, err := c.store.GetTicket(ctx, open)
 	switch {
@@ -342,9 +425,13 @@ func (c *console) threadComponent(ctx context.Context, open int64) (templ.Compon
 		if bannerErr != nil {
 			return nil, bannerErr
 		}
-		return templates.Thread(&ticket, threadRows, buildWaitProgress(&ticket, rows, conv), banner), nil
+		actions, actionsErr := c.ticketActions(ctx, ticket)
+		if actionsErr != nil {
+			return nil, actionsErr
+		}
+		return templates.Thread(&ticket, threadRows, buildWaitProgress(&ticket, rows, conv), banner, actions), nil
 	case errors.Is(err, sql.ErrNoRows):
-		return templates.Thread(nil, nil, templates.WaitProgress{}, ""), nil
+		return templates.Thread(nil, nil, templates.WaitProgress{}, "", templates.TicketActions{}), nil
 	default:
 		return nil, err
 	}

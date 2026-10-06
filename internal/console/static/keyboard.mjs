@@ -679,6 +679,26 @@ export function reviewNoteTargets(questions) {
 }
 
 /**
+ * ticketActionConfirmText writes the in-page confirm dialog's line for the
+ * thread view's Abandon and Restart buttons (Q3: an in-page dialog, never
+ * window.confirm), naming the ticket's issue ref. Any other action returns
+ * the empty string, since the dialog only ever opens for these two.
+ *
+ * @param {string} action - 'abandon' or 'restart'
+ * @param {string} ref - the issue ref the thread's action bar carries
+ * @returns {string}
+ */
+export function ticketActionConfirmText(action, ref) {
+	if (action === 'abandon') {
+		return `Abandon #${ref}? Its thread stays as history.`;
+	}
+	if (action === 'restart') {
+		return `Restart #${ref} from planning? This ticket is abandoned and a new one starts.`;
+	}
+	return '';
+}
+
+/**
  * skipConflicted filters a conflicted reply box out of whatever list
  * console.js is about to save or send (ticket #43, cause 2, Q5: a box that
  * just got a "changed in another tab" note stays neither saved nor sent

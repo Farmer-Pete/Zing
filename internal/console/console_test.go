@@ -106,6 +106,12 @@ const (
 	testStateQueued            = "queued"
 	testQuestionStateOpen      = "open"
 	testQuestionStateAnswered  = "answered"
+
+	// testRetiredRef5First is ref "5"'s first retired attempt (#65): the
+	// tracker_ref a restart or pickup gives ticket 5's old row once a fresh
+	// ticket takes "5", shared by pickup_test.go and ticket_actions_test.go
+	// so the literal is not repeated across the package (goconst).
+	testRetiredRef5First = "5-abandoned-1"
 )
 
 var testProject = store.Project{

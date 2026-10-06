@@ -52,6 +52,7 @@ import {
 	sendResultWithUnsent,
 	sendTargets,
 	sendConfirmText,
+	ticketActionConfirmText,
 	reviewNoteTargets,
 	reviewNoteWarningText,
 	skipConflicted,
@@ -846,6 +847,15 @@ test('sendConfirmText: names the one question or lists several', () => {
 	assert.equal(sendConfirmText(['Q6', 'Q7', 'Q9']), 'Send 3 replies on Q6, Q7, Q9?');
 });
 
+test('ticketActionConfirmText: names the action and the issue', () => {
+	assert.equal(ticketActionConfirmText('abandon', '41'), 'Abandon #41? Its thread stays as history.');
+	assert.equal(
+		ticketActionConfirmText('restart', '41'),
+		'Restart #41 from planning? This ticket is abandoned and a new one starts.',
+	);
+	assert.equal(ticketActionConfirmText('other', '41'), '');
+});
+
 test('sendConfirmText: a true warn argument appends the review note warning', () => {
 	assert.equal(sendConfirmText(['Q6'], true), `Send 1 reply on Q6? ${reviewNoteWarningText}`);
 	assert.equal(
@@ -1417,4 +1427,46 @@ test('handleKeyEvent: g p calls run with the project action', () => {
 	handleKeyEvent(state, { key: 'p', target: { tagName: 'BODY' }, preventDefault: () => {} }, 10, run);
 
 	assert.deepEqual(calls, ['nav-project']);
+});
+
+// ---- ticket actions confirm in-page (ticket #65, Q3: never window.confirm) ----
+//
+// console.js itself is not loaded or unit-tested under Node (file-top
+// comment above): this test instead reads its source text directly, the
+// only way to pin that installTicketActions' abandon/restart buttons always
+// route through openConfirmDialog's in-page dialog rather than some other,
+// easier-to-add-by-accident confirm path (e.g. window.confirm).
+const consoleJsSource = readFileSync(new URL('./console.js', import.meta.url), 'utf8');
+
+// functionBody extracts name's balanced-brace body out of source, so the
+// first assertion below can look inside installTicketActions specifically
+// rather than the whole file.
+function functionBody(source, name) {
+	const match = source.match(new RegExp(`function ${name}\\s*\\([^)]*\\)\\s*\\{`));
+	assert.ok(match, `function ${name} not found`);
+	let depth = 1;
+	let i = match.index + match[0].length;
+	while (depth > 0) {
+		if (source[i] === '{') {
+			depth++;
+		} else if (source[i] === '}') {
+			depth--;
+		}
+		i++;
+	}
+	return source.slice(match.index + match[0].length, i - 1);
+}
+
+test('ticket actions confirm in-page', () => {
+	const body = functionBody(consoleJsSource, 'installTicketActions');
+	assert.match(body, /openConfirmDialog\(/);
+
+	for (const line of consoleJsSource.split('\n')) {
+		if (line.includes('openConfirmDialog(')) {
+			continue;
+		}
+		const lower = line.toLowerCase();
+		const callsConfirmDirectly = lower.includes('confirm(') && (lower.includes('abandon') || lower.includes('restart'));
+		assert.ok(!callsConfirmDirectly, `line bypasses openConfirmDialog: ${line}`);
+	}
 });
