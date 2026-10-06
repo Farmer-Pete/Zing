@@ -549,6 +549,7 @@ func TestDecideCIRerun(t *testing.T) {
 		failed         []failedCheck
 		failedStatuses int
 		prior          []priorRerun
+		inFlight       map[int64]bool
 		want           rerunDecision
 	}{
 		{
@@ -695,12 +696,46 @@ func TestDecideCIRerun(t *testing.T) {
 			failedStatuses: 1,
 			want:           rerunDecision{Action: rerunFix},
 		},
+		{
+			name:     "a sibling job still running in the same workflow run waits",
+			failed:   []failedCheck{mkFailedCheck("ci", 1, 10, 100, ghFailure, "--- FAIL: TestX", nil)},
+			inFlight: map[int64]bool{10: true},
+			want:     rerunDecision{Action: rerunWait},
+		},
+		{
+			name: "two failed checks sharing a workflow run only plan one re-run",
+			failed: []failedCheck{
+				mkFailedCheck("a", 1, 10, 100, ghFailure, "--- FAIL: TestA", nil),
+				mkFailedCheck("b", 2, 10, 101, ghFailure, "--- FAIL: TestB", nil),
+			},
+			want: rerunDecision{
+				Action: rerunNow,
+				Reruns: []plannedRerun{{
+					Event: response.CheckRerunEvent{Check: "a", SHA: ciSHA, RunID: 10, CheckRunID: 1, Reason: response.RerunReasonFlaky, Tests: []string{"TestA"}},
+					JobID: 100,
+				}},
+			},
+		},
+		{
+			name:   "an infra conclusion with a too-long name escalates without re-running",
+			failed: []failedCheck{mkFailedCheck(strings.Repeat("x", 201), 1, 10, 100, ghCancelled, "", nil)},
+			want: rerunDecision{
+				Action: rerunEscalate,
+				What:   rerunNameInvalidWhat,
+				Why:    "a check ended cancelled on bbbbbbb with a name 201 runes long, so Zing cannot record a re-run of it",
+			},
+		},
+		{
+			name:   "a flaky failure with a too-long name gives fix instead of re-running",
+			failed: []failedCheck{mkFailedCheck(strings.Repeat("x", 201), 1, 10, 100, ghFailure, "--- FAIL: TestX", nil)},
+			want:   rerunDecision{Action: rerunFix},
+		},
 	}
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			got := decideCIRerun(decideCIRerunNow, ciSHA, tc.failed, tc.failedStatuses, tc.prior)
+			got := decideCIRerun(decideCIRerunNow, ciSHA, tc.failed, tc.failedStatuses, tc.prior, tc.inFlight)
 			if diff := cmp.Diff(tc.want, got, cmpopts.EquateEmpty()); diff != "" {
 				t.Errorf("decideCIRerun() mismatch (-want +got):\n%s", diff)
 			}
@@ -857,12 +892,12 @@ func TestRerunPassedNotes(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			got, err := rerunPassedNotes(99, ciSHA, tc.runs, tc.reruns, tc.passed)
+			got, events, err := rerunPassedNotes(99, ciSHA, tc.runs, tc.reruns, tc.passed)
 			if err != nil {
 				t.Fatalf("rerunPassedNotes: %v", err)
 			}
-			if len(got) != tc.wantLen {
-				t.Fatalf("len(got) = %d, want %d", len(got), tc.wantLen)
+			if len(got) != tc.wantLen || len(events) != tc.wantLen {
+				t.Fatalf("len(got) = %d, len(events) = %d, want %d", len(got), len(events), tc.wantLen)
 			}
 			if tc.wantLen == 0 {
 				return
@@ -875,6 +910,9 @@ func TestRerunPassedNotes(t *testing.T) {
 			if !cmp.Equal(payload, want) {
 				t.Errorf("payload = %+v, want %+v", payload, want)
 			}
+			if !cmp.Equal(events[0], want) {
+				t.Errorf("events[0] = %+v, want %+v", events[0], want)
+			}
 			if got[0].TicketID != 99 {
 				t.Errorf("TicketID = %d, want 99", got[0].TicketID)
 			}
@@ -883,6 +921,39 @@ func TestRerunPassedNotes(t *testing.T) {
 			}
 		})
 	}
+
+	t.Run("the newest of several events for one check wins its Tests", func(t *testing.T) {
+		t.Parallel()
+		older := response.CheckRerunEvent{Check: "ci", SHA: ciSHA, RunID: 10, CheckRunID: 1, Reason: response.RerunReasonFlaky, Tests: []string{"TestOld"}}
+		newer := response.CheckRerunEvent{Check: "ci", SHA: ciSHA, RunID: 11, CheckRunID: 2, Reason: response.RerunReasonFlaky, Tests: []string{"TestNew"}}
+		runs := []orchestrator.CheckRun{{ID: 3, Name: "ci", Status: ghCompleted, Conclusion: ghSuccess}}
+
+		_, events, err := rerunPassedNotes(99, ciSHA, runs, []response.CheckRerunEvent{older, newer}, nil)
+		if err != nil {
+			t.Fatalf("rerunPassedNotes: %v", err)
+		}
+		if len(events) != 1 || !cmp.Equal(events[0].Tests, newer.Tests) {
+			t.Fatalf("events = %+v, want Tests %v", events, newer.Tests)
+		}
+	})
+
+	t.Run("messages are sorted by check name", func(t *testing.T) {
+		t.Parallel()
+		ciEvent := response.CheckRerunEvent{Check: "ci", SHA: ciSHA, RunID: 10, CheckRunID: 1, Reason: response.RerunReasonFlaky}
+		zzEvent := response.CheckRerunEvent{Check: "zz", SHA: ciSHA, RunID: 20, CheckRunID: 2, Reason: response.RerunReasonFlaky}
+		runs := []orchestrator.CheckRun{
+			{ID: 3, Name: "zz", Status: ghCompleted, Conclusion: ghSuccess},
+			{ID: 4, Name: "ci", Status: ghCompleted, Conclusion: ghSuccess},
+		}
+
+		_, events, err := rerunPassedNotes(99, ciSHA, runs, []response.CheckRerunEvent{zzEvent, ciEvent}, nil)
+		if err != nil {
+			t.Fatalf("rerunPassedNotes: %v", err)
+		}
+		if len(events) != 2 || events[0].Check != "ci" || events[1].Check != "zz" {
+			t.Fatalf("events = %+v, want ci then zz", events)
+		}
+	})
 }
 
 // -----------------------------------------------------------------------

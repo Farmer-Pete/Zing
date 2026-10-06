@@ -663,11 +663,34 @@ func (g *GitHubClient) CommentOnPR(ctx context.Context, owner, repo string, numb
 	return nil
 }
 
+// ErrWorkflowRunIncomplete is RerunJob's own classification of GitHub's
+// refusal to re-run a job whose workflow run has not finished yet
+// (observed: a 403 reading "This workflow is already running"). GitHub
+// requires every job in a run to be complete before any one of them can be
+// re-run, so this can happen even after job.decideCIRerun's own checks
+// (workflowRunsInFlight, and planning at most one re-run per run id per
+// tick), on a race between reading CI and calling RerunJob: another job in
+// the same run finished and GitHub re-queued the run, or a human re-ran it
+// first. job.shipHandler.pollRerun reschedules on it rather than
+// escalating, the same as ErrGitHubUnavailable.
+var ErrWorkflowRunIncomplete = errors.New("orchestrator: workflow run not complete yet")
+
+// workflowRunIncompletePattern matches GitHub's own wording, case
+// insensitive, for the 403 or 409 RerunJob gets back when a job's workflow
+// run has not finished (observed: "This workflow is already running").
+var workflowRunIncompletePattern = regexp.MustCompile(`(?i)workflow.*(already running|is running|not (yet )?complete)`)
+
 // RerunJob re-runs one Actions job (POST
 // /repos/OWNER/REPO/actions/jobs/JOB-ID/rerun), the per-job form of
 // "re-run failed jobs" (job.Checks.RerunJob).
 func (g *GitHubClient) RerunJob(ctx context.Context, owner, repo string, jobID int64) error {
 	if _, err := g.c.Actions.RerunJobByID(ctx, owner, repo, jobID); err != nil {
+		if ere, ok := errors.AsType[*github.ErrorResponse](err); ok && ere.Response != nil {
+			code := ere.Response.StatusCode
+			if (code == http.StatusForbidden || code == http.StatusConflict) && workflowRunIncompletePattern.MatchString(ere.Message) {
+				return ErrWorkflowRunIncomplete
+			}
+		}
 		return classifyGitHubErr(err)
 	}
 	return nil

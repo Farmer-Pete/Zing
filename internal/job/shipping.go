@@ -708,7 +708,7 @@ func (h shipHandler) poll(ctx context.Context, t store.Ticket, d Deps) (store.Ha
 
 	var rd rerunDecision
 	if result.State == CIFailed {
-		rd, err = h.ciRerunDecision(ctx, t, d, proj, result, local)
+		rd, err = h.ciRerunDecision(ctx, t, d, proj, result, runs, local)
 		if err != nil {
 			return store.HandlerCommit{}, err
 		}
@@ -771,14 +771,39 @@ func (h shipHandler) pollRoute(ctx context.Context, t store.Ticket, d Deps, proj
 	}
 }
 
+// checkRerunEvents reads every check_rerun event on sha and decodes it,
+// keeping each row's id and CreatedAt: ciRerunDecision needs both (the id
+// against the retry marker, the time against rerunAppearWait), and
+// rerunNotesFor needs neither but shares the same read and decode.
+func checkRerunEvents(ctx context.Context, d Deps, ticketID int64, sha string) ([]priorRerun, error) {
+	rows, err := d.Store.Events(ctx, ticketID, store.EventKindCheckRerun, store.EventFilter{SHA: sha})
+	if err != nil {
+		return nil, fmt.Errorf("job: shipping: poll: check_rerun events: %w", err)
+	}
+	out := make([]priorRerun, 0, len(rows))
+	for i := range rows {
+		var ev response.CheckRerunEvent
+		if err := json.Unmarshal(rows[i].Payload, &ev); err != nil {
+			return nil, fmt.Errorf("job: shipping: poll: check_rerun event %d: %w", rows[i].ID, err)
+		}
+		at := time.Time{}
+		if rows[i].CreatedAt != nil {
+			at = rows[i].CreatedAt.UTC()
+		}
+		out = append(out, priorRerun{Event: ev, ID: rows[i].ID, At: at})
+	}
+	return out, nil
+}
+
 // ciRerunDecision reads the failed checks' own facts and logs
 // (readFailedChecks), this sha's own check_rerun events written since the
 // newest "retry requested" marker (Retry resets every check's own budget,
-// #91's Q1), and returns decideCIRerun's verdict with Text set to
-// ciLogTextFrom's text -- computed here, once, so both the fix row and a
-// loops_exhausted escalation built from it (pollCIFailed) see the same
-// text this tick decided on.
-func (h shipHandler) ciRerunDecision(ctx context.Context, t store.Ticket, d Deps, proj Project, result CIResult, sha string) (rerunDecision, error) {
+// #91's Q1), the workflow runs still in flight (workflowRunsInFlight), and
+// returns decideCIRerun's verdict with Text set to ciLogTextFrom's text --
+// computed here, once, so both the fix row and a loops_exhausted
+// escalation built from it (pollCIFailed) see the same text this tick
+// decided on.
+func (h shipHandler) ciRerunDecision(ctx context.Context, t store.Ticket, d Deps, proj Project, result CIResult, runs []orchestrator.CheckRun, sha string) (rerunDecision, error) {
 	failed := readFailedChecks(ctx, proj.Checks, proj.Owner, proj.Repo, result.FailedRuns)
 	text := ciLogTextFrom(failed, result.FailedStatuses)
 
@@ -787,28 +812,19 @@ func (h shipHandler) ciRerunDecision(ctx context.Context, t store.Ticket, d Deps
 		return rerunDecision{}, fmt.Errorf("job: shipping: poll: retry requested marker: %w", err)
 	}
 
-	rows, err := d.Store.Events(ctx, t.ID, store.EventKindCheckRerun, store.EventFilter{SHA: sha})
+	rows, err := checkRerunEvents(ctx, d, t.ID, sha)
 	if err != nil {
-		return rerunDecision{}, fmt.Errorf("job: shipping: poll: check_rerun events: %w", err)
+		return rerunDecision{}, err
 	}
-
 	prior := make([]priorRerun, 0, len(rows))
-	for i := range rows {
-		if hasRetry && rows[i].ID <= retryRow.ID {
+	for _, p := range rows {
+		if hasRetry && p.ID <= retryRow.ID {
 			continue
 		}
-		var ev response.CheckRerunEvent
-		if err := json.Unmarshal(rows[i].Payload, &ev); err != nil {
-			return rerunDecision{}, fmt.Errorf("job: shipping: poll: check_rerun event %d: %w", rows[i].ID, err)
-		}
-		at := time.Time{}
-		if rows[i].CreatedAt != nil {
-			at = rows[i].CreatedAt.UTC()
-		}
-		prior = append(prior, priorRerun{Event: ev, At: at})
+		prior = append(prior, p)
 	}
 
-	rd := decideCIRerun(time.Now().UTC(), sha, failed, len(result.FailedStatuses), prior)
+	rd := decideCIRerun(time.Now().UTC(), sha, failed, len(result.FailedStatuses), prior, workflowRunsInFlight(runs))
 	rd.Text = text
 	return rd, nil
 }
@@ -819,27 +835,31 @@ const ciRerunAPIErrorWhat = "Zing could not re-run a failed CI check"
 
 // pollRerun re-runs every planned job in order (design shape, "Per-check
 // rule"): RerunJob first, then the check_rerun event recording it, so a
-// crash between the two never records a re-run GitHub never made. A rate
-// limit or an unavailable GitHub reschedules this tick exactly as
-// pollReadFailure's own two such rows do, keeping the check_rerun events
-// already written this tick attached to the commit -- a re-run GitHub did
-// make before the one that failed must not go unrecorded, or the next
-// tick's budget check would count it as never having happened and could
-// re-run the same job a second time. Any other RerunJob failure escalates
-// instead, carrying those same events.
+// crash between the two never records a re-run GitHub never made. A read
+// failure pollReadFailure itself knows how to classify (an unavailable
+// GitHub, a rate limit, or a refused token) is handled the same way it
+// handles any other POLL read, keeping the check_rerun events already
+// written this tick attached to the commit -- a re-run GitHub did make
+// before the one that failed must not go unrecorded, or the next tick's
+// budget check would count it as never having happened and could re-run
+// the same job a second time. A job whose workflow run GitHub says is not
+// complete yet (orchestrator.ErrWorkflowRunIncomplete; decideCIRerun's own
+// per-tick dedupe and workflowRunsInFlight check narrow this to a race
+// between reading CI and calling RerunJob, r2f1) reschedules the same way.
+// Any other RerunJob failure escalates instead, carrying those same
+// events.
 func (h shipHandler) pollRerun(ctx context.Context, t store.Ticket, d Deps, proj Project, fp string, plan []plannedRerun) (store.HandlerCommit, error) {
 	written := make([]store.Message, 0, len(plan))
 	for _, p := range plan {
 		if err := proj.Checks.RerunJob(ctx, proj.Owner, proj.Repo, p.JobID); err != nil {
-			if errors.Is(err, orchestrator.ErrGitHubUnavailable) {
-				slog.Warn("ci check re-run dropped", "ticket_id", t.ID, "check", p.Event.Check, "job_id", p.JobID, "reruns_dropped", len(written), "error", err)
+			if errors.Is(err, orchestrator.ErrWorkflowRunIncomplete) {
+				slog.Info("ci check re-run deferred, workflow run not complete yet", "ticket_id", t.ID, "check", p.Event.Check, "job_id", p.JobID, "reruns_recorded", len(written), "error", err)
 				c := pollScheduleOnly(t, d, time.Time{})
 				c.Messages = written
 				return c, nil
 			}
-			if rle, ok := errors.AsType[orchestrator.RateLimitedError](err); ok {
-				slog.Warn("ci check re-run dropped", "ticket_id", t.ID, "check", p.Event.Check, "job_id", p.JobID, "reruns_dropped", len(written), "error", err)
-				c := pollScheduleOnly(t, d, rle.ResetAt)
+			if c, handled := pollReadFailure(t, d, false, err); handled {
+				slog.Warn("ci check re-run dropped", "ticket_id", t.ID, "check", p.Event.Check, "job_id", p.JobID, "reruns_recorded", len(written), "error", err)
 				c.Messages = written
 				return c, nil
 			}
@@ -874,22 +894,18 @@ func (h shipHandler) pollRerun(ctx context.Context, t store.Ticket, d Deps, proj
 // earlier tick can pass on any later one, whichever row that tick's own
 // CI result otherwise routes to.
 func (h shipHandler) rerunNotesFor(ctx context.Context, t store.Ticket, d Deps, runs []orchestrator.CheckRun, sha string) ([]store.Message, error) {
-	rerunRows, err := d.Store.Events(ctx, t.ID, store.EventKindCheckRerun, store.EventFilter{SHA: sha})
+	rerunRows, err := checkRerunEvents(ctx, d, t.ID, sha)
 	if err != nil {
-		return nil, fmt.Errorf("job: shipping: poll: check_rerun events: %w", err)
+		return nil, err
 	}
+	reruns := make([]response.CheckRerunEvent, len(rerunRows))
+	for i, p := range rerunRows {
+		reruns[i] = p.Event
+	}
+
 	passedRows, err := d.Store.Events(ctx, t.ID, store.EventKindCheckRerunPassed, store.EventFilter{SHA: sha})
 	if err != nil {
 		return nil, fmt.Errorf("job: shipping: poll: check_rerun_passed events: %w", err)
-	}
-
-	reruns := make([]response.CheckRerunEvent, 0, len(rerunRows))
-	for i := range rerunRows {
-		var ev response.CheckRerunEvent
-		if decodeErr := json.Unmarshal(rerunRows[i].Payload, &ev); decodeErr != nil {
-			return nil, fmt.Errorf("job: shipping: poll: check_rerun event %d: %w", rerunRows[i].ID, decodeErr)
-		}
-		reruns = append(reruns, ev)
 	}
 	passed := make([]response.CheckRerunPassedEvent, 0, len(passedRows))
 	for i := range passedRows {
@@ -900,15 +916,11 @@ func (h shipHandler) rerunNotesFor(ctx context.Context, t store.Ticket, d Deps, 
 		passed = append(passed, ev)
 	}
 
-	notes, err := rerunPassedNotes(t.ID, sha, runs, reruns, passed)
+	notes, events, err := rerunPassedNotes(t.ID, sha, runs, reruns, passed)
 	if err != nil {
 		return nil, err
 	}
-	for i := range notes {
-		var ev response.CheckRerunPassedEvent
-		if decodeErr := json.Unmarshal(notes[i].Payload, &ev); decodeErr != nil {
-			return nil, fmt.Errorf("job: shipping: poll: check_rerun_passed event: %w", decodeErr)
-		}
+	for _, ev := range events {
 		slog.Info("ci check passed on re-run", "ticket_id", t.ID, "check", ev.Check, "sha", ev.SHA, "tests", ev.Tests)
 	}
 	return notes, nil

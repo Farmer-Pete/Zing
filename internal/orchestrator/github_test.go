@@ -961,6 +961,21 @@ func TestRerunJobPostsJobRerun(t *testing.T) {
 			t.Error("RerunJob: expected an error, got nil")
 		}
 	})
+
+	t.Run("a workflow-still-running 403 is ErrWorkflowRunIncomplete", func(t *testing.T) {
+		t.Parallel()
+		mux := http.NewServeMux()
+		mux.HandleFunc("/repos/acme/widgets/actions/jobs/99/rerun", func(w http.ResponseWriter, _ *http.Request) {
+			w.WriteHeader(http.StatusForbidden)
+			fmt.Fprint(w, `{"message": "This workflow is already running"}`)
+		})
+		g := newTestGHClient(t, mux)
+
+		err := g.RerunJob(t.Context(), "acme", "widgets", 99)
+		if !errors.Is(err, ErrWorkflowRunIncomplete) {
+			t.Errorf("RerunJob error = %v, want ErrWorkflowRunIncomplete", err)
+		}
+	})
 }
 
 func TestMergePinsSha(t *testing.T) {
@@ -1353,17 +1368,7 @@ func TestJobLogTailKeepsFailureLinesFromLongStep(t *testing.T) {
 	writeFiller(4000)
 	fmt.Fprint(&b, "##[error]Process completed with exit code 1.\n")
 
-	logServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		fmt.Fprint(w, b.String())
-	}))
-	t.Cleanup(logServer.Close)
-
-	mux := http.NewServeMux()
-	mux.HandleFunc("/repos/acme/widgets/actions/jobs/99/logs", func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set("Location", logServer.URL+"/log")
-		w.WriteHeader(http.StatusFound)
-	})
-	g := newTestGHClient(t, mux)
+	g := serveLog(t, b.String())
 
 	got, err := g.JobLogTail(t.Context(), "acme", "widgets", 99, 200)
 	if err != nil {

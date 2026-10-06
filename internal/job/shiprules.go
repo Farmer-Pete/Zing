@@ -20,11 +20,11 @@ import (
 	"fmt"
 	"path"
 	"regexp"
-	"slices"
 	"sort"
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"zing/internal/orchestrator"
 	"zing/internal/response"
@@ -378,6 +378,24 @@ const rerunInfraWhat = "a CI check keeps failing to start"
 // branch (rule 4).
 const rerunNoLogWhat = "a failed CI check has no readable log"
 
+// rerunNameInvalidWhat is rerunDecision.What for an infra conclusion whose
+// check name decideCIRerun refuses to plan a re-run for (checkNameValid).
+const rerunNameInvalidWhat = "a CI check's name cannot be recorded"
+
+// maxCheckNameRunes is the check_rerun and check_rerun_passed schemas' own
+// maxLength on check, counted in runes to match JSON Schema's own count.
+const maxCheckNameRunes = 200
+
+// checkNameValid reports whether name fits check_rerun's schema (1 to 200
+// runes): decideCIRerun never plans a re-run RerunJob would make real but
+// the store would then refuse to record, which would leave it unrecorded
+// and so re-run again every later tick, with neither budget nor cap ever
+// taking hold.
+func checkNameValid(name string) bool {
+	n := utf8.RuneCountInString(name)
+	return n >= 1 && n <= maxCheckNameRunes
+}
+
 // failedCheck is one failed check run together with what readFailedChecks
 // could learn about it.
 type failedCheck struct {
@@ -395,12 +413,26 @@ type failedCheck struct {
 	LogErr error
 }
 
+// isActionsJob reports whether fc is a GitHub Actions run Zing found both
+// workflow and job ids for: readFailedChecks sets RunID and JobID
+// together, from the same actionsJobIDPattern match, so either both are
+// nonzero or both are 0.
+func (fc failedCheck) isActionsJob() bool {
+	return fc.RunID != 0 && fc.JobID != 0
+}
+
+// logRead reports whether readFailedChecks attempted to read fc's job
+// log: an Actions job whose conclusion is not infrastructure.
+func (fc failedCheck) logRead() bool {
+	return fc.isActionsJob() && !infraConclusions[fc.Run.Conclusion]
+}
+
 // readFailedChecks reads every failed run's facts, sorted by name. For a
 // github-actions run whose DetailsURL matches actionsJobIDPattern, it
 // parses RunID and JobID from the two groups inline (a ParseInt error
-// leaves both 0). For such a run whose conclusion is not infrastructure,
-// it fetches JobLogTail(jobID, 200) into Log or LogErr. It never reads an
-// infrastructure run's log.
+// leaves both 0). For such a run whose conclusion is not infrastructure
+// (logRead), it fetches JobLogTail(jobID, 200) into Log or LogErr. It
+// never reads an infrastructure run's log.
 func readFailedChecks(ctx context.Context, checks Checks, owner, repo string, runs []orchestrator.CheckRun) []failedCheck {
 	out := make([]failedCheck, 0, len(runs))
 	for _, r := range runs {
@@ -415,7 +447,7 @@ func readFailedChecks(ctx context.Context, checks Checks, owner, repo string, ru
 				}
 			}
 		}
-		if fc.JobID != 0 && !infraConclusions[r.Conclusion] {
+		if fc.logRead() {
 			tail, err := checks.JobLogTail(ctx, owner, repo, fc.JobID, 200)
 			if err != nil {
 				fc.LogErr = err
@@ -427,6 +459,29 @@ func readFailedChecks(ctx context.Context, checks Checks, owner, repo string, ru
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Run.Name < out[j].Run.Name })
 	return out
+}
+
+// workflowRunsInFlight returns the set of Actions workflow run ids that
+// have at least one check run GitHub has not completed yet, built from
+// every run Actions reports, not only the failed ones: a failed check's
+// own sibling job in the same workflow run can still be queued or in
+// progress, and GitHub refuses to re-run a job until its whole workflow
+// run is complete.
+func workflowRunsInFlight(runs []orchestrator.CheckRun) map[int64]bool {
+	inFlight := make(map[int64]bool)
+	for _, r := range runs {
+		if r.AppSlug != ghGitHubActions || r.Status == ghCompleted {
+			continue
+		}
+		m := actionsJobIDPattern.FindStringSubmatch(r.DetailsURL)
+		if m == nil {
+			continue
+		}
+		if runID, err := strconv.ParseInt(m[1], 10, 64); err == nil {
+			inFlight[runID] = true
+		}
+	}
+	return inFlight
 }
 
 // ciLogTextFrom is design section 8.5's ci_log text, built from what
@@ -449,7 +504,7 @@ func ciLogTextFrom(failed []failedCheck, failedStatuses []orchestrator.CommitSta
 		switch {
 		case fc.LogErr != nil:
 			parts = append(parts, fmt.Sprintf("check %s (%s): the log could not be read: %s", r.Name, r.Conclusion, fc.LogErr))
-		case fc.JobID != 0 && !infraConclusions[r.Conclusion]:
+		case fc.logRead():
 			parts = append(parts, fmt.Sprintf("check %s (%s)\n%s", r.Name, r.Conclusion, fc.Log))
 		default:
 			parts = append(parts, fmt.Sprintf("check %s (%s) %s", r.Name, r.Conclusion, r.DetailsURL))
@@ -493,6 +548,7 @@ func failedTestNames(text string) []string {
 // sha under consideration, decoded.
 type priorRerun struct {
 	Event response.CheckRerunEvent // decoded payload
+	ID    int64                    // the message row's id, for the retry-marker filter
 	At    time.Time                // the message row's CreatedAt, UTC
 }
 
@@ -539,11 +595,15 @@ func triedRunsText(events []priorRerun) string {
 
 // decideCIRerun applies the per-check rule (design shape, "Per-check
 // rule") to every failed check and aggregates: escalate over rerun over
-// fix over wait.
-func decideCIRerun(now time.Time, sha string, failed []failedCheck, failedStatuses int, prior []priorRerun) rerunDecision {
-	sorted := append([]failedCheck(nil), failed...)
-	slices.SortFunc(sorted, func(a, b failedCheck) int { return strings.Compare(a.Run.Name, b.Run.Name) })
-
+// fix over wait. failed is sorted by name, as readFailedChecks returns it,
+// so decideCIRerun does no sorting of its own. inFlight is
+// workflowRunsInFlight's own result: a failed check whose workflow run
+// still has an incomplete sibling job waits rather than re-runs, since
+// GitHub refuses to re-run a single job until its whole workflow run is
+// complete (r2f1) -- the same reason a tick never plans more than one
+// re-run per workflow run id (the dedupe below), so two failed jobs from
+// one run never race each other's own re-run call within a tick.
+func decideCIRerun(now time.Time, sha string, failed []failedCheck, failedStatuses int, prior []priorRerun, inFlight map[int64]bool) rerunDecision {
 	type verdict struct {
 		action rerunAction
 		rerun  plannedRerun
@@ -554,14 +614,21 @@ func decideCIRerun(now time.Time, sha string, failed []failedCheck, failedStatus
 
 	sha7 := shortSHA(sha)
 	var verdicts []verdict
-	for i := range sorted {
-		fc := &sorted[i]
+	for i := range failed {
+		fc := &failed[i]
 		name := fc.Run.Name
+		isActionsJob := fc.isActionsJob()
 
 		var infra, used []priorRerun
+		waiting := false
 		for _, p := range prior {
 			if p.Event.Check != name {
 				continue
+			}
+			sameRun := p.Event.CheckRunID == fc.Run.ID
+			recent := now.Sub(p.At) < rerunAppearWait
+			if sameRun && recent {
+				waiting = true
 			}
 			switch p.Event.Reason {
 			case response.RerunReasonInfra:
@@ -570,20 +637,14 @@ func decideCIRerun(now time.Time, sha string, failed []failedCheck, failedStatus
 				used = append(used, p)
 			}
 		}
-
-		waiting := false
-		for _, p := range prior {
-			if p.Event.Check == name && p.Event.CheckRunID == fc.Run.ID && now.Sub(p.At) < rerunAppearWait {
-				waiting = true
-				break
-			}
-		}
 		if waiting {
 			verdicts = append(verdicts, verdict{action: rerunWait})
 			continue
 		}
-
-		isActionsJob := fc.RunID != 0 && fc.JobID != 0
+		if isActionsJob && inFlight[fc.RunID] {
+			verdicts = append(verdicts, verdict{action: rerunWait})
+			continue
+		}
 
 		if infraConclusions[fc.Run.Conclusion] {
 			if !isActionsJob {
@@ -591,6 +652,14 @@ func decideCIRerun(now time.Time, sha string, failed []failedCheck, failedStatus
 					action: rerunEscalate,
 					what:   rerunInfraWhat,
 					why:    fmt.Sprintf("%s ended %s on %s and is not a GitHub Actions job, so Zing cannot re-run it", name, fc.Run.Conclusion, sha7),
+				})
+				continue
+			}
+			if !checkNameValid(name) {
+				verdicts = append(verdicts, verdict{
+					action: rerunEscalate,
+					what:   rerunNameInvalidWhat,
+					why:    fmt.Sprintf("a check ended %s on %s with a name %d runes long, so Zing cannot record a re-run of it", fc.Run.Conclusion, sha7, utf8.RuneCountInString(name)),
 				})
 				continue
 			}
@@ -613,7 +682,7 @@ func decideCIRerun(now time.Time, sha string, failed []failedCheck, failedStatus
 			continue
 		}
 
-		if !isActionsJob {
+		if !isActionsJob || !checkNameValid(name) {
 			verdicts = append(verdicts, verdict{action: rerunFix})
 			continue
 		}
@@ -658,11 +727,23 @@ func decideCIRerun(now time.Time, sha string, failed []failedCheck, failedStatus
 		}
 	}
 
+	// At most one planned re-run per workflow run id: calling RerunJob for
+	// one job in a run puts the whole run back in progress, so a second
+	// call for another job in that same run would hit GitHub's own "not
+	// complete yet" refusal (r2f1). The dropped check is re-planned once
+	// its run finishes again (inFlight, above).
 	var reruns []plannedRerun
+	seenRun := make(map[int64]bool, len(verdicts))
 	for i := range verdicts {
-		if verdicts[i].action == rerunNow {
-			reruns = append(reruns, verdicts[i].rerun)
+		if verdicts[i].action != rerunNow {
+			continue
 		}
+		r := verdicts[i].rerun
+		if seenRun[r.Event.RunID] {
+			continue
+		}
+		seenRun[r.Event.RunID] = true
+		reruns = append(reruns, r)
 	}
 	if len(reruns) > 0 {
 		return rerunDecision{Action: rerunNow, Reruns: reruns}
@@ -680,13 +761,15 @@ func decideCIRerun(now time.Time, sha string, failed []failedCheck, failedStatus
 	return rerunDecision{Action: rerunWait}
 }
 
-// rerunPassedNotes returns one check_rerun_passed event message per check
-// that has a flaky or no_log check_rerun event in reruns, whose newest run
-// by id in runs (same Name) is completed with a good conclusion and an id
-// other than the event's check_run_id, and that has no event in passed
-// for the same check. Tests come from the newest such check_rerun event.
-// Messages are sorted by check name.
-func rerunPassedNotes(ticketID int64, sha string, runs []orchestrator.CheckRun, reruns []response.CheckRerunEvent, passed []response.CheckRerunPassedEvent) ([]store.Message, error) {
+// rerunPassedNotes returns one check_rerun_passed event message, and its
+// decoded payload (so a caller that only wants to log need not re-decode
+// what this function just built), per check that has a flaky or no_log
+// check_rerun event in reruns, whose newest run by id in runs (same Name)
+// is completed with a good conclusion and an id other than the event's
+// check_run_id, and that has no event in passed for the same check. Tests
+// come from the newest such check_rerun event. Both slices are sorted by
+// check name.
+func rerunPassedNotes(ticketID int64, sha string, runs []orchestrator.CheckRun, reruns []response.CheckRerunEvent, passed []response.CheckRerunPassedEvent) ([]store.Message, []response.CheckRerunPassedEvent, error) {
 	passedChecks := make(map[string]bool, len(passed))
 	for _, p := range passed {
 		passedChecks[p.Check] = true
@@ -714,7 +797,8 @@ func rerunPassedNotes(ticketID int64, sha string, runs []orchestrator.CheckRun, 
 	}
 	sort.Strings(names)
 
-	var out []store.Message
+	var msgs []store.Message
+	var events []response.CheckRerunPassedEvent
 	for _, name := range names {
 		if passedChecks[name] {
 			continue
@@ -722,21 +806,23 @@ func rerunPassedNotes(ticketID int64, sha string, runs []orchestrator.CheckRun, 
 		event := newestEvent[name]
 		run, ok := newestRun[name]
 		isNewRun := ok && run.ID != event.CheckRunID
-		passed := run.Status == ghCompleted && goodConclusions[run.Conclusion]
-		if !isNewRun || !passed {
+		runPassed := run.Status == ghCompleted && goodConclusions[run.Conclusion]
+		if !isNewRun || !runPassed {
 			continue
 		}
-		msg, err := store.NewEvent(ticketID, store.EventKindCheckRerunPassed, response.CheckRerunPassedEvent{
+		passedEvent := response.CheckRerunPassedEvent{
 			Check: name,
 			SHA:   sha,
 			Tests: event.Tests,
-		})
-		if err != nil {
-			return nil, fmt.Errorf("job: shipping: poll: check_rerun_passed event for %s: %w", name, err)
 		}
-		out = append(out, msg)
+		msg, err := store.NewEvent(ticketID, store.EventKindCheckRerunPassed, passedEvent)
+		if err != nil {
+			return nil, nil, fmt.Errorf("job: shipping: poll: check_rerun_passed event for %s: %w", name, err)
+		}
+		msgs = append(msgs, msg)
+		events = append(events, passedEvent)
 	}
-	return out, nil
+	return msgs, events, nil
 }
 
 // prURLPattern is the shape tickets.pr_url must have for parsePRNumber to

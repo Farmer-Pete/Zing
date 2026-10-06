@@ -2650,6 +2650,84 @@ func TestPollCIRerunAPIErrorKeepsEarlierRerunEvents(t *testing.T) {
 	}
 }
 
+// TestPollCIRerunSharedWorkflowRunPlansOnlyOne proves decideCIRerun's own
+// per-tick dedupe (r2f1): two failed Actions checks from the same workflow
+// run only ever get one RerunJob call this tick, since GitHub refuses to
+// re-run a second job in a run it has just put back in progress. The
+// dropped check waits for a later tick instead of racing the first one.
+func TestPollCIRerunSharedWorkflowRunPlansOnlyOne(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow end-to-end flow; runs in the full suite")
+	}
+	t.Parallel()
+	s, ticket, gh, tr := shipPublished(t)
+	local := shipHeadSHA(t, s, ticket)
+	gh.runs = []orchestrator.CheckRun{
+		{
+			ID: 1, Name: "a", Status: ghCompleted, Conclusion: ghFailure, AppSlug: ghGitHubActions,
+			DetailsURL: "https://github.com/fixture/fixture/actions/runs/10/job/11",
+		},
+		{
+			ID: 2, Name: "b", Status: ghCompleted, Conclusion: ghFailure, AppSlug: ghGitHubActions,
+			DetailsURL: "https://github.com/fixture/fixture/actions/runs/10/job/12",
+		},
+	}
+	gh.required = []orchestrator.RequiredCheck{{Context: "a"}, {Context: "b"}}
+	gh.prState = shipMergeReadyPR(local, "PR_node_shared_run")
+	gh.logTail = func(context.Context, string, string, int64, int) (string, error) {
+		return shipFlakyLogText, nil
+	}
+
+	commit, err := shipPollRun(t, s, ticket, gh, tr)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if commit.Escalation != nil {
+		t.Errorf("Escalation = %+v, want none", commit.Escalation)
+	}
+	if len(gh.reruns) != 1 {
+		t.Fatalf("reruns = %+v, want exactly one call", gh.reruns)
+	}
+	events := shipCheckRerunEvents(t, commit)
+	if len(events) != 1 || events[0].Check != "a" {
+		t.Fatalf("check_rerun events = %+v, want exactly one, for a", events)
+	}
+}
+
+// TestPollCIRerunWorkflowRunIncompleteReschedules proves pollRerun's own
+// reschedule row for orchestrator.ErrWorkflowRunIncomplete (r2f1): GitHub
+// refusing a re-run because the job's workflow run has not finished yet
+// reschedules the same way an unavailable GitHub does, instead of
+// escalating or recording a check_rerun event that never happened.
+func TestPollCIRerunWorkflowRunIncompleteReschedules(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow end-to-end flow; runs in the full suite")
+	}
+	t.Parallel()
+	s, ticket, gh, tr := shipPublished(t)
+	local := shipHeadSHA(t, s, ticket)
+	gh.runs, gh.required = shipFailedCI()
+	gh.prState = shipMergeReadyPR(local, "PR_node_run_incomplete")
+	gh.logTail = func(context.Context, string, string, int64, int) (string, error) {
+		return shipFlakyLogText, nil
+	}
+	gh.rerunErr = orchestrator.ErrWorkflowRunIncomplete
+
+	commit, err := shipPollRun(t, s, ticket, gh, tr)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if commit.Escalation != nil {
+		t.Errorf("Escalation = %+v, want none", commit.Escalation)
+	}
+	if events := shipCheckRerunEvents(t, commit); len(events) != 0 {
+		t.Errorf("check_rerun events = %+v, want none", events)
+	}
+	if commit.PollSchedule == nil {
+		t.Fatal("commit.PollSchedule is nil, want a rescheduled poll")
+	}
+}
+
 // TestThreadsGateRetryKeepsCheckpoint proves design section 5.6's own
 // "shipping, loops_exhausted" retry row for kind threads: the retry writes
 // both the fix request and "respond applied <aid>" with its own watermark
