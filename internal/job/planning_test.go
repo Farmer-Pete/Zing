@@ -2500,6 +2500,177 @@ func TestPlanningHandler_Ready_FixedDispositionIsStored(t *testing.T) {
 	}
 }
 
+// TestPlanningHandler_ReviewTick_SameMajorAfterFixedStaysOpen proves ticket
+// 72 task 3: a plan that lists a required major only under risks, rather
+// than fixing it, does not stop the finding from being raised again -- the
+// next review's same-location above-floor finding is stored with Reopens
+// set to the earlier id and ReopensAfter fixed (owner decision Q3), and the
+// resume that follows still requires a disposition for it.
+func TestPlanningHandler_ReviewTick_SameMajorAfterFixedStaysOpen(t *testing.T) {
+	t.Parallel()
+	s := newJobTestStore(t)
+	ticketID := seedFeatureTicketInPlanning(t, s)
+	const objective1 = "Same major after fixed stays open, v1."
+	planVersion1, runID1 := seedCohort(t, s, ticketID, validPlan(objective1), validScenarios(2, "reopensv1"))
+
+	minor := finding(response.SeverityMinor, "plan/design/shape", "needs a name", "name it")
+	minor.ID = fmt.Sprintf("p%d-f1", planVersion1)
+	major := finding(response.SeverityMajor, testObjectiveLocation, "wrong goal", "restate it")
+	major.ID = fmt.Sprintf("p%d-f2", planVersion1)
+	seedPlanreviewArtifact(t, s, ticketID, planVersion1, runID1, minor, major)
+	insertUpdateMarker(t, s, ticketID, fmt.Sprintf("planreview v%d pending", planVersion1))
+	insertUpdateMarker(t, s, ticketID, fmt.Sprintf("planreview v%d delivered", planVersion1))
+
+	const objective2 = "Same major after fixed stays open, v2."
+	plan2 := validPlan(objective2)
+	plan2.Review.Risks = []string{"the objective finding is noted here, not fixed in the design"}
+	plan2.Dispositions = []response.Disposition{{Finding: major.ID, Kind: response.DispositionFixed, Path: "plan/review/risks/risk[1]"}}
+	planVersion2, _ := seedCohort(t, s, ticketID, plan2, validScenarios(2, "reopensv2"))
+
+	reviewRT := &scriptedRuntime{t: t, steps: []scriptedStep{readyStep(
+		findingsResponse(
+			finding(response.SeverityMinor, "plan/design/shape", "needs a name", "name it"),
+			finding(response.SeverityMajor, testObjectiveLocation, "wrong goal", "restate it"),
+		), "reopens-review-sess")}}
+	reviewCommit, err := runPlanning(t, s, claim(t, s, reviewRT, ticketID), ticketID)
+	if err != nil {
+		t.Fatalf("review tick Run: %v", err)
+	}
+	apply(t, s, getTicket(t, s, ticketID), reviewCommit)
+
+	artifact, ok, err := s.PlanReviewAt(t.Context(), ticketID, planVersion2)
+	if err != nil || !ok {
+		t.Fatalf("PlanReviewAt(%d) = (_, %v, %v), want a stored artifact", planVersion2, ok, err)
+	}
+	var payload struct {
+		Findings []response.Finding `json:"findings"`
+	}
+	if unmarshalErr := json.Unmarshal(artifact.Payload, &payload); unmarshalErr != nil {
+		t.Fatalf("unmarshal stored planreview payload: %v", unmarshalErr)
+	}
+	wantMinorID2 := fmt.Sprintf("p%d-f1", planVersion2)
+	wantMajorID2 := fmt.Sprintf("p%d-f2", planVersion2)
+	if len(payload.Findings) != 2 || payload.Findings[0].ID != wantMinorID2 || payload.Findings[1].ID != wantMajorID2 {
+		t.Fatalf("stored findings = %+v, want ids %q (minor) and %q (major)", payload.Findings, wantMinorID2, wantMajorID2)
+	}
+	if payload.Findings[0].Reopens != "" {
+		t.Errorf("minor Reopens = %q, want empty", payload.Findings[0].Reopens)
+	}
+	if payload.Findings[1].Reopens != major.ID || payload.Findings[1].ReopensAfter != "fixed" {
+		t.Errorf("major Reopens = %q ReopensAfter = %q, want %q fixed", payload.Findings[1].Reopens, payload.Findings[1].ReopensAfter, major.ID)
+	}
+
+	resp := readyResponse(validPlan("Same major after fixed stays open, v3."), validClaims(), validScenarios(2, "reopensv3"))
+	resumeRT := &scriptedRuntime{t: t, steps: []scriptedStep{readyStep(resp, "reopens-resume-sess")}}
+	rec := &recordingRuntime{rt: resumeRT}
+	commit, err := runPlanning(t, s, claim(t, s, rec, ticketID), ticketID)
+	if err != nil {
+		t.Fatalf("resume Run: %v", err)
+	}
+	wantSuffix := fmt.Sprintf("(raised again: %s was marked fixed)", major.ID)
+	if !strings.Contains(rec.lastReq.Prompt, wantSuffix) {
+		t.Errorf("resume prompt does not carry the reopened suffix %q:\n%s", wantSuffix, rec.lastReq.Prompt)
+	}
+	found := false
+	for _, m := range commit.Messages {
+		if strings.HasPrefix(m.Body, "validation errors pending run ") && strings.Contains(m.Body, wantMajorID2) {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("commit.Messages = %+v, want a validation errors pending message naming %s", commit.Messages, wantMajorID2)
+	}
+}
+
+// TestPlanningHandler_ReviewTick_DisputeRoundCarriesFixedSiblings proves
+// ticket 72 task 3: previousReview walks back to the newest review below
+// the version under review, even when a disputed round produced the
+// in-between plan version with no review of its own, and pairs it with the
+// dispositions of the plan that answered it -- so a fixed finding next to a
+// disputed one still carries forward into the next review's reopens
+// marking, while the disputed one never gets marked reopened.
+func TestPlanningHandler_ReviewTick_DisputeRoundCarriesFixedSiblings(t *testing.T) {
+	t.Parallel()
+	s := newJobTestStore(t)
+	ticketID := seedFeatureTicketInPlanning(t, s)
+	const contextLocation = "plan/overview/context"
+	const objective1 = "Dispute round carries fixed siblings, v1."
+	planVersion1, runID1 := seedCohort(t, s, ticketID, validPlan(objective1), validScenarios(2, "siblingsv1"))
+
+	minor := finding(response.SeverityMinor, "plan/design/shape", "needs a name", "name it")
+	minor.ID = fmt.Sprintf("p%d-f1", planVersion1)
+	majorObjective := finding(response.SeverityMajor, testObjectiveLocation, "wrong goal", "restate it")
+	majorObjective.ID = fmt.Sprintf("p%d-f2", planVersion1)
+	majorContext := finding(response.SeverityMajor, contextLocation, "wrong context", "restate it")
+	majorContext.ID = fmt.Sprintf("p%d-f3", planVersion1)
+	seedPlanreviewArtifact(t, s, ticketID, planVersion1, runID1, minor, majorObjective, majorContext)
+	insertUpdateMarker(t, s, ticketID, fmt.Sprintf("planreview v%d pending", planVersion1))
+
+	const objective2 = "Dispute round carries fixed siblings, v2."
+	plan2 := validPlan(objective2)
+	plan2.Dispositions = []response.Disposition{
+		{Finding: majorObjective.ID, Kind: response.DispositionFixed, Path: testObjectiveLocation},
+		{Finding: majorContext.ID, Kind: response.DispositionDisputed, Reason: "the context is correct as written"},
+	}
+	seedCohort(t, s, ticketID, plan2, validScenarios(2, "siblingsv2"))
+
+	const objective3 = "Dispute round carries fixed siblings, v3."
+	planVersion3, _ := seedCohort(t, s, ticketID, validPlan(objective3), validScenarios(2, "siblingsv3"))
+
+	reviewRT := &scriptedRuntime{t: t, steps: []scriptedStep{readyStep(
+		findingsResponse(
+			finding(response.SeverityMajor, testObjectiveLocation, "wrong goal again", "restate it"),
+			finding(response.SeverityMajor, contextLocation, "wrong context again", "restate it"),
+		), "siblings-review-sess")}}
+	rec := &recordingRuntime{rt: reviewRT}
+	commit, err := runPlanning(t, s, claim(t, s, rec, ticketID), ticketID)
+	if err != nil {
+		t.Fatalf("review tick Run: %v", err)
+	}
+
+	prompt := rec.lastReq.Prompt
+	if !strings.Contains(prompt, "previous_findings:") {
+		t.Fatalf("review prompt does not carry a previous_findings input:\n%s", prompt)
+	}
+	if !strings.Contains(prompt, majorObjective.ID) || !strings.Contains(prompt, majorContext.ID) {
+		t.Errorf("previous_findings does not carry both %s and %s:\n%s", majorObjective.ID, majorContext.ID, prompt)
+	}
+	if !strings.Contains(prompt, "previous_dispositions:") {
+		t.Fatalf("review prompt does not carry a previous_dispositions input:\n%s", prompt)
+	}
+	wantDispLine := fmt.Sprintf("%s fixed: %s", majorObjective.ID, testObjectiveLocation)
+	if !strings.Contains(prompt, wantDispLine) {
+		t.Errorf("previous_dispositions does not carry %q:\n%s", wantDispLine, prompt)
+	}
+
+	apply(t, s, getTicket(t, s, ticketID), commit)
+	artifact, ok, err := s.PlanReviewAt(t.Context(), ticketID, planVersion3)
+	if err != nil || !ok {
+		t.Fatalf("PlanReviewAt(%d) = (_, %v, %v), want a stored artifact", planVersion3, ok, err)
+	}
+	var payload struct {
+		Findings []response.Finding `json:"findings"`
+	}
+	if unmarshalErr := json.Unmarshal(artifact.Payload, &payload); unmarshalErr != nil {
+		t.Fatalf("unmarshal stored planreview payload: %v", unmarshalErr)
+	}
+	var gotObjective, gotContext *response.Finding
+	for i := range payload.Findings {
+		switch payload.Findings[i].Location {
+		case testObjectiveLocation:
+			gotObjective = &payload.Findings[i]
+		case contextLocation:
+			gotContext = &payload.Findings[i]
+		}
+	}
+	if gotObjective == nil || gotObjective.Reopens != majorObjective.ID {
+		t.Fatalf("objective finding = %+v, want Reopens %q", gotObjective, majorObjective.ID)
+	}
+	if gotContext == nil || gotContext.Reopens != "" {
+		t.Fatalf("context finding = %+v, want empty Reopens (its prior disposition was disputed)", gotContext)
+	}
+}
+
 // TestPlanningHandler_ReviewTick_CleanFloorPostsTheGate proves section 6.6's
 // "Post" step (task 7c): a clean review (no at-or-below-floor findings)
 // posts exactly one gate question in the same commit that stores the

@@ -20,6 +20,10 @@ import (
 // own objective, the shape every "needs a disposition" test below uses.
 const testObjectiveLocation = "plan/overview/objective"
 
+// requiredID is the plan-review finding id TestCheckDispositions and
+// TestMarkReopened both use for their one required/previous major finding.
+const requiredID = "p1-f2"
+
 // TestGateQuestionMessage_StatesWhatApproveDoes proves F013: the gate
 // question's body carries a plain-language paragraph explaining what
 // approving does, not just the bare plan objective, while leaving the two
@@ -244,10 +248,7 @@ func TestCheckDispositions(t *testing.T) {
 		t.Fatalf("planXMLFor: %v", err)
 	}
 
-	const (
-		requiredID     = "p1-f2"
-		dispositionOne = "plan/dispositions/disposition[1]"
-	)
+	const dispositionOne = "plan/dispositions/disposition[1]"
 	required := []response.Finding{{
 		ID: requiredID, Severity: response.SeverityMajor, Location: testObjectiveLocation,
 		Text: "wrong goal", Fix: "restate it",
@@ -333,6 +334,112 @@ func TestCheckDispositions(t *testing.T) {
 			for i, wantPath := range tt.wantPaths {
 				if errs[i].Path != wantPath {
 					t.Errorf("errs[%d].Path = %q, want %q (full: %+v)", i, errs[i].Path, wantPath, errs)
+				}
+			}
+		})
+	}
+}
+
+// TestMarkReopened proves markReopened's own rule (ticket 72 task 3, owner
+// decision Q3): a new above-floor finding at the exact location of a
+// previous above-floor finding marked fixed or left without a disposition
+// gets Reopens and ReopensAfter set; a disputed match, a different
+// location, an at-or-below-floor new finding, and a previous finding with
+// no id set nothing. It also proves renderFindings' own reopens suffix on
+// the fixed and no-disposition rows.
+func TestMarkReopened(t *testing.T) {
+	t.Parallel()
+
+	// prevMajor is the one previous above-floor finding every row below
+	// matches (or deliberately fails to match) against; prevNoID is the
+	// same finding with its id cleared, for the "no id" row.
+	prevMajor := response.Finding{
+		ID: requiredID, Severity: response.SeverityMajor, Location: testObjectiveLocation,
+		Text: "stale objective finding", Fix: "restate the objective",
+	}
+	prevNoID := prevMajor
+	prevNoID.ID = ""
+
+	// newMajor is the shape every row's own new finding takes, varied only
+	// by Location or Severity where a row needs to; differentLocation
+	// reuses TestFloorResumeInputs' own shape location rather than
+	// introducing a second plan path literal here.
+	newMajor := response.Finding{Severity: response.SeverityMajor, Location: testObjectiveLocation, Text: "still wrong", Fix: "fix it"}
+	belowFloor := newMajor
+	belowFloor.Severity = response.SeverityMinor
+	differentLocation := newMajor
+	differentLocation.Location = "plan/design/shape"
+
+	fixedDisposition := []response.Disposition{{Finding: requiredID, Kind: response.DispositionFixed, Path: testObjectiveLocation}}
+
+	tests := []struct {
+		name         string
+		findings     []response.Finding
+		prev         []response.Finding
+		ds           []response.Disposition
+		wantReopens  string
+		wantAfter    string
+		wantRenderIn string // rendered line must contain this when wantReopens != ""
+	}{
+		{
+			name:         "fixed match",
+			findings:     []response.Finding{newMajor},
+			prev:         []response.Finding{prevMajor},
+			ds:           fixedDisposition,
+			wantReopens:  requiredID,
+			wantAfter:    reopensAfterFixed,
+			wantRenderIn: "was marked fixed",
+		},
+		{
+			name:         "no disposition match",
+			findings:     []response.Finding{newMajor},
+			prev:         []response.Finding{prevMajor},
+			ds:           nil,
+			wantReopens:  requiredID,
+			wantAfter:    reopensAfterNoDisposition,
+			wantRenderIn: "got no disposition",
+		},
+		{
+			name:     "disputed match sets nothing",
+			findings: []response.Finding{newMajor},
+			prev:     []response.Finding{prevMajor},
+			ds:       []response.Disposition{{Finding: requiredID, Kind: response.DispositionDisputed, Reason: "not a bug"}},
+		},
+		{
+			name:     "different location sets nothing",
+			findings: []response.Finding{differentLocation},
+			prev:     []response.Finding{prevMajor},
+			ds:       fixedDisposition,
+		},
+		{
+			name:     "at-or-below-floor finding sets nothing",
+			findings: []response.Finding{belowFloor},
+			prev:     []response.Finding{prevMajor},
+			ds:       fixedDisposition,
+		},
+		{
+			name:     "previous finding with no id sets nothing",
+			findings: []response.Finding{newMajor},
+			prev:     []response.Finding{prevNoID},
+			ds:       fixedDisposition,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			findings := make([]response.Finding, len(tt.findings))
+			copy(findings, tt.findings)
+			markReopened(findings, tt.prev, tt.ds, response.SeverityMinor)
+			if findings[0].Reopens != tt.wantReopens {
+				t.Errorf("Reopens = %q, want %q", findings[0].Reopens, tt.wantReopens)
+			}
+			if findings[0].ReopensAfter != tt.wantAfter {
+				t.Errorf("ReopensAfter = %q, want %q", findings[0].ReopensAfter, tt.wantAfter)
+			}
+			if tt.wantReopens != "" {
+				rendered := renderFindings(findings)
+				if !strings.HasSuffix(rendered, tt.wantRenderIn+")") {
+					t.Errorf("renderFindings = %q, want it to end with %q)", rendered, tt.wantRenderIn)
 				}
 			}
 		})

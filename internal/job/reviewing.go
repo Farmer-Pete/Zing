@@ -2207,7 +2207,8 @@ func (h reviewingHandler) askedCommit(
 		case *response.FindingsResponse:
 			runID := a.rr.Reserved.RunID
 			doneSet[a.lens] = true
-			for _, f := range resp.Findings {
+			for i := range resp.Findings {
+				f := &resp.Findings[i]
 				k++
 				row := response.FindingArtifact{
 					Lens: f.Lens, Severity: f.Severity, Location: f.Location, Text: f.Text, Fix: f.Fix, PlanRef: f.PlanRef,

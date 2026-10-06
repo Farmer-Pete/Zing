@@ -1477,9 +1477,9 @@ func maybeResumeFloorFindings(ctx context.Context, t store.Ticket, d Deps, sess 
 		return store.HandlerCommit{}, false, fmt.Errorf("job: planning: unmarshal planreview artifact: %w", unmarshalErr)
 	}
 	atOrBelow := make([]response.Finding, 0, len(payload.Findings))
-	for _, f := range payload.Findings {
-		if f.Severity.Rank() <= d.Floor.Rank() {
-			atOrBelow = append(atOrBelow, f)
+	for i := range payload.Findings {
+		if payload.Findings[i].Severity.Rank() <= d.Floor.Rank() {
+			atOrBelow = append(atOrBelow, payload.Findings[i])
 		}
 	}
 	above := len(payload.Findings) - len(atOrBelow)
@@ -1574,6 +1574,25 @@ func runPlanReview(ctx context.Context, t store.Ticket, d Deps, extra []prompt.N
 		inputs = append(inputs, prompt.Invalid(invalidRetryText(reason)))
 	}
 
+	prev, prevDispositions, err := previousReview(ctx, d, t.ID, cohort.PlanVersion)
+	if err != nil {
+		return store.HandlerCommit{}, err
+	}
+	if len(prev) > 0 {
+		inputs = append(inputs, prompt.NamedInput{Label: previousFindingsLabel, Text: renderFindings(prev), Untrusted: true})
+	}
+	if len(prevDispositions) > 0 {
+		lines := make([]string, len(prevDispositions))
+		for i, disp := range prevDispositions {
+			detail := disp.Path
+			if disp.Kind == response.DispositionDisputed {
+				detail = disp.Reason
+			}
+			lines[i] = fmt.Sprintf("%s %s: %s", disp.Finding, disp.Kind, detail)
+		}
+		inputs = append(inputs, prompt.NamedInput{Label: previousDispositionsLabel, Text: strings.Join(lines, "\n"), Untrusted: true})
+	}
+
 	jobCfg := d.Machine.Jobs[jobPlanreviewName]
 	promptText, err := readAsset(jobCfg.Prompt.Single)
 	if err != nil {
@@ -1626,7 +1645,7 @@ func runPlanReview(ctx context.Context, t store.Ticket, d Deps, extra []prompt.N
 	req := runtime.RunRequest{Job: response.JobPlanreview, Prompt: assembled}
 	return runAndRoute(ctx, d, t, jobPlanreviewName, su, req, n, freshSessionRecord, resolveIDs, response.EscalationOriginPlanreview,
 		func(rr runResult) (store.HandlerCommit, error) {
-			return planReviewSuccessCommit(ctx, t, d, rr, cohort, plan, planXML, freshSessionRecord(rr), resolveIDs)
+			return planReviewSuccessCommit(ctx, t, d, rr, cohort, plan, planXML, prev, prevDispositions, freshSessionRecord(rr), resolveIDs)
 		}, nil, 0)
 }
 
@@ -1637,14 +1656,14 @@ func runPlanReview(ctx context.Context, t store.Ticket, d Deps, extra []prompt.N
 // (already unmarshaled by the caller, runPlanReview, to render planXML), so
 // a clean review's gate post (design section 6.6) can read its objective
 // without a second store round trip.
-func planReviewSuccessCommit(ctx context.Context, t store.Ticket, d Deps, rr runResult, cohort store.Cohort, plan response.Plan, planXML string, sessionCommit *store.SessionUpsert, resolveIDs []int64) (store.HandlerCommit, error) {
+func planReviewSuccessCommit(ctx context.Context, t store.Ticket, d Deps, rr runResult, cohort store.Cohort, plan response.Plan, planXML string, prev []response.Finding, prevDispositions []response.Disposition, sessionCommit *store.SessionUpsert, resolveIDs []int64) (store.HandlerCommit, error) {
 	switch resp := rr.Res.Response.(type) {
 	case *response.QuestionResponse:
 		return questionOutcomeCommit(t, d, rr, resp.Questions, sessionCommit, resolveIDs)
 	case *response.ErrorResponse:
 		return errorOutcomeCommit(t, d, rr, resp, sessionCommit, resolveIDs, response.EscalationOriginPlanreview), nil
 	case *response.FindingsResponse:
-		return planReviewOkCommit(ctx, t, d, rr, resp, cohort, plan, planXML, sessionCommit, resolveIDs)
+		return planReviewOkCommit(ctx, t, d, rr, resp, cohort, plan, planXML, prev, prevDispositions, sessionCommit, resolveIDs)
 	default:
 		return store.HandlerCommit{}, fmt.Errorf("job: planreview: outcome %s not handled", rr.Res.Response.Header().Outcome)
 	}
@@ -1659,30 +1678,34 @@ func planReviewSuccessCommit(ctx context.Context, t store.Ticket, d Deps, rr run
 // (design section 6.6's "Post" step, task 7c); otherwise this writes the
 // "planreview vN pending" marker and leaves the ticket in planning, not
 // waiting, for entry step 7 to pick up.
-func planReviewOkCommit(ctx context.Context, t store.Ticket, d Deps, rr runResult, resp *response.FindingsResponse, cohort store.Cohort, plan response.Plan, planXML string, sessionCommit *store.SessionUpsert, resolveIDs []int64) (store.HandlerCommit, error) {
+func planReviewOkCommit(ctx context.Context, t store.Ticket, d Deps, rr runResult, resp *response.FindingsResponse, cohort store.Cohort, plan response.Plan, planXML string, prev []response.Finding, prevDispositions []response.Disposition, sessionCommit *store.SessionUpsert, resolveIDs []int64) (store.HandlerCommit, error) {
 	kept := make([]response.Finding, 0, len(resp.Findings))
 	dropped := 0
-	for _, f := range resp.Findings {
-		if !response.ResolvesInPlan([]byte(planXML), f.Location) {
+	for i := range resp.Findings {
+		if !response.ResolvesInPlan([]byte(planXML), resp.Findings[i].Location) {
 			dropped++
 			continue
 		}
-		kept = append(kept, f)
+		kept = append(kept, resp.Findings[i])
 	}
 	for i := range kept {
 		kept[i].ID = fmt.Sprintf("p%d-f%d", cohort.PlanVersion, i+1)
 	}
+	markReopened(kept, prev, prevDispositions, d.Floor)
 
-	var atOrBelow, above int
-	for _, f := range kept {
-		if f.Severity.Rank() <= d.Floor.Rank() {
+	var atOrBelow, above, reopened int
+	for i := range kept {
+		if kept[i].Severity.Rank() <= d.Floor.Rank() {
 			atOrBelow++
 		} else {
 			above++
 		}
+		if kept[i].Reopens != "" {
+			reopened++
+		}
 	}
 	slog.Info("floor split", "ticket_id", t.ID, "run_id", rr.Reserved.RunID, "floor", string(d.Floor),
-		"at_or_below", atOrBelow, "above", above, "dropped_unresolved", dropped)
+		"at_or_below", atOrBelow, "above", above, "dropped_unresolved", dropped, "reopened", reopened)
 
 	payload, err := json.Marshal(planreviewArtifactPayload{Findings: kept})
 	if err != nil {
@@ -1776,10 +1799,17 @@ func renderScenariosForReview(artifacts []store.Artifact) (string, error) {
 // section 6.3, 6.4).
 func renderFindings(findings []response.Finding) string {
 	lines := make([]string, len(findings))
-	for i, f := range findings {
+	for i := range findings {
+		f := &findings[i]
 		line := fmt.Sprintf("[%s/%s] %s: %s (fix: %s)", f.Lens, f.Severity, f.Location, f.Text, f.Fix)
 		if f.ID != "" {
 			line = f.ID + " " + line
+		}
+		switch {
+		case f.Reopens != "" && f.ReopensAfter == reopensAfterFixed:
+			line += fmt.Sprintf(" (raised again: %s was marked fixed)", f.Reopens)
+		case f.Reopens != "":
+			line += fmt.Sprintf(" (raised again: %s got no disposition)", f.Reopens)
 		}
 		lines[i] = line
 	}
@@ -1791,6 +1821,22 @@ func renderFindings(findings []response.Finding) string {
 // of fixed or disputed (ticket 72, task 2 on).
 const needsDispositionLabel = "needs_disposition"
 
+// previousFindingsLabel and previousDispositionsLabel fence the plan
+// review's own inputs about the last review below the version under review
+// and what the plan did about each of its findings (ticket 72 task 3).
+const (
+	previousFindingsLabel     = "previous_findings"
+	previousDispositionsLabel = "previous_dispositions"
+)
+
+// reopensAfterFixed and reopensAfterNoDisposition are Finding.ReopensAfter's
+// two values: what the plan did with the earlier, same-location finding a
+// new above-floor finding raises again (ticket 72 task 3, owner decision Q3).
+const (
+	reopensAfterFixed         = "fixed"
+	reopensAfterNoDisposition = "no_disposition"
+)
+
 // floorResumeInputs splits findings at floor into the fenced inputs a
 // planning resume carries: "findings" for the at-or-below-floor survivors
 // and "needs_disposition" for the above-floor ones (owner decision Q1 on
@@ -1798,11 +1844,11 @@ const needsDispositionLabel = "needs_disposition"
 // planner). Either side is left out of the result when it is empty.
 func floorResumeInputs(findings []response.Finding, floor response.Severity) []prompt.NamedInput {
 	var atOrBelow, above []response.Finding
-	for _, f := range findings {
-		if f.Severity.Rank() <= floor.Rank() {
-			atOrBelow = append(atOrBelow, f)
+	for i := range findings {
+		if findings[i].Severity.Rank() <= floor.Rank() {
+			atOrBelow = append(atOrBelow, findings[i])
 		} else {
-			above = append(above, f)
+			above = append(above, findings[i])
 		}
 	}
 	var inputs []prompt.NamedInput
@@ -1825,7 +1871,8 @@ const gateFindingTextMaxRunes = 200
 // no findings.
 func renderGateFindings(findings []response.Finding) string {
 	lines := make([]string, len(findings))
-	for i, f := range findings {
+	for i := range findings {
+		f := &findings[i]
 		text := []rune(strings.Join(strings.Fields(f.Text), " "))
 		if len(text) > gateFindingTextMaxRunes {
 			text = text[:gateFindingTextMaxRunes]
@@ -2340,6 +2387,77 @@ func storedPlanreviewFindings(ctx context.Context, t store.Ticket, d Deps) ([]re
 	return payload.Findings, nil
 }
 
+// previousReview returns the findings of ticketID's newest planreview
+// artifact below version, and the dispositions of the plan stored at that
+// review's version plus one -- the plan that answered it; all nil, nil when
+// no review exists below version (ticket 72 task 3). runPlanReview calls
+// this once per review run and threads the result through its success
+// closure into planReviewOkCommit, so a review's own inputs and its reopens
+// marking come from the same read.
+func previousReview(ctx context.Context, d Deps, ticketID int64, version int) ([]response.Finding, []response.Disposition, error) {
+	all, err := d.Store.ListArtifacts(ctx, ticketID)
+	if err != nil {
+		return nil, nil, fmt.Errorf("job: planreview: previous review: %w", err)
+	}
+	var review *store.Artifact
+	for i := range all {
+		a := &all[i]
+		if a.Type == artifactTypePlanreview && a.Version < version && (review == nil || a.Version > review.Version) {
+			review = a
+		}
+	}
+	if review == nil {
+		return nil, nil, nil
+	}
+	var payload planreviewArtifactPayload
+	if unmarshalErr := json.Unmarshal(review.Payload, &payload); unmarshalErr != nil {
+		return nil, nil, fmt.Errorf("job: planreview: unmarshal planreview artifact v%d: %w", review.Version, unmarshalErr)
+	}
+	for i := range all {
+		if all[i].Type != artifactTypePlan || all[i].Version != review.Version+1 {
+			continue
+		}
+		var plan response.Plan
+		if unmarshalErr := json.Unmarshal(all[i].Payload, &plan); unmarshalErr != nil {
+			return nil, nil, fmt.Errorf("job: planreview: unmarshal plan artifact v%d: %w", all[i].Version, unmarshalErr)
+		}
+		return payload.Findings, plan.Dispositions, nil
+	}
+	return payload.Findings, nil, nil
+}
+
+// markReopened sets Reopens and ReopensAfter on each above-floor finding in
+// findings that is raised at the exact location of a previous above-floor
+// finding (in prev) the plan marked fixed or left without a disposition; a
+// disputed match never counts (owner decision Q3 on ticket 72: Zing matches
+// on exact location and an above-floor severity, never on the reviewer
+// naming the earlier id).
+func markReopened(findings, prev []response.Finding, ds []response.Disposition, floor response.Severity) {
+	kinds := make(map[string]response.DispositionKind, len(ds))
+	for _, disp := range ds {
+		kinds[disp.Finding] = disp.Kind
+	}
+	for i := range findings {
+		if findings[i].Severity.Rank() <= floor.Rank() {
+			continue
+		}
+		for j := range prev {
+			p := &prev[j]
+			sameSpot := p.ID != "" && p.Severity.Rank() > floor.Rank() && p.Location == findings[i].Location
+			kind := kinds[p.ID]
+			if !sameSpot || kind == response.DispositionDisputed {
+				continue
+			}
+			findings[i].Reopens = p.ID
+			findings[i].ReopensAfter = reopensAfterNoDisposition
+			if kind == response.DispositionFixed {
+				findings[i].ReopensAfter = reopensAfterFixed
+			}
+			break
+		}
+	}
+}
+
 // dispositionsRequired returns the above-floor findings, with ids, of the
 // current cohort's planreview artifact when a floor loop started for that
 // version (its pending marker exists); nil, nil when there is no cohort or
@@ -2367,9 +2485,9 @@ func dispositionsRequired(ctx context.Context, t store.Ticket, d Deps) ([]respon
 		return nil, err
 	}
 	var required []response.Finding
-	for _, f := range findings {
-		if f.Severity.Rank() > d.Floor.Rank() && f.ID != "" {
-			required = append(required, f)
+	for i := range findings {
+		if findings[i].Severity.Rank() > d.Floor.Rank() && findings[i].ID != "" {
+			required = append(required, findings[i])
 		}
 	}
 	return required, nil
@@ -2383,8 +2501,8 @@ func dispositionsRequired(ctx context.Context, t store.Ticket, d Deps) ([]respon
 // TestCheckDispositions, calling this directly, reaches it.
 func checkDispositions(required []response.Finding, ds []response.Disposition, planXML []byte) []*response.PathError {
 	byID := make(map[string]response.Finding, len(required))
-	for _, f := range required {
-		byID[f.ID] = f
+	for i := range required {
+		byID[required[i].ID] = required[i]
 	}
 	var errs []*response.PathError
 	seen := make(map[string]bool, len(ds))
@@ -2414,7 +2532,8 @@ func checkDispositions(required []response.Finding, ds []response.Disposition, p
 			errs = append(errs, &response.PathError{Path: path, Msg: fmt.Sprintf("kind %q must be fixed or disputed", disp.Kind)})
 		}
 	}
-	for _, f := range required {
+	for i := range required {
+		f := &required[i]
 		if !seen[f.ID] {
 			errs = append(errs, &response.PathError{Path: "plan/dispositions", Msg: fmt.Sprintf(
 				"finding %s (%s at %s: %s) needs a disposition: fixed with the path you changed, or disputed with a reason",

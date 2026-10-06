@@ -327,14 +327,16 @@ type FindingsResponse struct { // planreview and review, outcome ok
 }
 
 type Finding struct {
-	Lens     Lens      `xml:"lens,attr"           json:"lens"`
-	Severity Severity  `xml:"severity,attr"       json:"severity"`
-	Location string    `xml:"location,attr"       json:"location" jsonschema:"minLength=1" doc:"plan: an element path such as plan/delivery/tasks/task[3]; code: path:line inside the diff"`
-	Text     string    `xml:"text"                json:"text"     jsonschema:"minLength=1" doc:"what is wrong or unanswered"`
-	Fix      string    `xml:"fix"                 json:"fix"      jsonschema:"minLength=1" doc:"what to change"`
-	PlanRef  string    `xml:"plan_ref,omitempty"  json:"plan_ref,omitempty" doc:"code review, fidelity lens only: the plan element"`
-	Decision *Decision `xml:"-"                   json:"decision,omitempty"  doc:"set by the owner at triage"`
-	ID       string    `xml:"-"                   json:"id,omitempty"        jsonschema:"pattern=^p[0-9]+-f[0-9]+$" doc:"plan review only, set by Zing when it stores the artifact"`
+	Lens         Lens      `xml:"lens,attr"           json:"lens"`
+	Severity     Severity  `xml:"severity,attr"       json:"severity"`
+	Location     string    `xml:"location,attr"       json:"location" jsonschema:"minLength=1" doc:"plan: an element path such as plan/delivery/tasks/task[3]; code: path:line inside the diff"`
+	Text         string    `xml:"text"                json:"text"     jsonschema:"minLength=1" doc:"what is wrong or unanswered"`
+	Fix          string    `xml:"fix"                 json:"fix"      jsonschema:"minLength=1" doc:"what to change"`
+	PlanRef      string    `xml:"plan_ref,omitempty"  json:"plan_ref,omitempty" doc:"code review, fidelity lens only: the plan element"`
+	Decision     *Decision `xml:"-"                   json:"decision,omitempty"  doc:"set by the owner at triage"`
+	ID           string    `xml:"-"                   json:"id,omitempty"        jsonschema:"pattern=^p[0-9]+-f[0-9]+$" doc:"plan review only, set by Zing when it stores the artifact"`
+	Reopens      string    `xml:"-" json:"reopens,omitempty"       jsonschema:"pattern=^p[0-9]+-f[0-9]+$" doc:"plan review only, the id of the previous review's finding that this one raises again at the same location"`
+	ReopensAfter string    `xml:"-" json:"reopens_after,omitempty" jsonschema:"enum=fixed,enum=no_disposition" doc:"plan review only, set exactly when reopens is set: what the plan did with the earlier finding"`
 }
 
 // ---- build ----------------------------------------------------------------

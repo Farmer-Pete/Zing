@@ -590,7 +590,8 @@ func (c *console) loadFindings(ctx context.Context, ticketID int64) ([]templates
 	}
 
 	rows := make([]templates.FindingRow, 0, len(payload.Findings))
-	for _, f := range payload.Findings {
+	for i := range payload.Findings {
+		f := &payload.Findings[i]
 		if f.Severity.Rank() <= c.floor.Rank() && !capped {
 			continue
 		}
