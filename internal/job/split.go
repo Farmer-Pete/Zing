@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"strings"
 
 	"zing/internal/response"
 	"zing/internal/store"
@@ -95,4 +96,57 @@ func splitQuestionMessage(ticketID int64, n int) (store.Message, error) {
 		TicketID: ticketID, Type: msgTypeQuestion, Author: authorZing,
 		State: new(questionStateOpen), Body: body, Payload: payload,
 	}, nil
+}
+
+// splitOrder returns children in an order where every child comes after
+// every child it depends on (Kahn's algorithm), always taking the
+// earliest-listed child among those currently ready, so filing proceeds
+// in a stable, predictable order.
+func splitOrder(children []response.Child) ([]response.Child, error) {
+	byKey := make(map[string]response.Child, len(children))
+	for _, c := range children {
+		byKey[c.Key] = c
+	}
+	for _, c := range children {
+		for _, dep := range c.DependsOn {
+			if _, ok := byKey[dep]; !ok {
+				return nil, fmt.Errorf("job: split: child %s depends on unknown key %s", c.Key, dep)
+			}
+		}
+	}
+
+	taken := make(map[string]bool, len(children))
+	order := make([]response.Child, 0, len(children))
+	for len(order) < len(children) {
+		progressed := false
+		for _, c := range children {
+			if taken[c.Key] {
+				continue
+			}
+			ready := true
+			for _, dep := range c.DependsOn {
+				if !taken[dep] {
+					ready = false
+					break
+				}
+			}
+			if !ready {
+				continue
+			}
+			taken[c.Key] = true
+			order = append(order, c)
+			progressed = true
+			break
+		}
+		if !progressed {
+			remaining := make([]string, 0, len(children)-len(order))
+			for _, c := range children {
+				if !taken[c.Key] {
+					remaining = append(remaining, c.Key)
+				}
+			}
+			return nil, fmt.Errorf("job: split: dependency cycle among %s", strings.Join(remaining, ", "))
+		}
+	}
+	return order, nil
 }
