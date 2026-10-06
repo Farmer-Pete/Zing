@@ -44,18 +44,27 @@ const (
 // no reason to assert on.
 func seedGateQuestion(t *testing.T, s *store.Store, ticketID int64) {
 	t.Helper()
+	seedGateQuestionInState(t, s, ticketID, response.QuestionStateOpen, testQuestionStateOpen)
+}
+
+// seedGateQuestionInState is seedGateQuestion's shared implementation,
+// parameterized on the gate's own payload and message state, so a fixture
+// needing a gate question already resolved -- the shape a sealed ticket's
+// own gate leaves behind (sealed_section_test.go) -- defines the gate's
+// shape once rather than copying it (r1f1).
+func seedGateQuestionInState(t *testing.T, s *store.Store, ticketID int64, payloadState response.QuestionState, msgState string) {
+	t.Helper()
 	payload, err := json.Marshal(response.QuestionPayload{
-		Key: "Q1", Kind: response.QuestionKindGate, State: response.QuestionStateOpen,
+		Key: "Q1", Kind: response.QuestionKindGate, State: payloadState,
 		Recommended: "a",
 		Options:     []response.Option{{Key: "a", Text: "Approve"}, {Key: "b", Text: "Reject"}},
 	})
 	if err != nil {
 		t.Fatalf("marshal gate question payload: %v", err)
 	}
-	openState := testQuestionStateOpen
 	if _, err := s.InsertMessage(t.Context(), store.Message{
 		TicketID: ticketID, Type: testMsgTypeQuestion, Author: testAuthorZing,
-		State:   &openState,
+		State:   &msgState,
 		Body:    gateQuestionTitle + "\n\nReview the plan, scenarios, and findings.",
 		Payload: payload,
 	}); err != nil {
@@ -456,6 +465,8 @@ func TestGateOwnerEditControls_ClaimedRendersDisabled(t *testing.T) {
 		t.Errorf("gate group missing the claim sentence; got:\n%s", gate)
 	}
 
+	assertDataFieldsDisabled(t, gate)
+
 	t.Run("unclaimed twin shows no claim note", func(t *testing.T) {
 		t.Parallel()
 		s2 := newConsoleTestStore(t)
@@ -476,6 +487,68 @@ func TestGateOwnerEditControls_ClaimedRendersDisabled(t *testing.T) {
 		gate2 := findGroup(t, splitQuestionGroups(t, main2), gateQuestionTitle)
 		if strings.Contains(gate2, "owner-edit-claim-note") {
 			t.Errorf("unclaimed gate group contains owner-edit-claim-note; got:\n%s", gate2)
+		}
+	})
+}
+
+// amendedQuestionTitle is the fixed heading seedAmendedQuestion's own body
+// carries (owner_edit_test.go), distinct from gateQuestionTitle so findGroup
+// never matches the wrong group.
+const amendedQuestionTitle = "Amended check"
+
+// TestGateOwnerEditControls_AmendedEscalationClaimedRendersDisabled proves
+// #75's Q2 for the amended cannot_run escalation's own "Edit it" box
+// (thread.templ's row.Question.Amendment branch, wired in
+// buildThreadQuestion): while a run holds the ticket's claim, that box's
+// Save control renders disabled and shows the store's own claim sentence,
+// the same as the gate's and the sealed section's boxes.
+func TestGateOwnerEditControls_AmendedEscalationClaimedRendersDisabled(t *testing.T) {
+	t.Parallel()
+	s := newConsoleTestStore(t)
+	ticketID := seedTicket(t, s, "fake#1", "Add a hello endpoint")
+	seedSealedScenarioArtifact(t, s, ticketID, nil, response.Scenario{
+		ID: "s1", Kind: response.ScenarioKindBehavior, Given: "g1", When: "w1", Then: "t1",
+	})
+	seedAmendedQuestion(t, s, ticketID, "s1")
+
+	claimed, err := s.Claim(t.Context(), ticketID, "runner-1", time.Now().Add(time.Hour))
+	if err != nil || !claimed {
+		t.Fatalf("Claim: claimed=%v err=%v", claimed, err)
+	}
+
+	srv := newTestServer(t, s, bus.New(), nil, newTestLogHandler(t))
+	resp, r, cancel := openStream(t, srv.URL, "thread", ticketID, 0)
+	defer cancel()
+	defer func() { _ = resp.Body.Close() }()
+	_, main, _, _ := readInitialFrames(t, r)
+
+	group := findGroup(t, splitQuestionGroups(t, main), amendedQuestionTitle)
+
+	if n, want := strings.Count(group, `class="owner-edit-save" disabled`), strings.Count(group, `class="owner-edit-save"`); n != want || want == 0 {
+		t.Errorf(`owner-edit-save disabled count = %d, want %d (all of them, at least one); group:\n%s`, n, want, group)
+	}
+	if !strings.Contains(group, store.OwnerEditClaimedReason) {
+		t.Errorf("amended escalation group missing the claim sentence; got:\n%s", group)
+	}
+
+	t.Run("unclaimed twin shows no claim note", func(t *testing.T) {
+		t.Parallel()
+		s2 := newConsoleTestStore(t)
+		ticketID2 := seedTicket(t, s2, "fake#2", "Add another endpoint")
+		seedSealedScenarioArtifact(t, s2, ticketID2, nil, response.Scenario{
+			ID: "s1", Kind: response.ScenarioKindBehavior, Given: "g1", When: "w1", Then: "t1",
+		})
+		seedAmendedQuestion(t, s2, ticketID2, "s1")
+
+		srv2 := newTestServer(t, s2, bus.New(), nil, newTestLogHandler(t))
+		resp2, r2, cancel2 := openStream(t, srv2.URL, "thread", ticketID2, 0)
+		defer cancel2()
+		defer func() { _ = resp2.Body.Close() }()
+		_, main2, _, _ := readInitialFrames(t, r2)
+
+		group2 := findGroup(t, splitQuestionGroups(t, main2), amendedQuestionTitle)
+		if strings.Contains(group2, "owner-edit-claim-note") {
+			t.Errorf("unclaimed amended escalation group contains owner-edit-claim-note; got:\n%s", group2)
 		}
 	})
 }

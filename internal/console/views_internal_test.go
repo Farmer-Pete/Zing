@@ -2295,13 +2295,25 @@ func TestShowSealedSection(t *testing.T) {
 	}
 	gates := []string{msgStateOpen, msgStateAnswered, msgStateResolved, ""}
 
+	// wantSealedState is a literal copy of the states #75 Q1 names, kept
+	// independent of production's sealedSectionStates map so a change to
+	// that map (e.g. adding planning or dropping reviewing) fails this
+	// test instead of passing it vacuously (r1f4).
+	wantSealedState := map[string]bool{
+		string(response.TicketStateBuilding):  true,
+		string(response.TicketStateReviewing): true,
+		string(response.TicketStateJudging):   true,
+		string(response.TicketStateShipping):  true,
+		string(response.TicketStateEscalated): true,
+	}
+
 	for _, state := range states {
 		for _, sealed := range []bool{true, false} {
 			for _, gate := range gates {
 				t.Run(state+"/sealed="+strconv.FormatBool(sealed)+"/gate="+gate, func(t *testing.T) {
 					t.Parallel()
 					rows := sealedSectionGateRow(t, gate)
-					want := sealed && sealedSectionStates[state] && (gate == "" || gate == msgStateResolved)
+					want := sealed && wantSealedState[state] && (gate == "" || gate == msgStateResolved)
 					if got := showSealedSection(state, sealed, rows); got != want {
 						t.Errorf("showSealedSection(%q, %v, gate=%q) = %v, want %v", state, sealed, gate, got, want)
 					}

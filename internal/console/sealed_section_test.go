@@ -52,31 +52,6 @@ func advanceTicketToState(t *testing.T, s *store.Store, ticketID int64, state st
 	}
 }
 
-// seedResolvedGateQuestion inserts one resolved gate-kind "question" message
-// on ticketID (gateShowsPlan's own false case): the shape a sealed ticket's
-// own gate leaves behind once the seal resolves it, so showSealedSection
-// sees a gate question that no longer shows the plan.
-func seedResolvedGateQuestion(t *testing.T, s *store.Store, ticketID int64) {
-	t.Helper()
-	payload, err := json.Marshal(response.QuestionPayload{
-		Key: "Q1", Kind: response.QuestionKindGate, State: response.QuestionStateResolved,
-		Recommended: "a",
-		Options:     []response.Option{{Key: "a", Text: "Approve"}, {Key: "b", Text: "Reject"}},
-	})
-	if err != nil {
-		t.Fatalf("marshal resolved gate question payload: %v", err)
-	}
-	resolvedState := string(response.QuestionStateResolved)
-	if _, err := s.InsertMessage(t.Context(), store.Message{
-		TicketID: ticketID, Type: testMsgTypeQuestion, Author: testAuthorZing,
-		State:   &resolvedState,
-		Body:    gateQuestionTitle + "\n\nReview the plan, scenarios, and findings.",
-		Payload: payload,
-	}); err != nil {
-		t.Fatalf("InsertMessage(resolved gate question): %v", err)
-	}
-}
-
 // seedSealedSectionFixture seeds a queued ticket carrying a run, a 2-task
 // plan whose one file names task "2", and one sealed host scenario s1
 // (check sealedSectionHostCheck), through the same real store writes every
@@ -108,7 +83,7 @@ func seedSealedSectionFixture(t *testing.T, s *store.Store) int64 {
 		ID: "s1", Kind: response.ScenarioKindHost, Check: sealedSectionHostCheck,
 		Given: "g1", When: "w1", Then: "t1",
 	})
-	seedResolvedGateQuestion(t, s, ticketID)
+	seedGateQuestionInState(t, s, ticketID, response.QuestionStateResolved, string(response.QuestionStateResolved))
 	return ticketID
 }
 
@@ -312,6 +287,27 @@ func TestThreadSealedSection_HiddenOutsidePostGateStates(t *testing.T) {
 	})
 }
 
+// assertDataFieldsDisabled fails the test unless every data-field control's
+// opening tag in html -- every textarea, input and select an owner-edit box
+// renders -- carries the disabled attribute (r1f2: the Save/Drop and
+// claim-note checks alone leave every other control unchecked).
+func assertDataFieldsDisabled(t *testing.T, html string) {
+	t.Helper()
+	parts := strings.Split(html, `data-field="`)
+	if len(parts) < 2 {
+		t.Fatalf("assertDataFieldsDisabled: no data-field controls found in:\n%s", html)
+	}
+	for _, p := range parts[1:] {
+		end := strings.IndexByte(p, '>')
+		if end < 0 {
+			t.Fatalf("assertDataFieldsDisabled: no closing '>' after data-field in:\n%s", html)
+		}
+		if tag := p[:end]; !strings.Contains(tag, "disabled") {
+			t.Errorf("data-field control not disabled: data-field=\"%s\"", tag)
+		}
+	}
+}
+
 // TestThreadSealedSection_ClaimedRendersDisabled proves #75's Q2: while a
 // run holds the ticket's claim, every owner-edit box on the page -- the
 // ticket body, the sealed section's scenario and plan-file boxes, and the
@@ -354,4 +350,6 @@ func TestThreadSealedSection_ClaimedRendersDisabled(t *testing.T) {
 	if noteCount != saveCount {
 		t.Errorf("claim sentence count = %d, want %d (one per owner-edit-save box)", noteCount, saveCount)
 	}
+
+	assertDataFieldsDisabled(t, main)
 }
