@@ -686,8 +686,9 @@ var workflowRunIncompletePattern = regexp.MustCompile(`(?i)workflow.*(already ru
 func (g *GitHubClient) RerunJob(ctx context.Context, owner, repo string, jobID int64) error {
 	if _, err := g.c.Actions.RerunJobByID(ctx, owner, repo, jobID); err != nil {
 		if ere, ok := errors.AsType[*github.ErrorResponse](err); ok && ere.Response != nil {
-			code := ere.Response.StatusCode
-			if (code == http.StatusForbidden || code == http.StatusConflict) && workflowRunIncompletePattern.MatchString(ere.Message) {
+			refusalStatus := ere.Response.StatusCode == http.StatusForbidden || ere.Response.StatusCode == http.StatusConflict
+			runStillRunning := workflowRunIncompletePattern.MatchString(ere.Message)
+			if refusalStatus && runStillRunning {
 				return ErrWorkflowRunIncomplete
 			}
 		}

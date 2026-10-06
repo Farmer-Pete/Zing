@@ -26,13 +26,15 @@ import (
 // use, a second check name (not "lint" -- building.go's own check command
 // already carries that name), and two commit-status contexts.
 const (
-	ciSHA             = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
-	testRequiredCI    = "ci"
-	testCheckB        = "typecheck"
-	testStatusA       = "deploy"
-	testStatusB       = "codecov"
-	testInProgress    = "in_progress"
-	testFlakyTestName = "TestX"
+	ciSHA                   = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+	testRequiredCI          = "ci"
+	testCheckB              = "typecheck"
+	testStatusA             = "deploy"
+	testStatusB             = "codecov"
+	testInProgress          = "in_progress"
+	testFlakyTestName       = "TestX"
+	testTriedThreeInfraRuns = "re-ran workflow runs 10, 11, 12"
+	mkNonActionsAppSlug     = "circleci"
 )
 
 // -----------------------------------------------------------------------
@@ -463,7 +465,7 @@ func TestCILogText(t *testing.T) {
 	failedRuns := []orchestrator.CheckRun{
 		{Name: testRequiredCI, AppSlug: ghGitHubActions, Conclusion: ghFailure, DetailsURL: "https://github.com/o/r/actions/runs/1/job/111"},
 		{Name: "unreadable", AppSlug: ghGitHubActions, Conclusion: ghFailure, DetailsURL: "https://github.com/o/r/actions/runs/2/job/222"},
-		{Name: "other-app", AppSlug: "circleci", Conclusion: ghFailure, DetailsURL: "https://circleci.com/gh/o/r/9"},
+		{Name: "other-app", AppSlug: mkNonActionsAppSlug, Conclusion: ghFailure, DetailsURL: "https://circleci.com/gh/o/r/9"},
 		{Name: "zzz-fourth", AppSlug: ghGitHubActions, Conclusion: ghFailure, DetailsURL: "https://github.com/o/r/actions/runs/3/job/333"},
 	}
 	failedStatuses := []orchestrator.CommitStatus{
@@ -526,7 +528,7 @@ func mkNonActionsFailedCheck(name string, checkRunID int64, conclusion string) f
 			Name:       name,
 			Status:     ghCompleted,
 			Conclusion: conclusion,
-			AppSlug:    "circleci",
+			AppSlug:    mkNonActionsAppSlug,
 			DetailsURL: "https://circleci.com/gh/o/r/9",
 		},
 	}
@@ -619,7 +621,7 @@ func TestDecideCIRerun(t *testing.T) {
 				Action: rerunEscalate,
 				What:   rerunInfraWhat,
 				Why:    "ci ended cancelled on bbbbbbb after 3 re-runs",
-				Tried:  "re-ran workflow runs 10, 11, 12",
+				Tried:  testTriedThreeInfraRuns,
 			},
 		},
 		{
@@ -673,7 +675,7 @@ func TestDecideCIRerun(t *testing.T) {
 				Action: rerunEscalate,
 				What:   rerunInfraWhat,
 				Why:    "a ended cancelled on bbbbbbb after 3 re-runs",
-				Tried:  "re-ran workflow runs 10, 11, 12",
+				Tried:  testTriedThreeInfraRuns,
 			},
 		},
 		{
@@ -730,6 +732,29 @@ func TestDecideCIRerun(t *testing.T) {
 			failed: []failedCheck{mkFailedCheck(strings.Repeat("x", 201), 1, 10, 100, ghFailure, "--- FAIL: TestX", nil)},
 			want:   rerunDecision{Action: rerunFix},
 		},
+		{
+			name:     "a spent flaky budget gives fix even with a sibling job in flight",
+			failed:   []failedCheck{mkFailedCheck("ci", 2, 11, 101, ghFailure, "--- FAIL: TestX", nil)},
+			prior:    []priorRerun{mkPrior("ci", 1, 10, response.RerunReasonFlaky, 20*time.Minute)},
+			inFlight: map[int64]bool{11: true},
+			want:     rerunDecision{Action: rerunFix},
+		},
+		{
+			name:     "an infra cap already hit escalates even with a sibling job in flight",
+			failed:   []failedCheck{mkFailedCheck("ci", 4, 13, 103, ghCancelled, "", nil)},
+			inFlight: map[int64]bool{13: true},
+			prior: []priorRerun{
+				mkPrior("ci", 1, 10, response.RerunReasonInfra, 3*time.Hour),
+				mkPrior("ci", 2, 11, response.RerunReasonInfra, 2*time.Hour),
+				mkPrior("ci", 3, 12, response.RerunReasonInfra, time.Hour),
+			},
+			want: rerunDecision{
+				Action: rerunEscalate,
+				What:   rerunInfraWhat,
+				Why:    "ci ended cancelled on bbbbbbb after 3 re-runs",
+				Tried:  testTriedThreeInfraRuns,
+			},
+		},
 	}
 
 	for _, tc := range cases {
@@ -738,6 +763,59 @@ func TestDecideCIRerun(t *testing.T) {
 			got := decideCIRerun(decideCIRerunNow, ciSHA, tc.failed, tc.failedStatuses, tc.prior, tc.inFlight)
 			if diff := cmp.Diff(tc.want, got, cmpopts.EquateEmpty()); diff != "" {
 				t.Errorf("decideCIRerun() mismatch (-want +got):\n%s", diff)
+			}
+		})
+	}
+}
+
+// -----------------------------------------------------------------------
+// Pure: workflowRunsInFlight
+// -----------------------------------------------------------------------
+
+func TestWorkflowRunsInFlight(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name string
+		runs []orchestrator.CheckRun
+		want map[int64]bool
+	}{
+		{
+			name: "an in-progress Actions run counts",
+			runs: []orchestrator.CheckRun{
+				{AppSlug: ghGitHubActions, Status: testInProgress, DetailsURL: fmt.Sprintf("https://github.com/o/r/actions/runs/%d/job/%d", 10, 11)},
+			},
+			want: map[int64]bool{10: true},
+		},
+		{
+			name: "a completed run does not count",
+			runs: []orchestrator.CheckRun{
+				{AppSlug: ghGitHubActions, Status: ghCompleted, Conclusion: ghFailure, DetailsURL: fmt.Sprintf("https://github.com/o/r/actions/runs/%d/job/%d", 20, 21)},
+			},
+			want: map[int64]bool{},
+		},
+		{
+			name: "a non-Actions app does not count",
+			runs: []orchestrator.CheckRun{
+				{AppSlug: mkNonActionsAppSlug, Status: testInProgress, DetailsURL: fmt.Sprintf("https://github.com/o/r/actions/runs/%d/job/%d", 30, 31)},
+			},
+			want: map[int64]bool{},
+		},
+		{
+			name: "a DetailsURL that does not match does not count",
+			runs: []orchestrator.CheckRun{
+				{AppSlug: ghGitHubActions, Status: testInProgress, DetailsURL: "https://example.com/not-actions"},
+			},
+			want: map[int64]bool{},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got := workflowRunsInFlight(tc.runs)
+			if diff := cmp.Diff(tc.want, got, cmpopts.EquateEmpty()); diff != "" {
+				t.Errorf("workflowRunsInFlight() mismatch (-want +got):\n%s", diff)
 			}
 		})
 	}
@@ -892,12 +970,12 @@ func TestRerunPassedNotes(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			got, events, err := rerunPassedNotes(99, ciSHA, tc.runs, tc.reruns, tc.passed)
+			got, err := rerunPassedNotes(99, ciSHA, tc.runs, tc.reruns, tc.passed)
 			if err != nil {
 				t.Fatalf("rerunPassedNotes: %v", err)
 			}
-			if len(got) != tc.wantLen || len(events) != tc.wantLen {
-				t.Fatalf("len(got) = %d, len(events) = %d, want %d", len(got), len(events), tc.wantLen)
+			if len(got) != tc.wantLen {
+				t.Fatalf("len(got) = %d, want %d", len(got), tc.wantLen)
 			}
 			if tc.wantLen == 0 {
 				return
@@ -909,9 +987,6 @@ func TestRerunPassedNotes(t *testing.T) {
 			want := response.CheckRerunPassedEvent{Check: "ci", SHA: ciSHA, Tests: []string{testFlakyTestName}}
 			if !cmp.Equal(payload, want) {
 				t.Errorf("payload = %+v, want %+v", payload, want)
-			}
-			if !cmp.Equal(events[0], want) {
-				t.Errorf("events[0] = %+v, want %+v", events[0], want)
 			}
 			if got[0].TicketID != 99 {
 				t.Errorf("TicketID = %d, want 99", got[0].TicketID)
@@ -928,12 +1003,19 @@ func TestRerunPassedNotes(t *testing.T) {
 		newer := response.CheckRerunEvent{Check: "ci", SHA: ciSHA, RunID: 11, CheckRunID: 2, Reason: response.RerunReasonFlaky, Tests: []string{"TestNew"}}
 		runs := []orchestrator.CheckRun{{ID: 3, Name: "ci", Status: ghCompleted, Conclusion: ghSuccess}}
 
-		_, events, err := rerunPassedNotes(99, ciSHA, runs, []response.CheckRerunEvent{older, newer}, nil)
+		got, err := rerunPassedNotes(99, ciSHA, runs, []response.CheckRerunEvent{older, newer}, nil)
 		if err != nil {
 			t.Fatalf("rerunPassedNotes: %v", err)
 		}
-		if len(events) != 1 || !cmp.Equal(events[0].Tests, newer.Tests) {
-			t.Fatalf("events = %+v, want Tests %v", events, newer.Tests)
+		if len(got) != 1 {
+			t.Fatalf("got = %+v, want one message", got)
+		}
+		var payload response.CheckRerunPassedEvent
+		if err := json.Unmarshal(got[0].Payload, &payload); err != nil {
+			t.Fatalf("unmarshal payload: %v", err)
+		}
+		if !cmp.Equal(payload.Tests, newer.Tests) {
+			t.Fatalf("Tests = %v, want %v", payload.Tests, newer.Tests)
 		}
 	})
 
@@ -946,12 +1028,22 @@ func TestRerunPassedNotes(t *testing.T) {
 			{ID: 4, Name: "ci", Status: ghCompleted, Conclusion: ghSuccess},
 		}
 
-		_, events, err := rerunPassedNotes(99, ciSHA, runs, []response.CheckRerunEvent{zzEvent, ciEvent}, nil)
+		got, err := rerunPassedNotes(99, ciSHA, runs, []response.CheckRerunEvent{zzEvent, ciEvent}, nil)
 		if err != nil {
 			t.Fatalf("rerunPassedNotes: %v", err)
 		}
-		if len(events) != 2 || events[0].Check != "ci" || events[1].Check != "zz" {
-			t.Fatalf("events = %+v, want ci then zz", events)
+		if len(got) != 2 {
+			t.Fatalf("got = %+v, want two messages", got)
+		}
+		var first, second response.CheckRerunPassedEvent
+		if err := json.Unmarshal(got[0].Payload, &first); err != nil {
+			t.Fatalf("unmarshal payload: %v", err)
+		}
+		if err := json.Unmarshal(got[1].Payload, &second); err != nil {
+			t.Fatalf("unmarshal payload: %v", err)
+		}
+		if first.Check != "ci" || second.Check != "zz" {
+			t.Fatalf("checks = %q, %q, want ci then zz", first.Check, second.Check)
 		}
 	})
 }

@@ -1546,19 +1546,16 @@ func shipFailedCI() (runs []orchestrator.CheckRun, required []orchestrator.Requi
 // shipInsertReviewBotMarker seeds a review-bot clock marker: a test of a
 // row below the rerun rows (the fix request, or a draft flip) seeds one
 // here first, so decideCIRerun's own "used" rule already finds a spent
-// flaky or no_log re-run for the check and sha under test. It returns the
-// new row's own message id.
-func seedCheckRerun(t *testing.T, s *store.Store, ticketID int64, event response.CheckRerunEvent) int64 {
+// flaky or no_log re-run for the check and sha under test.
+func seedCheckRerun(t *testing.T, s *store.Store, ticketID int64, event response.CheckRerunEvent) {
 	t.Helper()
 	msg, err := store.NewEvent(ticketID, store.EventKindCheckRerun, event)
 	if err != nil {
 		t.Fatalf("seedCheckRerun: NewEvent: %v", err)
 	}
-	id, err := s.InsertMessage(t.Context(), msg)
-	if err != nil {
+	if _, err := s.InsertMessage(t.Context(), msg); err != nil {
 		t.Fatalf("seedCheckRerun: InsertMessage: %v", err)
 	}
-	return id
 }
 
 // seedSpentFlakyCheckRerun seeds a "ci" check_rerun event, reason flaky,
@@ -2504,8 +2501,11 @@ func TestPollCIRerunNonActionsCheckSendsFix(t *testing.T) {
 }
 
 // TestPollCIRerunAPIErrorEscalates proves pollRerun's own error row: a
-// plain RerunJob failure (neither a rate limit nor an unavailable GitHub)
-// escalates instead of leaving the budget silently unspent.
+// RerunJob failure that is neither a rate limit, an unavailable GitHub,
+// nor an incomplete workflow run escalates instead of leaving the budget
+// silently unspent -- a refused token included (r3f2), since the plan's
+// own risk (a token that can read but lacks actions write permission) is
+// exactly a classified orchestrator.ErrGitHubAuth, not a generic error.
 func TestPollCIRerunAPIErrorEscalates(t *testing.T) {
 	if testing.Short() {
 		t.Skip("slow end-to-end flow; runs in the full suite")
@@ -2518,7 +2518,7 @@ func TestPollCIRerunAPIErrorEscalates(t *testing.T) {
 	gh.logTail = func(context.Context, string, string, int64, int) (string, error) {
 		return shipFlakyLogText, nil
 	}
-	gh.rerunErr = errors.New("403 Forbidden")
+	gh.rerunErr = fmt.Errorf("%w: 403 Forbidden", orchestrator.ErrGitHubAuth)
 
 	commit, err := shipPollRun(t, s, ticket, gh, tr)
 	if err != nil {
@@ -2691,6 +2691,56 @@ func TestPollCIRerunSharedWorkflowRunPlansOnlyOne(t *testing.T) {
 	events := shipCheckRerunEvents(t, commit)
 	if len(events) != 1 || events[0].Check != "a" {
 		t.Fatalf("check_rerun events = %+v, want exactly one, for a", events)
+	}
+}
+
+// TestPollCIRerunWaitsForInFlightSibling proves workflowRunsInFlight
+// (r3f5): a required check that failed shares its workflow run with a
+// not-yet-complete, non-required sibling job. GitHub refuses to re-run a
+// job until its whole workflow run is complete, so POLL waits instead of
+// calling RerunJob, writing no check_rerun event and sending no fix
+// request or escalation.
+func TestPollCIRerunWaitsForInFlightSibling(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow end-to-end flow; runs in the full suite")
+	}
+	t.Parallel()
+	s, ticket, gh, tr := shipPublished(t)
+	local := shipHeadSHA(t, s, ticket)
+	gh.runs = []orchestrator.CheckRun{
+		{
+			ID: 1, Name: "ci", Status: ghCompleted, Conclusion: ghFailure, AppSlug: ghGitHubActions,
+			DetailsURL: "https://github.com/fixture/fixture/actions/runs/10/job/11",
+		},
+		{
+			ID: 2, Name: checkKindLint, Status: testInProgress, AppSlug: ghGitHubActions,
+			DetailsURL: "https://github.com/fixture/fixture/actions/runs/10/job/12",
+		},
+	}
+	gh.required = []orchestrator.RequiredCheck{{Context: "ci"}}
+	gh.prState = shipMergeReadyPR(local, "PR_node_in_flight_sibling")
+	gh.logTail = func(context.Context, string, string, int64, int) (string, error) {
+		return shipFlakyLogText, nil
+	}
+
+	commit, err := shipPollRun(t, s, ticket, gh, tr)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if commit.Escalation != nil {
+		t.Errorf("Escalation = %+v, want none", commit.Escalation)
+	}
+	if len(gh.reruns) != 0 {
+		t.Errorf("reruns = %+v, want none", gh.reruns)
+	}
+	if events := shipCheckRerunEvents(t, commit); len(events) != 0 {
+		t.Errorf("check_rerun events = %+v, want none", events)
+	}
+	if shipHasFixMarker(commit) {
+		t.Errorf("commit.Messages = %+v, want no fix marker", commit.Messages)
+	}
+	if commit.Poll == nil {
+		t.Fatal("commit.Poll is nil, want a rescheduled poll")
 	}
 }
 

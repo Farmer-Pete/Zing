@@ -806,6 +806,11 @@ func checkRerunEvents(ctx context.Context, d Deps, ticketID int64, sha string) (
 func (h shipHandler) ciRerunDecision(ctx context.Context, t store.Ticket, d Deps, proj Project, result CIResult, runs []orchestrator.CheckRun, sha string) (rerunDecision, error) {
 	failed := readFailedChecks(ctx, proj.Checks, proj.Owner, proj.Repo, result.FailedRuns)
 	text := ciLogTextFrom(failed, result.FailedStatuses)
+	for i := range failed {
+		if fc := &failed[i]; fc.LogErr != nil {
+			slog.Warn("ci check log unreadable", "ticket_id", t.ID, "check", fc.Run.Name, "sha", sha, "workflow_run_id", fc.RunID, "job_id", fc.JobID, "error", fc.LogErr)
+		}
+	}
 
 	retryRow, hasRetry, err := d.Store.Marker(ctx, t.ID, markerRetryRequested)
 	if err != nil {
@@ -835,31 +840,34 @@ const ciRerunAPIErrorWhat = "Zing could not re-run a failed CI check"
 
 // pollRerun re-runs every planned job in order (design shape, "Per-check
 // rule"): RerunJob first, then the check_rerun event recording it, so a
-// crash between the two never records a re-run GitHub never made. A read
-// failure pollReadFailure itself knows how to classify (an unavailable
-// GitHub, a rate limit, or a refused token) is handled the same way it
-// handles any other POLL read, keeping the check_rerun events already
-// written this tick attached to the commit -- a re-run GitHub did make
-// before the one that failed must not go unrecorded, or the next tick's
-// budget check would count it as never having happened and could re-run
-// the same job a second time. A job whose workflow run GitHub says is not
-// complete yet (orchestrator.ErrWorkflowRunIncomplete; decideCIRerun's own
-// per-tick dedupe and workflowRunsInFlight check narrow this to a race
-// between reading CI and calling RerunJob, r2f1) reschedules the same way.
-// Any other RerunJob failure escalates instead, carrying those same
-// events.
+// crash between the two never records a re-run GitHub never made. Only a
+// transient read failure -- an unavailable GitHub, a rate limit, or a
+// workflow run GitHub says is not complete yet
+// (orchestrator.ErrWorkflowRunIncomplete; decideCIRerun's own per-tick
+// dedupe and workflowRunsInFlight check narrow this to a race between
+// reading CI and calling RerunJob, r2f1) -- reschedules, keeping the
+// check_rerun events already written this tick attached to the commit --
+// a re-run GitHub did make before the one that failed must not go
+// unrecorded, or the next tick's budget check would count it as never
+// having happened and could re-run the same job a second time. Any other
+// RerunJob failure, a refused token included (r3f2: the plan's own risk,
+// a token with read but not actions-write access, is exactly this case,
+// and the generic "GitHub refused the token" escalation pollReadFailure
+// would otherwise give it names no check and no job), escalates instead
+// with ciRerunAPIErrorWhat, carrying those same events.
 func (h shipHandler) pollRerun(ctx context.Context, t store.Ticket, d Deps, proj Project, fp string, plan []plannedRerun) (store.HandlerCommit, error) {
 	written := make([]store.Message, 0, len(plan))
 	for _, p := range plan {
 		if err := proj.Checks.RerunJob(ctx, proj.Owner, proj.Repo, p.JobID); err != nil {
-			if errors.Is(err, orchestrator.ErrWorkflowRunIncomplete) {
-				slog.Info("ci check re-run deferred, workflow run not complete yet", "ticket_id", t.ID, "check", p.Event.Check, "job_id", p.JobID, "reruns_recorded", len(written), "error", err)
+			if errors.Is(err, orchestrator.ErrWorkflowRunIncomplete) || errors.Is(err, orchestrator.ErrGitHubUnavailable) {
+				slog.Info("ci check re-run deferred", "ticket_id", t.ID, "check", p.Event.Check, "sha", p.Event.SHA, "workflow_run_id", p.Event.RunID, "job_id", p.JobID, "reruns_recorded", len(written), "error", err)
 				c := pollScheduleOnly(t, d, time.Time{})
 				c.Messages = written
 				return c, nil
 			}
-			if c, handled := pollReadFailure(t, d, false, err); handled {
-				slog.Warn("ci check re-run dropped", "ticket_id", t.ID, "check", p.Event.Check, "job_id", p.JobID, "reruns_recorded", len(written), "error", err)
+			if rle, ok := errors.AsType[orchestrator.RateLimitedError](err); ok {
+				slog.Info("ci check re-run deferred", "ticket_id", t.ID, "check", p.Event.Check, "sha", p.Event.SHA, "workflow_run_id", p.Event.RunID, "job_id", p.JobID, "reruns_recorded", len(written), "error", err)
+				c := pollScheduleOnly(t, d, rle.ResetAt)
 				c.Messages = written
 				return c, nil
 			}
@@ -916,12 +924,9 @@ func (h shipHandler) rerunNotesFor(ctx context.Context, t store.Ticket, d Deps, 
 		passed = append(passed, ev)
 	}
 
-	notes, events, err := rerunPassedNotes(t.ID, sha, runs, reruns, passed)
+	notes, err := rerunPassedNotes(t.ID, sha, runs, reruns, passed)
 	if err != nil {
 		return nil, err
-	}
-	for _, ev := range events {
-		slog.Info("ci check passed on re-run", "ticket_id", t.ID, "check", ev.Check, "sha", ev.SHA, "tests", ev.Tests)
 	}
 	return notes, nil
 }

@@ -18,6 +18,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"log/slog"
 	"path"
 	"regexp"
 	"sort"
@@ -602,7 +603,11 @@ func triedRunsText(events []priorRerun) string {
 // GitHub refuses to re-run a single job until its whole workflow run is
 // complete (r2f1) -- the same reason a tick never plans more than one
 // re-run per workflow run id (the dedupe below), so two failed jobs from
-// one run never race each other's own re-run call within a tick.
+// one run never race each other's own re-run call within a tick. That
+// wait only ever replaces a verdict the rule below would otherwise plan
+// as a re-run (r3f6): a budget already spent, a cap already hit, or a
+// check the rules send straight to fix or escalate is never delayed by
+// an unrelated job still running in the same workflow run.
 func decideCIRerun(now time.Time, sha string, failed []failedCheck, failedStatuses int, prior []priorRerun, inFlight map[int64]bool) rerunDecision {
 	type verdict struct {
 		action rerunAction
@@ -641,10 +646,12 @@ func decideCIRerun(now time.Time, sha string, failed []failedCheck, failedStatus
 			verdicts = append(verdicts, verdict{action: rerunWait})
 			continue
 		}
-		if isActionsJob && inFlight[fc.RunID] {
-			verdicts = append(verdicts, verdict{action: rerunWait})
-			continue
-		}
+		// blockedByRun reports whether fc's workflow run still has an
+		// incomplete sibling job (r3f6: checked only where a rule below
+		// would otherwise plan a re-run, never ahead of a fix or escalate
+		// verdict, so a budget already spent or a cap already hit is
+		// never delayed by an unrelated job in the same run).
+		blockedByRun := isActionsJob && inFlight[fc.RunID]
 
 		if infraConclusions[fc.Run.Conclusion] {
 			if !isActionsJob {
@@ -664,6 +671,10 @@ func decideCIRerun(now time.Time, sha string, failed []failedCheck, failedStatus
 				continue
 			}
 			if len(infra) < infraRerunCap {
+				if blockedByRun {
+					verdicts = append(verdicts, verdict{action: rerunWait})
+					continue
+				}
 				verdicts = append(verdicts, verdict{
 					action: rerunNow,
 					rerun: plannedRerun{
@@ -689,6 +700,10 @@ func decideCIRerun(now time.Time, sha string, failed []failedCheck, failedStatus
 
 		if fc.LogErr != nil {
 			if len(used) == 0 {
+				if blockedByRun {
+					verdicts = append(verdicts, verdict{action: rerunWait})
+					continue
+				}
 				verdicts = append(verdicts, verdict{
 					action: rerunNow,
 					rerun: plannedRerun{
@@ -708,6 +723,10 @@ func decideCIRerun(now time.Time, sha string, failed []failedCheck, failedStatus
 		}
 
 		if len(used) == 0 {
+			if blockedByRun {
+				verdicts = append(verdicts, verdict{action: rerunWait})
+				continue
+			}
 			verdicts = append(verdicts, verdict{
 				action: rerunNow,
 				rerun: plannedRerun{
@@ -761,15 +780,16 @@ func decideCIRerun(now time.Time, sha string, failed []failedCheck, failedStatus
 	return rerunDecision{Action: rerunWait}
 }
 
-// rerunPassedNotes returns one check_rerun_passed event message, and its
-// decoded payload (so a caller that only wants to log need not re-decode
-// what this function just built), per check that has a flaky or no_log
-// check_rerun event in reruns, whose newest run by id in runs (same Name)
-// is completed with a good conclusion and an id other than the event's
-// check_run_id, and that has no event in passed for the same check. Tests
-// come from the newest such check_rerun event. Both slices are sorted by
-// check name.
-func rerunPassedNotes(ticketID int64, sha string, runs []orchestrator.CheckRun, reruns []response.CheckRerunEvent, passed []response.CheckRerunPassedEvent) ([]store.Message, []response.CheckRerunPassedEvent, error) {
+// rerunPassedNotes returns one check_rerun_passed event message per check
+// that has a flaky or no_log check_rerun event in reruns, whose newest run
+// by id in runs (same Name) is completed with a good conclusion and an id
+// other than the event's check_run_id, and that has no event in passed
+// for the same check. Tests come from the newest such check_rerun event.
+// Messages are sorted by check name, and each one it writes also logs an
+// info line (r3f9: the only caller that needs the decoded payload is this
+// function's own log line, so it logs there instead of returning a
+// second slice for rerunNotesFor to re-decode and log itself).
+func rerunPassedNotes(ticketID int64, sha string, runs []orchestrator.CheckRun, reruns []response.CheckRerunEvent, passed []response.CheckRerunPassedEvent) ([]store.Message, error) {
 	passedChecks := make(map[string]bool, len(passed))
 	for _, p := range passed {
 		passedChecks[p.Check] = true
@@ -798,7 +818,6 @@ func rerunPassedNotes(ticketID int64, sha string, runs []orchestrator.CheckRun, 
 	sort.Strings(names)
 
 	var msgs []store.Message
-	var events []response.CheckRerunPassedEvent
 	for _, name := range names {
 		if passedChecks[name] {
 			continue
@@ -817,12 +836,12 @@ func rerunPassedNotes(ticketID int64, sha string, runs []orchestrator.CheckRun, 
 		}
 		msg, err := store.NewEvent(ticketID, store.EventKindCheckRerunPassed, passedEvent)
 		if err != nil {
-			return nil, nil, fmt.Errorf("job: shipping: poll: check_rerun_passed event for %s: %w", name, err)
+			return nil, fmt.Errorf("job: shipping: poll: check_rerun_passed event for %s: %w", name, err)
 		}
 		msgs = append(msgs, msg)
-		events = append(events, passedEvent)
+		slog.Info("ci check passed on re-run", "ticket_id", ticketID, "check", passedEvent.Check, "sha", passedEvent.SHA, "tests", passedEvent.Tests)
 	}
-	return msgs, events, nil
+	return msgs, nil
 }
 
 // prURLPattern is the shape tickets.pr_url must have for parsePRNumber to
