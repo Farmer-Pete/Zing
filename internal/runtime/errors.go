@@ -9,7 +9,7 @@ import (
 )
 
 // The typed run failures (design section 4.1). Run returns (RunResult,
-// error) where error is nil or exactly one of these four sentinels or two
+// error) where error is nil or exactly one of these sentinels or two
 // typed errors, so a caller (job.runJob, section 4.6) routes on the failure
 // kind with errors.Is/errors.As rather than parsing text. This package only
 // declares the shapes; the real runtimes that produce them land in tasks 5
@@ -22,6 +22,10 @@ var (
 	// ErrCanceled reports a process killed because the parent context was
 	// canceled (dispatcher shutdown), not because the job deadline expired.
 	ErrCanceled = errors.New("runtime: parent context canceled")
+	// ErrStalled reports a Claude process the idle watchdog killed: its
+	// session transcript did not grow for RunRequest.IdleTimeout.
+	// RunResult.LastEvent holds the last growth it saw.
+	ErrStalled = errors.New("runtime: no transcript growth within the idle limit")
 	// ErrOutputTooLarge reports stdout or the final-message file exceeding
 	// the 4 MiB cap.
 	ErrOutputTooLarge = errors.New("runtime: output exceeded the 4 MiB cap")

@@ -545,6 +545,84 @@ func (c Claude) commandNameArgs(req RunRequest, argv []string) (name string, arg
 	return req.ExecPrefix[0], args
 }
 
+// idleWatchMaxPoll caps how often idleWatch stats the transcript.
+const idleWatchMaxPoll = 5 * time.Second
+
+// idleWatch is Claude's idle watchdog (RunRequest.IdleTimeout): it polls
+// the session transcript's size and cancels the run's context with
+// ErrStalled once the size has not changed for idle. last and fired are
+// written only by run and read only after finish returns.
+type idleWatch struct {
+	path   string
+	idle   time.Duration
+	poll   time.Duration
+	size   int64
+	cancel context.CancelCauseFunc
+	stop   chan struct{}
+	done   chan struct{}
+	last   time.Time
+	fired  bool
+}
+
+func newIdleWatch(path string, idle time.Duration, cancel context.CancelCauseFunc) *idleWatch {
+	return &idleWatch{
+		path: path, idle: idle, poll: min(idleWatchMaxPoll, idle/4), size: transcriptSize(path),
+		cancel: cancel, stop: make(chan struct{}), done: make(chan struct{}),
+	}
+}
+
+// transcriptSize is path's size in bytes, or -1 when it cannot be stat'ed.
+func transcriptSize(path string) int64 {
+	info, err := os.Stat(path)
+	if err != nil {
+		return -1
+	}
+	return info.Size()
+}
+
+// run polls until finish is called or the transcript stays the same size
+// for idle; started is the process start, the idle clock's origin until the
+// first growth.
+func (w *idleWatch) run(started time.Time) {
+	defer close(w.done)
+	ticker := time.NewTicker(w.poll)
+	defer ticker.Stop()
+	quietSince := started
+	for {
+		select {
+		case <-w.stop:
+			return
+		case now := <-ticker.C:
+			if s := transcriptSize(w.path); s != w.size {
+				w.size = s
+				if s >= 0 {
+					quietSince, w.last = now, now
+				}
+			}
+			if now.Sub(quietSince) >= w.idle {
+				w.fired = true
+				w.cancel(ErrStalled)
+				return
+			}
+		}
+	}
+}
+
+// finish stops run and waits for it to return.
+func (w *idleWatch) finish() {
+	close(w.stop)
+	<-w.done
+}
+
+// stallDetail is RunResult.FailureDetail for an ErrStalled run.
+func stallDetail(idle time.Duration, last time.Time) string {
+	since := "none since the process started"
+	if !last.IsZero() {
+		since = last.UTC().Format(time.RFC3339)
+	}
+	return fmt.Sprintf("no transcript growth for %d s; last transcript event: %s", int(idle/time.Second), since)
+}
+
 // classifyProcessOutcome applies the shared priority order both runtimes use
 // once a process has exited (design section 4.1): ctx.Err() explains the
 // exit before anything else, because after a kill a process's own exit
@@ -635,7 +713,27 @@ func (c Claude) Run(ctx context.Context, req RunRequest) (RunResult, error) {
 // because its counts fall back to zero rather than failing the run.
 func (c Claude) run(ctx context.Context, req RunRequest, argv []string, sessionID, statePath string, start time.Time) (RunResult, error) {
 	name, args := c.commandNameArgs(req, argv)
-	cmd := exec.CommandContext(ctx, name, args...) //nolint:gosec // G204: bin is an operator-configured path (NewClaude), argv is built by claudeArgv from validated fields, and ExecPrefix (when set) is the sandbox's own prefix (sandbox.Sandbox.Prefix) -- never raw external input
+	// The token is appended after agentEnv, not passed through it, so
+	// FilteredEnv's own drop pass (which removes anything *_TOKEN-shaped,
+	// including a parent or req.Env CLAUDE_CODE_OAUTH_TOKEN) never has to
+	// know about it, and only the claude runtime's own configured value
+	// ever reaches a child (PKG9-PLAN.md section 4.6, D26).
+	env := append(agentEnv(req), "CLAUDE_CODE_OAUTH_TOKEN="+c.oauthToken)
+
+	runCtx := ctx
+	var watch *idleWatch
+	if req.IdleTimeout > 0 {
+		if path := claudeTranscriptPath(env, req.WorkDir, sessionID); path != "" {
+			var cancel context.CancelCauseFunc
+			runCtx, cancel = context.WithCancelCause(ctx)
+			defer cancel(nil)
+			watch = newIdleWatch(path, req.IdleTimeout, cancel)
+		} else {
+			slog.Warn("claude run: idle watchdog off, no transcript path", "job", req.Job, "run_token", req.RunToken)
+		}
+	}
+
+	cmd := exec.CommandContext(runCtx, name, args...) //nolint:gosec // G204: bin is an operator-configured path (NewClaude), argv is built by claudeArgv from validated fields, and ExecPrefix (when set) is the sandbox's own prefix (sandbox.Sandbox.Prefix) -- never raw external input
 	cmd.Dir = req.WorkDir
 	if statePath != "" {
 		// A resumed session reuses its session id, so a stale state file
@@ -645,12 +743,7 @@ func (c Claude) run(ctx context.Context, req RunRequest, argv []string, sessionI
 		// write and its rename can leave one behind.
 		removeStopHookState(statePath)
 	}
-	// The token is appended after agentEnv, not passed through it, so
-	// FilteredEnv's own drop pass (which removes anything *_TOKEN-shaped,
-	// including a parent or req.Env CLAUDE_CODE_OAUTH_TOKEN) never has to
-	// know about it, and only the claude runtime's own configured value
-	// ever reaches a child (PKG9-PLAN.md section 4.6, D26).
-	cmd.Env = append(agentEnv(req), "CLAUDE_CODE_OAUTH_TOKEN="+c.oauthToken)
+	cmd.Env = env
 	configureProcessGroup(cmd)
 
 	stdout := &capWriter{limit: maxOutputBytes}
@@ -679,6 +772,10 @@ func (c Claude) run(ctx context.Context, req RunRequest, argv []string, sessionI
 		req.OnStart(StartInfo{PID: cmd.Process.Pid, SessionID: sessionID})
 	}
 
+	if watch != nil {
+		go watch.run(time.Now())
+	}
+
 	go func() {
 		_, _ = io.WriteString(stdin, req.Prompt) //nolint:errcheck // EPIPE means the agent already exited; cmd.Wait reports the real outcome
 		_ = stdin.Close()                        //nolint:errcheck // same: a close error here never changes the run's outcome
@@ -686,6 +783,9 @@ func (c Claude) run(ctx context.Context, req RunRequest, argv []string, sessionI
 
 	waitErr := cmd.Wait()
 	killProcessGroup(cmd)
+	if watch != nil {
+		watch.finish()
+	}
 
 	var hookState stopHookState
 	if statePath != "" {
@@ -713,6 +813,19 @@ func (c Claude) run(ctx context.Context, req RunRequest, argv []string, sessionI
 	}
 
 	logLongTurns(req, res.TranscriptPath)
+
+	if watch != nil {
+		res.LastEvent = watch.last
+		// A clean exit that raced the watch keeps its result: only a
+		// process the watch actually killed is a stall.
+		killedByWatch := watch.fired && waitErr != nil
+		parentAlive := ctx.Err() == nil
+		if killedByWatch && parentAlive {
+			res.ExitCode = -1
+			res.FailureDetail = stallDetail(req.IdleTimeout, watch.last)
+			return res, ErrStalled
+		}
+	}
 
 	if outcomeErr := classifyProcessOutcome(ctx, stdout.overflowed(), waitErr, res.ExitCode); outcomeErr != nil {
 		if errors.Is(outcomeErr, ErrTimeout) || errors.Is(outcomeErr, ErrCanceled) {

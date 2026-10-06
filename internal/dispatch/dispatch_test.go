@@ -1846,6 +1846,42 @@ func TestTickUsesInjectedClock(t *testing.T) {
 	}
 }
 
+// TestClaimTimeoutForQueuedCoversClassifyRetry proves claimTimeoutFor's own
+// "queued" row (PKG9-PLAN.md section 17.1, owner decision Q4): the real
+// machine.toml gives jobs.classify a 5-minute timeout_minutes and a
+// timeout_retries of 1, so max(defaultCodeTimeout, (1+1)*5) is 10 minutes,
+// covering both of classify's attempts under one lease.
+func TestClaimTimeoutForQueuedCoversClassifyRetry(t *testing.T) {
+	t.Parallel()
+
+	s := newDispatchTestStore(t)
+	seedQueuedTicket(t, s, testFixtureRef)
+
+	spy := &spyHandler{next: testStatePlanning, reason: testSpyReason}
+	reg := job.Registry()
+	reg[testStateQueued] = spy
+
+	d := newDispatcher(t, s, newFixtureTracker(t), bus.New(), fakeRuntime(t), reg, nil, dispatch.Config{MaxParallel: 2, Owner: testOwner})
+
+	before := time.Now()
+	if err := d.Tick(t.Context()); err != nil {
+		t.Fatalf("Tick: %v", err)
+	}
+	after := time.Now()
+
+	if spy.Calls() != 1 {
+		t.Fatalf("spy.Calls() = %d, want 1", spy.Calls())
+	}
+	if !spy.HasDeadline() {
+		t.Fatal("the handler's context carried no deadline, want now+timeout")
+	}
+	wantMin := before.Add(9 * time.Minute)
+	wantMax := after.Add(11 * time.Minute)
+	if spy.Deadline().Before(wantMin) || spy.Deadline().After(wantMax) {
+		t.Errorf("run deadline = %v, want within [%v, %v] (~10m, max(defaultCodeTimeout, (1+timeout_retries)*classify timeout))", spy.Deadline(), wantMin, wantMax)
+	}
+}
+
 // TestClaimTimeoutForJudging proves claimTimeoutFor's own "judging" row
 // (PKG9-PLAN.md section 17.1): the real machine.toml gives jobs.judge and
 // jobs.build both 45 minutes and jobs.perimeter 3, so

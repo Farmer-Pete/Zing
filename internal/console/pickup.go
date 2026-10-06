@@ -11,6 +11,7 @@ package console
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -26,11 +27,19 @@ type pickupRequest struct {
 	N int `json:"n"`
 }
 
+// pickupResponse is POST /projects/{id}/pickup's 200 body: the issue number
+// the owner asked for and the id of the ticket it became, which
+// console.js's pickupIssue links to.
+type pickupResponse struct {
+	N        int   `json:"n"`
+	TicketID int64 `json:"ticket_id"`
+}
+
 // handlePickup is POST /projects/{id}/pickup (design section 6.14-style
 // guard, PKG9-PLAN.md D29): 400 on a malformed {id}, a malformed body, or a
 // non-positive n; 404 when {id} names no configured project; 409 with D29's
-// exact message on one of the four refusals; 204 and a bus publish on
-// success.
+// exact message on one of the four refusals; 200 with a pickupResponse JSON
+// body and a bus publish on success.
 func (c *console) handlePickup(w http.ResponseWriter, r *http.Request) {
 	projectID, ok := parsePositiveID(r.PathValue("id"))
 	if !ok {
@@ -93,14 +102,18 @@ func (c *console) handlePickup(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if _, err := dispatch.InsertAndAnnounce(r.Context(), c.store, c.tracker, projectID, trackerProject, c.user, tk); err != nil {
+	ticketID, err := dispatch.InsertAndAnnounce(r.Context(), c.store, c.tracker, projectID, trackerProject, c.user, tk)
+	if err != nil {
 		slog.Error("console: pickup: insert ticket", "project_id", projectID, "ref", ref, "err", err)
 		http.Error(w, genericServerErrorBody, http.StatusInternalServerError)
 		return
 	}
 
 	c.bus.Publish()
-	w.WriteHeader(http.StatusNoContent)
+	w.Header().Set("Content-Type", contentTypeJSON)
+	if err := json.NewEncoder(w).Encode(pickupResponse{N: req.N, TicketID: ticketID}); err != nil {
+		slog.Error("console: write pickup response", "project_id", projectID, "ticket_id", ticketID, "err", err)
+	}
 }
 
 // projectName returns the Name of the store project id -- the

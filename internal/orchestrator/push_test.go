@@ -16,13 +16,14 @@ import (
 
 func TestPullRequestBody(t *testing.T) {
 	t.Parallel()
-	t.Run("six sections render in order", func(t *testing.T) {
+	t.Run("seven sections render in order", func(t *testing.T) {
 		t.Parallel()
 		pr := PullRequest{
 			Title:            "Add the perimeter diff",
 			What:             "Adds Perimeter, the classifier for changed paths.",
 			WorkingDemo:      "Run go test ./internal/orchestrator/...",
 			Scenarios:        "- a declared path is omitted\n- an undeclared path is an Extra",
+			AcceptedFindings: "Review reached its fix loop cap.\n\n- r3f1 minor a.go:1 x",
 			DeclaredFiles:    "| Path | Note |\n| --- | --- |\n| perimeter.go | new |",
 			ChestertonsFence: "None removed.",
 			PlanLink:         "https://example.com/plan",
@@ -36,6 +37,7 @@ func TestPullRequestBody(t *testing.T) {
 		want := "## What\n\n" + pr.What + "\n\n" +
 			"## Working demo\n\n" + pr.WorkingDemo + "\n\n" +
 			"## Scenarios\n\n" + pr.Scenarios + "\n\n" +
+			"## Accepted review findings\n\n" + pr.AcceptedFindings + "\n\n" +
 			"## Declared files\n\n" + pr.DeclaredFiles + "\n\n" +
 			"## Chesterton's fence\n\n" + pr.ChestertonsFence + "\n\n" +
 			"## Plan\n\n" + pr.PlanLink + "\n"
@@ -63,6 +65,30 @@ func TestPullRequestBody(t *testing.T) {
 
 		if got != want {
 			t.Errorf("Body() =\n%q\nwant\n%q", got, want)
+		}
+	})
+
+	t.Run("an empty AcceptedFindings is left out", func(t *testing.T) {
+		t.Parallel()
+		pr := PullRequest{Title: "Some title"}
+
+		got, err := pr.Body()
+		if err != nil {
+			t.Fatalf("Body: unexpected error: %v", err)
+		}
+
+		want := "## What\n\nNone.\n\n" +
+			"## Working demo\n\nNone.\n\n" +
+			"## Scenarios\n\nNone.\n\n" +
+			"## Declared files\n\nNone.\n\n" +
+			"## Chesterton's fence\n\nNone.\n\n" +
+			"## Plan\n\nNone.\n"
+
+		if got != want {
+			t.Errorf("Body() =\n%q\nwant\n%q", got, want)
+		}
+		if strings.Contains(got, "Accepted review findings") {
+			t.Errorf("Body() = %q, want no Accepted review findings section", got)
 		}
 	})
 
