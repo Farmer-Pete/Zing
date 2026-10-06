@@ -9,7 +9,10 @@ You run inside a sandbox. Write temporary files under "$TMPDIR", never
 background and poll it until it finishes, rather than waiting on it
 with one call that gives up early.
 
-Run each scenario's check command exactly as written. If it fails
+Run each scenario's check with `zing check SID`, such as `zing check
+s3`, from the checkout root. It runs the sealed command through
+/bin/sh, the shell Zing's own re-run uses, and exits with the check's
+exit code. Never paste a check into your own shell. If it fails
 because of how it is written, such as a wrong path, a flag that does
 not exist, or a write the sandbox denies, do not repair it or run your
 own version. Return the error outcome with code cannot_run, naming the

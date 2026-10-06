@@ -63,7 +63,7 @@ func TestPrompts_MatchThePinnedDesignText(t *testing.T) {
 		{
 			name:   "judge",
 			path:   "prompts/judge.md",
-			sha256: "4f3a570983506de4fd530ab428f31600028a1c8ab7e52d21617c0883ca74c154",
+			sha256: "d187df17a370261be5e527259e7f31725a5677a247a2c36c71477a077a51137f",
 		},
 		{
 			name:   "respond",
@@ -222,17 +222,18 @@ func TestBuildPromptPlaceholders(t *testing.T) {
 }
 
 // TestJudgePromptRunsChecksAsWritten proves prompts/judge.md tells the
-// judge to run each sealed check exactly as written rather than
-// repairing it, to use "$TMPDIR" instead of /tmp, to run a long check in
-// the background and poll it instead of waiting on one call, and to
-// treat a skip the scenario's own then names as expected as an observed
-// pass while a skip that hides the behavior under test stays unobserved
-// (#78, #46, #38).
+// judge to run each sealed check through "zing check SID" rather than
+// pasting it into its own shell or repairing it, to use "$TMPDIR" instead
+// of /tmp, to run a long check in the background and poll it instead of
+// waiting on one call, and to treat a skip the scenario's own then names
+// as expected as an observed pass while a skip that hides the behavior
+// under test stays unobserved (#78, #46, #38, #86).
 func TestJudgePromptRunsChecksAsWritten(t *testing.T) {
 	t.Parallel()
 	text := unwrapped(t, "prompts/judge.md")
 	for _, want := range []string{
-		"Run each scenario's check command exactly as written.",
+		"Run each scenario's check with `zing check SID`",
+		"Never paste a check into your own shell.",
 		"do not repair it or run your own version",
 		"Return the error outcome with code cannot_run, naming the scenario and the defect in its check",
 		`Write temporary files under "$TMPDIR", never /tmp.`,
