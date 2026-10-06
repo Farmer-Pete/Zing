@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	"zing/internal/orchestrator"
+	"zing/internal/prompt"
 	"zing/internal/response"
 	"zing/internal/store"
 )
@@ -364,4 +365,29 @@ func splitRepeated(merged, dropped []response.FindingArtifact, changedBySHA map[
 		kept = append(kept, merged[i])
 	}
 	return kept, repeats
+}
+
+// droppedFindingsLabel is the review lens input that lists findings the
+// owner dropped in an earlier round (ticket 56).
+const droppedFindingsLabel = "dropped findings"
+
+// renderDroppedInput renders dropped as one untrusted input, one
+// "- ID LOCATION TEXT" line per row in id order, location and text
+// whitespace-collapsed and text cut at acceptedAtCapTextRunes with "..."
+// appended when cut, the same way acceptAtCap renders its own findings.
+// ok is false, and the zero NamedInput returned, when dropped is empty.
+func renderDroppedInput(dropped []response.FindingArtifact) (prompt.NamedInput, bool) {
+	if len(dropped) == 0 {
+		return prompt.NamedInput{}, false
+	}
+	sorted := sortByID(dropped)
+	lines := make([]string, len(sorted))
+	for i := range sorted {
+		text := collapseWhitespace(sorted[i].Text)
+		if cut := cutRunes(text, acceptedAtCapTextRunes); cut != text {
+			text = cut + "..."
+		}
+		lines[i] = fmt.Sprintf("- %s %s %s", sorted[i].ID, collapseWhitespace(sorted[i].Location), text)
+	}
+	return prompt.NamedInput{Label: droppedFindingsLabel, Text: strings.Join(lines, "\n"), Untrusted: true}, true
 }

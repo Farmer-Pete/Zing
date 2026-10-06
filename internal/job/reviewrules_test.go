@@ -17,6 +17,7 @@ import (
 	"github.com/google/go-cmp/cmp"
 
 	"zing/internal/orchestrator"
+	"zing/internal/prompt"
 	"zing/internal/response"
 	"zing/internal/store"
 )
@@ -37,6 +38,7 @@ const (
 	findingID4      = "r1f4"
 	findingIDRound2 = "r2f1"
 	wordFinding     = "finding"
+	twoLineText     = "line one\nline two"
 )
 
 // -----------------------------------------------------------------------
@@ -533,4 +535,80 @@ func TestSplitRepeated(t *testing.T) {
 	if repeats[0].DroppedID != findingID1 || repeats[0].Location != greetGoLine5 {
 		t.Errorf("repeats[0] = %+v, want {DroppedID: r1f1, Location: %s}", repeats[0], greetGoLine5)
 	}
+}
+
+// -----------------------------------------------------------------------
+// Pure: renderDroppedInput
+// -----------------------------------------------------------------------
+
+// TestRenderDroppedInput proves the dropped findings input's own
+// rendering (ticket 56): rows sort by id regardless of input order, a
+// newline in Text collapses onto one line, Text beyond
+// acceptedAtCapTextRunes is cut with "..." appended, and an empty dropped
+// gives ok false with the zero NamedInput.
+func TestRenderDroppedInput(t *testing.T) {
+	t.Parallel()
+
+	t.Run("two rows render in id order", func(t *testing.T) {
+		t.Parallel()
+		dropped := []response.FindingArtifact{
+			{ID: "r1f10", Location: aGoLine1, Text: "second by id"},
+			{ID: findingID2, Location: aGoLine12, Text: "first by id"},
+		}
+		in, ok := renderDroppedInput(dropped)
+		if !ok {
+			t.Fatal("renderDroppedInput(dropped) ok = false, want true")
+		}
+		want := "- " + findingID2 + " " + aGoLine12 + " first by id\n" +
+			"- r1f10 " + aGoLine1 + " second by id"
+		if in.Text != want {
+			t.Errorf("renderDroppedInput(dropped).Text = %q, want %q", in.Text, want)
+		}
+		if in.Label != droppedFindingsLabel {
+			t.Errorf("renderDroppedInput(dropped).Label = %q, want %q", in.Label, droppedFindingsLabel)
+		}
+		if !in.Untrusted {
+			t.Error("renderDroppedInput(dropped).Untrusted = false, want true")
+		}
+	})
+
+	t.Run("a newline in text renders on one line", func(t *testing.T) {
+		t.Parallel()
+		in, ok := renderDroppedInput([]response.FindingArtifact{
+			{ID: findingID1, Location: aGoLine1, Text: twoLineText},
+		})
+		if !ok {
+			t.Fatal("renderDroppedInput ok = false, want true")
+		}
+		want := "- " + findingID1 + " " + aGoLine1 + " line one line two"
+		if in.Text != want {
+			t.Errorf("renderDroppedInput(...).Text = %q, want %q", in.Text, want)
+		}
+	})
+
+	t.Run("text beyond the cap is cut with an ellipsis", func(t *testing.T) {
+		t.Parallel()
+		long := strings.Repeat("x", 250)
+		in, ok := renderDroppedInput([]response.FindingArtifact{
+			{ID: findingID1, Location: aGoLine1, Text: long},
+		})
+		if !ok {
+			t.Fatal("renderDroppedInput ok = false, want true")
+		}
+		want := "- " + findingID1 + " " + aGoLine1 + " " + strings.Repeat("x", acceptedAtCapTextRunes) + "..."
+		if in.Text != want {
+			t.Errorf("renderDroppedInput(...).Text = %q, want %q", in.Text, want)
+		}
+	})
+
+	t.Run("nil gives ok false", func(t *testing.T) {
+		t.Parallel()
+		in, ok := renderDroppedInput(nil)
+		if ok {
+			t.Errorf("renderDroppedInput(nil) ok = true, want false")
+		}
+		if in != (prompt.NamedInput{}) {
+			t.Errorf("renderDroppedInput(nil) input = %+v, want the zero NamedInput", in)
+		}
+	})
 }

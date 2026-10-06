@@ -439,7 +439,7 @@ func TestCILogText(t *testing.T) {
 			}
 			switch jobID {
 			case 111:
-				return "line one\nline two", nil
+				return twoLineText, nil
 			case 222:
 				return "", errors.New("signed url expired")
 			default:
@@ -668,7 +668,7 @@ func TestParseBaseMergeRequest(t *testing.T) {
 		}
 	})
 
-	retry := baseMergeRequest{MessageID: 9, AfterRunID: 4, BaseBranch: pbFixtureDefaultBranch, BaseSHA: strings.Repeat("b", 40), RetryOf: 7, Notes: "line one\nline two"}
+	retry := baseMergeRequest{MessageID: 9, AfterRunID: 4, BaseBranch: pbFixtureDefaultBranch, BaseSHA: strings.Repeat("b", 40), RetryOf: 7, Notes: twoLineText}
 	t.Run("retry request round-trips", func(t *testing.T) {
 		t.Parallel()
 		row := store.MessageRow{ID: retry.MessageID, Message: store.Message{Body: retry.body()}} //nolint:modernize // keyed on purpose: MessageRow's ID and CreatedAt fields precede the embedded Message, so the key cannot be dropped

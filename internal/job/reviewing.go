@@ -1250,6 +1250,13 @@ func (h reviewingHandler) round(ctx context.Context, t store.Ticket, d Deps, n i
 	if notes != "" {
 		extra = append(extra, prompt.Notes(notes))
 	}
+	prior, err := d.Store.Findings(ctx, t.ID)
+	if err != nil {
+		return store.HandlerCommit{}, fmt.Errorf("job: reviewing: findings: %w", err)
+	}
+	if in, ok := renderDroppedInput(droppedFindings(prior, n)); ok {
+		extra = append(extra, in)
+	}
 
 	attempts, lensesErr := runLensesParallel(ctx, d, t, lenses, schemas, func(lens response.Lens) (store.SessionUpsert, runtime.RunRequest, func(runResult) *store.SessionUpsert) {
 		codeSection, csErr := lensCodeSection(lens)

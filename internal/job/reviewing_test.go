@@ -167,18 +167,20 @@ const greetGoLine2 = "greet.go:2"
 
 // twoFindingScript is one lens's own "ok" document carrying two findings at
 // two distinct locations (design section 6.6's own batching tests: two
-// findings of one lens, both discussed, carried in one resume).
-func twoFindingScript(lens, sev1, loc1, text1, fix1, sev2, loc2, text2, fix2 string) string {
+// findings of one lens, both discussed, carried in one resume). Both
+// findings are severity major: every caller needs that severity, so it is
+// not a parameter (unparam).
+func twoFindingScript(lens, loc1, text1, fix1, loc2, text2, fix2 string) string {
 	return fmt.Sprintf(`<zing job="review" outcome="ok">
-<finding lens="%s" severity="%s" location="%s">
+<finding lens="%s" severity="major" location="%s">
 <text>%s</text>
 <fix>%s</fix>
 </finding>
-<finding lens="%s" severity="%s" location="%s">
+<finding lens="%s" severity="major" location="%s">
 <text>%s</text>
 <fix>%s</fix>
 </finding>
-</zing>`, lens, sev1, loc1, text1, fix1, lens, sev2, loc2, text2, fix2)
+</zing>`, lens, loc1, text1, fix1, lens, loc2, text2, fix2)
 }
 
 // reviewTicketReady is pbTicketInReviewing plus the ticket and the run id
@@ -2849,8 +2851,8 @@ func TestDiscussBatchesOneSession(t *testing.T) {
 	s, ticket, _ := reviewTicketReady(t)
 	scripts := reviewScriptsFS(map[string]string{
 		reviewScriptKey("security", 1): twoFindingScript(
-			"security", "major", greetGoLine2, "first finding", "fix the first",
-			"major", greetGoLine5, "second finding", "fix the second",
+			"security", greetGoLine2, "first finding", "fix the first",
+			greetGoLine5, "second finding", "fix the second",
 		),
 	})
 	rt := &recordingRuntime{inner: runtime.NewFake(scripts)}
@@ -3866,8 +3868,8 @@ func TestReReviewSuppressesDroppedAtUnchangedFile(t *testing.T) {
 	s, ticket, _ := reviewTicketReady(t)
 	scripts := reviewScriptsFS(map[string]string{
 		reviewScriptKey("quality", 1): twoFindingScript(
-			"quality", "major", greetGoLine5, "unchecked input", "validate it",
-			"major", pbHelloTxt+":1", "breaks the build", "fix the build",
+			"quality", greetGoLine5, "unchecked input", "validate it",
+			pbHelloTxt+":1", "breaks the build", "fix the build",
 		),
 	})
 	rt := runtime.NewFake(scripts)
@@ -3947,8 +3949,8 @@ func TestReReviewKeepsDroppedWhenFileChanged(t *testing.T) {
 	s, ticket, _ := reviewTicketReady(t)
 	scripts := reviewScriptsFS(map[string]string{
 		reviewScriptKey("quality", 1): twoFindingScript(
-			"quality", "major", greetGoLine5, "unchecked input", "validate it",
-			"major", greetGoLine2, "second concern", "fix the second",
+			"quality", greetGoLine5, "unchecked input", "validate it",
+			greetGoLine2, "second concern", "fix the second",
 		),
 	})
 	rt := runtime.NewFake(scripts)
@@ -4027,5 +4029,99 @@ func TestReReviewKeepsDroppedWhenFileChanged(t *testing.T) {
 	}
 	if !strings.Contains(marker.Body, "repeated 0") {
 		t.Errorf("done marker body = %q, want it to report repeated 0", marker.Body)
+	}
+}
+
+// requestsByLabel returns, in call order, every RunRequest rec has
+// recorded whose Label equals label exactly.
+func requestsByLabel(rec *recordingRuntime, label string) []runtime.RunRequest {
+	rec.mu.Lock()
+	defer rec.mu.Unlock()
+	var out []runtime.RunRequest
+	for i := range rec.reqs {
+		if rec.reqs[i].Label == label {
+			out = append(out, rec.reqs[i])
+		}
+	}
+	return out
+}
+
+// TestReReviewPromptListsDroppedFindings proves the ticket 56 prompt input:
+// round 2's own quality lens, the one that re-raises the dropped
+// greet.go:5 concern, receives a "dropped findings" input naming that
+// dropped row by id, location, and text; round 1, which has no dropped
+// row yet (nothing has been dropped before round 1 starts), carries no
+// such input at all.
+func TestReReviewPromptListsDroppedFindings(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow end-to-end flow; runs in the full suite")
+	}
+	t.Parallel()
+	s, ticket, _ := reviewTicketReady(t)
+	scripts := reviewScriptsFS(map[string]string{
+		reviewScriptKey("quality", 1): twoFindingScript(
+			"quality", greetGoLine5, "unchecked input", "validate it",
+			pbHelloTxt+":1", "breaks the build", "fix the build",
+		),
+	})
+	rt := &recordingRuntime{inner: runtime.NewFake(scripts)}
+
+	deps := pbClaim(t, s, rt, ticket.ID)
+	commit, err := (reviewingHandler{}).Run(t.Context(), ticket, deps) // ROUND 1
+	if err != nil {
+		t.Fatalf("Run (round 1): %v", err)
+	}
+	pbApply(t, s, ticket, commit)
+
+	q := newestOpenQuestion(t, s, ticket.ID)
+	var payload response.QuestionPayload
+	if err = json.Unmarshal(q.Payload, &payload); err != nil {
+		t.Fatalf("unmarshal question payload: %v", err)
+	}
+	dropID := itemRefByText(t, payload, "unchecked input")
+	acceptID := itemRefByText(t, payload, "breaks the build")
+	answerReviewItems(t, s, ticket.ID, q.ID, map[string]response.Decision{
+		dropID:   response.DecisionDrop,
+		acceptID: response.DecisionAccept,
+	}, "")
+
+	driveReviewRoundToFixreq(t, s, ticket, rt)
+
+	scripts["build/fix/1.xml"] = &fstest.MapFile{Data: []byte(reReviewHelloFixScript)}
+	driveReviewFixToLanding(t, s, ticket.ID, rt, reReviewHelloFixCmd)
+
+	scripts[reviewRoundScriptKey(2, "quality")] = &fstest.MapFile{
+		Data: []byte(findingScriptAt("quality", "major", greetGoLine5, "unchecked input", "validate it")),
+	}
+	scripts[reviewRoundScriptKey(2, lensFidelity)] = &fstest.MapFile{Data: []byte(reviewOKScript)}
+
+	ticket3 := pbGetTicket(t, s, ticket.ID)
+	deps3 := pbClaim(t, s, rt, ticket.ID)
+	if _, err = (reviewingHandler{}).Run(t.Context(), ticket3, deps3); err != nil { // ROUND 2
+		t.Fatalf("Run (round 2): %v", err)
+	}
+
+	// The job prompt's own fixed text mentions "dropped findings:" (the
+	// prose paragraph added for this ticket) in every request, so only the
+	// rendered input block's own "label:\n" header -- never followed by a
+	// space, the way the prose paragraph's colon is -- tells the two apart.
+	const droppedInputHeader = "dropped findings:\n"
+
+	for _, req := range requestsByLabel(rt, "1-quality") {
+		if strings.Contains(req.Prompt, droppedInputHeader) {
+			t.Errorf("round 1 quality Prompt = %q, want no dropped findings input (nothing dropped yet)", req.Prompt)
+		}
+	}
+
+	round2Quality := requestsByLabel(rt, "2-quality")
+	if len(round2Quality) != 1 {
+		t.Fatalf("requests labelled 2-quality = %d, want exactly 1", len(round2Quality))
+	}
+	prompt := round2Quality[0].Prompt
+	if !strings.Contains(prompt, droppedInputHeader) {
+		t.Errorf("round 2 quality Prompt = %q, want it to contain %q", prompt, droppedInputHeader)
+	}
+	if !strings.Contains(prompt, "- "+dropID+" "+greetGoLine5+" [quality] unchecked input") {
+		t.Errorf("round 2 quality Prompt = %q, want a dropped findings line for %s at %s", prompt, dropID, greetGoLine5)
 	}
 }
