@@ -36,9 +36,9 @@ const (
 	findingID2      = "r1f2"
 	findingID3      = "r1f3"
 	findingID4      = "r1f4"
+	findingID10     = "r1f10"
 	findingIDRound2 = "r2f1"
 	wordFinding     = "finding"
-	twoLineText     = "line one\nline two"
 )
 
 // -----------------------------------------------------------------------
@@ -381,7 +381,7 @@ func TestRenderFixFindings(t *testing.T) {
 	drop := response.FindingDrop
 
 	rows := []response.FindingArtifact{
-		{ID: "r1f10", Severity: response.SeverityNit, Lens: response.LensTests, Location: "c.go:5", Text: "t4", Fix: "f4", Decision: &accept},
+		{ID: findingID10, Severity: response.SeverityNit, Lens: response.LensTests, Location: "c.go:5", Text: "t4", Fix: "f4", Decision: &accept},
 		{ID: findingID3, Severity: response.SeverityBlocker, Lens: response.LensSecurity, Location: "b.go:1", Text: "sql injection", Fix: "parameterize", Decision: &accept},
 		{ID: findingID2, Severity: response.SeverityMajor, Lens: response.LensCorrectness, Location: "a.go:20", Text: "dropped one", Fix: "n/a", Decision: &drop},
 		{ID: findingID1, Severity: response.SeverityMinor, Lens: response.LensCorrectness, Location: aGoLine12, Text: "nil map write", Fix: "add nil check", Decision: &accept},
@@ -500,22 +500,6 @@ func TestDroppedFindings(t *testing.T) {
 // different line is untouched.
 func TestSplitRepeated(t *testing.T) {
 	t.Parallel()
-	dropped := []response.FindingArtifact{
-		{ID: findingID1, Location: greetGoLine5, SHA: "A"},
-		{ID: findingID2, Location: "a.go:3", SHA: "A"},
-		{ID: findingID3, Location: "c.go:7", SHA: "B"},
-	}
-	changedBySHA := map[string]map[string]bool{
-		"A": {bareAGoPath: true},
-	}
-	merged := []response.FindingArtifact{
-		{ID: findingIDRound2, Severity: response.SeverityBlocker, Location: "./greet.go:5"},
-		{ID: "r2f2", Severity: response.SeverityMajor, Location: "a.go:3"},
-		{ID: "r2f3", Severity: response.SeverityMajor, Location: "c.go:7"},
-		{ID: "r2f4", Severity: response.SeverityMajor, Location: "greet.go:6"},
-	}
-
-	kept, repeats := splitRepeated(merged, dropped, changedBySHA)
 
 	idsOf := func(rows []response.FindingArtifact) []string {
 		ids := make([]string, len(rows))
@@ -524,17 +508,61 @@ func TestSplitRepeated(t *testing.T) {
 		}
 		return ids
 	}
-	wantKept := []string{"r2f2", "r2f3", "r2f4"}
-	if got := idsOf(kept); !equalStrings(got, wantKept) {
-		t.Errorf("kept ids = %v, want %v", got, wantKept)
-	}
 
-	if len(repeats) != 1 {
-		t.Fatalf("repeats = %+v, want exactly one", repeats)
-	}
-	if repeats[0].DroppedID != findingID1 || repeats[0].Location != greetGoLine5 {
-		t.Errorf("repeats[0] = %+v, want {DroppedID: r1f1, Location: %s}", repeats[0], greetGoLine5)
-	}
+	t.Run("blocks only an unchanged location, fails open on an unresolved sha", func(t *testing.T) {
+		t.Parallel()
+		dropped := []response.FindingArtifact{
+			{ID: findingID1, Location: greetGoLine5, SHA: "A"},
+			{ID: findingID2, Location: "a.go:3", SHA: "A"},
+			{ID: findingID3, Location: "c.go:7", SHA: "B"},
+		}
+		changedBySHA := map[string]map[string]bool{
+			"A": {bareAGoPath: true},
+		}
+		merged := []response.FindingArtifact{
+			{ID: findingIDRound2, Severity: response.SeverityBlocker, Location: "./greet.go:5"},
+			{ID: "r2f2", Severity: response.SeverityMajor, Location: "a.go:3"},
+			{ID: "r2f3", Severity: response.SeverityMajor, Location: "c.go:7"},
+			{ID: "r2f4", Severity: response.SeverityMajor, Location: "greet.go:6"},
+		}
+
+		kept, repeats := splitRepeated(merged, dropped, changedBySHA)
+
+		wantKept := []string{"r2f2", "r2f3", "r2f4"}
+		if got := idsOf(kept); !equalStrings(got, wantKept) {
+			t.Errorf("kept ids = %v, want %v", got, wantKept)
+		}
+
+		if len(repeats) != 1 {
+			t.Fatalf("repeats = %+v, want exactly one", repeats)
+		}
+		if repeats[0].DroppedID != findingID1 || repeats[0].Location != greetGoLine5 {
+			t.Errorf("repeats[0] = %+v, want {DroppedID: r1f1, Location: %s}", repeats[0], greetGoLine5)
+		}
+	})
+
+	t.Run("lowest id wins when two dropped rows share a location", func(t *testing.T) {
+		t.Parallel()
+		dropped := []response.FindingArtifact{
+			{ID: findingID10, Location: greetGoLine5, SHA: "A"},
+			{ID: findingID2, Location: greetGoLine5, SHA: "A"},
+		}
+		changedBySHA := map[string]map[string]bool{
+			"A": {},
+		}
+		merged := []response.FindingArtifact{
+			{ID: findingIDRound2, Severity: response.SeverityMajor, Location: greetGoLine5},
+		}
+
+		kept, repeats := splitRepeated(merged, dropped, changedBySHA)
+
+		if len(kept) != 0 {
+			t.Errorf("kept = %+v, want none", kept)
+		}
+		if len(repeats) != 1 || repeats[0].DroppedID != findingID2 {
+			t.Errorf("repeats = %+v, want exactly one with DroppedID %s", repeats, findingID2)
+		}
+	})
 }
 
 // -----------------------------------------------------------------------
@@ -552,7 +580,7 @@ func TestRenderDroppedInput(t *testing.T) {
 	t.Run("two rows render in id order", func(t *testing.T) {
 		t.Parallel()
 		dropped := []response.FindingArtifact{
-			{ID: "r1f10", Location: aGoLine1, Text: "second by id"},
+			{ID: findingID10, Location: aGoLine1, Text: "second by id"},
 			{ID: findingID2, Location: aGoLine12, Text: "first by id"},
 		}
 		in, ok := renderDroppedInput(dropped)
@@ -575,12 +603,12 @@ func TestRenderDroppedInput(t *testing.T) {
 	t.Run("a newline in text renders on one line", func(t *testing.T) {
 		t.Parallel()
 		in, ok := renderDroppedInput([]response.FindingArtifact{
-			{ID: findingID1, Location: aGoLine1, Text: twoLineText},
+			{ID: findingID1, Location: aGoLine1, Text: "first line\nsecond line"},
 		})
 		if !ok {
 			t.Fatal("renderDroppedInput ok = false, want true")
 		}
-		want := "- " + findingID1 + " " + aGoLine1 + " line one line two"
+		want := "- " + findingID1 + " " + aGoLine1 + " first line second line"
 		if in.Text != want {
 			t.Errorf("renderDroppedInput(...).Text = %q, want %q", in.Text, want)
 		}

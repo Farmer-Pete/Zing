@@ -439,7 +439,7 @@ func TestCILogText(t *testing.T) {
 			}
 			switch jobID {
 			case 111:
-				return twoLineText, nil
+				return "line one\nline two", nil
 			case 222:
 				return "", errors.New("signed url expired")
 			default:
@@ -668,7 +668,7 @@ func TestParseBaseMergeRequest(t *testing.T) {
 		}
 	})
 
-	retry := baseMergeRequest{MessageID: 9, AfterRunID: 4, BaseBranch: pbFixtureDefaultBranch, BaseSHA: strings.Repeat("b", 40), RetryOf: 7, Notes: twoLineText}
+	retry := baseMergeRequest{MessageID: 9, AfterRunID: 4, BaseBranch: pbFixtureDefaultBranch, BaseSHA: strings.Repeat("b", 40), RetryOf: 7, Notes: "line one\nline two"}
 	t.Run("retry request round-trips", func(t *testing.T) {
 		t.Parallel()
 		row := store.MessageRow{ID: retry.MessageID, Message: store.Message{Body: retry.body()}} //nolint:modernize // keyed on purpose: MessageRow's ID and CreatedAt fields precede the embedded Message, so the key cannot be dropped
@@ -833,7 +833,7 @@ func TestMergeCheckText(t *testing.T) {
 	}
 
 	results := []commandResult{{Kind: checkKindTest, Cmd: "go test ./...", Exit: 1, Output: "FAIL"}}
-	markers := []string{bareAGoPath}
+	markers := []string{"a.go"}
 	outside := []string{"b.go"}
 	want := strings.Join([]string{
 		checkInputText(results),
@@ -853,7 +853,7 @@ func TestMergeFuncLines(t *testing.T) {
 		t.Errorf("mergeTitle() = %q, want %q", got, "Merge main into the ticket branch")
 	}
 
-	lines := mergeFuncLines(req, []string{bareAGoPath, "b\nbad.go", "", "c.go"})
+	lines := mergeFuncLines(req, []string{"a.go", "b\nbad.go", "", "c.go"})
 	want := []string{"Merges main at abc1234", "Resolves a.go", "Resolves c.go"}
 	if diff := cmp.Diff(want, lines); diff != "" {
 		t.Errorf("mergeFuncLines() mismatch (-want +got):\n%s", diff)

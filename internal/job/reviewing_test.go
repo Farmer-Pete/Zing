@@ -167,20 +167,21 @@ const greetGoLine2 = "greet.go:2"
 
 // twoFindingScript is one lens's own "ok" document carrying two findings at
 // two distinct locations (design section 6.6's own batching tests: two
-// findings of one lens, both discussed, carried in one resume). Both
-// findings are severity major: every caller needs that severity, so it is
-// not a parameter (unparam).
-func twoFindingScript(lens, loc1, text1, fix1, loc2, text2, fix2 string) string {
+// findings of one lens, both discussed, carried in one resume). Every call
+// site today passes "major" for both severities, but the parameters stay:
+// a caller needing a different severity (to cross or stay under the floor)
+// should not have to fork this helper.
+func twoFindingScript(lens, sev1, loc1, text1, fix1, sev2, loc2, text2, fix2 string) string { //nolint:unparam // see above: kept general on purpose
 	return fmt.Sprintf(`<zing job="review" outcome="ok">
-<finding lens="%s" severity="major" location="%s">
+<finding lens="%s" severity="%s" location="%s">
 <text>%s</text>
 <fix>%s</fix>
 </finding>
-<finding lens="%s" severity="major" location="%s">
+<finding lens="%s" severity="%s" location="%s">
 <text>%s</text>
 <fix>%s</fix>
 </finding>
-</zing>`, lens, loc1, text1, fix1, lens, loc2, text2, fix2)
+</zing>`, lens, sev1, loc1, text1, fix1, lens, sev2, loc2, text2, fix2)
 }
 
 // reviewTicketReady is pbTicketInReviewing plus the ticket and the run id
@@ -2851,8 +2852,8 @@ func TestDiscussBatchesOneSession(t *testing.T) {
 	s, ticket, _ := reviewTicketReady(t)
 	scripts := reviewScriptsFS(map[string]string{
 		reviewScriptKey("security", 1): twoFindingScript(
-			"security", greetGoLine2, "first finding", "fix the first",
-			greetGoLine5, "second finding", "fix the second",
+			"security", "major", greetGoLine2, "first finding", "fix the first",
+			"major", greetGoLine5, "second finding", "fix the second",
 		),
 	})
 	rt := &recordingRuntime{inner: runtime.NewFake(scripts)}
@@ -3868,8 +3869,8 @@ func TestReReviewSuppressesDroppedAtUnchangedFile(t *testing.T) {
 	s, ticket, _ := reviewTicketReady(t)
 	scripts := reviewScriptsFS(map[string]string{
 		reviewScriptKey("quality", 1): twoFindingScript(
-			"quality", greetGoLine5, "unchecked input", "validate it",
-			pbHelloTxt+":1", "breaks the build", "fix the build",
+			"quality", "major", greetGoLine5, "unchecked input", "validate it",
+			"major", pbHelloTxt+":1", "breaks the build", "fix the build",
 		),
 	})
 	rt := runtime.NewFake(scripts)
@@ -3949,8 +3950,8 @@ func TestReReviewKeepsDroppedWhenFileChanged(t *testing.T) {
 	s, ticket, _ := reviewTicketReady(t)
 	scripts := reviewScriptsFS(map[string]string{
 		reviewScriptKey("quality", 1): twoFindingScript(
-			"quality", greetGoLine5, "unchecked input", "validate it",
-			greetGoLine2, "second concern", "fix the second",
+			"quality", "major", greetGoLine5, "unchecked input", "validate it",
+			"major", greetGoLine2, "second concern", "fix the second",
 		),
 	})
 	rt := runtime.NewFake(scripts)
@@ -4038,12 +4039,15 @@ func TestReReviewKeepsDroppedWhenFileChanged(t *testing.T) {
 // and a dropped row whose SHA git cannot resolve must block nothing,
 // report zero repeats, and return no error, rather than failing the tick
 // or (wrongly) blocking every location because its own ChangedFilesBetween
-// came back empty.
+// came back empty. It also proves the warning Q3 requires names the
+// unresolved commit, and that suppressRepeated returns ctx.Err() instead of
+// failing open when the comparison fails because the context is done. Not
+// parallel: it swaps the process-wide default logger to capture the
+// warning.
 func TestSuppressRepeatedFailsOpenOnUnresolvableSHA(t *testing.T) {
 	if testing.Short() {
 		t.Skip("slow end-to-end flow; runs in the full suite")
 	}
-	t.Parallel()
 	s, ticket, _ := reviewTicketReady(t)
 	rt := runtime.NewFake(reviewScriptsFS(nil))
 	deps := pbClaim(t, s, rt, ticket.ID)
@@ -4068,6 +4072,11 @@ func TestSuppressRepeatedFailsOpenOnUnresolvableSHA(t *testing.T) {
 	dropped := []response.FindingArtifact{{ID: findingID1, Location: greetGoLine5, SHA: unresolvable}}
 	merged := []response.FindingArtifact{{ID: findingID1, Severity: response.SeverityMajor, Location: greetGoLine5}}
 
+	var logBuf bytes.Buffer
+	prevDefault := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logBuf, &slog.HandlerOptions{Level: slog.LevelWarn})))
+	t.Cleanup(func() { slog.SetDefault(prevDefault) })
+
 	kept, repeated, err := suppressRepeated(t.Context(), ticket, proj, wt, sha, dropped, merged)
 	if err != nil {
 		t.Fatalf("suppressRepeated: %v", err)
@@ -4077,6 +4086,76 @@ func TestSuppressRepeatedFailsOpenOnUnresolvableSHA(t *testing.T) {
 	}
 	if len(kept) != 1 || kept[0].ID != findingID1 {
 		t.Errorf("kept = %+v, want the merged row kept", kept)
+	}
+	if got := logBuf.String(); !strings.Contains(got, "review dropped findings not compared") || !strings.Contains(got, "sha="+unresolvable) {
+		t.Errorf("log = %q, want a warning naming sha=%s", got, unresolvable)
+	}
+
+	t.Run("a cancelled context returns ctx.Err() instead of failing open", func(t *testing.T) {
+		cancelCtx, cancel := context.WithCancel(t.Context())
+		cancel()
+		cancelled := []response.FindingArtifact{{ID: findingID1, Location: greetGoLine5, SHA: sha}}
+		kept, _, err := suppressRepeated(cancelCtx, ticket, proj, wt, sha, cancelled, merged)
+		if !errors.Is(err, context.Canceled) {
+			t.Errorf("suppressRepeated error = %v, want context.Canceled", err)
+		}
+		if kept != nil {
+			t.Errorf("kept = %+v, want nil", kept)
+		}
+	})
+}
+
+// TestSuppressRepeatedLogsRepeatedFinding proves each removal is logged at
+// info with ticket_id, the dropped row's own finding_id, and location
+// (ticket 56): the dropped row's own SHA equal to the current sha makes
+// ChangedFilesBetween's own diff empty, so the merged row at the same
+// location is blocked. Not parallel: it swaps the process-wide default
+// logger to capture the line.
+func TestSuppressRepeatedLogsRepeatedFinding(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow end-to-end flow; runs in the full suite")
+	}
+	s, ticket, _ := reviewTicketReady(t)
+	rt := runtime.NewFake(reviewScriptsFS(nil))
+	deps := pbClaim(t, s, rt, ticket.ID)
+
+	proj, wt, escalation, err := ensureWorktreeOrEscalate(t.Context(), ticket, deps, func(errText string) store.HandlerCommit {
+		t.Fatalf("ensureWorktreeOrEscalate: onFail: %s", errText)
+		return store.HandlerCommit{}
+	})
+	if err != nil {
+		t.Fatalf("ensureWorktreeOrEscalate: %v", err)
+	}
+	if escalation != nil {
+		t.Fatalf("ensureWorktreeOrEscalate: escalation = %+v, want nil", escalation)
+	}
+
+	sha, err := proj.Orch.HeadSHA(t.Context(), wt)
+	if err != nil {
+		t.Fatalf("HeadSHA: %v", err)
+	}
+
+	dropped := []response.FindingArtifact{{ID: findingID1, Location: greetGoLine5, SHA: sha}}
+	merged := []response.FindingArtifact{{ID: findingIDRound2, Severity: response.SeverityMajor, Location: greetGoLine5}}
+
+	var logBuf bytes.Buffer
+	prevDefault := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logBuf, &slog.HandlerOptions{Level: slog.LevelInfo})))
+	t.Cleanup(func() { slog.SetDefault(prevDefault) })
+
+	kept, repeated, err := suppressRepeated(t.Context(), ticket, proj, wt, sha, dropped, merged)
+	if err != nil {
+		t.Fatalf("suppressRepeated: %v", err)
+	}
+	if repeated != 1 || len(kept) != 0 {
+		t.Fatalf("suppressRepeated = (%+v, %d), want (none, 1)", kept, repeated)
+	}
+
+	got := logBuf.String()
+	if !strings.Contains(got, "review finding repeats a dropped finding") ||
+		!strings.Contains(got, "finding_id="+findingID1) ||
+		!strings.Contains(got, "location="+greetGoLine5) {
+		t.Errorf("log = %q, want a line naming finding_id=%s location=%s", got, findingID1, greetGoLine5)
 	}
 }
 
@@ -4123,8 +4202,8 @@ func TestReReviewPromptListsDroppedFindings(t *testing.T) {
 	s, ticket, _ := reviewTicketReady(t)
 	scripts := reviewScriptsFS(map[string]string{
 		reviewScriptKey("quality", 1): twoFindingScript(
-			"quality", greetGoLine5, "unchecked input", "validate it",
-			pbHelloTxt+":1", "breaks the build", "fix the build",
+			"quality", "major", greetGoLine5, "unchecked input", "validate it",
+			"major", pbHelloTxt+":1", "breaks the build", "fix the build",
 		),
 	})
 	rt := &recordingRuntime{inner: runtime.NewFake(scripts)}
