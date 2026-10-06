@@ -466,6 +466,46 @@ func TestOwnerEdit_HostScenarioEmptyCheckRefused(t *testing.T) {
 	}
 }
 
+// TestOwnerEditKind proves OwnerEditRequest.Kind (#57): a host kind with a
+// non-blank check is stored, and a bogus kind is refused invalid (the
+// schema's enum) with nothing changed.
+func TestOwnerEditKind(t *testing.T) {
+	t.Parallel()
+	s := newTestStore(t)
+	_, ticketID := seedQueuedTicket(t, s, "1")
+	seedSealedScenario(t, s, ticketID)
+
+	if err := s.OwnerEdit(t.Context(), OwnerEditRequest{
+		TicketID: ticketID, Target: OwnerEditScenario, Ref: "s1", Action: OwnerEditActionEdit,
+		Kind: new("host"), Check: new("go test ./host"),
+	}); err != nil {
+		t.Fatalf("OwnerEdit(kind host): %v", err)
+	}
+	var sc response.Scenario
+	if err := json.Unmarshal(readScenarioPayload(t, s, ticketID, "s1"), &sc); err != nil {
+		t.Fatalf("unmarshal scenario s1: %v", err)
+	}
+	if sc.Kind != response.ScenarioKindHost || sc.Check != "go test ./host" {
+		t.Errorf("scenario s1 = %+v, want kind host, check %q", sc, "go test ./host")
+	}
+
+	before := readScenarioPayload(t, s, ticketID, "s1")
+	err := s.OwnerEdit(t.Context(), OwnerEditRequest{
+		TicketID: ticketID, Target: OwnerEditScenario, Ref: "s1", Action: OwnerEditActionEdit,
+		Kind: new("bogus"),
+	})
+	refusal, ok := errors.AsType[*OwnerEditError](err)
+	if !ok {
+		t.Fatalf("OwnerEdit(kind bogus) error = %v (%T), want *OwnerEditError", err, err)
+	}
+	if refusal.Code != OwnerEditCodeInvalid {
+		t.Errorf("code = %q, want %q", refusal.Code, OwnerEditCodeInvalid)
+	}
+	if after := readScenarioPayload(t, s, ticketID, "s1"); !bytes.Equal(after, before) {
+		t.Errorf("payload = %s, want unchanged %s", after, before)
+	}
+}
+
 // --- plan task edits (#41, task 2) ------------------------------------------
 
 // TestOwnerEdit_EditsPlanTaskInPlace proves a plan_task edit updates the one

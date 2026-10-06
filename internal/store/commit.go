@@ -168,6 +168,12 @@ type HandlerCommit struct {
 	// escalation that no run caused; a non-nil RunID ties both inserted
 	// messages to the run that did.
 	Escalation *EscalationCommit
+	// ScenarioEdit applies a judge-proposed amendment the owner accepted
+	// (#57): applied right after Artifacts, inside this commit's own fenced
+	// transaction, through OwnerEdit's own editScenarioTx body with the
+	// claim guard replaced by this commit's own lease fence. A refusal
+	// (shape or schema) fails the whole commit.
+	ScenarioEdit *ScenarioEdit
 	// TrackerEffect is carried, never applied, by this transaction: the
 	// dispatcher runs it against the ticket's tracker only after a
 	// successful commit (design D12).
@@ -218,6 +224,20 @@ type EscalationCommit struct {
 	RunID   *int64
 	Body    string
 	Payload response.EscalationPayload
+}
+
+// ScenarioEdit is HandlerCommit.ScenarioEdit (#57): the amended fields for
+// one sealed scenario, already resolved by job.judgeAmendment (Kind filled
+// in when the amendment left it blank), plus the judge's Reason, which
+// becomes the owner_edit event's Reason.
+type ScenarioEdit struct {
+	Ref    string
+	Kind   response.ScenarioKind
+	Given  string
+	When   string
+	Then   string
+	Check  string
+	Reason string
 }
 
 // TrackerEffect is a tracker comment a handler wants posted after its commit
@@ -457,6 +477,28 @@ func (s *Store) CommitHandlerResult(ctx context.Context, c HandlerCommit) (bool,
 			}
 		}
 		if _, err = s.insertArtifactTx(ctx, tx, a); err != nil {
+			return false, fmt.Errorf("commit handler result: %w", err)
+		}
+	}
+
+	// A judge amendment the owner accepted (#57): OwnerEdit's own shape
+	// check, schema validation, and owner_edit event, with this commit's
+	// lease fence already in place of the claim guard.
+	if se := c.ScenarioEdit; se != nil {
+		kind := string(se.Kind)
+		req := OwnerEditRequest{
+			TicketID: c.TicketID, Target: OwnerEditScenario, Ref: se.Ref, Action: OwnerEditActionEdit,
+			Given: &se.Given, When: &se.When, Then: &se.Then, Check: &se.Check, Kind: &kind,
+		}
+		if shapeErr := checkOwnerEditShape(req); shapeErr != nil {
+			return false, fmt.Errorf("commit handler result: scenario edit: %w", shapeErr)
+		}
+		var ev response.OwnerEditEvent
+		if ev, err = s.editScenarioTx(ctx, tx, req, false); err != nil {
+			return false, fmt.Errorf("commit handler result: scenario edit: %w", err)
+		}
+		ev.Reason = se.Reason
+		if err = s.insertOwnerEditEventTx(ctx, tx, c.TicketID, ev); err != nil {
 			return false, fmt.Errorf("commit handler result: %w", err)
 		}
 	}
@@ -1214,26 +1256,38 @@ func fillQuestionKeyTx(ctx context.Context, tx *sql.Tx, ticketID int64, payload 
 	return out, nil
 }
 
-// escalationOptionRetry, escalationOptionBackToPlanning, and
-// escalationOptionAbandon are the three escalation option texts
+// escalationOptionRetry, escalationOptionBackToPlanning,
+// escalationOptionAbandon, escalationOptionAcceptAmendment, and
+// escalationOptionEditAmendment are the escalation option texts
 // escalationOptionsFor assembles (goconst: each repeats across commit.go
 // and commit_test.go's own want fixtures). The option keys stay literal
 // "a"/"b"/"c" at each call site: those are the stable ids this plan's own
 // point is that every caller must keep meaning the same thing by them, not
 // a value worth hiding behind a name.
 const (
-	escalationOptionRetry          = "Retry"
-	escalationOptionBackToPlanning = "Back to planning"
-	escalationOptionAbandon        = "Abandon"
+	escalationOptionRetry           = "Retry"
+	escalationOptionBackToPlanning  = "Back to planning"
+	escalationOptionAbandon         = "Abandon"
+	escalationOptionAcceptAmendment = "Accept the amended check"
+	escalationOptionEditAmendment   = "Edit it"
 )
 
 // escalationOptionsFor picks the question's options and recommendation
-// (#47): post-seal, back to planning cannot run (replanUnsupportedEscalation
-// is the only thing it does there), so it's dropped and Retry is always
+// (#47, #57): amended overrides everything else, offering the judge's
+// proposed fix, an edit, and abandon, and recommending accept. Otherwise,
+// post-seal, back to planning cannot run (replanUnsupportedEscalation is
+// the only thing it does there), so it's dropped and Retry is always
 // recommended. In planning all three options work; the recommendation
-// follows the code. Abandon always keeps its "c" key, in both branches: it
+// follows the code. Abandon always keeps its "c" key, in every branch: it
 // is never renumbered to "b" just because back to planning is missing.
-func escalationOptionsFor(ticketState, code string) (options []response.Option, recommended string) {
+func escalationOptionsFor(ticketState, code string, amended bool) (options []response.Option, recommended string) {
+	if amended {
+		return []response.Option{
+			{Key: "a", Text: escalationOptionAcceptAmendment},
+			{Key: "b", Text: escalationOptionEditAmendment},
+			{Key: "c", Text: escalationOptionAbandon},
+		}, "a"
+	}
 	if ticketState != ticketStatePlanning {
 		return []response.Option{
 			{Key: "a", Text: escalationOptionRetry},
@@ -1300,13 +1354,14 @@ func (s *Store) escalateTx(ctx context.Context, tx *sql.Tx, ticketID int64, tick
 		return fmt.Errorf("escalation: %w", err)
 	}
 
-	options, recommended := escalationOptionsFor(ticketState, ec.Payload.Code)
+	options, recommended := escalationOptionsFor(ticketState, ec.Payload.Code, ec.Payload.Amendment != nil)
 	qPayload, err := json.Marshal(response.QuestionPayload{
 		Key:         fmt.Sprintf("Q%d", n),
 		Kind:        response.QuestionKindQuestion,
 		State:       response.QuestionStateOpen,
 		Recommended: recommended,
 		Options:     options,
+		Amendment:   ec.Payload.Amendment,
 	})
 	if err != nil {
 		return fmt.Errorf("escalation: marshal question payload: %w", err)

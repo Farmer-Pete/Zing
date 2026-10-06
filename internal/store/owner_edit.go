@@ -73,6 +73,7 @@ type OwnerEditRequest struct {
 	When  *string
 	Then  *string
 	Check *string
+	Kind  *string
 
 	// plan_task edit only.
 	Text *string
@@ -130,7 +131,7 @@ var scenarioRefPattern = regexp.MustCompile(`^s\d+$`)
 // ownerEditFieldsByTarget names, for each target, exactly the
 // OwnerEditRequest fields an edit may set.
 var ownerEditFieldsByTarget = map[string]map[string]bool{
-	OwnerEditScenario:   {"given": true, "when": true, "then": true, "check": true},
+	OwnerEditScenario:   {"given": true, "when": true, "then": true, "check": true, "kind": true},
 	OwnerEditPlanTask:   {"text": true, "test": true, "demo": true},
 	OwnerEditTicketBody: {"body": true},
 }
@@ -150,6 +151,9 @@ func ownerEditSetFields(req OwnerEditRequest) []string {
 	}
 	if req.Check != nil {
 		names = append(names, "check")
+	}
+	if req.Kind != nil {
+		names = append(names, "kind")
 	}
 	if req.Text != nil {
 		names = append(names, "text")
@@ -252,7 +256,7 @@ func (s *Store) OwnerEdit(ctx context.Context, req OwnerEditRequest) error {
 	var ev response.OwnerEditEvent
 	switch req.Target {
 	case OwnerEditScenario:
-		ev, err = s.editScenarioTx(ctx, tx, req)
+		ev, err = s.editScenarioTx(ctx, tx, req, true)
 	case OwnerEditPlanTask:
 		ev, err = s.editPlanTaskTx(ctx, tx, req)
 	case OwnerEditTicketBody:
@@ -276,8 +280,11 @@ func (s *Store) OwnerEdit(ctx context.Context, req OwnerEditRequest) error {
 // editScenarioTx applies a scenario edit (OwnerEditPlanTask and
 // OwnerEditTicketBody never reach here): it loads the sealed scenario
 // named by req.Ref, sets every non-nil field, validates the result against
-// artifacts/scenario, and writes it back guarded by the ticket's claim.
-func (s *Store) editScenarioTx(ctx context.Context, tx *sql.Tx, req OwnerEditRequest) (response.OwnerEditEvent, error) {
+// artifacts/scenario, and writes it back. claimGuard true (the console's own
+// OwnerEdit call) guards the write against the ticket's claim; claimGuard
+// false (CommitHandlerResult's ScenarioEdit step, already inside that
+// commit's own lease fence) writes unconditionally.
+func (s *Store) editScenarioTx(ctx context.Context, tx *sql.Tx, req OwnerEditRequest, claimGuard bool) (response.OwnerEditEvent, error) {
 	var id int64
 	var payload []byte
 	var sealedAt sql.NullString
@@ -315,6 +322,9 @@ func (s *Store) editScenarioTx(ctx context.Context, tx *sql.Tx, req OwnerEditReq
 	if req.Check != nil {
 		sc.Check = *req.Check
 	}
+	if req.Kind != nil {
+		sc.Kind = response.ScenarioKind(*req.Kind)
+	}
 	if sc.Kind == response.ScenarioKindHost && strings.TrimSpace(sc.Check) == "" {
 		return response.OwnerEditEvent{}, ownerEditErr(OwnerEditCodeInvalid, response.HostScenarioNeedsCheck)
 	}
@@ -327,11 +337,15 @@ func (s *Store) editScenarioTx(ctx context.Context, tx *sql.Tx, req OwnerEditReq
 		return response.OwnerEditEvent{}, ownerEditErr(OwnerEditCodeInvalid, err.Error())
 	}
 
-	if err := execClaimGuardedTx(ctx, tx, "scenario "+req.Ref,
-		`UPDATE artifacts SET payload = ? WHERE id = ? AND (SELECT claim_owner FROM tickets WHERE id = ?) IS NULL`,
-		string(newPayload), id, req.TicketID,
-	); err != nil {
-		return response.OwnerEditEvent{}, err
+	if claimGuard {
+		if err := execClaimGuardedTx(ctx, tx, "scenario "+req.Ref,
+			`UPDATE artifacts SET payload = ? WHERE id = ? AND (SELECT claim_owner FROM tickets WHERE id = ?) IS NULL`,
+			string(newPayload), id, req.TicketID,
+		); err != nil {
+			return response.OwnerEditEvent{}, err
+		}
+	} else if _, err := tx.ExecContext(ctx, `UPDATE artifacts SET payload = ? WHERE id = ?`, string(newPayload), id); err != nil {
+		return response.OwnerEditEvent{}, fmt.Errorf("owner edit: update scenario %s: %w", req.Ref, err)
 	}
 
 	return response.OwnerEditEvent{
