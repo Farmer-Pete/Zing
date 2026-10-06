@@ -94,12 +94,13 @@ const (
 	// its Recommended back this way -- a merge question's Recommended is
 	// always "a", meaning something else entirely there).
 	//
-	// escalationChoiceAccept is "accept the remaining findings", offered
-	// only as an EscalationCommit.ExtraOptions entry on a review
-	// loops_exhausted question (ticket 60). It shares the "d" key with
-	// escalationChoiceGrant because the two never appear on one question: a
-	// grant comes only from a build escalation, and checkEscalationOptions
-	// (store/commit.go) rejects a duplicate key if that ever changed.
+	// escalationChoiceAccept is option d offered as an
+	// EscalationCommit.ExtraOptions entry on two loops_exhausted questions:
+	// review's "accept the remaining findings" (ticket 60) and plan
+	// review's cap_loops "accept the plan and go to the gate". It shares
+	// the "d" key with escalationChoiceGrant because a grant comes only
+	// from a build escalation; checkEscalationOptions (store/commit.go)
+	// rejects a duplicate key if that ever changed.
 	escalationChoiceRetry   = "a"
 	escalationChoiceBack    = "b"
 	escalationChoiceAbandon = "c"
@@ -175,6 +176,19 @@ const (
 		"approve, writing in any settled question reopens it and withdraws this gate. Plan review reached " +
 		"machine.toml's planreview max_loops with only at-or-below-floor findings left; they were not fixed " +
 		"automatically and are shown below for your decision."
+
+	// planAcceptAtCapOptionText is option d's text on plan review's
+	// cap_loops loops_exhausted question.
+	planAcceptAtCapOptionText = "Accept the plan and go to the gate"
+
+	// gateApproveExplainsOwnerChose is the gate text acceptPlanAtCap posts
+	// when the owner picked d on the cap_loops escalation: unlike
+	// gateApproveExplainsLoopsExhausted, findings above the floor remain.
+	gateApproveExplainsOwnerChose = "Approve asks the planning agent whether any question is still open. If none is, " +
+		"Zing seals this scenario set and moves the ticket to building. This cannot be undone. Until you " +
+		"approve, writing in any settled question reopens it and withdraws this gate. Plan review reached " +
+		"machine.toml's planreview max_loops with findings above the quality floor still open. The findings " +
+		"below were not fixed, and you chose to see this gate anyway."
 
 	// The three artifact types a stored ready cohort writes (design section
 	// 6.5, 4.5): internal/store/schemas/artifacts/{plan,claims,scenario}.json
@@ -998,101 +1012,111 @@ func checkScenarioShape(scenarios []response.Scenario) []*response.PathError {
 		})
 	}
 	for i, sc := range scenarios {
-		if strings.TrimSpace(sc.Then) == "" {
-			errs = append(errs, &response.PathError{
-				Path: "scenarios/" + indexedScenario(i) + "/then",
-				Msg:  "then must not be empty",
-			})
-		}
-		host := sc.Kind == response.ScenarioKindHost
-		hasCheck := strings.TrimSpace(sc.Check) != ""
-		// A host check runs on the owner's machine at judging, outside any
-		// sandbox, so the /tmp and nested-sandbox refusals below do not
-		// apply to it; it must still have a check to run.
-		if host && !hasCheck {
-			errs = append(errs, &response.PathError{
-				Path: "scenarios/" + indexedScenario(i) + "/check",
-				Msg:  response.HostScenarioNeedsCheck,
-			})
-		}
-		// A host check runs unsandboxed with only the gate's own reading of
-		// its rendered text as approval, so a control or Unicode format
-		// character (a bidi override, a zero-width character) that could
-		// make the rendered command differ from what the shell runs is
-		// refused here too.
-		if host && hasCheck && response.HostCheckUnsafe(sc.Check) {
-			errs = append(errs, &response.PathError{
-				Path: "scenarios/" + indexedScenario(i) + "/check",
-				Msg:  response.HostCheckUnsafeMsg,
-			})
-		}
-		// Zing re-runs every check under the build sandbox, which denies
-		// writes to the host /tmp (bug fix: a live judge round failed every
-		// check that built into /tmp, though the judge, which rewrote the
-		// path, saw them pass).
-		if !host && strings.Contains(sc.Check, "/tmp/") {
-			errs = append(errs, &response.PathError{
-				Path: "scenarios/" + indexedScenario(i) + "/check",
-				Msg:  "check must not write under /tmp, which the sandbox denies; use \"$TMPDIR\" instead",
-			})
-		}
-		// Zing runs every check inside a seatbelt sandbox (the judge's, then
-		// CHECK's build sandbox), and seatbelt cannot start sandbox-exec, so
-		// the sandbox probes skip and exit 0 (#78). A check that greps the
-		// "--- SKIP:" line asserts the skip itself, so it proves the probe
-		// skipped rather than hiding behind the sandbox's own skip.
-		expectsSkip := skipWord.MatchString(sc.Then)
-		assertsSkip := strings.Contains(sc.Check, skipLine)
-		startsSeatbelt := strings.Contains(sc.Check, "sandbox-exec")
-		runsSandboxProbes := strings.Contains(sc.Check, "internal/sandbox")
-		// A then like "the test no longer skips" matches skipWord but
-		// expects the opposite result, so the host-sandbox exemption below
-		// must not fire for it: a grepped "--- SKIP:" would then prove the
-		// wrong thing and reopen #78's hole. expectedSkipCheckMsg below
-		// still fires on this same then (Q3, no_longer_skips_flagged); only
-		// the exemption's affirmative check is narrowed.
-		affirmsSkip := expectsSkip && !negatedSkipWord.MatchString(sc.Then)
-		// sandbox-exec is never exempt: the fix only needs to let an
-		// internal/sandbox probe's own expected skip through, and starting
-		// the seatbelt directly is the exact nested-sandbox invocation #78
-		// refused. An internal/sandbox check is exempt only when the check
-		// proves the skip (assertsSkip) and the scenario affirmatively
-		// expects it (affirmsSkip); a skip the then doesn't name, or
-		// negates, still hides the behavior under test.
-		exemptSandboxProbe := runsSandboxProbes && assertsSkip && affirmsSkip
-		if !host && (startsSeatbelt || (runsSandboxProbes && !exemptSandboxProbe)) {
-			errs = append(errs, &response.PathError{
-				Path: "scenarios/" + indexedScenario(i) + "/check",
-				Msg:  hostSandboxCheckMsg,
-			})
-		}
-		// A bare go test exits 0 whether or not the test skipped, so a then
-		// that expects a skip needs a check that greps the skip line (#80,
-		// #129 s5).
-		if hasCheck && expectsSkip && !assertsSkip {
-			errs = append(errs, &response.PathError{
-				Path: "scenarios/" + indexedScenario(i) + "/check",
-				Msg:  expectedSkipCheckMsg,
-			})
-		}
-		// Two of the three #86 sealed-check failures: a check that greps a
-		// multi-word phrase straight against hard-wrapped prose (the phrase
-		// can span the line break the prose wraps at) without joining the
-		// lines first, and a check with an unquoted glob (the judge
-		// agent's zsh login shell aborts on an unmatched glob, turning a
-		// leading "!" into a false pass).
-		if proseGrepWithoutJoin(sc.Check) {
-			errs = append(errs, &response.PathError{
-				Path: "scenarios/" + indexedScenario(i) + "/check",
-				Msg:  proseGrepCheckMsg,
-			})
-		}
-		if word, ok := unquotedGlob(sc.Check); ok {
-			errs = append(errs, &response.PathError{
-				Path: "scenarios/" + indexedScenario(i) + "/check",
-				Msg:  unquotedGlobCheckMsg(word),
-			})
-		}
+		errs = append(errs, checkScenarioRules(i, sc)...)
+	}
+	return errs
+}
+
+// checkScenarioRules is checkScenarioShape's own per-scenario half (#57):
+// every rule that reads one scenario alone, with no dependency on the rest
+// of the cohort, so judgeAmendment (judging.go) can run the same rules
+// against a judge-proposed amendment before the owner ever sees it.
+func checkScenarioRules(i int, sc response.Scenario) []*response.PathError {
+	var errs []*response.PathError
+	if strings.TrimSpace(sc.Then) == "" {
+		errs = append(errs, &response.PathError{
+			Path: "scenarios/" + indexedScenario(i) + "/then",
+			Msg:  "then must not be empty",
+		})
+	}
+	host := sc.Kind == response.ScenarioKindHost
+	hasCheck := strings.TrimSpace(sc.Check) != ""
+	// A host check runs on the owner's machine at judging, outside any
+	// sandbox, so the /tmp and nested-sandbox refusals below do not
+	// apply to it; it must still have a check to run.
+	if host && !hasCheck {
+		errs = append(errs, &response.PathError{
+			Path: "scenarios/" + indexedScenario(i) + "/check",
+			Msg:  response.HostScenarioNeedsCheck,
+		})
+	}
+	// A host check runs unsandboxed with only the gate's own reading of
+	// its rendered text as approval, so a control or Unicode format
+	// character (a bidi override, a zero-width character) that could
+	// make the rendered command differ from what the shell runs is
+	// refused here too.
+	if host && hasCheck && response.HostCheckUnsafe(sc.Check) {
+		errs = append(errs, &response.PathError{
+			Path: "scenarios/" + indexedScenario(i) + "/check",
+			Msg:  response.HostCheckUnsafeMsg,
+		})
+	}
+	// Zing re-runs every check under the build sandbox, which denies
+	// writes to the host /tmp (bug fix: a live judge round failed every
+	// check that built into /tmp, though the judge, which rewrote the
+	// path, saw them pass).
+	if !host && strings.Contains(sc.Check, "/tmp/") {
+		errs = append(errs, &response.PathError{
+			Path: "scenarios/" + indexedScenario(i) + "/check",
+			Msg:  "check must not write under /tmp, which the sandbox denies; use \"$TMPDIR\" instead",
+		})
+	}
+	// Zing runs every check inside a seatbelt sandbox (the judge's, then
+	// CHECK's build sandbox), and seatbelt cannot start sandbox-exec, so
+	// the sandbox probes skip and exit 0 (#78). A check that greps the
+	// "--- SKIP:" line asserts the skip itself, so it proves the probe
+	// skipped rather than hiding behind the sandbox's own skip.
+	expectsSkip := skipWord.MatchString(sc.Then)
+	assertsSkip := strings.Contains(sc.Check, skipLine)
+	startsSeatbelt := strings.Contains(sc.Check, "sandbox-exec")
+	runsSandboxProbes := strings.Contains(sc.Check, "internal/sandbox")
+	// A then like "the test no longer skips" matches skipWord but
+	// expects the opposite result, so the host-sandbox exemption below
+	// must not fire for it: a grepped "--- SKIP:" would then prove the
+	// wrong thing and reopen #78's hole. expectedSkipCheckMsg below
+	// still fires on this same then (Q3, no_longer_skips_flagged); only
+	// the exemption's affirmative check is narrowed.
+	affirmsSkip := expectsSkip && !negatedSkipWord.MatchString(sc.Then)
+	// sandbox-exec is never exempt: the fix only needs to let an
+	// internal/sandbox probe's own expected skip through, and starting
+	// the seatbelt directly is the exact nested-sandbox invocation #78
+	// refused. An internal/sandbox check is exempt only when the check
+	// proves the skip (assertsSkip) and the scenario affirmatively
+	// expects it (affirmsSkip); a skip the then doesn't name, or
+	// negates, still hides the behavior under test.
+	exemptSandboxProbe := runsSandboxProbes && assertsSkip && affirmsSkip
+	if !host && (startsSeatbelt || (runsSandboxProbes && !exemptSandboxProbe)) {
+		errs = append(errs, &response.PathError{
+			Path: "scenarios/" + indexedScenario(i) + "/check",
+			Msg:  hostSandboxCheckMsg,
+		})
+	}
+	// A bare go test exits 0 whether or not the test skipped, so a then
+	// that expects a skip needs a check that greps the skip line (#80,
+	// #129 s5).
+	if hasCheck && expectsSkip && !assertsSkip {
+		errs = append(errs, &response.PathError{
+			Path: "scenarios/" + indexedScenario(i) + "/check",
+			Msg:  expectedSkipCheckMsg,
+		})
+	}
+	// Two of the three #86 sealed-check failures: a check that greps a
+	// multi-word phrase straight against hard-wrapped prose (the phrase
+	// can span the line break the prose wraps at) without joining the
+	// lines first, and a check with an unquoted glob (the judge
+	// agent's zsh login shell aborts on an unmatched glob, turning a
+	// leading "!" into a false pass).
+	if proseGrepWithoutJoin(sc.Check) {
+		errs = append(errs, &response.PathError{
+			Path: "scenarios/" + indexedScenario(i) + "/check",
+			Msg:  proseGrepCheckMsg,
+		})
+	}
+	if word, ok := unquotedGlob(sc.Check); ok {
+		errs = append(errs, &response.PathError{
+			Path: "scenarios/" + indexedScenario(i) + "/check",
+			Msg:  unquotedGlobCheckMsg(word),
+		})
 	}
 	return errs
 }
@@ -1456,11 +1480,11 @@ func maybeResumeFloorFindings(ctx context.Context, t store.Ticket, d Deps, sess 
 		return store.HandlerCommit{}, false, fmt.Errorf("job: planning: count delivered reviews: %w", err)
 	}
 	if n >= d.Machine.Jobs[jobPlanreviewName].MaxLoops {
-		// Issue #48: an above-floor finding still escalates loops_exhausted,
-		// unchanged -- a gate must never post against a mixed artifact. Only
-		// when every surviving finding is at or below the floor does the cap
-		// post the gate instead, so the owner decides rather than the loop
-		// exhausting into an escalation nobody above the floor asked for.
+		// Issue #48: an above-floor finding still escalates loops_exhausted --
+		// the loop itself never posts a gate against a mixed artifact. The
+		// owner can: option d on this escalation (acceptPlanAtCap) posts the
+		// gate anyway, since the rule exists so the owner, not the loop,
+		// makes that call.
 		if above == 0 {
 			planArtifact, found, artErr := d.Store.GetArtifact(ctx, t.ID, artifactTypePlan)
 			if artErr != nil {
@@ -1473,7 +1497,7 @@ func maybeResumeFloorFindings(ctx context.Context, t store.Ticket, d Deps, sess 
 			if unmarshalErr := json.Unmarshal(planArtifact.Payload, &plan); unmarshalErr != nil {
 				return store.HandlerCommit{}, false, fmt.Errorf("job: planning: unmarshal plan artifact: %w", unmarshalErr)
 			}
-			commit, err = postGateCommit(ctx, t, d, plan.Overview.Objective, true)
+			commit, err = postGateCommit(ctx, t, d, plan.Overview.Objective, gateApproveExplainsLoopsExhausted)
 			if err != nil {
 				return commit, true, err
 			}
@@ -1491,6 +1515,8 @@ func maybeResumeFloorFindings(ctx context.Context, t store.Ticket, d Deps, sess 
 		}
 		c := escalationCommit(t, d, nil, nil,
 			string(response.EscalationCodeLoopsExhausted), loopsExhaustedWhat, loopsExhaustedWhy, "", response.EscalationOriginCapLoops)
+		c.Escalation.ExtraOptions = []response.Option{{Key: escalationChoiceAccept, Text: planAcceptAtCapOptionText}}
+		c.Escalation.Recommended = escalationChoiceAccept
 		return c, true, nil
 	}
 
@@ -1658,7 +1684,7 @@ func planReviewOkCommit(ctx context.Context, t store.Ticket, d Deps, rr runResul
 	}}
 
 	if atOrBelow == 0 {
-		gc, gcErr := postGateCommit(ctx, t, d, plan.Overview.Objective, false)
+		gc, gcErr := postGateCommit(ctx, t, d, plan.Overview.Objective, gateApproveExplains)
 		if gcErr != nil {
 			return store.HandlerCommit{}, gcErr
 		}
@@ -1742,6 +1768,26 @@ func renderFindings(findings []response.Finding) string {
 	return strings.Join(lines, "\n")
 }
 
+// gateFindingTextMaxRunes caps each finding's text on the owner-chose gate
+// acceptPlanAtCap posts (ticket 66).
+const gateFindingTextMaxRunes = 200
+
+// renderGateFindings renders findings, in stored order, one markdown list
+// line each: "- SEVERITY LOCATION TEXT", every whitespace run collapsed to
+// one space and TEXT cut to its first gateFindingTextMaxRunes runes; "" for
+// no findings.
+func renderGateFindings(findings []response.Finding) string {
+	lines := make([]string, len(findings))
+	for i, f := range findings {
+		text := []rune(strings.Join(strings.Fields(f.Text), " "))
+		if len(text) > gateFindingTextMaxRunes {
+			text = text[:gateFindingTextMaxRunes]
+		}
+		lines[i] = strings.Join(strings.Fields(fmt.Sprintf("- %s %s %s", f.Severity, f.Location, string(text))), " ")
+	}
+	return strings.Join(lines, "\n")
+}
+
 // ---- 6.6 the gate: post, approve/seal, reject -----------------------------
 
 // gateQuestionMessage builds the section 6.6 "Post" message: kind gate,
@@ -1754,7 +1800,7 @@ func renderFindings(findings []response.Finding) string {
 // cuts the body on its first newline, so objective still renders as the
 // question's title and gateApproveExplains as its markdown body, exactly as
 // every other question's Title/Body pair does.
-func gateQuestionMessage(ticketID int64, objective string, loopsExhausted bool) (store.Message, error) {
+func gateQuestionMessage(ticketID int64, objective, explains string) (store.Message, error) {
 	payload, err := json.Marshal(response.QuestionPayload{
 		Kind:        response.QuestionKindGate,
 		State:       response.QuestionStateOpen,
@@ -1766,10 +1812,6 @@ func gateQuestionMessage(ticketID int64, objective string, loopsExhausted bool) 
 	})
 	if err != nil {
 		return store.Message{}, fmt.Errorf("job: gate: marshal question payload: %w", err)
-	}
-	explains := gateApproveExplains
-	if loopsExhausted {
-		explains = gateApproveExplainsLoopsExhausted
 	}
 	return store.Message{
 		TicketID: ticketID, Type: msgTypeQuestion, Author: authorZing,
@@ -1785,8 +1827,8 @@ func gateQuestionMessage(ticketID int64, objective string, loopsExhausted bool) 
 // AttachRunToMsgs -- planReviewOkCommit, the caller with a live review run,
 // overlays those itself; maybeResumeFloorFindings's cap branch has no run
 // to attach, since the cap, not a run, produced this gate.
-func postGateCommit(ctx context.Context, t store.Ticket, d Deps, objective string, loopsExhausted bool) (store.HandlerCommit, error) {
-	msg, err := gateQuestionMessage(t.ID, objective, loopsExhausted)
+func postGateCommit(ctx context.Context, t store.Ticket, d Deps, objective, explains string) (store.HandlerCommit, error) {
+	msg, err := gateQuestionMessage(t.ID, objective, explains)
 	if err != nil {
 		return store.HandlerCommit{}, err
 	}
@@ -1854,13 +1896,16 @@ func (h planningHandler) enterFromGateRound(ctx context.Context, t store.Ticket,
 // gateRejectExtra builds a rejected gate's resume extra (review P2 on issue
 // #48's own PR): the owner's notes alone give the planner nothing to act on
 // when the rejected gate was posted at the loop cap (gateCapMarker), since
-// those at-or-below-floor findings were never fed back into planning -- the
-// cap stopped the resume loop that would have done that. When the current
-// cohort carries that marker, this fetches its stored floor findings with
-// outstandingFloorFindings (the same helper the cap_loops escalation retry
-// already uses) and fences them ahead of the notes, exactly as the
-// floor-findings resume renders them; a clean-review gate (no marker)
-// carries notes alone, unchanged.
+// those stored findings were never fed back into planning -- the cap
+// stopped the resume loop that would have done that. When the current
+// cohort carries that marker, this fetches every finding still in the
+// stored planreview artifact with storedPlanreviewFindings and fences them
+// ahead of the notes, exactly as the floor-findings resume renders them. A
+// capped gate's stored findings are not always all at-or-below-floor: the
+// owner's own d pick on the cap_loops escalation (acceptPlanAtCap) posts
+// the gate with above-floor findings still open, and the owner decided a
+// reject should feed those back too (owner decision Q2). A clean-review
+// gate (no marker) carries notes alone, unchanged.
 func gateRejectExtra(ctx context.Context, t store.Ticket, d Deps, notes string) ([]prompt.NamedInput, error) {
 	capped, err := rejectedGateWasCapped(ctx, t, d)
 	if err != nil {
@@ -1869,7 +1914,7 @@ func gateRejectExtra(ctx context.Context, t store.Ticket, d Deps, notes string) 
 	if !capped {
 		return []prompt.NamedInput{prompt.Notes(notes)}, nil
 	}
-	findings, err := outstandingFloorFindings(ctx, t, d)
+	findings, err := storedPlanreviewFindings(ctx, t, d)
 	if err != nil {
 		return nil, err
 	}
@@ -1997,6 +2042,15 @@ func roundChoice(round store.Round) string {
 // "hold" for a merge round (shipping.go's mergeAnswer: anything but
 // escalationChoiceRetry holds), so this is not a new behavior for those
 // kinds, only a name for the one they already had.
+//
+// An amended escalation (qp.Amendment != nil) is the one exception to
+// reading Recommended straight back: escalationOptionsFor recommends "a"
+// (Accept) there only to steer the owner's chip in the UI, and a reply
+// with no option picked must never silently accept a judge-written check
+// (#57, r1f9 triage: "a reply with no picked option must never accept an
+// amendment"). So a reply with no option on an amended escalation always
+// falls back to escalationChoiceBack (Edit it), which starts a fresh judge
+// round with the scenario unchanged rather than applying anything.
 func roundRecommendedOption(round store.Round) string {
 	if len(round.Questions) == 0 {
 		return escalationChoiceBack
@@ -2004,6 +2058,10 @@ func roundRecommendedOption(round store.Round) string {
 	var qp response.QuestionPayload
 	q := round.Questions[len(round.Questions)-1]
 	if err := json.Unmarshal(q.Payload, &qp); err != nil || qp.Kind != response.QuestionKindQuestion {
+		return escalationChoiceBack
+	}
+	if qp.Amendment != nil {
+		slog.Info("amended escalation reply without option, falling back to edit", "ticket_id", q.TicketID, "question_id", q.ID)
 		return escalationChoiceBack
 	}
 	if qp.Recommended == "" {
@@ -2043,6 +2101,16 @@ func (h planningHandler) enterFromEscalationRound(ctx context.Context, t store.T
 	notes := joinReplies(round.Replies)
 	errorText := payload.What + "\n" + payload.Why + "\n" + payload.Tried
 	origin := response.EscalationOrigin(payload.Origin)
+	capLoops := origin == response.EscalationOriginCapLoops && payload.Code == string(response.EscalationCodeLoopsExhausted)
+	// Owner decision Q1: a reply with no chip on the cap_loops question
+	// resolves as Retry even though d is recommended -- a note is for the
+	// planner, and the gate cannot act on it (review's own rule,
+	// postbuild.go's resolvePostBuildEscalation).
+	replyOnlyDefaultedToAccept := choice == escalationChoiceAccept && newestChosenOption(round.Answers) == ""
+	if capLoops && replyOnlyDefaultedToAccept {
+		slog.Info("plan review loops_exhausted reply-only answer resolves as retry", "ticket_id", t.ID, "recommended", escalationChoiceAccept)
+		choice = escalationChoiceRetry
+	}
 	notesAndError := []prompt.NamedInput{prompt.Notes(notes), prompt.Error(errorText)}
 
 	var commit store.HandlerCommit
@@ -2080,6 +2148,8 @@ func (h planningHandler) enterFromEscalationRound(ctx context.Context, t store.T
 		// carries the exhausted session's threads instead.
 		commit, err = resolveCapResumesEscalation(ctx, t, d, notes, errorText, resolveIDs)
 
+	case capLoops && choice == escalationChoiceAccept:
+		commit, err = acceptPlanAtCap(ctx, t, d, resolveIDs)
 	case origin == response.EscalationOriginCapLoops && choice == escalationChoiceRetry:
 		findings, findErr := outstandingFloorFindings(ctx, t, d)
 		if findErr != nil {
@@ -2105,6 +2175,51 @@ func (h planningHandler) enterFromEscalationRound(ctx context.Context, t store.T
 		"run_id", int64OrZero(escMsg.RunID), "code", payload.Code, "origin", payload.Origin,
 		"choice", choice, "preserved_rounds", preserved)
 	return commit, nil
+}
+
+// acceptPlanAtCap is option d on plan review's cap_loops loops_exhausted
+// question: the owner, not the loop, chose to see the gate with findings
+// above the floor still open. It posts the gate as the at-or-below-floor
+// cap path does (postGateCommit plus gateCapMarker, so a reject and the
+// console both read it as a capped gate), with no runtime call, and
+// resolves the escalation round in the same commit.
+func acceptPlanAtCap(ctx context.Context, t store.Ticket, d Deps, resolveIDs []int64) (store.HandlerCommit, error) {
+	cohort, ok, err := d.Store.CurrentCohort(ctx, t.ID)
+	if err != nil {
+		return store.HandlerCommit{}, fmt.Errorf("job: planning: cap_loops accept: current cohort: %w", err)
+	}
+	if !ok {
+		return store.HandlerCommit{}, fmt.Errorf("job: planning: cap_loops accept: ticket %d has no current cohort", t.ID)
+	}
+	planArtifact, found, err := d.Store.GetArtifact(ctx, t.ID, artifactTypePlan)
+	if err != nil {
+		return store.HandlerCommit{}, fmt.Errorf("job: planning: cap_loops accept: get plan artifact: %w", err)
+	}
+	if !found {
+		return store.HandlerCommit{}, fmt.Errorf("job: planning: cap_loops accept: ticket %d has a cohort but no plan artifact", t.ID)
+	}
+	var plan response.Plan
+	if err = json.Unmarshal(planArtifact.Payload, &plan); err != nil {
+		return store.HandlerCommit{}, fmt.Errorf("job: planning: cap_loops accept: unmarshal plan artifact: %w", err)
+	}
+	findings, err := storedPlanreviewFindings(ctx, t, d)
+	if err != nil {
+		return store.HandlerCommit{}, err
+	}
+	explains := gateApproveExplainsOwnerChose
+	if list := renderGateFindings(findings); list != "" {
+		explains += "\n\n" + list
+	}
+	c, err := postGateCommit(ctx, t, d, plan.Overview.Objective, explains)
+	if err != nil {
+		return store.HandlerCommit{}, err
+	}
+	c.ResolveQuestions = resolveIDs
+	c.Messages = append(c.Messages, store.Message{
+		TicketID: t.ID, Type: msgTypeUpdate, Author: authorSystem, Body: gateCapMarker(cohort.PlanVersion),
+	})
+	slog.Info("gate posted at loop cap by owner choice", "ticket_id", t.ID, "plan_version", cohort.PlanVersion, "findings", len(findings))
+	return c, nil
 }
 
 // abandonCommit is section 6.7 choice "c" (design D10): every open or
@@ -2153,6 +2268,31 @@ func retryCapBudget(ctx context.Context, t store.Ticket, d Deps, resolveIDs []in
 	return buildingHandler{}.retryMarkerCommit(t, d, resolveIDs), nil
 }
 
+// storedPlanreviewFindings returns every finding in the planreview artifact
+// at the current cohort's exact version, in stored order; nil, nil when
+// there is no cohort or no artifact at that version.
+func storedPlanreviewFindings(ctx context.Context, t store.Ticket, d Deps) ([]response.Finding, error) {
+	cohort, ok, err := d.Store.CurrentCohort(ctx, t.ID)
+	if err != nil {
+		return nil, fmt.Errorf("job: planning: stored planreview findings: current cohort: %w", err)
+	}
+	if !ok {
+		return nil, nil
+	}
+	review, exists, err := d.Store.PlanReviewAt(ctx, t.ID, cohort.PlanVersion)
+	if err != nil {
+		return nil, fmt.Errorf("job: planning: stored planreview findings: planreview at version %d: %w", cohort.PlanVersion, err)
+	}
+	if !exists {
+		return nil, nil
+	}
+	var payload planreviewArtifactPayload
+	if unmarshalErr := json.Unmarshal(review.Payload, &payload); unmarshalErr != nil {
+		return nil, fmt.Errorf("job: planning: stored planreview findings: unmarshal planreview artifact: %w", unmarshalErr)
+	}
+	return payload.Findings, nil
+}
+
 // outstandingFloorFindings reads the current cohort's planreview artifact
 // and returns its at-or-below-floor survivors (design section 6.7's
 // cap_loops retry row): the same set maybeResumeFloorFindings itself
@@ -2162,26 +2302,12 @@ func retryCapBudget(ctx context.Context, t store.Ticket, d Deps, resolveIDs []in
 // cohort or no planreview artifact at its version yet (unreachable in
 // practice: a cap_loops escalation cannot exist without one).
 func outstandingFloorFindings(ctx context.Context, t store.Ticket, d Deps) ([]response.Finding, error) {
-	cohort, ok, err := d.Store.CurrentCohort(ctx, t.ID)
+	findings, err := storedPlanreviewFindings(ctx, t, d)
 	if err != nil {
-		return nil, fmt.Errorf("job: planning: cap_loops retry: current cohort: %w", err)
+		return nil, err
 	}
-	if !ok {
-		return nil, nil
-	}
-	review, exists, err := d.Store.PlanReviewAt(ctx, t.ID, cohort.PlanVersion)
-	if err != nil {
-		return nil, fmt.Errorf("job: planning: cap_loops retry: planreview at version %d: %w", cohort.PlanVersion, err)
-	}
-	if !exists {
-		return nil, nil
-	}
-	var payload planreviewArtifactPayload
-	if unmarshalErr := json.Unmarshal(review.Payload, &payload); unmarshalErr != nil {
-		return nil, fmt.Errorf("job: planning: cap_loops retry: unmarshal planreview artifact: %w", unmarshalErr)
-	}
-	atOrBelow := make([]response.Finding, 0, len(payload.Findings))
-	for _, f := range payload.Findings {
+	atOrBelow := make([]response.Finding, 0, len(findings))
+	for _, f := range findings {
 		if f.Severity.Rank() <= d.Floor.Rank() {
 			atOrBelow = append(atOrBelow, f)
 		}
@@ -2658,10 +2784,11 @@ func postRunFailure(t store.Ticket, d Deps, rr runResult, sessionCommit *store.S
 // store.ErrClaimLost) either escalate (ErrBudget) or return unchanged;
 // runtime.ErrCanceled returns with no commit at all (design D13: the
 // dispatcher leaves the claim for ExpireClaims to reconcile); an exec
-// failure (ErrStart, ErrTimeout, ErrOutputTooLarge, *runtime.ExecError)
-// terminalizes the run and escalates runtime_exec_failed; an invalid output
-// applies D14. ok is false when runErr names none of these, so the caller
-// can report it as a bug rather than silently dropping it.
+// failure (ErrStart, ErrTimeout, ErrStalled, ErrOutputTooLarge,
+// *runtime.ExecError) terminalizes the run and escalates
+// runtime_exec_failed; an invalid output applies D14. ok is false when
+// runErr names none of these, so the caller can report it as a bug rather
+// than silently dropping it.
 func routeFailure(
 	t store.Ticket, d Deps, rr runResult, runErr error, priorInvalid int,
 	sessionCommit *store.SessionUpsert, resolveIDs []int64, origin response.EscalationOrigin,
@@ -2687,13 +2814,23 @@ func routeFailure(
 	return store.HandlerCommit{}, false, nil
 }
 
-// isExecFailure reports whether err is one of the four runtime failures
+// execFailureSentinels are four of the five runtime failures section 6.8
+// escalates as runtime_exec_failed: the process could not start, the job
+// deadline killed it, Claude's idle watchdog killed a stalled run, or its
+// output exceeded the 4 MiB cap. The fifth, exiting with no parseable
+// result, is runtime.ExecError, which isExecFailure matches separately.
+var execFailureSentinels = []error{runtime.ErrStart, runtime.ErrTimeout, runtime.ErrStalled, runtime.ErrOutputTooLarge}
+
+// isExecFailure reports whether err is one of the five runtime failures
 // section 6.8 escalates as runtime_exec_failed: the process could not
-// start, the job deadline killed it, its output exceeded the 4 MiB cap, or
-// it exited with no parseable result.
+// start, the job deadline killed it, Claude's idle watchdog killed a
+// stalled run, its output exceeded the 4 MiB cap, or it exited with no
+// parseable result.
 func isExecFailure(err error) bool {
-	if errors.Is(err, runtime.ErrStart) || errors.Is(err, runtime.ErrTimeout) || errors.Is(err, runtime.ErrOutputTooLarge) {
-		return true
+	for _, sentinel := range execFailureSentinels {
+		if errors.Is(err, sentinel) {
+			return true
+		}
 	}
 	var execErr *runtime.ExecError
 	return errors.As(err, &execErr) //nolint:modernize // see routeFailure's comment

@@ -720,6 +720,58 @@ func TestPlanningHandler_Gate_Reject_CapGateIncludesStoredFloorFindings(t *testi
 	}
 }
 
+// TestPlanningHandler_Gate_Reject_CapGateIncludesAboveFloorFindings proves
+// owner decision Q2: rejecting a capped gate feeds back every finding still
+// in the stored planreview artifact, above-floor findings included, not
+// just the at-or-below-floor survivors outstandingFloorFindings would keep
+// -- a capped gate can carry an above-floor finding when the owner picked
+// option d on the cap_loops escalation (acceptPlanAtCap) to see the gate
+// anyway.
+func TestPlanningHandler_Gate_Reject_CapGateIncludesAboveFloorFindings(t *testing.T) {
+	t.Parallel()
+	s := newJobTestStore(t)
+	ticketID := seedQueuedTicket(t, s)
+	rt := fakeRuntime(t)
+	advanceQueuedToPlanning(t, s, rt, ticketID)
+	apply(t, s, getTicket(t, s, ticketID), mustPlanning(t, s, claim(t, s, rt, ticketID), ticketID)) // classify
+	apply(t, s, getTicket(t, s, ticketID), mustPlanning(t, s, claim(t, s, rt, ticketID), ticketID)) // first turn: posts Q1
+	answerFixtureQuestion(t, s, ticketID)                                                           // Q1: opens the planning session, still open after
+
+	planVersion, runID := seedCohort(t, s, ticketID, validPlan("Cap gate reject above floor."), validScenarios(2, "capreject2"))
+	minor := finding(response.SeverityMinor, "plan/design/shape", "still a bit off", "tighten the copy")
+	major := finding(response.SeverityMajor, "plan/design/other", "the plan skips migrations", "add a migration step")
+	seedPlanreviewArtifact(t, s, ticketID, planVersion, runID, minor, major)
+	insertUpdateMarker(t, s, ticketID, fmt.Sprintf("gate cap reached plan v%d", planVersion))
+
+	qID := seedGateQuestion(t, s, ticketID, &runID)
+	const notes = "fix these"
+	answerGateQuestion(t, s, ticketID, qID, new("b"), notes)
+
+	openSess, _, err := s.LatestSession(t.Context(), ticketID, testStatePlanning, 12)
+	if err != nil {
+		t.Fatalf("LatestSession: %v", err)
+	}
+
+	resumeRT := &scriptedRuntime{t: t, steps: []scriptedStep{questionResult(response.JobPlanning, "gate-reject-cap-above-floor-sess")}}
+	rec := &recordingRuntime{rt: resumeRT}
+	commit, err := runPlanning(t, s, claim(t, s, rec, ticketID), ticketID)
+	if err != nil {
+		t.Fatalf("gate reject (capped, above floor) Run: %v", err)
+	}
+	if commit.Session == nil || commit.Session.ID == nil || *commit.Session.ID != openSess.ID {
+		t.Fatalf("commit.Session = %+v, want the already-open session %d (a resume, not fresh)", commit.Session, openSess.ID)
+	}
+	if !strings.Contains(rec.lastReq.Prompt, "still a bit off") {
+		t.Errorf("resume prompt does not carry the capped gate's at-or-below-floor finding:\n%s", rec.lastReq.Prompt)
+	}
+	if !strings.Contains(rec.lastReq.Prompt, "the plan skips migrations") {
+		t.Errorf("resume prompt does not carry the capped gate's above-floor finding:\n%s", rec.lastReq.Prompt)
+	}
+	if !strings.Contains(rec.lastReq.Prompt, notes) {
+		t.Errorf("resume prompt does not carry the owner's rejection notes:\n%s", rec.lastReq.Prompt)
+	}
+}
+
 // ---- seeding helpers this file adds on top of planning_test.go's own ------
 
 // seedSealedCohort is seedCohort (planning_test.go), with every scenario

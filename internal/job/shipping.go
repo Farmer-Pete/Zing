@@ -236,7 +236,12 @@ func (h shipHandler) publish(ctx context.Context, t store.Ticket, d Deps) (store
 		return store.HandlerCommit{}, fmt.Errorf("job: shipping: file events: %w", err)
 	}
 
-	pr := prBody(t, plan, final, cohort, reports, events)
+	accepted, err := acceptedAtCapFindings(ctx, t, d)
+	if err != nil {
+		return store.HandlerCommit{}, err
+	}
+
+	pr := prBody(t, plan, final, cohort, reports, events, accepted)
 
 	url, number, openErr := proj.Orch.OpenDraftPR(ctx, wt, pr)
 	if openErr != nil {
@@ -255,6 +260,78 @@ func (h shipHandler) publish(ctx context.Context, t store.Ticket, d Deps) (store
 	}}
 	c.ClearPoll = true
 	return c, nil
+}
+
+// msgTypeState is the messages.type of a committed state change, whose
+// payload is a response.StatePayload (store/commit.go).
+const msgTypeState = "state"
+
+// acceptedAtCapFindings returns the review findings the ticket took to
+// judging unfixed: empty unless its reviewing to judging state change has
+// reason reasonReviewAcceptedAtCap or reasonReviewOwnerAcceptedAtCap.
+// The round is the number of "review round N done" markers older than that
+// state message; the rows are that round's newest accepted, unheld finding
+// rows, by id. It reads the stored rows, never the update message's text.
+// An accept reason logs once: Info with the listed ids, or Warn when no
+// row passed, since the thread message (built from raw rows) then lists
+// findings the PR body leaves out.
+func acceptedAtCapFindings(ctx context.Context, t store.Ticket, d Deps) (acceptedFindings, error) {
+	msgs, err := d.Store.ListMessages(ctx, t.ID)
+	if err != nil {
+		return acceptedFindings{}, fmt.Errorf("job: shipping: accepted findings: messages: %w", err)
+	}
+	var stateID int64
+	var reason string
+	for i := range slices.Backward(msgs) {
+		m := &msgs[i]
+		if m.Type != msgTypeState {
+			continue
+		}
+		var p response.StatePayload
+		if unmarshalErr := json.Unmarshal(m.Payload, &p); unmarshalErr != nil {
+			return acceptedFindings{}, fmt.Errorf("job: shipping: accepted findings: state payload %d: %w", m.ID, unmarshalErr)
+		}
+		if p.From == response.TicketState(stateReviewing) && p.To == response.TicketState(stateJudging) {
+			stateID, reason = m.ID, p.Reason
+			break
+		}
+	}
+	if reason != reasonReviewAcceptedAtCap && reason != reasonReviewOwnerAcceptedAtCap {
+		return acceptedFindings{}, nil
+	}
+	owner := reason == reasonReviewOwnerAcceptedAtCap
+
+	markers, err := d.Store.MarkersWithPrefix(ctx, t.ID, reviewRoundMarkerPrefix)
+	if err != nil {
+		return acceptedFindings{}, fmt.Errorf("job: shipping: accepted findings: review round markers: %w", err)
+	}
+	older := slices.DeleteFunc(markers, func(m store.MessageRow) bool { return m.ID >= stateID })
+	round := reviewRoundDoneCount(older)
+
+	findings, err := d.Store.Findings(ctx, t.ID)
+	if err != nil {
+		return acceptedFindings{}, fmt.Errorf("job: shipping: accepted findings: findings: %w", err)
+	}
+	var rows []response.FindingArtifact
+	for _, row := range newestFindingRowPerID(findings) {
+		f := row.Finding
+		if f.Round == round && !f.Held && f.Decision != nil && *f.Decision == response.FindingAccept {
+			rows = append(rows, f)
+		}
+	}
+	if len(rows) == 0 {
+		slog.Warn("review accepted at cap but no accepted rows for pr body",
+			"ticket_id", t.ID, "state_message_id", stateID, "round", round, "reason", reason)
+		return acceptedFindings{Owner: owner}, nil
+	}
+	rows = sortByID(rows)
+	ids := make([]string, len(rows))
+	for i := range rows {
+		ids[i] = rows[i].ID
+	}
+	slog.Info("pr body lists accepted review findings",
+		"ticket_id", t.ID, "round", round, "owner", owner, "finding_ids", strings.Join(ids, ","))
+	return acceptedFindings{Owner: owner, Rows: rows}, nil
 }
 
 // publishChecks is PUBLISH's own step 1 (design section 8.2): ROUND's own

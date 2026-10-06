@@ -75,15 +75,16 @@ templ earlierAttempts(headID int64, attempts []store.Ticket) {
 // input for the issue number and a submit button, no <form> element (mw.go
 // rejects every plain-form content type; console.js's installPickupBox
 // wires the button's click the same delegated way installSideBox wires the
-// side box's submit). pickupError is the refusal or error text POST
-// /projects/{id}/pickup's non-2xx response body carries verbatim
-// (PKG9-PLAN.md D29: "with the exact console message"); empty on first
-// paint.
+// side box's submit). The pickup-message span is the box's one message
+// spot: console.js's pickupIssue writes the refusal text, or "Picked up
+// #N as ticket T" with a link to that ticket's thread. It is empty on
+// first paint. data-ignore-morph plus the per-project id keep the message
+// across the /stream patch that every pickup's bus publish causes.
 templ pickupBox(projectID int64) {
 	<section class="pickup-box" data-pickup-project={ strconv.FormatInt(projectID, 10) }>
 		<label for="pickup-n">Pick up issue #</label>
 		<input type="number" id="pickup-n" class="pickup-n" min="1" step="1" aria-label="Issue number to pick up"/>
 		<button type="submit">Pick up</button>
-		<span class="pickup-error" role="alert"></span>
+		<span class="pickup-message" id={ "pickup-message-" + strconv.FormatInt(projectID, 10) } role="alert" data-ignore-morph></span>
 	</section>
 }

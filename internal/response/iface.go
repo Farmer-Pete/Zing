@@ -32,4 +32,5 @@ var (
 	_ Response = (*RespondResponse)(nil)
 	_ Response = (*SideResponse)(nil)
 	_ Response = (*ErrorResponse)(nil)
+	_ Response = (*JudgeErrorResponse)(nil)
 )

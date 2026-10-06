@@ -2,6 +2,7 @@ package console_test
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -207,11 +208,12 @@ func TestPickup_RefusesAnAlreadyTicketedIssue(t *testing.T) {
 	}
 }
 
-// TestPickup_SucceedsAndPostsOnePickupComment proves the success path
-// (PKG9-PLAN.md D29): 204, a new queued ticket lands in the store with the
-// issue's fields, and exactly one pickup comment is posted through the same
-// shared step intake itself uses (dispatch.InsertAndAnnounce).
-func TestPickup_SucceedsAndPostsOnePickupComment(t *testing.T) {
+// TestPickup_SucceedsAndReturnsTheTicketID proves the success path
+// (PKG9-PLAN.md D29): 200 with a JSON body naming the issue and the new
+// ticket's id, a new queued ticket lands in the store with the issue's
+// fields, and exactly one pickup comment is posted through the same shared
+// step intake itself uses (dispatch.InsertAndAnnounce).
+func TestPickup_SucceedsAndReturnsTheTicketID(t *testing.T) {
 	t.Parallel()
 	s := newConsoleTestStore(t)
 	projectID := seedPickupProject(t, s)
@@ -222,8 +224,11 @@ func TestPickup_SucceedsAndPostsOnePickupComment(t *testing.T) {
 	srv := newTestServerPickup(t, s, bus.New(), newTestLogHandler(t), tr)
 	resp := doRequest(t, mutationRequest(t, srv, pickupPath(projectID), `{"n":5}`))
 	defer func() { _ = resp.Body.Close() }()
-	if resp.StatusCode != http.StatusNoContent {
-		t.Fatalf("status = %d, want 204", resp.StatusCode)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	}
+	if ct := resp.Header.Get("Content-Type"); ct != contentTypeJSONForTest {
+		t.Errorf("Content-Type = %q, want %q", ct, contentTypeJSONForTest)
 	}
 
 	tickets, err := s.TicketsByProject(t.Context(), projectID)
@@ -236,6 +241,22 @@ func TestPickup_SucceedsAndPostsOnePickupComment(t *testing.T) {
 	got := tickets[0]
 	if got.TrackerRef != "5" || got.Title != "A real issue" || got.Body != "do the thing" || got.State != testStateQueued {
 		t.Errorf("inserted ticket = %+v, want ref=5 title=%q body=%q state=%s", got, "A real issue", "do the thing", testStateQueued)
+	}
+
+	var body struct {
+		N        int   `json:"n"`
+		TicketID int64 `json:"ticket_id"`
+	}
+	dec := json.NewDecoder(resp.Body)
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&body); err != nil {
+		t.Fatalf("decode response body: %v", err)
+	}
+	if body.N != 5 {
+		t.Errorf("response n = %d, want 5", body.N)
+	}
+	if body.TicketID != got.ID {
+		t.Errorf("response ticket_id = %d, want %d", body.TicketID, got.ID)
 	}
 
 	comments := tr.recordedComments()
@@ -272,8 +293,8 @@ func TestPickup_AcceptsAnIssueWhoseTicketIsAbandoned(t *testing.T) {
 	srv := newTestServerPickup(t, s, bus.New(), newTestLogHandler(t), tr)
 	resp := doRequest(t, mutationRequest(t, srv, pickupPath(projectID), `{"n":5}`))
 	defer func() { _ = resp.Body.Close() }()
-	if resp.StatusCode != http.StatusNoContent {
-		t.Fatalf("status = %d, want 204", resp.StatusCode)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200", resp.StatusCode)
 	}
 
 	tickets, err := s.TicketsByProject(t.Context(), projectID)

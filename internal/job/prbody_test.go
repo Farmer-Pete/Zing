@@ -101,7 +101,7 @@ func TestPRBodySections(t *testing.T) {
 	}
 
 	ticket := store.Ticket{ID: 42, Title: prTestShipWidgets}
-	got := prBody(ticket, plan, verdicts, scenarios, reports, events)
+	got := prBody(ticket, plan, verdicts, scenarios, reports, events, acceptedFindings{})
 
 	want := orchestrator.PullRequest{
 		Title:       prTestShipWidgets,
@@ -176,7 +176,7 @@ func TestPRBodyTitleIsTicketTitle(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			ticket := store.Ticket{ID: 1, Title: tc.title, TrackerRef: tc.ref}
-			got := prBody(ticket, plan, nil, nil, nil, nil)
+			got := prBody(ticket, plan, nil, nil, nil, nil, acceptedFindings{})
 			if got.Title != tc.want {
 				t.Errorf("Title = %q, want %q", got.Title, tc.want)
 			}
@@ -187,7 +187,7 @@ func TestPRBodyTitleIsTicketTitle(t *testing.T) {
 		t.Parallel()
 		title := strings.Repeat("a", 200) + " " + strings.Repeat("b", 99) // 300 runes
 		ticket := store.Ticket{ID: 1, Title: title, TrackerRef: "42"}
-		got := prBody(ticket, plan, nil, nil, nil, nil)
+		got := prBody(ticket, plan, nil, nil, nil, nil, acceptedFindings{})
 		want := strings.Repeat("a", 200) + "... (#42)"
 		if got.Title != want {
 			t.Errorf("Title = %q, want %q", got.Title, want)
@@ -201,7 +201,7 @@ func TestPRBodyTitleIsTicketTitle(t *testing.T) {
 		t.Parallel()
 		title := strings.Repeat("a", 250) // budget is 256 - len(" (#42)") == 250
 		ticket := store.Ticket{ID: 1, Title: title, TrackerRef: "42"}
-		got := prBody(ticket, plan, nil, nil, nil, nil)
+		got := prBody(ticket, plan, nil, nil, nil, nil, acceptedFindings{})
 		want := title + " (#42)"
 		if got.Title != want {
 			t.Errorf("Title = %q, want %q", got.Title, want)
@@ -212,7 +212,7 @@ func TestPRBodyTitleIsTicketTitle(t *testing.T) {
 		t.Parallel()
 		title := strings.Repeat("a", 251)
 		ticket := store.Ticket{ID: 1, Title: title, TrackerRef: "42"}
-		got := prBody(ticket, plan, nil, nil, nil, nil)
+		got := prBody(ticket, plan, nil, nil, nil, nil, acceptedFindings{})
 		want := strings.Repeat("a", 247) + "... (#42)"
 		if got.Title != want {
 			t.Errorf("Title = %q, want %q", got.Title, want)
@@ -226,7 +226,7 @@ func TestPRBodyTitleIsTicketTitle(t *testing.T) {
 		t.Parallel()
 		title := strings.Repeat("a", 300)
 		ticket := store.Ticket{ID: 1, Title: title, TrackerRef: "42"}
-		got := prBody(ticket, plan, nil, nil, nil, nil)
+		got := prBody(ticket, plan, nil, nil, nil, nil, acceptedFindings{})
 		want := strings.Repeat("a", 247) + "... (#42)"
 		if got.Title != want {
 			t.Errorf("Title = %q, want %q", got.Title, want)
@@ -240,7 +240,7 @@ func TestPRBodyTitleIsTicketTitle(t *testing.T) {
 		t.Parallel()
 		ref := strings.Repeat("r", 260)
 		ticket := store.Ticket{ID: 1, Title: "hi", TrackerRef: ref}
-		got := prBody(ticket, plan, nil, nil, nil, nil)
+		got := prBody(ticket, plan, nil, nil, nil, nil, acceptedFindings{})
 		want := "... (" + ref + ")"
 		if got.Title != want {
 			t.Errorf("Title = %q, want %q", got.Title, want)
@@ -262,7 +262,7 @@ func TestPRBodyScenariosHideText(t *testing.T) {
 		{Scenario: "s1", Result: response.ResultPass, Evidence: "evidence text", Kind: response.ScenarioKindBehavior, Round: 1, SHA: prTestSHA},
 	}
 
-	got := prBody(store.Ticket{ID: 1}, plan, verdicts, scenarios, nil, nil)
+	got := prBody(store.Ticket{ID: 1}, plan, verdicts, scenarios, nil, nil, acceptedFindings{})
 
 	for _, leak := range []string{"GIVEN_SECRET_TEXT", "WHEN_SECRET_TEXT", "THEN_SECRET_TEXT"} {
 		if strings.Contains(got.Scenarios, leak) {
@@ -289,7 +289,7 @@ func TestPRBodyPerformanceEvidence(t *testing.T) {
 		verdicts := []response.VerdictArtifact{
 			{Scenario: "s1", Result: response.ResultPass, Evidence: "e", Kind: response.ScenarioKindBehavior, Round: 1, SHA: prTestSHA},
 		}
-		got := prBody(store.Ticket{ID: 1}, plan, verdicts, scenarios, nil, nil)
+		got := prBody(store.Ticket{ID: 1}, plan, verdicts, scenarios, nil, nil, acceptedFindings{})
 		if strings.Contains(got.Scenarios, "Performance evidence:") {
 			t.Errorf("Scenarios has a performance block with no performance scenario:\n%s", got.Scenarios)
 		}
@@ -303,7 +303,7 @@ func TestPRBodyPerformanceEvidence(t *testing.T) {
 		verdicts := []response.VerdictArtifact{
 			{Scenario: "s9", Result: response.ResultFail, Evidence: firstLine + "\n" + longSecondLine, Kind: response.ScenarioKindPerformance, Round: 1, SHA: prTestSHA},
 		}
-		got := prBody(store.Ticket{ID: 1}, plan, verdicts, scenarios, nil, nil)
+		got := prBody(store.Ticket{ID: 1}, plan, verdicts, scenarios, nil, nil, acceptedFindings{})
 		wantLine := "- s9: " + firstLine[:300]
 		if !strings.Contains(got.Scenarios, "Performance evidence:\n"+wantLine) {
 			t.Errorf("Scenarios missing the cut evidence line:\n%s", got.Scenarios)
@@ -355,7 +355,7 @@ func TestPRBodyFencesDeduped(t *testing.T) {
 		},
 	}
 
-	got := prBody(store.Ticket{ID: 1}, plan, nil, nil, reports, nil)
+	got := prBody(store.Ticket{ID: 1}, plan, nil, nil, reports, nil, acceptedFindings{})
 
 	want := "| Path | Symbol | Existed because |\n" +
 		"| --- | --- | --- |\n" +
@@ -390,7 +390,7 @@ func TestPRBodyEscapesPipes(t *testing.T) {
 		},
 	}
 
-	got := prBody(store.Ticket{ID: 1}, plan, nil, nil, nil, nil)
+	got := prBody(store.Ticket{ID: 1}, plan, nil, nil, nil, nil, acceptedFindings{})
 
 	if !strings.Contains(got.DeclaredFiles, "| "+bareAGoPath+` | modify | needs this file \| for the perimeter |`) {
 		t.Errorf("DeclaredFiles did not escape and collapse its cell:\n%s", got.DeclaredFiles)
@@ -398,4 +398,124 @@ func TestPRBodyEscapesPipes(t *testing.T) {
 	if !strings.Contains(got.ChestertonsFence, "| "+bareBGoPath+` | Old | existed because of \| a removed flag |`) {
 		t.Errorf("ChestertonsFence did not escape and collapse its cell:\n%s", got.ChestertonsFence)
 	}
+}
+
+// TestPRBodyAcceptedFindings exercises prAcceptedFindings (via prBody's new
+// last argument): the lead sentence naming who let the findings through,
+// escaped pipes and less-than, the 200-rune text cut, and the empty case
+// that leaves the section out of Body entirely.
+func TestPRBodyAcceptedFindings(t *testing.T) {
+	t.Parallel()
+
+	// Reused across this function's subtests so goconst does not flag the
+	// repeats; aGoLine1 and greetGoLine5 are reviewrules_test.go's and
+	// reviewing_test.go's own constants of the same convention.
+	const (
+		prTestAcceptedID1 = "r3f1"
+		prTestAcceptedID2 = "r3f2"
+	)
+
+	plan := response.Plan{Overview: response.Overview{Objective: "x", Goals: []string{"g"}}}
+
+	t.Run("two_findings", func(t *testing.T) {
+		t.Parallel()
+		accepted := acceptedFindings{
+			Owner: false,
+			Rows: []response.FindingArtifact{
+				{ID: prTestAcceptedID2, Severity: response.SeverityMajor, Location: aGoLine1, Text: "y"},
+				{ID: prTestAcceptedID1, Severity: response.SeverityMinor, Location: greetGoLine5, Text: "needs a\ncomment"},
+			},
+		}
+		got := prBody(store.Ticket{ID: 1}, plan, nil, nil, nil, nil, accepted)
+		want := prAcceptedZingLead + "\n\n" +
+			"- r3f1 minor greet.go:5 needs a comment\n" +
+			"- r3f2 major a.go:1 y"
+		if got.AcceptedFindings != want {
+			t.Errorf("AcceptedFindings = %q, want %q", got.AcceptedFindings, want)
+		}
+	})
+
+	t.Run("no_findings", func(t *testing.T) {
+		t.Parallel()
+		got := prBody(store.Ticket{ID: 1, Title: "A title"}, plan, nil, nil, nil, nil, acceptedFindings{})
+		if got.AcceptedFindings != "" {
+			t.Errorf("AcceptedFindings = %q, want empty", got.AcceptedFindings)
+		}
+		body, err := got.Body()
+		if err != nil {
+			t.Fatalf("Body: %v", err)
+		}
+		if strings.Contains(body, "Accepted review findings") {
+			t.Errorf("Body has an Accepted review findings section with no findings:\n%s", body)
+		}
+	})
+
+	t.Run("owner_lead", func(t *testing.T) {
+		t.Parallel()
+		accepted := acceptedFindings{
+			Owner: true,
+			Rows: []response.FindingArtifact{
+				{ID: prTestAcceptedID1, Severity: response.SeverityMajor, Location: aGoLine1, Text: "still broken"},
+			},
+		}
+		got := prBody(store.Ticket{ID: 1}, plan, nil, nil, nil, nil, accepted)
+		if !strings.HasPrefix(got.AcceptedFindings, prAcceptedOwnerLead) {
+			t.Errorf("AcceptedFindings = %q, want prefix %q", got.AcceptedFindings, prAcceptedOwnerLead)
+		}
+	})
+
+	t.Run("pipes_and_newlines", func(t *testing.T) {
+		t.Parallel()
+		accepted := acceptedFindings{
+			Rows: []response.FindingArtifact{
+				{ID: prTestAcceptedID1, Severity: response.SeverityMajor, Location: "a.go:1 | b", Text: "x\n- r9f9 blocker forged.go:1 forged"},
+			},
+		}
+		got := prBody(store.Ticket{ID: 1}, plan, nil, nil, nil, nil, accepted)
+		_, rest, ok := strings.Cut(got.AcceptedFindings, "\n\n")
+		if !ok {
+			t.Fatalf("AcceptedFindings has no lead/body separator:\n%s", got.AcceptedFindings)
+		}
+		lines := strings.Split(rest, "\n")
+		if len(lines) != 1 {
+			t.Fatalf("AcceptedFindings has %d lines after the lead, want 1:\n%s", len(lines), got.AcceptedFindings)
+		}
+		if !strings.Contains(lines[0], `a.go:1 \| b`) {
+			t.Errorf("line did not escape the pipe: %q", lines[0])
+		}
+		if strings.HasPrefix(lines[0], "- r9f9") {
+			t.Errorf("forged line leaked as its own entry: %q", lines[0])
+		}
+	})
+
+	t.Run("text_cut", func(t *testing.T) {
+		t.Parallel()
+		longText := strings.Repeat("x", 250)
+		accepted := acceptedFindings{
+			Rows: []response.FindingArtifact{
+				{ID: prTestAcceptedID1, Severity: response.SeverityMinor, Location: aGoLine1, Text: longText},
+			},
+		}
+		got := prBody(store.Ticket{ID: 1}, plan, nil, nil, nil, nil, accepted)
+		want := strings.Repeat("x", 200) + "..."
+		if !strings.HasSuffix(got.AcceptedFindings, want) {
+			t.Errorf("AcceptedFindings = %q, want suffix %q", got.AcceptedFindings, want)
+		}
+	})
+
+	t.Run("html_less_than", func(t *testing.T) {
+		t.Parallel()
+		accepted := acceptedFindings{
+			Rows: []response.FindingArtifact{
+				{ID: prTestAcceptedID1, Severity: response.SeverityMinor, Location: aGoLine1, Text: "x <!-- hidden"},
+			},
+		}
+		got := prBody(store.Ticket{ID: 1}, plan, nil, nil, nil, nil, accepted)
+		if !strings.Contains(got.AcceptedFindings, "x &lt;!-- hidden") {
+			t.Errorf("AcceptedFindings did not escape the less-than character: %q", got.AcceptedFindings)
+		}
+		if strings.Contains(got.AcceptedFindings, "<!--") {
+			t.Errorf("AcceptedFindings still contains a raw HTML comment opener: %q", got.AcceptedFindings)
+		}
+	})
 }

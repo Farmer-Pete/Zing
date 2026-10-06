@@ -31,7 +31,9 @@ type Job struct {
 	Per            string    `toml:"per"`
 	Worktree       string    `toml:"worktree"`
 	TimeoutMinutes int       `toml:"timeout_minutes"`
-	MaxResumes     int       `toml:"max_resumes"` // default 1 when the key is absent
+	IdleMinutes    int       `toml:"idle_minutes"`    // claude only: arms the idle watchdog; absent/0 means off
+	TimeoutRetries int       `toml:"timeout_retries"` // 0 or 1; default 0; one automatic retry after ErrTimeout or ErrStalled
+	MaxResumes     int       `toml:"max_resumes"`     // default 1 when the key is absent
 	MaxLoops       int       `toml:"max_loops"`
 	CheckLoops     int       `toml:"check_loops"` // build only: CHECK's test-and-lint fix loop cap; default 5 when absent
 	Outcomes       []string  `toml:"outcomes"`    // default ["ok"] when the key is absent
@@ -250,6 +252,17 @@ func validateJob(fsys fs.FS, md toml.MetaData, name string, job Job) error {
 	}
 	if job.TimeoutMinutes < 1 || job.TimeoutMinutes > 240 {
 		return jobErr("timeout_minutes", "must be 1 to 240")
+	}
+	if md.IsDefined("jobs", name, "idle_minutes") {
+		if job.Runtime != "claude" {
+			return jobErr("idle_minutes", "only the claude runtime supports it")
+		}
+		if job.IdleMinutes < 1 || job.IdleMinutes >= job.TimeoutMinutes {
+			return jobErr("idle_minutes", "must be at least 1 and less than timeout_minutes")
+		}
+	}
+	if job.TimeoutRetries < 0 || job.TimeoutRetries > 1 {
+		return jobErr("timeout_retries", "must be 0 or 1")
 	}
 	if err := validateOutcomes(jobErr, job.Outcomes); err != nil {
 		return err

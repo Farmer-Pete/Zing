@@ -1186,6 +1186,47 @@ export function staleMarkerText(staleSince) {
 }
 
 /**
+ * ownerEditFieldEntries decides which [data-field] values ownerEditSubmit
+ * (console.js) sends in a non-drop POST /tickets/{id}/edit body (#41, #57
+ * Q3): a checkbox field only when its checked state changed from
+ * defaultChecked, a select field only when its value changed from its own
+ * data-initial (a select carries no browser-native default the way an
+ * input or textarea's defaultValue does), and any other field only when its
+ * value changed from defaultValue. answerQuestion overrides every one of
+ * those comparisons to true: Save on an amended escalation's "Edit it" box
+ * (a non-empty answerQuestion) both rewrites the scenario and answers the
+ * escalation in the same store transaction, so a field the owner left
+ * exactly as the judge proposed it must still land, not be treated as
+ * unchanged and dropped. A non-empty answerQuestion also adds
+ * answer_question to the result, as Number(answerQuestion), so the escalation
+ * it names is answered in that same POST.
+ *
+ * @param {{name: string, kind: 'checkbox'|'select'|'text', value?: string, defaultValue?: string, initial?: string, checked?: boolean, defaultChecked?: boolean}[]} fields
+ * @param {string|undefined} answerQuestion
+ * @returns {Object<string, string|boolean|number>}
+ */
+export function ownerEditFieldEntries(fields, answerQuestion) {
+	const entries = {};
+	for (const f of fields) {
+		if (f.kind === 'checkbox') {
+			if (answerQuestion || f.checked !== f.defaultChecked) {
+				entries[f.name] = f.checked;
+			}
+		} else if (f.kind === 'select') {
+			if (answerQuestion || f.value !== f.initial) {
+				entries[f.name] = f.value;
+			}
+		} else if (answerQuestion || f.value !== f.defaultValue) {
+			entries[f.name] = f.value;
+		}
+	}
+	if (answerQuestion) {
+		entries.answer_question = Number(answerQuestion);
+	}
+	return entries;
+}
+
+/**
  * versionedURL is path with build as its v query, the URL the server marks
  * immutable; path unchanged when build is '' (a page from before data-build).
  * @param {string} path
@@ -1236,4 +1277,35 @@ export function streamStatusView(pageBuild, serverBuild, staleSince) {
 	}
 	const text = staleMarkerText(staleSince);
 	return { text, showReload: false, stale: text !== '' };
+}
+
+/**
+ * pickupResultView turns a POST /projects/{id}/pickup response into the
+ * pickup box's one message (console.js's pickupIssue). A refusal shows the
+ * server's own text; a success names the issue and links the new ticket;
+ * a 200 whose body has no positive integer ticket_id still says the
+ * pickup happened, without a link.
+ *
+ * @param {boolean} ok resp.ok
+ * @param {string} bodyText the response body, read with resp.text()
+ * @param {number} n the issue number the owner asked for
+ * @returns {{text: string, linkText: string, ticketID: number}}
+ */
+export function pickupResultView(ok, bodyText, n) {
+	if (!ok) {
+		return { text: bodyText.trim() || 'request failed', linkText: '', ticketID: 0 };
+	}
+	let ticketID = 0;
+	try {
+		const id = JSON.parse(bodyText)?.ticket_id;
+		if (Number.isInteger(id) && id > 0) {
+			ticketID = id;
+		}
+	} catch {
+		// An unreadable 200 body still means the ticket was created.
+	}
+	if (ticketID === 0) {
+		return { text: `Picked up #${n}`, linkText: '', ticketID: 0 };
+	}
+	return { text: `Picked up #${n} as `, linkText: `ticket ${ticketID}`, ticketID };
 }

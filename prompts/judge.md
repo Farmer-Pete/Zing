@@ -17,7 +17,11 @@ because of how it is written, such as a wrong path, a flag that does
 not exist, or a write the sandbox denies, do not repair it or run your
 own version. Return the error outcome with code cannot_run, naming the
 scenario and the defect in its check: only the owner can change a
-sealed check.
+sealed check. When the check is wrong as written, add an amendment to
+that error: the scenario id, the given, when, then, and check you
+propose, the kind only if it should change, and a reason. Amend at
+most one scenario. When the check is right and the code is wrong, fail
+the scenario instead.
 
 A skip that the scenario's own then names as the expected result is an
 observed pass. Record the check's successful exit and the exact

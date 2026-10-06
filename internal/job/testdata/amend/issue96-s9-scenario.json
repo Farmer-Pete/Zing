@@ -1,0 +1,8 @@
+{
+  "id": "s9",
+  "kind": "negative",
+  "check_cmd": "! git diff --name-only origin/main...HEAD -- internal/job | grep -q .",
+  "given": "A branch whose only internal/job changes are lint fixes in _test.go files",
+  "when": "The perimeter step accepts them",
+  "then": "No non-test file under internal/job changed"
+}

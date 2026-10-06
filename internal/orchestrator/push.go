@@ -111,44 +111,52 @@ type PullRequest struct {
 	What             string // markdown body of "## What"
 	WorkingDemo      string
 	Scenarios        string
+	AcceptedFindings string // markdown body of "## Accepted review findings"; empty leaves the section out
 	DeclaredFiles    string // pre-rendered markdown table
 	ChestertonsFence string
 	PlanLink         string // a URL or console link
 }
 
-// prBodySections is the fixed, ordered shape Body renders: six "## "
-// headings, each carrying the PullRequest field it draws from.
+// prBodySections is the fixed, ordered shape Body renders: seven "## "
+// headings, each carrying the PullRequest field it draws from. An optional
+// section with empty content is left out, heading and all.
 var prBodySections = []struct {
-	heading string
-	field   func(PullRequest) string
+	heading  string
+	field    func(PullRequest) string
+	optional bool
 }{
-	{"What", func(pr PullRequest) string { return pr.What }},
-	{"Working demo", func(pr PullRequest) string { return pr.WorkingDemo }},
-	{"Scenarios", func(pr PullRequest) string { return pr.Scenarios }},
-	{"Declared files", func(pr PullRequest) string { return pr.DeclaredFiles }},
-	{"Chesterton's fence", func(pr PullRequest) string { return pr.ChestertonsFence }},
-	{"Plan", func(pr PullRequest) string { return pr.PlanLink }},
+	{"What", func(pr PullRequest) string { return pr.What }, false},
+	{"Working demo", func(pr PullRequest) string { return pr.WorkingDemo }, false},
+	{"Scenarios", func(pr PullRequest) string { return pr.Scenarios }, false},
+	{"Accepted review findings", func(pr PullRequest) string { return pr.AcceptedFindings }, true},
+	{"Declared files", func(pr PullRequest) string { return pr.DeclaredFiles }, false},
+	{"Chesterton's fence", func(pr PullRequest) string { return pr.ChestertonsFence }, false},
+	{"Plan", func(pr PullRequest) string { return pr.PlanLink }, false},
 }
 
-// Body renders the six sections of section 13 in order: What, Working demo,
-// Scenarios, Declared files, Chesterton's fence, Plan. An empty section
-// renders its heading followed by "None." so the shape is stable. An empty
-// Title is an error.
+// Body renders the sections in order (What, Working demo, Scenarios,
+// Accepted review findings, Declared files, Chesterton's fence, Plan). An
+// empty section renders its heading followed by "None.", except Accepted
+// review findings, which is left out when empty. An empty Title is an
+// error.
 func (pr PullRequest) Body() (string, error) {
 	if pr.Title == "" {
 		return "", errors.New("orchestrator: pull request body: title must not be empty")
 	}
 
 	var b strings.Builder
-	for i, section := range prBodySections {
-		if i > 0 {
+	for _, section := range prBodySections {
+		content := section.field(pr)
+		if content == "" && section.optional {
+			continue
+		}
+		if b.Len() != 0 {
 			b.WriteString("\n\n")
 		}
 		b.WriteString("## ")
 		b.WriteString(section.heading)
 		b.WriteString("\n\n")
 
-		content := section.field(pr)
 		if content == "" {
 			content = "None."
 		}

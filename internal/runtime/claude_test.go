@@ -1522,3 +1522,186 @@ func TestAgentEnvBashTimeoutsSurviveFilterDrop(t *testing.T) {
 	wantEnvValue(t, env, "BASH_DEFAULT_TIMEOUT_MS", "2640000")
 	wantEnvValue(t, env, "BASH_MAX_TIMEOUT_MS", "2640000")
 }
+
+// ---- idle watchdog (task 1) -------------------------------------------------
+
+// TestClaude_IdleWatchdogKillsStalledRun proves the idle watchdog kills a
+// Claude run whose session transcript stops growing: the fake CLI writes one
+// transcript line and then sleeps well past the 1s IdleTimeout, so Run must
+// report ErrStalled, not wait for the much longer context deadline.
+func TestClaude_IdleWatchdogKillsStalledRun(t *testing.T) {
+	t.Parallel()
+	requireUnix(t)
+
+	// Absolute, not fakeClaudeScript's bare relative path: cmd.Dir below is
+	// req.WorkDir, a temp dir, not this package's directory, and exec
+	// resolves a relative binary path against cmd.Dir, not the test's own
+	// cwd (TestClaudeRun_LogsLongTurnWithRunID's own pattern).
+	absFakeClaudeScript, err := filepath.Abs(fakeClaudeScript)
+	if err != nil {
+		t.Fatalf("resolve fake claude script path: %v", err)
+	}
+
+	dir := t.TempDir()
+	home := filepath.Join(dir, "home")
+	req := newFakeRequest(dir, "event_then_sleep", "HOME="+home, "FAKE_CLAUDE_SLEEP_SECONDS=30")
+	req.WorkDir = dir
+	req.SessionID = testResumedSessionID
+	req.IdleTimeout = time.Second
+
+	transcriptPath := claudeTranscriptPath(req.Env, req.WorkDir, req.SessionID)
+	req.Env = append(req.Env, "FAKE_CLAUDE_TRANSCRIPT="+transcriptPath)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+
+	c := NewClaude(absFakeClaudeScript, testOAuthToken)
+	start := time.Now()
+	res, err := c.Run(ctx, req)
+	elapsed := time.Since(start)
+
+	if !errors.Is(err, ErrStalled) {
+		t.Fatalf("err = %v, want ErrStalled", err)
+	}
+	if res.ExitCode != -1 {
+		t.Errorf("ExitCode = %d, want -1", res.ExitCode)
+	}
+	if res.LastEvent.IsZero() {
+		t.Error("LastEvent is zero, want the time of the one transcript line")
+	}
+	const wantPrefix = "no transcript growth for 1 s"
+	if !strings.HasPrefix(res.FailureDetail, wantPrefix) {
+		t.Errorf("FailureDetail = %q, want a prefix of %q", res.FailureDetail, wantPrefix)
+	}
+	if elapsed > 10*time.Second {
+		t.Errorf("Run took %v, want well under the 20s deadline (watchdog should fire within ~1s)", elapsed)
+	}
+}
+
+// TestClaude_IdleWatchdogParentCancelWins proves that when the parent
+// context's own deadline has also passed, Run reports the parent's own
+// outcome, not ErrStalled, even though the watchdog's idle limit would
+// otherwise have fired too (r2f3): the parent ctx and IdleTimeout share the
+// same 1s bound, so by the time the kill-and-wait sequence finishes, the
+// parent's deadline has certainly passed as well.
+func TestClaude_IdleWatchdogParentCancelWins(t *testing.T) {
+	t.Parallel()
+	requireUnix(t)
+
+	absFakeClaudeScript, err := filepath.Abs(fakeClaudeScript)
+	if err != nil {
+		t.Fatalf("resolve fake claude script path: %v", err)
+	}
+
+	dir := t.TempDir()
+	home := filepath.Join(dir, "home")
+	req := newFakeRequest(dir, "event_then_sleep", "HOME="+home, "FAKE_CLAUDE_SLEEP_SECONDS=30")
+	req.WorkDir = dir
+	req.SessionID = testResumedSessionID
+	req.IdleTimeout = time.Second
+
+	transcriptPath := claudeTranscriptPath(req.Env, req.WorkDir, req.SessionID)
+	req.Env = append(req.Env, "FAKE_CLAUDE_TRANSCRIPT="+transcriptPath)
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+
+	c := NewClaude(absFakeClaudeScript, testOAuthToken)
+	res, err := c.Run(ctx, req)
+
+	if !errors.Is(err, ErrTimeout) {
+		t.Fatalf("err = %v, want ErrTimeout", err)
+	}
+	if errors.Is(err, ErrStalled) {
+		t.Errorf("err = %v, want anything but ErrStalled (the parent's own deadline must win)", err)
+	}
+	if res.ExitCode != -1 {
+		t.Errorf("ExitCode = %d, want -1", res.ExitCode)
+	}
+}
+
+// TestClaude_IdleWatchdogSparesGrowingTranscript proves the idle watchdog
+// never fires on a run whose transcript keeps growing: the fake CLI appends
+// 8 lines 0.3s apart, each well inside the 1s IdleTimeout, then prints its
+// result and exits cleanly, so Run must return the parsed response with no
+// error.
+func TestClaude_IdleWatchdogSparesGrowingTranscript(t *testing.T) {
+	t.Parallel()
+	requireUnix(t)
+
+	absFakeClaudeScript, err := filepath.Abs(fakeClaudeScript)
+	if err != nil {
+		t.Fatalf("resolve fake claude script path: %v", err)
+	}
+
+	dir := t.TempDir()
+	home := filepath.Join(dir, "home")
+	req := newFakeRequest(dir, "events_then_result", "HOME="+home)
+	req.WorkDir = dir
+	req.SessionID = testResumedSessionID
+	req.IdleTimeout = time.Second
+
+	transcriptPath := claudeTranscriptPath(req.Env, req.WorkDir, req.SessionID)
+	req.Env = append(req.Env, "FAKE_CLAUDE_TRANSCRIPT="+transcriptPath)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+
+	c := NewClaude(absFakeClaudeScript, testOAuthToken)
+	res, err := c.Run(ctx, req)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	cr, ok := res.Response.(*response.ClassifyResponse)
+	if !ok {
+		t.Fatalf("Response type = %T, want *ClassifyResponse", res.Response)
+	}
+	if cr.Outcome != response.OutcomeBug {
+		t.Errorf("Outcome = %q, want %q", cr.Outcome, response.OutcomeBug)
+	}
+	if res.LastEvent.IsZero() {
+		t.Error("LastEvent is zero, want the time of the last transcript line")
+	}
+}
+
+// TestClaude_IdleWatchdogOffWhenUnset proves a zero IdleTimeout leaves the
+// watchdog off entirely: the fake CLI sleeps 2s with no transcript growth
+// at all, well past what a 1s idle limit would tolerate, and Run must still
+// wait for it rather than report ErrStalled.
+func TestClaude_IdleWatchdogOffWhenUnset(t *testing.T) {
+	t.Parallel()
+	requireUnix(t)
+
+	absFakeClaudeScript, err := filepath.Abs(fakeClaudeScript)
+	if err != nil {
+		t.Fatalf("resolve fake claude script path: %v", err)
+	}
+
+	dir := t.TempDir()
+	home := filepath.Join(dir, "home")
+	req := newFakeRequest(dir, "event_then_sleep", "HOME="+home, "FAKE_CLAUDE_SLEEP_SECONDS=2")
+	req.WorkDir = dir
+	req.SessionID = testResumedSessionID
+	req.IdleTimeout = 0
+
+	transcriptPath := claudeTranscriptPath(req.Env, req.WorkDir, req.SessionID)
+	req.Env = append(req.Env, "FAKE_CLAUDE_TRANSCRIPT="+transcriptPath)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	c := NewClaude(absFakeClaudeScript, testOAuthToken)
+	start := time.Now()
+	res, runErr := c.Run(ctx, req)
+	elapsed := time.Since(start)
+
+	if errors.Is(runErr, ErrStalled) {
+		t.Errorf("err = %v, want anything but ErrStalled", runErr)
+	}
+	if elapsed < 2*time.Second {
+		t.Errorf("Run took %v, want at least the 2s sleep (watchdog must not have fired)", elapsed)
+	}
+	if !res.LastEvent.IsZero() {
+		t.Errorf("LastEvent = %v, want zero when IdleTimeout is 0", res.LastEvent)
+	}
+}

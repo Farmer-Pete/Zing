@@ -31,16 +31,18 @@ import (
 const stateQueued = "queued"
 
 // The machine.toml job names claimTimeoutFor maps a pipeline state to
-// (design section 6.8 step 6, PKG9-PLAN.md section 17.1): planning's job is
-// "planning", building's job is "build", reviewing's job is "review" (ROUND
-// runs up to seven lens runs in parallel under one job.review.timeout_minutes
-// horizon, PKG9-PLAN.md section 6.2), judging's own claim takes the largest
-// of "judge", "build", and "perimeter" (a fix step runs in every post-build
-// state, design section 5.3) and a 10-minute floor; shipping's own claim
-// takes the largest of "respond", "build", and "perimeter", the same
-// reasoning with no floor of its own (a respond batch, not just a fix step,
-// can also run inside "shipping"). Every other candidate state is a
-// code-only handler and uses defaultCodeTimeout.
+// (design section 6.8 step 6, PKG9-PLAN.md section 17.1): queued's own claim
+// covers every one of classify's attempts, including its one automatic
+// timeout retry (owner decision Q4); planning's job is "planning", building's
+// job is "build", reviewing's job is "review" (ROUND runs up to seven lens
+// runs in parallel under one job.review.timeout_minutes horizon, PKG9-PLAN.md
+// section 6.2), judging's own claim takes the largest of "judge", "build",
+// and "perimeter" (a fix step runs in every post-build state, design section
+// 5.3) and a 10-minute floor; shipping's own claim takes the largest of
+// "respond", "build", and "perimeter", the same reasoning with no floor of
+// its own (a respond batch, not just a fix step, can also run inside
+// "shipping"). Every other candidate state is a code-only handler and uses
+// defaultCodeTimeout.
 const (
 	statePlanning  = "planning"
 	stateBuilding  = "building"
@@ -48,6 +50,7 @@ const (
 	stateJudging   = "judging"
 	stateShipping  = "shipping"
 
+	jobClassify  = "classify"
 	jobPlanning  = "planning"
 	jobBuild     = "build"
 	jobReview    = "review"
@@ -1063,14 +1066,17 @@ func InsertAndAnnounce(ctx context.Context, st *store.Store, tr tracker.Tracker,
 }
 
 // claimTimeoutFor returns the claim/run timeout for state (design section
-// 6.8 step 6, PKG9-PLAN.md section 17.1): planning and building each take
-// one job's own timeout_minutes (jobTimeoutOrDefault's own
-// defaultCodeTimeout fallback when that job is missing or carries no
-// positive timeout_minutes); reviewing takes the largest of the review,
-// build, and perimeter job timeouts, like shipping, since a review fix
-// unit's build run and CHECK run inside it (#55); judging takes the
-// largest of the judge, build, and perimeter job timeouts and a 10-minute
-// floor
+// 6.8 step 6, PKG9-PLAN.md section 17.1): queued takes
+// max(defaultCodeTimeout, (1+classify's timeout_retries)*classify's
+// timeout_minutes), so the lease covers classify's one automatic timeout
+// retry (owner decision Q4; 0 when there is no classify job, leaving just
+// the defaultCodeTimeout floor); planning and building each take one job's
+// own timeout_minutes (jobTimeoutOrDefault's own defaultCodeTimeout fallback
+// when that job is missing or carries no positive timeout_minutes);
+// reviewing takes the largest of the review, build, and perimeter job
+// timeouts, like shipping, since a review fix unit's build run and CHECK run
+// inside it (#55); judging takes the largest of the judge, build, and
+// perimeter job timeouts and a 10-minute floor
 // (judgingMinClaimTimeout) -- CHECK's own command re-runs and a fix step
 // (design section 5.3) can each run inside "judging", so its own claim
 // must outlast all three -- never falling back to defaultCodeTimeout even
@@ -1078,6 +1084,14 @@ func InsertAndAnnounce(ctx context.Context, st *store.Store, tr tracker.Tracker,
 // (code-only) state uses defaultCodeTimeout.
 func (d *Dispatcher) claimTimeoutFor(state string) time.Duration {
 	switch state {
+	case stateQueued:
+		// classify runs here, and machine.toml timeout_retries gives it up
+		// to one more full attempt, so the lease covers every attempt.
+		// Multiplied in int minutes, not as two time.Duration values,
+		// so durationcheck does not read this as a units bug.
+		classify := d.machine.Jobs[jobClassify]
+		attempts := 1 + classify.TimeoutRetries
+		return max(defaultCodeTimeout, time.Duration(attempts*classify.TimeoutMinutes)*time.Minute)
 	case statePlanning:
 		return d.jobTimeoutOrDefault(jobPlanning)
 	case stateBuilding:
