@@ -130,6 +130,46 @@ func TestDisplayBody_ResponseInvalidWithoutErrors(t *testing.T) {
 	}
 }
 
+// TestResponseInvalidDetailFence proves responseInvalidDetail's own three
+// cases (design H2): a lens renders in the head line, a nil lens drops that
+// clause, and a marker with no error lines falls back to "Reason: ...."
+// rather than an empty "Validator errors:" section. The fence-length case --
+// an errors block that itself contains a run of backticks -- is proved
+// through the full render path by
+// TestEscalationQuestion_ResponseInvalidShowsValidatorErrors, since
+// responseInvalidDetail's own markdown is meaningless until Render turns it
+// into HTML.
+func TestResponseInvalidDetailFence(t *testing.T) {
+	t.Parallel()
+	lens := "correctness"
+
+	marker := "response invalid run 5\nthe final message failed validation\nplan/goals: required"
+	got := responseInvalidDetail("review", &lens, 5, marker)
+	for _, want := range []string{"Job: review, lens correctness. Run 5.", "plan/goals: required"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("responseInvalidDetail(lens) = %q, want it to contain %q", got, want)
+		}
+	}
+
+	got = responseInvalidDetail("planning", nil, 5, marker)
+	if strings.Contains(got, "lens") {
+		t.Errorf("responseInvalidDetail(nil lens) = %q, want no lens clause", got)
+	}
+	if !strings.Contains(got, "Job: planning. Run 5.") {
+		t.Errorf("responseInvalidDetail(nil lens) = %q, want it to contain %q", got, "Job: planning. Run 5.")
+	}
+
+	noErrors := "response invalid run 5\nthe final message failed validation"
+	got = responseInvalidDetail("planning", nil, 5, noErrors)
+	const want = "Job: planning. Run 5.\n\nReason: the final message failed validation."
+	if got != want {
+		t.Errorf("responseInvalidDetail(no errors) = %q, want %q", got, want)
+	}
+	if strings.Contains(got, "Validator errors") {
+		t.Errorf("responseInvalidDetail(no errors) = %q, want no \"Validator errors\" heading", got)
+	}
+}
+
 // TestDisplayBody_SealMismatchIsHumanReadable proves a "seal mismatch
 // cohort <runID>" marker (store.CountSealMismatches) renders as a plain
 // sentence.

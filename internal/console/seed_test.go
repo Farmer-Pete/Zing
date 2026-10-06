@@ -71,7 +71,7 @@ func TestSeedDemo_SeededTicketWaitsOnItsGateNotQueued(t *testing.T) {
 		t.Fatalf("tickets = %d, want exactly 1", len(tickets))
 	}
 	tk := tickets[0]
-	if tk.State != "planning" {
+	if tk.State != testPlanningLiteral {
 		t.Errorf("seeded ticket state = %q, want planning (a queued ticket would be dispatched)", tk.State)
 	}
 	if tk.WaitingOn == nil || *tk.WaitingOn != string(response.QuestionKindGate) {

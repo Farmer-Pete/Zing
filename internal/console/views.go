@@ -1841,6 +1841,10 @@ func splitQuestionBody(raw string) (title, body string) {
 // just keeps its stored body (buildThreadQuestion's own
 // "unparseable payload renders as a plain row" rule, extended here).
 func (c *console) withEscalationDetails(ctx context.Context, ticketID int64, rows []store.MessageRow) ([]store.MessageRow, error) {
+	var runs []store.Run
+	var sessions []store.Session
+	runsLoaded := false
+
 	for i := range rows {
 		esc := rows[i]
 		if esc.Type != msgTypeEscalation {
@@ -1852,12 +1856,27 @@ func (c *console) withEscalationDetails(ctx context.Context, ticketID int64, row
 		}
 
 		var detail string
-		if ep.Code == string(response.EscalationCodeLoopsExhausted) && ep.Origin == string(response.EscalationOriginCapLoops) {
+		switch {
+		case ep.Code == string(response.EscalationCodeLoopsExhausted) && ep.Origin == string(response.EscalationOriginCapLoops):
 			d, err := c.loopsExhaustedDetail(ctx, ticketID, esc.ID, rows)
 			if err != nil {
 				return nil, err
 			}
 			detail = d
+		case ep.Code == string(response.EscalationCodeResponseInvalid) && esc.RunID != nil:
+			if !runsLoaded {
+				var err error
+				runs, err = c.store.RunsForTicket(ctx, ticketID)
+				if err != nil {
+					return nil, err
+				}
+				sessions, err = c.store.SessionsForTicket(ctx, ticketID)
+				if err != nil {
+					return nil, err
+				}
+				runsLoaded = true
+			}
+			detail = c.responseInvalidDetailFor(ctx, ticketID, esc.ID, *esc.RunID, rows, runs, sessions)
 		}
 		if detail == "" {
 			continue
@@ -1953,6 +1972,127 @@ func findingsDetail(version int, findings []response.Finding) string {
 		lines = append(lines, fmt.Sprintf("- %s at `%s`: %s", f.Severity, f.Location, text))
 	}
 	return strings.Join(lines, "\n")
+}
+
+// responseInvalidDetailFor reads the job, lens and validator errors a
+// response_invalid escalation's own why never carries (design H2): the
+// run's own session names the job, the run itself carries the lens when
+// one applies, and the validator's errors sit on that run's own "response
+// invalid run <id>" marker (invalidMarkerBody, internal/job/planning.go).
+// It returns "" with no error when the marker, the run, or its session is
+// missing -- each logged once at Debug rather than failing the render, the
+// same fallback loopsExhaustedDetail uses for its own missing sources.
+func (c *console) responseInvalidDetailFor(
+	ctx context.Context, ticketID, escalationID, runID int64, rows []store.MessageRow, runs []store.Run, sessions []store.Session,
+) string {
+	marker, ok := findResponseInvalidMarker(rows, runID)
+	if !ok {
+		slog.DebugContext(ctx, "console: escalation detail source unavailable",
+			"ticket_id", ticketID, "escalation_id", escalationID, "reason", "marker", "run_id", runID)
+		return ""
+	}
+
+	run, ok := findRun(runs, runID)
+	if !ok {
+		slog.DebugContext(ctx, "console: escalation detail source unavailable",
+			"ticket_id", ticketID, "escalation_id", escalationID, "reason", "run", "run_id", runID)
+		return ""
+	}
+
+	session, ok := findSession(sessions, run.SessionID)
+	if !ok {
+		slog.DebugContext(ctx, "console: escalation detail source unavailable",
+			"ticket_id", ticketID, "escalation_id", escalationID, "reason", "session", "run_id", runID)
+		return ""
+	}
+
+	return responseInvalidDetail(session.Job, run.Lens, runID, marker)
+}
+
+// findResponseInvalidMarker returns the body of the update row among rows
+// whose own first line is exactly "response invalid run <runID>"
+// (invalidMarkerBody), matching on the full first line rather than a bare
+// prefix so run 9's marker is never mistaken for run 91's.
+func findResponseInvalidMarker(rows []store.MessageRow, runID int64) (string, bool) {
+	want := updateMarkerResponseInvalidPrefix + strconv.FormatInt(runID, 10)
+	for i := range rows {
+		if rows[i].Type != msgTypeUpdate {
+			continue
+		}
+		first, _, _ := strings.Cut(rows[i].Body, "\n")
+		if first == want {
+			return rows[i].Body, true
+		}
+	}
+	return "", false
+}
+
+// findRun returns the run in runs whose ID is runID.
+func findRun(runs []store.Run, runID int64) (store.Run, bool) {
+	for _, r := range runs {
+		if r.ID == runID {
+			return r, true
+		}
+	}
+	return store.Run{}, false
+}
+
+// findSession returns the session in sessions whose ID is sessionID.
+func findSession(sessions []store.Session, sessionID int64) (store.Session, bool) {
+	for _, s := range sessions {
+		if s.ID == sessionID {
+			return s, true
+		}
+	}
+	return store.Session{}, false
+}
+
+// responseInvalidDetail renders a response_invalid escalation's own job,
+// lens, run id, and the run's own "response invalid run <id>" marker body
+// (invalidMarkerBody, internal/job/planning.go) into the detail
+// withEscalationDetails appends to the question body (design H2). marker's
+// first line (the marker's own run id) is discarded in favor of the
+// caller's own authoritative runID; its second line is the closed reason,
+// shown only when there are no validator errors. The validator's errors --
+// model text that can hold anything, including a markdown fence of its own
+// -- sit in a fenced code block one backtick longer than the longest
+// backtick run they contain, so they always render as inert text rather
+// than breaking out of the fence early.
+func responseInvalidDetail(job string, lens *string, runID int64, marker string) string {
+	_, rest, _ := strings.Cut(marker, "\n")
+	reason, errs, hasErrs := strings.Cut(rest, "\n")
+
+	head := "Job: " + job
+	if lens != nil {
+		head += ", lens " + *lens
+	}
+	head += fmt.Sprintf(". Run %d.", runID)
+
+	if !hasErrs || errs == "" {
+		return head + "\n\nReason: " + reason + "."
+	}
+
+	fence := backtickFence(errs)
+	return head + "\n\nValidator errors:\n\n" + fence + "\n" + errs + "\n" + fence
+}
+
+// backtickFence returns a markdown code-fence delimiter for text: backticks
+// one longer than the longest run of consecutive backticks text contains,
+// and never fewer than 3 (CommonMark's own minimum fence length).
+func backtickFence(text string) string {
+	longest, cur := 0, 0
+	for _, r := range text {
+		if r == '`' {
+			cur++
+			if cur > longest {
+				longest = cur
+			}
+		} else {
+			cur = 0
+		}
+	}
+	n := max(longest+1, 3)
+	return strings.Repeat("`", n)
 }
 
 // displayBody returns what the Thread view renders for one message: a
