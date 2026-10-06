@@ -281,9 +281,8 @@ func TestSimplificationLensProposesSplittingOversizedTasks(t *testing.T) {
 // testsLensPureFunctionLine is the bullet prompts/lenses/tests.md adds to
 // its "In a plan" section (#111): plan review flags changed wiring whose
 // decision has no test.
-const testsLensPureFunctionLine = "If a plan tests only helpers and leaves the changed wiring, " +
-	"such as a handler, a callback, or another call site with no test harness, " +
-	"with no test of its decision, that is a major finding. " +
+const testsLensPureFunctionLine = "If a changed handler, a callback, or another call site with no test harness " +
+	"has no test of its decision, that is a major finding, even when the plan tests helpers or other cut points. " +
 	"The fix names the pure function to extract and the test for it."
 
 // TestTestsLensRequiresPureFunctionSeam proves prompts/lenses/tests.md
