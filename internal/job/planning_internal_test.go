@@ -21,7 +21,7 @@ import (
 func TestGateQuestionMessage_StatesWhatApproveDoes(t *testing.T) {
 	t.Parallel()
 	const objective = "Add a hello endpoint so a caller can get a plain-text greeting back over HTTP."
-	msg, err := gateQuestionMessage(1, objective, false)
+	msg, err := gateQuestionMessage(1, objective, gateApproveExplains)
 	if err != nil {
 		t.Fatalf("gateQuestionMessage: %v", err)
 	}
@@ -54,29 +54,33 @@ func TestGateQuestionMessage_StatesWhatApproveDoes(t *testing.T) {
 }
 
 // TestGateQuestionMessage_LoopsExhaustedUsesDifferentExplainsText proves
-// issue #48's gate text split: loopsExhausted false keeps today's
-// clean-review explains text ("already fixed automatically"); loopsExhausted
-// true swaps in the cap-reached explains text instead, and the two bodies
-// never share that phrase.
+// issue #48's and ticket 66's gate text split: the body always equals
+// objective, a blank line, then the explains text passed in, and the three
+// explains constants never share the phrases that mark the other two.
 func TestGateQuestionMessage_LoopsExhaustedUsesDifferentExplainsText(t *testing.T) {
 	t.Parallel()
 	const objective = "Loop exhausted on floor-only findings."
+	const alreadyFixedAutomaticallyPhrase = "already fixed automatically"
 
 	tests := []struct {
-		name           string
-		loopsExhausted bool
-		wantContains   string
-		wantAbsent     string
+		name         string
+		explains     string
+		wantContains string
+		wantAbsent   string
 	}{
-		{"clean review", false, "already fixed automatically", "max_loops"},
-		{"loops exhausted", true, "max_loops", "already fixed automatically"},
+		{"clean review", gateApproveExplains, alreadyFixedAutomaticallyPhrase, "max_loops"},
+		{"loops exhausted", gateApproveExplainsLoopsExhausted, "max_loops", alreadyFixedAutomaticallyPhrase},
+		{"owner chose", gateApproveExplainsOwnerChose, "chose", alreadyFixedAutomaticallyPhrase},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			msg, err := gateQuestionMessage(1, objective, tt.loopsExhausted)
+			msg, err := gateQuestionMessage(1, objective, tt.explains)
 			if err != nil {
 				t.Fatalf("gateQuestionMessage: %v", err)
+			}
+			if msg.Body != objective+"\n\n"+tt.explains {
+				t.Errorf("message body = %q, want %q", msg.Body, objective+"\n\n"+tt.explains)
 			}
 			if !strings.Contains(msg.Body, tt.wantContains) {
 				t.Errorf("message body = %q, want it to contain %q", msg.Body, tt.wantContains)
@@ -85,6 +89,12 @@ func TestGateQuestionMessage_LoopsExhaustedUsesDifferentExplainsText(t *testing.
 				t.Errorf("message body = %q, want it to not contain %q", msg.Body, tt.wantAbsent)
 			}
 		})
+	}
+	if !strings.Contains(gateApproveExplainsLoopsExhausted, "max_loops") || strings.Contains(gateApproveExplainsLoopsExhausted, "chose") {
+		t.Errorf("gateApproveExplainsLoopsExhausted = %q, want max_loops and not chose", gateApproveExplainsLoopsExhausted)
+	}
+	if !strings.Contains(gateApproveExplainsOwnerChose, "max_loops") {
+		t.Errorf("gateApproveExplainsOwnerChose = %q, want it to mention max_loops too", gateApproveExplainsOwnerChose)
 	}
 }
 

@@ -94,12 +94,13 @@ const (
 	// its Recommended back this way -- a merge question's Recommended is
 	// always "a", meaning something else entirely there).
 	//
-	// escalationChoiceAccept is "accept the remaining findings", offered
-	// only as an EscalationCommit.ExtraOptions entry on a review
-	// loops_exhausted question (ticket 60). It shares the "d" key with
-	// escalationChoiceGrant because the two never appear on one question: a
-	// grant comes only from a build escalation, and checkEscalationOptions
-	// (store/commit.go) rejects a duplicate key if that ever changed.
+	// escalationChoiceAccept is option d offered as an
+	// EscalationCommit.ExtraOptions entry on two loops_exhausted questions:
+	// review's "accept the remaining findings" (ticket 60) and plan
+	// review's cap_loops "accept the plan and go to the gate". It shares
+	// the "d" key with escalationChoiceGrant because a grant comes only
+	// from a build escalation; checkEscalationOptions (store/commit.go)
+	// rejects a duplicate key if that ever changed.
 	escalationChoiceRetry   = "a"
 	escalationChoiceBack    = "b"
 	escalationChoiceAbandon = "c"
@@ -175,6 +176,19 @@ const (
 		"approve, writing in any settled question reopens it and withdraws this gate. Plan review reached " +
 		"machine.toml's planreview max_loops with only at-or-below-floor findings left; they were not fixed " +
 		"automatically and are shown below for your decision."
+
+	// planAcceptAtCapOptionText is option d's text on plan review's
+	// cap_loops loops_exhausted question.
+	planAcceptAtCapOptionText = "Accept the plan and go to the gate"
+
+	// gateApproveExplainsOwnerChose is the gate text acceptPlanAtCap posts
+	// when the owner picked d on the cap_loops escalation: unlike
+	// gateApproveExplainsLoopsExhausted, findings above the floor remain.
+	gateApproveExplainsOwnerChose = "Approve asks the planning agent whether any question is still open. If none is, " +
+		"Zing seals this scenario set and moves the ticket to building. This cannot be undone. Until you " +
+		"approve, writing in any settled question reopens it and withdraws this gate. Plan review reached " +
+		"machine.toml's planreview max_loops with findings above the quality floor still open. The findings " +
+		"below were not fixed, and you chose to see this gate anyway."
 
 	// The three artifact types a stored ready cohort writes (design section
 	// 6.5, 4.5): internal/store/schemas/artifacts/{plan,claims,scenario}.json
@@ -1456,11 +1470,11 @@ func maybeResumeFloorFindings(ctx context.Context, t store.Ticket, d Deps, sess 
 		return store.HandlerCommit{}, false, fmt.Errorf("job: planning: count delivered reviews: %w", err)
 	}
 	if n >= d.Machine.Jobs[jobPlanreviewName].MaxLoops {
-		// Issue #48: an above-floor finding still escalates loops_exhausted,
-		// unchanged -- a gate must never post against a mixed artifact. Only
-		// when every surviving finding is at or below the floor does the cap
-		// post the gate instead, so the owner decides rather than the loop
-		// exhausting into an escalation nobody above the floor asked for.
+		// Issue #48: an above-floor finding still escalates loops_exhausted --
+		// the loop itself never posts a gate against a mixed artifact. The
+		// owner can: option d on this escalation (acceptPlanAtCap) posts the
+		// gate anyway, since the rule exists so the owner, not the loop,
+		// makes that call.
 		if above == 0 {
 			planArtifact, found, artErr := d.Store.GetArtifact(ctx, t.ID, artifactTypePlan)
 			if artErr != nil {
@@ -1473,7 +1487,7 @@ func maybeResumeFloorFindings(ctx context.Context, t store.Ticket, d Deps, sess 
 			if unmarshalErr := json.Unmarshal(planArtifact.Payload, &plan); unmarshalErr != nil {
 				return store.HandlerCommit{}, false, fmt.Errorf("job: planning: unmarshal plan artifact: %w", unmarshalErr)
 			}
-			commit, err = postGateCommit(ctx, t, d, plan.Overview.Objective, true)
+			commit, err = postGateCommit(ctx, t, d, plan.Overview.Objective, gateApproveExplainsLoopsExhausted)
 			if err != nil {
 				return commit, true, err
 			}
@@ -1491,6 +1505,8 @@ func maybeResumeFloorFindings(ctx context.Context, t store.Ticket, d Deps, sess 
 		}
 		c := escalationCommit(t, d, nil, nil,
 			string(response.EscalationCodeLoopsExhausted), loopsExhaustedWhat, loopsExhaustedWhy, "", response.EscalationOriginCapLoops)
+		c.Escalation.ExtraOptions = []response.Option{{Key: escalationChoiceAccept, Text: planAcceptAtCapOptionText}}
+		c.Escalation.Recommended = escalationChoiceAccept
 		return c, true, nil
 	}
 
@@ -1658,7 +1674,7 @@ func planReviewOkCommit(ctx context.Context, t store.Ticket, d Deps, rr runResul
 	}}
 
 	if atOrBelow == 0 {
-		gc, gcErr := postGateCommit(ctx, t, d, plan.Overview.Objective, false)
+		gc, gcErr := postGateCommit(ctx, t, d, plan.Overview.Objective, gateApproveExplains)
 		if gcErr != nil {
 			return store.HandlerCommit{}, gcErr
 		}
@@ -1754,7 +1770,7 @@ func renderFindings(findings []response.Finding) string {
 // cuts the body on its first newline, so objective still renders as the
 // question's title and gateApproveExplains as its markdown body, exactly as
 // every other question's Title/Body pair does.
-func gateQuestionMessage(ticketID int64, objective string, loopsExhausted bool) (store.Message, error) {
+func gateQuestionMessage(ticketID int64, objective, explains string) (store.Message, error) {
 	payload, err := json.Marshal(response.QuestionPayload{
 		Kind:        response.QuestionKindGate,
 		State:       response.QuestionStateOpen,
@@ -1766,10 +1782,6 @@ func gateQuestionMessage(ticketID int64, objective string, loopsExhausted bool) 
 	})
 	if err != nil {
 		return store.Message{}, fmt.Errorf("job: gate: marshal question payload: %w", err)
-	}
-	explains := gateApproveExplains
-	if loopsExhausted {
-		explains = gateApproveExplainsLoopsExhausted
 	}
 	return store.Message{
 		TicketID: ticketID, Type: msgTypeQuestion, Author: authorZing,
@@ -1785,8 +1797,8 @@ func gateQuestionMessage(ticketID int64, objective string, loopsExhausted bool) 
 // AttachRunToMsgs -- planReviewOkCommit, the caller with a live review run,
 // overlays those itself; maybeResumeFloorFindings's cap branch has no run
 // to attach, since the cap, not a run, produced this gate.
-func postGateCommit(ctx context.Context, t store.Ticket, d Deps, objective string, loopsExhausted bool) (store.HandlerCommit, error) {
-	msg, err := gateQuestionMessage(t.ID, objective, loopsExhausted)
+func postGateCommit(ctx context.Context, t store.Ticket, d Deps, objective, explains string) (store.HandlerCommit, error) {
+	msg, err := gateQuestionMessage(t.ID, objective, explains)
 	if err != nil {
 		return store.HandlerCommit{}, err
 	}
@@ -2043,6 +2055,7 @@ func (h planningHandler) enterFromEscalationRound(ctx context.Context, t store.T
 	notes := joinReplies(round.Replies)
 	errorText := payload.What + "\n" + payload.Why + "\n" + payload.Tried
 	origin := response.EscalationOrigin(payload.Origin)
+	capLoops := origin == response.EscalationOriginCapLoops && payload.Code == string(response.EscalationCodeLoopsExhausted)
 	notesAndError := []prompt.NamedInput{prompt.Notes(notes), prompt.Error(errorText)}
 
 	var commit store.HandlerCommit
@@ -2080,6 +2093,8 @@ func (h planningHandler) enterFromEscalationRound(ctx context.Context, t store.T
 		// carries the exhausted session's threads instead.
 		commit, err = resolveCapResumesEscalation(ctx, t, d, notes, errorText, resolveIDs)
 
+	case capLoops && choice == escalationChoiceAccept:
+		commit, err = acceptPlanAtCap(ctx, t, d, resolveIDs)
 	case origin == response.EscalationOriginCapLoops && choice == escalationChoiceRetry:
 		findings, findErr := outstandingFloorFindings(ctx, t, d)
 		if findErr != nil {
@@ -2105,6 +2120,43 @@ func (h planningHandler) enterFromEscalationRound(ctx context.Context, t store.T
 		"run_id", int64OrZero(escMsg.RunID), "code", payload.Code, "origin", payload.Origin,
 		"choice", choice, "preserved_rounds", preserved)
 	return commit, nil
+}
+
+// acceptPlanAtCap is option d on plan review's cap_loops loops_exhausted
+// question: the owner, not the loop, chose to see the gate with findings
+// above the floor still open. It posts the gate as the at-or-below-floor
+// cap path does (postGateCommit plus gateCapMarker, so a reject and the
+// console both read it as a capped gate), with no runtime call, and
+// resolves the escalation round in the same commit.
+func acceptPlanAtCap(ctx context.Context, t store.Ticket, d Deps, resolveIDs []int64) (store.HandlerCommit, error) {
+	cohort, ok, err := d.Store.CurrentCohort(ctx, t.ID)
+	if err != nil {
+		return store.HandlerCommit{}, fmt.Errorf("job: planning: cap_loops accept: current cohort: %w", err)
+	}
+	if !ok {
+		return store.HandlerCommit{}, fmt.Errorf("job: planning: cap_loops accept: ticket %d has no current cohort", t.ID)
+	}
+	planArtifact, found, err := d.Store.GetArtifact(ctx, t.ID, artifactTypePlan)
+	if err != nil {
+		return store.HandlerCommit{}, fmt.Errorf("job: planning: cap_loops accept: get plan artifact: %w", err)
+	}
+	if !found {
+		return store.HandlerCommit{}, fmt.Errorf("job: planning: cap_loops accept: ticket %d has a cohort but no plan artifact", t.ID)
+	}
+	var plan response.Plan
+	if err = json.Unmarshal(planArtifact.Payload, &plan); err != nil {
+		return store.HandlerCommit{}, fmt.Errorf("job: planning: cap_loops accept: unmarshal plan artifact: %w", err)
+	}
+	c, err := postGateCommit(ctx, t, d, plan.Overview.Objective, gateApproveExplainsOwnerChose)
+	if err != nil {
+		return store.HandlerCommit{}, err
+	}
+	c.ResolveQuestions = resolveIDs
+	c.Messages = append(c.Messages, store.Message{
+		TicketID: t.ID, Type: msgTypeUpdate, Author: authorSystem, Body: gateCapMarker(cohort.PlanVersion),
+	})
+	slog.Info("gate posted at loop cap by owner choice", "ticket_id", t.ID, "plan_version", cohort.PlanVersion)
+	return c, nil
 }
 
 // abandonCommit is section 6.7 choice "c" (design D10): every open or
