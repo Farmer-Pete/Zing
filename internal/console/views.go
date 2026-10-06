@@ -325,6 +325,10 @@ func (c *console) threadComponent(ctx context.Context, open int64) (templ.Compon
 		if findingsErr != nil {
 			return nil, findingsErr
 		}
+		split, splitErr := c.loadSplit(ctx, open)
+		if splitErr != nil {
+			return nil, splitErr
+		}
 		conv, convErr := c.store.PlanningConversation(ctx, open)
 		if convErr != nil {
 			return nil, fmt.Errorf("console: planning conversation for ticket %d: %w", open, convErr)
@@ -333,6 +337,11 @@ func (c *console) threadComponent(ctx context.Context, open int64) (templ.Compon
 		threadRows, buildErr := buildThreadRows(&ticket, rows, plan, scenarios, findings, conv, agent)
 		if buildErr != nil {
 			return nil, buildErr
+		}
+		for i := range threadRows {
+			if q := threadRows[i].Question; q != nil && q.Kind == string(response.QuestionKindSplit) {
+				q.Split = split
+			}
 		}
 		banner, bannerErr := c.threadBanner(ctx, open, rows, conv, agent)
 		if bannerErr != nil {
@@ -412,6 +421,13 @@ func gateApprovalInProgress(rows []store.MessageRow) bool {
 // (internal/store/schemas/artifacts/plan.json), the type name
 // store.GetArtifact(ticketID, "plan") in design section 6.9 names directly.
 const planArtifactType = "plan"
+
+// childrenArtifactType is the artifacts.type literal a children outcome's
+// commit writes (internal/job/split.go's own unexported
+// artifactTypeChildren, mirrored here rather than imported -- this package
+// has no other reason to depend on internal/job, matching
+// planreviewFindingsPayload's own mirrored-not-imported wire shape above).
+const childrenArtifactType = "children"
 
 // loadPlan reads ticketID's newest stored plan artifact (design section
 // 6.9) and pre-renders it, for the gate kind's context region
@@ -599,6 +615,43 @@ func (c *console) loadFindings(ctx context.Context, ticketID int64) ([]templates
 		})
 	}
 	return rows, nil
+}
+
+// loadSplit reads ticketID's newest stored children artifact (design
+// section 7.2, Task 8) and pre-renders it, for the split kind's context
+// region (thread.templ's splitContext). It returns nil, nil when the
+// ticket has no children artifact yet, the same "not there yet" shape
+// loadPlan itself returns.
+func (c *console) loadSplit(ctx context.Context, ticketID int64) (*templates.SplitView, error) {
+	artifact, ok, err := c.store.GetArtifact(ctx, ticketID, childrenArtifactType)
+	if err != nil {
+		return nil, fmt.Errorf("console: load children artifact for ticket %d: %w", ticketID, err)
+	}
+	if !ok {
+		return nil, nil //nolint:nilnil // "no split proposed yet" is a legitimate result, not an error
+	}
+	var ca response.ChildrenArtifact
+	if unmarshalErr := json.Unmarshal(artifact.Payload, &ca); unmarshalErr != nil {
+		return nil, fmt.Errorf("console: unmarshal children artifact for ticket %d: %w", ticketID, unmarshalErr)
+	}
+	view := &templates.SplitView{Children: make([]templates.SplitChildView, len(ca.Children))}
+	if strings.TrimSpace(ca.Notes) != "" {
+		notesHTML, renderErr := Render(ca.Notes)
+		if renderErr != nil {
+			return nil, fmt.Errorf("console: render children notes for ticket %d: %w", ticketID, renderErr)
+		}
+		view.NotesHTML = notesHTML
+	}
+	for i, child := range ca.Children {
+		bodyHTML, renderErr := Render(child.Body)
+		if renderErr != nil {
+			return nil, fmt.Errorf("console: render child %s body for ticket %d: %w", child.Key, ticketID, renderErr)
+		}
+		view.Children[i] = templates.SplitChildView{
+			Key: child.Key, Title: child.Title, BodyHTML: bodyHTML, DependsOn: child.DependsOn,
+		}
+	}
+	return view, nil
 }
 
 // msgTypeState, msgTypeQuestion, msgTypeEscalation, and msgTypeAnswer name
