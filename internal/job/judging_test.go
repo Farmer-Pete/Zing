@@ -420,10 +420,11 @@ func judgeScriptsFS(scripts ...string) fstest.MapFS {
 	return m
 }
 
-// judgeAnswerOpenQuestion answers ticketID's one open question with option
-// (postbuild_test.go's own pbAnswerFixtureQuestion always answers "b",
-// which judgeQuestionScript's own single option "a" does not offer).
-func judgeAnswerOpenQuestion(t *testing.T, s *store.Store, ticketID int64, option string) {
+// judgeAnswerOpenQuestion answers ticketID's one open question with
+// judgeQuestionScript's own single option "a" (postbuild_test.go's own
+// pbAnswerFixtureQuestion always answers "b", which that option does not
+// offer).
+func judgeAnswerOpenQuestion(t *testing.T, s *store.Store, ticketID int64) {
 	t.Helper()
 	open, err := s.QuestionsByState(t.Context(), ticketID, "open")
 	if err != nil {
@@ -432,7 +433,7 @@ func judgeAnswerOpenQuestion(t *testing.T, s *store.Store, ticketID int64, optio
 	if len(open) != 1 {
 		t.Fatalf("QuestionsByState(open) = %d questions, want exactly 1", len(open))
 	}
-	result, err := s.AnswerQuestion(t.Context(), store.AnswerInput{TicketID: ticketID, QuestionID: open[0].ID, Option: option})
+	result, err := s.AnswerQuestion(t.Context(), store.AnswerInput{TicketID: ticketID, QuestionID: open[0].ID, Option: "a"})
 	if err != nil {
 		t.Fatalf("AnswerQuestion: %v", err)
 	}
@@ -778,7 +779,7 @@ func TestJudgeQuestionResumes(t *testing.T) {
 		t.Fatalf("RunByID: %v", err)
 	}
 
-	judgeAnswerOpenQuestion(t, s, ticket.ID, "a")
+	judgeAnswerOpenQuestion(t, s, ticket.ID)
 
 	deps = pbClaim(t, s, rt, ticket.ID)
 	secondCommit, err := (judgeHandler{}).Run(t.Context(), ticket, deps)
@@ -859,7 +860,7 @@ func TestJudgeAnswerAtCapResumesFree(t *testing.T) {
 		}
 	}
 
-	judgeAnswerOpenQuestion(t, s, ticket.ID, "a")
+	judgeAnswerOpenQuestion(t, s, ticket.ID)
 
 	deps = pbClaim(t, s, rt, ticket.ID)
 	secondCommit, err := (judgeHandler{}).Run(t.Context(), ticket, deps)
@@ -886,6 +887,77 @@ func TestJudgeAnswerAtCapResumesFree(t *testing.T) {
 	}
 	if sess.Resumes != maxResumes {
 		t.Errorf("sessions.resumes after the free answer resume = %d, want %d (unchanged; answer resumes are free)", sess.Resumes, maxResumes)
+	}
+}
+
+// TestJudgeAnswerAtCapWithLegacyEscalationWaits proves resumeAnswered's
+// legacy branch of answerResume (job.go): a judge session already
+// exhausted and already carrying its own cap_resumes escalation (written
+// before this rule existed) leaves the round to that escalation's retry,
+// returning ErrNoAction with no run started, instead of resuming free.
+func TestJudgeAnswerAtCapWithLegacyEscalationWaits(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow end-to-end flow; runs in the full suite")
+	}
+	t.Parallel()
+	s, ticket := judgeTicketReady(t)
+	rt := runtime.NewFake(judgeScriptsFS(judgeQuestionScript, judgeOkBothScript))
+	ticket = judgeAdvanceStart(t, s, rt, ticket)
+
+	deps := pbClaim(t, s, rt, ticket.ID)
+	firstCommit, err := (judgeHandler{}).Run(t.Context(), ticket, deps)
+	if err != nil {
+		t.Fatalf("RUN (first turn): %v", err)
+	}
+	pbApply(t, s, ticket, firstCommit)
+	ticket = pbGetTicket(t, s, ticket.ID)
+
+	questionRunID := firstCommit.Runs[0].ID
+	questionSession, err := s.RunByID(t.Context(), questionRunID)
+	if err != nil {
+		t.Fatalf("RunByID: %v", err)
+	}
+
+	maxResumes := pbMachine(t).Jobs[jobJudgeName].MaxResumes
+	owner, expires := deps.Owner, deps.Expires
+	for range maxResumes {
+		claimed, claimErr := s.Claim(t.Context(), ticket.ID, owner, expires)
+		if claimErr != nil || !claimed {
+			t.Fatalf("bump claim: claimed=%v err=%v", claimed, claimErr)
+		}
+		applied, bumpErr := s.CommitHandlerResult(t.Context(), store.HandlerCommit{
+			TicketID: ticket.ID, Owner: owner, Expires: expires,
+			Session: &store.SessionUpsert{ID: &questionSession.SessionID, BumpResumes: true},
+		})
+		if bumpErr != nil || !applied {
+			t.Fatalf("bump CommitHandlerResult: applied=%v err=%v", applied, bumpErr)
+		}
+	}
+
+	judgeAnswerOpenQuestion(t, s, ticket.ID)
+
+	claimed, claimErr := s.Claim(t.Context(), ticket.ID, owner, expires)
+	if claimErr != nil || !claimed {
+		t.Fatalf("escalate claim: claimed=%v err=%v", claimed, claimErr)
+	}
+	escCommit := capResumesEscalation(ticket, Deps{Owner: owner, Expires: expires}, jobJudgeName, questionSession.SessionID)
+	applied, escErr := s.CommitHandlerResult(t.Context(), escCommit)
+	if escErr != nil || !applied {
+		t.Fatalf("escalate CommitHandlerResult: applied=%v err=%v", applied, escErr)
+	}
+
+	deps = pbClaim(t, s, rt, ticket.ID)
+	_, err = (judgeHandler{}).Run(t.Context(), ticket, deps)
+	if !errors.Is(err, ErrNoAction) {
+		t.Fatalf("err = %v, want ErrNoAction (already escalated once)", err)
+	}
+
+	sess, _, err := s.SessionByID(t.Context(), questionSession.SessionID, maxResumes)
+	if err != nil {
+		t.Fatalf("SessionByID: %v", err)
+	}
+	if sess.Resumes != maxResumes {
+		t.Errorf("sessions.resumes = %d, want %d (unchanged)", sess.Resumes, maxResumes)
 	}
 }
 
@@ -1211,7 +1283,7 @@ func TestJudgeAnsweredRoundInterruptedBypassesExhaustedCap(t *testing.T) {
 
 	// The answered round's own resume is cancelled mid-flight. The round is
 	// never resolved: it stays answered for the next tick.
-	judgeAnswerOpenQuestion(t, s, ticket.ID, "a")
+	judgeAnswerOpenQuestion(t, s, ticket.ID)
 	canceledRT := &pbScriptedRuntime{t: t, steps: []pbScriptedStep{
 		{res: runtime.RunResult{ExitCode: -1, AgentTime: time.Second}, err: runtime.ErrCanceled},
 	}}

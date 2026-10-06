@@ -915,7 +915,10 @@ func (h reviewingHandler) discussRunAndRoute(
 // group (design section 6.6: "One marker ... per finding of the group"),
 // each carrying the same run id, batch, and kept count. Survivors above the
 // floor post a new review question (6.4); zero survivors means the lens
-// withdrew every finding of the group, and no question follows.
+// withdrew every finding of the group, and no question follows. resolveIDs
+// is non-empty only when this turn answered a round's own generic question
+// (discuss's non-nil round): this commit resolves that question here, the
+// same way every other job's answered-round ok outcome resolves its own.
 func (h reviewingHandler) discussOkCommit(
 	ctx context.Context, t store.Ticket, d Deps, proj Project, wt orchestrator.Worktree,
 	group pendingDiscussGroup, rr runResult, sessionCommit *store.SessionUpsert, resolveIDs []int64,
@@ -2301,6 +2304,7 @@ func (h reviewingHandler) continueRound(ctx context.Context, t store.Ticket, d D
 		lens        response.Lens
 		sess        store.Session
 		answers     string
+		round       store.Round
 		interrupted bool
 	}
 	askers := make([]asker, 0, len(answered))
@@ -2320,11 +2324,16 @@ func (h reviewingHandler) continueRound(ctx context.Context, t store.Ticket, d D
 		if newestErr != nil {
 			return store.HandlerCommit{}, fmt.Errorf("job: reviewing: continue: newest run: %w", newestErr)
 		}
-		capped, capErr := answerResume(ctx, t, d, sess, state, r)
+		// answerResumeCapped (job.go): checked for every asker before any of
+		// them is logged free, so one capped asker further down the list
+		// doesn't leave an earlier asker's "free answer resume" line for a
+		// run that never starts (this whole attempt returns ErrNoAction).
+		capped, capErr := answerResumeCapped(ctx, t, d, sess, state)
 		if capErr != nil {
 			return store.HandlerCommit{}, capErr
 		}
 		if capped {
+			slog.Debug("reviewing entry decision", "ticket_id", t.ID, "step", "continue_resume_capped", "session_state", sessionStateName(state))
 			return store.HandlerCommit{}, ErrNoAction
 		}
 		answers, ansErr := renderRoundAnswers(r)
@@ -2332,9 +2341,12 @@ func (h reviewingHandler) continueRound(ctx context.Context, t store.Ticket, d D
 			return store.HandlerCommit{}, ansErr
 		}
 		askers = append(askers, asker{
-			lens: response.Lens(*run.Lens), sess: sess, answers: answers,
+			lens: response.Lens(*run.Lens), sess: sess, answers: answers, round: r,
 			interrupted: foundRun && newestRun.Interrupted,
 		})
+	}
+	for i := range askers {
+		logFreeAnswerResume(t, askers[i].sess, askers[i].round)
 	}
 
 	diff, err := proj.Orch.Diff(ctx, wt, sha)

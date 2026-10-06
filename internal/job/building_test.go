@@ -17,6 +17,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"testing"
@@ -51,6 +52,11 @@ const (
 	// question-resume test here replies with (goconst: shared, not
 	// repeated as a literal at each call site).
 	testAnswerUseSQLite = "Use SQLite."
+
+	// testAnswerUseHyphen is the owner's own answer text every perimeter
+	// question-resume test here replies with (goconst: shared, not
+	// repeated as a literal at each call site).
+	testAnswerUseHyphen = "Use a hyphen."
 )
 
 // ---- shared building fixtures ----------------------------------------------
@@ -1950,7 +1956,7 @@ func TestPerimeterRunAnswerResumesItsSession(t *testing.T) {
 	tick() // DESCRIBE returns a question (perimeter/1-1/1.xml)
 
 	q := findOpenQuestionByKind(t, s, ticketID, response.QuestionKindQuestion)
-	if _, err := s.SaveDraft(t.Context(), store.DraftInput{TicketID: ticketID, QuestionID: &q.ID, Text: "Use a hyphen."}); err != nil {
+	if _, err := s.SaveDraft(t.Context(), store.DraftInput{TicketID: ticketID, QuestionID: &q.ID, Text: testAnswerUseHyphen}); err != nil {
 		t.Fatalf("SaveDraft: %v", err)
 	}
 	if _, err := s.SendBatch(t.Context(), ticketID); err != nil {
@@ -3529,7 +3535,7 @@ func TestPerimeterQuestionAnswerAtCapResumesFree(t *testing.T) {
 	describeTick(t, s, scriptRT, ticketID) // DESCRIBE returns a question
 
 	q := findOpenQuestionByKind(t, s, ticketID, response.QuestionKindQuestion)
-	if _, draftErr := s.SaveDraft(t.Context(), store.DraftInput{TicketID: ticketID, QuestionID: &q.ID, Text: "Use a hyphen."}); draftErr != nil {
+	if _, draftErr := s.SaveDraft(t.Context(), store.DraftInput{TicketID: ticketID, QuestionID: &q.ID, Text: testAnswerUseHyphen}); draftErr != nil {
 		t.Fatalf("SaveDraft: %v", draftErr)
 	}
 	if _, sendErr := s.SendBatch(t.Context(), ticketID); sendErr != nil {
@@ -3559,8 +3565,8 @@ func TestPerimeterQuestionAnswerAtCapResumesFree(t *testing.T) {
 	if len(commit.Runs) != 1 {
 		t.Fatalf("commit.Runs = %+v, want exactly one", commit.Runs)
 	}
-	if len(commit.ResolveQuestions) == 0 {
-		t.Error("commit.ResolveQuestions is empty, want the answered question id")
+	if !slices.Contains(commit.ResolveQuestions, q.ID) {
+		t.Errorf("commit.ResolveQuestions = %v, want it to contain %d (the answered question id)", commit.ResolveQuestions, q.ID)
 	}
 	apply(t, s, ticket, commit)
 
@@ -3570,5 +3576,59 @@ func TestPerimeterQuestionAnswerAtCapResumesFree(t *testing.T) {
 	}
 	if perimSess.Resumes != perimeterMaxResumes {
 		t.Errorf("sessions.resumes after the free answer resume = %d, want %d (unchanged)", perimSess.Resumes, perimeterMaxResumes)
+	}
+}
+
+// TestPerimeterQuestionAnswerAtCapWithLegacyEscalationWaits proves
+// resolvePerimeterQuestion's legacy branch of answerResume (job.go): a
+// perimeter session already exhausted and already carrying its own
+// cap_resumes escalation (written before this rule existed) still leaves
+// the round to that escalation's retry, returning ErrNoAction with no run
+// started, instead of resuming free.
+func TestPerimeterQuestionAnswerAtCapWithLegacyEscalationWaits(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow end-to-end flow; runs in the full suite")
+	}
+	t.Parallel()
+	s, ticketID, _, scriptRT := perimeterScenario(t, map[string]string{testExtraPath: testExtraReason})
+	scriptRT.steps = append(scriptRT.steps, perimeterQuestionStep("perim-q-legacy-cap-sess"))
+	describeTick(t, s, scriptRT, ticketID) // DESCRIBE returns a question
+
+	q := findOpenQuestionByKind(t, s, ticketID, response.QuestionKindQuestion)
+	if _, draftErr := s.SaveDraft(t.Context(), store.DraftInput{TicketID: ticketID, QuestionID: &q.ID, Text: testAnswerUseHyphen}); draftErr != nil {
+		t.Fatalf("SaveDraft: %v", draftErr)
+	}
+	if _, sendErr := s.SendBatch(t.Context(), ticketID); sendErr != nil {
+		t.Fatalf("SendBatch: %v", sendErr)
+	}
+
+	const perimeterMaxResumes = 1
+	perimSess, _, err := s.LatestSession(t.Context(), ticketID, "perimeter", perimeterMaxResumes)
+	if err != nil {
+		t.Fatalf("LatestSession(perimeter): %v", err)
+	}
+	owner := "perim-legacy-cap-owner"
+	expires := time.Now().Add(10 * time.Minute).UTC().Truncate(time.Second)
+	bumpResumesToCap(t, s, ticketID, perimSess.ID, perimeterMaxResumes, owner, expires)
+
+	escalateDirect(t, s, ticketID, nil, &perimSess.ID, response.EscalationCodeResumesExhausted, response.EscalationOriginCapResumes)
+
+	callsBefore := scriptRT.calls
+	ticket := getTicket(t, s, ticketID)
+	deps := claimForBuild(t, s, scriptRT, ticketID)
+	_, err = job.Registry()[testStateBuilding].Run(t.Context(), ticket, deps)
+	if !errors.Is(err, job.ErrNoAction) {
+		t.Fatalf("err = %v, want errors.Is(err, job.ErrNoAction)", err)
+	}
+	if scriptRT.calls != callsBefore {
+		t.Errorf("scriptRT.calls = %d, want %d (no run started)", scriptRT.calls, callsBefore)
+	}
+
+	perimSess, _, err = s.LatestSession(t.Context(), ticketID, "perimeter", perimeterMaxResumes)
+	if err != nil {
+		t.Fatalf("LatestSession(perimeter): %v", err)
+	}
+	if perimSess.Resumes != perimeterMaxResumes {
+		t.Errorf("sessions.resumes = %d, want %d (unchanged)", perimSess.Resumes, perimeterMaxResumes)
 	}
 }

@@ -4059,6 +4059,81 @@ func TestRespondAnswerAtCapResumesFree(t *testing.T) {
 	}
 }
 
+// TestRespondAnswerAtCapWithLegacyEscalationWaits proves
+// resumeRespondAnswered's legacy branch of answerResume (job.go): a respond
+// session already exhausted and already carrying its own cap_resumes
+// escalation (written before this rule existed) leaves the round to that
+// escalation's retry, returning ErrNoAction with no run started, instead
+// of resuming free.
+func TestRespondAnswerAtCapWithLegacyEscalationWaits(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow end-to-end flow; runs in the full suite")
+	}
+	t.Parallel()
+	when := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	s, ticket, gh, tr, _ := shipRespondReady(t, when)
+
+	rt := runtime.NewFake(respondScriptsFS(shipRespondQuestionScript, shipRespondReplyScript))
+	deps := shipClaim(t, s, rt, ticket.ID, gh, tr)
+	askCommit, err := (shipHandler{}).Run(t.Context(), ticket, deps)
+	if err != nil {
+		t.Fatalf("ask Run: %v", err)
+	}
+	pbApply(t, s, ticket, askCommit)
+
+	if askCommit.Session == nil || askCommit.Session.ID == nil {
+		t.Fatalf("askCommit.Session = %+v, want a session id", askCommit.Session)
+	}
+	sessionID := *askCommit.Session.ID
+
+	owner := "ship-respond-answer-legacy-cap-owner"
+	expires := time.Now().Add(10 * time.Minute).UTC().Truncate(time.Second)
+	maxResumes := pbMachine(t).Jobs[jobRespondName].MaxResumes
+	for range maxResumes {
+		claimed, claimErr := s.Claim(t.Context(), ticket.ID, owner, expires)
+		if claimErr != nil || !claimed {
+			t.Fatalf("bump claim: claimed=%v err=%v", claimed, claimErr)
+		}
+		applied, bumpErr := s.CommitHandlerResult(t.Context(), store.HandlerCommit{
+			TicketID: ticket.ID, Owner: owner, Expires: expires,
+			Session: &store.SessionUpsert{ID: &sessionID, BumpResumes: true},
+		})
+		if bumpErr != nil || !applied {
+			t.Fatalf("bump CommitHandlerResult: applied=%v err=%v", applied, bumpErr)
+		}
+	}
+
+	open, err := s.QuestionsByState(t.Context(), ticket.ID, "open")
+	if err != nil || len(open) == 0 {
+		t.Fatalf("QuestionsByState(open): rows=%d err=%v", len(open), err)
+	}
+	pbAnswerEscalation(t, s, ticket.ID, open[len(open)-1].ID, "a")
+
+	claimed, claimErr := s.Claim(t.Context(), ticket.ID, owner, expires)
+	if claimErr != nil || !claimed {
+		t.Fatalf("escalate claim: claimed=%v err=%v", claimed, claimErr)
+	}
+	escCommit := capResumesEscalation(ticket, Deps{Owner: owner, Expires: expires}, jobRespondName, sessionID)
+	applied, escErr := s.CommitHandlerResult(t.Context(), escCommit)
+	if escErr != nil || !applied {
+		t.Fatalf("escalate CommitHandlerResult: applied=%v err=%v", applied, escErr)
+	}
+
+	deps2 := shipClaim(t, s, rt, ticket.ID, gh, tr)
+	_, err = (shipHandler{}).Run(t.Context(), pbGetTicket(t, s, ticket.ID), deps2)
+	if !errors.Is(err, ErrNoAction) {
+		t.Fatalf("err = %v, want ErrNoAction (already escalated once)", err)
+	}
+
+	sess, _, err := s.SessionByID(t.Context(), sessionID, maxResumes)
+	if err != nil {
+		t.Fatalf("SessionByID: %v", err)
+	}
+	if sess.Resumes != maxResumes {
+		t.Errorf("sessions.resumes = %d, want %d (unchanged)", sess.Resumes, maxResumes)
+	}
+}
+
 // ---- TestRespondInterruptedIdlessFirstTurnRunsFresh -------------------------
 
 // TestRespondInterruptedIdlessFirstTurnRunsFresh proves design section 7.5

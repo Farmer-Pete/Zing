@@ -683,11 +683,6 @@ func (h buildingHandler) resumeBuildRound(ctx context.Context, t store.Ticket, d
 	// bypasses the exhausted-cap escalation, even on a session already at
 	// max_resumes, unless that session already carries its cap_resumes
 	// escalation from before this rule existed.
-	newestRun, foundRun, newestErr := d.Store.SessionNewestRun(ctx, sess.ID)
-	if newestErr != nil {
-		return store.HandlerCommit{}, false, fmt.Errorf("job: building: answered round: newest run: %w", newestErr)
-	}
-
 	capped, capErr := answerResume(ctx, t, d, sess, state, round)
 	if capErr != nil {
 		return store.HandlerCommit{}, false, capErr
@@ -695,6 +690,14 @@ func (h buildingHandler) resumeBuildRound(ctx context.Context, t store.Ticket, d
 	if capped {
 		slog.Debug("building entry decision", "ticket_id", t.ID, "step", "build_round_capped_again", "session_state", sessionStateName(state))
 		return store.HandlerCommit{}, true, nil
+	}
+
+	// resumeCharge (job.go, design D5, section 7.4): an interrupted latest
+	// run's own input is still added to the prompt, even though the answer
+	// resume itself is free.
+	newestRun, foundRun, newestErr := d.Store.SessionNewestRun(ctx, sess.ID)
+	if newestErr != nil {
+		return store.HandlerCommit{}, false, fmt.Errorf("job: building: answered round: newest run: %w", newestErr)
 	}
 
 	_, wt, escalation, err := ensureUnitWorktreeFor(ctx, t, d, u)
