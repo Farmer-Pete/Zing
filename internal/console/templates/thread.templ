@@ -23,10 +23,13 @@ import (
 // no banner at all (every planning thread settled), still in place of
 // waitProgressBanner -- buildAgentStatus is call only when the ticket
 // carries a planning question at all, console.threadComponent's own guard.
-templ Thread(ticket *store.Ticket, rows []ThreadRow, wait WaitProgress, banner string) {
+// actions is console.ticketActions' own build of the owner's action bar
+// (#65), rendered right after the title by ticketActionBar.
+templ Thread(ticket *store.Ticket, rows []ThreadRow, wait WaitProgress, banner string, actions TicketActions) {
 	<main id="main" class="view-thread">
 		if ticket != nil {
 			<h2>{ ticket.Title }</h2>
+			@ticketActionBar(ticket.ID, actions)
 			@ticketBodyEditor(ticket)
 			if banner != "" {
 				<p class="agent-status">{ banner }</p>
@@ -54,6 +57,31 @@ templ Thread(ticket *store.Ticket, rows []ThreadRow, wait WaitProgress, banner s
 			<p class="empty">Select a ticket.</p>
 		}
 	</main>
+}
+
+// ticketActionBar is the owner's Abandon and Restart from planning action
+// bar (#65), rendered under the ticket title: a button per action
+// console.ticketActions offers, both disabled with the claim note while
+// actions.Held, and renders nothing when neither action is offered.
+// console.js's installTicketActions confirms through an in-page dialog
+// before posting, so these buttons carry no onclick of their own.
+// data-ref is the confirm dialog's own wording (stripped of any
+// -abandoned-K suffix, store.SplitAttemptRef).
+templ ticketActionBar(ticketID int64, actions TicketActions) {
+	if actions.Abandon || actions.Restart {
+		<section class="ticket-actions" data-ticket={ strconv.FormatInt(ticketID, 10) } data-ref={ actions.Ref }>
+			if actions.Abandon {
+				<button type="button" class="ticket-abandon" data-action="abandon" disabled?={ actions.Held }>Abandon</button>
+			}
+			if actions.Restart {
+				<button type="button" class="ticket-restart" data-action="restart" disabled?={ actions.Held }>Restart from planning</button>
+			}
+			if actions.Held {
+				<p class="ticket-actions-note">{ store.AbandonClaimedReason }</p>
+			}
+			<span class="ticket-actions-error" role="alert"></span>
+		</section>
+	}
 }
 
 // ticketBodyEditor is the owner's ticket-body owner-edit box (#41): a

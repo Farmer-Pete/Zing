@@ -1887,6 +1887,75 @@ func TestActionsFor(t *testing.T) {
 	}
 }
 
+// TestThreadRendersTicketActions proves threadComponent wires ticketActions
+// into Thread's action bar (#65): an unclaimed queued ticket renders both
+// buttons without disabled, and a claimed ticket renders both disabled with
+// the claim note.
+func TestThreadRendersTicketActions(t *testing.T) {
+	t.Parallel()
+	s, err := store.Open(t.Context(), filepath.Join(t.TempDir(), "zing.db"))
+	if err != nil {
+		t.Fatalf("store.Open: %v", err)
+	}
+	t.Cleanup(func() { _ = s.Close() })
+	c := &console{store: s}
+
+	projectID, err := s.EnsureProject(t.Context(), store.Project{
+		Name: "thread-actions", RepoURL: "https://example.invalid/thread-actions.git",
+		LocalPath: t.TempDir(), Tracker: testGitHubTracker,
+	})
+	if err != nil {
+		t.Fatalf("EnsureProject: %v", err)
+	}
+	ticketID, err := s.InsertTicket(t.Context(), store.Ticket{
+		ProjectID: projectID, TrackerRef: "41", Title: "restart me", State: testQueuedState,
+	})
+	if err != nil {
+		t.Fatalf("InsertTicket: %v", err)
+	}
+
+	render := func() string {
+		t.Helper()
+		comp, compErr := c.threadComponent(t.Context(), ticketID)
+		if compErr != nil {
+			t.Fatalf("threadComponent: %v", compErr)
+		}
+		var sb strings.Builder
+		if renderErr := comp.Render(t.Context(), &sb); renderErr != nil {
+			t.Fatalf("Render: %v", renderErr)
+		}
+		return sb.String()
+	}
+
+	got := render()
+	if !strings.Contains(got, "ticket-abandon") || !strings.Contains(got, "ticket-restart") {
+		t.Errorf("unclaimed ticket missing action buttons; got:\n%s", got)
+	}
+	if strings.Contains(got, "disabled") {
+		t.Errorf("unclaimed ticket renders disabled; got:\n%s", got)
+	}
+
+	expires := time.Now().Add(10 * time.Minute).UTC().Truncate(time.Second)
+	claimed, err := s.Claim(t.Context(), ticketID, "some-owner", expires)
+	if err != nil {
+		t.Fatalf("Claim: %v", err)
+	}
+	if !claimed {
+		t.Fatal("Claim: got false, want true")
+	}
+
+	got = render()
+	if !strings.Contains(got, "ticket-abandon") || !strings.Contains(got, "ticket-restart") {
+		t.Errorf("claimed ticket missing action buttons; got:\n%s", got)
+	}
+	if strings.Count(got, "disabled") != 2 {
+		t.Errorf("claimed ticket want 2 disabled buttons; got:\n%s", got)
+	}
+	if !strings.Contains(got, store.AbandonClaimedReason) {
+		t.Errorf("claimed ticket missing claim note; got:\n%s", got)
+	}
+}
+
 // projectSectionsRefs returns tickets' tracker refs, in order, for
 // TestProjectSections' assertions.
 func projectSectionsRefs(tickets []store.Ticket) []string {

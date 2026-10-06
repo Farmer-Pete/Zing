@@ -211,6 +211,24 @@ func actionsFor(t store.Ticket, liveSuccessor bool) templates.TicketActions {
 	}
 }
 
+// ticketActions builds t's action bar (#65): every state but abandoned
+// skips the extra read and calls actionsFor directly; an abandoned ticket
+// looks up its own base ref to tell whether a live successor already
+// exists at it (console.restartTicket's own ErrRefLive case, read here
+// instead of written).
+func (c *console) ticketActions(ctx context.Context, t store.Ticket) (templates.TicketActions, error) {
+	if t.State != ticketStateAbandoned {
+		return actionsFor(t, false), nil
+	}
+	base, _ := store.SplitAttemptRef(t.TrackerRef)
+	cur, found, err := c.store.TicketByRef(ctx, t.ProjectID, base)
+	if err != nil {
+		return templates.TicketActions{}, fmt.Errorf("console: ticket actions for ticket %d: ticket by ref %s: %w", t.ID, base, err)
+	}
+	liveSuccessor := found && cur.ID != t.ID && cur.State != ticketStateAbandoned
+	return actionsFor(t, liveSuccessor), nil
+}
+
 // mainComponent builds the #main region for the current view (design
 // section 6.3, 6.5): Inbox, Recent, Feed, and Project each read straight
 // from their store method; Thread additionally reads the ticket and its
@@ -321,7 +339,7 @@ func displayFeedMessages(messages []store.MessageRow) ([]templates.FeedRow, erro
 // 6.6, carried over from Package 3's patchThread guard).
 func (c *console) threadComponent(ctx context.Context, open int64) (templ.Component, error) {
 	if open <= 0 {
-		return templates.Thread(nil, nil, templates.WaitProgress{}, ""), nil
+		return templates.Thread(nil, nil, templates.WaitProgress{}, "", templates.TicketActions{}), nil
 	}
 	ticket, err := c.store.GetTicket(ctx, open)
 	switch {
@@ -355,9 +373,13 @@ func (c *console) threadComponent(ctx context.Context, open int64) (templ.Compon
 		if bannerErr != nil {
 			return nil, bannerErr
 		}
-		return templates.Thread(&ticket, threadRows, buildWaitProgress(&ticket, rows, conv), banner), nil
+		actions, actionsErr := c.ticketActions(ctx, ticket)
+		if actionsErr != nil {
+			return nil, actionsErr
+		}
+		return templates.Thread(&ticket, threadRows, buildWaitProgress(&ticket, rows, conv), banner, actions), nil
 	case errors.Is(err, sql.ErrNoRows):
-		return templates.Thread(nil, nil, templates.WaitProgress{}, ""), nil
+		return templates.Thread(nil, nil, templates.WaitProgress{}, "", templates.TicketActions{}), nil
 	default:
 		return nil, err
 	}
