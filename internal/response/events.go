@@ -38,6 +38,39 @@ type OwnerEditEvent struct {
 	Reason string `json:"reason,omitempty" doc:"the judge's reason when a handler commit applied an accepted amendment; empty for every console edit"`
 }
 
+// StaleBaseEvent is the stale_base typed event's payload (messages table,
+// event_kind "stale_base"): a step that used the last fetched base
+// because the fetch itself failed, once per step and sha (#68 follow-up).
+type StaleBaseEvent struct {
+	Step   string `json:"step" jsonschema:"enum=building,enum=reviewing,enum=judging,enum=shipping"`
+	Branch string `json:"branch" jsonschema:"minLength=1,maxLength=255"`
+	SHA    string `json:"sha" jsonschema:"pattern=^[0-9a-f]{40}$"`
+	Reason string `json:"reason" jsonschema:"enum=no_origin,enum=remote_ref_missing,enum=auth,enum=network,enum=fetch_failed"`
+}
+
+// StaleBaseLine renders a stale_base event as one owner-facing feed
+// sentence. An unknown reason reads as the generic fetch_failed phrase.
+func StaleBaseLine(e StaleBaseEvent) string {
+	var why string
+	switch e.Reason {
+	case "no_origin":
+		why = "origin is missing or is not a git repository"
+	case "remote_ref_missing":
+		why = "origin has no branch " + e.Branch
+	case "auth":
+		why = "origin refused the credentials"
+	case "network":
+		why = "origin could not be reached"
+	default:
+		why = "git fetch failed"
+	}
+	sha := e.SHA
+	if len(sha) > 7 {
+		sha = sha[:7]
+	}
+	return "Used the last fetched " + e.Branch + " at " + sha + " for " + e.Step + ": " + why + "."
+}
+
 // OwnerEditLine renders an owner_edit event as one owner-facing feed
 // sentence.
 func OwnerEditLine(e OwnerEditEvent) string {
