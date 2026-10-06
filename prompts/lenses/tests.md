@@ -3,6 +3,10 @@ Check:
 - Every new or changed cut point has an integration test.
 - Unit tests are limited to parsers and pure functions.
 - Mocks are limited to cut points, and each is named.
+- If a plan tests only helpers and leaves the changed wiring, such as
+  a handler, a callback, or another call site with no test harness,
+  with no test of its decision, that is a major finding. The fix
+  names the pure function to extract and the test for it.
 - For a bug, the first test is the regression test, at a seam that
   reproduces the real bug pattern.
 - Every task names the test written before it.

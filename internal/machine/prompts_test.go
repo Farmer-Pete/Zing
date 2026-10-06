@@ -278,6 +278,34 @@ func TestSimplificationLensProposesSplittingOversizedTasks(t *testing.T) {
 	}
 }
 
+// testsLensPureFunctionLine is the bullet prompts/lenses/tests.md adds to
+// its "In a plan" section (#111): plan review flags changed wiring whose
+// decision has no test.
+const testsLensPureFunctionLine = "If a plan tests only helpers and leaves the changed wiring, " +
+	"such as a handler, a callback, or another call site with no test harness, " +
+	"with no test of its decision, that is a major finding. " +
+	"The fix names the pure function to extract and the test for it."
+
+// TestTestsLensRequiresPureFunctionSeam proves prompts/lenses/tests.md
+// carries the pure-function-seam bullet in its "In a plan" section, before
+// "In code" (#111): deleting or rewording the line would otherwise pass
+// every other test.
+func TestTestsLensRequiresPureFunctionSeam(t *testing.T) {
+	t.Parallel()
+	const path = "prompts/lenses/tests.md"
+	text := unwrapped(t, path)
+	inPlanIdx := strings.Index(text, "In a plan")
+	inCodeIdx := strings.Index(text, "In code")
+	lineIdx := strings.Index(text, testsLensPureFunctionLine)
+	anyMissing := inPlanIdx < 0 || inCodeIdx < 0 || lineIdx < 0
+	if anyMissing {
+		t.Fatalf("%s: In a plan at %d, In code at %d, pure-function line at %d, want all present", path, inPlanIdx, inCodeIdx, lineIdx)
+	}
+	if inPlanIdx >= lineIdx || lineIdx >= inCodeIdx {
+		t.Errorf("%s: want the pure-function line between In a plan and In code, got In a plan=%d, line=%d, In code=%d", path, inPlanIdx, lineIdx, inCodeIdx)
+	}
+}
+
 // TestBuildPromptPlaceholders checks that prompts/build.md carries each of
 // its five placeholders exactly once, so ForBuild's single replacement of
 // each cannot silently miss or double up.
