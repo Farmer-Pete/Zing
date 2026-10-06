@@ -13,10 +13,15 @@ import (
 	"fmt"
 	"log/slog"
 	"slices"
+	"strconv"
 	"strings"
 
 	"zing/internal/response"
 )
+
+// ticketStateAbandoned is the terminal state AbandonTicket and
+// RetireAbandonedRef both write and check against.
+const ticketStateAbandoned = "abandoned"
 
 // abandonableStates is the one list of states the owner can abandon from.
 // CanAbandon and AbandonTicket both read it, so they cannot drift.
@@ -113,4 +118,94 @@ func (s *Store) AbandonTicket(ctx context.Context, ticketID int64, reason string
 
 	slog.InfoContext(ctx, "ticket abandoned", "ticket_id", ticketID, "from", state, "reason", reason)
 	return nil
+}
+
+// attemptSep separates a ref's base from the attempt number a restart or
+// pickup gave it: RetireAbandonedRef writes "BASE" + attemptSep + "K".
+const attemptSep = "-abandoned-"
+
+// SplitAttemptRef splits a tracker_ref into the issue ref and the attempt
+// number a restart gave it: "41" is ("41", 0), "41-abandoned-2" is ("41", 2).
+// A suffix that is not a positive decimal with no leading zero is not an
+// attempt, and the whole ref comes back with attempt 0.
+func SplitAttemptRef(ref string) (base string, attempt int) {
+	i := strings.LastIndex(ref, attemptSep)
+	if i == -1 || i == 0 {
+		return ref, 0
+	}
+	digits := ref[i+len(attemptSep):]
+	if digits == "" || digits[0] == '0' {
+		return ref, 0
+	}
+	for _, r := range digits {
+		if r < '0' || r > '9' {
+			return ref, 0
+		}
+	}
+	n, err := strconv.Atoi(digits)
+	if err != nil {
+		return ref, 0
+	}
+	return ref[:i], n
+}
+
+// ErrRefLive is RetireAbandonedRef's refusal when a live (non-abandoned)
+// ticket holds ref.
+var ErrRefLive = errors.New("tracker ref is held by a live ticket")
+
+// RetireAbandonedRef renames the abandoned ticket holding ref in projectID
+// to ref-abandoned-K, K one past the highest attempt already used for ref,
+// so a new ticket can take ref under UNIQUE(project_id, tracker_ref). No
+// ticket at ref returns "", nil. A non-abandoned holder returns ErrRefLive
+// and changes nothing.
+func (s *Store) RetireAbandonedRef(ctx context.Context, projectID int64, ref string) (string, error) {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return "", fmt.Errorf("retire abandoned ref %s: begin tx: %w", ref, err)
+	}
+	defer rollback(tx)
+
+	var ticketID int64
+	var state string
+	err = tx.QueryRowContext(ctx, `SELECT id, state FROM tickets WHERE project_id = ? AND tracker_ref = ?`, projectID, ref).Scan(&ticketID, &state)
+	switch {
+	case errors.Is(err, sql.ErrNoRows):
+		return "", nil
+	case err != nil:
+		return "", fmt.Errorf("retire abandoned ref %s: load: %w", ref, err)
+	}
+	if state != ticketStateAbandoned {
+		return "", ErrRefLive
+	}
+
+	rows, err := tx.QueryContext(ctx, `SELECT tracker_ref FROM tickets WHERE project_id = ? AND tracker_ref LIKE ?`, projectID, ref+attemptSep+"%")
+	if err != nil {
+		return "", fmt.Errorf("retire abandoned ref %s: list attempts: %w", ref, err)
+	}
+	defer rows.Close()
+	highest := 0
+	for rows.Next() {
+		var existingRef string
+		if err = rows.Scan(&existingRef); err != nil {
+			return "", fmt.Errorf("retire abandoned ref %s: scan attempt: %w", ref, err)
+		}
+		if base, attempt := SplitAttemptRef(existingRef); base == ref && attempt > highest {
+			highest = attempt
+		}
+	}
+	if err = rows.Err(); err != nil {
+		return "", fmt.Errorf("retire abandoned ref %s: list attempts: %w", ref, err)
+	}
+
+	newRef := fmt.Sprintf("%s%s%d", ref, attemptSep, highest+1)
+	if _, err = tx.ExecContext(ctx, `UPDATE tickets SET tracker_ref = ? WHERE id = ? AND state = 'abandoned'`, newRef, ticketID); err != nil {
+		return "", fmt.Errorf("retire abandoned ref %s: update: %w", ref, err)
+	}
+
+	if err = tx.Commit(); err != nil {
+		return "", fmt.Errorf("retire abandoned ref %s: commit: %w", ref, err)
+	}
+
+	slog.InfoContext(ctx, "abandoned ref retired", "ticket_id", ticketID, "project_id", projectID, "ref", ref, "new_ref", newRef)
+	return newRef, nil
 }

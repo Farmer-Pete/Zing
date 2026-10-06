@@ -179,3 +179,85 @@ func TestAbandonTicket_RefusesClaimedAndTerminal(t *testing.T) {
 		}
 	}
 }
+
+// TestSplitAttemptRef proves SplitAttemptRef's table of cases (#65): a plain
+// ref has attempt 0, a BASE-abandoned-K ref gives (BASE, K), and anything
+// that only looks like one (a zero, a leading zero, a non-digit, or an empty
+// or missing base) comes back as itself with attempt 0.
+func TestSplitAttemptRef(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		ref         string
+		base        string
+		wantAttempt int
+	}{
+		{"41", "41", 0},
+		{"41-abandoned-1", "41", 1},
+		{"41-abandoned-12", "41", 12},
+		{"41-abandoned-0", "41-abandoned-0", 0},
+		{"41-abandoned-", "41-abandoned-", 0},
+		{"41-abandoned-x", "41-abandoned-x", 0},
+		{"demo-1", "demo-1", 0},
+		{"a-abandoned-2-abandoned-3", "a-abandoned-2", 3},
+		{"-abandoned-1", "-abandoned-1", 0},
+	}
+	for _, tc := range cases {
+		base, attempt := SplitAttemptRef(tc.ref)
+		if base != tc.base || attempt != tc.wantAttempt {
+			t.Errorf("SplitAttemptRef(%q) = (%q, %d), want (%q, %d)", tc.ref, base, attempt, tc.base, tc.wantAttempt)
+		}
+	}
+}
+
+// TestRetireAbandonedRef_NumbersAttempts proves RetireAbandonedRef's three
+// outcomes (#65): it numbers a fresh attempt past the highest already used,
+// it is a no-op when nothing holds ref, and it refuses a live holder.
+func TestRetireAbandonedRef_NumbersAttempts(t *testing.T) {
+	t.Parallel()
+	s := newTestStore(t)
+	ctx := t.Context()
+
+	projectID, first := seedQueuedTicket(t, s, "41")
+	setTicketState(t, s, first, testStateAbandoned)
+	_, second := seedQueuedTicket(t, s, "41-abandoned-1")
+	setTicketState(t, s, second, testStateAbandoned)
+
+	newRef, err := s.RetireAbandonedRef(ctx, projectID, "41")
+	if err != nil {
+		t.Fatalf("RetireAbandonedRef: %v", err)
+	}
+	if newRef != "41-abandoned-2" {
+		t.Errorf("RetireAbandonedRef = %q, want %q", newRef, "41-abandoned-2")
+	}
+	got, err := s.GetTicket(ctx, first)
+	if err != nil {
+		t.Fatalf("GetTicket: %v", err)
+	}
+	if got.TrackerRef != "41-abandoned-2" {
+		t.Errorf("ticket ref = %q, want %q", got.TrackerRef, "41-abandoned-2")
+	}
+
+	newRef, err = s.RetireAbandonedRef(ctx, projectID, "41")
+	if err != nil {
+		t.Fatalf("RetireAbandonedRef (second call): %v", err)
+	}
+	if newRef != "" {
+		t.Errorf("RetireAbandonedRef (second call) = %q, want empty", newRef)
+	}
+
+	_, liveTicket := seedQueuedTicket(t, s, "7")
+	newRef, err = s.RetireAbandonedRef(ctx, projectID, "7")
+	if !errors.Is(err, ErrRefLive) {
+		t.Fatalf("RetireAbandonedRef(live) err = %v, want ErrRefLive", err)
+	}
+	if newRef != "" {
+		t.Errorf("RetireAbandonedRef(live) = %q, want empty", newRef)
+	}
+	got, err = s.GetTicket(ctx, liveTicket)
+	if err != nil {
+		t.Fatalf("GetTicket(live): %v", err)
+	}
+	if got.TrackerRef != "7" {
+		t.Errorf("live ticket ref = %q, want unchanged %q", got.TrackerRef, "7")
+	}
+}
