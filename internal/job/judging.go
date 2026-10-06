@@ -829,6 +829,7 @@ func (h judgeHandler) resumeAnswered(ctx context.Context, t store.Ticket, d Deps
 		return store.HandlerCommit{}, capErr
 	}
 	if capped {
+		slog.Debug("judging entry decision", "ticket_id", t.ID, "session_id", sess.ID, "step", "answer_resume_capped", "session_state", sessionStateName(state))
 		return store.HandlerCommit{}, ErrNoAction
 	}
 

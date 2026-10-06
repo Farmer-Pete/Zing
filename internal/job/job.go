@@ -315,9 +315,9 @@ func resumeCharge(latest store.Run) (bump, gate bool) {
 // answerResumeCapped is answerResume's cap check alone, with no "free
 // answer resume" log: a caller that must check several sessions before
 // committing to any of them (continueRound, one per asking lens) calls
-// this first for every one, and only logs (logFreeAnswerResume) once it
-// knows none of them is capped, so a later capped session's ErrNoAction
-// never leaves an earlier session's log line for a resume that never ran.
+// this first for every one, and only logs once it knows none of them is
+// capped, so a later capped session's ErrNoAction never leaves an earlier
+// session's log line for a resume that never ran.
 func answerResumeCapped(ctx context.Context, t store.Ticket, d Deps, sess store.Session, state store.SessionState) (capped bool, err error) {
 	if state != store.SessionExhausted {
 		return false, nil
@@ -327,14 +327,6 @@ func answerResumeCapped(ctx context.Context, t store.Ticket, d Deps, sess store.
 		return false, fmt.Errorf("job: answer resume: has escalation: %w", hasErr)
 	}
 	return has, nil
-}
-
-// logFreeAnswerResume is answerResume's own "free answer resume" log line,
-// factored out so a caller that must decide capped for several sessions
-// before logging any of them (continueRound) can log each only after every
-// one of them is confirmed not capped.
-func logFreeAnswerResume(t store.Ticket, sess store.Session, round store.Round) {
-	slog.Info("free answer resume", "ticket_id", t.ID, "session_id", sess.ID, "question_ids", questionIDs(round))
 }
 
 // answerResume is how every post-seal resume that delivers the owner's
@@ -351,7 +343,7 @@ func answerResume(ctx context.Context, t store.Ticket, d Deps, sess store.Sessio
 	if capped {
 		return true, nil
 	}
-	logFreeAnswerResume(t, sess, round)
+	slog.Info("free answer resume", "ticket_id", t.ID, "session_id", sess.ID, "question_ids", questionIDs(round))
 	return false, nil
 }
 

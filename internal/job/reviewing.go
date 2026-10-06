@@ -784,6 +784,7 @@ func (h reviewingHandler) discuss(ctx context.Context, t store.Ticket, d Deps, g
 			return store.HandlerCommit{}, capErr
 		}
 		if capped {
+			slog.Debug("reviewing entry decision", "ticket_id", t.ID, "session_id", sess.ID, "step", "discuss_resume_capped", "session_state", sessionStateName(state))
 			return store.HandlerCommit{}, ErrNoAction
 		}
 		bump, gate = false, false
@@ -2333,7 +2334,7 @@ func (h reviewingHandler) continueRound(ctx context.Context, t store.Ticket, d D
 			return store.HandlerCommit{}, capErr
 		}
 		if capped {
-			slog.Debug("reviewing entry decision", "ticket_id", t.ID, "step", "continue_resume_capped", "session_state", sessionStateName(state))
+			slog.Debug("reviewing entry decision", "ticket_id", t.ID, "step", "continue_resume_capped", "session_state", sessionStateName(state), "session_id", sess.ID, "lens", *run.Lens)
 			return store.HandlerCommit{}, ErrNoAction
 		}
 		answers, ansErr := renderRoundAnswers(r)
@@ -2346,7 +2347,7 @@ func (h reviewingHandler) continueRound(ctx context.Context, t store.Ticket, d D
 		})
 	}
 	for i := range askers {
-		logFreeAnswerResume(t, askers[i].sess, askers[i].round)
+		slog.Info("free answer resume", "ticket_id", t.ID, "session_id", askers[i].sess.ID, "question_ids", questionIDs(askers[i].round))
 	}
 
 	diff, err := proj.Orch.Diff(ctx, wt, sha)

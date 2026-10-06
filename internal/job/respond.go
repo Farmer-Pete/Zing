@@ -815,6 +815,7 @@ func (h shipHandler) resumeRespondAnswered(ctx context.Context, t store.Ticket, 
 		return store.HandlerCommit{}, capErr
 	}
 	if capped {
+		slog.Debug("shipping entry decision", "ticket_id", t.ID, "session_id", sess.ID, "step", "respond_answer_resume_capped", "session_state", sessionStateName(state))
 		return store.HandlerCommit{}, ErrNoAction
 	}
 
