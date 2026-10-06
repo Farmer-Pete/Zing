@@ -9,7 +9,9 @@ package console
 
 import (
 	"context"
+	"database/sql"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
 
@@ -19,6 +21,19 @@ import (
 // reasonConsoleAbandon is the state message AbandonTicket writes when the
 // owner abandons a ticket directly (as opposed to a restart's own reason).
 const reasonConsoleAbandon = "owner abandoned from the console"
+
+// reasonConsoleRestart is the state message AbandonTicket writes on the old
+// ticket when the owner restarts it from planning.
+const reasonConsoleRestart = "owner restarted from planning"
+
+// ticketStateDone and ticketStateEscalated are the two terminal states
+// restartTicket refuses outright: neither is abandonable (store.CanAbandon)
+// nor, unlike ticketStateAbandoned (pickup.go), does it ever make sense to
+// restart one.
+const (
+	ticketStateDone      = "done"
+	ticketStateEscalated = "escalated"
+)
 
 // actionRefusal is a console action's own refusal: Status is the HTTP
 // status to answer with, Reason is the exact response body. Unlike
@@ -85,4 +100,87 @@ func (c *console) handleAbandon(w http.ResponseWriter, r *http.Request) {
 // in the console behind one such function.
 func (c *console) abandonTicket(ctx context.Context, id int64) error {
 	return c.store.AbandonTicket(ctx, id, reasonConsoleAbandon)
+}
+
+// handleRestart is POST /tickets/{id}/restart: the owner's Restart from
+// planning action. 200 with {"ticket":NEW-ID} and a bus publish on
+// success; a refusal answers its status with the reason as the body
+// (writeActionError).
+func (c *console) handleRestart(w http.ResponseWriter, r *http.Request) {
+	id, ok := parsePositiveID(r.PathValue("id"))
+	if !ok {
+		http.Error(w, "bad request", http.StatusBadRequest)
+		return
+	}
+
+	newID, err := c.restartTicket(r.Context(), id)
+	if err != nil {
+		c.writeActionError(w, "restart", id, err)
+		return
+	}
+
+	c.bus.Publish()
+	w.Header().Set("Content-Type", "application/json")
+	fmt.Fprintf(w, `{"ticket":%d}`, newID)
+}
+
+// restartTicket is the owner's Restart from planning action: the one
+// function its route (handleRestart) calls. It reuses the pickup path
+// (fetchIssue, insertFresh): it re-reads the issue, refuses a closed,
+// missing, or pull-request ref with the old ticket untouched, abandons the
+// old ticket (unless it is already abandoned), and inserts a fresh queued
+// ticket for the same ref.
+func (c *console) restartTicket(ctx context.Context, id int64) (int64, error) {
+	t, err := c.store.GetTicket(ctx, id)
+	if errors.Is(err, sql.ErrNoRows) {
+		return 0, &actionRefusal{Status: http.StatusNotFound, Reason: fmt.Sprintf("no ticket %d", id)}
+	}
+	if err != nil {
+		return 0, err
+	}
+
+	base, _ := store.SplitAttemptRef(t.TrackerRef)
+
+	switch {
+	case t.ClaimOwner != nil:
+		return 0, &actionRefusal{Status: http.StatusConflict, Reason: store.AbandonClaimedReason}
+	case t.State == ticketStateDone || t.State == ticketStateEscalated:
+		return 0, &actionRefusal{Status: http.StatusConflict, Reason: fmt.Sprintf("ticket %d is %s; only a live or abandoned ticket restarts", id, t.State)}
+	case t.State == ticketStateAbandoned:
+		cur, found, curErr := c.store.TicketByRef(ctx, t.ProjectID, base)
+		if curErr != nil {
+			return 0, curErr
+		}
+		if found && cur.State != ticketStateAbandoned {
+			return 0, &actionRefusal{Status: http.StatusConflict, Reason: fmt.Sprintf("issue #%s is already ticket %d", base, cur.ID)}
+		}
+	}
+
+	trackerProject, found, err := c.projectName(ctx, t.ProjectID)
+	if err != nil {
+		return 0, err
+	}
+	if !found {
+		return 0, fmt.Errorf("console: restart ticket %d: project %d not configured", id, t.ProjectID)
+	}
+
+	tk, err := c.fetchIssue(ctx, trackerProject, base)
+	if err != nil {
+		return 0, err
+	}
+
+	if t.State != ticketStateAbandoned {
+		if abandonErr := c.store.AbandonTicket(ctx, id, reasonConsoleRestart); abandonErr != nil {
+			return 0, abandonErr
+		}
+	}
+
+	newID, retiredRef, err := c.insertFresh(ctx, t.ProjectID, trackerProject, tk)
+	if err != nil {
+		return 0, err
+	}
+
+	slog.Info("console: ticket restarted",
+		"old_ticket_id", id, "new_ticket_id", newID, "project_id", t.ProjectID, "ref", base, "retired_ref", retiredRef)
+	return newID, nil
 }
