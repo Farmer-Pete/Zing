@@ -970,7 +970,10 @@ func checkReady(t store.Ticket, resp *response.ReadyResponse, fsys fs.FS) ([]*re
 // check doesn't grep that same line, since a bare go test exits 0 whether
 // or not the test skipped; that second rule still fires on a negated skip
 // then, since only the host-sandbox exemption's affirmative check is
-// narrowed.
+// narrowed. A scenario of kind host runs on the owner's machine at judging,
+// outside any sandbox (#137), so it is exempt from the /tmp and
+// nested-sandbox refusals below; it still needs a non-blank check, and it
+// still obeys the expected-skip rule.
 func checkScenarioShape(scenarios []response.Scenario) []*response.PathError {
 	var errs []*response.PathError
 	if n := len(scenarios); n < minReadyScenarios || n > maxReadyScenarios {
@@ -986,11 +989,33 @@ func checkScenarioShape(scenarios []response.Scenario) []*response.PathError {
 				Msg:  "then must not be empty",
 			})
 		}
+		host := sc.Kind == response.ScenarioKindHost
+		hasCheck := strings.TrimSpace(sc.Check) != ""
+		// A host check runs on the owner's machine at judging, outside any
+		// sandbox, so the /tmp and nested-sandbox refusals below do not
+		// apply to it; it must still have a check to run.
+		if host && !hasCheck {
+			errs = append(errs, &response.PathError{
+				Path: "scenarios/" + indexedScenario(i) + "/check",
+				Msg:  response.HostScenarioNeedsCheck,
+			})
+		}
+		// A host check runs unsandboxed with only the gate's own reading of
+		// its rendered text as approval, so a control or Unicode format
+		// character (a bidi override, a zero-width character) that could
+		// make the rendered command differ from what the shell runs is
+		// refused here too.
+		if host && hasCheck && response.HostCheckUnsafe(sc.Check) {
+			errs = append(errs, &response.PathError{
+				Path: "scenarios/" + indexedScenario(i) + "/check",
+				Msg:  response.HostCheckUnsafeMsg,
+			})
+		}
 		// Zing re-runs every check under the build sandbox, which denies
 		// writes to the host /tmp (bug fix: a live judge round failed every
 		// check that built into /tmp, though the judge, which rewrote the
 		// path, saw them pass).
-		if strings.Contains(sc.Check, "/tmp/") {
+		if !host && strings.Contains(sc.Check, "/tmp/") {
 			errs = append(errs, &response.PathError{
 				Path: "scenarios/" + indexedScenario(i) + "/check",
 				Msg:  "check must not write under /tmp, which the sandbox denies; use \"$TMPDIR\" instead",
@@ -1001,7 +1026,6 @@ func checkScenarioShape(scenarios []response.Scenario) []*response.PathError {
 		// the sandbox probes skip and exit 0 (#78). A check that greps the
 		// "--- SKIP:" line asserts the skip itself, so it proves the probe
 		// skipped rather than hiding behind the sandbox's own skip.
-		hasCheck := strings.TrimSpace(sc.Check) != ""
 		expectsSkip := skipWord.MatchString(sc.Then)
 		assertsSkip := strings.Contains(sc.Check, skipLine)
 		startsSeatbelt := strings.Contains(sc.Check, "sandbox-exec")
@@ -1021,7 +1045,7 @@ func checkScenarioShape(scenarios []response.Scenario) []*response.PathError {
 		// expects it (affirmsSkip); a skip the then doesn't name, or
 		// negates, still hides the behavior under test.
 		exemptSandboxProbe := runsSandboxProbes && assertsSkip && affirmsSkip
-		if startsSeatbelt || (runsSandboxProbes && !exemptSandboxProbe) {
+		if !host && (startsSeatbelt || (runsSandboxProbes && !exemptSandboxProbe)) {
 			errs = append(errs, &response.PathError{
 				Path: "scenarios/" + indexedScenario(i) + "/check",
 				Msg:  hostSandboxCheckMsg,

@@ -13,6 +13,11 @@
       <when>a client sends POST /healthz</when>
       <then>the response is 405, since only GET is registered for the route</then>
     </scenario>
+    <scenario id="s3" kind="host" check="curl -sf http://127.0.0.1:8080/healthz">
+      <given>zing serve is running on the owner's machine</given>
+      <when>the owner's machine sends GET /healthz to the live server</when>
+      <then>the response is 200 with body ok</then>
+    </scenario>
   </scenarios>
   <plan>
     <overview>

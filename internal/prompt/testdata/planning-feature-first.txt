@@ -31,16 +31,20 @@ the next step.
 4. Scenarios. Write acceptance scenarios in user terms: given, when, then.
    Each then is observable from outside the code: a command's output, a
    response, a file, a UI state. Two at least, thirty at most. Mark each
-   behavior, negative, or performance. Add a check command where one
+   behavior, negative, performance, or host. Add a check command where one
    command can decide it. Zing runs every check inside the build sandbox,
    which cannot start another sandbox. Write temporary files under
    "$TMPDIR", never /tmp. Write only givens and checks an agent inside that
    sandbox can observe: no live zing serve, no machine outside the sandbox,
    and none of the owner's own config such as ~/.codex, ~/.claude, or the
-   console. Quote a check's glob, such as --include='*.go', and join a
-   prose file's lines before a multi-word grep, such as tr -s '[:space:]'
-   ' ' < FILE | grep -qF 'two words'. Done when a stranger could run every
-   scenario and say pass or fail.
+   console. The exception is kind host. Zing runs a host scenario's check
+   on the owner's machine at judging, outside any sandbox, once the owner
+   approves it at the gate. Use it for a live sandbox probe, a live zing
+   serve, or wall-clock timing. A host scenario needs a check. Quote a
+   check's glob, such as --include='*.go', and join a prose file's lines
+   before a multi-word grep, such as tr -s '[:space:]' ' ' < FILE | grep
+   -qF 'two words'. Done when a stranger could run every scenario and say
+   pass or fail.
 
 5. Cut. Find the 20 percent of the work that gives 80 percent of the
    value. That is the working demo: the smallest slice that runs end to
@@ -279,7 +283,7 @@ Body: Users want a dark theme toggle in settings.
     <claim kind="..." verdict="..." evidence="...">...</claim> <!-- Claim, one or more; kind: ClaimKind, one of: code | env; verdict: ClaimVerdict, one of: true | false | unchecked; evidence: string, for a code claim, a path you read, with a line where one applies -->
   </claims>
   <scenarios>
-    <scenario id="..." kind="..." check="..."> <!-- Scenario, two to 30; id: string, must match ^s[0-9]+$; kind: ScenarioKind, one of: behavior | negative | performance; check: string, optional, one command whose exit code decides it -->
+    <scenario id="..." kind="..." check="..."> <!-- Scenario, two to 30; id: string, must match ^s[0-9]+$; kind: ScenarioKind, one of: behavior | negative | performance | host; check: string, optional, one command whose exit code decides it -->
       <given>...</given> <!-- string, the starting state -->
       <when>...</when> <!-- string, the action -->
       <then>...</then> <!-- string, what a stranger would observe, from outside the code -->

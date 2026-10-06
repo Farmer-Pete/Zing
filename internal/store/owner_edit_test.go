@@ -56,7 +56,7 @@ func readScenarioPayload(t *testing.T, s *Store, ticketID int64, id string) []by
 }
 
 // scenarioCheck reads back ticketID's scenario id's check_cmd field.
-func scenarioCheck(t *testing.T, s *Store, ticketID int64, id string) string {
+func scenarioCheck(t *testing.T, s *Store, ticketID int64, id string) string { //nolint:unparam // every call site below reads "s1", but the helper mirrors readScenarioPayload's own general id parameter
 	t.Helper()
 	var sc response.Scenario
 	if err := json.Unmarshal(readScenarioPayload(t, s, ticketID, id), &sc); err != nil {
@@ -413,6 +413,56 @@ func TestOwnerEdit_RefusesSchemaBreakingEdit(t *testing.T) {
 	}
 	if n, err := s.CountEvents(t.Context(), ticketID, EventKindOwnerEdit, EventFilter{}); err != nil || n != 0 {
 		t.Errorf("owner_edit events = %d (err %v), want 0", n, err)
+	}
+}
+
+// TestOwnerEdit_HostScenarioEmptyCheckRefused proves a host scenario's
+// check cannot be blanked: the edit is refused invalid with
+// response.HostScenarioNeedsCheck, nothing changes, and a non-blank check
+// still succeeds.
+func TestOwnerEdit_HostScenarioEmptyCheckRefused(t *testing.T) {
+	t.Parallel()
+	s := newTestStore(t)
+	_, ticketID := seedQueuedTicket(t, s, "1")
+	seedSealedScenario(t, s, ticketID)
+	if _, err := s.db.ExecContext(t.Context(),
+		`UPDATE artifacts SET payload = json_set(payload, '$.kind', 'host')
+		 WHERE ticket_id = ? AND type = 'scenario' AND json_extract(payload, '$.id') = ?`,
+		ticketID, "s1",
+	); err != nil {
+		t.Fatalf("set scenario s1 kind to host: %v", err)
+	}
+	before := readScenarioPayload(t, s, ticketID, "s1")
+
+	err := s.OwnerEdit(t.Context(), OwnerEditRequest{
+		TicketID: ticketID, Target: OwnerEditScenario, Ref: "s1", Action: OwnerEditActionEdit,
+		Check: new("  "),
+	})
+	refusal, ok := errors.AsType[*OwnerEditError](err)
+	if !ok {
+		t.Fatalf("OwnerEdit(blank check on host scenario) error = %v (%T), want *OwnerEditError", err, err)
+	}
+	if refusal.Code != OwnerEditCodeInvalid {
+		t.Errorf("code = %q, want %q", refusal.Code, OwnerEditCodeInvalid)
+	}
+	if refusal.Reason != response.HostScenarioNeedsCheck {
+		t.Errorf("reason = %q, want %q", refusal.Reason, response.HostScenarioNeedsCheck)
+	}
+	if after := readScenarioPayload(t, s, ticketID, "s1"); !bytes.Equal(after, before) {
+		t.Errorf("payload = %s, want unchanged %s", after, before)
+	}
+	if events := ownerEditEvents(t, s, ticketID); len(events) != 0 {
+		t.Errorf("owner_edit events = %d, want 0", len(events))
+	}
+
+	if err := s.OwnerEdit(t.Context(), OwnerEditRequest{
+		TicketID: ticketID, Target: OwnerEditScenario, Ref: "s1", Action: OwnerEditActionEdit,
+		Check: new("go test ./x"),
+	}); err != nil {
+		t.Fatalf("OwnerEdit(non-blank check on host scenario): %v", err)
+	}
+	if got := scenarioCheck(t, s, ticketID, "s1"); got != "go test ./x" {
+		t.Errorf("check_cmd = %q, want %q", got, "go test ./x")
 	}
 }
 

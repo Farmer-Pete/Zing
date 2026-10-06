@@ -247,6 +247,53 @@ func TestCommandRunnerEnvHasNoOAuthToken(t *testing.T) {
 	}
 }
 
+// TestHostCommandRunnerEnv proves the unsandboxed host runner (design
+// section 5, task 2) sets TMPDIR to a fresh, writable directory per run,
+// distinct from the parent's own TMPDIR, removed once Run returns, and
+// otherwise runs with the filtered environment: a secret-shaped variable
+// inherited from this test process must not reach the command. Not
+// parallel: t.Setenv cannot combine with t.Parallel.
+func TestHostCommandRunnerEnv(t *testing.T) {
+	t.Setenv("GITHUB_TOKEN", "secret")
+	r := NewHostCommandRunner()
+	dir := t.TempDir()
+
+	runOnce := func(name string) string {
+		out := filepath.Join(dir, name)
+		exitCode, err := r.Run(t.Context(), dir, "", "echo \"$TMPDIR\" >"+out+" && test -w \"$TMPDIR\" && test -z \"$GITHUB_TOKEN\"", commandRunnerTimeout, CommandIO{})
+		if err != nil {
+			t.Fatalf("Run: %v", err)
+		}
+		if exitCode != 0 {
+			t.Fatalf("exitCode = %d, want 0", exitCode)
+		}
+		got, readErr := os.ReadFile(out)
+		if readErr != nil {
+			t.Fatalf("read %s: %v", out, readErr)
+		}
+		return strings.TrimSpace(string(got))
+	}
+
+	tmp1 := runOnce("1.txt")
+	tmp2 := runOnce("2.txt")
+
+	if tmp1 == "" || tmp2 == "" {
+		t.Fatalf("TMPDIR was empty: %q, %q", tmp1, tmp2)
+	}
+	if tmp1 == tmp2 {
+		t.Errorf("both runs got the same TMPDIR %q, want distinct fresh directories", tmp1)
+	}
+	if tmp1 == os.Getenv("TMPDIR") || tmp2 == os.Getenv("TMPDIR") {
+		t.Error("the run's TMPDIR equals the parent process's own TMPDIR")
+	}
+	if _, statErr := os.Stat(tmp1); !errors.Is(statErr, os.ErrNotExist) {
+		t.Errorf("Stat(%s) after Run = %v, want not-exist", tmp1, statErr)
+	}
+	if _, statErr := os.Stat(tmp2); !errors.Is(statErr, os.ErrNotExist) {
+		t.Errorf("Stat(%s) after Run = %v, want not-exist", tmp2, statErr)
+	}
+}
+
 // TestSandboxedCommandsErrSandbox proves the real CommandRunner refuses to
 // run anything when the sandbox is unavailable and required (design section
 // 5.5).

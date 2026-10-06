@@ -1365,6 +1365,9 @@ func TestJudgePromptCarriesNoPlan(t *testing.T) {
 			t.Errorf("judge prompt contains plan text %q:\n%s", text, req.Prompt)
 		}
 	}
+	if strings.Contains(req.Prompt, "host_checks:") {
+		t.Errorf("judge prompt carries a host_checks input with no host scenario in the cohort:\n%s", req.Prompt)
+	}
 }
 
 // ---- TestJudgePromptCarriesOwnerDecisions -----------------------------------
