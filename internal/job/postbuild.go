@@ -16,9 +16,11 @@ import (
 	"zing/internal/store"
 )
 
-// postBuildPrelude runs steps E, R, and F (design section 5.5). handled is
-// false when none applies and the caller's own state step machine should
-// run instead.
+// postBuildPrelude runs steps E, R, F, and M (design section 5.5, basesync.go
+// task 3): an open base merge request owns the worktree until it lands or
+// closes, exactly as an open fix request does, in every post-build state.
+// handled is false when none applies and the caller's own state step
+// machine should run instead.
 func postBuildPrelude(ctx context.Context, t store.Ticket, d Deps, origin response.EscalationOrigin) (c store.HandlerCommit, handled bool, err error) {
 	slog.Debug("postbuild entry decision", "ticket_id", t.ID, "state", t.State, "origin", string(origin))
 
@@ -37,12 +39,22 @@ func postBuildPrelude(ctx context.Context, t store.Ticket, d Deps, origin respon
 	if err != nil {
 		return store.HandlerCommit{}, false, fmt.Errorf("job: postbuild: open fix request: %w", err)
 	}
-	if !open {
-		return store.HandlerCommit{}, false, nil
+	if open {
+		commit, driveErr := DriveFix(ctx, t, d, req)
+		return commit, true, driveErr
 	}
 
-	commit, driveErr := DriveFix(ctx, t, d, req)
-	return commit, true, driveErr
+	// An open base merge (merge.go) owns the worktree until it lands or
+	// closes, in every post-build state: nothing else may read or move the
+	// branch meanwhile. Only shipping's own POLL ever opened one before
+	// basesync.go's review and judge points; every post-build state can
+	// carry one now, so this prelude drives it for all three rather than
+	// leaving it to shipHandler.Run alone.
+	mc, merging, mergeErr := shipHandler{}.driveOpenMerge(ctx, t, d)
+	if merging || mergeErr != nil {
+		return mc, true, mergeErr
+	}
+	return store.HandlerCommit{}, false, nil
 }
 
 // postBuildEnterFromRounds is steps E and R (design section 5.5), applied in

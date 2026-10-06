@@ -122,12 +122,6 @@ func (h shipHandler) Run(ctx context.Context, t store.Ticket, d Deps) (store.Han
 		return c, err
 	}
 
-	// An open base merge (merge.go) owns the worktree until it lands or
-	// closes: nothing else in shipping may read or move the branch meanwhile.
-	if mc, merging, mergeErr := h.driveOpenMerge(ctx, t, d); merging || mergeErr != nil {
-		return mc, mergeErr
-	}
-
 	rounds, err := d.Store.AnsweredRounds(ctx, t.ID)
 	if err != nil {
 		return store.HandlerCommit{}, fmt.Errorf("job: shipping: answered rounds: %w", err)
@@ -1225,15 +1219,24 @@ func (h shipHandler) pollHeadMismatch(ctx context.Context, t store.Ticket, d Dep
 	return c, nil
 }
 
-// pollCIFailed is design section 8.5 row 4: the shared gate of 8.7, then a
-// ci_log fix request carrying text -- ciRerunDecision's own ciLogTextFrom
-// text, reached once a check's own flaky or no_log re-run budget is
-// already spent (rd.Action rerunFix) -- or loops_exhausted when the gate
-// is already at jobs.respond.max_loops (D14). Rows 5 and 6a's own
+// pollCIFailed is design section 8.5 row 4: the CI point first (overview
+// design, owner's Q1 note) -- CI tests the pull request merged with the
+// base, so a base that moved since this branch last merged it is merged in
+// before anything else, with no shared-path condition, and a fix is asked
+// for only once CI fails again on the merged head -- then the shared gate
+// of 8.7, then a ci_log fix request carrying text -- ciRerunDecision's own
+// ciLogTextFrom text, reached once a check's own flaky or no_log re-run
+// budget is already spent (rd.Action rerunFix) -- or loops_exhausted when
+// the gate is already at jobs.respond.max_loops (D14). Rows 5 and 6a's own
 // merge-question withdrawal has nothing to withdraw in M3 (no code
 // anywhere in this milestone ever writes a "merge asked" or "merge held"
 // marker), so it is not built here.
 func (h shipHandler) pollCIFailed(ctx context.Context, t store.Ticket, d Deps, text string) (store.HandlerCommit, error) {
+	if c, opened, err := baseSync(ctx, t, d, syncPointCI); err != nil || opened {
+		c.ClearPoll = opened
+		return c, err
+	}
+
 	ciReqs, err := d.Store.MarkersWithPrefix(ctx, t.ID, fixRequestedCILogPrefix)
 	if err != nil {
 		return store.HandlerCommit{}, fmt.Errorf("job: shipping: poll: ci_log fix requests: %w", err)

@@ -117,3 +117,18 @@ func (o *Orchestrator) IsAncestor(ctx context.Context, wt Worktree, a, b string)
 	}
 	return true, nil
 }
+
+// MergeBase returns git merge-base a b, trimmed. Two commits with no
+// common ancestor (git exit 1) is an error.
+func (o *Orchestrator) MergeBase(ctx context.Context, wt Worktree, a, b string) (string, error) {
+	if err := o.revalidate(ctx, wt); err != nil {
+		return "", fmt.Errorf("orchestrator: merge base: %w", err)
+	}
+
+	run := execRunner{drivers: wt.drivers}
+	out, err := run.Output(ctx, wt.dir, "git", "merge-base", a, b)
+	if err != nil {
+		return "", fmt.Errorf("orchestrator: merge base: %w", err)
+	}
+	return strings.TrimSpace(out), nil
+}

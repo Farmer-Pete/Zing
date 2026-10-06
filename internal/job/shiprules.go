@@ -1001,9 +1001,22 @@ const baseMergePrefix = "base merge "
 var (
 	baseMergeRequestedLine = regexp.MustCompile(`^base merge requested after run (0|[1-9]\d*)$`)
 	baseMergeBaseLine      = regexp.MustCompile(`^base (\S+) ([0-9a-f]{40})$`)
+	baseMergePointLine     = regexp.MustCompile(`^point (review|judge|ci)$`)
 	baseMergeRetryLine     = regexp.MustCompile(`^retry of ([1-9]\d*)$`)
 	baseMergeEndLine       = regexp.MustCompile(`^base merge (?:landed ([1-9]\d*) sha [0-9a-f]{40}|closed ([1-9]\d*))$`)
 	baseMergeTriedLine     = regexp.MustCompile(`^base merge ([1-9]\d*)$`)
+)
+
+// syncPoint names a baseSync call site (basesync.go): review before review
+// round 1, judge before a judge round starts, or ci before shipping sends a
+// CI-failure fix request. The empty string, syncPoint's zero value, means a
+// request POLL wrote, not one of these three points.
+type syncPoint string
+
+const (
+	syncPointReview syncPoint = "review"
+	syncPointJudge  syncPoint = "judge"
+	syncPointCI     syncPoint = "ci"
 )
 
 // baseMergeClosedBody renders the closed end marker baseMergeEndLine
@@ -1021,21 +1034,26 @@ func baseMergeLandedBody(id int64, sha string) string {
 // baseMergeRequest is one base-merge request marker, read back or about to
 // be written (overview design, "Markers" table).
 type baseMergeRequest struct {
-	MessageID  int64  // the marker's message id; 0 before it is written
-	AfterRunID int64  // the SessionAfter watermark
-	BaseBranch string // the project's default branch, as POLL read it
-	BaseSHA    string // 40 lowercase hex characters
-	RetryOf    int64  // 0 for a request POLL wrote; else the closed request's message id
-	Notes      string // owner retry notes, trimmed; set only when RetryOf is non-zero
+	MessageID  int64     // the marker's message id; 0 before it is written
+	AfterRunID int64     // the SessionAfter watermark
+	BaseBranch string    // the project's default branch, as POLL read it
+	BaseSHA    string    // 40 lowercase hex characters
+	Point      syncPoint // "" for a request POLL wrote; else review, judge or ci
+	RetryOf    int64     // 0 for a request POLL wrote; else the closed request's message id
+	Notes      string    // owner retry notes, trimmed; set only when RetryOf is non-zero
 }
 
 // body renders the request marker: line 1 "base merge requested after run
-// <R>", line 2 "base <branch> <sha>", and for a retry line 3 "retry of
-// <id>" then the notes (trimmed; omitted when empty).
+// <R>", line 2 "base <branch> <sha>", then "point <name>" when Point is set,
+// and for a retry a "retry of <id>" line then the notes (trimmed; omitted
+// when empty).
 func (r baseMergeRequest) body() string {
 	lines := []string{
 		fmt.Sprintf("base merge requested after run %d", r.AfterRunID),
 		fmt.Sprintf("base %s %s", r.BaseBranch, r.BaseSHA),
+	}
+	if r.Point != "" {
+		lines = append(lines, "point "+string(r.Point))
 	}
 	if r.RetryOf != 0 {
 		lines = append(lines, fmt.Sprintf("retry of %d", r.RetryOf))
@@ -1075,9 +1093,10 @@ func (e *malformedBaseMergeRequestError) Is(target error) bool {
 }
 
 // parseBaseMergeRequest parses one request marker row. Line 1 or 2 not
-// matching, or a line 3 present but not "retry of <id>", is the error
-// "job: base merge request <id>: malformed marker", which answers
-// errors.Is(err, ErrMalformedBaseMergeRequest) true.
+// matching, a "point " line that does not match baseMergePointLine, or a
+// retry line present but not "retry of <id>", is the error "job: base merge
+// request <id>: malformed marker", which answers errors.Is(err,
+// ErrMalformedBaseMergeRequest) true.
 func parseBaseMergeRequest(row store.MessageRow) (baseMergeRequest, error) {
 	malformed := &malformedBaseMergeRequestError{rowID: row.ID}
 
@@ -1099,11 +1118,20 @@ func parseBaseMergeRequest(row store.MessageRow) (baseMergeRequest, error) {
 	}
 
 	req := baseMergeRequest{MessageID: row.ID, AfterRunID: afterRunID, BaseBranch: m2[1], BaseSHA: m2[2]}
-	if len(lines) == 2 {
+	i := 2
+	if i < len(lines) && strings.HasPrefix(lines[i], "point ") {
+		m := baseMergePointLine.FindStringSubmatch(lines[i])
+		if m == nil {
+			return baseMergeRequest{}, malformed
+		}
+		req.Point = syncPoint(m[1])
+		i++
+	}
+	if i == len(lines) {
 		return req, nil
 	}
 
-	m3 := baseMergeRetryLine.FindStringSubmatch(lines[2])
+	m3 := baseMergeRetryLine.FindStringSubmatch(lines[i])
 	if m3 == nil {
 		return baseMergeRequest{}, malformed
 	}
@@ -1112,8 +1140,8 @@ func parseBaseMergeRequest(row store.MessageRow) (baseMergeRequest, error) {
 		return baseMergeRequest{}, malformed
 	}
 	req.RetryOf = retryOf
-	if len(lines) > 3 {
-		req.Notes = strings.Join(lines[3:], "\n")
+	if len(lines) > i+1 {
+		req.Notes = strings.Join(lines[i+1:], "\n")
 	}
 	return req, nil
 }
@@ -1175,20 +1203,47 @@ func openBaseMergeRequest(rows []store.MessageRow) (baseMergeRequest, bool, erro
 	}
 }
 
-// pollMergeCount is the number of request rows with no "retry of" line:
-// the merges POLL itself started, counted against jobs.merge.max_loops. A
-// malformed request row counts too.
+// requestRowFlags reads a request row's own point and retry lines without
+// failing: point is the name on the line right after the base line when it
+// matches baseMergePointLine, else the empty string; retry is true when the
+// line right after that (the point line, when present, else the base line)
+// matches baseMergeRetryLine. A malformed row reports ("", false).
+func requestRowFlags(row store.MessageRow) (point syncPoint, retry bool) {
+	lines := strings.Split(row.Body, "\n")
+	i := 2
+	if i < len(lines) {
+		if m := baseMergePointLine.FindStringSubmatch(lines[i]); m != nil {
+			point = syncPoint(m[1])
+			i++
+		}
+	}
+	if i < len(lines) && baseMergeRetryLine.MatchString(lines[i]) {
+		retry = true
+	}
+	return point, retry
+}
+
+// pollMergeCount is the number of request rows with no point line and no
+// "retry of" line: the merges POLL itself started, counted against
+// jobs.merge.max_loops. A malformed request row counts too. A request a
+// baseSync point opened (point line set) is counted apart, by
+// pointMergeCount, not here.
 func pollMergeCount(rows []store.MessageRow) int {
+	return pointMergeCount(rows, "")
+}
+
+// pointMergeCount is the number of request rows baseSync opened at point: a
+// point line naming it and no retry line.
+func pointMergeCount(rows []store.MessageRow, point syncPoint) int {
 	count := 0
 	for i := range rows {
 		if !isBaseMergeRequestRow(rows[i]) {
 			continue
 		}
-		lines := strings.Split(rows[i].Body, "\n")
-		if len(lines) >= 3 && baseMergeRetryLine.MatchString(lines[2]) {
-			continue
+		p, retry := requestRowFlags(rows[i])
+		if p == point && !retry {
+			count++
 		}
-		count++
 	}
 	return count
 }

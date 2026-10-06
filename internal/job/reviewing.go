@@ -295,6 +295,12 @@ func (h reviewingHandler) enterRound(ctx context.Context, t store.Ticket, d Deps
 	n := reviewRoundDoneCount(markers) + 1
 
 	if len(markers) == 0 {
+		// Review round 1 reads the branch against current main
+		// (basesync.go, the review point): a request opened here merges
+		// before this round ever reads the diff.
+		if c, opened, err := baseSync(ctx, t, d, syncPointReview); err != nil || opened {
+			return c, err
+		}
 		return h.round(ctx, t, d, n, "", false)
 	}
 	newest := markers[len(markers)-1]
