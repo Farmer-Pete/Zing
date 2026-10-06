@@ -445,13 +445,14 @@ type BuildReport struct {
 type FindingArtifact struct {
 	// The six fields of Finding, copied rather than embedded, so Decision can
 	// have its own narrower type:
-	Lens     Lens             `json:"lens"`
-	Severity Severity         `json:"severity"`
-	Location string           `json:"location" jsonschema:"minLength=1"`
-	Text     string           `json:"text"     jsonschema:"minLength=1"`
-	Fix      string           `json:"fix"      jsonschema:"minLength=1"`
-	PlanRef  string           `json:"plan_ref,omitempty"`
-	Decision *FindingDecision `json:"decision,omitempty" doc:"set when routed: accept at or below the floor, else the owner's triage"`
+	Lens        Lens             `json:"lens"`
+	Severity    Severity         `json:"severity"`
+	Location    string           `json:"location" jsonschema:"minLength=1"`
+	Text        string           `json:"text"     jsonschema:"minLength=1"`
+	Fix         string           `json:"fix"      jsonschema:"minLength=1"`
+	PlanRef     string           `json:"plan_ref,omitempty"`
+	Decision    *FindingDecision `json:"decision,omitempty" doc:"set when routed: accept at or below the floor, else the owner's triage"`
+	OwnerPicked bool             `json:"owner_picked,omitempty" doc:"true when TRIAGE stored the owner's own item decision; absent for a default accept, a floor accept, a lens row, or a row stored before this field"`
 
 	Held       bool     `json:"held,omitempty"       doc:"a lens output kept while the round waits on a lens question (6.2a); not yet filtered, never routed"`
 	ID         string   `json:"id"                   jsonschema:"pattern=^r[1-9][0-9]*[fh][1-9][0-9]*$" doc:"r<round>f<k>, or r<round>h<k> for a held row"`

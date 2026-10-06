@@ -358,20 +358,26 @@ const fixRequestedFindingsPrefix = "fix requested findings after run "
 // fixreq is FIXREQ (design section 6.8) entered from enterFromDone: under
 // jobs.review.max_loops it opens a fix request with accepted's own fix
 // text. At the gate, an accepted list wholly at or below the floor moves on
-// to judging (acceptAtCap, issue #68); one where the owner accepted an
-// above-floor finding escalates loops_exhausted as before.
+// to judging (acceptAtCap, issue #68); otherwise an accepted row the owner
+// picked (OwnerPicked) opens the fix request anyway, bypassing the gate,
+// because the review question already asked the owner this once; otherwise
+// the gate escalates loops_exhausted as before.
 func (h reviewingHandler) fixreq(ctx context.Context, t store.Ticket, d Deps, accepted []response.FindingArtifact) (store.HandlerCommit, error) {
 	msg, k, maxLoops, err := fixRequestOrLoopsExhausted(ctx, t, d, accepted)
 	if err != nil {
 		return store.HandlerCommit{}, err
 	}
 	if msg == nil {
-		if allAtOrBelowFloor(accepted, d.Floor) {
+		switch {
+		case allAtOrBelowFloor(accepted, d.Floor):
 			return acceptAtCap(baseCommit(t, d), t, d, k, maxLoops, accepted), nil
+		case slices.ContainsFunc(accepted, func(f response.FindingArtifact) bool { return f.OwnerPicked }):
+			return ownerAcceptAtCap(ctx, t, d, k, maxLoops, accepted)
+		default:
+			what := fmt.Sprintf("review findings remain after %d fix runs", k)
+			why := fmt.Sprintf("max_loops for review is %d", maxLoops)
+			return reviewLoopsExhausted(t, d, what, why, renderFixFindings(accepted)), nil
 		}
-		what := fmt.Sprintf("review findings remain after %d fix runs", k)
-		why := fmt.Sprintf("max_loops for review is %d", maxLoops)
-		return reviewLoopsExhausted(t, d, what, why, renderFixFindings(accepted)), nil
 	}
 	c := baseCommit(t, d)
 	c.Messages = []store.Message{*msg}
@@ -424,12 +430,14 @@ func replyTexts(replies []store.MessageRow) []string {
 // own "newest question kind review" branch, once the owner has answered the
 // review question (6.4). It stores one new finding row per item, carrying
 // the owner's own decision or the safe default accept (a missing or
-// out-of-set decision, logged at warn), writes one "review note <id>"
-// marker per discussed item (D24: the owner's reply on the question applies
-// to every finding discussed in that answer), and resolves the round's own
-// question. No state transition and no new Waiting (baseCommit's own nil
-// clears it): the next tick's decision tree step (2) or (3) routes the
-// ticket on from the decisions this commit just stored.
+// out-of-set decision, logged at warn); the row's own OwnerPicked is true
+// only for the owner's own valid decision, never for the defaulted accept.
+// It also writes one "review note <id>" marker per discussed item (D24: the
+// owner's reply on the question applies to every finding discussed in that
+// answer), and resolves the round's own question. No state transition and
+// no new Waiting (baseCommit's own nil clears it): the next tick's decision
+// tree step (2) or (3) routes the ticket on from the decisions this commit
+// just stored.
 func (h reviewingHandler) triage(ctx context.Context, t store.Ticket, d Deps, round store.Round) (store.HandlerCommit, error) {
 	if len(round.Questions) != 1 {
 		return store.HandlerCommit{}, fmt.Errorf("job: reviewing: triage: review round carries %d questions, want 1", len(round.Questions))
@@ -464,6 +472,7 @@ func (h reviewingHandler) triage(ctx context.Context, t store.Ticket, d Deps, ro
 
 		finding := row.Finding
 		finding.Decision = &fd
+		finding.OwnerPicked = validDecision
 		payload, marshalErr := json.Marshal(finding)
 		if marshalErr != nil {
 			return store.HandlerCommit{}, fmt.Errorf("job: reviewing: triage: marshal finding %s: %w", finding.ID, marshalErr)
@@ -1545,15 +1554,28 @@ func fixRequestOrLoopsExhausted(ctx context.Context, t store.Ticket, d Deps, acc
 		return nil, k, maxLoops, nil
 	}
 
-	maxRunID, err := d.Store.MaxRunID(ctx, t.ID)
+	m, _, err := findingsFixRequest(ctx, t, d, accepted)
 	if err != nil {
-		return nil, 0, 0, fmt.Errorf("job: reviewing: max run id: %w", err)
-	}
-	m, msgErr := fixRequestMessage(t, FixKindFindings, renderFixFindings(accepted), maxRunID)
-	if msgErr != nil {
-		return nil, 0, 0, fmt.Errorf("job: reviewing: fix request message: %w", msgErr)
+		return nil, 0, 0, fmt.Errorf("job: reviewing: %w", err)
 	}
 	return &m, k, maxLoops, nil
+}
+
+// findingsFixRequest builds the one fix request message FIXREQ sends for
+// accepted, against the ticket's latest run (design section 6.8): both the
+// under-cap path (fixRequestOrLoopsExhausted) and the owner-pick path past
+// the cap (ownerAcceptAtCap) open the same kind of fix request, so they
+// share this build.
+func findingsFixRequest(ctx context.Context, t store.Ticket, d Deps, accepted []response.FindingArtifact) (store.Message, int64, error) {
+	maxRunID, err := d.Store.MaxRunID(ctx, t.ID)
+	if err != nil {
+		return store.Message{}, 0, fmt.Errorf("max run id: %w", err)
+	}
+	m, err := fixRequestMessage(t, FixKindFindings, renderFixFindings(accepted), maxRunID)
+	if err != nil {
+		return store.Message{}, 0, fmt.Errorf("fix request message: %w", err)
+	}
+	return m, maxRunID, nil
 }
 
 // reasonReviewAcceptedAtCap is the reviewing → judging state reason when
@@ -1607,6 +1629,29 @@ func acceptAtCap(c store.HandlerCommit, t store.Ticket, d Deps, k, maxLoops int,
 	c.Messages = append(c.Messages, store.Message{TicketID: t.ID, Type: msgTypeUpdate, Author: authorSystem, Body: strings.Join(lines, "\n")})
 	c.Next, c.Reason = stateJudging, reasonReviewAcceptedAtCap
 	return c
+}
+
+// ownerAcceptAtCap is the FIXREQ gate's own outcome when the gate is at or
+// past max_loops, the accepted list has an above-floor finding, and at
+// least one accepted row's OwnerPicked is true: the owner already decided
+// to fix it on the review question, so this opens the fix request anyway,
+// bypassing the gate, instead of asking loops_exhausted the same thing
+// again (ticket 55).
+func ownerAcceptAtCap(ctx context.Context, t store.Ticket, d Deps, k, maxLoops int, accepted []response.FindingArtifact) (store.HandlerCommit, error) {
+	m, maxRunID, err := findingsFixRequest(ctx, t, d, accepted)
+	if err != nil {
+		return store.HandlerCommit{}, fmt.Errorf("job: reviewing: owner accept at cap: %w", err)
+	}
+	sorted := sortByID(accepted)
+	ids := make([]string, len(sorted))
+	for i := range sorted {
+		ids[i] = sorted[i].ID
+	}
+	slog.Info("review owner accept past loop cap starts fix", "ticket_id", t.ID, "fix_runs", k, "max_loops", maxLoops,
+		"after_run_id", maxRunID, "finding_ids", strings.Join(ids, ","))
+	c := baseCommit(t, d)
+	c.Messages = []store.Message{m}
+	return c, nil
 }
 
 // waitingFlagReview is the review question's own waiting_on value (design
@@ -2176,6 +2221,7 @@ func (h reviewingHandler) retryCapResumesDiscuss(t store.Ticket, d Deps, resolve
 		row := &pending[i]
 		finding := row.Finding
 		finding.Decision = &accept
+		finding.OwnerPicked = false // Zing's recovery accept, not the owner's pick on the review question
 		if notes != "" {
 			finding.Fix = strings.TrimRight(finding.Fix, "\n") + "\n\n" + notes
 		}

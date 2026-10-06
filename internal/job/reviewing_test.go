@@ -2609,8 +2609,14 @@ func TestTriageStoresDecisions(t *testing.T) {
 	if d := newest[accepted].Finding.Decision; d == nil || *d != response.FindingAccept {
 		t.Errorf("accepted finding %s decision = %v, want accept", accepted, d)
 	}
+	if !newest[accepted].Finding.OwnerPicked {
+		t.Errorf("accepted finding %s OwnerPicked = false, want true (an explicit owner pick)", accepted)
+	}
 	if d := newest[dropped].Finding.Decision; d == nil || *d != response.FindingDrop {
 		t.Errorf("dropped finding %s decision = %v, want drop", dropped, d)
+	}
+	if !newest[dropped].Finding.OwnerPicked {
+		t.Errorf("dropped finding %s OwnerPicked = false, want true (an explicit owner pick)", dropped)
 	}
 
 	resolved, err := s.QuestionsByState(t.Context(), ticket.ID, "resolved")
@@ -2684,8 +2690,21 @@ func TestTriageDefaultsToAccept(t *testing.T) {
 	if d := newest[decided].Finding.Decision; d == nil || *d != response.FindingDrop {
 		t.Errorf("decided finding %s decision = %v, want drop (unaffected by the default)", decided, d)
 	}
+	if !newest[decided].Finding.OwnerPicked {
+		t.Errorf("decided finding %s OwnerPicked = false, want true (an explicit owner pick)", decided)
+	}
 	if d := newest[undecided].Finding.Decision; d == nil || *d != response.FindingAccept {
 		t.Errorf("undecided finding %s decision = %v, want accept (the safe default)", undecided, d)
+	}
+	if newest[undecided].Finding.OwnerPicked {
+		t.Errorf("undecided finding %s OwnerPicked = true, want false (the safe default, not an owner pick)", undecided)
+	}
+	undecidedPayload, marshalErr := json.Marshal(newest[undecided].Finding)
+	if marshalErr != nil {
+		t.Fatalf("marshal undecided finding: %v", marshalErr)
+	}
+	if strings.Contains(string(undecidedPayload), "owner_picked") {
+		t.Errorf("undecided finding payload = %s, want no %q key", undecidedPayload, "owner_picked")
 	}
 }
 
@@ -3768,6 +3787,18 @@ func TestReviewCapResumesRetryAccepts(t *testing.T) {
 	}
 	pbApply(t, s, ticket, commit)
 
+	sourceRows, err := s.Findings(t.Context(), ticket.ID)
+	if err != nil {
+		t.Fatalf("Findings (before retry): %v", err)
+	}
+	sourceRow, ok := newestFindingRowPerID(sourceRows)[findingID]
+	if !ok {
+		t.Fatalf("no finding row for %q before retry", findingID)
+	}
+	if !sourceRow.Finding.OwnerPicked {
+		t.Errorf("source row OwnerPicked = false, want true (triage's own discuss pick)")
+	}
+
 	qID := newestOpenQuestion(t, s, ticket.ID).ID
 	const note = "owner says accept it as is"
 	option := escalationChoiceRetry
@@ -3802,6 +3833,12 @@ func TestReviewCapResumesRetryAccepts(t *testing.T) {
 	}
 	if !strings.Contains(finding.Fix, discussFix) || !strings.Contains(finding.Fix, note) {
 		t.Errorf("finding.Fix = %q, want it to carry both the original fix text and the owner's own note", finding.Fix)
+	}
+	if finding.OwnerPicked {
+		t.Errorf("retry finding.OwnerPicked = true, want false (Zing's own recovery accept, not the owner's pick)")
+	}
+	if strings.Contains(string(retryCommit.Artifacts[0].Payload), "owner_picked") {
+		t.Errorf("retry artifact payload = %q, want no owner_picked key", retryCommit.Artifacts[0].Payload)
 	}
 	if len(retryCommit.ResolveQuestions) != 1 || retryCommit.ResolveQuestions[0] != qID {
 		t.Errorf("retryCommit.ResolveQuestions = %v, want [%d]", retryCommit.ResolveQuestions, qID)
