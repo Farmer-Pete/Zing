@@ -254,8 +254,9 @@ func TestSaveDraftReviewDecision(t *testing.T) {
 }
 
 // TestSaveDraftPerimeterDecision proves the section 4.2 rule: a perimeter
-// item takes accept or reject; accept and reject save, drop and discuss
-// return the conflict "a perimeter item takes accept or reject".
+// item takes accept or drop; accept and reject save unchanged, drop saves as
+// reject (the word internal/job/building.go reads), and discuss is refused
+// with "a perimeter item takes accept or drop".
 func TestSaveDraftPerimeterDecision(t *testing.T) {
 	t.Parallel()
 	s := newTestStore(t)
@@ -263,26 +264,30 @@ func TestSaveDraftPerimeterDecision(t *testing.T) {
 	items := []response.Item{{Ref: testRefAGo, Text: "a"}}
 
 	tests := []struct {
-		name     string
-		key      string
-		decision response.Decision
-		wantErr  string
+		name      string
+		key       string
+		decision  response.Decision
+		wantStore response.Decision
+		wantErr   string
 	}{
-		{"accept saves", "Q1", response.DecisionAccept, ""},
-		{"reject saves", "Q2", response.DecisionReject, ""},
-		{"drop is refused", "Q3", response.DecisionDrop, "a perimeter item takes accept or reject"},
-		{"discuss is refused", "Q4", response.DecisionDiscuss, "a perimeter item takes accept or reject"},
+		{"accept saves", "Q1", response.DecisionAccept, response.DecisionAccept, ""},
+		{"reject saves", "Q2", response.DecisionReject, response.DecisionReject, ""},
+		{"drop saves as reject", "Q3", response.DecisionDrop, response.DecisionReject, ""},
+		{"discuss is refused", "Q4", response.DecisionDiscuss, "", "a perimeter item takes accept or drop"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			qID := insertQuestionOfKind(t, s, ticketID, tc.key, response.QuestionKindPerimeter, nil, items)
-			_, err := s.SaveDraft(t.Context(), DraftInput{
+			res, err := s.SaveDraft(t.Context(), DraftInput{
 				TicketID: ticketID, QuestionID: &qID, Item: &ItemDecision{Ref: testRefAGo, Decision: tc.decision},
 			})
 			if tc.wantErr == "" {
 				if err != nil {
 					t.Errorf("SaveDraft(decision=%s): %v, want nil", tc.decision, err)
+				}
+				if got := draftPayloadOf(t, s, res.MessageID); got.Items[testRefAGo] != tc.wantStore {
+					t.Errorf("stored decision = %v, want %v", got.Items[testRefAGo], tc.wantStore)
 				}
 				return
 			}
@@ -291,6 +296,67 @@ func TestSaveDraftPerimeterDecision(t *testing.T) {
 			}
 			if got := conflictReason(t, err); got != tc.wantErr {
 				t.Errorf("conflict reason = %q, want %q", got, tc.wantErr)
+			}
+		})
+	}
+}
+
+// TestSendBatch_PerimeterDropSendsReject proves owner decision Q1: saving
+// drop on a perimeter item and sending it stores and sends reject, the word
+// internal/job/building.go's mergedItemDecisions reads.
+func TestSendBatch_PerimeterDropSendsReject(t *testing.T) {
+	t.Parallel()
+	s := newTestStore(t)
+	_, ticketID := seedQueuedTicket(t, s, "1")
+	items := []response.Item{{Ref: testRefAGo, Text: "a"}, {Ref: testRefBGo, Text: "b"}}
+	qID := insertQuestionOfKind(t, s, ticketID, "Q1", response.QuestionKindPerimeter, nil, items)
+
+	res, err := s.SaveDraft(t.Context(), DraftInput{
+		TicketID: ticketID, QuestionID: &qID, Item: &ItemDecision{Ref: testRefAGo, Decision: response.DecisionDrop},
+	})
+	if err != nil {
+		t.Fatalf("SaveDraft: %v", err)
+	}
+
+	if _, err := s.SendBatch(t.Context(), ticketID); err != nil {
+		t.Fatalf("SendBatch: %v", err)
+	}
+
+	got := draftPayloadOf(t, s, res.MessageID)
+	if got.Items[testRefAGo] != response.DecisionReject {
+		t.Errorf("sent decision for a.go = %v, want %v", got.Items[testRefAGo], response.DecisionReject)
+	}
+}
+
+// TestItemDecisionForKind tables itemDecisionForKind's shape rules across
+// perimeter, review, and a non-item kind (gate), over every response.Decision
+// value.
+func TestItemDecisionForKind(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		kind       response.QuestionKind
+		decision   response.Decision
+		wantStore  response.Decision
+		wantReason string
+	}{
+		{response.QuestionKindPerimeter, response.DecisionAccept, response.DecisionAccept, ""},
+		{response.QuestionKindPerimeter, response.DecisionReject, response.DecisionReject, ""},
+		{response.QuestionKindPerimeter, response.DecisionDrop, response.DecisionReject, ""},
+		{response.QuestionKindPerimeter, response.DecisionDiscuss, "", "a perimeter item takes accept or drop"},
+		{response.QuestionKindReview, response.DecisionAccept, response.DecisionAccept, ""},
+		{response.QuestionKindReview, response.DecisionDrop, response.DecisionDrop, ""},
+		{response.QuestionKindReview, response.DecisionDiscuss, response.DecisionDiscuss, ""},
+		{response.QuestionKindReview, response.DecisionReject, "", "a review item takes accept, drop, or discuss"},
+		{response.QuestionKindGate, response.DecisionAccept, response.DecisionAccept, ""},
+		{response.QuestionKindGate, response.DecisionDiscuss, response.DecisionDiscuss, ""},
+	}
+	for _, tc := range tests {
+		t.Run(string(tc.kind)+"/"+string(tc.decision), func(t *testing.T) {
+			t.Parallel()
+			gotStore, gotReason := itemDecisionForKind(tc.kind, tc.decision)
+			if gotStore != tc.wantStore || gotReason != tc.wantReason {
+				t.Errorf("itemDecisionForKind(%s, %s) = (%q, %q), want (%q, %q)",
+					tc.kind, tc.decision, gotStore, gotReason, tc.wantStore, tc.wantReason)
 			}
 		})
 	}
