@@ -108,7 +108,7 @@ func projectAddArgs(name, repo, path string) []string {
 		"--name", name,
 		"--repo", repo,
 		"--path", path,
-		"--test", "go test ./...",
+		"--test", liveTestCmd,
 		"--lint", "golangci-lint run",
 	}
 }
