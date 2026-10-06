@@ -1,8 +1,12 @@
-// escalation_detail_test.go is Task 1's test-first proof for #70's first
-// change: a plan review loops_exhausted question lists the remaining
+// escalation_detail_test.go is the test-first proof for #70's first two
+// changes: a plan review loops_exhausted question lists the remaining
 // findings from the planreview artifact at the version its own pending
-// marker names (design section's withEscalationDetails, findingsDetail).
-// Every test here drives the real store and the live GET /stream, the same
+// marker names, and a response_invalid question shows the run's job, lens
+// and validator errors read from that run's own invalid marker (design
+// section's withEscalationDetails, findingsDetail, responseInvalidDetail).
+// It also proves the fallback: a question whose escalation points at a
+// missing or unparseable source keeps its stored body, unchanged. Every
+// test here drives the real store and the live GET /stream, the same
 // boundary gate_test.go and question_kinds_test.go already exercise.
 package console_test
 
@@ -18,30 +22,12 @@ import (
 	"zing/internal/store"
 )
 
-// seedPlanReviewArtifactAt inserts one "planreview" artifact at version,
-// carrying runID and findings, wrapped exactly as job/planning.go's own
-// planReviewOkCommit stores them. Unlike gate_test.go's own
-// seedPlanReviewArtifact (fixed at version 1, one cohort per fixture), this
-// lets a test seed more than one plan version's own review on one ticket.
-func seedPlanReviewArtifactAt(t *testing.T, s *store.Store, ticketID, runID int64, version int, findings []response.Finding) {
-	t.Helper()
-	payload, err := json.Marshal(struct {
-		Findings []response.Finding `json:"findings"`
-	}{Findings: findings})
-	if err != nil {
-		t.Fatalf("marshal planreview findings: %v", err)
-	}
-	if _, err := s.InsertArtifact(t.Context(), store.Artifact{
-		TicketID: ticketID, Type: testArtifactTypePlanreview, Version: version, RunID: &runID, Payload: payload,
-	}); err != nil {
-		t.Fatalf("InsertArtifact(planreview v%d): %v", version, err)
-	}
-}
-
-// seedPlanreviewMarker inserts one "update" message on ticketID with body,
-// the same shape job/planning.go's planreviewPendingMarker and
-// planreviewDeliveredMarker write (design section 5.3).
-func seedPlanreviewMarker(t *testing.T, s *store.Store, ticketID int64, body string) {
+// seedSystemUpdate inserts one "update" message on ticketID with body,
+// authored by "system", the same shape any of job/planning.go's or
+// job/reviewing.go's own bookkeeping markers (a "planreview vN pending"
+// marker, a "response invalid run <id>" marker, and so on) take when
+// written.
+func seedSystemUpdate(t *testing.T, s *store.Store, ticketID int64, body string) {
 	t.Helper()
 	if _, err := s.InsertMessage(t.Context(), store.Message{
 		TicketID: ticketID, Type: testMsgTypeUpdate, Author: "system", Body: body,
@@ -138,19 +124,29 @@ func TestEscalationQuestion_LoopsExhaustedListsFindings(t *testing.T) {
 	ticketID := seedTicket(t, s, "fake#1", "Add a hello endpoint")
 	runID := seedRun(t, s, ticketID)
 
-	seedPlanReviewArtifactAt(t, s, ticketID, runID, 2, []response.Finding{
+	seedPlanReviewArtifact(t, s, ticketID, runID, 2, []response.Finding{
 		{Lens: response.LensQuality, Severity: response.SeverityMinor, Location: findingLocation, Text: "v2 minor finding text", Fix: findingFixPlaceholder},
 	})
-	seedPlanreviewMarker(t, s, ticketID, "planreview v2 pending")
-	seedPlanreviewMarker(t, s, ticketID, "planreview v2 delivered")
+	seedSystemUpdate(t, s, ticketID, "planreview v2 pending")
+	seedSystemUpdate(t, s, ticketID, "planreview v2 delivered")
 
-	seedPlanReviewArtifactAt(t, s, ticketID, runID, 3, []response.Finding{
+	seedPlanReviewArtifact(t, s, ticketID, runID, 3, []response.Finding{
 		{Lens: response.LensCorrectness, Severity: response.SeverityMajor, Location: findingLocation, Text: "v3 major finding text", Fix: findingFixPlaceholder},
 		{Lens: response.LensQuality, Severity: response.SeverityMinor, Location: findingLocation, Text: "v3 minor finding text", Fix: findingFixPlaceholder},
 	})
-	seedPlanreviewMarker(t, s, ticketID, "planreview v3 pending")
+	seedSystemUpdate(t, s, ticketID, "planreview v3 pending")
 
 	seedLoopsExhaustedEscalation(t, s, ticketID, loopsExhaustedTitle)
+
+	// A v4 cohort seeded only after the escalation: latestPlanreviewPendingVersion
+	// only looks at marker rows below the escalation's own id, so a later
+	// retry's own v4 pending marker must never leak into this escalation's
+	// findings (the #87 failure the design guards against). Without that
+	// bound, this would still pass today since nothing else seeds a v4.
+	seedPlanReviewArtifact(t, s, ticketID, runID, 4, []response.Finding{
+		{Lens: response.LensQuality, Severity: response.SeverityMinor, Location: findingLocation, Text: "v4 later finding text", Fix: findingFixPlaceholder},
+	})
+	seedSystemUpdate(t, s, ticketID, "planreview v4 pending")
 
 	srv := newTestServer(t, s, bus.New(), nil, newTestLogHandler(t))
 	resp, r, cancel := openStream(t, srv.URL, "thread", ticketID, 0)
@@ -171,8 +167,10 @@ func TestEscalationQuestion_LoopsExhaustedListsFindings(t *testing.T) {
 			t.Errorf("q-body missing %q; got:\n%s", want, body)
 		}
 	}
-	if strings.Contains(body, "v2 minor finding text") {
-		t.Errorf("q-body shows the older v2 cohort's finding; got:\n%s", body)
+	for _, unwanted := range []string{"v2 minor finding text", "v4 later finding text", "plan review of v4"} {
+		if strings.Contains(body, unwanted) {
+			t.Errorf("q-body shows %q from the wrong cohort; got:\n%s", unwanted, body)
+		}
 	}
 }
 
@@ -271,10 +269,14 @@ const responseInvalidTitle = "response_invalid: lens correctness returned an inv
 // run's job and lens and the validator's errors read from that run's own
 // "response invalid run <id>" marker (design H2) -- never the stored body
 // alone, which names only the reason and the run id. The marker's third
-// error line carries a run of three backticks and a raw "<b>bold</b>" tag,
-// proving both that the rendered fence is long enough to swallow an
-// embedded run of backticks without closing early, and that Render's own
-// no-raw-HTML rule (render.go) still applies inside it.
+// third error line is exactly a run of three backticks, on its own line,
+// with a raw "<b>bold</b> tail after fence" line right after it: a fixed
+// three-backtick fence would read that bare "```" line as its own closing
+// delimiter (CommonMark lets a closing fence line hold only backticks) and
+// let "tail after fence" leak out of the code block, so this proves the
+// rendered fence is actually longer than the longest backtick run the
+// errors contain, and that Render's own no-raw-HTML rule (render.go) still
+// applies inside it.
 func TestEscalationQuestion_ResponseInvalidShowsValidatorErrors(t *testing.T) {
 	t.Parallel()
 	s := newConsoleTestStore(t)
@@ -282,8 +284,8 @@ func TestEscalationQuestion_ResponseInvalidShowsValidatorErrors(t *testing.T) {
 	runID := seedReviewRun(t, s, ticketID, "correctness")
 
 	seedResponseInvalidEscalation(t, s, ticketID, &runID, responseInvalidTitle)
-	seedPlanreviewMarker(t, s, ticketID, fmt.Sprintf(
-		"response invalid run %d\nthe final message failed validation\nplan/overview/objective: required\nplan/design/shape: required\n```<b>bold</b> tail after fence",
+	seedSystemUpdate(t, s, ticketID, fmt.Sprintf(
+		"response invalid run %d\nthe final message failed validation\nplan/overview/objective: required\nplan/design/shape: required\n```\n<b>bold</b> tail after fence",
 		runID))
 
 	srv := newTestServer(t, s, bus.New(), nil, newTestLogHandler(t))
@@ -337,10 +339,10 @@ func TestEscalationQuestion_NoDetailWithoutSource(t *testing.T) {
 	seedLoopsExhaustedEscalation(t, s, ticketID, loopsExhaustedTitle)
 
 	runID := seedRun(t, s, ticketID)
-	seedPlanReviewArtifactAt(t, s, ticketID, runID, 1, []response.Finding{
+	seedPlanReviewArtifact(t, s, ticketID, runID, 1, []response.Finding{
 		{Lens: response.LensQuality, Severity: response.SeverityMinor, Location: findingLocation, Text: "ignored finding text", Fix: findingFixPlaceholder},
 	})
-	seedPlanreviewMarker(t, s, ticketID, "planreview vX pending")
+	seedSystemUpdate(t, s, ticketID, "planreview vX pending")
 	seedLoopsExhaustedEscalation(t, s, ticketID, loopsExhaustedTitle)
 
 	seedResponseInvalidEscalation(t, s, ticketID, nil, responseInvalidTitle)

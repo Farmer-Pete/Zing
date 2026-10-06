@@ -1833,12 +1833,14 @@ func splitQuestionBody(raw string) (title, body string) {
 // own question row with detail read at render time from the data the
 // escalation points at (ticket 70, design section "Build the detail at read
 // time"): a plan review loops_exhausted question gets the planreview
-// artifact's remaining findings. rows is returned unchanged -- not even
-// reordered -- except for those Body rewrites, so threadComponent's later
-// buildThreadRows call sees the same rows it always did, with richer
-// question bodies. Only a store read failure is returned; every other
-// escalation whose payload, marker, or artifact is missing or unparseable
-// just keeps its stored body (buildThreadQuestion's own
+// artifact's remaining findings, and a response_invalid question whose
+// escalation row has a RunID gets that run's job, lens and validator errors
+// read from its own "response invalid run <id>" marker. rows is returned
+// unchanged -- not even reordered -- except for those Body rewrites, so
+// threadComponent's later buildThreadRows call sees the same rows it always
+// did, with richer question bodies. Only a store read failure is returned;
+// every other escalation whose payload, marker, or artifact is missing or
+// unparseable just keeps its stored body (buildThreadQuestion's own
 // "unparseable payload renders as a plain row" rule, extended here).
 func (c *console) withEscalationDetails(ctx context.Context, ticketID int64, rows []store.MessageRow) ([]store.MessageRow, error) {
 	var runs []store.Run
@@ -1852,6 +1854,8 @@ func (c *console) withEscalationDetails(ctx context.Context, ticketID int64, row
 		}
 		var ep response.EscalationPayload
 		if err := json.Unmarshal(esc.Payload, &ep); err != nil {
+			slog.DebugContext(ctx, "console: escalation detail source unavailable",
+				"ticket_id", ticketID, "escalation_id", esc.ID, "reason", "payload")
 			continue
 		}
 
@@ -1868,11 +1872,11 @@ func (c *console) withEscalationDetails(ctx context.Context, ticketID int64, row
 				var err error
 				runs, err = c.store.RunsForTicket(ctx, ticketID)
 				if err != nil {
-					return nil, err
+					return nil, fmt.Errorf("console: escalation detail runs for ticket %d: %w", ticketID, err)
 				}
 				sessions, err = c.store.SessionsForTicket(ctx, ticketID)
 				if err != nil {
-					return nil, err
+					return nil, fmt.Errorf("console: escalation detail sessions for ticket %d: %w", ticketID, err)
 				}
 				runsLoaded = true
 			}
@@ -1883,15 +1887,21 @@ func (c *console) withEscalationDetails(ctx context.Context, ticketID int64, row
 		}
 
 		for j := range rows {
-			q := rows[j]
-			if q.Type != msgTypeQuestion || q.ParentID == nil || *q.ParentID != esc.ID {
+			if !isQuestionFor(rows[j], esc.ID) {
 				continue
 			}
-			title, body := splitQuestionBody(q.Body)
+			title, body := splitQuestionBody(rows[j].Body)
 			rows[j].Body = title + "\n\n" + detail + "\n\n" + body
 		}
 	}
 	return rows, nil
+}
+
+// isQuestionFor reports whether q is the open-ended question child of the
+// escalation row whose id is escID -- the only link a question row has back
+// to the escalation that spawned it (its own ParentID).
+func isQuestionFor(q store.MessageRow, escID int64) bool {
+	return q.Type == msgTypeQuestion && q.ParentID != nil && *q.ParentID == escID
 }
 
 // loopsExhaustedDetail reads the plan review findings a cap_loops
@@ -1911,7 +1921,7 @@ func (c *console) loopsExhaustedDetail(ctx context.Context, ticketID, escalation
 
 	artifact, found, err := c.store.PlanReviewAt(ctx, ticketID, version)
 	if err != nil {
-		return "", err
+		return "", fmt.Errorf("console: escalation %d planreview at version %d for ticket %d: %w", escalationID, version, ticketID, err)
 	}
 	if !found {
 		slog.DebugContext(ctx, "console: escalation detail source unavailable",
@@ -1949,11 +1959,19 @@ func latestPlanreviewPendingVersion(rows []store.MessageRow, beforeID int64) (in
 	if !found {
 		return 0, false
 	}
-	v, err := strconv.Atoi(strings.TrimSuffix(strings.TrimPrefix(body, updateMarkerPlanreviewPrefix), updateMarkerPlanreviewPendingSuffix))
+	v, err := strconv.Atoi(planreviewMarkerVersion(body, updateMarkerPlanreviewPendingSuffix))
 	if err != nil {
 		return 0, false
 	}
 	return v, true
+}
+
+// planreviewMarkerVersion cuts the "N" out of a "planreview vN pending" or
+// "planreview vN delivered" marker body, given that marker's own suffix. The
+// result is not guaranteed to parse as a number; callers that need the
+// version as an int run it through strconv.Atoi themselves.
+func planreviewMarkerVersion(body, suffix string) string {
+	return strings.TrimSuffix(strings.TrimPrefix(body, updateMarkerPlanreviewPrefix), suffix)
 }
 
 // findingsDetail renders a plan review's own remaining findings as a
@@ -2069,6 +2087,9 @@ func responseInvalidDetail(job string, lens *string, runID int64, marker string)
 	head += fmt.Sprintf(". Run %d.", runID)
 
 	if !hasErrs || errs == "" {
+		if reason == "" {
+			return head
+		}
 		return head + "\n\nReason: " + reason + "."
 	}
 
@@ -2192,10 +2213,10 @@ func updateLine(m *store.MessageRow, agent string) (string, bool) {
 	case strings.HasPrefix(body, updateMarkerSealRefusedPrefix):
 		return sealRefusedLine(body), true
 	case strings.HasPrefix(body, updateMarkerPlanreviewPrefix) && strings.HasSuffix(body, updateMarkerPlanreviewPendingSuffix):
-		version := strings.TrimSuffix(strings.TrimPrefix(body, updateMarkerPlanreviewPrefix), updateMarkerPlanreviewPendingSuffix)
+		version := planreviewMarkerVersion(body, updateMarkerPlanreviewPendingSuffix)
 		return "Plan review of v" + version + " found minor findings. Planning resumes automatically to address them.", true
 	case strings.HasPrefix(body, updateMarkerPlanreviewPrefix) && strings.HasSuffix(body, updateMarkerPlanreviewDeliveredSuffix):
-		version := strings.TrimSuffix(strings.TrimPrefix(body, updateMarkerPlanreviewPrefix), updateMarkerPlanreviewDeliveredSuffix)
+		version := planreviewMarkerVersion(body, updateMarkerPlanreviewDeliveredSuffix)
 		return "Planning resumed with the v" + version + " review findings.", true
 	case strings.HasPrefix(body, updateMarkerValidationPendingPrefix):
 		return validationErrorsLine(body), true

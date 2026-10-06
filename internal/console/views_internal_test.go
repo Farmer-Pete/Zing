@@ -129,15 +129,17 @@ func TestDisplayBody_ResponseInvalidWithoutErrors(t *testing.T) {
 	}
 }
 
-// TestResponseInvalidDetailFence proves responseInvalidDetail's own three
-// cases (design H2): a lens renders in the head line, a nil lens drops that
-// clause, and a marker with no error lines falls back to "Reason: ...."
-// rather than an empty "Validator errors:" section. The fence-length case --
-// an errors block that itself contains a run of backticks -- is proved
+// TestResponseInvalidDetailFence proves responseInvalidDetail's own cases
+// (design H2): a lens renders in the head line, a nil lens drops that
+// clause, a marker with no error lines falls back to "Reason: ...." rather
+// than an empty "Validator errors:" section, and errors that themselves
+// hold a run of three backticks get wrapped in a four-backtick fence (one
+// longer than the longest run they contain) while a plain error gets the
+// CommonMark minimum, a three-backtick fence. The fence case is proved again
 // through the full render path by
-// TestEscalationQuestion_ResponseInvalidShowsValidatorErrors, since
-// responseInvalidDetail's own markdown is meaningless until Render turns it
-// into HTML.
+// TestEscalationQuestion_ResponseInvalidShowsValidatorErrors, since only
+// Render turns responseInvalidDetail's own markdown into HTML that can
+// actually close (or fail to close) a code block.
 func TestResponseInvalidDetailFence(t *testing.T) {
 	t.Parallel()
 	lens := "correctness"
@@ -166,6 +168,18 @@ func TestResponseInvalidDetailFence(t *testing.T) {
 	}
 	if strings.Contains(got, "Validator errors") {
 		t.Errorf("responseInvalidDetail(no errors) = %q, want no \"Validator errors\" heading", got)
+	}
+
+	plain := "response invalid run 5\nthe final message failed validation\nplan/goals: required"
+	got = responseInvalidDetail("planning", nil, 5, plain)
+	if !strings.Contains(got, "\n\n```\nplan/goals: required\n```") {
+		t.Errorf("responseInvalidDetail(plain errors) = %q, want a three-backtick fence", got)
+	}
+
+	backtickRun := "response invalid run 5\nthe final message failed validation\nplan/goals: required\n```\nplan/review: required"
+	got = responseInvalidDetail("planning", nil, 5, backtickRun)
+	if strings.Count(got, "````") != 2 {
+		t.Errorf("responseInvalidDetail(backtick run) = %q, want two four-backtick fence lines", got)
 	}
 }
 
