@@ -4032,6 +4032,54 @@ func TestReReviewKeepsDroppedWhenFileChanged(t *testing.T) {
 	}
 }
 
+// TestSuppressRepeatedFailsOpenOnUnresolvableSHA proves Q3's own fail-open
+// branch: suppressRepeated runs against the real Orchestrator every
+// integration test in this file already claims through (pbBuildProjects),
+// and a dropped row whose SHA git cannot resolve must block nothing,
+// report zero repeats, and return no error, rather than failing the tick
+// or (wrongly) blocking every location because its own ChangedFilesBetween
+// came back empty.
+func TestSuppressRepeatedFailsOpenOnUnresolvableSHA(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow end-to-end flow; runs in the full suite")
+	}
+	t.Parallel()
+	s, ticket, _ := reviewTicketReady(t)
+	rt := runtime.NewFake(reviewScriptsFS(nil))
+	deps := pbClaim(t, s, rt, ticket.ID)
+
+	proj, wt, escalation, err := ensureWorktreeOrEscalate(t.Context(), ticket, deps, func(errText string) store.HandlerCommit {
+		t.Fatalf("ensureWorktreeOrEscalate: onFail: %s", errText)
+		return store.HandlerCommit{}
+	})
+	if err != nil {
+		t.Fatalf("ensureWorktreeOrEscalate: %v", err)
+	}
+	if escalation != nil {
+		t.Fatalf("ensureWorktreeOrEscalate: escalation = %+v, want nil", escalation)
+	}
+
+	sha, err := proj.Orch.HeadSHA(t.Context(), wt)
+	if err != nil {
+		t.Fatalf("HeadSHA: %v", err)
+	}
+
+	const unresolvable = "0000000000000000000000000000000000000000"
+	dropped := []response.FindingArtifact{{ID: findingID1, Location: greetGoLine5, SHA: unresolvable}}
+	merged := []response.FindingArtifact{{ID: findingID1, Severity: response.SeverityMajor, Location: greetGoLine5}}
+
+	kept, repeated, err := suppressRepeated(t.Context(), ticket, proj, wt, sha, dropped, merged)
+	if err != nil {
+		t.Fatalf("suppressRepeated: %v", err)
+	}
+	if repeated != 0 {
+		t.Errorf("repeated = %d, want 0 (an unresolvable sha blocks nothing)", repeated)
+	}
+	if len(kept) != 1 || kept[0].ID != findingID1 {
+		t.Errorf("kept = %+v, want the merged row kept", kept)
+	}
+}
+
 // requestsByLabel returns, in call order, every RunRequest rec has
 // recorded whose Label equals label exactly.
 func requestsByLabel(rec *recordingRuntime, label string) []runtime.RunRequest {
@@ -4040,6 +4088,21 @@ func requestsByLabel(rec *recordingRuntime, label string) []runtime.RunRequest {
 	var out []runtime.RunRequest
 	for i := range rec.reqs {
 		if rec.reqs[i].Label == label {
+			out = append(out, rec.reqs[i])
+		}
+	}
+	return out
+}
+
+// requestsByLabelPrefix is requestsByLabel, matching a Label prefix instead
+// of an exact Label (TestReReviewPromptListsDroppedFindings's own round 1
+// check: "1-" covers every lens the round ran, not just quality).
+func requestsByLabelPrefix(rec *recordingRuntime, prefix string) []runtime.RunRequest {
+	rec.mu.Lock()
+	defer rec.mu.Unlock()
+	var out []runtime.RunRequest
+	for i := range rec.reqs {
+		if strings.HasPrefix(rec.reqs[i].Label, prefix) {
 			out = append(out, rec.reqs[i])
 		}
 	}
@@ -4107,9 +4170,13 @@ func TestReReviewPromptListsDroppedFindings(t *testing.T) {
 	// space, the way the prose paragraph's colon is -- tells the two apart.
 	const droppedInputHeader = "dropped findings:\n"
 
-	for _, req := range requestsByLabel(rt, "1-quality") {
+	round1 := requestsByLabelPrefix(rt, "1-")
+	if len(round1) == 0 {
+		t.Fatal("requests labelled 1-*, = 0, want at least one (round 1 ran at least one lens)")
+	}
+	for _, req := range round1 {
 		if strings.Contains(req.Prompt, droppedInputHeader) {
-			t.Errorf("round 1 quality Prompt = %q, want no dropped findings input (nothing dropped yet)", req.Prompt)
+			t.Errorf("round 1 %q Prompt = %q, want no dropped findings input (nothing dropped yet)", req.Label, req.Prompt)
 		}
 	}
 

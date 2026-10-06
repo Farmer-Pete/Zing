@@ -313,7 +313,9 @@ func droppedFindings(findings []store.FindingRow, round int) []response.FindingA
 	var out []response.FindingArtifact
 	for _, row := range newestFindingRowPerID(findings) {
 		f := row.Finding
-		if f.Held || f.Round >= round || f.Decision == nil || *f.Decision != response.FindingDrop {
+		earlier := f.Round < round
+		decidedDrop := f.Decision != nil && *f.Decision == response.FindingDrop
+		if f.Held || !earlier || !decidedDrop {
 			continue
 		}
 		out = append(out, f)
