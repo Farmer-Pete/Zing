@@ -510,7 +510,7 @@ func TestSentAnswerText(t *testing.T) {
 		got := sentAnswerText(response.AnswerPayload{Items: map[string]response.Decision{
 			"greet.go": response.DecisionAccept, "machine.toml": response.DecisionReject,
 		}}, nil)
-		want := "greet.go: accept, machine.toml: reject"
+		want := "greet.go: accept, machine.toml: drop"
 		if got != want {
 			t.Errorf("sentAnswerText = %q, want %q", got, want)
 		}
@@ -522,6 +522,24 @@ func TestSentAnswerText(t *testing.T) {
 			t.Errorf("sentAnswerText = %q, want empty", got)
 		}
 	})
+}
+
+// TestAnswerLineShowsDropForReject proves answerLine runs each item decision
+// through templates.DisplayDecision, so a perimeter item stored as reject
+// prints as drop, the same word its row's button shows.
+func TestAnswerLineShowsDropForReject(t *testing.T) {
+	t.Parallel()
+	payload, err := json.Marshal(response.AnswerPayload{Items: map[string]response.Decision{
+		"greet.go": response.DecisionAccept, "machine.toml": response.DecisionReject,
+	}})
+	if err != nil {
+		t.Fatalf("marshal answer payload: %v", err)
+	}
+	m := &store.MessageRow{Message: store.Message{Type: msgTypeAnswer, Payload: payload}} //nolint:modernize // keyed on purpose
+	want := "greet.go: accept, machine.toml: drop"
+	if got := answerLine(m); got != want {
+		t.Errorf("answerLine = %q, want %q", got, want)
+	}
 }
 
 // TestCollectSentAnswers proves collectSentAnswers reads only "answer" rows
