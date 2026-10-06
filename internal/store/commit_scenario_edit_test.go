@@ -3,6 +3,7 @@ package store
 import (
 	"bytes"
 	"encoding/json"
+	"slices"
 	"testing"
 	"time"
 
@@ -86,6 +87,10 @@ func TestCommitHandlerResultScenarioEdit(t *testing.T) {
 		}
 		if ev.Reason != amendedReason {
 			t.Errorf("event reason = %q, want the judge's reason", ev.Reason)
+		}
+		wantBody := "Owner accepted the judge's amendment to scenario s1: " + amendedReason
+		if events[0].Body != wantBody {
+			t.Errorf("event body = %q, want %q", events[0].Body, wantBody)
 		}
 		if events[0].Body != response.OwnerEditLine(ev) {
 			t.Errorf("event body = %q, want %q", events[0].Body, response.OwnerEditLine(ev))
@@ -208,13 +213,8 @@ func TestEscalateTxAmendedOptions(t *testing.T) {
 			{Key: "b", Text: escalationOptionEditAmendment},
 			{Key: "c", Text: escalationOptionAbandon},
 		}
-		if len(qp.Options) != len(wantOptions) {
-			t.Fatalf("options = %+v, want %+v", qp.Options, wantOptions)
-		}
-		for i := range wantOptions {
-			if qp.Options[i] != wantOptions[i] {
-				t.Errorf("options[%d] = %+v, want %+v", i, qp.Options[i], wantOptions[i])
-			}
+		if !slices.Equal(qp.Options, wantOptions) {
+			t.Errorf("options = %+v, want %+v", qp.Options, wantOptions)
 		}
 		if qp.Recommended != "a" {
 			t.Errorf("recommended = %q, want %q", qp.Recommended, "a")
@@ -243,23 +243,11 @@ func TestEscalateTxAmendedOptions(t *testing.T) {
 		}
 
 		qp := latestQuestionPayload(t, s, ticketID)
-		if !equalOptions(qp.Options, wantEscalationOptionsPostSeal) {
+		if !slices.Equal(qp.Options, wantEscalationOptionsPostSeal) {
 			t.Errorf("options = %+v, want %+v", qp.Options, wantEscalationOptionsPostSeal)
 		}
 		if qp.Amendment != nil {
 			t.Errorf("question amendment = %+v, want nil", qp.Amendment)
 		}
 	})
-}
-
-func equalOptions(a, b []response.Option) bool {
-	if len(a) != len(b) {
-		return false
-	}
-	for i := range a {
-		if a[i] != b[i] {
-			return false
-		}
-	}
-	return true
 }

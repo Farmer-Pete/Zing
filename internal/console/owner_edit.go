@@ -96,7 +96,8 @@ func (c *console) handleOwnerEdit(w http.ResponseWriter, r *http.Request) {
 
 	// kind host makes a check run outside any sandbox, so kind joins check
 	// and test under the same local-only boundary.
-	if (body.Check != nil || body.Test != nil || body.Kind != nil) && !isLoopbackRemote(r.RemoteAddr) {
+	setsSandboxedCommand := body.Check != nil || body.Test != nil || body.Kind != nil
+	if setsSandboxedCommand && !isLoopbackRemote(r.RemoteAddr) {
 		http.Error(w, ownerEditSandboxCmdOnlyReason, http.StatusForbidden)
 		return
 	}

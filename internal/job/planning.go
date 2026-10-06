@@ -1883,6 +1883,15 @@ func roundChoice(round store.Round) string {
 // "hold" for a merge round (shipping.go's mergeAnswer: anything but
 // escalationChoiceRetry holds), so this is not a new behavior for those
 // kinds, only a name for the one they already had.
+//
+// An amended escalation (qp.Amendment != nil) is the one exception to
+// reading Recommended straight back: escalationOptionsFor recommends "a"
+// (Accept) there only to steer the owner's chip in the UI, and a reply
+// with no option picked must never silently accept a judge-written check
+// (#57, r1f9 triage: "a reply with no picked option must never accept an
+// amendment"). So a reply with no option on an amended escalation always
+// falls back to escalationChoiceBack (Edit it), which starts a fresh judge
+// round with the scenario unchanged rather than applying anything.
 func roundRecommendedOption(round store.Round) string {
 	if len(round.Questions) == 0 {
 		return escalationChoiceBack
@@ -1890,6 +1899,9 @@ func roundRecommendedOption(round store.Round) string {
 	var qp response.QuestionPayload
 	q := round.Questions[len(round.Questions)-1]
 	if err := json.Unmarshal(q.Payload, &qp); err != nil || qp.Kind != response.QuestionKindQuestion {
+		return escalationChoiceBack
+	}
+	if qp.Amendment != nil {
 		return escalationChoiceBack
 	}
 	if qp.Recommended == "" {

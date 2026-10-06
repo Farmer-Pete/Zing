@@ -61,6 +61,17 @@ func conflict(reason string) error { return &ConflictError{Reason: reason} }
 // in logSaveDraftOutcome's own check for it.
 const changedInAnotherTabReason = "changed in another tab"
 
+// amendmentAcceptOption is the option key escalationOptionsFor (commit.go)
+// gives "Accept the amended check", the one answer revalidateBatchTx holds
+// to amendmentAcceptLoopbackOnlyReason (#57, r1f9 triage).
+const amendmentAcceptOption = "a"
+
+// amendmentAcceptLoopbackOnlyReason is revalidateBatchTx's refusal when a
+// non-loopback send would accept a judge amendment: the same boundary
+// console/owner_edit.go's own loopback-only check holds a check, test, or
+// kind edit to, since Accept writes through the same store path.
+const amendmentAcceptLoopbackOnlyReason = "accepting a judge amendment is allowed from this machine only"
+
 // checkDraftBase reports a *ConflictError when base names what a tab last
 // saw saved, but the stored value (current) has since moved away from both
 // that base and the value this call is about to write, text (empty for a
@@ -751,22 +762,28 @@ func kindForWaitReason(reason string) (response.QuestionKind, bool) {
 // answered questions, and clears the matching question-backed wait when
 // none of that kind is open (design section 6.7). It is sendBatch with no
 // question scope, kept for the store's own tests: no HTTP route reaches it,
-// since POST /send always names its questions (SendBatchOnly).
+// since POST /send always names its questions (SendBatchOnly). loopback is
+// always true here: nothing but a test calls this entry point, and the
+// console's own loopback rule (amendmentAcceptLoopbackOnly) only matters at
+// the one HTTP route that can run from somewhere else.
 func (s *Store) SendBatch(ctx context.Context, ticketID int64) (BatchResult, error) {
-	return s.sendBatch(ctx, ticketID, nil)
+	return s.sendBatch(ctx, ticketID, nil, true)
 }
 
 // SendBatchOnly is SendBatch scoped to questionIDs: a draft whose ParentID
 // is not in questionIDs is left a draft, however stale or old it is (ticket
 // #43: Cmd+Enter must never send a question the owner was not shown). A
 // duplicate id in questionIDs counts once. This is the only entry point
-// POST /send uses.
-func (s *Store) SendBatchOnly(ctx context.Context, ticketID int64, questionIDs []int64) (BatchResult, error) {
+// POST /send uses. loopback is the caller's own isLoopbackRemote check
+// (#57, r1f9 triage): accepting a judge amendment writes an agent-written
+// check and kind through the same store path a console loopback-only edit
+// does, so it is held to the same boundary (amendmentAcceptLoopbackOnly).
+func (s *Store) SendBatchOnly(ctx context.Context, ticketID int64, questionIDs []int64, loopback bool) (BatchResult, error) {
 	only := make(map[int64]bool, len(questionIDs))
 	for _, id := range questionIDs {
 		only[id] = true
 	}
-	return s.sendBatch(ctx, ticketID, only)
+	return s.sendBatch(ctx, ticketID, only, loopback)
 }
 
 // sendBatch is SendBatch's body. only is nil for an unscoped send (SendBatch
@@ -776,7 +793,7 @@ func (s *Store) SendBatchOnly(ctx context.Context, ticketID int64, questionIDs [
 // IMMEDIATE transaction (store.Open sets _txlock=immediate on the store's
 // one connection), so it takes the write lock before it reads and
 // max(batch_id)+1 is never racy.
-func (s *Store) sendBatch(ctx context.Context, ticketID int64, only map[int64]bool) (result BatchResult, err error) {
+func (s *Store) sendBatch(ctx context.Context, ticketID int64, only map[int64]bool, loopback bool) (result BatchResult, err error) {
 	var leftUnsent int
 	// Named returns so one deferred call logs every branch's outcome
 	// (CLAUDE.md: "log every major branch with the ids"), without a log
@@ -810,7 +827,7 @@ func (s *Store) sendBatch(ctx context.Context, ticketID int64, only map[int64]bo
 		return BatchResult{Empty: true}, nil
 	}
 
-	valid, stale, questions, err := revalidateBatchTx(ctx, tx, ticketID, drafts)
+	valid, stale, questions, err := revalidateBatchTx(ctx, tx, ticketID, drafts, loopback)
 	if err != nil {
 		return BatchResult{}, err
 	}
@@ -977,7 +994,7 @@ func loadDraftsTx(ctx context.Context, tx *sql.Tx, ticketID int64) ([]MessageRow
 // draft still touches, for markAnsweredQuestionsTx to reuse; a question
 // backing only stale drafts is left out, since there is nothing left to mark
 // answered against it.
-func revalidateBatchTx(ctx context.Context, tx *sql.Tx, ticketID int64, drafts []MessageRow) (valid, stale []MessageRow, questions map[int64]response.QuestionPayload, err error) {
+func revalidateBatchTx(ctx context.Context, tx *sql.Tx, ticketID int64, drafts []MessageRow, loopback bool) (valid, stale []MessageRow, questions map[int64]response.QuestionPayload, err error) {
 	questions = make(map[int64]response.QuestionPayload)
 	staleQuestions := make(map[int64]bool)
 
@@ -1029,6 +1046,15 @@ func revalidateBatchTx(ctx context.Context, tx *sql.Tx, ticketID int64, drafts [
 		if optionStale || itemStale {
 			stale = append(stale, d)
 			continue
+		}
+		// Accepting a judge amendment writes an agent-written check (and,
+		// for a kind change, an unsandboxed command) through the same store
+		// path a loopback-only console edit uses, so it is held to the same
+		// boundary (#57, r1f9 triage). This aborts the whole send, unlike a
+		// stale draft: the owner picked Accept, so silently discarding it
+		// and moving on would be as surprising as silently applying it.
+		if payload.Amendment != nil && ap.Option != nil && *ap.Option == amendmentAcceptOption && !loopback {
+			return nil, nil, nil, conflict(amendmentAcceptLoopbackOnlyReason)
 		}
 		valid = append(valid, d)
 	}

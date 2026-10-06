@@ -13,6 +13,7 @@ package job
 import (
 	"encoding/json"
 	"os"
+	"slices"
 	"strings"
 	"testing"
 
@@ -141,13 +142,8 @@ func judgeAssertAmendedOptions(t *testing.T, qp response.QuestionPayload) {
 		{Key: "b", Text: "Edit it"},
 		{Key: "c", Text: "Abandon"},
 	}
-	if len(qp.Options) != len(wantOptions) {
-		t.Fatalf("options = %+v, want %+v", qp.Options, wantOptions)
-	}
-	for i := range wantOptions {
-		if qp.Options[i] != wantOptions[i] {
-			t.Errorf("options[%d] = %+v, want %+v", i, qp.Options[i], wantOptions[i])
-		}
+	if !slices.Equal(qp.Options, wantOptions) {
+		t.Errorf("options = %+v, want %+v", qp.Options, wantOptions)
 	}
 	if qp.Recommended != "a" {
 		t.Errorf("recommended = %q, want %q", qp.Recommended, "a")
@@ -161,17 +157,41 @@ func judgeAssertAmendedOptions(t *testing.T, qp response.QuestionPayload) {
 func judgeAssertPlainOptions(t *testing.T, qp response.QuestionPayload) {
 	t.Helper()
 	wantOptions := []response.Option{{Key: "a", Text: "Retry"}, {Key: "c", Text: "Abandon"}}
-	if len(qp.Options) != len(wantOptions) {
-		t.Fatalf("options = %+v, want %+v", qp.Options, wantOptions)
-	}
-	for i := range wantOptions {
-		if qp.Options[i] != wantOptions[i] {
-			t.Errorf("options[%d] = %+v, want %+v", i, qp.Options[i], wantOptions[i])
-		}
+	if !slices.Equal(qp.Options, wantOptions) {
+		t.Errorf("options = %+v, want %+v", qp.Options, wantOptions)
 	}
 	if qp.Amendment != nil {
 		t.Errorf("question amendment = %+v, want nil", qp.Amendment)
 	}
+}
+
+// judgeAnsweredOption returns the option key of the one sent "answer"
+// message parented to qID, failing unless there is exactly one.
+func judgeAnsweredOption(t *testing.T, s *store.Store, ticketID, qID int64) string {
+	t.Helper()
+	all, err := s.ListMessages(t.Context(), ticketID)
+	if err != nil {
+		t.Fatalf("ListMessages: %v", err)
+	}
+	var found *response.AnswerPayload
+	for i := range all {
+		m := &all[i]
+		if m.Type != msgTypeAnswer || m.ParentID == nil || *m.ParentID != qID {
+			continue
+		}
+		var ap response.AnswerPayload
+		if err := json.Unmarshal(m.Payload, &ap); err != nil {
+			t.Fatalf("unmarshal answer payload for question %d: %v", qID, err)
+		}
+		if found != nil {
+			t.Fatalf("question %d has more than one answer message", qID)
+		}
+		found = &ap
+	}
+	if found == nil || found.Option == nil {
+		t.Fatalf("question %d has no option answer", qID)
+	}
+	return *found.Option
 }
 
 // judgeOwnerEditEvents returns ticketID's owner_edit events, decoded.
@@ -225,6 +245,7 @@ func TestJudgeAmendmentAccept(t *testing.T) {
 	ticket = judgeAdvanceStart(t, s, rt, ticket)
 
 	deps := pbClaim(t, s, rt, ticket.ID)
+	oldS2 := judgeScenarioS2(t, deps, ticket)
 	commit, err := (judgeHandler{}).Run(t.Context(), ticket, deps)
 	if err != nil {
 		t.Fatalf("RUN: %v", err)
@@ -277,6 +298,12 @@ func TestJudgeAmendmentAccept(t *testing.T) {
 	if events[0].Reason != judgeAmendmentS2Reason {
 		t.Errorf("event reason = %q, want %q", events[0].Reason, judgeAmendmentS2Reason)
 	}
+	if !strings.Contains(events[0].Old, oldS2.Then) {
+		t.Errorf("event old = %q, want it to contain the pre-accept s2 then %q", events[0].Old, oldS2.Then)
+	}
+	if strings.Contains(events[0].Old, judgeAmendmentS2Check) {
+		t.Errorf("event old = %q, want it not to contain the amended check %q", events[0].Old, judgeAmendmentS2Check)
+	}
 
 	markers, err := s.MarkersWithPrefix(t.Context(), ticket.ID, judgeRoundMarkerPrefix)
 	if err != nil {
@@ -292,6 +319,69 @@ func TestJudgeAmendmentAccept(t *testing.T) {
 
 	if open, openErr := s.QuestionsByState(t.Context(), ticket.ID, "open"); openErr != nil || len(open) != 0 {
 		t.Errorf("open questions = %+v (err %v), want none", open, openErr)
+	}
+}
+
+// ---- TestJudgeAmendmentAcceptRefusedAtAccept -------------------------------
+
+// TestJudgeAmendmentAcceptRefusedAtAccept proves acceptAmendment's own
+// refusal branch (#57, r1f5): judgeAmendment runs again at accept time
+// against the ticket's current sealed cohort, so an amendment that named a
+// scenario at escalation time but no longer resolves (here, an escalation
+// built by hand naming s12, which judgeTicketReady's cohort never had)
+// re-escalates plain cannot_run with the refusal appended to Tried, rather
+// than writing a ScenarioEdit or starting a new round.
+func TestJudgeAmendmentAcceptRefusedAtAccept(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow end-to-end flow; runs in the full suite")
+	}
+	t.Parallel()
+	s, ticket := judgeTicketReady(t)
+	rt := runtime.NewFake(judgeScriptsFS())
+	deps := pbClaim(t, s, rt, ticket.ID)
+
+	commit := escalationCommit(ticket, deps, nil, nil, string(response.EscalationCodeCannotRun),
+		"s12's check cannot run", "testing the accept-time refusal", "",
+		response.EscalationOriginJudge)
+	commit.Escalation.Payload.Amendment = &response.Amendment{
+		Scenario: "s12", Given: "g", When: "w", Then: "th", Check: "true",
+		Reason: "testing the accept-time refusal",
+	}
+	pbApply(t, s, ticket, commit)
+	ticket = pbGetTicket(t, s, ticket.ID)
+
+	qID, _ := judgeOpenAmendedQuestion(t, s, ticket.ID)
+	pbAnswerEscalation(t, s, ticket.ID, qID, "a")
+
+	deps2 := pbClaim(t, s, rt, ticket.ID)
+	reCommit, handled := pbRunPrelude(t, s, deps2, ticket.ID)
+	if !handled {
+		t.Fatal("handled = false, want true")
+	}
+	if reCommit.Escalation == nil {
+		t.Fatal("reCommit.Escalation is nil, want a plain cannot_run re-escalation")
+	}
+	if reCommit.Escalation.Payload.Amendment != nil {
+		t.Errorf("reCommit.Escalation.Payload.Amendment = %+v, want nil", reCommit.Escalation.Payload.Amendment)
+	}
+	want := judgeAmendmentDroppedPrefix + judgeNoSealedScenarioRefusal + "s12"
+	if reCommit.Escalation.Payload.Tried != want {
+		t.Errorf("Tried = %q, want %q", reCommit.Escalation.Payload.Tried, want)
+	}
+	ticket = pbGetTicket(t, s, ticket.ID)
+
+	_, qp := judgeOpenQuestionPayload(t, s, ticket.ID)
+	judgeAssertPlainOptions(t, qp)
+
+	if events := judgeOwnerEditEvents(t, s, ticket.ID); len(events) != 0 {
+		t.Errorf("owner_edit events = %+v, want none", events)
+	}
+	markers, err := s.MarkersWithPrefix(t.Context(), ticket.ID, judgeRoundMarkerPrefix)
+	if err != nil {
+		t.Fatalf("MarkersWithPrefix: %v", err)
+	}
+	if len(markers) != 0 {
+		t.Errorf("judge round markers = %+v, want none (no new round started)", markers)
 	}
 }
 
@@ -606,6 +696,9 @@ func TestJudgeAmendmentEditItStartsRound(t *testing.T) {
 
 	if open, openErr := s.QuestionsByState(t.Context(), ticket.ID, "open"); openErr != nil || len(open) != 0 {
 		t.Fatalf("open questions = %+v (err %v), want none", open, openErr)
+	}
+	if got := judgeAnsweredOption(t, s, ticket.ID, qID); got != "b" {
+		t.Errorf("answered option = %q, want %q", got, "b")
 	}
 
 	roundCommit, handled := pbRunPrelude(t, s, deps2, ticket.ID)

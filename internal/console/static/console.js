@@ -51,6 +51,7 @@ import {
 	reduceStreamStatus,
 	staleMarkerText,
 	STREAM_TICK_MS,
+	ownerEditFieldEntries,
 } from './keyboard.mjs';
 
 // defaultNav is the shell's own data-signals default (templates/shell.templ:
@@ -1459,20 +1460,16 @@ async function ownerEditSubmit(button) {
 	const answerQuestion = box.dataset.answerQuestion;
 	const body = { target, ref, action: dropping ? 'drop' : 'edit' };
 	if (!dropping) {
-		for (const field of box.querySelectorAll('[data-field]')) {
-			const name = field.dataset.field;
-			if (field.type === 'checkbox') {
-				if (answerQuestion || field.checked !== field.defaultChecked) {
-					body[name] = field.checked;
-				}
-			} else if (field.tagName === 'SELECT') {
-				if (answerQuestion || field.value !== field.dataset.initial) {
-					body[name] = field.value;
-				}
-			} else if (answerQuestion || field.value !== field.defaultValue) {
-				body[name] = field.value;
-			}
-		}
+		const fields = [...box.querySelectorAll('[data-field]')].map((field) => ({
+			name: field.dataset.field,
+			kind: field.type === 'checkbox' ? 'checkbox' : field.tagName === 'SELECT' ? 'select' : 'text',
+			value: field.value,
+			defaultValue: field.defaultValue,
+			initial: field.dataset.initial,
+			checked: field.checked,
+			defaultChecked: field.defaultChecked,
+		}));
+		Object.assign(body, ownerEditFieldEntries(fields, answerQuestion));
 		if (answerQuestion) {
 			body.answer_question = Number(answerQuestion);
 		}

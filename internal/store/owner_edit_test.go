@@ -2,6 +2,7 @@ package store
 
 import (
 	"bytes"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -504,6 +505,36 @@ func TestOwnerEditKind(t *testing.T) {
 	if after := readScenarioPayload(t, s, ticketID, "s1"); !bytes.Equal(after, before) {
 		t.Errorf("payload = %s, want unchanged %s", after, before)
 	}
+
+	// A host check runs unsandboxed with only the owner's reading of its
+	// rendered text as approval, so switching an existing check to kind
+	// host, without changing the check text, still refuses a check that
+	// hides its true meaning behind a bidi override (#57, r1f13).
+	at := time.Now().UTC().Truncate(time.Second)
+	insertScenarioArtifact(t, s, ticketID, nil, "s2", &at)
+	unsafeCheck := "go test ./old\u202e"
+	if editErr := s.OwnerEdit(t.Context(), OwnerEditRequest{
+		TicketID: ticketID, Target: OwnerEditScenario, Ref: "s2", Action: OwnerEditActionEdit,
+		Check: &unsafeCheck,
+	}); editErr != nil {
+		t.Fatalf("OwnerEdit(check with bidi override, kind behavior): %v", editErr)
+	}
+
+	before = readScenarioPayload(t, s, ticketID, "s2")
+	err = s.OwnerEdit(t.Context(), OwnerEditRequest{
+		TicketID: ticketID, Target: OwnerEditScenario, Ref: "s2", Action: OwnerEditActionEdit,
+		Kind: new("host"),
+	})
+	refusal, ok = errors.AsType[*OwnerEditError](err)
+	if !ok {
+		t.Fatalf("OwnerEdit(kind host, unsafe check) error = %v (%T), want *OwnerEditError", err, err)
+	}
+	if refusal.Code != OwnerEditCodeInvalid {
+		t.Errorf("code = %q, want %q", refusal.Code, OwnerEditCodeInvalid)
+	}
+	if after := readScenarioPayload(t, s, ticketID, "s2"); !bytes.Equal(after, before) {
+		t.Errorf("payload = %s, want unchanged %s", after, before)
+	}
 }
 
 // --- plan task edits (#41, task 2) ------------------------------------------
@@ -851,6 +882,51 @@ func TestOwnerEditAnswersAmendedEscalation(t *testing.T) {
 		answered, err := s.QuestionsByState(t.Context(), ticketID, questionStateAnswered)
 		if err != nil || len(answered) != 1 || answered[0].ID != qID {
 			t.Errorf("answered questions = %+v (err %v), want exactly [%d]", answered, err, qID)
+		}
+	})
+
+	t.Run("a draft picked on the question before Save is cleared", func(t *testing.T) {
+		t.Parallel()
+		s := newTestStore(t)
+		_, ticketID := seedQueuedTicket(t, s, "1")
+		seedSealedScenario(t, s, ticketID) // s1
+		qID := seedAmendedEscalation(t, s, ticketID, "s1")
+
+		// The owner picked the Accept chip (draft option "a") before opening
+		// the box and saving it, the same way a chip pick drafts against any
+		// other question (#57, r1f12): Save's own answer must not leave that
+		// draft stranded against a now-answered question.
+		draftOption := "a"
+		if _, err := s.SaveDraft(t.Context(), DraftInput{TicketID: ticketID, QuestionID: &qID, Option: &draftOption}); err != nil {
+			t.Fatalf("SaveDraft: %v", err)
+		}
+
+		const ownerCheck = "go test ./owner-written"
+		if err := s.OwnerEdit(t.Context(), OwnerEditRequest{
+			TicketID: ticketID, Target: OwnerEditScenario, Ref: "s1", Action: OwnerEditActionEdit,
+			Check: new(ownerCheck), AnswerQuestion: &qID,
+		}); err != nil {
+			t.Fatalf("OwnerEdit: %v", err)
+		}
+
+		var remaining int
+		if err := s.db.QueryRowContext(t.Context(),
+			`SELECT COUNT(*) FROM messages WHERE parent_id = ? AND state = 'draft'`, qID,
+		).Scan(&remaining); err != nil {
+			t.Fatalf("count drafts on question %d: %v", qID, err)
+		}
+		if remaining != 0 {
+			t.Errorf("drafts on question %d = %d, want 0", qID, remaining)
+		}
+
+		var readAt sql.NullString
+		if err := s.db.QueryRowContext(t.Context(),
+			`SELECT read_at FROM messages WHERE id = ?`, qID,
+		).Scan(&readAt); err != nil {
+			t.Fatalf("read read_at for question %d: %v", qID, err)
+		}
+		if !readAt.Valid {
+			t.Errorf("question %d read_at is NULL, want set", qID)
 		}
 	})
 

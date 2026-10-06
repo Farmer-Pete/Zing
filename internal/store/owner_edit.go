@@ -18,6 +18,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"time"
 
 	"zing/internal/response"
 )
@@ -341,6 +342,21 @@ func (s *Store) answerAmendedEscalationTx(ctx context.Context, tx *sql.Tx, ticke
 	if !res.Accepted {
 		return ownerEditErr(OwnerEditCodeAnswerRefused, fmt.Sprintf("question %d: %s", questionID, res.Conflict))
 	}
+
+	// answerQuestionTx (commit.go's own AnswerQuestion path) neither clears a
+	// leftover draft on questionID nor marks it read the way sendBatch's own
+	// answer path does: the owner may have picked a chip (Accept or Edit it)
+	// before opening and saving this box, leaving a draft answer row parented
+	// to questionID that would otherwise sit stale until the next SendBatch
+	// call revalidates and discards it (#57, r1f12).
+	if _, err = tx.ExecContext(ctx, `DELETE FROM messages WHERE parent_id = ? AND state = ?`, questionID, draftState); err != nil {
+		return fmt.Errorf("owner edit: clear draft for question %d: %w", questionID, err)
+	}
+	if _, err = tx.ExecContext(ctx,
+		`UPDATE messages SET read_at = ? WHERE id = ? AND read_at IS NULL`, formatTime(time.Now()), questionID,
+	); err != nil {
+		return fmt.Errorf("owner edit: mark question %d read: %w", questionID, err)
+	}
 	return nil
 }
 
@@ -394,6 +410,13 @@ func (s *Store) editScenarioTx(ctx context.Context, tx *sql.Tx, req OwnerEditReq
 	}
 	if sc.Kind == response.ScenarioKindHost && strings.TrimSpace(sc.Check) == "" {
 		return response.OwnerEditEvent{}, ownerEditErr(OwnerEditCodeInvalid, response.HostScenarioNeedsCheck)
+	}
+	// A host check runs unsandboxed with only the owner's reading of its
+	// rendered text as approval (#57, #159), so the owner's own switch to
+	// kind host applies the same control/invisible-character refusal to
+	// the existing check that checkScenarioRules applies to a judge's.
+	if sc.Kind == response.ScenarioKindHost && response.HostCheckUnsafe(sc.Check) {
+		return response.OwnerEditEvent{}, ownerEditErr(OwnerEditCodeInvalid, response.HostCheckUnsafeMsg)
 	}
 
 	newPayload, err := json.Marshal(sc)

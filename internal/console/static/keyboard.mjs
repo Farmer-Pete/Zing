@@ -1164,3 +1164,39 @@ export function staleMarkerText(staleSince) {
 	const mm = String(d.getMinutes()).padStart(2, '0');
 	return `Reconnecting. Stale since ${hh}:${mm}.`;
 }
+
+/**
+ * ownerEditFieldEntries decides which [data-field] values ownerEditSubmit
+ * (console.js) sends in a non-drop POST /tickets/{id}/edit body (#41, #57
+ * Q3): a checkbox field only when its checked state changed from
+ * defaultChecked, a select field only when its value changed from its own
+ * data-initial (a select carries no browser-native default the way an
+ * input or textarea's defaultValue does), and any other field only when its
+ * value changed from defaultValue. answerQuestion overrides every one of
+ * those comparisons to true: Save on an amended escalation's "Edit it" box
+ * (a non-empty answerQuestion) both rewrites the scenario and answers the
+ * escalation in the same store transaction, so a field the owner left
+ * exactly as the judge proposed it must still land, not be treated as
+ * unchanged and dropped.
+ *
+ * @param {{name: string, kind: 'checkbox'|'select'|'text', value?: string, defaultValue?: string, initial?: string, checked?: boolean, defaultChecked?: boolean}[]} fields
+ * @param {string|undefined} answerQuestion
+ * @returns {Object<string, string|boolean>}
+ */
+export function ownerEditFieldEntries(fields, answerQuestion) {
+	const entries = {};
+	for (const f of fields) {
+		if (f.kind === 'checkbox') {
+			if (answerQuestion || f.checked !== f.defaultChecked) {
+				entries[f.name] = f.checked;
+			}
+		} else if (f.kind === 'select') {
+			if (answerQuestion || f.value !== f.initial) {
+				entries[f.name] = f.value;
+			}
+		} else if (answerQuestion || f.value !== f.defaultValue) {
+			entries[f.name] = f.value;
+		}
+	}
+	return entries;
+}

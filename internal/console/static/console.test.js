@@ -13,8 +13,9 @@
 // left unsent or stale (unsavedReplyBodies, sendResultWithUnsent), the
 // debounced autosave decision (replyAutosaveBody), the send-time emptied-box
 // flush, failed-clear block, and failed/stale save split (emptiedReplyBodies,
-// clearFailedResult, partitionFailedSaves), and the patch-caused-blur-only
-// focus restore decision (replyFocusSnapshot, restoreFocusDecision).
+// clearFailedResult, partitionFailedSaves), the patch-caused-blur-only
+// focus restore decision (replyFocusSnapshot, restoreFocusDecision), and
+// the owner-edit box's field-to-body decision (ownerEditFieldEntries).
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
@@ -69,6 +70,7 @@ import {
 	handleKeyEvent,
 	notePatchFocus,
 	patchFocus,
+	ownerEditFieldEntries,
 } from './keyboard.mjs';
 
 // fixtureBindings is a small parsed-keys.json fixture, shaped the same as
@@ -506,6 +508,36 @@ test('buildItemDraftBody: reads ticket, question, item ref, and decision off the
 		ticket: 12,
 		question: 34,
 		item: { ref: 'src/main.go', decision: 'accept' },
+	});
+});
+
+// ownerEditFieldEntries: the owner-edit box's own field-to-body decision
+// (console.js's ownerEditSubmit, #41, #57 Q3) -- a select counts as changed
+// against its own data-initial, not a browser-native default, and a box
+// answering an amended escalation (a non-empty answerQuestion) sends every
+// field whether changed or not. ownerEditSubmit itself appends
+// answer_question as Number(box.dataset.answerQuestion) alongside this
+// function's result; that one line is DOM glue console.js's own header
+// comment already excludes from Node coverage.
+
+test('ownerEditFieldEntries: an unchanged select against its data-initial sends no kind', () => {
+	const fields = [
+		{ name: 'then', kind: 'text', value: 'a new then', defaultValue: 'old then' },
+		{ name: 'kind', kind: 'select', value: 'behavior', initial: 'behavior' },
+	];
+	assert.deepEqual(ownerEditFieldEntries(fields, undefined), { then: 'a new then' });
+});
+
+test('ownerEditFieldEntries: a box answering a question sends every field whether changed or not', () => {
+	const fields = [
+		{ name: 'given', kind: 'text', value: 'g', defaultValue: 'g' },
+		{ name: 'when', kind: 'text', value: 'w', defaultValue: 'w' },
+		{ name: 'then', kind: 'text', value: 't', defaultValue: 't' },
+		{ name: 'check', kind: 'text', value: 'c', defaultValue: 'c' },
+		{ name: 'kind', kind: 'select', value: 'behavior', initial: 'behavior' },
+	];
+	assert.deepEqual(ownerEditFieldEntries(fields, '42'), {
+		given: 'g', when: 'w', then: 't', check: 'c', kind: 'behavior',
 	});
 });
 

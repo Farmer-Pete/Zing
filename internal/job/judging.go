@@ -1918,7 +1918,15 @@ func (h judgeHandler) acceptAmendment(ctx context.Context, t store.Ticket, d Dep
 	if refusal != "" {
 		slog.Warn("judge amendment refused at accept", "ticket_id", t.ID, "scenario_id", payload.Amendment.Scenario, "question_ids", resolveIDs, "refusal", refusal)
 		tried := appendTried(payload.Tried, judgeAmendmentDroppedPrefix+refusal)
-		c := escalationCommit(t, d, nil, nil, string(response.EscalationCodeCannotRun), payload.What, payload.Why, tried, response.EscalationOriginJudge)
+		code := string(response.EscalationCodeCannotRun)
+		// No run caused this re-escalation (the owner's own answer did), so
+		// session_id and run_id are both nil, the same shape
+		// judgeLoopsExhausted's own re-escalation gives this file's
+		// "escalation written" log (design section 11): every escalation
+		// this file writes logs that line once, and acceptAmendment's own
+		// escalationCommit call below would otherwise be the one exception.
+		slog.Warn("escalation written", "ticket_id", t.ID, "session_id", nil, "run_id", nil, "code", code, "origin", string(response.EscalationOriginJudge))
+		c := escalationCommit(t, d, nil, nil, code, payload.What, payload.Why, tried, response.EscalationOriginJudge)
 		c.ResolveQuestions = resolveIDs
 		return c, nil
 	}

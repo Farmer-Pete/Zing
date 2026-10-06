@@ -4,6 +4,8 @@ import (
 	"regexp"
 	"slices"
 	"strconv"
+
+	"zing/internal/response"
 )
 
 // hostCheckWSRun matches a tab, or a run of more than 4 consecutive
@@ -117,12 +119,6 @@ templ ownerEditScenarioForm(s ScenarioRow) {
 	@ownerEditScenarioBox(s, 0, "Edit")
 }
 
-// scenarioKindOptions is the kind select's own closed set (response.
-// ScenarioKind's four values, mirrored here the same way this package
-// already copies other job and store literals it cannot import): behavior,
-// negative, performance, host, in that order.
-var scenarioKindOptions = []string{"behavior", "negative", "performance", "host"}
-
 // ownerEditScenarioBox is one sealed scenario's owner-edit box (#41, #57): a
 // <details class="owner-edit"> the owner opens to rewrite given, when,
 // then, check, or kind, posted by console.js's ownerEditSubmit to POST
@@ -164,7 +160,7 @@ templ ownerEditScenarioBox(s ScenarioRow, answerQuestionID int64, summary string
 		<input type="text" data-field="check" value={ s.Check }/>
 		<label>Kind</label>
 		<select data-field="kind" data-initial={ s.Kind }>
-			for _, k := range scenarioKindOptions {
+			for _, k := range response.ScenarioKind("").Values() {
 				<option value={ k } selected?={ k == s.Kind }>{ k }</option>
 			}
 		</select>

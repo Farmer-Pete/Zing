@@ -726,7 +726,7 @@ func TestSendBatchOnly_SendsOnlyListedQuestion(t *testing.T) {
 		t.Fatalf("SaveDraft(q2): %v", err)
 	}
 
-	res, err := s.SendBatchOnly(t.Context(), ticketID, []int64{q1})
+	res, err := s.SendBatchOnly(t.Context(), ticketID, []int64{q1}, true)
 	if err != nil {
 		t.Fatalf("SendBatchOnly(q1): %v", err)
 	}
@@ -758,7 +758,7 @@ func TestSendBatchOnly_SendsOnlyListedQuestion(t *testing.T) {
 	if err != nil {
 		t.Fatalf("SaveDraft(q1, second round): %v", err)
 	}
-	res, err = s.SendBatchOnly(t.Context(), ticketID, []int64{q1, q1})
+	res, err = s.SendBatchOnly(t.Context(), ticketID, []int64{q1, q1}, true)
 	if err != nil {
 		t.Fatalf("SendBatchOnly([q1, q1]): %v", err)
 	}
@@ -774,7 +774,7 @@ func TestSendBatchOnly_SendsOnlyListedQuestion(t *testing.T) {
 	}
 
 	// A question id with no draft at all sends nothing.
-	res, err = s.SendBatchOnly(t.Context(), ticketID, []int64{999999999})
+	res, err = s.SendBatchOnly(t.Context(), ticketID, []int64{999999999}, true)
 	if err != nil {
 		t.Fatalf("SendBatchOnly(no draft): %v", err)
 	}

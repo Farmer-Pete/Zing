@@ -586,7 +586,7 @@ func TestThreadAnsweredAndResolvedQuestionsRenderReadOnly(t *testing.T) {
 
 	answeredPayload := []byte(`{"key":"Q1","kind":"question","state":"answered","recommended":"a",` +
 		`"options":[{"key":"a","text":"Plain hello"},{"key":"b","text":"hello, world"}]}`)
-	answeredState := "answered"
+	answeredState := testQuestionStateAnswered
 	if _, err := s.InsertMessage(t.Context(), store.Message{
 		TicketID: ticketID, Type: testMsgTypeQuestion, Author: "zing", State: &answeredState,
 		Body: "Answered question\n\nAlready decided.", Payload: answeredPayload,

@@ -435,7 +435,7 @@ func TestHandleOwnerEditKindLoopbackOnly(t *testing.T) {
 
 	t.Run("non-loopback refused", func(t *testing.T) {
 		authority := strings.TrimPrefix(srv.URL, "http://")
-		body := `{"target":"scenario","ref":"s1","action":"edit","kind":"host","check":"` + testNewCheck + `"}`
+		body := `{"target":"scenario","ref":"s1","action":"edit","kind":"negative"}`
 		req := httptest.NewRequestWithContext(t.Context(), http.MethodPost, srv.URL+ownerEditPath(ticketID), strings.NewReader(body))
 		req.Host = authority
 		req.RemoteAddr = testNonLoopbackRemoteAddr
@@ -523,7 +523,7 @@ func TestHandleOwnerEditAnswerQuestion(t *testing.T) {
 		if err != nil {
 			t.Fatalf("GetMessage: %v", err)
 		}
-		if got.State == nil || *got.State != "answered" {
+		if got.State == nil || *got.State != testQuestionStateAnswered {
 			t.Errorf("question state = %v, want answered", got.State)
 		}
 	})
