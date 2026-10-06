@@ -13,7 +13,7 @@ const goTestAllCmd = "go test ./..."
 func TestDeniedCommand(t *testing.T) {
 	t.Parallel()
 
-	deny := []string{goTestAllCmd, "make test", "make lint"}
+	deny := []string{goTestAllCmd, denyTestCmd, denyLintCmd}
 
 	matches := []struct {
 		name    string
@@ -22,9 +22,12 @@ func TestDeniedCommand(t *testing.T) {
 	}{
 		{"timed pipe", "time go test ./... | tail -40", goTestAllCmd},
 		{"env prefixed", "CGO_ENABLED=0 go test ./... -count=1", goTestAllCmd},
-		{"second segment", "cd sub && make test", "make test"},
-		{"env then time", "FOO=1 time make lint -v", "make lint"},
+		{"second segment", "cd sub && make test", denyTestCmd},
+		{"env then time", "FOO=1 time make lint -v", denyLintCmd},
 		{"extra spaces", "go  test   ./...", goTestAllCmd},
+		{"semicolon", "cd sub; make test", denyTestCmd},
+		{"newline", "cd sub\nmake test", denyTestCmd},
+		{"or-or", "false || go test ./...", goTestAllCmd},
 	}
 	for _, tc := range matches {
 		t.Run(tc.name, func(t *testing.T) {
@@ -44,6 +47,7 @@ func TestDeniedCommand(t *testing.T) {
 		"go test -run X ./a",
 		"echo make test",
 		"",
+		"make test-short || true",
 	}
 	for _, command := range noMatches {
 		t.Run("no match: "+command, func(t *testing.T) {
@@ -54,4 +58,37 @@ func TestDeniedCommand(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestDeniedCommand_EntryItselfNeedsNormalizing proves a deny entry that
+// carries an env assignment or is itself a compound command still matches
+// the bare segment a build run tries to run (the project's own configured
+// test or lint command, which this hook exists to block, often looks
+// exactly like this).
+func TestDeniedCommand_EntryItselfNeedsNormalizing(t *testing.T) {
+	t.Parallel()
+
+	t.Run("entry has a leading env assignment", func(t *testing.T) {
+		t.Parallel()
+		deny := []string{"CGO_ENABLED=0 go test ./..."}
+		entry, ok := DeniedCommand("CGO_ENABLED=0 go test ./...", deny)
+		if !ok {
+			t.Fatal("DeniedCommand ok = false, want true")
+		}
+		if entry != deny[0] {
+			t.Errorf("entry = %q, want %q", entry, deny[0])
+		}
+	})
+
+	t.Run("entry is a compound command", func(t *testing.T) {
+		t.Parallel()
+		deny := []string{"go vet ./... && go test ./..."}
+		entry, ok := DeniedCommand("go test ./...", deny)
+		if !ok {
+			t.Fatal("DeniedCommand ok = false, want true")
+		}
+		if entry != deny[0] {
+			t.Errorf("entry = %q, want %q", entry, deny[0])
+		}
+	})
 }

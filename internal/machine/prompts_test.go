@@ -251,6 +251,32 @@ func TestPlanningPromptsSizeTasksToRun(t *testing.T) {
 	}
 }
 
+// simplificationLensTaskSplitLine is the line prompts/lenses/simplification.md
+// adds to its "In a plan" section (#53): plan review proposes splitting an
+// oversized task the same way the task-size sentence above asks the
+// planner itself to.
+const simplificationLensTaskSplitLine = "Find each task that adds three or more new functions with their tests, " +
+	"and propose splitting it so each part fits one build run."
+
+// TestSimplificationLensProposesSplittingOversizedTasks proves
+// prompts/lenses/simplification.md carries the task-split line in its "In
+// a plan" section, before "In code" (#53): deleting or rewording the line
+// would otherwise pass every other test.
+func TestSimplificationLensProposesSplittingOversizedTasks(t *testing.T) {
+	t.Parallel()
+	const path = "prompts/lenses/simplification.md"
+	text := unwrapped(t, path)
+	inPlanIdx := strings.Index(text, "In a plan")
+	inCodeIdx := strings.Index(text, "In code")
+	lineIdx := strings.Index(text, simplificationLensTaskSplitLine)
+	if inPlanIdx < 0 || inCodeIdx < 0 || lineIdx < 0 {
+		t.Fatalf("%s: In a plan at %d, In code at %d, task-split line at %d, want all present", path, inPlanIdx, inCodeIdx, lineIdx)
+	}
+	if inPlanIdx >= lineIdx || lineIdx >= inCodeIdx {
+		t.Errorf("%s: want the task-split line between In a plan and In code, got In a plan=%d, line=%d, In code=%d", path, inPlanIdx, lineIdx, inCodeIdx)
+	}
+}
+
 // TestBuildPromptPlaceholders checks that prompts/build.md carries each of
 // its five placeholders exactly once, so ForBuild's single replacement of
 // each cannot silently miss or double up.

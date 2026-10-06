@@ -12,11 +12,6 @@ import (
 // command segment the same way a leading "time" is, before matching.
 var envAssignment = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*=`)
 
-// bashToolCheck is Claude Code's tool name for a Bash call, named so this
-// file's own comparison doesn't add a third raw "Bash" literal next to
-// claude.go's two (tasks 2, 7, out of scope here).
-const bashToolCheck = "Bash"
-
 // denyHookInput is the subset of a Claude Code PreToolUse event the hook
 // reads.
 type denyHookInput struct {
@@ -26,51 +21,87 @@ type denyHookInput struct {
 	} `json:"tool_input"`
 }
 
+// denyPiece is one normalized, matchable piece of a deny entry, kept next
+// to the original entry text so a match can report what the owner wrote
+// even when the entry itself held several segments or a leading env
+// assignment.
+type denyPiece struct {
+	normalized string
+	entry      string
+}
+
 // DeniedCommand reports the first deny entry that a segment of command
 // matches, after stripping a leading time and VAR=value assignments from
-// each segment; ok is false when none matches.
+// each segment; ok is false when none matches. Each deny entry is split
+// and stripped the same way, so an entry that is itself a compound command
+// (such as "go vet ./... && go test ./...") or starts with an env
+// assignment (such as "CGO_ENABLED=0 go test ./...") still matches the
+// bare segment a build run tries to run.
 func DeniedCommand(command string, deny []string) (entry string, ok bool) {
-	normDeny := make([]string, len(deny))
-	for i, d := range deny {
-		normDeny[i] = normalizeFields(strings.Fields(d))
+	var pieces []denyPiece
+	for _, d := range deny {
+		for _, seg := range splitCommandSegments(d) {
+			if norm := normalizeSegment(seg); norm != "" {
+				pieces = append(pieces, denyPiece{normalized: norm, entry: d})
+			}
+		}
 	}
 	for _, seg := range splitCommandSegments(command) {
-		fields := strings.Fields(seg)
-		for len(fields) > 0 && (fields[0] == "time" || envAssignment.MatchString(fields[0])) {
-			fields = fields[1:]
-		}
-		normSeg := normalizeFields(fields)
+		normSeg := normalizeSegment(seg)
 		if normSeg == "" {
 			continue
 		}
-		for i, d := range normDeny {
-			if d == "" {
-				continue
-			}
-			if normSeg == d || strings.HasPrefix(normSeg, d+" ") {
-				return deny[i], true
+		for _, p := range pieces {
+			if normSeg == p.normalized || strings.HasPrefix(normSeg, p.normalized+" ") {
+				return p.entry, true
 			}
 		}
 	}
 	return "", false
 }
 
-// normalizeFields joins fields with single spaces.
-func normalizeFields(fields []string) string {
+// strippablePrefix reports whether field is a leading "time" or a
+// VAR=value assignment, the parts normalizeSegment drops before a segment
+// or deny entry is compared.
+func strippablePrefix(field string) bool {
+	return field == "time" || envAssignment.MatchString(field)
+}
+
+// normalizeSegment strips any leading time and VAR=value fields from seg,
+// then joins what remains with single spaces.
+func normalizeSegment(seg string) string {
+	fields := strings.Fields(seg)
+	for len(fields) > 0 && strippablePrefix(fields[0]) {
+		fields = fields[1:]
+	}
 	return strings.Join(fields, " ")
 }
 
-// splitCommandSegments splits command on &&, ||, ;, |, and newline, the
-// two-character operators checked before the single-character ones so
-// "||" is not split into two empty segments around a stray "|".
+// commandOperator reports the two-character shell operator command starts
+// with at i, or "" when there is none; checked before the single-character
+// operators so "||" is not split into two empty segments around a stray
+// "|".
+func commandOperator(command string, i int) string {
+	if i+1 >= len(command) {
+		return ""
+	}
+	switch pair := command[i : i+2]; pair {
+	case "&&", "||":
+		return pair
+	default:
+		return ""
+	}
+}
+
+// splitCommandSegments splits command on &&, ||, ;, |, and newline.
 func splitCommandSegments(command string) []string {
 	var segments []string
 	var cur strings.Builder
 	for i := 0; i < len(command); {
-		if i+1 < len(command) && (command[i:i+2] == "&&" || command[i:i+2] == "||") {
+		if op := commandOperator(command, i); op != "" {
 			segments = append(segments, cur.String())
 			cur.Reset()
-			i += 2
+			i += len(op)
 			continue
 		}
 		switch c := command[i]; c {
@@ -93,7 +124,7 @@ func DenyHook(stdin io.Reader, deny []string) (reason string, err error) {
 	if derr := json.NewDecoder(stdin).Decode(&in); derr != nil {
 		return "", fmt.Errorf("runtime: deny hook: decode input: %w", derr)
 	}
-	if in.ToolName != bashToolCheck {
+	if in.ToolName != claudeBashTool {
 		return "", nil
 	}
 	entry, ok := DeniedCommand(in.ToolInput.Command, deny)

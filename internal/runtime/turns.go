@@ -44,22 +44,28 @@ type transcriptLine struct {
 	} `json:"message"`
 }
 
+// parsedLine is one transcript JSONL line, decoded and timestamped.
+type parsedLine struct {
+	Time time.Time
+	Line transcriptLine
+}
+
 // parseTranscriptLine decodes one raw JSONL line and parses its timestamp;
 // ok is false when either fails, per the turn timing rule ("skip any line
 // that does not decode or whose timestamp does not parse as RFC 3339").
-func parseTranscriptLine(raw []byte) (ts time.Time, isAssistant bool, messageID string, outputTokens int, ok bool) {
+func parseTranscriptLine(raw []byte) (parsedLine, bool) {
 	if len(bytes.TrimSpace(raw)) == 0 {
-		return time.Time{}, false, "", 0, false
+		return parsedLine{}, false
 	}
 	var tl transcriptLine
 	if err := json.Unmarshal(raw, &tl); err != nil {
-		return time.Time{}, false, "", 0, false
+		return parsedLine{}, false
 	}
 	ts, err := time.Parse(time.RFC3339Nano, tl.Timestamp)
 	if err != nil {
-		return time.Time{}, false, "", 0, false
+		return parsedLine{}, false
 	}
-	return ts, tl.Type == "assistant", tl.Message.ID, tl.Message.Usage.OutputTokens, true
+	return parsedLine{Time: ts, Line: tl}, true
 }
 
 // openTurn is a turn longTurns is still accumulating lines for.
@@ -68,6 +74,15 @@ type openTurn struct {
 	start  time.Time
 	end    time.Time
 	tokens int
+}
+
+// extend grows t with another line of the same message id: end moves to
+// ts, and tokens becomes the larger of its current value and tokens.
+func (t *openTurn) extend(ts time.Time, tokens int) {
+	t.end = ts
+	if tokens > t.tokens {
+		t.tokens = tokens
+	}
 }
 
 // finalize turns t into the longTurn it represents, per the turn timing
@@ -92,24 +107,22 @@ func longTurns(r io.Reader) ([]longTurn, error) {
 	var prevTime time.Time
 
 	for {
-		line, readErr := br.ReadBytes('\n')
-		if len(line) > 0 {
-			if ts, isAssistant, messageID, tokens, ok := parseTranscriptLine(line); ok {
-				if isAssistant && messageID != "" {
-					if current == nil || current.id != messageID {
-						if current != nil && !current.start.IsZero() {
-							finalized = append(finalized, current.finalize())
-						}
-						current = &openTurn{id: messageID, start: prevTime, end: ts, tokens: tokens}
-					} else {
-						current.end = ts
-						if tokens > current.tokens {
-							current.tokens = tokens
-						}
-					}
-				}
-				prevTime = ts
+		raw, readErr := br.ReadBytes('\n')
+		pl, ok := parseTranscriptLine(raw)
+		switch {
+		case !ok:
+			// skip: empty, undecodable, or an unparsable timestamp
+		case pl.Line.Type != "assistant" || pl.Line.Message.ID == "":
+			prevTime = pl.Time
+		case current != nil && current.id == pl.Line.Message.ID:
+			current.extend(pl.Time, pl.Line.Message.Usage.OutputTokens)
+			prevTime = pl.Time
+		default:
+			if current != nil && !current.start.IsZero() {
+				finalized = append(finalized, current.finalize())
 			}
+			current = &openTurn{id: pl.Line.Message.ID, start: prevTime, end: pl.Time, tokens: pl.Line.Message.Usage.OutputTokens}
+			prevTime = pl.Time
 		}
 		if readErr != nil {
 			if current != nil && !current.start.IsZero() {

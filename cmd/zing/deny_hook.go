@@ -21,7 +21,10 @@ func runDenyHook(args []string, stdin io.Reader, stderr io.Writer) int {
 		deny = append(deny, v)
 		return nil
 	})
-	if err := fs.Parse(args); err != nil || len(deny) == 0 || len(fs.Args()) != 0 {
+	parseFailed := fs.Parse(args) != nil
+	noDeny := len(deny) == 0
+	extraArgs := len(fs.Args()) != 0
+	if parseFailed || noDeny || extraArgs {
 		fmt.Fprintln(stderr, denyHookUsage)
 		return 1
 	}

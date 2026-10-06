@@ -352,7 +352,8 @@ func TestClaude_ArgvCarriesDenyHook(t *testing.T) {
 	req := newFakeRequest(dir, "success")
 	req.DenyBash = []string{denyTestCmd, denyLintCmd}
 	c := NewClaude(fakeClaudeScript, testOAuthToken).WithStopHook("/bin/zing")
-	if _, err := c.Run(context.Background(), req); err != nil {
+	res, err := c.Run(context.Background(), req)
+	if err != nil {
 		t.Fatalf("Run: %v", err)
 	}
 
@@ -369,13 +370,21 @@ func TestClaude_ArgvCarriesDenyHook(t *testing.T) {
 	if !ok || len(stopGroups) != 1 || len(stopGroups[0].Hooks) != 1 {
 		t.Fatalf("settings.Hooks[Stop] = %+v, want one group with one command", settings.Hooks["Stop"])
 	}
+	if stopGroups[0].Matcher != "" {
+		t.Errorf("Stop matcher = %q, want empty", stopGroups[0].Matcher)
+	}
+	wantStopStatePath := filepath.Join(os.TempDir(), "zing-stop-hook-"+res.SessionID+".json")
+	wantStopCmd := "'/bin/zing' validate --hook --job 'classify' --state '" + wantStopStatePath + "'"
+	if got := stopGroups[0].Hooks[0].Command; got != wantStopCmd {
+		t.Errorf("Stop command = %q, want %q", got, wantStopCmd)
+	}
 
 	denyGroups, ok := settings.Hooks["PreToolUse"]
 	if !ok || len(denyGroups) != 1 || len(denyGroups[0].Hooks) != 1 {
 		t.Fatalf("settings.Hooks[PreToolUse] = %+v, want one group with one command", settings.Hooks["PreToolUse"])
 	}
-	if denyGroups[0].Matcher != bashToolCheck {
-		t.Errorf("PreToolUse matcher = %q, want %q", denyGroups[0].Matcher, bashToolCheck)
+	if denyGroups[0].Matcher != claudeBashTool {
+		t.Errorf("PreToolUse matcher = %q, want %q", denyGroups[0].Matcher, claudeBashTool)
 	}
 	wantCmd := "'/bin/zing' deny-hook --deny 'make test' --deny 'make lint'"
 	if got := denyGroups[0].Hooks[0].Command; got != wantCmd {

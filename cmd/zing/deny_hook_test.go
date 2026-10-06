@@ -1,6 +1,8 @@
 package main
 
 import (
+	"bytes"
+	"encoding/json"
 	"strings"
 	"testing"
 )
@@ -11,14 +13,22 @@ const denyFlag = "--deny"
 
 // denyHookStdin builds the JSON a Claude Code PreToolUse event for a Bash
 // call sends on stdin.
-func denyHookStdin(toolName, command string) *strings.Reader {
-	return strings.NewReader(`{"tool_name":"` + toolName + `","tool_input":{"command":` + quoteJSON(command) + `}}`)
-}
-
-// quoteJSON renders s as a JSON string literal, good enough for the plain
-// ASCII commands these tests use.
-func quoteJSON(s string) string {
-	return `"` + strings.ReplaceAll(s, `"`, `\"`) + `"`
+func denyHookStdin(toolName, command string) *bytes.Reader {
+	b, err := json.Marshal(struct {
+		ToolName  string `json:"tool_name"`
+		ToolInput struct {
+			Command string `json:"command"`
+		} `json:"tool_input"`
+	}{
+		ToolName: toolName,
+		ToolInput: struct {
+			Command string `json:"command"`
+		}{Command: command},
+	})
+	if err != nil {
+		panic(err)
+	}
+	return bytes.NewReader(b)
 }
 
 // TestDenyHook_BlocksTimedFullSuite proves runDenyHook stops the two

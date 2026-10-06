@@ -503,14 +503,14 @@ func TestRunJob_BuildRunCarriesDenyList(t *testing.T) {
 
 // TestDeadlineInput_UsesBuildTimeout proves deadlineInput reads the
 // machine's own build job.timeout_minutes through jobTimeout, the one
-// function runJobWith's own req.Timeout also reads (task 3), so the two
-// never drift.
+// function runJobWith's own req.Timeout also reads, so the two never
+// drift.
 func TestDeadlineInput_UsesBuildTimeout(t *testing.T) {
 	t.Parallel()
 	d := Deps{Machine: runJobTestMachine(t)}
 	now := time.Date(2026, 10, 5, 14, 0, 0, 0, time.UTC)
 
-	in := deadlineInput(d, jobBuildName, now)
+	in := deadlineInput(d, now)
 
 	const want = "This run ends at 14:45 UTC, in 45 minutes." // machine.toml jobs.build.timeout_minutes
 	if in.Text != want {

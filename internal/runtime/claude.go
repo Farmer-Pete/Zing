@@ -66,6 +66,9 @@ func (c Claude) resolveBin() string {
 	return c.bin
 }
 
+// claudeBashTool is Claude Code's tool name for a Bash call.
+const claudeBashTool = "Bash"
+
 // claudeToolNames maps a machine.toml tool name to its CLI spelling
 // (design section 4.1): read/grep/glob/edit/write/bash pass straight
 // through to their built-in tool name, and bash_readonly narrows Bash to
@@ -76,7 +79,7 @@ var claudeToolNames = map[string]string{
 	"glob":          "Glob",
 	"edit":          "Edit",
 	"write":         "Write",
-	"bash":          bashToolCheck,
+	"bash":          claudeBashTool,
 	"bash_readonly": "Bash(zing validate:*)",
 }
 
@@ -204,13 +207,12 @@ func hookSettings(zingBin string, job response.Job, statePath string, deny []str
 		"Stop": {{Hooks: []claudeHookCommand{{Type: "command", Command: stopCmd}}}},
 	}
 	if len(deny) > 0 {
-		denyCmd := shellQuote(zingBin) + " deny-hook"
-		var denyCmdSb208 strings.Builder
+		var b strings.Builder
+		b.WriteString(shellQuote(zingBin) + " deny-hook")
 		for _, entry := range deny {
-			denyCmdSb208.WriteString(" --deny " + shellQuote(entry))
+			b.WriteString(" --deny " + shellQuote(entry))
 		}
-		denyCmd += denyCmdSb208.String()
-		hooks["PreToolUse"] = []claudeHookGroup{{Matcher: bashToolCheck, Hooks: []claudeHookCommand{{Type: "command", Command: denyCmd}}}}
+		hooks["PreToolUse"] = []claudeHookGroup{{Matcher: claudeBashTool, Hooks: []claudeHookCommand{{Type: "command", Command: b.String()}}}}
 	}
 	b, err := json.Marshal(claudeSettings{Hooks: hooks})
 	if err != nil {
@@ -414,7 +416,7 @@ func countValidateDenials(stdout []byte) int {
 	}
 	n := 0
 	for _, d := range cr.PermissionDenials {
-		if d.ToolName == bashToolCheck && strings.Contains(d.ToolInput.Command, "zing validate") {
+		if d.ToolName == claudeBashTool && strings.Contains(d.ToolInput.Command, "zing validate") {
 			n++
 		}
 	}

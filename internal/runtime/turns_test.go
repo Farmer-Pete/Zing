@@ -1,8 +1,12 @@
 package runtime
 
 import (
+	"bytes"
+	"encoding/json"
 	"errors"
 	"io"
+	"log/slog"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -15,26 +19,7 @@ func turnLine(ts time.Time, messageID string, outputTokens int) string {
 		return `{"type":"user","timestamp":"` + ts.Format(time.RFC3339Nano) + `"}`
 	}
 	return `{"type":"assistant","timestamp":"` + ts.Format(time.RFC3339Nano) +
-		`","message":{"id":"` + messageID + `","usage":{"output_tokens":` + itoa(outputTokens) + `}}}`
-}
-
-func itoa(n int) string {
-	if n == 0 {
-		return "0"
-	}
-	neg := n < 0
-	if neg {
-		n = -n
-	}
-	var b []byte
-	for n > 0 {
-		b = append([]byte{byte('0' + n%10)}, b...)
-		n /= 10
-	}
-	if neg {
-		b = append([]byte{'-'}, b...)
-	}
-	return string(b)
+		`","message":{"id":"` + messageID + `","usage":{"output_tokens":` + strconv.Itoa(outputTokens) + `}}}`
 }
 
 // TestLongTurns covers the turn timing rule (design shape): the keep step
@@ -175,4 +160,40 @@ func (e *errAfterReader) Read(p []byte) (int, error) {
 		return n, e.err
 	}
 	return n, err
+}
+
+// TestLogLongTurns_TranscriptReadFailed proves logLongTurns logs the
+// "transcript read failed" DEBUG record, with run_id and turns_kept, when
+// path opens but reading it fails partway through (here, path names a
+// directory: os.Open succeeds, but Read on it fails on every platform this
+// project supports).
+func TestLogLongTurns_TranscriptReadFailed(t *testing.T) {
+	dir := t.TempDir()
+
+	var logBuf bytes.Buffer
+	prevDefault := slog.Default()
+	slog.SetDefault(slog.New(slog.NewJSONHandler(&logBuf, &slog.HandlerOptions{Level: slog.LevelDebug})))
+	t.Cleanup(func() { slog.SetDefault(prevDefault) })
+
+	logLongTurns(RunRequest{RunToken: "459"}, dir)
+
+	var sawReadFailed bool
+	for line := range strings.SplitSeq(strings.TrimSpace(logBuf.String()), "\n") {
+		var rec map[string]any
+		if err := json.Unmarshal([]byte(line), &rec); err != nil {
+			t.Fatalf("decode log line %q: %v", line, err)
+		}
+		if rec["msg"] == "claude long turns: transcript read failed" {
+			sawReadFailed = true
+			if rec["run_id"] != "459" {
+				t.Errorf("run_id = %v, want 459", rec["run_id"])
+			}
+			if rec["turns_kept"] != float64(0) {
+				t.Errorf("turns_kept = %v, want 0", rec["turns_kept"])
+			}
+		}
+	}
+	if !sawReadFailed {
+		t.Errorf("log = %q, want a claude long turns: transcript read failed record", logBuf.String())
+	}
 }
