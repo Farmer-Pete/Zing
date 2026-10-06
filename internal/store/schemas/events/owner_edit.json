@@ -24,6 +24,9 @@
     },
     "new": {
       "type": "string"
+    },
+    "reason": {
+      "type": "string"
     }
   },
   "additionalProperties": false,

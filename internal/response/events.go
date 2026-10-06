@@ -20,12 +20,15 @@ type OwnerEditEvent struct {
 	Action string `json:"action" jsonschema:"enum=edit,enum=drop"`
 	Old    string `json:"old"`
 	New    string `json:"new"`
+	Reason string `json:"reason,omitempty" doc:"the judge's reason when a handler commit applied an accepted amendment; empty for every console edit"`
 }
 
 // OwnerEditLine renders an owner_edit event as one owner-facing feed
 // sentence.
 func OwnerEditLine(e OwnerEditEvent) string {
 	switch {
+	case e.Target == "scenario" && e.Reason != "":
+		return "Owner accepted the judge's amendment to scenario " + e.Ref + ": " + e.Reason
 	case e.Target == "scenario":
 		return "Owner edited scenario " + e.Ref + "."
 	case e.Target == "plan_task" && e.Action == "drop":

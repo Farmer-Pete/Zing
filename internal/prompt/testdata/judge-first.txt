@@ -68,10 +68,17 @@ Body: Add a ping endpoint so uptime monitoring has something to hit.
 </zing>
 
 <zing job="judge" outcome="error"> <!-- job: Job, one of: classify | planning | planreview | build | perimeter | review | judge | respond | side, the running job; must match; outcome: Outcome, one of: ok | question | error, one of this job's outcomes, or question, or error -->
-  <error code="..."> <!-- RunError; code: ErrorCode, one of: plan_gap | cannot_run | environment | other -->
+  <error code="..."> <!-- JudgeRunError; code: ErrorCode, one of: plan_gap | cannot_run | environment | other -->
     <what>...</what> <!-- string, what could not be done -->
     <why>...</why> <!-- string, why, with evidence -->
     <tried>...</tried> <!-- string, what was tried -->
+    <amendment scenario="..." kind="..."> <!-- Amendment, optional, cannot_run only: your rewrite of the one sealed scenario whose check is wrong as written; scenario: string, must match ^s[0-9]+$; kind: ScenarioKind, optional, one of: behavior | negative | performance | host, omit to keep the scenario's current kind -->
+      <given>...</given> <!-- string, the starting state -->
+      <when>...</when> <!-- string, the action -->
+      <then>...</then> <!-- string, what a stranger would observe, from outside the code -->
+      <check>...</check> <!-- string, one command whose exit code decides it -->
+      <reason>...</reason> <!-- string, why the sealed check is wrong as written -->
+    </amendment>
   </error>
 </zing>
 

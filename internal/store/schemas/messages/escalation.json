@@ -70,6 +70,53 @@
         "shipping",
         "respond"
       ]
+    },
+    "amendment": {
+      "properties": {
+        "scenario": {
+          "type": "string",
+          "pattern": "^s[0-9]+$"
+        },
+        "kind": {
+          "type": "string",
+          "enum": [
+            "behavior",
+            "negative",
+            "performance",
+            "host"
+          ]
+        },
+        "given": {
+          "type": "string",
+          "minLength": 1
+        },
+        "when": {
+          "type": "string",
+          "minLength": 1
+        },
+        "then": {
+          "type": "string",
+          "minLength": 1
+        },
+        "check": {
+          "type": "string",
+          "minLength": 1
+        },
+        "reason": {
+          "type": "string",
+          "minLength": 1
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "required": [
+        "scenario",
+        "given",
+        "when",
+        "then",
+        "check",
+        "reason"
+      ]
     }
   },
   "additionalProperties": false,

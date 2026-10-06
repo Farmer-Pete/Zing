@@ -970,11 +970,25 @@ func judgeRunAndRoute(
 	case *response.QuestionResponse:
 		c, err := questionOutcomeCommit(t, d, rr, resp.Questions, sessionCommit, resolveIDs)
 		return c, rr, err
+	case *response.JudgeErrorResponse:
+		c, err := judgeErrorCommit(t, d, rr, resp, sessionCommit, resolveIDs)
+		return c, rr, err
 	case *response.ErrorResponse:
+		// Unreachable once the registry maps judge errors to
+		// JudgeErrorResponse; kept so a hand-built Response still routes.
 		return errorOutcomeCommit(t, d, rr, resp, sessionCommit, resolveIDs, response.EscalationOriginJudge), rr, nil
 	default:
 		return store.HandlerCommit{}, rr, fmt.Errorf("job: judging: outcome %s not handled", rr.Res.Response.Header().Outcome)
 	}
+}
+
+// judgeErrorCommit routes the judge's own error outcome (JudgeErrorResponse):
+// its RunError half is terminalized exactly as errorOutcomeCommit does for
+// every other job's plain ErrorResponse. The amendment half lands in a
+// later task; today it carries only the no-amendment path.
+func judgeErrorCommit(t store.Ticket, d Deps, rr runResult, resp *response.JudgeErrorResponse, sessionCommit *store.SessionUpsert, resolveIDs []int64) (store.HandlerCommit, error) { //nolint:unparam // error is always nil today; a later task's amendment lookup can fail, and the signature already matches judgeRunAndRoute's other onOk-style callees
+	plain := &response.ErrorResponse{Head: resp.Head, Error: resp.Error.RunError}
+	return errorOutcomeCommit(t, d, rr, plain, sessionCommit, resolveIDs, response.EscalationOriginJudge), nil
 }
 
 // judgeOkCommit is RUN's own "ok" outcome (design section 7.2 step 5):

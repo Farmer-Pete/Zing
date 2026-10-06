@@ -41,6 +41,8 @@ func buildRegistry() map[registryKey]func() Response {
 		m[registryKey{job, OutcomeQuestion}] = func() Response { return &QuestionResponse{} }
 		m[registryKey{job, OutcomeError}] = func() Response { return &ErrorResponse{} }
 	}
+	// The judge's own error outcome may carry one scenario amendment.
+	m[registryKey{JobJudge, OutcomeError}] = func() Response { return &JudgeErrorResponse{} }
 	// Planning's own "question" spelling decodes the same as "questions":
 	// a planning document may close a thread without opening a new one, so
 	// it needs the Conversation fields too (design section 22.2).

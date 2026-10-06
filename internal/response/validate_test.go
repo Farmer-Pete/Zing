@@ -267,6 +267,82 @@ func TestPathError_Error(t *testing.T) {
 	}
 }
 
+// judgeAmendmentXML builds a judge error document with the given code and,
+// when reason is non-empty, a full amendment whose reason element is
+// reason. An empty reason omits the amendment entirely.
+func judgeAmendmentXML(code, reason string) string {
+	amendment := ""
+	if reason != "" {
+		amendment = `<amendment scenario="s2">` +
+			`<given>g</given><when>w</when><then>th</then><check>c</check>` +
+			`<reason>` + reason + `</reason></amendment>`
+	}
+	return `<zing job="judge" outcome="error">` +
+		`<error code="` + code + `">` +
+		`<what>w</what><why>y</why><tried>t</tried>` +
+		amendment +
+		`</error></zing>`
+}
+
+func TestValidateJudgeAmendment(t *testing.T) {
+	t.Parallel()
+
+	t.Run("wrong code with amendment", func(t *testing.T) {
+		t.Parallel()
+		doc := mustParse(t, judgeAmendmentXML("environment", "the check is wrong"))
+		errs := Validate(doc, ValidateContext{})
+		want := "error/amendment: an amendment is allowed only with code cannot_run"
+		if !containsErr(errs, want) {
+			t.Fatalf("errs = %v, want to contain %q", dumpErrs(errs), want)
+		}
+	})
+
+	t.Run("cannot_run with amendment missing reason", func(t *testing.T) {
+		t.Parallel()
+		xmlDoc := `<zing job="judge" outcome="error">` +
+			`<error code="cannot_run">` +
+			`<what>w</what><why>y</why><tried>t</tried>` +
+			`<amendment scenario="s2">` +
+			`<given>g</given><when>w</when><then>th</then><check>c</check>` +
+			`<reason></reason></amendment>` +
+			`</error></zing>`
+		doc := mustParse(t, xmlDoc)
+		errs := Validate(doc, ValidateContext{})
+		want := "error/amendment/reason: must not be empty"
+		if !containsErr(errs, want) {
+			t.Fatalf("errs = %v, want to contain %q", dumpErrs(errs), want)
+		}
+	})
+
+	t.Run("cannot_run with full amendment is clean", func(t *testing.T) {
+		t.Parallel()
+		doc := mustParse(t, judgeAmendmentXML("cannot_run", "the check is wrong as written"))
+		errs := Validate(doc, ValidateContext{})
+		if len(errs) != 0 {
+			t.Fatalf("Validate = %v, want no errors", dumpErrs(errs))
+		}
+	})
+
+	t.Run("cannot_run with no amendment is clean", func(t *testing.T) {
+		t.Parallel()
+		doc := mustParse(t, judgeAmendmentXML("cannot_run", ""))
+		errs := Validate(doc, ValidateContext{})
+		if len(errs) != 0 {
+			t.Fatalf("Validate = %v, want no errors", dumpErrs(errs))
+		}
+	})
+
+	t.Run("build job's error document still decodes as ErrorResponse", func(t *testing.T) {
+		t.Parallel()
+		xmlDoc := `<zing job="build" outcome="error">` +
+			`<error code="other"><what>w</what><why>y</why><tried>t</tried></error></zing>`
+		doc := mustParse(t, xmlDoc)
+		if _, ok := doc.Response.(*ErrorResponse); !ok {
+			t.Fatalf("Response is %T, want *ErrorResponse", doc.Response)
+		}
+	})
+}
+
 func containsErr(errs []*PathError, want string) bool {
 	for _, e := range errs {
 		if e.Path+": "+e.Msg == want {
