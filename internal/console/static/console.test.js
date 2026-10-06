@@ -1242,3 +1242,45 @@ test('handleKeyEvent: g p calls run with the project action', () => {
 
 	assert.deepEqual(calls, ['nav-project']);
 });
+
+// ---- ticket actions confirm in-page (ticket #65, Q3: never window.confirm) ----
+//
+// console.js itself is not loaded or unit-tested under Node (file-top
+// comment above): this test instead reads its source text directly, the
+// only way to pin that installTicketActions' abandon/restart buttons always
+// route through openConfirmDialog's in-page dialog rather than some other,
+// easier-to-add-by-accident confirm path (e.g. window.confirm).
+const consoleJsSource = readFileSync(new URL('./console.js', import.meta.url), 'utf8');
+
+// functionBody extracts name's balanced-brace body out of source, so the
+// first assertion below can look inside installTicketActions specifically
+// rather than the whole file.
+function functionBody(source, name) {
+	const match = source.match(new RegExp(`function ${name}\\s*\\([^)]*\\)\\s*\\{`));
+	assert.ok(match, `function ${name} not found`);
+	let depth = 1;
+	let i = match.index + match[0].length;
+	while (depth > 0) {
+		if (source[i] === '{') {
+			depth++;
+		} else if (source[i] === '}') {
+			depth--;
+		}
+		i++;
+	}
+	return source.slice(match.index + match[0].length, i - 1);
+}
+
+test('ticket actions confirm in-page', () => {
+	const body = functionBody(consoleJsSource, 'installTicketActions');
+	assert.match(body, /openConfirmDialog\(/);
+
+	for (const line of consoleJsSource.split('\n')) {
+		if (line.includes('openConfirmDialog(')) {
+			continue;
+		}
+		const lower = line.toLowerCase();
+		const callsConfirmDirectly = lower.includes('confirm(') && (lower.includes('abandon') || lower.includes('restart'));
+		assert.ok(!callsConfirmDirectly, `line bypasses openConfirmDialog: ${line}`);
+	}
+});

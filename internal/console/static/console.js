@@ -1324,6 +1324,77 @@ function installPickupBox() {
 	});
 }
 
+// ---- ticket actions: abandon, restart from planning (ticket #65) ---------
+
+// postTicketAction handles the confirmed Abandon/Restart click: posts
+// POST /tickets/{id}/{action} and, on a non-2xx response, shows the
+// response body -- ticket_actions.go's own exact refusal text -- in the
+// action bar's error span, the same pattern pickupIssue above uses for
+// POST /projects/{id}/pickup. A successful restart answers {"ticket":
+// NEW-ID}; this navigates straight there, since the old ticket (now
+// abandoned) is no longer what the owner wants open.
+async function postTicketAction(box, action) {
+	const ticketID = box?.dataset?.ticket;
+	const errorSpan = box?.querySelector('.ticket-actions-error');
+	if (!box || !ticketID || !errorSpan) {
+		return;
+	}
+	try {
+		const resp = await fetch(`/tickets/${ticketID}/${action}`, {
+			method: 'POST',
+			headers: { 'Content-Type': 'application/json', 'Datastar-Request': 'true' },
+			body: '{}',
+		});
+		if (!resp.ok) {
+			const text = await resp.text();
+			suppressPatchSignal = true;
+			errorSpan.textContent = text;
+			suppressPatchSignal = false;
+			return;
+		}
+		suppressPatchSignal = true;
+		errorSpan.textContent = '';
+		suppressPatchSignal = false;
+		if (action === 'restart') {
+			const body = await resp.json();
+			navigate({ view: 'thread', open: body.ticket, project: 0 });
+		}
+	} catch (err) {
+		console.error(`console.js: POST /tickets/{id}/${action}`, err);
+		suppressPatchSignal = true;
+		errorSpan.textContent = 'request failed';
+		suppressPatchSignal = false;
+	}
+}
+
+// installTicketActions wires the thread view's action bar (ticket #65,
+// Q3), delegated from document like installPickupBox above, because
+// #main is morphed by every /stream patch. Every Abandon/Restart click
+// confirms first through openConfirmDialog's in-page dialog -- never
+// window.confirm, which blocks the page and any browser automation
+// driving the console -- before postTicketAction ever runs.
+function installTicketActions() {
+	document.addEventListener('click', (event) => {
+		const button = event.target.closest?.('.ticket-actions button[data-action]:not([disabled])');
+		if (!button) {
+			return;
+		}
+		event.preventDefault();
+		const box = button.closest('.ticket-actions');
+		const action = button.dataset.action;
+		if (!box || !action) {
+			return;
+		}
+		openConfirmDialog({
+			id: 'ticket-action-confirm',
+			text: ticketActionConfirmText(action, box.dataset.ref),
+			items: [],
+			confirmLabel: action === 'abandon' ? 'Abandon' : 'Restart',
+			onConfirm: () => postTicketAction(box, action),
+		});
+	});
+}
+
 // ---- run a command in this ticket's sandbox (split from #73) ------------
 
 // sandboxRunOutputCap is the number of bytes the server keeps (job's
@@ -1961,11 +2032,11 @@ function installNavBridge() {
 // loadBindings' own /static/keys.json fetch (bug fix): none of
 // installStreamWatch, installNavBridge, installPatchObserver, installSideBox,
 // installLogControls, installChipActivation, installPickupBox,
-// installSandboxRunBox, installOwnerEdit, installReplyAutosave, or
-// installReplyFocusTracking reads state.bindings, so there was no reason
-// their listeners -- installNavBridge above all, the zing-nav bridge a
-// Threads-sidebar click needs live as early as possible -- sat behind an
-// unrelated network round trip. Only
+// installTicketActions, installSandboxRunBox, installOwnerEdit,
+// installReplyAutosave, or installReplyFocusTracking reads state.bindings,
+// so there was no reason their listeners -- installNavBridge above all,
+// the zing-nav bridge a Threads-sidebar click needs live as early as
+// possible -- sat behind an unrelated network round trip. Only
 // handleKeyEvent needs the parsed bindings, so it alone waits on the fetch.
 // installStreamWatch runs first (the reconnect plan): it must already be
 // bound before data-init's own @get('/stream') can fire the very first
@@ -1979,6 +2050,7 @@ async function install() {
 	installLogControls();
 	installChipActivation();
 	installPickupBox();
+	installTicketActions();
 	installSandboxRunBox();
 	installOwnerEdit();
 	installReplyAutosave();
