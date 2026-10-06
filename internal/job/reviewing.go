@@ -773,6 +773,21 @@ func (h reviewingHandler) discuss(ctx context.Context, t store.Ticket, d Deps, g
 	if foundRun {
 		bump, gate = resumeCharge(newestRun)
 	}
+	// answerResume (job.go): an answered round delivers the owner's own
+	// answer, so this discuss resume is free and bypasses the exhausted-cap
+	// escalation below, even on a session already at max_resumes, unless
+	// that session already carries its cap_resumes escalation from before
+	// this rule existed. A fresh discuss turn (round nil) keeps the gate.
+	if round != nil {
+		capped, capErr := answerResume(ctx, t, d, sess, state, *round)
+		if capErr != nil {
+			return store.HandlerCommit{}, capErr
+		}
+		if capped {
+			return store.HandlerCommit{}, ErrNoAction
+		}
+		bump, gate = false, false
+	}
 
 	if state == store.SessionExhausted && gate {
 		has, hasErr := d.Store.HasEscalation(ctx, t.ID, string(response.EscalationOriginCapResumes), sess.ID)
@@ -833,7 +848,7 @@ func (h reviewingHandler) discuss(ctx context.Context, t store.Ticket, d Deps, g
 
 	return h.discussRunAndRoute(ctx, t, d, su, req, group.lens, priorInvalid, sess.ID, resolveIDs,
 		func(rr runResult, sessionCommit *store.SessionUpsert) (store.HandlerCommit, error) {
-			return h.discussOkCommit(ctx, t, d, proj, wt, group, rr, sessionCommit)
+			return h.discussOkCommit(ctx, t, d, proj, wt, group, rr, sessionCommit, resolveIDs)
 		})
 }
 
@@ -903,7 +918,7 @@ func (h reviewingHandler) discussRunAndRoute(
 // withdrew every finding of the group, and no question follows.
 func (h reviewingHandler) discussOkCommit(
 	ctx context.Context, t store.Ticket, d Deps, proj Project, wt orchestrator.Worktree,
-	group pendingDiscussGroup, rr runResult, sessionCommit *store.SessionUpsert,
+	group pendingDiscussGroup, rr runResult, sessionCommit *store.SessionUpsert, resolveIDs []int64,
 ) (store.HandlerCommit, error) {
 	fr, ok := rr.Res.Response.(*response.FindingsResponse)
 	if !ok {
@@ -943,6 +958,7 @@ func (h reviewingHandler) discussOkCommit(
 	c := baseCommit(t, d)
 	c.Runs = terminalRuns(rr, string(response.OutcomeOk))
 	c.Session = sessionCommit
+	c.ResolveQuestions = resolveIDs
 
 	runIDStr := strconv.FormatInt(rr.Reserved.RunID, 10)
 	batchStr := strings.Join(groupIDs, ",")

@@ -3229,30 +3229,28 @@ func TestDiscussExhaustedEscalatesOnce(t *testing.T) {
 		t.Skip("slow end-to-end flow; runs in the full suite")
 	}
 	t.Parallel()
-	s, ticket, rt, scripts, _ := discussGroupReady(t, "")
-	scripts[reviewScriptKey("security", 2)] = &fstest.MapFile{Data: []byte(reviewQuestionScript("Q1", "which way?"))}
-	scripts[reviewScriptKey("security", 3)] = &fstest.MapFile{Data: []byte(reviewQuestionScript("Q2", "which way now?"))}
+	s, ticket, rt, _, findingID := discussGroupReady(t, "")
+
+	sessionID := runByFindingID(t, s, ticket.ID, findingID).SessionID
+	owner := "discuss-cap-owner"
+	expires := time.Now().Add(10 * time.Minute).UTC().Truncate(time.Second)
+	maxResumes := pbMachine(t).Jobs[jobReviewName].MaxResumes
+	for range maxResumes {
+		claimed, claimErr := s.Claim(t.Context(), ticket.ID, owner, expires)
+		if claimErr != nil || !claimed {
+			t.Fatalf("bump claim: claimed=%v err=%v", claimed, claimErr)
+		}
+		applied, bumpErr := s.CommitHandlerResult(t.Context(), store.HandlerCommit{
+			TicketID: ticket.ID, Owner: owner, Expires: expires,
+			Session: &store.SessionUpsert{ID: &sessionID, BumpResumes: true},
+		})
+		if bumpErr != nil || !applied {
+			t.Fatalf("bump CommitHandlerResult: applied=%v err=%v", applied, bumpErr)
+		}
+	}
 
 	deps := pbClaim(t, s, rt, ticket.ID)
 	commit, err := (reviewingHandler{}).Run(t.Context(), ticket, deps)
-	if err != nil {
-		t.Fatalf("Run (discuss 1): %v", err)
-	}
-	pbApply(t, s, ticket, commit)
-	answerReviewQuestion(t, s, ticket.ID, newestOpenQuestion(t, s, ticket.ID).ID)
-
-	ticket = pbGetTicket(t, s, ticket.ID)
-	deps = pbClaim(t, s, rt, ticket.ID)
-	commit, err = (reviewingHandler{}).Run(t.Context(), ticket, deps)
-	if err != nil {
-		t.Fatalf("Run (discuss 2): %v", err)
-	}
-	pbApply(t, s, ticket, commit)
-	answerReviewQuestion(t, s, ticket.ID, newestOpenQuestion(t, s, ticket.ID).ID)
-
-	ticket = pbGetTicket(t, s, ticket.ID)
-	deps = pbClaim(t, s, rt, ticket.ID)
-	commit, err = (reviewingHandler{}).Run(t.Context(), ticket, deps)
 	if err != nil {
 		t.Fatalf("Run (cap): %v", err)
 	}
@@ -3272,6 +3270,91 @@ func TestDiscussExhaustedEscalatesOnce(t *testing.T) {
 	_, err = (reviewingHandler{}).Run(t.Context(), ticket, deps)
 	if !errors.Is(err, ErrNoAction) {
 		t.Fatalf("err = %v, want ErrNoAction (already escalated once)", err)
+	}
+}
+
+// ---- TestDiscussAnswerResumesAreFree -----------------------------------------
+
+// TestDiscussAnswerResumesAreFree proves answerResume (job.go) in discuss:
+// an answered round's own resume is free, even once the lens session sits
+// at the cap, unlike a fresh discuss turn (TestDiscussExhaustedEscalatesOnce).
+func TestDiscussAnswerResumesAreFree(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow end-to-end flow; runs in the full suite")
+	}
+	t.Parallel()
+	s, ticket, rt, scripts, findingID := discussGroupReady(t, "")
+	scripts[reviewScriptKey(discussLens, 2)] = &fstest.MapFile{Data: []byte(reviewQuestionScript("Q1", "which way?"))}
+	scripts[reviewScriptKey(discussLens, 3)] = &fstest.MapFile{Data: []byte(findingScript(discussLens, "minor", "revised", "fix"))}
+
+	deps := pbClaim(t, s, rt, ticket.ID)
+	commit, err := (reviewingHandler{}).Run(t.Context(), ticket, deps)
+	if err != nil {
+		t.Fatalf("Run (discuss 1): %v", err)
+	}
+	pbApply(t, s, ticket, commit)
+
+	sid := runByFindingID(t, s, ticket.ID, findingID).SessionID
+	owner := "discuss-free-owner"
+	expires := time.Now().Add(10 * time.Minute).UTC().Truncate(time.Second)
+	claimed, claimErr := s.Claim(t.Context(), ticket.ID, owner, expires)
+	if claimErr != nil || !claimed {
+		t.Fatalf("bump claim: claimed=%v err=%v", claimed, claimErr)
+	}
+	applied, bumpErr := s.CommitHandlerResult(t.Context(), store.HandlerCommit{
+		TicketID: ticket.ID, Owner: owner, Expires: expires,
+		Session: &store.SessionUpsert{ID: &sid, BumpResumes: true},
+	})
+	if bumpErr != nil || !applied {
+		t.Fatalf("bump CommitHandlerResult: applied=%v err=%v", applied, bumpErr)
+	}
+
+	maxResumes := pbMachine(t).Jobs[jobReviewName].MaxResumes
+	sess, state, err := s.SessionByID(t.Context(), sid, maxResumes)
+	if err != nil {
+		t.Fatalf("SessionByID: %v", err)
+	}
+	if state != store.SessionExhausted {
+		t.Fatalf("session state = %v, want SessionExhausted (at the cap)", state)
+	}
+	if sess.Resumes != 2 {
+		t.Fatalf("sess.Resumes = %d, want 2 (at the cap)", sess.Resumes)
+	}
+
+	qID := newestOpenQuestion(t, s, ticket.ID).ID
+	answerReviewQuestion(t, s, ticket.ID, qID)
+
+	before, err := s.MaxRunID(t.Context(), ticket.ID)
+	if err != nil {
+		t.Fatalf("MaxRunID (before): %v", err)
+	}
+
+	ticket = pbGetTicket(t, s, ticket.ID)
+	deps = pbClaim(t, s, rt, ticket.ID)
+	commit, err = (reviewingHandler{}).Run(t.Context(), ticket, deps)
+	if err != nil {
+		t.Fatalf("Run (discuss 2, free): %v", err)
+	}
+	if commit.Escalation != nil {
+		t.Fatalf("commit.Escalation = %+v, want nil (the owner's answer is free)", commit.Escalation)
+	}
+	after, err := s.MaxRunID(t.Context(), ticket.ID)
+	if err != nil {
+		t.Fatalf("MaxRunID (after): %v", err)
+	}
+	if after != before+1 {
+		t.Errorf("MaxRunID moved from %d to %d, want exactly one new run", before, after)
+	}
+	if !slices.Contains(commit.ResolveQuestions, qID) {
+		t.Errorf("commit.ResolveQuestions = %v, want it to contain %d", commit.ResolveQuestions, qID)
+	}
+
+	sess, _, err = s.SessionByID(t.Context(), sid, maxResumes)
+	if err != nil {
+		t.Fatalf("SessionByID (after): %v", err)
+	}
+	if sess.Resumes != 2 {
+		t.Errorf("sess.Resumes after the free answer resume = %d, want 2 (unchanged)", sess.Resumes)
 	}
 }
 
@@ -3800,30 +3883,28 @@ func TestReviewCapResumesRetryAccepts(t *testing.T) {
 		t.Skip("slow end-to-end flow; runs in the full suite")
 	}
 	t.Parallel()
-	s, ticket, rt, scripts, findingID := discussGroupReady(t, "")
-	scripts[reviewScriptKey(discussLens, 2)] = &fstest.MapFile{Data: []byte(reviewQuestionScript("Q1", "which way?"))}
-	scripts[reviewScriptKey(discussLens, 3)] = &fstest.MapFile{Data: []byte(reviewQuestionScript("Q2", "which way now?"))}
+	s, ticket, rt, _, findingID := discussGroupReady(t, "")
+
+	sessionID := runByFindingID(t, s, ticket.ID, findingID).SessionID
+	owner := "discuss-retry-cap-owner"
+	expires := time.Now().Add(10 * time.Minute).UTC().Truncate(time.Second)
+	maxResumes := pbMachine(t).Jobs[jobReviewName].MaxResumes
+	for range maxResumes {
+		claimed, claimErr := s.Claim(t.Context(), ticket.ID, owner, expires)
+		if claimErr != nil || !claimed {
+			t.Fatalf("bump claim: claimed=%v err=%v", claimed, claimErr)
+		}
+		applied, bumpErr := s.CommitHandlerResult(t.Context(), store.HandlerCommit{
+			TicketID: ticket.ID, Owner: owner, Expires: expires,
+			Session: &store.SessionUpsert{ID: &sessionID, BumpResumes: true},
+		})
+		if bumpErr != nil || !applied {
+			t.Fatalf("bump CommitHandlerResult: applied=%v err=%v", applied, bumpErr)
+		}
+	}
 
 	deps := pbClaim(t, s, rt, ticket.ID)
 	commit, err := (reviewingHandler{}).Run(t.Context(), ticket, deps)
-	if err != nil {
-		t.Fatalf("Run (discuss 1): %v", err)
-	}
-	pbApply(t, s, ticket, commit)
-	answerReviewQuestion(t, s, ticket.ID, newestOpenQuestion(t, s, ticket.ID).ID)
-
-	ticket = pbGetTicket(t, s, ticket.ID)
-	deps = pbClaim(t, s, rt, ticket.ID)
-	commit, err = (reviewingHandler{}).Run(t.Context(), ticket, deps)
-	if err != nil {
-		t.Fatalf("Run (discuss 2): %v", err)
-	}
-	pbApply(t, s, ticket, commit)
-	answerReviewQuestion(t, s, ticket.ID, newestOpenQuestion(t, s, ticket.ID).ID)
-
-	ticket = pbGetTicket(t, s, ticket.ID)
-	deps = pbClaim(t, s, rt, ticket.ID)
-	commit, err = (reviewingHandler{}).Run(t.Context(), ticket, deps)
 	if err != nil {
 		t.Fatalf("Run (cap): %v", err)
 	}
