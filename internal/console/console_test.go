@@ -513,8 +513,8 @@ func TestIndexSendsNoCache(t *testing.T) {
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("GET / status = %d, want 200", resp.StatusCode)
 	}
-	if cc := resp.Header.Get("Cache-Control"); cc != "no-cache" {
-		t.Errorf("GET / Cache-Control = %q, want no-cache", cc)
+	if cc := resp.Header.Get("Cache-Control"); cc != cacheControlNoCache {
+		t.Errorf("GET / Cache-Control = %q, want %q", cc, cacheControlNoCache)
 	}
 }
 
