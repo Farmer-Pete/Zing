@@ -320,6 +320,7 @@ func runJobWith(
 	started := time.Now()
 	res, runErr := rt.Run(runCtx, req)
 	res, runErr = retryTransient(runCtx, rt, req, t.ID, rsv.RunID, jobName, res, runErr)
+	res, runErr = retryTimeout(ctx, rt, req, t.ID, rsv.RunID, jobName, jobCfg.TimeoutRetries, res, runErr)
 
 	var sl *runtime.SessionLimitError
 	if errors.As(runErr, &sl) { //nolint:modernize // see errKind's own comment
@@ -470,6 +471,103 @@ func retryTransient(
 	}
 	retryRes.FailureDetail = runtime.CapFailureDetail(fmt.Sprintf("retried once after a transient failure matching %q; the retry failed with: %s", execErr.Transient, quoted))
 	return retryRes, retryErr
+}
+
+// timeoutRetryPrefix opens the Tried text of a turn whose automatic timeout
+// retry also failed.
+const timeoutRetryPrefix = "retried once automatically after a timeout"
+
+// timeoutRetryNoteFmt is the line a timeout retry's prompt starts with; %s
+// is firstAttemptText.
+const timeoutRetryNoteFmt = "Note from Zing: the previous attempt at this turn %s. Zing is running the turn again."
+
+// retryTimeout is runJobWith's single automatic retry after an ErrTimeout or
+// ErrStalled (design goals: "A job with timeout_retries = 1 retries an
+// ErrTimeout or ErrStalled once, on the same reserved run, after a 2 s
+// wait"), for a job whose machine.toml timeout_retries is 1. ctx is
+// runJobWith's parent context, not the spent runCtx: the retry's deadline is
+// req.Timeout from its start or ctx's own deadline, whichever comes first.
+// req.SessionID is kept as it is, so a first turn starts a fresh session and
+// a resume turn resumes the same one (owner decision Q7), with the note
+// line in front of either prompt. Every other result passes through res and
+// runErr unchanged.
+func retryTimeout(
+	ctx context.Context, rt runtime.Runtime, req runtime.RunRequest,
+	ticketID, runID int64, jobName string, retries int, res runtime.RunResult, runErr error,
+) (runtime.RunResult, error) {
+	stalled := errors.Is(runErr, runtime.ErrStalled)
+	if retries < 1 || (!stalled && !errors.Is(runErr, runtime.ErrTimeout)) {
+		return res, runErr
+	}
+	first := firstAttemptText(res, stalled)
+	lastEvent := lastEventText(res.LastEvent)
+
+	if ctx.Err() != nil {
+		return skipRetry(ctx, ticketID, runID, jobName, lastEvent, res)
+	}
+
+	select {
+	case <-ctx.Done():
+		return skipRetry(ctx, ticketID, runID, jobName, lastEvent, res)
+	case <-time.After(transientRetryDelay):
+	}
+
+	retryReq := req
+	retryReq.Prompt = fmt.Sprintf(timeoutRetryNoteFmt, first) + "\n\n" + req.Prompt
+	retryCtx, cancel := context.WithTimeout(ctx, req.Timeout)
+	defer cancel()
+	retryRes, retryErr := rt.Run(retryCtx, retryReq)
+	retryRes = combineAttempts(res, retryRes)
+
+	if retryErr == nil {
+		return retryRes, nil
+	}
+	// retryRes.FailureDetail is "" whenever the retry's own failure carries
+	// no detail of its own (an ErrTimeout from the job deadline, ErrStart,
+	// ErrOutputTooLarge, or a -o file with no content): quoting retryErr's
+	// own text there keeps the Tried text from ending in "the retry failed
+	// with: " with nothing after the colon.
+	quoted := retryRes.FailureDetail
+	if quoted == "" {
+		quoted = retryErr.Error()
+	}
+	retryRes.FailureDetail = runtime.CapFailureDetail(fmt.Sprintf("%s: the first attempt %s; the retry failed with: %s", timeoutRetryPrefix, first, quoted))
+	return retryRes, retryErr
+}
+
+// skipRetry is retryTimeout's one answer when the parent ctx has ended,
+// before the 2 s wait or during it (owner decision Q10): no retry, ExitCode
+// -1, the first result otherwise kept, and ErrCanceled for a cancel or
+// ErrTimeout for the parent's own deadline.
+func skipRetry(ctx context.Context, _, _ int64, _, _ string, res runtime.RunResult) (runtime.RunResult, error) {
+	res.ExitCode = -1
+	skipErr := runtime.ErrCanceled
+	if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+		skipErr = runtime.ErrTimeout
+	}
+	return res, skipErr
+}
+
+// firstAttemptText names how the first attempt ended, for the retry's
+// prompt note and the Tried text.
+func firstAttemptText(res runtime.RunResult, stalled bool) string {
+	secs := runtime.Seconds(res.AgentTime)
+	if !stalled {
+		return fmt.Sprintf("timed out after %d s", secs)
+	}
+	since := lastEventText(res.LastEvent)
+	if since == "" {
+		since = "the process started"
+	}
+	return fmt.Sprintf("stalled after %d s with no transcript growth since %s", secs, since)
+}
+
+// lastEventText is t in RFC 3339 UTC, or "" for the zero time.
+func lastEventText(t time.Time) string {
+	if t.IsZero() {
+		return ""
+	}
+	return t.UTC().Format(time.RFC3339)
 }
 
 // writeRunsFile saves data to <dataDir>/runs/name, mode 0600 in a 0700
