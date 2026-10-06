@@ -478,21 +478,25 @@ const reviewAcceptRemainingOptionText = "Accept the remaining findings and conti
 // recommendation with recommended (ticket 60).
 func reviewLoopsExhausted(t store.Ticket, d Deps, what, why, tried, recommended string) store.HandlerCommit {
 	code := string(response.EscalationCodeLoopsExhausted)
-	slog.Warn("escalation written", "ticket_id", t.ID, "session_id", nil, "run_id", nil, "code", code, "origin", string(response.EscalationOriginReview))
+	slog.Warn("escalation written", "ticket_id", t.ID, "session_id", nil, "run_id", nil, "code", code, "origin", string(response.EscalationOriginReview), "recommended", recommended)
 	c := escalationCommit(t, d, nil, nil, code, what, why, tried, response.EscalationOriginReview)
 	c.Escalation.ExtraOptions = []response.Option{{Key: escalationChoiceAccept, Text: reviewAcceptRemainingOptionText}}
 	c.Escalation.Recommended = recommended
 	return c
 }
 
-// newestFixChangedFiles reports whether the newest fix run's build report
-// (TaskN 0, newest artifact id) lists at least one changed path; found is
-// false when no fix report exists yet (ticket 60, owner decision Q2).
+// newestFixChangedFiles reports whether the newest review fix run's build
+// report (TaskN 0, newest artifact id, run id after minRunID) lists at
+// least one changed path; found is false when no review fix report exists
+// yet (ticket 60, owner decision Q2). minRunID excludes any fix report
+// from before review's own first fix request, such as a building-stage
+// CHECK fix landed on the same ticket (review finding r1f4): without it, a
+// fix unrelated to the review findings could stand in for one.
 // FilesChanged is the builder's own claim, which CHECK has already
 // cross-checked against the real diff.
-func newestFixChangedFiles(reports []store.BuildReportRow) (changed, found bool) {
+func newestFixChangedFiles(reports []store.BuildReportRow, minRunID int64) (changed, found bool) {
 	for i := len(reports) - 1; i != -1; i-- {
-		if reports[i].Report.TaskN == 0 {
+		if reports[i].Report.TaskN == 0 && reports[i].RunID > minRunID {
 			return len(reports[i].Report.FilesChanged) != 0, true
 		}
 	}
@@ -517,12 +521,26 @@ func loopsExhaustedRecommendation(accepted []response.FindingArtifact, changed, 
 
 // loopsExhaustedRecommendationFor reads the ticket's own build reports and
 // returns loopsExhaustedRecommendation's pick for accepted (ticket 60).
+// minRunID, the first "fix requested findings" marker's own watermark,
+// keeps a building-stage fix from before review ever opened out of
+// newestFixChangedFiles (review finding r1f4).
 func loopsExhaustedRecommendationFor(ctx context.Context, t store.Ticket, d Deps, accepted []response.FindingArtifact) (string, error) {
+	reqs, _, _, err := reviewFixLoops(ctx, t, d)
+	if err != nil {
+		return "", err
+	}
+	var minRunID int64
+	if len(reqs) > 0 {
+		firstLine, _, _ := strings.Cut(reqs[0].Body, "\n")
+		if _, afterRunID, ok := parseFixRequestLine(firstLine); ok {
+			minRunID = afterRunID
+		}
+	}
 	reports, err := d.Store.BuildReports(ctx, t.ID)
 	if err != nil {
 		return "", fmt.Errorf("job: reviewing: loops_exhausted recommendation: build reports: %w", err)
 	}
-	changed, found := newestFixChangedFiles(reports)
+	changed, found := newestFixChangedFiles(reports, minRunID)
 	return loopsExhaustedRecommendation(accepted, changed, found), nil
 }
 
@@ -1780,6 +1798,19 @@ func reviewRoundFailedMarker(ticketID int64, n int, reason string) store.Message
 	}
 }
 
+// reviewFixLoops reads review's own "fix requested findings" marker
+// family, oldest first, and the loop count (k, len(reqs)) and
+// jobs.review.max_loops that go with it: fixRequestOrLoopsExhausted and
+// acceptReviewLoopsExhausted both need the same count, from the same
+// marker family, so they share this read (ticket 60, review finding r1f5).
+func reviewFixLoops(ctx context.Context, t store.Ticket, d Deps) (reqs []store.MessageRow, k, maxLoops int, err error) {
+	reqs, err = d.Store.MarkersWithPrefix(ctx, t.ID, "fix requested findings")
+	if err != nil {
+		return nil, 0, 0, fmt.Errorf("job: reviewing: fix requested findings markers: %w", err)
+	}
+	return reqs, len(reqs), d.Machine.Jobs[jobReviewName].MaxLoops, nil
+}
+
 // fixRequestOrLoopsExhausted is FIXREQ's own body (design section 6.8),
 // shared by fixreq and successCommit's inline FIXREQ: under
 // jobs.review.max_loops, it returns a "fix requested findings" marker (msg
@@ -1787,12 +1818,10 @@ func reviewRoundFailedMarker(ticketID int64, n int, reason string) store.Message
 // nil and the caller decides between acceptAtCap and a loops_exhausted
 // escalation. k and maxLoops are returned either way.
 func fixRequestOrLoopsExhausted(ctx context.Context, t store.Ticket, d Deps, accepted []response.FindingArtifact) (msg *store.Message, k, maxLoops int, err error) {
-	allReqs, err := d.Store.MarkersWithPrefix(ctx, t.ID, "fix requested findings")
+	_, k, maxLoops, err = reviewFixLoops(ctx, t, d)
 	if err != nil {
-		return nil, 0, 0, fmt.Errorf("job: reviewing: fix requested findings markers: %w", err)
+		return nil, 0, 0, err
 	}
-	k = len(allReqs)
-	maxLoops = d.Machine.Jobs[jobReviewName].MaxLoops
 	if k >= maxLoops {
 		return nil, k, maxLoops, nil
 	}
@@ -2501,11 +2530,10 @@ func (h reviewingHandler) acceptReviewLoopsExhausted(ctx context.Context, t stor
 	}
 	accepted := acceptedRoundFindings(findings, reviewRoundDoneCount(markers))
 
-	reqs, err := d.Store.MarkersWithPrefix(ctx, t.ID, "fix requested findings")
+	_, k, maxLoops, err := reviewFixLoops(ctx, t, d)
 	if err != nil {
-		return store.HandlerCommit{}, fmt.Errorf("job: reviewing: owner accept at cap: fix requested findings markers: %w", err)
+		return store.HandlerCommit{}, err
 	}
-	k, maxLoops := len(reqs), d.Machine.Jobs[jobReviewName].MaxLoops
 
 	lines := make([]string, 0, 2+len(accepted))
 	lines = append(lines,

@@ -450,15 +450,16 @@ func TestLoopsExhaustedRecommendation(t *testing.T) {
 		cases := []struct {
 			name        string
 			reports     []store.BuildReportRow
+			minRunID    int64
 			wantChanged bool
 			wantFound   bool
 		}{
 			{
 				name: "task report, fix with files, fix with none: newest fix wins",
 				reports: []store.BuildReportRow{
-					{Report: task1WithFiles},
-					{Report: withFiles},
-					{Report: noFiles},
+					{RunID: 1, Report: task1WithFiles},
+					{RunID: 2, Report: withFiles},
+					{RunID: 3, Report: noFiles},
 				},
 				wantChanged: false,
 				wantFound:   true,
@@ -466,15 +467,15 @@ func TestLoopsExhaustedRecommendation(t *testing.T) {
 			{
 				name: "fix with none, then task report: fix still newest",
 				reports: []store.BuildReportRow{
-					{Report: noFiles},
-					{Report: task2WithFiles},
+					{RunID: 1, Report: noFiles},
+					{RunID: 2, Report: task2WithFiles},
 				},
 				wantChanged: false,
 				wantFound:   true,
 			},
 			{
 				name:      "task report only: not found",
-				reports:   []store.BuildReportRow{{Report: task1WithFiles}},
+				reports:   []store.BuildReportRow{{RunID: 1, Report: task1WithFiles}},
 				wantFound: false,
 			},
 			{
@@ -482,10 +483,19 @@ func TestLoopsExhaustedRecommendation(t *testing.T) {
 				reports:   nil,
 				wantFound: false,
 			},
+			{
+				// A building-stage CHECK fix landed before review's own first
+				// fix request watermark (minRunID): it must not stand in for a
+				// review fix run that has not happened yet (r1f4).
+				name:      "fix report from before review, no review fix report: not found",
+				reports:   []store.BuildReportRow{{RunID: 5, Report: withFiles}},
+				minRunID:  5,
+				wantFound: false,
+			},
 		}
 		for _, tc := range cases {
 			t.Run(tc.name, func(t *testing.T) {
-				changed, found := newestFixChangedFiles(tc.reports)
+				changed, found := newestFixChangedFiles(tc.reports, tc.minRunID)
 				if changed != tc.wantChanged || found != tc.wantFound {
 					t.Errorf("newestFixChangedFiles(...) = (%v, %v), want (%v, %v)", changed, found, tc.wantChanged, tc.wantFound)
 				}
@@ -729,12 +739,12 @@ func TestLoopGateOwnerAcceptsRemainingFindings(t *testing.T) {
 	if acceptMsg == nil {
 		t.Fatalf("commit.Messages = %+v, want exactly one starting %q", commit.Messages, "The owner accepted ")
 	}
-	wantFirstLine := "The owner accepted one finding at the review fix loop cap"
-	if firstLine, _, _ := strings.Cut(acceptMsg.Body, "\n"); firstLine != wantFirstLine {
-		t.Errorf("accept message first line = %q, want %q", firstLine, wantFirstLine)
-	}
-	if !strings.Contains(acceptMsg.Body, "still broken") {
-		t.Errorf("accept message = %q, want it to mention %q", acceptMsg.Body, "still broken")
+	maxLoops := pbMachine(t).Jobs[jobReviewName].MaxLoops
+	wantBody := "The owner accepted one finding at the review fix loop cap\n" +
+		fmt.Sprintf("Review reached max_loops (%d) after %d fix runs, and the owner chose to continue to judging without fixing these:\n", maxLoops, maxLoops) +
+		"- r3f1 major greet.go:2 [fidelity] still broken"
+	if acceptMsg.Body != wantBody {
+		t.Errorf("accept message body = %q, want %q", acceptMsg.Body, wantBody)
 	}
 
 	pbApply(t, s, ticket, commit)
@@ -801,6 +811,9 @@ func TestLoopGateReplyOnlyRetriesAtCap(t *testing.T) {
 	for i := range commit.Messages {
 		body := commit.Messages[i].Body
 		if strings.HasPrefix(body, fixRequestedFindingsPrefix) {
+			if fixMsg != nil {
+				t.Fatalf("commit.Messages carries more than one message starting %q", fixRequestedFindingsPrefix)
+			}
 			fixMsg = &commit.Messages[i]
 		}
 		if strings.HasPrefix(body, "The owner accepted ") {

@@ -205,6 +205,7 @@ func resolvePostBuildEscalation(ctx context.Context, t store.Ticket, d Deps, rou
 	reviewLoops := origin == response.EscalationOriginReview && payload.Code == string(response.EscalationCodeLoopsExhausted)
 
 	if reviewLoops && choice == escalationChoiceAccept && newestChosenOption(round.Answers) == "" {
+		slog.Info("review loops_exhausted reply-only answer resolves as retry", "ticket_id", t.ID, "run_id", int64OrZero(escMsg.RunID), "recommended", escalationChoiceAccept)
 		choice = escalationChoiceRetry
 	}
 

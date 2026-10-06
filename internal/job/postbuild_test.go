@@ -912,52 +912,62 @@ const (
 	pbEscalationTextAbandon = "Abandon"
 )
 
-// pbLegacyEscalationQuestion inserts an escalation message plus its linked
-// question directly through store.InsertMessage, carrying the fixed
-// three-option payload every escalation offered before #47 item 2
-// (escalation_test.go's own legacyEscalationQuestion, package job_test,
-// unreachable from here): "Retry", "Back to planning", and "Abandon",
-// recommended "b". pbEscalateDirect now goes through the fixed escalateTx,
-// which never recommends "b" post-seal any more (either answered explicitly
-// or defaulted through roundRecommendedOption, planning.go), so it cannot
-// produce this shape -- this helper simulates one of the escalations the
-// database already carried before that fix shipped. Returns the linked
-// question's id.
-func pbLegacyEscalationQuestion(t *testing.T, s *store.Store, ticketID int64, code response.EscalationCode, origin response.EscalationOrigin) int64 {
+// pbEscalationQuestion inserts an escalation message plus its linked
+// question directly through store.InsertMessage, with the question's own
+// options and recommendation as given (ticket 60, review finding r1f2):
+// pbLegacyEscalationQuestion and TestPreludeAcceptPickOnOtherEscalationReplans
+// share this one body instead of each marshalling their own copy. Returns
+// the linked question's id.
+func pbEscalationQuestion(t *testing.T, s *store.Store, ticketID int64, code response.EscalationCode, origin response.EscalationOrigin, recommended string, options []response.Option) int64 {
 	t.Helper()
 	payload := pbTestEscalationPayload(code, origin)
 	body := string(code) + ": " + payload.What
 	escPayload, err := json.Marshal(payload)
 	if err != nil {
-		t.Fatalf("pbLegacyEscalationQuestion: marshal escalation payload: %v", err)
+		t.Fatalf("pbEscalationQuestion: marshal escalation payload: %v", err)
 	}
 	escID, err := s.InsertMessage(t.Context(), store.Message{
 		TicketID: ticketID, Type: "escalation", Author: authorZing, Body: body, Payload: escPayload,
 	})
 	if err != nil {
-		t.Fatalf("pbLegacyEscalationQuestion: InsertMessage(escalation): %v", err)
+		t.Fatalf("pbEscalationQuestion: InsertMessage(escalation): %v", err)
 	}
 
 	qPayload, err := json.Marshal(response.QuestionPayload{
 		Key: "Q1", Kind: response.QuestionKindQuestion, State: response.QuestionStateOpen,
-		Recommended: "b",
-		Options: []response.Option{
-			{Key: "a", Text: pbEscalationTextRetry},
-			{Key: "b", Text: "Back to planning"},
-			{Key: "c", Text: pbEscalationTextAbandon},
-		},
+		Recommended: recommended,
+		Options:     options,
 	})
 	if err != nil {
-		t.Fatalf("pbLegacyEscalationQuestion: marshal question payload: %v", err)
+		t.Fatalf("pbEscalationQuestion: marshal question payload: %v", err)
 	}
 	qID, err := s.InsertMessage(t.Context(), store.Message{
 		TicketID: ticketID, ParentID: &escID, Type: msgTypeQuestion, Author: authorZing,
 		State: new(questionStateOpen), Body: body + "\n\nHow should Zing proceed?", Payload: qPayload,
 	})
 	if err != nil {
-		t.Fatalf("pbLegacyEscalationQuestion: InsertMessage(question): %v", err)
+		t.Fatalf("pbEscalationQuestion: InsertMessage(question): %v", err)
 	}
 	return qID
+}
+
+// pbLegacyEscalationQuestion inserts the fixed three-option payload every
+// escalation offered before #47 item 2 (escalation_test.go's own
+// legacyEscalationQuestion, package job_test, unreachable from here):
+// "Retry", "Back to planning", and "Abandon", recommended "b".
+// pbEscalateDirect now goes through the fixed escalateTx, which never
+// recommends "b" post-seal any more (either answered explicitly or
+// defaulted through roundRecommendedOption, planning.go), so it cannot
+// produce this shape -- this helper simulates one of the escalations the
+// database already carried before that fix shipped. Returns the linked
+// question's id.
+func pbLegacyEscalationQuestion(t *testing.T, s *store.Store, ticketID int64, code response.EscalationCode, origin response.EscalationOrigin) int64 {
+	t.Helper()
+	return pbEscalationQuestion(t, s, ticketID, code, origin, "b", []response.Option{
+		{Key: "a", Text: pbEscalationTextRetry},
+		{Key: "b", Text: "Back to planning"},
+		{Key: "c", Text: pbEscalationTextAbandon},
+	})
 }
 
 // pbAnswerEscalation answers questionID with option (escalation_test.go's
@@ -1296,48 +1306,6 @@ func TestPreludeBackToPlanningReplanUnsupported(t *testing.T) {
 	}
 }
 
-// pbAcceptOptionEscalationQuestion inserts an escalation message plus its
-// linked question directly through store.InsertMessage (ticket 60, like
-// pbLegacyEscalationQuestion), carrying the review loops_exhausted shape:
-// options a Retry, d "Accept the remaining findings and continue to
-// judging", c Abandon, Recommended a. Returns the linked question's id.
-func pbAcceptOptionEscalationQuestion(t *testing.T, s *store.Store, ticketID int64, code response.EscalationCode, origin response.EscalationOrigin) int64 {
-	t.Helper()
-	payload := pbTestEscalationPayload(code, origin)
-	body := string(code) + ": " + payload.What
-	escPayload, err := json.Marshal(payload)
-	if err != nil {
-		t.Fatalf("pbAcceptOptionEscalationQuestion: marshal escalation payload: %v", err)
-	}
-	escID, err := s.InsertMessage(t.Context(), store.Message{
-		TicketID: ticketID, Type: "escalation", Author: authorZing, Body: body, Payload: escPayload,
-	})
-	if err != nil {
-		t.Fatalf("pbAcceptOptionEscalationQuestion: InsertMessage(escalation): %v", err)
-	}
-
-	qPayload, err := json.Marshal(response.QuestionPayload{
-		Key: "Q1", Kind: response.QuestionKindQuestion, State: response.QuestionStateOpen,
-		Recommended: escalationChoiceRetry,
-		Options: []response.Option{
-			{Key: escalationChoiceRetry, Text: pbEscalationTextRetry},
-			{Key: escalationChoiceAccept, Text: reviewAcceptRemainingOptionText},
-			{Key: escalationChoiceAbandon, Text: pbEscalationTextAbandon},
-		},
-	})
-	if err != nil {
-		t.Fatalf("pbAcceptOptionEscalationQuestion: marshal question payload: %v", err)
-	}
-	qID, err := s.InsertMessage(t.Context(), store.Message{
-		TicketID: ticketID, ParentID: &escID, Type: msgTypeQuestion, Author: authorZing,
-		State: new(questionStateOpen), Body: body + "\n\nHow should Zing proceed?", Payload: qPayload,
-	})
-	if err != nil {
-		t.Fatalf("pbAcceptOptionEscalationQuestion: InsertMessage(question): %v", err)
-	}
-	return qID
-}
-
 // TestPreludeAcceptPickOnOtherEscalationReplans proves ticket 60's own last
 // goal: choice d is offered only on a review loops_exhausted question, so
 // resolvePostBuildEscalation treats a d pick on any other escalation like
@@ -1359,7 +1327,11 @@ func TestPreludeAcceptPickOnOtherEscalationReplans(t *testing.T) {
 			s := newFixTestStore(t)
 			ticket := pbSeedTicketInState(t, s, stateReviewing)
 
-			qID := pbAcceptOptionEscalationQuestion(t, s, ticket.ID, tc.code, tc.origin)
+			qID := pbEscalationQuestion(t, s, ticket.ID, tc.code, tc.origin, escalationChoiceRetry, []response.Option{
+				{Key: escalationChoiceRetry, Text: pbEscalationTextRetry},
+				{Key: escalationChoiceAccept, Text: reviewAcceptRemainingOptionText},
+				{Key: escalationChoiceAbandon, Text: pbEscalationTextAbandon},
+			})
 			pbAnswerEscalation(t, s, ticket.ID, qID, escalationChoiceAccept)
 
 			deps := pbClaim(t, s, pbFakeRuntime(t), ticket.ID)

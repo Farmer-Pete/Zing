@@ -3606,7 +3606,7 @@ func TestCommitHandlerResult_EscalationOffersFileGrant(t *testing.T) {
 	payload.Grant = &response.FileGrant{Task: 2, Paths: []string{"x.go"}}
 	applied, err := s.CommitHandlerResult(ctx, HandlerCommit{
 		TicketID: ticketID, Owner: owner, Expires: expires,
-		Escalation: &EscalationCommit{Body: testEscalationBodyPlanGap, Payload: payload},
+		Escalation: &EscalationCommit{Body: "plan_gap: x.go belongs to another task", Payload: payload},
 	})
 	if err != nil {
 		t.Fatalf("CommitHandlerResult: %v", err)
