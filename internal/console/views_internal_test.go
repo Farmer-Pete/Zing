@@ -51,23 +51,22 @@ const testEscalationBody = "escalation summary"
 // TestDisplayBody_PlanreviewPendingMarkerIsHumanReadable proves a
 // "planreview vN pending" marker (job.planreviewPendingMarker) no longer
 // renders as-is, and instead reads as the owner-facing sentence explaining
-// that planning is about to resume on its own.
+// that planning is about to resume on its own, naming the version so the
+// owner never reads a stale version's line (#87).
 func TestDisplayBody_PlanreviewPendingMarkerIsHumanReadable(t *testing.T) {
 	t.Parallel()
-	got := displayBody(updateRow("planreview v3 pending"))
-	if got == "planreview v3 pending" {
-		t.Fatalf("displayBody returned the raw marker unchanged: %q", got)
-	}
-	if !strings.Contains(got, "Planning resumes") {
-		t.Errorf("displayBody(%q) = %q, want it to contain %q", "planreview v3 pending", got, "Planning resumes")
+	const want = "Plan review of v3 found minor findings. Planning resumes automatically to address them."
+	if got := displayBody(updateRow("planreview v3 pending")); got != want {
+		t.Errorf("displayBody(%q) = %q, want %q", "planreview v3 pending", got, want)
 	}
 }
 
 // TestDisplayBody_PlanreviewDeliveredMarkerIsHumanReadable proves a
-// "planreview vN delivered" marker renders as a plain sentence too.
+// "planreview vN delivered" marker renders as a plain sentence too, naming
+// the version.
 func TestDisplayBody_PlanreviewDeliveredMarkerIsHumanReadable(t *testing.T) {
 	t.Parallel()
-	const want = "Planning resumed with the review findings."
+	const want = "Planning resumed with the v3 review findings."
 	if got := displayBody(updateRow("planreview v3 delivered")); got != want {
 		t.Errorf("displayBody(%q) = %q, want %q", "planreview v3 delivered", got, want)
 	}
@@ -128,6 +127,54 @@ func TestDisplayBody_ResponseInvalidWithoutErrors(t *testing.T) {
 	body := "response invalid run 4\nno zing element in final message"
 	if got := displayBody(updateRow(body)); got != want {
 		t.Errorf("displayBody(%q) = %q, want %q", body, got, want)
+	}
+}
+
+// TestResponseInvalidDetailFence proves responseInvalidDetail's own cases
+// (design H2): a lens renders in the head line, a nil lens drops that
+// clause, a marker with no error lines falls back to "Reason: ...." rather
+// than an empty "Validator errors:" section, and errors that themselves
+// hold a run of three backticks get wrapped in a four-backtick fence (one
+// longer than the longest run they contain) while a plain error gets the
+// CommonMark minimum, a three-backtick fence. The fence case is proved again
+// through the full render path by
+// TestEscalationQuestion_ResponseInvalidShowsValidatorErrors, since only
+// Render turns responseInvalidDetail's own markdown into HTML that can
+// actually close (or fail to close) a code block.
+func TestResponseInvalidDetailFence(t *testing.T) {
+	t.Parallel()
+	lens := "correctness"
+
+	marker := "response invalid run 5\nthe final message failed validation\nplan/goals: required"
+	got := responseInvalidDetail("review", &lens, 5, marker)
+	for _, want := range []string{"Job: review, lens correctness. Run 5.", "plan/goals: required"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("responseInvalidDetail(lens) = %q, want it to contain %q", got, want)
+		}
+	}
+
+	got = responseInvalidDetail("planning", nil, 5, marker)
+	if strings.Contains(got, "lens") {
+		t.Errorf("responseInvalidDetail(nil lens) = %q, want no lens clause", got)
+	}
+	if !strings.Contains(got, "Job: planning. Run 5.") {
+		t.Errorf("responseInvalidDetail(nil lens) = %q, want it to contain %q", got, "Job: planning. Run 5.")
+	}
+	if !strings.Contains(got, "\n\n```\nplan/goals: required\n```") {
+		t.Errorf("responseInvalidDetail(nil lens) = %q, want a three-backtick fence", got)
+	}
+
+	noErrors := "response invalid run 5\nthe final message failed validation"
+	got = responseInvalidDetail("planning", nil, 5, noErrors)
+	const want = "Job: planning. Run 5.\n\nReason: the final message failed validation."
+	if got != want {
+		t.Errorf("responseInvalidDetail(no errors) = %q, want %q", got, want)
+	}
+
+	backtickRun := "response invalid run 5\nthe final message failed validation\nplan/goals: required\n```\nplan/review: required"
+	got = responseInvalidDetail("planning", nil, 5, backtickRun)
+	if strings.Count(got, "````") != 2 {
+		t.Errorf("responseInvalidDetail(backtick run) = %q, want two four-backtick fence lines", got)
 	}
 }
 

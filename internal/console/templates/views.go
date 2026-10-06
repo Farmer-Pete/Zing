@@ -193,6 +193,13 @@ type ThreadQuestion struct {
 	DraftOption string
 	DraftItems  map[string]response.Decision
 
+	// DraftNotes is the ticket's own in-progress, unsent per-finding notes
+	// against this question (ticket #68), review kind only: DraftItems'
+	// ref->decision alongside DraftNotes' ref->note, both keyed the same.
+	// effectiveItemNotes (thread.templ) reads it the same way
+	// effectivePickedItems reads DraftItems.
+	DraftNotes map[string]string
+
 	// PickedOption and PickedItems are this question's own sent answer,
 	// decoded once (console.collectSentAnswers) and kept separate from
 	// DraftOption/DraftItems (bug fix: "options vanish once locked" --
@@ -205,6 +212,10 @@ type ThreadQuestion struct {
 	// question is still open.
 	PickedOption string
 	PickedItems  map[string]response.Decision
+
+	// PickedNotes is this question's own sent per-finding notes (ticket
+	// #68), set only once not Interactive, mirroring PickedItems above.
+	PickedNotes map[string]string
 
 	// AnsweredHTML is a closed, state=answered question's own sent answer,
 	// pre-rendered as markdown (bug fix: raw backticks showed literally;

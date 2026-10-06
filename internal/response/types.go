@@ -405,6 +405,7 @@ type Item struct {
 type AnswerPayload struct {
 	Option *string             `json:"option,omitempty" jsonschema:"pattern=^[a-z]$"`
 	Items  map[string]Decision `json:"items,omitempty"  doc:"ref to decision, for perimeter and review"`
+	Notes  map[string]string   `json:"notes,omitempty"  doc:"ref to the owner's note on that item, review only; keys are refs present in Items"`
 }
 
 type EscalationPayload struct {

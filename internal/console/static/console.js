@@ -25,12 +25,16 @@ import {
 	stepComposerIndex,
 	buildChipDraftBody,
 	buildItemDraftBody,
+	itemNoteBody,
+	itemNoteFlushTargets,
+	pickBeforeNoteText,
 	unsavedReplyBody,
 	unsavedReplyBodies,
 	sendResultWithUnsent,
 	sendTargets,
 	sendConfirmText,
 	ticketActionConfirmText,
+	reviewNoteTargets,
 	skipConflicted,
 	sendableQuestions,
 	AUTOSAVE_DEBOUNCE_MS,
@@ -528,6 +532,33 @@ async function postDraftRequest(el, ticket, question, text) {
 	}
 }
 
+// itemRowDraftChains serializes /draft posts for the same review item row
+// (review fix, correctness): a note edit's 'change' and a decision click on
+// the same row can land in the same tick -- blurring the note box to click a
+// decision fires 'change' just before the click's own listener runs -- and
+// two concurrent POST /draft requests for the same ref could reach the
+// server out of order, letting the later response's decision lose to the
+// earlier one. installChipActivation's decision branch and
+// installItemNoteSave below both post through postItemDraft, which chains
+// onto the same promise here, keyed by "ticket:question:ref", so a row's
+// posts always land in the order they were made.
+const itemRowDraftChains = new Map();
+
+// postItemDraft posts body to /draft, chained after any earlier post for the
+// same ticket, question, and ref (itemRowDraftChains above).
+function postItemDraft(dataset, body) {
+	const key = `${dataset.draftTicket}:${dataset.draftQuestion}:${dataset.itemRef}`;
+	const prior = itemRowDraftChains.get(key) ?? Promise.resolve();
+	const result = prior.then(() => postJSON('/draft', body));
+	itemRowDraftChains.set(key, result);
+	result.finally(() => {
+		if (itemRowDraftChains.get(key) === result) {
+			itemRowDraftChains.delete(key);
+		}
+	});
+	return result;
+}
+
 // installChipActivation wires a delegated click listener for the
 // composer's option chips (thread.templ's optionChips) and per-item
 // accept/reject/drop/discuss controls (itemRow) -- the missing half of
@@ -549,8 +580,55 @@ function installChipActivation() {
 		}
 		const decision = event.target.closest?.('.item-decisions .decision');
 		if (decision) {
-			postJSON('/draft', buildItemDraftBody(decision.dataset));
+			// The row's own note box (review items only, task 3's itemRow)
+			// rides this same pick: a note typed before the owner clicks a
+			// decision has nowhere else to save (buildItemDraftBody only ever
+			// carries a note via this click or installItemNoteSave's own
+			// 'change', both of which need a picked decision first), so it
+			// goes out with the pick instead of waiting for a 'change' that
+			// may never come. The row's hint is cleared here too (review fix,
+			// correctness): a note typed before any pick left
+			// pickBeforeNoteText showing in installItemNoteSave's hint, and
+			// this click -- which gives the row its first decision -- is what
+			// makes that hint stale.
+			const row = decision.closest('.item-row');
+			const noteEl = row?.querySelector('.item-note');
+			const hint = row?.querySelector('.item-note-hint');
+			if (hint) {
+				hint.textContent = '';
+			}
+			postItemDraft(decision.dataset, buildItemDraftBody(decision.dataset, noteEl?.value));
 		}
+	});
+}
+
+// installItemNoteSave wires a delegated 'change' listener for a review
+// item's note box (thread.templ's itemRow, task 3; owner decision Q2): a
+// decision must already be picked on the same row for the note to save.
+// Without one, it shows pickBeforeNoteText in the row's .item-note-hint
+// instead of posting a request the server would refuse. itemNoteBody reads
+// the note box's own data-note-ticket, data-note-question, and
+// data-item-ref, plus the row's already-picked decision button's decision.
+function installItemNoteSave() {
+	document.addEventListener('change', (event) => {
+		const noteEl = event.target.closest?.('.item-note');
+		if (!noteEl) {
+			return;
+		}
+		const row = noteEl.closest('.item-row');
+		const hint = row?.querySelector('.item-note-hint');
+		const picked = row?.querySelector('.item-decisions .decision.picked');
+		const body = picked ? itemNoteBody(noteEl.dataset, picked.dataset.decision, noteEl.value) : null;
+		if (!body) {
+			if (hint) {
+				hint.textContent = pickBeforeNoteText;
+			}
+			return;
+		}
+		if (hint) {
+			hint.textContent = '';
+		}
+		postItemDraft(picked.dataset, body);
 	});
 }
 
@@ -623,7 +701,11 @@ function showSendResult(text) {
 // the question's own reply box's key is in conflictedBoxes (ticket #43,
 // cause 2, Q5): sendTargets drops such a question even though it has a
 // draft, since sending it would send the other tab's text, not what the
-// owner has not yet typed over.
+// owner has not yet typed over. reviewNote is true when the question's own
+// data-kind (thread.templ's questionGroup) is "review" and its reply box holds
+// text: a free reply there is still a discussion note to the lens and does
+// not answer the question, so reviewNoteTargets uses this to decide whether
+// sendBatch's confirm dialog must warn about it (Q4).
 function collectSendQuestions() {
 	return Array.from(document.querySelectorAll('#main .q[data-focus-id^="question:"]')).map((q) => {
 		const id = Number(q.getAttribute('data-focus-id').slice('question:'.length));
@@ -632,7 +714,8 @@ function collectSendQuestions() {
 		const hasReply = Boolean(replyInput && replyInput.value !== '');
 		const hasPick = Boolean(q.querySelector('.picked[data-draft-question]'));
 		const conflicted = Boolean(replyInput && isConflicted(replyInput));
-		return { id, key, hasDraft: hasReply || hasPick, conflicted };
+		const reviewNote = q.dataset.kind === 'review' && hasReply;
+		return { id, key, hasDraft: hasReply || hasPick, conflicted, reviewNote };
 	});
 }
 
@@ -732,11 +815,13 @@ function openConfirmDialog({ id, text, items, confirmLabel, onConfirm }) {
 }
 
 // openSendConfirm is Cmd+Enter's in-page confirm dialog (ticket #43, Q3),
-// listing the replies it is about to send.
-function openSendConfirm(ticket, ids, keys) {
+// listing the replies it is about to send. A true warn (reviewNoteTargets)
+// adds reviewNoteWarningText to the dialog's message via sendConfirmText's
+// own second argument (Q4).
+function openSendConfirm(ticket, ids, keys, warn) {
 	openConfirmDialog({
 		id: 'send-confirm',
-		text: sendConfirmText(keys),
+		text: sendConfirmText(keys, warn),
 		items: keys,
 		confirmLabel: 'Send',
 		onConfirm: () => postSendBatch(ticket, ids),
@@ -746,9 +831,9 @@ function openSendConfirm(ticket, ids, keys) {
 // sendBatch handles the send chord (design section 6.4, 6.7, ticket #43):
 // decides what Cmd+Enter would actually send (collectSendQuestions feeding
 // sendTargets), then either sends straight away, when the targets are
-// exactly the focused question, asks first with openSendConfirm's in-page
-// dialog otherwise, or -- with nothing to send -- says so and posts
-// nothing.
+// exactly the focused question and none of them would leak a review note,
+// asks first with openSendConfirm's in-page dialog otherwise, or -- with
+// nothing to send -- says so and posts nothing.
 //
 // Every "#main .reply-input" holding unsaved text is still saved first
 // (unsavedReplyBodies, inside postSendBatchLocked), not just whichever one
@@ -758,21 +843,29 @@ function openSendConfirm(ticket, ids, keys) {
 // dialog first, rather than sent silently alongside whatever question has
 // focus (cause 1 of ticket #43: a send named only the ticket, so a draft
 // typed and forgotten on another question went out unseen).
+//
+// warn (reviewNoteTargets) forces the confirm dialog open even for the
+// single-focused-question case sendTargets would otherwise send silently
+// (Q4): a review question's reply box holding text is still a note to a
+// lens that also keeps the question open, and the owner is told that
+// before it goes out.
 function sendBatch() {
 	if (!state.nav.open) {
 		return false;
 	}
 	const ticket = state.nav.open;
-	const { ids, keys, confirm } = sendTargets(collectSendQuestions(), focusedQuestionID());
+	const questions = collectSendQuestions();
+	const { ids, keys, confirm } = sendTargets(questions, focusedQuestionID());
 	if (ids.length === 0) {
 		showSendResult('Nothing to send. Pick an option or type a reply first.');
 		return true;
 	}
-	if (!confirm) {
+	const warn = reviewNoteTargets(questions);
+	if (!confirm && !warn) {
 		postSendBatch(ticket, ids);
 		return true;
 	}
-	openSendConfirm(ticket, ids, keys);
+	openSendConfirm(ticket, ids, keys, warn);
 	return true;
 }
 
@@ -1065,6 +1158,33 @@ async function postSendBatchLocked(ticket, questions) {
 	// post-send reset below, which would otherwise silently put a
 	// just-sent box's key back to its pre-send text.
 	await Promise.all(autosaveInFlight.values());
+
+	// A review item's note box (task 3's itemRow) has no autosave of its
+	// own -- it saves on 'change' (installItemNoteSave) -- so a note typed
+	// and left unblurred would otherwise still be sitting only in the DOM
+	// when /send runs below. Flushing every such box's note here, ahead of
+	// the reply saves, means /send always sees the note the box currently
+	// shows. itemNoteFlushTargets (review fix, tests) is the pure decision
+	// over which boxes qualify -- changed, picked, and in this send -- kept
+	// in keyboard.mjs so it has its own Node coverage: without those checks,
+	// sending one question flushed every item-note box on the page,
+	// including one on a revisable, already-answered review question whose
+	// picks come only from the last sent answer (views.go's
+	// buildThreadQuestion fallback), never a draft -- creating an unintended
+	// new draft answer on a question the owner never touched this send.
+	const boxes = Array.from(document.querySelectorAll('#main .item-note')).map((el) => {
+		const picked = el.closest('.item-row')?.querySelector('.item-decisions .decision.picked');
+		return {
+			value: el.value,
+			defaultValue: el.defaultValue,
+			dataset: el.dataset,
+			picked: picked ? { decision: picked.dataset.decision, draftQuestion: picked.dataset.draftQuestion } : null,
+		};
+	});
+	const noteSaves = itemNoteFlushTargets(boxes, questions).map((body) =>
+		postItemDraft({ draftTicket: String(body.ticket), draftQuestion: String(body.question), itemRef: body.item.ref }, body),
+	);
+	await Promise.all(noteSaves);
 
 	const inputs = Array.from(document.querySelectorAll('#main .reply-input'));
 	// Recorded before any further await below, so a box the owner keeps
@@ -2063,12 +2183,12 @@ function installNavBridge() {
 // install wires every delegated listener synchronously, before awaiting
 // loadBindings' own /static/keys.json fetch (bug fix): none of
 // installStreamWatch, installNavBridge, installPatchObserver, installSideBox,
-// installLogControls, installChipActivation, installPickupBox,
-// installTicketActions, installSandboxRunBox, installOwnerEdit,
-// installReplyAutosave, or installReplyFocusTracking reads state.bindings,
-// so there was no reason their listeners -- installNavBridge above all,
-// the zing-nav bridge a Threads-sidebar click needs live as early as
-// possible -- sat behind an unrelated network round trip. Only
+// installLogControls, installChipActivation, installItemNoteSave,
+// installPickupBox, installTicketActions, installSandboxRunBox,
+// installOwnerEdit, installReplyAutosave, or installReplyFocusTracking reads
+// state.bindings, so there was no reason their listeners -- installNavBridge
+// above all, the zing-nav bridge a Threads-sidebar click needs live as early
+// as possible -- sat behind an unrelated network round trip. Only
 // handleKeyEvent needs the parsed bindings, so it alone waits on the fetch.
 // installStreamWatch runs first (the reconnect plan): it must already be
 // bound before data-init's own @get('/stream') can fire the very first
@@ -2081,6 +2201,7 @@ async function install() {
 	installSideBox();
 	installLogControls();
 	installChipActivation();
+	installItemNoteSave();
 	installPickupBox();
 	installTicketActions();
 	installSandboxRunBox();
