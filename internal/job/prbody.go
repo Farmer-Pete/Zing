@@ -26,24 +26,71 @@ const (
 	prEvidenceRuneCap = 300
 )
 
-// prBody renders the six-section PullRequest body (design 8.10): Title
-// from the ticket's own title and ref; What from the plan's objective and
-// goals; WorkingDemo from its demo; Scenarios from the cohort and its
-// selected verdicts, never the scenarios' own given/when/then;
-// DeclaredFiles from the plan's files plus every accepted extra;
+// prBody renders the seven-section PullRequest body (design 8.10), one of
+// them optional: Title from the ticket's own title and ref; What from the
+// plan's objective and goals; WorkingDemo from its demo; Scenarios from
+// the cohort and its selected verdicts, never the scenarios' own
+// given/when/then; AcceptedFindings from accepted, the review findings let
+// through unfixed (prAcceptedFindings), empty and so left out when there
+// are none; DeclaredFiles from the plan's files plus every accepted extra;
 // ChestertonsFence from the plan's deletions plus every landed build
 // report's fences, deduplicated; PlanLink naming t.ID. The body itself
 // renders through orchestrator.PullRequest.Body (Package 5).
-func prBody(t store.Ticket, plan response.Plan, verdicts []response.VerdictArtifact, scenarios []response.Scenario, reports []store.BuildReportRow, events []store.FileEventRow) orchestrator.PullRequest {
+func prBody(t store.Ticket, plan response.Plan, verdicts []response.VerdictArtifact, scenarios []response.Scenario, reports []store.BuildReportRow, events []store.FileEventRow, accepted acceptedFindings) orchestrator.PullRequest {
 	return orchestrator.PullRequest{
 		Title:            prTitle(t.Title, t.TrackerRef),
 		What:             prWhat(plan.Overview.Objective, plan.Overview.Goals),
 		WorkingDemo:      prWorkingDemo(plan.Design.Demo),
 		Scenarios:        prScenarios(scenarios, verdicts),
+		AcceptedFindings: prAcceptedFindings(accepted),
 		DeclaredFiles:    prDeclaredFiles(plan, events),
 		ChestertonsFence: prChestertonsFence(plan, reports),
 		PlanLink:         fmt.Sprintf("The plan is ticket %d in the Zing console.", t.ID),
 	}
+}
+
+// acceptedFindings is prBody's own input for the "Accepted review findings"
+// section (issue #67): the review findings a ticket took to judging
+// unfixed, from the newest reviewing to judging state change whose reason
+// names one of the two accept-at-cap paths. Owner is true for the owner's
+// own "d" pick on a loops_exhausted question, false for Zing's own
+// acceptAtCap; Rows is nil or empty when there is nothing to report, which
+// leaves the section out of the rendered body entirely.
+type acceptedFindings struct {
+	Owner bool
+	Rows  []response.FindingArtifact
+}
+
+// The lead sentence of the "Accepted review findings" section, one per
+// path to judging (issue #66's split): Zing's own accept at the floor, or
+// the owner's d pick on loops_exhausted.
+const (
+	prAcceptedZingLead  = "Review reached its fix loop cap. Zing let these through unfixed because every one is at or below the floor."
+	prAcceptedOwnerLead = "Review reached its fix loop cap. The owner chose to ship these unfixed."
+)
+
+// prAcceptedEscaper escapes lens output for the public PR body: "|" the way
+// escapeCell does, and "<" as its HTML entity so a finding cannot open a
+// comment or tag that hides the sections after it.
+var prAcceptedEscaper = strings.NewReplacer("|", `\|`, "<", "&lt;")
+
+// prAcceptedFindings is the lead sentence for a's path, a blank line, then
+// acceptedFindingLines' own "- ID SEVERITY LOCATION TEXT" lines, each passed
+// through prAcceptedEscaper. An empty a.Rows is "", so Body leaves the
+// section out.
+func prAcceptedFindings(a acceptedFindings) string {
+	if len(a.Rows) == 0 {
+		return ""
+	}
+	lead := prAcceptedZingLead
+	if a.Owner {
+		lead = prAcceptedOwnerLead
+	}
+	lines := acceptedFindingLines(a.Rows)
+	for i, l := range lines {
+		lines[i] = prAcceptedEscaper.Replace(l)
+	}
+	return lead + "\n\n" + strings.Join(lines, "\n")
 }
 
 // prTitle collapses title's whitespace and appends a suffix naming ref:
