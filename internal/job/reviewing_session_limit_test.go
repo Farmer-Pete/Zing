@@ -16,7 +16,7 @@
 package job
 
 import (
-	"slices"
+	"errors"
 	"strings"
 	"testing"
 
@@ -48,40 +48,43 @@ func reviewCappedExitKey(lens string) string {
 // reviewParkRound is this file's own stand-in for the dispatcher's
 // parkCapped (internal/dispatch/dispatch.go): package job cannot import
 // package dispatch (the reverse direction compiles the real thing), so this
-// calls the exact two store methods parkCapped itself calls -- CappedUntil
-// for the reset and store.ParkRuns, fed CappedFinish(err) -- under the same
-// (owner, expires) the attempt's own claim just used, and fails the test if
-// either returns an error.
+// calls the exact store methods parkCapped itself calls -- Capped for the
+// reset, the finish rows, and the discard marker body; store.ParkRuns; and,
+// when ParkRuns actually recorded something, the one "discarded review
+// round" InsertMessage parkCapped itself writes -- under the same (owner,
+// expires) the attempt's own claim just used, and fails the test if any of
+// them returns an error.
 func reviewParkRound(t *testing.T, s *store.Store, ticketID int64, deps Deps, err error) store.ParkResult {
 	t.Helper()
-	until, capped := CappedUntil(err)
+	info, capped := Capped(err)
 	if !capped {
-		t.Fatalf("reviewParkRound: CappedUntil(%v) = (_, false), want true", err)
+		t.Fatalf("reviewParkRound: Capped(%v) = (_, false), want true", err)
 	}
-	res, parkErr := s.ParkRuns(t.Context(), ticketID, deps.Owner, deps.Expires, until, CappedFinish(err))
+	res, parkErr := s.ParkRuns(t.Context(), ticketID, deps.Owner, deps.Expires, info.Until, info.Finish)
 	if parkErr != nil {
 		t.Fatalf("ParkRuns: %v", parkErr)
+	}
+	if info.DiscardMarker != "" && res.Applied && (len(res.RunIDs) != 0 || len(info.Finish) != 0) {
+		if _, insErr := s.InsertMessage(t.Context(), store.Message{
+			TicketID: ticketID, Type: msgTypeUpdate, Author: authorSystem, Body: info.DiscardMarker,
+		}); insErr != nil {
+			t.Fatalf("InsertMessage (discarded review round): %v", insErr)
+		}
 	}
 	return res
 }
 
-// goodAttemptRuns is tableCommit's own capped-lens row expression
-// (reviewing.go), reproduced here so this test can assert on it without
-// exporting it from production code: terminalizeAttempts over every attempt
-// but the capped and canceled ones (cappedOrCanceled).
-func goodAttemptRuns(attempts []lensAttempt) []store.Run {
-	runs, _, _ := terminalizeAttempts(slices.DeleteFunc(slices.Clone(attempts), cappedOrCanceled))
-	return runs
-}
-
-// TestGoodAttemptRuns proves cappedOrCanceled's own filter deterministically,
-// with no runtime concurrency involved (review fix r1f6, r2f11): a capped
-// attempt's own run is excluded, a canceled attempt's own run (one
+// TestFinishedLensRuns proves finishedLensRuns' own filter deterministically,
+// with no runtime concurrency involved (review fix r1f6, r2f11, r3f7): a
+// capped attempt's own run is excluded, a canceled attempt's own run (one
 // runLensesParallel's roundCtx cut off after another lens hit the cap) is
 // excluded too since it did not fail on its own, a good attempt's own run is
-// terminalized by its real outcome, and an attempt that never reserved (no
-// HeldError Reserve call) contributes nothing.
-func TestGoodAttemptRuns(t *testing.T) {
+// terminalized by its real outcome, an attempt that never reserved (no
+// HeldError Reserve call) contributes nothing, and a retried attempt whose
+// own first try was invalid but whose retry hit the cap keeps that
+// first-try run (its own real "error" outcome) even though its own capped
+// retry run is excluded.
+func TestFinishedLensRuns(t *testing.T) {
 	t.Parallel()
 
 	capped := lensAttempt{
@@ -106,16 +109,31 @@ func TestGoodAttemptRuns(t *testing.T) {
 		rr:  runResult{Reserved: store.Reserved{RunID: 4, Turn: 0}},
 		err: runtime.ErrCanceled,
 	}
+	retriedThenCapped := lensAttempt{
+		idx: 4, lens: "performance",
+		rr:  runResult{Reserved: store.Reserved{RunID: 6, Turn: 1}},
+		err: &runtime.SessionLimitError{Parsed: true},
+		firstTry: &lensFirstTry{
+			rr:     runResult{Reserved: store.Reserved{RunID: 5, Turn: 0}},
+			invErr: &runtime.InvalidOutputError{},
+		},
+	}
 
-	runs := goodAttemptRuns([]lensAttempt{capped, good, neverReserved, canceled})
-	if len(runs) != 1 {
-		t.Fatalf("goodAttemptRuns = %+v, want exactly one run (the good lens's own)", runs)
+	runs := finishedLensRuns([]lensAttempt{capped, good, neverReserved, canceled, retriedThenCapped})
+	if len(runs) != 2 {
+		t.Fatalf("finishedLensRuns = %+v, want exactly two runs (the good lens's own and the retried lens's own first try)", runs)
 	}
 	if runs[0].ID != 2 {
-		t.Errorf("goodAttemptRuns[0].ID = %d, want 2 (the good lens's run id, not the capped or canceled one's)", runs[0].ID)
+		t.Errorf("finishedLensRuns[0].ID = %d, want 2 (the good lens's run id, not the capped or canceled one's)", runs[0].ID)
 	}
 	if runs[0].Outcome == nil || *runs[0].Outcome != string(response.OutcomeOk) {
-		t.Errorf("goodAttemptRuns[0].Outcome = %v, want %q", runs[0].Outcome, response.OutcomeOk)
+		t.Errorf("finishedLensRuns[0].Outcome = %v, want %q", runs[0].Outcome, response.OutcomeOk)
+	}
+	if runs[1].ID != 5 {
+		t.Errorf("finishedLensRuns[1].ID = %d, want 5 (the retried lens's own first-try run, not its capped retry)", runs[1].ID)
+	}
+	if runs[1].Outcome == nil || *runs[1].Outcome != string(response.OutcomeError) {
+		t.Errorf("finishedLensRuns[1].Outcome = %v, want %q (the first try's own real failure, not the cap)", runs[1].Outcome, response.OutcomeError)
 	}
 }
 
@@ -196,13 +214,12 @@ func TestCappedRoundNote(t *testing.T) {
 // commit, so the round-failure count does not move", owner decision Q3,
 // picked option a) together with its own Finish mechanism (owner decision
 // Q6): two separate round attempts where lens "correctness" hits the
-// session limit each return an error job.CappedUntil recognizes and an
-// empty commit, so neither writes a "review round" marker and neither
-// feeds lensFailedTwiceWhat's two-in-a-row escalation; and, once the
-// dispatcher's own ParkRuns call is simulated (reviewParkRound), every
-// other lens's own run keeps its own real outcome and no capped_until,
-// while only the capped lens's run is swept as interrupted with
-// capped_until set.
+// session limit each return a *CappedRoundError for round 1, with an empty
+// commit, so neither writes a "review round" marker and neither feeds
+// lensFailedTwiceWhat's two-in-a-row escalation; and, once the dispatcher's
+// own ParkRuns call is simulated (reviewParkRound), every other lens's own
+// run keeps its own real outcome and no capped_until, while only the capped
+// lens's run is swept as interrupted with capped_until set.
 func TestReviewRound_CappedLensDiscardsRound(t *testing.T) {
 	t.Parallel()
 
@@ -233,8 +250,20 @@ func TestReviewRound_CappedLensDiscardsRound(t *testing.T) {
 		if err == nil {
 			t.Fatalf("attempt %d: Run: err = nil, want a capped error", attempt)
 		}
-		if _, capped := CappedUntil(err); !capped {
-			t.Fatalf("attempt %d: CappedUntil(%v) = (_, false), want true", attempt, err)
+		if _, capped := Capped(err); !capped {
+			t.Fatalf("attempt %d: Capped(%v) = (_, false), want true", attempt, err)
+		}
+		var roundErr *CappedRoundError
+		if !errors.As(err, &roundErr) {
+			t.Fatalf("attempt %d: errors.As(%v, &CappedRoundError) = false, want true", attempt, err)
+		}
+		if roundErr.Round != 1 {
+			t.Errorf("attempt %d: CappedRoundError.Round = %d, want 1", attempt, roundErr.Round)
+		}
+		for _, r := range roundErr.Finish {
+			if r.Lens != nil && *r.Lens == cappedLens {
+				t.Errorf("attempt %d: CappedRoundError.Finish contains the capped lens's own run %+v, want it excluded", attempt, r)
+			}
 		}
 		if commit.Escalation != nil {
 			t.Errorf("attempt %d: commit.Escalation = %+v, want nil", attempt, commit.Escalation)
@@ -323,5 +352,112 @@ func TestReviewRound_CappedLensDiscardsRound(t *testing.T) {
 	}
 	if parkedMarkers != 2 {
 		t.Errorf("parked markers = %d, want 2 (one per attempt)", parkedMarkers)
+	}
+}
+
+// TestReviewRound_CappedRoundRerunsEveryLensFresh proves the owner's final
+// Q17 revision of Q6: after a capped review round, every lens of the
+// round, capped or completed, runs again as a new run of the same round on
+// its own fresh session -- no lens resumes its old session -- and the
+// rerun's own prompt carries the "discarded because of the Claude session
+// limit" note (r3f9). Once every lens of the rerun returns clean, the round
+// closes exactly like any other: one "review round 1 done" marker, no
+// different from a round that was never capped at all.
+func TestReviewRound_CappedRoundRerunsEveryLensFresh(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow end-to-end flow; runs in the full suite")
+	}
+	t.Parallel()
+
+	s, ticket, before := reviewTicketReady(t)
+	cappedScripts := reviewScriptsFS(map[string]string{
+		reviewCappedExitKey(cappedLens): reviewCappedLensMessage,
+	})
+	deps := pbClaim(t, s, runtime.NewFake(cappedScripts), ticket.ID)
+	ticketNow := pbGetTicket(t, s, ticket.ID)
+	_, err := (reviewingHandler{}).Run(t.Context(), ticketNow, deps)
+	if err == nil {
+		t.Fatal("Run (round 1, capped): err = nil, want a capped error")
+	}
+	if _, capped := Capped(err); !capped {
+		t.Fatalf("Capped(%v) = (_, false), want true", err)
+	}
+	if res := reviewParkRound(t, s, ticket.ID, deps, err); !res.Applied {
+		t.Fatal("ParkRuns: Applied = false, want true")
+	}
+
+	// runLensesParallel cancels the round as soon as the capped lens's own
+	// bad attempt is seen, so a lens still waiting on the semaphore (a
+	// genuine scheduler race TestReviewRound_CappedLensDiscardsRound's own
+	// comment already notes) may never reserve a run at all: this round's
+	// own session count is not deterministic, only that the capped lens's
+	// own run is among whatever did reserve.
+	cappedRuns := reviewRunsSince(t, s, ticket.ID, before)
+	sessionIDsByLens := make(map[string]int64, len(cappedRuns))
+	for _, r := range cappedRuns {
+		if r.Lens != nil {
+			sessionIDsByLens[*r.Lens] = r.SessionID
+		}
+	}
+	if _, ok := sessionIDsByLens[cappedLens]; !ok {
+		t.Fatalf("round 1 (capped) sessions = %+v, want the capped lens %q among them", sessionIDsByLens, cappedLens)
+	}
+	afterFirstRound, err := s.MaxRunID(t.Context(), ticket.ID)
+	if err != nil {
+		t.Fatalf("MaxRunID: %v", err)
+	}
+
+	// The reset already passed: the hold ParkRuns just raised is pushed into
+	// the past, the same way TestReviewRound_CappedLensDiscardsRound's own
+	// second attempt stands in for a real reset without waiting on a real
+	// clock.
+	if setErr := s.SetSettings(t.Context(), "claude_hold_until", "2000-01-01T00:00:00Z"); setErr != nil {
+		t.Fatalf("SetSettings(claude_hold_until): %v", setErr)
+	}
+
+	okRT := &recordingRuntime{inner: runtime.NewFake(reviewScriptsFS(nil))}
+	deps2 := pbClaim(t, s, okRT, ticket.ID)
+	ticketNow2 := pbGetTicket(t, s, ticket.ID)
+	commit2, err2 := (reviewingHandler{}).Run(t.Context(), ticketNow2, deps2)
+	if err2 != nil {
+		t.Fatalf("Run (round 1, rerun): %v", err2)
+	}
+	if commit2.Next != stateJudging || commit2.Reason != reasonReviewClean {
+		t.Fatalf("commit2 = {Next: %q, Reason: %q}, want {%q, %q}", commit2.Next, commit2.Reason, stateJudging, reasonReviewClean)
+	}
+	pbApply(t, s, ticket, commit2)
+
+	if _, ok := reviewMarker(t, s, ticket.ID, "review round 1 done"); !ok {
+		t.Error(`no "review round 1 done" marker after the rerun (want the round to close normally)`)
+	}
+
+	rerunRuns := reviewRunsSince(t, s, ticket.ID, afterFirstRound)
+	seenLenses := make(map[string]bool, len(reviewLensNames))
+	for _, r := range rerunRuns {
+		if r.Lens == nil {
+			continue
+		}
+		seenLenses[*r.Lens] = true
+		if r.ID <= afterFirstRound {
+			t.Errorf("rerun lens %q run %+v, want a new run id after the discarded round's own", *r.Lens, r)
+		}
+		if priorSession, ok := sessionIDsByLens[*r.Lens]; ok && r.SessionID == priorSession {
+			t.Errorf("rerun lens %q run %+v reused session %d from the discarded round, want a fresh session", *r.Lens, r, priorSession)
+		}
+	}
+	for _, lens := range reviewLensNames {
+		if !seenLenses[lens] {
+			t.Errorf("lens %q never reran, want every lens of the round -- capped or completed -- to run again", lens)
+		}
+	}
+
+	if len(okRT.reqs) == 0 {
+		t.Fatal("recordingRuntime: no request recorded")
+	}
+	const wantNote = "the previous review round was discarded because of the Claude session limit"
+	for _, req := range okRT.reqs {
+		if !strings.Contains(req.Prompt, wantNote) {
+			t.Errorf("rerun request (label %q) prompt = %q, want it to contain %q", req.Label, req.Prompt, wantNote)
+		}
 	}
 }

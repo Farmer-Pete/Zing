@@ -9,9 +9,12 @@
 package dispatch_test
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"io/fs"
+	"log/slog"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -109,9 +112,17 @@ func planningRuns(t *testing.T, s *store.Store, ticketID int64) []store.Run {
 // run capped and the session parked until the parsed reset, with no owner
 // question; held while the clock sits before the reset; and resumes the
 // same session for free, with no owner answer, once the clock passes it
-// (design shape demo, tests list).
+// (design shape demo, tests list). It also proves the ticket's own logging
+// requirement (r3f12): the park and the resume are each logged with the
+// run id, the ticket id and the reset time. It swaps the process-wide slog
+// default to capture those two lines (matching dispatch_test.go's
+// TestTick_IntakeErrorOnOneProjectLogsAndContinuesToTheNext), so it does
+// not run in parallel with another subtest that touches slog.
 func TestTick_SessionLimitParksThenResumes(t *testing.T) {
-	t.Parallel()
+	var logBuf bytes.Buffer
+	prevDefault := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logBuf, &slog.HandlerOptions{Level: slog.LevelDebug})))
+	t.Cleanup(func() { slog.SetDefault(prevDefault) })
 
 	s := newDispatchTestStore(t)
 	ticketID := seedQueuedTicket(t, s, testFixtureRef)
@@ -219,6 +230,22 @@ func TestTick_SessionLimitParksThenResumes(t *testing.T) {
 		t.Error(`no "parked until" marker found`)
 	}
 
+	logged := logBuf.String()
+	wantRunID := strconv.FormatInt(run.ID, 10)
+	if !strings.Contains(logged, "claude session limit park") {
+		t.Errorf("log = %q, want it to contain %q", logged, "claude session limit park")
+	}
+	if !strings.Contains(logged, "ticket_id="+strconv.FormatInt(ticketID, 10)) {
+		t.Errorf("log = %q, want the park line to name ticket_id=%d", logged, ticketID)
+	}
+	if !strings.Contains(logged, wantRunID) {
+		t.Errorf("log = %q, want the park line to name the parked run id %s", logged, wantRunID)
+	}
+	wantParkResetAt := run.CappedUntil.UTC().Format(time.RFC3339)
+	if !strings.Contains(logged, wantParkResetAt) {
+		t.Errorf("log = %q, want the park line to carry reset_at %s", logged, wantParkResetAt)
+	}
+
 	// Tick 3: one minute before the reset, the parked ticket is skipped. The
 	// global claude_hold_until setting is pushed into the past first, so
 	// runJobWith's own hold gate cannot be what refuses this ticket: only
@@ -289,6 +316,21 @@ func TestTick_SessionLimitParksThenResumes(t *testing.T) {
 	}
 	if !sawResumed {
 		t.Error(`no "resumed after the Claude session limit" marker found`)
+	}
+
+	loggedAfter4 := logBuf.String()
+	wantResumedRunID := strconv.FormatInt(resumed.ID, 10)
+	if !strings.Contains(loggedAfter4, "claude session limit resume") {
+		t.Errorf("log = %q, want it to contain %q", loggedAfter4, "claude session limit resume")
+	}
+	if !strings.Contains(loggedAfter4, "ticket_id="+strconv.FormatInt(ticketID, 10)) {
+		t.Errorf("log = %q, want the resume line to name ticket_id=%d", loggedAfter4, ticketID)
+	}
+	if !strings.Contains(loggedAfter4, "run_id="+wantResumedRunID) {
+		t.Errorf("log = %q, want the resume line to name run_id=%s", loggedAfter4, wantResumedRunID)
+	}
+	if !strings.Contains(loggedAfter4, run.CappedUntil.UTC().Format(time.RFC3339)) {
+		t.Errorf("log = %q, want the resume line to carry reset_at %s", loggedAfter4, run.CappedUntil.UTC().Format(time.RFC3339))
 	}
 
 	finalTicket := getTicket(t, s, ticketID)
@@ -460,12 +502,12 @@ func (c *capAfterN) Run(_ context.Context, _ runtime.RunRequest) (runtime.RunRes
 }
 
 // TestTick_ReviewRoundCappedLensParksOnlyThatRun proves the dispatcher's own
-// wiring of job.CappedFinish(err) into store.ParkRuns (design shape, owner
+// wiring of job.Capped(err).Finish into store.ParkRuns (design shape, owner
 // decision Q6, review fix r2f3): with the review lenses forced serial
 // (LensesParallel 1), a lens that completes before another lens hits the
 // session limit keeps its own real "ok" outcome, not interrupted and with
 // no capped_until, while only the capped lens's own run is parked. Were the
-// dispatcher to pass nil instead of job.CappedFinish(err) at this call
+// dispatcher to pass nil instead of job.Capped(err).Finish at this call
 // site, ParkRuns would sweep every open run -- including the lens that
 // already finished -- as interrupted with capped_until set, failing the
 // "finished, not interrupted" assertion below.
@@ -539,7 +581,7 @@ func TestTick_ReviewRoundCappedLensParksOnlyThatRun(t *testing.T) {
 		t.Errorf("saw %d capped runs, want 1", sawCapped)
 	}
 	if sawFinished != 2 {
-		t.Errorf("saw %d finished runs, want 2 (ParkRuns' Finish, from job.CappedFinish, kept their real outcome)", sawFinished)
+		t.Errorf("saw %d finished runs, want 2 (ParkRuns' Finish, from job.Capped(err).Finish, kept their real outcome)", sawFinished)
 	}
 
 	msgs, err := s.ListMessages(t.Context(), ticketID)
@@ -556,6 +598,79 @@ func TestTick_ReviewRoundCappedLensParksOnlyThatRun(t *testing.T) {
 		}
 	}
 	if !sawDiscarded {
-		t.Errorf(`no %q marker found for round 1 (r2f9)`, job.CappedRoundDiscardedPrefix+"1: Claude session limit")
+		t.Errorf("no %q marker found for round 1", job.CappedRoundDiscardedPrefix+"1: Claude session limit")
 	}
+}
+
+// TestTick_ReviewRoundHeldByOtherTicketWritesNoDiscardMarker proves the
+// correctness fix for r3f3: a reviewing ticket that is itself never parked
+// -- held only because some other ticket's own park already raised the
+// global claude_hold_until -- gets a HeldError on every lens before Reserve
+// (runJobWith's hold gate), so tableCommit still returns a *CappedRoundError
+// for the round, but ParkRuns sweeps nothing of this ticket's own (no run
+// was ever reserved) and terminalizes no finish row either. parkCapped must
+// not write a "discarded review round" marker for a round that never
+// actually ran: were the isRound branch gated on capped.DiscardMarker alone,
+// this ticket's thread would gain one such marker on every tick it is held,
+// for as long as the other ticket's hold stays in the future.
+func TestTick_ReviewRoundHeldByOtherTicketWritesNoDiscardMarker(t *testing.T) {
+	t.Parallel()
+
+	s := newDispatchTestStore(t)
+	rt := fakeRuntime(t)
+	ticketID := seedQueuedGitBackedTicket(t, s, testFixtureRef)
+	advanceTicket(t, s, rt, ticketID, testStateQueued, testStatePlanning, testStateBuilding)
+
+	if setErr := s.SetSettings(t.Context(), "claude_hold_until", formatFutureHold(time.Now().Add(time.Hour))); setErr != nil {
+		t.Fatalf("SetSettings(claude_hold_until): %v", setErr)
+	}
+
+	beforeMaxID, err := s.MaxRunID(t.Context(), ticketID)
+	if err != nil {
+		t.Fatalf("MaxRunID (before): %v", err)
+	}
+
+	d := newDispatcher(t, s, newFixtureTracker(t), bus.New(), rt, nil, nil,
+		dispatch.Config{
+			MaxParallel: 1, Owner: testOwner, LensesParallel: 1,
+			Projects: buildTestProjects(t, s), Sandboxes: sandbox.OffSet(),
+		})
+
+	for i := range 2 {
+		if tickErr := d.Tick(t.Context()); tickErr != nil {
+			t.Fatalf("Tick %d (held by another ticket's hold): %v", i+1, tickErr)
+		}
+	}
+
+	held := getTicket(t, s, ticketID)
+	if held.ClaimOwner != nil {
+		t.Errorf("ticket.ClaimOwner = %v, want nil (claimed then released each tick)", *held.ClaimOwner)
+	}
+
+	all, err := s.RunsForTicket(t.Context(), ticketID)
+	if err != nil {
+		t.Fatalf("RunsForTicket: %v", err)
+	}
+	for _, r := range all {
+		if r.ID > beforeMaxID {
+			t.Errorf("run %+v reserved while held, want none (every lens refused before Reserve)", r)
+		}
+	}
+
+	msgs, err := s.ListMessages(t.Context(), ticketID)
+	if err != nil {
+		t.Fatalf("ListMessages: %v", err)
+	}
+	for _, m := range msgs {
+		if strings.HasPrefix(m.Body, job.CappedRoundDiscardedPrefix) {
+			t.Errorf("message %+v starts with %q, want none (the round never ran, nothing of this ticket's own was parked)", m, job.CappedRoundDiscardedPrefix)
+		}
+	}
+}
+
+// formatFutureHold renders until the same fixed layout store.ParkRuns
+// itself writes to claude_hold_until, so this test can seed that setting
+// directly without exporting store's own private layout constant.
+func formatFutureHold(until time.Time) string {
+	return until.UTC().Format("2006-01-02T15:04:05Z")
 }

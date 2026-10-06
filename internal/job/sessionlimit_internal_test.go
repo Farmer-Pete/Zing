@@ -33,7 +33,7 @@ func seedClaudeHoldSetting(t *testing.T, s *store.Store, until time.Time) {
 
 // TestRunJob_ClaudeHoldRefusesClaudeBeforeReserve proves the hold gate
 // (design shape, "Hold"): with claude_hold_until 10 minutes after Deps.Now,
-// runJob for planning (runtime claude) returns an error CappedUntil
+// runJob for planning (runtime claude) returns an error job.Capped
 // recognizes, errors.As finds a *HeldError inside it, and nothing was
 // reserved.
 func TestRunJob_ClaudeHoldRefusesClaudeBeforeReserve(t *testing.T) {
@@ -65,12 +65,12 @@ func TestRunJob_ClaudeHoldRefusesClaudeBeforeReserve(t *testing.T) {
 	if err == nil {
 		t.Fatal("runJob: err = nil, want a HeldError")
 	}
-	resetAt, capped := CappedUntil(err)
+	info, capped := Capped(err)
 	if !capped {
-		t.Fatalf("CappedUntil(%v) = (_, false), want true", err)
+		t.Fatalf("Capped(%v) = (_, false), want true", err)
 	}
-	if !resetAt.Equal(until) {
-		t.Errorf("CappedUntil reset = %v, want %v", resetAt, until)
+	if !info.Until.Equal(until) {
+		t.Errorf("Capped reset = %v, want %v", info.Until, until)
 	}
 	var held *HeldError
 	if !errors.As(err, &held) { //nolint:modernize // see errKind's own comment
@@ -212,31 +212,50 @@ func TestRouteFailure_PassesCappedThrough(t *testing.T) {
 	}
 }
 
-// --- CappedUntil -----------------------------------------------------------
+// --- Capped -----------------------------------------------------------
 
-// TestCappedUntil proves CappedUntil's own classification (design shape,
-// "CappedUntil"): a %w-wrapped SessionLimitError gives its ResetAt, a
-// HeldError gives its Until, and neither an ExecError, runtime.ErrCanceled,
-// nor nil is capped.
-func TestCappedUntil(t *testing.T) {
+// TestCapped proves Capped's own classification (design shape,
+// "CappedUntil"; simplification fix, one accessor in place of three): a
+// %w-wrapped SessionLimitError gives its ResetAt, a HeldError gives its
+// Until, and neither an ExecError, runtime.ErrCanceled, nor nil is capped.
+func TestCapped(t *testing.T) {
 	t.Parallel()
 
 	resetAt := time.Date(2026, 10, 5, 16, 20, 0, 0, time.UTC)
 	wrapped := fmt.Errorf("wrap: %w", &runtime.SessionLimitError{ResetAt: resetAt, Parsed: true})
-	got, ok := CappedUntil(wrapped)
-	if !ok || !got.Equal(resetAt) {
-		t.Errorf("CappedUntil(wrapped SessionLimitError) = (%v, %v), want (%v, true)", got, ok, resetAt)
+	got, ok := Capped(wrapped)
+	if !ok || !got.Until.Equal(resetAt) {
+		t.Errorf("Capped(wrapped SessionLimitError) = (%+v, %v), want Until %v, true", got, ok, resetAt)
 	}
 
 	until := time.Date(2026, 10, 5, 17, 0, 0, 0, time.UTC)
-	got2, ok2 := CappedUntil(&HeldError{Until: until})
-	if !ok2 || !got2.Equal(until) {
-		t.Errorf("CappedUntil(HeldError) = (%v, %v), want (%v, true)", got2, ok2, until)
+	got2, ok2 := Capped(&HeldError{Until: until})
+	if !ok2 || !got2.Until.Equal(until) {
+		t.Errorf("Capped(HeldError) = (%+v, %v), want Until %v, true", got2, ok2, until)
 	}
 
 	for _, err := range []error{&runtime.ExecError{ExitCode: 1}, runtime.ErrCanceled, nil} {
-		if _, ok := CappedUntil(err); ok {
-			t.Errorf("CappedUntil(%v) = (_, true), want false", err)
+		if _, ok := Capped(err); ok {
+			t.Errorf("Capped(%v) = (_, true), want false", err)
 		}
+	}
+
+	roundErr := &CappedRoundError{
+		Err:    &runtime.SessionLimitError{ResetAt: resetAt, Parsed: true},
+		Finish: []store.Run{{ID: 7}},
+		Round:  3,
+	}
+	got3, ok3 := Capped(roundErr)
+	if !ok3 || !got3.Until.Equal(resetAt) {
+		t.Errorf("Capped(CappedRoundError) = (%+v, %v), want Until %v, true", got3, ok3, resetAt)
+	}
+	if len(got3.Finish) != 1 || got3.Finish[0].ID != 7 {
+		t.Errorf("Capped(CappedRoundError).Finish = %+v, want [{ID: 7}]", got3.Finish)
+	}
+	if got3.Round != 3 {
+		t.Errorf("Capped(CappedRoundError).Round = %d, want 3", got3.Round)
+	}
+	if got3.DiscardMarker != CappedRoundDiscardedPrefix+"3: Claude session limit" {
+		t.Errorf("Capped(CappedRoundError).DiscardMarker = %q, want %q", got3.DiscardMarker, CappedRoundDiscardedPrefix+"3: Claude session limit")
 	}
 }

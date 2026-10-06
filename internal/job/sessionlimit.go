@@ -7,6 +7,7 @@ package job
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"time"
 
@@ -28,25 +29,51 @@ func (e *HeldError) Error() string {
 	return "job: claude runs held until " + e.Until.UTC().Format(time.RFC3339)
 }
 
-// CappedUntil reports whether err is a Claude session-limit hit or a hold
-// refusal, and the instant the ticket should wait for (design shape,
-// "CappedUntil"): the dispatcher parks on either.
-func CappedUntil(err error) (time.Time, bool) {
-	var sl *runtime.SessionLimitError
-	if errors.As(err, &sl) { //nolint:modernize // errcheck check-blank, as errKind
-		return sl.ResetAt, true
-	}
-	var held *HeldError
-	if errors.As(err, &held) { //nolint:modernize // same
-		return held.Until, true
-	}
-	return time.Time{}, false
+// CappedInfo is the pieces the dispatcher's parkCapped needs for any capped
+// Claude error (design shape, "CappedUntil"; simplification fix, one
+// accessor in place of three): Until is the instant the ticket should wait
+// for; Finish carries a capped review round's own already-finished lens
+// runs (CappedRoundError.Finish, owner decision Q6) to terminalize before
+// the park sweep, nil outside a round; Round is the review round number a
+// round error discards, zero outside a round; DiscardMarker is the
+// dispatcher's own "discarded review round N" marker body, built here so
+// the review marker text stays in this package, empty outside a round
+// (r2f9: scoped to review alone, never for some other job's own plain cap).
+type CappedInfo struct {
+	Until         time.Time
+	Finish        []store.Run
+	Round         int
+	DiscardMarker string
 }
 
-// claudeCapped is CappedUntil's bool alone, for the handler passthroughs
-// that only need to know whether to escalate.
+// Capped reports whether err is a Claude session-limit hit, a capped review
+// round, or a hold refusal, and the CappedInfo the dispatcher parks on.
+func Capped(err error) (CappedInfo, bool) {
+	var info CappedInfo
+	var sl *runtime.SessionLimitError
+	switch {
+	case errors.As(err, &sl): //nolint:modernize // errcheck check-blank, as errKind
+		info.Until = sl.ResetAt
+	default:
+		var held *HeldError
+		if !errors.As(err, &held) { //nolint:modernize // same
+			return CappedInfo{}, false
+		}
+		info.Until = held.Until
+	}
+	var round *CappedRoundError
+	if errors.As(err, &round) { //nolint:modernize // same
+		info.Finish = round.Finish
+		info.Round = round.Round
+		info.DiscardMarker = fmt.Sprintf("%s%d: Claude session limit", CappedRoundDiscardedPrefix, round.Round)
+	}
+	return info, true
+}
+
+// claudeCapped is Capped's bool alone, for the handler passthroughs that
+// only need to know whether to escalate.
 func claudeCapped(err error) bool {
-	_, ok := CappedUntil(err)
+	_, ok := Capped(err)
 	return ok
 }
 
@@ -58,9 +85,9 @@ func claudeCapped(err error) bool {
 // it sweeps whatever lens run is still open as capped, so a lens that
 // already finished is never rewritten as interrupted, and Round is the
 // review round number this discards, so the dispatcher's own "discarded
-// review round" marker can be scoped to review alone (r2f9): any other
-// capped run (planning, build, discuss, a lone review lens's own
-// HeldError) never writes that marker.
+// review round" marker (Capped's DiscardMarker) can be scoped to review
+// alone: any other capped run (planning, build, discuss, a lone review
+// lens's own HeldError) never writes that marker.
 type CappedRoundError struct {
 	Err    error
 	Finish []store.Run
@@ -69,29 +96,6 @@ type CappedRoundError struct {
 
 func (e *CappedRoundError) Error() string { return e.Err.Error() }
 func (e *CappedRoundError) Unwrap() error { return e.Err }
-
-// CappedFinish returns the Run rows a capped review round's own error
-// carries to terminalize before parking (CappedRoundError), nil for any
-// other capped error.
-func CappedFinish(err error) []store.Run {
-	var round *CappedRoundError
-	if errors.As(err, &round) { //nolint:modernize // see errKind's own comment
-		return round.Finish
-	}
-	return nil
-}
-
-// CappedRound reports the review round number a capped review round's own
-// error discards (CappedRoundError.Round), for the dispatcher's own
-// "discarded review round" marker (r2f9); ok is false for any other capped
-// error, including a lone lens's own HeldError outside a round-wide cap.
-func CappedRound(err error) (int, bool) {
-	var round *CappedRoundError
-	if errors.As(err, &round) { //nolint:modernize // see errKind's own comment
-		return round.Round, true
-	}
-	return 0, false
-}
 
 // recordCappedResume writes runJobWith's own "resumed after the Claude
 // session limit" marker (design shape, "Resume marker") for a session whose
@@ -110,7 +114,6 @@ func recordCappedResume(ctx context.Context, d Deps, ticketID int64, rsv store.R
 	defer cancel()
 	written, err := d.Store.RecordCappedResume(resumeCtx, ticketID, rsv.RunID)
 	if err != nil {
-		written = false
 		slog.Warn("capped resume marker not written", "ticket_id", ticketID, "run_id", rsv.RunID, "error", err)
 	}
 	slog.Info("claude session limit resume",
