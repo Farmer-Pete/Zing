@@ -794,6 +794,34 @@ func TestClaude_ExecErrorRealCode(t *testing.T) {
 	}
 }
 
+// TestClaudeRun_SessionLimitExit proves Run classifies a process that
+// exits non-zero with a session-limit final message as a
+// *SessionLimitError, not a plain *ExecError.
+func TestClaudeRun_SessionLimitExit(t *testing.T) {
+	t.Parallel()
+	requireUnix(t)
+
+	dir := t.TempDir()
+	req := newFakeRequest(dir, "result_then_exit", "FAKE_CLAUDE_RESULT_FILE=testdata/claude_result_session_limit.json")
+	c := NewClaude(fakeClaudeScript, testOAuthToken)
+	res, err := c.Run(context.Background(), req)
+
+	var sl *SessionLimitError
+	if !errors.As(err, &sl) {
+		t.Fatalf("err = %v, want *SessionLimitError", err)
+	}
+	if !sl.Parsed {
+		t.Errorf("Parsed = false, want true")
+	}
+	if res.ExitCode != 1 {
+		t.Errorf("ExitCode = %d, want 1", res.ExitCode)
+	}
+	const wantMsg = "You've hit your session limit · resets 12:20pm (America/New_York)"
+	if res.FinalMessage != wantMsg {
+		t.Errorf("FinalMessage = %q, want %q", res.FinalMessage, wantMsg)
+	}
+}
+
 func TestClaude_ExecErrorSignal(t *testing.T) {
 	t.Parallel()
 	requireUnix(t)

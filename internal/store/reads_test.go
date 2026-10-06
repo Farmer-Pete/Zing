@@ -330,6 +330,44 @@ func TestListReadyCandidatesAnsweredSkipsWait(t *testing.T) {
 	}
 }
 
+// TestListReadyCandidates_SkipsParkedTicket proves ListReadyCandidates' own
+// NOT EXISTS clause (#45, ParkRuns): a queued ticket with a run whose
+// capped_until is still in the future is not a dispatch candidate, but
+// becomes one again once now passes that reset.
+func TestListReadyCandidates_SkipsParkedTicket(t *testing.T) {
+	t.Parallel()
+	s := newTestStore(t)
+	ctx := t.Context()
+	now := time.Now().UTC().Truncate(time.Second)
+
+	_, ticketID := seedQueuedTicket(t, s, "1")
+	owner, expires := claimForCommit(t, s, ticketID)
+	if _, err := s.Reserve(ctx, ticketID, owner, expires,
+		SessionUpsert{Job: testStatePlanning, Runtime: testRuntimeFake}, RunSeed{Model: testModelClaudeX}); err != nil {
+		t.Fatalf("Reserve: %v", err)
+	}
+	cappedUntil := now.Add(time.Minute)
+	if _, err := s.ParkRuns(ctx, ticketID, owner, expires, cappedUntil, ""); err != nil {
+		t.Fatalf("ParkRuns: %v", err)
+	}
+
+	got, err := s.ListReadyCandidates(ctx, nil, now)
+	if err != nil {
+		t.Fatalf("ListReadyCandidates (before reset): %v", err)
+	}
+	if slices.Contains(ticketIDs(got), ticketID) {
+		t.Errorf("ListReadyCandidates(now=%v) = %v, want it to exclude parked ticket %d (capped_until %v)", now, ticketIDs(got), ticketID, cappedUntil)
+	}
+
+	got, err = s.ListReadyCandidates(ctx, nil, cappedUntil.Add(time.Minute))
+	if err != nil {
+		t.Fatalf("ListReadyCandidates (after reset): %v", err)
+	}
+	if !slices.Contains(ticketIDs(got), ticketID) {
+		t.Errorf("ListReadyCandidates(now=%v) = %v, want it to contain ticket %d (reset passed)", cappedUntil.Add(time.Minute), ticketIDs(got), ticketID)
+	}
+}
+
 func ticketIDs(ts []Ticket) []int64 {
 	ids := make([]int64, len(ts))
 	for i := range ts {

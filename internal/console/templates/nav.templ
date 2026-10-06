@@ -31,10 +31,18 @@ import (
 // guaranteed to carry across. threadLink below renders "selected" as part
 // of #nav's own HTML instead, so it survives every patch the same as the
 // row's title or badge does).
-templ Nav(projects []store.Project, threads []NavThread, sandboxReason string, openTicketID int64) {
+//
+// claudeHold is console.navComponent's own clockLabel of store.ClaudeHold,
+// such as "12:20pm", when the Claude session-limit hold is still in the
+// future (#45); empty otherwise, in which case this renders no status line
+// at all.
+templ Nav(projects []store.Project, threads []NavThread, sandboxReason string, claudeHold string, openTicketID int64) {
 	<nav id="nav">
 		if sandboxReason != "" {
 			<span class="sandbox-off" role="status" title={ sandboxReason }>sandbox: off</span>
+		}
+		if claudeHold != "" {
+			<span class="claude-held" role="status">claude: capped until { claudeHold }</span>
 		}
 		<section class="nav-views">
 			@navLink("inbox", 0, 0, "Inbox")
@@ -71,12 +79,13 @@ templ navLink(view string, open, project int64, label string) {
 }
 
 // threadLink is one nav-threads row: the ticket's title, opening it on
-// click, with a badge showing the waiting flag when blocking, an unread
-// badge when not blocking but unread, or otherwise its state pill (design
-// section 6.8, #106 bug 4). It carries "selected" (bug fix, threadRowClass
-// below) when it is the thread view's own open ticket, so the sidebar's
-// highlight is part of #nav's rendered HTML rather than a client-only focus
-// ring a later patch can drop.
+// click, with a badge showing the waiting flag when blocking, the parked
+// reset time when not blocking but parked (#45), an unread badge when
+// neither, or otherwise its state pill (design section 6.8, #106 bug 4).
+// It carries "selected" (bug fix, threadRowClass below) when it is the
+// thread view's own open ticket, so the sidebar's highlight is part of
+// #nav's rendered HTML rather than a client-only focus ring a later patch
+// can drop.
 templ threadLink(th NavThread, openTicketID int64) {
 	<a href="#" class={ threadRowClass(th.Ticket.ID, openTicketID) } data-on:click__prevent={ zingNavExpr("thread", th.Ticket.ID, 0) }>
 		<span class="title">{ th.Ticket.Title }</span>
@@ -88,6 +97,8 @@ templ threadLink(th NavThread, openTicketID int64) {
 					{ th.WaitingOn }
 				}
 			</span>
+		} else if th.ParkedUntil != "" {
+			<span class="badge badge-parked">parked until { th.ParkedUntil }</span>
 		} else if th.Unread {
 			<span class="badge badge-unread">unread</span>
 		} else {

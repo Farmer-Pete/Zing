@@ -10,6 +10,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"zing/internal/response"
 )
@@ -66,6 +67,23 @@ func (f *Fake) Run(ctx context.Context, req RunRequest) (RunResult, error) {
 	sessionID, sess, isNew, err := f.resolveSessionLocked(req)
 	if err != nil {
 		return RunResult{}, err
+	}
+
+	// A "JOB/LABEL/N.exit1" sibling scripts a turn whose process exits 1 with
+	// the file's text as its final message. It is checked before N.xml, it
+	// advances the turn, and it commits a new session, so a resume serves
+	// N+1.
+	exitKey := effectKey(req.Job, req.Label, sess.nextTurn, ".exit1")
+	if msg, readErr := fs.ReadFile(f.fsys, exitKey); readErr == nil {
+		if req.OnStart != nil {
+			req.OnStart(StartInfo{PID: 0, SessionID: sessionID})
+		}
+		sess.nextTurn++
+		if isNew {
+			f.sessions[sessionID] = sess
+		}
+		final := capFinalMessage(string(msg))
+		return RunResult{SessionID: sessionID, ExitCode: 1, FinalMessage: final}, exitFailure(1, final, time.Now())
 	}
 
 	key := scriptKey(req.Job, req.Label, sess.nextTurn)

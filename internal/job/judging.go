@@ -1042,7 +1042,7 @@ func judgeRunAndRoute(
 
 	if runErr != nil {
 		switch {
-		case errors.Is(runErr, runtime.ErrCanceled), errors.Is(runErr, ErrConfig), errors.Is(runErr, store.ErrClaimLost):
+		case errors.Is(runErr, runtime.ErrCanceled), errors.Is(runErr, ErrConfig), errors.Is(runErr, store.ErrClaimLost), claudeCapped(runErr):
 			return store.HandlerCommit{}, rr, runErr
 		case errors.Is(runErr, ErrBudget):
 			return budgetEscalationCommit(t, d, resolveIDs), rr, nil

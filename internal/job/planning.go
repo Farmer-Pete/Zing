@@ -2655,7 +2655,7 @@ func routeFailure(
 	sessionCommit *store.SessionUpsert, resolveIDs []int64, origin response.EscalationOrigin,
 ) (commit store.HandlerCommit, ok bool, err error) {
 	switch {
-	case errors.Is(runErr, runtime.ErrCanceled):
+	case errors.Is(runErr, runtime.ErrCanceled), claudeCapped(runErr):
 		return store.HandlerCommit{}, true, runErr
 	case errors.Is(runErr, ErrBudget):
 		return budgetEscalationCommit(t, d, resolveIDs), true, nil
