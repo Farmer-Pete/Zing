@@ -833,7 +833,7 @@ func TestMergeCheckText(t *testing.T) {
 	}
 
 	results := []commandResult{{Kind: checkKindTest, Cmd: "go test ./...", Exit: 1, Output: "FAIL"}}
-	markers := []string{"a.go"}
+	markers := []string{bareAGoPath}
 	outside := []string{"b.go"}
 	want := strings.Join([]string{
 		checkInputText(results),
@@ -853,7 +853,7 @@ func TestMergeFuncLines(t *testing.T) {
 		t.Errorf("mergeTitle() = %q, want %q", got, "Merge main into the ticket branch")
 	}
 
-	lines := mergeFuncLines(req, []string{"a.go", "b\nbad.go", "", "c.go"})
+	lines := mergeFuncLines(req, []string{bareAGoPath, "b\nbad.go", "", "c.go"})
 	want := []string{"Merges main at abc1234", "Resolves a.go", "Resolves c.go"}
 	if diff := cmp.Diff(want, lines); diff != "" {
 		t.Errorf("mergeFuncLines() mismatch (-want +got):\n%s", diff)

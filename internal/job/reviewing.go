@@ -1498,7 +1498,7 @@ func (h reviewingHandler) tableCommit(
 		return h.askedCommit(t, d, n, sha, attempts, resolveIDs, priorDone, len(heldFindings))
 	}
 
-	return h.successCommit(ctx, t, d, n, sha, idx, attempts, resolveIDs, heldFindings)
+	return h.successCommit(ctx, t, d, proj, wt, n, sha, idx, attempts, resolveIDs, heldFindings)
 }
 
 // firstExecFailure returns the first (lens order) attempt whose own error
@@ -1662,17 +1662,61 @@ func reviewQuestionMessage(t store.Ticket, d Deps, n int, runID int64, above []r
 	}, nil
 }
 
+// suppressRepeated removes merged rows that repeat a dropped finding at a
+// location whose file has not changed since that finding's own SHA (ticket
+// 56): one Orchestrator.ChangedFilesBetween call per distinct dropped SHA.
+// A failed comparison is logged at warn, naming the SHA, and blocks nothing
+// (fail open, Q3) unless ctx itself is done, which this returns as an
+// error. Each row splitRepeated removes is logged at info with the
+// dropped row's own finding_id and location.
+func suppressRepeated(ctx context.Context, t store.Ticket, proj Project, wt orchestrator.Worktree, sha string,
+	dropped, merged []response.FindingArtifact,
+) ([]response.FindingArtifact, int, error) {
+	if len(dropped) == 0 {
+		return merged, 0, nil
+	}
+	changedBySHA := make(map[string]map[string]bool)
+	attempted := make(map[string]bool)
+	for i := range dropped {
+		from := dropped[i].SHA
+		if attempted[from] {
+			continue
+		}
+		attempted[from] = true
+		paths, err := proj.Orch.ChangedFilesBetween(ctx, wt, from, sha)
+		if err != nil {
+			if ctx.Err() != nil {
+				return nil, 0, ctx.Err()
+			}
+			slog.Warn("review dropped findings not compared", "ticket_id", t.ID, "sha", from, "err", err)
+			continue
+		}
+		set := make(map[string]bool, len(paths))
+		for _, p := range paths {
+			set[p] = true
+		}
+		changedBySHA[from] = set
+	}
+	kept, repeats := splitRepeated(merged, dropped, changedBySHA)
+	for _, r := range repeats {
+		slog.Info("review finding repeats a dropped finding", "ticket_id", t.ID, "finding_id", r.DroppedID, "location", r.Location)
+	}
+	return kept, len(repeats), nil
+}
+
 // successCommit is ROUND's own success commit (design section 6.2 step 9's
 // last row) and CONTINUE's own "all ok" outcome (6.2a step 3): extra is the
 // round's own held findings (nil for a fresh ROUND; CONTINUE's held rows,
 // converted back to response.Finding, for a completed continuation).
 // Findings: survivors := FilterFindings(all, idx), then DedupFindings, then
-// ids r<n>f<k>. At-or-below d.Floor get Decision accept. Then the first
+// suppressRepeated removes a row that repeats a finding the owner already
+// dropped at a location whose file has not changed (ticket 56), then ids
+// r<n>f<k>. At-or-below d.Floor get Decision accept. Then the first
 // matching row: findings above the floor post the review question (6.4);
 // else one or more survivors call FIXREQ (6.8); else Next = judging.
 func (h reviewingHandler) successCommit(
-	ctx context.Context, t store.Ticket, d Deps, n int, sha string, idx orchestrator.DiffIndex,
-	attempts []lensAttempt, resolveIDs []int64, extra []response.Finding,
+	ctx context.Context, t store.Ticket, d Deps, proj Project, wt orchestrator.Worktree, n int, sha string,
+	idx orchestrator.DiffIndex, attempts []lensAttempt, resolveIDs []int64, extra []response.Finding,
 ) (store.HandlerCommit, error) {
 	runIDByLens := make(map[response.Lens]int64, len(attempts))
 	all := append([]response.Finding(nil), extra...)
@@ -1686,7 +1730,15 @@ func (h reviewingHandler) successCommit(
 	}
 
 	survivors := FilterFindings(all, idx)
-	merged := DedupFindings(survivors, reviewLenses(d))
+	deduped := DedupFindings(survivors, reviewLenses(d))
+	prior, err := d.Store.Findings(ctx, t.ID)
+	if err != nil {
+		return store.HandlerCommit{}, fmt.Errorf("job: reviewing: findings: %w", err)
+	}
+	merged, repeated, err := suppressRepeated(ctx, t, proj, wt, sha, droppedFindings(prior, n), deduped)
+	if err != nil {
+		return store.HandlerCommit{}, err
+	}
 	for i := range merged {
 		merged[i].ID = fmt.Sprintf("r%df%d", n, i+1)
 		merged[i].Round = n
@@ -1705,8 +1757,8 @@ func (h reviewingHandler) successCommit(
 	}
 	c.Messages = append(c.Messages, store.Message{
 		TicketID: t.ID, Type: msgTypeUpdate, Author: authorSystem,
-		Body: fmt.Sprintf("review round %d done sha %s lenses %s\nkept %d dropped %d merged %d",
-			n, sha, strings.Join(lensList, ","), len(merged), len(all)-len(survivors), len(survivors)-len(merged)),
+		Body: fmt.Sprintf("review round %d done sha %s lenses %s\nkept %d dropped %d merged %d repeated %d",
+			n, sha, strings.Join(lensList, ","), len(merged), len(all)-len(survivors), len(survivors)-len(deduped), repeated),
 	})
 
 	artifacts := make([]store.Artifact, len(stored))

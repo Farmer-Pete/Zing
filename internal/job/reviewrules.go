@@ -11,6 +11,7 @@ import (
 
 	"zing/internal/orchestrator"
 	"zing/internal/response"
+	"zing/internal/store"
 )
 
 // locationPattern is 6.3's location grammar, applied after trimming spaces:
@@ -301,4 +302,66 @@ func renderFixFindings(rows []response.FindingArtifact) string {
 		blocks = append(blocks, findingBlock(*row))
 	}
 	return strings.Join(blocks, "\n\n")
+}
+
+// droppedFindings returns every finding whose newest row
+// (newestFindingRowPerID) is decided drop, is not held, and belongs to a
+// round before round, in id order: successCommit's and round's own set of
+// locations the owner already judged (ticket 56).
+func droppedFindings(findings []store.FindingRow, round int) []response.FindingArtifact {
+	var out []response.FindingArtifact
+	for _, row := range newestFindingRowPerID(findings) {
+		f := row.Finding
+		if f.Held || f.Round >= round || f.Decision == nil || *f.Decision != response.FindingDrop {
+			continue
+		}
+		out = append(out, f)
+	}
+	return sortByID(out)
+}
+
+// repeatedFinding is one merged row splitRepeated removed: the dropped
+// row's own id and the normalized location they share.
+type repeatedFinding struct {
+	DroppedID string
+	Location  string
+}
+
+// splitRepeated removes each merged row whose normalized location matches a
+// dropped row whose path is absent from changedBySHA[dropped.SHA]. A
+// dropped row whose SHA has no entry in changedBySHA (its own comparison
+// failed, or was never attempted) blocks nothing: fail open (ticket 56, Q3).
+// The lowest id wins when two dropped rows share a location.
+func splitRepeated(merged, dropped []response.FindingArtifact, changedBySHA map[string]map[string]bool) ([]response.FindingArtifact, []repeatedFinding) {
+	blocked := make(map[string]string, len(dropped))
+	sorted := sortByID(dropped)
+	for i := range sorted {
+		d := &sorted[i]
+		changed, ok := changedBySHA[d.SHA]
+		if !ok {
+			continue
+		}
+		path, line, ok := ParseLocation(d.Location)
+		if !ok || changed[path] {
+			continue
+		}
+		key := fmt.Sprintf("%s:%d", path, line)
+		if _, seen := blocked[key]; !seen {
+			blocked[key] = d.ID
+		}
+	}
+
+	kept := make([]response.FindingArtifact, 0, len(merged))
+	var repeats []repeatedFinding
+	for i := range merged {
+		if path, line, ok := ParseLocation(merged[i].Location); ok {
+			key := fmt.Sprintf("%s:%d", path, line)
+			if id, hit := blocked[key]; hit {
+				repeats = append(repeats, repeatedFinding{DroppedID: id, Location: key})
+				continue
+			}
+		}
+		kept = append(kept, merged[i])
+	}
+	return kept, repeats
 }

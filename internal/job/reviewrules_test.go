@@ -18,6 +18,7 @@ import (
 
 	"zing/internal/orchestrator"
 	"zing/internal/response"
+	"zing/internal/store"
 )
 
 // Location and id literals reused across this file's cases, pulled out as
@@ -34,6 +35,7 @@ const (
 	findingID2      = "r1f2"
 	findingID3      = "r1f3"
 	findingID4      = "r1f4"
+	findingIDRound2 = "r2f1"
 	wordFinding     = "finding"
 )
 
@@ -431,5 +433,104 @@ func TestCountNoun(t *testing.T) {
 		if got := orchestrator.CountNoun(tc.n, wordFinding, many); got != tc.want {
 			t.Errorf("CountNoun(%d, %q, %q) = %q, want %q", tc.n, wordFinding, many, got, tc.want)
 		}
+	}
+}
+
+// -----------------------------------------------------------------------
+// Pure: droppedFindings
+// -----------------------------------------------------------------------
+
+// TestDroppedFindings proves the round cutoff, the held exclusion, and that
+// a later row (TRIAGE's own decided row over ROUND's undecided one, or a
+// decision later changed) wins over an earlier one for the same id (ticket
+// 56).
+func TestDroppedFindings(t *testing.T) {
+	t.Parallel()
+	drop := response.FindingDrop
+	accept := response.FindingAccept
+
+	rows := []store.FindingRow{
+		{ArtifactID: 1, Finding: response.FindingArtifact{ID: findingID1, Location: aGoLine1, Round: 1}},
+		{ArtifactID: 2, Finding: response.FindingArtifact{ID: findingID2, Location: aGoLine12, Round: 1, Decision: &drop}},
+		{ArtifactID: 3, Finding: response.FindingArtifact{ID: "r1h1", Location: aGoLine44, Round: 1, Held: true, Decision: &drop}},
+		{ArtifactID: 4, Finding: response.FindingArtifact{ID: findingIDRound2, Location: bareAGoPath + ":2", Round: 2, Decision: &drop}},
+		{ArtifactID: 5, Finding: response.FindingArtifact{ID: findingID1, Location: aGoLine1, Round: 1, Decision: &drop}},
+		{ArtifactID: 6, Finding: response.FindingArtifact{ID: findingID2, Location: aGoLine12, Round: 1, Decision: &accept}},
+	}
+
+	idsOf := func(rows []response.FindingArtifact) []string {
+		ids := make([]string, len(rows))
+		for i, r := range rows {
+			ids[i] = r.ID
+		}
+		return ids
+	}
+
+	cases := []struct {
+		name  string
+		round int
+		want  []string
+	}{
+		{"round 2: only r1f1 (r1f2's newest row accepted, r1h1 held, r2f1 not yet before round 2)", 2, []string{findingID1}},
+		{"round 3: r1f1 then r2f1, id order", 3, []string{findingID1, findingIDRound2}},
+		{"round 1: nothing is before round 1", 1, nil},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got := idsOf(droppedFindings(rows, tc.round))
+			if !equalStrings(got, tc.want) {
+				t.Errorf("droppedFindings(rows, %d) ids = %v, want %v", tc.round, got, tc.want)
+			}
+		})
+	}
+}
+
+// -----------------------------------------------------------------------
+// Pure: splitRepeated
+// -----------------------------------------------------------------------
+
+// TestSplitRepeated drives the worked example from the plan: a dropped row
+// blocks its own normalized location regardless of the merged row's own
+// severity (ticket 56, Q1); a dropped row whose file changed blocks
+// nothing; a dropped row whose own SHA comparison failed (absent from
+// changedBySHA) blocks nothing either (fail open, Q3); a merged row at a
+// different line is untouched.
+func TestSplitRepeated(t *testing.T) {
+	t.Parallel()
+	dropped := []response.FindingArtifact{
+		{ID: findingID1, Location: greetGoLine5, SHA: "A"},
+		{ID: findingID2, Location: "a.go:3", SHA: "A"},
+		{ID: findingID3, Location: "c.go:7", SHA: "B"},
+	}
+	changedBySHA := map[string]map[string]bool{
+		"A": {bareAGoPath: true},
+	}
+	merged := []response.FindingArtifact{
+		{ID: findingIDRound2, Severity: response.SeverityBlocker, Location: "./greet.go:5"},
+		{ID: "r2f2", Severity: response.SeverityMajor, Location: "a.go:3"},
+		{ID: "r2f3", Severity: response.SeverityMajor, Location: "c.go:7"},
+		{ID: "r2f4", Severity: response.SeverityMajor, Location: "greet.go:6"},
+	}
+
+	kept, repeats := splitRepeated(merged, dropped, changedBySHA)
+
+	idsOf := func(rows []response.FindingArtifact) []string {
+		ids := make([]string, len(rows))
+		for i, r := range rows {
+			ids[i] = r.ID
+		}
+		return ids
+	}
+	wantKept := []string{"r2f2", "r2f3", "r2f4"}
+	if got := idsOf(kept); !equalStrings(got, wantKept) {
+		t.Errorf("kept ids = %v, want %v", got, wantKept)
+	}
+
+	if len(repeats) != 1 {
+		t.Fatalf("repeats = %+v, want exactly one", repeats)
+	}
+	if repeats[0].DroppedID != findingID1 || repeats[0].Location != greetGoLine5 {
+		t.Errorf("repeats[0] = %+v, want {DroppedID: r1f1, Location: %s}", repeats[0], greetGoLine5)
 	}
 }
