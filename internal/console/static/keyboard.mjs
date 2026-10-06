@@ -1194,3 +1194,26 @@ export function buildChanged(pageBuild, serverBuild) {
 	}
 	return pageBuild !== serverBuild;
 }
+
+/**
+ * streamStatusView composes renderStreamStatus's two markers into what
+ * #stream-status should show. The update marker (#59: a redeploy left an
+ * open tab running its old cached script against the new server) wins over
+ * the reconnect marker whenever both apply, since the fix for either is the
+ * same reload and the owner only needs to be told once.
+ * @param {string} pageBuild - body's data-build
+ * @param {string} serverBuild - #alerts' data-build from the latest frame
+ * @param {number|null} staleSince - reduceStreamStatus's staleSince, epoch
+ *   ms, or null while live
+ * @returns {{text: string, showReload: boolean, stale: boolean}} text is
+ *   the marker's own words, with a trailing space before the Reload link
+ *   when showReload is true; stale is what body.stream-stale should be set
+ *   to.
+ */
+export function streamStatusView(pageBuild, serverBuild, staleSince) {
+	if (buildChanged(pageBuild, serverBuild)) {
+		return { text: `${UPDATED_MARKER_TEXT} `, showReload: true, stale: true };
+	}
+	const text = staleMarkerText(staleSince);
+	return { text, showReload: false, stale: text !== '' };
+}

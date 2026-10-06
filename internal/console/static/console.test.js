@@ -67,6 +67,7 @@ import {
 	versionedURL,
 	buildChanged,
 	UPDATED_MARKER_TEXT,
+	streamStatusView,
 	STREAM_IDLE_MS,
 	PATCH_SUPPRESS_MS,
 	handleKeyEvent,
@@ -1114,6 +1115,30 @@ test('buildChanged: an unknown build never counts as changed', () => {
 	assert.equal(buildChanged('', '9b20e7c4aa10'), false);
 	assert.equal(buildChanged('3f9a1c0b7d21', ''), false);
 	assert.equal(buildChanged('', ''), false);
+});
+
+// streamStatusView covers the plan's page-build-by-server-build table (#59
+// design section 5, "Update marker"), plus the row the table leaves out: a
+// changed build with staleSince also set, where the update marker must win.
+test('streamStatusView: same build falls back to the reconnect marker', () => {
+	const staleSince = new Date(2026, 9, 4, 19, 25).getTime();
+	assert.deepEqual(streamStatusView('3f9a1c0b7d21', '3f9a1c0b7d21', null), { text: '', showReload: false, stale: false });
+	assert.deepEqual(streamStatusView('3f9a1c0b7d21', '3f9a1c0b7d21', staleSince), {
+		text: 'Reconnecting. Stale since 19:25.',
+		showReload: false,
+		stale: true,
+	});
+});
+
+test('streamStatusView: a changed build shows the update marker, even while also stale', () => {
+	const staleSince = new Date(2026, 9, 4, 19, 25).getTime();
+	assert.deepEqual(streamStatusView('3f9a1c0b7d21', '9b20e7c4aa10', null), { text: 'Zing was updated. ', showReload: true, stale: true });
+	assert.deepEqual(streamStatusView('3f9a1c0b7d21', '9b20e7c4aa10', staleSince), { text: 'Zing was updated. ', showReload: true, stale: true });
+});
+
+test('streamStatusView: an unknown build never counts as changed', () => {
+	assert.deepEqual(streamStatusView('', '9b20e7c4aa10', null), { text: '', showReload: false, stale: false });
+	assert.deepEqual(streamStatusView('3f9a1c0b7d21', '', null), { text: '', showReload: false, stale: false });
 });
 
 // handleKeyEvent / decideKey / notePatchFocus / patchFocus: the whole former

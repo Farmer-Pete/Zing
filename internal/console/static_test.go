@@ -150,78 +150,97 @@ func TestStaticCacheControl(t *testing.T) {
 	}
 
 	for _, path := range paths {
-		t.Run(path, func(t *testing.T) {
+		t.Run(path+"/versioned", func(t *testing.T) {
 			t.Parallel()
-
-			t.Run("versioned", func(t *testing.T) {
-				resp, err := http.Get(srv.URL + path + "?v=" + console.AssetVersion()) //nolint:noctx // a bare GET on a test server needs no deadline
-				if err != nil {
-					t.Fatalf("GET %s?v=...: %v", path, err)
-				}
-				defer func() { _ = resp.Body.Close() }()
-
-				if resp.StatusCode != http.StatusOK {
-					t.Fatalf("GET %s?v=... status = %d, want 200", path, resp.StatusCode)
-				}
-				body, err := io.ReadAll(resp.Body)
-				if err != nil {
-					t.Fatalf("GET %s?v=...: read body: %v", path, err)
-				}
-				if len(body) == 0 {
-					t.Errorf("GET %s?v=... returned an empty body", path)
-				}
-				if cc := resp.Header.Get("Cache-Control"); cc != cacheControlImmutable {
-					t.Errorf("GET %s?v=... Cache-Control = %q, want %q", path, cc, cacheControlImmutable)
-				}
-			})
-
-			t.Run("unversioned", func(t *testing.T) {
-				resp, err := http.Get(srv.URL + path) //nolint:noctx // a bare GET on a test server needs no deadline
-				if err != nil {
-					t.Fatalf("GET %s: %v", path, err)
-				}
-				defer func() { _ = resp.Body.Close() }()
-
-				if resp.StatusCode != http.StatusOK {
-					t.Fatalf("GET %s status = %d, want 200", path, resp.StatusCode)
-				}
-				if cc := resp.Header.Get("Cache-Control"); cc != cacheControlNoCache {
-					t.Errorf("GET %s Cache-Control = %q, want %q", path, cc, cacheControlNoCache)
-				}
-			})
-
-			t.Run("stale_version", func(t *testing.T) {
-				unversioned, err := http.Get(srv.URL + path) //nolint:noctx // a bare GET on a test server needs no deadline
-				if err != nil {
-					t.Fatalf("GET %s: %v", path, err)
-				}
-				defer func() { _ = unversioned.Body.Close() }()
-				wantBody, err := io.ReadAll(unversioned.Body)
-				if err != nil {
-					t.Fatalf("GET %s: read body: %v", path, err)
-				}
-
-				resp, err := http.Get(srv.URL + path + "?v=000000000000") //nolint:noctx // a bare GET on a test server needs no deadline
-				if err != nil {
-					t.Fatalf("GET %s?v=000000000000: %v", path, err)
-				}
-				defer func() { _ = resp.Body.Close() }()
-
-				if resp.StatusCode != http.StatusOK {
-					t.Fatalf("GET %s?v=000000000000 status = %d, want 200", path, resp.StatusCode)
-				}
-				body, err := io.ReadAll(resp.Body)
-				if err != nil {
-					t.Fatalf("GET %s?v=000000000000: read body: %v", path, err)
-				}
-				if !bytes.Equal(body, wantBody) {
-					t.Errorf("GET %s?v=000000000000 body differs from the unversioned body", path)
-				}
-				if cc := resp.Header.Get("Cache-Control"); cc != cacheControlNoCache {
-					t.Errorf("GET %s?v=000000000000 Cache-Control = %q, want %q", path, cc, cacheControlNoCache)
-				}
-			})
+			checkStaticCacheControlVersioned(t, srv.URL, path)
 		})
+		t.Run(path+"/unversioned", func(t *testing.T) {
+			t.Parallel()
+			checkStaticCacheControlUnversioned(t, srv.URL, path)
+		})
+		t.Run(path+"/stale_version", func(t *testing.T) {
+			t.Parallel()
+			checkStaticCacheControlStaleVersion(t, srv.URL, path)
+		})
+	}
+}
+
+// checkStaticCacheControlVersioned asserts that path requested with this
+// build's ?v= answers 200, a non-empty body and the immutable Cache-Control.
+func checkStaticCacheControlVersioned(t *testing.T, base, path string) {
+	t.Helper()
+	resp, err := http.Get(base + path + "?v=" + console.AssetVersion()) //nolint:noctx // a bare GET on a test server needs no deadline
+	if err != nil {
+		t.Fatalf("GET %s?v=...: %v", path, err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("GET %s?v=... status = %d, want 200", path, resp.StatusCode)
+	}
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("GET %s?v=...: read body: %v", path, err)
+	}
+	if len(body) == 0 {
+		t.Errorf("GET %s?v=... returned an empty body", path)
+	}
+	if cc := resp.Header.Get("Cache-Control"); cc != cacheControlImmutable {
+		t.Errorf("GET %s?v=... Cache-Control = %q, want %q", path, cc, cacheControlImmutable)
+	}
+}
+
+// checkStaticCacheControlUnversioned asserts that the bare path answers 200
+// and the no-cache Cache-Control.
+func checkStaticCacheControlUnversioned(t *testing.T, base, path string) {
+	t.Helper()
+	resp, err := http.Get(base + path) //nolint:noctx // a bare GET on a test server needs no deadline
+	if err != nil {
+		t.Fatalf("GET %s: %v", path, err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("GET %s status = %d, want 200", path, resp.StatusCode)
+	}
+	if cc := resp.Header.Get("Cache-Control"); cc != cacheControlNoCache {
+		t.Errorf("GET %s Cache-Control = %q, want %q", path, cc, cacheControlNoCache)
+	}
+}
+
+// checkStaticCacheControlStaleVersion asserts that path requested with
+// another build's ?v= answers 200, the same body as the unversioned
+// request, and the no-cache Cache-Control.
+func checkStaticCacheControlStaleVersion(t *testing.T, base, path string) {
+	t.Helper()
+	unversioned, err := http.Get(base + path) //nolint:noctx // a bare GET on a test server needs no deadline
+	if err != nil {
+		t.Fatalf("GET %s: %v", path, err)
+	}
+	defer func() { _ = unversioned.Body.Close() }()
+	wantBody, err := io.ReadAll(unversioned.Body)
+	if err != nil {
+		t.Fatalf("GET %s: read body: %v", path, err)
+	}
+
+	resp, err := http.Get(base + path + "?v=000000000000") //nolint:noctx // a bare GET on a test server needs no deadline
+	if err != nil {
+		t.Fatalf("GET %s?v=000000000000: %v", path, err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("GET %s?v=000000000000 status = %d, want 200", path, resp.StatusCode)
+	}
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("GET %s?v=000000000000: read body: %v", path, err)
+	}
+	if !bytes.Equal(body, wantBody) {
+		t.Errorf("GET %s?v=000000000000 body differs from the unversioned body", path)
+	}
+	if cc := resp.Header.Get("Cache-Control"); cc != cacheControlNoCache {
+		t.Errorf("GET %s?v=000000000000 Cache-Control = %q, want %q", path, cc, cacheControlNoCache)
 	}
 }
 

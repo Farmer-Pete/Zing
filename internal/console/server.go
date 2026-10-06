@@ -315,7 +315,16 @@ func staticAsset(body []byte, contentType string) http.HandlerFunc {
 		if v == assetVersion {
 			cc = cacheControlImmutable
 		} else if v != "" {
-			slog.Debug("console: static asset requested for another build", "path", r.URL.Path, "v", v, "current", assetVersion)
+			// v is attacker-reachable and unbounded (a request line can run to
+			// about 1 MiB); cap what reaches the log to assetVersionLen, the
+			// only length a real build's v is ever expected to have, and log
+			// v's real length separately so a truncated or oversized value is
+			// still visible as such.
+			logged := v
+			if len(logged) > assetVersionLen {
+				logged = logged[:assetVersionLen]
+			}
+			slog.Debug("console: static asset requested for another build", "path", r.URL.Path, "v", logged, "v_len", len(v), "current", assetVersion)
 		}
 		w.Header().Set("Content-Type", contentType)
 		w.Header().Set("Cache-Control", cc)

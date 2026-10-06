@@ -49,11 +49,9 @@ import {
 	clearReplyInputs,
 	emptyStreamStatus,
 	reduceStreamStatus,
-	staleMarkerText,
 	STREAM_TICK_MS,
 	versionedURL,
-	buildChanged,
-	UPDATED_MARKER_TEXT,
+	streamStatusView,
 } from './keyboard.mjs';
 
 // defaultNav is the shell's own data-signals default (templates/shell.templ:
@@ -1827,19 +1825,16 @@ function applyStreamEvent(event) {
 	renderStreamStatus();
 }
 
-// renderStreamStatus mirrors streamStatus.staleSince onto #stream-status (a
-// client-owned node outside #nav/#main/#rail, the #send-result pattern) and
-// onto body.stream-stale, which shell.templ's palette uses to dim
-// nav.templ's "All clear." while the page is stale. The update marker (#59:
-// a redeploy left an open tab running its old cached script against the new
-// server) takes priority over the reconnect text, and it is built only when
-// the link is missing, so the 5000 ms tick never replaces a link the owner
-// is about to click.
+// renderStreamStatus mirrors streamStatusView's (keyboard.mjs) verdict onto
+// #stream-status (a client-owned node outside #nav/#main/#rail, the
+// #send-result pattern) and onto body.stream-stale, which shell.templ's
+// palette uses to dim nav.templ's "All clear." while the page is stale. The
+// Reload link is built only when it is missing, so the 5000 ms tick never
+// replaces a link the owner is about to click.
 function renderStreamStatus() {
 	const serverBuild = document.getElementById('alerts')?.dataset.build ?? '';
-	const updated = buildChanged(pageBuild, serverBuild);
-	const text = staleMarkerText(streamStatus.staleSince);
-	document.body.classList.toggle('stream-stale', updated || text !== '');
+	const view = streamStatusView(pageBuild, serverBuild, streamStatus.staleSince);
+	document.body.classList.toggle('stream-stale', view.stale);
 	let el = document.getElementById('stream-status');
 	if (!el) {
 		el = document.createElement('div');
@@ -1848,9 +1843,9 @@ function renderStreamStatus() {
 		el.setAttribute('aria-live', 'polite');
 		document.body.appendChild(el);
 	}
-	if (updated) {
+	if (view.showReload) {
 		if (el.querySelector('a.stream-reload') === null) {
-			el.textContent = `${UPDATED_MARKER_TEXT} `;
+			el.textContent = view.text;
 			const link = document.createElement('a');
 			link.className = 'stream-reload';
 			link.href = '/';
@@ -1859,7 +1854,7 @@ function renderStreamStatus() {
 		}
 		return;
 	}
-	el.textContent = text;
+	el.textContent = view.text;
 }
 
 // installStreamWatch listens for Datastar's datastar-fetch events on

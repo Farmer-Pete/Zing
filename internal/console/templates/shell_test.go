@@ -212,4 +212,14 @@ func TestShellImportMapPrecedesModuleScripts(t *testing.T) {
 	if !strings.Contains(got, `data-build="abc123def456"`) {
 		t.Errorf("rendered shell's body missing data-build=\"abc123def456\"; got:\n%s", got)
 	}
+
+	for _, src := range []string{
+		`src="/static/mermaid.js?v=abc123def456"`,
+		`src="/static/console.js?v=abc123def456"`,
+		`src="/static/datastar.js?v=abc123def456"`,
+	} {
+		if !strings.Contains(got, src) {
+			t.Errorf("rendered shell missing %s; got:\n%s", src, got)
+		}
+	}
 }
