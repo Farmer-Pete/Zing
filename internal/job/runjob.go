@@ -118,7 +118,7 @@ func runJobWith(
 			return runResult{}, fmt.Errorf("job: %s: claude hold: %w", jobName, holdErr)
 		}
 		if held && until.After(d.now()) {
-			slog.Debug("claude run held", "ticket_id", t.ID, "job", jobName, "reset_at", until.Format(time.RFC3339))
+			slog.Debug("claude run held", "ticket_id", t.ID, "job", jobName, "reset_at", until.UTC().Format(time.RFC3339))
 			return runResult{}, &HeldError{Until: until}
 		}
 	}
@@ -266,7 +266,7 @@ func runJobWith(
 		recordRunStart(ctx, d, t.ID, rsv.RunID, info)
 	}
 	if cappedPrev != nil {
-		recordCappedResume(ctx, d, t.ID, rsv, *cappedPrev)
+		recordCappedResume(ctx, d, t.ID, rsv, cappedPrev.ID, *cappedPrev.CappedUntil)
 	}
 
 	if sandboxed && hook != nil {
@@ -301,7 +301,7 @@ func runJobWith(
 	if errors.As(runErr, &sl) { //nolint:modernize // see errKind's own comment
 		slog.Warn("claude session limit hit",
 			"ticket_id", t.ID, "session_id", rsv.SessionID, "run_id", rsv.RunID,
-			"job", jobName, "reset_at", sl.ResetAt.Format(time.RFC3339), "reset_parsed", sl.Parsed)
+			"job", jobName, "reset_at", sl.ResetAt.UTC().Format(time.RFC3339), "reset_parsed", sl.Parsed)
 	}
 
 	stderrFile := ""

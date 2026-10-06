@@ -110,7 +110,7 @@ func isASCIIDigit(b byte) bool { return b >= '0' && b <= '9' }
 // hour consumes 1 or 2 ASCII digits and reports their value, 1 to 12.
 func (r *resetScanner) hour() (int, bool) {
 	start := r.i
-	for r.i < len(r.s) && r.i-start < 2 && isASCIIDigit(r.s[r.i]) {
+	for r.i-start < 2 && r.digitAt(0) {
 		r.i++
 	}
 	if r.i == start {
@@ -123,9 +123,14 @@ func (r *resetScanner) hour() (int, bool) {
 	return h, true
 }
 
+// digitAt reports whether the byte k past r.i exists and is an ASCII digit.
+func (r *resetScanner) digitAt(k int) bool {
+	return r.i+k < len(r.s) && isASCIIDigit(r.s[r.i+k])
+}
+
 // minute consumes exactly 2 ASCII digits and reports their value, 0 to 59.
 func (r *resetScanner) minute() (int, bool) {
-	if r.i+2 > len(r.s) || !isASCIIDigit(r.s[r.i]) || !isASCIIDigit(r.s[r.i+1]) {
+	if !r.digitAt(0) || !r.digitAt(1) {
 		return 0, false
 	}
 	m, err := strconv.Atoi(r.s[r.i : r.i+2])

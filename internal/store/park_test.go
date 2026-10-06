@@ -62,6 +62,29 @@ func parkedMarkerBodies(t *testing.T, s *Store, ticketID int64) []string {
 	return bodies
 }
 
+// TestParkedMarkerBody proves parkedMarkerBody's own two formatting rules
+// (design shape): a named zone's own Location().String() is used as-is, and
+// time.Local's own synthetic "Local" name falls back to the zone
+// abbreviation (until.Format("MST")) instead.
+func TestParkedMarkerBody(t *testing.T) {
+	t.Parallel()
+
+	namedZone := time.Date(2026, 10, 5, 12, 20, 0, 0, time.FixedZone("America/New_York", -4*60*60))
+	if got, want := parkedMarkerBody(namedZone, []int64{1625}), "parked until 12:20pm America/New_York (run 1625): Claude session limit"; got != want {
+		t.Errorf("parkedMarkerBody(named zone) = %q, want %q", got, want)
+	}
+
+	local := time.Date(2026, 10, 5, 12, 20, 0, 0, time.Local)
+	want := "parked until 12:20pm " + local.Format("MST") + " (run 1625): Claude session limit"
+	if got := parkedMarkerBody(local, []int64{1625}); got != want {
+		t.Errorf("parkedMarkerBody(time.Local) = %q, want %q", got, want)
+	}
+
+	if got, want := parkedMarkerBody(namedZone, []int64{1625, 1626}), "parked until 12:20pm America/New_York (runs 1625, 1626): Claude session limit"; got != want {
+		t.Errorf("parkedMarkerBody(two runs) = %q, want %q", got, want)
+	}
+}
+
 // TestParkRuns_StampsOpenRunsAndHold proves ParkRuns' main path (design
 // shape, #45): every open run on the ticket is stamped interrupted with
 // capped_until, the claim clears, a later stored hold is left alone (the
@@ -83,7 +106,7 @@ func TestParkRuns_StampsOpenRunsAndHold(t *testing.T) {
 	laterHold := until.Add(time.Hour)
 	seedClaudeHold(t, s, laterHold)
 
-	res, err := s.ParkRuns(ctx, ticketID, owner, expires, until)
+	res, err := s.ParkRuns(ctx, ticketID, owner, expires, until, nil)
 	if err != nil {
 		t.Fatalf("ParkRuns: %v", err)
 	}
@@ -139,7 +162,7 @@ func TestParkRuns_StampsOpenRunsAndHold(t *testing.T) {
 	runC := reserveOpenRun(t, s, ticketID, owner2, expires2, testStateJudging)
 	until2 := laterHold.Add(time.Hour)
 
-	res2, err := s.ParkRuns(ctx, ticketID, owner2, expires2, until2)
+	res2, err := s.ParkRuns(ctx, ticketID, owner2, expires2, until2, nil)
 	if err != nil {
 		t.Fatalf("second ParkRuns: %v", err)
 	}
@@ -156,6 +179,69 @@ func TestParkRuns_StampsOpenRunsAndHold(t *testing.T) {
 	}
 }
 
+// TestParkRuns_FinishTerminalizesGoodRunsFirst proves ParkRuns' finish
+// argument (design shape, owner decision Q6): a run named in finish is
+// terminalized by its own real outcome and keeps capped_until nil, while a
+// different open run on the same ticket is still swept as capped, and
+// finish's own run id is excluded from ParkRuns.RunIDs.
+func TestParkRuns_FinishTerminalizesGoodRunsFirst(t *testing.T) {
+	t.Parallel()
+	s := newTestStore(t)
+	ctx := t.Context()
+	_, ticketID := seedQueuedTicket(t, s, "1")
+	setTicketState(t, s, ticketID, testStateReviewing)
+	owner, expires := claimForCommit(t, s, ticketID)
+
+	goodRun := reserveOpenRun(t, s, ticketID, owner, expires, testStateReviewing)
+	cappedRun := reserveOpenRun(t, s, ticketID, owner, expires, testStateReviewing)
+
+	outcome := "ok"
+	exitCode := 0
+	agentSeconds := 5
+	until := time.Now().Add(20 * time.Minute).UTC().Truncate(time.Second)
+
+	res, err := s.ParkRuns(ctx, ticketID, owner, expires, until, []Run{
+		{ID: goodRun, Outcome: &outcome, ExitCode: &exitCode, AgentSeconds: &agentSeconds},
+	})
+	if err != nil {
+		t.Fatalf("ParkRuns: %v", err)
+	}
+	if !res.Applied {
+		t.Fatal("ParkRuns: Applied = false, want true")
+	}
+	if len(res.RunIDs) != 1 || res.RunIDs[0] != cappedRun {
+		t.Errorf("ParkRuns.RunIDs = %v, want [%d] (the good run is finished, not swept)", res.RunIDs, cappedRun)
+	}
+
+	good, ok, err := s.SessionNewestRun(ctx, sessionIDForRun(t, s, goodRun))
+	if err != nil {
+		t.Fatalf("SessionNewestRun(good): %v", err)
+	}
+	if !ok {
+		t.Fatal("SessionNewestRun(good): ok = false")
+	}
+	if good.Outcome == nil || *good.Outcome != "ok" {
+		t.Errorf("good run Outcome = %v, want ok", good.Outcome)
+	}
+	if good.Interrupted {
+		t.Error("good run Interrupted = true, want false")
+	}
+	if good.CappedUntil != nil {
+		t.Errorf("good run CappedUntil = %v, want nil", good.CappedUntil)
+	}
+
+	capped, ok, err := s.SessionNewestRun(ctx, sessionIDForRun(t, s, cappedRun))
+	if err != nil {
+		t.Fatalf("SessionNewestRun(capped): %v", err)
+	}
+	if !ok {
+		t.Fatal("SessionNewestRun(capped): ok = false")
+	}
+	if !capped.Interrupted || capped.CappedUntil == nil || !capped.CappedUntil.Equal(until) {
+		t.Errorf("capped run = %+v, want interrupted with capped_until %v", capped, until)
+	}
+}
+
 // TestParkRuns_FenceMissWritesNothing proves ParkRuns shares
 // interruptClaimedRuns' own fence (design section 5.3): a wrong owner
 // leaves the run, the claim, the settings row, and the messages untouched.
@@ -169,7 +255,7 @@ func TestParkRuns_FenceMissWritesNothing(t *testing.T) {
 	runID := reserveOpenRun(t, s, ticketID, owner, expires, testStatePlanning)
 
 	until := time.Now().Add(30 * time.Minute)
-	res, err := s.ParkRuns(ctx, ticketID, testOwnerOther, expires, until)
+	res, err := s.ParkRuns(ctx, ticketID, testOwnerOther, expires, until, nil)
 	if err != nil {
 		t.Fatalf("ParkRuns: %v", err)
 	}
@@ -221,7 +307,7 @@ func TestParkRuns_NoOpenRunsOnlyReleasesClaim(t *testing.T) {
 	owner, expires := claimForCommit(t, s, ticketID)
 
 	until := time.Now().Add(30 * time.Minute)
-	res, err := s.ParkRuns(ctx, ticketID, owner, expires, until)
+	res, err := s.ParkRuns(ctx, ticketID, owner, expires, until, nil)
 	if err != nil {
 		t.Fatalf("ParkRuns: %v", err)
 	}
@@ -268,7 +354,7 @@ func TestClaudeHold_ReadsSetting(t *testing.T) {
 	reserveOpenRun(t, s, ticketID, owner, expires, testStatePlanning)
 
 	until := time.Now().Add(45 * time.Minute).UTC().Truncate(time.Second)
-	if _, err := s.ParkRuns(ctx, ticketID, owner, expires, until); err != nil {
+	if _, err := s.ParkRuns(ctx, ticketID, owner, expires, until, nil); err != nil {
 		t.Fatalf("ParkRuns: %v", err)
 	}
 
@@ -307,7 +393,7 @@ func TestRecordCappedResume_OncePerPark(t *testing.T) {
 	owner, expires := claimForCommit(t, s, ticketID)
 	runA := reserveOpenRun(t, s, ticketID, owner, expires, testStatePlanning)
 	until := time.Now().Add(20 * time.Minute)
-	if _, err := s.ParkRuns(ctx, ticketID, owner, expires, until); err != nil {
+	if _, err := s.ParkRuns(ctx, ticketID, owner, expires, until, nil); err != nil {
 		t.Fatalf("ParkRuns: %v", err)
 	}
 
@@ -329,7 +415,7 @@ func TestRecordCappedResume_OncePerPark(t *testing.T) {
 
 	owner2, expires2 := claimForCommit(t, s, ticketID)
 	runB := reserveOpenRun(t, s, ticketID, owner2, expires2, testStateBuilding)
-	if _, parkErr := s.ParkRuns(ctx, ticketID, owner2, expires2, time.Now().Add(20*time.Minute)); parkErr != nil {
+	if _, parkErr := s.ParkRuns(ctx, ticketID, owner2, expires2, time.Now().Add(20*time.Minute), nil); parkErr != nil {
 		t.Fatalf("second ParkRuns: %v", parkErr)
 	}
 

@@ -212,6 +212,37 @@ func TestRouteFailure_PassesCappedThrough(t *testing.T) {
 	}
 }
 
+// --- passThroughErr ---------------------------------------------------------
+
+// TestPassThroughErr proves the one shared predicate judgeRunAndRoute,
+// respondRunAndRouteRaw, discussRunAndRoute and routeFailure all switch on
+// (design shape, review fix r1f4): true for runtime.ErrCanceled, ErrConfig,
+// store.ErrClaimLost, a capped SessionLimitError and a HeldError, false for
+// an ordinary ExecError and nil. A future edit that drops one of these four
+// conditions from the shared predicate -- or drops the predicate from one of
+// its four call sites -- fails this test or the handler test it guards.
+func TestPassThroughErr(t *testing.T) {
+	t.Parallel()
+
+	for _, err := range []error{
+		runtime.ErrCanceled,
+		ErrConfig,
+		store.ErrClaimLost,
+		fmt.Errorf("wrap: %w", &runtime.SessionLimitError{ResetAt: time.Now().Add(time.Hour), Parsed: true}),
+		&HeldError{Until: time.Now().Add(10 * time.Minute)},
+	} {
+		if !passThroughErr(err) {
+			t.Errorf("passThroughErr(%v) = false, want true", err)
+		}
+	}
+
+	for _, err := range []error{&runtime.ExecError{ExitCode: 1}, nil} {
+		if passThroughErr(err) {
+			t.Errorf("passThroughErr(%v) = true, want false", err)
+		}
+	}
+}
+
 // --- CappedUntil -----------------------------------------------------------
 
 // TestCappedUntil proves CappedUntil's own classification (design shape,

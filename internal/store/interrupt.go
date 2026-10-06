@@ -236,7 +236,7 @@ func openRunsForTicket(ctx context.Context, q queryer, ticketID int64) ([]OpenRu
 // Reserve uses (design section 5.3). applied is false, err nil, when the
 // fence finds no matching claim.
 func (s *Store) InterruptRuns(ctx context.Context, ticketID int64, owner string, expires time.Time) (applied bool, err error) {
-	_, applied, err = s.interruptClaimedRuns(ctx, ticketID, owner, expires, nil, nil)
+	_, applied, err = s.interruptClaimedRuns(ctx, ticketID, owner, expires, nil, nil, nil)
 	return applied, err
 }
 
@@ -256,21 +256,28 @@ func (s *Store) ReclaimClaim(ctx context.Context, ticketID int64, owner string, 
 		}
 		_, present, presentErr := openCheckForTicket(ctx, tx, ticketID)
 		return !present, presentErr
-	}, nil)
+	}, nil, nil)
 	return applied, err
 }
 
 // interruptClaimedRuns is the shared transaction body behind InterruptRuns,
 // ReclaimClaim and ParkRuns (design section 5.3; #45 for park): fence on the
 // exact claim, run afterFence when set (false keeps the claim and writes
-// nothing), then terminalize every open run of ticketID's sessions as
+// nothing), terminalize every run named in finish by its own real outcome,
+// then terminalize every run of ticketID's sessions still open as
 // interrupted, then clear the claim. park is nil for a plain interrupt
 // (InterruptRuns, ReclaimClaim); when set, every swept run's capped_until is
 // stamped with it, the settings claude_hold_until row rises to it if later,
 // and one "parked until" update is written -- all inside this same
-// transaction. runIDs is the ascending ids of the runs swept, nil when none
-// were open.
-func (s *Store) interruptClaimedRuns(ctx context.Context, ticketID int64, owner string, expires time.Time, afterFence func(*sql.Tx) (bool, error), park *time.Time) (runIDs []int64, applied bool, err error) {
+// transaction. finish is nil for a plain interrupt; ParkRuns uses it to
+// terminalize a review round's own already-finished lens runs (owner
+// decision Q6) before the sweep below ever sees them, so they keep their
+// real outcome instead of being swept as capped. runIDs is the ascending
+// ids of the runs swept (never finish's own), nil when none were open.
+func (s *Store) interruptClaimedRuns(
+	ctx context.Context, ticketID int64, owner string, expires time.Time,
+	afterFence func(*sql.Tx) (bool, error), park *time.Time, finish []Run,
+) (runIDs []int64, applied bool, err error) {
 	expires = truncateExpires(expires)
 	now := time.Now()
 
@@ -302,6 +309,12 @@ func (s *Store) interruptClaimedRuns(ctx context.Context, ticketID int64, owner 
 		}
 	}
 
+	for _, r := range finish {
+		if finishErr := updateRunTx(ctx, tx, r, ticketID); finishErr != nil {
+			return nil, false, fmt.Errorf("interrupt runs: finish run %d: %w", r.ID, finishErr)
+		}
+	}
+
 	targets, err := interruptTargetsTx(ctx, tx, ticketID)
 	if err != nil {
 		return nil, false, fmt.Errorf("interrupt runs: %w", err)
@@ -323,7 +336,7 @@ func (s *Store) interruptClaimedRuns(ctx context.Context, ticketID int64, owner 
 		if err := upsertClaudeHoldTx(ctx, tx, *park); err != nil {
 			return nil, false, fmt.Errorf("interrupt runs: ticket %d: %w", ticketID, err)
 		}
-		if err := insertParkedMarkerTx(ctx, tx, s, ticketID, *park, runIDs); err != nil {
+		if err := s.insertParkedMarkerTx(ctx, tx, ticketID, *park, runIDs); err != nil {
 			return nil, false, fmt.Errorf("interrupt runs: ticket %d: %w", ticketID, err)
 		}
 	}

@@ -50,13 +50,52 @@ func claudeCapped(err error) bool {
 	return ok
 }
 
+// CappedRoundError is a capped review round's own error (tableCommit, owner
+// decision Q3/Q6): Err is the capped lens's own error (a wrapped
+// runtime.SessionLimitError or HeldError), and Finish carries every other
+// lens's own terminal Run row -- the round's good results -- for the
+// dispatcher's park write to terminalize with their own real outcome before
+// it sweeps whatever lens run is still open as capped, so a lens that
+// already finished is never rewritten as interrupted.
+type CappedRoundError struct {
+	Err    error
+	Finish []store.Run
+}
+
+func (e *CappedRoundError) Error() string { return e.Err.Error() }
+func (e *CappedRoundError) Unwrap() error { return e.Err }
+
+// CappedFinish returns the Run rows a capped review round's own error
+// carries to terminalize before parking (CappedRoundError), nil for any
+// other capped error.
+func CappedFinish(err error) []store.Run {
+	var round *CappedRoundError
+	if errors.As(err, &round) { //nolint:modernize // see errKind's own comment
+		return round.Finish
+	}
+	return nil
+}
+
+// passThroughErr reports whether err is one of the four conditions every
+// Claude-call handler (routeFailure, judgeRunAndRoute, respondRunAndRouteRaw,
+// discussRunAndRoute) hands straight back to the dispatcher with no commit
+// of its own: a shutdown cancel, a config error, a claim already lost
+// before Reserve, or a capped Claude run or hold refusal. Named once so the
+// same four-term list cannot drift between its several copies.
+func passThroughErr(err error) bool {
+	return errors.Is(err, runtime.ErrCanceled) || errors.Is(err, store.ErrClaimLost) || errors.Is(err, ErrConfig) || claudeCapped(err)
+}
+
 // recordCappedResume writes runJobWith's own "resumed after the Claude
 // session limit" marker (design shape, "Resume marker") for a session whose
-// newest run, before this one, was capped: a write failure is logged at
-// WARN and never fails the run, and no line is logged at all when the
-// marker was not actually written (RecordCappedResume's own ordering rule:
-// one marker per park, however many lens sessions resume from it).
-func recordCappedResume(ctx context.Context, d Deps, ticketID int64, rsv store.Reserved, cappedPrev store.Run) {
+// newest run, before this one, was capped at cappedUntil under cappedRunID:
+// a write failure is logged at WARN and never fails the run. The marker
+// itself is written once per park (RecordCappedResume's own ordering rule),
+// but every resumed run still gets its own "claude session limit resume"
+// log line, with marker_written reporting whether this call was the one
+// that wrote it, so every free resume is traceable by run_id even when
+// another lens session already wrote the shared marker.
+func recordCappedResume(ctx context.Context, d Deps, ticketID int64, rsv store.Reserved, cappedRunID int64, cappedUntil time.Time) {
 	resumeCtx, cancel := onStartContext(ctx)
 	defer cancel()
 	written, err := d.Store.RecordCappedResume(resumeCtx, ticketID, rsv.RunID)
@@ -64,14 +103,7 @@ func recordCappedResume(ctx context.Context, d Deps, ticketID int64, rsv store.R
 		slog.Warn("capped resume marker not written", "ticket_id", ticketID, "run_id", rsv.RunID, "error", err)
 		return
 	}
-	if !written {
-		return
-	}
-	resetAt := ""
-	if cappedPrev.CappedUntil != nil {
-		resetAt = cappedPrev.CappedUntil.UTC().Format(time.RFC3339)
-	}
 	slog.Info("claude session limit resume",
 		"ticket_id", ticketID, "session_id", rsv.SessionID, "run_id", rsv.RunID,
-		"capped_run_id", cappedPrev.ID, "reset_at", resetAt)
+		"capped_run_id", cappedRunID, "reset_at", cappedUntil.UTC().Format(time.RFC3339), "marker_written", written)
 }

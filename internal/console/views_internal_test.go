@@ -1891,15 +1891,68 @@ func TestProjectSections(t *testing.T) {
 	})
 }
 
+// TestNavComponent_ClaudeHold proves navComponent's own ClaudeHold read and
+// its own now comparison (review fix r1f1: the previous test only covered
+// buildNavThreads, never navComponent's own call to c.store.ClaudeHold or
+// its own "still in the future" check): rendering #nav shows "claude:
+// capped until" while the stored hold is in the future, and shows neither
+// that line nor a parked badge once the hold (seeded here directly, the
+// same store.ParkRuns a real park would use) has passed.
+func TestNavComponent_ClaudeHold(t *testing.T) {
+	t.Parallel()
+	s, err := store.Open(t.Context(), filepath.Join(t.TempDir(), "zing.db"))
+	if err != nil {
+		t.Fatalf("store.Open: %v", err)
+	}
+	t.Cleanup(func() { _ = s.Close() })
+	c := &console{store: s}
+
+	render := func() string {
+		t.Helper()
+		comp, err := c.navComponent(t.Context(), 0)
+		if err != nil {
+			t.Fatalf("navComponent: %v", err)
+		}
+		var buf strings.Builder
+		if err := comp.Render(t.Context(), &buf); err != nil {
+			t.Fatalf("Render: %v", err)
+		}
+		return buf.String()
+	}
+
+	if got := render(); strings.Contains(got, "claude: capped") {
+		t.Errorf("navComponent with no hold set shows a claude-hold line; got:\n%s", got)
+	}
+
+	future := time.Now().Add(20 * time.Minute)
+	if err := s.SetSettings(t.Context(), "claude_hold_until", future.UTC().Truncate(time.Second).Format("2006-01-02T15:04:05Z")); err != nil {
+		t.Fatalf("SetSettings: %v", err)
+	}
+	gotFuture := render()
+	if !strings.Contains(gotFuture, "claude: capped until "+clockLabel(future)) {
+		t.Errorf("navComponent with a future hold missing the claude-hold line %q; got:\n%s", "claude: capped until "+clockLabel(future), gotFuture)
+	}
+
+	past := time.Now().Add(-20 * time.Minute)
+	if err := s.SetSettings(t.Context(), "claude_hold_until", past.UTC().Truncate(time.Second).Format("2006-01-02T15:04:05Z")); err != nil {
+		t.Fatalf("SetSettings: %v", err)
+	}
+	if gotPast := render(); strings.Contains(gotPast, "claude: capped") {
+		t.Errorf("navComponent with a past hold still shows a claude-hold line; got:\n%s", gotPast)
+	}
+}
+
 // TestBuildNavThreads_ParkedUntil proves buildNavThreads' own now comparison
 // (#45): a LiveTicket.ParkedUntil still after now gives NavThread.ParkedUntil
-// equal to clockLabel of that time; one at or before now gives the empty
-// string.
+// equal to the literal "3:04pm"-style clock (not clockLabel itself, the
+// function under test: review fix r1f1); one at or before now gives the
+// empty string. future and past are built directly in time.Local, so the
+// literal "4:01pm" is correct regardless of the test machine's own zone.
 func TestBuildNavThreads_ParkedUntil(t *testing.T) {
 	t.Parallel()
-	now := time.Date(2026, 10, 5, 16, 0, 0, 0, time.UTC)
+	now := time.Date(2026, 10, 5, 16, 0, 0, 0, time.Local)
 
-	future := now.Add(time.Minute)
+	future := time.Date(2026, 10, 5, 16, 1, 0, 0, time.Local)
 	past := now.Add(-time.Minute)
 	items := []store.LiveTicket{
 		{Ticket: store.Ticket{ID: 1}, ParkedUntil: &future},
@@ -1911,8 +1964,8 @@ func TestBuildNavThreads_ParkedUntil(t *testing.T) {
 	if len(got) != 3 {
 		t.Fatalf("buildNavThreads returned %d threads, want 3", len(got))
 	}
-	if want := clockLabel(future); got[0].ParkedUntil != want {
-		t.Errorf("buildNavThreads[0].ParkedUntil = %q, want %q (future)", got[0].ParkedUntil, want)
+	if got[0].ParkedUntil != "4:01pm" {
+		t.Errorf("buildNavThreads[0].ParkedUntil = %q, want %q (future)", got[0].ParkedUntil, "4:01pm")
 	}
 	if got[1].ParkedUntil != "" {
 		t.Errorf("buildNavThreads[1].ParkedUntil = %q, want \"\" (past)", got[1].ParkedUntil)

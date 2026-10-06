@@ -552,14 +552,14 @@ func TestLiveTickets_ParkedUntil(t *testing.T) {
 	owner, expires := claimForCommit(t, s, parked)
 	reserveOpenRun(t, s, parked, owner, expires, testStatePlanning)
 	earlier := time.Now().Add(time.Hour).UTC().Truncate(time.Second)
-	if _, err := s.ParkRuns(ctx, parked, owner, expires, earlier); err != nil {
+	if _, err := s.ParkRuns(ctx, parked, owner, expires, earlier, nil); err != nil {
 		t.Fatalf("ParkRuns(earlier): %v", err)
 	}
 
 	owner, expires = claimForCommit(t, s, parked)
 	reserveOpenRun(t, s, parked, owner, expires, testStateBuilding)
 	later := earlier.Add(time.Hour)
-	if _, err := s.ParkRuns(ctx, parked, owner, expires, later); err != nil {
+	if _, err := s.ParkRuns(ctx, parked, owner, expires, later, nil); err != nil {
 		t.Fatalf("ParkRuns(later): %v", err)
 	}
 

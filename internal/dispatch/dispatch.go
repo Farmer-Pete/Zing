@@ -1202,7 +1202,7 @@ func (d *Dispatcher) runAndCommit(ctx context.Context, ticket store.Ticket, time
 		// of runtime.ErrCanceled because a capped error is never that: the
 		// run is parked, not left for ExpireClaims to reconcile.
 		if until, capped := job.CappedUntil(err); capped {
-			return d.parkCapped(ctx, ticket, expires, until)
+			return d.parkCapped(ctx, ticket, expires, until, job.CappedFinish(err))
 		}
 		// runtime.ErrCanceled (design D13, section 4.5, 6.8): runCtx's own
 		// deadline expired (ctx itself is still live, or the branch above
@@ -1320,20 +1320,22 @@ func (d *Dispatcher) recordShutdownInterrupt(ctx context.Context, ticket store.T
 }
 
 // parkCapped records a Claude session limit (or a hold refusal) for ticket
-// (design shape, "Park write"): store.ParkRuns terminalizes every open run
-// of the ticket as interrupted with capped_until = until, raises the
-// claude_hold_until setting when until is later, writes one "parked until"
-// marker when any run was actually swept, and clears the claim, all under
-// a detached, bounded context so a cancelled handler context cannot abort
-// a write that must still land. Like recordShutdownInterrupt, it never
-// returns a non-nil error: a write failure is logged and the claim is left
-// to expire for ExpireClaims to reconcile.
-func (d *Dispatcher) parkCapped(ctx context.Context, ticket store.Ticket, expires, until time.Time) error {
+// (design shape, "Park write"): store.ParkRuns terminalizes finish (a
+// capped review round's own already-finished lens runs, owner decision Q6)
+// by their real outcome, then every run of the ticket still open as
+// interrupted with capped_until = until, raises the claude_hold_until
+// setting when until is later, writes one "parked until" marker when any
+// run was actually swept, and clears the claim, all under a detached,
+// bounded context so a cancelled handler context cannot abort a write that
+// must still land. Like recordShutdownInterrupt, it never returns a
+// non-nil error: a write failure is logged and the claim is left to expire
+// for ExpireClaims to reconcile.
+func (d *Dispatcher) parkCapped(ctx context.Context, ticket store.Ticket, expires, until time.Time, finish []store.Run) error {
 	postCtx, cancel := postHandlerContext(ctx)
 	defer cancel()
 
-	res, err := d.store.ParkRuns(postCtx, ticket.ID, d.cfg.Owner, expires, until)
-	resetAt := until.Format(time.RFC3339)
+	res, err := d.store.ParkRuns(postCtx, ticket.ID, d.cfg.Owner, expires, until, finish)
+	resetAt := until.UTC().Format(time.RFC3339)
 	switch {
 	case err != nil:
 		slog.Error("claude session limit park failed", "ticket_id", ticket.ID, "reset_at", resetAt, "err", err)

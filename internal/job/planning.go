@@ -2519,14 +2519,12 @@ func routeFailure(
 	sessionCommit *store.SessionUpsert, resolveIDs []int64, origin response.EscalationOrigin,
 ) (commit store.HandlerCommit, ok bool, err error) {
 	switch {
-	case errors.Is(runErr, runtime.ErrCanceled), claudeCapped(runErr):
+	case passThroughErr(runErr):
 		return store.HandlerCommit{}, true, runErr
 	case errors.Is(runErr, ErrBudget):
 		return budgetEscalationCommit(t, d, resolveIDs), true, nil
 	case errors.Is(runErr, ErrSandbox):
 		return sandboxEscalationCommit(t, d, resolveIDs, origin, d.Sandboxes.Build.Reason()), true, nil
-	case errors.Is(runErr, ErrConfig), errors.Is(runErr, store.ErrClaimLost):
-		return store.HandlerCommit{}, true, runErr
 	}
 
 	var invErr *runtime.InvalidOutputError

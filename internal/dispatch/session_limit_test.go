@@ -9,6 +9,7 @@
 package dispatch_test
 
 import (
+	"fmt"
 	"io/fs"
 	"strings"
 	"testing"
@@ -175,6 +176,9 @@ func TestTick_SessionLimitParksThenResumes(t *testing.T) {
 		t.Errorf("ClaudeHold = %v, want %v", until, *run.CappedUntil)
 	}
 
+	wantParkedBody := fmt.Sprintf("parked until %s %s (run %d): Claude session limit",
+		wantReset.Format("3:04pm"), wantReset.Location().String(), run.ID)
+
 	msgs, err := s.ListMessages(t.Context(), ticketID)
 	if err != nil {
 		t.Fatalf("ListMessages: %v", err)
@@ -186,6 +190,9 @@ func TestTick_SessionLimitParksThenResumes(t *testing.T) {
 		}
 		if strings.HasPrefix(m.Body, "parked until ") {
 			sawParked = true
+			if m.Body != wantParkedBody {
+				t.Errorf("parked marker = %q, want %q", m.Body, wantParkedBody)
+			}
 		}
 	}
 	if !sawParked {
@@ -234,6 +241,8 @@ func TestTick_SessionLimitParksThenResumes(t *testing.T) {
 		t.Errorf("sess.Resumes = %d, want 0 (free resume)", sess.Resumes)
 	}
 
+	wantResumedBody := fmt.Sprintf("resumed after the Claude session limit (run %d)", resumed.ID)
+
 	msgsAfter4, err := s.ListMessages(t.Context(), ticketID)
 	if err != nil {
 		t.Fatalf("ListMessages after Tick 4: %v", err)
@@ -245,6 +254,9 @@ func TestTick_SessionLimitParksThenResumes(t *testing.T) {
 		}
 		if strings.HasPrefix(m.Body, "resumed after the Claude session limit") {
 			sawResumed = true
+			if m.Body != wantResumedBody {
+				t.Errorf("resumed marker = %q, want %q", m.Body, wantResumedBody)
+			}
 		}
 	}
 	if !sawResumed {
@@ -254,6 +266,93 @@ func TestTick_SessionLimitParksThenResumes(t *testing.T) {
 	finalTicket := getTicket(t, s, ticketID)
 	if finalTicket.WaitingOn == nil || *finalTicket.WaitingOn != testWaitingQuestions {
 		t.Errorf("final ticket.WaitingOn = %v, want questions (resumed without an owner answer)", finalTicket.WaitingOn)
+	}
+}
+
+// TestTick_SessionLimitHoldSkipsOtherClaudeTicket proves the global hold's
+// own reach (design shape, "Hold"; acceptance "While any run is capped,
+// hold new Claude dispatches until the reset"): once ticket A parks, a
+// second, unrelated ticket B -- never itself parked -- is claimed and
+// released on the very next tick with no run reserved and no "parked
+// until" marker of its own, because runJobWith's hold gate refuses its
+// claude job (here, classify) before Reserve; the dispatcher's own
+// parkCapped still clears B's claim through the same ParkRuns call the
+// design's "HeldError with no open runs" edge case describes.
+func TestTick_SessionLimitHoldSkipsOtherClaudeTicket(t *testing.T) {
+	t.Parallel()
+
+	s := newDispatchTestStore(t)
+	ticketA := seedQueuedTicket(t, s, testFixtureRef)
+	advanceTicket(t, s, fakeRuntime(t), ticketA, testStateQueued)
+	ticketB := seedQueuedTicket(t, s, "fake#2")
+	advanceTicket(t, s, fakeRuntime(t), ticketB, testStateQueued)
+
+	capRT := runtime.NewFake(sessionLimitFS(t, sessionLimitMsg))
+	// MaxParallel 1, not 2: with ListReadyCandidates' own "ORDER BY id" and
+	// #45's fill filling every free slot, a MaxParallel of 2 would run A
+	// and B's own classify-then-planning turns concurrently, racing B's own
+	// session-limit hit against A's park setting the hold; one slot keeps
+	// the two tickets' own turns strictly in id order instead.
+	d := newDispatcher(t, s, newFixtureTracker(t), bus.New(), capRT, nil, nil,
+		dispatch.Config{MaxParallel: 1, Owner: testOwner})
+
+	// Tick 1: ticket A (lower id) classifies; ticket B is not picked.
+	if err := d.Tick(t.Context()); err != nil {
+		t.Fatalf("Tick 1 (ticket A classifies): %v", err)
+	}
+	// Tick 2: ticket A's own real planning turn hits the session limit and
+	// parks, setting the global hold.
+	if err := d.Tick(t.Context()); err != nil {
+		t.Fatalf("Tick 2 (ticket A parks): %v", err)
+	}
+	parkedA := getTicket(t, s, ticketA)
+	if parkedA.ClaimOwner != nil {
+		t.Fatalf("ticket A claim = %v, want nil (parked)", *parkedA.ClaimOwner)
+	}
+	if _, held, err := s.ClaudeHold(t.Context()); err != nil {
+		t.Fatalf("ClaudeHold: %v", err)
+	} else if !held {
+		t.Fatal("ClaudeHold: held = false, want true after ticket A parks")
+	}
+
+	runsBBefore, err := s.RunsForTicket(t.Context(), ticketB)
+	if err != nil {
+		t.Fatalf("RunsForTicket(B) before: %v", err)
+	}
+	if len(runsBBefore) != 0 {
+		t.Fatalf("RunsForTicket(B) before Tick 3 = %d runs, want 0 (never picked yet)", len(runsBBefore))
+	}
+
+	// Tick 3: ticket B (the only remaining candidate) is claimed and
+	// released with no run reserved: its own classify turn is a claude
+	// job, and the hold ticket A's park just set is still in the future.
+	if tickErr := d.Tick(t.Context()); tickErr != nil {
+		t.Fatalf("Tick 3 (ticket B held): %v", tickErr)
+	}
+	heldB := getTicket(t, s, ticketB)
+	if heldB.ClaimOwner != nil {
+		t.Errorf("ticket B claim = %v, want nil (claimed then released)", *heldB.ClaimOwner)
+	}
+	if heldB.Kind != nil {
+		t.Errorf("ticket B Kind = %v, want nil (no classify turn ran)", *heldB.Kind)
+	}
+
+	runsBAfter, err := s.RunsForTicket(t.Context(), ticketB)
+	if err != nil {
+		t.Fatalf("RunsForTicket(B) after: %v", err)
+	}
+	if len(runsBAfter) != len(runsBBefore) {
+		t.Errorf("RunsForTicket(B) = %d runs, want unchanged %d (held before Reserve)", len(runsBAfter), len(runsBBefore))
+	}
+
+	msgsB, err := s.ListMessages(t.Context(), ticketB)
+	if err != nil {
+		t.Fatalf("ListMessages(B): %v", err)
+	}
+	for _, m := range msgsB {
+		if strings.HasPrefix(m.Body, "parked until ") {
+			t.Errorf("ticket B message %+v starts with %q, want none (B never itself parked)", m, "parked until ")
+		}
 	}
 }
 

@@ -36,13 +36,15 @@ type ParkResult struct {
 }
 
 // ParkRuns is InterruptRuns for a Claude session limit (or a hold refusal,
-// #45): every open run of ticketID's sessions becomes interrupted with
-// capped_until = until, the settings claude_hold_until row rises to until
-// when later, one "parked until" update is written, and the claim is
-// cleared, all in one transaction fenced on owner and expires exactly like
-// InterruptRuns.
-func (s *Store) ParkRuns(ctx context.Context, ticketID int64, owner string, expires, until time.Time) (ParkResult, error) {
-	runIDs, applied, err := s.interruptClaimedRuns(ctx, ticketID, owner, expires, nil, &until)
+// #45): finish is terminalized first, each by its own real outcome (owner
+// decision Q6: a review lens that already finished before the cap keeps its
+// own run record true), then every run of ticketID's sessions still open
+// becomes interrupted with capped_until = until, the settings
+// claude_hold_until row rises to until when later, one "parked until"
+// update is written, and the claim is cleared, all in one transaction
+// fenced on owner and expires exactly like InterruptRuns.
+func (s *Store) ParkRuns(ctx context.Context, ticketID int64, owner string, expires, until time.Time, finish []Run) (ParkResult, error) {
+	runIDs, applied, err := s.interruptClaimedRuns(ctx, ticketID, owner, expires, nil, &until, finish)
 	if err != nil {
 		return ParkResult{}, err
 	}
@@ -84,7 +86,7 @@ func upsertClaudeHoldTx(ctx context.Context, tx *sql.Tx, until time.Time) error 
 
 // insertParkedMarkerTx writes ParkRuns' own "parked until" update, inside
 // the same transaction as the runs it stamped.
-func insertParkedMarkerTx(ctx context.Context, tx *sql.Tx, s *Store, ticketID int64, until time.Time, runIDs []int64) error {
+func (s *Store) insertParkedMarkerTx(ctx context.Context, tx *sql.Tx, ticketID int64, until time.Time, runIDs []int64) error {
 	return s.insertMessageTx(ctx, tx, Message{
 		TicketID: ticketID, Type: msgTypeUpdate, Author: authorSystem,
 		Body: parkedMarkerBody(until, runIDs),
