@@ -908,14 +908,62 @@ export function buildChipDraftBody(dataset) {
  * data-item-ref, and data-decision, matching store.DraftInput's item mode
  * (answer.go's draftRequest: {ticket, question, item: {ref, decision}}).
  *
+ * note is the review item's note box value, read by console.js off the
+ * same row's .item-note input (task 4, ticket #68) and carried along with
+ * the pick so a note typed before a decision is clicked still rides that
+ * decision's own /draft post. Omitted (the one-argument call) or not a
+ * string, item.note is left off the body entirely, matching today's shape
+ * for every non-review control.
+ *
  * @param {{draftTicket?: string, draftQuestion?: string, itemRef?: string, decision?: string}} dataset
- * @returns {{ticket: number, question: number, item: {ref: string, decision: string}}}
+ * @param {string} [note]
+ * @returns {{ticket: number, question: number, item: {ref: string, decision: string, note?: string}}}
  */
-export function buildItemDraftBody(dataset) {
+export function buildItemDraftBody(dataset, note) {
+	const item = { ref: dataset?.itemRef ?? '', decision: dataset?.decision ?? '' };
+	if (typeof note === 'string') {
+		item.note = note;
+	}
 	return {
 		ticket: Number(dataset?.draftTicket),
 		question: Number(dataset?.draftQuestion),
-		item: { ref: dataset?.itemRef ?? '', decision: dataset?.decision ?? '' },
+		item,
+	};
+}
+
+/**
+ * pickBeforeNoteText is the review item note box's hint (console.js's
+ * installItemNoteSave) when the owner edits a finding's note before
+ * picking a decision on that row (owner decision Q2): the note waits in
+ * the box, unsaved, until a decision exists to save it with.
+ */
+export const pickBeforeNoteText = 'Pick a decision to save this note';
+
+/**
+ * itemNoteBody builds POST /draft's JSON body for a review item's note
+ * box (thread.templ's itemRow note input, task 3; owner decision Q2):
+ * the box's own data-note-ticket, data-note-question, and data-item-ref,
+ * plus decision -- the row's already-picked decision, read by the caller
+ * off its .decision.picked element, not off the note box itself, which
+ * carries no data-decision. Returns null when decision is empty or
+ * missing, so a note typed before any pick exists saves nothing (Q2: "the
+ * server refuses a note with no decision" -- this is the client-side half
+ * of that rule, which also lets console.js show pickBeforeNoteText instead
+ * of posting a request doomed to be refused).
+ *
+ * @param {{noteTicket?: string, noteQuestion?: string, itemRef?: string}} dataset
+ * @param {string} [decision]
+ * @param {string} [note]
+ * @returns {{ticket: number, question: number, item: {ref: string, decision: string, note: string}} | null}
+ */
+export function itemNoteBody(dataset, decision, note) {
+	if (!decision) {
+		return null;
+	}
+	return {
+		ticket: Number(dataset?.noteTicket),
+		question: Number(dataset?.noteQuestion),
+		item: { ref: dataset?.itemRef ?? '', decision, note: note ?? '' },
 	};
 }
 

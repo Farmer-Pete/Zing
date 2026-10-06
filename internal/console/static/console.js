@@ -25,6 +25,8 @@ import {
 	stepComposerIndex,
 	buildChipDraftBody,
 	buildItemDraftBody,
+	itemNoteBody,
+	pickBeforeNoteText,
 	unsavedReplyBody,
 	unsavedReplyBodies,
 	sendResultWithUnsent,
@@ -547,7 +549,43 @@ function installChipActivation() {
 		}
 		const decision = event.target.closest?.('.item-decisions .decision');
 		if (decision) {
-			postJSON('/draft', buildItemDraftBody(decision.dataset));
+			// The row's own note box (review items only, task 3's itemRow)
+			// rides this same pick: a note typed before the owner clicks a
+			// decision has nowhere else to save (itemNoteBody requires a
+			// decision), so it goes out with the pick instead of waiting
+			// for a 'change' on the note box that may never come.
+			const noteEl = decision.closest('.item-row')?.querySelector('.item-note');
+			postJSON('/draft', buildItemDraftBody(decision.dataset, noteEl?.value));
+		}
+	});
+}
+
+// installItemNoteSave wires a delegated 'change' listener for a review
+// item's note box (thread.templ's itemRow, task 3; owner decision Q2): a
+// decision must already be picked on the same row for the note to save.
+// Without one, it shows pickBeforeNoteText in the row's .item-note-hint
+// instead of posting a request the server would refuse.
+function installItemNoteSave() {
+	document.addEventListener('change', (event) => {
+		const noteEl = event.target.closest?.('.item-note');
+		if (!noteEl) {
+			return;
+		}
+		const row = noteEl.closest('.item-row');
+		const hint = row?.querySelector('.item-note-hint');
+		const picked = row?.querySelector('.item-decisions .decision.picked');
+		if (!picked) {
+			if (hint) {
+				hint.textContent = pickBeforeNoteText;
+			}
+			return;
+		}
+		if (hint) {
+			hint.textContent = '';
+		}
+		const body = itemNoteBody(noteEl.dataset, picked.dataset.decision, noteEl.value);
+		if (body) {
+			postJSON('/draft', body);
 		}
 	});
 }
@@ -1048,6 +1086,22 @@ async function postSendBatchLocked(ticket, questions) {
 	// post-send reset below, which would otherwise silently put a
 	// just-sent box's key back to its pre-send text.
 	await Promise.all(autosaveInFlight.values());
+
+	// A review item's note box (task 3's itemRow) has no autosave of its
+	// own -- it saves on 'change' (installItemNoteSave) -- so a note typed
+	// and left unblurred would otherwise still be sitting only in the DOM
+	// when /send runs below. Flushing every such box's note here, ahead of
+	// the reply saves, means /send always sees the note the box currently
+	// shows. Only a row with a picked decision has anything to save
+	// (itemNoteBody returns null otherwise); an unpicked row's note stays
+	// in the box, same as it already did before this send.
+	const noteSaves = Array.from(document.querySelectorAll('#main .item-note'))
+		.map((el) => {
+			const picked = el.closest('.item-row')?.querySelector('.item-decisions .decision.picked');
+			return picked ? itemNoteBody(el.dataset, picked.dataset.decision, el.value) : null;
+		})
+		.filter((body) => body != null);
+	await Promise.all(noteSaves.map((body) => postJSON('/draft', body)));
 
 	const inputs = Array.from(document.querySelectorAll('#main .reply-input'));
 	// Recorded before any further await below, so a box the owner keeps
@@ -1954,9 +2008,10 @@ function installNavBridge() {
 // install wires every delegated listener synchronously, before awaiting
 // loadBindings' own /static/keys.json fetch (bug fix): none of
 // installStreamWatch, installNavBridge, installPatchObserver, installSideBox,
-// installLogControls, installChipActivation, installPickupBox,
-// installSandboxRunBox, installOwnerEdit, installReplyAutosave, or
-// installReplyFocusTracking reads state.bindings, so there was no reason
+// installLogControls, installChipActivation, installItemNoteSave,
+// installPickupBox, installSandboxRunBox, installOwnerEdit,
+// installReplyAutosave, or installReplyFocusTracking reads state.bindings,
+// so there was no reason
 // their listeners -- installNavBridge above all, the zing-nav bridge a
 // Threads-sidebar click needs live as early as possible -- sat behind an
 // unrelated network round trip. Only
@@ -1972,6 +2027,7 @@ async function install() {
 	installSideBox();
 	installLogControls();
 	installChipActivation();
+	installItemNoteSave();
 	installPickupBox();
 	installSandboxRunBox();
 	installOwnerEdit();
