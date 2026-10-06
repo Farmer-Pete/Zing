@@ -12,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -2098,4 +2099,103 @@ func TestBuildNavThreads_ParkedUntil(t *testing.T) {
 	if got[2].ParkedUntil != "" {
 		t.Errorf("buildNavThreads[2].ParkedUntil = %q, want \"\" (nil)", got[2].ParkedUntil)
 	}
+}
+
+// sealedSectionGateRow builds the one gate-question row showSealedSection's
+// cross-product test varies: a "question" message carrying a gate-kind
+// QuestionPayload in the given state, or nil for "no gate row at all".
+func sealedSectionGateRow(t *testing.T, state string) []store.MessageRow {
+	t.Helper()
+	if state == "" {
+		return nil
+	}
+	payload, err := json.Marshal(response.QuestionPayload{Key: "Q1", Kind: response.QuestionKindGate})
+	if err != nil {
+		t.Fatalf("marshal gate payload: %v", err)
+	}
+	st := state
+	return []store.MessageRow{{ID: 1, Message: store.Message{Type: msgTypeQuestion, State: &st, Payload: payload}}} //nolint:modernize // keyed on purpose
+}
+
+// TestShowSealedSection proves showSealedSection's full rule (#75 Q1): true
+// exactly when the state is one of building, reviewing, judging, shipping
+// or escalated, the cohort is sealed, and the only gate question present
+// (if any) is resolved -- never while a gate still shows the plan (open or
+// answered), so the gate's own boxes and the section's never both render.
+func TestShowSealedSection(t *testing.T) {
+	t.Parallel()
+	states := []string{
+		string(response.TicketStateQueued), string(response.TicketStatePlanning), string(response.TicketStateBuilding),
+		string(response.TicketStateReviewing), string(response.TicketStateJudging), string(response.TicketStateShipping),
+		string(response.TicketStateEscalated), string(response.TicketStateDone), string(response.TicketStateAbandoned),
+	}
+	gates := []string{msgStateOpen, msgStateAnswered, msgStateResolved, ""}
+
+	for _, state := range states {
+		for _, sealed := range []bool{true, false} {
+			for _, gate := range gates {
+				t.Run(state+"/sealed="+strconv.FormatBool(sealed)+"/gate="+gate, func(t *testing.T) {
+					t.Parallel()
+					rows := sealedSectionGateRow(t, gate)
+					want := sealed && sealedSectionStates[state] && (gate == "" || gate == msgStateResolved)
+					if got := showSealedSection(state, sealed, rows); got != want {
+						t.Errorf("showSealedSection(%q, %v, gate=%q) = %v, want %v", state, sealed, gate, got, want)
+					}
+				})
+			}
+		}
+	}
+
+	t.Run("building sealed with an open non-gate question: true", func(t *testing.T) {
+		t.Parallel()
+		open := msgStateOpen
+		payload, err := json.Marshal(response.QuestionPayload{Key: "Q1", Kind: response.QuestionKindQuestion})
+		if err != nil {
+			t.Fatalf("marshal question payload: %v", err)
+		}
+		rows := []store.MessageRow{{ID: 1, Message: store.Message{Type: msgTypeQuestion, State: &open, Payload: payload}}} //nolint:modernize // keyed on purpose
+		if !showSealedSection(string(response.TicketStateBuilding), true, rows) {
+			t.Error("showSealedSection = false, want true")
+		}
+	})
+
+	for _, state := range []string{string(response.TicketStateJudging), string(response.TicketStateEscalated)} {
+		t.Run(state+" sealed with an open amended escalation question: true", func(t *testing.T) {
+			t.Parallel()
+			open := msgStateOpen
+			payload, err := json.Marshal(response.QuestionPayload{
+				Key: "Q1", Kind: response.QuestionKindQuestion,
+				Amendment: &response.Amendment{Scenario: "s1", Given: "g", When: "w", Then: "t", Check: "go test ./...", Reason: "r"},
+			})
+			if err != nil {
+				t.Fatalf("marshal amended escalation payload: %v", err)
+			}
+			rows := []store.MessageRow{{ID: 1, Message: store.Message{Type: msgTypeQuestion, State: &open, Payload: payload}}} //nolint:modernize // keyed on purpose
+			if !showSealedSection(state, true, rows) {
+				t.Errorf("showSealedSection(%q) = false, want true", state)
+			}
+		})
+	}
+
+	t.Run("building sealed with only a draft gate question: true", func(t *testing.T) {
+		t.Parallel()
+		draft := draftMessageState
+		payload, err := json.Marshal(response.QuestionPayload{Key: "Q1", Kind: response.QuestionKindGate})
+		if err != nil {
+			t.Fatalf("marshal gate payload: %v", err)
+		}
+		rows := []store.MessageRow{{ID: 1, Message: store.Message{Type: msgTypeQuestion, State: &draft, Payload: payload}}} //nolint:modernize // keyed on purpose
+		if !showSealedSection(string(response.TicketStateBuilding), true, rows) {
+			t.Error("showSealedSection = false, want true")
+		}
+	})
+
+	t.Run("building sealed with an undecodable question payload: true", func(t *testing.T) {
+		t.Parallel()
+		open := msgStateOpen
+		rows := []store.MessageRow{{ID: 1, Message: store.Message{Type: msgTypeQuestion, State: &open, Payload: json.RawMessage("not json")}}} //nolint:modernize // keyed on purpose
+		if !showSealedSection(string(response.TicketStateBuilding), true, rows) {
+			t.Error("showSealedSection = false, want true")
+		}
+	})
 }

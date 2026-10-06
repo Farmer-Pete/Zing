@@ -23,7 +23,10 @@ import (
 // no banner at all (every planning thread settled), still in place of
 // waitProgressBanner -- buildAgentStatus is call only when the ticket
 // carries a planning question at all, console.threadComponent's own guard.
-templ Thread(ticket *store.Ticket, rows []ThreadRow, wait WaitProgress, banner string) {
+// sealed is threadComponent's post-gate "Sealed plan and scenarios" section
+// (#75): nil when console.showSealedSection reports the ticket does not
+// get one.
+templ Thread(ticket *store.Ticket, rows []ThreadRow, wait WaitProgress, banner string, sealed *SealedSection) {
 	<main id="main" class="view-thread">
 		if ticket != nil {
 			<h2>{ ticket.Title }</h2>
@@ -49,6 +52,7 @@ templ Thread(ticket *store.Ticket, rows []ThreadRow, wait WaitProgress, banner s
 					}
 				}
 			}
+			@sealedSection(sealed)
 			@sandboxRunBox(ticket.ID)
 		} else {
 			<p class="empty">Select a ticket.</p>
@@ -75,6 +79,24 @@ templ ticketBodyEditor(ticket *store.Ticket) {
 		<button type="button" class="owner-edit-save">Save</button>
 		<span class="owner-edit-error"></span>
 	</details>
+}
+
+// sealedSection is the post-gate "Sealed plan and scenarios" section (#75,
+// Q1): the sealed cohort's scenario table and the stored plan, each with
+// the same owner-edit boxes gateContext renders, collapsed by default.
+// Renders nothing when s is nil. The host-check list is left out
+// (scenariosSection's atGate false), since its text speaks of approving a
+// gate that is already behind the ticket. A scenario box here sends no
+// answer_question: it edits the scenario and leaves any open amended
+// escalation for its own "Edit it" box or options.
+templ sealedSection(s *SealedSection) {
+	if s != nil {
+		<details id="sealed-section" class="sealed-section" data-preserve-attr="open">
+			<summary>Sealed plan and scenarios</summary>
+			@scenariosSection(s.Scenarios, false)
+			@PlanView(*s.Plan)
+		</details>
+	}
 }
 
 // waitProgressBanner is the current round's progress line (bug fix: "After
@@ -357,7 +379,7 @@ templ answeredLocked(answeredHTML templ.Component) {
 // name are the seam Task 6 reserved and Task 8 filled.
 templ gateContext(plan *RenderedPlan, scenarios []ScenarioRow, findings []FindingRow) {
 	<div class="q-context gate-context" data-context="plan">
-		@scenariosSection(scenarios)
+		@scenariosSection(scenarios, true)
 		@findingsSection(findings)
 		if plan != nil {
 			@PlanView(*plan)

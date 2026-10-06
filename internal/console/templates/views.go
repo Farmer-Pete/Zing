@@ -95,6 +95,16 @@ type ScenarioRow struct {
 	TicketID                           int64
 }
 
+// SealedSection is the post-gate "Sealed plan and scenarios" section's view
+// model (#75): the sealed cohort's current scenario table and stored plan,
+// the same two context pieces gateContext renders at the gate. A nil
+// *SealedSection (threadComponent's own showSealedSection guard) renders
+// nothing (thread.templ's sealedSection).
+type SealedSection struct {
+	Plan      *RenderedPlan
+	Scenarios []ScenarioRow
+}
+
 // FindingRow is one above-floor plan-review finding in the gate's context
 // region's findings table (design section 7, D8, Task 11):
 // internal/console/views.go's loadFindings has already dropped every

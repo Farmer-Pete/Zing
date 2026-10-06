@@ -20,7 +20,7 @@ func TestOwnerEditControls_SealedScenarioOnly(t *testing.T) {
 	}
 
 	var sb strings.Builder
-	if err := scenariosSection(rows).Render(t.Context(), &sb); err != nil {
+	if err := scenariosSection(rows, true).Render(t.Context(), &sb); err != nil {
 		t.Fatalf("scenariosSection.Render: %v", err)
 	}
 	got := sb.String()
@@ -170,7 +170,7 @@ func TestOwnerEditControls_TicketBodyEditor(t *testing.T) {
 	ticket := &store.Ticket{ID: 7, Title: testHelloTicketTitle, Body: "B"}
 
 	var sb strings.Builder
-	if err := Thread(ticket, nil, WaitProgress{}, "").Render(t.Context(), &sb); err != nil {
+	if err := Thread(ticket, nil, WaitProgress{}, "", nil).Render(t.Context(), &sb); err != nil {
 		t.Fatalf("Thread.Render: %v", err)
 	}
 	got := sb.String()
@@ -192,7 +192,7 @@ func TestOwnerEditControls_TextareaPreservesLeadingNewline(t *testing.T) {
 	ticket := &store.Ticket{ID: 7, Title: testHelloTicketTitle, Body: "\nX"}
 
 	var sb strings.Builder
-	if err := Thread(ticket, nil, WaitProgress{}, "").Render(t.Context(), &sb); err != nil {
+	if err := Thread(ticket, nil, WaitProgress{}, "", nil).Render(t.Context(), &sb); err != nil {
 		t.Fatalf("Thread.Render: %v", err)
 	}
 	got := sb.String()

@@ -23,7 +23,7 @@ func TestGateHostChecksSection(t *testing.T) {
 	}
 
 	var sb strings.Builder
-	if err := scenariosSection(rows).Render(t.Context(), &sb); err != nil {
+	if err := scenariosSection(rows, true).Render(t.Context(), &sb); err != nil {
 		t.Fatalf("scenariosSection.Render: %v", err)
 	}
 	got := sb.String()
@@ -77,7 +77,7 @@ func TestGateHostChecksSection_MarksLongWhitespaceRuns(t *testing.T) {
 	}
 
 	var sb strings.Builder
-	if err := scenariosSection(rows).Render(t.Context(), &sb); err != nil {
+	if err := scenariosSection(rows, true).Render(t.Context(), &sb); err != nil {
 		t.Fatalf("scenariosSection.Render: %v", err)
 	}
 	got := sb.String()
@@ -102,7 +102,7 @@ func TestGateHostChecksSection_AbsentWithoutHost(t *testing.T) {
 	}
 
 	var sb strings.Builder
-	if err := scenariosSection(rows).Render(t.Context(), &sb); err != nil {
+	if err := scenariosSection(rows, true).Render(t.Context(), &sb); err != nil {
 		t.Fatalf("scenariosSection.Render: %v", err)
 	}
 	got := sb.String()

@@ -53,10 +53,13 @@ func hostCheckSegments(check string) []hostCheckSegment {
 // ownerEditScenarioForm), empty for an unsealed scenario. When any row is
 // kind host, the section first renders the "Runs on your machine at
 // judging" list of host ids and verbatim checks, in the slice's own order:
-// approving the gate approves those commands (host scenario kind, #137).
-templ scenariosSection(scenarios []ScenarioRow) {
+// approving the gate approves those commands (host scenario kind, #137) --
+// but only while atGate is true (#75): after the seal, approving the gate
+// is already behind the ticket, so the post-gate sealed section renders
+// that list only within the gate's own copy, never within its own.
+templ scenariosSection(scenarios []ScenarioRow, atGate bool) {
 	if len(scenarios) > 0 {
-		if slices.ContainsFunc(scenarios, func(s ScenarioRow) bool { return s.Kind == "host" }) {
+		if atGate && slices.ContainsFunc(scenarios, func(s ScenarioRow) bool { return s.Kind == "host" }) {
 			<section class="host-checks">
 				<h3>Runs on your machine at judging</h3>
 				<p>Approving this gate approves these commands. Zing runs each one on this machine, outside any sandbox, before the judge runs.</p>
