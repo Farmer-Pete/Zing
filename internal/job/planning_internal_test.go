@@ -151,6 +151,54 @@ func TestRenderGateFindings(t *testing.T) {
 	}
 }
 
+// TestFloorResumeInputs proves floorResumeInputs' split (ticket 72 task 1):
+// a minor plus a major gives two inputs, "findings" and "needs_disposition",
+// both fenced; only a minor gives one "findings" input; only a major gives
+// one "needs_disposition" input; no findings gives nil.
+func TestFloorResumeInputs(t *testing.T) {
+	t.Parallel()
+
+	minor := response.Finding{Severity: response.SeverityMinor, Location: "plan/design/shape", Text: "needs a name", Fix: "name it"}
+	major := response.Finding{Severity: response.SeverityMajor, Location: "plan/overview/objective", Text: "wrong goal", Fix: "restate it"}
+
+	t.Run("minor and major", func(t *testing.T) {
+		t.Parallel()
+		got := floorResumeInputs([]response.Finding{minor, major}, response.SeverityMinor)
+		if len(got) != 2 {
+			t.Fatalf("floorResumeInputs = %+v, want 2 inputs", got)
+		}
+		if got[0].Label != "findings" || !got[0].Untrusted || !strings.Contains(got[0].Text, minor.Text) {
+			t.Errorf("got[0] = %+v, want the fenced findings input carrying the minor", got[0])
+		}
+		if got[1].Label != needsDispositionLabel || !got[1].Untrusted || !strings.Contains(got[1].Text, major.Text) {
+			t.Errorf("got[1] = %+v, want the fenced needs_disposition input carrying the major", got[1])
+		}
+	})
+
+	t.Run("only minor", func(t *testing.T) {
+		t.Parallel()
+		got := floorResumeInputs([]response.Finding{minor}, response.SeverityMinor)
+		if len(got) != 1 || got[0].Label != "findings" {
+			t.Fatalf("floorResumeInputs = %+v, want one findings input", got)
+		}
+	})
+
+	t.Run("only major", func(t *testing.T) {
+		t.Parallel()
+		got := floorResumeInputs([]response.Finding{major}, response.SeverityMinor)
+		if len(got) != 1 || got[0].Label != needsDispositionLabel {
+			t.Fatalf("floorResumeInputs = %+v, want one needs_disposition input", got)
+		}
+	})
+
+	t.Run("no findings", func(t *testing.T) {
+		t.Parallel()
+		if got := floorResumeInputs(nil, response.SeverityMinor); got != nil {
+			t.Errorf("floorResumeInputs(nil) = %+v, want nil", got)
+		}
+	})
+}
+
 // TestPostRunFailedWhatFor covers postRunFailedWhatFor's own table (design
 // section 4.1): the four origins runAndRoute already threads through
 // postRunFailure, the three origins Package 8 adds ahead of their own

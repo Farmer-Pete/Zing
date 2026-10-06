@@ -49,6 +49,10 @@
               "drop",
               "discuss"
             ]
+          },
+          "id": {
+            "type": "string",
+            "pattern": "^p[0-9]+-f[0-9]+$"
           }
         },
         "additionalProperties": false,

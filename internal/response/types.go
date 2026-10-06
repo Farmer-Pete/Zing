@@ -324,6 +324,7 @@ type Finding struct {
 	Fix      string    `xml:"fix"                 json:"fix"      jsonschema:"minLength=1" doc:"what to change"`
 	PlanRef  string    `xml:"plan_ref,omitempty"  json:"plan_ref,omitempty" doc:"code review, fidelity lens only: the plan element"`
 	Decision *Decision `xml:"-"                   json:"decision,omitempty"  doc:"set by the owner at triage"`
+	ID       string    `xml:"-"                   json:"id,omitempty"        jsonschema:"pattern=^p[0-9]+-f[0-9]+$" doc:"plan review only, set by Zing when it stores the artifact"`
 }
 
 // ---- build ----------------------------------------------------------------

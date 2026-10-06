@@ -2219,8 +2219,10 @@ func TestPlanningHandler_ReviewTick_DropsUnresolvedLocationFindings(t *testing.T
 // proves section 6.5's floor split for every review.floor value: the same
 // four findings (one per severity) split differently depending on the
 // configured floor. Since the at-or-below survivors are what entry step 7
-// fences into the next resume (prompt.Findings), this drives one more tick
-// after the review lands and inspects that resumed prompt.
+// fences into the next resume under "findings" (prompt.Findings) and the
+// above-floor survivors under "needs_disposition" (floorResumeInputs,
+// ticket 72 task 1, owner decision Q1), this drives one more tick after the
+// review lands and inspects that resumed prompt's own split.
 func TestPlanningHandler_ReviewTick_FloorSplitsFindingsAcrossAllFourFloors(t *testing.T) {
 	t.Parallel()
 	const blockerText, majorText, minorText, nitText = "blocker text", "major text", "minor text", "nit text"
@@ -2234,7 +2236,7 @@ func TestPlanningHandler_ReviewTick_FloorSplitsFindingsAcrossAllFourFloors(t *te
 	cases := []struct {
 		floor     response.Severity
 		wantIn    []string
-		wantNotIn []string
+		wantAbove []string
 	}{
 		{response.SeverityBlocker, []string{blockerText, majorText, minorText, nitText}, nil},
 		{response.SeverityMajor, []string{majorText, minorText, nitText}, []string{blockerText}},
@@ -2262,17 +2264,135 @@ func TestPlanningHandler_ReviewTick_FloorSplitsFindingsAcrossAllFourFloors(t *te
 				t.Fatalf("floor resume Run: %v", err)
 			}
 
+			prompt := rec.lastReq.Prompt
+			i := strings.Index(prompt, "needs_disposition:")
+			atOrBelowSection, aboveSection := prompt, ""
+			if i >= 0 {
+				atOrBelowSection, aboveSection = prompt[:i], prompt[i:]
+			}
+
 			for _, want := range tc.wantIn {
-				if !strings.Contains(rec.lastReq.Prompt, want) {
-					t.Errorf("floor %s: resume prompt missing %q:\n%s", tc.floor, want, rec.lastReq.Prompt)
+				if !strings.Contains(atOrBelowSection, want) {
+					t.Errorf("floor %s: findings section missing %q:\n%s", tc.floor, want, atOrBelowSection)
+				}
+				if strings.Contains(aboveSection, want) {
+					t.Errorf("floor %s: needs_disposition section unexpectedly contains at-or-below %q:\n%s", tc.floor, want, aboveSection)
 				}
 			}
-			for _, notWant := range tc.wantNotIn {
-				if strings.Contains(rec.lastReq.Prompt, notWant) {
-					t.Errorf("floor %s: resume prompt unexpectedly contains %q:\n%s", tc.floor, notWant, rec.lastReq.Prompt)
+			for _, wantAbove := range tc.wantAbove {
+				if !strings.Contains(aboveSection, wantAbove) {
+					t.Errorf("floor %s: needs_disposition section missing %q:\n%s", tc.floor, wantAbove, aboveSection)
+				}
+				if strings.Contains(atOrBelowSection, wantAbove) {
+					t.Errorf("floor %s: findings section unexpectedly contains above-floor %q:\n%s", tc.floor, wantAbove, atOrBelowSection)
 				}
 			}
 		})
+	}
+}
+
+// TestPlanningHandler_ReviewTick_FloorResumeDeliversAboveFloorFindings proves
+// ticket 72 task 1: a review with at least one at-or-below-floor finding
+// stores every survivor with a stable p<planVersion>-f<index> id, and the
+// loop's resume carries the above-floor findings too, fenced under
+// needs_disposition, separate from the at-or-below-floor findings input.
+// Before this change the major never reached the planner during the loop.
+func TestPlanningHandler_ReviewTick_FloorResumeDeliversAboveFloorFindings(t *testing.T) {
+	t.Parallel()
+	s := newJobTestStore(t)
+	ticketID := seedFeatureTicketInPlanning(t, s)
+	planVersion, _ := seedCohort(t, s, ticketID, validPlan("Floor resume delivers above-floor findings."), validScenarios(2, "abovefloor"))
+
+	minor := finding(response.SeverityMinor, "plan/design/shape", "needs a name", "name it")
+	major := finding(response.SeverityMajor, "plan/overview/objective", "wrong goal", "restate it")
+	reviewRT := &scriptedRuntime{t: t, steps: []scriptedStep{readyStep(findingsResponse(minor, major), "abovefloor-sess-1")}}
+
+	firstCommit, err := runPlanning(t, s, claim(t, s, reviewRT, ticketID), ticketID)
+	if err != nil {
+		t.Fatalf("review tick Run: %v", err)
+	}
+	apply(t, s, getTicket(t, s, ticketID), firstCommit)
+
+	artifact, ok, err := s.PlanReviewAt(t.Context(), ticketID, planVersion)
+	if err != nil || !ok {
+		t.Fatalf("PlanReviewAt(%d) = (_, %v, %v), want a stored artifact", planVersion, ok, err)
+	}
+	var payload struct {
+		Findings []response.Finding `json:"findings"`
+	}
+	if err := json.Unmarshal(artifact.Payload, &payload); err != nil {
+		t.Fatalf("unmarshal stored planreview payload: %v", err)
+	}
+	wantMinorID := fmt.Sprintf("p%d-f1", planVersion)
+	wantMajorID := fmt.Sprintf("p%d-f2", planVersion)
+	if len(payload.Findings) != 2 || payload.Findings[0].ID != wantMinorID || payload.Findings[1].ID != wantMajorID {
+		t.Fatalf("stored findings = %+v, want ids %q (minor) and %q (major)", payload.Findings, wantMinorID, wantMajorID)
+	}
+
+	resumeRT := &scriptedRuntime{t: t, steps: []scriptedStep{questionResult(response.JobPlanning, "abovefloor-resume-sess")}}
+	rec := &recordingRuntime{rt: resumeRT}
+	if _, err := runPlanning(t, s, claim(t, s, rec, ticketID), ticketID); err != nil {
+		t.Fatalf("floor resume Run: %v", err)
+	}
+	prompt := rec.lastReq.Prompt
+	if !strings.Contains(prompt, "needs_disposition:") {
+		t.Fatalf("resume prompt does not carry a needs_disposition input:\n%s", prompt)
+	}
+	i := strings.Index(prompt, "needs_disposition:")
+	wantMajorLine := wantMajorID + " [correctness/major] plan/overview/objective"
+	if !strings.Contains(prompt[i:], wantMajorLine) {
+		t.Errorf("needs_disposition section does not carry the major:\n%s", prompt[i:])
+	}
+	if !strings.Contains(prompt[:i], wantMinorID) {
+		t.Errorf("findings section (before needs_disposition) does not carry the minor's id:\n%s", prompt[:i])
+	}
+	if strings.Contains(prompt[i:], wantMinorID) {
+		t.Errorf("needs_disposition section unexpectedly carries the minor's id:\n%s", prompt[i:])
+	}
+	if !strings.Contains(prompt, "<<<UNTRUSTED ") {
+		t.Errorf("resume prompt does not fence its findings inputs:\n%s", prompt)
+	}
+}
+
+// TestPlanningHandler_ReviewTick_OnlyAboveFloorFindingsPostsGate proves owner
+// decision Q2 on ticket 72: a review with only above-floor findings still
+// posts the gate (today's rule, unchanged), rather than starting the
+// dispositions loop -- that loop only starts when a review has at least one
+// at-or-below-floor finding.
+func TestPlanningHandler_ReviewTick_OnlyAboveFloorFindingsPostsGate(t *testing.T) {
+	t.Parallel()
+	s := newJobTestStore(t)
+	ticketID := seedFeatureTicketInPlanning(t, s)
+	planVersion, _ := seedCohort(t, s, ticketID, validPlan("Only above-floor findings post the gate."), validScenarios(2, "onlyabove"))
+
+	major := finding(response.SeverityMajor, "plan/overview/objective", "wrong goal", "restate it")
+	rt := &scriptedRuntime{t: t, steps: []scriptedStep{readyStep(findingsResponse(major), "onlyabove-sess")}}
+
+	commit, err := runPlanning(t, s, claim(t, s, rt, ticketID), ticketID)
+	if err != nil {
+		t.Fatalf("review tick Run: %v", err)
+	}
+	if commit.Waiting == nil || *commit.Waiting != testWaitingGate {
+		t.Fatalf("commit.Waiting = %v, want gate", commit.Waiting)
+	}
+	wantPending := fmt.Sprintf("planreview v%d pending", planVersion)
+	for _, m := range commit.Messages {
+		if m.Body == wantPending {
+			t.Errorf("commit.Messages contains %q, want no pending marker (only above-floor findings post the gate directly)", wantPending)
+		}
+	}
+	if len(commit.Artifacts) != 1 {
+		t.Fatalf("commit.Artifacts = %d entries, want 1", len(commit.Artifacts))
+	}
+	var payload struct {
+		Findings []response.Finding `json:"findings"`
+	}
+	if err := json.Unmarshal(commit.Artifacts[0].Payload, &payload); err != nil {
+		t.Fatalf("unmarshal stored planreview payload: %v", err)
+	}
+	wantID := fmt.Sprintf("p%d-f1", planVersion)
+	if len(payload.Findings) != 1 || payload.Findings[0].ID != wantID {
+		t.Fatalf("stored findings = %+v, want exactly one finding with id %q", payload.Findings, wantID)
 	}
 }
 

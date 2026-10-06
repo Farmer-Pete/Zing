@@ -40,7 +40,9 @@ func seedCapLoopsEscalation(t *testing.T, objective string) (s *store.Store, tic
 	insertUpdateMarker(t, s, ticketID, "planreview v2 delivered")
 
 	minor := finding(response.SeverityMinor, "plan/design/shape", "still wrong", "fix it")
+	minor.ID = fmt.Sprintf("p%d-f1", planVersion)
 	major := finding(response.SeverityMajor, "plan/design/other", "worse", "fix that too")
+	major.ID = fmt.Sprintf("p%d-f2", planVersion)
 	seedPlanreviewArtifact(t, s, ticketID, planVersion, runID, minor, major)
 	insertUpdateMarker(t, s, ticketID, fmt.Sprintf("planreview v%d pending", planVersion))
 
@@ -237,6 +239,20 @@ func TestPlanCapLoops_RetryBackAbandonUnchanged(t *testing.T) {
 		}
 		if strings.Contains(rec.lastReq.Prompt, "raise machine.toml") {
 			t.Errorf("resume prompt carries the error label, want none on a retry:\n%s", rec.lastReq.Prompt)
+		}
+
+		i := strings.Index(rec.lastReq.Prompt, "needs_disposition:")
+		if i < 0 {
+			t.Fatalf("resume prompt does not carry a needs_disposition input:\n%s", rec.lastReq.Prompt)
+		}
+		if !strings.Contains(rec.lastReq.Prompt[i:], "p1-f2 [correctness/major] plan/design/other") {
+			t.Errorf("needs_disposition section does not carry the major:\n%s", rec.lastReq.Prompt[i:])
+		}
+		if !strings.Contains(rec.lastReq.Prompt[:i], "p1-f1 [correctness/minor] plan/design/shape") {
+			t.Errorf("findings section (before needs_disposition) does not carry the minor:\n%s", rec.lastReq.Prompt[:i])
+		}
+		if strings.Contains(rec.lastReq.Prompt[i:], "p1-f1") {
+			t.Errorf("needs_disposition section unexpectedly carries the minor's id:\n%s", rec.lastReq.Prompt[i:])
 		}
 	})
 

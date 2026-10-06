@@ -1520,10 +1520,12 @@ func maybeResumeFloorFindings(ctx context.Context, t store.Ticket, d Deps, sess 
 		return c, true, nil
 	}
 
-	commit, err = runPlanningResume(ctx, t, d, sess, nil, []prompt.NamedInput{prompt.Findings(renderFindings(atOrBelow))}, 0, true)
+	commit, err = runPlanningResume(ctx, t, d, sess, nil, floorResumeInputs(payload.Findings, d.Floor), 0, true)
 	if err != nil {
 		return commit, true, err
 	}
+	slog.Info("floor findings delivered", "ticket_id", t.ID, "plan_version", cohort.PlanVersion,
+		"at_or_below", len(atOrBelow), "needs_disposition", above)
 	commit.Messages = append(commit.Messages, store.Message{
 		TicketID: t.ID, Type: msgTypeUpdate, Author: authorSystem, Body: delivered,
 	})
@@ -1658,6 +1660,9 @@ func planReviewOkCommit(ctx context.Context, t store.Ticket, d Deps, rr runResul
 		}
 		kept = append(kept, f)
 	}
+	for i := range kept {
+		kept[i].ID = fmt.Sprintf("p%d-f%d", cohort.PlanVersion, i+1)
+	}
 
 	var atOrBelow, above int
 	for _, f := range kept {
@@ -1763,9 +1768,42 @@ func renderScenariosForReview(artifacts []store.Artifact) (string, error) {
 func renderFindings(findings []response.Finding) string {
 	lines := make([]string, len(findings))
 	for i, f := range findings {
-		lines[i] = fmt.Sprintf("[%s/%s] %s: %s (fix: %s)", f.Lens, f.Severity, f.Location, f.Text, f.Fix)
+		line := fmt.Sprintf("[%s/%s] %s: %s (fix: %s)", f.Lens, f.Severity, f.Location, f.Text, f.Fix)
+		if f.ID != "" {
+			line = f.ID + " " + line
+		}
+		lines[i] = line
 	}
 	return strings.Join(lines, "\n")
+}
+
+// needsDispositionLabel is the fenced input carrying above-floor findings a
+// planning resume delivers; the planner must answer each with a disposition
+// of fixed or disputed (ticket 72, task 2 on).
+const needsDispositionLabel = "needs_disposition"
+
+// floorResumeInputs splits findings at floor into the fenced inputs a
+// planning resume carries: "findings" for the at-or-below-floor survivors
+// and "needs_disposition" for the above-floor ones (owner decision Q1 on
+// ticket 72: every above-floor finding, whatever the floor, goes back to the
+// planner). Either side is left out of the result when it is empty.
+func floorResumeInputs(findings []response.Finding, floor response.Severity) []prompt.NamedInput {
+	var atOrBelow, above []response.Finding
+	for _, f := range findings {
+		if f.Severity.Rank() <= floor.Rank() {
+			atOrBelow = append(atOrBelow, f)
+		} else {
+			above = append(above, f)
+		}
+	}
+	var inputs []prompt.NamedInput
+	if len(atOrBelow) > 0 {
+		inputs = append(inputs, prompt.Findings(renderFindings(atOrBelow)))
+	}
+	if len(above) > 0 {
+		inputs = append(inputs, prompt.NamedInput{Label: needsDispositionLabel, Text: renderFindings(above), Untrusted: true})
+	}
+	return inputs
 }
 
 // gateFindingTextMaxRunes caps each finding's text on the owner-chose gate
@@ -1918,7 +1956,7 @@ func gateRejectExtra(ctx context.Context, t store.Ticket, d Deps, notes string) 
 	if err != nil {
 		return nil, err
 	}
-	return []prompt.NamedInput{prompt.Findings(renderFindings(findings)), prompt.Notes(notes)}, nil
+	return append(floorResumeInputs(findings, d.Floor), prompt.Notes(notes)), nil
 }
 
 // rejectedGateWasCapped reports whether the current cohort's exact plan
@@ -2151,11 +2189,11 @@ func (h planningHandler) enterFromEscalationRound(ctx context.Context, t store.T
 	case capLoops && choice == escalationChoiceAccept:
 		commit, err = acceptPlanAtCap(ctx, t, d, resolveIDs)
 	case origin == response.EscalationOriginCapLoops && choice == escalationChoiceRetry:
-		findings, findErr := outstandingFloorFindings(ctx, t, d)
+		findings, findErr := storedPlanreviewFindings(ctx, t, d)
 		if findErr != nil {
 			return store.HandlerCommit{}, findErr
 		}
-		commit, err = resumeOrFresh(ctx, t, d, []prompt.NamedInput{prompt.Findings(renderFindings(findings)), prompt.Notes(notes)}, resolveIDs)
+		commit, err = resumeOrFresh(ctx, t, d, append(floorResumeInputs(findings, d.Floor), prompt.Notes(notes)), resolveIDs)
 	case origin == response.EscalationOriginCapLoops:
 		commit, err = resumeOrFresh(ctx, t, d, notesAndError, resolveIDs)
 
@@ -2291,28 +2329,6 @@ func storedPlanreviewFindings(ctx context.Context, t store.Ticket, d Deps) ([]re
 		return nil, fmt.Errorf("job: planning: stored planreview findings: unmarshal planreview artifact: %w", unmarshalErr)
 	}
 	return payload.Findings, nil
-}
-
-// outstandingFloorFindings reads the current cohort's planreview artifact
-// and returns its at-or-below-floor survivors (design section 6.7's
-// cap_loops retry row): the same set maybeResumeFloorFindings itself
-// resumes with (section 5.1 step 7), independent of whether that step's own
-// "live pending marker" check would still find one live -- choosing retry on
-// the cap_loops escalation is itself the trigger. nil, nil when there is no
-// cohort or no planreview artifact at its version yet (unreachable in
-// practice: a cap_loops escalation cannot exist without one).
-func outstandingFloorFindings(ctx context.Context, t store.Ticket, d Deps) ([]response.Finding, error) {
-	findings, err := storedPlanreviewFindings(ctx, t, d)
-	if err != nil {
-		return nil, err
-	}
-	atOrBelow := make([]response.Finding, 0, len(findings))
-	for _, f := range findings {
-		if f.Severity.Rank() <= d.Floor.Rank() {
-			atOrBelow = append(atOrBelow, f)
-		}
-	}
-	return atOrBelow, nil
 }
 
 // resolveCapResumesEscalation is section 6.7's cap_resumes retry/back row

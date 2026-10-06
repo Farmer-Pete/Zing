@@ -739,7 +739,9 @@ func TestPlanningHandler_Gate_Reject_CapGateIncludesAboveFloorFindings(t *testin
 
 	planVersion, runID := seedCohort(t, s, ticketID, validPlan("Cap gate reject above floor."), validScenarios(2, "capreject2"))
 	minor := finding(response.SeverityMinor, "plan/design/shape", "still a bit off", "tighten the copy")
+	minor.ID = fmt.Sprintf("p%d-f1", planVersion)
 	major := finding(response.SeverityMajor, "plan/design/other", "the plan skips migrations", "add a migration step")
+	major.ID = fmt.Sprintf("p%d-f2", planVersion)
 	seedPlanreviewArtifact(t, s, ticketID, planVersion, runID, minor, major)
 	insertUpdateMarker(t, s, ticketID, fmt.Sprintf("gate cap reached plan v%d", planVersion))
 
@@ -769,6 +771,22 @@ func TestPlanningHandler_Gate_Reject_CapGateIncludesAboveFloorFindings(t *testin
 	}
 	if !strings.Contains(rec.lastReq.Prompt, notes) {
 		t.Errorf("resume prompt does not carry the owner's rejection notes:\n%s", rec.lastReq.Prompt)
+	}
+
+	i := strings.Index(rec.lastReq.Prompt, "needs_disposition:")
+	if i < 0 {
+		t.Fatalf("resume prompt does not carry a needs_disposition input:\n%s", rec.lastReq.Prompt)
+	}
+	wantMinorID := fmt.Sprintf("p%d-f1", planVersion)
+	wantMajorID := fmt.Sprintf("p%d-f2", planVersion)
+	if !strings.Contains(rec.lastReq.Prompt[i:], wantMajorID+" [correctness/major] plan/design/other") {
+		t.Errorf("needs_disposition section does not carry the major's id line:\n%s", rec.lastReq.Prompt[i:])
+	}
+	if !strings.Contains(rec.lastReq.Prompt[:i], wantMinorID+" [correctness/minor] plan/design/shape") {
+		t.Errorf("findings section (before needs_disposition) does not carry the minor's id line:\n%s", rec.lastReq.Prompt[:i])
+	}
+	if strings.Contains(rec.lastReq.Prompt[i:], wantMinorID) {
+		t.Errorf("needs_disposition section unexpectedly carries the minor's id:\n%s", rec.lastReq.Prompt[i:])
 	}
 }
 
