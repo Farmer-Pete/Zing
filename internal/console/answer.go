@@ -41,10 +41,16 @@ const maxDraftBodyBytes = 64 << 10 // 64 KiB
 // runes so a multi-byte character counts once.
 const maxDraftTextLen = 8000
 
-// draftItemRequest is the wire shape of a DraftInput.Item.
+// draftItemRequest is the wire shape of a DraftInput.Item. Note is the
+// owner's free-text note on this one finding (ticket #68, design section
+// 6.7): empty clears it, non-empty only ever saves against a review
+// question (store.SaveDraft's own check), and it shares Text's 8000-rune
+// cap below (handleDraft), checked here rather than left to the store so
+// an over-length note reports 400 the same way an over-length reply does.
 type draftItemRequest struct {
 	Ref      string            `json:"ref"`
 	Decision response.Decision `json:"decision"`
+	Note     string            `json:"note"`
 }
 
 // draftRequest is POST /draft's body: console.js's postDraft already sends
@@ -104,6 +110,10 @@ func (c *console) handleDraft(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "bad request", http.StatusBadRequest)
 		return
 	}
+	if req.Item != nil && len([]rune(req.Item.Note)) > maxDraftTextLen {
+		http.Error(w, "bad request", http.StatusBadRequest)
+		return
+	}
 	// A question draft naming none of option, item, or text (text omitted,
 	// not an explicit "") names no mode at all: SaveDraft's draftModeCount
 	// would otherwise read it as an empty-text clear (review fix).
@@ -134,7 +144,7 @@ func (c *console) handleDraft(w http.ResponseWriter, r *http.Request) {
 
 	in := store.DraftInput{TicketID: req.Ticket, QuestionID: req.Question, Option: req.Option, Text: text, Base: req.Base}
 	if req.Item != nil {
-		in.Item = &store.ItemDecision{Ref: req.Item.Ref, Decision: req.Item.Decision}
+		in.Item = &store.ItemDecision{Ref: req.Item.Ref, Decision: req.Item.Decision, Note: req.Item.Note}
 	}
 
 	_, err := c.store.SaveDraft(r.Context(), in)

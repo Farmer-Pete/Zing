@@ -16,6 +16,12 @@
         ]
       },
       "type": "object"
+    },
+    "notes": {
+      "additionalProperties": {
+        "type": "string"
+      },
+      "type": "object"
     }
   },
   "additionalProperties": false,

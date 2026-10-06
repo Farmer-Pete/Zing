@@ -586,15 +586,42 @@ func replyTexts(replies []store.MessageRow) []string {
 	return out
 }
 
+// mergedItemNotes merges every sent answer's own AnswerPayload.Notes into
+// one ref->note map, newest answer winning per ref (ticket #68, mirroring
+// mergedItemDecisions): answers arrive in ascending id order (AnsweredRounds'
+// own Answers). For each ref a row decides (present in ap.Items), it sets
+// that row's own note or deletes the ref when the row carries none, so a
+// later pick on a ref with no note clears an earlier one rather than
+// leaving it in place.
+func mergedItemNotes(answers []store.MessageRow) map[string]string {
+	out := make(map[string]string)
+	for i := range answers {
+		var ap response.AnswerPayload
+		if err := json.Unmarshal(answers[i].Payload, &ap); err != nil {
+			continue
+		}
+		for ref := range ap.Items {
+			if note := ap.Notes[ref]; note != "" {
+				out[ref] = note
+			} else {
+				delete(out, ref)
+			}
+		}
+	}
+	return out
+}
+
 // triage is TRIAGE (design section 6.5): entry is decision tree step (1)'s
 // own "newest question kind review" branch, once the owner has answered the
 // review question (6.4). It stores one new finding row per item, carrying
 // the owner's own decision or the safe default accept (a missing or
 // out-of-set decision, logged at warn); the row's own OwnerPicked is true
 // only for the owner's own valid decision, never for the defaulted accept.
-// It also writes one "review note <id>" marker per discussed item (D24: the
-// owner's reply on the question applies to every finding discussed in that
-// answer), and resolves the round's own question. No state transition and
+// It also writes one "review note <id>" marker per discussed item: a
+// finding's own note (ticket #68, mergedItemNotes) wins when the owner
+// saved one on that item's row, else D24's own joined question-level reply
+// applies, else reviewNoteNone. It resolves the round's own question. No
+// state transition and
 // no new Waiting (baseCommit's own nil clears it): the next tick's decision
 // tree step (2) or (3) routes the ticket on from the decisions this commit
 // just stored.
@@ -614,7 +641,8 @@ func (h reviewingHandler) triage(ctx context.Context, t store.Ticket, d Deps, ro
 	}
 	newest := newestFindingRowPerID(findings)
 	decisions := mergedItemDecisions(round.Answers)
-	note := strings.Join(replyTexts(round.Replies), "\n")
+	notes := mergedItemNotes(round.Answers)
+	reply := strings.Join(replyTexts(round.Replies), "\n")
 
 	c := baseCommit(t, d)
 	c.ResolveQuestions = questionIDs(round)
@@ -640,12 +668,18 @@ func (h reviewingHandler) triage(ctx context.Context, t store.Ticket, d Deps, ro
 		c.Artifacts = append(c.Artifacts, store.Artifact{Type: artifactTypeFinding, RunID: row.RunID, Payload: payload})
 
 		if fd == response.FindingDiscuss {
-			body := "review note " + finding.ID + "\n"
-			if note == "" {
-				body += reviewNoteNone
-			} else {
-				body += note
+			noteSource := "none"
+			noteText := reviewNoteNone
+			switch {
+			case notes[item.Ref] != "":
+				noteSource = "own"
+				noteText = notes[item.Ref]
+			case reply != "":
+				noteSource = "reply"
+				noteText = reply
 			}
+			slog.DebugContext(ctx, "review note source", "ticket_id", t.ID, "run_id", row.RunID, "question_id", q.ID, "finding_id", finding.ID, "note_source", noteSource)
+			body := "review note " + finding.ID + "\n" + noteText
 			c.Messages = append(c.Messages, store.Message{TicketID: t.ID, Type: msgTypeUpdate, Author: authorSystem, Body: body})
 		}
 	}

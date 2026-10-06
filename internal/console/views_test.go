@@ -919,6 +919,10 @@ func TestThreadRendersDraftOptionPicked(t *testing.T) {
 	}
 }
 
+// testItemRefAGo is the item ref "a.go", reused across the perimeter and
+// review item-note tests below (goconst).
+const testItemRefAGo = "a.go"
+
 // perimeterQuestionPayload builds a minimal, schema-valid perimeter
 // question payload with two file items, for the item-kind draft tests
 // below: hand-built rather than through console.SeedQuestionFixtures, so
@@ -956,7 +960,7 @@ func TestThreadRendersDraftItemsPicked(t *testing.T) {
 
 	if _, err := s.SaveDraft(t.Context(), store.DraftInput{
 		TicketID: ticketID, QuestionID: &questionID,
-		Item: &store.ItemDecision{Ref: "a.go", Decision: response.DecisionAccept},
+		Item: &store.ItemDecision{Ref: testItemRefAGo, Decision: response.DecisionAccept},
 	}); err != nil {
 		t.Fatalf("SaveDraft(item): %v", err)
 	}
@@ -988,7 +992,7 @@ func TestThreadDraftItemClearsAfterSend(t *testing.T) {
 
 	if _, err := s.SaveDraft(t.Context(), store.DraftInput{
 		TicketID: ticketID, QuestionID: &questionID,
-		Item: &store.ItemDecision{Ref: "a.go", Decision: response.DecisionAccept},
+		Item: &store.ItemDecision{Ref: testItemRefAGo, Decision: response.DecisionAccept},
 	}); err != nil {
 		t.Fatalf("SaveDraft(a.go accept): %v", err)
 	}
@@ -1016,6 +1020,115 @@ func TestThreadDraftItemClearsAfterSend(t *testing.T) {
 	if !strings.Contains(g, `class="decision picked" aria-pressed="true" data-draft-ticket="`+strconv.FormatInt(ticketID, 10)+
 		`" data-draft-question="`+strconv.FormatInt(questionID, 10)+`" data-item-ref="b.go" data-decision="reject"`) {
 		t.Errorf("b.go's still-unsent draft decision missing its picked rendering; got:\n%s", g)
+	}
+}
+
+// reviewQuestionPayload builds a minimal, schema-valid review question
+// payload with two findings, for the item note test below: the review
+// kind's own payload, parallel to perimeterQuestionPayload above.
+const reviewQuestionPayload = `{"key":"Q1","kind":"review","state":"open","recommended":"Discuss a.go",` +
+	`"options":[],"items":[{"ref":"a.go","text":"Builder: x Change: y"},{"ref":"b.go","text":"Builder: x Change: y"}]}`
+
+// seedOpenReviewQuestion inserts one open review-kind question message on
+// ticketID with two findings, "a.go" and "b.go" (reviewQuestionPayload),
+// and returns its message id, beside seedOpenPerimeterQuestion above.
+func seedOpenReviewQuestion(t *testing.T, s *store.Store, ticketID int64) int64 {
+	t.Helper()
+	openState := testQuestionStateOpen
+	id, err := s.InsertMessage(t.Context(), store.Message{
+		TicketID: ticketID, Type: testMsgTypeQuestion, Author: testAuthorZing, State: &openState,
+		Body:    "Review these findings\n\nDecide each one.",
+		Payload: []byte(reviewQuestionPayload),
+	})
+	if err != nil {
+		t.Fatalf("InsertMessage(review question): %v", err)
+	}
+	return id
+}
+
+// TestThreadRendersReviewItemNote proves a review question's own drafted
+// per-finding note renders back into its note box's value (ticket #68,
+// design section 6.7, bug fix: a typed note that never rendered back would
+// look lost the same way a bare reply draft once did), that the question
+// element itself carries data-kind="review" so the client can find it, and
+// that a perimeter question -- same item-kind family, no notes -- renders
+// no item-note input at all.
+func TestThreadRendersReviewItemNote(t *testing.T) {
+	t.Parallel()
+	s := newConsoleTestStore(t)
+	ticketID := seedTicket(t, s, "t#11", "Thread review item note ticket")
+	reviewQID := seedOpenReviewQuestion(t, s, ticketID)
+	perimeterQID := seedOpenPerimeterQuestion(t, s, ticketID)
+
+	if _, err := s.SaveDraft(t.Context(), store.DraftInput{
+		TicketID: ticketID, QuestionID: &reviewQID,
+		Item: &store.ItemDecision{Ref: testItemRefAGo, Decision: response.DecisionDrop, Note: "out of scope"},
+	}); err != nil {
+		t.Fatalf("SaveDraft(review item note): %v", err)
+	}
+	if _, err := s.SaveDraft(t.Context(), store.DraftInput{
+		TicketID: ticketID, QuestionID: &perimeterQID,
+		Item: &store.ItemDecision{Ref: testItemRefAGo, Decision: response.DecisionAccept},
+	}); err != nil {
+		t.Fatalf("SaveDraft(perimeter item): %v", err)
+	}
+
+	srv := newTestServer(t, s, bus.New(), nil, newTestLogHandler(t))
+	main := mainFrame(t, srv.URL, "thread", ticketID, 0)
+
+	groups := splitQuestionGroups(t, main)
+	reviewGroup := findGroup(t, groups, "Review these findings")
+	perimeterGroup := findGroup(t, groups, "Confirm the file perimeter")
+
+	if !strings.Contains(reviewGroup, `data-kind="review"`) {
+		t.Errorf("review question group missing data-kind=\"review\"; got:\n%s", reviewGroup)
+	}
+	if !strings.Contains(reviewGroup, `class="item-note" value="out of scope"`) {
+		t.Errorf("review question missing a.go's drafted note rendered back; got:\n%s", reviewGroup)
+	}
+	if strings.Contains(perimeterGroup, "item-note") {
+		t.Errorf("perimeter question renders an item-note control; got:\n%s", perimeterGroup)
+	}
+}
+
+// TestThreadRendersReviewItemNote_Locked proves the locked path
+// TestThreadRendersReviewItemNote above does not reach (review fix, tests):
+// once a review question is fully decided and no longer Interactive, its
+// dropped finding's note renders read-only as span.item-note-text, with no
+// item-note input at all.
+func TestThreadRendersReviewItemNote_Locked(t *testing.T) {
+	t.Parallel()
+	s := newConsoleTestStore(t)
+	ticketID := seedTicket(t, s, "t#12", "Thread review item note locked ticket")
+	reviewQID := seedOpenReviewQuestion(t, s, ticketID)
+
+	if _, err := s.SaveDraft(t.Context(), store.DraftInput{
+		TicketID: ticketID, QuestionID: &reviewQID,
+		Item: &store.ItemDecision{Ref: testItemRefAGo, Decision: response.DecisionDrop, Note: "out of scope"},
+	}); err != nil {
+		t.Fatalf("SaveDraft(a.go drop with note): %v", err)
+	}
+	if _, err := s.SaveDraft(t.Context(), store.DraftInput{
+		TicketID: ticketID, QuestionID: &reviewQID,
+		Item: &store.ItemDecision{Ref: "b.go", Decision: response.DecisionAccept},
+	}); err != nil {
+		t.Fatalf("SaveDraft(b.go accept): %v", err)
+	}
+	if _, err := s.SendBatch(t.Context(), ticketID); err != nil {
+		t.Fatalf("SendBatch: %v", err)
+	}
+
+	srv := newTestServer(t, s, bus.New(), nil, newTestLogHandler(t))
+	main := mainFrame(t, srv.URL, "thread", ticketID, 0)
+
+	groups := splitQuestionGroups(t, main)
+	reviewGroup := findGroup(t, groups, "Review these findings")
+
+	if strings.Contains(reviewGroup, "item-note\" value=") {
+		t.Errorf("locked review question still renders an editable item-note input; got:\n%s", reviewGroup)
+	}
+	if !strings.Contains(reviewGroup, `<span class="item-note-text">out of scope</span>`) {
+		t.Errorf("locked review question missing a.go's note as read-only text; got:\n%s", reviewGroup)
 	}
 }
 

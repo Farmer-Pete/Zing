@@ -1778,6 +1778,7 @@ func buildThreadQuestion(ticket *store.Ticket, m *store.MessageRow, messageCount
 			q.DraftOption = *draft.Answer.Option
 		}
 		q.DraftItems = draft.Answer.Items
+		q.DraftNotes = draft.Answer.Notes
 	}
 	// A revisable question with no unsent draft yet still shows its last
 	// sent pick, chip-picked the same way an unsent draft would, so the
@@ -1790,6 +1791,7 @@ func buildThreadQuestion(ticket *store.Ticket, m *store.MessageRow, messageCount
 			}
 			if len(ap.Items) > 0 {
 				q.DraftItems = ap.Items
+				q.DraftNotes = ap.Notes
 			}
 		}
 	}
@@ -1805,6 +1807,7 @@ func buildThreadQuestion(ticket *store.Ticket, m *store.MessageRow, messageCount
 			}
 			if len(ap.Items) > 0 {
 				q.PickedItems = ap.Items
+				q.PickedNotes = ap.Notes
 			}
 		}
 	}
