@@ -20,6 +20,10 @@ const (
 	amendedGiven  = "a new given"
 )
 
+// amendedEscalationBody is the escalation body owner_edit_test.go's amended
+// escalation fixtures repeat (goconst).
+const amendedEscalationBody = "cannot_run: amended"
+
 // scenarioSealedAt reads back ticketID's scenario id's sealed_at column, so
 // TestCommitHandlerResultScenarioEdit can prove the ScenarioEdit step leaves
 // it unchanged.

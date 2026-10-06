@@ -536,25 +536,37 @@ func TestOwnerEditKind(t *testing.T) {
 		t.Errorf("payload = %s, want unchanged %s", after, before)
 	}
 
-	// A check the owner types in the same edit is exempt: the owner read
-	// what they typed, so the switch to kind host does not re-run
-	// HostCheckUnsafe against it (#57, r2f9).
+	// Q16 drops the owner-typed exemption entirely: an edit that sets kind
+	// host and, in the same edit, types an unsafe check is refused too,
+	// whoever wrote the check (#57, r4f8).
 	ownedUnsafe := "go test ./typed\u202e"
-	if editErr := s.OwnerEdit(t.Context(), OwnerEditRequest{
+	before = readScenarioPayload(t, s, ticketID, "s2")
+	err = s.OwnerEdit(t.Context(), OwnerEditRequest{
 		TicketID: ticketID, Target: OwnerEditScenario, Ref: "s2", Action: OwnerEditActionEdit,
 		Kind: new("host"), Check: &ownedUnsafe,
-	}); editErr != nil {
-		t.Fatalf("OwnerEdit(kind host, owner-typed bidi check): %v", editErr)
+	})
+	refusal, ok = errors.AsType[*OwnerEditError](err)
+	if !ok {
+		t.Fatalf("OwnerEdit(kind host, owner-typed bidi check) error = %v (%T), want *OwnerEditError", err, err)
 	}
-	if err := json.Unmarshal(readScenarioPayload(t, s, ticketID, "s2"), &sc); err != nil {
-		t.Fatalf("unmarshal scenario s2: %v", err)
+	if refusal.Code != OwnerEditCodeInvalid {
+		t.Errorf("code = %q, want %q", refusal.Code, OwnerEditCodeInvalid)
 	}
-	if sc.Kind != response.ScenarioKindHost || sc.Check != ownedUnsafe {
-		t.Errorf("scenario s2 = %+v, want kind host, check %q", sc, ownedUnsafe)
+	if after := readScenarioPayload(t, s, ticketID, "s2"); !bytes.Equal(after, before) {
+		t.Errorf("payload = %s, want unchanged %s", after, before)
 	}
 
-	// An edit to only given, when or then on a scenario that is already
-	// host is exempt: it neither switches kind nor sets check (#57, r2f9).
+	// Switch s2 to host with a safe check, then prove an edit to only
+	// given, when or then on a scenario that is already host still runs
+	// HostCheckUnsafe against the resulting (already-stored, safe) check
+	// and so is unaffected (#57, Q16).
+	safeCheck := "go test ./safe"
+	if editErr := s.OwnerEdit(t.Context(), OwnerEditRequest{
+		TicketID: ticketID, Target: OwnerEditScenario, Ref: "s2", Action: OwnerEditActionEdit,
+		Kind: new("host"), Check: &safeCheck,
+	}); editErr != nil {
+		t.Fatalf("OwnerEdit(kind host, safe check): %v", editErr)
+	}
 	if editErr := s.OwnerEdit(t.Context(), OwnerEditRequest{
 		TicketID: ticketID, Target: OwnerEditScenario, Ref: "s2", Action: OwnerEditActionEdit,
 		Given: new(amendedGiven),
@@ -564,8 +576,8 @@ func TestOwnerEditKind(t *testing.T) {
 	if err := json.Unmarshal(readScenarioPayload(t, s, ticketID, "s2"), &sc); err != nil {
 		t.Fatalf("unmarshal scenario s2: %v", err)
 	}
-	if sc.Given != amendedGiven || sc.Check != ownedUnsafe {
-		t.Errorf("scenario s2 = %+v, want given %q, check unchanged %q", sc, amendedGiven, ownedUnsafe)
+	if sc.Given != amendedGiven || sc.Check != safeCheck {
+		t.Errorf("scenario s2 = %+v, want given %q, check unchanged %q", sc, amendedGiven, safeCheck)
 	}
 }
 
@@ -863,7 +875,7 @@ func seedAmendedEscalation(t *testing.T, s *Store, ticketID int64, ref string) i
 	owner, expires := claimForCommit(t, s, ticketID)
 	if _, err := s.CommitHandlerResult(t.Context(), HandlerCommit{
 		TicketID: ticketID, Owner: owner, Expires: expires,
-		Escalation: &EscalationCommit{Body: "cannot_run: amended", Payload: payload},
+		Escalation: &EscalationCommit{Body: amendedEscalationBody, Payload: payload},
 	}); err != nil {
 		t.Fatalf("CommitHandlerResult(escalation): %v", err)
 	}
@@ -1066,7 +1078,7 @@ func TestOwnerEditAnswersAmendedEscalation(t *testing.T) {
 		owner, expires := claimForCommit(t, s, ticketID)
 		if _, err := s.CommitHandlerResult(t.Context(), HandlerCommit{
 			TicketID: ticketID, Owner: owner, Expires: expires,
-			Escalation: &EscalationCommit{Body: "cannot_run: amended", Payload: payload},
+			Escalation: &EscalationCommit{Body: amendedEscalationBody, Payload: payload},
 		}); err != nil {
 			t.Fatalf("CommitHandlerResult(escalation): %v", err)
 		}
@@ -1096,6 +1108,70 @@ func TestOwnerEditAnswersAmendedEscalation(t *testing.T) {
 		}
 		if n, countErr := s.CountEvents(t.Context(), ticketID, EventKindOwnerEdit, EventFilter{}); countErr != nil || n != 0 {
 			t.Errorf("owner_edit events = %d (err %v), want 0", n, countErr)
+		}
+		if openAfter, openErr := s.QuestionsByState(t.Context(), ticketID, questionStateOpen); openErr != nil || len(openAfter) != 1 || openAfter[0].ID != qID {
+			t.Errorf("open questions = %+v (err %v), want still exactly [%d]", openAfter, openErr, qID)
+		}
+	})
+
+	t.Run("saving an already-host scenario's edit with the judge's unsafe check unchanged is refused (#57, r4f8)", func(t *testing.T) {
+		t.Parallel()
+		s := newTestStore(t)
+		_, ticketID := seedQueuedTicket(t, s, "1")
+		seedSealedScenario(t, s, ticketID) // s1, kind behavior
+
+		// The scenario is already host before the judge's amendment.
+		if err := s.OwnerEdit(t.Context(), OwnerEditRequest{
+			TicketID: ticketID, Target: OwnerEditScenario, Ref: "s1", Action: OwnerEditActionEdit,
+			Kind: new("host"), Check: new("go test ./host"),
+		}); err != nil {
+			t.Fatalf("OwnerEdit(kind host, safe check): %v", err)
+		}
+
+		// The judge's own amendment proposes kind behavior with an unsafe
+		// check; checkScenarioRules runs HostCheckUnsafe only for kind
+		// host, so an amendment resolving to behavior passes and is
+		// offered even though its check is unsafe for host.
+		unsafeCheck := "go test ./amended\u202e"
+		payload := escalationTestPayload(response.EscalationCodeCannotRun, response.EscalationOriginJudge)
+		payload.Amendment = &response.Amendment{
+			Scenario: "s1", Kind: response.ScenarioKindBehavior,
+			Given: "g2", When: "w2", Then: "t2", Check: unsafeCheck, Reason: amendedReason,
+		}
+		owner, expires := claimForCommit(t, s, ticketID)
+		if _, err := s.CommitHandlerResult(t.Context(), HandlerCommit{
+			TicketID: ticketID, Owner: owner, Expires: expires,
+			Escalation: &EscalationCommit{Body: amendedEscalationBody, Payload: payload},
+		}); err != nil {
+			t.Fatalf("CommitHandlerResult(escalation): %v", err)
+		}
+		open, err := s.QuestionsByState(t.Context(), ticketID, questionStateOpen)
+		if err != nil || len(open) != 1 {
+			t.Fatalf("QuestionsByState(open) = %+v (err %v), want exactly 1", open, err)
+		}
+		qID := open[0].ID
+		before := readScenarioPayload(t, s, ticketID, "s1")
+
+		// The owner leaves the kind select at host (the scenario's own
+		// current kind) and saves the box, which resends the judge's
+		// check unchanged. The resulting kind is host, so HostCheckUnsafe
+		// must run on it regardless of the kind having "switched".
+		err = s.OwnerEdit(t.Context(), OwnerEditRequest{
+			TicketID: ticketID, Target: OwnerEditScenario, Ref: "s1", Action: OwnerEditActionEdit,
+			Kind: new("host"), Check: new(unsafeCheck), AnswerQuestion: &qID,
+		})
+		refusal, ok := errors.AsType[*OwnerEditError](err)
+		if !ok {
+			t.Fatalf("OwnerEdit error = %v (%T), want *OwnerEditError", err, err)
+		}
+		if refusal.Code != OwnerEditCodeInvalid {
+			t.Errorf("code = %q, want %q", refusal.Code, OwnerEditCodeInvalid)
+		}
+		if after := readScenarioPayload(t, s, ticketID, "s1"); !bytes.Equal(after, before) {
+			t.Errorf("payload = %s, want unchanged %s", after, before)
+		}
+		if n, countErr := s.CountEvents(t.Context(), ticketID, EventKindOwnerEdit, EventFilter{}); countErr != nil || n != 1 {
+			t.Errorf("owner_edit events = %d (err %v), want 1 (only the earlier switch-to-host edit)", n, countErr)
 		}
 		if openAfter, openErr := s.QuestionsByState(t.Context(), ticketID, questionStateOpen); openErr != nil || len(openAfter) != 1 || openAfter[0].ID != qID {
 			t.Errorf("open questions = %+v (err %v), want still exactly [%d]", openAfter, openErr, qID)

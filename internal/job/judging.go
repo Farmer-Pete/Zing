@@ -1930,11 +1930,11 @@ func (h judgeHandler) retryFreshRound(ctx context.Context, t store.Ticket, d Dep
 func (h judgeHandler) acceptAmendment(ctx context.Context, t store.Ticket, d Deps, resolveIDs []int64, payload response.EscalationPayload, runID, sessionID *int64) (store.HandlerCommit, error) {
 	scenarios, err := judgeScenariosFor(ctx, t, d)
 	if err != nil {
-		return store.HandlerCommit{}, err
+		return store.HandlerCommit{}, fmt.Errorf("job: judging: accept amendment: %w", err)
 	}
 	_, a, refusal := judgeAmendment(scenarios, *payload.Amendment)
 	if refusal != "" {
-		slog.Warn("judge amendment refused at accept", "ticket_id", t.ID, "scenario_id", payload.Amendment.Scenario, "question_ids", resolveIDs, "refusal", refusal)
+		slog.Warn("judge amendment refused at accept", "ticket_id", t.ID, "run_id", int64OrZero(runID), "scenario_id", payload.Amendment.Scenario, "question_ids", resolveIDs, "refusal", refusal)
 		tried := appendTried(payload.Tried, judgeAmendmentDroppedPrefix+refusal)
 		code := string(response.EscalationCodeCannotRun)
 		// judgeEscalation's own generic "escalation written" Warn (design
@@ -1953,7 +1953,7 @@ func (h judgeHandler) acceptAmendment(ctx context.Context, t store.Ticket, d Dep
 	}
 	prevN, err := judgeNewestRoundNumber(markers)
 	if err != nil {
-		return store.HandlerCommit{}, err
+		return store.HandlerCommit{}, fmt.Errorf("job: judging: accept amendment: %w", err)
 	}
 
 	// h.start is RUN's own round-start commit (judging.go): one marker
@@ -1962,7 +1962,7 @@ func (h judgeHandler) acceptAmendment(ctx context.Context, t store.Ticket, d Dep
 	// written in exactly one place (#57, r2f3 triage).
 	c, err := h.start(ctx, t, d, prevN+1)
 	if err != nil {
-		return store.HandlerCommit{}, err
+		return store.HandlerCommit{}, fmt.Errorf("job: judging: accept amendment: %w", err)
 	}
 	if c.Escalation != nil {
 		// judgeStartChecks escalated instead of starting the round: the
@@ -1971,11 +1971,11 @@ func (h judgeHandler) acceptAmendment(ctx context.Context, t store.Ticket, d Dep
 		// judgeEscalation's own generic "escalation written" Warn, which
 		// carries no scenario_id or question_ids and does not say an
 		// accepted amendment went unapplied (#57, r2f4 triage).
-		slog.Warn("judge amendment not applied: start checks escalated", "ticket_id", t.ID, "scenario_id", a.Scenario, "question_ids", resolveIDs)
+		slog.Warn("judge amendment not applied: start checks escalated", "ticket_id", t.ID, "run_id", int64OrZero(runID), "scenario_id", a.Scenario, "question_ids", resolveIDs)
 		return c, nil
 	}
 
-	slog.Info("judge amendment accepted", "ticket_id", t.ID, "scenario_id", a.Scenario, "kind", string(a.Kind), "round", prevN+1, "question_ids", resolveIDs)
+	slog.Info("judge amendment accepted", "ticket_id", t.ID, "run_id", int64OrZero(runID), "scenario_id", a.Scenario, "kind", string(a.Kind), "round", prevN+1, "question_ids", resolveIDs)
 	c.ScenarioEdit = &store.ScenarioEdit{Ref: a.Scenario, Kind: a.Kind, Given: a.Given, When: a.When, Then: a.Then, Check: a.Check, Reason: a.Reason}
 	c.ResolveQuestions = resolveIDs
 	return c, nil

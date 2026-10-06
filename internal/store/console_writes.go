@@ -62,10 +62,7 @@ func conflict(reason string) error { return &ConflictError{Reason: reason} }
 const changedInAnotherTabReason = "changed in another tab"
 
 // SendOrigin says whether a send request reached the store from this
-// machine: SendBatchOnly's bare positional bool said nothing at any call
-// site about what true or false meant, and its own doc comment named a
-// amendmentAcceptLoopbackOnly constant that did not exist (#57, r2f7
-// triage). Only SendFromLoopback may send a draft that answers "Accept the
+// machine. Only SendFromLoopback may send a draft that answers "Accept the
 // amended check" (amendmentAcceptLoopbackOnlyReason).
 type SendOrigin bool
 
