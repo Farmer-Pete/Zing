@@ -151,6 +151,13 @@ var (
 	judgeRoundRetryLine    = regexp.MustCompile(`^judge round ([1-9]\d*) retry after run (\d+)$`)
 	judgeRoundFailedLine   = regexp.MustCompile(`^judge round ([1-9]\d*) failed$`)
 	judgeRoundVerdictsLine = regexp.MustCompile(`^judge round ([1-9]\d*) verdicts run (\d+)$`)
+	// judgeRoundSameSHALine is the same-sha guard's own marker (ticket #50,
+	// Q1): written only once the guard has actually escalated for round n,
+	// so a markerRetryRequested from some unrelated mid-fix escalation
+	// (judgeStartChecks's own worktree or branch check) can never be mistaken
+	// for the owner's answer to this guard -- there is nothing to compare it
+	// against until the guard has fired at least once.
+	judgeRoundSameSHALine = regexp.MustCompile(`^judge round ([1-9]\d*) same sha escalated$`)
 )
 
 // judgeCoverageFailedFmt and judgeCoverageDeliveredFmt are the coverage
@@ -276,8 +283,14 @@ func (h judgeHandler) Run(ctx context.Context, t store.Ticket, d Deps) (store.Ha
 	firstLine, _, _ := strings.Cut(newest.Body, "\n")
 
 	switch {
-	case judgeRoundFailedLine.MatchString(firstLine):
-		sub := judgeRoundFailedLine.FindStringSubmatch(firstLine)
+	case judgeRoundFailedLine.MatchString(firstLine), judgeRoundSameSHALine.MatchString(firstLine):
+		alreadyEscalated := judgeRoundSameSHALine.MatchString(firstLine)
+		var sub []string
+		if alreadyEscalated {
+			sub = judgeRoundSameSHALine.FindStringSubmatch(firstLine)
+		} else {
+			sub = judgeRoundFailedLine.FindStringSubmatch(firstLine)
+		}
 		m, convErr := strconv.Atoi(sub[1])
 		if convErr != nil {
 			return store.HandlerCommit{}, fmt.Errorf("job: judging: parse failed round %q: %w", firstLine, convErr)
@@ -306,26 +319,22 @@ func (h judgeHandler) Run(ctx context.Context, t store.Ticket, d Deps) (store.Ha
 		}
 
 		if sha == prevSHA {
-			// review finding r1f5: the fix that lands round m's own fix
-			// request runs as an ordinary build/fix round, and anything it
-			// escalates along the way (a sandbox hiccup, judgeStartChecks's
-			// own worktree or branch check on an earlier tick) carries this
+			_, idsLine, _ := strings.Cut(newest.Body, "\n")
+
+			// The fix that lands round m's own fix request runs as an
+			// ordinary build/fix round, and anything it escalates along the
+			// way (a sandbox hiccup, judgeStartChecks's own worktree or
+			// branch check, raised on this very branch above) carries this
 			// same origin "judge" and, retried, writes the very same bare
-			// markerRetryRequested this guard looks for. Comparing against
-			// "newest" (round m's own failed marker, written before the fix
-			// ever opened) would mistake that unrelated retry for the
-			// owner's own answer to this guard. The newest "fix landed"
-			// marker -- round m's fix landing is always the latest one by
-			// the time this branch ever runs -- sits after every one of
-			// those mid-fix retries, so only a retry requested after it can
-			// be the owner's answer to this guard.
-			floor := newest.ID
-			landed, landedErr := d.Store.MarkersWithPrefix(ctx, t.ID, fixLandedPrefix)
-			if landedErr != nil {
-				return store.HandlerCommit{}, fmt.Errorf("job: judging: fix landed markers: %w", landedErr)
-			}
-			if n := len(landed); n > 0 && landed[n-1].ID > floor {
-				floor = landed[n-1].ID
+			// markerRetryRequested this guard looks for. Until this guard has
+			// actually escalated for round m (judgeRoundSameSHALine not yet
+			// newest), there is no marker of this guard's own to compare a
+			// retry against, so any retry seen so far must answer one of
+			// those unrelated mid-fix escalations instead: escalate
+			// unconditionally rather than let it stand in for an answer the
+			// owner never gave.
+			if !alreadyEscalated {
+				return judgeSameSHAEscalation(t, d, m, sha, strings.Split(idsLine, ",")), nil
 			}
 
 			retries, retryErr := d.Store.MarkersWithPrefix(ctx, t.ID, markerRetryRequested)
@@ -334,13 +343,12 @@ func (h judgeHandler) Run(ctx context.Context, t store.Ticket, d Deps) (store.Ha
 			}
 			retried := false
 			for i := range retries {
-				if retries[i].ID > floor && retries[i].Body == markerRetryRequested {
+				if retries[i].ID > newest.ID && retries[i].Body == markerRetryRequested {
 					retried = true
 					break
 				}
 			}
 			if !retried {
-				_, idsLine, _ := strings.Cut(newest.Body, "\n")
 				return judgeSameSHAEscalation(t, d, m, sha, strings.Split(idsLine, ",")), nil
 			}
 		}
@@ -597,14 +605,23 @@ func judgeStartCommit(t store.Ticket, d Deps, n int, sha string, maxRunID int64)
 // (design section 7.1, ticket #50 Q1): a "failure" fix landed with no new
 // commit, so round m's own failing scenarios (ids) still fail at sha, and
 // judging again would only repeat round m. The owner's Retry re-judges
-// that same sha anyway (the failed-round branch's own retried check).
+// that same sha anyway (the failed-round branch's own retried check), which
+// looks for a markerRetryRequested newer than the "judge round m same sha
+// escalated" marker this writes alongside the escalation -- the floor that
+// keeps an unrelated mid-fix retry from ever counting as the owner's answer.
 func judgeSameSHAEscalation(t store.Ticket, d Deps, m int, sha string, ids []string) store.HandlerCommit {
 	what := fmt.Sprintf("the fix changed no code, so judging again would repeat round %d", m)
 	why := fmt.Sprintf("round %d failed at sha %s and the fix landed at that same sha", m, sha)
-	tried := fmt.Sprintf("scenarios still failing: %s\nif a check looks wrong, edit it in the console and pick Retry to judge this sha again.", strings.Join(ids, ","))
+	idsLine := strings.Join(ids, ",")
+	tried := fmt.Sprintf("scenarios still failing: %s\nif a check looks wrong, edit it in the console and pick Retry to judge this sha again.", idsLine)
 	slog.Warn("escalation written", "ticket_id", t.ID, "session_id", nil, "run_id", nil,
 		"code", string(response.EscalationCodeCannotRun), "origin", string(response.EscalationOriginJudge))
-	return escalationCommit(t, d, nil, nil, string(response.EscalationCodeCannotRun), what, why, tried, response.EscalationOriginJudge)
+	c := escalationCommit(t, d, nil, nil, string(response.EscalationCodeCannotRun), what, why, tried, response.EscalationOriginJudge)
+	c.Messages = []store.Message{{
+		TicketID: t.ID, Type: msgTypeUpdate, Author: authorSystem,
+		Body: fmt.Sprintf("judge round %d same sha escalated\n%s", m, idsLine),
+	}}
+	return c
 }
 
 // ---- RUN (design section 7.2) ---------------------------------------------

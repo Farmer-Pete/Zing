@@ -108,8 +108,9 @@ func TestCheckRefusesOutsideJudgeRun(t *testing.T) {
 	token := strconv.FormatInt(runID, 10)
 
 	cases := map[string]struct {
-		args []string
-		env  map[string]string
+		args    []string
+		env     map[string]string
+		wantErr string // non-empty: stderr must equal this exactly, not just one line
 	}{
 		"missing token": {
 			args: []string{"s1"},
@@ -120,8 +121,24 @@ func TestCheckRefusesOutsideJudgeRun(t *testing.T) {
 			env:  map[string]string{scenariosTokenEnv: "32", scenariosFileEnv: path},
 		},
 		"no args": {
-			args: nil,
-			env:  map[string]string{scenariosTokenEnv: token, scenariosFileEnv: path},
+			args:    nil,
+			env:     map[string]string{scenariosTokenEnv: token, scenariosFileEnv: path},
+			wantErr: checkUsage,
+		},
+		// "malformed id" reaches checkIDPattern.MatchString itself, the half
+		// of check's own argument check "no args" never exercises.
+		"malformed id": {
+			args:    []string{"foo"},
+			env:     map[string]string{scenariosTokenEnv: token, scenariosFileEnv: path},
+			wantErr: checkUsage,
+		},
+		// "two ids" reaches the len(args) != 1 branch with a non-empty args,
+		// short-circuiting before checkIDPattern.MatchString ever runs; it
+		// names s1, the canary scenario, so it also proves nothing ran.
+		"two ids": {
+			args:    []string{"s1", "s2"},
+			env:     map[string]string{scenariosTokenEnv: token, scenariosFileEnv: path},
+			wantErr: checkUsage,
 		},
 		"unknown id": {
 			args: []string{"s9"},
@@ -144,6 +161,9 @@ func TestCheckRefusesOutsideJudgeRun(t *testing.T) {
 			}
 			if n := strings.Count(errOut.String(), "\n"); n != 1 {
 				t.Errorf("stderr = %q, want exactly one line", errOut.String())
+			}
+			if tc.wantErr != "" && errOut.String() != tc.wantErr+"\n" {
+				t.Errorf("stderr = %q, want %q", errOut.String(), tc.wantErr+"\n")
 			}
 			if out.String() != "" {
 				t.Errorf("stdout = %q, want empty", out.String())

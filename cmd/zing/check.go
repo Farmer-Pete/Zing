@@ -26,7 +26,7 @@ const (
 )
 
 // checkTimeoutMsg is built from checkTimeout, rather than naming "10m" a
-// second time, so the two can never drift apart (review finding r1f1).
+// second time, so the two can never drift apart.
 var checkTimeoutMsg = fmt.Sprintf("zing check: timed out after %s", checkTimeout)
 
 // checkIDPattern mirrors response.Scenario's own id shape
@@ -100,9 +100,9 @@ func check(args []string, getenv func(string) string, dir string, env []string, 
 	case exitCode < 0:
 		// job.RunShell gives a negative exitCode with a nil error when the
 		// shell was killed by a signal rather than exiting on its own
-		// (exec.ExitError.ExitCode(), review finding r1f2): returning that
-		// unchanged would exit this process with status 255, a number the
-		// judge cannot tell apart from a real check exit of 255.
+		// (exec.ExitError.ExitCode()): returning that unchanged would exit
+		// this process with status 255, a number the judge cannot tell
+		// apart from a real check exit of 255.
 		fmt.Fprintln(stderr, "zing check: killed by signal")
 		return 1
 	default:

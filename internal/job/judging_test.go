@@ -2336,15 +2336,15 @@ func TestJudgeNoChangeFixRetryRejudges(t *testing.T) {
 
 // TestJudgeNoChangeFixEscalatesDespiteEarlierRetry proves the same-sha
 // guard does not mistake a markerRetryRequested written for some earlier,
-// unrelated escalation during the fix's own run (here, inserted directly
-// after round 1 fails but before the no-change fix lands, standing in for
-// an owner Retry on, say, a worktree or branch check judgeStartChecks
-// raised while landing the fix) for the owner's own answer to the
-// same-sha escalation (review finding r1f5): that stale marker already
-// sits newer than round 1's own "failed" marker, so without
-// judgeSameSHAEscalation's own fresh "failed" marker, the failed-round
-// branch's retried check would start round 2 on the sha round 1 already
-// judged.
+// unrelated escalation (here, inserted directly after round 1 fails but
+// before the no-change fix lands, standing in for an owner Retry on, say, a
+// worktree or branch check judgeStartChecks raised while landing the fix)
+// for the owner's own answer to the same-sha escalation: until
+// judgeSameSHAEscalation has actually written its own "judge round 1 same
+// sha escalated" marker, the failed-round branch escalates unconditionally,
+// so this stale retry, already newer than round 1's own "failed" marker,
+// never gets a chance to count as the owner's reply to a guard that had not
+// fired yet.
 func TestJudgeNoChangeFixEscalatesDespiteEarlierRetry(t *testing.T) {
 	if testing.Short() {
 		t.Skip("slow end-to-end flow; runs in the full suite")
@@ -2390,5 +2390,109 @@ func TestJudgeNoChangeFixEscalatesDespiteEarlierRetry(t *testing.T) {
 	}
 	if commit.Escalation.Payload.Code != string(response.EscalationCodeCannotRun) {
 		t.Errorf("escalation code = %q, want %q", commit.Escalation.Payload.Code, response.EscalationCodeCannotRun)
+	}
+}
+
+// TestJudgeNoChangeFixEscalatesDespiteRetryAfterLanding proves the same-sha
+// guard's own floor (review finding r2f3): after the no-change fix lands,
+// judgeStartChecks itself can still escalate on a later tick (here, an
+// uncommitted file left in the worktree, standing in for the mid-fix
+// worktree or branch hiccups judgeStartChecks also checks), and the
+// owner's Retry on that escalation writes the very same bare
+// markerRetryRequested the same-sha guard looks for, newer than round 1's
+// own "fix landed" marker. Without anchoring the floor to its own "judge
+// round 1 same sha escalated" marker rather than that landed marker, this
+// retry would be mistaken for the owner's answer to a same-sha escalation
+// that was never even raised yet, and round 2 would start on the sha round
+// 1 already judged.
+func TestJudgeNoChangeFixEscalatesDespiteRetryAfterLanding(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow end-to-end flow; runs in the full suite")
+	}
+	t.Parallel()
+	s, ticket := judgeTicketReady(t)
+
+	scripts := judgeScriptsFS(judgeOkBothScript)
+	scripts["build/fix/1.xml"] = &fstest.MapFile{Data: []byte(judgeNoChangeFixBuildScript)}
+	rt := runtime.NewFake(scripts)
+
+	checks := &judgeScriptedCheckCommands{real: NewCommandRunner(sandbox.Off(), false), steps: []judgeCheckStep{{exit: 1}}}
+
+	ticket = judgeFailRoundOne(t, s, ticket, rt, checks)
+
+	driveJudgeFixToLanding(t, s, ticket.ID, rt, checks, pbNoopShellCmd)
+
+	ticket = pbGetTicket(t, s, ticket.ID)
+	if ticket.State != stateJudging {
+		t.Fatalf("after the no-change fix landed: ticket state = %q, want judging", ticket.State)
+	}
+
+	deps := pbWithTestCmd(pbClaim(t, s, rt, ticket.ID), ticket, judgeFixTestCmd)
+	deps.Commands = checks
+	proj := deps.Projects[ticket.ProjectID]
+	wt, _, err := proj.Orch.EnsureWorktree(t.Context(), ticket.ID, ticket.Title)
+	if err != nil {
+		t.Fatalf("EnsureWorktree: %v", err)
+	}
+	dirtyPath := filepath.Join(wt.Dir(), "dirty.txt")
+	if writeErr := os.WriteFile(dirtyPath, []byte("uncommitted\n"), 0o600); writeErr != nil {
+		t.Fatalf("write dirty file: %v", writeErr)
+	}
+
+	dirtyCommit, err := (judgeHandler{}).Run(t.Context(), ticket, deps) // judgeStartChecks: dirty tree, unrelated to the same-sha guard
+	if err != nil {
+		t.Fatalf("Run with dirty tree: %v", err)
+	}
+	if dirtyCommit.Escalation == nil || dirtyCommit.Escalation.Payload.What != treeDirtyBeforeReviewWhat {
+		t.Fatalf("dirtyCommit.Escalation = %+v, want a tree-dirty escalation", dirtyCommit.Escalation)
+	}
+	pbApply(t, s, ticket, dirtyCommit)
+
+	open, err := s.QuestionsByState(t.Context(), ticket.ID, "open")
+	if err != nil {
+		t.Fatalf("QuestionsByState(open): %v", err)
+	}
+	if len(open) != 1 {
+		t.Fatalf("QuestionsByState(open) = %d questions, want exactly 1", len(open))
+	}
+	pbAnswerEscalation(t, s, ticket.ID, open[0].ID, "a")
+
+	deps2 := pbWithTestCmd(pbClaim(t, s, rt, ticket.ID), pbGetTicket(t, s, ticket.ID), judgeFixTestCmd)
+	deps2.Commands = checks
+	retryCommit, handled := pbRunPrelude(t, s, deps2, ticket.ID)
+	if !handled {
+		t.Fatal("handled = false, want true")
+	}
+	if len(retryCommit.Messages) != 1 || retryCommit.Messages[0].Body != markerRetryRequested {
+		t.Fatalf("retryCommit.Messages = %+v, want exactly the retry marker", retryCommit.Messages)
+	}
+
+	if rmErr := os.Remove(dirtyPath); rmErr != nil {
+		t.Fatalf("remove dirty file: %v", rmErr)
+	}
+
+	deps3 := pbWithTestCmd(pbClaim(t, s, rt, ticket.ID), pbGetTicket(t, s, ticket.ID), judgeFixTestCmd)
+	deps3.Commands = checks
+	commit, err := (judgeHandler{}).Run(t.Context(), pbGetTicket(t, s, ticket.ID), deps3) // next tick, tree clean again
+	if err != nil {
+		t.Fatalf("Run after cleaning the dirty tree: %v", err)
+	}
+
+	for _, m := range commit.Messages {
+		if strings.HasPrefix(m.Body, "judge round 2 started") {
+			t.Errorf("commit.Messages = %+v, want no \"judge round 2 started\" marker (the retry answered the dirty-tree escalation, not the same-sha guard)", commit.Messages)
+		}
+	}
+	if commit.Escalation == nil {
+		t.Fatal("commit.Escalation = nil, want a cannot_run escalation")
+	}
+	if commit.Escalation.Payload.Code != string(response.EscalationCodeCannotRun) {
+		t.Errorf("escalation code = %q, want %q", commit.Escalation.Payload.Code, response.EscalationCodeCannotRun)
+	}
+	if commit.Escalation.Payload.Origin != string(response.EscalationOriginJudge) {
+		t.Errorf("escalation origin = %q, want %q", commit.Escalation.Payload.Origin, response.EscalationOriginJudge)
+	}
+	if !strings.Contains(commit.Escalation.Payload.Tried, "s1") {
+		t.Errorf("escalation Tried = %q, want it to name s1", commit.Escalation.Payload.Tried)
 	}
 }
