@@ -3,6 +3,7 @@ package prompt
 import (
 	"strings"
 	"testing"
+	"time"
 
 	"zing/internal/response"
 )
@@ -656,4 +657,32 @@ func TestForRespondResumeHeader(t *testing.T) {
 		t.Errorf("ForRespondResume did not lead with RespondResumeHeader; got:\n%s", got)
 	}
 	assertFenced(t, got, "answers", answers)
+}
+
+// TestDeadline pins Deadline's label, raw (untrusted-false) text, and its
+// minute rounding: a build run's deadline is never fenced, since it is
+// Zing's own text, not owner- or model-supplied.
+func TestDeadline(t *testing.T) {
+	t.Parallel()
+
+	now := time.Date(2026, 10, 5, 14, 0, 0, 0, time.UTC)
+	end := time.Date(2026, 10, 5, 14, 45, 0, 0, time.UTC)
+
+	in := Deadline(now, end)
+	if in.Label != "deadline" {
+		t.Errorf("Deadline.Label = %q, want deadline", in.Label)
+	}
+	if in.Untrusted {
+		t.Error("Deadline.Untrusted = true, want false")
+	}
+	const want = "This run ends at 14:45 UTC, in 45 minutes."
+	if in.Text != want {
+		t.Errorf("Deadline.Text = %q, want %q", in.Text, want)
+	}
+
+	soon := Deadline(now, now.Add(-30*time.Second))
+	const wantSoon = "This run ends at 13:59 UTC, in 0 minutes."
+	if soon.Text != wantSoon {
+		t.Errorf("Deadline.Text = %q, want %q", soon.Text, wantSoon)
+	}
 }

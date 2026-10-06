@@ -2,8 +2,10 @@ package prompt
 
 import (
 	"fmt"
+	"math"
 	"strconv"
 	"strings"
+	"time"
 
 	"zing/internal/response"
 )
@@ -545,6 +547,15 @@ func ForRespond(jobPrompt string, styles []string, plan, diff, threads string, e
 // from the plan.
 const RespondResumeHeader = "Continue sorting these review threads. The input below says why you were resumed. " +
 	"Return the next document."
+
+// Deadline returns the raw "deadline" input telling a build run when it
+// ends: "This run ends at 15:04 MST, in N minutes.", N rounded to the
+// nearest minute and never below 0, end formatted in its own location.
+func Deadline(now, end time.Time) NamedInput {
+	minutes := max(int(math.Round(end.Sub(now).Minutes())), 0)
+	text := fmt.Sprintf("This run ends at %s, in %d minutes.", end.Format("15:04 MST"), minutes)
+	return NamedInput{Label: "deadline", Text: text}
+}
 
 // ForRespondResume builds a respond resume turn's Input: RespondResumeHeader
 // in place of a prompt file, inputs passed through unchanged -- built by

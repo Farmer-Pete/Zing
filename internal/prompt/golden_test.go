@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	zing "zing"
 	"zing/internal/response"
@@ -17,6 +18,13 @@ const goldenDir = "testdata"
 // healthCheckPlan is the stored-plan XML shared by every golden case that
 // needs one: build-first, build-fix, and review-first.
 const healthCheckPlan = "<plan><objective>Add a health check endpoint.</objective></plan>"
+
+// goldenDeadline is the deadline input shared by every build golden case
+// (build-first, build-fix, build-resume): a 45-minute run from 14:00 UTC.
+var goldenDeadline = Deadline(
+	time.Date(2026, 1, 1, 14, 0, 0, 0, time.UTC),
+	time.Date(2026, 1, 1, 14, 45, 0, 0, time.UTC),
+)
 
 // readAsset reads one file through zing.Assets, the same embed.FS
 // production code reads prompt and style files from, so these goldens
@@ -159,7 +167,8 @@ func goldenCases() []goldenCase {
 					"Body: Add a ping endpoint so uptime monitoring has something to hit."
 				plan := healthCheckPlan
 				accepted := []string{"internal/health/ping.go", "internal/health/ping_test.go"}
-				in, err := ForBuild(jobPrompt, task, "go test ./...", "make lint", ticket, plan, accepted, nil)
+				in, err := ForBuild(jobPrompt, task, "go test ./...", "make lint", ticket, plan, accepted,
+					[]NamedInput{goldenDeadline})
 				if err != nil {
 					t.Fatalf("ForBuild: %v", err)
 				}
@@ -180,6 +189,7 @@ func goldenCases() []goldenCase {
 					{Label: "claims", Text: "internal/health/ping.go: declared but not written", Untrusted: true},
 					Check("test command: go test ./...\nexit code: 1\noutput:\n--- FAIL: TestPingHandlerReturnsPong"),
 					Invalid("output was not one <zing> document"),
+					goldenDeadline,
 				})
 				in.Schemas = schemasFor(t, response.JobBuild,
 					response.OutcomeOk, response.OutcomeQuestion, response.OutcomeError)
@@ -196,7 +206,7 @@ func goldenCases() []goldenCase {
 				plan := healthCheckPlan
 				findings := "problem: internal/health/ping.go returns 500 on success."
 				in, err := ForFix(jobPrompt, "Fix review findings", "findings", findings,
-					"go test ./...", "make lint", ticket, plan, nil, nil)
+					"go test ./...", "make lint", ticket, plan, nil, []NamedInput{goldenDeadline})
 				if err != nil {
 					t.Fatalf("ForFix: %v", err)
 				}

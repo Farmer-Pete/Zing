@@ -43,7 +43,7 @@ func TestPrompts_MatchThePinnedDesignText(t *testing.T) {
 		{
 			name:   testJobNameBuild,
 			path:   "prompts/build.md",
-			sha256: "abd42e1ac7c2bd904dc54f8679c14cef7ee8d4f30b2b62c87f68bac95122348f",
+			sha256: "c474c2de970139242c79d3ccdfd4411034c1c8c659a9259bd54818ef1e18607d",
 		},
 		{
 			name:   "merge",
@@ -189,6 +189,26 @@ func TestBuildPromptLeavesFullSuiteToZing(t *testing.T) {
 const greenTasksSentence = "Every task ends with its named tests passing; " +
 	"a test written in a task is made to pass in that same task, never left failing for a later one. " +
 	"Zing runs the project's full test and lint commands after each task."
+
+// TestBuildPromptStopsBeforeDeadline proves prompts/build.md tells the
+// builder what the deadline input means and what to do with 10 minutes
+// left: stop, commit nothing, and return the error outcome with code other
+// (#53).
+func TestBuildPromptStopsBeforeDeadline(t *testing.T) {
+	t.Parallel()
+	text := unwrapped(t, "prompts/build.md")
+	for _, want := range []string{
+		"The deadline input says when this run ends.",
+		"Zing stops the run then and keeps nothing from it.",
+		"Check the time with date between steps.",
+		"When 10 minutes remain, stop: commit nothing, start no new command, and return the error outcome with code other.",
+		"In what, list the parts of this task that remain; in tried, list what is done and the files you changed.",
+	} {
+		if !strings.Contains(text, want) {
+			t.Errorf("prompts/build.md lacks %q", want)
+		}
+	}
+}
 
 // TestPlanningPromptsRequireGreenTasks proves both planning prompts tell
 // the planner that no task may end with a failing test (#55).
