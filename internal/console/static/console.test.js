@@ -47,6 +47,7 @@ import {
 	sendResultWithUnsent,
 	sendTargets,
 	sendConfirmText,
+	ticketActionConfirmText,
 	skipConflicted,
 	sendableQuestions,
 	AUTOSAVE_DEBOUNCE_MS,
@@ -700,6 +701,15 @@ test('sendTargets: a conflicted entry with hasDraft true is left out of ids and 
 test('sendConfirmText: names the one question or lists several', () => {
 	assert.equal(sendConfirmText(['Q6']), 'Send 1 reply on Q6?');
 	assert.equal(sendConfirmText(['Q6', 'Q7', 'Q9']), 'Send 3 replies on Q6, Q7, Q9?');
+});
+
+test('ticketActionConfirmText: names the action and the issue', () => {
+	assert.equal(ticketActionConfirmText('abandon', '41'), 'Abandon #41? Its thread stays as history.');
+	assert.equal(
+		ticketActionConfirmText('restart', '41'),
+		'Restart #41 from planning? This ticket is abandoned and a new one starts.',
+	);
+	assert.equal(ticketActionConfirmText('other', '41'), '');
 });
 
 // skipConflicted: postSendBatchLocked and rearmAutosaves (ticket #43, cause

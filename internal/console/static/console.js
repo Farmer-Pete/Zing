@@ -30,6 +30,7 @@ import {
 	sendResultWithUnsent,
 	sendTargets,
 	sendConfirmText,
+	ticketActionConfirmText,
 	skipConflicted,
 	sendableQuestions,
 	AUTOSAVE_DEBOUNCE_MS,
@@ -646,58 +647,61 @@ function focusedQuestionID() {
 	return id?.startsWith('question:') ? Number(id.slice('question:'.length)) : null;
 }
 
-// openSendConfirm is Cmd+Enter's in-page confirm dialog (ticket #43, Q3:
-// never window.confirm, since a native dialog blocks the page and any
-// browser automation driving the console, and the owner often answers
-// several questions in one send). Built and appended to document.body on
-// each open, the same placement buildHelpOverlay above uses, and torn back
-// down on either resolution rather than kept around like that overlay's own
-// singleton. A capture-phase keydown listener on document means Enter and
-// Escape resolve the dialog before onKeyDown's own dispatch ever sees them
-// (preventDefault and stopPropagation on both); a second Cmd+Enter while the
-// dialog is open is itself an Enter keypress, so it confirms. Enter cancels
-// instead, same as clicking it, when the Cancel button itself has focus
-// (review fix, correctness): without that check, tabbing to Cancel and
-// pressing Enter still confirmed the send, since onKeyDown read every Enter
-// the same way regardless of what was focused. Cancel -- by Escape, its own
-// button, Enter while it has focus, or nothing at all -- returns focus to
-// whatever had it before the dialog opened, almost always the reply box the
-// owner was typing in.
-function openSendConfirm(ticket, ids, keys) {
+// openConfirmDialog is every in-page confirm dialog's whole body (ticket
+// #43, Q3: never window.confirm, since a native dialog blocks the page and
+// any browser automation driving the console). Built and appended to
+// document.body on each open, the same placement buildHelpOverlay above
+// uses, and torn back down on either resolution rather than kept around
+// like that overlay's own singleton. A capture-phase keydown listener on
+// document means Enter and Escape resolve the dialog before onKeyDown's own
+// dispatch ever sees them (preventDefault and stopPropagation on both); a
+// second Cmd+Enter while the dialog is open is itself an Enter keypress, so
+// it confirms. Enter cancels instead, same as clicking it, when the Cancel
+// button itself has focus (review fix, correctness): without that check,
+// tabbing to Cancel and pressing Enter still confirmed the action, since
+// onKeyDown read every Enter the same way regardless of what was focused.
+// Cancel -- by Escape, its own button, Enter while it has focus, or nothing
+// at all -- returns focus to whatever had it before the dialog opened,
+// almost always the reply box the owner was typing in.
+//
+// @param {{id: string, text: string, items: string[], confirmLabel: string, onConfirm: () => void}} opts
+function openConfirmDialog({ id, text, items, confirmLabel, onConfirm }) {
 	const previouslyFocused = document.activeElement;
 	const dialog = document.createElement('div');
-	dialog.id = 'send-confirm';
+	dialog.id = id;
 	dialog.setAttribute('role', 'dialog');
 	dialog.setAttribute('aria-modal', 'true');
 
 	const message = document.createElement('p');
-	message.textContent = sendConfirmText(keys);
+	message.textContent = text;
 	dialog.appendChild(message);
 
-	const list = document.createElement('ul');
-	for (const key of keys) {
-		const item = document.createElement('li');
-		item.textContent = key;
-		list.appendChild(item);
+	if (items.length > 0) {
+		const list = document.createElement('ul');
+		for (const item of items) {
+			const li = document.createElement('li');
+			li.textContent = item;
+			list.appendChild(li);
+		}
+		dialog.appendChild(list);
 	}
-	dialog.appendChild(list);
 
-	const sendButton = document.createElement('button');
-	sendButton.type = 'button';
-	sendButton.textContent = 'Send';
+	const confirmButton = document.createElement('button');
+	confirmButton.type = 'button';
+	confirmButton.textContent = confirmLabel;
 	const cancelButton = document.createElement('button');
 	cancelButton.type = 'button';
 	cancelButton.textContent = 'Cancel';
-	dialog.appendChild(sendButton);
+	dialog.appendChild(confirmButton);
 	dialog.appendChild(cancelButton);
 
 	function cleanup() {
 		document.removeEventListener('keydown', onKeyDown, true);
 		dialog.remove();
 	}
-	function confirmSend() {
+	function confirm() {
 		cleanup();
-		postSendBatch(ticket, ids);
+		onConfirm();
 	}
 	function cancel() {
 		cleanup();
@@ -710,7 +714,7 @@ function openSendConfirm(ticket, ids, keys) {
 			if (event.target === cancelButton) {
 				cancel();
 			} else {
-				confirmSend();
+				confirm();
 			}
 		} else if (event.key === 'Escape') {
 			event.preventDefault();
@@ -718,11 +722,23 @@ function openSendConfirm(ticket, ids, keys) {
 			cancel();
 		}
 	}
-	sendButton.addEventListener('click', confirmSend);
+	confirmButton.addEventListener('click', confirm);
 	cancelButton.addEventListener('click', cancel);
 	document.addEventListener('keydown', onKeyDown, true);
 	document.body.appendChild(dialog);
-	sendButton.focus();
+	confirmButton.focus();
+}
+
+// openSendConfirm is Cmd+Enter's in-page confirm dialog (ticket #43, Q3),
+// listing the replies it is about to send.
+function openSendConfirm(ticket, ids, keys) {
+	openConfirmDialog({
+		id: 'send-confirm',
+		text: sendConfirmText(keys),
+		items: keys,
+		confirmLabel: 'Send',
+		onConfirm: () => postSendBatch(ticket, ids),
+	});
 }
 
 // sendBatch handles the send chord (design section 6.4, 6.7, ticket #43):
