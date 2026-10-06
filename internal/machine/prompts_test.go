@@ -28,12 +28,12 @@ func TestPrompts_MatchThePinnedDesignText(t *testing.T) {
 		{
 			name:   "planning-feature",
 			path:   planningFeaturePromptPath,
-			sha256: "bfd291b0af204468b0a2fb152f8f69ba6e0af7063df83ca43019f0fdd5823886",
+			sha256: "ba5a81b1c4aca45862f02935db3a319edc2681baa2dc7709d79af6c3d5e42350",
 		},
 		{
 			name:   "planning-bug",
 			path:   planningBugPromptPath,
-			sha256: "38aa8ae017c1c54323a7f3dfddd68e4576d48349da925751a13dbd4960df34a4",
+			sha256: "dc2e46bca4ac10034abe296cb3653faad1eeb86eb8fdae562f75afed52f22412",
 		},
 		{
 			name:   "planreview",
@@ -372,6 +372,24 @@ func TestPlanningPromptsTeachHostKind(t *testing.T) {
 	}
 	if !strings.Contains(unwrapped(t, planningFeaturePromptPath), "behavior, negative, performance, or host") {
 		t.Errorf("%s does not list host as the fourth kind", planningFeaturePromptPath)
+	}
+}
+
+// pureFunctionSeamSentence is what both planning prompts say in their
+// Plan step (#111, #130): a decision inside a handler or callback moves
+// into a pure function the plan tests.
+const pureFunctionSeamSentence = "If behavior lives in an event handler, a UI callback, " +
+	"or other code with no test harness, move the decision into a pure function " +
+	"and test that function; the handler stays a shim of about one line that calls it."
+
+// TestPlanningPromptsRequirePureFunctionSeam proves both planning prompts
+// ask for a pure-function seam behind handler and callback logic (#111).
+func TestPlanningPromptsRequirePureFunctionSeam(t *testing.T) {
+	t.Parallel()
+	for _, path := range []string{planningFeaturePromptPath, planningBugPromptPath} {
+		if !strings.Contains(unwrapped(t, path), pureFunctionSeamSentence) {
+			t.Errorf("%s lacks the pure-function seam sentence", path)
+		}
 	}
 }
 
