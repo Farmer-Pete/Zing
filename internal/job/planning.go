@@ -2658,10 +2658,11 @@ func postRunFailure(t store.Ticket, d Deps, rr runResult, sessionCommit *store.S
 // store.ErrClaimLost) either escalate (ErrBudget) or return unchanged;
 // runtime.ErrCanceled returns with no commit at all (design D13: the
 // dispatcher leaves the claim for ExpireClaims to reconcile); an exec
-// failure (ErrStart, ErrTimeout, ErrOutputTooLarge, *runtime.ExecError)
-// terminalizes the run and escalates runtime_exec_failed; an invalid output
-// applies D14. ok is false when runErr names none of these, so the caller
-// can report it as a bug rather than silently dropping it.
+// failure (ErrStart, ErrTimeout, ErrStalled, ErrOutputTooLarge,
+// *runtime.ExecError) terminalizes the run and escalates
+// runtime_exec_failed; an invalid output applies D14. ok is false when
+// runErr names none of these, so the caller can report it as a bug rather
+// than silently dropping it.
 func routeFailure(
 	t store.Ticket, d Deps, rr runResult, runErr error, priorInvalid int,
 	sessionCommit *store.SessionUpsert, resolveIDs []int64, origin response.EscalationOrigin,
@@ -2687,12 +2688,13 @@ func routeFailure(
 	return store.HandlerCommit{}, false, nil
 }
 
-// isExecFailure reports whether err is one of the four runtime failures
+// isExecFailure reports whether err is one of the five runtime failures
 // section 6.8 escalates as runtime_exec_failed: the process could not
-// start, the job deadline killed it, its output exceeded the 4 MiB cap, or
-// it exited with no parseable result.
+// start, the job deadline killed it, Claude's idle watchdog killed a
+// stalled run, its output exceeded the 4 MiB cap, or it exited with no
+// parseable result.
 func isExecFailure(err error) bool {
-	if errors.Is(err, runtime.ErrStart) || errors.Is(err, runtime.ErrTimeout) || errors.Is(err, runtime.ErrOutputTooLarge) {
+	if errors.Is(err, runtime.ErrStart) || errors.Is(err, runtime.ErrTimeout) || errors.Is(err, runtime.ErrStalled) || errors.Is(err, runtime.ErrOutputTooLarge) {
 		return true
 	}
 	var execErr *runtime.ExecError

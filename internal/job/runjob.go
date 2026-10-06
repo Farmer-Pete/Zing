@@ -166,6 +166,7 @@ func runJobWith(
 
 	req.Tools = jobCfg.Tools
 	req.Timeout = jobTimeout(jobCfg)
+	req.IdleTimeout = time.Duration(jobCfg.IdleMinutes) * time.Minute
 	if jobName == jobBuildName {
 		req.DenyBash = d.Projects[t.ProjectID].DenyCommands()
 	}
@@ -388,6 +389,23 @@ const transientRetryDelay = 2 * time.Second
 // applies to one attempt's own tailWriter.
 const maxTranscriptBytes = 64 << 10
 
+// combineAttempts is the one result a retried run reports: retry's own
+// result with first's AgentTime added, first's SessionID kept when retry
+// has none, and both attempts' Stdout joined and cut to the last
+// maxTranscriptBytes.
+func combineAttempts(first, retry runtime.RunResult) runtime.RunResult {
+	if retry.SessionID == "" {
+		retry.SessionID = first.SessionID
+	}
+	retry.AgentTime += first.AgentTime
+	joined := append(append([]byte(nil), first.Stdout...), retry.Stdout...)
+	if len(joined) > maxTranscriptBytes {
+		joined = joined[len(joined)-maxTranscriptBytes:]
+	}
+	retry.Stdout = joined
+	return retry
+}
+
 // retryTransient is runJobWith's own single automatic retry (design goals:
 // a Codex ExecError whose Transient names a matched pattern -- 429, rate
 // limit, 500, 502, 503, 504, connection reset, or stream disconnected -- is
@@ -432,17 +450,8 @@ func retryTransient(
 	case <-time.After(transientRetryDelay):
 	}
 
-	firstAgentTime, firstStdout, firstSessionID := res.AgentTime, res.Stdout, res.SessionID
 	retryRes, retryErr := rt.Run(ctx, req)
-	if retryRes.SessionID == "" {
-		retryRes.SessionID = firstSessionID
-	}
-	retryRes.AgentTime += firstAgentTime
-	joinedStdout := append(append([]byte(nil), firstStdout...), retryRes.Stdout...)
-	if len(joinedStdout) > maxTranscriptBytes {
-		joinedStdout = joinedStdout[len(joinedStdout)-maxTranscriptBytes:]
-	}
-	retryRes.Stdout = joinedStdout
+	retryRes = combineAttempts(res, retryRes)
 
 	if retryErr == nil {
 		slog.Info("runtime transient retry succeeded", "ticket_id", ticketID, "run_id", runID, "job", jobName, "match", execErr.Transient)
@@ -692,6 +701,8 @@ func errKind(err error) string {
 		return "ErrStart"
 	case errors.Is(err, runtime.ErrTimeout):
 		return "ErrTimeout"
+	case errors.Is(err, runtime.ErrStalled):
+		return "ErrStalled"
 	case errors.Is(err, runtime.ErrCanceled):
 		return "ErrCanceled"
 	case errors.Is(err, runtime.ErrOutputTooLarge):
