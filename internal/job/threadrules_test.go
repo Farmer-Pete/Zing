@@ -247,25 +247,18 @@ func TestClassifyThreadsOne(t *testing.T) {
 	cases := []struct {
 		name   string
 		thread orchestrator.Thread
-		want   string
 	}{
-		{"zero comments is unclassified", orchestrator.Thread{ID: "RT_unclassified_zero_comments"}, "unclassified"},
-		{"an empty id is unclassified", orchestrator.Thread{ID: "", Comments: []orchestrator.ThreadComment{odd}}, "unclassified"},
+		{"zero comments is unclassified", orchestrator.Thread{ID: "RT_unclassified_zero_comments"}},
+		{"an empty id is unclassified", orchestrator.Thread{ID: "", Comments: []orchestrator.ThreadComment{odd}}},
 	}
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			resolved, actionable, leftover, unclassified := classifyThreads([]orchestrator.Thread{tc.thread}, testViewerLogin)
-			got := map[string]int{"resolved": len(resolved), "actionable": len(actionable), "leftover": len(leftover), "unclassified": len(unclassified)}
-			for class, n := range got {
-				want := 0
-				if class == tc.want {
-					want = 1
-				}
-				if n != want {
-					t.Errorf("classifyThreads: %s = %d, want %d", class, n, want)
-				}
+			if len(unclassified) != 1 || len(resolved)+len(actionable)+len(leftover) != 0 {
+				t.Errorf("classifyThreads: resolved=%d actionable=%d leftover=%d unclassified=%d, want 0,0,0,1",
+					len(resolved), len(actionable), len(leftover), len(unclassified))
 			}
 		})
 	}
