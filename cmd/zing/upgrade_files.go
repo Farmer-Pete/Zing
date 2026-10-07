@@ -2,10 +2,13 @@ package main
 
 import (
 	"cmp"
+	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"slices"
+	"time"
 )
 
 const (
@@ -53,4 +56,59 @@ func pruneBackups(dataDir string, keep int) error {
 		}
 	}
 	return errors.Join(errs...)
+}
+
+const (
+	markerPending    = "pending"
+	markerAttempted  = "attempted"
+	markerRolledBack = "rolled_back"
+
+	upgradeMarkerFile = "upgrade.json"
+)
+
+// upgradeMarker records the state of one upgrade across the restart that
+// swaps in the new binary.
+type upgradeMarker struct {
+	FromSHA      string `json:"from_sha"`
+	ToSHA        string `json:"to_sha"`
+	TicketID     int64  `json:"ticket_id"`
+	State        string `json:"state"`
+	HasNext      bool   `json:"has_next"`
+	NextSHA      string `json:"next_sha"`
+	NextTicketID int64  `json:"next_ticket_id"`
+	WrittenAt    string `json:"written_at"`
+}
+
+// loadUpgradeMarker reads DATA_DIR/upgrade.json. A missing file is found
+// false with a nil error.
+func loadUpgradeMarker(dataDir string) (m upgradeMarker, found bool, err error) {
+	data, err := os.ReadFile(filepath.Join(dataDir, upgradeMarkerFile))
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return upgradeMarker{}, false, nil
+		}
+		return upgradeMarker{}, false, fmt.Errorf("upgrade: read upgrade.json: %w", err)
+	}
+	if err := json.Unmarshal(data, &m); err != nil {
+		return upgradeMarker{}, false, fmt.Errorf("upgrade: read upgrade.json: %w", err)
+	}
+	return m, true, nil
+}
+
+// saveUpgradeMarker sets m.WrittenAt to now in RFC3339 UTC, writes
+// upgrade.json.tmp with mode 0600, and renames it over upgrade.json.
+func saveUpgradeMarker(dataDir string, m upgradeMarker) error {
+	m.WrittenAt = time.Now().UTC().Format(time.RFC3339)
+	data, err := json.MarshalIndent(m, "", "  ")
+	if err != nil {
+		return fmt.Errorf("upgrade: write upgrade.json: %w", err)
+	}
+	tmp := filepath.Join(dataDir, upgradeMarkerFile+".tmp")
+	if err := os.WriteFile(tmp, data, 0o600); err != nil {
+		return fmt.Errorf("upgrade: write upgrade.json: %w", err)
+	}
+	if err := os.Rename(tmp, filepath.Join(dataDir, upgradeMarkerFile)); err != nil {
+		return fmt.Errorf("upgrade: write upgrade.json: %w", err)
+	}
+	return nil
 }
