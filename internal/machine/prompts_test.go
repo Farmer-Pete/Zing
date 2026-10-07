@@ -28,12 +28,12 @@ func TestPrompts_MatchThePinnedDesignText(t *testing.T) {
 		{
 			name:   "planning-feature",
 			path:   planningFeaturePromptPath,
-			sha256: "d8330f7e88d130f37101c7003d6b898b40b47083384ae20e23a8d0bd95fa8726",
+			sha256: "e01f7fbf0ec0a66987deb59533cd2f136f8fc86ebf732581cc721377f8d56ebe",
 		},
 		{
 			name:   "planning-bug",
 			path:   planningBugPromptPath,
-			sha256: "faa167f10d401d2bb578490fcf28f3d081dfad071be158fa20d9786246f43c99",
+			sha256: "3b435b3bc1f8f1ae26e49e169673e84bb79427c9cf851714f182bdd7495f6b63",
 		},
 		{
 			name:   "planreview",
@@ -403,6 +403,29 @@ func TestPlanningPromptsTeachHostKind(t *testing.T) {
 	}
 	if !strings.Contains(unwrapped(t, planningFeaturePromptPath), "behavior, negative, performance, or host") {
 		t.Errorf("%s does not list host as the fourth kind", planningFeaturePromptPath)
+	}
+}
+
+// governanceChecksSentence is what both planning prompts say about
+// reading CLAUDE.md or AGENTS.md (#225, #92): the judge's checkout
+// overwrites both with the default branch's copies, so a check must read
+// the committed file with git show HEAD:FILE rather than the working
+// copy.
+const governanceChecksSentence = "A check reads CLAUDE.md or AGENTS.md with git show " +
+	"HEAD:FILE, never from the working copy, such as git show HEAD:AGENTS.md | tr -s " +
+	`'[:space:]' ' ' | grep -qF 'two words', because the judge's checkout holds the ` +
+	"default branch's copies of both files."
+
+// TestPlanningPromptsReadGovernanceFilesFromCommit proves both planning
+// prompts tell the planner to read CLAUDE.md or AGENTS.md with
+// git show HEAD:FILE rather than the working copy, since the judge's
+// checkout holds the default branch's copies of both (#225, #92).
+func TestPlanningPromptsReadGovernanceFilesFromCommit(t *testing.T) {
+	t.Parallel()
+	for _, path := range []string{planningFeaturePromptPath, planningBugPromptPath} {
+		if !strings.Contains(unwrapped(t, path), governanceChecksSentence) {
+			t.Errorf("%s lacks the governance-checks sentence", path)
+		}
 	}
 }
 

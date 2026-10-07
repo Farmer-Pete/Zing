@@ -48,7 +48,11 @@ Work in this order. Each step has a completion criterion.
    Use it for a live sandbox probe, a live zing serve, or wall-clock
    timing. A host scenario needs a check. Quote a check's glob, such as
    --include='*.go', and join a prose file's lines before a multi-word
-   grep, such as tr -s '[:space:]' ' ' < FILE | grep -qF 'two words'.
+   grep, such as tr -s '[:space:]' ' ' < FILE | grep -qF 'two words'. A
+   check reads CLAUDE.md or AGENTS.md with git show HEAD:FILE, never from
+   the working copy, such as git show HEAD:AGENTS.md | tr -s '[:space:]'
+   ' ' | grep -qF 'two words', because the judge's checkout holds the
+   default branch's copies of both files.
 
 5. Plan. Fill the plan schema. Put the proof in the plan: the problem
    element carries the loop command, the repro, and the hypothesis that
