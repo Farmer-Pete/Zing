@@ -376,59 +376,6 @@ func TestServe_ClampsInvalidDispatchConfig(t *testing.T) {
 	cancelAndWaitForServe(t, cancel, serveDone)
 }
 
-// readOneSettingsFrame reads SSE frames from r until one contains
-// data-tuning-name="max_parallel" (the Settings view's #main patch), or
-// fails the test after frameTimeout per frame or after maxFrames frames.
-// A plain substring scan, not full Datastar frame parsing: the nav, rail,
-// and alerts frames never contain that marker, so skipping past them is
-// enough.
-func readOneSettingsFrame(t *testing.T, r *bufio.Reader) string {
-	t.Helper()
-	const maxFrames = 8
-	for range maxFrames {
-		type result struct {
-			text string
-			err  error
-		}
-		ch := make(chan result, 1)
-		go func() {
-			var sb strings.Builder
-			started := false
-			for {
-				line, err := r.ReadString('\n')
-				if !started {
-					if line == "\n" && err == nil {
-						continue
-					}
-					started = true
-				}
-				sb.WriteString(line)
-				if err != nil {
-					ch <- result{sb.String(), err}
-					return
-				}
-				if line == "\n" {
-					ch <- result{sb.String(), nil}
-					return
-				}
-			}
-		}()
-		select {
-		case res := <-ch:
-			if res.err != nil {
-				t.Fatalf("read SSE frame: %v", res.err)
-			}
-			if strings.Contains(res.text, `data-tuning-name="max_parallel"`) {
-				return res.text
-			}
-		case <-time.After(10 * time.Second):
-			t.Fatal("timed out waiting for the settings view frame")
-		}
-	}
-	t.Fatalf("no frame carrying the settings view within %d frames", maxFrames)
-	return ""
-}
-
 // TestServe_StoredTuningWinsOverZingTOMLAfterRestart proves the wiring
 // around dispatch.LoadTuning and console.WithTuner in runServe (#81, "after
 // a serve restart, the stored values win over zing.toml"): a settings-table
@@ -488,7 +435,23 @@ func TestServe_StoredTuningWinsOverZingTOMLAfterRestart(t *testing.T) {
 	}
 	defer func() { _ = resp.Body.Close() }()
 
-	main := readOneSettingsFrame(t, bufio.NewReader(resp.Body))
+	// /stream always sends three frames on connect, in order: #nav, then
+	// #main, then #rail (readInitialSelftestFrames, cmd/zing/selftest.go).
+	// This test only needs #main, so it reads with the same
+	// readSelftestFrame readInitialSelftestFrames itself calls, skipping
+	// the other two, rather than adding a second caller that discards
+	// readInitialSelftestFrames' own nav and rail results.
+	streamReader := bufio.NewReader(resp.Body)
+	if _, navErr := readSelftestFrame(streamReader); navErr != nil {
+		t.Fatalf("read nav frame: %v", navErr)
+	}
+	main, mainErr := readSelftestFrame(streamReader)
+	if mainErr != nil {
+		t.Fatalf("read main frame: %v", mainErr)
+	}
+	if _, railErr := readSelftestFrame(streamReader); railErr != nil {
+		t.Fatalf("read rail frame: %v", railErr)
+	}
 	if !strings.Contains(main, `data-tuning-name="max_parallel"`) || !strings.Contains(main, `value="3"`) {
 		t.Errorf("settings frame missing max_parallel value 3 (stored, not zing.toml's 1); got:\n%s", main)
 	}

@@ -230,8 +230,10 @@ type Config struct {
 // Tuning is the dispatcher's live, console-changeable settings (#81):
 // Dispatcher.tune starts as a copy of Config's own Interval, MaxParallel,
 // and Budget, and SetTuning is the only way to change it afterward. fill's
-// slot guard, Tick and Run's results-channel sizing, and runAndCommit's
-// Budget all read it under d.mu instead of d.cfg.
+// slot guard, Tick's results-channel sizing, Run's ticker interval, and
+// runAndCommit's Budget all read it under d.mu instead of d.cfg. Run's own
+// results buffer is the exception: it is sized once, at Run's start, from
+// max(MaxParallelCeiling, Config.MaxParallel), not from the live tune.
 type Tuning struct {
 	MaxParallel int
 	Interval    time.Duration

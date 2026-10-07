@@ -285,6 +285,63 @@ func TestRun_IntervalChangeResetsTicker(t *testing.T) {
 	}
 }
 
+// TestRun_MaxParallelRaiseDrainsAllAtFinish proves a live raise of
+// max_parallel does not break finish's guarantee that its results buffer
+// holds every in-flight worker's result (#81): Run starts at MaxParallel
+// 1, SetTuning raises it to 3 before any ticket launches, and all three
+// must still start, finish, and have their commits land once released,
+// with Run returning cleanly afterward.
+func TestRun_MaxParallelRaiseDrainsAllAtFinish(t *testing.T) {
+	t.Parallel()
+
+	s := newDispatchTestStore(t)
+	id1 := seedQueuedTicket(t, s, "fake#1")
+	id2 := seedQueuedTicket(t, s, "fake#2")
+	id3 := seedQueuedTicket(t, s, "fake#3")
+
+	started := make(chan int64, 3)
+	release := make(chan struct{})
+	reg := job.Registry()
+	reg[testStateQueued] = &barrierHandler{started: started, release: release, next: testStatePlanning, reason: testSpyReason}
+
+	d := newDispatcher(t, s, newFixtureTracker(t), bus.New(), fakeRuntime(t), reg, nil,
+		dispatch.Config{MaxParallel: 1, Interval: time.Second, Owner: testOwner})
+
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	runErrCh := make(chan error, 1)
+	go func() { runErrCh <- d.Run(ctx) }()
+
+	if err := d.SetTuning(t.Context(), dispatch.TuneMaxParallel, 3, "peter"); err != nil {
+		t.Fatalf("SetTuning: %v", err)
+	}
+
+	seen := make(map[int64]bool)
+	for len(seen) < 3 {
+		seen[waitFor(t, started, "all three handlers to start")] = true
+	}
+
+	if err := s.SetDraining(t.Context(), true); err != nil {
+		t.Fatalf("SetDraining: %v", err)
+	}
+	d.NotifyDrain()
+	close(release)
+
+	if err := waitFor(t, runErrCh, "Run to return after the raised max_parallel drained"); err != nil {
+		t.Fatalf("Run: %v, want nil (a graceful drain is not an error)", err)
+	}
+
+	for _, id := range []int64{id1, id2, id3} {
+		ticket := getTicket(t, s, id)
+		if ticket.State != testStatePlanning {
+			t.Errorf("ticket %d state = %q, want %q (its commit must land)", id, ticket.State, testStatePlanning)
+		}
+		if ticket.ClaimOwner != nil {
+			t.Errorf("ticket %d ClaimOwner = %v, want nil (released, none left in flight)", id, *ticket.ClaimOwner)
+		}
+	}
+}
+
 // TestLoadTuning_StoredValuesWinOverBase proves a valid stored value for
 // every setting wins over base, the zing.toml-derived startup values
 // (#81), and that sources names store for each one; and that when only
