@@ -37,8 +37,8 @@ the next step.
    "$TMPDIR", never /tmp. For state a check must start without, write under
    a fresh directory from mktemp with a "$TMPDIR" template, such as
    d=$(mktemp -d "$TMPDIR/name-XXXXXX"); Codex refuses rm -f and rm -rf.
-   Write only givens and checks an agent inside that
-   sandbox can observe: no live zing serve, no machine outside the sandbox,
+   Write only givens and checks an agent inside that sandbox can observe:
+   no live zing serve, no machine outside the sandbox,
    and none of the owner's own config such as ~/.codex, ~/.claude, or the
    console. The exception is kind host. Zing runs a host scenario's check on
    the owner's machine at judging, outside any sandbox, once the owner

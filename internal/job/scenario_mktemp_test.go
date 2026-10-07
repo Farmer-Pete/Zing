@@ -75,7 +75,6 @@ func TestCheckScenarioShape_AllowsTmpdirMktemp(t *testing.T) {
 		{"quoted_mention", response.ScenarioKindBehavior, `grep -q 'mktemp -d' notes.txt`},
 		{"similar_word", response.ScenarioKindBehavior, `mktempfoo`},
 		{"host", response.ScenarioKindHost, `d=$(mktemp -d)`},
-		{"rm_force_msg_example", response.ScenarioKindBehavior, `mktemp -d "$TMPDIR/name-XXXXXX"`},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -88,6 +87,24 @@ func TestCheckScenarioShape_AllowsTmpdirMktemp(t *testing.T) {
 			}
 		})
 	}
+
+	// rm_force_msg_example reads the templated mktemp straight out of
+	// rmForceCheckMsg, so a future edit that reverts the message to the
+	// bare "mktemp -d" wording fails here instead of drifting silently.
+	t.Run("rm_force_msg_example", func(t *testing.T) {
+		t.Parallel()
+		start := strings.Index(rmForceCheckMsg, "mktemp -d ")
+		if start < 0 {
+			t.Fatalf("rmForceCheckMsg = %q, want it to contain %q", rmForceCheckMsg, "mktemp -d ")
+		}
+		example := strings.TrimSuffix(rmForceCheckMsg[start:], " instead")
+		sc := response.Scenario{ID: "s1", Kind: response.ScenarioKindBehavior, Then: "compares two lists", Check: example}
+		for _, err := range checkScenarioRules(0, sc) {
+			if err.Msg == mktempCheckMsg {
+				t.Fatalf("checkScenarioRules(%q) flagged mktemp, want it allowed", example)
+			}
+		}
+	})
 }
 
 // TestJudgeAmendment_RefusesBareMktemp is a regression test for #245 s6: a
