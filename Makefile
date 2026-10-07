@@ -40,7 +40,7 @@ vet:
 # -p still runs separate packages side by side. Measured go test -count=1
 # ./internal/job: 193s uncapped, 106-156s at -parallel 4, on a 14-core Mac.
 TEST_PARALLEL ?= 4
-test:
+test: test-js
 	go test $(if $(TEST_PARALLEL),-parallel $(TEST_PARALLEL),) ./...
 
 # Skips the slow end-to-end flows (testing.Short()-gated) for fast local

@@ -28,6 +28,7 @@ The owner runs Zing from the web console, so every owner action goes through it,
 - One process. No new service without a plan that names the network call it adds.
 - Reproduce a bug with a failing test before fixing it, when a correct seam exists.
 - Tests are integration tests at cut points. Unit tests for parsers and pure functions. Mocks only at cut points.
+- Prove browser behavior with a test the build runs: `node --test` for scripts in `internal/console/static`, Go template and view tests for `internal/console/templates` and `internal/console/views.go`. A scenario check never opens a browser.
 - Log every major branch with the ids. Wrap errors with `%w`. Never log a secret.
 - Every JSON column has a JSON Schema. Every write is validated against it.
 - A plan that adds a schema under `internal/store/schemas` also lists its example at the same relative path under `internal/store/examples`, and `internal/schemagen/schemagen_test.go`, whose registry count test breaks on every new schema. A new event kind also lists `internal/store/events_test.go`, whose `TestEventKinds` names every kind.
