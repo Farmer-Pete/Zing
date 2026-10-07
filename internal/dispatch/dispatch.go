@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"slices"
 	"strconv"
 	"sync"
 	"sync/atomic"
@@ -538,6 +539,32 @@ func (d *Dispatcher) SetTuning(ctx context.Context, name string, value int, by s
 	}
 	slog.Info("dispatch: setting changed", "name", name, "value", value, "by", by)
 	return nil
+}
+
+// SlotSnapshot is a point-in-time read of the dispatcher's run slots: the
+// ticket ids it is running now, the live max_parallel, and this process's
+// claim owner. The console's rail reads it through Dispatcher.Slots to say
+// a ready ticket is waiting for a free run slot and which tickets hold the
+// slots.
+type SlotSnapshot struct {
+	Owner       string
+	Inflight    []int64
+	MaxParallel int
+}
+
+// Slots returns a copy of the ticket ids this process is running now, in
+// ascending order, with the live max_parallel and this dispatcher's claim
+// owner, read under d.mu. The console's rail reads it to say a ready ticket
+// is waiting for a free run slot and which tickets hold the slots.
+func (d *Dispatcher) Slots() SlotSnapshot {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	ids := make([]int64, 0, len(d.inflight))
+	for id := range d.inflight {
+		ids = append(ids, id)
+	}
+	slices.Sort(ids)
+	return SlotSnapshot{Owner: d.cfg.Owner, Inflight: ids, MaxParallel: d.tune.MaxParallel}
 }
 
 // CurrentTuning returns the live Tuning, read under d.mu like every other
