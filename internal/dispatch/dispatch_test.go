@@ -1412,6 +1412,10 @@ func (f *failingIntakeTracker) CommentContains(context.Context, string, string, 
 	panic("failingIntakeTracker: CommentContains is unused by this test")
 }
 
+func (f *failingIntakeTracker) Comments(context.Context, string, string) ([]tracker.Comment, error) {
+	return nil, nil
+}
+
 var _ tracker.Tracker = (*failingIntakeTracker)(nil)
 
 // TestTick_IntakeErrorOnOneProjectLogsAndContinuesToTheNext proves intake
