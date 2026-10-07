@@ -44,25 +44,9 @@ const splitTestChildrenXML = `<zing job="planning" outcome="children">
 </zing>
 `
 
-// splitOverlayFS layers over on top of base: Open serves over's own entry
-// when it has one, and base's otherwise. splitTestRuntime uses it to keep
-// the real, checked-in fixtures/scripts tree's own classify/1.xml (a
-// "feature" outcome, exactly what this test needs) while substituting only
-// planning's first turn.
-type splitOverlayFS struct {
-	over fs.FS
-	base fs.FS
-}
-
-func (o splitOverlayFS) Open(name string) (fs.File, error) {
-	if f, err := o.over.Open(name); err == nil {
-		return f, nil
-	}
-	return o.base.Open(name)
-}
-
-// splitTestRuntime returns a *runtime.Fake serving the real, checked-in
-// fixtures/scripts tree, except planning's first turn is overridden to
+// splitTestRuntime returns a *runtime.Fake serving a two-entry MapFS: the
+// real, checked-in fixtures/scripts/classify/1.xml (a "feature" outcome,
+// exactly what this test needs) and planning's first turn overridden to
 // splitTestChildrenXML (a children outcome) in place of the real fixture's
 // own question.
 func splitTestRuntime(t *testing.T) *runtime.Fake {
@@ -71,8 +55,15 @@ func splitTestRuntime(t *testing.T) *runtime.Fake {
 	if err != nil {
 		t.Fatalf("fs.Sub(scripts): %v", err)
 	}
-	over := fstest.MapFS{"planning/1.xml": &fstest.MapFile{Data: []byte(splitTestChildrenXML)}}
-	return runtime.NewFake(splitOverlayFS{over: over, base: base})
+	classifyXML, err := fs.ReadFile(base, "classify/1.xml")
+	if err != nil {
+		t.Fatalf("ReadFile(classify/1.xml): %v", err)
+	}
+	fsys := fstest.MapFS{
+		"classify/1.xml": &fstest.MapFile{Data: classifyXML},
+		"planning/1.xml": &fstest.MapFile{Data: []byte(splitTestChildrenXML)},
+	}
+	return runtime.NewFake(fsys)
 }
 
 // newSplitFixtureTracker returns a *tracker.Fixture over an inline,
@@ -211,6 +202,17 @@ func TestSplit_ApproveFilesBothQueuesFirstHoldsSecond(t *testing.T) {
 
 	// Step 3 (fixture assertions): both issues exist on the fixture
 	// tracker, and the second carries the first's ref.
+	c1Issue, fetchErr := fx.Fetch(t.Context(), splitTestProject, c1Ref)
+	if fetchErr != nil {
+		t.Fatalf("Fetch(c1): %v", fetchErr)
+	}
+	if !strings.Contains(c1Issue.Body, "Add conflict detection for the merge step.") {
+		t.Errorf("c1 body = %q, want it to carry the child's own body text", c1Issue.Body)
+	}
+	if !strings.Contains(c1Issue.Body, "Split from") {
+		t.Errorf("c1 body = %q, want it to carry \"Split from\"", c1Issue.Body)
+	}
+
 	c2Issue, fetchErr := fx.Fetch(t.Context(), splitTestProject, c2Ref)
 	if fetchErr != nil {
 		t.Fatalf("Fetch(c2): %v", fetchErr)

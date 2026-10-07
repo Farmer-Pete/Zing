@@ -2315,3 +2315,24 @@ func TestGroupAttempts_AllAttemptsRetiredHeadIsHighest(t *testing.T) {
 		t.Errorf("earlier[10] = %+v, want [ticket 6]", got10)
 	}
 }
+
+// TestHoldBanner covers holdBanner's non-abandoned branch (a dependency in
+// an active state such as planning, rendered as "REF (STATE)") and joining
+// several held dependencies with semicolons, neither of which
+// TestThreadBanner_HeldTicketNamesAbandonedDependency (split_test.go)
+// exercises on its own (r1f1).
+func TestHoldBanner(t *testing.T) {
+	t.Parallel()
+
+	deps := []store.DependencyRow{
+		{TicketID: 1, Ref: "12", State: string(response.TicketStateAbandoned)},
+		{TicketID: 2, Ref: "13", State: "planning"},
+		{TicketID: 3, Ref: "14", State: string(response.TicketStateDone)},
+	}
+
+	got := holdBanner(deps)
+	want := "Waits on #12, which was abandoned; #13 (planning)."
+	if got != want {
+		t.Errorf("holdBanner(%+v) = %q, want %q", deps, got, want)
+	}
+}

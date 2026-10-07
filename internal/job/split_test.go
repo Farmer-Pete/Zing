@@ -9,6 +9,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"slices"
 	"strings"
 	"testing"
 
@@ -97,12 +98,10 @@ type fakeSplitTracker struct {
 	t    *testing.T
 	refs []string
 
-	calls      int
-	filed      int
-	projectIDs []int64
-	titles     []string
-	bodies     []string
-	failAt     int
+	calls  int
+	filed  int
+	titles []string
+	failAt int
 
 	closeCalls     int
 	closeProjectID int64
@@ -110,10 +109,9 @@ type fakeSplitTracker struct {
 	closeBody      string
 }
 
-func (f *fakeSplitTracker) FileSplitChild(_ context.Context, projectID int64, title, body string) (string, error) {
+func (f *fakeSplitTracker) FileSplitChild(_ context.Context, _ int64, title, _ string) (string, error) {
 	f.t.Helper()
 	f.calls++
-	f.projectIDs = append(f.projectIDs, projectID)
 	f.titles = append(f.titles, title)
 	if f.failAt != 0 && f.calls == f.failAt {
 		return "", errors.New("fake split tracker: file failed")
@@ -123,12 +121,10 @@ func (f *fakeSplitTracker) FileSplitChild(_ context.Context, projectID int64, ti
 	}
 	ref := f.refs[f.filed]
 	f.filed++
-	f.bodies = append(f.bodies, body)
 	return ref, nil
 }
 
 func (f *fakeSplitTracker) CloseSplitParent(_ context.Context, projectID int64, ref, body string) error {
-	f.t.Helper()
 	f.closeCalls++
 	f.closeProjectID = projectID
 	f.closeRef = ref
@@ -215,9 +211,9 @@ func TestPlanningHandler_Children_PostsSplitGate(t *testing.T) {
 		if qp.Recommended != "a" {
 			t.Errorf("question recommended = %q, want a", qp.Recommended)
 		}
-		if len(qp.Options) != 2 || qp.Options[0].Key != "a" || qp.Options[0].Text != testApproveOptionText ||
-			qp.Options[1].Key != "b" || qp.Options[1].Text != testRejectOptionText {
-			t.Errorf("question options = %+v, want a=Approve, b=Reject", qp.Options)
+		wantOptions := []response.Option{{Key: "a", Text: testApproveOptionText}, {Key: "b", Text: testRejectOptionText}}
+		if !slices.Equal(qp.Options, wantOptions) {
+			t.Errorf("question options = %+v, want %+v", qp.Options, wantOptions)
 		}
 		if !strings.HasPrefix(splitMsg.Body, "Split this ticket into 2 tickets?") {
 			t.Errorf("question body = %q, want it to start with %q", splitMsg.Body, "Split this ticket into 2 tickets?")
@@ -301,9 +297,15 @@ func TestPlanningHandler_SplitRejected_ResumesWithNotes(t *testing.T) {
 
 	resumeRT := &scriptedRuntime{t: t, steps: []scriptedStep{questionResult(response.JobPlanning, "split-reject-sess")}}
 	rec := &recordingRuntime{rt: resumeRT}
-	commit, err := runPlanning(t, s, claim(t, s, rec, ticketID), ticketID)
+	fake := &fakeSplitTracker{t: t}
+	deps := claim(t, s, rec, ticketID)
+	deps.Splitter = fake
+	commit, err := runPlanning(t, s, deps, ticketID)
 	if err != nil {
 		t.Fatalf("split reject Run: %v", err)
+	}
+	if fake.calls != 0 || fake.closeCalls != 0 {
+		t.Errorf("fake split tracker calls = %d, closeCalls = %d, want 0 and 0 (reject must never file)", fake.calls, fake.closeCalls)
 	}
 	if commit.Session == nil || commit.Session.ID == nil || *commit.Session.ID != openSess.ID {
 		t.Fatalf("commit.Session = %+v, want the already-open session %d (a resume, not fresh)", commit.Session, openSess.ID)
@@ -368,6 +370,7 @@ func TestPlanningHandler_SplitApproved_FilesOneChildPerTickThenClosesParent(t *t
 		}
 		apply(t, s, getTicket(t, s, ticketID), commit2)
 
+		parent := getTicket(t, s, ticketID)
 		deps = claimWithRuntimes(t, s, rt, ticketID)
 		deps.Splitter = fake
 		commit3, err := runPlanning(t, s, deps, ticketID)
@@ -376,6 +379,12 @@ func TestPlanningHandler_SplitApproved_FilesOneChildPerTickThenClosesParent(t *t
 		}
 		if fake.closeCalls != 1 {
 			t.Fatalf("CloseSplitParent called %d times, want 1", fake.closeCalls)
+		}
+		if fake.closeRef != parent.TrackerRef {
+			t.Errorf("CloseSplitParent ref = %q, want the parent's own ref %q", fake.closeRef, parent.TrackerRef)
+		}
+		if fake.closeProjectID != parent.ProjectID {
+			t.Errorf("CloseSplitParent projectID = %d, want the parent's own project %d", fake.closeProjectID, parent.ProjectID)
 		}
 		if !strings.Contains(fake.closeBody, "#70, #71") {
 			t.Errorf("CloseSplitParent body = %q, want it to name #70, #71", fake.closeBody)
@@ -456,18 +465,21 @@ func TestPlanningHandler_SplitApproved_FilesOneChildPerTickThenClosesParent(t *t
 		if commit2.SplitChild == nil {
 			t.Fatalf("commit2.SplitChild = nil, want the c2 child")
 		}
-		childTicketID := int64(0)
+		var childTicketID, c1TicketID int64
 		filed, err := s.SplitChildren(t.Context(), ticketID)
 		if err != nil {
 			t.Fatalf("SplitChildren: %v", err)
 		}
 		for _, f := range filed {
-			if f.Key == "c2" {
+			switch f.Key {
+			case "c2":
 				childTicketID = f.TicketID
+			case "c1":
+				c1TicketID = f.TicketID
 			}
 		}
-		if childTicketID == 0 {
-			t.Fatalf("SplitChildren = %+v, want a filed c2", filed)
+		if childTicketID == 0 || c1TicketID == 0 {
+			t.Fatalf("SplitChildren = %+v, want filed c1 and c2", filed)
 		}
 		deps2, err := s.Dependencies(t.Context(), childTicketID)
 		if err != nil {
@@ -475,6 +487,9 @@ func TestPlanningHandler_SplitApproved_FilesOneChildPerTickThenClosesParent(t *t
 		}
 		if len(deps2) != 1 {
 			t.Fatalf("Dependencies(c2) = %+v, want exactly one row (c1)", deps2)
+		}
+		if deps2[0].TicketID != c1TicketID {
+			t.Errorf("Dependencies(c2)[0].TicketID = %d, want c1's ticket id %d", deps2[0].TicketID, c1TicketID)
 		}
 	})
 }

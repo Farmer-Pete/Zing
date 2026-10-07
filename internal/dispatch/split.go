@@ -8,7 +8,6 @@ package dispatch
 import (
 	"context"
 	"fmt"
-	"log/slog"
 
 	"zing/internal/job"
 	"zing/internal/tracker"
@@ -32,7 +31,6 @@ func (d *Dispatcher) FileSplitChild(ctx context.Context, projectID int64, title,
 	if err != nil {
 		return "", fmt.Errorf("dispatch: file split child: %w", err)
 	}
-	slog.Info("split child issue created", "project", b.TrackerProject, "ref", ref)
 	return ref, nil
 }
 

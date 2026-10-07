@@ -1096,7 +1096,9 @@ var splitKeyPattern = regexp.MustCompile(`^c\d+$`)
 // filed under this parent is the error "split child %s depends on %s, which
 // is not filed".
 func applySplitChildTx(ctx context.Context, tx *sql.Tx, parent Ticket, sc SplitChild) error {
-	if !splitKeyPattern.MatchString(sc.Key) || sc.Ref == "" || sc.Title == "" || sc.Body == "" {
+	validKey := splitKeyPattern.MatchString(sc.Key)
+	complete := sc.Ref != "" && sc.Title != "" && sc.Body != ""
+	if !validKey || !complete {
 		return fmt.Errorf("split child %q: key must match c[0-9]+ and ref, title, body must be non-empty", sc.Key)
 	}
 	depIDs := make([]int64, len(sc.DependsOn))

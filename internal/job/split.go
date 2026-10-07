@@ -14,6 +14,7 @@ import (
 	"fmt"
 	"log/slog"
 	"strings"
+	"unicode"
 
 	"zing/internal/prompt"
 	"zing/internal/response"
@@ -122,7 +123,7 @@ func splitOrder(children []response.Child) ([]response.Child, error) {
 	for _, c := range children {
 		for _, dep := range c.DependsOn {
 			if _, ok := byKey[dep]; !ok {
-				return nil, fmt.Errorf("job: split: child %s depends on unknown key %s", c.Key, dep)
+				return nil, fmt.Errorf("child %s depends on unknown key %s", c.Key, dep)
 			}
 		}
 	}
@@ -157,7 +158,7 @@ func splitOrder(children []response.Child) ([]response.Child, error) {
 					remaining = append(remaining, c.Key)
 				}
 			}
-			return nil, fmt.Errorf("job: split: dependency cycle among %s", strings.Join(remaining, ", "))
+			return nil, fmt.Errorf("dependency cycle among %s", strings.Join(remaining, ", "))
 		}
 	}
 	return order, nil
@@ -286,9 +287,9 @@ func closeSplitParent(ctx context.Context, t store.Ticket, d Deps, order []respo
 // only when depRefs is non-empty, "Depends on" each ref joined by ", ".
 // Parts are joined by a blank line.
 func splitChildBody(body, notes, parentRef string, depRefs []string) string {
-	parts := []string{strings.TrimSpace(body)}
+	parts := []string{strings.TrimRightFunc(body, unicode.IsSpace)}
 	if strings.TrimSpace(notes) != "" {
-		parts = append(parts, "## Shared notes from the split\n\n"+strings.TrimSpace(notes))
+		parts = append(parts, "## Shared notes from the split\n\n"+strings.TrimRightFunc(notes, unicode.IsSpace))
 	}
 	parts = append(parts, fmt.Sprintf("Split from %s.", tracker.IssueRef(parentRef)))
 	if len(depRefs) > 0 {
