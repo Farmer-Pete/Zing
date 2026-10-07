@@ -10,16 +10,21 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
 	"zing/internal/bus"
 	"zing/internal/console"
+	"zing/internal/dispatch"
+	"zing/internal/proc"
 	"zing/internal/response"
 	"zing/internal/store"
 )
@@ -1504,5 +1509,384 @@ func TestRunFile_LogsOutcomes(t *testing.T) {
 
 	if strings.Contains(logBuf.String(), finalMsg) || strings.Contains(logBuf.String(), stderrSecret) {
 		t.Errorf("log buffer leaked evidence text:\n%s", logBuf.String())
+	}
+}
+
+// ---- Stall line (ticket "Say on each ticket why it is not moving", split
+// from #79) -----------------------------------------------------------
+
+// TestRail_StallOwnerWaitAndLastRan proves the rail's stall section shows
+// the "waiting on the owner" reason, naming the waiting_on flag, and the
+// "last ran" line formatted from the newest run's recorded StartedAt. This
+// task (Task 3) wires no SlotSource, so decideStall's running, claim_dead,
+// and slot reasons cannot fire here; only waiting-on-owner is exercised.
+func TestRail_StallOwnerWaitAndLastRan(t *testing.T) {
+	t.Parallel()
+	s := newConsoleTestStore(t)
+	ticketID := seedTicket(t, s, "fake#1", "Add a hello endpoint")
+	advanceTicketToBuilding(t, s, ticketID, "sonnet", 42)
+
+	runs, err := s.RunsForTicket(t.Context(), ticketID)
+	if err != nil {
+		t.Fatalf("RunsForTicket: %v", err)
+	}
+	if len(runs) != 1 {
+		t.Fatalf("RunsForTicket returned %d runs, want 1", len(runs))
+	}
+	startedAt := time.Date(2026, 1, 2, 3, 4, 0, 0, time.UTC)
+	if err := s.RecordRunStart(t.Context(), runs[0].ID, 0, "", startedAt, ""); err != nil {
+		t.Fatalf("RecordRunStart: %v", err)
+	}
+
+	srv := newTestServer(t, s, bus.New(), testMachine(t), newTestLogHandler(t))
+	rail := railHTML(t, srv.URL, ticketID)
+
+	if !strings.Contains(rail, "waiting on the owner (gate)") {
+		t.Errorf("rail missing the owner-wait stall line; got:\n%s", rail)
+	}
+	if !strings.Contains(rail, "last ran 2026-01-02 03:04 UTC") {
+		t.Errorf("rail missing the last-ran line; got:\n%s", rail)
+	}
+}
+
+// TestRail_StallCIWaiting proves the rail's stall section shows the CI
+// reason, with the whole-minutes count and the check names, once the ticket
+// is in shipping and carries a "ci waiting ..." system update marker newer
+// than its newest run's start (owner decision Q1).
+func TestRail_StallCIWaiting(t *testing.T) {
+	t.Parallel()
+	s := newConsoleTestStore(t)
+	ticketID := seedTicket(t, s, "fake#1", "Add a hello endpoint")
+	advanceTicketToState(t, s, ticketID, string(response.TicketStateShipping))
+
+	if _, err := s.InsertMessage(t.Context(), store.Message{
+		TicketID: ticketID, Type: testMsgTypeUpdate, Author: "system", Body: "ci waiting ci,lint",
+	}); err != nil {
+		t.Fatalf("InsertMessage: %v", err)
+	}
+
+	srv := newTestServer(t, s, bus.New(), testMachine(t), newTestLogHandler(t))
+	rail := railHTML(t, srv.URL, ticketID)
+
+	if !strings.Contains(rail, `data-stall-reason="ci"`) {
+		t.Errorf("rail missing data-stall-reason=\"ci\"; got:\n%s", rail)
+	}
+	if !strings.Contains(rail, "CI waiting 0 minutes for ci, lint") {
+		t.Errorf("rail missing the CI waiting line; got:\n%s", rail)
+	}
+}
+
+// TestRail_StallLoaderPicksNewestRunAndMarker proves buildStallRail's two
+// "take the newest" choices actually pick by time, not by position: the
+// greatest Run.StartedAt across several runs (RunsForTicket orders by id,
+// not by start time), and the newest of several "ci waiting" markers. Each
+// subtest gives the higher-id run the earlier start, so a loader that used
+// the last run by id, instead of the greatest StartedAt, would report the
+// wrong last-ran time and the wrong side of the CI newer-than-run-start
+// check (owner decision Q1).
+func TestRail_StallLoaderPicksNewestRunAndMarker(t *testing.T) {
+	t.Parallel()
+
+	seedTwoRunsAndMarkers := func(t *testing.T, newestRunStart, olderRunStart time.Time) (*store.Store, int64) {
+		t.Helper()
+		s := newConsoleTestStore(t)
+		ticketID := seedTicket(t, s, "fake#1", "Add a hello endpoint")
+		advanceTicketToState(t, s, ticketID, string(response.TicketStateShipping))
+
+		const owner = "rail-loader-test-owner"
+		expires := time.Now().Add(10 * time.Minute).UTC().Truncate(time.Second)
+		claimed, err := s.Claim(t.Context(), ticketID, owner, expires)
+		if err != nil || !claimed {
+			t.Fatalf("Claim: claimed=%v err=%v", claimed, err)
+		}
+
+		// The lower run id (reserved first) carries the newest start; the
+		// higher run id (reserved second) carries the older one, so picking
+		// "the last run by id" disagrees with picking "the greatest start".
+		newest, err := s.Reserve(t.Context(), ticketID, owner, expires,
+			store.SessionUpsert{Job: string(response.TicketStateShipping), Runtime: testRuntimeFake},
+			store.RunSeed{Model: "test-model"})
+		if err != nil {
+			t.Fatalf("Reserve (newest run): %v", err)
+		}
+		if err = s.RecordRunStart(t.Context(), newest.RunID, 0, "", newestRunStart, ""); err != nil {
+			t.Fatalf("RecordRunStart (newest run): %v", err)
+		}
+		older, err := s.Reserve(t.Context(), ticketID, owner, expires,
+			store.SessionUpsert{Job: string(response.TicketStateShipping), Runtime: testRuntimeFake},
+			store.RunSeed{Model: "test-model"})
+		if err != nil {
+			t.Fatalf("Reserve (older, higher-id run): %v", err)
+		}
+		if older.RunID <= newest.RunID {
+			t.Fatalf("older run id %d is not greater than newest run id %d", older.RunID, newest.RunID)
+		}
+		if err = s.RecordRunStart(t.Context(), older.RunID, 0, "", olderRunStart, ""); err != nil {
+			t.Fatalf("RecordRunStart (older run): %v", err)
+		}
+
+		if _, err := s.InsertMessage(t.Context(), store.Message{
+			TicketID: ticketID, Type: testMsgTypeUpdate, Author: "system", Body: "ci waiting stale-check",
+		}); err != nil {
+			t.Fatalf("InsertMessage (older marker): %v", err)
+		}
+		if _, err := s.InsertMessage(t.Context(), store.Message{
+			TicketID: ticketID, Type: testMsgTypeUpdate, Author: "system", Body: "ci waiting ci,lint",
+		}); err != nil {
+			t.Fatalf("InsertMessage (newest marker): %v", err)
+		}
+
+		return s, ticketID
+	}
+
+	t.Run("marker_older_than_newest_run_hides_ci_and_last_ran_uses_greatest_start", func(t *testing.T) {
+		t.Parallel()
+		now := time.Now().UTC()
+		newestRunStart := now.Add(2 * time.Hour).Truncate(time.Second)
+		olderRunStart := now.Add(-2 * time.Hour).Truncate(time.Second)
+		s, ticketID := seedTwoRunsAndMarkers(t, newestRunStart, olderRunStart)
+
+		srv := newTestServer(t, s, bus.New(), testMachine(t), newTestLogHandler(t))
+		rail := railHTML(t, srv.URL, ticketID)
+
+		wantLastRan := "last ran " + newestRunStart.Format("2006-01-02 15:04") + " UTC"
+		if !strings.Contains(rail, wantLastRan) {
+			t.Errorf("rail missing %q (the greater of the two run starts); got:\n%s", wantLastRan, rail)
+		}
+		if strings.Contains(rail, `data-stall-reason="ci"`) {
+			t.Errorf("rail should hide the CI reason when the newest marker is older than the newest run's start; got:\n%s", rail)
+		}
+	})
+
+	t.Run("marker_newer_than_newest_run_shows_newest_markers_names", func(t *testing.T) {
+		t.Parallel()
+		now := time.Now().UTC()
+		newestRunStart := now.Add(-2 * time.Hour).Truncate(time.Second)
+		olderRunStart := now.Add(-3 * time.Hour).Truncate(time.Second)
+		s, ticketID := seedTwoRunsAndMarkers(t, newestRunStart, olderRunStart)
+
+		srv := newTestServer(t, s, bus.New(), testMachine(t), newTestLogHandler(t))
+		rail := railHTML(t, srv.URL, ticketID)
+
+		if !strings.Contains(rail, `data-stall-reason="ci"`) {
+			t.Errorf("rail missing data-stall-reason=\"ci\"; got:\n%s", rail)
+		}
+		if !strings.Contains(rail, "for ci, lint") {
+			t.Errorf("rail should show the newest marker's check names; got:\n%s", rail)
+		}
+		if strings.Contains(rail, "stale-check") {
+			t.Errorf("rail should not show the older marker's check name; got:\n%s", rail)
+		}
+	})
+}
+
+// TestRail_StallNoSlotSource proves a console with a machine but no
+// SlotSource still renders the stall section's shell -- class="rail-stall"
+// and the "never ran" last-ran line -- but shows no stall-reason element,
+// since a ready queued ticket's only possible reason (a full run-slot
+// table) needs a SlotSource this console does not have (Task 4).
+func TestRail_StallNoSlotSource(t *testing.T) {
+	t.Parallel()
+	s := newConsoleTestStore(t)
+	ticketID := seedTicket(t, s, "fake#1", "Add a hello endpoint")
+
+	srv := newTestServer(t, s, bus.New(), testMachine(t), newTestLogHandler(t))
+	rail := railHTML(t, srv.URL, ticketID)
+
+	if !strings.Contains(rail, `class="rail-stall"`) {
+		t.Errorf("rail missing the rail-stall section; got:\n%s", rail)
+	}
+	if !strings.Contains(rail, "never ran") {
+		t.Errorf("rail missing the never-ran line; got:\n%s", rail)
+	}
+	if strings.Contains(rail, `class="stall-reason"`) {
+		t.Errorf("rail should show no stall-reason with no SlotSource; got:\n%s", rail)
+	}
+}
+
+// TestRail_StallHiddenWhenTerminal proves a terminal ticket (abandoned)
+// renders no rail-stall section at all, matching buildStallRail's own
+// terminal-state guard.
+func TestRail_StallHiddenWhenTerminal(t *testing.T) {
+	t.Parallel()
+	s := newConsoleTestStore(t)
+	ticketID := seedTicket(t, s, "fake#1", "Add a hello endpoint")
+	if err := s.AbandonTicket(t.Context(), ticketID, "rail stall test"); err != nil {
+		t.Fatalf("AbandonTicket: %v", err)
+	}
+
+	srv := newTestServer(t, s, bus.New(), testMachine(t), newTestLogHandler(t))
+	rail := railHTML(t, srv.URL, ticketID)
+
+	if !strings.Contains(rail, `class="rail-phase"`) {
+		t.Errorf("rail should still render the phase section for a terminal ticket; got:\n%s", rail)
+	}
+	if strings.Contains(rail, "rail-stall") {
+		t.Errorf("rail should hide the stall section for a terminal ticket; got:\n%s", rail)
+	}
+}
+
+// fakeSlots is a console.SlotSource a test can seed with a fixed snapshot,
+// standing in for a real dispatch.Dispatcher (owner decision Q5): Slots
+// always returns the exact dispatch.SlotSnapshot the test constructed it
+// with.
+type fakeSlots dispatch.SlotSnapshot
+
+func (f fakeSlots) Slots() dispatch.SlotSnapshot { return dispatch.SlotSnapshot(f) }
+
+// newStallTestServer is newTestServerConfig (console_test.go), narrowed to
+// what the stall tests need: a real machine (testMachine) so the rail
+// renders a stall section at all, and slots wired through console.WithSlots
+// so decideStall's running, claim_dead, and slot reasons can fire.
+func newStallTestServer(t *testing.T, s *store.Store, b *bus.Broker, slots console.SlotSource) *httptest.Server {
+	t.Helper()
+	return newTestServerConfig(t, s, b, testMachine(t), newTestLogHandler(t), response.SeverityMinor, "", nil, "",
+		nil, console.WithSlots(slots))
+}
+
+// TestRail_StallSlotLine proves the rail's stall section shows the "waiting
+// for a free run slot" reason, naming the tickets that hold the slots, for
+// a ready (unclaimed, non-waiting) ticket once every slot a SlotSource
+// reports is busy (owner decision Q5; "Done when" bullet 1).
+func TestRail_StallSlotLine(t *testing.T) {
+	t.Parallel()
+	s := newConsoleTestStore(t)
+	ticketID := seedTicket(t, s, "fake#1", "Add a hello endpoint")
+
+	slots := fakeSlots{Owner: "this-serve", Inflight: []int64{11, 12}, MaxParallel: 2}
+	srv := newStallTestServer(t, s, bus.New(), slots)
+	rail := railHTML(t, srv.URL, ticketID)
+
+	if !strings.Contains(rail, `data-stall-reason="slot"`) {
+		t.Errorf("rail missing data-stall-reason=\"slot\"; got:\n%s", rail)
+	}
+	if !strings.Contains(rail, "waiting for a free run slot; slots held by tickets 11, 12") {
+		t.Errorf("rail missing the slot-wait line; got:\n%s", rail)
+	}
+}
+
+// TestRail_StallSlotLineHiddenForNonCandidate proves the slot reason stays
+// hidden for a ticket store.ListReadyCandidates excludes, even with every
+// slot a SlotSource reports busy: here a ticket a Claude session limit
+// parked into the future (review finding r2f2) is not a ready candidate,
+// so a buildStallRail that skipped the ListReadyCandidates read and
+// treated every unclaimed ticket as a candidate would show the slot line
+// here, while this test wants it hidden.
+func TestRail_StallSlotLineHiddenForNonCandidate(t *testing.T) {
+	t.Parallel()
+	s := newConsoleTestStore(t)
+	ticketID := seedTicket(t, s, "fake#1", "Add a hello endpoint")
+
+	const owner = "park-test-owner"
+	expires := time.Now().Add(10 * time.Minute).UTC().Truncate(time.Second)
+	claimed, err := s.Claim(t.Context(), ticketID, owner, expires)
+	if err != nil || !claimed {
+		t.Fatalf("Claim: claimed=%v err=%v", claimed, err)
+	}
+	if _, err := s.Reserve(t.Context(), ticketID, owner, expires,
+		store.SessionUpsert{Job: string(response.TicketStateBuilding), Runtime: testRuntimeFake},
+		store.RunSeed{Model: "test-model"}); err != nil {
+		t.Fatalf("Reserve: %v", err)
+	}
+	cappedUntil := time.Now().Add(time.Hour).UTC().Truncate(time.Second)
+	if _, err := s.ParkRuns(t.Context(), ticketID, owner, expires, cappedUntil, ""); err != nil {
+		t.Fatalf("ParkRuns: %v", err)
+	}
+
+	slots := fakeSlots{Owner: "this-serve", Inflight: []int64{11, 12}, MaxParallel: 2}
+	srv := newStallTestServer(t, s, bus.New(), slots)
+	rail := railHTML(t, srv.URL, ticketID)
+
+	if !strings.Contains(rail, `class="rail-stall"`) {
+		t.Errorf("rail missing the rail-stall section; got:\n%s", rail)
+	}
+	if strings.Contains(rail, `data-stall-reason="slot"`) {
+		t.Errorf("rail should hide the slot reason for a parked, non-candidate ticket; got:\n%s", rail)
+	}
+}
+
+// TestRail_StallDeadClaim proves the rail's stall section shows the
+// dead-claim reason for a ticket claimed by an owner other than the
+// SlotSource's own, when that ticket carries no open runs at all -- so
+// ClaimAlive, still always false until Task 5 wires ClaimProcessesAlive,
+// correctly picks the "next dispatch pass reclaims it" text rather than the
+// "leftover agent process is still running" one.
+func TestRail_StallDeadClaim(t *testing.T) {
+	t.Parallel()
+	s := newConsoleTestStore(t)
+	ticketID := seedTicket(t, s, "fake#1", "Add a hello endpoint")
+
+	expires := time.Now().Add(10 * time.Minute).UTC().Truncate(time.Second)
+	claimed, err := s.Claim(t.Context(), ticketID, "dead-serve-1", expires)
+	if err != nil {
+		t.Fatalf("Claim: %v", err)
+	}
+	if !claimed {
+		t.Fatal("Claim: got false, want true")
+	}
+
+	slots := fakeSlots{Owner: "this-serve", Inflight: nil, MaxParallel: 2}
+	srv := newStallTestServer(t, s, bus.New(), slots)
+	rail := railHTML(t, srv.URL, ticketID)
+
+	if !strings.Contains(rail, `data-stall-reason="claim_dead"`) {
+		t.Errorf("rail missing data-stall-reason=\"claim_dead\"; got:\n%s", rail)
+	}
+	if !strings.Contains(rail, "claim held by a process that is no longer alive (dead-serve-1); the next dispatch pass reclaims it") {
+		t.Errorf("rail missing the dead-claim line; got:\n%s", rail)
+	}
+}
+
+// TestRail_StallDeadClaimOrphanRunning proves the dead-claim reason picks
+// the "leftover agent process is still running" text, not "the next
+// dispatch pass reclaims it", when store.ForeignClaims' matching entry's
+// open run still has a live process group (owner decision Q2,
+// dispatch.ClaimProcessesAlive).
+func TestRail_StallDeadClaimOrphanRunning(t *testing.T) {
+	t.Parallel()
+	s := newConsoleTestStore(t)
+	ticketID := seedTicket(t, s, "fake#1", "Add a hello endpoint")
+
+	cmd := exec.CommandContext(t.Context(), "sh", "-c", "sleep 30")
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	if err := cmd.Start(); err != nil {
+		t.Skipf("start sh: %v", err)
+	}
+	pgid := cmd.Process.Pid
+	token, err := proc.StartToken(pgid)
+	if err != nil {
+		_ = syscall.Kill(-pgid, syscall.SIGKILL) //nolint:errcheck // best-effort teardown
+		t.Skipf("proc.StartToken unsupported on this platform: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = syscall.Kill(-pgid, syscall.SIGKILL) //nolint:errcheck // best-effort teardown
+		_ = cmd.Wait()                           //nolint:errcheck // best-effort teardown
+	})
+
+	const foreignOwner = "dead-serve-2"
+	expires := time.Now().Add(10 * time.Minute).UTC().Truncate(time.Second)
+	claimed, err := s.Claim(t.Context(), ticketID, foreignOwner, expires)
+	if err != nil || !claimed {
+		t.Fatalf("Claim: claimed=%v err=%v", claimed, err)
+	}
+	reserved, err := s.Reserve(t.Context(), ticketID, foreignOwner, expires,
+		store.SessionUpsert{Job: string(response.TicketStateBuilding), Runtime: testRuntimeFake},
+		store.RunSeed{Model: "test-model"})
+	if err != nil {
+		t.Fatalf("Reserve: %v", err)
+	}
+	if err := s.RecordRunStart(t.Context(), reserved.RunID, pgid, token, time.Now(), ""); err != nil {
+		t.Fatalf("RecordRunStart: %v", err)
+	}
+
+	slots := fakeSlots{Owner: "this-serve", Inflight: nil, MaxParallel: 2}
+	srv := newStallTestServer(t, s, bus.New(), slots)
+	rail := railHTML(t, srv.URL, ticketID)
+
+	if !strings.Contains(rail, `data-stall-reason="claim_dead"`) {
+		t.Errorf("rail missing data-stall-reason=\"claim_dead\"; got:\n%s", rail)
+	}
+	if !strings.Contains(rail, "claim held by a process that is no longer alive (dead-serve-2); its leftover agent process is still running") {
+		t.Errorf("rail missing the live-orphan dead-claim line; got:\n%s", rail)
 	}
 }

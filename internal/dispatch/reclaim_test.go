@@ -47,6 +47,86 @@ func seedOpenRun(t *testing.T, s *store.Store, ticketID int64, owner string, exp
 	}
 }
 
+// TestClaimProcessesAlive proves dispatch.ClaimProcessesAlive reuses
+// classifyOpenRun's own liveness rules over a store.ForeignClaim's open
+// runs and, when there are none, its recorded CHECK command (owner
+// decision Q2): the decideStall pure function (console.stall.go) trusts
+// its bool rather than re-deriving liveness from scratch.
+func TestClaimProcessesAlive(t *testing.T) {
+	t.Parallel()
+
+	t.Run("nil pgid and no check is dead", func(t *testing.T) {
+		t.Parallel()
+		fc := store.ForeignClaim{
+			TicketID: 1,
+			Owner:    "dead-serve-1",
+			Open:     []store.OpenRun{{RunID: 1, Job: reclaimTestJob, PGID: nil}},
+		}
+		if dispatch.ClaimProcessesAlive(fc) {
+			t.Error("ClaimProcessesAlive = true, want false for a nil-PGID open run and no check")
+		}
+	})
+
+	t.Run("live open run is alive", func(t *testing.T) {
+		t.Parallel()
+		cmd := startGroupLeader(t)
+		defer killGroup(t, cmd)
+		pgid := cmd.Process.Pid
+		token, err := proc.StartToken(pgid)
+		if err != nil {
+			t.Skipf("proc.StartToken unsupported on this platform: %v", err)
+		}
+		fc := store.ForeignClaim{
+			TicketID: 2,
+			Owner:    "dead-serve-2",
+			Open:     []store.OpenRun{{RunID: 1, Job: reclaimTestJob, PGID: &pgid, ProcStart: &token}},
+		}
+		if !dispatch.ClaimProcessesAlive(fc) {
+			t.Error("ClaimProcessesAlive = false, want true for a live open run")
+		}
+	})
+
+	t.Run("no open runs but a live check is alive", func(t *testing.T) {
+		t.Parallel()
+		cmd := startGroupLeader(t)
+		defer killGroup(t, cmd)
+		pgid := cmd.Process.Pid
+		token, err := proc.StartToken(pgid)
+		if err != nil {
+			t.Skipf("proc.StartToken unsupported on this platform: %v", err)
+		}
+		fc := store.ForeignClaim{
+			TicketID: 3,
+			Owner:    "dead-serve-3",
+			Check:    &store.OpenCheck{PGID: pgid, ProcStart: &token, StartedAt: time.Now(), BudgetStartedAt: time.Now()},
+		}
+		if !dispatch.ClaimProcessesAlive(fc) {
+			t.Error("ClaimProcessesAlive = false, want true for a live check command")
+		}
+	})
+
+	t.Run("killed open run is dead", func(t *testing.T) {
+		t.Parallel()
+		cmd := startGroupLeader(t)
+		pgid := cmd.Process.Pid
+		token, err := proc.StartToken(pgid)
+		if err != nil {
+			killGroup(t, cmd)
+			t.Skipf("proc.StartToken unsupported on this platform: %v", err)
+		}
+		killGroup(t, cmd)
+		waitGroupGone(t, pgid)
+		fc := store.ForeignClaim{
+			TicketID: 4,
+			Owner:    "dead-serve-4",
+			Open:     []store.OpenRun{{RunID: 1, Job: reclaimTestJob, PGID: &pgid, ProcStart: &token}},
+		}
+		if dispatch.ClaimProcessesAlive(fc) {
+			t.Error("ClaimProcessesAlive = true, want false once the open run's group exited")
+		}
+	})
+}
+
 // startGroupLeader starts "sleep 30" as its own process group leader
 // (pgid == pid), the same pattern internal/proc's own tests use, and
 // returns the running command; the caller must kill and wait on it.
