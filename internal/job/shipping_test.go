@@ -8516,6 +8516,40 @@ func TestAutoMergeWhenAllowed(t *testing.T) {
 	}
 }
 
+// TestAutoMergeBlockedByDependencyFile proves the handler wires
+// mergeDecision's DependencyFiles rule end to end: it reads the real
+// diff from ChangedFilesSinceBase and passes deps.MergeRule.DependencyFiles
+// into mergeDecision, so with merge.auto on but the ticket's own real
+// build landing hello.txt (shipTicketReady's own fixture), named here as a
+// dependency file, row 9 asks instead of merging, naming the path in its
+// own reason. TestMergeDecision's own "dependency file hello.txt named
+// exactly" row proves the rule in isolation; this proves the handler
+// reaches it.
+func TestAutoMergeBlockedByDependencyFile(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow end-to-end flow; runs in the full suite")
+	}
+	t.Parallel()
+	s, ticket, gh, tr := shipPublished(t)
+	local := shipHeadSHA(t, s, ticket)
+	runs, required := shipGreenCI()
+	gh.runs, gh.required = runs, required
+	gh.prState = shipMergeReadyPR(local, "PR_node_auto_blocked")
+
+	rule := MergeRule{Auto: true, Method: shipMergeMethodSquash, DependencyFiles: []string{"hello.txt"}}
+	commit, err := shipPollRunWithRule(t, s, ticket, gh, tr, rule)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if len(gh.mergeCalls) != 0 {
+		t.Errorf("mergeCalls = %+v, want none (the dependency file blocks it)", gh.mergeCalls)
+	}
+	q := shipQuestionMessage(t, commit)
+	if !strings.Contains(q.Body, "the diff changes a dependency file: hello.txt") {
+		t.Errorf("question body = %q, want the dependency-file reason naming hello.txt", q.Body)
+	}
+}
+
 // TestMergeWaitPollsAndSeesMerge proves D21: a ticket waiting on "merge"
 // stays a dispatch candidate, so a merge GitHub itself reports -- the
 // owner merged it there directly, with the question still open and
