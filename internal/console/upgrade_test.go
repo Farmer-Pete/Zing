@@ -129,3 +129,33 @@ func TestHandleUpgrade_UnavailableWithoutSelfProject(t *testing.T) {
 		t.Errorf("body = %q, want it to contain %q", body, "no project in zing.toml sets self = true")
 	}
 }
+
+// TestSettings_UpgradeButton proves the Settings view's Upgrade now row
+// (task 10, Q6): it appears, with its button and alert message span, only
+// when an upgrader is wired through console.WithUpgrader.
+func TestSettings_UpgradeButton(t *testing.T) {
+	t.Parallel()
+	s := newConsoleTestStore(t)
+	up := &fakeUpgrader{}
+	srv := newUpgradeTestServer(t, s, bus.New(), console.WithUpgrader(up))
+
+	resp, r, cancel := openStream(t, srv.URL, "settings", 0, 0)
+	defer cancel()
+	defer resp.Body.Close()
+	_, main, _, _ := readInitialFrames(t, r)
+	if !strings.Contains(main, `class="upgrade-now"`) {
+		t.Errorf("main missing upgrade-now button; got:\n%s", main)
+	}
+	if !strings.Contains(main, `id="upgrade-message" role="alert" data-ignore-morph`) {
+		t.Errorf("main missing upgrade-message alert span; got:\n%s", main)
+	}
+
+	srvNoUpgrader := newUpgradeTestServer(t, newConsoleTestStore(t), bus.New())
+	resp2, r2, cancel2 := openStream(t, srvNoUpgrader.URL, "settings", 0, 0)
+	defer cancel2()
+	defer resp2.Body.Close()
+	_, main2, _, _ := readInitialFrames(t, r2)
+	if strings.Contains(main2, "upgrade-now") || strings.Contains(main2, "upgrade-message") {
+		t.Errorf("main (no upgrader) should not show the Upgrade now row; got:\n%s", main2)
+	}
+}

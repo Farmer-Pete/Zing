@@ -21,8 +21,10 @@ type SettingRow struct {
 // pickup-message, so a refusal console.js writes there survives the
 // /stream patch any bus publish causes. No tuner (selftest, or any caller
 // that never wires console.WithTuner) renders nil, in which case this
-// shows the "needs a running zing serve" line instead of any row.
-templ Settings(rows []SettingRow) {
+// shows the "needs a running zing serve" line instead of any row. upgrade
+// is c.upgrader != nil (#109 part 2, Q6): it shows the Upgrade now row,
+// independent of rows, only when an upgrader is wired.
+templ Settings(rows []SettingRow, upgrade bool) {
 	<main id="main" class="view-settings">
 		<h2>Settings</h2>
 		if len(rows) == 0 {
@@ -37,6 +39,13 @@ templ Settings(rows []SettingRow) {
 					<span class="tuning-message" id={ "tuning-message-" + r.Name } role="alert" data-ignore-morph></span>
 				</div>
 			}
+		}
+		if upgrade {
+			<div class="upgrade-row">
+				<p class="upgrade-help">Build the default branch's tip, selftest it, and restart zing serve on it.</p>
+				<button type="button" class="upgrade-now">Upgrade now</button>
+				<span class="upgrade-message" id="upgrade-message" role="alert" data-ignore-morph></span>
+			</div>
 		}
 	</main>
 }

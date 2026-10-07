@@ -60,6 +60,7 @@ import {
 	streamStatusView,
 	pickupResultView,
 	tuningRequestBody,
+	upgradeMessageText,
 } from './keyboard.mjs';
 
 // defaultNav is the shell's own data-signals default (templates/shell.templ:
@@ -1518,6 +1519,45 @@ function installTuningControls() {
 	});
 }
 
+// postUpgrade posts POST /upgrade and shows upgradeMessageText's answer in
+// #upgrade-message, through suppressPatchSignal like saveTuning.
+async function postUpgrade(button) {
+	const message = document.getElementById('upgrade-message');
+	const show = (text) => {
+		suppressPatchSignal = true;
+		if (message) {
+			message.textContent = text;
+		}
+		suppressPatchSignal = false;
+	};
+	button.disabled = true;
+	try {
+		const resp = await fetch('/upgrade', {
+			method: 'POST',
+			headers: { 'Content-Type': 'application/json', 'Datastar-Request': 'true' },
+			body: '{}',
+		});
+		show(upgradeMessageText(resp.ok, await resp.text()));
+	} catch (err) {
+		console.error('console.js: POST /upgrade', err);
+		show(upgradeMessageText(false, ''));
+	} finally {
+		button.disabled = false;
+	}
+}
+
+// installUpgradeButton wires the Settings view's Upgrade now button,
+// delegated from document like installTuningControls.
+function installUpgradeButton() {
+	document.addEventListener('click', (event) => {
+		const button = event.target.closest?.('.upgrade-row button.upgrade-now');
+		if (button) {
+			event.preventDefault();
+			postUpgrade(button);
+		}
+	});
+}
+
 // ---- ticket actions: abandon, restart from planning (ticket #65) ---------
 
 // postTicketAction handles the confirmed Abandon/Restart click: posts
@@ -2289,7 +2329,7 @@ function installNavBridge() {
 // loadBindings' own /static/keys.json fetch (bug fix): none of
 // installStreamWatch, installNavBridge, installPatchObserver, installSideBox,
 // installLogControls, installChipActivation, installItemNoteSave,
-// installPickupBox, installTuningControls, installTicketActions, installSandboxRunBox,
+// installPickupBox, installTuningControls, installUpgradeButton, installTicketActions, installSandboxRunBox,
 // installOwnerEdit, installReplyAutosave, or installReplyFocusTracking reads
 // state.bindings, so there was no reason their listeners -- installNavBridge
 // above all, the zing-nav bridge a Threads-sidebar click needs live as early
@@ -2309,6 +2349,7 @@ async function install() {
 	installItemNoteSave();
 	installPickupBox();
 	installTuningControls();
+	installUpgradeButton();
 	installTicketActions();
 	installDispatchResume();
 	installSandboxRunBox();
