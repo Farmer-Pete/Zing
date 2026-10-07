@@ -238,6 +238,64 @@ func TestRun_StopPushFailureOnlyWarns(t *testing.T) {
 	}
 }
 
+// blockingNotifier is a fake dispatch.Notifier whose Send blocks until the
+// test closes release, so a test can observe finish's own notifyWG.Wait()
+// actually holding Run's return open for an in-flight send rather than
+// merely coexisting with one that already finished.
+type blockingNotifier struct {
+	entered chan struct{}
+	release chan struct{}
+}
+
+func newBlockingNotifier() *blockingNotifier {
+	return &blockingNotifier{entered: make(chan struct{}), release: make(chan struct{})}
+}
+
+func (n *blockingNotifier) Send(_ context.Context, _ []byte) error {
+	close(n.entered)
+	<-n.release
+	return nil
+}
+
+// TestRun_FinishWaitsForInFlightPush proves finish's own notifyWG.Wait()
+// (design section "shape" rules: that wait is at most notifyTimeout, and
+// "zing serve never closes the store under a running send") actually blocks
+// Run's return on a send still in flight, rather than merely joining one
+// that has already finished by the time Run is canceled.
+func TestRun_FinishWaitsForInFlightPush(t *testing.T) {
+	s := newDispatchTestStore(t)
+	seedQueuedTicket(t, s, testFixtureRef)
+
+	notifier := newBlockingNotifier()
+
+	reg := job.Registry()
+	reg[testStateQueued] = &failOnceHandler{}
+	reg[testStatePlanning] = noActionHandler{}
+
+	d := newDispatcher(t, s, newFixtureTracker(t), bus.New(), fakeRuntime(t), reg, nil,
+		dispatch.Config{MaxParallel: 1, Interval: 5 * time.Millisecond, Owner: testOwner, Notifier: notifier})
+
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	runErrCh := make(chan error, 1)
+	go func() { runErrCh <- d.Run(ctx) }()
+
+	waitFor(t, notifier.entered, "notifyStop's goroutine to call Send")
+	cancel()
+
+	select {
+	case <-runErrCh:
+		t.Fatalf("Run returned before the in-flight push was released")
+	case <-time.After(200 * time.Millisecond):
+	}
+
+	close(notifier.release)
+	runErr := waitFor(t, runErrCh, "Run to return once the push is released")
+	if runErr != nil && !errors.Is(runErr, context.Canceled) {
+		t.Errorf("Run err = %v, want nil or context.Canceled", runErr)
+	}
+}
+
 // TestResume_OwnerStopSendsNoPush proves an owner stop (the store's stopped
 // flag alone, with no recorded stopErr) never calls notifyStop (design
 // section "shape" rules, owner decision Q2): only setStop's recorded branch

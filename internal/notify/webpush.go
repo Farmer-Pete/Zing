@@ -187,6 +187,26 @@ func decodeB64URL(s string) ([]byte, error) {
 	return base64.RawURLEncoding.DecodeString(strings.TrimRight(s, "="))
 }
 
+// decode validates and decodes k's two base64url fields: p256dh must decode
+// to a 65-byte uncompressed point that ecdh.P256().NewPublicKey accepts, and
+// auth must decode to exactly 16 bytes. Any failure returns the fixed error
+// "invalid keys" (sendOne's own doc comment), so the subscription stays
+// stored rather than being deleted for a malformed row.
+func (k subscriptionKeys) decode() (uaPublic, authSecret []byte, err error) {
+	uaPublic, err = decodeB64URL(k.P256dh)
+	if err != nil || len(uaPublic) != uncompressedP256PointLen {
+		return nil, nil, errors.New("invalid keys")
+	}
+	if _, pubErr := ecdh.P256().NewPublicKey(uaPublic); pubErr != nil {
+		return nil, nil, errors.New("invalid keys")
+	}
+	authSecret, err = decodeB64URL(k.Auth)
+	if err != nil || len(authSecret) != 16 {
+		return nil, nil, errors.New("invalid keys")
+	}
+	return uaPublic, authSecret, nil
+}
+
 // Send encrypts payload once per stored subscription and POSTs it, with a
 // VAPID JWT, to each one (RFC 8291, RFC 8292). It rejects an oversize
 // payload before touching the store. An empty subscription list is a no-op:
@@ -252,16 +272,9 @@ func (w *WebPush) sendOne(ctx context.Context, sub store.PushSubscription, paylo
 	if err := json.Unmarshal(sub.KeysJSON, &keys); err != nil {
 		return errors.New("invalid keys")
 	}
-	uaPublic, err := decodeB64URL(keys.P256dh)
-	if err != nil || len(uaPublic) != uncompressedP256PointLen {
-		return errors.New("invalid keys")
-	}
-	if _, pubErr := ecdh.P256().NewPublicKey(uaPublic); pubErr != nil {
-		return errors.New("invalid keys")
-	}
-	authSecret, err := decodeB64URL(keys.Auth)
-	if err != nil || len(authSecret) != 16 {
-		return errors.New("invalid keys")
+	uaPublic, authSecret, err := keys.decode()
+	if err != nil {
+		return err
 	}
 
 	asPriv, err := ecdh.P256().GenerateKey(rand.Reader)

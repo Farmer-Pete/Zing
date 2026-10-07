@@ -308,6 +308,14 @@ func (p *pushRecorder) count() int {
 	return len(p.reqs)
 }
 
+// redirectTo answers every request with a 307 to target, so a test can
+// prove Send's client never follows it.
+func redirectTo(target string) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, target, http.StatusTemporaryRedirect)
+	}
+}
+
 func newPushSubscriberKeys(t *testing.T) (priv *ecdh.PrivateKey, auth []byte) {
 	t.Helper()
 	var err error
@@ -409,6 +417,60 @@ func TestSend_ServerErrorKeepsSubscription(t *testing.T) {
 	}
 }
 
+// TestSend_InvalidKeysKeepsSubscription proves a malformed keys_json row
+// (wrong p256dh length, a p256dh that is not a valid P-256 point, or wrong
+// auth length) fails with "invalid keys" rather than reaching the push
+// service, and is never deleted.
+func TestSend_InvalidKeysKeepsSubscription(t *testing.T) {
+	priv, auth := newPushSubscriberKeys(t)
+	goodP256dh := priv.PublicKey().Bytes()
+
+	cases := []struct {
+		name   string
+		p256dh []byte
+		auth   []byte
+	}{
+		{"short p256dh", goodP256dh[:64], auth},
+		{"p256dh not a P-256 point", bytes.Repeat([]byte{0x04}, uncompressedP256PointLen), auth},
+		{"short auth", goodP256dh, auth[:15]},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			s := newWebPushTestStore(t)
+			w := New(s)
+
+			rec := &pushRecorder{}
+			srv := httptest.NewServer(rec.handler(http.StatusCreated))
+			defer srv.Close()
+
+			if err := s.UpsertPushSubscription(t.Context(), store.PushSubscription{
+				Endpoint: srv.URL, KeysJSON: pushSubscriptionKeysJSON(t, c.p256dh, c.auth),
+			}); err != nil {
+				t.Fatalf("UpsertPushSubscription: %v", err)
+			}
+
+			err := w.Send(t.Context(), []byte(`{"title":"hi"}`))
+			if err == nil {
+				t.Fatal("Send: err = nil, want an error")
+			}
+			if !strings.Contains(err.Error(), "subscription") || !strings.Contains(err.Error(), "invalid keys") {
+				t.Errorf("Send error = %q, want \"subscription ID: invalid keys\"", err.Error())
+			}
+			if got := rec.count(); got != 0 {
+				t.Errorf("push service received %d requests, want 0", got)
+			}
+
+			subs, err := s.ListPushSubscriptions(t.Context())
+			if err != nil {
+				t.Fatalf("ListPushSubscriptions: %v", err)
+			}
+			if len(subs) != 1 {
+				t.Errorf("ListPushSubscriptions: got %d subscriptions, want 1 (kept)", len(subs))
+			}
+		})
+	}
+}
+
 // TestSend_RedirectIsNotFollowed proves a 3xx answer is treated as an
 // ordinary non-2xx status, never followed, and that an endpoint url.Parse
 // rejects becomes "invalid endpoint" without quoting it.
@@ -421,9 +483,7 @@ func TestSend_RedirectIsNotFollowed(t *testing.T) {
 		srv2 := httptest.NewServer(rec2.handler(http.StatusCreated))
 		defer srv2.Close()
 
-		srv1 := httptest.NewServer(http.HandlerFunc(func(rw http.ResponseWriter, r *http.Request) {
-			http.Redirect(rw, r, srv2.URL, http.StatusTemporaryRedirect)
-		}))
+		srv1 := httptest.NewServer(redirectTo(srv2.URL))
 		defer srv1.Close()
 
 		priv, auth := newPushSubscriberKeys(t)

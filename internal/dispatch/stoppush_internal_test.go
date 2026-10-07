@@ -2,6 +2,7 @@ package dispatch
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
 	"time"
 )
@@ -73,7 +74,7 @@ func TestStopPushPayload(t *testing.T) {
 		}
 		wantHeadline := "Dispatching stopped after error in a dispatcher pass."
 		body, ok := sp["body"].(string)
-		if !ok || body[:len(wantHeadline)] != wantHeadline {
+		if !ok || !strings.HasPrefix(body, wantHeadline) {
 			t.Errorf("body %q does not start with %q", body, wantHeadline)
 		}
 	})

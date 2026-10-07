@@ -699,23 +699,11 @@ func (d *Dispatcher) NotifyDrain() {
 // push send that must, by design, outlive it (notifyStop's own doc
 // comment).
 func (d *Dispatcher) setStop(err error) bool {
-	first, recorded, payload := d.recordStop(err)
-	if recorded {
-		d.notifyStop(payload, err)
-	}
-	return first
-}
-
-// recordStop is setStop's shared, mutex-guarded core: it records err as
-// described above and reports whether this call was the first to set stop
-// and whether it was also the first to record a non-nil stopErr, together
-// with that error's stop-push payload (built while still holding d.mu, so a
-// concurrent StopStatus or notifyStop call can never observe stoppedAt
-// before the payload it describes exists).
-func (d *Dispatcher) recordStop(err error) (first, recorded bool, payload []byte) {
 	d.mu.Lock()
-	first = !d.stop
+	first := !d.stop
 	d.stop = true
+	var recorded bool
+	var payload []byte
 	if d.stopErr == nil {
 		d.stopErr = err
 		recorded = err != nil
@@ -730,7 +718,10 @@ func (d *Dispatcher) recordStop(err error) (first, recorded bool, payload []byte
 	if recorded && hook != nil {
 		hook(err)
 	}
-	return first, recorded, payload
+	if recorded {
+		d.notifyStop(payload, err)
+	}
+	return first
 }
 
 // notifyStop sends payload through cfg.Notifier in its own goroutine,
@@ -1315,19 +1306,13 @@ func stopPushPayload(err error, at time.Time) []byte {
 	body += fmt.Sprintf(" Stopped at %s.", at.Format(stopPushTimeFormat))
 
 	sp := stopPush{
-		Title: "Zing stopped dispatching",
-		Body:  body,
-		Kind:  kind,
-		At:    at.Format(time.RFC3339),
+		Title:    "Zing stopped dispatching",
+		Body:     body,
+		Kind:     kind,
+		TicketID: ticketID,
+		At:       at.Format(time.RFC3339),
 	}
-	if hasTicket {
-		sp.TicketID = ticketID
-	}
-	b, marshalErr := json.Marshal(sp)
-	if marshalErr != nil {
-		// unreachable: sp is a plain struct of strings and an int64.
-		return nil
-	}
+	b, _ := json.Marshal(sp) //nolint:errcheck // sp holds only strings and an int64
 	return b
 }
 
