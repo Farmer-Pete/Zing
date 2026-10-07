@@ -1506,3 +1506,110 @@ func TestRunFile_LogsOutcomes(t *testing.T) {
 		t.Errorf("log buffer leaked evidence text:\n%s", logBuf.String())
 	}
 }
+
+// ---- Stall line (ticket "Say on each ticket why it is not moving", split
+// from #79) -----------------------------------------------------------
+
+// TestRail_StallOwnerWaitAndLastRan proves the rail's stall section shows
+// the "waiting on the owner" reason, naming the waiting_on flag, and the
+// "last ran" line formatted from the newest run's recorded StartedAt. This
+// task (Task 3) wires no SlotSource, so decideStall's running, claim_dead,
+// and slot reasons cannot fire here; only waiting-on-owner is exercised.
+func TestRail_StallOwnerWaitAndLastRan(t *testing.T) {
+	t.Parallel()
+	s := newConsoleTestStore(t)
+	ticketID := seedTicket(t, s, "fake#1", "Add a hello endpoint")
+	advanceTicketToBuilding(t, s, ticketID, "sonnet", 42)
+
+	runs, err := s.RunsForTicket(t.Context(), ticketID)
+	if err != nil {
+		t.Fatalf("RunsForTicket: %v", err)
+	}
+	if len(runs) != 1 {
+		t.Fatalf("RunsForTicket returned %d runs, want 1", len(runs))
+	}
+	startedAt := time.Date(2026, 1, 2, 3, 4, 0, 0, time.UTC)
+	if err := s.RecordRunStart(t.Context(), runs[0].ID, 0, "", startedAt, ""); err != nil {
+		t.Fatalf("RecordRunStart: %v", err)
+	}
+
+	srv := newTestServer(t, s, bus.New(), testMachine(t), newTestLogHandler(t))
+	rail := railHTML(t, srv.URL, ticketID)
+
+	if !strings.Contains(rail, "waiting on the owner (gate)") {
+		t.Errorf("rail missing the owner-wait stall line; got:\n%s", rail)
+	}
+	if !strings.Contains(rail, "last ran 2026-01-02 03:04 UTC") {
+		t.Errorf("rail missing the last-ran line; got:\n%s", rail)
+	}
+}
+
+// TestRail_StallCIWaiting proves the rail's stall section shows the CI
+// reason, with the whole-minutes count and the check names, once the ticket
+// is in shipping and carries a "ci waiting ..." system update marker newer
+// than its newest run's start (owner decision Q1).
+func TestRail_StallCIWaiting(t *testing.T) {
+	t.Parallel()
+	s := newConsoleTestStore(t)
+	ticketID := seedTicket(t, s, "fake#1", "Add a hello endpoint")
+	advanceTicketToState(t, s, ticketID, string(response.TicketStateShipping))
+
+	if _, err := s.InsertMessage(t.Context(), store.Message{
+		TicketID: ticketID, Type: testMsgTypeUpdate, Author: "system", Body: "ci waiting ci,lint",
+	}); err != nil {
+		t.Fatalf("InsertMessage: %v", err)
+	}
+
+	srv := newTestServer(t, s, bus.New(), testMachine(t), newTestLogHandler(t))
+	rail := railHTML(t, srv.URL, ticketID)
+
+	if !strings.Contains(rail, `data-stall-reason="ci"`) {
+		t.Errorf("rail missing data-stall-reason=\"ci\"; got:\n%s", rail)
+	}
+	if !strings.Contains(rail, "CI waiting 0 minutes for ci, lint") {
+		t.Errorf("rail missing the CI waiting line; got:\n%s", rail)
+	}
+}
+
+// TestRail_StallNoSlotSource proves a console with a machine but no
+// SlotSource still renders the stall section's shell -- class="rail-stall"
+// and the "never ran" last-ran line -- but shows no stall-reason element,
+// since a ready queued ticket's only possible reason (a full run-slot
+// table) needs a SlotSource this console does not have (Task 4).
+func TestRail_StallNoSlotSource(t *testing.T) {
+	t.Parallel()
+	s := newConsoleTestStore(t)
+	ticketID := seedTicket(t, s, "fake#1", "Add a hello endpoint")
+
+	srv := newTestServer(t, s, bus.New(), testMachine(t), newTestLogHandler(t))
+	rail := railHTML(t, srv.URL, ticketID)
+
+	if !strings.Contains(rail, `class="rail-stall"`) {
+		t.Errorf("rail missing the rail-stall section; got:\n%s", rail)
+	}
+	if !strings.Contains(rail, "never ran") {
+		t.Errorf("rail missing the never-ran line; got:\n%s", rail)
+	}
+	if strings.Contains(rail, `class="stall-reason"`) {
+		t.Errorf("rail should show no stall-reason with no SlotSource; got:\n%s", rail)
+	}
+}
+
+// TestRail_StallHiddenWhenTerminal proves a terminal ticket (abandoned)
+// renders no rail-stall section at all, matching buildStallRail's own
+// terminal-state guard.
+func TestRail_StallHiddenWhenTerminal(t *testing.T) {
+	t.Parallel()
+	s := newConsoleTestStore(t)
+	ticketID := seedTicket(t, s, "fake#1", "Add a hello endpoint")
+	if err := s.AbandonTicket(t.Context(), ticketID, "rail stall test"); err != nil {
+		t.Fatalf("AbandonTicket: %v", err)
+	}
+
+	srv := newTestServer(t, s, bus.New(), testMachine(t), newTestLogHandler(t))
+	rail := railHTML(t, srv.URL, ticketID)
+
+	if strings.Contains(rail, "rail-stall") {
+		t.Errorf("rail should hide the stall section for a terminal ticket; got:\n%s", rail)
+	}
+}

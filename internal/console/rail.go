@@ -107,8 +107,13 @@ func (c *console) buildRailModel(ctx context.Context, ticketID int64) (*template
 	if err != nil {
 		return nil, err
 	}
+	stall, err := c.buildStallRail(ctx, ticket)
+	if err != nil {
+		return nil, err
+	}
 
 	return &templates.RailModel{
+		Stall:     stall,
 		Phase:     c.buildPhaseRail(ticket),
 		Artifacts: artifacts,
 		Run:       run,
@@ -154,6 +159,46 @@ func (c *console) buildPhaseRail(ticket store.Ticket) []templates.PhaseDot {
 		dots[i] = dot
 	}
 	return dots
+}
+
+// buildStallRail builds the rail's "why is this not moving" line (ticket
+// "Say on each ticket why it is not moving", split from #79): nil for a
+// terminal ticket or a console with no machine, so the rail renders no
+// stall-reason section at all for either. Otherwise it gathers decideStall's
+// (stall.go) input and renders its result. This task's own form leaves
+// in.Slots nil (no SlotSource yet, Task 4), so decideStall's running,
+// claim_dead, and slot reasons never fire here; only waiting-on-owner and CI
+// waiting can.
+func (c *console) buildStallRail(ctx context.Context, ticket store.Ticket) (*templates.StallLine, error) {
+	if c.machine == nil || slices.Contains(c.machine.States.Terminal, ticket.State) {
+		return nil, nil //nolint:nilnil // no stall line for a terminal ticket or a console with no machine
+	}
+
+	in := stallInput{Ticket: ticket, Now: time.Now()}
+
+	runs, err := c.store.RunsForTicket(ctx, ticket.ID)
+	if err != nil {
+		return nil, fmt.Errorf("console: rail: stall: runs for ticket %d: %w", ticket.ID, err)
+	}
+	for _, r := range runs {
+		if r.StartedAt != nil && (in.LastRan == nil || r.StartedAt.After(*in.LastRan)) {
+			in.LastRan = r.StartedAt
+		}
+	}
+
+	if ticket.State == string(response.TicketStateShipping) {
+		markers, err := c.store.MarkersWithPrefix(ctx, ticket.ID, updateMarkerCIWaitingPrefix)
+		if err != nil {
+			return nil, fmt.Errorf("console: rail: stall: ci markers for ticket %d: %w", ticket.ID, err)
+		}
+		if len(markers) > 0 {
+			newest := markers[len(markers)-1] // MarkersWithPrefix orders by id, oldest first
+			in.CIMarker = &newest
+		}
+	}
+
+	reason, text := decideStall(in)
+	return &templates.StallLine{Reason: string(reason), Text: text, LastRan: lastRanText(in.LastRan)}, nil
 }
 
 // buildArtifactsRail groups ticketID's artifacts by type into the mock's
