@@ -125,6 +125,12 @@ type Deps struct {
 	// Q1): nil means never request an upgrade, which is every project
 	// today and every existing test. Wired from dispatch.Config.Upgrader.
 	Upgrader SelfUpgrader
+	// Source is what refreshTicket (refresh.go) reads a ticket's current
+	// tracker text from, before each planning tick of a ticket that is not
+	// waiting (#98). nil skips the refresh entirely. The dispatcher
+	// implements TicketSource over its own tracker and bindings and passes
+	// itself here, as it does for Tracker and Splitter.
+	Source TicketSource
 }
 
 // now is d.Now(), or time.Now when Now is nil.

@@ -117,6 +117,10 @@ type HandlerCommit struct {
 	// conflict: have <x>, want <y>" (design section 4.2, 8.2). Applied after
 	// SetBranch.
 	SetPRURL *string
+	// SetTicketText stores a planning refresh's new tracker text (migration
+	// 0011): applied by setTicketTextTx, right after SetPRURL. nil changes
+	// nothing.
+	SetTicketText *TicketText
 	// Poll sets all three poll columns together (design section 4.2, D8).
 	// PollSchedule moves next_poll_at and poll_interval_s only, leaving
 	// poll_fingerprint as it is (used when a poll's GitHub reads failed,
@@ -488,6 +492,12 @@ func (s *Store) CommitHandlerResult(ctx context.Context, c HandlerCommit) (bool,
 
 	if c.SetPRURL != nil {
 		if err = setPRURLTx(ctx, tx, c.TicketID, *c.SetPRURL); err != nil {
+			return false, fmt.Errorf("commit handler result: %w", err)
+		}
+	}
+
+	if c.SetTicketText != nil {
+		if err = setTicketTextTx(ctx, tx, c.TicketID, *c.SetTicketText); err != nil {
 			return false, fmt.Errorf("commit handler result: %w", err)
 		}
 	}
@@ -1001,6 +1011,23 @@ func setPRURLTx(ctx context.Context, tx *sql.Tx, ticketID int64, url string) err
 	return fmt.Errorf("pr url conflict: have %s, want %s", haveStr, url)
 }
 
+// setTicketTextTx stores a tracker refresh. A non-nil Body sets body and
+// tracker_body together; owner_comments is always written. The commit's
+// own lease fence guarantees the claim refreshTicket decided under.
+func setTicketTextTx(ctx context.Context, tx *sql.Tx, ticketID int64, tt TicketText) error {
+	var err error
+	if tt.Body != nil {
+		_, err = tx.ExecContext(ctx, `UPDATE tickets SET body = ?, tracker_body = ?, owner_comments = ? WHERE id = ?`,
+			*tt.Body, *tt.Body, tt.OwnerComments, ticketID)
+	} else {
+		_, err = tx.ExecContext(ctx, `UPDATE tickets SET owner_comments = ? WHERE id = ?`, tt.OwnerComments, ticketID)
+	}
+	if err != nil {
+		return fmt.Errorf("set ticket text: %w", err)
+	}
+	return nil
+}
+
 // pollUpdateCount reports how many of c's three poll-update fields are set,
 // the input to CommitHandlerResult's "at most one poll update per commit"
 // rule (design section 4.2, D8).
@@ -1114,9 +1141,9 @@ func applySplitChildTx(ctx context.Context, tx *sql.Tx, parent Ticket, sc SplitC
 		}
 	}
 	res, err := tx.ExecContext(ctx,
-		`INSERT INTO tickets (project_id, tracker_ref, title, body, state, parent_ticket_id, split_key)
-		 VALUES (?, ?, ?, ?, ?, ?, ?)`,
-		parent.ProjectID, sc.Ref, sc.Title, sc.Body, ticketStateQueued, parent.ID, sc.Key)
+		`INSERT INTO tickets (project_id, tracker_ref, title, body, tracker_body, state, parent_ticket_id, split_key)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+		parent.ProjectID, sc.Ref, sc.Title, sc.Body, sc.Body, ticketStateQueued, parent.ID, sc.Key)
 	if err != nil {
 		return fmt.Errorf("split child %s: insert ticket: %w", sc.Key, err)
 	}

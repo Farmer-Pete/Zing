@@ -23,6 +23,10 @@ Check:
   runs its check on the owner's machine at judging, so a live
   `zing serve`, a sandbox probe, or timing belongs there. A host
   scenario with no check is a finding.
+- A scenario whose check opens a browser is a major finding. So is a then
+  that is a browser state with no test the build runs behind it. The fix is
+  a script test under node --test or a server-side render test, plus an
+  owner_smoke item when the owner wants a look after merge.
 - A host scenario whose given or check needs this ticket's own new binary,
   route, or flag, or a file only that new binary writes on the host, is a
   major finding. The installed zing and the live `zing serve` run main

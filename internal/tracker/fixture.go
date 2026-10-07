@@ -12,6 +12,10 @@ import (
 	"github.com/BurntSushi/toml"
 )
 
+// fixtureLogin is the one identity the fixture posts under, the same name
+// Collaborators returns.
+const fixtureLogin = "fixture-user"
+
 // Fixture is a Tracker backed by a repo-owned TOML file, read once at
 // construction and served unchanged on every call. It carries no
 // connection, so it never fails after construction.
@@ -237,5 +241,20 @@ func (f *Fixture) Collaborators(_ context.Context, project string) ([]string, er
 	if project != f.project {
 		return nil, fmt.Errorf("tracker: unknown project %q", project)
 	}
-	return []string{"fixture-user"}, nil
+	return []string{fixtureLogin}, nil
+}
+
+// Comments returns every body Comment recorded under ref, in post order,
+// each authored by fixtureLogin, with ID its 1-based position.
+func (f *Fixture) Comments(_ context.Context, project, ref string) ([]Comment, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if project != f.project {
+		return nil, fmt.Errorf("tracker: unknown project %q", project)
+	}
+	out := make([]Comment, len(f.comments[ref]))
+	for i, body := range f.comments[ref] {
+		out[i] = Comment{ID: int64(i + 1), Author: fixtureLogin, Body: body}
+	}
+	return out, nil
 }

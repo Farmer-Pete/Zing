@@ -39,11 +39,22 @@ type Tracker interface {
 	// counts, so a spoofed marker cannot suppress a comment Zing must post
 	// at most once (PKG9-PLAN.md section 8.2, 8.6, 11).
 	CommentContains(ctx context.Context, project, ref, needle string) (bool, error)
+	// Comments returns every comment on ref within project, oldest first,
+	// with its author's login. Zing's own posts are included; the caller
+	// filters (OwnerComments).
+	Comments(ctx context.Context, project, ref string) ([]Comment, error)
 }
 
 // Ticket is a tracker ticket, not the store row.
 type Ticket struct {
 	Ref, Title, Body string
+}
+
+// Comment is one comment read back from the tracker.
+type Comment struct {
+	ID     int64
+	Author string
+	Body   string
 }
 
 // NewTicket is what FileTicket takes to create a Ticket.

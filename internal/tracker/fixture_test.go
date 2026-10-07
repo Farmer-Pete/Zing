@@ -283,6 +283,33 @@ func TestFixtureRecordsClose(t *testing.T) {
 	}
 }
 
+// TestFixtureComments proves Comments returns every body Comment has
+// recorded under ref, in post order, each authored by the fixture's one
+// identity (fixtureLogin, "fixture-user"), with ID its 1-based position.
+func TestFixtureComments(t *testing.T) {
+	t.Parallel()
+
+	f := newFixture(t)
+	ctx := context.Background()
+
+	if err := f.Comment(ctx, fixtureProject, testFixtureRef1, "hello"); err != nil {
+		t.Fatalf("Comment: %v", err)
+	}
+
+	cs, err := f.Comments(ctx, fixtureProject, testFixtureRef1)
+	if err != nil {
+		t.Fatalf("Comments: %v", err)
+	}
+	want := []tracker.Comment{{ID: 1, Author: "fixture-user", Body: "hello"}}
+	if len(cs) != 1 || cs[0] != want[0] {
+		t.Errorf("Comments = %+v, want %+v", cs, want)
+	}
+
+	if _, err := f.Comments(ctx, "not-"+fixtureProject, testFixtureRef1); err == nil {
+		t.Error("Comments for an unknown project returned nil error, want one")
+	}
+}
+
 // TestFixtureCommentContains proves CommentContains searches every comment
 // Comment has recorded under ref (design section 10.5): a needle found in
 // a posted body is reported, one not posted is not.

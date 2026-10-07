@@ -1,6 +1,7 @@
 package response
 
 import (
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -752,6 +753,114 @@ func TestValidate_QuestionResponse_FiveOptionsExactlyOneCardinalityError(t *test
 	if containsErr(errs, "question[0]/options: give none, or two to four") {
 		t.Errorf("Validate = %v, must not also contain Layer 2's cardinality error for n>4", dumpErrs(errs))
 	}
+}
+
+// planXMLWithOwnerSmoke returns planXML() with an owner_smoke element,
+// one item per entry, inserted after the tasks element. A nil items
+// leaves planXML() unchanged.
+func planXMLWithOwnerSmoke(items []string) string {
+	doc := planXML()
+	if items == nil {
+		return doc
+	}
+	var sb strings.Builder
+	sb.WriteString("</tasks><owner_smoke>")
+	for _, item := range items {
+		sb.WriteString("<item>")
+		sb.WriteString(item)
+		sb.WriteString("</item>")
+	}
+	sb.WriteString("</owner_smoke></delivery>")
+	return strings.Replace(doc, "</tasks></delivery>", sb.String(), 1)
+}
+
+func TestValidate_OwnerSmoke(t *testing.T) {
+	t.Parallel()
+
+	readyXML := func(plan string) string {
+		return `<zing job="planning" outcome="ready">` +
+			`<claims><claim kind="code" verdict="true" evidence="a.go:1">it works</claim></claims>` +
+			`<scenarios>` + scenarioXML("s1") + scenarioXML("s2") + `</scenarios>` +
+			plan +
+			`</zing>`
+	}
+
+	t.Run("absent", func(t *testing.T) {
+		t.Parallel()
+
+		doc := mustParse(t, readyXML(planXMLWithOwnerSmoke(nil)))
+		errs := Validate(doc, ValidateContext{})
+		for _, e := range errs {
+			if strings.HasPrefix(e.Path, "plan/delivery/owner_smoke") {
+				t.Errorf("Validate = %v, want no error under plan/delivery/owner_smoke", dumpErrs(errs))
+			}
+		}
+	})
+
+	t.Run("two_items", func(t *testing.T) {
+		t.Parallel()
+
+		items := []string{"Open the inbox and see the badge", "Click Abandon and see the confirm"}
+		doc := mustParse(t, readyXML(planXMLWithOwnerSmoke(items)))
+		errs := Validate(doc, ValidateContext{})
+		if len(errs) != 0 {
+			t.Fatalf("Validate = %v, want no errors", dumpErrs(errs))
+		}
+		ready, ok := doc.Response.(*ReadyResponse)
+		if !ok {
+			t.Fatalf("Response is %T, want *ReadyResponse", doc.Response)
+		}
+		if got := ready.Plan.Delivery.OwnerSmoke; !slices.Equal(got, items) {
+			t.Errorf("Plan.Delivery.OwnerSmoke = %v, want %v", got, items)
+		}
+	})
+
+	t.Run("eleven_items", func(t *testing.T) {
+		t.Parallel()
+
+		items := make([]string, 11)
+		for i := range items {
+			items[i] = "item " + strconv.Itoa(i)
+		}
+		doc := mustParse(t, readyXML(planXMLWithOwnerSmoke(items)))
+		errs := Validate(doc, ValidateContext{})
+		want := "plan/delivery/owner_smoke/item: at most 10 allowed"
+		if !containsErr(errs, want) {
+			t.Fatalf("errs = %v, want to contain %q", dumpErrs(errs), want)
+		}
+	})
+
+	t.Run("item_301_chars", func(t *testing.T) {
+		t.Parallel()
+
+		long := strings.Repeat("a", 301)
+		doc := mustParse(t, readyXML(planXMLWithOwnerSmoke([]string{long})))
+		errs := Validate(doc, ValidateContext{})
+		want := "plan/delivery/owner_smoke/item[0]: must be at most 300 characters"
+		if !containsErr(errs, want) {
+			t.Fatalf("errs = %v, want to contain %q", dumpErrs(errs), want)
+		}
+
+		ok := strings.Repeat("a", 300)
+		doc2 := mustParse(t, readyXML(planXMLWithOwnerSmoke([]string{ok})))
+		errs2 := Validate(doc2, ValidateContext{})
+		for _, e := range errs2 {
+			if strings.HasPrefix(e.Path, "plan/delivery/owner_smoke") {
+				t.Errorf("Validate = %v, want no owner_smoke error for a 300-char item", dumpErrs(errs2))
+			}
+		}
+	})
+
+	t.Run("empty_item", func(t *testing.T) {
+		t.Parallel()
+
+		doc := mustParse(t, readyXML(planXMLWithOwnerSmoke([]string{""})))
+		errs := Validate(doc, ValidateContext{})
+		want := "plan/delivery/owner_smoke/item[0]: must not be empty"
+		if !containsErr(errs, want) {
+			t.Fatalf("errs = %v, want to contain %q", dumpErrs(errs), want)
+		}
+	})
 }
 
 func scenarioXML(id string) string {

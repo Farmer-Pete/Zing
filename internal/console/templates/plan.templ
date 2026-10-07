@@ -46,6 +46,10 @@ templ PlanView(p RenderedPlan) {
 		@testsTable(p.Delivery.Tests)
 		<h3>Tasks</h3>
 		@tasksTable(p.TicketID, p.Editable, p.Claimed, p.Delivery.Tasks)
+		if len(p.Delivery.OwnerSmoke) > 0 {
+			<h3>Owner smoke</h3>
+			@stringList(p.Delivery.OwnerSmoke)
+		}
 		<h2>Review</h2>
 		<h3>Trust root</h3>
 		<p>{ p.Review.TrustRoot }</p>

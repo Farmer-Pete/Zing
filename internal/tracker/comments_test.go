@@ -171,3 +171,56 @@ func TestIssueRef(t *testing.T) {
 		}
 	}
 }
+
+// TestOwnerComments proves OwnerComments keeps only the owner's own
+// comments, dropping Zing's own posts (by disclosure, reply prefix, or
+// marker), another author's comments, and blank ones; an empty owner
+// keeps nothing.
+func TestOwnerComments(t *testing.T) {
+	t.Parallel()
+
+	owner := tracker.Comment{ID: 1, Author: "Farmer-Pete", Body: "Use serve."}
+	ownerCaseInsensitive := tracker.Comment{ID: 2, Author: "farmer-pete", Body: "Keep FixKind."}
+	otherAuthor := tracker.Comment{ID: 3, Author: "someone-else", Body: "I think this is wrong."}
+	ownerDisclosure := tracker.Comment{ID: 4, Author: "Farmer-Pete", Body: "intro\n\n" + tracker.PickupComment("Farmer-Pete")}
+	ownerReplyPrefix := tracker.Comment{ID: 5, Author: "Farmer-Pete", Body: tracker.ReplyPrefix("Farmer-Pete") + " looks good"}
+	ownerMarkerUpper := tracker.Comment{ID: 6, Author: "Farmer-Pete", Body: "text <!-- ZING: SOMETHING --> more"}
+	ownerBlank := tracker.Comment{ID: 7, Author: "Farmer-Pete", Body: "   "}
+
+	cs := []tracker.Comment{owner, ownerCaseInsensitive, otherAuthor, ownerDisclosure, ownerReplyPrefix, ownerMarkerUpper, ownerBlank}
+
+	got := tracker.OwnerComments(cs, "Farmer-Pete")
+	want := []tracker.Comment{owner, ownerCaseInsensitive}
+	if len(got) != len(want) {
+		t.Fatalf("OwnerComments() = %+v, want %+v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("OwnerComments()[%d] = %+v, want %+v", i, got[i], want[i])
+		}
+	}
+
+	if got := tracker.OwnerComments(cs, ""); got != nil {
+		t.Errorf("OwnerComments(cs, \"\") = %+v, want nil", got)
+	}
+}
+
+// TestRenderComments proves RenderComments renders the two-comment worked
+// example exactly, and nil renders "".
+func TestRenderComments(t *testing.T) {
+	t.Parallel()
+
+	cs := []tracker.Comment{
+		{Author: "Farmer-Pete", Body: "Use serve."},
+		{Author: "Farmer-Pete", Body: "  Keep FixKind.\n"},
+	}
+	got := tracker.RenderComments(cs)
+	want := "Comment by Farmer-Pete:\nUse serve.\n\nComment by Farmer-Pete:\nKeep FixKind."
+	if got != want {
+		t.Errorf("RenderComments(cs) =\n%q\nwant\n%q", got, want)
+	}
+
+	if got := tracker.RenderComments(nil); got != "" {
+		t.Errorf("RenderComments(nil) = %q, want %q", got, "")
+	}
+}

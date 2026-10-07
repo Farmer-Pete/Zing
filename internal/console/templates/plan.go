@@ -56,13 +56,15 @@ type RenderedTask struct {
 // their own. DecidedFiles is design section 9.2's own addition: the newest
 // FileEvents row per path that carries an owner decision (path, decision,
 // task number, marker, builder reason, perimeter description), not part of
-// the stored Plan itself.
+// the stored Plan itself. OwnerSmoke is copied verbatim from the stored
+// plan's Delivery.OwnerSmoke by buildRenderedPlan.
 type RenderedDelivery struct {
 	Files        []response.FileChange
 	Deletions    response.Deletions
 	Tests        []response.TestCase
 	Tasks        []RenderedTask
 	DecidedFiles []response.FileArtifact
+	OwnerSmoke   []string
 }
 
 // RenderedPlan is a stored response.Plan (design section 6.9) with every
