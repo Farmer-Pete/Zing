@@ -1027,6 +1027,88 @@ func TestRunJobJudgeEmptyCodexHomeIsConfigError(t *testing.T) {
 	}
 }
 
+// testJudgeClaudeTestJob is the machine.toml job name
+// TestRunJobJudgeClaudeNeedsNoCodexHome registers, a copy of the build job
+// with its own Sandbox set to "judge-claude".
+const testJudgeClaudeTestJob = "judge-claude-test-job"
+
+// loadTestJudgeClaudeSandboxOrSkip loads testSandboxProfile under the
+// "judge-claude" name, through sandbox.LoadProfile, so Prefix's own
+// judge-claude-named checks (errJudgeClaudeParamsIncomplete, the
+// SCENARIOS_FILE flag) actually run, unlike a Sandbox loaded under a
+// different name (#105). It skips, rather than fails, when this machine
+// cannot load a sandbox at all (design section 5.4's own four reasons).
+func loadTestJudgeClaudeSandboxOrSkip(t *testing.T) sandbox.Sandbox {
+	t.Helper()
+	sb := sandbox.LoadProfile("judge-claude", testSandboxProfile, t.TempDir(), nil, 7420)
+	if !sb.Available() {
+		t.Skipf("sandbox unavailable on this machine: %s", sb.Reason())
+	}
+	return sb
+}
+
+// TestRunJobJudgeClaudeNeedsNoCodexHome proves a judge-claude-profile job
+// runs with an empty Deps.JudgeCodexHome, unlike the judge profile (#105):
+// the judge-claude sandbox takes no CODEX_HOME param at all, so runJob
+// never treats an empty JudgeCodexHome as a configuration error for it, and
+// that the sandbox the hook's own scenarios file is written for actually
+// carries that file as SCENARIOS_FILE, through a Sandbox loaded under the
+// judge-claude name.
+func TestRunJobJudgeClaudeNeedsNoCodexHome(t *testing.T) {
+	t.Parallel()
+	judgeClaudeSB := loadTestJudgeClaudeSandboxOrSkip(t)
+
+	s := newRunJobTestStore(t)
+	ticketID := seedRunJobTicket(t, s)
+	ticket := getRunJobTicket(t, s, ticketID)
+	owner, expires := claimRunJobTicket(t, s, ticketID)
+
+	m := runJobTestMachine(t)
+	j := m.Jobs[testJobBuild]
+	j.Sandbox = "judge-claude"
+	m.Jobs[testJudgeClaudeTestJob] = j
+
+	scripts := fstest.MapFS{testBuildScriptKey: &fstest.MapFile{Data: []byte(buildOkXML)}}
+	counting := &countingRuntime{rt: runtime.NewFake(scripts)}
+	set, err := runtime.NewSet(map[string]runtime.Runtime{testRuntimeClaude: counting, testRuntimeCodex: counting, runtimeFake: counting})
+	if err != nil {
+		t.Fatalf("runtime.NewSet: %v", err)
+	}
+
+	deps := Deps{
+		Store: s, Runtimes: set, Machine: m,
+		Models: map[string]string{testModelAlias: testModelExact, testModelAliasOpus: testModelExact, testModelAliasFable: testModelExact, testRuntimeCodex: testModelExact},
+		Budget: time.Hour, Owner: owner, Expires: expires, Reserve: realReserve(s, owner, expires),
+		Projects:       map[int64]Project{ticket.ProjectID: {RepoGit: t.TempDir()}},
+		Sandboxes:      sandbox.Set{Build: sandbox.Off(), JudgeClaude: judgeClaudeSB},
+		RequireSandbox: true,
+		// JudgeCodexHome left empty.
+	}
+
+	scenariosFile := filepath.Join(t.TempDir(), "scenarios.xml")
+	if writeErr := os.WriteFile(scenariosFile, []byte("<scenarios/>"), 0o600); writeErr != nil {
+		t.Fatalf("write scenarios file: %v", writeErr)
+	}
+	hook := func(context.Context, store.Reserved, *runtime.RunRequest) (string, func() error, error) {
+		return scenariosFile, nil, nil
+	}
+
+	_, err = runJobWith(t.Context(), deps, ticket, testJudgeClaudeTestJob, store.SessionUpsert{Job: testJudgeClaudeTestJob, Runtime: testRuntimeClaude},
+		runtime.RunRequest{Job: response.JobBuild, Label: testBuildLabel, WorkDir: t.TempDir()}, nil, nil, 0, hook)
+	if err != nil {
+		t.Fatalf("runJobWith: %v", err)
+	}
+	wantFlag := "SCENARIOS_FILE=" + scenariosFile
+	if !slices.Contains(counting.lastReq.ExecPrefix, wantFlag) {
+		t.Errorf("ExecPrefix = %v, want it to contain %q", counting.lastReq.ExecPrefix, wantFlag)
+	}
+	for _, flag := range counting.lastReq.ExecPrefix {
+		if strings.HasPrefix(flag, "CODEX_HOME=") {
+			t.Errorf("ExecPrefix = %v, want no CODEX_HOME entry", counting.lastReq.ExecPrefix)
+		}
+	}
+}
+
 // TestRunJobUnknownProfileIsConfigError proves a job whose machine.toml
 // sandbox name Set.For does not recognize is ErrConfig, with nothing
 // reserved and the runtime never called (PKG9-PLAN.md section 4.7): this

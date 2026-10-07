@@ -731,10 +731,11 @@ func perimeterLabel(taskN, i int) string {
 const fixRunLabel = "fix"
 
 // sandboxProfileJudge is the one machine.toml job.sandbox value that takes
-// Deps.JudgeCodexHome (PKG9-PLAN.md section 4.3, 4.7, 7.3, D27):
+// Deps.JudgeCodexHome (PKG9-PLAN.md section 4.3, 4.7, 7.3, D27; #105):
 // machine.go's own validateJob already refuses any job.sandbox value but
-// "", "build", "readonly", or "judge", so this is the one of those four
-// runJobWith ever treats specially.
+// "", "build", "readonly", "judge", or "judge-claude", so this is the one
+// of those five runJobWith ever treats specially: a judge-claude run takes
+// no Codex home, and the scenarios-file hook serves both.
 const sandboxProfileJudge = "judge"
 
 // finishSandboxRequest is design section 5.5's own last sandbox step: build

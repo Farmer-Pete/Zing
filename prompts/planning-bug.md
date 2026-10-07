@@ -58,6 +58,9 @@ Work in this order. Each step has a completion criterion.
    HEAD:FILE, never from the working copy, such as git show HEAD:AGENTS.md |
    tr -s '[:space:]' ' ' | grep -qF 'two words', because the judge's
    checkout holds the default branch's copies of both files.
+   A check that greps a command's output more than once writes the log
+   first, then greps it, such as CMD > FILE 2>&1; grep -q A FILE &&
+   grep -q B FILE, because tee into grep -q can cut the log short.
    A check never opens a browser. Prove a then that is a browser state with
    a test the build runs, such as a script test under node --test or a
    server-side render test of the page. A look in a browser that the owner

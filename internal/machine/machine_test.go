@@ -142,6 +142,50 @@ func TestLoad_RealMachineTOMLLoadsClean(t *testing.T) {
 	}
 }
 
+// TestMachineTOMLRunsPlanreviewOnClaude proves that the real machine.toml
+// runs planreview on Claude while Codex is out of quota (#105): the self-
+// upgrade from main must not drop plan review back onto codex.
+func TestMachineTOMLRunsPlanreviewOnClaude(t *testing.T) {
+	t.Parallel()
+
+	m, err := Load(zing.Assets, machineTOMLPath)
+	if err != nil {
+		t.Fatalf("Load(real machine.toml): %v", err)
+	}
+
+	planreview := m.Jobs["planreview"]
+	if planreview.Model != modelOpus {
+		t.Errorf("planreview.Model = %q, want opus", planreview.Model)
+	}
+	if planreview.Runtime != "claude" {
+		t.Errorf("planreview.Runtime = %q, want claude", planreview.Runtime)
+	}
+}
+
+// TestMachineTOMLRunsJudgeOnClaude proves that the real machine.toml runs
+// the judge on Claude, in the judge-claude sandbox, while Codex is out of
+// quota (#105): the self-upgrade from main must not drop the judge back
+// onto codex and the plain judge profile.
+func TestMachineTOMLRunsJudgeOnClaude(t *testing.T) {
+	t.Parallel()
+
+	m, err := Load(zing.Assets, machineTOMLPath)
+	if err != nil {
+		t.Fatalf("Load(real machine.toml): %v", err)
+	}
+
+	judge := m.Jobs["judge"]
+	if judge.Model != modelOpus {
+		t.Errorf("judge.Model = %q, want opus", judge.Model)
+	}
+	if judge.Runtime != "claude" {
+		t.Errorf("judge.Runtime = %q, want claude", judge.Runtime)
+	}
+	if judge.Sandbox != "judge-claude" {
+		t.Errorf("judge.Sandbox = %q, want judge-claude", judge.Sandbox)
+	}
+}
+
 // TestJobSandboxKey proves the sandbox key's own validation (PKG8-PLAN.md
 // section 4.5): absent or "build" both load clean, and any other value is
 // rejected with the exact error text.
@@ -192,13 +236,24 @@ func TestJobSandboxKey(t *testing.T) {
 		}
 	})
 
+	t.Run("judge-claude", func(t *testing.T) {
+		t.Parallel()
+		m, err := Load(machineFixture(t, validJobFragment+"\nsandbox = \"judge-claude\"\n"), machineTOMLPath)
+		if err != nil {
+			t.Fatalf("Load(): %v", err)
+		}
+		if got := m.Jobs["test"].Sandbox; got != "judge-claude" {
+			t.Errorf("Sandbox = %q, want judge-claude", got)
+		}
+	})
+
 	t.Run("anything else", func(t *testing.T) {
 		t.Parallel()
 		_, err := Load(machineFixture(t, validJobFragment+"\nsandbox = \"bogus\"\n"), machineTOMLPath)
 		if err == nil {
 			t.Fatal("Load() = nil, want an error")
 		}
-		want := "machine.toml: job test: sandbox: must be absent, build, readonly, or judge"
+		want := "machine.toml: job test: sandbox: must be absent, build, readonly, judge, or judge-claude"
 		if err.Error() != want {
 			t.Errorf("Load() = %q, want %q", err.Error(), want)
 		}

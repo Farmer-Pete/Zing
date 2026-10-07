@@ -370,10 +370,16 @@ func serve(ctx context.Context, cfgPath, dbPath string, seedDemo bool, su *selfU
 		"interval_seconds", tune.Value(zdispatch.TuneIntervalSeconds), "interval_seconds_source", tuneSources[zdispatch.TuneIntervalSeconds],
 		"agent_minutes_per_ticket", tune.Value(zdispatch.TuneAgentMinutes), "agent_minutes_per_ticket_source", tuneSources[zdispatch.TuneAgentMinutes])
 
+	// push is built before zdispatch.New so Config.Notifier can carry it:
+	// setStop's recorded branch (internal/dispatch) sends through this same
+	// value, once per fail-closed or error stop.
+	push := notify.New(st, notify.WithContact(cfg.Console.PushContact))
+
 	dcfg := zdispatch.Config{
 		Interval:    tune.Interval,
 		MaxParallel: tune.MaxParallel,
 		Owner:       claimOwner(),
+		Notifier:    push,
 		Models: map[string]string{
 			modelAliasSonnet: cfg.Models.Sonnet, modelAliasOpus: cfg.Models.Opus, modelAliasFable: cfg.Models.Fable, modelAliasCodex: cfg.Models.Codex,
 		},
@@ -433,7 +439,6 @@ func serve(ctx context.Context, cfgPath, dbPath string, seedDemo bool, su *selfU
 		_ = st.Close()
 		return err
 	}
-	push := notify.New(st)
 
 	// The mutation guard's Host allowlist (mw.go, design section 6.14):
 	// every resolved bind authority plus every configured
@@ -554,13 +559,13 @@ selectLoop:
 const serveRequireSandbox = true
 
 // serveSandbox loads the seatbelt profile set every sandboxed job's run is
-// wrapped in (design section 5.1, 5.5, 10; PKG9-PLAN.md section 4.7): the
-// checked-in, embedded sandbox/build.sb, sandbox/readonly.sb, and
-// sandbox/judge.sb, each with cfg.Sandbox.ReadPaths and cfg.Console.Port.
-// LoadProfile never errors -- a failure is recorded as unavailable, with
-// one of section 5.4's four closed reasons -- so the only error this can
-// return is reading an embedded profile itself, which would mean the
-// binary was built without it.
+// wrapped in (design section 5.1, 5.5, 10; PKG9-PLAN.md section 4.7; #105):
+// the checked-in, embedded sandbox/build.sb, sandbox/readonly.sb,
+// sandbox/judge.sb, and sandbox/judge-claude.sb, each with
+// cfg.Sandbox.ReadPaths and cfg.Console.Port. LoadProfile never errors -- a
+// failure is recorded as unavailable, with one of section 5.4's four closed
+// reasons -- so the only error this can return is reading an embedded
+// profile itself, which would mean the binary was built without it.
 func serveSandbox(cfg *config.Config, dataDir string) (sandbox.Set, error) {
 	buildProfile, err := zing.Assets.ReadFile("sandbox/build.sb")
 	if err != nil {
@@ -574,12 +579,17 @@ func serveSandbox(cfg *config.Config, dataDir string) (sandbox.Set, error) {
 	if err != nil {
 		return sandbox.Set{}, fmt.Errorf("serve: read embedded sandbox profile: %w", err)
 	}
+	judgeClaudeProfile, err := zing.Assets.ReadFile("sandbox/judge-claude.sb")
+	if err != nil {
+		return sandbox.Set{}, fmt.Errorf("serve: read embedded sandbox profile: %w", err)
+	}
 
 	build := loadNamedSandbox("build", buildProfile, cfg, dataDir)
 	readonly := loadNamedSandbox("readonly", readonlyProfile, cfg, dataDir)
 	judge := loadNamedSandbox("judge", judgeProfile, cfg, dataDir)
+	judgeClaude := loadNamedSandbox("judge-claude", judgeClaudeProfile, cfg, dataDir)
 
-	return sandbox.Set{Build: build, ReadOnly: readonly, Judge: judge}, nil
+	return sandbox.Set{Build: build, ReadOnly: readonly, Judge: judge, JudgeClaude: judgeClaude}, nil
 }
 
 // loadNamedSandbox loads one profile through sandbox.LoadProfile and logs
@@ -1068,7 +1078,7 @@ func shutdown(
 				// on the next ticker fire, which can race a short drain
 				// deadline (design section 6.10; dispatch.Dispatcher's own
 				// NotifyDrain doc comment).
-				d.NotifyDrain()
+				d.NotifyDrain() //nolint:contextcheck // NotifyDrain's own setStop(nil) call never reaches notifyStop's detached context.Background(), since that only fires for a non-nil error (setStop's own doc comment)
 			}
 			return setErr
 		},

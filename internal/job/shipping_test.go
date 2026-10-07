@@ -25,6 +25,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"maps"
 	"net/http"
 	"reflect"
 	"slices"
@@ -609,17 +610,76 @@ func shipHasMessage(c store.HandlerCommit, body string) bool {
 	return false
 }
 
-// shipTicketReady drives a ticket all the way to "shipping" through the
-// real planning, building, reviewing, and judging state machines (reusing
-// judging_test.go's own judgeTicketReady), exactly
-// TestJudgePassMovesToShipping's own sequence, then calls
-// shipTicketReadyFrom for the judge-to-shipping leg and the bare git
-// remote.
+// shippingStage is the process-lifetime snapshot shipTicketReady builds
+// once per process and every caller copies.
+var shippingStage = &stageSnap{name: "shipping"}
+
+// buildShippingStage is shippingStage's builder: it takes its own copy of
+// the judging stage and drives it the rest of the way to "shipping" with
+// shipTicketReadyFrom, carrying the bare origin shipTicketReadyFrom makes
+// for useStage/snapshotStage to snapshot.
+func buildShippingStage(t *testing.T) stageBuild {
+	t.Helper()
+	c := useStage(t, judgingStage, buildJudgingStage)
+	judgingTicket := pbGetTicket(t, c.Store, c.TicketID)
+	ticket, remoteDir := shipTicketReadyFrom(t, c.Store, judgingTicket)
+	return stageBuild{Store: c.Store, DBPath: c.DBPath, TicketID: ticket.ID, OriginDir: remoteDir}
+}
+
+// shipTicketReady returns the test's own private copy of the shipping
+// stage: a fresh, git-backed ticket driven through planning, a real
+// three-task build, reviewing, and one judge round into "shipping", with
+// its own bare git origin. The real handlers run at most once per
+// process, under shippingStage; every caller gets its own copy of the
+// store, repo, and origin (useStage, copyStage).
 func shipTicketReady(t *testing.T) (s *store.Store, ticket store.Ticket, remoteDir string) {
 	t.Helper()
-	s, judgingTicket := judgeTicketReady(t)
-	ticket, remoteDir = shipTicketReadyFrom(t, s, judgingTicket)
-	return s, ticket, remoteDir
+	c := useStage(t, shippingStage, buildShippingStage)
+	return c.Store, pbGetTicket(t, c.Store, c.TicketID), c.OriginDir
+}
+
+// TestShippingStageCopyHasOwnOrigin checks that two calls to
+// shipTicketReady each get their own shipping ticket and their own bare
+// git origin, independent of each other.
+func TestShippingStageCopyHasOwnOrigin(t *testing.T) {
+	s1, ticket1, remoteDir1 := shipTicketReady(t)
+	s2, ticket2, remoteDir2 := shipTicketReady(t)
+
+	if ticket1.State != stateShipping {
+		t.Fatalf("ticket1 state = %q, want %q", ticket1.State, stateShipping)
+	}
+	if ticket2.State != stateShipping {
+		t.Fatalf("ticket2 state = %q, want %q", ticket2.State, stateShipping)
+	}
+	if remoteDir1 == remoteDir2 {
+		t.Fatalf("both copies share remoteDir %s", remoteDir1)
+	}
+
+	for i, tc := range []struct {
+		s         *store.Store
+		ticket    store.Ticket
+		remoteDir string
+	}{{s1, ticket1, remoteDir1}, {s2, ticket2, remoteDir2}} {
+		proj, err := tc.s.ProjectForTicket(t.Context(), tc.ticket.ID)
+		if err != nil {
+			t.Fatalf("copy %d: ProjectForTicket: %v", i+1, err)
+		}
+		out, gitErr := gitfixture.Git(t.Context(), proj.LocalPath, "remote", "get-url", "origin")
+		if gitErr != nil {
+			t.Fatalf("copy %d: git remote get-url: %v: %s", i+1, gitErr, out)
+		}
+		if got := strings.TrimSpace(string(out)); got != tc.remoteDir {
+			t.Fatalf("copy %d: origin url = %s, want %s", i+1, got, tc.remoteDir)
+		}
+
+		isBare, bareErr := gitfixture.Git(t.Context(), tc.remoteDir, "rev-parse", "--is-bare-repository")
+		if bareErr != nil {
+			t.Fatalf("copy %d: git rev-parse --is-bare-repository: %v: %s", i+1, bareErr, isBare)
+		}
+		if got := strings.TrimSpace(string(isBare)); got != "true" {
+			t.Fatalf("copy %d: is-bare-repository = %q, want true", i+1, got)
+		}
+	}
 }
 
 // shipTicketReadyFrom drives judgingTicket (already in the shape
@@ -1607,27 +1667,249 @@ func TestFinalVerdictsPassedTwice(t *testing.T) {
 // POLL (task 7)
 // -----------------------------------------------------------------------
 
-// shipPublished drives a ticket all the way through PUBLISH (shipTicketReady,
-// then one real shipHandler.Run that opens the draft pull request) so its
-// own tickets.pr_url is set -- the state every POLL test starts from. gh
-// and tr are the same doubles PUBLISH used, so a caller configures gh's own
-// prState, runs, statuses, and required (POLL's own reads, task 7) before
-// claiming the ticket again for a POLL call.
-func shipPublished(t *testing.T) (s *store.Store, ticket store.Ticket, gh *shipGitHub, tr *shipTracker) {
+// publishedStage is the process-lifetime snapshot shipPublished builds once
+// per process and every caller copies.
+var publishedStage = &stageSnap{name: "published"}
+
+// publishedDoubles carries the *shipGitHub and *shipTracker doubles PUBLISH
+// ran with through stageBuild/stageCopy's own Extra field. Neither pointer
+// is ever handed to a test directly: both are shared across every copy of
+// publishedStage, so shipPublished clones each (shipCloneGitHub, and a
+// value copy of *shipTracker) before returning them.
+type publishedDoubles struct {
+	gh *shipGitHub
+	tr *shipTracker
+}
+
+// buildPublishedStage is publishedStage's builder: it takes its own copy of
+// the shipping stage and runs one real PUBLISH (shipHandler.Run) against a
+// fresh *shipGitHub and *shipTracker, carrying both doubles in Extra for
+// snapshotStage to store and every copyStage call to clone.
+func buildPublishedStage(t *testing.T) stageBuild {
 	t.Helper()
-	s, ticket, _ = shipTicketReady(t)
-	gh = &shipGitHub{}
-	tr = &shipTracker{}
-	deps := shipClaim(t, s, pbFakeRuntime(t), ticket.ID, gh, tr)
+	c := useStage(t, shippingStage, buildShippingStage)
+	ticket := pbGetTicket(t, c.Store, c.TicketID)
+
+	gh := &shipGitHub{}
+	tr := &shipTracker{}
+	deps := shipClaim(t, c.Store, pbFakeRuntime(t), ticket.ID, gh, tr)
 	commit, err := (shipHandler{}).Run(t.Context(), ticket, deps)
 	if err != nil {
-		t.Fatalf("shipPublished: PUBLISH Run: %v", err)
+		t.Fatalf("buildPublishedStage: PUBLISH Run: %v", err)
 	}
 	if commit.Escalation != nil {
-		t.Fatalf("shipPublished: PUBLISH escalated: %+v", commit.Escalation.Payload)
+		t.Fatalf("buildPublishedStage: PUBLISH escalated: %+v", commit.Escalation.Payload)
 	}
-	pbApply(t, s, ticket, commit)
-	return s, pbGetTicket(t, s, ticket.ID), gh, tr
+	pbApply(t, c.Store, ticket, commit)
+
+	return stageBuild{
+		Store: c.Store, DBPath: c.DBPath, TicketID: ticket.ID, OriginDir: c.OriginDir,
+		Extra: publishedDoubles{gh: gh, tr: tr},
+	}
+}
+
+// shipCloneGitHub returns a deep-enough copy of gh for a test to mutate
+// freely without affecting publishedStage's own shared double, or another
+// test's copy of it: every slice and map field gets its own backing store
+// (slices.Clone, maps.Clone), and a non-nil pr gets a new pointer to a copy
+// of the shipGitHubPR it points at. Func fields (runsFor, logTail) and
+// scalars copy as they are, along with everything else shipGitHub declares.
+func shipCloneGitHub(gh *shipGitHub) *shipGitHub {
+	out := *gh
+	if gh.pr != nil {
+		pr := *gh.pr
+		out.pr = &pr
+	}
+	out.runs = slices.Clone(gh.runs)
+	out.runsSHAs = slices.Clone(gh.runsSHAs)
+	out.statuses = slices.Clone(gh.statuses)
+	out.required = slices.Clone(gh.required)
+	out.reruns = slices.Clone(gh.reruns)
+	out.threads = slices.Clone(gh.threads)
+	out.reviews = slices.Clone(gh.reviews)
+	out.replies = slices.Clone(gh.replies)
+	out.resolves = slices.Clone(gh.resolves)
+	out.requestedReviewers = slices.Clone(gh.requestedReviewers)
+	out.requestReviewersErr = maps.Clone(gh.requestReviewersErr)
+	out.markerAuthors = maps.Clone(gh.markerAuthors)
+	out.containsCalls = slices.Clone(gh.containsCalls)
+	out.resolveErrFor = maps.Clone(gh.resolveErrFor)
+	out.markReadyCalls = slices.Clone(gh.markReadyCalls)
+	out.convertToDraftCalls = slices.Clone(gh.convertToDraftCalls)
+	out.mergeCalls = slices.Clone(gh.mergeCalls)
+	out.commentOnPRCalls = slices.Clone(gh.commentOnPRCalls)
+	return &out
+}
+
+// TestShipCloneGitHubIsolatesSlicesAndMaps checks shipCloneGitHub directly:
+// mutating any slice or map field, or the pr pointer, on the clone must
+// never reach the original, since publishedStage hands its one shared gh
+// double to every shipPublished caller through this clone.
+func TestShipCloneGitHubIsolatesSlicesAndMaps(t *testing.T) {
+	original := &shipGitHub{
+		pr:                  &shipGitHubPR{url: "https://example.com/pr/1"},
+		runs:                []orchestrator.CheckRun{{}},
+		runsSHAs:            []string{"sha1"},
+		statuses:            []orchestrator.CommitStatus{{}},
+		required:            []orchestrator.RequiredCheck{{}},
+		reruns:              []int64{1},
+		threads:             []orchestrator.Thread{{}},
+		reviews:             []orchestrator.Review{{}},
+		replies:             []string{"r1"},
+		resolves:            []string{"t1"},
+		requestedReviewers:  []string{"alice"},
+		requestReviewersErr: map[string]error{"alice": errors.New("boom")},
+		markerAuthors:       map[string]string{"t1|marker": "zing-bot"},
+		containsCalls:       []string{"c1"},
+		resolveErrFor:       map[string]error{"t1": errors.New("boom")},
+		markReadyCalls:      []string{"pr1"},
+		convertToDraftCalls: []string{"pr1"},
+		mergeCalls:          []string{"1|sha|squash|title"},
+		commentOnPRCalls:    []string{"1|hello"},
+	}
+
+	clone := shipCloneGitHub(original)
+
+	clone.pr.url = "https://example.com/pr/2"
+	clone.runs[0] = orchestrator.CheckRun{Name: "changed"}
+	clone.runsSHAs[0] = "changed"
+	clone.statuses[0] = orchestrator.CommitStatus{Context: "changed"}
+	clone.required[0] = orchestrator.RequiredCheck{Context: "changed"}
+	clone.reruns[0] = 99
+	clone.threads[0] = orchestrator.Thread{ID: "changed"}
+	clone.reviews[0] = orchestrator.Review{Login: "changed"}
+	clone.replies[0] = "changed"
+	clone.resolves[0] = "changed"
+	clone.requestedReviewers[0] = "changed"
+	clone.requestReviewersErr["alice"] = errors.New("changed")
+	clone.markerAuthors["t1|marker"] = "changed"
+	clone.containsCalls[0] = "changed"
+	clone.resolveErrFor["t1"] = errors.New("changed")
+	clone.markReadyCalls[0] = "changed"
+	clone.convertToDraftCalls[0] = "changed"
+	clone.mergeCalls[0] = "changed"
+	clone.commentOnPRCalls[0] = "changed"
+
+	if original.pr.url != "https://example.com/pr/1" {
+		t.Errorf("original.pr.url = %q, want unchanged", original.pr.url)
+	}
+	if original.runs[0].Name == "changed" {
+		t.Error("original.runs mutated through clone")
+	}
+	if original.runsSHAs[0] == "changed" {
+		t.Error("original.runsSHAs mutated through clone")
+	}
+	if original.statuses[0].Context == "changed" {
+		t.Error("original.statuses mutated through clone")
+	}
+	if original.required[0].Context == "changed" {
+		t.Error("original.required mutated through clone")
+	}
+	if original.reruns[0] == 99 {
+		t.Error("original.reruns mutated through clone")
+	}
+	if original.threads[0].ID == "changed" {
+		t.Error("original.threads mutated through clone")
+	}
+	if original.reviews[0].Login == "changed" {
+		t.Error("original.reviews mutated through clone")
+	}
+	if original.replies[0] == "changed" {
+		t.Error("original.replies mutated through clone")
+	}
+	if original.resolves[0] == "changed" {
+		t.Error("original.resolves mutated through clone")
+	}
+	if original.requestedReviewers[0] == "changed" {
+		t.Error("original.requestedReviewers mutated through clone")
+	}
+	if original.requestReviewersErr["alice"].Error() == "changed" {
+		t.Error("original.requestReviewersErr mutated through clone")
+	}
+	if original.markerAuthors["t1|marker"] == "changed" {
+		t.Error("original.markerAuthors mutated through clone")
+	}
+	if original.containsCalls[0] == "changed" {
+		t.Error("original.containsCalls mutated through clone")
+	}
+	if original.resolveErrFor["t1"].Error() == "changed" {
+		t.Error("original.resolveErrFor mutated through clone")
+	}
+	if original.markReadyCalls[0] == "changed" {
+		t.Error("original.markReadyCalls mutated through clone")
+	}
+	if original.convertToDraftCalls[0] == "changed" {
+		t.Error("original.convertToDraftCalls mutated through clone")
+	}
+	if original.mergeCalls[0] == "changed" {
+		t.Error("original.mergeCalls mutated through clone")
+	}
+	if original.commentOnPRCalls[0] == "changed" {
+		t.Error("original.commentOnPRCalls mutated through clone")
+	}
+}
+
+// shipPublished returns the test's own private copy of the published
+// stage: a shipping-stage copy driven one real PUBLISH (shipHandler.Run)
+// further, so its own tickets.pr_url is set -- the state every POLL test
+// starts from. gh and tr are this copy's own clones of the doubles PUBLISH
+// ran with, so a caller configures gh's own prState, runs, statuses, and
+// required (POLL's own reads, task 7) before claiming the ticket again for
+// a POLL call, with no risk of one test's edits reaching another's copy.
+func shipPublished(t *testing.T) (s *store.Store, ticket store.Ticket, gh *shipGitHub, tr *shipTracker) {
+	t.Helper()
+	c := useStage(t, publishedStage, buildPublishedStage)
+	d, ok := c.Extra.(publishedDoubles)
+	if !ok {
+		t.Fatalf("shipPublished: Extra = %T, want publishedDoubles", c.Extra)
+	}
+	trCopy := *d.tr
+	return c.Store, pbGetTicket(t, c.Store, c.TicketID), shipCloneGitHub(d.gh), &trCopy
+}
+
+// TestPublishedStageDoublesAreClones checks that two calls to shipPublished
+// each get their own GitHub and tracker doubles, independent of each
+// other, even though both copies start from the one shared publishedStage
+// build.
+func TestPublishedStageDoublesAreClones(t *testing.T) {
+	_, ticket1, gh1, tr1 := shipPublished(t)
+	_, ticket2, gh2, tr2 := shipPublished(t)
+
+	if ticket1.PRURL == nil {
+		t.Fatal("ticket1.PRURL = nil, want set")
+	}
+	if ticket2.PRURL == nil {
+		t.Fatal("ticket2.PRURL = nil, want set")
+	}
+
+	if gh1.pr == nil || gh2.pr == nil {
+		t.Fatalf("gh1.pr = %v, gh2.pr = %v, want both set", gh1.pr, gh2.pr)
+	}
+	if gh1.pr == gh2.pr {
+		t.Fatal("gh1.pr and gh2.pr share the same pointer")
+	}
+	if gh1.pr.url != gh2.pr.url {
+		t.Fatalf("gh1.pr.url = %q, gh2.pr.url = %q, want equal", gh1.pr.url, gh2.pr.url)
+	}
+
+	gh1.prState = orchestrator.PRState{State: shipPRStateOpen}
+	gh1.reruns = append(gh1.reruns, 1)
+	if gh2.prState != (orchestrator.PRState{}) {
+		t.Fatalf("gh2.prState = %+v, want zero value", gh2.prState)
+	}
+	if len(gh2.reruns) != 0 {
+		t.Fatalf("gh2.reruns = %v, want empty", gh2.reruns)
+	}
+
+	if tr1 == tr2 {
+		t.Fatal("tr1 and tr2 share the same pointer")
+	}
+	if !tr1.prPosted {
+		t.Fatal("tr1.prPosted = false, want true")
+	}
+	if !tr2.prPosted {
+		t.Fatal("tr2.prPosted = false, want true")
+	}
 }
 
 // shipPollRun claims ticket afresh and runs shipHandler.Run once (POLL,

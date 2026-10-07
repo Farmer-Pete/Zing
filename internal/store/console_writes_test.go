@@ -2348,3 +2348,59 @@ func TestUpsertPushSubscription_RejectsKeysMissingRequiredFields(t *testing.T) {
 		t.Errorf("push_subscriptions row count = %d, want 0 (nothing written on a rejected payload)", count)
 	}
 }
+
+// TestPushSubscriptions_ListAndDelete proves ListPushSubscriptions returns
+// rows in id order with their IDs set, that DeletePushSubscription removes
+// one by endpoint, and that deleting a missing endpoint is a no-op (err ==
+// nil).
+func TestPushSubscriptions_ListAndDelete(t *testing.T) {
+	t.Parallel()
+	s := newTestStore(t)
+
+	if err := s.UpsertPushSubscription(t.Context(), PushSubscription{
+		Endpoint: "https://push.example/one", KeysJSON: pushKeysJSON("p256dh-one", "auth-one"),
+	}); err != nil {
+		t.Fatalf("UpsertPushSubscription (one): %v", err)
+	}
+	if err := s.UpsertPushSubscription(t.Context(), PushSubscription{
+		Endpoint: "https://push.example/two", KeysJSON: pushKeysJSON("p256dh-two", "auth-two"),
+	}); err != nil {
+		t.Fatalf("UpsertPushSubscription (two): %v", err)
+	}
+
+	subs, err := s.ListPushSubscriptions(t.Context())
+	if err != nil {
+		t.Fatalf("ListPushSubscriptions: %v", err)
+	}
+	if len(subs) != 2 {
+		t.Fatalf("ListPushSubscriptions: got %d subscriptions, want 2", len(subs))
+	}
+	if subs[0].Endpoint != "https://push.example/one" || subs[1].Endpoint != "https://push.example/two" {
+		t.Errorf("ListPushSubscriptions order = %q, %q, want one then two", subs[0].Endpoint, subs[1].Endpoint)
+	}
+	if subs[0].ID == 0 || subs[1].ID == 0 {
+		t.Errorf("ListPushSubscriptions: ID not set: %+v, %+v", subs[0], subs[1])
+	}
+	if subs[0].ID >= subs[1].ID {
+		t.Errorf("ListPushSubscriptions: IDs %d, %d not in ascending order", subs[0].ID, subs[1].ID)
+	}
+
+	if derr := s.DeletePushSubscription(t.Context(), "https://push.example/missing"); derr != nil {
+		t.Errorf("DeletePushSubscription (missing endpoint): err = %v, want nil", derr)
+	}
+
+	if derr := s.DeletePushSubscription(t.Context(), "https://push.example/one"); derr != nil {
+		t.Fatalf("DeletePushSubscription: %v", derr)
+	}
+
+	subs, err = s.ListPushSubscriptions(t.Context())
+	if err != nil {
+		t.Fatalf("ListPushSubscriptions (after delete): %v", err)
+	}
+	if len(subs) != 1 {
+		t.Fatalf("ListPushSubscriptions (after delete): got %d subscriptions, want 1", len(subs))
+	}
+	if subs[0].Endpoint != "https://push.example/two" {
+		t.Errorf("ListPushSubscriptions (after delete): endpoint = %q, want two", subs[0].Endpoint)
+	}
+}

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/netip"
+	"net/url"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -67,6 +68,14 @@ type Console struct {
 	// section 6.14) with hostnames the middleware cannot derive on its own,
 	// such as a tailnet DNS name: bare hostnames, no port. Empty by default.
 	AllowedHosts []string `toml:"allowed_hosts"`
+	// PushContact is the VAPID JWT's sub claim (RFC 8292) that
+	// notify.WebPush.Send signs into every push it sends: a mailto: URL with
+	// an address, or an https: URL with a host. Left empty by Load and
+	// LoadForAdd when zing.toml omits it; cmd/zing/serve.go falls back to
+	// notify.DefaultContact ("mailto:zing@localhost") in that case. Safari
+	// push goes through Apple, which rejects a JWT whose sub is not a real
+	// contact, so an owner on Safari sets this explicitly.
+	PushContact string `toml:"push_contact"`
 }
 
 type Models struct {
@@ -595,6 +604,9 @@ func checkValues(md toml.MetaData, cfg Config) error {
 	if md.IsDefined("console", "push_token") && utf8.RuneCountInString(cfg.Console.PushToken) < minPushTokenLen {
 		return fmt.Errorf("zing.toml: console.push_token: must be at least %d characters", minPushTokenLen)
 	}
+	if md.IsDefined("console", "push_contact") && !validPushContact(cfg.Console.PushContact) {
+		return errors.New("zing.toml: console.push_contact: must be a mailto: or https: URL")
+	}
 	// Project names must be unique: serve keys the tracker's repo map by name
 	// (cmd/zing's productionTracker), so two projects sharing a name would
 	// silently collide and send one project's intake and comments to the
@@ -694,6 +706,25 @@ func checkSandboxReadPaths(paths []string) error {
 		}
 	}
 	return nil
+}
+
+// validPushContact reports whether contact is a usable VAPID JWT sub (RFC
+// 8292): a mailto: URL with a non-empty address (url.Parse puts "a@b" into
+// Opaque, since mailto has no "//" authority), or an https: URL with a
+// non-empty host.
+func validPushContact(contact string) bool {
+	u, err := url.Parse(contact)
+	if err != nil {
+		return false
+	}
+	switch u.Scheme {
+	case "mailto":
+		return u.Opaque != ""
+	case "https":
+		return u.Host != ""
+	default:
+		return false
+	}
 }
 
 // checkReviewBots rejects an explicit review_bots.wait_minutes outside
