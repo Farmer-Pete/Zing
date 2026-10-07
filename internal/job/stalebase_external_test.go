@@ -7,9 +7,10 @@
 // helpers. No building or escalation test's own assertion broke once
 // buildingHandler.Run started posting its own stale_base note (every one
 // of them either doesn't count commit.Messages exactly or runs against a
-// project with a working origin already), so this file carries no
-// withoutStaleBase copy: Go's unused-function check would refuse one with
-// no caller.
+// project with a working origin already, through this package's own
+// buildTicketInBuilding/buildWorktreeFor fixtures, not postbuild_test.go's
+// pbAdvanceBuilding), so this file carries no withoutStaleBase copy: no
+// test here needs the filter.
 package job_test
 
 import (

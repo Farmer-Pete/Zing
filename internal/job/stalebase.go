@@ -19,6 +19,9 @@ import (
 // staleBaseSHA is the stale_base schema's own sha pattern.
 var staleBaseSHA = regexp.MustCompile(`^[0-9a-f]{40}$`)
 
+// staleBaseBranchMax is the stale_base schema's own branch maxLength.
+const staleBaseBranchMax = 255
+
 // The two skip causes staleBaseSkip returns.
 const (
 	staleBaseAlreadyNoted   = "already_noted"
@@ -37,7 +40,9 @@ func withStaleBaseNote(ctx context.Context, t store.Ticket, d Deps, step string,
 	proj.Orch.TakeBaseFallback(t.ID) // an earlier fallback belongs to no step here
 	c, err := run(ctx, t, d)
 	f, stale := proj.Orch.TakeBaseFallback(t.ID)
-	if !stale || err != nil || c.TicketID != t.ID {
+	tickFailed := err != nil
+	zeroCommit := c.TicketID != t.ID
+	if !stale || tickFailed || zeroCommit {
 		return c, err
 	}
 	skip := func(cause string, skipErr error) (store.HandlerCommit, error) {
@@ -72,7 +77,9 @@ func withStaleBaseNote(ctx context.Context, t store.Ticket, d Deps, step string,
 // is passed over instead of failing the tick. A row whose payload won't
 // decode is passed over.
 func staleBaseSkip(f orchestrator.BaseFallback, rows []store.MessageRow, step string) string {
-	if !staleBaseSHA.MatchString(f.SHA) || f.Branch == "" || utf8.RuneCountInString(f.Branch) > 255 {
+	shaOK := staleBaseSHA.MatchString(f.SHA)
+	branchOK := f.Branch != "" && utf8.RuneCountInString(f.Branch) <= staleBaseBranchMax
+	if !shaOK || !branchOK {
 		return staleBasePayloadInvalid
 	}
 	for i := range rows {

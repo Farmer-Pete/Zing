@@ -134,13 +134,21 @@ func staleBaseApply(t *testing.T, s *store.Store, commit store.HandlerCommit) {
 }
 
 // TestStaleBaseNoteOnce is this ticket's own done-when test (design demo):
-// an unreachable origin, two reviewing ticks then one building tick, each
-// through withStaleBaseNote directly (no handler wired yet). The reviewing
-// ticks fall back to the same sha and post one note between them; the
-// building tick, a different step at that same sha, posts a second.
+// an unreachable origin, two reviewing ticks, a building tick, and a
+// second reviewing tick at a new sha, each through withStaleBaseNote
+// directly (no handler wired yet). pbTicketInReviewing's own build phase
+// already drove a building tick against this same origin-less project,
+// so a building note at this sha exists before this test ever calls
+// staleBaseBreakOrigin; the two reviewing ticks fall back to that same
+// sha and post one note between them (a different step, same sha, still
+// posts, Q1 option a's second half). Re-entering building at that sha
+// stays quiet (Q1 option a's first half). Moving the base ref to a new
+// sha and reviewing again posts a second reviewing note (Q1 option a's
+// "a different stale sha posts again").
 func TestStaleBaseNoteOnce(t *testing.T) {
 	t.Parallel()
 	s, ticket, _ := reviewTicketReady(t)
+	baselineBuilding := staleBaseEventsFor(t, s, ticket.ID, stateBuilding)
 	staleBaseBreakOrigin(t, s, ticket.ID)
 	rt := runtime.NewFake(reviewScriptsFS(nil))
 
@@ -166,16 +174,9 @@ func TestStaleBaseNoteOnce(t *testing.T) {
 
 	wantSHA := staleBaseRefSHA(t, s, ticket.ID)
 
-	n, err := s.CountEvents(t.Context(), ticket.ID, store.EventKindStaleBase, store.EventFilter{})
-	if err != nil {
-		t.Fatalf("CountEvents: %v", err)
-	}
-	if n != 1 {
-		t.Fatalf("CountEvents after two reviewing ticks = %d, want 1", n)
-	}
 	reviewing := staleBaseEventsFor(t, s, ticket.ID, stateReviewing)
 	if len(reviewing) != 1 {
-		t.Fatalf("staleBaseEventsFor(reviewing) = %+v, want exactly one", reviewing)
+		t.Fatalf("staleBaseEventsFor(reviewing) after two ticks = %+v, want exactly one", reviewing)
 	}
 	if got := reviewing[0]; got.SHA != wantSHA || got.Reason != "no_origin" {
 		t.Errorf("reviewing event = %+v, want sha %s reason no_origin", got, wantSHA)
@@ -183,28 +184,58 @@ func TestStaleBaseNoteOnce(t *testing.T) {
 
 	tick(stateBuilding)
 
-	n, err = s.CountEvents(t.Context(), ticket.ID, store.EventKindStaleBase, store.EventFilter{})
-	if err != nil {
-		t.Fatalf("CountEvents: %v", err)
-	}
-	if n != 2 {
-		t.Fatalf("CountEvents after the building tick = %d, want 2", n)
-	}
 	building := staleBaseEventsFor(t, s, ticket.ID, stateBuilding)
-	if len(building) != 1 {
-		t.Fatalf("staleBaseEventsFor(building) = %+v, want exactly one", building)
+	if len(building) != len(baselineBuilding) {
+		t.Fatalf("staleBaseEventsFor(building) after re-entering building at the same sha = %+v, want unchanged from baseline %+v", building, baselineBuilding)
 	}
-	if got := building[0]; got.SHA != wantSHA || got.Reason != "no_origin" {
-		t.Errorf("building event = %+v, want sha %s reason no_origin", got, wantSHA)
+	for _, got := range building {
+		if got.SHA != wantSHA || got.Reason != "no_origin" {
+			t.Errorf("building event = %+v, want sha %s reason no_origin", got, wantSHA)
+		}
+	}
+
+	proj, err := s.ProjectForTicket(t.Context(), ticket.ID)
+	if err != nil {
+		t.Fatalf("ProjectForTicket: %v", err)
+	}
+	tree, err := gitfixture.Git(t.Context(), proj.LocalPath, "rev-parse", wantSHA+"^{tree}")
+	if err != nil {
+		t.Fatalf("rev-parse %s^{tree}: %v", wantSHA, err)
+	}
+	newCommit, err := gitfixture.Git(t.Context(), proj.LocalPath, "commit-tree", strings.TrimSpace(string(tree)), "-p", wantSHA, "-m", "advance base")
+	if err != nil {
+		t.Fatalf("commit-tree: %v", err)
+	}
+	newSHA := strings.TrimSpace(string(newCommit))
+	if _, err := gitfixture.Git(t.Context(), proj.LocalPath, "update-ref", "refs/zing/base/"+pbFixtureDefaultBranch, newSHA); err != nil {
+		t.Fatalf("update-ref refs/zing/base/%s %s: %v", pbFixtureDefaultBranch, newSHA, err)
+	}
+
+	tick(stateReviewing)
+
+	reviewing = staleBaseEventsFor(t, s, ticket.ID, stateReviewing)
+	if len(reviewing) != 2 {
+		t.Fatalf("staleBaseEventsFor(reviewing) after the base moved = %+v, want exactly two", reviewing)
+	}
+	gotSHAs := map[string]bool{reviewing[0].SHA: true, reviewing[1].SHA: true}
+	if !gotSHAs[wantSHA] || !gotSHAs[newSHA] || len(gotSHAs) != 2 {
+		t.Fatalf("staleBaseEventsFor(reviewing) shas = %+v, want one each of %s and %s", gotSHAs, wantSHA, newSHA)
 	}
 }
 
 // TestStaleBaseNoteSkippedWhenFetchWorks proves a tick whose fetch really
-// reaches origin adds no stale_base event.
+// reaches origin adds no stale_base event. It pins the actual cause (a
+// successful fetch, not some unrelated skip such as payload_invalid) by
+// checking that the base ref really moved to origin's own sha and that
+// the orchestrator recorded no fallback at all.
 func TestStaleBaseNoteSkippedWhenFetchWorks(t *testing.T) {
 	t.Parallel()
 	s, ticket, _ := reviewTicketReady(t)
-	basesyncAddOrigin(t, s, ticket)
+	remoteDir := basesyncAddOrigin(t, s, ticket)
+	wantSHA, err := gitfixture.Git(t.Context(), remoteDir, "rev-parse", pbFixtureDefaultBranch)
+	if err != nil {
+		t.Fatalf("rev-parse %s in origin: %v", pbFixtureDefaultBranch, err)
+	}
 	rt := runtime.NewFake(reviewScriptsFS(nil))
 	deps := pbClaim(t, s, rt, ticket.ID)
 
@@ -214,6 +245,14 @@ func TestStaleBaseNoteSkippedWhenFetchWorks(t *testing.T) {
 	}
 	if kept := withoutStaleBase(commit.Messages); len(kept) != len(commit.Messages) {
 		t.Errorf("commit.Messages = %+v, want no stale_base message", commit.Messages)
+	}
+
+	if gotSHA := staleBaseRefSHA(t, s, ticket.ID); gotSHA != strings.TrimSpace(string(wantSHA)) {
+		t.Fatalf("refs/zing/base/%s = %s, want origin's %s (the fetch did not really succeed)", pbFixtureDefaultBranch, gotSHA, wantSHA)
+	}
+	proj := deps.Projects[ticket.ProjectID]
+	if _, stale := proj.Orch.TakeBaseFallback(ticket.ID); stale {
+		t.Error("TakeBaseFallback after a successful fetch: ok = true, want false")
 	}
 }
 

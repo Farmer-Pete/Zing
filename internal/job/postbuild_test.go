@@ -449,52 +449,21 @@ func pbAdvancePlanningWithAnAnswer(t *testing.T, s *store.Store, rt runtime.Runt
 
 const pbAdvanceBuildingMaxCalls = 8
 
-// pbWithWorkingOrigin gives ticketID's project a working bare origin for
-// fn's own duration, then removes it. buildingHandler.Run's own tick
-// fetches the base (#68 follow-up, task 7's withStaleBaseNote wrapping),
-// and this fixture's project otherwise has no origin at all, so every
-// building tick fn drives would otherwise fall back and post its own
-// stale_base note, which no caller of pbAdvanceBuilding (reviewTicketReady,
-// judgeTicketReady, shipTicketReady, and stalebase_test.go's own
-// TestStaleBaseNoteOnce, none of which expect a pre-existing note) wants.
-// Removing the origin again afterward matters too: shipTicketReadyFrom
-// later calls gitfixture.WithBareOrigin unconditionally, which errors if
-// an origin remote is already there.
-func pbWithWorkingOrigin(t *testing.T, s *store.Store, ticketID int64, fn func()) {
-	t.Helper()
-	proj, err := s.ProjectForTicket(t.Context(), ticketID)
-	if err != nil {
-		t.Fatalf("pbWithWorkingOrigin: ProjectForTicket: %v", err)
-	}
-	if _, err := gitfixture.WithBareOrigin(t.Context(), proj.LocalPath); err != nil {
-		t.Fatalf("pbWithWorkingOrigin: WithBareOrigin: %v", err)
-	}
-	if out, pushErr := gitfixture.Git(t.Context(), proj.LocalPath, "push", "origin", pbFixtureDefaultBranch); pushErr != nil {
-		t.Fatalf("pbWithWorkingOrigin: push origin %s: %v: %s", pbFixtureDefaultBranch, pushErr, out)
-	}
-	fn()
-	if out, rmErr := gitfixture.Git(t.Context(), proj.LocalPath, "remote", "remove", "origin"); rmErr != nil {
-		t.Fatalf("pbWithWorkingOrigin: remote remove origin: %v: %s", rmErr, out)
-	}
-}
-
 func pbAdvanceBuilding(t *testing.T, s *store.Store, rt runtime.Runtime, ticketID int64) {
 	t.Helper()
-	pbWithWorkingOrigin(t, s, ticketID, func() {
-		for range pbAdvanceBuildingMaxCalls {
-			ticket := pbGetTicket(t, s, ticketID)
-			deps := pbClaim(t, s, rt, ticketID)
-			commit, err := (buildingHandler{}).Run(t.Context(), ticket, deps)
-			if err != nil {
-				t.Fatalf("building Run: %v", err)
-			}
-			pbApply(t, s, ticket, commit)
-			if pbGetTicket(t, s, ticketID).State != stateBuilding {
-				return
-			}
+	for range pbAdvanceBuildingMaxCalls {
+		ticket := pbGetTicket(t, s, ticketID)
+		deps := pbClaim(t, s, rt, ticketID)
+		commit, err := (buildingHandler{}).Run(t.Context(), ticket, deps)
+		if err != nil {
+			t.Fatalf("building Run: %v", err)
 		}
-		t.Fatalf("pbAdvanceBuilding: still in building after %d calls", pbAdvanceBuildingMaxCalls)
-	})
+		pbApply(t, s, ticket, commit)
+		if pbGetTicket(t, s, ticketID).State != stateBuilding {
+			return
+		}
+	}
+	t.Fatalf("pbAdvanceBuilding: still in building after %d calls", pbAdvanceBuildingMaxCalls)
 }
 
 // pbTicketInReviewing drives a fresh, git-backed ticket from queued through
