@@ -1531,6 +1531,18 @@ func (h reviewingHandler) round(ctx context.Context, t store.Ticket, d Deps, n i
 	if in, ok := renderDroppedInput(droppedFindings(prior, n)); ok {
 		extra = append(extra, in)
 	}
+	events, err := d.Store.FileEvents(ctx, t.ID)
+	if err != nil {
+		return store.HandlerCommit{}, fmt.Errorf("job: reviewing: file events: %w", err)
+	}
+	messages, err := d.Store.ListMessages(ctx, t.ID)
+	if err != nil {
+		return store.HandlerCommit{}, fmt.Errorf("job: reviewing: messages: %w", err)
+	}
+	if in, ok := renderAcceptedPerimeterInput(events, messages); ok {
+		extra = append(extra, in)
+		slog.Info("review lists accepted perimeter files", "ticket_id", t.ID, "round", n)
+	}
 
 	attempts, lensesErr := runLensesParallel(ctx, d, t, lenses, schemas, func(lens response.Lens) (store.SessionUpsert, runtime.RunRequest, func(runResult) *store.SessionUpsert) {
 		codeSection, csErr := lensCodeSection(lens)
