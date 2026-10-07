@@ -126,6 +126,62 @@ func TestSplitGate_RendersChildrenAndNotes(t *testing.T) {
 	}
 }
 
+// TestSplitGate_ResolvedQuestionShowsNoStaleChildren proves the review fix
+// (#74): loadSplit reads only the newest children artifact, so a resolved
+// split question -- rejected, or otherwise superseded by a later proposal
+// -- must not render it as if it were its own (splitShowsChildren mirrors
+// gateShowsPlan's own guard for the gate kind, views.go). Only the live,
+// not yet resolved split question shows the current artifact.
+func TestSplitGate_ResolvedQuestionShowsNoStaleChildren(t *testing.T) {
+	t.Parallel()
+	s := newConsoleTestStore(t)
+	ticketID := seedTicket(t, s, "fake#2", "Split this big ticket")
+
+	seedChildrenArtifact(t, s, ticketID, []response.Child{
+		{Key: "c1", Title: "Live child A", Body: "Do the live work.", DependsOn: []string{}},
+		{Key: "c2", Title: "Live child B", Body: "Do the other live work.", DependsOn: []string{"c1"}},
+	}, "Live notes")
+
+	const resolvedTitle = "An earlier split proposal for this ticket"
+	resolvedState := "resolved"
+	payload, err := json.Marshal(response.QuestionPayload{
+		Key: "Q0", Kind: response.QuestionKindSplit, State: response.QuestionStateOpen,
+		Recommended: "a",
+		Options:     []response.Option{{Key: "a", Text: "Approve"}, {Key: "b", Text: "Reject"}},
+	})
+	if err != nil {
+		t.Fatalf("marshal split question payload: %v", err)
+	}
+	if _, err := s.InsertMessage(t.Context(), store.Message{
+		TicketID: ticketID, Type: testMsgTypeQuestion, Author: testAuthorZing,
+		State:   &resolvedState,
+		Body:    resolvedTitle,
+		Payload: payload,
+	}); err != nil {
+		t.Fatalf("InsertMessage(resolved split question): %v", err)
+	}
+
+	seedSplitQuestion(t, s, ticketID)
+
+	srv := newTestServer(t, s, bus.New(), nil, newTestLogHandler(t))
+	resp, r, cancel := openStream(t, srv.URL, "thread", ticketID, 0)
+	defer cancel()
+	defer func() { _ = resp.Body.Close() }()
+	_, main, _, _ := readInitialFrames(t, r)
+	assertExactSSEFraming(t, main)
+
+	groups := splitQuestionGroups(t, main)
+	resolvedGroup := findGroup(t, groups, resolvedTitle)
+	liveGroup := findGroup(t, groups, splitQuestionTitle)
+
+	if strings.Contains(resolvedGroup, "Live child A") {
+		t.Errorf("resolved split group renders the live artifact's children; got:\n%s", resolvedGroup)
+	}
+	if !strings.Contains(liveGroup, "Live child A") {
+		t.Errorf("live split group missing its own children; got:\n%s", liveGroup)
+	}
+}
+
 // TestThreadBanner_HeldTicketNamesAbandonedDependency proves holdBanner
 // (#74 owner decision Q3): a child ticket held on a dependency that ends
 // abandoned stays held, and its thread banner names the dependency and

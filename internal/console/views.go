@@ -429,14 +429,9 @@ func (c *console) threadComponent(ctx context.Context, open int64) (templ.Compon
 			return nil, fmt.Errorf("console: planning conversation for ticket %d: %w", open, convErr)
 		}
 		agent := agentName(c.machine)
-		threadRows, buildErr := buildThreadRows(&ticket, rows, plan, scenarios, findings, conv, agent)
+		threadRows, buildErr := buildThreadRows(&ticket, rows, plan, scenarios, findings, split, conv, agent)
 		if buildErr != nil {
 			return nil, buildErr
-		}
-		for i := range threadRows {
-			if q := threadRows[i].Question; q != nil && q.Kind == string(response.QuestionKindSplit) {
-				q.Split = split
-			}
 		}
 		banner, bannerErr := c.threadBanner(ctx, open, rows, conv, agent)
 		if bannerErr != nil {
@@ -1034,6 +1029,15 @@ func gateShowsPlan(kind response.QuestionKind, state *string) bool {
 	return kind == response.QuestionKindGate && (state == nil || *state != msgStateResolved)
 }
 
+// splitShowsChildren mirrors gateShowsPlan for the split kind (review fix,
+// #74): only a split question still in play renders the stored children
+// artifact. A resolved split question -- rejected, or otherwise superseded
+// by a later proposal -- is history; attaching the newest artifact to it
+// too would show a split it never gated.
+func splitShowsChildren(kind response.QuestionKind, state *string) bool {
+	return kind == response.QuestionKindSplit && (state == nil || *state != msgStateResolved)
+}
+
 // sealedSectionStates is every ticket state the post-gate "Sealed plan and
 // scenarios" section renders in (#75 Q1): each post-seal state a ticket can
 // still change in. done and abandoned have no run left to use an edit.
@@ -1419,7 +1423,7 @@ func buildWaitProgress(ticket *store.Ticket, rows []store.MessageRow, conv store
 // AnsweredHTML); every other question kind is unaffected. agent is that
 // conversation's own display name (views.go's agentName), used for a
 // planning question's "with <agent>" pill and "Settled by <agent>" line.
-func buildThreadRows(ticket *store.Ticket, rows []store.MessageRow, plan *templates.RenderedPlan, scenarios []templates.ScenarioRow, findings []templates.FindingRow, conv store.PlanningConversation, agent string) ([]templates.ThreadRow, error) {
+func buildThreadRows(ticket *store.Ticket, rows []store.MessageRow, plan *templates.RenderedPlan, scenarios []templates.ScenarioRow, findings []templates.FindingRow, split *templates.SplitView, conv store.PlanningConversation, agent string) ([]templates.ThreadRow, error) {
 	drafts := collectQuestionDrafts(rows)
 	rows = visibleRows(rows)
 	sentAnswers := collectSentAnswers(rows)
@@ -1469,7 +1473,7 @@ func buildThreadRows(ticket *store.Ticket, rows []store.MessageRow, plan *templa
 		}
 		if row.Type == msgTypeQuestion || row.Type == msgTypeEscalation {
 			convThread := convThreadForQuestion(conv, row.ID)
-			question, err := buildThreadQuestion(ticket, row, messageCounts[row.ID]+1, plan, scenarios, findings, drafts, sentAnswers, sentChildren[row.ID], convThread, conv, agent, gateOpen)
+			question, err := buildThreadQuestion(ticket, row, messageCounts[row.ID]+1, plan, scenarios, findings, split, drafts, sentAnswers, sentChildren[row.ID], convThread, conv, agent, gateOpen)
 			if err != nil {
 				return nil, err
 			}
@@ -1822,7 +1826,7 @@ func collectQuestionDrafts(rows []store.MessageRow) map[int64]questionDraft {
 // 22.1); conv carries that conversation's delivery watermark and in-flight
 // run, for convThread's own pill and Queued tags; agent is the planning
 // job's own display name (views.go's agentName).
-func buildThreadQuestion(ticket *store.Ticket, m *store.MessageRow, messageCount int, plan *templates.RenderedPlan, scenarios []templates.ScenarioRow, findings []templates.FindingRow, drafts map[int64]questionDraft, sentAnswers map[int64]response.AnswerPayload, children []store.MessageRow, convThread *store.Thread, conv store.PlanningConversation, agent string, gateOpen bool) (*templates.ThreadQuestion, error) {
+func buildThreadQuestion(ticket *store.Ticket, m *store.MessageRow, messageCount int, plan *templates.RenderedPlan, scenarios []templates.ScenarioRow, findings []templates.FindingRow, split *templates.SplitView, drafts map[int64]questionDraft, sentAnswers map[int64]response.AnswerPayload, children []store.MessageRow, convThread *store.Thread, conv store.PlanningConversation, agent string, gateOpen bool) (*templates.ThreadQuestion, error) {
 	if m.Type != msgTypeQuestion {
 		return nil, nil //nolint:nilnil // "no question" is a legitimate result, not an error
 	}
@@ -1984,6 +1988,9 @@ func buildThreadQuestion(ticket *store.Ticket, m *store.MessageRow, messageCount
 		q.Plan = plan
 		q.Scenarios = scenarios
 		q.Findings = findings
+	}
+	if splitShowsChildren(payload.Kind, m.State) {
+		q.Split = split
 	}
 	if payload.Amendment != nil {
 		a := payload.Amendment
