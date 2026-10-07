@@ -22,7 +22,7 @@ const (
 func pruneBackups(dataDir string, keep int) error {
 	matches, err := filepath.Glob(filepath.Join(dataDir, backupPrefix+"*"))
 	if err != nil {
-		return err
+		return fmt.Errorf("upgrade: prune backups: glob: %w", err)
 	}
 
 	type backup struct {
@@ -37,7 +37,7 @@ func pruneBackups(dataDir string, keep int) error {
 			if errors.Is(statErr, os.ErrNotExist) {
 				continue
 			}
-			return statErr
+			return fmt.Errorf("upgrade: prune backups: stat %s: %w", path, statErr)
 		}
 		backups = append(backups, backup{path: path, modTime: info.ModTime().UnixNano()})
 	}

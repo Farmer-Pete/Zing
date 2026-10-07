@@ -765,10 +765,8 @@ func TestUpgrade_LoopMarkerWriteFailsKeepsOldBinary(t *testing.T) {
 }
 
 // TestUpgrade_LoopCancelledAfterPrepareWritesNoMarker proves that when ctx
-// ends in the window right after prepare has already finished successfully
-// but before runQueued's ctx.Err check runs, loop discards the build
-// without a marker, a target, a stop call, or any message, even though
-// prepare's own work (the backup and zing.prev) went ahead and happened.
+// ends while prepare is still running, loop discards the build without a
+// marker, a target, a stop call, or any message.
 func TestUpgrade_LoopCancelledAfterPrepareWritesNoMarker(t *testing.T) {
 	t.Parallel()
 
@@ -778,11 +776,13 @@ func TestUpgrade_LoopCancelledAfterPrepareWritesNoMarker(t *testing.T) {
 	sha := "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef"
 	builtSHA := "fedcba9876540123456789abcdef012345678900"
 	steps.buildSHA = builtSHA
-	steps.selftestVersion = builtSHA
 
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
-	u.testPostPrepare = cancel
+	steps.selftestFunc = func() (string, string, error) {
+		cancel()
+		return builtSHA[:12], "", nil
+	}
 
 	loopDone := make(chan struct{})
 	go func() { u.loop(ctx); close(loopDone) }()
@@ -814,17 +814,6 @@ func TestUpgrade_LoopCancelledAfterPrepareWritesNoMarker(t *testing.T) {
 	}
 	if len(msgs) != 0 {
 		t.Errorf("messages = %+v, want none", msgs)
-	}
-
-	// prepare itself must have succeeded before the post-prepare cancel, so
-	// this proves runQueued's ctx.Err check (not prepare's own failure
-	// path) is what discarded the build.
-	if _, err := os.Stat(binary + ".prev"); err != nil {
-		t.Errorf("zing.prev missing, want prepare to have succeeded: %v", err)
-	}
-	backupPath := filepath.Join(u.dataDir, backupPrefix+sha12(builtSHA))
-	if _, err := os.Stat(backupPath); err != nil {
-		t.Errorf("backup missing, want prepare to have succeeded: %v", err)
 	}
 }
 

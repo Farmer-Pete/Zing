@@ -402,10 +402,62 @@ func TestServe_UpgraderRunsAlongsideShutdown(t *testing.T) {
 		t.Errorf("su.next = %+v, want nil: no upgrade was ever requested", su.next)
 	}
 	got := logs.String()
-	if !strings.Contains(got, `msg="upgrade: enabled"`) ||
-		!strings.Contains(got, "exe="+su.exe) ||
-		!strings.Contains(got, "running="+su.running) {
-		t.Errorf("logs = %q, want an \"upgrade: enabled\" line with exe=%s and running=%s: serve must have built a non-nil upgrader from su", got, su.exe, su.running)
+	hasMsg := strings.Contains(got, `msg="upgrade: enabled"`)
+	hasExe := strings.Contains(got, "exe="+su.exe)
+	hasRunning := strings.Contains(got, "running="+su.running)
+	if !hasMsg || !hasExe || !hasRunning {
+		t.Errorf("logs = %q, want an \"upgrade: enabled\" line with exe=%s and running=%s (hasMsg=%v hasExe=%v hasRunning=%v): serve must have built a non-nil upgrader from su",
+			got, su.exe, su.running, hasMsg, hasExe, hasRunning)
+	}
+}
+
+// TestServe_UpgraderStopsOnDispatcherExitWithoutCtxCancel proves that serve's
+// cancelServe-then-wait-on-upDone sequence (right before shutdown, serve.go)
+// really ends the running upgrader loop goroutine even when the parent ctx
+// is never cancelled. The drain here is triggered by the dispatcher's own
+// goroutine ending on its own, through the store's "draining" flag, which
+// does not touch ctx at all (waitForShutdownTrigger's dispDone case). Left
+// unfixed (review finding r4f1: deleting the cancelServe()/<-upDone call
+// at serve.go), up.loop would keep waiting on its own derived ctx, which
+// stays live, and serve would hang forever on <-upDone instead of
+// returning once shutdown finishes.
+func TestServe_UpgraderStopsOnDispatcherExitWithoutCtxCancel(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "zing.toml")
+	dbPath := filepath.Join(dir, "zing.db")
+
+	port := freeLoopbackPort(t)
+	writeZingTOML(t, cfgPath, zingTOMLOpts{
+		Port: port, IntervalSeconds: 1, MaxParallel: 1, Bind: []string{loopback}, Self: true,
+	})
+
+	su := &selfUpgrade{exe: filepath.Join(dir, "not-the-running-binary"), running: "0123456789ab"}
+
+	// t.Context() is never cancelled by this test: the only way serve ends
+	// below is the dispatcher's own exit, not a signal or parent cancel.
+	serveDone := make(chan error, 1)
+	go func() { serveDone <- serve(t.Context(), cfgPath, dbPath, false, su) }()
+
+	waitForServing(t, fmt.Sprintf("http://127.0.0.1:%d", port), serveDone)
+
+	st, err := store.Open(t.Context(), dbPath)
+	if err != nil {
+		t.Fatalf("store.Open: %v", err)
+	}
+	defer func() { _ = st.Close() }()
+	if err := st.SetDraining(t.Context(), true); err != nil {
+		t.Fatalf("SetDraining(true): %v", err)
+	}
+
+	select {
+	case err := <-serveDone:
+		if err != nil {
+			t.Fatalf("serve returned %v, want nil", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("serve did not return within the drain window after the dispatcher's own exit; the upgrader loop likely never saw its ctx end")
 	}
 }
 

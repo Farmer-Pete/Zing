@@ -109,22 +109,6 @@ type upgrader struct {
 	// go loop in part 1 (and by part 2 only after booted_ok). loop waits
 	// on it before it waits for its first wake.
 	gate chan struct{}
-
-	// testPostPrepare, when set, runs in runQueued right after prepare
-	// returns successfully but before the ctx.Err check that follows it.
-	// Only tests set it, to simulate ctx ending in that exact window.
-	//
-	// Recorded plan deviation (review r2f3): the plan's
-	// TestUpgrade_LoopCancelledAfterPrepareWritesNoMarker has the fake
-	// Selftest cancel ctx and then return success, so the cancellation
-	// happens inside prepare rather than after it. But prepare's own later
-	// steps (BackupTo, os.Link) still run against that already-cancelled
-	// ctx and fail there, so the test's assertion that prepare's backup and
-	// zing.prev work went ahead could never hold. This hook lets a test
-	// cancel ctx in the exact window runQueued's own check covers, after
-	// prepare's work has genuinely finished, without changing prepare's
-	// production behavior.
-	testPostPrepare func()
 }
 
 // Request queues ticketID and sha as the next upgrade, newest wins. Once a
@@ -187,7 +171,7 @@ func (u *upgrader) prepare(ctx context.Context, req upgradeRequest) (restartTarg
 	fail := func(err error) (restartTarget, error) {
 		_ = os.Remove(next)
 		if ctx.Err() != nil {
-			slog.Info("upgrade: cancelled", "from_sha", u.running, "to_sha", req.SHA, "ticket_id", req.TicketID, "error", err)
+			slog.Info("upgrade: cancelled", "from_sha", u.running, "to_sha", req.SHA, "ticket_id", req.TicketID, "error", redactURLs(err.Error()))
 		} else {
 			tellOwner(context.WithoutCancel(ctx), u.store, req.TicketID, err.Error())
 		}
@@ -289,10 +273,6 @@ func (u *upgrader) runQueued(ctx context.Context) bool {
 		rt, err := u.prepare(ctx, req)
 		if err != nil {
 			return false
-		}
-
-		if u.testPostPrepare != nil {
-			u.testPostPrepare()
 		}
 
 		if ctx.Err() != nil {
