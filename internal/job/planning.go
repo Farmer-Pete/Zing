@@ -2582,15 +2582,16 @@ func retryCapBudget(ctx context.Context, t store.Ticket, d Deps, resolveIDs []in
 	budget += time.Duration(raiseMinutes) * time.Minute
 	exhausted, capSeconds := budgetExhausted(agentSeconds, budget)
 	var c store.HandlerCommit
-	if exhausted {
+	switch {
+	case exhausted:
 		slog.Info("cap_budget retry still over budget", "ticket_id", t.ID, "agent_seconds", agentSeconds, "cap_seconds", capSeconds, "raise_minutes", raiseMinutes)
 		c = budgetEscalationCommit(t, d, resolveIDs)
-	} else {
+	case t.State == stateShipping:
+		slog.Info("cap_budget retry resumes", "ticket_id", t.ID, "state", t.State, "agent_seconds", agentSeconds, "cap_seconds", capSeconds, "raise_minutes", raiseMinutes)
+		c = shipRetryMarkerCommit(t, d, resolveIDs)
+	default:
 		slog.Info("cap_budget retry resumes", "ticket_id", t.ID, "state", t.State, "agent_seconds", agentSeconds, "cap_seconds", capSeconds, "raise_minutes", raiseMinutes)
 		c = buildingHandler{}.retryMarkerCommit(t, d, resolveIDs)
-		if t.State == stateShipping {
-			c = shipRetryMarkerCommit(t, d, resolveIDs)
-		}
 	}
 	if raiseMinutes == 0 {
 		return c, nil
