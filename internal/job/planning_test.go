@@ -3279,9 +3279,13 @@ func assertWallClockEscalation(t *testing.T, commit store.HandlerCommit) {
 	if payload.Code != string(response.EscalationCodeWallClock) || payload.Origin != string(response.EscalationOriginCapBudget) {
 		t.Errorf("payload = (Code=%q, Origin=%q), want (wall_clock, cap_budget)", payload.Code, payload.Origin)
 	}
-	const wantWhat = "raise budget.agent_minutes_per_ticket or abandon"
+	const wantWhat = "raise Agent minutes per ticket in the console's settings, raise this ticket's budget by 60 minutes, or abandon"
 	if payload.What != wantWhat {
 		t.Errorf("payload.What = %q, want %q", payload.What, wantWhat)
+	}
+	wantExtra := []response.Option{{Key: "d", Text: "raise this ticket's budget by 60 minutes"}}
+	if !reflect.DeepEqual(commit.Escalation.ExtraOptions, wantExtra) {
+		t.Errorf("commit.Escalation.ExtraOptions = %+v, want %+v", commit.Escalation.ExtraOptions, wantExtra)
 	}
 	if commit.Waiting == nil || *commit.Waiting != testWaitingQuestions {
 		t.Errorf("commit.Waiting = %v, want questions", commit.Waiting)

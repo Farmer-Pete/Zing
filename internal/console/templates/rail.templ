@@ -13,6 +13,9 @@ import "strconv"
 templ Rail(model *RailModel) {
 	<aside id="rail">
 		if model != nil {
+			if model.Stall != nil {
+				@stallRail(*model.Stall)
+			}
 			@phaseRail(model.Phase)
 			@artifactsRail(model.Artifacts)
 			@runRail(model.Run)
@@ -20,6 +23,19 @@ templ Rail(model *RailModel) {
 			@sideBox()
 		}
 	</aside>
+}
+
+// stallRail renders the rail's "why is this not moving" line, plus when the
+// ticket last ran (ticket "Say on each ticket why it is not moving", split
+// from #79). An empty s.Text renders no stall-reason element at all (owner
+// decision Q3): the section still holds the last-ran line.
+templ stallRail(s StallLine) {
+	<section class="rail-stall">
+		if s.Text != "" {
+			<p class="stall-reason" data-stall-reason={ s.Reason }>{ s.Text }</p>
+		}
+		<p class="stall-last-ran">{ s.LastRan }</p>
+	</section>
 }
 
 // phaseRail draws machine.States.Order as dots (design section 6.11):

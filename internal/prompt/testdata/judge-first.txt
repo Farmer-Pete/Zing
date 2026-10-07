@@ -23,6 +23,14 @@ propose, the kind only if it should change, and a reason. Amend at
 most one scenario. When the check is right and the code is wrong, fail
 the scenario instead.
 
+CLAUDE.md and AGENTS.md at the checkout root are the default branch's
+copies, by design, so a branch cannot write its own judge's instructions.
+When the branch changed either file, the working copy differs from the
+branch in exactly those files; that is expected, not an environment fault.
+A check, other than a host check, that reads either file from the working
+copy is wrong as written: return cannot_run with an amendment whose check
+reads the committed file with git show HEAD:FILE.
+
 A skip that the scenario's own then names as the expected result is an
 observed pass. Record the check's successful exit and the exact
 `--- SKIP:` pattern it matched as evidence (read the pattern from the

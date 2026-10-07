@@ -193,8 +193,10 @@ func postBuildRoundOwnedByOpenFix(ctx context.Context, t store.Ticket, d Deps, r
 // (reviewingHandler.acceptReviewLoopsExhausted, ticket 60) -- but only as an
 // explicit pick: a reply with no chosen option on that one question resolves
 // as Retry even when d is recommended (owner decision Q3), rewritten ahead
-// of this switch. Choice d on any other escalation is treated like b, and
-// reaches the choice != escalationChoiceRetry row below.
+// of this switch. Choice d on a cap_budget escalation raises this ticket's
+// budget by budgetRaiseMinutes and then retries through retryCapBudget.
+// Choice d on any other escalation is treated like b, and reaches the
+// choice != escalationChoiceRetry row below.
 func resolvePostBuildEscalation(ctx context.Context, t store.Ticket, d Deps, round store.Round, escID int64) (store.HandlerCommit, error) {
 	h := buildingHandler{}
 	escMsg, payload, err := d.Store.EscalationByID(ctx, escID)
@@ -229,6 +231,9 @@ func resolvePostBuildEscalation(ctx context.Context, t store.Ticket, d Deps, rou
 	case choice == escalationChoiceAccept && reviewLoops && t.State == stateReviewing:
 		commit, err = reviewingHandler{}.acceptReviewLoopsExhausted(ctx, t, d, resolveIDs)
 
+	case choice == escalationChoiceRaiseBudget && origin == response.EscalationOriginCapBudget:
+		commit, err = retryCapBudget(ctx, t, d, resolveIDs, budgetRaiseMinutes)
+
 	case choice != escalationChoiceRetry:
 		commit = replanUnsupportedEscalation(t, d, resolveIDs, origin)
 
@@ -236,7 +241,7 @@ func resolvePostBuildEscalation(ctx context.Context, t store.Ticket, d Deps, rou
 		commit = h.retryMarkerCommit(t, d, resolveIDs)
 
 	case origin == response.EscalationOriginCapBudget:
-		commit, err = retryCapBudget(ctx, t, d, resolveIDs)
+		commit, err = retryCapBudget(ctx, t, d, resolveIDs, 0)
 
 	case origin == response.EscalationOriginCapResumes:
 		commit, preserved, err = h.retryCapResumes(ctx, t, d, resolveIDs, notes, int64OrZero(payload.SessionID))

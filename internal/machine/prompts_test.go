@@ -28,12 +28,12 @@ func TestPrompts_MatchThePinnedDesignText(t *testing.T) {
 		{
 			name:   "planning-feature",
 			path:   planningFeaturePromptPath,
-			sha256: "d8330f7e88d130f37101c7003d6b898b40b47083384ae20e23a8d0bd95fa8726",
+			sha256: "95252ee8d2f4bc23dd8990f32891a1580cafaed25859e5647f503f32154318b3",
 		},
 		{
 			name:   "planning-bug",
 			path:   planningBugPromptPath,
-			sha256: "faa167f10d401d2bb578490fcf28f3d081dfad071be158fa20d9786246f43c99",
+			sha256: "57cd6325d06fe02ed4ee77e1c22563c4f4c5bb2c5d025e88cf735af2c6e65ee5",
 		},
 		{
 			name:   "planreview",
@@ -63,7 +63,7 @@ func TestPrompts_MatchThePinnedDesignText(t *testing.T) {
 		{
 			name:   "judge",
 			path:   "prompts/judge.md",
-			sha256: "3ac9e3d378d60bd79e1fcd42cca366babf73f581b36cee604d0bb1062afb0b5e",
+			sha256: "8e9bc69eef767021f31a44e7cc35a728807ed57afb4f85c90ef31b91d5241eb7",
 		},
 		{
 			name:   "respond",
@@ -406,6 +406,29 @@ func TestPlanningPromptsTeachHostKind(t *testing.T) {
 	}
 }
 
+// governanceChecksSentence is what both planning prompts say about
+// reading CLAUDE.md or AGENTS.md (#225, #92): the judge's checkout
+// overwrites both with the default branch's copies, so a check must read
+// the committed file with git show HEAD:FILE rather than the working
+// copy.
+const governanceChecksSentence = "A check reads CLAUDE.md or AGENTS.md with git show " +
+	"HEAD:FILE, never from the working copy, such as git show HEAD:AGENTS.md | tr -s " +
+	`'[:space:]' ' ' | grep -qF 'two words', because the judge's checkout holds the ` +
+	"default branch's copies of both files."
+
+// TestPlanningPromptsReadGovernanceFilesFromCommit proves both planning
+// prompts tell the planner to read CLAUDE.md or AGENTS.md with
+// git show HEAD:FILE rather than the working copy, since the judge's
+// checkout holds the default branch's copies of both (#225, #92).
+func TestPlanningPromptsReadGovernanceFilesFromCommit(t *testing.T) {
+	t.Parallel()
+	for _, path := range []string{planningFeaturePromptPath, planningBugPromptPath} {
+		if !strings.Contains(unwrapped(t, path), governanceChecksSentence) {
+			t.Errorf("%s lacks the governance-checks sentence", path)
+		}
+	}
+}
+
 // pureFunctionSeamSentence is what both planning prompts say in their
 // Plan step (#111, #130): a decision inside a handler or callback moves
 // into a pure function the plan tests.
@@ -420,6 +443,38 @@ func TestPlanningPromptsRequirePureFunctionSeam(t *testing.T) {
 	for _, path := range []string{planningFeaturePromptPath, planningBugPromptPath} {
 		if !strings.Contains(unwrapped(t, path), pureFunctionSeamSentence) {
 			t.Errorf("%s lacks the pure-function seam sentence", path)
+		}
+	}
+}
+
+// hostBeforeMergeSentence is what both planning prompts say right after
+// hostKindSentence (#91): a host check runs in a checkout of this branch,
+// so it may read or test any repo file the plan creates, but everything
+// else it needs must already exist on the host before this ticket merges,
+// since the installed zing and the live zing serve both run main until
+// then.
+const hostBeforeMergeSentence = "A host check runs in a checkout of this " +
+	"branch, so it may read or test any repo file the plan creates. " +
+	"Everything else it needs must already exist on the host before this " +
+	"ticket merges, since the installed zing and the live zing serve both " +
+	"run main until then. Prove a binary, route, or flag this ticket adds " +
+	"with a behavior scenario that runs the branch's tests. A host check " +
+	"only reads the owner's live state."
+
+// TestPlanningPromptsLimitHostToMain proves both planning prompts carry
+// hostBeforeMergeSentence right after hostKindSentence, and before "Quote
+// a check's glob" (#91): a host scenario may only depend on what exists
+// on the host before this ticket merges, since the installed zing and
+// the live zing serve both run main until then.
+func TestPlanningPromptsLimitHostToMain(t *testing.T) {
+	t.Parallel()
+	for _, path := range []string{planningFeaturePromptPath, planningBugPromptPath} {
+		text := unwrapped(t, path)
+		if !strings.Contains(text, hostKindSentence+" "+hostBeforeMergeSentence) {
+			t.Errorf("%s lacks the host-before-merge sentence right after the host-kind sentence", path)
+		}
+		if !strings.Contains(text, hostBeforeMergeSentence+" Quote a check's glob") {
+			t.Errorf("%s does not place the host-before-merge sentence before \"Quote a check's glob\"", path)
 		}
 	}
 }
@@ -456,6 +511,34 @@ func TestJudgePromptAmendsWrongChecks(t *testing.T) {
 		"Amend at most one scenario.",
 		"When the check is right and the code is wrong, fail the scenario instead.",
 	} {
+		if !strings.Contains(text, want) {
+			t.Errorf("prompts/judge.md lacks %q", want)
+		}
+	}
+}
+
+// judgeGovernanceSentences is what prompts/judge.md says about CLAUDE.md
+// and AGENTS.md (#225, #92): the checkout's root copies are the default
+// branch's by design, a diff in exactly those two files is expected, and
+// a check other than a host check that reads either from the working
+// copy is wrong as written.
+var judgeGovernanceSentences = []string{
+	"CLAUDE.md and AGENTS.md at the checkout root are the default branch's copies, by design, so a branch cannot write its own judge's instructions.",
+	"When the branch changed either file, the working copy differs from the branch in exactly those files; that is expected, not an environment fault.",
+	"A check, other than a host check, that reads either file from the working copy is wrong as written: return cannot_run with an amendment whose check reads the committed file with git show HEAD:FILE.",
+}
+
+// TestJudgePromptExpectsDefaultBranchGovernanceFiles proves prompts/judge.md
+// tells the judge that CLAUDE.md and AGENTS.md at the checkout root are
+// the default branch's copies by design, that a diff in exactly those
+// files is expected and not an environment fault, and that a check other
+// than a host check that reads either from the working copy is wrong as
+// written and gets cannot_run with a git show HEAD:FILE amendment (#225,
+// #92).
+func TestJudgePromptExpectsDefaultBranchGovernanceFiles(t *testing.T) {
+	t.Parallel()
+	text := unwrapped(t, "prompts/judge.md")
+	for _, want := range judgeGovernanceSentences {
 		if !strings.Contains(text, want) {
 			t.Errorf("prompts/judge.md lacks %q", want)
 		}

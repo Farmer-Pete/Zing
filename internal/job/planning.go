@@ -107,6 +107,11 @@ const (
 	escalationChoiceAbandon = "c"
 	escalationChoiceGrant   = "d"
 	escalationChoiceAccept  = "d"
+	// escalationChoiceRaiseBudget is chip d on a cap_budget wall_clock
+	// escalation (owner decision Q2): it shares the "d" key with grant and
+	// accept, which never appear on a cap_budget escalation;
+	// checkEscalationOptions rejects a duplicate key if that ever changed.
+	escalationChoiceRaiseBudget = "d"
 
 	responseInvalidWhat = "the model's final message failed validation twice in a row"
 
@@ -116,8 +121,14 @@ const (
 	runtimeExecFailedWhat = "the runtime could not complete this run"
 	runtimeExecFailedWhy  = "the process failed to start, timed out, exceeded the output cap, or exited with no parseable result"
 
-	budgetExhaustedWhat = "raise budget.agent_minutes_per_ticket or abandon"
+	budgetExhaustedWhat = "raise Agent minutes per ticket in the console's settings, raise this ticket's budget by 60 minutes, or abandon"
 	budgetExhaustedWhy  = "the ticket's spent agent time has reached the configured budget"
+
+	// budgetRaiseOptionText is chip d's text on a cap_budget wall_clock
+	// escalation. budgetRaiseMinutes is what one pick adds, stacking on top
+	// of the global budget and any earlier raise (owner decision Q2).
+	budgetRaiseOptionText = "raise this ticket's budget by 60 minutes"
+	budgetRaiseMinutes    = 60
 
 	resumesExhaustedWhatFmt = "raise machine.toml's %s max_resumes, or abandon"
 	resumesExhaustedWhyFmt  = "the %s session has resumed the maximum number of times machine.toml allows"
@@ -1025,7 +1036,10 @@ func checkReady(t store.Ticket, resp *response.ReadyResponse, fsys fs.FS) ([]*re
 // outside any sandbox (#137), so it is exempt from the /tmp and
 // nested-sandbox refusals below; it still needs a non-blank check, and it
 // still obeys the expected-skip rule. It also refuses rm -f and rm -rf in
-// every kind, since Codex refuses them (#94).
+// every kind, since Codex refuses them (#94). It also refuses a check that
+// reads the root CLAUDE.md or AGENTS.md from the working copy, in every
+// kind, since the judge's checkout holds the default branch's copies of
+// both (#225).
 func checkScenarioShape(scenarios []response.Scenario) []*response.PathError {
 	var errs []*response.PathError
 	if n := len(scenarios); n < minReadyScenarios || n > maxReadyScenarios {
@@ -1151,8 +1165,29 @@ func checkScenarioRules(i int, sc response.Scenario) []*response.PathError {
 			Msg:  unquotedGlobCheckMsg(word),
 		})
 	}
+	// The judge's checkout holds the default branch's CLAUDE.md and
+	// AGENTS.md (design D5), so a check that reads either from disk sees
+	// main's copy and fails on a correct branch (#225). Every kind, host
+	// included: host checks run in a checkout built the same way.
+	if governanceFileRead.MatchString(sc.Check) {
+		errs = append(errs, &response.PathError{
+			Path: "scenarios/" + indexedScenario(i) + "/check",
+			Msg:  governanceFileCheckMsg,
+		})
+	}
 	return errs
 }
+
+// governanceFileRead matches a check that names the root CLAUDE.md or
+// AGENTS.md as a working-copy path, bare or ./, as a command word's
+// argument or a redirect target. The judge's checkout overwrites both with
+// the default branch's copies (internal/orchestrator/judge.go,
+// judgeGovernanceFiles), so such a check reads main's file, not the
+// branch's (#225). HEAD:AGENTS.md (a colon before it) and docs/AGENTS.md
+// (a slash before it) do not match.
+var governanceFileRead = regexp.MustCompile(`(^|[\s'"<>=(;|&])(\./)?(CLAUDE|AGENTS)\.md($|[\s'"()<>;|&])`)
+
+const governanceFileCheckMsg = "check reads CLAUDE.md or AGENTS.md from the working copy, but the judge's checkout holds the default branch's copies of both; read the committed file with git show HEAD:FILE, such as git show HEAD:AGENTS.md"
 
 // proseGrep matches a grep invocation whose flags include F or q, followed
 // (before the next pipe, semicolon, or ampersand) by a single- or
@@ -2470,10 +2505,12 @@ func (h planningHandler) enterFromEscalationRound(ctx context.Context, t store.T
 	case origin == response.EscalationOriginCapLoops:
 		commit, err = resumeOrFresh(ctx, t, d, notesAndError, resolveIDs)
 
+	case origin == response.EscalationOriginCapBudget && choice == escalationChoiceRaiseBudget:
+		commit, err = retryCapBudget(ctx, t, d, resolveIDs, budgetRaiseMinutes)
 	case origin == response.EscalationOriginCapBudget:
 		// Both a and b retry once the budget has room, and re-escalate
 		// wall_clock while it does not (design section 6.7).
-		commit, err = retryCapBudget(ctx, t, d, resolveIDs)
+		commit, err = retryCapBudget(ctx, t, d, resolveIDs, 0)
 
 	default:
 		return store.HandlerCommit{}, fmt.Errorf("job: planning: escalation %d: unrecognized origin %q", escID, payload.Origin)
@@ -2544,39 +2581,51 @@ func abandonCommit(t store.Ticket, d Deps, code string) store.HandlerCommit {
 	return c
 }
 
-// recapBudgetEscalation is retryCapBudget's still-over-budget branch (design
-// section 6.7): re-escalate wall_clock in this same commit, with the
-// unchanged What/Why text budgetEscalationCommit itself uses, resolving the
-// round that led here.
-func recapBudgetEscalation(t store.Ticket, d Deps, resolveIDs []int64) store.HandlerCommit {
-	c := escalationCommit(t, d, nil, nil, string(response.EscalationCodeWallClock), budgetExhaustedWhat, budgetExhaustedWhy, "", response.EscalationOriginCapBudget)
-	c.ResolveQuestions = resolveIDs
-	return c
-}
-
-// retryCapBudget is the cap_budget retry row (design section 6.7):
-// while the ticket's agent seconds still meet d.Budget, the comparison it
-// shares with runJobWith via budgetExhausted, it re-escalates wall_clock
-// (recapBudgetEscalation). Once the owner has raised
-// budget.agent_minutes_per_ticket and restarted serve, it resolves the
-// round and writes the "retry requested" marker instead, so the next tick
-// retakes the refused call; a shipping ticket also clears its poll. Both
-// branches log at INFO, so settings.log_level warn or error drops them.
-func retryCapBudget(ctx context.Context, t store.Ticket, d Deps, resolveIDs []int64) (store.HandlerCommit, error) {
+// retryCapBudget is the cap_budget row for Retry and chip d (design section
+// 6.7): it compares the ticket's agent seconds with ticketBudget plus
+// raiseMinutes, through the budgetExhausted comparison it shares with
+// runJobWith. raiseMinutes is 0 for Retry and budgetRaiseMinutes for chip d.
+// While the ticket is still over, it re-escalates wall_clock in this same
+// commit, with the same What/Why/ExtraOptions budgetEscalationCommit itself
+// posts, resolving the round that led here (which also keeps chip d on the
+// re-escalation). Once the owner has raised Agent minutes per ticket in the
+// console's settings or picked chip d, it resolves the round and writes the
+// "retry requested" marker instead, so the next tick retakes the refused
+// call; a shipping ticket also clears its poll. When raiseMinutes is above
+// 0, either commit also carries one budget_raised event. Both branches log
+// at INFO, so settings.log_level warn or error drops them.
+func retryCapBudget(ctx context.Context, t store.Ticket, d Deps, resolveIDs []int64, raiseMinutes int) (store.HandlerCommit, error) {
 	agentSeconds, err := d.Store.AgentSecondsForTicket(ctx, t.ID)
 	if err != nil {
 		return store.HandlerCommit{}, fmt.Errorf("job: cap_budget retry: agent seconds for ticket %d: %w", t.ID, err)
 	}
-	exhausted, capSeconds := budgetExhausted(agentSeconds, d.Budget)
-	if exhausted {
-		slog.Info("cap_budget retry still over budget", "ticket_id", t.ID, "agent_seconds", agentSeconds, "cap_seconds", capSeconds)
-		return recapBudgetEscalation(t, d, resolveIDs), nil
+	budget, err := ticketBudget(ctx, d, t.ID)
+	if err != nil {
+		return store.HandlerCommit{}, fmt.Errorf("job: cap_budget retry: %w", err)
 	}
-	slog.Info("cap_budget retry resumes", "ticket_id", t.ID, "state", t.State, "agent_seconds", agentSeconds, "cap_seconds", capSeconds)
-	if t.State == stateShipping {
-		return shipRetryMarkerCommit(t, d, resolveIDs), nil
+	budget += time.Duration(raiseMinutes) * time.Minute
+	exhausted, capSeconds := budgetExhausted(agentSeconds, budget)
+	var c store.HandlerCommit
+	switch {
+	case exhausted:
+		slog.Info("cap_budget retry still over budget", "ticket_id", t.ID, "agent_seconds", agentSeconds, "cap_seconds", capSeconds, "raise_minutes", raiseMinutes)
+		c = budgetEscalationCommit(t, d, resolveIDs)
+	case t.State == stateShipping:
+		slog.Info("cap_budget retry resumes", "ticket_id", t.ID, "state", t.State, "agent_seconds", agentSeconds, "cap_seconds", capSeconds, "raise_minutes", raiseMinutes)
+		c = shipRetryMarkerCommit(t, d, resolveIDs)
+	default:
+		slog.Info("cap_budget retry resumes", "ticket_id", t.ID, "state", t.State, "agent_seconds", agentSeconds, "cap_seconds", capSeconds, "raise_minutes", raiseMinutes)
+		c = buildingHandler{}.retryMarkerCommit(t, d, resolveIDs)
 	}
-	return buildingHandler{}.retryMarkerCommit(t, d, resolveIDs), nil
+	if raiseMinutes == 0 {
+		return c, nil
+	}
+	ev, err := store.NewEvent(t.ID, store.EventKindBudgetRaised, response.BudgetRaisedEvent{Minutes: raiseMinutes})
+	if err != nil {
+		return store.HandlerCommit{}, fmt.Errorf("job: cap_budget raise: %w", err)
+	}
+	c.Messages = append(c.Messages, ev)
+	return c, nil
 }
 
 // storedPlanreviewFindings returns every finding in the planreview artifact
@@ -3494,6 +3543,10 @@ func capLoopsEscalation(t store.Ticket, d Deps, runID, sessionID *int64, tried s
 // RunID and SessionID are both nil.
 func budgetEscalationCommit(t store.Ticket, d Deps, resolveIDs []int64) store.HandlerCommit {
 	c := escalationCommit(t, d, nil, nil, string(response.EscalationCodeWallClock), budgetExhaustedWhat, budgetExhaustedWhy, "", response.EscalationOriginCapBudget)
+	// Chip d, between Retry and Abandon: Recommended stays unset, so a
+	// reply with no chip resolves as "a" (roundChoice's default) and never
+	// spends budget.
+	c.Escalation.ExtraOptions = []response.Option{{Key: escalationChoiceRaiseBudget, Text: budgetRaiseOptionText}}
 	// Resolve the answered round that triggered this run atomically with the
 	// escalation, exactly as the sibling exec/error escalations do; otherwise
 	// budget exhaustion leaves that gate or planning round open forever.

@@ -42,11 +42,20 @@ the next step.
    console. The exception is kind host. Zing runs a host scenario's check on
    the owner's machine at judging, outside any sandbox, once the owner
    approves it at the gate. Use it for a live sandbox probe, a live zing
-   serve, or wall-clock timing. A host scenario needs a check. Quote a
-   check's glob, such as --include='*.go', and join a prose file's lines
-   before a multi-word grep, such as tr -s '[:space:]' ' ' < FILE | grep -qF
-   'two words'. Done when a stranger could run every scenario and say
-   pass or fail.
+   serve, or wall-clock timing. A host scenario needs a check. A host check
+   runs in a checkout of this branch, so it may read or test any repo file
+   the plan creates. Everything else it needs must already exist on the host
+   before this ticket merges, since the installed zing and the live zing
+   serve both run main until then. Prove a binary, route, or flag this
+   ticket adds with a behavior scenario that runs the branch's tests. A host
+   check only reads the owner's live state. Quote a check's glob, such as
+   --include='*.go', and join a prose file's lines before a multi-word grep,
+   such as tr -s '[:space:]' ' ' < FILE | grep -qF 'two words'. A check
+   reads CLAUDE.md or AGENTS.md with git show HEAD:FILE, never from the
+   working copy, such as git show HEAD:AGENTS.md | tr -s '[:space:]' ' ' |
+   grep -qF 'two words', because the judge's checkout holds the default
+   branch's copies of both files. Done when a stranger could run every
+   scenario and say pass or fail.
 
 5. Cut. Find the 20 percent of the work that gives 80 percent of the
    value. That is the working demo: the smallest slice that runs end to

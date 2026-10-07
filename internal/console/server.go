@@ -135,6 +135,14 @@ type console struct {
 	// Settings view report settings are not available.
 	tuner *dispatch.Dispatcher
 
+	// slots backs the rail's stall line (ticket "Say on each ticket why it
+	// is not moving", split from #79, owner decision Q5): the running
+	// dispatcher's read-only slot snapshot, wired only through WithSlots. A
+	// nil slots (selftest, most tests) makes buildStallRail (rail.go) skip
+	// every reason that needs it: running now, a dead claim, and a full
+	// run-slot table.
+	slots SlotSource
+
 	// startedAt is when New built this console (bug fix: the Log rail's
 	// empty state read as "No log lines yet." after every `zing serve`
 	// restart, since log.go's ring is in memory and a restart always starts
@@ -308,6 +316,22 @@ type Option func(*console)
 // view reports settings are not available.
 func WithTuner(d *dispatch.Dispatcher) Option {
 	return func(c *console) { c.tuner = d }
+}
+
+// SlotSource is the dispatcher's slot snapshot as the rail's stall line
+// reads it (ticket "Say on each ticket why it is not moving", split from
+// #79, owner decision Q5): *dispatch.Dispatcher satisfies it through
+// Dispatcher.Slots, and a test passes a fake.
+type SlotSource interface {
+	Slots() dispatch.SlotSnapshot
+}
+
+// WithSlots wires the rail's stall line to s, the running dispatcher's slot
+// snapshot (owner decision Q5). Without it (selftest, most tests) the rail
+// never shows running now, a dead claim, or a full run-slot table; only
+// waiting-on-owner and CI waiting can still show.
+func WithSlots(s SlotSource) Option {
+	return func(c *console) { c.slots = s }
 }
 
 // withWriteDeadline wraps a non-streaming handler with a per-request write

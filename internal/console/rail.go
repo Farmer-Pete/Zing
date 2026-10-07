@@ -26,6 +26,7 @@ import (
 	"github.com/a-h/templ"
 
 	"zing/internal/console/templates"
+	"zing/internal/dispatch"
 	"zing/internal/response"
 	"zing/internal/store"
 )
@@ -107,8 +108,13 @@ func (c *console) buildRailModel(ctx context.Context, ticketID int64) (*template
 	if err != nil {
 		return nil, err
 	}
+	stall, err := c.buildStallRail(ctx, ticket)
+	if err != nil {
+		return nil, err
+	}
 
 	return &templates.RailModel{
+		Stall:     stall,
 		Phase:     c.buildPhaseRail(ticket),
 		Artifacts: artifacts,
 		Run:       run,
@@ -154,6 +160,88 @@ func (c *console) buildPhaseRail(ticket store.Ticket) []templates.PhaseDot {
 		dots[i] = dot
 	}
 	return dots
+}
+
+// buildStallRail builds the rail's "why is this not moving" line (ticket
+// "Say on each ticket why it is not moving", split from #79): nil for a
+// terminal ticket or a console with no machine, so the rail renders no
+// stall-reason section at all for either. Otherwise it gathers decideStall's
+// (stall.go) input and renders its result. With no SlotSource (selftest,
+// most tests) in.Slots stays nil, so decideStall's running, claim_dead, and
+// slot reasons never fire; only waiting-on-owner and CI waiting can.
+func (c *console) buildStallRail(ctx context.Context, ticket store.Ticket) (*templates.StallLine, error) {
+	if c.machine == nil || slices.Contains(c.machine.States.Terminal, ticket.State) {
+		return nil, nil //nolint:nilnil // no stall line for a terminal ticket or a console with no machine
+	}
+
+	in := stallInput{Ticket: ticket, Now: time.Now()}
+
+	if c.slots != nil {
+		snap := c.slots.Slots()
+		in.Slots = &snap
+
+		if ticket.ClaimOwner == nil {
+			candidates, err := c.store.ListReadyCandidates(ctx, c.machine.States.Terminal, in.Now)
+			if err != nil {
+				return nil, fmt.Errorf("console: rail: stall: ready candidates for ticket %d: %w", ticket.ID, err)
+			}
+			for i := range candidates {
+				if candidates[i].ID == ticket.ID {
+					in.Candidate = true
+					break
+				}
+			}
+		}
+
+		if foreignClaim(ticket, in.Slots) {
+			foreign, err := c.store.ForeignClaims(ctx, snap.Owner)
+			if err != nil {
+				return nil, fmt.Errorf("console: rail: stall: foreign claims for ticket %d: %w", ticket.ID, err)
+			}
+			for i := range foreign {
+				if foreign[i].TicketID == ticket.ID {
+					in.ClaimAlive = dispatch.ClaimProcessesAlive(foreign[i])
+					break
+				}
+			}
+		}
+	}
+
+	runs, err := c.store.RunsForTicket(ctx, ticket.ID)
+	if err != nil {
+		return nil, fmt.Errorf("console: rail: stall: runs for ticket %d: %w", ticket.ID, err)
+	}
+	in.LastRan = newestStart(runs)
+
+	if ticket.State == string(response.TicketStateShipping) {
+		markers, err := c.store.MarkersWithPrefix(ctx, ticket.ID, updateMarkerCIWaitingPrefix)
+		if err != nil {
+			return nil, fmt.Errorf("console: rail: stall: ci markers for ticket %d: %w", ticket.ID, err)
+		}
+		if len(markers) > 0 {
+			newest := markers[len(markers)-1] // MarkersWithPrefix orders by id, oldest first
+			in.CIMarker = &newest
+		}
+	}
+
+	reason, text := decideStall(in)
+	return &templates.StallLine{Reason: string(reason), Text: text, LastRan: lastRanText(in.LastRan)}, nil
+}
+
+// newestStart returns the greatest non-nil Run.StartedAt among runs, or nil
+// when none has started yet (review fix: named apart from buildStallRail's
+// own loop, rather than one three-term nil-guarded boolean inline there).
+func newestStart(runs []store.Run) *time.Time {
+	var newest *time.Time
+	for _, r := range runs {
+		if r.StartedAt == nil {
+			continue
+		}
+		if newest == nil || r.StartedAt.After(*newest) {
+			newest = r.StartedAt
+		}
+	}
+	return newest
 }
 
 // buildArtifactsRail groups ticketID's artifacts by type into the mock's

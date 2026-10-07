@@ -1,0 +1,15 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "properties": {
+    "minutes": {
+      "type": "integer",
+      "maximum": 525600,
+      "minimum": 1
+    }
+  },
+  "additionalProperties": false,
+  "type": "object",
+  "required": [
+    "minutes"
+  ]
+}
