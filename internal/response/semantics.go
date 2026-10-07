@@ -381,7 +381,8 @@ var findingLocationPattern = regexp.MustCompile(`^(.+):([1-9]\d*)$`)
 // same distinction).
 func checkReviewFindingsShape(findings []Finding, present map[string]bool) []*PathError {
 	var errs []*PathError
-	for i, f := range findings {
+	for i := range findings {
+		f := &findings[i]
 		locPath := indexedName("finding", i) + "/location"
 		if present[locPath] && !findingLocationPattern.MatchString(f.Location) {
 			errs = append(errs, &PathError{Path: locPath, Msg: "must be path:line with line >= 1"})

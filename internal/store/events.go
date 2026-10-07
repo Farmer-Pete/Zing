@@ -29,6 +29,10 @@ const EventKindCheckRerunPassed = "check_rerun_passed"
 // to a sealed scenario, a sealed plan's task, or the ticket body.
 const EventKindOwnerEdit = "owner_edit"
 
+// EventKindStaleBase names the stale_base event kind: a step that used
+// the last fetched base because the fetch failed, once per step and sha.
+const EventKindStaleBase = "stale_base"
+
 // EventFilter narrows Events and CountEvents beyond ticket and kind.
 type EventFilter struct {
 	RunID *int64 // nil: any run

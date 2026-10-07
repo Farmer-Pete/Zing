@@ -495,6 +495,36 @@
         "alternatives",
         "risks"
       ]
+    },
+    "dispositions": {
+      "items": {
+        "properties": {
+          "finding": {
+            "type": "string",
+            "pattern": "^p[0-9]+-f[0-9]+$"
+          },
+          "kind": {
+            "type": "string",
+            "enum": [
+              "fixed",
+              "disputed"
+            ]
+          },
+          "path": {
+            "type": "string"
+          },
+          "reason": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "finding",
+          "kind"
+        ]
+      },
+      "type": "array"
     }
   },
   "additionalProperties": false,

@@ -121,9 +121,6 @@ const (
 	resumesExhaustedWhatFmt = "raise machine.toml's %s max_resumes, or abandon"
 	resumesExhaustedWhyFmt  = "the %s session has resumed the maximum number of times machine.toml allows"
 
-	splitUnsupportedWhat = "the plan says this ticket should be split into several tickets, which Zing does not yet build"
-	splitUnsupportedWhy  = "the planning run returned a children outcome"
-
 	// nothingToDoNoCodeClaimsWhat is section 6.8's own nothing_to_do
 	// escalation What text (task 8, tightened by F022): response.Validate's
 	// CheckNothingToDoClaims already rejects any nothing_to_do response
@@ -382,6 +379,8 @@ func (h planningHandler) enterFromRound(ctx context.Context, t store.Ticket, d D
 	switch {
 	case qp.Kind == response.QuestionKindGate:
 		return h.enterFromGateRound(ctx, t, d, round)
+	case qp.Kind == response.QuestionKindSplit:
+		return h.enterFromSplitRound(ctx, t, d, round)
 	case newest.ParentID != nil:
 		// The newest question's own parent id, not round.ParentID: a
 		// run-caused escalation's linked question carries the same run_id
@@ -748,8 +747,9 @@ func priorInvalidReason(ctx context.Context, d Deps, ticketID, sessionID, before
 // section 6.8, 22.2, 22.4), shared by the first turn and the resume:
 // questions and error are the same universal handling classify uses;
 // replies is D31's own thread-only outcome; ready is section 6.5's real
-// cohort check and store; children escalates split_unsupported (design
-// D6); nothing_to_do is nothingToDoCommit's own accept-or-escalate check
+// cohort check and store; children is childrenCommit, which stores the
+// children artifact and posts the split question (split.go);
+// nothing_to_do is nothingToDoCommit's own accept-or-escalate check
 // (task 8). Every outcome but error can carry <replies> (design section
 // 22.2): when the response does, checkConversation runs first against conv
 // (the same PlanningConversation its caller already read to build this
@@ -780,11 +780,7 @@ func planningSuccessCommit(ctx context.Context, t store.Ticket, d Deps, rr runRe
 	case *response.ReadyResponse:
 		c, err = readyCommit(ctx, t, d, rr, r, sessionCommit, resolveIDs)
 	case *response.ChildrenResponse:
-		c = escalationCommit(t, d, &rr.Reserved.RunID, &rr.Reserved.SessionID,
-			string(response.EscalationCodeSplitUnsupported), splitUnsupportedWhat, splitUnsupportedWhy, "", response.EscalationOriginSplit)
-		c.Runs = terminalRuns(rr, string(response.OutcomeChildren))
-		c.Session = sessionCommit
-		c.ResolveQuestions = resolveIDs
+		c, err = childrenCommit(t, d, rr, r, sessionCommit, resolveIDs)
 	case *response.NothingToDoResponse:
 		c, err = nothingToDoCommit(t, d, rr, r, sessionCommit, resolveIDs)
 	case *response.ErrorResponse:
@@ -933,7 +929,19 @@ func readyCommit(ctx context.Context, t store.Ticket, d Deps, rr runResult, resp
 	if err != nil {
 		return store.HandlerCommit{}, fmt.Errorf("job: planning: ready: %w", err)
 	}
+	required, err := dispositionsRequired(ctx, t, d)
+	if err != nil {
+		return store.HandlerCommit{}, fmt.Errorf("job: planning: ready: %w", err)
+	}
+	planXML, err := planXMLFor(resp.Plan)
+	if err != nil {
+		return store.HandlerCommit{}, fmt.Errorf("job: planning: ready: %w", err)
+	}
+	dispositionErrs := checkDispositions(required, resp.Plan.Dispositions, []byte(planXML))
+	errs = append(errs, dispositionErrs...)
 	if len(errs) > 0 {
+		slog.Info("ready plan rejected", "ticket_id", t.ID, "run_id", rr.Reserved.RunID,
+			"error_count", len(errs), "disposition_error_count", len(dispositionErrs), "required_count", len(required))
 		c.Messages = []store.Message{{
 			TicketID: t.ID, Type: msgTypeUpdate, Author: authorSystem,
 			Body: fmt.Sprintf("%s run %d\n%s", validationErrorsPendingPrefix, rr.Reserved.RunID, formatReadyErrors(errs)),
@@ -956,6 +964,18 @@ func readyCommit(ctx context.Context, t store.Ticket, d Deps, rr runResult, resp
 		planVersion = cohort.PlanVersion + 1
 	}
 	slog.Info("artifacts stored", "ticket_id", t.ID, "run_id", rr.Reserved.RunID, "plan_version", planVersion, "scenario_count", len(resp.Scenarios))
+
+	questions, err := disputeQuestionMessages(t.ID, required, resp.Plan.Dispositions)
+	if err != nil {
+		return store.HandlerCommit{}, fmt.Errorf("job: planning: ready: %w", err)
+	}
+	if len(questions) > 0 {
+		c.Messages = questions
+		c.AttachRunToMsgs = true
+		waiting := waitingFlagQuestions
+		c.Waiting = &waiting
+		slog.Info("disputed findings posted", "ticket_id", t.ID, "run_id", rr.Reserved.RunID, "count", len(questions))
+	}
 	return c, nil
 }
 
@@ -1467,13 +1487,13 @@ func maybeResumeFloorFindings(ctx context.Context, t store.Ticket, d Deps, sess 
 	if unmarshalErr := json.Unmarshal(review.Payload, &payload); unmarshalErr != nil {
 		return store.HandlerCommit{}, false, fmt.Errorf("job: planning: unmarshal planreview artifact: %w", unmarshalErr)
 	}
-	atOrBelow := make([]response.Finding, 0, len(payload.Findings))
-	for _, f := range payload.Findings {
-		if f.Severity.Rank() <= d.Floor.Rank() {
-			atOrBelow = append(atOrBelow, f)
+	atOrBelow := 0
+	for i := range payload.Findings {
+		if payload.Findings[i].Severity.Rank() <= d.Floor.Rank() {
+			atOrBelow++
 		}
 	}
-	above := len(payload.Findings) - len(atOrBelow)
+	above := len(payload.Findings) - atOrBelow
 
 	n, err := d.Store.CountDeliveredReviews(ctx, t.ID)
 	if err != nil {
@@ -1510,7 +1530,7 @@ func maybeResumeFloorFindings(ctx context.Context, t store.Ticket, d Deps, sess 
 			commit.Messages = append(commit.Messages, store.Message{
 				TicketID: t.ID, Type: msgTypeUpdate, Author: authorSystem, Body: gateCapMarker(cohort.PlanVersion),
 			})
-			slog.Info("gate posted at loop cap", "ticket_id", t.ID, "plan_version", cohort.PlanVersion, "floor_findings", len(atOrBelow))
+			slog.Info("gate posted at loop cap", "ticket_id", t.ID, "plan_version", cohort.PlanVersion, "floor_findings", atOrBelow)
 			return commit, true, nil
 		}
 		c := escalationCommit(t, d, nil, nil,
@@ -1520,10 +1540,16 @@ func maybeResumeFloorFindings(ctx context.Context, t store.Ticket, d Deps, sess 
 		return c, true, nil
 	}
 
-	commit, err = runPlanningResume(ctx, t, d, sess, nil, []prompt.NamedInput{prompt.Findings(renderFindings(atOrBelow))}, 0, true)
+	commit, err = runPlanningResume(ctx, t, d, sess, nil, floorResumeInputs(payload.Findings, d.Floor), 0, true)
 	if err != nil {
 		return commit, true, err
 	}
+	var runID int64
+	if len(commit.Runs) == 1 {
+		runID = commit.Runs[0].ID
+	}
+	slog.Info("floor findings delivered", "ticket_id", t.ID, "run_id", runID, "plan_version", cohort.PlanVersion,
+		"at_or_below", atOrBelow, "needs_disposition", above)
 	commit.Messages = append(commit.Messages, store.Message{
 		TicketID: t.ID, Type: msgTypeUpdate, Author: authorSystem, Body: delivered,
 	})
@@ -1561,6 +1587,17 @@ func runPlanReview(ctx context.Context, t store.Ticket, d Deps, extra []prompt.N
 	}
 	if n == 1 {
 		inputs = append(inputs, prompt.Invalid(invalidRetryText(reason)))
+	}
+
+	prev, prevDispositions, err := previousReview(ctx, d, t.ID, cohort.PlanVersion)
+	if err != nil {
+		return store.HandlerCommit{}, err
+	}
+	if len(prev) > 0 {
+		inputs = append(inputs, prompt.NamedInput{Label: previousFindingsLabel, Text: renderFindings(prev), Untrusted: true})
+	}
+	if len(prevDispositions) > 0 {
+		inputs = append(inputs, prompt.NamedInput{Label: previousDispositionsLabel, Text: renderDispositions(prevDispositions), Untrusted: true})
 	}
 
 	jobCfg := d.Machine.Jobs[jobPlanreviewName]
@@ -1615,7 +1652,7 @@ func runPlanReview(ctx context.Context, t store.Ticket, d Deps, extra []prompt.N
 	req := runtime.RunRequest{Job: response.JobPlanreview, Prompt: assembled}
 	return runAndRoute(ctx, d, t, jobPlanreviewName, su, req, n, freshSessionRecord, resolveIDs, response.EscalationOriginPlanreview,
 		func(rr runResult) (store.HandlerCommit, error) {
-			return planReviewSuccessCommit(ctx, t, d, rr, cohort, plan, planXML, freshSessionRecord(rr), resolveIDs)
+			return planReviewSuccessCommit(ctx, t, d, rr, cohort, plan, planXML, prev, prevDispositions, freshSessionRecord(rr), resolveIDs)
 		}, nil, 0)
 }
 
@@ -1626,14 +1663,14 @@ func runPlanReview(ctx context.Context, t store.Ticket, d Deps, extra []prompt.N
 // (already unmarshaled by the caller, runPlanReview, to render planXML), so
 // a clean review's gate post (design section 6.6) can read its objective
 // without a second store round trip.
-func planReviewSuccessCommit(ctx context.Context, t store.Ticket, d Deps, rr runResult, cohort store.Cohort, plan response.Plan, planXML string, sessionCommit *store.SessionUpsert, resolveIDs []int64) (store.HandlerCommit, error) {
+func planReviewSuccessCommit(ctx context.Context, t store.Ticket, d Deps, rr runResult, cohort store.Cohort, plan response.Plan, planXML string, prev []response.Finding, prevDispositions []response.Disposition, sessionCommit *store.SessionUpsert, resolveIDs []int64) (store.HandlerCommit, error) {
 	switch resp := rr.Res.Response.(type) {
 	case *response.QuestionResponse:
 		return questionOutcomeCommit(t, d, rr, resp.Questions, sessionCommit, resolveIDs)
 	case *response.ErrorResponse:
 		return errorOutcomeCommit(t, d, rr, resp, sessionCommit, resolveIDs, response.EscalationOriginPlanreview), nil
 	case *response.FindingsResponse:
-		return planReviewOkCommit(ctx, t, d, rr, resp, cohort, plan, planXML, sessionCommit, resolveIDs)
+		return planReviewOkCommit(ctx, t, d, rr, resp, cohort, plan, planXML, prev, prevDispositions, sessionCommit, resolveIDs)
 	default:
 		return store.HandlerCommit{}, fmt.Errorf("job: planreview: outcome %s not handled", rr.Res.Response.Header().Outcome)
 	}
@@ -1648,27 +1685,34 @@ func planReviewSuccessCommit(ctx context.Context, t store.Ticket, d Deps, rr run
 // (design section 6.6's "Post" step, task 7c); otherwise this writes the
 // "planreview vN pending" marker and leaves the ticket in planning, not
 // waiting, for entry step 7 to pick up.
-func planReviewOkCommit(ctx context.Context, t store.Ticket, d Deps, rr runResult, resp *response.FindingsResponse, cohort store.Cohort, plan response.Plan, planXML string, sessionCommit *store.SessionUpsert, resolveIDs []int64) (store.HandlerCommit, error) {
+func planReviewOkCommit(ctx context.Context, t store.Ticket, d Deps, rr runResult, resp *response.FindingsResponse, cohort store.Cohort, plan response.Plan, planXML string, prev []response.Finding, prevDispositions []response.Disposition, sessionCommit *store.SessionUpsert, resolveIDs []int64) (store.HandlerCommit, error) {
 	kept := make([]response.Finding, 0, len(resp.Findings))
 	dropped := 0
-	for _, f := range resp.Findings {
-		if !response.ResolvesInPlan([]byte(planXML), f.Location) {
+	for i := range resp.Findings {
+		if !response.ResolvesInPlan([]byte(planXML), resp.Findings[i].Location) {
 			dropped++
 			continue
 		}
-		kept = append(kept, f)
+		kept = append(kept, resp.Findings[i])
 	}
+	for i := range kept {
+		kept[i].ID = fmt.Sprintf("p%d-f%d", cohort.PlanVersion, i+1)
+	}
+	markReopened(kept, prev, prevDispositions, d.Floor)
 
-	var atOrBelow, above int
-	for _, f := range kept {
-		if f.Severity.Rank() <= d.Floor.Rank() {
+	var atOrBelow, above, reopened int
+	for i := range kept {
+		if kept[i].Severity.Rank() <= d.Floor.Rank() {
 			atOrBelow++
 		} else {
 			above++
 		}
+		if kept[i].Reopens != "" {
+			reopened++
+		}
 	}
 	slog.Info("floor split", "ticket_id", t.ID, "run_id", rr.Reserved.RunID, "floor", string(d.Floor),
-		"at_or_below", atOrBelow, "above", above, "dropped_unresolved", dropped)
+		"at_or_below", atOrBelow, "above", above, "dropped_unresolved", dropped, "reopened", reopened)
 
 	payload, err := json.Marshal(planreviewArtifactPayload{Findings: kept})
 	if err != nil {
@@ -1762,10 +1806,81 @@ func renderScenariosForReview(artifacts []store.Artifact) (string, error) {
 // section 6.3, 6.4).
 func renderFindings(findings []response.Finding) string {
 	lines := make([]string, len(findings))
-	for i, f := range findings {
-		lines[i] = fmt.Sprintf("[%s/%s] %s: %s (fix: %s)", f.Lens, f.Severity, f.Location, f.Text, f.Fix)
+	for i := range findings {
+		f := &findings[i]
+		line := fmt.Sprintf("[%s/%s] %s: %s (fix: %s)", f.Lens, f.Severity, f.Location, f.Text, f.Fix)
+		if f.ID != "" {
+			line = f.ID + " " + line
+		}
+		switch {
+		case f.Reopens != "" && f.ReopensAfter == reopensAfterFixed:
+			line += fmt.Sprintf(" (raised again: %s was marked fixed)", f.Reopens)
+		case f.Reopens != "":
+			line += fmt.Sprintf(" (raised again: %s got no disposition)", f.Reopens)
+		}
+		lines[i] = line
 	}
 	return strings.Join(lines, "\n")
+}
+
+// renderDispositions renders dispositions one per line -- finding id, kind,
+// then the fixed path or the disputed reason -- the review tick fences
+// behind previousDispositionsLabel.
+func renderDispositions(ds []response.Disposition) string {
+	lines := make([]string, len(ds))
+	for i, disp := range ds {
+		detail := disp.Path
+		if disp.Kind == response.DispositionDisputed {
+			detail = disp.Reason
+		}
+		lines[i] = fmt.Sprintf("%s %s: %s", disp.Finding, disp.Kind, detail)
+	}
+	return strings.Join(lines, "\n")
+}
+
+// needsDispositionLabel is the fenced input carrying above-floor findings a
+// planning resume delivers; the planner must answer each with a disposition
+// of fixed or disputed (ticket 72, task 2 on).
+const needsDispositionLabel = "needs_disposition"
+
+// previousFindingsLabel and previousDispositionsLabel fence the plan
+// review's own inputs about the last review below the version under review
+// and what the plan did about each of its findings (ticket 72 task 3).
+const (
+	previousFindingsLabel     = "previous_findings"
+	previousDispositionsLabel = "previous_dispositions"
+)
+
+// reopensAfterFixed and reopensAfterNoDisposition are Finding.ReopensAfter's
+// two values: what the plan did with the earlier, same-location finding a
+// new above-floor finding raises again (ticket 72 task 3, owner decision Q3).
+const (
+	reopensAfterFixed         = "fixed"
+	reopensAfterNoDisposition = "no_disposition"
+)
+
+// floorResumeInputs splits findings at floor into the fenced inputs a
+// planning resume carries: "findings" for the at-or-below-floor survivors
+// and "needs_disposition" for the above-floor ones (owner decision Q1 on
+// ticket 72: every above-floor finding, whatever the floor, goes back to the
+// planner). Either side is left out of the result when it is empty.
+func floorResumeInputs(findings []response.Finding, floor response.Severity) []prompt.NamedInput {
+	var atOrBelow, above []response.Finding
+	for i := range findings {
+		if findings[i].Severity.Rank() <= floor.Rank() {
+			atOrBelow = append(atOrBelow, findings[i])
+		} else {
+			above = append(above, findings[i])
+		}
+	}
+	var inputs []prompt.NamedInput
+	if len(atOrBelow) > 0 {
+		inputs = append(inputs, prompt.Findings(renderFindings(atOrBelow)))
+	}
+	if len(above) > 0 {
+		inputs = append(inputs, prompt.NamedInput{Label: needsDispositionLabel, Text: renderFindings(above), Untrusted: true})
+	}
+	return inputs
 }
 
 // gateFindingTextMaxRunes caps each finding's text on the owner-chose gate
@@ -1778,7 +1893,8 @@ const gateFindingTextMaxRunes = 200
 // no findings.
 func renderGateFindings(findings []response.Finding) string {
 	lines := make([]string, len(findings))
-	for i, f := range findings {
+	for i := range findings {
+		f := &findings[i]
 		text := []rune(strings.Join(strings.Fields(f.Text), " "))
 		if len(text) > gateFindingTextMaxRunes {
 			text = text[:gateFindingTextMaxRunes]
@@ -1918,7 +2034,7 @@ func gateRejectExtra(ctx context.Context, t store.Ticket, d Deps, notes string) 
 	if err != nil {
 		return nil, err
 	}
-	return []prompt.NamedInput{prompt.Findings(renderFindings(findings)), prompt.Notes(notes)}, nil
+	return append(floorResumeInputs(findings, d.Floor), prompt.Notes(notes)), nil
 }
 
 // rejectedGateWasCapped reports whether the current cohort's exact plan
@@ -2151,11 +2267,11 @@ func (h planningHandler) enterFromEscalationRound(ctx context.Context, t store.T
 	case capLoops && choice == escalationChoiceAccept:
 		commit, err = acceptPlanAtCap(ctx, t, d, resolveIDs)
 	case origin == response.EscalationOriginCapLoops && choice == escalationChoiceRetry:
-		findings, findErr := outstandingFloorFindings(ctx, t, d)
+		findings, findErr := storedPlanreviewFindings(ctx, t, d)
 		if findErr != nil {
 			return store.HandlerCommit{}, findErr
 		}
-		commit, err = resumeOrFresh(ctx, t, d, []prompt.NamedInput{prompt.Findings(renderFindings(findings)), prompt.Notes(notes)}, resolveIDs)
+		commit, err = resumeOrFresh(ctx, t, d, append(floorResumeInputs(findings, d.Floor), prompt.Notes(notes)), resolveIDs)
 	case origin == response.EscalationOriginCapLoops:
 		commit, err = resumeOrFresh(ctx, t, d, notesAndError, resolveIDs)
 
@@ -2293,26 +2409,215 @@ func storedPlanreviewFindings(ctx context.Context, t store.Ticket, d Deps) ([]re
 	return payload.Findings, nil
 }
 
-// outstandingFloorFindings reads the current cohort's planreview artifact
-// and returns its at-or-below-floor survivors (design section 6.7's
-// cap_loops retry row): the same set maybeResumeFloorFindings itself
-// resumes with (section 5.1 step 7), independent of whether that step's own
-// "live pending marker" check would still find one live -- choosing retry on
-// the cap_loops escalation is itself the trigger. nil, nil when there is no
-// cohort or no planreview artifact at its version yet (unreachable in
-// practice: a cap_loops escalation cannot exist without one).
-func outstandingFloorFindings(ctx context.Context, t store.Ticket, d Deps) ([]response.Finding, error) {
+// previousReview returns the findings of ticketID's newest planreview
+// artifact below version, and the dispositions of the plan stored at that
+// review's version plus one -- the plan that answered it; all nil, nil when
+// no review exists below version (ticket 72 task 3). runPlanReview calls
+// this once per review run and threads the result through its success
+// closure into planReviewOkCommit, so a review's own inputs and its reopens
+// marking come from the same read.
+func previousReview(ctx context.Context, d Deps, ticketID int64, version int) ([]response.Finding, []response.Disposition, error) {
+	all, err := d.Store.ListArtifacts(ctx, ticketID)
+	if err != nil {
+		return nil, nil, fmt.Errorf("job: planreview: previous review: %w", err)
+	}
+	var review *store.Artifact
+	for i := range all {
+		a := &all[i]
+		below := a.Type == artifactTypePlanreview && a.Version < version
+		newer := review == nil || a.Version > review.Version
+		if below && newer {
+			review = a
+		}
+	}
+	if review == nil {
+		return nil, nil, nil
+	}
+	var payload planreviewArtifactPayload
+	if unmarshalErr := json.Unmarshal(review.Payload, &payload); unmarshalErr != nil {
+		return nil, nil, fmt.Errorf("job: planreview: unmarshal planreview artifact v%d: %w", review.Version, unmarshalErr)
+	}
+	for i := range all {
+		if all[i].Type != artifactTypePlan || all[i].Version != review.Version+1 {
+			continue
+		}
+		var plan response.Plan
+		if unmarshalErr := json.Unmarshal(all[i].Payload, &plan); unmarshalErr != nil {
+			return nil, nil, fmt.Errorf("job: planreview: unmarshal plan artifact v%d: %w", all[i].Version, unmarshalErr)
+		}
+		return payload.Findings, plan.Dispositions, nil
+	}
+	return payload.Findings, nil, nil
+}
+
+// markReopened sets Reopens and ReopensAfter on each above-floor finding in
+// findings that is raised at the exact location of a previous above-floor
+// finding (in prev) the plan marked fixed or left without a disposition; a
+// disputed match never counts (owner decision Q3 on ticket 72: Zing matches
+// on exact location and an above-floor severity, never on the reviewer
+// naming the earlier id).
+func markReopened(findings, prev []response.Finding, ds []response.Disposition, floor response.Severity) {
+	kinds := make(map[string]response.DispositionKind, len(ds))
+	for _, disp := range ds {
+		kinds[disp.Finding] = disp.Kind
+	}
+	for i := range findings {
+		if findings[i].Severity.Rank() <= floor.Rank() {
+			continue
+		}
+		for j := range prev {
+			p := &prev[j]
+			sameSpot := p.ID != "" && p.Severity.Rank() > floor.Rank() && p.Location == findings[i].Location
+			kind := kinds[p.ID]
+			if !sameSpot || kind == response.DispositionDisputed {
+				continue
+			}
+			findings[i].Reopens = p.ID
+			findings[i].ReopensAfter = reopensAfterNoDisposition
+			if kind == response.DispositionFixed {
+				findings[i].ReopensAfter = reopensAfterFixed
+			}
+			break
+		}
+	}
+}
+
+// dispositionsRequired returns the above-floor findings, with ids, of the
+// current cohort's planreview artifact when a floor loop started for that
+// version (its pending marker exists); nil, nil when there is no cohort or
+// no loop started. It does not depend on which path produced the ready
+// plan: the pending marker, not the delivered one, is the one source
+// readyCommit can read regardless of whether maybeResumeFloorFindings,
+// gateRejectExtra, or the cap_loops retry produced this turn's resume.
+func dispositionsRequired(ctx context.Context, t store.Ticket, d Deps) ([]response.Finding, error) {
+	cohort, ok, err := d.Store.CurrentCohort(ctx, t.ID)
+	if err != nil {
+		return nil, fmt.Errorf("job: planning: dispositions required: current cohort: %w", err)
+	}
+	if !ok {
+		return nil, nil
+	}
+	_, looped, err := d.Store.Marker(ctx, t.ID, planreviewPendingMarker(cohort.PlanVersion))
+	if err != nil {
+		return nil, fmt.Errorf("job: planning: dispositions required: pending marker: %w", err)
+	}
+	if !looped {
+		return nil, nil
+	}
 	findings, err := storedPlanreviewFindings(ctx, t, d)
 	if err != nil {
 		return nil, err
 	}
-	atOrBelow := make([]response.Finding, 0, len(findings))
-	for _, f := range findings {
-		if f.Severity.Rank() <= d.Floor.Rank() {
-			atOrBelow = append(atOrBelow, f)
+	var required []response.Finding
+	for i := range findings {
+		if findings[i].Severity.Rank() > d.Floor.Rank() && findings[i].ID != "" {
+			required = append(required, findings[i])
 		}
 	}
-	return atOrBelow, nil
+	return required, nil
+}
+
+// checkDispositions checks a ready plan's dispositions against required:
+// one valid entry per required finding, none for any other id (design
+// section 6.5, ticket 72 task 2). The default kind branch is defensive:
+// Layer 1 (response.validate.go's Values enum check) already rejects an
+// unknown DispositionKind as invalid output before this runs; only
+// TestCheckDispositions, calling this directly, reaches it.
+func checkDispositions(required []response.Finding, ds []response.Disposition, planXML []byte) []*response.PathError {
+	byID := make(map[string]response.Finding, len(required))
+	for i := range required {
+		byID[required[i].ID] = required[i]
+	}
+	var errs []*response.PathError
+	seen := make(map[string]bool, len(ds))
+	for i, disp := range ds {
+		path := fmt.Sprintf("plan/dispositions/disposition[%d]", i+1)
+		if _, ok := byID[disp.Finding]; !ok {
+			errs = append(errs, &response.PathError{Path: path, Msg: fmt.Sprintf("finding %s was not in the needs_disposition input; remove this disposition", disp.Finding)})
+			continue
+		}
+		if seen[disp.Finding] {
+			errs = append(errs, &response.PathError{Path: path, Msg: fmt.Sprintf("finding %s already has a disposition; keep one", disp.Finding)})
+			continue
+		}
+		seen[disp.Finding] = true
+		switch disp.Kind {
+		case response.DispositionFixed:
+			if disp.Path == "" {
+				errs = append(errs, &response.PathError{Path: path, Msg: "a fixed disposition names the plan element path you changed"})
+			} else if !response.ResolvesInPlan(planXML, disp.Path) {
+				errs = append(errs, &response.PathError{Path: path, Msg: fmt.Sprintf("path %s does not resolve in this plan", disp.Path)})
+			}
+		case response.DispositionDisputed:
+			if strings.TrimSpace(disp.Reason) == "" {
+				errs = append(errs, &response.PathError{Path: path, Msg: "a disputed disposition gives the reason the finding is wrong"})
+			}
+		default:
+			errs = append(errs, &response.PathError{Path: path, Msg: fmt.Sprintf("kind %q must be fixed or disputed", disp.Kind)})
+		}
+	}
+	for i := range required {
+		f := &required[i]
+		if !seen[f.ID] {
+			errs = append(errs, &response.PathError{Path: "plan/dispositions", Msg: fmt.Sprintf(
+				"finding %s (%s at %s: %s) needs a disposition: fixed with the path you changed, or disputed with a reason",
+				f.ID, f.Severity, f.Location, f.Text)})
+		}
+	}
+	return errs
+}
+
+// disputeOptionKeep and disputeOptionChange are the fixed Keep/Change chip
+// texts a dispute question offers the owner (ticket 72 task 4, owner
+// decision Q4), the same shape as gateQuestionMessage's Approve/Reject
+// pair above.
+const (
+	disputeOptionKeep   = "Keep the plan: the planner's reason holds"
+	disputeOptionChange = "Change the plan: the finding stands"
+)
+
+// disputeQuestionMessages builds one open planning question per disputed
+// disposition in ds, in plan order, each naming the finding it disputes
+// (design section 6.5, ticket 72 task 4). Key is left empty for
+// CommitHandlerResult's own fillQuestionKeyTx to allocate, the same
+// convention questionMessagesFor and gateQuestionMessage use. Recommended
+// is "b" (change the plan), since an above-floor finding stands unless the
+// owner agrees with the planner's reason. required is dispositionsRequired's
+// result for this same ready plan, so byID always has an entry for every
+// disputed finding reaching here: checkDispositions has already rejected
+// any disposition naming an id outside required.
+func disputeQuestionMessages(ticketID int64, required []response.Finding, ds []response.Disposition) ([]store.Message, error) {
+	byID := make(map[string]response.Finding, len(required))
+	for i := range required {
+		byID[required[i].ID] = required[i]
+	}
+	var msgs []store.Message
+	for _, disp := range ds {
+		if disp.Kind != response.DispositionDisputed {
+			continue
+		}
+		f := byID[disp.Finding]
+		payload, err := json.Marshal(response.QuestionPayload{
+			Kind:        response.QuestionKindQuestion,
+			State:       response.QuestionStateOpen,
+			Recommended: "b",
+			Options: []response.Option{
+				{Key: "a", Text: disputeOptionKeep},
+				{Key: "b", Text: disputeOptionChange},
+			},
+		})
+		if err != nil {
+			return nil, fmt.Errorf("job: marshal dispute question %s: %w", disp.Finding, err)
+		}
+		body := fmt.Sprintf(
+			"Plan review finding %s is disputed\n\nThe reviewer raised this %s finding at %s:\n\n%s\n\nSuggested fix: %s\n\nThe planner disputes it:\n\n%s",
+			f.ID, f.Severity, f.Location, f.Text, f.Fix, disp.Reason)
+		msgs = append(msgs, store.Message{
+			TicketID: ticketID, Type: msgTypeQuestion, Author: authorZing,
+			State: new(questionStateOpen), Body: body, Payload: payload,
+		})
+	}
+	return msgs, nil
 }
 
 // resolveCapResumesEscalation is section 6.7's cap_resumes retry/back row

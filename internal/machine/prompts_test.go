@@ -38,7 +38,7 @@ func TestPrompts_MatchThePinnedDesignText(t *testing.T) {
 		{
 			name:   "planreview",
 			path:   "prompts/planreview.md",
-			sha256: "7eceaab2061d7c45cba821969aec91b736d019491efa1bcce2e1d73d26d79221",
+			sha256: "1dcc4f65fcb2e0c85c4e375c00caca934ca4d6d8f589db0e8ca5fe27e4d5495c",
 		},
 		{
 			name:   testJobNameBuild,

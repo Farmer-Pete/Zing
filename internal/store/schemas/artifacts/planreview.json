@@ -49,6 +49,21 @@
               "drop",
               "discuss"
             ]
+          },
+          "id": {
+            "type": "string",
+            "pattern": "^p[0-9]+-f[0-9]+$"
+          },
+          "reopens": {
+            "type": "string",
+            "pattern": "^p[0-9]+-f[0-9]+$"
+          },
+          "reopens_after": {
+            "type": "string",
+            "enum": [
+              "fixed",
+              "no_disposition"
+            ]
           }
         },
         "additionalProperties": false,

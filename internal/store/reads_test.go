@@ -169,9 +169,9 @@ func TestListReadyCandidates_ExcludesClaimedWaitingAndTerminal(t *testing.T) {
 	if err != nil {
 		t.Fatalf("InsertTicket(done): %v", err)
 	}
-	setTicketState(t, s, done, "done")
+	setTicketState(t, s, done, ticketStateDone)
 
-	got, err := s.ListReadyCandidates(ctx, []string{"done", "escalated", "abandoned"}, time.Now())
+	got, err := s.ListReadyCandidates(ctx, []string{ticketStateDone, "escalated", "abandoned"}, time.Now())
 	if err != nil {
 		t.Fatalf("ListReadyCandidates: %v", err)
 	}
@@ -890,5 +890,139 @@ func TestGetMessage_RoundTrips(t *testing.T) {
 	}
 	if got.TicketID != ticketID || got.Body != testBodyProgress || got.Type != testTypeUpdate {
 		t.Errorf("GetMessage = %+v, want ticket %d, body progress, type update", got, ticketID)
+	}
+}
+
+// insertDependency inserts a ticket_dependencies row directly: a fixture
+// setup, not the code under test (applySplitChildTx, commit.go, is the
+// production write path).
+func insertDependency(t *testing.T, s *Store, ticketID, dependsOnTicketID int64) {
+	t.Helper()
+	if _, err := s.db.ExecContext(t.Context(),
+		`INSERT INTO ticket_dependencies (ticket_id, depends_on_ticket_id) VALUES (?, ?)`,
+		ticketID, dependsOnTicketID); err != nil {
+		t.Fatalf("insert ticket_dependencies: %v", err)
+	}
+}
+
+// TestListReadyCandidates_HoldsTicketUntilDependenciesDone proves
+// ListReadyCandidates' dependency hold clause (#74, owner decision Q2): a
+// queued ticket with a dependency that is not done is never a candidate,
+// whatever that dependency's own state, including abandoned (owner
+// decision Q3); once the dependency reaches done, the ticket is a
+// candidate again. A ticket with no dependency rows is unaffected.
+func TestListReadyCandidates_HoldsTicketUntilDependenciesDone(t *testing.T) {
+	t.Parallel()
+	s := newTestStore(t)
+	ctx := t.Context()
+	projectID, err := s.EnsureProject(ctx, testProject)
+	if err != nil {
+		t.Fatalf("EnsureProject: %v", err)
+	}
+
+	unaffected, err := s.InsertTicket(ctx, Ticket{ProjectID: projectID, TrackerRef: "1", Title: "unaffected", State: ticketStateQueued})
+	if err != nil {
+		t.Fatalf("InsertTicket(unaffected): %v", err)
+	}
+	dep, err := s.InsertTicket(ctx, Ticket{ProjectID: projectID, TrackerRef: "2", Title: "dep", State: ticketStateQueued})
+	if err != nil {
+		t.Fatalf("InsertTicket(dep): %v", err)
+	}
+	held, err := s.InsertTicket(ctx, Ticket{ProjectID: projectID, TrackerRef: "3", Title: "held", State: ticketStateQueued})
+	if err != nil {
+		t.Fatalf("InsertTicket(held): %v", err)
+	}
+	insertDependency(t, s, held, dep)
+
+	setTicketState(t, s, dep, testStatePlanning)
+	got, err := s.ListReadyCandidates(ctx, nil, time.Now())
+	if err != nil {
+		t.Fatalf("ListReadyCandidates (dependency planning): %v", err)
+	}
+	if slices.Contains(ticketIDs(got), held) {
+		t.Errorf("ListReadyCandidates (dependency planning) = %v, want it to not contain %d", ticketIDs(got), held)
+	}
+	if !slices.Contains(ticketIDs(got), unaffected) {
+		t.Errorf("ListReadyCandidates (dependency planning) = %v, want it to contain %d", ticketIDs(got), unaffected)
+	}
+
+	setTicketState(t, s, dep, "abandoned")
+	got, err = s.ListReadyCandidates(ctx, nil, time.Now())
+	if err != nil {
+		t.Fatalf("ListReadyCandidates (dependency abandoned): %v", err)
+	}
+	if slices.Contains(ticketIDs(got), held) {
+		t.Errorf("ListReadyCandidates (dependency abandoned) = %v, want it to not contain %d", ticketIDs(got), held)
+	}
+	if !slices.Contains(ticketIDs(got), unaffected) {
+		t.Errorf("ListReadyCandidates (dependency abandoned) = %v, want it to contain %d", ticketIDs(got), unaffected)
+	}
+
+	setTicketState(t, s, dep, ticketStateDone)
+	got, err = s.ListReadyCandidates(ctx, nil, time.Now())
+	if err != nil {
+		t.Fatalf("ListReadyCandidates (dependency done): %v", err)
+	}
+	if !slices.Contains(ticketIDs(got), held) {
+		t.Errorf("ListReadyCandidates (dependency done) = %v, want it to contain %d", ticketIDs(got), held)
+	}
+	if !slices.Contains(ticketIDs(got), unaffected) {
+		t.Errorf("ListReadyCandidates (dependency done) = %v, want it to contain %d", ticketIDs(got), unaffected)
+	}
+}
+
+// TestDependencies_ReturnsEveryDependencyWithState proves Store.Dependencies
+// returns every dependency of a ticket with its ref and state, ordered by
+// id, done ones included, and an empty slice for a ticket with none (#74).
+func TestDependencies_ReturnsEveryDependencyWithState(t *testing.T) {
+	t.Parallel()
+	s := newTestStore(t)
+	ctx := t.Context()
+	projectID, err := s.EnsureProject(ctx, testProject)
+	if err != nil {
+		t.Fatalf("EnsureProject: %v", err)
+	}
+
+	lonely, err := s.InsertTicket(ctx, Ticket{ProjectID: projectID, TrackerRef: "1", Title: "lonely", State: ticketStateQueued})
+	if err != nil {
+		t.Fatalf("InsertTicket(lonely): %v", err)
+	}
+	none, err := s.Dependencies(ctx, lonely)
+	if err != nil {
+		t.Fatalf("Dependencies(lonely): %v", err)
+	}
+	if len(none) != 0 {
+		t.Errorf("Dependencies(lonely) = %+v, want empty", none)
+	}
+
+	depA, err := s.InsertTicket(ctx, Ticket{ProjectID: projectID, TrackerRef: "2", Title: "depA", State: ticketStateQueued})
+	if err != nil {
+		t.Fatalf("InsertTicket(depA): %v", err)
+	}
+	setTicketState(t, s, depA, ticketStateDone)
+	depB, err := s.InsertTicket(ctx, Ticket{ProjectID: projectID, TrackerRef: "3", Title: "depB", State: ticketStateQueued})
+	if err != nil {
+		t.Fatalf("InsertTicket(depB): %v", err)
+	}
+	setTicketState(t, s, depB, testStatePlanning)
+	ticketID, err := s.InsertTicket(ctx, Ticket{ProjectID: projectID, TrackerRef: "4", Title: "t", State: ticketStateQueued})
+	if err != nil {
+		t.Fatalf("InsertTicket(t): %v", err)
+	}
+	insertDependency(t, s, ticketID, depA)
+	insertDependency(t, s, ticketID, depB)
+
+	got, err := s.Dependencies(ctx, ticketID)
+	if err != nil {
+		t.Fatalf("Dependencies: %v", err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("len(Dependencies) = %d, want 2", len(got))
+	}
+	if got[0].TicketID != depA || got[0].Ref != "2" || got[0].State != ticketStateDone {
+		t.Errorf("Dependencies[0] = %+v, want ticket %d, ref 2, state done", got[0], depA)
+	}
+	if got[1].TicketID != depB || got[1].Ref != "3" || got[1].State != testStatePlanning {
+		t.Errorf("Dependencies[1] = %+v, want ticket %d, ref 3, state %s", got[1], depB, testStatePlanning)
 	}
 }

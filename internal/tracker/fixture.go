@@ -184,6 +184,15 @@ func (f *Fixture) CommentContains(_ context.Context, project, ref, needle string
 	return false, nil
 }
 
+// CommentCount returns how many comments have been recorded against ref,
+// so a test can assert a marked-once post (postMarkedOnce) was never
+// posted twice, beyond CommentContains's own existence check (r2f6).
+func (f *Fixture) CommentCount(ref string) int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return len(f.comments[ref])
+}
+
 // Close records ref as closed (design section 10.5, PKG9-PLAN.md section
 // 8.6): closing an already-closed ref is a no-op, matching the real
 // tracker's own idempotent behavior.

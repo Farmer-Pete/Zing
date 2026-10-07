@@ -300,7 +300,7 @@ templ questionGroup(ticketID int64, row ThreadRow) {
 			case string(response.QuestionKindGate):
 				@gateContext(row.Question.Plan, row.Question.Scenarios, row.Question.Findings)
 			case string(response.QuestionKindSplit):
-				@splitContext()
+				@splitContext(row.Question.Split)
 			case string(response.QuestionKindMerge):
 				@mergeContext(row.Question.PRURL)
 		}
@@ -427,13 +427,35 @@ templ gateContext(plan *RenderedPlan, scenarios []ScenarioRow, findings []Findin
 	</div>
 }
 
-// splitContext is the split kind's context region: the proposed children,
-// deferred to the same later-task seam as gateContext, since no store read
-// for a ticket's proposed children exists yet (design section 7.2 names none;
-// Task 6 keeps this minimal rather than reaching for one).
-templ splitContext() {
+// splitContext is the split kind's context region (design section 7.2,
+// Task 8): the planner's shared notes, when any, above the proposed
+// children in the artifact's own order -- or a placeholder when the ticket
+// has no stored children artifact yet (console.loadSplit's "not there yet"
+// result, matching gateContext's own plan placeholder).
+templ splitContext(split *SplitView) {
 	<div class="q-context split-context" data-context="children">
-		<p class="placeholder">The proposed children render here once split has a producer.</p>
+		if split == nil {
+			<p class="placeholder">No proposed children stored for this ticket.</p>
+		} else {
+			if split.NotesHTML != nil {
+				<section class="split-notes">
+					<h4>Shared notes</h4>
+					@split.NotesHTML
+				</section>
+			}
+			<ol class="split-children">
+				for _, c := range split.Children {
+					<li>
+						<h4>{ c.Title }</h4>
+						<span class="split-key">{ c.Key }</span>
+						if len(c.DependsOn) > 0 {
+							<p class="split-deps">Depends on { strings.Join(c.DependsOn, ", ") }</p>
+						}
+						@c.BodyHTML
+					</li>
+				}
+			</ol>
+		}
 	</div>
 }
 
