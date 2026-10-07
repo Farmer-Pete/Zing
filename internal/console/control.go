@@ -7,6 +7,7 @@ package console
 
 import (
 	"errors"
+	"io"
 	"log/slog"
 	"net/http"
 	"sync"
@@ -118,6 +119,46 @@ func (c *console) handleDebug(w http.ResponseWriter, r *http.Request) {
 
 	c.bus.Publish()
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// Upgrader is what POST /upgrade needs from cmd/zing's self-upgrader
+// (#109 part 2, Q6): *upgrader (cmd/zing/upgrade.go) satisfies it through
+// its existing Request method.
+type Upgrader interface {
+	Request(ticketID int64, sha string)
+}
+
+// upgradeRequest is POST /upgrade's body, which is always {} (owner
+// decision Q6: Upgrade now builds the default branch's tip, with no
+// parameters of its own).
+type upgradeRequest struct{}
+
+// handleUpgrade is POST /upgrade (#109 part 2, Q6): queue a build of the
+// default branch's tip. 503 when this console was built with no
+// WithUpgrader (no project in zing.toml sets self = true), 400 on a
+// malformed or non-empty body, 202 once the request is queued.
+func (c *console) handleUpgrade(w http.ResponseWriter, r *http.Request) {
+	r.Body = http.MaxBytesReader(w, r.Body, maxDraftBodyBytes)
+
+	if c.upgrader == nil {
+		http.Error(w, "no project in zing.toml sets self = true", http.StatusServiceUnavailable)
+		return
+	}
+
+	var req upgradeRequest
+	if err := decodeStrict(r, &req); err != nil {
+		writeDecodeError(w, err)
+		return
+	}
+
+	c.upgrader.Request(0, "")
+	slog.Info("console: upgrade requested", "by", c.user)
+
+	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	w.WriteHeader(http.StatusAccepted)
+	if _, err := io.WriteString(w, "upgrade started\n"); err != nil {
+		slog.Error("console: write upgrade result", "err", err)
+	}
 }
 
 // tuningRequest is POST /settings' body (#81, owner decision Q1): name is

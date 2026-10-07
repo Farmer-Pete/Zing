@@ -483,8 +483,12 @@ func serve(ctx context.Context, cfgPath, dbPath string, seedDemo bool, su *selfU
 	allowedHosts = append(allowedHosts, hosts...)
 	allowedHosts = append(allowedHosts, cfg.Console.AllowedHosts...)
 
+	consoleOpts := []console.Option{console.WithTuner(d), console.WithDispatch(d), console.WithSlots(d)}
+	if up != nil {
+		consoleOpts = append(consoleOpts, console.WithUpgrader(up))
+	}
 	handler := console.New(st, b, m, allowedHosts, cfg.Console.Port, logHandler, push, pushToken, floor, sbSet.FirstUnavailable(usedSandboxProfiles(m)), tr, cfg.User,
-		job.TicketCommands{Store: st, Machine: m, Projects: projects, Commands: cmds}, console.WithTuner(d), console.WithDispatch(d), console.WithSlots(d))
+		job.TicketCommands{Store: st, Machine: m, Projects: projects, Commands: cmds}, consoleOpts...)
 	srv := newServer(ctx, handler)
 
 	listeners, err := listenOnAll(ctx, hosts, cfg.Console.Port)
