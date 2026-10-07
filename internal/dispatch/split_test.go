@@ -250,6 +250,18 @@ func TestSplit_ApproveFilesBothQueuesFirstHoldsSecond(t *testing.T) {
 	if !hasComment {
 		t.Errorf("parent issue %q never got the split comment", splitTestParentRef)
 	}
+	if got := fx.CommentCount(splitTestParentRef); got != 1 {
+		t.Fatalf("CommentCount(parent) = %d, want exactly 1 before any retry", got)
+	}
+
+	// Step 5b (r2f6): a retried CloseSplitParent call, the same shape a
+	// retried tick makes, never posts the split comment a second time.
+	if closeErr := d.CloseSplitParent(t.Context(), projectID, splitTestParentRef, "Zing split this ticket into retried."); closeErr != nil {
+		t.Fatalf("CloseSplitParent (retry): %v", closeErr)
+	}
+	if got := fx.CommentCount(splitTestParentRef); got != 1 {
+		t.Errorf("CommentCount(parent) after a retried CloseSplitParent = %d, want still exactly 1", got)
+	}
 
 	// Step 6: c1 is a ready candidate, c2 is held on it.
 	ready, readyErr := s.ListReadyCandidates(t.Context(), nil, time.Now())

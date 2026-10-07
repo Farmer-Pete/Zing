@@ -76,8 +76,10 @@ func seedChildrenArtifact(t *testing.T, s *store.Store, ticketID int64, children
 
 // approveSplitQuestion seeds an open split question (seedSplitQuestion),
 // then answers it with option a (Approve) and sends it, so the next
-// planning tick's AnsweredRounds carries an approved split round.
-func approveSplitQuestion(t *testing.T, s *store.Store, ticketID int64) {
+// planning tick's AnsweredRounds carries an approved split round. It
+// returns the split question's own id, so a caller can confirm it is later
+// resolved.
+func approveSplitQuestion(t *testing.T, s *store.Store, ticketID int64) int64 {
 	t.Helper()
 	qID := seedSplitQuestion(t, s, ticketID)
 	option := "a"
@@ -87,22 +89,24 @@ func approveSplitQuestion(t *testing.T, s *store.Store, ticketID int64) {
 	if _, err := s.SendBatch(t.Context(), ticketID); err != nil {
 		t.Fatalf("SendBatch: %v", err)
 	}
+	return qID
 }
 
 // fakeSplitTracker is a job.SplitTracker double (task 6): FileSplitChild
 // returns refs in order from refs, recording every title and body it was
 // called with, including a failed call; failAt, when non-zero, fails the
 // failAt'th FileSplitChild call (1-based) once, with no ref consumed.
-// CloseSplitParent always succeeds, recording its own arguments.
+// CloseSplitParent records its own arguments on every call, and fails its
+// first closeFailTimes calls (r2f6), succeeding every call after that.
 type fakeSplitTracker struct {
 	t    *testing.T
 	refs []string
 
-	calls  int
 	filed  int
 	titles []string
 	failAt int
 
+	closeFailTimes int
 	closeCalls     int
 	closeProjectID int64
 	closeRef       string
@@ -111,13 +115,12 @@ type fakeSplitTracker struct {
 
 func (f *fakeSplitTracker) FileSplitChild(_ context.Context, _ int64, title, _ string) (string, error) {
 	f.t.Helper()
-	f.calls++
 	f.titles = append(f.titles, title)
-	if f.failAt != 0 && f.calls == f.failAt {
+	if f.failAt != 0 && len(f.titles) == f.failAt {
 		return "", errors.New("fake split tracker: file failed")
 	}
 	if f.filed >= len(f.refs) {
-		f.t.Fatalf("fakeSplitTracker.FileSplitChild: call %d has no ref left (only %d)", f.calls, len(f.refs))
+		f.t.Fatalf("fakeSplitTracker.FileSplitChild: call %d has no ref left (only %d)", len(f.titles), len(f.refs))
 	}
 	ref := f.refs[f.filed]
 	f.filed++
@@ -129,6 +132,9 @@ func (f *fakeSplitTracker) CloseSplitParent(_ context.Context, projectID int64, 
 	f.closeProjectID = projectID
 	f.closeRef = ref
 	f.closeBody = body
+	if f.closeCalls <= f.closeFailTimes {
+		return errors.New("fake split tracker: close failed")
+	}
 	return nil
 }
 
@@ -264,11 +270,29 @@ func TestPlanningHandler_Children_PostsSplitGate(t *testing.T) {
 // TestPlanningHandler_SplitRejected_ResumesWithNotes proves
 // enterFromSplitRound's reject branch (design section 6.6/6.7's split
 // variant, mirroring the gate's own rejection): a split question answered
-// with option b plus a reply resumes the open planning session with the
-// reply's body fenced as notes under splitRejectedNote, and resolves the
-// split question.
+// with option b, or with a reply and no option picked at all, resumes the
+// open planning session with the reply's body fenced as notes under
+// splitRejectedNote, and resolves the split question. Either way,
+// fileNextSplitChild must never run.
 func TestPlanningHandler_SplitRejected_ResumesWithNotes(t *testing.T) {
 	t.Parallel()
+	t.Run("explicit reject", func(t *testing.T) {
+		t.Parallel()
+		runSplitRejectedResumesWithNotes(t, "b")
+	})
+	t.Run("no option picked", func(t *testing.T) {
+		t.Parallel()
+		runSplitRejectedResumesWithNotes(t, "")
+	})
+}
+
+// runSplitRejectedResumesWithNotes is
+// TestPlanningHandler_SplitRejected_ResumesWithNotes's shared body (r2f4):
+// option is the owner's chosen option key, or "" to save only a text
+// reply with no option picked at all, which enterFromSplitRound must also
+// treat as a reject.
+func runSplitRejectedResumesWithNotes(t *testing.T, option string) {
+	t.Helper()
 	s := newJobTestStore(t)
 	ticketID := seedQueuedTicket(t, s)
 	rt := fakeRuntime(t)
@@ -279,9 +303,11 @@ func TestPlanningHandler_SplitRejected_ResumesWithNotes(t *testing.T) {
 
 	qID := seedSplitQuestion(t, s, ticketID)
 	const notes = "keep it as one ticket"
-	option := "b"
-	if _, draftErr := s.SaveDraft(t.Context(), store.DraftInput{TicketID: ticketID, QuestionID: &qID, Option: &option}); draftErr != nil {
-		t.Fatalf("SaveDraft(option): %v", draftErr)
+	if option != "" {
+		opt := option
+		if _, draftErr := s.SaveDraft(t.Context(), store.DraftInput{TicketID: ticketID, QuestionID: &qID, Option: &opt}); draftErr != nil {
+			t.Fatalf("SaveDraft(option): %v", draftErr)
+		}
 	}
 	if _, draftErr := s.SaveDraft(t.Context(), store.DraftInput{TicketID: ticketID, QuestionID: &qID, Text: notes}); draftErr != nil {
 		t.Fatalf("SaveDraft(text): %v", draftErr)
@@ -304,8 +330,8 @@ func TestPlanningHandler_SplitRejected_ResumesWithNotes(t *testing.T) {
 	if err != nil {
 		t.Fatalf("split reject Run: %v", err)
 	}
-	if fake.calls != 0 || fake.closeCalls != 0 {
-		t.Errorf("fake split tracker calls = %d, closeCalls = %d, want 0 and 0 (reject must never file)", fake.calls, fake.closeCalls)
+	if len(fake.titles) != 0 || fake.closeCalls != 0 {
+		t.Errorf("fake split tracker calls = %d, closeCalls = %d, want 0 and 0 (reject must never file)", len(fake.titles), fake.closeCalls)
 	}
 	if commit.Session == nil || commit.Session.ID == nil || *commit.Session.ID != openSess.ID {
 		t.Fatalf("commit.Session = %+v, want the already-open session %d (a resume, not fresh)", commit.Session, openSess.ID)
@@ -338,7 +364,7 @@ func TestPlanningHandler_SplitApproved_FilesOneChildPerTickThenClosesParent(t *t
 			{Key: "c1", Title: "Detect the conflict", Body: "do c1", DependsOn: []string{}},
 			{Key: "c2", Title: "The merge unit", Body: "do c2", DependsOn: []string{"c1"}},
 		}, testSplitSharedNotes)
-		approveSplitQuestion(t, s, ticketID)
+		qID := approveSplitQuestion(t, s, ticketID)
 
 		fake := &fakeSplitTracker{t: t, refs: []string{"70", "71"}}
 
@@ -395,10 +421,25 @@ func TestPlanningHandler_SplitApproved_FilesOneChildPerTickThenClosesParent(t *t
 		if commit3.Reason != "split into #70, #71" {
 			t.Errorf("run 3: commit.Reason = %q, want %q", commit3.Reason, "split into #70, #71")
 		}
+		if len(commit3.ResolveQuestions) != 1 || commit3.ResolveQuestions[0] != qID {
+			t.Errorf("commit3.ResolveQuestions = %v, want [%d]", commit3.ResolveQuestions, qID)
+		}
 		apply(t, s, getTicket(t, s, ticketID), commit3)
 
-		if fake.calls != 2 {
-			t.Errorf("FileSplitChild called %d times, want exactly 2", fake.calls)
+		if len(fake.titles) != 2 {
+			t.Errorf("FileSplitChild called %d times, want exactly 2", len(fake.titles))
+		}
+		if got := getTicket(t, s, ticketID).State; got != "done" {
+			t.Errorf("parent state = %q, want done", got)
+		}
+		answered, err := s.QuestionsByState(t.Context(), ticketID, "answered")
+		if err != nil {
+			t.Fatalf("QuestionsByState(answered): %v", err)
+		}
+		for _, q := range answered {
+			if q.ID == qID {
+				t.Errorf("QuestionsByState(answered) still lists the split question %d, want it resolved", qID)
+			}
 		}
 	})
 
@@ -565,5 +606,69 @@ func TestPlanningHandler_SplitApproved_TrackerFailureRetriesWithoutDuplicate(t *
 	}
 	if count != 1 {
 		t.Errorf("split children rows with key c1 = %d, want exactly 1", count)
+	}
+}
+
+// TestPlanningHandler_SplitApproved_CloseParentRetriesWithoutDuplicateComment
+// proves closeSplitParent's own retry rule (design section 6.6's split
+// variant, r2f6): a CloseSplitParent failure logs a warning and returns
+// ErrNoAction with no commit, leaving the parent in planning, and the next
+// tick retries the close and reaches done. The real tracker's own
+// once-only comment on a retried close is proved by
+// internal/dispatch/split_test.go, against the fixture tracker.
+func TestPlanningHandler_SplitApproved_CloseParentRetriesWithoutDuplicateComment(t *testing.T) {
+	t.Parallel()
+	s := newJobTestStore(t)
+	ticketID := seedQueuedTicket(t, s)
+	rt := &scriptedRuntime{t: t}
+	advanceQueuedToPlanning(t, s, rt, ticketID)
+	seedChildrenArtifact(t, s, ticketID, []response.Child{
+		{Key: "c1", Title: "c1", Body: "do c1", DependsOn: []string{}},
+		{Key: "c2", Title: "c2", Body: "do c2", DependsOn: []string{"c1"}},
+	}, "")
+	approveSplitQuestion(t, s, ticketID)
+
+	fake := &fakeSplitTracker{t: t, refs: []string{"70", "71"}, closeFailTimes: 1}
+
+	deps := claimWithRuntimes(t, s, rt, ticketID)
+	deps.Splitter = fake
+	commit1, err := runPlanning(t, s, deps, ticketID)
+	if err != nil {
+		t.Fatalf("run 1 (file c1): %v", err)
+	}
+	apply(t, s, getTicket(t, s, ticketID), commit1)
+
+	deps = claimWithRuntimes(t, s, rt, ticketID)
+	deps.Splitter = fake
+	commit2, err := runPlanning(t, s, deps, ticketID)
+	if err != nil {
+		t.Fatalf("run 2 (file c2): %v", err)
+	}
+	apply(t, s, getTicket(t, s, ticketID), commit2)
+
+	deps = claimWithRuntimes(t, s, rt, ticketID)
+	deps.Splitter = fake
+	_, err = runPlanning(t, s, deps, ticketID)
+	if !errors.Is(err, job.ErrNoAction) {
+		t.Fatalf("run 3 (close fails): err = %v, want ErrNoAction", err)
+	}
+	if got := getTicket(t, s, ticketID).State; got == "done" {
+		t.Fatalf("parent state = %q after a failed close, want still planning", got)
+	}
+
+	// Run 3's failure applied no commit, so the claim from run 3 is still
+	// held: reuse it rather than re-claiming, the same as
+	// TestPlanningHandler_SplitApproved_TrackerFailureRetriesWithoutDuplicate.
+	commit4, err := runPlanning(t, s, deps, ticketID)
+	if err != nil {
+		t.Fatalf("run 4 (close retries): %v", err)
+	}
+	if commit4.Next != "done" {
+		t.Errorf("run 4: commit.Next = %q, want done", commit4.Next)
+	}
+	apply(t, s, getTicket(t, s, ticketID), commit4)
+
+	if fake.closeCalls != 2 {
+		t.Errorf("CloseSplitParent called %d times, want exactly 2 (one failure, one success)", fake.closeCalls)
 	}
 }

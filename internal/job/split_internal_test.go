@@ -1,6 +1,7 @@
 package job
 
 import (
+	"slices"
 	"strings"
 	"testing"
 
@@ -23,7 +24,9 @@ func TestSplitOrder(t *testing.T) {
 		if err != nil {
 			t.Fatalf("splitOrder: %v", err)
 		}
-		wantKeys(t, got, "c1", "c2")
+		if keys := keysOf(got); !slices.Equal(keys, []string{"c1", "c2"}) {
+			t.Fatalf("splitOrder: got keys %v, want %v", keys, []string{"c1", "c2"})
+		}
 	})
 
 	t.Run("dependency reorders", func(t *testing.T) {
@@ -36,7 +39,9 @@ func TestSplitOrder(t *testing.T) {
 		if err != nil {
 			t.Fatalf("splitOrder: %v", err)
 		}
-		wantKeys(t, got, "c1", "c3", "c2")
+		if keys := keysOf(got); !slices.Equal(keys, []string{"c1", "c3", "c2"}) {
+			t.Fatalf("splitOrder: got keys %v, want %v", keys, []string{"c1", "c3", "c2"})
+		}
 	})
 
 	t.Run("unknown dependency key", func(t *testing.T) {
@@ -104,18 +109,6 @@ func TestSplitChildBody(t *testing.T) {
 			t.Errorf("splitChildBody = %q, want %q", got, want)
 		}
 	})
-}
-
-func wantKeys(t *testing.T, got []response.Child, want ...string) {
-	t.Helper()
-	if len(got) != len(want) {
-		t.Fatalf("splitOrder: got %d children, want %d", len(got), len(want))
-	}
-	for i, c := range got {
-		if c.Key != want[i] {
-			t.Fatalf("splitOrder: got keys %v, want %v", keysOf(got), want)
-		}
-	}
 }
 
 func keysOf(cs []response.Child) []string {
