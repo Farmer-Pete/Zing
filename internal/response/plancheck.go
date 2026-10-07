@@ -259,16 +259,44 @@ func checkHostNewRoutes(changes []Change, scenarios []Scenario, present map[stri
 			continue
 		}
 		for _, route := range routes {
-			if strings.Contains(route, "{") { // task 1 only; task 2 deletes this if
-				continue
-			}
-			re := regexp.MustCompile(loopbackHost + regexp.QuoteMeta(route) + urlPathEnd) // task 2: re := routePathRegexp(route)
+			re := routePathRegexp(route)
 			if re.MatchString(sc.Check) {
 				errs = append(errs, &PathError{Path: base + "/check", Msg: fmt.Sprintf(hostNewRouteFmt, route)})
 			}
 		}
 	}
 	return errs
+}
+
+// restOfPath matches the rest of a URL path, for {name...} and for the
+// trailing empty segment of a subtree pattern such as /settings/.
+const restOfPath = `[^\s"'?#]*`
+
+// routePathRegexp compiles a ServeMux path into a regexp that matches a
+// loopback URL the mux would route to it: {name} is one non-empty
+// segment, {name...} is the rest of the path, {$} ends it, and a
+// trailing slash without {$} is a subtree that matches the rest of the path.
+func routePathRegexp(route string) *regexp.Regexp {
+	var b strings.Builder
+	b.WriteString(loopbackHost)
+	segs := strings.Split(route, "/")
+	for i, seg := range segs {
+		if i > 0 {
+			b.WriteString("/")
+		}
+		subtree := i > 0 && i == len(segs)-1 && seg == ""
+		switch {
+		case seg == "{$}":
+		case subtree, strings.HasPrefix(seg, "{") && strings.HasSuffix(seg, "...}"):
+			b.WriteString(restOfPath)
+		case strings.HasPrefix(seg, "{") && strings.HasSuffix(seg, "}"):
+			b.WriteString(`[^/\s"'?#]+`)
+		default:
+			b.WriteString(regexp.QuoteMeta(seg))
+		}
+	}
+	b.WriteString(urlPathEnd)
+	return regexp.MustCompile(b.String())
 }
 
 var whitespaceRun = regexp.MustCompile(`\s+`)

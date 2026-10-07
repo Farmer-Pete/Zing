@@ -490,6 +490,65 @@ func TestCheckPlan_NonHostScenarioCallingNewRoutePasses(t *testing.T) {
 	}
 }
 
+func TestCheckPlan_HostScenarioCallingNewWildcardRouteFails(t *testing.T) {
+	t.Parallel()
+
+	p := cleanPlan()
+	p.Design.Changes[0].Before = "none"
+	p.Design.Changes[0].After = "mux.HandleFunc(`POST /tickets/{id}/settings`, c.handleSettings)"
+
+	scenarios := cleanScenarios()
+	scenarios[0] = Scenario{
+		ID: "s1", Kind: ScenarioKindHost,
+		Check: "curl -s -X POST http://localhost:7420/tickets/42/settings",
+		Given: "the owner's live zing serve is running", When: "the check runs", Then: "it succeeds",
+	}
+
+	errs := CheckPlan(p, scenarios, false, planChecklists, fullPresence(2))
+	want := "scenarios/scenario[0]/check: " + fmt.Sprintf(hostNewRouteFmt, "/tickets/{id}/settings")
+	if !containsErr(errs, want) {
+		t.Fatalf("CheckPlan = %v, want to contain %q", dumpErrs(errs), want)
+	}
+	if len(errs) != 1 {
+		t.Fatalf("CheckPlan = %v, want exactly one error", dumpErrs(errs))
+	}
+}
+
+func TestRoutePathRegexp(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name  string
+		route string
+		check string
+		want  bool
+	}{
+		{"settings matches post", "/settings", "curl -X POST http://127.0.0.1:7420/settings -d x=1", true},
+		{"settings does not match subtree path", "/settings", "curl http://localhost:7420/settings/advanced", false},
+		{"settings does not match non-loopback host", "/settings", "curl https://example.com/settings", false},
+		{"settings does not match a go test invocation", "/settings", "go test ./internal/console -run TestSettings", false},
+		{"wildcard id matches ipv6 loopback", "/tickets/{id}/settings", "curl 'http://[::1]:7420/tickets/42/settings'", true},
+		{"wildcard id does not match empty segment", "/tickets/{id}/settings", "curl http://localhost/tickets//settings", false},
+		{"rest wildcard matches nested path", "/files/{path...}", "curl localhost:7420/files/a/b.txt", true},
+		{"dollar end matches exact subtree root", "/runs/{$}", "curl localhost:7420/runs/", true},
+		{"dollar end does not match a child", "/runs/{$}", "curl localhost:7420/runs/7", false},
+		{"trailing slash subtree matches a child", "/settings/", "curl localhost:7420/settings/tuning", true},
+		{"trailing slash subtree matches its own root", "/settings/", "curl localhost:7420/settings/", true},
+		{"trailing slash subtree does not match a sibling prefix", "/settings/", "curl localhost:7420/settingsx", false},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			re := routePathRegexp(tc.route)
+			got := re.MatchString(tc.check)
+			if got != tc.want {
+				t.Fatalf("routePathRegexp(%q).MatchString(%q) = %v, want %v", tc.route, tc.check, got, tc.want)
+			}
+		})
+	}
+}
+
 func TestNewRoutePaths(t *testing.T) {
 	t.Parallel()
 
