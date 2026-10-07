@@ -1939,7 +1939,7 @@ func TestCommitHandlerResult_SetTicketText(t *testing.T) {
 		t.Parallel()
 		s := newTestStore(t)
 		ctx := t.Context()
-		_, ticketID := seedQueuedTicket(t, s, "1")
+		_, ticketID := seedQueuedTicketWithBody(t, s, "1", "the stored body")
 		owner, expires := claimForCommit(t, s, ticketID)
 
 		applied, err := s.CommitHandlerResult(ctx, HandlerCommit{
@@ -1957,11 +1957,11 @@ func TestCommitHandlerResult_SetTicketText(t *testing.T) {
 		if getErr != nil {
 			t.Fatalf("GetTicket: %v", getErr)
 		}
-		if got.Body != "" {
-			t.Errorf("body = %q, want unchanged empty string", got.Body)
+		if got.Body != "the stored body" {
+			t.Errorf("body = %q, want unchanged %q", got.Body, "the stored body")
 		}
-		if got.TrackerBody == nil || *got.TrackerBody != "" {
-			t.Errorf("tracker_body = %v, want unchanged empty string (InsertTicket's own baseline)", got.TrackerBody)
+		if got.TrackerBody == nil || *got.TrackerBody != "the stored body" {
+			t.Errorf("tracker_body = %v, want unchanged %q (InsertTicket's own baseline)", got.TrackerBody, "the stored body")
 		}
 		if got.OwnerComments != "Comment by owner:\nUse serve." {
 			t.Errorf("owner_comments = %q, want %q", got.OwnerComments, "Comment by owner:\nUse serve.")

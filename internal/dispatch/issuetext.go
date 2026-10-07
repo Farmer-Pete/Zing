@@ -13,11 +13,11 @@ import (
 func issueText(ctx context.Context, tr tracker.Tracker, b Binding, ref string) (job.IssueText, error) {
 	tk, err := tr.Fetch(ctx, b.TrackerProject, ref)
 	if err != nil {
-		return job.IssueText{}, fmt.Errorf("dispatch: issue text %s: %w", ref, err)
+		return job.IssueText{}, fmt.Errorf("dispatch: issue text %s: fetch: %w", ref, err)
 	}
 	cs, err := tr.Comments(ctx, b.TrackerProject, ref)
 	if err != nil {
-		return job.IssueText{}, fmt.Errorf("dispatch: issue text %s: %w", ref, err)
+		return job.IssueText{}, fmt.Errorf("dispatch: issue text %s: comments: %w", ref, err)
 	}
 	mine := tracker.OwnerComments(cs, b.User)
 	return job.IssueText{Body: tk.Body, OwnerComments: tracker.RenderComments(mine), CommentCount: len(mine)}, nil

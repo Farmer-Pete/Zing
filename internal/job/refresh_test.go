@@ -36,6 +36,20 @@ func nullifyTrackerBody(t *testing.T, s *store.Store, ticketID int64) {
 	}
 }
 
+// claimForRefresh claims ticketID under the same owner literal
+// claimWithRuntimes uses, for a test that applies a store.HandlerCommit
+// directly rather than through a handler's Run.
+func claimForRefresh(t *testing.T, s *store.Store, ticketID int64) (owner string, expires time.Time) {
+	t.Helper()
+	owner = "test-owner"
+	expires = time.Now().Add(10 * time.Minute).UTC().Truncate(time.Second)
+	claimed, err := s.Claim(t.Context(), ticketID, owner, expires)
+	if err != nil || !claimed {
+		t.Fatalf("Claim: claimed=%v err=%v", claimed, err)
+	}
+	return owner, expires
+}
+
 // fakeTicketSource is a job.TicketSource that always returns it and err,
 // regardless of the projectID and ref it is called with.
 type fakeTicketSource struct {
@@ -377,6 +391,16 @@ func TestPlanningResume_DeliversRefreshedTicketOnce(t *testing.T) {
 	}
 	apply(t, s, getTicket(t, s, ticketID), firstCommit)
 
+	const refreshedComments = "Comment by owner-login:\nREFRESHED-TEXT"
+	refreshOwner, refreshExpires := claimForRefresh(t, s, ticketID)
+	refreshApplied, refreshErr := s.CommitHandlerResult(t.Context(), store.HandlerCommit{
+		TicketID: ticketID, Owner: refreshOwner, Expires: refreshExpires,
+		SetTicketText: &store.TicketText{OwnerComments: refreshedComments},
+	})
+	if refreshErr != nil || !refreshApplied {
+		t.Fatalf("CommitHandlerResult (seed refreshed text): applied=%v err=%v", refreshApplied, refreshErr)
+	}
+
 	_, insertErr := s.InsertMessage(t.Context(), store.Message{
 		TicketID: ticketID, Type: testMsgTypeUpdate, Author: testAuthorSystem,
 		Body: "ticket refreshed from tracker\nowner comments changed, 1 now",
@@ -411,6 +435,9 @@ func TestPlanningResume_DeliversRefreshedTicketOnce(t *testing.T) {
 	}
 	if !strings.Contains(rec.lastReq.Prompt, "ticket:\n") {
 		t.Errorf("resume prompt does not carry a \"ticket:\" input:\n%s", rec.lastReq.Prompt)
+	}
+	if !strings.Contains(rec.lastReq.Prompt, "REFRESHED-TEXT") {
+		t.Errorf("resume prompt does not carry the refreshed ticket text:\n%s", rec.lastReq.Prompt)
 	}
 	delivered := false
 	for _, m := range secondCommit.Messages {
