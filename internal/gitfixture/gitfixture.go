@@ -268,6 +268,66 @@ func gitDirOf(root string) (string, error) {
 	return root, nil
 }
 
+// worktreeLink names one linked worktree found under a repository's git
+// dir, by the admin directory's own name (the "NAME" in
+// "worktrees/NAME") and the worktree's own directory, relative to the
+// repository root (for example ".zing/wt/7"). worktreePaths resolves and
+// validates both before any copy happens, so CopyRepo can relink the
+// copy entirely in terms of dest, with no path naming src.
+type worktreeLink struct {
+	name string
+	rel  string
+}
+
+// worktreePaths reads every linked worktree registered under gitDir
+// (GITDIR/worktrees/NAME/gitdir) and returns each one's name and its
+// worktree directory relative to srcReal (gitDir's resolved repository
+// root). A worktree directory that no longer exists is skipped: its
+// gitdir file names a worktree someone already removed. A worktree
+// directory outside srcReal is an error, since CopyRepo has nothing to
+// relink it against once src is gone.
+func worktreePaths(srcReal, gitDir string) ([]worktreeLink, error) {
+	worktreesDir := filepath.Join(gitDir, "worktrees")
+	entries, err := os.ReadDir(worktreesDir)
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+
+	var links []worktreeLink
+	for _, entry := range entries {
+		name := entry.Name()
+		raw, readErr := os.ReadFile(filepath.Join(worktreesDir, name, "gitdir"))
+		if errors.Is(readErr, fs.ErrNotExist) {
+			continue
+		}
+		if readErr != nil {
+			return nil, fmt.Errorf("read worktree %s gitdir: %w", name, readErr)
+		}
+
+		target := strings.TrimSpace(string(raw))
+		targetReal, resolveErr := filepath.EvalSymlinks(target)
+		if errors.Is(resolveErr, fs.ErrNotExist) {
+			continue
+		}
+		if resolveErr != nil {
+			return nil, fmt.Errorf("resolve worktree %s gitdir %s: %w", name, target, resolveErr)
+		}
+
+		rel, relErr := filepath.Rel(srcReal, filepath.Dir(targetReal))
+		if relErr != nil {
+			return nil, fmt.Errorf("relativize worktree %s: %w", name, relErr)
+		}
+		if rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+			return nil, fmt.Errorf("worktree %s at %s is outside %s", name, targetReal, srcReal)
+		}
+		links = append(links, worktreeLink{name: name, rel: rel})
+	}
+	return links, nil
+}
+
 // CopyRepo copies the git repository (or bare repository) at src to
 // dest, a path that does not yet exist, so a test can get its own
 // private copy of a fixture built once per process instead of paying
@@ -276,6 +336,10 @@ func gitDirOf(root string) (string, error) {
 // first as given and then resolved (filepath.EvalSymlinks), so it names
 // the copy's own key under dest instead of src's. When src's config
 // names no signingKey matching either form, the config is left alone.
+// Every linked worktree under src (.zing/wt/TICKET-ID,
+// .zing/judge/TICKET-ID) is relinked to work entirely under dest: see
+// the package doc on worktreePaths and the relink step below for why
+// this never runs "git worktree repair" and never writes under src.
 func CopyRepo(ctx context.Context, src, dest string) error {
 	if err := ctx.Err(); err != nil {
 		return fmt.Errorf("gitfixture: %w", err)
@@ -294,11 +358,24 @@ func CopyRepo(ctx context.Context, src, dest string) error {
 		return fmt.Errorf("gitfixture: stat src git dir: %w", err)
 	}
 
+	links, err := worktreePaths(srcReal, srcGitDirReal)
+	if err != nil {
+		return fmt.Errorf("gitfixture: %w", err)
+	}
+
 	if copyErr := copyTree(src, dest); copyErr != nil {
 		return fmt.Errorf("gitfixture: copy repo: %w", copyErr)
 	}
 
+	destReal, err := filepath.EvalSymlinks(dest)
+	if err != nil {
+		return fmt.Errorf("gitfixture: resolve dest: %w", err)
+	}
 	destGitDir, err := gitDirOf(dest)
+	if err != nil {
+		return fmt.Errorf("gitfixture: stat dest git dir: %w", err)
+	}
+	destGitDirReal, err := gitDirOf(destReal)
 	if err != nil {
 		return fmt.Errorf("gitfixture: stat dest git dir: %w", err)
 	}
@@ -314,6 +391,26 @@ func CopyRepo(ctx context.Context, src, dest string) error {
 		oldKeyResolved := filepath.Join(srcGitDirReal, signingKeyName)
 		if _, err := rewriteSigningKey(configPath, oldKeyResolved, newKey); err != nil {
 			return fmt.Errorf("gitfixture: rewrite signing key: %w", err)
+		}
+	}
+
+	// Relink every worktree by writing both link files directly, naming
+	// only destReal, rather than running "git worktree repair": while src
+	// still exists, the copied .git file still names src's admin dir, and
+	// repair would follow it and rewrite src's own reverse link to point
+	// at dest, breaking src and racing any other copy made from it at the
+	// same time.
+	for _, link := range links {
+		worktreeGit := filepath.Join(destReal, link.rel, ".git")
+		adminGitdir := filepath.Join(destGitDirReal, "worktrees", link.name, "gitdir")
+
+		worktreeGitContent := "gitdir: " + filepath.Join(destGitDirReal, "worktrees", link.name) + "\n"
+		if writeErr := os.WriteFile(worktreeGit, []byte(worktreeGitContent), 0o644); writeErr != nil { //nolint:gosec // G306: the .git pointer file is always world-readable
+			return fmt.Errorf("gitfixture: relink worktree %s: %w", link.name, writeErr)
+		}
+		adminGitdirContent := filepath.Join(destReal, link.rel, ".git") + "\n"
+		if writeErr := os.WriteFile(adminGitdir, []byte(adminGitdirContent), 0o644); writeErr != nil { //nolint:gosec // G306: the admin gitdir file is always world-readable
+			return fmt.Errorf("gitfixture: relink worktree %s: %w", link.name, writeErr)
 		}
 	}
 

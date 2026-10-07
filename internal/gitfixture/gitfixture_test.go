@@ -174,6 +174,122 @@ func TestCopyRepoCopiesBareRepo(t *testing.T) {
 	}
 }
 
+// TestCopyRepoRelinksWorktree pins that CopyRepo also relinks a linked
+// worktree so it works entirely under dest, with no reference back to src:
+// git itself works in the copied worktree, the copied .git pointer has the
+// shape the orchestrator's checkGitPointer requires, "git worktree list"
+// in dest names only paths under dest, a signed commit in the copy
+// verifies with the copied key, and src is left byte-for-byte untouched.
+func TestCopyRepoRelinksWorktree(t *testing.T) {
+	t.Parallel()
+
+	src := t.TempDir()
+	if err := NewSigningRepo(t.Context(), src); err != nil {
+		t.Fatalf("NewSigningRepo: %v", err)
+	}
+	if err := runGit(t.Context(), src, "worktree", "add", "-q", "-b", "wt7", filepath.Join(".zing", "wt", "7")); err != nil {
+		t.Fatalf("git worktree add: %v", err)
+	}
+	srcWorktreeGitdir := filepath.Join(src, ".git", "worktrees", "7", "gitdir")
+	srcGitdirBefore, err := os.ReadFile(srcWorktreeGitdir)
+	if err != nil {
+		t.Fatalf("read src worktree gitdir: %v", err)
+	}
+
+	dest := t.TempDir()
+	if copyErr := CopyRepo(t.Context(), src, dest); copyErr != nil {
+		t.Fatalf("CopyRepo: %v", copyErr)
+	}
+	destReal, err := filepath.EvalSymlinks(dest)
+	if err != nil {
+		t.Fatalf("resolve dest: %v", err)
+	}
+
+	destWorktree := filepath.Join(dest, ".zing", "wt", "7")
+	if out, statusErr := Git(t.Context(), destWorktree, "status", "--porcelain"); statusErr != nil {
+		t.Fatalf("git status in copied worktree: %v\n%s", statusErr, out)
+	}
+
+	commonDirOut := strings.TrimSpace(readGit(t, dest, "rev-parse", "--path-format=absolute", "--git-common-dir"))
+	wantPrefix := "gitdir: " + commonDirOut + "/worktrees/"
+	gotPointer, err := os.ReadFile(filepath.Join(destWorktree, ".git"))
+	if err != nil {
+		t.Fatalf("read copied worktree .git: %v", err)
+	}
+	if !strings.HasPrefix(string(gotPointer), wantPrefix) {
+		t.Errorf(".git pointer = %q, want prefix %q", gotPointer, wantPrefix)
+	}
+
+	listOut := readGit(t, dest, "worktree", "list", "--porcelain")
+	for line := range strings.SplitSeq(listOut, "\n") {
+		if !strings.HasPrefix(line, "worktree ") {
+			continue
+		}
+		p := strings.TrimPrefix(line, "worktree ")
+		if !strings.HasPrefix(p, destReal) {
+			t.Errorf("worktree list line %q names a path outside dest %q", line, destReal)
+		}
+	}
+
+	if commitErr := runGit(t.Context(), destWorktree, "commit", "-q", "--allow-empty", "-S", "-m", "copy worktree commit"); commitErr != nil {
+		t.Fatalf("commit in copied worktree: %v", commitErr)
+	}
+	wantKey := filepath.Join(dest, ".git", "zing-fixture-key")
+	pubOut, err := exec.CommandContext(t.Context(), "ssh-keygen", "-y", "-f", wantKey).CombinedOutput()
+	if err != nil {
+		t.Fatalf("ssh-keygen -y: %v: %s", err, pubOut)
+	}
+	allowed := filepath.Join(t.TempDir(), "allowed_signers")
+	line := "zing-fixture@example.com " + string(pubOut)
+	if writeErr := os.WriteFile(allowed, []byte(line), 0o600); writeErr != nil {
+		t.Fatalf("write allowed signers: %v", writeErr)
+	}
+	if out, verifyErr := Git(t.Context(), destWorktree, "-c", "gpg.ssh.allowedSignersFile="+allowed, "verify-commit", "HEAD"); verifyErr != nil {
+		t.Fatalf("verify-commit in copied worktree: %v\n%s", verifyErr, out)
+	}
+
+	srcGitdirAfter, err := os.ReadFile(srcWorktreeGitdir)
+	if err != nil {
+		t.Fatalf("read src worktree gitdir: %v", err)
+	}
+	if !bytes.Equal(srcGitdirBefore, srcGitdirAfter) {
+		t.Errorf("CopyRepo modified src's worktree gitdir file")
+	}
+	if out, err := Git(t.Context(), filepath.Join(src, ".zing", "wt", "7"), "status", "--porcelain"); err != nil {
+		t.Fatalf("git status in src worktree after copy: %v\n%s", err, out)
+	}
+	srcListOut := readGit(t, src, "worktree", "list", "--porcelain")
+	if strings.Contains(srcListOut, destReal) {
+		t.Errorf("src worktree list names a path under dest:\n%s", srcListOut)
+	}
+}
+
+// TestCopyRepoRejectsWorktreeOutsideRepo pins that CopyRepo refuses to copy
+// a repository whose linked worktree lives outside the repository: there is
+// nothing under src to resolve that worktree's relative path against once
+// it is copied elsewhere.
+func TestCopyRepoRejectsWorktreeOutsideRepo(t *testing.T) {
+	t.Parallel()
+
+	src := t.TempDir()
+	if err := NewSigningRepo(t.Context(), src); err != nil {
+		t.Fatalf("NewSigningRepo: %v", err)
+	}
+	outside := filepath.Join(t.TempDir(), "outside-worktree")
+	if err := runGit(t.Context(), src, "worktree", "add", "-q", "-b", "wtout", outside); err != nil {
+		t.Fatalf("git worktree add: %v", err)
+	}
+
+	dest := filepath.Join(t.TempDir(), "repo")
+	err := CopyRepo(t.Context(), src, dest)
+	if err == nil {
+		t.Fatalf("CopyRepo: want error, got nil")
+	}
+	if !strings.Contains(err.Error(), "is outside") {
+		t.Errorf("CopyRepo error = %q, want it to contain %q", err.Error(), "is outside")
+	}
+}
+
 // TestTemplateDisablesAutoMaintenance proves the template repository turns
 // off git's automatic maintenance and gc, so no commit in it starts a
 // background "git maintenance run --auto" whose objects/maintenance.lock
