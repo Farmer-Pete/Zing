@@ -148,6 +148,15 @@ func newTestServer(t *testing.T, s *store.Store, b *bus.Broker, m *machine.Machi
 	return newTestServerFloor(t, s, b, m, log, response.SeverityMinor)
 }
 
+// newTestServerDispatch is newTestServer with console.WithDispatch(d) added
+// (ticket #89), for a test that must exercise #alerts' stop banner or POST
+// /dispatch/resume against a real console route, not just buildStopBanner
+// or handleDispatchResume directly.
+func newTestServerDispatch(t *testing.T, s *store.Store, b *bus.Broker, m *machine.Machine, log *console.Handler, d console.Dispatch) *httptest.Server { //nolint:unparam // m mirrors every other newTestServer* helper's own machine parameter; today's banner tests all pass nil
+	t.Helper()
+	return newTestServerConfig(t, s, b, m, log, response.SeverityMinor, "", nil, "", nil, console.WithDispatch(d))
+}
+
 // newTestServerFloor is newTestServer with an explicit review.floor (design
 // section 4.4, 7, D8, Task 11): every caller that does not itself need a
 // particular floor goes through newTestServer's own default
@@ -206,6 +215,7 @@ func newTestServerConfig(
 	t *testing.T, s *store.Store, b *bus.Broker, m *machine.Machine, log *console.Handler,
 	floor response.Severity, sandboxReason string, tr tracker.Tracker, user string,
 	configure func(*http.Server),
+	opts ...console.Option,
 ) *httptest.Server {
 	t.Helper()
 
@@ -219,7 +229,7 @@ func newTestServerConfig(
 		t.Fatalf("unexpected listener address type %T", ln.Addr())
 	}
 
-	handler := console.New(s, b, m, testBindHosts, addr.Port, log, nil, testPushToken, floor, sandboxReason, tr, user, nil)
+	handler := console.New(s, b, m, testBindHosts, addr.Port, log, nil, testPushToken, floor, sandboxReason, tr, user, nil, opts...)
 	srv := httptest.NewUnstartedServer(handler)
 	if err := srv.Listener.Close(); err != nil {
 		t.Fatalf("close the placeholder listener: %v", err)

@@ -59,12 +59,14 @@ const alertsLimit = 20
 const alertLineTimeFormat = "15:04:05"
 
 // alertsComponent builds the #alerts region (design section 6a, D8): every
-// WARN-and-above line the log Handler's ring currently holds, newest first.
-// Unlike #main and #rail, it takes no navigation signals: it renders the
-// same content on every frame regardless of which view or ticket is open,
-// so patchRegions (stream.go) can call it without sig.
-func (c *console) alertsComponent() templ.Component {
-	return templates.Alerts(buildAlertLines(c.log.Warnings(alertsLimit)), assetVersion, templates.StopBanner{})
+// WARN-and-above line the log Handler's ring currently holds, newest first,
+// plus the dispatcher's stop banner (dispatchbanner.go, ticket #89). Unlike
+// #main and #rail, it takes no navigation signals: it renders the same
+// content on every frame regardless of which view or ticket is open, so
+// patchRegions (stream.go) can call it without sig. ctx backs stopBanner's
+// own StopStatus read.
+func (c *console) alertsComponent(ctx context.Context) templ.Component {
+	return templates.Alerts(buildAlertLines(c.log.Warnings(alertsLimit)), assetVersion, c.stopBanner(ctx))
 }
 
 // buildAlertLines turns the handler's ring entries into the #alerts

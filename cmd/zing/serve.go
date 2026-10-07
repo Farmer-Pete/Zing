@@ -402,7 +402,7 @@ func serve(ctx context.Context, cfgPath, dbPath string, seedDemo bool) error {
 	allowedHosts = append(allowedHosts, cfg.Console.AllowedHosts...)
 
 	handler := console.New(st, b, m, allowedHosts, cfg.Console.Port, logHandler, push, pushToken, floor, sbSet.FirstUnavailable(usedSandboxProfiles(m)), tr, cfg.User,
-		job.TicketCommands{Store: st, Machine: m, Projects: projects, Commands: cmds})
+		job.TicketCommands{Store: st, Machine: m, Projects: projects, Commands: cmds}, console.WithDispatch(d))
 	srv := newServer(ctx, handler)
 
 	listeners, err := listenOnAll(ctx, hosts, cfg.Console.Port)

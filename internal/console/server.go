@@ -126,6 +126,14 @@ type console struct {
 	// not itself exercise the route passes nil.
 	run TicketRunner
 
+	// dispatch backs the #alerts stop banner and POST /dispatch/resume
+	// (dispatchbanner.go, ticket #89): WithDispatch sets it. Nilable the
+	// way push, tracker, and run already are -- nil renders no banner and
+	// answers that route 503 "the dispatcher is not running in this
+	// process"; every test that does not itself exercise either passes no
+	// WithDispatch option.
+	dispatch Dispatch
+
 	// startedAt is when New built this console (bug fix: the Log rail's
 	// empty state read as "No log lines yet." after every `zing serve`
 	// restart, since log.go's ring is in memory and a restart always starts
@@ -227,10 +235,15 @@ type console struct {
 // dispatcher's CHECK step runs with. A nil run (every other caller: selftest,
 // most tests) makes that route answer 503 "sandbox runs are not available".
 //
+// opts (ticket #89) apply in argument order before any route is
+// registered; WithDispatch (dispatchbanner.go) is the only one today.
+// cmd/zing/serve.go passes it; every other caller, including every
+// existing test, passes none.
+//
 // The returned handler is a *http.ServeMux, plain HTTP/1.1, with no timeouts
 // of its own; cmd/zing wraps it in an http.Server with the drain-aware
 // BaseContext and shutdown sequence (design section 6.14, cmd/zing/serve.go).
-func New(st *store.Store, b *bus.Broker, m *machine.Machine, hosts []string, port int, log *Handler, push PushKeys, pushToken string, floor response.Severity, sandboxReason string, tr tracker.Tracker, user string, run TicketRunner) http.Handler {
+func New(st *store.Store, b *bus.Broker, m *machine.Machine, hosts []string, port int, log *Handler, push PushKeys, pushToken string, floor response.Severity, sandboxReason string, tr tracker.Tracker, user string, run TicketRunner, opts ...Option) http.Handler {
 	c := &console{
 		store: st, bus: b, machine: m, log: log, push: push, pushToken: pushToken,
 		floor: floor, sandboxReason: sandboxReason, tracker: tr, user: user,
@@ -238,6 +251,9 @@ func New(st *store.Store, b *bus.Broker, m *machine.Machine, hosts []string, por
 		startedAt:          time.Now(),
 		streamHeartbeat:    streamHeartbeatInterval,
 		streamWriteTimeout: streamFrameWriteTimeout,
+	}
+	for _, opt := range opts {
+		opt(c)
 	}
 	// asset_version is what every page this console serves carries in
 	// data-build and ?v=, so a stale tab can be matched to its deploy (#59).
