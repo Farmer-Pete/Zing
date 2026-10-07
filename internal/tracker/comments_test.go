@@ -153,3 +153,21 @@ func TestReplyPrefix(t *testing.T) {
 		}
 	})
 }
+
+// TestIssueRef proves IssueRef renders a GitHub issue number with a
+// leading "#" and leaves every other ref unchanged (plan #74).
+func TestIssueRef(t *testing.T) {
+	t.Parallel()
+
+	cases := map[string]string{
+		"65":     "#65",
+		"fake#3": "fake#3",
+		"":       "",
+		"6a":     "6a",
+	}
+	for ref, want := range cases {
+		if got := tracker.IssueRef(ref); got != want {
+			t.Errorf("IssueRef(%q) = %q, want %q", ref, got, want)
+		}
+	}
+}

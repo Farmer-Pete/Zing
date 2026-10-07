@@ -656,3 +656,62 @@ func TestMigration0009CappedUntil(t *testing.T) {
 		t.Errorf("run.CappedUntil = %v, want %v", run.CappedUntil, want)
 	}
 }
+
+// TestMigration0010SplitChildren proves migration 0010_split_children.sql
+// installed the ticket_dependencies table and the tickets.split_key column
+// (#74's planner split): ticket_dependencies accepts a row between two
+// distinct tickets and rejects a self-dependency (its CHECK), an UPDATE
+// setting split_key to a non-c-prefixed value fails the column's own CHECK,
+// and two children of the same parent sharing a split_key violate
+// tickets_split_key_uk.
+func TestMigration0010SplitChildren(t *testing.T) {
+	t.Parallel()
+	ctx := t.Context()
+	s, err := Open(ctx, dbPath(t))
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer func() { _ = s.Close() }()
+	seedProjectAndTicket(t, s)
+
+	found := tableColumnNames(t, s, "tickets")
+	if !found["split_key"] {
+		t.Fatal("tickets.split_key column not found after migration 0010")
+	}
+
+	if _, execErr := s.db.ExecContext(ctx,
+		`INSERT INTO tickets (id, project_id, tracker_ref, title, state, parent_ticket_id) VALUES (2, 1, '43', 'a child', 'queued', 1)`,
+	); execErr != nil {
+		t.Fatalf("seed child ticket: %v", execErr)
+	}
+
+	if _, execErr := s.db.ExecContext(ctx,
+		`INSERT INTO ticket_dependencies (ticket_id, depends_on_ticket_id) VALUES (2, 1)`,
+	); execErr != nil {
+		t.Errorf("insert dependency between distinct tickets: %v", execErr)
+	}
+
+	if _, execErr := s.db.ExecContext(ctx,
+		`INSERT INTO ticket_dependencies (ticket_id, depends_on_ticket_id) VALUES (2, 2)`,
+	); execErr == nil {
+		t.Error("insert self-dependency: want a CHECK constraint error, got nil")
+	}
+
+	if _, execErr := s.db.ExecContext(ctx,
+		`UPDATE tickets SET split_key = 'x1' WHERE id = 2`,
+	); execErr == nil {
+		t.Error("UPDATE split_key to a non-c-prefixed value: want a CHECK constraint error, got nil")
+	}
+
+	if _, execErr := s.db.ExecContext(ctx,
+		`UPDATE tickets SET split_key = 'c1' WHERE id = 2`,
+	); execErr != nil {
+		t.Fatalf("UPDATE split_key to a legal value: %v", execErr)
+	}
+
+	if _, execErr := s.db.ExecContext(ctx,
+		`INSERT INTO tickets (id, project_id, tracker_ref, title, state, parent_ticket_id, split_key) VALUES (3, 1, '44', 'another child', 'queued', 1, 'c1')`,
+	); execErr == nil {
+		t.Error("insert second child with the same parent and split_key: want tickets_split_key_uk violation, got nil")
+	}
+}
