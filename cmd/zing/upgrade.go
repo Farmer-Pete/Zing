@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"sync"
 	"time"
 
 	"zing/internal/store"
@@ -81,6 +82,46 @@ type upgrader struct {
 	running string
 	store   *store.Store
 	steps   upgradeSteps
+
+	// mu guards queued, hasQueued, target, carry, and hasCarry.
+	mu        sync.Mutex
+	queued    upgradeRequest
+	hasQueued bool
+	target    *restartTarget
+	carry     upgradeRequest
+	hasCarry  bool
+
+	// wake has capacity 1; Request sends on it without blocking.
+	wake chan struct{}
+}
+
+// Request queues ticketID and sha as the next upgrade, newest wins. Once a
+// target is set, it writes to carry instead, so the drain that already
+// started is never replaced.
+func (u *upgrader) Request(ticketID int64, sha string) {
+	u.mu.Lock()
+	defer u.mu.Unlock()
+	r := upgradeRequest{TicketID: ticketID, SHA: sha}
+	if u.target != nil {
+		u.carry, u.hasCarry = r, true
+		return
+	}
+	u.queued, u.hasQueued = r, true
+	select {
+	case u.wake <- struct{}{}:
+	default:
+	}
+}
+
+// Target reports the restart target once the loop has set one, along with
+// any request that arrived after that.
+func (u *upgrader) Target() (rt restartTarget, carry upgradeRequest, hasCarry, ok bool) {
+	u.mu.Lock()
+	defer u.mu.Unlock()
+	if u.target == nil {
+		return restartTarget{}, upgradeRequest{}, false, false
+	}
+	return *u.target, u.carry, u.hasCarry, true
 }
 
 // matchesRunning reports whether running names commit sha: running must be

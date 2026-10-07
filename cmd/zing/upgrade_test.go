@@ -81,6 +81,7 @@ func newTestUpgrader(t *testing.T) (*upgrader, *fakeSteps) {
 		running: "0123456789ab",
 		store:   st,
 		steps:   steps,
+		wake:    make(chan struct{}, 1),
 	}
 	return u, steps
 }
@@ -218,6 +219,68 @@ func TestMatchesRunning(t *testing.T) {
 				t.Errorf("matchesRunning(%q, %q) = %v, want %v", c.sha, c.running, got, c.want)
 			}
 		})
+	}
+}
+
+// TestUpgrade_RequestQueuesAndCarries proves Request queues the newest
+// request while no target is set, wakes the loop once, and once a target is
+// set writes to carry instead, leaving queued untouched. It runs with no
+// goroutines.
+func TestUpgrade_RequestQueuesAndCarries(t *testing.T) {
+	t.Parallel()
+
+	u, _ := newTestUpgrader(t)
+
+	u.Request(1, "a")
+	u.Request(2, "b")
+
+	u.mu.Lock()
+	if !u.hasQueued || u.queued != (upgradeRequest{TicketID: 2, SHA: "b"}) {
+		u.mu.Unlock()
+		t.Fatalf("queued = %+v, hasQueued = %v, want {2 b}, true", u.queued, u.hasQueued)
+	}
+	u.mu.Unlock()
+
+	select {
+	case <-u.wake:
+	default:
+		t.Fatalf("wake has no signal, want one")
+	}
+	select {
+	case <-u.wake:
+		t.Fatalf("wake had a second signal, want exactly one queued for two Requests")
+	default:
+	}
+
+	rt, carry, hasCarry, ok := u.Target()
+	if ok {
+		t.Fatalf("Target = %+v, %+v, %v, %v before target is set, want ok false", rt, carry, hasCarry, ok)
+	}
+
+	u.mu.Lock()
+	target := restartTarget{Binary: "bin/zing", ToSHA: "b"}
+	u.target = &target
+	u.mu.Unlock()
+
+	u.Request(3, "c")
+	u.Request(4, "d")
+
+	u.mu.Lock()
+	if !u.hasQueued || u.queued != (upgradeRequest{TicketID: 2, SHA: "b"}) {
+		u.mu.Unlock()
+		t.Fatalf("queued changed after target was set: queued = %+v, hasQueued = %v, want still {2 b}, true", u.queued, u.hasQueued)
+	}
+	u.mu.Unlock()
+
+	rt, carry, hasCarry, ok = u.Target()
+	if !ok {
+		t.Fatalf("Target ok = %v, want true", ok)
+	}
+	if rt != target {
+		t.Errorf("Target restartTarget = %+v, want %+v", rt, target)
+	}
+	if !hasCarry || carry != (upgradeRequest{TicketID: 4, SHA: "d"}) {
+		t.Errorf("carry = %+v, hasCarry = %v, want {4 d}, true", carry, hasCarry)
 	}
 }
 
