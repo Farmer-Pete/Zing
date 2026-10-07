@@ -1454,6 +1454,9 @@ func (d *Dispatcher) runAndCommit(ctx context.Context, ticket store.Ticket, time
 		// Splitter is the dispatcher too: FileSplitChild and CloseSplitParent
 		// (split.go), the same split-variant pair job.SplitTracker names.
 		Splitter: d,
+		// Source is the dispatcher too: IssueText (issuetext.go) reads a
+		// ticket's current body and owner comments for the planning refresh.
+		Source: d,
 		// Reserve closes over this tick's own owner and expires (the same
 		// lease Claim above just took out), so a handler's runJob call never
 		// sees either directly (design D13, section 4.4, 4.6).

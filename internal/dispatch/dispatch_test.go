@@ -302,12 +302,26 @@ func seedQueuedGitBackedTicket(t *testing.T, s *store.Store, ref string) int64 {
 	t.Helper()
 	projectID := seedGitBackedProject(t, s)
 	id, err := s.InsertTicket(t.Context(), store.Ticket{
-		ProjectID: projectID, TrackerRef: ref, Title: testTicketTitle, State: testStateQueued,
+		ProjectID: projectID, TrackerRef: ref, Title: testTicketTitle, Body: fixtureTicketBody(t, ref), State: testStateQueued,
 	})
 	if err != nil {
 		t.Fatalf("InsertTicket(%s): %v", ref, err)
 	}
 	return id
+}
+
+// fixtureTicketBody returns ref's body in fixtures/tickets.toml, or "" when
+// ref is not one of its tickets (Deps.Source is wired for real now, so a
+// ticket seeded with an empty Body would spend its first planning tick on a
+// refresh the fixture tracker reports as a change; seeding the body it
+// would read back makes that first refresh a no-op).
+func fixtureTicketBody(t *testing.T, ref string) string {
+	t.Helper()
+	tk, err := newFixtureTracker(t).Fetch(t.Context(), "zing", ref)
+	if err != nil {
+		return ""
+	}
+	return tk.Body
 }
 
 // seedProject inserts testProject and returns its id.
@@ -327,7 +341,7 @@ func seedQueuedTicket(t *testing.T, s *store.Store, ref string) int64 {
 	t.Helper()
 	projectID := seedProject(t, s)
 	id, err := s.InsertTicket(t.Context(), store.Ticket{
-		ProjectID: projectID, TrackerRef: ref, Title: testTicketTitle, State: testStateQueued,
+		ProjectID: projectID, TrackerRef: ref, Title: testTicketTitle, Body: fixtureTicketBody(t, ref), State: testStateQueued,
 	})
 	if err != nil {
 		t.Fatalf("InsertTicket(%s): %v", ref, err)
@@ -4285,7 +4299,7 @@ func TestTick_PlanningNothingToDoAllFalseClaimsPostsTrackerComment(t *testing.T)
 	projectID := seedProject(t, s)
 	const bindingUser = "nothing-to-do-owner"
 	ticketID, err := s.InsertTicket(t.Context(), store.Ticket{
-		ProjectID: projectID, TrackerRef: testFixtureRef, Title: "t", State: testStateQueued,
+		ProjectID: projectID, TrackerRef: testFixtureRef, Title: "t", Body: fixtureTicketBody(t, testFixtureRef), State: testStateQueued,
 	})
 	if err != nil {
 		t.Fatalf("InsertTicket: %v", err)
@@ -4354,7 +4368,7 @@ func TestTick_PlanningNothingToDoClosesIssueOnce(t *testing.T) {
 	projectID := seedProject(t, s)
 	const bindingUser = "nothing-to-do-owner"
 	ticketID, err := s.InsertTicket(t.Context(), store.Ticket{
-		ProjectID: projectID, TrackerRef: testFixtureRef, Title: "t", State: testStateQueued,
+		ProjectID: projectID, TrackerRef: testFixtureRef, Title: "t", Body: fixtureTicketBody(t, testFixtureRef), State: testStateQueued,
 	})
 	if err != nil {
 		t.Fatalf("InsertTicket: %v", err)
