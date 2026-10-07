@@ -208,9 +208,6 @@ func TestRunAndRoute_CodexCommandRejectionQuotedInTried(t *testing.T) {
 	if got := commit.Escalation.Payload.Tried; got != wantTried {
 		t.Errorf("Escalation.Payload.Tried = %q, want %q", got, wantTried)
 	}
-	if !strings.Contains(commit.Escalation.Payload.Tried, "rm -f style commands are not permitted. Use a safer approach") {
-		t.Errorf("Escalation.Payload.Tried = %q, want it to contain the rejection line", commit.Escalation.Payload.Tried)
-	}
 
 	if got := readFakeCodexCalls(t, fakeDir); got != 1 {
 		t.Errorf("FAKE_CODEX_DIR/calls holds %d lines, want 1 (no retry)", got)

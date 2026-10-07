@@ -41,8 +41,14 @@ func TestCheckScenarioShape_RejectsRmForce(t *testing.T) {
 				cleanScenario,
 			}
 			errs := checkScenarioShape(scenarios)
-			if len(errs) != 1 || errs[0].Path != "scenarios/scenario[0]/check" || errs[0].Msg != rmForceCheckMsg {
-				t.Fatalf("checkScenarioShape(%q) = %+v, want one error on scenario[0]/check with msg %q", tc.check, errs, rmForceCheckMsg)
+			if len(errs) != 1 {
+				t.Fatalf("checkScenarioShape(%q) = %+v, want exactly one error", tc.check, errs)
+			}
+			if errs[0].Path != "scenarios/scenario[0]/check" {
+				t.Errorf("checkScenarioShape(%q) error Path = %q, want %q", tc.check, errs[0].Path, "scenarios/scenario[0]/check")
+			}
+			if errs[0].Msg != rmForceCheckMsg {
+				t.Errorf("checkScenarioShape(%q) error Msg = %q, want %q", tc.check, errs[0].Msg, rmForceCheckMsg)
 			}
 		})
 	}

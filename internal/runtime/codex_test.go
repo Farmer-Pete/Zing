@@ -971,8 +971,13 @@ func TestCodexCommandRejection(t *testing.T) {
 			wantLine: line,
 		},
 		{
-			name:     "error event",
-			stdout:   marshal(t, codexRejectionEventLine{Type: codexEventError, Message: line}),
+			name: "error event",
+			stdout: func() string {
+				var ev codexRejectionEventLine
+				ev.Type = codexEventError
+				ev.Message = line
+				return marshal(t, ev)
+			}(),
 			wantLine: line,
 		},
 		{
@@ -1107,14 +1112,19 @@ func TestCodexRejectionDetail(t *testing.T) {
 		})
 	}
 
-	t.Run("a 5000-byte detail is cut to at most 2048 bytes", func(t *testing.T) {
+	t.Run("a multi-byte rune straddling the 2048-byte cut is kept whole", func(t *testing.T) {
 		t.Parallel()
-		detail := strings.Repeat("a", 5000)
-		got := codexRejectionDetail("rm -f s2.json", line, detail)
+		wantHead := "codex refused a command: rm -f s2.json: " + line
+		prefix := wantHead + "; codex's own error: "
+		// Pad with 'a' up to byte 2047 of the combined string, then append a
+		// run of 'é' (two bytes each) so one straddles the cut at byte 2048:
+		// a cut that blindly took the first maxFailureDetailBytes bytes would
+		// split it in half and produce invalid UTF-8.
+		padded := strings.Repeat("a", 2047-len(prefix)) + strings.Repeat("é", 10)
+		got := codexRejectionDetail("rm -f s2.json", line, padded)
 		if len(got) > maxFailureDetailBytes {
 			t.Errorf("len(got) = %d, want at most %d", len(got), maxFailureDetailBytes)
 		}
-		wantHead := "codex refused a command: rm -f s2.json: " + line
 		if !strings.HasPrefix(got, wantHead) {
 			t.Errorf("got = %q, want prefix %q", got, wantHead)
 		}
