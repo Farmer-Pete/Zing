@@ -2557,27 +2557,19 @@ func abandonCommit(t store.Ticket, d Deps, code string) store.HandlerCommit {
 	return c
 }
 
-// recapBudgetEscalation is retryCapBudget's still-over-budget branch (design
-// section 6.7): re-escalate wall_clock in this same commit, with the same
-// What/Why/ExtraOptions budgetEscalationCommit itself posts, resolving the
-// round that led here. The two bodies were identical; delegating keeps chip
-// d on the re-escalation too.
-func recapBudgetEscalation(t store.Ticket, d Deps, resolveIDs []int64) store.HandlerCommit {
-	return budgetEscalationCommit(t, d, resolveIDs)
-}
-
 // retryCapBudget is the cap_budget row for Retry and chip d (design section
 // 6.7): it compares the ticket's agent seconds with ticketBudget plus
 // raiseMinutes, through the budgetExhausted comparison it shares with
 // runJobWith. raiseMinutes is 0 for Retry and budgetRaiseMinutes for chip d.
-// While the ticket is still over, it re-escalates wall_clock
-// (recapBudgetEscalation). Once the owner has raised Agent minutes per
-// ticket in the console's settings or picked chip d, it resolves the round
-// and writes the "retry requested" marker instead, so the next tick retakes
-// the refused call; a shipping ticket also clears its poll. When
-// raiseMinutes is above 0, either commit also carries one budget_raised
-// event. Both branches log at INFO, so settings.log_level warn or error
-// drops them.
+// While the ticket is still over, it re-escalates wall_clock in this same
+// commit, with the same What/Why/ExtraOptions budgetEscalationCommit itself
+// posts, resolving the round that led here (which also keeps chip d on the
+// re-escalation). Once the owner has raised Agent minutes per ticket in the
+// console's settings or picked chip d, it resolves the round and writes the
+// "retry requested" marker instead, so the next tick retakes the refused
+// call; a shipping ticket also clears its poll. When raiseMinutes is above
+// 0, either commit also carries one budget_raised event. Both branches log
+// at INFO, so settings.log_level warn or error drops them.
 func retryCapBudget(ctx context.Context, t store.Ticket, d Deps, resolveIDs []int64, raiseMinutes int) (store.HandlerCommit, error) {
 	agentSeconds, err := d.Store.AgentSecondsForTicket(ctx, t.ID)
 	if err != nil {
@@ -2590,16 +2582,15 @@ func retryCapBudget(ctx context.Context, t store.Ticket, d Deps, resolveIDs []in
 	budget += time.Duration(raiseMinutes) * time.Minute
 	exhausted, capSeconds := budgetExhausted(agentSeconds, budget)
 	var c store.HandlerCommit
-	switch {
-	case exhausted:
+	if exhausted {
 		slog.Info("cap_budget retry still over budget", "ticket_id", t.ID, "agent_seconds", agentSeconds, "cap_seconds", capSeconds, "raise_minutes", raiseMinutes)
-		c = recapBudgetEscalation(t, d, resolveIDs)
-	case t.State == stateShipping:
-		slog.Info("cap_budget retry resumes", "ticket_id", t.ID, "state", t.State, "agent_seconds", agentSeconds, "cap_seconds", capSeconds, "raise_minutes", raiseMinutes)
-		c = shipRetryMarkerCommit(t, d, resolveIDs)
-	default:
+		c = budgetEscalationCommit(t, d, resolveIDs)
+	} else {
 		slog.Info("cap_budget retry resumes", "ticket_id", t.ID, "state", t.State, "agent_seconds", agentSeconds, "cap_seconds", capSeconds, "raise_minutes", raiseMinutes)
 		c = buildingHandler{}.retryMarkerCommit(t, d, resolveIDs)
+		if t.State == stateShipping {
+			c = shipRetryMarkerCommit(t, d, resolveIDs)
+		}
 	}
 	if raiseMinutes == 0 {
 		return c, nil

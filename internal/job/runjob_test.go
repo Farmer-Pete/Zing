@@ -1967,15 +1967,19 @@ func TestRaiseCapBudget_LiftsOnlyThatTicket(t *testing.T) {
 // still-over-budget branch also carries the budget_raised event when
 // raiseMinutes is above 0 (design section 6.7): a raise that is not enough
 // re-escalates wall_clock, offering chip d again, and still records the
-// event -- a second pick then compares against the sum of both.
+// event. A second pick, after the first is committed, then compares against
+// the sum of both raises (owner decision Q2: each pick stacks).
 func TestRetryCapBudget_RaiseStillOverBudget(t *testing.T) {
 	t.Parallel()
 	s := newRunJobTestStore(t)
 	ticketID := seedRunJobTicket(t, s)
 	seedAgentSeconds(t, s, ticketID, 4000)
-	ticket := getRunJobTicket(t, s, ticketID)
 
-	commit, err := retryCapBudget(t.Context(), ticket, Deps{Store: s, Budget: 0}, nil, budgetRaiseMinutes)
+	owner1, expires1 := claimRunJobTicket(t, s, ticketID)
+	ticket := getRunJobTicket(t, s, ticketID)
+	deps1 := Deps{Store: s, Budget: 0, Owner: owner1, Expires: expires1}
+
+	commit, err := retryCapBudget(t.Context(), ticket, deps1, nil, budgetRaiseMinutes)
 	if err != nil {
 		t.Fatalf("retryCapBudget: %v", err)
 	}
@@ -2000,5 +2004,51 @@ func TestRetryCapBudget_RaiseStillOverBudget(t *testing.T) {
 	}
 	if payload.Minutes != 60 {
 		t.Errorf("payload.Minutes = %d, want 60", payload.Minutes)
+	}
+
+	applied, err := s.CommitHandlerResult(t.Context(), commit)
+	if err != nil {
+		t.Fatalf("CommitHandlerResult: %v", err)
+	}
+	if !applied {
+		t.Fatal("CommitHandlerResult: applied = false, want true")
+	}
+
+	owner2, expires2 := claimRunJobTicket(t, s, ticketID)
+	deps2 := Deps{Store: s, Budget: 0, Owner: owner2, Expires: expires2}
+	ticket2 := getRunJobTicket(t, s, ticketID)
+
+	commit2, err := retryCapBudget(t.Context(), ticket2, deps2, nil, budgetRaiseMinutes)
+	if err != nil {
+		t.Fatalf("retryCapBudget (second pick): %v", err)
+	}
+	if commit2.Escalation != nil {
+		t.Errorf("commit2.Escalation = %+v, want nil (120 raised minutes covers 4000 agent seconds)", commit2.Escalation)
+	}
+	if len(commit2.Messages) != 2 {
+		t.Fatalf("commit2.Messages = %+v, want a marker plus one budget_raised event", commit2.Messages)
+	}
+	if commit2.Messages[0].Body != markerRetryRequested {
+		t.Errorf("commit2.Messages[0].Body = %q, want %q", commit2.Messages[0].Body, markerRetryRequested)
+	}
+	ev2 := commit2.Messages[1]
+	if ev2.EventKind == nil || *ev2.EventKind != store.EventKindBudgetRaised {
+		t.Fatalf("commit2.Messages[1].EventKind = %v, want %q", ev2.EventKind, store.EventKindBudgetRaised)
+	}
+
+	applied2, err := s.CommitHandlerResult(t.Context(), commit2)
+	if err != nil {
+		t.Fatalf("CommitHandlerResult (second pick): %v", err)
+	}
+	if !applied2 {
+		t.Fatal("CommitHandlerResult (second pick): applied = false, want true")
+	}
+
+	total, err := s.BudgetRaisedMinutes(t.Context(), ticketID)
+	if err != nil {
+		t.Fatalf("BudgetRaisedMinutes: %v", err)
+	}
+	if total != 120 {
+		t.Fatalf("BudgetRaisedMinutes = %d, want 120", total)
 	}
 }
