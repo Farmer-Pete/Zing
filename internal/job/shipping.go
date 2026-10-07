@@ -398,9 +398,10 @@ func publishChecks(ctx context.Context, t store.Ticket, d Deps) (proj Project, w
 }
 
 // judgeRoundPassedLine is "judge round <n> passed", EVALUATE's own terminal
-// marker (judging.go's judgeRoundMarkerPrefix family; "passed" is the one
-// shape judging.go itself has no regex for, since EVALUATE's own code never
-// needs to parse it back -- PUBLISH is its only reader).
+// marker (judging.go's judgeRoundMarkerPrefix family). PUBLISH is its first
+// reader here; judging.go's own run also matches it now, since the owner's
+// Retry on PUBLISH's judgeNotPassedWhat escalation (#95, owner decision Q5)
+// sends the ticket back to judging with this same marker still newest.
 var judgeRoundPassedLine = regexp.MustCompile(`^judge round ([1-9]\d*) passed$`)
 
 // judgeRoundPassed returns the round of the newest "judge round <n> passed"
@@ -532,6 +533,11 @@ func shipLoopsExhausted(t store.Ticket, d Deps, what, why, tried string) store.H
 // pins this literal exactly, "merged", because DONE fires whoever merged
 // the pull request, not only a merge Zing itself made (M4).
 const reasonMerged = "merged"
+
+// reasonJudgeNotPassedHead is retryJudgeNotPassed's own Reason (#95, owner
+// decision Q5): the owner's Retry on PUBLISH's judgeNotPassedWhat escalation
+// sends the ticket back to judging so a new round starts at HEAD.
+const reasonJudgeNotPassedHead = "judge has not passed head"
 
 // jobRespondName is jobs.respond's own machine.toml key (design D14,
 // section 8.7): the shared shipping counter's own limit is
@@ -1516,6 +1522,27 @@ func previousCIWaiting(ctx context.Context, t store.Ticket, d Deps) ([]string, e
 // or the merge question sets ClearPoll (design section 8.1).
 func shipRetryMarkerCommit(t store.Ticket, d Deps, resolveIDs []int64) store.HandlerCommit {
 	c := buildingHandler{}.retryMarkerCommit(t, d, resolveIDs)
+	c.ClearPoll = true
+	return c
+}
+
+// retryJudgeNotPassed is resolvePostBuildEscalation's own row for the
+// owner's Retry on PUBLISH's judgeNotPassedWhat escalation (#95, owner
+// decision Q5): nothing in shipping writes verdicts, so re-running PUBLISH
+// (shipRetryMarkerCommit's own generic row) would only escalate the same
+// way again. Instead this sends the ticket back to judging, where the new
+// judgeRoundPassedLine case in judgeHandler.run starts a fresh round at
+// HEAD.
+func (h shipHandler) retryJudgeNotPassed(t store.Ticket, d Deps, resolveIDs []int64) store.HandlerCommit {
+	slog.Info("ticket sent back to judging", "ticket_id", t.ID, "question_ids", resolveIDs)
+
+	c := baseCommit(t, d)
+	c.ResolveQuestions = resolveIDs
+	c.Messages = []store.Message{{
+		TicketID: t.ID, Type: msgTypeUpdate, Author: authorSystem,
+		Body: "Zing sent the ticket back to judging: the judge has not passed the branch head, so a new judge round runs there",
+	}}
+	c.Next, c.Reason = stateJudging, reasonJudgeNotPassedHead
 	c.ClearPoll = true
 	return c
 }

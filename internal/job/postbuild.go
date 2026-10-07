@@ -170,7 +170,11 @@ func postBuildRoundOwnedByOpenFix(ctx context.Context, t store.Ticket, d Deps, r
 // shipRetryMarkerCommit, when the ticket is in shipping -- and otherwise
 // re-escalates wall_clock, unchanged from before #25.
 // Shipping's own loops_exhausted row is shipHandler.retryShippingLoopsExhausted
-// (shipping.go, task 7); its pr_closed and every other code share
+// (shipping.go, task 7). A row just above the generic shipping one matches
+// PUBLISH's own judgeNotPassedWhat escalation while still in shipping and
+// sends the ticket back to judging instead (shipHandler.retryJudgeNotPassed,
+// #95, owner decision Q5), since nothing in shipping could re-judge it.
+// Its pr_closed and every other code share
 // shipRetryMarkerCommit, the same "retry requested" marker plus ClearPoll --
 // except a merge-unit escalation (isBaseMergeTried, merge.go task 7), which
 // takes priority over loops_exhausted and every other code and routes to
@@ -266,6 +270,9 @@ func resolvePostBuildEscalation(ctx context.Context, t store.Ticket, d Deps, rou
 
 	case origin == response.EscalationOriginShipping && payload.Code == string(response.EscalationCodeLoopsExhausted):
 		commit, err = shipHandler{}.retryShippingLoopsExhausted(ctx, t, d, resolveIDs, notes, payload.Tried)
+
+	case origin == response.EscalationOriginShipping && payload.What == judgeNotPassedWhat && t.State == stateShipping:
+		commit = shipHandler{}.retryJudgeNotPassed(t, d, resolveIDs)
 
 	case origin == response.EscalationOriginShipping:
 		commit = shipRetryMarkerCommit(t, d, resolveIDs)

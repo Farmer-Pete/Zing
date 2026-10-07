@@ -146,10 +146,14 @@ const artifactTypeVerdict = "verdict"
 // the newest is jm, the decision tree's own step (2) entry point.
 const judgeRoundMarkerPrefix = "judge round "
 
-// The four "judge round " marker first-line shapes this file reads (design
-// section 5.1, 7.1); "judge round <n> passed" is EVALUATE's own terminal
-// marker (task 8) and is never read here, since a passed round has already
-// moved the ticket out of "judging" by the time any later tick could see it.
+// The four "judge round " marker first-line shapes this file itself reads
+// (design section 5.1, 7.1); shipping.go's own judgeRoundPassedLine is the
+// fifth. "judge round <n> passed" is EVALUATE's own terminal marker (task
+// 8): a passed round normally moves the ticket out of "judging" before any
+// later tick could see it, but the owner's Retry on PUBLISH's
+// judgeNotPassedWhat escalation (#95, owner decision Q5) sends the ticket
+// back to judging with that same passed marker still newest, so run's own
+// judgeRoundPassedLine case starts round n+1 at HEAD.
 var (
 	judgeRoundStartedLine  = regexp.MustCompile(`^judge round ([1-9]\d*) started sha ([0-9a-f]{40}) after run (\d+)$`)
 	judgeRoundRetryLine    = regexp.MustCompile(`^judge round ([1-9]\d*) retry after run (\d+)$`)
@@ -425,6 +429,15 @@ func (h judgeHandler) run(ctx context.Context, t store.Ticket, d Deps) (store.Ha
 			return store.HandlerCommit{}, shaErr
 		}
 		return h.checkOrEvaluate(ctx, t, d, n, sha)
+
+	case judgeRoundPassedLine.MatchString(firstLine):
+		sub := judgeRoundPassedLine.FindStringSubmatch(firstLine)
+		n, convErr := strconv.Atoi(sub[1])
+		if convErr != nil {
+			return store.HandlerCommit{}, fmt.Errorf("job: judging: parse passed round %q: %w", firstLine, convErr)
+		}
+		slog.Info("judge round restarted after shipping retry", "ticket_id", t.ID, "round", n, "new_round", n+1)
+		return h.start(ctx, t, d, n+1)
 
 	default:
 		return store.HandlerCommit{}, fmt.Errorf("job: judging: unrecognized judge round marker %q", firstLine)
