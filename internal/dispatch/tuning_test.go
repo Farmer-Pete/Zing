@@ -1,6 +1,7 @@
 package dispatch_test
 
 import (
+	"context"
 	"errors"
 	"testing"
 	"time"
@@ -200,5 +201,55 @@ func TestSetTuning_RejectsOutOfRangeAndWritesNothing(t *testing.T) {
 		if ok {
 			t.Errorf("GetSetting(%q): ok = true, want false (a refused SetTuning must write nothing)", key)
 		}
+	}
+}
+
+// TestRun_IntervalChangeResetsTicker proves a SetTuning call that changes
+// interval_seconds wakes a running Run and resets its ticker at once (#81),
+// rather than leaving the new interval to apply only once the old, much
+// longer interval would next have fired.
+func TestRun_IntervalChangeResetsTicker(t *testing.T) {
+	t.Parallel()
+
+	s := newDispatchTestStore(t)
+	seedQueuedTicket(t, s, testFixtureRef)
+
+	spy := &spyHandler{next: testStatePlanning, reason: testSpyReason}
+	reg := job.Registry()
+	reg[testStateQueued] = spy
+
+	d := newDispatcher(t, s, newFixtureTracker(t), bus.New(), fakeRuntime(t), reg, nil,
+		dispatch.Config{Interval: time.Hour, MaxParallel: 1, Owner: testOwner})
+
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+
+	runErrCh := make(chan error, 1)
+	go func() { runErrCh <- d.Run(ctx) }()
+
+	time.Sleep(100 * time.Millisecond)
+	if got := spy.Calls(); got != 0 {
+		t.Fatalf("spy.Calls() = %d after 100ms with a 1h interval, want 0", got)
+	}
+
+	if err := d.SetTuning(t.Context(), dispatch.TuneIntervalSeconds, 1, "peter"); err != nil {
+		t.Fatalf("SetTuning: %v", err)
+	}
+
+	deadline := time.Now().Add(5 * time.Second)
+	for spy.Calls() == 0 {
+		if time.Now().After(deadline) {
+			t.Fatalf("spy.Calls() stayed 0 for 5s after SetTuning(interval_seconds, 1)")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	if want := time.Second; d.CurrentTuning().Interval != want {
+		t.Errorf("CurrentTuning().Interval = %v, want %v", d.CurrentTuning().Interval, want)
+	}
+
+	cancel()
+	if err := waitFor(t, runErrCh, "Run to return after ctx cancel"); err != nil && !errors.Is(err, context.Canceled) {
+		t.Errorf("Run() = %v, want context.Canceled", err)
 	}
 }

@@ -305,8 +305,9 @@ func TestSettingsRoute_BudgetReachesNextDeps(t *testing.T) {
 
 // TestSettingsRoute_RejectsOutOfRange proves every out-of-bounds or unknown
 // POST /settings request answers 400 with the owner-facing message
-// (owner decision Q2), and writes nothing to the settings table, and an
-// extra field in the body also answers 400.
+// (owner decision Q2), writes nothing to the settings table, and leaves the
+// dispatcher's live Tuning exactly as it started (#81): a refused POST must
+// never partially apply. An extra field in the body also answers 400.
 func TestSettingsRoute_RejectsOutOfRange(t *testing.T) {
 	t.Parallel()
 
@@ -314,6 +315,7 @@ func TestSettingsRoute_RejectsOutOfRange(t *testing.T) {
 	b := bus.New()
 	d := settingsTestDispatcher(t, s, b, zdispatch.Config{MaxParallel: 1, Interval: time.Hour}, &settingsBudgetHandler{})
 	srv := newMutationTestServerWithTuner(t, s, b, d)
+	startTuning := d.CurrentTuning()
 
 	cases := []struct {
 		name, body, wantMsg string
@@ -358,6 +360,9 @@ func TestSettingsRoute_RejectsOutOfRange(t *testing.T) {
 				if ok {
 					t.Errorf("GetSetting(%q): ok = true, want false (a refused POST must write nothing)", key)
 				}
+			}
+			if got := d.CurrentTuning(); got != startTuning {
+				t.Errorf("CurrentTuning() = %+v after a refused POST, want unchanged %+v", got, startTuning)
 			}
 		})
 	}

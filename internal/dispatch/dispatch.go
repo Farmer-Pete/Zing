@@ -332,6 +332,14 @@ type Dispatcher struct {
 	// in the other. Taken before mu above, never after.
 	tuneMu sync.Mutex
 
+	// tuneCh wakes a running Run as soon as SetTuning changes
+	// interval_seconds (#81), rather than leaving the new interval to apply
+	// only on the ticker's next, still-old-interval fire. Capacity 1,
+	// made in New; SetTuning sends to it non-blockingly, so repeated
+	// interval changes before Run's select loop wakes coalesce into a
+	// single wake, the same pattern NotifyDrain uses for drainCh.
+	tuneCh chan struct{}
+
 	// firstErrorReported guards reportFirstError's alert 1 (design section
 	// 4.6): raised at most once per Dispatcher lifetime, whether the error
 	// that stopped the dispatcher arrives in Run's main loop or while
@@ -412,6 +420,7 @@ func New(
 		store: s, tracker: tr, bus: b, machine: m, reg: reg, rts: rts, bindings: bindings, cfg: cfg,
 		tune:     Tuning{MaxParallel: cfg.MaxParallel, Interval: cfg.Interval, Budget: cfg.Budget},
 		drainCh:  make(chan struct{}, 1),
+		tuneCh:   make(chan struct{}, 1),
 		inflight: make(map[int64]bool),
 	}, nil
 }
@@ -446,8 +455,23 @@ func (d *Dispatcher) SetTuning(ctx context.Context, name string, value int, by s
 		d.tune.Budget = time.Duration(value) * time.Minute
 	}
 	d.mu.Unlock()
+	if name == TuneIntervalSeconds {
+		select {
+		case d.tuneCh <- struct{}{}:
+		default:
+		}
+	}
 	slog.Info("dispatch: setting changed", "name", name, "value", value, "by", by)
 	return nil
+}
+
+// CurrentTuning returns the live Tuning, read under d.mu like every other
+// access to d.tune (#81): the console's Settings view reads it to show the
+// owner the value actually in effect, not just what is stored.
+func (d *Dispatcher) CurrentTuning() Tuning {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.tune
 }
 
 // postHandlerContext returns a detached, bounded context for a post-handler
@@ -570,8 +594,9 @@ func (d *Dispatcher) Run(ctx context.Context) error {
 	}
 	defer d.driving.Store(false)
 
-	results := make(chan runResult, d.cfg.MaxParallel)
-	ticker := time.NewTicker(d.cfg.Interval)
+	results := make(chan runResult, max(MaxParallelCeiling, d.cfg.MaxParallel))
+	interval := d.CurrentTuning().Interval
+	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 
 	for {
@@ -588,6 +613,13 @@ func (d *Dispatcher) Run(ctx context.Context) error {
 			if draining {
 				d.setStop(nil)
 				return d.finish(nil, results)
+			}
+
+		case <-d.tuneCh:
+			if iv := d.CurrentTuning().Interval; iv != interval {
+				slog.Info("dispatch: interval reset", "old", interval, "new", iv)
+				interval = iv
+				ticker.Reset(iv)
 			}
 
 		case r := <-results:
@@ -666,9 +698,12 @@ func (d *Dispatcher) finish(err error, results <-chan runResult) error {
 
 	// Every worker sends its result before calling wg.Done (design section
 	// 4.2 step 5), so by the time d.wg.Wait() above returned, every
-	// in-flight worker's value is already sitting in results' buffer
-	// (capacity cfg.MaxParallel) even if Go's select happened to pick the
-	// done case first above. Drain it now, without blocking.
+	// in-flight worker's value is already sitting in results' buffer even
+	// if Go's select happened to pick the done case first above. results'
+	// capacity is max(MaxParallelCeiling, the startup max_parallel), at
+	// least every console-reachable max_parallel (#81): a worker that still
+	// finds it full blocks before wg.Done, so this drain is never skipped
+	// while a send is still pending. Drain it now, without blocking.
 	for {
 		select {
 		case r := <-results:
