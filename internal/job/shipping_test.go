@@ -1661,8 +1661,8 @@ func shipPollRunWithReviewBots(t *testing.T, s *store.Store, ticket store.Ticket
 
 // recordingUpgrader is a job.SelfUpgrader test double (#109 part 1): it
 // records every Request call under a mutex, so TestPollMergedSelfRequestsUpgrade
-// and TestRunAndCommitCopiesUpgrader can assert both the call count and the
-// arguments without racing pollDone's own goroutine.
+// and TestPollMergedNonSelfDoesNotUpgrade can assert both the call count and
+// the arguments without racing pollDone's own goroutine.
 type recordingUpgrader struct {
 	mu    sync.Mutex
 	calls []upgradeRequestCall

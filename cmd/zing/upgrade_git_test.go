@@ -143,7 +143,7 @@ func TestGitGoSteps_BuildsAtSHA(t *testing.T) {
 		t.Fatalf("Build: %v", err)
 	}
 	if resolved != firstSHA {
-		t.Fatalf("resolved sha = %s, want %s (origin's tip, not the one requested)", resolved, firstSHA)
+		t.Fatalf("resolved sha = %s, want %s (the requested sha, not origin's tip)", resolved, firstSHA)
 	}
 
 	built, err := exec.CommandContext(ctx, out).Output() //nolint:gosec // G204: out is the binary this test just built

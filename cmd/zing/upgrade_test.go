@@ -35,6 +35,9 @@ type fakeSteps struct {
 	// is closed, but only for the matching sha.
 	blockSHA string
 	blockCh  chan struct{}
+	// blockStarted, when set, is closed the instant Build enters its block
+	// for blockSHA, so a test can wait for that instead of sleeping.
+	blockStarted chan struct{}
 
 	selftestVersion string
 	selftestOutput  string
@@ -48,8 +51,12 @@ func (f *fakeSteps) Build(_ context.Context, sha, out string) (string, error) {
 	f.buildCalls = append(f.buildCalls, sha)
 	block := f.blockSHA != "" && f.blockSHA == sha
 	ch := f.blockCh
+	started := f.blockStarted
 	f.mu.Unlock()
 	if block {
+		if started != nil {
+			close(started)
+		}
 		<-ch
 	}
 	if f.buildErr != nil {
@@ -516,6 +523,55 @@ func TestUpgrade_UnstampedBuildKeepsOldBinary(t *testing.T) {
 	}
 }
 
+// TestUpgrade_AlreadyRunningSkipsUpgrade proves that when the built sha
+// already matches the running version, prepare stops after build, removes
+// zing.next, posts no message, and never runs selftest or any later step.
+func TestUpgrade_AlreadyRunningSkipsUpgrade(t *testing.T) {
+	t.Parallel()
+
+	u, steps, _ := newTestUpgrader(t)
+	// 40 hex characters, starting with u.running ("0123456789ab").
+	builtSHA := u.running + "cdefabcdefabcdefabcdefabcdef"
+	if len(builtSHA) != 40 {
+		t.Fatalf("builtSHA length = %d, want 40", len(builtSHA))
+	}
+	steps.buildSHA = builtSHA
+	steps.selftestErr = errors.New("selftest must not run")
+
+	ticketID := seedTicketForUpgrade(t, u.store)
+	req := upgradeRequest{TicketID: ticketID, SHA: "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef"}
+
+	_, err := u.prepare(t.Context(), req)
+	if !errors.Is(err, errUpgradeNotRun) {
+		t.Fatalf("prepare error = %v, want errUpgradeNotRun", err)
+	}
+	if calls := steps.calls(); len(calls) != 1 {
+		t.Fatalf("Build called %d times, want 1", len(calls))
+	}
+
+	binary := filepath.Join(u.dataDir, "bin", "zing")
+	if _, statErr := os.Stat(binary + ".next"); !os.IsNotExist(statErr) {
+		t.Errorf("zing.next exists, want removed")
+	}
+	if _, statErr := os.Stat(binary + ".prev"); !os.IsNotExist(statErr) {
+		t.Errorf("zing.prev exists, want absent")
+	}
+	matches, err := filepath.Glob(filepath.Join(u.dataDir, backupPrefix+"*"))
+	if err != nil {
+		t.Fatalf("glob: %v", err)
+	}
+	if len(matches) != 0 {
+		t.Errorf("backups = %v, want none", matches)
+	}
+	msgs, err := u.store.ListMessages(t.Context(), ticketID)
+	if err != nil {
+		t.Fatalf("ListMessages: %v", err)
+	}
+	if len(msgs) != 0 {
+		t.Errorf("messages = %+v, want none", msgs)
+	}
+}
+
 // TestUpgrade_LoopBuildsNewestQueuedSHA proves a build superseded mid-flight
 // is discarded for the newest queued request without returning to loop's
 // wake wait, that loop builds exactly the shas that were ever started, and
@@ -531,6 +587,7 @@ func TestUpgrade_LoopBuildsNewestQueuedSHA(t *testing.T) {
 	u, steps, stopped := newTestUpgrader(t)
 	steps.blockSHA = shaA
 	steps.blockCh = make(chan struct{})
+	steps.blockStarted = make(chan struct{})
 	close(u.gate)
 
 	ctx, cancel := context.WithCancel(t.Context())
@@ -539,9 +596,10 @@ func TestUpgrade_LoopBuildsNewestQueuedSHA(t *testing.T) {
 	go func() { u.loop(ctx); close(loopDone) }()
 
 	u.Request(1, shaA)
-	// Give the loop time to start building A and block inside it before B
-	// and C are queued behind it.
-	time.Sleep(50 * time.Millisecond)
+	// Wait for the loop to actually enter Build for A and block inside it,
+	// rather than assuming it has by a fixed deadline, before B and C are
+	// queued behind it.
+	waitForClose(t, steps.blockStarted, "Build(A) to start")
 	u.Request(2, shaB)
 	u.Request(3, shaC)
 
@@ -561,8 +619,8 @@ func TestUpgrade_LoopBuildsNewestQueuedSHA(t *testing.T) {
 	if rt.ToSHA != shaC {
 		t.Errorf("Target.ToSHA = %q, want %q", rt.ToSHA, shaC)
 	}
-	if !hasCarry || carry.TicketID != 4 {
-		t.Errorf("carry = %+v, hasCarry = %v, want ticket 4, true", carry, hasCarry)
+	if !hasCarry || carry.TicketID != 4 || carry.SHA != shaD {
+		t.Errorf("carry = %+v, hasCarry = %v, want ticket 4, sha %q, true", carry, hasCarry, shaD)
 	}
 
 	m, found, err := loadUpgradeMarker(u.dataDir)
@@ -649,9 +707,68 @@ func TestUpgrade_SelftestFailsKeepsOldBinary(t *testing.T) {
 	}
 }
 
+// TestUpgrade_LoopMarkerWriteFailsKeepsOldBinary drives a failing
+// saveUpgradeMarker through loop (by putting a directory where upgrade.json
+// would be renamed) and proves the failure removes zing.next, posts a
+// message starting with "upgrade: write upgrade.json:", and never sets a
+// target or calls stop.
+func TestUpgrade_LoopMarkerWriteFailsKeepsOldBinary(t *testing.T) {
+	t.Parallel()
+
+	u, steps, stopped := newTestUpgrader(t)
+	builtSHA := "fedcba9876540123456789abcdef012345678900"
+	steps.buildSHA = builtSHA
+	steps.selftestVersion = builtSHA
+	close(u.gate)
+
+	if err := os.MkdirAll(filepath.Join(u.dataDir, upgradeMarkerFile), 0o755); err != nil {
+		t.Fatalf("mkdir upgrade.json: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	go u.loop(ctx)
+
+	ticketID := seedTicketForUpgrade(t, u.store)
+	sha := "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef"
+	u.Request(ticketID, sha)
+
+	deadline := time.Now().Add(5 * time.Second)
+	var msgs []store.MessageRow
+	for time.Now().Before(deadline) {
+		var err error
+		msgs, err = u.store.ListMessages(t.Context(), ticketID)
+		if err != nil {
+			t.Fatalf("ListMessages: %v", err)
+		}
+		if len(msgs) > 0 {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if len(msgs) != 1 || !strings.HasPrefix(msgs[0].Body, "upgrade: write upgrade.json:") {
+		t.Fatalf("messages = %+v, want one starting with %q", msgs, "upgrade: write upgrade.json:")
+	}
+
+	select {
+	case <-stopped:
+		t.Fatalf("stop was called, want it never called")
+	default:
+	}
+	if _, _, _, ok := u.Target(); ok {
+		t.Errorf("Target ok = true, want false")
+	}
+	binary := filepath.Join(u.dataDir, "bin", "zing")
+	if _, err := os.Stat(binary + ".next"); !os.IsNotExist(err) {
+		t.Errorf("zing.next exists, want absent")
+	}
+}
+
 // TestUpgrade_LoopCancelledAfterPrepareWritesNoMarker proves that when ctx
-// ends while prepare is finishing successfully, loop discards the build
-// without a marker, a target, a stop call, or any message.
+// ends in the window right after prepare has already finished successfully
+// but before runQueued's ctx.Err check runs, loop discards the build
+// without a marker, a target, a stop call, or any message, even though
+// prepare's own work (the backup and zing.prev) went ahead and happened.
 func TestUpgrade_LoopCancelledAfterPrepareWritesNoMarker(t *testing.T) {
 	t.Parallel()
 
@@ -659,12 +776,13 @@ func TestUpgrade_LoopCancelledAfterPrepareWritesNoMarker(t *testing.T) {
 	close(u.gate)
 
 	sha := "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef"
+	builtSHA := "fedcba9876540123456789abcdef012345678900"
+	steps.buildSHA = builtSHA
+	steps.selftestVersion = builtSHA
+
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
-	steps.selftestFunc = func() (string, string, error) {
-		cancel()
-		return sha[:12], "", nil
-	}
+	u.testPostPrepare = cancel
 
 	loopDone := make(chan struct{})
 	go func() { u.loop(ctx); close(loopDone) }()
@@ -696,6 +814,17 @@ func TestUpgrade_LoopCancelledAfterPrepareWritesNoMarker(t *testing.T) {
 	}
 	if len(msgs) != 0 {
 		t.Errorf("messages = %+v, want none", msgs)
+	}
+
+	// prepare itself must have succeeded before the post-prepare cancel, so
+	// this proves runQueued's ctx.Err check (not prepare's own failure
+	// path) is what discarded the build.
+	if _, err := os.Stat(binary + ".prev"); err != nil {
+		t.Errorf("zing.prev missing, want prepare to have succeeded: %v", err)
+	}
+	backupPath := filepath.Join(u.dataDir, backupPrefix+sha12(builtSHA))
+	if _, err := os.Stat(backupPath); err != nil {
+		t.Errorf("backup missing, want prepare to have succeeded: %v", err)
 	}
 }
 
@@ -915,6 +1044,56 @@ func TestUpgrade_MergeBuildsSelftestsSwapsAndExecs(t *testing.T) {
 	}
 	if m.State != markerPending || m.ToSHA != sha || m.TicketID != ticketID {
 		t.Errorf("marker = %+v, want pending, to_sha %s, ticket_id %d", m, sha, ticketID)
+	}
+}
+
+// TestUpgradeHandoff proves upgradeHandoff returns nil for a nil upgrader
+// or one with no target yet, and otherwise saves the carry into upgrade.json
+// (or just logs a WARN when that write fails) and returns the target.
+func TestUpgradeHandoff(t *testing.T) {
+	t.Parallel()
+
+	if rt := upgradeHandoff(t.TempDir(), nil); rt != nil {
+		t.Errorf("upgradeHandoff(nil) = %+v, want nil", rt)
+	}
+
+	u, _, _ := newTestUpgrader(t)
+	if rt := upgradeHandoff(u.dataDir, u); rt != nil {
+		t.Errorf("upgradeHandoff with no target = %+v, want nil", rt)
+	}
+
+	target := restartTarget{Binary: "bin/zing", FromSHA: "0123456789ab", ToSHA: "fedcba987654", TicketID: 7}
+	marker := upgradeMarker{FromSHA: target.FromSHA, ToSHA: target.ToSHA, TicketID: target.TicketID, State: markerPending}
+	if err := saveUpgradeMarker(u.dataDir, marker); err != nil {
+		t.Fatalf("saveUpgradeMarker: %v", err)
+	}
+	u.mu.Lock()
+	u.target = &target
+	u.carry, u.hasCarry = upgradeRequest{TicketID: 9, SHA: "abcdef0123456789abcdef0123456789abcdef01"}, true
+	u.mu.Unlock()
+
+	rt := upgradeHandoff(u.dataDir, u)
+	if rt == nil || *rt != target {
+		t.Fatalf("upgradeHandoff = %+v, want %+v", rt, target)
+	}
+	m, found, err := loadUpgradeMarker(u.dataDir)
+	if err != nil || !found {
+		t.Fatalf("loadUpgradeMarker: found=%v err=%v", found, err)
+	}
+	if !m.HasNext || m.NextSHA != "abcdef0123456789abcdef0123456789abcdef01" || m.NextTicketID != 9 {
+		t.Errorf("marker = %+v, want the carry recorded", m)
+	}
+
+	// A missing upgrade.json makes saveCarry fail; upgradeHandoff must still
+	// return the target, since the swap has to happen regardless.
+	u2, _, _ := newTestUpgrader(t)
+	u2.mu.Lock()
+	u2.target = &target
+	u2.carry, u2.hasCarry = upgradeRequest{TicketID: 9, SHA: "abc"}, true
+	u2.mu.Unlock()
+	rt2 := upgradeHandoff(u2.dataDir, u2)
+	if rt2 == nil || *rt2 != target {
+		t.Fatalf("upgradeHandoff with failing saveCarry = %+v, want %+v", rt2, target)
 	}
 }
 

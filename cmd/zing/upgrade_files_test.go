@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"os"
 	"path/filepath"
 	"testing"
@@ -103,6 +104,21 @@ func TestSaveCarry(t *testing.T) {
 		t.Fatalf("saveUpgradeMarker: %v", err)
 	}
 
+	before, readErr := os.ReadFile(filepath.Join(dir, upgradeMarkerFile))
+	if readErr != nil {
+		t.Fatalf("read upgrade.json: %v", readErr)
+	}
+	if saveErr := saveCarry(dir, upgradeRequest{TicketID: 9, SHA: "abc"}, false); saveErr != nil {
+		t.Fatalf("saveCarry with hasCarry false over an existing marker: %v", saveErr)
+	}
+	after, readErr := os.ReadFile(filepath.Join(dir, upgradeMarkerFile))
+	if readErr != nil {
+		t.Fatalf("read upgrade.json: %v", readErr)
+	}
+	if !bytes.Equal(before, after) {
+		t.Errorf("upgrade.json changed with hasCarry false: before %s, after %s", before, after)
+	}
+
 	carry := upgradeRequest{TicketID: 42, SHA: "abcdef0123456789abcdef0123456789abcdef01"}
 	if err := saveCarry(dir, carry, true); err != nil {
 		t.Fatalf("saveCarry: %v", err)
@@ -146,17 +162,17 @@ func TestPruneBackups_KeepsFiveNewest(t *testing.T) {
 	}
 
 	names := []string{
-		backupPrefix + "a", // 1 minute, tied with b
-		backupPrefix + "b", // 1 minute, tied with a; b sorts before a (name descending)
-		backupPrefix + "c", // 2 minutes
-		backupPrefix + "d", // 3 minutes
-		backupPrefix + "e", // 4 minutes
-		backupPrefix + "f", // 5 minutes
+		backupPrefix + "a", // 1 minute
+		backupPrefix + "b", // 2 minutes
+		backupPrefix + "c", // 3 minutes
+		backupPrefix + "d", // 4 minutes
+		backupPrefix + "e", // 5 minutes, tied with f, at the keep=5 boundary
+		backupPrefix + "f", // 5 minutes, tied with e; f sorts before e (name descending), so f is the one kept
 		backupPrefix + "g", // 6 minutes, oldest
 	}
 	ages := []time.Duration{
-		1 * time.Minute, 1 * time.Minute, 2 * time.Minute, 3 * time.Minute,
-		4 * time.Minute, 5 * time.Minute, 6 * time.Minute,
+		1 * time.Minute, 2 * time.Minute, 3 * time.Minute, 4 * time.Minute,
+		5 * time.Minute, 5 * time.Minute, 6 * time.Minute,
 	}
 	for i, name := range names {
 		touch(name, ages[i])
@@ -168,14 +184,15 @@ func TestPruneBackups_KeepsFiveNewest(t *testing.T) {
 		t.Fatalf("pruneBackups: %v", err)
 	}
 
-	// Newest 5 by (modTime desc, name desc): b, a, c, d, e. f and g must be gone.
-	wantKept := []string{backupPrefix + "b", backupPrefix + "a", backupPrefix + "c", backupPrefix + "d", backupPrefix + "e"}
+	// Newest 5 by (modTime desc, name desc): a, b, c, d, f. The e/f tie
+	// decides whether f (kept) or e (removed) lands in the top 5.
+	wantKept := []string{backupPrefix + "a", backupPrefix + "b", backupPrefix + "c", backupPrefix + "d", backupPrefix + "f"}
 	for _, name := range wantKept {
 		if _, err := os.Stat(filepath.Join(dir, name)); err != nil {
 			t.Errorf("want %s to remain: %v", name, err)
 		}
 	}
-	wantRemoved := []string{backupPrefix + "f", backupPrefix + "g"}
+	wantRemoved := []string{backupPrefix + "e", backupPrefix + "g"}
 	for _, name := range wantRemoved {
 		if _, err := os.Stat(filepath.Join(dir, name)); !os.IsNotExist(err) {
 			t.Errorf("want %s removed, stat err = %v", name, err)

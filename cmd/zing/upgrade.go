@@ -44,9 +44,10 @@ func tellOwner(ctx context.Context, st *store.Store, ticketID int64, text string
 	}
 }
 
-// errUpgradeNotRun marks a prepare outcome that needed no owner message,
-// either because install_check refused to run or because the built sha is
-// already what's running.
+// errUpgradeNotRun marks a prepare that chose not to upgrade, as opposed to
+// a failure: either install_check refused to run (which still posts a
+// message), or the built sha is already what's running (which posts
+// nothing).
 var errUpgradeNotRun = errors.New("upgrade: not run")
 
 const (
@@ -107,6 +108,11 @@ type upgrader struct {
 	// go loop in part 1 (and by part 2 only after booted_ok). loop waits
 	// on it before it waits for its first wake.
 	gate chan struct{}
+
+	// testPostPrepare, when set, runs in runQueued right after prepare
+	// returns successfully but before the ctx.Err check that follows it.
+	// Only tests set it, to simulate ctx ending in that exact window.
+	testPostPrepare func()
 }
 
 // Request queues ticketID and sha as the next upgrade, newest wins. Once a
@@ -216,7 +222,7 @@ func (u *upgrader) prepare(ctx context.Context, req upgradeRequest) (restartTarg
 		return fail(fmt.Errorf("upgrade: backup: %w", err))
 	}
 	if err := pruneBackups(u.dataDir, backupKeep); err != nil {
-		slog.Warn("upgrade: prune backups", "error", err)
+		slog.Warn("upgrade: prune backups", "from_sha", u.running, "to_sha", builtSHA, "ticket_id", req.TicketID, "error", err)
 	}
 
 	logStep("keep_prev", builtSHA)
@@ -273,6 +279,10 @@ func (u *upgrader) runQueued(ctx context.Context) bool {
 			return false
 		}
 
+		if u.testPostPrepare != nil {
+			u.testPostPrepare()
+		}
+
 		if ctx.Err() != nil {
 			_ = os.Remove(rt.Next)
 			slog.Info("upgrade: cancelled", "from_sha", rt.FromSHA, "to_sha", rt.ToSHA, "ticket_id", rt.TicketID)
@@ -285,7 +295,7 @@ func (u *upgrader) runQueued(ctx context.Context) bool {
 			u.hasQueued = false
 			u.mu.Unlock()
 			_ = os.Remove(rt.Next)
-			slog.Info("upgrade: superseded", "from_sha", rt.FromSHA, "to_sha", newer.SHA, "ticket_id", newer.TicketID)
+			slog.Info("upgrade: superseded", "from_sha", rt.FromSHA, "discarded_sha", rt.ToSHA, "discarded_ticket_id", rt.TicketID, "to_sha", newer.SHA, "ticket_id", newer.TicketID)
 			req = newer
 			continue
 		}
@@ -351,13 +361,16 @@ type gitGoSteps struct {
 	tmpRoot       string
 }
 
-// tailRedacted is the last at most 4096 bytes of b, with redactURLs
-// applied, for use in an error that may reach a log or a ticket.
+// tailRedacted redacts b, then keeps at most the last 4096 bytes of the
+// result, for use in an error that may reach a log or a ticket. Redacting
+// first, rather than after the cut, keeps a userinfo credential from
+// surviving a cut that lands between the URL's scheme and its "@".
 func tailRedacted(b []byte) string {
-	if len(b) > 4096 {
-		b = b[len(b)-4096:]
+	s := redactURLs(string(b))
+	if len(s) > 4096 {
+		s = s[len(s)-4096:]
 	}
-	return redactURLs(string(b))
+	return s
 }
 
 // runGit runs one git command against g.repoGit with GIT_TERMINAL_PROMPT=0
@@ -441,6 +454,24 @@ func (g gitGoSteps) Selftest(ctx context.Context, bin string) (version, output s
 	}
 	v := strings.TrimPrefix(strings.TrimSpace(string(versionOut)), "zing ")
 	return v, string(selftestOut), nil
+}
+
+// upgradeHandoff reads up's restart target, if any, right after shutdown,
+// saves any carry into upgrade.json (a WARN only on error, since the swap
+// still has to happen), and returns the target for serve to hand to
+// su.next. With up nil, or with no target set, it returns nil.
+func upgradeHandoff(dataDir string, up *upgrader) *restartTarget {
+	if up == nil {
+		return nil
+	}
+	rt, carry, hasCarry, ok := up.Target()
+	if !ok {
+		return nil
+	}
+	if err := saveCarry(dataDir, carry, hasCarry); err != nil {
+		slog.Warn("upgrade: save carry", "ticket_id", carry.TicketID, "sha", carry.SHA, "from_sha", rt.FromSHA, "to_sha", rt.ToSHA, "error", err)
+	}
+	return &rt
 }
 
 // newUpgrader builds the upgrader for the one project with self = true, or

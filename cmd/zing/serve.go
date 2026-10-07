@@ -420,21 +420,6 @@ func serve(ctx context.Context, cfgPath, dbPath string, seedDemo bool, su *selfU
 		close(dispDone)
 	}()
 
-	// upDone closes once up.loop returns; with no upgrader it is closed
-	// already, so the wait below never blocks (#109 part 1). gate is closed
-	// at once here, in part 1: part 2 instead closes it only after
-	// booted_ok.
-	upDone := make(chan struct{})
-	if up != nil {
-		go func() {
-			up.loop(ctx)
-			close(upDone)
-		}()
-		close(up.gate)
-	} else {
-		close(upDone)
-	}
-
 	// The bearer token GET /push/key and POST /push/subscribe check (design
 	// section 6.13): an explicit console.push_token always wins; otherwise
 	// the token persisted from an earlier run (or generated and persisted
@@ -465,6 +450,23 @@ func serve(ctx context.Context, cfgPath, dbPath string, seedDemo bool, su *selfU
 		return err
 	}
 
+	// upDone closes once up.loop returns; with no upgrader it is closed
+	// already, so the wait below never blocks (#109 part 1). gate is closed
+	// at once here, in part 1: part 2 instead closes it only after
+	// booted_ok. This starts only after every other fallible startup step
+	// has already succeeded, so no early return after this point can leave
+	// the loop goroutine running past st.Close() (#109 part 1 review r1f1).
+	upDone := make(chan struct{})
+	if up != nil {
+		go func() {
+			up.loop(ctx)
+			close(upDone)
+		}()
+		close(up.gate)
+	} else {
+		close(upDone)
+	}
+
 	// One srv.Serve(ln) goroutine per resolved listener (design section
 	// 6.14: "One http.Server with one mux serves every resolved listener
 	// through a srv.Serve(ln) goroutine each"). srv.Shutdown, below, closes
@@ -487,13 +489,8 @@ func serve(ctx context.Context, cfgPath, dbPath string, seedDemo bool, su *selfU
 
 	err = shutdown(ctx, st, srv, d, errCh, len(listeners), consumedFromErrCh, serveErr, dispTriggered, dispDone, func() error { return dispErr }, cancelDisp)
 
-	if up != nil {
-		if rt, carry, hasCarry, ok := up.Target(); ok {
-			if cErr := saveCarry(dataDir, carry, hasCarry); cErr != nil {
-				slog.Warn("upgrade: save carry", "error", cErr)
-			}
-			su.next = &rt
-		}
+	if rt := upgradeHandoff(dataDir, up); rt != nil {
+		su.next = rt
 	}
 
 	return err
@@ -838,18 +835,6 @@ func removeStaleStderrFiles(ctx context.Context, st *store.Store, dataDir string
 	return n
 }
 
-// buildJobProjects builds one orchestrator.Orchestrator per configured
-// project and returns job.Project keyed by its store project id (design
-// section 10): owner and repo split from projects[i].repo, LocalPath from
-// the project's own configured path, gh shared by every one of them, and
-// BuildWritableRoots from the sandbox's own cache root and mds folder when
-// it is available (task 8, design section 15). bindings supplies the store
-// project id for each configured project name (ensureBindings, above). gh is
-// the concrete *orchestrator.GitHubClient, not the four-method GitHub
-// interface: every job.Project also carries Owner, Repo, and gh itself as
-// its PullRequests, Flips, Checks, and Threads (PKG9-PLAN.md section 10.3),
-// so the shipping and respond handlers read and write GitHub through the
-// same client Package 5's git writes use.
 // findSelfProject returns the index of the one project with self = true
 // (#109 part 1, Q2). Zero such projects is idx -1, ok false, err nil. More
 // than one is a startup error, since serve can upgrade only itself.
@@ -867,6 +852,18 @@ func findSelfProject(projects []config.Project) (idx int, ok bool, err error) {
 	return idx, ok, nil
 }
 
+// buildJobProjects builds one orchestrator.Orchestrator per configured
+// project and returns job.Project keyed by its store project id (design
+// section 10): owner and repo split from projects[i].repo, LocalPath from
+// the project's own configured path, gh shared by every one of them, and
+// BuildWritableRoots from the sandbox's own cache root and mds folder when
+// it is available (task 8, design section 15). bindings supplies the store
+// project id for each configured project name (ensureBindings, above). gh is
+// the concrete *orchestrator.GitHubClient, not the four-method GitHub
+// interface: every job.Project also carries Owner, Repo, and gh itself as
+// its PullRequests, Flips, Checks, and Threads (PKG9-PLAN.md section 10.3),
+// so the shipping and respond handlers read and write GitHub through the
+// same client Package 5's git writes use.
 func buildJobProjects(ctx context.Context, projects []config.Project, bindings []zdispatch.Binding, gh *orchestrator.GitHubClient, sb sandbox.Sandbox) (map[int64]job.Project, error) {
 	storeProjectID := make(map[string]int64, len(bindings))
 	for _, b := range bindings {

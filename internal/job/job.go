@@ -179,9 +179,9 @@ type ReviewBotCheck struct {
 
 // SelfUpgrader is what pollDone needs to request a self-upgrade (#109 part
 // 1, Q1): Request must not block, since it is called from pollDone on the
-// dispatcher's own worker goroutine. The dispatcher implements it over its
-// own upgrader and passes itself here, the same way it does for Tracker and
-// Splitter (internal/dispatch/dispatch.go's runAndCommit).
+// dispatcher's own worker goroutine. serve's own *upgrader implements it;
+// dispatch.Config.Upgrader carries that value into Deps.Upgrader through
+// runAndCommit (internal/dispatch/dispatch.go).
 type SelfUpgrader interface {
 	Request(ticketID int64, sha string)
 }
