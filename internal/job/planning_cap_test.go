@@ -39,6 +39,21 @@ func seedCapLoopsEscalation(t *testing.T, objective string) (s *store.Store, tic
 	insertUpdateMarker(t, s, ticketID, "planreview v1 delivered")
 	insertUpdateMarker(t, s, ticketID, "planreview v2 delivered")
 
+	// A plan_unblock event already exists (an earlier unblock turn already
+	// ran and spent its one shot), plus the delivered marker its own resume
+	// would have written, so n reaches max_loops plus 1 and this tick still
+	// hits the cap and escalates, rather than running the unblock turn again
+	// (ticket 85: at most one unblock turn per ticket).
+	unblockMsg, err := store.NewEvent(ticketID, store.EventKindPlanUnblock,
+		response.PlanUnblockEvent{PlanVersion: 99, FindingIDs: []string{"p99-f2"}, Guidance: "Drop task 4."})
+	if err != nil {
+		t.Fatalf("seedCapLoopsEscalation: NewEvent: %v", err)
+	}
+	if _, err = s.InsertMessage(t.Context(), unblockMsg); err != nil {
+		t.Fatalf("seedCapLoopsEscalation: InsertMessage(plan_unblock): %v", err)
+	}
+	insertUpdateMarker(t, s, ticketID, "planreview v99 delivered")
+
 	minor := finding(response.SeverityMinor, "plan/design/shape", "still wrong", "fix it")
 	minor.ID = fmt.Sprintf("p%d-f1", planVersion)
 	major := finding(response.SeverityMajor, "plan/design/other", "worse", "fix that too")

@@ -1455,9 +1455,12 @@ func maybeReviewTick(ctx context.Context, t store.Ticket, d Deps) (commit store.
 // same version), resumes planning with those findings fenced (design
 // section 6.3, 6.4) under machine.toml's max_loops, counting only delivered
 // cycles (CountDeliveredReviews); at the cap it escalates loops_exhausted
-// instead. handled is false when there is no cohort, no planreview artifact
-// at its version, or no live pending marker for it, so the caller falls
-// through to ErrNoAction.
+// instead. The first time the cap is hit with an above-floor finding still
+// open, it runs one unblock turn (runUnblock) instead of escalating; a
+// successful unblock turn buys exactly one review round past max_loops, and
+// its guidance rides along on that round's resume. handled is false when
+// there is no cohort, no planreview artifact at its version, or no live
+// pending marker for it, so the caller falls through to ErrNoAction.
 func maybeResumeFloorFindings(ctx context.Context, t store.Ticket, d Deps, sess store.Session) (commit store.HandlerCommit, handled bool, err error) {
 	cohort, ok, err := d.Store.CurrentCohort(ctx, t.ID)
 	if err != nil {
@@ -1499,7 +1502,16 @@ func maybeResumeFloorFindings(ctx context.Context, t store.Ticket, d Deps, sess 
 	if err != nil {
 		return store.HandlerCommit{}, false, fmt.Errorf("job: planning: count delivered reviews: %w", err)
 	}
-	if n >= d.Machine.Jobs[jobPlanreviewName].MaxLoops {
+	unblock, unblocked, err := d.Store.NewestPlanUnblock(ctx, t.ID)
+	if err != nil {
+		return store.HandlerCommit{}, false, fmt.Errorf("job: planning: newest plan unblock: %w", err)
+	}
+	// A successful unblock turn buys exactly one review round past max_loops.
+	limit := d.Machine.Jobs[jobPlanreviewName].MaxLoops
+	if unblocked {
+		limit++
+	}
+	if n >= limit {
 		// Issue #48: an above-floor finding still escalates loops_exhausted --
 		// the loop itself never posts a gate against a mixed artifact. The
 		// owner can: option d on this escalation (acceptPlanAtCap) posts the
@@ -1533,6 +1545,13 @@ func maybeResumeFloorFindings(ctx context.Context, t store.Ticket, d Deps, sess 
 			slog.Info("gate posted at loop cap", "ticket_id", t.ID, "plan_version", cohort.PlanVersion, "floor_findings", atOrBelow)
 			return commit, true, nil
 		}
+		if !unblocked {
+			commit, err = runUnblock(ctx, t, d, cohort.PlanVersion, payload.Findings)
+			return commit, true, err
+		}
+		// Tried stays empty, as today: Back to planning sends Tried to
+		// planning as the error input (enterFromEscalationRound), and the
+		// owner's own resumes keep today's inputs (owner decision Q2).
 		c := escalationCommit(t, d, nil, nil,
 			string(response.EscalationCodeLoopsExhausted), loopsExhaustedWhat, loopsExhaustedWhy, "", response.EscalationOriginCapLoops)
 		c.Escalation.ExtraOptions = []response.Option{{Key: escalationChoiceAccept, Text: planAcceptAtCapOptionText}}
@@ -1540,7 +1559,12 @@ func maybeResumeFloorFindings(ctx context.Context, t store.Ticket, d Deps, sess 
 		return c, true, nil
 	}
 
-	commit, err = runPlanningResume(ctx, t, d, sess, nil, floorResumeInputs(payload.Findings, d.Floor), 0, true)
+	inputs := floorResumeInputs(payload.Findings, d.Floor)
+	withGuidance := unblocked && unblock.PlanVersion == cohort.PlanVersion
+	if withGuidance {
+		inputs = append(inputs, prompt.Guidance(unblock.Guidance))
+	}
+	commit, err = runPlanningResume(ctx, t, d, sess, nil, inputs, 0, true)
 	if err != nil {
 		return commit, true, err
 	}
@@ -1550,10 +1574,122 @@ func maybeResumeFloorFindings(ctx context.Context, t store.Ticket, d Deps, sess 
 	}
 	slog.Info("floor findings delivered", "ticket_id", t.ID, "run_id", runID, "plan_version", cohort.PlanVersion,
 		"at_or_below", atOrBelow, "needs_disposition", above)
+	if withGuidance {
+		slog.Info("plan unblock guidance delivered", "ticket_id", t.ID, "run_id", runID, "plan_version", cohort.PlanVersion)
+	}
 	commit.Messages = append(commit.Messages, store.Message{
 		TicketID: t.ID, Type: msgTypeUpdate, Author: authorSystem, Body: delivered,
 	})
 	return commit, true, nil
+}
+
+// jobUnblockName is machine.toml's [jobs.unblock]. unblockRunLabel tells
+// its runs apart from a side run elsewhere, since both use response.JobSide.
+const (
+	jobUnblockName  = "unblock"
+	unblockRunLabel = "unblock"
+)
+
+// runUnblock is the one unblock turn at plan review's loop cap
+// (maybeResumeFloorFindings): a fresh run on [jobs.unblock] that reads the
+// ticket, the stored plan, and the capped review's findings, and returns
+// guidance for planning. Failures route through runAndRoute under origin
+// cap_loops.
+func runUnblock(ctx context.Context, t store.Ticket, d Deps, planVersion int, findings []response.Finding) (store.HandlerCommit, error) {
+	jobCfg := d.Machine.Jobs[jobUnblockName]
+	promptText, err := readAsset(jobCfg.Prompt.Single)
+	if err != nil {
+		return store.HandlerCommit{}, fmt.Errorf("job: unblock: %w", err)
+	}
+	planArtifact, found, err := d.Store.GetArtifact(ctx, t.ID, artifactTypePlan)
+	if err != nil {
+		return store.HandlerCommit{}, fmt.Errorf("job: unblock: get plan artifact: %w", err)
+	}
+	if !found {
+		return store.HandlerCommit{}, fmt.Errorf("job: unblock: ticket %d has a cohort but no plan artifact", t.ID)
+	}
+	var plan response.Plan
+	if err = json.Unmarshal(planArtifact.Payload, &plan); err != nil {
+		return store.HandlerCommit{}, fmt.Errorf("job: unblock: unmarshal plan artifact: %w", err)
+	}
+	planXML, err := planXMLFor(plan)
+	if err != nil {
+		return store.HandlerCommit{}, fmt.Errorf("job: unblock: %w", err)
+	}
+	ticketText, err := specFor(ctx, d, t)
+	if err != nil {
+		return store.HandlerCommit{}, fmt.Errorf("job: unblock: %w", err)
+	}
+	schemas, err := renderSchemas(response.JobSide, response.OutcomeOk)
+	if err != nil {
+		return store.HandlerCommit{}, fmt.Errorf("job: unblock: %w", err)
+	}
+	n, reason, err := d.Store.ConsecutiveInvalidOutputs(ctx, t.ID, jobUnblockName, nil)
+	if err != nil {
+		return store.HandlerCommit{}, fmt.Errorf("job: unblock: consecutive invalid outputs: %w", err)
+	}
+	var extra []prompt.NamedInput
+	if n == 1 {
+		extra = append(extra, prompt.Invalid(invalidRetryText(reason)))
+	}
+	ids := make([]string, 0, len(findings))
+	for i := range findings {
+		if findings[i].Severity.Rank() > d.Floor.Rank() {
+			ids = append(ids, findings[i].ID)
+		}
+	}
+	in := prompt.ForUnblock(promptText, ticketText, planXML, renderFindings(findings), extra)
+	in.Schemas = schemas
+	su := store.SessionUpsert{Job: jobUnblockName, Runtime: jobCfg.Runtime}
+	req := runtime.RunRequest{Job: response.JobSide, Label: unblockRunLabel, Prompt: prompt.Assemble(in)}
+	slog.Info("plan unblock turn started", "ticket_id", t.ID, "plan_version", planVersion, "finding_ids", ids)
+	return runAndRoute(ctx, d, t, jobUnblockName, su, req, n, freshSessionRecord, nil, response.EscalationOriginCapLoops,
+		func(rr runResult) (store.HandlerCommit, error) {
+			return unblockSuccessCommit(t, d, rr, planVersion, ids, freshSessionRecord(rr))
+		}, nil, 0)
+}
+
+// unblockSuccessCommit routes an unblock run's parsed response. ok commits
+// the plan_unblock event with no question. error and question post the
+// cap_loops loops_exhausted question with option d, naming what the turn
+// returned in Tried, and write no event, so a later cap hit tries again.
+func unblockSuccessCommit(t store.Ticket, d Deps, rr runResult, planVersion int, ids []string, sessionCommit *store.SessionUpsert) (store.HandlerCommit, error) {
+	outcome := string(rr.Res.Response.Header().Outcome)
+	var tried string
+	switch resp := rr.Res.Response.(type) {
+	case *response.SideResponse:
+		guidance := strings.TrimSpace(resp.Answer)
+		if guidance == "" {
+			return store.HandlerCommit{}, errors.New("job: unblock: guidance is empty")
+		}
+		msg, err := store.NewEvent(t.ID, store.EventKindPlanUnblock,
+			response.PlanUnblockEvent{PlanVersion: planVersion, FindingIDs: ids, Guidance: guidance})
+		if err != nil {
+			return store.HandlerCommit{}, fmt.Errorf("job: unblock: %w", err)
+		}
+		c := baseCommit(t, d)
+		c.Runs = terminalRuns(rr, string(response.OutcomeOk))
+		c.Session = sessionCommit
+		c.Messages = []store.Message{msg}
+		c.AttachRunToMsgs = true
+		return c, nil
+	case *response.ErrorResponse:
+		tried = fmt.Sprintf("the unblock turn returned error %s: %s", resp.Error.Code, resp.Error.What)
+	case *response.QuestionResponse:
+		tried = "the unblock turn asked a question instead of returning guidance"
+		if len(resp.Questions) > 0 {
+			tried += ": " + resp.Questions[0].Title
+		}
+	default:
+		return store.HandlerCommit{}, fmt.Errorf("job: unblock: outcome %s not handled", outcome)
+	}
+	c := escalationCommit(t, d, &rr.Reserved.RunID, &rr.Reserved.SessionID,
+		string(response.EscalationCodeLoopsExhausted), loopsExhaustedWhat, loopsExhaustedWhy, tried, response.EscalationOriginCapLoops)
+	c.Escalation.ExtraOptions = []response.Option{{Key: escalationChoiceAccept, Text: planAcceptAtCapOptionText}}
+	c.Escalation.Recommended = escalationChoiceAccept
+	c.Runs = terminalRuns(rr, outcome)
+	c.Session = sessionCommit
+	return c, nil
 }
 
 // runPlanReview is plan section 6.5's review tick (entry steps 6 and 1(e)):
