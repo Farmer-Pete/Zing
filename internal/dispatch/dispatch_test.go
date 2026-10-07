@@ -4185,10 +4185,11 @@ func TestTick_NothingToDoSkipsMarkedCommentStillCloses(t *testing.T) {
 
 // TestTick_NothingToDoCloseFailureIsBestEffort proves a failing Close is
 // best-effort, just as a failing Comment is (design D12): Tick still
-// returns nil and the ticket's own commit stays applied.
+// returns nil and the ticket's own commit stays applied. It does not run in
+// parallel with another subtest that touches slog (matching
+// TestTick_IntakeErrorOnOneProjectLogsAndContinuesToTheNext above), since it
+// swaps the process-wide slog default to capture "tracker close failed".
 func TestTick_NothingToDoCloseFailureIsBestEffort(t *testing.T) {
-	t.Parallel()
-
 	s, projectID, ticketID, tr := shipTestFixture(t)
 
 	reg := job.Registry()
@@ -4196,6 +4197,11 @@ func TestTick_NothingToDoCloseFailureIsBestEffort(t *testing.T) {
 	bindings := []dispatch.Binding{{StoreProjectID: projectID, TrackerProject: testProject.Name, User: testBindingUser}}
 
 	tr.failClose = errors.New("boom: close failed")
+
+	var logBuf bytes.Buffer
+	prevDefault := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logBuf, &slog.HandlerOptions{Level: slog.LevelDebug})))
+	t.Cleanup(func() { slog.SetDefault(prevDefault) })
 
 	d := newDispatcher(t, s, tr, bus.New(), fakeRuntime(t), reg, bindings, dispatch.Config{MaxParallel: 2, Owner: testOwner})
 
@@ -4223,6 +4229,15 @@ func TestTick_NothingToDoCloseFailureIsBestEffort(t *testing.T) {
 	final := getTicket(t, s, ticketID)
 	if final.ClaimOwner != nil {
 		t.Errorf("final ticket claim owner = %v, want nil (the ticket's own commit still applied)", *final.ClaimOwner)
+	}
+
+	logged := logBuf.String()
+	wantWarn := fmt.Sprintf("msg=\"tracker close failed\" ticket_id=%d ref=%s", ticketID, testFixtureRef)
+	if !strings.Contains(logged, wantWarn) {
+		t.Errorf("log output = %q, want it to contain %q", logged, wantWarn)
+	}
+	if strings.Contains(logged, "tracker issue closed") {
+		t.Errorf("log output = %q, want no \"tracker issue closed\" (the close failed)", logged)
 	}
 }
 
@@ -4326,10 +4341,11 @@ func TestTick_PlanningNothingToDoAllFalseClaimsPostsTrackerComment(t *testing.T)
 // D12, owner decision Q1): after the real planning handler's nothing_to_do
 // commit lands, the same Tick posts tracker.NothingToDoComment through the
 // zing:nothing marker and then closes the issue, in that order, and a
-// second Tick against the now-done ticket repeats neither call.
+// second Tick against the now-done ticket repeats neither call. It does not
+// run in parallel with another subtest that touches slog (matching
+// TestTick_IntakeErrorOnOneProjectLogsAndContinuesToTheNext above), since it
+// swaps the process-wide slog default to capture "tracker issue closed".
 func TestTick_PlanningNothingToDoClosesIssueOnce(t *testing.T) {
-	t.Parallel()
-
 	s := newDispatchTestStore(t)
 	projectID := seedProject(t, s)
 	const bindingUser = "nothing-to-do-owner"
@@ -4363,6 +4379,11 @@ func TestTick_PlanningNothingToDoClosesIssueOnce(t *testing.T) {
 	tr := newShipTrackerDouble(t, "zing-bot")
 	d := newDispatcher(t, s, tr, bus.New(), rt, nil, bindings, dispatch.Config{MaxParallel: 2, Owner: testOwner})
 
+	var logBuf bytes.Buffer
+	prevDefault := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logBuf, &slog.HandlerOptions{Level: slog.LevelDebug})))
+	t.Cleanup(func() { slog.SetDefault(prevDefault) })
+
 	if err := d.Tick(t.Context()); err != nil {
 		t.Fatalf("Tick: %v", err)
 	}
@@ -4382,6 +4403,11 @@ func TestTick_PlanningNothingToDoClosesIssueOnce(t *testing.T) {
 	}
 	if got[0].ref != testFixtureRef {
 		t.Errorf("comment ref = %q, want %q", got[0].ref, testFixtureRef)
+	}
+
+	wantInfo := fmt.Sprintf("msg=\"tracker issue closed\" ticket_id=%d ref=%s", ticketID, testFixtureRef)
+	if logged := logBuf.String(); !strings.Contains(logged, wantInfo) {
+		t.Errorf("log output = %q, want it to contain %q", logged, wantInfo)
 	}
 
 	wantSeq := []string{"comment:" + testFixtureRef, "close:" + testFixtureRef}

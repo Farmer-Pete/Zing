@@ -1738,15 +1738,6 @@ func (d *Dispatcher) postCommitTrackerEffect(ctx context.Context, ticket store.T
 		return
 	}
 
-	// The planning run whose evidence justified this close, when the commit
-	// carries exactly one: terminalRuns always produces a single entry with
-	// a nonzero ID, but an empty or multi-entry Runs leaves the close
-	// untraceable to a run rather than guess at the wrong one.
-	logArgs := []any{"ticket_id", ticket.ID, "ref", e.Ref}
-	if len(commit.Runs) == 1 && commit.Runs[0].ID != 0 {
-		logArgs = append(logArgs, "run_id", commit.Runs[0].ID)
-	}
-
 	// Unlike the store writes above (which detach with WithoutCancel so they
 	// still land after a cancel), this comment and close are best-effort and
 	// the commit has already succeeded, so this derives from ctx and is
@@ -1760,15 +1751,15 @@ func (d *Dispatcher) postCommitTrackerEffect(ctx context.Context, ticket store.T
 		return tracker.NothingToDoComment(b.User, e.Notes)
 	})
 	if err != nil {
-		slog.Warn("tracker comment failed", append(logArgs, "err", err)...)
+		slog.Warn("tracker comment failed", "ticket_id", ticket.ID, "ref", e.Ref, "err", err)
 		return
 	}
 
 	if err := d.tracker.Close(trackerCtx, b.TrackerProject, e.Ref); err != nil {
-		slog.Warn("tracker close failed", append(logArgs, "err", err)...)
+		slog.Warn("tracker close failed", "ticket_id", ticket.ID, "ref", e.Ref, "err", err)
 		return
 	}
-	slog.Info("tracker issue closed", logArgs...)
+	slog.Info("tracker issue closed", "ticket_id", ticket.ID, "ref", e.Ref)
 }
 
 // shipMarkerFmt is the hidden marker PostPRLink and PostDone each search
