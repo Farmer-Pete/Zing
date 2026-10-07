@@ -176,10 +176,16 @@ func TestFloorResumeInputs(t *testing.T) {
 		if len(got) != 2 {
 			t.Fatalf("floorResumeInputs = %+v, want 2 inputs", got)
 		}
-		if got[0].Label != "findings" || !got[0].Untrusted || !strings.Contains(got[0].Text, minor.Text) {
+		isFindings := got[0].Label == "findings"
+		fenced := got[0].Untrusted
+		carriesMinor := strings.Contains(got[0].Text, minor.Text)
+		if !isFindings || !fenced || !carriesMinor {
 			t.Errorf("got[0] = %+v, want the fenced findings input carrying the minor", got[0])
 		}
-		if got[1].Label != needsDispositionLabel || !got[1].Untrusted || !strings.Contains(got[1].Text, major.Text) {
+		isNeedsDisposition := got[1].Label == needsDispositionLabel
+		fenced = got[1].Untrusted
+		carriesMajor := strings.Contains(got[1].Text, major.Text)
+		if !isNeedsDisposition || !fenced || !carriesMajor {
 			t.Errorf("got[1] = %+v, want the fenced needs_disposition input carrying the major", got[1])
 		}
 	})

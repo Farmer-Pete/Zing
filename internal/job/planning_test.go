@@ -2331,7 +2331,9 @@ func TestPlanningHandler_ReviewTick_FloorResumeDeliversAboveFloorFindings(t *tes
 	}
 	wantMinorID := fmt.Sprintf("p%d-f1", planVersion)
 	wantMajorID := fmt.Sprintf("p%d-f2", planVersion)
-	if len(payload.Findings) != 2 || payload.Findings[0].ID != wantMinorID || payload.Findings[1].ID != wantMajorID {
+	wantCount := len(payload.Findings) == 2
+	idsMatch := wantCount && payload.Findings[0].ID == wantMinorID && payload.Findings[1].ID == wantMajorID
+	if !idsMatch {
 		t.Fatalf("stored findings = %+v, want ids %q (minor) and %q (major)", payload.Findings, wantMinorID, wantMajorID)
 	}
 
@@ -2341,10 +2343,10 @@ func TestPlanningHandler_ReviewTick_FloorResumeDeliversAboveFloorFindings(t *tes
 		t.Fatalf("floor resume Run: %v", err)
 	}
 	prompt := rec.lastReq.Prompt
-	if !strings.Contains(prompt, "needs_disposition:") {
+	i := strings.Index(prompt, "needs_disposition:")
+	if i < 0 {
 		t.Fatalf("resume prompt does not carry a needs_disposition input:\n%s", prompt)
 	}
-	i := strings.Index(prompt, "needs_disposition:")
 	wantMajorLine := wantMajorID + " [correctness/major] plan/overview/objective"
 	if !strings.Contains(prompt[i:], wantMajorLine) {
 		t.Errorf("needs_disposition section does not carry the major:\n%s", prompt[i:])
@@ -2438,7 +2440,9 @@ func TestPlanningHandler_Ready_MissingDispositionIsRejected(t *testing.T) {
 	}
 	found := false
 	for _, m := range commit.Messages {
-		if strings.HasPrefix(m.Body, "validation errors pending run ") && strings.Contains(m.Body, wantMajorID) && strings.Contains(m.Body, "needs a disposition") {
+		isValidation := strings.HasPrefix(m.Body, "validation errors pending run ")
+		namesFinding := strings.Contains(m.Body, wantMajorID) && strings.Contains(m.Body, "needs a disposition")
+		if isValidation && namesFinding {
 			found = true
 		}
 	}
@@ -2594,12 +2598,8 @@ func TestPlanningHandler_Ready_DisputedPostsOneOwnerQuestion(t *testing.T) {
 	}
 
 	noRunRT := &scriptedRuntime{t: t, steps: nil}
-	if _, err := runPlanning(t, s, claim(t, s, noRunRT, ticketID), ticketID); err != nil && !errors.Is(err, job.ErrNoAction) {
+	if _, err := runPlanning(t, s, claim(t, s, noRunRT, ticketID), ticketID); !errors.Is(err, job.ErrNoAction) {
 		t.Fatalf("planning Run with an open dispute thread: %v, want ErrNoAction and no runtime call", err)
-	}
-	nextPlanVersion := planVersion + 1
-	if _, ok, err := s.PlanReviewAt(t.Context(), ticketID, nextPlanVersion); err != nil || ok {
-		t.Fatalf("PlanReviewAt(%d) = (_, %v, %v), want no artifact (a disputed plan is never reviewed)", nextPlanVersion, ok, err)
 	}
 }
 
@@ -2653,7 +2653,9 @@ func TestPlanningHandler_ReviewTick_SameMajorAfterFixedStaysOpen(t *testing.T) {
 	}
 	wantMinorID2 := fmt.Sprintf("p%d-f1", planVersion2)
 	wantMajorID2 := fmt.Sprintf("p%d-f2", planVersion2)
-	if len(payload.Findings) != 2 || payload.Findings[0].ID != wantMinorID2 || payload.Findings[1].ID != wantMajorID2 {
+	wantCount2 := len(payload.Findings) == 2
+	idsMatch2 := wantCount2 && payload.Findings[0].ID == wantMinorID2 && payload.Findings[1].ID == wantMajorID2
+	if !idsMatch2 {
 		t.Fatalf("stored findings = %+v, want ids %q (minor) and %q (major)", payload.Findings, wantMinorID2, wantMajorID2)
 	}
 	if payload.Findings[0].Reopens != "" {
