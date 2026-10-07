@@ -10,10 +10,12 @@ import (
 
 // Document is an extracted zing element: its dispatched, decoded Response
 // and the bytes of the element, opening tag included. Elem holds the input
-// bytes exactly as written when Parse's strict pass finds the document; when
-// the repair pass finds it instead, Elem holds the repaired bytes, with bare
-// < escaped to &lt;, which can differ from the original input. See Parse's
-// doc comment for the two-pass behavior.
+// bytes exactly as written when Parse's strict pass finds the document and
+// none of its free-text fields held an inline tag; when flattenInline
+// rewrote one, or when the repair pass found the document instead, Elem
+// holds the rewritten bytes (inline tags flattened to backtick-quoted
+// text, or bare < escaped to &lt;), which can differ from the original
+// input. See Parse's doc comment for the two-pass behavior.
 type Document struct {
 	Response Response
 	Elem     []byte
@@ -285,13 +287,28 @@ func tryDecode(input []byte, offset int) (*Document, error) {
 		return nil, err
 	}
 
+	flattened, tags := flattenInline(input[offset:])
+	if tags > 0 {
+		logFlatten(tags)
+	}
+
+	dec = xml.NewDecoder(bytes.NewReader(flattened))
+	tok, err = dec.Token()
+	if err != nil {
+		return nil, errMalformedCandidate
+	}
+	start, ok = isZingStart(tok)
+	if !ok {
+		return nil, errMalformedCandidate
+	}
+
 	if err := dec.DecodeElement(r, &start); err != nil {
 		return nil, &bodyDecodeError{err: err}
 	}
 
-	//nolint:gosec // dec.InputOffset() is bounded by len(input[offset:]), which fits in an int already.
-	end := offset + int(dec.InputOffset())
-	return &Document{Response: r, Elem: input[offset:end]}, nil
+	//nolint:gosec // dec.InputOffset() is bounded by len(flattened), which fits in an int already.
+	end := int(dec.InputOffset())
+	return &Document{Response: r, Elem: flattened[:end]}, nil
 }
 
 func headerAttrs(attrs []xml.Attr) (job Job, outcome Outcome, ok bool) {

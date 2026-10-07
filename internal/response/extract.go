@@ -31,17 +31,21 @@ import (
 // pass none.
 func ExtractAll(text string, logAttrs ...any) []string {
 	input := escapeBareAmpersands([]byte(text))
-	roots, capped := extractStrict(input)
+	roots, flattenedTags, capped := extractStrict(input)
 	if len(roots) > 0 || capped {
+		if flattenedTags > 0 {
+			logFlatten(flattenedTags, logAttrs...)
+		}
 		return roots
 	}
 	return extractRepaired(input, logAttrs)
 }
 
 // extractStrict is ExtractAll's first pass over input exactly as written.
-// capped is true when it stopped at maxRootCandidates, and then roots is
-// nil.
-func extractStrict(input []byte) (roots []string, capped bool) {
+// Each root passes through flattenInline; flattenedTags is the total
+// count of inline tags rewritten across every root. capped is true when
+// it stopped at maxRootCandidates, and then roots is nil.
+func extractStrict(input []byte) (roots []string, flattenedTags int, capped bool) {
 	excluded := excludedRanges(input)
 	scanned := 0
 	for _, offset := range candidateOffsets(input) {
@@ -56,14 +60,16 @@ func extractStrict(input []byte) (roots []string, capped bool) {
 		// failure rather than a stalled worker. A genuine document sits at the
 		// first well-formed candidate, far below this cap.
 		if scanned == maxRootCandidates {
-			return nil, true
+			return nil, 0, true
 		}
 		scanned++
 		if end, ok := wellFormedRootExtent(input, offset); ok {
-			roots = append(roots, string(input[offset:end]))
+			root, tags := flattenInline(input[offset:end])
+			flattenedTags += tags
+			roots = append(roots, string(root))
 		}
 	}
-	return roots, false
+	return roots, flattenedTags, false
 }
 
 // extractRepaired is ExtractAll's second pass, run only when the strict

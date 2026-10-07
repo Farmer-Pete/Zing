@@ -156,17 +156,18 @@ func TestExtractAll_UnregisteredPairIsNotRepaired(t *testing.T) {
 
 // TestExtractAll_StrictRootWithUnknownChildSkipsRepair is ExtractAll's half
 // of TestParse_StrictDocumentKeepsItsBytes: the input holds no bare <, so
-// the strict pass finds it well formed and must return it unchanged. A
-// repair-first ExtractAll would instead treat reason as free text, escape
-// <code>'s opening < as text, and fail to match its closing </code>
-// against the open reason frame, changing the root.
+// the strict pass finds it well formed and flattens reason's <code> child
+// to a backtick. A repair-first ExtractAll would instead escape <code>'s
+// opening < as text and fail to match its closing </code> against the
+// open reason frame, changing the root a different way.
 func TestExtractAll_StrictRootWithUnknownChildSkipsRepair(t *testing.T) {
 	t.Parallel()
 
 	in := `<zing job="classify" outcome="bug"><reason>use <code>x</code></reason></zing>`
+	want := "<zing job=\"classify\" outcome=\"bug\"><reason>use `x`</reason></zing>"
 	got := ExtractAll(in)
-	if len(got) != 1 || got[0] != in {
-		t.Fatalf("ExtractAll = %v, want exactly [%q]", got, in)
+	if len(got) != 1 || got[0] != want {
+		t.Fatalf("ExtractAll = %v, want exactly [%q]", got, want)
 	}
 }
 
@@ -183,7 +184,7 @@ func TestExtractStrict_HitsCapReturnsNilTrue(t *testing.T) {
 	t.Parallel()
 
 	hostile := wellFormedClassify + strings.Repeat("<zing >\n", 2000)
-	roots, capped := extractStrict([]byte(hostile))
+	roots, _, capped := extractStrict([]byte(hostile))
 	if !capped {
 		t.Fatal("capped = false, want true past maxRootCandidates")
 	}
