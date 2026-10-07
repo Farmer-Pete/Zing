@@ -17,7 +17,6 @@ import (
 	"testing/fstest"
 	"time"
 
-	"zing/internal/gitfixture"
 	"zing/internal/orchestrator"
 	"zing/internal/response"
 	"zing/internal/runtime"
@@ -397,51 +396,11 @@ func TestJudgingStageCopiesAreIndependent(t *testing.T) {
 		t.Fatalf("MaxRunID differs between copies: %d vs %d", maxRunID1, maxRunID2)
 	}
 
-	var localPaths [2]string
-	for i, pair := range []struct {
-		s  *store.Store
-		id int64
-	}{{s1, ticket1.ID}, {s2, ticket2.ID}} {
-		proj, err := pair.s.ProjectForTicket(t.Context(), pair.id)
-		if err != nil {
-			t.Fatalf("copy %d: ProjectForTicket: %v", i+1, err)
-		}
-		localPaths[i] = proj.LocalPath
+	localPath1 := pbAssertPrivateWorktree(t, "copy 1", s1, ticket1.ID)
+	localPath2 := pbAssertPrivateWorktree(t, "copy 2", s2, ticket2.ID)
 
-		localReal, err := filepath.EvalSymlinks(proj.LocalPath)
-		if err != nil {
-			t.Fatalf("copy %d: EvalSymlinks(%s): %v", i+1, proj.LocalPath, err)
-		}
-
-		wtDir := filepath.Join(proj.LocalPath, ".zing", "wt", strconv.FormatInt(pair.id, 10))
-		if _, statErr := os.Stat(wtDir); statErr != nil {
-			t.Fatalf("copy %d: worktree dir %s: %v", i+1, wtDir, statErr)
-		}
-		if out, statusErr := gitfixture.Git(t.Context(), wtDir, "status", "--porcelain"); statusErr != nil {
-			t.Fatalf("copy %d: git status in %s: %v: %s", i+1, wtDir, statusErr, out)
-		}
-
-		out, err := gitfixture.Git(t.Context(), proj.LocalPath, "worktree", "list", "--porcelain")
-		if err != nil {
-			t.Fatalf("copy %d: git worktree list: %v: %s", i+1, err, out)
-		}
-		for line := range strings.SplitSeq(string(out), "\n") {
-			path, ok := strings.CutPrefix(line, "worktree ")
-			if !ok {
-				continue
-			}
-			pathReal, err := filepath.EvalSymlinks(path)
-			if err != nil {
-				t.Fatalf("copy %d: EvalSymlinks(%s): %v", i+1, path, err)
-			}
-			if pathReal != localReal && !strings.HasPrefix(pathReal, localReal+string(filepath.Separator)) {
-				t.Fatalf("copy %d: worktree list path %s (resolved %s) is not under %s", i+1, path, pathReal, localReal)
-			}
-		}
-	}
-
-	if localPaths[0] == localPaths[1] {
-		t.Fatalf("both copies share LocalPath %s", localPaths[0])
+	if localPath1 == localPath2 {
+		t.Fatalf("both copies share LocalPath %s", localPath1)
 	}
 }
 

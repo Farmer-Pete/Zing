@@ -137,9 +137,10 @@ func TestUseStageRecordsFailedBuild(t *testing.T) {
 		return stageBuild{} // unreached
 	}
 
+	buildOnce := func() { runStageBuild(t, st, build) }
 	var wg sync.WaitGroup
 	wg.Go(func() {
-		st.once.Do(func() { runStageBuild(t, st, build) })
+		st.once.Do(buildOnce)
 	})
 	wg.Wait()
 
@@ -228,13 +229,6 @@ type stageBuild struct {
 	Extra     any
 }
 
-// complete reports whether b carries everything snapshotStage needs: an
-// open store, the store's own file path, and the ticket whose project
-// names the repo to snapshot.
-func (b stageBuild) complete() bool {
-	return b.Store != nil && b.DBPath != "" && b.TicketID != 0
-}
-
 // stageCopy is one test's own private copy of a stage, built by copyStage
 // inside the caller's t.TempDir().
 type stageCopy struct {
@@ -252,7 +246,7 @@ type stageCopy struct {
 // too. It is called at most once per stage, inside the first useStage
 // caller's sync.Once.Do.
 func snapshotStage(ctx context.Context, st *stageSnap, b stageBuild) error {
-	if !b.complete() {
+	if b.Store == nil || b.DBPath == "" || b.TicketID == 0 {
 		return fmt.Errorf("stage %s: builder returned an incomplete stageBuild", st.name)
 	}
 

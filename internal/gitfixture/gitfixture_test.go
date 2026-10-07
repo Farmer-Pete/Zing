@@ -91,6 +91,27 @@ func TestNewSigningRepoLeavesGlobalConfigAlone(t *testing.T) {
 	}
 }
 
+// verifyHeadSignedBy fails the test unless HEAD in dir verifies as signed
+// by the ed25519 key at keyPath: it derives the public key, writes a
+// throwaway allowed-signers file naming it for zing-fixture@example.com
+// (the identity every fixture commit uses), and runs "git verify-commit".
+func verifyHeadSignedBy(t *testing.T, dir, keyPath string) {
+	t.Helper()
+
+	pubOut, err := exec.CommandContext(t.Context(), "ssh-keygen", "-y", "-f", keyPath).CombinedOutput()
+	if err != nil {
+		t.Fatalf("ssh-keygen -y: %v: %s", err, pubOut)
+	}
+	allowed := filepath.Join(t.TempDir(), "allowed_signers")
+	line := "zing-fixture@example.com " + string(pubOut)
+	if err := os.WriteFile(allowed, []byte(line), 0o600); err != nil {
+		t.Fatalf("write allowed signers: %v", err)
+	}
+	if out, err := Git(t.Context(), dir, "-c", "gpg.ssh.allowedSignersFile="+allowed, "verify-commit", "HEAD"); err != nil {
+		t.Fatalf("verify-commit: %v\n%s", err, out)
+	}
+}
+
 // TestCopyRepoSignsWithCopiedKey pins that CopyRepo's copy signs with its
 // own key, not the source's: the copy's user.signingKey names a path
 // under the copy, the source's own config is untouched, and a fresh
@@ -136,20 +157,53 @@ func TestCopyRepoSignsWithCopiedKey(t *testing.T) {
 		t.Fatalf("commit in dest: %v", err)
 	}
 
-	pubOut, err := exec.CommandContext(t.Context(), "ssh-keygen", "-y", "-f", wantKey).CombinedOutput()
-	if err != nil {
-		t.Fatalf("ssh-keygen -y: %v: %s", err, pubOut)
+	verifyHeadSignedBy(t, dest, wantKey)
+}
+
+// TestCopyRepoRewritesResolvedSigningKey pins CopyRepo's second try at
+// rewriteSigningKey: when src's config names its key by a path that
+// differs, as a string, from the src path CopyRepo is given, but
+// resolves (filepath.EvalSymlinks) to the same key file, CopyRepo still
+// finds and rewrites it. src's leaf directory is real (a symlinked leaf
+// would stop copyTree's walk before CopyRepo ever reaches the config),
+// but an ancestor directory is a symlink, so the given path and its
+// resolved form are different strings naming the same file. Without the
+// second try, a copy reached through such a path would keep signing
+// with src's own key, which does not survive src's removal.
+func TestCopyRepoRewritesResolvedSigningKey(t *testing.T) {
+	t.Parallel()
+
+	base := t.TempDir()
+	srcReal := filepath.Join(base, "real")
+	if err := os.Mkdir(srcReal, 0o755); err != nil {
+		t.Fatalf("mkdir src: %v", err)
 	}
-	allowed := filepath.Join(t.TempDir(), "allowed_signers")
-	line := "zing-fixture@example.com " + string(pubOut)
-	if err = os.WriteFile(allowed, []byte(line), 0o600); err != nil {
-		t.Fatalf("write allowed signers: %v", err)
+	if err := NewSigningRepo(t.Context(), srcReal); err != nil {
+		t.Fatalf("NewSigningRepo: %v", err)
 	}
 
-	out, err := Git(t.Context(), dest, "-c", "gpg.ssh.allowedSignersFile="+allowed, "verify-commit", "HEAD")
-	if err != nil {
-		t.Fatalf("verify-commit: %v\n%s", err, out)
+	linkDir := t.TempDir()
+	link := filepath.Join(linkDir, "link")
+	if err := os.Symlink(base, link); err != nil {
+		t.Fatalf("symlink base: %v", err)
 	}
+	src := filepath.Join(link, "real")
+
+	dest := filepath.Join(t.TempDir(), "repo")
+	if err := CopyRepo(t.Context(), src, dest); err != nil {
+		t.Fatalf("CopyRepo: %v", err)
+	}
+
+	wantKey := filepath.Join(dest, ".git", "zing-fixture-key")
+	gotKey := strings.TrimSpace(readGit(t, dest, "config", "--get", "user.signingKey"))
+	if gotKey != wantKey {
+		t.Errorf("dest user.signingKey = %q, want %q", gotKey, wantKey)
+	}
+
+	if err := runGit(t.Context(), dest, "commit", "-q", "--allow-empty", "-S", "-m", "copy commit"); err != nil {
+		t.Fatalf("commit in dest: %v", err)
+	}
+	verifyHeadSignedBy(t, dest, wantKey)
 }
 
 // TestCopyRepoCopiesBareRepo pins that CopyRepo also copies a bare
@@ -235,18 +289,7 @@ func TestCopyRepoRelinksWorktree(t *testing.T) {
 		t.Fatalf("commit in copied worktree: %v", commitErr)
 	}
 	wantKey := filepath.Join(dest, ".git", "zing-fixture-key")
-	pubOut, err := exec.CommandContext(t.Context(), "ssh-keygen", "-y", "-f", wantKey).CombinedOutput()
-	if err != nil {
-		t.Fatalf("ssh-keygen -y: %v: %s", err, pubOut)
-	}
-	allowed := filepath.Join(t.TempDir(), "allowed_signers")
-	line := "zing-fixture@example.com " + string(pubOut)
-	if writeErr := os.WriteFile(allowed, []byte(line), 0o600); writeErr != nil {
-		t.Fatalf("write allowed signers: %v", writeErr)
-	}
-	if out, verifyErr := Git(t.Context(), destWorktree, "-c", "gpg.ssh.allowedSignersFile="+allowed, "verify-commit", "HEAD"); verifyErr != nil {
-		t.Fatalf("verify-commit in copied worktree: %v\n%s", verifyErr, out)
-	}
+	verifyHeadSignedBy(t, destWorktree, wantKey)
 
 	srcGitdirAfter, err := os.ReadFile(srcWorktreeGitdir)
 	if err != nil {

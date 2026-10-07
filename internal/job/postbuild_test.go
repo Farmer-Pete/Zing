@@ -527,12 +527,66 @@ func pbTicketInReviewingOn(t *testing.T, s *store.Store, rt runtime.Runtime) int
 	return ticketID
 }
 
+// pbAssertPrivateWorktree checks that ticketID's project in s has a
+// git-backed worktree under its own local_path, with git itself (not
+// just the store) agreeing it is independent and working: the worktree
+// dir exists and git status succeeds there, and git worktree list names
+// at least one path under the (resolved) local_path and no path outside
+// it. It returns local_path, so a caller comparing two copies only needs
+// to collect and compare that. label identifies the copy in a failure
+// message (for example "copy 1").
+func pbAssertPrivateWorktree(t *testing.T, label string, s *store.Store, ticketID int64) string {
+	t.Helper()
+
+	proj, err := s.ProjectForTicket(t.Context(), ticketID)
+	if err != nil {
+		t.Fatalf("%s: ProjectForTicket: %v", label, err)
+	}
+
+	localReal, err := filepath.EvalSymlinks(proj.LocalPath)
+	if err != nil {
+		t.Fatalf("%s: EvalSymlinks(%s): %v", label, proj.LocalPath, err)
+	}
+
+	wtDir := filepath.Join(proj.LocalPath, ".zing", "wt", strconv.FormatInt(ticketID, 10))
+	if _, statErr := os.Stat(wtDir); statErr != nil {
+		t.Fatalf("%s: worktree dir %s: %v", label, wtDir, statErr)
+	}
+	if out, statusErr := gitfixture.Git(t.Context(), wtDir, "status", "--porcelain"); statusErr != nil {
+		t.Fatalf("%s: git status in %s: %v: %s", label, wtDir, statusErr, out)
+	}
+
+	out, err := gitfixture.Git(t.Context(), proj.LocalPath, "worktree", "list", "--porcelain")
+	if err != nil {
+		t.Fatalf("%s: git worktree list: %v: %s", label, err, out)
+	}
+	found := false
+	for line := range strings.SplitSeq(string(out), "\n") {
+		path, ok := strings.CutPrefix(line, "worktree ")
+		if !ok {
+			continue
+		}
+		pathReal, err := filepath.EvalSymlinks(path)
+		if err != nil {
+			t.Fatalf("%s: EvalSymlinks(%s): %v", label, path, err)
+		}
+		if pathReal != localReal && !strings.HasPrefix(pathReal, localReal+string(filepath.Separator)) {
+			t.Fatalf("%s: worktree list path %s (resolved %s) is not under %s", label, path, pathReal, localReal)
+		}
+		if pathReal != localReal {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("%s: git worktree list named no worktree under %s", label, localReal)
+	}
+
+	return proj.LocalPath
+}
+
 // TestReviewingStageCopiesAreIndependent checks that two calls to
 // pbTicketInReviewing each get their own reviewing ticket and their own
-// git-backed worktree, with git itself (not just the store) agreeing the
-// copy is independent and working: git status succeeds in the copy's
-// worktree, and git worktree list names only paths under the copy's own
-// (resolved) local_path.
+// git-backed worktree.
 func TestReviewingStageCopiesAreIndependent(t *testing.T) {
 	s1, ticketID1 := pbTicketInReviewing(t)
 	s2, ticketID2 := pbTicketInReviewing(t)
@@ -544,58 +598,10 @@ func TestReviewingStageCopiesAreIndependent(t *testing.T) {
 		t.Fatalf("copy 2: ticket state = %q, want reviewing", ticket.State)
 	}
 
-	var localPaths [2]string
-	for i, pair := range []struct {
-		s  *store.Store
-		id int64
-	}{{s1, ticketID1}, {s2, ticketID2}} {
-		proj, err := pair.s.ProjectForTicket(t.Context(), pair.id)
-		if err != nil {
-			t.Fatalf("copy %d: ProjectForTicket: %v", i+1, err)
-		}
-		localPaths[i] = proj.LocalPath
-
-		localReal, err := filepath.EvalSymlinks(proj.LocalPath)
-		if err != nil {
-			t.Fatalf("copy %d: EvalSymlinks(%s): %v", i+1, proj.LocalPath, err)
-		}
-
-		wtDir := filepath.Join(proj.LocalPath, ".zing", "wt", strconv.FormatInt(pair.id, 10))
-		if _, statErr := os.Stat(wtDir); statErr != nil {
-			t.Fatalf("copy %d: worktree dir %s: %v", i+1, wtDir, statErr)
-		}
-		if out, statusErr := gitfixture.Git(t.Context(), wtDir, "status", "--porcelain"); statusErr != nil {
-			t.Fatalf("copy %d: git status in %s: %v: %s", i+1, wtDir, statusErr, out)
-		}
-
-		out, err := gitfixture.Git(t.Context(), proj.LocalPath, "worktree", "list", "--porcelain")
-		if err != nil {
-			t.Fatalf("copy %d: git worktree list: %v: %s", i+1, err, out)
-		}
-		found := false
-		for line := range strings.SplitSeq(string(out), "\n") {
-			path, ok := strings.CutPrefix(line, "worktree ")
-			if !ok {
-				continue
-			}
-			pathReal, err := filepath.EvalSymlinks(path)
-			if err != nil {
-				t.Fatalf("copy %d: EvalSymlinks(%s): %v", i+1, path, err)
-			}
-			if pathReal != localReal && !strings.HasPrefix(pathReal, localReal+string(filepath.Separator)) {
-				t.Fatalf("copy %d: worktree list path %s (resolved %s) is not under %s", i+1, path, pathReal, localReal)
-			}
-			if pathReal != localReal {
-				found = true
-			}
-		}
-		if !found {
-			t.Fatalf("copy %d: git worktree list named no worktree under %s", i+1, localReal)
-		}
-	}
-
-	if localPaths[0] == localPaths[1] {
-		t.Fatalf("both copies share LocalPath %s", localPaths[0])
+	localPath1 := pbAssertPrivateWorktree(t, "copy 1", s1, ticketID1)
+	localPath2 := pbAssertPrivateWorktree(t, "copy 2", s2, ticketID2)
+	if localPath1 == localPath2 {
+		t.Fatalf("both copies share LocalPath %s", localPath1)
 	}
 }
 
