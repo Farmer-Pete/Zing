@@ -3343,11 +3343,17 @@ func questionOutcomeCommit(t store.Ticket, d Deps, rr runResult, questions []res
 func questionMessagesFor(ticketID int64, qs []response.Question) ([]store.Message, error) {
 	msgs := make([]store.Message, 0, len(qs))
 	for i, q := range qs {
+		// A free-text question has no options. The question schema wants an
+		// array, and a null fails the whole commit.
+		options := q.Options
+		if options == nil {
+			options = []response.Option{}
+		}
 		payload, err := json.Marshal(response.QuestionPayload{
 			Kind:        response.QuestionKindQuestion,
 			State:       response.QuestionStateOpen,
 			Recommended: q.Recommended,
-			Options:     q.Options,
+			Options:     options,
 		})
 		if err != nil {
 			return nil, fmt.Errorf("job: marshal question payload %d: %w", i, err)

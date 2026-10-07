@@ -9,9 +9,11 @@ package console
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -50,23 +52,22 @@ const testEscalationBody = "escalation summary"
 // TestDisplayBody_PlanreviewPendingMarkerIsHumanReadable proves a
 // "planreview vN pending" marker (job.planreviewPendingMarker) no longer
 // renders as-is, and instead reads as the owner-facing sentence explaining
-// that planning is about to resume on its own.
+// that planning is about to resume on its own, naming the version so the
+// owner never reads a stale version's line (#87).
 func TestDisplayBody_PlanreviewPendingMarkerIsHumanReadable(t *testing.T) {
 	t.Parallel()
-	got := displayBody(updateRow("planreview v3 pending"))
-	if got == "planreview v3 pending" {
-		t.Fatalf("displayBody returned the raw marker unchanged: %q", got)
-	}
-	if !strings.Contains(got, "Planning resumes") {
-		t.Errorf("displayBody(%q) = %q, want it to contain %q", "planreview v3 pending", got, "Planning resumes")
+	const want = "Plan review of v3 found minor findings. Planning resumes automatically to address them."
+	if got := displayBody(updateRow("planreview v3 pending")); got != want {
+		t.Errorf("displayBody(%q) = %q, want %q", "planreview v3 pending", got, want)
 	}
 }
 
 // TestDisplayBody_PlanreviewDeliveredMarkerIsHumanReadable proves a
-// "planreview vN delivered" marker renders as a plain sentence too.
+// "planreview vN delivered" marker renders as a plain sentence too, naming
+// the version.
 func TestDisplayBody_PlanreviewDeliveredMarkerIsHumanReadable(t *testing.T) {
 	t.Parallel()
-	const want = "Planning resumed with the review findings."
+	const want = "Planning resumed with the v3 review findings."
 	if got := displayBody(updateRow("planreview v3 delivered")); got != want {
 		t.Errorf("displayBody(%q) = %q, want %q", "planreview v3 delivered", got, want)
 	}
@@ -127,6 +128,54 @@ func TestDisplayBody_ResponseInvalidWithoutErrors(t *testing.T) {
 	body := "response invalid run 4\nno zing element in final message"
 	if got := displayBody(updateRow(body)); got != want {
 		t.Errorf("displayBody(%q) = %q, want %q", body, got, want)
+	}
+}
+
+// TestResponseInvalidDetailFence proves responseInvalidDetail's own cases
+// (design H2): a lens renders in the head line, a nil lens drops that
+// clause, a marker with no error lines falls back to "Reason: ...." rather
+// than an empty "Validator errors:" section, and errors that themselves
+// hold a run of three backticks get wrapped in a four-backtick fence (one
+// longer than the longest run they contain) while a plain error gets the
+// CommonMark minimum, a three-backtick fence. The fence case is proved again
+// through the full render path by
+// TestEscalationQuestion_ResponseInvalidShowsValidatorErrors, since only
+// Render turns responseInvalidDetail's own markdown into HTML that can
+// actually close (or fail to close) a code block.
+func TestResponseInvalidDetailFence(t *testing.T) {
+	t.Parallel()
+	lens := "correctness"
+
+	marker := "response invalid run 5\nthe final message failed validation\nplan/goals: required"
+	got := responseInvalidDetail("review", &lens, 5, marker)
+	for _, want := range []string{"Job: review, lens correctness. Run 5.", "plan/goals: required"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("responseInvalidDetail(lens) = %q, want it to contain %q", got, want)
+		}
+	}
+
+	got = responseInvalidDetail("planning", nil, 5, marker)
+	if strings.Contains(got, "lens") {
+		t.Errorf("responseInvalidDetail(nil lens) = %q, want no lens clause", got)
+	}
+	if !strings.Contains(got, "Job: planning. Run 5.") {
+		t.Errorf("responseInvalidDetail(nil lens) = %q, want it to contain %q", got, "Job: planning. Run 5.")
+	}
+	if !strings.Contains(got, "\n\n```\nplan/goals: required\n```") {
+		t.Errorf("responseInvalidDetail(nil lens) = %q, want a three-backtick fence", got)
+	}
+
+	noErrors := "response invalid run 5\nthe final message failed validation"
+	got = responseInvalidDetail("planning", nil, 5, noErrors)
+	const want = "Job: planning. Run 5.\n\nReason: the final message failed validation."
+	if got != want {
+		t.Errorf("responseInvalidDetail(no errors) = %q, want %q", got, want)
+	}
+
+	backtickRun := "response invalid run 5\nthe final message failed validation\nplan/goals: required\n```\nplan/review: required"
+	got = responseInvalidDetail("planning", nil, 5, backtickRun)
+	if strings.Count(got, "````") != 2 {
+		t.Errorf("responseInvalidDetail(backtick run) = %q, want two four-backtick fence lines", got)
 	}
 }
 
@@ -1841,6 +1890,169 @@ func TestGateShowsPlan(t *testing.T) {
 	}
 }
 
+// TestActionsFor proves actionsFor (#65) offers Abandon and Restart on
+// every queued-through-shipping state, never on done or escalated (even if
+// store.CanAbandon's own list drifted, r1f11 pins these two by name rather
+// than by re-deriving the expectation from the function under test), offers
+// Restart but not Abandon on an abandoned ticket with no live successor,
+// offers neither on an abandoned ticket that has one, reads Held off the
+// claim alone, and strips an attempt suffix from Ref.
+func TestActionsFor(t *testing.T) {
+	t.Parallel()
+
+	// wantAbandon is spelled out per state, not derived from
+	// store.CanAbandon, so a state wrongly added to or dropped from that
+	// list cannot also move this test's expectation (r1f11).
+	wantAbandon := map[string]bool{
+		testQueuedState: true, demoTicketState: true, string(response.TicketStateBuilding): true,
+		string(response.TicketStateReviewing): true, string(response.TicketStateJudging): true, string(response.TicketStateShipping): true,
+		string(response.TicketStateDone): false, string(response.TicketStateEscalated): false, ticketStateAbandoned: false,
+	}
+	claims := []*string{nil, new("some-owner")}
+
+	for state, wantState := range wantAbandon {
+		for _, claim := range claims {
+			for _, liveSuccessor := range []bool{false, true} {
+				name := fmt.Sprintf("state=%s claimed=%v liveSuccessor=%v", state, claim != nil, liveSuccessor)
+				t.Run(name, func(t *testing.T) {
+					t.Parallel()
+					ticket := store.Ticket{TrackerRef: "41-abandoned-2", State: state, ClaimOwner: claim}
+					got := actionsFor(ticket, liveSuccessor)
+
+					if got.Abandon != wantState {
+						t.Errorf("Abandon = %v, want %v", got.Abandon, wantState)
+					}
+
+					wantRestart := wantState
+					if state == ticketStateAbandoned {
+						wantRestart = !liveSuccessor
+					}
+					if got.Restart != wantRestart {
+						t.Errorf("Restart = %v, want %v", got.Restart, wantRestart)
+					}
+
+					if wantHeld := claim != nil; got.Held != wantHeld {
+						t.Errorf("Held = %v, want %v", got.Held, wantHeld)
+					}
+
+					if got.Ref != "41" {
+						t.Errorf("Ref = %q, want %q", got.Ref, "41")
+					}
+				})
+			}
+		}
+	}
+}
+
+// TestThreadRendersTicketActions proves threadComponent wires ticketActions
+// into Thread's action bar (#65): an unclaimed queued ticket renders both
+// buttons without disabled, and a claimed ticket renders both disabled with
+// the claim note.
+func TestThreadRendersTicketActions(t *testing.T) {
+	t.Parallel()
+	s, err := store.Open(t.Context(), filepath.Join(t.TempDir(), "zing.db"))
+	if err != nil {
+		t.Fatalf("store.Open: %v", err)
+	}
+	t.Cleanup(func() { _ = s.Close() })
+	c := &console{store: s}
+
+	projectID, err := s.EnsureProject(t.Context(), store.Project{
+		Name: "thread-actions", RepoURL: "https://example.invalid/thread-actions.git",
+		LocalPath: t.TempDir(), Tracker: testGitHubTracker,
+	})
+	if err != nil {
+		t.Fatalf("EnsureProject: %v", err)
+	}
+	ticketID, err := s.InsertTicket(t.Context(), store.Ticket{
+		ProjectID: projectID, TrackerRef: "41", Title: "restart me", State: testQueuedState,
+	})
+	if err != nil {
+		t.Fatalf("InsertTicket: %v", err)
+	}
+
+	render := func(id int64) string {
+		t.Helper()
+		comp, compErr := c.threadComponent(t.Context(), id)
+		if compErr != nil {
+			t.Fatalf("threadComponent: %v", compErr)
+		}
+		var sb strings.Builder
+		if renderErr := comp.Render(t.Context(), &sb); renderErr != nil {
+			t.Fatalf("Render: %v", renderErr)
+		}
+		return sb.String()
+	}
+
+	got := render(ticketID)
+	if !strings.Contains(got, "ticket-abandon") || !strings.Contains(got, "ticket-restart") {
+		t.Errorf("unclaimed ticket missing action buttons; got:\n%s", got)
+	}
+	if strings.Contains(got, "disabled") {
+		t.Errorf("unclaimed ticket renders disabled; got:\n%s", got)
+	}
+
+	expires := time.Now().Add(10 * time.Minute).UTC().Truncate(time.Second)
+	claimed, err := s.Claim(t.Context(), ticketID, "some-owner", expires)
+	if err != nil {
+		t.Fatalf("Claim: %v", err)
+	}
+	if !claimed {
+		t.Fatal("Claim: got false, want true")
+	}
+
+	got = render(ticketID)
+	if !strings.Contains(got, "ticket-abandon") || !strings.Contains(got, "ticket-restart") {
+		t.Errorf("claimed ticket missing action buttons; got:\n%s", got)
+	}
+	// Count only the action bar's buttons: the ticket body box is disabled
+	// too while claimed (#75 Q2).
+	if !strings.Contains(got, `data-action="abandon" disabled`) || !strings.Contains(got, `data-action="restart" disabled`) {
+		t.Errorf("claimed ticket want both action buttons disabled; got:\n%s", got)
+	}
+	if !strings.Contains(got, store.AbandonClaimedReason) {
+		t.Errorf("claimed ticket missing claim note; got:\n%s", got)
+	}
+
+	// An abandoned ticket with no live successor still offers Restart, but
+	// not Abandon, so ticketActions' own TicketByRef lookup must run (r1f10:
+	// the two cases below were previously untested, so ticketActions could
+	// always pass liveSuccessor=false and still pass every other test).
+	abandonedID, err := s.InsertTicket(t.Context(), store.Ticket{
+		ProjectID: projectID, TrackerRef: "99", Title: "restart me too", State: testQueuedState,
+	})
+	if err != nil {
+		t.Fatalf("InsertTicket: %v", err)
+	}
+	if err := s.AbandonTicket(t.Context(), abandonedID, "test abandon"); err != nil {
+		t.Fatalf("AbandonTicket: %v", err)
+	}
+
+	gotAbandoned := render(abandonedID)
+	if strings.Contains(gotAbandoned, "ticket-abandon") {
+		t.Errorf("abandoned ticket with no live successor offers Abandon; got:\n%s", gotAbandoned)
+	}
+	if !strings.Contains(gotAbandoned, "ticket-restart") {
+		t.Errorf("abandoned ticket with no live successor missing Restart; got:\n%s", gotAbandoned)
+	}
+
+	// Once a live successor exists at the retired ref, the old abandoned
+	// ticket offers neither action.
+	if _, err := s.RetireAbandonedRef(t.Context(), projectID, "99"); err != nil {
+		t.Fatalf("RetireAbandonedRef: %v", err)
+	}
+	if _, err := s.InsertTicket(t.Context(), store.Ticket{
+		ProjectID: projectID, TrackerRef: "99", Title: "the live successor", State: testQueuedState,
+	}); err != nil {
+		t.Fatalf("InsertTicket: %v", err)
+	}
+
+	gotSuperseded := render(abandonedID)
+	if strings.Contains(gotSuperseded, "ticket-actions") {
+		t.Errorf("abandoned ticket with a live successor renders an action bar; got:\n%s", gotSuperseded)
+	}
+}
+
 // projectSectionsRefs returns tickets' tracker refs, in order, for
 // TestProjectSections' assertions.
 func projectSectionsRefs(tickets []store.Ticket) []string {
@@ -2050,5 +2262,170 @@ func TestBuildNavThreads_ParkedUntil(t *testing.T) {
 	}
 	if got[2].ParkedUntil != "" {
 		t.Errorf("buildNavThreads[2].ParkedUntil = %q, want \"\" (nil)", got[2].ParkedUntil)
+	}
+}
+
+// sealedSectionGateRow builds the one gate-question row showSealedSection's
+// cross-product test varies: a "question" message carrying a gate-kind
+// QuestionPayload in the given state, or nil for "no gate row at all".
+func sealedSectionGateRow(t *testing.T, state string) []store.MessageRow {
+	t.Helper()
+	if state == "" {
+		return nil
+	}
+	payload, err := json.Marshal(response.QuestionPayload{Key: "Q1", Kind: response.QuestionKindGate})
+	if err != nil {
+		t.Fatalf("marshal gate payload: %v", err)
+	}
+	st := state
+	return []store.MessageRow{{ID: 1, Message: store.Message{Type: msgTypeQuestion, State: &st, Payload: payload}}} //nolint:modernize // keyed on purpose
+}
+
+// TestShowSealedSection proves showSealedSection's full rule (#75 Q1): true
+// exactly when the state is one of building, reviewing, judging, shipping
+// or escalated, the cohort is sealed, and the only gate question present
+// (if any) is resolved -- never while a gate still shows the plan (open or
+// answered), so the gate's own boxes and the section's never both render.
+func TestShowSealedSection(t *testing.T) {
+	t.Parallel()
+	states := []string{
+		string(response.TicketStateQueued), string(response.TicketStatePlanning), string(response.TicketStateBuilding),
+		string(response.TicketStateReviewing), string(response.TicketStateJudging), string(response.TicketStateShipping),
+		string(response.TicketStateEscalated), string(response.TicketStateDone), string(response.TicketStateAbandoned),
+	}
+	gates := []string{msgStateOpen, msgStateAnswered, msgStateResolved, ""}
+
+	// wantSealedState is a literal copy of the states #75 Q1 names, kept
+	// independent of production's sealedSectionStates map so a change to
+	// that map (e.g. adding planning or dropping reviewing) fails this
+	// test instead of passing it vacuously (r1f4).
+	wantSealedState := map[string]bool{
+		string(response.TicketStateBuilding):  true,
+		string(response.TicketStateReviewing): true,
+		string(response.TicketStateJudging):   true,
+		string(response.TicketStateShipping):  true,
+		string(response.TicketStateEscalated): true,
+	}
+
+	for _, state := range states {
+		for _, sealed := range []bool{true, false} {
+			for _, gate := range gates {
+				t.Run(state+"/sealed="+strconv.FormatBool(sealed)+"/gate="+gate, func(t *testing.T) {
+					t.Parallel()
+					rows := sealedSectionGateRow(t, gate)
+					want := sealed && wantSealedState[state] && (gate == "" || gate == msgStateResolved)
+					if got := showSealedSection(state, sealed, rows); got != want {
+						t.Errorf("showSealedSection(%q, %v, gate=%q) = %v, want %v", state, sealed, gate, got, want)
+					}
+				})
+			}
+		}
+	}
+
+	t.Run("building sealed with an open non-gate question: true", func(t *testing.T) {
+		t.Parallel()
+		open := msgStateOpen
+		payload, err := json.Marshal(response.QuestionPayload{Key: "Q1", Kind: response.QuestionKindQuestion})
+		if err != nil {
+			t.Fatalf("marshal question payload: %v", err)
+		}
+		rows := []store.MessageRow{{ID: 1, Message: store.Message{Type: msgTypeQuestion, State: &open, Payload: payload}}} //nolint:modernize // keyed on purpose
+		if !showSealedSection(string(response.TicketStateBuilding), true, rows) {
+			t.Error("showSealedSection = false, want true")
+		}
+	})
+
+	for _, state := range []string{string(response.TicketStateJudging), string(response.TicketStateEscalated)} {
+		t.Run(state+" sealed with an open amended escalation question: true", func(t *testing.T) {
+			t.Parallel()
+			open := msgStateOpen
+			payload, err := json.Marshal(response.QuestionPayload{
+				Key: "Q1", Kind: response.QuestionKindQuestion,
+				Amendment: &response.Amendment{Scenario: "s1", Given: "g", When: "w", Then: "t", Check: "go test ./...", Reason: "r"},
+			})
+			if err != nil {
+				t.Fatalf("marshal amended escalation payload: %v", err)
+			}
+			rows := []store.MessageRow{{ID: 1, Message: store.Message{Type: msgTypeQuestion, State: &open, Payload: payload}}} //nolint:modernize // keyed on purpose
+			if !showSealedSection(state, true, rows) {
+				t.Errorf("showSealedSection(%q) = false, want true", state)
+			}
+		})
+	}
+
+	t.Run("building sealed with only a draft gate question: true", func(t *testing.T) {
+		t.Parallel()
+		draft := draftMessageState
+		payload, err := json.Marshal(response.QuestionPayload{Key: "Q1", Kind: response.QuestionKindGate})
+		if err != nil {
+			t.Fatalf("marshal gate payload: %v", err)
+		}
+		rows := []store.MessageRow{{ID: 1, Message: store.Message{Type: msgTypeQuestion, State: &draft, Payload: payload}}} //nolint:modernize // keyed on purpose
+		if !showSealedSection(string(response.TicketStateBuilding), true, rows) {
+			t.Error("showSealedSection = false, want true")
+		}
+	})
+
+	t.Run("building sealed with an undecodable question payload: true", func(t *testing.T) {
+		t.Parallel()
+		open := msgStateOpen
+		rows := []store.MessageRow{{ID: 1, Message: store.Message{Type: msgTypeQuestion, State: &open, Payload: json.RawMessage("not json")}}} //nolint:modernize // keyed on purpose
+		if !showSealedSection(string(response.TicketStateBuilding), true, rows) {
+			t.Error("showSealedSection = false, want true")
+		}
+	})
+}
+
+// TestGroupAttempts proves groupAttempts (#65) folds a project's tickets by
+// issue: one head per base ref -- the attempt-0 ticket when one exists, in
+// the input's own order -- and every other ticket sharing that base under
+// earlier[head.ID], oldest attempt first; a base with no attempt-0 ticket at
+// all (53-abandoned-1 alone) is still its own head, with no earlier entry.
+func TestGroupAttempts(t *testing.T) {
+	t.Parallel()
+
+	ticket9 := store.Ticket{ID: 9, TrackerRef: "41"}
+	ticket3 := store.Ticket{ID: 3, TrackerRef: "7"}
+	ticket8 := store.Ticket{ID: 8, TrackerRef: "41-abandoned-2"}
+	ticket4 := store.Ticket{ID: 4, TrackerRef: "41-abandoned-1"}
+	ticket6 := store.Ticket{ID: 6, TrackerRef: "53-abandoned-1"}
+
+	heads, earlier := groupAttempts([]store.Ticket{ticket9, ticket3, ticket8, ticket4, ticket6})
+
+	if len(heads) != 3 {
+		t.Fatalf("groupAttempts heads = %+v, want 3 entries", heads)
+	}
+	if heads[0].ID != 9 || heads[1].ID != 3 || heads[2].ID != 6 {
+		t.Errorf("groupAttempts heads = %d, %d, %d; want 9, 3, 6", heads[0].ID, heads[1].ID, heads[2].ID)
+	}
+
+	got9 := earlier[9]
+	if len(got9) != 2 || got9[0].ID != 4 || got9[1].ID != 8 {
+		t.Errorf("earlier[9] = %+v, want [ticket 4, ticket 8] in that order", got9)
+	}
+	if got6 := earlier[6]; len(got6) != 0 {
+		t.Errorf("earlier[6] = %+v, want no entry", got6)
+	}
+}
+
+// TestGroupAttempts_AllAttemptsRetiredHeadIsHighest proves that when every
+// ticket sharing a base has been retired, groupAttempts (#65) still picks
+// one head for that base -- the highest-attempt ticket, not simply the
+// first one seen -- and files every other retired attempt under it in
+// earlier (r1f12).
+func TestGroupAttempts_AllAttemptsRetiredHeadIsHighest(t *testing.T) {
+	t.Parallel()
+
+	ticket6 := store.Ticket{ID: 6, TrackerRef: "60-abandoned-1"}
+	ticket10 := store.Ticket{ID: 10, TrackerRef: "60-abandoned-2"}
+
+	heads, earlier := groupAttempts([]store.Ticket{ticket6, ticket10})
+
+	if len(heads) != 1 || heads[0].ID != 10 {
+		t.Fatalf("groupAttempts heads = %+v, want [ticket 10]", heads)
+	}
+	got10 := earlier[10]
+	if len(got10) != 1 || got10[0].ID != 6 {
+		t.Errorf("earlier[10] = %+v, want [ticket 6]", got10)
 	}
 }

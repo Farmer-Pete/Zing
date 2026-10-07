@@ -640,16 +640,62 @@ export function sendTargets(questions, focusedID) {
 /**
  * sendConfirmText writes openSendConfirm's dialog line naming the questions
  * a Cmd+Enter is about to send (Q3: "Send 3 replies on Q6, Q7, Q9?"), given
- * sendTargets' own keys in the same order.
+ * sendTargets' own keys in the same order. A true warn appends a space and
+ * reviewNoteWarningText (Q4: a review question's reply box held text, so
+ * this send also leaks a note to a lens and leaves the question open);
+ * omitting warn, or passing false, leaves the text exactly as before.
  *
  * @param {string[]} keys
+ * @param {boolean} [warn]
  * @returns {string}
  */
-export function sendConfirmText(keys) {
-	if (keys.length === 1) {
-		return `Send 1 reply on ${keys[0]}?`;
+export function sendConfirmText(keys, warn) {
+	const base =
+		keys.length === 1 ? `Send 1 reply on ${keys[0]}?` : `Send ${keys.length} replies on ${keys.join(', ')}?`;
+	return warn ? `${base} ${reviewNoteWarningText}` : base;
+}
+
+// reviewNoteWarningText is openSendConfirm's extra line (Q4) when the send
+// also goes out from a review question's reply box: a free reply there is
+// still a discussion note to the lens, and it does not answer the question
+// (markAnsweredQuestionsTx's review rule), so the owner is told both things
+// before they confirm.
+export const reviewNoteWarningText = 'This sends your note to the lens and keeps the question open.';
+
+/**
+ * reviewNoteTargets decides whether sendBatch's confirm dialog must warn
+ * that this send also leaks a note to a lens and leaves its question open
+ * (Q4). questions is the same list sendTargets reads (collectSendQuestions'
+ * descriptors), each now also carrying reviewNote: true when it is a
+ * review-kind question whose reply box currently holds text. True when any
+ * entry that would actually be sent -- hasDraft and not conflicted, the same
+ * filter sendTargets applies -- has reviewNote true.
+ *
+ * @param {{hasDraft: boolean, conflicted: boolean, reviewNote?: boolean}[]} questions
+ * @returns {boolean}
+ */
+export function reviewNoteTargets(questions) {
+	return (questions ?? []).some((q) => q.hasDraft && !q.conflicted && q.reviewNote);
+}
+
+/**
+ * ticketActionConfirmText writes the in-page confirm dialog's line for the
+ * thread view's Abandon and Restart buttons (Q3: an in-page dialog, never
+ * window.confirm), naming the ticket's issue ref. Any other action returns
+ * the empty string, since the dialog only ever opens for these two.
+ *
+ * @param {string} action - 'abandon' or 'restart'
+ * @param {string} ref - the issue ref the thread's action bar carries
+ * @returns {string}
+ */
+export function ticketActionConfirmText(action, ref) {
+	if (action === 'abandon') {
+		return `Abandon #${ref}? Its thread stays as history.`;
 	}
-	return `Send ${keys.length} replies on ${keys.join(', ')}?`;
+	if (action === 'restart') {
+		return `Restart #${ref} from planning? This ticket is abandoned and a new one starts.`;
+	}
+	return '';
 }
 
 /**
@@ -908,16 +954,95 @@ export function buildChipDraftBody(dataset) {
  * data-item-ref, and data-decision, matching store.DraftInput's item mode
  * (answer.go's draftRequest: {ticket, question, item: {ref, decision}}).
  *
+ * note is the review item's note box value, read by console.js off the
+ * same row's .item-note input (task 4, ticket #68) and carried along with
+ * the pick so a note typed before a decision is clicked still rides that
+ * decision's own /draft post. Omitted (the one-argument call) or not a
+ * string, item.note is left off the body entirely, matching today's shape
+ * for every non-review control.
+ *
  * @param {{draftTicket?: string, draftQuestion?: string, itemRef?: string, decision?: string}} dataset
- * @returns {{ticket: number, question: number, item: {ref: string, decision: string}}}
+ * @param {string} [note]
+ * @returns {{ticket: number, question: number, item: {ref: string, decision: string, note?: string}}}
  */
-export function buildItemDraftBody(dataset) {
+export function buildItemDraftBody(dataset, note) {
+	const item = { ref: dataset?.itemRef ?? '', decision: dataset?.decision ?? '' };
+	if (typeof note === 'string') {
+		item.note = note;
+	}
 	return {
 		ticket: Number(dataset?.draftTicket),
 		question: Number(dataset?.draftQuestion),
-		item: { ref: dataset?.itemRef ?? '', decision: dataset?.decision ?? '' },
+		item,
 	};
 }
+
+/**
+ * itemNoteBody builds POST /draft's JSON body for a review item's note box
+ * save (console.js's installItemNoteSave and postSendBatchLocked's pre-send
+ * flush, ticket #68): dataset is the note box's own data-note-ticket,
+ * data-note-question, and data-item-ref (thread.templ's itemRow), decision
+ * is the row's already-picked decision button's data-decision value, and
+ * note is the box's current value. Returns null when decision is empty or
+ * missing (owner decision Q2: a note needs a pick on its row before it can
+ * save), so the caller can show pickBeforeNoteText instead of posting a
+ * request the server would refuse.
+ *
+ * @param {{noteTicket?: string, noteQuestion?: string, itemRef?: string}} dataset
+ * @param {string} [decision]
+ * @param {string} [note]
+ * @returns {{ticket: number, question: number, item: {ref: string, decision: string, note: string}}|null}
+ */
+export function itemNoteBody(dataset, decision, note) {
+	if (!decision) {
+		return null;
+	}
+	return {
+		ticket: Number(dataset?.noteTicket),
+		question: Number(dataset?.noteQuestion),
+		item: { ref: dataset?.itemRef ?? '', decision, note: note ?? '' },
+	};
+}
+
+/**
+ * itemNoteFlushTargets decides which review item note boxes
+ * postSendBatchLocked must flush before /send runs (review fix, tests):
+ * boxes is one descriptor per "#main .item-note" box -- its current value,
+ * its defaultValue (what the page rendered), its own dataset
+ * (data-note-ticket, data-note-question, data-item-ref), and picked, the
+ * row's picked decision button's {decision, draftQuestion} or null when the
+ * row has none yet. questionIDs is the send's own target question ids
+ * (sendTargets' ids). A box is skipped, and flushes nothing, when its value
+ * has not changed from defaultValue, when its row has no picked decision,
+ * or when its question is not one of questionIDs: without these three
+ * checks, sending one question flushed every item-note box on the page,
+ * including one on a revisable, already-answered review question the owner
+ * never touched this send, creating an unintended new draft answer there.
+ *
+ * @param {{value: string, defaultValue: string, dataset: {noteTicket?: string, noteQuestion?: string, itemRef?: string}, picked: {decision: string, draftQuestion: string}|null}[]} boxes
+ * @param {number[]} questionIDs
+ * @returns {{ticket: number, question: number, item: {ref: string, decision: string, note: string}}[]}
+ */
+export function itemNoteFlushTargets(boxes, questionIDs) {
+	const ids = new Set(questionIDs ?? []);
+	return (boxes ?? [])
+		.filter((b) => b.value !== b.defaultValue)
+		.map((b) => {
+			if (!b.picked || !ids.has(Number(b.picked.draftQuestion))) {
+				return null;
+			}
+			return itemNoteBody(b.dataset, b.picked.decision, b.value);
+		})
+		.filter((body) => body != null);
+}
+
+/**
+ * pickBeforeNoteText is the review item note box's hint (console.js's
+ * installItemNoteSave) when the owner edits a finding's note before
+ * picking a decision on that row (owner decision Q2): the note waits in
+ * the box, unsaved, until a decision exists to save it with.
+ */
+export const pickBeforeNoteText = 'Pick a decision to save this note';
 
 /**
  * collectPatchWork is the one call the MutationObserver callback makes each

@@ -88,11 +88,25 @@ type ThreadItem struct {
 // Check, Sealed, and TicketID (#41) feed scenariosSection's own owner-edit
 // box, rendered only when Sealed: Check is the scenario's check_cmd, Sealed
 // is whether the artifact's sealed_at is set, and TicketID is the owning
-// ticket, the box's data-ticket attribute.
+// ticket, the box's data-ticket attribute. Claimed (#75) is true only when
+// the owning ticket's ClaimOwner is non-nil; set by console.threadComponent
+// and console.buildThreadQuestion (the Amendment row), it renders the
+// scenario's owner-edit box disabled with the store's own claim sentence.
 type ScenarioRow struct {
 	ID, Kind, Given, When, Then, Check string
 	Sealed                             bool
 	TicketID                           int64
+	Claimed                            bool
+}
+
+// SealedSection is the post-gate "Sealed plan and scenarios" section's view
+// model (#75): the sealed cohort's current scenario table and stored plan,
+// the same two context pieces gateContext renders at the gate. A nil
+// *SealedSection (threadComponent's own showSealedSection guard) renders
+// nothing (thread.templ's sealedSection).
+type SealedSection struct {
+	Plan      *RenderedPlan
+	Scenarios []ScenarioRow
 }
 
 // FindingRow is one above-floor plan-review finding in the gate's context
@@ -193,6 +207,13 @@ type ThreadQuestion struct {
 	DraftOption string
 	DraftItems  map[string]response.Decision
 
+	// DraftNotes is the ticket's own in-progress, unsent per-finding notes
+	// against this question (ticket #68), review kind only: DraftItems'
+	// ref->decision alongside DraftNotes' ref->note, both keyed the same.
+	// effectiveItemNotes (thread.templ) reads it the same way
+	// effectivePickedItems reads DraftItems.
+	DraftNotes map[string]string
+
 	// PickedOption and PickedItems are this question's own sent answer,
 	// decoded once (console.collectSentAnswers) and kept separate from
 	// DraftOption/DraftItems (bug fix: "options vanish once locked" --
@@ -205,6 +226,10 @@ type ThreadQuestion struct {
 	// question is still open.
 	PickedOption string
 	PickedItems  map[string]response.Decision
+
+	// PickedNotes is this question's own sent per-finding notes (ticket
+	// #68), set only once not Interactive, mirroring PickedItems above.
+	PickedNotes map[string]string
 
 	// AnsweredHTML is a closed, state=answered question's own sent answer,
 	// pre-rendered as markdown (bug fix: raw backticks showed literally;
@@ -240,6 +265,31 @@ type ThreadQuestion struct {
 	// left with an empty closing line.
 	SettledLabel string
 	SettledHTML  templ.Component
+}
+
+// TicketActions is the thread view's action bar (#65, design section 6.6's
+// owner actions): console.actionsFor builds it from one ticket's own state,
+// claim, and (for an abandoned ticket) whether a live successor exists at
+// its ref.
+type TicketActions struct {
+	// Abandon reports whether the Abandon button renders at all: exactly
+	// store.CanAbandon(ticket.State).
+	Abandon bool
+
+	// Restart reports whether the Restart from planning button renders:
+	// wherever Abandon does, and also on an abandoned ticket while no live
+	// ticket holds its ref.
+	Restart bool
+
+	// Held reports whether a run currently holds the ticket (claim_owner is
+	// set): both buttons render disabled, with AbandonClaimedReason as the
+	// note, while this is true.
+	Held bool
+
+	// Ref is the ticket's issue ref with any -abandoned-K suffix stripped
+	// (store.SplitAttemptRef), the action bar's data-ref attribute and the
+	// confirm dialog's own wording.
+	Ref string
 }
 
 // Turn is one line of a question's own conversation (design section 22.7):

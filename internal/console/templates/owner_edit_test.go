@@ -20,7 +20,7 @@ func TestOwnerEditControls_SealedScenarioOnly(t *testing.T) {
 	}
 
 	var sb strings.Builder
-	if err := scenariosSection(rows).Render(t.Context(), &sb); err != nil {
+	if err := scenariosSection(rows, true).Render(t.Context(), &sb); err != nil {
 		t.Fatalf("scenariosSection.Render: %v", err)
 	}
 	got := sb.String()
@@ -170,7 +170,7 @@ func TestOwnerEditControls_TicketBodyEditor(t *testing.T) {
 	ticket := &store.Ticket{ID: 7, Title: testHelloTicketTitle, Body: "B"}
 
 	var sb strings.Builder
-	if err := Thread(ticket, nil, WaitProgress{}, "").Render(t.Context(), &sb); err != nil {
+	if err := Thread(ticket, nil, WaitProgress{}, "", TicketActions{}, nil).Render(t.Context(), &sb); err != nil {
 		t.Fatalf("Thread.Render: %v", err)
 	}
 	got := sb.String()
@@ -192,12 +192,33 @@ func TestOwnerEditControls_TextareaPreservesLeadingNewline(t *testing.T) {
 	ticket := &store.Ticket{ID: 7, Title: testHelloTicketTitle, Body: "\nX"}
 
 	var sb strings.Builder
-	if err := Thread(ticket, nil, WaitProgress{}, "").Render(t.Context(), &sb); err != nil {
+	if err := Thread(ticket, nil, WaitProgress{}, "", TicketActions{}, nil).Render(t.Context(), &sb); err != nil {
 		t.Fatalf("Thread.Render: %v", err)
 	}
 	got := sb.String()
 
 	if !strings.Contains(got, "<textarea data-field=\"body\">\n\nX</textarea>") {
 		t.Errorf("want the body textarea to double up the stored leading newline; got:\n%s", got)
+	}
+}
+
+// TestOwnerEditControls_TicketBodyEditorStripsSuffix proves the tracker
+// issue note (#65) shows a retired ticket's base ref, never the raw
+// -abandoned-K suffix.
+func TestOwnerEditControls_TicketBodyEditorStripsSuffix(t *testing.T) {
+	t.Parallel()
+	ticket := &store.Ticket{ID: 7, TrackerRef: "41-abandoned-2", Title: testHelloTicketTitle, Body: "B"}
+
+	var sb strings.Builder
+	if err := Thread(ticket, nil, WaitProgress{}, "", TicketActions{}, nil).Render(t.Context(), &sb); err != nil {
+		t.Fatalf("Thread.Render: %v", err)
+	}
+	got := sb.String()
+
+	if !strings.Contains(got, "The tracker issue 41 is not updated") {
+		t.Errorf(`want "The tracker issue 41 is not updated"; got:\n%s`, got)
+	}
+	if strings.Contains(got, "41-abandoned-2") {
+		t.Errorf("Thread rendered the raw -abandoned-K ref; got:\n%s", got)
 	}
 }

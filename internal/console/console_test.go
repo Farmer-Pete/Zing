@@ -77,32 +77,41 @@ func newTestLogHandler(t *testing.T) *console.Handler {
 	return console.NewHandler(io.Discard, new(slog.LevelVar), nil)
 }
 
-// testTrackerGitHub, testAuthorZing, testMsgTypeQuestion,
+// testTrackerGitHub, testAuthorZing, testMsgTypeQuestion, testMsgTypeUpdate,
 // testWaitingQuestions, testRuntimeFake, testArtifactTypePlan,
-// testArtifactTypeScenario, and testPlanningLiteral round up the string
-// literals this package's tests repeat three or more times: the tracker
-// name every seeded project uses, the author every zing-authored message
-// uses, the "question" message type, the "questions" ticket.waiting_on
-// value a seeded open question sets (store's own historical spelling,
-// commit.go's waitingFlagQuestions), the "fake" runtime name, the "plan"
-// and "scenario" artifacts.type values, and "planning" -- the exact spelling
-// sessions.job (a run's own job name) and tickets.state (design section
-// 5.2's own name for the ticket's state while planning runs) happen to
-// share, named once rather than twice for two meanings that collide.
+// testArtifactTypeScenario, testArtifactTypePlanreview, and
+// testPlanningLiteral round up the string literals this package's tests
+// repeat three or more times: the tracker name every seeded project uses,
+// the author every zing-authored message uses, the "question" and "update"
+// message types, the "questions" ticket.waiting_on value a seeded open
+// question sets (store's own historical spelling, commit.go's
+// waitingFlagQuestions), the "fake" runtime name, the "plan", "scenario",
+// and "planreview" artifacts.type values, and "planning" -- the exact
+// spelling sessions.job (a run's own job name) and tickets.state (design
+// section 5.2's own name for the ticket's state while planning runs) happen
+// to share, named once rather than twice for two meanings that collide.
 // testQuestionStateAnswered is the question lifecycle's own "answered"
 // state, read back after Save/Send resolves a question's chip.
 const (
-	testTrackerGitHub         = "github"
-	testAuthorZing            = "zing"
-	testMsgTypeQuestion       = "question"
-	testWaitingQuestions      = "questions"
-	testRuntimeFake           = "fake"
-	testArtifactTypePlan      = "plan"
-	testArtifactTypeScenario  = "scenario"
-	testPlanningLiteral       = "planning"
-	testStateQueued           = "queued"
-	testQuestionStateOpen     = "open"
-	testQuestionStateAnswered = "answered"
+	testTrackerGitHub          = "github"
+	testAuthorZing             = "zing"
+	testMsgTypeQuestion        = "question"
+	testMsgTypeUpdate          = "update"
+	testWaitingQuestions       = "questions"
+	testRuntimeFake            = "fake"
+	testArtifactTypePlan       = "plan"
+	testArtifactTypeScenario   = "scenario"
+	testArtifactTypePlanreview = "planreview"
+	testPlanningLiteral        = "planning"
+	testStateQueued            = "queued"
+	testQuestionStateOpen      = "open"
+	testQuestionStateAnswered  = "answered"
+
+	// testRetiredRef5First is ref "5"'s first retired attempt (#65): the
+	// tracker_ref a restart or pickup gives ticket 5's old row once a fresh
+	// ticket takes "5", shared by pickup_test.go and ticket_actions_test.go
+	// so the literal is not repeated across the package (goconst).
+	testRetiredRef5First = "5-abandoned-1"
 )
 
 var testProject = store.Project{
@@ -273,7 +282,7 @@ func seedStateMessage(t *testing.T, s *store.Store, ticketID int64, from, to, re
 func seedUnreadUpdate(t *testing.T, s *store.Store, ticketID int64, body string) int64 {
 	t.Helper()
 	id, err := s.InsertMessage(t.Context(), store.Message{
-		TicketID: ticketID, Type: "update", Author: testAuthorZing, Body: body,
+		TicketID: ticketID, Type: testMsgTypeUpdate, Author: testAuthorZing, Body: body,
 	})
 	if err != nil {
 		t.Fatalf("InsertMessage(update): %v", err)

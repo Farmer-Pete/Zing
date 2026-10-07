@@ -131,10 +131,14 @@ func draftFingerprint(s string) string {
 
 // ItemDecision is one ref-to-decision pick for an item-kind question
 // (perimeter, review): SaveDraft merges it into the draft's
-// AnswerPayload.Items map one call at a time (design section 6.7).
+// AnswerPayload.Items map one call at a time (design section 6.7). Note is
+// the owner's free-text note on this finding, review questions only
+// (ticket #68): empty clears any note already stored for Ref, and a
+// non-empty Note on a non-review question is refused by SaveDraft.
 type ItemDecision struct {
 	Ref      string
 	Decision response.Decision
+	Note     string
 }
 
 // DraftInput is one SaveDraft call: exactly one of Option, Item, or Text is
@@ -259,6 +263,9 @@ func (s *Store) SaveDraft(ctx context.Context, in DraftInput) (result DraftResul
 				in.Item.Decision != response.DecisionAccept && in.Item.Decision != response.DecisionDrop && in.Item.Decision != response.DecisionDiscuss {
 				return DraftResult{}, conflict("a review item takes accept, drop, or discuss")
 			}
+			if in.Item.Note != "" && payload.Kind != response.QuestionKindReview {
+				return DraftResult{}, conflict("a note is for a review item")
+			}
 			result, err = s.upsertItemDraftTx(ctx, tx, in.TicketID, *in.QuestionID, *in.Item)
 		case in.Text == "":
 			// Option and Item are already both nil in this branch (the two
@@ -301,8 +308,10 @@ func (s *Store) SaveDraft(ctx context.Context, in DraftInput) (result DraftResul
 // base_fp, text_fp, and current_fp -- draftFingerprint of in.Base, in.Text,
 // and ce.Current -- and "draft saved" and "draft cleared" carry base_fp and
 // text_fp whenever has_base is true, so a conflict's losing and winning
-// tabs can be matched up after the fact by fingerprint alone. Draft text is
-// never logged.
+// tabs can be matched up after the fact by fingerprint alone. When in.Item
+// is set, every line also carries has_note, plus note_fp = draftFingerprint
+// of in.Item.Note when has_note is true (ticket #68). Draft text, and a
+// finding's note, are never logged.
 func logSaveDraftOutcome(ctx context.Context, in DraftInput, result DraftResult, err error) {
 	var questionID int64
 	if in.QuestionID != nil {
@@ -312,6 +321,13 @@ func logSaveDraftOutcome(ctx context.Context, in DraftInput, result DraftResult,
 	attrs := []any{"ticket_id", in.TicketID, "question_id", questionID, "has_base", hasBase}
 	if hasBase {
 		attrs = append(attrs, "base_fp", draftFingerprint(*in.Base), "text_fp", draftFingerprint(in.Text))
+	}
+	if in.Item != nil {
+		hasNote := in.Item.Note != ""
+		attrs = append(attrs, "has_note", hasNote)
+		if hasNote {
+			attrs = append(attrs, "note_fp", draftFingerprint(in.Item.Note))
+		}
 	}
 
 	if err != nil {
@@ -601,8 +617,12 @@ func (s *Store) upsertOptionDraftTx(ctx context.Context, tx *sql.Tx, ticketID, q
 
 // upsertItemDraftTx merges one ref->decision entry into questionID's draft
 // answer items map, creating the draft answer row on the first pick (design
-// section 6.7). Replaced reports whether ref already carried this exact
-// decision.
+// section 6.7), and merges item.Note into the draft's Notes map alongside it
+// (ticket #68): a non-empty Note sets Notes[item.Ref], an empty Note deletes
+// that key, and Notes is set back to nil once it would otherwise be left
+// empty, so an all-cleared notes map never round-trips as `"notes":{}`.
+// Replaced reports whether ref already carried this exact decision and
+// note.
 func (s *Store) upsertItemDraftTx(ctx context.Context, tx *sql.Tx, ticketID, questionID int64, item ItemDecision) (DraftResult, error) {
 	existingID, existingPayload, found, err := findDraftAnswerTx(ctx, tx, ticketID, questionID)
 	if err != nil {
@@ -615,11 +635,25 @@ func (s *Store) upsertItemDraftTx(ctx context.Context, tx *sql.Tx, ticketID, que
 			return DraftResult{}, fmt.Errorf("save draft: decode existing item answer: %w", decodeErr)
 		}
 	}
-	same := found && payload.Items != nil && payload.Items[item.Ref] == item.Decision
+	sameDecision := payload.Items[item.Ref] == item.Decision
+	sameNote := payload.Notes[item.Ref] == item.Note
+	same := found && sameDecision && sameNote
 	if payload.Items == nil {
 		payload.Items = make(map[string]response.Decision, 1)
 	}
 	payload.Items[item.Ref] = item.Decision
+
+	if item.Note != "" {
+		if payload.Notes == nil {
+			payload.Notes = make(map[string]string, 1)
+		}
+		payload.Notes[item.Ref] = item.Note
+	} else if payload.Notes != nil {
+		delete(payload.Notes, item.Ref)
+		if len(payload.Notes) == 0 {
+			payload.Notes = nil
+		}
+	}
 
 	newPayload, err := json.Marshal(payload)
 	if err != nil {
@@ -1126,7 +1160,11 @@ func sentItemDecisionsTx(ctx context.Context, tx *sql.Tx, qid int64) (map[string
 // sent gives it a sent option answer, a complete sent item answer (every
 // item ref in the question's payload has a decision, counting decisions
 // already sent in an earlier SendBatch call alongside this batch's own), or
-// a sent reply (design section 6.7). An incomplete item answer sends its
+// a sent reply (design section 6.7) -- except on a review question, where a
+// reply never answers it on its own (ticket #68: a typed note must not
+// silently close a review question while a finding still lacks a decision).
+// A review question closes only through the item-completeness check below,
+// same as any other item-kind question. An incomplete item answer sends its
 // draft like any other but leaves the question open. A planning question
 // is skipped outright (D31, design section 22.3): SendBatch never moves one
 // to "answered" again -- it stays "open" until the agent itself settles it
@@ -1159,7 +1197,11 @@ func markAnsweredQuestionsTx(ctx context.Context, tx *sql.Tx, ticketID int64, dr
 			}
 			switch d.Type {
 			case msgTypeReply:
-				answered = true
+				if payload.Kind != response.QuestionKindReview {
+					answered = true
+				} else {
+					slog.DebugContext(ctx, "review reply does not answer", "ticket_id", ticketID, "question_id", qid)
+				}
 			case msgTypeAnswer:
 				var ap response.AnswerPayload
 				if err := json.Unmarshal(d.Payload, &ap); err != nil {
