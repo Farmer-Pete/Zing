@@ -165,6 +165,57 @@ func TestGitGoSteps_BuildsAtSHA(t *testing.T) {
 	}
 }
 
+// TestGitGoSteps_BuildRemovesStaleWorktreeDir proves Build self-heals a
+// worktree directory left behind by a killed serve: "git worktree prune"
+// alone never drops a registration whose directory still exists, so without
+// clearing it first, "worktree add" for the same sha would keep failing
+// with "already exists" forever (review finding r2f7).
+func TestGitGoSteps_BuildRemovesStaleWorktreeDir(t *testing.T) {
+	if testing.Short() {
+		t.Skip("spawns git and go build; runs in the full suite")
+	}
+	ctx := t.Context()
+	tmp := t.TempDir()
+
+	src := filepath.Join(tmp, "src")
+	if err := os.MkdirAll(src, 0o755); err != nil {
+		t.Fatalf("mkdir src: %v", err)
+	}
+	gitFixtureRun(t, src, "init", "-q", "-b", "main")
+	gitFixtureWrite(t, src, "go.mod", "module fixture\n\ngo 1.21\n")
+	gitFixtureWrite(t, src, "cmd/zing/main.go", fixtureMainGo)
+	gitFixtureCommit(t, src, "first")
+	firstSHA := strings.TrimSpace(gitFixtureRun(t, src, "rev-parse", "HEAD"))
+
+	bare := filepath.Join(tmp, "origin.git")
+	gitFixtureRun(t, tmp, "clone", "-q", "--bare", src, bare)
+
+	clone := filepath.Join(tmp, "clone")
+	gitFixtureRun(t, tmp, "clone", "-q", bare, clone)
+	repoGit := filepath.Join(clone, ".git")
+
+	tmpRoot := filepath.Join(tmp, "tmproot")
+	g := gitGoSteps{repoGit: repoGit, defaultBranch: "main", tmpRoot: tmpRoot}
+
+	// Simulate a crash mid-build: register and leave behind the exact
+	// worktree directory Build itself would use for firstSHA, with no
+	// cleanup.
+	wt := filepath.Join(tmpRoot, "upgrade-"+firstSHA[:12])
+	gitFixtureRun(t, clone, "worktree", "add", "--detach", wt, firstSHA)
+
+	out := filepath.Join(tmp, "candidate")
+	resolved, err := g.Build(ctx, firstSHA, out)
+	if err != nil {
+		t.Fatalf("Build with a leftover worktree directory: %v", err)
+	}
+	if resolved != firstSHA {
+		t.Fatalf("resolved sha = %s, want %s", resolved, firstSHA)
+	}
+	if _, statErr := os.Stat(out); statErr != nil {
+		t.Fatalf("candidate binary missing: %v", statErr)
+	}
+}
+
 // TestGitGoSteps_SelftestReportsFailure proves Selftest surfaces a failing
 // selftest's output, redacted, and that a successful run's reported
 // version survives the "zing " prefix trim unchanged.

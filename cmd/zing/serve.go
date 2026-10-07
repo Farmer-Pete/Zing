@@ -340,6 +340,9 @@ func serve(ctx context.Context, cfgPath, dbPath string, seedDemo bool, su *selfU
 		_ = st.Close()
 		return err
 	}
+	if up != nil {
+		slog.Info("upgrade: enabled", "exe", up.exe, "running", up.running, "data_dir", dataDir)
+	}
 
 	// dispCtx is deliberately not derived from ctx's cancellation: the
 	// drain sequence below stops the dispatcher through the store's
@@ -489,7 +492,7 @@ func serve(ctx context.Context, cfgPath, dbPath string, seedDemo bool, su *selfU
 
 	err = shutdown(ctx, st, srv, d, errCh, len(listeners), consumedFromErrCh, serveErr, dispTriggered, dispDone, func() error { return dispErr }, cancelDisp)
 
-	if rt := upgradeHandoff(dataDir, up); rt != nil {
+	if rt := up.handoff(); rt != nil {
 		su.next = rt
 	}
 

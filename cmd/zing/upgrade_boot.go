@@ -5,6 +5,7 @@
 package main
 
 import (
+	"log/slog"
 	"os"
 	"path/filepath"
 	"runtime/debug"
@@ -29,10 +30,13 @@ type selfUpgrade struct {
 // for newUpgrader. A resolve failure leaves exe empty.
 func newSelfUpgrade() *selfUpgrade {
 	exe := ""
-	if path, err := os.Executable(); err == nil {
-		if resolved, evalErr := filepath.EvalSymlinks(path); evalErr == nil {
-			exe = resolved
-		}
+	path, err := os.Executable()
+	if err != nil {
+		slog.Warn("upgrade: resolve executable", "error", err)
+	} else if resolved, evalErr := filepath.EvalSymlinks(path); evalErr != nil {
+		slog.Warn("upgrade: resolve executable", "error", evalErr)
+	} else {
+		exe = resolved
 	}
 	info, _ := debug.ReadBuildInfo()
 	return &selfUpgrade{exe: exe, running: versionString(info)}

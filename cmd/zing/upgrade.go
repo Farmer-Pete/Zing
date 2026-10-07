@@ -4,6 +4,7 @@
 package main
 
 import (
+	"bytes"
 	"cmp"
 	"context"
 	"errors"
@@ -112,6 +113,17 @@ type upgrader struct {
 	// testPostPrepare, when set, runs in runQueued right after prepare
 	// returns successfully but before the ctx.Err check that follows it.
 	// Only tests set it, to simulate ctx ending in that exact window.
+	//
+	// Recorded plan deviation (review r2f3): the plan's
+	// TestUpgrade_LoopCancelledAfterPrepareWritesNoMarker has the fake
+	// Selftest cancel ctx and then return success, so the cancellation
+	// happens inside prepare rather than after it. But prepare's own later
+	// steps (BackupTo, os.Link) still run against that already-cancelled
+	// ctx and fail there, so the test's assertion that prepare's backup and
+	// zing.prev work went ahead could never hold. This hook lets a test
+	// cancel ctx in the exact window runQueued's own check covers, after
+	// prepare's work has genuinely finished, without changing prepare's
+	// production behavior.
 	testPostPrepare func()
 }
 
@@ -175,7 +187,7 @@ func (u *upgrader) prepare(ctx context.Context, req upgradeRequest) (restartTarg
 	fail := func(err error) (restartTarget, error) {
 		_ = os.Remove(next)
 		if ctx.Err() != nil {
-			slog.Info("upgrade: cancelled", "from_sha", u.running, "to_sha", req.SHA, "ticket_id", req.TicketID)
+			slog.Info("upgrade: cancelled", "from_sha", u.running, "to_sha", req.SHA, "ticket_id", req.TicketID, "error", err)
 		} else {
 			tellOwner(context.WithoutCancel(ctx), u.store, req.TicketID, err.Error())
 		}
@@ -373,13 +385,32 @@ func tailRedacted(b []byte) string {
 	return s
 }
 
-// runGit runs one git command against g.repoGit with GIT_TERMINAL_PROMPT=0
-// added, and returns its combined output.
-func (g gitGoSteps) runGit(ctx context.Context, args ...string) ([]byte, error) {
+// gitCmd builds one git command against g.repoGit with GIT_TERMINAL_PROMPT=0
+// added. WaitDelay bounds how long Wait waits for the output pipe after the
+// process ends or ctx cancels it, so a remote-https or ssh helper that
+// outlives git itself cannot stall the command past that.
+func (g gitGoSteps) gitCmd(ctx context.Context, args ...string) *exec.Cmd {
 	full := append([]string{"--git-dir", g.repoGit}, args...)
 	cmd := exec.CommandContext(ctx, gitbin.Path(), full...) //nolint:gosec // G204: args are fixed strings and a sha already checked against validSHA
 	cmd.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0")
-	return cmd.CombinedOutput()
+	cmd.WaitDelay = 5 * time.Second
+	return cmd
+}
+
+// runGit runs one git command and returns its combined output.
+func (g gitGoSteps) runGit(ctx context.Context, args ...string) ([]byte, error) {
+	return g.gitCmd(ctx, args...).CombinedOutput()
+}
+
+// runGitStdout runs one git command and returns stdout and stderr
+// separately, so a caller that parses stdout (such as rev-parse) is never
+// tripped up by a warning or trace line git writes to stderr.
+func (g gitGoSteps) runGitStdout(ctx context.Context, args ...string) (stdout, stderr []byte, err error) {
+	cmd := g.gitCmd(ctx, args...)
+	var errBuf bytes.Buffer
+	cmd.Stderr = &errBuf
+	stdout, err = cmd.Output()
+	return stdout, errBuf.Bytes(), err
 }
 
 // Build checks sha's shape before anything else, then fetches, resolves it
@@ -398,18 +429,13 @@ func (g gitGoSteps) Build(ctx context.Context, sha, out string) (string, error) 
 	if sha == "" {
 		rev = "origin/" + g.defaultBranch + "^{commit}"
 	}
-	o, err := g.runGit(ctx, "rev-parse", "--verify", "--end-of-options", rev)
+	stdout, stderr, err := g.runGitStdout(ctx, "rev-parse", "--verify", "--end-of-options", rev)
 	if err != nil {
-		return "", fmt.Errorf("build: rev-parse: %w: %s", err, tailRedacted(o))
+		return "", fmt.Errorf("build: rev-parse: %w: %s", err, tailRedacted(stderr))
 	}
-	resolved := strings.TrimSpace(string(o))
+	resolved := strings.TrimSpace(string(stdout))
 	if !validSHA.MatchString(resolved) {
 		return "", fmt.Errorf("build: invalid sha %s", resolved)
-	}
-
-	o, err = g.runGit(ctx, "worktree", "prune")
-	if err != nil {
-		return "", fmt.Errorf("build: worktree prune: %w: %s", err, tailRedacted(o))
 	}
 
 	if err = os.MkdirAll(g.tmpRoot, 0o700); err != nil {
@@ -417,13 +443,32 @@ func (g gitGoSteps) Build(ctx context.Context, sha, out string) (string, error) 
 	}
 	shortSHA := resolved[:12]
 	wt := filepath.Join(g.tmpRoot, "upgrade-"+shortSHA)
+
+	// A worktree left behind by a killed serve (SIGKILL, power loss) stays
+	// registered after prune, since prune only drops worktrees whose
+	// directory is gone; a stale directory keeps "worktree add" failing for
+	// this sha forever. Removing it first, before prune, clears both the
+	// registration and the directory so a retry of the same sha can proceed.
+	if _, statErr := os.Stat(wt); statErr == nil {
+		if removeOut, removeErr := g.runGit(ctx, "worktree", "remove", "--force", wt); removeErr != nil {
+			slog.Info("upgrade: worktree remove before add", "to_sha", resolved, "worktree", wt, "output", tailRedacted(removeOut))
+		}
+		if err = os.RemoveAll(wt); err != nil {
+			return "", fmt.Errorf("build: remove stale worktree %s: %w", wt, err)
+		}
+	}
+	o, err := g.runGit(ctx, "worktree", "prune")
+	if err != nil {
+		return "", fmt.Errorf("build: worktree prune: %w: %s", err, tailRedacted(o))
+	}
+
 	o, err = g.runGit(ctx, "worktree", "add", "--detach", wt, resolved)
 	if err != nil {
 		return "", fmt.Errorf("build: worktree add: %w: %s", err, tailRedacted(o))
 	}
 	defer func() {
 		if removeOut, removeErr := g.runGit(context.WithoutCancel(ctx), "worktree", "remove", "--force", wt); removeErr != nil {
-			slog.Warn("upgrade: worktree remove", "error", removeErr, "output", tailRedacted(removeOut))
+			slog.Warn("upgrade: worktree remove", "to_sha", resolved, "worktree", wt, "error", removeErr, "output", tailRedacted(removeOut))
 		}
 	}()
 
@@ -434,6 +479,7 @@ func (g gitGoSteps) Build(ctx context.Context, sha, out string) (string, error) 
 	build := exec.CommandContext(ctx, goBin, "build", "-o", out, "./cmd/zing") //nolint:gosec // G204: goBin from LookPath, out and args fixed
 	build.Dir = wt
 	build.Env = os.Environ()
+	build.WaitDelay = 5 * time.Second
 	if o, err := build.CombinedOutput(); err != nil {
 		return "", fmt.Errorf("build: go build: %w: %s", err, tailRedacted(o))
 	}
@@ -444,11 +490,15 @@ func (g gitGoSteps) Build(ctx context.Context, sha, out string) (string, error) 
 // Selftest runs bin selftest, then bin version, and trims the "zing "
 // prefix from the version.
 func (g gitGoSteps) Selftest(ctx context.Context, bin string) (version, output string, err error) {
-	selftestOut, err := exec.CommandContext(ctx, bin, "selftest").CombinedOutput() //nolint:gosec // G204: bin is the freshly built candidate, not caller input
+	selftestCmd := exec.CommandContext(ctx, bin, "selftest") //nolint:gosec // G204: bin is the freshly built candidate, not caller input
+	selftestCmd.WaitDelay = 5 * time.Second
+	selftestOut, err := selftestCmd.CombinedOutput()
 	if err != nil {
 		return "", "", fmt.Errorf("selftest: %w: %s", err, tailRedacted(selftestOut))
 	}
-	versionOut, err := exec.CommandContext(ctx, bin, "version").CombinedOutput() //nolint:gosec // G204: bin is the freshly built candidate, not caller input
+	versionCmd := exec.CommandContext(ctx, bin, "version") //nolint:gosec // G204: bin is the freshly built candidate, not caller input
+	versionCmd.WaitDelay = 5 * time.Second
+	versionOut, err := versionCmd.CombinedOutput()
 	if err != nil {
 		return "", "", fmt.Errorf("selftest: version: %w: %s", err, tailRedacted(versionOut))
 	}
@@ -456,19 +506,19 @@ func (g gitGoSteps) Selftest(ctx context.Context, bin string) (version, output s
 	return v, string(selftestOut), nil
 }
 
-// upgradeHandoff reads up's restart target, if any, right after shutdown,
-// saves any carry into upgrade.json (a WARN only on error, since the swap
-// still has to happen), and returns the target for serve to hand to
-// su.next. With up nil, or with no target set, it returns nil.
-func upgradeHandoff(dataDir string, up *upgrader) *restartTarget {
-	if up == nil {
+// handoff reads u's restart target, if any, right after shutdown, saves any
+// carry into upgrade.json (a WARN only on error, since the swap still has
+// to happen), and returns the target for serve to hand to su.next. With u
+// nil, or with no target set, it returns nil.
+func (u *upgrader) handoff() *restartTarget {
+	if u == nil {
 		return nil
 	}
-	rt, carry, hasCarry, ok := up.Target()
+	rt, carry, hasCarry, ok := u.Target()
 	if !ok {
 		return nil
 	}
-	if err := saveCarry(dataDir, carry, hasCarry); err != nil {
+	if err := saveCarry(u.dataDir, carry, hasCarry); err != nil {
 		slog.Warn("upgrade: save carry", "ticket_id", carry.TicketID, "sha", carry.SHA, "from_sha", rt.FromSHA, "to_sha", rt.ToSHA, "error", err)
 	}
 	return &rt

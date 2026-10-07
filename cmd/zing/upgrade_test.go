@@ -122,7 +122,6 @@ func newTestUpgrader(t *testing.T) (u *upgrader, steps *fakeSteps, stopped chan 
 
 	steps = &fakeSteps{}
 	stopped = make(chan struct{})
-	var stopOnce sync.Once
 	u = &upgrader{
 		dataDir: dataDir,
 		exe:     binPath,
@@ -130,7 +129,7 @@ func newTestUpgrader(t *testing.T) (u *upgrader, steps *fakeSteps, stopped chan 
 		store:   st,
 		steps:   steps,
 		wake:    make(chan struct{}, 1),
-		stop:    func() { stopOnce.Do(func() { close(stopped) }) },
+		stop:    sync.OnceFunc(func() { close(stopped) }),
 		gate:    make(chan struct{}),
 	}
 	return u, steps, stopped
@@ -372,8 +371,9 @@ func TestUpgrade_PrepareBacksUpAndKeepsPrev(t *testing.T) {
 	}
 
 	binary := filepath.Join(u.dataDir, "bin", "zing")
-	if rt.Binary != binary || rt.Next != binary+".next" || rt.FromSHA != u.running || rt.ToSHA != builtSHA || rt.TicketID != ticketID {
-		t.Fatalf("restartTarget = %+v", rt)
+	want := restartTarget{Binary: binary, Next: binary + ".next", FromSHA: u.running, ToSHA: builtSHA, TicketID: ticketID}
+	if rt != want {
+		t.Fatalf("restartTarget = %+v, want %+v", rt, want)
 	}
 
 	nextBytes, err := os.ReadFile(binary + ".next")
@@ -944,11 +944,12 @@ func TestRestartAfterServe(t *testing.T) {
 func TestUpgrade_LoopWaitsForGate(t *testing.T) {
 	t.Parallel()
 
-	u, steps, _ := newTestUpgrader(t)
+	u, steps, stopped := newTestUpgrader(t)
 
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
-	go u.loop(ctx)
+	loopDone := make(chan struct{})
+	go func() { u.loop(ctx); close(loopDone) }()
 
 	u.Request(1, "0000000000000000000000000000000000000000")
 
@@ -966,6 +967,13 @@ func TestUpgrade_LoopWaitsForGate(t *testing.T) {
 	if n := len(steps.calls()); n != 1 {
 		t.Fatalf("Build called %d times after gate opened, want 1", n)
 	}
+
+	// The fake steps succeed by default, so this build runs all the way
+	// through prepare and stop(). Wait for both before the test's cleanup
+	// closes the store and removes DATA_DIR out from under the still-running
+	// goroutine.
+	waitForClose(t, stopped, "stop")
+	waitForClose(t, loopDone, "loop")
 }
 
 // TestUpgrade_MergeBuildsSelftestsSwapsAndExecs is the working demo for this
@@ -1047,19 +1055,21 @@ func TestUpgrade_MergeBuildsSelftestsSwapsAndExecs(t *testing.T) {
 	}
 }
 
-// TestUpgradeHandoff proves upgradeHandoff returns nil for a nil upgrader
-// or one with no target yet, and otherwise saves the carry into upgrade.json
-// (or just logs a WARN when that write fails) and returns the target.
+// TestUpgradeHandoff proves (*upgrader).handoff returns nil for a nil
+// upgrader or one with no target yet, and otherwise saves the carry into
+// upgrade.json (or just logs a WARN when that write fails) and returns the
+// target.
 func TestUpgradeHandoff(t *testing.T) {
 	t.Parallel()
 
-	if rt := upgradeHandoff(t.TempDir(), nil); rt != nil {
-		t.Errorf("upgradeHandoff(nil) = %+v, want nil", rt)
+	var nilUp *upgrader
+	if rt := nilUp.handoff(); rt != nil {
+		t.Errorf("handoff(nil) = %+v, want nil", rt)
 	}
 
 	u, _, _ := newTestUpgrader(t)
-	if rt := upgradeHandoff(u.dataDir, u); rt != nil {
-		t.Errorf("upgradeHandoff with no target = %+v, want nil", rt)
+	if rt := u.handoff(); rt != nil {
+		t.Errorf("handoff with no target = %+v, want nil", rt)
 	}
 
 	target := restartTarget{Binary: "bin/zing", FromSHA: "0123456789ab", ToSHA: "fedcba987654", TicketID: 7}
@@ -1072,9 +1082,9 @@ func TestUpgradeHandoff(t *testing.T) {
 	u.carry, u.hasCarry = upgradeRequest{TicketID: 9, SHA: "abcdef0123456789abcdef0123456789abcdef01"}, true
 	u.mu.Unlock()
 
-	rt := upgradeHandoff(u.dataDir, u)
+	rt := u.handoff()
 	if rt == nil || *rt != target {
-		t.Fatalf("upgradeHandoff = %+v, want %+v", rt, target)
+		t.Fatalf("handoff = %+v, want %+v", rt, target)
 	}
 	m, found, err := loadUpgradeMarker(u.dataDir)
 	if err != nil || !found {
@@ -1091,9 +1101,9 @@ func TestUpgradeHandoff(t *testing.T) {
 	u2.target = &target
 	u2.carry, u2.hasCarry = upgradeRequest{TicketID: 9, SHA: "abc"}, true
 	u2.mu.Unlock()
-	rt2 := upgradeHandoff(u2.dataDir, u2)
+	rt2 := u2.handoff()
 	if rt2 == nil || *rt2 != target {
-		t.Fatalf("upgradeHandoff with failing saveCarry = %+v, want %+v", rt2, target)
+		t.Fatalf("handoff with failing saveCarry = %+v, want %+v", rt2, target)
 	}
 }
 
@@ -1191,6 +1201,24 @@ func TestNewUpgrader(t *testing.T) {
 		up.stop()
 		if !stopped {
 			t.Error("up.stop() did not call the given stop func")
+		}
+	})
+
+	t.Run("configured default branch reaches gitGoSteps", func(t *testing.T) {
+		t.Parallel()
+		withBranch := []config.Project{{Name: "zing", Self: true, DefaultBranch: "trunk"}}
+		jobProjects := map[int64]job.Project{1: {RepoGit: "/data/repos/zing/.git"}}
+
+		up, err := newUpgrader(withBranch, bindingFor("zing"), jobProjects, su, dataDir, st, nil)
+		if err != nil {
+			t.Fatalf("newUpgrader: %v", err)
+		}
+		steps, ok := up.steps.(gitGoSteps)
+		if !ok {
+			t.Fatalf("steps = %T, want gitGoSteps", up.steps)
+		}
+		if steps.defaultBranch != "trunk" {
+			t.Errorf("defaultBranch = %q, want %q", steps.defaultBranch, "trunk")
 		}
 	})
 }

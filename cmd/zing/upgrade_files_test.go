@@ -131,8 +131,12 @@ func TestSaveCarry(t *testing.T) {
 	if !got.HasNext || got.NextSHA != carry.SHA || got.NextTicketID != carry.TicketID {
 		t.Errorf("marker = %+v, want has_next true, next_sha %q, next_ticket_id %d", got, carry.SHA, carry.TicketID)
 	}
-	if got.FromSHA != orig.FromSHA || got.ToSHA != orig.ToSHA || got.TicketID != orig.TicketID || got.State != orig.State {
-		t.Errorf("marker changed unrelated fields: got %+v, want from/to/ticket/state matching %+v", got, orig)
+	gotUnrelated := got
+	gotUnrelated.HasNext, gotUnrelated.NextSHA, gotUnrelated.NextTicketID, gotUnrelated.WrittenAt = false, "", 0, ""
+	wantUnrelated := orig
+	wantUnrelated.WrittenAt = ""
+	if gotUnrelated != wantUnrelated {
+		t.Errorf("marker changed unrelated fields: got %+v, want fields matching %+v", gotUnrelated, wantUnrelated)
 	}
 
 	missing := t.TempDir()

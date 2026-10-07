@@ -109,6 +109,7 @@ type zingTOMLOpts struct {
 	IntervalSeconds int
 	MaxParallel     int
 	Bind            []string // nil or empty writes bind = [], an invalid config
+	Self            bool     // true writes self = true on the one configured project
 }
 
 // newTestGitRepo git-inits a fresh temp directory and returns its path: task
@@ -160,6 +161,11 @@ func writeZingTOML(t *testing.T, path string, opts zingTOMLOpts) {
 	}
 	judgeCodexHome := writeTestJudgeCodexHome(t, filepath.Dir(path))
 
+	selfLine := ""
+	if opts.Self {
+		selfLine = "self = true\n"
+	}
+
 	doc := fmt.Sprintf(`
 user = "test-user"
 github_token = "test-github-token"
@@ -180,7 +186,7 @@ repo = "x/zing"
 path = %q
 tracker = "github"
 commands = { test = "go test ./...", lint = "golangci-lint run" }
-`, judgeCodexHome, strings.Join(bindItems, ", "), opts.Port, opts.IntervalSeconds, opts.MaxParallel, newTestGitRepo(t))
+%s`, judgeCodexHome, strings.Join(bindItems, ", "), opts.Port, opts.IntervalSeconds, opts.MaxParallel, newTestGitRepo(t), selfLine)
 
 	if err := os.WriteFile(path, []byte(doc), 0o600); err != nil {
 		t.Fatalf("write zing.toml: %v", err)
@@ -324,6 +330,43 @@ func TestServe_ClearsStaleDrainingAndStoppedFlagsAtStartup(t *testing.T) {
 
 	waitForTicketPastQueued(t, dbPath, serveDone)
 	cancelAndWaitForServe(t, cancel, serveDone)
+}
+
+// TestServe_UpgraderRunsAlongsideShutdown proves serve's upgrader wiring
+// (newUpgrader, go up.loop(ctx), close(up.gate), and the cancelServe-then-
+// wait-on-upDone sequence before shutdown) does not change serve's ordinary
+// shutdown behavior: with a non-nil su whose exe never matches
+// DATA_DIR/bin/zing (so install_check would refuse any upgrade, exactly as
+// in production before the owner sets self = true), serve still starts up,
+// and a plain ctx cancellation still drains it within the usual deadline.
+// Since no Request ever reaches the upgrader, up.Target never reports ok,
+// so su.next must stay nil (review finding r2f2).
+func TestServe_UpgraderRunsAlongsideShutdown(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "zing.toml")
+	dbPath := filepath.Join(dir, "zing.db")
+
+	port := freeLoopbackPort(t)
+	writeZingTOML(t, cfgPath, zingTOMLOpts{
+		Port: port, IntervalSeconds: 1, MaxParallel: 1, Bind: []string{loopback}, Self: true,
+	})
+
+	su := &selfUpgrade{exe: filepath.Join(dir, "not-the-running-binary"), running: "0123456789ab"}
+
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+
+	serveDone := make(chan error, 1)
+	go func() { serveDone <- serve(ctx, cfgPath, dbPath, false, su) }()
+
+	waitForServing(t, fmt.Sprintf("http://127.0.0.1:%d", port), serveDone)
+	cancelAndWaitForServe(t, cancel, serveDone)
+
+	if su.next != nil {
+		t.Errorf("su.next = %+v, want nil: no upgrade was ever requested", su.next)
+	}
 }
 
 // seedQueuedTicketForServe inserts one queued ticket directly into st, under
