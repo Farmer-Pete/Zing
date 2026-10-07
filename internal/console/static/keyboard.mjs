@@ -184,6 +184,23 @@ export function draftConflictMessage(reason) {
 }
 
 /**
+ * upgradeMessageText is what the Settings view's upgrade-message span shows
+ * after POST /upgrade: the server's own text when it sent one, else
+ * "upgrade started" on success and "request failed" otherwise.
+ *
+ * @param {boolean} ok
+ * @param {string} body
+ * @returns {string}
+ */
+export function upgradeMessageText(ok, body) {
+	const text = String(body ?? '').trim();
+	if (text) {
+		return text;
+	}
+	return ok ? 'upgrade started' : 'request failed';
+}
+
+/**
  * clearReplyInputs sets every given element's value to the empty string
  * (console.js's postSendBatch, design section 22.7): a 200 from /send
  * clears the value of every .reply-input inside #main, so a sent draft's

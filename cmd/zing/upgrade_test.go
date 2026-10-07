@@ -898,6 +898,28 @@ func TestRestartAfterServe(t *testing.T) {
 		}
 	})
 
+	t.Run("empty_next_does_no_swap", func(t *testing.T) {
+		t.Parallel()
+		dir := t.TempDir()
+		binary := filepath.Join(dir, "zing")
+		if err := os.WriteFile(binary, []byte("old"), 0o755); err != nil {
+			t.Fatalf("write zing: %v", err)
+		}
+		rt := &restartTarget{Binary: binary, FromSHA: "fedcba987654", ToSHA: "0123456789ab"}
+
+		fe := &fakeExec{}
+		if err := restartAfterServe(t.Context(), rt, []string{"zing", "serve"}, []string{"A=1"}, fe.exec); err != nil {
+			t.Fatalf("restartAfterServe: %v", err)
+		}
+		if fe.argv0 != binary {
+			t.Errorf("exec argv0 = %q, want %q", fe.argv0, binary)
+		}
+		got, err := os.ReadFile(binary)
+		if err != nil || string(got) != "old" {
+			t.Errorf("binary = %q, %v, want \"old\" unchanged", got, err)
+		}
+	})
+
 	t.Run("exec error is wrapped", func(t *testing.T) {
 		t.Parallel()
 		dir := t.TempDir()
@@ -920,15 +942,18 @@ func TestRestartAfterServe(t *testing.T) {
 	})
 }
 
-// fakeExec records the one call restartAfterServe makes to its execFunc, so
-// tests can assert on argv0, argv, and env without nested closures.
+// fakeExec records the calls restartAfterServe or bootAndServe make to its
+// execFunc, so tests can assert on argv0, argv, env, and the call count
+// without nested closures.
 type fakeExec struct {
 	err       error
+	calls     int
 	argv0     string
 	argv, env []string
 }
 
 func (fe *fakeExec) exec(argv0 string, argv, env []string) error {
+	fe.calls++
 	fe.argv0, fe.argv, fe.env = argv0, argv, env
 	return fe.err
 }

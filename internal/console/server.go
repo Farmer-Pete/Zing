@@ -143,6 +143,14 @@ type console struct {
 	// Settings view report settings are not available.
 	tuner *dispatch.Dispatcher
 
+	// upgrader backs POST /upgrade and the Settings view's Upgrade now row
+	// (#109 part 2, Q6): the running self-upgrader whose Request method
+	// queues a build of the default branch's tip. Set only through
+	// WithUpgrader; nil (every caller, including every test, that does not
+	// run with self = true set) makes POST /upgrade answer 503 and hides
+	// the Upgrade now row.
+	upgrader Upgrader
+
 	// slots backs the rail's stall line (ticket "Say on each ticket why it
 	// is not moving", split from #79, owner decision Q5): the running
 	// dispatcher's read-only slot snapshot, wired only through WithSlots. A
@@ -193,6 +201,7 @@ type console struct {
 //	POST /loglevel               change the runtime log level (design section 6.12, 7.1)
 //	POST /debug                  toggle one ticket's per-ticket debug override (design section 6.12, 7.1)
 //	POST /settings               change max_parallel, the dispatch interval, or the agent budget live (#81)
+//	POST /upgrade                build the default branch's tip and restart on it (Q6)
 //	POST /side                  the inert side box's fixed reply (design section 6.11, 7.1)
 //	POST /stop                  stop everything, or one ticket; no keyboard key offers this yet (design section 6.11, 7.1)
 //	POST /dispatch/resume       resume a stopped dispatcher from the console's own banner (ticket #89)
@@ -291,6 +300,7 @@ func New(st *store.Store, b *bus.Broker, m *machine.Machine, hosts []string, por
 	mux.HandleFunc("POST /loglevel", withWriteDeadline(guard.requireSameOrigin(c.handleLogLevel)))
 	mux.HandleFunc("POST /debug", withWriteDeadline(guard.requireSameOrigin(c.handleDebug)))
 	mux.HandleFunc("POST /settings", withWriteDeadline(guard.requireSameOrigin(c.handleTuning)))
+	mux.HandleFunc("POST /upgrade", withWriteDeadline(guard.requireSameOrigin(c.handleUpgrade)))
 	mux.HandleFunc("POST /side", withWriteDeadline(guard.requireSameOrigin(c.handleSide)))
 	mux.HandleFunc("POST /stop", withWriteDeadline(guard.requireSameOrigin(c.handleStop)))
 	mux.HandleFunc("POST /dispatch/resume", withWriteDeadline(guard.requireSameOrigin(c.handleDispatchResume)))
@@ -329,6 +339,13 @@ type Option func(*console)
 // view reports settings are not available.
 func WithTuner(d *dispatch.Dispatcher) Option {
 	return func(c *console) { c.tuner = d }
+}
+
+// WithUpgrader wires POST /upgrade and the Settings view's Upgrade now row
+// to u (#109 part 2, Q6). Without it POST /upgrade answers 503 and the row
+// is hidden.
+func WithUpgrader(u Upgrader) Option {
+	return func(c *console) { c.upgrader = u }
 }
 
 // SlotSource is the dispatcher's slot snapshot as the rail's stall line

@@ -307,7 +307,7 @@ func (c *console) mainComponent(ctx context.Context, view string, open, project 
 		return templates.Feed(rows), nil
 	case viewSettings:
 		if c.tuner == nil {
-			return templates.Settings(nil), nil
+			return templates.Settings(nil, c.upgrader != nil), nil
 		}
 		stored := make(map[string]string, 3*len(dispatch.TuningSettings))
 		for _, s := range dispatch.TuningSettings {
@@ -319,7 +319,7 @@ func (c *console) mainComponent(ctx context.Context, view string, open, project 
 				stored[k] = v
 			}
 		}
-		return templates.Settings(buildSettingRows(c.tuner.CurrentTuning(), stored)), nil
+		return templates.Settings(buildSettingRows(c.tuner.CurrentTuning(), stored), c.upgrader != nil), nil
 	case viewProject:
 		if project == 0 {
 			projects, err := c.store.ListProjects(ctx)
