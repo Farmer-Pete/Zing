@@ -480,11 +480,13 @@ func codexTransientMatch(detail string) string {
 const commandRejectionPhrase = "are not permitted"
 
 // codexRejectionEventLine is the subset of one JSONL event that
-// codexCommandRejection reads. It embeds codexFailureEventLine for the
-// Type, Message, and Error.Message fields the two parsers share, and adds
-// Item for the command_execution case codexFailureDetail never looks at.
+// codexCommandRejection reads.
 type codexRejectionEventLine struct {
-	codexFailureEventLine
+	Type    string `json:"type"`
+	Message string `json:"message"`
+	Error   struct {
+		Message string `json:"message"`
+	} `json:"error"`
 	Item struct {
 		Type             string `json:"type"`
 		Command          string `json:"command"`

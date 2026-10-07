@@ -217,6 +217,19 @@ command_rejected)
   printf '{"type":"turn.failed","error":{"message":"judge could not run its checks"}}\n'
   exit 1
   ;;
+command_rejected_long_stream)
+  # Same rejection as command_rejected, but followed by more than 64 KiB of
+  # filler lines before turn.failed: the declined item falls out of
+  # RunResult.Stdout (maxCodexStdoutBytes, the last 64 KiB) while
+  # codexCommandRejection still finds it because Codex.run passes it the
+  # head capWriter (up to 4 MiB), not the tail (#94 review finding r2f2).
+  printf '{"type":"thread.started","thread_id":"fake-codex-rejected-thread-id"}\n'
+  printf '{"type":"item.completed","item":{"id":"item_1","type":"command_execution","command":"rm -f s2.json","aggregated_output":"rm -f style commands are not permitted. Use a safer approach","exit_code":1,"status":"declined"}}\n'
+  filler=$(head -c 70000 /dev/zero | tr '\0' 'x')
+  printf '{"type":"item.completed","item":{"id":"item_2","type":"agent_message","text":"%s"}}\n' "$filler"
+  printf '{"type":"turn.failed","error":{"message":"judge could not run its checks"}}\n'
+  exit 1
+  ;;
 *)
   echo "fake_codex: unknown FAKE_CODEX_MODE $mode_flag" >&2
   exit 9

@@ -724,6 +724,39 @@ func TestCodex_CommandRejectionInFailureDetail(t *testing.T) {
 	}
 }
 
+// TestCodex_CommandRejectionSurvivesLongStream proves Codex.run finds a
+// command rejection even when more than 64 KiB of stream follows it (#94
+// review finding r2f2): codexCommandRejection reads stdout.bytes(), the
+// head capWriter up to 4 MiB, not res.Stdout, the last-64-KiB tail, so a
+// rejection early in a long run is not lost.
+func TestCodex_CommandRejectionSurvivesLongStream(t *testing.T) {
+	t.Parallel()
+	requireUnix(t)
+
+	dir := t.TempDir()
+	req := newFakeCodexRequest(dir, "command_rejected_long_stream")
+	c := NewCodex(fakeCodexScript)
+	res, err := c.Run(context.Background(), req)
+
+	execErr, ok := errors.AsType[*ExecError](err)
+	if !ok {
+		t.Fatalf("err = %v, want *ExecError", err)
+	}
+	if execErr.ExitCode != 1 {
+		t.Errorf("ExecError.ExitCode = %d, want 1", execErr.ExitCode)
+	}
+	const wantPrefix = "codex refused a command: rm -f s2.json: rm -f style commands are not permitted. Use a safer approach"
+	if !strings.HasPrefix(res.FailureDetail, wantPrefix) {
+		t.Errorf("res.FailureDetail = %q, want prefix %q", res.FailureDetail, wantPrefix)
+	}
+	if len(res.Stdout) > maxCodexStdoutBytes {
+		t.Fatalf("res.Stdout is %d bytes, want at most %d (the tail cap this test relies on)", len(res.Stdout), maxCodexStdoutBytes)
+	}
+	if strings.Contains(string(res.Stdout), "rm -f s2.json") {
+		t.Fatal("res.Stdout still contains the rejection; the filler did not push it out of the 64 KiB tail, so this test does not exercise r2f2")
+	}
+}
+
 // TestCodex_TransientErrorSetsExecErrorTransient proves a Codex run whose
 // error event names a 503 sets ExecError.Transient to "503" (design:
 // codexTransientMatch, called by Codex.run only when codexFailureDetail
@@ -1019,6 +1052,18 @@ func TestCodexCommandRejection(t *testing.T) {
 			wantLine:    line,
 		},
 		{
+			name:        "completed item with no exit code still matches",
+			stdout:      marshal(t, commandExecutionItem("rm -f s2.json", line, "completed", nil)),
+			wantCommand: "rm -f s2.json",
+			wantLine:    line,
+		},
+		{
+			name:        "completed item with nonzero exit code still matches",
+			stdout:      marshal(t, commandExecutionItem("rm -f s2.json", line, "completed", &one)),
+			wantCommand: "rm -f s2.json",
+			wantLine:    line,
+		},
+		{
 			name:   "quote completed command",
 			stdout: marshal(t, commandExecutionItem("cat notes.txt", "note: "+line, "completed", &zero)),
 		},
@@ -1111,6 +1156,22 @@ func TestCodexRejectionDetail(t *testing.T) {
 			}
 		})
 	}
+
+	t.Run("a 5000-byte detail is cut to at most 2048 bytes", func(t *testing.T) {
+		t.Parallel()
+		detail := strings.Repeat("a", 5000)
+		got := codexRejectionDetail("rm -f s2.json", line, detail)
+		if len(got) > maxFailureDetailBytes {
+			t.Errorf("len(got) = %d, want at most %d", len(got), maxFailureDetailBytes)
+		}
+		wantHead := "codex refused a command: rm -f s2.json: " + line
+		if !strings.HasPrefix(got, wantHead) {
+			t.Errorf("got = %q, want prefix %q", got, wantHead)
+		}
+		if !utf8.ValidString(got) {
+			t.Error("got is not valid UTF-8")
+		}
+	})
 
 	t.Run("a multi-byte rune straddling the 2048-byte cut is kept whole", func(t *testing.T) {
 		t.Parallel()
