@@ -93,6 +93,14 @@ type upgrader struct {
 
 	// wake has capacity 1; Request sends on it without blocking.
 	wake chan struct{}
+
+	// stop is serve's cancelServe. loop calls it at most once, when prepare
+	// has set a restart target.
+	stop context.CancelFunc
+	// gate is unbuffered and closed exactly once, by serve right after
+	// go loop in part 1 (and by part 2 only after booted_ok). loop waits
+	// on it before it waits for its first wake.
+	gate chan struct{}
 }
 
 // Request queues ticketID and sha as the next upgrade, newest wins. Once a
@@ -214,4 +222,81 @@ func (u *upgrader) prepare(ctx context.Context, req upgradeRequest) (restartTarg
 	}
 
 	return restartTarget{Binary: binary, Next: next, FromSHA: u.running, ToSHA: builtSHA, TicketID: req.TicketID}, nil
+}
+
+// loop waits for the gate to open, then repeatedly waits for a queued
+// request and runs it through runQueued, until ctx ends or runQueued sets a
+// restart target and stops serve.
+func (u *upgrader) loop(ctx context.Context) {
+	select {
+	case <-u.gate:
+	case <-ctx.Done():
+		return
+	}
+	for {
+		select {
+		case <-u.wake:
+		case <-ctx.Done():
+			return
+		}
+		if u.runQueued(ctx) {
+			return
+		}
+	}
+}
+
+// runQueued pops the queued request and runs prepare on it. A build
+// superseded by a newer request while it ran is discarded in favor of the
+// newer one, without returning to loop's wake wait. It returns true once a
+// restart target has been set, the marker is saved, and stop has been
+// called; it returns false, with nothing queued, once there is nothing left
+// to try.
+func (u *upgrader) runQueued(ctx context.Context) bool {
+	u.mu.Lock()
+	if !u.hasQueued {
+		u.mu.Unlock()
+		return false
+	}
+	req := u.queued
+	u.hasQueued = false
+	u.mu.Unlock()
+
+	for {
+		rt, err := u.prepare(ctx, req)
+		if err != nil {
+			return false
+		}
+
+		if ctx.Err() != nil {
+			_ = os.Remove(rt.Next)
+			slog.Info("upgrade: cancelled", "from_sha", rt.FromSHA, "to_sha", rt.ToSHA, "ticket_id", rt.TicketID)
+			return false
+		}
+
+		u.mu.Lock()
+		if u.hasQueued {
+			newer := u.queued
+			u.hasQueued = false
+			u.mu.Unlock()
+			_ = os.Remove(rt.Next)
+			slog.Info("upgrade: superseded", "from_sha", rt.FromSHA, "to_sha", newer.SHA, "ticket_id", newer.TicketID)
+			req = newer
+			continue
+		}
+
+		marker := upgradeMarker{FromSHA: u.running, ToSHA: rt.ToSHA, TicketID: rt.TicketID, State: markerPending}
+		if err := saveUpgradeMarker(u.dataDir, marker); err != nil {
+			u.mu.Unlock()
+			_ = os.Remove(rt.Next)
+			tellOwner(context.WithoutCancel(ctx), u.store, rt.TicketID, fmt.Sprintf("upgrade: write upgrade.json: %v", err))
+			return false
+		}
+
+		u.target = &rt
+		u.mu.Unlock()
+
+		slog.Info("upgrade", "step", "drain", "from_sha", rt.FromSHA, "to_sha", rt.ToSHA, "ticket_id", rt.TicketID)
+		u.stop()
+		return true
+	}
 }

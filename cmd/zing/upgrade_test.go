@@ -6,45 +6,79 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"zing/internal/store"
 )
 
 // fakeSteps is a test double for upgradeSteps that records every Build call
-// and returns canned results for both Build and Selftest.
+// and returns canned results for both Build and Selftest. By default, Build
+// returns the sha it was given, and Selftest echoes back the last sha Build
+// returned, so a built sha survives unmodified through to the version check
+// unless a test overrides it.
 type fakeSteps struct {
 	mu         sync.Mutex
 	buildCalls []string
+	lastBuilt  string
 
 	buildSHA string
 	buildErr error
 
+	// blockSHA and blockCh, when both set, make Build block until blockCh
+	// is closed, but only for the matching sha.
+	blockSHA string
+	blockCh  chan struct{}
+
 	selftestVersion string
 	selftestOutput  string
 	selftestErr     error
+	// selftestFunc, when set, replaces every other Selftest behavior.
+	selftestFunc func() (version, output string, err error)
 }
 
 func (f *fakeSteps) Build(_ context.Context, sha, out string) (string, error) {
 	f.mu.Lock()
 	f.buildCalls = append(f.buildCalls, sha)
+	block := f.blockSHA != "" && f.blockSHA == sha
+	ch := f.blockCh
 	f.mu.Unlock()
+	if block {
+		<-ch
+	}
 	if f.buildErr != nil {
 		return "", f.buildErr
 	}
 	if err := os.WriteFile(out, []byte("new"), 0o755); err != nil {
 		return "", err
 	}
-	return f.buildSHA, nil
+	built := f.buildSHA
+	if built == "" {
+		built = sha
+	}
+	f.mu.Lock()
+	f.lastBuilt = built
+	f.mu.Unlock()
+	return built, nil
 }
 
 func (f *fakeSteps) Selftest(_ context.Context, _ string) (version, output string, err error) {
+	if f.selftestFunc != nil {
+		return f.selftestFunc()
+	}
 	if f.selftestErr != nil {
 		return "", f.selftestOutput, f.selftestErr
 	}
-	return f.selftestVersion, f.selftestOutput, nil
+	if f.selftestVersion != "" {
+		return f.selftestVersion, f.selftestOutput, nil
+	}
+	f.mu.Lock()
+	v := f.lastBuilt
+	f.mu.Unlock()
+	return v, f.selftestOutput, nil
 }
 
 func (f *fakeSteps) calls() []string {
@@ -55,8 +89,10 @@ func (f *fakeSteps) calls() []string {
 
 // newTestUpgrader builds an upgrader whose DATA_DIR is a fresh t.TempDir,
 // with bin/zing holding "old", exe set to that path, running set to
-// 0123456789ab, and a fresh *fakeSteps as its steps.
-func newTestUpgrader(t *testing.T) (*upgrader, *fakeSteps) {
+// 0123456789ab, and a fresh *fakeSteps as its steps. stop is a sync.Once
+// closing the returned stopped channel, so a test can tell whether loop
+// called it. gate is unbuffered, left open for the test to close.
+func newTestUpgrader(t *testing.T) (u *upgrader, steps *fakeSteps, stopped chan struct{}) {
 	t.Helper()
 
 	dataDir := t.TempDir()
@@ -74,16 +110,30 @@ func newTestUpgrader(t *testing.T) (*upgrader, *fakeSteps) {
 	}
 	t.Cleanup(func() { _ = st.Close() })
 
-	steps := &fakeSteps{}
-	u := &upgrader{
+	steps = &fakeSteps{}
+	stopped = make(chan struct{})
+	var stopOnce sync.Once
+	u = &upgrader{
 		dataDir: dataDir,
 		exe:     binPath,
 		running: "0123456789ab",
 		store:   st,
 		steps:   steps,
 		wake:    make(chan struct{}, 1),
+		stop:    func() { stopOnce.Do(func() { close(stopped) }) },
+		gate:    make(chan struct{}),
 	}
-	return u, steps
+	return u, steps, stopped
+}
+
+// waitForClose waits up to 5 s for ch to close, failing the test otherwise.
+func waitForClose(t *testing.T, ch chan struct{}, what string) {
+	t.Helper()
+	select {
+	case <-ch:
+	case <-time.After(5 * time.Second):
+		t.Fatalf("timed out waiting for %s", what)
+	}
 }
 
 // TestRedactURLs proves redactURLs replaces a URL's userinfo with REDACTED
@@ -229,7 +279,7 @@ func TestMatchesRunning(t *testing.T) {
 func TestUpgrade_RequestQueuesAndCarries(t *testing.T) {
 	t.Parallel()
 
-	u, _ := newTestUpgrader(t)
+	u, _, _ := newTestUpgrader(t)
 
 	u.Request(1, "a")
 	u.Request(2, "b")
@@ -290,7 +340,7 @@ func TestUpgrade_RequestQueuesAndCarries(t *testing.T) {
 func TestUpgrade_PrepareBacksUpAndKeepsPrev(t *testing.T) {
 	t.Parallel()
 
-	u, steps := newTestUpgrader(t)
+	u, steps, _ := newTestUpgrader(t)
 	builtSHA := "fedcba9876540123456789abcdef012345678900"
 	steps.buildSHA = builtSHA
 	steps.selftestVersion = builtSHA
@@ -361,7 +411,7 @@ func TestUpgrade_PrepareBacksUpAndKeepsPrev(t *testing.T) {
 func TestUpgrade_IgnoresDevBuildBinary(t *testing.T) {
 	t.Parallel()
 
-	u, steps := newTestUpgrader(t)
+	u, steps, _ := newTestUpgrader(t)
 	u.exe = filepath.Join(t.TempDir(), "dev-build-of-zing")
 
 	ticketID := seedTicketForUpgrade(t, u.store)
@@ -420,7 +470,7 @@ func TestUpgrade_UnstampedBuildKeepsOldBinary(t *testing.T) {
 		t.Run(c.name, func(t *testing.T) {
 			t.Parallel()
 
-			u, steps := newTestUpgrader(t)
+			u, steps, _ := newTestUpgrader(t)
 			builtSHA := "fedcba9876540123456789abcdef012345678900"
 			steps.buildSHA = builtSHA
 			steps.selftestVersion = c.version
@@ -458,5 +508,217 @@ func TestUpgrade_UnstampedBuildKeepsOldBinary(t *testing.T) {
 				t.Fatalf("messages = %+v, want one message %q", msgs, wantErr)
 			}
 		})
+	}
+}
+
+// TestUpgrade_LoopBuildsNewestQueuedSHA proves a build superseded mid-flight
+// is discarded for the newest queued request without returning to loop's
+// wake wait, that loop builds exactly the shas that were ever started, and
+// that a request arriving after stop lands in carry.
+func TestUpgrade_LoopBuildsNewestQueuedSHA(t *testing.T) {
+	t.Parallel()
+
+	shaA := "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	shaB := "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+	shaC := "cccccccccccccccccccccccccccccccccccccccc"[:40]
+	shaD := "dddddddddddddddddddddddddddddddddddddddd"
+
+	u, steps, stopped := newTestUpgrader(t)
+	steps.blockSHA = shaA
+	steps.blockCh = make(chan struct{})
+	close(u.gate)
+
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	loopDone := make(chan struct{})
+	go func() { u.loop(ctx); close(loopDone) }()
+
+	u.Request(1, shaA)
+	// Give the loop time to start building A and block inside it before B
+	// and C are queued behind it.
+	time.Sleep(50 * time.Millisecond)
+	u.Request(2, shaB)
+	u.Request(3, shaC)
+
+	close(steps.blockCh)
+	waitForClose(t, stopped, "stop")
+
+	u.Request(4, shaD)
+
+	if got, want := steps.calls(), []string{shaA, shaC}; !slices.Equal(got, want) {
+		t.Fatalf("Build calls = %v, want %v", got, want)
+	}
+
+	rt, carry, hasCarry, ok := u.Target()
+	if !ok {
+		t.Fatalf("Target ok = %v, want true", ok)
+	}
+	if rt.ToSHA != shaC {
+		t.Errorf("Target.ToSHA = %q, want %q", rt.ToSHA, shaC)
+	}
+	if !hasCarry || carry.TicketID != 4 {
+		t.Errorf("carry = %+v, hasCarry = %v, want ticket 4, true", carry, hasCarry)
+	}
+
+	m, found, err := loadUpgradeMarker(u.dataDir)
+	if err != nil || !found {
+		t.Fatalf("loadUpgradeMarker: %v, found %v", err, found)
+	}
+	if m.ToSHA != rt.ToSHA || m.State != markerPending {
+		t.Errorf("marker = %+v, want to_sha %q, state pending", m, rt.ToSHA)
+	}
+
+	cancel()
+	waitForClose(t, loopDone, "loop")
+}
+
+// TestUpgrade_SelftestFailsKeepsOldBinary drives a failing selftest through
+// loop and proves the failure never sets a target, never writes a marker,
+// and never calls stop.
+func TestUpgrade_SelftestFailsKeepsOldBinary(t *testing.T) {
+	t.Parallel()
+
+	u, steps, stopped := newTestUpgrader(t)
+	steps.selftestErr = errors.New("boom")
+	close(u.gate)
+
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	go u.loop(ctx)
+
+	ticketID := seedTicketForUpgrade(t, u.store)
+	sha := "fedcba9876540123456789abcdef012345678900"
+	u.Request(ticketID, sha)
+
+	deadline := time.Now().Add(5 * time.Second)
+	var msgs []store.MessageRow
+	for time.Now().Before(deadline) {
+		var err error
+		msgs, err = u.store.ListMessages(t.Context(), ticketID)
+		if err != nil {
+			t.Fatalf("ListMessages: %v", err)
+		}
+		found := false
+		for _, m := range msgs {
+			if strings.Contains(m.Body, "boom") {
+				found = true
+			}
+		}
+		if found {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if len(msgs) == 0 {
+		t.Fatalf("no message posted within deadline")
+	}
+	found := false
+	for _, m := range msgs {
+		if strings.Contains(m.Body, "boom") {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("messages = %+v, want one containing boom", msgs)
+	}
+
+	select {
+	case <-stopped:
+		t.Fatalf("stop was called, want it never called")
+	default:
+	}
+
+	binary := filepath.Join(u.dataDir, "bin", "zing")
+	if _, err := os.Stat(filepath.Join(u.dataDir, upgradeMarkerFile)); !os.IsNotExist(err) {
+		t.Errorf("upgrade.json exists, want absent")
+	}
+	if _, _, _, ok := u.Target(); ok {
+		t.Errorf("Target ok = true, want false")
+	}
+	binBytes, err := os.ReadFile(binary)
+	if err != nil || string(binBytes) != "old" {
+		t.Errorf("bin/zing = %q, %v, want unchanged \"old\"", binBytes, err)
+	}
+	if _, err := os.Stat(binary + ".next"); !os.IsNotExist(err) {
+		t.Errorf("zing.next exists, want absent")
+	}
+}
+
+// TestUpgrade_LoopCancelledAfterPrepareWritesNoMarker proves that when ctx
+// ends while prepare is finishing successfully, loop discards the build
+// without a marker, a target, a stop call, or any message.
+func TestUpgrade_LoopCancelledAfterPrepareWritesNoMarker(t *testing.T) {
+	t.Parallel()
+
+	u, steps, stopped := newTestUpgrader(t)
+	close(u.gate)
+
+	sha := "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef"
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	steps.selftestFunc = func() (string, string, error) {
+		cancel()
+		return sha[:12], "", nil
+	}
+
+	loopDone := make(chan struct{})
+	go func() { u.loop(ctx); close(loopDone) }()
+
+	ticketID := seedTicketForUpgrade(t, u.store)
+	u.Request(ticketID, sha)
+
+	waitForClose(t, loopDone, "loop")
+
+	select {
+	case <-stopped:
+		t.Fatalf("stop was called, want it never called")
+	default:
+	}
+
+	binary := filepath.Join(u.dataDir, "bin", "zing")
+	if _, err := os.Stat(filepath.Join(u.dataDir, upgradeMarkerFile)); !os.IsNotExist(err) {
+		t.Errorf("upgrade.json exists, want absent")
+	}
+	if _, err := os.Stat(binary + ".next"); !os.IsNotExist(err) {
+		t.Errorf("zing.next exists, want absent")
+	}
+	if _, _, _, ok := u.Target(); ok {
+		t.Errorf("Target ok = true, want false")
+	}
+	msgs, err := u.store.ListMessages(t.Context(), ticketID)
+	if err != nil {
+		t.Fatalf("ListMessages: %v", err)
+	}
+	if len(msgs) != 0 {
+		t.Errorf("messages = %+v, want none", msgs)
+	}
+}
+
+// TestUpgrade_LoopWaitsForGate proves loop never builds anything before its
+// gate is closed, even with a request already queued.
+func TestUpgrade_LoopWaitsForGate(t *testing.T) {
+	t.Parallel()
+
+	u, steps, _ := newTestUpgrader(t)
+
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	go u.loop(ctx)
+
+	u.Request(1, "0000000000000000000000000000000000000000")
+
+	time.Sleep(100 * time.Millisecond)
+	if n := len(steps.calls()); n != 0 {
+		t.Fatalf("Build called %d times before gate opened, want 0", n)
+	}
+
+	close(u.gate)
+
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) && len(steps.calls()) == 0 {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if n := len(steps.calls()); n != 1 {
+		t.Fatalf("Build called %d times after gate opened, want 1", n)
 	}
 }
