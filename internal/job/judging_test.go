@@ -508,12 +508,16 @@ func judgeAdvanceStart(t *testing.T, s *store.Store, rt runtime.Runtime, ticket 
 	return pbGetTicket(t, s, ticket.ID)
 }
 
-// ---- TestJudgeMergedSince -----------------------------------------------
+// ---- TestJudgeMergedSinceStart -------------------------------------------
 
-// TestJudgeMergedSince proves judgeMergedSince's own table (#95): a landed
-// base merge row with an id newer than startedID means true, and a closed
-// row or a bare request row never does regardless of its id.
-func TestJudgeMergedSince(t *testing.T) {
+// TestJudgeMergedSinceStart proves judgeMergedSince's own table (#95): a
+// landed base merge row with an id newer than startedID means true, and a
+// closed row or a bare request row never does regardless of its id. It
+// also proves judgeStartedMarker, which Run uses to resolve round n's own
+// started marker into the startedID that judgeMergedSince takes: round 1
+// and round 2 each resolve to their own started marker, and a round with
+// no started marker errors instead of resolving to the zero value.
+func TestJudgeMergedSinceStart(t *testing.T) {
 	t.Parallel()
 
 	row := func(id int64, body string) store.MessageRow {
@@ -528,6 +532,9 @@ func TestJudgeMergedSince(t *testing.T) {
 	requested := func(id int64) store.MessageRow {
 		req := baseMergeRequest{AfterRunID: 1, BaseBranch: pbFixtureDefaultBranch, BaseSHA: strings.Repeat("c", 40), Point: syncPointJudge}
 		return row(id, req.body())
+	}
+	started := func(id int64, n int, sha string) store.MessageRow {
+		return row(id, fmt.Sprintf("judge round %d started sha %s after run %d", n, sha, 1))
 	}
 
 	cases := []struct {
@@ -577,6 +584,42 @@ func TestJudgeMergedSince(t *testing.T) {
 			}
 		})
 	}
+
+	markers := []store.MessageRow{started(1, 1, strings.Repeat("a", 40)), landed(2), started(3, 2, strings.Repeat("b", 40))}
+
+	t.Run("round 1's own started marker is older than the landing", func(t *testing.T) {
+		t.Parallel()
+		m, err := judgeStartedMarker(markers, 1)
+		if err != nil {
+			t.Fatalf("judgeStartedMarker(1): %v", err)
+		}
+		if got := judgeMergedSince(markers[1:2], m.ID); got != true {
+			t.Errorf("judgeMergedSince after round 1's started marker = %v, want true", got)
+		}
+	})
+
+	t.Run("round 2's own started marker is newer than the landing", func(t *testing.T) {
+		t.Parallel()
+		m, err := judgeStartedMarker(markers, 2)
+		if err != nil {
+			t.Fatalf("judgeStartedMarker(2): %v", err)
+		}
+		if got := judgeMergedSince(markers[1:2], m.ID); got != false {
+			t.Errorf("judgeMergedSince after round 2's started marker = %v, want false", got)
+		}
+	})
+
+	t.Run("a round with no started marker errors", func(t *testing.T) {
+		t.Parallel()
+		_, err := judgeStartedMarker(markers, 3)
+		if err == nil {
+			t.Fatal("judgeStartedMarker(3): want error, got nil")
+		}
+		const want = "job: judging: round 3 has no started marker"
+		if err.Error() != want {
+			t.Errorf("judgeStartedMarker(3) error = %q, want %q", err.Error(), want)
+		}
+	})
 }
 
 // ---- TestJudgeRunStoresVerdicts ---------------------------------------------

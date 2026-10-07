@@ -404,8 +404,7 @@ func (h judgeHandler) run(ctx context.Context, t store.Ticket, d Deps) (store.Ha
 		if shaErr != nil {
 			return store.HandlerCommit{}, shaErr
 		}
-		startedLine, _, _ := strings.Cut(startedMarker.Body, "\n")
-		sha := judgeRoundStartedLine.FindStringSubmatch(startedLine)[2]
+		sha := judgeStartedRowSHA(startedMarker)
 		if judgeMergedSince(mergeRows, startedMarker.ID) {
 			slog.Info("judge round superseded by base merge", "ticket_id", t.ID, "round", n, "sha", sha, "new_round", n+1)
 			return h.start(ctx, t, d, n+1)
@@ -459,15 +458,21 @@ func judgeStartedMarker(markers []store.MessageRow, n int) (store.MessageRow, er
 	return store.MessageRow{}, fmt.Errorf("job: judging: round %d has no started marker", n)
 }
 
-// judgeStartedSHA is judgeStartedMarker's own sha: a retry marker names no
-// sha of its own (design section 7.1: "sha from round n's started marker").
+// judgeStartedRowSHA extracts a round's own sha from its own started marker
+// row, the body judgeStartedMarker found: a retry marker names no sha of
+// its own (design section 7.1: "sha from round n's started marker").
+func judgeStartedRowSHA(row store.MessageRow) string {
+	firstLine, _, _ := strings.Cut(row.Body, "\n")
+	return judgeRoundStartedLine.FindStringSubmatch(firstLine)[2]
+}
+
+// judgeStartedSHA is judgeStartedMarker's own sha.
 func judgeStartedSHA(markers []store.MessageRow, n int) (string, error) {
 	m, err := judgeStartedMarker(markers, n)
 	if err != nil {
 		return "", err
 	}
-	firstLine, _, _ := strings.Cut(m.Body, "\n")
-	return judgeRoundStartedLine.FindStringSubmatch(firstLine)[2], nil
+	return judgeStartedRowSHA(m), nil
 }
 
 // judgeMergedSince reports whether a judge-point base merge landed after
