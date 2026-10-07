@@ -106,7 +106,7 @@ func TestRunJob_ClaudeHoldLetsCodexRun(t *testing.T) {
 	}
 
 	d := Deps{
-		Store: s, Runtimes: set, Machine: runJobTestMachine(t),
+		Store: s, Runtimes: set, Machine: codexPlanreviewMachine(t),
 		Models: map[string]string{testModelAlias: testModelExact, testRuntimeCodex: testModelExact},
 		Budget: time.Hour, Owner: owner, Expires: expires, Reserve: realReserve(s, owner, expires),
 		DataDir: t.TempDir(), Now: func() time.Time { return now },

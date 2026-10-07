@@ -17,6 +17,7 @@ import (
 	"testing"
 	"time"
 
+	"zing/internal/machine"
 	"zing/internal/response"
 	"zing/internal/runtime"
 	"zing/internal/store"
@@ -64,13 +65,28 @@ const codexFailureTestScript = "../runtime/testdata/fake_codex.sh"
 // since three tests below set it (goconst).
 const fakeCodexModeErrorEvent = "FAKE_CODEX_MODE=error_event"
 
+// codexPlanreviewMachine is the real machine.toml with planreview set back
+// to model and runtime codex: these tests are about the Codex runtime's
+// failure routing, which stays in main while machine.toml runs planreview
+// on Claude (Codex quota, #105).
+func codexPlanreviewMachine(t *testing.T) *machine.Machine {
+	t.Helper()
+	m := runJobTestMachine(t)
+	j := m.Jobs[jobPlanreviewName]
+	j.Model = testRuntimeCodex
+	j.Runtime = testRuntimeCodex
+	m.Jobs[jobPlanreviewName] = j
+	return m
+}
+
 // newCodexFailureTestDeps builds the Deps a runAndRoute call against the
 // real Codex runtime needs: a fresh store and ticket, a claimed owner and
-// lease, a real Reserve, the checked-in machine.toml (whose "planreview"
-// job names runtime "codex" and model alias "codex"), the codex alias in
-// Models, and a real DataDir -- planreview names no sandbox profile, so
-// runJobWith gives it a private temp root under DataDir (PKG9-PLAN.md
-// section 7.3), which ErrConfig's if DataDir is empty.
+// lease, a real Reserve, codexPlanreviewMachine (the checked-in machine.toml
+// with "planreview" put back on runtime "codex" and model alias "codex",
+// since main itself now runs planreview on Claude while Codex is out of
+// quota), the codex alias in Models, and a real DataDir -- planreview names
+// no sandbox profile, so runJobWith gives it a private temp root under
+// DataDir (PKG9-PLAN.md section 7.3), which ErrConfig's if DataDir is empty.
 func newCodexFailureTestDeps(t *testing.T) (Deps, store.Ticket) {
 	t.Helper()
 	s := newRunJobTestStore(t)
@@ -94,7 +110,7 @@ func newCodexFailureTestDeps(t *testing.T) (Deps, store.Ticket) {
 	}
 
 	d := Deps{
-		Store: s, Runtimes: set, Machine: runJobTestMachine(t),
+		Store: s, Runtimes: set, Machine: codexPlanreviewMachine(t),
 		Models: map[string]string{testRuntimeCodex: testModelExact},
 		Budget: time.Hour, Owner: owner, Expires: expires, Reserve: realReserve(s, owner, expires),
 		DataDir: t.TempDir(),

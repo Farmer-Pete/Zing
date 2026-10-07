@@ -142,6 +142,26 @@ func TestLoad_RealMachineTOMLLoadsClean(t *testing.T) {
 	}
 }
 
+// TestMachineTOMLRunsPlanreviewOnClaude proves that the real machine.toml
+// runs planreview on Claude while Codex is out of quota (#105): the self-
+// upgrade from main must not drop plan review back onto codex.
+func TestMachineTOMLRunsPlanreviewOnClaude(t *testing.T) {
+	t.Parallel()
+
+	m, err := Load(zing.Assets, machineTOMLPath)
+	if err != nil {
+		t.Fatalf("Load(real machine.toml): %v", err)
+	}
+
+	planreview := m.Jobs["planreview"]
+	if planreview.Model != modelOpus {
+		t.Errorf("planreview.Model = %q, want opus", planreview.Model)
+	}
+	if planreview.Runtime != "claude" {
+		t.Errorf("planreview.Runtime = %q, want claude", planreview.Runtime)
+	}
+}
+
 // TestJobSandboxKey proves the sandbox key's own validation (PKG8-PLAN.md
 // section 4.5): absent or "build" both load clean, and any other value is
 // rejected with the exact error text.
