@@ -2250,10 +2250,11 @@ func planreviewMarkerVersion(body, suffix string) string {
 }
 
 // findingsDetail renders a plan review's own remaining findings as a
-// markdown list, one item per finding ("- SEVERITY at `LOCATION`: TEXT"),
-// under a heading naming version. It returns "" for no findings, so a
-// caller can treat that as "no detail" the same way it treats a missing
-// marker or artifact.
+// markdown list, one item per finding ("- ID SEVERITY at `LOCATION`: TEXT",
+// or "- SEVERITY at `LOCATION`: TEXT" when the finding has no id), under a
+// heading naming version. It returns "" for no findings, so a caller can
+// treat that as "no detail" the same way it treats a missing marker or
+// artifact.
 func findingsDetail(version int, findings []response.Finding) string {
 	if len(findings) == 0 {
 		return ""
@@ -2263,7 +2264,11 @@ func findingsDetail(version int, findings []response.Finding) string {
 	for i := range findings {
 		f := &findings[i]
 		text := strings.Join(strings.Fields(f.Text), " ")
-		lines = append(lines, fmt.Sprintf("- %s at `%s`: %s", f.Severity, f.Location, text))
+		ref := string(f.Severity)
+		if f.ID != "" {
+			ref = f.ID + " " + ref
+		}
+		lines = append(lines, fmt.Sprintf("- %s at `%s`: %s", ref, f.Location, text))
 	}
 	return strings.Join(lines, "\n")
 }

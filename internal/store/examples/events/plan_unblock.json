@@ -1,0 +1,5 @@
+{
+  "plan_version": 3,
+  "finding_ids": ["p3-f2"],
+  "guidance": "Drop task 4 and test the parser seam."
+}
