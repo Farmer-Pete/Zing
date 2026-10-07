@@ -121,6 +121,12 @@ type Deps struct {
 	// Config.Now, so a test that drives the dispatcher's own clock also
 	// drives the hold check.
 	Now func() time.Time
+	// Source is what refreshTicket (refresh.go) reads a ticket's current
+	// tracker text from, before each planning tick of a ticket that is not
+	// waiting (#98). nil skips the refresh entirely. The dispatcher
+	// implements TicketSource over its own tracker and bindings and passes
+	// itself here, as it does for Tracker and Splitter.
+	Source TicketSource
 }
 
 // now is d.Now(), or time.Now when Now is nil.

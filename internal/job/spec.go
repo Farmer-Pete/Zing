@@ -26,6 +26,12 @@ import (
 const (
 	specDecisionsHeader = "Owner decisions, oldest first. They amend the ticket text above."
 	specApprovalHeader  = "At the gate, the owner approved the plan and wrote:"
+	// specCommentsHeader introduces t.OwnerComments, right after the body
+	// and before specDecisionsHeader (#98): the owner's issue comments are
+	// as trusted as the body, so renderSpec appends them under the same
+	// untrusted fence every caller of specFor already applies to the whole
+	// ticket input.
+	specCommentsHeader = "Owner comments on the issue, oldest first. They amend the ticket text above."
 )
 
 // specFor is the ticket text every stage judges against (design goal 1):
@@ -88,6 +94,9 @@ func renderSpec(t store.Ticket, conv store.PlanningConversation, answers []store
 	}
 
 	base := t.Title + "\n\n" + t.Body
+	if t.OwnerComments != "" {
+		base += "\n\n" + specCommentsHeader + "\n\n" + t.OwnerComments
+	}
 	if len(parts) == 0 {
 		return base
 	}

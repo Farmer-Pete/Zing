@@ -235,6 +235,9 @@ const (
 type planningHandler struct{}
 
 func (h planningHandler) Run(ctx context.Context, t store.Ticket, d Deps) (store.HandlerCommit, error) {
+	if c, refreshed := refreshTicket(ctx, t, d); refreshed {
+		return c, nil
+	}
 	rounds, err := d.Store.AnsweredRounds(ctx, t.ID)
 	if err != nil {
 		return store.HandlerCommit{}, fmt.Errorf("job: planning: answered rounds: %w", err)
