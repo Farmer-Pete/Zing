@@ -348,6 +348,7 @@ func (h planningHandler) Run(ctx context.Context, t store.Ticket, d Deps) (store
 			return store.HandlerCommit{}, liveErr
 		}
 		if live {
+			slog.Info("planning resumes with refreshed ticket before review", "ticket_id", t.ID, "session_id", sess.ID)
 			return runPlanningResume(ctx, t, d, sess, nil, nil, 0, false)
 		}
 

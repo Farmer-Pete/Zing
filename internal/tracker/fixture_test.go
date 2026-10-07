@@ -283,9 +283,6 @@ func TestFixtureRecordsClose(t *testing.T) {
 	}
 }
 
-// TestFixtureCommentContains proves CommentContains searches every comment
-// Comment has recorded under ref (design section 10.5): a needle found in
-// a posted body is reported, one not posted is not.
 // TestFixtureComments proves Comments returns every body Comment has
 // recorded under ref, in post order, each authored by the fixture's one
 // identity (fixtureLogin, "fixture-user"), with ID its 1-based position.
@@ -313,6 +310,9 @@ func TestFixtureComments(t *testing.T) {
 	}
 }
 
+// TestFixtureCommentContains proves CommentContains searches every comment
+// Comment has recorded under ref (design section 10.5): a needle found in
+// a posted body is reported, one not posted is not.
 func TestFixtureCommentContains(t *testing.T) {
 	t.Parallel()
 

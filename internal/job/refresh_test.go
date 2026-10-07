@@ -7,14 +7,34 @@ package job_test
 
 import (
 	"context"
+	"database/sql"
 	"errors"
+	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"zing/internal/job"
 	"zing/internal/response"
+	"zing/internal/runtime"
 	"zing/internal/store"
 )
+
+// nullifyTrackerBody stands in for a row inserted before migration 0011: it
+// clears tracker_body with a raw UPDATE against s's own database file, which
+// InsertTicket cannot leave NULL since it always writes tracker_body equal
+// to body.
+func nullifyTrackerBody(t *testing.T, s *store.Store, ticketID int64) {
+	t.Helper()
+	db, err := sql.Open("sqlite", "file:"+filepath.Join(s.Dir(), "zing.db"))
+	if err != nil {
+		t.Fatalf("nullifyTrackerBody: sql.Open: %v", err)
+	}
+	defer func() { _ = db.Close() }()
+	if _, err := db.ExecContext(t.Context(), `UPDATE tickets SET tracker_body = NULL WHERE id = ?`, ticketID); err != nil {
+		t.Fatalf("nullifyTrackerBody: update: %v", err)
+	}
+}
 
 // fakeTicketSource is a job.TicketSource that always returns it and err,
 // regardless of the projectID and ref it is called with.
@@ -133,6 +153,15 @@ func TestPlanningRefresh_FirstTurnMarksDelivered(t *testing.T) {
 	if len(commit2.Runs) == 0 {
 		t.Errorf("tick 2 commit.Runs = %+v, want a reserved run (the first turn)", commit2.Runs)
 	}
+	apply(t, s, getTicket(t, s, ticketID), commit2)
+
+	_, live, err := s.LiveMarker(t.Context(), ticketID, "ticket refreshed from tracker", "ticket refresh delivered")
+	if err != nil {
+		t.Fatalf("LiveMarker: %v", err)
+	}
+	if live {
+		t.Error("LiveMarker reports live after the delivered commit was applied, want not live")
+	}
 }
 
 // TestPlanningRefresh_UnchangedWritesNothing proves a source that reports
@@ -234,6 +263,7 @@ func TestPlanningRefresh_ConsoleEditSurvivesUnchangedIssue(t *testing.T) {
 	t.Parallel()
 	s := newJobTestStore(t)
 	ticketID := seedFeatureTicketInPlanningWithBody(t, s, "A")
+	nullifyTrackerBody(t, s, ticketID)
 
 	if err := s.OwnerEdit(t.Context(), store.OwnerEditRequest{
 		TicketID: ticketID, Target: store.OwnerEditTicketBody, Action: store.OwnerEditActionEdit,
@@ -261,6 +291,7 @@ func TestPlanningRefresh_ConsoleEditSurvivesUnchangedIssue(t *testing.T) {
 			t.Errorf("commit.Messages = %+v, want no refresh message", commit.Messages)
 		}
 	}
+	apply(t, s, ticket, commit)
 
 	final := getTicket(t, s, ticketID)
 	if final.Body != "A, edited" {
@@ -314,5 +345,108 @@ func TestPlanningRefresh_ResumesIdleSessionBeforeReview(t *testing.T) {
 	}
 	if !delivered {
 		t.Errorf("commit.Messages = %+v, want one \"ticket refresh delivered\" message", commit.Messages)
+	}
+}
+
+// TestPlanningResume_DeliversRefreshedTicketOnce proves runPlanningResume's
+// own live-refresh gate (#98, task 6), the exactly-once goal for a resume
+// triggered by an undelivered owner answer (PlanningConversation.Undelivered,
+// not the Run-level open-session branch TestPlanningRefresh_
+// ResumesIdleSessionBeforeReview covers): the first such resume, with a
+// live refresh marker already stored, carries the ticket spec under
+// "ticket:" and marks the refresh delivered in the same commit; a second
+// resume, after that commit is applied, carries no "ticket:" input.
+func TestPlanningResume_DeliversRefreshedTicketOnce(t *testing.T) {
+	t.Parallel()
+	s := newJobTestStore(t)
+	ticketID := seedFeatureTicketInPlanning(t, s)
+
+	options := []response.Option{{Key: "a", Text: testOptionAText}, {Key: "b", Text: testOptionBText}}
+	firstResp := &response.PlanningQuestionsResponse{
+		Job: response.JobPlanning, Outcome: response.OutcomeQuestion,
+		Questions: []response.Question{{
+			Key: "q1", Title: "A question", Body: testQuestionBody, Options: options, Recommended: "a",
+		}},
+	}
+	firstRT := &scriptedRuntime{t: t, steps: []scriptedStep{
+		{res: runtime.RunResult{Response: firstResp, SessionID: "resume-once-sess", ExitCode: 0, AgentTime: time.Second}},
+	}}
+	firstCommit, err := runPlanning(t, s, claimWithRuntimes(t, s, firstRT, ticketID), ticketID)
+	if err != nil {
+		t.Fatalf("first turn Run: %v", err)
+	}
+	apply(t, s, getTicket(t, s, ticketID), firstCommit)
+
+	_, insertErr := s.InsertMessage(t.Context(), store.Message{
+		TicketID: ticketID, Type: testMsgTypeUpdate, Author: testAuthorSystem,
+		Body: "ticket refreshed from tracker\nowner comments changed, 1 now",
+	})
+	if insertErr != nil {
+		t.Fatalf("InsertMessage: %v", insertErr)
+	}
+
+	open, err := s.QuestionsByState(t.Context(), ticketID, "open")
+	if err != nil || len(open) != 1 {
+		t.Fatalf("QuestionsByState(open) = %v, %v, want exactly one", open, err)
+	}
+	if _, answerErr := s.AnswerQuestion(t.Context(), store.AnswerInput{TicketID: ticketID, QuestionID: open[0].ID, Option: "a"}); answerErr != nil {
+		t.Fatalf("AnswerQuestion: %v", answerErr)
+	}
+
+	secondResp := &response.PlanningQuestionsResponse{
+		Job: response.JobPlanning, Outcome: response.OutcomeQuestion,
+		Questions: []response.Question{{
+			Key: "q1", Title: "Another question", Body: testQuestionBody, Options: options, Recommended: "a",
+		}},
+		Replies: []response.Reply{
+			{Question: "Q1", Settled: true, Decision: "Settled Q1.", Text: "Settling Q1."},
+		},
+	}
+	rec := &recordingRuntime{rt: &scriptedRuntime{t: t, steps: []scriptedStep{
+		{res: runtime.RunResult{Response: secondResp, SessionID: "resume-once-sess", ExitCode: 0, AgentTime: time.Second}},
+	}}}
+	secondCommit, err := runPlanning(t, s, claimWithRuntimes(t, s, rec, ticketID), ticketID)
+	if err != nil {
+		t.Fatalf("second turn (resume) Run: %v", err)
+	}
+	if !strings.Contains(rec.lastReq.Prompt, "ticket:\n") {
+		t.Errorf("resume prompt does not carry a \"ticket:\" input:\n%s", rec.lastReq.Prompt)
+	}
+	delivered := false
+	for _, m := range secondCommit.Messages {
+		if m.Body == "ticket refresh delivered" {
+			delivered = true
+		}
+	}
+	if !delivered {
+		t.Errorf("second commit.Messages = %+v, want one \"ticket refresh delivered\" message", secondCommit.Messages)
+	}
+	apply(t, s, getTicket(t, s, ticketID), secondCommit)
+
+	open2, err := s.QuestionsByState(t.Context(), ticketID, "open")
+	if err != nil || len(open2) != 1 {
+		t.Fatalf("QuestionsByState(open) after second turn = %v, %v, want exactly one", open2, err)
+	}
+	if _, answerErr := s.AnswerQuestion(t.Context(), store.AnswerInput{TicketID: ticketID, QuestionID: open2[0].ID, Option: "a"}); answerErr != nil {
+		t.Fatalf("AnswerQuestion: %v", answerErr)
+	}
+
+	thirdResp := &response.PlanningQuestionsResponse{
+		Job: response.JobPlanning, Outcome: response.OutcomeQuestion,
+		Questions: []response.Question{{
+			Key: "q1", Title: "A third question", Body: testQuestionBody, Options: options, Recommended: "a",
+		}},
+		Replies: []response.Reply{
+			{Question: "Q2", Settled: true, Decision: "Settled Q2.", Text: "Settling Q2."},
+		},
+	}
+	rec2 := &recordingRuntime{rt: &scriptedRuntime{t: t, steps: []scriptedStep{
+		{res: runtime.RunResult{Response: thirdResp, SessionID: "resume-once-sess", ExitCode: 0, AgentTime: time.Second}},
+	}}}
+	if _, err := runPlanning(t, s, claimWithRuntimes(t, s, rec2, ticketID), ticketID); err != nil {
+		t.Fatalf("third turn (second resume) Run: %v", err)
+	}
+	if strings.Contains(rec2.lastReq.Prompt, "ticket:\n") {
+		t.Errorf("second resume prompt carries a \"ticket:\" input, want none (delivered once):\n%s", rec2.lastReq.Prompt)
 	}
 }

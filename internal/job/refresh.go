@@ -119,8 +119,10 @@ func refreshLive(ctx context.Context, d Deps, ticketID int64) (bool, error) {
 // err is nil, and the run reserved a row (commit.Runs non-empty). In every
 // other case it returns commit and err unchanged.
 func markRefreshDelivered(commit store.HandlerCommit, err error, live bool, ticketID int64) (store.HandlerCommit, error) {
-	if live && err == nil && len(commit.Runs) > 0 {
+	ranRun := err == nil && len(commit.Runs) > 0
+	if live && ranRun {
 		commit.Messages = append(commit.Messages, store.Message{TicketID: ticketID, Type: msgTypeUpdate, Author: authorSystem, Body: ticketRefreshDeliveredMarker})
+		slog.Info("ticket refresh delivered", "ticket_id", ticketID, "run_id", commit.Runs[0].ID)
 	}
 	return commit, err
 }

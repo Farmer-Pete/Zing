@@ -47,17 +47,6 @@ func TestLinear_EveryMethodReturnsNotImplemented(t *testing.T) {
 	}
 }
 
-// TestLinearComments proves Comments always fails with
-// errLinearNotImplemented (decision D5).
-func TestLinearComments(t *testing.T) {
-	t.Parallel()
-
-	var l Linear
-	if _, err := l.Comments(context.Background(), "proj", "ref"); !errors.Is(err, errLinearNotImplemented) {
-		t.Errorf("Comments err = %v, want %v", err, errLinearNotImplemented)
-	}
-}
-
 // TestLinear_SatisfiesTracker proves Linear{} satisfies the Tracker
 // interface at compile time (the var _ Tracker = Linear{} assertion in
 // linear.go), by using it as one through a variable of the interface type.
