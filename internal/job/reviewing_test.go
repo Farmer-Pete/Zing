@@ -3880,6 +3880,99 @@ func TestAllDroppedMovesToJudging(t *testing.T) {
 	}
 }
 
+// ---- TestReviewRoundDropsCompileClaimWithoutCompilerOutput, TestReviewRoundKeepsCompileClaimWithCompilerOutput ----
+
+// TestReviewRoundDropsCompileClaimWithoutCompilerOutput proves ticket
+// #104's rule: a finding claiming code does not compile, with no quoted
+// go build or go vet output, is dropped by FilterFindings before it ever
+// reaches the owner, and the round moves straight to judging.
+func TestReviewRoundDropsCompileClaimWithoutCompilerOutput(t *testing.T) {
+	t.Parallel()
+	s, ticket, _ := reviewTicketReady(t)
+	scripts := reviewScriptsFS(map[string]string{
+		reviewScriptKey("correctness", 1): findingScript(
+			"correctness", "blocker",
+			"Go does not allow promoted fields in a composite literal, so internal/job tests do not compile.",
+			"use the embedded struct's own literal",
+		),
+	})
+	deps := pbClaim(t, s, runtime.NewFake(scripts), ticket.ID)
+	commit, err := (reviewingHandler{}).Run(t.Context(), ticket, deps)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if commit.Next != stateJudging {
+		t.Fatalf("commit.Next = %q, want %q", commit.Next, stateJudging)
+	}
+	if len(commit.Artifacts) != 0 {
+		t.Fatalf("commit.Artifacts = %d, want 0", len(commit.Artifacts))
+	}
+	found := false
+	for _, m := range commit.Messages {
+		if strings.Contains(m.Body, "kept 0 dropped 1") {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("messages = %+v, want one containing %q", commit.Messages, "kept 0 dropped 1")
+	}
+}
+
+// TestReviewRoundKeepsCompileClaimWithCompilerOutput proves the converse:
+// the same claim, with a quoted Go diagnostic line, survives FilterFindings
+// and reaches the owner as a review question.
+func TestReviewRoundKeepsCompileClaimWithCompilerOutput(t *testing.T) {
+	t.Parallel()
+	s, ticket, _ := reviewTicketReady(t)
+	scripts := reviewScriptsFS(map[string]string{
+		reviewScriptKey("correctness", 1): findingScript(
+			"correctness", "blocker",
+			"internal/job tests do not compile: internal/job/x_test.go:12:5: unknown field Foo in struct literal",
+			"use the embedded struct's own literal",
+		),
+	})
+	deps := pbClaim(t, s, runtime.NewFake(scripts), ticket.ID)
+	commit, err := (reviewingHandler{}).Run(t.Context(), ticket, deps)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if len(commit.Artifacts) != 1 {
+		t.Fatalf("commit.Artifacts = %d, want 1", len(commit.Artifacts))
+	}
+	var artifact response.FindingArtifact
+	if err = json.Unmarshal(commit.Artifacts[0].Payload, &artifact); err != nil {
+		t.Fatalf("unmarshal finding artifact: %v", err)
+	}
+	if artifact.ID != "r1f1" {
+		t.Errorf("artifact.ID = %q, want %q", artifact.ID, "r1f1")
+	}
+	if commit.Waiting == nil || *commit.Waiting != waitingFlagReview {
+		t.Fatalf("commit.Waiting = %v, want %q", commit.Waiting, waitingFlagReview)
+	}
+	if commit.Next == stateJudging {
+		t.Errorf("commit.Next = %q, want not judging", commit.Next)
+	}
+	found := false
+	for _, m := range commit.Messages {
+		if strings.Contains(m.Body, "kept 1 dropped 0") {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("messages = %+v, want one containing %q", commit.Messages, "kept 1 dropped 0")
+	}
+
+	pbApply(t, s, ticket, commit)
+	q := newestOpenQuestion(t, s, ticket.ID)
+	var payload response.QuestionPayload
+	if err = json.Unmarshal(q.Payload, &payload); err != nil {
+		t.Fatalf("unmarshal question payload: %v", err)
+	}
+	if len(payload.Items) != 1 {
+		t.Fatalf("payload.Items = %d, want 1", len(payload.Items))
+	}
+}
+
 // ---- task 12: re-review, the loop gate, and review escalation retries ----
 
 // reviewRoundScriptKey is reviewScriptKey generalized to any round (design
