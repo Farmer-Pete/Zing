@@ -6,9 +6,12 @@
 package console
 
 import (
+	"errors"
 	"log/slog"
 	"net/http"
 	"sync"
+
+	"zing/internal/dispatch"
 )
 
 // logLevelsByName is the design section 6.12 closed set POST /loglevel
@@ -112,6 +115,55 @@ func (c *console) handleDebug(w http.ResponseWriter, r *http.Request) {
 	}
 
 	c.log.ToggleDebug(req.Ticket)
+
+	c.bus.Publish()
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// tuningRequest is POST /settings' body (#81, owner decision Q1): name is
+// one of dispatch.TuneMaxParallel, dispatch.TuneIntervalSeconds, or
+// dispatch.TuneAgentMinutes, and value is the new setting in that
+// setting's own unit.
+type tuningRequest struct {
+	Name  string `json:"name"`
+	Value int    `json:"value"`
+}
+
+// handleTuning is POST /settings (#81): change max_parallel, the dispatch
+// interval, or the agent budget on the running dispatcher, live, with no
+// restart. 503 when this console was built with no WithTuner (settings are
+// not available at all), 400 on a malformed body or a *dispatch.TuningError
+// (an unknown name or a value outside its bounds, owner decision Q2), 500
+// on any other failure (the settings-table write), 204 and a bus publish on
+// success.
+func (c *console) handleTuning(w http.ResponseWriter, r *http.Request) {
+	r.Body = http.MaxBytesReader(w, r.Body, maxDraftBodyBytes)
+
+	if c.tuner == nil {
+		http.Error(w, "dispatch settings are not available", http.StatusServiceUnavailable)
+		return
+	}
+
+	var req tuningRequest
+	if err := decodeStrict(r, &req); err != nil {
+		writeDecodeError(w, err)
+		return
+	}
+
+	by := c.user
+	if by == "" {
+		by = "console"
+	}
+
+	if err := c.tuner.SetTuning(r.Context(), req.Name, req.Value, by); err != nil {
+		if te, ok := errors.AsType[*dispatch.TuningError](err); ok {
+			http.Error(w, te.Error(), http.StatusBadRequest)
+			return
+		}
+		slog.Error("console: set dispatch setting", "name", req.Name, "err", err)
+		http.Error(w, genericServerErrorBody, http.StatusInternalServerError)
+		return
+	}
 
 	c.bus.Publish()
 	w.WriteHeader(http.StatusNoContent)
