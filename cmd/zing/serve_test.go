@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"math"
 	"net"
 	"net/http"
@@ -109,6 +110,7 @@ type zingTOMLOpts struct {
 	IntervalSeconds int
 	MaxParallel     int
 	Bind            []string // nil or empty writes bind = [], an invalid config
+	Self            bool     // true writes self = true on the one configured project
 }
 
 // newTestGitRepo git-inits a fresh temp directory and returns its path: task
@@ -160,6 +162,11 @@ func writeZingTOML(t *testing.T, path string, opts zingTOMLOpts) {
 	}
 	judgeCodexHome := writeTestJudgeCodexHome(t, filepath.Dir(path))
 
+	selfLine := ""
+	if opts.Self {
+		selfLine = "self = true\n"
+	}
+
 	doc := fmt.Sprintf(`
 user = "test-user"
 github_token = "test-github-token"
@@ -180,7 +187,7 @@ repo = "x/zing"
 path = %q
 tracker = "github"
 commands = { test = "go test ./...", lint = "golangci-lint run" }
-`, judgeCodexHome, strings.Join(bindItems, ", "), opts.Port, opts.IntervalSeconds, opts.MaxParallel, newTestGitRepo(t))
+%s`, judgeCodexHome, strings.Join(bindItems, ", "), opts.Port, opts.IntervalSeconds, opts.MaxParallel, newTestGitRepo(t), selfLine)
 
 	if err := os.WriteFile(path, []byte(doc), 0o600); err != nil {
 		t.Fatalf("write zing.toml: %v", err)
@@ -320,10 +327,138 @@ func TestServe_ClearsStaleDrainingAndStoppedFlagsAtStartup(t *testing.T) {
 	defer cancel()
 
 	serveDone := make(chan error, 1)
-	go func() { serveDone <- serve(ctx, cfgPath, dbPath, false) }()
+	go func() { serveDone <- serve(ctx, cfgPath, dbPath, false, nil) }()
 
 	waitForTicketPastQueued(t, dbPath, serveDone)
 	cancelAndWaitForServe(t, cancel, serveDone)
+}
+
+// TestServe_UpgraderRunsAlongsideShutdown proves serve's upgrader wiring
+// (newUpgrader, go up.loop(ctx), close(up.gate), and the cancelServe-then-
+// wait-on-upDone sequence before shutdown) does not change serve's ordinary
+// shutdown behavior: with a non-nil su whose exe never matches
+// DATA_DIR/bin/zing (so install_check would refuse any upgrade, exactly as
+// in production before the owner sets self = true), serve still starts up,
+// and a plain ctx cancellation still drains it within the usual deadline.
+// Since no Request ever reaches the upgrader, up.Target never reports ok,
+// so su.next must stay nil (review finding r2f2). The "upgrade: enabled"
+// INFO log, captured off the real process os.Stderr (installLogHandler
+// resets slog's default to write there, so a swapped slog default alone
+// would never see it), proves newUpgrader really built a non-nil upgrader
+// from su and serve really started its loop goroutine; without that wiring
+// this log line would never appear, where su.next staying nil alone would
+// not catch its removal (r3f2).
+func TestServe_UpgraderRunsAlongsideShutdown(t *testing.T) {
+	// Not t.Parallel(): this test swaps the process os.Stderr to capture
+	// the "upgrade: enabled" log, which would race with any other test
+	// logging concurrently.
+
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "zing.toml")
+	dbPath := filepath.Join(dir, "zing.db")
+
+	port := freeLoopbackPort(t)
+	writeZingTOML(t, cfgPath, zingTOMLOpts{
+		Port: port, IntervalSeconds: 1, MaxParallel: 1, Bind: []string{loopback}, Self: true,
+	})
+
+	su := &selfUpgrade{exe: filepath.Join(dir, "not-the-running-binary"), running: "0123456789ab"}
+
+	r, w, pipeErr := os.Pipe()
+	if pipeErr != nil {
+		t.Fatal(pipeErr)
+	}
+	origStderr := os.Stderr
+	os.Stderr = w
+	t.Cleanup(func() { os.Stderr = origStderr })
+
+	var logs strings.Builder
+	var copyErr error
+	logsDone := make(chan struct{})
+	go func() {
+		_, copyErr = io.Copy(&logs, r)
+		close(logsDone)
+	}()
+
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+
+	serveDone := make(chan error, 1)
+	go func() { serveDone <- serve(ctx, cfgPath, dbPath, false, su) }()
+
+	waitForServing(t, fmt.Sprintf("http://127.0.0.1:%d", port), serveDone)
+	cancelAndWaitForServe(t, cancel, serveDone)
+
+	os.Stderr = origStderr
+	if err := w.Close(); err != nil {
+		t.Fatal(err)
+	}
+	<-logsDone
+	if copyErr != nil {
+		t.Fatal(copyErr)
+	}
+
+	if su.next != nil {
+		t.Errorf("su.next = %+v, want nil: no upgrade was ever requested", su.next)
+	}
+	got := logs.String()
+	hasMsg := strings.Contains(got, `msg="upgrade: enabled"`)
+	hasExe := strings.Contains(got, "exe="+su.exe)
+	hasRunning := strings.Contains(got, "running="+su.running)
+	if !hasMsg || !hasExe || !hasRunning {
+		t.Errorf("logs = %q, want an \"upgrade: enabled\" line with exe=%s and running=%s (hasMsg=%v hasExe=%v hasRunning=%v): serve must have built a non-nil upgrader from su",
+			got, su.exe, su.running, hasMsg, hasExe, hasRunning)
+	}
+}
+
+// TestServe_UpgraderStopsOnDispatcherExitWithoutCtxCancel proves that serve's
+// cancelServe-then-wait-on-upDone sequence (right before shutdown, serve.go)
+// really ends the running upgrader loop goroutine even when the parent ctx
+// is never cancelled. The drain here is triggered by the dispatcher's own
+// goroutine ending on its own, through the store's "draining" flag, which
+// does not touch ctx at all (waitForShutdownTrigger's dispDone case). Left
+// unfixed (review finding r4f1: deleting the cancelServe()/<-upDone call
+// at serve.go), up.loop would keep waiting on its own derived ctx, which
+// stays live, and serve would hang forever on <-upDone instead of
+// returning once shutdown finishes.
+func TestServe_UpgraderStopsOnDispatcherExitWithoutCtxCancel(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "zing.toml")
+	dbPath := filepath.Join(dir, "zing.db")
+
+	port := freeLoopbackPort(t)
+	writeZingTOML(t, cfgPath, zingTOMLOpts{
+		Port: port, IntervalSeconds: 1, MaxParallel: 1, Bind: []string{loopback}, Self: true,
+	})
+
+	su := &selfUpgrade{exe: filepath.Join(dir, "not-the-running-binary"), running: "0123456789ab"}
+
+	// t.Context() is never cancelled by this test: the only way serve ends
+	// below is the dispatcher's own exit, not a signal or parent cancel.
+	serveDone := make(chan error, 1)
+	go func() { serveDone <- serve(t.Context(), cfgPath, dbPath, false, su) }()
+
+	waitForServing(t, fmt.Sprintf("http://127.0.0.1:%d", port), serveDone)
+
+	st, err := store.Open(t.Context(), dbPath)
+	if err != nil {
+		t.Fatalf("store.Open: %v", err)
+	}
+	defer func() { _ = st.Close() }()
+	if err := st.SetDraining(t.Context(), true); err != nil {
+		t.Fatalf("SetDraining(true): %v", err)
+	}
+
+	select {
+	case err := <-serveDone:
+		if err != nil {
+			t.Fatalf("serve returned %v, want nil", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("serve did not return within the drain window after the dispatcher's own exit; the upgrader loop likely never saw its ctx end")
+	}
 }
 
 // seedQueuedTicketForServe inserts one queued ticket directly into st, under
@@ -370,7 +505,7 @@ func TestServe_ClampsInvalidDispatchConfig(t *testing.T) {
 	defer cancel()
 
 	serveDone := make(chan error, 1)
-	go func() { serveDone <- serve(ctx, cfgPath, dbPath, false) }()
+	go func() { serveDone <- serve(ctx, cfgPath, dbPath, false, nil) }()
 
 	waitForServing(t, fmt.Sprintf("http://127.0.0.1:%d", port), serveDone)
 	cancelAndWaitForServe(t, cancel, serveDone)
@@ -417,7 +552,7 @@ func TestServe_StoredTuningWinsOverZingTOMLAfterRestart(t *testing.T) {
 	defer cancel()
 
 	serveDone := make(chan error, 1)
-	go func() { serveDone <- serve(ctx, cfgPath, dbPath, false) }()
+	go func() { serveDone <- serve(ctx, cfgPath, dbPath, false, nil) }()
 
 	baseURL := fmt.Sprintf("http://%s:%d", loopback, port)
 	waitForServing(t, baseURL, serveDone)
@@ -479,7 +614,7 @@ func TestServe_ErrorsOnEmptyConsoleBind(t *testing.T) {
 		Port: freeLoopbackPort(t), IntervalSeconds: 1, MaxParallel: 1, Bind: nil,
 	})
 
-	err := serve(t.Context(), cfgPath, dbPath, false)
+	err := serve(t.Context(), cfgPath, dbPath, false, nil)
 	if err == nil {
 		t.Fatal("serve returned nil, want an error for an empty console.bind")
 	}
@@ -513,7 +648,7 @@ func TestServe_BindsEveryLiteralAddressAndSkipsAnUnresolvedTailscaleEntry(t *tes
 	defer cancel()
 
 	serveDone := make(chan error, 1)
-	go func() { serveDone <- serve(ctx, cfgPath, dbPath, false) }()
+	go func() { serveDone <- serve(ctx, cfgPath, dbPath, false, nil) }()
 
 	waitForServing(t, fmt.Sprintf("http://127.0.0.1:%d", port), serveDone)
 	cancelAndWaitForServe(t, cancel, serveDone)
@@ -620,6 +755,50 @@ func TestDispatchMaxParallel(t *testing.T) {
 
 			if got := dispatchMaxParallel(tc.n); got != tc.want {
 				t.Errorf("dispatchMaxParallel(%d) = %d, want %d", tc.n, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestFindSelfProject covers findSelfProject directly (#109 part 1, Q2):
+// zero self projects reports ok false with no error, exactly one reports its
+// index, and two is the exact startup error, since serve can upgrade only
+// one project.
+func TestFindSelfProject(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		projects []config.Project
+		wantIdx  int
+		wantOK   bool
+		wantErr  string
+	}{
+		{name: "none self", projects: []config.Project{{Name: "a"}, {Name: "b"}}, wantIdx: -1, wantOK: false},
+		{name: "one self at index 1", projects: []config.Project{{Name: "a"}, {Name: "b", Self: true}}, wantIdx: 1, wantOK: true},
+		{
+			name:     "two self",
+			projects: []config.Project{{Name: "a", Self: true}, {Name: "b", Self: true}},
+			wantIdx:  -1, wantOK: false,
+			wantErr: "zing.toml: only one project may set self = true",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			idx, ok, err := findSelfProject(tc.projects)
+			if idx != tc.wantIdx || ok != tc.wantOK {
+				t.Errorf("findSelfProject(...) = (%d, %v), want (%d, %v)", idx, ok, tc.wantIdx, tc.wantOK)
+			}
+			if tc.wantErr == "" {
+				if err != nil {
+					t.Errorf("err = %v, want nil", err)
+				}
+				return
+			}
+			if err == nil || err.Error() != tc.wantErr {
+				t.Errorf("err = %v, want %q", err, tc.wantErr)
 			}
 		})
 	}
@@ -1333,13 +1512,13 @@ func TestServe_SecondServeRefused(t *testing.T) {
 	defer cancel()
 
 	firstDone := make(chan error, 1)
-	go func() { firstDone <- serve(ctx, cfgPath, dbPath, false) }()
+	go func() { firstDone <- serve(ctx, cfgPath, dbPath, false, nil) }()
 
 	waitForServing(t, fmt.Sprintf("http://%s:%d", loopback, port), firstDone)
 
 	secondCtx, secondCancel := context.WithCancel(t.Context())
 	defer secondCancel()
-	err := serve(secondCtx, cfgPath, dbPath, false)
+	err := serve(secondCtx, cfgPath, dbPath, false, nil)
 	if err == nil {
 		t.Fatal("second serve against the same data directory: want an error, got nil")
 	}

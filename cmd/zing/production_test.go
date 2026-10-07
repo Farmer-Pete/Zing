@@ -268,10 +268,12 @@ func TestServeLoadsJudge(t *testing.T) {
 
 // TestServeBuildsOneOrchestratorPerProject proves buildJobProjects builds
 // exactly one job.Project per configured project, keyed by its store
-// project id, each carrying its own repository's real git common dir, and
-// its configured commands.deny list (r3f3: without this, a project's
-// commands.deny would load from zing.toml and reach Project.DenyCommands
-// in isolation, but never actually join a running build's deny list).
+// project id, each carrying its own repository's real git common dir, its
+// configured commands.deny list (r3f3: without this, a project's
+// commands.deny would load from zing.toml and reach Project.DenyCommands in
+// isolation, but never actually join a running build's deny list), and its
+// self flag (r3f1: without the Self: p.Self copy, pollDone could never call
+// Upgrader.Request, since job.Project.Self would always read false).
 func TestServeBuildsOneOrchestratorPerProject(t *testing.T) {
 	t.Parallel()
 
@@ -279,7 +281,7 @@ func TestServeBuildsOneOrchestratorPerProject(t *testing.T) {
 	repoB := newTestGitRepo(t)
 	wantDeny := []string{"go test ./...", "make ci"}
 	cfgProjects := []config.Project{
-		{Name: "alpha", Repo: "acme/alpha", Path: repoA, Tracker: testServeTracker, Commands: config.Commands{Deny: wantDeny}},
+		{Name: "alpha", Repo: "acme/alpha", Path: repoA, Tracker: testServeTracker, Commands: config.Commands{Deny: wantDeny}, Self: true},
 		{Name: "beta", Repo: "acme/beta", Path: repoB, Tracker: testServeTracker},
 	}
 	bindings := []zdispatch.Binding{
@@ -328,6 +330,13 @@ func TestServeBuildsOneOrchestratorPerProject(t *testing.T) {
 	}
 	if beta := projects[20]; len(beta.Deny) != 0 {
 		t.Errorf("projects[20].Deny = %v, want empty", beta.Deny)
+	}
+
+	if !alpha.Self {
+		t.Errorf("projects[10].Self = false, want true")
+	}
+	if beta := projects[20]; beta.Self {
+		t.Errorf("projects[20].Self = true, want false")
 	}
 }
 

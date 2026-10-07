@@ -32,6 +32,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"testing/fstest"
 	"time"
@@ -1940,6 +1941,50 @@ func shipPollRunWithReviewBots(t *testing.T, s *store.Store, ticket store.Ticket
 	return (shipHandler{}).Run(t.Context(), ticket, deps)
 }
 
+// recordingUpgrader is a job.SelfUpgrader test double (#109 part 1): it
+// records every Request call under a mutex, so TestPollMergedSelfRequestsUpgrade
+// and TestPollMergedNonSelfDoesNotUpgrade can assert both the call count and
+// the arguments without racing pollDone's own goroutine.
+type recordingUpgrader struct {
+	mu    sync.Mutex
+	calls []upgradeRequestCall
+}
+
+// upgradeRequestCall is one recorded SelfUpgrader.Request call.
+type upgradeRequestCall struct {
+	TicketID int64
+	SHA      string
+}
+
+func (u *recordingUpgrader) Request(ticketID int64, sha string) {
+	u.mu.Lock()
+	defer u.mu.Unlock()
+	u.calls = append(u.calls, upgradeRequestCall{TicketID: ticketID, SHA: sha})
+}
+
+// Calls returns a copy of every Request call recorded so far.
+func (u *recordingUpgrader) Calls() []upgradeRequestCall {
+	u.mu.Lock()
+	defer u.mu.Unlock()
+	out := make([]upgradeRequestCall, len(u.calls))
+	copy(out, u.calls)
+	return out
+}
+
+// shipPollRunWithUpgrader is shipPollRun with ticket's own project marked
+// self (or not, per self) and upgrader wired as Deps.Upgrader (#109 part 1,
+// task 8): it copies deps.Projects[ticket.ProjectID], sets Self, and writes
+// it back, since job.Project values are stored by value in the map.
+func shipPollRunWithUpgrader(t *testing.T, s *store.Store, ticket store.Ticket, gh *shipGitHub, tr *shipTracker, self bool, upgrader SelfUpgrader) (store.HandlerCommit, error) {
+	t.Helper()
+	deps := shipClaim(t, s, pbFakeRuntime(t), ticket.ID, gh, tr)
+	proj := deps.Projects[ticket.ProjectID]
+	proj.Self = self
+	deps.Projects[ticket.ProjectID] = proj
+	deps.Upgrader = upgrader
+	return (shipHandler{}).Run(t.Context(), ticket, deps)
+}
+
 // shipInsertReviewBotMarker inserts a review bot clock marker directly,
 // dated age in the past, for a test to seed a marker older than the real
 // clock would ever let pollIdle write on its own (TestPollReviewBotNudgesThenEscalates,
@@ -2180,6 +2225,70 @@ func TestPollMergedPostsMergeCommit(t *testing.T) {
 	}
 	if tr.doneMergeSHA != mergeSHA {
 		t.Errorf("tr.doneMergeSHA = %q, want %q", tr.doneMergeSHA, mergeSHA)
+	}
+}
+
+// TestPollMergedSelfRequestsUpgrade proves pollDone calls Upgrader.Request
+// with the ticket's own id and merge sha when its project is self and
+// Deps.Upgrader is set (#109 part 1, Q1).
+func TestPollMergedSelfRequestsUpgrade(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow end-to-end flow; runs in the full suite")
+	}
+	t.Parallel()
+	s, ticket, gh, tr := shipPublished(t)
+	const mergeSHA = "0123456789abcdef0123456789abcdef01234567"
+	gh.prState = orchestrator.PRState{Merged: true, Draft: true, MergeCommitSHA: mergeSHA}
+
+	rec := &recordingUpgrader{}
+	commit, err := shipPollRunWithUpgrader(t, s, ticket, gh, tr, true, rec)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if commit.Next != stateDone || commit.Reason != reasonMerged {
+		t.Errorf("commit = (Next=%q, Reason=%q), want (done, %q)", commit.Next, commit.Reason, reasonMerged)
+	}
+	calls := rec.Calls()
+	if len(calls) != 1 || calls[0].TicketID != ticket.ID || calls[0].SHA != mergeSHA {
+		t.Errorf("rec.Calls() = %+v, want exactly one call (%d, %q)", calls, ticket.ID, mergeSHA)
+	}
+}
+
+// TestPollMergedNonSelfDoesNotUpgrade proves pollDone never calls
+// Upgrader.Request for a project whose Self is false, and never calls it
+// with an empty merge sha even when Self is true (#109 part 1, Q1).
+func TestPollMergedNonSelfDoesNotUpgrade(t *testing.T) {
+	t.Parallel()
+	if testing.Short() {
+		t.Skip("slow end-to-end flow; runs in the full suite")
+	}
+
+	cases := []struct {
+		name     string
+		self     bool
+		mergeSHA string
+	}{
+		{name: "non-self project with a merge sha", self: false, mergeSHA: "0123456789abcdef0123456789abcdef01234567"},
+		{name: "self project with an empty merge sha", self: true, mergeSHA: ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			s, ticket, gh, tr := shipPublished(t)
+			gh.prState = orchestrator.PRState{Merged: true, Draft: true, MergeCommitSHA: tc.mergeSHA}
+
+			rec := &recordingUpgrader{}
+			commit, err := shipPollRunWithUpgrader(t, s, ticket, gh, tr, tc.self, rec)
+			if err != nil {
+				t.Fatalf("Run: %v", err)
+			}
+			if commit.Next != stateDone || commit.Reason != reasonMerged {
+				t.Errorf("commit = (Next=%q, Reason=%q), want (done, %q)", commit.Next, commit.Reason, reasonMerged)
+			}
+			if calls := rec.Calls(); len(calls) != 0 {
+				t.Errorf("rec.Calls() = %+v, want none", calls)
+			}
+		})
 	}
 }
 

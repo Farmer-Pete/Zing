@@ -115,7 +115,11 @@ func run(args []string) error {
 		return err
 	}
 
-	return serve(ctx, cfgPath, dbPath, seedDemo)
+	su := newSelfUpgrade()
+	if err := serve(ctx, cfgPath, dbPath, seedDemo, su); err != nil {
+		return err
+	}
+	return restartAfterServe(ctx, su.next, os.Args, os.Environ(), syscall.Exec)
 }
 
 // serve starts the store, the dispatcher, and the console, and runs until
@@ -127,7 +131,13 @@ func run(args []string) error {
 // visible before the console's first request; false leaves the store
 // exactly as a normal serve always has, since SeedDemo must never run
 // unasked.
-func serve(ctx context.Context, cfgPath, dbPath string, seedDemo bool) error {
+func serve(ctx context.Context, cfgPath, dbPath string, seedDemo bool, su *selfUpgrade) error {
+	// Wrapped so the upgrader's own stop (cancelServe) ends serve's wait the
+	// same way a signal or an HTTP listener failure does (#109 part 1), and
+	// so every return path below can cancel it defensively with defer.
+	ctx, cancelServe := context.WithCancel(ctx)
+	defer cancelServe()
+
 	cfg, err := config.Load(cfgPath)
 	if err != nil {
 		return err
@@ -323,6 +333,17 @@ func serve(ctx context.Context, cfgPath, dbPath string, seedDemo bool) error {
 		return err
 	}
 
+	// up is nil, and the upgrader disabled, when su is nil (every test that
+	// has not opted in) or no project sets self = true (#109 part 1).
+	up, err := newUpgrader(cfg.Projects, bindings, projects, su, dataDir, st, cancelServe)
+	if err != nil {
+		_ = st.Close()
+		return err
+	}
+	if up != nil {
+		slog.Info("upgrade: enabled", "exe", up.exe, "running", up.running, "data_dir", dataDir)
+	}
+
 	// dispCtx is deliberately not derived from ctx's cancellation: the
 	// drain sequence below stops the dispatcher through the store's
 	// draining flag first, and only cancels dispCtx as the timeout
@@ -354,7 +375,7 @@ func serve(ctx context.Context, cfgPath, dbPath string, seedDemo bool) error {
 	// value, once per fail-closed or error stop.
 	push := notify.New(st, notify.WithContact(cfg.Console.PushContact))
 
-	d, err := zdispatch.New(st, tr, b, m, job.Registry(), bindings, zdispatch.Config{
+	dcfg := zdispatch.Config{
 		Interval:    tune.Interval,
 		MaxParallel: tune.MaxParallel,
 		Owner:       claimOwner(),
@@ -384,7 +405,14 @@ func serve(ctx context.Context, cfgPath, dbPath string, seedDemo bool) error {
 		// claim owner is dead (design section 6.2, 6.3): serve took that
 		// lock above, so it is the only caller that ever sets this true.
 		ReclaimForeign: true,
-	}, rts)
+	}
+	// Set only for a non-nil *upgrader, never a typed nil, so no typed-nil
+	// job.SelfUpgrader interface value ever reaches the dispatcher (#109
+	// part 1).
+	if up != nil {
+		dcfg.Upgrader = up
+	}
+	d, err := zdispatch.New(st, tr, b, m, job.Registry(), bindings, dcfg, rts)
 	if err != nil {
 		_ = st.Close()
 		return err
@@ -430,6 +458,23 @@ func serve(ctx context.Context, cfgPath, dbPath string, seedDemo bool) error {
 		return err
 	}
 
+	// upDone closes once up.loop returns; with no upgrader it is closed
+	// already, so the wait below never blocks (#109 part 1). gate is closed
+	// at once here, in part 1: part 2 instead closes it only after
+	// booted_ok. This starts only after every other fallible startup step
+	// has already succeeded, so no early return after this point can leave
+	// the loop goroutine running past st.Close() (#109 part 1 review r1f1).
+	upDone := make(chan struct{})
+	if up != nil {
+		go func() {
+			up.loop(ctx)
+			close(upDone)
+		}()
+		close(up.gate)
+	} else {
+		close(upDone)
+	}
+
 	// One srv.Serve(ln) goroutine per resolved listener (design section
 	// 6.14: "One http.Server with one mux serves every resolved listener
 	// through a srv.Serve(ln) goroutine each"). srv.Shutdown, below, closes
@@ -442,7 +487,21 @@ func serve(ctx context.Context, cfgPath, dbPath string, seedDemo bool) error {
 
 	consumedFromErrCh, dispTriggered, serveErr := waitForShutdownTrigger(ctx, errCh, dispDone, func() error { return dispErr })
 
-	return shutdown(ctx, st, srv, d, errCh, len(listeners), consumedFromErrCh, serveErr, dispTriggered, dispDone, func() error { return dispErr }, cancelDisp)
+	// Every shutdown trigger ends the upgrader before shutdown closes the
+	// store (#109 part 1): cancelServe is a no-op when the trigger was the
+	// upgrader's own stop or a signal, but it ends the loop for the other
+	// two triggers (a listener error, or the dispatcher goroutine ending on
+	// its own), neither of which cancels ctx by itself.
+	cancelServe()
+	<-upDone
+
+	err = shutdown(ctx, st, srv, d, errCh, len(listeners), consumedFromErrCh, serveErr, dispTriggered, dispDone, func() error { return dispErr }, cancelDisp)
+
+	if rt := up.handoff(); rt != nil {
+		su.next = rt
+	}
+
+	return err
 }
 
 // waitForShutdownTrigger blocks until a real shutdown trigger arrives: an
@@ -789,6 +848,23 @@ func removeStaleStderrFiles(ctx context.Context, st *store.Store, dataDir string
 	return n
 }
 
+// findSelfProject returns the index of the one project with self = true
+// (#109 part 1, Q2). Zero such projects is idx -1, ok false, err nil. More
+// than one is a startup error, since serve can upgrade only itself.
+func findSelfProject(projects []config.Project) (idx int, ok bool, err error) {
+	idx = -1
+	for i := range projects {
+		if !projects[i].Self {
+			continue
+		}
+		if ok {
+			return -1, false, errors.New("zing.toml: only one project may set self = true")
+		}
+		idx, ok = i, true
+	}
+	return idx, ok, nil
+}
+
 // buildJobProjects builds one orchestrator.Orchestrator per configured
 // project and returns job.Project keyed by its store project id (design
 // section 10): owner and repo split from projects[i].repo, LocalPath from
@@ -835,6 +911,7 @@ func buildJobProjects(ctx context.Context, projects []config.Project, bindings [
 		out[id] = job.Project{
 			Orch: orch, RepoGit: repoGit, TestCmd: p.Commands.Test, LintCmd: p.Commands.Lint, FixCmd: p.Commands.Fix, Deny: p.Commands.Deny,
 			Owner: owner, Repo: repo, PullRequests: gh, Flips: gh, Checks: gh, Threads: gh,
+			Self: p.Self,
 		}
 	}
 	return out, nil
