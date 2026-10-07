@@ -90,24 +90,45 @@ func compileSchemas() (*schemaSet, error) {
 	return &schemaSet{compiled: compiled}, nil
 }
 
+// ErrSchemaInvalid is wrapped by every validate failure, so a caller can
+// tell a payload that does not match its schema from a store failure (such
+// as a lost lease or a database error).
+var ErrSchemaInvalid = errors.New("payload does not match schema")
+
+// schemaInvalidError keeps validate's message text unchanged while
+// matching ErrSchemaInvalid and, when set, the underlying cause.
+type schemaInvalidError struct {
+	msg   string
+	cause error
+}
+
+func (e *schemaInvalidError) Error() string { return e.msg }
+
+func (e *schemaInvalidError) Unwrap() []error {
+	if e.cause == nil {
+		return []error{ErrSchemaInvalid}
+	}
+	return []error{ErrSchemaInvalid, e.cause}
+}
+
 // validate checks payload against the compiled schema for table/typ.
 func (s *schemaSet) validate(table, typ string, payload []byte) error {
 	sch, ok := s.compiled[table+"/"+typ]
 	if !ok {
-		return fmt.Errorf("payload does not match schema %s: /: no schema for %s/%s", typ, table, typ)
+		return &schemaInvalidError{msg: fmt.Sprintf("payload does not match schema %s: /: no schema for %s/%s", typ, table, typ)}
 	}
 
 	var v any
 	if err := json.Unmarshal(payload, &v); err != nil {
-		return fmt.Errorf("payload does not match schema %s: /: invalid JSON: %w", typ, err)
+		return &schemaInvalidError{msg: fmt.Sprintf("payload does not match schema %s: /: invalid JSON: %v", typ, err), cause: err}
 	}
 
 	if err := sch.Validate(v); err != nil {
 		if verr, ok := errors.AsType[*jsonschema.ValidationError](err); ok {
 			loc, reason := firstLeaf(verr)
-			return fmt.Errorf("payload does not match schema %s: %s: %s", typ, loc, reason)
+			return &schemaInvalidError{msg: fmt.Sprintf("payload does not match schema %s: %s: %s", typ, loc, reason)}
 		}
-		return fmt.Errorf("payload does not match schema %s: /: %w", typ, err)
+		return &schemaInvalidError{msg: fmt.Sprintf("payload does not match schema %s: /: %v", typ, err), cause: err}
 	}
 	return nil
 }
