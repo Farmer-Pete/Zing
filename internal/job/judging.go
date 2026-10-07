@@ -261,6 +261,10 @@ func (h judgeHandler) run(ctx context.Context, t store.Ticket, d Deps) (store.Ha
 	if err != nil {
 		return store.HandlerCommit{}, fmt.Errorf("job: judging: judge round markers: %w", err)
 	}
+	mergeRows, err := d.Store.MarkersWithPrefix(ctx, t.ID, baseMergePrefix)
+	if err != nil {
+		return store.HandlerCommit{}, fmt.Errorf("job: judging: base merge markers: %w", err)
+	}
 
 	// Decision tree step (1): an answered round of job "judge" is always a
 	// plain agent question (kind "question") resumed with the owner's
@@ -376,6 +380,14 @@ func (h judgeHandler) run(ctx context.Context, t store.Ticket, d Deps) (store.Ha
 		if parseErr != nil {
 			return store.HandlerCommit{}, fmt.Errorf("job: judging: parse started round %q: %w", firstLine, parseErr)
 		}
+		merged, mergedErr := judgeMergedSinceStart(markers, mergeRows, n)
+		if mergedErr != nil {
+			return store.HandlerCommit{}, mergedErr
+		}
+		if merged {
+			slog.Info("judge round superseded by base merge", "ticket_id", t.ID, "round", n, "sha", sha, "new_round", n+1)
+			return h.start(ctx, t, d, n+1)
+		}
 		return h.enterAfterStart(ctx, t, d, n, sha, afterRunID)
 
 	case judgeRoundRetryLine.MatchString(firstLine):
@@ -391,6 +403,14 @@ func (h judgeHandler) run(ctx context.Context, t store.Ticket, d Deps) (store.Ha
 		sha, shaErr := judgeStartedSHA(markers, n)
 		if shaErr != nil {
 			return store.HandlerCommit{}, shaErr
+		}
+		merged, mergedErr := judgeMergedSinceStart(markers, mergeRows, n)
+		if mergedErr != nil {
+			return store.HandlerCommit{}, mergedErr
+		}
+		if merged {
+			slog.Info("judge round superseded by base merge", "ticket_id", t.ID, "round", n, "sha", sha, "new_round", n+1)
+			return h.start(ctx, t, d, n+1)
 		}
 		return h.enterAfterStart(ctx, t, d, n, sha, afterRunID)
 
@@ -431,6 +451,50 @@ func judgeStartedSHA(markers []store.MessageRow, n int) (string, error) {
 		}
 	}
 	return "", fmt.Errorf("job: judging: round %d has no started marker", n)
+}
+
+// judgeMergedSinceStart reports whether a judge-point base merge landed
+// after round n's own started marker (overview design, #95): it finds that
+// marker the way judgeStartedSHA does, keeping its message id, and returns
+// the same "round N has no started marker" error when there is none. A
+// landed row (baseMergeEndLine, capture group 1) in mergeRows with an id
+// greater than the started marker's own id means the round's own sha is no
+// longer HEAD, so Run's started and retry branches must start round n+1
+// instead of resuming round n.
+func judgeMergedSinceStart(markers, mergeRows []store.MessageRow, n int) (bool, error) {
+	var startedID int64
+	found := false
+	for i := range markers {
+		firstLine, _, _ := strings.Cut(markers[i].Body, "\n")
+		sub := judgeRoundStartedLine.FindStringSubmatch(firstLine)
+		if sub == nil {
+			continue
+		}
+		roundN, convErr := strconv.Atoi(sub[1])
+		if convErr != nil {
+			return false, fmt.Errorf("job: judging: parse started round %q: %w", firstLine, convErr)
+		}
+		if roundN == n {
+			startedID = markers[i].ID
+			found = true
+			break
+		}
+	}
+	if !found {
+		return false, fmt.Errorf("job: judging: round %d has no started marker", n)
+	}
+
+	for i := range mergeRows {
+		firstLine, _, _ := strings.Cut(mergeRows[i].Body, "\n")
+		sub := baseMergeEndLine.FindStringSubmatch(firstLine)
+		if len(sub) == 0 || sub[1] == "" {
+			continue
+		}
+		if mergeRows[i].ID > startedID {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 // judgeRoundOwning finds the judge round (n, sha) whose own session is

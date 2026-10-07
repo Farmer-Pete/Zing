@@ -508,6 +508,112 @@ func judgeAdvanceStart(t *testing.T, s *store.Store, rt runtime.Runtime, ticket 
 	return pbGetTicket(t, s, ticket.ID)
 }
 
+// ---- TestJudgeMergedSinceStart -----------------------------------------------
+
+// TestJudgeMergedSinceStart proves judgeMergedSinceStart's own table (#95):
+// a landed base merge row with an id newer than round n's own started
+// marker means true, a closed row or a bare request row never does
+// regardless of its id, and a round with no started marker of its own is
+// the same "has no started marker" error judgeStartedSHA returns.
+func TestJudgeMergedSinceStart(t *testing.T) {
+	t.Parallel()
+
+	row := func(id int64, body string) store.MessageRow {
+		return store.MessageRow{ID: id, Message: store.Message{Body: body}} //nolint:modernize // keyed on purpose: MessageRow's ID and CreatedAt fields precede the embedded Message, so the key cannot be dropped
+	}
+	started := func(id int64, n int) store.MessageRow {
+		return row(id, fmt.Sprintf("judge round %d started sha %s after run 1", n, strings.Repeat("a", 40)))
+	}
+	landed := func(id int64) store.MessageRow {
+		return row(id, baseMergeLandedBody(id, strings.Repeat("b", 40)))
+	}
+	closed := func(id int64) store.MessageRow {
+		return row(id, baseMergeClosedBody(id))
+	}
+	requested := func(id int64) store.MessageRow {
+		req := baseMergeRequest{AfterRunID: 1, BaseBranch: pbFixtureDefaultBranch, BaseSHA: strings.Repeat("c", 40), Point: syncPointJudge}
+		return row(id, req.body())
+	}
+
+	cases := []struct {
+		name      string
+		markers   []store.MessageRow
+		mergeRows []store.MessageRow
+		n         int
+		want      bool
+		wantErr   bool
+	}{
+		{
+			name:      "landed newer than the started marker",
+			markers:   []store.MessageRow{started(1, 2)},
+			mergeRows: []store.MessageRow{landed(2)},
+			n:         2,
+			want:      true,
+		},
+		{
+			name:      "landed older than the started marker",
+			markers:   []store.MessageRow{started(2, 2)},
+			mergeRows: []store.MessageRow{landed(1)},
+			n:         2,
+			want:      false,
+		},
+		{
+			name:      "closed newer than the started marker",
+			markers:   []store.MessageRow{started(1, 2)},
+			mergeRows: []store.MessageRow{closed(2)},
+			n:         2,
+			want:      false,
+		},
+		{
+			name:      "a bare request row newer than the started marker",
+			markers:   []store.MessageRow{started(1, 2)},
+			mergeRows: []store.MessageRow{requested(2)},
+			n:         2,
+			want:      false,
+		},
+		{
+			name:      "round 1 started, round 2 started after the landing: false for round 2",
+			markers:   []store.MessageRow{started(1, 1), started(3, 2)},
+			mergeRows: []store.MessageRow{landed(2)},
+			n:         2,
+			want:      false,
+		},
+		{
+			name:      "round 1 started, round 2 started after the landing: true for round 1",
+			markers:   []store.MessageRow{started(1, 1), started(3, 2)},
+			mergeRows: []store.MessageRow{landed(2)},
+			n:         1,
+			want:      true,
+		},
+		{
+			name:      "no started marker for n",
+			markers:   nil,
+			mergeRows: []store.MessageRow{landed(1)},
+			n:         1,
+			wantErr:   true,
+		},
+	}
+
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			t.Parallel()
+			got, err := judgeMergedSinceStart(c.markers, c.mergeRows, c.n)
+			if c.wantErr {
+				if err == nil {
+					t.Fatal("err = nil, want an error")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("judgeMergedSinceStart: %v", err)
+			}
+			if got != c.want {
+				t.Errorf("judgeMergedSinceStart = %v, want %v", got, c.want)
+			}
+		})
+	}
+}
+
 // ---- TestJudgeRunStoresVerdicts ---------------------------------------------
 
 // TestJudgeRunStoresVerdicts proves RUN's own clean ok outcome (design
