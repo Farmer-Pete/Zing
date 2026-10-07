@@ -7,8 +7,11 @@ package job
 
 import (
 	"encoding/json"
+	"errors"
+	"slices"
 	"strings"
 	"testing"
+	"time"
 	"unicode/utf8"
 
 	"zing/internal/response"
@@ -521,4 +524,162 @@ func TestRenderAnswerText_MarksARevisedAnswer(t *testing.T) {
 	if !strings.Contains(got, wantRevised) {
 		t.Errorf("renderAnswerText missing the (revised) second pick %q; got:\n%s", wantRevised, got)
 	}
+}
+
+// TestSchemaInvalidEscalation proves SchemaInvalidEscalation's mapping and
+// copying rules (design section "job"): each of the six states that can
+// reach it maps to its own origin, the failed commit's runs with an id
+// above 0 terminalize as error while its own exit code and agent seconds
+// pass through unchanged, Session/ResolveQuestions are carried the same
+// way postRunFailure carries them (owner decision Q5), a Sessions entry
+// with no ID is dropped (an entry's own ID is what every further session
+// write requires), and a state with no mapped origin (done) returns ok
+// false so the dispatcher's own caller falls through to fail-closed.
+func TestSchemaInvalidEscalation(t *testing.T) {
+	t.Parallel()
+
+	t.Run("origin per state", func(t *testing.T) {
+		t.Parallel()
+		tests := []struct {
+			state      string
+			wantOrigin response.EscalationOrigin
+		}{
+			{stateQueued, response.EscalationOriginClassify},
+			{statePlanning, response.EscalationOriginPlanningResume},
+			{stateBuilding, response.EscalationOriginBuild},
+			{stateReviewing, response.EscalationOriginReview},
+			{stateJudging, response.EscalationOriginJudge},
+			{stateShipping, response.EscalationOriginShipping},
+		}
+		for _, tt := range tests {
+			t.Run(tt.state, func(t *testing.T) {
+				t.Parallel()
+				ticket := store.Ticket{ID: 1, State: tt.state}
+				failed := store.HandlerCommit{TicketID: 1}
+				c, ok := SchemaInvalidEscalation(ticket, failed, errors.New("payload does not match schema question: /options: got null, want array"))
+				if !ok {
+					t.Fatalf("SchemaInvalidEscalation(%s) ok = false, want true", tt.state)
+				}
+				if c.Escalation == nil {
+					t.Fatalf("SchemaInvalidEscalation(%s): Escalation = nil", tt.state)
+				}
+				if got := c.Escalation.Payload.Origin; got != string(tt.wantOrigin) {
+					t.Errorf("SchemaInvalidEscalation(%s): origin = %q, want %q", tt.state, got, tt.wantOrigin)
+				}
+			})
+		}
+	})
+
+	t.Run("building: full shape", func(t *testing.T) {
+		t.Parallel()
+		ticket := store.Ticket{ID: 1, State: stateBuilding}
+		exitCode := 3
+		agentSeconds := 42
+		sessionID := int64(55)
+		ext := "ext-55"
+		keptID := int64(90)
+		keptExt := "ext-90"
+		droppedExt := "ext-dropped"
+		resolveIDs := []int64{11, 12}
+		failErr := errors.New("payload does not match schema question: /options: got null, want array")
+
+		failed := store.HandlerCommit{
+			TicketID: 1, Owner: "owner-1", Expires: time.Now().Add(time.Hour),
+			Runs:             []store.Run{{ID: 7, Turn: 2, ExitCode: &exitCode, AgentSeconds: &agentSeconds}},
+			Session:          &store.SessionUpsert{ID: &sessionID, ExternalID: &ext},
+			Sessions:         []store.SessionUpsert{{ID: &keptID, ExternalID: &keptExt}, {ExternalID: &droppedExt}},
+			ResolveQuestions: resolveIDs,
+			ResolveAll:       false,
+		}
+
+		c, ok := SchemaInvalidEscalation(ticket, failed, failErr)
+		if !ok {
+			t.Fatal("SchemaInvalidEscalation ok = false, want true")
+		}
+
+		if c.Owner != failed.Owner {
+			t.Errorf("Owner = %q, want %q", c.Owner, failed.Owner)
+		}
+		if !c.Expires.Equal(failed.Expires) {
+			t.Errorf("Expires = %v, want %v", c.Expires, failed.Expires)
+		}
+		if c.Escalation == nil {
+			t.Fatal("Escalation = nil")
+		}
+		if c.Escalation.RunID != nil {
+			t.Errorf("Escalation.RunID = %v, want nil", *c.Escalation.RunID)
+		}
+		if c.Escalation.Payload.Code != string(response.EscalationCodePostRunFailed) {
+			t.Errorf("Payload.Code = %q, want %q", c.Escalation.Payload.Code, response.EscalationCodePostRunFailed)
+		}
+		if c.Waiting == nil || *c.Waiting != waitingFlagQuestions {
+			t.Errorf("Waiting = %v, want %q", c.Waiting, waitingFlagQuestions)
+		}
+
+		if len(c.Runs) != 1 {
+			t.Fatalf("Runs = %+v, want exactly 1", c.Runs)
+		}
+		if c.Runs[0].ID != 7 {
+			t.Errorf("Runs[0].ID = %d, want 7", c.Runs[0].ID)
+		}
+		if c.Runs[0].Outcome == nil || *c.Runs[0].Outcome != string(response.OutcomeError) {
+			t.Errorf("Runs[0].Outcome = %v, want %q", c.Runs[0].Outcome, response.OutcomeError)
+		}
+		if c.Runs[0].ExitCode == nil || *c.Runs[0].ExitCode != exitCode {
+			t.Errorf("Runs[0].ExitCode = %v, want %d", c.Runs[0].ExitCode, exitCode)
+		}
+
+		tried := c.Escalation.Payload.Tried
+		if !strings.HasPrefix(tried, failErr.Error()) {
+			t.Errorf("Tried = %q, want it to start with %q", tried, failErr.Error())
+		}
+		if !strings.HasSuffix(tried, "run ids: 7") {
+			t.Errorf("Tried = %q, want it to end with %q", tried, "run ids: 7")
+		}
+
+		if c.Session != failed.Session {
+			t.Errorf("Session = %v, want the same pointer as the failed commit's own Session", c.Session)
+		}
+		if len(c.Sessions) != 1 || c.Sessions[0].ID != &keptID {
+			t.Errorf("Sessions = %+v, want exactly the one entry with an ID", c.Sessions)
+		}
+		if !slices.Equal(c.ResolveQuestions, resolveIDs) {
+			t.Errorf("ResolveQuestions = %v, want %v", c.ResolveQuestions, resolveIDs)
+		}
+	})
+
+	t.Run("no runs gives run ids none", func(t *testing.T) {
+		t.Parallel()
+		ticket := store.Ticket{ID: 1, State: stateBuilding}
+		c, ok := SchemaInvalidEscalation(ticket, store.HandlerCommit{TicketID: 1}, errors.New("boom"))
+		if !ok {
+			t.Fatal("ok = false, want true")
+		}
+		if !strings.HasSuffix(c.Escalation.Payload.Tried, "run ids: none") {
+			t.Errorf("Tried = %q, want it to end with %q", c.Escalation.Payload.Tried, "run ids: none")
+		}
+	})
+
+	t.Run("session with nil ID is dropped", func(t *testing.T) {
+		t.Parallel()
+		ticket := store.Ticket{ID: 1, State: stateBuilding}
+		ext := "ext-no-id"
+		failed := store.HandlerCommit{TicketID: 1, Session: &store.SessionUpsert{ExternalID: &ext}}
+		c, ok := SchemaInvalidEscalation(ticket, failed, errors.New("boom"))
+		if !ok {
+			t.Fatal("ok = false, want true")
+		}
+		if c.Session != nil {
+			t.Errorf("Session = %+v, want nil (the failed commit's own Session had no ID)", c.Session)
+		}
+	})
+
+	t.Run("state with no mapped origin returns ok false", func(t *testing.T) {
+		t.Parallel()
+		ticket := store.Ticket{ID: 1, State: stateDone}
+		_, ok := SchemaInvalidEscalation(ticket, store.HandlerCommit{TicketID: 1}, errors.New("boom"))
+		if ok {
+			t.Error("ok = true, want false for state done")
+		}
+	})
 }

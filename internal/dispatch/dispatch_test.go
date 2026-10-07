@@ -5171,3 +5171,145 @@ func TestTick_SchemaInvalidCommitEscalatesAndKeepsDispatching(t *testing.T) {
 		t.Errorf("B's state after the second Tick = %q, want %q", got, testStatePlanning)
 	}
 }
+
+// schemaInvalidSelfStealingHandler combines selfStealingHandler's own
+// concurrent-release simulation with schemaInvalidHandler's own
+// schema-failing commit: it reserves a run, releases this exact ticket's
+// own claim out from under itself (the same fenced no-op releaseClaim
+// uses), then returns the options-null commit. The question schema check
+// inside insertMessageTx runs well before the fenced ticket UPDATE
+// (internal/store/commit.go), so CommitHandlerResult reports the schema
+// failure first; only the dispatcher's own escalation attempt, retrying
+// CommitHandlerResult a second time, ever reaches that lost fence.
+type schemaInvalidSelfStealingHandler struct{}
+
+func (schemaInvalidSelfStealingHandler) Run(ctx context.Context, t store.Ticket, d job.Deps) (store.HandlerCommit, error) {
+	rsv, err := d.Reserve(ctx, t.ID, store.SessionUpsert{Job: testStatePlanning, Runtime: testRuntimeFake}, store.RunSeed{Model: testModelClaudeX})
+	if err != nil {
+		return store.HandlerCommit{}, err
+	}
+	if _, err := d.Store.CommitHandlerResult(ctx, store.HandlerCommit{TicketID: t.ID, Owner: d.Owner, Expires: d.Expires}); err != nil {
+		return store.HandlerCommit{}, err
+	}
+	outcome := "ok"
+	exitCode := 0
+	agentSeconds := 1
+	ext := "ext-session"
+	state := testQuestionOpen
+	return store.HandlerCommit{
+		TicketID: t.ID, Owner: d.Owner, Expires: d.Expires,
+		Session: &store.SessionUpsert{ID: &rsv.SessionID, ExternalID: &ext},
+		Runs:    []store.Run{{ID: rsv.RunID, Turn: rsv.Turn, Outcome: &outcome, ExitCode: &exitCode, AgentSeconds: &agentSeconds}},
+		Messages: []store.Message{{
+			TicketID: t.ID, Type: testQuestionLiteral, Author: "zing", State: &state, Body: "Q1",
+			Payload: json.RawMessage(`{"key":"Q1","kind":"question","state":"open","recommended":"a","options":null}`),
+		}},
+	}, nil
+}
+
+// TestTick_SchemaInvalidCommitWithLostLeaseFailsClosed proves the
+// schema-invalid branch still falls through to today's fail-closed path
+// when its own escalation attempt cannot apply: a concurrent release of
+// this exact ticket's own claim (schemaInvalidSelfStealingHandler) means
+// the escalation commit's fenced ticket UPDATE finds the lease already
+// gone, so CommitHandlerResult reports applied=false for it, and the
+// dispatcher reports the original schema error, wrapped in ErrFailClosed,
+// rather than silently losing it.
+func TestTick_SchemaInvalidCommitWithLostLeaseFailsClosed(t *testing.T) {
+	t.Parallel()
+
+	s := newDispatchTestStore(t)
+	rt := fakeRuntime(t)
+	ticketID := seedQueuedTicket(t, s, testFixtureRef)
+	advanceTicket(t, s, rt, ticketID, testStateQueued)
+
+	reg := job.Registry()
+	reg[testStatePlanning] = &schemaInvalidSelfStealingHandler{}
+
+	d := newDispatcher(t, s, newFixtureTracker(t), bus.New(), rt, reg, nil, dispatch.Config{MaxParallel: 2, Owner: testOwner})
+
+	err := d.Tick(t.Context())
+	if !errors.Is(err, dispatch.ErrFailClosed) {
+		t.Fatalf("Tick: err = %v, want errors.Is(err, dispatch.ErrFailClosed)", err)
+	}
+	if !errors.Is(err, store.ErrSchemaInvalid) {
+		t.Errorf("Tick: err = %v, want errors.Is(err, store.ErrSchemaInvalid)", err)
+	}
+
+	_, stopped, flagsErr := s.Flags(t.Context())
+	if flagsErr != nil {
+		t.Fatalf("Flags: %v", flagsErr)
+	}
+	if !stopped {
+		t.Error("stopped flag = false, want true after fail-closed")
+	}
+
+	msgs, err := s.ListMessages(t.Context(), ticketID)
+	if err != nil {
+		t.Fatalf("ListMessages: %v", err)
+	}
+	for _, m := range msgs {
+		if m.Type == testMsgTypeEscalation {
+			t.Errorf("found an escalation message %+v, want none: the escalation commit must not have applied", m)
+		}
+	}
+
+	runs, err := s.RunsForTicket(t.Context(), ticketID)
+	if err != nil {
+		t.Fatalf("RunsForTicket: %v", err)
+	}
+	if len(runs) != 1 || runs[0].Outcome != nil {
+		t.Fatalf("runs = %+v, want exactly 1 with outcome still nil", runs)
+	}
+}
+
+// unownedRunMessageHandler returns a commit with one "update" message whose
+// RunID names a run this ticket does not own, so CommitHandlerResult's own
+// runOwnedByTicketTx check fails with a plain error unrelated to schema
+// validation (internal/store/commit.go).
+type unownedRunMessageHandler struct{}
+
+func (unownedRunMessageHandler) Run(_ context.Context, t store.Ticket, d job.Deps) (store.HandlerCommit, error) {
+	unownedRunID := int64(999999)
+	return store.HandlerCommit{
+		TicketID: t.ID, Owner: d.Owner, Expires: d.Expires,
+		Messages: []store.Message{{TicketID: t.ID, RunID: &unownedRunID, Type: testMsgTypeUpdate, Author: "zing", Body: "x"}},
+	}, nil
+}
+
+// TestTick_NonSchemaCommitErrorStillFailsClosed proves a commit error that
+// has nothing to do with schema validation still fails the dispatcher
+// closed, exactly as before this ticket's change: a message whose RunID
+// names a run the ticket does not own fails runOwnedByTicketTx inside
+// CommitHandlerResult with a plain error that never wraps
+// store.ErrSchemaInvalid, so the new branch in runAndCommit must leave it
+// alone and fall straight through to the existing fail-closed path.
+func TestTick_NonSchemaCommitErrorStillFailsClosed(t *testing.T) {
+	t.Parallel()
+
+	s := newDispatchTestStore(t)
+	rt := fakeRuntime(t)
+	ticketID := seedQueuedTicket(t, s, testFixtureRef)
+	advanceTicket(t, s, rt, ticketID, testStateQueued)
+
+	reg := job.Registry()
+	reg[testStatePlanning] = &unownedRunMessageHandler{}
+
+	d := newDispatcher(t, s, newFixtureTracker(t), bus.New(), rt, reg, nil, dispatch.Config{MaxParallel: 2, Owner: testOwner})
+
+	err := d.Tick(t.Context())
+	if !errors.Is(err, dispatch.ErrFailClosed) {
+		t.Fatalf("Tick: err = %v, want errors.Is(err, dispatch.ErrFailClosed)", err)
+	}
+	if errors.Is(err, store.ErrSchemaInvalid) {
+		t.Errorf("Tick: err = %v, want errors.Is(err, store.ErrSchemaInvalid) = false", err)
+	}
+
+	_, stopped, flagsErr := s.Flags(t.Context())
+	if flagsErr != nil {
+		t.Fatalf("Flags: %v", flagsErr)
+	}
+	if !stopped {
+		t.Error("stopped flag = false, want true after fail-closed")
+	}
+}
