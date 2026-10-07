@@ -367,6 +367,13 @@ const maxFailureDetailBytes = 2048
 // non-empty line at all: a process that died before printing anything.
 const noStdoutFailureDetail = "codex wrote nothing to stdout"
 
+// codexEventError and codexEventTurnFailed are the two failure event types
+// codexFailureDetail and codexCommandRejection both read.
+const (
+	codexEventError      = "error"
+	codexEventTurnFailed = "turn.failed"
+)
+
 // codexFailureEventLine is the subset of one codex exec --json JSONL
 // event's fields codexFailureDetail reads: an "error" event's own message,
 // or a "turn.failed" event's error.message (Codex's documented event shape,
@@ -424,9 +431,9 @@ func codexFailureDetail(stdout []byte) (detail string, fromEvent bool) {
 		}
 		var msg string
 		switch ev.Type {
-		case "error":
+		case codexEventError:
 			msg = ev.Message
-		case "turn.failed":
+		case codexEventTurnFailed:
 			msg = ev.Error.Message
 		default:
 			continue
@@ -478,6 +485,104 @@ func codexTransientMatch(detail string) string {
 		}
 	}
 	return ""
+}
+
+// commandRejectionPhrase is the text Codex's command policy puts in every
+// refusal, such as "rm -f style commands are not permitted. Use a safer
+// approach" (#94).
+const commandRejectionPhrase = "are not permitted"
+
+// codexRejectionEventLine is the subset of one JSONL event that
+// codexCommandRejection reads.
+type codexRejectionEventLine struct {
+	Type    string `json:"type"`
+	Message string `json:"message"`
+	Error   struct {
+		Message string `json:"message"`
+	} `json:"error"`
+	Item struct {
+		Type             string `json:"type"`
+		Command          string `json:"command"`
+		AggregatedOutput string `json:"aggregated_output"`
+		Status           string `json:"status"`
+		ExitCode         *int   `json:"exit_code"`
+	} `json:"item"`
+}
+
+// codexCommandRejection finds Codex's refusal of a command (#94): the last
+// matching line in stdout, or failing that in stderr. It returns the
+// refused command (empty when the event names none) and the one line
+// holding commandRejectionPhrase, verbatim, or two empty strings. Only a
+// non-JSON line, an error or turn.failed event, or a command_execution
+// item that did not complete with exit code 0 counts. Agent messages,
+// reasoning, and successful commands that merely quote the phrase, such as
+// a cat of this file, never do.
+func codexCommandRejection(stdout, stderr []byte) (command, line string) {
+	for _, stream := range [][]byte{stdout, stderr} {
+		for raw := range bytes.SplitSeq(stream, []byte("\n")) {
+			raw = bytes.TrimSpace(raw)
+			if !bytes.Contains(raw, []byte(commandRejectionPhrase)) {
+				continue
+			}
+			var ev codexRejectionEventLine
+			if json.Unmarshal(raw, &ev) != nil {
+				command, line = "", string(raw)
+				continue
+			}
+			switch {
+			case ev.Item.Type == "command_execution":
+				clean := ev.Item.Status == "completed" && ev.Item.ExitCode != nil && *ev.Item.ExitCode == 0
+				if l := phraseLine(ev.Item.AggregatedOutput); l != "" && !clean {
+					command, line = strings.TrimSpace(ev.Item.Command), l
+				}
+			case ev.Item.Type != "":
+				// Any other item only quotes text; it never refuses.
+			case ev.Type == codexEventError:
+				if l := phraseLine(ev.Message); l != "" {
+					command, line = "", l
+				}
+			case ev.Type == codexEventTurnFailed:
+				if l := phraseLine(ev.Error.Message); l != "" {
+					command, line = "", l
+				}
+			}
+		}
+		if line != "" {
+			return command, line
+		}
+	}
+	return "", ""
+}
+
+// phraseLine returns the first trimmed line of s holding
+// commandRejectionPhrase, or "".
+func phraseLine(s string) string {
+	for l := range strings.SplitSeq(s, "\n") {
+		if l = strings.TrimSpace(l); strings.Contains(l, commandRejectionPhrase) {
+			return l
+		}
+	}
+	return ""
+}
+
+// codexRejectionDetail puts a command rejection in front of Codex's own
+// failure detail (owner decision Q2), so the 2048-byte cap never cuts the
+// cause: "codex refused a command: COMMAND: LINE; codex's own error:
+// DETAIL". It drops "COMMAND: " when command is empty, and drops the
+// detail half when detail is blank or already holds line. With no line it
+// returns detail unchanged.
+func codexRejectionDetail(command, line, detail string) string {
+	if line == "" {
+		return detail
+	}
+	head := "codex refused a command: " + line
+	if command != "" {
+		head = "codex refused a command: " + command + ": " + line
+	}
+	if strings.TrimSpace(detail) == "" || strings.Contains(detail, line) {
+		return CapFailureDetail(head)
+	}
+	return CapFailureDetail(head + "; codex's own error: " + detail)
 }
 
 // Run runs one turn of req.Job through the codex CLI (design section 4.1):
@@ -630,6 +735,10 @@ func (c Codex) run(ctx context.Context, req RunRequest, argv []string, outPath s
 			if fromEvent {
 				execErr.Transient = codexTransientMatch(res.FailureDetail)
 			}
+			// After the transient match, so a rejection's own text never
+			// makes a run retryable (#94).
+			command, line := codexCommandRejection(stdout.bytes(), res.Stderr)
+			res.FailureDetail = codexRejectionDetail(command, line, res.FailureDetail)
 		}
 		return res, outcomeErr
 	}

@@ -1022,7 +1022,8 @@ func checkReady(t store.Ticket, resp *response.ReadyResponse, fsys fs.FS) ([]*re
 // narrowed. A scenario of kind host runs on the owner's machine at judging,
 // outside any sandbox (#137), so it is exempt from the /tmp and
 // nested-sandbox refusals below; it still needs a non-blank check, and it
-// still obeys the expected-skip rule.
+// still obeys the expected-skip rule. It also refuses rm -f and rm -rf in
+// every kind, since Codex refuses them (#94).
 func checkScenarioShape(scenarios []response.Scenario) []*response.PathError {
 	var errs []*response.PathError
 	if n := len(scenarios); n < minReadyScenarios || n > maxReadyScenarios {
@@ -1079,6 +1080,16 @@ func checkScenarioRules(i int, sc response.Scenario) []*response.PathError {
 		errs = append(errs, &response.PathError{
 			Path: "scenarios/" + indexedScenario(i) + "/check",
 			Msg:  "check must not write under /tmp, which the sandbox denies; use \"$TMPDIR\" instead",
+		})
+	}
+	// Codex's command policy refuses rm -f and rm -rf ("rm -f style
+	// commands are not permitted"), so a check that clears its state that
+	// way fails inside the judge with no cause the owner can see (#94).
+	// Every kind, host included.
+	if rmForce.MatchString(sc.Check) {
+		errs = append(errs, &response.PathError{
+			Path: "scenarios/" + indexedScenario(i) + "/check",
+			Msg:  rmForceCheckMsg,
 		})
 	}
 	// Zing runs every check inside a seatbelt sandbox (the judge's, then
@@ -1232,6 +1243,12 @@ func unquotedGlobCheckMsg(word string) string {
 }
 
 const hostSandboxCheckMsg = "check runs the host sandbox (sandbox-exec or the internal/sandbox probes), which cannot start inside the sandbox Zing runs checks in, so its probes skip and prove nothing; leave it out of the sealed checks"
+
+// rmForce matches rm used as a command word with a flag cluster holding f:
+// rm -f, rm -rf, rm -fr, rm -Rf. form -f and a quoted 'rm -f' do not match.
+var rmForce = regexp.MustCompile(`(^|[;&|(\s])rm\s+-[a-zA-Z]*f`)
+
+const rmForceCheckMsg = "check must not use rm -f or rm -rf, which Codex refuses; write state under a fresh directory from mktemp -d instead"
 
 // skipWord matches a then that names a skip as the expected result.
 var skipWord = regexp.MustCompile(`(?i)\bskip(s|ped)?\b`)
