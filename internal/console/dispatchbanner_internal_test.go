@@ -58,7 +58,7 @@ func TestBuildStopBanner(t *testing.T) {
 			},
 		},
 		{
-			name: "error with no ticket",
+			name: "error with no ticket leaves the button enabled when InFlight is 0",
 			in:   dispatch.StopStatus{Stopped: true, Kind: dispatch.StopKindError},
 			want: templates.StopBanner{
 				Show:     true,
@@ -67,12 +67,21 @@ func TestBuildStopBanner(t *testing.T) {
 			},
 		},
 		{
-			name: "InFlight 0 leaves the button enabled",
-			in:   dispatch.StopStatus{Stopped: true, Kind: dispatch.StopKindError, InFlight: 0},
+			name: "ticketed stop with InFlight 0 leaves the button enabled",
+			in: dispatch.StopStatus{
+				Stopped:   true,
+				Kind:      dispatch.StopKindFailClosed,
+				TicketID:  42,
+				HasTicket: true,
+				At:        stoppedAt,
+				InFlight:  0,
+			},
 			want: templates.StopBanner{
 				Show:     true,
-				Kind:     dispatch.StopKindError,
-				Headline: "Dispatching stopped after error in a dispatcher pass.",
+				Kind:     dispatch.StopKindFailClosed,
+				Headline: "Dispatching stopped after fail-closed on ticket 42.",
+				Note:     "Ticket 42 runs again once its claim expires.",
+				Time:     stoppedAt.Format(alertLineTimeFormat),
 			},
 		},
 	}

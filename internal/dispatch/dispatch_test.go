@@ -4880,7 +4880,8 @@ func TestRun_FillErrorRaisesAlerts(t *testing.T) {
 	t.Cleanup(func() { _ = s.Close() })
 	seedQueuedTicket(t, s, testFixtureRef)
 
-	d := newDispatcher(t, s, newFixtureTracker(t), bus.New(), fakeRuntime(t), nil, nil,
+	b := bus.New()
+	d := newDispatcher(t, s, newFixtureTracker(t), b, fakeRuntime(t), nil, nil,
 		dispatch.Config{MaxParallel: 1, Interval: 5 * time.Millisecond, Owner: testOwner})
 
 	logBuf := &syncBuffer{}
@@ -4899,12 +4900,18 @@ func TestRun_FillErrorRaisesAlerts(t *testing.T) {
 		t.Fatalf("close raw db: %v", err)
 	}
 
+	ch, cancelSub := b.Subscribe()
+	defer cancelSub()
+
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
 	runErrCh := make(chan error, 1)
 	go func() { runErrCh <- d.Run(ctx) }()
 
-	waitUntil(t, func() bool { return dispatch.IsStoppedForTest(d) }, "dispatcher to park after the flags-read error")
+	waitForSignalThen(t, ch, func() bool {
+		status, err := d.StopStatus(t.Context())
+		return err == nil && status.Stopped && status.Kind == dispatch.StopKindError
+	}, "a bus signal after which StopStatus reports Stopped with Kind error")
 	waitUntil(t, func() bool { return strings.Contains(logBuf.String(), "dispatcher stopped after") }, "alert 2 to log while Run stays parked, before cancel")
 	cancel()
 

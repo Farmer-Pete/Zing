@@ -3,9 +3,11 @@ package dispatch_test
 import (
 	"bytes"
 	"context"
+	"database/sql"
 	"errors"
 	"fmt"
 	"log/slog"
+	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -45,32 +47,13 @@ func (b *syncBuffer) String() string {
 // waitFor on ch followed by a separate waitUntil poll, this proves cond
 // turned true because of a signal this call itself received, not because
 // of some earlier, unrelated wake already sitting ahead of it (ticket #89
-// review r1f14).
+// review r1f14). It reuses waitFor's own deadline handling (ticket #89
+// review r2f6) rather than repeating it.
 func waitForSignalThen(t *testing.T, ch <-chan struct{}, cond func() bool, what string) {
 	t.Helper()
 
-	deadline, ok := t.Deadline()
-	var limit time.Time
-	if ok {
-		limit = time.Now().Add(time.Until(deadline) * 9 / 10)
-	}
-
 	for {
-		if ok {
-			remaining := time.Until(limit)
-			if remaining <= 0 {
-				t.Fatalf("%s: still waiting near go test's -timeout", what)
-			}
-			timer := time.NewTimer(remaining)
-			select {
-			case <-ch:
-				timer.Stop()
-			case <-timer.C:
-				t.Fatalf("%s: still waiting near go test's -timeout", what)
-			}
-		} else {
-			<-ch
-		}
+		waitFor(t, ch, what)
 		if cond() {
 			return
 		}
@@ -148,6 +131,55 @@ func TestRun_ParksAfterFailClosedUntilCancelled(t *testing.T) {
 	wantAlert1 := fmt.Sprintf("fail-closed on ticket %d", ticketID)
 	if i1, i2 := strings.Index(logged, wantAlert1), strings.Index(logged, wantAlert2); i1 < 0 || i2 < 0 || i2 < i1 {
 		t.Errorf("alerts out of order (alert1 at %d, alert2 at %d); log: %s", i1, i2, logged)
+	}
+}
+
+// TestRun_DrainOnlyStopStillParksOnAFlagsReadError proves passFailed guards
+// on a recorded error, not on d.stop (ticket #89 review r2f3): NotifyDrain
+// alone sets d.stop with stopErr still nil, so a Flags read failing right
+// after it must still park and record that error, or it is lost and Run
+// only ever returns ctx.Err() at a later cancel.
+func TestRun_DrainOnlyStopStillParksOnAFlagsReadError(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "zing.db")
+	s, err := store.Open(t.Context(), dbPath)
+	if err != nil {
+		t.Fatalf("store.Open: %v", err)
+	}
+	t.Cleanup(func() { _ = s.Close() })
+
+	d := newDispatcher(t, s, newFixtureTracker(t), bus.New(), fakeRuntime(t), nil, nil,
+		dispatch.Config{MaxParallel: 1, Interval: 5 * time.Millisecond, Owner: testOwner})
+
+	d.NotifyDrain()
+
+	raw, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatalf("sql.Open: %v", err)
+	}
+	if _, err := raw.ExecContext(t.Context(), "DROP TABLE settings"); err != nil {
+		t.Fatalf("drop settings table: %v", err)
+	}
+	if err := raw.Close(); err != nil {
+		t.Fatalf("close raw db: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	runErrCh := make(chan error, 1)
+	go func() { runErrCh <- d.Run(ctx) }()
+
+	waitUntil(t, func() bool {
+		status, err := d.StopStatus(t.Context())
+		return err == nil && status.Stopped && status.Kind == dispatch.StopKindError
+	}, "StopStatus to report Stopped with Kind error after the drain-only stop's Flags read fails")
+
+	cancel()
+	runErr := waitFor(t, runErrCh, "Run to return")
+	if runErr == nil {
+		t.Fatal("Run after a drain-only stop whose Flags read then failed: want an error, got nil")
+	}
+	if !strings.Contains(runErr.Error(), "read flags") {
+		t.Errorf("Run err = %v, want it to contain the store's own read-flags failure, not just ctx.Err()", runErr)
 	}
 }
 
@@ -523,6 +555,9 @@ func TestResume_Refusals(t *testing.T) {
 		d := newDispatcher(t, s, newFixtureTracker(t), bus.New(), fakeRuntime(t), nil, nil, dispatch.Config{MaxParallel: 1, Owner: testOwner})
 
 		dispatch.SetStopForTest(d, errors.New("boom"))
+		if err := s.SetStopped(t.Context(), true); err != nil {
+			t.Fatalf("SetStopped: %v", err)
+		}
 		if err := s.SetDraining(t.Context(), true); err != nil {
 			t.Fatalf("SetDraining: %v", err)
 		}
@@ -542,6 +577,12 @@ func TestResume_Refusals(t *testing.T) {
 		}
 		if !status.Stopped || status.Kind != dispatch.StopKindError {
 			t.Errorf("StopStatus = %+v, want Stopped true and Kind %q (untouched by the refusal)", status, dispatch.StopKindError)
+		}
+
+		if _, stopped, err := s.Flags(t.Context()); err != nil {
+			t.Fatalf("Flags: %v", err)
+		} else if !stopped {
+			t.Error("store stopped flag = false, want true (untouched by the refusal)")
 		}
 	})
 

@@ -162,6 +162,26 @@ func TestDispatchBanner_ShowsOnIndex(t *testing.T) {
 			t.Errorf("GET / body contains a dispatch-banner section with nothing stopped; got:\n%s", body)
 		}
 	})
+
+	t.Run("status_error", func(t *testing.T) {
+		t.Parallel()
+		s := newConsoleTestStore(t)
+		fd := &fakeDispatch{statusErr: errors.New("boom")}
+		srv := newTestServerDispatch(t, s, bus.New(), newTestLogHandler(t), fd)
+
+		resp, err := http.Get(srv.URL + "/") //nolint:noctx // a bare GET on a test server needs no deadline
+		if err != nil {
+			t.Fatalf("GET /: %v", err)
+		}
+		defer func() { _ = resp.Body.Close() }()
+		if resp.StatusCode != http.StatusOK {
+			t.Errorf("status = %d, want 200 even when StopStatus fails", resp.StatusCode)
+		}
+		body := getBody(t, srv.URL+"/")
+		if strings.Contains(body, `class="dispatch-banner"`) {
+			t.Errorf("GET / body contains a dispatch-banner section when StopStatus errors; got:\n%s", body)
+		}
+	})
 }
 
 // TestDispatchBanner_RealDispatcherStopShowsBanner proves the banner comes
