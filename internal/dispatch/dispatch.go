@@ -246,6 +246,17 @@ type Dispatcher struct {
 	stop     bool           // set once: no further claim or launch
 	stopErr  error          // the first error that set stop; nil when a drain or cancel set it
 
+	// stoppedAt is when setStop first recorded a non-nil stopErr (design
+	// section "shape" rules): zero until then, and zeroed again by Resume
+	// (task 4) so a later stop episode gets its own fresh time.
+	stoppedAt time.Time
+
+	// stopAlerted guards logStopAlert's own one-shot alert 2 (design section
+	// "shape" rules): a later drain's own finish call, or a later ticker
+	// fire's passFailed, must never log it a second time for the same stop
+	// episode. Cleared by Resume (task 4).
+	stopAlerted bool
+
 	// pending counts launched workers whose result no caller has read yet
 	// (design section "shape" rules): fill raises it by one per launch, in
 	// the same critical section that adds to inflight; Run, Tick, and
@@ -384,6 +395,9 @@ func (d *Dispatcher) setStop(err error) bool {
 	if d.stopErr == nil {
 		d.stopErr = err
 		recorded = err != nil
+		if recorded {
+			d.stoppedAt = time.Now()
+		}
 	}
 	hook := d.stopErrRecordedForTest
 	d.mu.Unlock()
@@ -441,15 +455,17 @@ func (d *Dispatcher) Tick(ctx context.Context) error {
 	return err
 }
 
-// Run ticks every cfg.Interval until ctx is done, the drain flag is
-// observed, or a fill pass or a launched worker reports an error (design
-// section 4.4). Unlike Tick, Run never blocks the caller between passes:
-// each tick's fill only launches workers and returns; Run's own select loop
-// keeps receiving their results so a free slot is ready for the next
-// ticker fire, and a worker's error stops future launches and begins the
-// drain-then-return sequence immediately rather than waiting for the next
-// tick to notice. Only one of Tick or Run may drive this Dispatcher at a
-// time; see Tick's own doc comment.
+// Run ticks every cfg.Interval until ctx is done or the drain flag is
+// observed (design section 4.4). Unlike Tick, Run never blocks the caller
+// between passes: each tick's fill only launches workers and returns; Run's
+// own select loop keeps receiving their results so a free slot is ready for
+// the next ticker fire. A worker, flags-read, or fill error no longer ends
+// Run: it parks the dispatcher instead -- no further claim or launch, both
+// alerts logged -- and Run keeps looping, skipping fill while parked, so a
+// console Resume (task 4) can bring the very same Run back without a serve
+// restart. A drain or a context cancel still ends Run exactly as before.
+// Only one of Tick or Run may drive this Dispatcher at a time; see Tick's
+// own doc comment.
 func (d *Dispatcher) Run(ctx context.Context) error {
 	if !d.driving.CompareAndSwap(false, true) {
 		return ErrConcurrentDrive
@@ -469,7 +485,10 @@ func (d *Dispatcher) Run(ctx context.Context) error {
 		case <-d.drainCh:
 			draining, _, err := d.store.Flags(ctx)
 			if err != nil {
-				return d.stopOnPassError(ctx, fmt.Errorf("dispatch: read flags: %w", err), results)
+				if done, ret := d.passFailed(ctx, fmt.Errorf("dispatch: read flags: %w", err), results); done {
+					return ret
+				}
+				continue
 			}
 			if draining {
 				d.setStop(nil)
@@ -477,42 +496,67 @@ func (d *Dispatcher) Run(ctx context.Context) error {
 			}
 
 		case r := <-results:
+			settled := d.resultConsumed()
 			if r.Err != nil {
-				return d.finish(r.Err, results)
+				d.park(r.Err)
 			}
-			// A nil result only frees a slot; the next ticker fire refills
-			// it (design section 4.4) -- this keeps one place, the ticker,
-			// that starts passes.
+			d.bus.Publish() // the banner's in-flight count just dropped, owner stop or not
+			if settled {
+				d.logStopAlert()
+			}
 
 		case <-ticker.C:
 			draining, _, err := d.store.Flags(ctx)
 			if err != nil {
-				return d.stopOnPassError(ctx, fmt.Errorf("dispatch: read flags: %w", err), results)
+				if done, ret := d.passFailed(ctx, fmt.Errorf("dispatch: read flags: %w", err), results); done {
+					return ret
+				}
+				continue
 			}
 			if draining {
 				d.setStop(nil)
 				return d.finish(nil, results)
 			}
+			if d.isStopped() {
+				continue // parked: Resume clears d.stop
+			}
 			if _, fillErr := d.fill(ctx, results); fillErr != nil {
-				return d.stopOnPassError(ctx, fillErr, results)
+				if done, ret := d.passFailed(ctx, fillErr, results); done {
+					return ret
+				}
 			}
 		}
 	}
 }
 
-// stopOnPassError ends Run after a store read or a fill pass failed. When
-// ctx is already done, the failure is only the cancel cutting a statement
-// off mid-flight (database/sql then reports its own rollback error, not
-// the context's), so Run stops as for a cancel: no stop
-// error, no alerts, and ctx.Err() as the result. Otherwise the error stops
-// the dispatcher and raises both alerts (design section 4.6).
-func (d *Dispatcher) stopOnPassError(ctx context.Context, err error, results <-chan runResult) error {
+// passFailed handles a failed flags read or fill pass under Run (design
+// section "shape" rules). When ctx is done, the failure is only the cancel
+// cutting a statement off mid-flight (database/sql then reports its own
+// rollback error, not the context's), so Run ends as for a cancel: no stop
+// error, no alerts, and ctx.Err() as the result. Otherwise the dispatcher
+// parks and Run keeps looping.
+func (d *Dispatcher) passFailed(ctx context.Context, err error, results <-chan runResult) (done bool, ret error) {
 	if ctx.Err() != nil {
 		d.setStop(nil)
-		return d.finish(ctx.Err(), results)
+		return true, d.finish(ctx.Err(), results)
 	}
+	d.park(err)
+	d.mu.Lock()
+	settled := d.pending == 0
+	d.mu.Unlock()
+	if settled {
+		d.logStopAlert()
+	}
+	return false, nil
+}
+
+// park records err as the reason the dispatcher stopped, raises alert 1
+// once (design section 4.6), and wakes the console's own re-render so the
+// stop banner shows up without waiting for the next /stream frame.
+func (d *Dispatcher) park(err error) {
 	d.setStop(err)
-	return d.finish(err, results)
+	d.reportFirstError()
+	d.bus.Publish()
 }
 
 // finish is Run's (and Tick's own fail-closed path's) shutdown join (design
@@ -520,7 +564,11 @@ func (d *Dispatcher) stopOnPassError(ctx context.Context, err error, results <-c
 // anything else, so every caller -- a worker error, a flags-read failure, or
 // a fill error -- raises alert 1 before alert 2, matching Tick's behavior
 // (reportFirstError is idempotent and a no-op when d.stopErr is nil). It
-// then waits for every worker fill ever launched to call d.wg.Done(),
+// then joins d.stopErr, if one was ever recorded, into its own err: a park
+// (task 2) never hands finish the error directly, only a drain's or a
+// cancel's own nil or ctx.Err(), so finish must read it back from d.stopErr
+// to still return it on the way out. It then waits for every worker fill
+// ever launched to call d.wg.Done(),
 // draining results throughout so no worker ever blocks on a full channel,
 // joining every non-nil result error into err and reporting it too (the
 // same idempotent call, in case a worker error arrives only here). It
@@ -530,6 +578,17 @@ func (d *Dispatcher) stopOnPassError(ctx context.Context, err error, results <-c
 // logged if any error was ever reported during this Dispatcher's lifetime.
 func (d *Dispatcher) finish(err error, results <-chan runResult) error {
 	d.reportFirstError()
+
+	d.mu.Lock()
+	stopErr := d.stopErr
+	d.mu.Unlock()
+	if stopErr != nil {
+		if err == nil {
+			err = stopErr
+		} else {
+			err = errors.Join(stopErr, err)
+		}
+	}
 
 	done := make(chan struct{})
 	go func() {
@@ -575,8 +634,9 @@ func (d *Dispatcher) finish(err error, results <-chan runResult) error {
 
 // resultConsumed records that a caller read one worker result and reports
 // whether no launched worker's result is still owed (design section
-// "shape" rules).
-func (d *Dispatcher) resultConsumed() (settled bool) { //nolint:unparam // Tick and finish ignore settled for now; Run and passFailed (task 2) use it to gate logStopAlert
+// "shape" rules): Run's results case and passFailed use this to gate
+// logStopAlert; Tick and finish read it too but ignore the return value.
+func (d *Dispatcher) resultConsumed() (settled bool) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	d.pending--
@@ -621,19 +681,25 @@ func (d *Dispatcher) reportFirstError() {
 	}
 }
 
-// logStopAlert logs alert 2 (design section 4.6): called once, after
-// d.wg.Wait() has returned, whenever any error was ever reported during
-// this Dispatcher's lifetime (hasStopErr above).
+// logStopAlert logs alert 2 (design section 4.6) at most once per stop
+// episode (stopAlerted), whenever any error was ever reported during this
+// Dispatcher's lifetime (hasStopErr above): Run's own results case and
+// passFailed call it the moment pending reaches 0, and finish calls it
+// again on the way out in case a drain or a cancel settled pending first;
+// the one-shot guard keeps the second call (or any later episode's own
+// retry) from logging it twice.
 func (d *Dispatcher) logStopAlert() {
 	d.mu.Lock()
-	err := d.stopErr
-	d.mu.Unlock()
-	if err == nil {
+	if d.stopErr == nil || d.stopAlerted {
+		d.mu.Unlock()
 		return
 	}
+	d.stopAlerted = true
+	err := d.stopErr
+	d.mu.Unlock()
 
 	kind, where, ticketID, hasTicket := alertKindWhere(err)
-	msg := fmt.Sprintf("dispatcher stopped after %s %s. Restart zing serve to resume.", kind, where)
+	msg := fmt.Sprintf("dispatcher stopped after %s %s. Resume it from the console.", kind, where)
 	if hasTicket {
 		slog.Error(msg, "ticket_id", ticketID)
 	} else {

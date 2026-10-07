@@ -4692,6 +4692,9 @@ func TestRun_FillErrorRaisesAlerts(t *testing.T) {
 	runErrCh := make(chan error, 1)
 	go func() { runErrCh <- d.Run(ctx) }()
 
+	waitUntil(t, func() bool { return dispatch.IsStoppedForTest(d) }, "dispatcher to park after the flags-read error")
+	cancel()
+
 	runErr := waitFor(t, runErrCh, "Run to return")
 	if runErr == nil {
 		t.Fatal("Run against a dropped tickets table: want an error, got nil")
@@ -4701,8 +4704,8 @@ func TestRun_FillErrorRaisesAlerts(t *testing.T) {
 	if !strings.Contains(logged, "in a dispatcher pass") {
 		t.Errorf("log = %q, want alert 1 naming \"in a dispatcher pass\" (no ticket id)", logged)
 	}
-	if !strings.Contains(logged, "dispatcher stopped after") {
-		t.Errorf("log = %q, want alert 2 (\"dispatcher stopped after ...\")", logged)
+	if got := strings.Count(logged, "dispatcher stopped after"); got != 1 {
+		t.Errorf("alert 2 (\"dispatcher stopped after ...\") appeared %d times, want exactly 1 (log: %s)", got, logged)
 	}
 	if i1, i2 := strings.Index(logged, "in a dispatcher pass"), strings.Index(logged, "dispatcher stopped after"); i1 < 0 || i2 < 0 || i2 < i1 {
 		t.Errorf("alerts out of order (alert1 at %d, alert2 at %d); log: %s", i1, i2, logged)
@@ -4743,9 +4746,13 @@ func TestRun_FailClosedLetsOthersFinish(t *testing.T) {
 		t.Fatalf("started ticket = %d, want %d (B)", got, bID)
 	}
 
-	waitUntil(t, func() bool { return dispatch.IsStoppedForTest(d) }, "dispatcher to stop after A's fail-closed commit")
+	waitUntil(t, func() bool { return dispatch.IsStoppedForTest(d) }, "dispatcher to park after A's fail-closed commit")
 
 	close(release)
+
+	waitUntil(t, func() bool { return getTicket(t, s, bID).State == testStatePlanning },
+		"B's own commit to apply despite A's fail-closed")
+	cancel()
 
 	runErr := waitFor(t, runErrCh, "Run to return")
 	if !errors.Is(runErr, dispatch.ErrFailClosed) {
@@ -4770,6 +4777,9 @@ func TestRun_FailClosedLetsOthersFinish(t *testing.T) {
 	}
 	if firstIdx >= 0 && secondIdx >= 0 && secondIdx < firstIdx {
 		t.Errorf("alert 2 appeared before alert 1 in the log")
+	}
+	if got := strings.Count(logged, "dispatcher stopped after fail-closed"); got != 1 {
+		t.Errorf("alert 2 appeared %d times, want exactly 1 (log: %s)", got, logged)
 	}
 }
 
