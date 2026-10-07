@@ -2754,19 +2754,20 @@ type markedComment struct {
 type shipTrackerDouble struct {
 	*tracker.Fixture
 
-	mu       sync.Mutex
-	ownLogin string
-	marked   map[string][]markedComment // ref -> comments, in arrival order
-	posted   []recordedComment          // every successful Comment call
-	closed   []string                   // every successful Close call's ref
-	sequence []string                   // "comment:<ref>" then "close:<ref>", call order
+	mu            sync.Mutex
+	ownLogin      string
+	marked        map[string][]markedComment // ref -> comments, in arrival order
+	posted        []recordedComment          // every successful Comment call
+	closed        []string                   // every successful Close call's ref
+	sequence      []string                   // "comment:<ref>" then "close:<ref>", call order
+	closeAttempts int                        // every Close call, successful or not
 
 	failComment, failContains, failClose error
 }
 
-func newShipTrackerDouble(t *testing.T) *shipTrackerDouble {
+func newShipTrackerDouble(t *testing.T, login string) *shipTrackerDouble {
 	t.Helper()
-	return &shipTrackerDouble{Fixture: newFixtureTracker(t), ownLogin: "zing-bot", marked: map[string][]markedComment{}}
+	return &shipTrackerDouble{Fixture: newFixtureTracker(t), ownLogin: login, marked: map[string][]markedComment{}}
 }
 
 // seedMarked records a comment under testFixtureRef, the one ref every
@@ -2809,6 +2810,7 @@ func (s *shipTrackerDouble) CommentContains(_ context.Context, _, ref, needle st
 func (s *shipTrackerDouble) Close(_ context.Context, _, ref string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.closeAttempts++
 	if s.failClose != nil {
 		return s.failClose
 	}
@@ -2829,6 +2831,15 @@ func (s *shipTrackerDouble) callSequence() []string {
 	return append([]string(nil), s.sequence...)
 }
 
+// closeAttemptCount is every Close call this double received, whether or
+// not failClose made it fail, so a test can prove a failing Close was
+// actually attempted and not merely absent from callSequence.
+func (s *shipTrackerDouble) closeAttemptCount() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.closeAttempts
+}
+
 var _ tracker.Tracker = (*shipTrackerDouble)(nil)
 
 // shipTestFixture builds a *store.Store, one ticket under testFixtureRef
@@ -2846,7 +2857,7 @@ func shipTestFixture(t *testing.T) (s *store.Store, projectID, ticketID int64, t
 	if err != nil {
 		t.Fatalf("InsertTicket: %v", err)
 	}
-	tr = newShipTrackerDouble(t)
+	tr = newShipTrackerDouble(t, "zing-bot")
 	return s, projectID, ticketID, tr
 }
 
@@ -4148,20 +4159,12 @@ func TestTick_TrackerEffectPostsNothingToDoCommentAfterCommit(t *testing.T) {
 func TestTick_NothingToDoSkipsMarkedCommentStillCloses(t *testing.T) {
 	t.Parallel()
 
-	s := newDispatchTestStore(t)
-	projectID := seedProject(t, s)
-	ticketID, err := s.InsertTicket(t.Context(), store.Ticket{
-		ProjectID: projectID, TrackerRef: testFixtureRef, Title: "t", State: testStateQueued,
-	})
-	if err != nil {
-		t.Fatalf("InsertTicket: %v", err)
-	}
+	s, projectID, ticketID, tr := shipTestFixture(t)
 
 	reg := job.Registry()
 	reg[testStateQueued] = trackerEffectHandler{}
 	bindings := []dispatch.Binding{{StoreProjectID: projectID, TrackerProject: testProject.Name, User: testBindingUser}}
 
-	tr := newShipTrackerDouble(t)
 	marker := fmt.Sprintf("<!-- zing:nothing t%d -->", ticketID)
 	tr.seedMarked(tr.ownLogin, "an earlier post\n\n"+marker)
 
@@ -4186,20 +4189,12 @@ func TestTick_NothingToDoSkipsMarkedCommentStillCloses(t *testing.T) {
 func TestTick_NothingToDoCloseFailureIsBestEffort(t *testing.T) {
 	t.Parallel()
 
-	s := newDispatchTestStore(t)
-	projectID := seedProject(t, s)
-	ticketID, err := s.InsertTicket(t.Context(), store.Ticket{
-		ProjectID: projectID, TrackerRef: testFixtureRef, Title: "t", State: testStateQueued,
-	})
-	if err != nil {
-		t.Fatalf("InsertTicket: %v", err)
-	}
+	s, projectID, ticketID, tr := shipTestFixture(t)
 
 	reg := job.Registry()
 	reg[testStateQueued] = trackerEffectHandler{}
 	bindings := []dispatch.Binding{{StoreProjectID: projectID, TrackerProject: testProject.Name, User: testBindingUser}}
 
-	tr := newShipTrackerDouble(t)
 	tr.failClose = errors.New("boom: close failed")
 
 	d := newDispatcher(t, s, tr, bus.New(), fakeRuntime(t), reg, bindings, dispatch.Config{MaxParallel: 2, Owner: testOwner})
@@ -4220,6 +4215,9 @@ func TestTick_NothingToDoCloseFailureIsBestEffort(t *testing.T) {
 	wantSeq := []string{"comment:" + testFixtureRef}
 	if seq := tr.callSequence(); !slices.Equal(seq, wantSeq) {
 		t.Errorf("call sequence = %v, want %v (a failed close must not be recorded as one)", seq, wantSeq)
+	}
+	if n := tr.closeAttemptCount(); n != 1 {
+		t.Errorf("close attempts = %d, want 1 (the close must actually be tried, not skipped)", n)
 	}
 
 	final := getTicket(t, s, ticketID)
@@ -4362,7 +4360,7 @@ func TestTick_PlanningNothingToDoClosesIssueOnce(t *testing.T) {
 	answerOpenQuestion(t, s, ticketID)
 
 	bindings := []dispatch.Binding{{StoreProjectID: projectID, TrackerProject: testProject.Name, User: bindingUser}}
-	tr := newShipTrackerDouble(t)
+	tr := newShipTrackerDouble(t, "zing-bot")
 	d := newDispatcher(t, s, tr, bus.New(), rt, nil, bindings, dispatch.Config{MaxParallel: 2, Owner: testOwner})
 
 	if err := d.Tick(t.Context()); err != nil {
