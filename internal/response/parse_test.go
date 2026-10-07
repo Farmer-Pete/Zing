@@ -476,21 +476,37 @@ func TestParse_UnregisteredPairIsNotRepaired(t *testing.T) {
 }
 
 // TestParse_StrictDocumentKeepsItsBytes guards goal 2: a document that
-// parses on the strict pass comes back byte for byte, untouched by the
-// repair pass. The input holds no bare <, but reason's unknown <code/>
-// child distinguishes the two passes: the strict decoder simply skips it,
-// while a repair-first Parse would treat reason as free text and escape
-// <code/>'s opening < (rule 5) into &lt;, changing the bytes. Because
-// <code/> is self-closing, that repaired text still decodes, so a
-// repair-first Parse would succeed with different bytes rather than fail
-// outright and fall back to the strict ones. Asserting byte-for-byte
-// equality here would hold even if Parse ran its passes in the wrong
-// order only by accident, unless the repair pass's output actually
-// differs from the input; this input makes the two passes disagree, so
-// the assertion actually pins which one ran.
+// parses on the strict pass comes back untouched by the repair pass. The
+// input holds no bare <, but reason's unknown <code/> child distinguishes
+// the two passes: the strict decoder flattens it away, a self-closing
+// inline tag is removed with no replacement (reason is free text), while
+// a repair-first Parse would instead escape <code/>'s opening < (rule 5)
+// into &lt;, a different rewrite. Because <code/> is self-closing, that
+// repaired text still decodes, so a repair-first Parse would succeed
+// with different bytes rather than fail outright and fall back to the
+// strict ones. Asserting the flattened bytes here would hold even if
+// Parse ran its passes in the wrong order only by accident, unless the
+// repair pass's own output actually differs; this input makes the two
+// passes disagree, so the assertion actually pins which one ran.
 func TestParse_StrictDocumentKeepsItsBytes(t *testing.T) {
 	t.Parallel()
 	in := []byte(`<zing job="classify" outcome="bug"><reason>use <code/>x</reason></zing>`)
+	want := []byte(`<zing job="classify" outcome="bug"><reason>use x</reason></zing>`)
+	doc, err := Parse(in)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if !bytes.Equal(doc.Elem, want) {
+		t.Errorf("doc.Elem = %q, want the flattened bytes: %q", doc.Elem, want)
+	}
+}
+
+// TestParse_StrictDocumentNoInlineTagIsByteForByte guards the narrower
+// strict-pass guarantee that a document with no inline tag to flatten
+// comes back exactly as written, untouched by either pass.
+func TestParse_StrictDocumentNoInlineTagIsByteForByte(t *testing.T) {
+	t.Parallel()
+	in := []byte(`<zing job="classify" outcome="bug"><reason>plain text</reason></zing>`)
 	doc, err := Parse(in)
 	if err != nil {
 		t.Fatalf("Parse: %v", err)

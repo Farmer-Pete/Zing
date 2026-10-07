@@ -1725,10 +1725,12 @@ func TestTick_ClaimUsesTheJobTimeoutAndRunsUnderThatDeadlineNotTheClaimGrace(t *
 }
 
 // TestClaimTimeoutForReviewingCoversBuild proves the "reviewing" state's
-// claim/run deadline is the largest of the review, build, and perimeter
-// job timeouts (#55 plan D9): a review fix unit runs a 45-minute build run
-// and a 45-minute CHECK inside "reviewing", so with build at 45 and review
-// at 30 the deadline is 45m, not review's own 30m.
+// claim/run deadline is the largest of the review job timeout,
+// buildAttemptsTimeout, and the perimeter job timeout (#55 plan D9, #80):
+// a review fix unit runs a build run and CHECK inside "reviewing", and
+// that build run can itself resume once on a timeout, so with build at 45
+// and one timeout_retry, buildAttemptsTimeout is 90, well past review's
+// own 30m.
 func TestClaimTimeoutForReviewingCoversBuild(t *testing.T) {
 	t.Parallel()
 
@@ -1771,10 +1773,59 @@ func TestClaimTimeoutForReviewingCoversBuild(t *testing.T) {
 	if !spy.HasDeadline() {
 		t.Fatal("the handler's context carried no deadline, want now+timeout")
 	}
-	wantMin := before.Add(44 * time.Minute)
-	wantMax := after.Add(46 * time.Minute)
+	wantMin := before.Add(89 * time.Minute)
+	wantMax := after.Add(91 * time.Minute)
 	if spy.Deadline().Before(wantMin) || spy.Deadline().After(wantMax) {
-		t.Errorf("run deadline = %v, want within [%v, %v] (~45m, jobs.build.timeout_minutes, not review's 30m)", spy.Deadline(), wantMin, wantMax)
+		t.Errorf("run deadline = %v, want within [%v, %v] (~90m, buildAttemptsTimeout, not review's 30m)", spy.Deadline(), wantMin, wantMax)
+	}
+}
+
+// TestClaimTimeoutForBuildingCoversBuildRetry proves the "building" state's
+// claim/run deadline covers build's own one automatic timeout retry
+// (owner decision Q7, #80): the real machine.toml gives jobs.build 45
+// minutes and one timeout_retry, so buildAttemptsTimeout is 90, and the
+// building row takes that over jobTimeoutOrDefault's bare 45.
+func TestClaimTimeoutForBuildingCoversBuildRetry(t *testing.T) {
+	t.Parallel()
+
+	s := newDispatchTestStore(t)
+	ticketID := seedQueuedTicket(t, s, testFixtureRef)
+
+	seedOwner := "seed-building-owner"
+	seedExpires := time.Now().Add(10 * time.Minute).UTC().Truncate(time.Second)
+	claimed, err := s.Claim(t.Context(), ticketID, seedOwner, seedExpires)
+	if err != nil || !claimed {
+		t.Fatalf("seed claim: claimed=%v err=%v", claimed, err)
+	}
+	applied, err := s.CommitHandlerResult(t.Context(), store.HandlerCommit{
+		TicketID: ticketID, Owner: seedOwner, Expires: seedExpires, Next: testStateBuilding, Reason: testSeedReason,
+	})
+	if err != nil || !applied {
+		t.Fatalf("seed commit: applied=%v err=%v", applied, err)
+	}
+
+	spy := &spyHandler{next: testStateReviewing, reason: testSpyReason}
+	reg := job.Registry()
+	reg[testStateBuilding] = spy
+
+	d := newDispatcher(t, s, newFixtureTracker(t), bus.New(), fakeRuntime(t), reg, nil, dispatch.Config{MaxParallel: 2, Owner: testOwner})
+
+	before := time.Now()
+	if err := d.Tick(t.Context()); err != nil {
+		t.Fatalf("Tick: %v", err)
+	}
+	after := time.Now()
+
+	if spy.Calls() != 1 {
+		t.Fatalf("spy.Calls() = %d, want 1", spy.Calls())
+	}
+	if !spy.HasDeadline() {
+		t.Fatal("the handler's context carried no deadline, want now+timeout")
+	}
+	wantMin := before.Add(89 * time.Minute)
+	wantMax := after.Add(91 * time.Minute)
+	if spy.Deadline().Before(wantMin) || spy.Deadline().After(wantMax) {
+		t.Errorf("run deadline = %v, want within [%v, %v] (~90m, max(jobTimeoutOrDefault(build), buildAttemptsTimeout))", spy.Deadline(), wantMin, wantMax)
 	}
 }
 
@@ -1883,11 +1934,12 @@ func TestClaimTimeoutForQueuedCoversClassifyRetry(t *testing.T) {
 }
 
 // TestClaimTimeoutForJudging proves claimTimeoutFor's own "judging" row
-// (PKG9-PLAN.md section 17.1): the real machine.toml gives jobs.judge and
-// jobs.build both 45 minutes and jobs.perimeter 3, so
-// max(judge, build, perimeter, 10) is 45 -- the build job's own timeout,
-// not judge's alone, so this also proves the row reads every one of the
-// three jobs rather than just "judge".
+// (PKG9-PLAN.md section 17.1, #80): the real machine.toml gives jobs.judge
+// 45 minutes, jobs.build 45 minutes with one timeout_retry, and
+// jobs.perimeter 3, so max(judge, buildAttemptsTimeout, perimeter, 10) is
+// 90 -- buildAttemptsTimeout covering both of build's attempts, not
+// judge's bare 45 alone, so this also proves the row reads every one of
+// the three jobs rather than just "judge".
 func TestClaimTimeoutForJudging(t *testing.T) {
 	t.Parallel()
 
@@ -1925,18 +1977,19 @@ func TestClaimTimeoutForJudging(t *testing.T) {
 	if !spy.HasDeadline() {
 		t.Fatal("the handler's context carried no deadline, want now+timeout")
 	}
-	wantMin := before.Add(44 * time.Minute)
-	wantMax := after.Add(46 * time.Minute)
+	wantMin := before.Add(89 * time.Minute)
+	wantMax := after.Add(91 * time.Minute)
 	if spy.Deadline().Before(wantMin) || spy.Deadline().After(wantMax) {
-		t.Errorf("run deadline = %v, want within [%v, %v] (~45m, max(judge, build, perimeter, 10))", spy.Deadline(), wantMin, wantMax)
+		t.Errorf("run deadline = %v, want within [%v, %v] (~90m, max(judge, buildAttemptsTimeout, perimeter, 10))", spy.Deadline(), wantMin, wantMax)
 	}
 }
 
 // TestClaimTimeoutForShipping proves claimTimeoutFor's own "shipping" row
-// (PKG9-PLAN.md section 17.1): the real machine.toml gives jobs.build 45
-// minutes, jobs.perimeter 3, and jobs.respond 15, so
-// max(respond, build, perimeter) is 45 -- the build job's own timeout, not
-// respond's alone, so this also proves the row reads every one of the
+// (PKG9-PLAN.md section 17.1, #80): the real machine.toml gives jobs.build
+// 45 minutes with one timeout_retry, jobs.perimeter 3, and jobs.respond
+// 15, so max(respond, buildAttemptsTimeout, perimeter) is 90 --
+// buildAttemptsTimeout covering both of build's attempts, not respond's
+// bare timeout alone, so this also proves the row reads every one of the
 // three jobs rather than just "respond".
 func TestClaimTimeoutForShipping(t *testing.T) {
 	t.Parallel()
@@ -1975,10 +2028,10 @@ func TestClaimTimeoutForShipping(t *testing.T) {
 	if !spy.HasDeadline() {
 		t.Fatal("the handler's context carried no deadline, want now+timeout")
 	}
-	wantMin := before.Add(44 * time.Minute)
-	wantMax := after.Add(46 * time.Minute)
+	wantMin := before.Add(89 * time.Minute)
+	wantMax := after.Add(91 * time.Minute)
 	if spy.Deadline().Before(wantMin) || spy.Deadline().After(wantMax) {
-		t.Errorf("run deadline = %v, want within [%v, %v] (~45m, max(respond, build, perimeter))", spy.Deadline(), wantMin, wantMax)
+		t.Errorf("run deadline = %v, want within [%v, %v] (~90m, max(respond, buildAttemptsTimeout, perimeter))", spy.Deadline(), wantMin, wantMax)
 	}
 }
 
@@ -4880,12 +4933,13 @@ func TestRun_FillErrorRaisesAlerts(t *testing.T) {
 	t.Cleanup(func() { _ = s.Close() })
 	seedQueuedTicket(t, s, testFixtureRef)
 
-	d := newDispatcher(t, s, newFixtureTracker(t), bus.New(), fakeRuntime(t), nil, nil,
+	b := bus.New()
+	d := newDispatcher(t, s, newFixtureTracker(t), b, fakeRuntime(t), nil, nil,
 		dispatch.Config{MaxParallel: 1, Interval: 5 * time.Millisecond, Owner: testOwner})
 
-	var logBuf bytes.Buffer
+	logBuf := &syncBuffer{}
 	prevDefault := slog.Default()
-	slog.SetDefault(slog.New(slog.NewTextHandler(&logBuf, &slog.HandlerOptions{Level: slog.LevelDebug})))
+	slog.SetDefault(slog.New(slog.NewTextHandler(logBuf, &slog.HandlerOptions{Level: slog.LevelDebug})))
 	t.Cleanup(func() { slog.SetDefault(prevDefault) })
 
 	raw, err := sql.Open("sqlite", dbPath)
@@ -4899,10 +4953,20 @@ func TestRun_FillErrorRaisesAlerts(t *testing.T) {
 		t.Fatalf("close raw db: %v", err)
 	}
 
+	ch, cancelSub := b.Subscribe()
+	defer cancelSub()
+
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
 	runErrCh := make(chan error, 1)
 	go func() { runErrCh <- d.Run(ctx) }()
+
+	waitForSignalThen(t, ch, func() bool {
+		status, err := d.StopStatus(t.Context())
+		return err == nil && status.Stopped && status.Kind == dispatch.StopKindError
+	}, "a bus signal after which StopStatus reports Stopped with Kind error")
+	waitUntil(t, func() bool { return strings.Contains(logBuf.String(), "dispatcher stopped after") }, "alert 2 to log while Run stays parked, before cancel")
+	cancel()
 
 	runErr := waitFor(t, runErrCh, "Run to return")
 	if runErr == nil {
@@ -4913,8 +4977,8 @@ func TestRun_FillErrorRaisesAlerts(t *testing.T) {
 	if !strings.Contains(logged, "in a dispatcher pass") {
 		t.Errorf("log = %q, want alert 1 naming \"in a dispatcher pass\" (no ticket id)", logged)
 	}
-	if !strings.Contains(logged, "dispatcher stopped after") {
-		t.Errorf("log = %q, want alert 2 (\"dispatcher stopped after ...\")", logged)
+	if got := strings.Count(logged, "dispatcher stopped after"); got != 1 {
+		t.Errorf("alert 2 (\"dispatcher stopped after ...\") appeared %d times, want exactly 1 (log: %s)", got, logged)
 	}
 	if i1, i2 := strings.Index(logged, "in a dispatcher pass"), strings.Index(logged, "dispatcher stopped after"); i1 < 0 || i2 < 0 || i2 < i1 {
 		t.Errorf("alerts out of order (alert1 at %d, alert2 at %d); log: %s", i1, i2, logged)
@@ -4955,9 +5019,13 @@ func TestRun_FailClosedLetsOthersFinish(t *testing.T) {
 		t.Fatalf("started ticket = %d, want %d (B)", got, bID)
 	}
 
-	waitUntil(t, func() bool { return dispatch.IsStoppedForTest(d) }, "dispatcher to stop after A's fail-closed commit")
+	waitUntil(t, func() bool { return dispatch.IsStoppedForTest(d) }, "dispatcher to park after A's fail-closed commit")
 
 	close(release)
+
+	waitUntil(t, func() bool { return getTicket(t, s, bID).State == testStatePlanning },
+		"B's own commit to apply despite A's fail-closed")
+	cancel()
 
 	runErr := waitFor(t, runErrCh, "Run to return")
 	if !errors.Is(runErr, dispatch.ErrFailClosed) {
@@ -4982,6 +5050,9 @@ func TestRun_FailClosedLetsOthersFinish(t *testing.T) {
 	}
 	if firstIdx >= 0 && secondIdx >= 0 && secondIdx < firstIdx {
 		t.Errorf("alert 2 appeared before alert 1 in the log")
+	}
+	if got := strings.Count(logged, "dispatcher stopped after fail-closed"); got != 1 {
+		t.Errorf("alert 2 appeared %d times, want exactly 1 (log: %s)", got, logged)
 	}
 }
 

@@ -9,6 +9,10 @@
 // (shipHandler.pollCIFailed), reusing shipping_test.go's own
 // shipTicketReady, shipGitHub, shipTracker, shipFailedCI and shipHeadSHA,
 // and merge_test.go's own shipClaim and mergeRunTick.
+// TestBaseSyncAfterAcceptedAmendmentStartsNewRound (#95) reuses
+// judging_amend_test.go's own amendment fixtures to prove that a judge-point
+// merge opened by acceptAmendment's own h.start still ends with round 2
+// started at the merged head, not round 1 resumed at the stale sha.
 package job
 
 import (
@@ -429,6 +433,132 @@ func TestBaseSyncBeforeJudgeRoundAfterFailedRound(t *testing.T) {
 	wantPrefix := "judge round 2 started sha " + mergedSHA
 	if _, found := basesyncFindMessage(commit2, wantPrefix); !found {
 		t.Fatalf("tick after landed commit.Messages = %+v, want a message starting %q", commit2.Messages, wantPrefix)
+	}
+}
+
+// TestBaseSyncAfterAcceptedAmendmentStartsNewRound proves the overview
+// design's own bug fix (#95, repeating #81/ticket #80): accepting a
+// judge's amended check starts round 2 through h.start, which opens a
+// judge-point base merge instead of writing round 2's own started marker
+// when main has moved under a file the ticket also changed; once that
+// merge lands, the next judging tick must start round 2 at the merged
+// head rather than resume round 1 at the stale sha that would later make
+// PUBLISH's own sha guard refuse to publish.
+func TestBaseSyncAfterAcceptedAmendmentStartsNewRound(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow end-to-end flow; runs in the full suite")
+	}
+	t.Parallel()
+	s, ticket := judgeTicketReady(t)
+	basesyncAddOrigin(t, s, ticket)
+
+	scripts := judgeScriptsFS(judgeAmendmentS2ErrorScript, judgeOkBothScript)
+	scripts["judge/2/1.xml"] = &fstest.MapFile{Data: []byte(judgeOkBothScript)}
+	rt := runtime.NewFake(scripts)
+
+	ticket = judgeAdvanceStart(t, s, rt, ticket) // START round 1 at OLD
+
+	deps := pbClaim(t, s, rt, ticket.ID)
+	runCommit, err := (judgeHandler{}).Run(t.Context(), ticket, deps) // RUN round 1: cannot_run with an amendment
+	if err != nil {
+		t.Fatalf("RUN round 1: %v", err)
+	}
+	if runCommit.Escalation == nil {
+		t.Fatal("runCommit.Escalation is nil, want the amended cannot_run")
+	}
+	pbApply(t, s, ticket, runCommit)
+	ticket = pbGetTicket(t, s, ticket.ID)
+
+	orch, wt := basesyncTicketWorktree(t, s, ticket)
+	helloContent, err := gitfixture.Git(t.Context(), wt.Dir(), "show", "HEAD:hello.txt")
+	if err != nil {
+		t.Fatalf("git show HEAD:hello.txt: %v", err)
+	}
+	mergeCommitOnMain(t, s, ticket, "hello.txt", helloContent)
+	baseSHA := mergeCommitOnMain(t, s, ticket, "other.txt", []byte("main only\n"))
+
+	qID, _ := judgeOpenAmendedQuestion(t, s, ticket.ID)
+	pbAnswerEscalation(t, s, ticket.ID, qID, "a")
+
+	deps2 := pbClaim(t, s, rt, ticket.ID)
+	acceptCommit, handled := pbRunPrelude(t, s, deps2, ticket.ID)
+	if !handled {
+		t.Fatal("handled = false, want true")
+	}
+	if acceptCommit.Escalation != nil {
+		t.Fatalf("acceptCommit escalated: %+v", acceptCommit.Escalation.Payload)
+	}
+	reqBody, found := basesyncFindMessage(acceptCommit, "base merge requested after run ")
+	if !found {
+		t.Fatalf("acceptCommit.Messages = %+v, want a base merge request", acceptCommit.Messages)
+	}
+	req, err := parseBaseMergeRequest(store.MessageRow{ID: 1, Body: reqBody})
+	if err != nil {
+		t.Fatalf("parseBaseMergeRequest: %v", err)
+	}
+	if req.Point != syncPointJudge {
+		t.Errorf("req.Point = %q, want %q", req.Point, syncPointJudge)
+	}
+	if req.BaseSHA != baseSHA {
+		t.Errorf("req.BaseSHA = %s, want %s", req.BaseSHA, baseSHA)
+	}
+	if _, found := basesyncFindMessage(acceptCommit, "judge round 2 started"); found {
+		t.Errorf("acceptCommit.Messages = %+v, want no round 2 started marker (the merge runs first)", acceptCommit.Messages)
+	}
+	ticket = pbGetTicket(t, s, ticket.ID)
+
+	landed := false
+	var last store.HandlerCommit
+	for i := 0; i < 4 && !landed; i++ {
+		deps = pbClaim(t, s, rt, ticket.ID)
+		ticket, last = basesyncTick(t, s, deps, ticket, judgeHandler{}, "merge tick")
+		landed = shipHasMergeLanded(last)
+	}
+	if !landed {
+		t.Fatal("base merge did not land within 4 ticks")
+	}
+
+	mergedSHA, err := orch.HeadSHA(t.Context(), wt)
+	if err != nil {
+		t.Fatalf("HeadSHA: %v", err)
+	}
+
+	checks := &judgeScriptedCheckCommands{real: NewCommandRunner(sandbox.Off(), false), steps: []judgeCheckStep{{exit: 0}, {exit: 0}}}
+
+	deps = pbClaim(t, s, rt, ticket.ID)
+	deps.Commands = checks
+	ticket, startCommit2 := basesyncTick(t, s, deps, ticket, judgeHandler{}, "tick after landed")
+	wantPrefix := "judge round 2 started sha " + mergedSHA
+	if _, found := basesyncFindMessage(startCommit2, wantPrefix); !found {
+		t.Fatalf("tick after landed commit.Messages = %+v, want a message starting %q", startCommit2.Messages, wantPrefix)
+	}
+
+	shipped := false
+	for i := 0; i < 6 && !shipped; i++ {
+		deps = pbClaim(t, s, rt, ticket.ID)
+		deps.Commands = checks
+		ticket, _ = basesyncTick(t, s, deps, ticket, judgeHandler{}, fmt.Sprintf("round 2 tick %d", i))
+		shipped = ticket.State == stateShipping
+	}
+	if !shipped {
+		t.Fatal("ticket did not reach shipping within 6 ticks")
+	}
+
+	markers, err := s.MarkersWithPrefix(t.Context(), ticket.ID, judgeRoundMarkerPrefix)
+	if err != nil {
+		t.Fatalf("MarkersWithPrefix: %v", err)
+	}
+	cohort, err := judgeScenariosFor(t.Context(), ticket, deps)
+	if err != nil {
+		t.Fatalf("judgeScenariosFor: %v", err)
+	}
+	verdictRows, err := s.Verdicts(t.Context(), ticket.ID)
+	if err != nil {
+		t.Fatalf("Verdicts: %v", err)
+	}
+	_, what, _ := finalVerdicts(markers, cohort, verdictRows, mergedSHA)
+	if what != "" {
+		t.Errorf("finalVerdicts what = %q, want empty", what)
 	}
 }
 

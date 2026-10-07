@@ -982,6 +982,23 @@ func pbAnswerEscalation(t *testing.T, s *store.Store, ticketID, questionID int64
 	}
 }
 
+// pbAnswerEscalationWithNote answers questionID with option plus a typed
+// note (merge_test.go:1692-1702's own pattern): SaveDraft(option),
+// SaveDraft(text), then SendBatch, so the owner's reply carries both the
+// chosen option and free text into the round's Replies.
+func pbAnswerEscalationWithNote(t *testing.T, s *store.Store, ticketID, questionID int64, option, note string) {
+	t.Helper()
+	if _, err := s.SaveDraft(t.Context(), store.DraftInput{TicketID: ticketID, QuestionID: &questionID, Option: &option}); err != nil {
+		t.Fatalf("SaveDraft(option): %v", err)
+	}
+	if _, err := s.SaveDraft(t.Context(), store.DraftInput{TicketID: ticketID, QuestionID: &questionID, Text: note}); err != nil {
+		t.Fatalf("SaveDraft(text): %v", err)
+	}
+	if _, err := s.SendBatch(t.Context(), ticketID); err != nil {
+		t.Fatalf("SendBatch: %v", err)
+	}
+}
+
 // TestPreludeFixRetryRestartsFix proves 5.6's "fix with a run" retry row
 // (#28 gap 3, design section 5.4 change 3): a fix run's own exec failure
 // escalates origin fix with a run; the owner's retry restarts the fix with a
@@ -1049,6 +1066,56 @@ func TestPreludeFixRetryRestartsFix(t *testing.T) {
 	if len(open) != 0 {
 		t.Errorf("open questions after retry = %+v, want none (the round resolved)", open)
 	}
+}
+
+// TestPreludeFixRetryCarriesOwnerNote proves ticket #80 task 5: a
+// fix-origin retry "with a run" (buildingHandler.retryFreshRun, through
+// retryFreshFixRun) carries the owner's typed note, not just the chosen
+// option, into the fresh session's own fenced "notes" input -- the same
+// setup as TestPreludeFixRetryRestartsFix, but answered with a note instead
+// of a bare option.
+func TestPreludeFixRetryCarriesOwnerNote(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow end-to-end flow; runs in the full suite")
+	}
+	t.Parallel()
+	s, ticketID := pbTicketInReviewing(t)
+	pbOpenFixRequest(t, s, ticketID)
+
+	owner := "reserve-terminal-run-owner"
+	expires := time.Now().Add(10 * time.Minute).UTC().Truncate(time.Second)
+	claimed, claimErr := s.Claim(t.Context(), ticketID, owner, expires)
+	if claimErr != nil || !claimed {
+		t.Fatalf("claim: claimed=%v err=%v", claimed, claimErr)
+	}
+	rsv, reserveErr := s.Reserve(t.Context(), ticketID, owner, expires, store.SessionUpsert{Job: jobBuildName, Runtime: pbRuntimeClaude}, store.RunSeed{Model: pbModelClaudeX})
+	if reserveErr != nil {
+		t.Fatalf("Reserve: %v", reserveErr)
+	}
+	outcome, exitCode, agentSeconds := "error", 1, 1
+	applied, commitErr := s.CommitHandlerResult(t.Context(), store.HandlerCommit{
+		TicketID: ticketID, Owner: owner, Expires: expires,
+		Runs: []store.Run{{ID: rsv.RunID, Outcome: &outcome, ExitCode: &exitCode, AgentSeconds: &agentSeconds}},
+	})
+	if commitErr != nil || !applied {
+		t.Fatalf("CommitHandlerResult: applied=%v err=%v", applied, commitErr)
+	}
+
+	runID := rsv.RunID
+	qID := pbEscalateDirect(t, s, ticketID, &runID, nil, response.EscalationCodeRuntimeExecFailed, response.EscalationOriginFix)
+	const retryNote = "rerun with the fixture data"
+	pbAnswerEscalationWithNote(t, s, ticketID, qID, "a", retryNote)
+
+	scriptRT := &pbScriptedRuntime{t: t, steps: []pbScriptedStep{pbBuildStep([]string{pbHelloTxt}, nil, "fix-retry-sess")}}
+	deps := pbWithTestCmd(pbClaim(t, s, scriptRT, ticketID), pbGetTicket(t, s, ticketID), pbFixTestCmd)
+	_, handled := pbRunPrelude(t, s, deps, ticketID)
+	if !handled {
+		t.Fatal("handled = false, want true")
+	}
+	if len(scriptRT.reqs) != 1 {
+		t.Fatalf("runtime requests = %+v, want exactly one", scriptRT.reqs)
+	}
+	assertFencedPB(t, scriptRT.reqs[0].Prompt, "notes", retryNote)
 }
 
 // assertFencedPB asserts prompt carries label's fenced input containing text

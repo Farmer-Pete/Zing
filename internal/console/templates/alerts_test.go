@@ -16,7 +16,7 @@ func TestAlertLinesScrollRegionIsFocusable(t *testing.T) {
 	t.Parallel()
 	var sb strings.Builder
 	lines := []AlertLine{{Time: "12:00:00", Level: "warn", Message: "disk space low"}}
-	if err := Alerts(lines, "abc123def456").Render(t.Context(), &sb); err != nil {
+	if err := Alerts(lines, "abc123def456", StopBanner{}).Render(t.Context(), &sb); err != nil {
 		t.Fatalf("Alerts.Render: %v", err)
 	}
 	got := sb.String()
@@ -31,7 +31,7 @@ func TestAlertLinesScrollRegionIsFocusable(t *testing.T) {
 func TestAlertsCarriesBuildVersion(t *testing.T) {
 	t.Parallel()
 	var sb strings.Builder
-	if err := Alerts(nil, "abc123def456").Render(t.Context(), &sb); err != nil {
+	if err := Alerts(nil, "abc123def456", StopBanner{}).Render(t.Context(), &sb); err != nil {
 		t.Fatalf("Alerts.Render: %v", err)
 	}
 	got := sb.String()
@@ -55,5 +55,67 @@ func TestAlertsCarriesBuildVersion(t *testing.T) {
 	body := got[bodyStart:bodyEnd]
 	if strings.TrimSpace(body) != "" {
 		t.Errorf("rendered #alerts body with nil lines not empty: %q", body)
+	}
+}
+
+// TestAlertsRendersStopBanner proves #alerts renders the dispatcher-stopped
+// banner (ticket #89) when stop.Show is true, with the Resume button
+// disabled and the busy sentence shown exactly when ResumeDisabled is true,
+// and renders no banner at all for a zero StopBanner.
+func TestAlertsRendersStopBanner(t *testing.T) {
+	t.Parallel()
+
+	shown := StopBanner{
+		Show:     true,
+		Kind:     "fail-closed",
+		Headline: "Dispatching stopped after fail-closed on ticket 42.",
+		Cause:    "the lease was lost",
+		Time:     "14:03:09",
+		Note:     "Ticket 42 runs again once its claim expires.",
+	}
+
+	var sb strings.Builder
+	if err := Alerts(nil, "abc123def456", shown).Render(t.Context(), &sb); err != nil {
+		t.Fatalf("Alerts.Render: %v", err)
+	}
+	got := sb.String()
+	for _, want := range []string{
+		`class="dispatch-banner"`,
+		`data-kind="fail-closed"`,
+		"Dispatching stopped after fail-closed on ticket 42.",
+		"the lease was lost",
+		"14:03:09",
+		"Ticket 42 runs again once its claim expires.",
+		`class="dispatch-resume"`,
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("rendered #alerts missing %q: %s", want, got)
+		}
+	}
+	if strings.Contains(got, "disabled") {
+		t.Errorf("rendered #alerts carries disabled with ResumeDisabled false: %s", got)
+	}
+
+	var sbBusy strings.Builder
+	busy := shown
+	busy.ResumeDisabled = true
+	busy.Busy = "1 runs are still finishing; resume once they are done"
+	if err := Alerts(nil, "abc123def456", busy).Render(t.Context(), &sbBusy); err != nil {
+		t.Fatalf("Alerts.Render: %v", err)
+	}
+	gotBusy := sbBusy.String()
+	if !strings.Contains(gotBusy, "disabled") {
+		t.Errorf("rendered #alerts missing disabled with ResumeDisabled true: %s", gotBusy)
+	}
+	if !strings.Contains(gotBusy, "1 runs are still finishing; resume once they are done") {
+		t.Errorf("rendered #alerts missing busy text: %s", gotBusy)
+	}
+
+	var sbNone strings.Builder
+	if err := Alerts(nil, "abc123def456", StopBanner{}).Render(t.Context(), &sbNone); err != nil {
+		t.Fatalf("Alerts.Render: %v", err)
+	}
+	if strings.Contains(sbNone.String(), "dispatch-banner") {
+		t.Errorf("rendered #alerts with a zero StopBanner carries a banner: %s", sbNone.String())
 	}
 }

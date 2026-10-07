@@ -1254,6 +1254,94 @@ func TestPublishRequiresJudgePassOnHead(t *testing.T) {
 	}
 }
 
+// TestShipRetryJudgeNotPassedRejudgesHead proves design section 5.6's new
+// shipping row (#95, owner decision Q5): the owner's Retry on PUBLISH's
+// judgeNotPassedWhat escalation sends a ticket already stuck there back to
+// judging rather than re-running PUBLISH, and a fresh judge round then
+// starts at HEAD.
+func TestShipRetryJudgeNotPassedRejudgesHead(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow end-to-end flow; runs in the full suite")
+	}
+	t.Parallel()
+	s, ticket, _ := shipTicketReady(t)
+
+	maxRunID, err := s.MaxRunID(t.Context(), ticket.ID)
+	if err != nil {
+		t.Fatalf("MaxRunID: %v", err)
+	}
+	msg, err := fixRequestMessage(ticket, FixKindCILog, "check \"ci\" failed: boom", maxRunID)
+	if err != nil {
+		t.Fatalf("fixRequestMessage: %v", err)
+	}
+	owner := "ship-retry-not-passed-owner"
+	expires := time.Now().Add(10 * time.Minute).UTC().Truncate(time.Second)
+	claimed, err := s.Claim(t.Context(), ticket.ID, owner, expires)
+	if err != nil || !claimed {
+		t.Fatalf("claim: claimed=%v err=%v", claimed, err)
+	}
+	applied, err := s.CommitHandlerResult(t.Context(), store.HandlerCommit{
+		TicketID: ticket.ID, Owner: owner, Expires: expires, Messages: []store.Message{msg},
+	})
+	if err != nil || !applied {
+		t.Fatalf("seed fix request: applied=%v err=%v", applied, err)
+	}
+
+	rt := runtime.NewFake(fstest.MapFS{shipFixBuildScriptPath: &fstest.MapFile{Data: []byte(judgeFixBuildScript)}})
+	driveShipFixToLanding(t, s, ticket.ID, rt)
+
+	gh := &shipGitHub{}
+	tr := &shipTracker{}
+	escDeps := shipClaim(t, s, pbFakeRuntime(t), ticket.ID, gh, tr)
+	escCommit, err := (shipHandler{}).Run(t.Context(), pbGetTicket(t, s, ticket.ID), escDeps)
+	if err != nil {
+		t.Fatalf("Run (PUBLISH escalate): %v", err)
+	}
+	if escCommit.Escalation == nil {
+		t.Fatal("want an escalation")
+	}
+	if escCommit.Escalation.Payload.What != judgeNotPassedWhat {
+		t.Fatalf("What = %q, want %q", escCommit.Escalation.Payload.What, judgeNotPassedWhat)
+	}
+	pbApply(t, s, pbGetTicket(t, s, ticket.ID), escCommit)
+
+	qID, _ := judgeOpenQuestionPayload(t, s, ticket.ID)
+	pbAnswerEscalation(t, s, ticket.ID, qID, "a")
+
+	retryDeps := shipClaim(t, s, pbFakeRuntime(t), ticket.ID, gh, tr)
+	retryCommit, err := (shipHandler{}).Run(t.Context(), pbGetTicket(t, s, ticket.ID), retryDeps)
+	if err != nil {
+		t.Fatalf("Run (retry): %v", err)
+	}
+	if retryCommit.Escalation != nil {
+		t.Fatalf("got an escalation, want none: %+v", retryCommit.Escalation.Payload)
+	}
+	if retryCommit.Next != stateJudging {
+		t.Errorf("Next = %q, want %q", retryCommit.Next, stateJudging)
+	}
+	pbApply(t, s, pbGetTicket(t, s, ticket.ID), retryCommit)
+
+	ticket = pbGetTicket(t, s, ticket.ID)
+	if ticket.State != stateJudging {
+		t.Fatalf("ticket state = %q, want judging", ticket.State)
+	}
+
+	wantSHA := shipHeadSHA(t, s, ticket)
+
+	judgeDeps := pbClaim(t, s, pbFakeRuntime(t), ticket.ID)
+	startCommit, err := (judgeHandler{}).Run(t.Context(), ticket, judgeDeps)
+	if err != nil {
+		t.Fatalf("Run (judge restart): %v", err)
+	}
+	if len(startCommit.Messages) == 0 {
+		t.Fatal("commit.Messages is empty, want a started marker")
+	}
+	want := "judge round 2 started sha " + wantSHA
+	if !strings.HasPrefix(startCommit.Messages[0].Body, want) {
+		t.Errorf("Messages[0].Body = %q, want prefix %q", startCommit.Messages[0].Body, want)
+	}
+}
+
 // -----------------------------------------------------------------------
 // finalVerdicts, through PUBLISH
 // -----------------------------------------------------------------------
@@ -4170,6 +4258,9 @@ func TestShippingEscalationRetries(t *testing.T) {
 			if !commit.ClearPoll {
 				t.Error("ClearPoll = false, want true")
 			}
+			if commit.Next != "" {
+				t.Errorf("Next = %q, want empty (not the judge-not-passed row)", commit.Next)
+			}
 			found := false
 			for _, m := range commit.Messages {
 				if m.Body == markerRetryRequested {
@@ -5329,6 +5420,55 @@ func TestRespondErrorRetry(t *testing.T) {
 	if !found {
 		t.Errorf("commit.Messages = %+v, want a %q marker", commit.Messages, markerRetryRequested)
 	}
+}
+
+// TestRespondRetryWithRunCarriesOwnerNote proves ticket #80 task 5: a
+// respond-origin "with a run" retry (shipHandler.retryRespondWithRun)
+// carries the owner's typed note, not just the chosen option, into the
+// fresh batch's own fenced "notes" input.
+func TestRespondRetryWithRunCarriesOwnerNote(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow end-to-end flow; runs in the full suite")
+	}
+	t.Parallel()
+	when := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	s, ticket, gh, tr, _ := shipRespondReady(t, when)
+
+	owner := "reserve-terminal-run-owner"
+	expires := time.Now().Add(10 * time.Minute).UTC().Truncate(time.Second)
+	claimed, claimErr := s.Claim(t.Context(), ticket.ID, owner, expires)
+	if claimErr != nil || !claimed {
+		t.Fatalf("claim: claimed=%v err=%v", claimed, claimErr)
+	}
+	rsv, reserveErr := s.Reserve(t.Context(), ticket.ID, owner, expires, store.SessionUpsert{Job: jobRespondName, Runtime: pbRuntimeClaude}, store.RunSeed{Model: pbModelClaudeX})
+	if reserveErr != nil {
+		t.Fatalf("Reserve: %v", reserveErr)
+	}
+	outcome, exitCode, agentSeconds := "error", 1, 1
+	applied, commitErr := s.CommitHandlerResult(t.Context(), store.HandlerCommit{
+		TicketID: ticket.ID, Owner: owner, Expires: expires,
+		Runs: []store.Run{{ID: rsv.RunID, Outcome: &outcome, ExitCode: &exitCode, AgentSeconds: &agentSeconds}},
+	})
+	if commitErr != nil || !applied {
+		t.Fatalf("CommitHandlerResult: applied=%v err=%v", applied, commitErr)
+	}
+
+	runID := rsv.RunID
+	qID := pbEscalateDirect(t, s, ticket.ID, &runID, nil, response.EscalationCodeRuntimeExecFailed, response.EscalationOriginRespond)
+	const retryNote = "reply in one line"
+	pbAnswerEscalationWithNote(t, s, ticket.ID, qID, "a", retryNote)
+
+	// The retry starts batch 2 (shipRespondReady already started batch 1),
+	// so the fake must serve respond/2/1.xml, not respondScriptsFS's own
+	// batch-1 key.
+	scripts := fstest.MapFS{"respond/2/1.xml": &fstest.MapFile{Data: []byte(shipRespondReplyScript)}}
+	rec := &recordingRuntime{inner: runtime.NewFake(scripts)}
+	deps := shipClaim(t, s, rec, ticket.ID, gh, tr)
+	_, err := (shipHandler{}).Run(t.Context(), pbGetTicket(t, s, ticket.ID), deps)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	assertFencedPB(t, rec.lastRequest(t).Prompt, "notes", retryNote)
 }
 
 // TestRespondCapResumesRetryStartsFresh proves design section 5.6's own

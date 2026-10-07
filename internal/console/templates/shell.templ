@@ -154,6 +154,20 @@ templ palette() {
 		.alert-level { text-transform: uppercase; font-size: 0.7rem; }
 		.alert-level-WARN { color: var(--zing-warn); }
 		.alert-level-ERROR { color: var(--zing-danger); }
+		/* .dispatch-banner (ticket #89): the dispatcher-stopped banner, a
+		   visible block above .alert-lines so a stopped dispatcher is never
+		   mistaken for a quiet one. --zing-danger matches .alert-level-ERROR's
+		   own color, since a parked dispatcher is exactly that severity. */
+		.dispatch-banner {
+			padding: 0.5rem 1rem;
+			border: 1px solid var(--zing-danger);
+			border-bottom: 1px solid var(--zing-border);
+			background: var(--zing-surface);
+		}
+		.dispatch-banner-headline { margin: 0; color: var(--zing-danger); font-weight: 600; }
+		.dispatch-banner-time { color: var(--zing-text-dim); font-size: 0.8rem; }
+		.dispatch-banner-cause, .dispatch-banner-note { margin: 0.25rem 0 0; font-size: 0.85rem; }
+		.dispatch-banner-busy, .dispatch-banner-error { color: var(--zing-text-dim); font-size: 0.8rem; }
 		#nav {
 			border-right: 1px solid var(--zing-border);
 			padding: 1rem;

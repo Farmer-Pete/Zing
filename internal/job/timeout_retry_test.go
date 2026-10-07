@@ -9,6 +9,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"maps"
 	"strings"
@@ -16,6 +17,7 @@ import (
 	"time"
 
 	"zing/internal/machine"
+	"zing/internal/prompt"
 	"zing/internal/response"
 	"zing/internal/runtime"
 	"zing/internal/store"
@@ -78,11 +80,10 @@ func newTimeoutRetryStubDeps(t *testing.T, stub *timeoutStubRuntime) (Deps, stor
 
 // TestRunAndRoute_NoTimeoutRetryEscalatesAtOnce is this task's named test
 // (design goal: "A job with timeout_retries 0 escalates a timeout at once,
-// as it does today"): classify's own TimeoutRetries is overridden to the
-// build job's value, after asserting that value is 0, so an ErrTimeout from
-// the one scripted attempt still escalates runtime_exec_failed at once,
-// with no second attempt and a Tried that does not mention the automatic
-// retry text task 4 adds.
+// as it does today"): classify's own TimeoutRetries is overridden to 0, so
+// an ErrTimeout from the one scripted attempt still escalates
+// runtime_exec_failed at once, with no second attempt and a Tried that does
+// not mention the automatic retry text task 4 adds.
 func TestRunAndRoute_NoTimeoutRetryEscalatesAtOnce(t *testing.T) {
 	t.Parallel()
 	stub := &timeoutStubRuntime{results: []scriptedAttempt{
@@ -90,11 +91,7 @@ func TestRunAndRoute_NoTimeoutRetryEscalatesAtOnce(t *testing.T) {
 	}}
 	d, ticket := newTimeoutRetryStubDeps(t, stub)
 
-	buildRetries := d.Machine.Jobs[jobBuildName].TimeoutRetries
-	if buildRetries != 0 {
-		t.Fatalf("build job's TimeoutRetries = %d, want 0", buildRetries)
-	}
-	d = withClassifyTimeoutRetries(d, buildRetries)
+	d = withClassifyTimeoutRetries(d, 0)
 
 	su := store.SessionUpsert{Job: testJobClassify, Runtime: testRuntimeClaude}
 	commit, err := runAndRoute(t.Context(), d, ticket, testJobClassify, su, runtime.RunRequest{Job: response.JobClassify}, 0,
@@ -656,5 +653,134 @@ func TestRunJob_TimeoutRetryResumeKeepsSession(t *testing.T) {
 	}
 	if got := stub.requests[1].SessionID; got != "SESSION-1" {
 		t.Errorf("second request SessionID = %q, want %q", got, "SESSION-1")
+	}
+}
+
+// TestTimeoutRetryRequest is this task's named test (design: "For
+// jobBuildName with res.SessionID set, it returns req with SessionID =
+// res.SessionID and Prompt = ... Otherwise it returns today's request,
+// timeoutRetryNoteFmt in front of req.Prompt, and false"): a build turn
+// whose attempt minted a session resumes that session with the fixed note
+// as its whole prompt and no trace of the original prompt; a build turn
+// with no session id, and any other job, keep #155's note-in-front
+// behavior.
+func TestTimeoutRetryRequest(t *testing.T) {
+	t.Parallel()
+
+	t.Run("build with session resumes", func(t *testing.T) {
+		t.Parallel()
+		req := runtime.RunRequest{Job: response.JobBuild, Prompt: "ORIGINAL BUILD PROMPT", Timeout: 45 * time.Minute}
+		res := runtime.RunResult{SessionID: "sess-1"}
+		now := time.Date(2026, 10, 6, 12, 0, 0, 0, time.UTC)
+
+		got, resumed := timeoutRetryRequest(jobBuildName, req, res, "timed out after 180 s", now)
+
+		if !resumed {
+			t.Error("resumed = false, want true")
+		}
+		if got.SessionID != "sess-1" {
+			t.Errorf("SessionID = %q, want %q", got.SessionID, "sess-1")
+		}
+		if !strings.HasPrefix(got.Prompt, prompt.BuildResumeHeader) {
+			t.Errorf("Prompt does not start with BuildResumeHeader: %q", got.Prompt)
+		}
+		for _, want := range []string{"git status", "git diff", "run only the tests named in your input"} {
+			if !strings.Contains(got.Prompt, want) {
+				t.Errorf("Prompt = %q, want it to contain %q", got.Prompt, want)
+			}
+		}
+		if strings.Contains(got.Prompt, "ORIGINAL BUILD PROMPT") {
+			t.Errorf("Prompt = %q, want none of the original prompt", got.Prompt)
+		}
+	})
+
+	t.Run("build with no session keeps today's note", func(t *testing.T) {
+		t.Parallel()
+		req := runtime.RunRequest{Job: response.JobBuild, Prompt: "ORIGINAL BUILD PROMPT", Timeout: 45 * time.Minute}
+		res := runtime.RunResult{}
+
+		got, resumed := timeoutRetryRequest(jobBuildName, req, res, "timed out after 180 s", time.Now())
+
+		if resumed {
+			t.Error("resumed = true, want false")
+		}
+		wantPrompt := fmt.Sprintf(timeoutRetryNoteFmt, "timed out after 180 s") + "\n\nORIGINAL BUILD PROMPT"
+		if got.Prompt != wantPrompt {
+			t.Errorf("Prompt = %q, want %q", got.Prompt, wantPrompt)
+		}
+	})
+
+	t.Run("classify keeps today's note even with a session id on res", func(t *testing.T) {
+		t.Parallel()
+		req := runtime.RunRequest{Job: response.JobClassify, Prompt: "ORIGINAL CLASSIFY PROMPT", Timeout: 5 * time.Minute, SessionID: "req-session"}
+		res := runtime.RunResult{SessionID: "sess-1"}
+
+		got, resumed := timeoutRetryRequest(testJobClassify, req, res, "timed out after 60 s", time.Now())
+
+		if resumed {
+			t.Error("resumed = true, want false")
+		}
+		wantPrompt := fmt.Sprintf(timeoutRetryNoteFmt, "timed out after 60 s") + "\n\nORIGINAL CLASSIFY PROMPT"
+		if got.Prompt != wantPrompt {
+			t.Errorf("Prompt = %q, want %q", got.Prompt, wantPrompt)
+		}
+		if got.SessionID != "req-session" {
+			t.Errorf("SessionID = %q, want req's own unchanged %q", got.SessionID, "req-session")
+		}
+	})
+}
+
+// TestRetryTimeout_BuildResumesWithNote is this task's named test: a build
+// turn's first attempt that times out after minting a session must retry by
+// resuming that session, with a prompt holding the resume note (git status,
+// git diff).
+func TestRetryTimeout_BuildResumesWithNote(t *testing.T) {
+	t.Parallel()
+	stub := &timeoutStubRuntime{results: []scriptedAttempt{
+		{res: runtime.RunResult{FinalMessage: "ok"}},
+	}}
+	req := runtime.RunRequest{Job: response.JobBuild, Prompt: "ORIGINAL BUILD PROMPT", Timeout: 45 * time.Minute}
+	firstRes := runtime.RunResult{AgentTime: 180 * time.Second, SessionID: "sess-1"}
+
+	_, err := retryTimeout(t.Context(), stub, req, 1, 1, jobBuildName, 1, firstRes, runtime.ErrTimeout)
+	if err != nil {
+		t.Fatalf("retryTimeout: %v", err)
+	}
+	if stub.calls != 1 {
+		t.Fatalf("stub.calls = %d, want 1", stub.calls)
+	}
+	if got := stub.requests[0].SessionID; got != "sess-1" {
+		t.Errorf("retry request SessionID = %q, want %q", got, "sess-1")
+	}
+	if !strings.Contains(stub.requests[0].Prompt, "git status") || !strings.Contains(stub.requests[0].Prompt, "git diff") {
+		t.Errorf("retry request Prompt = %q, want it to hold git status and git diff", stub.requests[0].Prompt)
+	}
+}
+
+// TestRetryTimeout_BuildSecondTimeoutEscalates is this task's named test: a
+// build turn whose resumed retry also times out must report that second
+// timeout back to the caller (runJobWith turns it into the usual
+// runtime_exec_failed escalation elsewhere), with the FailureDetail naming
+// the automatic retry.
+func TestRetryTimeout_BuildSecondTimeoutEscalates(t *testing.T) {
+	t.Parallel()
+	stub := &timeoutStubRuntime{results: []scriptedAttempt{
+		{res: runtime.RunResult{AgentTime: 60 * time.Second}, err: runtime.ErrTimeout},
+	}}
+	req := runtime.RunRequest{Job: response.JobBuild, Prompt: "ORIGINAL BUILD PROMPT", Timeout: 45 * time.Minute}
+	firstRes := runtime.RunResult{AgentTime: 180 * time.Second, SessionID: "sess-1"}
+
+	retryRes, err := retryTimeout(t.Context(), stub, req, 1, 1, jobBuildName, 1, firstRes, runtime.ErrTimeout)
+	if !errors.Is(err, runtime.ErrTimeout) {
+		t.Fatalf("retryTimeout err = %v, want ErrTimeout", err)
+	}
+	if stub.calls != 1 {
+		t.Fatalf("stub.calls = %d, want 1", stub.calls)
+	}
+	if got := stub.requests[0].SessionID; got != "sess-1" {
+		t.Errorf("retry request SessionID = %q, want %q", got, "sess-1")
+	}
+	if !strings.HasPrefix(retryRes.FailureDetail, timeoutRetryPrefix) {
+		t.Errorf("FailureDetail = %q, want it to start with %q", retryRes.FailureDetail, timeoutRetryPrefix)
 	}
 }

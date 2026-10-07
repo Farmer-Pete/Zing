@@ -1590,6 +1590,59 @@ function installTicketActions() {
 	});
 }
 
+// ---- resume a stopped dispatcher from the #alerts banner (ticket #89) ---
+
+// postDispatchResume handles the Resume button's click: posts POST
+// /dispatch/resume and, on a non-2xx response, shows the response body --
+// the console's own exact 409 refusal sentence, or the 503/500 body -- in
+// the banner's own error span, the same pattern postTicketAction above
+// uses. It holds no decision of its own: the next bus-driven re-render
+// supplies the banner's new state (gone on success, or still shown with an
+// updated InFlight count on a busy refusal), the same as every other
+// mutation route in this file.
+async function postDispatchResume(banner) {
+	const errorSpan = banner?.querySelector('.dispatch-banner-error');
+	if (!banner || !errorSpan) {
+		return;
+	}
+	try {
+		const resp = await fetch('/dispatch/resume', {
+			method: 'POST',
+			headers: { 'Content-Type': 'application/json', 'Datastar-Request': 'true' },
+			body: '{}',
+		});
+		if (!resp.ok) {
+			const text = await resp.text();
+			suppressPatchSignal = true;
+			errorSpan.textContent = text;
+			suppressPatchSignal = false;
+			return;
+		}
+		suppressPatchSignal = true;
+		errorSpan.textContent = '';
+		suppressPatchSignal = false;
+	} catch (err) {
+		console.error('console.js: POST /dispatch/resume', err);
+		suppressPatchSignal = true;
+		errorSpan.textContent = 'request failed';
+		suppressPatchSignal = false;
+	}
+}
+
+// installDispatchResume wires the #alerts stop banner's Resume button
+// (ticket #89), delegated from document like installTicketActions above,
+// because #alerts is patched by every /stream frame.
+function installDispatchResume() {
+	document.addEventListener('click', (event) => {
+		const button = event.target.closest?.('.dispatch-banner button.dispatch-resume:not([disabled])');
+		if (!button) {
+			return;
+		}
+		event.preventDefault();
+		postDispatchResume(button.closest('.dispatch-banner'));
+	});
+}
+
 // ---- run a command in this ticket's sandbox (split from #73) ------------
 
 // sandboxRunOutputCap is the number of bytes the server keeps (job's
@@ -2257,6 +2310,7 @@ async function install() {
 	installPickupBox();
 	installTuningControls();
 	installTicketActions();
+	installDispatchResume();
 	installSandboxRunBox();
 	installOwnerEdit();
 	installReplyAutosave();

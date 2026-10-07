@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	"zing/internal/response"
 	"zing/internal/store"
 )
 
@@ -70,6 +71,23 @@ func TestFixRequestMessageRejectsEmptyText(t *testing.T) {
 	}
 }
 
+// TestFixStageOptions proves fixStageOptions routes by the asking stage
+// (design section 8, owner decision Q6, premise correction): only a
+// failure-kind fix, whose asking stage is judging, offers the "judge
+// again" option; findings, ci_log, and threads offer none.
+func TestFixStageOptions(t *testing.T) {
+	t.Parallel()
+	want := []response.Option{{Key: fixRejudgeOptionKey, Text: fixRejudgeOptionText}}
+	if got := fixStageOptions(FixKindFailure); len(got) != 1 || got[0] != want[0] {
+		t.Errorf("fixStageOptions(failure) = %+v, want %+v", got, want)
+	}
+	for _, kind := range []FixKind{FixKindFindings, FixKindCILog, FixKindThreads} {
+		if got := fixStageOptions(kind); got != nil {
+			t.Errorf("fixStageOptions(%s) = %+v, want nil", kind, got)
+		}
+	}
+}
+
 // TestOpenFixRequestSkipsLanded proves openFixRequest's own D22 identity
 // rule (design section 5.2): a request whose own "fix landed <id> sha
 // ..." marker exists is not open; a second, later request with no landed
@@ -123,6 +141,60 @@ func TestOpenFixRequestSkipsLanded(t *testing.T) {
 	}
 	if req.Kind != FixKindFailure || req.Text != "second" || req.AfterRunID != 10 {
 		t.Errorf("req = %+v, want {MessageID:%d Kind:failure Text:second AfterRunID:10}", req, mid2)
+	}
+}
+
+// TestOpenFixRequestSkipsDropped proves openFixRequest's own D22 identity
+// rule extended by ticket #80 (owner decision Q6): a request whose own "fix
+// dropped <id>" marker exists is not open, the same as a landed one; a
+// dropped marker naming another request's id leaves that other request
+// open.
+func TestOpenFixRequestSkipsDropped(t *testing.T) {
+	t.Parallel()
+	s := newFixTestStore(t)
+	ticket := seedFixTestTicket(t, s)
+	d := Deps{Store: s}
+	ctx := t.Context()
+
+	msg, err := fixRequestMessage(ticket, FixKindFailure, "first", 0)
+	if err != nil {
+		t.Fatalf("fixRequestMessage: %v", err)
+	}
+	mid, err := s.InsertMessage(ctx, msg)
+	if err != nil {
+		t.Fatalf("InsertMessage: %v", err)
+	}
+	if _, insertErr := s.InsertMessage(ctx, store.Message{
+		TicketID: ticket.ID, Type: msgTypeUpdate, Author: authorSystem,
+		Body: fmt.Sprintf("fix dropped %d", mid),
+	}); insertErr != nil {
+		t.Fatalf("InsertMessage (dropped): %v", insertErr)
+	}
+
+	if _, open, openErr := openFixRequest(ctx, d, ticket); openErr != nil {
+		t.Fatalf("openFixRequest: %v", openErr)
+	} else if open {
+		t.Fatal("openFixRequest after dropping: open = true, want false")
+	}
+
+	msg2, err := fixRequestMessage(ticket, FixKindFailure, "second", 10)
+	if err != nil {
+		t.Fatalf("fixRequestMessage: %v", err)
+	}
+	mid2, err := s.InsertMessage(ctx, msg2)
+	if err != nil {
+		t.Fatalf("InsertMessage: %v", err)
+	}
+
+	req, open, err := openFixRequest(ctx, d, ticket)
+	if err != nil {
+		t.Fatalf("openFixRequest: %v", err)
+	}
+	if !open {
+		t.Fatal("openFixRequest: open = false, want true (the second, undropped request)")
+	}
+	if req.MessageID != mid2 {
+		t.Errorf("req.MessageID = %d, want %d", req.MessageID, mid2)
 	}
 }
 
