@@ -38,7 +38,7 @@ templ ownerEditClaimNote(claimed bool) {
 // (#75): nil when console.showSealedSection reports the ticket does not
 // get one.
 // smoke is the stored plan's owner_smoke items, set by
-// console.threadComponent only for a ticket done with reason merged; nil
+// console.ownerSmokeItems only for a ticket done with reason merged; nil
 // renders nothing.
 templ Thread(ticket *store.Ticket, rows []ThreadRow, wait WaitProgress, banner string, actions TicketActions, sealed *SealedSection, smoke []string) {
 	<main id="main" class="view-thread">

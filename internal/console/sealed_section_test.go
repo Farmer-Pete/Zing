@@ -34,22 +34,13 @@ const sealedSectionHostCheck = "go test ./internal/console/"
 // state the way a real handler does. The commit clears the claim; a test
 // that needs it held calls s.Claim again afterwards. Going straight from
 // queued skips checkGateApprovalTx, which fires only on planning to
-// building or a seal.
+// building or a seal. It is a one-line wrapper around
+// advanceTicketWithReason (owner_smoke_test.go) with the fixed
+// "sealed section test advance" reason, so the Claim and commit code
+// lives in one place.
 func advanceTicketToState(t *testing.T, s *store.Store, ticketID int64, state string) {
 	t.Helper()
-	const owner = "sealed-section-test-owner"
-	expires := time.Now().Add(10 * time.Minute).UTC().Truncate(time.Second)
-	claimed, err := s.Claim(t.Context(), ticketID, owner, expires)
-	if err != nil || !claimed {
-		t.Fatalf("Claim: claimed=%v err=%v", claimed, err)
-	}
-	applied, err := s.CommitHandlerResult(t.Context(), store.HandlerCommit{
-		TicketID: ticketID, Owner: owner, Expires: expires,
-		Next: state, Reason: "sealed section test advance",
-	})
-	if err != nil || !applied {
-		t.Fatalf("CommitHandlerResult(%s): applied=%v err=%v", state, applied, err)
-	}
+	advanceTicketWithReason(t, s, ticketID, state, "sealed section test advance")
 }
 
 // seedSealedSectionFixture seeds a queued ticket carrying a run, a 2-task

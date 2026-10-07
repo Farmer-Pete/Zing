@@ -451,6 +451,16 @@ func mergedDone(state string, rows []store.MessageRow) bool {
 	return false
 }
 
+// ownerSmokeItems returns the stored plan's owner_smoke items for the
+// thread's Owner smoke checks section: only when merged (mergedDone) is
+// true. nil when not merged or when there is no plan.
+func ownerSmokeItems(merged bool, plan *templates.RenderedPlan) []string {
+	if !merged || plan == nil {
+		return nil
+	}
+	return plan.Delivery.OwnerSmoke
+}
+
 // threadComponent builds the read-only Thread view for the open ticket:
 // nil ticket and no rows when open is 0 or names no ticket (design section
 // 6.6, carried over from Package 3's patchThread guard).
@@ -513,10 +523,7 @@ func (c *console) threadComponent(ctx context.Context, open int64) (templ.Compon
 		if plan != nil && showSealedSection(ticket.State, plan.Editable, rows) {
 			sealed = &templates.SealedSection{Plan: plan, Scenarios: scenarios}
 		}
-		var smoke []string
-		if plan != nil && mergedDone(ticket.State, rows) {
-			smoke = plan.Delivery.OwnerSmoke
-		}
+		smoke := ownerSmokeItems(mergedDone(ticket.State, rows), plan)
 		return templates.Thread(&ticket, threadRows, buildWaitProgress(&ticket, rows, conv), banner, actions, sealed, smoke), nil
 	case errors.Is(err, sql.ErrNoRows):
 		return templates.Thread(nil, nil, templates.WaitProgress{}, "", templates.TicketActions{}, nil, nil), nil

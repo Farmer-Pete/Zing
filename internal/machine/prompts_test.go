@@ -344,7 +344,8 @@ func TestTestsLensFlagsBrowserChecks(t *testing.T) {
 	inPlanIdx := strings.Index(text, "In a plan")
 	lineIdx := strings.Index(text, testsLensBrowserLine)
 	inCodeIdx := strings.Index(text, "In code")
-	if inPlanIdx < 0 || lineIdx < 0 || inCodeIdx < 0 {
+	anyMissing := inPlanIdx < 0 || inCodeIdx < 0 || lineIdx < 0
+	if anyMissing {
 		t.Fatalf("%s: In a plan at %d, browser line at %d, In code at %d, want all present", path, inPlanIdx, lineIdx, inCodeIdx)
 	}
 	if inPlanIdx >= lineIdx || lineIdx >= inCodeIdx {
