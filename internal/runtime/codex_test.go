@@ -897,6 +897,130 @@ func TestCodexFailureDetail(t *testing.T) {
 	}
 }
 
+func TestCodexCommandRejection(t *testing.T) {
+	t.Parallel()
+
+	const line = "rm -f style commands are not permitted. Use a safer approach"
+
+	marshal := func(t *testing.T, v any) string {
+		t.Helper()
+		b, err := json.Marshal(v)
+		if err != nil {
+			t.Fatalf("json.Marshal: %v", err)
+		}
+		return string(b)
+	}
+
+	commandExecutionItem := func(command, output, status string, exitCode *int) codexRejectionEventLine {
+		var ev codexRejectionEventLine
+		ev.Type = "item.completed"
+		ev.Item.Type = "command_execution"
+		ev.Item.Command = command
+		ev.Item.AggregatedOutput = output
+		ev.Item.Status = status
+		ev.Item.ExitCode = exitCode
+		return ev
+	}
+	zero, one := 0, 1
+
+	cases := []struct {
+		name        string
+		stdout      string
+		stderr      string
+		wantCommand string
+		wantLine    string
+	}{
+		{
+			name:        "declined command_execution item",
+			stdout:      marshal(t, commandExecutionItem("rm -f s2.json", line, "declined", &one)),
+			wantCommand: "rm -f s2.json",
+			wantLine:    line,
+		},
+		{
+			name:     "failed multiline item with no command",
+			stdout:   marshal(t, commandExecutionItem("", "line one\n"+line+"\nmore", "failed", nil)),
+			wantLine: line,
+		},
+		{
+			name:     "error event",
+			stdout:   marshal(t, codexRejectionEventLine{Type: codexEventError, Message: line}),
+			wantLine: line,
+		},
+		{
+			name: "turn.failed event",
+			stdout: func() string {
+				var ev codexRejectionEventLine
+				ev.Type = codexEventTurnFailed
+				ev.Error.Message = line
+				return marshal(t, ev)
+			}(),
+			wantLine: line,
+		},
+		{
+			name:     "plain non-JSON line",
+			stdout:   "codex: " + line,
+			wantLine: "codex: " + line,
+		},
+		{
+			name:     "stderr only",
+			stderr:   line,
+			wantLine: line,
+		},
+		{
+			name:     "stdout wins over stderr",
+			stdout:   "codex: " + line,
+			stderr:   line,
+			wantLine: "codex: " + line,
+		},
+		{
+			name:     "last stdout match wins",
+			stdout:   "codex: " + line + "\nanother: " + line + " too",
+			wantLine: "another: " + line + " too",
+		},
+		{
+			name: "clean completed item then declined item",
+			stdout: marshal(t, commandExecutionItem("", line, "completed", &zero)) + "\n" +
+				marshal(t, commandExecutionItem("rm -f s2.json", line, "declined", &one)),
+			wantCommand: "rm -f s2.json",
+			wantLine:    line,
+		},
+		{
+			name:   "quote completed command",
+			stdout: marshal(t, commandExecutionItem("cat notes.txt", "note: "+line, "completed", &zero)),
+		},
+		{
+			name:   "quote agent message",
+			stdout: `{"type":"item.completed","item":{"type":"agent_message","text":"` + line + `"}}`,
+		},
+		{
+			name:   "quote reasoning",
+			stdout: `{"type":"item.completed","item":{"type":"reasoning","text":"` + line + `"}}`,
+		},
+		{
+			name:   "quote other event",
+			stdout: `{"type":"x","note":"` + line + `"}`,
+		},
+		{
+			name:   "no line in either stream holds the phrase",
+			stdout: "all clear\nnothing to see",
+			stderr: "still clear",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			command, got := codexCommandRejection([]byte(tc.stdout), []byte(tc.stderr))
+			if command != tc.wantCommand {
+				t.Errorf("command = %q, want %q", command, tc.wantCommand)
+			}
+			if got != tc.wantLine {
+				t.Errorf("line = %q, want %q", got, tc.wantLine)
+			}
+		})
+	}
+}
+
 func TestCodexTransientMatch(t *testing.T) {
 	t.Parallel()
 
