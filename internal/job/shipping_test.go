@@ -1203,6 +1203,9 @@ func TestPublishPushErrorEscalates(t *testing.T) {
 	if commit.Escalation.Payload.Tried == "" {
 		t.Error("Tried is empty, want the push error's own text")
 	}
+	if !strings.Contains(commit.Escalation.Payload.Tried, "(attempts: 1)") {
+		t.Errorf("Tried = %q, want it to contain %q (a missing origin is not a 5xx, so it escalates after one try)", commit.Escalation.Payload.Tried, "(attempts: 1)")
+	}
 	if gh.creates != 0 {
 		t.Errorf("gh.creates = %d, want 0 (push must fail before create is ever attempted)", gh.creates)
 	}

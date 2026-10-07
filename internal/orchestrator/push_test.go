@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 // -----------------------------------------------------------------------
@@ -235,6 +236,385 @@ func (g *scriptedPushGitHub) FindPRByHead(_ context.Context, _, _, _, base strin
 		return "", 0, false, g.findErr
 	}
 	return g.findURL, g.findNumber, g.findOK, nil
+}
+
+// isPushOrigin reports whether a Runner.Run call with name and args is
+// "git push origin ...", the only command flakyPushRunner scripts.
+func isPushOrigin(name string, args []string) bool {
+	return name == "git" && len(args) >= 2 && args[0] == "push" && args[1] == "origin"
+}
+
+// flakyPushRunner wraps a real execRunner, failing the first failures calls
+// to "git push origin ..." with out and a generic non-zero-exit error, then
+// delegating every push call (and every other command, always) to
+// execRunner. pushes counts every push call it has seen, failed or not, so
+// a test can assert how many attempts pushOrigin made.
+type flakyPushRunner struct {
+	failures int
+	out      string
+	pushes   int
+}
+
+func (r *flakyPushRunner) Run(ctx context.Context, dir, name string, args ...string) (string, error) {
+	if isPushOrigin(name, args) {
+		r.pushes++
+		if r.pushes <= r.failures {
+			return r.out, errors.New("exit status 1")
+		}
+	}
+	return execRunner{}.Run(ctx, dir, name, args...)
+}
+
+func (r *flakyPushRunner) Output(ctx context.Context, dir, name string, args ...string) (string, error) {
+	return execRunner{}.Output(ctx, dir, name, args...)
+}
+
+// shortPushBackoff is TestOpenDraftPRRetriesGitHub5xx's and
+// TestPushRetryLogs' own stand-in for the 30s/60s/120s production defaults:
+// 3 entries of 1 millisecond, so a retrying test runs fast.
+var shortPushBackoff = []time.Duration{time.Millisecond, time.Millisecond, time.Millisecond}
+
+// TestOpenDraftPRRetriesGitHub5xx proves pushOrigin retries a GitHub 5xx up
+// to 3 times (4 attempts in all) before OpenDraftPR escalates, and that any
+// other push failure escalates after a single attempt.
+func TestOpenDraftPRRetriesGitHub5xx(t *testing.T) {
+	t.Parallel()
+
+	t.Run("two 5xx then success", func(t *testing.T) {
+		t.Parallel()
+		fixture := newSigningFixture(t, true)
+		repo := newSigningTestRepo(t, fixture)
+		ctx := t.Context()
+		remote := newBareRemote(ctx, t)
+		addOrigin(ctx, t, repo, remote)
+
+		runner := &flakyPushRunner{failures: 2, out: "remote: Internal Server Error"}
+		gh := &scriptedPushGitHub{createURL: "https://github.com/acme/widgets/pull/40", createNumber: 40}
+		o := newTestOrchestratorWithGitHub(t, repo, runner, gh)
+		o.pushBackoff = shortPushBackoff
+		wt := prepareSignedCommit(ctx, t, o, 740)
+
+		url, _, err := o.OpenDraftPR(ctx, wt, PullRequest{Title: testCommitTitle})
+		if err != nil {
+			t.Fatalf("OpenDraftPR: unexpected error: %v", err)
+		}
+		if url != gh.createURL {
+			t.Errorf("url = %q, want %q", url, gh.createURL)
+		}
+		if runner.pushes != 3 {
+			t.Errorf("pushes = %d, want 3", runner.pushes)
+		}
+		if gh.createCalls != 1 {
+			t.Errorf("createCalls = %d, want 1", gh.createCalls)
+		}
+
+		out := runGit(ctx, t, remote, "show-ref", "--verify", "refs/heads/"+wt.Branch())
+		if !strings.Contains(out, "refs/heads/"+wt.Branch()) {
+			t.Errorf("bare remote did not receive refs/heads/%s, show-ref = %q", wt.Branch(), out)
+		}
+	})
+
+	t.Run("four 5xx fail", func(t *testing.T) {
+		t.Parallel()
+		fixture := newSigningFixture(t, true)
+		repo := newSigningTestRepo(t, fixture)
+		ctx := t.Context()
+		remote := newBareRemote(ctx, t)
+		addOrigin(ctx, t, repo, remote)
+
+		runner := &flakyPushRunner{failures: 4, out: "remote: Internal Server Error"}
+		gh := &scriptedPushGitHub{}
+		o := newTestOrchestratorWithGitHub(t, repo, runner, gh)
+		o.pushBackoff = shortPushBackoff
+		wt := prepareSignedCommit(ctx, t, o, 741)
+
+		_, _, err := o.OpenDraftPR(ctx, wt, PullRequest{Title: testCommitTitle})
+		if err == nil {
+			t.Fatal("OpenDraftPR: expected an error, got nil")
+		}
+		if !strings.Contains(err.Error(), "(attempts: 4)") {
+			t.Errorf("error = %q, want it to contain %q", err.Error(), "(attempts: 4)")
+		}
+		if !strings.Contains(err.Error(), "Internal Server Error") {
+			t.Errorf("error = %q, want it to contain %q", err.Error(), "Internal Server Error")
+		}
+		if runner.pushes != 4 {
+			t.Errorf("pushes = %d, want 4", runner.pushes)
+		}
+		if gh.createCalls != 0 {
+			t.Errorf("createCalls = %d, want 0", gh.createCalls)
+		}
+	})
+
+	t.Run("non 5xx fails at once", func(t *testing.T) {
+		t.Parallel()
+		fixture := newSigningFixture(t, true)
+		repo := newSigningTestRepo(t, fixture)
+		ctx := t.Context()
+		remote := newBareRemote(ctx, t)
+		addOrigin(ctx, t, repo, remote)
+
+		runner := &flakyPushRunner{failures: 4, out: "! [rejected] zing/742 -> zing/742 (fetch first)"}
+		gh := &scriptedPushGitHub{}
+		o := newTestOrchestratorWithGitHub(t, repo, runner, gh)
+		o.pushBackoff = shortPushBackoff
+		wt := prepareSignedCommit(ctx, t, o, 742)
+
+		_, _, err := o.OpenDraftPR(ctx, wt, PullRequest{Title: testCommitTitle})
+		if err == nil {
+			t.Fatal("OpenDraftPR: expected an error, got nil")
+		}
+		if !strings.Contains(err.Error(), "(attempts: 1)") {
+			t.Errorf("error = %q, want it to contain %q", err.Error(), "(attempts: 1)")
+		}
+		if runner.pushes != 1 {
+			t.Errorf("pushes = %d, want 1", runner.pushes)
+		}
+	})
+
+	t.Run("http 503 retried", func(t *testing.T) {
+		t.Parallel()
+		fixture := newSigningFixture(t, true)
+		repo := newSigningTestRepo(t, fixture)
+		ctx := t.Context()
+		remote := newBareRemote(ctx, t)
+		addOrigin(ctx, t, repo, remote)
+
+		runner := &flakyPushRunner{failures: 1, out: "error: RPC failed; HTTP 503 curl 22 The requested URL returned error: 503"}
+		gh := &scriptedPushGitHub{createURL: "https://github.com/acme/widgets/pull/43", createNumber: 43}
+		o := newTestOrchestratorWithGitHub(t, repo, runner, gh)
+		o.pushBackoff = shortPushBackoff
+		wt := prepareSignedCommit(ctx, t, o, 743)
+
+		_, _, err := o.OpenDraftPR(ctx, wt, PullRequest{Title: testCommitTitle})
+		if err != nil {
+			t.Fatalf("OpenDraftPR: unexpected error: %v", err)
+		}
+		if runner.pushes != 2 {
+			t.Errorf("pushes = %d, want 2", runner.pushes)
+		}
+	})
+}
+
+// cancelAfterFirstPushRunner wraps flakyPushRunner, cancelling its own ctx
+// right after the first "git push origin ..." call returns, so a test can
+// put pushOrigin's wait on a long pushBackoff entry and still observe its
+// ctx.Done() branch return at once rather than actually waiting it out.
+type cancelAfterFirstPushRunner struct {
+	flakyPushRunner
+	cancel context.CancelFunc
+	fired  bool
+}
+
+func (r *cancelAfterFirstPushRunner) Run(ctx context.Context, dir, name string, args ...string) (string, error) {
+	out, err := r.flakyPushRunner.Run(ctx, dir, name, args...)
+	if isPushOrigin(name, args) && !r.fired {
+		r.fired = true
+		r.cancel()
+	}
+	return out, err
+}
+
+// TestPushRetryWaitRespectsCtx proves pushOrigin's wait between retries is
+// ctx-aware (owner decision Q1): with every pushBackoff entry set to an hour,
+// a push that fails its first attempt with a 5xx and then sees ctx
+// cancelled still returns promptly, with an error naming a single attempt
+// and wrapping ctx.Err(), rather than actually waiting out the hour.
+func TestPushRetryWaitRespectsCtx(t *testing.T) {
+	t.Parallel()
+	fixture := newSigningFixture(t, true)
+	repo := newSigningTestRepo(t, fixture)
+	parent := t.Context()
+	remote := newBareRemote(parent, t)
+	addOrigin(parent, t, repo, remote)
+
+	ctx, cancel := context.WithCancel(parent)
+	runner := &cancelAfterFirstPushRunner{
+		flakyPushRunner{failures: 4, out: "remote: Internal Server Error"},
+		cancel,
+		false,
+	}
+	gh := &scriptedPushGitHub{}
+	o := newTestOrchestratorWithGitHub(t, repo, runner, gh)
+	o.pushBackoff = []time.Duration{time.Hour, time.Hour, time.Hour}
+	wt := prepareSignedCommit(ctx, t, o, 745)
+
+	start := time.Now()
+	_, _, err := o.OpenDraftPR(ctx, wt, PullRequest{Title: testCommitTitle})
+	elapsed := time.Since(start)
+
+	if err == nil {
+		t.Fatal("OpenDraftPR: expected an error, got nil")
+	}
+	if elapsed > 5*time.Second {
+		t.Errorf("OpenDraftPR took %v, want it to return promptly once ctx is cancelled rather than wait out an hour-long pushBackoff entry", elapsed)
+	}
+	if !errors.Is(err, context.Canceled) {
+		t.Errorf("err = %v, want errors.Is(err, context.Canceled)", err)
+	}
+	if !strings.Contains(err.Error(), "(attempts: 1)") {
+		t.Errorf("error = %q, want it to contain %q", err.Error(), "(attempts: 1)")
+	}
+	if !strings.Contains(err.Error(), "waiting to retry") {
+		t.Errorf("error = %q, want it to contain %q", err.Error(), "waiting to retry")
+	}
+	if runner.pushes != 1 {
+		t.Errorf("pushes = %d, want 1", runner.pushes)
+	}
+}
+
+// TestIsGitHub5xx proves isGitHub5xx matches the owner's chosen phrases and
+// HTTP/error codes (Q2), and does not fire on a bare 502 inside a SHA, a
+// branch name, or a request ID, nor on a non-5xx rejection.
+func TestIsGitHub5xx(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name string
+		out  string
+		want bool
+	}{
+		{"internal server error", "remote: Internal Server Error", true},
+		{"bad gateway", "remote: Bad Gateway", true},
+		{"service unavailable", "remote: Service Unavailable", true},
+		{"gateway timeout", "remote: Gateway Timeout", true},
+		{"http 500", "error: RPC failed; HTTP 500", true},
+		{"http 502", "error: RPC failed; HTTP 502", true},
+		{"http 504", "error: RPC failed; HTTP 504", true},
+		{"error prefixed 503", "The requested URL returned error: 503", true},
+		{"sha holding 502", "fatal: unable to access: a1b2c3d4e5f6502890abcdef1234567890abcdef", false},
+		{"branch named 502", "! [rejected] zing/502-fix -> zing/502-fix (non-fast-forward)", false},
+		{"request id alone", "remote: Request ID AC8D:502:288832:310C81:6AC67999", false},
+		{"stale branch", "! [rejected] zing/9 -> zing/9 (fetch first)", false},
+		{"protected branch", "! [remote rejected] zing/9 -> zing/9 (protected branch hook declined)", false},
+		{"auth failed", "remote: Authentication failed", false},
+		{"http 404", "error: RPC failed; HTTP 404", false},
+		{"empty", "", false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			t.Parallel()
+			if got := isGitHub5xx(c.out); got != c.want {
+				t.Errorf("isGitHub5xx(%q) = %v, want %v", c.out, got, c.want)
+			}
+		})
+	}
+}
+
+// TestPushRetryDefaults proves New sets pushBackoff from a clone of
+// pushRetryBackoff, and that mutating one Orchestrator's slice never
+// touches the shared package variable.
+func TestPushRetryDefaults(t *testing.T) {
+	t.Parallel()
+	o := newTestOrchestrator(t, absLocalPath, execRunner{})
+
+	want := []time.Duration{30 * time.Second, 60 * time.Second, 120 * time.Second}
+	if len(o.pushBackoff) != len(want) {
+		t.Fatalf("pushBackoff = %v, want %v", o.pushBackoff, want)
+	}
+	for i := range want {
+		if o.pushBackoff[i] != want[i] {
+			t.Errorf("pushBackoff[%d] = %v, want %v", i, o.pushBackoff[i], want[i])
+		}
+	}
+
+	o.pushBackoff[0] = time.Hour
+	if pushRetryBackoff[0] != 30*time.Second {
+		t.Errorf("pushRetryBackoff[0] = %v, want unchanged 30s", pushRetryBackoff[0])
+	}
+}
+
+// TestGitHubRequestID proves githubRequestID returns the first GitHub
+// request ID in git push's output (5 colon-joined hex groups), and "" when
+// there is none.
+func TestGitHubRequestID(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name string
+		out  string
+		want string
+	}{
+		{
+			name: "request id on its own line",
+			out:  "remote: Request ID A512:EDA7E:31004F:396F02:6AC6793F",
+			want: "A512:EDA7E:31004F:396F02:6AC6793F",
+		},
+		{
+			name: "request id inside a sentence",
+			out:  "remote: Internal Server Error, request AC8D:299B8C:288832:310C81:6AC67999 was logged",
+			want: "AC8D:299B8C:288832:310C81:6AC67999",
+		},
+		{
+			name: "sha and no request id",
+			out:  "fatal: unable to access: a1b2c3d4e5f6502890abcdef1234567890abcdef",
+			want: "",
+		},
+		{
+			name: "empty",
+			out:  "",
+			want: "",
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			t.Parallel()
+			if got := githubRequestID(c.out); got != c.want {
+				t.Errorf("githubRequestID(%q) = %q, want %q", c.out, got, c.want)
+			}
+		})
+	}
+}
+
+// TestPushRetryLogs proves pushOrigin's "git push failed" records carry
+// ticket_id, attempt, github_5xx, retry and request_id, and that the final
+// "pushed branch" record carries the total attempts.
+func TestPushRetryLogs(t *testing.T) {
+	t.Parallel()
+	fixture := newSigningFixture(t, true)
+	repo := newSigningTestRepo(t, fixture)
+	ctx := t.Context()
+	remote := newBareRemote(ctx, t)
+	addOrigin(ctx, t, repo, remote)
+
+	requestID := "A512:EDA7E:31004F:396F02:6AC6793F"
+	runner := &flakyPushRunner{failures: 2, out: "remote: Internal Server Error\nremote: Request ID " + requestID}
+	o, logs := newTestOrchestratorCapturingLog(t, repo, runner)
+	o.pushBackoff = shortPushBackoff
+	wt := prepareSignedCommit(ctx, t, o, 744)
+
+	if err := o.Push(ctx, wt); err != nil {
+		t.Fatalf("Push: unexpected error: %v", err)
+	}
+
+	failed := findRecords(logs.records(t), "git push failed")
+	if len(failed) != 2 {
+		t.Fatalf("len(failed) = %d, want 2", len(failed))
+	}
+	for i, rec := range failed {
+		wantAttempt := float64(i + 1)
+		if got := rec["attempt"]; got != wantAttempt {
+			t.Errorf("failed[%d].attempt = %v, want %v", i, got, wantAttempt)
+		}
+		if got, want := rec["ticket_id"], float64(744); got != want {
+			t.Errorf("failed[%d].ticket_id = %v, want %v", i, got, want)
+		}
+		if got := rec["github_5xx"]; got != true {
+			t.Errorf("failed[%d].github_5xx = %v, want true", i, got)
+		}
+		if got := rec["retry"]; got != true {
+			t.Errorf("failed[%d].retry = %v, want true", i, got)
+		}
+		if got := rec["request_id"]; got != requestID {
+			t.Errorf("failed[%d].request_id = %v, want %q", i, got, requestID)
+		}
+	}
+
+	pushed := findRecords(logs.records(t), "pushed branch")
+	if len(pushed) != 1 {
+		t.Fatalf("len(pushed) = %d, want 1", len(pushed))
+	}
+	if got, want := pushed[0]["attempts"], float64(3); got != want {
+		t.Errorf("pushed[0].attempts = %v, want %v", got, want)
+	}
 }
 
 // newTestOrchestratorWithGitHub mirrors worktree_test.go's

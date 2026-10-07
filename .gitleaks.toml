@@ -13,4 +13,8 @@ regexes = [
   # from #59). The literal "keys.json" contains "key", which trips
   # generic-api-key's keyword heuristic on the adjacent quoted hex string.
   '''versionedURL\('/static/keys\.json', '[0-9a-f]{12}'\)''',
+  # internal/orchestrator/push_test.go's githubRequestID table checks that
+  # a SHA-shaped string with no GitHub request ID returns "". The 40-hex
+  # fixture after "access:" trips generic-api-key's keyword heuristic.
+  '''unable to access: [0-9a-f]{40}''',
 ]

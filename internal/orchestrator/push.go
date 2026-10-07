@@ -4,8 +4,37 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"regexp"
 	"strings"
+	"time"
 )
+
+// pushRetryBackoff is the wait after each failed git push GitHub answered
+// with a 5xx: 3 retries, so 4 attempts in all. New clones this into every
+// Orchestrator's own pushBackoff field; package tests shorten that clone
+// rather than mutating this package variable.
+var pushRetryBackoff = []time.Duration{30 * time.Second, 60 * time.Second, 120 * time.Second}
+
+// github5xxPattern matches a git push GitHub refused with a server error
+// (owner decision Q2): a status phrase, or the code right after "HTTP " or
+// "error: ", never a bare 502 inside a SHA or a branch name.
+var github5xxPattern = regexp.MustCompile(`Internal Server Error|Bad Gateway|Service Unavailable|Gateway Timeout|(?:HTTP |error: )50[0234]\b`)
+
+// isGitHub5xx reports whether out, git push's combined output, shows a
+// GitHub 5xx.
+func isGitHub5xx(out string) bool {
+	return github5xxPattern.MatchString(out)
+}
+
+// githubRequestIDPattern matches GitHub's request ID: 5 colon-joined
+// uppercase hex groups, such as A512:EDA7E:31004F:396F02:6AC6793F.
+var githubRequestIDPattern = regexp.MustCompile(`\b[0-9A-F]{1,8}(?::[0-9A-F]{1,8}){4}\b`)
+
+// githubRequestID returns the first GitHub request ID in out, git push's
+// combined output, or "" when there is none.
+func githubRequestID(out string) string {
+	return githubRequestIDPattern.FindString(out)
+}
 
 // Push pushes wt's branch to origin (PKG5-PLAN.md section 8.4). It first
 // revalidates wt (8.2): the branch must match the zing/ form, must differ
@@ -44,7 +73,7 @@ func (o *Orchestrator) Push(ctx context.Context, wt Worktree) error {
 		}
 	}
 
-	o.log.Info("pushing branch", "branch", wt.branch, "commits", len(shas))
+	o.log.Info("pushing branch", "ticket_id", wt.ticketID, "branch", wt.branch, "commits", len(shas))
 
 	// The push itself (no -u) writes only refs/remotes/origin/<branch>: a
 	// ref update, which git-safe object/ref writes already make safe
@@ -53,8 +82,9 @@ func (o *Orchestrator) Push(ctx context.Context, wt Worktree) error {
 	// remote never blocks every other ticket's shared git writes in this
 	// repository for the whole network round trip.
 	refspec := "refs/heads/" + wt.branch + ":refs/heads/" + wt.branch
-	if out, runErr := o.run.Run(ctx, wt.dir, "git", "push", "origin", refspec); runErr != nil {
-		return fmt.Errorf("orchestrator: push: git push: %w: %s", runErr, strings.TrimSpace(out))
+	attempts, pushErr := o.pushOrigin(ctx, wt, refspec)
+	if pushErr != nil {
+		return pushErr
 	}
 
 	// Only the upstream config writes touch the shared config, so only
@@ -71,9 +101,35 @@ func (o *Orchestrator) Push(ctx context.Context, wt Worktree) error {
 		}
 	}
 
-	o.log.Info("pushed branch", "branch", wt.branch)
+	o.log.Info("pushed branch", "ticket_id", wt.ticketID, "branch", wt.branch, "attempts", attempts)
 
 	return nil
+}
+
+// pushOrigin runs git push, retrying a GitHub 5xx after each o.pushBackoff
+// wait (owner decision Q1: the wait runs inside this call, which blocks the
+// calling tick). Any other failure returns at once. attempts counts every
+// push run, including the final one, whether it succeeded or not.
+func (o *Orchestrator) pushOrigin(ctx context.Context, wt Worktree, refspec string) (attempts int, err error) {
+	for attempt := 1; ; attempt++ {
+		out, runErr := o.run.Run(ctx, wt.dir, "git", "push", "origin", refspec)
+		if runErr == nil {
+			return attempt, nil
+		}
+
+		server := isGitHub5xx(out)
+		retry := server && attempt <= len(o.pushBackoff)
+		o.log.Warn("git push failed", "ticket_id", wt.ticketID, "branch", wt.branch, "attempt", attempt, "github_5xx", server, "retry", retry, "request_id", githubRequestID(out))
+		if !retry {
+			return attempt, fmt.Errorf("orchestrator: push: git push (attempts: %d): %w: %s", attempt, runErr, strings.TrimSpace(out))
+		}
+
+		select {
+		case <-ctx.Done():
+			return attempt, fmt.Errorf("orchestrator: push: git push (attempts: %d): waiting to retry: %w", attempt, ctx.Err())
+		case <-time.After(o.pushBackoff[attempt-1]):
+		}
+	}
 }
 
 // unpushedShas returns every commit sha in <base>..<branch>, read with

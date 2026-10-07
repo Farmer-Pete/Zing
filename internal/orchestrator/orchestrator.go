@@ -12,9 +12,11 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
+	"time"
 
 	"zing/internal/gitbin"
 )
@@ -238,6 +240,13 @@ type Orchestrator struct {
 	// the first recordFallback.
 	fallbackGuard sync.Mutex
 	fallbacks     map[int64]BaseFallback
+
+	// pushBackoff is the wait after each failed git push GitHub answered
+	// with a 5xx (pushOrigin, push.go): a clone of pushRetryBackoff, set by
+	// New. Its length is the number of retries, so pushOrigin makes at
+	// most 1+len(pushBackoff) attempts. Package tests replace it with
+	// short entries; nothing else writes it after New.
+	pushBackoff []time.Duration
 }
 
 // New validates proj (non-empty Owner, Repo, DefaultBranch; absolute
@@ -258,7 +267,7 @@ func New(proj Project, gh GitHub, run Runner, log *slog.Logger) (*Orchestrator, 
 	if log == nil {
 		log = slog.Default()
 	}
-	return &Orchestrator{proj: proj, gh: gh, run: run, log: log}, nil
+	return &Orchestrator{proj: proj, gh: gh, run: run, log: log, pushBackoff: slices.Clone(pushRetryBackoff)}, nil
 }
 
 // NewRunner returns the real Runner: os/exec commands, hooks and fsmonitor
