@@ -67,6 +67,7 @@ import {
 	describeAction,
 	ACTION_LABELS,
 	pickupResultView,
+	tuningRequestBody,
 	RECONNECT_BASE_MS,
 	RECONNECT_MAX_MS,
 	emptyStreamStatus,
@@ -655,6 +656,24 @@ test('pickupResultView: an unreadable 200 still says picked up', () => {
 		assert.deepEqual(pickupResultView(true, body, 5), {
 			text: 'Picked up #5', linkText: '', ticketID: 0,
 		});
+	}
+});
+
+// tuningRequestBody: a Settings row's name and raw input text turned into
+// POST /settings' JSON body (console.js's saveTuning).
+
+test('tuningRequestBody: a whole number, with or without padding, builds the request body', () => {
+	assert.deepEqual(tuningRequestBody('max_parallel', '3'), {
+		body: JSON.stringify({ name: 'max_parallel', value: 3 }),
+	});
+	assert.deepEqual(tuningRequestBody('max_parallel', '  3  '), {
+		body: JSON.stringify({ name: 'max_parallel', value: 3 }),
+	});
+});
+
+test('tuningRequestBody: a non-whole-number value is refused without posting', () => {
+	for (const raw of ['2.5', '-1', '', 'abc']) {
+		assert.deepEqual(tuningRequestBody('max_parallel', raw), { error: 'enter a whole number' });
 	}
 });
 
