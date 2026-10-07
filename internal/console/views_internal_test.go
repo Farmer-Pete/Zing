@@ -419,6 +419,8 @@ func TestUpdateLineFixMarkers(t *testing.T) {
 		{"fix landed", "fix landed 3 sha " + sha, "Fix landed at 0123456."},
 		{"fix dropped", "fix dropped 5", "Fix dropped; judging again."},
 		{"fix dropped with a malformed id", "fix dropped oops", "fix dropped oops"},
+		{"fix dropped with extra fields", "fix dropped 5 6", "fix dropped 5 6"},
+		{"fix dropped with no id", "fix dropped ", "fix dropped "},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -1227,6 +1229,11 @@ func TestMarkerRecognized(t *testing.T) {
 			"a fix dropped marker is recognized",
 			store.MessageRow{Message: store.Message{Type: msgTypeUpdate, Author: authorSystem, Body: "fix dropped 5"}}, //nolint:modernize // keyed on purpose
 			true,
+		},
+		{
+			"a malformed fix dropped marker is not recognized",
+			store.MessageRow{Message: store.Message{Type: msgTypeUpdate, Author: authorSystem, Body: "fix dropped oops"}}, //nolint:modernize // keyed on purpose
+			false,
 		},
 		{
 			"an unregistered marker is not recognized",

@@ -998,20 +998,19 @@ const (
 
 // updateMarkerFixRequestedPrefix, updateMarkerFixLandedPrefix, and
 // updateMarkerFixDroppedPrefix mirror internal/job/fix.go's own
-// fixRequestedPrefix and fixLandedPrefix literals, and judging.go's
-// rejudgeWithoutFix: "fix requested <kind> after run <R>"
-// (fixRequestMessage) opens a fix unit -- kind one of findings, failure,
-// ci_log, or threads (FixKind.Values) -- "fix landed <mid> sha <sha>"
-// (building.go's land and its adopted-commit twin) closes it once the
-// unit's own commit lands, and "fix dropped <mid>" (rejudgeWithoutFix,
-// ticket #80) closes it when the owner picks "Judge again without a fix"
-// instead. None had a console case until this task (and the one before
-// it): design/threading-design.md's review found the first two
-// unrecognized (a loose card today), and cmd/zing's own e2e second guard
+// fixRequestedPrefix, fixLandedPrefix, and fixDroppedPrefix literals:
+// "fix requested <kind> after run <R>" (fixRequestMessage) opens a fix
+// unit -- kind one of findings, failure, ci_log, or threads
+// (FixKind.Values) -- "fix landed <mid> sha <sha>" (building.go's land
+// and its adopted-commit twin) closes it once the unit's own commit
+// lands, and "fix dropped <mid>" (rejudgeWithoutFix, ticket #80) closes
+// it when the owner picks "Judge again without a fix" instead.
+// design/threading-design.md's review found the first two unrecognized
+// (a loose card today), and cmd/zing's own e2e second guard
 // (verifySelftestMarkersAllRecognized) failed on the first real "fix
 // requested failure after run <R>" marker the selftest pipeline wrote
-// until those two cases were added; "fix dropped <mid>" (ticket #108)
-// follows the same pattern.
+// until those two cases were added. Ticket #108 added the "fix dropped"
+// case that follows the same pattern.
 const (
 	updateMarkerFixRequestedPrefix = "fix requested "
 	updateMarkerFixLandedPrefix    = "fix landed "
