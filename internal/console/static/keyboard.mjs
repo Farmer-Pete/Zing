@@ -1414,3 +1414,21 @@ export function pickupResultView(ok, bodyText, n) {
 	}
 	return { text: `Picked up #${n} as `, linkText: `ticket ${ticketID}`, ticketID };
 }
+
+/**
+ * tuningRequestBody turns a Settings row's name and raw input text into
+ * POST /settings' JSON body, or an error the row shows instead of posting.
+ * The server checks the bounds; this only rejects text that is not a
+ * whole number.
+ *
+ * @param {string} name
+ * @param {string} raw
+ * @returns {{body: string, error?: undefined}|{error: string, body?: undefined}}
+ */
+export function tuningRequestBody(name, raw) {
+	const text = String(raw ?? '').trim();
+	if (!/^[0-9]+$/.test(text)) {
+		return { error: 'enter a whole number' };
+	}
+	return { body: JSON.stringify({ name, value: Number(text) }) };
+}

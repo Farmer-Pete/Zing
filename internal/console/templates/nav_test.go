@@ -126,6 +126,27 @@ func TestNavThreadBadgeByKind(t *testing.T) {
 	})
 }
 
+// TestNav_HasSettingsLink proves the Settings nav link (#81, owner
+// decision Q1) renders after Feed, with a click expression that carries
+// view settings.
+func TestNav_HasSettingsLink(t *testing.T) {
+	t.Parallel()
+
+	got := renderNav(t, nil, 0)
+	feedIdx := strings.Index(got, `>Feed<`)
+	settingsIdx := strings.Index(got, `>Settings<`)
+	if feedIdx == -1 || settingsIdx == -1 {
+		t.Fatalf("rendered nav missing Feed or Settings link; got:\n%s", got)
+	}
+	if settingsIdx < feedIdx {
+		t.Errorf("Settings link rendered before Feed; got:\n%s", got)
+	}
+	want := `data-on:click__prevent="document.getElementById(&#39;stream-ctl&#39;).dispatchEvent(new CustomEvent(&#39;zing-nav&#39;,{detail:{view:&#39;settings&#39;,open:0,project:0}}))"`
+	if !strings.Contains(got, want) {
+		t.Errorf("rendered nav missing the Settings click expression %q; got:\n%s", want, got)
+	}
+}
+
 // TestZingNavExpr_KnownViewsUnchanged pins zingNavExpr's exact output for
 // every view name a real caller passes today, so hardening it against an
 // out-of-set view (below) cannot silently change what the current literal

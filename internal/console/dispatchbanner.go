@@ -20,10 +20,6 @@ type Dispatch interface {
 	Resume(ctx context.Context) error
 }
 
-// Option configures a console before New registers its routes (ticket
-// #89): applied in New in argument order.
-type Option func(*console)
-
 // WithDispatch wires the dispatcher behind the #alerts stop banner and
 // POST /dispatch/resume (ticket #89). Without it, stopBanner always
 // renders nothing and handleDispatchResume always answers 503: every one

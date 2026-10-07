@@ -59,6 +59,7 @@ import {
 	versionedURL,
 	streamStatusView,
 	pickupResultView,
+	tuningRequestBody,
 } from './keyboard.mjs';
 
 // defaultNav is the shell's own data-signals default (templates/shell.templ:
@@ -1466,6 +1467,57 @@ function installPickupBox() {
 	});
 }
 
+// ---- Settings view: live dispatch tuning (ticket #81) --------------------
+
+// saveTuning posts one Settings row's value to POST /settings. On a
+// refusal it shows the server's text in the row's message span; on
+// success it clears the span, and the stream's next patch shows the new
+// value and source line. Writes go through suppressPatchSignal like
+// showPickupMessage's.
+async function saveTuning(button) {
+	const row = button.closest('.tuning-row');
+	const input = row?.querySelector('.tuning-value');
+	const message = row?.querySelector('.tuning-message');
+	const name = row?.dataset?.tuningName;
+	if (!row || !input || !message || !name) {
+		return;
+	}
+	const show = (text) => {
+		suppressPatchSignal = true;
+		message.textContent = text;
+		suppressPatchSignal = false;
+	};
+	const req = tuningRequestBody(name, input.value);
+	if (req.error) {
+		show(req.error);
+		return;
+	}
+	try {
+		const resp = await fetch('/settings', {
+			method: 'POST',
+			headers: { 'Content-Type': 'application/json', 'Datastar-Request': 'true' },
+			body: req.body,
+		});
+		show(resp.ok ? '' : (await resp.text()).trim() || 'request failed');
+	} catch (err) {
+		console.error('console.js: POST /settings', err);
+		show('request failed');
+	}
+}
+
+// installTuningControls wires the Settings view's Save buttons, delegated
+// from document like installPickupBox, because #main is morphed by every
+// /stream patch.
+function installTuningControls() {
+	document.addEventListener('click', (event) => {
+		const button = event.target.closest?.('.tuning-row button.tuning-save');
+		if (button) {
+			event.preventDefault();
+			saveTuning(button);
+		}
+	});
+}
+
 // ---- ticket actions: abandon, restart from planning (ticket #65) ---------
 
 // postTicketAction handles the confirmed Abandon/Restart click: posts
@@ -2241,7 +2293,7 @@ function installNavBridge() {
 // loadBindings' own /static/keys.json fetch (bug fix): none of
 // installStreamWatch, installNavBridge, installPatchObserver, installSideBox,
 // installLogControls, installChipActivation, installItemNoteSave,
-// installPickupBox, installTicketActions, installSandboxRunBox,
+// installPickupBox, installTuningControls, installTicketActions, installSandboxRunBox,
 // installOwnerEdit, installReplyAutosave, or installReplyFocusTracking reads
 // state.bindings, so there was no reason their listeners -- installNavBridge
 // above all, the zing-nav bridge a Threads-sidebar click needs live as early
@@ -2260,6 +2312,7 @@ async function install() {
 	installChipActivation();
 	installItemNoteSave();
 	installPickupBox();
+	installTuningControls();
 	installTicketActions();
 	installDispatchResume();
 	installSandboxRunBox();

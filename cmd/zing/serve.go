@@ -335,14 +335,28 @@ func serve(ctx context.Context, cfgPath, dbPath string, seedDemo bool) error {
 	// same value, so a command it runs is run exactly as CHECK would run it.
 	cmds := job.NewCommandRunner(sbSet.Build, serveRequireSandbox)
 
-	d, err := zdispatch.New(st, tr, b, m, job.Registry(), bindings, zdispatch.Config{
-		Interval:    dispatchInterval(cfg.Dispatch.IntervalSeconds),
+	tune, tuneSources, err := zdispatch.LoadTuning(ctx, st, zdispatch.Tuning{
 		MaxParallel: dispatchMaxParallel(cfg.Dispatch.MaxParallel),
+		Interval:    dispatchInterval(cfg.Dispatch.IntervalSeconds),
+		Budget:      time.Duration(cfg.Budget.AgentMinutesPerTicket) * time.Minute,
+	})
+	if err != nil {
+		_ = st.Close()
+		return err
+	}
+	slog.Info("dispatch: startup tuning",
+		"max_parallel", tune.Value(zdispatch.TuneMaxParallel), "max_parallel_source", tuneSources[zdispatch.TuneMaxParallel],
+		"interval_seconds", tune.Value(zdispatch.TuneIntervalSeconds), "interval_seconds_source", tuneSources[zdispatch.TuneIntervalSeconds],
+		"agent_minutes_per_ticket", tune.Value(zdispatch.TuneAgentMinutes), "agent_minutes_per_ticket_source", tuneSources[zdispatch.TuneAgentMinutes])
+
+	d, err := zdispatch.New(st, tr, b, m, job.Registry(), bindings, zdispatch.Config{
+		Interval:    tune.Interval,
+		MaxParallel: tune.MaxParallel,
 		Owner:       claimOwner(),
 		Models: map[string]string{
 			modelAliasSonnet: cfg.Models.Sonnet, modelAliasOpus: cfg.Models.Opus, modelAliasFable: cfg.Models.Fable, modelAliasCodex: cfg.Models.Codex,
 		},
-		Budget:         time.Duration(cfg.Budget.AgentMinutesPerTicket) * time.Minute,
+		Budget:         tune.Budget,
 		Floor:          floor,
 		Projects:       projects,
 		Sandboxes:      sbSet,
@@ -402,7 +416,7 @@ func serve(ctx context.Context, cfgPath, dbPath string, seedDemo bool) error {
 	allowedHosts = append(allowedHosts, cfg.Console.AllowedHosts...)
 
 	handler := console.New(st, b, m, allowedHosts, cfg.Console.Port, logHandler, push, pushToken, floor, sbSet.FirstUnavailable(usedSandboxProfiles(m)), tr, cfg.User,
-		job.TicketCommands{Store: st, Machine: m, Projects: projects, Commands: cmds}, console.WithDispatch(d))
+		job.TicketCommands{Store: st, Machine: m, Projects: projects, Commands: cmds}, console.WithTuner(d), console.WithDispatch(d))
 	srv := newServer(ctx, handler)
 
 	listeners, err := listenOnAll(ctx, hosts, cfg.Console.Port)

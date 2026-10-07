@@ -2754,12 +2754,13 @@ type markedComment struct {
 type shipTrackerDouble struct {
 	*tracker.Fixture
 
-	mu       sync.Mutex
-	ownLogin string
-	marked   map[string][]markedComment // ref -> comments, in arrival order
-	posted   []recordedComment          // every successful Comment call
-	closed   []string                   // every successful Close call's ref
-	sequence []string                   // "comment:<ref>" then "close:<ref>", call order
+	mu            sync.Mutex
+	ownLogin      string
+	marked        map[string][]markedComment // ref -> comments, in arrival order
+	posted        []recordedComment          // every successful Comment call
+	closed        []string                   // every successful Close call's ref
+	sequence      []string                   // "comment:<ref>" then "close:<ref>", call order
+	closeAttempts int                        // every Close call, successful or not
 
 	failComment, failContains, failClose error
 }
@@ -2809,6 +2810,7 @@ func (s *shipTrackerDouble) CommentContains(_ context.Context, _, ref, needle st
 func (s *shipTrackerDouble) Close(_ context.Context, _, ref string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.closeAttempts++
 	if s.failClose != nil {
 		return s.failClose
 	}
@@ -2827,6 +2829,15 @@ func (s *shipTrackerDouble) callSequence() []string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return append([]string(nil), s.sequence...)
+}
+
+// closeAttemptCount is every Close call this double received, whether or
+// not failClose made it fail, so a test can prove a failing Close was
+// actually attempted and not merely absent from callSequence.
+func (s *shipTrackerDouble) closeAttemptCount() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.closeAttempts
 }
 
 var _ tracker.Tracker = (*shipTrackerDouble)(nil)
@@ -3076,6 +3087,10 @@ type spyHandler struct {
 	// dispatch.Config.ReviewBots into the Deps a handler actually sees,
 	// the same way judgeCodexHome already covers JudgeCodexHome.
 	reviewBots job.ReviewBotRule
+	// budget records d.Budget, so TestSetTuning_NextDepsCarriesNewBudget
+	// can assert a SetTuning call reaches the very next job.Deps
+	// runAndCommit builds (#81).
+	budget time.Duration
 
 	next, reason string
 	err          error
@@ -3087,6 +3102,7 @@ func (h *spyHandler) Run(ctx context.Context, t store.Ticket, d job.Deps) (store
 	h.expires = d.Expires
 	h.judgeCodexHome = d.JudgeCodexHome
 	h.reviewBots = d.ReviewBots
+	h.budget = d.Budget
 	if dl, ok := ctx.Deadline(); ok {
 		h.hasDeadline = true
 		h.deadline = dl
@@ -3140,6 +3156,13 @@ func (h *spyHandler) ReviewBots() job.ReviewBotRule {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	return h.reviewBots
+}
+
+// Budget returns the most recent Run call's d.Budget.
+func (h *spyHandler) Budget() time.Duration {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.budget
 }
 
 // countingRuntime wraps a runtime.Runtime and counts every Run call, so a
@@ -4076,6 +4099,9 @@ func TestTrackerEffectUnknownKindPostsNothing(t *testing.T) {
 	if got := rec.recorded(); len(got) != 0 {
 		t.Errorf("tracker comments = %+v, want none (an unrecognized kind must post nothing)", got)
 	}
+	if rec.Closed(testFixtureRef) {
+		t.Errorf("issue closed = true, want false (an unrecognized kind must close nothing)")
+	}
 }
 
 // TestTick_TrackerEffectPostsNothingToDoCommentAfterCommit proves the D12
@@ -4088,9 +4114,10 @@ func TestTick_TrackerEffectPostsNothingToDoCommentAfterCommit(t *testing.T) {
 	s := newDispatchTestStore(t)
 	projectID := seedProject(t, s)
 	const bindingUser = testBindingUser
-	if _, err := s.InsertTicket(t.Context(), store.Ticket{
+	ticketID, err := s.InsertTicket(t.Context(), store.Ticket{
 		ProjectID: projectID, TrackerRef: testFixtureRef, Title: "t", State: testStateQueued,
-	}); err != nil {
+	})
+	if err != nil {
 		t.Fatalf("InsertTicket: %v", err)
 	}
 
@@ -4109,7 +4136,7 @@ func TestTick_TrackerEffectPostsNothingToDoCommentAfterCommit(t *testing.T) {
 	if len(got) != 1 {
 		t.Fatalf("tracker comments = %d, want 1", len(got))
 	}
-	wantBody := tracker.NothingToDoComment(bindingUser, "already handled elsewhere")
+	wantBody := tracker.NothingToDoComment(bindingUser, "already handled elsewhere") + "\n\n" + fmt.Sprintf("<!-- zing:nothing t%d -->", ticketID)
 	if got[0].body != wantBody {
 		t.Errorf("comment body =\n%q\nwant\n%q", got[0].body, wantBody)
 	}
@@ -4118,6 +4145,99 @@ func TestTick_TrackerEffectPostsNothingToDoCommentAfterCommit(t *testing.T) {
 	}
 	if got[0].project != testProject.Name {
 		t.Errorf("comment project = %q, want %q", got[0].project, testProject.Name)
+	}
+	if !rec.Closed(testFixtureRef) {
+		t.Errorf("issue closed = false, want true (the nothing_to_do path closes after commenting)")
+	}
+}
+
+// TestTick_NothingToDoSkipsMarkedCommentStillCloses proves postMarkedOnce's
+// guard applies on the nothing_to_do path too (design section 10.5, owner
+// decision Q1): when the zing:nothing marker is already on the issue from
+// the tracker's own login, postCommitTrackerEffect posts no comment but
+// still closes.
+func TestTick_NothingToDoSkipsMarkedCommentStillCloses(t *testing.T) {
+	t.Parallel()
+
+	s, projectID, ticketID, tr := shipTestFixture(t)
+
+	reg := job.Registry()
+	reg[testStateQueued] = trackerEffectHandler{}
+	bindings := []dispatch.Binding{{StoreProjectID: projectID, TrackerProject: testProject.Name, User: testBindingUser}}
+
+	marker := fmt.Sprintf("<!-- zing:nothing t%d -->", ticketID)
+	tr.seedMarked(tr.ownLogin, "an earlier post\n\n"+marker)
+
+	d := newDispatcher(t, s, tr, bus.New(), fakeRuntime(t), reg, bindings, dispatch.Config{MaxParallel: 2, Owner: testOwner})
+
+	if err := d.Tick(t.Context()); err != nil {
+		t.Fatalf("Tick: %v", err)
+	}
+
+	if got := tr.postedComments(); len(got) != 0 {
+		t.Errorf("posted comments = %+v, want none (the marker was already there)", got)
+	}
+	wantSeq := []string{"close:" + testFixtureRef}
+	if seq := tr.callSequence(); !slices.Equal(seq, wantSeq) {
+		t.Errorf("call sequence = %v, want %v", seq, wantSeq)
+	}
+}
+
+// TestTick_NothingToDoCloseFailureIsBestEffort proves a failing Close is
+// best-effort, just as a failing Comment is (design D12): Tick still
+// returns nil and the ticket's own commit stays applied. It does not run in
+// parallel with another subtest that touches slog (matching
+// TestTick_IntakeErrorOnOneProjectLogsAndContinuesToTheNext above), since it
+// swaps the process-wide slog default to capture "tracker close failed".
+func TestTick_NothingToDoCloseFailureIsBestEffort(t *testing.T) {
+	s, projectID, ticketID, tr := shipTestFixture(t)
+
+	reg := job.Registry()
+	reg[testStateQueued] = trackerEffectHandler{}
+	bindings := []dispatch.Binding{{StoreProjectID: projectID, TrackerProject: testProject.Name, User: testBindingUser}}
+
+	tr.failClose = errors.New("boom: close failed")
+
+	var logBuf bytes.Buffer
+	prevDefault := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logBuf, &slog.HandlerOptions{Level: slog.LevelDebug})))
+	t.Cleanup(func() { slog.SetDefault(prevDefault) })
+
+	d := newDispatcher(t, s, tr, bus.New(), fakeRuntime(t), reg, bindings, dispatch.Config{MaxParallel: 2, Owner: testOwner})
+
+	if err := d.Tick(t.Context()); err != nil {
+		t.Fatalf("Tick: %v, want nil (a tracker close failure is best-effort)", err)
+	}
+
+	got := tr.postedComments()
+	if len(got) != 1 {
+		t.Fatalf("posted comments = %d, want 1", len(got))
+	}
+	marker := fmt.Sprintf("<!-- zing:nothing t%d -->", ticketID)
+	if !strings.HasSuffix(got[0].body, marker) {
+		t.Errorf("comment body = %q, want it to end with %q", got[0].body, marker)
+	}
+
+	wantSeq := []string{"comment:" + testFixtureRef}
+	if seq := tr.callSequence(); !slices.Equal(seq, wantSeq) {
+		t.Errorf("call sequence = %v, want %v (a failed close must not be recorded as one)", seq, wantSeq)
+	}
+	if n := tr.closeAttemptCount(); n != 1 {
+		t.Errorf("close attempts = %d, want 1 (the close must actually be tried, not skipped)", n)
+	}
+
+	final := getTicket(t, s, ticketID)
+	if final.ClaimOwner != nil {
+		t.Errorf("final ticket claim owner = %v, want nil (the ticket's own commit still applied)", *final.ClaimOwner)
+	}
+
+	logged := logBuf.String()
+	wantWarn := fmt.Sprintf("msg=\"tracker close failed\" ticket_id=%d ref=%s", ticketID, testFixtureRef)
+	if !strings.Contains(logged, wantWarn) {
+		t.Errorf("log output = %q, want it to contain %q", logged, wantWarn)
+	}
+	if strings.Contains(logged, "tracker issue closed") {
+		t.Errorf("log output = %q, want no \"tracker issue closed\" (the close failed)", logged)
 	}
 }
 
@@ -4208,12 +4328,101 @@ func TestTick_PlanningNothingToDoAllFalseClaimsPostsTrackerComment(t *testing.T)
 	if len(got) != 1 {
 		t.Fatalf("tracker comments = %d, want 1", len(got))
 	}
-	wantBody := tracker.NothingToDoComment(bindingUser, notes)
+	wantBody := tracker.NothingToDoComment(bindingUser, notes) + "\n\n" + fmt.Sprintf("<!-- zing:nothing t%d -->", ticketID)
 	if got[0].body != wantBody {
 		t.Errorf("comment body =\n%q\nwant\n%q", got[0].body, wantBody)
 	}
 	if got[0].ref != testFixtureRef {
 		t.Errorf("comment ref = %q, want %q", got[0].ref, testFixtureRef)
+	}
+}
+
+// TestTick_PlanningNothingToDoClosesIssueOnce proves task 1's close (design
+// D12, owner decision Q1): after the real planning handler's nothing_to_do
+// commit lands, the same Tick posts tracker.NothingToDoComment through the
+// zing:nothing marker and then closes the issue, in that order, and a
+// second Tick against the now-done ticket repeats neither call. It does not
+// run in parallel with another subtest that touches slog (matching
+// TestTick_IntakeErrorOnOneProjectLogsAndContinuesToTheNext above), since it
+// swaps the process-wide slog default to capture "tracker issue closed".
+func TestTick_PlanningNothingToDoClosesIssueOnce(t *testing.T) {
+	s := newDispatchTestStore(t)
+	projectID := seedProject(t, s)
+	const bindingUser = "nothing-to-do-owner"
+	ticketID, err := s.InsertTicket(t.Context(), store.Ticket{
+		ProjectID: projectID, TrackerRef: testFixtureRef, Title: "t", State: testStateQueued,
+	})
+	if err != nil {
+		t.Fatalf("InsertTicket: %v", err)
+	}
+
+	const notes = "the described behavior already exists and is already tested"
+	resp := &response.NothingToDoResponse{
+		Job: response.JobPlanning, Outcome: response.OutcomeNothingToDo,
+		Claims: []response.Claim{
+			{Kind: response.ClaimKindCode, Verdict: response.ClaimVerdictFalse, Evidence: readyClaimEvidencePath + ":1", Text: "already returns hello"},
+			{Kind: response.ClaimKindCode, Verdict: response.ClaimVerdictFalse, Evidence: readyClaimEvidencePath + ":2", Text: "already tested"},
+		},
+		Notes: notes,
+		Replies: []response.Reply{
+			{Question: "Q1", Settled: true, Decision: "The owner's answer to Q1 settles this thread."},
+		},
+	}
+	rt := &planningNothingToDoRuntime{t: t, fake: fakeRuntime(t), resp: resp}
+
+	advanceTicket(t, s, rt, ticketID, testStateQueued)    // queued -> planning
+	runHandlerOnce(t, s, rt, ticketID, testStatePlanning) // classify: sets kind
+	runHandlerOnce(t, s, rt, ticketID, testStatePlanning) // first turn: posts Q1, waits
+	answerOpenQuestion(t, s, ticketID)
+
+	bindings := []dispatch.Binding{{StoreProjectID: projectID, TrackerProject: testProject.Name, User: bindingUser}}
+	tr := newShipTrackerDouble(t, "zing-bot")
+	d := newDispatcher(t, s, tr, bus.New(), rt, nil, bindings, dispatch.Config{MaxParallel: 2, Owner: testOwner})
+
+	var logBuf bytes.Buffer
+	prevDefault := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logBuf, &slog.HandlerOptions{Level: slog.LevelDebug})))
+	t.Cleanup(func() { slog.SetDefault(prevDefault) })
+
+	if err := d.Tick(t.Context()); err != nil {
+		t.Fatalf("Tick: %v", err)
+	}
+
+	final := getTicket(t, s, ticketID)
+	if final.State != testStateDone {
+		t.Fatalf("final ticket state = %q, want done", final.State)
+	}
+
+	wantBody := tracker.NothingToDoComment(bindingUser, notes) + "\n\n" + fmt.Sprintf("<!-- zing:nothing t%d -->", ticketID)
+	got := tr.postedComments()
+	if len(got) != 1 {
+		t.Fatalf("posted comments = %d, want 1", len(got))
+	}
+	if got[0].body != wantBody {
+		t.Errorf("comment body =\n%q\nwant\n%q", got[0].body, wantBody)
+	}
+	if got[0].ref != testFixtureRef {
+		t.Errorf("comment ref = %q, want %q", got[0].ref, testFixtureRef)
+	}
+
+	wantInfo := fmt.Sprintf("msg=\"tracker issue closed\" ticket_id=%d ref=%s", ticketID, testFixtureRef)
+	if logged := logBuf.String(); !strings.Contains(logged, wantInfo) {
+		t.Errorf("log output = %q, want it to contain %q", logged, wantInfo)
+	}
+
+	wantSeq := []string{"comment:" + testFixtureRef, "close:" + testFixtureRef}
+	if seq := tr.callSequence(); !slices.Equal(seq, wantSeq) {
+		t.Fatalf("call sequence = %v, want %v", seq, wantSeq)
+	}
+
+	if err := d.Tick(t.Context()); err != nil {
+		t.Fatalf("second Tick: %v", err)
+	}
+	if got := tr.postedComments(); len(got) != 1 {
+		t.Errorf("posted comments after second Tick = %d, want still 1 (no retry post)", len(got))
+	}
+	if seq := tr.callSequence(); !slices.Equal(seq, wantSeq) {
+		t.Errorf("call sequence after second Tick = %v, want unchanged %v (no retry comment or close)", seq, wantSeq)
 	}
 }
 
@@ -4253,6 +4462,9 @@ func TestTick_TrackerEffectFailureIsBestEffort(t *testing.T) {
 	final := getTicket(t, s, ticketID)
 	if final.ClaimOwner != nil {
 		t.Errorf("final ticket claim owner = %v, want nil (the ticket's own commit still applied)", *final.ClaimOwner)
+	}
+	if rec.Closed(testFixtureRef) {
+		t.Errorf("issue closed = true, want false (a failed comment means no close, owner decision Q2)")
 	}
 }
 

@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"zing/internal/bus"
+	"zing/internal/dispatch"
 	"zing/internal/machine"
 	"zing/internal/response"
 	"zing/internal/store"
@@ -134,6 +135,14 @@ type console struct {
 	// WithDispatch option.
 	dispatch Dispatch
 
+	// tuner backs POST /settings and the Settings view (#81, Q1): the
+	// running dispatcher whose live max_parallel, dispatch interval, and
+	// agent budget the owner can change without a restart. Set only
+	// through WithTuner; nil (every test and caller that does not itself
+	// exercise dispatch settings) makes POST /settings answer 503 and the
+	// Settings view report settings are not available.
+	tuner *dispatch.Dispatcher
+
 	// startedAt is when New built this console (bug fix: the Log rail's
 	// empty state read as "No log lines yet." after every `zing serve`
 	// restart, since log.go's ring is in memory and a restart always starts
@@ -175,6 +184,7 @@ type console struct {
 //	POST /read                  mark one message read (design section 6.8)
 //	POST /loglevel               change the runtime log level (design section 6.12, 7.1)
 //	POST /debug                  toggle one ticket's per-ticket debug override (design section 6.12, 7.1)
+//	POST /settings               change max_parallel, the dispatch interval, or the agent budget live (#81)
 //	POST /side                  the inert side box's fixed reply (design section 6.11, 7.1)
 //	POST /stop                  stop everything, or one ticket; no keyboard key offers this yet (design section 6.11, 7.1)
 //	POST /dispatch/resume       resume a stopped dispatcher from the console's own banner (ticket #89)
@@ -236,10 +246,13 @@ type console struct {
 // dispatcher's CHECK step runs with. A nil run (every other caller: selftest,
 // most tests) makes that route answer 503 "sandbox runs are not available".
 //
-// opts (ticket #89) apply in argument order before any route is
-// registered; WithDispatch (dispatchbanner.go) is the only one today.
-// cmd/zing/serve.go passes it; every other caller, including every
-// existing test, passes none.
+// opts are optional dependencies New does not take positionally, applied
+// in argument order before any route is registered: WithTuner (#81) wires
+// POST /settings to a running dispatcher, and WithDispatch (ticket #89,
+// dispatchbanner.go) wires the #alerts stop banner and POST
+// /dispatch/resume. cmd/zing/serve.go passes both; every other caller,
+// including every existing test, passes none, and compiles unchanged since
+// opts is variadic.
 //
 // The returned handler is a *http.ServeMux, plain HTTP/1.1, with no timeouts
 // of its own; cmd/zing wraps it in an http.Server with the drain-aware
@@ -269,6 +282,7 @@ func New(st *store.Store, b *bus.Broker, m *machine.Machine, hosts []string, por
 	mux.HandleFunc("POST /read", withWriteDeadline(guard.requireSameOrigin(c.handleRead)))
 	mux.HandleFunc("POST /loglevel", withWriteDeadline(guard.requireSameOrigin(c.handleLogLevel)))
 	mux.HandleFunc("POST /debug", withWriteDeadline(guard.requireSameOrigin(c.handleDebug)))
+	mux.HandleFunc("POST /settings", withWriteDeadline(guard.requireSameOrigin(c.handleTuning)))
 	mux.HandleFunc("POST /side", withWriteDeadline(guard.requireSameOrigin(c.handleSide)))
 	mux.HandleFunc("POST /stop", withWriteDeadline(guard.requireSameOrigin(c.handleStop)))
 	mux.HandleFunc("POST /dispatch/resume", withWriteDeadline(guard.requireSameOrigin(c.handleDispatchResume)))
@@ -292,6 +306,21 @@ func New(st *store.Store, b *bus.Broker, m *machine.Machine, hosts []string, por
 	mux.HandleFunc("GET /static/keyboard.mjs", withWriteDeadline(staticAsset(keyboardMJS, contentTypeJS)))
 	mux.HandleFunc("GET /static/keys.json", withWriteDeadline(staticAsset(keysJSON, contentTypeJSON)))
 	return mux
+}
+
+// Option configures one optional console dependency New does not take
+// positionally (#81): a caller that needs it passes it as one of New's
+// trailing opts, and every caller that does not need it is unaffected.
+type Option func(*console)
+
+// WithTuner wires POST /settings and the Settings view to d, the running
+// dispatcher whose live max_parallel, dispatch interval, and agent budget
+// the owner can change without a restart (#81). Without it (every caller
+// that does not run a real dispatcher alongside this console, such as
+// selftest and most tests), POST /settings answers 503 and the Settings
+// view reports settings are not available.
+func WithTuner(d *dispatch.Dispatcher) Option {
+	return func(c *console) { c.tuner = d }
 }
 
 // withWriteDeadline wraps a non-streaming handler with a per-request write

@@ -249,6 +249,40 @@ func TestForPlanReview_TrimsTrailingNewlineBetweenLensSections(t *testing.T) {
 	}
 }
 
+// TestForUnblock pins ForUnblock's input order and fencing: the ticket,
+// the plan, and the findings arrive fenced, in that order, then any extra
+// input, and JobPrompt carries the prompt unchanged.
+func TestForUnblock(t *testing.T) {
+	t.Parallel()
+
+	in := ForUnblock("PROMPT", "ticket body", "<plan/>", "finding p3-f2 major", []NamedInput{Guidance("earlier guidance")})
+
+	if in.JobPrompt != "PROMPT" {
+		t.Errorf("ForUnblock.JobPrompt = %q, want PROMPT", in.JobPrompt)
+	}
+	wantLabels := []string{"ticket", "plan", "findings", "guidance"}
+	if len(in.Inputs) != len(wantLabels) {
+		t.Fatalf("ForUnblock.Inputs has %d entries, want %d", len(in.Inputs), len(wantLabels))
+	}
+	for i, label := range wantLabels {
+		if in.Inputs[i].Label != label {
+			t.Errorf("ForUnblock.Inputs[%d].Label = %q, want %q", i, in.Inputs[i].Label, label)
+		}
+	}
+	for i := range in.Inputs {
+		if !in.Inputs[i].Untrusted {
+			t.Errorf("ForUnblock.Inputs[%d] (%s) is not Untrusted, want fenced", i, in.Inputs[i].Label)
+		}
+	}
+
+	in.Fence = testFence
+	got := Assemble(in)
+	assertFenced(t, got, "ticket", "ticket body")
+	assertFenced(t, got, "plan", "<plan/>")
+	assertFenced(t, got, "findings", "finding p3-f2 major")
+	assertFenced(t, got, "guidance", "earlier guidance")
+}
+
 // The following three tests are the plan section 4.2 injection tests:
 // adversarial, model-plausible text in a fenced field must still arrive
 // wrapped in the fence, never bare in the prompt where a model might read

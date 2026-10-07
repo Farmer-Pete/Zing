@@ -30,6 +30,13 @@ lenses = ["problem", "simplification", "correctness", "security", "fidelity", "t
 timeout_minutes = 20
 max_loops = 2
 
+[jobs.unblock]
+model = "opus"                       # switch to "fable" here; nothing else names it
+runtime = "claude"
+tools = ["read", "grep", "glob", "bash_readonly"]
+prompt = "prompts/unblock.md"
+timeout_minutes = 20
+
 [jobs.build]
 model = "sonnet"
 runtime = "claude"
