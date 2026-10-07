@@ -10,6 +10,15 @@ import (
 	"zing/internal/store"
 )
 
+// ownerEditClaimNote is an owner-edit box's claim note (#75 Q2): the
+// store's own refusal sentence, shown only while a run holds the ticket's
+// claim, when the box's controls render disabled.
+templ ownerEditClaimNote(claimed bool) {
+	if claimed {
+		<p class="owner-edit-claim-note">{ store.OwnerEditClaimedReason }</p>
+	}
+}
+
 // Thread renders the #main region for view=thread (design section 6.6):
 // the ticket's messages in id order, read only except for the question
 // groups, which dispatch on QuestionPayload.Kind into interactive controls
@@ -25,7 +34,10 @@ import (
 // carries a planning question at all, console.threadComponent's own guard.
 // actions is console.ticketActions' own build of the owner's action bar
 // (#65), rendered right after the title by ticketActionBar.
-templ Thread(ticket *store.Ticket, rows []ThreadRow, wait WaitProgress, banner string, actions TicketActions) {
+// sealed is threadComponent's post-gate "Sealed plan and scenarios" section
+// (#75): nil when console.showSealedSection reports the ticket does not
+// get one.
+templ Thread(ticket *store.Ticket, rows []ThreadRow, wait WaitProgress, banner string, actions TicketActions, sealed *SealedSection) {
 	<main id="main" class="view-thread">
 		if ticket != nil {
 			<h2>{ ticket.Title }</h2>
@@ -52,6 +64,7 @@ templ Thread(ticket *store.Ticket, rows []ThreadRow, wait WaitProgress, banner s
 					}
 				}
 			}
+			@sealedSection(sealed)
 			@sandboxRunBox(ticket.ID)
 		} else {
 			<p class="empty">Select a ticket.</p>
@@ -98,11 +111,30 @@ templ ticketActionBar(ticketID int64, actions TicketActions) {
 templ ticketBodyEditor(ticket *store.Ticket) {
 	<details class="owner-edit" data-preserve-attr="open" data-ticket={ strconv.FormatInt(ticket.ID, 10) } data-target="ticket_body">
 		<summary>Ticket body</summary>
-		<textarea data-field="body">{ "\n" + ticket.Body }</textarea>
+		@ownerEditClaimNote(ticket.ClaimOwner != nil)
+		<textarea data-field="body" disabled?={ ticket.ClaimOwner != nil }>{ "\n" + ticket.Body }</textarea>
 		<p>The tracker issue { displayRef(ticket.TrackerRef) } is not updated; edit it by hand to match.</p>
-		<button type="button" class="owner-edit-save">Save</button>
+		<button type="button" class="owner-edit-save" disabled?={ ticket.ClaimOwner != nil }>Save</button>
 		<span class="owner-edit-error"></span>
 	</details>
+}
+
+// sealedSection is the post-gate "Sealed plan and scenarios" section (#75,
+// Q1): the sealed cohort's scenario table and the stored plan, each with
+// the same owner-edit boxes gateContext renders, collapsed by default.
+// Renders nothing when s is nil. The host-check list is left out
+// (scenariosSection's atGate false), since its text speaks of approving a
+// gate that is already behind the ticket. A scenario box here sends no
+// answer_question: it edits the scenario and leaves any open amended
+// escalation for its own "Edit it" box or options.
+templ sealedSection(s *SealedSection) {
+	if s != nil {
+		<details id="sealed-section" class="sealed-section" data-preserve-attr="open">
+			<summary>Sealed plan and scenarios</summary>
+			@scenariosSection(s.Scenarios, false)
+			@PlanView(*s.Plan)
+		</details>
+	}
 }
 
 // waitProgressBanner is the current round's progress line (bug fix: "After
@@ -385,7 +417,7 @@ templ answeredLocked(answeredHTML templ.Component) {
 // name are the seam Task 6 reserved and Task 8 filled.
 templ gateContext(plan *RenderedPlan, scenarios []ScenarioRow, findings []FindingRow) {
 	<div class="q-context gate-context" data-context="plan">
-		@scenariosSection(scenarios)
+		@scenariosSection(scenarios, true)
 		@findingsSection(findings)
 		if plan != nil {
 			@PlanView(*plan)
@@ -513,18 +545,20 @@ func pickedAttr(picked bool) string {
 
 // itemDecisionsReview is the review kind's own closed set of item decisions,
 // in the order their controls render (design section 6.5, 9.2, Task 11):
-// accept, drop, and discuss, matching response.FindingDecision -- never
-// reject, which is perimeter's own decision alone.
+// accept, drop, and discuss, matching response.FindingDecision. Both item
+// kinds share accept and drop; discuss is review's alone (bug fix, #78).
 var itemDecisionsReview = []response.Decision{
 	response.DecisionAccept, response.DecisionDrop, response.DecisionDiscuss,
 }
 
 // itemDecisionsPerimeter is the perimeter kind's own narrower set (design
-// section 9.2, Task 10): a perimeter item is a file the owner only ever
-// keeps or reverts, so it renders accept and reject alone, never drop or
-// discuss.
+// section 9.2, Task 10, bug fix #78): a perimeter item is a file the owner
+// only ever keeps or reverts, so it renders accept and drop alone, never
+// discuss. SaveDraft stores a perimeter drop as reject, the word
+// internal/job/building.go reads, and DisplayDecision shows that stored
+// reject back as drop.
 var itemDecisionsPerimeter = []response.Decision{
-	response.DecisionAccept, response.DecisionReject,
+	response.DecisionAccept, response.DecisionDrop,
 }
 
 // itemRows renders the two item kinds' control (design section 6.6, 9.2):
@@ -541,7 +575,7 @@ templ itemRows(ticketID, questionID int64, items []ThreadItem, decisions []respo
 	if len(items) > 0 {
 		<div class="items">
 			for _, item := range items {
-				@itemRow(ticketID, questionID, item, decisions, pickedItems[item.Ref], notes[item.Ref], withNotes, interactive)
+				@itemRow(ticketID, questionID, item, decisions, DisplayDecision(pickedItems[item.Ref]), notes[item.Ref], withNotes, interactive)
 			}
 		</div>
 	}

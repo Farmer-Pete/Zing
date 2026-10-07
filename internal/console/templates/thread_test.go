@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"regexp"
 	"slices"
 	"strings"
 	"testing"
@@ -499,7 +500,7 @@ func TestThreadShowsWaitProgress(t *testing.T) {
 	t.Run("a blocked ticket shows the progress line", func(t *testing.T) {
 		t.Parallel()
 		var sb strings.Builder
-		if err := Thread(ticket, nil, WaitProgress{Answered: 1, Total: 2}, "", TicketActions{}).Render(t.Context(), &sb); err != nil {
+		if err := Thread(ticket, nil, WaitProgress{Answered: 1, Total: 2}, "", TicketActions{}, nil).Render(t.Context(), &sb); err != nil {
 			t.Fatalf("Thread.Render: %v", err)
 		}
 		got := sb.String()
@@ -512,7 +513,7 @@ func TestThreadShowsWaitProgress(t *testing.T) {
 	t.Run("an unblocked ticket shows no progress line", func(t *testing.T) {
 		t.Parallel()
 		var sb strings.Builder
-		if err := Thread(ticket, nil, WaitProgress{}, "", TicketActions{}).Render(t.Context(), &sb); err != nil {
+		if err := Thread(ticket, nil, WaitProgress{}, "", TicketActions{}, nil).Render(t.Context(), &sb); err != nil {
 			t.Fatalf("Thread.Render: %v", err)
 		}
 		if strings.Contains(sb.String(), "wait-progress") {
@@ -728,7 +729,7 @@ func TestThreadRendersSandboxRunBox(t *testing.T) {
 		t.Parallel()
 		ticket := &store.Ticket{ID: 7, Title: testHelloTicketTitle}
 		var sb strings.Builder
-		if err := Thread(ticket, nil, WaitProgress{}, "", TicketActions{}).Render(t.Context(), &sb); err != nil {
+		if err := Thread(ticket, nil, WaitProgress{}, "", TicketActions{}, nil).Render(t.Context(), &sb); err != nil {
 			t.Fatalf("Thread.Render: %v", err)
 		}
 		got := sb.String()
@@ -747,11 +748,57 @@ func TestThreadRendersSandboxRunBox(t *testing.T) {
 	t.Run("no open ticket renders no sandbox run box", func(t *testing.T) {
 		t.Parallel()
 		var sb strings.Builder
-		if err := Thread(nil, nil, WaitProgress{}, "", TicketActions{}).Render(t.Context(), &sb); err != nil {
+		if err := Thread(nil, nil, WaitProgress{}, "", TicketActions{}, nil).Render(t.Context(), &sb); err != nil {
 			t.Fatalf("Thread.Render: %v", err)
 		}
 		if got := sb.String(); strings.Contains(got, "sandbox-run") {
 			t.Errorf("rendered thread has a sandbox run box with no open ticket; got:\n%s", got)
 		}
 	})
+}
+
+// renderItemRows renders itemRows(1, 2, items, decisions, pickedItems, nil,
+// false, true) to a string, failing the test on a render error.
+func renderItemRows(t *testing.T, items []ThreadItem, decisions []response.Decision, pickedItems map[string]response.Decision) string {
+	t.Helper()
+	var sb strings.Builder
+	if err := itemRows(1, 2, items, decisions, pickedItems, nil, false, true).Render(t.Context(), &sb); err != nil {
+		t.Fatalf("itemRows.Render: %v", err)
+	}
+	return sb.String()
+}
+
+// TestItemRowsSameDecisionLabels proves perimeter and review item rows now
+// share one set of decision words (bug fix, #78): a perimeter row renders
+// accept and drop, a review row renders accept, drop, and discuss, and
+// neither ever renders the word reject, even though a perimeter item whose
+// stored pick is reject still shows its drop button picked (DisplayDecision).
+func TestItemRowsSameDecisionLabels(t *testing.T) {
+	t.Parallel()
+	item := []ThreadItem{{Ref: "a.go", Text: "Builder: x Change: y"}}
+
+	buttonText := regexp.MustCompile(`>(accept|drop|discuss|reject)</button>`)
+	tests := []struct {
+		decisions []response.Decision
+		want      []string
+	}{
+		{itemDecisionsPerimeter, []string{"accept", "drop"}},
+		{itemDecisionsReview, []string{"accept", "drop", "discuss"}},
+	}
+	for _, tc := range tests {
+		rendered := renderItemRows(t, item, tc.decisions, nil)
+		matches := buttonText.FindAllStringSubmatch(rendered, -1)
+		got := make([]string, len(matches))
+		for i, m := range matches {
+			got[i] = m[1]
+		}
+		if !slices.Equal(got, tc.want) {
+			t.Errorf("itemRows decision labels = %v, want %v; got:\n%s", got, tc.want, rendered)
+		}
+	}
+
+	picked := renderItemRows(t, item, itemDecisionsPerimeter, map[string]response.Decision{"a.go": response.DecisionReject})
+	if !strings.Contains(picked, `class="decision picked" aria-pressed="true" data-draft-ticket="1" data-draft-question="2" data-item-ref="a.go" data-decision="drop"`) {
+		t.Errorf("perimeter row with a stored reject pick must render its drop button picked; got:\n%s", picked)
+	}
 }

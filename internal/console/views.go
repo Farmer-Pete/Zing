@@ -388,7 +388,7 @@ func displayFeedMessages(messages []store.MessageRow) ([]templates.FeedRow, erro
 // 6.6, carried over from Package 3's patchThread guard).
 func (c *console) threadComponent(ctx context.Context, open int64) (templ.Component, error) {
 	if open <= 0 {
-		return templates.Thread(nil, nil, templates.WaitProgress{}, "", templates.TicketActions{}), nil
+		return templates.Thread(nil, nil, templates.WaitProgress{}, "", templates.TicketActions{}, nil), nil
 	}
 	ticket, err := c.store.GetTicket(ctx, open)
 	switch {
@@ -417,6 +417,13 @@ func (c *console) threadComponent(ctx context.Context, open int64) (templ.Compon
 		if splitErr != nil {
 			return nil, splitErr
 		}
+		claimed := ticket.ClaimOwner != nil
+		if plan != nil {
+			plan.Claimed = claimed
+		}
+		for i := range scenarios {
+			scenarios[i].Claimed = claimed
+		}
 		conv, convErr := c.store.PlanningConversation(ctx, open)
 		if convErr != nil {
 			return nil, fmt.Errorf("console: planning conversation for ticket %d: %w", open, convErr)
@@ -439,9 +446,13 @@ func (c *console) threadComponent(ctx context.Context, open int64) (templ.Compon
 		if actionsErr != nil {
 			return nil, actionsErr
 		}
-		return templates.Thread(&ticket, threadRows, buildWaitProgress(&ticket, rows, conv), banner, actions), nil
+		var sealed *templates.SealedSection
+		if plan != nil && showSealedSection(ticket.State, plan.Editable, rows) {
+			sealed = &templates.SealedSection{Plan: plan, Scenarios: scenarios}
+		}
+		return templates.Thread(&ticket, threadRows, buildWaitProgress(&ticket, rows, conv), banner, actions, sealed), nil
 	case errors.Is(err, sql.ErrNoRows):
-		return templates.Thread(nil, nil, templates.WaitProgress{}, "", templates.TicketActions{}), nil
+		return templates.Thread(nil, nil, templates.WaitProgress{}, "", templates.TicketActions{}, nil), nil
 	default:
 		return nil, err
 	}
@@ -1023,6 +1034,41 @@ func gateShowsPlan(kind response.QuestionKind, state *string) bool {
 	return kind == response.QuestionKindGate && (state == nil || *state != msgStateResolved)
 }
 
+// sealedSectionStates is every ticket state the post-gate "Sealed plan and
+// scenarios" section renders in (#75 Q1): each post-seal state a ticket can
+// still change in. done and abandoned have no run left to use an edit.
+var sealedSectionStates = map[string]bool{
+	"building": true, "reviewing": true, "judging": true, "shipping": true, "escalated": true,
+}
+
+// showSealedSection reports whether the thread renders the post-gate sealed
+// section (#75): the state is in sealedSectionStates, the cohort is sealed
+// (RenderedPlan.Editable), and no visible gate question still shows the
+// plan (gateShowsPlan), so the gate's boxes and the section's never both
+// render. Only gate questions count: an open amended escalation keeps its
+// own "Edit it" box beside the section's plain one. A question whose
+// payload does not decode is skipped, matching gateApprovalInProgress.
+func showSealedSection(state string, sealed bool, rows []store.MessageRow) bool {
+	if !sealed || !sealedSectionStates[state] {
+		return false
+	}
+	visible := visibleRows(rows)
+	for i := range visible {
+		m := &visible[i]
+		if m.Type != msgTypeQuestion {
+			continue
+		}
+		var p response.QuestionPayload
+		if err := json.Unmarshal(m.Payload, &p); err != nil {
+			continue
+		}
+		if gateShowsPlan(p.Kind, m.State) {
+			return false
+		}
+	}
+	return true
+}
+
 // isWithdrawnGate reports whether a question is a gate that closed without
 // an owner answer (bug fix: a gate withdrawn by a reopen showed "resolved",
 // which reads as approved). An approved or rejected gate carries the
@@ -1523,9 +1569,11 @@ func collectSentAnswers(rows []store.MessageRow) map[int64]response.AnswerPayloa
 // the option's text when payload.Option names one of q's own options (its
 // bare key as a fallback, for a payload that is well-formed but, through
 // some future drift, no longer matches), or "ref: decision" pairs, ref
-// order, for an item answer. Empty when payload carries neither, which
-// questionGroup (thread.templ) treats as "nothing to show" rather than an
-// empty locked note.
+// order, for an item answer. Each item decision runs through
+// templates.DisplayDecision, so a perimeter item stored as reject prints as
+// drop, the same word its button shows. Empty when payload carries neither,
+// which questionGroup (thread.templ) treats as "nothing to show" rather
+// than an empty locked note.
 func sentAnswerText(payload response.AnswerPayload, options []templates.ThreadOption) string {
 	if payload.Option != nil {
 		for _, o := range options {
@@ -1545,7 +1593,7 @@ func sentAnswerText(payload response.AnswerPayload, options []templates.ThreadOp
 	sort.Strings(refs)
 	parts := make([]string, 0, len(refs))
 	for _, ref := range refs {
-		parts = append(parts, ref+": "+string(payload.Items[ref]))
+		parts = append(parts, ref+": "+string(templates.DisplayDecision(payload.Items[ref])))
 	}
 	return strings.Join(parts, ", ")
 }
@@ -1942,6 +1990,7 @@ func buildThreadQuestion(ticket *store.Ticket, m *store.MessageRow, messageCount
 		q.Amendment = &templates.ScenarioRow{
 			ID: a.Scenario, Kind: string(a.Kind), Given: a.Given, When: a.When, Then: a.Then,
 			Check: a.Check, Sealed: true, TicketID: m.TicketID,
+			Claimed: ticket != nil && ticket.ClaimOwner != nil,
 		}
 	}
 	if draft, ok := drafts[m.ID]; ok {
@@ -2975,9 +3024,11 @@ func validationErrorsLine(body string) string {
 // Body never carries (design section 6.6, 6.7, code review fix 2): the
 // chosen option's key, or its item ref-to-decision picks joined into one
 // line, ref order sorted so the rendered line is deterministic regardless
-// of map iteration order. An unparseable or empty payload falls back to the
-// (empty) Body rather than erroring, matching stateLine's and
-// escalationLine's own defensive fallback.
+// of map iteration order. Each item decision runs through
+// templates.DisplayDecision, so a perimeter item stored as reject prints as
+// drop. An unparseable or empty payload falls back to the (empty) Body
+// rather than erroring, matching stateLine's and escalationLine's own
+// defensive fallback.
 func answerLine(m *store.MessageRow) string {
 	if len(m.Payload) == 0 {
 		return m.Body
@@ -2999,7 +3050,7 @@ func answerLine(m *store.MessageRow) string {
 	sort.Strings(refs)
 	parts := make([]string, 0, len(refs))
 	for _, ref := range refs {
-		parts = append(parts, ref+": "+string(ap.Items[ref]))
+		parts = append(parts, ref+": "+string(templates.DisplayDecision(ap.Items[ref])))
 	}
 	return strings.Join(parts, ", ")
 }

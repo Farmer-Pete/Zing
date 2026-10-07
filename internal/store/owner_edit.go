@@ -118,10 +118,13 @@ func ownerEditErr(code OwnerEditCode, reason string) *OwnerEditError {
 	return &OwnerEditError{Code: code, Reason: reason}
 }
 
-// ownerEditClaimedReason is every claim-guarded write's one refusal
+// OwnerEditClaimedReason is every claim-guarded write's one refusal
 // sentence, shared by execClaimGuardedTx's callers so a claimed ticket
-// reads the same regardless of which target it refused.
-const ownerEditClaimedReason = "ticket is claimed; edits are refused while a run holds it"
+// reads the same regardless of which target it refused. Exported so the
+// console's ownerEditClaimNote (#75) shows this exact sentence as the
+// claim note on every disabled owner-edit box, keeping the note and the
+// 409 body from drifting apart.
+const OwnerEditClaimedReason = "ticket is claimed; edits are refused while a run holds it"
 
 // execClaimGuardedTx runs query guarded by "the ticket is not claimed" --
 // query must itself AND its WHERE clause against
@@ -139,7 +142,7 @@ func execClaimGuardedTx(ctx context.Context, tx *sql.Tx, what, query string, arg
 		return fmt.Errorf("owner edit: update %s: %w", what, err)
 	}
 	if n == 0 {
-		return ownerEditErr(OwnerEditCodeClaimed, ownerEditClaimedReason)
+		return ownerEditErr(OwnerEditCodeClaimed, OwnerEditClaimedReason)
 	}
 	return nil
 }

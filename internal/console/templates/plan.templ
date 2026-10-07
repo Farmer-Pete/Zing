@@ -38,14 +38,14 @@ templ PlanView(p RenderedPlan) {
 		@migrationsSection(p.Design.Migrations)
 		<h2>Delivery</h2>
 		<h3>Files</h3>
-		@filesTable(p.TicketID, p.Editable, p.Delivery.Files)
+		@filesTable(p.TicketID, p.Editable, p.Claimed, p.Delivery.Files)
 		@decidedFilesSection(p.Delivery.DecidedFiles)
 		<h3>Deletions</h3>
 		@deletionsSection(p.Delivery.Deletions)
 		<h3>Tests</h3>
 		@testsTable(p.Delivery.Tests)
 		<h3>Tasks</h3>
-		@tasksTable(p.TicketID, p.Editable, p.Delivery.Tasks)
+		@tasksTable(p.TicketID, p.Editable, p.Claimed, p.Delivery.Tasks)
 		<h2>Review</h2>
 		<h3>Trust root</h3>
 		<p>{ p.Review.TrustRoot }</p>
@@ -249,7 +249,7 @@ templ migrationsSection(m response.Migrations) {
 // editable is RenderedPlan.Editable (#41, extended by the file-grant
 // change): only then does each row gain a last cell holding ticketID's own
 // owner-edit box (ownerEditFileForm) for that file.
-templ filesTable(ticketID int64, editable bool, files []response.FileChange) {
+templ filesTable(ticketID int64, editable, claimed bool, files []response.FileChange) {
 	<table class="files">
 		<thead>
 			<tr>
@@ -271,7 +271,7 @@ templ filesTable(ticketID int64, editable bool, files []response.FileChange) {
 					<td>{ f.Reason }</td>
 					if editable {
 						<td>
-							@ownerEditFileForm(ticketID, f)
+							@ownerEditFileForm(ticketID, f, claimed)
 						</td>
 					}
 				</tr>
@@ -285,12 +285,13 @@ templ filesTable(ticketID int64, editable bool, files []response.FileChange) {
 // change f.Path, posted by console.js's ownerEditSubmit to POST
 // /tickets/{id}/edit, the same box ownerEditTaskForm already uses for a
 // plan task.
-templ ownerEditFileForm(ticketID int64, f response.FileChange) {
+templ ownerEditFileForm(ticketID int64, f response.FileChange, claimed bool) {
 	<details class="owner-edit" data-preserve-attr="open" data-ticket={ strconv.FormatInt(ticketID, 10) } data-target="plan_file" data-ref={ f.Path }>
 		<summary>Edit tasks</summary>
+		@ownerEditClaimNote(claimed)
 		<label>Tasks</label>
-		<input type="text" data-field="tasks" value={ f.Task }/>
-		<button type="button" class="owner-edit-save">Save</button>
+		<input type="text" data-field="tasks" value={ f.Task } disabled?={ claimed }/>
+		<button type="button" class="owner-edit-save" disabled?={ claimed }>Save</button>
 		<span class="owner-edit-error"></span>
 	</details>
 }
@@ -403,7 +404,7 @@ templ testsTable(tests []response.TestCase) {
 // last cell holding ticketID's own owner-edit box (ownerEditTaskForm) for
 // that task, so a plan with no sealed scenario -- or the artifacts rail's
 // own read-only copy, ticketID 0 -- renders no edit controls at all.
-templ tasksTable(ticketID int64, editable bool, tasks []RenderedTask) {
+templ tasksTable(ticketID int64, editable, claimed bool, tasks []RenderedTask) {
 	<table class="tasks">
 		<thead>
 			<tr>
@@ -427,7 +428,7 @@ templ tasksTable(ticketID int64, editable bool, tasks []RenderedTask) {
 					</td>
 					if editable {
 						<td>
-							@ownerEditTaskForm(ticketID, t)
+							@ownerEditTaskForm(ticketID, t, claimed)
 						</td>
 					}
 				</tr>
@@ -447,17 +448,18 @@ templ tasksTable(ticketID int64, editable bool, tasks []RenderedTask) {
 // exactly one leading newline right after a textarea's opening tag, so
 // without it a stored text that itself starts with a newline would render
 // one character short; the prefix makes the parser's drop a no-op either way.
-templ ownerEditTaskForm(ticketID int64, t RenderedTask) {
+templ ownerEditTaskForm(ticketID int64, t RenderedTask, claimed bool) {
 	<details class="owner-edit" data-preserve-attr="open" data-ticket={ strconv.FormatInt(ticketID, 10) } data-target="plan_task" data-ref={ strconv.Itoa(t.N) }>
 		<summary>Edit</summary>
+		@ownerEditClaimNote(claimed)
 		<label>Text</label>
-		<textarea data-field="text">{ "\n" + t.Text }</textarea>
+		<textarea data-field="text" disabled?={ claimed }>{ "\n" + t.Text }</textarea>
 		<label>Test</label>
-		<input type="text" data-field="test" value={ t.Test }/>
+		<input type="text" data-field="test" value={ t.Test } disabled?={ claimed }/>
 		<label>Demo</label>
-		<input type="checkbox" data-field="demo" checked?={ t.Demo }/>
-		<button type="button" class="owner-edit-save">Save</button>
-		<button type="button" class="owner-edit-drop">Drop</button>
+		<input type="checkbox" data-field="demo" checked?={ t.Demo } disabled?={ claimed }/>
+		<button type="button" class="owner-edit-save" disabled?={ claimed }>Save</button>
+		<button type="button" class="owner-edit-drop" disabled?={ claimed }>Drop</button>
 		<span class="owner-edit-error"></span>
 	</details>
 }
