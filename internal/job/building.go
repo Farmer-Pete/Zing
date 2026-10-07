@@ -814,7 +814,7 @@ func (h buildingHandler) enterFromEscalationRound(ctx context.Context, t store.T
 		commit = h.retryMarkerCommit(t, d, resolveIDs)
 
 	case origin == response.EscalationOriginCapBudget:
-		commit, err = retryCapBudget(ctx, t, d, resolveIDs)
+		commit, err = retryCapBudget(ctx, t, d, resolveIDs, 0)
 
 	case origin == response.EscalationOriginCapResumes:
 		commit, preserved, err = h.retryCapResumes(ctx, t, d, resolveIDs, notes, int64OrZero(payload.SessionID))

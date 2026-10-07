@@ -23,6 +23,7 @@ package job_test
 import (
 	"encoding/json"
 	"fmt"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -745,15 +746,119 @@ func TestEscalationResolve_CapBudget_EveryChoiceReEscalatesWhileOverBudget(t *te
 				commit.Escalation.Payload.Origin != string(response.EscalationOriginCapBudget) {
 				t.Errorf("payload = %+v, want (wall_clock, cap_budget)", commit.Escalation.Payload)
 			}
-			const wantWhat = "raise budget.agent_minutes_per_ticket or abandon"
+			const wantWhat = "raise Agent minutes per ticket in the console's settings, raise this ticket's budget by 60 minutes, or abandon"
 			if commit.Escalation.Payload.What != wantWhat {
 				t.Errorf("payload.What = %q, want %q", commit.Escalation.Payload.What, wantWhat)
+			}
+			wantExtra := []response.Option{{Key: "d", Text: "raise this ticket's budget by 60 minutes"}}
+			if !reflect.DeepEqual(commit.Escalation.ExtraOptions, wantExtra) {
+				t.Errorf("commit.Escalation.ExtraOptions = %+v, want %+v", commit.Escalation.ExtraOptions, wantExtra)
 			}
 			if len(commit.ResolveQuestions) != 1 || commit.ResolveQuestions[0] != qID {
 				t.Errorf("commit.ResolveQuestions = %v, want [%d]", commit.ResolveQuestions, qID)
 			}
 		})
 	}
+}
+
+// escalateCapBudgetRaise works like escalateDirect, but its EscalationCommit
+// carries ExtraOptions with key d, "raise this ticket's budget by 60
+// minutes" -- the same ExtraOptions budgetEscalationCommit itself sets
+// (design section 6.7), so a test can answer chip d against a store-level
+// escalation without driving a real ErrBudget run. Returns the linked
+// question's id.
+func escalateCapBudgetRaise(t *testing.T, s *store.Store, ticketID int64) int64 {
+	t.Helper()
+	owner := "escalate-cap-budget-raise-owner"
+	expires := time.Now().Add(10 * time.Minute).UTC().Truncate(time.Second)
+	claimed, err := s.Claim(t.Context(), ticketID, owner, expires)
+	if err != nil || !claimed {
+		t.Fatalf("escalateCapBudgetRaise: claim: claimed=%v err=%v", claimed, err)
+	}
+
+	payload := testEscalationPayload(response.EscalationCodeWallClock, response.EscalationOriginCapBudget)
+	applied, err := s.CommitHandlerResult(t.Context(), store.HandlerCommit{
+		TicketID: ticketID, Owner: owner, Expires: expires,
+		Waiting: new(testWaitingQuestions),
+		Escalation: &store.EscalationCommit{
+			Body: string(response.EscalationCodeWallClock) + ": " + payload.What, Payload: payload,
+			ExtraOptions: []response.Option{{Key: "d", Text: "raise this ticket's budget by 60 minutes"}},
+		},
+	})
+	if err != nil || !applied {
+		t.Fatalf("escalateCapBudgetRaise: CommitHandlerResult: applied=%v err=%v", applied, err)
+	}
+
+	open, err := s.QuestionsByState(t.Context(), ticketID, "open")
+	if err != nil || len(open) == 0 {
+		t.Fatalf("escalateCapBudgetRaise: QuestionsByState(open) = %v, %v, want at least one", open, err)
+	}
+	return open[len(open)-1].ID
+}
+
+// TestEscalationResolve_CapBudget_RaiseOption proves picking chip d on a
+// cap_budget wall_clock escalation (retryCapBudget, raiseMinutes ==
+// budgetRaiseMinutes): the round resolves, the "retry requested" marker
+// lands, and one budget_raised event with minutes 60 lands alongside it. A
+// reply with no chip resolves as the stored Recommended option, "a"
+// (budgetEscalationCommit leaves Recommended unset), so it carries no
+// budget_raised event.
+func TestEscalationResolve_CapBudget_RaiseOption(t *testing.T) {
+	t.Parallel()
+	t.Run("pick_d", func(t *testing.T) {
+		t.Parallel()
+		s := newJobTestStore(t)
+		ticketID := seedFeatureTicketInPlanning(t, s)
+		qID := escalateCapBudgetRaise(t, s, ticketID)
+		answerGateQuestion(t, s, ticketID, qID, new("d"), "")
+
+		commit, err := runPlanning(t, s, claim(t, s, &scriptedRuntime{t: t}, ticketID), ticketID)
+		if err != nil {
+			t.Fatalf("escalation resolve (cap_budget raise) Run: %v", err)
+		}
+		if commit.Escalation != nil {
+			t.Errorf("commit.Escalation = %+v, want nil", commit.Escalation)
+		}
+		if commit.Waiting != nil {
+			t.Errorf("commit.Waiting = %v, want nil", commit.Waiting)
+		}
+		if len(commit.ResolveQuestions) != 1 || commit.ResolveQuestions[0] != qID {
+			t.Errorf("commit.ResolveQuestions = %v, want [%d]", commit.ResolveQuestions, qID)
+		}
+		if len(commit.Messages) != 2 {
+			t.Fatalf("commit.Messages = %+v, want a marker plus one budget_raised event", commit.Messages)
+		}
+		if commit.Messages[0].Body != testMarkerRetryRequested {
+			t.Errorf("commit.Messages[0].Body = %q, want %q", commit.Messages[0].Body, testMarkerRetryRequested)
+		}
+		ev := commit.Messages[1]
+		if ev.EventKind == nil || *ev.EventKind != store.EventKindBudgetRaised {
+			t.Fatalf("commit.Messages[1].EventKind = %v, want %q", ev.EventKind, store.EventKindBudgetRaised)
+		}
+		var payload response.BudgetRaisedEvent
+		if err = json.Unmarshal(ev.Payload, &payload); err != nil {
+			t.Fatalf("unmarshal budget_raised payload: %v", err)
+		}
+		if payload.Minutes != 60 {
+			t.Errorf("payload.Minutes = %d, want 60", payload.Minutes)
+		}
+	})
+
+	t.Run("reply_only", func(t *testing.T) {
+		t.Parallel()
+		s := newJobTestStore(t)
+		ticketID := seedFeatureTicketInPlanning(t, s)
+		qID := escalateCapBudgetRaise(t, s, ticketID)
+		answerGateQuestion(t, s, ticketID, qID, nil, "more time please")
+
+		commit, err := runPlanning(t, s, claim(t, s, &scriptedRuntime{t: t}, ticketID), ticketID)
+		if err != nil {
+			t.Fatalf("escalation resolve (cap_budget reply only) Run: %v", err)
+		}
+		if len(commit.Messages) != 1 || commit.Messages[0].Body != testMarkerRetryRequested {
+			t.Fatalf("commit.Messages = %+v, want one %q marker, no budget_raised event", commit.Messages, testMarkerRetryRequested)
+		}
+	})
 }
 
 // ---- split and nothing_to_do_claims: both choices resume or fresh ---------
