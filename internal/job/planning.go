@@ -1283,10 +1283,12 @@ var teeOperand = regexp.MustCompile(`"[^"]*"|'[^']*'|[^\s|;&()'"]+`)
 
 // mktempCall matches mktemp as a command word, preceded by the start of the
 // check, whitespace, ;, &, |, ( or a backtick, then a word boundary (so
-// mktempfoo doesn't match), then group 1 of zero or more whitespace-
-// separated operands, quoted or bare, each one stopping at |, ;, &, ( or ),
-// as teeOperand later splits (as teeToPipe does above).
-var mktempCall = regexp.MustCompile("(?:^|[\\s;&|(`])mktemp\\b((?:\\s+(?:\"[^\"]*\"|'[^']*'|[^\\s|;&()'\"]+))*)")
+// mktempfoo doesn't match), then group 1 of zero or more operands, quoted
+// or bare, separated by horizontal whitespace only, so a newline ends the
+// operand list and a later line's words aren't pulled into this call; each
+// operand stops at |, ;, &, ( or ), as teeOperand later splits (as
+// teeToPipe does above).
+var mktempCall = regexp.MustCompile("(?:^|[\\s;&|(`])mktemp\\b((?:[ \\t]+(?:\"[^\"]*\"|'[^']*'|[^\\s|;&()'\"]+))*)")
 
 // shortFlags matches a single-dash short-flag cluster, such as -d or -tv.
 var shortFlags = regexp.MustCompile(`^-[A-Za-z]+$`)

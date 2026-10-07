@@ -75,6 +75,7 @@ func TestCheckScenarioShape_AllowsTmpdirMktemp(t *testing.T) {
 		{"quoted_mention", response.ScenarioKindBehavior, `grep -q 'mktemp -d' notes.txt`},
 		{"similar_word", response.ScenarioKindBehavior, `mktempfoo`},
 		{"host", response.ScenarioKindHost, `d=$(mktemp -d)`},
+		{"newline_then_short_flag", response.ScenarioKindBehavior, "mktemp -d \"$TMPDIR/x-XXXXXX\"\nls -t\n"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
