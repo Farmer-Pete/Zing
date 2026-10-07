@@ -121,9 +121,6 @@ const (
 	resumesExhaustedWhatFmt = "raise machine.toml's %s max_resumes, or abandon"
 	resumesExhaustedWhyFmt  = "the %s session has resumed the maximum number of times machine.toml allows"
 
-	splitUnsupportedWhat = "the plan says this ticket should be split into several tickets, which Zing does not yet build"
-	splitUnsupportedWhy  = "the planning run returned a children outcome"
-
 	// nothingToDoNoCodeClaimsWhat is section 6.8's own nothing_to_do
 	// escalation What text (task 8, tightened by F022): response.Validate's
 	// CheckNothingToDoClaims already rejects any nothing_to_do response
@@ -382,6 +379,8 @@ func (h planningHandler) enterFromRound(ctx context.Context, t store.Ticket, d D
 	switch {
 	case qp.Kind == response.QuestionKindGate:
 		return h.enterFromGateRound(ctx, t, d, round)
+	case qp.Kind == response.QuestionKindSplit:
+		return h.enterFromSplitRound(ctx, t, d, round)
 	case newest.ParentID != nil:
 		// The newest question's own parent id, not round.ParentID: a
 		// run-caused escalation's linked question carries the same run_id
@@ -748,8 +747,9 @@ func priorInvalidReason(ctx context.Context, d Deps, ticketID, sessionID, before
 // section 6.8, 22.2, 22.4), shared by the first turn and the resume:
 // questions and error are the same universal handling classify uses;
 // replies is D31's own thread-only outcome; ready is section 6.5's real
-// cohort check and store; children escalates split_unsupported (design
-// D6); nothing_to_do is nothingToDoCommit's own accept-or-escalate check
+// cohort check and store; children is childrenCommit, which stores the
+// children artifact and posts the split question (split.go);
+// nothing_to_do is nothingToDoCommit's own accept-or-escalate check
 // (task 8). Every outcome but error can carry <replies> (design section
 // 22.2): when the response does, checkConversation runs first against conv
 // (the same PlanningConversation its caller already read to build this
@@ -780,11 +780,7 @@ func planningSuccessCommit(ctx context.Context, t store.Ticket, d Deps, rr runRe
 	case *response.ReadyResponse:
 		c, err = readyCommit(ctx, t, d, rr, r, sessionCommit, resolveIDs)
 	case *response.ChildrenResponse:
-		c = escalationCommit(t, d, &rr.Reserved.RunID, &rr.Reserved.SessionID,
-			string(response.EscalationCodeSplitUnsupported), splitUnsupportedWhat, splitUnsupportedWhy, "", response.EscalationOriginSplit)
-		c.Runs = terminalRuns(rr, string(response.OutcomeChildren))
-		c.Session = sessionCommit
-		c.ResolveQuestions = resolveIDs
+		c, err = childrenCommit(t, d, rr, r, sessionCommit, resolveIDs)
 	case *response.NothingToDoResponse:
 		c, err = nothingToDoCommit(t, d, rr, r, sessionCommit, resolveIDs)
 	case *response.ErrorResponse:
