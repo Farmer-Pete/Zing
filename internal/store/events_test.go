@@ -6,6 +6,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"zing/internal/response"
 )
@@ -330,9 +331,83 @@ func TestInsertEventRejects(t *testing.T) {
 func TestEventKinds(t *testing.T) {
 	t.Parallel()
 	got := EventKinds()
-	want := []string{"check_rerun", "check_rerun_passed", "owner_edit", "plan_unblock", "stale_base"}
+	want := []string{"budget_raised", "check_rerun", "check_rerun_passed", "owner_edit", "plan_unblock", "stale_base"}
 	if !slices.Equal(got, want) {
 		t.Errorf("EventKinds() = %v, want %v", got, want)
+	}
+}
+
+// TestBudgetRaisedMinutes proves BudgetRaisedMinutes sums every
+// budget_raised event's minutes on a ticket, leaves another ticket alone,
+// and stays unchanged when a commit carrying an invalid event is rejected.
+// It writes every event through CommitHandlerResult, the only path
+// production uses (retryCapBudget's commit), rather than InsertMessage
+// directly.
+func TestBudgetRaisedMinutes(t *testing.T) {
+	t.Parallel()
+	s := newTestStore(t)
+	ctx := t.Context()
+
+	projectID, ticketA := seedQueuedTicket(t, s, "42")
+	ticketB, insertErr := s.InsertTicket(ctx, Ticket{ProjectID: projectID, TrackerRef: "43", Title: "a second ticket", State: ticketStateQueued})
+	if insertErr != nil {
+		t.Fatalf("InsertTicket(B): %v", insertErr)
+	}
+
+	if got, err := s.BudgetRaisedMinutes(ctx, ticketA); err != nil || got != 0 {
+		t.Fatalf("BudgetRaisedMinutes(A, no events) = (%d, %v), want (0, nil)", got, err)
+	}
+
+	for range 2 {
+		expires := time.Now().Add(time.Hour).UTC().Truncate(time.Second)
+		if ok, err := s.Claim(ctx, ticketA, testForeignOwner, expires); err != nil || !ok {
+			t.Fatalf("Claim(A) = (%v, %v), want (true, nil)", ok, err)
+		}
+		msg, err := NewEvent(ticketA, EventKindBudgetRaised, response.BudgetRaisedEvent{Minutes: 60})
+		if err != nil {
+			t.Fatalf("NewEvent: %v", err)
+		}
+		applied, err := s.CommitHandlerResult(ctx, HandlerCommit{
+			TicketID: ticketA, Owner: testForeignOwner, Expires: expires, Messages: []Message{msg},
+		})
+		if err != nil {
+			t.Fatalf("CommitHandlerResult(budget_raised): %v", err)
+		}
+		if !applied {
+			t.Fatal("CommitHandlerResult(budget_raised): applied = false, want true")
+		}
+	}
+
+	got, err := s.BudgetRaisedMinutes(ctx, ticketA)
+	if err != nil {
+		t.Fatalf("BudgetRaisedMinutes(A): %v", err)
+	}
+	if got != 120 {
+		t.Errorf("BudgetRaisedMinutes(A) = %d, want 120", got)
+	}
+
+	gotB, err := s.BudgetRaisedMinutes(ctx, ticketB)
+	if err != nil || gotB != 0 {
+		t.Fatalf("BudgetRaisedMinutes(B) = (%d, %v), want (0, nil)", gotB, err)
+	}
+
+	badExpires := time.Now().Add(time.Hour).UTC().Truncate(time.Second)
+	if ok, claimErr := s.Claim(ctx, ticketA, testForeignOwner, badExpires); claimErr != nil || !ok {
+		t.Fatalf("Claim(A, before bad commit) = (%v, %v), want (true, nil)", ok, claimErr)
+	}
+	badMsg, err := NewEvent(ticketA, EventKindBudgetRaised, response.BudgetRaisedEvent{Minutes: 0})
+	if err != nil {
+		t.Fatalf("NewEvent: %v", err)
+	}
+	if _, commitErr := s.CommitHandlerResult(ctx, HandlerCommit{
+		TicketID: ticketA, Owner: testForeignOwner, Expires: badExpires, Messages: []Message{badMsg},
+	}); commitErr == nil {
+		t.Error("CommitHandlerResult(budget_raised, minutes 0) = nil error, want one")
+	}
+
+	gotAfter, err := s.BudgetRaisedMinutes(ctx, ticketA)
+	if err != nil || gotAfter != 120 {
+		t.Fatalf("BudgetRaisedMinutes(A) after rejected commit = (%d, %v), want (120, nil)", gotAfter, err)
 	}
 }
 

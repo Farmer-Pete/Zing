@@ -4022,6 +4022,61 @@ func TestShippingEscalationRetries(t *testing.T) {
 			t.Errorf("commit.Messages = %+v, want a %q marker", commit.Messages, markerRetryRequested)
 		}
 	})
+
+	t.Run("cap_budget_raise", func(t *testing.T) {
+		t.Parallel()
+		s, ticket, _ := shipTicketReady(t)
+
+		gh := &shipGitHub{}
+		tr := &shipTracker{}
+		deps := shipClaim(t, s, pbFakeRuntime(t), ticket.ID, gh, tr)
+		escCommit := budgetEscalationCommit(pbGetTicket(t, s, ticket.ID), deps, nil)
+		applied, err := s.CommitHandlerResult(t.Context(), escCommit)
+		if err != nil || !applied {
+			t.Fatalf("CommitHandlerResult(budgetEscalationCommit): applied=%v err=%v", applied, err)
+		}
+		open, err := s.QuestionsByState(t.Context(), ticket.ID, "open")
+		if err != nil || len(open) == 0 {
+			t.Fatalf("QuestionsByState(open) = %v, %v, want at least one", open, err)
+		}
+		qID := open[len(open)-1].ID
+		pbAnswerEscalation(t, s, ticket.ID, qID, "d")
+
+		deps2 := shipClaim(t, s, pbFakeRuntime(t), ticket.ID, gh, tr)
+		commit, runErr := (shipHandler{}).Run(t.Context(), pbGetTicket(t, s, ticket.ID), deps2)
+		if runErr != nil {
+			t.Fatalf("Run: %v", runErr)
+		}
+		if !commit.ClearPoll {
+			t.Error("ClearPoll = false, want true")
+		}
+		if commit.Escalation != nil {
+			t.Errorf("commit.Escalation = %+v, want nil (budget raised)", commit.Escalation)
+		}
+		found := false
+		var ev *store.Message
+		for i, m := range commit.Messages {
+			if m.Body == markerRetryRequested {
+				found = true
+			}
+			if m.EventKind != nil && *m.EventKind == store.EventKindBudgetRaised {
+				ev = &commit.Messages[i]
+			}
+		}
+		if !found {
+			t.Errorf("commit.Messages = %+v, want a %q marker", commit.Messages, markerRetryRequested)
+		}
+		if ev == nil {
+			t.Fatalf("commit.Messages = %+v, want one budget_raised event", commit.Messages)
+		}
+		var payload response.BudgetRaisedEvent
+		if err := json.Unmarshal(ev.Payload, &payload); err != nil {
+			t.Fatalf("unmarshal budget_raised payload: %v", err)
+		}
+		if payload.Minutes != 60 {
+			t.Errorf("payload.Minutes = %d, want 60", payload.Minutes)
+		}
+	})
 }
 
 // -----------------------------------------------------------------------

@@ -1,6 +1,7 @@
 package response
 
 import (
+	"fmt"
 	"regexp"
 	"slices"
 	"strings"
@@ -87,10 +88,12 @@ func proseElements(p Plan) []proseElem {
 }
 
 // CheckPlan applies every design section 6.6 plan-checker rule to p: the
-// placeholder, vague-qualifier, performance-without-measurement, and
-// scenario-leak rules over its prose, plus (when bug) the bug-plan-shape
-// rules. Every path is prefixed "plan". lists.Placeholders, lists.Vague,
-// and lists.Units are the sole source of their respective word lists, so
+// placeholder, vague-qualifier, performance-without-measurement,
+// scenario-leak, and host-scenario new-route rules over its prose and
+// scenarios, plus (when bug) the bug-plan-shape rules. A prose-rule error's
+// path is prefixed "plan"; the host-scenario new-route rule reports at
+// scenarios/scenario[i]/check. lists.Placeholders, lists.Vague, and
+// lists.Units are the sole source of their respective word lists, so
 // tuning checklists.toml actually changes what CheckPlan flags.
 //
 // present is the document's Layer 1 presence set (design section 6.4): the
@@ -113,6 +116,7 @@ func CheckPlan(p Plan, scenarios []Scenario, bug bool, lists Checklists, present
 		}
 	}
 	errs = append(errs, checkScenarioLeaks(elems, scenarios, present)...)
+	errs = append(errs, checkHostNewRoutes(p.Design.Changes, scenarios, present)...)
 
 	if bug {
 		errs = append(errs, checkBugShape(p, present["plan/overview/problem"], present["plan/delivery/tests/test[0]/kind"])...)
@@ -194,6 +198,111 @@ func checkScenarioLeaks(elems []proseElem, scenarios []Scenario, present map[str
 		}
 	}
 	return errs
+}
+
+// routeDecl matches a net/http ServeMux pattern that names a method,
+// such as "POST /settings" or `GET /tickets/{id}`, capturing its path.
+var routeDecl = regexp.MustCompile("[\"`](?:GET|HEAD|POST|PUT|PATCH|DELETE|OPTIONS)[ \\t]+(/[^\"`\\s]*)[\"`]")
+
+// literalSegment matches a path with at least one segment that is not a
+// wildcard, so "/" and "/{id}" alone are never treated as new routes.
+var literalSegment = regexp.MustCompile(`/[^/{]`)
+
+// newRoutePaths returns the route paths the plan's after code declares
+// and no change's before code declares with any method, in first-seen
+// order, without duplicates.
+func newRoutePaths(changes []Change) []string {
+	existing := map[string]bool{}
+	for i := range changes {
+		for _, m := range routeDecl.FindAllStringSubmatch(changes[i].Before, -1) {
+			existing[m[1]] = true
+		}
+	}
+	seen := map[string]bool{}
+	var out []string
+	for i := range changes {
+		for _, m := range routeDecl.FindAllStringSubmatch(changes[i].After, -1) {
+			path := m[1]
+			declaredBefore := existing[path]
+			duplicate := seen[path]
+			allWildcard := !literalSegment.MatchString(path)
+			if declaredBefore || duplicate || allWildcard {
+				continue
+			}
+			seen[path] = true
+			out = append(out, path)
+		}
+	}
+	return out
+}
+
+// loopbackHost matches the host part of a URL aimed at this machine,
+// which is where the owner's live zing serve listens.
+const loopbackHost = `(?:\blocalhost|\b127\.0\.0\.1|\[::1\])(?::[0-9]+)?`
+
+// urlPathEnd matches what can follow a URL path in a shell command.
+const urlPathEnd = `(?:$|[\s"'?#&;|)])`
+
+const hostNewRouteFmt = "host check calls %s, a route this plan adds; the live zing serve runs main until merge, so prove the route with a behavior scenario that runs the branch's tests"
+
+// checkHostNewRoutes flags a host scenario whose check calls, on a
+// loopback URL, a route the plan adds. A host check runs at judging,
+// before merge, against the owner's live serve, which runs main (#210).
+func checkHostNewRoutes(changes []Change, scenarios []Scenario, present map[string]bool) []*PathError {
+	routes := newRoutePaths(changes)
+	if len(routes) == 0 {
+		return nil
+	}
+	var errs []*PathError
+	for i, sc := range scenarios {
+		base := "scenarios/" + indexedName("scenario", i)
+		idPresent := present[base+"/id"]
+		isHost := sc.Kind == ScenarioKindHost
+		hasCheck := strings.TrimSpace(sc.Check) != ""
+		if !idPresent || !isHost || !hasCheck {
+			continue
+		}
+		for _, route := range routes {
+			re := routePathRegexp(route)
+			if re.MatchString(sc.Check) {
+				errs = append(errs, &PathError{Path: base + "/check", Msg: fmt.Sprintf(hostNewRouteFmt, route)})
+			}
+		}
+	}
+	return errs
+}
+
+// restOfPath matches the rest of a URL path, for {name...} and for the
+// trailing empty segment of a subtree pattern such as /settings/.
+const restOfPath = `[^\s"'?#]*`
+
+// routePathRegexp compiles a ServeMux path into a regexp that matches a
+// loopback URL the mux would route to it: {name} is one non-empty
+// segment, {name...} is the rest of the path, {$} ends it, and a
+// trailing slash without {$} is a subtree that matches the rest of the path.
+func routePathRegexp(route string) *regexp.Regexp {
+	var b strings.Builder
+	b.WriteString(loopbackHost)
+	segs := strings.Split(route, "/")
+	for i, seg := range segs {
+		if i > 0 {
+			b.WriteString("/")
+		}
+		subtree := i > 0 && i == len(segs)-1 && seg == ""
+		restWildcard := strings.HasPrefix(seg, "{") && strings.HasSuffix(seg, "...}")
+		segWildcard := strings.HasPrefix(seg, "{") && strings.HasSuffix(seg, "}")
+		switch {
+		case seg == "{$}":
+		case subtree, restWildcard:
+			b.WriteString(restOfPath)
+		case segWildcard:
+			b.WriteString(`[^/\s"'?#]+`)
+		default:
+			b.WriteString(regexp.QuoteMeta(seg))
+		}
+	}
+	b.WriteString(urlPathEnd)
+	return regexp.MustCompile(b.String())
 }
 
 var whitespaceRun = regexp.MustCompile(`\s+`)

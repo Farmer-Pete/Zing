@@ -39,6 +39,10 @@ const EventKindStaleBase = "stale_base"
 // unblock turn at plan review's loop cap.
 const EventKindPlanUnblock = "plan_unblock"
 
+// EventKindBudgetRaised names the budget_raised event kind: the owner
+// raised one ticket's agent budget from its wall_clock escalation.
+const EventKindBudgetRaised = "budget_raised"
+
 // EventFilter narrows Events and CountEvents beyond ticket and kind.
 type EventFilter struct {
 	RunID *int64 // nil: any run
@@ -125,6 +129,19 @@ func (s *Store) NewestPlanUnblock(ctx context.Context, ticketID int64) (response
 		return response.PlanUnblockEvent{}, false, fmt.Errorf("newest plan_unblock for ticket %d: %w", ticketID, err)
 	}
 	return e, true, nil
+}
+
+// BudgetRaisedMinutes sums the minutes of every budget_raised event on
+// ticketID: 0 when there is none.
+func (s *Store) BudgetRaisedMinutes(ctx context.Context, ticketID int64) (int64, error) {
+	var total int64
+	err := s.db.QueryRowContext(ctx,
+		`SELECT COALESCE(SUM(json_extract(payload, '$.minutes')), 0) FROM messages WHERE ticket_id = ? AND event_kind = ?`,
+		ticketID, EventKindBudgetRaised).Scan(&total)
+	if err != nil {
+		return 0, fmt.Errorf("budget raised minutes for ticket %d: %w", ticketID, err)
+	}
+	return total, nil
 }
 
 // EventKinds returns every event kind with a committed schema under
