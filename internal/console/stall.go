@@ -72,15 +72,18 @@ func decideStall(in stallInput) (reason stallReason, text string) {
 	if t.WaitingOn != nil {
 		return stallOwner, "waiting on the owner (" + *t.WaitingOn + ")"
 	}
-	if in.Slots != nil && t.ClaimOwner != nil && *t.ClaimOwner != in.Slots.Owner {
+	foreignClaim := in.Slots != nil && t.ClaimOwner != nil && *t.ClaimOwner != in.Slots.Owner
+	if foreignClaim {
 		tail := "the next dispatch pass reclaims it"
 		if in.ClaimAlive {
 			tail = "its leftover agent process is still running"
 		}
 		return stallClaimDead, "claim held by a process that is no longer alive (" + *t.ClaimOwner + "); " + tail
 	}
-	if t.State == string(response.TicketStateShipping) && in.CIMarker != nil && in.CIMarker.CreatedAt != nil &&
-		(in.LastRan == nil || in.CIMarker.CreatedAt.After(*in.LastRan)) {
+	shipping := t.State == string(response.TicketStateShipping)
+	dated := in.CIMarker != nil && in.CIMarker.CreatedAt != nil
+	newerThanRun := dated && (in.LastRan == nil || in.CIMarker.CreatedAt.After(*in.LastRan))
+	if shipping && newerThanRun {
 		first, _, _ := strings.Cut(in.CIMarker.Body, "\n")
 		var names []string
 		for n := range strings.SplitSeq(strings.TrimPrefix(first, updateMarkerCIWaitingPrefix), ",") {
@@ -97,7 +100,8 @@ func decideStall(in stallInput) (reason stallReason, text string) {
 			return stallCI, fmt.Sprintf("CI waiting %d %s for %s", mins, unit, strings.Join(names, ", "))
 		}
 	}
-	if in.Slots != nil && in.Candidate && len(in.Slots.Inflight) >= in.Slots.MaxParallel {
+	slotsFull := in.Slots != nil && len(in.Slots.Inflight) >= in.Slots.MaxParallel
+	if in.Candidate && slotsFull {
 		ids := make([]string, len(in.Slots.Inflight))
 		for i, id := range in.Slots.Inflight {
 			ids[i] = strconv.FormatInt(id, 10)

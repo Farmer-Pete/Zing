@@ -1,6 +1,7 @@
 package dispatch_test
 
 import (
+	"slices"
 	"testing"
 
 	"zing/internal/bus"
@@ -40,7 +41,7 @@ func TestSlots_ReportsInflightOwnerAndMaxParallel(t *testing.T) {
 	if snap.MaxParallel != 2 {
 		t.Errorf("Slots().MaxParallel = %d, want 2", snap.MaxParallel)
 	}
-	if want := []int64{id1, id2}; !equalIDs(snap.Inflight, want) {
+	if want := []int64{id1, id2}; !slices.Equal(snap.Inflight, want) {
 		t.Errorf("Slots().Inflight = %v, want %v (ascending)", snap.Inflight, want)
 	}
 
@@ -74,16 +75,4 @@ func TestSlots_FreshDispatcherHasEmptyInflight(t *testing.T) {
 	if len(snap.Inflight) != 0 {
 		t.Errorf("Slots().Inflight = %v, want empty", snap.Inflight)
 	}
-}
-
-func equalIDs(got, want []int64) bool {
-	if len(got) != len(want) {
-		return false
-	}
-	for i, id := range got {
-		if id != want[i] {
-			return false
-		}
-	}
-	return true
 }

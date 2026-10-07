@@ -202,10 +202,13 @@ func newTestServerSandboxTracker(
 // newTestServerSandboxTracker. stream_test.go's newReadTimeoutTestServer is
 // the one caller that passes a non-nil hook, to set ReadTimeout, rather than
 // duplicating this listener-reservation and placeholder-swap recipe.
+// opts is passed through to console.New: rail_test.go's newStallTestServer
+// is the one caller that passes a console.Option (console.WithSlots),
+// rather than duplicating this same recipe again.
 func newTestServerConfig(
 	t *testing.T, s *store.Store, b *bus.Broker, m *machine.Machine, log *console.Handler,
 	floor response.Severity, sandboxReason string, tr tracker.Tracker, user string,
-	configure func(*http.Server),
+	configure func(*http.Server), opts ...console.Option,
 ) *httptest.Server {
 	t.Helper()
 
@@ -219,7 +222,7 @@ func newTestServerConfig(
 		t.Fatalf("unexpected listener address type %T", ln.Addr())
 	}
 
-	handler := console.New(s, b, m, testBindHosts, addr.Port, log, nil, testPushToken, floor, sandboxReason, tr, user, nil)
+	handler := console.New(s, b, m, testBindHosts, addr.Port, log, nil, testPushToken, floor, sandboxReason, tr, user, nil, opts...)
 	srv := httptest.NewUnstartedServer(handler)
 	if err := srv.Listener.Close(); err != nil {
 		t.Fatalf("close the placeholder listener: %v", err)

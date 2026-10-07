@@ -9,7 +9,6 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
-	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -1577,6 +1576,110 @@ func TestRail_StallCIWaiting(t *testing.T) {
 	}
 }
 
+// TestRail_StallLoaderPicksNewestRunAndMarker proves buildStallRail's two
+// "take the newest" choices actually pick by time, not by position: the
+// greatest Run.StartedAt across several runs (RunsForTicket orders by id,
+// not by start time), and the newest of several "ci waiting" markers. Each
+// subtest gives the higher-id run the earlier start, so a loader that used
+// the last run by id, instead of the greatest StartedAt, would report the
+// wrong last-ran time and the wrong side of the CI newer-than-run-start
+// check (owner decision Q1).
+func TestRail_StallLoaderPicksNewestRunAndMarker(t *testing.T) {
+	t.Parallel()
+
+	seedTwoRunsAndMarkers := func(t *testing.T, newestRunStart, olderRunStart time.Time) (*store.Store, int64) {
+		t.Helper()
+		s := newConsoleTestStore(t)
+		ticketID := seedTicket(t, s, "fake#1", "Add a hello endpoint")
+		advanceTicketToState(t, s, ticketID, string(response.TicketStateShipping))
+
+		const owner = "rail-loader-test-owner"
+		expires := time.Now().Add(10 * time.Minute).UTC().Truncate(time.Second)
+		claimed, err := s.Claim(t.Context(), ticketID, owner, expires)
+		if err != nil || !claimed {
+			t.Fatalf("Claim: claimed=%v err=%v", claimed, err)
+		}
+
+		// The lower run id (reserved first) carries the newest start; the
+		// higher run id (reserved second) carries the older one, so picking
+		// "the last run by id" disagrees with picking "the greatest start".
+		newest, err := s.Reserve(t.Context(), ticketID, owner, expires,
+			store.SessionUpsert{Job: string(response.TicketStateShipping), Runtime: testRuntimeFake},
+			store.RunSeed{Model: "test-model"})
+		if err != nil {
+			t.Fatalf("Reserve (newest run): %v", err)
+		}
+		if err = s.RecordRunStart(t.Context(), newest.RunID, 0, "", newestRunStart, ""); err != nil {
+			t.Fatalf("RecordRunStart (newest run): %v", err)
+		}
+		older, err := s.Reserve(t.Context(), ticketID, owner, expires,
+			store.SessionUpsert{Job: string(response.TicketStateShipping), Runtime: testRuntimeFake},
+			store.RunSeed{Model: "test-model"})
+		if err != nil {
+			t.Fatalf("Reserve (older, higher-id run): %v", err)
+		}
+		if older.RunID <= newest.RunID {
+			t.Fatalf("older run id %d is not greater than newest run id %d", older.RunID, newest.RunID)
+		}
+		if err = s.RecordRunStart(t.Context(), older.RunID, 0, "", olderRunStart, ""); err != nil {
+			t.Fatalf("RecordRunStart (older run): %v", err)
+		}
+
+		if _, err := s.InsertMessage(t.Context(), store.Message{
+			TicketID: ticketID, Type: testMsgTypeUpdate, Author: "system", Body: "ci waiting stale-check",
+		}); err != nil {
+			t.Fatalf("InsertMessage (older marker): %v", err)
+		}
+		if _, err := s.InsertMessage(t.Context(), store.Message{
+			TicketID: ticketID, Type: testMsgTypeUpdate, Author: "system", Body: "ci waiting ci,lint",
+		}); err != nil {
+			t.Fatalf("InsertMessage (newest marker): %v", err)
+		}
+
+		return s, ticketID
+	}
+
+	t.Run("marker_older_than_newest_run_hides_ci_and_last_ran_uses_greatest_start", func(t *testing.T) {
+		t.Parallel()
+		now := time.Now().UTC()
+		newestRunStart := now.Add(2 * time.Hour).Truncate(time.Second)
+		olderRunStart := now.Add(-2 * time.Hour).Truncate(time.Second)
+		s, ticketID := seedTwoRunsAndMarkers(t, newestRunStart, olderRunStart)
+
+		srv := newTestServer(t, s, bus.New(), testMachine(t), newTestLogHandler(t))
+		rail := railHTML(t, srv.URL, ticketID)
+
+		wantLastRan := "last ran " + newestRunStart.Format("2006-01-02 15:04") + " UTC"
+		if !strings.Contains(rail, wantLastRan) {
+			t.Errorf("rail missing %q (the greater of the two run starts); got:\n%s", wantLastRan, rail)
+		}
+		if strings.Contains(rail, `data-stall-reason="ci"`) {
+			t.Errorf("rail should hide the CI reason when the newest marker is older than the newest run's start; got:\n%s", rail)
+		}
+	})
+
+	t.Run("marker_newer_than_newest_run_shows_newest_markers_names", func(t *testing.T) {
+		t.Parallel()
+		now := time.Now().UTC()
+		newestRunStart := now.Add(-2 * time.Hour).Truncate(time.Second)
+		olderRunStart := now.Add(-3 * time.Hour).Truncate(time.Second)
+		s, ticketID := seedTwoRunsAndMarkers(t, newestRunStart, olderRunStart)
+
+		srv := newTestServer(t, s, bus.New(), testMachine(t), newTestLogHandler(t))
+		rail := railHTML(t, srv.URL, ticketID)
+
+		if !strings.Contains(rail, `data-stall-reason="ci"`) {
+			t.Errorf("rail missing data-stall-reason=\"ci\"; got:\n%s", rail)
+		}
+		if !strings.Contains(rail, "for ci, lint") {
+			t.Errorf("rail should show the newest marker's check names; got:\n%s", rail)
+		}
+		if strings.Contains(rail, "stale-check") {
+			t.Errorf("rail should not show the older marker's check name; got:\n%s", rail)
+		}
+	})
+}
+
 // TestRail_StallNoSlotSource proves a console with a machine but no
 // SlotSource still renders the stall section's shell -- class="rail-stall"
 // and the "never ran" last-ran line -- but shows no stall-reason element,
@@ -1615,6 +1718,9 @@ func TestRail_StallHiddenWhenTerminal(t *testing.T) {
 	srv := newTestServer(t, s, bus.New(), testMachine(t), newTestLogHandler(t))
 	rail := railHTML(t, srv.URL, ticketID)
 
+	if !strings.Contains(rail, `class="rail-phase"`) {
+		t.Errorf("rail should still render the phase section for a terminal ticket; got:\n%s", rail)
+	}
 	if strings.Contains(rail, "rail-stall") {
 		t.Errorf("rail should hide the stall section for a terminal ticket; got:\n%s", rail)
 	}
@@ -1628,34 +1734,14 @@ type fakeSlots dispatch.SlotSnapshot
 
 func (f fakeSlots) Slots() dispatch.SlotSnapshot { return dispatch.SlotSnapshot(f) }
 
-// newStallTestServer is newTestServerConfig's own listener-reservation and
-// placeholder-swap recipe (console_test.go), narrowed to what the stall
-// tests need: a real machine (testMachine) so the rail renders a stall
-// section at all, and slots wired through console.WithSlots so decideStall's
-// running, claim_dead, and slot reasons can fire.
+// newStallTestServer is newTestServerConfig (console_test.go), narrowed to
+// what the stall tests need: a real machine (testMachine) so the rail
+// renders a stall section at all, and slots wired through console.WithSlots
+// so decideStall's running, claim_dead, and slot reasons can fire.
 func newStallTestServer(t *testing.T, s *store.Store, b *bus.Broker, slots console.SlotSource) *httptest.Server {
 	t.Helper()
-
-	var lc net.ListenConfig
-	ln, err := lc.Listen(t.Context(), "tcp", testBindHost+":0")
-	if err != nil {
-		t.Fatalf("reserve a listener: %v", err)
-	}
-	addr, ok := ln.Addr().(*net.TCPAddr)
-	if !ok {
-		t.Fatalf("unexpected listener address type %T", ln.Addr())
-	}
-
-	handler := console.New(s, b, testMachine(t), testBindHosts, addr.Port, newTestLogHandler(t), nil, testPushToken,
-		response.SeverityMinor, "", nil, "", nil, console.WithSlots(slots))
-	srv := httptest.NewUnstartedServer(handler)
-	if err := srv.Listener.Close(); err != nil {
-		t.Fatalf("close the placeholder listener: %v", err)
-	}
-	srv.Listener = ln
-	srv.Start()
-	t.Cleanup(srv.Close)
-	return srv
+	return newTestServerConfig(t, s, b, testMachine(t), newTestLogHandler(t), response.SeverityMinor, "", nil, "",
+		nil, console.WithSlots(slots))
 }
 
 // TestRail_StallSlotLine proves the rail's stall section shows the "waiting
