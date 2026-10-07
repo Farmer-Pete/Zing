@@ -37,7 +37,10 @@ templ ownerEditClaimNote(claimed bool) {
 // sealed is threadComponent's post-gate "Sealed plan and scenarios" section
 // (#75): nil when console.showSealedSection reports the ticket does not
 // get one.
-templ Thread(ticket *store.Ticket, rows []ThreadRow, wait WaitProgress, banner string, actions TicketActions, sealed *SealedSection) {
+// smoke is the stored plan's owner_smoke items, set by
+// console.ownerSmokeItems only for a ticket done with reason merged; nil
+// renders nothing.
+templ Thread(ticket *store.Ticket, rows []ThreadRow, wait WaitProgress, banner string, actions TicketActions, sealed *SealedSection, smoke []string) {
 	<main id="main" class="view-thread">
 		if ticket != nil {
 			<h2>{ ticket.Title }</h2>
@@ -65,6 +68,7 @@ templ Thread(ticket *store.Ticket, rows []ThreadRow, wait WaitProgress, banner s
 				}
 			}
 			@sealedSection(sealed)
+			@ownerSmokeSection(smoke)
 			@sandboxRunBox(ticket.ID)
 		} else {
 			<p class="empty">Select a ticket.</p>
@@ -134,6 +138,23 @@ templ sealedSection(s *SealedSection) {
 			@scenariosSection(s.Scenarios, false)
 			@PlanView(*s.Plan)
 		</details>
+	}
+}
+
+// ownerSmokeSection is a merged ticket's Owner smoke checks list: each of
+// the plan's owner_smoke items beside a bare checkbox that posts nothing
+// and is never saved, so a tick blocks nothing. Renders nothing when
+// items is empty.
+templ ownerSmokeSection(items []string) {
+	if len(items) > 0 {
+		<section id="owner-smoke" class="owner-smoke">
+			<h3>Owner smoke checks</h3>
+			<ul>
+				for _, item := range items {
+					<li><label><input type="checkbox"/> { item }</label></li>
+				}
+			</ul>
+		</section>
 	}
 }
 

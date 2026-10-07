@@ -170,7 +170,7 @@ func TestOwnerEditControls_TicketBodyEditor(t *testing.T) {
 	ticket := &store.Ticket{ID: 7, Title: testHelloTicketTitle, Body: "B"}
 
 	var sb strings.Builder
-	if err := Thread(ticket, nil, WaitProgress{}, "", TicketActions{}, nil).Render(t.Context(), &sb); err != nil {
+	if err := Thread(ticket, nil, WaitProgress{}, "", TicketActions{}, nil, nil).Render(t.Context(), &sb); err != nil {
 		t.Fatalf("Thread.Render: %v", err)
 	}
 	got := sb.String()
@@ -192,7 +192,7 @@ func TestOwnerEditControls_TextareaPreservesLeadingNewline(t *testing.T) {
 	ticket := &store.Ticket{ID: 7, Title: testHelloTicketTitle, Body: "\nX"}
 
 	var sb strings.Builder
-	if err := Thread(ticket, nil, WaitProgress{}, "", TicketActions{}, nil).Render(t.Context(), &sb); err != nil {
+	if err := Thread(ticket, nil, WaitProgress{}, "", TicketActions{}, nil, nil).Render(t.Context(), &sb); err != nil {
 		t.Fatalf("Thread.Render: %v", err)
 	}
 	got := sb.String()
@@ -210,7 +210,7 @@ func TestOwnerEditControls_TicketBodyEditorStripsSuffix(t *testing.T) {
 	ticket := &store.Ticket{ID: 7, TrackerRef: "41-abandoned-2", Title: testHelloTicketTitle, Body: "B"}
 
 	var sb strings.Builder
-	if err := Thread(ticket, nil, WaitProgress{}, "", TicketActions{}, nil).Render(t.Context(), &sb); err != nil {
+	if err := Thread(ticket, nil, WaitProgress{}, "", TicketActions{}, nil, nil).Render(t.Context(), &sb); err != nil {
 		t.Fatalf("Thread.Render: %v", err)
 	}
 	got := sb.String()
