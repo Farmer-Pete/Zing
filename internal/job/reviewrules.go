@@ -1,6 +1,7 @@
 package job
 
 import (
+	"encoding/json"
 	"fmt"
 	"log/slog"
 	stdpath "path"
@@ -394,4 +395,58 @@ func renderDroppedInput(dropped []response.FindingArtifact) (prompt.NamedInput, 
 		lines[i] = fmt.Sprintf("- %s %s %s", sorted[i].ID, collapseWhitespace(sorted[i].Location), text)
 	}
 	return prompt.NamedInput{Label: droppedFindingsLabel, Text: strings.Join(lines, "\n"), Untrusted: true}, true
+}
+
+// acceptedPerimeterLabel is the review lens input that lists the paths
+// outside the plan the owner accepted at a perimeter question.
+const acceptedPerimeterLabel = "accepted perimeter files"
+
+// perimeterQuestionKeys maps each path a perimeter question named to the
+// Key of the newest such question (messages in id order, as ListMessages
+// returns them).
+func perimeterQuestionKeys(messages []store.MessageRow) map[string]string {
+	out := make(map[string]string)
+	for i := range messages {
+		m := &messages[i]
+		if m.Type != msgTypeQuestion {
+			continue
+		}
+		var qp response.QuestionPayload
+		if err := json.Unmarshal(m.Payload, &qp); err != nil || qp.Kind != response.QuestionKindPerimeter {
+			continue
+		}
+		for _, item := range qp.Items {
+			out[item.Ref] = qp.Key
+		}
+	}
+	return out
+}
+
+// renderAcceptedPerimeterInput renders every path whose newest file event
+// is accepted as one untrusted input, one line per path in path order:
+// "- PATH accepted at KEY: REASON", or "- PATH accepted: REASON" when no
+// perimeter question names the path. REASON is the builder's, collapsed
+// and cut at acceptedAtCapTextRunes. ok is false when nothing is accepted.
+func renderAcceptedPerimeterInput(events []store.FileEventRow, messages []store.MessageRow) (prompt.NamedInput, bool) {
+	keys := perimeterQuestionKeys(messages)
+	var lines []string
+	for path, row := range newestFileEventPerPath(events) {
+		if row.File.Decision == nil || *row.File.Decision != response.PerimeterAccept {
+			continue
+		}
+		reason := collapseWhitespace(row.File.Reason)
+		if cut := cutRunes(reason, acceptedAtCapTextRunes); cut != reason {
+			reason = cut + "..."
+		}
+		at := ""
+		if key, ok := keys[path]; ok {
+			at = " at " + key
+		}
+		lines = append(lines, fmt.Sprintf("- %s accepted%s: %s", collapseWhitespace(path), at, reason))
+	}
+	if len(lines) == 0 {
+		return prompt.NamedInput{}, false
+	}
+	sort.Strings(lines)
+	return prompt.NamedInput{Label: acceptedPerimeterLabel, Text: strings.Join(lines, "\n"), Untrusted: true}, true
 }

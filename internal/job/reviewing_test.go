@@ -4784,3 +4784,94 @@ func TestReReviewPromptListsDroppedFindings(t *testing.T) {
 		t.Errorf("round 2 quality Prompt = %q, want a dropped findings line for %s at %s", prompt, dropID, greetGoLine5)
 	}
 }
+
+// TestReviewPromptListsAcceptedPerimeterFiles proves ticket 96's own review
+// input: a path the owner accepted at a perimeter question (Q7066) is
+// listed in every lens's "accepted perimeter files" input with its
+// question key and the builder's reason, the fidelity lens's own code
+// section carries the new "not a fidelity finding" rule, and a path the
+// owner rejected at the same question never appears in any round 1 prompt.
+func TestReviewPromptListsAcceptedPerimeterFiles(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow end-to-end flow; runs in the full suite")
+	}
+	t.Parallel()
+	s, ticket, _ := reviewTicketReady(t)
+
+	questionPayload, err := json.Marshal(response.QuestionPayload{
+		Key: "Q7066", Kind: response.QuestionKindPerimeter, State: response.QuestionStateResolved,
+		Recommended: "Decide each file", Options: []response.Option{},
+		Items: []response.Item{
+			{Ref: "internal/extra_test.go", Text: "Builder: split the parser tests out"},
+			{Ref: "internal/rejected.go", Text: "Builder: unrelated"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("marshal question payload: %v", err)
+	}
+	if _, err = s.InsertMessage(t.Context(), store.Message{
+		TicketID: ticket.ID, Type: msgTypeQuestion, Author: authorZing,
+		State: new("resolved"), Body: "Confirm the file perimeter", Payload: questionPayload,
+	}); err != nil {
+		t.Fatalf("InsertMessage (question): %v", err)
+	}
+
+	accept := response.PerimeterAccept
+	acceptPayload, err := json.Marshal(response.FileArtifact{
+		Path: "internal/extra_test.go", Action: response.FileActionCreate, Reason: "split the parser tests out",
+		Decision: &accept,
+	})
+	if err != nil {
+		t.Fatalf("marshal accepted file artifact: %v", err)
+	}
+	if _, err = s.InsertArtifact(t.Context(), store.Artifact{TicketID: ticket.ID, Type: artifactTypeFile, Payload: acceptPayload}); err != nil {
+		t.Fatalf("InsertArtifact (accepted): %v", err)
+	}
+
+	reject := response.PerimeterReject
+	rejectPayload, err := json.Marshal(response.FileArtifact{
+		Path: "internal/rejected.go", Action: response.FileActionCreate, Reason: "unrelated",
+		Decision: &reject,
+	})
+	if err != nil {
+		t.Fatalf("marshal rejected file artifact: %v", err)
+	}
+	if _, err = s.InsertArtifact(t.Context(), store.Artifact{TicketID: ticket.ID, Type: artifactTypeFile, Payload: rejectPayload}); err != nil {
+		t.Fatalf("InsertArtifact (rejected): %v", err)
+	}
+
+	rt := &recordingRuntime{inner: runtime.NewFake(reviewScriptsFS(nil))}
+	deps := pbClaim(t, s, rt, ticket.ID)
+	if _, err = (reviewingHandler{}).Run(t.Context(), ticket, deps); err != nil { // ROUND 1
+		t.Fatalf("Run (round 1): %v", err)
+	}
+
+	round1Fidelity := requestsByLabel(rt, "1-fidelity")
+	if len(round1Fidelity) != 1 {
+		t.Fatalf("requests labelled 1-fidelity = %d, want exactly 1", len(round1Fidelity))
+	}
+	prompt := round1Fidelity[0].Prompt
+
+	const header = "accepted perimeter files:\n"
+	const line = "- internal/extra_test.go accepted at Q7066: split the parser tests out"
+	last := strings.LastIndex(prompt, header)
+	if last < 0 {
+		t.Fatalf("fidelity Prompt = %q, want it to contain %q", prompt, header)
+	}
+	if !strings.Contains(prompt[last:], line) {
+		t.Errorf("fidelity Prompt = %q, want %q inside the accepted perimeter files input", prompt, line)
+	}
+	if !strings.Contains(strings.Join(strings.Fields(prompt), " "), "A listed path is not a fidelity finding") {
+		t.Errorf("fidelity Prompt = %q, want the lens text's new rule", prompt)
+	}
+
+	round1 := requestsByLabelPrefix(rt, "1-")
+	if len(round1) == 0 {
+		t.Fatal("requests labelled 1-*, = 0, want at least one (round 1 ran at least one lens)")
+	}
+	for _, req := range round1 {
+		if strings.Contains(req.Prompt, "internal/rejected.go") {
+			t.Errorf("round 1 %q Prompt = %q, want no mention of the rejected path", req.Label, req.Prompt)
+		}
+	}
+}
