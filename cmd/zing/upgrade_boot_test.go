@@ -1,8 +1,11 @@
 package main
 
 import (
+	"bytes"
+	"log/slog"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -189,6 +192,262 @@ func TestRemoveMarker(t *testing.T) {
 		t.Parallel()
 		if err := removeMarker(t.TempDir()); err != nil {
 			t.Errorf("removeMarker with no marker = %v, want nil", err)
+		}
+	})
+}
+
+// guardBootSHA is a stand-in commit sha, used as both the running build's
+// version and the marker's to_sha so matchesRunning agrees they match.
+const guardBootSHA = "0123456789abcdef0123456789abcdef01234567"
+
+// writeGuardBootBinary resolves dir's data directory (macOS temp dirs sit
+// behind a symlink), creates DATA_DIR/bin, and writes exe (and, with prev
+// non-empty, DATA_DIR/bin/zing.prev) with the given contents. It returns
+// the resolved data dir and the exe path.
+func writeGuardBootBinary(t *testing.T, dir, exeContent, prevContent string) (resolved, exe string) {
+	t.Helper()
+	resolved, err := filepath.EvalSymlinks(dir)
+	if err != nil {
+		t.Fatalf("resolve %s: %v", dir, err)
+	}
+	binDir := filepath.Join(resolved, "bin")
+	if err := os.MkdirAll(binDir, 0o700); err != nil {
+		t.Fatalf("mkdir %s: %v", binDir, err)
+	}
+	exe = filepath.Join(binDir, "zing")
+	if err := os.WriteFile(exe, []byte(exeContent), 0o700); err != nil {
+		t.Fatalf("write %s: %v", exe, err)
+	}
+	if prevContent != "" {
+		if err := os.WriteFile(exe+".prev", []byte(prevContent), 0o700); err != nil {
+			t.Fatalf("write %s.prev: %v", exe, err)
+		}
+	}
+	return resolved, exe
+}
+
+func TestGuardBoot_RollsBackAttempted(t *testing.T) {
+	t.Parallel()
+
+	t.Run("rolls back and releases the lock", func(t *testing.T) {
+		t.Parallel()
+		resolved, exe := writeGuardBootBinary(t, t.TempDir(), "new", "old")
+		marker := upgradeMarker{FromSHA: "from-sha", ToSHA: guardBootSHA, TicketID: 5, State: markerAttempted}
+		if err := saveUpgradeMarker(resolved, marker); err != nil {
+			t.Fatalf("saveUpgradeMarker: %v", err)
+		}
+
+		action, m, target, err := guardBoot(resolved, exe, guardBootSHA)
+		if err != nil {
+			t.Fatalf("guardBoot: %v", err)
+		}
+		if action != bootRollback {
+			t.Errorf("action = %v, want bootRollback", action)
+		}
+		if target.Next != "" {
+			t.Errorf("target.Next = %q, want empty", target.Next)
+		}
+
+		su := &selfUpgrade{boot: action, marker: m}
+		if su.boot != bootRollback {
+			t.Errorf("su.boot = %v, want bootRollback", su.boot)
+		}
+
+		got, err := os.ReadFile(exe)
+		if err != nil {
+			t.Fatalf("read exe: %v", err)
+		}
+		if string(got) != "old" {
+			t.Errorf("exe contents = %q, want %q", got, "old")
+		}
+		if _, statErr := os.Stat(exe + ".prev"); !os.IsNotExist(statErr) {
+			t.Errorf("zing.prev still exists after rollback")
+		}
+
+		saved, found, err := loadUpgradeMarker(resolved)
+		if err != nil || !found {
+			t.Fatalf("loadUpgradeMarker: found=%v err=%v", found, err)
+		}
+		if saved.State != markerRolledBack {
+			t.Errorf("marker state = %q, want %q", saved.State, markerRolledBack)
+		}
+		if su.marker.State != markerRolledBack {
+			t.Errorf("su.marker.State = %q, want %q", su.marker.State, markerRolledBack)
+		}
+
+		lock, err := acquireServeLock(resolved)
+		if err != nil {
+			t.Fatalf("acquireServeLock after guardBoot: %v", err)
+		}
+		lock.release()
+	})
+
+	t.Run("no_prev", func(t *testing.T) {
+		t.Parallel()
+		resolved, exe := writeGuardBootBinary(t, t.TempDir(), "new", "")
+		marker := upgradeMarker{FromSHA: "from-sha", ToSHA: guardBootSHA, TicketID: 5, State: markerAttempted}
+		if err := saveUpgradeMarker(resolved, marker); err != nil {
+			t.Fatalf("saveUpgradeMarker: %v", err)
+		}
+
+		action, m, _, err := guardBoot(resolved, exe, guardBootSHA)
+		if err != nil {
+			t.Fatalf("guardBoot: %v", err)
+		}
+		if action != bootNormal {
+			t.Errorf("action = %v, want bootNormal", action)
+		}
+		if m.State != markerAttempted {
+			t.Errorf("m.State = %q, want %q (the marker as read, before the no-op removal)", m.State, markerAttempted)
+		}
+		if _, found, loadErr := loadUpgradeMarker(resolved); loadErr != nil || found {
+			t.Errorf("marker found=%v err=%v, want gone", found, loadErr)
+		}
+	})
+}
+
+func TestGuardBoot_MarksPendingAttempted(t *testing.T) {
+	resolved, exe := writeGuardBootBinary(t, t.TempDir(), "zing", "")
+	marker := upgradeMarker{FromSHA: "from-sha", ToSHA: guardBootSHA, TicketID: 9, State: markerPending}
+	if err := saveUpgradeMarker(resolved, marker); err != nil {
+		t.Fatalf("saveUpgradeMarker: %v", err)
+	}
+
+	action, m, _, err := guardBoot(resolved, exe, guardBootSHA)
+	if err != nil {
+		t.Fatalf("guardBoot: %v", err)
+	}
+	if action != bootWatch {
+		t.Errorf("action = %v, want bootWatch", action)
+	}
+
+	su := &selfUpgrade{boot: action, marker: m}
+	su.booted.Store(false)
+	su.deadlinePassed.Store(false)
+	if su.marker.State != markerAttempted {
+		t.Errorf("su.marker.State = %q, want %q", su.marker.State, markerAttempted)
+	}
+	if su.booted.Load() || su.deadlinePassed.Load() {
+		t.Errorf("su.booted / su.deadlinePassed should start false")
+	}
+
+	saved, found, err := loadUpgradeMarker(resolved)
+	if err != nil || !found {
+		t.Fatalf("loadUpgradeMarker: found=%v err=%v", found, err)
+	}
+	if saved.State != markerAttempted {
+		t.Errorf("marker state = %q, want %q", saved.State, markerAttempted)
+	}
+
+	t.Run("mismatch_discards", func(t *testing.T) {
+		resolvedMismatch, exeMismatch := writeGuardBootBinary(t, t.TempDir(), "zing", "")
+		pendingMarker := upgradeMarker{FromSHA: "from-sha", ToSHA: guardBootSHA, TicketID: 9, State: markerPending}
+		if saveErr := saveUpgradeMarker(resolvedMismatch, pendingMarker); saveErr != nil {
+			t.Fatalf("saveUpgradeMarker: %v", saveErr)
+		}
+
+		action, m, _, guardErr := guardBoot(resolvedMismatch, exeMismatch, "fedcba9876543210")
+		if guardErr != nil {
+			t.Fatalf("guardBoot: %v", guardErr)
+		}
+		if action != bootDiscard {
+			t.Errorf("action = %v, want bootDiscard", action)
+		}
+		if m.State != markerPending {
+			t.Errorf("m.State = %q, want %q (the marker as read, before the discard)", m.State, markerPending)
+		}
+		if _, found, loadErr := loadUpgradeMarker(resolvedMismatch); loadErr != nil || found {
+			t.Errorf("marker found=%v err=%v, want gone", found, loadErr)
+		}
+	})
+
+	t.Run("missing_data_dir", func(t *testing.T) {
+		missing := filepath.Join(t.TempDir(), "does-not-exist")
+
+		action, _, _, guardErr := guardBoot(missing, exe, guardBootSHA)
+		if guardErr != nil {
+			t.Fatalf("guardBoot: %v", guardErr)
+		}
+		if action != bootNormal {
+			t.Errorf("action = %v, want bootNormal", action)
+		}
+		if _, statErr := os.Stat(missing); !os.IsNotExist(statErr) {
+			t.Errorf("missing data dir was created")
+		}
+	})
+
+	t.Run("exe_outside_data_dir", func(t *testing.T) {
+		prevDefault := slog.Default()
+		var buf bytes.Buffer
+		slog.SetDefault(slog.New(slog.NewTextHandler(&buf, nil)))
+		t.Cleanup(func() { slog.SetDefault(prevDefault) })
+
+		resolvedOutside, realExe := writeGuardBootBinary(t, t.TempDir(), "zing", "old")
+		attemptedMarker := upgradeMarker{FromSHA: "from-sha", ToSHA: guardBootSHA, TicketID: 9, State: markerAttempted}
+		if saveErr := saveUpgradeMarker(resolvedOutside, attemptedMarker); saveErr != nil {
+			t.Fatalf("saveUpgradeMarker: %v", saveErr)
+		}
+		before, readErr := os.ReadFile(filepath.Join(resolvedOutside, upgradeMarkerFile))
+		if readErr != nil {
+			t.Fatalf("read upgrade.json: %v", readErr)
+		}
+		prevBefore, readErr := os.ReadFile(realExe + ".prev")
+		if readErr != nil {
+			t.Fatalf("read zing.prev: %v", readErr)
+		}
+
+		outsideDir := t.TempDir()
+		outsideExe := filepath.Join(outsideDir, "zing")
+		if writeErr := os.WriteFile(outsideExe, []byte("outside"), 0o700); writeErr != nil {
+			t.Fatalf("write outside exe: %v", writeErr)
+		}
+
+		action, m, _, guardErr := guardBoot(resolvedOutside, outsideExe, guardBootSHA)
+		if guardErr != nil {
+			t.Fatalf("guardBoot: %v", guardErr)
+		}
+		if action != bootNormal {
+			t.Errorf("action = %v, want bootNormal", action)
+		}
+		if m != (upgradeMarker{}) {
+			t.Errorf("m = %+v, want the zero value (the marker is never read for this action)", m)
+		}
+
+		after, readErr := os.ReadFile(filepath.Join(resolvedOutside, upgradeMarkerFile))
+		if readErr != nil {
+			t.Fatalf("read upgrade.json after: %v", readErr)
+		}
+		if !bytes.Equal(before, after) {
+			t.Errorf("upgrade.json changed: before=%q after=%q", before, after)
+		}
+		prevAfter, readErr := os.ReadFile(realExe + ".prev")
+		if readErr != nil {
+			t.Fatalf("read zing.prev after: %v", readErr)
+		}
+		if !bytes.Equal(prevBefore, prevAfter) {
+			t.Errorf("zing.prev changed: before=%q after=%q", prevBefore, prevAfter)
+		}
+
+		for _, name := range []string{serveLockFilename, serveLockGuardFilename} {
+			if _, statErr := os.Stat(filepath.Join(resolvedOutside, name)); !os.IsNotExist(statErr) {
+				t.Errorf("%s was created in the data dir", name)
+			}
+		}
+
+		lines := strings.Split(strings.TrimRight(buf.String(), "\n"), "\n")
+		if len(lines) != 1 {
+			t.Fatalf("log lines = %d, want 1: %q", len(lines), buf.String())
+		}
+		line := lines[0]
+		wantBinary := filepath.Join(resolvedOutside, "bin", "zing")
+		for _, want := range []string{
+			"level=WARN",
+			"upgrade: boot guard skipped: serve runs " + outsideExe,
+			wantBinary,
+		} {
+			if !strings.Contains(line, want) {
+				t.Errorf("log line %q missing %q", line, want)
+			}
 		}
 	})
 }

@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime/debug"
+	"sync/atomic"
 )
 
 // bootAction is what the boot guard decides to do with upgrade.json at
@@ -123,6 +124,21 @@ type selfUpgrade struct {
 	// next is set by serve, after shutdown, when Target reports a restart
 	// target is ready. run passes it to restartAfterServe.
 	next *restartTarget
+
+	// boot is set by bootAndServe from guardBoot's answer, before serve
+	// runs. It is never bootRollback, since bootAndServe execs instead of
+	// serving in that case.
+	boot bootAction
+	// marker is the upgrade.json guardBoot read, with State already
+	// updated to attempted for a watch boot; it is the zero value for
+	// bootNormal.
+	marker upgradeMarker
+	// booted is set once, by onBooted, once the boot watch sees a 200. The
+	// 60 s timer and finishBoot both read it.
+	booted atomic.Bool
+	// deadlinePassed is set once, by the 60 s timer, when it fires before
+	// booted is set. finishBoot reads it to pick failed's cause.
+	deadlinePassed atomic.Bool
 }
 
 // newSelfUpgrade resolves the running executable and this build's version,
@@ -139,4 +155,70 @@ func newSelfUpgrade() *selfUpgrade {
 	}
 	info, _ := debug.ReadBuildInfo()
 	return &selfUpgrade{exe: exe, running: versionString(info)}
+}
+
+// guardBoot reads upgrade.json under serve.lock, before zing.toml is read,
+// and acts on decideBoot's answer. A watch marks the marker attempted; a
+// rollback renames zing.prev over exe and marks it rolled_back; a discard
+// removes it. It releases serve.lock before it returns. Any error comes
+// back with the action guardBoot settled on, for bootAndServe to log at
+// WARN. With a missing dataDir or an empty exe, it returns normal without
+// touching anything.
+func guardBoot(dataDir, exe, running string) (bootAction, upgradeMarker, restartTarget, error) {
+	if exe == "" {
+		return bootNormal, upgradeMarker{}, restartTarget{}, nil
+	}
+	resolved, err := filepath.EvalSymlinks(dataDir)
+	if errors.Is(err, os.ErrNotExist) {
+		return bootNormal, upgradeMarker{}, restartTarget{}, nil
+	}
+	if err != nil {
+		return bootNormal, upgradeMarker{}, restartTarget{}, fmt.Errorf("upgrade: boot guard: resolve %s: %w", dataDir, err)
+	}
+	binary := filepath.Join(resolved, "bin", "zing")
+	if exe != binary {
+		slog.Warn(fmt.Sprintf("upgrade: boot guard skipped: serve runs %s, not %s", exe, binary))
+		return bootNormal, upgradeMarker{}, restartTarget{}, nil
+	}
+
+	lock, err := acquireServeLock(resolved)
+	if err != nil {
+		return bootNormal, upgradeMarker{}, restartTarget{}, err
+	}
+	defer lock.release()
+
+	m, found, err := loadUpgradeMarker(resolved)
+	if err != nil {
+		return bootNormal, upgradeMarker{}, restartTarget{}, err
+	}
+	switch action := decideBoot(m, found, running); action {
+	case bootWatch:
+		m.State = markerAttempted
+		slog.Info("upgrade", "step", "boot_watch", "from_sha", m.FromSHA, "to_sha", m.ToSHA, "ticket_id", m.TicketID)
+		return bootWatch, m, restartTarget{}, saveUpgradeMarker(resolved, m)
+	case bootRollback:
+		return rollBack(resolved, exe, m)
+	case bootDiscard:
+		slog.Warn("upgrade: boot guard discarded upgrade.json", "state", m.State, "to_sha", m.ToSHA, "running", running, "ticket_id", m.TicketID)
+		return bootDiscard, m, restartTarget{}, removeMarker(resolved)
+	default: // bootNormal, bootReport
+		return action, m, restartTarget{}, nil
+	}
+}
+
+// rollBack renames zing.prev over exe and marks the marker rolled_back.
+// With no zing.prev there is nothing to roll back to: it removes the
+// marker and answers normal.
+func rollBack(dataDir, exe string, m upgradeMarker) (bootAction, upgradeMarker, restartTarget, error) {
+	prev := exe + ".prev"
+	if err := os.Rename(prev, exe); err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			slog.Warn("upgrade: rollback: no zing.prev", "to_sha", m.ToSHA, "ticket_id", m.TicketID)
+			return bootNormal, m, restartTarget{}, removeMarker(dataDir)
+		}
+		return bootNormal, m, restartTarget{}, fmt.Errorf("upgrade: rollback: %w", err)
+	}
+	m.State = markerRolledBack
+	slog.Warn("upgrade: rolling back", "from_sha", m.ToSHA, "to_sha", m.FromSHA, "ticket_id", m.TicketID)
+	return bootRollback, m, rollbackTarget(m, exe), saveUpgradeMarker(dataDir, m)
 }
