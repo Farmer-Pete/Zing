@@ -23,6 +23,14 @@ Check:
   runs its check on the owner's machine at judging, so a live
   `zing serve`, a sandbox probe, or timing belongs there. A host
   scenario with no check is a finding.
+- A host scenario whose given or check needs this ticket's own new binary,
+  route, or flag, or a file only that new binary writes on the host, is a
+  major finding. The installed zing and the live `zing serve` run main
+  until merge, so the check fails, or passes having tested nothing. A host
+  check that writes to the owner's live state, such as a POST to the live
+  console, is a major finding too. A repo file the plan creates is fine in
+  a host check, which runs in a checkout of the branch. The fix is a
+  behavior scenario that runs the branch's own tests.
 - A scenario whose then expects a skip has a check that runs `go test
   -v` and greps the skip line, such as `--- SKIP: TestName`, and the
   skip message. A bare `go test` exits 0 whether or not the test

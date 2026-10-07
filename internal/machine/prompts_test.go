@@ -28,12 +28,12 @@ func TestPrompts_MatchThePinnedDesignText(t *testing.T) {
 		{
 			name:   "planning-feature",
 			path:   planningFeaturePromptPath,
-			sha256: "e01f7fbf0ec0a66987deb59533cd2f136f8fc86ebf732581cc721377f8d56ebe",
+			sha256: "95252ee8d2f4bc23dd8990f32891a1580cafaed25859e5647f503f32154318b3",
 		},
 		{
 			name:   "planning-bug",
 			path:   planningBugPromptPath,
-			sha256: "3b435b3bc1f8f1ae26e49e169673e84bb79427c9cf851714f182bdd7495f6b63",
+			sha256: "57cd6325d06fe02ed4ee77e1c22563c4f4c5bb2c5d025e88cf735af2c6e65ee5",
 		},
 		{
 			name:   "planreview",
@@ -443,6 +443,38 @@ func TestPlanningPromptsRequirePureFunctionSeam(t *testing.T) {
 	for _, path := range []string{planningFeaturePromptPath, planningBugPromptPath} {
 		if !strings.Contains(unwrapped(t, path), pureFunctionSeamSentence) {
 			t.Errorf("%s lacks the pure-function seam sentence", path)
+		}
+	}
+}
+
+// hostBeforeMergeSentence is what both planning prompts say right after
+// hostKindSentence (#91): a host check runs in a checkout of this branch,
+// so it may read or test any repo file the plan creates, but everything
+// else it needs must already exist on the host before this ticket merges,
+// since the installed zing and the live zing serve both run main until
+// then.
+const hostBeforeMergeSentence = "A host check runs in a checkout of this " +
+	"branch, so it may read or test any repo file the plan creates. " +
+	"Everything else it needs must already exist on the host before this " +
+	"ticket merges, since the installed zing and the live zing serve both " +
+	"run main until then. Prove a binary, route, or flag this ticket adds " +
+	"with a behavior scenario that runs the branch's tests. A host check " +
+	"only reads the owner's live state."
+
+// TestPlanningPromptsLimitHostToMain proves both planning prompts carry
+// hostBeforeMergeSentence right after hostKindSentence, and before "Quote
+// a check's glob" (#91): a host scenario may only depend on what exists
+// on the host before this ticket merges, since the installed zing and
+// the live zing serve both run main until then.
+func TestPlanningPromptsLimitHostToMain(t *testing.T) {
+	t.Parallel()
+	for _, path := range []string{planningFeaturePromptPath, planningBugPromptPath} {
+		text := unwrapped(t, path)
+		if !strings.Contains(text, hostKindSentence+" "+hostBeforeMergeSentence) {
+			t.Errorf("%s lacks the host-before-merge sentence right after the host-kind sentence", path)
+		}
+		if !strings.Contains(text, hostBeforeMergeSentence+" Quote a check's glob") {
+			t.Errorf("%s does not place the host-before-merge sentence before \"Quote a check's glob\"", path)
 		}
 	}
 }
