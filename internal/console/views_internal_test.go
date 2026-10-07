@@ -511,7 +511,7 @@ func TestSentAnswerText(t *testing.T) {
 		got := sentAnswerText(response.AnswerPayload{Items: map[string]response.Decision{
 			"greet.go": response.DecisionAccept, "machine.toml": response.DecisionReject,
 		}}, nil)
-		want := "greet.go: accept, machine.toml: reject"
+		want := "greet.go: accept, machine.toml: drop"
 		if got != want {
 			t.Errorf("sentAnswerText = %q, want %q", got, want)
 		}
@@ -523,6 +523,24 @@ func TestSentAnswerText(t *testing.T) {
 			t.Errorf("sentAnswerText = %q, want empty", got)
 		}
 	})
+}
+
+// TestAnswerLineShowsDropForReject proves answerLine runs each item decision
+// through templates.DisplayDecision, so a perimeter item stored as reject
+// prints as drop, the same word its row's button shows.
+func TestAnswerLineShowsDropForReject(t *testing.T) {
+	t.Parallel()
+	payload, err := json.Marshal(response.AnswerPayload{Items: map[string]response.Decision{
+		"greet.go": response.DecisionAccept, "machine.toml": response.DecisionReject,
+	}})
+	if err != nil {
+		t.Fatalf("marshal answer payload: %v", err)
+	}
+	m := &store.MessageRow{Message: store.Message{Type: msgTypeAnswer, Payload: payload}} //nolint:modernize // keyed on purpose
+	want := "greet.go: accept, machine.toml: drop"
+	if got := answerLine(m); got != want {
+		t.Errorf("answerLine = %q, want %q", got, want)
+	}
 }
 
 // TestCollectSentAnswers proves collectSentAnswers reads only "answer" rows
@@ -585,7 +603,7 @@ func TestBuildThreadRowsNestsSentRepliesAndAnswersUnderTheirQuestion(t *testing.
 		{ID: 4, Message: store.Message{Type: msgTypeReply, Body: "a thread-level note"}},
 	}
 
-	got, err := buildThreadRows(&store.Ticket{}, rows, nil, nil, nil, store.PlanningConversation{}, "The agent")
+	got, err := buildThreadRows(&store.Ticket{}, rows, nil, nil, nil, nil, store.PlanningConversation{}, "The agent")
 	if err != nil {
 		t.Fatalf("buildThreadRows: %v", err)
 	}
@@ -734,7 +752,7 @@ func TestBuildThreadRowsBadgesRevisableAnsweredDifferentlyFromLocked(t *testing.
 	rows := []store.MessageRow{questionRowForWait(t, msgStateAnswered, response.QuestionKindQuestion)}
 
 	waiting := waitReasonQuestions
-	revisableRows, err := buildThreadRows(&store.Ticket{WaitingOn: &waiting}, rows, nil, nil, nil, store.PlanningConversation{}, "The agent")
+	revisableRows, err := buildThreadRows(&store.Ticket{WaitingOn: &waiting}, rows, nil, nil, nil, nil, store.PlanningConversation{}, "The agent")
 	if err != nil {
 		t.Fatalf("buildThreadRows (revisable): %v", err)
 	}
@@ -742,7 +760,7 @@ func TestBuildThreadRowsBadgesRevisableAnsweredDifferentlyFromLocked(t *testing.
 		t.Errorf("revisable answered question StateLabel = %q, want %q", got, "answered · can change")
 	}
 
-	lockedRows, err := buildThreadRows(&store.Ticket{}, rows, nil, nil, nil, store.PlanningConversation{}, "The agent")
+	lockedRows, err := buildThreadRows(&store.Ticket{}, rows, nil, nil, nil, nil, store.PlanningConversation{}, "The agent")
 	if err != nil {
 		t.Fatalf("buildThreadRows (locked): %v", err)
 	}
@@ -957,7 +975,7 @@ func TestNoMessageKindRendersOutsideItsThread(t *testing.T) {
 							row.ParentID = &qid
 						}
 
-						got, err := buildThreadRows(&store.Ticket{}, []store.MessageRow{question, row}, nil, nil, nil, store.PlanningConversation{}, "The agent")
+						got, err := buildThreadRows(&store.Ticket{}, []store.MessageRow{question, row}, nil, nil, nil, nil, store.PlanningConversation{}, "The agent")
 						if err != nil {
 							t.Fatalf("buildThreadRows: %v", err)
 						}
@@ -1013,7 +1031,7 @@ func TestNoMessageKindRendersOutsideItsThread(t *testing.T) {
 					row := store.MessageRow{ID: 2, Message: store.Message{ //nolint:modernize // keyed on purpose
 						Type: msgTypeUpdate, Author: authorSystem, Body: tc.body, ParentID: &qid,
 					}}
-					got, err := buildThreadRows(&store.Ticket{}, []store.MessageRow{question, row}, nil, nil, nil, store.PlanningConversation{}, "The agent")
+					got, err := buildThreadRows(&store.Ticket{}, []store.MessageRow{question, row}, nil, nil, nil, nil, store.PlanningConversation{}, "The agent")
 					if err != nil {
 						t.Fatalf("buildThreadRows: %v", err)
 					}
@@ -1026,7 +1044,7 @@ func TestNoMessageKindRendersOutsideItsThread(t *testing.T) {
 				t.Run("unparented, never a card", func(t *testing.T) {
 					t.Parallel()
 					row := store.MessageRow{Message: store.Message{Type: msgTypeUpdate, Author: authorSystem, Body: tc.body}} //nolint:modernize // keyed on purpose
-					got, err := buildThreadRows(&store.Ticket{}, []store.MessageRow{row}, nil, nil, nil, store.PlanningConversation{}, "The agent")
+					got, err := buildThreadRows(&store.Ticket{}, []store.MessageRow{row}, nil, nil, nil, nil, store.PlanningConversation{}, "The agent")
 					if err != nil {
 						t.Fatalf("buildThreadRows: %v", err)
 					}
@@ -1066,7 +1084,7 @@ func TestEscalationWithQuestionChildRendersNoCard(t *testing.T) {
 	parentID := escalation.ID
 	question := store.MessageRow{ID: 49, Message: store.Message{Type: msgTypeQuestion, Author: authorZing, Payload: payload, ParentID: &parentID, Body: testEscalationBody + "\n\nHow should Zing proceed?"}} //nolint:modernize // keyed on purpose
 
-	got, err := buildThreadRows(&store.Ticket{}, []store.MessageRow{escalation, question}, nil, nil, nil, store.PlanningConversation{}, "The agent")
+	got, err := buildThreadRows(&store.Ticket{}, []store.MessageRow{escalation, question}, nil, nil, nil, nil, store.PlanningConversation{}, "The agent")
 	if err != nil {
 		t.Fatalf("buildThreadRows: %v", err)
 	}
@@ -1086,7 +1104,7 @@ func TestEscalationWithNoQuestionChildKeepsItsCard(t *testing.T) {
 	t.Parallel()
 	escalation := store.MessageRow{ID: 1, Message: store.Message{Type: msgTypeEscalation, Author: authorZing, Body: testEscalationBody}} //nolint:modernize // keyed on purpose
 
-	got, err := buildThreadRows(&store.Ticket{}, []store.MessageRow{escalation}, nil, nil, nil, store.PlanningConversation{}, "The agent")
+	got, err := buildThreadRows(&store.Ticket{}, []store.MessageRow{escalation}, nil, nil, nil, nil, store.PlanningConversation{}, "The agent")
 	if err != nil {
 		t.Fatalf("buildThreadRows: %v", err)
 	}
@@ -1108,7 +1126,7 @@ func TestUnknownMarkerIsADivider(t *testing.T) {
 	const body = testBodyUnknownMarker
 	row := store.MessageRow{ID: 1, Message: store.Message{Type: msgTypeUpdate, Author: authorSystem, Body: body}} //nolint:modernize // keyed on purpose
 
-	got, err := buildThreadRows(&store.Ticket{}, []store.MessageRow{row}, nil, nil, nil, store.PlanningConversation{}, "The agent")
+	got, err := buildThreadRows(&store.Ticket{}, []store.MessageRow{row}, nil, nil, nil, nil, store.PlanningConversation{}, "The agent")
 	if err != nil {
 		t.Fatalf("buildThreadRows: %v", err)
 	}
@@ -1137,7 +1155,7 @@ func TestConversationMarkersHidden(t *testing.T) {
 		{ID: 1, Message: store.Message{Type: msgTypeUpdate, Author: authorSystem, Body: testBodyConversationPending}},             //nolint:modernize // keyed on purpose
 		{ID: 2, Message: store.Message{Type: msgTypeUpdate, Author: authorSystem, Body: "conversation delivered run 31 batch 4"}}, //nolint:modernize // keyed on purpose
 	}
-	got, err := buildThreadRows(&store.Ticket{}, rows, nil, nil, nil, store.PlanningConversation{}, "The agent")
+	got, err := buildThreadRows(&store.Ticket{}, rows, nil, nil, nil, nil, store.PlanningConversation{}, "The agent")
 	if err != nil {
 		t.Fatalf("buildThreadRows: %v", err)
 	}
@@ -1221,7 +1239,7 @@ func TestResolvedSystemRowShowsAsANoteNotAnEmptyCard(t *testing.T) {
 		Type: msgTypeResolved, Author: authorSystem, ParentID: &qid,
 	}}
 
-	got, err := buildThreadRows(&store.Ticket{}, []store.MessageRow{question, resolved}, nil, nil, nil, store.PlanningConversation{}, "The agent")
+	got, err := buildThreadRows(&store.Ticket{}, []store.MessageRow{question, resolved}, nil, nil, nil, nil, store.PlanningConversation{}, "The agent")
 	if err != nil {
 		t.Fatalf("buildThreadRows: %v", err)
 	}
@@ -1329,7 +1347,7 @@ func TestBuildThreadRowsInterleavesConversation(t *testing.T) {
 		}},
 	}
 
-	got, err := buildThreadRows(&store.Ticket{}, rows, nil, nil, nil, conv, "Fable")
+	got, err := buildThreadRows(&store.Ticket{}, rows, nil, nil, nil, nil, conv, "Fable")
 	if err != nil {
 		t.Fatalf("buildThreadRows: %v", err)
 	}
@@ -1397,7 +1415,7 @@ func TestBuildThreadRowsPlacesSystemResolvedRowByID(t *testing.T) {
 		}},
 	}
 
-	got, err := buildThreadRows(&store.Ticket{}, rows, nil, nil, nil, conv, "The agent")
+	got, err := buildThreadRows(&store.Ticket{}, rows, nil, nil, nil, nil, conv, "The agent")
 	if err != nil {
 		t.Fatalf("buildThreadRows: %v", err)
 	}
@@ -1447,7 +1465,7 @@ func TestReopenPlaceholderOnSettledReopenableThread(t *testing.T) {
 	t.Run("reopenable, no gate open: plain reopen placeholder", func(t *testing.T) {
 		t.Parallel()
 		ticket := &store.Ticket{State: ticketStatePlanning}
-		got, err := buildThreadRows(ticket, []store.MessageRow{question}, nil, nil, nil, conv, "Fable")
+		got, err := buildThreadRows(ticket, []store.MessageRow{question}, nil, nil, nil, nil, conv, "Fable")
 		if err != nil {
 			t.Fatalf("buildThreadRows: %v", err)
 		}
@@ -1469,7 +1487,7 @@ func TestReopenPlaceholderOnSettledReopenableThread(t *testing.T) {
 		openState := msgStateOpen
 		gateQuestion := store.MessageRow{ID: 20, Message: store.Message{Type: msgTypeQuestion, Payload: gatePayload(t), State: &openState}} //nolint:modernize // keyed on purpose
 		ticket := &store.Ticket{State: ticketStatePlanning}
-		got, err := buildThreadRows(ticket, []store.MessageRow{question, gateQuestion}, nil, nil, nil, conv, "Fable")
+		got, err := buildThreadRows(ticket, []store.MessageRow{question, gateQuestion}, nil, nil, nil, nil, conv, "Fable")
 		if err != nil {
 			t.Fatalf("buildThreadRows: %v", err)
 		}
@@ -1491,7 +1509,7 @@ func TestReopenPlaceholderOnSettledReopenableThread(t *testing.T) {
 	t.Run("locked once the ticket left planning", func(t *testing.T) {
 		t.Parallel()
 		ticket := &store.Ticket{State: "building"}
-		got, err := buildThreadRows(ticket, []store.MessageRow{question}, nil, nil, nil, conv, "Fable")
+		got, err := buildThreadRows(ticket, []store.MessageRow{question}, nil, nil, nil, nil, conv, "Fable")
 		if err != nil {
 			t.Fatalf("buildThreadRows: %v", err)
 		}
@@ -1518,7 +1536,7 @@ func TestEarlierDecisionShownWhileReopened(t *testing.T) {
 	question := store.MessageRow{ID: qid, Message: store.Message{Type: msgTypeQuestion, Payload: questionPayload}} //nolint:modernize // keyed on purpose
 	conv := store.PlanningConversation{Threads: []store.Thread{{Question: question, Settled: false, Decision: "Plain text only."}}}
 
-	got, err := buildThreadRows(&store.Ticket{State: ticketStatePlanning}, []store.MessageRow{question}, nil, nil, nil, conv, "Fable")
+	got, err := buildThreadRows(&store.Ticket{State: ticketStatePlanning}, []store.MessageRow{question}, nil, nil, nil, nil, conv, "Fable")
 	if err != nil {
 		t.Fatalf("buildThreadRows: %v", err)
 	}
@@ -1750,7 +1768,7 @@ func TestOptionChipTextRendersBackticksAsCode(t *testing.T) {
 	openState := msgStateOpen
 	rows := []store.MessageRow{{Message: store.Message{Type: msgTypeQuestion, State: &openState, Payload: questionPayload}}} //nolint:modernize // keyed on purpose
 
-	got, err := buildThreadRows(&store.Ticket{}, rows, nil, nil, nil, store.PlanningConversation{}, "The agent")
+	got, err := buildThreadRows(&store.Ticket{}, rows, nil, nil, nil, nil, store.PlanningConversation{}, "The agent")
 	if err != nil {
 		t.Fatalf("buildThreadRows: %v", err)
 	}
@@ -2427,5 +2445,26 @@ func TestGroupAttempts_AllAttemptsRetiredHeadIsHighest(t *testing.T) {
 	got10 := earlier[10]
 	if len(got10) != 1 || got10[0].ID != 6 {
 		t.Errorf("earlier[10] = %+v, want [ticket 6]", got10)
+	}
+}
+
+// TestHoldBanner covers holdBanner's non-abandoned branch (a dependency in
+// an active state such as planning, rendered as "REF (STATE)") and joining
+// several held dependencies with semicolons, neither of which
+// TestThreadBanner_HeldTicketNamesAbandonedDependency (split_test.go)
+// exercises on its own (r1f1).
+func TestHoldBanner(t *testing.T) {
+	t.Parallel()
+
+	deps := []store.DependencyRow{
+		{TicketID: 1, Ref: "12", State: string(response.TicketStateAbandoned)},
+		{TicketID: 2, Ref: "13", State: "planning"},
+		{TicketID: 3, Ref: "14", State: string(response.TicketStateDone)},
+	}
+
+	got := holdBanner(deps)
+	want := "Waits on #12, which was abandoned; #13 (planning)."
+	if got != want {
+		t.Errorf("holdBanner(%+v) = %q, want %q", deps, got, want)
 	}
 }

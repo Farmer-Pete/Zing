@@ -476,8 +476,8 @@ func TestJudgeStartWritesWatermark(t *testing.T) {
 	if commit.Next != "" || commit.Waiting != nil {
 		t.Fatalf("commit = {Next: %q, Waiting: %v}, want both empty (START makes no transition and waits on nothing)", commit.Next, commit.Waiting)
 	}
-	if len(commit.Messages) != 1 {
-		t.Fatalf("commit.Messages has %d entries, want 1", len(commit.Messages))
+	if msgs := withoutStaleBase(commit.Messages); len(msgs) != 1 {
+		t.Fatalf("commit.Messages (minus stale_base) has %d entries, want 1", len(msgs))
 	}
 	pbApply(t, s, ticket, commit)
 

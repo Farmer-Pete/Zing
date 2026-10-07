@@ -15,6 +15,13 @@ Location is the element path in the plan, for example
 plan/delivery/tasks/task[3]. A finding whose path does not resolve is
 discarded.
 
+The previous_findings input, when present, lists the last review's findings
+with their ids. The previous_dispositions input says what the planner did
+with each one: fixed names the element it changed, and disputed gives its
+reason. Check each fixed finding at its location, and raise it again at the
+same location if the fix did not land. A disputed finding goes to the
+owner, and the owner's answer reaches you as a decision.
+
 Severity: blocker means the plan cannot be built as written; major means
 it will produce the wrong thing; minor means it will produce a worse
 thing; nit is a small fix. Mark the lens each finding came from.

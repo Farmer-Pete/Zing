@@ -244,8 +244,14 @@ func judgeCapResumesEscalation(t store.Ticket, d Deps, sessionID int64) store.Ha
 	return capResumesEscalation(t, d, jobJudgeName, sessionID)
 }
 
-// Run is the judging state's own decision tree (design section 7.1).
+// Run is judging's tick, wrapped so a stale base fetch is noted.
 func (h judgeHandler) Run(ctx context.Context, t store.Ticket, d Deps) (store.HandlerCommit, error) {
+	return withStaleBaseNote(ctx, t, d, stateJudging, h.run)
+}
+
+// run is the judging state's own decision tree (design section 7.1), Run's
+// body before this change.
+func (h judgeHandler) run(ctx context.Context, t store.Ticket, d Deps) (store.HandlerCommit, error) {
 	c, handled, err := postBuildPrelude(ctx, t, d, response.EscalationOriginJudge)
 	if handled || err != nil {
 		return c, err

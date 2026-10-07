@@ -76,3 +76,18 @@ func ReplyPrefix(login string) string {
 	}
 	return fmt.Sprintf(replyPrefixFmt, login)
 }
+
+// IssueRef renders ref for a human: "#" + ref for a GitHub issue number
+// (every character ASCII digits), ref unchanged otherwise (plan #74, the
+// planner's split).
+func IssueRef(ref string) string {
+	if ref == "" {
+		return ref
+	}
+	for _, r := range ref {
+		if r < '0' || r > '9' {
+			return ref
+		}
+	}
+	return "#" + ref
+}

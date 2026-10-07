@@ -230,6 +230,14 @@ type Orchestrator struct {
 	commonDirGuard   sync.Mutex
 	commonDir        string
 	commonDirResolve *commonMutex
+
+	// fallbackGuard guards fallbacks. Held only across reading or
+	// publishing it, never across a git call. fallbacks holds, per ticket
+	// id, the newest BaseFallback a fetch recorded since the last
+	// TakeBaseFallback call for that ticket (basefallback.go); nil until
+	// the first recordFallback.
+	fallbackGuard sync.Mutex
+	fallbacks     map[int64]BaseFallback
 }
 
 // New validates proj (non-empty Owner, Repo, DefaultBranch; absolute

@@ -101,6 +101,12 @@ type Deps struct {
 	// its own tracker and bindings and passes itself here
 	// (internal/dispatch/dispatch.go's runAndCommit).
 	Tracker ShipTracker
+	// Splitter is what an approved split needs from the tracker (#74's
+	// planner split, split.go's SplitTracker): FileSplitChild and
+	// CloseSplitParent. The dispatcher implements it over its own tracker
+	// and bindings and passes itself here, as it does for Tracker
+	// (internal/dispatch/dispatch.go's runAndCommit).
+	Splitter SplitTracker
 	// MergeRule is config.Merge, resolved once at startup (PKG9-PLAN.md
 	// section 4.3, 8.8): mergeDecision's own input for row 9's automatic
 	// merge gate (shiprules.go). The zero value (Auto false) always asks.

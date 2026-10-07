@@ -125,10 +125,20 @@ type ReadyResponse struct {
 
 // The plan. Four parts. The console shows each part as a heading and each child as a sub-heading.
 type Plan struct {
-	Overview Overview `xml:"overview" json:"overview" doc:"for the owner first; a reader with no prior context must follow it"`
-	Design   Design   `xml:"design"   json:"design"`
-	Delivery Delivery `xml:"delivery" json:"delivery"`
-	Review   Review   `xml:"review"   json:"review"`
+	Overview     Overview      `xml:"overview"                json:"overview" doc:"for the owner first; a reader with no prior context must follow it"`
+	Design       Design        `xml:"design"                  json:"design"`
+	Delivery     Delivery      `xml:"delivery"                json:"delivery"`
+	Review       Review        `xml:"review"                  json:"review"`
+	Dispositions []Disposition `xml:"dispositions>disposition" json:"dispositions,omitempty" doc:"one per finding in the needs_disposition input, or named in a validation message; leave out when there is none"`
+}
+
+// Disposition is the planner's fixed-or-disputed call on one finding the
+// planning resume's needs_disposition input required an answer for.
+type Disposition struct {
+	Finding string          `xml:"finding,attr" json:"finding" jsonschema:"pattern=^p[0-9]+-f[0-9]+$" doc:"the id of a finding in the needs_disposition input, such as p2-f1"`
+	Kind    DispositionKind `xml:"kind,attr"    json:"kind"`
+	Path    string          `xml:"path,attr,omitempty" json:"path,omitempty" doc:"fixed only: the plan element path you changed, such as plan/delivery/tasks/task[2]"`
+	Reason  string          `xml:",chardata"    json:"reason,omitempty" doc:"disputed only: why the finding is wrong"`
 }
 
 type Overview struct {
@@ -317,13 +327,16 @@ type FindingsResponse struct { // planreview and review, outcome ok
 }
 
 type Finding struct {
-	Lens     Lens      `xml:"lens,attr"           json:"lens"`
-	Severity Severity  `xml:"severity,attr"       json:"severity"`
-	Location string    `xml:"location,attr"       json:"location" jsonschema:"minLength=1" doc:"plan: an element path such as plan/delivery/tasks/task[3]; code: path:line inside the diff"`
-	Text     string    `xml:"text"                json:"text"     jsonschema:"minLength=1" doc:"what is wrong or unanswered"`
-	Fix      string    `xml:"fix"                 json:"fix"      jsonschema:"minLength=1" doc:"what to change"`
-	PlanRef  string    `xml:"plan_ref,omitempty"  json:"plan_ref,omitempty" doc:"code review, fidelity lens only: the plan element"`
-	Decision *Decision `xml:"-"                   json:"decision,omitempty"  doc:"set by the owner at triage"`
+	Lens         Lens      `xml:"lens,attr"           json:"lens"`
+	Severity     Severity  `xml:"severity,attr"       json:"severity"`
+	Location     string    `xml:"location,attr"       json:"location" jsonschema:"minLength=1" doc:"plan: an element path such as plan/delivery/tasks/task[3]; code: path:line inside the diff"`
+	Text         string    `xml:"text"                json:"text"     jsonschema:"minLength=1" doc:"what is wrong or unanswered"`
+	Fix          string    `xml:"fix"                 json:"fix"      jsonschema:"minLength=1" doc:"what to change"`
+	PlanRef      string    `xml:"plan_ref,omitempty"  json:"plan_ref,omitempty" doc:"code review, fidelity lens only: the plan element"`
+	Decision     *Decision `xml:"-"                   json:"decision,omitempty"  doc:"set by the owner at triage"`
+	ID           string    `xml:"-"                   json:"id,omitempty"        jsonschema:"pattern=^p[0-9]+-f[0-9]+$" doc:"plan review only, set by Zing when it stores the artifact"`
+	Reopens      string    `xml:"-" json:"reopens,omitempty"       jsonschema:"pattern=^p[0-9]+-f[0-9]+$" doc:"plan review only, the id of the previous review's finding that this one raises again at the same location"`
+	ReopensAfter string    `xml:"-" json:"reopens_after,omitempty" jsonschema:"enum=fixed,enum=no_disposition" doc:"plan review only, set exactly when reopens is set: what the plan did with the earlier finding"`
 }
 
 // ---- build ----------------------------------------------------------------
@@ -517,4 +530,11 @@ type RespondArtifact struct {
 type ThreadSeen struct {
 	TID         string `json:"tid"          jsonschema:"pattern=^t[0-9a-f]{16}$"`
 	LastComment string `json:"last_comment" jsonschema:"pattern=^[0-9a-f]{64}$" doc:"commentDigest of the last comment that is not a Zing reply"`
+}
+
+// ChildrenArtifact is the stored form of a planner's children outcome
+// (artifact type "children"): the proposed split, shown at the split gate.
+type ChildrenArtifact struct {
+	Children []Child `json:"children" jsonschema:"minItems=2"`
+	Notes    string  `json:"notes"`
 }

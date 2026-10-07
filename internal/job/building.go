@@ -281,16 +281,19 @@ type unit struct {
 type buildingHandler struct{}
 
 func (h buildingHandler) Run(ctx context.Context, t store.Ticket, d Deps) (store.HandlerCommit, error) {
-	c, err := h.run(ctx, t, d)
-	if err != nil {
-		return c, err
-	}
-	return attachFileGrant(ctx, t, d, c)
+	return withStaleBaseNote(ctx, t, d, stateBuilding, func(ctx context.Context, t store.Ticket, d Deps) (store.HandlerCommit, error) {
+		c, err := h.run(ctx, t, d)
+		if err != nil {
+			return c, err
+		}
+		return attachFileGrant(ctx, t, d, c)
+	})
 }
 
 // run is building's own tick (design section 6): the answered-round
 // entry, step 0, step 2, and the unit switch, unchanged from Run's old
-// body. Run wraps it with attachFileGrant (plan #51).
+// body. Run wraps it with attachFileGrant (plan #51) and withStaleBaseNote
+// (#68 follow-up).
 func (h buildingHandler) run(ctx context.Context, t store.Ticket, d Deps) (store.HandlerCommit, error) {
 	// Step (E)/1: an answered round (design section 6.2). The newest
 	// question's kind decides the branch before round.Job does: a

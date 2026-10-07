@@ -554,6 +554,7 @@ func (o *Orchestrator) updateBaseLocked(ctx context.Context, ticketID int64, src
 		}
 	}
 	o.log.Warn("fetch base failed, using last fetched base", "ticket_id", ticketID, "ref", ref, "sha", sha, "reason", reason)
+	o.recordFallback(ticketID, BaseFallback{Branch: o.proj.DefaultBranch, SHA: sha, Reason: reason})
 	return sha, false, nil
 }
 
