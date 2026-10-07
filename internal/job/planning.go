@@ -1016,7 +1016,10 @@ func checkReady(t store.Ticket, resp *response.ReadyResponse, fsys fs.FS) ([]*re
 // proven by a grep for the "--- SKIP:" line in the check (#80, #129 s5); a
 // bare sandbox-exec invocation stays refused even then, since the fix only
 // needs to let a probe's own expected skip through, not every
-// nested-sandbox check. It also refuses a then that expects a skip when its
+// nested-sandbox check. It also refuses a check that reads the root
+// CLAUDE.md or AGENTS.md from the working copy, in every kind, since the
+// judge's checkout holds the default branch's copies of both (#225). It
+// also refuses a then that expects a skip when its
 // check doesn't grep that same line, since a bare go test exits 0 whether
 // or not the test skipped; that second rule still fires on a negated skip
 // then, since only the host-sandbox exemption's affirmative check is
@@ -1150,8 +1153,29 @@ func checkScenarioRules(i int, sc response.Scenario) []*response.PathError {
 			Msg:  unquotedGlobCheckMsg(word),
 		})
 	}
+	// The judge's checkout holds the default branch's CLAUDE.md and
+	// AGENTS.md (design D5), so a check that reads either from disk sees
+	// main's copy and fails on a correct branch (#225). Every kind, host
+	// included: host checks run in a checkout built the same way.
+	if governanceFileRead.MatchString(sc.Check) {
+		errs = append(errs, &response.PathError{
+			Path: "scenarios/" + indexedScenario(i) + "/check",
+			Msg:  governanceFileCheckMsg,
+		})
+	}
 	return errs
 }
+
+// governanceFileRead matches a check that names the root CLAUDE.md or
+// AGENTS.md as a working-copy path, bare or ./, as a command word's
+// argument or a redirect target. The judge's checkout overwrites both with
+// the default branch's copies (internal/orchestrator/judge.go,
+// judgeGovernanceFiles), so such a check reads main's file, not the
+// branch's (#225). HEAD:AGENTS.md (a colon before it) and docs/AGENTS.md
+// (a slash before it) do not match.
+var governanceFileRead = regexp.MustCompile(`(^|[\s'"<>=(;|&])(\./)?(CLAUDE|AGENTS)\.md($|[\s'"()<>;|&])`)
+
+const governanceFileCheckMsg = "check reads CLAUDE.md or AGENTS.md from the working copy, but the judge's checkout holds the default branch's copies of both; read the committed file with git show HEAD:FILE, such as git show HEAD:AGENTS.md"
 
 // proseGrep matches a grep invocation whose flags include F or q, followed
 // (before the next pipe, semicolon, or ampersand) by a single- or
