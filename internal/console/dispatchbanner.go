@@ -2,8 +2,10 @@ package console
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
+	"net/http"
 
 	"zing/internal/console/templates"
 	"zing/internal/dispatch"
@@ -70,4 +72,27 @@ func buildStopBanner(s dispatch.StopStatus) templates.StopBanner {
 		b.Busy = fmt.Sprintf("%d runs are still finishing; resume once they are done", s.InFlight)
 	}
 	return b
+}
+
+// handleDispatchResume is POST /dispatch/resume (ticket #89), sat behind
+// the same mutation guard every other state-changing route is (mw.go). It
+// answers 204 on success, 409 with the dispatcher's own *ResumeRefusal
+// sentence verbatim, 500 on any other error, and 503 when no dispatcher is
+// wired through WithDispatch.
+func (c *console) handleDispatchResume(w http.ResponseWriter, r *http.Request) {
+	if c.dispatch == nil {
+		http.Error(w, "the dispatcher is not running in this process", http.StatusServiceUnavailable)
+		return
+	}
+	err := c.dispatch.Resume(r.Context())
+	if refusal, ok := errors.AsType[*dispatch.ResumeRefusal](err); ok {
+		http.Error(w, refusal.Reason, http.StatusConflict)
+		return
+	}
+	if err != nil {
+		slog.Error("console: resume dispatcher", "err", err)
+		http.Error(w, genericServerErrorBody, http.StatusInternalServerError)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
 }

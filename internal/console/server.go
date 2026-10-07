@@ -177,6 +177,7 @@ type console struct {
 //	POST /debug                  toggle one ticket's per-ticket debug override (design section 6.12, 7.1)
 //	POST /side                  the inert side box's fixed reply (design section 6.11, 7.1)
 //	POST /stop                  stop everything, or one ticket; no keyboard key offers this yet (design section 6.11, 7.1)
+//	POST /dispatch/resume       resume a stopped dispatcher from the console's own banner (ticket #89)
 //	POST /projects/{id}/pickup  manual intake: pick up one issue by number (PKG9-PLAN.md D29)
 //	POST /tickets/{id}/edit     the owner edits a sealed scenario, a sealed plan's task, or the ticket body
 //	POST /tickets/{id}/abandon  the owner abandons any non-terminal, unclaimed ticket (#65)
@@ -270,6 +271,7 @@ func New(st *store.Store, b *bus.Broker, m *machine.Machine, hosts []string, por
 	mux.HandleFunc("POST /debug", withWriteDeadline(guard.requireSameOrigin(c.handleDebug)))
 	mux.HandleFunc("POST /side", withWriteDeadline(guard.requireSameOrigin(c.handleSide)))
 	mux.HandleFunc("POST /stop", withWriteDeadline(guard.requireSameOrigin(c.handleStop)))
+	mux.HandleFunc("POST /dispatch/resume", withWriteDeadline(guard.requireSameOrigin(c.handleDispatchResume)))
 	mux.HandleFunc("POST /projects/{id}/pickup", withWriteDeadline(guard.requireSameOrigin(c.handlePickup)))
 	mux.HandleFunc("POST /tickets/{id}/edit", withWriteDeadline(guard.requireSameOrigin(c.handleOwnerEdit)))
 	mux.HandleFunc("POST /tickets/{id}/abandon", withWriteDeadline(guard.requireSameOrigin(c.handleAbandon)))

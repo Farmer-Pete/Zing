@@ -25,12 +25,14 @@ import (
 )
 
 // fakeDispatch is this file's own console.Dispatch double: StopStatus
-// always answers the status it is built with, and Resume (unused by this
-// task's tests, exercised by the resume tests) answers resumeErr.
+// always answers the status it is built with, and Resume answers
+// resumeErr and counts its own calls, so TestDispatchResume_CrossOriginRefused
+// can prove a rejected request never reaches it (ticket #89, task 7).
 type fakeDispatch struct {
-	status    zdispatch.StopStatus
-	statusErr error
-	resumeErr error
+	status      zdispatch.StopStatus
+	statusErr   error
+	resumeErr   error
+	resumeCalls atomic.Int32
 }
 
 func (f *fakeDispatch) StopStatus(context.Context) (zdispatch.StopStatus, error) {
@@ -38,6 +40,7 @@ func (f *fakeDispatch) StopStatus(context.Context) (zdispatch.StopStatus, error)
 }
 
 func (f *fakeDispatch) Resume(context.Context) error {
+	f.resumeCalls.Add(1)
 	return f.resumeErr
 }
 
@@ -207,4 +210,164 @@ func getBody(t *testing.T, url string) string {
 
 func contains(body, want string) bool {
 	return strings.Contains(body, want)
+}
+
+// TestDispatchResume_Responses proves POST /dispatch/resume's four response
+// shapes (ticket #89, task 7): 204 on success, 409 with the dispatcher's
+// own *dispatch.ResumeRefusal sentence verbatim, 500 with the generic body
+// on any other error, and 503 when no dispatcher is wired through
+// WithDispatch at all.
+func TestDispatchResume_Responses(t *testing.T) {
+	t.Parallel()
+
+	t.Run("success", func(t *testing.T) {
+		t.Parallel()
+		s := newConsoleTestStore(t)
+		fd := &fakeDispatch{}
+		srv := newTestServerDispatch(t, s, bus.New(), nil, newTestLogHandler(t), fd)
+
+		resp := doRequest(t, mutationRequest(t, srv, "/dispatch/resume", "{}"))
+		defer func() { _ = resp.Body.Close() }()
+		b, err := io.ReadAll(resp.Body)
+		if err != nil {
+			t.Fatalf("read body: %v", err)
+		}
+		if resp.StatusCode != http.StatusNoContent {
+			t.Errorf("status = %d, want 204", resp.StatusCode)
+		}
+		if len(b) != 0 {
+			t.Errorf("body = %q, want empty", b)
+		}
+	})
+
+	t.Run("refusal", func(t *testing.T) {
+		t.Parallel()
+		s := newConsoleTestStore(t)
+		fd := &fakeDispatch{resumeErr: &zdispatch.ResumeRefusal{Reason: "the dispatcher is not stopped"}}
+		srv := newTestServerDispatch(t, s, bus.New(), nil, newTestLogHandler(t), fd)
+
+		resp := doRequest(t, mutationRequest(t, srv, "/dispatch/resume", "{}"))
+		defer func() { _ = resp.Body.Close() }()
+		b, err := io.ReadAll(resp.Body)
+		if err != nil {
+			t.Fatalf("read body: %v", err)
+		}
+		if resp.StatusCode != http.StatusConflict {
+			t.Errorf("status = %d, want 409", resp.StatusCode)
+		}
+		if got := strings.TrimSpace(string(b)); got != "the dispatcher is not stopped" {
+			t.Errorf("body = %q, want %q", got, "the dispatcher is not stopped")
+		}
+	})
+
+	t.Run("store_error", func(t *testing.T) {
+		t.Parallel()
+		s := newConsoleTestStore(t)
+		fd := &fakeDispatch{resumeErr: errors.New("boom")}
+		srv := newTestServerDispatch(t, s, bus.New(), nil, newTestLogHandler(t), fd)
+
+		resp := doRequest(t, mutationRequest(t, srv, "/dispatch/resume", "{}"))
+		defer func() { _ = resp.Body.Close() }()
+		b, err := io.ReadAll(resp.Body)
+		if err != nil {
+			t.Fatalf("read body: %v", err)
+		}
+		if resp.StatusCode != http.StatusInternalServerError {
+			t.Errorf("status = %d, want 500", resp.StatusCode)
+		}
+		if got := strings.TrimSpace(string(b)); got != "internal error" {
+			t.Errorf("body = %q, want %q", got, "internal error")
+		}
+	})
+
+	t.Run("no_dispatch", func(t *testing.T) {
+		t.Parallel()
+		s := newConsoleTestStore(t)
+		srv := newTestServer(t, s, bus.New(), nil, newTestLogHandler(t))
+
+		resp := doRequest(t, mutationRequest(t, srv, "/dispatch/resume", "{}"))
+		defer func() { _ = resp.Body.Close() }()
+		b, err := io.ReadAll(resp.Body)
+		if err != nil {
+			t.Fatalf("read body: %v", err)
+		}
+		if resp.StatusCode != http.StatusServiceUnavailable {
+			t.Errorf("status = %d, want 503", resp.StatusCode)
+		}
+		if got := strings.TrimSpace(string(b)); got != "the dispatcher is not running in this process" {
+			t.Errorf("body = %q, want %q", got, "the dispatcher is not running in this process")
+		}
+	})
+}
+
+// TestDispatchResume_CrossOriginRefused proves POST /dispatch/resume sits
+// behind the same mutation guard every other state-changing route does
+// (ticket #89, task 7): a cross-origin request never reaches
+// Dispatch.Resume at all.
+func TestDispatchResume_CrossOriginRefused(t *testing.T) {
+	t.Parallel()
+	s := newConsoleTestStore(t)
+	fd := &fakeDispatch{}
+	srv := newTestServerDispatch(t, s, bus.New(), nil, newTestLogHandler(t), fd)
+
+	req := mutationRequest(t, srv, "/dispatch/resume", "{}")
+	req.Header.Set("Origin", "http://evil.example")
+	resp := doRequest(t, req)
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusForbidden {
+		t.Errorf("status = %d, want 403", resp.StatusCode)
+	}
+	if got := fd.resumeCalls.Load(); got != 0 {
+		t.Errorf("Resume calls = %d, want 0", got)
+	}
+}
+
+// TestDispatchResume_RealDispatcherResumesAndDispatches is the plan's own
+// demo (ticket #89, task 7): a real dispatcher fails closed on a ticket,
+// GET / shows the banner naming that ticket, a same-origin POST
+// /dispatch/resume answers 204, and the next Tick moves the ticket to
+// planning with the banner gone -- all without a new Run or a serve
+// restart.
+func TestDispatchResume_RealDispatcherResumesAndDispatches(t *testing.T) {
+	t.Parallel()
+	s := newConsoleTestStore(t)
+	d, ticketID := newStoppedRealDispatcher(t, s)
+
+	srv := newTestServerDispatch(t, s, bus.New(), nil, newTestLogHandler(t), d)
+
+	body := getBody(t, srv.URL+"/")
+	if !contains(body, strconv.FormatInt(ticketID, 10)) {
+		t.Errorf("GET / body does not name ticket %d before resume; got:\n%s", ticketID, body)
+	}
+
+	resp := doRequest(t, mutationRequest(t, srv, "/dispatch/resume", "{}"))
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusNoContent {
+		t.Errorf("POST /dispatch/resume status = %d, want 204", resp.StatusCode)
+	}
+
+	_, stopped, err := s.Flags(t.Context())
+	if err != nil {
+		t.Fatalf("Flags: %v", err)
+	}
+	if stopped {
+		t.Error("Flags: stopped = true, want false after resume")
+	}
+
+	if tickErr := d.Tick(t.Context()); tickErr != nil {
+		t.Fatalf("Tick after resume: %v", tickErr)
+	}
+
+	ticket, err := s.GetTicket(t.Context(), ticketID)
+	if err != nil {
+		t.Fatalf("GetTicket: %v", err)
+	}
+	if ticket.State != testPlanningLiteral {
+		t.Errorf("ticket state = %q, want %q", ticket.State, testPlanningLiteral)
+	}
+
+	body = getBody(t, srv.URL+"/")
+	if contains(body, `class="dispatch-banner"`) {
+		t.Errorf("GET / body still contains a dispatch-banner after resume; got:\n%s", body)
+	}
 }

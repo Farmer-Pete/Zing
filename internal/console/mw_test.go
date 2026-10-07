@@ -26,8 +26,13 @@ import (
 // buffer-and-LevelVar-backed handler so it can assert what the console
 // wrote and changed. It returns the server and the port every same-origin
 // request in this file and answer_test.go must present as Host/Origin's
-// port.
-func newMutationTestServer(t *testing.T, s *store.Store, b *bus.Broker, log *console.Handler) (srv *httptest.Server, port int) {
+// port. opts (ticket #89) pass straight through to console.New, in
+// argument order, mirroring every newTestServer* helper's own variadic
+// opts in console_test.go; every caller in this file passes none, since
+// this file's own tests exercise the mutation guard itself, not the stop
+// banner or POST /dispatch/resume (dispatchbanner_test.go's own
+// newTestServerDispatch covers those instead).
+func newMutationTestServer(t *testing.T, s *store.Store, b *bus.Broker, log *console.Handler, opts ...console.Option) (srv *httptest.Server, port int) { //nolint:unparam // opts mirrors newTestServerConfig's own variadic opts; no caller in this file needs a non-nil option yet
 	t.Helper()
 
 	var lc net.ListenConfig
@@ -41,7 +46,7 @@ func newMutationTestServer(t *testing.T, s *store.Store, b *bus.Broker, log *con
 	}
 	port = addr.Port
 
-	handler := console.New(s, b, nil, []string{testBindHost}, port, log, nil, testPushToken, response.SeverityMinor, "", nil, "", nil)
+	handler := console.New(s, b, nil, []string{testBindHost}, port, log, nil, testPushToken, response.SeverityMinor, "", nil, "", nil, opts...)
 	srv = httptest.NewUnstartedServer(handler)
 	if err := srv.Listener.Close(); err != nil {
 		t.Fatalf("close the placeholder listener: %v", err)
