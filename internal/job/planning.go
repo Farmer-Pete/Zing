@@ -1070,7 +1070,10 @@ func checkReady(t store.Ticket, resp *response.ReadyResponse, fsys fs.FS) ([]*re
 // kind, since the judge's checkout holds the default branch's copies of
 // both (#225). It also refuses, in every kind, a check that pipes tee into
 // another command and then reads the tee'd file, since a reader that exits
-// early cuts the file short.
+// early cuts the file short. It also refuses a non-host check that calls
+// mktemp without a "$TMPDIR/" template, since a bare mktemp ignores TMPDIR
+// on macOS and writes to a folder the sandbox denies (#245 s6, #244 s10);
+// host checks are exempt, as for the /tmp rule above.
 func checkScenarioShape(scenarios []response.Scenario) []*response.PathError {
 	var errs []*response.PathError
 	if n := len(scenarios); n < minReadyScenarios || n > maxReadyScenarios {
@@ -1127,6 +1130,17 @@ func checkScenarioRules(i int, sc response.Scenario) []*response.PathError {
 		errs = append(errs, &response.PathError{
 			Path: "scenarios/" + indexedScenario(i) + "/check",
 			Msg:  "check must not write under /tmp, which the sandbox denies; use \"$TMPDIR\" instead",
+		})
+	}
+	// A bare mktemp or mktemp -d ignores TMPDIR on macOS and writes to the
+	// per-user temp folder instead, which the sandbox also denies, so every
+	// write under it fails; depending on the check's shape it then either
+	// fails for no reason or, as in #245 s6, compares two empty files and
+	// passes having compared nothing. #244 s10 is the same bug in a script.
+	if !host && mktempWithoutTmpdir(sc.Check) {
+		errs = append(errs, &response.PathError{
+			Path: "scenarios/" + indexedScenario(i) + "/check",
+			Msg:  mktempCheckMsg,
 		})
 	}
 	// Codex's command policy refuses rm -f and rm -rf ("rm -f style
@@ -1267,6 +1281,67 @@ var teeToPipe = regexp.MustCompile(`(?:^|[\s;&|(])tee((?:\s+(?:"[^"]*"|'[^']*'|[
 // teeOperand splits teeToPipe's group 1 into tee's operands.
 var teeOperand = regexp.MustCompile(`"[^"]*"|'[^']*'|[^\s|;&()'"]+`)
 
+// mktempCall matches mktemp as a command word, preceded by the start of the
+// check, whitespace, ;, &, |, ( or a backtick, then a word boundary (so
+// mktempfoo doesn't match), then group 1 of zero or more whitespace-
+// separated operands, quoted or bare, each one stopping at |, ;, &, ( or ),
+// as teeOperand later splits (as teeToPipe does above).
+var mktempCall = regexp.MustCompile("(?:^|[\\s;&|(`])mktemp\\b((?:\\s+(?:\"[^\"]*\"|'[^']*'|[^\\s|;&()'\"]+))*)")
+
+// shortFlags matches a single-dash short-flag cluster, such as -d or -tv.
+var shortFlags = regexp.MustCompile(`^-[A-Za-z]+$`)
+
+// tmpdirTemplates are the only mktemp template spellings mktempWithoutTmpdir
+// accepts as keeping the write under TMPDIR (Q5): "$TMPDIR/, $TMPDIR/,
+// "${TMPDIR}/ and ${TMPDIR}/. Everything else, including -t, -p, --tmpdir,
+// a single-quoted $TMPDIR (which never expands), and ${TMPDIR:-/tmp}/, is
+// refused.
+var tmpdirTemplates = []string{
+	`"$TMPDIR/`,
+	`$TMPDIR/`,
+	`"${TMPDIR}/`,
+	`${TMPDIR}/`,
+}
+
+// mktempWithoutTmpdir is true when check calls mktemp as a command word
+// (mktempCall) in a way that can write outside TMPDIR: a --tmpdir or
+// --tmpdir=VALUE operand, a short-flag cluster holding t or p, or a first
+// non-flag operand that doesn't start with one of tmpdirTemplates' four
+// spellings. A long option other than --tmpdir, such as --directory or
+// --quiet, is skipped rather than checked. A bare mktemp with no template
+// at all has no operand to match, so it is refused the same way (#245 s6,
+// #244 s10).
+func mktempWithoutTmpdir(check string) bool {
+	for _, m := range mktempCall.FindAllStringSubmatch(check, -1) {
+		template := ""
+		for _, op := range teeOperand.FindAllString(m[1], -1) {
+			switch {
+			case op == "--tmpdir" || strings.HasPrefix(op, "--tmpdir="):
+				return true
+			case strings.HasPrefix(op, "--"):
+				continue
+			case shortFlags.MatchString(op):
+				if strings.ContainsAny(op, "tp") {
+					return true
+				}
+			case template == "":
+				template = op
+			}
+		}
+		safe := false
+		for _, prefix := range tmpdirTemplates {
+			if strings.HasPrefix(template, prefix) {
+				safe = true
+				break
+			}
+		}
+		if !safe {
+			return true
+		}
+	}
+	return false
+}
+
 // pipelineEnd matches the first list operator or newline, where the
 // pipeline holding tee ends and a later command starts.
 var pipelineEnd = regexp.MustCompile(`;|&&|\|\||\n`)
@@ -1370,6 +1445,10 @@ const hostSandboxCheckMsg = "check runs the host sandbox (sandbox-exec or the in
 var rmForce = regexp.MustCompile(`(^|[;&|(\s])rm\s+-[a-zA-Z]*f`)
 
 const rmForceCheckMsg = "check must not use rm -f or rm -rf, which Codex refuses; write state under a fresh directory from mktemp -d instead"
+
+// mktempCheckMsg is checkScenarioRules' own refusal for a check that calls
+// mktemp without a "$TMPDIR/" template (#245 s6, #244 s10).
+const mktempCheckMsg = "check calls mktemp without a \"$TMPDIR/\" template, so on macOS it writes to the per-user temp folder, which the sandbox denies; use mktemp -d \"$TMPDIR/name-XXXXXX\", or keep values in shell variables"
 
 // skipWord matches a then that names a skip as the expected result.
 var skipWord = regexp.MustCompile(`(?i)\bskip(s|ped)?\b`)
