@@ -1572,11 +1572,8 @@ func maybeResumeFloorFindings(ctx context.Context, t store.Ticket, d Deps, sess 
 		// Tried stays empty, as today: Back to planning sends Tried to
 		// planning as the error input (enterFromEscalationRound), and the
 		// owner's own resumes keep today's inputs (owner decision Q2).
-		c := escalationCommit(t, d, nil, nil,
-			string(response.EscalationCodeLoopsExhausted), loopsExhaustedWhat, loopsExhaustedWhy, "", response.EscalationOriginCapLoops)
+		c := capLoopsEscalation(t, d, nil, nil, "")
 		c.Escalation.Body = capAfterUnblockBody(payload.Findings, d.Floor, unblock.Guidance)
-		c.Escalation.ExtraOptions = []response.Option{{Key: escalationChoiceAccept, Text: planAcceptAtCapOptionText}}
-		c.Escalation.Recommended = escalationChoiceAccept
 		return c, true, nil
 	}
 
@@ -1669,7 +1666,7 @@ func runUnblock(ctx context.Context, t store.Ticket, d Deps, planVersion int, fi
 	}
 	if err != nil {
 		slog.Info("plan unblock turn", "ticket_id", t.ID, "run_id", runID, "plan_version", planVersion,
-			"finding_ids", ids, "outcome", "failed", "error", err)
+			"finding_ids", ids, "outcome", "failed")
 		return commit, err
 	}
 	slog.Info("plan unblock turn", "ticket_id", t.ID, "run_id", runID, "plan_version", planVersion,
@@ -1747,10 +1744,7 @@ func unblockSuccessCommit(t store.Ticket, d Deps, rr runResult, planVersion int,
 	default:
 		return store.HandlerCommit{}, fmt.Errorf("job: unblock: outcome %s not handled", outcome)
 	}
-	c := escalationCommit(t, d, &rr.Reserved.RunID, &rr.Reserved.SessionID,
-		string(response.EscalationCodeLoopsExhausted), loopsExhaustedWhat, loopsExhaustedWhy, tried, response.EscalationOriginCapLoops)
-	c.Escalation.ExtraOptions = []response.Option{{Key: escalationChoiceAccept, Text: planAcceptAtCapOptionText}}
-	c.Escalation.Recommended = escalationChoiceAccept
+	c := capLoopsEscalation(t, d, &rr.Reserved.RunID, &rr.Reserved.SessionID, tried)
 	c.Runs = terminalRuns(rr, outcome)
 	c.Session = sessionCommit
 	return c, nil
@@ -3477,6 +3471,20 @@ func escalationCommit(t store.Ticket, d Deps, runID, sessionID *int64, code, wha
 	}
 	waiting := waitingFlagQuestions
 	c.Waiting = &waiting
+	return c
+}
+
+// capLoopsEscalation builds the cap_loops loops_exhausted escalation posted
+// both when the cap is reached after the unblock round (maybeResumeFloorFindings)
+// and when the unblock turn itself fails (unblockSuccessCommit): the fixed
+// What and Why, option d to accept the plan at the cap, and d recommended.
+// One helper keeps the two posts in lockstep, so an edit to the option set
+// cannot land in one and miss the other.
+func capLoopsEscalation(t store.Ticket, d Deps, runID, sessionID *int64, tried string) store.HandlerCommit {
+	c := escalationCommit(t, d, runID, sessionID,
+		string(response.EscalationCodeLoopsExhausted), loopsExhaustedWhat, loopsExhaustedWhy, tried, response.EscalationOriginCapLoops)
+	c.Escalation.ExtraOptions = []response.Option{{Key: escalationChoiceAccept, Text: planAcceptAtCapOptionText}}
+	c.Escalation.Recommended = escalationChoiceAccept
 	return c
 }
 

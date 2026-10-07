@@ -3060,14 +3060,7 @@ func TestPlanningHandler_ReviewTick_MaxLoopsWithAboveFloorFindingStillEscalates(
 	// (the plan_unblock event plus the delivered marker its own resume would
 	// have written), so n reaches max_loops plus 1 and this tick still
 	// escalates immediately, rather than running the unblock turn again.
-	unblockMsg, err := store.NewEvent(ticketID, store.EventKindPlanUnblock,
-		response.PlanUnblockEvent{PlanVersion: 99, FindingIDs: []string{"p99-f2"}, Guidance: "Drop task 4."})
-	if err != nil {
-		t.Fatalf("NewEvent: %v", err)
-	}
-	if _, err = s.InsertMessage(t.Context(), unblockMsg); err != nil {
-		t.Fatalf("InsertMessage(plan_unblock): %v", err)
-	}
+	seedPlanUnblockEvent(t, s, ticketID, 99, []string{"p99-f2"}, "Drop task 4.")
 	insertUpdateMarker(t, s, ticketID, "planreview v99 delivered")
 
 	minor := finding(response.SeverityMinor, "plan/design/shape", "still wrong", "fix it")
@@ -3517,6 +3510,21 @@ func seedPlanUnblockCap(t *testing.T, objective string) (s *store.Store, ticketI
 	return s, ticketID, planVersion
 }
 
+// seedPlanUnblockEvent inserts a plan_unblock event (an earlier unblock
+// turn's guidance) directly, the way a successful runUnblock commit would,
+// so a test can seed the cap as already having spent its one shot.
+func seedPlanUnblockEvent(t *testing.T, s *store.Store, ticketID int64, planVersion int, findingIDs []string, guidance string) {
+	t.Helper()
+	msg, err := store.NewEvent(ticketID, store.EventKindPlanUnblock,
+		response.PlanUnblockEvent{PlanVersion: planVersion, FindingIDs: findingIDs, Guidance: guidance})
+	if err != nil {
+		t.Fatalf("seedPlanUnblockEvent: NewEvent: %v", err)
+	}
+	if _, err = s.InsertMessage(t.Context(), msg); err != nil {
+		t.Fatalf("seedPlanUnblockEvent: InsertMessage: %v", err)
+	}
+}
+
 // sideOkResult builds a scriptedStep whose Response is a minimal, valid
 // *response.SideResponse (job side, outcome ok): the unblock turn's own
 // success shape.
@@ -3680,6 +3688,9 @@ func TestPlanUnblock_FailedTurnWritesNoMarker(t *testing.T) {
 				if len(commit.Escalation.ExtraOptions) != 1 || commit.Escalation.ExtraOptions[0].Key != "d" {
 					t.Errorf("Escalation.ExtraOptions = %+v, want one entry keyed %q", commit.Escalation.ExtraOptions, "d")
 				}
+				if commit.Escalation.Recommended != "d" {
+					t.Errorf("Escalation.Recommended = %q, want %q", commit.Escalation.Recommended, "d")
+				}
 			}
 
 			apply(t, s, getTicket(t, s, ticketID), commit)
@@ -3689,6 +3700,28 @@ func TestPlanUnblock_FailedTurnWritesNoMarker(t *testing.T) {
 			}
 			if n != 0 {
 				t.Errorf("CountEvents(plan_unblock) = %d, want 0", n)
+			}
+
+			if tc.wantCode == string(response.EscalationCodeLoopsExhausted) {
+				open, err := s.QuestionsByState(t.Context(), ticketID, "open")
+				if err != nil || len(open) != 1 {
+					t.Fatalf("QuestionsByState(open) = %v, %v, want exactly one", open, err)
+				}
+				var qPayload response.QuestionPayload
+				if err := json.Unmarshal(open[0].Payload, &qPayload); err != nil {
+					t.Fatalf("unmarshal question payload: %v", err)
+				}
+				wantKeys := []string{"a", "b", "d", "c"}
+				gotKeys := make([]string, len(qPayload.Options))
+				for i, o := range qPayload.Options {
+					gotKeys[i] = o.Key
+				}
+				if !reflect.DeepEqual(gotKeys, wantKeys) {
+					t.Errorf("question option keys = %v, want %v", gotKeys, wantKeys)
+				}
+				if qPayload.Recommended != "d" {
+					t.Errorf("qPayload.Recommended = %q, want %q", qPayload.Recommended, "d")
+				}
 			}
 		})
 	}
@@ -3752,14 +3785,7 @@ func TestPlanUnblock_ExtraRoundOnlyAfterUnblock(t *testing.T) {
 	s, ticketID, _ := seedPlanUnblockCap(t, "Extra round only after its own unblock.")
 
 	const guidance = "Drop task 4."
-	msg, err := store.NewEvent(ticketID, store.EventKindPlanUnblock,
-		response.PlanUnblockEvent{PlanVersion: 99, FindingIDs: []string{"p99-f2"}, Guidance: guidance})
-	if err != nil {
-		t.Fatalf("NewEvent: %v", err)
-	}
-	if _, err = s.InsertMessage(t.Context(), msg); err != nil {
-		t.Fatalf("InsertMessage: %v", err)
-	}
+	seedPlanUnblockEvent(t, s, ticketID, 99, []string{"p99-f2"}, guidance)
 
 	resumeRT := &scriptedRuntime{t: t, steps: []scriptedStep{questionResult(response.JobPlanning, "unblockextra-sess")}}
 	rec := &recordingRuntime{rt: resumeRT}
