@@ -7,6 +7,7 @@ package dispatch
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -1182,6 +1183,72 @@ func truncateCause(s string, maxBytes int) string {
 		cut--
 	}
 	return s[:cut]
+}
+
+// StopHeadline is the one-sentence summary of s shared by the console's
+// #alerts banner (buildStopBanner) and the stop push's title line (design
+// section "shape" rules): the three sentences buildStopBanner used to build
+// inline, now in one place. It returns the empty string when s.Stopped is
+// false.
+func StopHeadline(s StopStatus) string {
+	switch {
+	case !s.Stopped:
+		return ""
+	case s.Kind == StopKindOwner:
+		return "Dispatching is stopped by the owner."
+	case s.HasTicket:
+		return fmt.Sprintf("Dispatching stopped after %s on ticket %d.", s.Kind, s.TicketID)
+	default:
+		return fmt.Sprintf("Dispatching stopped after %s in a dispatcher pass.", s.Kind)
+	}
+}
+
+// stopPushTimeFormat is the stop push body's clock time, matching the
+// console's own alertLineTimeFormat (internal/console/views.go).
+const stopPushTimeFormat = "15:04:05"
+
+// stopPush is the JSON payload stopPushPayload marshals and notify.WebPush.Send
+// delivers (design section "shape" rules).
+type stopPush struct {
+	Title    string `json:"title"`
+	Body     string `json:"body"`
+	Kind     string `json:"kind"`
+	TicketID int64  `json:"ticket_id,omitempty"`
+	At       string `json:"at"`
+}
+
+// stopPushPayload builds the stop push body setStop sends on a fail-closed or
+// error stop (design section "shape" rules): the headline, an optional cause
+// sentence, and the stop time, all derived from err the same way the two
+// stop alerts (reportFirstError, logStopAlert) already are. At is formatted
+// in its own location, never converted to local or UTC time, since setStop
+// passes d.stoppedAt, already in the process's local zone.
+func stopPushPayload(err error, at time.Time) []byte {
+	kind, _, ticketID, hasTicket := alertKindWhere(err)
+	cause := truncateCause(alertCause(err), alertCauseMaxBytes)
+	status := StopStatus{Stopped: true, Kind: kind, Cause: cause, TicketID: ticketID, HasTicket: hasTicket, At: at}
+
+	body := StopHeadline(status)
+	if cause != "" {
+		body += fmt.Sprintf(" Cause: %s.", cause)
+	}
+	body += fmt.Sprintf(" Stopped at %s.", at.Format(stopPushTimeFormat))
+
+	sp := stopPush{
+		Title: "Zing stopped dispatching",
+		Body:  body,
+		Kind:  kind,
+		At:    at.Format(time.RFC3339),
+	}
+	if hasTicket {
+		sp.TicketID = ticketID
+	}
+	b, marshalErr := json.Marshal(sp)
+	if marshalErr != nil {
+		// unreachable: sp is a plain struct of strings and an int64.
+		return nil
+	}
+	return b
 }
 
 // fill runs one reconcile-intake-pick-claim-launch pass (design section
