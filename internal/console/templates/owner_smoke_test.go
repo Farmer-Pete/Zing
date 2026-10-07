@@ -26,7 +26,8 @@ func TestPlanViewListsOwnerSmoke(t *testing.T) {
 		tasksAt := strings.Index(got, "<h3>Tasks</h3>")
 		smokeAt := strings.Index(got, "<h3>Owner smoke</h3>")
 		reviewAt := strings.Index(got, "<h2>Review</h2>")
-		if tasksAt == -1 || smokeAt == -1 || reviewAt == -1 {
+		headingsFound := tasksAt != -1 && smokeAt != -1 && reviewAt != -1
+		if !headingsFound {
 			t.Fatalf("want Tasks, Owner smoke, and Review headings all present; got:\n%s", got)
 		}
 		if tasksAt >= smokeAt || smokeAt >= reviewAt {

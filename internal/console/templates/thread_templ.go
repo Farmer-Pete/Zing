@@ -84,7 +84,7 @@ func ownerEditClaimNote(claimed bool) templ.Component {
 // (#75): nil when console.showSealedSection reports the ticket does not
 // get one.
 // smoke is the stored plan's owner_smoke items, set by
-// console.ownerSmokeItems only for a ticket done with reason merged; nil
+// console.threadComponent only for a ticket done with reason merged; nil
 // renders nothing.
 func Thread(ticket *store.Ticket, rows []ThreadRow, wait WaitProgress, banner string, actions TicketActions, sealed *SealedSection, smoke []string) templ.Component {
 	return templruntime.GeneratedTemplate(func(templ_7745c5c3_Input templruntime.GeneratedComponentInput) (templ_7745c5c3_Err error) {
