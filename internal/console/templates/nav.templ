@@ -48,6 +48,7 @@ templ Nav(projects []store.Project, threads []NavThread, sandboxReason string, c
 			@navLink("inbox", 0, 0, "Inbox")
 			@navLink("recent", 0, 0, "Recent")
 			@navLink("feed", 0, 0, "Feed")
+			@navLink("settings", 0, 0, "Settings")
 		</section>
 		<section class="nav-projects">
 			<h2>Projects</h2>
@@ -119,13 +120,13 @@ func threadRowClass(ticketID, openTicketID int64) string {
 }
 
 // validNavViews is the closed set of view names every call site in this
-// file passes today (Nav's three view-switcher links, its per-project
+// file passes today (Nav's four view-switcher links, its per-project
 // links, and threadLink's "thread"; matches console.viewInbox/Recent/
-// Feed/Project/Thread one for one, kept as literals here rather than
-// imported, since internal/console already imports this package and
+// Feed/Settings/Project/Thread one for one, kept as literals here rather
+// than imported, since internal/console already imports this package and
 // importing back would cycle).
 var validNavViews = map[string]bool{
-	"inbox": true, "recent": true, "feed": true, "project": true, "thread": true,
+	"inbox": true, "recent": true, "feed": true, "settings": true, "project": true, "thread": true,
 }
 
 // zingNavExpr builds the data-on:click expression a temporary nav link uses
