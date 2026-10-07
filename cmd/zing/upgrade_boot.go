@@ -347,3 +347,52 @@ func onBooted(ctx context.Context, st *store.Store, dataDir string, su *selfUpgr
 		close(up.gate)
 	}
 }
+
+// bootDeadline is Q4's fixed boot deadline: a watch boot whose console has
+// not answered 200 within this long has its serve context cancelled, so
+// serve drains and finishBoot can fail the boot.
+const bootDeadline = 60 * time.Second
+
+// errBootDeadline is finishBoot's error for a watch boot that never
+// answered 200: serve returned with no error of its own, so there is
+// nothing else to report.
+var errBootDeadline = errors.New("upgrade: console did not answer 200 within 60 s; the next start rolls back")
+
+// bootDeadlineFired is the 60 s timer's body, armed only for a watch boot.
+// Unless onBooted already set su.booted, it marks the deadline passed and
+// cancels serve's context so serve can drain and return.
+func bootDeadlineFired(su *selfUpgrade, cancel context.CancelFunc) {
+	if su.booted.Load() {
+		return
+	}
+	su.deadlinePassed.Store(true)
+	slog.Warn("upgrade: boot deadline passed", "to_sha", su.marker.ToSHA, "ticket_id", su.marker.TicketID)
+	cancel()
+}
+
+// finishBoot ends a watch boot once serve has returned, using bootOutcome.
+// failed leaves the marker attempted, so the next start rolls back, and
+// returns serveErr, or errBootDeadline when serve returned nil itself.
+// revert, for an owner signal during the watch, writes the marker back to
+// pending so the next start watches again. none passes serveErr through
+// unchanged; so does any boot that was never a watch.
+func finishBoot(dataDir string, su *selfUpgrade, serveErr error, signalled bool) error {
+	outcome, cause := bootOutcome(su.boot == bootWatch, su.booted.Load(), su.deadlinePassed.Load(), signalled)
+	switch outcome {
+	case outcomeFailed:
+		slog.Error("upgrade: boot failed", "cause", cause, "from_sha", su.marker.FromSHA, "to_sha", su.marker.ToSHA, "ticket_id", su.marker.TicketID, "error", serveErr)
+		if serveErr != nil {
+			return serveErr
+		}
+		return errBootDeadline
+	case outcomeRevert:
+		m := su.marker
+		m.State = markerPending
+		if err := saveUpgradeMarker(dataDir, m); err != nil {
+			slog.Warn("upgrade: revert to pending", "to_sha", m.ToSHA, "ticket_id", m.TicketID, "error", err)
+		}
+		return serveErr
+	default:
+		return serveErr
+	}
+}

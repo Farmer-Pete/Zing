@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"errors"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -854,6 +855,138 @@ func TestOnBooted(t *testing.T) {
 		}
 		if _, found, err := loadUpgradeMarker(dir); err != nil || found {
 			t.Errorf("marker found=%v err=%v, want gone", found, err)
+		}
+	})
+}
+
+func TestBootDeadlineFired(t *testing.T) {
+	t.Parallel()
+
+	t.Run("not_booted", func(t *testing.T) {
+		t.Parallel()
+
+		su := &selfUpgrade{marker: upgradeMarker{ToSHA: guardBootSHA, TicketID: 3}}
+		var calls int
+		cancel := func() { calls++ }
+
+		bootDeadlineFired(su, cancel)
+
+		if !su.deadlinePassed.Load() {
+			t.Error("deadlinePassed = false, want true")
+		}
+		if calls != 1 {
+			t.Errorf("cancel calls = %d, want 1", calls)
+		}
+	})
+
+	t.Run("booted", func(t *testing.T) {
+		t.Parallel()
+
+		su := &selfUpgrade{marker: upgradeMarker{ToSHA: guardBootSHA, TicketID: 3}}
+		su.booted.Store(true)
+		var calls int
+		cancel := func() { calls++ }
+
+		bootDeadlineFired(su, cancel)
+
+		if su.deadlinePassed.Load() {
+			t.Error("deadlinePassed = true, want false")
+		}
+		if calls != 0 {
+			t.Errorf("cancel calls = %d, want 0", calls)
+		}
+	})
+}
+
+func TestFinishBoot(t *testing.T) {
+	t.Parallel()
+
+	t.Run("failed_serve_err", func(t *testing.T) {
+		t.Parallel()
+		dir := t.TempDir()
+		marker := upgradeMarker{FromSHA: "from-sha", ToSHA: guardBootSHA, TicketID: 4, State: markerAttempted}
+		if err := saveUpgradeMarker(dir, marker); err != nil {
+			t.Fatalf("saveUpgradeMarker: %v", err)
+		}
+		su := &selfUpgrade{boot: bootWatch, marker: marker}
+		su.deadlinePassed.Store(true)
+		wantErr := errors.New("serve boom")
+
+		err := finishBoot(dir, su, wantErr, false)
+		if !errors.Is(err, wantErr) {
+			t.Errorf("finishBoot err = %v, want %v", err, wantErr)
+		}
+
+		saved, found, loadErr := loadUpgradeMarker(dir)
+		if loadErr != nil || !found {
+			t.Fatalf("loadUpgradeMarker: found=%v err=%v", found, loadErr)
+		}
+		if saved.State != markerAttempted {
+			t.Errorf("marker state = %q, want %q", saved.State, markerAttempted)
+		}
+	})
+
+	t.Run("failed_no_serve_err_gives_errBootDeadline", func(t *testing.T) {
+		t.Parallel()
+		dir := t.TempDir()
+		marker := upgradeMarker{FromSHA: "from-sha", ToSHA: guardBootSHA, TicketID: 4, State: markerAttempted}
+		if err := saveUpgradeMarker(dir, marker); err != nil {
+			t.Fatalf("saveUpgradeMarker: %v", err)
+		}
+		su := &selfUpgrade{boot: bootWatch, marker: marker}
+		su.deadlinePassed.Store(true)
+
+		err := finishBoot(dir, su, nil, false)
+		if !errors.Is(err, errBootDeadline) {
+			t.Errorf("finishBoot err = %v, want errBootDeadline", err)
+		}
+
+		saved, found, loadErr := loadUpgradeMarker(dir)
+		if loadErr != nil || !found {
+			t.Fatalf("loadUpgradeMarker: found=%v err=%v", found, loadErr)
+		}
+		if saved.State != markerAttempted {
+			t.Errorf("marker state = %q, want %q", saved.State, markerAttempted)
+		}
+	})
+
+	t.Run("revert_on_signal", func(t *testing.T) {
+		t.Parallel()
+		dir := t.TempDir()
+		marker := upgradeMarker{FromSHA: "from-sha", ToSHA: guardBootSHA, TicketID: 4, State: markerAttempted}
+		if err := saveUpgradeMarker(dir, marker); err != nil {
+			t.Fatalf("saveUpgradeMarker: %v", err)
+		}
+		su := &selfUpgrade{boot: bootWatch, marker: marker}
+		wantErr := errors.New("serve boom")
+
+		err := finishBoot(dir, su, wantErr, true)
+		if !errors.Is(err, wantErr) {
+			t.Errorf("finishBoot err = %v, want %v", err, wantErr)
+		}
+
+		saved, found, loadErr := loadUpgradeMarker(dir)
+		if loadErr != nil || !found {
+			t.Fatalf("loadUpgradeMarker: found=%v err=%v", found, loadErr)
+		}
+		if saved.State != markerPending {
+			t.Errorf("marker state = %q, want %q", saved.State, markerPending)
+		}
+	})
+
+	t.Run("none_passes_serveErr_through", func(t *testing.T) {
+		t.Parallel()
+		dir := t.TempDir()
+		su := &selfUpgrade{boot: bootNormal}
+		wantErr := errors.New("serve boom")
+
+		err := finishBoot(dir, su, wantErr, false)
+		if !errors.Is(err, wantErr) {
+			t.Errorf("finishBoot err = %v, want %v", err, wantErr)
+		}
+
+		if _, found, loadErr := loadUpgradeMarker(dir); loadErr != nil || found {
+			t.Errorf("marker found=%v err=%v, want no file written", found, loadErr)
 		}
 	})
 }

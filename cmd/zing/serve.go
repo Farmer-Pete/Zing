@@ -130,7 +130,15 @@ func bootAndServe(ctx context.Context, cfgPath, dbPath string, seedDemo bool, su
 		return restartAfterServe(ctx, &back, os.Args, os.Environ(), execve)
 	}
 	su.boot, su.marker = boot, marker
-	if err := serve(ctx, cfgPath, dbPath, seedDemo, su); err != nil {
+
+	serveCtx, cancelServeCtx := context.WithCancel(ctx)
+	defer cancelServeCtx()
+	if boot == bootWatch {
+		timer := time.AfterFunc(bootDeadline, func() { bootDeadlineFired(su, cancelServeCtx) })
+		defer timer.Stop()
+	}
+	serveErr := serve(serveCtx, cfgPath, dbPath, seedDemo, su)
+	if err := finishBoot(dataDir, su, serveErr, ctx.Err() != nil); err != nil {
 		return err
 	}
 	return restartAfterServe(ctx, su.next, os.Args, os.Environ(), execve)
