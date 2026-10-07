@@ -2240,6 +2240,86 @@ const judgeNoChangeFixBuildScript = `<zing job="build" outcome="ok">
   <notes></notes>
 </zing>`
 
+// judgeFixCannotRunBuildScript is the fix driver's own RUN turn for a
+// failure the fix agent could not reproduce (ticket #80 task 2), verbatim
+// from internal/response/examples/build-error.xml: a build "error" outcome,
+// code cannot_run, so DriveFix's own runFixFirst escalates instead of
+// landing.
+const judgeFixCannotRunBuildScript = `<zing job="build" outcome="error">
+  <error code="cannot_run">
+    <what>The task's test suite cannot run: go test fails immediately with a missing go.sum entry for the sqlite driver.</what>
+    <why>go mod tidy was never run after the driver was added to go.mod, so the build fails before any test executes.</why>
+    <tried>Ran go mod tidy locally, which needs network access this sandbox does not have.</tried>
+  </error>
+</zing>`
+
+// judgeFixEscalated brings a fresh judgeTicketReady ticket through round 1's
+// own failure and "failure" fix request (judgeFailRoundOne), then drives
+// that fix request's own first RUN turn with judgeFixCannotRunBuildScript,
+// so it escalates cannot_run, origin fix, instead of landing. It returns
+// the store and the ticket read back after that escalation commit applies,
+// for TestFixEscalationInJudgingOffersJudgeAgain (ticket #80 task 2) to
+// read the open question from.
+func judgeFixEscalated(t *testing.T) (*store.Store, store.Ticket) {
+	t.Helper()
+	s, ticket := judgeTicketReady(t)
+
+	scripts := judgeScriptsFS(judgeOkBothScript)
+	scripts["build/fix/1.xml"] = &fstest.MapFile{Data: []byte(judgeFixCannotRunBuildScript)}
+	rt := runtime.NewFake(scripts)
+
+	checks := &judgeScriptedCheckCommands{real: NewCommandRunner(sandbox.Off(), false), steps: []judgeCheckStep{{exit: 1}}}
+
+	ticket = judgeFailRoundOne(t, s, ticket, rt, checks)
+
+	deps := pbWithTestCmd(pbClaim(t, s, rt, ticket.ID), ticket, judgeFixTestCmd)
+	deps.Commands = checks
+	commit, err := (judgeHandler{}).Run(t.Context(), ticket, deps) // fix RUN turn: cannot_run error
+	if err != nil {
+		t.Fatalf("judgeFixEscalated: fix RUN: %v", err)
+	}
+	pbApply(t, s, ticket, commit)
+
+	return s, pbGetTicket(t, s, ticket.ID)
+}
+
+// TestFixEscalationInJudgingOffersJudgeAgain proves withFixStageOption
+// (design section 8, owner decision Q6, ticket #80 task 2): a failure-kind
+// fix's own cannot_run escalation, raised while judging, offers "Judge
+// again without a fix" between Retry and Abandon, with Retry still
+// recommended.
+func TestFixEscalationInJudgingOffersJudgeAgain(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow end-to-end flow; runs in the full suite")
+	}
+	t.Parallel()
+	s, ticket := judgeFixEscalated(t)
+
+	open, err := s.QuestionsByState(t.Context(), ticket.ID, "open")
+	if err != nil {
+		t.Fatalf("QuestionsByState(open): %v", err)
+	}
+	if len(open) != 1 {
+		t.Fatalf("QuestionsByState(open) = %d questions, want exactly 1", len(open))
+	}
+
+	var qp response.QuestionPayload
+	if err := json.Unmarshal(open[0].Payload, &qp); err != nil {
+		t.Fatalf("unmarshal question payload: %v", err)
+	}
+	wantOptions := []response.Option{
+		{Key: "a", Text: pbEscalationTextRetry},
+		{Key: fixRejudgeOptionKey, Text: fixRejudgeOptionText},
+		{Key: "c", Text: pbEscalationTextAbandon},
+	}
+	if !reflect.DeepEqual(qp.Options, wantOptions) {
+		t.Errorf("question options = %+v, want %+v", qp.Options, wantOptions)
+	}
+	if qp.Recommended != "a" {
+		t.Errorf("recommended = %q, want %q", qp.Recommended, "a")
+	}
+}
+
 // driveJudgeFixToLanding drives an already-open "failure" fix request
 // through the fix driver's own RUN then CHECK-and-LAND ticks (fix.go's own
 // DriveFix, reached through judgeHandler.Run's own postBuildPrelude),

@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	"zing/internal/response"
 	"zing/internal/store"
 )
 
@@ -67,6 +68,23 @@ func TestFixRequestMessageRejectsEmptyText(t *testing.T) {
 	_, err := fixRequestMessage(store.Ticket{ID: 1}, FixKindFindings, "   \n\t ", 0)
 	if err == nil || err.Error() != "job: fix input is empty" {
 		t.Fatalf("fixRequestMessage error = %v, want %q", err, "job: fix input is empty")
+	}
+}
+
+// TestFixStageOptions proves fixStageOptions routes by the asking stage
+// (design section 8, owner decision Q6, premise correction): only a
+// failure-kind fix, whose asking stage is judging, offers the "judge
+// again" option; findings, ci_log, and threads offer none.
+func TestFixStageOptions(t *testing.T) {
+	t.Parallel()
+	want := []response.Option{{Key: fixRejudgeOptionKey, Text: fixRejudgeOptionText}}
+	if got := fixStageOptions(FixKindFailure); len(got) != 1 || got[0] != want[0] {
+		t.Errorf("fixStageOptions(failure) = %+v, want %+v", got, want)
+	}
+	for _, kind := range []FixKind{FixKindFindings, FixKindCILog, FixKindThreads} {
+		if got := fixStageOptions(kind); got != nil {
+			t.Errorf("fixStageOptions(%s) = %+v, want nil", kind, got)
+		}
 	}
 }
 

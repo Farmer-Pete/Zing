@@ -185,6 +185,36 @@ func openFixRequest(ctx context.Context, d Deps, t store.Ticket) (FixRequest, bo
 	}
 }
 
+// fixStageFor maps a FixKind to the state whose own stage asked for it
+// (design section 8, ticket #80 premise correction): findings is a
+// reviewing ask, failure is a judging ask, and ci_log and threads are both
+// shipping asks.
+var fixStageFor = map[FixKind]string{
+	FixKindFindings: stateReviewing,
+	FixKindFailure:  stateJudging,
+	FixKindCILog:    stateShipping,
+	FixKindThreads:  stateShipping,
+}
+
+// fixRejudgeOptionKey and fixRejudgeOptionText are the extra escalation
+// option a failure-kind fix offers (owner decision Q6): picking it closes
+// the fix with a "fix dropped" marker and starts the next judge round with
+// no fix run.
+const (
+	fixRejudgeOptionKey  = "e"
+	fixRejudgeOptionText = "Judge again without a fix"
+)
+
+// fixStageOptions returns the one extra escalation option a fix-origin
+// escalation of this kind should offer, or nil when the kind's own asking
+// stage is not judging (owner decision Q6: judge only, for now).
+func fixStageOptions(kind FixKind) []response.Option {
+	if fixStageFor[kind] != stateJudging {
+		return nil
+	}
+	return []response.Option{{Key: fixRejudgeOptionKey, Text: fixRejudgeOptionText}}
+}
+
 // fixUnit is req's own unit (design section 5.3): "u := unit{TaskN: 0,
 // Title: fixSubjectFor[req.Kind], FixRequestID: req.MessageID}".
 func fixUnit(req FixRequest) unit {
