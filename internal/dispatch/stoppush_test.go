@@ -213,6 +213,10 @@ func TestRun_StopPushFailureOnlyWarns(t *testing.T) {
 	go func() { runErrCh <- d.Run(ctx) }()
 
 	waitUntil(t, func() bool { return dispatch.IsStoppedForTest(d) }, "dispatcher to park after the fail-closed commit")
+	waitUntil(t, func() bool {
+		status, err := d.StopStatus(t.Context())
+		return err == nil && status.InFlight == 0
+	}, "InFlight to settle at 0")
 
 	if err := d.Resume(t.Context()); err != nil {
 		t.Fatalf("Resume: %v", err)
