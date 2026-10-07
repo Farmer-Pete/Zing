@@ -172,6 +172,51 @@ func TestRunAndRoute_CodexErrorEventQuotedInTried(t *testing.T) {
 	}
 }
 
+// TestRunAndRoute_CodexCommandRejectionQuotedInTried is this task's named
+// test (design: TestRunAndRoute_CodexCommandRejectionQuotedInTried): a fake
+// Codex that declines a command with "are not permitted" and then fails its
+// turn with no final message (command_rejected mode) must escalate
+// runtime_exec_failed with Tried naming the refused command and quoting the
+// rejection verbatim, ahead of Codex's own turn.failed detail (#94, owner
+// decision Q2), and the fake binary must run exactly once (no retry: a
+// command rejection is not a transient pattern).
+func TestRunAndRoute_CodexCommandRejectionQuotedInTried(t *testing.T) {
+	t.Parallel()
+	d, ticket := newCodexFailureTestDeps(t)
+
+	const wantTried = `codex refused a command: rm -f s2.json: rm -f style commands are not permitted. Use a safer approach; codex's own error: judge could not run its checks`
+	fakeDir := t.TempDir()
+	req := runtime.RunRequest{
+		Job: response.JobPlanreview,
+		Env: []string{"FAKE_CODEX_DIR=" + fakeDir, "FAKE_CODEX_MODE=command_rejected"},
+	}
+
+	su := store.SessionUpsert{Job: jobPlanreviewName, Runtime: testRuntimeCodex}
+	commit, err := runAndRoute(t.Context(), d, ticket, jobPlanreviewName, su, req, 0,
+		freshSessionRecord, nil, response.EscalationOriginPlanreview,
+		failIfSuccessCalled(t), nil, 0)
+	if err != nil {
+		t.Fatalf("runAndRoute: %v", err)
+	}
+
+	if commit.Escalation == nil {
+		t.Fatal("commit.Escalation = nil, want a runtime_exec_failed escalation")
+	}
+	if got := commit.Escalation.Payload.Code; got != string(response.EscalationCodeRuntimeExecFailed) {
+		t.Errorf("Escalation.Payload.Code = %q, want %q", got, response.EscalationCodeRuntimeExecFailed)
+	}
+	if got := commit.Escalation.Payload.Tried; got != wantTried {
+		t.Errorf("Escalation.Payload.Tried = %q, want %q", got, wantTried)
+	}
+	if !strings.Contains(commit.Escalation.Payload.Tried, "rm -f style commands are not permitted. Use a safer approach") {
+		t.Errorf("Escalation.Payload.Tried = %q, want it to contain the rejection line", commit.Escalation.Payload.Tried)
+	}
+
+	if got := readFakeCodexCalls(t, fakeDir); got != 1 {
+		t.Errorf("FAKE_CODEX_DIR/calls holds %d lines, want 1 (no retry)", got)
+	}
+}
+
 // readFakeCodexCalls counts the lines in FAKE_CODEX_DIR/calls, the one
 // fake_codex.sh appends on every invocation (fake_codex.sh): the number of
 // times the fake binary actually ran, independent of what each run printed.

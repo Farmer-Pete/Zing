@@ -552,6 +552,26 @@ func phraseLine(s string) string {
 	return ""
 }
 
+// codexRejectionDetail puts a command rejection in front of Codex's own
+// failure detail (owner decision Q2), so the 2048-byte cap never cuts the
+// cause: "codex refused a command: COMMAND: LINE; codex's own error:
+// DETAIL". It drops "COMMAND: " when command is empty, and drops the
+// detail half when detail is blank or already holds line. With no line it
+// returns detail unchanged.
+func codexRejectionDetail(command, line, detail string) string {
+	if line == "" {
+		return detail
+	}
+	head := "codex refused a command: " + line
+	if command != "" {
+		head = "codex refused a command: " + command + ": " + line
+	}
+	if strings.TrimSpace(detail) == "" || strings.Contains(detail, line) {
+		return CapFailureDetail(head)
+	}
+	return CapFailureDetail(head + "; codex's own error: " + detail)
+}
+
 // Run runs one turn of req.Job through the codex CLI (design section 4.1):
 // argv per codexArgv, the prompt on stdin (never in argv), the environment
 // per agentEnv (identical to Claude's), stdout capped and drained the same
@@ -698,6 +718,10 @@ func (c Codex) run(ctx context.Context, req RunRequest, argv []string, outPath s
 			if fromEvent {
 				execErr.Transient = codexTransientMatch(res.FailureDetail)
 			}
+			// After the transient match, so a rejection's own text never
+			// makes a run retryable (#94).
+			command, line := codexCommandRejection(stdout.bytes(), res.Stderr)
+			res.FailureDetail = codexRejectionDetail(command, line, res.FailureDetail)
 		}
 		return res, outcomeErr
 	}

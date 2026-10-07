@@ -695,6 +695,35 @@ func TestCodex_ErrorEventKeptInResult(t *testing.T) {
 	}
 }
 
+// TestCodex_CommandRejectionInFailureDetail proves Codex.run's ExecError
+// branch combines a parsed command rejection with Codex's own turn.failed
+// detail (#94): res.FailureDetail is the exact codexRejectionDetail result,
+// and the rejection's own text never makes the run transient.
+func TestCodex_CommandRejectionInFailureDetail(t *testing.T) {
+	t.Parallel()
+	requireUnix(t)
+
+	const wantDetail = `codex refused a command: rm -f s2.json: rm -f style commands are not permitted. Use a safer approach; codex's own error: judge could not run its checks`
+	dir := t.TempDir()
+	req := newFakeCodexRequest(dir, "command_rejected")
+	c := NewCodex(fakeCodexScript)
+	res, err := c.Run(context.Background(), req)
+
+	var execErr *ExecError
+	if !errors.As(err, &execErr) {
+		t.Fatalf("err = %v, want *ExecError", err)
+	}
+	if execErr.ExitCode != 1 {
+		t.Errorf("ExecError.ExitCode = %d, want 1", execErr.ExitCode)
+	}
+	if execErr.Transient != "" {
+		t.Errorf("ExecError.Transient = %q, want empty (a rejection is never transient)", execErr.Transient)
+	}
+	if res.FailureDetail != wantDetail {
+		t.Errorf("res.FailureDetail = %q, want %q", res.FailureDetail, wantDetail)
+	}
+}
+
 // TestCodex_TransientErrorSetsExecErrorTransient proves a Codex run whose
 // error event names a 503 sets ExecError.Transient to "503" (design:
 // codexTransientMatch, called by Codex.run only when codexFailureDetail
@@ -1019,6 +1048,80 @@ func TestCodexCommandRejection(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestCodexRejectionDetail proves codexRejectionDetail's combining rules
+// (design: codexRejectionDetail, owner decision Q2): rejection first, then
+// Codex's own detail after a separator, cut to 2048 bytes together so the
+// cap never drops the rejection.
+func TestCodexRejectionDetail(t *testing.T) {
+	t.Parallel()
+
+	const line = "rm -f style commands are not permitted. Use a safer approach"
+
+	cases := []struct {
+		name    string
+		command string
+		line    string
+		detail  string
+		want    string
+	}{
+		{
+			name:   "empty line returns detail unchanged",
+			detail: "judge could not run its checks",
+			want:   "judge could not run its checks",
+		},
+		{
+			name:    "command, line, and detail combine",
+			command: "rm -f s2.json",
+			line:    line,
+			detail:  "judge could not run its checks",
+			want:    "codex refused a command: rm -f s2.json: " + line + "; codex's own error: judge could not run its checks",
+		},
+		{
+			name:   "no command still combines",
+			line:   line,
+			detail: "judge could not run its checks",
+			want:   "codex refused a command: " + line + "; codex's own error: judge could not run its checks",
+		},
+		{
+			name:   "a detail that already holds the line gives the head alone",
+			line:   line,
+			detail: "earlier text: " + line,
+			want:   "codex refused a command: " + line,
+		},
+		{
+			name:   "an empty detail gives the head alone",
+			line:   line,
+			detail: "",
+			want:   "codex refused a command: " + line,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := codexRejectionDetail(tc.command, tc.line, tc.detail); got != tc.want {
+				t.Errorf("codexRejectionDetail(%q, %q, %q) = %q, want %q", tc.command, tc.line, tc.detail, got, tc.want)
+			}
+		})
+	}
+
+	t.Run("a 5000-byte detail is cut to at most 2048 bytes", func(t *testing.T) {
+		t.Parallel()
+		detail := strings.Repeat("a", 5000)
+		got := codexRejectionDetail("rm -f s2.json", line, detail)
+		if len(got) > maxFailureDetailBytes {
+			t.Errorf("len(got) = %d, want at most %d", len(got), maxFailureDetailBytes)
+		}
+		wantHead := "codex refused a command: rm -f s2.json: " + line
+		if !strings.HasPrefix(got, wantHead) {
+			t.Errorf("got = %q, want prefix %q", got, wantHead)
+		}
+		if !utf8.ValidString(got) {
+			t.Error("got is not valid UTF-8")
+		}
+	})
 }
 
 func TestCodexTransientMatch(t *testing.T) {

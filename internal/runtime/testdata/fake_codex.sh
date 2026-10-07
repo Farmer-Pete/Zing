@@ -206,6 +206,17 @@ signal_kill)
   kill -TERM "$$"
   sleep 5
   ;;
+command_rejected)
+  # Codex's command policy refuses a command (#94): a declined
+  # command_execution item carrying "are not permitted" in its aggregated
+  # output, then a turn.failed with its own, different message. The -o
+  # file is left exactly as Run created it (empty), so FinalMessage stays
+  # "".
+  printf '{"type":"thread.started","thread_id":"fake-codex-rejected-thread-id"}\n'
+  printf '{"type":"item.completed","item":{"id":"item_1","type":"command_execution","command":"rm -f s2.json","aggregated_output":"rm -f style commands are not permitted. Use a safer approach","exit_code":1,"status":"declined"}}\n'
+  printf '{"type":"turn.failed","error":{"message":"judge could not run its checks"}}\n'
+  exit 1
+  ;;
 *)
   echo "fake_codex: unknown FAKE_CODEX_MODE $mode_flag" >&2
   exit 9
