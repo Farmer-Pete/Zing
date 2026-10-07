@@ -4754,11 +4754,10 @@ func TestRespondRetryWithRunCarriesOwnerNote(t *testing.T) {
 	scripts := fstest.MapFS{"respond/2/1.xml": &fstest.MapFile{Data: []byte(shipRespondReplyScript)}}
 	rec := &recordingRuntime{inner: runtime.NewFake(scripts)}
 	deps := shipClaim(t, s, rec, ticket.ID, gh, tr)
-	commit, err := (shipHandler{}).Run(t.Context(), pbGetTicket(t, s, ticket.ID), deps)
+	_, err := (shipHandler{}).Run(t.Context(), pbGetTicket(t, s, ticket.ID), deps)
 	if err != nil {
 		t.Fatalf("Run: %v", err)
 	}
-	_ = commit
 	assertFencedPB(t, rec.lastRequest(t).Prompt, "notes", retryNote)
 }
 

@@ -2824,16 +2824,7 @@ func TestJudgeAgainWithoutFixStartsJudgeRound(t *testing.T) {
 	qID := open2[0].ID
 
 	const rejudgeNote = "the failure is outside the code"
-	optE := fixRejudgeOptionKey
-	if _, draftErr := s.SaveDraft(t.Context(), store.DraftInput{TicketID: ticket.ID, QuestionID: &qID, Option: &optE}); draftErr != nil {
-		t.Fatalf("SaveDraft(option): %v", draftErr)
-	}
-	if _, draftErr := s.SaveDraft(t.Context(), store.DraftInput{TicketID: ticket.ID, QuestionID: &qID, Text: rejudgeNote}); draftErr != nil {
-		t.Fatalf("SaveDraft(text): %v", draftErr)
-	}
-	if _, sendErr := s.SendBatch(t.Context(), ticket.ID); sendErr != nil {
-		t.Fatalf("SendBatch: %v", sendErr)
-	}
+	pbAnswerEscalationWithNote(t, s, ticket.ID, qID, fixRejudgeOptionKey, rejudgeNote)
 
 	reqCountBefore := len(rec.reqs)
 	deps2 := pbWithTestCmd(pbClaim(t, s, rec, ticket.ID), pbGetTicket(t, s, ticket.ID), judgeFixTestCmd)
@@ -2860,6 +2851,9 @@ func TestJudgeAgainWithoutFixStartsJudgeRound(t *testing.T) {
 	}
 	if len(rec.reqs)-reqCountBefore != 1 {
 		t.Fatalf("runtime requests after answering e = %d, want exactly 1", len(rec.reqs)-reqCountBefore)
+	}
+	if last := rec.reqs[len(rec.reqs)-1]; last.Job != response.JobJudge {
+		t.Errorf("request Job = %q, want %q (no fix run)", last.Job, response.JobJudge)
 	}
 	assertFencedPB(t, rec.reqs[len(rec.reqs)-1].Prompt, "notes", rejudgeNote)
 
@@ -2890,11 +2884,10 @@ func TestJudgeAgainWithoutFixDirtyTreeStillDrops(t *testing.T) {
 	scripts["build/fix/1.xml"] = &fstest.MapFile{Data: []byte(judgeFixCannotRunBuildScript)}
 	scripts["judge/2/1.xml"] = &fstest.MapFile{Data: []byte(judgeOkBothScript)}
 	rec := &recordingRuntime{inner: runtime.NewFake(scripts)}
-	rt := rec
 
 	checks := &judgeScriptedCheckCommands{real: NewCommandRunner(sandbox.Off(), false), steps: []judgeCheckStep{{exit: 1}}}
 
-	ticket = judgeFailRoundOne(t, s, ticket, rt, checks)
+	ticket = judgeFailRoundOne(t, s, ticket, rec, checks)
 
 	startedMarker, ok := reviewMarker(t, s, ticket.ID, "judge round 1 started")
 	if !ok {
@@ -2907,7 +2900,7 @@ func TestJudgeAgainWithoutFixDirtyTreeStillDrops(t *testing.T) {
 	}
 	wantSHA := sub[2]
 
-	deps := pbWithTestCmd(pbClaim(t, s, rt, ticket.ID), ticket, judgeFixTestCmd)
+	deps := pbWithTestCmd(pbClaim(t, s, rec, ticket.ID), ticket, judgeFixTestCmd)
 	deps.Commands = checks
 	fixCommit, err := (judgeHandler{}).Run(t.Context(), ticket, deps) // fix RUN turn: cannot_run error
 	if err != nil {
@@ -2947,19 +2940,17 @@ func TestJudgeAgainWithoutFixDirtyTreeStillDrops(t *testing.T) {
 	}
 	qID := open2[0].ID
 
-	optE := fixRejudgeOptionKey
-	if _, draftErr := s.SaveDraft(t.Context(), store.DraftInput{TicketID: ticket.ID, QuestionID: &qID, Option: &optE}); draftErr != nil {
-		t.Fatalf("SaveDraft(option): %v", draftErr)
-	}
-	if _, sendErr := s.SendBatch(t.Context(), ticket.ID); sendErr != nil {
-		t.Fatalf("SendBatch: %v", sendErr)
-	}
+	pbAnswerEscalationWithNote(t, s, ticket.ID, qID, fixRejudgeOptionKey, "")
 
-	deps2 := pbWithTestCmd(pbClaim(t, s, rt, ticket.ID), pbGetTicket(t, s, ticket.ID), judgeFixTestCmd)
+	reqCountBeforeDrop := len(rec.reqs)
+	deps2 := pbWithTestCmd(pbClaim(t, s, rec, ticket.ID), pbGetTicket(t, s, ticket.ID), judgeFixTestCmd)
 	deps2.Commands = checks
 	commit, handled := pbRunPrelude(t, s, deps2, ticket.ID)
 	if !handled {
 		t.Fatal("handled = false, want true")
+	}
+	if len(rec.reqs) != reqCountBeforeDrop {
+		t.Errorf("runtime requests after answering e with a dirty tree = %d, want no change from %d", len(rec.reqs), reqCountBeforeDrop)
 	}
 
 	if len(commit.Messages) == 0 || commit.Messages[0].Body != fmt.Sprintf("fix dropped %d", req.MessageID) {
@@ -2987,9 +2978,6 @@ func TestJudgeAgainWithoutFixDirtyTreeStillDrops(t *testing.T) {
 	// followed the drop with Retry plus a note, and prove retryJudgeNoRun
 	// starts round 2 at round 1's own sha with that note reaching the
 	// fresh judge turn.
-	if rmErr := os.Remove(readmePath); rmErr != nil {
-		t.Fatalf("remove dirty readme (restore via git): %v", rmErr)
-	}
 	if writeErr := os.WriteFile(readmePath, existing, 0o600); writeErr != nil {
 		t.Fatalf("restore README.md: %v", writeErr)
 	}
@@ -3004,19 +2992,10 @@ func TestJudgeAgainWithoutFixDirtyTreeStillDrops(t *testing.T) {
 	qID2 := open3[0].ID
 
 	const cleanNote = "tree is clean now"
-	optA := "a"
-	if _, draftErr := s.SaveDraft(t.Context(), store.DraftInput{TicketID: ticket.ID, QuestionID: &qID2, Option: &optA}); draftErr != nil {
-		t.Fatalf("SaveDraft(option): %v", draftErr)
-	}
-	if _, draftErr := s.SaveDraft(t.Context(), store.DraftInput{TicketID: ticket.ID, QuestionID: &qID2, Text: cleanNote}); draftErr != nil {
-		t.Fatalf("SaveDraft(text): %v", draftErr)
-	}
-	if _, sendErr := s.SendBatch(t.Context(), ticket.ID); sendErr != nil {
-		t.Fatalf("SendBatch: %v", sendErr)
-	}
+	pbAnswerEscalationWithNote(t, s, ticket.ID, qID2, "a", cleanNote)
 
 	reqCountBefore := len(rec.reqs)
-	deps3 := pbWithTestCmd(pbClaim(t, s, rt, ticket.ID), pbGetTicket(t, s, ticket.ID), judgeFixTestCmd)
+	deps3 := pbWithTestCmd(pbClaim(t, s, rec, ticket.ID), pbGetTicket(t, s, ticket.ID), judgeFixTestCmd)
 	deps3.Commands = checks
 	finalCommit, err := (judgeHandler{}).Run(t.Context(), pbGetTicket(t, s, ticket.ID), deps3) // Retry after cleaning the tree
 	if err != nil {
@@ -3029,9 +3008,15 @@ func TestJudgeAgainWithoutFixDirtyTreeStillDrops(t *testing.T) {
 		if strings.HasPrefix(m.Body, want) {
 			found = true
 		}
+		if strings.HasPrefix(m.Body, "judge round 1 same sha escalated") {
+			t.Errorf("finalCommit.Messages = %+v, want no \"judge round 1 same sha escalated\" marker (the Retry skipped the same-sha guard)", finalCommit.Messages)
+		}
 	}
 	if !found {
 		t.Errorf("finalCommit.Messages = %+v, want a message starting %q", finalCommit.Messages, want)
+	}
+	if finalCommit.Escalation != nil {
+		t.Errorf("finalCommit.Escalation = %+v, want nil", finalCommit.Escalation)
 	}
 	if !slices.Contains(finalCommit.ResolveQuestions, qID2) {
 		t.Errorf("finalCommit.ResolveQuestions = %v, want it to contain %d", finalCommit.ResolveQuestions, qID2)
@@ -3149,29 +3134,33 @@ func TestFixDroppedSince(t *testing.T) {
 // own shared setup, pulled out to a package-level helper (rather than a
 // closure, which tparallel mistakes for an unparallel subtest body) so both
 // of its own subtests share it: round 1 fails and its "failure" fix
-// escalates cannot_run, then either a "fix dropped <mid>" or a "fix landed
-// <mid> sha <sha>" marker (at round 1's own sha) closes it, and a plain
-// judgeHandler.Run tick runs after that.
+// escalates cannot_run. For dropFix, it then replays part 1 of
+// TestJudgeAgainWithoutFixDirtyTreeStillDrops (a dirty worktree forces
+// retryFreshRound's own judgeStartChecks to escalate instead of starting
+// round 2, so rejudgeWithoutFix's "fix dropped <mid>" marker lands with no
+// "judge round 2 started" marker alongside it) and restores the tree, so
+// the marker judgeHandler.Run reads back is the one rejudgeWithoutFix
+// itself wrote, not a synthetic stand-in. The negative case instead closes
+// the fix with a "fix landed <mid> sha <sha>" marker written directly:
+// landing is never reached from this same dirty-tree setup (it needs the
+// fix's own CHECK-and-LAND ticks, exercised elsewhere by
+// driveJudgeFixToLanding), and judgeHandler.Run's consent check only ever
+// reads a closing marker's own text, not the fix's open/closed state, so a
+// well-formed "landed" line in its place still proves the negative. A
+// plain judgeHandler.Run tick, with no answered round, runs after either
+// marker lands.
 func judgeFailedRoundDroppedFixRun(t *testing.T, dropFix bool) (commit store.HandlerCommit, startedSHA string) {
 	t.Helper()
 	s, ticket := judgeTicketReady(t)
 
 	scripts := judgeScriptsFS(judgeOkBothScript)
 	scripts["build/fix/1.xml"] = &fstest.MapFile{Data: []byte(judgeFixCannotRunBuildScript)}
+	scripts["judge/2/1.xml"] = &fstest.MapFile{Data: []byte(judgeOkBothScript)}
 	rt := runtime.NewFake(scripts)
 
 	checks := &judgeScriptedCheckCommands{real: NewCommandRunner(sandbox.Off(), false), steps: []judgeCheckStep{{exit: 1}}}
 
 	ticket = judgeFailRoundOne(t, s, ticket, rt, checks)
-
-	deps := pbWithTestCmd(pbClaim(t, s, rt, ticket.ID), ticket, judgeFixTestCmd)
-	deps.Commands = checks
-	fixCommit, err := (judgeHandler{}).Run(t.Context(), ticket, deps) // fix RUN turn: cannot_run error
-	if err != nil {
-		t.Fatalf("fix RUN: %v", err)
-	}
-	pbApply(t, s, ticket, fixCommit)
-	ticket = pbGetTicket(t, s, ticket.ID)
 
 	startedMarker, ok := reviewMarker(t, s, ticket.ID, "judge round 1 started")
 	if !ok {
@@ -3184,6 +3173,15 @@ func judgeFailedRoundDroppedFixRun(t *testing.T, dropFix bool) (commit store.Han
 	}
 	wantSHA := sub[2]
 
+	deps := pbWithTestCmd(pbClaim(t, s, rt, ticket.ID), ticket, judgeFixTestCmd)
+	deps.Commands = checks
+	fixCommit, err := (judgeHandler{}).Run(t.Context(), ticket, deps) // fix RUN turn: cannot_run error
+	if err != nil {
+		t.Fatalf("fix RUN: %v", err)
+	}
+	pbApply(t, s, ticket, fixCommit)
+	ticket = pbGetTicket(t, s, ticket.ID)
+
 	req, open, reqErr := openFixRequest(t.Context(), Deps{Store: s}, ticket)
 	if reqErr != nil {
 		t.Fatalf("openFixRequest: %v", reqErr)
@@ -3192,23 +3190,55 @@ func judgeFailedRoundDroppedFixRun(t *testing.T, dropFix bool) (commit store.Han
 		t.Fatal("openFixRequest: open = false, want true")
 	}
 
-	// Either marker closes the fix request so judgeHandler.Run reaches
-	// the failed-round branch's own decision tree instead of driving
-	// the fix again through postBuildPrelude; only the "dropped" shape
-	// is this check's own consent.
-	closeBody := fmt.Sprintf("fix landed %d sha %s", req.MessageID, wantSHA)
 	if dropFix {
-		closeBody = fmt.Sprintf("fix dropped %d", req.MessageID)
-	}
-	if _, insertErr := s.InsertMessage(t.Context(), store.Message{
-		TicketID: ticket.ID, Type: msgTypeUpdate, Author: authorSystem, Body: closeBody,
-	}); insertErr != nil {
-		t.Fatalf("InsertMessage(close fix): %v", insertErr)
+		proj := deps.Projects[ticket.ProjectID]
+		wt, _, wtErr := proj.Orch.EnsureWorktree(t.Context(), ticket.ID, ticket.Title)
+		if wtErr != nil {
+			t.Fatalf("EnsureWorktree: %v", wtErr)
+		}
+		readmePath := filepath.Join(wt.Dir(), "README.md")
+		existing, readErr := os.ReadFile(readmePath)
+		if readErr != nil {
+			t.Fatalf("read README.md: %v", readErr)
+		}
+		if writeErr := os.WriteFile(readmePath, append(existing, []byte("dirty\n")...), 0o600); writeErr != nil {
+			t.Fatalf("modify README.md: %v", writeErr)
+		}
+
+		open2, qErr := s.QuestionsByState(t.Context(), ticket.ID, "open")
+		if qErr != nil {
+			t.Fatalf("QuestionsByState(open): %v", qErr)
+		}
+		if len(open2) != 1 {
+			t.Fatalf("QuestionsByState(open) = %d questions, want exactly 1", len(open2))
+		}
+		pbAnswerEscalationWithNote(t, s, ticket.ID, open2[0].ID, fixRejudgeOptionKey, "")
+
+		deps2 := pbWithTestCmd(pbClaim(t, s, rt, ticket.ID), pbGetTicket(t, s, ticket.ID), judgeFixTestCmd)
+		deps2.Commands = checks
+		dropCommit, handled := pbRunPrelude(t, s, deps2, ticket.ID)
+		if !handled {
+			t.Fatal("handled = false, want true")
+		}
+		if dropCommit.Escalation == nil {
+			t.Fatal("dropCommit.Escalation = nil, want a judge-origin escalation from judgeStartChecks (the dirty tree)")
+		}
+
+		if writeErr := os.WriteFile(readmePath, existing, 0o600); writeErr != nil {
+			t.Fatalf("restore README.md: %v", writeErr)
+		}
+	} else {
+		closeBody := fmt.Sprintf("fix landed %d sha %s", req.MessageID, wantSHA)
+		if _, insertErr := s.InsertMessage(t.Context(), store.Message{
+			TicketID: ticket.ID, Type: msgTypeUpdate, Author: authorSystem, Body: closeBody,
+		}); insertErr != nil {
+			t.Fatalf("InsertMessage(close fix): %v", insertErr)
+		}
 	}
 
-	deps2 := pbWithTestCmd(pbClaim(t, s, rt, ticket.ID), pbGetTicket(t, s, ticket.ID), judgeFixTestCmd)
-	deps2.Commands = checks
-	commit, runErr := (judgeHandler{}).Run(t.Context(), pbGetTicket(t, s, ticket.ID), deps2)
+	deps3 := pbWithTestCmd(pbClaim(t, s, rt, ticket.ID), pbGetTicket(t, s, ticket.ID), judgeFixTestCmd)
+	deps3.Commands = checks
+	commit, runErr := (judgeHandler{}).Run(t.Context(), pbGetTicket(t, s, ticket.ID), deps3)
 	if runErr != nil {
 		t.Fatalf("Run after the fix escalated: %v", runErr)
 	}
@@ -3299,10 +3329,9 @@ func TestJudgeRetryFreshRoundCarriesOwnerNote(t *testing.T) {
 
 	rec := &recordingRuntime{inner: rt}
 	deps2 := pbClaim(t, s, rec, ticket.ID)
-	commit, handled := pbRunPrelude(t, s, deps2, ticket.ID)
+	_, handled := pbRunPrelude(t, s, deps2, ticket.ID)
 	if !handled {
 		t.Fatal("handled = false, want true")
 	}
-	_ = commit
 	assertFencedPB(t, rec.lastRequest(t).Prompt, "notes", retryNote)
 }

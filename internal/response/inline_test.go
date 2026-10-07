@@ -58,7 +58,7 @@ func TestFlattenInline(t *testing.T) {
 		n    int
 	}{
 		{
-			name: "code in why becomes backticks",
+			name: "code in why becomes backticks, what and tried keep their order and bytes",
 			elem: `<zing job="judge" outcome="error"><error code="cannot_run"><what>w</what><why>run <code>go test ./...</code> now</why><tried>t</tried></error></zing>`,
 			want: "<zing job=\"judge\" outcome=\"error\"><error code=\"cannot_run\"><what>w</what><why>run `go test ./...` now</why><tried>t</tried></error></zing>",
 			n:    2,
@@ -88,9 +88,21 @@ func TestFlattenInline(t *testing.T) {
 			n:    1,
 		},
 		{
+			name: "self-closing code is removed with no backtick",
+			elem: `<zing job="classify" outcome="bug"><reason>use <code/>x</reason></zing>`,
+			want: `<zing job="classify" outcome="bug"><reason>use x</reason></zing>`,
+			n:    1,
+		},
+		{
 			name: "no inline tag returns the same bytes",
 			elem: `<zing job="classify" outcome="bug"><reason>plain text</reason></zing>`,
 			want: `<zing job="classify" outcome="bug"><reason>plain text</reason></zing>`,
+			n:    0,
+		},
+		{
+			name: "unknown element under the root is skipped, code child included",
+			elem: `<zing job="classify" outcome="bug"><reason>plain text</reason><extra><code>y</code></extra></zing>`,
+			want: `<zing job="classify" outcome="bug"><reason>plain text</reason><extra><code>y</code></extra></zing>`,
 			n:    0,
 		},
 		{
@@ -115,23 +127,6 @@ func TestFlattenInline(t *testing.T) {
 				t.Errorf("out = %q, want the input unchanged: %q", out, tc.elem)
 			}
 		})
-	}
-}
-
-// TestFlattenInline_KeepsSchemaChildOrder confirms a judge error's own
-// schema children (what, why, tried) keep their order and bytes when
-// flattenInline rewrites an inline tag inside one of them.
-func TestFlattenInline_KeepsSchemaChildOrder(t *testing.T) {
-	t.Parallel()
-
-	elem := `<zing job="judge" outcome="error"><error code="cannot_run"><what>w</what><why>run <code>x</code> now</why><tried>t</tried></error></zing>`
-	out, n := flattenInline([]byte(elem))
-	if n != 2 {
-		t.Fatalf("rewritten = %d, want 2", n)
-	}
-	want := "<zing job=\"judge\" outcome=\"error\"><error code=\"cannot_run\"><what>w</what><why>run `x` now</why><tried>t</tried></error></zing>"
-	if string(out) != want {
-		t.Errorf("out =\n%q\nwant\n%q", out, want)
 	}
 }
 

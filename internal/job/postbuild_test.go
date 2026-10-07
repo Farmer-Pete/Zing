@@ -1108,11 +1108,10 @@ func TestPreludeFixRetryCarriesOwnerNote(t *testing.T) {
 
 	scriptRT := &pbScriptedRuntime{t: t, steps: []pbScriptedStep{pbBuildStep([]string{pbHelloTxt}, nil, "fix-retry-sess")}}
 	deps := pbWithTestCmd(pbClaim(t, s, scriptRT, ticketID), pbGetTicket(t, s, ticketID), pbFixTestCmd)
-	commit, handled := pbRunPrelude(t, s, deps, ticketID)
+	_, handled := pbRunPrelude(t, s, deps, ticketID)
 	if !handled {
 		t.Fatal("handled = false, want true")
 	}
-	_ = commit
 	if len(scriptRT.reqs) != 1 {
 		t.Fatalf("runtime requests = %+v, want exactly one", scriptRT.reqs)
 	}

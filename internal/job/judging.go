@@ -295,15 +295,9 @@ func (h judgeHandler) run(ctx context.Context, t store.Ticket, d Deps) (store.Ha
 	switch {
 	case judgeRoundFailedLine.MatchString(firstLine), judgeRoundSameSHALine.MatchString(firstLine):
 		alreadyEscalated := judgeRoundSameSHALine.MatchString(firstLine)
-		var sub []string
-		if alreadyEscalated {
-			sub = judgeRoundSameSHALine.FindStringSubmatch(firstLine)
-		} else {
-			sub = judgeRoundFailedLine.FindStringSubmatch(firstLine)
-		}
-		m, convErr := strconv.Atoi(sub[1])
-		if convErr != nil {
-			return store.HandlerCommit{}, fmt.Errorf("job: judging: parse failed round %q: %w", firstLine, convErr)
+		m, ok := judgeFailedRoundNumber(firstLine)
+		if !ok {
+			return store.HandlerCommit{}, fmt.Errorf("job: judging: parse failed round %q", firstLine)
 		}
 
 		// #86's own repeat (ticket #50, Q1): a "failure" fix that lands
@@ -1918,6 +1912,28 @@ func (h judgeHandler) evaluate(ctx context.Context, t store.Ticket, d Deps, n in
 
 // ---- the judge rows of resolvePostBuildEscalation (design section 5.6) ---
 
+// judgeFailedRoundNumber reads the round number back from firstLine when
+// it is a "judge round N failed" or "judge round N same sha escalated"
+// line, the one pair of shapes judgeHandler.Run's own failed-marker
+// branch and retryJudgeNoRun both read this round number from. ok is
+// false, and m is 0, when firstLine is neither shape or its round number
+// fails to parse, so a caller never logs a wrong round on a quiet
+// failure.
+func judgeFailedRoundNumber(firstLine string) (m int, ok bool) {
+	sub := judgeRoundFailedLine.FindStringSubmatch(firstLine)
+	if sub == nil {
+		sub = judgeRoundSameSHALine.FindStringSubmatch(firstLine)
+	}
+	if sub == nil {
+		return 0, false
+	}
+	n, convErr := strconv.Atoi(sub[1])
+	if convErr != nil {
+		return 0, false
+	}
+	return n, true
+}
+
 // judgeNewestRoundNumber reads the round number back from markers' own
 // newest "judge round " marker, whichever of the four shapes it is (design
 // section 5.1): retryFreshRound needs the round just abandoned to number
@@ -2084,22 +2100,12 @@ func (h judgeHandler) retryJudgeNoRun(ctx context.Context, t store.Ticket, d Dep
 	if len(markers) > 0 {
 		newest := markers[len(markers)-1]
 		firstLine, _, _ := strings.Cut(newest.Body, "\n")
-		if judgeRoundFailedLine.MatchString(firstLine) || judgeRoundSameSHALine.MatchString(firstLine) {
+		if m, ok := judgeFailedRoundNumber(firstLine); ok {
 			dropped, droppedErr := d.Store.MarkersWithPrefix(ctx, t.ID, fixDroppedPrefix)
 			if droppedErr != nil {
 				return store.HandlerCommit{}, fmt.Errorf("job: judging: retry no run: fix dropped markers: %w", droppedErr)
 			}
 			if fixRequestID, ok := fixDroppedSince(dropped, newest.ID); ok {
-				var m int
-				if sub := judgeRoundFailedLine.FindStringSubmatch(firstLine); sub != nil {
-					if n, convErr := strconv.Atoi(sub[1]); convErr == nil {
-						m = n
-					}
-				} else if sub := judgeRoundSameSHALine.FindStringSubmatch(firstLine); sub != nil {
-					if n, convErr := strconv.Atoi(sub[1]); convErr == nil {
-						m = n
-					}
-				}
 				slog.Info("judge again after dropped fix", "ticket_id", t.ID, "round", m+1, "fix_request_id", fixRequestID)
 				return h.retryFreshRound(ctx, t, d, resolveIDs, notes, errorText)
 			}
@@ -2125,16 +2131,16 @@ func (h judgeHandler) rejudgeWithoutFix(ctx context.Context, t store.Ticket, d D
 	if err != nil {
 		return store.HandlerCommit{}, fmt.Errorf("job: judging: rejudge without fix: %w", err)
 	}
-	if t.State != stateJudging || !open || fixStageFor[req.Kind] != stateJudging {
-		var reason string
-		switch {
-		case t.State != stateJudging:
-			reason = "ticket is not judging"
-		case !open:
-			reason = "no open fix request"
-		case fixStageFor[req.Kind] != stateJudging:
-			reason = fmt.Sprintf("fix kind %q does not ask judging", req.Kind)
-		}
+	var reason string
+	switch {
+	case t.State != stateJudging:
+		reason = "ticket is not judging"
+	case !open:
+		reason = "no open fix request"
+	case fixStageFor[req.Kind] != stateJudging:
+		reason = fmt.Sprintf("fix kind %q does not ask judging", req.Kind)
+	}
+	if reason != "" {
 		slog.Warn("judge again refused", "ticket_id", t.ID, "reason", reason)
 		return replanUnsupportedEscalation(t, d, resolveIDs, response.EscalationOriginFix), nil
 	}

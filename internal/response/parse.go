@@ -288,9 +288,6 @@ func tryDecode(input []byte, offset int) (*Document, error) {
 	}
 
 	flattened, tags := flattenInline(input[offset:])
-	if tags > 0 {
-		logFlatten(tags)
-	}
 
 	dec = xml.NewDecoder(bytes.NewReader(flattened))
 	tok, err = dec.Token()
@@ -304,6 +301,10 @@ func tryDecode(input []byte, offset int) (*Document, error) {
 
 	if err := dec.DecodeElement(r, &start); err != nil {
 		return nil, &bodyDecodeError{err: err}
+	}
+
+	if tags > 0 {
+		logFlatten(tags)
 	}
 
 	//nolint:gosec // dec.InputOffset() is bounded by len(flattened), which fits in an int already.
