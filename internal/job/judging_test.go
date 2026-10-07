@@ -2774,3 +2774,251 @@ func TestJudgeNoChangeFixEscalatesDespiteRetryAfterLanding(t *testing.T) {
 		t.Errorf("escalation Tried = %q, want it to name s1", commit.Escalation.Payload.Tried)
 	}
 }
+
+// TestJudgeAgainWithoutFixStartsJudgeRound proves rejudgeWithoutFix's own
+// happy path (design section 8, owner decision Q6, ticket #80 task 3): the
+// owner answers a failure-kind fix's own cannot_run escalation with option
+// e plus a note, and the next tick drops the fix and starts the next judge
+// round at HEAD, with the note reaching the judge's own RUN turn and no fix
+// run in between.
+func TestJudgeAgainWithoutFixStartsJudgeRound(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow end-to-end flow; runs in the full suite")
+	}
+	t.Parallel()
+	s, ticket := judgeTicketReady(t)
+
+	scripts := judgeScriptsFS(judgeOkBothScript)
+	scripts["build/fix/1.xml"] = &fstest.MapFile{Data: []byte(judgeFixCannotRunBuildScript)}
+	scripts["judge/2/1.xml"] = &fstest.MapFile{Data: []byte(judgeOkBothScript)}
+	rec := &recordingRuntime{inner: runtime.NewFake(scripts)}
+
+	checks := &judgeScriptedCheckCommands{real: NewCommandRunner(sandbox.Off(), false), steps: []judgeCheckStep{{exit: 1}}}
+
+	ticket = judgeFailRoundOne(t, s, ticket, rec, checks)
+
+	deps := pbWithTestCmd(pbClaim(t, s, rec, ticket.ID), ticket, judgeFixTestCmd)
+	deps.Commands = checks
+	fixCommit, err := (judgeHandler{}).Run(t.Context(), ticket, deps) // fix RUN turn: cannot_run error
+	if err != nil {
+		t.Fatalf("fix RUN: %v", err)
+	}
+	pbApply(t, s, ticket, fixCommit)
+	ticket = pbGetTicket(t, s, ticket.ID)
+
+	req, open, err := openFixRequest(t.Context(), Deps{Store: s}, ticket)
+	if err != nil {
+		t.Fatalf("openFixRequest: %v", err)
+	}
+	if !open {
+		t.Fatal("openFixRequest: open = false, want true")
+	}
+
+	open2, err := s.QuestionsByState(t.Context(), ticket.ID, "open")
+	if err != nil {
+		t.Fatalf("QuestionsByState(open): %v", err)
+	}
+	if len(open2) != 1 {
+		t.Fatalf("QuestionsByState(open) = %d questions, want exactly 1", len(open2))
+	}
+	qID := open2[0].ID
+
+	const rejudgeNote = "the failure is outside the code"
+	optE := fixRejudgeOptionKey
+	if _, draftErr := s.SaveDraft(t.Context(), store.DraftInput{TicketID: ticket.ID, QuestionID: &qID, Option: &optE}); draftErr != nil {
+		t.Fatalf("SaveDraft(option): %v", draftErr)
+	}
+	if _, draftErr := s.SaveDraft(t.Context(), store.DraftInput{TicketID: ticket.ID, QuestionID: &qID, Text: rejudgeNote}); draftErr != nil {
+		t.Fatalf("SaveDraft(text): %v", draftErr)
+	}
+	if _, sendErr := s.SendBatch(t.Context(), ticket.ID); sendErr != nil {
+		t.Fatalf("SendBatch: %v", sendErr)
+	}
+
+	reqCountBefore := len(rec.reqs)
+	deps2 := pbWithTestCmd(pbClaim(t, s, rec, ticket.ID), pbGetTicket(t, s, ticket.ID), judgeFixTestCmd)
+	deps2.Commands = checks
+	commit, err := (judgeHandler{}).Run(t.Context(), pbGetTicket(t, s, ticket.ID), deps2) // resolves e: rejudgeWithoutFix
+	if err != nil {
+		t.Fatalf("Run after answering e: %v", err)
+	}
+
+	if len(commit.Messages) == 0 || commit.Messages[0].Body != fmt.Sprintf("fix dropped %d", req.MessageID) {
+		t.Fatalf("commit.Messages[0] = %+v, want \"fix dropped %d\"", commit.Messages, req.MessageID)
+	}
+	foundStarted := false
+	for _, m := range commit.Messages {
+		if strings.HasPrefix(m.Body, "judge round 2 started sha") {
+			foundStarted = true
+		}
+	}
+	if !foundStarted {
+		t.Errorf("commit.Messages = %+v, want a \"judge round 2 started sha\" message", commit.Messages)
+	}
+	if !slices.Contains(commit.ResolveQuestions, qID) {
+		t.Errorf("commit.ResolveQuestions = %v, want it to contain %d", commit.ResolveQuestions, qID)
+	}
+	if len(rec.reqs)-reqCountBefore != 1 {
+		t.Fatalf("runtime requests after answering e = %d, want exactly 1", len(rec.reqs)-reqCountBefore)
+	}
+	assertFencedPB(t, rec.reqs[len(rec.reqs)-1].Prompt, "notes", rejudgeNote)
+
+	pbApply(t, s, ticket, commit)
+	_, stillOpen, err := openFixRequest(t.Context(), Deps{Store: s}, pbGetTicket(t, s, ticket.ID))
+	if err != nil {
+		t.Fatalf("openFixRequest after applying: %v", err)
+	}
+	if stillOpen {
+		t.Error("openFixRequest after rejudging without a fix: open = true, want false")
+	}
+}
+
+// TestJudgeAgainWithoutFixDirtyTreeStillDrops proves rejudgeWithoutFix drops
+// the fix even when retryFreshRound's own judgeStartChecks escalates instead
+// of starting a round (design section 8, ticket #80 task 3): a dirty
+// worktree at answer time still closes the fix request, and the owner's
+// Retry on the escalation that follows starts the round once the tree is
+// clean (task 4).
+func TestJudgeAgainWithoutFixDirtyTreeStillDrops(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow end-to-end flow; runs in the full suite")
+	}
+	t.Parallel()
+	s, ticket := judgeTicketReady(t)
+
+	scripts := judgeScriptsFS(judgeOkBothScript)
+	scripts["build/fix/1.xml"] = &fstest.MapFile{Data: []byte(judgeFixCannotRunBuildScript)}
+	rt := runtime.NewFake(scripts)
+
+	checks := &judgeScriptedCheckCommands{real: NewCommandRunner(sandbox.Off(), false), steps: []judgeCheckStep{{exit: 1}}}
+
+	ticket = judgeFailRoundOne(t, s, ticket, rt, checks)
+
+	deps := pbWithTestCmd(pbClaim(t, s, rt, ticket.ID), ticket, judgeFixTestCmd)
+	deps.Commands = checks
+	fixCommit, err := (judgeHandler{}).Run(t.Context(), ticket, deps) // fix RUN turn: cannot_run error
+	if err != nil {
+		t.Fatalf("fix RUN: %v", err)
+	}
+	pbApply(t, s, ticket, fixCommit)
+	ticket = pbGetTicket(t, s, ticket.ID)
+
+	req, open, err := openFixRequest(t.Context(), Deps{Store: s}, ticket)
+	if err != nil {
+		t.Fatalf("openFixRequest: %v", err)
+	}
+	if !open {
+		t.Fatal("openFixRequest: open = false, want true")
+	}
+
+	proj := deps.Projects[ticket.ProjectID]
+	wt, _, err := proj.Orch.EnsureWorktree(t.Context(), ticket.ID, ticket.Title)
+	if err != nil {
+		t.Fatalf("EnsureWorktree: %v", err)
+	}
+	readmePath := filepath.Join(wt.Dir(), "README.md")
+	existing, readErr := os.ReadFile(readmePath)
+	if readErr != nil {
+		t.Fatalf("read README.md: %v", readErr)
+	}
+	if writeErr := os.WriteFile(readmePath, append(existing, []byte("dirty\n")...), 0o600); writeErr != nil {
+		t.Fatalf("modify README.md: %v", writeErr)
+	}
+
+	open2, err := s.QuestionsByState(t.Context(), ticket.ID, "open")
+	if err != nil {
+		t.Fatalf("QuestionsByState(open): %v", err)
+	}
+	if len(open2) != 1 {
+		t.Fatalf("QuestionsByState(open) = %d questions, want exactly 1", len(open2))
+	}
+	qID := open2[0].ID
+
+	optE := fixRejudgeOptionKey
+	if _, draftErr := s.SaveDraft(t.Context(), store.DraftInput{TicketID: ticket.ID, QuestionID: &qID, Option: &optE}); draftErr != nil {
+		t.Fatalf("SaveDraft(option): %v", draftErr)
+	}
+	if _, sendErr := s.SendBatch(t.Context(), ticket.ID); sendErr != nil {
+		t.Fatalf("SendBatch: %v", sendErr)
+	}
+
+	deps2 := pbWithTestCmd(pbClaim(t, s, rt, ticket.ID), pbGetTicket(t, s, ticket.ID), judgeFixTestCmd)
+	deps2.Commands = checks
+	commit, handled := pbRunPrelude(t, s, deps2, ticket.ID)
+	if !handled {
+		t.Fatal("handled = false, want true")
+	}
+
+	if len(commit.Messages) == 0 || commit.Messages[0].Body != fmt.Sprintf("fix dropped %d", req.MessageID) {
+		t.Fatalf("commit.Messages[0] = %+v, want \"fix dropped %d\"", commit.Messages, req.MessageID)
+	}
+	if commit.Escalation == nil {
+		t.Fatal("commit.Escalation = nil, want a judge-origin escalation from judgeStartChecks")
+	}
+	if commit.Escalation.Payload.Origin != string(response.EscalationOriginJudge) {
+		t.Errorf("escalation origin = %q, want %q", commit.Escalation.Payload.Origin, response.EscalationOriginJudge)
+	}
+	if !slices.Contains(commit.ResolveQuestions, qID) {
+		t.Errorf("commit.ResolveQuestions = %v, want it to contain %d", commit.ResolveQuestions, qID)
+	}
+
+	_, stillOpen, err := openFixRequest(t.Context(), Deps{Store: s}, pbGetTicket(t, s, ticket.ID))
+	if err != nil {
+		t.Fatalf("openFixRequest after applying: %v", err)
+	}
+	if stillOpen {
+		t.Error("openFixRequest after the dirty-tree escalation: open = true, want false")
+	}
+}
+
+// TestRejudgeWithoutFixRefuses proves rejudgeWithoutFix's own refusal branch
+// (design section 8, ticket #80 task 3): with no open fix, or an open fix
+// whose own asking stage is not judging (findings, a reviewing ask), it
+// re-escalates replan_unsupported, origin fix, with no fix dropped marker,
+// rather than ever dropping a fix that was never judging's own to drop.
+func TestRejudgeWithoutFixRefuses(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name string
+		seed func(t *testing.T, s *store.Store, ticket store.Ticket)
+	}{
+		{name: "no open fix", seed: nil},
+		{name: "findings fix open", seed: func(t *testing.T, s *store.Store, ticket store.Ticket) {
+			t.Helper()
+			msg, err := fixRequestMessage(ticket, FixKindFindings, "fix the findings", 0)
+			if err != nil {
+				t.Fatalf("fixRequestMessage: %v", err)
+			}
+			if _, insertErr := s.InsertMessage(t.Context(), msg); insertErr != nil {
+				t.Fatalf("InsertMessage: %v", insertErr)
+			}
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			s, ticket := judgeTicketReady(t)
+			if tc.seed != nil {
+				tc.seed(t, s, ticket)
+			}
+
+			commit, err := (judgeHandler{}).rejudgeWithoutFix(t.Context(), ticket, Deps{Store: s}, nil, "", "")
+			if err != nil {
+				t.Fatalf("rejudgeWithoutFix: %v", err)
+			}
+			if commit.Escalation == nil {
+				t.Fatal("commit.Escalation = nil, want a replan_unsupported escalation")
+			}
+			if commit.Escalation.Payload.Code != string(response.EscalationCodeReplanUnsupported) {
+				t.Errorf("escalation code = %q, want %q", commit.Escalation.Payload.Code, response.EscalationCodeReplanUnsupported)
+			}
+			if commit.Escalation.Payload.Origin != string(response.EscalationOriginFix) {
+				t.Errorf("escalation origin = %q, want %q", commit.Escalation.Payload.Origin, response.EscalationOriginFix)
+			}
+			for _, m := range commit.Messages {
+				if strings.HasPrefix(m.Body, "fix dropped ") {
+					t.Errorf("commit.Messages = %+v, want no \"fix dropped\" line", commit.Messages)
+				}
+			}
+		})
+	}
+}

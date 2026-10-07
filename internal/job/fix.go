@@ -106,7 +106,7 @@ func fixRequestMessage(t store.Ticket, kind FixKind, text string, afterRunID int
 // marker's own first line (design section 5.1).
 func parseFixRequestLine(firstLine string) (kind FixKind, afterRunID int64, ok bool) {
 	fields := strings.Fields(firstLine)
-	if len(fields) != 6 || fields[0] != "fix" || fields[1] != "requested" || fields[3] != "after" || fields[4] != "run" {
+	if len(fields) != 6 || fields[0] != fixRunLabel || fields[1] != "requested" || fields[3] != "after" || fields[4] != "run" {
 		return "", 0, false
 	}
 	r, err := strconv.ParseInt(fields[5], 10, 64)
@@ -121,7 +121,7 @@ func parseFixRequestLine(firstLine string) (kind FixKind, afterRunID int64, ok b
 // message id.
 func parseFixLandedMessageID(firstLine string) (mid int64, ok bool) {
 	fields := strings.Fields(firstLine)
-	if len(fields) != 5 || fields[0] != "fix" || fields[1] != "landed" || fields[3] != "sha" {
+	if len(fields) != 5 || fields[0] != fixRunLabel || fields[1] != "landed" || fields[3] != "sha" {
 		return 0, false
 	}
 	mid, err := strconv.ParseInt(fields[2], 10, 64)
@@ -131,19 +131,39 @@ func parseFixLandedMessageID(firstLine string) (mid int64, ok bool) {
 	return mid, true
 }
 
-// fixRequestedPrefix and fixLandedPrefix are the two marker families
-// openFixRequest reads with Store.MarkersWithPrefix (design section 5.1).
+// fixRequestedPrefix, fixLandedPrefix, and fixDroppedPrefix are the three
+// marker families openFixRequest reads with Store.MarkersWithPrefix (design
+// section 5.1; fixDroppedPrefix added by ticket #80, owner decision Q6): a
+// "fix dropped <mid>" marker closes a request the same way "fix landed <mid>
+// sha <sha>" does, without ever landing a commit.
 const (
 	fixRequestedPrefix = "fix requested "
 	fixLandedPrefix    = "fix landed "
+	fixDroppedPrefix   = "fix dropped "
 )
 
+// parseFixDroppedMessageID parses a "fix dropped <mid>" marker's own first
+// line (design section 5.1, ticket #80 task 3), returning the request's own
+// message id.
+func parseFixDroppedMessageID(firstLine string) (mid int64, ok bool) {
+	fields := strings.Fields(firstLine)
+	if len(fields) != 3 || fields[0] != fixRunLabel || fields[1] != "dropped" {
+		return 0, false
+	}
+	mid, err := strconv.ParseInt(fields[2], 10, 64)
+	if err != nil {
+		return 0, false
+	}
+	return mid, true
+}
+
 // openFixRequest returns the newest "fix requested" marker that has no
-// "fix landed <id> sha ..." marker (design section 5.2, D22). Two open
-// requests is the error "job: ticket <id> has two open fix requests"
-// (producers never write a request while one is open, so this is a bug,
-// and it is loud). A marker whose first line does not parse is "job: fix
-// request <mid>: malformed marker". ok is false, with no error, when no
+// "fix landed <id> sha ..." marker and no "fix dropped <id>" marker (design
+// section 5.2, D22; the dropped case added by ticket #80, owner decision
+// Q6). Two open requests is the error "job: ticket <id> has two open fix
+// requests" (producers never write a request while one is open, so this is
+// a bug, and it is loud). A marker whose first line does not parse is "job:
+// fix request <mid>: malformed marker". ok is false, with no error, when no
 // request is open.
 func openFixRequest(ctx context.Context, d Deps, t store.Ticket) (FixRequest, bool, error) {
 	requested, err := d.Store.MarkersWithPrefix(ctx, t.ID, fixRequestedPrefix)
@@ -154,17 +174,27 @@ func openFixRequest(ctx context.Context, d Deps, t store.Ticket) (FixRequest, bo
 	if err != nil {
 		return FixRequest{}, false, fmt.Errorf("job: open fix request: %w", err)
 	}
-	landedIDs := make(map[int64]bool, len(landed))
+	dropped, err := d.Store.MarkersWithPrefix(ctx, t.ID, fixDroppedPrefix)
+	if err != nil {
+		return FixRequest{}, false, fmt.Errorf("job: open fix request: %w", err)
+	}
+	closedIDs := make(map[int64]bool, len(landed)+len(dropped))
 	for i := range landed {
 		firstLine, _, _ := strings.Cut(landed[i].Body, "\n")
 		if mid, ok := parseFixLandedMessageID(firstLine); ok {
-			landedIDs[mid] = true
+			closedIDs[mid] = true
+		}
+	}
+	for i := range dropped {
+		firstLine, _, _ := strings.Cut(dropped[i].Body, "\n")
+		if mid, ok := parseFixDroppedMessageID(firstLine); ok {
+			closedIDs[mid] = true
 		}
 	}
 
 	var open []store.MessageRow
 	for i := range requested {
-		if !landedIDs[requested[i].ID] {
+		if !closedIDs[requested[i].ID] {
 			open = append(open, requested[i])
 		}
 	}

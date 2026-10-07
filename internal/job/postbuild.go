@@ -250,6 +250,9 @@ func resolvePostBuildEscalation(ctx context.Context, t store.Ticket, d Deps, rou
 	case choice == escalationChoiceAbandon:
 		commit = abandonCommit(t, d, payload.Code)
 
+	case choice == fixRejudgeOptionKey && origin == response.EscalationOriginFix:
+		commit, err = judgeHandler{}.rejudgeWithoutFix(ctx, t, d, resolveIDs, notes, errorText)
+
 	case payload.Amendment != nil && choice == escalationChoiceRetry:
 		commit, err = judgeHandler{}.acceptAmendment(ctx, t, d, resolveIDs, payload, escMsg.RunID, payload.SessionID)
 

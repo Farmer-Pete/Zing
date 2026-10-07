@@ -2021,6 +2021,51 @@ func (h judgeHandler) retryFreshRound(ctx context.Context, t store.Ticket, d Dep
 	return commit, nil
 }
 
+// rejudgeWithoutFix routes escalation option e, "Judge again without a fix"
+// (design section 8, owner decision Q6, ticket #80 task 3): it refuses,
+// logging a Warn "judge again refused" and re-escalating replan_unsupported
+// with origin fix and no fix dropped marker, unless the ticket is in
+// "judging", a fix request is open, and that request's own asking stage
+// (fixStageFor[req.Kind]) is judging -- the same gate withFixStageOption
+// used to decide whether to offer the option in the first place. Otherwise
+// it calls retryFreshRound and prepends a "fix dropped <mid>" marker to
+// every commit it returns, including an escalation from judgeStartChecks
+// (a dirty tree, say): the fix still counts toward judge max_loops (owner
+// decision Q6), so dropping it only ever closes the request, never erases
+// the round it cost.
+func (h judgeHandler) rejudgeWithoutFix(ctx context.Context, t store.Ticket, d Deps, resolveIDs []int64, notes, errorText string) (store.HandlerCommit, error) {
+	req, open, err := openFixRequest(ctx, d, t)
+	if err != nil {
+		return store.HandlerCommit{}, fmt.Errorf("job: judging: rejudge without fix: %w", err)
+	}
+	if t.State != stateJudging || !open || fixStageFor[req.Kind] != stateJudging {
+		var reason string
+		switch {
+		case t.State != stateJudging:
+			reason = "ticket is not judging"
+		case !open:
+			reason = "no open fix request"
+		case fixStageFor[req.Kind] != stateJudging:
+			reason = fmt.Sprintf("fix kind %q does not ask judging", req.Kind)
+		}
+		slog.Warn("judge again refused", "ticket_id", t.ID, "reason", reason)
+		return replanUnsupportedEscalation(t, d, resolveIDs, response.EscalationOriginFix), nil
+	}
+
+	commit, err := h.retryFreshRound(ctx, t, d, resolveIDs, notes, errorText)
+	if err != nil {
+		return store.HandlerCommit{}, err
+	}
+	dropped := store.Message{
+		TicketID: t.ID, Type: msgTypeUpdate, Author: authorSystem,
+		Body: fmt.Sprintf("fix dropped %d", req.MessageID),
+	}
+	commit.Messages = append([]store.Message{dropped}, commit.Messages...)
+	commit.ResolveQuestions = resolveIDs
+	slog.Info("fix dropped", "ticket_id", t.ID, "fix_request_id", req.MessageID, "stage", "judge")
+	return commit, nil
+}
+
 // acceptAmendment is resolvePostBuildEscalation's own "Accept the amended
 // check" row (#57, Q1): it never runs the judge in the same tick (a judge
 // run here would read the sealed scenarios before this commit's own edit
