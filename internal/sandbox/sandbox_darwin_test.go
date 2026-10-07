@@ -1708,3 +1708,166 @@ func TestParamsForCarriesAgentSocket(t *testing.T) {
 		assertSandboxAgentSocketLog(t, logBuf, "resolved", missing, wantReal)
 	})
 }
+
+// ---- the judge-claude profile (plan 105, task 3) -----------------------
+
+// newLoadedJudgeClaudeSandbox reads the real, checked-in
+// sandbox/judge-claude.sb through zing.Assets and loads it with no extra
+// read paths, on port 7425 (distinct from every other newLoaded*Sandbox
+// helper's own port in this file, so a test using more than one profile at
+// once never collides), failing the test if the profile does not load on
+// this machine.
+func newLoadedJudgeClaudeSandbox(t *testing.T) Sandbox {
+	t.Helper()
+	requireNotSandboxed(t)
+
+	profile, err := zing.Assets.ReadFile("sandbox/judge-claude.sb")
+	if err != nil {
+		t.Fatalf("read sandbox/judge-claude.sb: %v", err)
+	}
+	sb := LoadProfile(profileNameJudgeClaude, profile, t.TempDir(), nil, 7425)
+	if !sb.Available() {
+		t.Fatalf("LoadProfile(judge-claude): unavailable, reason %q", sb.Reason())
+	}
+	return sb
+}
+
+func TestJudgeClaudeProfileLoads(t *testing.T) {
+	t.Parallel()
+	sb := newLoadedJudgeClaudeSandbox(t)
+	if !sb.Available() {
+		t.Fatalf("sandbox unavailable: %s", sb.Reason())
+	}
+}
+
+// TestJudgeClaudeAllowsScenariosFileRead proves the judge-claude profile's
+// literal SCENARIOS_FILE allow reaches the one file it names and nothing
+// else in the same directory, the same as judge.sb (owner decision Q1: the
+// scenarios file stays at DATA_DIR/judge/RUN/scenarios.xml).
+func TestJudgeClaudeAllowsScenariosFileRead(t *testing.T) {
+	t.Parallel()
+	sb := newLoadedJudgeClaudeSandbox(t)
+	dirs := newTestDirs(t)
+	p := dirs.judgeParams(t)
+
+	if exitCode, out := runSandboxed(t, sb, p, "/bin/cat", p.ScenariosFile); exitCode != 0 {
+		t.Fatalf("cat SCENARIOS_FILE under the judge-claude profile: exit %d, want 0 (output %q)", exitCode, out)
+	}
+
+	sibling := filepath.Join(filepath.Dir(p.ScenariosFile), "other.xml")
+	if err := os.WriteFile(sibling, []byte("not the scenarios file\n"), 0o600); err != nil {
+		t.Fatalf("write %s: %v", sibling, err)
+	}
+	if exitCode, out := runSandboxed(t, sb, p, "/bin/cat", sibling); exitCode == 0 {
+		t.Errorf("cat a sibling file next to SCENARIOS_FILE: want a non-zero exit, got 0 (output %q)", out)
+	}
+}
+
+// TestJudgeClaudeDeniesDatabase proves the judge-claude profile denies
+// zing.db under DATA_DIR whole, the same as judge.sb.
+func TestJudgeClaudeDeniesDatabase(t *testing.T) {
+	t.Parallel()
+	sb := newLoadedJudgeClaudeSandbox(t)
+	dirs := newTestDirs(t)
+	p := dirs.judgeParams(t)
+
+	f := filepath.Join(dirs.dataDir, "zing.db")
+	if err := os.WriteFile(f, []byte("scenario data"), 0o600); err != nil {
+		t.Fatalf("write %s: %v", f, err)
+	}
+	if exitCode, out := runSandboxed(t, sb, p, "/bin/cat", f); exitCode == 0 {
+		t.Errorf("cat zing.db under the judge-claude profile: want a non-zero exit, got 0 (output %q)", out)
+	}
+}
+
+// TestJudgeClaudeAllowsClaudeStateRead proves the judge-claude profile
+// allows the Claude CLI's own reads under ~/.claude and ~/.claude.json,
+// build.sb's own carve-out, in place of judge.sb's CODEX_HOME reads.
+func TestJudgeClaudeAllowsClaudeStateRead(t *testing.T) {
+	t.Parallel()
+	sb := newLoadedJudgeClaudeSandbox(t)
+	dirs := newTestDirs(t)
+	p := dirs.judgeParams(t)
+
+	claudeJSON := filepath.Join(p.Home, ".claude.json")
+	if err := os.WriteFile(claudeJSON, []byte(`{"marker":"claude state"}`), 0o600); err != nil {
+		t.Fatalf("write %s: %v", claudeJSON, err)
+	}
+	settings := filepath.Join(p.Home, ".claude", "settings.json")
+	if err := os.MkdirAll(filepath.Dir(settings), 0o700); err != nil {
+		t.Fatalf("mkdir %s: %v", filepath.Dir(settings), err)
+	}
+	if err := os.WriteFile(settings, []byte(`{"marker":"claude settings"}`), 0o600); err != nil {
+		t.Fatalf("write %s: %v", settings, err)
+	}
+
+	for _, f := range []string{claudeJSON, settings} {
+		if exitCode, out := runSandboxed(t, sb, p, "/bin/cat", f); exitCode != 0 {
+			t.Errorf("cat %s under the judge-claude profile: exit %d, want 0 (output %q)", f, exitCode, out)
+		}
+	}
+}
+
+// TestJudgeClaudeAllowsTranscriptWrite proves the judge-claude profile
+// allows a write into TRANSCRIPTS, the run's own transcript folder: the
+// Claude CLI must still be able to write its own transcript.
+func TestJudgeClaudeAllowsTranscriptWrite(t *testing.T) {
+	t.Parallel()
+	sb := newLoadedJudgeClaudeSandbox(t)
+	dirs := newTestDirs(t)
+	p := dirs.judgeParams(t)
+	if err := os.MkdirAll(p.Transcripts, 0o700); err != nil {
+		t.Fatalf("mkdir %s: %v", p.Transcripts, err)
+	}
+	target := filepath.Join(p.Transcripts, "x.jsonl")
+
+	if exitCode, out := runSandboxed(t, sb, p, "/usr/bin/touch", target); exitCode != 0 {
+		t.Fatalf("touch a transcripts file under the judge-claude profile: exit %d, want 0 (output %q)", exitCode, out)
+	}
+	if _, err := os.Stat(target); err != nil {
+		t.Errorf("transcripts file was not created: %v", err)
+	}
+}
+
+// TestJudgeClaudeDeniesOtherTranscripts proves the judge-claude profile
+// denies a transcript folder other than TRANSCRIPTS itself (N6: no other
+// session's transcript), the same as judge.sb's own deny-then-allow pair
+// around ~/.claude/projects.
+func TestJudgeClaudeDeniesOtherTranscripts(t *testing.T) {
+	t.Parallel()
+	sb := newLoadedJudgeClaudeSandbox(t)
+	dirs := newTestDirs(t)
+	p := dirs.judgeParams(t)
+
+	other := filepath.Join(p.Home, ".claude", "projects", "other-session", "t.jsonl")
+	if err := os.MkdirAll(filepath.Dir(other), 0o700); err != nil {
+		t.Fatalf("mkdir %s: %v", filepath.Dir(other), err)
+	}
+	if err := os.WriteFile(other, []byte("not this run's transcript\n"), 0o600); err != nil {
+		t.Fatalf("write %s: %v", other, err)
+	}
+	if exitCode, out := runSandboxed(t, sb, p, "/bin/cat", other); exitCode == 0 {
+		t.Errorf("cat another session's transcript under the judge-claude profile: want a non-zero exit, got 0 (output %q)", out)
+	}
+}
+
+// TestJudgeClaudeDeniesCodexState proves the judge-claude profile still
+// denies ~/.codex (the ~/.codex deny stays, design section "changes"),
+// even though this profile has no CODEX_HOME param at all.
+func TestJudgeClaudeDeniesCodexState(t *testing.T) {
+	t.Parallel()
+	sb := newLoadedJudgeClaudeSandbox(t)
+	dirs := newTestDirs(t)
+	p := dirs.judgeParams(t)
+
+	codexAuth := filepath.Join(p.Home, ".codex", "auth.json")
+	if err := os.MkdirAll(filepath.Dir(codexAuth), 0o700); err != nil {
+		t.Fatalf("mkdir %s: %v", filepath.Dir(codexAuth), err)
+	}
+	if err := os.WriteFile(codexAuth, []byte(`{"marker":"not for claude"}`), 0o600); err != nil {
+		t.Fatalf("write %s: %v", codexAuth, err)
+	}
+	if exitCode, out := runSandboxed(t, sb, p, "/bin/cat", codexAuth); exitCode == 0 {
+		t.Errorf("cat ~/.codex/auth.json under the judge-claude profile: want a non-zero exit, got 0 (output %q)", out)
+	}
+}
