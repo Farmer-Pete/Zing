@@ -6,10 +6,10 @@ package console_test
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"io/fs"
 	"net/http"
-	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -121,10 +121,10 @@ func TestDispatchBanner_ShowsOnIndex(t *testing.T) {
 		t.Parallel()
 		s := newConsoleTestStore(t)
 		fd := &fakeDispatch{status: zdispatch.StopStatus{Stopped: true, Kind: zdispatch.StopKindOwner}}
-		srv := newTestServerDispatch(t, s, bus.New(), nil, newTestLogHandler(t), fd)
+		srv := newTestServerDispatch(t, s, bus.New(), newTestLogHandler(t), fd)
 
 		body := getBody(t, srv.URL+"/")
-		if !contains(body, "Dispatching is stopped by the owner.") {
+		if !strings.Contains(body, "Dispatching is stopped by the owner.") {
 			t.Errorf("GET / body does not contain the owner headline; got:\n%s", body)
 		}
 	})
@@ -136,16 +136,16 @@ func TestDispatchBanner_ShowsOnIndex(t *testing.T) {
 			Stopped: true, Kind: zdispatch.StopKindFailClosed, Cause: "dispatch: fail-closed: commit not applied cleanly: ticket 42: the lease was lost",
 			TicketID: 42, HasTicket: true, InFlight: 1,
 		}}
-		srv := newTestServerDispatch(t, s, bus.New(), nil, newTestLogHandler(t), fd)
+		srv := newTestServerDispatch(t, s, bus.New(), newTestLogHandler(t), fd)
 
 		body := getBody(t, srv.URL+"/")
 		for _, want := range []string{
 			"Dispatching stopped after fail-closed on ticket 42.",
 			"the lease was lost",
 			"1 runs are still finishing; resume once they are done",
-			`disabled`,
+			`class="dispatch-resume" disabled`,
 		} {
-			if !contains(body, want) {
+			if !strings.Contains(body, want) {
 				t.Errorf("GET / body does not contain %q; got:\n%s", want, body)
 			}
 		}
@@ -155,10 +155,10 @@ func TestDispatchBanner_ShowsOnIndex(t *testing.T) {
 		t.Parallel()
 		s := newConsoleTestStore(t)
 		fd := &fakeDispatch{status: zdispatch.StopStatus{}}
-		srv := newTestServerDispatch(t, s, bus.New(), nil, newTestLogHandler(t), fd)
+		srv := newTestServerDispatch(t, s, bus.New(), newTestLogHandler(t), fd)
 
 		body := getBody(t, srv.URL+"/")
-		if contains(body, `class="dispatch-banner"`) {
+		if strings.Contains(body, `class="dispatch-banner"`) {
 			t.Errorf("GET / body contains a dispatch-banner section with nothing stopped; got:\n%s", body)
 		}
 	})
@@ -173,23 +173,20 @@ func TestDispatchBanner_RealDispatcherStopShowsBanner(t *testing.T) {
 	s := newConsoleTestStore(t)
 	d, ticketID := newStoppedRealDispatcher(t, s)
 
-	srv := newTestServerDispatch(t, s, bus.New(), nil, newTestLogHandler(t), d)
+	srv := newTestServerDispatch(t, s, bus.New(), newTestLogHandler(t), d)
 
 	body := getBody(t, srv.URL+"/")
 	for _, want := range []string{
-		"Dispatching stopped after fail-closed on ticket",
+		fmt.Sprintf("Dispatching stopped after fail-closed on ticket %d.", ticketID),
 		"the lease was lost",
-		"runs again once its claim expires.",
+		fmt.Sprintf("Ticket %d runs again once its claim expires.", ticketID),
 		"dispatch-resume",
 	} {
-		if !contains(body, want) {
+		if !strings.Contains(body, want) {
 			t.Errorf("GET / body does not contain %q; got:\n%s", want, body)
 		}
 	}
-	if !contains(body, strconv.FormatInt(ticketID, 10)) {
-		t.Errorf("GET / body does not name ticket %d; got:\n%s", ticketID, body)
-	}
-	if contains(body, `class="dispatch-resume" disabled`) {
+	if strings.Contains(body, `class="dispatch-resume" disabled`) {
 		t.Errorf("GET / resume button is disabled with no run in flight; got:\n%s", body)
 	}
 }
@@ -208,10 +205,6 @@ func getBody(t *testing.T, url string) string {
 	return string(b)
 }
 
-func contains(body, want string) bool {
-	return strings.Contains(body, want)
-}
-
 // TestDispatchResume_Responses proves POST /dispatch/resume's four response
 // shapes (ticket #89, task 7): 204 on success, 409 with the dispatcher's
 // own *dispatch.ResumeRefusal sentence verbatim, 500 with the generic body
@@ -224,7 +217,7 @@ func TestDispatchResume_Responses(t *testing.T) {
 		t.Parallel()
 		s := newConsoleTestStore(t)
 		fd := &fakeDispatch{}
-		srv := newTestServerDispatch(t, s, bus.New(), nil, newTestLogHandler(t), fd)
+		srv := newTestServerDispatch(t, s, bus.New(), newTestLogHandler(t), fd)
 
 		resp := doRequest(t, mutationRequest(t, srv, "/dispatch/resume", "{}"))
 		defer func() { _ = resp.Body.Close() }()
@@ -244,7 +237,7 @@ func TestDispatchResume_Responses(t *testing.T) {
 		t.Parallel()
 		s := newConsoleTestStore(t)
 		fd := &fakeDispatch{resumeErr: &zdispatch.ResumeRefusal{Reason: "the dispatcher is not stopped"}}
-		srv := newTestServerDispatch(t, s, bus.New(), nil, newTestLogHandler(t), fd)
+		srv := newTestServerDispatch(t, s, bus.New(), newTestLogHandler(t), fd)
 
 		resp := doRequest(t, mutationRequest(t, srv, "/dispatch/resume", "{}"))
 		defer func() { _ = resp.Body.Close() }()
@@ -264,7 +257,7 @@ func TestDispatchResume_Responses(t *testing.T) {
 		t.Parallel()
 		s := newConsoleTestStore(t)
 		fd := &fakeDispatch{resumeErr: errors.New("boom")}
-		srv := newTestServerDispatch(t, s, bus.New(), nil, newTestLogHandler(t), fd)
+		srv := newTestServerDispatch(t, s, bus.New(), newTestLogHandler(t), fd)
 
 		resp := doRequest(t, mutationRequest(t, srv, "/dispatch/resume", "{}"))
 		defer func() { _ = resp.Body.Close() }()
@@ -308,7 +301,7 @@ func TestDispatchResume_CrossOriginRefused(t *testing.T) {
 	t.Parallel()
 	s := newConsoleTestStore(t)
 	fd := &fakeDispatch{}
-	srv := newTestServerDispatch(t, s, bus.New(), nil, newTestLogHandler(t), fd)
+	srv := newTestServerDispatch(t, s, bus.New(), newTestLogHandler(t), fd)
 
 	req := mutationRequest(t, srv, "/dispatch/resume", "{}")
 	req.Header.Set("Origin", "http://evil.example")
@@ -333,11 +326,12 @@ func TestDispatchResume_RealDispatcherResumesAndDispatches(t *testing.T) {
 	s := newConsoleTestStore(t)
 	d, ticketID := newStoppedRealDispatcher(t, s)
 
-	srv := newTestServerDispatch(t, s, bus.New(), nil, newTestLogHandler(t), d)
+	srv := newTestServerDispatch(t, s, bus.New(), newTestLogHandler(t), d)
 
 	body := getBody(t, srv.URL+"/")
-	if !contains(body, strconv.FormatInt(ticketID, 10)) {
-		t.Errorf("GET / body does not name ticket %d before resume; got:\n%s", ticketID, body)
+	wantHeadline := fmt.Sprintf("Dispatching stopped after fail-closed on ticket %d.", ticketID)
+	if !strings.Contains(body, wantHeadline) {
+		t.Errorf("GET / body does not contain %q before resume; got:\n%s", wantHeadline, body)
 	}
 
 	resp := doRequest(t, mutationRequest(t, srv, "/dispatch/resume", "{}"))
@@ -367,7 +361,7 @@ func TestDispatchResume_RealDispatcherResumesAndDispatches(t *testing.T) {
 	}
 
 	body = getBody(t, srv.URL+"/")
-	if contains(body, `class="dispatch-banner"`) {
+	if strings.Contains(body, `class="dispatch-banner"`) {
 		t.Errorf("GET / body still contains a dispatch-banner after resume; got:\n%s", body)
 	}
 }

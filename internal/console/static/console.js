@@ -1639,11 +1639,7 @@ function installDispatchResume() {
 			return;
 		}
 		event.preventDefault();
-		const banner = button.closest('.dispatch-banner');
-		if (!banner) {
-			return;
-		}
-		postDispatchResume(banner);
+		postDispatchResume(button.closest('.dispatch-banner'));
 	});
 }
 

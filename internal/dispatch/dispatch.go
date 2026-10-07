@@ -779,12 +779,18 @@ func (d *Dispatcher) Run(ctx context.Context) error {
 // section "shape" rules). When ctx is done, the failure is only the cancel
 // cutting a statement off mid-flight (database/sql then reports its own
 // rollback error, not the context's), so Run ends as for a cancel: no stop
-// error, no alerts, and ctx.Err() as the result. Otherwise the dispatcher
-// parks and Run keeps looping.
+// error, no alerts, and ctx.Err() as the result. Otherwise, if the
+// dispatcher is already parked -- a store that keeps failing makes every
+// ticker fire land here again -- there is nothing new to report, so this
+// call skips park entirely rather than waking every open console tab for
+// no change. Otherwise the dispatcher parks and Run keeps looping.
 func (d *Dispatcher) passFailed(ctx context.Context, err error, results <-chan runResult) (done bool, ret error) {
 	if ctx.Err() != nil {
 		d.setStop(nil)
 		return true, d.finish(ctx.Err(), results)
+	}
+	if d.isStopped() {
+		return false, nil
 	}
 	d.park(err)
 	d.mu.Lock()
@@ -829,11 +835,7 @@ func (d *Dispatcher) finish(err error, results <-chan runResult) error {
 	stopErr := d.stopErr
 	d.mu.Unlock()
 	if stopErr != nil {
-		if err == nil {
-			err = stopErr
-		} else {
-			err = errors.Join(stopErr, err)
-		}
+		err = errors.Join(stopErr, err)
 	}
 
 	done := make(chan struct{})
@@ -849,7 +851,9 @@ func (d *Dispatcher) finish(err error, results <-chan runResult) error {
 			d.resultConsumed()
 			if r.Err != nil {
 				d.reportFirstError()
-				err = errors.Join(err, r.Err)
+				if !errors.Is(r.Err, stopErr) {
+					err = errors.Join(err, r.Err)
+				}
 			}
 		case <-done:
 			waiting = false
@@ -870,7 +874,9 @@ func (d *Dispatcher) finish(err error, results <-chan runResult) error {
 			d.resultConsumed()
 			if r.Err != nil {
 				d.reportFirstError()
-				err = errors.Join(err, r.Err)
+				if !errors.Is(r.Err, stopErr) {
+					err = errors.Join(err, r.Err)
+				}
 			}
 		default:
 			if d.hasStopErr() {
@@ -981,19 +987,32 @@ func (d *Dispatcher) Resume(ctx context.Context) error {
 		return &ResumeRefusal{Reason: fmt.Sprintf("%d runs are still finishing; resume once they are done", status.InFlight)}
 	}
 
+	d.mu.Lock()
+	snapshotErr := d.stopErr
+	d.mu.Unlock()
+
 	if err := d.store.SetStopped(ctx, false); err != nil {
 		return fmt.Errorf("dispatch: resume: clear stopped flag: %w", err)
 	}
+
+	// A fresh stop can land between the snapshot above and this lock: a
+	// fail-closed or a failed pass parks the dispatcher on its own, with no
+	// help from Resume, the moment the store's stopped flag goes false.
+	// When that happened, stopErr no longer matches the snapshot, and the
+	// clear below must leave the new stop in place rather than erase it.
+	d.mu.Lock()
+	if !errors.Is(d.stopErr, snapshotErr) {
+		d.mu.Unlock()
+		return nil
+	}
+	d.stop, d.stopErr, d.firstErrorReported, d.stopAlerted, d.stoppedAt = false, nil, false, false, time.Time{}
+	d.mu.Unlock()
 
 	attrs := []any{"kind", status.Kind}
 	if status.HasTicket {
 		attrs = append(attrs, "ticket_id", status.TicketID)
 	}
 	slog.Info("dispatcher resumed from the console", attrs...)
-
-	d.mu.Lock()
-	d.stop, d.stopErr, d.firstErrorReported, d.stopAlerted, d.stoppedAt = false, nil, false, false, time.Time{}
-	d.mu.Unlock()
 	d.bus.Publish()
 	return nil
 }

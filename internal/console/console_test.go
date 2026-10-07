@@ -151,10 +151,11 @@ func newTestServer(t *testing.T, s *store.Store, b *bus.Broker, m *machine.Machi
 // newTestServerDispatch is newTestServer with console.WithDispatch(d) added
 // (ticket #89), for a test that must exercise #alerts' stop banner or POST
 // /dispatch/resume against a real console route, not just buildStopBanner
-// or handleDispatchResume directly.
-func newTestServerDispatch(t *testing.T, s *store.Store, b *bus.Broker, m *machine.Machine, log *console.Handler, d console.Dispatch) *httptest.Server { //nolint:unparam // m mirrors every other newTestServer* helper's own machine parameter; today's banner tests all pass nil
+// or handleDispatchResume directly. machine is always nil here: no banner
+// test touches the rail.
+func newTestServerDispatch(t *testing.T, s *store.Store, b *bus.Broker, log *console.Handler, d console.Dispatch) *httptest.Server {
 	t.Helper()
-	return newTestServerConfig(t, s, b, m, log, response.SeverityMinor, "", nil, "", nil, console.WithDispatch(d))
+	return newTestServerConfig(t, s, b, nil, log, response.SeverityMinor, "", nil, "", nil, console.WithDispatch(d))
 }
 
 // newTestServerFloor is newTestServer with an explicit review.floor (design

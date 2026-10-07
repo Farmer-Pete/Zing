@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log/slog"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -16,6 +17,65 @@ import (
 	"zing/internal/job"
 	"zing/internal/store"
 )
+
+// syncBuffer is a mutex-guarded bytes.Buffer, for a test that must poll a
+// slog.TextHandler's output while Run's own goroutine may still be writing
+// to it concurrently (ticket #89 review r1f13): a bare bytes.Buffer is not
+// safe for that, only for a read that happens after Run has already
+// returned.
+type syncBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *syncBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *syncBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
+}
+
+// waitForSignalThen loops on ch, checking cond right after each signal,
+// until cond reports true or go test's own -timeout nears. Unlike a
+// waitFor on ch followed by a separate waitUntil poll, this proves cond
+// turned true because of a signal this call itself received, not because
+// of some earlier, unrelated wake already sitting ahead of it (ticket #89
+// review r1f14).
+func waitForSignalThen(t *testing.T, ch <-chan struct{}, cond func() bool, what string) {
+	t.Helper()
+
+	deadline, ok := t.Deadline()
+	var limit time.Time
+	if ok {
+		limit = time.Now().Add(time.Until(deadline) * 9 / 10)
+	}
+
+	for {
+		if ok {
+			remaining := time.Until(limit)
+			if remaining <= 0 {
+				t.Fatalf("%s: still waiting near go test's -timeout", what)
+			}
+			timer := time.NewTimer(remaining)
+			select {
+			case <-ch:
+				timer.Stop()
+			case <-timer.C:
+				t.Fatalf("%s: still waiting near go test's -timeout", what)
+			}
+		} else {
+			<-ch
+		}
+		if cond() {
+			return
+		}
+	}
+}
 
 // failOnceHandler self-steals its own ticket's claim on its first call, the
 // same way selfStealingHandler always does, so that one call fails closed;
@@ -48,9 +108,9 @@ func TestRun_ParksAfterFailClosedUntilCancelled(t *testing.T) {
 	reg := job.Registry()
 	reg[testStateQueued] = selfStealingHandler{}
 
-	var logBuf bytes.Buffer
+	logBuf := &syncBuffer{}
 	prevDefault := slog.Default()
-	slog.SetDefault(slog.New(slog.NewTextHandler(&logBuf, &slog.HandlerOptions{Level: slog.LevelDebug})))
+	slog.SetDefault(slog.New(slog.NewTextHandler(logBuf, &slog.HandlerOptions{Level: slog.LevelDebug})))
 	t.Cleanup(func() { slog.SetDefault(prevDefault) })
 
 	d := newDispatcher(t, s, newFixtureTracker(t), bus.New(), fakeRuntime(t), reg, nil,
@@ -62,6 +122,9 @@ func TestRun_ParksAfterFailClosedUntilCancelled(t *testing.T) {
 	go func() { runErrCh <- d.Run(ctx) }()
 
 	waitUntil(t, func() bool { return dispatch.IsStoppedForTest(d) }, "dispatcher to park after the fail-closed commit")
+
+	wantAlert2 := fmt.Sprintf("dispatcher stopped after fail-closed on ticket %d. Resume it from the console.", ticketID)
+	waitUntil(t, func() bool { return strings.Contains(logBuf.String(), wantAlert2) }, "alert 2 to log while Run stays parked, before cancel")
 
 	select {
 	case err := <-runErrCh:
@@ -79,7 +142,6 @@ func TestRun_ParksAfterFailClosedUntilCancelled(t *testing.T) {
 	}
 
 	logged := logBuf.String()
-	wantAlert2 := fmt.Sprintf("dispatcher stopped after fail-closed on ticket %d. Resume it from the console.", ticketID)
 	if got := strings.Count(logged, wantAlert2); got != 1 {
 		t.Errorf("alert 2 (%q) appeared %d times, want exactly 1 (log: %s)", wantAlert2, got, logged)
 	}
@@ -273,11 +335,10 @@ func TestRun_PublishesAsStoppedRunsFinish(t *testing.T) {
 		defer cancelSub()
 		close(release)
 
-		waitFor(t, ch, "a bus signal once Run reads B's result")
-		waitUntil(t, func() bool {
+		waitForSignalThen(t, ch, func() bool {
 			status, err := d.StopStatus(t.Context())
 			return err == nil && status.InFlight == 0
-		}, "InFlight to settle at 0 once Run reads B's result")
+		}, "a bus signal after which InFlight reads 0")
 
 		status, err := d.StopStatus(t.Context())
 		if err != nil {
@@ -323,11 +384,10 @@ func TestRun_PublishesAsStoppedRunsFinish(t *testing.T) {
 		defer cancelSub()
 		close(release)
 
-		waitFor(t, ch, "a bus signal once Run reads the result")
-		waitUntil(t, func() bool {
+		waitForSignalThen(t, ch, func() bool {
 			status, err := d.StopStatus(t.Context())
 			return err == nil && status.Kind == dispatch.StopKindOwner && status.InFlight == 0
-		}, "StopStatus to settle at owner with InFlight 0")
+		}, "a bus signal after which StopStatus reports owner with InFlight 0")
 
 		cancel()
 		_ = waitFor(t, runErrCh, "Run to return") //nolint:errcheck // this test only proves Run returns after cancel
@@ -584,15 +644,21 @@ func TestResume_OwnerStopClearsFlag(t *testing.T) {
 	t.Parallel()
 
 	s := newDispatchTestStore(t)
-	d := newDispatcher(t, s, newFixtureTracker(t), bus.New(), fakeRuntime(t), nil, nil, dispatch.Config{MaxParallel: 1, Owner: testOwner})
+	b := bus.New()
+	d := newDispatcher(t, s, newFixtureTracker(t), b, fakeRuntime(t), nil, nil, dispatch.Config{MaxParallel: 1, Owner: testOwner})
 
 	if err := s.SetStopped(t.Context(), true); err != nil {
 		t.Fatalf("SetStopped: %v", err)
 	}
 
+	ch, cancelSub := b.Subscribe()
+	defer cancelSub()
+
 	if err := d.Resume(t.Context()); err != nil {
 		t.Fatalf("Resume: %v", err)
 	}
+
+	waitFor(t, ch, "a bus signal once Resume succeeds")
 
 	if _, stopped, err := s.Flags(t.Context()); err != nil {
 		t.Fatalf("Flags: %v", err)

@@ -4883,9 +4883,9 @@ func TestRun_FillErrorRaisesAlerts(t *testing.T) {
 	d := newDispatcher(t, s, newFixtureTracker(t), bus.New(), fakeRuntime(t), nil, nil,
 		dispatch.Config{MaxParallel: 1, Interval: 5 * time.Millisecond, Owner: testOwner})
 
-	var logBuf bytes.Buffer
+	logBuf := &syncBuffer{}
 	prevDefault := slog.Default()
-	slog.SetDefault(slog.New(slog.NewTextHandler(&logBuf, &slog.HandlerOptions{Level: slog.LevelDebug})))
+	slog.SetDefault(slog.New(slog.NewTextHandler(logBuf, &slog.HandlerOptions{Level: slog.LevelDebug})))
 	t.Cleanup(func() { slog.SetDefault(prevDefault) })
 
 	raw, err := sql.Open("sqlite", dbPath)
@@ -4905,6 +4905,7 @@ func TestRun_FillErrorRaisesAlerts(t *testing.T) {
 	go func() { runErrCh <- d.Run(ctx) }()
 
 	waitUntil(t, func() bool { return dispatch.IsStoppedForTest(d) }, "dispatcher to park after the flags-read error")
+	waitUntil(t, func() bool { return strings.Contains(logBuf.String(), "dispatcher stopped after") }, "alert 2 to log while Run stays parked, before cancel")
 	cancel()
 
 	runErr := waitFor(t, runErrCh, "Run to return")
