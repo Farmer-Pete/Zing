@@ -715,3 +715,60 @@ func TestMigration0010SplitChildren(t *testing.T) {
 		t.Error("insert second child with the same parent and split_key: want tickets_split_key_uk violation, got nil")
 	}
 }
+
+// TestMigration0011TicketText proves migration 0011_ticket_text.sql
+// installed tickets.tracker_body and tickets.owner_comments (#98):
+// owner_comments defaults to an empty string for a raw INSERT that names
+// neither column, and InsertTicket sets tracker_body equal to body.
+func TestMigration0011TicketText(t *testing.T) {
+	t.Parallel()
+	ctx := t.Context()
+	s, err := Open(ctx, dbPath(t))
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer func() { _ = s.Close() }()
+
+	found := tableColumnNames(t, s, "tickets")
+	for _, col := range []string{"tracker_body", "owner_comments"} {
+		if !found[col] {
+			t.Errorf("tickets.%s column not found after migration 0011", col)
+		}
+	}
+
+	if _, execErr := s.db.ExecContext(ctx,
+		`INSERT INTO projects (id, name, repo_url, local_path, tracker) VALUES (1, 'zing', 'https://github.com/x/zing', '/tmp/zing', 'github')`,
+	); execErr != nil {
+		t.Fatalf("seed project: %v", execErr)
+	}
+	if _, execErr := s.db.ExecContext(ctx,
+		`INSERT INTO tickets (id, project_id, tracker_ref, title, state) VALUES (1, 1, '42', 'fix the bug', 'queued')`,
+	); execErr != nil {
+		t.Fatalf("seed ticket: %v", execErr)
+	}
+	var ownerComments string
+	var trackerBody sql.NullString
+	if scanErr := s.db.QueryRowContext(ctx,
+		`SELECT owner_comments, tracker_body FROM tickets WHERE id = 1`,
+	).Scan(&ownerComments, &trackerBody); scanErr != nil {
+		t.Fatalf("read back raw insert: %v", scanErr)
+	}
+	if ownerComments != "" {
+		t.Errorf("owner_comments default = %q, want \"\"", ownerComments)
+	}
+	if trackerBody.Valid {
+		t.Errorf("tracker_body for a raw INSERT = %v, want NULL", trackerBody)
+	}
+
+	ticketID, err := s.InsertTicket(ctx, Ticket{ProjectID: 1, TrackerRef: "43", Title: "t", Body: "the body", State: ticketStateQueued})
+	if err != nil {
+		t.Fatalf("InsertTicket: %v", err)
+	}
+	ticket, getErr := s.GetTicket(ctx, ticketID)
+	if getErr != nil {
+		t.Fatalf("GetTicket: %v", getErr)
+	}
+	if ticket.TrackerBody == nil || *ticket.TrackerBody != "the body" {
+		t.Errorf("InsertTicket's tracker_body = %v, want %q", ticket.TrackerBody, "the body")
+	}
+}
