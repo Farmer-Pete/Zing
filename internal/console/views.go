@@ -21,20 +21,23 @@ import (
 	"github.com/a-h/templ"
 
 	"zing/internal/console/templates"
+	"zing/internal/dispatch"
 	"zing/internal/machine"
 	"zing/internal/response"
 	"zing/internal/store"
 )
 
-// The five views' names, the closed set design section 8 names. keys.go
-// (Task 4) becomes the keyboard map's source of truth, but /stream and
-// views.go need the same five strings before that exists.
+// The views' names, the closed set design section 8 names, plus Settings
+// (#81, owner decision Q1). keys.go (Task 4) becomes the keyboard map's
+// source of truth, but /stream and views.go need the same strings before
+// that exists.
 const (
-	viewInbox   = "inbox"
-	viewRecent  = "recent"
-	viewFeed    = "feed"
-	viewProject = "project"
-	viewThread  = "thread"
+	viewInbox    = "inbox"
+	viewRecent   = "recent"
+	viewFeed     = "feed"
+	viewSettings = "settings"
+	viewProject  = "project"
+	viewThread   = "thread"
 )
 
 // feedLimit is the message count views.go asks the feed for: the design's
@@ -299,6 +302,21 @@ func (c *console) mainComponent(ctx context.Context, view string, open, project 
 			return nil, err
 		}
 		return templates.Feed(rows), nil
+	case viewSettings:
+		if c.tuner == nil {
+			return templates.Settings(nil), nil
+		}
+		stored := make(map[string]string, 3*len(dispatch.TuningSettings))
+		for _, s := range dispatch.TuningSettings {
+			for _, k := range []string{s.Key, s.Key + ".changed_by", s.Key + ".changed_at"} {
+				v, _, err := c.store.GetSetting(ctx, k)
+				if err != nil {
+					return nil, err
+				}
+				stored[k] = v
+			}
+		}
+		return templates.Settings(buildSettingRows(c.tuner.CurrentTuning(), stored)), nil
 	case viewProject:
 		if project == 0 {
 			projects, err := c.store.ListProjects(ctx)
@@ -323,6 +341,32 @@ func (c *console) mainComponent(ctx context.Context, view string, open, project 
 	default:
 		return c.inboxComponent(ctx)
 	}
+}
+
+// buildSettingRows turns the live tuning and the stored settings rows
+// (keyed by full settings key) into the Settings view's rows, in
+// dispatch.TuningSettings order (#81, owner decision Q4): a row's source
+// line reads "set by BY at AT" only when the stored value still matches
+// the live one and both provenance keys are non-empty; otherwise it reads
+// "from zing.toml".
+func buildSettingRows(t dispatch.Tuning, stored map[string]string) []templates.SettingRow {
+	rows := make([]templates.SettingRow, 0, len(dispatch.TuningSettings))
+	for _, s := range dispatch.TuningSettings {
+		live := t.MaxParallel
+		switch s.Name {
+		case dispatch.TuneIntervalSeconds:
+			live = int(t.Interval / time.Second)
+		case dispatch.TuneAgentMinutes:
+			live = int(t.Budget / time.Minute)
+		}
+		source := "from zing.toml"
+		by, at := stored[s.Key+".changed_by"], stored[s.Key+".changed_at"]
+		if stored[s.Key] == strconv.Itoa(live) && by != "" && at != "" {
+			source = "set by " + by + " at " + at
+		}
+		rows = append(rows, templates.SettingRow{Name: s.Name, Label: s.Label, Value: live, Min: s.Min, Max: s.Max, Source: source})
+	}
+	return rows
 }
 
 // inboxComponent builds the Inbox view (design section 6.5): tickets that

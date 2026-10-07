@@ -396,3 +396,54 @@ func TestSettingsRoute_NoTunerIs503(t *testing.T) {
 		t.Errorf("body = %q, want %q", got, want)
 	}
 }
+
+// TestSettingsView_ShowsLiveValuesAndSource proves the Settings view (task
+// 5, owner decision Q1, Q4): the #main region for view=settings shows every
+// tuning row with its live value, a source line, and a per-row message
+// span carrying role alert and data-ignore-morph -- and, with no tuner
+// wired, the "needs a running zing serve" line instead.
+func TestSettingsView_ShowsLiveValuesAndSource(t *testing.T) {
+	t.Parallel()
+
+	s := newConsoleTestStore(t)
+	b := bus.New()
+	d := settingsTestDispatcher(t, s, b, zdispatch.Config{MaxParallel: 1, Interval: time.Hour}, &settingsBudgetHandler{})
+	srv := newMutationTestServerWithTuner(t, s, b, d)
+
+	if err := d.SetTuning(t.Context(), zdispatch.TuneMaxParallel, 3, "peter"); err != nil {
+		t.Fatalf("SetTuning: %v", err)
+	}
+
+	resp, r, cancel := openStream(t, srv.URL, "settings", 0, 0)
+	defer cancel()
+	defer resp.Body.Close()
+	_, main, _, _ := readInitialFrames(t, r)
+
+	for _, name := range []string{"max_parallel", "interval_seconds", "agent_minutes_per_ticket"} {
+		if !strings.Contains(main, `data-tuning-name="`+name+`"`) {
+			t.Errorf("main missing tuning row for %q; got:\n%s", name, main)
+		}
+		msgID := "tuning-message-" + name
+		if !strings.Contains(main, `id="`+msgID+`"`) || !strings.Contains(main, `role="alert"`) {
+			t.Errorf("main missing alert message span for %q; got:\n%s", name, main)
+		}
+	}
+	if !strings.Contains(main, `data-tuning-name="max_parallel"`) || !strings.Contains(main, `value="3"`) {
+		t.Errorf("main missing max_parallel value 3; got:\n%s", main)
+	}
+	if !strings.Contains(main, "set by peter at") {
+		t.Errorf("main missing \"set by peter at\" source line; got:\n%s", main)
+	}
+	if !strings.Contains(main, "data-ignore-morph") {
+		t.Errorf("main missing data-ignore-morph on the message span; got:\n%s", main)
+	}
+
+	srvNoTuner, _ := newMutationTestServer(t, newConsoleTestStore(t), bus.New(), newTestLogHandler(t))
+	resp2, r2, cancel2 := openStream(t, srvNoTuner.URL, "settings", 0, 0)
+	defer cancel2()
+	defer resp2.Body.Close()
+	_, main2, _, _ := readInitialFrames(t, r2)
+	if !strings.Contains(main2, "Dispatch settings need a running zing serve.") {
+		t.Errorf("main (no tuner) missing the unavailable line; got:\n%s", main2)
+	}
+}
