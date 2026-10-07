@@ -845,7 +845,7 @@ func (h shipHandler) pollRoute(ctx context.Context, t store.Ticket, d Deps, proj
 	case !pr.Draft && (result.State == CIFailed || anyUnresolved) && !skipFlip:
 		return h.pollConvertToDraft(ctx, t, d, proj, pr, number, local)
 	case result.State == CIFailed:
-		return h.pollCIFailed(ctx, t, d, rd.Text)
+		return h.pollCIFailed(ctx, t, d, proj, wt, rd)
 	case len(actionable) > 0:
 		return h.startRespondBatch(ctx, t, d, local, actionable, login)
 	case len(leftover) > 0:
@@ -925,8 +925,59 @@ func (h shipHandler) ciRerunDecision(ctx context.Context, t store.Ticket, d Deps
 
 	rd := decideCIRerun(time.Now().UTC(), sha, failed, len(result.FailedStatuses), prior, workflowRunsInFlight(runs))
 	rd.Text = text
+	rd.Failed = failed
+	rd.FailedStatuses = len(result.FailedStatuses)
 	return rd, nil
 }
+
+// readBaseChecks reads main's newest run of every check in failed at
+// baseSHA, reduced through newestRunPerNameApp, and returns the failing
+// test names of the ones that are both completed and failed, keyed by
+// checkKey (design shape, "Data flow"). A key is present only when main's
+// newest run for that name and app is completed; its value is main's
+// failing test names, set only when that run's conclusion is in
+// failedConclusions and the PR's own check named at least one test
+// (decidePreExisting's rule 1 never needs base names for a check whose PR
+// log named none), read through readFailedChecks so an unreadable log is
+// logged the same way ciRerunDecision logs one.
+func readBaseChecks(ctx context.Context, checks Checks, ticketID int64, owner, repo, baseSHA string, failed []failedCheck) (map[checkKey][]string, error) {
+	runs, err := checks.ListCheckRuns(ctx, owner, repo, baseSHA)
+	if err != nil {
+		return nil, err
+	}
+	byKey := make(map[checkKey]orchestrator.CheckRun, len(runs))
+	for _, r := range newestRunPerNameApp(runs) {
+		byKey[checkKey{Name: r.Name, AppID: r.AppID}] = r
+	}
+
+	out := make(map[checkKey][]string, len(failed))
+	for i := range failed {
+		k := checkKey{Name: failed[i].Run.Name, AppID: failed[i].Run.AppID}
+		r, ok := byKey[k]
+		if !ok || r.Status != ghCompleted {
+			continue
+		}
+		var tests []string
+		if failedConclusions[r.Conclusion] && len(failedTestNames(failed[i].Log)) != 0 {
+			read := readFailedChecks(ctx, checks, owner, repo, []orchestrator.CheckRun{r})
+			if read[0].LogErr != nil {
+				slog.Warn("ci base check log unreadable", "ticket_id", ticketID, "check", r.Name, "base_sha", baseSHA, "job_id", read[0].JobID, "error", read[0].LogErr)
+			}
+			tests = failedTestNames(read[0].Log)
+		}
+		out[k] = tests
+	}
+	return out, nil
+}
+
+// preExistingPrefix, preExistingWhat, and preExistingTried are
+// pollCIFailed's own pre-existing message and escalation text (design
+// shape, "What the owner sees on Pre").
+const (
+	preExistingPrefix = "pre-existing on "
+	preExistingWhat   = "a CI failure also fails on main"
+	preExistingTried  = "Once main is fixed, pick Retry: Zing re-runs the check, and if it fails again, merges the new main in when its base-merge budget allows."
+)
 
 // ciRerunAPIErrorWhat is pollRerun's own escalation What, once RerunJob
 // itself fails with neither a rate limit nor an unavailable GitHub.
@@ -1314,10 +1365,31 @@ func (h shipHandler) pollHeadMismatch(ctx context.Context, t store.Ticket, d Dep
 // merge-question withdrawal has nothing to withdraw in M3 (no code
 // anywhere in this milestone ever writes a "merge asked" or "merge held"
 // marker), so it is not built here.
-func (h shipHandler) pollCIFailed(ctx context.Context, t store.Ticket, d Deps, text string) (store.HandlerCommit, error) {
+func (h shipHandler) pollCIFailed(ctx context.Context, t store.Ticket, d Deps, proj Project, wt orchestrator.Worktree, rd rerunDecision) (store.HandlerCommit, error) {
 	if c, opened, err := baseSync(ctx, t, d, syncPointCI); err != nil || opened {
 		c.ClearPoll = opened
 		return c, err
+	}
+
+	text := rd.Text
+	baseSHA, baseErr := proj.Orch.FetchBase(ctx, wt)
+	var base map[checkKey][]string
+	if baseErr == nil {
+		base, baseErr = readBaseChecks(ctx, proj.Checks, t.ID, proj.Owner, proj.Repo, baseSHA, rd.Failed)
+	}
+	if baseErr != nil {
+		slog.Warn("ci pre-existing check skipped", "ticket_id", t.ID, "error", baseErr)
+	} else {
+		pe := decidePreExisting(rd.Failed, rd.FailedStatuses, base)
+		slog.Info("ci pre-existing check", "ticket_id", t.ID, "base_sha", baseSHA, "pre", pe.Pre, "tests", pe.Tests, "no_run", pe.NoRun)
+		if pe.Pre {
+			tests := strings.Join(pe.Tests, ", ")
+			why := fmt.Sprintf("%s failed on this pull request and on %s at %s too, so a fix run on this ticket cannot fix them", tests, proj.Orch.DefaultBranch(), shortSHA(baseSHA))
+			c := shipEscalation(t, d, preExistingWhat, why, preExistingTried)
+			c.Messages = append(c.Messages, store.Message{TicketID: t.ID, Type: msgTypeUpdate, Author: authorSystem, Body: preExistingPrefix + baseSHA + ": " + tests})
+			c.ClearPoll = true
+			return c, nil
+		}
 	}
 
 	ciReqs, err := d.Store.MarkersWithPrefix(ctx, t.ID, fixRequestedCILogPrefix)

@@ -632,6 +632,12 @@ type rerunDecision struct {
 	Why    string         // Action rerunEscalate only
 	Tried  string         // Action rerunEscalate only
 	Text   string         // ciLogTextFrom's text, set by ciRerunDecision for every action
+	// Failed and FailedStatuses are set by ciRerunDecision to
+	// readFailedChecks' own result and len(result.FailedStatuses), for
+	// pollCIFailed's own decidePreExisting step; decideCIRerun itself
+	// leaves both at their zero value.
+	Failed         []failedCheck
+	FailedStatuses int
 }
 
 // triedRunsText renders rerunDecision.Tried for an escalation that
