@@ -508,6 +508,120 @@ func judgeAdvanceStart(t *testing.T, s *store.Store, rt runtime.Runtime, ticket 
 	return pbGetTicket(t, s, ticket.ID)
 }
 
+// ---- TestJudgeMergedSinceStart -------------------------------------------
+
+// TestJudgeMergedSinceStart proves judgeMergedSince's own table (#95): a
+// landed base merge row with an id newer than startedID means true, and a
+// closed row or a bare request row never does regardless of its id. It
+// also proves judgeStartedMarker, which Run uses to resolve round n's own
+// started marker into the startedID that judgeMergedSince takes: round 1
+// and round 2 each resolve to their own started marker, and a round with
+// no started marker errors instead of resolving to the zero value.
+func TestJudgeMergedSinceStart(t *testing.T) {
+	t.Parallel()
+
+	row := func(id int64, body string) store.MessageRow {
+		return store.MessageRow{ID: id, Message: store.Message{Body: body}} //nolint:modernize // keyed on purpose: MessageRow's ID and CreatedAt fields precede the embedded Message, so the key cannot be dropped
+	}
+	landed := func(id int64) store.MessageRow {
+		return row(id, baseMergeLandedBody(id, strings.Repeat("b", 40)))
+	}
+	closed := func(id int64) store.MessageRow {
+		return row(id, baseMergeClosedBody(id))
+	}
+	requested := func(id int64) store.MessageRow {
+		req := baseMergeRequest{AfterRunID: 1, BaseBranch: pbFixtureDefaultBranch, BaseSHA: strings.Repeat("c", 40), Point: syncPointJudge}
+		return row(id, req.body())
+	}
+	started := func(id int64, n int, sha string) store.MessageRow {
+		return row(id, fmt.Sprintf("judge round %d started sha %s after run %d", n, sha, 1))
+	}
+
+	cases := []struct {
+		name      string
+		mergeRows []store.MessageRow
+		startedID int64
+		want      bool
+	}{
+		{
+			name:      "landed newer than the started marker",
+			mergeRows: []store.MessageRow{landed(2)},
+			startedID: 1,
+			want:      true,
+		},
+		{
+			name:      "landed older than the started marker",
+			mergeRows: []store.MessageRow{landed(1)},
+			startedID: 2,
+			want:      false,
+		},
+		{
+			name:      "closed newer than the started marker",
+			mergeRows: []store.MessageRow{closed(2)},
+			startedID: 1,
+			want:      false,
+		},
+		{
+			name:      "a bare request row newer than the started marker",
+			mergeRows: []store.MessageRow{requested(2)},
+			startedID: 1,
+			want:      false,
+		},
+		{
+			name:      "round 1's landing is not newer than round 2's own started marker",
+			mergeRows: []store.MessageRow{landed(2)},
+			startedID: 3,
+			want:      false,
+		},
+	}
+
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			t.Parallel()
+			got := judgeMergedSince(c.mergeRows, c.startedID)
+			if got != c.want {
+				t.Errorf("judgeMergedSince = %v, want %v", got, c.want)
+			}
+		})
+	}
+
+	markers := []store.MessageRow{started(1, 1, strings.Repeat("a", 40)), landed(2), started(3, 2, strings.Repeat("b", 40))}
+
+	t.Run("round 1's own started marker is older than the landing", func(t *testing.T) {
+		t.Parallel()
+		m, err := judgeStartedMarker(markers, 1)
+		if err != nil {
+			t.Fatalf("judgeStartedMarker(1): %v", err)
+		}
+		if got := judgeMergedSince(markers[1:2], m.ID); got != true {
+			t.Errorf("judgeMergedSince after round 1's started marker = %v, want true", got)
+		}
+	})
+
+	t.Run("round 2's own started marker is newer than the landing", func(t *testing.T) {
+		t.Parallel()
+		m, err := judgeStartedMarker(markers, 2)
+		if err != nil {
+			t.Fatalf("judgeStartedMarker(2): %v", err)
+		}
+		if got := judgeMergedSince(markers[1:2], m.ID); got != false {
+			t.Errorf("judgeMergedSince after round 2's started marker = %v, want false", got)
+		}
+	})
+
+	t.Run("a round with no started marker errors", func(t *testing.T) {
+		t.Parallel()
+		_, err := judgeStartedMarker(markers, 3)
+		if err == nil {
+			t.Fatal("judgeStartedMarker(3): want error, got nil")
+		}
+		const want = "job: judging: round 3 has no started marker"
+		if err.Error() != want {
+			t.Errorf("judgeStartedMarker(3) error = %q, want %q", err.Error(), want)
+		}
+	})
+}
+
 // ---- TestJudgeRunStoresVerdicts ---------------------------------------------
 
 // TestJudgeRunStoresVerdicts proves RUN's own clean ok outcome (design
@@ -2204,6 +2318,51 @@ func TestJudgeCapResumesRetryStartsFresh(t *testing.T) {
 	}
 	if freshCommit.Session == nil || freshCommit.Session.ID == nil || *freshCommit.Session.ID == sessionID {
 		t.Errorf("freshCommit.Session = %+v, want a freshly minted session (not the exhausted one, %d)", freshCommit.Session, sessionID)
+	}
+}
+
+// TestJudgeRetryStartsNewRoundAfterBaseMergeLanded proves Run's retry
+// branch guard (#95, review finding r1f1): with round 1's own started
+// marker, then a landed base merge row newer than it, then a round 1 retry
+// marker as the newest marker, Run must start round 2 through h.start
+// rather than resume round 1 at its own started sha.
+func TestJudgeRetryStartsNewRoundAfterBaseMergeLanded(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow end-to-end flow; runs in the full suite")
+	}
+	t.Parallel()
+	s, ticket := judgeTicketReady(t)
+	rt := runtime.NewFake(judgeScriptsFS(judgeOkBothScript))
+	ticket = judgeAdvanceStart(t, s, rt, ticket)
+
+	markers, err := s.MarkersWithPrefix(t.Context(), ticket.ID, judgeRoundMarkerPrefix)
+	if err != nil {
+		t.Fatalf("MarkersWithPrefix: %v", err)
+	}
+	if len(markers) != 1 {
+		t.Fatalf("markers = %+v, want exactly round 1's own started marker", markers)
+	}
+
+	if _, insertErr := s.InsertMessage(t.Context(), store.Message{
+		TicketID: ticket.ID, Type: msgTypeUpdate, Author: authorSystem,
+		Body: baseMergeLandedBody(1, strings.Repeat("d", 40)),
+	}); insertErr != nil {
+		t.Fatalf("InsertMessage(landed): %v", insertErr)
+	}
+	if _, insertErr := s.InsertMessage(t.Context(), store.Message{
+		TicketID: ticket.ID, Type: msgTypeUpdate, Author: authorSystem,
+		Body: "judge round 1 retry after run 1",
+	}); insertErr != nil {
+		t.Fatalf("InsertMessage(retry): %v", insertErr)
+	}
+
+	deps := pbClaim(t, s, rt, ticket.ID)
+	commit, err := (judgeHandler{}).Run(t.Context(), pbGetTicket(t, s, ticket.ID), deps)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if len(commit.Messages) != 1 || !strings.HasPrefix(commit.Messages[0].Body, "judge round 2 started sha ") {
+		t.Fatalf("commit.Messages = %+v, want a \"judge round 2 started sha\" marker, not a round 1 resume", commit.Messages)
 	}
 }
 
