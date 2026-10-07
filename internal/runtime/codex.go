@@ -71,14 +71,6 @@ func codexSandboxArgs(req RunRequest) ([]string, error) {
 	}
 }
 
-// codexSkillsOffSetting is the -c pair that turns off the judge's attempt to
-// scan its own skill directories, including `~/.agents/skills` (confirmed on
-// the host against Codex 0.160.0: `codex features list` names
-// `skip_host_skill_discovery`, and `codex exec -c features.skip_host_skill_discovery=true
-// --strict-config` accepts it as a known key; judge.sb already denies the
-// read at the OS level, so this is a second, best-effort layer).
-const codexSkillsOffSetting = "features.skip_host_skill_discovery=true"
-
 // codexSkillScanPrefix and codexSkillScanSuffix bound the one stderr line
 // dropCodexSkillScanNoise removes: Codex 0.160.0 tries to walk
 // ~/.agents/skills, judge.sb denies the read, and Codex logs
@@ -156,14 +148,12 @@ func codexShellEnvArgs(env []string) []string {
 // 4.6, D20). The forbidden --dangerously-bypass-approvals-and-sandbox flag
 // (real, and present in both --help outputs) never appears.
 //
-// A judge-job request also carries one judge-only "-c" pair right after the
-// sandbox flags: codexSkillsOffSetting. Codex 0.160.0's config schema (104
-// top-level fields) has no key that bounds how long one shell command may
-// run -- background_terminal_max_timeout only controls when a still-running
-// command is handed to a background terminal the agent polls, so it is not
-// a substitute -- and prompts/judge.md's own instruction to run a long check
-// in the background and poll it covers that case instead. Every other
-// job's argv is unchanged.
+// Codex 0.160.0's config schema (104 top-level fields) has no key that
+// bounds how long one shell command may run -- background_terminal_max_timeout
+// only controls when a still-running command is handed to a background
+// terminal the agent polls, so it is not a substitute -- and
+// prompts/judge.md's own instruction to run a long check in the background
+// and poll it covers that case instead.
 //
 // Every job, first turn and resume, also carries codexShellEnvArgs's own
 // "-c" pairs right before -m: shell_environment_policy.set.TMPDIR and
@@ -182,9 +172,6 @@ func codexArgv(req RunRequest, outPath string) ([]string, error) {
 	}
 	argv := []string{"exec", "--ignore-user-config", "--ignore-rules", "--skip-git-repo-check"}
 	argv = append(argv, sandboxArgs...)
-	if req.Job == response.JobJudge {
-		argv = append(argv, "-c", codexSkillsOffSetting)
-	}
 	argv = append(argv, codexShellEnvArgs(req.Env)...)
 	argv = append(argv, "-m", req.Model, "--json", "-o", outPath)
 	if req.SessionID != "" {
