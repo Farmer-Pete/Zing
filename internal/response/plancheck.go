@@ -289,11 +289,13 @@ func routePathRegexp(route string) *regexp.Regexp {
 			b.WriteString("/")
 		}
 		subtree := i > 0 && i == len(segs)-1 && seg == ""
+		restWildcard := strings.HasPrefix(seg, "{") && strings.HasSuffix(seg, "...}")
+		segWildcard := strings.HasPrefix(seg, "{") && strings.HasSuffix(seg, "}")
 		switch {
 		case seg == "{$}":
-		case subtree, strings.HasPrefix(seg, "{") && strings.HasSuffix(seg, "...}"):
+		case subtree, restWildcard:
 			b.WriteString(restOfPath)
-		case strings.HasPrefix(seg, "{") && strings.HasSuffix(seg, "}"):
+		case segWildcard:
 			b.WriteString(`[^/\s"'?#]+`)
 		default:
 			b.WriteString(regexp.QuoteMeta(seg))

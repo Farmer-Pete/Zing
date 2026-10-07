@@ -556,6 +556,8 @@ func TestRoutePathRegexp(t *testing.T) {
 		{"trailing slash subtree matches a child", "/settings/", "curl localhost:7420/settings/tuning", true},
 		{"trailing slash subtree matches its own root", "/settings/", "curl localhost:7420/settings/", true},
 		{"trailing slash subtree does not match a sibling prefix", "/settings/", "curl localhost:7420/settingsx", false},
+		{"settings matches with a query string", "/settings", "curl 'http://127.0.0.1:7420/settings?interval=30'", true},
+		{"settings matches followed by a shell separator", "/settings", "curl localhost:7420/settings; echo done", true},
 	}
 
 	for _, tc := range tests {
@@ -607,6 +609,30 @@ func TestNewRoutePaths(t *testing.T) {
 		}
 		got := newRoutePaths(changes)
 		want := []string{"/a"}
+		if !slices.Equal(got, want) {
+			t.Fatalf("newRoutePaths = %v, want %v", got, want)
+		}
+	})
+
+	t.Run("before in one change covers after in another", func(t *testing.T) {
+		t.Parallel()
+		changes := []Change{
+			{Before: `mux.HandleFunc("GET /settings", h)`, After: "none"},
+			{Before: "none", After: `mux.HandleFunc("POST /settings", h)`},
+		}
+		got := newRoutePaths(changes)
+		if got != nil {
+			t.Fatalf("newRoutePaths = %v, want nil: a before in a different change still covers the path", got)
+		}
+	})
+
+	t.Run("first-seen order is preserved", func(t *testing.T) {
+		t.Parallel()
+		changes := []Change{
+			{Before: "none", After: `mux.HandleFunc("POST /b", h); mux.HandleFunc("POST /a", h)`},
+		}
+		got := newRoutePaths(changes)
+		want := []string{"/b", "/a"}
 		if !slices.Equal(got, want) {
 			t.Fatalf("newRoutePaths = %v, want %v", got, want)
 		}
