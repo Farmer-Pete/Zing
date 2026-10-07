@@ -868,7 +868,8 @@ var errNothingToDoClaimNotFalse = errors.New("nothing_to_do code claim not verif
 // and escalates instead. Acceptance terminalizes the run, transitions the
 // ticket straight to done, and sets TrackerEffect, Kind
 // store.TrackerEffectKindNothingToDo, so the dispatcher posts
-// tracker.NothingToDoComment after the commit lands (design D12); the
+// tracker.NothingToDoComment once, through the zing:nothing marker, and
+// then closes the issue, after the commit lands (design D12); the
 // escalation carries RunID and SessionID (a run did cause this) and leaves
 // the ticket waiting on the owner's retry/planning/abandon choice, exactly
 // like every other section 6.7 escalation.
