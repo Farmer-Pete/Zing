@@ -74,7 +74,8 @@ func commitPhrase(f response.Finding) (string, bool) {
 // follows findings.
 func FilterFindings(findings []response.Finding, idx orchestrator.DiffIndex) []response.Finding {
 	survivors := make([]response.Finding, 0, len(findings))
-	for _, f := range findings {
+	for i := range findings {
+		f := &findings[i]
 		path, line, ok := ParseLocation(f.Location)
 		if !ok || !idx.Contains(path, line) {
 			continue
@@ -82,11 +83,11 @@ func FilterFindings(findings []response.Finding, idx orchestrator.DiffIndex) []r
 		if f.Lens == response.LensFidelity && strings.TrimSpace(f.PlanRef) == "" {
 			continue
 		}
-		if phrase, ok := commitPhrase(f); ok {
+		if phrase, ok := commitPhrase(*f); ok {
 			slog.Warn("review finding about pushed commit text dropped", "lens", f.Lens, "location", f.Location, "phrase", phrase)
 			continue
 		}
-		survivors = append(survivors, f)
+		survivors = append(survivors, *f)
 	}
 	return survivors
 }
@@ -116,8 +117,8 @@ func DedupFindings(findings []response.Finding, lensOrder []response.Lens) []res
 
 	groups := make(map[key]*group, len(findings))
 	order := make([]key, 0, len(findings))
-	for _, f := range findings {
-		path, line, ok := ParseLocation(f.Location)
+	for i := range findings {
+		path, line, ok := ParseLocation(findings[i].Location)
 		if !ok {
 			continue
 		}
@@ -128,7 +129,7 @@ func DedupFindings(findings []response.Finding, lensOrder []response.Lens) []res
 			groups[k] = g
 			order = append(order, k)
 		}
-		g.items = append(g.items, f)
+		g.items = append(g.items, findings[i])
 	}
 
 	sort.Slice(order, func(i, j int) bool {
@@ -153,7 +154,8 @@ func DedupFindings(findings []response.Finding, lensOrder []response.Lens) []res
 		row := response.FindingArtifact{Location: fmt.Sprintf("%s:%d", k.path, k.line)}
 		var texts, fixes []string
 		best := items[0].Severity
-		for _, it := range items {
+		for i := range items {
+			it := &items[i]
 			if it.Severity.Rank() > best.Rank() {
 				best = it.Severity
 			}

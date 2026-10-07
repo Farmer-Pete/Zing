@@ -40,12 +40,13 @@ func TestValues(t *testing.T) {
 		{"QuestionState", QuestionState(""), []string{"open", "answered", "resolved"}},
 		{"TaskState", TaskState(""), []string{"pending", "running", "done", "failed"}},
 		{"Decision", Decision(""), []string{"accept", "reject", "drop", "discuss"}},
+		{"DispositionKind", DispositionKind(""), []string{"fixed", "disputed"}},
 		{"Result", Result(""), []string{"pass", "fail"}},
 		{"ThreadVerb", ThreadVerb(""), []string{"fix", "reply", "nit", "addressed"}},
 	}
 
-	if len(tests) != 18 {
-		t.Fatalf("18 enums documented in the plan, got %d test cases", len(tests))
+	if len(tests) != 19 {
+		t.Fatalf("19 enums documented in the plan, got %d test cases", len(tests))
 	}
 
 	for _, tt := range tests {

@@ -47,9 +47,10 @@ func findGroup(t *testing.T, groups []string, title string) string {
 // (design section 6.6): the four option kinds (question, gate, split,
 // merge) render numbered option chips, the two item kinds (perimeter,
 // review) render one row per item with their own decision controls and the
-// item's ref (perimeter: accept, reject; review: accept, drop, discuss --
-// design section 6.5, 9.2), and every kind renders a free reply input wired
-// to console.js's postDraft contract (data-draft-ticket, data-draft-question).
+// item's ref (perimeter: accept, drop; review: accept, drop, discuss --
+// design section 6.5, 9.2, bug fix #78), and every kind renders a free
+// reply input wired to console.js's postDraft contract (data-draft-ticket,
+// data-draft-question).
 // It seeds all six kinds through SeedQuestionFixtures -- the real store, the
 // real validated inserts, no hand-built payload -- then reads them back
 // over the live /stream the browser itself uses.
@@ -122,12 +123,12 @@ func TestQuestionKindsRenderTheirControls(t *testing.T) {
 		assertFreeReply(t, g, ticketAttr)
 	})
 
-	t.Run("perimeter kind renders one row per item with accept and reject only", func(t *testing.T) {
+	t.Run("perimeter kind renders one row per item with accept and drop only", func(t *testing.T) {
 		t.Parallel()
 		g := findGroup(t, groups, "Confirm the file perimeter")
-		assertItemRowDecisions(t, g, "internal/hello/handler.go", "accept", "reject")
-		assertItemRowDecisions(t, g, "internal/hello/handler_test.go", "accept", "reject")
-		assertItemRowDecisions(t, g, "cmd/zing/main.go", "accept", "reject")
+		assertItemRowDecisions(t, g, "internal/hello/handler.go", "accept", "drop")
+		assertItemRowDecisions(t, g, "internal/hello/handler_test.go", "accept", "drop")
+		assertItemRowDecisions(t, g, "cmd/zing/main.go", "accept", "drop")
 		assertFreeReply(t, g, ticketAttr)
 		if strings.Contains(g, `class="chips"`) {
 			t.Errorf("perimeter (an item kind) must not render option chips; got:\n%s", g)
@@ -188,14 +189,15 @@ var allItemDecisions = []string{decisionAccept, decisionReject, decisionDrop, de
 
 // reviewItemDecisions is the review kind's own closed set (design section
 // 6.5, 9.2, Task 11): accept, drop, and discuss, matching
-// response.FindingDecision -- never reject, which stays perimeter's alone.
+// response.FindingDecision. Both item kinds share accept and drop; discuss
+// is review's alone (bug fix, #78).
 var reviewItemDecisions = []string{decisionAccept, decisionDrop, decisionDiscuss}
 
 // assertItemRowDecisions fails the test unless group contains an item row
 // for ref carrying exactly want's decision controls: every one of want
 // present, and every closed-set decision not in want absent (design section
-// 9.2: perimeter renders accept and reject only; review renders accept,
-// drop, and discuss).
+// 9.2, bug fix #78: perimeter renders accept and drop only; review renders
+// accept, drop, and discuss).
 func assertItemRowDecisions(t *testing.T, group, ref string, want ...string) {
 	t.Helper()
 	if !strings.Contains(group, `data-item-ref="`+ref+`"`) {
@@ -246,20 +248,20 @@ func perimeterAndReviewGroups(t *testing.T) (perimeter, review string) {
 	return findGroup(t, groups, "Confirm the file perimeter"), findGroup(t, groups, "Triage the review findings")
 }
 
-// TestPerimeterRendersAcceptAndReject proves design section 9.2's own
-// narrowing (Task 10): a perimeter question's item rows carry accept and
-// reject only, never drop or discuss.
-func TestPerimeterRendersAcceptAndReject(t *testing.T) {
+// TestPerimeterRendersAcceptAndDrop proves design section 9.2's own
+// narrowing (Task 10, bug fix #78): a perimeter question's item rows carry
+// accept and drop only, never discuss, and never the word reject.
+func TestPerimeterRendersAcceptAndDrop(t *testing.T) {
 	t.Parallel()
 	perimeter, _ := perimeterAndReviewGroups(t)
-	assertItemRowDecisions(t, perimeter, "internal/hello/handler.go", "accept", "reject")
-	assertItemRowDecisions(t, perimeter, "internal/hello/handler_test.go", "accept", "reject")
-	assertItemRowDecisions(t, perimeter, "cmd/zing/main.go", "accept", "reject")
+	assertItemRowDecisions(t, perimeter, "internal/hello/handler.go", "accept", "drop")
+	assertItemRowDecisions(t, perimeter, "internal/hello/handler_test.go", "accept", "drop")
+	assertItemRowDecisions(t, perimeter, "cmd/zing/main.go", "accept", "drop")
 }
 
 // TestReviewRendersThreeDecisions proves design section 6.5's own review
 // decision set (accept, drop, discuss): a review question's item rows carry
-// exactly those three controls, never perimeter's reject.
+// exactly those three controls, never the word reject.
 func TestReviewRendersThreeDecisions(t *testing.T) {
 	t.Parallel()
 	_, review := perimeterAndReviewGroups(t)

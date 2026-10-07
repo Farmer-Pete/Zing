@@ -203,6 +203,34 @@ func draftModeCount(in DraftInput) int {
 	return n
 }
 
+// itemDecisionForKind maps the decision word the console sends for an item
+// to the word stored for kind, or names the conflict when kind does not take
+// it. A perimeter item shows drop but stores reject, the word
+// internal/job/building.go reads; reject itself still saves, for a client
+// that predates the shared word set.
+func itemDecisionForKind(kind response.QuestionKind, d response.Decision) (stored response.Decision, reason string) {
+	switch kind {
+	case response.QuestionKindPerimeter:
+		switch d {
+		case response.DecisionAccept:
+			return d, ""
+		case response.DecisionDrop, response.DecisionReject:
+			return response.DecisionReject, ""
+		default:
+			return "", "a perimeter item takes accept or drop"
+		}
+	case response.QuestionKindReview:
+		switch d {
+		case response.DecisionAccept, response.DecisionDrop, response.DecisionDiscuss:
+			return d, ""
+		default:
+			return "", "a review item takes accept, drop, or discuss"
+		}
+	default:
+		return d, ""
+	}
+}
+
 // SaveDraft upserts one draft for a ticket (design section 6.7). It handles
 // exactly one answer mode: an option answer keys by (ticket, question) and
 // replaces the earlier draft; an item answer merges one ref->decision into
@@ -255,18 +283,16 @@ func (s *Store) SaveDraft(ctx context.Context, in DraftInput) (result DraftResul
 			if !validItemRef(payload, in.Item.Ref) {
 				return DraftResult{}, conflict("missing item")
 			}
-			if payload.Kind == response.QuestionKindPerimeter &&
-				in.Item.Decision != response.DecisionAccept && in.Item.Decision != response.DecisionReject {
-				return DraftResult{}, conflict("a perimeter item takes accept or reject")
-			}
-			if payload.Kind == response.QuestionKindReview &&
-				in.Item.Decision != response.DecisionAccept && in.Item.Decision != response.DecisionDrop && in.Item.Decision != response.DecisionDiscuss {
-				return DraftResult{}, conflict("a review item takes accept, drop, or discuss")
+			stored, reason := itemDecisionForKind(payload.Kind, in.Item.Decision)
+			if reason != "" {
+				return DraftResult{}, conflict(reason)
 			}
 			if in.Item.Note != "" && payload.Kind != response.QuestionKindReview {
 				return DraftResult{}, conflict("a note is for a review item")
 			}
-			result, err = s.upsertItemDraftTx(ctx, tx, in.TicketID, *in.QuestionID, *in.Item)
+			item := *in.Item
+			item.Decision = stored
+			result, err = s.upsertItemDraftTx(ctx, tx, in.TicketID, *in.QuestionID, item)
 		case in.Text == "":
 			// Option and Item are already both nil in this branch (the two
 			// cases above), so an empty Text here is specifically "clear this
