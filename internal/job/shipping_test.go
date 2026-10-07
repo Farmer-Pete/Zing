@@ -1740,6 +1740,114 @@ func shipCloneGitHub(gh *shipGitHub) *shipGitHub {
 	return &out
 }
 
+// TestShipCloneGitHubIsolatesSlicesAndMaps checks shipCloneGitHub directly:
+// mutating any slice or map field, or the pr pointer, on the clone must
+// never reach the original, since publishedStage hands its one shared gh
+// double to every shipPublished caller through this clone.
+func TestShipCloneGitHubIsolatesSlicesAndMaps(t *testing.T) {
+	original := &shipGitHub{
+		pr:                  &shipGitHubPR{url: "https://example.com/pr/1"},
+		runs:                []orchestrator.CheckRun{{}},
+		runsSHAs:            []string{"sha1"},
+		statuses:            []orchestrator.CommitStatus{{}},
+		required:            []orchestrator.RequiredCheck{{}},
+		reruns:              []int64{1},
+		threads:             []orchestrator.Thread{{}},
+		reviews:             []orchestrator.Review{{}},
+		replies:             []string{"r1"},
+		resolves:            []string{"t1"},
+		requestedReviewers:  []string{"alice"},
+		requestReviewersErr: map[string]error{"alice": errors.New("boom")},
+		markerAuthors:       map[string]string{"t1|marker": "zing-bot"},
+		containsCalls:       []string{"c1"},
+		resolveErrFor:       map[string]error{"t1": errors.New("boom")},
+		markReadyCalls:      []string{"pr1"},
+		convertToDraftCalls: []string{"pr1"},
+		mergeCalls:          []string{"1|sha|squash|title"},
+		commentOnPRCalls:    []string{"1|hello"},
+	}
+
+	clone := shipCloneGitHub(original)
+
+	clone.pr.url = "https://example.com/pr/2"
+	clone.runs[0] = orchestrator.CheckRun{Name: "changed"}
+	clone.runsSHAs[0] = "changed"
+	clone.statuses[0] = orchestrator.CommitStatus{Context: "changed"}
+	clone.required[0] = orchestrator.RequiredCheck{Context: "changed"}
+	clone.reruns[0] = 99
+	clone.threads[0] = orchestrator.Thread{ID: "changed"}
+	clone.reviews[0] = orchestrator.Review{Login: "changed"}
+	clone.replies[0] = "changed"
+	clone.resolves[0] = "changed"
+	clone.requestedReviewers[0] = "changed"
+	clone.requestReviewersErr["alice"] = errors.New("changed")
+	clone.markerAuthors["t1|marker"] = "changed"
+	clone.containsCalls[0] = "changed"
+	clone.resolveErrFor["t1"] = errors.New("changed")
+	clone.markReadyCalls[0] = "changed"
+	clone.convertToDraftCalls[0] = "changed"
+	clone.mergeCalls[0] = "changed"
+	clone.commentOnPRCalls[0] = "changed"
+
+	if original.pr.url != "https://example.com/pr/1" {
+		t.Errorf("original.pr.url = %q, want unchanged", original.pr.url)
+	}
+	if original.runs[0].Name == "changed" {
+		t.Error("original.runs mutated through clone")
+	}
+	if original.runsSHAs[0] == "changed" {
+		t.Error("original.runsSHAs mutated through clone")
+	}
+	if original.statuses[0].Context == "changed" {
+		t.Error("original.statuses mutated through clone")
+	}
+	if original.required[0].Context == "changed" {
+		t.Error("original.required mutated through clone")
+	}
+	if original.reruns[0] == 99 {
+		t.Error("original.reruns mutated through clone")
+	}
+	if original.threads[0].ID == "changed" {
+		t.Error("original.threads mutated through clone")
+	}
+	if original.reviews[0].Login == "changed" {
+		t.Error("original.reviews mutated through clone")
+	}
+	if original.replies[0] == "changed" {
+		t.Error("original.replies mutated through clone")
+	}
+	if original.resolves[0] == "changed" {
+		t.Error("original.resolves mutated through clone")
+	}
+	if original.requestedReviewers[0] == "changed" {
+		t.Error("original.requestedReviewers mutated through clone")
+	}
+	if original.requestReviewersErr["alice"].Error() == "changed" {
+		t.Error("original.requestReviewersErr mutated through clone")
+	}
+	if original.markerAuthors["t1|marker"] == "changed" {
+		t.Error("original.markerAuthors mutated through clone")
+	}
+	if original.containsCalls[0] == "changed" {
+		t.Error("original.containsCalls mutated through clone")
+	}
+	if original.resolveErrFor["t1"].Error() == "changed" {
+		t.Error("original.resolveErrFor mutated through clone")
+	}
+	if original.markReadyCalls[0] == "changed" {
+		t.Error("original.markReadyCalls mutated through clone")
+	}
+	if original.convertToDraftCalls[0] == "changed" {
+		t.Error("original.convertToDraftCalls mutated through clone")
+	}
+	if original.mergeCalls[0] == "changed" {
+		t.Error("original.mergeCalls mutated through clone")
+	}
+	if original.commentOnPRCalls[0] == "changed" {
+		t.Error("original.commentOnPRCalls mutated through clone")
+	}
+}
+
 // shipPublished returns the test's own private copy of the published
 // stage: a shipping-stage copy driven one real PUBLISH (shipHandler.Run)
 // further, so its own tickets.pr_url is set -- the state every POLL test

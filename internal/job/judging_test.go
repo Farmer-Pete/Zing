@@ -326,8 +326,7 @@ func TestScenariosDirRemovedAfterRun(t *testing.T) {
 // reviewingHandler.Run call suffices): the sealed two-scenario cohort
 // fixtures/scripts/planning/2.xml writes (s1 behavior, check "curl -sf
 // localhost:8080/hello"; s2 negative, no check), with no judge round marker
-// yet. It is the from-scratch step shared by judgeTicketReadyFresh and
-// buildJudgingStage.
+// yet. It is the from-scratch step buildJudgingStage uses.
 func judgeFromReviewing(t *testing.T, s *store.Store, reviewTicket store.Ticket) store.Ticket {
 	t.Helper()
 	deps := pbClaim(t, s, runtime.NewFake(reviewScriptsFS(nil)), reviewTicket.ID)

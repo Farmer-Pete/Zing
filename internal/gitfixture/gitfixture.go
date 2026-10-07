@@ -253,19 +253,20 @@ func rewriteSigningKey(configPath, oldKey, newKey string) (found bool, err error
 	return true, nil
 }
 
-// gitDirOf returns root's git directory: "root/.git" when that is a
-// directory, or root itself when root is a bare repository (no .git
-// subdirectory, so root's own entries -- config, objects, refs -- are
-// the git dir's entries).
-func gitDirOf(root string) (string, error) {
+// gitRelOf reports root's git dir relative to root itself: ".git" for an
+// ordinary repository, or "" for a bare one. CopyRepo calls this once on
+// srcReal, since dest is a copy of src and the resolved paths are the
+// same directories, so the answer is the same for src, srcReal, dest,
+// and destReal.
+func gitRelOf(root string) (string, error) {
 	fi, err := os.Stat(filepath.Join(root, ".git"))
 	if err == nil && fi.IsDir() {
-		return filepath.Join(root, ".git"), nil
+		return ".git", nil
 	}
 	if err != nil && !errors.Is(err, fs.ErrNotExist) {
 		return "", err
 	}
-	return root, nil
+	return "", nil
 }
 
 // worktreeLink names one linked worktree found under a repository's git
@@ -349,14 +350,12 @@ func CopyRepo(ctx context.Context, src, dest string) error {
 	if err != nil {
 		return fmt.Errorf("gitfixture: resolve src: %w", err)
 	}
-	srcGitDir, err := gitDirOf(src)
+	gitRel, err := gitRelOf(srcReal)
 	if err != nil {
 		return fmt.Errorf("gitfixture: stat src git dir: %w", err)
 	}
-	srcGitDirReal, err := gitDirOf(srcReal)
-	if err != nil {
-		return fmt.Errorf("gitfixture: stat src git dir: %w", err)
-	}
+	srcGitDir := filepath.Join(src, gitRel)
+	srcGitDirReal := filepath.Join(srcReal, gitRel)
 
 	links, err := worktreePaths(srcReal, srcGitDirReal)
 	if err != nil {
@@ -371,14 +370,8 @@ func CopyRepo(ctx context.Context, src, dest string) error {
 	if err != nil {
 		return fmt.Errorf("gitfixture: resolve dest: %w", err)
 	}
-	destGitDir, err := gitDirOf(dest)
-	if err != nil {
-		return fmt.Errorf("gitfixture: stat dest git dir: %w", err)
-	}
-	destGitDirReal, err := gitDirOf(destReal)
-	if err != nil {
-		return fmt.Errorf("gitfixture: stat dest git dir: %w", err)
-	}
+	destGitDir := filepath.Join(dest, gitRel)
+	destGitDirReal := filepath.Join(destReal, gitRel)
 
 	configPath := filepath.Join(destGitDir, "config")
 	newKey := filepath.Join(destGitDir, signingKeyName)

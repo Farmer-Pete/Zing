@@ -151,8 +151,12 @@ func TestUseStageRecordsFailedBuild(t *testing.T) {
 	}
 
 	err := stageFailure(st.name, st.failedBy)
-	if err == nil || !strings.Contains(err.Error(), "stage failing") || !strings.Contains(err.Error(), t.Name()) {
-		t.Fatalf("stageFailure = %v, want error containing %q and %q", err, "stage failing", t.Name())
+	if err == nil {
+		t.Fatal("stageFailure = nil, want an error")
+	}
+	namesStageAndTest := strings.Contains(err.Error(), "stage failing") && strings.Contains(err.Error(), t.Name())
+	if !namesStageAndTest {
+		t.Fatalf("stageFailure = %q, want it to contain %q and %q", err.Error(), "stage failing", t.Name())
 	}
 
 	calls := 0
@@ -224,6 +228,13 @@ type stageBuild struct {
 	Extra     any
 }
 
+// complete reports whether b carries everything snapshotStage needs: an
+// open store, the store's own file path, and the ticket whose project
+// names the repo to snapshot.
+func (b stageBuild) complete() bool {
+	return b.Store != nil && b.DBPath != "" && b.TicketID != 0
+}
+
 // stageCopy is one test's own private copy of a stage, built by copyStage
 // inside the caller's t.TempDir().
 type stageCopy struct {
@@ -241,7 +252,7 @@ type stageCopy struct {
 // too. It is called at most once per stage, inside the first useStage
 // caller's sync.Once.Do.
 func snapshotStage(ctx context.Context, st *stageSnap, b stageBuild) error {
-	if b.Store == nil || b.DBPath == "" || b.TicketID == 0 {
+	if !b.complete() {
 		return fmt.Errorf("stage %s: builder returned an incomplete stageBuild", st.name)
 	}
 
