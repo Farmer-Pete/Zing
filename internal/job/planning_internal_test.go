@@ -585,7 +585,7 @@ func TestSchemaInvalidEscalation(t *testing.T) {
 
 		failed := store.HandlerCommit{
 			TicketID: 1, Owner: "owner-1", Expires: time.Now().Add(time.Hour),
-			Runs:             []store.Run{{ID: 7, Turn: 2, ExitCode: &exitCode, AgentSeconds: &agentSeconds}},
+			Runs:             []store.Run{{ID: 7, Turn: 2, ExitCode: &exitCode, AgentSeconds: &agentSeconds}, {ID: 0, Turn: 1}},
 			Session:          &store.SessionUpsert{ID: &sessionID, ExternalID: &ext},
 			Sessions:         []store.SessionUpsert{{ID: &keptID, ExternalID: &keptExt}, {ExternalID: &droppedExt}},
 			ResolveQuestions: resolveIDs,
@@ -640,11 +640,11 @@ func TestSchemaInvalidEscalation(t *testing.T) {
 			t.Errorf("Tried = %q, want it to end with %q", tried, "run ids: 7")
 		}
 
-		if c.Session != failed.Session {
-			t.Errorf("Session = %v, want the same pointer as the failed commit's own Session", c.Session)
+		if c.Session == nil || c.Session.ID == nil || *c.Session.ID != sessionID || c.Session.ExternalID == nil || *c.Session.ExternalID != ext {
+			t.Errorf("Session = %v, want ID %d and ExternalID %q", c.Session, sessionID, ext)
 		}
-		if len(c.Sessions) != 1 || c.Sessions[0].ID != &keptID {
-			t.Errorf("Sessions = %+v, want exactly the one entry with an ID", c.Sessions)
+		if len(c.Sessions) != 1 || c.Sessions[0].ID == nil || *c.Sessions[0].ID != keptID || c.Sessions[0].ExternalID == nil || *c.Sessions[0].ExternalID != keptExt {
+			t.Errorf("Sessions = %+v, want exactly the one entry with ID %d and ExternalID %q", c.Sessions, keptID, keptExt)
 		}
 		if !slices.Equal(c.ResolveQuestions, resolveIDs) {
 			t.Errorf("ResolveQuestions = %v, want %v", c.ResolveQuestions, resolveIDs)

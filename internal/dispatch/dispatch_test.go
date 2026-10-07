@@ -5216,8 +5216,6 @@ func (schemaInvalidSelfStealingHandler) Run(ctx context.Context, t store.Ticket,
 // dispatcher reports the original schema error, wrapped in ErrFailClosed,
 // rather than silently losing it.
 func TestTick_SchemaInvalidCommitWithLostLeaseFailsClosed(t *testing.T) {
-	t.Parallel()
-
 	s := newDispatchTestStore(t)
 	rt := fakeRuntime(t)
 	ticketID := seedQueuedTicket(t, s, testFixtureRef)
@@ -5228,12 +5226,28 @@ func TestTick_SchemaInvalidCommitWithLostLeaseFailsClosed(t *testing.T) {
 
 	d := newDispatcher(t, s, newFixtureTracker(t), bus.New(), rt, reg, nil, dispatch.Config{MaxParallel: 2, Owner: testOwner})
 
+	var logBuf bytes.Buffer
+	prevDefault := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logBuf, &slog.HandlerOptions{Level: slog.LevelDebug})))
+	t.Cleanup(func() { slog.SetDefault(prevDefault) })
+
 	err := d.Tick(t.Context())
 	if !errors.Is(err, dispatch.ErrFailClosed) {
 		t.Fatalf("Tick: err = %v, want errors.Is(err, dispatch.ErrFailClosed)", err)
 	}
 	if !errors.Is(err, store.ErrSchemaInvalid) {
 		t.Errorf("Tick: err = %v, want errors.Is(err, store.ErrSchemaInvalid)", err)
+	}
+
+	logged := logBuf.String()
+	if !strings.Contains(logged, "schema escalation not applied") {
+		t.Errorf("log = %q, want the \"schema escalation not applied\" line, proving the escalation branch was reached", logged)
+	}
+	if !strings.Contains(logged, fmt.Sprintf("ticket_id=%d", ticketID)) {
+		t.Errorf("log = %q, want ticket_id=%d", logged, ticketID)
+	}
+	if !strings.Contains(logged, "applied=false") {
+		t.Errorf("log = %q, want applied=false", logged)
 	}
 
 	_, stopped, flagsErr := s.Flags(t.Context())
