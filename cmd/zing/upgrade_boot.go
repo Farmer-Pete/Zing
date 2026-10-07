@@ -5,11 +5,93 @@
 package main
 
 import (
+	"fmt"
 	"log/slog"
 	"os"
 	"path/filepath"
 	"runtime/debug"
 )
+
+// bootAction is what the boot guard decides to do with upgrade.json at
+// start-up, before zing.toml is read.
+type bootAction int
+
+const (
+	bootNormal bootAction = iota
+	bootWatch
+	bootRollback
+	bootReport
+	bootDiscard
+)
+
+// String renders a bootAction as a word, for log fields.
+func (a bootAction) String() string {
+	switch a {
+	case bootNormal:
+		return "normal"
+	case bootWatch:
+		return "watch"
+	case bootRollback:
+		return "rollback"
+	case bootReport:
+		return "report"
+	case bootDiscard:
+		return "discard"
+	default:
+		return fmt.Sprintf("boot(%d)", int(a))
+	}
+}
+
+// bootOutcome's results, and the causes a failed outcome names.
+const (
+	outcomeNone   = "none"
+	outcomeFailed = "failed"
+	outcomeRevert = "revert"
+
+	bootCauseDeadline = "deadline"
+	bootCauseStopped  = "serve_stopped"
+)
+
+// decideBoot maps upgrade.json, as found at start-up, to what the boot
+// guard does with it.
+func decideBoot(m upgradeMarker, found bool, running string) bootAction {
+	if !found {
+		return bootNormal
+	}
+	matches := matchesRunning(m.ToSHA, running)
+	switch m.State {
+	case markerPending:
+		if matches {
+			return bootWatch
+		}
+		return bootDiscard
+	case markerAttempted:
+		if matches {
+			return bootRollback
+		}
+		return bootDiscard
+	case markerRolledBack:
+		return bootReport
+	default:
+		return bootDiscard
+	}
+}
+
+// bootOutcome decides how a serve that has returned ends its boot. cause
+// names why a failed boot failed, for finishBoot's log; it is empty for
+// none and revert.
+func bootOutcome(watching, booted, deadlinePassed, signalled bool) (outcome, cause string) {
+	switch {
+	case !watching || booted:
+		return outcomeNone, ""
+	case signalled:
+		return outcomeRevert, ""
+	case deadlinePassed:
+		return outcomeFailed, bootCauseDeadline
+	default:
+		return outcomeFailed, bootCauseStopped
+	}
+}
 
 // selfUpgrade carries the self-upgrade state across serve's call, from run
 // to the restartAfterServe call that follows it.
