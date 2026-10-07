@@ -1,12 +1,14 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"errors"
 	"fmt"
 	"math"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -371,6 +373,92 @@ func TestServe_ClampsInvalidDispatchConfig(t *testing.T) {
 	go func() { serveDone <- serve(ctx, cfgPath, dbPath, false) }()
 
 	waitForServing(t, fmt.Sprintf("http://127.0.0.1:%d", port), serveDone)
+	cancelAndWaitForServe(t, cancel, serveDone)
+}
+
+// TestServe_StoredTuningWinsOverZingTOMLAfterRestart proves the wiring
+// around dispatch.LoadTuning and console.WithTuner in runServe (#81, "after
+// a serve restart, the stored values win over zing.toml"): a settings-table
+// row stored before serve starts, under a different zing.toml max_parallel
+// and budget, must be what the Settings view and the live dispatcher show,
+// not zing.toml's own values. Passing the zing.toml-derived values straight
+// into zdispatch.Config instead of LoadTuning's result, or dropping
+// console.WithTuner(d) from console.New, would still start serve cleanly
+// and leave this test as the only thing that catches it.
+func TestServe_StoredTuningWinsOverZingTOMLAfterRestart(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "zing.toml")
+	dbPath := filepath.Join(dir, "zing.db")
+
+	port := freeLoopbackPort(t)
+	writeZingTOML(t, cfgPath, zingTOMLOpts{
+		Port: port, IntervalSeconds: 1, MaxParallel: 1, Bind: []string{loopback},
+	})
+
+	st, err := store.Open(t.Context(), dbPath)
+	if err != nil {
+		t.Fatalf("pre-migrate store.Open: %v", err)
+	}
+	setErr := st.SetSettings(t.Context(),
+		"dispatch.max_parallel", "3", "dispatch.max_parallel.changed_by", "peter", "dispatch.max_parallel.changed_at", "2026-10-06T14:03:00Z",
+		"budget.agent_minutes_per_ticket", "480", "budget.agent_minutes_per_ticket.changed_by", "peter", "budget.agent_minutes_per_ticket.changed_at", "2026-10-06T14:03:00Z",
+	)
+	if setErr != nil {
+		t.Fatalf("SetSettings: %v", setErr)
+	}
+	closeErr := st.Close()
+	if closeErr != nil {
+		t.Fatalf("pre-migrate store.Close: %v", closeErr)
+	}
+
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+
+	serveDone := make(chan error, 1)
+	go func() { serveDone <- serve(ctx, cfgPath, dbPath, false) }()
+
+	baseURL := fmt.Sprintf("http://%s:%d", loopback, port)
+	waitForServing(t, baseURL, serveDone)
+
+	v := url.Values{}
+	v.Set("datastar", `{"view":"settings","open":0,"project":0}`)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, baseURL+"/stream?"+v.Encode(), http.NoBody)
+	if err != nil {
+		t.Fatalf("new /stream request: %v", err)
+	}
+	req.Header.Set("Datastar-Request", "true")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("GET /stream: %v", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	// /stream always sends three frames on connect, in order: #nav, then
+	// #main, then #rail (readInitialSelftestFrames, cmd/zing/selftest.go).
+	// This test only needs #main, so it reads with the same
+	// readSelftestFrame readInitialSelftestFrames itself calls, skipping
+	// the other two, rather than adding a second caller that discards
+	// readInitialSelftestFrames' own nav and rail results.
+	streamReader := bufio.NewReader(resp.Body)
+	if _, navErr := readSelftestFrame(streamReader); navErr != nil {
+		t.Fatalf("read nav frame: %v", navErr)
+	}
+	main, mainErr := readSelftestFrame(streamReader)
+	if mainErr != nil {
+		t.Fatalf("read main frame: %v", mainErr)
+	}
+	if _, railErr := readSelftestFrame(streamReader); railErr != nil {
+		t.Fatalf("read rail frame: %v", railErr)
+	}
+	if !strings.Contains(main, `data-tuning-name="max_parallel"`) || !strings.Contains(main, `value="3"`) {
+		t.Errorf("settings frame missing max_parallel value 3 (stored, not zing.toml's 1); got:\n%s", main)
+	}
+	if !strings.Contains(main, `value="480"`) {
+		t.Errorf("settings frame missing agent_minutes_per_ticket value 480 (stored, not zing.toml's default); got:\n%s", main)
+	}
+
 	cancelAndWaitForServe(t, cancel, serveDone)
 }
 

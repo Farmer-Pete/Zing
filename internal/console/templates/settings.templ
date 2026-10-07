@@ -1,0 +1,42 @@
+package templates
+
+import (
+	"strconv"
+)
+
+// SettingRow is one row of the Settings view (#81, owner decisions Q1,
+// Q4): one console-changeable dispatch setting's live value, bounds, and
+// provenance line.
+type SettingRow struct {
+	Name   string
+	Label  string
+	Value  int
+	Min    int
+	Max    int
+	Source string
+}
+
+// Settings renders the #main region for view=settings. Each row's message
+// span carries a per-setting id plus data-ignore-morph, like pickupBox's
+// pickup-message, so a refusal console.js writes there survives the
+// /stream patch any bus publish causes. No tuner (selftest, or any caller
+// that never wires console.WithTuner) renders nil, in which case this
+// shows the "needs a running zing serve" line instead of any row.
+templ Settings(rows []SettingRow) {
+	<main id="main" class="view-settings">
+		<h2>Settings</h2>
+		if len(rows) == 0 {
+			<p class="empty">Dispatch settings need a running zing serve.</p>
+		} else {
+			for _, r := range rows {
+				<div class="tuning-row" data-tuning-name={ r.Name }>
+					<label for={ "tuning-value-" + r.Name }>{ r.Label }</label>
+					<input type="number" id={ "tuning-value-" + r.Name } class="tuning-value" min={ strconv.Itoa(r.Min) } max={ strconv.Itoa(r.Max) } step="1" value={ strconv.Itoa(r.Value) }/>
+					<button type="button" class="tuning-save">Save</button>
+					<span class="tuning-source">{ r.Source }</span>
+					<span class="tuning-message" id={ "tuning-message-" + r.Name } role="alert" data-ignore-morph></span>
+				</div>
+			}
+		}
+	</main>
+}

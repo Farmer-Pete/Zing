@@ -123,6 +123,10 @@ func Nav(projects []store.Project, threads []NavThread, sandboxReason string, cl
 		if templ_7745c5c3_Err != nil {
 			return templ_7745c5c3_Err
 		}
+		templ_7745c5c3_Err = navLink("settings", 0, 0, "Settings").Render(ctx, templ_7745c5c3_Buffer)
+		if templ_7745c5c3_Err != nil {
+			return templ_7745c5c3_Err
+		}
 		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 7, "</section><section class=\"nav-projects\"><h2>Projects</h2>")
 		if templ_7745c5c3_Err != nil {
 			return templ_7745c5c3_Err
@@ -195,7 +199,7 @@ func navLink(view string, open, project int64, label string) templ.Component {
 		var templ_7745c5c3_Var5 string
 		templ_7745c5c3_Var5, templ_7745c5c3_Err = templ.ResolveAttributeValue(zingNavExpr(view, open, project))
 		if templ_7745c5c3_Err != nil {
-			return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/console/templates/nav.templ`, Line: 78, Col: 87}
+			return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/console/templates/nav.templ`, Line: 79, Col: 87}
 		}
 		_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ_7745c5c3_Var5)
 		if templ_7745c5c3_Err != nil {
@@ -208,7 +212,7 @@ func navLink(view string, open, project int64, label string) templ.Component {
 		var templ_7745c5c3_Var6 string
 		templ_7745c5c3_Var6, templ_7745c5c3_Err = templ.JoinStringErrs(label)
 		if templ_7745c5c3_Err != nil {
-			return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/console/templates/nav.templ`, Line: 78, Col: 97}
+			return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/console/templates/nav.templ`, Line: 79, Col: 97}
 		}
 		_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ.EscapeString(templ_7745c5c3_Var6))
 		if templ_7745c5c3_Err != nil {
@@ -276,7 +280,7 @@ func threadLink(th NavThread, openTicketID int64) templ.Component {
 		var templ_7745c5c3_Var10 string
 		templ_7745c5c3_Var10, templ_7745c5c3_Err = templ.ResolveAttributeValue(zingNavExpr("thread", th.Ticket.ID, 0))
 		if templ_7745c5c3_Err != nil {
-			return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/console/templates/nav.templ`, Line: 90, Col: 129}
+			return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/console/templates/nav.templ`, Line: 91, Col: 129}
 		}
 		_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ_7745c5c3_Var10)
 		if templ_7745c5c3_Err != nil {
@@ -289,7 +293,7 @@ func threadLink(th NavThread, openTicketID int64) templ.Component {
 		var templ_7745c5c3_Var11 string
 		templ_7745c5c3_Var11, templ_7745c5c3_Err = templ.JoinStringErrs(th.Ticket.Title)
 		if templ_7745c5c3_Err != nil {
-			return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/console/templates/nav.templ`, Line: 91, Col: 39}
+			return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/console/templates/nav.templ`, Line: 92, Col: 39}
 		}
 		_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ.EscapeString(templ_7745c5c3_Var11))
 		if templ_7745c5c3_Err != nil {
@@ -308,7 +312,7 @@ func threadLink(th NavThread, openTicketID int64) templ.Component {
 				var templ_7745c5c3_Var12 string
 				templ_7745c5c3_Var12, templ_7745c5c3_Err = templ.JoinStringErrs(fmt.Sprintf("%s (%d)", th.WaitingOn, th.OpenQuestionCount))
 				if templ_7745c5c3_Err != nil {
-					return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/console/templates/nav.templ`, Line: 95, Col: 65}
+					return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/console/templates/nav.templ`, Line: 96, Col: 65}
 				}
 				_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ.EscapeString(templ_7745c5c3_Var12))
 				if templ_7745c5c3_Err != nil {
@@ -318,7 +322,7 @@ func threadLink(th NavThread, openTicketID int64) templ.Component {
 				var templ_7745c5c3_Var13 string
 				templ_7745c5c3_Var13, templ_7745c5c3_Err = templ.JoinStringErrs(th.WaitingOn)
 				if templ_7745c5c3_Err != nil {
-					return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/console/templates/nav.templ`, Line: 97, Col: 19}
+					return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/console/templates/nav.templ`, Line: 98, Col: 19}
 				}
 				_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ.EscapeString(templ_7745c5c3_Var13))
 				if templ_7745c5c3_Err != nil {
@@ -337,7 +341,7 @@ func threadLink(th NavThread, openTicketID int64) templ.Component {
 			var templ_7745c5c3_Var14 string
 			templ_7745c5c3_Var14, templ_7745c5c3_Err = templ.JoinStringErrs(th.ParkedUntil)
 			if templ_7745c5c3_Err != nil {
-				return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/console/templates/nav.templ`, Line: 101, Col: 65}
+				return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/console/templates/nav.templ`, Line: 102, Col: 65}
 			}
 			_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ.EscapeString(templ_7745c5c3_Var14))
 			if templ_7745c5c3_Err != nil {
@@ -378,13 +382,13 @@ func threadRowClass(ticketID, openTicketID int64) string {
 }
 
 // validNavViews is the closed set of view names every call site in this
-// file passes today (Nav's three view-switcher links, its per-project
+// file passes today (Nav's four view-switcher links, its per-project
 // links, and threadLink's "thread"; matches console.viewInbox/Recent/
-// Feed/Project/Thread one for one, kept as literals here rather than
-// imported, since internal/console already imports this package and
+// Feed/Settings/Project/Thread one for one, kept as literals here rather
+// than imported, since internal/console already imports this package and
 // importing back would cycle).
 var validNavViews = map[string]bool{
-	"inbox": true, "recent": true, "feed": true, "project": true, "thread": true,
+	"inbox": true, "recent": true, "feed": true, "settings": true, "project": true, "thread": true,
 }
 
 // zingNavExpr builds the data-on:click expression a temporary nav link uses
