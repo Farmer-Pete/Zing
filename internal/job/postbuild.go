@@ -296,7 +296,7 @@ func resolvePostBuildEscalation(ctx context.Context, t store.Ticket, d Deps, rou
 		commit, err = judgeHandler{}.retryFreshRound(ctx, t, d, resolveIDs, notes, errorText)
 
 	case origin == response.EscalationOriginJudge:
-		commit = h.retryMarkerCommit(t, d, resolveIDs)
+		commit, err = judgeHandler{}.retryJudgeNoRun(ctx, t, d, resolveIDs, notes, errorText)
 
 	case origin == response.EscalationOriginShipping && isBaseMergeTried(payload.Tried):
 		commit, err = shipHandler{}.retryMerge(ctx, t, d, resolveIDs, notes, payload.Tried)

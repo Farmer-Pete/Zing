@@ -2888,11 +2888,24 @@ func TestJudgeAgainWithoutFixDirtyTreeStillDrops(t *testing.T) {
 
 	scripts := judgeScriptsFS(judgeOkBothScript)
 	scripts["build/fix/1.xml"] = &fstest.MapFile{Data: []byte(judgeFixCannotRunBuildScript)}
-	rt := runtime.NewFake(scripts)
+	scripts["judge/2/1.xml"] = &fstest.MapFile{Data: []byte(judgeOkBothScript)}
+	rec := &recordingRuntime{inner: runtime.NewFake(scripts)}
+	rt := rec
 
 	checks := &judgeScriptedCheckCommands{real: NewCommandRunner(sandbox.Off(), false), steps: []judgeCheckStep{{exit: 1}}}
 
 	ticket = judgeFailRoundOne(t, s, ticket, rt, checks)
+
+	startedMarker, ok := reviewMarker(t, s, ticket.ID, "judge round 1 started")
+	if !ok {
+		t.Fatal(`no "judge round 1 started" marker`)
+	}
+	startedFirstLine, _, _ := strings.Cut(startedMarker.Body, "\n")
+	sub := judgeRoundStartedLine.FindStringSubmatch(startedFirstLine)
+	if sub == nil {
+		t.Fatalf("started marker body = %q, did not match the started-line shape", startedMarker.Body)
+	}
+	wantSHA := sub[2]
 
 	deps := pbWithTestCmd(pbClaim(t, s, rt, ticket.ID), ticket, judgeFixTestCmd)
 	deps.Commands = checks
@@ -2969,6 +2982,64 @@ func TestJudgeAgainWithoutFixDirtyTreeStillDrops(t *testing.T) {
 	if stillOpen {
 		t.Error("openFixRequest after the dirty-tree escalation: open = true, want false")
 	}
+
+	// Part 2 (task 4): clean the tree, answer the judge escalation that
+	// followed the drop with Retry plus a note, and prove retryJudgeNoRun
+	// starts round 2 at round 1's own sha with that note reaching the
+	// fresh judge turn.
+	if rmErr := os.Remove(readmePath); rmErr != nil {
+		t.Fatalf("remove dirty readme (restore via git): %v", rmErr)
+	}
+	if writeErr := os.WriteFile(readmePath, existing, 0o600); writeErr != nil {
+		t.Fatalf("restore README.md: %v", writeErr)
+	}
+
+	open3, err := s.QuestionsByState(t.Context(), ticket.ID, "open")
+	if err != nil {
+		t.Fatalf("QuestionsByState(open) after the dirty-tree escalation: %v", err)
+	}
+	if len(open3) != 1 {
+		t.Fatalf("QuestionsByState(open) = %d questions, want exactly 1", len(open3))
+	}
+	qID2 := open3[0].ID
+
+	const cleanNote = "tree is clean now"
+	optA := "a"
+	if _, draftErr := s.SaveDraft(t.Context(), store.DraftInput{TicketID: ticket.ID, QuestionID: &qID2, Option: &optA}); draftErr != nil {
+		t.Fatalf("SaveDraft(option): %v", draftErr)
+	}
+	if _, draftErr := s.SaveDraft(t.Context(), store.DraftInput{TicketID: ticket.ID, QuestionID: &qID2, Text: cleanNote}); draftErr != nil {
+		t.Fatalf("SaveDraft(text): %v", draftErr)
+	}
+	if _, sendErr := s.SendBatch(t.Context(), ticket.ID); sendErr != nil {
+		t.Fatalf("SendBatch: %v", sendErr)
+	}
+
+	reqCountBefore := len(rec.reqs)
+	deps3 := pbWithTestCmd(pbClaim(t, s, rt, ticket.ID), pbGetTicket(t, s, ticket.ID), judgeFixTestCmd)
+	deps3.Commands = checks
+	finalCommit, err := (judgeHandler{}).Run(t.Context(), pbGetTicket(t, s, ticket.ID), deps3) // Retry after cleaning the tree
+	if err != nil {
+		t.Fatalf("Run after cleaning the tree: %v", err)
+	}
+
+	want := "judge round 2 started sha " + wantSHA
+	found := false
+	for _, m := range finalCommit.Messages {
+		if strings.HasPrefix(m.Body, want) {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("finalCommit.Messages = %+v, want a message starting %q", finalCommit.Messages, want)
+	}
+	if !slices.Contains(finalCommit.ResolveQuestions, qID2) {
+		t.Errorf("finalCommit.ResolveQuestions = %v, want it to contain %d", finalCommit.ResolveQuestions, qID2)
+	}
+	if len(rec.reqs)-reqCountBefore != 1 {
+		t.Fatalf("runtime requests after the Retry = %d, want exactly 1", len(rec.reqs)-reqCountBefore)
+	}
+	assertFencedPB(t, rec.reqs[len(rec.reqs)-1].Prompt, "notes", cleanNote)
 }
 
 // TestRejudgeWithoutFixRefuses proves rejudgeWithoutFix's own refusal branch
@@ -3021,4 +3092,174 @@ func TestRejudgeWithoutFixRefuses(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestFixDroppedSince proves fixDroppedSince's own pure table (design
+// section 8, ticket #80 task 4): a "fix dropped <mid>" marker counts only
+// above floorID, the newest well-formed one above the floor wins, and a
+// malformed line is skipped rather than treated as a floor-breaking
+// failure.
+func TestFixDroppedSince(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name    string
+		dropped []store.MessageRow
+		floorID int64
+		wantID  int64
+		wantOK  bool
+	}{
+		{name: "no markers", dropped: nil, floorID: 5},
+		{
+			name:    "marker at the floor does not count",
+			dropped: []store.MessageRow{{ID: 5, Body: "fix dropped 1"}},
+			floorID: 5,
+		},
+		{
+			name: "two markers above the floor, the newer one wins",
+			dropped: []store.MessageRow{
+				{ID: 6, Body: "fix dropped 1"},
+				{ID: 8, Body: "fix dropped 2"},
+			},
+			floorID: 5,
+			wantID:  2,
+			wantOK:  true,
+		},
+		{
+			name: "a malformed line is ignored, the older well-formed marker still counts",
+			dropped: []store.MessageRow{
+				{ID: 6, Body: "fix dropped 1"},
+				{ID: 8, Body: "fix dropped oops"},
+			},
+			floorID: 5,
+			wantID:  1,
+			wantOK:  true,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			gotID, gotOK := fixDroppedSince(tc.dropped, tc.floorID)
+			if gotOK != tc.wantOK || gotID != tc.wantID {
+				t.Errorf("fixDroppedSince(...) = (%d, %v), want (%d, %v)", gotID, gotOK, tc.wantID, tc.wantOK)
+			}
+		})
+	}
+}
+
+// judgeFailedRoundDroppedFixRun is TestJudgeFailedRoundDroppedFixStartsNextRound's
+// own shared setup, pulled out to a package-level helper (rather than a
+// closure, which tparallel mistakes for an unparallel subtest body) so both
+// of its own subtests share it: round 1 fails and its "failure" fix
+// escalates cannot_run, then either a "fix dropped <mid>" or a "fix landed
+// <mid> sha <sha>" marker (at round 1's own sha) closes it, and a plain
+// judgeHandler.Run tick runs after that.
+func judgeFailedRoundDroppedFixRun(t *testing.T, dropFix bool) (commit store.HandlerCommit, startedSHA string) {
+	t.Helper()
+	s, ticket := judgeTicketReady(t)
+
+	scripts := judgeScriptsFS(judgeOkBothScript)
+	scripts["build/fix/1.xml"] = &fstest.MapFile{Data: []byte(judgeFixCannotRunBuildScript)}
+	rt := runtime.NewFake(scripts)
+
+	checks := &judgeScriptedCheckCommands{real: NewCommandRunner(sandbox.Off(), false), steps: []judgeCheckStep{{exit: 1}}}
+
+	ticket = judgeFailRoundOne(t, s, ticket, rt, checks)
+
+	deps := pbWithTestCmd(pbClaim(t, s, rt, ticket.ID), ticket, judgeFixTestCmd)
+	deps.Commands = checks
+	fixCommit, err := (judgeHandler{}).Run(t.Context(), ticket, deps) // fix RUN turn: cannot_run error
+	if err != nil {
+		t.Fatalf("fix RUN: %v", err)
+	}
+	pbApply(t, s, ticket, fixCommit)
+	ticket = pbGetTicket(t, s, ticket.ID)
+
+	startedMarker, ok := reviewMarker(t, s, ticket.ID, "judge round 1 started")
+	if !ok {
+		t.Fatal(`no "judge round 1 started" marker`)
+	}
+	startedFirstLine, _, _ := strings.Cut(startedMarker.Body, "\n")
+	sub := judgeRoundStartedLine.FindStringSubmatch(startedFirstLine)
+	if sub == nil {
+		t.Fatalf("started marker body = %q, did not match the started-line shape", startedMarker.Body)
+	}
+	wantSHA := sub[2]
+
+	req, open, reqErr := openFixRequest(t.Context(), Deps{Store: s}, ticket)
+	if reqErr != nil {
+		t.Fatalf("openFixRequest: %v", reqErr)
+	}
+	if !open {
+		t.Fatal("openFixRequest: open = false, want true")
+	}
+
+	// Either marker closes the fix request so judgeHandler.Run reaches
+	// the failed-round branch's own decision tree instead of driving
+	// the fix again through postBuildPrelude; only the "dropped" shape
+	// is this check's own consent.
+	closeBody := fmt.Sprintf("fix landed %d sha %s", req.MessageID, wantSHA)
+	if dropFix {
+		closeBody = fmt.Sprintf("fix dropped %d", req.MessageID)
+	}
+	if _, insertErr := s.InsertMessage(t.Context(), store.Message{
+		TicketID: ticket.ID, Type: msgTypeUpdate, Author: authorSystem, Body: closeBody,
+	}); insertErr != nil {
+		t.Fatalf("InsertMessage(close fix): %v", insertErr)
+	}
+
+	deps2 := pbWithTestCmd(pbClaim(t, s, rt, ticket.ID), pbGetTicket(t, s, ticket.ID), judgeFixTestCmd)
+	deps2.Commands = checks
+	commit, runErr := (judgeHandler{}).Run(t.Context(), pbGetTicket(t, s, ticket.ID), deps2)
+	if runErr != nil {
+		t.Fatalf("Run after the fix escalated: %v", runErr)
+	}
+	return commit, wantSHA
+}
+
+// TestJudgeFailedRoundDroppedFixStartsNextRound proves judgeHandler.Run's
+// own dropped-fix consent check (design section 8, owner decision Q9,
+// ticket #80 task 4): once part 1 of TestJudgeAgainWithoutFixDirtyTreeStillDrops
+// has dropped the fix and the dirty file is restored, a plain tick (no
+// answered round at all) finds the fix dropped marker newer than round 1's
+// own failed marker and starts round 2 at that same sha with no same-sha
+// escalation. Without the dropped marker, the very same setup still hits
+// the cannot_run same-sha escalation, proving the marker is what decides.
+func TestJudgeFailedRoundDroppedFixStartsNextRound(t *testing.T) {
+	t.Parallel()
+	if testing.Short() {
+		t.Skip("slow end-to-end flow; runs in the full suite")
+	}
+
+	t.Run("with the fix dropped", func(t *testing.T) {
+		t.Parallel()
+		commit, wantSHA := judgeFailedRoundDroppedFixRun(t, true)
+		want := "judge round 2 started sha " + wantSHA
+		found := false
+		for _, m := range commit.Messages {
+			if strings.HasPrefix(m.Body, want) {
+				found = true
+			}
+		}
+		if !found {
+			t.Errorf("commit.Messages = %+v, want a message starting %q", commit.Messages, want)
+		}
+		if commit.Escalation != nil {
+			t.Errorf("commit.Escalation = %+v, want none", commit.Escalation)
+		}
+	})
+
+	t.Run("without the fix dropped", func(t *testing.T) {
+		t.Parallel()
+		commit, _ := judgeFailedRoundDroppedFixRun(t, false)
+		for _, m := range commit.Messages {
+			if strings.HasPrefix(m.Body, "judge round 2 started") {
+				t.Errorf("commit.Messages = %+v, want no \"judge round 2 started\" marker", commit.Messages)
+			}
+		}
+		if commit.Escalation == nil {
+			t.Fatal("commit.Escalation = nil, want a cannot_run escalation")
+		}
+		if commit.Escalation.Payload.Code != string(response.EscalationCodeCannotRun) {
+			t.Errorf("escalation code = %q, want %q", commit.Escalation.Payload.Code, response.EscalationCodeCannotRun)
+		}
+	})
 }
