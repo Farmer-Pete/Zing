@@ -182,6 +182,20 @@ type Binding struct {
 // values.
 const intakeModeManual = "manual"
 
+// Notifier sends one push payload to every subscriber (design section
+// "shape" rules: "The seam"). *notify.WebPush satisfies it; this package
+// never imports notify outside its own tests, so a nil Notifier -- every
+// existing Config literal, selftest included -- disables push entirely.
+type Notifier interface {
+	Send(ctx context.Context, payload []byte) error
+}
+
+// notifyTimeout bounds the context notifyStop's goroutine gives Send
+// (design section "shape" rules: "Never blocks dispatching"): long enough
+// for an ordinary push round-trip, short enough that finish's own
+// notifyWG.Wait() cannot hang a drain indefinitely.
+const notifyTimeout = 15 * time.Second
+
 // Config is the dispatcher's run-time tuning (design section 6.8). Models
 // and Floor (design section 4.4) are threaded straight into every job.Deps
 // runAndCommit builds. Interval, MaxParallel, and Budget are the startup
@@ -245,6 +259,10 @@ type Config struct {
 	// process without the lock cannot prove every other owner's claim is
 	// really dead.
 	ReclaimForeign bool
+	// Notifier sends one push per fail-closed or error stop (design section
+	// "shape" rules, owner decision Q2). nil, every existing Config literal
+	// and selftest's own, sends nothing.
+	Notifier Notifier
 }
 
 // Tuning is the dispatcher's live, console-changeable settings (#81):
@@ -473,6 +491,13 @@ type Dispatcher struct {
 	// finish so Run (and Tick) never returns while a worker is still live.
 	wg sync.WaitGroup
 
+	// notifyWG counts the goroutine notifyStop starts per recorded stop
+	// (design section "shape" rules: "Never blocks dispatching"): one Add
+	// right before the goroutine starts, one Done when Send returns or
+	// notifyTimeout elapses. finish waits on it right before its own final
+	// return, so zing serve never closes the store under a running send.
+	notifyWG sync.WaitGroup
+
 	// driving enforces one caller of Tick or Run at a time (design section
 	// 4.1): both start with a CompareAndSwap and return ErrConcurrentDrive
 	// on failure, since concurrent passes would race every read and write
@@ -663,16 +688,49 @@ func (d *Dispatcher) NotifyDrain() {
 // from a drain or a context cancellation, which must never erase a real
 // error already recorded. It returns whether this call was the first to
 // set stop, though no caller in this package currently needs that signal.
+//
+// setStop never calls notifyStop itself, unlike setStopAndNotify below: every
+// caller that always passes nil (NotifyDrain, a drain, or a context
+// cancellation) calls this one instead, so that call graph never statically
+// reaches notifyStop's own detached context.Background(). Without that
+// separation, golangci-lint's contextcheck would flag every caller of
+// NotifyDrain -- including a future HTTP handler with its own ctx in scope
+// -- for not threading that ctx through a push send that must, by design,
+// outlive it (notifyStop's own doc comment).
 func (d *Dispatcher) setStop(err error) bool {
+	first, _, _ := d.recordStop(err)
+	return first
+}
+
+// setStopAndNotify is setStop plus notifyStop (design section "shape"
+// rules): every caller that might pass a non-nil error -- Tick's own fill
+// error, park's worker or flags-read error -- calls this one, so a
+// fail-closed or error stop still sends its push exactly once, from
+// whichever call first records it.
+func (d *Dispatcher) setStopAndNotify(err error) bool {
+	first, recorded, payload := d.recordStop(err)
+	if recorded {
+		d.notifyStop(payload, err)
+	}
+	return first
+}
+
+// recordStop is setStop's and setStopAndNotify's shared, mutex-guarded
+// core: it records err as described above and reports whether this call
+// was the first to set stop and whether it was also the first to record a
+// non-nil stopErr, together with that error's stop-push payload (built
+// while still holding d.mu, so a concurrent StopStatus or notifyStop call
+// can never observe stoppedAt before the payload it describes exists).
+func (d *Dispatcher) recordStop(err error) (first, recorded bool, payload []byte) {
 	d.mu.Lock()
-	first := !d.stop
+	first = !d.stop
 	d.stop = true
-	recorded := false
 	if d.stopErr == nil {
 		d.stopErr = err
 		recorded = err != nil
 		if recorded {
 			d.stoppedAt = time.Now()
+			payload = stopPushPayload(err, d.stoppedAt)
 		}
 	}
 	hook := d.stopErrRecordedForTest
@@ -681,7 +739,37 @@ func (d *Dispatcher) setStop(err error) bool {
 	if recorded && hook != nil {
 		hook(err)
 	}
-	return first
+	return first, recorded, payload
+}
+
+// notifyStop sends payload through cfg.Notifier in its own goroutine,
+// tracked by notifyWG, so setStop (called from a worker or Run's own
+// goroutine) never blocks dispatching on a push's HTTP round-trip (design
+// section "shape" rules: "Never blocks dispatching"). A nil Notifier -- the
+// default for every existing Config literal and selftest -- sends nothing.
+// Send's own context is detached from the caller's, since setStop has no
+// ctx of its own to thread through, and bounded by notifyTimeout so a
+// wedged push service cannot hang finish's own notifyWG.Wait() forever. The
+// log line names kind, and ticket_id when alertKindWhere reports one, the
+// same two attributes the stop alerts already use.
+func (d *Dispatcher) notifyStop(payload []byte, err error) {
+	if d.cfg.Notifier == nil {
+		return
+	}
+	kind, _, ticketID, hasTicket := alertKindWhere(err)
+	d.notifyWG.Go(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), notifyTimeout)
+		defer cancel()
+		attrs := []any{"kind", kind}
+		if hasTicket {
+			attrs = append(attrs, "ticket_id", ticketID)
+		}
+		if sendErr := d.cfg.Notifier.Send(ctx, payload); sendErr != nil {
+			slog.Warn("dispatch: stop push failed", append([]any{"err", sendErr}, attrs...)...)
+			return
+		}
+		slog.Info("dispatch: stop push sent", attrs...)
+	})
 }
 
 // isStopped reports whether setStop has been called yet (design section
@@ -709,7 +797,7 @@ func (d *Dispatcher) Tick(ctx context.Context) error {
 	results := make(chan runResult, d.CurrentTuning().MaxParallel)
 	launched, fillErr := d.fill(ctx, results)
 	if fillErr != nil {
-		d.setStop(fillErr)
+		d.setStopAndNotify(fillErr) //nolint:contextcheck // notifyStop's own send deliberately runs on a bounded context.Background(), detached from this ctx, so a push outlives the Tick call that triggered it (notifyStop's own doc comment)
 	}
 
 	errs := make([]error, 0, launched+1)
@@ -782,7 +870,7 @@ func (d *Dispatcher) Run(ctx context.Context) error {
 		case r := <-results:
 			settled := d.resultConsumed()
 			if r.Err != nil {
-				d.park(r.Err)
+				d.park(r.Err) //nolint:contextcheck // park's own setStopAndNotify feeds notifyStop, whose send deliberately runs on a bounded context.Background(), detached from this ctx, so a push outlives the Run pass that triggered it (notifyStop's own doc comment)
 			}
 			d.bus.Publish() // the banner's in-flight count just dropped, owner stop or not
 			if settled {
@@ -834,7 +922,7 @@ func (d *Dispatcher) passFailed(ctx context.Context, err error, results <-chan r
 	if d.hasStopErr() {
 		return false, nil
 	}
-	d.park(err)
+	d.park(err) //nolint:contextcheck // park's own setStopAndNotify feeds notifyStop, whose send deliberately runs on a bounded context.Background(), detached from this ctx, so a push outlives the pass that triggered it (notifyStop's own doc comment)
 	d.mu.Lock()
 	settled := d.pending == 0
 	d.mu.Unlock()
@@ -848,7 +936,7 @@ func (d *Dispatcher) passFailed(ctx context.Context, err error, results <-chan r
 // once (design section 4.6), and wakes the console's own re-render so the
 // stop banner shows up without waiting for the next /stream frame.
 func (d *Dispatcher) park(err error) {
-	d.setStop(err)
+	d.setStopAndNotify(err)
 	d.reportFirstError()
 	d.bus.Publish()
 }
@@ -924,6 +1012,7 @@ func (d *Dispatcher) finish(err error, results <-chan runResult) error {
 			if d.hasStopErr() {
 				d.logStopAlert()
 			}
+			d.notifyWG.Wait()
 			return err
 		}
 	}
@@ -1397,7 +1486,7 @@ func (d *Dispatcher) worker(ctx context.Context, ticket store.Ticket, timeout ti
 	err := d.runAndCommit(ctx, ticket, timeout, expires)
 	if err != nil {
 		err = &runError{TicketID: ticket.ID, Err: err}
-		d.setStop(err)
+		d.setStopAndNotify(err) //nolint:contextcheck // notifyStop's own send deliberately runs on a bounded context.Background(), detached from this ctx, so a push outlives the worker that triggered it (notifyStop's own doc comment)
 	}
 
 	// Send before leaving inflight: a finished worker whose result the
