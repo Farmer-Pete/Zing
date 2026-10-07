@@ -608,17 +608,76 @@ func shipHasMessage(c store.HandlerCommit, body string) bool {
 	return false
 }
 
-// shipTicketReady drives a ticket all the way to "shipping" through the
-// real planning, building, reviewing, and judging state machines (reusing
-// judging_test.go's own judgeTicketReady), exactly
-// TestJudgePassMovesToShipping's own sequence, then calls
-// shipTicketReadyFrom for the judge-to-shipping leg and the bare git
-// remote.
+// shippingStage is the process-lifetime snapshot shipTicketReady builds
+// once per process and every caller copies.
+var shippingStage = &stageSnap{name: "shipping"}
+
+// buildShippingStage is shippingStage's builder: it takes its own copy of
+// the judging stage and drives it the rest of the way to "shipping" with
+// shipTicketReadyFrom, carrying the bare origin shipTicketReadyFrom makes
+// for useStage/snapshotStage to snapshot.
+func buildShippingStage(t *testing.T) stageBuild {
+	t.Helper()
+	c := useStage(t, judgingStage, buildJudgingStage)
+	judgingTicket := pbGetTicket(t, c.Store, c.TicketID)
+	ticket, remoteDir := shipTicketReadyFrom(t, c.Store, judgingTicket)
+	return stageBuild{Store: c.Store, DBPath: c.DBPath, TicketID: ticket.ID, OriginDir: remoteDir}
+}
+
+// shipTicketReady returns the test's own private copy of the shipping
+// stage: a fresh, git-backed ticket driven through planning, a real
+// three-task build, reviewing, and one judge round into "shipping", with
+// its own bare git origin. The real handlers run at most once per
+// process, under shippingStage; every caller gets its own copy of the
+// store, repo, and origin (useStage, copyStage).
 func shipTicketReady(t *testing.T) (s *store.Store, ticket store.Ticket, remoteDir string) {
 	t.Helper()
-	s, judgingTicket := judgeTicketReady(t)
-	ticket, remoteDir = shipTicketReadyFrom(t, s, judgingTicket)
-	return s, ticket, remoteDir
+	c := useStage(t, shippingStage, buildShippingStage)
+	return c.Store, pbGetTicket(t, c.Store, c.TicketID), c.OriginDir
+}
+
+// TestShippingStageCopyHasOwnOrigin checks that two calls to
+// shipTicketReady each get their own shipping ticket and their own bare
+// git origin, independent of each other.
+func TestShippingStageCopyHasOwnOrigin(t *testing.T) {
+	s1, ticket1, remoteDir1 := shipTicketReady(t)
+	s2, ticket2, remoteDir2 := shipTicketReady(t)
+
+	if ticket1.State != stateShipping {
+		t.Fatalf("ticket1 state = %q, want %q", ticket1.State, stateShipping)
+	}
+	if ticket2.State != stateShipping {
+		t.Fatalf("ticket2 state = %q, want %q", ticket2.State, stateShipping)
+	}
+	if remoteDir1 == remoteDir2 {
+		t.Fatalf("both copies share remoteDir %s", remoteDir1)
+	}
+
+	for i, tc := range []struct {
+		s         *store.Store
+		ticket    store.Ticket
+		remoteDir string
+	}{{s1, ticket1, remoteDir1}, {s2, ticket2, remoteDir2}} {
+		proj, err := tc.s.ProjectForTicket(t.Context(), tc.ticket.ID)
+		if err != nil {
+			t.Fatalf("copy %d: ProjectForTicket: %v", i+1, err)
+		}
+		out, gitErr := gitfixture.Git(t.Context(), proj.LocalPath, "remote", "get-url", "origin")
+		if gitErr != nil {
+			t.Fatalf("copy %d: git remote get-url: %v: %s", i+1, gitErr, out)
+		}
+		if got := strings.TrimSpace(string(out)); got != tc.remoteDir {
+			t.Fatalf("copy %d: origin url = %s, want %s", i+1, got, tc.remoteDir)
+		}
+
+		isBare, bareErr := gitfixture.Git(t.Context(), tc.remoteDir, "rev-parse", "--is-bare-repository")
+		if bareErr != nil {
+			t.Fatalf("copy %d: git rev-parse --is-bare-repository: %v: %s", i+1, bareErr, isBare)
+		}
+		if got := strings.TrimSpace(string(isBare)); got != "true" {
+			t.Fatalf("copy %d: is-bare-repository = %q, want true", i+1, got)
+		}
+	}
 }
 
 // shipTicketReadyFrom drives judgingTicket (already in the shape
