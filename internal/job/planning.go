@@ -39,6 +39,7 @@ import (
 	"log/slog"
 	"os"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 	"unicode"
@@ -1022,7 +1023,8 @@ func checkReady(t store.Ticket, resp *response.ReadyResponse, fsys fs.FS) ([]*re
 // narrowed. A scenario of kind host runs on the owner's machine at judging,
 // outside any sandbox (#137), so it is exempt from the /tmp and
 // nested-sandbox refusals below; it still needs a non-blank check, and it
-// still obeys the expected-skip rule.
+// still obeys the expected-skip rule. It also refuses rm -f and rm -rf in
+// every kind, since Codex refuses them (#94).
 func checkScenarioShape(scenarios []response.Scenario) []*response.PathError {
 	var errs []*response.PathError
 	if n := len(scenarios); n < minReadyScenarios || n > maxReadyScenarios {
@@ -1079,6 +1081,16 @@ func checkScenarioRules(i int, sc response.Scenario) []*response.PathError {
 		errs = append(errs, &response.PathError{
 			Path: "scenarios/" + indexedScenario(i) + "/check",
 			Msg:  "check must not write under /tmp, which the sandbox denies; use \"$TMPDIR\" instead",
+		})
+	}
+	// Codex's command policy refuses rm -f and rm -rf ("rm -f style
+	// commands are not permitted"), so a check that clears its state that
+	// way fails inside the judge with no cause the owner can see (#94).
+	// Every kind, host included.
+	if rmForce.MatchString(sc.Check) {
+		errs = append(errs, &response.PathError{
+			Path: "scenarios/" + indexedScenario(i) + "/check",
+			Msg:  rmForceCheckMsg,
 		})
 	}
 	// Zing runs every check inside a seatbelt sandbox (the judge's, then
@@ -1232,6 +1244,12 @@ func unquotedGlobCheckMsg(word string) string {
 }
 
 const hostSandboxCheckMsg = "check runs the host sandbox (sandbox-exec or the internal/sandbox probes), which cannot start inside the sandbox Zing runs checks in, so its probes skip and prove nothing; leave it out of the sealed checks"
+
+// rmForce matches rm used as a command word with a flag cluster holding f:
+// rm -f, rm -rf, rm -fr, rm -Rf. form -f and a quoted 'rm -f' do not match.
+var rmForce = regexp.MustCompile(`(^|[;&|(\s])rm\s+-[a-zA-Z]*f`)
+
+const rmForceCheckMsg = "check must not use rm -f or rm -rf, which Codex refuses; write state under a fresh directory from mktemp -d instead"
 
 // skipWord matches a then that names a skip as the expected result.
 var skipWord = regexp.MustCompile(`(?i)\bskip(s|ped)?\b`)
@@ -3083,6 +3101,65 @@ func postRunFailure(t store.Ticket, d Deps, rr runResult, sessionCommit *store.S
 	return c
 }
 
+// schemaInvalidOrigins maps a ticket's state to the escalation origin
+// SchemaInvalidEscalation gives a schema-invalid commit for that state
+// (design section "dispatcher"): the state names the step whose handler
+// built the rejected payload, in each case the one that handles that
+// state's escalation with no run (RunID nil).
+var schemaInvalidOrigins = map[string]response.EscalationOrigin{
+	stateQueued:    response.EscalationOriginClassify,
+	statePlanning:  response.EscalationOriginPlanningResume,
+	stateBuilding:  response.EscalationOriginBuild,
+	stateReviewing: response.EscalationOriginReview,
+	stateJudging:   response.EscalationOriginJudge,
+	stateShipping:  response.EscalationOriginShipping,
+}
+
+// SchemaInvalidEscalation turns a commit the store refused as
+// schema-invalid into a post_run_failed escalation for the same ticket and
+// lease (design section "dispatcher"): the dispatcher's own schema-invalid
+// branch in runAndCommit calls this ahead of falling back to fail-closed.
+// ok is false for a state with no origin, so the caller fails closed. The
+// escalation's RunID is left nil (unlike postRunFailure, which names the
+// run that failed), so each job's Retry takes its existing no-run path
+// rather than trying to resume a run whose result was never stored.
+func SchemaInvalidEscalation(t store.Ticket, failed store.HandlerCommit, err error) (store.HandlerCommit, bool) {
+	origin, ok := schemaInvalidOrigins[t.State]
+	if !ok {
+		return store.HandlerCommit{}, false
+	}
+
+	var runs []store.Run
+	ids := make([]string, 0, len(failed.Runs))
+	for _, r := range failed.Runs {
+		if r.ID <= 0 {
+			continue
+		}
+		o := string(response.OutcomeError)
+		runs = append(runs, store.Run{ID: r.ID, Turn: r.Turn, Outcome: &o, ExitCode: r.ExitCode, AgentSeconds: r.AgentSeconds})
+		ids = append(ids, strconv.FormatInt(r.ID, 10))
+	}
+	runText := noneLiteral
+	if len(ids) != 0 {
+		runText = strings.Join(ids, ", ")
+	}
+
+	d := Deps{Owner: failed.Owner, Expires: failed.Expires}
+	c := escalationCommit(t, d, nil, nil, string(response.EscalationCodePostRunFailed),
+		postRunFailedWhatFor(origin), postRunFailedWhy, err.Error()+"\nrun ids: "+runText, origin)
+	c.Runs = runs
+	if failed.Session != nil && failed.Session.ID != nil {
+		c.Session = failed.Session
+	}
+	for _, su := range failed.Sessions {
+		if su.ID != nil {
+			c.Sessions = append(c.Sessions, su)
+		}
+	}
+	c.ResolveQuestions = failed.ResolveQuestions
+	return c, true
+}
+
 // routeFailure builds the commit for every runJob failure classify, the
 // planning first turn, and its resume all handle alike (design section 5.4,
 // 6.7, 6.8): the pre-reserve failures (ErrBudget, ErrConfig,
@@ -3560,7 +3637,7 @@ func confirmSchemas() ([]string, error) {
 func sessionStateName(s store.SessionState) string {
 	switch s {
 	case store.SessionNone:
-		return "none"
+		return noneLiteral
 	case store.SessionIdless:
 		return "idless"
 	case store.SessionOpen:
