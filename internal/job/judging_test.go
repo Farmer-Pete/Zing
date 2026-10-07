@@ -3263,3 +3263,46 @@ func TestJudgeFailedRoundDroppedFixStartsNextRound(t *testing.T) {
 		}
 	})
 }
+
+// TestJudgeRetryFreshRoundCarriesOwnerNote proves ticket #80 task 5: a
+// judge-origin "with a run" retry (judgeHandler.retryFreshRound) carries
+// the owner's typed note, not just the chosen option, into round 2's own
+// fenced "notes" input.
+func TestJudgeRetryFreshRoundCarriesOwnerNote(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow end-to-end flow; runs in the full suite")
+	}
+	t.Parallel()
+	s, ticket := judgeTicketReady(t)
+
+	scripts := judgeScriptsFS(judgeOkBothScript)
+	scripts["judge/2/1.xml"] = &fstest.MapFile{Data: []byte(judgeOkBothScript)}
+	rt := runtime.NewFake(scripts)
+
+	ticket = judgeAdvanceStart(t, s, rt, ticket) // START round 1
+
+	deps := pbClaim(t, s, rt, ticket.ID)
+	runCommit, err := (judgeHandler{}).Run(t.Context(), ticket, deps) // RUN round 1
+	if err != nil {
+		t.Fatalf("RUN round 1: %v", err)
+	}
+	pbApply(t, s, ticket, runCommit)
+	ticket = pbGetTicket(t, s, ticket.ID)
+
+	runID, err := s.MaxRunID(t.Context(), ticket.ID)
+	if err != nil {
+		t.Fatalf("MaxRunID: %v", err)
+	}
+	qID := pbEscalateDirect(t, s, ticket.ID, &runID, nil, response.EscalationCodeRuntimeExecFailed, response.EscalationOriginJudge)
+	const retryNote = "judge s2 only"
+	pbAnswerEscalationWithNote(t, s, ticket.ID, qID, "a", retryNote)
+
+	rec := &recordingRuntime{inner: rt}
+	deps2 := pbClaim(t, s, rec, ticket.ID)
+	commit, handled := pbRunPrelude(t, s, deps2, ticket.ID)
+	if !handled {
+		t.Fatal("handled = false, want true")
+	}
+	_ = commit
+	assertFencedPB(t, rec.lastRequest(t).Prompt, "notes", retryNote)
+}
