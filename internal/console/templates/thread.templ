@@ -523,18 +523,20 @@ func pickedAttr(picked bool) string {
 
 // itemDecisionsReview is the review kind's own closed set of item decisions,
 // in the order their controls render (design section 6.5, 9.2, Task 11):
-// accept, drop, and discuss, matching response.FindingDecision -- never
-// reject, which is perimeter's own decision alone.
+// accept, drop, and discuss, matching response.FindingDecision. Both item
+// kinds share accept and drop; discuss is review's alone (bug fix, #78).
 var itemDecisionsReview = []response.Decision{
 	response.DecisionAccept, response.DecisionDrop, response.DecisionDiscuss,
 }
 
 // itemDecisionsPerimeter is the perimeter kind's own narrower set (design
-// section 9.2, Task 10): a perimeter item is a file the owner only ever
-// keeps or reverts, so it renders accept and reject alone, never drop or
-// discuss.
+// section 9.2, Task 10, bug fix #78): a perimeter item is a file the owner
+// only ever keeps or reverts, so it renders accept and drop alone, never
+// discuss. SaveDraft stores a perimeter drop as reject, the word
+// internal/job/building.go reads, and DisplayDecision shows that stored
+// reject back as drop.
 var itemDecisionsPerimeter = []response.Decision{
-	response.DecisionAccept, response.DecisionReject,
+	response.DecisionAccept, response.DecisionDrop,
 }
 
 // itemRows renders the two item kinds' control (design section 6.6, 9.2):
@@ -551,7 +553,7 @@ templ itemRows(ticketID, questionID int64, items []ThreadItem, decisions []respo
 	if len(items) > 0 {
 		<div class="items">
 			for _, item := range items {
-				@itemRow(ticketID, questionID, item, decisions, pickedItems[item.Ref], notes[item.Ref], withNotes, interactive)
+				@itemRow(ticketID, questionID, item, decisions, DisplayDecision(pickedItems[item.Ref]), notes[item.Ref], withNotes, interactive)
 			}
 		</div>
 	}

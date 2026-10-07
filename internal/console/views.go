@@ -1485,9 +1485,11 @@ func collectSentAnswers(rows []store.MessageRow) map[int64]response.AnswerPayloa
 // the option's text when payload.Option names one of q's own options (its
 // bare key as a fallback, for a payload that is well-formed but, through
 // some future drift, no longer matches), or "ref: decision" pairs, ref
-// order, for an item answer. Empty when payload carries neither, which
-// questionGroup (thread.templ) treats as "nothing to show" rather than an
-// empty locked note.
+// order, for an item answer. Each item decision runs through
+// templates.DisplayDecision, so a perimeter item stored as reject prints as
+// drop, the same word its button shows. Empty when payload carries neither,
+// which questionGroup (thread.templ) treats as "nothing to show" rather
+// than an empty locked note.
 func sentAnswerText(payload response.AnswerPayload, options []templates.ThreadOption) string {
 	if payload.Option != nil {
 		for _, o := range options {
@@ -1507,7 +1509,7 @@ func sentAnswerText(payload response.AnswerPayload, options []templates.ThreadOp
 	sort.Strings(refs)
 	parts := make([]string, 0, len(refs))
 	for _, ref := range refs {
-		parts = append(parts, ref+": "+string(payload.Items[ref]))
+		parts = append(parts, ref+": "+string(templates.DisplayDecision(payload.Items[ref])))
 	}
 	return strings.Join(parts, ", ")
 }
@@ -2939,9 +2941,11 @@ func validationErrorsLine(body string) string {
 // Body never carries (design section 6.6, 6.7, code review fix 2): the
 // chosen option's key, or its item ref-to-decision picks joined into one
 // line, ref order sorted so the rendered line is deterministic regardless
-// of map iteration order. An unparseable or empty payload falls back to the
-// (empty) Body rather than erroring, matching stateLine's and
-// escalationLine's own defensive fallback.
+// of map iteration order. Each item decision runs through
+// templates.DisplayDecision, so a perimeter item stored as reject prints as
+// drop. An unparseable or empty payload falls back to the (empty) Body
+// rather than erroring, matching stateLine's and escalationLine's own
+// defensive fallback.
 func answerLine(m *store.MessageRow) string {
 	if len(m.Payload) == 0 {
 		return m.Body
@@ -2963,7 +2967,7 @@ func answerLine(m *store.MessageRow) string {
 	sort.Strings(refs)
 	parts := make([]string, 0, len(refs))
 	for _, ref := range refs {
-		parts = append(parts, ref+": "+string(ap.Items[ref]))
+		parts = append(parts, ref+": "+string(templates.DisplayDecision(ap.Items[ref])))
 	}
 	return strings.Join(parts, ", ")
 }
