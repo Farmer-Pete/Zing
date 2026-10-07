@@ -1372,6 +1372,7 @@ func (h shipHandler) pollCIFailed(ctx context.Context, t store.Ticket, d Deps, p
 	}
 
 	text := rd.Text
+	var notes []store.Message
 	baseSHA, baseErr := proj.Orch.FetchBase(ctx, wt)
 	var base map[checkKey][]string
 	if baseErr == nil {
@@ -1380,15 +1381,25 @@ func (h shipHandler) pollCIFailed(ctx context.Context, t store.Ticket, d Deps, p
 	if baseErr != nil {
 		slog.Warn("ci pre-existing check skipped", "ticket_id", t.ID, "error", baseErr)
 	} else {
+		branch := proj.Orch.DefaultBranch()
 		pe := decidePreExisting(rd.Failed, rd.FailedStatuses, base)
 		slog.Info("ci pre-existing check", "ticket_id", t.ID, "base_sha", baseSHA, "pre", pe.Pre, "tests", pe.Tests, "no_run", pe.NoRun)
 		if pe.Pre {
 			tests := strings.Join(pe.Tests, ", ")
-			why := fmt.Sprintf("%s failed on this pull request and on %s at %s too, so a fix run on this ticket cannot fix them", tests, proj.Orch.DefaultBranch(), shortSHA(baseSHA))
+			why := fmt.Sprintf("%s failed on this pull request and on %s at %s too, so a fix run on this ticket cannot fix them", tests, branch, shortSHA(baseSHA))
 			c := shipEscalation(t, d, preExistingWhat, why, preExistingTried)
 			c.Messages = append(c.Messages, store.Message{TicketID: t.ID, Type: msgTypeUpdate, Author: authorSystem, Body: preExistingPrefix + baseSHA + ": " + tests})
 			c.ClearPoll = true
 			return c, nil
+		}
+		if len(pe.Tests) != 0 {
+			text += fmt.Sprintf("\n\nThese tests also fail on %s at %s, so this ticket did not cause them; leave them alone: %s", branch, shortSHA(baseSHA), strings.Join(pe.Tests, ", "))
+		}
+		for _, name := range pe.NoRun {
+			notes = append(notes, store.Message{
+				TicketID: t.ID, Type: msgTypeUpdate, Author: authorSystem,
+				Body: fmt.Sprintf("%s at %s has no finished run of %s, so Zing could not tell whether the failure is pre-existing", branch, shortSHA(baseSHA), name),
+			})
 		}
 	}
 
@@ -1406,6 +1417,7 @@ func (h shipHandler) pollCIFailed(ctx context.Context, t store.Ticket, d Deps, p
 	ok, what, why, tried := shippingGate(k, maxLoops, string(FixKindCILog), 0, text)
 	if !ok {
 		c := shipLoopsExhausted(t, d, what, why, tried)
+		c.Messages = append(c.Messages, notes...)
 		c.ClearPoll = true
 		return c, nil
 	}
@@ -1420,7 +1432,7 @@ func (h shipHandler) pollCIFailed(ctx context.Context, t store.Ticket, d Deps, p
 	}
 
 	c := baseCommit(t, d)
-	c.Messages = []store.Message{msg}
+	c.Messages = append([]store.Message{msg}, notes...)
 	c.ClearPoll = true
 	return c, nil
 }

@@ -35,12 +35,13 @@ func mergePublished(t *testing.T) (s *store.Store, ticket store.Ticket, gh *ship
 	return s, ticket, gh, tr
 }
 
-// mergeBaseRefSHA reads refs/zing/base/<branch> directly out of the
-// ticket's own project checkout, the ref FetchBase (internal/orchestrator)
-// advances, so a test can prove a request's own BaseSHA is exactly what
-// FetchBase read.
-func mergeBaseRefSHA(t *testing.T, s *store.Store, ticket store.Ticket, branch string) string {
+// mergeBaseRefSHA reads refs/zing/base/<pbFixtureDefaultBranch> directly
+// out of the ticket's own project checkout, the ref FetchBase
+// (internal/orchestrator) advances, so a test can prove a request's own
+// BaseSHA is exactly what FetchBase read.
+func mergeBaseRefSHA(t *testing.T, s *store.Store, ticket store.Ticket) string {
 	t.Helper()
+	branch := pbFixtureDefaultBranch
 	proj, err := s.ProjectForTicket(t.Context(), ticket.ID)
 	if err != nil {
 		t.Fatalf("ProjectForTicket: %v", err)
@@ -91,7 +92,7 @@ func TestPollDirtyWritesMergeRequest(t *testing.T) {
 	if req.BaseBranch != pbFixtureDefaultBranch {
 		t.Errorf("req.BaseBranch = %q, want %q", req.BaseBranch, pbFixtureDefaultBranch)
 	}
-	wantSHA := mergeBaseRefSHA(t, s, ticket, pbFixtureDefaultBranch)
+	wantSHA := mergeBaseRefSHA(t, s, ticket)
 	if req.BaseSHA != wantSHA {
 		t.Errorf("req.BaseSHA = %s, want %s (refs/zing/base/%s)", req.BaseSHA, wantSHA, pbFixtureDefaultBranch)
 	}
