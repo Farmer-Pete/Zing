@@ -71,7 +71,7 @@ const (
 	tableEvents            = "events"
 )
 
-// Registry lists the 20 stored types, each mapped to its committed schema path.
+// Registry lists the 21 stored types, each mapped to its committed schema path.
 func Registry() []Entry {
 	return []Entry{
 		{tableMessages, "question", response.QuestionPayload{}},
@@ -94,6 +94,7 @@ func Registry() []Entry {
 		{tableEvents, "check_rerun", response.CheckRerunEvent{}},
 		{tableEvents, "check_rerun_passed", response.CheckRerunPassedEvent{}},
 		{tableEvents, "owner_edit", response.OwnerEditEvent{}},
+		{tableEvents, "stale_base", response.StaleBaseEvent{}},
 	}
 }
 

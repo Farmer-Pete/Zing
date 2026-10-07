@@ -24,6 +24,7 @@ var eventRules = map[string]eventRule{
 	store.EventKindCheckRerun:       checkRerunLine,
 	store.EventKindCheckRerunPassed: checkRerunPassedLine,
 	store.EventKindOwnerEdit:        ownerEditLine,
+	store.EventKindStaleBase:        staleBaseLine,
 }
 
 // eventLine renders an event row through its kind's rule. If the kind has
@@ -94,4 +95,14 @@ func ownerEditLine(payload json.RawMessage) (string, error) {
 		return "", fmt.Errorf("decode owner_edit: %w", err)
 	}
 	return response.OwnerEditLine(e), nil
+}
+
+// staleBaseLine renders a stale_base event (store.EventKindStaleBase): a
+// step that used the last fetched base because the fetch failed.
+func staleBaseLine(payload json.RawMessage) (string, error) {
+	var e response.StaleBaseEvent
+	if err := json.Unmarshal(payload, &e); err != nil {
+		return "", fmt.Errorf("decode stale_base: %w", err)
+	}
+	return response.StaleBaseLine(e), nil
 }

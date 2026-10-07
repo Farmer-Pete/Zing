@@ -108,15 +108,21 @@ type ShipTracker interface {
 // job.go's own Registry()["shipping"] entry.
 type shipHandler struct{}
 
-// Run is the shipping state's own decision tree (design section 8.1): the
-// prelude (P), step (1)'s own "job respond" branch (RESPOND resume with
-// answers, M4 task 4) and "merge" branch (MERGE-ANSWER, M4 task 8), step
-// (2) (RESPOND's first turn and every resume, M4 task 4), step (3) (APPLY,
-// M4 task 5, respond.go), step (4) PUBLISH when pr_url is still NULL, and
-// step (5) POLL otherwise. Nothing before row 9 (8.5) or MERGE-ANSWER
-// itself ever writes a "merge asked" marker, so an answered round of any
-// other job or kind is a bug this reports loudly rather than guessing at.
+// Run is shipping's tick, wrapped so a stale base fetch is noted.
 func (h shipHandler) Run(ctx context.Context, t store.Ticket, d Deps) (store.HandlerCommit, error) {
+	return withStaleBaseNote(ctx, t, d, stateShipping, h.run)
+}
+
+// run is the shipping state's own decision tree (design section 8.1), Run's
+// body before this change: the prelude (P), step (1)'s own "job respond"
+// branch (RESPOND resume with answers, M4 task 4) and "merge" branch
+// (MERGE-ANSWER, M4 task 8), step (2) (RESPOND's first turn and every
+// resume, M4 task 4), step (3) (APPLY, M4 task 5, respond.go), step (4)
+// PUBLISH when pr_url is still NULL, and step (5) POLL otherwise. Nothing
+// before row 9 (8.5) or MERGE-ANSWER itself ever writes a "merge asked"
+// marker, so an answered round of any other job or kind is a bug this
+// reports loudly rather than guessing at.
+func (h shipHandler) run(ctx context.Context, t store.Ticket, d Deps) (store.HandlerCommit, error) {
 	c, handled, err := postBuildPrelude(ctx, t, d, response.EscalationOriginShipping)
 	if handled || err != nil {
 		return c, err
