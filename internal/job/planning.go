@@ -941,8 +941,11 @@ func readyCommit(ctx context.Context, t store.Ticket, d Deps, rr runResult, resp
 	if err != nil {
 		return store.HandlerCommit{}, fmt.Errorf("job: planning: ready: %w", err)
 	}
-	errs = append(errs, checkDispositions(required, resp.Plan.Dispositions, []byte(planXML))...)
+	dispositionErrs := checkDispositions(required, resp.Plan.Dispositions, []byte(planXML))
+	errs = append(errs, dispositionErrs...)
 	if len(errs) > 0 {
+		slog.Info("ready plan rejected", "ticket_id", t.ID, "run_id", rr.Reserved.RunID,
+			"error_count", len(errs), "disposition_error_count", len(dispositionErrs), "required_count", len(required))
 		c.Messages = []store.Message{{
 			TicketID: t.ID, Type: msgTypeUpdate, Author: authorSystem,
 			Body: fmt.Sprintf("%s run %d\n%s", validationErrorsPendingPrefix, rr.Reserved.RunID, formatReadyErrors(errs)),
@@ -1488,13 +1491,13 @@ func maybeResumeFloorFindings(ctx context.Context, t store.Ticket, d Deps, sess 
 	if unmarshalErr := json.Unmarshal(review.Payload, &payload); unmarshalErr != nil {
 		return store.HandlerCommit{}, false, fmt.Errorf("job: planning: unmarshal planreview artifact: %w", unmarshalErr)
 	}
-	atOrBelow := make([]response.Finding, 0, len(payload.Findings))
+	atOrBelow := 0
 	for i := range payload.Findings {
 		if payload.Findings[i].Severity.Rank() <= d.Floor.Rank() {
-			atOrBelow = append(atOrBelow, payload.Findings[i])
+			atOrBelow++
 		}
 	}
-	above := len(payload.Findings) - len(atOrBelow)
+	above := len(payload.Findings) - atOrBelow
 
 	n, err := d.Store.CountDeliveredReviews(ctx, t.ID)
 	if err != nil {
@@ -1531,7 +1534,7 @@ func maybeResumeFloorFindings(ctx context.Context, t store.Ticket, d Deps, sess 
 			commit.Messages = append(commit.Messages, store.Message{
 				TicketID: t.ID, Type: msgTypeUpdate, Author: authorSystem, Body: gateCapMarker(cohort.PlanVersion),
 			})
-			slog.Info("gate posted at loop cap", "ticket_id", t.ID, "plan_version", cohort.PlanVersion, "floor_findings", len(atOrBelow))
+			slog.Info("gate posted at loop cap", "ticket_id", t.ID, "plan_version", cohort.PlanVersion, "floor_findings", atOrBelow)
 			return commit, true, nil
 		}
 		c := escalationCommit(t, d, nil, nil,
@@ -1545,8 +1548,12 @@ func maybeResumeFloorFindings(ctx context.Context, t store.Ticket, d Deps, sess 
 	if err != nil {
 		return commit, true, err
 	}
-	slog.Info("floor findings delivered", "ticket_id", t.ID, "plan_version", cohort.PlanVersion,
-		"at_or_below", len(atOrBelow), "needs_disposition", above)
+	var runID int64
+	if len(commit.Runs) == 1 {
+		runID = commit.Runs[0].ID
+	}
+	slog.Info("floor findings delivered", "ticket_id", t.ID, "run_id", runID, "plan_version", cohort.PlanVersion,
+		"at_or_below", atOrBelow, "needs_disposition", above)
 	commit.Messages = append(commit.Messages, store.Message{
 		TicketID: t.ID, Type: msgTypeUpdate, Author: authorSystem, Body: delivered,
 	})
@@ -1594,15 +1601,7 @@ func runPlanReview(ctx context.Context, t store.Ticket, d Deps, extra []prompt.N
 		inputs = append(inputs, prompt.NamedInput{Label: previousFindingsLabel, Text: renderFindings(prev), Untrusted: true})
 	}
 	if len(prevDispositions) > 0 {
-		lines := make([]string, len(prevDispositions))
-		for i, disp := range prevDispositions {
-			detail := disp.Path
-			if disp.Kind == response.DispositionDisputed {
-				detail = disp.Reason
-			}
-			lines[i] = fmt.Sprintf("%s %s: %s", disp.Finding, disp.Kind, detail)
-		}
-		inputs = append(inputs, prompt.NamedInput{Label: previousDispositionsLabel, Text: strings.Join(lines, "\n"), Untrusted: true})
+		inputs = append(inputs, prompt.NamedInput{Label: previousDispositionsLabel, Text: renderDispositions(prevDispositions), Untrusted: true})
 	}
 
 	jobCfg := d.Machine.Jobs[jobPlanreviewName]
@@ -1824,6 +1823,21 @@ func renderFindings(findings []response.Finding) string {
 			line += fmt.Sprintf(" (raised again: %s got no disposition)", f.Reopens)
 		}
 		lines[i] = line
+	}
+	return strings.Join(lines, "\n")
+}
+
+// renderDispositions renders dispositions one per line -- finding id, kind,
+// then the fixed path or the disputed reason -- the review tick fences
+// behind previousDispositionsLabel.
+func renderDispositions(ds []response.Disposition) string {
+	lines := make([]string, len(ds))
+	for i, disp := range ds {
+		detail := disp.Path
+		if disp.Kind == response.DispositionDisputed {
+			detail = disp.Reason
+		}
+		lines[i] = fmt.Sprintf("%s %s: %s", disp.Finding, disp.Kind, detail)
 	}
 	return strings.Join(lines, "\n")
 }
@@ -2414,7 +2428,9 @@ func previousReview(ctx context.Context, d Deps, ticketID int64, version int) ([
 	var review *store.Artifact
 	for i := range all {
 		a := &all[i]
-		if a.Type == artifactTypePlanreview && a.Version < version && (review == nil || a.Version > review.Version) {
+		below := a.Type == artifactTypePlanreview && a.Version < version
+		newer := review == nil || a.Version > review.Version
+		if below && newer {
 			review = a
 		}
 	}
@@ -2556,12 +2572,12 @@ func checkDispositions(required []response.Finding, ds []response.Disposition, p
 }
 
 // disputeOptionKeep and disputeOptionChange are the fixed Keep/Change chip
-// pair a dispute question offers the owner (ticket 72 task 4, owner
+// texts a dispute question offers the owner (ticket 72 task 4, owner
 // decision Q4), the same shape as gateQuestionMessage's Approve/Reject
 // pair above.
 const (
-	disputeOptionKeep   = "a"
-	disputeOptionChange = "b"
+	disputeOptionKeep   = "Keep the plan: the planner's reason holds"
+	disputeOptionChange = "Change the plan: the finding stands"
 )
 
 // disputeQuestionMessages builds one open planning question per disputed
@@ -2588,10 +2604,10 @@ func disputeQuestionMessages(ticketID int64, required []response.Finding, ds []r
 		payload, err := json.Marshal(response.QuestionPayload{
 			Kind:        response.QuestionKindQuestion,
 			State:       response.QuestionStateOpen,
-			Recommended: disputeOptionChange,
+			Recommended: "b",
 			Options: []response.Option{
-				{Key: disputeOptionKeep, Text: "Keep the plan: the planner's reason holds"},
-				{Key: disputeOptionChange, Text: "Change the plan: the finding stands"},
+				{Key: "a", Text: disputeOptionKeep},
+				{Key: "b", Text: disputeOptionChange},
 			},
 		})
 		if err != nil {

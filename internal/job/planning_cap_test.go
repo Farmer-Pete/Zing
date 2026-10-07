@@ -351,9 +351,10 @@ func TestPlanCapLoops_BackReadyNeedsDispositionOnce(t *testing.T) {
 	}
 	found := false
 	for _, m := range commit.Messages {
-		if strings.HasPrefix(m.Body, "validation errors pending run ") &&
-			strings.Contains(m.Body, "p1-f2") && strings.Contains(m.Body, "major") &&
-			strings.Contains(m.Body, "plan/design/other") && strings.Contains(m.Body, "worse") {
+		isValidation := strings.HasPrefix(m.Body, "validation errors pending run ")
+		namesFinding := strings.Contains(m.Body, "p1-f2") && strings.Contains(m.Body, "major") &&
+			strings.Contains(m.Body, "plan/design/other") && strings.Contains(m.Body, "worse")
+		if isValidation && namesFinding {
 			found = true
 		}
 	}

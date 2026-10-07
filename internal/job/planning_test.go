@@ -16,6 +16,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"strconv"
 	"strings"
@@ -2354,8 +2355,9 @@ func TestPlanningHandler_ReviewTick_FloorResumeDeliversAboveFloorFindings(t *tes
 	if strings.Contains(prompt[i:], wantMinorID) {
 		t.Errorf("needs_disposition section unexpectedly carries the minor's id:\n%s", prompt[i:])
 	}
-	if !strings.Contains(prompt, "<<<UNTRUSTED ") {
-		t.Errorf("resume prompt does not fence its findings inputs:\n%s", prompt)
+	fenceRe := regexp.MustCompile(`^needs_disposition:\n<<<UNTRUSTED [0-9a-f]{6}>>>`)
+	if !fenceRe.MatchString(prompt[i:]) {
+		t.Errorf("needs_disposition input is not fenced:\n%s", prompt[i:])
 	}
 }
 
@@ -2591,6 +2593,10 @@ func TestPlanningHandler_Ready_DisputedPostsOneOwnerQuestion(t *testing.T) {
 		t.Fatalf("PlanningConversation.Unsettled() = %+v, want exactly 1 thread", unsettled)
 	}
 
+	noRunRT := &scriptedRuntime{t: t, steps: nil}
+	if _, err := runPlanning(t, s, claim(t, s, noRunRT, ticketID), ticketID); err != nil && !errors.Is(err, job.ErrNoAction) {
+		t.Fatalf("planning Run with an open dispute thread: %v, want ErrNoAction and no runtime call", err)
+	}
 	nextPlanVersion := planVersion + 1
 	if _, ok, err := s.PlanReviewAt(t.Context(), ticketID, nextPlanVersion); err != nil || ok {
 		t.Fatalf("PlanReviewAt(%d) = (_, %v, %v), want no artifact (a disputed plan is never reviewed)", nextPlanVersion, ok, err)
@@ -2726,14 +2732,19 @@ func TestPlanningHandler_ReviewTick_DisputeRoundCarriesFixedSiblings(t *testing.
 	}
 
 	prompt := rec.lastReq.Prompt
-	if !strings.Contains(prompt, "previous_findings:") {
+	findingsIdx := strings.Index(prompt, "previous_findings:")
+	dispositionsIdx := strings.Index(prompt, "previous_dispositions:")
+	if findingsIdx < 0 {
 		t.Fatalf("review prompt does not carry a previous_findings input:\n%s", prompt)
 	}
-	if !strings.Contains(prompt, majorObjective.ID) || !strings.Contains(prompt, majorContext.ID) {
-		t.Errorf("previous_findings does not carry both %s and %s:\n%s", majorObjective.ID, majorContext.ID, prompt)
-	}
-	if !strings.Contains(prompt, "previous_dispositions:") {
+	if dispositionsIdx < 0 {
 		t.Fatalf("review prompt does not carry a previous_dispositions input:\n%s", prompt)
+	}
+	findingsSection := prompt[findingsIdx:dispositionsIdx]
+	wantObjectiveLine := fmt.Sprintf("%s [correctness/major] %s", majorObjective.ID, testObjectiveLocation)
+	wantContextLine := fmt.Sprintf("%s [correctness/major] %s", majorContext.ID, contextLocation)
+	if !strings.Contains(findingsSection, wantObjectiveLine) || !strings.Contains(findingsSection, wantContextLine) {
+		t.Errorf("previous_findings does not carry both %q and %q:\n%s", wantObjectiveLine, wantContextLine, findingsSection)
 	}
 	wantDispLine := fmt.Sprintf("%s fixed: %s", majorObjective.ID, testObjectiveLocation)
 	if !strings.Contains(prompt, wantDispLine) {
