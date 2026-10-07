@@ -450,6 +450,100 @@ func TestPushRetryDefaults(t *testing.T) {
 	}
 }
 
+// TestGitHubRequestID proves githubRequestID returns the first GitHub
+// request ID in git push's output (5 colon-joined hex groups), and "" when
+// there is none.
+func TestGitHubRequestID(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name string
+		out  string
+		want string
+	}{
+		{
+			name: "request id on its own line",
+			out:  "remote: Request ID A512:EDA7E:31004F:396F02:6AC6793F",
+			want: "A512:EDA7E:31004F:396F02:6AC6793F",
+		},
+		{
+			name: "request id inside a sentence",
+			out:  "remote: Internal Server Error, request AC8D:299B8C:288832:310C81:6AC67999 was logged",
+			want: "AC8D:299B8C:288832:310C81:6AC67999",
+		},
+		{
+			name: "sha and no request id",
+			out:  "fatal: unable to access: a1b2c3d4e5f6502890abcdef1234567890abcdef",
+			want: "",
+		},
+		{
+			name: "empty",
+			out:  "",
+			want: "",
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			t.Parallel()
+			if got := githubRequestID(c.out); got != c.want {
+				t.Errorf("githubRequestID(%q) = %q, want %q", c.out, got, c.want)
+			}
+		})
+	}
+}
+
+// TestPushRetryLogs proves pushOrigin's "git push failed" records carry
+// ticket_id, attempt, github_5xx, retry and request_id, and that the final
+// "pushed branch" record carries the total attempts.
+func TestPushRetryLogs(t *testing.T) {
+	t.Parallel()
+	fixture := newSigningFixture(t, true)
+	repo := newSigningTestRepo(t, fixture)
+	ctx := t.Context()
+	remote := newBareRemote(ctx, t)
+	addOrigin(ctx, t, repo, remote)
+
+	requestID := "A512:EDA7E:31004F:396F02:6AC6793F"
+	runner := &flakyPushRunner{failures: 2, out: "remote: Internal Server Error\nremote: Request ID " + requestID}
+	o, logs := newTestOrchestratorCapturingLog(t, repo, runner)
+	o.pushBackoff = shortPushBackoff
+	wt := prepareSignedCommit(ctx, t, o, 744)
+
+	if err := o.Push(ctx, wt); err != nil {
+		t.Fatalf("Push: unexpected error: %v", err)
+	}
+
+	failed := findRecords(logs.records(t), "git push failed")
+	if len(failed) != 2 {
+		t.Fatalf("len(failed) = %d, want 2", len(failed))
+	}
+	for i, rec := range failed {
+		wantAttempt := float64(i + 1)
+		if got := rec["attempt"]; got != wantAttempt {
+			t.Errorf("failed[%d].attempt = %v, want %v", i, got, wantAttempt)
+		}
+		if got, want := rec["ticket_id"], float64(744); got != want {
+			t.Errorf("failed[%d].ticket_id = %v, want %v", i, got, want)
+		}
+		if got := rec["github_5xx"]; got != true {
+			t.Errorf("failed[%d].github_5xx = %v, want true", i, got)
+		}
+		if got := rec["retry"]; got != true {
+			t.Errorf("failed[%d].retry = %v, want true", i, got)
+		}
+		if got := rec["request_id"]; got != requestID {
+			t.Errorf("failed[%d].request_id = %v, want %q", i, got, requestID)
+		}
+	}
+
+	pushed := findRecords(logs.records(t), "pushed branch")
+	if len(pushed) != 1 {
+		t.Fatalf("len(pushed) = %d, want 1", len(pushed))
+	}
+	if got, want := pushed[0]["attempts"], float64(3); got != want {
+		t.Errorf("pushed[0].attempts = %v, want %v", got, want)
+	}
+}
+
 // newTestOrchestratorWithGitHub mirrors worktree_test.go's
 // newTestOrchestrator, but with a caller-supplied GitHub double instead of
 // the always-erroring fakeGitHub{}, since OpenDraftPR needs one that

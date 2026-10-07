@@ -26,6 +26,16 @@ func isGitHub5xx(out string) bool {
 	return github5xxPattern.MatchString(out)
 }
 
+// githubRequestIDPattern matches GitHub's request ID: 5 colon-joined
+// uppercase hex groups, such as A512:EDA7E:31004F:396F02:6AC6793F.
+var githubRequestIDPattern = regexp.MustCompile(`\b[0-9A-F]{1,8}(?::[0-9A-F]{1,8}){4}\b`)
+
+// githubRequestID returns the first GitHub request ID in out, git push's
+// combined output, or "" when there is none.
+func githubRequestID(out string) string {
+	return githubRequestIDPattern.FindString(out)
+}
+
 // Push pushes wt's branch to origin (PKG5-PLAN.md section 8.4). It first
 // revalidates wt (8.2): the branch must match the zing/ form, must differ
 // from the default branch, and must be the branch actually checked out in
@@ -109,7 +119,7 @@ func (o *Orchestrator) pushOrigin(ctx context.Context, wt Worktree, refspec stri
 
 		server := isGitHub5xx(out)
 		retry := server && attempt <= len(o.pushBackoff)
-		o.log.Warn("git push failed", "ticket_id", wt.ticketID, "branch", wt.branch, "attempt", attempt, "github_5xx", server, "retry", retry)
+		o.log.Warn("git push failed", "ticket_id", wt.ticketID, "branch", wt.branch, "attempt", attempt, "github_5xx", server, "retry", retry, "request_id", githubRequestID(out))
 		if !retry {
 			return attempt, fmt.Errorf("orchestrator: push: git push (attempts: %d): %w: %s", attempt, runErr, strings.TrimSpace(out))
 		}
