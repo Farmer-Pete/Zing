@@ -19,6 +19,8 @@ import (
 	"zing/internal/store"
 )
 
+// ---- shared failure and escalation commit builders ------------------------
+
 // runAndRoute is the one seam every runJob call passes through on its way to
 // a commit (design F025): runClassify, runPlanningFirst, runPlanningResume,
 // and runPlanReview differ only in the request they build and the success
