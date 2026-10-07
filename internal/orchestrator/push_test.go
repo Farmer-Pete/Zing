@@ -238,6 +238,12 @@ func (g *scriptedPushGitHub) FindPRByHead(_ context.Context, _, _, _, base strin
 	return g.findURL, g.findNumber, g.findOK, nil
 }
 
+// isPushOrigin reports whether a Runner.Run call with name and args is
+// "git push origin ...", the only command flakyPushRunner scripts.
+func isPushOrigin(name string, args []string) bool {
+	return name == "git" && len(args) >= 2 && args[0] == "push" && args[1] == "origin"
+}
+
 // flakyPushRunner wraps a real execRunner, failing the first failures calls
 // to "git push origin ..." with out and a generic non-zero-exit error, then
 // delegating every push call (and every other command, always) to
@@ -250,7 +256,7 @@ type flakyPushRunner struct {
 }
 
 func (r *flakyPushRunner) Run(ctx context.Context, dir, name string, args ...string) (string, error) {
-	if name == "git" && len(args) >= 2 && args[0] == "push" && args[1] == "origin" {
+	if isPushOrigin(name, args) {
 		r.pushes++
 		if r.pushes <= r.failures {
 			return r.out, errors.New("exit status 1")
@@ -388,6 +394,73 @@ func TestOpenDraftPRRetriesGitHub5xx(t *testing.T) {
 			t.Errorf("pushes = %d, want 2", runner.pushes)
 		}
 	})
+}
+
+// cancelAfterFirstPushRunner wraps flakyPushRunner, cancelling its own ctx
+// right after the first "git push origin ..." call returns, so a test can
+// put pushOrigin's wait on a long pushBackoff entry and still observe its
+// ctx.Done() branch return at once rather than actually waiting it out.
+type cancelAfterFirstPushRunner struct {
+	flakyPushRunner
+	cancel context.CancelFunc
+	fired  bool
+}
+
+func (r *cancelAfterFirstPushRunner) Run(ctx context.Context, dir, name string, args ...string) (string, error) {
+	out, err := r.flakyPushRunner.Run(ctx, dir, name, args...)
+	if isPushOrigin(name, args) && !r.fired {
+		r.fired = true
+		r.cancel()
+	}
+	return out, err
+}
+
+// TestPushRetryWaitRespectsCtx proves pushOrigin's wait between retries is
+// ctx-aware (owner decision Q1): with every pushBackoff entry set to an hour,
+// a push that fails its first attempt with a 5xx and then sees ctx
+// cancelled still returns promptly, with an error naming a single attempt
+// and wrapping ctx.Err(), rather than actually waiting out the hour.
+func TestPushRetryWaitRespectsCtx(t *testing.T) {
+	t.Parallel()
+	fixture := newSigningFixture(t, true)
+	repo := newSigningTestRepo(t, fixture)
+	parent := t.Context()
+	remote := newBareRemote(parent, t)
+	addOrigin(parent, t, repo, remote)
+
+	ctx, cancel := context.WithCancel(parent)
+	runner := &cancelAfterFirstPushRunner{
+		flakyPushRunner{failures: 4, out: "remote: Internal Server Error"},
+		cancel,
+		false,
+	}
+	gh := &scriptedPushGitHub{}
+	o := newTestOrchestratorWithGitHub(t, repo, runner, gh)
+	o.pushBackoff = []time.Duration{time.Hour, time.Hour, time.Hour}
+	wt := prepareSignedCommit(ctx, t, o, 745)
+
+	start := time.Now()
+	_, _, err := o.OpenDraftPR(ctx, wt, PullRequest{Title: testCommitTitle})
+	elapsed := time.Since(start)
+
+	if err == nil {
+		t.Fatal("OpenDraftPR: expected an error, got nil")
+	}
+	if elapsed > 5*time.Second {
+		t.Errorf("OpenDraftPR took %v, want it to return promptly once ctx is cancelled rather than wait out an hour-long pushBackoff entry", elapsed)
+	}
+	if !errors.Is(err, context.Canceled) {
+		t.Errorf("err = %v, want errors.Is(err, context.Canceled)", err)
+	}
+	if !strings.Contains(err.Error(), "(attempts: 1)") {
+		t.Errorf("error = %q, want it to contain %q", err.Error(), "(attempts: 1)")
+	}
+	if !strings.Contains(err.Error(), "waiting to retry") {
+		t.Errorf("error = %q, want it to contain %q", err.Error(), "waiting to retry")
+	}
+	if runner.pushes != 1 {
+		t.Errorf("pushes = %d, want 1", runner.pushes)
+	}
 }
 
 // TestIsGitHub5xx proves isGitHub5xx matches the owner's chosen phrases and
