@@ -276,19 +276,20 @@ type ScenarioEdit struct {
 // text, and Kind picks which comment builder the dispatcher's
 // postCommitTrackerEffect applies to Notes before posting. CommitHandlerResult
 // carries this value through unread; only the dispatcher, after a successful
-// commit, resolves Ref and posts the built comment. PUBLISH's PR-link
-// comment and DONE's done comment are posted before their own commits
-// instead (PKG9-PLAN.md section 8.2, 8.6, 11) and never go through
-// TrackerEffect.
+// commit, resolves Ref and posts the built comment, then closes the issue.
+// PUBLISH's PR-link comment and DONE's done comment are posted before their
+// own commits instead (PKG9-PLAN.md section 8.2, 8.6, 11) and never go
+// through TrackerEffect.
 type TrackerEffect struct {
 	Kind       string
 	Ref, Notes string
 }
 
 // TrackerEffectKindNothingToDo is TrackerEffect.Kind's value for design
-// section 6.8's nothing_to_do row: the dispatcher responds to it with
-// tracker.NothingToDoComment. An empty or unrecognized Kind posts nothing
-// rather than guessing which comment to send.
+// section 6.8's nothing_to_do row: the dispatcher responds to it by posting
+// tracker.NothingToDoComment once, through the zing:nothing marker, and
+// then closing the issue (owner decision Q1). An empty or unrecognized Kind
+// posts and closes nothing rather than guessing which comment to send.
 const TrackerEffectKindNothingToDo = "nothing_to_do"
 
 // ErrSealMismatch is the sentinel every *SealMismatchError unwraps to, so a

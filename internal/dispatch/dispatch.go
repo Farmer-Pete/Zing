@@ -1714,14 +1714,17 @@ func (d *Dispatcher) releaseAfterSealRefused(
 
 // postCommitTrackerEffect runs commit.TrackerEffect, if any, only after
 // CommitHandlerResult has already applied cleanly (design D12, section 4.5,
-// 6.8): it resolves the binding for ticket.ProjectID the same way intake
-// (above) resolves one for its pickup comment, builds the comment body
-// e.Kind names, and posts it best-effort -- a failure only warns, since the
-// ticket's own state has already committed and must not be undone by a
-// tracker-side failure. An unrecognized Kind posts nothing: every kind this
-// dispatcher knows is named below, and guessing at an unknown one risks
-// posting the wrong comment under the ticket's own name. PUBLISH's PR-link
-// comment and DONE's done comment never reach here -- PostPRLink and
+// 6.8): it posts the nothing_to_do comment through postMarkedOnce, the same
+// marked-once shape CloseSplitParent and PostDone share, under marker kind
+// "nothing", and then closes the issue -- a retried tick never posts or
+// closes twice. Both steps are best-effort, since the ticket's own state has
+// already committed and must not be undone by a tracker-side failure: a
+// failed comment only warns and skips the close (owner decision Q2), and a
+// failed close only warns. A successful close logs at info with ticket_id
+// and the issue ref. An unrecognized Kind posts and closes nothing: every
+// kind this dispatcher knows is named below, and guessing at an unknown one
+// risks posting the wrong comment under the ticket's own name. PUBLISH's
+// PR-link comment and DONE's done comment never reach here -- PostPRLink and
 // PostDone (below) post those before their own commits (PKG9-PLAN.md
 // section 8.2, 8.6, 11).
 func (d *Dispatcher) postCommitTrackerEffect(ctx context.Context, ticket store.Ticket, commit store.HandlerCommit) {
@@ -1730,31 +1733,33 @@ func (d *Dispatcher) postCommitTrackerEffect(ctx context.Context, ticket store.T
 	}
 	e := commit.TrackerEffect
 
-	b, ok := d.bindingForProject(ticket.ProjectID)
-	if !ok {
-		slog.Warn("tracker comment failed", "ticket_id", ticket.ID, "ref", e.Ref, "err", "no binding for project")
-		return
-	}
-
-	var body string
-	switch e.Kind {
-	case store.TrackerEffectKindNothingToDo:
-		body = tracker.NothingToDoComment(b.User, e.Notes)
-	default:
+	if e.Kind != store.TrackerEffectKindNothingToDo {
 		slog.Warn("tracker comment skipped", "ticket_id", ticket.ID, "ref", e.Ref, "kind", e.Kind, "err", "unrecognized tracker effect kind")
 		return
 	}
 
 	// Unlike the store writes above (which detach with WithoutCancel so they
-	// still land after a cancel), this comment is best-effort and the commit
-	// has already succeeded, so it derives from ctx and is cancelled by a
-	// shutdown -- still bounded by postHandlerWriteTimeout, but never able to
-	// keep Run alive past the drain deadline on a blocked tracker.
-	commentCtx, cancel := context.WithTimeout(ctx, postHandlerWriteTimeout)
+	// still land after a cancel), this comment and close are best-effort and
+	// the commit has already succeeded, so this derives from ctx and is
+	// cancelled by a shutdown -- still bounded by postHandlerWriteTimeout,
+	// but never able to keep Run alive past the drain deadline on a blocked
+	// tracker.
+	trackerCtx, cancel := context.WithTimeout(ctx, postHandlerWriteTimeout)
 	defer cancel()
-	if err := d.tracker.Comment(commentCtx, b.TrackerProject, e.Ref, body); err != nil {
+
+	b, err := d.postMarkedOnce(trackerCtx, ticket.ProjectID, e.Ref, "nothing", func(b Binding) string {
+		return tracker.NothingToDoComment(b.User, e.Notes)
+	})
+	if err != nil {
 		slog.Warn("tracker comment failed", "ticket_id", ticket.ID, "ref", e.Ref, "err", err)
+		return
 	}
+
+	if err := d.tracker.Close(trackerCtx, b.TrackerProject, e.Ref); err != nil {
+		slog.Warn("tracker close failed", "ticket_id", ticket.ID, "ref", e.Ref, "err", err)
+		return
+	}
+	slog.Info("tracker issue closed", "ticket_id", ticket.ID, "ref", e.Ref)
 }
 
 // shipMarkerFmt is the hidden marker PostPRLink and PostDone each search
