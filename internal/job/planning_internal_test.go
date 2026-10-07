@@ -522,3 +522,41 @@ func TestRenderAnswerText_MarksARevisedAnswer(t *testing.T) {
 		t.Errorf("renderAnswerText missing the (revised) second pick %q; got:\n%s", wantRevised, got)
 	}
 }
+
+// TestUnblockLogOutcome proves unblockLogOutcome names an unblock turn's
+// outcome for its INFO log: "guidance" when the commit carries the
+// plan_unblock event, the escalation code when it escalates, else
+// "invalid_retry" (D14's first invalid output, retried on the next tick).
+func TestUnblockLogOutcome(t *testing.T) {
+	t.Parallel()
+	guidanceKind := store.EventKindPlanUnblock
+	guidanceCommit := store.HandlerCommit{
+		Messages: []store.Message{{EventKind: &guidanceKind}},
+	}
+	loopsExhaustedCommit := store.HandlerCommit{
+		Escalation: &store.EscalationCommit{Payload: response.EscalationPayload{Code: string(response.EscalationCodeLoopsExhausted)}},
+	}
+	postRunFailedCommit := store.HandlerCommit{
+		Escalation: &store.EscalationCommit{Payload: response.EscalationPayload{Code: string(response.EscalationCodePostRunFailed)}},
+	}
+	neitherCommit := store.HandlerCommit{}
+
+	tests := []struct {
+		name   string
+		commit store.HandlerCommit
+		want   string
+	}{
+		{"guidance event", guidanceCommit, "guidance"},
+		{"loops_exhausted escalation", loopsExhaustedCommit, "loops_exhausted"},
+		{"post_run_failed escalation", postRunFailedCommit, "post_run_failed"},
+		{"neither", neitherCommit, "invalid_retry"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			if got := unblockLogOutcome(tt.commit); got != tt.want {
+				t.Errorf("unblockLogOutcome() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}

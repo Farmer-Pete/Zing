@@ -1643,10 +1643,38 @@ func runUnblock(ctx context.Context, t store.Ticket, d Deps, planVersion int, fi
 	su := store.SessionUpsert{Job: jobUnblockName, Runtime: jobCfg.Runtime}
 	req := runtime.RunRequest{Job: response.JobSide, Label: unblockRunLabel, Prompt: prompt.Assemble(in)}
 	slog.Info("plan unblock turn started", "ticket_id", t.ID, "plan_version", planVersion, "finding_ids", ids)
-	return runAndRoute(ctx, d, t, jobUnblockName, su, req, n, freshSessionRecord, nil, response.EscalationOriginCapLoops,
+	commit, err := runAndRoute(ctx, d, t, jobUnblockName, su, req, n, freshSessionRecord, nil, response.EscalationOriginCapLoops,
 		func(rr runResult) (store.HandlerCommit, error) {
 			return unblockSuccessCommit(t, d, rr, planVersion, ids, freshSessionRecord(rr))
 		}, nil, 0)
+	var runID int64
+	if len(commit.Runs) > 0 {
+		runID = commit.Runs[0].ID
+	}
+	if err != nil {
+		slog.Info("plan unblock turn", "ticket_id", t.ID, "run_id", runID, "plan_version", planVersion,
+			"finding_ids", ids, "outcome", "failed", "error", err)
+		return commit, err
+	}
+	slog.Info("plan unblock turn", "ticket_id", t.ID, "run_id", runID, "plan_version", planVersion,
+		"finding_ids", ids, "outcome", unblockLogOutcome(commit))
+	return commit, nil
+}
+
+// unblockLogOutcome names an unblock turn's outcome for its INFO log:
+// "guidance" when commit carries the plan_unblock event, the escalation
+// code when it escalates, else "invalid_retry" (D14's first invalid
+// output, retried on the next tick).
+func unblockLogOutcome(commit store.HandlerCommit) string {
+	for i := range commit.Messages {
+		if k := commit.Messages[i].EventKind; k != nil && *k == store.EventKindPlanUnblock {
+			return "guidance"
+		}
+	}
+	if commit.Escalation != nil {
+		return commit.Escalation.Payload.Code
+	}
+	return "invalid_retry"
 }
 
 // unblockSuccessCommit routes an unblock run's parsed response. ok commits
