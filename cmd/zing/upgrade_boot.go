@@ -16,6 +16,8 @@ import (
 	"runtime/debug"
 	"sync/atomic"
 	"time"
+
+	"zing/internal/store"
 )
 
 // bootAction is what the boot guard decides to do with upgrade.json at
@@ -56,6 +58,10 @@ const (
 
 	bootCauseDeadline = "deadline"
 	bootCauseStopped  = "serve_stopped"
+
+	// closeBootedOK is closeUpgrade's outcome for a watch boot that answered
+	// 200; the rolled_back outcome reuses markerRolledBack.
+	closeBootedOK = "booted_ok"
 )
 
 // decideBoot maps upgrade.json, as found at start-up, to what the boot
@@ -273,4 +279,33 @@ func bootAnswered(ctx context.Context, client *http.Client, url string) (int, er
 		return resp.StatusCode, err
 	}
 	return resp.StatusCode, nil
+}
+
+// closeUpgrade records how an upgrade ended and removes upgrade.json.
+// request is up.Request, or nil with no upgrader; it receives a carried
+// request on booted_ok. Both outcomes post a message only when
+// m.TicketID is above 0.
+func closeUpgrade(ctx context.Context, st *store.Store, dataDir string, m upgradeMarker, outcome string, request func(int64, string)) {
+	switch outcome {
+	case closeBootedOK:
+		slog.Info("upgrade", "step", closeBootedOK, "from_sha", m.FromSHA, "to_sha", m.ToSHA, "ticket_id", m.TicketID)
+		if m.TicketID > 0 {
+			body := closeBootedOK + " " + sha12(m.ToSHA)
+			if _, err := st.InsertMessage(ctx, store.Message{TicketID: m.TicketID, Type: "update", Author: "system", Body: body}); err != nil {
+				slog.Warn("upgrade: post message", "ticket_id", m.TicketID, "error", err)
+			}
+		}
+	case markerRolledBack:
+		tellOwner(ctx, st, m.TicketID, fmt.Sprintf("upgrade: %s rolled back to %s: it did not answer 200 within 60 s", sha12(m.ToSHA), sha12(m.FromSHA)))
+	default:
+		slog.Warn("upgrade: close: unknown outcome", "outcome", outcome, "ticket_id", m.TicketID)
+		return
+	}
+	if err := removeMarker(dataDir); err != nil {
+		slog.Warn("upgrade: close", "outcome", outcome, "ticket_id", m.TicketID, "error", err)
+	}
+	if outcome == closeBootedOK && m.HasNext && request != nil {
+		slog.Info("upgrade: carried request passed on", "ticket_id", m.NextTicketID, "sha", m.NextSHA)
+		request(m.NextTicketID, m.NextSHA)
+	}
 }

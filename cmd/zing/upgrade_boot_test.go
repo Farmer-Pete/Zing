@@ -14,6 +14,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"zing/internal/store"
 )
 
 func TestDecideBoot(t *testing.T) {
@@ -607,5 +609,124 @@ func TestWatchBoot_StopsOnCancel(t *testing.T) {
 	}
 	if n, convErr := strconv.Atoi(m[1]); convErr != nil || n < 1 {
 		t.Errorf("polls = %q, want a number at least 1", m[1])
+	}
+}
+
+// openUpgradeBootStore opens a fresh store under t.TempDir and closes it on
+// cleanup, for closeUpgrade's tests.
+func openUpgradeBootStore(t *testing.T) (st *store.Store, dataDir string) {
+	t.Helper()
+	dir := t.TempDir()
+	st, err := store.Open(t.Context(), filepath.Join(dir, "zing.db"))
+	if err != nil {
+		t.Fatalf("store.Open: %v", err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	return st, dir
+}
+
+func TestCloseUpgrade_BootedOK(t *testing.T) {
+	t.Parallel()
+
+	st, dir := openUpgradeBootStore(t)
+	ticketID := seedTicketForUpgrade(t, st)
+
+	m := upgradeMarker{
+		FromSHA: "fedcba9876543210", ToSHA: "0123456789abcdef0123456789abcdef01234567",
+		TicketID: ticketID, State: markerAttempted,
+		HasNext: true, NextSHA: "deadbeef", NextTicketID: 99,
+	}
+	if err := saveUpgradeMarker(dir, m); err != nil {
+		t.Fatalf("saveUpgradeMarker: %v", err)
+	}
+
+	var gotTicketID int64
+	var gotSHA string
+	var calls int
+	request := func(ticketID int64, sha string) {
+		calls++
+		gotTicketID, gotSHA = ticketID, sha
+	}
+
+	closeUpgrade(t.Context(), st, dir, m, closeBootedOK, request)
+
+	msgs, err := st.ListMessages(t.Context(), ticketID)
+	if err != nil {
+		t.Fatalf("ListMessages: %v", err)
+	}
+	if len(msgs) != 1 {
+		t.Fatalf("ListMessages = %d messages, want 1", len(msgs))
+	}
+	wantBody := "booted_ok " + sha12(m.ToSHA)
+	if msgs[0].Body != wantBody || msgs[0].Type != "update" || msgs[0].Author != "system" {
+		t.Errorf("message = %+v, want body %q, type update, author system", msgs[0], wantBody)
+	}
+
+	if _, found, loadErr := loadUpgradeMarker(dir); loadErr != nil || found {
+		t.Errorf("marker found=%v err=%v, want gone", found, loadErr)
+	}
+
+	if calls != 1 {
+		t.Fatalf("request calls = %d, want 1", calls)
+	}
+	if gotTicketID != m.NextTicketID || gotSHA != m.NextSHA {
+		t.Errorf("request called with (%d, %q), want (%d, %q)", gotTicketID, gotSHA, m.NextTicketID, m.NextSHA)
+	}
+
+	t.Run("ticket_zero", func(t *testing.T) {
+		t.Parallel()
+
+		st, dir := openUpgradeBootStore(t)
+		m := upgradeMarker{FromSHA: "fedcba9876543210", ToSHA: "0123456789abcdef0123456789abcdef01234567"}
+		if err := saveUpgradeMarker(dir, m); err != nil {
+			t.Fatalf("saveUpgradeMarker: %v", err)
+		}
+
+		closeUpgrade(t.Context(), st, dir, m, closeBootedOK, nil)
+
+		if _, found, loadErr := loadUpgradeMarker(dir); loadErr != nil || found {
+			t.Errorf("marker found=%v err=%v, want gone", found, loadErr)
+		}
+	})
+}
+
+func TestCloseUpgrade_RolledBack(t *testing.T) {
+	t.Parallel()
+
+	st, dir := openUpgradeBootStore(t)
+	ticketID := seedTicketForUpgrade(t, st)
+
+	m := upgradeMarker{
+		FromSHA: "fedcba9876543210fedcba9876543210fedcba9", ToSHA: "0123456789abcdef0123456789abcdef01234567",
+		TicketID: ticketID, State: markerRolledBack,
+		HasNext: true, NextSHA: "deadbeef", NextTicketID: 99,
+	}
+	if err := saveUpgradeMarker(dir, m); err != nil {
+		t.Fatalf("saveUpgradeMarker: %v", err)
+	}
+
+	calls := 0
+	request := func(int64, string) { calls++ }
+
+	closeUpgrade(t.Context(), st, dir, m, markerRolledBack, request)
+
+	msgs, err := st.ListMessages(t.Context(), ticketID)
+	if err != nil {
+		t.Fatalf("ListMessages: %v", err)
+	}
+	if len(msgs) != 1 {
+		t.Fatalf("ListMessages = %d messages, want 1", len(msgs))
+	}
+	wantBody := "upgrade: " + sha12(m.ToSHA) + " rolled back to " + sha12(m.FromSHA) + ": it did not answer 200 within 60 s"
+	if msgs[0].Body != wantBody || msgs[0].Type != "update" || msgs[0].Author != "system" {
+		t.Errorf("message = %+v, want body %q, type update, author system", msgs[0], wantBody)
+	}
+
+	if _, found, loadErr := loadUpgradeMarker(dir); loadErr != nil || found {
+		t.Errorf("marker found=%v err=%v, want gone", found, loadErr)
+	}
+
+	if calls != 0 {
+		t.Errorf("request calls = %d, want 0", calls)
 	}
 }
