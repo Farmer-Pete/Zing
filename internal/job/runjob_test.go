@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"strconv"
 	"strings"
@@ -1818,7 +1819,7 @@ func TestRetryCapBudget_LogsBranchAtInfo(t *testing.T) {
 	slog.SetDefault(slog.New(slog.NewJSONHandler(&logBuf, &slog.HandlerOptions{Level: slog.LevelInfo})))
 	t.Cleanup(func() { slog.SetDefault(prevDefault) })
 
-	stillOverCommit, err := retryCapBudget(t.Context(), ticket, Deps{Store: s, Budget: 10 * time.Second}, nil)
+	stillOverCommit, err := retryCapBudget(t.Context(), ticket, Deps{Store: s, Budget: 10 * time.Second}, nil, 0)
 	if err != nil {
 		t.Fatalf("retryCapBudget (still over budget): %v", err)
 	}
@@ -1826,7 +1827,7 @@ func TestRetryCapBudget_LogsBranchAtInfo(t *testing.T) {
 		t.Errorf("still-over commit escalation = %+v, want wall_clock", stillOverCommit.Escalation)
 	}
 
-	resumesCommit, err := retryCapBudget(t.Context(), ticket, Deps{Store: s, Budget: 11 * time.Second}, nil)
+	resumesCommit, err := retryCapBudget(t.Context(), ticket, Deps{Store: s, Budget: 11 * time.Second}, nil, 0)
 	if err != nil {
 		t.Fatalf("retryCapBudget (budget has room): %v", err)
 	}
@@ -1859,13 +1860,195 @@ func TestRetryCapBudget_LogsBranchAtInfo(t *testing.T) {
 
 	logBuf.Reset()
 	slog.SetDefault(slog.New(slog.NewJSONHandler(&logBuf, &slog.HandlerOptions{Level: slog.LevelWarn})))
-	if _, err := retryCapBudget(t.Context(), ticket, Deps{Store: s, Budget: 11 * time.Second}, nil); err != nil {
+	if _, err := retryCapBudget(t.Context(), ticket, Deps{Store: s, Budget: 11 * time.Second}, nil, 0); err != nil {
 		t.Fatalf("retryCapBudget (budget has room, warn level): %v", err)
 	}
-	if _, err := retryCapBudget(t.Context(), ticket, Deps{Store: s, Budget: 10 * time.Second}, nil); err != nil {
+	if _, err := retryCapBudget(t.Context(), ticket, Deps{Store: s, Budget: 10 * time.Second}, nil, 0); err != nil {
 		t.Fatalf("retryCapBudget (still over budget, warn level): %v", err)
 	}
 	if logged := logBuf.String(); strings.Contains(logged, "cap_budget retry") {
 		t.Errorf("log buffer at WARN contains a cap_budget retry record, want neither:\n%s", logged)
+	}
+}
+
+// TestRaiseCapBudget_LiftsOnlyThatTicket proves a budget_raised event on one
+// ticket lifts only that ticket's own ticketBudget (runjob.go), not any
+// other ticket's: raising ticket A by budgetRaiseMinutes resumes it, while
+// ticket B, claimed with the same global budget and the same spent agent
+// seconds, still returns ErrBudget (design section 6.7).
+func TestRaiseCapBudget_LiftsOnlyThatTicket(t *testing.T) {
+	t.Parallel()
+	s := newRunJobTestStore(t)
+	ticketA := seedRunJobTicket(t, s)
+	projectID, err := s.EnsureProject(t.Context(), runJobTestProject)
+	if err != nil {
+		t.Fatalf("EnsureProject: %v", err)
+	}
+	ticketB, err := s.InsertTicket(t.Context(), store.Ticket{
+		ProjectID: projectID, TrackerRef: "fake#2", Title: "t2", State: stateQueued,
+	})
+	if err != nil {
+		t.Fatalf("InsertTicket: %v", err)
+	}
+	seedAgentSeconds(t, s, ticketA, 10)
+	seedAgentSeconds(t, s, ticketB, 10)
+
+	ownerA, expiresA := claimRunJobTicket(t, s, ticketA)
+	raiseDeps := Deps{Store: s, Budget: 10 * time.Second, Owner: ownerA, Expires: expiresA}
+	commit, err := retryCapBudget(t.Context(), getRunJobTicket(t, s, ticketA), raiseDeps, nil, budgetRaiseMinutes)
+	if err != nil {
+		t.Fatalf("retryCapBudget: %v", err)
+	}
+	if commit.Escalation != nil {
+		t.Errorf("commit.Escalation = %+v, want nil", commit.Escalation)
+	}
+	if len(commit.Messages) != 2 {
+		t.Fatalf("commit.Messages = %+v, want a marker plus one budget_raised event", commit.Messages)
+	}
+	if commit.Messages[0].Body != markerRetryRequested {
+		t.Errorf("commit.Messages[0].Body = %q, want %q", commit.Messages[0].Body, markerRetryRequested)
+	}
+	ev := commit.Messages[1]
+	if ev.EventKind == nil || *ev.EventKind != store.EventKindBudgetRaised {
+		t.Fatalf("commit.Messages[1].EventKind = %v, want %q", ev.EventKind, store.EventKindBudgetRaised)
+	}
+	var payload response.BudgetRaisedEvent
+	if err = json.Unmarshal(ev.Payload, &payload); err != nil {
+		t.Fatalf("unmarshal budget_raised payload: %v", err)
+	}
+	if payload.Minutes != 60 {
+		t.Errorf("payload.Minutes = %d, want 60", payload.Minutes)
+	}
+
+	applied, err := s.CommitHandlerResult(t.Context(), commit)
+	if err != nil {
+		t.Fatalf("CommitHandlerResult: %v", err)
+	}
+	if !applied {
+		t.Fatal("CommitHandlerResult: applied = false, want true")
+	}
+
+	fake := runtime.NewFake(fstest.MapFS{})
+	set, err := runtime.NewSet(map[string]runtime.Runtime{testRuntimeClaude: fake, testRuntimeCodex: fake, runtimeFake: fake})
+	if err != nil {
+		t.Fatalf("runtime.NewSet: %v", err)
+	}
+
+	ownerA2, expiresA2 := claimRunJobTicket(t, s, ticketA)
+	recA := &recordingReserve{fn: realReserve(s, ownerA2, expiresA2)}
+	dA := Deps{
+		Store: s, Runtimes: set, Machine: runJobTestMachine(t), Models: map[string]string{testModelAlias: testModelExact},
+		Budget: 10 * time.Second, Owner: ownerA2, Expires: expiresA2, Reserve: recA.Reserve, DataDir: t.TempDir(),
+	}
+	_, err = runJob(t.Context(), dA, getRunJobTicket(t, s, ticketA), testJobClassify, store.SessionUpsert{Job: testJobClassify, Runtime: runtimeFake}, runtime.RunRequest{Job: response.JobClassify}, nil, nil, 0)
+	if errors.Is(err, ErrBudget) {
+		t.Fatalf("ticket A err = %v, want some error other than ErrBudget (the budget check passed)", err)
+	}
+	if recA.calls != 1 {
+		t.Errorf("ticket A Reserve calls = %d, want 1", recA.calls)
+	}
+
+	ownerB, expiresB := claimRunJobTicket(t, s, ticketB)
+	recB := &recordingReserve{fn: realReserve(s, ownerB, expiresB)}
+	dB := Deps{
+		Store: s, Runtimes: set, Machine: runJobTestMachine(t), Models: map[string]string{testModelAlias: testModelExact},
+		Budget: 10 * time.Second, Owner: ownerB, Expires: expiresB, Reserve: recB.Reserve, DataDir: t.TempDir(),
+	}
+	_, err = runJob(t.Context(), dB, getRunJobTicket(t, s, ticketB), testJobClassify, store.SessionUpsert{Job: testJobClassify, Runtime: runtimeFake}, runtime.RunRequest{Job: response.JobClassify}, nil, nil, 0)
+	if !errors.Is(err, ErrBudget) {
+		t.Fatalf("ticket B err = %v, want errors.Is(err, ErrBudget)", err)
+	}
+	if recB.calls != 0 {
+		t.Errorf("ticket B Reserve calls = %d, want 0", recB.calls)
+	}
+}
+
+// TestRetryCapBudget_RaiseStillOverBudget proves retryCapBudget's
+// still-over-budget branch also carries the budget_raised event when
+// raiseMinutes is above 0 (design section 6.7): a raise that is not enough
+// re-escalates wall_clock, offering chip d again, and still records the
+// event. A second pick, after the first is committed, then compares against
+// the sum of both raises (owner decision Q2: each pick stacks).
+func TestRetryCapBudget_RaiseStillOverBudget(t *testing.T) {
+	t.Parallel()
+	s := newRunJobTestStore(t)
+	ticketID := seedRunJobTicket(t, s)
+	seedAgentSeconds(t, s, ticketID, 4000)
+
+	owner1, expires1 := claimRunJobTicket(t, s, ticketID)
+	ticket := getRunJobTicket(t, s, ticketID)
+	deps1 := Deps{Store: s, Budget: 0, Owner: owner1, Expires: expires1}
+
+	commit, err := retryCapBudget(t.Context(), ticket, deps1, nil, budgetRaiseMinutes)
+	if err != nil {
+		t.Fatalf("retryCapBudget: %v", err)
+	}
+	if commit.Escalation == nil || commit.Escalation.Payload.Code != string(response.EscalationCodeWallClock) ||
+		commit.Escalation.Payload.Origin != string(response.EscalationOriginCapBudget) {
+		t.Fatalf("commit.Escalation = %+v, want wall_clock/cap_budget", commit.Escalation)
+	}
+	wantExtra := []response.Option{{Key: "d", Text: "raise this ticket's budget by 60 minutes"}}
+	if !reflect.DeepEqual(commit.Escalation.ExtraOptions, wantExtra) {
+		t.Errorf("commit.Escalation.ExtraOptions = %+v, want %+v", commit.Escalation.ExtraOptions, wantExtra)
+	}
+	if len(commit.Messages) != 1 {
+		t.Fatalf("commit.Messages = %+v, want exactly one budget_raised event", commit.Messages)
+	}
+	ev := commit.Messages[0]
+	if ev.EventKind == nil || *ev.EventKind != store.EventKindBudgetRaised {
+		t.Fatalf("commit.Messages[0].EventKind = %v, want %q", ev.EventKind, store.EventKindBudgetRaised)
+	}
+	var payload response.BudgetRaisedEvent
+	if err = json.Unmarshal(ev.Payload, &payload); err != nil {
+		t.Fatalf("unmarshal budget_raised payload: %v", err)
+	}
+	if payload.Minutes != 60 {
+		t.Errorf("payload.Minutes = %d, want 60", payload.Minutes)
+	}
+
+	applied, err := s.CommitHandlerResult(t.Context(), commit)
+	if err != nil {
+		t.Fatalf("CommitHandlerResult: %v", err)
+	}
+	if !applied {
+		t.Fatal("CommitHandlerResult: applied = false, want true")
+	}
+
+	owner2, expires2 := claimRunJobTicket(t, s, ticketID)
+	deps2 := Deps{Store: s, Budget: 0, Owner: owner2, Expires: expires2}
+	ticket2 := getRunJobTicket(t, s, ticketID)
+
+	commit2, err := retryCapBudget(t.Context(), ticket2, deps2, nil, budgetRaiseMinutes)
+	if err != nil {
+		t.Fatalf("retryCapBudget (second pick): %v", err)
+	}
+	if commit2.Escalation != nil {
+		t.Errorf("commit2.Escalation = %+v, want nil (120 raised minutes covers 4000 agent seconds)", commit2.Escalation)
+	}
+	if len(commit2.Messages) != 2 {
+		t.Fatalf("commit2.Messages = %+v, want a marker plus one budget_raised event", commit2.Messages)
+	}
+	if commit2.Messages[0].Body != markerRetryRequested {
+		t.Errorf("commit2.Messages[0].Body = %q, want %q", commit2.Messages[0].Body, markerRetryRequested)
+	}
+	ev2 := commit2.Messages[1]
+	if ev2.EventKind == nil || *ev2.EventKind != store.EventKindBudgetRaised {
+		t.Fatalf("commit2.Messages[1].EventKind = %v, want %q", ev2.EventKind, store.EventKindBudgetRaised)
+	}
+
+	applied2, err := s.CommitHandlerResult(t.Context(), commit2)
+	if err != nil {
+		t.Fatalf("CommitHandlerResult (second pick): %v", err)
+	}
+	if !applied2 {
+		t.Fatal("CommitHandlerResult (second pick): applied = false, want true")
+	}
+
+	total, err := s.BudgetRaisedMinutes(t.Context(), ticketID)
+	if err != nil {
+		t.Fatalf("BudgetRaisedMinutes: %v", err)
+	}
+	if total != 120 {
+		t.Fatalf("BudgetRaisedMinutes = %d, want 120", total)
 	}
 }

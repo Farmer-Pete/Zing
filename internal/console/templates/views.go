@@ -503,8 +503,28 @@ type AlertLine struct {
 // non-thread or ticket-less /stream frame still needs (design section 6.3:
 // "#rail ... is always patched, so leaving a thread clears the old rail").
 type RailModel struct {
+	// Stall is nil for a terminal ticket or a console with no machine, which
+	// renders no rail-stall section at all (ticket "Say on each ticket why
+	// it is not moving", split from #79).
+	Stall     *StallLine
 	Phase     []PhaseDot
 	Artifacts []ArtifactSlot
 	Run       RunRail
 	Log       LogRail
+}
+
+// StallLine is the rail's one-line answer to "why is this ticket not
+// moving", plus when it last ran (ticket "Say on each ticket why it is not
+// moving", split from #79). console.decideStall (internal/console/stall.go)
+// picks Reason and Text; this package only renders them.
+type StallLine struct {
+	// Reason is a stallReason value, rendered verbatim as data-stall-reason;
+	// empty when Text is empty.
+	Reason string
+	// Text is decideStall's rendered sentence; empty renders no
+	// stall-reason element at all (owner decision Q3: most non-moving
+	// tickets show only LastRan).
+	Text string
+	// LastRan is exactly "never ran" or "last ran YYYY-MM-DD HH:MM UTC".
+	LastRan string
 }

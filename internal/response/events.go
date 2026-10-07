@@ -49,6 +49,14 @@ type PlanUnblockEvent struct {
 	Guidance    string   `json:"guidance"     jsonschema:"minLength=1"`
 }
 
+// BudgetRaisedEvent is the budget_raised typed event's payload (messages
+// table, event_kind "budget_raised"): one owner pick of the wall_clock
+// cap_budget escalation's chip d, raising this ticket's agent budget by
+// Minutes on top of the global budget.
+type BudgetRaisedEvent struct {
+	Minutes int `json:"minutes" jsonschema:"minimum=1,maximum=525600"`
+}
+
 // StaleBaseEvent is the stale_base typed event's payload (messages table,
 // event_kind "stale_base"): a step that used the last fetched base
 // because the fetch itself failed, once per step and sha (#68 follow-up).

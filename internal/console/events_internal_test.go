@@ -121,3 +121,21 @@ func TestPlanUnblockLine(t *testing.T) {
 		t.Error("planUnblockLine(empty guidance) = nil error, want one")
 	}
 }
+
+// TestBudgetRaisedLine proves budgetRaisedLine renders the raise sentence
+// and rejects a payload with no minutes.
+func TestBudgetRaisedLine(t *testing.T) {
+	t.Parallel()
+	got, err := budgetRaisedLine([]byte(`{"minutes":60}`))
+	if err != nil {
+		t.Fatalf("budgetRaisedLine: %v", err)
+	}
+	want := "Owner raised this ticket's agent budget by 60 minutes."
+	if got != want {
+		t.Errorf("budgetRaisedLine = %q, want %q", got, want)
+	}
+
+	if _, err := budgetRaisedLine([]byte(`{}`)); err == nil {
+		t.Error("budgetRaisedLine({}) = nil error, want one")
+	}
+}

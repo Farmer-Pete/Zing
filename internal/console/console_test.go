@@ -212,11 +212,14 @@ func newTestServerSandboxTracker(
 // newTestServerSandboxTracker. stream_test.go's newReadTimeoutTestServer is
 // the one caller that passes a non-nil hook, to set ReadTimeout, rather than
 // duplicating this listener-reservation and placeholder-swap recipe.
+// opts is passed through to console.New: rail_test.go's newStallTestServer
+// (console.WithSlots) and newTestServerDispatch (console.WithDispatch) are
+// the callers that pass a console.Option, rather than duplicating this same
+// recipe again.
 func newTestServerConfig(
 	t *testing.T, s *store.Store, b *bus.Broker, m *machine.Machine, log *console.Handler,
 	floor response.Severity, sandboxReason string, tr tracker.Tracker, user string,
-	configure func(*http.Server),
-	opts ...console.Option,
+	configure func(*http.Server), opts ...console.Option,
 ) *httptest.Server {
 	t.Helper()
 

@@ -205,6 +205,46 @@ func TestBuildingEscalationTable(t *testing.T) {
 			t.Errorf("commit.ResolveQuestions = %v, want [%d]", commit.ResolveQuestions, qID)
 		}
 	})
+
+	t.Run("CapBudgetRaise", func(t *testing.T) {
+		t.Parallel()
+		// "d raise | cap_budget | retryCapBudget, raiseMinutes ==
+		// budgetRaiseMinutes": resolve the round, commit the marker "retry
+		// requested" plus one budget_raised event; no re-escalation, no
+		// runtime call. Before task 3 this choice fell to the choice !=
+		// escalationChoiceRetry row and re-escalated replan_unsupported.
+		s, _, ticketID := buildTicketInBuilding(t)
+		qID := escalateCapBudgetRaise(t, s, ticketID)
+		answerGateQuestion(t, s, ticketID, qID, new("d"), "")
+
+		commit, err := runBuilding(t, s, claimForBuild(t, s, &scriptedRuntime{t: t}, ticketID), ticketID)
+		if err != nil {
+			t.Fatalf("escalation resolve (cap_budget raise) Run: %v", err)
+		}
+		if commit.Escalation != nil || commit.Next != "" {
+			t.Errorf("commit = %+v, want a plain marker commit, no escalation, no transition", commit)
+		}
+		if len(commit.ResolveQuestions) != 1 || commit.ResolveQuestions[0] != qID {
+			t.Errorf("commit.ResolveQuestions = %v, want [%d]", commit.ResolveQuestions, qID)
+		}
+		if len(commit.Messages) != 2 {
+			t.Fatalf("commit.Messages = %+v, want a marker plus one budget_raised event", commit.Messages)
+		}
+		if commit.Messages[0].Body != testMarkerRetryRequested {
+			t.Errorf("commit.Messages[0].Body = %q, want %q", commit.Messages[0].Body, testMarkerRetryRequested)
+		}
+		ev := commit.Messages[1]
+		if ev.EventKind == nil || *ev.EventKind != store.EventKindBudgetRaised {
+			t.Fatalf("commit.Messages[1].EventKind = %v, want %q", ev.EventKind, store.EventKindBudgetRaised)
+		}
+		var payload response.BudgetRaisedEvent
+		if err = json.Unmarshal(ev.Payload, &payload); err != nil {
+			t.Fatalf("unmarshal budget_raised payload: %v", err)
+		}
+		if payload.Minutes != 60 {
+			t.Errorf("payload.Minutes = %d, want 60", payload.Minutes)
+		}
+	})
 }
 
 // TestSandboxUnavailableEscalates proves design section 6.9's own code
