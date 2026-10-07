@@ -1226,6 +1226,20 @@ func classifyOpenRun(r store.OpenRun) orphanLiveness {
 	}
 }
 
+// ClaimProcessesAlive reports whether any open run of fc, or its recorded
+// CHECK command, still has a live process group by classifyOpenRun's rules
+// (live or unverified live both count). reclaimForeign keeps such a claim
+// until the process outlives its deadline; the console says so (owner
+// decision Q2).
+func ClaimProcessesAlive(fc store.ForeignClaim) bool {
+	for _, r := range fc.Open {
+		if classifyOpenRun(r) != orphanDead {
+			return true
+		}
+	}
+	return fc.Check != nil && classifyOpenRun(fc.Check.AsOpenRun()) != orphanDead
+}
+
 // evaluateOrphan decides whether r still counts as live for this
 // reclaimForeign pass (design section 6.3), killing its group when it has
 // outlived its job's deadline and can be verified, and logging throughout

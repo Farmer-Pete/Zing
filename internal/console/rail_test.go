@@ -13,16 +13,19 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
 	"zing/internal/bus"
 	"zing/internal/console"
 	"zing/internal/dispatch"
+	"zing/internal/proc"
 	"zing/internal/response"
 	"zing/internal/store"
 )
@@ -1705,5 +1708,59 @@ func TestRail_StallDeadClaim(t *testing.T) {
 	}
 	if !strings.Contains(rail, "claim held by a process that is no longer alive (dead-serve-1); the next dispatch pass reclaims it") {
 		t.Errorf("rail missing the dead-claim line; got:\n%s", rail)
+	}
+}
+
+// TestRail_StallDeadClaimOrphanRunning proves the dead-claim reason picks
+// the "leftover agent process is still running" text, not "the next
+// dispatch pass reclaims it", when store.ForeignClaims' matching entry's
+// open run still has a live process group (owner decision Q2,
+// dispatch.ClaimProcessesAlive).
+func TestRail_StallDeadClaimOrphanRunning(t *testing.T) {
+	t.Parallel()
+	s := newConsoleTestStore(t)
+	ticketID := seedTicket(t, s, "fake#1", "Add a hello endpoint")
+
+	cmd := exec.CommandContext(t.Context(), "sh", "-c", "sleep 30")
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	if err := cmd.Start(); err != nil {
+		t.Skipf("start sh: %v", err)
+	}
+	pgid := cmd.Process.Pid
+	token, err := proc.StartToken(pgid)
+	if err != nil {
+		_ = syscall.Kill(-pgid, syscall.SIGKILL) //nolint:errcheck // best-effort teardown
+		t.Skipf("proc.StartToken unsupported on this platform: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = syscall.Kill(-pgid, syscall.SIGKILL) //nolint:errcheck // best-effort teardown
+		_ = cmd.Wait()                           //nolint:errcheck // best-effort teardown
+	})
+
+	const foreignOwner = "dead-serve-2"
+	expires := time.Now().Add(10 * time.Minute).UTC().Truncate(time.Second)
+	claimed, err := s.Claim(t.Context(), ticketID, foreignOwner, expires)
+	if err != nil || !claimed {
+		t.Fatalf("Claim: claimed=%v err=%v", claimed, err)
+	}
+	reserved, err := s.Reserve(t.Context(), ticketID, foreignOwner, expires,
+		store.SessionUpsert{Job: string(response.TicketStateBuilding), Runtime: testRuntimeFake},
+		store.RunSeed{Model: "test-model"})
+	if err != nil {
+		t.Fatalf("Reserve: %v", err)
+	}
+	if err := s.RecordRunStart(t.Context(), reserved.RunID, pgid, token, time.Now(), ""); err != nil {
+		t.Fatalf("RecordRunStart: %v", err)
+	}
+
+	slots := fakeSlots{Owner: "this-serve", Inflight: nil, MaxParallel: 2}
+	srv := newStallTestServer(t, s, bus.New(), slots)
+	rail := railHTML(t, srv.URL, ticketID)
+
+	if !strings.Contains(rail, `data-stall-reason="claim_dead"`) {
+		t.Errorf("rail missing data-stall-reason=\"claim_dead\"; got:\n%s", rail)
+	}
+	if !strings.Contains(rail, "claim held by a process that is no longer alive (dead-serve-2); its leftover agent process is still running") {
+		t.Errorf("rail missing the live-orphan dead-claim line; got:\n%s", rail)
 	}
 }
