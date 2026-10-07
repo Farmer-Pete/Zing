@@ -117,13 +117,11 @@ type shipGitHub struct {
 
 	runs    []orchestrator.CheckRun
 	runsErr error
-	// runsFor and runsErrFor, when set, back ListCheckRuns keyed by sha,
-	// overriding runs and runsErr respectively; runsSHAs records every sha
-	// ListCheckRuns was called with, in call order (task 2's own
-	// pre-existing read of main's own checks, keyed by the base sha rather
-	// than the PR's head).
-	runsFor     func(sha string) []orchestrator.CheckRun
-	runsErrFor  func(sha string) error
+	// runsFor, when set, backs ListCheckRuns keyed by sha, overriding runs
+	// and runsErr; runsSHAs records every sha ListCheckRuns was called
+	// with, in call order (task 2's own pre-existing read of main's own
+	// checks, keyed by the base sha rather than the PR's head).
+	runsFor     func(sha string) ([]orchestrator.CheckRun, error)
 	runsSHAs    []string
 	statuses    []orchestrator.CommitStatus
 	statusesErr error
@@ -301,16 +299,11 @@ func (g *shipGitHub) Merge(_ context.Context, _, _ string, number int, sha, meth
 
 func (g *shipGitHub) ListCheckRuns(_ context.Context, _, _, sha string) ([]orchestrator.CheckRun, error) {
 	g.runsSHAs = append(g.runsSHAs, sha)
-	if g.runsErrFor != nil {
-		if err := g.runsErrFor(sha); err != nil {
-			return nil, err
-		}
-	}
 	if g.runsErr != nil {
 		return nil, g.runsErr
 	}
 	if g.runsFor != nil {
-		return g.runsFor(sha), nil
+		return g.runsFor(sha)
 	}
 	return g.runs, nil
 }
@@ -2053,11 +2046,11 @@ func TestPollCIPreExistingAsksOwner(t *testing.T) {
 	local := shipHeadSHA(t, s, ticket)
 	gh.required = shipCIRequired()
 	gh.prState = orchestrator.PRState{Draft: true, HeadSHA: local, BaseRef: pbFixtureDefaultBranch}
-	gh.runsFor = func(sha string) []orchestrator.CheckRun {
+	gh.runsFor = func(sha string) ([]orchestrator.CheckRun, error) {
 		if sha == local {
-			return []orchestrator.CheckRun{shipCIRun(1, 1, 2, "failure")}
+			return []orchestrator.CheckRun{shipCIRun(1, 1, 2, "failure")}, nil
 		}
-		return []orchestrator.CheckRun{shipCIRun(50, 60, 70, "failure")}
+		return []orchestrator.CheckRun{shipCIRun(50, 60, 70, "failure")}, nil
 	}
 	gh.logTail = func(_ context.Context, _, _ string, jobID int64, _ int) (string, error) {
 		if jobID == 2 || jobID == 70 {
@@ -2066,7 +2059,7 @@ func TestPollCIPreExistingAsksOwner(t *testing.T) {
 		return "", nil
 	}
 	seedSpentFlakyCheckRerun(t, s, ticket.ID, local)
-	baseSHA := mergeBaseRefSHA(t, s, ticket)
+	baseSHA := mergeBaseRefSHA(t, s, ticket, pbFixtureDefaultBranch)
 
 	var logBuf bytes.Buffer
 	prevDefault := slog.Default()
@@ -2126,11 +2119,11 @@ func TestPollCINotOnMainSendsFix(t *testing.T) {
 	local := shipHeadSHA(t, s, ticket)
 	gh.required = shipCIRequired()
 	gh.prState = orchestrator.PRState{Draft: true, HeadSHA: local, BaseRef: pbFixtureDefaultBranch}
-	gh.runsFor = func(sha string) []orchestrator.CheckRun {
+	gh.runsFor = func(sha string) ([]orchestrator.CheckRun, error) {
 		if sha == local {
-			return []orchestrator.CheckRun{shipCIRun(1, 1, 2, "failure")}
+			return []orchestrator.CheckRun{shipCIRun(1, 1, 2, "failure")}, nil
 		}
-		return []orchestrator.CheckRun{shipCIRun(50, 60, 70, "failure")}
+		return []orchestrator.CheckRun{shipCIRun(50, 60, 70, "failure")}, nil
 	}
 	gh.logTail = func(_ context.Context, _, _ string, jobID int64, _ int) (string, error) {
 		switch jobID {
@@ -2173,11 +2166,11 @@ func TestPollCIMainNewerPassSendsFix(t *testing.T) {
 	local := shipHeadSHA(t, s, ticket)
 	gh.required = shipCIRequired()
 	gh.prState = orchestrator.PRState{Draft: true, HeadSHA: local, BaseRef: pbFixtureDefaultBranch}
-	gh.runsFor = func(sha string) []orchestrator.CheckRun {
+	gh.runsFor = func(sha string) ([]orchestrator.CheckRun, error) {
 		if sha == local {
-			return []orchestrator.CheckRun{shipCIRun(1, 1, 2, "failure")}
+			return []orchestrator.CheckRun{shipCIRun(1, 1, 2, "failure")}, nil
 		}
-		return []orchestrator.CheckRun{shipCIRun(50, 60, 70, "failure"), shipCIRun(51, 61, 71, ghSuccess)}
+		return []orchestrator.CheckRun{shipCIRun(50, 60, 70, "failure"), shipCIRun(51, 61, 71, ghSuccess)}, nil
 	}
 	gh.logTail = func(_ context.Context, _, _ string, jobID int64, _ int) (string, error) {
 		if jobID == 2 || jobID == 70 {
@@ -2219,14 +2212,11 @@ func TestPollCIBaseReadErrorSendsFix(t *testing.T) {
 	local := shipHeadSHA(t, s, ticket)
 	gh.required = shipCIRequired()
 	gh.prState = orchestrator.PRState{Draft: true, HeadSHA: local, BaseRef: pbFixtureDefaultBranch}
-	gh.runsFor = func(string) []orchestrator.CheckRun {
-		return []orchestrator.CheckRun{shipCIRun(1, 1, 2, "failure")}
-	}
-	gh.runsErrFor = func(sha string) error {
-		if sha == local {
-			return nil
+	gh.runsFor = func(sha string) ([]orchestrator.CheckRun, error) {
+		if sha != local {
+			return nil, orchestrator.ErrGitHubUnavailable
 		}
-		return orchestrator.ErrGitHubUnavailable
+		return []orchestrator.CheckRun{shipCIRun(1, 1, 2, "failure")}, nil
 	}
 	gh.logTail = func(_ context.Context, _, _ string, jobID int64, _ int) (string, error) {
 		if jobID == 2 {
@@ -2235,7 +2225,7 @@ func TestPollCIBaseReadErrorSendsFix(t *testing.T) {
 		return "", nil
 	}
 	seedSpentFlakyCheckRerun(t, s, ticket.ID, local)
-	baseSHA := mergeBaseRefSHA(t, s, ticket)
+	baseSHA := mergeBaseRefSHA(t, s, ticket, pbFixtureDefaultBranch)
 
 	var logBuf bytes.Buffer
 	prevDefault := slog.Default()
@@ -2265,6 +2255,77 @@ func TestPollCIBaseReadErrorSendsFix(t *testing.T) {
 	}
 }
 
+// TestPollCIFetchBaseFailureSkipsPreExisting proves ciPreExisting's other
+// warn-and-continue path: FetchBase itself fails (design shape, "Errors"),
+// before any call to ListCheckRuns. With the project's local checkout
+// missing both the base ref and the default branch ref, neither the real
+// fetch (no origin in this fixture) nor FetchBase's own local-seed fallback
+// can produce a sha, so ciPreExisting returns rd.Text and the notes
+// unchanged, no escalation, and never reaches ListCheckRuns, after logging
+// "ci pre-existing check skipped" with no base_sha (there is none to log).
+// This calls ciPreExisting directly, the same way
+// TestPollDirtyFetchBaseFailureEscalates calls pollConflict directly, since
+// deleting the local default branch ref also breaks other reads a full
+// POLL tick would make before ever reaching this step.
+//
+// Not parallel: it calls slog.SetDefault below to capture a log line,
+// which swaps the process-wide default logger.
+func TestPollCIFetchBaseFailureSkipsPreExisting(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow end-to-end flow; runs in the full suite")
+	}
+	s, ticket, gh, tr := shipPublished(t)
+
+	storeProj, err := s.ProjectForTicket(t.Context(), ticket.ID)
+	if err != nil {
+		t.Fatalf("ProjectForTicket: %v", err)
+	}
+	if out, delErr := gitfixture.Git(t.Context(), storeProj.LocalPath, "update-ref", "-d", "refs/zing/base/"+pbFixtureDefaultBranch); delErr != nil {
+		t.Fatalf("git update-ref -d refs/zing/base: %v: %s", delErr, out)
+	}
+	if out, delErr := gitfixture.Git(t.Context(), storeProj.LocalPath, "update-ref", "-d", "refs/heads/"+pbFixtureDefaultBranch); delErr != nil {
+		t.Fatalf("git update-ref -d refs/heads: %v: %s", delErr, out)
+	}
+
+	deps := shipClaim(t, s, pbFakeRuntime(t), ticket.ID, gh, tr)
+	proj := deps.Projects[ticket.ProjectID]
+	wt, _, err := proj.Orch.EnsureWorktree(t.Context(), ticket.ID, ticket.Title)
+	if err != nil {
+		t.Fatalf("EnsureWorktree: %v", err)
+	}
+
+	rd := rerunDecision{
+		Text:   "fix requested ci_log",
+		Failed: []failedCheck{{Run: shipCIRun(1, 1, 2, "failure"), JobID: 2, Log: shipFlakyLogText}},
+	}
+
+	var logBuf bytes.Buffer
+	prevDefault := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logBuf, &slog.HandlerOptions{Level: slog.LevelWarn})))
+	t.Cleanup(func() { slog.SetDefault(prevDefault) })
+
+	esc, text, notes := (shipHandler{}).ciPreExisting(t.Context(), ticket, deps, proj, wt, rd)
+	if esc != nil {
+		t.Fatalf("ciPreExisting escalated: %+v", esc)
+	}
+	if text != rd.Text {
+		t.Errorf("text = %q, want %q (unchanged)", text, rd.Text)
+	}
+	if notes != nil {
+		t.Errorf("notes = %+v, want nil", notes)
+	}
+	logged := logBuf.String()
+	if !strings.Contains(logged, "ci pre-existing check skipped") {
+		t.Errorf("log missing \"ci pre-existing check skipped\"; got:\n%s", logged)
+	}
+	if strings.Contains(logged, "base_sha") {
+		t.Errorf("log has base_sha, want none: FetchBase itself failed before any base sha existed; got:\n%s", logged)
+	}
+	if len(gh.runsSHAs) != 0 {
+		t.Errorf("runsSHAs = %+v, want none: ListCheckRuns is never reached when FetchBase fails", gh.runsSHAs)
+	}
+}
+
 // TestPollCIBaseLogUnreadableSendsFix proves the other warn-and-continue
 // path inside readBaseChecks: main's newest run of the check failed, but
 // its own log cannot be read. That leaves main's failing test names
@@ -2284,11 +2345,11 @@ func TestPollCIBaseLogUnreadableSendsFix(t *testing.T) {
 	local := shipHeadSHA(t, s, ticket)
 	gh.required = shipCIRequired()
 	gh.prState = orchestrator.PRState{Draft: true, HeadSHA: local, BaseRef: pbFixtureDefaultBranch}
-	gh.runsFor = func(sha string) []orchestrator.CheckRun {
+	gh.runsFor = func(sha string) ([]orchestrator.CheckRun, error) {
 		if sha == local {
-			return []orchestrator.CheckRun{shipCIRun(1, 1, 2, "failure")}
+			return []orchestrator.CheckRun{shipCIRun(1, 1, 2, "failure")}, nil
 		}
-		return []orchestrator.CheckRun{shipCIRun(50, 60, 70, "failure")}
+		return []orchestrator.CheckRun{shipCIRun(50, 60, 70, "failure")}, nil
 	}
 	logErr := errors.New("signed url expired")
 	gh.logTail = func(_ context.Context, _, _ string, jobID int64, _ int) (string, error) {
@@ -2322,8 +2383,11 @@ func TestPollCIBaseLogUnreadableSendsFix(t *testing.T) {
 			t.Errorf("commit.Messages = %+v, want no pre-existing or no-run message", commit.Messages)
 		}
 	}
-	if !strings.Contains(logBuf.String(), `msg="ci base check log unreadable"`) || !strings.Contains(logBuf.String(), "job_id=70") || !strings.Contains(logBuf.String(), "workflow_run_id=60") {
-		t.Errorf("log missing \"ci base check log unreadable\" with workflow_run_id=60 and job_id=70; got:\n%s", logBuf.String())
+	logged := logBuf.String()
+	for _, want := range []string{`msg="ci base check log unreadable"`, "job_id=70", "workflow_run_id=60"} {
+		if !strings.Contains(logged, want) {
+			t.Errorf("log missing %q; got:\n%s", want, logged)
+		}
 	}
 }
 
@@ -2379,11 +2443,11 @@ func TestPollCIPartlyOnMainNamesThemInFix(t *testing.T) {
 	local := shipHeadSHA(t, s, ticket)
 	gh.required = shipCIRequired()
 	gh.prState = orchestrator.PRState{Draft: true, HeadSHA: local, BaseRef: pbFixtureDefaultBranch}
-	gh.runsFor = func(sha string) []orchestrator.CheckRun {
+	gh.runsFor = func(sha string) ([]orchestrator.CheckRun, error) {
 		if sha == local {
-			return []orchestrator.CheckRun{shipCIRun(1, 1, 2, "failure")}
+			return []orchestrator.CheckRun{shipCIRun(1, 1, 2, "failure")}, nil
 		}
-		return []orchestrator.CheckRun{shipCIRun(50, 60, 70, "failure")}
+		return []orchestrator.CheckRun{shipCIRun(50, 60, 70, "failure")}, nil
 	}
 	gh.logTail = func(_ context.Context, _, _ string, jobID int64, _ int) (string, error) {
 		switch jobID {
@@ -2395,7 +2459,7 @@ func TestPollCIPartlyOnMainNamesThemInFix(t *testing.T) {
 		return "", nil
 	}
 	seedSpentFlakyCheckRerun(t, s, ticket.ID, local)
-	baseSHA := mergeBaseRefSHA(t, s, ticket)
+	baseSHA := mergeBaseRefSHA(t, s, ticket, pbFixtureDefaultBranch)
 
 	commit, err := shipPollRun(t, s, ticket, gh, tr)
 	if err != nil {
@@ -2431,11 +2495,11 @@ func TestPollCIMainHasNoRunNotes(t *testing.T) {
 	local := shipHeadSHA(t, s, ticket)
 	gh.required = shipCIRequired()
 	gh.prState = orchestrator.PRState{Draft: true, HeadSHA: local, BaseRef: pbFixtureDefaultBranch}
-	gh.runsFor = func(sha string) []orchestrator.CheckRun {
+	gh.runsFor = func(sha string) ([]orchestrator.CheckRun, error) {
 		if sha == local {
-			return []orchestrator.CheckRun{shipCIRun(1, 1, 2, "failure")}
+			return []orchestrator.CheckRun{shipCIRun(1, 1, 2, "failure")}, nil
 		}
-		return nil
+		return nil, nil
 	}
 	gh.logTail = func(_ context.Context, _, _ string, jobID int64, _ int) (string, error) {
 		if jobID == 2 {
@@ -2444,7 +2508,7 @@ func TestPollCIMainHasNoRunNotes(t *testing.T) {
 		return "", nil
 	}
 	seedSpentFlakyCheckRerun(t, s, ticket.ID, local)
-	baseSHA := mergeBaseRefSHA(t, s, ticket)
+	baseSHA := mergeBaseRefSHA(t, s, ticket, pbFixtureDefaultBranch)
 
 	commit, err := shipPollRun(t, s, ticket, gh, tr)
 	if err != nil {
@@ -2477,11 +2541,11 @@ func TestPollCIMainRunInProgressCountsAsNoRun(t *testing.T) {
 	local := shipHeadSHA(t, s, ticket)
 	gh.required = shipCIRequired()
 	gh.prState = orchestrator.PRState{Draft: true, HeadSHA: local, BaseRef: pbFixtureDefaultBranch}
-	gh.runsFor = func(sha string) []orchestrator.CheckRun {
+	gh.runsFor = func(sha string) ([]orchestrator.CheckRun, error) {
 		if sha == local {
-			return []orchestrator.CheckRun{shipCIRun(1, 1, 2, "failure")}
+			return []orchestrator.CheckRun{shipCIRun(1, 1, 2, "failure")}, nil
 		}
-		return []orchestrator.CheckRun{{ID: 50, Name: "ci", Status: "in_progress", AppSlug: ghGitHubActions}}
+		return []orchestrator.CheckRun{{ID: 50, Name: "ci", Status: "in_progress", AppSlug: ghGitHubActions}}, nil
 	}
 	gh.logTail = func(_ context.Context, _, _ string, jobID int64, _ int) (string, error) {
 		if jobID == 2 {
@@ -2490,7 +2554,7 @@ func TestPollCIMainRunInProgressCountsAsNoRun(t *testing.T) {
 		return "", nil
 	}
 	seedSpentFlakyCheckRerun(t, s, ticket.ID, local)
-	baseSHA := mergeBaseRefSHA(t, s, ticket)
+	baseSHA := mergeBaseRefSHA(t, s, ticket, pbFixtureDefaultBranch)
 
 	commit, err := shipPollRun(t, s, ticket, gh, tr)
 	if err != nil {
@@ -2522,11 +2586,11 @@ func TestPollCIGateExhaustedKeepsNoRunNote(t *testing.T) {
 	local := shipHeadSHA(t, s, pbGetTicket(t, s, ticket.ID))
 	gh.required = shipCIRequired()
 	gh.prState = orchestrator.PRState{Draft: true, HeadSHA: local, BaseRef: pbFixtureDefaultBranch}
-	gh.runsFor = func(sha string) []orchestrator.CheckRun {
+	gh.runsFor = func(sha string) ([]orchestrator.CheckRun, error) {
 		if sha == local {
-			return []orchestrator.CheckRun{shipCIRun(1, 1, 2, "failure")}
+			return []orchestrator.CheckRun{shipCIRun(1, 1, 2, "failure")}, nil
 		}
-		return nil
+		return nil, nil
 	}
 	gh.logTail = func(_ context.Context, _, _ string, jobID int64, _ int) (string, error) {
 		if jobID == 2 {
@@ -2536,7 +2600,7 @@ func TestPollCIGateExhaustedKeepsNoRunNote(t *testing.T) {
 	}
 	seedReReqHandled(t, s, ticket.ID, local)
 	seedSpentFlakyCheckRerun(t, s, ticket.ID, local)
-	baseSHA := mergeBaseRefSHA(t, s, pbGetTicket(t, s, ticket.ID))
+	baseSHA := mergeBaseRefSHA(t, s, pbGetTicket(t, s, ticket.ID), pbFixtureDefaultBranch)
 
 	commit, err := shipPollRun(t, s, pbGetTicket(t, s, ticket.ID), gh, tr)
 	if err != nil {
