@@ -55,3 +55,8 @@ func (Linear) Close(context.Context, string, string) error {
 func (Linear) CommentContains(context.Context, string, string, string) (bool, error) {
 	return false, errLinearNotImplemented
 }
+
+// Comments always fails: see errLinearNotImplemented.
+func (Linear) Comments(context.Context, string, string) ([]Comment, error) {
+	return nil, errLinearNotImplemented
+}

@@ -42,6 +42,9 @@ func TestLinear_EveryMethodReturnsNotImplemented(t *testing.T) {
 	if _, err := l.CommentContains(ctx, "proj", "ref", "needle"); !errors.Is(err, errLinearNotImplemented) {
 		t.Errorf("CommentContains err = %v, want %v", err, errLinearNotImplemented)
 	}
+	if _, err := l.Comments(ctx, "proj", "ref"); !errors.Is(err, errLinearNotImplemented) {
+		t.Errorf("Comments err = %v, want %v", err, errLinearNotImplemented)
+	}
 }
 
 // TestLinear_SatisfiesTracker proves Linear{} satisfies the Tracker

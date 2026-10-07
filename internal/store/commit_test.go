@@ -1891,6 +1891,122 @@ func TestCommitSetPRURL(t *testing.T) {
 	})
 }
 
+// --- CommitHandlerResult: SetTicketText -------------------------------------
+
+// TestCommitHandlerResult_SetTicketText proves setTicketTextTx applies a
+// planning refresh (migration 0011, #98): a commit whose SetTicketText.Body
+// is set updates body and tracker_body together, plus owner_comments, and a
+// commit whose Body is nil changes owner_comments only, leaving body and
+// tracker_body untouched.
+func TestCommitHandlerResult_SetTicketText(t *testing.T) {
+	t.Parallel()
+
+	t.Run("Body set updates body and tracker_body together", func(t *testing.T) {
+		t.Parallel()
+		s := newTestStore(t)
+		ctx := t.Context()
+		_, ticketID := seedQueuedTicket(t, s, "1")
+		owner, expires := claimForCommit(t, s, ticketID)
+
+		newBody := "the new issue body"
+		applied, err := s.CommitHandlerResult(ctx, HandlerCommit{
+			TicketID: ticketID, Owner: owner, Expires: expires,
+			SetTicketText: &TicketText{Body: &newBody, OwnerComments: "Comment by owner:\nUse serve."},
+		})
+		if err != nil {
+			t.Fatalf("CommitHandlerResult: %v", err)
+		}
+		if !applied {
+			t.Fatal("CommitHandlerResult: applied = false, want true")
+		}
+
+		got, getErr := s.GetTicket(ctx, ticketID)
+		if getErr != nil {
+			t.Fatalf("GetTicket: %v", getErr)
+		}
+		if got.Body != newBody {
+			t.Errorf("body = %q, want %q", got.Body, newBody)
+		}
+		if got.TrackerBody == nil || *got.TrackerBody != newBody {
+			t.Errorf("tracker_body = %v, want %q", got.TrackerBody, newBody)
+		}
+		if got.OwnerComments != "Comment by owner:\nUse serve." {
+			t.Errorf("owner_comments = %q, want %q", got.OwnerComments, "Comment by owner:\nUse serve.")
+		}
+	})
+
+	t.Run("Body nil changes only owner_comments", func(t *testing.T) {
+		t.Parallel()
+		s := newTestStore(t)
+		ctx := t.Context()
+		_, ticketID := seedQueuedTicketWithBody(t, s, "1", "the stored body")
+		owner, expires := claimForCommit(t, s, ticketID)
+
+		applied, err := s.CommitHandlerResult(ctx, HandlerCommit{
+			TicketID: ticketID, Owner: owner, Expires: expires,
+			SetTicketText: &TicketText{OwnerComments: "Comment by owner:\nUse serve."},
+		})
+		if err != nil {
+			t.Fatalf("CommitHandlerResult: %v", err)
+		}
+		if !applied {
+			t.Fatal("CommitHandlerResult: applied = false, want true")
+		}
+
+		got, getErr := s.GetTicket(ctx, ticketID)
+		if getErr != nil {
+			t.Fatalf("GetTicket: %v", getErr)
+		}
+		if got.Body != "the stored body" {
+			t.Errorf("body = %q, want unchanged %q", got.Body, "the stored body")
+		}
+		if got.TrackerBody == nil || *got.TrackerBody != "the stored body" {
+			t.Errorf("tracker_body = %v, want unchanged %q (InsertTicket's own baseline)", got.TrackerBody, "the stored body")
+		}
+		if got.OwnerComments != "Comment by owner:\nUse serve." {
+			t.Errorf("owner_comments = %q, want %q", got.OwnerComments, "Comment by owner:\nUse serve.")
+		}
+	})
+}
+
+// TestCommitHandlerResult_SplitChildTrackerBody proves applySplitChildTx
+// writes tracker_body equal to the child's filed body (#98), so a split
+// child's first planning refresh compares against what was actually filed.
+func TestCommitHandlerResult_SplitChildTrackerBody(t *testing.T) {
+	t.Parallel()
+	s := newTestStore(t)
+	ctx := t.Context()
+	_, parentID := seedQueuedTicket(t, s, "65")
+
+	owner, expires := claimForCommit(t, s, parentID)
+	applied, err := s.CommitHandlerResult(ctx, HandlerCommit{
+		TicketID: parentID, Owner: owner, Expires: expires,
+		SplitChild: &SplitChild{Key: "c1", Ref: "70", Title: "Detect the conflict", Body: "child body"},
+	})
+	if err != nil {
+		t.Fatalf("CommitHandlerResult: %v", err)
+	}
+	if !applied {
+		t.Fatal("CommitHandlerResult: applied = false, want true")
+	}
+
+	children, scErr := s.SplitChildren(ctx, parentID)
+	if scErr != nil {
+		t.Fatalf("SplitChildren: %v", scErr)
+	}
+	if len(children) != 1 {
+		t.Fatalf("len(children) = %d, want 1", len(children))
+	}
+
+	child, getErr := s.GetTicket(ctx, children[0].TicketID)
+	if getErr != nil {
+		t.Fatalf("GetTicket(child): %v", getErr)
+	}
+	if child.TrackerBody == nil || *child.TrackerBody != "child body" {
+		t.Errorf("child.TrackerBody = %v, want %q", child.TrackerBody, "child body")
+	}
+}
+
 // --- CommitHandlerResult: Poll, PollSchedule, ClearPoll ---------------------
 
 // testFingerprint is the one 64-lowercase-hex fingerprint value this

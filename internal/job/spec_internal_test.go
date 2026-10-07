@@ -339,3 +339,42 @@ func TestRenderSpec(t *testing.T) {
 		}
 	})
 }
+
+// TestRenderSpecOwnerComments proves renderSpec's owner-comments block
+// (#98, design "comments appear inside the ticket input"): the comments sit
+// right after the body, under specCommentsHeader, and ahead of
+// specDecisionsHeader when there is one.
+func TestRenderSpecOwnerComments(t *testing.T) {
+	t.Parallel()
+
+	t.Run("comments_no_decisions", func(t *testing.T) {
+		t.Parallel()
+		ticket := store.Ticket{Title: "T", Body: "B", OwnerComments: "Comment by owner-login:\nUse serve."}
+		got := renderSpec(ticket, store.PlanningConversation{}, nil, "")
+		want := specTestBase + "\n\n" +
+			specCommentsHeader + "\n\n" +
+			"Comment by owner-login:\nUse serve."
+		if got != want {
+			t.Errorf("renderSpec = %q, want %q", got, want)
+		}
+	})
+
+	t.Run("comments_and_decisions", func(t *testing.T) {
+		t.Parallel()
+		ticket := store.Ticket{Title: "T", Body: "B", OwnerComments: "Comment by owner-login:\nUse serve."}
+		q1 := questionRow(1, "Q1", "Settled with no owner rows", "", nil, "a")
+		conv := store.PlanningConversation{Threads: []store.Thread{{
+			Question: q1, Settled: true, Decision: "Settled by the planner alone.",
+		}}}
+		got := renderSpec(ticket, conv, nil, "")
+		want := specTestBase + "\n\n" +
+			specCommentsHeader + "\n\n" +
+			"Comment by owner-login:\nUse serve.\n\n" +
+			specDecisionsHeader + "\n\n" +
+			"Q1: Settled with no owner rows\n" +
+			"Decision: Settled by the planner alone."
+		if got != want {
+			t.Errorf("renderSpec = %q, want %q", got, want)
+		}
+	})
+}

@@ -86,6 +86,10 @@ func (p *pickupTestTracker) CommentContains(context.Context, string, string, str
 	panic("pickupTestTracker: CommentContains is unused by POST /projects/{id}/pickup")
 }
 
+func (p *pickupTestTracker) Comments(context.Context, string, string) ([]tracker.Comment, error) {
+	panic("pickupTestTracker: Comments is unused by POST /projects/{id}/pickup")
+}
+
 var _ tracker.Tracker = (*pickupTestTracker)(nil)
 
 // seedPickupProject ensures testProject and returns its store id.

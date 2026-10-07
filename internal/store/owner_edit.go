@@ -792,8 +792,12 @@ func editTicketBodyTx(ctx context.Context, tx *sql.Tx, req OwnerEditRequest) (re
 
 	newBody := *req.Body
 
+	// tracker_body keeps the body as it was before the first console edit
+	// (SQLite evaluates SET against the old row), so a later refresh tells
+	// this edit apart from an edit on the tracker even on a row inserted
+	// before migration 0011.
 	if err := execClaimGuardedTx(ctx, tx, fmt.Sprintf("ticket %d body", req.TicketID),
-		`UPDATE tickets SET body = ? WHERE id = ? AND claim_owner IS NULL`,
+		`UPDATE tickets SET tracker_body = COALESCE(tracker_body, body), body = ? WHERE id = ? AND claim_owner IS NULL`,
 		newBody, req.TicketID,
 	); err != nil {
 		return response.OwnerEditEvent{}, err

@@ -65,9 +65,9 @@ func (s *Store) InsertTicket(ctx context.Context, t Ticket) (int64, error) {
 	}
 
 	res, err := s.db.ExecContext(ctx,
-		`INSERT INTO tickets (project_id, tracker_ref, title, body, kind, state, waiting_on, parent_ticket_id, branch, pr_url, claim_owner, claim_expires_at)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		t.ProjectID, t.TrackerRef, t.Title, t.Body, t.Kind, t.State, t.WaitingOn,
+		`INSERT INTO tickets (project_id, tracker_ref, title, body, tracker_body, kind, state, waiting_on, parent_ticket_id, branch, pr_url, claim_owner, claim_expires_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		t.ProjectID, t.TrackerRef, t.Title, t.Body, t.Body, t.Kind, t.State, t.WaitingOn,
 		t.ParentTicketID, t.Branch, t.PRURL, t.ClaimOwner, formatTimePtr(t.ClaimExpiresAt),
 	)
 	if err != nil {
