@@ -589,3 +589,29 @@ func (s *Store) GetSetting(ctx context.Context, key string) (value string, ok bo
 	}
 	return raw.String, true, nil
 }
+
+// ListPushSubscriptions returns every push_subscriptions row, ordered by
+// id, for notify.WebPush.Send to deliver to. It returns an empty non-nil
+// slice when there are no rows.
+func (s *Store) ListPushSubscriptions(ctx context.Context) ([]PushSubscription, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT id, endpoint, keys_json FROM push_subscriptions ORDER BY id`)
+	if err != nil {
+		return nil, fmt.Errorf("list push subscriptions: %w", err)
+	}
+	defer rows.Close()
+
+	out := []PushSubscription{}
+	for rows.Next() {
+		var sub PushSubscription
+		var keysJSON string
+		if err := rows.Scan(&sub.ID, &sub.Endpoint, &keysJSON); err != nil {
+			return nil, fmt.Errorf("list push subscriptions: %w", err)
+		}
+		sub.KeysJSON = []byte(keysJSON)
+		out = append(out, sub)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("list push subscriptions: %w", err)
+	}
+	return out, nil
+}

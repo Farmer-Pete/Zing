@@ -50,15 +50,9 @@ func buildStopBanner(s dispatch.StopStatus) templates.StopBanner {
 	if !s.Stopped {
 		return templates.StopBanner{}
 	}
-	b := templates.StopBanner{Show: true, Kind: s.Kind, Cause: s.Cause}
-	switch {
-	case s.Kind == dispatch.StopKindOwner:
-		b.Headline = "Dispatching is stopped by the owner."
-	case s.HasTicket:
-		b.Headline = fmt.Sprintf("Dispatching stopped after %s on ticket %d.", s.Kind, s.TicketID)
+	b := templates.StopBanner{Show: true, Kind: s.Kind, Cause: s.Cause, Headline: dispatch.StopHeadline(s)}
+	if s.Kind != dispatch.StopKindOwner && s.HasTicket {
 		b.Note = fmt.Sprintf("Ticket %d runs again once its claim expires.", s.TicketID)
-	default:
-		b.Headline = fmt.Sprintf("Dispatching stopped after %s in a dispatcher pass.", s.Kind)
 	}
 	if !s.At.IsZero() {
 		b.Time = s.At.Format(alertLineTimeFormat)

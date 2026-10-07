@@ -7,6 +7,7 @@ package dispatch
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -181,6 +182,20 @@ type Binding struct {
 // values.
 const intakeModeManual = "manual"
 
+// Notifier sends one push payload to every subscriber (design section
+// "shape" rules: "The seam"). *notify.WebPush satisfies it; this package
+// never imports notify outside its own tests, so a nil Notifier -- every
+// existing Config literal, selftest included -- disables push entirely.
+type Notifier interface {
+	Send(ctx context.Context, payload []byte) error
+}
+
+// notifyTimeout bounds the context notifyStop's goroutine gives Send
+// (design section "shape" rules: "Never blocks dispatching"): long enough
+// for an ordinary push round-trip, short enough that finish's own
+// notifyWG.Wait() cannot hang a drain indefinitely.
+const notifyTimeout = 15 * time.Second
+
 // Config is the dispatcher's run-time tuning (design section 6.8). Models
 // and Floor (design section 4.4) are threaded straight into every job.Deps
 // runAndCommit builds. Interval, MaxParallel, and Budget are the startup
@@ -244,6 +259,10 @@ type Config struct {
 	// process without the lock cannot prove every other owner's claim is
 	// really dead.
 	ReclaimForeign bool
+	// Notifier sends one push per fail-closed or error stop (design section
+	// "shape" rules, owner decision Q2). nil, every existing Config literal
+	// and selftest's own, sends nothing.
+	Notifier Notifier
 }
 
 // Tuning is the dispatcher's live, console-changeable settings (#81):
@@ -472,6 +491,13 @@ type Dispatcher struct {
 	// finish so Run (and Tick) never returns while a worker is still live.
 	wg sync.WaitGroup
 
+	// notifyWG counts the goroutine notifyStop starts per recorded stop
+	// (design section "shape" rules: "Never blocks dispatching"): one Add
+	// right before the goroutine starts, one Done when Send returns or
+	// notifyTimeout elapses. finish waits on it right before its own final
+	// return, so zing serve never closes the store under a running send.
+	notifyWG sync.WaitGroup
+
 	// driving enforces one caller of Tick or Run at a time (design section
 	// 4.1): both start with a CompareAndSwap and return ErrConcurrentDrive
 	// on failure, since concurrent passes would race every read and write
@@ -662,16 +688,28 @@ func (d *Dispatcher) NotifyDrain() {
 // from a drain or a context cancellation, which must never erase a real
 // error already recorded. It returns whether this call was the first to
 // set stop, though no caller in this package currently needs that signal.
+//
+// setStop calls notifyStop on the first non-nil error any caller reports
+// (design section "shape" rules): a fail-closed or error stop sends its
+// push exactly once, from whichever call first records it. A caller that
+// always passes nil (NotifyDrain, a drain, or a context cancellation) never
+// records a non-nil stopErr, so it never reaches notifyStop's own detached
+// context.Background() -- which is why golangci-lint's contextcheck does
+// not flag NotifyDrain's own callers for not threading their ctx through a
+// push send that must, by design, outlive it (notifyStop's own doc
+// comment).
 func (d *Dispatcher) setStop(err error) bool {
 	d.mu.Lock()
 	first := !d.stop
 	d.stop = true
-	recorded := false
+	var recorded bool
+	var payload []byte
 	if d.stopErr == nil {
 		d.stopErr = err
 		recorded = err != nil
 		if recorded {
 			d.stoppedAt = time.Now()
+			payload = stopPushPayload(err, d.stoppedAt)
 		}
 	}
 	hook := d.stopErrRecordedForTest
@@ -680,7 +718,40 @@ func (d *Dispatcher) setStop(err error) bool {
 	if recorded && hook != nil {
 		hook(err)
 	}
+	if recorded {
+		d.notifyStop(payload, err)
+	}
 	return first
+}
+
+// notifyStop sends payload through cfg.Notifier in its own goroutine,
+// tracked by notifyWG, so setStop (called from a worker or Run's own
+// goroutine) never blocks dispatching on a push's HTTP round-trip (design
+// section "shape" rules: "Never blocks dispatching"). A nil Notifier -- the
+// default for every existing Config literal and selftest -- sends nothing.
+// Send's own context is detached from the caller's, since setStop has no
+// ctx of its own to thread through, and bounded by notifyTimeout so a
+// wedged push service cannot hang finish's own notifyWG.Wait() forever. The
+// log line names kind, and ticket_id when alertKindWhere reports one, the
+// same two attributes the stop alerts already use.
+func (d *Dispatcher) notifyStop(payload []byte, err error) {
+	if d.cfg.Notifier == nil {
+		return
+	}
+	kind, _, ticketID, hasTicket := alertKindWhere(err)
+	d.notifyWG.Go(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), notifyTimeout)
+		defer cancel()
+		attrs := []any{"kind", kind}
+		if hasTicket {
+			attrs = append(attrs, "ticket_id", ticketID)
+		}
+		if sendErr := d.cfg.Notifier.Send(ctx, payload); sendErr != nil {
+			slog.Warn("dispatch: stop push failed", append([]any{"err", sendErr}, attrs...)...)
+			return
+		}
+		slog.Info("dispatch: stop push sent", attrs...)
+	})
 }
 
 // isStopped reports whether setStop has been called yet (design section
@@ -708,7 +779,7 @@ func (d *Dispatcher) Tick(ctx context.Context) error {
 	results := make(chan runResult, d.CurrentTuning().MaxParallel)
 	launched, fillErr := d.fill(ctx, results)
 	if fillErr != nil {
-		d.setStop(fillErr)
+		d.setStop(fillErr) //nolint:contextcheck // notifyStop's own send deliberately runs on a bounded context.Background(), detached from this ctx, so a push outlives the Tick call that triggered it (notifyStop's own doc comment)
 	}
 
 	errs := make([]error, 0, launched+1)
@@ -755,7 +826,7 @@ func (d *Dispatcher) Run(ctx context.Context) error {
 	for {
 		select {
 		case <-ctx.Done():
-			d.setStop(nil)
+			d.setStop(nil) //nolint:contextcheck // this always passes nil, so notifyStop's own detached context.Background() is never reached (setStop's own doc comment)
 			return d.finish(ctx.Err(), results)
 
 		case <-d.drainCh:
@@ -767,7 +838,7 @@ func (d *Dispatcher) Run(ctx context.Context) error {
 				continue
 			}
 			if draining {
-				d.setStop(nil)
+				d.setStop(nil) //nolint:contextcheck // this always passes nil, so notifyStop's own detached context.Background() is never reached (setStop's own doc comment)
 				return d.finish(nil, results)
 			}
 
@@ -781,7 +852,7 @@ func (d *Dispatcher) Run(ctx context.Context) error {
 		case r := <-results:
 			settled := d.resultConsumed()
 			if r.Err != nil {
-				d.park(r.Err)
+				d.park(r.Err) //nolint:contextcheck // park's own setStop feeds notifyStop, whose send deliberately runs on a bounded context.Background(), detached from this ctx, so a push outlives the Run pass that triggered it (notifyStop's own doc comment)
 			}
 			d.bus.Publish() // the banner's in-flight count just dropped, owner stop or not
 			if settled {
@@ -797,7 +868,7 @@ func (d *Dispatcher) Run(ctx context.Context) error {
 				continue
 			}
 			if draining {
-				d.setStop(nil)
+				d.setStop(nil) //nolint:contextcheck // this always passes nil, so notifyStop's own detached context.Background() is never reached (setStop's own doc comment)
 				return d.finish(nil, results)
 			}
 			if d.isStopped() {
@@ -827,13 +898,13 @@ func (d *Dispatcher) Run(ctx context.Context) error {
 // parks and Run keeps looping.
 func (d *Dispatcher) passFailed(ctx context.Context, err error, results <-chan runResult) (done bool, ret error) {
 	if ctx.Err() != nil {
-		d.setStop(nil)
+		d.setStop(nil) //nolint:contextcheck // this always passes nil, so notifyStop's own detached context.Background() is never reached (setStop's own doc comment)
 		return true, d.finish(ctx.Err(), results)
 	}
 	if d.hasStopErr() {
 		return false, nil
 	}
-	d.park(err)
+	d.park(err) //nolint:contextcheck // park's own setStop feeds notifyStop, whose send deliberately runs on a bounded context.Background(), detached from this ctx, so a push outlives the pass that triggered it (notifyStop's own doc comment)
 	d.mu.Lock()
 	settled := d.pending == 0
 	d.mu.Unlock()
@@ -923,6 +994,7 @@ func (d *Dispatcher) finish(err error, results <-chan runResult) error {
 			if d.hasStopErr() {
 				d.logStopAlert()
 			}
+			d.notifyWG.Wait()
 			return err
 		}
 	}
@@ -1184,6 +1256,66 @@ func truncateCause(s string, maxBytes int) string {
 	return s[:cut]
 }
 
+// StopHeadline is the one-sentence summary of s shared by the console's
+// #alerts banner (buildStopBanner) and the stop push's title line (design
+// section "shape" rules): the three sentences buildStopBanner used to build
+// inline, now in one place. It returns the empty string when s.Stopped is
+// false.
+func StopHeadline(s StopStatus) string {
+	switch {
+	case !s.Stopped:
+		return ""
+	case s.Kind == StopKindOwner:
+		return "Dispatching is stopped by the owner."
+	case s.HasTicket:
+		return fmt.Sprintf("Dispatching stopped after %s on ticket %d.", s.Kind, s.TicketID)
+	default:
+		return fmt.Sprintf("Dispatching stopped after %s in a dispatcher pass.", s.Kind)
+	}
+}
+
+// stopPushTimeFormat is the stop push body's clock time, matching the
+// console's own alertLineTimeFormat (internal/console/views.go).
+const stopPushTimeFormat = "15:04:05"
+
+// stopPush is the JSON payload stopPushPayload marshals and notify.WebPush.Send
+// delivers (design section "shape" rules).
+type stopPush struct {
+	Title    string `json:"title"`
+	Body     string `json:"body"`
+	Kind     string `json:"kind"`
+	TicketID int64  `json:"ticket_id,omitempty"`
+	At       string `json:"at"`
+}
+
+// stopPushPayload builds the stop push body setStop sends on a fail-closed or
+// error stop (design section "shape" rules): the headline, an optional cause
+// sentence, and the stop time, all derived from err the same way the two
+// stop alerts (reportFirstError, logStopAlert) already are. At is formatted
+// in its own location, never converted to local or UTC time, since setStop
+// passes d.stoppedAt, already in the process's local zone.
+func stopPushPayload(err error, at time.Time) []byte {
+	kind, _, ticketID, hasTicket := alertKindWhere(err)
+	cause := truncateCause(alertCause(err), alertCauseMaxBytes)
+	status := StopStatus{Stopped: true, Kind: kind, Cause: cause, TicketID: ticketID, HasTicket: hasTicket, At: at}
+
+	body := StopHeadline(status)
+	if cause != "" {
+		body += fmt.Sprintf(" Cause: %s.", cause)
+	}
+	body += fmt.Sprintf(" Stopped at %s.", at.Format(stopPushTimeFormat))
+
+	sp := stopPush{
+		Title:    "Zing stopped dispatching",
+		Body:     body,
+		Kind:     kind,
+		TicketID: ticketID,
+		At:       at.Format(time.RFC3339),
+	}
+	b, _ := json.Marshal(sp) //nolint:errcheck // sp holds only strings and an int64
+	return b
+}
+
 // fill runs one reconcile-intake-pick-claim-launch pass (design section
 // 4.2): it replaces the body of the old Tick, except that step 7 (today's
 // run-and-commit) now only launches a worker goroutine per claimed ticket,
@@ -1330,7 +1462,7 @@ func (d *Dispatcher) worker(ctx context.Context, ticket store.Ticket, timeout ti
 	err := d.runAndCommit(ctx, ticket, timeout, expires)
 	if err != nil {
 		err = &runError{TicketID: ticket.ID, Err: err}
-		d.setStop(err)
+		d.setStop(err) //nolint:contextcheck // notifyStop's own send deliberately runs on a bounded context.Background(), detached from this ctx, so a push outlives the worker that triggered it (notifyStop's own doc comment)
 	}
 
 	// Send before leaving inflight: a finished worker whose result the

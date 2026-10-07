@@ -5,9 +5,8 @@
 // library or the store's raw settings keys directly, only this package's
 // WebPush type and its own PushKeys interface.
 //
-// Real push delivery (Send) is Package 10's job, not this one's: this
-// package only generates and persists the VAPID keypair and stores
-// subscriptions, so a later package's Notifier can send to them.
+// Real push delivery (Send and sendOne) lives in webpush.go, alongside the
+// RFC 8291 encryption and RFC 8292 VAPID JWT it needs.
 package notify
 
 import (
@@ -20,7 +19,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"net/http"
 	"sync"
+	"time"
 
 	"zing/internal/store"
 )
@@ -58,11 +59,60 @@ type WebPush struct {
 	// mutex makes the check-then-generate atomic: only one goroutine ever
 	// generates, and every other goroutine re-reads the stored key.
 	genMu sync.Mutex
+
+	// client sends the POST in sendOne. CheckRedirect turns any 3xx answer
+	// into an ordinary non-2xx status instead of following it to a second
+	// address (design section: "Trust boundary").
+	client *http.Client
+
+	// contact is the VAPID JWT's sub claim. Defaults to DefaultContact;
+	// WithContact overrides it.
+	contact string
+
+	// now returns the signing time for the VAPID JWT. Defaults to
+	// time.Now; a test may replace it.
+	now func() time.Time
 }
 
-// New builds a WebPush backed by st.
-func New(st *store.Store) *WebPush {
-	return &WebPush{store: st}
+// DefaultContact is the VAPID JWT sub claim used when console.push_contact
+// is unset (owner decision Q3). A JWT with no usable sub is rejected by
+// Apple's push service, which Safari push goes through, so the owner can
+// override it with WithContact.
+const DefaultContact = "mailto:zing@localhost"
+
+// Option configures a WebPush built by New.
+type Option func(*WebPush)
+
+// WithContact sets the VAPID JWT's sub claim to c, the console.push_contact
+// value config.Load already validated (a mailto: URL with an address, or an
+// https: URL with a host). An empty c leaves New's DefaultContact in place,
+// so cmd/zing/serve.go can pass WithContact(cfg.Console.PushContact)
+// unconditionally.
+func WithContact(c string) Option {
+	return func(w *WebPush) {
+		if c != "" {
+			w.contact = c
+		}
+	}
+}
+
+// New builds a WebPush backed by st, applying every opt in order.
+func New(st *store.Store, opts ...Option) *WebPush {
+	w := &WebPush{
+		store: st,
+		client: &http.Client{
+			Timeout: 10 * time.Second,
+			CheckRedirect: func(*http.Request, []*http.Request) error {
+				return http.ErrUseLastResponse
+			},
+		},
+		contact: DefaultContact,
+		now:     time.Now,
+	}
+	for _, opt := range opts {
+		opt(w)
+	}
+	return w
 }
 
 // PublicKey returns the VAPID public key, base64url raw-URL encoded

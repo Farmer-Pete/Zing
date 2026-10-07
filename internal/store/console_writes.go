@@ -1639,8 +1639,11 @@ func (s *Store) SetSettings(ctx context.Context, kvs ...string) error {
 // 6.13): Endpoint is the subscription's https URL, validated by the console
 // handler (push.go), not here, because the endpoint is its own column and a
 // keys_json schema cannot see it; KeysJSON is the serialized {p256dh, auth}
-// object, validated here against push_subscriptions/keys.
+// object, validated here against push_subscriptions/keys. ID is set by
+// ListPushSubscriptions from push_subscriptions.id; UpsertPushSubscription
+// ignores it.
 type PushSubscription struct {
+	ID       int64
 	Endpoint string
 	KeysJSON []byte
 }
@@ -1660,6 +1663,17 @@ func (s *Store) UpsertPushSubscription(ctx context.Context, sub PushSubscription
 		sub.Endpoint, string(sub.KeysJSON),
 	); err != nil {
 		return fmt.Errorf("upsert push subscription: %w", err)
+	}
+	return nil
+}
+
+// DeletePushSubscription removes a push_subscriptions row by endpoint
+// (notify.WebPush.sendOne's cleanup of a subscription the push service
+// answers 404 or 410 for). A missing endpoint is not an error. The SQL
+// error never includes the endpoint argument.
+func (s *Store) DeletePushSubscription(ctx context.Context, endpoint string) error {
+	if _, err := s.db.ExecContext(ctx, `DELETE FROM push_subscriptions WHERE endpoint = ?`, endpoint); err != nil {
+		return fmt.Errorf("delete push subscription: %w", err)
 	}
 	return nil
 }

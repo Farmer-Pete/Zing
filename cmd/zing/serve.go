@@ -349,10 +349,16 @@ func serve(ctx context.Context, cfgPath, dbPath string, seedDemo bool) error {
 		"interval_seconds", tune.Value(zdispatch.TuneIntervalSeconds), "interval_seconds_source", tuneSources[zdispatch.TuneIntervalSeconds],
 		"agent_minutes_per_ticket", tune.Value(zdispatch.TuneAgentMinutes), "agent_minutes_per_ticket_source", tuneSources[zdispatch.TuneAgentMinutes])
 
+	// push is built before zdispatch.New so Config.Notifier can carry it:
+	// setStop's recorded branch (internal/dispatch) sends through this same
+	// value, once per fail-closed or error stop.
+	push := notify.New(st, notify.WithContact(cfg.Console.PushContact))
+
 	d, err := zdispatch.New(st, tr, b, m, job.Registry(), bindings, zdispatch.Config{
 		Interval:    tune.Interval,
 		MaxParallel: tune.MaxParallel,
 		Owner:       claimOwner(),
+		Notifier:    push,
 		Models: map[string]string{
 			modelAliasSonnet: cfg.Models.Sonnet, modelAliasOpus: cfg.Models.Opus, modelAliasFable: cfg.Models.Fable, modelAliasCodex: cfg.Models.Codex,
 		},
@@ -405,7 +411,6 @@ func serve(ctx context.Context, cfgPath, dbPath string, seedDemo bool) error {
 		_ = st.Close()
 		return err
 	}
-	push := notify.New(st)
 
 	// The mutation guard's Host allowlist (mw.go, design section 6.14):
 	// every resolved bind authority plus every configured
@@ -996,7 +1001,7 @@ func shutdown(
 				// on the next ticker fire, which can race a short drain
 				// deadline (design section 6.10; dispatch.Dispatcher's own
 				// NotifyDrain doc comment).
-				d.NotifyDrain()
+				d.NotifyDrain() //nolint:contextcheck // NotifyDrain's own setStop(nil) call never reaches notifyStop's detached context.Background(), since that only fires for a non-nil error (setStop's own doc comment)
 			}
 			return setErr
 		},
