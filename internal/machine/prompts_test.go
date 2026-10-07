@@ -58,7 +58,7 @@ func TestPrompts_MatchThePinnedDesignText(t *testing.T) {
 		{
 			name:   "review",
 			path:   "prompts/review.md",
-			sha256: "0b3ace2fbe7bad963efb4ce744fca11ae2df70be0f5cb8daf777c25ca6547a96",
+			sha256: "5e435b119a4c9c21759c6db77470a3406be6b1f36f4f0765ad2f38852ce0c0e1",
 		},
 		{
 			name:   "judge",
@@ -541,6 +541,23 @@ func TestJudgePromptExpectsDefaultBranchGovernanceFiles(t *testing.T) {
 	for _, want := range judgeGovernanceSentences {
 		if !strings.Contains(text, want) {
 			t.Errorf("prompts/judge.md lacks %q", want)
+		}
+	}
+}
+
+// TestReviewPromptRequiresCompilerOutput proves prompts/review.md tells
+// every lens that a finding claiming code does not compile, or a test
+// does not build, must quote the go build or go vet output that shows
+// it, and that review drops such a finding without that output (#104).
+func TestReviewPromptRequiresCompilerOutput(t *testing.T) {
+	t.Parallel()
+	text := unwrapped(t, "prompts/review.md")
+	for _, want := range []string{
+		"A finding that says code does not compile, or a test does not build, must quote the go build or go vet output that shows it",
+		"Review drops such a finding without that output.",
+	} {
+		if !strings.Contains(text, want) {
+			t.Errorf("prompts/review.md lacks %q", want)
 		}
 	}
 }
