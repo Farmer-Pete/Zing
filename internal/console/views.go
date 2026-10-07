@@ -425,12 +425,48 @@ func displayFeedMessages(messages []store.MessageRow) ([]templates.FeedRow, erro
 	return out, nil
 }
 
+// stateReasonMerged is the Reason shipping commits when a ticket's pull
+// request merges (internal/job/shipping.go's reasonMerged).
+const stateReasonMerged = "merged"
+
+// mergedDone reports whether state is done and the newest state message in
+// rows (oldest first, as store.ListMessages returns them) records the move
+// into done with Reason merged. A done reached by planning's
+// nothing_to_do or by a split carries another reason and reports false, as
+// does a state payload that does not decode.
+func mergedDone(state string, rows []store.MessageRow) bool {
+	if state != string(response.TicketStateDone) {
+		return false
+	}
+	for i := range slices.Backward(rows) {
+		if rows[i].Type != msgTypeState {
+			continue
+		}
+		var p response.StatePayload
+		if err := json.Unmarshal(rows[i].Payload, &p); err != nil {
+			return false
+		}
+		return p.To == response.TicketStateDone && p.Reason == stateReasonMerged
+	}
+	return false
+}
+
+// ownerSmokeItems returns the stored plan's owner_smoke items for the
+// thread's Owner smoke checks section: only when merged (mergedDone) is
+// true. nil when not merged or when there is no plan.
+func ownerSmokeItems(merged bool, plan *templates.RenderedPlan) []string {
+	if !merged || plan == nil {
+		return nil
+	}
+	return plan.Delivery.OwnerSmoke
+}
+
 // threadComponent builds the read-only Thread view for the open ticket:
 // nil ticket and no rows when open is 0 or names no ticket (design section
 // 6.6, carried over from Package 3's patchThread guard).
 func (c *console) threadComponent(ctx context.Context, open int64) (templ.Component, error) {
 	if open <= 0 {
-		return templates.Thread(nil, nil, templates.WaitProgress{}, "", templates.TicketActions{}, nil), nil
+		return templates.Thread(nil, nil, templates.WaitProgress{}, "", templates.TicketActions{}, nil, nil), nil
 	}
 	ticket, err := c.store.GetTicket(ctx, open)
 	switch {
@@ -487,9 +523,10 @@ func (c *console) threadComponent(ctx context.Context, open int64) (templ.Compon
 		if plan != nil && showSealedSection(ticket.State, plan.Editable, rows) {
 			sealed = &templates.SealedSection{Plan: plan, Scenarios: scenarios}
 		}
-		return templates.Thread(&ticket, threadRows, buildWaitProgress(&ticket, rows, conv), banner, actions, sealed), nil
+		smoke := ownerSmokeItems(mergedDone(ticket.State, rows), plan)
+		return templates.Thread(&ticket, threadRows, buildWaitProgress(&ticket, rows, conv), banner, actions, sealed, smoke), nil
 	case errors.Is(err, sql.ErrNoRows):
-		return templates.Thread(nil, nil, templates.WaitProgress{}, "", templates.TicketActions{}, nil), nil
+		return templates.Thread(nil, nil, templates.WaitProgress{}, "", templates.TicketActions{}, nil, nil), nil
 	default:
 		return nil, err
 	}

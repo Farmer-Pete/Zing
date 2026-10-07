@@ -28,12 +28,12 @@ func TestPrompts_MatchThePinnedDesignText(t *testing.T) {
 		{
 			name:   "planning-feature",
 			path:   planningFeaturePromptPath,
-			sha256: "95252ee8d2f4bc23dd8990f32891a1580cafaed25859e5647f503f32154318b3",
+			sha256: "5e8da028411c575385ac2acbd67809c559a9704cba195181db0246bcf43daa53",
 		},
 		{
 			name:   "planning-bug",
 			path:   planningBugPromptPath,
-			sha256: "57cd6325d06fe02ed4ee77e1c22563c4f4c5bb2c5d025e88cf735af2c6e65ee5",
+			sha256: "b5d2ea6d73fb3d0ba93e4d30e30d60fe6dc515592e32bc9bd370b0c4f0d347d4",
 		},
 		{
 			name:   "planreview",
@@ -302,6 +302,54 @@ func TestTestsLensRequiresPureFunctionSeam(t *testing.T) {
 	}
 	if inPlanIdx >= lineIdx || lineIdx >= inCodeIdx {
 		t.Errorf("%s: want the pure-function line between In a plan and In code, got In a plan=%d, line=%d, In code=%d", path, inPlanIdx, lineIdx, inCodeIdx)
+	}
+}
+
+// browserProofSentence is what both planning prompts say at the end of
+// their scenarios step (#101): a scenario check never opens a browser,
+// and browser behavior is proven by a test the build runs instead, with
+// an optional owner_smoke item for a look the owner wants after merge.
+const browserProofSentence = "A check never opens a browser. " +
+	"Prove a then that is a browser state with a test the build runs, " +
+	"such as a script test under node --test or a server-side render test of the page. " +
+	"A look in a browser that the owner may want after merge " +
+	"goes in owner_smoke, which never blocks shipping."
+
+// TestPlanningPromptsTeachBrowserProof proves both planning prompts carry
+// the browser-proof sentence (#101).
+func TestPlanningPromptsTeachBrowserProof(t *testing.T) {
+	t.Parallel()
+	for _, path := range []string{planningFeaturePromptPath, planningBugPromptPath} {
+		if !strings.Contains(unwrapped(t, path), browserProofSentence) {
+			t.Errorf("%s lacks the browser-proof sentence", path)
+		}
+	}
+}
+
+// testsLensBrowserLine is the bullet prompts/lenses/tests.md adds to its
+// "In a plan" section (#101): a scenario whose check opens a browser, or
+// whose then is an unproven browser state, is a major finding.
+const testsLensBrowserLine = "A scenario whose check opens a browser is a major finding. " +
+	"So is a then that is a browser state with no test the build runs behind it. " +
+	"The fix is a script test under node --test or a server-side render test, " +
+	"plus an owner_smoke item when the owner wants a look after merge."
+
+// TestTestsLensFlagsBrowserChecks proves prompts/lenses/tests.md carries
+// the browser-check bullet in its "In a plan" section, after the kind
+// host bullet (#101).
+func TestTestsLensFlagsBrowserChecks(t *testing.T) {
+	t.Parallel()
+	const path = "prompts/lenses/tests.md"
+	text := unwrapped(t, path)
+	inPlanIdx := strings.Index(text, "In a plan")
+	lineIdx := strings.Index(text, testsLensBrowserLine)
+	inCodeIdx := strings.Index(text, "In code")
+	anyMissing := inPlanIdx < 0 || inCodeIdx < 0 || lineIdx < 0
+	if anyMissing {
+		t.Fatalf("%s: In a plan at %d, browser line at %d, In code at %d, want all present", path, inPlanIdx, lineIdx, inCodeIdx)
+	}
+	if inPlanIdx >= lineIdx || lineIdx >= inCodeIdx {
+		t.Errorf("%s: want the browser line after In a plan and before In code, got In a plan=%d, line=%d, In code=%d", path, inPlanIdx, lineIdx, inCodeIdx)
 	}
 }
 

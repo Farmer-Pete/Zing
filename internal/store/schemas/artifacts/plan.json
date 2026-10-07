@@ -456,6 +456,15 @@
           "type": "array",
           "maxItems": 12,
           "minItems": 1
+        },
+        "owner_smoke": {
+          "items": {
+            "type": "string",
+            "maxLength": 300,
+            "minLength": 1
+          },
+          "type": "array",
+          "maxItems": 10
         }
       },
       "additionalProperties": false,

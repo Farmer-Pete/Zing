@@ -54,8 +54,12 @@ the next step.
    reads CLAUDE.md or AGENTS.md with git show HEAD:FILE, never from the
    working copy, such as git show HEAD:AGENTS.md | tr -s '[:space:]' ' ' |
    grep -qF 'two words', because the judge's checkout holds the default
-   branch's copies of both files. Done when a stranger could run every
-   scenario and say pass or fail.
+   branch's copies of both files.
+   A check never opens a browser. Prove a then that is a browser state with
+   a test the build runs, such as a script test under node --test or a
+   server-side render test of the page. A look in a browser that the owner
+   may want after merge goes in owner_smoke, which never blocks shipping.
+   Done when a stranger could run every scenario and say pass or fail.
 
 5. Cut. Find the 20 percent of the work that gives 80 percent of the
    value. That is the working demo: the smallest slice that runs end to

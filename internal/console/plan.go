@@ -102,6 +102,7 @@ func buildRenderedPlan(plan response.Plan, events []store.FileEventRow) (templat
 			Tests:        plan.Delivery.Tests,
 			Tasks:        tasks,
 			DecidedFiles: decidedFiles(events),
+			OwnerSmoke:   plan.Delivery.OwnerSmoke,
 		},
 		Review: plan.Review,
 	}, nil
