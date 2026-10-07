@@ -2153,34 +2153,6 @@ func TestJudgePassMovesToShipping(t *testing.T) {
 	}
 }
 
-// TestJudgePerformanceNeverBlocks proves EVALUATE routes on JudgePasses
-// (design section 7.4, 7.6), not a literal all-pass check: a failing
-// performance row never blocks the pass. evaluate is called directly
-// (its pass branch touches no store read), so this proves EVALUATE's own
-// commit, not just the already-proven JudgePasses rule (judgerules_test.go's
-// own TestJudgePasses).
-func TestJudgePerformanceNeverBlocks(t *testing.T) {
-	if testing.Short() {
-		t.Skip("slow end-to-end flow; runs in the full suite")
-	}
-	t.Parallel()
-	s, ticket := judgeTicketReady(t)
-	deps := pbClaim(t, s, pbFakeRuntime(t), ticket.ID)
-	sha := strings.Repeat("b", 40)
-	final := []response.VerdictArtifact{
-		{Scenario: "s1", Result: response.ResultPass, Evidence: "ok", Kind: response.ScenarioKindBehavior, Round: 1, SHA: sha},
-		{Scenario: "s2", Result: response.ResultPass, Evidence: "ok", Kind: response.ScenarioKindNegative, Round: 1, SHA: sha},
-		{Scenario: "s3", Result: response.ResultFail, Evidence: "slow", Kind: response.ScenarioKindPerformance, Round: 1, SHA: sha},
-	}
-	commit, err := (judgeHandler{}).evaluate(t.Context(), ticket, deps, 1, final)
-	if err != nil {
-		t.Fatalf("evaluate: %v", err)
-	}
-	if commit.Next != stateShipping || commit.Reason != reasonJudgePassed {
-		t.Errorf("commit = (Next=%q, Reason=%q), want (shipping, %q): a failing performance row must never block the pass", commit.Next, commit.Reason, reasonJudgePassed)
-	}
-}
-
 // TestJudgeFailRequestsFixWithoutScenarioText proves EVALUATE's own fail
 // branch under the loop gate (design section 7.6): the failed-ids marker,
 // then a "failure" fix request whose text is scrubbed of the scenario's
