@@ -1018,8 +1018,11 @@ func TestThreadDraftItemClearsAfterSend(t *testing.T) {
 		t.Errorf("a.go's sent decision still renders picked after SendBatch; got:\n%s", g)
 	}
 	if !strings.Contains(g, `class="decision picked" aria-pressed="true" data-draft-ticket="`+strconv.FormatInt(ticketID, 10)+
-		`" data-draft-question="`+strconv.FormatInt(questionID, 10)+`" data-item-ref="b.go" data-decision="reject"`) {
+		`" data-draft-question="`+strconv.FormatInt(questionID, 10)+`" data-item-ref="b.go" data-decision="drop"`) {
 		t.Errorf("b.go's still-unsent draft decision missing its picked rendering; got:\n%s", g)
+	}
+	if strings.Contains(g, `data-decision="reject"`) {
+		t.Errorf("perimeter group must never render a reject button; got:\n%s", g)
 	}
 }
 
