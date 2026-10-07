@@ -1725,10 +1725,12 @@ func TestTick_ClaimUsesTheJobTimeoutAndRunsUnderThatDeadlineNotTheClaimGrace(t *
 }
 
 // TestClaimTimeoutForReviewingCoversBuild proves the "reviewing" state's
-// claim/run deadline is the largest of the review, build, and perimeter
-// job timeouts (#55 plan D9): a review fix unit runs a 45-minute build run
-// and a 45-minute CHECK inside "reviewing", so with build at 45 and review
-// at 30 the deadline is 45m, not review's own 30m.
+// claim/run deadline is the largest of the review job timeout,
+// buildAttemptsTimeout, and the perimeter job timeout (#55 plan D9, #80):
+// a review fix unit runs a build run and CHECK inside "reviewing", and
+// that build run can itself resume once on a timeout, so with build at 45
+// and one timeout_retry, buildAttemptsTimeout is 90, well past review's
+// own 30m.
 func TestClaimTimeoutForReviewingCoversBuild(t *testing.T) {
 	t.Parallel()
 
@@ -1771,10 +1773,59 @@ func TestClaimTimeoutForReviewingCoversBuild(t *testing.T) {
 	if !spy.HasDeadline() {
 		t.Fatal("the handler's context carried no deadline, want now+timeout")
 	}
-	wantMin := before.Add(44 * time.Minute)
-	wantMax := after.Add(46 * time.Minute)
+	wantMin := before.Add(89 * time.Minute)
+	wantMax := after.Add(91 * time.Minute)
 	if spy.Deadline().Before(wantMin) || spy.Deadline().After(wantMax) {
-		t.Errorf("run deadline = %v, want within [%v, %v] (~45m, jobs.build.timeout_minutes, not review's 30m)", spy.Deadline(), wantMin, wantMax)
+		t.Errorf("run deadline = %v, want within [%v, %v] (~90m, buildAttemptsTimeout, not review's 30m)", spy.Deadline(), wantMin, wantMax)
+	}
+}
+
+// TestClaimTimeoutForBuildingCoversBuildRetry proves the "building" state's
+// claim/run deadline covers build's own one automatic timeout retry
+// (owner decision Q7, #80): the real machine.toml gives jobs.build 45
+// minutes and one timeout_retry, so buildAttemptsTimeout is 90, and the
+// building row takes that over jobTimeoutOrDefault's bare 45.
+func TestClaimTimeoutForBuildingCoversBuildRetry(t *testing.T) {
+	t.Parallel()
+
+	s := newDispatchTestStore(t)
+	ticketID := seedQueuedTicket(t, s, testFixtureRef)
+
+	seedOwner := "seed-building-owner"
+	seedExpires := time.Now().Add(10 * time.Minute).UTC().Truncate(time.Second)
+	claimed, err := s.Claim(t.Context(), ticketID, seedOwner, seedExpires)
+	if err != nil || !claimed {
+		t.Fatalf("seed claim: claimed=%v err=%v", claimed, err)
+	}
+	applied, err := s.CommitHandlerResult(t.Context(), store.HandlerCommit{
+		TicketID: ticketID, Owner: seedOwner, Expires: seedExpires, Next: testStateBuilding, Reason: testSeedReason,
+	})
+	if err != nil || !applied {
+		t.Fatalf("seed commit: applied=%v err=%v", applied, err)
+	}
+
+	spy := &spyHandler{next: testStateReviewing, reason: testSpyReason}
+	reg := job.Registry()
+	reg[testStateBuilding] = spy
+
+	d := newDispatcher(t, s, newFixtureTracker(t), bus.New(), fakeRuntime(t), reg, nil, dispatch.Config{MaxParallel: 2, Owner: testOwner})
+
+	before := time.Now()
+	if err := d.Tick(t.Context()); err != nil {
+		t.Fatalf("Tick: %v", err)
+	}
+	after := time.Now()
+
+	if spy.Calls() != 1 {
+		t.Fatalf("spy.Calls() = %d, want 1", spy.Calls())
+	}
+	if !spy.HasDeadline() {
+		t.Fatal("the handler's context carried no deadline, want now+timeout")
+	}
+	wantMin := before.Add(89 * time.Minute)
+	wantMax := after.Add(91 * time.Minute)
+	if spy.Deadline().Before(wantMin) || spy.Deadline().After(wantMax) {
+		t.Errorf("run deadline = %v, want within [%v, %v] (~90m, max(jobTimeoutOrDefault(build), buildAttemptsTimeout))", spy.Deadline(), wantMin, wantMax)
 	}
 }
 
@@ -1883,11 +1934,12 @@ func TestClaimTimeoutForQueuedCoversClassifyRetry(t *testing.T) {
 }
 
 // TestClaimTimeoutForJudging proves claimTimeoutFor's own "judging" row
-// (PKG9-PLAN.md section 17.1): the real machine.toml gives jobs.judge and
-// jobs.build both 45 minutes and jobs.perimeter 3, so
-// max(judge, build, perimeter, 10) is 45 -- the build job's own timeout,
-// not judge's alone, so this also proves the row reads every one of the
-// three jobs rather than just "judge".
+// (PKG9-PLAN.md section 17.1, #80): the real machine.toml gives jobs.judge
+// 45 minutes, jobs.build 45 minutes with one timeout_retry, and
+// jobs.perimeter 3, so max(judge, buildAttemptsTimeout, perimeter, 10) is
+// 90 -- buildAttemptsTimeout covering both of build's attempts, not
+// judge's bare 45 alone, so this also proves the row reads every one of
+// the three jobs rather than just "judge".
 func TestClaimTimeoutForJudging(t *testing.T) {
 	t.Parallel()
 
@@ -1925,18 +1977,19 @@ func TestClaimTimeoutForJudging(t *testing.T) {
 	if !spy.HasDeadline() {
 		t.Fatal("the handler's context carried no deadline, want now+timeout")
 	}
-	wantMin := before.Add(44 * time.Minute)
-	wantMax := after.Add(46 * time.Minute)
+	wantMin := before.Add(89 * time.Minute)
+	wantMax := after.Add(91 * time.Minute)
 	if spy.Deadline().Before(wantMin) || spy.Deadline().After(wantMax) {
-		t.Errorf("run deadline = %v, want within [%v, %v] (~45m, max(judge, build, perimeter, 10))", spy.Deadline(), wantMin, wantMax)
+		t.Errorf("run deadline = %v, want within [%v, %v] (~90m, max(judge, buildAttemptsTimeout, perimeter, 10))", spy.Deadline(), wantMin, wantMax)
 	}
 }
 
 // TestClaimTimeoutForShipping proves claimTimeoutFor's own "shipping" row
-// (PKG9-PLAN.md section 17.1): the real machine.toml gives jobs.build 45
-// minutes, jobs.perimeter 3, and jobs.respond 15, so
-// max(respond, build, perimeter) is 45 -- the build job's own timeout, not
-// respond's alone, so this also proves the row reads every one of the
+// (PKG9-PLAN.md section 17.1, #80): the real machine.toml gives jobs.build
+// 45 minutes with one timeout_retry, jobs.perimeter 3, and jobs.respond
+// 15, so max(respond, buildAttemptsTimeout, perimeter) is 90 --
+// buildAttemptsTimeout covering both of build's attempts, not respond's
+// bare timeout alone, so this also proves the row reads every one of the
 // three jobs rather than just "respond".
 func TestClaimTimeoutForShipping(t *testing.T) {
 	t.Parallel()
@@ -1975,10 +2028,10 @@ func TestClaimTimeoutForShipping(t *testing.T) {
 	if !spy.HasDeadline() {
 		t.Fatal("the handler's context carried no deadline, want now+timeout")
 	}
-	wantMin := before.Add(44 * time.Minute)
-	wantMax := after.Add(46 * time.Minute)
+	wantMin := before.Add(89 * time.Minute)
+	wantMax := after.Add(91 * time.Minute)
 	if spy.Deadline().Before(wantMin) || spy.Deadline().After(wantMax) {
-		t.Errorf("run deadline = %v, want within [%v, %v] (~45m, max(respond, build, perimeter))", spy.Deadline(), wantMin, wantMax)
+		t.Errorf("run deadline = %v, want within [%v, %v] (~90m, max(respond, buildAttemptsTimeout, perimeter))", spy.Deadline(), wantMin, wantMax)
 	}
 }
 

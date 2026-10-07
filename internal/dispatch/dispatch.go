@@ -1070,13 +1070,16 @@ func InsertAndAnnounce(ctx context.Context, st *store.Store, tr tracker.Tracker,
 // max(defaultCodeTimeout, (1+classify's timeout_retries)*classify's
 // timeout_minutes), so the lease covers classify's one automatic timeout
 // retry (owner decision Q4; 0 when there is no classify job, leaving just
-// the defaultCodeTimeout floor); planning and building each take one job's
-// own timeout_minutes (jobTimeoutOrDefault's own defaultCodeTimeout fallback
-// when that job is missing or carries no positive timeout_minutes);
-// reviewing takes the largest of the review, build, and perimeter job
-// timeouts, like shipping, since a review fix unit's build run and CHECK run
-// inside it (#55); judging takes the largest of the judge, build, and
-// perimeter job timeouts and a 10-minute floor
+// the defaultCodeTimeout floor); planning takes its own timeout_minutes
+// (jobTimeoutOrDefault's own defaultCodeTimeout fallback when that job is
+// missing or carries no positive timeout_minutes); building takes the
+// larger of that same fallback and buildAttemptsTimeout, so the lease
+// covers build's own one automatic timeout retry (owner decision Q7, #80);
+// reviewing and shipping each take the largest of their own job,
+// buildAttemptsTimeout, and the perimeter job timeout, since a review fix
+// unit's build run and CHECK run inside "reviewing" (#55) and a fix run can
+// time out and resume inside either; judging takes the largest of the
+// judge job, buildAttemptsTimeout, the perimeter job, and a 10-minute floor
 // (judgingMinClaimTimeout) -- CHECK's own command re-runs and a fix step
 // (design section 5.3) can each run inside "judging", so its own claim
 // must outlast all three -- never falling back to defaultCodeTimeout even
@@ -1095,18 +1098,33 @@ func (d *Dispatcher) claimTimeoutFor(state string) time.Duration {
 	case statePlanning:
 		return d.jobTimeoutOrDefault(jobPlanning)
 	case stateBuilding:
-		return d.jobTimeoutOrDefault(jobBuild)
+		return max(d.jobTimeoutOrDefault(jobBuild), d.buildAttemptsTimeout())
 	case stateReviewing:
 		// A review fix unit runs a build run and CHECK inside
 		// "reviewing", so its claim must outlast both (#55 plan D9).
-		return max(d.jobTimeoutMinutes(jobReview), d.jobTimeoutMinutes(jobBuild), d.jobTimeoutMinutes(jobPerimeter))
+		return max(d.jobTimeoutMinutes(jobReview), d.buildAttemptsTimeout(), d.jobTimeoutMinutes(jobPerimeter))
 	case stateJudging:
-		return max(d.jobTimeoutMinutes(jobJudge), d.jobTimeoutMinutes(jobBuild), d.jobTimeoutMinutes(jobPerimeter), judgingMinClaimTimeout)
+		return max(d.jobTimeoutMinutes(jobJudge), d.buildAttemptsTimeout(), d.jobTimeoutMinutes(jobPerimeter), judgingMinClaimTimeout)
 	case stateShipping:
-		return max(d.jobTimeoutMinutes(jobRespond), d.jobTimeoutMinutes(jobBuild), d.jobTimeoutMinutes(jobPerimeter))
+		return max(d.jobTimeoutMinutes(jobRespond), d.buildAttemptsTimeout(), d.jobTimeoutMinutes(jobPerimeter))
 	default:
 		return defaultCodeTimeout
 	}
+}
+
+// buildAttemptsTimeout returns (1+build's timeout_retries)*build's
+// timeout_minutes, so a claim built on it covers every attempt of build's
+// own automatic timeout retry (owner decision Q7, #80), the same way
+// stateQueued's term already covers classify's. It returns 0 when
+// machine.toml names no build job or gives it no positive timeout_minutes,
+// contributing nothing to a max() rather than defaultCodeTimeout's minutes.
+func (d *Dispatcher) buildAttemptsTimeout() time.Duration {
+	build, ok := d.machine.Jobs[jobBuild]
+	if !ok || build.TimeoutMinutes <= 0 {
+		return 0
+	}
+	attempts := 1 + build.TimeoutRetries
+	return time.Duration(attempts*build.TimeoutMinutes) * time.Minute
 }
 
 // jobTimeoutOrDefault returns name's own timeout_minutes, or
