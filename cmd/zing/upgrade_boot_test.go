@@ -451,3 +451,89 @@ func TestGuardBoot_MarksPendingAttempted(t *testing.T) {
 		}
 	})
 }
+
+// countingExec is an execFunc fake that counts its calls and records the
+// last argv0, so tests can assert "exactly one exec call" as well as which
+// binary it named.
+type countingExec struct {
+	calls int
+	argv0 string
+}
+
+func (ce *countingExec) exec(argv0 string, _, _ []string) error {
+	ce.calls++
+	ce.argv0 = argv0
+	return nil
+}
+
+func TestBootAndServe_RollbackExecsBeforeConfig(t *testing.T) {
+	resolved, exe := writeGuardBootBinary(t, t.TempDir(), "new", "old")
+	marker := upgradeMarker{FromSHA: "from-sha", ToSHA: guardBootSHA, TicketID: 5, State: markerAttempted}
+	if err := saveUpgradeMarker(resolved, marker); err != nil {
+		t.Fatalf("saveUpgradeMarker: %v", err)
+	}
+
+	dbPath := filepath.Join(resolved, "zing.db")
+	cfgPath := filepath.Join(resolved, "does-not-exist.toml")
+	su := &selfUpgrade{exe: exe, running: guardBootSHA[:12]}
+	ce := &countingExec{}
+
+	err := bootAndServe(t.Context(), cfgPath, dbPath, false, su, ce.exec)
+	if err != nil {
+		t.Fatalf("bootAndServe: %v", err)
+	}
+	if ce.calls != 1 {
+		t.Errorf("exec calls = %d, want 1", ce.calls)
+	}
+	if ce.argv0 != exe {
+		t.Errorf("exec argv0 = %q, want %q", ce.argv0, exe)
+	}
+
+	got, readErr := os.ReadFile(exe)
+	if readErr != nil {
+		t.Fatalf("read exe: %v", readErr)
+	}
+	if string(got) != "old" {
+		t.Errorf("exe contents = %q, want %q", got, "old")
+	}
+
+	saved, found, loadErr := loadUpgradeMarker(resolved)
+	if loadErr != nil || !found {
+		t.Fatalf("loadUpgradeMarker: found=%v err=%v", found, loadErr)
+	}
+	if saved.State != markerRolledBack {
+		t.Errorf("marker state = %q, want %q", saved.State, markerRolledBack)
+	}
+}
+
+func TestBootAndServe_GuardRunsBeforeConfig(t *testing.T) {
+	resolved, exe := writeGuardBootBinary(t, t.TempDir(), "zing", "")
+	marker := upgradeMarker{FromSHA: "from-sha", ToSHA: guardBootSHA, TicketID: 9, State: markerPending}
+	if err := saveUpgradeMarker(resolved, marker); err != nil {
+		t.Fatalf("saveUpgradeMarker: %v", err)
+	}
+
+	dbPath := filepath.Join(resolved, "zing.db")
+	cfgPath := filepath.Join(resolved, "zing.toml")
+	if err := os.WriteFile(cfgPath, []byte("not = [toml"), 0o600); err != nil {
+		t.Fatalf("write zing.toml: %v", err)
+	}
+	su := &selfUpgrade{exe: exe, running: guardBootSHA[:12]}
+	ce := &countingExec{}
+
+	err := bootAndServe(t.Context(), cfgPath, dbPath, false, su, ce.exec)
+	if err == nil {
+		t.Fatalf("bootAndServe: got nil error, want config.Load's decode error")
+	}
+	if ce.calls != 0 {
+		t.Errorf("exec calls = %d, want 0", ce.calls)
+	}
+
+	saved, found, loadErr := loadUpgradeMarker(resolved)
+	if loadErr != nil || !found {
+		t.Fatalf("loadUpgradeMarker: found=%v err=%v", found, loadErr)
+	}
+	if saved.State != markerAttempted {
+		t.Errorf("marker state = %q, want %q (the guard ran before zing.toml was read)", saved.State, markerAttempted)
+	}
+}

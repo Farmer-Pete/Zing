@@ -115,11 +115,25 @@ func run(args []string) error {
 		return err
 	}
 
-	su := newSelfUpgrade()
+	return bootAndServe(ctx, cfgPath, dbPath, seedDemo, newSelfUpgrade(), syscall.Exec)
+}
+
+// bootAndServe runs the boot guard before zing.toml is read, then serve,
+// then any restart. run passes syscall.Exec as execve; tests pass a fake.
+func bootAndServe(ctx context.Context, cfgPath, dbPath string, seedDemo bool, su *selfUpgrade, execve execFunc) error {
+	dataDir := filepath.Dir(dbPath)
+	boot, marker, back, err := guardBoot(dataDir, su.exe, su.running)
+	if err != nil {
+		slog.Warn("upgrade: boot guard", "action", boot, "error", err)
+	}
+	if boot == bootRollback {
+		return restartAfterServe(ctx, &back, os.Args, os.Environ(), execve)
+	}
+	su.boot, su.marker = boot, marker
 	if err := serve(ctx, cfgPath, dbPath, seedDemo, su); err != nil {
 		return err
 	}
-	return restartAfterServe(ctx, su.next, os.Args, os.Environ(), syscall.Exec)
+	return restartAfterServe(ctx, su.next, os.Args, os.Environ(), execve)
 }
 
 // serve starts the store, the dispatcher, and the console, and runs until
