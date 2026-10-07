@@ -1459,3 +1459,165 @@ func TestCodexShellEnvArgs(t *testing.T) {
 		})
 	}
 }
+
+// ---- dropping the judge's skill-scan noise (run 1453, ticket #137 split) --
+
+// codexSkillScanLine is the exact stderr line run 1453 recorded: Codex
+// 0.160.0 tries to walk ~/.agents/skills, judge.sb denies the read, and
+// Codex logs this to stderr.
+const codexSkillScanLine = "failed to scan skill path file:///Users/peter/.agents/skills: Operation not permitted"
+
+// writeCodexStderrFile writes content to a new file under t.TempDir() and
+// returns its path, for FAKE_CODEX_STDERR_FILE.
+func writeCodexStderrFile(t *testing.T, content string) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "stderr.txt")
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatalf("write stderr file: %v", err)
+	}
+	return path
+}
+
+// TestCodexJudgeStderrDropsSkillScanNoise proves Codex.run drops the
+// skill-scan line from a judge run's RunResult.Stderr, keeping every other
+// line, while a planreview run's Stderr is left untouched (PKG9-PLAN.md
+// ticket #137 split, Q3: filtering is judge-only).
+func TestCodexJudgeStderrDropsSkillScanNoise(t *testing.T) {
+	t.Parallel()
+	requireUnix(t)
+
+	stderrContent := codexSkillScanLine + "\nother line\n"
+
+	t.Run("judge", func(t *testing.T) {
+		t.Parallel()
+		dir := t.TempDir()
+		stderrFile := writeCodexStderrFile(t, stderrContent)
+		req := newFakeJudgeRequest(t, dir)
+		req.ExecPrefix = judgeExecPrefix
+		req.Env = append(req.Env, "FAKE_CODEX_STDERR_FILE="+stderrFile)
+
+		c := NewCodex(fakeCodexScript)
+		res, err := c.Run(context.Background(), req)
+		if err != nil {
+			t.Fatalf("Run: %v", err)
+		}
+
+		if string(res.Stderr) != "other line\n" {
+			t.Errorf("Stderr = %q, want %q", string(res.Stderr), "other line\n")
+		}
+		if res.StderrLen != int64(len(stderrContent)) {
+			t.Errorf("StderrLen = %d, want %d (the raw stream's length)", res.StderrLen, len(stderrContent))
+		}
+	})
+
+	t.Run("planreview", func(t *testing.T) {
+		t.Parallel()
+		dir := t.TempDir()
+		stderrFile := writeCodexStderrFile(t, stderrContent)
+		req := newFakeCodexRequest(dir, "success", "FAKE_CODEX_STDERR_FILE="+stderrFile)
+
+		c := NewCodex(fakeCodexScript)
+		res, err := c.Run(context.Background(), req)
+		if err != nil {
+			t.Fatalf("Run: %v", err)
+		}
+
+		if string(res.Stderr) != stderrContent {
+			t.Errorf("Stderr = %q, want unfiltered %q", string(res.Stderr), stderrContent)
+		}
+	})
+}
+
+// TestDropCodexSkillScanNoise is a direct table test of
+// dropCodexSkillScanNoise: only a line that both starts with
+// codexSkillScanPrefix and ends with codexSkillScanSuffix is dropped; every
+// other line, including partial matches, passes through unchanged.
+func TestDropCodexSkillScanNoise(t *testing.T) {
+	t.Parallel()
+
+	for _, tt := range []struct {
+		name  string
+		input string
+		want  string
+	}{
+		{
+			name:  "scan line dropped, other line kept",
+			input: codexSkillScanLine + "\nother line\n",
+			want:  "other line\n",
+		},
+		{
+			name:  "prefix match but wrong suffix is kept",
+			input: "failed to scan skill path X: No such file or directory\n",
+			want:  "failed to scan skill path X: No such file or directory\n",
+		},
+		{
+			name:  "suffix match but wrong prefix is kept",
+			input: "warning: Operation not permitted\n",
+			want:  "warning: Operation not permitted\n",
+		},
+		{
+			name:  "scan line with no trailing newline is still dropped",
+			input: "keep\n" + codexSkillScanLine,
+			want:  "keep\n",
+		},
+		{
+			name:  "empty input",
+			input: "",
+			want:  "",
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got := dropCodexSkillScanNoise([]byte(tt.input))
+			if string(got) != tt.want {
+				t.Errorf("dropCodexSkillScanNoise(%q) = %q, want %q", tt.input, string(got), tt.want)
+			}
+		})
+	}
+}
+
+// TestCodexRunLogsStderrKeptLen proves Codex.Run's "codex run" log line
+// carries stderr_kept_len (RunResult.Stderr's own length after filtering)
+// next to the raw stderr_len, and never logs the filtered stderr text
+// itself. Not parallel: it swaps the process-wide slog default
+// (TestRun_ErrStartLogsCause's own pattern, above).
+func TestCodexRunLogsStderrKeptLen(t *testing.T) {
+	dir := t.TempDir()
+	stderrContent := codexSkillScanLine + "\n"
+	stderrFile := writeCodexStderrFile(t, stderrContent)
+
+	var logBuf bytes.Buffer
+	prevDefault := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logBuf, &slog.HandlerOptions{Level: slog.LevelInfo})))
+	t.Cleanup(func() { slog.SetDefault(prevDefault) })
+
+	req := newFakeJudgeRequest(t, dir)
+	req.ExecPrefix = judgeExecPrefix
+	req.Env = append(req.Env, "FAKE_CODEX_STDERR_FILE="+stderrFile)
+
+	c := NewCodex(fakeCodexScript)
+	if _, err := c.Run(context.Background(), req); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	logged := logBuf.String()
+	var line string
+	for candidate := range strings.SplitSeq(logged, "\n") {
+		if strings.Contains(candidate, "codex run") {
+			line = candidate
+			break
+		}
+	}
+	if line == "" {
+		t.Fatalf("log missing a %q line; got:\n%s", "codex run", logged)
+	}
+	if !strings.Contains(line, "stderr_kept_len=0") {
+		t.Errorf("codex run line missing %q; got:\n%s", "stderr_kept_len=0", line)
+	}
+	if want := fmt.Sprintf("stderr_len=%d", len(stderrContent)); !strings.Contains(line, want) {
+		t.Errorf("codex run line missing %q; got:\n%s", want, line)
+	}
+	if strings.Contains(line, "failed to scan skill path") {
+		t.Errorf("codex run line leaks filtered stderr text; got:\n%s", line)
+	}
+}

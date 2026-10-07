@@ -119,6 +119,9 @@ success)
   else
     printf '%s' "$default_result" > "$outfile"
   fi
+  if [ -n "${FAKE_CODEX_STDERR_FILE:-}" ]; then
+    cat "$FAKE_CODEX_STDERR_FILE" >&2
+  fi
   exit 0
   ;;
 exit_nonzero)

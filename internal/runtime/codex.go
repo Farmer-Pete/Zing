@@ -79,6 +79,32 @@ func codexSandboxArgs(req RunRequest) ([]string, error) {
 // read at the OS level, so this is a second, best-effort layer).
 const codexSkillsOffSetting = "features.skip_host_skill_discovery=true"
 
+// codexSkillScanPrefix and codexSkillScanSuffix bound the one stderr line
+// dropCodexSkillScanNoise removes: Codex 0.160.0 tries to walk
+// ~/.agents/skills, judge.sb denies the read, and Codex logs
+// "failed to scan skill path file:///...: Operation not permitted" (run
+// 1453). No config key stops the walk (owner's host check, ticket #137
+// split): outside the sandbox the line never appears.
+const (
+	codexSkillScanPrefix = "failed to scan skill path"
+	codexSkillScanSuffix = "Operation not permitted"
+)
+
+// dropCodexSkillScanNoise returns stderr without the lines that start with
+// codexSkillScanPrefix and end with codexSkillScanSuffix; every other line
+// is kept byte for byte, newline included.
+func dropCodexSkillScanNoise(stderr []byte) []byte {
+	var out []byte
+	for line := range bytes.SplitAfterSeq(stderr, []byte("\n")) {
+		body := bytes.TrimSuffix(line, []byte("\n"))
+		if bytes.HasPrefix(body, []byte(codexSkillScanPrefix)) && bytes.HasSuffix(body, []byte(codexSkillScanSuffix)) {
+			continue
+		}
+		out = append(out, line...)
+	}
+	return out
+}
+
 // codexShellEnvVars are the req.Env names codexShellEnvArgs copies into
 // Codex's shell_environment_policy.set, in this order.
 var codexShellEnvVars = []string{"TMPDIR", "TMPPREFIX"}
@@ -518,6 +544,7 @@ func (c Codex) Run(ctx context.Context, req RunRequest) (RunResult, error) {
 		"exit_code", res.ExitCode,
 		"agent_seconds", Seconds(res.AgentTime),
 		"stderr_len", res.StderrLen,
+		"stderr_kept_len", len(res.Stderr),
 		"stderr_sha256", res.StderrSHA256,
 	)
 	return res, runErr
@@ -599,6 +626,9 @@ func (c Codex) run(ctx context.Context, req RunRequest, argv []string, outPath s
 		StderrSHA256: shortHex(stderrHash.Sum(nil)),
 		Stderr:       stderrCap.bytes(),
 		Stdout:       tail.bytes(),
+	}
+	if req.Job == response.JobJudge {
+		res.Stderr = dropCodexSkillScanNoise(res.Stderr)
 	}
 	res.FinalMessage = readFinalMessageFile(outPath)
 
