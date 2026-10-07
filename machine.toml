@@ -37,6 +37,7 @@ per = "task"                         # one fresh run per task, one commit per ta
 tools = ["read", "grep", "glob", "edit", "write", "bash"]
 prompt = "prompts/build.md"
 timeout_minutes = 45
+timeout_retries = 1                  # one in-run resume on a timeout before escalating
 max_resumes = 3
 check_loops = 5                      # CHECK's test-and-lint fix loop, separate from max_resumes
 worktree = "sparse"
