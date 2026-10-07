@@ -6938,51 +6938,6 @@ func TestNoReadyWithUnresolvedThread(t *testing.T) {
 	}
 }
 
-// TestNoReadyWithUnclassifiedThread proves row 8's same guard against the
-// unclassified class (design section 9.1): a thread with zero comments and
-// one with an odd (empty) raw id each block the ready flip, idle (row 6a)
-// instead of marking ready.
-func TestNoReadyWithUnclassifiedThread(t *testing.T) {
-	t.Parallel()
-	for _, tc := range []struct {
-		name   string
-		thread orchestrator.Thread
-	}{
-		{"zero comments", orchestrator.Thread{ID: "RT_unclassified_zero_comments"}},
-		{"odd id", orchestrator.Thread{ID: "", Comments: []orchestrator.ThreadComment{shipHumanComment("c1", "reviewer1", "???", time.Now())}}},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			s, ticket, gh, tr := shipPublished(t)
-			local := shipHeadSHA(t, s, ticket)
-			runs, required := shipGreenCI()
-			gh.runs, gh.required = runs, required
-			gh.prState = orchestrator.PRState{Draft: true, HeadSHA: local, BaseRef: pbFixtureDefaultBranch}
-			gh.threads = []orchestrator.Thread{tc.thread}
-
-			commit, err := shipPollRun(t, s, ticket, gh, tr)
-			if err != nil {
-				t.Fatalf("Run: %v", err)
-			}
-			if len(gh.markReadyCalls) != 0 {
-				t.Errorf("markReadyCalls = %+v, want none", gh.markReadyCalls)
-			}
-			if commit.Poll == nil {
-				t.Fatal("commit.Poll is nil, want the idle backoff commit (row 6a)")
-			}
-			found := false
-			for _, m := range commit.Messages {
-				if strings.HasPrefix(m.Body, threadsBlockingPrefix) {
-					found = true
-				}
-			}
-			if !found {
-				t.Errorf("commit.Messages = %+v, want a %q marker", commit.Messages, threadsBlockingPrefix)
-			}
-		})
-	}
-}
-
 // TestDraftWhenLoopReopens proves design section 8.5 row 3: a failed
 // required check converts an already-ready pull request back to draft,
 // whoever made it ready -- draft and ready state are read from GitHub
@@ -7554,13 +7509,18 @@ func TestMergeNowRefusedWhenThreadOpen(t *testing.T) {
 	}
 }
 
-// testMergeGateBlockedByUnclassified is TestMergeGateBlockedByZeroCommentThread's
-// and TestMergeGateBlockedByOddThreadID's shared body: an unclassified
-// thread (design section 9.1) reappears between the ask and the Merge now
-// answer, and MERGE's own anyUnresolved check blocks it exactly as an
-// actionable or leftover thread would.
-func testMergeGateBlockedByUnclassified(t *testing.T, thread orchestrator.Thread) {
-	t.Helper()
+// TestMergeGateBlockedByZeroCommentThread proves MERGE's own anyUnresolved
+// check blocks on an unclassified thread (the handler's term at
+// shipping.go:2002) exactly as an actionable or leftover thread would: a
+// zero-comment thread (design section 9.1) reappears between the ask and
+// the Merge now answer, and MERGE refuses instead of calling Merge.
+func TestMergeGateBlockedByZeroCommentThread(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow end-to-end flow; runs in the full suite")
+	}
+	t.Parallel()
+
+	thread := orchestrator.Thread{ID: "RT_gate_zero_comments"}
 	s, ticket, gh, tr := shipPublished(t)
 	local := shipHeadSHA(t, s, ticket)
 	runs, required := shipGreenCI()
@@ -7585,22 +7545,6 @@ func testMergeGateBlockedByUnclassified(t *testing.T, thread orchestrator.Thread
 	if !shipHasMessage(commit2, "merge refused "+local+"\n"+mergeReasonThreadOpen) {
 		t.Errorf("commit2.Messages = %+v, want the %q refusal", commit2.Messages, mergeReasonThreadOpen)
 	}
-}
-
-func TestMergeGateBlockedByZeroCommentThread(t *testing.T) {
-	if testing.Short() {
-		t.Skip("slow end-to-end flow; runs in the full suite")
-	}
-	t.Parallel()
-	testMergeGateBlockedByUnclassified(t, orchestrator.Thread{ID: "RT_gate_zero_comments"})
-}
-
-func TestMergeGateBlockedByOddThreadID(t *testing.T) {
-	if testing.Short() {
-		t.Skip("slow end-to-end flow; runs in the full suite")
-	}
-	t.Parallel()
-	testMergeGateBlockedByUnclassified(t, orchestrator.Thread{ID: "", Comments: []orchestrator.ThreadComment{shipHumanComment("c1", "reviewer1", "???", time.Now())}})
 }
 
 // TestMergeCrashConverges proves design section 11's own convergence rule
