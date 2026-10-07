@@ -148,6 +148,16 @@ func newTestServer(t *testing.T, s *store.Store, b *bus.Broker, m *machine.Machi
 	return newTestServerFloor(t, s, b, m, log, response.SeverityMinor)
 }
 
+// newTestServerDispatch is newTestServer with console.WithDispatch(d) added
+// (ticket #89), for a test that must exercise #alerts' stop banner or POST
+// /dispatch/resume against a real console route, not just buildStopBanner
+// or handleDispatchResume directly. machine is always nil here: no banner
+// test touches the rail.
+func newTestServerDispatch(t *testing.T, s *store.Store, b *bus.Broker, log *console.Handler, d console.Dispatch) *httptest.Server {
+	t.Helper()
+	return newTestServerConfig(t, s, b, nil, log, response.SeverityMinor, "", nil, "", nil, console.WithDispatch(d))
+}
+
 // newTestServerFloor is newTestServer with an explicit review.floor (design
 // section 4.4, 7, D8, Task 11): every caller that does not itself need a
 // particular floor goes through newTestServer's own default
@@ -203,8 +213,9 @@ func newTestServerSandboxTracker(
 // the one caller that passes a non-nil hook, to set ReadTimeout, rather than
 // duplicating this listener-reservation and placeholder-swap recipe.
 // opts is passed through to console.New: rail_test.go's newStallTestServer
-// is the one caller that passes a console.Option (console.WithSlots),
-// rather than duplicating this same recipe again.
+// (console.WithSlots) and newTestServerDispatch (console.WithDispatch) are
+// the callers that pass a console.Option, rather than duplicating this same
+// recipe again.
 func newTestServerConfig(
 	t *testing.T, s *store.Store, b *bus.Broker, m *machine.Machine, log *console.Handler,
 	floor response.Severity, sandboxReason string, tr tracker.Tracker, user string,

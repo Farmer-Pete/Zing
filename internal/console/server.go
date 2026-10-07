@@ -127,6 +127,14 @@ type console struct {
 	// not itself exercise the route passes nil.
 	run TicketRunner
 
+	// dispatch backs the #alerts stop banner and POST /dispatch/resume
+	// (dispatchbanner.go, ticket #89): WithDispatch sets it. Nilable the
+	// way push, tracker, and run already are -- nil renders no banner and
+	// answers that route 503 "the dispatcher is not running in this
+	// process"; every test that does not itself exercise either passes no
+	// WithDispatch option.
+	dispatch Dispatch
+
 	// tuner backs POST /settings and the Settings view (#81, Q1): the
 	// running dispatcher whose live max_parallel, dispatch interval, and
 	// agent budget the owner can change without a restart. Set only
@@ -187,6 +195,7 @@ type console struct {
 //	POST /settings               change max_parallel, the dispatch interval, or the agent budget live (#81)
 //	POST /side                  the inert side box's fixed reply (design section 6.11, 7.1)
 //	POST /stop                  stop everything, or one ticket; no keyboard key offers this yet (design section 6.11, 7.1)
+//	POST /dispatch/resume       resume a stopped dispatcher from the console's own banner (ticket #89)
 //	POST /projects/{id}/pickup  manual intake: pick up one issue by number (PKG9-PLAN.md D29)
 //	POST /tickets/{id}/edit     the owner edits a sealed scenario, a sealed plan's task, or the ticket body
 //	POST /tickets/{id}/abandon  the owner abandons any non-terminal, unclaimed ticket (#65)
@@ -245,10 +254,13 @@ type console struct {
 // dispatcher's CHECK step runs with. A nil run (every other caller: selftest,
 // most tests) makes that route answer 503 "sandbox runs are not available".
 //
-// opts are optional dependencies New does not take positionally (#81):
-// WithTuner is the only one so far, wiring POST /settings to a running
-// dispatcher. Every existing call site compiles unchanged, since opts is
-// variadic.
+// opts are optional dependencies New does not take positionally, applied
+// in argument order before any route is registered: WithTuner (#81) wires
+// POST /settings to a running dispatcher, and WithDispatch (ticket #89,
+// dispatchbanner.go) wires the #alerts stop banner and POST
+// /dispatch/resume. cmd/zing/serve.go passes both; every other caller,
+// including every existing test, passes none, and compiles unchanged since
+// opts is variadic.
 //
 // The returned handler is a *http.ServeMux, plain HTTP/1.1, with no timeouts
 // of its own; cmd/zing wraps it in an http.Server with the drain-aware
@@ -281,6 +293,7 @@ func New(st *store.Store, b *bus.Broker, m *machine.Machine, hosts []string, por
 	mux.HandleFunc("POST /settings", withWriteDeadline(guard.requireSameOrigin(c.handleTuning)))
 	mux.HandleFunc("POST /side", withWriteDeadline(guard.requireSameOrigin(c.handleSide)))
 	mux.HandleFunc("POST /stop", withWriteDeadline(guard.requireSameOrigin(c.handleStop)))
+	mux.HandleFunc("POST /dispatch/resume", withWriteDeadline(guard.requireSameOrigin(c.handleDispatchResume)))
 	mux.HandleFunc("POST /projects/{id}/pickup", withWriteDeadline(guard.requireSameOrigin(c.handlePickup)))
 	mux.HandleFunc("POST /tickets/{id}/edit", withWriteDeadline(guard.requireSameOrigin(c.handleOwnerEdit)))
 	mux.HandleFunc("POST /tickets/{id}/abandon", withWriteDeadline(guard.requireSameOrigin(c.handleAbandon)))

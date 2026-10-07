@@ -207,7 +207,7 @@ func (c *console) patchRegions(ctx context.Context, rc *http.ResponseController,
 	if !c.armFrameWriteDeadline(ctx, rc, "alerts", sig) {
 		return false
 	}
-	if patchErr := sse.PatchElementTempl(c.alertsComponent()); patchErr != nil {
+	if patchErr := sse.PatchElementTempl(c.alertsComponent(ctx)); patchErr != nil {
 		logStreamErr(ctx, slog.LevelWarn, "console: stream: patch alerts", patchErr, "view", sig.View, "open", sig.Open)
 		return false
 	}

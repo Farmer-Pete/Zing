@@ -39,7 +39,7 @@ func mergePublished(t *testing.T) (s *store.Store, ticket store.Ticket, gh *ship
 // ticket's own project checkout, the ref FetchBase (internal/orchestrator)
 // advances, so a test can prove a request's own BaseSHA is exactly what
 // FetchBase read.
-func mergeBaseRefSHA(t *testing.T, s *store.Store, ticket store.Ticket, branch string) string {
+func mergeBaseRefSHA(t *testing.T, s *store.Store, ticket store.Ticket, branch string) string { //nolint:unparam // every call site below reads pbFixtureDefaultBranch, but the helper mirrors FetchBase's own general branch parameter
 	t.Helper()
 	proj, err := s.ProjectForTicket(t.Context(), ticket.ID)
 	if err != nil {

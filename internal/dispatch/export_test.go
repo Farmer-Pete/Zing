@@ -1,5 +1,7 @@
 package dispatch
 
+import "context"
+
 // SetAfterClaimForTest installs a hook fill calls synchronously right after
 // a successful Claim for a ticket, before fill's own stop-check-and-launch
 // critical section (design section 4.2 step 5). It exists only to let a
@@ -43,4 +45,37 @@ func SetBeforeClaimForTest(d *Dispatcher, f func(ticketID int64)) {
 // fixed, without polling or sleeping.
 func SetStopErrRecordedForTest(d *Dispatcher, f func(err error)) {
 	d.stopErrRecordedForTest = f
+}
+
+// FillForTest calls d.fill with a fresh results channel of capacity
+// cfg.MaxParallel, letting a test launch workers directly without driving a
+// full Tick or Run pass.
+func FillForTest(ctx context.Context, d *Dispatcher) (results chan runResult, launched int, err error) {
+	results = make(chan runResult, d.cfg.MaxParallel)
+	launched, err = d.fill(ctx, results)
+	return results, launched, err
+}
+
+// WaitWorkersForTest blocks until every worker fill has ever launched on d
+// has sent its result and returned, the same wait finish uses.
+func WaitWorkersForTest(d *Dispatcher) {
+	d.wg.Wait()
+}
+
+// PendingForTest reads d.pending under d.mu, for a test asserting the
+// unread-result count directly.
+func PendingForTest(d *Dispatcher) int {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.pending
+}
+
+// SetBeforeResumeClearForTest installs a hook Resume calls synchronously
+// after it clears the store's stopped flag and right before its own
+// re-check-and-clear critical section locks d.mu. It exists only to let a
+// test open that race window -- call setStop (directly, or through park)
+// from another goroutine while this goroutine is paused here -- and must
+// never be called from production code.
+func SetBeforeResumeClearForTest(d *Dispatcher, f func()) {
+	d.beforeResumeClearForTest = f
 }

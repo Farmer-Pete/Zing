@@ -21,6 +21,7 @@ import (
 	"log/slog"
 	"path"
 	"regexp"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -545,6 +546,59 @@ func failedTestNames(text string) []string {
 	return out
 }
 
+// checkKey identifies a check run by the check's name and the GitHub App
+// that created it, so a run on the PR's head sha can be matched against
+// main's own run of the same check.
+type checkKey struct {
+	Name  string
+	AppID int64
+}
+
+// preExisting is decidePreExisting's own result.
+type preExisting struct {
+	Pre   bool     // true only when every failed PR check matched a failure on main
+	Tests []string // distinct PR test names also failing on main, first-seen order
+	NoRun []string // names of failed PR checks with no completed run on main, name order
+}
+
+// decidePreExisting compares each failed PR check's failing test names with
+// main's run of the same check (design shape, "Rules of decidePreExisting").
+func decidePreExisting(failed []failedCheck, failedStatuses int, base map[checkKey][]string) preExisting {
+	var out preExisting
+	seen := make(map[string]bool)
+	all := len(failed) != 0 && failedStatuses == 0
+	for i := range failed {
+		fc := failed[i]
+		names := failedTestNames(fc.Log)
+		if len(names) == 0 {
+			all = false
+			continue
+		}
+		onBase, ok := base[checkKey{Name: fc.Run.Name, AppID: fc.Run.AppID}]
+		if !ok {
+			out.NoRun = append(out.NoRun, fc.Run.Name)
+			all = false
+			continue
+		}
+		matched := 0
+		for _, n := range names {
+			if !slices.Contains(onBase, n) {
+				continue
+			}
+			matched++
+			if !seen[n] {
+				seen[n] = true
+				out.Tests = append(out.Tests, n)
+			}
+		}
+		if matched != len(names) {
+			all = false
+		}
+	}
+	out.Pre = all
+	return out
+}
+
 // priorRerun is one check_rerun event already on the ticket for the head
 // sha under consideration, decoded.
 type priorRerun struct {
@@ -578,6 +632,12 @@ type rerunDecision struct {
 	Why    string         // Action rerunEscalate only
 	Tried  string         // Action rerunEscalate only
 	Text   string         // ciLogTextFrom's text, set by ciRerunDecision for every action
+	// Failed and FailedStatuses are set by ciRerunDecision to
+	// readFailedChecks' own result and len(result.FailedStatuses), for
+	// pollCIFailed's own decidePreExisting step; decideCIRerun itself
+	// leaves both at their zero value.
+	Failed         []failedCheck
+	FailedStatuses int
 }
 
 // triedRunsText renders rerunDecision.Tried for an escalation that

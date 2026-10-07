@@ -424,7 +424,10 @@ var legalEdges = map[string][]string{
 	stateBuilding:  {stateReviewing, stateAbandoned},
 	stateReviewing: {stateJudging, stateAbandoned},
 	stateJudging:   {stateShipping, stateAbandoned},
-	stateShipping:  {stateDone, stateAbandoned},
+	// stateShipping's own edge back to stateJudging exists only for the
+	// owner's Retry on PUBLISH's "the judge has not passed this commit"
+	// escalation (#95): shipHandler.retryJudgeNotPassed.
+	stateShipping: {stateJudging, stateDone, stateAbandoned},
 }
 
 // legalWaiting is the eight waiting_on flags migrations/0001_init.sql

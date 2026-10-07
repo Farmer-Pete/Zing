@@ -618,8 +618,10 @@ func TestLoad_IdleMinutesAndTimeoutRetries(t *testing.T) {
 }
 
 // TestLoad_ShippedMachineTimeoutKeys proves the real machine.toml sets
-// idle_minutes = 2 and timeout_retries = 1 on classify and perimeter only;
-// every other job keeps both at their absent-key default of 0.
+// idle_minutes = 2 and timeout_retries = 1 on classify and perimeter, build
+// keeps idle_minutes at its absent-key default of 0 but sets
+// timeout_retries = 1 on its own (one in-run resume on a timeout, owner
+// decision Q7 in #80's ticket), and every other job keeps both at 0.
 func TestLoad_ShippedMachineTimeoutKeys(t *testing.T) {
 	t.Parallel()
 
@@ -638,7 +640,15 @@ func TestLoad_ShippedMachineTimeoutKeys(t *testing.T) {
 		}
 	}
 
-	for _, name := range []string{testJobNameBuild, "merge", "planning", "review", "respond", "side"} {
+	buildJob := m.Jobs[testJobNameBuild]
+	if buildJob.IdleMinutes != 0 {
+		t.Errorf("%s.IdleMinutes = %d, want 0", testJobNameBuild, buildJob.IdleMinutes)
+	}
+	if buildJob.TimeoutRetries != 1 {
+		t.Errorf("%s.TimeoutRetries = %d, want 1", testJobNameBuild, buildJob.TimeoutRetries)
+	}
+
+	for _, name := range []string{"merge", "planning", "review", "respond", "side"} {
 		job := m.Jobs[name]
 		if job.IdleMinutes != 0 {
 			t.Errorf("%s.IdleMinutes = %d, want 0", name, job.IdleMinutes)

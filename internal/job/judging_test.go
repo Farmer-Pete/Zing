@@ -508,6 +508,120 @@ func judgeAdvanceStart(t *testing.T, s *store.Store, rt runtime.Runtime, ticket 
 	return pbGetTicket(t, s, ticket.ID)
 }
 
+// ---- TestJudgeMergedSinceStart -------------------------------------------
+
+// TestJudgeMergedSinceStart proves judgeMergedSince's own table (#95): a
+// landed base merge row with an id newer than startedID means true, and a
+// closed row or a bare request row never does regardless of its id. It
+// also proves judgeStartedMarker, which Run uses to resolve round n's own
+// started marker into the startedID that judgeMergedSince takes: round 1
+// and round 2 each resolve to their own started marker, and a round with
+// no started marker errors instead of resolving to the zero value.
+func TestJudgeMergedSinceStart(t *testing.T) {
+	t.Parallel()
+
+	row := func(id int64, body string) store.MessageRow {
+		return store.MessageRow{ID: id, Message: store.Message{Body: body}} //nolint:modernize // keyed on purpose: MessageRow's ID and CreatedAt fields precede the embedded Message, so the key cannot be dropped
+	}
+	landed := func(id int64) store.MessageRow {
+		return row(id, baseMergeLandedBody(id, strings.Repeat("b", 40)))
+	}
+	closed := func(id int64) store.MessageRow {
+		return row(id, baseMergeClosedBody(id))
+	}
+	requested := func(id int64) store.MessageRow {
+		req := baseMergeRequest{AfterRunID: 1, BaseBranch: pbFixtureDefaultBranch, BaseSHA: strings.Repeat("c", 40), Point: syncPointJudge}
+		return row(id, req.body())
+	}
+	started := func(id int64, n int, sha string) store.MessageRow {
+		return row(id, fmt.Sprintf("judge round %d started sha %s after run %d", n, sha, 1))
+	}
+
+	cases := []struct {
+		name      string
+		mergeRows []store.MessageRow
+		startedID int64
+		want      bool
+	}{
+		{
+			name:      "landed newer than the started marker",
+			mergeRows: []store.MessageRow{landed(2)},
+			startedID: 1,
+			want:      true,
+		},
+		{
+			name:      "landed older than the started marker",
+			mergeRows: []store.MessageRow{landed(1)},
+			startedID: 2,
+			want:      false,
+		},
+		{
+			name:      "closed newer than the started marker",
+			mergeRows: []store.MessageRow{closed(2)},
+			startedID: 1,
+			want:      false,
+		},
+		{
+			name:      "a bare request row newer than the started marker",
+			mergeRows: []store.MessageRow{requested(2)},
+			startedID: 1,
+			want:      false,
+		},
+		{
+			name:      "round 1's landing is not newer than round 2's own started marker",
+			mergeRows: []store.MessageRow{landed(2)},
+			startedID: 3,
+			want:      false,
+		},
+	}
+
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			t.Parallel()
+			got := judgeMergedSince(c.mergeRows, c.startedID)
+			if got != c.want {
+				t.Errorf("judgeMergedSince = %v, want %v", got, c.want)
+			}
+		})
+	}
+
+	markers := []store.MessageRow{started(1, 1, strings.Repeat("a", 40)), landed(2), started(3, 2, strings.Repeat("b", 40))}
+
+	t.Run("round 1's own started marker is older than the landing", func(t *testing.T) {
+		t.Parallel()
+		m, err := judgeStartedMarker(markers, 1)
+		if err != nil {
+			t.Fatalf("judgeStartedMarker(1): %v", err)
+		}
+		if got := judgeMergedSince(markers[1:2], m.ID); got != true {
+			t.Errorf("judgeMergedSince after round 1's started marker = %v, want true", got)
+		}
+	})
+
+	t.Run("round 2's own started marker is newer than the landing", func(t *testing.T) {
+		t.Parallel()
+		m, err := judgeStartedMarker(markers, 2)
+		if err != nil {
+			t.Fatalf("judgeStartedMarker(2): %v", err)
+		}
+		if got := judgeMergedSince(markers[1:2], m.ID); got != false {
+			t.Errorf("judgeMergedSince after round 2's started marker = %v, want false", got)
+		}
+	})
+
+	t.Run("a round with no started marker errors", func(t *testing.T) {
+		t.Parallel()
+		_, err := judgeStartedMarker(markers, 3)
+		if err == nil {
+			t.Fatal("judgeStartedMarker(3): want error, got nil")
+		}
+		const want = "job: judging: round 3 has no started marker"
+		if err.Error() != want {
+			t.Errorf("judgeStartedMarker(3) error = %q, want %q", err.Error(), want)
+		}
+	})
+}
+
 // ---- TestJudgeRunStoresVerdicts ---------------------------------------------
 
 // TestJudgeRunStoresVerdicts proves RUN's own clean ok outcome (design
@@ -2207,6 +2321,51 @@ func TestJudgeCapResumesRetryStartsFresh(t *testing.T) {
 	}
 }
 
+// TestJudgeRetryStartsNewRoundAfterBaseMergeLanded proves Run's retry
+// branch guard (#95, review finding r1f1): with round 1's own started
+// marker, then a landed base merge row newer than it, then a round 1 retry
+// marker as the newest marker, Run must start round 2 through h.start
+// rather than resume round 1 at its own started sha.
+func TestJudgeRetryStartsNewRoundAfterBaseMergeLanded(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow end-to-end flow; runs in the full suite")
+	}
+	t.Parallel()
+	s, ticket := judgeTicketReady(t)
+	rt := runtime.NewFake(judgeScriptsFS(judgeOkBothScript))
+	ticket = judgeAdvanceStart(t, s, rt, ticket)
+
+	markers, err := s.MarkersWithPrefix(t.Context(), ticket.ID, judgeRoundMarkerPrefix)
+	if err != nil {
+		t.Fatalf("MarkersWithPrefix: %v", err)
+	}
+	if len(markers) != 1 {
+		t.Fatalf("markers = %+v, want exactly round 1's own started marker", markers)
+	}
+
+	if _, insertErr := s.InsertMessage(t.Context(), store.Message{
+		TicketID: ticket.ID, Type: msgTypeUpdate, Author: authorSystem,
+		Body: baseMergeLandedBody(1, strings.Repeat("d", 40)),
+	}); insertErr != nil {
+		t.Fatalf("InsertMessage(landed): %v", insertErr)
+	}
+	if _, insertErr := s.InsertMessage(t.Context(), store.Message{
+		TicketID: ticket.ID, Type: msgTypeUpdate, Author: authorSystem,
+		Body: "judge round 1 retry after run 1",
+	}); insertErr != nil {
+		t.Fatalf("InsertMessage(retry): %v", insertErr)
+	}
+
+	deps := pbClaim(t, s, rt, ticket.ID)
+	commit, err := (judgeHandler{}).Run(t.Context(), pbGetTicket(t, s, ticket.ID), deps)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if len(commit.Messages) != 1 || !strings.HasPrefix(commit.Messages[0].Body, "judge round 2 started sha ") {
+		t.Fatalf("commit.Messages = %+v, want a \"judge round 2 started sha\" marker, not a round 1 resume", commit.Messages)
+	}
+}
+
 // judgeFixTestCmd is the fix driver's own project.TestCmd override (design
 // section 5.3's own adopt/CHECK pattern, pbFixTestCmd's own trick):
 // appends a line to hello.txt, which the earlier real build already
@@ -2239,6 +2398,145 @@ const judgeNoChangeFixBuildScript = `<zing job="build" outcome="ok">
   <report>The failure was not in the code; nothing changed.</report>
   <notes></notes>
 </zing>`
+
+// judgeFixCannotRunBuildScript is the fix driver's own RUN turn for a
+// failure the fix agent could not reproduce (ticket #80 task 2), verbatim
+// from internal/response/examples/build-error.xml: a build "error" outcome,
+// code cannot_run, so DriveFix's own runFixFirst escalates instead of
+// landing.
+const judgeFixCannotRunBuildScript = `<zing job="build" outcome="error">
+  <error code="cannot_run">
+    <what>The task's test suite cannot run: go test fails immediately with a missing go.sum entry for the sqlite driver.</what>
+    <why>go mod tidy was never run after the driver was added to go.mod, so the build fails before any test executes.</why>
+    <tried>Ran go mod tidy locally, which needs network access this sandbox does not have.</tried>
+  </error>
+</zing>`
+
+// judgeFixEscalated brings a fresh judgeTicketReady ticket through round 1's
+// own failure and "failure" fix request (judgeFailRoundOne), then drives
+// that fix request's own first RUN turn with judgeFixCannotRunBuildScript,
+// so it escalates cannot_run, origin fix, instead of landing. It returns
+// the store, the ticket read back after that escalation commit applies,
+// and the runtime (wrapped in a recordingRuntime, so a later retry's own
+// requests can be counted and inspected), for
+// TestFixEscalationInJudgingOffersJudgeAgain (ticket #80 task 2) and
+// TestFixEscalationAfterRetryStillOffersJudgeAgain (task 2, review r2f9)
+// to build on.
+func judgeFixEscalated(t *testing.T) (*store.Store, store.Ticket, *recordingRuntime) {
+	t.Helper()
+	s, ticket := judgeTicketReady(t)
+
+	scripts := judgeScriptsFS(judgeOkBothScript)
+	scripts["build/fix/1.xml"] = &fstest.MapFile{Data: []byte(judgeFixCannotRunBuildScript)}
+	rec := &recordingRuntime{inner: runtime.NewFake(scripts)}
+
+	checks := &judgeScriptedCheckCommands{real: NewCommandRunner(sandbox.Off(), false), steps: []judgeCheckStep{{exit: 1}}}
+
+	ticket = judgeFailRoundOne(t, s, ticket, rec, checks)
+
+	deps := pbWithTestCmd(pbClaim(t, s, rec, ticket.ID), ticket, judgeFixTestCmd)
+	deps.Commands = checks
+	commit, err := (judgeHandler{}).Run(t.Context(), ticket, deps) // fix RUN turn: cannot_run error
+	if err != nil {
+		t.Fatalf("judgeFixEscalated: fix RUN: %v", err)
+	}
+	pbApply(t, s, ticket, commit)
+
+	return s, pbGetTicket(t, s, ticket.ID), rec
+}
+
+// TestFixEscalationInJudgingOffersJudgeAgain proves withFixStageOption
+// (design section 8, owner decision Q6, ticket #80 task 2): a failure-kind
+// fix's own cannot_run escalation, raised while judging, offers "Judge
+// again without a fix" between Retry and Abandon, with Retry still
+// recommended.
+func TestFixEscalationInJudgingOffersJudgeAgain(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow end-to-end flow; runs in the full suite")
+	}
+	t.Parallel()
+	s, ticket, _ := judgeFixEscalated(t)
+
+	open, err := s.QuestionsByState(t.Context(), ticket.ID, "open")
+	if err != nil {
+		t.Fatalf("QuestionsByState(open): %v", err)
+	}
+	if len(open) != 1 {
+		t.Fatalf("QuestionsByState(open) = %d questions, want exactly 1", len(open))
+	}
+
+	var qp response.QuestionPayload
+	if err := json.Unmarshal(open[0].Payload, &qp); err != nil {
+		t.Fatalf("unmarshal question payload: %v", err)
+	}
+	wantOptions := []response.Option{
+		{Key: "a", Text: pbEscalationTextRetry},
+		{Key: fixRejudgeOptionKey, Text: fixRejudgeOptionText},
+		{Key: "c", Text: pbEscalationTextAbandon},
+	}
+	if !reflect.DeepEqual(qp.Options, wantOptions) {
+		t.Errorf("question options = %+v, want %+v", qp.Options, wantOptions)
+	}
+	if qp.Recommended != "a" {
+		t.Errorf("recommended = %q, want %q", qp.Recommended, "a")
+	}
+}
+
+// TestFixEscalationAfterRetryStillOffersJudgeAgain proves withFixStageOption's
+// own call from postBuildPrelude's answered-round branch (postbuild.go's
+// postBuildEnterFromRounds row), not only its DriveFix row (review r2f9):
+// a Retry on the first cannot_run escalation reruns the same "failure" fix,
+// which escalates cannot_run again (judgeFixCannotRunBuildScript, replayed
+// on the fix's fresh session), and that second escalation still offers
+// "Judge again without a fix".
+func TestFixEscalationAfterRetryStillOffersJudgeAgain(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow end-to-end flow; runs in the full suite")
+	}
+	t.Parallel()
+	s, ticket, rec := judgeFixEscalated(t)
+
+	open, err := s.QuestionsByState(t.Context(), ticket.ID, "open")
+	if err != nil {
+		t.Fatalf("QuestionsByState(open): %v", err)
+	}
+	if len(open) != 1 {
+		t.Fatalf("QuestionsByState(open) = %d questions, want exactly 1", len(open))
+	}
+	pbAnswerEscalationWithNote(t, s, ticket.ID, open[0].ID, "a", "")
+
+	deps := pbWithTestCmd(pbClaim(t, s, rec, ticket.ID), pbGetTicket(t, s, ticket.ID), judgeFixTestCmd)
+	deps.Commands = &judgeScriptedCheckCommands{real: NewCommandRunner(sandbox.Off(), false), steps: []judgeCheckStep{{exit: 1}}}
+	commit, err := (judgeHandler{}).Run(t.Context(), pbGetTicket(t, s, ticket.ID), deps) // Retry: fresh fix RUN turn, cannot_run again
+	if err != nil {
+		t.Fatalf("Run after Retry: %v", err)
+	}
+	pbApply(t, s, pbGetTicket(t, s, ticket.ID), commit)
+
+	open2, err := s.QuestionsByState(t.Context(), ticket.ID, "open")
+	if err != nil {
+		t.Fatalf("QuestionsByState(open) after Retry: %v", err)
+	}
+	if len(open2) != 1 {
+		t.Fatalf("QuestionsByState(open) after Retry = %d questions, want exactly 1", len(open2))
+	}
+
+	var qp response.QuestionPayload
+	if err := json.Unmarshal(open2[0].Payload, &qp); err != nil {
+		t.Fatalf("unmarshal question payload: %v", err)
+	}
+	wantOptions := []response.Option{
+		{Key: "a", Text: pbEscalationTextRetry},
+		{Key: fixRejudgeOptionKey, Text: fixRejudgeOptionText},
+		{Key: "c", Text: pbEscalationTextAbandon},
+	}
+	if !reflect.DeepEqual(qp.Options, wantOptions) {
+		t.Errorf("question options after Retry = %+v, want %+v", qp.Options, wantOptions)
+	}
+	if len(rec.reqs) == 0 {
+		t.Fatal("rec.reqs is empty, want the Retry to have made a fresh fix run request")
+	}
+}
 
 // driveJudgeFixToLanding drives an already-open "failure" fix request
 // through the fix driver's own RUN then CHECK-and-LAND ticks (fix.go's own
@@ -2693,4 +2991,607 @@ func TestJudgeNoChangeFixEscalatesDespiteRetryAfterLanding(t *testing.T) {
 	if !strings.Contains(commit.Escalation.Payload.Tried, "s1") {
 		t.Errorf("escalation Tried = %q, want it to name s1", commit.Escalation.Payload.Tried)
 	}
+}
+
+// TestJudgeAgainWithoutFixStartsJudgeRound proves rejudgeWithoutFix's own
+// happy path (design section 8, owner decision Q6, ticket #80 task 3): the
+// owner answers a failure-kind fix's own cannot_run escalation with option
+// e plus a note, and the next tick drops the fix and starts the next judge
+// round at HEAD, with the note reaching the judge's own RUN turn and no fix
+// run in between.
+func TestJudgeAgainWithoutFixStartsJudgeRound(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow end-to-end flow; runs in the full suite")
+	}
+	t.Parallel()
+	s, ticket := judgeTicketReady(t)
+
+	scripts := judgeScriptsFS(judgeOkBothScript)
+	scripts["build/fix/1.xml"] = &fstest.MapFile{Data: []byte(judgeFixCannotRunBuildScript)}
+	scripts["judge/2/1.xml"] = &fstest.MapFile{Data: []byte(judgeOkBothScript)}
+	rec := &recordingRuntime{inner: runtime.NewFake(scripts)}
+
+	checks := &judgeScriptedCheckCommands{real: NewCommandRunner(sandbox.Off(), false), steps: []judgeCheckStep{{exit: 1}}}
+
+	ticket = judgeFailRoundOne(t, s, ticket, rec, checks)
+
+	deps := pbWithTestCmd(pbClaim(t, s, rec, ticket.ID), ticket, judgeFixTestCmd)
+	deps.Commands = checks
+	fixCommit, err := (judgeHandler{}).Run(t.Context(), ticket, deps) // fix RUN turn: cannot_run error
+	if err != nil {
+		t.Fatalf("fix RUN: %v", err)
+	}
+	pbApply(t, s, ticket, fixCommit)
+	ticket = pbGetTicket(t, s, ticket.ID)
+
+	req, open, err := openFixRequest(t.Context(), Deps{Store: s}, ticket)
+	if err != nil {
+		t.Fatalf("openFixRequest: %v", err)
+	}
+	if !open {
+		t.Fatal("openFixRequest: open = false, want true")
+	}
+
+	open2, err := s.QuestionsByState(t.Context(), ticket.ID, "open")
+	if err != nil {
+		t.Fatalf("QuestionsByState(open): %v", err)
+	}
+	if len(open2) != 1 {
+		t.Fatalf("QuestionsByState(open) = %d questions, want exactly 1", len(open2))
+	}
+	qID := open2[0].ID
+
+	const rejudgeNote = "the failure is outside the code"
+	pbAnswerEscalationWithNote(t, s, ticket.ID, qID, fixRejudgeOptionKey, rejudgeNote)
+
+	reqCountBefore := len(rec.reqs)
+	deps2 := pbWithTestCmd(pbClaim(t, s, rec, ticket.ID), pbGetTicket(t, s, ticket.ID), judgeFixTestCmd)
+	deps2.Commands = checks
+	commit, err := (judgeHandler{}).Run(t.Context(), pbGetTicket(t, s, ticket.ID), deps2) // resolves e: rejudgeWithoutFix
+	if err != nil {
+		t.Fatalf("Run after answering e: %v", err)
+	}
+
+	if len(commit.Messages) == 0 || commit.Messages[0].Body != fmt.Sprintf("fix dropped %d", req.MessageID) {
+		t.Fatalf("commit.Messages[0] = %+v, want \"fix dropped %d\"", commit.Messages, req.MessageID)
+	}
+	foundStarted := false
+	for _, m := range commit.Messages {
+		if strings.HasPrefix(m.Body, "judge round 2 started sha") {
+			foundStarted = true
+		}
+	}
+	if !foundStarted {
+		t.Errorf("commit.Messages = %+v, want a \"judge round 2 started sha\" message", commit.Messages)
+	}
+	if !slices.Contains(commit.ResolveQuestions, qID) {
+		t.Errorf("commit.ResolveQuestions = %v, want it to contain %d", commit.ResolveQuestions, qID)
+	}
+	if len(rec.reqs)-reqCountBefore != 1 {
+		t.Fatalf("runtime requests after answering e = %d, want exactly 1", len(rec.reqs)-reqCountBefore)
+	}
+	if last := rec.reqs[len(rec.reqs)-1]; last.Job != response.JobJudge {
+		t.Errorf("request Job = %q, want %q (no fix run)", last.Job, response.JobJudge)
+	}
+	assertFencedPB(t, rec.reqs[len(rec.reqs)-1].Prompt, "notes", rejudgeNote)
+
+	pbApply(t, s, ticket, commit)
+	_, stillOpen, err := openFixRequest(t.Context(), Deps{Store: s}, pbGetTicket(t, s, ticket.ID))
+	if err != nil {
+		t.Fatalf("openFixRequest after applying: %v", err)
+	}
+	if stillOpen {
+		t.Error("openFixRequest after rejudging without a fix: open = true, want false")
+	}
+}
+
+// TestJudgeAgainWithoutFixDirtyTreeStillDrops proves rejudgeWithoutFix drops
+// the fix even when retryFreshRound's own judgeStartChecks escalates instead
+// of starting a round (design section 8, ticket #80 task 3): a dirty
+// worktree at answer time still closes the fix request, and the owner's
+// Retry on the escalation that follows starts the round once the tree is
+// clean (task 4).
+func TestJudgeAgainWithoutFixDirtyTreeStillDrops(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow end-to-end flow; runs in the full suite")
+	}
+	t.Parallel()
+	s, ticket := judgeTicketReady(t)
+
+	scripts := judgeScriptsFS(judgeOkBothScript)
+	scripts["build/fix/1.xml"] = &fstest.MapFile{Data: []byte(judgeFixCannotRunBuildScript)}
+	scripts["judge/2/1.xml"] = &fstest.MapFile{Data: []byte(judgeOkBothScript)}
+	rec := &recordingRuntime{inner: runtime.NewFake(scripts)}
+
+	checks := &judgeScriptedCheckCommands{real: NewCommandRunner(sandbox.Off(), false), steps: []judgeCheckStep{{exit: 1}}}
+
+	ticket = judgeFailRoundOne(t, s, ticket, rec, checks)
+
+	startedMarker, ok := reviewMarker(t, s, ticket.ID, "judge round 1 started")
+	if !ok {
+		t.Fatal(`no "judge round 1 started" marker`)
+	}
+	startedFirstLine, _, _ := strings.Cut(startedMarker.Body, "\n")
+	sub := judgeRoundStartedLine.FindStringSubmatch(startedFirstLine)
+	if sub == nil {
+		t.Fatalf("started marker body = %q, did not match the started-line shape", startedMarker.Body)
+	}
+	wantSHA := sub[2]
+
+	deps := pbWithTestCmd(pbClaim(t, s, rec, ticket.ID), ticket, judgeFixTestCmd)
+	deps.Commands = checks
+	fixCommit, err := (judgeHandler{}).Run(t.Context(), ticket, deps) // fix RUN turn: cannot_run error
+	if err != nil {
+		t.Fatalf("fix RUN: %v", err)
+	}
+	pbApply(t, s, ticket, fixCommit)
+	ticket = pbGetTicket(t, s, ticket.ID)
+
+	req, open, err := openFixRequest(t.Context(), Deps{Store: s}, ticket)
+	if err != nil {
+		t.Fatalf("openFixRequest: %v", err)
+	}
+	if !open {
+		t.Fatal("openFixRequest: open = false, want true")
+	}
+
+	proj := deps.Projects[ticket.ProjectID]
+	wt, _, err := proj.Orch.EnsureWorktree(t.Context(), ticket.ID, ticket.Title)
+	if err != nil {
+		t.Fatalf("EnsureWorktree: %v", err)
+	}
+	readmePath := filepath.Join(wt.Dir(), "README.md")
+	existing, readErr := os.ReadFile(readmePath)
+	if readErr != nil {
+		t.Fatalf("read README.md: %v", readErr)
+	}
+	if writeErr := os.WriteFile(readmePath, append(existing, []byte("dirty\n")...), 0o600); writeErr != nil {
+		t.Fatalf("modify README.md: %v", writeErr)
+	}
+
+	open2, err := s.QuestionsByState(t.Context(), ticket.ID, "open")
+	if err != nil {
+		t.Fatalf("QuestionsByState(open): %v", err)
+	}
+	if len(open2) != 1 {
+		t.Fatalf("QuestionsByState(open) = %d questions, want exactly 1", len(open2))
+	}
+	qID := open2[0].ID
+
+	pbAnswerEscalationWithNote(t, s, ticket.ID, qID, fixRejudgeOptionKey, "")
+
+	reqCountBeforeDrop := len(rec.reqs)
+	deps2 := pbWithTestCmd(pbClaim(t, s, rec, ticket.ID), pbGetTicket(t, s, ticket.ID), judgeFixTestCmd)
+	deps2.Commands = checks
+	commit, handled := pbRunPrelude(t, s, deps2, ticket.ID)
+	if !handled {
+		t.Fatal("handled = false, want true")
+	}
+	if len(rec.reqs) != reqCountBeforeDrop {
+		t.Errorf("runtime requests after answering e with a dirty tree = %d, want no change from %d", len(rec.reqs), reqCountBeforeDrop)
+	}
+
+	if len(commit.Messages) == 0 || commit.Messages[0].Body != fmt.Sprintf("fix dropped %d", req.MessageID) {
+		t.Fatalf("commit.Messages[0] = %+v, want \"fix dropped %d\"", commit.Messages, req.MessageID)
+	}
+	if commit.Escalation == nil {
+		t.Fatal("commit.Escalation = nil, want a judge-origin escalation from judgeStartChecks")
+	}
+	if commit.Escalation.Payload.Origin != string(response.EscalationOriginJudge) {
+		t.Errorf("escalation origin = %q, want %q", commit.Escalation.Payload.Origin, response.EscalationOriginJudge)
+	}
+	if !slices.Contains(commit.ResolveQuestions, qID) {
+		t.Errorf("commit.ResolveQuestions = %v, want it to contain %d", commit.ResolveQuestions, qID)
+	}
+
+	_, stillOpen, err := openFixRequest(t.Context(), Deps{Store: s}, pbGetTicket(t, s, ticket.ID))
+	if err != nil {
+		t.Fatalf("openFixRequest after applying: %v", err)
+	}
+	if stillOpen {
+		t.Error("openFixRequest after the dirty-tree escalation: open = true, want false")
+	}
+
+	// Part 1b (review r2f5): Retry while the tree is still dirty.
+	// retryJudgeNoRun's own call to retryFreshRound escalates again
+	// through judgeStartChecks, and the answered question must still
+	// resolve, or the next tick would see the same answered round again.
+	openDirty, err := s.QuestionsByState(t.Context(), ticket.ID, "open")
+	if err != nil {
+		t.Fatalf("QuestionsByState(open) before cleaning the tree: %v", err)
+	}
+	if len(openDirty) != 1 {
+		t.Fatalf("QuestionsByState(open) = %d questions, want exactly 1", len(openDirty))
+	}
+	qIDDirty := openDirty[0].ID
+	pbAnswerEscalationWithNote(t, s, ticket.ID, qIDDirty, "a", "retry while still dirty")
+
+	reqCountBeforeDirtyRetry := len(rec.reqs)
+	deps2b := pbWithTestCmd(pbClaim(t, s, rec, ticket.ID), pbGetTicket(t, s, ticket.ID), judgeFixTestCmd)
+	deps2b.Commands = checks
+	dirtyRetryCommit, err := (judgeHandler{}).Run(t.Context(), pbGetTicket(t, s, ticket.ID), deps2b)
+	if err != nil {
+		t.Fatalf("Run (Retry with the tree still dirty): %v", err)
+	}
+	if len(rec.reqs) != reqCountBeforeDirtyRetry {
+		t.Errorf("runtime requests after a Retry with the tree still dirty = %d, want no change from %d", len(rec.reqs), reqCountBeforeDirtyRetry)
+	}
+	if dirtyRetryCommit.Escalation == nil {
+		t.Fatal("dirtyRetryCommit.Escalation = nil, want a judge-origin escalation from judgeStartChecks again")
+	}
+	if !slices.Contains(dirtyRetryCommit.ResolveQuestions, qIDDirty) {
+		t.Errorf("dirtyRetryCommit.ResolveQuestions = %v, want it to contain %d", dirtyRetryCommit.ResolveQuestions, qIDDirty)
+	}
+	pbApply(t, s, pbGetTicket(t, s, ticket.ID), dirtyRetryCommit)
+
+	// Part 2 (task 4): clean the tree, answer the judge escalation that
+	// followed the drop with Retry plus a note, and prove retryJudgeNoRun
+	// starts round 2 at round 1's own sha with that note reaching the
+	// fresh judge turn.
+	if writeErr := os.WriteFile(readmePath, existing, 0o600); writeErr != nil {
+		t.Fatalf("restore README.md: %v", writeErr)
+	}
+
+	open3, err := s.QuestionsByState(t.Context(), ticket.ID, "open")
+	if err != nil {
+		t.Fatalf("QuestionsByState(open) after the dirty-tree escalation: %v", err)
+	}
+	if len(open3) != 1 {
+		t.Fatalf("QuestionsByState(open) = %d questions, want exactly 1", len(open3))
+	}
+	qID2 := open3[0].ID
+
+	const cleanNote = "tree is clean now"
+	pbAnswerEscalationWithNote(t, s, ticket.ID, qID2, "a", cleanNote)
+
+	reqCountBefore := len(rec.reqs)
+	deps3 := pbWithTestCmd(pbClaim(t, s, rec, ticket.ID), pbGetTicket(t, s, ticket.ID), judgeFixTestCmd)
+	deps3.Commands = checks
+	finalCommit, err := (judgeHandler{}).Run(t.Context(), pbGetTicket(t, s, ticket.ID), deps3) // Retry after cleaning the tree
+	if err != nil {
+		t.Fatalf("Run after cleaning the tree: %v", err)
+	}
+
+	want := "judge round 2 started sha " + wantSHA
+	found := false
+	for _, m := range finalCommit.Messages {
+		if strings.HasPrefix(m.Body, want) {
+			found = true
+		}
+		if strings.HasPrefix(m.Body, "judge round 1 same sha escalated") {
+			t.Errorf("finalCommit.Messages = %+v, want no \"judge round 1 same sha escalated\" marker (the Retry skipped the same-sha guard)", finalCommit.Messages)
+		}
+	}
+	if !found {
+		t.Errorf("finalCommit.Messages = %+v, want a message starting %q", finalCommit.Messages, want)
+	}
+	if finalCommit.Escalation != nil {
+		t.Errorf("finalCommit.Escalation = %+v, want nil", finalCommit.Escalation)
+	}
+	if !slices.Contains(finalCommit.ResolveQuestions, qID2) {
+		t.Errorf("finalCommit.ResolveQuestions = %v, want it to contain %d", finalCommit.ResolveQuestions, qID2)
+	}
+	if len(rec.reqs)-reqCountBefore != 1 {
+		t.Fatalf("runtime requests after the Retry = %d, want exactly 1", len(rec.reqs)-reqCountBefore)
+	}
+	assertFencedPB(t, rec.reqs[len(rec.reqs)-1].Prompt, "notes", cleanNote)
+}
+
+// TestRejudgeWithoutFixRefuses proves rejudgeWithoutFix's own refusal branch
+// (design section 8, ticket #80 task 3): with no open fix, or an open fix
+// whose own asking stage is not judging (findings, a reviewing ask), it
+// re-escalates replan_unsupported, origin fix, with no fix dropped marker,
+// rather than ever dropping a fix that was never judging's own to drop.
+func TestRejudgeWithoutFixRefuses(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name string
+		seed func(t *testing.T, s *store.Store, ticket store.Ticket)
+	}{
+		{name: "no open fix", seed: nil},
+		{name: "findings fix open", seed: func(t *testing.T, s *store.Store, ticket store.Ticket) {
+			t.Helper()
+			msg, err := fixRequestMessage(ticket, FixKindFindings, "fix the findings", 0)
+			if err != nil {
+				t.Fatalf("fixRequestMessage: %v", err)
+			}
+			if _, insertErr := s.InsertMessage(t.Context(), msg); insertErr != nil {
+				t.Fatalf("InsertMessage: %v", insertErr)
+			}
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			s, ticket := judgeTicketReady(t)
+			if tc.seed != nil {
+				tc.seed(t, s, ticket)
+			}
+
+			commit, err := (judgeHandler{}).rejudgeWithoutFix(t.Context(), ticket, Deps{Store: s}, nil, "", "")
+			if err != nil {
+				t.Fatalf("rejudgeWithoutFix: %v", err)
+			}
+			if commit.Escalation == nil {
+				t.Fatal("commit.Escalation = nil, want a replan_unsupported escalation")
+			}
+			if commit.Escalation.Payload.Code != string(response.EscalationCodeReplanUnsupported) {
+				t.Errorf("escalation code = %q, want %q", commit.Escalation.Payload.Code, response.EscalationCodeReplanUnsupported)
+			}
+			if commit.Escalation.Payload.Origin != string(response.EscalationOriginFix) {
+				t.Errorf("escalation origin = %q, want %q", commit.Escalation.Payload.Origin, response.EscalationOriginFix)
+			}
+			for _, m := range commit.Messages {
+				if strings.HasPrefix(m.Body, "fix dropped ") {
+					t.Errorf("commit.Messages = %+v, want no \"fix dropped\" line", commit.Messages)
+				}
+			}
+		})
+	}
+}
+
+// TestFixDroppedSince proves fixDroppedSince's own pure table (design
+// section 8, ticket #80 task 4): a "fix dropped <mid>" marker counts only
+// above floorID, the newest well-formed one above the floor wins, and a
+// malformed line is skipped rather than treated as a floor-breaking
+// failure.
+func TestFixDroppedSince(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name    string
+		dropped []store.MessageRow
+		floorID int64
+		wantID  int64
+		wantOK  bool
+	}{
+		{name: "no markers", dropped: nil, floorID: 5},
+		{
+			name:    "marker at the floor does not count",
+			dropped: []store.MessageRow{{ID: 5, Body: "fix dropped 1"}},
+			floorID: 5,
+		},
+		{
+			name: "two markers above the floor, the newer one wins",
+			dropped: []store.MessageRow{
+				{ID: 6, Body: "fix dropped 1"},
+				{ID: 8, Body: "fix dropped 2"},
+			},
+			floorID: 5,
+			wantID:  2,
+			wantOK:  true,
+		},
+		{
+			name: "a malformed line is ignored, the older well-formed marker still counts",
+			dropped: []store.MessageRow{
+				{ID: 6, Body: "fix dropped 1"},
+				{ID: 8, Body: "fix dropped oops"},
+			},
+			floorID: 5,
+			wantID:  1,
+			wantOK:  true,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			gotID, gotOK := fixDroppedSince(tc.dropped, tc.floorID)
+			if gotOK != tc.wantOK || gotID != tc.wantID {
+				t.Errorf("fixDroppedSince(...) = (%d, %v), want (%d, %v)", gotID, gotOK, tc.wantID, tc.wantOK)
+			}
+		})
+	}
+}
+
+// judgeFailedRoundDroppedFixRun is TestJudgeFailedRoundDroppedFixStartsNextRound's
+// own shared setup, pulled out to a package-level helper (rather than a
+// closure, which tparallel mistakes for an unparallel subtest body) so both
+// of its own subtests share it: round 1 fails and its "failure" fix
+// escalates cannot_run. For dropFix, it then replays part 1 of
+// TestJudgeAgainWithoutFixDirtyTreeStillDrops (a dirty worktree forces
+// retryFreshRound's own judgeStartChecks to escalate instead of starting
+// round 2, so rejudgeWithoutFix's "fix dropped <mid>" marker lands with no
+// "judge round 2 started" marker alongside it) and restores the tree, so
+// the marker judgeHandler.Run reads back is the one rejudgeWithoutFix
+// itself wrote, not a synthetic stand-in. The negative case instead closes
+// the fix with a "fix landed <mid> sha <sha>" marker written directly:
+// landing is never reached from this same dirty-tree setup (it needs the
+// fix's own CHECK-and-LAND ticks, exercised elsewhere by
+// driveJudgeFixToLanding), and judgeHandler.Run's consent check only ever
+// reads a closing marker's own text, not the fix's open/closed state, so a
+// well-formed "landed" line in its place still proves the negative. A
+// plain judgeHandler.Run tick, with no answered round, runs after either
+// marker lands.
+func judgeFailedRoundDroppedFixRun(t *testing.T, dropFix bool) (commit store.HandlerCommit, startedSHA string) {
+	t.Helper()
+	s, ticket := judgeTicketReady(t)
+
+	scripts := judgeScriptsFS(judgeOkBothScript)
+	scripts["build/fix/1.xml"] = &fstest.MapFile{Data: []byte(judgeFixCannotRunBuildScript)}
+	scripts["judge/2/1.xml"] = &fstest.MapFile{Data: []byte(judgeOkBothScript)}
+	rt := runtime.NewFake(scripts)
+
+	checks := &judgeScriptedCheckCommands{real: NewCommandRunner(sandbox.Off(), false), steps: []judgeCheckStep{{exit: 1}}}
+
+	ticket = judgeFailRoundOne(t, s, ticket, rt, checks)
+
+	startedMarker, ok := reviewMarker(t, s, ticket.ID, "judge round 1 started")
+	if !ok {
+		t.Fatal(`no "judge round 1 started" marker`)
+	}
+	startedFirstLine, _, _ := strings.Cut(startedMarker.Body, "\n")
+	sub := judgeRoundStartedLine.FindStringSubmatch(startedFirstLine)
+	if sub == nil {
+		t.Fatalf("started marker body = %q, did not match the started-line shape", startedMarker.Body)
+	}
+	wantSHA := sub[2]
+
+	deps := pbWithTestCmd(pbClaim(t, s, rt, ticket.ID), ticket, judgeFixTestCmd)
+	deps.Commands = checks
+	fixCommit, err := (judgeHandler{}).Run(t.Context(), ticket, deps) // fix RUN turn: cannot_run error
+	if err != nil {
+		t.Fatalf("fix RUN: %v", err)
+	}
+	pbApply(t, s, ticket, fixCommit)
+	ticket = pbGetTicket(t, s, ticket.ID)
+
+	req, open, reqErr := openFixRequest(t.Context(), Deps{Store: s}, ticket)
+	if reqErr != nil {
+		t.Fatalf("openFixRequest: %v", reqErr)
+	}
+	if !open {
+		t.Fatal("openFixRequest: open = false, want true")
+	}
+
+	if dropFix {
+		proj := deps.Projects[ticket.ProjectID]
+		wt, _, wtErr := proj.Orch.EnsureWorktree(t.Context(), ticket.ID, ticket.Title)
+		if wtErr != nil {
+			t.Fatalf("EnsureWorktree: %v", wtErr)
+		}
+		readmePath := filepath.Join(wt.Dir(), "README.md")
+		existing, readErr := os.ReadFile(readmePath)
+		if readErr != nil {
+			t.Fatalf("read README.md: %v", readErr)
+		}
+		if writeErr := os.WriteFile(readmePath, append(existing, []byte("dirty\n")...), 0o600); writeErr != nil {
+			t.Fatalf("modify README.md: %v", writeErr)
+		}
+
+		open2, qErr := s.QuestionsByState(t.Context(), ticket.ID, "open")
+		if qErr != nil {
+			t.Fatalf("QuestionsByState(open): %v", qErr)
+		}
+		if len(open2) != 1 {
+			t.Fatalf("QuestionsByState(open) = %d questions, want exactly 1", len(open2))
+		}
+		pbAnswerEscalationWithNote(t, s, ticket.ID, open2[0].ID, fixRejudgeOptionKey, "")
+
+		deps2 := pbWithTestCmd(pbClaim(t, s, rt, ticket.ID), pbGetTicket(t, s, ticket.ID), judgeFixTestCmd)
+		deps2.Commands = checks
+		dropCommit, handled := pbRunPrelude(t, s, deps2, ticket.ID)
+		if !handled {
+			t.Fatal("handled = false, want true")
+		}
+		if dropCommit.Escalation == nil {
+			t.Fatal("dropCommit.Escalation = nil, want a judge-origin escalation from judgeStartChecks (the dirty tree)")
+		}
+
+		if writeErr := os.WriteFile(readmePath, existing, 0o600); writeErr != nil {
+			t.Fatalf("restore README.md: %v", writeErr)
+		}
+	} else {
+		closeBody := fmt.Sprintf("fix landed %d sha %s", req.MessageID, wantSHA)
+		if _, insertErr := s.InsertMessage(t.Context(), store.Message{
+			TicketID: ticket.ID, Type: msgTypeUpdate, Author: authorSystem, Body: closeBody,
+		}); insertErr != nil {
+			t.Fatalf("InsertMessage(close fix): %v", insertErr)
+		}
+	}
+
+	deps3 := pbWithTestCmd(pbClaim(t, s, rt, ticket.ID), pbGetTicket(t, s, ticket.ID), judgeFixTestCmd)
+	deps3.Commands = checks
+	commit, runErr := (judgeHandler{}).Run(t.Context(), pbGetTicket(t, s, ticket.ID), deps3)
+	if runErr != nil {
+		t.Fatalf("Run after the fix escalated: %v", runErr)
+	}
+	return commit, wantSHA
+}
+
+// TestJudgeFailedRoundDroppedFixStartsNextRound proves judgeHandler.Run's
+// own dropped-fix consent check (design section 8, owner decision Q9,
+// ticket #80 task 4): once part 1 of TestJudgeAgainWithoutFixDirtyTreeStillDrops
+// has dropped the fix and the dirty file is restored, a plain tick (no
+// answered round at all) finds the fix dropped marker newer than round 1's
+// own failed marker and starts round 2 at that same sha with no same-sha
+// escalation. Without the dropped marker, the very same setup still hits
+// the cannot_run same-sha escalation, proving the marker is what decides.
+func TestJudgeFailedRoundDroppedFixStartsNextRound(t *testing.T) {
+	t.Parallel()
+	if testing.Short() {
+		t.Skip("slow end-to-end flow; runs in the full suite")
+	}
+
+	t.Run("with the fix dropped", func(t *testing.T) {
+		t.Parallel()
+		commit, wantSHA := judgeFailedRoundDroppedFixRun(t, true)
+		want := "judge round 2 started sha " + wantSHA
+		found := false
+		for _, m := range commit.Messages {
+			if strings.HasPrefix(m.Body, want) {
+				found = true
+			}
+		}
+		if !found {
+			t.Errorf("commit.Messages = %+v, want a message starting %q", commit.Messages, want)
+		}
+		if commit.Escalation != nil {
+			t.Errorf("commit.Escalation = %+v, want none", commit.Escalation)
+		}
+	})
+
+	t.Run("without the fix dropped", func(t *testing.T) {
+		t.Parallel()
+		commit, _ := judgeFailedRoundDroppedFixRun(t, false)
+		sameSHAEscalated := false
+		for _, m := range commit.Messages {
+			if strings.HasPrefix(m.Body, "judge round 2 started") {
+				t.Errorf("commit.Messages = %+v, want no \"judge round 2 started\" marker", commit.Messages)
+			}
+			if strings.HasPrefix(m.Body, "judge round 1 same sha escalated") {
+				sameSHAEscalated = true
+			}
+		}
+		if !sameSHAEscalated {
+			t.Errorf("commit.Messages = %+v, want a \"judge round 1 same sha escalated\" marker, proving judgeSameSHAEscalation fired", commit.Messages)
+		}
+		if commit.Escalation == nil {
+			t.Fatal("commit.Escalation = nil, want a cannot_run escalation")
+		}
+		if commit.Escalation.Payload.Code != string(response.EscalationCodeCannotRun) {
+			t.Errorf("escalation code = %q, want %q", commit.Escalation.Payload.Code, response.EscalationCodeCannotRun)
+		}
+		if commit.Escalation.Payload.Origin != string(response.EscalationOriginJudge) {
+			t.Errorf("escalation origin = %q, want %q", commit.Escalation.Payload.Origin, response.EscalationOriginJudge)
+		}
+	})
+}
+
+// TestJudgeRetryFreshRoundCarriesOwnerNote proves ticket #80 task 5: a
+// judge-origin "with a run" retry (judgeHandler.retryFreshRound) carries
+// the owner's typed note, not just the chosen option, into round 2's own
+// fenced "notes" input.
+func TestJudgeRetryFreshRoundCarriesOwnerNote(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow end-to-end flow; runs in the full suite")
+	}
+	t.Parallel()
+	s, ticket := judgeTicketReady(t)
+
+	scripts := judgeScriptsFS(judgeOkBothScript)
+	scripts["judge/2/1.xml"] = &fstest.MapFile{Data: []byte(judgeOkBothScript)}
+	rt := runtime.NewFake(scripts)
+
+	ticket = judgeAdvanceStart(t, s, rt, ticket) // START round 1
+
+	deps := pbClaim(t, s, rt, ticket.ID)
+	runCommit, err := (judgeHandler{}).Run(t.Context(), ticket, deps) // RUN round 1
+	if err != nil {
+		t.Fatalf("RUN round 1: %v", err)
+	}
+	pbApply(t, s, ticket, runCommit)
+	ticket = pbGetTicket(t, s, ticket.ID)
+
+	runID, err := s.MaxRunID(t.Context(), ticket.ID)
+	if err != nil {
+		t.Fatalf("MaxRunID: %v", err)
+	}
+	qID := pbEscalateDirect(t, s, ticket.ID, &runID, nil, response.EscalationCodeRuntimeExecFailed, response.EscalationOriginJudge)
+	const retryNote = "judge s2 only"
+	pbAnswerEscalationWithNote(t, s, ticket.ID, qID, "a", retryNote)
+
+	rec := &recordingRuntime{inner: rt}
+	deps2 := pbClaim(t, s, rec, ticket.ID)
+	_, handled := pbRunPrelude(t, s, deps2, ticket.ID)
+	if !handled {
+		t.Fatal("handled = false, want true")
+	}
+	assertFencedPB(t, rec.lastRequest(t).Prompt, "notes", retryNote)
 }

@@ -44,7 +44,7 @@ func (c *console) handleIndex(w http.ResponseWriter, r *http.Request) {
 	}
 	// alertsComponent takes no navigation signals and cannot fail (design
 	// section 6a): it renders the same ring read regardless of view.
-	alerts := c.alertsComponent()
+	alerts := c.alertsComponent(r.Context())
 
 	// Rendered into a buffer first, not straight to w, so a render failure
 	// still reports 500 rather than sending a 200 with a half-written body.
