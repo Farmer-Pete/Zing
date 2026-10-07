@@ -783,6 +783,12 @@ func TestRenderAcceptedPerimeterInput(t *testing.T) {
 		if in.Text != want {
 			t.Errorf("renderAcceptedPerimeterInput(...).Text = %q, want %q", in.Text, want)
 		}
+		if in.Label != acceptedPerimeterLabel {
+			t.Errorf("renderAcceptedPerimeterInput(...).Label = %q, want %q", in.Label, acceptedPerimeterLabel)
+		}
+		if !in.Untrusted {
+			t.Error("renderAcceptedPerimeterInput(...).Untrusted = false, want true")
+		}
 	})
 
 	t.Run("a non-perimeter question naming the path is ignored", func(t *testing.T) {
@@ -798,6 +804,12 @@ func TestRenderAcceptedPerimeterInput(t *testing.T) {
 		want := "- a.go accepted: why"
 		if in.Text != want {
 			t.Errorf("renderAcceptedPerimeterInput(...).Text = %q, want %q", in.Text, want)
+		}
+		if in.Label != acceptedPerimeterLabel {
+			t.Errorf("renderAcceptedPerimeterInput(...).Label = %q, want %q", in.Label, acceptedPerimeterLabel)
+		}
+		if !in.Untrusted {
+			t.Error("renderAcceptedPerimeterInput(...).Untrusted = false, want true")
 		}
 	})
 }
