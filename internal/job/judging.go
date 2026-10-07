@@ -1133,7 +1133,13 @@ func judgeRunAndRoute(
 		case errors.Is(runErr, ErrBudget):
 			return budgetEscalationCommit(t, d, resolveIDs), rr, nil
 		case errors.Is(runErr, ErrSandbox):
-			return sandboxEscalationCommit(t, d, resolveIDs, response.EscalationOriginJudge, d.Sandboxes.Judge.Reason()), rr, nil
+			// The judge's own sandbox is whichever profile machine.toml
+			// names on jobs.judge today ("judge" or "judge-claude" while
+			// Codex is out of quota, #105): runJobWith only returns
+			// ErrSandbox once d.Sandboxes.For has already resolved that
+			// name, so the lookup here always succeeds too (review r1f5).
+			sb, _ := d.Sandboxes.For(d.Machine.Jobs[jobJudgeName].Sandbox)
+			return sandboxEscalationCommit(t, d, resolveIDs, response.EscalationOriginJudge, sb.Reason()), rr, nil
 		}
 		var invErr *runtime.InvalidOutputError
 		if errors.As(runErr, &invErr) { //nolint:modernize // errors.AsType discards its bool via _, which errcheck flags

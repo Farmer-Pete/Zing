@@ -3595,3 +3595,39 @@ func TestJudgeRetryFreshRoundCarriesOwnerNote(t *testing.T) {
 	}
 	assertFencedPB(t, rec.lastRequest(t).Prompt, "notes", retryNote)
 }
+
+// TestJudgeRunAndRouteErrSandboxNamesJudgeJobsOwnProfile proves
+// judgeRunAndRoute's ErrSandbox commit reads its reason from whichever
+// sandbox profile jobs.judge actually names (machine.toml's "judge-claude"
+// while Codex is out of quota), not from the unrelated, always-available
+// d.Sandboxes.Judge slot (review r1f5): with Judge available and
+// JudgeClaude unloaded, the escalation still carries JudgeClaude's own
+// "not loaded" reason.
+func TestJudgeRunAndRouteErrSandboxNamesJudgeJobsOwnProfile(t *testing.T) {
+	t.Parallel()
+	judgeAvailable := loadTestSandboxOrSkip(t)
+
+	m := runJobTestMachine(t)
+	if m.Jobs[jobJudgeName].Sandbox != "judge-claude" {
+		t.Fatalf("machine.toml jobs.judge.sandbox = %q, want judge-claude", m.Jobs[jobJudgeName].Sandbox)
+	}
+
+	deps := Deps{
+		Machine:        m,
+		Sandboxes:      sandbox.Set{Judge: judgeAvailable, JudgeClaude: sandbox.NotLoaded()},
+		RequireSandbox: true,
+	}
+	ticket := store.Ticket{ID: 1, ProjectID: 1}
+
+	commit, _, err := judgeRunAndRoute(t.Context(), deps, ticket, store.SessionUpsert{}, runtime.RunRequest{},
+		0, freshSessionRecord, nil, nil, nil)
+	if err != nil {
+		t.Fatalf("judgeRunAndRoute: %v", err)
+	}
+	if commit.Escalation == nil {
+		t.Fatal("Escalation = nil, want sandbox_unavailable")
+	}
+	if want := sandbox.NotLoaded().Reason(); commit.Escalation.Payload.Why != want {
+		t.Errorf("Escalation.Why = %q, want %q (JudgeClaude's own reason, not Judge's)", commit.Escalation.Payload.Why, want)
+	}
+}

@@ -95,6 +95,11 @@ var validModels = map[string]bool{"sonnet": true, "opus": true, "fable": true, "
 
 var validRuntimes = map[string]bool{"claude": true, "codex": true, "fake": true}
 
+// validSandboxes is every value job.Sandbox may hold, named once so each new
+// profile is a single map entry rather than another term in validateJob's
+// own condition.
+var validSandboxes = map[string]bool{"": true, "build": true, "readonly": true, "judge": true, "judge-claude": true}
+
 // Load reads and validates machine.toml at path within fsys.
 func Load(fsys fs.FS, path string) (*Machine, error) {
 	var m Machine
@@ -234,7 +239,7 @@ func validateJob(fsys fs.FS, md toml.MetaData, name string, job Job) error {
 	if job.Worktree != "" && job.Worktree != "sparse" {
 		return jobErr("worktree", "must be absent or sparse")
 	}
-	if job.Sandbox != "" && job.Sandbox != "build" && job.Sandbox != "readonly" && job.Sandbox != "judge" && job.Sandbox != "judge-claude" {
+	if !validSandboxes[job.Sandbox] {
 		return jobErr("sandbox", "must be absent, build, readonly, judge, or judge-claude")
 	}
 	for _, tool := range job.Tools {

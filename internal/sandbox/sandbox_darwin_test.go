@@ -1853,7 +1853,11 @@ func TestJudgeClaudeDeniesOtherTranscripts(t *testing.T) {
 
 // TestJudgeClaudeDeniesCodexState proves the judge-claude profile still
 // denies ~/.codex (the ~/.codex deny stays, design section "changes"),
-// even though this profile has no CODEX_HOME param at all.
+// even though this profile has no CODEX_HOME param at all. The blanket
+// file-read-data deny on all of HOME already fails a plain cat here, so
+// that alone would pass even without the ~/.codex rule; /usr/bin/stat only
+// needs file-read* metadata access, which the HOME-wide deny does not
+// cover, so it isolates the ~/.codex rule's own extra reach (review r1f4).
 func TestJudgeClaudeDeniesCodexState(t *testing.T) {
 	t.Parallel()
 	sb := newLoadedJudgeClaudeSandbox(t)
@@ -1869,5 +1873,8 @@ func TestJudgeClaudeDeniesCodexState(t *testing.T) {
 	}
 	if exitCode, out := runSandboxed(t, sb, p, "/bin/cat", codexAuth); exitCode == 0 {
 		t.Errorf("cat ~/.codex/auth.json under the judge-claude profile: want a non-zero exit, got 0 (output %q)", out)
+	}
+	if exitCode, out := runSandboxed(t, sb, p, "/usr/bin/stat", codexAuth); exitCode == 0 {
+		t.Errorf("stat ~/.codex/auth.json under the judge-claude profile: want a non-zero exit, got 0 (output %q)", out)
 	}
 }
