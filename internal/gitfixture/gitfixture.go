@@ -219,19 +219,211 @@ func NewSigningRepo(ctx context.Context, dir string) error {
 	// it verbatim rather than leave the copy signing with the template's
 	// own key file.
 	configPath := filepath.Join(dir, ".git", "config")
-	config, err := os.ReadFile(configPath) //nolint:gosec // G304: configPath is under the caller's own dir
-	if err != nil {
-		return fmt.Errorf("gitfixture: read copied config: %w", err)
-	}
 	oldKey := filepath.Join(src, ".git", signingKeyName)
-	if !strings.Contains(string(config), "signingKey = "+oldKey+"\n") {
+	newKey := filepath.Join(dir, ".git", signingKeyName)
+	found, err := rewriteSigningKey(configPath, oldKey, newKey)
+	if err != nil {
+		return fmt.Errorf("gitfixture: %w", err)
+	}
+	if !found {
 		return fmt.Errorf("gitfixture: template config does not name its key as %s", oldKey)
 	}
-	newKey := filepath.Join(dir, ".git", signingKeyName)
-	rewritten := strings.Replace(string(config), "signingKey = "+oldKey+"\n", "signingKey = "+newKey+"\n", 1)
-	if writeErr := os.WriteFile(configPath, []byte(rewritten), 0o600); writeErr != nil { //nolint:gosec // G703: configPath is under the caller's own dir
-		return fmt.Errorf("gitfixture: write copied config: %w", writeErr)
+	return nil
+}
+
+// rewriteSigningKey replaces the first "signingKey = OLD\n" line in the
+// git config at configPath with "signingKey = NEW\n", so a copy of a
+// signed repository signs with its own copy of the key rather than the
+// source's. It reports whether that line was present: a config whose
+// signingKey already names something else (or carries none) is left on
+// disk untouched, and found is false.
+func rewriteSigningKey(configPath, oldKey, newKey string) (found bool, err error) {
+	config, err := os.ReadFile(configPath) //nolint:gosec // G304: configPath is under the caller's own dir
+	if err != nil {
+		return false, fmt.Errorf("read copied config: %w", err)
 	}
+	line := "signingKey = " + oldKey + "\n"
+	if !strings.Contains(string(config), line) {
+		return false, nil
+	}
+	rewritten := strings.Replace(string(config), line, "signingKey = "+newKey+"\n", 1)
+	if writeErr := os.WriteFile(configPath, []byte(rewritten), 0o600); writeErr != nil { //nolint:gosec // G703: configPath is under the caller's own dir
+		return false, fmt.Errorf("write copied config: %w", writeErr)
+	}
+	return true, nil
+}
+
+// rewriteCopiedSigningKey points dest's user.signingKey at newKey,
+// replacing whatever path its current signingKey line names, as long as
+// that path's file name is signingKeyName. CopyRepo cannot match the old
+// value by an exact path the way rewriteSigningKey does: that value was
+// written by whatever call created src's own repository, through
+// whichever ancestor symlinks were present at that time (for example a
+// symlinked TMPDIR), which need not equal either src's path as CopyRepo
+// was given it or that path's own fully resolved form. Matching by file
+// name instead finds the line regardless of how it got there. A config
+// whose signingKey names some other file, or carries none, is left on
+// disk untouched, and found is false.
+func rewriteCopiedSigningKey(configPath, newKey string) (found bool, err error) {
+	config, err := os.ReadFile(configPath) //nolint:gosec // G304: configPath is under the caller's own dir
+	if err != nil {
+		return false, fmt.Errorf("read copied config: %w", err)
+	}
+	const prefix = "signingKey = "
+	lines := strings.Split(string(config), "\n")
+	for i, line := range lines {
+		value, ok := strings.CutPrefix(strings.TrimSpace(line), prefix)
+		if !ok || filepath.Base(value) != signingKeyName {
+			continue
+		}
+		indent := line[:len(line)-len(strings.TrimLeft(line, " \t"))]
+		lines[i] = indent + prefix + newKey
+		rewritten := strings.Join(lines, "\n")
+		if writeErr := os.WriteFile(configPath, []byte(rewritten), 0o600); writeErr != nil { //nolint:gosec // G306: configPath is under the caller's own dir
+			return false, fmt.Errorf("write copied config: %w", writeErr)
+		}
+		return true, nil
+	}
+	return false, nil
+}
+
+// worktreeLink names one linked worktree found under a repository's git
+// dir, by the admin directory's own name (the "NAME" in
+// "worktrees/NAME") and the worktree's own directory, relative to the
+// repository root (for example ".zing/wt/7"). worktreePaths resolves and
+// validates both before any copy happens, so CopyRepo can relink the
+// copy entirely in terms of dest, with no path naming src.
+type worktreeLink struct {
+	name string
+	rel  string
+}
+
+// worktreePaths reads every linked worktree registered under gitDir
+// (GITDIR/worktrees/NAME/gitdir) and returns each one's name and its
+// worktree directory relative to srcReal (gitDir's resolved repository
+// root). A worktree directory that no longer exists is skipped: its
+// gitdir file names a worktree someone already removed. A worktree
+// directory outside srcReal is an error, since CopyRepo has nothing to
+// relink it against once src is gone.
+func worktreePaths(srcReal, gitDir string) ([]worktreeLink, error) {
+	worktreesDir := filepath.Join(gitDir, "worktrees")
+	entries, err := os.ReadDir(worktreesDir)
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+
+	var links []worktreeLink
+	for _, entry := range entries {
+		name := entry.Name()
+		raw, readErr := os.ReadFile(filepath.Join(worktreesDir, name, "gitdir"))
+		if errors.Is(readErr, fs.ErrNotExist) {
+			continue
+		}
+		if readErr != nil {
+			return nil, fmt.Errorf("read worktree %s gitdir: %w", name, readErr)
+		}
+
+		target := strings.TrimSpace(string(raw))
+		targetReal, resolveErr := filepath.EvalSymlinks(target)
+		if errors.Is(resolveErr, fs.ErrNotExist) {
+			continue
+		}
+		if resolveErr != nil {
+			return nil, fmt.Errorf("resolve worktree %s gitdir %s: %w", name, target, resolveErr)
+		}
+
+		rel, relErr := filepath.Rel(srcReal, filepath.Dir(targetReal))
+		if relErr != nil {
+			return nil, fmt.Errorf("relativize worktree %s: %w", name, relErr)
+		}
+		if rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+			return nil, fmt.Errorf("worktree %s at %s is outside %s", name, targetReal, srcReal)
+		}
+		links = append(links, worktreeLink{name: name, rel: rel})
+	}
+	return links, nil
+}
+
+// CopyRepo copies the git repository (or bare repository) at src to
+// dest, a path that does not yet exist, so a test can get its own
+// private copy of a fixture built once per process instead of paying
+// for git init, key generation, and a signed commit again. It rewrites
+// the copy's user.signingKey to name the copy's own key under dest
+// instead of src's, matching the config's existing signingKey line by
+// its file name (see rewriteCopiedSigningKey) rather than by the exact
+// path, since that path's own symlink history is not something CopyRepo
+// can reconstruct from src alone. When src's config names no signingKey
+// ending in signingKeyName, the config is left alone. Every linked
+// worktree under src (.zing/wt/TICKET-ID,
+// .zing/judge/TICKET-ID) is relinked to work entirely under dest: see
+// worktreePaths and the relink comment below for why this never runs
+// "git worktree repair" and never writes under src.
+func CopyRepo(ctx context.Context, src, dest string) error {
+	if err := ctx.Err(); err != nil {
+		return fmt.Errorf("gitfixture: %w", err)
+	}
+
+	srcReal, err := filepath.EvalSymlinks(src)
+	if err != nil {
+		return fmt.Errorf("gitfixture: resolve src: %w", err)
+	}
+	// gitRel is srcReal's git dir relative to srcReal itself: ".git" for
+	// an ordinary repository, or "" for a bare one. dest is a copy of
+	// src, so the same relative path holds for src, dest, and destReal
+	// too.
+	gitRel := ""
+	if fi, statErr := os.Stat(filepath.Join(srcReal, ".git")); statErr == nil && fi.IsDir() {
+		gitRel = ".git"
+	} else if statErr != nil && !errors.Is(statErr, fs.ErrNotExist) {
+		return fmt.Errorf("gitfixture: stat src git dir: %w", statErr)
+	}
+	srcGitDirReal := filepath.Join(srcReal, gitRel)
+
+	links, err := worktreePaths(srcReal, srcGitDirReal)
+	if err != nil {
+		return fmt.Errorf("gitfixture: %w", err)
+	}
+
+	if copyErr := copyTree(src, dest); copyErr != nil {
+		return fmt.Errorf("gitfixture: copy repo: %w", copyErr)
+	}
+
+	destReal, err := filepath.EvalSymlinks(dest)
+	if err != nil {
+		return fmt.Errorf("gitfixture: resolve dest: %w", err)
+	}
+	destGitDir := filepath.Join(dest, gitRel)
+	destGitDirReal := filepath.Join(destReal, gitRel)
+
+	configPath := filepath.Join(destGitDir, "config")
+	newKey := filepath.Join(destGitDir, signingKeyName)
+	if _, err := rewriteCopiedSigningKey(configPath, newKey); err != nil {
+		return fmt.Errorf("gitfixture: rewrite signing key: %w", err)
+	}
+
+	// Relink every worktree by writing both link files directly, naming
+	// only destReal, rather than running "git worktree repair": while src
+	// still exists, the copied .git file still names src's admin dir, and
+	// repair would follow it and rewrite src's own reverse link to point
+	// at dest, breaking src and racing any other copy made from it at the
+	// same time.
+	for _, link := range links {
+		worktreeGit := filepath.Join(destReal, link.rel, ".git")
+		adminGitdir := filepath.Join(destGitDirReal, "worktrees", link.name, "gitdir")
+
+		worktreeGitContent := "gitdir: " + filepath.Join(destGitDirReal, "worktrees", link.name) + "\n"
+		if writeErr := os.WriteFile(worktreeGit, []byte(worktreeGitContent), 0o644); writeErr != nil { //nolint:gosec // G306: the .git pointer file is always world-readable
+			return fmt.Errorf("gitfixture: relink worktree %s: %w", link.name, writeErr)
+		}
+		adminGitdirContent := worktreeGit + "\n"
+		if writeErr := os.WriteFile(adminGitdir, []byte(adminGitdirContent), 0o644); writeErr != nil { //nolint:gosec // G306: the admin gitdir file is always world-readable
+			return fmt.Errorf("gitfixture: relink worktree %s: %w", link.name, writeErr)
+		}
+	}
+
 	return nil
 }
 

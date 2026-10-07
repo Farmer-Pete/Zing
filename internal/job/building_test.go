@@ -61,24 +61,76 @@ const (
 
 // ---- shared building fixtures ----------------------------------------------
 
-// buildTicketInBuilding drives a fresh, git-backed ticket from queued
-// through planning (real classify, first turn, the fixture Q1 answer, the
-// resume that stores the three-task ready cohort, the clean review tick,
-// and the owner's gate approval) into "building", with its plan cohort
-// sealed and ready to build (design section 6). rt is the *runtime.Fake
-// that drove it, still serving fixtures/scripts/build/{1,2,3}/1.xml for
-// whichever test keeps ticking it.
-func buildTicketInBuilding(t *testing.T) (*store.Store, runtime.Runtime, int64) {
+// buildingStage is the "building" pipeline stage's process-lifetime
+// snapshot (ticket #102): buildBuildingStage's own queued-through-planning
+// build runs at most once per test process, and every buildTicketInBuilding
+// caller gets its own private copy of it.
+var buildingStage = job.NewStageSnap("building")
+
+// buildBuildingStage is buildingStage's builder: it drives a fresh,
+// git-backed ticket from queued through planning (real classify, first
+// turn, the fixture Q1 answer, the resume that stores the three-task ready
+// cohort, the clean review tick, and the owner's gate approval) into
+// "building", with its plan cohort sealed and ready to build (design
+// section 6).
+func buildBuildingStage(t *testing.T) job.StageBuild {
 	t.Helper()
-	s := newJobTestStore(t)
+	dbPath := filepath.Join(t.TempDir(), "zing.db")
+	s, err := store.Open(t.Context(), dbPath)
+	if err != nil {
+		t.Fatalf("buildBuildingStage: store.Open: %v", err)
+	}
+	t.Cleanup(func() { _ = s.Close() })
 	rt := fakeRuntime(t)
 	ticketID := seedQueuedGitBackedTicket(t, s)
 	advanceQueuedToPlanning(t, s, rt, ticketID)
 	advancePlanningWithAnAnswer(t, s, rt, ticketID)
 	if ticket := getTicket(t, s, ticketID); ticket.State != testStateBuilding {
-		t.Fatalf("buildTicketInBuilding: ticket state = %q, want building", ticket.State)
+		t.Fatalf("buildBuildingStage: ticket state = %q, want building", ticket.State)
 	}
-	return s, rt, ticketID
+	return job.StageBuild{Store: s, DBPath: dbPath, TicketID: ticketID}
+}
+
+// buildTicketInBuilding returns the caller's own copy of the building
+// stage, with a fresh *runtime.Fake still serving fixtures/scripts/build/{1,2,3}/1.xml
+// for whichever test keeps ticking it: no caller resumes a planning
+// session, and a build session always starts new, so the copy's own
+// runtime need not be the one that built the snapshot.
+func buildTicketInBuilding(t *testing.T) (*store.Store, runtime.Runtime, int64) {
+	t.Helper()
+	c := job.UseStage(t, buildingStage, buildBuildingStage)
+	return c.Store, fakeRuntime(t), c.TicketID
+}
+
+// TestBuildingStageCopiesAreIndependent proves buildTicketInBuilding's own
+// copy is private (ticket #102): two calls both reach "building", but each
+// gets its own project local_path and its own *runtime.Fake value.
+func TestBuildingStageCopiesAreIndependent(t *testing.T) {
+	s1, rt1, ticketID1 := buildTicketInBuilding(t)
+	s2, rt2, ticketID2 := buildTicketInBuilding(t)
+
+	if ticket := getTicket(t, s1, ticketID1); ticket.State != testStateBuilding {
+		t.Fatalf("copy 1: ticket state = %q, want building", ticket.State)
+	}
+	if ticket := getTicket(t, s2, ticketID2); ticket.State != testStateBuilding {
+		t.Fatalf("copy 2: ticket state = %q, want building", ticket.State)
+	}
+
+	proj1, err := s1.ProjectForTicket(t.Context(), ticketID1)
+	if err != nil {
+		t.Fatalf("copy 1: ProjectForTicket: %v", err)
+	}
+	proj2, err := s2.ProjectForTicket(t.Context(), ticketID2)
+	if err != nil {
+		t.Fatalf("copy 2: ProjectForTicket: %v", err)
+	}
+	if proj1.LocalPath == proj2.LocalPath {
+		t.Fatalf("both copies share LocalPath %s", proj1.LocalPath)
+	}
+
+	if rt1 == rt2 {
+		t.Fatalf("both copies share the same runtime.Runtime value")
+	}
 }
 
 // claimForBuild is claimWithRuntimes (planning_test.go), plus the sandbox,

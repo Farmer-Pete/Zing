@@ -319,27 +319,89 @@ func TestScenariosDirRemovedAfterRun(t *testing.T) {
 // comment -- so every test below drives it directly, the same way
 // reviewing_test.go drove reviewingHandler before task 10 wired it in).
 
-// judgeTicketReady drives a fresh, git-backed ticket through planning, a
-// real three-task build, and one clean review round into "judging"
-// (reviewing.go's own roundCommit already sets Next judging in that same
-// commit, so one reviewingHandler.Run call suffices): a stored plan, a real
-// worktree, and the sealed two-scenario cohort fixtures/scripts/
-// planning/2.xml writes (s1 behavior, check "curl -sf localhost:8080/hello";
-// s2 negative, no check), with no judge round marker yet.
-func judgeTicketReady(t *testing.T) (s *store.Store, ticket store.Ticket) {
+// judgeFromReviewing runs one clean review round on reviewTicket (already
+// in "reviewing") and returns it, now in "judging" (reviewing.go's own
+// roundCommit already sets Next judging in that same commit, so one
+// reviewingHandler.Run call suffices): the sealed two-scenario cohort
+// fixtures/scripts/planning/2.xml writes (s1 behavior, check "curl -sf
+// localhost:8080/hello"; s2 negative, no check), with no judge round marker
+// yet. It is the from-scratch step buildJudgingStage uses.
+func judgeFromReviewing(t *testing.T, s *store.Store, reviewTicket store.Ticket) store.Ticket {
 	t.Helper()
-	s, reviewTicket, _ := reviewTicketReady(t)
 	deps := pbClaim(t, s, runtime.NewFake(reviewScriptsFS(nil)), reviewTicket.ID)
 
 	commit, err := (reviewingHandler{}).Run(t.Context(), reviewTicket, deps)
 	if err != nil {
-		t.Fatalf("judgeTicketReady: review Run: %v", err)
+		t.Fatalf("judgeFromReviewing: review Run: %v", err)
 	}
 	if commit.Next != stateJudging {
-		t.Fatalf("judgeTicketReady: review commit.Next = %q, want %q", commit.Next, stateJudging)
+		t.Fatalf("judgeFromReviewing: review commit.Next = %q, want %q", commit.Next, stateJudging)
 	}
 	pbApply(t, s, reviewTicket, commit)
-	return s, pbGetTicket(t, s, reviewTicket.ID)
+	return pbGetTicket(t, s, reviewTicket.ID)
+}
+
+// judgingStage is the process-lifetime snapshot judgeTicketReady builds
+// once per process and every caller copies.
+var judgingStage = &stageSnap{name: "judging"}
+
+// buildJudgingStage is judgingStage's builder: it takes its own copy of the
+// reviewing stage and drives it one clean review round further with
+// judgeFromReviewing, for useStage/snapshotStage to snapshot.
+func buildJudgingStage(t *testing.T) stageBuild {
+	t.Helper()
+	c := useStage(t, reviewingStage, buildReviewingStage)
+	ticket := judgeFromReviewing(t, c.Store, pbGetTicket(t, c.Store, c.TicketID))
+	return stageBuild{Store: c.Store, DBPath: c.DBPath, TicketID: ticket.ID}
+}
+
+// judgeTicketReady returns the test's own private copy of the judging
+// stage: a fresh, git-backed ticket driven through planning, a real
+// three-task build, and one clean review round into "judging", with a
+// stored plan, a real worktree, and no judge round marker yet. The real
+// handlers run at most once per process, under judgingStage; every caller
+// gets its own copy of the store and repo (useStage, copyStage).
+func judgeTicketReady(t *testing.T) (s *store.Store, ticket store.Ticket) {
+	t.Helper()
+	c := useStage(t, judgingStage, buildJudgingStage)
+	return c.Store, pbGetTicket(t, c.Store, c.TicketID)
+}
+
+// TestJudgingStageCopiesAreIndependent checks that two calls to
+// judgeTicketReady each get their own judging ticket and their own
+// git-backed worktree, with git itself agreeing the copy is independent
+// and working, and that MaxRunID agrees across copies since both went
+// through the identical real planning, build, and review runs before
+// diverging at the stage snapshot.
+func TestJudgingStageCopiesAreIndependent(t *testing.T) {
+	s1, ticket1 := judgeTicketReady(t)
+	s2, ticket2 := judgeTicketReady(t)
+
+	if ticket1.State != stateJudging {
+		t.Fatalf("copy 1: ticket state = %q, want judging", ticket1.State)
+	}
+	if ticket2.State != stateJudging {
+		t.Fatalf("copy 2: ticket state = %q, want judging", ticket2.State)
+	}
+
+	maxRunID1, err := s1.MaxRunID(t.Context(), ticket1.ID)
+	if err != nil {
+		t.Fatalf("copy 1: MaxRunID: %v", err)
+	}
+	maxRunID2, err := s2.MaxRunID(t.Context(), ticket2.ID)
+	if err != nil {
+		t.Fatalf("copy 2: MaxRunID: %v", err)
+	}
+	if maxRunID1 != maxRunID2 {
+		t.Fatalf("MaxRunID differs between copies: %d vs %d", maxRunID1, maxRunID2)
+	}
+
+	localPath1 := pbAssertPrivateWorktree(t, "copy 1", s1, ticket1.ID)
+	localPath2 := pbAssertPrivateWorktree(t, "copy 2", s2, ticket2.ID)
+
+	if localPath1 == localPath2 {
+		t.Fatalf("both copies share LocalPath %s", localPath1)
+	}
 }
 
 // judgeWorktreeDir returns the judge checkout's own path for ticketID
