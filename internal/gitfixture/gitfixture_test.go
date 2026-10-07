@@ -1,7 +1,9 @@
 package gitfixture
 
 import (
+	"bytes"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -86,6 +88,89 @@ func TestNewSigningRepoLeavesGlobalConfigAlone(t *testing.T) {
 		if _, statErr := os.Stat(p); statErr == nil {
 			t.Errorf("NewSigningRepo created a global git config file at %s", p)
 		}
+	}
+}
+
+// TestCopyRepoSignsWithCopiedKey pins that CopyRepo's copy signs with its
+// own key, not the source's: the copy's user.signingKey names a path
+// under the copy, the source's own config is untouched, and a fresh
+// signed commit made in the copy verifies against the copy's own public
+// key.
+func TestCopyRepoSignsWithCopiedKey(t *testing.T) {
+	t.Parallel()
+
+	src := t.TempDir()
+	if err := NewSigningRepo(t.Context(), src); err != nil {
+		t.Fatalf("NewSigningRepo: %v", err)
+	}
+	srcConfigBefore, err := os.ReadFile(filepath.Join(src, ".git", "config"))
+	if err != nil {
+		t.Fatalf("read src config: %v", err)
+	}
+
+	dest := filepath.Join(t.TempDir(), "repo")
+	if err = CopyRepo(t.Context(), src, dest); err != nil {
+		t.Fatalf("CopyRepo: %v", err)
+	}
+
+	wantKey := filepath.Join(dest, ".git", "zing-fixture-key")
+	gotKey := strings.TrimSpace(readGit(t, dest, "config", "--get", "user.signingKey"))
+	if gotKey != wantKey {
+		t.Errorf("dest user.signingKey = %q, want %q", gotKey, wantKey)
+	}
+
+	srcKey := strings.TrimSpace(readGit(t, src, "config", "--get", "user.signingKey"))
+	wantSrcKey := filepath.Join(src, ".git", "zing-fixture-key")
+	if srcKey != wantSrcKey {
+		t.Errorf("src user.signingKey = %q, want %q (CopyRepo must not touch src)", srcKey, wantSrcKey)
+	}
+	srcConfigAfter, err := os.ReadFile(filepath.Join(src, ".git", "config"))
+	if err != nil {
+		t.Fatalf("read src config: %v", err)
+	}
+	if !bytes.Equal(srcConfigBefore, srcConfigAfter) {
+		t.Errorf("CopyRepo modified src's config")
+	}
+
+	if err = runGit(t.Context(), dest, "commit", "-q", "--allow-empty", "-S", "-m", "copy commit"); err != nil {
+		t.Fatalf("commit in dest: %v", err)
+	}
+
+	pubOut, err := exec.CommandContext(t.Context(), "ssh-keygen", "-y", "-f", wantKey).CombinedOutput()
+	if err != nil {
+		t.Fatalf("ssh-keygen -y: %v: %s", err, pubOut)
+	}
+	allowed := filepath.Join(t.TempDir(), "allowed_signers")
+	line := "zing-fixture@example.com " + string(pubOut)
+	if err = os.WriteFile(allowed, []byte(line), 0o600); err != nil {
+		t.Fatalf("write allowed signers: %v", err)
+	}
+
+	out, err := Git(t.Context(), dest, "-c", "gpg.ssh.allowedSignersFile="+allowed, "verify-commit", "HEAD")
+	if err != nil {
+		t.Fatalf("verify-commit: %v\n%s", err, out)
+	}
+}
+
+// TestCopyRepoCopiesBareRepo pins that CopyRepo also copies a bare
+// repository (no .git subdirectory, no signing key), the shape the
+// orchestrator's push target and a shipping stage's origin both use.
+func TestCopyRepoCopiesBareRepo(t *testing.T) {
+	t.Parallel()
+
+	src := t.TempDir()
+	if err := runGit(t.Context(), src, "init", "-q", "--bare", "-b", "main"); err != nil {
+		t.Fatalf("git init --bare: %v", err)
+	}
+
+	dest := filepath.Join(t.TempDir(), "origin")
+	if err := CopyRepo(t.Context(), src, dest); err != nil {
+		t.Fatalf("CopyRepo: %v", err)
+	}
+
+	out := strings.TrimSpace(readGit(t, dest, "rev-parse", "--is-bare-repository"))
+	if out != "true" {
+		t.Errorf("rev-parse --is-bare-repository = %q, want %q", out, "true")
 	}
 }
 

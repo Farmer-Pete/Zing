@@ -219,19 +219,104 @@ func NewSigningRepo(ctx context.Context, dir string) error {
 	// it verbatim rather than leave the copy signing with the template's
 	// own key file.
 	configPath := filepath.Join(dir, ".git", "config")
-	config, err := os.ReadFile(configPath) //nolint:gosec // G304: configPath is under the caller's own dir
-	if err != nil {
-		return fmt.Errorf("gitfixture: read copied config: %w", err)
-	}
 	oldKey := filepath.Join(src, ".git", signingKeyName)
-	if !strings.Contains(string(config), "signingKey = "+oldKey+"\n") {
+	newKey := filepath.Join(dir, ".git", signingKeyName)
+	found, err := rewriteSigningKey(configPath, oldKey, newKey)
+	if err != nil {
+		return fmt.Errorf("gitfixture: %w", err)
+	}
+	if !found {
 		return fmt.Errorf("gitfixture: template config does not name its key as %s", oldKey)
 	}
-	newKey := filepath.Join(dir, ".git", signingKeyName)
-	rewritten := strings.Replace(string(config), "signingKey = "+oldKey+"\n", "signingKey = "+newKey+"\n", 1)
-	if writeErr := os.WriteFile(configPath, []byte(rewritten), 0o600); writeErr != nil { //nolint:gosec // G703: configPath is under the caller's own dir
-		return fmt.Errorf("gitfixture: write copied config: %w", writeErr)
+	return nil
+}
+
+// rewriteSigningKey replaces the first "signingKey = OLD\n" line in the
+// git config at configPath with "signingKey = NEW\n", so a copy of a
+// signed repository signs with its own copy of the key rather than the
+// source's. It reports whether that line was present: a config whose
+// signingKey already names something else (or carries none) is left on
+// disk untouched, and found is false.
+func rewriteSigningKey(configPath, oldKey, newKey string) (found bool, err error) {
+	config, err := os.ReadFile(configPath) //nolint:gosec // G304: configPath is under the caller's own dir
+	if err != nil {
+		return false, fmt.Errorf("read copied config: %w", err)
 	}
+	line := "signingKey = " + oldKey + "\n"
+	if !strings.Contains(string(config), line) {
+		return false, nil
+	}
+	rewritten := strings.Replace(string(config), line, "signingKey = "+newKey+"\n", 1)
+	if writeErr := os.WriteFile(configPath, []byte(rewritten), 0o600); writeErr != nil { //nolint:gosec // G703: configPath is under the caller's own dir
+		return false, fmt.Errorf("write copied config: %w", writeErr)
+	}
+	return true, nil
+}
+
+// gitDirOf returns root's git directory: "root/.git" when that is a
+// directory, or root itself when root is a bare repository (no .git
+// subdirectory, so root's own entries -- config, objects, refs -- are
+// the git dir's entries).
+func gitDirOf(root string) (string, error) {
+	fi, err := os.Stat(filepath.Join(root, ".git"))
+	if err == nil && fi.IsDir() {
+		return filepath.Join(root, ".git"), nil
+	}
+	if err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return "", err
+	}
+	return root, nil
+}
+
+// CopyRepo copies the git repository (or bare repository) at src to
+// dest, a path that does not yet exist, so a test can get its own
+// private copy of a fixture built once per process instead of paying
+// for git init, key generation, and a signed commit again. It rewrites
+// the copy's user.signingKey, trying the key path named in src's config
+// first as given and then resolved (filepath.EvalSymlinks), so it names
+// the copy's own key under dest instead of src's. When src's config
+// names no signingKey matching either form, the config is left alone.
+func CopyRepo(ctx context.Context, src, dest string) error {
+	if err := ctx.Err(); err != nil {
+		return fmt.Errorf("gitfixture: %w", err)
+	}
+
+	srcReal, err := filepath.EvalSymlinks(src)
+	if err != nil {
+		return fmt.Errorf("gitfixture: resolve src: %w", err)
+	}
+	srcGitDir, err := gitDirOf(src)
+	if err != nil {
+		return fmt.Errorf("gitfixture: stat src git dir: %w", err)
+	}
+	srcGitDirReal, err := gitDirOf(srcReal)
+	if err != nil {
+		return fmt.Errorf("gitfixture: stat src git dir: %w", err)
+	}
+
+	if copyErr := copyTree(src, dest); copyErr != nil {
+		return fmt.Errorf("gitfixture: copy repo: %w", copyErr)
+	}
+
+	destGitDir, err := gitDirOf(dest)
+	if err != nil {
+		return fmt.Errorf("gitfixture: stat dest git dir: %w", err)
+	}
+
+	configPath := filepath.Join(destGitDir, "config")
+	newKey := filepath.Join(destGitDir, signingKeyName)
+	oldKeyGiven := filepath.Join(srcGitDir, signingKeyName)
+	found, err := rewriteSigningKey(configPath, oldKeyGiven, newKey)
+	if err != nil {
+		return fmt.Errorf("gitfixture: rewrite signing key: %w", err)
+	}
+	if !found {
+		oldKeyResolved := filepath.Join(srcGitDirReal, signingKeyName)
+		if _, err := rewriteSigningKey(configPath, oldKeyResolved, newKey); err != nil {
+			return fmt.Errorf("gitfixture: rewrite signing key: %w", err)
+		}
+	}
+
 	return nil
 }
 
