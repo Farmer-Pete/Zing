@@ -239,7 +239,8 @@ func rollBack(dataDir, exe string, m upgradeMarker) (bootAction, upgradeMarker, 
 // poll's status and error, so a failed boot can be diagnosed after the
 // rollback.
 func watchBoot(ctx context.Context, url string, every time.Duration) bool {
-	client := &http.Client{Timeout: 2 * time.Second}
+	client := newBootClient()
+	defer client.CloseIdleConnections()
 	ticker := time.NewTicker(every)
 	defer ticker.Stop()
 	var lastStatus, polls int
@@ -261,6 +262,21 @@ func watchBoot(ctx context.Context, url string, every time.Duration) bool {
 		case <-ticker.C:
 		}
 	}
+}
+
+// newBootClient builds the HTTP client watchBoot polls with. It clones
+// http.DefaultTransport and clears Proxy: watchBoot always dials this
+// process's own listener, so a proxy environment variable must never
+// route its polls through a proxy, which could stall them past the 60 s
+// deadline and roll back a working build.
+func newBootClient() *http.Client {
+	dt, ok := http.DefaultTransport.(*http.Transport)
+	if !ok {
+		dt = &http.Transport{}
+	}
+	tr := dt.Clone()
+	tr.Proxy = nil
+	return &http.Client{Timeout: 2 * time.Second, Transport: tr}
 }
 
 // bootAnswered GETs url once and returns its status code, or 0 and the

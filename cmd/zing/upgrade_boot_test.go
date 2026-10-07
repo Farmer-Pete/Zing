@@ -606,6 +606,19 @@ func TestWatchBoot_Returns200(t *testing.T) {
 	}
 }
 
+func TestWatchBoot_ClientIgnoresProxy(t *testing.T) {
+	t.Parallel()
+
+	client := newBootClient()
+	tr, ok := client.Transport.(*http.Transport)
+	if !ok {
+		t.Fatalf("Transport = %T, want *http.Transport", client.Transport)
+	}
+	if tr.Proxy != nil {
+		t.Errorf("Transport.Proxy is set, want nil: watchBoot always dials its own listener and must never go through HTTP_PROXY/HTTPS_PROXY")
+	}
+}
+
 func TestWatchBoot_StopsOnCancel(t *testing.T) {
 	prevDefault := slog.Default()
 	var buf bytes.Buffer
