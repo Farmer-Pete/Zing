@@ -162,6 +162,40 @@ func TestUseStageRecordsFailedBuild(t *testing.T) {
 	}
 }
 
+// TestUseStageBuildsOnce checks that useStage runs its builder once across
+// two sequential calls, and that the two calls' copies are independent.
+func TestUseStageBuildsOnce(t *testing.T) {
+	st := &stageSnap{name: "once"}
+	calls := 0
+	build := func(t *testing.T) stageBuild {
+		t.Helper()
+		calls++
+		s := newPostbuildTestStore(t)
+		ticketID := pbSeedQueuedGitBackedTicket(t, s)
+		return stageBuild{Store: s, DBPath: filepath.Join(s.Dir(), "zing.db"), TicketID: ticketID}
+	}
+
+	var repoDirs [2]string
+	t.Run("first", func(t *testing.T) {
+		c := useStage(t, st, build)
+		repoDirs[0] = c.RepoDir
+	})
+	t.Run("second", func(t *testing.T) {
+		c := useStage(t, st, build)
+		repoDirs[1] = c.RepoDir
+	})
+
+	if calls != 1 {
+		t.Fatalf("builder ran %d times, want 1", calls)
+	}
+	if st.failedBy != "" {
+		t.Fatalf("failedBy = %q, want empty", st.failedBy)
+	}
+	if repoDirs[0] == repoDirs[1] {
+		t.Fatalf("both copies share RepoDir %s", repoDirs[0])
+	}
+}
+
 // stageSnap is one pipeline stage's process-lifetime snapshot. It is
 // always a package-level pointer; its fields are read and written only by
 // useStage, runStageBuild, snapshotStage, and copyStage. once makes the
@@ -340,6 +374,21 @@ func runStageBuild(t *testing.T, st *stageSnap, build func(*testing.T) stageBuil
 		t.Fatalf("stage %s: snapshot: %v", st.name, err)
 	}
 	st.failedBy = ""
+}
+
+// useStage returns the caller's own copy of stage st, building it with
+// build the first time any caller asks for it and reusing that build for
+// every later caller, in this process. build is useStage's once.Do body,
+// run under st.once; the sync.Once guarantees every write it makes is
+// visible to every later caller with no extra lock, since sync.Once orders
+// every write inside Do before every return from Do.
+func useStage(t *testing.T, st *stageSnap, build func(*testing.T) stageBuild) stageCopy {
+	t.Helper()
+	st.once.Do(func() { runStageBuild(t, st, build) })
+	if err := stageFailure(st.name, st.failedBy); err != nil {
+		t.Fatal(err)
+	}
+	return copyStage(t, st)
 }
 
 // stageFailure reports whether stage name's once-per-process build
