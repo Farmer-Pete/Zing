@@ -1,8 +1,11 @@
 package dispatch_test
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"log/slog"
+	"strings"
 	"testing"
 	"time"
 
@@ -252,4 +255,145 @@ func TestRun_IntervalChangeResetsTicker(t *testing.T) {
 	if err := waitFor(t, runErrCh, "Run to return after ctx cancel"); err != nil && !errors.Is(err, context.Canceled) {
 		t.Errorf("Run() = %v, want context.Canceled", err)
 	}
+}
+
+// TestLoadTuning_StoredValuesWinOverBase proves a valid stored value for
+// every setting wins over base, the zing.toml-derived startup values
+// (#81), and that sources names store for each one; and that when only
+// one of the three is stored, sources names store for it and zing.toml
+// for the other two.
+func TestLoadTuning_StoredValuesWinOverBase(t *testing.T) {
+	t.Parallel()
+
+	base := dispatch.Tuning{MaxParallel: 2, Interval: 30 * time.Second, Budget: 240 * time.Minute}
+
+	t.Run("all three stored", func(t *testing.T) {
+		t.Parallel()
+		s := newDispatchTestStore(t)
+		if err := s.SetSettings(t.Context(),
+			"dispatch.max_parallel", "3",
+			"dispatch.interval_seconds", "10",
+			"budget.agent_minutes_per_ticket", "480"); err != nil {
+			t.Fatalf("SetSettings: %v", err)
+		}
+
+		got, sources, err := dispatch.LoadTuning(t.Context(), s, base)
+		if err != nil {
+			t.Fatalf("LoadTuning: %v", err)
+		}
+		want := dispatch.Tuning{MaxParallel: 3, Interval: 10 * time.Second, Budget: 480 * time.Minute}
+		if got != want {
+			t.Errorf("LoadTuning() = %+v, want %+v", got, want)
+		}
+		for _, name := range []string{dispatch.TuneMaxParallel, dispatch.TuneIntervalSeconds, dispatch.TuneAgentMinutes} {
+			if sources[name] != dispatch.TuningSourceStore {
+				t.Errorf("sources[%q] = %q, want %q", name, sources[name], dispatch.TuningSourceStore)
+			}
+		}
+	})
+
+	t.Run("only max_parallel stored", func(t *testing.T) {
+		t.Parallel()
+		s := newDispatchTestStore(t)
+		if err := s.SetSettings(t.Context(), "dispatch.max_parallel", "3"); err != nil {
+			t.Fatalf("SetSettings: %v", err)
+		}
+
+		got, sources, err := dispatch.LoadTuning(t.Context(), s, base)
+		if err != nil {
+			t.Fatalf("LoadTuning: %v", err)
+		}
+		want := dispatch.Tuning{MaxParallel: 3, Interval: base.Interval, Budget: base.Budget}
+		if got != want {
+			t.Errorf("LoadTuning() = %+v, want %+v", got, want)
+		}
+		if sources[dispatch.TuneMaxParallel] != dispatch.TuningSourceStore {
+			t.Errorf("sources[max_parallel] = %q, want %q", sources[dispatch.TuneMaxParallel], dispatch.TuningSourceStore)
+		}
+		if sources[dispatch.TuneIntervalSeconds] != dispatch.TuningSourceToml {
+			t.Errorf("sources[interval_seconds] = %q, want %q", sources[dispatch.TuneIntervalSeconds], dispatch.TuningSourceToml)
+		}
+		if sources[dispatch.TuneAgentMinutes] != dispatch.TuningSourceToml {
+			t.Errorf("sources[agent_minutes_per_ticket] = %q, want %q", sources[dispatch.TuneAgentMinutes], dispatch.TuningSourceToml)
+		}
+	})
+}
+
+// TestLoadTuning_UnsetOrInvalidKeepsBase proves an unset, empty, or
+// invalid stored value keeps base's own value for that setting and is
+// reported as coming from zing.toml, and that an invalid stored value
+// logs one warning naming the key and the stored text (#81). Not
+// t.Parallel at the top level: the invalid-value subtests swap slog's
+// process-wide default, which t.Parallel forbids for the whole ancestor
+// chain. Its other subtests, which touch no global state, are parallel on
+// their own.
+func TestLoadTuning_UnsetOrInvalidKeepsBase(t *testing.T) { //nolint:tparallel // the invalid-value subtests swap slog's process-wide default, so the parent itself cannot call Parallel
+	base := dispatch.Tuning{MaxParallel: 2, Interval: 30 * time.Second, Budget: 240 * time.Minute}
+
+	t.Run("nothing stored", func(t *testing.T) {
+		t.Parallel()
+		s := newDispatchTestStore(t)
+
+		got, sources, err := dispatch.LoadTuning(t.Context(), s, base)
+		if err != nil {
+			t.Fatalf("LoadTuning: %v", err)
+		}
+		if got != base {
+			t.Errorf("LoadTuning() = %+v, want base %+v", got, base)
+		}
+		for _, name := range []string{dispatch.TuneMaxParallel, dispatch.TuneIntervalSeconds, dispatch.TuneAgentMinutes} {
+			if sources[name] != dispatch.TuningSourceToml {
+				t.Errorf("sources[%q] = %q, want %q", name, sources[name], dispatch.TuningSourceToml)
+			}
+		}
+	})
+
+	for _, stored := range []string{"abc", "0"} {
+		t.Run("invalid dispatch.max_parallel "+stored, func(t *testing.T) {
+			s := newDispatchTestStore(t)
+			if err := s.SetSettings(t.Context(), "dispatch.max_parallel", stored); err != nil {
+				t.Fatalf("SetSettings: %v", err)
+			}
+
+			var buf bytes.Buffer
+			prev := slog.Default()
+			slog.SetDefault(slog.New(slog.NewTextHandler(&buf, nil)))
+			t.Cleanup(func() { slog.SetDefault(prev) })
+
+			got, sources, err := dispatch.LoadTuning(t.Context(), s, base)
+			if err != nil {
+				t.Fatalf("LoadTuning: %v", err)
+			}
+			if got.MaxParallel != base.MaxParallel {
+				t.Errorf("MaxParallel = %d, want base %d", got.MaxParallel, base.MaxParallel)
+			}
+			if sources[dispatch.TuneMaxParallel] != dispatch.TuningSourceToml {
+				t.Errorf("sources[max_parallel] = %q, want %q", sources[dispatch.TuneMaxParallel], dispatch.TuningSourceToml)
+			}
+
+			log := buf.String()
+			if !strings.Contains(log, "level=WARN") || !strings.Contains(log, "key=dispatch.max_parallel") || !strings.Contains(log, "stored="+stored) {
+				t.Errorf("log = %q, want one level=WARN record with key=dispatch.max_parallel stored=%s", log, stored)
+			}
+		})
+	}
+
+	t.Run("empty dispatch.interval_seconds", func(t *testing.T) {
+		t.Parallel()
+		s := newDispatchTestStore(t)
+		if err := s.SetSettings(t.Context(), "dispatch.interval_seconds", ""); err != nil {
+			t.Fatalf("SetSettings: %v", err)
+		}
+
+		got, sources, err := dispatch.LoadTuning(t.Context(), s, base)
+		if err != nil {
+			t.Fatalf("LoadTuning: %v", err)
+		}
+		if got.Interval != base.Interval {
+			t.Errorf("Interval = %v, want base %v", got.Interval, base.Interval)
+		}
+		if sources[dispatch.TuneIntervalSeconds] != dispatch.TuningSourceToml {
+			t.Errorf("sources[interval_seconds] = %q, want %q", sources[dispatch.TuneIntervalSeconds], dispatch.TuningSourceToml)
+		}
+	})
 }

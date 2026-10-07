@@ -335,14 +335,28 @@ func serve(ctx context.Context, cfgPath, dbPath string, seedDemo bool) error {
 	// same value, so a command it runs is run exactly as CHECK would run it.
 	cmds := job.NewCommandRunner(sbSet.Build, serveRequireSandbox)
 
-	d, err := zdispatch.New(st, tr, b, m, job.Registry(), bindings, zdispatch.Config{
-		Interval:    dispatchInterval(cfg.Dispatch.IntervalSeconds),
+	tune, tuneSources, err := zdispatch.LoadTuning(ctx, st, zdispatch.Tuning{
 		MaxParallel: dispatchMaxParallel(cfg.Dispatch.MaxParallel),
+		Interval:    dispatchInterval(cfg.Dispatch.IntervalSeconds),
+		Budget:      time.Duration(cfg.Budget.AgentMinutesPerTicket) * time.Minute,
+	})
+	if err != nil {
+		_ = st.Close()
+		return err
+	}
+	slog.Info("dispatch: startup tuning",
+		"max_parallel", tune.MaxParallel, "max_parallel_source", tuneSources[zdispatch.TuneMaxParallel],
+		"interval_seconds", int(tune.Interval/time.Second), "interval_seconds_source", tuneSources[zdispatch.TuneIntervalSeconds],
+		"agent_minutes_per_ticket", int(tune.Budget/time.Minute), "agent_minutes_per_ticket_source", tuneSources[zdispatch.TuneAgentMinutes])
+
+	d, err := zdispatch.New(st, tr, b, m, job.Registry(), bindings, zdispatch.Config{
+		Interval:    tune.Interval,
+		MaxParallel: tune.MaxParallel,
 		Owner:       claimOwner(),
 		Models: map[string]string{
 			modelAliasSonnet: cfg.Models.Sonnet, modelAliasOpus: cfg.Models.Opus, modelAliasFable: cfg.Models.Fable, modelAliasCodex: cfg.Models.Codex,
 		},
-		Budget:         time.Duration(cfg.Budget.AgentMinutesPerTicket) * time.Minute,
+		Budget:         tune.Budget,
 		Floor:          floor,
 		Projects:       projects,
 		Sandboxes:      sbSet,

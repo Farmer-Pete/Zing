@@ -297,6 +297,64 @@ func ValidateTuning(name string, value int) (TuningSetting, error) {
 	return TuningSetting{}, &TuningError{Msg: fmt.Sprintf("unknown setting %q", name)}
 }
 
+// withTuning returns t with name set to value, in that setting's unit.
+// name is assumed already accepted by ValidateTuning; any other name
+// leaves t unchanged.
+func withTuning(t Tuning, name string, value int) Tuning {
+	switch name {
+	case TuneMaxParallel:
+		t.MaxParallel = value
+	case TuneIntervalSeconds:
+		t.Interval = time.Duration(value) * time.Second
+	case TuneAgentMinutes:
+		t.Budget = time.Duration(value) * time.Minute
+	}
+	return t
+}
+
+// The two sources LoadTuning reports for each setting name: TuningSourceStore
+// when a valid stored value won, TuningSourceToml when the zing.toml-derived
+// base value won (#81).
+const (
+	TuningSourceStore = "store"
+	TuningSourceToml  = "zing.toml"
+)
+
+// LoadTuning overlays each valid stored setting from the settings table on
+// top of base, the zing.toml-derived startup values (#81, owner decision:
+// "a stored value wins once it is set"). A setting whose key is unset,
+// empty, not a decimal integer, or outside ValidateTuning's bounds keeps
+// base's own value for that setting and is reported as coming from
+// zing.toml; any other call returns an error and must not be used.
+// sources maps every TuningSettings name to TuningSourceStore or
+// TuningSourceToml.
+func LoadTuning(ctx context.Context, st *store.Store, base Tuning) (Tuning, map[string]string, error) {
+	out := base
+	sources := make(map[string]string, len(TuningSettings))
+	for _, s := range TuningSettings {
+		sources[s.Name] = TuningSourceToml
+		raw, ok, err := st.GetSetting(ctx, s.Key)
+		if err != nil {
+			return base, nil, fmt.Errorf("dispatch: load %s: %w", s.Key, err)
+		}
+		if !ok || raw == "" {
+			continue
+		}
+		v, convErr := strconv.Atoi(raw)
+		if convErr == nil {
+			_, convErr = ValidateTuning(s.Name, v)
+		}
+		if convErr != nil {
+			slog.Warn("dispatch: stored setting is invalid, using zing.toml",
+				"key", s.Key, "stored", raw, "err", convErr)
+			continue
+		}
+		out = withTuning(out, s.Name, v)
+		sources[s.Name] = TuningSourceStore
+	}
+	return out, sources, nil
+}
+
 // Dispatcher ticks: reconcile, intake, count, pick, claim, run, commit
 // (design section 6.8), now launching up to cfg.MaxParallel claimed
 // tickets' handlers at once (design section 4.1, #45 D1) instead of running
@@ -446,14 +504,7 @@ func (d *Dispatcher) SetTuning(ctx context.Context, name string, value int, by s
 		return fmt.Errorf("dispatch: set %s: %w", name, err)
 	}
 	d.mu.Lock()
-	switch name {
-	case TuneMaxParallel:
-		d.tune.MaxParallel = value
-	case TuneIntervalSeconds:
-		d.tune.Interval = time.Duration(value) * time.Second
-	case TuneAgentMinutes:
-		d.tune.Budget = time.Duration(value) * time.Minute
-	}
+	d.tune = withTuning(d.tune, name, value)
 	d.mu.Unlock()
 	if name == TuneIntervalSeconds {
 		select {
