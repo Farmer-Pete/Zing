@@ -942,15 +942,18 @@ func TestRestartAfterServe(t *testing.T) {
 	})
 }
 
-// fakeExec records the one call restartAfterServe makes to its execFunc, so
-// tests can assert on argv0, argv, and env without nested closures.
+// fakeExec records the calls restartAfterServe or bootAndServe make to its
+// execFunc, so tests can assert on argv0, argv, env, and the call count
+// without nested closures.
 type fakeExec struct {
 	err       error
+	calls     int
 	argv0     string
 	argv, env []string
 }
 
 func (fe *fakeExec) exec(argv0 string, argv, env []string) error {
+	fe.calls++
 	fe.argv0, fe.argv, fe.env = argv0, argv, env
 	return fe.err
 }

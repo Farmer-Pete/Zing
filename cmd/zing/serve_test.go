@@ -528,6 +528,48 @@ func TestServe_WatchBootRecordsBootedOK(t *testing.T) {
 	}
 }
 
+// TestServe_ReportBootClosesRolledBack proves serve's report-boot wiring
+// (review finding r1f1): with su.boot set to bootReport and su.marker set
+// to a rolled_back marker, serve calls closeUpgrade right after dataDir
+// resolves, which removes upgrade.json, before it ever reaches the
+// listeners.
+func TestServe_ReportBootClosesRolledBack(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "zing.toml")
+	dbPath := filepath.Join(dir, "zing.db")
+
+	port := freeLoopbackPort(t)
+	writeZingTOML(t, cfgPath, zingTOMLOpts{
+		Port: port, IntervalSeconds: 1, MaxParallel: 1, Bind: []string{loopback},
+	})
+
+	marker := upgradeMarker{
+		FromSHA: "0123456789ab", ToSHA: "fedcba9876543210fedcba9876543210fedcba9",
+		TicketID: 0, State: markerRolledBack,
+	}
+	if err := saveUpgradeMarker(dir, marker); err != nil {
+		t.Fatalf("saveUpgradeMarker: %v", err)
+	}
+
+	su := &selfUpgrade{boot: bootReport, marker: marker}
+
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+
+	serveDone := make(chan error, 1)
+	go func() { serveDone <- serve(ctx, cfgPath, dbPath, false, su) }()
+
+	waitForServing(t, fmt.Sprintf("http://127.0.0.1:%d", port), serveDone)
+
+	if _, found, loadErr := loadUpgradeMarker(dir); loadErr != nil || found {
+		t.Fatalf("loadUpgradeMarker: found=%v err=%v, want gone", found, loadErr)
+	}
+
+	cancelAndWaitForServe(t, cancel, serveDone)
+}
+
 // TestServe_UpgraderStopsOnDispatcherExitWithoutCtxCancel proves that serve's
 // cancelServe-then-wait-on-upDone sequence (right before shutdown, serve.go)
 // really ends the running upgrader loop goroutine even when the parent ctx

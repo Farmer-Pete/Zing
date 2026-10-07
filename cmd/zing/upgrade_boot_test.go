@@ -141,30 +141,37 @@ func TestDecideBoot(t *testing.T) {
 	}
 }
 
+// TestBootOutcome pins bootOutcome's literal answer for all 16 combinations
+// of its four bools, so a rule written wrongly cannot also be written
+// wrongly in the test's own expectation.
 func TestBootOutcome(t *testing.T) {
-	for _, watching := range []bool{false, true} {
-		for _, booted := range []bool{false, true} {
-			for _, deadlinePassed := range []bool{false, true} {
-				for _, signalled := range []bool{false, true} {
-					var wantOutcome, wantCause string
-					switch {
-					case !watching || booted:
-						wantOutcome, wantCause = outcomeNone, ""
-					case signalled:
-						wantOutcome, wantCause = outcomeRevert, ""
-					case deadlinePassed:
-						wantOutcome, wantCause = outcomeFailed, bootCauseDeadline
-					default:
-						wantOutcome, wantCause = outcomeFailed, bootCauseStopped
-					}
+	tests := []struct {
+		watching, booted, deadlinePassed, signalled bool
+		wantOutcome, wantCause                      string
+	}{
+		{false, false, false, false, outcomeNone, ""},
+		{false, false, false, true, outcomeNone, ""},
+		{false, false, true, false, outcomeNone, ""},
+		{false, false, true, true, outcomeNone, ""},
+		{false, true, false, false, outcomeNone, ""},
+		{false, true, false, true, outcomeNone, ""},
+		{false, true, true, false, outcomeNone, ""},
+		{false, true, true, true, outcomeNone, ""},
+		{true, false, false, false, outcomeFailed, bootCauseStopped},
+		{true, false, false, true, outcomeRevert, ""},
+		{true, false, true, false, outcomeFailed, bootCauseDeadline},
+		{true, false, true, true, outcomeRevert, ""},
+		{true, true, false, false, outcomeNone, ""},
+		{true, true, false, true, outcomeNone, ""},
+		{true, true, true, false, outcomeNone, ""},
+		{true, true, true, true, outcomeNone, ""},
+	}
 
-					gotOutcome, gotCause := bootOutcome(watching, booted, deadlinePassed, signalled)
-					if gotOutcome != wantOutcome || gotCause != wantCause {
-						t.Errorf("bootOutcome(%v, %v, %v, %v) = (%v, %v), want (%v, %v)",
-							watching, booted, deadlinePassed, signalled, gotOutcome, gotCause, wantOutcome, wantCause)
-					}
-				}
-			}
+	for _, tt := range tests {
+		gotOutcome, gotCause := bootOutcome(tt.watching, tt.booted, tt.deadlinePassed, tt.signalled)
+		if gotOutcome != tt.wantOutcome || gotCause != tt.wantCause {
+			t.Errorf("bootOutcome(%v, %v, %v, %v) = (%v, %v), want (%v, %v)",
+				tt.watching, tt.booted, tt.deadlinePassed, tt.signalled, gotOutcome, gotCause, tt.wantOutcome, tt.wantCause)
 		}
 	}
 }
@@ -248,7 +255,7 @@ func TestGuardBoot_RollsBackAttempted(t *testing.T) {
 			t.Fatalf("saveUpgradeMarker: %v", err)
 		}
 
-		action, m, target, err := guardBoot(resolved, exe, guardBootSHA)
+		action, _, target, err := guardBoot(resolved, exe, guardBootSHA)
 		if err != nil {
 			t.Fatalf("guardBoot: %v", err)
 		}
@@ -257,11 +264,6 @@ func TestGuardBoot_RollsBackAttempted(t *testing.T) {
 		}
 		if target.Next != "" {
 			t.Errorf("target.Next = %q, want empty", target.Next)
-		}
-
-		su := &selfUpgrade{boot: action, marker: m}
-		if su.boot != bootRollback {
-			t.Errorf("su.boot = %v, want bootRollback", su.boot)
 		}
 
 		got, err := os.ReadFile(exe)
@@ -281,9 +283,6 @@ func TestGuardBoot_RollsBackAttempted(t *testing.T) {
 		}
 		if saved.State != markerRolledBack {
 			t.Errorf("marker state = %q, want %q", saved.State, markerRolledBack)
-		}
-		if su.marker.State != markerRolledBack {
-			t.Errorf("su.marker.State = %q, want %q", su.marker.State, markerRolledBack)
 		}
 
 		lock, err := acquireServeLock(resolved)
@@ -332,14 +331,8 @@ func TestGuardBoot_MarksPendingAttempted(t *testing.T) {
 		t.Errorf("action = %v, want bootWatch", action)
 	}
 
-	su := &selfUpgrade{boot: action, marker: m}
-	su.booted.Store(false)
-	su.deadlinePassed.Store(false)
-	if su.marker.State != markerAttempted {
-		t.Errorf("su.marker.State = %q, want %q", su.marker.State, markerAttempted)
-	}
-	if su.booted.Load() || su.deadlinePassed.Load() {
-		t.Errorf("su.booted / su.deadlinePassed should start false")
+	if m.State != markerAttempted {
+		t.Errorf("m.State = %q, want %q", m.State, markerAttempted)
 	}
 
 	saved, found, err := loadUpgradeMarker(resolved)
@@ -463,20 +456,6 @@ func TestGuardBoot_MarksPendingAttempted(t *testing.T) {
 	})
 }
 
-// countingExec is an execFunc fake that counts its calls and records the
-// last argv0, so tests can assert "exactly one exec call" as well as which
-// binary it named.
-type countingExec struct {
-	calls int
-	argv0 string
-}
-
-func (ce *countingExec) exec(argv0 string, _, _ []string) error {
-	ce.calls++
-	ce.argv0 = argv0
-	return nil
-}
-
 func TestBootAndServe_RollbackExecsBeforeConfig(t *testing.T) {
 	resolved, exe := writeGuardBootBinary(t, t.TempDir(), "new", "old")
 	marker := upgradeMarker{FromSHA: "from-sha", ToSHA: guardBootSHA, TicketID: 5, State: markerAttempted}
@@ -487,7 +466,7 @@ func TestBootAndServe_RollbackExecsBeforeConfig(t *testing.T) {
 	dbPath := filepath.Join(resolved, "zing.db")
 	cfgPath := filepath.Join(resolved, "does-not-exist.toml")
 	su := &selfUpgrade{exe: exe, running: guardBootSHA[:12]}
-	ce := &countingExec{}
+	ce := &fakeExec{}
 
 	err := bootAndServe(t.Context(), cfgPath, dbPath, false, su, ce.exec)
 	if err != nil {
@@ -530,7 +509,7 @@ func TestBootAndServe_GuardRunsBeforeConfig(t *testing.T) {
 		t.Fatalf("write zing.toml: %v", err)
 	}
 	su := &selfUpgrade{exe: exe, running: guardBootSHA[:12]}
-	ce := &countingExec{}
+	ce := &fakeExec{}
 
 	err := bootAndServe(t.Context(), cfgPath, dbPath, false, su, ce.exec)
 	if err == nil {
@@ -563,7 +542,7 @@ func TestWatchBoot_Returns200(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	ok := watchBoot(t.Context(), srv.URL, 10*time.Millisecond)
+	ok := watchBoot(t.Context(), srv.URL, 10*time.Millisecond, 7)
 	if !ok {
 		t.Fatalf("watchBoot returned false, want true")
 	}
@@ -587,7 +566,7 @@ func TestWatchBoot_StopsOnCancel(t *testing.T) {
 	time.AfterFunc(50*time.Millisecond, cancel)
 
 	start := time.Now()
-	ok := watchBoot(ctx, srv.URL, 10*time.Millisecond)
+	ok := watchBoot(ctx, srv.URL, 10*time.Millisecond, 42)
 	if ok {
 		t.Fatalf("watchBoot returned true, want false")
 	}
@@ -600,7 +579,7 @@ func TestWatchBoot_StopsOnCancel(t *testing.T) {
 		t.Fatalf("log lines = %d, want 1: %q", len(lines), buf.String())
 	}
 	line := lines[0]
-	for _, want := range []string{"level=WARN", "upgrade: boot watch gave up", "last_status=503"} {
+	for _, want := range []string{"level=WARN", "upgrade: boot watch gave up", "last_status=503", "ticket_id=42"} {
 		if !strings.Contains(line, want) {
 			t.Errorf("log line %q missing %q", line, want)
 		}
@@ -688,6 +667,13 @@ func TestCloseUpgrade_BootedOK(t *testing.T) {
 
 		if _, found, loadErr := loadUpgradeMarker(dir); loadErr != nil || found {
 			t.Errorf("marker found=%v err=%v, want gone", found, loadErr)
+		}
+		msgs, err := st.ListMessages(t.Context(), m.TicketID)
+		if err != nil {
+			t.Fatalf("ListMessages: %v", err)
+		}
+		if len(msgs) != 0 {
+			t.Errorf("ListMessages(ticket 0) = %v, want none posted", msgs)
 		}
 	})
 }
