@@ -318,7 +318,9 @@ type execFunc func(argv0 string, argv, envv []string) error
 // argv and env, once ctx (run's own signal context) is still live. With a
 // nil rt, or with ctx already done because a real signal arrived during the
 // drain, it does nothing and returns nil, leaving zing.next and a pending
-// upgrade.json for the next start to deal with.
+// upgrade.json for the next start to deal with. A rollback target has an
+// empty Next: rollBack has already put zing.prev back in place, so there is
+// nothing to swap, and restartAfterServe execs rt.Binary as it is.
 func restartAfterServe(ctx context.Context, rt *restartTarget, argv, env []string, run execFunc) error {
 	if rt == nil {
 		return nil
@@ -329,8 +331,10 @@ func restartAfterServe(ctx context.Context, rt *restartTarget, argv, env []strin
 		slog.Info("upgrade: restart skipped, serve was signalled", "to_sha", rt.ToSHA, "ticket_id", rt.TicketID)
 		return nil //nolint:nilerr // ctx.Err() here is a signal, not a failure
 	}
-	if err := os.Rename(rt.Next, rt.Binary); err != nil {
-		return fmt.Errorf("upgrade: swap: %w", err)
+	if rt.Next != "" {
+		if err := os.Rename(rt.Next, rt.Binary); err != nil {
+			return fmt.Errorf("upgrade: swap: %w", err)
+		}
 	}
 	slog.Info("upgrade", "step", "exec", "from_sha", rt.FromSHA, "to_sha", rt.ToSHA, "ticket_id", rt.TicketID)
 	if err := run(rt.Binary, argv, env); err != nil {

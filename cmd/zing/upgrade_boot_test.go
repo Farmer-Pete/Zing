@@ -1,6 +1,10 @@
 package main
 
-import "testing"
+import (
+	"os"
+	"path/filepath"
+	"testing"
+)
 
 func TestDecideBoot(t *testing.T) {
 	const (
@@ -149,4 +153,42 @@ func TestBootOutcome(t *testing.T) {
 			}
 		}
 	}
+}
+
+func TestRollbackTarget(t *testing.T) {
+	t.Parallel()
+
+	m := upgradeMarker{FromSHA: "a1", ToSHA: "b2", TicketID: 7}
+	got := rollbackTarget(m, "X")
+
+	want := restartTarget{Binary: "X", Next: "", FromSHA: "b2", ToSHA: "a1", TicketID: 7}
+	if got != want {
+		t.Errorf("rollbackTarget(%+v, %q) = %+v, want %+v", m, "X", got, want)
+	}
+}
+
+func TestRemoveMarker(t *testing.T) {
+	t.Parallel()
+
+	t.Run("removes existing marker", func(t *testing.T) {
+		t.Parallel()
+		dir := t.TempDir()
+		path := filepath.Join(dir, upgradeMarkerFile)
+		if err := os.WriteFile(path, []byte("{}"), 0o644); err != nil {
+			t.Fatalf("write marker: %v", err)
+		}
+		if err := removeMarker(dir); err != nil {
+			t.Fatalf("removeMarker: %v", err)
+		}
+		if _, err := os.Stat(path); !os.IsNotExist(err) {
+			t.Errorf("marker still exists after removeMarker")
+		}
+	})
+
+	t.Run("missing marker is fine", func(t *testing.T) {
+		t.Parallel()
+		if err := removeMarker(t.TempDir()); err != nil {
+			t.Errorf("removeMarker with no marker = %v, want nil", err)
+		}
+	})
 }

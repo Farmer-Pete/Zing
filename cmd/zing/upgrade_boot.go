@@ -5,6 +5,7 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -91,6 +92,22 @@ func bootOutcome(watching, booted, deadlinePassed, signalled bool) (outcome, cau
 	default:
 		return outcomeFailed, bootCauseStopped
 	}
+}
+
+// removeMarker removes DATA_DIR/upgrade.json; a missing file is fine.
+func removeMarker(dataDir string) error {
+	err := os.Remove(filepath.Join(dataDir, upgradeMarkerFile))
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("upgrade: remove upgrade.json: %w", err)
+	}
+	return nil
+}
+
+// rollbackTarget is the exec a rollback performs: rollBack has already
+// renamed zing.prev over exe, so Next is empty and restartAfterServe does
+// no swap of its own.
+func rollbackTarget(m upgradeMarker, exe string) restartTarget {
+	return restartTarget{Binary: exe, FromSHA: m.ToSHA, ToSHA: m.FromSHA, TicketID: m.TicketID}
 }
 
 // selfUpgrade carries the self-upgrade state across serve's call, from run

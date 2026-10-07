@@ -898,6 +898,28 @@ func TestRestartAfterServe(t *testing.T) {
 		}
 	})
 
+	t.Run("empty_next_does_no_swap", func(t *testing.T) {
+		t.Parallel()
+		dir := t.TempDir()
+		binary := filepath.Join(dir, "zing")
+		if err := os.WriteFile(binary, []byte("old"), 0o755); err != nil {
+			t.Fatalf("write zing: %v", err)
+		}
+		rt := &restartTarget{Binary: binary, FromSHA: "fedcba987654", ToSHA: "0123456789ab"}
+
+		fe := &fakeExec{}
+		if err := restartAfterServe(t.Context(), rt, []string{"zing", "serve"}, []string{"A=1"}, fe.exec); err != nil {
+			t.Fatalf("restartAfterServe: %v", err)
+		}
+		if fe.argv0 != binary {
+			t.Errorf("exec argv0 = %q, want %q", fe.argv0, binary)
+		}
+		got, err := os.ReadFile(binary)
+		if err != nil || string(got) != "old" {
+			t.Errorf("binary = %q, %v, want \"old\" unchanged", got, err)
+		}
+	})
+
 	t.Run("exec error is wrapped", func(t *testing.T) {
 		t.Parallel()
 		dir := t.TempDir()
