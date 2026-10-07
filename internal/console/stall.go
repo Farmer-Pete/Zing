@@ -60,6 +60,15 @@ type stallInput struct {
 	Now time.Time
 }
 
+// foreignClaim reports whether t's claim is held by an owner other than
+// slots' own (owner decision Q2): console.buildStallRail calls it to decide
+// whether to load ClaimAlive from store.ForeignClaims, and decideStall
+// calls it for the claim_dead rule, so the loader and the decision can
+// never disagree about which claims are foreign.
+func foreignClaim(t store.Ticket, slots *dispatch.SlotSnapshot) bool {
+	return slots != nil && t.ClaimOwner != nil && *t.ClaimOwner != slots.Owner
+}
+
 // decideStall picks the one reason the ticket is not moving, in this
 // precedence (owner decision Q4): running now, then waiting on the owner,
 // then a dead claim, then CI waiting, then a full run-slot table. It
@@ -72,8 +81,7 @@ func decideStall(in stallInput) (reason stallReason, text string) {
 	if t.WaitingOn != nil {
 		return stallOwner, "waiting on the owner (" + *t.WaitingOn + ")"
 	}
-	foreignClaim := in.Slots != nil && t.ClaimOwner != nil && *t.ClaimOwner != in.Slots.Owner
-	if foreignClaim {
+	if foreignClaim(t, in.Slots) {
 		tail := "the next dispatch pass reclaims it"
 		if in.ClaimAlive {
 			tail = "its leftover agent process is still running"

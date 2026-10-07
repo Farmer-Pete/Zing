@@ -193,7 +193,7 @@ func (c *console) buildStallRail(ctx context.Context, ticket store.Ticket) (*tem
 			}
 		}
 
-		if ticket.ClaimOwner != nil && *ticket.ClaimOwner != snap.Owner {
+		if foreignClaim(ticket, in.Slots) {
 			foreign, err := c.store.ForeignClaims(ctx, snap.Owner)
 			if err != nil {
 				return nil, fmt.Errorf("console: rail: stall: foreign claims for ticket %d: %w", ticket.ID, err)
@@ -211,11 +211,7 @@ func (c *console) buildStallRail(ctx context.Context, ticket store.Ticket) (*tem
 	if err != nil {
 		return nil, fmt.Errorf("console: rail: stall: runs for ticket %d: %w", ticket.ID, err)
 	}
-	for _, r := range runs {
-		if r.StartedAt != nil && (in.LastRan == nil || r.StartedAt.After(*in.LastRan)) {
-			in.LastRan = r.StartedAt
-		}
-	}
+	in.LastRan = newestStart(runs)
 
 	if ticket.State == string(response.TicketStateShipping) {
 		markers, err := c.store.MarkersWithPrefix(ctx, ticket.ID, updateMarkerCIWaitingPrefix)
@@ -230,6 +226,22 @@ func (c *console) buildStallRail(ctx context.Context, ticket store.Ticket) (*tem
 
 	reason, text := decideStall(in)
 	return &templates.StallLine{Reason: string(reason), Text: text, LastRan: lastRanText(in.LastRan)}, nil
+}
+
+// newestStart returns the greatest non-nil Run.StartedAt among runs, or nil
+// when none has started yet (review fix: named apart from buildStallRail's
+// own loop, rather than one three-term nil-guarded boolean inline there).
+func newestStart(runs []store.Run) *time.Time {
+	var newest *time.Time
+	for _, r := range runs {
+		if r.StartedAt == nil {
+			continue
+		}
+		if newest == nil || r.StartedAt.After(*newest) {
+			newest = r.StartedAt
+		}
+	}
+	return newest
 }
 
 // buildArtifactsRail groups ticketID's artifacts by type into the mock's

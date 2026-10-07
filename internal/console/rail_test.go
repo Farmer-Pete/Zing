@@ -1765,6 +1765,46 @@ func TestRail_StallSlotLine(t *testing.T) {
 	}
 }
 
+// TestRail_StallSlotLineHiddenForNonCandidate proves the slot reason stays
+// hidden for a ticket store.ListReadyCandidates excludes, even with every
+// slot a SlotSource reports busy: here a ticket a Claude session limit
+// parked into the future (review finding r2f2) is not a ready candidate,
+// so a buildStallRail that skipped the ListReadyCandidates read and
+// treated every unclaimed ticket as a candidate would show the slot line
+// here, while this test wants it hidden.
+func TestRail_StallSlotLineHiddenForNonCandidate(t *testing.T) {
+	t.Parallel()
+	s := newConsoleTestStore(t)
+	ticketID := seedTicket(t, s, "fake#1", "Add a hello endpoint")
+
+	const owner = "park-test-owner"
+	expires := time.Now().Add(10 * time.Minute).UTC().Truncate(time.Second)
+	claimed, err := s.Claim(t.Context(), ticketID, owner, expires)
+	if err != nil || !claimed {
+		t.Fatalf("Claim: claimed=%v err=%v", claimed, err)
+	}
+	if _, err := s.Reserve(t.Context(), ticketID, owner, expires,
+		store.SessionUpsert{Job: string(response.TicketStateBuilding), Runtime: testRuntimeFake},
+		store.RunSeed{Model: "test-model"}); err != nil {
+		t.Fatalf("Reserve: %v", err)
+	}
+	cappedUntil := time.Now().Add(time.Hour).UTC().Truncate(time.Second)
+	if _, err := s.ParkRuns(t.Context(), ticketID, owner, expires, cappedUntil, ""); err != nil {
+		t.Fatalf("ParkRuns: %v", err)
+	}
+
+	slots := fakeSlots{Owner: "this-serve", Inflight: []int64{11, 12}, MaxParallel: 2}
+	srv := newStallTestServer(t, s, bus.New(), slots)
+	rail := railHTML(t, srv.URL, ticketID)
+
+	if !strings.Contains(rail, `class="rail-stall"`) {
+		t.Errorf("rail missing the rail-stall section; got:\n%s", rail)
+	}
+	if strings.Contains(rail, `data-stall-reason="slot"`) {
+		t.Errorf("rail should hide the slot reason for a parked, non-candidate ticket; got:\n%s", rail)
+	}
+}
+
 // TestRail_StallDeadClaim proves the rail's stall section shows the
 // dead-claim reason for a ticket claimed by an owner other than the
 // SlotSource's own, when that ticket carries no open runs at all -- so
