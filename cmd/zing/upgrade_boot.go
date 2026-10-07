@@ -237,9 +237,8 @@ func rollBack(dataDir, exe string, m upgradeMarker) (bootAction, upgradeMarker, 
 // (true) or ctx ends (false). Each GET has its own 2 s timeout. Each poll
 // that is not a 200 logs at DEBUG; giving up logs one WARN with the last
 // poll's status and error, so a failed boot can be diagnosed after the
-// rollback. ticketID, 0 with no ticket, is only ever logged, never used to
-// decide anything.
-func watchBoot(ctx context.Context, url string, every time.Duration, ticketID int64) bool {
+// rollback.
+func watchBoot(ctx context.Context, url string, every time.Duration) bool {
 	client := &http.Client{Timeout: 2 * time.Second}
 	ticker := time.NewTicker(every)
 	defer ticker.Stop()
@@ -253,11 +252,11 @@ func watchBoot(ctx context.Context, url string, every time.Duration, ticketID in
 				return true
 			}
 			lastStatus, lastErr = status, err
-			slog.Debug("upgrade: boot watch poll", "url", url, "status", status, "error", err, "ticket_id", ticketID)
+			slog.Debug("upgrade: boot watch poll", "url", url, "status", status, "error", err)
 		}
 		select {
 		case <-ctx.Done():
-			slog.Warn("upgrade: boot watch gave up", "url", url, "last_status", lastStatus, "last_error", lastErr, "polls", polls, "ticket_id", ticketID)
+			slog.Warn("upgrade: boot watch gave up", "url", url, "last_status", lastStatus, "last_error", lastErr, "polls", polls)
 			return false
 		case <-ticker.C:
 		}
@@ -382,7 +381,7 @@ func finishBoot(dataDir string, su *selfUpgrade, serveErr error, signalled bool)
 	outcome, cause := bootOutcome(su.boot == bootWatch, su.booted.Load(), su.deadlinePassed.Load(), signalled)
 	switch outcome {
 	case outcomeFailed:
-		slog.Error("upgrade: boot failed", "cause", cause, "from_sha", su.marker.FromSHA, "to_sha", su.marker.ToSHA, "ticket_id", su.marker.TicketID)
+		slog.Error("upgrade: boot failed", "cause", cause, "from_sha", su.marker.FromSHA, "to_sha", su.marker.ToSHA, "ticket_id", su.marker.TicketID, "error", serveErr)
 		if serveErr != nil {
 			return serveErr
 		}

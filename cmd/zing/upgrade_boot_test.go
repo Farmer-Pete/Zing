@@ -528,6 +528,61 @@ func TestBootAndServe_GuardRunsBeforeConfig(t *testing.T) {
 	}
 }
 
+// TestBootAndServe_SignalRevertsToPending proves finishBoot's signalled
+// argument is wired to the real signal context (r2f1): bootAndServe must
+// pass ctx.Err() != nil, the outer context run's signal.NotifyContext
+// cancels, not serveCtx.Err() != nil, the inner one the boot deadline timer
+// cancels on its own. ctx is already cancelled before bootAndServe starts,
+// standing in for the owner's SIGINT or SIGTERM landing before the boot
+// watch ever answers 200: guardBoot still marks the marker attempted for a
+// watch boot, and finishBoot must read the already-cancelled ctx as the
+// owner's signal and revert it to pending, not leave it attempted for the
+// next start to roll back, with no restart exec.
+func TestBootAndServe_SignalRevertsToPending(t *testing.T) {
+	resolved, exe := writeGuardBootBinary(t, t.TempDir(), "zing", "")
+	marker := upgradeMarker{FromSHA: "from-sha", ToSHA: guardBootSHA, TicketID: 0, State: markerPending}
+	if err := saveUpgradeMarker(resolved, marker); err != nil {
+		t.Fatalf("saveUpgradeMarker: %v", err)
+	}
+
+	dbPath := filepath.Join(resolved, "zing.db")
+	cfgPath := filepath.Join(resolved, "zing.toml")
+	port := freeLoopbackPort(t)
+	writeZingTOML(t, cfgPath, zingTOMLOpts{
+		Port: port, IntervalSeconds: 1, MaxParallel: 1, Bind: []string{loopback},
+	})
+
+	su := &selfUpgrade{exe: exe, running: guardBootSHA[:12]}
+	ce := &fakeExec{}
+
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+
+	done := make(chan error, 1)
+	go func() { done <- bootAndServe(ctx, cfgPath, dbPath, false, su, ce.exec) }()
+
+	select {
+	case <-done:
+		// Whatever serve's own setup error is with ctx already done (it
+		// never reaches a listener), what matters here is that finishBoot
+		// still read the cancellation as the owner's signal and reverted.
+	case <-time.After(10 * time.Second):
+		t.Fatal("bootAndServe did not return within 10s of an already-cancelled context")
+	}
+
+	if ce.calls != 0 {
+		t.Errorf("exec calls = %d, want 0", ce.calls)
+	}
+
+	saved, found, loadErr := loadUpgradeMarker(resolved)
+	if loadErr != nil || !found {
+		t.Fatalf("loadUpgradeMarker: found=%v err=%v", found, loadErr)
+	}
+	if saved.State != markerPending {
+		t.Errorf("marker state = %q, want %q (the owner's signal reverts a watch boot)", saved.State, markerPending)
+	}
+}
+
 func TestWatchBoot_Returns200(t *testing.T) {
 	t.Parallel()
 
@@ -542,7 +597,7 @@ func TestWatchBoot_Returns200(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	ok := watchBoot(t.Context(), srv.URL, 10*time.Millisecond, 7)
+	ok := watchBoot(t.Context(), srv.URL, 10*time.Millisecond)
 	if !ok {
 		t.Fatalf("watchBoot returned false, want true")
 	}
@@ -566,7 +621,7 @@ func TestWatchBoot_StopsOnCancel(t *testing.T) {
 	time.AfterFunc(50*time.Millisecond, cancel)
 
 	start := time.Now()
-	ok := watchBoot(ctx, srv.URL, 10*time.Millisecond, 42)
+	ok := watchBoot(ctx, srv.URL, 10*time.Millisecond)
 	if ok {
 		t.Fatalf("watchBoot returned true, want false")
 	}
@@ -579,7 +634,7 @@ func TestWatchBoot_StopsOnCancel(t *testing.T) {
 		t.Fatalf("log lines = %d, want 1: %q", len(lines), buf.String())
 	}
 	line := lines[0]
-	for _, want := range []string{"level=WARN", "upgrade: boot watch gave up", "last_status=503", "ticket_id=42"} {
+	for _, want := range []string{"level=WARN", "upgrade: boot watch gave up", "last_status=503"} {
 		if !strings.Contains(line, want) {
 			t.Errorf("log line %q missing %q", line, want)
 		}
@@ -606,9 +661,9 @@ func openUpgradeBootStore(t *testing.T) (st *store.Store, dataDir string) {
 	return st, dir
 }
 
+// TestCloseUpgrade_BootedOK does not call t.Parallel: its ticket_zero
+// subtest swaps slog's default handler.
 func TestCloseUpgrade_BootedOK(t *testing.T) {
-	t.Parallel()
-
 	st, dir := openUpgradeBootStore(t)
 	ticketID := seedTicketForUpgrade(t, st)
 
@@ -655,7 +710,16 @@ func TestCloseUpgrade_BootedOK(t *testing.T) {
 	}
 
 	t.Run("ticket_zero", func(t *testing.T) {
-		t.Parallel()
+		// Not t.Parallel: it swaps slog's default handler to prove that
+		// closeUpgrade never attempts InsertMessage for ticket 0. If the
+		// m.TicketID > 0 guard were removed, the insert would fail its
+		// foreign-key check (no ticket 0 exists) and log an "upgrade:
+		// post message" WARN; ListMessages(0) would stay empty either
+		// way, so that alone cannot tell the guard apart from its absence.
+		prevDefault := slog.Default()
+		var buf bytes.Buffer
+		slog.SetDefault(slog.New(slog.NewTextHandler(&buf, nil)))
+		t.Cleanup(func() { slog.SetDefault(prevDefault) })
 
 		st, dir := openUpgradeBootStore(t)
 		m := upgradeMarker{FromSHA: "fedcba9876543210", ToSHA: "0123456789abcdef0123456789abcdef01234567"}
@@ -668,12 +732,8 @@ func TestCloseUpgrade_BootedOK(t *testing.T) {
 		if _, found, loadErr := loadUpgradeMarker(dir); loadErr != nil || found {
 			t.Errorf("marker found=%v err=%v, want gone", found, loadErr)
 		}
-		msgs, err := st.ListMessages(t.Context(), m.TicketID)
-		if err != nil {
-			t.Fatalf("ListMessages: %v", err)
-		}
-		if len(msgs) != 0 {
-			t.Errorf("ListMessages(ticket 0) = %v, want none posted", msgs)
+		if strings.Contains(buf.String(), "upgrade: post message") {
+			t.Errorf("log contains an \"upgrade: post message\" WARN, want no insert attempted for ticket 0: %q", buf.String())
 		}
 	})
 }

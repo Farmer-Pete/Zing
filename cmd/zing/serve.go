@@ -525,7 +525,7 @@ func serve(ctx context.Context, cfgPath, dbPath string, seedDemo bool, su *selfU
 		url := "http://" + listeners[0].Addr().String() + "/"
 		go func() {
 			defer close(watchDone)
-			if watchBoot(ctx, url, bootPoll, su.marker.TicketID) {
+			if watchBoot(ctx, url, bootPoll) {
 				onBooted(ctx, st, dataDir, su, up)
 			}
 		}()

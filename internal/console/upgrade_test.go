@@ -11,9 +11,11 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"zing/internal/bus"
 	"zing/internal/console"
+	zdispatch "zing/internal/dispatch"
 	"zing/internal/response"
 	"zing/internal/store"
 )
@@ -157,5 +159,22 @@ func TestSettings_UpgradeButton(t *testing.T) {
 	_, main2, _, _ := readInitialFrames(t, r2)
 	if strings.Contains(main2, "upgrade-now") || strings.Contains(main2, "upgrade-message") {
 		t.Errorf("main (no upgrader) should not show the Upgrade now row; got:\n%s", main2)
+	}
+
+	// A live serve always wires a tuner (views.go's c.tuner != nil branch);
+	// prove the Upgrade now row renders there too, alongside a tuning row.
+	s3 := newConsoleTestStore(t)
+	d := settingsTestDispatcher(t, s3, bus.New(), zdispatch.Config{MaxParallel: 1, Interval: time.Hour}, &settingsBudgetHandler{})
+	up3 := &fakeUpgrader{}
+	srv3 := newUpgradeTestServer(t, s3, bus.New(), console.WithTuner(d), console.WithUpgrader(up3))
+	resp3, r3, cancel3 := openStream(t, srv3.URL, "settings", 0, 0)
+	defer cancel3()
+	defer resp3.Body.Close()
+	_, main3, _, _ := readInitialFrames(t, r3)
+	if !strings.Contains(main3, `data-tuning-name="max_parallel"`) {
+		t.Errorf("main (with tuner) missing a tuning row; got:\n%s", main3)
+	}
+	if !strings.Contains(main3, `class="upgrade-now"`) {
+		t.Errorf("main (with tuner) missing upgrade-now button; got:\n%s", main3)
 	}
 }
