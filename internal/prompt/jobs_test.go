@@ -269,7 +269,7 @@ func TestForUnblock(t *testing.T) {
 			t.Errorf("ForUnblock.Inputs[%d].Label = %q, want %q", i, in.Inputs[i].Label, label)
 		}
 	}
-	for i := range 3 {
+	for i := range in.Inputs {
 		if !in.Inputs[i].Untrusted {
 			t.Errorf("ForUnblock.Inputs[%d] (%s) is not Untrusted, want fenced", i, in.Inputs[i].Label)
 		}
@@ -280,6 +280,7 @@ func TestForUnblock(t *testing.T) {
 	assertFenced(t, got, "ticket", "ticket body")
 	assertFenced(t, got, "plan", "<plan/>")
 	assertFenced(t, got, "findings", "finding p3-f2 major")
+	assertFenced(t, got, "guidance", "earlier guidance")
 }
 
 // The following three tests are the plan section 4.2 injection tests:

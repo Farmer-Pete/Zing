@@ -1666,7 +1666,7 @@ func runUnblock(ctx context.Context, t store.Ticket, d Deps, planVersion int, fi
 	}
 	if err != nil {
 		slog.Info("plan unblock turn", "ticket_id", t.ID, "run_id", runID, "plan_version", planVersion,
-			"finding_ids", ids, "outcome", "failed")
+			"finding_ids", ids, "outcome", "failed", "error", err)
 		return commit, err
 	}
 	slog.Info("plan unblock turn", "ticket_id", t.ID, "run_id", runID, "plan_version", planVersion,
