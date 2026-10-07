@@ -25,6 +25,7 @@ var eventRules = map[string]eventRule{
 	store.EventKindCheckRerunPassed: checkRerunPassedLine,
 	store.EventKindOwnerEdit:        ownerEditLine,
 	store.EventKindStaleBase:        staleBaseLine,
+	store.EventKindPlanUnblock:      planUnblockLine,
 }
 
 // eventLine renders an event row through its kind's rule. If the kind has
@@ -105,4 +106,18 @@ func staleBaseLine(payload json.RawMessage) (string, error) {
 		return "", fmt.Errorf("decode stale_base: %w", err)
 	}
 	return response.StaleBaseLine(e), nil
+}
+
+// planUnblockLine renders a plan_unblock event (store.EventKindPlanUnblock):
+// the guidance Zing sent back to planning on its own at plan review's loop
+// cap.
+func planUnblockLine(payload json.RawMessage) (string, error) {
+	var e response.PlanUnblockEvent
+	if err := json.Unmarshal(payload, &e); err != nil {
+		return "", fmt.Errorf("decode plan_unblock: %w", err)
+	}
+	if e.Guidance == "" {
+		return "", errors.New("decode plan_unblock: missing guidance")
+	}
+	return "Zing sent this back to planning with: " + e.Guidance, nil
 }
