@@ -10,6 +10,7 @@ package job
 
 import (
 	"bytes"
+	"encoding/json"
 	"log/slog"
 	"strings"
 	"testing"
@@ -637,6 +638,166 @@ func TestRenderDroppedInput(t *testing.T) {
 		}
 		if in != (prompt.NamedInput{}) {
 			t.Errorf("renderDroppedInput(nil) input = %+v, want the zero NamedInput", in)
+		}
+	})
+}
+
+// -----------------------------------------------------------------------
+// Pure: renderAcceptedPerimeterInput
+// -----------------------------------------------------------------------
+
+// acceptedFileEvent builds a FileEventRow for a path decided at the file
+// perimeter, for renderAcceptedPerimeterInput's cases below.
+func acceptedFileEvent(artifactID int64, path, reason string, decision response.PerimeterDecision) store.FileEventRow {
+	return store.FileEventRow{
+		ArtifactID: artifactID,
+		File: response.FileArtifact{
+			FileChange: response.FileChange{Path: path, Action: response.FileActionCreate, Reason: reason},
+			Decision:   &decision,
+		},
+	}
+}
+
+// perimeterQuestionMessage builds a MessageRow carrying a perimeter
+// question payload naming items, for renderAcceptedPerimeterInput's cases
+// below.
+func perimeterQuestionMessage(t *testing.T, id int64, key string, kind response.QuestionKind, refs ...string) store.MessageRow {
+	t.Helper()
+	items := make([]response.Item, len(refs))
+	for i, ref := range refs {
+		items[i] = response.Item{Ref: ref, Text: "Builder: why"}
+	}
+	payload, err := json.Marshal(response.QuestionPayload{
+		Key: key, Kind: kind, State: response.QuestionStateAnswered,
+		Recommended: "Decide each file", Options: []response.Option{}, Items: items,
+	})
+	if err != nil {
+		t.Fatalf("marshal question payload: %v", err)
+	}
+	return store.MessageRow{ID: id, Type: msgTypeQuestion, Payload: payload}
+}
+
+// TestRenderAcceptedPerimeterInput proves the accepted perimeter files
+// input's own rendering (ticket "the fidelity lens knows which out-of-plan
+// files the owner accepted at the perimeter"): only a path whose newest
+// file event is accepted appears, each line carries the perimeter
+// question's key when one named the path, the reason is collapsed and cut
+// at acceptedAtCapTextRunes, and a path with no accepted event, or no
+// events at all, gives ok false.
+func TestRenderAcceptedPerimeterInput(t *testing.T) {
+	t.Parallel()
+
+	t.Run("no events gives ok false", func(t *testing.T) {
+		t.Parallel()
+		in, ok := renderAcceptedPerimeterInput(nil, nil)
+		if ok {
+			t.Errorf("renderAcceptedPerimeterInput(nil, nil) ok = true, want false")
+		}
+		if in != (prompt.NamedInput{}) {
+			t.Errorf("renderAcceptedPerimeterInput(nil, nil) input = %+v, want the zero NamedInput", in)
+		}
+	})
+
+	t.Run("only a rejected path gives ok false", func(t *testing.T) {
+		t.Parallel()
+		events := []store.FileEventRow{acceptedFileEvent(1, "a.go", "why", response.PerimeterReject)}
+		in, ok := renderAcceptedPerimeterInput(events, nil)
+		if ok {
+			t.Errorf("renderAcceptedPerimeterInput ok = true, want false")
+		}
+		if in != (prompt.NamedInput{}) {
+			t.Errorf("renderAcceptedPerimeterInput input = %+v, want the zero NamedInput", in)
+		}
+	})
+
+	t.Run("accepted then rejected for the same path gives ok false", func(t *testing.T) {
+		t.Parallel()
+		events := []store.FileEventRow{
+			acceptedFileEvent(1, "a.go", "why", response.PerimeterAccept),
+			acceptedFileEvent(2, "a.go", "why", response.PerimeterReject),
+		}
+		in, ok := renderAcceptedPerimeterInput(events, nil)
+		if ok {
+			t.Errorf("renderAcceptedPerimeterInput ok = true, want false")
+		}
+		if in != (prompt.NamedInput{}) {
+			t.Errorf("renderAcceptedPerimeterInput input = %+v, want the zero NamedInput", in)
+		}
+	})
+
+	t.Run("accepted with no question naming it", func(t *testing.T) {
+		t.Parallel()
+		events := []store.FileEventRow{acceptedFileEvent(1, "a.go", "why", response.PerimeterAccept)}
+		in, ok := renderAcceptedPerimeterInput(events, nil)
+		if !ok {
+			t.Fatal("renderAcceptedPerimeterInput ok = false, want true")
+		}
+		want := "- a.go accepted: why"
+		if in.Text != want {
+			t.Errorf("renderAcceptedPerimeterInput(...).Text = %q, want %q", in.Text, want)
+		}
+		if in.Label != acceptedPerimeterLabel {
+			t.Errorf("renderAcceptedPerimeterInput(...).Label = %q, want %q", in.Label, acceptedPerimeterLabel)
+		}
+		if !in.Untrusted {
+			t.Error("renderAcceptedPerimeterInput(...).Untrusted = false, want true")
+		}
+	})
+
+	t.Run("two accepted paths sort by path and carry the newest question's key", func(t *testing.T) {
+		t.Parallel()
+		events := []store.FileEventRow{
+			acceptedFileEvent(1, "b.go", "why b", response.PerimeterAccept),
+			acceptedFileEvent(2, "a.go", "why a", response.PerimeterAccept),
+		}
+		messages := []store.MessageRow{
+			perimeterQuestionMessage(t, 1, "Q3", response.QuestionKindPerimeter, "a.go", "b.go"),
+			perimeterQuestionMessage(t, 2, "Q9", response.QuestionKindPerimeter, "b.go"),
+		}
+		in, ok := renderAcceptedPerimeterInput(events, messages)
+		if !ok {
+			t.Fatal("renderAcceptedPerimeterInput ok = false, want true")
+		}
+		want := "- a.go accepted at Q3: why a\n" +
+			"- b.go accepted at Q9: why b"
+		if in.Text != want {
+			t.Errorf("renderAcceptedPerimeterInput(...).Text = %q, want %q", in.Text, want)
+		}
+		if in.Label != acceptedPerimeterLabel {
+			t.Errorf("renderAcceptedPerimeterInput(...).Label = %q, want %q", in.Label, acceptedPerimeterLabel)
+		}
+		if !in.Untrusted {
+			t.Error("renderAcceptedPerimeterInput(...).Untrusted = false, want true")
+		}
+	})
+
+	t.Run("a long reason with an embedded newline is collapsed and cut", func(t *testing.T) {
+		t.Parallel()
+		long := strings.Repeat("x", 150) + "\n" + strings.Repeat("y", 150)
+		events := []store.FileEventRow{acceptedFileEvent(1, "a.go", long, response.PerimeterAccept)}
+		in, ok := renderAcceptedPerimeterInput(events, nil)
+		if !ok {
+			t.Fatal("renderAcceptedPerimeterInput ok = false, want true")
+		}
+		want := "- a.go accepted: " + strings.Repeat("x", 150) + " " + strings.Repeat("y", 49) + "..."
+		if in.Text != want {
+			t.Errorf("renderAcceptedPerimeterInput(...).Text = %q, want %q", in.Text, want)
+		}
+	})
+
+	t.Run("a non-perimeter question naming the path is ignored", func(t *testing.T) {
+		t.Parallel()
+		events := []store.FileEventRow{acceptedFileEvent(1, "a.go", "why", response.PerimeterAccept)}
+		messages := []store.MessageRow{
+			perimeterQuestionMessage(t, 1, "Q1", response.QuestionKindQuestion, "a.go"),
+		}
+		in, ok := renderAcceptedPerimeterInput(events, messages)
+		if !ok {
+			t.Fatal("renderAcceptedPerimeterInput ok = false, want true")
+		}
+		want := "- a.go accepted: why"
+		if in.Text != want {
+			t.Errorf("renderAcceptedPerimeterInput(...).Text = %q, want %q", in.Text, want)
 		}
 	})
 }
