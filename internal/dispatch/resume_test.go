@@ -715,3 +715,45 @@ func TestResume_OwnerStopClearsFlag(t *testing.T) {
 		t.Error("Stopped = true, want false after Resume")
 	}
 }
+
+// TestResume_RaceWithConcurrentParkDoesNotLoseError covers review thread
+// tbfe41af5f64ce5a5: an owner-only stop (stopErr nil) resuming must not
+// wipe a brand-new stopErr that park records in the window between
+// Resume's own status snapshot and its final clear.
+func TestResume_RaceWithConcurrentParkDoesNotLoseError(t *testing.T) {
+	t.Parallel()
+
+	s := newDispatchTestStore(t)
+	b := bus.New()
+	d := newDispatcher(t, s, newFixtureTracker(t), b, fakeRuntime(t), nil, nil, dispatch.Config{MaxParallel: 1, Owner: testOwner})
+
+	if err := s.SetStopped(t.Context(), true); err != nil {
+		t.Fatalf("SetStopped: %v", err)
+	}
+
+	raceErr := errors.New("boom: concurrent flags-read failure")
+	dispatch.SetBeforeResumeClearForTest(d, func() {
+		dispatch.SetStopForTest(d, raceErr)
+	})
+
+	err := d.Resume(t.Context())
+	if refusal, ok := errors.AsType[*dispatch.ResumeRefusal](err); !ok {
+		t.Fatalf("Resume error = %v, want a *ResumeRefusal", err)
+	} else if refusal.Reason == "" {
+		t.Error("ResumeRefusal.Reason is empty")
+	}
+
+	status, statusErr := d.StopStatus(t.Context())
+	if statusErr != nil {
+		t.Fatalf("StopStatus: %v", statusErr)
+	}
+	if !status.Stopped {
+		t.Error("Stopped = false, want true: the race's new stopErr must not be wiped")
+	}
+	if status.Kind != dispatch.StopKindError {
+		t.Errorf("Kind = %q, want %q", status.Kind, dispatch.StopKindError)
+	}
+	if !strings.Contains(status.Cause, "boom: concurrent flags-read failure") {
+		t.Errorf("Cause = %q, want it to contain the race's own error", status.Cause)
+	}
+}

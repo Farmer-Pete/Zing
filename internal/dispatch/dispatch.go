@@ -508,6 +508,16 @@ type Dispatcher struct {
 	// through export_test.go's SetStopErrRecordedForTest, never in
 	// production code.
 	stopErrRecordedForTest func(err error)
+
+	// beforeResumeClearForTest, when non-nil, is called by Resume
+	// synchronously after the store's stopped flag is cleared and right
+	// before Resume's own re-check-and-clear critical section locks d.mu
+	// (review thread tbfe41af5f64ce5a5). It exists only so a test can open
+	// that race window -- call setStop (directly, or through park) from
+	// another goroutine while this goroutine is paused here -- and is set
+	// only through export_test.go's SetBeforeResumeClearForTest, never in
+	// production code.
+	beforeResumeClearForTest func()
 }
 
 // deferredMechanics names the three section 10 dispatcher mechanics this
@@ -995,9 +1005,23 @@ func (r *ResumeRefusal) Error() string {
 // stopped, or while a launched worker's result is still unread -- each with
 // its own exact sentence, wrapped in a *ResumeRefusal. Otherwise it clears
 // the store's own stopped flag first, so a failure there leaves every
-// in-memory field untouched, then clears stop, stopErr, firstErrorReported,
-// stopAlerted, and stoppedAt, and publishes so every open console tab
-// re-renders without its banner.
+// in-memory field untouched.
+//
+// The decision above and the store write both read a stale snapshot: an
+// owner-only stop (status.Kind == StopKindOwner) has stopErr still nil, and
+// passFailed's hasStopErr() guard is false until some call records one, so
+// a ticker-driven flags-read failure can call park and set a brand-new
+// stopErr in the window between that snapshot and this function's own
+// clear (review thread tbfe41af5f64ce5a5). A worker result cannot land in
+// that same window: status.InFlight was already 0, and fill never launches
+// another while d.stop is true, so pending stays 0 until Resume's own
+// clear runs. So the one re-check this function needs, right before it
+// clears, is whether a new stopErr has appeared since the snapshot. It
+// takes that re-check and the clear under the same d.mu hold, so nothing
+// can park in between: if a new stopErr is there, Resume leaves every
+// in-memory field untouched (the store flag stays cleared; StopStatus
+// still reports the new stopErr regardless, since it always wins over the
+// store flag) and refuses instead of silently discarding it.
 func (d *Dispatcher) Resume(ctx context.Context) error {
 	draining, _, err := d.store.Flags(ctx)
 	if err != nil {
@@ -1022,15 +1046,29 @@ func (d *Dispatcher) Resume(ctx context.Context) error {
 		return fmt.Errorf("dispatch: resume: clear stopped flag: %w", err)
 	}
 
+	if d.beforeResumeClearForTest != nil {
+		d.beforeResumeClearForTest()
+	}
+
+	d.mu.Lock()
+	if status.Kind == StopKindOwner && d.stopErr != nil {
+		d.mu.Unlock()
+		return &ResumeRefusal{Reason: "a new error stopped the dispatcher; resume again to clear it"}
+	}
+	if d.pending > 0 {
+		inFlight := d.pending
+		d.mu.Unlock()
+		return &ResumeRefusal{Reason: fmt.Sprintf("%d runs are still finishing; resume once they are done", inFlight)}
+	}
+	d.stop, d.stopErr, d.firstErrorReported, d.stopAlerted, d.stoppedAt = false, nil, false, false, time.Time{}
+	d.mu.Unlock()
+
 	attrs := []any{"kind", status.Kind}
 	if status.HasTicket {
 		attrs = append(attrs, "ticket_id", status.TicketID)
 	}
 	slog.Info("dispatcher resumed from the console", attrs...)
 
-	d.mu.Lock()
-	d.stop, d.stopErr, d.firstErrorReported, d.stopAlerted, d.stoppedAt = false, nil, false, false, time.Time{}
-	d.mu.Unlock()
 	d.bus.Publish()
 	return nil
 }

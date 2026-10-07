@@ -69,3 +69,13 @@ func PendingForTest(d *Dispatcher) int {
 	defer d.mu.Unlock()
 	return d.pending
 }
+
+// SetBeforeResumeClearForTest installs a hook Resume calls synchronously
+// after it clears the store's stopped flag and right before its own
+// re-check-and-clear critical section locks d.mu. It exists only to let a
+// test open that race window -- call setStop (directly, or through park)
+// from another goroutine while this goroutine is paused here -- and must
+// never be called from production code.
+func SetBeforeResumeClearForTest(d *Dispatcher, f func()) {
+	d.beforeResumeClearForTest = f
+}
