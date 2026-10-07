@@ -37,9 +37,11 @@ Work in this order. Each step has a completion criterion.
 
 4. Scenarios. As in a feature plan. The first scenario is the loop. Zing
    runs every check inside the build sandbox, which cannot start another
-   sandbox. Write temporary files under "$TMPDIR", never /tmp. Write only
-   givens and checks an agent inside that sandbox can observe: no live zing
-   serve, no machine outside the sandbox, and none of the owner's own
+   sandbox. Write temporary files under "$TMPDIR", never /tmp. For state a
+   check must start without, write under a fresh directory from mktemp -d,
+   such as d=$(mktemp -d); Codex refuses rm -f and rm -rf. Write only
+   givens and checks an agent inside that sandbox can observe: no live
+   zing serve, no machine outside the sandbox, and none of the owner's own
    config such as ~/.codex, ~/.claude, or the console. The exception is
    kind host. Zing runs a host scenario's check on the owner's machine at
    judging, outside any sandbox, once the owner approves it at the gate.
