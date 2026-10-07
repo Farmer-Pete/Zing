@@ -1017,10 +1017,7 @@ func checkReady(t store.Ticket, resp *response.ReadyResponse, fsys fs.FS) ([]*re
 // proven by a grep for the "--- SKIP:" line in the check (#80, #129 s5); a
 // bare sandbox-exec invocation stays refused even then, since the fix only
 // needs to let a probe's own expected skip through, not every
-// nested-sandbox check. It also refuses a check that reads the root
-// CLAUDE.md or AGENTS.md from the working copy, in every kind, since the
-// judge's checkout holds the default branch's copies of both (#225). It
-// also refuses a then that expects a skip when its
+// nested-sandbox check. It also refuses a then that expects a skip when its
 // check doesn't grep that same line, since a bare go test exits 0 whether
 // or not the test skipped; that second rule still fires on a negated skip
 // then, since only the host-sandbox exemption's affirmative check is
@@ -1028,7 +1025,10 @@ func checkReady(t store.Ticket, resp *response.ReadyResponse, fsys fs.FS) ([]*re
 // outside any sandbox (#137), so it is exempt from the /tmp and
 // nested-sandbox refusals below; it still needs a non-blank check, and it
 // still obeys the expected-skip rule. It also refuses rm -f and rm -rf in
-// every kind, since Codex refuses them (#94).
+// every kind, since Codex refuses them (#94). It also refuses a check that
+// reads the root CLAUDE.md or AGENTS.md from the working copy, in every
+// kind, since the judge's checkout holds the default branch's copies of
+// both (#225).
 func checkScenarioShape(scenarios []response.Scenario) []*response.PathError {
 	var errs []*response.PathError
 	if n := len(scenarios); n < minReadyScenarios || n > maxReadyScenarios {
