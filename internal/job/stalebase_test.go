@@ -117,22 +117,6 @@ func staleBaseRefSHA(t *testing.T, s *store.Store, ticketID int64) string {
 	return strings.TrimSpace(string(out))
 }
 
-// staleBaseApply applies commit directly through the store, skipping
-// ValidateCommit's "the commit must do something" rule: staleBaseFetchRun
-// returns a bare commit, which carries nothing at all once a tick's
-// stale_base note is deduped, and such a commit still needs to clear the
-// claim so the next tick can reclaim it.
-func staleBaseApply(t *testing.T, s *store.Store, commit store.HandlerCommit) {
-	t.Helper()
-	applied, err := s.CommitHandlerResult(t.Context(), commit)
-	if err != nil {
-		t.Fatalf("CommitHandlerResult: %v", err)
-	}
-	if !applied {
-		t.Fatal("CommitHandlerResult: applied = false, want true")
-	}
-}
-
 // TestStaleBaseNoteOnce is this ticket's own done-when test (design demo):
 // an unreachable origin, two reviewing ticks, a building tick, and a
 // second reviewing tick at a new sha, each through withStaleBaseNote
@@ -149,6 +133,10 @@ func TestStaleBaseNoteOnce(t *testing.T) {
 	t.Parallel()
 	s, ticket, _ := reviewTicketReady(t)
 	baselineBuilding := staleBaseEventsFor(t, s, ticket.ID, stateBuilding)
+	baselineSHA := staleBaseRefSHA(t, s, ticket.ID)
+	if len(baselineBuilding) != 1 || baselineBuilding[0].SHA != baselineSHA || baselineBuilding[0].Reason != "no_origin" {
+		t.Fatalf("staleBaseEventsFor(building) before this test = %+v, want exactly one at %s with reason no_origin (the build phase's own origin-less fetch)", baselineBuilding, baselineSHA)
+	}
 	staleBaseBreakOrigin(t, s, ticket.ID)
 	rt := runtime.NewFake(reviewScriptsFS(nil))
 
@@ -164,7 +152,13 @@ func TestStaleBaseNoteOnce(t *testing.T) {
 		// pbApply: ValidateCommit's "must do something" rule is a
 		// dispatcher-facing guard a synthetic run argument like this one
 		// doesn't need to satisfy.
-		staleBaseApply(t, s, commit)
+		applied, err := s.CommitHandlerResult(t.Context(), commit)
+		if err != nil {
+			t.Fatalf("CommitHandlerResult: %v", err)
+		}
+		if !applied {
+			t.Fatal("CommitHandlerResult: applied = false, want true")
+		}
 		ticket = pbGetTicket(t, s, ticket.ID)
 		return commit
 	}
@@ -272,7 +266,9 @@ func TestStaleBaseNoteDroppedOnTickError(t *testing.T) {
 		if _, err := staleBaseFetchRun(ctx, tk, d); err != nil {
 			return store.HandlerCommit{}, err
 		}
-		return store.HandlerCommit{}, boom
+		// A non-zero commit together with the error proves the error
+		// itself, not the zeroCommit guard, is what drops the note.
+		return store.HandlerCommit{TicketID: tk.ID, Owner: d.Owner, Expires: d.Expires}, boom
 	}
 
 	commit, err := withStaleBaseNote(t.Context(), ticket, deps, stateReviewing, run)
@@ -286,6 +282,34 @@ func TestStaleBaseNoteDroppedOnTickError(t *testing.T) {
 	proj := deps.Projects[ticket.ProjectID]
 	if _, ok := proj.Orch.TakeBaseFallback(ticket.ID); ok {
 		t.Error("TakeBaseFallback after an errored tick: ok = true, want false (the fallback was dropped)")
+	}
+}
+
+// TestStaleBaseNoteSkippedOnZeroCommit proves withStaleBaseNote's separate
+// zeroCommit guard: a tick that falls back, returns a nil error, but
+// returns a commit whose TicketID is still its zero value (a dispatcher
+// contract violation, distinct from a tick error) adds no stale_base
+// event either.
+func TestStaleBaseNoteSkippedOnZeroCommit(t *testing.T) {
+	t.Parallel()
+	s, ticket, _ := reviewTicketReady(t)
+	staleBaseBreakOrigin(t, s, ticket.ID)
+	rt := runtime.NewFake(reviewScriptsFS(nil))
+	deps := pbClaim(t, s, rt, ticket.ID)
+
+	run := func(ctx context.Context, tk store.Ticket, d Deps) (store.HandlerCommit, error) {
+		if _, err := staleBaseFetchRun(ctx, tk, d); err != nil {
+			return store.HandlerCommit{}, err
+		}
+		return store.HandlerCommit{}, nil
+	}
+
+	commit, err := withStaleBaseNote(t.Context(), ticket, deps, stateReviewing, run)
+	if err != nil {
+		t.Fatalf("withStaleBaseNote: %v", err)
+	}
+	if kept := withoutStaleBase(commit.Messages); len(kept) != len(commit.Messages) {
+		t.Errorf("commit.Messages = %+v, want no stale_base message", commit.Messages)
 	}
 }
 
@@ -413,6 +437,7 @@ func TestStaleBaseSkip(t *testing.T) {
 		{"empty branch", orchestrator.BaseFallback{Branch: "", SHA: sha40, Reason: "no_origin"}, nil, stateReviewing, staleBasePayloadInvalid},
 		{"256 rune branch", orchestrator.BaseFallback{Branch: strings.Repeat("x", 256), SHA: sha40, Reason: "no_origin"}, nil, stateReviewing, staleBasePayloadInvalid},
 		{"255 rune branch", orchestrator.BaseFallback{Branch: strings.Repeat("x", 255), SHA: sha40, Reason: "no_origin"}, nil, stateReviewing, ""},
+		{"255 multibyte rune branch", orchestrator.BaseFallback{Branch: strings.Repeat("é", 255), SHA: sha40, Reason: "no_origin"}, nil, stateReviewing, ""},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
