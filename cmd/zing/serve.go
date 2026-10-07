@@ -115,7 +115,11 @@ func run(args []string) error {
 		return err
 	}
 
-	return serve(ctx, cfgPath, dbPath, seedDemo)
+	su := newSelfUpgrade()
+	if err := serve(ctx, cfgPath, dbPath, seedDemo, su); err != nil {
+		return err
+	}
+	return restartAfterServe(ctx, su.next, os.Args, os.Environ(), syscall.Exec)
 }
 
 // serve starts the store, the dispatcher, and the console, and runs until
@@ -127,7 +131,13 @@ func run(args []string) error {
 // visible before the console's first request; false leaves the store
 // exactly as a normal serve always has, since SeedDemo must never run
 // unasked.
-func serve(ctx context.Context, cfgPath, dbPath string, seedDemo bool) error {
+func serve(ctx context.Context, cfgPath, dbPath string, seedDemo bool, su *selfUpgrade) error {
+	// Wrapped so the upgrader's own stop (cancelServe) ends serve's wait the
+	// same way a signal or an HTTP listener failure does (#109 part 1), and
+	// so every return path below can cancel it defensively with defer.
+	ctx, cancelServe := context.WithCancel(ctx)
+	defer cancelServe()
+
 	cfg, err := config.Load(cfgPath)
 	if err != nil {
 		return err
@@ -323,6 +333,14 @@ func serve(ctx context.Context, cfgPath, dbPath string, seedDemo bool) error {
 		return err
 	}
 
+	// up is nil, and the upgrader disabled, when su is nil (every test that
+	// has not opted in) or no project sets self = true (#109 part 1).
+	up, err := newUpgrader(cfg.Projects, bindings, projects, su, dataDir, st, cancelServe)
+	if err != nil {
+		_ = st.Close()
+		return err
+	}
+
 	// dispCtx is deliberately not derived from ctx's cancellation: the
 	// drain sequence below stops the dispatcher through the store's
 	// draining flag first, and only cancels dispCtx as the timeout
@@ -349,7 +367,7 @@ func serve(ctx context.Context, cfgPath, dbPath string, seedDemo bool) error {
 		"interval_seconds", tune.Value(zdispatch.TuneIntervalSeconds), "interval_seconds_source", tuneSources[zdispatch.TuneIntervalSeconds],
 		"agent_minutes_per_ticket", tune.Value(zdispatch.TuneAgentMinutes), "agent_minutes_per_ticket_source", tuneSources[zdispatch.TuneAgentMinutes])
 
-	d, err := zdispatch.New(st, tr, b, m, job.Registry(), bindings, zdispatch.Config{
+	dcfg := zdispatch.Config{
 		Interval:    tune.Interval,
 		MaxParallel: tune.MaxParallel,
 		Owner:       claimOwner(),
@@ -378,7 +396,14 @@ func serve(ctx context.Context, cfgPath, dbPath string, seedDemo bool) error {
 		// claim owner is dead (design section 6.2, 6.3): serve took that
 		// lock above, so it is the only caller that ever sets this true.
 		ReclaimForeign: true,
-	}, rts)
+	}
+	// Set only for a non-nil *upgrader, never a typed nil, so no typed-nil
+	// job.SelfUpgrader interface value ever reaches the dispatcher (#109
+	// part 1).
+	if up != nil {
+		dcfg.Upgrader = up
+	}
+	d, err := zdispatch.New(st, tr, b, m, job.Registry(), bindings, dcfg, rts)
 	if err != nil {
 		_ = st.Close()
 		return err
@@ -394,6 +419,21 @@ func serve(ctx context.Context, cfgPath, dbPath string, seedDemo bool) error {
 		dispErr = d.Run(dispCtx)
 		close(dispDone)
 	}()
+
+	// upDone closes once up.loop returns; with no upgrader it is closed
+	// already, so the wait below never blocks (#109 part 1). gate is closed
+	// at once here, in part 1: part 2 instead closes it only after
+	// booted_ok.
+	upDone := make(chan struct{})
+	if up != nil {
+		go func() {
+			up.loop(ctx)
+			close(upDone)
+		}()
+		close(up.gate)
+	} else {
+		close(upDone)
+	}
 
 	// The bearer token GET /push/key and POST /push/subscribe check (design
 	// section 6.13): an explicit console.push_token always wins; otherwise
@@ -437,7 +477,26 @@ func serve(ctx context.Context, cfgPath, dbPath string, seedDemo bool) error {
 
 	consumedFromErrCh, dispTriggered, serveErr := waitForShutdownTrigger(ctx, errCh, dispDone, func() error { return dispErr })
 
-	return shutdown(ctx, st, srv, d, errCh, len(listeners), consumedFromErrCh, serveErr, dispTriggered, dispDone, func() error { return dispErr }, cancelDisp)
+	// Every shutdown trigger ends the upgrader before shutdown closes the
+	// store (#109 part 1): cancelServe is a no-op when the trigger was the
+	// upgrader's own stop or a signal, but it ends the loop for the other
+	// two triggers (a listener error, or the dispatcher goroutine ending on
+	// its own), neither of which cancels ctx by itself.
+	cancelServe()
+	<-upDone
+
+	err = shutdown(ctx, st, srv, d, errCh, len(listeners), consumedFromErrCh, serveErr, dispTriggered, dispDone, func() error { return dispErr }, cancelDisp)
+
+	if up != nil {
+		if rt, carry, hasCarry, ok := up.Target(); ok {
+			if cErr := saveCarry(dataDir, carry, hasCarry); cErr != nil {
+				slog.Warn("upgrade: save carry", "error", cErr)
+			}
+			su.next = &rt
+		}
+	}
+
+	return err
 }
 
 // waitForShutdownTrigger blocks until a real shutdown trigger arrives: an

@@ -4,6 +4,7 @@
 package main
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"fmt"
@@ -16,7 +17,10 @@ import (
 	"sync"
 	"time"
 
+	"zing/internal/config"
+	zdispatch "zing/internal/dispatch"
 	"zing/internal/gitbin"
+	"zing/internal/job"
 	"zing/internal/store"
 )
 
@@ -437,4 +441,51 @@ func (g gitGoSteps) Selftest(ctx context.Context, bin string) (version, output s
 	}
 	v := strings.TrimPrefix(strings.TrimSpace(string(versionOut)), "zing ")
 	return v, string(selftestOut), nil
+}
+
+// newUpgrader builds the upgrader for the one project with self = true, or
+// returns nil, nil when there is no upgrader to run: su is nil (every
+// existing test, and a serve that never saw a usable running executable at
+// startup) or no project is self. Two self projects is findSelfProject's own
+// error, returned even when su is nil, so a misconfigured zing.toml is
+// caught regardless. A self project with no matching binding is a startup
+// error too, since the upgrader could not find its own store project id.
+func newUpgrader(projects []config.Project, bindings []zdispatch.Binding, jobProjects map[int64]job.Project,
+	su *selfUpgrade, dataDir string, st *store.Store, stop context.CancelFunc,
+) (*upgrader, error) {
+	idx, ok, err := findSelfProject(projects)
+	if err != nil {
+		return nil, err
+	}
+	if su == nil || !ok {
+		return nil, nil //nolint:nilnil // no upgrader to run is a legitimate result, not an error
+	}
+	p := projects[idx]
+
+	var storeProjectID int64
+	var bound bool
+	for _, b := range bindings {
+		if b.TrackerProject == p.Name {
+			storeProjectID, bound = b.StoreProjectID, true
+			break
+		}
+	}
+	if !bound {
+		return nil, fmt.Errorf("serve: self project %s: no store binding", p.Name)
+	}
+
+	return &upgrader{
+		dataDir: dataDir,
+		exe:     su.exe,
+		running: su.running,
+		store:   st,
+		steps: gitGoSteps{
+			repoGit:       jobProjects[storeProjectID].RepoGit,
+			defaultBranch: cmp.Or(p.DefaultBranch, "main"),
+			tmpRoot:       filepath.Join(dataDir, "tmp"),
+		},
+		wake: make(chan struct{}, 1),
+		gate: make(chan struct{}),
+		stop: stop,
+	}, nil
 }

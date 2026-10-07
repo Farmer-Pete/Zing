@@ -89,7 +89,7 @@ func TestServe_WithoutSeedDemoFlag_DoesNotSeedTheDemoProject(t *testing.T) {
 	defer cancel()
 
 	serveDone := make(chan error, 1)
-	go func() { serveDone <- serve(ctx, cfgPath, dbPath, false) }()
+	go func() { serveDone <- serve(ctx, cfgPath, dbPath, false, nil) }()
 
 	// Wait for the seeded ticket to leave "queued" (proving the store and
 	// dispatcher are both live), asserting on every poll that no "demo"

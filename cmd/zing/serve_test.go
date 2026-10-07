@@ -320,7 +320,7 @@ func TestServe_ClearsStaleDrainingAndStoppedFlagsAtStartup(t *testing.T) {
 	defer cancel()
 
 	serveDone := make(chan error, 1)
-	go func() { serveDone <- serve(ctx, cfgPath, dbPath, false) }()
+	go func() { serveDone <- serve(ctx, cfgPath, dbPath, false, nil) }()
 
 	waitForTicketPastQueued(t, dbPath, serveDone)
 	cancelAndWaitForServe(t, cancel, serveDone)
@@ -370,7 +370,7 @@ func TestServe_ClampsInvalidDispatchConfig(t *testing.T) {
 	defer cancel()
 
 	serveDone := make(chan error, 1)
-	go func() { serveDone <- serve(ctx, cfgPath, dbPath, false) }()
+	go func() { serveDone <- serve(ctx, cfgPath, dbPath, false, nil) }()
 
 	waitForServing(t, fmt.Sprintf("http://127.0.0.1:%d", port), serveDone)
 	cancelAndWaitForServe(t, cancel, serveDone)
@@ -417,7 +417,7 @@ func TestServe_StoredTuningWinsOverZingTOMLAfterRestart(t *testing.T) {
 	defer cancel()
 
 	serveDone := make(chan error, 1)
-	go func() { serveDone <- serve(ctx, cfgPath, dbPath, false) }()
+	go func() { serveDone <- serve(ctx, cfgPath, dbPath, false, nil) }()
 
 	baseURL := fmt.Sprintf("http://%s:%d", loopback, port)
 	waitForServing(t, baseURL, serveDone)
@@ -479,7 +479,7 @@ func TestServe_ErrorsOnEmptyConsoleBind(t *testing.T) {
 		Port: freeLoopbackPort(t), IntervalSeconds: 1, MaxParallel: 1, Bind: nil,
 	})
 
-	err := serve(t.Context(), cfgPath, dbPath, false)
+	err := serve(t.Context(), cfgPath, dbPath, false, nil)
 	if err == nil {
 		t.Fatal("serve returned nil, want an error for an empty console.bind")
 	}
@@ -513,7 +513,7 @@ func TestServe_BindsEveryLiteralAddressAndSkipsAnUnresolvedTailscaleEntry(t *tes
 	defer cancel()
 
 	serveDone := make(chan error, 1)
-	go func() { serveDone <- serve(ctx, cfgPath, dbPath, false) }()
+	go func() { serveDone <- serve(ctx, cfgPath, dbPath, false, nil) }()
 
 	waitForServing(t, fmt.Sprintf("http://127.0.0.1:%d", port), serveDone)
 	cancelAndWaitForServe(t, cancel, serveDone)
@@ -1366,13 +1366,13 @@ func TestServe_SecondServeRefused(t *testing.T) {
 	defer cancel()
 
 	firstDone := make(chan error, 1)
-	go func() { firstDone <- serve(ctx, cfgPath, dbPath, false) }()
+	go func() { firstDone <- serve(ctx, cfgPath, dbPath, false, nil) }()
 
 	waitForServing(t, fmt.Sprintf("http://%s:%d", loopback, port), firstDone)
 
 	secondCtx, secondCancel := context.WithCancel(t.Context())
 	defer secondCancel()
-	err := serve(secondCtx, cfgPath, dbPath, false)
+	err := serve(secondCtx, cfgPath, dbPath, false, nil)
 	if err == nil {
 		t.Fatal("second serve against the same data directory: want an error, got nil")
 	}

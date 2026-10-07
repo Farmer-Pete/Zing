@@ -12,6 +12,9 @@ import (
 	"testing"
 	"time"
 
+	"zing/internal/config"
+	zdispatch "zing/internal/dispatch"
+	"zing/internal/job"
 	"zing/internal/store"
 )
 
@@ -913,4 +916,102 @@ func TestUpgrade_MergeBuildsSelftestsSwapsAndExecs(t *testing.T) {
 	if m.State != markerPending || m.ToSHA != sha || m.TicketID != ticketID {
 		t.Errorf("marker = %+v, want pending, to_sha %s, ticket_id %d", m, sha, ticketID)
 	}
+}
+
+// TestNewUpgrader covers newUpgrader's own rules: nil, nil with no usable
+// self project, findSelfProject's own error even with a nil su, the missing
+// binding error, and the fields it fills in for the one usable case.
+func TestNewUpgrader(t *testing.T) {
+	t.Parallel()
+
+	dataDir := t.TempDir()
+	st, err := store.Open(t.Context(), filepath.Join(dataDir, "zing.db"))
+	if err != nil {
+		t.Fatalf("store.Open: %v", err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+
+	oneSelf := []config.Project{{Name: "zing", Self: true}}
+	bindingFor := func(names ...string) []zdispatch.Binding {
+		bindings := make([]zdispatch.Binding, len(names))
+		for i, name := range names {
+			bindings[i] = zdispatch.Binding{StoreProjectID: int64(i + 1), TrackerProject: name}
+		}
+		return bindings
+	}
+	su := &selfUpgrade{exe: "/data/bin/zing", running: "0123456789ab"}
+
+	t.Run("nil su with one self project", func(t *testing.T) {
+		t.Parallel()
+		up, err := newUpgrader(oneSelf, bindingFor("zing"), nil, nil, dataDir, st, nil)
+		if up != nil || err != nil {
+			t.Fatalf("newUpgrader = %v, %v, want nil, nil", up, err)
+		}
+	})
+
+	t.Run("no self project", func(t *testing.T) {
+		t.Parallel()
+		up, err := newUpgrader([]config.Project{{Name: "zing"}}, bindingFor("zing"), nil, su, dataDir, st, nil)
+		if up != nil || err != nil {
+			t.Fatalf("newUpgrader = %v, %v, want nil, nil", up, err)
+		}
+	})
+
+	t.Run("two self projects", func(t *testing.T) {
+		t.Parallel()
+		two := []config.Project{{Name: "a", Self: true}, {Name: "b", Self: true}}
+		for _, testSu := range []*selfUpgrade{nil, su} {
+			up, err := newUpgrader(two, bindingFor("a", "b"), nil, testSu, dataDir, st, nil)
+			if up != nil || err == nil || err.Error() != "zing.toml: only one project may set self = true" {
+				t.Fatalf("newUpgrader(su=%v) = %v, %v, want nil, the only-one-self error", testSu, up, err)
+			}
+		}
+	})
+
+	t.Run("missing binding", func(t *testing.T) {
+		t.Parallel()
+		up, err := newUpgrader(oneSelf, nil, nil, su, dataDir, st, nil)
+		if up != nil || err == nil || err.Error() != "serve: self project zing: no store binding" {
+			t.Fatalf("newUpgrader = %v, %v, want nil, the no-binding error", up, err)
+		}
+	})
+
+	t.Run("one self project", func(t *testing.T) {
+		t.Parallel()
+		jobProjects := map[int64]job.Project{1: {RepoGit: "/data/repos/zing/.git"}}
+		var stopped bool
+		stop := func() { stopped = true }
+
+		up, err := newUpgrader(oneSelf, bindingFor("zing"), jobProjects, su, dataDir, st, stop)
+		if err != nil {
+			t.Fatalf("newUpgrader: %v", err)
+		}
+		if up == nil {
+			t.Fatal("newUpgrader returned nil upgrader")
+		}
+		if up.exe != su.exe || up.running != su.running {
+			t.Errorf("exe/running = %q/%q, want %q/%q", up.exe, up.running, su.exe, su.running)
+		}
+		if up.dataDir != dataDir || up.store != st {
+			t.Errorf("dataDir/store not copied through")
+		}
+		steps, ok := up.steps.(gitGoSteps)
+		if !ok {
+			t.Fatalf("steps = %T, want gitGoSteps", up.steps)
+		}
+		wantSteps := gitGoSteps{repoGit: "/data/repos/zing/.git", defaultBranch: "main", tmpRoot: filepath.Join(dataDir, "tmp")}
+		if steps != wantSteps {
+			t.Errorf("steps = %+v, want %+v", steps, wantSteps)
+		}
+		if cap(up.wake) != 1 {
+			t.Errorf("wake capacity = %d, want 1", cap(up.wake))
+		}
+		if up.stop == nil {
+			t.Fatal("stop not set")
+		}
+		up.stop()
+		if !stopped {
+			t.Error("up.stop() did not call the given stop func")
+		}
+	})
 }
