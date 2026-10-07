@@ -17,7 +17,9 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	goruntime "runtime"
 	"strings"
+	"sync"
 	"testing"
 
 	"zing/internal/gitfixture"
@@ -94,13 +96,82 @@ func TestStageSnapshotCopiesAreIndependent(t *testing.T) {
 	}
 }
 
+// TestStageFailureNamesStageAndTest checks stageFailure's two outcomes: no
+// error when the stage never failed, and an error naming both the stage
+// and the test whose build failed when it did.
+func TestStageFailureNamesStageAndTest(t *testing.T) {
+	tests := []struct {
+		name     string
+		failedBy string
+		wantErr  bool
+	}{
+		{name: "judging", failedBy: "", wantErr: false},
+		{name: "judging", failedBy: "TestX", wantErr: true},
+	}
+	for _, tt := range tests {
+		err := stageFailure(tt.name, tt.failedBy)
+		if !tt.wantErr {
+			if err != nil {
+				t.Fatalf("stageFailure(%q, %q) = %v, want nil", tt.name, tt.failedBy, err)
+			}
+			continue
+		}
+		if err == nil {
+			t.Fatalf("stageFailure(%q, %q) = nil, want error", tt.name, tt.failedBy)
+		}
+		if !strings.Contains(err.Error(), "stage "+tt.name) || !strings.Contains(err.Error(), tt.failedBy) {
+			t.Fatalf("stageFailure(%q, %q) = %q, want it to contain %q and %q",
+				tt.name, tt.failedBy, err.Error(), "stage "+tt.name, tt.failedBy)
+		}
+	}
+}
+
+// TestUseStageRecordsFailedBuild checks that a builder that Goexits (the
+// same way t.Fatal does) leaves failedBy set and dir empty, that
+// stageFailure then reports it, and that once.Do never runs its func
+// again.
+func TestUseStageRecordsFailedBuild(t *testing.T) {
+	st := &stageSnap{name: "failing"}
+	build := func(*testing.T) stageBuild {
+		goruntime.Goexit()
+		return stageBuild{} // unreached
+	}
+
+	var wg sync.WaitGroup
+	wg.Go(func() {
+		st.once.Do(func() { runStageBuild(t, st, build) })
+	})
+	wg.Wait()
+
+	if st.failedBy != t.Name() {
+		t.Fatalf("failedBy = %q, want %q", st.failedBy, t.Name())
+	}
+	if st.dir != "" {
+		t.Fatalf("dir = %q, want empty", st.dir)
+	}
+
+	err := stageFailure(st.name, st.failedBy)
+	if err == nil || !strings.Contains(err.Error(), "stage failing") || !strings.Contains(err.Error(), t.Name()) {
+		t.Fatalf("stageFailure = %v, want error containing %q and %q", err, "stage failing", t.Name())
+	}
+
+	calls := 0
+	st.once.Do(func() { calls++ })
+	if calls != 0 {
+		t.Fatalf("once.Do ran its func again: calls = %d", calls)
+	}
+}
+
 // stageSnap is one pipeline stage's process-lifetime snapshot. It is
 // always a package-level pointer; its fields are read and written only by
-// useStage, snapshotStage, and copyStage. useStage (task 5) adds the
-// sync.Once and the failedBy bookkeeping that make the build run at most
-// once per process; snapshotStage and copyStage need neither.
+// useStage, runStageBuild, snapshotStage, and copyStage. once makes the
+// build run at most once per process; failedBy names the test whose build
+// is running or failed, read by stageFailure after once.Do returns.
 type stageSnap struct {
 	name string
+
+	once     sync.Once
+	failedBy string // t.Name() of the test whose build is running or failed, else ""
 
 	dir       string // SNAP, from os.MkdirTemp; empty until the build succeeds
 	ticketID  int64
@@ -255,4 +326,29 @@ func rewriteLocalPath(ctx context.Context, dbPath, oldPath, newPath string) erro
 		return fmt.Errorf("update local_path: affected %d rows, want 1", rows)
 	}
 	return nil
+}
+
+// runStageBuild is useStage's once.Do body. It records t as the stage's
+// builder before building, so a builder that Goexits (t.Fatal) leaves
+// failedBy naming it, and clears the record only once the snapshot is on
+// disk.
+func runStageBuild(t *testing.T, st *stageSnap, build func(*testing.T) stageBuild) {
+	t.Helper()
+	st.failedBy = t.Name()
+	b := build(t)
+	if err := snapshotStage(t.Context(), st, b); err != nil {
+		t.Fatalf("stage %s: snapshot: %v", st.name, err)
+	}
+	st.failedBy = ""
+}
+
+// stageFailure reports whether stage name's once-per-process build
+// failed. failedBy is empty on success; otherwise it names the test whose
+// build failed, and is echoed in the returned error so a later caller's
+// failure points back at the test to look at.
+func stageFailure(name, failedBy string) error {
+	if failedBy == "" {
+		return nil
+	}
+	return fmt.Errorf("stage %s: the once-per-process build failed in %s; see that test's output", name, failedBy)
 }
