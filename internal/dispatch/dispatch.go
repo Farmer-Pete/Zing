@@ -707,6 +707,66 @@ func (d *Dispatcher) StopStatus(ctx context.Context) (StopStatus, error) {
 	return StopStatus{Stopped: true, Kind: StopKindOwner, InFlight: inFlight}, nil
 }
 
+// ResumeRefusal is Resume's own error when it declines to clear a stop
+// (design section "shape" rules): Reason is one exact sentence, the console
+// route's 409 body verbatim, and the banner's own disabled-button text when
+// it names an in-flight count.
+type ResumeRefusal struct {
+	Reason string
+}
+
+// Error returns Reason, so a *ResumeRefusal reads as its own sentence
+// wherever an error is logged or joined.
+func (r *ResumeRefusal) Error() string {
+	return r.Reason
+}
+
+// Resume restarts dispatching after a stop (design section "shape" rules),
+// the console's one entry point for doing so (CLAUDE.md: owner actions get
+// no CLI verb). It refuses, in order, while draining, when nothing is
+// stopped, or while a launched worker's result is still unread -- each with
+// its own exact sentence, wrapped in a *ResumeRefusal. Otherwise it clears
+// the store's own stopped flag first, so a failure there leaves every
+// in-memory field untouched, then clears stop, stopErr, firstErrorReported,
+// stopAlerted, and stoppedAt, and publishes so every open console tab
+// re-renders without its banner.
+func (d *Dispatcher) Resume(ctx context.Context) error {
+	draining, _, err := d.store.Flags(ctx)
+	if err != nil {
+		return fmt.Errorf("dispatch: resume: read flags: %w", err)
+	}
+	if draining {
+		return &ResumeRefusal{Reason: "zing is shutting down; there is nothing to resume"}
+	}
+
+	status, err := d.StopStatus(ctx)
+	if err != nil {
+		return fmt.Errorf("dispatch: resume: %w", err)
+	}
+	if !status.Stopped {
+		return &ResumeRefusal{Reason: "the dispatcher is not stopped"}
+	}
+	if status.InFlight > 0 {
+		return &ResumeRefusal{Reason: fmt.Sprintf("%d runs are still finishing; resume once they are done", status.InFlight)}
+	}
+
+	if err := d.store.SetStopped(ctx, false); err != nil {
+		return fmt.Errorf("dispatch: resume: clear stopped flag: %w", err)
+	}
+
+	attrs := []any{"kind", status.Kind}
+	if status.HasTicket {
+		attrs = append(attrs, "ticket_id", status.TicketID)
+	}
+	slog.Info("dispatcher resumed from the console", attrs...)
+
+	d.mu.Lock()
+	d.stop, d.stopErr, d.firstErrorReported, d.stopAlerted, d.stoppedAt = false, nil, false, false, time.Time{}
+	d.mu.Unlock()
+	d.bus.Publish()
+	return nil
+}
+
 // reportFirstError logs alert 1 (design section 4.6) at most once per
 // Dispatcher lifetime, naming d.stopErr -- the error saved by the first
 // setStop call that carried one -- never whichever result happened to
