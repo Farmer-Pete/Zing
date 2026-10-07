@@ -30,7 +30,7 @@ shards=$1
 timeout=$2
 pkg=zing/internal/job
 
-tmp=$(mktemp -d)
+tmp=$(mktemp -d "${TMPDIR:-/tmp}/test-race-XXXXXX")
 trap 'rm -rf "$tmp"' EXIT
 
 # Every top-level test, example, and fuzz target `go test` runs by default.

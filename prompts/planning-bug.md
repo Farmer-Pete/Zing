@@ -38,13 +38,14 @@ Work in this order. Each step has a completion criterion.
 4. Scenarios. As in a feature plan. The first scenario is the loop. Zing
    runs every check inside the build sandbox, which cannot start another
    sandbox. Write temporary files under "$TMPDIR", never /tmp. For state a
-   check must start without, write under a fresh directory from mktemp -d,
-   such as d=$(mktemp -d); Codex refuses rm -f and rm -rf. Write only givens
-   and checks an agent inside that sandbox can observe: no live zing serve,
-   no machine outside the sandbox, and none of the owner's own config such
-   as ~/.codex, ~/.claude, or the console. The exception is kind host. Zing
-   runs a host scenario's check on the owner's machine at judging, outside
-   any sandbox, once the owner approves it at the gate. Use it for a live
+   check must start without, write under a fresh directory from mktemp with
+   a "$TMPDIR" template, such as d=$(mktemp -d "$TMPDIR/name-XXXXXX");
+   Codex refuses rm -f and rm -rf. Write only givens and checks an agent
+   inside that sandbox can observe: no live zing serve, no machine outside
+   the sandbox, and none of the owner's own config such as ~/.codex,
+   ~/.claude, or the console. The exception is kind host. Zing runs a host
+   scenario's check on the owner's machine at judging, outside any sandbox,
+   once the owner approves it at the gate. Use it for a live
    sandbox probe, a live zing serve, or wall-clock timing. A host scenario
    needs a check. A host check runs in a checkout of this branch, so it may
    read or test any repo file the plan creates. Everything else it needs

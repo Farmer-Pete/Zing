@@ -11,14 +11,14 @@ import (
 // own minimum count of 2; its check never trips any rule.
 var cleanScenario = response.Scenario{
 	ID: "s2", Kind: response.ScenarioKindBehavior, Then: "builds cleanly",
-	Check: `d=$(mktemp -d) && go test ./x`,
+	Check: `d=$(mktemp -d "$TMPDIR/s2-XXXXXX") && go test ./x`,
 }
 
 // TestCheckScenarioShape_RejectsRmForce is a regression test for #94: a
 // sealed check that cleared its state with rm -f or rm -rf made the Codex
 // judge refuse the command ("rm -f style commands are not permitted. Use a
 // safer approach"), and the escalation gave no cause. Each offending check
-// is refused at planning time, pointing at mktemp -d.
+// is refused at planning time, pointing at a $TMPDIR mktemp.
 func TestCheckScenarioShape_RejectsRmForce(t *testing.T) {
 	t.Parallel()
 	cases := []struct {
@@ -56,12 +56,12 @@ func TestCheckScenarioShape_RejectsRmForce(t *testing.T) {
 
 // TestCheckScenarioShape_AllowsNonForceRm checks that the rm -f rule only
 // matches rm used as a command word with a flag cluster holding f: a
-// mktemp -d replacement, a similarly named command, a quoted occurrence, or
+// $TMPDIR mktemp replacement, a similarly named command, a quoted occurrence, or
 // an rm without -f all pass.
 func TestCheckScenarioShape_AllowsNonForceRm(t *testing.T) {
 	t.Parallel()
 	checks := []string{
-		`d=$(mktemp -d) && go test ./x`,
+		`d=$(mktemp -d "$TMPDIR/s2-XXXXXX") && go test ./x`,
 		`form -f x`,
 		`grep -q 'rm -f' notes.txt`,
 		`rm -r d`,

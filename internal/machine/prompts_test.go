@@ -28,12 +28,12 @@ func TestPrompts_MatchThePinnedDesignText(t *testing.T) {
 		{
 			name:   "planning-feature",
 			path:   planningFeaturePromptPath,
-			sha256: "b821570489aa04eda8a7e01c49c8f8758b8334a8beeddc00d45dd7e041714b23",
+			sha256: "259ce11b475ad2c0e990b04870f6b33e277c4b9a4c7015e4610058474e58fb6a",
 		},
 		{
 			name:   "planning-bug",
 			path:   planningBugPromptPath,
-			sha256: "7d5b0d6ac019d904d65fd1f81cb4a759a283f11fefb0b9d42d4b7b446fa7172c",
+			sha256: "c98852678a61a76946fe12d9c4491c01e052cbcee114340c70bcd70cd34704ff",
 		},
 		{
 			name:   "planreview",
@@ -404,13 +404,15 @@ func TestJudgePromptRunsChecksAsWritten(t *testing.T) {
 // cannot start another sandbox, so a given or check that needs a live
 // serve, a machine outside the sandbox, or the owner's own config is
 // unobservable there. It also tells the planner to clear a check's state
-// under a fresh mktemp -d directory rather than rm -f or rm -rf, which
-// Codex's command policy refuses (#94).
+// under a fresh mktemp -d directory with a "$TMPDIR" template, rather
+// than rm -f or rm -rf, which Codex's command policy refuses (#94), and
+// rather than a bare mktemp, which on macOS ignores TMPDIR (#245, #244).
 const sandboxChecksSentence = "Zing runs every check inside the build sandbox, " +
 	"which cannot start another sandbox. " +
 	`Write temporary files under "$TMPDIR", never /tmp. ` +
 	"For state a check must start without, write under a fresh directory " +
-	"from mktemp -d, such as d=$(mktemp -d); Codex refuses rm -f and rm -rf. " +
+	`from mktemp with a "$TMPDIR" template, such as ` +
+	`d=$(mktemp -d "$TMPDIR/name-XXXXXX"); Codex refuses rm -f and rm -rf. ` +
 	"Write only givens and checks an agent inside that sandbox can observe: " +
 	"no live zing serve, no machine outside the sandbox, and none of the " +
 	"owner's own config such as ~/.codex, ~/.claude, or the console."
