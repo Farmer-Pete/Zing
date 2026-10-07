@@ -1033,20 +1033,25 @@ const (
 	updateMarkerFixRepliesPostedPrefix         = "fix replies posted "
 )
 
-// updateMarkerFixRequestedPrefix and updateMarkerFixLandedPrefix mirror
-// internal/job/fix.go's own fixRequestedPrefix and fixLandedPrefix
-// literals: "fix requested <kind> after run <R>" (fixRequestMessage) opens
-// a fix unit -- kind one of findings, failure, ci_log, or threads
-// (FixKind.Values) -- and "fix landed <mid> sha <sha>" (building.go's land
-// and its adopted-commit twin) closes it once the unit's own commit lands.
-// Neither had a console case until this task: design/threading-design.md's
-// review found them unrecognized (a loose card today), and cmd/zing's own
-// e2e second guard (verifySelftestMarkersAllRecognized) failed on the first
-// real "fix requested failure after run <R>" marker the selftest pipeline
-// wrote until these two cases were added.
+// updateMarkerFixRequestedPrefix, updateMarkerFixLandedPrefix, and
+// updateMarkerFixDroppedPrefix mirror internal/job/fix.go's own
+// fixRequestedPrefix, fixLandedPrefix, and fixDroppedPrefix literals:
+// "fix requested <kind> after run <R>" (fixRequestMessage) opens a fix
+// unit -- kind one of findings, failure, ci_log, or threads
+// (FixKind.Values) -- "fix landed <mid> sha <sha>" (building.go's land
+// and its adopted-commit twin) closes it once the unit's own commit
+// lands, and "fix dropped <mid>" (rejudgeWithoutFix, ticket #80) closes
+// it when the owner picks "Judge again without a fix" instead.
+// design/threading-design.md's review found the first two unrecognized
+// (a loose card today), and cmd/zing's own e2e second guard
+// (verifySelftestMarkersAllRecognized) failed on the first real "fix
+// requested failure after run <R>" marker the selftest pipeline wrote
+// until those two cases were added. Ticket #108 added the "fix dropped"
+// case that follows the same pattern.
 const (
 	updateMarkerFixRequestedPrefix = "fix requested "
 	updateMarkerFixLandedPrefix    = "fix landed "
+	updateMarkerFixDroppedPrefix   = "fix dropped "
 )
 
 // draftMessageState mirrors store's own unexported draft-state literal
@@ -2974,18 +2979,22 @@ func respondBatchStartedLine(rest string, hasRest bool) (string, bool) {
 }
 
 // isFixMarker reports whether body carries job/fix.go's own "fix requested "
-// or "fix landed " prefix: fixUpdateLine's own exact-shape parse runs
-// behind, the same two-step prefix-then-parse pattern isReviewMarker uses.
+// or "fix landed " prefix, or judging.go's "fix dropped " prefix:
+// fixUpdateLine's own exact-shape parse runs behind, the same two-step
+// prefix-then-parse pattern isReviewMarker uses.
 func isFixMarker(body string) bool {
-	return strings.HasPrefix(body, updateMarkerFixRequestedPrefix) || strings.HasPrefix(body, updateMarkerFixLandedPrefix)
+	return strings.HasPrefix(body, updateMarkerFixRequestedPrefix) ||
+		strings.HasPrefix(body, updateMarkerFixLandedPrefix) ||
+		strings.HasPrefix(body, updateMarkerFixDroppedPrefix)
 }
 
-// fixUpdateLine renders one of job/fix.go's own two marker shapes as an
+// fixUpdateLine renders one of job/fix.go's own three marker shapes as an
 // owner-facing sentence: "fix requested <kind> after run <R>" (opening a
-// fix unit, its own text kept below the header) and "fix landed <mid> sha
-// <sha>" (closing one). ok is false when body's prefix matched but the rest
-// of its shape did not, the same defensive fallback reviewUpdateLine's own
-// default case uses.
+// fix unit, its own text kept below the header), "fix landed <mid> sha
+// <sha>" (closing one with a commit), and "fix dropped <mid>" (closing one
+// with no commit, judging again instead). ok is false when body's prefix
+// matched but the rest of its shape did not, the same defensive fallback
+// reviewUpdateLine's own default case uses.
 func fixUpdateLine(body string) (string, bool) {
 	first, rest, hasRest := strings.Cut(body, "\n")
 	switch {
@@ -2993,6 +3002,8 @@ func fixUpdateLine(body string) (string, bool) {
 		return fixRequestedLine(first, rest, hasRest)
 	case strings.HasPrefix(first, updateMarkerFixLandedPrefix):
 		return fixLandedLine(first)
+	case strings.HasPrefix(first, updateMarkerFixDroppedPrefix):
+		return fixDroppedLine(first)
 	default:
 		return "", false
 	}
@@ -3028,6 +3039,23 @@ func fixLandedLine(first string) (string, bool) {
 		return "", false
 	}
 	return "Fix landed at " + sha7(fields[2]) + ".", true
+}
+
+// fixDroppedLine renders "fix dropped <mid>" (judging.go's
+// rejudgeWithoutFix, ticket #80): the request's own message id plays no
+// part in the sentence, the same elision fixLandedLine uses. mid must
+// parse as an integer, the same check job/fix.go's
+// parseFixDroppedMessageID makes, so the console names a marker as a
+// dropped fix only when the job would also count it as one.
+func fixDroppedLine(first string) (string, bool) {
+	fields := strings.Fields(strings.TrimPrefix(first, updateMarkerFixDroppedPrefix))
+	if len(fields) != 1 {
+		return "", false
+	}
+	if _, err := strconv.ParseInt(fields[0], 10, 64); err != nil {
+		return "", false
+	}
+	return "Fix dropped; judging again.", true
 }
 
 // claimErrorsPendingLine renders a "claim errors pending run <rid>" body's
