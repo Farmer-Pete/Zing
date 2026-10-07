@@ -6,6 +6,7 @@ package job
 // refreshTicket and planningHandler.Run through the real store.
 
 import (
+	"errors"
 	"testing"
 
 	"zing/internal/store"
@@ -129,6 +130,64 @@ func TestRefreshDecision(t *testing.T) {
 		want := ticketRefreshedMarker + "\nowner comments changed, 0 now"
 		if msg != want {
 			t.Errorf("refreshDecision msg = %q, want %q", msg, want)
+		}
+	})
+}
+
+// TestMarkRefreshDelivered proves markRefreshDelivered's table of cases
+// (#98, design "markRefreshDelivered"): only a live marker, a nil err, and
+// a reserved run (commit.Runs non-empty) earns the delivered message.
+func TestMarkRefreshDelivered(t *testing.T) {
+	t.Parallel()
+
+	runs := []store.Run{{ID: 1}}
+
+	t.Run("live_with_run_appends_delivered", func(t *testing.T) {
+		t.Parallel()
+		commit := store.HandlerCommit{TicketID: 7, Runs: runs}
+		got, err := markRefreshDelivered(commit, nil, true, 7)
+		if err != nil {
+			t.Fatalf("markRefreshDelivered err = %v, want nil", err)
+		}
+		if len(got.Messages) != 1 || got.Messages[0].Body != ticketRefreshDeliveredMarker || got.Messages[0].TicketID != 7 {
+			t.Errorf("got.Messages = %+v, want one %q message for ticket 7", got.Messages, ticketRefreshDeliveredMarker)
+		}
+	})
+
+	t.Run("not_live_appends_nothing", func(t *testing.T) {
+		t.Parallel()
+		commit := store.HandlerCommit{TicketID: 7, Runs: runs}
+		got, err := markRefreshDelivered(commit, nil, false, 7)
+		if err != nil {
+			t.Fatalf("markRefreshDelivered err = %v, want nil", err)
+		}
+		if len(got.Messages) != 0 {
+			t.Errorf("got.Messages = %+v, want none", got.Messages)
+		}
+	})
+
+	t.Run("live_with_error_appends_nothing_and_keeps_error", func(t *testing.T) {
+		t.Parallel()
+		wantErr := errors.New("boom")
+		commit := store.HandlerCommit{TicketID: 7, Runs: runs}
+		got, err := markRefreshDelivered(commit, wantErr, true, 7)
+		if !errors.Is(err, wantErr) {
+			t.Errorf("markRefreshDelivered err = %v, want %v", err, wantErr)
+		}
+		if len(got.Messages) != 0 {
+			t.Errorf("got.Messages = %+v, want none", got.Messages)
+		}
+	})
+
+	t.Run("live_with_no_runs_appends_nothing", func(t *testing.T) {
+		t.Parallel()
+		commit := store.HandlerCommit{TicketID: 7}
+		got, err := markRefreshDelivered(commit, nil, true, 7)
+		if err != nil {
+			t.Fatalf("markRefreshDelivered err = %v, want nil", err)
+		}
+		if len(got.Messages) != 0 {
+			t.Errorf("got.Messages = %+v, want none", got.Messages)
 		}
 	})
 }

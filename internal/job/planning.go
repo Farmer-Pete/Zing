@@ -345,6 +345,17 @@ func (h planningHandler) Run(ctx context.Context, t store.Ticket, d Deps) (store
 			return store.HandlerCommit{}, ErrNoAction
 		}
 
+		// A refresh the planner has not seen goes to the planner before any
+		// review of a plan written from the old text. Owner input, so the
+		// resume is free, like an owner-delivery resume.
+		live, liveErr := refreshLive(ctx, d, t.ID)
+		if liveErr != nil {
+			return store.HandlerCommit{}, liveErr
+		}
+		if live {
+			return runPlanningResume(ctx, t, d, sess, nil, nil, 0, false)
+		}
+
 		if commit, handled, resumeErr := maybeReviewTick(ctx, t, d); handled {
 			return commit, resumeErr
 		}
@@ -562,12 +573,18 @@ func runPlanningFirst(ctx context.Context, t store.Ticket, d Deps, extra []promp
 	in.Schemas = schemas
 	assembled := prompt.Assemble(in)
 
+	live, err := refreshLive(ctx, d, t.ID)
+	if err != nil {
+		return store.HandlerCommit{}, err
+	}
+
 	su := store.SessionUpsert{Job: jobPlanningName, Runtime: jobCfg.Runtime}
 	req := runtime.RunRequest{Job: response.JobPlanning, Prompt: assembled}
-	return runAndRoute(ctx, d, t, jobPlanningName, su, req, 0, freshSessionRecord, resolveIDs, response.EscalationOriginPlanningFirst,
+	commit, err := runAndRoute(ctx, d, t, jobPlanningName, su, req, 0, freshSessionRecord, resolveIDs, response.EscalationOriginPlanningFirst,
 		func(rr runResult) (store.HandlerCommit, error) {
 			return planningSuccessCommit(ctx, t, d, rr, freshSessionRecord(rr), resolveIDs, response.EscalationOriginPlanningFirst, conv, throughBatch)
 		}, nil, throughBatch)
+	return markRefreshDelivered(commit, err, live, t.ID)
 }
 
 // runPlanningResume is plan section 6.4 (and 6.3's resume-input shapes):
@@ -620,6 +637,18 @@ func runPlanningResume(ctx context.Context, t store.Ticket, d Deps, sess store.S
 	}
 	convExtra, throughBatch := conversationResumeInput(conv)
 
+	live, err := refreshLive(ctx, d, t.ID)
+	if err != nil {
+		return store.HandlerCommit{}, err
+	}
+	if live {
+		spec, specErr := specFor(ctx, d, t)
+		if specErr != nil {
+			return store.HandlerCommit{}, fmt.Errorf("job: planning: resume: %w", specErr)
+		}
+		extra = append(append([]prompt.NamedInput{}, extra...), prompt.NamedInput{Label: "ticket", Text: spec, Untrusted: true})
+	}
+
 	in := prompt.ForPlanningResume(append(append([]prompt.NamedInput{}, extra...), convExtra...))
 	in.Schemas = schemas
 	assembled := prompt.Assemble(in)
@@ -627,10 +656,11 @@ func runPlanningResume(ctx context.Context, t store.Ticket, d Deps, sess store.S
 	su := store.SessionUpsert{ID: &sess.ID, BumpResumes: charge}
 	req := runtime.RunRequest{Job: response.JobPlanning, SessionID: *sess.ExternalID, Prompt: assembled}
 	sessionRecord := func(rr runResult) *store.SessionUpsert { return resumeSessionRecord(sess.ID, rr) }
-	return runAndRoute(ctx, d, t, jobPlanningName, su, req, priorInvalid, sessionRecord, resolveIDs, response.EscalationOriginPlanningResume,
+	commit, err := runAndRoute(ctx, d, t, jobPlanningName, su, req, priorInvalid, sessionRecord, resolveIDs, response.EscalationOriginPlanningResume,
 		func(rr runResult) (store.HandlerCommit, error) {
 			return planningSuccessCommit(ctx, t, d, rr, sessionRecord(rr), resolveIDs, response.EscalationOriginPlanningResume, conv, throughBatch)
 		}, nil, throughBatch)
+	return markRefreshDelivered(commit, err, live, t.ID)
 }
 
 // planningInterruptedFallback is design D5's own catch-all (section 7.4's

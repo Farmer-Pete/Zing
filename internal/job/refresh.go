@@ -103,3 +103,24 @@ func refreshTicket(ctx context.Context, t store.Ticket, d Deps) (store.HandlerCo
 	slog.Info("ticket refreshed from tracker", "ticket_id", t.ID, "ref", fresh.TrackerRef, "body_changed", upd.Body != nil, "owner_comments", it.CommentCount)
 	return c, true
 }
+
+// refreshLive reports whether a refresh message has no delivered message
+// after it (design "the refresh marker's states"): the planner has not yet
+// seen the text a refresh commit stored.
+func refreshLive(ctx context.Context, d Deps, ticketID int64) (bool, error) {
+	_, live, err := d.Store.LiveMarker(ctx, ticketID, ticketRefreshedMarker, ticketRefreshDeliveredMarker)
+	if err != nil {
+		return false, fmt.Errorf("job: refresh marker: %w", err)
+	}
+	return live, nil
+}
+
+// markRefreshDelivered appends the delivered message to commit when live,
+// err is nil, and the run reserved a row (commit.Runs non-empty). In every
+// other case it returns commit and err unchanged.
+func markRefreshDelivered(commit store.HandlerCommit, err error, live bool, ticketID int64) (store.HandlerCommit, error) {
+	if live && err == nil && len(commit.Runs) > 0 {
+		commit.Messages = append(commit.Messages, store.Message{TicketID: ticketID, Type: msgTypeUpdate, Author: authorSystem, Body: ticketRefreshDeliveredMarker})
+	}
+	return commit, err
+}

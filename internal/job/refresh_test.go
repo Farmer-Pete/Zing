@@ -12,6 +12,7 @@ import (
 	"testing"
 
 	"zing/internal/job"
+	"zing/internal/response"
 	"zing/internal/store"
 )
 
@@ -88,6 +89,49 @@ func TestPlanningRefresh_OwnerCommentReachesNextRound(t *testing.T) {
 	}
 	if !strings.Contains(rec.lastReq.Prompt, comment) {
 		t.Errorf("tick 2 prompt does not carry the owner comment:\n%s", rec.lastReq.Prompt)
+	}
+}
+
+// TestPlanningRefresh_FirstTurnMarksDelivered proves runPlanningFirst
+// delivers a live refresh in the very same commit that starts the first
+// turn (#98, task 6): the refresh tick1 already wrote and applied means
+// the planner has not yet seen the new text, so tick2's first-turn commit
+// carries "ticket refresh delivered" alongside its own session/run fields.
+func TestPlanningRefresh_FirstTurnMarksDelivered(t *testing.T) {
+	t.Parallel()
+	s := newJobTestStore(t)
+	const body = "Add a CLI."
+	ticketID := seedFeatureTicketInPlanningWithBody(t, s, body)
+
+	const comment = "The CLI is a client of serve."
+	rendered := "Comment by owner-login:\n" + comment
+	src := fakeTicketSource{it: job.IssueText{Body: body, OwnerComments: rendered, CommentCount: 1}}
+
+	deps1 := claim(t, s, fakeRuntime(t), ticketID)
+	deps1.Source = src
+	commit1, err := job.Registry()[testStatePlanning].Run(t.Context(), getTicket(t, s, ticketID), deps1)
+	if err != nil {
+		t.Fatalf("tick 1 Run: %v", err)
+	}
+	apply(t, s, getTicket(t, s, ticketID), commit1)
+
+	deps2 := claim(t, s, fakeRuntime(t), ticketID)
+	deps2.Source = src
+	commit2, err := job.Registry()[testStatePlanning].Run(t.Context(), getTicket(t, s, ticketID), deps2)
+	if err != nil {
+		t.Fatalf("tick 2 Run: %v", err)
+	}
+	delivered := false
+	for _, m := range commit2.Messages {
+		if m.Body == "ticket refresh delivered" {
+			delivered = true
+		}
+	}
+	if !delivered {
+		t.Errorf("tick 2 commit.Messages = %+v, want one \"ticket refresh delivered\" message", commit2.Messages)
+	}
+	if len(commit2.Runs) == 0 {
+		t.Errorf("tick 2 commit.Runs = %+v, want a reserved run (the first turn)", commit2.Runs)
 	}
 }
 
@@ -221,5 +265,54 @@ func TestPlanningRefresh_ConsoleEditSurvivesUnchangedIssue(t *testing.T) {
 	final := getTicket(t, s, ticketID)
 	if final.Body != "A, edited" {
 		t.Errorf("final ticket.Body = %q, want %q (the console edit must survive)", final.Body, "A, edited")
+	}
+}
+
+// TestPlanningRefresh_ResumesIdleSessionBeforeReview proves the open-session
+// branch of planningHandler.Run resumes a live refresh before maybeReviewTick
+// ever runs (#98, task 6): a cohort with a ready, unreviewed plan sitting
+// behind a live "ticket refreshed from tracker" marker gets the planner
+// resumed, carrying the refreshed spec under "ticket:", instead of going
+// straight to plan review.
+func TestPlanningRefresh_ResumesIdleSessionBeforeReview(t *testing.T) {
+	t.Parallel()
+	s := newJobTestStore(t)
+	ticketID := seedFeatureTicketInPlanning(t, s)
+	seedCohort(t, s, ticketID, validPlan("Resume before review, not after."), validScenarios(2, "idle"))
+
+	if _, err := s.InsertMessage(t.Context(), store.Message{
+		TicketID: ticketID, Type: testMsgTypeUpdate, Author: testAuthorSystem,
+		Body: "ticket refreshed from tracker\nowner comments changed, 1 now",
+	}); err != nil {
+		t.Fatalf("InsertMessage: %v", err)
+	}
+
+	rt := &scriptedRuntime{t: t, steps: []scriptedStep{questionResult(response.JobPlanning, "resume-sess-1")}}
+	deps := claimWithRuntimes(t, s, rt, ticketID)
+
+	commit, err := job.Registry()[testStatePlanning].Run(t.Context(), getTicket(t, s, ticketID), deps)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	if len(rt.reqs) != 1 {
+		t.Fatalf("scriptedRuntime saw %d requests, want exactly 1 (no planreview request)", len(rt.reqs))
+	}
+	req := rt.reqs[0]
+	if req.Job != response.JobPlanning || req.SessionID == "" {
+		t.Errorf("request = (job=%s, sessionID=%q), want (planning, non-empty)", req.Job, req.SessionID)
+	}
+	if !strings.Contains(req.Prompt, "ticket:\n") {
+		t.Errorf("resume prompt does not carry a \"ticket:\" input:\n%s", req.Prompt)
+	}
+
+	delivered := false
+	for _, m := range commit.Messages {
+		if m.Body == "ticket refresh delivered" {
+			delivered = true
+		}
+	}
+	if !delivered {
+		t.Errorf("commit.Messages = %+v, want one \"ticket refresh delivered\" message", commit.Messages)
 	}
 }
