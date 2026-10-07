@@ -206,6 +206,65 @@ func TestCopyRepoRewritesResolvedSigningKey(t *testing.T) {
 	verifyHeadSignedBy(t, dest, wantKey)
 }
 
+// TestCopyRepoRewritesSigningKeyThroughNestedSymlinks pins the fix for a
+// host failure TestCopyRepoRewritesResolvedSigningKey could not catch in
+// every environment: on a host whose TMPDIR itself has a symlinked
+// ancestor (macOS's /var, a symlink to /private/var), src's config names
+// its key by a path that is itself only partly resolved, one level short
+// of src's fully resolved form. Neither of rewriteSigningKey's two literal
+// tries (as CopyRepo was given src, or src fully resolved) matched that
+// in-between string, so the copy kept signing with src's own key. This
+// test builds that same two-level gap with its own symlinks, so it fails
+// without relying on where the test binary's TMPDIR happens to sit.
+func TestCopyRepoRewritesSigningKeyThroughNestedSymlinks(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	realBase := filepath.Join(root, "realbase")
+	if err := os.Mkdir(realBase, 0o755); err != nil {
+		t.Fatalf("mkdir realbase: %v", err)
+	}
+
+	aliasA := filepath.Join(root, "aliasA")
+	if err := os.Symlink(realBase, aliasA); err != nil {
+		t.Fatalf("symlink aliasA: %v", err)
+	}
+
+	// The repo is created through aliasA, one symlink away from realBase,
+	// so its config names its key by that once-resolved path, not by
+	// realBase directly.
+	createPath := filepath.Join(aliasA, "real")
+	if err := NewSigningRepo(t.Context(), createPath); err != nil {
+		t.Fatalf("NewSigningRepo: %v", err)
+	}
+
+	// aliasB adds a second symlink on top of aliasA, so resolving src all
+	// the way (as CopyRepo's second try does) lands on realBase, a string
+	// equal to neither the literal src CopyRepo was given nor the
+	// once-resolved path the config already names.
+	aliasB := filepath.Join(root, "aliasB")
+	if err := os.Symlink(aliasA, aliasB); err != nil {
+		t.Fatalf("symlink aliasB: %v", err)
+	}
+	src := filepath.Join(aliasB, "real")
+
+	dest := filepath.Join(t.TempDir(), "repo")
+	if err := CopyRepo(t.Context(), src, dest); err != nil {
+		t.Fatalf("CopyRepo: %v", err)
+	}
+
+	wantKey := filepath.Join(dest, ".git", "zing-fixture-key")
+	gotKey := strings.TrimSpace(readGit(t, dest, "config", "--get", "user.signingKey"))
+	if gotKey != wantKey {
+		t.Errorf("dest user.signingKey = %q, want %q", gotKey, wantKey)
+	}
+
+	if err := runGit(t.Context(), dest, "commit", "-q", "--allow-empty", "-S", "-m", "copy commit"); err != nil {
+		t.Fatalf("commit in dest: %v", err)
+	}
+	verifyHeadSignedBy(t, dest, wantKey)
+}
+
 // TestCopyRepoCopiesBareRepo pins that CopyRepo also copies a bare
 // repository (no .git subdirectory, no signing key), the shape the
 // orchestrator's push target and a shipping stage's origin both use.
