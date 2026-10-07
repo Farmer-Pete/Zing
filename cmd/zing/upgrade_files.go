@@ -112,3 +112,20 @@ func saveUpgradeMarker(dataDir string, m upgradeMarker) error {
 	}
 	return nil
 }
+
+// saveCarry records a request that arrived after the drain began, so the
+// next serve can pick it up. With hasCarry false it touches nothing.
+func saveCarry(dataDir string, carry upgradeRequest, hasCarry bool) error {
+	if !hasCarry {
+		return nil
+	}
+	m, found, err := loadUpgradeMarker(dataDir)
+	if err != nil {
+		return err
+	}
+	if !found {
+		return errors.New("upgrade: save carry: no upgrade.json")
+	}
+	m.HasNext, m.NextSHA, m.NextTicketID = true, carry.SHA, carry.TicketID
+	return saveUpgradeMarker(dataDir, m)
+}

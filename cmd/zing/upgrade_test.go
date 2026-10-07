@@ -338,7 +338,9 @@ func TestUpgrade_RequestQueuesAndCarries(t *testing.T) {
 // selftests, backs up, hard-links zing.prev, and returns the restart target,
 // logging one step per stage.
 func TestUpgrade_PrepareBacksUpAndKeepsPrev(t *testing.T) {
-	t.Parallel()
+	// Not t.Parallel(): this test swaps the global slog default logger to
+	// capture step logs, which would race with any other test logging
+	// concurrently.
 
 	u, steps, _ := newTestUpgrader(t)
 	builtSHA := "fedcba9876540123456789abcdef012345678900"
@@ -694,6 +696,117 @@ func TestUpgrade_LoopCancelledAfterPrepareWritesNoMarker(t *testing.T) {
 	}
 }
 
+// TestRestartAfterServe proves restartAfterServe swaps rt.Next over
+// rt.Binary and execs rt.Binary only when rt is non-nil and ctx is still
+// live, and that a cancelled ctx or an exec error are both reported without
+// touching the files further than described.
+func TestRestartAfterServe(t *testing.T) {
+	t.Parallel()
+
+	newFakeExec := func(err error) (execFunc, *[]string, *string) {
+		var calls []string
+		var argv0 string
+		return func(a0 string, argv, envv []string) error {
+			argv0 = a0
+			calls = append(calls, argv...)
+			calls = append(calls, envv...)
+			return err
+		}, &calls, &argv0
+	}
+
+	t.Run("nil target", func(t *testing.T) {
+		t.Parallel()
+		exec, calls, _ := newFakeExec(nil)
+		if err := restartAfterServe(t.Context(), nil, []string{"zing"}, nil, exec); err != nil {
+			t.Fatalf("restartAfterServe: %v", err)
+		}
+		if len(*calls) != 0 {
+			t.Errorf("exec called with nil target, want no call")
+		}
+	})
+
+	t.Run("cancelled ctx", func(t *testing.T) {
+		t.Parallel()
+		dir := t.TempDir()
+		binary := filepath.Join(dir, "zing")
+		next := binary + ".next"
+		if err := os.WriteFile(next, []byte("new"), 0o755); err != nil {
+			t.Fatalf("write zing.next: %v", err)
+		}
+		if err := os.WriteFile(binary, []byte("old"), 0o755); err != nil {
+			t.Fatalf("write zing: %v", err)
+		}
+		rt := &restartTarget{Binary: binary, Next: next, FromSHA: "0123456789ab", ToSHA: "fedcba987654"}
+
+		ctx, cancel := context.WithCancel(t.Context())
+		cancel()
+		exec, calls, _ := newFakeExec(nil)
+
+		if err := restartAfterServe(ctx, rt, []string{"zing"}, nil, exec); err != nil {
+			t.Fatalf("restartAfterServe: %v", err)
+		}
+		if len(*calls) != 0 {
+			t.Errorf("exec called with cancelled ctx, want no call")
+		}
+		if _, err := os.Stat(next); err != nil {
+			t.Errorf("zing.next must still exist: %v", err)
+		}
+	})
+
+	t.Run("live ctx execs binary", func(t *testing.T) {
+		t.Parallel()
+		dir := t.TempDir()
+		binary := filepath.Join(dir, "zing")
+		next := binary + ".next"
+		if err := os.WriteFile(next, []byte("new"), 0o755); err != nil {
+			t.Fatalf("write zing.next: %v", err)
+		}
+		if err := os.WriteFile(binary, []byte("old"), 0o755); err != nil {
+			t.Fatalf("write zing: %v", err)
+		}
+		rt := &restartTarget{Binary: binary, Next: next, FromSHA: "0123456789ab", ToSHA: "fedcba987654"}
+
+		exec, calls, argv0 := newFakeExec(nil)
+		if err := restartAfterServe(t.Context(), rt, []string{"zing", "serve"}, []string{"A=1"}, exec); err != nil {
+			t.Fatalf("restartAfterServe: %v", err)
+		}
+		if *argv0 != binary {
+			t.Errorf("exec argv0 = %q, want %q", *argv0, binary)
+		}
+		if want := []string{"zing", "serve", "A=1"}; !slices.Equal(*calls, want) {
+			t.Errorf("exec argv+env = %v, want %v", *calls, want)
+		}
+		got, err := os.ReadFile(binary)
+		if err != nil || string(got) != "new" {
+			t.Errorf("binary = %q, %v, want \"new\"", got, err)
+		}
+		if _, err := os.Stat(next); !os.IsNotExist(err) {
+			t.Errorf("zing.next exists after swap, want removed")
+		}
+	})
+
+	t.Run("exec error is wrapped", func(t *testing.T) {
+		t.Parallel()
+		dir := t.TempDir()
+		binary := filepath.Join(dir, "zing")
+		next := binary + ".next"
+		if err := os.WriteFile(next, []byte("new"), 0o755); err != nil {
+			t.Fatalf("write zing.next: %v", err)
+		}
+		if err := os.WriteFile(binary, []byte("old"), 0o755); err != nil {
+			t.Fatalf("write zing: %v", err)
+		}
+		rt := &restartTarget{Binary: binary, Next: next}
+
+		wantErr := errors.New("exec failed")
+		exec, _, _ := newFakeExec(wantErr)
+		err := restartAfterServe(t.Context(), rt, nil, nil, exec)
+		if err == nil || !errors.Is(err, wantErr) {
+			t.Fatalf("restartAfterServe error = %v, want wrapping %v", err, wantErr)
+		}
+	})
+}
+
 // TestUpgrade_LoopWaitsForGate proves loop never builds anything before its
 // gate is closed, even with a request already queued.
 func TestUpgrade_LoopWaitsForGate(t *testing.T) {
@@ -720,5 +833,84 @@ func TestUpgrade_LoopWaitsForGate(t *testing.T) {
 	}
 	if n := len(steps.calls()); n != 1 {
 		t.Fatalf("Build called %d times after gate opened, want 1", n)
+	}
+}
+
+// TestUpgrade_MergeBuildsSelftestsSwapsAndExecs is the working demo for this
+// part: a merge request drives the loop through prepare, which builds,
+// selftests, backs up, and keeps zing.prev, then stops, and restartAfterServe
+// completes the swap and execs the new binary with the same argv and env.
+func TestUpgrade_MergeBuildsSelftestsSwapsAndExecs(t *testing.T) {
+	t.Parallel()
+
+	u, steps, stopped := newTestUpgrader(t)
+	sha := "fedcba9876540123456789abcdef012345678900"
+	steps.buildSHA = sha
+	steps.selftestVersion = sha[:12]
+	close(u.gate)
+
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	go u.loop(ctx)
+
+	ticketID := seedTicketForUpgrade(t, u.store)
+	u.Request(ticketID, sha)
+
+	waitForClose(t, stopped, "stop")
+
+	rt, _, _, ok := u.Target()
+	if !ok {
+		t.Fatalf("Target ok = %v, want true", ok)
+	}
+
+	binary := filepath.Join(u.dataDir, "bin", "zing")
+	if rt.Binary != binary || rt.Next != binary+".next" {
+		t.Fatalf("restartTarget = %+v", rt)
+	}
+
+	var argv0 string
+	var gotArgv, gotEnv []string
+	exec := func(a0 string, argv, envv []string) error {
+		argv0, gotArgv, gotEnv = a0, argv, envv
+		return nil
+	}
+
+	if err := restartAfterServe(t.Context(), &rt, []string{"zing", "serve"}, []string{"A=1"}, exec); err != nil {
+		t.Fatalf("restartAfterServe: %v", err)
+	}
+
+	if argv0 != binary {
+		t.Errorf("exec argv0 = %q, want %q", argv0, binary)
+	}
+	if want := []string{"zing", "serve"}; !slices.Equal(gotArgv, want) {
+		t.Errorf("exec argv = %v, want %v", gotArgv, want)
+	}
+	if want := []string{"A=1"}; !slices.Equal(gotEnv, want) {
+		t.Errorf("exec env = %v, want %v", gotEnv, want)
+	}
+
+	binBytes, err := os.ReadFile(binary)
+	if err != nil || string(binBytes) != "new" {
+		t.Errorf("bin/zing = %q, %v, want \"new\"", binBytes, err)
+	}
+	prevBytes, err := os.ReadFile(binary + ".prev")
+	if err != nil || string(prevBytes) != "old" {
+		t.Errorf("zing.prev = %q, %v, want \"old\"", prevBytes, err)
+	}
+	if _, statErr := os.Stat(binary + ".next"); !os.IsNotExist(statErr) {
+		t.Errorf("zing.next exists after swap, want removed")
+	}
+
+	backupPath := filepath.Join(u.dataDir, backupPrefix+sha12(sha))
+	if _, statErr := os.Stat(backupPath); statErr != nil {
+		t.Errorf("backup %s missing: %v", backupPath, statErr)
+	}
+
+	m, found, err := loadUpgradeMarker(u.dataDir)
+	if err != nil || !found {
+		t.Fatalf("loadUpgradeMarker: found=%v err=%v", found, err)
+	}
+	if m.State != markerPending || m.ToSHA != sha || m.TicketID != ticketID {
+		t.Errorf("marker = %+v, want pending, to_sha %s, ticket_id %d", m, sha, ticketID)
 	}
 }

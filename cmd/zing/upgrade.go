@@ -300,3 +300,33 @@ func (u *upgrader) runQueued(ctx context.Context) bool {
 		return true
 	}
 }
+
+// execFunc replaces the running process image, as syscall.Exec does.
+// restartAfterServe takes one as a parameter so tests can observe the call
+// instead of actually replacing the test binary.
+type execFunc func(argv0 string, argv, envv []string) error
+
+// restartAfterServe renames rt.Next over rt.Binary and execs rt.Binary with
+// argv and env, once ctx (run's own signal context) is still live. With a
+// nil rt, or with ctx already done because a real signal arrived during the
+// drain, it does nothing and returns nil, leaving zing.next and a pending
+// upgrade.json for the next start to deal with.
+func restartAfterServe(ctx context.Context, rt *restartTarget, argv, env []string, exec execFunc) error {
+	if rt == nil {
+		return nil
+	}
+	if ctx.Err() != nil {
+		// A real signal landed in the drain window, not a failure: skip the
+		// swap and leave it for the next start to pick up.
+		slog.Info("upgrade: restart skipped, serve was signalled", "to_sha", rt.ToSHA, "ticket_id", rt.TicketID)
+		return nil //nolint:nilerr // ctx.Err() here is a signal, not a failure
+	}
+	if err := os.Rename(rt.Next, rt.Binary); err != nil {
+		return fmt.Errorf("upgrade: swap: %w", err)
+	}
+	slog.Info("upgrade", "step", "exec", "from_sha", rt.FromSHA, "to_sha", rt.ToSHA, "ticket_id", rt.TicketID)
+	if err := exec(rt.Binary, argv, env); err != nil {
+		return fmt.Errorf("upgrade: exec %s: %w", rt.Binary, err)
+	}
+	return nil
+}

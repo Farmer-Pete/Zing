@@ -79,6 +79,52 @@ func TestUpgradeMarker_LoadMalformedFails(t *testing.T) {
 	}
 }
 
+// TestSaveCarry proves saveCarry leaves the marker untouched when hasCarry
+// is false, sets has_next/next_sha/next_ticket_id and keeps every other
+// field when hasCarry is true, and errors when no marker exists yet.
+func TestSaveCarry(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+
+	if err := saveCarry(dir, upgradeRequest{TicketID: 9, SHA: "abc"}, false); err != nil {
+		t.Fatalf("saveCarry with hasCarry false: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, upgradeMarkerFile)); !os.IsNotExist(err) {
+		t.Errorf("upgrade.json created with hasCarry false, stat err = %v", err)
+	}
+
+	orig := upgradeMarker{
+		FromSHA:  "0123456789ab",
+		ToSHA:    "fedcba9876543210fedcba9876543210fedcba9",
+		TicketID: 7,
+		State:    markerPending,
+	}
+	if err := saveUpgradeMarker(dir, orig); err != nil {
+		t.Fatalf("saveUpgradeMarker: %v", err)
+	}
+
+	carry := upgradeRequest{TicketID: 42, SHA: "abcdef0123456789abcdef0123456789abcdef01"}
+	if err := saveCarry(dir, carry, true); err != nil {
+		t.Fatalf("saveCarry: %v", err)
+	}
+
+	got, found, err := loadUpgradeMarker(dir)
+	if err != nil || !found {
+		t.Fatalf("loadUpgradeMarker: found=%v err=%v", found, err)
+	}
+	if !got.HasNext || got.NextSHA != carry.SHA || got.NextTicketID != carry.TicketID {
+		t.Errorf("marker = %+v, want has_next true, next_sha %q, next_ticket_id %d", got, carry.SHA, carry.TicketID)
+	}
+	if got.FromSHA != orig.FromSHA || got.ToSHA != orig.ToSHA || got.TicketID != orig.TicketID || got.State != orig.State {
+		t.Errorf("marker changed unrelated fields: got %+v, want from/to/ticket/state matching %+v", got, orig)
+	}
+
+	missing := t.TempDir()
+	if err := saveCarry(missing, carry, true); err == nil {
+		t.Fatal("saveCarry with no existing marker: want error")
+	}
+}
+
 // TestPruneBackups_KeepsFiveNewest proves pruneBackups keeps the backupKeep
 // newest backups by ModTime, breaking ties by name descending, and leaves
 // zing.db untouched.
