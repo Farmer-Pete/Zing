@@ -2127,6 +2127,58 @@ func TestRunAndCommitCopiesReviewBots(t *testing.T) {
 	}
 }
 
+// fakeUpgrader is a job.SelfUpgrader test double with no behavior of its
+// own: TestRunAndCommitCopiesUpgrader only needs a distinct, comparable
+// value to prove runAndCommit copied the exact one dispatch.Config carried,
+// never a zero value or a wrapper.
+type fakeUpgrader struct{ tag string }
+
+func (*fakeUpgrader) Request(_ int64, _ string) {}
+
+// TestRunAndCommitCopiesUpgrader proves runAndCommit copies
+// dispatch.Config.Upgrader into every job.Deps it builds, the same way
+// TestRunAndCommitCopiesReviewBots already proves for ReviewBots (#109 part
+// 1, task 8): without this copy, pollDone would never see a self project's
+// upgrader in production even though every lower-level test sets
+// deps.Upgrader directly.
+func TestRunAndCommitCopiesUpgrader(t *testing.T) {
+	t.Parallel()
+
+	s := newDispatchTestStore(t)
+	ticketID := seedQueuedTicket(t, s, testFixtureRef)
+
+	seedOwner := testSeedJudgingOwner
+	seedExpires := time.Now().Add(10 * time.Minute).UTC().Truncate(time.Second)
+	claimed, err := s.Claim(t.Context(), ticketID, seedOwner, seedExpires)
+	if err != nil || !claimed {
+		t.Fatalf("seed claim: claimed=%v err=%v", claimed, err)
+	}
+	applied, err := s.CommitHandlerResult(t.Context(), store.HandlerCommit{
+		TicketID: ticketID, Owner: seedOwner, Expires: seedExpires, Next: testStateJudging, Reason: testSeedReason,
+	})
+	if err != nil || !applied {
+		t.Fatalf("seed commit: applied=%v err=%v", applied, err)
+	}
+
+	spy := &spyHandler{next: testStateShipping, reason: testSpyReason}
+	reg := job.Registry()
+	reg[testStateJudging] = spy
+
+	wantUpgrader := &fakeUpgrader{tag: "self-upgrader"}
+	d := newDispatcher(t, s, newFixtureTracker(t), bus.New(), fakeRuntime(t), reg, nil,
+		dispatch.Config{MaxParallel: 2, Owner: testOwner, Upgrader: wantUpgrader})
+
+	if err := d.Tick(t.Context()); err != nil {
+		t.Fatalf("Tick: %v", err)
+	}
+	if spy.Calls() != 1 {
+		t.Fatalf("spy.Calls() = %d, want 1", spy.Calls())
+	}
+	if got := spy.Upgrader(); got != wantUpgrader {
+		t.Errorf("Deps.Upgrader = %v, want %v", got, wantUpgrader)
+	}
+}
+
 // TestTick_HandlerDeadlineSurvivesSlowIntakeNotEatenByIt proves the run
 // deadline is computed from a fresh time.Now() taken right before running
 // the handler (after the claim), not the tick-start now (design section
@@ -3144,6 +3196,10 @@ type spyHandler struct {
 	// can assert a SetTuning call reaches the very next job.Deps
 	// runAndCommit builds (#81).
 	budget time.Duration
+	// upgrader records d.Upgrader, so TestRunAndCommitCopiesUpgrader can
+	// assert runAndCommit copied dispatch.Config.Upgrader into the Deps a
+	// handler actually sees (#109 part 1, task 8).
+	upgrader job.SelfUpgrader
 
 	next, reason string
 	err          error
@@ -3156,6 +3212,7 @@ func (h *spyHandler) Run(ctx context.Context, t store.Ticket, d job.Deps) (store
 	h.judgeCodexHome = d.JudgeCodexHome
 	h.reviewBots = d.ReviewBots
 	h.budget = d.Budget
+	h.upgrader = d.Upgrader
 	if dl, ok := ctx.Deadline(); ok {
 		h.hasDeadline = true
 		h.deadline = dl
@@ -3209,6 +3266,18 @@ func (h *spyHandler) ReviewBots() job.ReviewBotRule {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	return h.reviewBots
+}
+
+// Upgrader returns the most recent Run call's d.Upgrader. It returns
+// job.SelfUpgrader, not a concrete type: TestRunAndCommitCopiesUpgrader
+// asserts identity (==) against the exact fakeUpgrader value dispatch.Config
+// carried, and a concrete wrapper type here would defeat that comparison.
+//
+//nolint:ireturn // the test asserts identity against the exact interface value runAndCommit copied
+func (h *spyHandler) Upgrader() job.SelfUpgrader {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.upgrader
 }
 
 // Budget returns the most recent Run call's d.Budget.

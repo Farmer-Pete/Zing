@@ -791,6 +791,23 @@ func removeStaleStderrFiles(ctx context.Context, st *store.Store, dataDir string
 // its PullRequests, Flips, Checks, and Threads (PKG9-PLAN.md section 10.3),
 // so the shipping and respond handlers read and write GitHub through the
 // same client Package 5's git writes use.
+// findSelfProject returns the index of the one project with self = true
+// (#109 part 1, Q2). Zero such projects is idx -1, ok false, err nil. More
+// than one is a startup error, since serve can upgrade only itself.
+func findSelfProject(projects []config.Project) (idx int, ok bool, err error) {
+	idx = -1
+	for i := range projects {
+		if !projects[i].Self {
+			continue
+		}
+		if ok {
+			return -1, false, errors.New("zing.toml: only one project may set self = true")
+		}
+		idx, ok = i, true
+	}
+	return idx, ok, nil
+}
+
 func buildJobProjects(ctx context.Context, projects []config.Project, bindings []zdispatch.Binding, gh *orchestrator.GitHubClient, sb sandbox.Sandbox) (map[int64]job.Project, error) {
 	storeProjectID := make(map[string]int64, len(bindings))
 	for _, b := range bindings {
@@ -825,6 +842,7 @@ func buildJobProjects(ctx context.Context, projects []config.Project, bindings [
 		out[id] = job.Project{
 			Orch: orch, RepoGit: repoGit, TestCmd: p.Commands.Test, LintCmd: p.Commands.Lint, FixCmd: p.Commands.Fix, Deny: p.Commands.Deny,
 			Owner: owner, Repo: repo, PullRequests: gh, Flips: gh, Checks: gh, Threads: gh,
+			Self: p.Self,
 		}
 	}
 	return out, nil

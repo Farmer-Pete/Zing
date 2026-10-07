@@ -625,6 +625,50 @@ func TestDispatchMaxParallel(t *testing.T) {
 	}
 }
 
+// TestFindSelfProject covers findSelfProject directly (#109 part 1, Q2):
+// zero self projects reports ok false with no error, exactly one reports its
+// index, and two is the exact startup error, since serve can upgrade only
+// one project.
+func TestFindSelfProject(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		projects []config.Project
+		wantIdx  int
+		wantOK   bool
+		wantErr  string
+	}{
+		{name: "none self", projects: []config.Project{{Name: "a"}, {Name: "b"}}, wantIdx: -1, wantOK: false},
+		{name: "one self at index 1", projects: []config.Project{{Name: "a"}, {Name: "b", Self: true}}, wantIdx: 1, wantOK: true},
+		{
+			name:     "two self",
+			projects: []config.Project{{Name: "a", Self: true}, {Name: "b", Self: true}},
+			wantIdx:  -1, wantOK: false,
+			wantErr: "zing.toml: only one project may set self = true",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			idx, ok, err := findSelfProject(tc.projects)
+			if idx != tc.wantIdx || ok != tc.wantOK {
+				t.Errorf("findSelfProject(...) = (%d, %v), want (%d, %v)", idx, ok, tc.wantIdx, tc.wantOK)
+			}
+			if tc.wantErr == "" {
+				if err != nil {
+					t.Errorf("err = %v, want nil", err)
+				}
+				return
+			}
+			if err == nil || err.Error() != tc.wantErr {
+				t.Errorf("err = %v, want %q", err, tc.wantErr)
+			}
+		})
+	}
+}
+
 // TestDispatchFailure covers dispatchFailure directly (the decision
 // shutdown makes about whether the dispatcher's own error becomes serve's
 // return value): it fires only when dispTriggered is true and de is a real,

@@ -1314,6 +1314,15 @@ func (h shipHandler) pollDone(ctx context.Context, t store.Ticket, d Deps, prURL
 		return store.HandlerCommit{}, fmt.Errorf("job: shipping: poll: post done: %w", err)
 	}
 
+	if d.Projects[t.ProjectID].Self && d.Upgrader != nil {
+		if mergeSHA == "" {
+			slog.Warn("upgrade: merged pull request has no merge sha", "ticket_id", t.ID)
+		} else {
+			slog.Info("upgrade: requested", "ticket_id", t.ID, "sha", mergeSHA)
+			d.Upgrader.Request(t.ID, mergeSHA)
+		}
+	}
+
 	c := baseCommit(t, d)
 	c.Next, c.Reason = stateDone, reasonMerged
 	c.ResolveAll = true

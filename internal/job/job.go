@@ -121,6 +121,10 @@ type Deps struct {
 	// Config.Now, so a test that drives the dispatcher's own clock also
 	// drives the hold check.
 	Now func() time.Time
+	// Upgrader is pollDone's own hook for the self project (#109 part 1,
+	// Q1): nil means never request an upgrade, which is every project
+	// today and every existing test. Wired from dispatch.Config.Upgrader.
+	Upgrader SelfUpgrader
 }
 
 // now is d.Now(), or time.Now when Now is nil.
@@ -167,6 +171,15 @@ type ReviewBotCheck struct {
 	Trigger string
 }
 
+// SelfUpgrader is what pollDone needs to request a self-upgrade (#109 part
+// 1, Q1): Request must not block, since it is called from pollDone on the
+// dispatcher's own worker goroutine. The dispatcher implements it over its
+// own upgrader and passes itself here, the same way it does for Tracker and
+// Splitter (internal/dispatch/dispatch.go's runAndCommit).
+type SelfUpgrader interface {
+	Request(ticketID int64, sha string)
+}
+
 // Project is what building needs to know about one store project (design
 // section 4.3).
 type Project struct {
@@ -191,6 +204,12 @@ type Project struct {
 	Flips        DraftFlips
 	Checks       Checks
 	Threads      ReviewThreads
+	// Self is config.Project.Self, copied by cmd/zing/serve.go's
+	// buildJobProjects (#109 part 1, Q2): true for at most one project,
+	// the one pollDone requests an upgrade for when a merged pull
+	// request's commit lands. findSelfProject enforces the "at most one"
+	// rule at startup.
+	Self bool
 }
 
 // DenyCommands returns p's deny list for a build run's PreToolUse hook:
