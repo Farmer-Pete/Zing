@@ -29,10 +29,6 @@ const (
 	pinnedCodexThreadID    = "0199e2b1-2c8b-7c53-8e9e-0a1b2c3d4e5f"
 	forbiddenCodexBypass   = "--dangerously-bypass-approvals-and-sandbox"
 	fakeCodexDefaultThread = "fake-codex-default-thread-id"
-	// wantCodexJudgeSkillsOffArg is codexSkillsOffSetting written out as a
-	// literal, so this file pins the exact argv independently of
-	// codex.go's own constant.
-	wantCodexJudgeSkillsOffArg = "features.skip_host_skill_discovery=true"
 )
 
 // judgeOkResultXML is a minimal, valid response.JudgeResponse "ok" document
@@ -695,6 +691,68 @@ func TestCodex_ErrorEventKeptInResult(t *testing.T) {
 	}
 }
 
+// TestCodex_CommandRejectionInFailureDetail proves Codex.run's ExecError
+// branch combines a parsed command rejection with Codex's own turn.failed
+// detail (#94): res.FailureDetail is the exact codexRejectionDetail result,
+// and the rejection's own text never makes the run transient.
+func TestCodex_CommandRejectionInFailureDetail(t *testing.T) {
+	t.Parallel()
+	requireUnix(t)
+
+	const wantDetail = `codex refused a command: rm -f s2.json: rm -f style commands are not permitted. Use a safer approach; codex's own error: judge could not run its checks`
+	dir := t.TempDir()
+	req := newFakeCodexRequest(dir, "command_rejected")
+	c := NewCodex(fakeCodexScript)
+	res, err := c.Run(context.Background(), req)
+
+	var execErr *ExecError
+	if !errors.As(err, &execErr) {
+		t.Fatalf("err = %v, want *ExecError", err)
+	}
+	if execErr.ExitCode != 1 {
+		t.Errorf("ExecError.ExitCode = %d, want 1", execErr.ExitCode)
+	}
+	if execErr.Transient != "" {
+		t.Errorf("ExecError.Transient = %q, want empty (a rejection is never transient)", execErr.Transient)
+	}
+	if res.FailureDetail != wantDetail {
+		t.Errorf("res.FailureDetail = %q, want %q", res.FailureDetail, wantDetail)
+	}
+}
+
+// TestCodex_CommandRejectionSurvivesLongStream proves Codex.run finds a
+// command rejection even when more than 64 KiB of stream follows it (#94
+// review finding r2f2): codexCommandRejection reads stdout.bytes(), the
+// head capWriter up to 4 MiB, not res.Stdout, the last-64-KiB tail, so a
+// rejection early in a long run is not lost.
+func TestCodex_CommandRejectionSurvivesLongStream(t *testing.T) {
+	t.Parallel()
+	requireUnix(t)
+
+	dir := t.TempDir()
+	req := newFakeCodexRequest(dir, "command_rejected_long_stream")
+	c := NewCodex(fakeCodexScript)
+	res, err := c.Run(context.Background(), req)
+
+	execErr, ok := errors.AsType[*ExecError](err)
+	if !ok {
+		t.Fatalf("err = %v, want *ExecError", err)
+	}
+	if execErr.ExitCode != 1 {
+		t.Errorf("ExecError.ExitCode = %d, want 1", execErr.ExitCode)
+	}
+	const wantPrefix = "codex refused a command: rm -f s2.json: rm -f style commands are not permitted. Use a safer approach"
+	if !strings.HasPrefix(res.FailureDetail, wantPrefix) {
+		t.Errorf("res.FailureDetail = %q, want prefix %q", res.FailureDetail, wantPrefix)
+	}
+	if len(res.Stdout) > maxCodexStdoutBytes {
+		t.Fatalf("res.Stdout is %d bytes, want at most %d (the tail cap this test relies on)", len(res.Stdout), maxCodexStdoutBytes)
+	}
+	if strings.Contains(string(res.Stdout), "rm -f s2.json") {
+		t.Fatal("res.Stdout still contains the rejection; the filler did not push it out of the 64 KiB tail, so this test does not exercise r2f2")
+	}
+}
+
 // TestCodex_TransientErrorSetsExecErrorTransient proves a Codex run whose
 // error event names a 503 sets ExecError.Transient to "503" (design:
 // codexTransientMatch, called by Codex.run only when codexFailureDetail
@@ -895,6 +953,242 @@ func TestCodexFailureDetail(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestCodexCommandRejection(t *testing.T) {
+	t.Parallel()
+
+	const line = "rm -f style commands are not permitted. Use a safer approach"
+
+	marshal := func(t *testing.T, v any) string {
+		t.Helper()
+		b, err := json.Marshal(v)
+		if err != nil {
+			t.Fatalf("json.Marshal: %v", err)
+		}
+		return string(b)
+	}
+
+	commandExecutionItem := func(command, output, status string, exitCode *int) codexRejectionEventLine {
+		var ev codexRejectionEventLine
+		ev.Type = "item.completed"
+		ev.Item.Type = "command_execution"
+		ev.Item.Command = command
+		ev.Item.AggregatedOutput = output
+		ev.Item.Status = status
+		ev.Item.ExitCode = exitCode
+		return ev
+	}
+	zero, one := 0, 1
+
+	cases := []struct {
+		name        string
+		stdout      string
+		stderr      string
+		wantCommand string
+		wantLine    string
+	}{
+		{
+			name:        "declined command_execution item",
+			stdout:      marshal(t, commandExecutionItem("rm -f s2.json", line, "declined", &one)),
+			wantCommand: "rm -f s2.json",
+			wantLine:    line,
+		},
+		{
+			name:     "failed multiline item with no command",
+			stdout:   marshal(t, commandExecutionItem("", "line one\n"+line+"\nmore", "failed", nil)),
+			wantLine: line,
+		},
+		{
+			name: "error event",
+			stdout: func() string {
+				var ev codexRejectionEventLine
+				ev.Type = codexEventError
+				ev.Message = line
+				return marshal(t, ev)
+			}(),
+			wantLine: line,
+		},
+		{
+			name: "turn.failed event",
+			stdout: func() string {
+				var ev codexRejectionEventLine
+				ev.Type = codexEventTurnFailed
+				ev.Error.Message = line
+				return marshal(t, ev)
+			}(),
+			wantLine: line,
+		},
+		{
+			name:     "plain non-JSON line",
+			stdout:   "codex: " + line,
+			wantLine: "codex: " + line,
+		},
+		{
+			name:     "stderr only",
+			stderr:   line,
+			wantLine: line,
+		},
+		{
+			name:     "stdout wins over stderr",
+			stdout:   "codex: " + line,
+			stderr:   line,
+			wantLine: "codex: " + line,
+		},
+		{
+			name:     "last stdout match wins",
+			stdout:   "codex: " + line + "\nanother: " + line + " too",
+			wantLine: "another: " + line + " too",
+		},
+		{
+			name: "clean completed item then declined item",
+			stdout: marshal(t, commandExecutionItem("", line, "completed", &zero)) + "\n" +
+				marshal(t, commandExecutionItem("rm -f s2.json", line, "declined", &one)),
+			wantCommand: "rm -f s2.json",
+			wantLine:    line,
+		},
+		{
+			name:        "completed item with no exit code still matches",
+			stdout:      marshal(t, commandExecutionItem("rm -f s2.json", line, "completed", nil)),
+			wantCommand: "rm -f s2.json",
+			wantLine:    line,
+		},
+		{
+			name:        "completed item with nonzero exit code still matches",
+			stdout:      marshal(t, commandExecutionItem("rm -f s2.json", line, "completed", &one)),
+			wantCommand: "rm -f s2.json",
+			wantLine:    line,
+		},
+		{
+			name:   "quote completed command",
+			stdout: marshal(t, commandExecutionItem("cat notes.txt", "note: "+line, "completed", &zero)),
+		},
+		{
+			name:   "quote agent message",
+			stdout: `{"type":"item.completed","item":{"type":"agent_message","text":"` + line + `"}}`,
+		},
+		{
+			name:   "quote reasoning",
+			stdout: `{"type":"item.completed","item":{"type":"reasoning","text":"` + line + `"}}`,
+		},
+		{
+			name:   "quote other event",
+			stdout: `{"type":"x","note":"` + line + `"}`,
+		},
+		{
+			name:   "no line in either stream holds the phrase",
+			stdout: "all clear\nnothing to see",
+			stderr: "still clear",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			command, got := codexCommandRejection([]byte(tc.stdout), []byte(tc.stderr))
+			if command != tc.wantCommand {
+				t.Errorf("command = %q, want %q", command, tc.wantCommand)
+			}
+			if got != tc.wantLine {
+				t.Errorf("line = %q, want %q", got, tc.wantLine)
+			}
+		})
+	}
+}
+
+// TestCodexRejectionDetail proves codexRejectionDetail's combining rules
+// (design: codexRejectionDetail, owner decision Q2): rejection first, then
+// Codex's own detail after a separator, cut to 2048 bytes together so the
+// cap never drops the rejection.
+func TestCodexRejectionDetail(t *testing.T) {
+	t.Parallel()
+
+	const line = "rm -f style commands are not permitted. Use a safer approach"
+
+	cases := []struct {
+		name    string
+		command string
+		line    string
+		detail  string
+		want    string
+	}{
+		{
+			name:   "empty line returns detail unchanged",
+			detail: "judge could not run its checks",
+			want:   "judge could not run its checks",
+		},
+		{
+			name:    "command, line, and detail combine",
+			command: "rm -f s2.json",
+			line:    line,
+			detail:  "judge could not run its checks",
+			want:    "codex refused a command: rm -f s2.json: " + line + "; codex's own error: judge could not run its checks",
+		},
+		{
+			name:   "no command still combines",
+			line:   line,
+			detail: "judge could not run its checks",
+			want:   "codex refused a command: " + line + "; codex's own error: judge could not run its checks",
+		},
+		{
+			name:   "a detail that already holds the line gives the head alone",
+			line:   line,
+			detail: "earlier text: " + line,
+			want:   "codex refused a command: " + line,
+		},
+		{
+			name:   "an empty detail gives the head alone",
+			line:   line,
+			detail: "",
+			want:   "codex refused a command: " + line,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := codexRejectionDetail(tc.command, tc.line, tc.detail); got != tc.want {
+				t.Errorf("codexRejectionDetail(%q, %q, %q) = %q, want %q", tc.command, tc.line, tc.detail, got, tc.want)
+			}
+		})
+	}
+
+	t.Run("a 5000-byte detail is cut to at most 2048 bytes", func(t *testing.T) {
+		t.Parallel()
+		detail := strings.Repeat("a", 5000)
+		got := codexRejectionDetail("rm -f s2.json", line, detail)
+		if len(got) > maxFailureDetailBytes {
+			t.Errorf("len(got) = %d, want at most %d", len(got), maxFailureDetailBytes)
+		}
+		wantHead := "codex refused a command: rm -f s2.json: " + line
+		if !strings.HasPrefix(got, wantHead) {
+			t.Errorf("got = %q, want prefix %q", got, wantHead)
+		}
+		if !utf8.ValidString(got) {
+			t.Error("got is not valid UTF-8")
+		}
+	})
+
+	t.Run("a multi-byte rune straddling the 2048-byte cut is kept whole", func(t *testing.T) {
+		t.Parallel()
+		wantHead := "codex refused a command: rm -f s2.json: " + line
+		prefix := wantHead + "; codex's own error: "
+		// Pad with 'a' up to byte 2047 of the combined string, then append a
+		// run of 'é' (two bytes each) so one straddles the cut at byte 2048:
+		// a cut that blindly took the first maxFailureDetailBytes bytes would
+		// split it in half and produce invalid UTF-8.
+		padded := strings.Repeat("a", 2047-len(prefix)) + strings.Repeat("é", 10)
+		got := codexRejectionDetail("rm -f s2.json", line, padded)
+		if len(got) > maxFailureDetailBytes {
+			t.Errorf("len(got) = %d, want at most %d", len(got), maxFailureDetailBytes)
+		}
+		if !strings.HasPrefix(got, wantHead) {
+			t.Errorf("got = %q, want prefix %q", got, wantHead)
+		}
+		if !utf8.ValidString(got) {
+			t.Error("got is not valid UTF-8")
+		}
+	})
 }
 
 func TestCodexTransientMatch(t *testing.T) {
@@ -1120,7 +1414,7 @@ func TestCodexArgvFullAccessOnlyWithPrefix(t *testing.T) {
 
 		argv := readArgv(t, dir)
 		outPath := outfileFromArgv(t, argv)
-		want := wantCodexArgv(outPath, []string{"-s", "danger-full-access", "-c", wantCodexJudgeSkillsOffArg}, []string{"-"})
+		want := wantCodexArgv(outPath, []string{"-s", "danger-full-access"}, []string{"-"})
 		if !slices.Equal(argv, want) {
 			t.Errorf("argv =\n%v\nwant\n%v", argv, want)
 		}
@@ -1139,60 +1433,9 @@ func TestCodexArgvFullAccessOnlyWithPrefix(t *testing.T) {
 
 		argv := readArgv(t, dir)
 		outPath := outfileFromArgv(t, argv)
-		want := wantCodexArgv(outPath, []string{"-c", `sandbox_mode="danger-full-access"`, "-c", wantCodexJudgeSkillsOffArg}, []string{"resume", testCodexResumeID, "-"})
+		want := wantCodexArgv(outPath, []string{"-c", `sandbox_mode="danger-full-access"`}, []string{"resume", testCodexResumeID, "-"})
 		if !slices.Equal(argv, want) {
 			t.Errorf("argv =\n%v\nwant\n%v", argv, want)
-		}
-	})
-}
-
-// TestCodexJudgeArgsOnlyForJudge proves the judge-only "-c" pair
-// (codexSkillsOffSetting) appears in a judge request's argv on both a first
-// turn and a resume, and appears in no other job's argv.
-func TestCodexJudgeArgsOnlyForJudge(t *testing.T) {
-	t.Parallel()
-	requireUnix(t)
-
-	for _, tt := range []struct {
-		name      string
-		sessionID string
-	}{
-		{"judge first turn", ""},
-		{"judge resume", testCodexResumeID},
-	} {
-		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
-			dir := t.TempDir()
-			req := newFakeJudgeRequest(t, dir)
-			req.ExecPrefix = judgeExecPrefix
-			req.SessionID = tt.sessionID
-			c := NewCodex(fakeCodexScript)
-			if _, err := c.Run(context.Background(), req); err != nil {
-				t.Fatalf("Run: %v", err)
-			}
-
-			argv := readArgv(t, dir)
-			idx := slices.Index(argv, wantCodexJudgeSkillsOffArg)
-			if idx < 1 || argv[idx-1] != "-c" {
-				t.Errorf("argv = %v, want \"-c\" %q", argv, wantCodexJudgeSkillsOffArg)
-			}
-		})
-	}
-
-	t.Run("planreview carries no judge-only setting", func(t *testing.T) {
-		t.Parallel()
-		dir := t.TempDir()
-		req := newFakeCodexRequest(dir, "success")
-		c := NewCodex(fakeCodexScript)
-		if _, err := c.Run(context.Background(), req); err != nil {
-			t.Fatalf("Run: %v", err)
-		}
-
-		argv := readArgv(t, dir)
-		for _, a := range argv {
-			if a == codexSkillsOffSetting {
-				t.Errorf("argv = %v, carries judge-only skills setting", argv)
-			}
 		}
 	})
 }
@@ -1262,7 +1505,7 @@ func TestCodexHonorsExecPrefix(t *testing.T) {
 
 	argv := readArgv(t, dir)
 	outPath := outfileFromArgv(t, argv)
-	want := wantCodexArgv(outPath, []string{"-s", "danger-full-access", "-c", wantCodexJudgeSkillsOffArg}, []string{"-"})
+	want := wantCodexArgv(outPath, []string{"-s", "danger-full-access"}, []string{"-"})
 	if !slices.Equal(argv, want) {
 		t.Errorf("argv (after the prefix) =\n%v\nwant\n%v", argv, want)
 	}
@@ -1457,5 +1700,167 @@ func TestCodexShellEnvArgs(t *testing.T) {
 				t.Errorf("codexShellEnvArgs(%v) = %v, want %v", tt.env, got, tt.want)
 			}
 		})
+	}
+}
+
+// ---- dropping the judge's skill-scan noise (run 1453, ticket #137 split) --
+
+// codexSkillScanLine is the exact stderr line run 1453 recorded: Codex
+// 0.160.0 tries to walk ~/.agents/skills, judge.sb denies the read, and
+// Codex logs this to stderr.
+const codexSkillScanLine = "failed to scan skill path file:///Users/peter/.agents/skills: Operation not permitted"
+
+// writeCodexStderrFile writes content to a new file under t.TempDir() and
+// returns its path, for FAKE_CODEX_STDERR_FILE.
+func writeCodexStderrFile(t *testing.T, content string) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "stderr.txt")
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatalf("write stderr file: %v", err)
+	}
+	return path
+}
+
+// TestCodexJudgeStderrDropsSkillScanNoise proves Codex.run drops the
+// skill-scan line from a judge run's RunResult.Stderr, keeping every other
+// line, while a planreview run's Stderr is left untouched (PKG9-PLAN.md
+// ticket #137 split, Q3: filtering is judge-only).
+func TestCodexJudgeStderrDropsSkillScanNoise(t *testing.T) {
+	t.Parallel()
+	requireUnix(t)
+
+	stderrContent := codexSkillScanLine + "\nother line\n"
+
+	t.Run("judge", func(t *testing.T) {
+		t.Parallel()
+		dir := t.TempDir()
+		stderrFile := writeCodexStderrFile(t, stderrContent)
+		req := newFakeJudgeRequest(t, dir)
+		req.ExecPrefix = judgeExecPrefix
+		req.Env = append(req.Env, "FAKE_CODEX_STDERR_FILE="+stderrFile)
+
+		c := NewCodex(fakeCodexScript)
+		res, err := c.Run(context.Background(), req)
+		if err != nil {
+			t.Fatalf("Run: %v", err)
+		}
+
+		if string(res.Stderr) != "other line\n" {
+			t.Errorf("Stderr = %q, want %q", string(res.Stderr), "other line\n")
+		}
+		if res.StderrLen != int64(len(stderrContent)) {
+			t.Errorf("StderrLen = %d, want %d (the raw stream's length)", res.StderrLen, len(stderrContent))
+		}
+	})
+
+	t.Run("planreview", func(t *testing.T) {
+		t.Parallel()
+		dir := t.TempDir()
+		stderrFile := writeCodexStderrFile(t, stderrContent)
+		req := newFakeCodexRequest(dir, "success", "FAKE_CODEX_STDERR_FILE="+stderrFile)
+
+		c := NewCodex(fakeCodexScript)
+		res, err := c.Run(context.Background(), req)
+		if err != nil {
+			t.Fatalf("Run: %v", err)
+		}
+
+		if string(res.Stderr) != stderrContent {
+			t.Errorf("Stderr = %q, want unfiltered %q", string(res.Stderr), stderrContent)
+		}
+	})
+}
+
+// TestDropCodexSkillScanNoise is a direct table test of
+// dropCodexSkillScanNoise: only a line that both starts with
+// codexSkillScanPrefix and ends with codexSkillScanSuffix is dropped; every
+// other line, including partial matches, passes through unchanged.
+func TestDropCodexSkillScanNoise(t *testing.T) {
+	t.Parallel()
+
+	for _, tt := range []struct {
+		name  string
+		input string
+		want  string
+	}{
+		{
+			name:  "scan line dropped, other line kept",
+			input: codexSkillScanLine + "\nother line\n",
+			want:  "other line\n",
+		},
+		{
+			name:  "prefix match but wrong suffix is kept",
+			input: "failed to scan skill path X: No such file or directory\n",
+			want:  "failed to scan skill path X: No such file or directory\n",
+		},
+		{
+			name:  "suffix match but wrong prefix is kept",
+			input: "warning: Operation not permitted\n",
+			want:  "warning: Operation not permitted\n",
+		},
+		{
+			name:  "scan line with no trailing newline is still dropped",
+			input: "keep\n" + codexSkillScanLine,
+			want:  "keep\n",
+		},
+		{
+			name:  "empty input",
+			input: "",
+			want:  "",
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got := dropCodexSkillScanNoise([]byte(tt.input))
+			if string(got) != tt.want {
+				t.Errorf("dropCodexSkillScanNoise(%q) = %q, want %q", tt.input, string(got), tt.want)
+			}
+		})
+	}
+}
+
+// TestCodexRunLogsStderrKeptLen proves Codex.Run's "codex run" log line
+// carries stderr_kept_len (RunResult.Stderr's own length after filtering)
+// next to the raw stderr_len, and never logs the filtered stderr text
+// itself. Not parallel: it swaps the process-wide slog default
+// (TestRun_ErrStartLogsCause's own pattern, above).
+func TestCodexRunLogsStderrKeptLen(t *testing.T) {
+	dir := t.TempDir()
+	stderrContent := codexSkillScanLine + "\n"
+	stderrFile := writeCodexStderrFile(t, stderrContent)
+
+	var logBuf bytes.Buffer
+	prevDefault := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logBuf, &slog.HandlerOptions{Level: slog.LevelInfo})))
+	t.Cleanup(func() { slog.SetDefault(prevDefault) })
+
+	req := newFakeJudgeRequest(t, dir)
+	req.ExecPrefix = judgeExecPrefix
+	req.Env = append(req.Env, "FAKE_CODEX_STDERR_FILE="+stderrFile)
+
+	c := NewCodex(fakeCodexScript)
+	if _, err := c.Run(context.Background(), req); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	logged := logBuf.String()
+	var line string
+	for candidate := range strings.SplitSeq(logged, "\n") {
+		if strings.Contains(candidate, "codex run") {
+			line = candidate
+			break
+		}
+	}
+	if line == "" {
+		t.Fatalf("log missing a %q line; got:\n%s", "codex run", logged)
+	}
+	if !strings.Contains(line, "stderr_kept_len=0") {
+		t.Errorf("codex run line missing %q; got:\n%s", "stderr_kept_len=0", line)
+	}
+	if want := fmt.Sprintf("stderr_len=%d", len(stderrContent)); !strings.Contains(line, want) {
+		t.Errorf("codex run line missing %q; got:\n%s", want, line)
+	}
+	if strings.Contains(line, "failed to scan skill path") {
+		t.Errorf("codex run line leaks filtered stderr text; got:\n%s", line)
 	}
 }

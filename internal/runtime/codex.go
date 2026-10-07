@@ -71,13 +71,31 @@ func codexSandboxArgs(req RunRequest) ([]string, error) {
 	}
 }
 
-// codexSkillsOffSetting is the -c pair that turns off the judge's attempt to
-// scan its own skill directories, including `~/.agents/skills` (confirmed on
-// the host against Codex 0.160.0: `codex features list` names
-// `skip_host_skill_discovery`, and `codex exec -c features.skip_host_skill_discovery=true
-// --strict-config` accepts it as a known key; judge.sb already denies the
-// read at the OS level, so this is a second, best-effort layer).
-const codexSkillsOffSetting = "features.skip_host_skill_discovery=true"
+// codexSkillScanPrefix and codexSkillScanSuffix bound the one stderr line
+// dropCodexSkillScanNoise removes: Codex 0.160.0 tries to walk
+// ~/.agents/skills, judge.sb denies the read, and Codex logs
+// "failed to scan skill path file:///...: Operation not permitted" (run
+// 1453). No config key stops the walk (owner's host check, ticket #137
+// split): outside the sandbox the line never appears.
+const (
+	codexSkillScanPrefix = "failed to scan skill path"
+	codexSkillScanSuffix = "Operation not permitted"
+)
+
+// dropCodexSkillScanNoise returns stderr without the lines that start with
+// codexSkillScanPrefix and end with codexSkillScanSuffix; every other line
+// is kept byte for byte, newline included.
+func dropCodexSkillScanNoise(stderr []byte) []byte {
+	var out []byte
+	for line := range bytes.SplitAfterSeq(stderr, []byte("\n")) {
+		body := bytes.TrimSuffix(line, []byte("\n"))
+		if bytes.HasPrefix(body, []byte(codexSkillScanPrefix)) && bytes.HasSuffix(body, []byte(codexSkillScanSuffix)) {
+			continue
+		}
+		out = append(out, line...)
+	}
+	return out
+}
 
 // codexShellEnvVars are the req.Env names codexShellEnvArgs copies into
 // Codex's shell_environment_policy.set, in this order.
@@ -130,14 +148,12 @@ func codexShellEnvArgs(env []string) []string {
 // 4.6, D20). The forbidden --dangerously-bypass-approvals-and-sandbox flag
 // (real, and present in both --help outputs) never appears.
 //
-// A judge-job request also carries one judge-only "-c" pair right after the
-// sandbox flags: codexSkillsOffSetting. Codex 0.160.0's config schema (104
-// top-level fields) has no key that bounds how long one shell command may
-// run -- background_terminal_max_timeout only controls when a still-running
-// command is handed to a background terminal the agent polls, so it is not
-// a substitute -- and prompts/judge.md's own instruction to run a long check
-// in the background and poll it covers that case instead. Every other
-// job's argv is unchanged.
+// Codex 0.160.0's config schema (104 top-level fields) has no key that
+// bounds how long one shell command may run -- background_terminal_max_timeout
+// only controls when a still-running command is handed to a background
+// terminal the agent polls, so it is not a substitute -- and
+// prompts/judge.md's own instruction to run a long check in the background
+// and poll it covers that case instead.
 //
 // Every job, first turn and resume, also carries codexShellEnvArgs's own
 // "-c" pairs right before -m: shell_environment_policy.set.TMPDIR and
@@ -156,9 +172,6 @@ func codexArgv(req RunRequest, outPath string) ([]string, error) {
 	}
 	argv := []string{"exec", "--ignore-user-config", "--ignore-rules", "--skip-git-repo-check"}
 	argv = append(argv, sandboxArgs...)
-	if req.Job == response.JobJudge {
-		argv = append(argv, "-c", codexSkillsOffSetting)
-	}
 	argv = append(argv, codexShellEnvArgs(req.Env)...)
 	argv = append(argv, "-m", req.Model, "--json", "-o", outPath)
 	if req.SessionID != "" {
@@ -354,6 +367,13 @@ const maxFailureDetailBytes = 2048
 // non-empty line at all: a process that died before printing anything.
 const noStdoutFailureDetail = "codex wrote nothing to stdout"
 
+// codexEventError and codexEventTurnFailed are the two failure event types
+// codexFailureDetail and codexCommandRejection both read.
+const (
+	codexEventError      = "error"
+	codexEventTurnFailed = "turn.failed"
+)
+
 // codexFailureEventLine is the subset of one codex exec --json JSONL
 // event's fields codexFailureDetail reads: an "error" event's own message,
 // or a "turn.failed" event's error.message (Codex's documented event shape,
@@ -411,9 +431,9 @@ func codexFailureDetail(stdout []byte) (detail string, fromEvent bool) {
 		}
 		var msg string
 		switch ev.Type {
-		case "error":
+		case codexEventError:
 			msg = ev.Message
-		case "turn.failed":
+		case codexEventTurnFailed:
 			msg = ev.Error.Message
 		default:
 			continue
@@ -467,6 +487,104 @@ func codexTransientMatch(detail string) string {
 	return ""
 }
 
+// commandRejectionPhrase is the text Codex's command policy puts in every
+// refusal, such as "rm -f style commands are not permitted. Use a safer
+// approach" (#94).
+const commandRejectionPhrase = "are not permitted"
+
+// codexRejectionEventLine is the subset of one JSONL event that
+// codexCommandRejection reads.
+type codexRejectionEventLine struct {
+	Type    string `json:"type"`
+	Message string `json:"message"`
+	Error   struct {
+		Message string `json:"message"`
+	} `json:"error"`
+	Item struct {
+		Type             string `json:"type"`
+		Command          string `json:"command"`
+		AggregatedOutput string `json:"aggregated_output"`
+		Status           string `json:"status"`
+		ExitCode         *int   `json:"exit_code"`
+	} `json:"item"`
+}
+
+// codexCommandRejection finds Codex's refusal of a command (#94): the last
+// matching line in stdout, or failing that in stderr. It returns the
+// refused command (empty when the event names none) and the one line
+// holding commandRejectionPhrase, verbatim, or two empty strings. Only a
+// non-JSON line, an error or turn.failed event, or a command_execution
+// item that did not complete with exit code 0 counts. Agent messages,
+// reasoning, and successful commands that merely quote the phrase, such as
+// a cat of this file, never do.
+func codexCommandRejection(stdout, stderr []byte) (command, line string) {
+	for _, stream := range [][]byte{stdout, stderr} {
+		for raw := range bytes.SplitSeq(stream, []byte("\n")) {
+			raw = bytes.TrimSpace(raw)
+			if !bytes.Contains(raw, []byte(commandRejectionPhrase)) {
+				continue
+			}
+			var ev codexRejectionEventLine
+			if json.Unmarshal(raw, &ev) != nil {
+				command, line = "", string(raw)
+				continue
+			}
+			switch {
+			case ev.Item.Type == "command_execution":
+				clean := ev.Item.Status == "completed" && ev.Item.ExitCode != nil && *ev.Item.ExitCode == 0
+				if l := phraseLine(ev.Item.AggregatedOutput); l != "" && !clean {
+					command, line = strings.TrimSpace(ev.Item.Command), l
+				}
+			case ev.Item.Type != "":
+				// Any other item only quotes text; it never refuses.
+			case ev.Type == codexEventError:
+				if l := phraseLine(ev.Message); l != "" {
+					command, line = "", l
+				}
+			case ev.Type == codexEventTurnFailed:
+				if l := phraseLine(ev.Error.Message); l != "" {
+					command, line = "", l
+				}
+			}
+		}
+		if line != "" {
+			return command, line
+		}
+	}
+	return "", ""
+}
+
+// phraseLine returns the first trimmed line of s holding
+// commandRejectionPhrase, or "".
+func phraseLine(s string) string {
+	for l := range strings.SplitSeq(s, "\n") {
+		if l = strings.TrimSpace(l); strings.Contains(l, commandRejectionPhrase) {
+			return l
+		}
+	}
+	return ""
+}
+
+// codexRejectionDetail puts a command rejection in front of Codex's own
+// failure detail (owner decision Q2), so the 2048-byte cap never cuts the
+// cause: "codex refused a command: COMMAND: LINE; codex's own error:
+// DETAIL". It drops "COMMAND: " when command is empty, and drops the
+// detail half when detail is blank or already holds line. With no line it
+// returns detail unchanged.
+func codexRejectionDetail(command, line, detail string) string {
+	if line == "" {
+		return detail
+	}
+	head := "codex refused a command: " + line
+	if command != "" {
+		head = "codex refused a command: " + command + ": " + line
+	}
+	if strings.TrimSpace(detail) == "" || strings.Contains(detail, line) {
+		return CapFailureDetail(head)
+	}
+	return CapFailureDetail(head + "; codex's own error: " + detail)
+}
+
 // Run runs one turn of req.Job through the codex CLI (design section 4.1):
 // argv per codexArgv, the prompt on stdin (never in argv), the environment
 // per agentEnv (identical to Claude's), stdout capped and drained the same
@@ -518,6 +636,7 @@ func (c Codex) Run(ctx context.Context, req RunRequest) (RunResult, error) {
 		"exit_code", res.ExitCode,
 		"agent_seconds", Seconds(res.AgentTime),
 		"stderr_len", res.StderrLen,
+		"stderr_kept_len", len(res.Stderr),
 		"stderr_sha256", res.StderrSHA256,
 	)
 	return res, runErr
@@ -600,6 +719,9 @@ func (c Codex) run(ctx context.Context, req RunRequest, argv []string, outPath s
 		Stderr:       stderrCap.bytes(),
 		Stdout:       tail.bytes(),
 	}
+	if req.Job == response.JobJudge {
+		res.Stderr = dropCodexSkillScanNoise(res.Stderr)
+	}
 	res.FinalMessage = readFinalMessageFile(outPath)
 
 	if outcomeErr := classifyProcessOutcome(ctx, stdout.overflowed(), waitErr, res.ExitCode); outcomeErr != nil {
@@ -613,6 +735,10 @@ func (c Codex) run(ctx context.Context, req RunRequest, argv []string, outPath s
 			if fromEvent {
 				execErr.Transient = codexTransientMatch(res.FailureDetail)
 			}
+			// After the transient match, so a rejection's own text never
+			// makes a run retryable (#94).
+			command, line := codexCommandRejection(stdout.bytes(), res.Stderr)
+			res.FailureDetail = codexRejectionDetail(command, line, res.FailureDetail)
 		}
 		return res, outcomeErr
 	}

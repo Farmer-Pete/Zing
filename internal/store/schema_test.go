@@ -1,6 +1,8 @@
 package store
 
 import (
+	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"testing"
@@ -131,6 +133,82 @@ func TestValidate_BadPayloads(t *testing.T) {
 			}
 			if err.Error() != tt.want {
 				t.Errorf("validate(%s, %s, %s) = %q, want %q", tt.table, tt.typ, tt.payload, err.Error(), tt.want)
+			}
+		})
+	}
+}
+
+// TestValidate_FailuresWrapErrSchemaInvalid proves every validate failure
+// path (design section "store": ErrSchemaInvalid) satisfies
+// errors.Is(err, ErrSchemaInvalid) while keeping validate's exact message
+// text unchanged (#213's dispatcher fix depends on both: the sentinel to
+// recognize a schema failure, the text to show the owner what failed). The
+// invalid-JSON case also satisfies errors.As for the underlying
+// *json.SyntaxError, since schemaInvalidError.Unwrap returns the cause too.
+func TestValidate_FailuresWrapErrSchemaInvalid(t *testing.T) {
+	t.Parallel()
+
+	schemas, err := loadSchemas()
+	if err != nil {
+		t.Fatalf("loadSchemas: %v", err)
+	}
+
+	tests := []struct {
+		name       string
+		table      string
+		typ        string
+		payload    string
+		want       string
+		wantSyntax bool
+	}{
+		{
+			name:    "unknown type",
+			table:   testTableMessages,
+			typ:     "nope",
+			payload: `{}`,
+			want:    "payload does not match schema nope: /: no schema for messages/nope",
+		},
+		{
+			name:       "invalid JSON",
+			table:      testTableMessages,
+			typ:        testTypeQuestion,
+			payload:    `{not json`,
+			want:       "payload does not match schema question: /: invalid JSON: invalid character 'n' looking for beginning of object key string",
+			wantSyntax: true,
+		},
+		{
+			name:    "options null",
+			table:   testTableMessages,
+			typ:     testTypeQuestion,
+			payload: `{"key":"Q1","kind":"question","state":"open","recommended":"a","options":null}`,
+			want:    "payload does not match schema question: /options: got null, want array",
+		},
+		{
+			name:    "five option array over maxItems",
+			table:   testTableMessages,
+			typ:     testTypeQuestion,
+			payload: `{"key":"Q1","kind":"question","state":"open","recommended":"a","options":[{"key":"a","text":"a"},{"key":"b","text":"b"},{"key":"c","text":"c"},{"key":"d","text":"d"},{"key":"e","text":"e"}]}`,
+			want:    "payload does not match schema question: /options: maxItems: got 5, want 4",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			err := schemas.validate(tt.table, tt.typ, []byte(tt.payload))
+			if err == nil {
+				t.Fatalf("validate(%s, %s, %s) = nil, want error", tt.table, tt.typ, tt.payload)
+			}
+			if !errors.Is(err, ErrSchemaInvalid) {
+				t.Errorf("validate(%s, %s, %s): errors.Is(err, ErrSchemaInvalid) = false, want true", tt.table, tt.typ, tt.payload)
+			}
+			if err.Error() != tt.want {
+				t.Errorf("validate(%s, %s, %s) = %q, want %q", tt.table, tt.typ, tt.payload, err.Error(), tt.want)
+			}
+			if tt.wantSyntax {
+				if syntaxErr, ok := errors.AsType[*json.SyntaxError](err); !ok || syntaxErr == nil {
+					t.Errorf("validate(%s, %s, %s): errors.AsType[*json.SyntaxError](err) = %v, %v, want non-nil, true", tt.table, tt.typ, tt.payload, syntaxErr, ok)
+				}
 			}
 		})
 	}

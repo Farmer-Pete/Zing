@@ -34,16 +34,18 @@ the next step.
    behavior, negative, performance, or host. Add a check command where one
    command can decide it. Zing runs every check inside the build sandbox,
    which cannot start another sandbox. Write temporary files under
-   "$TMPDIR", never /tmp. Write only givens and checks an agent inside that
+   "$TMPDIR", never /tmp. For state a check must start without, write under
+   a fresh directory from mktemp -d, such as d=$(mktemp -d); Codex refuses
+   rm -f and rm -rf. Write only givens and checks an agent inside that
    sandbox can observe: no live zing serve, no machine outside the sandbox,
    and none of the owner's own config such as ~/.codex, ~/.claude, or the
-   console. The exception is kind host. Zing runs a host scenario's check
-   on the owner's machine at judging, outside any sandbox, once the owner
+   console. The exception is kind host. Zing runs a host scenario's check on
+   the owner's machine at judging, outside any sandbox, once the owner
    approves it at the gate. Use it for a live sandbox probe, a live zing
    serve, or wall-clock timing. A host scenario needs a check. Quote a
    check's glob, such as --include='*.go', and join a prose file's lines
-   before a multi-word grep, such as tr -s '[:space:]' ' ' < FILE | grep
-   -qF 'two words'. Done when a stranger could run every scenario and say
+   before a multi-word grep, such as tr -s '[:space:]' ' ' < FILE | grep -qF
+   'two words'. Done when a stranger could run every scenario and say
    pass or fail.
 
 5. Cut. Find the 20 percent of the work that gives 80 percent of the

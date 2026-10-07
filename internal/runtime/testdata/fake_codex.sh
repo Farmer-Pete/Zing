@@ -119,6 +119,9 @@ success)
   else
     printf '%s' "$default_result" > "$outfile"
   fi
+  if [ -n "${FAKE_CODEX_STDERR_FILE:-}" ]; then
+    cat "$FAKE_CODEX_STDERR_FILE" >&2
+  fi
   exit 0
   ;;
 exit_nonzero)
@@ -205,6 +208,30 @@ big_stderr)
 signal_kill)
   kill -TERM "$$"
   sleep 5
+  ;;
+command_rejected)
+  # Codex's command policy refuses a command (#94): a declined
+  # command_execution item carrying "are not permitted" in its aggregated
+  # output, then a turn.failed with its own, different message. The -o
+  # file is left exactly as Run created it (empty), so FinalMessage stays
+  # "".
+  printf '{"type":"thread.started","thread_id":"fake-codex-rejected-thread-id"}\n'
+  printf '{"type":"item.completed","item":{"id":"item_1","type":"command_execution","command":"rm -f s2.json","aggregated_output":"rm -f style commands are not permitted. Use a safer approach","exit_code":1,"status":"declined"}}\n'
+  printf '{"type":"turn.failed","error":{"message":"judge could not run its checks"}}\n'
+  exit 1
+  ;;
+command_rejected_long_stream)
+  # Same rejection as command_rejected, but followed by more than 64 KiB of
+  # filler lines before turn.failed: the declined item falls out of
+  # RunResult.Stdout (maxCodexStdoutBytes, the last 64 KiB) while
+  # codexCommandRejection still finds it because Codex.run passes it the
+  # head capWriter (up to 4 MiB), not the tail (#94 review finding r2f2).
+  printf '{"type":"thread.started","thread_id":"fake-codex-rejected-thread-id"}\n'
+  printf '{"type":"item.completed","item":{"id":"item_1","type":"command_execution","command":"rm -f s2.json","aggregated_output":"rm -f style commands are not permitted. Use a safer approach","exit_code":1,"status":"declined"}}\n'
+  filler=$(head -c 70000 /dev/zero | tr '\0' 'x')
+  printf '{"type":"item.completed","item":{"id":"item_2","type":"agent_message","text":"%s"}}\n' "$filler"
+  printf '{"type":"turn.failed","error":{"message":"judge could not run its checks"}}\n'
+  exit 1
   ;;
 *)
   echo "fake_codex: unknown FAKE_CODEX_MODE $mode_flag" >&2
