@@ -90,10 +90,11 @@ func proseElements(p Plan) []proseElem {
 // CheckPlan applies every design section 6.6 plan-checker rule to p: the
 // placeholder, vague-qualifier, performance-without-measurement,
 // scenario-leak, and host-scenario new-route rules over its prose and
-// scenarios, plus (when bug) the bug-plan-shape rules. Every path is
-// prefixed "plan". lists.Placeholders, lists.Vague, and lists.Units are
-// the sole source of their respective word lists, so tuning
-// checklists.toml actually changes what CheckPlan flags.
+// scenarios, plus (when bug) the bug-plan-shape rules. A prose-rule error's
+// path is prefixed "plan"; the host-scenario new-route rule reports at
+// scenarios/scenario[i]/check. lists.Placeholders, lists.Vague, and
+// lists.Units are the sole source of their respective word lists, so
+// tuning checklists.toml actually changes what CheckPlan flags.
 //
 // present is the document's Layer 1 presence set (design section 6.4): the
 // same map Validate already builds, gating every check below that would
@@ -222,7 +223,10 @@ func newRoutePaths(changes []Change) []string {
 	for i := range changes {
 		for _, m := range routeDecl.FindAllStringSubmatch(changes[i].After, -1) {
 			path := m[1]
-			if existing[path] || seen[path] || !literalSegment.MatchString(path) {
+			declaredBefore := existing[path]
+			duplicate := seen[path]
+			allWildcard := !literalSegment.MatchString(path)
+			if declaredBefore || duplicate || allWildcard {
 				continue
 			}
 			seen[path] = true
