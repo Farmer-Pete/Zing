@@ -1,6 +1,9 @@
 package tracker
 
-import "fmt"
+import (
+	"fmt"
+	"strings"
+)
 
 // disclosureFmt is the shared disclosure line every comment builder ends
 // with, naming the configured owner (Zing may run for more than one
@@ -90,4 +93,45 @@ func IssueRef(ref string) string {
 		}
 	}
 	return "#" + ref
+}
+
+// zingMarker opens every hidden marker Zing posts; replyPrefixLead opens
+// every review-thread reply; disclosureLead starts both disclosure forms.
+const (
+	zingMarker      = "<!-- zing:"
+	replyPrefixLead = "Zing (an AI agent)"
+	disclosureLead  = "Posted automatically by Zing"
+)
+
+// OwnerComments keeps the comments owner wrote, in order: author equal to
+// owner ignoring case, body not blank, and not one of Zing's own posts
+// (holding disclosureLead, opening with replyPrefixLead, or holding
+// zingMarker in any case). An empty owner keeps nothing.
+func OwnerComments(cs []Comment, owner string) []Comment {
+	if owner == "" {
+		return nil
+	}
+	var out []Comment
+	for _, c := range cs {
+		body := strings.TrimSpace(c.Body)
+		byOwner := strings.EqualFold(c.Author, owner)
+		zingPost := strings.Contains(body, disclosureLead) ||
+			strings.HasPrefix(body, replyPrefixLead) ||
+			strings.Contains(strings.ToLower(body), zingMarker)
+		if byOwner && body != "" && !zingPost {
+			out = append(out, c)
+		}
+	}
+	return out
+}
+
+// RenderComments renders cs as the text stored in tickets.owner_comments:
+// one block per comment, "Comment by AUTHOR:" then its trimmed body,
+// blocks joined by one blank line. No comments renders "".
+func RenderComments(cs []Comment) string {
+	blocks := make([]string, len(cs))
+	for i, c := range cs {
+		blocks[i] = "Comment by " + c.Author + ":\n" + strings.TrimSpace(c.Body)
+	}
+	return strings.Join(blocks, "\n\n")
 }
