@@ -385,12 +385,13 @@ func TestUpdateLineJudgeShippingRespondMarkers(t *testing.T) {
 	}
 }
 
-// TestUpdateLineFixMarkers proves job/fix.go's own two marker shapes --
-// "fix requested <kind> after run <R>" (fixRequestMessage) and "fix landed
-// <mid> sha <sha>" (building.go's land and its adopted-commit twin) -- each
-// render as their own owner-facing sentence (task D31-4a: cmd/zing's e2e
-// second guard caught the real pipeline writing the first of these with no
-// updateMarker* case recognizing it).
+// TestUpdateLineFixMarkers proves job/fix.go's own three marker shapes --
+// "fix requested <kind> after run <R>" (fixRequestMessage), "fix landed
+// <mid> sha <sha>" (building.go's land and its adopted-commit twin), and
+// "fix dropped <mid>" (judging.go's rejudgeWithoutFix) -- each render as
+// their own owner-facing sentence (task D31-4a: cmd/zing's e2e second guard
+// caught the real pipeline writing the first of these with no updateMarker*
+// case recognizing it).
 func TestUpdateLineFixMarkers(t *testing.T) {
 	t.Parallel()
 	const sha = "0123456789abcdef0123456789abcdef01234567"
@@ -416,6 +417,8 @@ func TestUpdateLineFixMarkers(t *testing.T) {
 			"Fix requested after run 8 (threads):\n2 threads need a reply",
 		},
 		{"fix landed", "fix landed 3 sha " + sha, "Fix landed at 0123456."},
+		{"fix dropped", "fix dropped 5", "Fix dropped; judging again."},
+		{"fix dropped with a malformed id", "fix dropped oops", "fix dropped oops"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -902,15 +905,17 @@ var markerShapeCases = []struct{ name, body string }{
 	},
 	{"respond applied", "respond applied 7\nreplied 3 fixing 1 skipped 0"},
 	{"fix replies posted", "fix replies posted 8"},
-	// fix requested/landed (internal/job/fix.go's fixRequestMessage,
-	// building.go's two land call sites, and judging.go's, reviewing.go's,
-	// and shipping.go's own fixRequested*Prefix constants): fixUpdateLine's
+	// fix requested/landed/dropped (internal/job/fix.go's
+	// fixRequestMessage, building.go's two land call sites,
+	// judging.go's rejudgeWithoutFix, and reviewing.go's and
+	// shipping.go's own fixRequested*Prefix constants): fixUpdateLine's
 	// own case.
 	{"fix requested failure", "fix requested failure after run 5\nthe scenario still fails"},
 	{"fix requested findings", "fix requested findings after run 5\n2 findings remain"},
 	{"fix requested ci_log", "fix requested ci_log after run 5\nthe build step failed"},
 	{"fix requested threads", "fix requested threads after run 5\n2 threads need a reply"},
 	{"fix landed", "fix landed 3 sha 0123456789abcdef0123456789abcdef01234567"},
+	{"fix dropped", "fix dropped 5"},
 	// D31's own conversation markers (store/reserve.go, conversation_reads.go).
 	{"conversation pending", testBodyConversationPending},
 	{"conversation delivered", "conversation delivered run 31 batch 4"},
@@ -1144,6 +1149,36 @@ func TestUnknownMarkerIsADivider(t *testing.T) {
 	}
 }
 
+// TestFixDroppedMarkerRendersAsThreadLine proves ticket #108: an unparented
+// "fix dropped <mid>" row (judging.go's rejudgeWithoutFix, written when the
+// owner picks "Judge again without a fix") renders as one thread divider
+// reading "Fix dropped; judging again.", not a raw update card showing the
+// marker's own internal text.
+func TestFixDroppedMarkerRendersAsThreadLine(t *testing.T) {
+	t.Parallel()
+	row := store.MessageRow{Message: store.Message{Type: msgTypeUpdate, Author: authorSystem, Body: "fix dropped 5"}} //nolint:modernize // keyed on purpose
+
+	got, err := buildThreadRows(&store.Ticket{}, []store.MessageRow{row}, nil, nil, nil, nil, store.PlanningConversation{}, "The agent")
+	if err != nil {
+		t.Fatalf("buildThreadRows: %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("buildThreadRows returned %d rows, want 1: %+v", len(got), got)
+	}
+	if !got[0].Divider {
+		t.Errorf("fix dropped marker did not render as a divider: %+v", got[0])
+	}
+	if got[0].Question != nil {
+		t.Errorf("fix dropped marker rendered a question group: %+v", got[0])
+	}
+	if got[0].Body != "Fix dropped; judging again." {
+		t.Errorf("divider body = %q, want %q", got[0].Body, "Fix dropped; judging again.")
+	}
+	if strings.Contains(got[0].Body, "fix dropped 5") {
+		t.Errorf("divider body = %q, want no raw marker text", got[0].Body)
+	}
+}
+
 // TestConversationMarkersHidden proves D31's own "conversation pending" and
 // "conversation delivered" markers (store/reserve.go,
 // store/conversation_reads.go) never render in the Thread view at all --
@@ -1186,6 +1221,11 @@ func TestMarkerRecognized(t *testing.T) {
 		{
 			"a deliberately hidden marker is recognized",
 			store.MessageRow{Message: store.Message{Type: msgTypeUpdate, Author: authorSystem, Body: testBodyConversationPending}}, //nolint:modernize // keyed on purpose
+			true,
+		},
+		{
+			"a fix dropped marker is recognized",
+			store.MessageRow{Message: store.Message{Type: msgTypeUpdate, Author: authorSystem, Body: "fix dropped 5"}}, //nolint:modernize // keyed on purpose
 			true,
 		},
 		{
