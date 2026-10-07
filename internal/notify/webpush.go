@@ -7,10 +7,17 @@ import (
 	"crypto/aes"
 	"crypto/cipher"
 	"crypto/ecdh"
+	"crypto/ecdsa"
 	"crypto/hkdf"
+	"crypto/rand"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/binary"
+	"encoding/json"
+	"errors"
 	"fmt"
+	"net/url"
+	"time"
 )
 
 // maxPayloadBytes is the largest plaintext encrypt accepts: the aes128gcm
@@ -104,4 +111,59 @@ func encrypt(payload, uaPublic, authSecret, salt []byte, asPriv *ecdh.PrivateKey
 	body = append(body, ciphertext...)
 
 	return body, nil
+}
+
+// vapidExpiry is how far in the future vapidJWT sets the exp claim (RFC 8292
+// recommends at most 24 hours).
+const vapidExpiry = 12 * time.Hour
+
+// vapidJWTHeader is the fixed VAPID JWT header (RFC 8292 section 2): ES256
+// over a compact JWT.
+type vapidJWTHeader struct {
+	Typ string `json:"typ"`
+	Alg string `json:"alg"`
+}
+
+// vapidJWTClaims is the VAPID JWT claim set (RFC 8292 section 2). Sub
+// identifies the sender to the push service, as a mailto: or https: URL.
+type vapidJWTClaims struct {
+	Aud string `json:"aud"`
+	Exp int64  `json:"exp"`
+	Sub string `json:"sub"`
+}
+
+// vapidJWT builds and signs a compact VAPID JWT (RFC 8292) for a POST to
+// endpoint, with sub as the contact claim. now is the signing time; exp is
+// set to now plus vapidExpiry. It returns the error "invalid endpoint"
+// without wrapping when endpoint fails to parse or lacks a scheme or host,
+// since a wrapped url.Parse error would quote endpoint.
+func vapidJWT(priv *ecdsa.PrivateKey, endpoint, sub string, now time.Time) (string, error) {
+	u, err := url.Parse(endpoint)
+	if err != nil || u.Scheme == "" || u.Host == "" {
+		return "", errors.New("invalid endpoint")
+	}
+	aud := u.Scheme + "://" + u.Host
+
+	headerJSON, err := json.Marshal(vapidJWTHeader{Typ: "JWT", Alg: "ES256"})
+	if err != nil {
+		return "", fmt.Errorf("notify: marshal vapid jwt header: %w", err)
+	}
+	claimsJSON, err := json.Marshal(vapidJWTClaims{Aud: aud, Exp: now.Add(vapidExpiry).Unix(), Sub: sub})
+	if err != nil {
+		return "", fmt.Errorf("notify: marshal vapid jwt claims: %w", err)
+	}
+
+	signingInput := base64.RawURLEncoding.EncodeToString(headerJSON) + "." + base64.RawURLEncoding.EncodeToString(claimsJSON)
+	digest := sha256.Sum256([]byte(signingInput))
+
+	r, s, err := ecdsa.Sign(rand.Reader, priv, digest[:])
+	if err != nil {
+		return "", fmt.Errorf("notify: sign vapid jwt: %w", err)
+	}
+
+	sig := make([]byte, 64)
+	r.FillBytes(sig[:32])
+	s.FillBytes(sig[32:])
+
+	return signingInput + "." + base64.RawURLEncoding.EncodeToString(sig), nil
 }

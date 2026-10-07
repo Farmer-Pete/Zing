@@ -5,14 +5,20 @@ import (
 	"crypto/aes"
 	"crypto/cipher"
 	"crypto/ecdh"
+	"crypto/ecdsa"
+	"crypto/elliptic"
 	"crypto/hkdf"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/binary"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"math/big"
+	"strings"
 	"testing"
+	"time"
 )
 
 // decryptForTest implements the receiver half of RFC 8291 section 3.4: given
@@ -177,5 +183,61 @@ func TestEncrypt_RoundTripsThroughReceiver(t *testing.T) {
 	}
 	if !bytes.Equal(gotAppendix, []byte("When I grow up, I want to be a watermelon")) {
 		t.Fatalf("decryptForTest(appendix) = %q", gotAppendix)
+	}
+}
+
+func TestVAPIDJWT_SignsES256WithClaims(t *testing.T) {
+	priv, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatalf("generate vapid key: %v", err)
+	}
+	const sub = "mailto:owner@example.com"
+	now := time.Date(2026, 10, 7, 15, 4, 5, 0, time.UTC)
+
+	tok, err := vapidJWT(priv, "https://push.example/subscription/abc", sub, now)
+	if err != nil {
+		t.Fatalf("vapidJWT: %v", err)
+	}
+
+	parts := strings.Split(tok, ".")
+	if len(parts) != 3 {
+		t.Fatalf("token has %d parts, want 3: %q", len(parts), tok)
+	}
+
+	claimsJSON, err := base64.RawURLEncoding.DecodeString(parts[1])
+	if err != nil {
+		t.Fatalf("decode claims: %v", err)
+	}
+	var claims vapidJWTClaims
+	if err = json.Unmarshal(claimsJSON, &claims); err != nil {
+		t.Fatalf("unmarshal claims: %v", err)
+	}
+	if claims.Aud != "https://push.example" {
+		t.Errorf("aud = %q, want https://push.example", claims.Aud)
+	}
+	if claims.Sub != sub {
+		t.Errorf("sub = %q, want %q", claims.Sub, sub)
+	}
+	wantExp := now.Add(12 * time.Hour).Unix()
+	if claims.Exp != wantExp {
+		t.Errorf("exp = %d, want %d", claims.Exp, wantExp)
+	}
+
+	sig, err := base64.RawURLEncoding.DecodeString(parts[2])
+	if err != nil {
+		t.Fatalf("decode signature: %v", err)
+	}
+	if len(sig) != 64 {
+		t.Fatalf("signature is %d bytes, want 64", len(sig))
+	}
+	r := new(big.Int).SetBytes(sig[:32])
+	s := new(big.Int).SetBytes(sig[32:])
+	digest := sha256.Sum256([]byte(parts[0] + "." + parts[1]))
+	if !ecdsa.Verify(&priv.PublicKey, digest[:], r, s) {
+		t.Fatal("signature does not verify")
+	}
+
+	if _, err := vapidJWT(priv, "http://%zz", sub, now); err == nil || err.Error() != "invalid endpoint" {
+		t.Fatalf("vapidJWT(bad endpoint) error = %v, want \"invalid endpoint\"", err)
 	}
 }
