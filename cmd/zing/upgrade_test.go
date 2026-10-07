@@ -1,12 +1,89 @@
 package main
 
 import (
+	"context"
+	"errors"
+	"log/slog"
+	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 
 	"zing/internal/store"
 )
+
+// fakeSteps is a test double for upgradeSteps that records every Build call
+// and returns canned results for both Build and Selftest.
+type fakeSteps struct {
+	mu         sync.Mutex
+	buildCalls []string
+
+	buildSHA string
+	buildErr error
+
+	selftestVersion string
+	selftestOutput  string
+	selftestErr     error
+}
+
+func (f *fakeSteps) Build(_ context.Context, sha, out string) (string, error) {
+	f.mu.Lock()
+	f.buildCalls = append(f.buildCalls, sha)
+	f.mu.Unlock()
+	if f.buildErr != nil {
+		return "", f.buildErr
+	}
+	if err := os.WriteFile(out, []byte("new"), 0o755); err != nil {
+		return "", err
+	}
+	return f.buildSHA, nil
+}
+
+func (f *fakeSteps) Selftest(_ context.Context, _ string) (version, output string, err error) {
+	if f.selftestErr != nil {
+		return "", f.selftestOutput, f.selftestErr
+	}
+	return f.selftestVersion, f.selftestOutput, nil
+}
+
+func (f *fakeSteps) calls() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]string(nil), f.buildCalls...)
+}
+
+// newTestUpgrader builds an upgrader whose DATA_DIR is a fresh t.TempDir,
+// with bin/zing holding "old", exe set to that path, running set to
+// 0123456789ab, and a fresh *fakeSteps as its steps.
+func newTestUpgrader(t *testing.T) (*upgrader, *fakeSteps) {
+	t.Helper()
+
+	dataDir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(dataDir, "bin"), 0o755); err != nil {
+		t.Fatalf("mkdir bin: %v", err)
+	}
+	binPath := filepath.Join(dataDir, "bin", "zing")
+	if err := os.WriteFile(binPath, []byte("old"), 0o755); err != nil {
+		t.Fatalf("write bin/zing: %v", err)
+	}
+
+	st, err := store.Open(t.Context(), filepath.Join(dataDir, "zing.db"))
+	if err != nil {
+		t.Fatalf("store.Open: %v", err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+
+	steps := &fakeSteps{}
+	u := &upgrader{
+		dataDir: dataDir,
+		exe:     binPath,
+		running: "0123456789ab",
+		store:   st,
+		steps:   steps,
+	}
+	return u, steps
+}
 
 // TestRedactURLs proves redactURLs replaces a URL's userinfo with REDACTED
 // and leaves text with no URL unchanged.
@@ -113,5 +190,210 @@ func TestTellOwner_PostsOnlyForTicket(t *testing.T) {
 	}
 	if len(after) != 1 {
 		t.Fatalf("ListMessages after ticket_id 0 = %d messages, want still 1", len(after))
+	}
+}
+
+// TestMatchesRunning proves the stamped-and-prefix rule matchesRunning
+// applies to a version string.
+func TestMatchesRunning(t *testing.T) {
+	t.Parallel()
+
+	sha := "0123456789abcdef0123456789abcdef01234567"
+	cases := []struct {
+		name    string
+		sha     string
+		running string
+		want    bool
+	}{
+		{"full sha matches", sha, "0123456789ab", true},
+		{"devel is unstamped", sha, "devel", false},
+		{"dirty suffix is unstamped", sha, "0123456789ab-dirty", false},
+		{"too short a prefix", sha, "012345", false},
+		{"different sha", sha, "fedcba987654", false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			t.Parallel()
+			if got := matchesRunning(c.sha, c.running); got != c.want {
+				t.Errorf("matchesRunning(%q, %q) = %v, want %v", c.sha, c.running, got, c.want)
+			}
+		})
+	}
+}
+
+// TestUpgrade_PrepareBacksUpAndKeepsPrev proves a successful prepare builds,
+// selftests, backs up, hard-links zing.prev, and returns the restart target,
+// logging one step per stage.
+func TestUpgrade_PrepareBacksUpAndKeepsPrev(t *testing.T) {
+	t.Parallel()
+
+	u, steps := newTestUpgrader(t)
+	builtSHA := "fedcba9876540123456789abcdef012345678900"
+	steps.buildSHA = builtSHA
+	steps.selftestVersion = builtSHA
+	steps.selftestOutput = "ok"
+
+	var logs strings.Builder
+	oldLogger := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logs, nil)))
+	t.Cleanup(func() { slog.SetDefault(oldLogger) })
+
+	ticketID := seedTicketForUpgrade(t, u.store)
+	req := upgradeRequest{TicketID: ticketID, SHA: "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef"}
+
+	rt, err := u.prepare(t.Context(), req)
+	if err != nil {
+		t.Fatalf("prepare: %v", err)
+	}
+
+	binary := filepath.Join(u.dataDir, "bin", "zing")
+	if rt.Binary != binary || rt.Next != binary+".next" || rt.FromSHA != u.running || rt.ToSHA != builtSHA || rt.TicketID != ticketID {
+		t.Fatalf("restartTarget = %+v", rt)
+	}
+
+	nextBytes, err := os.ReadFile(binary + ".next")
+	if err != nil || string(nextBytes) != "new" {
+		t.Errorf("zing.next = %q, %v, want \"new\"", nextBytes, err)
+	}
+	prevBytes, err := os.ReadFile(binary + ".prev")
+	if err != nil || string(prevBytes) != "old" {
+		t.Errorf("zing.prev = %q, %v, want \"old\"", prevBytes, err)
+	}
+	binBytes, err := os.ReadFile(binary)
+	if err != nil || string(binBytes) != "old" {
+		t.Errorf("bin/zing = %q, %v, want \"old\"", binBytes, err)
+	}
+	binInfo, err := os.Stat(binary)
+	if err != nil {
+		t.Fatalf("stat bin/zing: %v", err)
+	}
+	prevInfo, err := os.Stat(binary + ".prev")
+	if err != nil {
+		t.Fatalf("stat zing.prev: %v", err)
+	}
+	if !os.SameFile(binInfo, prevInfo) {
+		t.Errorf("zing.prev does not share bin/zing's inode")
+	}
+
+	backupPath := filepath.Join(u.dataDir, backupPrefix+sha12(builtSHA))
+	backup, err := store.Open(t.Context(), backupPath)
+	if err != nil {
+		t.Fatalf("open backup: %v", err)
+	}
+	defer func() { _ = backup.Close() }()
+	if err := backup.VerifyTables(t.Context()); err != nil {
+		t.Errorf("VerifyTables on backup: %v", err)
+	}
+
+	logged := logs.String()
+	for _, step := range []string{"install_check", "build", "selftest", "version_check", "backup", "keep_prev"} {
+		if !strings.Contains(logged, "step="+step) {
+			t.Errorf("logs missing step %s:\n%s", step, logged)
+		}
+	}
+}
+
+// TestUpgrade_IgnoresDevBuildBinary proves install_check refuses to run when
+// the running executable is not DATA_DIR/bin/zing.
+func TestUpgrade_IgnoresDevBuildBinary(t *testing.T) {
+	t.Parallel()
+
+	u, steps := newTestUpgrader(t)
+	u.exe = filepath.Join(t.TempDir(), "dev-build-of-zing")
+
+	ticketID := seedTicketForUpgrade(t, u.store)
+	req := upgradeRequest{TicketID: ticketID, SHA: "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef"}
+
+	_, err := u.prepare(t.Context(), req)
+	if !errors.Is(err, errUpgradeNotRun) {
+		t.Fatalf("prepare error = %v, want errUpgradeNotRun", err)
+	}
+	if len(steps.calls()) != 0 {
+		t.Errorf("Build called %d times, want 0", len(steps.calls()))
+	}
+
+	msgs, err := u.store.ListMessages(t.Context(), ticketID)
+	if err != nil {
+		t.Fatalf("ListMessages: %v", err)
+	}
+	if len(msgs) != 1 {
+		t.Fatalf("ListMessages = %d, want 1", len(msgs))
+	}
+	binary := filepath.Join(u.dataDir, "bin", "zing")
+	want := "upgrade: not run: serve runs " + u.exe + ", not " + binary
+	if msgs[0].Body != want {
+		t.Errorf("message = %q, want %q", msgs[0].Body, want)
+	}
+
+	for _, suffix := range []string{".next", ".prev"} {
+		if _, statErr := os.Stat(binary + suffix); !os.IsNotExist(statErr) {
+			t.Errorf("%s exists, want absent", binary+suffix)
+		}
+	}
+	matches, err := filepath.Glob(filepath.Join(u.dataDir, backupPrefix+"*"))
+	if err != nil {
+		t.Fatalf("glob: %v", err)
+	}
+	if len(matches) != 0 {
+		t.Errorf("backups = %v, want none", matches)
+	}
+}
+
+// TestUpgrade_UnstampedBuildKeepsOldBinary proves version_check refuses an
+// unstamped or dirty zing.next, removes it, posts the message, and leaves
+// bin/zing and the backups untouched.
+func TestUpgrade_UnstampedBuildKeepsOldBinary(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name    string
+		version string
+	}{
+		{"devel", "devel"},
+		{"dirty", "fedcba987654-dirty"},
+	}
+
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			t.Parallel()
+
+			u, steps := newTestUpgrader(t)
+			builtSHA := "fedcba9876540123456789abcdef012345678900"
+			steps.buildSHA = builtSHA
+			steps.selftestVersion = c.version
+
+			ticketID := seedTicketForUpgrade(t, u.store)
+			req := upgradeRequest{TicketID: ticketID, SHA: "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef"}
+
+			_, err := u.prepare(t.Context(), req)
+			wantErr := "upgrade: zing.next reports version " + c.version + ", not " + builtSHA
+			if err == nil || err.Error() != wantErr {
+				t.Fatalf("prepare error = %v, want %q", err, wantErr)
+			}
+
+			binary := filepath.Join(u.dataDir, "bin", "zing")
+			if _, statErr := os.Stat(binary + ".next"); !os.IsNotExist(statErr) {
+				t.Errorf("zing.next exists, want removed")
+			}
+			binBytes, err := os.ReadFile(binary)
+			if err != nil || string(binBytes) != "old" {
+				t.Errorf("bin/zing = %q, %v, want unchanged \"old\"", binBytes, err)
+			}
+			matches, err := filepath.Glob(filepath.Join(u.dataDir, backupPrefix+"*"))
+			if err != nil {
+				t.Fatalf("glob: %v", err)
+			}
+			if len(matches) != 0 {
+				t.Errorf("backups = %v, want none", matches)
+			}
+
+			msgs, err := u.store.ListMessages(t.Context(), ticketID)
+			if err != nil {
+				t.Fatalf("ListMessages: %v", err)
+			}
+			if len(msgs) != 1 || msgs[0].Body != wantErr {
+				t.Fatalf("messages = %+v, want one message %q", msgs, wantErr)
+			}
+		})
 	}
 }
