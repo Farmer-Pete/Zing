@@ -209,6 +209,7 @@ func resolvePostBuildEscalation(ctx context.Context, t store.Ticket, d Deps, rou
 	errorText := payload.What + "\n" + payload.Why + "\n" + payload.Tried
 	origin := response.EscalationOrigin(payload.Origin)
 	reviewLoops := origin == response.EscalationOriginReview && payload.Code == string(response.EscalationCodeLoopsExhausted)
+	judgeNotPassedInShipping := payload.What == judgeNotPassedWhat && t.State == stateShipping
 
 	if reviewLoops && choice == escalationChoiceAccept && newestChosenOption(round.Answers) == "" {
 		slog.Info("review loops_exhausted reply-only answer resolves as retry", "ticket_id", t.ID, "run_id", int64OrZero(escMsg.RunID), "recommended", escalationChoiceAccept)
@@ -276,7 +277,7 @@ func resolvePostBuildEscalation(ctx context.Context, t store.Ticket, d Deps, rou
 	case origin == response.EscalationOriginShipping && payload.Code == string(response.EscalationCodeLoopsExhausted):
 		commit, err = shipHandler{}.retryShippingLoopsExhausted(ctx, t, d, resolveIDs, notes, payload.Tried)
 
-	case origin == response.EscalationOriginShipping && payload.What == judgeNotPassedWhat && t.State == stateShipping:
+	case origin == response.EscalationOriginShipping && judgeNotPassedInShipping:
 		commit = shipHandler{}.retryJudgeNotPassed(t, d, resolveIDs)
 
 	case origin == response.EscalationOriginShipping:

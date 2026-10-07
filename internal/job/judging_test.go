@@ -508,21 +508,16 @@ func judgeAdvanceStart(t *testing.T, s *store.Store, rt runtime.Runtime, ticket 
 	return pbGetTicket(t, s, ticket.ID)
 }
 
-// ---- TestJudgeMergedSinceStart -----------------------------------------------
+// ---- TestJudgeMergedSince -----------------------------------------------
 
-// TestJudgeMergedSinceStart proves judgeMergedSinceStart's own table (#95):
-// a landed base merge row with an id newer than round n's own started
-// marker means true, a closed row or a bare request row never does
-// regardless of its id, and a round with no started marker of its own is
-// the same "has no started marker" error judgeStartedSHA returns.
-func TestJudgeMergedSinceStart(t *testing.T) {
+// TestJudgeMergedSince proves judgeMergedSince's own table (#95): a landed
+// base merge row with an id newer than startedID means true, and a closed
+// row or a bare request row never does regardless of its id.
+func TestJudgeMergedSince(t *testing.T) {
 	t.Parallel()
 
 	row := func(id int64, body string) store.MessageRow {
 		return store.MessageRow{ID: id, Message: store.Message{Body: body}} //nolint:modernize // keyed on purpose: MessageRow's ID and CreatedAt fields precede the embedded Message, so the key cannot be dropped
-	}
-	started := func(id int64, n int) store.MessageRow {
-		return row(id, fmt.Sprintf("judge round %d started sha %s after run 1", n, strings.Repeat("a", 40)))
 	}
 	landed := func(id int64) store.MessageRow {
 		return row(id, baseMergeLandedBody(id, strings.Repeat("b", 40)))
@@ -537,78 +532,48 @@ func TestJudgeMergedSinceStart(t *testing.T) {
 
 	cases := []struct {
 		name      string
-		markers   []store.MessageRow
 		mergeRows []store.MessageRow
-		n         int
+		startedID int64
 		want      bool
-		wantErr   bool
 	}{
 		{
 			name:      "landed newer than the started marker",
-			markers:   []store.MessageRow{started(1, 2)},
 			mergeRows: []store.MessageRow{landed(2)},
-			n:         2,
+			startedID: 1,
 			want:      true,
 		},
 		{
 			name:      "landed older than the started marker",
-			markers:   []store.MessageRow{started(2, 2)},
 			mergeRows: []store.MessageRow{landed(1)},
-			n:         2,
+			startedID: 2,
 			want:      false,
 		},
 		{
 			name:      "closed newer than the started marker",
-			markers:   []store.MessageRow{started(1, 2)},
 			mergeRows: []store.MessageRow{closed(2)},
-			n:         2,
+			startedID: 1,
 			want:      false,
 		},
 		{
 			name:      "a bare request row newer than the started marker",
-			markers:   []store.MessageRow{started(1, 2)},
 			mergeRows: []store.MessageRow{requested(2)},
-			n:         2,
+			startedID: 1,
 			want:      false,
 		},
 		{
-			name:      "round 1 started, round 2 started after the landing: false for round 2",
-			markers:   []store.MessageRow{started(1, 1), started(3, 2)},
+			name:      "round 1's landing is not newer than round 2's own started marker",
 			mergeRows: []store.MessageRow{landed(2)},
-			n:         2,
+			startedID: 3,
 			want:      false,
-		},
-		{
-			name:      "round 1 started, round 2 started after the landing: true for round 1",
-			markers:   []store.MessageRow{started(1, 1), started(3, 2)},
-			mergeRows: []store.MessageRow{landed(2)},
-			n:         1,
-			want:      true,
-		},
-		{
-			name:      "no started marker for n",
-			markers:   nil,
-			mergeRows: []store.MessageRow{landed(1)},
-			n:         1,
-			wantErr:   true,
 		},
 	}
 
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			t.Parallel()
-			got, err := judgeMergedSinceStart(c.markers, c.mergeRows, c.n)
-			if c.wantErr {
-				if err == nil {
-					t.Fatal("err = nil, want an error")
-				}
-				return
-			}
-			if err != nil {
-				t.Fatalf("judgeMergedSinceStart: %v", err)
-			}
+			got := judgeMergedSince(c.mergeRows, c.startedID)
 			if got != c.want {
-				t.Errorf("judgeMergedSinceStart = %v, want %v", got, c.want)
+				t.Errorf("judgeMergedSince = %v, want %v", got, c.want)
 			}
 		})
 	}
@@ -2310,6 +2275,51 @@ func TestJudgeCapResumesRetryStartsFresh(t *testing.T) {
 	}
 	if freshCommit.Session == nil || freshCommit.Session.ID == nil || *freshCommit.Session.ID == sessionID {
 		t.Errorf("freshCommit.Session = %+v, want a freshly minted session (not the exhausted one, %d)", freshCommit.Session, sessionID)
+	}
+}
+
+// TestJudgeRetryStartsNewRoundAfterBaseMergeLanded proves Run's retry
+// branch guard (#95, review finding r1f1): with round 1's own started
+// marker, then a landed base merge row newer than it, then a round 1 retry
+// marker as the newest marker, Run must start round 2 through h.start
+// rather than resume round 1 at its own started sha.
+func TestJudgeRetryStartsNewRoundAfterBaseMergeLanded(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow end-to-end flow; runs in the full suite")
+	}
+	t.Parallel()
+	s, ticket := judgeTicketReady(t)
+	rt := runtime.NewFake(judgeScriptsFS(judgeOkBothScript))
+	ticket = judgeAdvanceStart(t, s, rt, ticket)
+
+	markers, err := s.MarkersWithPrefix(t.Context(), ticket.ID, judgeRoundMarkerPrefix)
+	if err != nil {
+		t.Fatalf("MarkersWithPrefix: %v", err)
+	}
+	if len(markers) != 1 {
+		t.Fatalf("markers = %+v, want exactly round 1's own started marker", markers)
+	}
+
+	if _, insertErr := s.InsertMessage(t.Context(), store.Message{
+		TicketID: ticket.ID, Type: msgTypeUpdate, Author: authorSystem,
+		Body: baseMergeLandedBody(1, strings.Repeat("d", 40)),
+	}); insertErr != nil {
+		t.Fatalf("InsertMessage(landed): %v", insertErr)
+	}
+	if _, insertErr := s.InsertMessage(t.Context(), store.Message{
+		TicketID: ticket.ID, Type: msgTypeUpdate, Author: authorSystem,
+		Body: "judge round 1 retry after run 1",
+	}); insertErr != nil {
+		t.Fatalf("InsertMessage(retry): %v", insertErr)
+	}
+
+	deps := pbClaim(t, s, rt, ticket.ID)
+	commit, err := (judgeHandler{}).Run(t.Context(), pbGetTicket(t, s, ticket.ID), deps)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if len(commit.Messages) != 1 || !strings.HasPrefix(commit.Messages[0].Body, "judge round 2 started sha ") {
+		t.Fatalf("commit.Messages = %+v, want a \"judge round 2 started sha\" marker, not a round 1 resume", commit.Messages)
 	}
 }
 
