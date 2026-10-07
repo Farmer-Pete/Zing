@@ -9,7 +9,9 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -20,6 +22,7 @@ import (
 
 	"zing/internal/bus"
 	"zing/internal/console"
+	"zing/internal/dispatch"
 	"zing/internal/response"
 	"zing/internal/store"
 )
@@ -1611,5 +1614,96 @@ func TestRail_StallHiddenWhenTerminal(t *testing.T) {
 
 	if strings.Contains(rail, "rail-stall") {
 		t.Errorf("rail should hide the stall section for a terminal ticket; got:\n%s", rail)
+	}
+}
+
+// fakeSlots is a console.SlotSource a test can seed with a fixed snapshot,
+// standing in for a real dispatch.Dispatcher (owner decision Q5): Slots
+// always returns the exact dispatch.SlotSnapshot the test constructed it
+// with.
+type fakeSlots dispatch.SlotSnapshot
+
+func (f fakeSlots) Slots() dispatch.SlotSnapshot { return dispatch.SlotSnapshot(f) }
+
+// newStallTestServer is newTestServerConfig's own listener-reservation and
+// placeholder-swap recipe (console_test.go), narrowed to what the stall
+// tests need: a real machine (testMachine) so the rail renders a stall
+// section at all, and slots wired through console.WithSlots so decideStall's
+// running, claim_dead, and slot reasons can fire.
+func newStallTestServer(t *testing.T, s *store.Store, b *bus.Broker, slots console.SlotSource) *httptest.Server {
+	t.Helper()
+
+	var lc net.ListenConfig
+	ln, err := lc.Listen(t.Context(), "tcp", testBindHost+":0")
+	if err != nil {
+		t.Fatalf("reserve a listener: %v", err)
+	}
+	addr, ok := ln.Addr().(*net.TCPAddr)
+	if !ok {
+		t.Fatalf("unexpected listener address type %T", ln.Addr())
+	}
+
+	handler := console.New(s, b, testMachine(t), testBindHosts, addr.Port, newTestLogHandler(t), nil, testPushToken,
+		response.SeverityMinor, "", nil, "", nil, console.WithSlots(slots))
+	srv := httptest.NewUnstartedServer(handler)
+	if err := srv.Listener.Close(); err != nil {
+		t.Fatalf("close the placeholder listener: %v", err)
+	}
+	srv.Listener = ln
+	srv.Start()
+	t.Cleanup(srv.Close)
+	return srv
+}
+
+// TestRail_StallSlotLine proves the rail's stall section shows the "waiting
+// for a free run slot" reason, naming the tickets that hold the slots, for
+// a ready (unclaimed, non-waiting) ticket once every slot a SlotSource
+// reports is busy (owner decision Q5; "Done when" bullet 1).
+func TestRail_StallSlotLine(t *testing.T) {
+	t.Parallel()
+	s := newConsoleTestStore(t)
+	ticketID := seedTicket(t, s, "fake#1", "Add a hello endpoint")
+
+	slots := fakeSlots{Owner: "this-serve", Inflight: []int64{11, 12}, MaxParallel: 2}
+	srv := newStallTestServer(t, s, bus.New(), slots)
+	rail := railHTML(t, srv.URL, ticketID)
+
+	if !strings.Contains(rail, `data-stall-reason="slot"`) {
+		t.Errorf("rail missing data-stall-reason=\"slot\"; got:\n%s", rail)
+	}
+	if !strings.Contains(rail, "waiting for a free run slot; slots held by tickets 11, 12") {
+		t.Errorf("rail missing the slot-wait line; got:\n%s", rail)
+	}
+}
+
+// TestRail_StallDeadClaim proves the rail's stall section shows the
+// dead-claim reason for a ticket claimed by an owner other than the
+// SlotSource's own, when that ticket carries no open runs at all -- so
+// ClaimAlive, still always false until Task 5 wires ClaimProcessesAlive,
+// correctly picks the "next dispatch pass reclaims it" text rather than the
+// "leftover agent process is still running" one.
+func TestRail_StallDeadClaim(t *testing.T) {
+	t.Parallel()
+	s := newConsoleTestStore(t)
+	ticketID := seedTicket(t, s, "fake#1", "Add a hello endpoint")
+
+	expires := time.Now().Add(10 * time.Minute).UTC().Truncate(time.Second)
+	claimed, err := s.Claim(t.Context(), ticketID, "dead-serve-1", expires)
+	if err != nil {
+		t.Fatalf("Claim: %v", err)
+	}
+	if !claimed {
+		t.Fatal("Claim: got false, want true")
+	}
+
+	slots := fakeSlots{Owner: "this-serve", Inflight: nil, MaxParallel: 2}
+	srv := newStallTestServer(t, s, bus.New(), slots)
+	rail := railHTML(t, srv.URL, ticketID)
+
+	if !strings.Contains(rail, `data-stall-reason="claim_dead"`) {
+		t.Errorf("rail missing data-stall-reason=\"claim_dead\"; got:\n%s", rail)
+	}
+	if !strings.Contains(rail, "claim held by a process that is no longer alive (dead-serve-1); the next dispatch pass reclaims it") {
+		t.Errorf("rail missing the dead-claim line; got:\n%s", rail)
 	}
 }

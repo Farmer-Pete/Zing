@@ -165,16 +165,35 @@ func (c *console) buildPhaseRail(ticket store.Ticket) []templates.PhaseDot {
 // "Say on each ticket why it is not moving", split from #79): nil for a
 // terminal ticket or a console with no machine, so the rail renders no
 // stall-reason section at all for either. Otherwise it gathers decideStall's
-// (stall.go) input and renders its result. This task's own form leaves
-// in.Slots nil (no SlotSource yet, Task 4), so decideStall's running,
-// claim_dead, and slot reasons never fire here; only waiting-on-owner and CI
-// waiting can.
+// (stall.go) input and renders its result. With no SlotSource (selftest,
+// most tests) in.Slots stays nil, so decideStall's running, claim_dead, and
+// slot reasons never fire; only waiting-on-owner and CI waiting can. Task 5
+// adds the ForeignClaims and ClaimProcessesAlive read that fills in.
+// ClaimAlive; until then it stays false.
 func (c *console) buildStallRail(ctx context.Context, ticket store.Ticket) (*templates.StallLine, error) {
 	if c.machine == nil || slices.Contains(c.machine.States.Terminal, ticket.State) {
 		return nil, nil //nolint:nilnil // no stall line for a terminal ticket or a console with no machine
 	}
 
 	in := stallInput{Ticket: ticket, Now: time.Now()}
+
+	if c.slots != nil {
+		snap := c.slots.Slots()
+		in.Slots = &snap
+
+		if ticket.ClaimOwner == nil {
+			candidates, err := c.store.ListReadyCandidates(ctx, c.machine.States.Terminal, in.Now)
+			if err != nil {
+				return nil, fmt.Errorf("console: rail: stall: ready candidates for ticket %d: %w", ticket.ID, err)
+			}
+			for i := range candidates {
+				if candidates[i].ID == ticket.ID {
+					in.Candidate = true
+					break
+				}
+			}
+		}
+	}
 
 	runs, err := c.store.RunsForTicket(ctx, ticket.ID)
 	if err != nil {
