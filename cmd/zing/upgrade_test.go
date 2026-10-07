@@ -835,24 +835,13 @@ func TestUpgrade_LoopCancelledAfterPrepareWritesNoMarker(t *testing.T) {
 func TestRestartAfterServe(t *testing.T) {
 	t.Parallel()
 
-	newFakeExec := func(err error) (execFunc, *[]string, *string) {
-		var calls []string
-		var argv0 string
-		return func(a0 string, argv, envv []string) error {
-			argv0 = a0
-			calls = append(calls, argv...)
-			calls = append(calls, envv...)
-			return err
-		}, &calls, &argv0
-	}
-
 	t.Run("nil target", func(t *testing.T) {
 		t.Parallel()
-		exec, calls, _ := newFakeExec(nil)
-		if err := restartAfterServe(t.Context(), nil, []string{"zing"}, nil, exec); err != nil {
+		fe := &fakeExec{}
+		if err := restartAfterServe(t.Context(), nil, []string{"zing"}, nil, fe.exec); err != nil {
 			t.Fatalf("restartAfterServe: %v", err)
 		}
-		if len(*calls) != 0 {
+		if fe.argv0 != "" {
 			t.Errorf("exec called with nil target, want no call")
 		}
 	})
@@ -872,12 +861,12 @@ func TestRestartAfterServe(t *testing.T) {
 
 		ctx, cancel := context.WithCancel(t.Context())
 		cancel()
-		exec, calls, _ := newFakeExec(nil)
+		fe := &fakeExec{}
 
-		if err := restartAfterServe(ctx, rt, []string{"zing"}, nil, exec); err != nil {
+		if err := restartAfterServe(ctx, rt, []string{"zing"}, nil, fe.exec); err != nil {
 			t.Fatalf("restartAfterServe: %v", err)
 		}
-		if len(*calls) != 0 {
+		if fe.argv0 != "" {
 			t.Errorf("exec called with cancelled ctx, want no call")
 		}
 		if _, err := os.Stat(next); err != nil {
@@ -898,15 +887,18 @@ func TestRestartAfterServe(t *testing.T) {
 		}
 		rt := &restartTarget{Binary: binary, Next: next, FromSHA: "0123456789ab", ToSHA: "fedcba987654"}
 
-		exec, calls, argv0 := newFakeExec(nil)
-		if err := restartAfterServe(t.Context(), rt, []string{"zing", "serve"}, []string{"A=1"}, exec); err != nil {
+		fe := &fakeExec{}
+		if err := restartAfterServe(t.Context(), rt, []string{"zing", "serve"}, []string{"A=1"}, fe.exec); err != nil {
 			t.Fatalf("restartAfterServe: %v", err)
 		}
-		if *argv0 != binary {
-			t.Errorf("exec argv0 = %q, want %q", *argv0, binary)
+		if fe.argv0 != binary {
+			t.Errorf("exec argv0 = %q, want %q", fe.argv0, binary)
 		}
-		if want := []string{"zing", "serve", "A=1"}; !slices.Equal(*calls, want) {
-			t.Errorf("exec argv+env = %v, want %v", *calls, want)
+		if want := []string{"zing", "serve"}; !slices.Equal(fe.argv, want) {
+			t.Errorf("exec argv = %v, want %v", fe.argv, want)
+		}
+		if want := []string{"A=1"}; !slices.Equal(fe.env, want) {
+			t.Errorf("exec env = %v, want %v", fe.env, want)
 		}
 		got, err := os.ReadFile(binary)
 		if err != nil || string(got) != "new" {
@@ -931,12 +923,25 @@ func TestRestartAfterServe(t *testing.T) {
 		rt := &restartTarget{Binary: binary, Next: next}
 
 		wantErr := errors.New("exec failed")
-		exec, _, _ := newFakeExec(wantErr)
-		err := restartAfterServe(t.Context(), rt, nil, nil, exec)
+		fe := &fakeExec{err: wantErr}
+		err := restartAfterServe(t.Context(), rt, nil, nil, fe.exec)
 		if err == nil || !errors.Is(err, wantErr) {
 			t.Fatalf("restartAfterServe error = %v, want wrapping %v", err, wantErr)
 		}
 	})
+}
+
+// fakeExec records the one call restartAfterServe makes to its execFunc, so
+// tests can assert on argv0, argv, and env without nested closures.
+type fakeExec struct {
+	err       error
+	argv0     string
+	argv, env []string
+}
+
+func (fe *fakeExec) exec(argv0 string, argv, env []string) error {
+	fe.argv0, fe.argv, fe.env = argv0, argv, env
+	return fe.err
 }
 
 // TestUpgrade_LoopWaitsForGate proves loop never builds anything before its

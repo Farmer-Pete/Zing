@@ -316,7 +316,7 @@ func (u *upgrader) runQueued(ctx context.Context) bool {
 		if err := saveUpgradeMarker(u.dataDir, marker); err != nil {
 			u.mu.Unlock()
 			_ = os.Remove(rt.Next)
-			tellOwner(context.WithoutCancel(ctx), u.store, rt.TicketID, fmt.Sprintf("upgrade: write upgrade.json: %v", err))
+			tellOwner(context.WithoutCancel(ctx), u.store, rt.TicketID, err.Error())
 			return false
 		}
 
@@ -451,7 +451,7 @@ func (g gitGoSteps) Build(ctx context.Context, sha, out string) (string, error) 
 	// registration and the directory so a retry of the same sha can proceed.
 	if _, statErr := os.Stat(wt); statErr == nil {
 		if removeOut, removeErr := g.runGit(ctx, "worktree", "remove", "--force", wt); removeErr != nil {
-			slog.Info("upgrade: worktree remove before add", "to_sha", resolved, "worktree", wt, "output", tailRedacted(removeOut))
+			slog.Info("upgrade: worktree remove before add", "to_sha", resolved, "worktree", wt, "error", removeErr, "output", tailRedacted(removeOut))
 		}
 		if err = os.RemoveAll(wt); err != nil {
 			return "", fmt.Errorf("build: remove stale worktree %s: %w", wt, err)
@@ -520,6 +520,8 @@ func (u *upgrader) handoff() *restartTarget {
 	}
 	if err := saveCarry(u.dataDir, carry, hasCarry); err != nil {
 		slog.Warn("upgrade: save carry", "ticket_id", carry.TicketID, "sha", carry.SHA, "from_sha", rt.FromSHA, "to_sha", rt.ToSHA, "error", err)
+	} else if hasCarry {
+		slog.Info("upgrade: carried", "ticket_id", carry.TicketID, "sha", carry.SHA, "from_sha", rt.FromSHA, "to_sha", rt.ToSHA)
 	}
 	return &rt
 }

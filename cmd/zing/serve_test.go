@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"math"
 	"net"
 	"net/http"
@@ -340,9 +341,17 @@ func TestServe_ClearsStaleDrainingAndStoppedFlagsAtStartup(t *testing.T) {
 // in production before the owner sets self = true), serve still starts up,
 // and a plain ctx cancellation still drains it within the usual deadline.
 // Since no Request ever reaches the upgrader, up.Target never reports ok,
-// so su.next must stay nil (review finding r2f2).
+// so su.next must stay nil (review finding r2f2). The "upgrade: enabled"
+// INFO log, captured off the real process os.Stderr (installLogHandler
+// resets slog's default to write there, so a swapped slog default alone
+// would never see it), proves newUpgrader really built a non-nil upgrader
+// from su and serve really started its loop goroutine; without that wiring
+// this log line would never appear, where su.next staying nil alone would
+// not catch its removal (r3f2).
 func TestServe_UpgraderRunsAlongsideShutdown(t *testing.T) {
-	t.Parallel()
+	// Not t.Parallel(): this test swaps the process os.Stderr to capture
+	// the "upgrade: enabled" log, which would race with any other test
+	// logging concurrently.
 
 	dir := t.TempDir()
 	cfgPath := filepath.Join(dir, "zing.toml")
@@ -355,6 +364,22 @@ func TestServe_UpgraderRunsAlongsideShutdown(t *testing.T) {
 
 	su := &selfUpgrade{exe: filepath.Join(dir, "not-the-running-binary"), running: "0123456789ab"}
 
+	r, w, pipeErr := os.Pipe()
+	if pipeErr != nil {
+		t.Fatal(pipeErr)
+	}
+	origStderr := os.Stderr
+	os.Stderr = w
+	t.Cleanup(func() { os.Stderr = origStderr })
+
+	var logs strings.Builder
+	var copyErr error
+	logsDone := make(chan struct{})
+	go func() {
+		_, copyErr = io.Copy(&logs, r)
+		close(logsDone)
+	}()
+
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
 
@@ -364,8 +389,23 @@ func TestServe_UpgraderRunsAlongsideShutdown(t *testing.T) {
 	waitForServing(t, fmt.Sprintf("http://127.0.0.1:%d", port), serveDone)
 	cancelAndWaitForServe(t, cancel, serveDone)
 
+	os.Stderr = origStderr
+	if err := w.Close(); err != nil {
+		t.Fatal(err)
+	}
+	<-logsDone
+	if copyErr != nil {
+		t.Fatal(copyErr)
+	}
+
 	if su.next != nil {
 		t.Errorf("su.next = %+v, want nil: no upgrade was ever requested", su.next)
+	}
+	got := logs.String()
+	if !strings.Contains(got, `msg="upgrade: enabled"`) ||
+		!strings.Contains(got, "exe="+su.exe) ||
+		!strings.Contains(got, "running="+su.running) {
+		t.Errorf("logs = %q, want an \"upgrade: enabled\" line with exe=%s and running=%s: serve must have built a non-nil upgrader from su", got, su.exe, su.running)
 	}
 }
 
