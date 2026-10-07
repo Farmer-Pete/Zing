@@ -65,7 +65,7 @@ type WebPush struct {
 	// address (design section: "Trust boundary").
 	client *http.Client
 
-	// contact is the VAPID JWT's sub claim. Defaults to defaultContact;
+	// contact is the VAPID JWT's sub claim. Defaults to DefaultContact;
 	// WithContact overrides it.
 	contact string
 
@@ -74,13 +74,31 @@ type WebPush struct {
 	now func() time.Time
 }
 
-// defaultContact is the VAPID JWT sub claim used when no contact is
-// configured.
-const defaultContact = "mailto:zing@localhost"
+// DefaultContact is the VAPID JWT sub claim used when console.push_contact
+// is unset (owner decision Q3). A JWT with no usable sub is rejected by
+// Apple's push service, which Safari push goes through, so the owner can
+// override it with WithContact.
+const DefaultContact = "mailto:zing@localhost"
 
-// New builds a WebPush backed by st.
-func New(st *store.Store) *WebPush {
-	return &WebPush{
+// Option configures a WebPush built by New.
+type Option func(*WebPush)
+
+// WithContact sets the VAPID JWT's sub claim to c, the console.push_contact
+// value config.Load already validated (a mailto: URL with an address, or an
+// https: URL with a host). An empty c leaves New's DefaultContact in place,
+// so cmd/zing/serve.go can pass WithContact(cfg.Console.PushContact)
+// unconditionally.
+func WithContact(c string) Option {
+	return func(w *WebPush) {
+		if c != "" {
+			w.contact = c
+		}
+	}
+}
+
+// New builds a WebPush backed by st, applying every opt in order.
+func New(st *store.Store, opts ...Option) *WebPush {
+	w := &WebPush{
 		store: st,
 		client: &http.Client{
 			Timeout: 10 * time.Second,
@@ -88,9 +106,13 @@ func New(st *store.Store) *WebPush {
 				return http.ErrUseLastResponse
 			},
 		},
-		contact: defaultContact,
+		contact: DefaultContact,
 		now:     time.Now,
 	}
+	for _, opt := range opts {
+		opt(w)
+	}
+	return w
 }
 
 // PublicKey returns the VAPID public key, base64url raw-URL encoded

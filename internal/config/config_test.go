@@ -1555,3 +1555,69 @@ projects = [{ name = "a", repo = "git@github.com:x/a.git", path = "/p/a", tracke
 		t.Errorf("AppendProject changed the file on a validation failure:\n%s", after)
 	}
 }
+
+// TestLoad_PushContact proves console.push_contact's validation (owner
+// decision Q3): a mailto: URL with an address and an https: URL with a host
+// both load back unchanged, while an http: URL and a bare address (neither
+// of which url.Parse puts into Opaque or Host the way this check needs) are
+// rejected with the exact message, and the key is left empty when absent.
+func TestLoad_PushContact(t *testing.T) {
+	t.Parallel()
+
+	t.Run("mailto URL loads", func(t *testing.T) {
+		t.Parallel()
+		cfg, err := Load(writeTOML(t, minimalValidTOML+"\n[console]\npush_contact = \"mailto:owner@example.com\"\n"))
+		if err != nil {
+			t.Fatalf("Load: %v", err)
+		}
+		if cfg.Console.PushContact != "mailto:owner@example.com" {
+			t.Errorf("Console.PushContact = %q, want %q", cfg.Console.PushContact, "mailto:owner@example.com")
+		}
+	})
+
+	t.Run("https URL loads", func(t *testing.T) {
+		t.Parallel()
+		cfg, err := Load(writeTOML(t, minimalValidTOML+"\n[console]\npush_contact = \"https://example.com/owner\"\n"))
+		if err != nil {
+			t.Fatalf("Load: %v", err)
+		}
+		if cfg.Console.PushContact != "https://example.com/owner" {
+			t.Errorf("Console.PushContact = %q, want %q", cfg.Console.PushContact, "https://example.com/owner")
+		}
+	})
+
+	t.Run("absent key defaults to empty", func(t *testing.T) {
+		t.Parallel()
+		cfg, err := Load(writeTOML(t, minimalValidTOML))
+		if err != nil {
+			t.Fatalf("Load: %v", err)
+		}
+		if cfg.Console.PushContact != "" {
+			t.Errorf("Console.PushContact = %q, want empty when zing.toml omits the key", cfg.Console.PushContact)
+		}
+	})
+
+	const want = "zing.toml: console.push_contact: must be a mailto: or https: URL"
+
+	t.Run("http URL is rejected", func(t *testing.T) {
+		t.Parallel()
+		_, err := Load(writeTOML(t, minimalValidTOML+"\n[console]\npush_contact = \"http://example.com/owner\"\n"))
+		if err == nil {
+			t.Fatal("Load() = nil, want an error for an http: push_contact")
+		}
+		if err.Error() != want {
+			t.Errorf("Load() = %q, want %q", err.Error(), want)
+		}
+	})
+
+	t.Run("bare address is rejected", func(t *testing.T) {
+		t.Parallel()
+		_, err := Load(writeTOML(t, minimalValidTOML+"\n[console]\npush_contact = \"owner@example.com\"\n"))
+		if err == nil {
+			t.Fatal("Load() = nil, want an error for a bare address push_contact")
+		}
+		if err.Error() != want {
+			t.Errorf("Load() = %q, want %q", err.Error(), want)
+		}
+	})
+}

@@ -1,8 +1,14 @@
 package notify_test
 
 import (
+	"crypto/ecdh"
+	"crypto/rand"
 	"encoding/base64"
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 
@@ -196,4 +202,104 @@ func TestSubscribe_RejectsKeysMissingRequiredFields(t *testing.T) {
 	if err == nil {
 		t.Fatal("Subscribe with a missing auth key: err = nil, want an error")
 	}
+}
+
+// subscribeFreshKeys stores one valid push_subscriptions row pointed at
+// endpoint, with a fresh receiver keypair and auth secret, so Send has
+// somewhere real to POST.
+func subscribeFreshKeys(t *testing.T, w *notify.WebPush, endpoint string) {
+	t.Helper()
+	priv, err := ecdh.P256().GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatalf("generate ua key: %v", err)
+	}
+	auth := make([]byte, 16)
+	if _, readErr := rand.Read(auth); readErr != nil {
+		t.Fatalf("random auth: %v", readErr)
+	}
+	err = w.Subscribe(t.Context(), notify.Subscription{
+		Endpoint: endpoint,
+		Keys: map[string]string{
+			keyP256dh: base64.RawURLEncoding.EncodeToString(priv.PublicKey().Bytes()),
+			"auth":    base64.RawURLEncoding.EncodeToString(auth),
+		},
+	})
+	if err != nil {
+		t.Fatalf("Subscribe: %v", err)
+	}
+}
+
+// jwtSub decodes the "sub" claim out of a compact VAPID JWT, the middle of
+// its three base64url segments.
+func jwtSub(t *testing.T, jwt string) string {
+	t.Helper()
+	parts := strings.Split(jwt, ".")
+	if len(parts) != 3 {
+		t.Fatalf("jwt %q does not have 3 segments", jwt)
+	}
+	claimsJSON, err := base64.RawURLEncoding.DecodeString(parts[1])
+	if err != nil {
+		t.Fatalf("decode jwt claims: %v", err)
+	}
+	var claims struct {
+		Sub string `json:"sub"`
+	}
+	if err := json.Unmarshal(claimsJSON, &claims); err != nil {
+		t.Fatalf("unmarshal jwt claims: %v", err)
+	}
+	return claims.Sub
+}
+
+// authorizationSub extracts the VAPID JWT from an Authorization header
+// shaped "vapid t=JWT, k=PUBKEY" and decodes its sub claim.
+func authorizationSub(t *testing.T, header string) string {
+	t.Helper()
+	const prefix = "vapid t="
+	if !strings.HasPrefix(header, prefix) {
+		t.Fatalf("Authorization header %q does not start with %q", header, prefix)
+	}
+	rest := header[len(prefix):]
+	jwt, _, found := strings.Cut(rest, ",")
+	if !found {
+		t.Fatalf("Authorization header %q has no k= part", header)
+	}
+	return jwtSub(t, jwt)
+}
+
+// TestWithContact_SetsJWTSub proves WithContact overrides the VAPID JWT's
+// sub claim (owner decision Q3), and that New without it falls back to
+// notify.DefaultContact.
+func TestWithContact_SetsJWTSub(t *testing.T) {
+	var gotAuth string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotAuth = r.Header.Get("Authorization")
+		w.WriteHeader(http.StatusCreated)
+	}))
+	defer srv.Close()
+
+	t.Run("without WithContact", func(t *testing.T) {
+		s := newTestStore(t)
+		w := notify.New(s)
+		subscribeFreshKeys(t, w, srv.URL)
+
+		if err := w.Send(t.Context(), []byte("hello")); err != nil {
+			t.Fatalf("Send: %v", err)
+		}
+		if sub := authorizationSub(t, gotAuth); sub != notify.DefaultContact {
+			t.Errorf("sub = %q, want DefaultContact %q", sub, notify.DefaultContact)
+		}
+	})
+
+	t.Run("with WithContact", func(t *testing.T) {
+		s := newTestStore(t)
+		w := notify.New(s, notify.WithContact("mailto:owner@example.com"))
+		subscribeFreshKeys(t, w, srv.URL)
+
+		if err := w.Send(t.Context(), []byte("hello")); err != nil {
+			t.Fatalf("Send: %v", err)
+		}
+		if sub := authorizationSub(t, gotAuth); sub != "mailto:owner@example.com" {
+			t.Errorf("sub = %q, want %q", sub, "mailto:owner@example.com")
+		}
+	})
 }
