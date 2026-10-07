@@ -757,6 +757,24 @@ func TestDecideCIRerun(t *testing.T) {
 				Tried:  testTriedThreeInfraRuns,
 			},
 		},
+		{
+			name:   "a prior infra re-run does not spend the flaky budget",
+			failed: []failedCheck{mkFailedCheck("ci", 7, 10, 11, ghFailure, "--- FAIL: TestY (0.1s)", nil)},
+			prior:  []priorRerun{mkPrior("ci", 6, 1, response.RerunReasonInfra, 0)},
+			want: rerunDecision{
+				Action: rerunNow,
+				Reruns: []plannedRerun{{
+					Event: response.CheckRerunEvent{Check: "ci", SHA: ciSHA, RunID: 10, CheckRunID: 7, Reason: response.RerunReasonFlaky, Tests: []string{"TestY"}},
+					JobID: 11,
+				}},
+			},
+		},
+		{
+			name:   "a spent no_log re-run on a readable failure gives fix",
+			failed: []failedCheck{mkFailedCheck("ci", 5, 10, 11, ghFailure, "--- FAIL: TestY (0.1s)", nil)},
+			prior:  []priorRerun{mkPrior("ci", 1, 1, response.RerunReasonNoLog, 0)},
+			want:   rerunDecision{Action: rerunFix},
+		},
 	}
 
 	for _, tc := range cases {
@@ -960,6 +978,12 @@ func TestDecidePreExisting(t *testing.T) {
 			failed: []failedCheck{fc("ci", 7, "--- FAIL: TestA (0s)")},
 			base:   map[checkKey][]string{{Name: "ci", AppID: 0}: {"TestA"}},
 			want:   preExisting{Pre: false, NoRun: []string{"ci"}},
+		},
+		{
+			name:   "main fails a different test: not pre-existing",
+			failed: []failedCheck{fc("ci", 0, "--- FAIL: TestFlaky (0.1s)")},
+			base:   map[checkKey][]string{{Name: "ci"}: {"TestOther"}},
+			want:   preExisting{Pre: false},
 		},
 	}
 
@@ -1249,6 +1273,13 @@ func TestMergeDecision(t *testing.T) {
 			changed: []string{".github/workflows/ci.yml"},
 			auto:    false,
 			reason:  "the diff touches a manual-deploy path: .github/workflows/ci.yml",
+		},
+		{
+			name:    "dependency file hello.txt named exactly",
+			rule:    MergeRule{Auto: true, Method: shipMergeMethodSquash, DependencyFiles: []string{"hello.txt"}},
+			changed: []string{"hello.txt"},
+			auto:    false,
+			reason:  "the diff changes a dependency file: hello.txt",
 		},
 	}
 
@@ -1682,6 +1713,7 @@ func TestReviewBotAction(t *testing.T) {
 	}{
 		{"no since starts", nil, nil, reviewBotStart},
 		{"under wait, no nudge: wait", tm(-10 * time.Minute), nil, reviewBotWait},
+		{"5 minutes under wait, no nudge: wait", tm(-5 * time.Minute), nil, reviewBotWait},
 		{"past wait, no nudge: nudge", tm(-21 * time.Minute), nil, reviewBotNudge},
 		{"exactly at wait, no nudge: nudge", tm(-wait), nil, reviewBotNudge},
 		{"nudged under wait: wait", tm(-40 * time.Minute), tm(-10 * time.Minute), reviewBotWait},

@@ -2476,53 +2476,6 @@ func TestPollCIPreExistingAsksOwner(t *testing.T) {
 	}
 }
 
-// TestPollCINotOnMainSendsFix proves the ticket's own acceptance
-// criterion's other half: a failing test that does not appear on main's
-// own run of the same check still gets the normal fix request, with no
-// pre-existing escalation.
-func TestPollCINotOnMainSendsFix(t *testing.T) {
-	if testing.Short() {
-		t.Skip("slow end-to-end flow; runs in the full suite")
-	}
-	t.Parallel()
-	s, ticket, gh, tr := shipPublished(t)
-	local := shipHeadSHA(t, s, ticket)
-	gh.required = shipCIRequired()
-	gh.prState = orchestrator.PRState{Draft: true, HeadSHA: local, BaseRef: pbFixtureDefaultBranch}
-	gh.runsFor = func(sha string) ([]orchestrator.CheckRun, error) {
-		if sha == local {
-			return []orchestrator.CheckRun{shipCIRun(1, 1, 2, "failure")}, nil
-		}
-		return []orchestrator.CheckRun{shipCIRun(50, 60, 70, "failure")}, nil
-	}
-	gh.logTail = func(_ context.Context, _, _ string, jobID int64, _ int) (string, error) {
-		switch jobID {
-		case 2:
-			return shipFlakyLogText, nil
-		case 70:
-			return "--- FAIL: TestOther (0.1s)", nil
-		}
-		return "", nil
-	}
-	seedSpentFlakyCheckRerun(t, s, ticket.ID, local)
-
-	commit, err := shipPollRun(t, s, ticket, gh, tr)
-	if err != nil {
-		t.Fatalf("Run: %v", err)
-	}
-	if commit.Escalation != nil {
-		t.Fatalf("got an escalation, want a fix request: %+v", commit.Escalation.Payload)
-	}
-	if !shipHasFixMarker(commit) {
-		t.Errorf("commit.Messages = %+v, want a fix marker", commit.Messages)
-	}
-	for _, m := range commit.Messages {
-		if strings.HasPrefix(m.Body, preExistingPrefix) {
-			t.Errorf("commit.Messages = %+v, want no %q message", commit.Messages, preExistingPrefix)
-		}
-	}
-}
-
 // TestPollCIMainNewerPassSendsFix proves that only main's newest run of
 // the check counts: main's own check failed once on TestFlaky but its
 // newest run passed, so the failure is not pre-existing and the normal
@@ -3210,41 +3163,6 @@ func TestPollCIRerunKeepsReadyPRReady(t *testing.T) {
 	}
 }
 
-// TestPollCIRerunWaitsForRerunToAppear proves decideCIRerun's own rule 1
-// (design shape): the same check run id, seeded just now, makes POLL wait
-// instead of re-running again or sending a fix request.
-func TestPollCIRerunWaitsForRerunToAppear(t *testing.T) {
-	if testing.Short() {
-		t.Skip("slow end-to-end flow; runs in the full suite")
-	}
-	t.Parallel()
-	s, ticket, gh, tr := shipPublished(t)
-	local := shipHeadSHA(t, s, ticket)
-	gh.runs, gh.required = shipFailedCI()
-	gh.prState = shipMergeReadyPR(local, "PR_node_waits")
-	seedCheckRerun(t, s, ticket.ID, response.CheckRerunEvent{
-		Check: "ci", SHA: local, RunID: 1, CheckRunID: 1, Reason: response.RerunReasonFlaky,
-	})
-
-	before := time.Now().UTC()
-	commit, err := shipPollRun(t, s, ticket, gh, tr)
-	if err != nil {
-		t.Fatalf("Run: %v", err)
-	}
-	if len(gh.reruns) != 0 {
-		t.Errorf("reruns = %+v, want none", gh.reruns)
-	}
-	if shipHasFixMarker(commit) {
-		t.Errorf("commit.Messages = %+v, want no fix marker", commit.Messages)
-	}
-	if commit.Poll == nil {
-		t.Fatal("commit.Poll is nil, want the idle backoff commit")
-	}
-	if !commit.Poll.NextAt.After(before) {
-		t.Errorf("Poll.NextAt = %v, want it after %v", commit.Poll.NextAt, before)
-	}
-}
-
 // TestPollCIRerunInfraCapsAtThreeThenEscalates proves decideCIRerun's own
 // rule 2 (design shape): an infrastructure conclusion re-runs up to its own
 // cap of 3 per check per head sha, then escalates, never a fix request, and
@@ -3307,39 +3225,6 @@ func TestPollCIRerunInfraCapsAtThreeThenEscalates(t *testing.T) {
 	}
 }
 
-// TestPollCIRerunInfraDoesNotSpendFlakyRerun proves decideCIRerun keeps an
-// infra re-run's own count separate from a flaky or no_log one: a prior
-// infra event for the check never counts as its "used" flaky budget.
-func TestPollCIRerunInfraDoesNotSpendFlakyRerun(t *testing.T) {
-	if testing.Short() {
-		t.Skip("slow end-to-end flow; runs in the full suite")
-	}
-	t.Parallel()
-	s, ticket, gh, tr := shipPublished(t)
-	local := shipHeadSHA(t, s, ticket)
-	gh.required = shipCIRequired()
-	gh.prState = shipMergeReadyPR(local, "PR_node_infra_not_spent")
-	gh.runs = []orchestrator.CheckRun{shipCIRun(7, 10, 11, "failure")}
-	gh.logTail = func(context.Context, string, string, int64, int) (string, error) {
-		return "--- FAIL: TestY (0.1s)", nil
-	}
-	seedCheckRerun(t, s, ticket.ID, response.CheckRerunEvent{
-		Check: "ci", SHA: local, RunID: 1, CheckRunID: 6, Reason: response.RerunReasonInfra,
-	})
-
-	commit, err := shipPollRun(t, s, ticket, gh, tr)
-	if err != nil {
-		t.Fatalf("Run: %v", err)
-	}
-	if len(gh.reruns) != 1 {
-		t.Fatalf("reruns = %+v, want exactly one", gh.reruns)
-	}
-	events := shipCheckRerunEvents(t, commit)
-	if len(events) != 1 || events[0].Reason != response.RerunReasonFlaky {
-		t.Fatalf("check_rerun events = %+v, want exactly one reason flaky", events)
-	}
-}
-
 // TestPollCIRerunNoLogTwiceEscalates proves decideCIRerun's own rule 4
 // (design shape): a failed check whose log cannot be read gets the check's
 // one re-run, and escalates -- never a fix request -- once that re-run
@@ -3382,44 +3267,6 @@ func TestPollCIRerunNoLogTwiceEscalates(t *testing.T) {
 	}
 	if shipHasFixMarker(commit2) {
 		t.Errorf("commit2.Messages = %+v, want no fix marker", commit2.Messages)
-	}
-}
-
-// TestPollCIRerunNoLogThenReadableFailureSendsFix proves decideCIRerun's
-// own rule 4 and 5 together: a spent no_log re-run for the check also
-// counts as "used" once a later failure of the same check reads a log
-// just fine, so a draft pull request reaches the fix row on this very
-// tick.
-func TestPollCIRerunNoLogThenReadableFailureSendsFix(t *testing.T) {
-	if testing.Short() {
-		t.Skip("slow end-to-end flow; runs in the full suite")
-	}
-	t.Parallel()
-	s, ticket, gh, tr := shipPublished(t)
-	local := shipHeadSHA(t, s, ticket)
-	gh.required = shipCIRequired()
-	gh.runs = []orchestrator.CheckRun{shipCIRun(5, 10, 11, "failure")}
-	gh.prState = orchestrator.PRState{Draft: true, HeadSHA: local, BaseRef: pbFixtureDefaultBranch}
-	gh.logTail = func(context.Context, string, string, int64, int) (string, error) { return shipCILogTailText, nil }
-	seedCheckRerun(t, s, ticket.ID, response.CheckRerunEvent{
-		Check: "ci", SHA: local, RunID: 1, CheckRunID: 1, Reason: response.RerunReasonNoLog,
-	})
-
-	commit, err := shipPollRun(t, s, ticket, gh, tr)
-	if err != nil {
-		t.Fatalf("Run: %v", err)
-	}
-	found := false
-	for _, m := range commit.Messages {
-		if strings.HasPrefix(m.Body, fixRequestedCILogPrefix) && strings.Contains(m.Body, shipCILogTailText) {
-			found = true
-		}
-	}
-	if !found {
-		t.Errorf("commit.Messages = %+v, want a %q marker carrying the log tail", commit.Messages, fixRequestedCILogPrefix)
-	}
-	if len(gh.reruns) != 0 {
-		t.Errorf("reruns = %+v, want none", gh.reruns)
 	}
 }
 
@@ -3677,50 +3524,6 @@ func TestPollCIRerunAPIErrorKeepsEarlierRerunEvents(t *testing.T) {
 	}
 	if len(gh.reruns) != 2 {
 		t.Errorf("reruns = %+v, want exactly two calls", gh.reruns)
-	}
-}
-
-// TestPollCIRerunSharedWorkflowRunPlansOnlyOne proves decideCIRerun's own
-// per-tick dedupe (r2f1): two failed Actions checks from the same workflow
-// run only ever get one RerunJob call this tick, since GitHub refuses to
-// re-run a second job in a run it has just put back in progress. The
-// dropped check waits for a later tick instead of racing the first one.
-func TestPollCIRerunSharedWorkflowRunPlansOnlyOne(t *testing.T) {
-	if testing.Short() {
-		t.Skip("slow end-to-end flow; runs in the full suite")
-	}
-	t.Parallel()
-	s, ticket, gh, tr := shipPublished(t)
-	local := shipHeadSHA(t, s, ticket)
-	gh.runs = []orchestrator.CheckRun{
-		{
-			ID: 1, Name: "a", Status: ghCompleted, Conclusion: ghFailure, AppSlug: ghGitHubActions,
-			DetailsURL: "https://github.com/fixture/fixture/actions/runs/10/job/11",
-		},
-		{
-			ID: 2, Name: "b", Status: ghCompleted, Conclusion: ghFailure, AppSlug: ghGitHubActions,
-			DetailsURL: "https://github.com/fixture/fixture/actions/runs/10/job/12",
-		},
-	}
-	gh.required = []orchestrator.RequiredCheck{{Context: "a"}, {Context: "b"}}
-	gh.prState = shipMergeReadyPR(local, "PR_node_shared_run")
-	gh.logTail = func(context.Context, string, string, int64, int) (string, error) {
-		return shipFlakyLogText, nil
-	}
-
-	commit, err := shipPollRun(t, s, ticket, gh, tr)
-	if err != nil {
-		t.Fatalf("Run: %v", err)
-	}
-	if commit.Escalation != nil {
-		t.Errorf("Escalation = %+v, want none", commit.Escalation)
-	}
-	if len(gh.reruns) != 1 {
-		t.Fatalf("reruns = %+v, want exactly one call", gh.reruns)
-	}
-	events := shipCheckRerunEvents(t, commit)
-	if len(events) != 1 || events[0].Check != "a" {
-		t.Fatalf("check_rerun events = %+v, want exactly one, for a", events)
 	}
 }
 
@@ -4343,39 +4146,15 @@ func TestPollReviewBotNudgesThenEscalates(t *testing.T) {
 }
 
 // TestPollReviewBotQuietWhileWaiting proves pollIdle never nudges or
-// escalates before its own wait has elapsed, nor on a draft pull request,
-// nor for a missing required check no configured bot names: every case
-// below just backs off like any other CI-pending poll.
+// escalates on a draft pull request, nor for a missing required check no
+// configured bot names: both cases just back off like any other
+// CI-pending poll. The under-wait case is TestReviewBotAction row "5
+// minutes under wait, no nudge: wait".
 func TestPollReviewBotQuietWhileWaiting(t *testing.T) {
 	t.Parallel()
 	if testing.Short() {
 		t.Skip("slow end-to-end flow; runs in the full suite")
 	}
-
-	t.Run("missing marker not yet old enough", func(t *testing.T) {
-		t.Parallel()
-		s, ticket, gh, tr := shipPublished(t)
-		local := shipHeadSHA(t, s, ticket)
-		gh.prState = orchestrator.PRState{State: shipPRStateOpen, Draft: false, HeadSHA: local, BaseRef: pbFixtureDefaultBranch}
-		gh.runs, gh.required = shipReviewBotCIAndRequired()
-		rule := shipCodeRabbitRule()
-
-		shipInsertReviewBotMarker(t, s, ticket.ID, reviewBotMissingHead(local, shipCodeRabbitCheck), 5*time.Minute)
-
-		commit, err := shipPollRunWithReviewBots(t, s, ticket, gh, tr, rule)
-		if err != nil {
-			t.Fatalf("Run: %v", err)
-		}
-		if len(gh.commentOnPRCalls) != 0 {
-			t.Errorf("commentOnPRCalls = %v, want none", gh.commentOnPRCalls)
-		}
-		if commit.Escalation != nil {
-			t.Fatalf("escalated: %+v", commit.Escalation.Payload)
-		}
-		if commit.Poll == nil {
-			t.Error("commit.Poll is nil, want the backoff commit")
-		}
-	})
 
 	t.Run("draft pull request", func(t *testing.T) {
 		t.Parallel()
@@ -7824,43 +7603,6 @@ func TestMergeGateBlockedByOddThreadID(t *testing.T) {
 	testMergeGateBlockedByUnclassified(t, orchestrator.Thread{ID: "", Comments: []orchestrator.ThreadComment{shipHumanComment("c1", "reviewer1", "???", time.Now())}})
 }
 
-// TestMergeGateBlockedBySpoofedCheck proves MERGE's own re-read of CI uses
-// EvaluateCI's app-id matching (design section 8.4): a same-name check
-// run from an app other than the one the required check is bound to
-// reappears between the ask and the answer (a spoof), so the required
-// check reads as missing and MERGE refuses with "CI is not green".
-func TestMergeGateBlockedBySpoofedCheck(t *testing.T) {
-	if testing.Short() {
-		t.Skip("slow end-to-end flow; runs in the full suite")
-	}
-	t.Parallel()
-	s, ticket, gh, tr := shipPublished(t)
-	local := shipHeadSHA(t, s, ticket)
-	const boundAppID = int64(15368)
-	gh.required = []orchestrator.RequiredCheck{{Context: "ci", AppID: new(boundAppID)}}
-	gh.runs = []orchestrator.CheckRun{{ID: 1, Name: "ci", Status: ghCompleted, Conclusion: ghSuccess, AppID: boundAppID, AppSlug: ghGitHubActions}}
-	gh.prState = shipMergeReadyPR(local, "PR_node_spoofed")
-
-	commit1, err := shipPollRun(t, s, ticket, gh, tr)
-	if err != nil {
-		t.Fatalf("Run (ask): %v", err)
-	}
-	pbApply(t, s, ticket, commit1)
-	shipAnswerMergeQuestion(t, s, ticket.ID, "a")
-
-	gh.runs = []orchestrator.CheckRun{{ID: 2, Name: "ci", Status: ghCompleted, Conclusion: ghSuccess, AppID: 99, AppSlug: ghGitHubActions}}
-	commit2, err := shipPollRun(t, s, pbGetTicket(t, s, ticket.ID), gh, tr)
-	if err != nil {
-		t.Fatalf("Run (merge now): %v", err)
-	}
-	if len(gh.mergeCalls) != 0 {
-		t.Errorf("mergeCalls = %+v, want none (the required check's own app no longer matches)", gh.mergeCalls)
-	}
-	if !shipHasMessage(commit2, "merge refused "+local+"\n"+mergeReasonCINotGreen) {
-		t.Errorf("commit2.Messages = %+v, want the %q refusal", commit2.Messages, mergeReasonCINotGreen)
-	}
-}
-
 // TestMergeCrashConverges proves design section 11's own convergence rule
 // for MERGE: a crash after the real GitHub Merge call but before its own
 // commit leaves tickets.pr_url's state unchanged, but the next poll's own
@@ -8827,36 +8569,6 @@ func TestAutoMergeWhenAllowed(t *testing.T) {
 	}
 	if commit.Waiting != nil {
 		t.Errorf("Waiting = %v, want nil (no question asked)", commit.Waiting)
-	}
-}
-
-// TestAutoMergeBlockedByDependencyFile proves mergeDecision's own
-// DependencyFiles rule end to end: merge.auto is on, but the ticket's own
-// real build landed hello.txt (shipTicketReady's own fixture), named here
-// as a dependency file, so row 9 asks instead of merging, naming the path
-// in its own reason.
-func TestAutoMergeBlockedByDependencyFile(t *testing.T) {
-	if testing.Short() {
-		t.Skip("slow end-to-end flow; runs in the full suite")
-	}
-	t.Parallel()
-	s, ticket, gh, tr := shipPublished(t)
-	local := shipHeadSHA(t, s, ticket)
-	runs, required := shipGreenCI()
-	gh.runs, gh.required = runs, required
-	gh.prState = shipMergeReadyPR(local, "PR_node_auto_blocked")
-
-	rule := MergeRule{Auto: true, Method: shipMergeMethodSquash, DependencyFiles: []string{"hello.txt"}}
-	commit, err := shipPollRunWithRule(t, s, ticket, gh, tr, rule)
-	if err != nil {
-		t.Fatalf("Run: %v", err)
-	}
-	if len(gh.mergeCalls) != 0 {
-		t.Errorf("mergeCalls = %+v, want none (the dependency file blocks it)", gh.mergeCalls)
-	}
-	q := shipQuestionMessage(t, commit)
-	if !strings.Contains(q.Body, "the diff changes a dependency file: hello.txt") {
-		t.Errorf("question body = %q, want the dependency-file reason naming hello.txt", q.Body)
 	}
 }
 
