@@ -1,6 +1,10 @@
 package response
 
-import "testing"
+import (
+	"fmt"
+	"slices"
+	"testing"
+)
 
 // cleanPlan returns a Plan whose prose is deliberately unremarkable: no
 // placeholder tokens, no vague qualifiers, no performance claims, and no
@@ -420,4 +424,111 @@ func TestCheckPlan_CleanFeaturePlanPasses(t *testing.T) {
 	if len(errs) != 0 {
 		t.Fatalf("CheckPlan = %v, want no errors", dumpErrs(errs))
 	}
+}
+
+func TestCheckPlan_HostScenarioCallingNewRouteFails(t *testing.T) {
+	t.Parallel()
+
+	p := cleanPlan()
+	p.Design.Changes[0].Before = "none"
+	p.Design.Changes[0].After = `mux.HandleFunc("POST /settings", c.handleSettings)`
+
+	scenarios := cleanScenarios()
+	scenarios[0] = Scenario{
+		ID: "s1", Kind: ScenarioKindHost,
+		Check: "curl -s -X POST http://127.0.0.1:7777/settings -d interval=30",
+		Given: "the owner's live zing serve is running", When: "the check runs", Then: "it succeeds",
+	}
+
+	errs := CheckPlan(p, scenarios, false, planChecklists, fullPresence(2))
+	want := "scenarios/scenario[0]/check: " + fmt.Sprintf(hostNewRouteFmt, "/settings")
+	if !containsErr(errs, want) {
+		t.Fatalf("CheckPlan = %v, want to contain %q", dumpErrs(errs), want)
+	}
+	if len(errs) != 1 {
+		t.Fatalf("CheckPlan = %v, want exactly one error", dumpErrs(errs))
+	}
+}
+
+func TestCheckPlan_HostScenarioCallingExistingRoutePasses(t *testing.T) {
+	t.Parallel()
+
+	p := cleanPlan()
+	p.Design.Changes[0].Before = `mux.HandleFunc("GET /stream", h)`
+	p.Design.Changes[0].After = `mux.HandleFunc("GET /stream", h)`
+
+	scenarios := cleanScenarios()
+	scenarios[0] = Scenario{
+		ID: "s1", Kind: ScenarioKindHost,
+		Check: "curl -s http://localhost:7420/stream",
+		Given: "the owner's live zing serve is running", When: "the check runs", Then: "it succeeds",
+	}
+
+	errs := CheckPlan(p, scenarios, false, planChecklists, fullPresence(2))
+	if len(errs) != 0 {
+		t.Fatalf("CheckPlan = %v, want no errors", dumpErrs(errs))
+	}
+}
+
+func TestCheckPlan_NonHostScenarioCallingNewRoutePasses(t *testing.T) {
+	t.Parallel()
+
+	p := cleanPlan()
+	p.Design.Changes[0].Before = "none"
+	p.Design.Changes[0].After = `mux.HandleFunc("POST /settings", c.handleSettings)`
+
+	scenarios := cleanScenarios()
+	scenarios[0] = Scenario{
+		ID: "s1", Kind: ScenarioKindBehavior,
+		Check: "curl -s -X POST http://127.0.0.1:7777/settings -d interval=30",
+		Given: "the branch's code is checked out", When: "the check runs", Then: "it succeeds",
+	}
+
+	errs := CheckPlan(p, scenarios, false, planChecklists, fullPresence(2))
+	if len(errs) != 0 {
+		t.Fatalf("CheckPlan = %v, want no errors", dumpErrs(errs))
+	}
+}
+
+func TestNewRoutePaths(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name   string
+		before string
+		after  string
+		want   []string
+	}{
+		{"new route", "none", `mux.HandleFunc("POST /settings", h)`, []string{"/settings"}},
+		{"unchanged route", `mux.HandleFunc("GET /stream", h)`, `mux.HandleFunc("GET /stream", h)`, nil},
+		{"new method on existing path", `mux.HandleFunc("GET /settings", h)`, `mux.HandleFunc("POST /settings", h)`, nil},
+		{"root wildcard", "none", `mux.HandleFunc("GET /{$}", h)`, nil},
+		{"id wildcard only", "none", `mux.HandleFunc("GET /{id}", h)`, nil},
+		{"backtick with wildcard segment", "none", "mux.HandleFunc(`GET /tickets/{id}/settings`, h)", []string{"/tickets/{id}/settings"}},
+		{"no method", "none", `const path = "/settings"`, nil},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			changes := []Change{{Before: tc.before, After: tc.after}}
+			got := newRoutePaths(changes)
+			if !slices.Equal(got, tc.want) {
+				t.Fatalf("newRoutePaths(%q, %q) = %v, want %v", tc.before, tc.after, got, tc.want)
+			}
+		})
+	}
+
+	t.Run("same path in two changes", func(t *testing.T) {
+		t.Parallel()
+		changes := []Change{
+			{Before: "none", After: `mux.HandleFunc("POST /a", h)`},
+			{Before: "none", After: `mux.HandleFunc("POST /a", h)`},
+		}
+		got := newRoutePaths(changes)
+		want := []string{"/a"}
+		if !slices.Equal(got, want) {
+			t.Fatalf("newRoutePaths = %v, want %v", got, want)
+		}
+	})
 }
