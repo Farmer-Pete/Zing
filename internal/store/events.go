@@ -11,6 +11,8 @@ import (
 	"io/fs"
 	"path"
 	"strings"
+
+	"zing/internal/response"
 )
 
 // tableEvents is the schema namespace a typed event's kind is validated
@@ -32,6 +34,10 @@ const EventKindOwnerEdit = "owner_edit"
 // EventKindStaleBase names the stale_base event kind: a step that used
 // the last fetched base because the fetch failed, once per step and sha.
 const EventKindStaleBase = "stale_base"
+
+// EventKindPlanUnblock names the plan_unblock event kind: one successful
+// unblock turn at plan review's loop cap.
+const EventKindPlanUnblock = "plan_unblock"
 
 // EventFilter narrows Events and CountEvents beyond ticket and kind.
 type EventFilter struct {
@@ -102,6 +108,23 @@ func (s *Store) CountEvents(ctx context.Context, ticketID int64, kind string, f 
 		return 0, fmt.Errorf("count events %s for ticket %d: %w", kind, ticketID, err)
 	}
 	return n, nil
+}
+
+// NewestPlanUnblock returns the newest plan_unblock event on ticketID,
+// decoded, and false when the ticket has none.
+func (s *Store) NewestPlanUnblock(ctx context.Context, ticketID int64) (response.PlanUnblockEvent, bool, error) {
+	rows, err := s.Events(ctx, ticketID, EventKindPlanUnblock, EventFilter{})
+	if err != nil {
+		return response.PlanUnblockEvent{}, false, err
+	}
+	if len(rows) == 0 {
+		return response.PlanUnblockEvent{}, false, nil
+	}
+	var e response.PlanUnblockEvent
+	if err := json.Unmarshal(rows[len(rows)-1].Payload, &e); err != nil {
+		return response.PlanUnblockEvent{}, false, fmt.Errorf("newest plan_unblock for ticket %d: %w", ticketID, err)
+	}
+	return e, true, nil
 }
 
 // EventKinds returns every event kind with a committed schema under

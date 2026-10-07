@@ -16,6 +16,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"reflect"
 	"regexp"
 	"slices"
 	"strconv"
@@ -3055,6 +3056,13 @@ func TestPlanningHandler_ReviewTick_MaxLoopsWithAboveFloorFindingStillEscalates(
 	insertUpdateMarker(t, s, ticketID, "planreview v1 delivered")
 	insertUpdateMarker(t, s, ticketID, "planreview v2 delivered")
 
+	// Ticket 85: an earlier unblock turn already ran and spent its one shot
+	// (the plan_unblock event plus the delivered marker its own resume would
+	// have written), so n reaches max_loops plus 1 and this tick still
+	// escalates immediately, rather than running the unblock turn again.
+	seedPlanUnblockEvent(t, s, ticketID, 99, []string{"p99-f2"}, "Drop task 4.")
+	insertUpdateMarker(t, s, ticketID, "planreview v99 delivered")
+
 	minor := finding(response.SeverityMinor, "plan/design/shape", "still wrong", "fix it")
 	major := finding(response.SeverityMajor, "plan/design/other", "worse", "fix that too")
 	seedPlanreviewArtifact(t, s, ticketID, planVersion, runID, minor, major)
@@ -3472,4 +3480,391 @@ func TestPlanningHandler_RepliesFailingConversationCheckTerminalizesRun(t *testi
 		t.Fatalf("commit.Runs = %+v, want one run with outcome %q", commit.Runs, response.OutcomeQuestion)
 	}
 	apply(t, s, getTicket(t, s, ticketID), commit)
+}
+
+// ---- ticket 85: the unblock turn at plan review's loop cap -----------------
+
+// seedPlanUnblockCap seeds a feature ticket whose cohort has reached plan
+// review's own loop cap (two delivered markers, machine.toml's max_loops),
+// with a stored planreview artifact at that cohort's version carrying one
+// at-or-below-floor minor finding and one above-floor major finding, and a
+// live pending marker -- the same shape seedCapLoopsEscalation seeds, minus
+// the planning Run it also drives, so a test can script and run the first
+// tick itself.
+func seedPlanUnblockCap(t *testing.T, objective string) (s *store.Store, ticketID int64, planVersion int) {
+	t.Helper()
+	s = newJobTestStore(t)
+	ticketID = seedFeatureTicketInPlanning(t, s)
+	var runID int64
+	planVersion, runID = seedCohort(t, s, ticketID, validPlan(objective), validScenarios(2, "unblockcap"))
+
+	insertUpdateMarker(t, s, ticketID, "planreview v1 delivered")
+	insertUpdateMarker(t, s, ticketID, "planreview v2 delivered")
+
+	minor := finding(response.SeverityMinor, "plan/design/shape", "still wrong", "fix it")
+	minor.ID = fmt.Sprintf("p%d-f1", planVersion)
+	major := finding(response.SeverityMajor, "plan/design/other", "worse", "fix that too")
+	major.ID = fmt.Sprintf("p%d-f2", planVersion)
+	seedPlanreviewArtifact(t, s, ticketID, planVersion, runID, minor, major)
+	insertUpdateMarker(t, s, ticketID, fmt.Sprintf("planreview v%d pending", planVersion))
+	return s, ticketID, planVersion
+}
+
+// seedPlanUnblockEvent inserts a plan_unblock event (an earlier unblock
+// turn's guidance) directly, the way a successful runUnblock commit would,
+// so a test can seed the cap as already having spent its one shot.
+func seedPlanUnblockEvent(t *testing.T, s *store.Store, ticketID int64, planVersion int, findingIDs []string, guidance string) {
+	t.Helper()
+	msg, err := store.NewEvent(ticketID, store.EventKindPlanUnblock,
+		response.PlanUnblockEvent{PlanVersion: planVersion, FindingIDs: findingIDs, Guidance: guidance})
+	if err != nil {
+		t.Fatalf("seedPlanUnblockEvent: NewEvent: %v", err)
+	}
+	if _, err = s.InsertMessage(t.Context(), msg); err != nil {
+		t.Fatalf("seedPlanUnblockEvent: InsertMessage: %v", err)
+	}
+}
+
+// sideOkResult builds a scriptedStep whose Response is a minimal, valid
+// *response.SideResponse (job side, outcome ok): the unblock turn's own
+// success shape.
+func sideOkResult(answer, sessionID string) scriptedStep {
+	return scriptedStep{res: runtime.RunResult{
+		Response:  &response.SideResponse{Job: response.JobSide, Outcome: response.OutcomeOk, Answer: answer},
+		SessionID: sessionID, ExitCode: 0, AgentTime: time.Second,
+	}}
+}
+
+// TestPlanUnblock_CapRunsUnblockTurnThenReplansWithGuidance proves ticket
+// 85's main path: the first time the cap is hit with an above-floor finding
+// still open, Zing runs one unblock turn on opus and commits its guidance as
+// a plan_unblock event with no question; the next tick resumes planning with
+// that guidance fenced, and delivers the review.
+func TestPlanUnblock_CapRunsUnblockTurnThenReplansWithGuidance(t *testing.T) {
+	t.Parallel()
+	s, ticketID, planVersion := seedPlanUnblockCap(t, "Cap runs the unblock turn.")
+
+	const guidance = "Drop task 4 and test the parser seam."
+	unblockRT := &scriptedRuntime{t: t, steps: []scriptedStep{sideOkResult(guidance, "unblock-sess-1")}}
+	commit, err := runPlanning(t, s, claim(t, s, unblockRT, ticketID), ticketID)
+	if err != nil {
+		t.Fatalf("planning Run (unblock turn): %v", err)
+	}
+	if len(unblockRT.reqs) != 1 {
+		t.Fatalf("unblockRT.reqs = %d requests, want exactly 1", len(unblockRT.reqs))
+	}
+	req := unblockRT.reqs[0]
+	if req.Job != response.JobSide {
+		t.Errorf("reqs[0].Job = %q, want %q", req.Job, response.JobSide)
+	}
+	if req.Model != testModels["opus"] {
+		t.Errorf("reqs[0].Model = %q, want %q", req.Model, testModels["opus"])
+	}
+	wantMajorID := fmt.Sprintf("p%d-f2", planVersion)
+	if !strings.Contains(req.Prompt, wantMajorID) {
+		t.Errorf("unblock prompt does not carry the major finding's id %q:\n%s", wantMajorID, req.Prompt)
+	}
+	if !strings.Contains(req.Prompt, "fix that too") {
+		t.Errorf("unblock prompt does not carry the major finding's fix text:\n%s", req.Prompt)
+	}
+	if commit.Escalation != nil {
+		t.Errorf("commit.Escalation = %+v, want nil", commit.Escalation)
+	}
+	if commit.Waiting != nil {
+		t.Errorf("commit.Waiting = %v, want nil", commit.Waiting)
+	}
+	if len(commit.Messages) != 1 {
+		t.Fatalf("commit.Messages = %+v, want exactly one (the plan_unblock event)", commit.Messages)
+	}
+	msg := commit.Messages[0]
+	if msg.EventKind == nil || *msg.EventKind != store.EventKindPlanUnblock {
+		t.Fatalf("commit.Messages[0].EventKind = %v, want %q", msg.EventKind, store.EventKindPlanUnblock)
+	}
+	var ev response.PlanUnblockEvent
+	if err = json.Unmarshal(msg.Payload, &ev); err != nil {
+		t.Fatalf("unmarshal plan_unblock payload: %v", err)
+	}
+	wantEv := response.PlanUnblockEvent{PlanVersion: planVersion, FindingIDs: []string{wantMajorID}, Guidance: guidance}
+	if !reflect.DeepEqual(ev, wantEv) {
+		t.Errorf("plan_unblock event = %+v, want %+v", ev, wantEv)
+	}
+
+	apply(t, s, getTicket(t, s, ticketID), commit)
+
+	resumeRT := &scriptedRuntime{t: t, steps: []scriptedStep{questionResult(response.JobPlanning, "unblock-resume-sess")}}
+	rec := &recordingRuntime{rt: resumeRT}
+	commit2, err := runPlanning(t, s, claim(t, s, rec, ticketID), ticketID)
+	if err != nil {
+		t.Fatalf("planning Run (resume with guidance): %v", err)
+	}
+	if rec.lastReq.Job != response.JobPlanning {
+		t.Errorf("reqs[1].Job = %q, want %q", rec.lastReq.Job, response.JobPlanning)
+	}
+	if !strings.Contains(rec.lastReq.Prompt, guidance) {
+		t.Errorf("resume prompt does not carry the guidance:\n%s", rec.lastReq.Prompt)
+	}
+	if commit2.Escalation != nil {
+		t.Errorf("commit2.Escalation = %+v, want nil", commit2.Escalation)
+	}
+	foundDelivered := false
+	wantDelivered := fmt.Sprintf("planreview v%d delivered", planVersion)
+	for _, m := range commit2.Messages {
+		if m.Body == wantDelivered {
+			foundDelivered = true
+		}
+	}
+	if !foundDelivered {
+		t.Errorf("commit2.Messages = %+v, want %q", commit2.Messages, wantDelivered)
+	}
+}
+
+// TestPlanUnblock_FailedTurnWritesNoMarker proves an unblock run that fails
+// with error, with a question, or with blank guidance routes through
+// runAndRoute under origin cap_loops and writes no plan_unblock event, so a
+// later cap hit tries the unblock turn again.
+func TestPlanUnblock_FailedTurnWritesNoMarker(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name            string
+		step            scriptedStep
+		wantCode        string
+		wantTriedPrefix string
+		wantRunOutcome  string
+	}{
+		{
+			name: "error",
+			step: scriptedStep{res: runtime.RunResult{
+				Response: &response.ErrorResponse{
+					Job: response.JobSide, Outcome: response.OutcomeError,
+					Error: response.RunError{Code: response.ErrorCodePlanGap, What: "the plan names no seam", Why: "no seam named"},
+				},
+				SessionID: "unblock-err-sess", ExitCode: 0, AgentTime: time.Second,
+			}},
+			wantCode:        string(response.EscalationCodeLoopsExhausted),
+			wantTriedPrefix: "the unblock turn returned error plan_gap",
+			wantRunOutcome:  string(response.OutcomeError),
+		},
+		{
+			name:            "question",
+			step:            questionResult(response.JobSide, "unblock-q-sess"),
+			wantCode:        string(response.EscalationCodeLoopsExhausted),
+			wantTriedPrefix: "the unblock turn asked a question",
+			wantRunOutcome:  string(response.OutcomeQuestion),
+		},
+		{
+			name:           "blank",
+			step:           sideOkResult("   \n", "unblock-blank-sess"),
+			wantCode:       string(response.EscalationCodePostRunFailed),
+			wantRunOutcome: string(response.OutcomeError),
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			s, ticketID, _ := seedPlanUnblockCap(t, "Cap runs the unblock turn ("+tc.name+").")
+			unblockRT := &scriptedRuntime{t: t, steps: []scriptedStep{tc.step}}
+			commit, err := runPlanning(t, s, claim(t, s, unblockRT, ticketID), ticketID)
+			if err != nil {
+				t.Fatalf("planning Run (unblock %s): %v", tc.name, err)
+			}
+			if commit.Escalation == nil {
+				t.Fatalf("commit.Escalation is nil, want %q", tc.wantCode)
+			}
+			if commit.Escalation.Payload.Code != tc.wantCode {
+				t.Errorf("Escalation.Payload.Code = %q, want %q", commit.Escalation.Payload.Code, tc.wantCode)
+			}
+			if commit.Escalation.Payload.Origin != string(response.EscalationOriginCapLoops) {
+				t.Errorf("Escalation.Payload.Origin = %q, want %q", commit.Escalation.Payload.Origin, response.EscalationOriginCapLoops)
+			}
+			if tc.wantTriedPrefix != "" && !strings.HasPrefix(commit.Escalation.Payload.Tried, tc.wantTriedPrefix) {
+				t.Errorf("Escalation.Payload.Tried = %q, want prefix %q", commit.Escalation.Payload.Tried, tc.wantTriedPrefix)
+			}
+			if len(commit.Runs) != 1 || commit.Runs[0].Outcome == nil || *commit.Runs[0].Outcome != tc.wantRunOutcome {
+				t.Fatalf("commit.Runs = %+v, want one run with outcome %q", commit.Runs, tc.wantRunOutcome)
+			}
+			if tc.wantCode == string(response.EscalationCodeLoopsExhausted) {
+				if len(commit.Escalation.ExtraOptions) != 1 || commit.Escalation.ExtraOptions[0].Key != "d" {
+					t.Errorf("Escalation.ExtraOptions = %+v, want one entry keyed %q", commit.Escalation.ExtraOptions, "d")
+				}
+				if commit.Escalation.Recommended != "d" {
+					t.Errorf("Escalation.Recommended = %q, want %q", commit.Escalation.Recommended, "d")
+				}
+			}
+
+			apply(t, s, getTicket(t, s, ticketID), commit)
+			n, err := s.CountEvents(t.Context(), ticketID, store.EventKindPlanUnblock, store.EventFilter{})
+			if err != nil {
+				t.Fatalf("CountEvents: %v", err)
+			}
+			if n != 0 {
+				t.Errorf("CountEvents(plan_unblock) = %d, want 0", n)
+			}
+
+			if tc.wantCode == string(response.EscalationCodeLoopsExhausted) {
+				open, err := s.QuestionsByState(t.Context(), ticketID, "open")
+				if err != nil || len(open) != 1 {
+					t.Fatalf("QuestionsByState(open) = %v, %v, want exactly one", open, err)
+				}
+				var qPayload response.QuestionPayload
+				if err := json.Unmarshal(open[0].Payload, &qPayload); err != nil {
+					t.Fatalf("unmarshal question payload: %v", err)
+				}
+				wantKeys := []string{"a", "b", "d", "c"}
+				gotKeys := make([]string, len(qPayload.Options))
+				for i, o := range qPayload.Options {
+					gotKeys[i] = o.Key
+				}
+				if !reflect.DeepEqual(gotKeys, wantKeys) {
+					t.Errorf("question option keys = %v, want %v", gotKeys, wantKeys)
+				}
+				if qPayload.Recommended != "d" {
+					t.Errorf("qPayload.Recommended = %q, want %q", qPayload.Recommended, "d")
+				}
+			}
+		})
+	}
+}
+
+// TestPlanUnblock_FloorOnlyCapPostsGateWithoutUnblock proves a capped review
+// holding only at-or-below-floor findings still posts the gate directly
+// (today's rule, unchanged): the unblock turn never runs, and no
+// plan_unblock event is ever written.
+func TestPlanUnblock_FloorOnlyCapPostsGateWithoutUnblock(t *testing.T) {
+	t.Parallel()
+	s := newJobTestStore(t)
+	ticketID := seedFeatureTicketInPlanning(t, s)
+	planVersion, runID := seedCohort(t, s, ticketID, validPlan("Floor only cap, no unblock."), validScenarios(2, "unblockfloorgate"))
+
+	insertUpdateMarker(t, s, ticketID, "planreview v1 delivered")
+	insertUpdateMarker(t, s, ticketID, "planreview v2 delivered")
+
+	f := finding(response.SeverityMinor, "plan/design/shape", "still wrong", "fix it")
+	seedPlanreviewArtifact(t, s, ticketID, planVersion, runID, f)
+	insertUpdateMarker(t, s, ticketID, fmt.Sprintf("planreview v%d pending", planVersion))
+
+	noCallRT := &scriptedRuntime{t: t}
+	commit, err := runPlanning(t, s, claim(t, s, noCallRT, ticketID), ticketID)
+	if err != nil {
+		t.Fatalf("planning Run: %v", err)
+	}
+	if len(noCallRT.reqs) != 0 {
+		t.Fatalf("noCallRT.reqs = %d requests, want 0 (no runtime call)", len(noCallRT.reqs))
+	}
+	if commit.Waiting == nil || *commit.Waiting != testWaitingGate {
+		t.Fatalf("commit.Waiting = %v, want gate", commit.Waiting)
+	}
+	wantMarker := fmt.Sprintf("gate cap reached plan v%d", planVersion)
+	foundMarker := false
+	for _, m := range commit.Messages {
+		if m.Body == wantMarker {
+			foundMarker = true
+		}
+	}
+	if !foundMarker {
+		t.Errorf("commit.Messages = %+v, want marker %q", commit.Messages, wantMarker)
+	}
+
+	apply(t, s, getTicket(t, s, ticketID), commit)
+	n, err := s.CountEvents(t.Context(), ticketID, store.EventKindPlanUnblock, store.EventFilter{})
+	if err != nil {
+		t.Fatalf("CountEvents: %v", err)
+	}
+	if n != 0 {
+		t.Errorf("CountEvents(plan_unblock) = %d, want 0", n)
+	}
+}
+
+// TestPlanUnblock_ExtraRoundOnlyAfterUnblock proves the guidance input rides
+// along only when the newest plan_unblock event's plan_version equals the
+// current cohort version: an event from an earlier, unrelated version (99)
+// resumes planning without the guidance, since the versions differ.
+func TestPlanUnblock_ExtraRoundOnlyAfterUnblock(t *testing.T) {
+	t.Parallel()
+	s, ticketID, _ := seedPlanUnblockCap(t, "Extra round only after its own unblock.")
+
+	const guidance = "Drop task 4."
+	seedPlanUnblockEvent(t, s, ticketID, 99, []string{"p99-f2"}, guidance)
+
+	resumeRT := &scriptedRuntime{t: t, steps: []scriptedStep{questionResult(response.JobPlanning, "unblockextra-sess")}}
+	rec := &recordingRuntime{rt: resumeRT}
+	commit, err := runPlanning(t, s, claim(t, s, rec, ticketID), ticketID)
+	if err != nil {
+		t.Fatalf("planning Run: %v", err)
+	}
+	if rec.lastReq.Job != response.JobPlanning {
+		t.Errorf("req.Job = %q, want %q", rec.lastReq.Job, response.JobPlanning)
+	}
+	if strings.Contains(rec.lastReq.Prompt, guidance) {
+		t.Errorf("resume prompt carries the unrelated version's guidance, want none:\n%s", rec.lastReq.Prompt)
+	}
+	if commit.Escalation != nil {
+		t.Errorf("commit.Escalation = %+v, want nil", commit.Escalation)
+	}
+}
+
+// TestPlanUnblock_SecondCapEscalatesWithGuidance proves that once the cap is
+// hit again after a successful unblock turn, Zing escalates loops_exhausted
+// with an empty Tried (today's shape, unchanged) and a Body naming the open
+// above-floor finding ids and the guidance Zing already tried
+// (capAfterUnblockBody); picking b (back to planning) still resumes planning
+// with today's inputs only, carrying no guidance.
+func TestPlanUnblock_SecondCapEscalatesWithGuidance(t *testing.T) {
+	t.Parallel()
+	s, ticketID, escCommit, q := seedCapLoopsEscalation(t, "Cap loops, second cap after unblock.")
+
+	if escCommit.Escalation.Payload.Code != string(response.EscalationCodeLoopsExhausted) {
+		t.Errorf("Escalation.Payload.Code = %q, want %q", escCommit.Escalation.Payload.Code, response.EscalationCodeLoopsExhausted)
+	}
+	if escCommit.Escalation.Payload.Origin != string(response.EscalationOriginCapLoops) {
+		t.Errorf("Escalation.Payload.Origin = %q, want %q", escCommit.Escalation.Payload.Origin, response.EscalationOriginCapLoops)
+	}
+	if escCommit.Escalation.Payload.Tried != "" {
+		t.Errorf("Escalation.Payload.Tried = %q, want empty", escCommit.Escalation.Payload.Tried)
+	}
+	cohort, ok, err := s.CurrentCohort(t.Context(), ticketID)
+	if err != nil || !ok {
+		t.Fatalf("CurrentCohort: %+v, ok=%v, %v", cohort, ok, err)
+	}
+	wantIDs := fmt.Sprintf("Open findings after Zing's unblock round: p%d-f2.", cohort.PlanVersion)
+	if !strings.Contains(escCommit.Escalation.Body, wantIDs) {
+		t.Errorf("Escalation.Body = %q, want it to contain %q", escCommit.Escalation.Body, wantIDs)
+	}
+	if !strings.Contains(escCommit.Escalation.Body, "Drop task 4.") {
+		t.Errorf("Escalation.Body = %q, want it to contain the guidance %q", escCommit.Escalation.Body, "Drop task 4.")
+	}
+
+	var payload response.QuestionPayload
+	if err = json.Unmarshal(q.Payload, &payload); err != nil {
+		t.Fatalf("unmarshal question payload: %v", err)
+	}
+	wantKeys := []string{"a", "b", "d", "c"}
+	gotKeys := make([]string, len(payload.Options))
+	for i, o := range payload.Options {
+		gotKeys[i] = o.Key
+	}
+	if !reflect.DeepEqual(gotKeys, wantKeys) {
+		t.Errorf("question option keys = %v, want %v", gotKeys, wantKeys)
+	}
+	if payload.Recommended != "d" {
+		t.Errorf("payload.Recommended = %q, want %q", payload.Recommended, "d")
+	}
+
+	answerGateQuestion(t, s, ticketID, q.ID, new("b"), "")
+
+	rec := &recordingRuntime{rt: &scriptedRuntime{t: t, steps: []scriptedStep{questionResult(response.JobPlanning, "unblock-second-cap-back-sess")}}}
+	commit2, err := runPlanning(t, s, claim(t, s, rec, ticketID), ticketID)
+	if err != nil {
+		t.Fatalf("planning Run (back): %v", err)
+	}
+	if rec.lastReq.Job != response.JobPlanning {
+		t.Errorf("req.Job = %q, want %q", rec.lastReq.Job, response.JobPlanning)
+	}
+	if strings.Contains(rec.lastReq.Prompt, "Drop task 4.") {
+		t.Errorf("resume prompt carries the guidance, want none on back:\n%s", rec.lastReq.Prompt)
+	}
+	if commit2.Escalation != nil {
+		t.Errorf("commit2.Escalation = %+v, want nil", commit2.Escalation)
+	}
 }

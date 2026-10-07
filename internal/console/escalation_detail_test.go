@@ -131,8 +131,8 @@ func TestEscalationQuestion_LoopsExhaustedListsFindings(t *testing.T) {
 	seedSystemUpdate(t, s, ticketID, "planreview v2 delivered")
 
 	seedPlanReviewArtifact(t, s, ticketID, runID, 3, []response.Finding{
-		{Lens: response.LensCorrectness, Severity: response.SeverityMajor, Location: findingLocation, Text: "v3 major finding text", Fix: findingFixPlaceholder},
-		{Lens: response.LensQuality, Severity: response.SeverityMinor, Location: findingLocation, Text: "v3 minor finding text", Fix: findingFixPlaceholder},
+		{ID: "p3-f1", Lens: response.LensCorrectness, Severity: response.SeverityMajor, Location: findingLocation, Text: "v3 major finding text", Fix: findingFixPlaceholder},
+		{ID: "p3-f2", Lens: response.LensQuality, Severity: response.SeverityMinor, Location: findingLocation, Text: "v3 minor finding text", Fix: findingFixPlaceholder},
 	})
 	seedSystemUpdate(t, s, ticketID, "planreview v3 pending")
 
@@ -164,8 +164,8 @@ func TestEscalationQuestion_LoopsExhaustedListsFindings(t *testing.T) {
 
 	for _, want := range []string{
 		"plan review of v3",
-		"major at <code>" + findingLocation + "</code>: v3 major finding text",
-		"minor at <code>" + findingLocation + "</code>: v3 minor finding text",
+		"p3-f1 major at <code>" + findingLocation + "</code>: v3 major finding text",
+		"p3-f2 minor at <code>" + findingLocation + "</code>: v3 minor finding text",
 	} {
 		if !strings.Contains(body, want) {
 			t.Errorf("q-body missing %q; got:\n%s", want, body)
