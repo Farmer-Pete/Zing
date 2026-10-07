@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -14,6 +15,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -408,6 +410,121 @@ func TestServe_UpgraderRunsAlongsideShutdown(t *testing.T) {
 	if !hasMsg || !hasExe || !hasRunning {
 		t.Errorf("logs = %q, want an \"upgrade: enabled\" line with exe=%s and running=%s (hasMsg=%v hasExe=%v hasRunning=%v): serve must have built a non-nil upgrader from su",
 			got, su.exe, su.running, hasMsg, hasExe, hasRunning)
+	}
+}
+
+// syncLogBuffer is a thread-safe io.Writer, so a test can poll the text an
+// os.Pipe-captured os.Stderr has accumulated so far while serve is still
+// running, instead of waiting for the pipe to close.
+type syncLogBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *syncLogBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *syncLogBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
+}
+
+// TestServe_WatchBootRecordsBootedOK proves serve's boot-watch wiring end to
+// end: with su.boot set to bootWatch, startUpgrader leaves the upgrader's
+// gate shut, the watch goroutine started once the listeners are up polls
+// GET / until it answers 200, and onBooted then removes upgrade.json and
+// opens the gate with the marker's carried request already queued. su.exe
+// is deliberately not DATA_DIR/bin/zing, so prepare's own install_check
+// refuses the carried request and logs "upgrade: not run" -- since no
+// fakeSteps can be injected into serve's own upgrader, that refusal log
+// line, captured off the real process os.Stderr the same way
+// TestServe_UpgraderRunsAlongsideShutdown does (installLogHandler resets
+// slog's default to write there), is what proves the carried request
+// really reached the now-open loop.
+func TestServe_WatchBootRecordsBootedOK(t *testing.T) {
+	// Not t.Parallel(): swaps the process os.Stderr to capture the
+	// "upgrade: not run" log, which would race with any other test logging
+	// concurrently.
+
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "zing.toml")
+	dbPath := filepath.Join(dir, "zing.db")
+
+	port := freeLoopbackPort(t)
+	writeZingTOML(t, cfgPath, zingTOMLOpts{
+		Port: port, IntervalSeconds: 1, MaxParallel: 1, Bind: []string{loopback}, Self: true,
+	})
+
+	marker := upgradeMarker{
+		FromSHA: "0123456789ab", ToSHA: "fedcba9876543210fedcba9876543210fedcba9",
+		TicketID: 0, State: markerAttempted,
+		HasNext: true, NextSHA: strings.Repeat("0", 40), NextTicketID: 0,
+	}
+	if err := saveUpgradeMarker(dir, marker); err != nil {
+		t.Fatalf("saveUpgradeMarker: %v", err)
+	}
+
+	su := &selfUpgrade{
+		exe: filepath.Join(dir, "not-the-running-binary"), running: "0123456789ab",
+		boot: bootWatch, marker: marker,
+	}
+
+	r, w, pipeErr := os.Pipe()
+	if pipeErr != nil {
+		t.Fatal(pipeErr)
+	}
+	origStderr := os.Stderr
+	os.Stderr = w
+	t.Cleanup(func() { os.Stderr = origStderr })
+
+	logs := &syncLogBuffer{}
+	var copyErr error
+	logsDone := make(chan struct{})
+	go func() {
+		_, copyErr = io.Copy(logs, r)
+		close(logsDone)
+	}()
+
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+
+	serveDone := make(chan error, 1)
+	go func() { serveDone <- serve(ctx, cfgPath, dbPath, false, su) }()
+
+	waitForServing(t, fmt.Sprintf("http://127.0.0.1:%d", port), serveDone)
+
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		_, found, loadErr := loadUpgradeMarker(dir)
+		if loadErr != nil {
+			t.Fatalf("loadUpgradeMarker: %v", loadErr)
+		}
+		if !found && strings.Contains(logs.String(), "upgrade: not run") {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("marker_gone=%v logs=%q: want upgrade.json gone and an \"upgrade: not run\" log line within 5s", !found, logs.String())
+		}
+		select {
+		case err := <-serveDone:
+			t.Fatalf("serve exited early: %v", err)
+		case <-time.After(50 * time.Millisecond):
+		}
+	}
+
+	cancelAndWaitForServe(t, cancel, serveDone)
+
+	os.Stderr = origStderr
+	if err := w.Close(); err != nil {
+		t.Fatal(err)
+	}
+	<-logsDone
+	if copyErr != nil {
+		t.Fatal(copyErr)
 	}
 }
 

@@ -309,3 +309,41 @@ func closeUpgrade(ctx context.Context, st *store.Store, dataDir string, m upgrad
 		request(m.NextTicketID, m.NextSHA)
 	}
 }
+
+// bootPoll is watchBoot's interval in serve's own boot-watch goroutine.
+const bootPoll = 1 * time.Second
+
+// startUpgrader starts up.loop and returns a channel that closes when the
+// loop returns. It opens the gate at once unless boot is bootWatch, where
+// onBooted opens it once the boot watch answers 200. A nil up starts
+// nothing and returns an already closed channel.
+func startUpgrader(ctx context.Context, up *upgrader, boot bootAction) <-chan struct{} {
+	done := make(chan struct{})
+	if up == nil {
+		close(done)
+		return done
+	}
+	go func() {
+		up.loop(ctx)
+		close(done)
+	}()
+	if boot != bootWatch {
+		close(up.gate)
+	}
+	return done
+}
+
+// onBooted records that a watch boot answered 200: it sets su.booted so the
+// 60 s timer stands down, closes the upgrade as booted_ok with any carried
+// request handed to up, and then opens up's gate.
+func onBooted(ctx context.Context, st *store.Store, dataDir string, su *selfUpgrade, up *upgrader) {
+	su.booted.Store(true)
+	var request func(int64, string)
+	if up != nil {
+		request = up.Request
+	}
+	closeUpgrade(context.WithoutCancel(ctx), st, dataDir, su.marker, closeBootedOK, request)
+	if up != nil {
+		close(up.gate)
+	}
+}

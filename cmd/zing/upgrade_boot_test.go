@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -729,4 +730,130 @@ func TestCloseUpgrade_RolledBack(t *testing.T) {
 	if calls != 0 {
 		t.Errorf("request calls = %d, want 0", calls)
 	}
+}
+
+// TestStartUpgrader proves startUpgrader's three cases: a watch boot starts
+// the loop but leaves the gate shut, so a queued request never reaches
+// Build; any other boot opens the gate at once, so a queued request does
+// reach Build; and a nil upgrader starts nothing and hands back an already
+// closed channel.
+func TestStartUpgrader(t *testing.T) {
+	t.Parallel()
+
+	t.Run("watch_leaves_gate_shut", func(t *testing.T) {
+		t.Parallel()
+
+		u, steps, _ := newTestUpgrader(t)
+		ctx, cancel := context.WithCancel(t.Context())
+		defer cancel()
+
+		done := startUpgrader(ctx, u, bootWatch)
+		u.Request(0, "deadbeef0123456789abcdef0123456789abcdef")
+
+		time.Sleep(100 * time.Millisecond)
+		if calls := steps.calls(); len(calls) != 0 {
+			t.Errorf("Build calls = %v, want none while the gate is shut", calls)
+		}
+
+		select {
+		case <-done:
+			t.Error("done closed before ctx was cancelled")
+		default:
+		}
+	})
+
+	t.Run("other_boot_opens_gate", func(t *testing.T) {
+		t.Parallel()
+
+		u, steps, _ := newTestUpgrader(t)
+		ctx, cancel := context.WithCancel(t.Context())
+		defer cancel()
+
+		startUpgrader(ctx, u, bootNormal)
+		u.Request(0, "deadbeef0123456789abcdef0123456789abcdef")
+
+		deadline := time.Now().Add(5 * time.Second)
+		for len(steps.calls()) == 0 {
+			if time.Now().After(deadline) {
+				t.Fatalf("Build was never called within 5s")
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+	})
+
+	t.Run("nil_up_is_noop", func(t *testing.T) {
+		t.Parallel()
+
+		done := startUpgrader(t.Context(), nil, bootNormal)
+		select {
+		case <-done:
+		default:
+			t.Error("done was not already closed for a nil upgrader")
+		}
+	})
+}
+
+// TestOnBooted proves onBooted removes upgrade.json, sets su.booted, and
+// opens up's gate with the carried request already queued, so the loop
+// reaches Build with the carried sha; a nil up is a no-op beyond setting
+// su.booted.
+func TestOnBooted(t *testing.T) {
+	t.Parallel()
+
+	u, steps, _ := newTestUpgrader(t)
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+
+	startUpgrader(ctx, u, bootWatch)
+
+	const nextSHA = "0123456789abcdef0123456789abcdef01234567"
+	m := upgradeMarker{
+		FromSHA: "fedcba9876543210", ToSHA: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+		State: markerAttempted, HasNext: true, NextSHA: nextSHA, NextTicketID: 42,
+	}
+	if err := saveUpgradeMarker(u.dataDir, m); err != nil {
+		t.Fatalf("saveUpgradeMarker: %v", err)
+	}
+
+	su := &selfUpgrade{marker: m}
+	onBooted(ctx, u.store, u.dataDir, su, u)
+
+	if !su.booted.Load() {
+		t.Error("su.booted = false, want true")
+	}
+	if _, found, err := loadUpgradeMarker(u.dataDir); err != nil || found {
+		t.Errorf("marker found=%v err=%v, want gone", found, err)
+	}
+
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		found := slices.Contains(steps.calls(), nextSHA)
+		if found {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("Build never received the carried sha %s; calls=%v", nextSHA, steps.calls())
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	t.Run("nil_up", func(t *testing.T) {
+		t.Parallel()
+
+		st, dir := openUpgradeBootStore(t)
+		m := upgradeMarker{FromSHA: "fedcba9876543210", ToSHA: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}
+		if err := saveUpgradeMarker(dir, m); err != nil {
+			t.Fatalf("saveUpgradeMarker: %v", err)
+		}
+
+		su := &selfUpgrade{marker: m}
+		onBooted(t.Context(), st, dir, su, nil)
+
+		if !su.booted.Load() {
+			t.Error("su.booted = false, want true")
+		}
+		if _, found, err := loadUpgradeMarker(dir); err != nil || found {
+			t.Errorf("marker found=%v err=%v, want gone", found, err)
+		}
+	})
 }
