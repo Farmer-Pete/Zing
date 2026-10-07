@@ -103,3 +103,21 @@ func TestEventLineFallbacks(t *testing.T) {
 		})
 	}
 }
+
+// TestPlanUnblockLine proves planUnblockLine renders the guidance sentence
+// and rejects a payload with no guidance.
+func TestPlanUnblockLine(t *testing.T) {
+	t.Parallel()
+	got, err := planUnblockLine([]byte(`{"plan_version":3,"finding_ids":["p3-f2"],"guidance":"Drop task 4 and test the parser seam."}`))
+	if err != nil {
+		t.Fatalf("planUnblockLine: %v", err)
+	}
+	want := "Zing sent this back to planning with: Drop task 4 and test the parser seam."
+	if got != want {
+		t.Errorf("planUnblockLine = %q, want %q", got, want)
+	}
+
+	if _, err := planUnblockLine([]byte(`{"plan_version":3,"finding_ids":["p3-f2"],"guidance":""}`)); err == nil {
+		t.Error("planUnblockLine(empty guidance) = nil error, want one")
+	}
+}

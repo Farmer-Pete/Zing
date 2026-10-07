@@ -330,8 +330,55 @@ func TestInsertEventRejects(t *testing.T) {
 func TestEventKinds(t *testing.T) {
 	t.Parallel()
 	got := EventKinds()
-	want := []string{"check_rerun", "check_rerun_passed", "owner_edit", "stale_base"}
+	want := []string{"check_rerun", "check_rerun_passed", "owner_edit", "plan_unblock", "stale_base"}
 	if !slices.Equal(got, want) {
 		t.Errorf("EventKinds() = %v, want %v", got, want)
+	}
+}
+
+// TestNewestPlanUnblock proves NewestPlanUnblock returns false on a ticket
+// with no plan_unblock events, and otherwise the newest one, decoded.
+func TestNewestPlanUnblock(t *testing.T) {
+	t.Parallel()
+	s := newTestStore(t)
+	ctx := t.Context()
+
+	seedProjectAndTicket(t, s)
+	const ticketID = 1
+
+	if _, ok, err := s.NewestPlanUnblock(ctx, ticketID); err != nil || ok {
+		t.Fatalf("NewestPlanUnblock(no events) = (ok=%v, err=%v), want (false, nil)", ok, err)
+	}
+
+	msg2, err := NewEvent(ticketID, EventKindPlanUnblock, response.PlanUnblockEvent{
+		PlanVersion: 2, FindingIDs: []string{"p2-f1"}, Guidance: "Drop task 2.",
+	})
+	if err != nil {
+		t.Fatalf("NewEvent(v2): %v", err)
+	}
+	if _, insertErr := s.InsertMessage(ctx, msg2); insertErr != nil {
+		t.Fatalf("InsertMessage(v2): %v", insertErr)
+	}
+
+	msg3, err := NewEvent(ticketID, EventKindPlanUnblock, response.PlanUnblockEvent{
+		PlanVersion: 3, FindingIDs: []string{"p3-f2"}, Guidance: "Drop task 4.",
+	})
+	if err != nil {
+		t.Fatalf("NewEvent(v3): %v", err)
+	}
+	if _, insertErr := s.InsertMessage(ctx, msg3); insertErr != nil {
+		t.Fatalf("InsertMessage(v3): %v", insertErr)
+	}
+
+	got, ok, err := s.NewestPlanUnblock(ctx, ticketID)
+	if err != nil {
+		t.Fatalf("NewestPlanUnblock: %v", err)
+	}
+	if !ok {
+		t.Fatal("NewestPlanUnblock: ok = false, want true")
+	}
+	want := response.PlanUnblockEvent{PlanVersion: 3, FindingIDs: []string{"p3-f2"}, Guidance: "Drop task 4."}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("NewestPlanUnblock = %+v, want %+v", got, want)
 	}
 }

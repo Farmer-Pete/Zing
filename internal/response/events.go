@@ -38,6 +38,17 @@ type OwnerEditEvent struct {
 	Reason string `json:"reason,omitempty" doc:"the judge's reason when a handler commit applied an accepted amendment; empty for every console edit"`
 }
 
+// PlanUnblockEvent is the plan_unblock typed event's payload (messages
+// table, event_kind "plan_unblock"): one successful unblock turn at plan
+// review's loop cap -- the plan version whose capped review it read, the
+// above-floor finding ids still open, and the guidance planning resumes
+// with.
+type PlanUnblockEvent struct {
+	PlanVersion int      `json:"plan_version" jsonschema:"minimum=1"`
+	FindingIDs  []string `json:"finding_ids"  jsonschema:"minItems=1"`
+	Guidance    string   `json:"guidance"     jsonschema:"minLength=1"`
+}
+
 // StaleBaseEvent is the stale_base typed event's payload (messages table,
 // event_kind "stale_base"): a step that used the last fetched base
 // because the fetch itself failed, once per step and sha (#68 follow-up).
