@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -161,16 +162,19 @@ type Binding struct {
 // values.
 const intakeModeManual = "manual"
 
-// Config is the dispatcher's run-time tuning (design section 6.8). Models,
-// Budget, and Floor (design section 4.4) are threaded straight into every
-// job.Deps runAndCommit builds; task 2 only threads them, nothing in this
-// package reads them yet.
+// Config is the dispatcher's run-time tuning (design section 6.8). Models
+// and Floor (design section 4.4) are threaded straight into every job.Deps
+// runAndCommit builds. Interval, MaxParallel, and Budget are the startup
+// values only (#81): New copies them into the live Dispatcher.tune, and
+// fill, Tick, Run, and runAndCommit read d.tune, under d.mu, from then on,
+// so a console-driven SetTuning call changes what they see without a
+// restart.
 type Config struct {
-	Interval    time.Duration     // Run's tick period
-	MaxParallel int               // the active-run guard (design section 6.8 step 4)
+	Interval    time.Duration     // the startup tick period; see Dispatcher.tune
+	MaxParallel int               // the startup active-run guard; see Dispatcher.tune
 	Owner       string            // this process's claim owner id, <hostname>-<pid>
 	Models      map[string]string // alias -> exact model id (config.Models)
-	Budget      time.Duration     // time.Duration(cfg.Budget.AgentMinutesPerTicket) * time.Minute
+	Budget      time.Duration     // the startup agent budget; see Dispatcher.tune
 	Floor       response.Severity // config.Review.Floor, parsed
 	// Projects, Sandboxes, RequireSandbox, and Commands are PKG8-PLAN.md
 	// section 10's own additions (Sandboxes replacing the single-profile
@@ -223,6 +227,76 @@ type Config struct {
 	ReclaimForeign bool
 }
 
+// Tuning is the dispatcher's live, console-changeable settings (#81):
+// Dispatcher.tune starts as a copy of Config's own Interval, MaxParallel,
+// and Budget, and SetTuning is the only way to change it afterward. fill's
+// slot guard, Tick and Run's results-channel sizing, and runAndCommit's
+// Budget all read it under d.mu instead of d.cfg.
+type Tuning struct {
+	MaxParallel int
+	Interval    time.Duration
+	Budget      time.Duration
+}
+
+// The three console-changeable setting names (owner decision Q1, Q2):
+// SetTuning's and ValidateTuning's name argument, and TuningSetting.Name.
+const (
+	TuneMaxParallel     = "max_parallel"
+	TuneIntervalSeconds = "interval_seconds"
+	TuneAgentMinutes    = "agent_minutes_per_ticket"
+)
+
+// MaxParallelCeiling is the console's own upper bound for max_parallel
+// (owner decision Q2): a zing.toml value above it still works at startup,
+// but the console can never set max_parallel above it, so Run sizes its
+// results buffer to at least this many slots regardless of the startup
+// Config.MaxParallel (finish's own buffer-capacity guarantee).
+const MaxParallelCeiling = 64
+
+// TuningSetting is one row of TuningSettings: a console-changeable
+// setting's name, its settings-table key, its console label, and its
+// bounds (owner decision Q2).
+type TuningSetting struct {
+	Name  string
+	Key   string
+	Label string
+	Min   int
+	Max   int
+}
+
+// TuningSettings lists the three console-changeable dispatch settings in
+// console display order. ValidateTuning, LoadTuning, and the console's
+// Settings view all loop over it instead of naming the three settings
+// separately.
+var TuningSettings = []TuningSetting{
+	{Name: TuneMaxParallel, Key: "dispatch.max_parallel", Label: "Max parallel tickets", Min: 1, Max: MaxParallelCeiling},
+	{Name: TuneIntervalSeconds, Key: "dispatch.interval_seconds", Label: "Dispatch interval (seconds)", Min: 1, Max: 86400},
+	{Name: TuneAgentMinutes, Key: "budget.agent_minutes_per_ticket", Label: "Agent minutes per ticket", Min: 1, Max: 525600},
+}
+
+// TuningError is ValidateTuning's and SetTuning's refusal: the console
+// shows Msg to the owner as is, with no further wrapping.
+type TuningError struct {
+	Msg string
+}
+
+func (e *TuningError) Error() string { return e.Msg }
+
+// ValidateTuning returns the TuningSettings entry for name when value is
+// inside its bounds, or a *TuningError the console shows the owner as is.
+func ValidateTuning(name string, value int) (TuningSetting, error) {
+	for _, s := range TuningSettings {
+		if s.Name != name {
+			continue
+		}
+		if value < s.Min || value > s.Max {
+			return TuningSetting{}, &TuningError{Msg: fmt.Sprintf("%s must be %d to %d", name, s.Min, s.Max)}
+		}
+		return s, nil
+	}
+	return TuningSetting{}, &TuningError{Msg: fmt.Sprintf("unknown setting %q", name)}
+}
+
 // Dispatcher ticks: reconcile, intake, count, pick, claim, run, commit
 // (design section 6.8), now launching up to cfg.MaxParallel claimed
 // tickets' handlers at once (design section 4.1, #45 D1) instead of running
@@ -238,13 +312,25 @@ type Dispatcher struct {
 	cfg      Config
 	drainCh  chan struct{}
 
-	// mu guards inflight, stop, stopErr, and firstErrorReported (design
-	// section 4.1): every read or write of these four fields happens under
-	// it, including a bare len(inflight).
+	// mu guards inflight, stop, stopErr, firstErrorReported, and tune
+	// (design section 4.1, #81): every read or write of these fields happens
+	// under it, including a bare len(inflight).
 	mu       sync.Mutex
 	inflight map[int64]bool // ticket ids this process is running now
 	stop     bool           // set once: no further claim or launch
 	stopErr  error          // the first error that set stop; nil when a drain or cancel set it
+
+	// tune is the live Tuning (#81): New copies Config's own Interval,
+	// MaxParallel, and Budget into it, and SetTuning is the only way to
+	// change it afterward. Guarded by mu above, like inflight.
+	tune Tuning
+
+	// tuneMu serializes SetTuning calls across the store write and the
+	// d.tune update that follows it (#81), the same reason control.go's
+	// logLevelMu exists: without it, two concurrent POST /settings calls
+	// could write their two values to the store in one order and to d.tune
+	// in the other. Taken before mu above, never after.
+	tuneMu sync.Mutex
 
 	// firstErrorReported guards reportFirstError's alert 1 (design section
 	// 4.6): raised at most once per Dispatcher lifetime, whether the error
@@ -324,9 +410,44 @@ func New(
 		"mechanics", deferredMechanics, "owner", "Package 7")
 	return &Dispatcher{
 		store: s, tracker: tr, bus: b, machine: m, reg: reg, rts: rts, bindings: bindings, cfg: cfg,
+		tune:     Tuning{MaxParallel: cfg.MaxParallel, Interval: cfg.Interval, Budget: cfg.Budget},
 		drainCh:  make(chan struct{}, 1),
 		inflight: make(map[int64]bool),
 	}, nil
+}
+
+// SetTuning validates value against name's bounds (ValidateTuning), writes
+// it to the settings table together with the changer (by) and the current
+// time in one transaction, and then updates the live Tuning fill, Tick,
+// Run, and runAndCommit read (#81, owner decisions Q2, Q3). tuneMu holds
+// the store write and the d.tune update together, so two concurrent
+// SetTuning calls can never write the store in one order and d.tune in the
+// other. The store write happens first: if it fails, d.tune is unchanged
+// and the caller gets the error back untouched.
+func (d *Dispatcher) SetTuning(ctx context.Context, name string, value int, by string) error {
+	s, err := ValidateTuning(name, value)
+	if err != nil {
+		return err
+	}
+	d.tuneMu.Lock()
+	defer d.tuneMu.Unlock()
+	at := d.cfg.Now().UTC().Format(time.RFC3339)
+	if err := d.store.SetSettings(ctx, s.Key, strconv.Itoa(value),
+		s.Key+".changed_by", by, s.Key+".changed_at", at); err != nil {
+		return fmt.Errorf("dispatch: set %s: %w", name, err)
+	}
+	d.mu.Lock()
+	switch name {
+	case TuneMaxParallel:
+		d.tune.MaxParallel = value
+	case TuneIntervalSeconds:
+		d.tune.Interval = time.Duration(value) * time.Second
+	case TuneAgentMinutes:
+		d.tune.Budget = time.Duration(value) * time.Minute
+	}
+	d.mu.Unlock()
+	slog.Info("dispatch: setting changed", "name", name, "value", value, "by", by)
+	return nil
 }
 
 // postHandlerContext returns a detached, bounded context for a post-handler
@@ -407,7 +528,10 @@ func (d *Dispatcher) Tick(ctx context.Context) error {
 	}
 	defer d.driving.Store(false)
 
-	results := make(chan runResult, d.cfg.MaxParallel)
+	d.mu.Lock()
+	slots := d.tune.MaxParallel
+	d.mu.Unlock()
+	results := make(chan runResult, slots)
 	launched, fillErr := d.fill(ctx, results)
 	if fillErr != nil {
 		d.setStop(fillErr)
@@ -738,7 +862,7 @@ func (d *Dispatcher) fill(ctx context.Context, results chan<- runResult) (int, e
 		id, state := ordered[i].ID, ordered[i].State
 
 		d.mu.Lock()
-		if d.stop || len(d.inflight) >= d.cfg.MaxParallel {
+		if d.stop || len(d.inflight) >= d.tune.MaxParallel {
 			d.mu.Unlock()
 			break
 		}
@@ -1161,9 +1285,13 @@ func (d *Dispatcher) runAndCommit(ctx context.Context, ticket store.Ticket, time
 	runCtx, cancel := context.WithDeadline(ctx, time.Now().Add(timeout))
 	defer cancel()
 
+	d.mu.Lock()
+	budget := d.tune.Budget
+	d.mu.Unlock()
+
 	deps := job.Deps{
 		Store: d.store, Runtimes: d.rts, Machine: d.machine,
-		Models: d.cfg.Models, Budget: d.cfg.Budget, Floor: d.cfg.Floor,
+		Models: d.cfg.Models, Budget: budget, Floor: d.cfg.Floor,
 		Owner: d.cfg.Owner, Expires: expires, Now: d.cfg.Now,
 		Projects: d.cfg.Projects, Sandboxes: d.cfg.Sandboxes, RequireSandbox: d.cfg.RequireSandbox, Commands: d.cfg.Commands,
 		HostCommands: d.cfg.HostCommands,

@@ -3076,6 +3076,10 @@ type spyHandler struct {
 	// dispatch.Config.ReviewBots into the Deps a handler actually sees,
 	// the same way judgeCodexHome already covers JudgeCodexHome.
 	reviewBots job.ReviewBotRule
+	// budget records d.Budget, so TestSetTuning_NextDepsCarriesNewBudget
+	// can assert a SetTuning call reaches the very next job.Deps
+	// runAndCommit builds (#81).
+	budget time.Duration
 
 	next, reason string
 	err          error
@@ -3087,6 +3091,7 @@ func (h *spyHandler) Run(ctx context.Context, t store.Ticket, d job.Deps) (store
 	h.expires = d.Expires
 	h.judgeCodexHome = d.JudgeCodexHome
 	h.reviewBots = d.ReviewBots
+	h.budget = d.Budget
 	if dl, ok := ctx.Deadline(); ok {
 		h.hasDeadline = true
 		h.deadline = dl
@@ -3140,6 +3145,13 @@ func (h *spyHandler) ReviewBots() job.ReviewBotRule {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	return h.reviewBots
+}
+
+// Budget returns the most recent Run call's d.Budget.
+func (h *spyHandler) Budget() time.Duration {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.budget
 }
 
 // countingRuntime wraps a runtime.Runtime and counts every Run call, so a
