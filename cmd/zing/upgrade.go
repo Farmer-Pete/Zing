@@ -9,12 +9,14 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
 	"strings"
 	"sync"
 	"time"
 
+	"zing/internal/gitbin"
 	"zing/internal/store"
 )
 
@@ -311,7 +313,7 @@ type execFunc func(argv0 string, argv, envv []string) error
 // nil rt, or with ctx already done because a real signal arrived during the
 // drain, it does nothing and returns nil, leaving zing.next and a pending
 // upgrade.json for the next start to deal with.
-func restartAfterServe(ctx context.Context, rt *restartTarget, argv, env []string, exec execFunc) error {
+func restartAfterServe(ctx context.Context, rt *restartTarget, argv, env []string, run execFunc) error {
 	if rt == nil {
 		return nil
 	}
@@ -325,8 +327,114 @@ func restartAfterServe(ctx context.Context, rt *restartTarget, argv, env []strin
 		return fmt.Errorf("upgrade: swap: %w", err)
 	}
 	slog.Info("upgrade", "step", "exec", "from_sha", rt.FromSHA, "to_sha", rt.ToSHA, "ticket_id", rt.TicketID)
-	if err := exec(rt.Binary, argv, env); err != nil {
+	if err := run(rt.Binary, argv, env); err != nil {
 		return fmt.Errorf("upgrade: exec %s: %w", rt.Binary, err)
 	}
 	return nil
+}
+
+// validSHA is the only shape of merge sha Build hands to git: a full,
+// lowercase commit id as the GitHub API gives it, never anything that
+// could parse as a command-line option.
+var validSHA = regexp.MustCompile(`^[0-9a-f]{40}$`)
+
+// gitGoSteps is the production upgradeSteps: a git fetch, a detached
+// worktree at the resolved sha under tmpRoot, and a go build, then
+// zing selftest and zing version on the result.
+type gitGoSteps struct {
+	repoGit       string
+	defaultBranch string
+	tmpRoot       string
+}
+
+// tailRedacted is the last at most 4096 bytes of b, with redactURLs
+// applied, for use in an error that may reach a log or a ticket.
+func tailRedacted(b []byte) string {
+	if len(b) > 4096 {
+		b = b[len(b)-4096:]
+	}
+	return redactURLs(string(b))
+}
+
+// runGit runs one git command against g.repoGit with GIT_TERMINAL_PROMPT=0
+// added, and returns its combined output.
+func (g gitGoSteps) runGit(ctx context.Context, args ...string) ([]byte, error) {
+	full := append([]string{"--git-dir", g.repoGit}, args...)
+	cmd := exec.CommandContext(ctx, gitbin.Path(), full...) //nolint:gosec // G204: args are fixed strings and a sha already checked against validSHA
+	cmd.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0")
+	return cmd.CombinedOutput()
+}
+
+// Build checks sha's shape before anything else, then fetches, resolves it
+// (or origin/defaultBranch when sha is empty), builds it in a detached
+// worktree, and returns the resolved full sha.
+func (g gitGoSteps) Build(ctx context.Context, sha, out string) (string, error) {
+	if sha != "" && !validSHA.MatchString(sha) {
+		return "", fmt.Errorf("build: invalid sha %s", sha)
+	}
+
+	if o, err := g.runGit(ctx, "fetch", "origin", g.defaultBranch); err != nil {
+		return "", fmt.Errorf("build: fetch: %w: %s", err, tailRedacted(o))
+	}
+
+	rev := sha + "^{commit}"
+	if sha == "" {
+		rev = "origin/" + g.defaultBranch + "^{commit}"
+	}
+	o, err := g.runGit(ctx, "rev-parse", "--verify", "--end-of-options", rev)
+	if err != nil {
+		return "", fmt.Errorf("build: rev-parse: %w: %s", err, tailRedacted(o))
+	}
+	resolved := strings.TrimSpace(string(o))
+	if !validSHA.MatchString(resolved) {
+		return "", fmt.Errorf("build: invalid sha %s", resolved)
+	}
+
+	o, err = g.runGit(ctx, "worktree", "prune")
+	if err != nil {
+		return "", fmt.Errorf("build: worktree prune: %w: %s", err, tailRedacted(o))
+	}
+
+	if err = os.MkdirAll(g.tmpRoot, 0o700); err != nil {
+		return "", fmt.Errorf("build: mkdir %s: %w", g.tmpRoot, err)
+	}
+	shortSHA := resolved[:12]
+	wt := filepath.Join(g.tmpRoot, "upgrade-"+shortSHA)
+	o, err = g.runGit(ctx, "worktree", "add", "--detach", wt, resolved)
+	if err != nil {
+		return "", fmt.Errorf("build: worktree add: %w: %s", err, tailRedacted(o))
+	}
+	defer func() {
+		if removeOut, removeErr := g.runGit(context.WithoutCancel(ctx), "worktree", "remove", "--force", wt); removeErr != nil {
+			slog.Warn("upgrade: worktree remove", "error", removeErr, "output", tailRedacted(removeOut))
+		}
+	}()
+
+	goBin, err := exec.LookPath("go")
+	if err != nil {
+		return "", fmt.Errorf("build: go: %w", err)
+	}
+	build := exec.CommandContext(ctx, goBin, "build", "-o", out, "./cmd/zing") //nolint:gosec // G204: goBin from LookPath, out and args fixed
+	build.Dir = wt
+	build.Env = os.Environ()
+	if o, err := build.CombinedOutput(); err != nil {
+		return "", fmt.Errorf("build: go build: %w: %s", err, tailRedacted(o))
+	}
+
+	return resolved, nil
+}
+
+// Selftest runs bin selftest, then bin version, and trims the "zing "
+// prefix from the version.
+func (g gitGoSteps) Selftest(ctx context.Context, bin string) (version, output string, err error) {
+	selftestOut, err := exec.CommandContext(ctx, bin, "selftest").CombinedOutput() //nolint:gosec // G204: bin is the freshly built candidate, not caller input
+	if err != nil {
+		return "", "", fmt.Errorf("selftest: %w: %s", err, tailRedacted(selftestOut))
+	}
+	versionOut, err := exec.CommandContext(ctx, bin, "version").CombinedOutput() //nolint:gosec // G204: bin is the freshly built candidate, not caller input
+	if err != nil {
+		return "", "", fmt.Errorf("selftest: version: %w: %s", err, tailRedacted(versionOut))
+	}
+	v := strings.TrimPrefix(strings.TrimSpace(string(versionOut)), "zing ")
+	return v, string(selftestOut), nil
 }
