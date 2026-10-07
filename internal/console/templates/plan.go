@@ -75,7 +75,11 @@ type RenderedDelivery struct {
 // current plan: RenderPlan (the artifacts rail) leaves both zero, so the
 // rail's own copy of the plan stays read-only. Editable is true only when
 // the plan's cohort has at least one sealed scenario (console.planSealed),
-// matching store.OwnerEdit's own not_sealed check for a plan task.
+// matching store.OwnerEdit's own not_sealed check for a plan task. Claimed
+// (#75) is true only when the ticket's ClaimOwner is non-nil, set by
+// console.threadComponent: it renders every owner-edit box filesTable and
+// tasksTable build disabled with the store's own claim sentence. The
+// rail's RenderPlan leaves it false, same as Editable.
 type RenderedPlan struct {
 	Overview RenderedOverview
 	Design   RenderedDesign
@@ -83,4 +87,5 @@ type RenderedPlan struct {
 	Review   response.Review
 	TicketID int64
 	Editable bool
+	Claimed  bool
 }

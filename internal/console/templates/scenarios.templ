@@ -53,10 +53,13 @@ func hostCheckSegments(check string) []hostCheckSegment {
 // ownerEditScenarioForm), empty for an unsealed scenario. When any row is
 // kind host, the section first renders the "Runs on your machine at
 // judging" list of host ids and verbatim checks, in the slice's own order:
-// approving the gate approves those commands (host scenario kind, #137).
-templ scenariosSection(scenarios []ScenarioRow) {
+// approving the gate approves those commands (host scenario kind, #137) --
+// but only while atGate is true (#75): after the seal, approving the gate
+// is already behind the ticket, so the post-gate sealed section renders
+// that list only within the gate's own copy, never within its own.
+templ scenariosSection(scenarios []ScenarioRow, atGate bool) {
 	if len(scenarios) > 0 {
-		if slices.ContainsFunc(scenarios, func(s ScenarioRow) bool { return s.Kind == "host" }) {
+		if atGate && slices.ContainsFunc(scenarios, func(s ScenarioRow) bool { return s.Kind == "host" }) {
 			<section class="host-checks">
 				<h3>Runs on your machine at judging</h3>
 				<p>Approving this gate approves these commands. Zing runs each one on this machine, outside any sandbox, before the judge runs.</p>
@@ -150,21 +153,22 @@ templ ownerEditScenarioBox(s ScenarioRow, answerQuestionID int64, summary string
 		}
 	>
 		<summary>{ summary }</summary>
+		@ownerEditClaimNote(s.Claimed)
 		<label>Given</label>
-		<textarea data-field="given">{ "\n" + s.Given }</textarea>
+		<textarea data-field="given" disabled?={ s.Claimed }>{ "\n" + s.Given }</textarea>
 		<label>When</label>
-		<textarea data-field="when">{ "\n" + s.When }</textarea>
+		<textarea data-field="when" disabled?={ s.Claimed }>{ "\n" + s.When }</textarea>
 		<label>Then</label>
-		<textarea data-field="then">{ "\n" + s.Then }</textarea>
+		<textarea data-field="then" disabled?={ s.Claimed }>{ "\n" + s.Then }</textarea>
 		<label>Check</label>
-		<input type="text" data-field="check" value={ s.Check }/>
+		<input type="text" data-field="check" value={ s.Check } disabled?={ s.Claimed }/>
 		<label>Kind</label>
-		<select data-field="kind" data-initial={ s.Kind }>
+		<select data-field="kind" data-initial={ s.Kind } disabled?={ s.Claimed }>
 			for _, k := range response.ScenarioKind("").Values() {
 				<option value={ k } selected?={ k == s.Kind }>{ k }</option>
 			}
 		</select>
-		<button type="button" class="owner-edit-save">Save</button>
+		<button type="button" class="owner-edit-save" disabled?={ s.Claimed }>Save</button>
 		<span class="owner-edit-error"></span>
 	</details>
 }
