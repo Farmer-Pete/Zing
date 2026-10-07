@@ -207,6 +207,34 @@ func TestSetTuning_RejectsOutOfRangeAndWritesNothing(t *testing.T) {
 	}
 }
 
+// TestSetTuning_StoreErrorLeavesTuningUnchanged proves that when the
+// settings-table write fails, SetTuning returns that error untouched (not
+// a *dispatch.TuningError) and leaves d.tune exactly as it started (#81):
+// the store write happens before d.tune is ever touched.
+func TestSetTuning_StoreErrorLeavesTuningUnchanged(t *testing.T) {
+	t.Parallel()
+
+	s := newDispatchTestStore(t)
+	d := newDispatcher(t, s, newFixtureTracker(t), bus.New(), fakeRuntime(t), nil, nil,
+		dispatch.Config{MaxParallel: 1, Owner: testOwner})
+	startTuning := d.CurrentTuning()
+
+	if err := s.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	err := d.SetTuning(t.Context(), dispatch.TuneMaxParallel, 2, "peter")
+	if err == nil {
+		t.Fatal("SetTuning after Close: err = nil, want an error")
+	}
+	if te, _ := errors.AsType[*dispatch.TuningError](err); te != nil {
+		t.Fatalf("SetTuning after Close: err = %v (a *dispatch.TuningError), want a plain store error", err)
+	}
+	if got := d.CurrentTuning(); got != startTuning {
+		t.Errorf("CurrentTuning() = %+v after a store error, want unchanged %+v", got, startTuning)
+	}
+}
+
 // TestRun_IntervalChangeResetsTicker proves a SetTuning call that changes
 // interval_seconds wakes a running Run and resets its ticker at once (#81),
 // rather than leaving the new interval to apply only once the old, much
@@ -372,8 +400,11 @@ func TestLoadTuning_UnsetOrInvalidKeepsBase(t *testing.T) { //nolint:tparallel /
 			}
 
 			log := buf.String()
-			if !strings.Contains(log, "level=WARN") || !strings.Contains(log, "key=dispatch.max_parallel") || !strings.Contains(log, "stored="+stored) {
+			if !strings.Contains(log, "key=dispatch.max_parallel") || !strings.Contains(log, "stored="+stored) {
 				t.Errorf("log = %q, want one level=WARN record with key=dispatch.max_parallel stored=%s", log, stored)
+			}
+			if got := strings.Count(log, "level=WARN"); got != 1 {
+				t.Errorf("level=WARN count = %d, want exactly 1; log = %q", got, log)
 			}
 		})
 	}

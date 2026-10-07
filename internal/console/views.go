@@ -309,7 +309,7 @@ func (c *console) mainComponent(ctx context.Context, view string, open, project 
 		}
 		stored := make(map[string]string, 3*len(dispatch.TuningSettings))
 		for _, s := range dispatch.TuningSettings {
-			for _, k := range []string{s.Key, s.Key + ".changed_by", s.Key + ".changed_at"} {
+			for _, k := range []string{s.Key, s.ChangedByKey(), s.ChangedAtKey()} {
 				v, _, err := c.store.GetSetting(ctx, k)
 				if err != nil {
 					return nil, err
@@ -353,16 +353,12 @@ func (c *console) mainComponent(ctx context.Context, view string, open, project 
 func buildSettingRows(t dispatch.Tuning, stored map[string]string) []templates.SettingRow {
 	rows := make([]templates.SettingRow, 0, len(dispatch.TuningSettings))
 	for _, s := range dispatch.TuningSettings {
-		live := t.MaxParallel
-		switch s.Name {
-		case dispatch.TuneIntervalSeconds:
-			live = int(t.Interval / time.Second)
-		case dispatch.TuneAgentMinutes:
-			live = int(t.Budget / time.Minute)
-		}
+		live := t.Value(s.Name)
 		source := "from zing.toml"
-		by, at := stored[s.Key+".changed_by"], stored[s.Key+".changed_at"]
-		if stored[s.Key] == strconv.Itoa(live) && by != "" && at != "" {
+		by, at := stored[s.ChangedByKey()], stored[s.ChangedAtKey()]
+		storedIsLive := stored[s.Key] == strconv.Itoa(live)
+		hasProvenance := by != "" && at != ""
+		if storedIsLive && hasProvenance {
 			source = "set by " + by + " at " + at
 		}
 		rows = append(rows, templates.SettingRow{Name: s.Name, Label: s.Label, Value: live, Min: s.Min, Max: s.Max, Source: source})

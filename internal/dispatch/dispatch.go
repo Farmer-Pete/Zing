@@ -264,6 +264,13 @@ type TuningSetting struct {
 	Max   int
 }
 
+// ChangedByKey and ChangedAtKey name the two settings-table keys that hold
+// a setting's provenance: who changed it and when (owner decision Q3, Q4).
+// SetTuning writes them and the console's Settings view reads them back;
+// both go through these methods so the suffixes live in one place.
+func (s TuningSetting) ChangedByKey() string { return s.Key + ".changed_by" }
+func (s TuningSetting) ChangedAtKey() string { return s.Key + ".changed_at" }
+
 // TuningSettings lists the three console-changeable dispatch settings in
 // console display order. ValidateTuning, LoadTuning, and the console's
 // Settings view all loop over it instead of naming the three settings
@@ -310,6 +317,21 @@ func withTuning(t Tuning, name string, value int) Tuning {
 		t.Budget = time.Duration(value) * time.Minute
 	}
 	return t
+}
+
+// Value returns t's field for name, converted to that setting's console
+// unit (seconds or minutes, not time.Duration). It is withTuning's
+// inverse. name is assumed already accepted by ValidateTuning; any other
+// name returns t.MaxParallel.
+func (t Tuning) Value(name string) int {
+	switch name {
+	case TuneIntervalSeconds:
+		return int(t.Interval / time.Second)
+	case TuneAgentMinutes:
+		return int(t.Budget / time.Minute)
+	default:
+		return t.MaxParallel
+	}
 }
 
 // The two sources LoadTuning reports for each setting name: TuningSourceStore
@@ -500,7 +522,7 @@ func (d *Dispatcher) SetTuning(ctx context.Context, name string, value int, by s
 	defer d.tuneMu.Unlock()
 	at := d.cfg.Now().UTC().Format(time.RFC3339)
 	if err := d.store.SetSettings(ctx, s.Key, strconv.Itoa(value),
-		s.Key+".changed_by", by, s.Key+".changed_at", at); err != nil {
+		s.ChangedByKey(), by, s.ChangedAtKey(), at); err != nil {
 		return fmt.Errorf("dispatch: set %s: %w", name, err)
 	}
 	d.mu.Lock()
@@ -603,10 +625,7 @@ func (d *Dispatcher) Tick(ctx context.Context) error {
 	}
 	defer d.driving.Store(false)
 
-	d.mu.Lock()
-	slots := d.tune.MaxParallel
-	d.mu.Unlock()
-	results := make(chan runResult, slots)
+	results := make(chan runResult, d.CurrentTuning().MaxParallel)
 	launched, fillErr := d.fill(ctx, results)
 	if fillErr != nil {
 		d.setStop(fillErr)
@@ -1371,9 +1390,7 @@ func (d *Dispatcher) runAndCommit(ctx context.Context, ticket store.Ticket, time
 	runCtx, cancel := context.WithDeadline(ctx, time.Now().Add(timeout))
 	defer cancel()
 
-	d.mu.Lock()
-	budget := d.tune.Budget
-	d.mu.Unlock()
+	budget := d.CurrentTuning().Budget
 
 	deps := job.Deps{
 		Store: d.store, Runtimes: d.rts, Machine: d.machine,

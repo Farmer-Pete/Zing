@@ -345,9 +345,9 @@ func serve(ctx context.Context, cfgPath, dbPath string, seedDemo bool) error {
 		return err
 	}
 	slog.Info("dispatch: startup tuning",
-		"max_parallel", tune.MaxParallel, "max_parallel_source", tuneSources[zdispatch.TuneMaxParallel],
-		"interval_seconds", int(tune.Interval/time.Second), "interval_seconds_source", tuneSources[zdispatch.TuneIntervalSeconds],
-		"agent_minutes_per_ticket", int(tune.Budget/time.Minute), "agent_minutes_per_ticket_source", tuneSources[zdispatch.TuneAgentMinutes])
+		"max_parallel", tune.Value(zdispatch.TuneMaxParallel), "max_parallel_source", tuneSources[zdispatch.TuneMaxParallel],
+		"interval_seconds", tune.Value(zdispatch.TuneIntervalSeconds), "interval_seconds_source", tuneSources[zdispatch.TuneIntervalSeconds],
+		"agent_minutes_per_ticket", tune.Value(zdispatch.TuneAgentMinutes), "agent_minutes_per_ticket_source", tuneSources[zdispatch.TuneAgentMinutes])
 
 	d, err := zdispatch.New(st, tr, b, m, job.Registry(), bindings, zdispatch.Config{
 		Interval:    tune.Interval,
