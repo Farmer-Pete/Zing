@@ -668,7 +668,7 @@ func (h reviewingHandler) triage(ctx context.Context, t store.Ticket, d Deps, ro
 		c.Artifacts = append(c.Artifacts, store.Artifact{Type: artifactTypeFinding, RunID: row.RunID, Payload: payload})
 
 		if fd == response.FindingDiscuss {
-			noteSource := "none"
+			noteSource := noneLiteral
 			noteText := reviewNoteNone
 			switch {
 			case notes[item.Ref] != "":

@@ -1149,7 +1149,11 @@ const judgingMinClaimTimeout = 10 * time.Minute
 // error or invalid commit releases the claim and leaves the ticket's state
 // for a later retry; a lost lease or any other commit error fails the
 // dispatcher closed; a valid, applied commit runs its TrackerEffect, if any,
-// and publishes. expires is the claim lease Claim was already called with
+// and publishes. A commit that fails CommitHandlerResult with
+// store.ErrSchemaInvalid is the one exception to "any other commit error
+// fails closed": it escalates the ticket under a fresh commit instead, so
+// one ticket's bad payload never stops every other ticket (#213). expires
+// is the claim lease Claim was already called with
 // (step 6), computed from a fresh post-intake time.Now() taken there (design
 // section "dispatch" fix 5), and stays as-is here so it remains consistent
 // with what was actually claimed. Every post-handler store write below (the
@@ -1283,6 +1287,32 @@ func (d *Dispatcher) runAndCommit(ctx context.Context, ticket store.Ticket, time
 		var refused *store.SealRefusedError
 		if errors.Is(err, store.ErrSealRefused) && errors.As(err, &refused) {
 			return d.releaseAfterSealRefused(ctx, ticket.ID, commit, expires, refused)
+		}
+
+		// store.ErrSchemaInvalid (design section "dispatcher"): the
+		// commit's own payload failed a JSON schema check, not a lease or
+		// a database failure. Escalating it under a fresh commit, rather
+		// than stopping the dispatcher, keeps one ticket's bad payload
+		// from parking every other ticket (#213's own failure mode). A
+		// state with no mapped origin, or an escalation commit that itself
+		// errors or does not apply, falls through to the ordinary
+		// fail-closed path below.
+		if errors.Is(err, store.ErrSchemaInvalid) {
+			if esc, ok := job.SchemaInvalidEscalation(ticket, commit, err); ok {
+				runIDs := make([]int64, 0, len(esc.Runs))
+				for _, r := range esc.Runs {
+					runIDs = append(runIDs, r.ID)
+				}
+				slog.Error("commit failed schema validation", "ticket_id", ticket.ID, "run_ids", runIDs, "err", err)
+				escCtx, cancelEsc := postHandlerContext(ctx)
+				defer cancelEsc()
+				escApplied, escErr := d.store.CommitHandlerResult(escCtx, esc)
+				if escErr == nil && escApplied {
+					d.bus.Publish()
+					return nil
+				}
+				slog.Error("schema escalation not applied", "ticket_id", ticket.ID, "applied", escApplied, "err", escErr)
+			}
 		}
 	}
 	if err != nil || !applied {

@@ -296,6 +296,11 @@ const interruptedResumeText = "the previous run was interrupted; continue and re
 // literal repeated at each call site (goconst).
 const labelInterrupted = "interrupted"
 
+// noneLiteral is "none" itself, shared by sessionStateName,
+// SchemaInvalidEscalation's run-ids text, and reviewing's noteSource, so
+// goconst sees one definition, not three (no story behind the value).
+const noneLiteral = "none"
+
 // resumeCharge says how a resume of a session is charged, from the newest
 // run of that session (design D5, section 7.4): an interrupted latest run
 // (store.Run.Interrupted) resumes free (bump is false, so the caller's own

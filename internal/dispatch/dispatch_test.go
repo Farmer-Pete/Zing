@@ -5053,3 +5053,121 @@ func TestRun_DrainRacingWorkerErrorStillAlerts(t *testing.T) {
 		t.Errorf("alerts out of order (alert1 at %d, alert2 at %d); log: %s", i1, i2, logged)
 	}
 }
+
+// schemaInvalidHandler reserves a run and returns a commit whose one
+// question message has options null, the #213 shape: the question schema
+// rejects null options, so CommitHandlerResult's own insertMessageTx fails
+// the commit and the dispatcher's own schema-invalid branch is what
+// TestTick_SchemaInvalidCommitEscalatesAndKeepsDispatching exercises.
+type schemaInvalidHandler struct{}
+
+func (schemaInvalidHandler) Run(ctx context.Context, t store.Ticket, d job.Deps) (store.HandlerCommit, error) {
+	rsv, err := d.Reserve(ctx, t.ID, store.SessionUpsert{Job: testStatePlanning, Runtime: testRuntimeFake}, store.RunSeed{Model: testModelClaudeX})
+	if err != nil {
+		return store.HandlerCommit{}, err
+	}
+	outcome := "ok"
+	exitCode := 0
+	agentSeconds := 1
+	ext := "ext-session"
+	state := testQuestionOpen
+	return store.HandlerCommit{
+		TicketID: t.ID, Owner: d.Owner, Expires: d.Expires,
+		Session: &store.SessionUpsert{ID: &rsv.SessionID, ExternalID: &ext},
+		Runs:    []store.Run{{ID: rsv.RunID, Turn: rsv.Turn, Outcome: &outcome, ExitCode: &exitCode, AgentSeconds: &agentSeconds}},
+		Messages: []store.Message{{
+			TicketID: t.ID, Type: testQuestionLiteral, Author: "zing", State: &state, Body: "Q1",
+			Payload: json.RawMessage(`{"key":"Q1","kind":"question","state":"open","recommended":"a","options":null}`),
+		}},
+	}, nil
+}
+
+// TestTick_SchemaInvalidCommitEscalatesAndKeepsDispatching proves a commit
+// that fails schema validation escalates its own ticket instead of
+// stopping the dispatcher (#213's original failure mode, this time for any
+// ticket, not just the one builder #213's own fix patched): with
+// MaxParallel 1 and two queued tickets, A's handler (schemaInvalidHandler)
+// reserves a run and returns a commit whose question payload fails the
+// question schema; B's handler (spyHandler) is an ordinary queued-to-planning
+// transition. The first Tick claims A (lower numeric TrackerRef sorts
+// first), the schema failure escalates A rather than setting the stopped
+// flag, and the second Tick claims and advances B.
+func TestTick_SchemaInvalidCommitEscalatesAndKeepsDispatching(t *testing.T) {
+	t.Parallel()
+
+	s := newDispatchTestStore(t)
+	aID := seedQueuedTicket(t, s, "fake#1")
+	bID := seedQueuedTicket(t, s, "fake#2")
+
+	spy := &spyHandler{next: testStatePlanning, reason: testSpyReason}
+	reg := job.Registry()
+	reg[testStateQueued] = &perTicketHandler{byTicket: map[int64]job.Handler{
+		aID: schemaInvalidHandler{},
+		bID: spy,
+	}}
+
+	d := newDispatcher(t, s, newFixtureTracker(t), bus.New(), fakeRuntime(t), reg, nil, dispatch.Config{MaxParallel: 1, Owner: testOwner})
+
+	if err := d.Tick(t.Context()); err != nil {
+		t.Fatalf("first Tick: err = %v, want nil", err)
+	}
+
+	a := getTicket(t, s, aID)
+	if a.ClaimOwner != nil {
+		t.Errorf("A's claim owner = %v, want nil", *a.ClaimOwner)
+	}
+	if a.WaitingOn == nil || *a.WaitingOn != testWaitingQuestions {
+		t.Errorf("A's WaitingOn = %v, want %q", a.WaitingOn, testWaitingQuestions)
+	}
+
+	msgs, err := s.ListMessages(t.Context(), aID)
+	if err != nil {
+		t.Fatalf("ListMessages: %v", err)
+	}
+	var escalation *store.MessageRow
+	for i := range msgs {
+		if msgs[i].Type == testMsgTypeEscalation {
+			escalation = &msgs[i]
+		}
+	}
+	if escalation == nil {
+		t.Fatal("no escalation message persisted for A")
+	}
+	var payload response.EscalationPayload
+	if unmarshalErr := json.Unmarshal(escalation.Payload, &payload); unmarshalErr != nil {
+		t.Fatalf("unmarshal escalation payload: %v", unmarshalErr)
+	}
+	if payload.Code != string(response.EscalationCodePostRunFailed) {
+		t.Errorf("escalation payload.Code = %q, want %q", payload.Code, response.EscalationCodePostRunFailed)
+	}
+	if !strings.Contains(payload.Tried, "payload does not match schema question") {
+		t.Errorf("escalation payload.Tried = %q, want it to name the schema validation error", payload.Tried)
+	}
+
+	runs, err := s.RunsForTicket(t.Context(), aID)
+	if err != nil {
+		t.Fatalf("RunsForTicket: %v", err)
+	}
+	if len(runs) != 1 || runs[0].Outcome == nil || *runs[0].Outcome != testOutcomeError {
+		t.Fatalf("A's runs = %+v, want exactly 1 with outcome error", runs)
+	}
+	wantRunIDs := fmt.Sprintf("run ids: %d", runs[0].ID)
+	if !strings.Contains(payload.Tried, wantRunIDs) {
+		t.Errorf("escalation payload.Tried = %q, want it to contain %q", payload.Tried, wantRunIDs)
+	}
+
+	_, stopped, err := s.Flags(t.Context())
+	if err != nil {
+		t.Fatalf("Flags: %v", err)
+	}
+	if stopped {
+		t.Error("stopped = true, want false")
+	}
+
+	if err := d.Tick(t.Context()); err != nil {
+		t.Fatalf("second Tick: err = %v, want nil", err)
+	}
+	if got := getTicket(t, s, bID).State; got != testStatePlanning {
+		t.Errorf("B's state after the second Tick = %q, want %q", got, testStatePlanning)
+	}
+}
