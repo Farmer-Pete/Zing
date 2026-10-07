@@ -4880,12 +4880,13 @@ func TestRun_FillErrorRaisesAlerts(t *testing.T) {
 	t.Cleanup(func() { _ = s.Close() })
 	seedQueuedTicket(t, s, testFixtureRef)
 
-	d := newDispatcher(t, s, newFixtureTracker(t), bus.New(), fakeRuntime(t), nil, nil,
+	b := bus.New()
+	d := newDispatcher(t, s, newFixtureTracker(t), b, fakeRuntime(t), nil, nil,
 		dispatch.Config{MaxParallel: 1, Interval: 5 * time.Millisecond, Owner: testOwner})
 
-	var logBuf bytes.Buffer
+	logBuf := &syncBuffer{}
 	prevDefault := slog.Default()
-	slog.SetDefault(slog.New(slog.NewTextHandler(&logBuf, &slog.HandlerOptions{Level: slog.LevelDebug})))
+	slog.SetDefault(slog.New(slog.NewTextHandler(logBuf, &slog.HandlerOptions{Level: slog.LevelDebug})))
 	t.Cleanup(func() { slog.SetDefault(prevDefault) })
 
 	raw, err := sql.Open("sqlite", dbPath)
@@ -4899,10 +4900,20 @@ func TestRun_FillErrorRaisesAlerts(t *testing.T) {
 		t.Fatalf("close raw db: %v", err)
 	}
 
+	ch, cancelSub := b.Subscribe()
+	defer cancelSub()
+
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
 	runErrCh := make(chan error, 1)
 	go func() { runErrCh <- d.Run(ctx) }()
+
+	waitForSignalThen(t, ch, func() bool {
+		status, err := d.StopStatus(t.Context())
+		return err == nil && status.Stopped && status.Kind == dispatch.StopKindError
+	}, "a bus signal after which StopStatus reports Stopped with Kind error")
+	waitUntil(t, func() bool { return strings.Contains(logBuf.String(), "dispatcher stopped after") }, "alert 2 to log while Run stays parked, before cancel")
+	cancel()
 
 	runErr := waitFor(t, runErrCh, "Run to return")
 	if runErr == nil {
@@ -4913,8 +4924,8 @@ func TestRun_FillErrorRaisesAlerts(t *testing.T) {
 	if !strings.Contains(logged, "in a dispatcher pass") {
 		t.Errorf("log = %q, want alert 1 naming \"in a dispatcher pass\" (no ticket id)", logged)
 	}
-	if !strings.Contains(logged, "dispatcher stopped after") {
-		t.Errorf("log = %q, want alert 2 (\"dispatcher stopped after ...\")", logged)
+	if got := strings.Count(logged, "dispatcher stopped after"); got != 1 {
+		t.Errorf("alert 2 (\"dispatcher stopped after ...\") appeared %d times, want exactly 1 (log: %s)", got, logged)
 	}
 	if i1, i2 := strings.Index(logged, "in a dispatcher pass"), strings.Index(logged, "dispatcher stopped after"); i1 < 0 || i2 < 0 || i2 < i1 {
 		t.Errorf("alerts out of order (alert1 at %d, alert2 at %d); log: %s", i1, i2, logged)
@@ -4955,9 +4966,13 @@ func TestRun_FailClosedLetsOthersFinish(t *testing.T) {
 		t.Fatalf("started ticket = %d, want %d (B)", got, bID)
 	}
 
-	waitUntil(t, func() bool { return dispatch.IsStoppedForTest(d) }, "dispatcher to stop after A's fail-closed commit")
+	waitUntil(t, func() bool { return dispatch.IsStoppedForTest(d) }, "dispatcher to park after A's fail-closed commit")
 
 	close(release)
+
+	waitUntil(t, func() bool { return getTicket(t, s, bID).State == testStatePlanning },
+		"B's own commit to apply despite A's fail-closed")
+	cancel()
 
 	runErr := waitFor(t, runErrCh, "Run to return")
 	if !errors.Is(runErr, dispatch.ErrFailClosed) {
@@ -4982,6 +4997,9 @@ func TestRun_FailClosedLetsOthersFinish(t *testing.T) {
 	}
 	if firstIdx >= 0 && secondIdx >= 0 && secondIdx < firstIdx {
 		t.Errorf("alert 2 appeared before alert 1 in the log")
+	}
+	if got := strings.Count(logged, "dispatcher stopped after fail-closed"); got != 1 {
+		t.Errorf("alert 2 appeared %d times, want exactly 1 (log: %s)", got, logged)
 	}
 }
 
