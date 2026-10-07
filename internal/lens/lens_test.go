@@ -217,6 +217,9 @@ func TestLoad_TestsLensFlagsUnobservableScenarios(t *testing.T) {
 		"A bare `go test` exits 0 whether or not the test skipped",
 		"A scenario of kind host is the exception to the bullet above",
 		"A host scenario with no check is a finding",
+		"needs this ticket's own new binary, route, or flag",
+		"writes to the owner's live state",
+		"A repo file the plan creates is fine in a host check",
 	} {
 		if !strings.Contains(plan, want) {
 			t.Errorf("tests.Plan does not contain %q: %q", want, plan)
