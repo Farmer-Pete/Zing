@@ -560,3 +560,23 @@ func TestUnblockLogOutcome(t *testing.T) {
 		})
 	}
 }
+
+// TestCapAfterUnblockBody proves capAfterUnblockBody renders the fixed
+// loops_exhausted heading, the open above-floor finding ids, and the
+// guidance Zing already tried, byte for byte against the plan's worked
+// example.
+func TestCapAfterUnblockBody(t *testing.T) {
+	t.Parallel()
+	findings := []response.Finding{
+		{ID: "p4-f1", Severity: response.SeverityMinor, Location: testObjectiveLocation, Text: "minor"},
+		{ID: "p4-f2", Severity: response.SeverityMajor, Location: testObjectiveLocation, Text: "major"},
+		{ID: "p4-f3", Severity: response.SeverityBlocker, Location: testObjectiveLocation, Text: "blocker"},
+	}
+	got := capAfterUnblockBody(findings, response.SeverityMinor, "Drop task 4.")
+	want := "loops_exhausted: raise machine.toml's planreview max_loops, or abandon" +
+		"\n\nOpen findings after Zing's unblock round: p4-f2, p4-f3." +
+		"\n\nZing sent the plan back to planning once with this guidance:\nDrop task 4."
+	if got != want {
+		t.Errorf("capAfterUnblockBody() =\n%q\nwant\n%q", got, want)
+	}
+}

@@ -3777,3 +3777,68 @@ func TestPlanUnblock_ExtraRoundOnlyAfterUnblock(t *testing.T) {
 		t.Errorf("commit.Escalation = %+v, want nil", commit.Escalation)
 	}
 }
+
+// TestPlanUnblock_SecondCapEscalatesWithGuidance proves that once the cap is
+// hit again after a successful unblock turn, Zing escalates loops_exhausted
+// with an empty Tried (today's shape, unchanged) and a Body naming the open
+// above-floor finding ids and the guidance Zing already tried
+// (capAfterUnblockBody); picking b (back to planning) still resumes planning
+// with today's inputs only, carrying no guidance.
+func TestPlanUnblock_SecondCapEscalatesWithGuidance(t *testing.T) {
+	t.Parallel()
+	s, ticketID, escCommit, q := seedCapLoopsEscalation(t, "Cap loops, second cap after unblock.")
+
+	if escCommit.Escalation.Payload.Code != string(response.EscalationCodeLoopsExhausted) {
+		t.Errorf("Escalation.Payload.Code = %q, want %q", escCommit.Escalation.Payload.Code, response.EscalationCodeLoopsExhausted)
+	}
+	if escCommit.Escalation.Payload.Origin != string(response.EscalationOriginCapLoops) {
+		t.Errorf("Escalation.Payload.Origin = %q, want %q", escCommit.Escalation.Payload.Origin, response.EscalationOriginCapLoops)
+	}
+	if escCommit.Escalation.Payload.Tried != "" {
+		t.Errorf("Escalation.Payload.Tried = %q, want empty", escCommit.Escalation.Payload.Tried)
+	}
+	cohort, ok, err := s.CurrentCohort(t.Context(), ticketID)
+	if err != nil || !ok {
+		t.Fatalf("CurrentCohort: %+v, ok=%v, %v", cohort, ok, err)
+	}
+	wantIDs := fmt.Sprintf("Open findings after Zing's unblock round: p%d-f2.", cohort.PlanVersion)
+	if !strings.Contains(escCommit.Escalation.Body, wantIDs) {
+		t.Errorf("Escalation.Body = %q, want it to contain %q", escCommit.Escalation.Body, wantIDs)
+	}
+	if !strings.Contains(escCommit.Escalation.Body, "Drop task 4.") {
+		t.Errorf("Escalation.Body = %q, want it to contain the guidance %q", escCommit.Escalation.Body, "Drop task 4.")
+	}
+
+	var payload response.QuestionPayload
+	if err = json.Unmarshal(q.Payload, &payload); err != nil {
+		t.Fatalf("unmarshal question payload: %v", err)
+	}
+	wantKeys := []string{"a", "b", "d", "c"}
+	gotKeys := make([]string, len(payload.Options))
+	for i, o := range payload.Options {
+		gotKeys[i] = o.Key
+	}
+	if !reflect.DeepEqual(gotKeys, wantKeys) {
+		t.Errorf("question option keys = %v, want %v", gotKeys, wantKeys)
+	}
+	if payload.Recommended != "d" {
+		t.Errorf("payload.Recommended = %q, want %q", payload.Recommended, "d")
+	}
+
+	answerGateQuestion(t, s, ticketID, q.ID, new("b"), "")
+
+	rec := &recordingRuntime{rt: &scriptedRuntime{t: t, steps: []scriptedStep{questionResult(response.JobPlanning, "unblock-second-cap-back-sess")}}}
+	commit2, err := runPlanning(t, s, claim(t, s, rec, ticketID), ticketID)
+	if err != nil {
+		t.Fatalf("planning Run (back): %v", err)
+	}
+	if rec.lastReq.Job != response.JobPlanning {
+		t.Errorf("req.Job = %q, want %q", rec.lastReq.Job, response.JobPlanning)
+	}
+	if strings.Contains(rec.lastReq.Prompt, "Drop task 4.") {
+		t.Errorf("resume prompt carries the guidance, want none on back:\n%s", rec.lastReq.Prompt)
+	}
+	if commit2.Escalation != nil {
+		t.Errorf("commit2.Escalation = %+v, want nil", commit2.Escalation)
+	}
+}

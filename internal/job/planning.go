@@ -1549,11 +1549,14 @@ func maybeResumeFloorFindings(ctx context.Context, t store.Ticket, d Deps, sess 
 			commit, err = runUnblock(ctx, t, d, cohort.PlanVersion, payload.Findings)
 			return commit, true, err
 		}
+		slog.Info("plan review cap reached after unblock", "ticket_id", t.ID, "plan_version", cohort.PlanVersion,
+			"finding_ids", aboveFloorIDs(payload.Findings, d.Floor))
 		// Tried stays empty, as today: Back to planning sends Tried to
 		// planning as the error input (enterFromEscalationRound), and the
 		// owner's own resumes keep today's inputs (owner decision Q2).
 		c := escalationCommit(t, d, nil, nil,
 			string(response.EscalationCodeLoopsExhausted), loopsExhaustedWhat, loopsExhaustedWhy, "", response.EscalationOriginCapLoops)
+		c.Escalation.Body = capAfterUnblockBody(payload.Findings, d.Floor, unblock.Guidance)
 		c.Escalation.ExtraOptions = []response.Option{{Key: escalationChoiceAccept, Text: planAcceptAtCapOptionText}}
 		c.Escalation.Recommended = escalationChoiceAccept
 		return c, true, nil
@@ -1632,12 +1635,7 @@ func runUnblock(ctx context.Context, t store.Ticket, d Deps, planVersion int, fi
 	if n == 1 {
 		extra = append(extra, prompt.Invalid(invalidRetryText(reason)))
 	}
-	ids := make([]string, 0, len(findings))
-	for i := range findings {
-		if findings[i].Severity.Rank() > d.Floor.Rank() {
-			ids = append(ids, findings[i].ID)
-		}
-	}
+	ids := aboveFloorIDs(findings, d.Floor)
 	in := prompt.ForUnblock(promptText, ticketText, planXML, renderFindings(findings), extra)
 	in.Schemas = schemas
 	su := store.SessionUpsert{Job: jobUnblockName, Runtime: jobCfg.Runtime}
@@ -1659,6 +1657,26 @@ func runUnblock(ctx context.Context, t store.Ticket, d Deps, planVersion int, fi
 	slog.Info("plan unblock turn", "ticket_id", t.ID, "run_id", runID, "plan_version", planVersion,
 		"finding_ids", ids, "outcome", unblockLogOutcome(commit))
 	return commit, nil
+}
+
+// aboveFloorIDs returns the ids of findings ranked above floor, in order.
+func aboveFloorIDs(findings []response.Finding, floor response.Severity) []string {
+	ids := make([]string, 0, len(findings))
+	for i := range findings {
+		if findings[i].Severity.Rank() > floor.Rank() {
+			ids = append(ids, findings[i].ID)
+		}
+	}
+	return ids
+}
+
+// capAfterUnblockBody is the escalation body for a cap reached after the
+// unblock round: the fixed loops_exhausted heading, the open above-floor
+// finding ids, and the guidance Zing already tried.
+func capAfterUnblockBody(findings []response.Finding, floor response.Severity, guidance string) string {
+	return string(response.EscalationCodeLoopsExhausted) + ": " + loopsExhaustedWhat +
+		"\n\nOpen findings after Zing's unblock round: " + strings.Join(aboveFloorIDs(findings, floor), ", ") + "." +
+		"\n\nZing sent the plan back to planning once with this guidance:\n" + guidance
 }
 
 // unblockLogOutcome names an unblock turn's outcome for its INFO log:
