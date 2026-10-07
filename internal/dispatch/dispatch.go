@@ -246,6 +246,15 @@ type Dispatcher struct {
 	stop     bool           // set once: no further claim or launch
 	stopErr  error          // the first error that set stop; nil when a drain or cancel set it
 
+	// pending counts launched workers whose result no caller has read yet
+	// (design section "shape" rules): fill raises it by one per launch, in
+	// the same critical section that adds to inflight; Run, Tick, and
+	// finish each lower it by one, through resultConsumed, per result they
+	// read. A worker that has sent its result and left inflight still
+	// counts here until a caller reads that result, which is what makes
+	// this the right count for Resume to refuse on.
+	pending int
+
 	// firstErrorReported guards reportFirstError's alert 1 (design section
 	// 4.6): raised at most once per Dispatcher lifetime, whether the error
 	// that stopped the dispatcher arrives in Run's main loop or while
@@ -417,6 +426,7 @@ func (d *Dispatcher) Tick(ctx context.Context) error {
 	errs = append(errs, fillErr)
 	for range launched {
 		r := <-results
+		d.resultConsumed()
 		errs = append(errs, r.Err)
 	}
 
@@ -531,6 +541,7 @@ func (d *Dispatcher) finish(err error, results <-chan runResult) error {
 	for waiting {
 		select {
 		case r := <-results:
+			d.resultConsumed()
 			if r.Err != nil {
 				d.reportFirstError()
 				err = errors.Join(err, r.Err)
@@ -548,6 +559,7 @@ func (d *Dispatcher) finish(err error, results <-chan runResult) error {
 	for {
 		select {
 		case r := <-results:
+			d.resultConsumed()
 			if r.Err != nil {
 				d.reportFirstError()
 				err = errors.Join(err, r.Err)
@@ -559,6 +571,16 @@ func (d *Dispatcher) finish(err error, results <-chan runResult) error {
 			return err
 		}
 	}
+}
+
+// resultConsumed records that a caller read one worker result and reports
+// whether no launched worker's result is still owed (design section
+// "shape" rules).
+func (d *Dispatcher) resultConsumed() (settled bool) { //nolint:unparam // Tick and finish ignore settled for now; Run and passFailed (task 2) use it to gate logStopAlert
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.pending--
+	return d.pending == 0
 }
 
 // hasStopErr reports whether stopErr has ever been set to a non-nil error
@@ -789,6 +811,7 @@ func (d *Dispatcher) fill(ctx context.Context, results chan<- runResult) (int, e
 			break
 		}
 		d.inflight[id] = true
+		d.pending++
 		d.wg.Add(1)
 		go d.worker(ctx, ordered[i], timeout, expires, results)
 		d.mu.Unlock()
