@@ -38,10 +38,11 @@ type Job struct {
 	CheckLoops     int       `toml:"check_loops"` // build only: CHECK's test-and-lint fix loop cap; default 5 when absent
 	Outcomes       []string  `toml:"outcomes"`    // default ["ok"] when the key is absent
 	// Sandbox names the seatbelt profile this job's runs are wrapped in
-	// (PKG8-PLAN.md section 4.5; PKG9-PLAN.md section 4.4): absent,
-	// "build", "readonly", or "judge". machine.toml sets it on jobs.build
-	// and jobs.perimeter (build), jobs.review (readonly), and, from M2 on,
-	// jobs.judge (judge).
+	// (PKG8-PLAN.md section 4.5; PKG9-PLAN.md section 4.4; #105): absent,
+	// "build", "readonly", "judge", or "judge-claude". machine.toml sets it
+	// on jobs.build and jobs.perimeter (build), jobs.review (readonly), and
+	// jobs.judge, which runs under "judge-claude" while Codex is out of
+	// quota and reverts to "judge" when it returns.
 	Sandbox string `toml:"sandbox"`
 }
 
@@ -233,8 +234,8 @@ func validateJob(fsys fs.FS, md toml.MetaData, name string, job Job) error {
 	if job.Worktree != "" && job.Worktree != "sparse" {
 		return jobErr("worktree", "must be absent or sparse")
 	}
-	if job.Sandbox != "" && job.Sandbox != "build" && job.Sandbox != "readonly" && job.Sandbox != "judge" {
-		return jobErr("sandbox", "must be absent, build, readonly, or judge")
+	if job.Sandbox != "" && job.Sandbox != "build" && job.Sandbox != "readonly" && job.Sandbox != "judge" && job.Sandbox != "judge-claude" {
+		return jobErr("sandbox", "must be absent, build, readonly, judge, or judge-claude")
 	}
 	for _, tool := range job.Tools {
 		if !toolCatalogue[tool] {

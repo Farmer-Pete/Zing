@@ -89,14 +89,16 @@ max_resumes = 2
 sandbox = "readonly"
 
 [jobs.judge]
-model = "codex"
-runtime = "codex"
+# Codex is out of quota until 2026-10-30. When it returns, set model = "codex",
+# runtime = "codex", and sandbox = "judge" here again.
+model = "opus"
+runtime = "claude"
 tools = ["read", "grep", "glob", "bash"]
 prompt = "prompts/judge.md"
 timeout_minutes = 45
 max_loops = 2
 max_resumes = 2
-sandbox = "judge"
+sandbox = "judge-claude"
 
 [jobs.respond]
 model = "sonnet"

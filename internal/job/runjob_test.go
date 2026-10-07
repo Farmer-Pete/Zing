@@ -1027,6 +1027,67 @@ func TestRunJobJudgeEmptyCodexHomeIsConfigError(t *testing.T) {
 	}
 }
 
+// testJudgeClaudeTestJob is the machine.toml job name
+// TestRunJobJudgeClaudeNeedsNoCodexHome registers, a copy of the build job
+// with its own Sandbox set to "judge-claude".
+const testJudgeClaudeTestJob = "judge-claude-test-job"
+
+// newJudgeClaudeProfileJob returns a machine.Machine whose own
+// testJudgeClaudeTestJob entry is a copy of testJobBuild with Sandbox set
+// to "judge-claude" (#105): like newJudgeProfileJob, but for the judge's
+// Claude profile, which takes no Codex home at all.
+func newJudgeClaudeProfileJob(t *testing.T) *machine.Machine {
+	t.Helper()
+	m := runJobTestMachine(t)
+	judgeClaudeJob := m.Jobs[testJobBuild]
+	judgeClaudeJob.Sandbox = "judge-claude"
+	m.Jobs[testJudgeClaudeTestJob] = judgeClaudeJob
+	return m
+}
+
+// TestRunJobJudgeClaudeNeedsNoCodexHome proves a judge-claude-profile job
+// runs with an empty Deps.JudgeCodexHome, unlike the judge profile (#105):
+// the judge-claude sandbox takes no CODEX_HOME param at all, so runJob
+// never treats an empty JudgeCodexHome as a configuration error for it.
+func TestRunJobJudgeClaudeNeedsNoCodexHome(t *testing.T) {
+	t.Parallel()
+	judgeClaudeSB := loadTestSandboxOrSkip(t)
+
+	s := newRunJobTestStore(t)
+	ticketID := seedRunJobTicket(t, s)
+	ticket := getRunJobTicket(t, s, ticketID)
+	owner, expires := claimRunJobTicket(t, s, ticketID)
+
+	m := newJudgeClaudeProfileJob(t)
+	scripts := fstest.MapFS{testBuildScriptKey: &fstest.MapFile{Data: []byte(buildOkXML)}}
+	counting := &countingRuntime{rt: runtime.NewFake(scripts)}
+	set, err := runtime.NewSet(map[string]runtime.Runtime{testRuntimeClaude: counting, testRuntimeCodex: counting, runtimeFake: counting})
+	if err != nil {
+		t.Fatalf("runtime.NewSet: %v", err)
+	}
+
+	deps := Deps{
+		Store: s, Runtimes: set, Machine: m,
+		Models: map[string]string{testModelAlias: testModelExact, testModelAliasOpus: testModelExact, testModelAliasFable: testModelExact, testRuntimeCodex: testModelExact},
+		Budget: time.Hour, Owner: owner, Expires: expires, Reserve: realReserve(s, owner, expires),
+		Projects:       map[int64]Project{ticket.ProjectID: {RepoGit: t.TempDir()}},
+		Sandboxes:      sandbox.Set{Build: sandbox.Off(), JudgeClaude: judgeClaudeSB},
+		RequireSandbox: true,
+		// JudgeCodexHome left empty.
+	}
+
+	_, err = runJob(t.Context(), deps, ticket, testJudgeClaudeTestJob, store.SessionUpsert{Job: testJudgeClaudeTestJob, Runtime: testRuntimeClaude},
+		runtime.RunRequest{Job: response.JobBuild, Label: testBuildLabel, WorkDir: t.TempDir()}, nil, nil, 0)
+	if err != nil {
+		t.Fatalf("runJob: %v", err)
+	}
+	for _, flag := range counting.lastReq.ExecPrefix {
+		if strings.HasPrefix(flag, "CODEX_HOME=") {
+			t.Errorf("ExecPrefix = %v, want no CODEX_HOME entry", counting.lastReq.ExecPrefix)
+		}
+	}
+}
+
 // TestRunJobUnknownProfileIsConfigError proves a job whose machine.toml
 // sandbox name Set.For does not recognize is ErrConfig, with nothing
 // reserved and the runtime never called (PKG9-PLAN.md section 4.7): this

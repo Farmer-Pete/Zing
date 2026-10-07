@@ -910,13 +910,12 @@ func TestServeRequiresJudgeCodexLogin(t *testing.T) {
 
 	t.Run("not logged in", func(t *testing.T) {
 		t.Parallel()
-		m, err := machine.Load(zing.Assets, "machine.toml")
-		if err != nil {
-			t.Fatalf("machine.Load: %v", err)
-		}
+		m := &machine.Machine{Jobs: map[string]machine.Job{
+			"judge": {Runtime: runtimeNameCodex},
+		}}
 		judgeCodexHome := t.TempDir()
 
-		err = checkJudgeCodexLogin(m, judgeCodexHome)
+		err := checkJudgeCodexLogin(m, judgeCodexHome)
 		if err == nil {
 			t.Fatal("checkJudgeCodexLogin: want an error, got nil")
 		}
@@ -924,6 +923,18 @@ func TestServeRequiresJudgeCodexLogin(t *testing.T) {
 			filepath.Join(judgeCodexHome, "auth.json"), judgeCodexHome)
 		if err.Error() != want {
 			t.Errorf("checkJudgeCodexLogin() = %q, want %q", err.Error(), want)
+		}
+	})
+
+	t.Run("a claude judge needs no codex login", func(t *testing.T) {
+		t.Parallel()
+		m, err := machine.Load(zing.Assets, "machine.toml")
+		if err != nil {
+			t.Fatalf("machine.Load: %v", err)
+		}
+		judgeCodexHome := t.TempDir()
+		if err := checkJudgeCodexLogin(m, judgeCodexHome); err != nil {
+			t.Errorf("checkJudgeCodexLogin() = %v, want nil (judge runtime is claude)", err)
 		}
 	})
 

@@ -495,13 +495,13 @@ selectLoop:
 const serveRequireSandbox = true
 
 // serveSandbox loads the seatbelt profile set every sandboxed job's run is
-// wrapped in (design section 5.1, 5.5, 10; PKG9-PLAN.md section 4.7): the
-// checked-in, embedded sandbox/build.sb, sandbox/readonly.sb, and
-// sandbox/judge.sb, each with cfg.Sandbox.ReadPaths and cfg.Console.Port.
-// LoadProfile never errors -- a failure is recorded as unavailable, with
-// one of section 5.4's four closed reasons -- so the only error this can
-// return is reading an embedded profile itself, which would mean the
-// binary was built without it.
+// wrapped in (design section 5.1, 5.5, 10; PKG9-PLAN.md section 4.7; #105):
+// the checked-in, embedded sandbox/build.sb, sandbox/readonly.sb,
+// sandbox/judge.sb, and sandbox/judge-claude.sb, each with
+// cfg.Sandbox.ReadPaths and cfg.Console.Port. LoadProfile never errors -- a
+// failure is recorded as unavailable, with one of section 5.4's four closed
+// reasons -- so the only error this can return is reading an embedded
+// profile itself, which would mean the binary was built without it.
 func serveSandbox(cfg *config.Config, dataDir string) (sandbox.Set, error) {
 	buildProfile, err := zing.Assets.ReadFile("sandbox/build.sb")
 	if err != nil {
@@ -515,12 +515,17 @@ func serveSandbox(cfg *config.Config, dataDir string) (sandbox.Set, error) {
 	if err != nil {
 		return sandbox.Set{}, fmt.Errorf("serve: read embedded sandbox profile: %w", err)
 	}
+	judgeClaudeProfile, err := zing.Assets.ReadFile("sandbox/judge-claude.sb")
+	if err != nil {
+		return sandbox.Set{}, fmt.Errorf("serve: read embedded sandbox profile: %w", err)
+	}
 
 	build := loadNamedSandbox("build", buildProfile, cfg, dataDir)
 	readonly := loadNamedSandbox("readonly", readonlyProfile, cfg, dataDir)
 	judge := loadNamedSandbox("judge", judgeProfile, cfg, dataDir)
+	judgeClaude := loadNamedSandbox("judge-claude", judgeClaudeProfile, cfg, dataDir)
 
-	return sandbox.Set{Build: build, ReadOnly: readonly, Judge: judge}, nil
+	return sandbox.Set{Build: build, ReadOnly: readonly, Judge: judge, JudgeClaude: judgeClaude}, nil
 }
 
 // loadNamedSandbox loads one profile through sandbox.LoadProfile and logs
