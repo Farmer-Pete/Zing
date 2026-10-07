@@ -692,7 +692,8 @@ func (c *console) loadFindings(ctx context.Context, ticketID int64) ([]templates
 	}
 
 	rows := make([]templates.FindingRow, 0, len(payload.Findings))
-	for _, f := range payload.Findings {
+	for i := range payload.Findings {
+		f := &payload.Findings[i]
 		if f.Severity.Rank() <= c.floor.Rank() && !capped {
 			continue
 		}
@@ -2127,7 +2128,8 @@ func findingsDetail(version int, findings []response.Finding) string {
 	}
 	lines := make([]string, 0, len(findings)+1)
 	lines = append(lines, fmt.Sprintf("Remaining findings from the plan review of v%d:", version))
-	for _, f := range findings {
+	for i := range findings {
+		f := &findings[i]
 		text := strings.Join(strings.Fields(f.Text), " ")
 		lines = append(lines, fmt.Sprintf("- %s at `%s`: %s", f.Severity, f.Location, text))
 	}

@@ -370,6 +370,9 @@ Body: Users want a dark theme toggle in settings.
         <risk>...</risk> <!-- string, one or more, a risk or open question -->
       </risks>
     </review>
+    <dispositions>
+      <disposition finding="..." kind="..." path="...">...</disposition> <!-- Disposition, optional, zero or more, one per finding in the needs_disposition input, or named in a validation message; leave out when there is none; finding: string, must match ^p[0-9]+-f[0-9]+$, the id of a finding in the needs_disposition input, such as p2-f1; kind: DispositionKind, one of: fixed | disputed; path: string, optional, fixed only: the plan element path you changed, such as plan/delivery/tasks/task[2] -->
+    </dispositions>
   </plan>
   <replies>
     <reply question="..." settled="..." decision="...">...</reply> <!-- Reply, optional, zero or more, none, or one per question thread you answer this turn; question: string, must match ^Q[0-9]+$, the question's key as Zing showed it, such as Q7, never your own q1; settled: bool, optional, write settled="true" to close the thread with decision; decision: string, optional, required when settled: the decision taken, one sentence -->

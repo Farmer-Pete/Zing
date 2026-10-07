@@ -40,7 +40,9 @@ func seedCapLoopsEscalation(t *testing.T, objective string) (s *store.Store, tic
 	insertUpdateMarker(t, s, ticketID, "planreview v2 delivered")
 
 	minor := finding(response.SeverityMinor, "plan/design/shape", "still wrong", "fix it")
+	minor.ID = fmt.Sprintf("p%d-f1", planVersion)
 	major := finding(response.SeverityMajor, "plan/design/other", "worse", "fix that too")
+	major.ID = fmt.Sprintf("p%d-f2", planVersion)
 	seedPlanreviewArtifact(t, s, ticketID, planVersion, runID, minor, major)
 	insertUpdateMarker(t, s, ticketID, fmt.Sprintf("planreview v%d pending", planVersion))
 
@@ -238,6 +240,20 @@ func TestPlanCapLoops_RetryBackAbandonUnchanged(t *testing.T) {
 		if strings.Contains(rec.lastReq.Prompt, "raise machine.toml") {
 			t.Errorf("resume prompt carries the error label, want none on a retry:\n%s", rec.lastReq.Prompt)
 		}
+
+		i := strings.Index(rec.lastReq.Prompt, "needs_disposition:")
+		if i < 0 {
+			t.Fatalf("resume prompt does not carry a needs_disposition input:\n%s", rec.lastReq.Prompt)
+		}
+		if !strings.Contains(rec.lastReq.Prompt[i:], "p1-f2 [correctness/major] plan/design/other") {
+			t.Errorf("needs_disposition section does not carry the major:\n%s", rec.lastReq.Prompt[i:])
+		}
+		if !strings.Contains(rec.lastReq.Prompt[:i], "p1-f1 [correctness/minor] plan/design/shape") {
+			t.Errorf("findings section (before needs_disposition) does not carry the minor:\n%s", rec.lastReq.Prompt[:i])
+		}
+		if strings.Contains(rec.lastReq.Prompt[i:], "p1-f1") {
+			t.Errorf("needs_disposition section unexpectedly carries the minor's id:\n%s", rec.lastReq.Prompt[i:])
+		}
 	})
 
 	t.Run("b: back to planning resumes with notes and the error", func(t *testing.T) {
@@ -307,5 +323,61 @@ func TestPlanCapLoops_ReplyOnlyResolvesAsRetry(t *testing.T) {
 		if json.Unmarshal(m.Payload, &qp) == nil && qp.Kind == response.QuestionKindGate {
 			t.Errorf("commit.Messages carries a gate-kind question, want none")
 		}
+	}
+}
+
+// TestPlanCapLoops_BackReadyNeedsDispositionOnce proves ticket 72 task 2's
+// back-branch edge case: the cap_loops escalation's back choice resumes
+// planning with no needs_disposition input (design section 6.7, b
+// subtest above, unchanged), yet the live pending marker from version 1
+// still requires a disposition for its major finding, so the first ready
+// plan that leaves it out is rejected once through the existing
+// validation errors resume; a second ready plan carrying a valid fixed
+// disposition for it lands as plan version 2.
+func TestPlanCapLoops_BackReadyNeedsDispositionOnce(t *testing.T) {
+	t.Parallel()
+	const objective = "Cap loops back, ready needs disposition once."
+	s, ticketID, _, q := seedCapLoopsEscalation(t, objective)
+	answerGateQuestion(t, s, ticketID, q.ID, new("b"), "back off")
+
+	resp1 := readyResponse(validPlan(objective), validClaims(), validScenarios(2, "capback"))
+	rt1 := &scriptedRuntime{t: t, steps: []scriptedStep{readyStep(resp1, "cap-back-ready-sess")}}
+	commit, err := runPlanning(t, s, claim(t, s, rt1, ticketID), ticketID)
+	if err != nil {
+		t.Fatalf("planning Run (first ready): %v", err)
+	}
+	if len(commit.Artifacts) != 0 {
+		t.Fatalf("commit.Artifacts = %+v, want none (rejected)", commit.Artifacts)
+	}
+	found := false
+	for _, m := range commit.Messages {
+		isValidation := strings.HasPrefix(m.Body, "validation errors pending run ")
+		namesFinding := strings.Contains(m.Body, "p1-f2") && strings.Contains(m.Body, "major") &&
+			strings.Contains(m.Body, "plan/design/other") && strings.Contains(m.Body, "worse")
+		if isValidation && namesFinding {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("commit.Messages = %+v, want a validation errors pending message naming p1-f2, major, plan/design/other, worse", commit.Messages)
+	}
+	apply(t, s, getTicket(t, s, ticketID), commit)
+
+	plan2 := validPlan(objective)
+	plan2.Dispositions = []response.Disposition{{Finding: "p1-f2", Kind: response.DispositionFixed, Path: testObjectiveLocation}}
+	resp2 := readyResponse(plan2, validClaims(), validScenarios(2, "capback"))
+	rt2 := &scriptedRuntime{t: t, steps: []scriptedStep{readyStep(resp2, "cap-back-ready-sess")}}
+	commit2, err := runPlanning(t, s, claim(t, s, rt2, ticketID), ticketID)
+	if err != nil {
+		t.Fatalf("planning Run (second ready): %v", err)
+	}
+	apply(t, s, getTicket(t, s, ticketID), commit2)
+
+	cohort, ok, err := s.CurrentCohort(t.Context(), ticketID)
+	if err != nil || !ok {
+		t.Fatalf("CurrentCohort = %+v, ok=%v, err=%v", cohort, ok, err)
+	}
+	if cohort.PlanVersion != 2 {
+		t.Fatalf("CurrentCohort.PlanVersion = %d, want 2", cohort.PlanVersion)
 	}
 }
