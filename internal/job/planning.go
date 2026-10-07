@@ -1444,7 +1444,7 @@ const hostSandboxCheckMsg = "check runs the host sandbox (sandbox-exec or the in
 // rm -f, rm -rf, rm -fr, rm -Rf. form -f and a quoted 'rm -f' do not match.
 var rmForce = regexp.MustCompile(`(^|[;&|(\s])rm\s+-[a-zA-Z]*f`)
 
-const rmForceCheckMsg = "check must not use rm -f or rm -rf, which Codex refuses; write state under a fresh directory from mktemp -d instead"
+const rmForceCheckMsg = "check must not use rm -f or rm -rf, which Codex refuses; write state under a fresh directory from mktemp -d \"$TMPDIR/name-XXXXXX\" instead"
 
 // mktempCheckMsg is checkScenarioRules' own refusal for a check that calls
 // mktemp without a "$TMPDIR/" template (#245 s6, #244 s10).

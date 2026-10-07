@@ -35,8 +35,9 @@ the next step.
    command can decide it. Zing runs every check inside the build sandbox,
    which cannot start another sandbox. Write temporary files under
    "$TMPDIR", never /tmp. For state a check must start without, write under
-   a fresh directory from mktemp -d, such as d=$(mktemp -d); Codex refuses
-   rm -f and rm -rf. Write only givens and checks an agent inside that
+   a fresh directory from mktemp with a "$TMPDIR" template, such as
+   d=$(mktemp -d "$TMPDIR/name-XXXXXX"); Codex refuses rm -f and rm -rf.
+   Write only givens and checks an agent inside that
    sandbox can observe: no live zing serve, no machine outside the sandbox,
    and none of the owner's own config such as ~/.codex, ~/.claude, or the
    console. The exception is kind host. Zing runs a host scenario's check on
