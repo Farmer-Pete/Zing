@@ -807,6 +807,9 @@ func (h buildingHandler) enterFromEscalationRound(ctx context.Context, t store.T
 		grantNote := response.FileGrantOptionText(*payload.Grant) + ": the owner approved this; the plan now lists these files for this task."
 		commit, err = h.retryFreshRun(ctx, t, d, resolveIDs, strings.TrimSpace(grantNote+"\n"+notes), errorText, payload.Grant)
 
+	case choice == escalationChoiceRaiseBudget && origin == response.EscalationOriginCapBudget:
+		commit, err = retryCapBudget(ctx, t, d, resolveIDs, budgetRaiseMinutes)
+
 	case choice != escalationChoiceRetry:
 		commit = replanUnsupportedEscalation(t, d, resolveIDs, origin)
 
