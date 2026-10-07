@@ -88,11 +88,11 @@ type Host struct {
 // Sandbox is a loaded (or deliberately unavailable) seatbelt profile: its
 // rendered text, the host values every run on this machine shares, whether
 // it is safe to wrap a real run in, and the profile name it was loaded
-// under (PKG9-PLAN.md section 4.7): empty for a zero-value Sandbox built
-// straight from a literal (most of this package's own white-box tests),
-// one of the three Set.For names otherwise. Prefix reads it to decide
-// whether the judge profile's two extra parameters, SCENARIOS_FILE and
-// CODEX_HOME, are required.
+// under (PKG9-PLAN.md section 4.7, #105): empty for a zero-value Sandbox
+// built straight from a literal (most of this package's own white-box
+// tests), one of the four Set.For names otherwise. Prefix reads it to
+// decide whether the judge profile's two extra parameters, SCENARIOS_FILE
+// and CODEX_HOME, are required, or, for judge-claude, just SCENARIOS_FILE.
 type Sandbox struct {
 	renderedProfile string
 	host            Host
@@ -115,26 +115,28 @@ func NotLoaded() Sandbox {
 	return Sandbox{reason: reasonNotLoaded}
 }
 
-// Set holds the three loaded profiles machine.toml's job.sandbox key can
-// name (PKG9-PLAN.md section 4.7): build, readonly, and, from M2 on, judge.
-// In M1, serve loads Build and ReadOnly and leaves Judge Off() with reason
-// "not loaded".
+// Set holds the four loaded profiles machine.toml's job.sandbox key can
+// name (PKG9-PLAN.md section 4.7, #105): build, readonly, judge, and
+// judge-claude, the judge profile for a judge run on the Claude runtime
+// while Codex is out of quota. In M1, serve loads Build and ReadOnly and
+// leaves Judge Off() with reason "not loaded".
 type Set struct {
-	Build, ReadOnly, Judge Sandbox
+	Build, ReadOnly, Judge, JudgeClaude Sandbox
 }
 
-// profileNameBuild, profileNameReadOnly, and profileNameJudge are the three
-// machine.toml job.sandbox values Set.For recognizes (section 4.7), named
-// once so machine.go's own validation and this package's lookup never drift
-// apart.
+// profileNameBuild, profileNameReadOnly, profileNameJudge, and
+// profileNameJudgeClaude are the four machine.toml job.sandbox values
+// Set.For recognizes (section 4.7, #105), named once so machine.go's own
+// validation and this package's lookup never drift apart.
 const (
-	profileNameBuild    = "build"
-	profileNameReadOnly = "readonly"
-	profileNameJudge    = "judge"
+	profileNameBuild       = "build"
+	profileNameReadOnly    = "readonly"
+	profileNameJudge       = "judge"
+	profileNameJudgeClaude = "judge-claude"
 )
 
-// For returns the profile machine.toml names: "build", "readonly", or
-// "judge". ok is false for any other name (section 4.7).
+// For returns the profile machine.toml names: "build", "readonly", "judge",
+// or "judge-claude". ok is false for any other name (section 4.7, #105).
 func (s Set) For(name string) (Sandbox, bool) {
 	switch name {
 	case profileNameBuild:
@@ -143,21 +145,23 @@ func (s Set) For(name string) (Sandbox, bool) {
 		return s.ReadOnly, true
 	case profileNameJudge:
 		return s.Judge, true
+	case profileNameJudgeClaude:
+		return s.JudgeClaude, true
 	default:
 		return Sandbox{}, false
 	}
 }
 
-// OffSet returns a Set of three Off() sandboxes, for a suite that drives
+// OffSet returns a Set of four Off() sandboxes, for a suite that drives
 // the fake runtime and must never attempt sandbox-exec at all (section
-// 4.7, design D5).
+// 4.7, design D5, #105).
 func OffSet() Set {
-	return Set{Build: Off(), ReadOnly: Off(), Judge: Off()}
+	return Set{Build: Off(), ReadOnly: Off(), Judge: Off(), JudgeClaude: Off()}
 }
 
-// setProfileOrder is the order FirstUnavailable reports in (section 4.7):
-// build, readonly, judge.
-var setProfileOrder = []string{profileNameBuild, profileNameReadOnly, profileNameJudge}
+// setProfileOrder is the order FirstUnavailable reports in (section 4.7,
+// #105): build, readonly, judge, judge-claude.
+var setProfileOrder = []string{profileNameBuild, profileNameReadOnly, profileNameJudge, profileNameJudgeClaude}
 
 // FirstUnavailable returns "<name>: <reason>" for the first profile, in
 // setProfileOrder, that some machine.toml job in used actually names and
@@ -205,13 +209,15 @@ func Load(profile []byte, dataDir string, readPaths []string, consolePort int) S
 
 // LoadProfile renders profile with readPaths and consolePort, then resolves
 // the host values, and proves the result loads by running sandbox-exec
-// against a throwaway run directory (PKG9-PLAN.md section 4.7): build and
-// readonly share M1's own proof (a fresh /usr/bin/true under generic
-// parameters); name == "judge" additionally writes a temp scenarios file
-// and a temp Codex home into that same run directory and proves
-// SCENARIOS_FILE's literal allow with "/bin/cat" instead (section 4.7's own
-// worked example), so a judge profile that cannot read its one literal
-// file is caught at load time, not at the judge's first real run. name is
+// against a throwaway run directory (PKG9-PLAN.md section 4.7, #105): build
+// and readonly share M1's own proof (a fresh /usr/bin/true under generic
+// parameters); name == "judge" or "judge-claude" additionally writes a temp
+// scenarios file and a temp Codex home into that same run directory and
+// proves SCENARIOS_FILE's literal allow with "/bin/cat" instead (section
+// 4.7's own worked example), so a judge profile that cannot read its one
+// literal file is caught at load time, not at the judge's first real run.
+// The judge-claude proof's unused temp Codex home is never read under
+// judge-claude.sb, which names no CODEX_HOME rule. name is
 // kept on the returned Sandbox (Prefix reads it) so every later caller
 // already names which profile it loaded. It never returns an error: any
 // failure is recorded on the returned Sandbox, unavailable, with one of
@@ -385,9 +391,9 @@ func resolveAgentSockPath(rawSock string) (resolved string, ok bool) {
 // directory, since the proof only needs the profile to load, not a
 // fine-grained boundary), the rendered profile, and a command that proves
 // the profile's own reach: /usr/bin/true for build and readonly, or (name
-// == "judge") /bin/cat against a temp scenarios file, proving the literal
-// SCENARIOS_FILE allow the same way a real judge run depends on it
-// (section 4.7, D19).
+// == "judge" or "judge-claude") /bin/cat against a temp scenarios file,
+// proving the literal SCENARIOS_FILE allow the same way a real judge run
+// depends on it (section 4.7, D19, #105).
 func (s Sandbox) proves() bool {
 	runDir, cleanup, err := s.NewRunDir()
 	if err != nil {
@@ -402,7 +408,7 @@ func (s Sandbox) proves() bool {
 		SSHAuthSock: s.host.SSHAuthSock, SSHAuthSockReal: s.host.SSHAuthSockReal,
 	}
 	cmd := []string{"/usr/bin/true"}
-	if s.name == profileNameJudge {
+	if s.name == profileNameJudge || s.name == profileNameJudgeClaude {
 		proofCmd, judgeErr := s.judgeProof(runDir, &p)
 		if judgeErr != nil {
 			return false
@@ -585,6 +591,11 @@ func checkParamValue(name, value string) error {
 // is empty in.
 var errJudgeParamsIncomplete = errors.New("sandbox: judge profile needs both SCENARIOS_FILE and CODEX_HOME")
 
+// errJudgeClaudeParamsIncomplete is Prefix's sentinel for the judge-claude
+// profile (#105): it reads the sealed scenarios from SCENARIOS_FILE like the
+// Codex judge, but has no Codex home, so only that one param is required.
+var errJudgeClaudeParamsIncomplete = errors.New("sandbox: judge-claude profile needs SCENARIOS_FILE")
+
 // Prefix returns the command prefix: sandbox-exec -D HOME=<..> -D
 // WORKTREE=<..> ... -D SSH_AUTH_SOCK=<..> -D SSH_AUTH_SOCK_REAL=<..> ...
 // -p <profile>, with the -D flags in paramOrder (section 5.4), followed by
@@ -669,6 +680,9 @@ func agentParamArgs(p Params) ([]string, error) {
 func (s Sandbox) judgeParamArgs(p Params) ([]string, error) {
 	if s.name == profileNameJudge && (p.ScenariosFile == "" || p.CodexHome == "") {
 		return nil, errJudgeParamsIncomplete
+	}
+	if s.name == profileNameJudgeClaude && p.ScenariosFile == "" {
+		return nil, errJudgeClaudeParamsIncomplete
 	}
 	var argv []string
 	for _, kv := range []struct{ name, value string }{

@@ -689,7 +689,8 @@ func TestSetFor(t *testing.T) {
 	build := Sandbox{reason: "build-reason"}
 	readonly := Sandbox{reason: "readonly-reason"}
 	judge := Sandbox{reason: "judge-reason"}
-	s := Set{Build: build, ReadOnly: readonly, Judge: judge}
+	judgeClaude := Sandbox{reason: "judge-claude-reason"}
+	s := Set{Build: build, ReadOnly: readonly, Judge: judge, JudgeClaude: judgeClaude}
 
 	tests := []struct {
 		name string
@@ -699,6 +700,7 @@ func TestSetFor(t *testing.T) {
 		{profileNameBuild, build, true},
 		{profileNameReadOnly, readonly, true},
 		{"judge", judge, true},
+		{"judge-claude", judgeClaude, true},
 		{"bogus", Sandbox{}, false},
 		{"", Sandbox{}, false},
 	}
@@ -714,12 +716,12 @@ func TestSetFor(t *testing.T) {
 	}
 }
 
-// TestOffSet proves OffSet returns three unavailable sandboxes, each one
+// TestOffSet proves OffSet returns four unavailable sandboxes, each one
 // Off's own contract.
 func TestOffSet(t *testing.T) {
 	t.Parallel()
 	s := OffSet()
-	for name, sb := range map[string]Sandbox{"Build": s.Build, "ReadOnly": s.ReadOnly, "Judge": s.Judge} {
+	for name, sb := range map[string]Sandbox{"Build": s.Build, "ReadOnly": s.ReadOnly, "Judge": s.Judge, "JudgeClaude": s.JudgeClaude} {
 		if sb.Available() {
 			t.Errorf("OffSet().%s: Available() = true, want false", name)
 		}
@@ -778,6 +780,15 @@ func TestFirstUnavailable(t *testing.T) {
 		s := Set{Build: available, ReadOnly: available, Judge: NotLoaded()}
 		want := "judge: not loaded"
 		if got := s.FirstUnavailable([]string{profileNameBuild, profileNameReadOnly, "judge"}); got != want {
+			t.Errorf("FirstUnavailable() = %q, want %q", got, want)
+		}
+	})
+
+	t.Run("judge-claude used and unavailable", func(t *testing.T) {
+		t.Parallel()
+		s := Set{Build: available, ReadOnly: available, Judge: NotLoaded(), JudgeClaude: NotLoaded()}
+		want := "judge-claude: not loaded"
+		if got := s.FirstUnavailable([]string{profileNameBuild, profileNameReadOnly, profileNameJudgeClaude}); got != want {
 			t.Errorf("FirstUnavailable() = %q, want %q", got, want)
 		}
 	})
@@ -959,6 +970,104 @@ func TestScenariosFileParamIsChecked(t *testing.T) {
 			t.Errorf("Prefix() err = %v, want %q", err, want)
 		}
 	})
+}
+
+// ---- the judge-claude profile's own extra parameter (#105) ---------------
+
+// TestPrefixEmitsScenariosFileForJudgeClaude proves Prefix appends "-D
+// SCENARIOS_FILE=..." after the fixed paramOrder and agent-socket flags,
+// with no CODEX_HOME entry, for a Sandbox loaded under the judge-claude
+// name, even when CodexHome is unset.
+func TestPrefixEmitsScenariosFileForJudgeClaude(t *testing.T) {
+	t.Parallel()
+	sb := Sandbox{renderedProfile: testMinimalRenderedProfile, name: profileNameJudgeClaude}
+	p := testJudgeParams()
+	p.CodexHome = ""
+
+	argv, err := sb.Prefix(p)
+	if err != nil {
+		t.Fatalf("Prefix: %v", err)
+	}
+	want := []string{
+		testSandboxExecArgv0,
+		"-D", "HOME=" + p.Home,
+		"-D", "WORKTREE=" + p.Worktree,
+		"-D", "REPO_GIT=" + p.RepoGit,
+		"-D", "DATA_DIR=" + p.DataDir,
+		"-D", "ZING_BIN=" + p.ZingBin,
+		"-D", "CACHE_ROOT=" + p.CacheRoot,
+		"-D", "CACHE_SHARED=" + p.CacheShared,
+		"-D", "RUN_DIR=" + p.RunDir,
+		"-D", "MDS_CACHE=" + p.MDSCache,
+		"-D", "TRANSCRIPTS=" + p.Transcripts,
+		"-D", "SSH_AUTH_SOCK=" + noAgentSocket,
+		"-D", "SSH_AUTH_SOCK_REAL=" + noAgentSocket,
+		"-D", "SCENARIOS_FILE=" + p.ScenariosFile,
+		"-p", sb.renderedProfile,
+	}
+	if !slices.Equal(argv, want) {
+		t.Errorf("Prefix() =\n%v\nwant\n%v", argv, want)
+	}
+	for _, a := range argv {
+		if strings.Contains(a, "CODEX_HOME") {
+			t.Errorf("Prefix() for judge-claude with CodexHome unset carries a CODEX_HOME flag anyway: %v", argv)
+		}
+	}
+}
+
+// TestJudgeClaudeWithoutScenariosFileIsConfigError proves Prefix refuses to
+// build a prefix for the judge-claude profile when ScenariosFile is empty,
+// rather than silently omitting it (#105, mirroring
+// TestJudgeWithoutScenariosFileIsConfigError for the judge profile).
+func TestJudgeClaudeWithoutScenariosFileIsConfigError(t *testing.T) {
+	t.Parallel()
+	sb := Sandbox{renderedProfile: testMinimalRenderedProfile, name: profileNameJudgeClaude}
+	p := testJudgeParams()
+	p.ScenariosFile = ""
+
+	if _, err := sb.Prefix(p); !errors.Is(err, errJudgeClaudeParamsIncomplete) {
+		t.Errorf("Prefix() err = %v, want errJudgeClaudeParamsIncomplete", err)
+	}
+}
+
+// TestJudgeClaudeProfileText proves the embedded sandbox/judge-claude.sb
+// renders clean and carries the judge-only rules it must keep from
+// judge.sb -- the DATA_DIR deny, the literal SCENARIOS_FILE allow, and the
+// ~/.codex deny, plus a TRANSCRIPTS write allow after the global write deny
+// -- and carries no CODEX_HOME param (#105).
+func TestJudgeClaudeProfileText(t *testing.T) {
+	t.Parallel()
+	profile, err := zing.Assets.ReadFile("sandbox/judge-claude.sb")
+	if err != nil {
+		t.Fatalf("read sandbox/judge-claude.sb: %v", err)
+	}
+	rendered, err := renderProfile(profile, nil, 7425)
+	if err != nil {
+		t.Fatalf("renderProfile(judge-claude.sb): %v", err)
+	}
+
+	for _, want := range []string{
+		`(deny file-read* file-read-data file-write* (subpath (param "DATA_DIR")))`,
+		`(allow file-read* file-read-data (literal (param "SCENARIOS_FILE")))`,
+		`(deny file-read* file-read-data (subpath (string-append (param "HOME") "/.codex")))`,
+	} {
+		if !strings.Contains(rendered, want) {
+			t.Errorf("judge-claude.sb does not contain %q", want)
+		}
+	}
+
+	writeDenyIdx := strings.Index(rendered, `(deny file-write* (subpath "/"))`)
+	if writeDenyIdx < 0 {
+		t.Fatalf("judge-claude.sb does not contain the global write deny")
+	}
+	transcriptsWriteIdx := strings.Index(rendered[writeDenyIdx:], `(subpath (param "TRANSCRIPTS"))`)
+	if transcriptsWriteIdx < 0 {
+		t.Errorf("judge-claude.sb does not contain a TRANSCRIPTS write allow after the global write deny")
+	}
+
+	if strings.Contains(rendered, `(param "CODEX_HOME")`) {
+		t.Error("judge-claude.sb names CODEX_HOME, want no Codex-home rule")
+	}
 }
 
 // TestJudgeProofWritesTempScenariosFile proves judgeProof (the judge
