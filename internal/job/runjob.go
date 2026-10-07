@@ -496,16 +496,54 @@ const timeoutRetryPrefix = "retried once automatically after a timeout"
 // is firstAttemptText.
 const timeoutRetryNoteFmt = "Note from Zing: the previous attempt at this turn %s. Zing is running the turn again."
 
+// buildTimeoutResumeNoteFmt is the whole prompt a timed-out build or fix
+// turn's own retry sends, replacing #155's generic note-in-front-of-prompt
+// behavior for this one job (owner decision Q7, #80's ticket): %s is
+// firstAttemptText's result. The wording fits both a task's build prompt
+// and a fix prompt, since a fix run also runs under jobBuildName
+// (internal/job/fix.go).
+const buildTimeoutResumeNoteFmt = "This run %s, and Zing resumed it once. Your edits are still in the worktree. " +
+	"Run git status and git diff to see the work in progress, run only the tests named in your input, and " +
+	"return your document. Zing runs the full test and lint commands after you return."
+
+// labelTimeout is the NamedInput.Label timeoutRetryRequest's resume note
+// carries on a build or fix turn's own timeout retry.
+const labelTimeout = "timeout"
+
+// timeoutRetryRequest builds retryTimeout's retry request from the attempt
+// it replaces (owner decision Q7, #80's ticket). For jobBuildName with a
+// known session id on res -- set once the runtime has actually started a
+// session, even when that attempt ends in ErrTimeout or ErrStalled -- it
+// resumes that session with buildTimeoutResumeNoteFmt as the whole prompt,
+// plus a deadline input for the retry's own window from now, and returns
+// true: a fix run is included, since it runs under jobBuildName too
+// (internal/job/fix.go). Every other turn keeps #155's behavior: req
+// unchanged but for timeoutRetryNoteFmt in front of its own prompt, and
+// returns false.
+func timeoutRetryRequest(jobName string, req runtime.RunRequest, res runtime.RunResult, first string, now time.Time) (runtime.RunRequest, bool) {
+	if jobName == jobBuildName && res.SessionID != "" {
+		req.SessionID = res.SessionID
+		note := prompt.NamedInput{Label: labelTimeout, Text: fmt.Sprintf(buildTimeoutResumeNoteFmt, first)}
+		deadline := prompt.Deadline(now, now.Add(req.Timeout))
+		req.Prompt = prompt.Assemble(prompt.ForBuildResume([]prompt.NamedInput{note, deadline}))
+		return req, true
+	}
+	req.Prompt = fmt.Sprintf(timeoutRetryNoteFmt, first) + "\n\n" + req.Prompt
+	return req, false
+}
+
 // retryTimeout is runJobWith's single automatic retry after an ErrTimeout or
 // ErrStalled (design goals: "A job with timeout_retries = 1 retries an
 // ErrTimeout or ErrStalled once, on the same reserved run, after a 2 s
 // wait"), for a job whose machine.toml timeout_retries is 1. ctx is
 // runJobWith's parent context, not the spent runCtx: the retry's deadline is
 // req.Timeout from its start or ctx's own deadline, whichever comes first.
-// req.SessionID is kept as it is, so a first turn starts a fresh session and
-// a resume turn resumes the same one (owner decision Q7), with the note
-// line in front of either prompt. Every other result passes through res and
-// runErr unchanged.
+// timeoutRetryRequest decides the retry's prompt and session id: a build or
+// fix turn with a known session id resumes that session with the resume
+// note as its whole prompt (owner decision Q7); every other turn keeps
+// #155's behavior, a first turn starting a fresh session and a resume turn
+// resuming the same one, with the generic note line in front of either
+// prompt. Every other result passes through res and runErr unchanged.
 func retryTimeout(
 	ctx context.Context, rt runtime.Runtime, req runtime.RunRequest,
 	ticketID, runID int64, jobName string, retries int, res runtime.RunResult, runErr error,
@@ -524,8 +562,9 @@ func retryTimeout(
 	if ctx.Err() != nil {
 		return skipRetry(ctx, ticketID, runID, jobName, lastEvent, res)
 	}
+	retryReq, resumed := timeoutRetryRequest(jobName, req, res, first, time.Now())
 	slog.Info("runtime timeout retry", "ticket_id", ticketID, "run_id", runID, "job", jobName,
-		"err_kind", errKind(runErr), "last_event", lastEvent, "agent_seconds", runtime.Seconds(res.AgentTime))
+		"err_kind", errKind(runErr), "last_event", lastEvent, "agent_seconds", runtime.Seconds(res.AgentTime), "resumed", resumed)
 
 	select {
 	case <-ctx.Done():
@@ -533,8 +572,6 @@ func retryTimeout(
 	case <-time.After(transientRetryDelay):
 	}
 
-	retryReq := req
-	retryReq.Prompt = fmt.Sprintf(timeoutRetryNoteFmt, first) + "\n\n" + req.Prompt
 	retryCtx, cancel := context.WithTimeout(ctx, req.Timeout)
 	defer cancel()
 	retryRes, retryErr := rt.Run(retryCtx, retryReq)

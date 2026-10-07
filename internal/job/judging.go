@@ -303,15 +303,9 @@ func (h judgeHandler) run(ctx context.Context, t store.Ticket, d Deps) (store.Ha
 	switch {
 	case judgeRoundFailedLine.MatchString(firstLine), judgeRoundSameSHALine.MatchString(firstLine):
 		alreadyEscalated := judgeRoundSameSHALine.MatchString(firstLine)
-		var sub []string
-		if alreadyEscalated {
-			sub = judgeRoundSameSHALine.FindStringSubmatch(firstLine)
-		} else {
-			sub = judgeRoundFailedLine.FindStringSubmatch(firstLine)
-		}
-		m, convErr := strconv.Atoi(sub[1])
-		if convErr != nil {
-			return store.HandlerCommit{}, fmt.Errorf("job: judging: parse failed round %q: %w", firstLine, convErr)
+		m, numErr := judgeFailedRoundNumber(firstLine)
+		if numErr != nil {
+			return store.HandlerCommit{}, fmt.Errorf("job: judging: parse failed round %q: %w", firstLine, numErr)
 		}
 
 		// #86's own repeat (ticket #50, Q1): a "failure" fix that lands
@@ -337,6 +331,21 @@ func (h judgeHandler) run(ctx context.Context, t store.Ticket, d Deps) (store.Ha
 		}
 
 		if sha == prevSHA {
+			// A "fix dropped <mid>" marker newer than this failed or
+			// same-sha-escalated marker is rejudgeWithoutFix's own trace of
+			// the owner's "Judge again without a fix" (design section 8,
+			// owner decision Q9, ticket #80 task 4): it counts as the
+			// owner's consent to judge this same sha again, exactly as a
+			// newer markerRetryRequested already does below, so round m+1
+			// starts straight away with no same-sha escalation.
+			consent, consentErr := droppedFixConsent(ctx, d, t, newest.ID, m+1)
+			if consentErr != nil {
+				return store.HandlerCommit{}, consentErr
+			}
+			if consent {
+				return judgeStartOrSync(ctx, t, d, m+1, sha, maxRunID)
+			}
+
 			_, idsLine, _ := strings.Cut(newest.Body, "\n")
 
 			// The fix that lands round m's own fix request runs as an
@@ -1963,6 +1972,34 @@ func (h judgeHandler) evaluate(ctx context.Context, t store.Ticket, d Deps, n in
 
 // ---- the judge rows of resolvePostBuildEscalation (design section 5.6) ---
 
+// errRoundLineNotFailed is judgeFailedRoundNumber's own sentinel for a
+// firstLine that is neither a "judge round N failed" nor a "judge round N
+// same sha escalated" line. retryJudgeNoRun treats this, like any other
+// error judgeFailedRoundNumber returns, as no match.
+var errRoundLineNotFailed = errors.New("job: judging: not a failed or same-sha round line")
+
+// judgeFailedRoundNumber reads the round number back from firstLine when
+// it is a "judge round N failed" or "judge round N same sha escalated"
+// line, the one pair of shapes judgeHandler.Run's own failed-marker
+// branch and retryJudgeNoRun both read this round number from. err is
+// errRoundLineNotFailed when firstLine is neither shape, and wraps the
+// strconv error when the round number itself fails to parse, so a
+// caller's own error keeps that detail.
+func judgeFailedRoundNumber(firstLine string) (m int, err error) {
+	sub := judgeRoundFailedLine.FindStringSubmatch(firstLine)
+	if sub == nil {
+		sub = judgeRoundSameSHALine.FindStringSubmatch(firstLine)
+	}
+	if sub == nil {
+		return 0, errRoundLineNotFailed
+	}
+	n, convErr := strconv.Atoi(sub[1])
+	if convErr != nil {
+		return 0, fmt.Errorf("round %q: %w", sub[1], convErr)
+	}
+	return n, nil
+}
+
 // judgeNewestRoundNumber reads the round number back from markers' own
 // newest "judge round " marker, whichever of the four shapes it is (design
 // section 5.1): retryFreshRound needs the round just abandoned to number
@@ -2085,6 +2122,126 @@ func (h judgeHandler) retryFreshRound(ctx context.Context, t store.Ticket, d Dep
 	}
 	commit.Messages = append([]store.Message{startMsg}, commit.Messages...)
 	commit.ResolveQuestions = resolveIDs
+	return commit, nil
+}
+
+// fixDroppedSince is the pure function behind judgeHandler.Run's
+// dropped-fix consent check and retryJudgeNoRun's own (design section 8,
+// ticket #80 task 4): it returns the newest well-formed "fix dropped <mid>"
+// marker in dropped (Store.MarkersWithPrefix's own oldest-first order)
+// whose own message id is above floorID -- round m's own failed or
+// same-sha-escalated marker -- and ok false when there is none. A dropped
+// marker at or below floorID predates the round this consent is for and
+// does not count; a malformed "fix dropped" line is skipped rather than
+// treated as a floor-breaking failure.
+func fixDroppedSince(dropped []store.MessageRow, floorID int64) (fixRequestID int64, ok bool) {
+	for i := range slices.Backward(dropped) {
+		if dropped[i].ID <= floorID {
+			break
+		}
+		firstLine, _, _ := strings.Cut(dropped[i].Body, "\n")
+		if mid, parsed := parseFixDroppedMessageID(firstLine); parsed {
+			return mid, true
+		}
+	}
+	return 0, false
+}
+
+// droppedFixConsent is the one read of fixDroppedPrefix markers behind
+// both judgeHandler.Run's dropped-fix consent check and retryJudgeNoRun's
+// own (design section 8, ticket #80 task 4): it reports whether a "fix
+// dropped <mid>" marker newer than floorID exists, logging the same Info
+// "judge again after dropped fix" line callers used to each log on their
+// own, with round the round about to start (m+1).
+func droppedFixConsent(ctx context.Context, d Deps, t store.Ticket, floorID int64, round int) (bool, error) {
+	dropped, err := d.Store.MarkersWithPrefix(ctx, t.ID, fixDroppedPrefix)
+	if err != nil {
+		return false, fmt.Errorf("job: judging: fix dropped markers: %w", err)
+	}
+	fixRequestID, ok := fixDroppedSince(dropped, floorID)
+	if !ok {
+		return false, nil
+	}
+	slog.Info("judge again after dropped fix", "ticket_id", t.ID, "round", round, "fix_request_id", fixRequestID)
+	return true, nil
+}
+
+// retryJudgeNoRun is resolvePostBuildEscalation's own judge-origin, no-run
+// row (design section 5.6, ticket #80 task 4): when the newest judge round
+// marker names a failed or same-sha-escalated round, and fixDroppedSince
+// finds a "fix dropped <mid>" marker newer than it, this Retry is the
+// owner's own answer to the judge escalation that followed
+// rejudgeWithoutFix's own drop, so it starts that next round directly
+// through retryFreshRound, with the owner's notes and errorText reaching
+// the fresh judge turn, rather than only writing the bare markerRetryRequested
+// the same-sha guard would otherwise need to see on a later tick. Every
+// other judge-origin, no-run escalation keeps buildingHandler's own
+// retryMarkerCommit, exactly as before this ticket.
+func (h judgeHandler) retryJudgeNoRun(ctx context.Context, t store.Ticket, d Deps, resolveIDs []int64, notes, errorText string) (store.HandlerCommit, error) {
+	markers, err := d.Store.MarkersWithPrefix(ctx, t.ID, judgeRoundMarkerPrefix)
+	if err != nil {
+		return store.HandlerCommit{}, fmt.Errorf("job: judging: retry no run: judge round markers: %w", err)
+	}
+	if len(markers) > 0 {
+		newest := markers[len(markers)-1]
+		firstLine, _, _ := strings.Cut(newest.Body, "\n")
+		if m, numErr := judgeFailedRoundNumber(firstLine); numErr == nil {
+			consent, consentErr := droppedFixConsent(ctx, d, t, newest.ID, m+1)
+			if consentErr != nil {
+				return store.HandlerCommit{}, consentErr
+			}
+			if consent {
+				commit, err := h.retryFreshRound(ctx, t, d, resolveIDs, notes, errorText)
+				if err != nil {
+					return store.HandlerCommit{}, err
+				}
+				commit.ResolveQuestions = resolveIDs
+				return commit, nil
+			}
+		}
+	}
+	return buildingHandler{}.retryMarkerCommit(t, d, resolveIDs), nil
+}
+
+// rejudgeWithoutFix routes escalation option e, "Judge again without a fix"
+// (design section 8, owner decision Q6, ticket #80 task 3): it refuses,
+// logging a Warn "judge again refused" and re-escalating replan_unsupported
+// with origin fix and no fix dropped marker, unless the ticket is in
+// "judging", a fix request is open, and that request's own asking stage
+// (fixStageFor[req.Kind]) is judging -- the same gate withFixStageOption
+// used to decide whether to offer the option in the first place. Otherwise
+// it calls retryFreshRound and prepends a "fix dropped <mid>" marker to
+// every commit it returns, including an escalation from judgeStartChecks
+// (a dirty tree, say): the fix still counts toward judge max_loops (owner
+// decision Q6), so dropping it only ever closes the request, never erases
+// the round it cost.
+func (h judgeHandler) rejudgeWithoutFix(ctx context.Context, t store.Ticket, d Deps, resolveIDs []int64, notes, errorText string) (store.HandlerCommit, error) {
+	req, open, err := openFixRequest(ctx, d, t)
+	if err != nil {
+		return store.HandlerCommit{}, fmt.Errorf("job: judging: rejudge without fix: %w", err)
+	}
+	var reason string
+	switch {
+	case t.State != stateJudging:
+		reason = "ticket is not judging"
+	case !open:
+		reason = "no open fix request"
+	case fixStageFor[req.Kind] != stateJudging:
+		reason = fmt.Sprintf("fix kind %q does not ask judging", req.Kind)
+	}
+	if reason != "" {
+		slog.Warn("judge again refused", "ticket_id", t.ID, "reason", reason)
+		return replanUnsupportedEscalation(t, d, resolveIDs, response.EscalationOriginFix), nil
+	}
+
+	commit, err := h.retryFreshRound(ctx, t, d, resolveIDs, notes, errorText)
+	if err != nil {
+		return store.HandlerCommit{}, err
+	}
+	dropped := fixDroppedMessage(t, req.MessageID)
+	commit.Messages = append([]store.Message{dropped}, commit.Messages...)
+	commit.ResolveQuestions = resolveIDs
+	slog.Info("fix dropped", "ticket_id", t.ID, "fix_request_id", req.MessageID, "stage", "judge")
 	return commit, nil
 }
 

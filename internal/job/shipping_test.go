@@ -5422,6 +5422,55 @@ func TestRespondErrorRetry(t *testing.T) {
 	}
 }
 
+// TestRespondRetryWithRunCarriesOwnerNote proves ticket #80 task 5: a
+// respond-origin "with a run" retry (shipHandler.retryRespondWithRun)
+// carries the owner's typed note, not just the chosen option, into the
+// fresh batch's own fenced "notes" input.
+func TestRespondRetryWithRunCarriesOwnerNote(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow end-to-end flow; runs in the full suite")
+	}
+	t.Parallel()
+	when := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	s, ticket, gh, tr, _ := shipRespondReady(t, when)
+
+	owner := "reserve-terminal-run-owner"
+	expires := time.Now().Add(10 * time.Minute).UTC().Truncate(time.Second)
+	claimed, claimErr := s.Claim(t.Context(), ticket.ID, owner, expires)
+	if claimErr != nil || !claimed {
+		t.Fatalf("claim: claimed=%v err=%v", claimed, claimErr)
+	}
+	rsv, reserveErr := s.Reserve(t.Context(), ticket.ID, owner, expires, store.SessionUpsert{Job: jobRespondName, Runtime: pbRuntimeClaude}, store.RunSeed{Model: pbModelClaudeX})
+	if reserveErr != nil {
+		t.Fatalf("Reserve: %v", reserveErr)
+	}
+	outcome, exitCode, agentSeconds := "error", 1, 1
+	applied, commitErr := s.CommitHandlerResult(t.Context(), store.HandlerCommit{
+		TicketID: ticket.ID, Owner: owner, Expires: expires,
+		Runs: []store.Run{{ID: rsv.RunID, Outcome: &outcome, ExitCode: &exitCode, AgentSeconds: &agentSeconds}},
+	})
+	if commitErr != nil || !applied {
+		t.Fatalf("CommitHandlerResult: applied=%v err=%v", applied, commitErr)
+	}
+
+	runID := rsv.RunID
+	qID := pbEscalateDirect(t, s, ticket.ID, &runID, nil, response.EscalationCodeRuntimeExecFailed, response.EscalationOriginRespond)
+	const retryNote = "reply in one line"
+	pbAnswerEscalationWithNote(t, s, ticket.ID, qID, "a", retryNote)
+
+	// The retry starts batch 2 (shipRespondReady already started batch 1),
+	// so the fake must serve respond/2/1.xml, not respondScriptsFS's own
+	// batch-1 key.
+	scripts := fstest.MapFS{"respond/2/1.xml": &fstest.MapFile{Data: []byte(shipRespondReplyScript)}}
+	rec := &recordingRuntime{inner: runtime.NewFake(scripts)}
+	deps := shipClaim(t, s, rec, ticket.ID, gh, tr)
+	_, err := (shipHandler{}).Run(t.Context(), pbGetTicket(t, s, ticket.ID), deps)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	assertFencedPB(t, rec.lastRequest(t).Prompt, "notes", retryNote)
+}
+
 // TestRespondCapResumesRetryStartsFresh proves design section 5.6's own
 // "cap_resumes, exhausted session of job respond" row: the retry marker
 // copies the started marker's own sha, tids, and seen line byte for byte

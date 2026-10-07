@@ -29,9 +29,13 @@ func postBuildPrelude(ctx context.Context, t store.Ticket, d Deps, origin respon
 		return store.HandlerCommit{}, false, fmt.Errorf("job: postbuild: answered rounds: %w", err)
 	}
 	if len(rounds) > 0 {
-		c, handled, roundsErr := postBuildEnterFromRounds(ctx, t, d, rounds)
-		if handled || roundsErr != nil {
-			return c, handled, roundsErr
+		roundsCommit, handled, roundsErr := postBuildEnterFromRounds(ctx, t, d, rounds)
+		if roundsErr != nil {
+			return roundsCommit, handled, roundsErr
+		}
+		if handled {
+			stageCommit, stageErr := withFixStageOption(ctx, d, t, roundsCommit)
+			return stageCommit, true, stageErr
 		}
 	}
 
@@ -41,7 +45,11 @@ func postBuildPrelude(ctx context.Context, t store.Ticket, d Deps, origin respon
 	}
 	if open {
 		commit, driveErr := DriveFix(ctx, t, d, req)
-		return commit, true, driveErr
+		if driveErr != nil {
+			return commit, true, driveErr
+		}
+		commit, err = withFixStageOption(ctx, d, t, commit)
+		return commit, true, err
 	}
 
 	// An open base merge (merge.go) owns the worktree until it lands or
@@ -152,6 +160,32 @@ func postBuildRoundOwnedByOpenFix(ctx context.Context, t store.Ticket, d Deps, r
 	return fixUnit(req), true, nil
 }
 
+// withFixStageOption adds fixStageOptions' own extra option to a fix-origin
+// escalation c already carries, so a failure-kind fix offers "Judge again
+// without a fix" next to Retry and Abandon (design section 8, owner
+// decision Q6). c is returned unchanged, with nothing logged, when c
+// carries no escalation, the escalation's origin is not fix, or no fix
+// request is open; openFixRequest's own error is this function's error.
+func withFixStageOption(ctx context.Context, d Deps, t store.Ticket, c store.HandlerCommit) (store.HandlerCommit, error) {
+	if c.Escalation == nil || response.EscalationOrigin(c.Escalation.Payload.Origin) != response.EscalationOriginFix {
+		return c, nil
+	}
+	req, open, err := openFixRequest(ctx, d, t)
+	if err != nil {
+		return store.HandlerCommit{}, fmt.Errorf("job: postbuild: open fix request: %w", err)
+	}
+	if !open {
+		return c, nil
+	}
+	extra := fixStageOptions(req.Kind)
+	if len(extra) == 0 {
+		return c, nil
+	}
+	c.Escalation.ExtraOptions = append(c.Escalation.ExtraOptions, extra...)
+	slog.Info("fix escalation offers judge again", "ticket_id", t.ID, "fix_request_id", req.MessageID, "kind", req.Kind)
+	return c, nil
+}
+
 // resolvePostBuildEscalation is design section 5.6's own Write/Resolve for a
 // post-build escalation (#28 gap 3): escID is the newest question's own
 // parent id. Choice c (abandon) is abandonCommit in every state; choice b,
@@ -222,6 +256,9 @@ func resolvePostBuildEscalation(ctx context.Context, t store.Ticket, d Deps, rou
 	case choice == escalationChoiceAbandon:
 		commit = abandonCommit(t, d, payload.Code)
 
+	case choice == fixRejudgeOptionKey && origin == response.EscalationOriginFix:
+		commit, err = judgeHandler{}.rejudgeWithoutFix(ctx, t, d, resolveIDs, notes, errorText)
+
 	case payload.Amendment != nil && choice == escalationChoiceRetry:
 		commit, err = judgeHandler{}.acceptAmendment(ctx, t, d, resolveIDs, payload, escMsg.RunID, payload.SessionID)
 
@@ -268,7 +305,7 @@ func resolvePostBuildEscalation(ctx context.Context, t store.Ticket, d Deps, rou
 		commit, err = judgeHandler{}.retryFreshRound(ctx, t, d, resolveIDs, notes, errorText)
 
 	case origin == response.EscalationOriginJudge:
-		commit = h.retryMarkerCommit(t, d, resolveIDs)
+		commit, err = judgeHandler{}.retryJudgeNoRun(ctx, t, d, resolveIDs, notes, errorText)
 
 	case origin == response.EscalationOriginShipping && isBaseMergeTried(payload.Tried):
 		commit, err = shipHandler{}.retryMerge(ctx, t, d, resolveIDs, notes, payload.Tried)
