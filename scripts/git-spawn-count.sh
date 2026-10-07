@@ -22,7 +22,7 @@ set -eu
 
 real_git=$(command -v git)
 
-tmp=$(mktemp -d)
+tmp=$(mktemp -d "${TMPDIR:-/tmp}/git-spawn-count-XXXXXX")
 trap 'rm -rf "$tmp"' EXIT
 
 log="$tmp/calls.log"
