@@ -5,13 +5,17 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
+	"net/http"
 	"os"
 	"path/filepath"
 	"runtime/debug"
 	"sync/atomic"
+	"time"
 )
 
 // bootAction is what the boot guard decides to do with upgrade.json at
@@ -221,4 +225,52 @@ func rollBack(dataDir, exe string, m upgradeMarker) (bootAction, upgradeMarker, 
 	m.State = markerRolledBack
 	slog.Warn("upgrade: rolling back", "from_sha", m.ToSHA, "to_sha", m.FromSHA, "ticket_id", m.TicketID)
 	return bootRollback, m, rollbackTarget(m, exe), saveUpgradeMarker(dataDir, m)
+}
+
+// watchBoot GETs url at once and then every interval until it answers 200
+// (true) or ctx ends (false). Each GET has its own 2 s timeout. Each poll
+// that is not a 200 logs at DEBUG; giving up logs one WARN with the last
+// poll's status and error, so a failed boot can be diagnosed after the
+// rollback.
+func watchBoot(ctx context.Context, url string, every time.Duration) bool {
+	client := &http.Client{Timeout: 2 * time.Second}
+	ticker := time.NewTicker(every)
+	defer ticker.Stop()
+	var lastStatus, polls int
+	var lastErr error
+	for {
+		status, err := bootAnswered(ctx, client, url)
+		if ctx.Err() == nil {
+			polls++
+			if err == nil && status == http.StatusOK {
+				return true
+			}
+			lastStatus, lastErr = status, err
+			slog.Debug("upgrade: boot watch poll", "url", url, "status", status, "error", err)
+		}
+		select {
+		case <-ctx.Done():
+			slog.Warn("upgrade: boot watch gave up", "url", url, "last_status", lastStatus, "last_error", lastErr, "polls", polls)
+			return false
+		case <-ticker.C:
+		}
+	}
+}
+
+// bootAnswered GETs url once and returns its status code, or 0 and the
+// error when the request could not be built or sent.
+func bootAnswered(ctx context.Context, client *http.Client, url string) (int, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, http.NoBody)
+	if err != nil {
+		return 0, err
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		return 0, err
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if _, err := io.Copy(io.Discard, resp.Body); err != nil {
+		return resp.StatusCode, err
+	}
+	return resp.StatusCode, nil
 }

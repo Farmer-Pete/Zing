@@ -2,11 +2,18 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"log/slog"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"regexp"
+	"strconv"
 	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
 )
 
 func TestDecideBoot(t *testing.T) {
@@ -535,5 +542,70 @@ func TestBootAndServe_GuardRunsBeforeConfig(t *testing.T) {
 	}
 	if saved.State != markerAttempted {
 		t.Errorf("marker state = %q, want %q (the guard ran before zing.toml was read)", saved.State, markerAttempted)
+	}
+}
+
+func TestWatchBoot_Returns200(t *testing.T) {
+	t.Parallel()
+
+	var calls atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		n := calls.Add(1)
+		if n <= 2 {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	ok := watchBoot(t.Context(), srv.URL, 10*time.Millisecond)
+	if !ok {
+		t.Fatalf("watchBoot returned false, want true")
+	}
+	if got := calls.Load(); got != 3 {
+		t.Errorf("GETs = %d, want 3", got)
+	}
+}
+
+func TestWatchBoot_StopsOnCancel(t *testing.T) {
+	prevDefault := slog.Default()
+	var buf bytes.Buffer
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, nil)))
+	t.Cleanup(func() { slog.SetDefault(prevDefault) })
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusServiceUnavailable)
+	}))
+	defer srv.Close()
+
+	ctx, cancel := context.WithCancel(t.Context())
+	time.AfterFunc(50*time.Millisecond, cancel)
+
+	start := time.Now()
+	ok := watchBoot(ctx, srv.URL, 10*time.Millisecond)
+	if ok {
+		t.Fatalf("watchBoot returned true, want false")
+	}
+	if elapsed := time.Since(start); elapsed > 1*time.Second+50*time.Millisecond {
+		t.Errorf("watchBoot took %s, want within 1s of the cancel", elapsed)
+	}
+
+	lines := strings.Split(strings.TrimRight(buf.String(), "\n"), "\n")
+	if len(lines) != 1 {
+		t.Fatalf("log lines = %d, want 1: %q", len(lines), buf.String())
+	}
+	line := lines[0]
+	for _, want := range []string{"level=WARN", "upgrade: boot watch gave up", "last_status=503"} {
+		if !strings.Contains(line, want) {
+			t.Errorf("log line %q missing %q", line, want)
+		}
+	}
+	m := regexp.MustCompile(`polls=(\d+)`).FindStringSubmatch(line)
+	if m == nil {
+		t.Fatalf("log line %q missing polls=N", line)
+	}
+	if n, convErr := strconv.Atoi(m[1]); convErr != nil || n < 1 {
+		t.Errorf("polls = %q, want a number at least 1", m[1])
 	}
 }
