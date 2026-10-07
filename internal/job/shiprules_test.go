@@ -880,6 +880,100 @@ func TestFailedTestNames(t *testing.T) {
 	}
 }
 
+func TestDecidePreExisting(t *testing.T) {
+	t.Parallel()
+
+	fc := func(name string, appID int64, log string) failedCheck {
+		return failedCheck{Run: orchestrator.CheckRun{Name: name, AppID: appID}, Log: log}
+	}
+
+	cases := []struct {
+		name           string
+		failed         []failedCheck
+		failedStatuses int
+		base           map[checkKey][]string
+		want           preExisting
+	}{
+		{
+			name:   "every failing test matches main: pre-existing",
+			failed: []failedCheck{fc("ci", 0, "--- FAIL: TestA (0s)")},
+			base:   map[checkKey][]string{{Name: "ci"}: {"TestA"}},
+			want:   preExisting{Pre: true, Tests: []string{"TestA"}},
+		},
+		{
+			name:   "partial overlap: not pre-existing, matched test still named",
+			failed: []failedCheck{fc("ci", 0, "--- FAIL: TestA (0s)\n--- FAIL: TestB (0s)")},
+			base:   map[checkKey][]string{{Name: "ci"}: {"TestA"}},
+			want:   preExisting{Pre: false, Tests: []string{"TestA"}},
+		},
+		{
+			name:   "base entry present but nil: no match",
+			failed: []failedCheck{fc("ci", 0, "--- FAIL: TestA (0s)")},
+			base:   map[checkKey][]string{{Name: "ci"}: nil},
+			want:   preExisting{Pre: false},
+		},
+		{
+			name:   "no base entry: recorded in NoRun",
+			failed: []failedCheck{fc("ci", 0, "--- FAIL: TestA (0s)")},
+			base:   map[checkKey][]string{},
+			want:   preExisting{Pre: false, NoRun: []string{"ci"}},
+		},
+		{
+			name:   "PR log names no test, base has an entry: not pre-existing, no NoRun",
+			failed: []failedCheck{fc("ci", 0, "FAIL: boom")},
+			base:   map[checkKey][]string{{Name: "ci"}: {"TestA"}},
+			want:   preExisting{Pre: false},
+		},
+		{
+			name:   "PR log names no test, no base entry: not pre-existing, no NoRun",
+			failed: []failedCheck{fc("ci", 0, "FAIL: boom")},
+			base:   map[checkKey][]string{},
+			want:   preExisting{Pre: false},
+		},
+		{
+			name:           "full match but a failed status present: not pre-existing",
+			failed:         []failedCheck{fc("ci", 0, "--- FAIL: TestA (0s)")},
+			failedStatuses: 1,
+			base:           map[checkKey][]string{{Name: "ci"}: {"TestA"}},
+			want:           preExisting{Pre: false, Tests: []string{"TestA"}},
+		},
+		{
+			name: "a second check with no test names blocks pre-existing",
+			failed: []failedCheck{
+				fc("ci", 0, "--- FAIL: TestA (0s)"),
+				fc("lint", 0, "FAIL: boom"),
+			},
+			base: map[checkKey][]string{
+				{Name: "ci"}:   {"TestA"},
+				{Name: "lint"}: {"TestA"},
+			},
+			want: preExisting{Pre: false, Tests: []string{"TestA"}},
+		},
+		{
+			name:   "no failed checks: not pre-existing",
+			failed: nil,
+			base:   map[checkKey][]string{},
+			want:   preExisting{Pre: false},
+		},
+		{
+			name:   "app id must match too: a base entry for a different app id is no run",
+			failed: []failedCheck{fc("ci", 7, "--- FAIL: TestA (0s)")},
+			base:   map[checkKey][]string{{Name: "ci", AppID: 0}: {"TestA"}},
+			want:   preExisting{Pre: false, NoRun: []string{"ci"}},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got := decidePreExisting(tc.failed, tc.failedStatuses, tc.base)
+			if diff := cmp.Diff(tc.want, got, cmpopts.EquateEmpty()); diff != "" {
+				t.Errorf("decidePreExisting() mismatch (-want +got):\n%s", diff)
+			}
+		})
+	}
+}
+
 // -----------------------------------------------------------------------
 // Pure: rerunPassedNotes
 // -----------------------------------------------------------------------
