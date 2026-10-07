@@ -154,11 +154,12 @@ func TestValidate_FailuresWrapErrSchemaInvalid(t *testing.T) {
 	}
 
 	tests := []struct {
-		name    string
-		table   string
-		typ     string
-		payload string
-		want    string
+		name       string
+		table      string
+		typ        string
+		payload    string
+		want       string
+		wantSyntax bool
 	}{
 		{
 			name:    "unknown type",
@@ -168,11 +169,12 @@ func TestValidate_FailuresWrapErrSchemaInvalid(t *testing.T) {
 			want:    "payload does not match schema nope: /: no schema for messages/nope",
 		},
 		{
-			name:    "invalid JSON",
-			table:   testTableMessages,
-			typ:     testTypeQuestion,
-			payload: `{not json`,
-			want:    "payload does not match schema question: /: invalid JSON: invalid character 'n' looking for beginning of object key string",
+			name:       "invalid JSON",
+			table:      testTableMessages,
+			typ:        testTypeQuestion,
+			payload:    `{not json`,
+			want:       "payload does not match schema question: /: invalid JSON: invalid character 'n' looking for beginning of object key string",
+			wantSyntax: true,
 		},
 		{
 			name:    "options null",
@@ -203,12 +205,9 @@ func TestValidate_FailuresWrapErrSchemaInvalid(t *testing.T) {
 			if err.Error() != tt.want {
 				t.Errorf("validate(%s, %s, %s) = %q, want %q", tt.table, tt.typ, tt.payload, err.Error(), tt.want)
 			}
-			if tt.name == "invalid JSON" {
-				syntaxErr, ok := errors.AsType[*json.SyntaxError](err)
-				if !ok {
-					t.Errorf("validate(%s, %s, %s): errors.AsType[*json.SyntaxError](err) ok = false, want true", tt.table, tt.typ, tt.payload)
-				} else if syntaxErr == nil {
-					t.Error("errors.AsType[*json.SyntaxError](err) = nil, false; want non-nil, true")
+			if tt.wantSyntax {
+				if syntaxErr, ok := errors.AsType[*json.SyntaxError](err); !ok || syntaxErr == nil {
+					t.Errorf("validate(%s, %s, %s): errors.AsType[*json.SyntaxError](err) = %v, %v, want non-nil, true", tt.table, tt.typ, tt.payload, syntaxErr, ok)
 				}
 			}
 		})

@@ -1306,15 +1306,15 @@ func (d *Dispatcher) runAndCommit(ctx context.Context, ticket store.Ticket, time
 				for _, r := range esc.Runs {
 					runIDs = append(runIDs, r.ID)
 				}
-				slog.Error("commit failed schema validation", "ticket_id", ticket.ID, "run_ids", runIDs, "err", err)
 				escCtx, cancelEsc := postHandlerContext(ctx)
 				defer cancelEsc()
 				escApplied, escErr := d.store.CommitHandlerResult(escCtx, esc)
 				if escErr == nil && escApplied {
+					slog.Error("commit failed schema validation; escalated", "ticket_id", ticket.ID, "run_ids", runIDs, "err", err)
 					d.bus.Publish()
 					return nil
 				}
-				slog.Error("schema escalation not applied", "ticket_id", ticket.ID, "applied", escApplied, "err", escErr)
+				slog.Error("schema escalation not applied", "ticket_id", ticket.ID, "run_ids", runIDs, "applied", escApplied, "err", escErr)
 			}
 		}
 	}

@@ -628,6 +628,9 @@ func TestSchemaInvalidEscalation(t *testing.T) {
 		if c.Runs[0].ExitCode == nil || *c.Runs[0].ExitCode != exitCode {
 			t.Errorf("Runs[0].ExitCode = %v, want %d", c.Runs[0].ExitCode, exitCode)
 		}
+		if c.Runs[0].AgentSeconds == nil || *c.Runs[0].AgentSeconds != agentSeconds {
+			t.Errorf("Runs[0].AgentSeconds = %v, want %d", c.Runs[0].AgentSeconds, agentSeconds)
+		}
 
 		tried := c.Escalation.Payload.Tried
 		if !strings.HasPrefix(tried, failErr.Error()) {
