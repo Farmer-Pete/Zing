@@ -124,6 +124,22 @@ func PlanLensSection(text string) (string, error) {
 	return strings.TrimRight(rest, "\n"), nil
 }
 
+// ForUnblock builds the unblock job's Input: the ticket, the stored plan
+// XML, and the capped review's findings, all fenced (D15), then extra.
+// Called by internal/job's plan review loop cap (maybeResumeFloorFindings)
+// at most once per ticket; calls Assemble once Schemas is set from
+// response.RenderTemplate(JobSide, response.OutcomeOk) in side schema order.
+func ForUnblock(jobPrompt, ticket, plan, findings string, extra []NamedInput) Input {
+	inputs := make([]NamedInput, 0, 3+len(extra))
+	inputs = append(inputs,
+		NamedInput{Label: labelTicket, Text: ticket, Untrusted: true},
+		NamedInput{Label: labelPlan, Text: plan, Untrusted: true},
+		Findings(findings),
+	)
+	inputs = append(inputs, extra...)
+	return Input{JobPrompt: jobPrompt, Inputs: inputs}
+}
+
 // Answer returns the "answer" labeled input for one resumed question: the
 // key, title, chosen option, and any typed reply text, fenced, since it
 // carries whatever the owner typed (plan section 4.2, D15).
@@ -134,6 +150,13 @@ func Answer(text string) NamedInput { return NamedInput{Label: "answer", Text: t
 // re-entering a model (plan section 4.2, D15).
 func Findings(text string) NamedInput {
 	return NamedInput{Label: "findings", Text: text, Untrusted: true}
+}
+
+// Guidance returns the "guidance" labeled input carrying an unblock turn's
+// advice into a planning resume, fenced because it is model-written text
+// re-entering a model (D15).
+func Guidance(text string) NamedInput {
+	return NamedInput{Label: "guidance", Text: text, Untrusted: true}
 }
 
 // Validation returns the "validation" labeled input carrying ready-check

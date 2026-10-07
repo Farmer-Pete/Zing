@@ -35,8 +35,8 @@ func TestLoad_RealMachineTOMLLoadsClean(t *testing.T) {
 	if m.Version != 1 {
 		t.Errorf("Version = %d, want 1", m.Version)
 	}
-	if len(m.Jobs) != 10 {
-		t.Errorf("len(Jobs) = %d, want 10", len(m.Jobs))
+	if len(m.Jobs) != 11 {
+		t.Errorf("len(Jobs) = %d, want 11", len(m.Jobs))
 	}
 
 	// classify's prompt is a bare string.
@@ -70,6 +70,19 @@ func TestLoad_RealMachineTOMLLoadsClean(t *testing.T) {
 	// classify sets no max_resumes key, so it defaults to 1.
 	if got := m.Jobs["classify"].MaxResumes; got != 1 {
 		t.Errorf("classify.MaxResumes = %d, want 1 (the absent-key default)", got)
+	}
+
+	// unblock runs on opus under the claude runtime (owner decision Q1), so
+	// switching it to fable later is a one-line machine.toml edit.
+	unblock := m.Jobs["unblock"]
+	if unblock.Model != modelOpus {
+		t.Errorf("unblock.Model = %q, want opus", unblock.Model)
+	}
+	if unblock.Runtime != "claude" {
+		t.Errorf("unblock.Runtime = %q, want claude", unblock.Runtime)
+	}
+	if unblock.Prompt.Single != "prompts/unblock.md" {
+		t.Errorf("unblock.Prompt.Single = %q, want prompts/unblock.md", unblock.Prompt.Single)
 	}
 
 	// build and perimeter both run under the seatbelt sandbox; classify does
