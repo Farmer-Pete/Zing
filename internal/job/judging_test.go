@@ -3598,26 +3598,43 @@ func TestJudgeRetryFreshRoundCarriesOwnerNote(t *testing.T) {
 
 // TestJudgeRunAndRouteErrSandboxNamesJudgeJobsOwnProfile proves
 // judgeRunAndRoute's ErrSandbox commit reads its reason from whichever
-// sandbox profile jobs.judge actually names (machine.toml's "judge-claude"
-// while Codex is out of quota), not from the unrelated, always-available
-// d.Sandboxes.Judge slot (review r1f5): with Judge available and
-// JudgeClaude unloaded, the escalation still carries JudgeClaude's own
-// "not loaded" reason.
+// sandbox profile jobs.judge actually names, not from the unrelated,
+// always-available d.Sandboxes.Judge slot (review r1f5): with the job set
+// to sandbox "judge-claude", Judge off, and JudgeClaude unloaded, the
+// escalation still carries JudgeClaude's own "not loaded" reason, not
+// Judge's "off". The job's sandbox is set here, not read from
+// machine.toml, since the behavior under test does not depend on which
+// profile jobs.judge currently names (review r2f2). Judge: sandbox.Off(),
+// not a loaded sandbox, so this never starts sandbox-exec and runs
+// everywhere, including inside Zing's own build sandbox (review r2f1).
 func TestJudgeRunAndRouteErrSandboxNamesJudgeJobsOwnProfile(t *testing.T) {
 	t.Parallel()
-	judgeAvailable := loadTestSandboxOrSkip(t)
+	s := newRunJobTestStore(t)
+	ticketID := seedRunJobTicket(t, s)
+	ticket := getRunJobTicket(t, s, ticketID)
+	owner, expires := claimRunJobTicket(t, s, ticketID)
 
 	m := runJobTestMachine(t)
-	if m.Jobs[jobJudgeName].Sandbox != "judge-claude" {
-		t.Fatalf("machine.toml jobs.judge.sandbox = %q, want judge-claude", m.Jobs[jobJudgeName].Sandbox)
+	job := m.Jobs[jobJudgeName]
+	job.Sandbox = "judge-claude"
+	m.Jobs[jobJudgeName] = job
+
+	set, err := runtime.NewSet(map[string]runtime.Runtime{testRuntimeClaude: runtime.NewFake(fstest.MapFS{})})
+	if err != nil {
+		t.Fatalf("runtime.NewSet: %v", err)
 	}
 
 	deps := Deps{
-		Machine:        m,
-		Sandboxes:      sandbox.Set{Judge: judgeAvailable, JudgeClaude: sandbox.NotLoaded()},
+		Store: s, Runtimes: set, Machine: m,
+		Models:         map[string]string{testModelAliasOpus: testModelExact},
+		Budget:         time.Hour,
+		Owner:          owner,
+		Expires:        expires,
+		Reserve:        realReserve(s, owner, expires),
+		Sandboxes:      sandbox.Set{Judge: sandbox.Off(), JudgeClaude: sandbox.NotLoaded()},
 		RequireSandbox: true,
+		DataDir:        t.TempDir(),
 	}
-	ticket := store.Ticket{ID: 1, ProjectID: 1}
 
 	commit, _, err := judgeRunAndRoute(t.Context(), deps, ticket, store.SessionUpsert{}, runtime.RunRequest{},
 		0, freshSessionRecord, nil, nil, nil)
