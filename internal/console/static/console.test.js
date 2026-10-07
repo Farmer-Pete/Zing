@@ -68,6 +68,7 @@ import {
 	ACTION_LABELS,
 	pickupResultView,
 	tuningRequestBody,
+	upgradeMessageText,
 	RECONNECT_BASE_MS,
 	RECONNECT_MAX_MS,
 	emptyStreamStatus,
@@ -675,6 +676,22 @@ test('tuningRequestBody: a non-whole-number value is refused without posting', (
 	for (const raw of ['2.5', '-1', '', 'abc']) {
 		assert.deepEqual(tuningRequestBody('max_parallel', raw), { error: 'enter a whole number' });
 	}
+});
+
+// upgradeMessageText: the Settings view's upgrade-message span text after
+// POST /upgrade (console.js's postUpgrade).
+
+test('upgradeMessageText: a successful response with a body shows the body', () => {
+	assert.equal(upgradeMessageText(true, 'upgrade started\n'), 'upgrade started');
+});
+
+test('upgradeMessageText: a refusal with a body shows the server text', () => {
+	assert.equal(upgradeMessageText(false, 'no project in zing.toml sets self = true'), 'no project in zing.toml sets self = true');
+});
+
+test('upgradeMessageText: an empty body falls back by outcome', () => {
+	assert.equal(upgradeMessageText(false, ''), 'request failed');
+	assert.equal(upgradeMessageText(true, ''), 'upgrade started');
 });
 
 // describeAction / ACTION_LABELS: the "?" help overlay's copy for a raw

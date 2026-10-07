@@ -224,3 +224,35 @@ func TestDispatch_UnknownCommand(t *testing.T) {
 		t.Errorf("stderr = %q, want %q", out, want)
 	}
 }
+
+// TestDispatch_NoUpgradeVerb proves "zing upgrade" is not a CLI verb
+// (non-goal: owner actions go through the console only, not a zing
+// upgrade command). It cannot run in parallel: it swaps the process
+// os.Stderr to capture dispatch's error message.
+func TestDispatch_NoUpgradeVerb(t *testing.T) {
+	r, w, pipeErr := os.Pipe()
+	if pipeErr != nil {
+		t.Fatal(pipeErr)
+	}
+	orig := os.Stderr
+	os.Stderr = w
+	t.Cleanup(func() { os.Stderr = orig })
+
+	got := dispatch([]string{argv0, "upgrade"})
+
+	if closeErr := w.Close(); closeErr != nil {
+		t.Fatal(closeErr)
+	}
+	out, err := io.ReadAll(r)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if got != 2 {
+		t.Errorf("dispatch(upgrade) = %d, want 2", got)
+	}
+	want := "zing: unknown command \"upgrade\"\n"
+	if string(out) != want {
+		t.Errorf("stderr = %q, want %q", out, want)
+	}
+}

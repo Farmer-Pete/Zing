@@ -115,11 +115,33 @@ func run(args []string) error {
 		return err
 	}
 
-	su := newSelfUpgrade()
-	if err := serve(ctx, cfgPath, dbPath, seedDemo, su); err != nil {
+	return bootAndServe(ctx, cfgPath, dbPath, seedDemo, newSelfUpgrade(), syscall.Exec)
+}
+
+// bootAndServe runs the boot guard before zing.toml is read, then serve,
+// then any restart. run passes syscall.Exec as execve; tests pass a fake.
+func bootAndServe(ctx context.Context, cfgPath, dbPath string, seedDemo bool, su *selfUpgrade, execve execFunc) error {
+	dataDir := filepath.Dir(dbPath)
+	boot, marker, back, err := guardBoot(dataDir, su.exe, su.running)
+	if err != nil {
+		slog.Warn("upgrade: boot guard", "action", boot, "error", err)
+	}
+	if boot == bootRollback {
+		return restartAfterServe(ctx, &back, os.Args, os.Environ(), execve)
+	}
+	su.boot, su.marker = boot, marker
+
+	serveCtx, cancelServeCtx := context.WithCancel(ctx)
+	defer cancelServeCtx()
+	if boot == bootWatch {
+		timer := time.AfterFunc(bootDeadline, func() { bootDeadlineFired(su, cancelServeCtx) })
+		defer timer.Stop()
+	}
+	serveErr := serve(serveCtx, cfgPath, dbPath, seedDemo, su)
+	if err := finishBoot(dataDir, su, serveErr, ctx.Err() != nil); err != nil {
 		return err
 	}
-	return restartAfterServe(ctx, su.next, os.Args, os.Environ(), syscall.Exec)
+	return restartAfterServe(ctx, su.next, os.Args, os.Environ(), execve)
 }
 
 // serve starts the store, the dispatcher, and the console, and runs until
@@ -250,6 +272,19 @@ func serve(ctx context.Context, cfgPath, dbPath string, seedDemo bool, su *selfU
 		_ = st.Close()
 		return fmt.Errorf("serve: resolve data directory %s: %w", rawDataDir, err)
 	}
+
+	// boot is su.boot, settled by guardBoot before zing.toml was even read;
+	// nil su (every test that has not opted in) behaves as bootNormal. A
+	// report boot's rolled_back close happens right here, the first point
+	// serve has a store to post the owner message through (#109 part 2).
+	boot := bootNormal
+	if su != nil {
+		boot = su.boot
+	}
+	if boot == bootReport {
+		closeUpgrade(ctx, st, dataDir, su.marker, markerRolledBack, nil)
+	}
+
 	judgeCodexHome, err := resolveJudgeCodexHome(dataDir, cfg.JudgeCodexHome)
 	if err != nil {
 		_ = st.Close()
@@ -448,8 +483,12 @@ func serve(ctx context.Context, cfgPath, dbPath string, seedDemo bool, su *selfU
 	allowedHosts = append(allowedHosts, hosts...)
 	allowedHosts = append(allowedHosts, cfg.Console.AllowedHosts...)
 
+	consoleOpts := []console.Option{console.WithTuner(d), console.WithDispatch(d), console.WithSlots(d)}
+	if up != nil {
+		consoleOpts = append(consoleOpts, console.WithUpgrader(up))
+	}
 	handler := console.New(st, b, m, allowedHosts, cfg.Console.Port, logHandler, push, pushToken, floor, sbSet.FirstUnavailable(usedSandboxProfiles(m)), tr, cfg.User,
-		job.TicketCommands{Store: st, Machine: m, Projects: projects, Commands: cmds}, console.WithTuner(d), console.WithDispatch(d), console.WithSlots(d))
+		job.TicketCommands{Store: st, Machine: m, Projects: projects, Commands: cmds}, consoleOpts...)
 	srv := newServer(ctx, handler)
 
 	listeners, err := listenOnAll(ctx, hosts, cfg.Console.Port)
@@ -459,21 +498,13 @@ func serve(ctx context.Context, cfgPath, dbPath string, seedDemo bool, su *selfU
 	}
 
 	// upDone closes once up.loop returns; with no upgrader it is closed
-	// already, so the wait below never blocks (#109 part 1). gate is closed
-	// at once here, in part 1: part 2 instead closes it only after
-	// booted_ok. This starts only after every other fallible startup step
-	// has already succeeded, so no early return after this point can leave
-	// the loop goroutine running past st.Close() (#109 part 1 review r1f1).
-	upDone := make(chan struct{})
-	if up != nil {
-		go func() {
-			up.loop(ctx)
-			close(upDone)
-		}()
-		close(up.gate)
-	} else {
-		close(upDone)
-	}
+	// already, so the wait below never blocks (#109 part 1). startUpgrader
+	// opens the gate at once for every boot except bootWatch, where onBooted
+	// opens it once the boot watch answers 200 (#109 part 2). This starts
+	// only after every other fallible startup step has already succeeded, so
+	// no early return after this point can leave the loop goroutine running
+	// past st.Close() (#109 part 1 review r1f1).
+	upDone := startUpgrader(ctx, up, boot)
 
 	// One srv.Serve(ln) goroutine per resolved listener (design section
 	// 6.14: "One http.Server with one mux serves every resolved listener
@@ -485,6 +516,23 @@ func serve(ctx context.Context, cfgPath, dbPath string, seedDemo bool, su *selfU
 	}
 	slog.Info("starting", "hosts", hosts, "port", cfg.Console.Port)
 
+	// watchDone closes once the boot-watch goroutine returns; with no watch
+	// boot it is closed already, so the wait below never blocks. It dials
+	// only the first resolved listener (#109 part 2 non-goal: the owner
+	// picks which one by listing it first in console.bind).
+	watchDone := make(chan struct{})
+	if boot == bootWatch {
+		url := "http://" + listeners[0].Addr().String() + "/"
+		go func() {
+			defer close(watchDone)
+			if watchBoot(ctx, url, bootPoll) {
+				onBooted(ctx, st, dataDir, su, up)
+			}
+		}()
+	} else {
+		close(watchDone)
+	}
+
 	consumedFromErrCh, dispTriggered, serveErr := waitForShutdownTrigger(ctx, errCh, dispDone, func() error { return dispErr })
 
 	// Every shutdown trigger ends the upgrader before shutdown closes the
@@ -494,6 +542,7 @@ func serve(ctx context.Context, cfgPath, dbPath string, seedDemo bool, su *selfU
 	// its own), neither of which cancels ctx by itself.
 	cancelServe()
 	<-upDone
+	<-watchDone
 
 	err = shutdown(ctx, st, srv, d, errCh, len(listeners), consumedFromErrCh, serveErr, dispTriggered, dispDone, func() error { return dispErr }, cancelDisp)
 
