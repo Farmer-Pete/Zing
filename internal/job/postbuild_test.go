@@ -17,8 +17,10 @@ import (
 	"encoding/json"
 	"errors"
 	"io/fs"
+	"os"
 	"path/filepath"
 	"reflect"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -466,32 +468,135 @@ func pbAdvanceBuilding(t *testing.T, s *store.Store, rt runtime.Runtime, ticketI
 	t.Fatalf("pbAdvanceBuilding: still in building after %d calls", pbAdvanceBuildingMaxCalls)
 }
 
-// pbTicketInReviewing drives a fresh, git-backed ticket from queued through
-// planning and a real three-task build into "reviewing", with a stored plan
-// and a real worktree the fix driver can use (the heavy end of this file's
-// own harness, mirroring job_test's own buildTicketInBuilding +
-// advanceBuilding). It is pbTicketInReviewingWith(t, pbFakeRuntime(t)).
+// pbTicketInReviewing returns the test's own private copy of the reviewing
+// stage: a fresh, git-backed ticket driven from queued through planning and
+// a real three-task build into "reviewing", with a stored plan and a real
+// worktree the fix driver can use. The real handlers run at most once per
+// process, under reviewingStage; every caller gets its own copy of the
+// store and repo (useStage, copyStage).
 func pbTicketInReviewing(t *testing.T) (s *store.Store, ticketID int64) {
 	t.Helper()
-	return pbTicketInReviewingWith(t, pbFakeRuntime(t))
+	c := useStage(t, reviewingStage, buildReviewingStage)
+	return c.Store, c.TicketID
+}
+
+// reviewingStage is the process-lifetime snapshot pbTicketInReviewing
+// builds once per process and every caller copies.
+var reviewingStage = &stageSnap{name: "reviewing"}
+
+// buildReviewingStage is reviewingStage's builder: it opens a fresh store
+// in its own t.TempDir() and drives a ticket to reviewing with
+// pbTicketInReviewingOn, for useStage/snapshotStage to snapshot.
+func buildReviewingStage(t *testing.T) stageBuild {
+	t.Helper()
+	dbPath := filepath.Join(t.TempDir(), "zing.db")
+	s, err := store.Open(t.Context(), dbPath)
+	if err != nil {
+		t.Fatalf("buildReviewingStage: store.Open: %v", err)
+	}
+	t.Cleanup(func() { _ = s.Close() })
+	ticketID := pbTicketInReviewingOn(t, s, pbFakeRuntime(t))
+	return stageBuild{Store: s, DBPath: dbPath, TicketID: ticketID}
 }
 
 // pbTicketInReviewingWith is pbTicketInReviewing with rt in place of
 // pbFakeRuntime(t): a caller that needs the planning or build turns to
 // read from its own scripted fs.FS (#49 task 3's judgeHostTicketReady, a
 // planning fixture with a host-kind scenario) drives the same path with
-// that runtime instead.
+// that runtime instead. It always builds from scratch, since rt is a
+// caller-supplied runtime the stage snapshot cannot share.
 func pbTicketInReviewingWith(t *testing.T, rt runtime.Runtime) (s *store.Store, ticketID int64) {
 	t.Helper()
 	s = newPostbuildTestStore(t)
-	ticketID = pbSeedQueuedGitBackedTicket(t, s)
+	return s, pbTicketInReviewingOn(t, s, rt)
+}
+
+// pbTicketInReviewingOn drives a fresh, git-backed ticket seeded on s from
+// queued through planning and a real three-task build into "reviewing"
+// with rt, and returns its ticket id. It is the from-scratch body shared by
+// pbTicketInReviewingWith and buildReviewingStage.
+func pbTicketInReviewingOn(t *testing.T, s *store.Store, rt runtime.Runtime) int64 {
+	t.Helper()
+	ticketID := pbSeedQueuedGitBackedTicket(t, s)
 	pbAdvanceQueuedToPlanning(t, s, rt, ticketID)
 	pbAdvancePlanningWithAnAnswer(t, s, rt, ticketID)
 	pbAdvanceBuilding(t, s, rt, ticketID)
 	if ticket := pbGetTicket(t, s, ticketID); ticket.State != stateReviewing {
-		t.Fatalf("pbTicketInReviewingWith: ticket state = %q, want reviewing", ticket.State)
+		t.Fatalf("pbTicketInReviewingOn: ticket state = %q, want reviewing", ticket.State)
 	}
-	return s, ticketID
+	return ticketID
+}
+
+// TestReviewingStageCopiesAreIndependent checks that two calls to
+// pbTicketInReviewing each get their own reviewing ticket and their own
+// git-backed worktree, with git itself (not just the store) agreeing the
+// copy is independent and working: git status succeeds in the copy's
+// worktree, and git worktree list names only paths under the copy's own
+// (resolved) local_path.
+func TestReviewingStageCopiesAreIndependent(t *testing.T) {
+	s1, ticketID1 := pbTicketInReviewing(t)
+	s2, ticketID2 := pbTicketInReviewing(t)
+
+	if ticket := pbGetTicket(t, s1, ticketID1); ticket.State != stateReviewing {
+		t.Fatalf("copy 1: ticket state = %q, want reviewing", ticket.State)
+	}
+	if ticket := pbGetTicket(t, s2, ticketID2); ticket.State != stateReviewing {
+		t.Fatalf("copy 2: ticket state = %q, want reviewing", ticket.State)
+	}
+
+	var localPaths [2]string
+	for i, pair := range []struct {
+		s  *store.Store
+		id int64
+	}{{s1, ticketID1}, {s2, ticketID2}} {
+		proj, err := pair.s.ProjectForTicket(t.Context(), pair.id)
+		if err != nil {
+			t.Fatalf("copy %d: ProjectForTicket: %v", i+1, err)
+		}
+		localPaths[i] = proj.LocalPath
+
+		localReal, err := filepath.EvalSymlinks(proj.LocalPath)
+		if err != nil {
+			t.Fatalf("copy %d: EvalSymlinks(%s): %v", i+1, proj.LocalPath, err)
+		}
+
+		wtDir := filepath.Join(proj.LocalPath, ".zing", "wt", strconv.FormatInt(pair.id, 10))
+		if _, statErr := os.Stat(wtDir); statErr != nil {
+			t.Fatalf("copy %d: worktree dir %s: %v", i+1, wtDir, statErr)
+		}
+		if out, statusErr := gitfixture.Git(t.Context(), wtDir, "status", "--porcelain"); statusErr != nil {
+			t.Fatalf("copy %d: git status in %s: %v: %s", i+1, wtDir, statusErr, out)
+		}
+
+		out, err := gitfixture.Git(t.Context(), proj.LocalPath, "worktree", "list", "--porcelain")
+		if err != nil {
+			t.Fatalf("copy %d: git worktree list: %v: %s", i+1, err, out)
+		}
+		found := false
+		for line := range strings.SplitSeq(string(out), "\n") {
+			path, ok := strings.CutPrefix(line, "worktree ")
+			if !ok {
+				continue
+			}
+			pathReal, err := filepath.EvalSymlinks(path)
+			if err != nil {
+				t.Fatalf("copy %d: EvalSymlinks(%s): %v", i+1, path, err)
+			}
+			if pathReal != localReal && !strings.HasPrefix(pathReal, localReal+string(filepath.Separator)) {
+				t.Fatalf("copy %d: worktree list path %s (resolved %s) is not under %s", i+1, path, pathReal, localReal)
+			}
+			if pathReal != localReal {
+				found = true
+			}
+		}
+		if !found {
+			t.Fatalf("copy %d: git worktree list named no worktree under %s", i+1, localReal)
+		}
+	}
+
+	if localPaths[0] == localPaths[1] {
+		t.Fatalf("both copies share LocalPath %s", localPaths[0])
+	}
 }
 
 // ---- harness: a scripted runtime and canned responses (planning_test.go's
