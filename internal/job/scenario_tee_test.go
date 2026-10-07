@@ -55,26 +55,32 @@ func TestCheckScenarioShape_RejectsTeeThenRead(t *testing.T) {
 // matches a check that pipes tee's output into another command and reads
 // the tee'd file later in the same check: the owner's rewrite, a tee never
 // reread, a tee followed by a semicolon or an or-list instead of a pipe, a
-// tee piped to /dev/null, "tee" appearing inside another word, and a check
-// that reads a different file later all pass.
+// tee piped to /dev/null, "tee" appearing inside another word, a check that
+// reads a different file later, and tee operands that the dash and
+// redirect filters must skip all pass.
 func TestCheckScenarioShape_AllowsLogThenGrep(t *testing.T) {
 	t.Parallel()
-	checks := []string{
-		`go test -count=1 -run TestJudgeClaude -v ./internal/orchestrator/ > "$TMPDIR/s14.log" 2>&1; grep -q -- '--- PASS: TestJudgeClaude' "$TMPDIR/s14.log" && ! grep -q -- '--- FAIL' "$TMPDIR/s14.log"`,
-		`go test ./x 2>&1 | tee "$TMPDIR/out" | grep -q ok`,
-		`go test ./x | tee "$TMPDIR/out"; grep -q ok "$TMPDIR/out"`,
-		`go test ./x | tee "$TMPDIR/out" || grep -q ok "$TMPDIR/out"`,
-		`go test ./x | tee "$TMPDIR/out" > /dev/null && grep -q ok "$TMPDIR/out"`,
-		`go test ./x | grep -q guarantee && grep -q ok "$TMPDIR/out"`,
-		`go test ./x | tee "$TMPDIR/a" | grep -q ok && grep -q ok "$TMPDIR/b"`,
+	cases := []struct {
+		name  string
+		check string
+	}{
+		{"s14_rewritten", `go test -count=1 -run TestJudgeClaude -v ./internal/orchestrator/ > "$TMPDIR/s14.log" 2>&1; grep -q -- '--- PASS: TestJudgeClaude' "$TMPDIR/s14.log" && ! grep -q -- '--- FAIL' "$TMPDIR/s14.log"`},
+		{"tee_never_reread", `go test ./x 2>&1 | tee "$TMPDIR/out" | grep -q ok`},
+		{"tee_no_pipe", `go test ./x | tee "$TMPDIR/out"; grep -q ok "$TMPDIR/out"`},
+		{"tee_or_list", `go test ./x | tee "$TMPDIR/out" || true; grep -q ok "$TMPDIR/out"`},
+		{"tee_to_devnull", `go test ./x | tee "$TMPDIR/out" > /dev/null && grep -q ok "$TMPDIR/out"`},
+		{"tee_inside_word", `go test ./x | grep -q guarantee && grep -q ok "$TMPDIR/out"`},
+		{"other_file_read_later", `go test ./x | tee "$TMPDIR/a" | grep -q ok && grep -q ok "$TMPDIR/b"`},
+		{"dash_operand_not_a_file", `go test ./x | tee -a "$TMPDIR/out" | grep -q ok && grep -a ok "$TMPDIR/other"`},
+		{"redirect_operand_not_a_file", `go test ./x | tee "$TMPDIR/out" 2>/dev/null | grep -q ok && grep -q x 2>/dev/null "$TMPDIR/b"`},
 	}
-	for _, check := range checks {
-		t.Run(check, func(t *testing.T) {
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			sc := response.Scenario{ID: "s1", Kind: response.ScenarioKindBehavior, Then: "the tests pass", Check: check}
+			sc := response.Scenario{ID: "s1", Kind: response.ScenarioKindBehavior, Then: "the tests pass", Check: tc.check}
 			for _, err := range checkScenarioRules(0, sc) {
 				if err.Msg == teeReadCheckMsg {
-					t.Fatalf("checkScenarioRules(%q) flagged tee into a reader, want it allowed", check)
+					t.Fatalf("checkScenarioRules(%q) flagged tee into a reader, want it allowed", tc.check)
 				}
 			}
 		})

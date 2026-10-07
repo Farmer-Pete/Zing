@@ -1289,7 +1289,9 @@ func teeFileReadAfterPipe(check string) bool {
 		later := after[end[0]:]
 		for _, op := range teeOperand.FindAllString(check[m[2]:m[3]], -1) {
 			file := strings.Trim(op, `"'`)
-			if file == "" || strings.HasPrefix(file, "-") || strings.ContainsAny(file, "<>") {
+			isFlag := strings.HasPrefix(file, "-")
+			isRedirect := strings.ContainsAny(file, "<>")
+			if file == "" || isFlag || isRedirect {
 				continue
 			}
 			if strings.Contains(later, file) {
