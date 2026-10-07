@@ -1,0 +1,83 @@
+(version 1)
+(allow default)
+
+; The judge profile for a judge on the Claude runtime (machine.toml
+; jobs.judge sandbox = "judge-claude"). It is judge.sb with the Claude
+; CLI's own needs in place of Codex's: the ~/.claude reads and the
+; run's own transcript folder that build.sb gives every Claude build,
+; and no CODEX_HOME. The DATA_DIR deny, the one SCENARIOS_FILE allow,
+; and the ~/.codex deny stay. Every deny that must beat a
+; file-read-data allow names file-read-data too (see build.sb).
+
+(deny file-read-data (subpath (param "HOME")))
+(allow file-read-data
+  (subpath (param "WORKTREE"))
+  (subpath (param "REPO_GIT"))
+  (subpath (string-append (param "HOME") "/.claude"))
+  (literal (string-append (param "HOME") "/.claude.json"))
+  (subpath (param "CACHE_ROOT")))
+; No other session's transcript, the planning session's above all (N6).
+(deny file-read-data (subpath (string-append (param "HOME") "/.claude/projects")))
+(allow file-read-data (subpath (param "TRANSCRIPTS")))
+;;READ_PATHS;;
+
+;;CONSOLE_DENY;;
+
+; No system service may act for the judge outside the sandbox. No profile
+; allows com.apple.SecurityServer any more (D26, N2): that Mach service is
+; how a process reaches the keychain, and the Claude CLI's login no longer
+; lives there. com.apple.trustd.agent is not allowed either: M1 task 7's
+; host probe (TestProbeTLSWithoutSecurityServer) ran `go mod download` and
+; curl against a fresh TLS connection with and without it, both clean, so
+; TLS verification does not need it.
+(deny appleevent-send)
+(deny mach-lookup)
+(allow mach-lookup
+  (global-name "com.apple.system.opendirectoryd.membership")
+  (global-name "com.apple.system.opendirectoryd.libinfo"))
+
+; No connection to the owner's ssh-agent: an agent process must never be
+; able to sign for the owner's SSH key (D26, N2). This is the first of
+; 7.3's two candidate rule forms; M1 task 7's host probe
+; (TestProbeSSHAgentDenied) decides whether it actually blocks `ssh-add -l`
+; against the real agent socket, or whether the second form
+; (network-outbound regex, no "remote unix-socket" wrapper) is needed
+; instead.
+(deny network-outbound (remote unix-socket (path-regex #"^/private/tmp/com\.apple\.launchd\.[^/]+/Listeners$")))
+
+; No connection to a custom ssh-agent socket either: the launchd-only regex
+; above never matches a 1Password- or Secretive-style agent, whose socket
+; sits somewhere under the owner's own SSH_AUTH_SOCK (#49's own agent-socket
+; gap). SSH_AUTH_SOCK_REAL is the same path with symlinks resolved, so a
+; socket reached only through a symlink is denied too. internal/sandbox
+; substitutes a sentinel nothing can ever listen at when the host never
+; named one, so this rule always has a real param to name.
+(deny network-outbound
+  (remote unix-socket (path-literal (param "SSH_AUTH_SOCK")))
+  (remote unix-socket (path-literal (param "SSH_AUTH_SOCK_REAL"))))
+
+; No outbound connect to a git transport port (#49: ssh read an unencrypted key from the real ~/.ssh and pushed over this).
+(deny network-outbound (remote tcp "*:22") (remote tcp "*:9418"))
+; No exec of any binary whose path ends in "/ssh" (#49: without this, a copy earlier in PATH could still read the unencrypted key).
+(deny process-exec (regex #"/ssh$"))
+
+; No git credential helper may run: it would hand out the owner's GitHub
+; credentials (N2). Git execs helpers as git-credential-<name>. Defense in
+; depth, not a guarantee (D26): a "!" shell helper is not caught by this.
+(deny process-exec (regex #"/git-credential-[^/]*$"))
+
+(deny file-read* file-read-data file-write* (subpath (param "DATA_DIR")))
+(allow file-read* file-read-data process-exec (literal (param "ZING_BIN")))
+(allow file-read* file-read-data (literal (param "SCENARIOS_FILE")))
+
+(deny file-read* file-read-data (subpath (string-append (param "HOME") "/.codex")))
+
+(deny file-write* (subpath "/"))
+(allow file-write*
+  (subpath (param "WORKTREE"))
+  (subpath (param "TRANSCRIPTS"))
+  (subpath (param "MDS_CACHE"))
+  (subpath (param "RUN_DIR"))
+  (subpath (param "CACHE_SHARED"))
+  (subpath "/dev"))
+(deny file-write* (literal (string-append (param "WORKTREE") "/.git")))

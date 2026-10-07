@@ -3595,3 +3595,56 @@ func TestJudgeRetryFreshRoundCarriesOwnerNote(t *testing.T) {
 	}
 	assertFencedPB(t, rec.lastRequest(t).Prompt, "notes", retryNote)
 }
+
+// TestJudgeRunAndRouteErrSandboxNamesJudgeJobsOwnProfile proves
+// judgeRunAndRoute's ErrSandbox commit reads its reason from whichever
+// sandbox profile jobs.judge actually names, not from the unrelated,
+// always-available d.Sandboxes.Judge slot (review r1f5): with the job set
+// to sandbox "judge-claude", Judge off, and JudgeClaude unloaded, the
+// escalation still carries JudgeClaude's own "not loaded" reason, not
+// Judge's "off". The job's sandbox is set here, not read from
+// machine.toml, since the behavior under test does not depend on which
+// profile jobs.judge currently names (review r2f2). Judge: sandbox.Off(),
+// not a loaded sandbox, so this never starts sandbox-exec and runs
+// everywhere, including inside Zing's own build sandbox (review r2f1).
+func TestJudgeRunAndRouteErrSandboxNamesJudgeJobsOwnProfile(t *testing.T) {
+	t.Parallel()
+	s := newRunJobTestStore(t)
+	ticketID := seedRunJobTicket(t, s)
+	ticket := getRunJobTicket(t, s, ticketID)
+	owner, expires := claimRunJobTicket(t, s, ticketID)
+
+	m := runJobTestMachine(t)
+	job := m.Jobs[jobJudgeName]
+	job.Sandbox = "judge-claude"
+	m.Jobs[jobJudgeName] = job
+
+	set, err := runtime.NewSet(map[string]runtime.Runtime{testRuntimeClaude: runtime.NewFake(fstest.MapFS{})})
+	if err != nil {
+		t.Fatalf("runtime.NewSet: %v", err)
+	}
+
+	deps := Deps{
+		Store: s, Runtimes: set, Machine: m,
+		Models:         map[string]string{testModelAliasOpus: testModelExact},
+		Budget:         time.Hour,
+		Owner:          owner,
+		Expires:        expires,
+		Reserve:        realReserve(s, owner, expires),
+		Sandboxes:      sandbox.Set{Judge: sandbox.Off(), JudgeClaude: sandbox.NotLoaded()},
+		RequireSandbox: true,
+		DataDir:        t.TempDir(),
+	}
+
+	commit, _, err := judgeRunAndRoute(t.Context(), deps, ticket, store.SessionUpsert{}, runtime.RunRequest{},
+		0, freshSessionRecord, nil, nil, nil)
+	if err != nil {
+		t.Fatalf("judgeRunAndRoute: %v", err)
+	}
+	if commit.Escalation == nil {
+		t.Fatal("Escalation = nil, want sandbox_unavailable")
+	}
+	if want := sandbox.NotLoaded().Reason(); commit.Escalation.Payload.Why != want {
+		t.Errorf("Escalation.Why = %q, want %q (JudgeClaude's own reason, not Judge's)", commit.Escalation.Payload.Why, want)
+	}
+}

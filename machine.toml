@@ -22,8 +22,10 @@ max_resumes = 12
 outcomes = ["questions", "ready", "children", "nothing_to_do"]
 
 [jobs.planreview]
-model = "codex"
-runtime = "codex"
+# Codex is out of quota until 2026-10-30. When it returns, set
+# model = "codex" and runtime = "codex" here again.
+model = "opus"
+runtime = "claude"
 tools = ["read", "grep", "glob", "bash_readonly"]
 prompt = "prompts/planreview.md"
 lenses = ["problem", "simplification", "correctness", "security", "fidelity", "tests", "quality", "observability"]
@@ -87,14 +89,16 @@ max_resumes = 2
 sandbox = "readonly"
 
 [jobs.judge]
-model = "codex"
-runtime = "codex"
+# Codex is out of quota until 2026-10-30. When it returns, set model = "codex",
+# runtime = "codex", and sandbox = "judge" here again.
+model = "opus"
+runtime = "claude"
 tools = ["read", "grep", "glob", "bash"]
 prompt = "prompts/judge.md"
 timeout_minutes = 45
 max_loops = 2
 max_resumes = 2
-sandbox = "judge"
+sandbox = "judge-claude"
 
 [jobs.respond]
 model = "sonnet"
