@@ -61,24 +61,21 @@ func flattenInline(elem []byte) (out []byte, rewritten int) {
 			}
 
 			top := stack[len(stack)-1]
-			if top.inline {
-				buf.Write(elem[last:before])
-				rewritten += writeInlineStart(&buf, t.Name.Local, selfClosingTag(elem, after))
-				last = after
-				stack = append(stack, inlineFrame{inline: true, name: t.Name.Local})
-				continue
+			if !top.inline {
+				if child := childNamed(top.node, t.Name.Local); child != nil {
+					buf.Write(elem[last:after])
+					last = after
+					stack = append(stack, inlineFrame{node: child})
+					continue
+				}
 			}
 
-			if child := childNamed(top.node, t.Name.Local); child != nil {
-				buf.Write(elem[last:after])
-				last = after
-				stack = append(stack, inlineFrame{node: child})
-				continue
-			}
-
-			if isTextLessThan(top.node, t.Name.Local) {
+			if top.inline || isTextLessThan(top.node, t.Name.Local) {
 				buf.Write(elem[last:before])
-				rewritten += writeInlineStart(&buf, t.Name.Local, selfClosingTag(elem, after))
+				if !selfClosingTag(elem, after) {
+					writeInlineTag(&buf, t.Name.Local)
+				}
+				rewritten++
 				last = after
 				stack = append(stack, inlineFrame{inline: true, name: t.Name.Local})
 				continue
@@ -106,7 +103,8 @@ func flattenInline(elem []byte) (out []byte, rewritten int) {
 					// A real end tag; a self-closing tag's implicit end
 					// token has zero width and needs no span removed.
 					buf.Write(elem[last:before])
-					rewritten += writeInlineReplacement(&buf, top.name)
+					writeInlineTag(&buf, top.name)
+					rewritten++
 					last = after
 				}
 				continue
@@ -135,26 +133,14 @@ func logFlatten(tags int, attrs ...any) {
 	slog.Info("flattened inline tags in zing document", append([]any{"tags", tags}, attrs...)...)
 }
 
-// writeInlineReplacement writes one inline tag's replacement to out: a
-// backtick for local name code, nothing otherwise. It always returns 1,
-// the one tag replaced or removed.
-func writeInlineReplacement(out *bytes.Buffer, name string) int {
+// writeInlineTag writes one inline tag's replacement to out: a backtick
+// for local name code, nothing otherwise. A caller counts the tag
+// replaced or removed; a self-closing tag's implicit end token needs no
+// call of its own.
+func writeInlineTag(out *bytes.Buffer, name string) {
 	if name == "code" {
 		out.WriteByte('`')
 	}
-	return 1
-}
-
-// writeInlineStart writes an inline start tag's replacement to out: a
-// backtick for a paired local name code, nothing for a self-closing tag
-// of any name or for any other paired name. It always returns 1, the one
-// tag replaced or removed; a self-closing tag's end token has zero width
-// and writes nothing on its own.
-func writeInlineStart(out *bytes.Buffer, name string, selfClosing bool) int {
-	if !selfClosing && name == "code" {
-		out.WriteByte('`')
-	}
-	return 1
 }
 
 // selfClosingTag reports whether the start tag whose bytes end just

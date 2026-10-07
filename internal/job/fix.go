@@ -102,11 +102,19 @@ func fixRequestMessage(t store.Ticket, kind FixKind, text string, afterRunID int
 	return store.Message{TicketID: t.ID, Type: msgTypeUpdate, Author: authorSystem, Body: body}, nil
 }
 
+// fixMarkerWord is the first field of every fix marker's own first line
+// ("fix requested ...", "fix landed ...", "fix dropped ..."): the marker's
+// own word, kept apart from fixRunLabel (runtime.RunRequest's own Label
+// for a fix run), so renaming the run label never silently stops these
+// parsers from reading the markers they already wrote (ticket #80 review
+// r2f1).
+const fixMarkerWord = "fix"
+
 // parseFixRequestLine parses a "fix requested <kind> after run <R>"
 // marker's own first line (design section 5.1).
 func parseFixRequestLine(firstLine string) (kind FixKind, afterRunID int64, ok bool) {
 	fields := strings.Fields(firstLine)
-	if len(fields) != 6 || fields[0] != fixRunLabel || fields[1] != "requested" || fields[3] != "after" || fields[4] != "run" {
+	if len(fields) != 6 || fields[0] != fixMarkerWord || fields[1] != "requested" || fields[3] != "after" || fields[4] != "run" {
 		return "", 0, false
 	}
 	r, err := strconv.ParseInt(fields[5], 10, 64)
@@ -121,7 +129,7 @@ func parseFixRequestLine(firstLine string) (kind FixKind, afterRunID int64, ok b
 // message id.
 func parseFixLandedMessageID(firstLine string) (mid int64, ok bool) {
 	fields := strings.Fields(firstLine)
-	if len(fields) != 5 || fields[0] != fixRunLabel || fields[1] != "landed" || fields[3] != "sha" {
+	if len(fields) != 5 || fields[0] != fixMarkerWord || fields[1] != "landed" || fields[3] != "sha" {
 		return 0, false
 	}
 	mid, err := strconv.ParseInt(fields[2], 10, 64)
@@ -142,12 +150,26 @@ const (
 	fixDroppedPrefix   = "fix dropped "
 )
 
+// fixDroppedMessage returns the marker that closes a fix unit with no
+// landed commit (design section 5.1, 5.2, ticket #80 task 3, owner
+// decision Q6): "fix dropped <mid>", mid the request's own message id.
+// rejudgeWithoutFix is its only writer, and parseFixDroppedMessageID is
+// its matching reader, so the marker's shape is written and parsed in
+// one place.
+func fixDroppedMessage(t store.Ticket, mid int64) store.Message {
+	return store.Message{
+		TicketID: t.ID, Type: msgTypeUpdate, Author: authorSystem,
+		Body: fmt.Sprintf("fix dropped %d", mid),
+	}
+}
+
 // parseFixDroppedMessageID parses a "fix dropped <mid>" marker's own first
 // line (design section 5.1, ticket #80 task 3), returning the request's own
 // message id.
 func parseFixDroppedMessageID(firstLine string) (mid int64, ok bool) {
 	fields := strings.Fields(firstLine)
-	if len(fields) != 3 || fields[0] != fixRunLabel || fields[1] != "dropped" {
+	isDroppedShape := len(fields) == 3 && fields[0] == fixMarkerWord && fields[1] == "dropped"
+	if !isDroppedShape {
 		return 0, false
 	}
 	mid, err := strconv.ParseInt(fields[2], 10, 64)

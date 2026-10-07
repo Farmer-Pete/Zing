@@ -737,59 +737,50 @@ func TestTimeoutRetryRequest(t *testing.T) {
 func TestRetryTimeout_BuildResumesWithNote(t *testing.T) {
 	t.Parallel()
 	stub := &timeoutStubRuntime{results: []scriptedAttempt{
-		{res: runtime.RunResult{AgentTime: 180 * time.Second, SessionID: "sess-1"}, err: runtime.ErrTimeout},
 		{res: runtime.RunResult{FinalMessage: "ok"}},
 	}}
-	d, ticket := newTimeoutRetryStubDeps(t, stub)
+	req := runtime.RunRequest{Job: response.JobBuild, Prompt: "ORIGINAL BUILD PROMPT", Timeout: 45 * time.Minute}
+	firstRes := runtime.RunResult{AgentTime: 180 * time.Second, SessionID: "sess-1"}
 
-	_, err := runJob(t.Context(), d, ticket, jobBuildName, store.SessionUpsert{Job: jobBuildName, Runtime: testRuntimeClaude},
-		runtime.RunRequest{Job: response.JobBuild, Prompt: "ORIGINAL BUILD PROMPT"}, nil, nil, 0)
+	_, err := retryTimeout(t.Context(), stub, req, 1, 1, jobBuildName, 1, firstRes, runtime.ErrTimeout)
 	if err != nil {
-		t.Fatalf("runJob: %v", err)
+		t.Fatalf("retryTimeout: %v", err)
 	}
-	if stub.calls != 2 {
-		t.Fatalf("stub.calls = %d, want 2", stub.calls)
+	if stub.calls != 1 {
+		t.Fatalf("stub.calls = %d, want 1", stub.calls)
 	}
-	if got := stub.requests[1].SessionID; got != "sess-1" {
-		t.Errorf("second request SessionID = %q, want %q", got, "sess-1")
+	if got := stub.requests[0].SessionID; got != "sess-1" {
+		t.Errorf("retry request SessionID = %q, want %q", got, "sess-1")
 	}
-	if !strings.Contains(stub.requests[1].Prompt, "git status") || !strings.Contains(stub.requests[1].Prompt, "git diff") {
-		t.Errorf("second request Prompt = %q, want it to hold git status and git diff", stub.requests[1].Prompt)
+	if !strings.Contains(stub.requests[0].Prompt, "git status") || !strings.Contains(stub.requests[0].Prompt, "git diff") {
+		t.Errorf("retry request Prompt = %q, want it to hold git status and git diff", stub.requests[0].Prompt)
 	}
 }
 
 // TestRetryTimeout_BuildSecondTimeoutEscalates is this task's named test: a
-// build turn whose resumed retry also times out must escalate exactly once
-// with runtime_exec_failed, the same way any other job's second timeout
-// does (two calls, a Tried naming the automatic retry).
+// build turn whose resumed retry also times out must report that second
+// timeout back to the caller (runJobWith turns it into the usual
+// runtime_exec_failed escalation elsewhere), with the FailureDetail naming
+// the automatic retry.
 func TestRetryTimeout_BuildSecondTimeoutEscalates(t *testing.T) {
 	t.Parallel()
 	stub := &timeoutStubRuntime{results: []scriptedAttempt{
-		{res: runtime.RunResult{AgentTime: 180 * time.Second, SessionID: "sess-1"}, err: runtime.ErrTimeout},
 		{res: runtime.RunResult{AgentTime: 60 * time.Second}, err: runtime.ErrTimeout},
 	}}
-	d, ticket := newTimeoutRetryStubDeps(t, stub)
+	req := runtime.RunRequest{Job: response.JobBuild, Prompt: "ORIGINAL BUILD PROMPT", Timeout: 45 * time.Minute}
+	firstRes := runtime.RunResult{AgentTime: 180 * time.Second, SessionID: "sess-1"}
 
-	su := store.SessionUpsert{Job: jobBuildName, Runtime: testRuntimeClaude}
-	commit, err := runAndRoute(t.Context(), d, ticket, jobBuildName, su, runtime.RunRequest{Job: response.JobBuild, Prompt: "ORIGINAL BUILD PROMPT"}, 0,
-		freshSessionRecord, nil, response.EscalationOriginBuild,
-		failIfSuccessCalled(t), nil, 0)
-	if err != nil {
-		t.Fatalf("runAndRoute: %v", err)
+	retryRes, err := retryTimeout(t.Context(), stub, req, 1, 1, jobBuildName, 1, firstRes, runtime.ErrTimeout)
+	if !errors.Is(err, runtime.ErrTimeout) {
+		t.Fatalf("retryTimeout err = %v, want ErrTimeout", err)
 	}
-	if stub.calls != 2 {
-		t.Fatalf("stub.calls = %d, want 2", stub.calls)
+	if stub.calls != 1 {
+		t.Fatalf("stub.calls = %d, want 1", stub.calls)
 	}
-	if got := stub.requests[1].SessionID; got != "sess-1" {
-		t.Errorf("second request SessionID = %q, want %q", got, "sess-1")
+	if got := stub.requests[0].SessionID; got != "sess-1" {
+		t.Errorf("retry request SessionID = %q, want %q", got, "sess-1")
 	}
-	if commit.Escalation == nil {
-		t.Fatal("commit.Escalation = nil, want a runtime_exec_failed escalation")
-	}
-	if got := commit.Escalation.Payload.Code; got != string(response.EscalationCodeRuntimeExecFailed) {
-		t.Errorf("Escalation.Payload.Code = %q, want %q", got, response.EscalationCodeRuntimeExecFailed)
-	}
-	if !strings.Contains(commit.Escalation.Payload.Tried, timeoutRetryPrefix) {
-		t.Errorf("Tried = %q, want it to contain %q", commit.Escalation.Payload.Tried, timeoutRetryPrefix)
+	if !strings.HasPrefix(retryRes.FailureDetail, timeoutRetryPrefix) {
+		t.Errorf("FailureDetail = %q, want it to start with %q", retryRes.FailureDetail, timeoutRetryPrefix)
 	}
 }

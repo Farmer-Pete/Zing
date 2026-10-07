@@ -295,9 +295,9 @@ func (h judgeHandler) run(ctx context.Context, t store.Ticket, d Deps) (store.Ha
 	switch {
 	case judgeRoundFailedLine.MatchString(firstLine), judgeRoundSameSHALine.MatchString(firstLine):
 		alreadyEscalated := judgeRoundSameSHALine.MatchString(firstLine)
-		m, ok := judgeFailedRoundNumber(firstLine)
-		if !ok {
-			return store.HandlerCommit{}, fmt.Errorf("job: judging: parse failed round %q", firstLine)
+		m, numErr := judgeFailedRoundNumber(firstLine)
+		if numErr != nil {
+			return store.HandlerCommit{}, fmt.Errorf("job: judging: parse failed round %q: %w", firstLine, numErr)
 		}
 
 		// #86's own repeat (ticket #50, Q1): a "failure" fix that lands
@@ -330,12 +330,11 @@ func (h judgeHandler) run(ctx context.Context, t store.Ticket, d Deps) (store.Ha
 			// owner's consent to judge this same sha again, exactly as a
 			// newer markerRetryRequested already does below, so round m+1
 			// starts straight away with no same-sha escalation.
-			dropped, droppedErr := d.Store.MarkersWithPrefix(ctx, t.ID, fixDroppedPrefix)
-			if droppedErr != nil {
-				return store.HandlerCommit{}, fmt.Errorf("job: judging: fix dropped markers: %w", droppedErr)
+			consent, consentErr := droppedFixConsent(ctx, d, t, newest.ID, m+1)
+			if consentErr != nil {
+				return store.HandlerCommit{}, consentErr
 			}
-			if fixRequestID, ok := fixDroppedSince(dropped, newest.ID); ok {
-				slog.Info("judge again after dropped fix", "ticket_id", t.ID, "round", m+1, "fix_request_id", fixRequestID)
+			if consent {
 				return judgeStartOrSync(ctx, t, d, m+1, sha, maxRunID)
 			}
 
@@ -1912,26 +1911,32 @@ func (h judgeHandler) evaluate(ctx context.Context, t store.Ticket, d Deps, n in
 
 // ---- the judge rows of resolvePostBuildEscalation (design section 5.6) ---
 
+// errRoundLineNotFailed is judgeFailedRoundNumber's own sentinel for a
+// firstLine that is neither a "judge round N failed" nor a "judge round N
+// same sha escalated" line. retryJudgeNoRun treats this, like any other
+// error judgeFailedRoundNumber returns, as no match.
+var errRoundLineNotFailed = errors.New("job: judging: not a failed or same-sha round line")
+
 // judgeFailedRoundNumber reads the round number back from firstLine when
 // it is a "judge round N failed" or "judge round N same sha escalated"
 // line, the one pair of shapes judgeHandler.Run's own failed-marker
-// branch and retryJudgeNoRun both read this round number from. ok is
-// false, and m is 0, when firstLine is neither shape or its round number
-// fails to parse, so a caller never logs a wrong round on a quiet
-// failure.
-func judgeFailedRoundNumber(firstLine string) (m int, ok bool) {
+// branch and retryJudgeNoRun both read this round number from. err is
+// errRoundLineNotFailed when firstLine is neither shape, and wraps the
+// strconv error when the round number itself fails to parse, so a
+// caller's own error keeps that detail.
+func judgeFailedRoundNumber(firstLine string) (m int, err error) {
 	sub := judgeRoundFailedLine.FindStringSubmatch(firstLine)
 	if sub == nil {
 		sub = judgeRoundSameSHALine.FindStringSubmatch(firstLine)
 	}
 	if sub == nil {
-		return 0, false
+		return 0, errRoundLineNotFailed
 	}
 	n, convErr := strconv.Atoi(sub[1])
 	if convErr != nil {
-		return 0, false
+		return 0, fmt.Errorf("round %q: %w", sub[1], convErr)
 	}
-	return n, true
+	return n, nil
 }
 
 // judgeNewestRoundNumber reads the round number back from markers' own
@@ -2081,6 +2086,25 @@ func fixDroppedSince(dropped []store.MessageRow, floorID int64) (fixRequestID in
 	return 0, false
 }
 
+// droppedFixConsent is the one read of fixDroppedPrefix markers behind
+// both judgeHandler.Run's dropped-fix consent check and retryJudgeNoRun's
+// own (design section 8, ticket #80 task 4): it reports whether a "fix
+// dropped <mid>" marker newer than floorID exists, logging the same Info
+// "judge again after dropped fix" line callers used to each log on their
+// own, with round the round about to start (m+1).
+func droppedFixConsent(ctx context.Context, d Deps, t store.Ticket, floorID int64, round int) (bool, error) {
+	dropped, err := d.Store.MarkersWithPrefix(ctx, t.ID, fixDroppedPrefix)
+	if err != nil {
+		return false, fmt.Errorf("job: judging: fix dropped markers: %w", err)
+	}
+	fixRequestID, ok := fixDroppedSince(dropped, floorID)
+	if !ok {
+		return false, nil
+	}
+	slog.Info("judge again after dropped fix", "ticket_id", t.ID, "round", round, "fix_request_id", fixRequestID)
+	return true, nil
+}
+
 // retryJudgeNoRun is resolvePostBuildEscalation's own judge-origin, no-run
 // row (design section 5.6, ticket #80 task 4): when the newest judge round
 // marker names a failed or same-sha-escalated round, and fixDroppedSince
@@ -2100,14 +2124,18 @@ func (h judgeHandler) retryJudgeNoRun(ctx context.Context, t store.Ticket, d Dep
 	if len(markers) > 0 {
 		newest := markers[len(markers)-1]
 		firstLine, _, _ := strings.Cut(newest.Body, "\n")
-		if m, ok := judgeFailedRoundNumber(firstLine); ok {
-			dropped, droppedErr := d.Store.MarkersWithPrefix(ctx, t.ID, fixDroppedPrefix)
-			if droppedErr != nil {
-				return store.HandlerCommit{}, fmt.Errorf("job: judging: retry no run: fix dropped markers: %w", droppedErr)
+		if m, numErr := judgeFailedRoundNumber(firstLine); numErr == nil {
+			consent, consentErr := droppedFixConsent(ctx, d, t, newest.ID, m+1)
+			if consentErr != nil {
+				return store.HandlerCommit{}, consentErr
 			}
-			if fixRequestID, ok := fixDroppedSince(dropped, newest.ID); ok {
-				slog.Info("judge again after dropped fix", "ticket_id", t.ID, "round", m+1, "fix_request_id", fixRequestID)
-				return h.retryFreshRound(ctx, t, d, resolveIDs, notes, errorText)
+			if consent {
+				commit, err := h.retryFreshRound(ctx, t, d, resolveIDs, notes, errorText)
+				if err != nil {
+					return store.HandlerCommit{}, err
+				}
+				commit.ResolveQuestions = resolveIDs
+				return commit, nil
 			}
 		}
 	}
@@ -2149,10 +2177,7 @@ func (h judgeHandler) rejudgeWithoutFix(ctx context.Context, t store.Ticket, d D
 	if err != nil {
 		return store.HandlerCommit{}, err
 	}
-	dropped := store.Message{
-		TicketID: t.ID, Type: msgTypeUpdate, Author: authorSystem,
-		Body: fmt.Sprintf("fix dropped %d", req.MessageID),
-	}
+	dropped := fixDroppedMessage(t, req.MessageID)
 	commit.Messages = append([]store.Message{dropped}, commit.Messages...)
 	commit.ResolveQuestions = resolveIDs
 	slog.Info("fix dropped", "ticket_id", t.ID, "fix_request_id", req.MessageID, "stage", "judge")

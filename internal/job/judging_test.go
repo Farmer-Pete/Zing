@@ -2257,22 +2257,25 @@ const judgeFixCannotRunBuildScript = `<zing job="build" outcome="error">
 // own failure and "failure" fix request (judgeFailRoundOne), then drives
 // that fix request's own first RUN turn with judgeFixCannotRunBuildScript,
 // so it escalates cannot_run, origin fix, instead of landing. It returns
-// the store and the ticket read back after that escalation commit applies,
-// for TestFixEscalationInJudgingOffersJudgeAgain (ticket #80 task 2) to
-// read the open question from.
-func judgeFixEscalated(t *testing.T) (*store.Store, store.Ticket) {
+// the store, the ticket read back after that escalation commit applies,
+// and the runtime (wrapped in a recordingRuntime, so a later retry's own
+// requests can be counted and inspected), for
+// TestFixEscalationInJudgingOffersJudgeAgain (ticket #80 task 2) and
+// TestFixEscalationAfterRetryStillOffersJudgeAgain (task 2, review r2f9)
+// to build on.
+func judgeFixEscalated(t *testing.T) (*store.Store, store.Ticket, *recordingRuntime) {
 	t.Helper()
 	s, ticket := judgeTicketReady(t)
 
 	scripts := judgeScriptsFS(judgeOkBothScript)
 	scripts["build/fix/1.xml"] = &fstest.MapFile{Data: []byte(judgeFixCannotRunBuildScript)}
-	rt := runtime.NewFake(scripts)
+	rec := &recordingRuntime{inner: runtime.NewFake(scripts)}
 
 	checks := &judgeScriptedCheckCommands{real: NewCommandRunner(sandbox.Off(), false), steps: []judgeCheckStep{{exit: 1}}}
 
-	ticket = judgeFailRoundOne(t, s, ticket, rt, checks)
+	ticket = judgeFailRoundOne(t, s, ticket, rec, checks)
 
-	deps := pbWithTestCmd(pbClaim(t, s, rt, ticket.ID), ticket, judgeFixTestCmd)
+	deps := pbWithTestCmd(pbClaim(t, s, rec, ticket.ID), ticket, judgeFixTestCmd)
 	deps.Commands = checks
 	commit, err := (judgeHandler{}).Run(t.Context(), ticket, deps) // fix RUN turn: cannot_run error
 	if err != nil {
@@ -2280,7 +2283,7 @@ func judgeFixEscalated(t *testing.T) (*store.Store, store.Ticket) {
 	}
 	pbApply(t, s, ticket, commit)
 
-	return s, pbGetTicket(t, s, ticket.ID)
+	return s, pbGetTicket(t, s, ticket.ID), rec
 }
 
 // TestFixEscalationInJudgingOffersJudgeAgain proves withFixStageOption
@@ -2293,7 +2296,7 @@ func TestFixEscalationInJudgingOffersJudgeAgain(t *testing.T) {
 		t.Skip("slow end-to-end flow; runs in the full suite")
 	}
 	t.Parallel()
-	s, ticket := judgeFixEscalated(t)
+	s, ticket, _ := judgeFixEscalated(t)
 
 	open, err := s.QuestionsByState(t.Context(), ticket.ID, "open")
 	if err != nil {
@@ -2317,6 +2320,62 @@ func TestFixEscalationInJudgingOffersJudgeAgain(t *testing.T) {
 	}
 	if qp.Recommended != "a" {
 		t.Errorf("recommended = %q, want %q", qp.Recommended, "a")
+	}
+}
+
+// TestFixEscalationAfterRetryStillOffersJudgeAgain proves withFixStageOption's
+// own call from postBuildPrelude's answered-round branch (postbuild.go's
+// postBuildEnterFromRounds row), not only its DriveFix row (review r2f9):
+// a Retry on the first cannot_run escalation reruns the same "failure" fix,
+// which escalates cannot_run again (judgeFixCannotRunBuildScript, replayed
+// on the fix's fresh session), and that second escalation still offers
+// "Judge again without a fix".
+func TestFixEscalationAfterRetryStillOffersJudgeAgain(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow end-to-end flow; runs in the full suite")
+	}
+	t.Parallel()
+	s, ticket, rec := judgeFixEscalated(t)
+
+	open, err := s.QuestionsByState(t.Context(), ticket.ID, "open")
+	if err != nil {
+		t.Fatalf("QuestionsByState(open): %v", err)
+	}
+	if len(open) != 1 {
+		t.Fatalf("QuestionsByState(open) = %d questions, want exactly 1", len(open))
+	}
+	pbAnswerEscalationWithNote(t, s, ticket.ID, open[0].ID, "a", "")
+
+	deps := pbWithTestCmd(pbClaim(t, s, rec, ticket.ID), pbGetTicket(t, s, ticket.ID), judgeFixTestCmd)
+	deps.Commands = &judgeScriptedCheckCommands{real: NewCommandRunner(sandbox.Off(), false), steps: []judgeCheckStep{{exit: 1}}}
+	commit, err := (judgeHandler{}).Run(t.Context(), pbGetTicket(t, s, ticket.ID), deps) // Retry: fresh fix RUN turn, cannot_run again
+	if err != nil {
+		t.Fatalf("Run after Retry: %v", err)
+	}
+	pbApply(t, s, pbGetTicket(t, s, ticket.ID), commit)
+
+	open2, err := s.QuestionsByState(t.Context(), ticket.ID, "open")
+	if err != nil {
+		t.Fatalf("QuestionsByState(open) after Retry: %v", err)
+	}
+	if len(open2) != 1 {
+		t.Fatalf("QuestionsByState(open) after Retry = %d questions, want exactly 1", len(open2))
+	}
+
+	var qp response.QuestionPayload
+	if err := json.Unmarshal(open2[0].Payload, &qp); err != nil {
+		t.Fatalf("unmarshal question payload: %v", err)
+	}
+	wantOptions := []response.Option{
+		{Key: "a", Text: pbEscalationTextRetry},
+		{Key: fixRejudgeOptionKey, Text: fixRejudgeOptionText},
+		{Key: "c", Text: pbEscalationTextAbandon},
+	}
+	if !reflect.DeepEqual(qp.Options, wantOptions) {
+		t.Errorf("question options after Retry = %+v, want %+v", qp.Options, wantOptions)
+	}
+	if len(rec.reqs) == 0 {
+		t.Fatal("rec.reqs is empty, want the Retry to have made a fresh fix run request")
 	}
 }
 
@@ -2974,6 +3033,38 @@ func TestJudgeAgainWithoutFixDirtyTreeStillDrops(t *testing.T) {
 		t.Error("openFixRequest after the dirty-tree escalation: open = true, want false")
 	}
 
+	// Part 1b (review r2f5): Retry while the tree is still dirty.
+	// retryJudgeNoRun's own call to retryFreshRound escalates again
+	// through judgeStartChecks, and the answered question must still
+	// resolve, or the next tick would see the same answered round again.
+	openDirty, err := s.QuestionsByState(t.Context(), ticket.ID, "open")
+	if err != nil {
+		t.Fatalf("QuestionsByState(open) before cleaning the tree: %v", err)
+	}
+	if len(openDirty) != 1 {
+		t.Fatalf("QuestionsByState(open) = %d questions, want exactly 1", len(openDirty))
+	}
+	qIDDirty := openDirty[0].ID
+	pbAnswerEscalationWithNote(t, s, ticket.ID, qIDDirty, "a", "retry while still dirty")
+
+	reqCountBeforeDirtyRetry := len(rec.reqs)
+	deps2b := pbWithTestCmd(pbClaim(t, s, rec, ticket.ID), pbGetTicket(t, s, ticket.ID), judgeFixTestCmd)
+	deps2b.Commands = checks
+	dirtyRetryCommit, err := (judgeHandler{}).Run(t.Context(), pbGetTicket(t, s, ticket.ID), deps2b)
+	if err != nil {
+		t.Fatalf("Run (Retry with the tree still dirty): %v", err)
+	}
+	if len(rec.reqs) != reqCountBeforeDirtyRetry {
+		t.Errorf("runtime requests after a Retry with the tree still dirty = %d, want no change from %d", len(rec.reqs), reqCountBeforeDirtyRetry)
+	}
+	if dirtyRetryCommit.Escalation == nil {
+		t.Fatal("dirtyRetryCommit.Escalation = nil, want a judge-origin escalation from judgeStartChecks again")
+	}
+	if !slices.Contains(dirtyRetryCommit.ResolveQuestions, qIDDirty) {
+		t.Errorf("dirtyRetryCommit.ResolveQuestions = %v, want it to contain %d", dirtyRetryCommit.ResolveQuestions, qIDDirty)
+	}
+	pbApply(t, s, pbGetTicket(t, s, ticket.ID), dirtyRetryCommit)
+
 	// Part 2 (task 4): clean the tree, answer the judge escalation that
 	// followed the drop with Retry plus a note, and prove retryJudgeNoRun
 	// starts round 2 at round 1's own sha with that note reaching the
@@ -3280,16 +3371,26 @@ func TestJudgeFailedRoundDroppedFixStartsNextRound(t *testing.T) {
 	t.Run("without the fix dropped", func(t *testing.T) {
 		t.Parallel()
 		commit, _ := judgeFailedRoundDroppedFixRun(t, false)
+		sameSHAEscalated := false
 		for _, m := range commit.Messages {
 			if strings.HasPrefix(m.Body, "judge round 2 started") {
 				t.Errorf("commit.Messages = %+v, want no \"judge round 2 started\" marker", commit.Messages)
 			}
+			if strings.HasPrefix(m.Body, "judge round 1 same sha escalated") {
+				sameSHAEscalated = true
+			}
+		}
+		if !sameSHAEscalated {
+			t.Errorf("commit.Messages = %+v, want a \"judge round 1 same sha escalated\" marker, proving judgeSameSHAEscalation fired", commit.Messages)
 		}
 		if commit.Escalation == nil {
 			t.Fatal("commit.Escalation = nil, want a cannot_run escalation")
 		}
 		if commit.Escalation.Payload.Code != string(response.EscalationCodeCannotRun) {
 			t.Errorf("escalation code = %q, want %q", commit.Escalation.Payload.Code, response.EscalationCodeCannotRun)
+		}
+		if commit.Escalation.Payload.Origin != string(response.EscalationOriginJudge) {
+			t.Errorf("escalation origin = %q, want %q", commit.Escalation.Payload.Origin, response.EscalationOriginJudge)
 		}
 	})
 }

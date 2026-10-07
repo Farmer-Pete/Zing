@@ -263,7 +263,9 @@ func (e *bodyDecodeError) Is(target error) bool { return target == errMalformedC
 // unregistered pair) returns errMalformedCandidate instead, so it never
 // contributes a lookup error of its own.
 func tryDecode(input []byte, offset int) (*Document, error) {
-	dec := xml.NewDecoder(bytes.NewReader(input[offset:]))
+	flattened, tags := flattenInline(input[offset:])
+
+	dec := xml.NewDecoder(bytes.NewReader(flattened))
 
 	tok, err := dec.Token()
 	if err != nil {
@@ -285,18 +287,6 @@ func tryDecode(input []byte, offset int) (*Document, error) {
 			return nil, errMalformedCandidate
 		}
 		return nil, err
-	}
-
-	flattened, tags := flattenInline(input[offset:])
-
-	dec = xml.NewDecoder(bytes.NewReader(flattened))
-	tok, err = dec.Token()
-	if err != nil {
-		return nil, errMalformedCandidate
-	}
-	start, ok = isZingStart(tok)
-	if !ok {
-		return nil, errMalformedCandidate
 	}
 
 	if err := dec.DecodeElement(r, &start); err != nil {
