@@ -39,15 +39,6 @@ func (claimsPayload) JSONSchemaExtend(s *jsonschema.Schema) {
 	s.MinItems = &one
 }
 
-// childrenPayload is the stored shape of a children artifact: []Child at the
-// document root, preserving ChildrenResponse.Children's minItems=2.
-type childrenPayload []response.Child
-
-func (childrenPayload) JSONSchemaExtend(s *jsonschema.Schema) {
-	two := uint64(2)
-	s.MinItems = &two
-}
-
 // pushKeys is the stored shape of push_subscriptions.keys_json (design
 // section 6.13): a small source type declared here, in internal/schemagen
 // itself, rather than reusing internal/notify.Subscription's Keys field, so
@@ -71,7 +62,7 @@ const (
 	tableEvents            = "events"
 )
 
-// Registry lists the 20 stored types, each mapped to its committed schema path.
+// Registry lists the 21 stored types, each mapped to its committed schema path.
 func Registry() []Entry {
 	return []Entry{
 		{tableMessages, "question", response.QuestionPayload{}},
@@ -82,7 +73,7 @@ func Registry() []Entry {
 		{tableArtifacts, "scenario", response.Scenario{}},
 		{tableArtifacts, "plan", response.Plan{}},
 		{tableArtifacts, "planreview", planReviewPayload{}},
-		{tableArtifacts, "children", childrenPayload{}},
+		{tableArtifacts, "children", response.ChildrenArtifact{}},
 		{tableArtifacts, "file", response.FileArtifact{}},
 		{tableArtifacts, "fence", response.Fence{}},
 		{tableArtifacts, "task", response.TaskArtifact{}},
@@ -94,6 +85,7 @@ func Registry() []Entry {
 		{tableEvents, "check_rerun", response.CheckRerunEvent{}},
 		{tableEvents, "check_rerun_passed", response.CheckRerunPassedEvent{}},
 		{tableEvents, "owner_edit", response.OwnerEditEvent{}},
+		{tableEvents, "stale_base", response.StaleBaseEvent{}},
 	}
 }
 

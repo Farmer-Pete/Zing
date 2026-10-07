@@ -115,7 +115,13 @@ func reviewLenses(d Deps) []response.Lens {
 // reviewingHandler runs the real reviewing state (design section 6.2, 6.2a).
 type reviewingHandler struct{}
 
+// Run is reviewing's tick, wrapped so a stale base fetch is noted.
 func (h reviewingHandler) Run(ctx context.Context, t store.Ticket, d Deps) (store.HandlerCommit, error) {
+	return withStaleBaseNote(ctx, t, d, stateReviewing, h.run)
+}
+
+// run is the reviewing decision tree, Run's body before this change.
+func (h reviewingHandler) run(ctx context.Context, t store.Ticket, d Deps) (store.HandlerCommit, error) {
 	c, handled, err := postBuildPrelude(ctx, t, d, response.EscalationOriginReview)
 	if handled || err != nil {
 		return c, err

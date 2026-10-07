@@ -36,7 +36,7 @@ func seedGateQuestion(t *testing.T, s *store.Store, ticketID int64, runID *int64
 	payload, err := json.Marshal(response.QuestionPayload{
 		Key: "Q1", Kind: response.QuestionKindGate, State: response.QuestionStateOpen,
 		Recommended: "a",
-		Options:     []response.Option{{Key: "a", Text: "Approve"}, {Key: "b", Text: "Reject"}},
+		Options:     []response.Option{{Key: "a", Text: testApproveOptionText}, {Key: "b", Text: testRejectOptionText}},
 	})
 	if err != nil {
 		t.Fatalf("marshal gate question payload: %v", err)

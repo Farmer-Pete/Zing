@@ -24,6 +24,7 @@ import (
 	"zing/internal/machine"
 	"zing/internal/response"
 	"zing/internal/store"
+	"zing/internal/tracker"
 )
 
 // The five views' names, the closed set design section 8 names. keys.go
@@ -412,6 +413,10 @@ func (c *console) threadComponent(ctx context.Context, open int64) (templ.Compon
 		if findingsErr != nil {
 			return nil, findingsErr
 		}
+		split, splitErr := c.loadSplit(ctx, open)
+		if splitErr != nil {
+			return nil, splitErr
+		}
 		claimed := ticket.ClaimOwner != nil
 		if plan != nil {
 			plan.Claimed = claimed
@@ -424,7 +429,7 @@ func (c *console) threadComponent(ctx context.Context, open int64) (templ.Compon
 			return nil, fmt.Errorf("console: planning conversation for ticket %d: %w", open, convErr)
 		}
 		agent := agentName(c.machine)
-		threadRows, buildErr := buildThreadRows(&ticket, rows, plan, scenarios, findings, conv, agent)
+		threadRows, buildErr := buildThreadRows(&ticket, rows, plan, scenarios, findings, split, conv, agent)
 		if buildErr != nil {
 			return nil, buildErr
 		}
@@ -457,6 +462,13 @@ func (c *console) threadComponent(ctx context.Context, open int64) (templ.Compon
 // nothing once every planning thread is settled and no approval is
 // running.
 func (c *console) threadBanner(ctx context.Context, ticketID int64, rows []store.MessageRow, conv store.PlanningConversation, agent string) (string, error) {
+	deps, err := c.store.Dependencies(ctx, ticketID)
+	if err != nil {
+		return "", fmt.Errorf("console: dependencies for ticket %d: %w", ticketID, err)
+	}
+	if held := holdBanner(deps); held != "" {
+		return held, nil
+	}
 	if gateApprovalInProgress(rows) {
 		cohort, ok, err := c.store.CurrentCohort(ctx, ticketID)
 		if err != nil {
@@ -510,10 +522,41 @@ func gateApprovalInProgress(rows []store.MessageRow) bool {
 	return false
 }
 
+// holdBanner reports the banner text for a ticket held on one or more split
+// dependencies not yet done (#74 owner decision Q3): a dependency in state
+// "abandoned" reads "..., which was abandoned", every other unfinished
+// dependency reads "... (state)". It returns "" once every dependency is
+// done, so threadBanner falls through to its other banners.
+func holdBanner(deps []store.DependencyRow) string {
+	var parts []string
+	for _, dep := range deps {
+		if dep.State == string(response.TicketStateDone) {
+			continue
+		}
+		ref := tracker.IssueRef(dep.Ref)
+		if dep.State == string(response.TicketStateAbandoned) {
+			parts = append(parts, ref+", which was abandoned")
+		} else {
+			parts = append(parts, ref+" ("+dep.State+")")
+		}
+	}
+	if len(parts) == 0 {
+		return ""
+	}
+	return "Waits on " + strings.Join(parts, "; ") + "."
+}
+
 // planArtifactType is the artifacts.type literal a planning commit writes
 // (internal/store/schemas/artifacts/plan.json), the type name
 // store.GetArtifact(ticketID, "plan") in design section 6.9 names directly.
 const planArtifactType = "plan"
+
+// childrenArtifactType is the artifacts.type literal a children outcome's
+// commit writes (internal/job/split.go's own unexported
+// artifactTypeChildren, mirrored here rather than imported -- this package
+// has no other reason to depend on internal/job, matching
+// planreviewFindingsPayload's own mirrored-not-imported wire shape above).
+const childrenArtifactType = "children"
 
 // loadPlan reads ticketID's newest stored plan artifact (design section
 // 6.9) and pre-renders it, for the gate kind's context region
@@ -702,6 +745,43 @@ func (c *console) loadFindings(ctx context.Context, ticketID int64) ([]templates
 		})
 	}
 	return rows, nil
+}
+
+// loadSplit reads ticketID's newest stored children artifact (design
+// section 7.2, Task 8) and pre-renders it, for the split kind's context
+// region (thread.templ's splitContext). It returns nil, nil when the
+// ticket has no children artifact yet, the same "not there yet" shape
+// loadPlan itself returns.
+func (c *console) loadSplit(ctx context.Context, ticketID int64) (*templates.SplitView, error) {
+	artifact, ok, err := c.store.GetArtifact(ctx, ticketID, childrenArtifactType)
+	if err != nil {
+		return nil, fmt.Errorf("console: load children artifact for ticket %d: %w", ticketID, err)
+	}
+	if !ok {
+		return nil, nil //nolint:nilnil // "no split proposed yet" is a legitimate result, not an error
+	}
+	var ca response.ChildrenArtifact
+	if unmarshalErr := json.Unmarshal(artifact.Payload, &ca); unmarshalErr != nil {
+		return nil, fmt.Errorf("console: unmarshal children artifact for ticket %d: %w", ticketID, unmarshalErr)
+	}
+	view := &templates.SplitView{Children: make([]templates.SplitChildView, len(ca.Children))}
+	if strings.TrimSpace(ca.Notes) != "" {
+		notesHTML, renderErr := Render(ca.Notes)
+		if renderErr != nil {
+			return nil, fmt.Errorf("console: render children notes for ticket %d: %w", ticketID, renderErr)
+		}
+		view.NotesHTML = notesHTML
+	}
+	for i, child := range ca.Children {
+		bodyHTML, renderErr := Render(child.Body)
+		if renderErr != nil {
+			return nil, fmt.Errorf("console: render child %s body for ticket %d: %w", child.Key, ticketID, renderErr)
+		}
+		view.Children[i] = templates.SplitChildView{
+			Key: child.Key, Title: child.Title, BodyHTML: bodyHTML, DependsOn: child.DependsOn,
+		}
+	}
+	return view, nil
 }
 
 // msgTypeState, msgTypeQuestion, msgTypeEscalation, and msgTypeAnswer name
@@ -948,6 +1028,15 @@ func questionStateLabel(state *string, revisable bool) string {
 // the plan stays in the rail's Plan artifact.
 func gateShowsPlan(kind response.QuestionKind, state *string) bool {
 	return kind == response.QuestionKindGate && (state == nil || *state != msgStateResolved)
+}
+
+// splitShowsChildren mirrors gateShowsPlan for the split kind (review fix,
+// #74): only a split question still in play renders the stored children
+// artifact. A resolved split question -- rejected, or otherwise superseded
+// by a later proposal -- is history; attaching the newest artifact to it
+// too would show a split it never gated.
+func splitShowsChildren(kind response.QuestionKind, state *string) bool {
+	return kind == response.QuestionKindSplit && (state == nil || *state != msgStateResolved)
 }
 
 // sealedSectionStates is every ticket state the post-gate "Sealed plan and
@@ -1335,7 +1424,7 @@ func buildWaitProgress(ticket *store.Ticket, rows []store.MessageRow, conv store
 // AnsweredHTML); every other question kind is unaffected. agent is that
 // conversation's own display name (views.go's agentName), used for a
 // planning question's "with <agent>" pill and "Settled by <agent>" line.
-func buildThreadRows(ticket *store.Ticket, rows []store.MessageRow, plan *templates.RenderedPlan, scenarios []templates.ScenarioRow, findings []templates.FindingRow, conv store.PlanningConversation, agent string) ([]templates.ThreadRow, error) {
+func buildThreadRows(ticket *store.Ticket, rows []store.MessageRow, plan *templates.RenderedPlan, scenarios []templates.ScenarioRow, findings []templates.FindingRow, split *templates.SplitView, conv store.PlanningConversation, agent string) ([]templates.ThreadRow, error) {
 	drafts := collectQuestionDrafts(rows)
 	rows = visibleRows(rows)
 	sentAnswers := collectSentAnswers(rows)
@@ -1385,7 +1474,7 @@ func buildThreadRows(ticket *store.Ticket, rows []store.MessageRow, plan *templa
 		}
 		if row.Type == msgTypeQuestion || row.Type == msgTypeEscalation {
 			convThread := convThreadForQuestion(conv, row.ID)
-			question, err := buildThreadQuestion(ticket, row, messageCounts[row.ID]+1, plan, scenarios, findings, drafts, sentAnswers, sentChildren[row.ID], convThread, conv, agent, gateOpen)
+			question, err := buildThreadQuestion(ticket, row, messageCounts[row.ID]+1, plan, scenarios, findings, split, drafts, sentAnswers, sentChildren[row.ID], convThread, conv, agent, gateOpen)
 			if err != nil {
 				return nil, err
 			}
@@ -1738,7 +1827,7 @@ func collectQuestionDrafts(rows []store.MessageRow) map[int64]questionDraft {
 // 22.1); conv carries that conversation's delivery watermark and in-flight
 // run, for convThread's own pill and Queued tags; agent is the planning
 // job's own display name (views.go's agentName).
-func buildThreadQuestion(ticket *store.Ticket, m *store.MessageRow, messageCount int, plan *templates.RenderedPlan, scenarios []templates.ScenarioRow, findings []templates.FindingRow, drafts map[int64]questionDraft, sentAnswers map[int64]response.AnswerPayload, children []store.MessageRow, convThread *store.Thread, conv store.PlanningConversation, agent string, gateOpen bool) (*templates.ThreadQuestion, error) {
+func buildThreadQuestion(ticket *store.Ticket, m *store.MessageRow, messageCount int, plan *templates.RenderedPlan, scenarios []templates.ScenarioRow, findings []templates.FindingRow, split *templates.SplitView, drafts map[int64]questionDraft, sentAnswers map[int64]response.AnswerPayload, children []store.MessageRow, convThread *store.Thread, conv store.PlanningConversation, agent string, gateOpen bool) (*templates.ThreadQuestion, error) {
 	if m.Type != msgTypeQuestion {
 		return nil, nil //nolint:nilnil // "no question" is a legitimate result, not an error
 	}
@@ -1900,6 +1989,9 @@ func buildThreadQuestion(ticket *store.Ticket, m *store.MessageRow, messageCount
 		q.Plan = plan
 		q.Scenarios = scenarios
 		q.Findings = findings
+	}
+	if splitShowsChildren(payload.Kind, m.State) {
+		q.Split = split
 	}
 	if payload.Amendment != nil {
 		a := payload.Amendment

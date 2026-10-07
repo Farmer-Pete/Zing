@@ -1,0 +1,41 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "properties": {
+    "step": {
+      "type": "string",
+      "enum": [
+        "building",
+        "reviewing",
+        "judging",
+        "shipping"
+      ]
+    },
+    "branch": {
+      "type": "string",
+      "maxLength": 255,
+      "minLength": 1
+    },
+    "sha": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{40}$"
+    },
+    "reason": {
+      "type": "string",
+      "enum": [
+        "no_origin",
+        "remote_ref_missing",
+        "auth",
+        "network",
+        "fetch_failed"
+      ]
+    }
+  },
+  "additionalProperties": false,
+  "type": "object",
+  "required": [
+    "step",
+    "branch",
+    "sha",
+    "reason"
+  ]
+}

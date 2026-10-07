@@ -4378,3 +4378,161 @@ func TestCommitConversationRejectsNonPlanningQuestion(t *testing.T) {
 		t.Error("applied = true, want false")
 	}
 }
+
+// --- SplitChild --------------------------------------------------------
+
+// TestCommitHandlerResult_SplitChildInsertsQueuedChildWithDependencies
+// proves applySplitChildTx inserts a queued child ticket under its parent
+// (#74's planner split), one child per commit, in the same fenced
+// transaction the claim guards: c1 (no dependencies) lands first, then c2,
+// which depends on c1 and is filed once c1's ticket already exists. Each
+// commit re-claims the parent, exactly as the dispatcher's own retried tick
+// does between filing one child and the next.
+func TestCommitHandlerResult_SplitChildInsertsQueuedChildWithDependencies(t *testing.T) {
+	t.Parallel()
+	s := newTestStore(t)
+	ctx := t.Context()
+	_, parentID := seedQueuedTicket(t, s, "65")
+
+	owner, expires := claimForCommit(t, s, parentID)
+	applied, err := s.CommitHandlerResult(ctx, HandlerCommit{
+		TicketID: parentID, Owner: owner, Expires: expires,
+		SplitChild: &SplitChild{Key: "c1", Ref: "70", Title: "Detect the conflict", Body: "do c1"},
+	})
+	if err != nil {
+		t.Fatalf("CommitHandlerResult (c1): %v", err)
+	}
+	if !applied {
+		t.Fatal("CommitHandlerResult (c1): applied = false, want true")
+	}
+
+	owner, expires = claimForCommit(t, s, parentID)
+	applied, err = s.CommitHandlerResult(ctx, HandlerCommit{
+		TicketID: parentID, Owner: owner, Expires: expires,
+		SplitChild: &SplitChild{Key: "c2", Ref: "71", Title: "The merge unit", Body: "do c2", DependsOn: []string{"c1"}},
+	})
+	if err != nil {
+		t.Fatalf("CommitHandlerResult (c2): %v", err)
+	}
+	if !applied {
+		t.Fatal("CommitHandlerResult (c2): applied = false, want true")
+	}
+
+	children, scErr := s.SplitChildren(ctx, parentID)
+	if scErr != nil {
+		t.Fatalf("SplitChildren: %v", scErr)
+	}
+	if len(children) != 2 {
+		t.Fatalf("len(children) = %d, want 2", len(children))
+	}
+	if children[0].Key != "c1" || children[0].Ref != "70" || children[0].State != ticketStateQueued {
+		t.Errorf("children[0] = %+v, want key c1, ref 70, state %s", children[0], ticketStateQueued)
+	}
+	if children[1].Key != "c2" || children[1].Ref != "71" || children[1].State != ticketStateQueued {
+		t.Errorf("children[1] = %+v, want key c2, ref 71, state %s", children[1], ticketStateQueued)
+	}
+
+	c2Ticket, getErr := s.GetTicket(ctx, children[1].TicketID)
+	if getErr != nil {
+		t.Fatalf("GetTicket(c2): %v", getErr)
+	}
+	if c2Ticket.ParentTicketID == nil || *c2Ticket.ParentTicketID != parentID {
+		t.Errorf("c2.ParentTicketID = %v, want %d", c2Ticket.ParentTicketID, parentID)
+	}
+
+	depCount := countRows(t, s, `SELECT COUNT(*) FROM ticket_dependencies WHERE ticket_id = ? AND depends_on_ticket_id = ?`,
+		children[1].TicketID, children[0].TicketID)
+	if depCount != 1 {
+		t.Errorf("ticket_dependencies rows for c2 depending on c1 = %d, want 1", depCount)
+	}
+}
+
+// TestCommitHandlerResult_SplitChildUnfiledDependencyFails proves a
+// SplitChild naming a sibling key that is not yet filed under the same
+// parent fails the whole commit, rather than inserting a child with a
+// dangling dependency: the parent's claim stays in place, because the
+// transaction rolled back.
+func TestCommitHandlerResult_SplitChildUnfiledDependencyFails(t *testing.T) {
+	t.Parallel()
+	s := newTestStore(t)
+	ctx := t.Context()
+	_, parentID := seedQueuedTicket(t, s, "65")
+
+	owner, expires := claimForCommit(t, s, parentID)
+	applied, err := s.CommitHandlerResult(ctx, HandlerCommit{
+		TicketID: parentID, Owner: owner, Expires: expires,
+		SplitChild: &SplitChild{Key: "c2", Ref: "71", Title: "The merge unit", Body: "do c2", DependsOn: []string{"c1"}},
+	})
+	wantErr := "commit handler result: split child c2 depends on c1, which is not filed"
+	if err == nil || err.Error() != wantErr {
+		t.Fatalf("CommitHandlerResult error = %v, want %q", err, wantErr)
+	}
+	if applied {
+		t.Error("applied = true, want false")
+	}
+
+	children, scErr := s.SplitChildren(ctx, parentID)
+	if scErr != nil {
+		t.Fatalf("SplitChildren: %v", scErr)
+	}
+	if len(children) != 0 {
+		t.Errorf("children = %+v, want none (whole commit rolled back)", children)
+	}
+
+	got, getErr := s.GetTicket(ctx, parentID)
+	if getErr != nil {
+		t.Fatalf("GetTicket: %v", getErr)
+	}
+	if got.ClaimOwner == nil || *got.ClaimOwner != owner {
+		t.Errorf("parent ClaimOwner = %v, want %q (claim still in place after rollback)", got.ClaimOwner, owner)
+	}
+}
+
+// TestSplitChildren_ReturnsFiledChildrenInOrder proves Store.SplitChildren
+// returns only the tickets filed under parentID (parent_ticket_id set and
+// split_key non-NULL), ordered by id, and that a parent with no filed
+// children at all returns an empty slice rather than nil-vs-empty
+// ambiguity or an error.
+func TestSplitChildren_ReturnsFiledChildrenInOrder(t *testing.T) {
+	t.Parallel()
+	s := newTestStore(t)
+	ctx := t.Context()
+	_, parentID := seedQueuedTicket(t, s, "65")
+
+	none, err := s.SplitChildren(ctx, parentID)
+	if err != nil {
+		t.Fatalf("SplitChildren (no children): %v", err)
+	}
+	if len(none) != 0 {
+		t.Errorf("SplitChildren (no children) = %+v, want empty", none)
+	}
+
+	owner, expires := claimForCommit(t, s, parentID)
+	if _, err = s.CommitHandlerResult(ctx, HandlerCommit{
+		TicketID: parentID, Owner: owner, Expires: expires,
+		SplitChild: &SplitChild{Key: "c1", Ref: "70", Title: "Detect the conflict", Body: "do c1"},
+	}); err != nil {
+		t.Fatalf("CommitHandlerResult (c1): %v", err)
+	}
+
+	// A ticket under the same parent with a NULL split_key (an ordinary,
+	// unrelated child row some other feature might add) is excluded.
+	parent, getErr := s.GetTicket(ctx, parentID)
+	if getErr != nil {
+		t.Fatalf("GetTicket(parent): %v", getErr)
+	}
+	if _, err = s.db.ExecContext(ctx,
+		`INSERT INTO tickets (project_id, tracker_ref, title, state, parent_ticket_id) VALUES (?, ?, ?, ?, ?)`,
+		parent.ProjectID, "72", "unrelated", ticketStateQueued, parentID,
+	); err != nil {
+		t.Fatalf("insert unrelated child: %v", err)
+	}
+
+	children, err := s.SplitChildren(ctx, parentID)
+	if err != nil {
+		t.Fatalf("SplitChildren: %v", err)
+	}
+	if len(children) != 1 || children[0].Key != "c1" {
+		t.Errorf("SplitChildren = %+v, want exactly one row, key c1", children)
+	}
+}

@@ -93,6 +93,13 @@ const (
 	testOptionAText  = "Option A"
 	testOptionBText  = "Option B"
 	testQuestionBody = "Body."
+	// testApproveOptionText and testRejectOptionText are the gate and split
+	// questions' own fixed option text (planning.go's gateQuestionMessage,
+	// split.go's splitQuestionMessage), shared across every hand-built
+	// Approve/Reject option pair in this package's tests (goconst: three or
+	// more call sites across this package compared the literal).
+	testApproveOptionText = "Approve"
+	testRejectOptionText  = "Reject"
 	// testQ1SettledDecision is the fixed decision text every D31 fixture
 	// uses to settle Q1 through a hand-built <replies> reply, so a
 	// ready/children/nothing_to_do response can pass checkConversation's

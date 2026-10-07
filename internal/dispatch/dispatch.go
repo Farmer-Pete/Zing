@@ -1177,6 +1177,9 @@ func (d *Dispatcher) runAndCommit(ctx context.Context, ticket store.Ticket, time
 		// already give it job.ShipTracker's own two methods, over its own
 		// tracker and bindings (PKG9-PLAN.md section 8.6, 17.1).
 		Tracker: d,
+		// Splitter is the dispatcher too: FileSplitChild and CloseSplitParent
+		// (split.go), the same split-variant pair job.SplitTracker names.
+		Splitter: d,
 		// Reserve closes over this tick's own owner and expires (the same
 		// lease Claim above just took out), so a handler's runJob call never
 		// sees either directly (design D13, section 4.4, 4.6).

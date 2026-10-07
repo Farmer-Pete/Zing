@@ -176,6 +176,13 @@ type ThreadQuestion struct {
 	PRURL string        // merge kind only; empty when the ticket has no PR link yet
 	Plan  *RenderedPlan // gate kind only; nil when the ticket has no stored plan artifact yet
 
+	// Split is the split kind's own context region (design section 7.2,
+	// Task 8): the proposed children and the planner's shared notes, both
+	// pre-rendered by internal/console/views.go's loadSplit. Nil when the
+	// ticket has no stored children artifact yet, splitContext's own
+	// "nothing to show" case.
+	Split *SplitView
+
 	// Scenarios and Findings are the gate kind's other two context regions
 	// (design section 7, D8, Task 11), rendered before Plan inside
 	// gateContext (thread.templ): the current scenario cohort and the
@@ -265,6 +272,25 @@ type ThreadQuestion struct {
 	// left with an empty closing line.
 	SettledLabel string
 	SettledHTML  templ.Component
+}
+
+// SplitView is the split kind's context region (design section 7.2, Task
+// 8): a stored children artifact, pre-rendered by
+// internal/console/views.go's loadSplit for splitContext (thread.templ).
+type SplitView struct {
+	// NotesHTML is the planner's shared notes, markdown-rendered; nil when
+	// the artifact's notes are blank, so splitContext shows no "Shared
+	// notes" heading for an empty string.
+	NotesHTML templ.Component
+	Children  []SplitChildView
+}
+
+// SplitChildView is one proposed child in the split gate's context region,
+// in the artifact's own order.
+type SplitChildView struct {
+	Key, Title string
+	BodyHTML   templ.Component
+	DependsOn  []string
 }
 
 // TicketActions is the thread view's action bar (#65, design section 6.6's

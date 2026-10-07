@@ -102,11 +102,11 @@ func TestValidate_BadPayloads(t *testing.T) {
 			want:    "payload does not match schema answer: /items/a~1b~0c: value must be one of 'accept', 'reject', 'drop', 'discuss'",
 		},
 		{
-			name:    "root array under length rejects with root minItems",
+			name:    "children array under length rejects with minItems",
 			table:   testTableArtifacts,
 			typ:     "children",
-			payload: `[{"key":"c1","title":"t","body":"b","depends_on":[]}]`,
-			want:    "payload does not match schema children: /: minItems: got 1, want 2",
+			payload: `{"children":[{"key":"c1","title":"t","body":"b","depends_on":[]}],"notes":""}`,
+			want:    "payload does not match schema children: /children: minItems: got 1, want 2",
 		},
 		{
 			name:    "unknown table/type pair",

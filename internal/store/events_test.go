@@ -330,7 +330,7 @@ func TestInsertEventRejects(t *testing.T) {
 func TestEventKinds(t *testing.T) {
 	t.Parallel()
 	got := EventKinds()
-	want := []string{"check_rerun", "check_rerun_passed", "owner_edit"}
+	want := []string{"check_rerun", "check_rerun_passed", "owner_edit", "stale_base"}
 	if !slices.Equal(got, want) {
 		t.Errorf("EventKinds() = %v, want %v", got, want)
 	}
