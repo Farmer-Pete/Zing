@@ -134,6 +134,24 @@ func (e *runError) Unwrap() error {
 	return e.Err
 }
 
+// StopStatus reports whether dispatching is stopped and why, for the
+// console's banner (design section "shape" rules). A recorded stopErr wins
+// over the store's own stopped flag, since a fail-closed or pass error also
+// sets that flag (task 2): Kind, Cause, TicketID, HasTicket, and At then
+// describe that error. The store flag alone, with no stopErr, means the
+// owner stopped it through POST /stop {"all": true}, reported as
+// StopKindOwner with no cause, no ticket, and a zero At. InFlight is always
+// d.pending, the launched-but-unread-result count Resume refuses on.
+type StopStatus struct {
+	Stopped   bool
+	Kind      string
+	Cause     string
+	TicketID  int64
+	HasTicket bool
+	At        time.Time
+	InFlight  int
+}
+
 // Binding pairs one store project with the tracker project intake reads for
 // it and the assignee rule intake applies (design section 6.8). Bindings is
 // a slice so one Dispatcher can serve many projects.
@@ -653,6 +671,42 @@ func (d *Dispatcher) hasStopErr() bool {
 	return d.stopErr != nil
 }
 
+// StopStatus reports whether the dispatcher is stopped and why (design
+// section "shape" rules): the in-memory stopErr, when one is recorded,
+// wins over the store's own stopped flag, since a fail-closed or a parked
+// pass error also sets that flag. Otherwise it reads the flag itself: set
+// with no stopErr, that is an owner's own POST /stop. InFlight is read
+// under the same lock as stopErr and stoppedAt, so a concurrent result
+// arriving between the two reads can only ever make this call's own
+// snapshot slightly stale, never wrong about which field goes with which.
+func (d *Dispatcher) StopStatus(ctx context.Context) (StopStatus, error) {
+	d.mu.Lock()
+	stopErr, at, inFlight := d.stopErr, d.stoppedAt, d.pending
+	d.mu.Unlock()
+
+	if stopErr != nil {
+		kind, _, ticketID, hasTicket := alertKindWhere(stopErr)
+		return StopStatus{
+			Stopped:   true,
+			Kind:      kind,
+			Cause:     truncateCause(alertCause(stopErr), alertCauseMaxBytes),
+			TicketID:  ticketID,
+			HasTicket: hasTicket,
+			At:        at,
+			InFlight:  inFlight,
+		}, nil
+	}
+
+	_, stopped, err := d.store.Flags(ctx)
+	if err != nil {
+		return StopStatus{InFlight: inFlight}, fmt.Errorf("dispatch: stop status: %w", err)
+	}
+	if !stopped {
+		return StopStatus{InFlight: inFlight}, nil
+	}
+	return StopStatus{Stopped: true, Kind: StopKindOwner, InFlight: inFlight}, nil
+}
+
 // reportFirstError logs alert 1 (design section 4.6) at most once per
 // Dispatcher lifetime, naming d.stopErr -- the error saved by the first
 // setStop call that carried one -- never whichever result happened to
@@ -707,11 +761,23 @@ func (d *Dispatcher) logStopAlert() {
 	}
 }
 
+// StopKindFailClosed, StopKindError, and StopKindOwner are the three values
+// StopStatus.Kind and the banner's data-kind attribute ever carry (design
+// section "shape" rules): the first two are alertKindWhere's own kind
+// strings, reused rather than duplicated; StopKindOwner names a stop the
+// store's own stopped flag alone recorded, with no in-memory stopErr (an
+// owner's POST /stop {"all": true}).
+const (
+	StopKindFailClosed = "fail-closed"
+	StopKindError      = "error"
+	StopKindOwner      = "owner"
+)
+
 // alertKindWhere derives the two alerts' shared kind and where from err
-// (design section 4.6): kind is "fail-closed" when err wraps ErrFailClosed,
-// else "error"; where is "on ticket <id>" when err is a *runError, else "in
-// a dispatcher pass" (a reconcile, flags, intake, list, or claim failure
-// from fill itself).
+// (design section 4.6): kind is StopKindFailClosed when err wraps
+// ErrFailClosed, else StopKindError; where is "on ticket <id>" when err is
+// a *runError, else "in a dispatcher pass" (a reconcile, flags, intake,
+// list, or claim failure from fill itself).
 func alertKindWhere(err error) (kind, where string, ticketID int64, hasTicket bool) {
 	if re, ok := errors.AsType[*runError](err); ok {
 		ticketID = re.TicketID
@@ -721,9 +787,9 @@ func alertKindWhere(err error) (kind, where string, ticketID int64, hasTicket bo
 		where = "in a dispatcher pass"
 	}
 	if errors.Is(err, ErrFailClosed) {
-		kind = "fail-closed"
+		kind = StopKindFailClosed
 	} else {
-		kind = "error"
+		kind = StopKindError
 	}
 	return kind, where, ticketID, hasTicket
 }
