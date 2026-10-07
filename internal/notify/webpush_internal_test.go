@@ -15,10 +15,18 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"math/big"
+	"net/http"
+	"net/http/httptest"
+	"path/filepath"
+	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
+
+	"zing/internal/store"
 )
 
 // decryptForTest implements the receiver half of RFC 8291 section 3.4: given
@@ -239,5 +247,332 @@ func TestVAPIDJWT_SignsES256WithClaims(t *testing.T) {
 
 	if _, err := vapidJWT(priv, "http://%zz", sub, now); err == nil || err.Error() != "invalid endpoint" {
 		t.Fatalf("vapidJWT(bad endpoint) error = %v, want \"invalid endpoint\"", err)
+	}
+}
+
+// newWebPushTestStore opens a fresh on-disk store for a WebPush.Send test.
+// It is local to this file (package notify, not notify_test) because Send
+// and sendOne are unexported.
+func newWebPushTestStore(t *testing.T) *store.Store {
+	t.Helper()
+	s, err := store.Open(t.Context(), filepath.Join(t.TempDir(), "zing.db"))
+	if err != nil {
+		t.Fatalf("store.Open: %v", err)
+	}
+	t.Cleanup(func() { _ = s.Close() })
+	return s
+}
+
+// pushSubscriptionKeysJSON builds the keys_json a browser subscription
+// stores: p256dh and auth, both base64url without padding.
+func pushSubscriptionKeysJSON(t *testing.T, p256dh, auth []byte) []byte {
+	t.Helper()
+	b, err := json.Marshal(map[string]string{
+		"p256dh": base64.RawURLEncoding.EncodeToString(p256dh),
+		"auth":   base64.RawURLEncoding.EncodeToString(auth),
+	})
+	if err != nil {
+		t.Fatalf("marshal keys: %v", err)
+	}
+	return b
+}
+
+// recordedPush is one POST a pushRecorder's handler observed.
+type recordedPush struct {
+	body    []byte
+	headers http.Header
+}
+
+// pushRecorder is a fake push service: its handler method answers every
+// POST with a fixed status and records the request for later assertions.
+type pushRecorder struct {
+	mu   sync.Mutex
+	reqs []recordedPush
+}
+
+func (p *pushRecorder) handler(status int) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		b, readErr := io.ReadAll(r.Body)
+		if readErr != nil {
+			panic(readErr)
+		}
+		p.mu.Lock()
+		p.reqs = append(p.reqs, recordedPush{body: b, headers: r.Header.Clone()})
+		p.mu.Unlock()
+		w.WriteHeader(status)
+	}
+}
+
+func (p *pushRecorder) count() int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return len(p.reqs)
+}
+
+func newPushSubscriberKeys(t *testing.T) (priv *ecdh.PrivateKey, auth []byte) {
+	t.Helper()
+	var err error
+	priv, err = ecdh.P256().GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatalf("generate ua key: %v", err)
+	}
+	auth = make([]byte, 16)
+	if _, err := rand.Read(auth); err != nil {
+		t.Fatalf("random auth: %v", err)
+	}
+	return priv, auth
+}
+
+// TestSend_NotFoundOrGoneDeletesSubscription proves that a subscription
+// whose endpoint answers 404 or 410 is deleted (and Send still returns
+// nil), while a sibling subscription at a different endpoint survives.
+func TestSend_NotFoundOrGoneDeletesSubscription(t *testing.T) {
+	for _, status := range []int{http.StatusNotFound, http.StatusGone} {
+		t.Run(strconv.Itoa(status), func(t *testing.T) {
+			s := newWebPushTestStore(t)
+			w := New(s)
+
+			goneRec := &pushRecorder{}
+			goneSrv := httptest.NewServer(goneRec.handler(status))
+			defer goneSrv.Close()
+
+			okRec := &pushRecorder{}
+			okSrv := httptest.NewServer(okRec.handler(http.StatusCreated))
+			defer okSrv.Close()
+
+			gonePriv, goneAuth := newPushSubscriberKeys(t)
+			okPriv, okAuth := newPushSubscriberKeys(t)
+
+			if err := s.UpsertPushSubscription(t.Context(), store.PushSubscription{
+				Endpoint: goneSrv.URL, KeysJSON: pushSubscriptionKeysJSON(t, gonePriv.PublicKey().Bytes(), goneAuth),
+			}); err != nil {
+				t.Fatalf("UpsertPushSubscription (gone): %v", err)
+			}
+			if err := s.UpsertPushSubscription(t.Context(), store.PushSubscription{
+				Endpoint: okSrv.URL, KeysJSON: pushSubscriptionKeysJSON(t, okPriv.PublicKey().Bytes(), okAuth),
+			}); err != nil {
+				t.Fatalf("UpsertPushSubscription (ok): %v", err)
+			}
+
+			if err := w.Send(t.Context(), []byte(`{"title":"hi"}`)); err != nil {
+				t.Fatalf("Send: %v", err)
+			}
+
+			subs, err := s.ListPushSubscriptions(t.Context())
+			if err != nil {
+				t.Fatalf("ListPushSubscriptions: %v", err)
+			}
+			if len(subs) != 1 {
+				t.Fatalf("ListPushSubscriptions: got %d subscriptions, want 1", len(subs))
+			}
+			if subs[0].Endpoint != okSrv.URL {
+				t.Errorf("remaining subscription endpoint = %q, want %q", subs[0].Endpoint, okSrv.URL)
+			}
+		})
+	}
+}
+
+// TestSend_ServerErrorKeepsSubscription proves a 500 answer is an error
+// that names the status but never the endpoint, and that the subscription
+// is not deleted.
+func TestSend_ServerErrorKeepsSubscription(t *testing.T) {
+	s := newWebPushTestStore(t)
+	w := New(s)
+
+	rec := &pushRecorder{}
+	srv := httptest.NewServer(rec.handler(http.StatusInternalServerError))
+	defer srv.Close()
+
+	priv, auth := newPushSubscriberKeys(t)
+	if err := s.UpsertPushSubscription(t.Context(), store.PushSubscription{
+		Endpoint: srv.URL, KeysJSON: pushSubscriptionKeysJSON(t, priv.PublicKey().Bytes(), auth),
+	}); err != nil {
+		t.Fatalf("UpsertPushSubscription: %v", err)
+	}
+
+	err := w.Send(t.Context(), []byte(`{"title":"hi"}`))
+	if err == nil {
+		t.Fatal("Send: err = nil, want an error")
+	}
+	if !strings.Contains(err.Error(), "subscription") || !strings.Contains(err.Error(), "500") {
+		t.Errorf("Send error = %q, want it to contain \"subscription\" and \"500\"", err.Error())
+	}
+	if strings.Contains(err.Error(), srv.URL) {
+		t.Errorf("Send error = %q, must not contain the endpoint URL", err.Error())
+	}
+
+	subs, err := s.ListPushSubscriptions(t.Context())
+	if err != nil {
+		t.Fatalf("ListPushSubscriptions: %v", err)
+	}
+	if len(subs) != 1 {
+		t.Errorf("ListPushSubscriptions: got %d subscriptions, want 1 (kept)", len(subs))
+	}
+}
+
+// TestSend_RedirectIsNotFollowed proves a 3xx answer is treated as an
+// ordinary non-2xx status, never followed, and that an endpoint url.Parse
+// rejects becomes "invalid endpoint" without quoting it.
+func TestSend_RedirectIsNotFollowed(t *testing.T) {
+	t.Run("redirect", func(t *testing.T) {
+		s := newWebPushTestStore(t)
+		w := New(s)
+
+		rec2 := &pushRecorder{}
+		srv2 := httptest.NewServer(rec2.handler(http.StatusCreated))
+		defer srv2.Close()
+
+		srv1 := httptest.NewServer(http.HandlerFunc(func(rw http.ResponseWriter, r *http.Request) {
+			http.Redirect(rw, r, srv2.URL, http.StatusTemporaryRedirect)
+		}))
+		defer srv1.Close()
+
+		priv, auth := newPushSubscriberKeys(t)
+		if err := s.UpsertPushSubscription(t.Context(), store.PushSubscription{
+			Endpoint: srv1.URL, KeysJSON: pushSubscriptionKeysJSON(t, priv.PublicKey().Bytes(), auth),
+		}); err != nil {
+			t.Fatalf("UpsertPushSubscription: %v", err)
+		}
+
+		err := w.Send(t.Context(), []byte(`{"title":"hi"}`))
+		if err == nil {
+			t.Fatal("Send: err = nil, want an error")
+		}
+		if !strings.Contains(err.Error(), "307") {
+			t.Errorf("Send error = %q, want it to contain 307", err.Error())
+		}
+		if strings.Contains(err.Error(), srv1.URL) || strings.Contains(err.Error(), srv2.URL) {
+			t.Errorf("Send error = %q, must not contain either server URL", err.Error())
+		}
+		if got := rec2.count(); got != 0 {
+			t.Errorf("srv2 (redirect target) got %d requests, want 0", got)
+		}
+
+		subs, err := s.ListPushSubscriptions(t.Context())
+		if err != nil {
+			t.Fatalf("ListPushSubscriptions: %v", err)
+		}
+		if len(subs) != 1 {
+			t.Errorf("ListPushSubscriptions: got %d subscriptions, want 1 (kept)", len(subs))
+		}
+	})
+
+	t.Run("invalid endpoint", func(t *testing.T) {
+		s := newWebPushTestStore(t)
+		w := New(s)
+
+		priv, auth := newPushSubscriberKeys(t)
+		if err := s.UpsertPushSubscription(t.Context(), store.PushSubscription{
+			Endpoint: "http://%zz", KeysJSON: pushSubscriptionKeysJSON(t, priv.PublicKey().Bytes(), auth),
+		}); err != nil {
+			t.Fatalf("UpsertPushSubscription: %v", err)
+		}
+
+		err := w.Send(t.Context(), []byte(`{"title":"hi"}`))
+		if err == nil {
+			t.Fatal("Send: err = nil, want an error")
+		}
+		if !strings.Contains(err.Error(), "subscription") || !strings.Contains(err.Error(), "invalid endpoint") {
+			t.Errorf("Send error = %q, want \"subscription ID: invalid endpoint\"", err.Error())
+		}
+		if strings.Contains(err.Error(), "%zz") {
+			t.Errorf("Send error = %q, must not contain %%zz", err.Error())
+		}
+	})
+}
+
+// TestSend_NoSubscriptionsSendsNothing proves Send is a no-op, and never
+// touches the VAPID keypair, when there is nothing to send to.
+func TestSend_NoSubscriptionsSendsNothing(t *testing.T) {
+	s := newWebPushTestStore(t)
+	w := New(s)
+
+	if err := w.Send(t.Context(), []byte(`{"title":"hi"}`)); err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+
+	if _, ok, err := s.GetSetting(t.Context(), settingVAPIDPublic); err != nil || ok {
+		t.Errorf("GetSetting(%s) = (_, %v, %v), want absent", settingVAPIDPublic, ok, err)
+	}
+}
+
+// TestSend_RejectsOversizePayload proves Send rejects a too-large payload
+// before making any request.
+func TestSend_RejectsOversizePayload(t *testing.T) {
+	s := newWebPushTestStore(t)
+	w := New(s)
+
+	payload := bytes.Repeat([]byte("a"), maxPayloadBytes+1)
+	err := w.Send(t.Context(), payload)
+	if err == nil {
+		t.Fatal("Send: err = nil, want an error")
+	}
+	if !strings.Contains(err.Error(), "3993") {
+		t.Errorf("Send error = %q, want it to mention 3993", err.Error())
+	}
+}
+
+// TestSend_PostsEncryptedPayloadToEverySubscription proves Send encrypts
+// one payload per subscription that decrypts (through decryptForTest) to
+// the exact payload, sets TTL 86400, and signs the Authorization header's
+// k= with the same value PublicKey returns.
+func TestSend_PostsEncryptedPayloadToEverySubscription(t *testing.T) {
+	s := newWebPushTestStore(t)
+	w := New(s)
+
+	priv1, auth1 := newPushSubscriberKeys(t)
+	priv2, auth2 := newPushSubscriberKeys(t)
+
+	rec := &pushRecorder{}
+	srv1 := httptest.NewServer(rec.handler(http.StatusCreated))
+	defer srv1.Close()
+	srv2 := httptest.NewServer(rec.handler(http.StatusCreated))
+	defer srv2.Close()
+
+	if err := s.UpsertPushSubscription(t.Context(), store.PushSubscription{
+		Endpoint: srv1.URL, KeysJSON: pushSubscriptionKeysJSON(t, priv1.PublicKey().Bytes(), auth1),
+	}); err != nil {
+		t.Fatalf("UpsertPushSubscription (one): %v", err)
+	}
+	if err := s.UpsertPushSubscription(t.Context(), store.PushSubscription{
+		Endpoint: srv2.URL, KeysJSON: pushSubscriptionKeysJSON(t, priv2.PublicKey().Bytes(), auth2),
+	}); err != nil {
+		t.Fatalf("UpsertPushSubscription (two): %v", err)
+	}
+
+	pub, err := w.PublicKey(t.Context())
+	if err != nil {
+		t.Fatalf("PublicKey: %v", err)
+	}
+
+	payload := []byte(`{"title":"hi"}`)
+	if err := w.Send(t.Context(), payload); err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+
+	if got := rec.count(); got != 2 {
+		t.Fatalf("got %d requests, want 2", got)
+	}
+
+	privs := []*ecdh.PrivateKey{priv1, priv2}
+	auths := [][]byte{auth1, auth2}
+	for i, req := range rec.reqs {
+		if got := req.headers.Get("TTL"); got != "86400" {
+			t.Errorf("request %d TTL = %q, want 86400", i, got)
+		}
+		authz := req.headers.Get("Authorization")
+		if !strings.HasPrefix(authz, "vapid t=") {
+			t.Errorf("request %d Authorization = %q, want a \"vapid t=\" prefix", i, authz)
+		}
+		if !strings.Contains(authz, "k="+pub) {
+			t.Errorf("request %d Authorization = %q, want k=%s", i, authz, pub)
+		}
+		got, err := decryptForTest(req.body, privs[i], auths[i])
+		if err != nil {
+			t.Fatalf("decryptForTest(request %d): %v", i, err)
+		}
+		if !bytes.Equal(got, payload) {
+			t.Errorf("request %d decrypted = %q, want %q", i, got, payload)
+		}
 	}
 }

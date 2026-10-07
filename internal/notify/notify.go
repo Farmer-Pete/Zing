@@ -5,9 +5,8 @@
 // library or the store's raw settings keys directly, only this package's
 // WebPush type and its own PushKeys interface.
 //
-// Real push delivery (Send) is Package 10's job, not this one's: this
-// package only generates and persists the VAPID keypair and stores
-// subscriptions, so a later package's Notifier can send to them.
+// Real push delivery (Send and sendOne) lives in webpush.go, alongside the
+// RFC 8291 encryption and RFC 8292 VAPID JWT it needs.
 package notify
 
 import (
@@ -20,7 +19,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"net/http"
 	"sync"
+	"time"
 
 	"zing/internal/store"
 )
@@ -58,11 +59,38 @@ type WebPush struct {
 	// mutex makes the check-then-generate atomic: only one goroutine ever
 	// generates, and every other goroutine re-reads the stored key.
 	genMu sync.Mutex
+
+	// client sends the POST in sendOne. CheckRedirect turns any 3xx answer
+	// into an ordinary non-2xx status instead of following it to a second
+	// address (design section: "Trust boundary").
+	client *http.Client
+
+	// contact is the VAPID JWT's sub claim. Defaults to defaultContact;
+	// WithContact overrides it.
+	contact string
+
+	// now returns the signing time for the VAPID JWT. Defaults to
+	// time.Now; a test may replace it.
+	now func() time.Time
 }
+
+// defaultContact is the VAPID JWT sub claim used when no contact is
+// configured.
+const defaultContact = "mailto:zing@localhost"
 
 // New builds a WebPush backed by st.
 func New(st *store.Store) *WebPush {
-	return &WebPush{store: st}
+	return &WebPush{
+		store: st,
+		client: &http.Client{
+			Timeout: 10 * time.Second,
+			CheckRedirect: func(*http.Request, []*http.Request) error {
+				return http.ErrUseLastResponse
+			},
+		},
+		contact: defaultContact,
+		now:     time.Now,
+	}
 }
 
 // PublicKey returns the VAPID public key, base64url raw-URL encoded
