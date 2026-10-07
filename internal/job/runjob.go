@@ -81,6 +81,17 @@ func budgetExhausted(agentSeconds int64, budget time.Duration) (exhausted bool, 
 	return
 }
 
+// ticketBudget is d.Budget plus every budget_raised event's minutes on
+// ticketID (design section 6.7): the one budget runJobWith's refusal check
+// and retryCapBudget's retry check both compare against.
+func ticketBudget(ctx context.Context, d Deps, ticketID int64) (time.Duration, error) {
+	raised, err := d.Store.BudgetRaisedMinutes(ctx, ticketID)
+	if err != nil {
+		return 0, fmt.Errorf("job: budget raised minutes for ticket %d: %w", ticketID, err)
+	}
+	return d.Budget + time.Duration(raised)*time.Minute, nil
+}
+
 // jobTimeout is the one place a job's run timeout comes from: runJobWith's
 // context deadline and deadlineInput's told deadline both read it.
 func jobTimeout(jobCfg machine.Job) time.Duration {
@@ -147,7 +158,11 @@ func runJobWith(
 	if err != nil {
 		return runResult{}, fmt.Errorf("job: %s: agent seconds for ticket %d: %w", jobName, t.ID, err)
 	}
-	exhausted, capSeconds := budgetExhausted(agentSeconds, d.Budget)
+	budget, err := ticketBudget(ctx, d, t.ID)
+	if err != nil {
+		return runResult{}, fmt.Errorf("job: %s: %w", jobName, err)
+	}
+	exhausted, capSeconds := budgetExhausted(agentSeconds, budget)
 	if exhausted {
 		slog.Warn("budget refused a call", "ticket_id", t.ID, "job", jobName, "agent_seconds", agentSeconds, "cap_seconds", capSeconds)
 		return runResult{}, ErrBudget

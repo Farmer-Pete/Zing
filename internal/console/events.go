@@ -26,6 +26,7 @@ var eventRules = map[string]eventRule{
 	store.EventKindOwnerEdit:        ownerEditLine,
 	store.EventKindStaleBase:        staleBaseLine,
 	store.EventKindPlanUnblock:      planUnblockLine,
+	store.EventKindBudgetRaised:     budgetRaisedLine,
 }
 
 // eventLine renders an event row through its kind's rule. If the kind has
@@ -120,4 +121,17 @@ func planUnblockLine(payload json.RawMessage) (string, error) {
 		return "", errors.New("decode plan_unblock: missing guidance")
 	}
 	return "Zing sent this back to planning with: " + e.Guidance, nil
+}
+
+// budgetRaisedLine renders a budget_raised event (store.EventKindBudgetRaised):
+// the owner gave this ticket alone more agent time.
+func budgetRaisedLine(payload json.RawMessage) (string, error) {
+	var e response.BudgetRaisedEvent
+	if err := json.Unmarshal(payload, &e); err != nil {
+		return "", fmt.Errorf("decode budget_raised: %w", err)
+	}
+	if e.Minutes == 0 {
+		return "", errors.New("decode budget_raised: missing minutes")
+	}
+	return fmt.Sprintf("Owner raised this ticket's agent budget by %d minutes.", e.Minutes), nil
 }
