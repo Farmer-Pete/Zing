@@ -384,3 +384,34 @@ func (g *GitHubTracker) CommentContains(ctx context.Context, project, ref, needl
 	}
 	return false, nil
 }
+
+// Comments returns every comment on ref within project, oldest first,
+// paginated to completion.
+func (g *GitHubTracker) Comments(ctx context.Context, project, ref string) ([]Comment, error) {
+	r, err := g.repoFor(project)
+	if err != nil {
+		return nil, err
+	}
+	n, err := canonicalRef(ref)
+	if err != nil {
+		return nil, err
+	}
+
+	opts := &github.IssueListCommentsOptions{}
+	opts.PerPage = perPage
+	var out []Comment
+	for {
+		page, resp, err := g.c.Issues.ListComments(ctx, r.owner, r.name, n, opts)
+		if err != nil {
+			return nil, fmt.Errorf("tracker: comments: %w", err)
+		}
+		for _, c := range page {
+			out = append(out, Comment{ID: c.GetID(), Author: c.GetUser().GetLogin(), Body: c.GetBody()})
+		}
+		if resp.NextPage == 0 {
+			break
+		}
+		opts.Page = resp.NextPage
+	}
+	return out, nil
+}

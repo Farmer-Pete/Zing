@@ -857,6 +857,81 @@ func TestCommentContainsPagesAll(t *testing.T) {
 	})
 }
 
+func TestGitHubTrackerCommentsPagesAll(t *testing.T) {
+	t.Run("returns 101 comments across two pages, in order", func(t *testing.T) {
+		var hits int
+
+		mux := http.NewServeMux()
+		mux.HandleFunc("/repos/o/r/issues/42/comments", func(w http.ResponseWriter, r *http.Request) {
+			hits++
+			if r.URL.Query().Get("page") == "2" {
+				fmt.Fprint(w, `[{"id":101,"user":{"login":"alice"},"body":"last one"}]`)
+				return
+			}
+			w.Header().Set("Link", `<`+"http://"+r.Host+`/repos/o/r/issues/42/comments?page=2>; rel="next"`)
+			var body strings.Builder
+			body.WriteString("[")
+			for i := 1; i <= 100; i++ {
+				if i > 1 {
+					body.WriteString(",")
+				}
+				fmt.Fprintf(&body, `{"id":%d,"user":{"login":"alice"},"body":"comment %d"}`, i, i)
+			}
+			body.WriteString("]")
+			fmt.Fprint(w, body.String())
+		})
+		g := newDefaultTracker(t, mux)
+
+		cs, err := g.Comments(t.Context(), testProject, "42")
+		if err != nil {
+			t.Fatalf("Comments: unexpected error: %v", err)
+		}
+		if hits != 2 {
+			t.Fatalf("Comments: made %d requests, want 2 (two pages)", hits)
+		}
+		if len(cs) != 101 {
+			t.Fatalf("Comments returned %d entries, want 101", len(cs))
+		}
+		if cs[0].ID != 1 || cs[0].Author != "alice" || cs[0].Body != "comment 1" {
+			t.Errorf("Comments[0] = %+v, want {ID:1 Author:alice Body:\"comment 1\"}", cs[0])
+		}
+		if cs[100].ID != 101 || cs[100].Body != "last one" {
+			t.Errorf("Comments[100] = %+v, want the last page's one entry", cs[100])
+		}
+	})
+
+	t.Run("a non-canonical ref errors before any HTTP call", func(t *testing.T) {
+		g := newDefaultTracker(t, unhitMux(t))
+		if _, err := g.Comments(t.Context(), testProject, "+1"); err == nil {
+			t.Fatal("Comments: expected an error for a non-canonical ref, got nil")
+		}
+	})
+
+	t.Run("unknown project errors before any HTTP call", func(t *testing.T) {
+		g := newDefaultTracker(t, unhitMux(t))
+		if _, err := g.Comments(t.Context(), "no-such-project", "42"); err == nil {
+			t.Fatal("Comments: expected an error for an unknown project, got nil")
+		}
+	})
+
+	t.Run("a 500 is an error", func(t *testing.T) {
+		mux := http.NewServeMux()
+		mux.HandleFunc("/repos/o/r/issues/42/comments", func(w http.ResponseWriter, _ *http.Request) {
+			w.WriteHeader(http.StatusInternalServerError)
+		})
+		g := newDefaultTracker(t, mux)
+
+		_, err := g.Comments(t.Context(), testProject, "42")
+		if err == nil {
+			t.Fatal("Comments: expected an error for a 500, got nil")
+		}
+		if !strings.Contains(err.Error(), "tracker: comments:") {
+			t.Errorf("Comments error = %q, want it to carry the %q prefix", err.Error(), "tracker: comments:")
+		}
+		assertErrorsAsGitHubErrorResponse(t, err)
+	})
+}
+
 func TestCommentContainsIgnoresOtherAuthors(t *testing.T) {
 	const needle = "<!-- zing:done t9 -->"
 

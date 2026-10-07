@@ -62,6 +62,37 @@ func commitPhrase(f response.Finding) (string, bool) {
 	return "", false
 }
 
+// compilePhrases mark a finding that claims code does not compile or a
+// test does not build. Review drops one unless it quotes the compiler
+// output (compilerOutputPattern): CHECK already built the commit.
+var compilePhrases = []string{
+	"does not compile", "do not compile", "doesn't compile", "won't compile",
+	"fails to compile", "fail to compile", "compile error", "compilation error",
+	"does not build", "do not build", "doesn't build", "fails to build",
+	"build fails", "build failure",
+}
+
+// compilePhrase returns the first compilePhrases entry found in a
+// finding's text (case-insensitive), from any lens, and whether one matched.
+func compilePhrase(f response.Finding) (string, bool) {
+	text := strings.ToLower(f.Text)
+	for _, p := range compilePhrases {
+		if strings.Contains(text, p) {
+			return p, true
+		}
+	}
+	return "", false
+}
+
+// compilerOutputPattern matches one go build or go vet diagnostic, such as
+// "internal/job/x_test.go:12:5: unknown field Foo in struct literal".
+var compilerOutputPattern = regexp.MustCompile(`[\w./-]+\.go:[1-9][0-9]*(:[1-9][0-9]*)?: \S`) //nolint:gocritic // written exactly as the plan's design shows, so a search for the pattern text finds both copies
+
+// hasCompilerOutput reports whether f's text or fix quotes a Go diagnostic.
+func hasCompilerOutput(f response.Finding) bool {
+	return compilerOutputPattern.MatchString(f.Text) || compilerOutputPattern.MatchString(f.Fix)
+}
+
 // FilterFindings applies 6.3's diff filter and fidelity check to one
 // round's raw lens findings: a finding with a bad Location, a Location
 // outside idx (its path not in the diff, or its line outside every range
@@ -71,8 +102,12 @@ func commitPhrase(f response.Finding) (string, bool) {
 // authorship) already pushed to the branch is also dropped and logged with
 // its lens, location, and the matched phrase -- never the finding text
 // (internal/console/log.go:295) -- because a fix run can only add commits
-// and cannot reword ones already on the branch. Order among survivors
-// follows findings.
+// and cannot reword ones already on the branch. A finding from any lens
+// that claims code does not compile or a test does not build
+// (compilePhrases) is also dropped and logged the same way, unless its
+// text or fix quotes a Go diagnostic line (compilerOutputPattern), because
+// CHECK already built and tested the commit. Order among survivors follows
+// findings.
 func FilterFindings(findings []response.Finding, idx orchestrator.DiffIndex) []response.Finding {
 	survivors := make([]response.Finding, 0, len(findings))
 	for i := range findings {
@@ -86,6 +121,10 @@ func FilterFindings(findings []response.Finding, idx orchestrator.DiffIndex) []r
 		}
 		if phrase, ok := commitPhrase(*f); ok {
 			slog.Warn("review finding about pushed commit text dropped", "lens", f.Lens, "location", f.Location, "phrase", phrase)
+			continue
+		}
+		if phrase, ok := compilePhrase(*f); ok && !hasCompilerOutput(*f) {
+			slog.Warn("review finding claiming a build failure dropped without compiler output", "lens", f.Lens, "location", f.Location, "phrase", phrase)
 			continue
 		}
 		survivors = append(survivors, *f)

@@ -74,6 +74,9 @@
       <tasks>
         <task n="..." test="..." demo="...">...</task> <!-- Task, one to 12, in build order; the working demo's tasks first; n: int; test: string, the test written before this task; demo: bool, true for the working demo's tasks -->
       </tasks>
+      <owner_smoke>
+        <item>...</item> <!-- string, at most 10, one look in a browser the owner may want after merge per item; never blocks shipping -->
+      </owner_smoke>
     </delivery>
     <review> <!-- Review -->
       <trust_root>...</trust_root> <!-- string, which trust-root or style-guide paths are in files, and why, or none -->

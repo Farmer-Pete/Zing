@@ -6,7 +6,10 @@ package job
 // imports orchestrator, and this is where the plan lists its test)
 // orchestrator.CountNoun. It also tests FilterFindings' commit-text drop
 // rule (ticket #10): a quality finding about pushed commit text can never
-// be fixed by a fix run, so it is dropped and logged rather than kept.
+// be fixed by a fix run, so it is dropped and logged rather than kept. It
+// also tests FilterFindings' compile-claim drop rule (ticket #104): a
+// finding claiming code does not compile or a test does not build is
+// dropped and logged unless it quotes compiler output.
 
 import (
 	"bytes"
@@ -122,6 +125,12 @@ func TestFilterFindings(t *testing.T) {
 		{"a quality finding about commit authorship: dropped", response.Finding{Lens: response.LensQuality, Location: nestedAGoLine12, Text: "Co-Authored-By trailer names the wrong author", Fix: "f"}, false},
 		{"a correctness finding mentioning the commit message builder: kept", response.Finding{Lens: response.LensCorrectness, Location: nestedAGoLine12, Text: "the commit message builder skips fences", Fix: "f"}, true},
 		{"a quality finding unrelated to commit text: kept", response.Finding{Lens: response.LensQuality, Location: nestedAGoLine12, Text: "name tmp is not a plain word", Fix: "f"}, true},
+		{"a compile claim with no compiler output: dropped", response.Finding{Lens: response.LensCorrectness, Location: nestedAGoLine12, Text: "Go does not allow promoted fields in a composite literal, so internal/job tests do not compile.", Fix: "use the embedded literal"}, false},
+		{"a compile claim with a diagnostic line in text: kept", response.Finding{Lens: response.LensCorrectness, Location: nestedAGoLine12, Text: "The tests do not compile: internal/job/x_test.go:12:5: unknown field Foo in struct literal", Fix: "f"}, true},
+		{"a build claim with a diagnostic line in fix: kept", response.Finding{Lens: response.LensCorrectness, Location: nestedAGoLine12, Text: "The test does not build.", Fix: "go vet says a_test.go:3: undefined: Bar"}, true},
+		{"a tests-lens build claim with no output: dropped", response.Finding{Lens: response.LensTests, Location: nestedAGoLine12, Text: "TestX does not build after the rename.", Fix: "f"}, false},
+		{"a quality finding whose fix mentions a compile phrase: kept", response.Finding{Lens: response.LensQuality, Location: nestedAGoLine12, Text: "name tmp is not a plain word", Fix: "this fails to compile otherwise"}, true},
+		{"breaks the build is not a listed phrase: kept", response.Finding{Lens: response.LensSecurity, Location: nestedAGoLine12, Text: "this change breaks the build", Fix: "f"}, true},
 	}
 
 	findings := make([]response.Finding, len(cases))
@@ -180,6 +189,45 @@ func TestFilterFindingsLogsCommitTextDrop(t *testing.T) {
 		t.Errorf("log = %q, want phrase=co-authored-by", logged)
 	}
 	if strings.Contains(logged, "trailer names the wrong author") {
+		t.Errorf("log = %q, must not contain the finding text", logged)
+	}
+}
+
+// TestFilterFindingsLogsCompileClaimDrop proves a dropped compile-claim
+// finding is logged with its lens, location, and the matched phrase, never
+// the finding's own text. Not parallel: it calls slog.SetDefault to
+// capture a log line, which swaps the process-wide default logger.
+func TestFilterFindingsLogsCompileClaimDrop(t *testing.T) {
+	idx := reviewDiffIndex()
+
+	var logBuf bytes.Buffer
+	prevDefault := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logBuf, nil)))
+	t.Cleanup(func() { slog.SetDefault(prevDefault) })
+
+	findings := []response.Finding{
+		{Lens: response.LensCorrectness, Location: nestedAGoLine12, Text: "Go does not allow promoted fields in a composite literal, so internal/job tests do not compile.", Fix: "use the embedded literal"},
+	}
+
+	got := FilterFindings(findings, idx)
+	if len(got) != 0 {
+		t.Fatalf("FilterFindings = %+v, want it dropped", got)
+	}
+
+	logged := logBuf.String()
+	if !strings.Contains(logged, "review finding claiming a build failure dropped without compiler output") {
+		t.Errorf("log = %q, want it to contain the drop message", logged)
+	}
+	if !strings.Contains(logged, "lens=correctness") {
+		t.Errorf("log = %q, want lens=correctness", logged)
+	}
+	if !strings.Contains(logged, "location="+nestedAGoLine12) {
+		t.Errorf("log = %q, want location=%s", logged, nestedAGoLine12)
+	}
+	if !strings.Contains(logged, `phrase="do not compile"`) {
+		t.Errorf("log = %q, want phrase=\"do not compile\"", logged)
+	}
+	if strings.Contains(logged, "promoted fields") {
 		t.Errorf("log = %q, must not contain the finding text", logged)
 	}
 }

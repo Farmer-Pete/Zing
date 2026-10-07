@@ -855,6 +855,84 @@ func TestOwnerEdit_AmendsTicketBody(t *testing.T) {
 	}
 }
 
+// TestOwnerEdit_TicketBodyKeepsTrackerBaseline proves editTicketBodyTx fills
+// a missing tracker_body baseline from the pre-edit body before it
+// overwrites body (#98), so a later planning refresh can tell a console
+// edit apart from an edit on the tracker: a row whose tracker_body is NULL
+// (standing in for one inserted before migration 0011) gets tracker_body
+// "A" on its first edit and keeps it on a second edit, while a row whose
+// tracker_body is already set keeps that value.
+func TestOwnerEdit_TicketBodyKeepsTrackerBaseline(t *testing.T) {
+	t.Parallel()
+
+	t.Run("NULL tracker_body is filled from the pre-edit body", func(t *testing.T) {
+		t.Parallel()
+		s := newTestStore(t)
+		ctx := t.Context()
+		_, ticketID := seedQueuedTicketWithBody(t, s, "2", "A")
+		if _, err := s.db.ExecContext(ctx, `UPDATE tickets SET tracker_body = NULL WHERE id = ?`, ticketID); err != nil {
+			t.Fatalf("set tracker_body NULL: %v", err)
+		}
+
+		if err := s.OwnerEdit(ctx, OwnerEditRequest{
+			TicketID: ticketID, Target: OwnerEditTicketBody, Action: OwnerEditActionEdit,
+			Body: new("A, edited"),
+		}); err != nil {
+			t.Fatalf("OwnerEdit: %v", err)
+		}
+
+		got, getErr := s.GetTicket(ctx, ticketID)
+		if getErr != nil {
+			t.Fatalf("GetTicket: %v", getErr)
+		}
+		if got.Body != "A, edited" {
+			t.Errorf("body = %q, want %q", got.Body, "A, edited")
+		}
+		if got.TrackerBody == nil || *got.TrackerBody != "A" {
+			t.Errorf("tracker_body = %v, want %q", got.TrackerBody, "A")
+		}
+
+		if err := s.OwnerEdit(ctx, OwnerEditRequest{
+			TicketID: ticketID, Target: OwnerEditTicketBody, Action: OwnerEditActionEdit,
+			Body: new("A, again"),
+		}); err != nil {
+			t.Fatalf("OwnerEdit (second edit): %v", err)
+		}
+		got2, getErr2 := s.GetTicket(ctx, ticketID)
+		if getErr2 != nil {
+			t.Fatalf("GetTicket: %v", getErr2)
+		}
+		if got2.TrackerBody == nil || *got2.TrackerBody != "A" {
+			t.Errorf("tracker_body after a second edit = %v, want unchanged %q", got2.TrackerBody, "A")
+		}
+	})
+
+	t.Run("an already-set tracker_body is left alone", func(t *testing.T) {
+		t.Parallel()
+		s := newTestStore(t)
+		ctx := t.Context()
+		_, ticketID := seedQueuedTicketWithBody(t, s, "3", "A")
+		if _, err := s.db.ExecContext(ctx, `UPDATE tickets SET tracker_body = 'X' WHERE id = ?`, ticketID); err != nil {
+			t.Fatalf("set tracker_body X: %v", err)
+		}
+
+		if err := s.OwnerEdit(ctx, OwnerEditRequest{
+			TicketID: ticketID, Target: OwnerEditTicketBody, Action: OwnerEditActionEdit,
+			Body: new("A, edited"),
+		}); err != nil {
+			t.Fatalf("OwnerEdit: %v", err)
+		}
+
+		got, getErr := s.GetTicket(ctx, ticketID)
+		if getErr != nil {
+			t.Fatalf("GetTicket: %v", getErr)
+		}
+		if got.TrackerBody == nil || *got.TrackerBody != "X" {
+			t.Errorf("tracker_body = %v, want unchanged %q", got.TrackerBody, "X")
+		}
+	})
+}
+
 // --- AnswerQuestion (#57, "Edit it") -----------------------------------------
 
 // seedAmendedEscalation claims ticketID and commits one escalation whose

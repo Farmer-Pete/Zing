@@ -30,6 +30,21 @@ type Ticket struct {
 	NextPollAt      *time.Time // nil: due now, or no babysit poll pending
 	PollIntervalS   *int       // 30..300 when set
 	PollFingerprint *string    // 64 lowercase hex when set
+	// TrackerBody is the issue body as last read from the tracker (migration
+	// 0011): nil only for a row inserted before that migration (or by an
+	// older binary) whose body the console has never edited.
+	TrackerBody *string
+	// OwnerComments is tracker.RenderComments text from the last planning
+	// refresh (migration 0011); "" when none.
+	OwnerComments string
+}
+
+// TicketText is a planning refresh's write (migration 0011): Body nil
+// leaves tickets.body and tracker_body untouched; a non-nil Body sets both
+// together. OwnerComments is always written.
+type TicketText struct {
+	Body          *string
+	OwnerComments string
 }
 
 // PollUpdate sets a ticket's three poll columns together (design section
@@ -114,7 +129,7 @@ const ticketStateQueued = "queued"
 // by every ticket read so a single scanTicket stays correct for all of them.
 // The binary before Package 9 names its own columns explicitly here too, so
 // it ignores migration 0004's three trailing poll columns (section 16).
-const ticketColumns = `id, project_id, tracker_ref, title, body, kind, state, waiting_on, parent_ticket_id, branch, pr_url, claim_owner, claim_expires_at, next_poll_at, poll_interval_s, poll_fingerprint`
+const ticketColumns = `id, project_id, tracker_ref, title, body, kind, state, waiting_on, parent_ticket_id, branch, pr_url, claim_owner, claim_expires_at, next_poll_at, poll_interval_s, poll_fingerprint, tracker_body, owner_comments`
 
 // messageColumns is the messages column list, id first, then the store's
 // Message (store.go) fields in that struct's order (event_kind last,
@@ -138,12 +153,14 @@ func scanTicket(rs rowScanner, extra ...any) (Ticket, error) {
 	var parentTicketID sql.NullInt64
 	var nextPollAt, pollFingerprint sql.NullString
 	var pollIntervalS sql.NullInt64
+	var trackerBody sql.NullString
 
 	dest := []any{ //nolint:prealloc // the literal spells out ticketColumns's order; extra is variadic and appended once below, not grown in a loop
 		&t.ID, &t.ProjectID, &t.TrackerRef, &t.Title, &t.Body,
 		&kind, &t.State, &waitingOn, &parentTicketID,
 		&branch, &prURL, &claimOwner, &claimExpiresAt,
 		&nextPollAt, &pollIntervalS, &pollFingerprint,
+		&trackerBody, &t.OwnerComments,
 	}
 	if err := rs.Scan(append(dest, extra...)...); err != nil {
 		return Ticket{}, err
@@ -187,6 +204,9 @@ func scanTicket(rs rowScanner, extra ...any) (Ticket, error) {
 	}
 	if pollFingerprint.Valid {
 		t.PollFingerprint = &pollFingerprint.String
+	}
+	if trackerBody.Valid {
+		t.TrackerBody = &trackerBody.String
 	}
 	return t, nil
 }

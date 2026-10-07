@@ -17,6 +17,13 @@ The owner has judged the code at those locations. A finding at a
 listed location, or about the same concern a few lines away, is not a
 finding unless the diff changed the code there.
 
+Zing built this commit and ran the project's tests and lint before
+review. A finding that says code does not compile, or a test does not
+build, must quote the go build or go vet output that shows it, such as
+internal/job/x_test.go:12:5: unknown field Foo in struct literal.
+Review drops such a finding without that output. Your tools cannot run
+go build or go vet, so raise that claim only when you can quote it.
+
 Severity: blocker means it must not merge; major means it is wrong; minor
 means it is worse than it should be; nit is a small fix.
 

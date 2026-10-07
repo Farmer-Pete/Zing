@@ -228,10 +228,11 @@ type Migration struct {
 }
 
 type Delivery struct {
-	Files     []FileChange `xml:"files>file"  json:"files" jsonschema:"minItems=1" doc:"every path the build will create, modify, or delete; this is the perimeter"`
-	Deletions Deletions    `xml:"deletions"   json:"deletions"`
-	Tests     []TestCase   `xml:"tests>test"  json:"tests" jsonschema:"minItems=1" doc:"integration tests at every new or changed cut point first; unit tests only for parsers and pure functions; for a bug, the regression test first"`
-	Tasks     []Task       `xml:"tasks>task"  json:"tasks" jsonschema:"minItems=1,maxItems=12" doc:"in build order; the working demo's tasks first"`
+	Files      []FileChange `xml:"files>file"        json:"files" jsonschema:"minItems=1" doc:"every path the build will create, modify, or delete; this is the perimeter"`
+	Deletions  Deletions    `xml:"deletions"         json:"deletions"`
+	Tests      []TestCase   `xml:"tests>test"        json:"tests" jsonschema:"minItems=1" doc:"integration tests at every new or changed cut point first; unit tests only for parsers and pure functions; for a bug, the regression test first"`
+	Tasks      []Task       `xml:"tasks>task"        json:"tasks" jsonschema:"minItems=1,maxItems=12" doc:"in build order; the working demo's tasks first"`
+	OwnerSmoke []string     `xml:"owner_smoke>item"  json:"owner_smoke,omitempty" jsonschema:"maxItems=10,minLength=1,maxLength=300" doc:"one look in a browser the owner may want after merge per item; never blocks shipping"`
 }
 
 type FileChange struct {
