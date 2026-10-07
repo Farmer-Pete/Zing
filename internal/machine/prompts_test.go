@@ -28,12 +28,12 @@ func TestPrompts_MatchThePinnedDesignText(t *testing.T) {
 		{
 			name:   "planning-feature",
 			path:   planningFeaturePromptPath,
-			sha256: "5e8da028411c575385ac2acbd67809c559a9704cba195181db0246bcf43daa53",
+			sha256: "b821570489aa04eda8a7e01c49c8f8758b8334a8beeddc00d45dd7e041714b23",
 		},
 		{
 			name:   "planning-bug",
 			path:   planningBugPromptPath,
-			sha256: "b5d2ea6d73fb3d0ba93e4d30e30d60fe6dc515592e32bc9bd370b0c4f0d347d4",
+			sha256: "7d5b0d6ac019d904d65fd1f81cb4a759a283f11fefb0b9d42d4b7b446fa7172c",
 		},
 		{
 			name:   "planreview",
@@ -473,6 +473,28 @@ func TestPlanningPromptsReadGovernanceFilesFromCommit(t *testing.T) {
 	for _, path := range []string{planningFeaturePromptPath, planningBugPromptPath} {
 		if !strings.Contains(unwrapped(t, path), governanceChecksSentence) {
 			t.Errorf("%s lacks the governance-checks sentence", path)
+		}
+	}
+}
+
+// teeLogSentence is what both planning prompts say about writing a log
+// before grepping it (#248): CMD | tee FILE | grep -q A pipes tee into a
+// reader that can exit on its first match, so tee gets SIGPIPE and stops
+// writing FILE before a later grep of FILE reads it, cutting a passing
+// build's log short.
+const teeLogSentence = "A check that greps a command's output more than " +
+	"once writes the log first, then greps it, such as CMD > FILE 2>&1; " +
+	"grep -q A FILE && grep -q B FILE, because tee into grep -q can cut " +
+	"the log short."
+
+// TestPlanningPromptsTeachLogThenGrep proves both planning prompts tell
+// the planner to write a check's log before grepping it rather than
+// piping tee into a reader that can exit early (#248).
+func TestPlanningPromptsTeachLogThenGrep(t *testing.T) {
+	t.Parallel()
+	for _, path := range []string{planningFeaturePromptPath, planningBugPromptPath} {
+		if !strings.Contains(unwrapped(t, path), teeLogSentence) {
+			t.Errorf("%s lacks the tee-log sentence", path)
 		}
 	}
 }
