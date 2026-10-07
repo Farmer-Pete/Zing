@@ -236,6 +236,34 @@ func TestSpoofedReplyKeepsThreadActionable(t *testing.T) {
 	}
 }
 
+// TestClassifyThreadsOne classifies one thread per row: each shape here
+// blocks the ready flip and the merge gate because it lands in
+// unclassified.
+func TestClassifyThreadsOne(t *testing.T) {
+	t.Parallel()
+
+	odd := orchestrator.ThreadComment{Author: testOtherLogin, Body: "???"}
+
+	cases := []struct {
+		name   string
+		thread orchestrator.Thread
+	}{
+		{"zero comments is unclassified", orchestrator.Thread{ID: "RT_unclassified_zero_comments"}},
+		{"an empty id is unclassified", orchestrator.Thread{ID: "", Comments: []orchestrator.ThreadComment{odd}}},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			resolved, actionable, leftover, unclassified := classifyThreads([]orchestrator.Thread{tc.thread}, testViewerLogin)
+			if len(unclassified) != 1 || len(resolved)+len(actionable)+len(leftover) != 0 {
+				t.Errorf("classifyThreads: resolved=%d actionable=%d leftover=%d unclassified=%d, want 0,0,0,1",
+					len(resolved), len(actionable), len(leftover), len(unclassified))
+			}
+		})
+	}
+}
+
 // -----------------------------------------------------------------------
 // Pure: renderThreads
 // -----------------------------------------------------------------------
