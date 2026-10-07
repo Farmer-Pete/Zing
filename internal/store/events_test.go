@@ -330,9 +330,67 @@ func TestInsertEventRejects(t *testing.T) {
 func TestEventKinds(t *testing.T) {
 	t.Parallel()
 	got := EventKinds()
-	want := []string{"check_rerun", "check_rerun_passed", "owner_edit", "plan_unblock", "stale_base"}
+	want := []string{"budget_raised", "check_rerun", "check_rerun_passed", "owner_edit", "plan_unblock", "stale_base"}
 	if !slices.Equal(got, want) {
 		t.Errorf("EventKinds() = %v, want %v", got, want)
+	}
+}
+
+// TestBudgetRaisedMinutes proves BudgetRaisedMinutes sums every
+// budget_raised event's minutes on a ticket, leaves another ticket alone,
+// and stays unchanged when an invalid event is rejected.
+func TestBudgetRaisedMinutes(t *testing.T) {
+	t.Parallel()
+	s := newTestStore(t)
+	ctx := t.Context()
+
+	seedProjectAndTicket(t, s)
+	const ticketA = 1
+	if _, err := s.db.ExecContext(ctx,
+		`INSERT INTO tickets (id, project_id, tracker_ref, title, state) VALUES (2, 1, '43', 'a second ticket', 'queued')`,
+	); err != nil {
+		t.Fatalf("seed second ticket: %v", err)
+	}
+	const ticketB = 2
+
+	if got, err := s.BudgetRaisedMinutes(ctx, ticketA); err != nil || got != 0 {
+		t.Fatalf("BudgetRaisedMinutes(A, no events) = (%d, %v), want (0, nil)", got, err)
+	}
+
+	for range 2 {
+		msg, err := NewEvent(ticketA, EventKindBudgetRaised, response.BudgetRaisedEvent{Minutes: 60})
+		if err != nil {
+			t.Fatalf("NewEvent: %v", err)
+		}
+		if _, err := s.InsertMessage(ctx, msg); err != nil {
+			t.Fatalf("InsertMessage(budget_raised): %v", err)
+		}
+	}
+
+	got, err := s.BudgetRaisedMinutes(ctx, ticketA)
+	if err != nil {
+		t.Fatalf("BudgetRaisedMinutes(A): %v", err)
+	}
+	if got != 120 {
+		t.Errorf("BudgetRaisedMinutes(A) = %d, want 120", got)
+	}
+
+	gotB, err := s.BudgetRaisedMinutes(ctx, ticketB)
+	if err != nil || gotB != 0 {
+		t.Fatalf("BudgetRaisedMinutes(B) = (%d, %v), want (0, nil)", gotB, err)
+	}
+
+	badMsg, err := NewEvent(ticketA, EventKindBudgetRaised, response.BudgetRaisedEvent{Minutes: 0})
+	if err != nil {
+		t.Fatalf("NewEvent: %v", err)
+	}
+	if _, insertErr := s.InsertMessage(ctx, badMsg); insertErr == nil {
+		t.Error("InsertMessage(budget_raised, minutes 0) = nil error, want one")
+	}
+
+	gotAfter, err := s.BudgetRaisedMinutes(ctx, ticketA)
+	if err != nil || gotAfter != 120 {
+		t.Fatalf("BudgetRaisedMinutes(A) after rejected event = (%d, %v), want (120, nil)", gotAfter, err)
 	}
 }
 
