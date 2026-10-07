@@ -59,6 +59,28 @@ func (p *pushPostCounter) handler(status int) http.HandlerFunc {
 	}
 }
 
+// countLinesWithAll reports how many lines of logged contain every one of
+// want, so a test can tell a log line's own attributes apart from another
+// line's (e.g. Resume's "dispatcher resumed from the console" line also
+// carries kind=fail-closed, and a bare strings.Contains over the whole
+// buffer cannot tell that attribute apart from the stop push line's own).
+func countLinesWithAll(logged string, want ...string) int {
+	count := 0
+	for line := range strings.SplitSeq(logged, "\n") {
+		matched := true
+		for _, w := range want {
+			if !strings.Contains(line, w) {
+				matched = false
+				break
+			}
+		}
+		if matched {
+			count++
+		}
+	}
+	return count
+}
+
 // stopPushTestSubscription stores one fresh, valid push_subscriptions row
 // pointed at endpoint, so notify.WebPush.Send has somewhere to POST.
 func stopPushTestSubscription(t *testing.T, s *store.Store, endpoint string) {
@@ -149,11 +171,12 @@ func TestRun_StopPushesOnceAndResumeDoesNot(t *testing.T) {
 
 	logged := logBuf.String()
 	wantSent := "dispatch: stop push sent"
-	if got := strings.Count(logged, wantSent); got != 1 {
-		t.Errorf("%q logged %d times, want exactly 1 (log: %s)", wantSent, got, logged)
+	wantKind := "kind=" + dispatch.StopKindFailClosed
+	if got := countLinesWithAll(logged, wantSent, wantKind); got != 1 {
+		t.Errorf("lines with both %q and %q = %d, want exactly 1 (log: %s)", wantSent, wantKind, got, logged)
 	}
-	if !strings.Contains(logged, "kind="+dispatch.StopKindFailClosed) {
-		t.Errorf("log does not contain kind=%s (log: %s)", dispatch.StopKindFailClosed, logged)
+	if got := countLinesWithAll(logged, wantSent, "ticket_id="); got != 1 {
+		t.Errorf("lines with both %q and ticket_id= = %d, want exactly 1 (log: %s)", wantSent, got, logged)
 	}
 }
 
@@ -206,11 +229,9 @@ func TestRun_StopPushFailureOnlyWarns(t *testing.T) {
 
 	logged := logBuf.String()
 	wantFailed := "dispatch: stop push failed"
-	if got := strings.Count(logged, wantFailed); got != 1 {
-		t.Errorf("%q logged %d times, want exactly 1 (log: %s)", wantFailed, got, logged)
-	}
-	if !strings.Contains(logged, "kind="+dispatch.StopKindFailClosed) {
-		t.Errorf("log does not contain kind=%s (log: %s)", dispatch.StopKindFailClosed, logged)
+	wantKind := "kind=" + dispatch.StopKindFailClosed
+	if got := countLinesWithAll(logged, wantFailed, wantKind); got != 1 {
+		t.Errorf("lines with both %q and %q = %d, want exactly 1 (log: %s)", wantFailed, wantKind, got, logged)
 	}
 	if strings.Contains(logged, srv.URL) {
 		t.Errorf("log contains the push endpoint URL %q, want it never logged", srv.URL)

@@ -105,10 +105,6 @@ func encrypt(payload, uaPublic, authSecret, salt []byte, asPriv *ecdh.PrivateKey
 	plaintext = append(plaintext, 0x02)
 	ciphertext := gcm.Seal(nil, nonce, plaintext, nil)
 
-	if len(asPublic) != uncompressedP256PointLen {
-		return nil, fmt.Errorf("notify: as_public is %d bytes, want %d", len(asPublic), uncompressedP256PointLen)
-	}
-
 	body := make([]byte, 0, 16+4+1+len(asPublic)+len(ciphertext))
 	body = append(body, salt...)
 	var recordSizeBytes [4]byte
@@ -147,7 +143,8 @@ type vapidJWTClaims struct {
 // since a wrapped url.Parse error would quote endpoint.
 func vapidJWT(priv *ecdsa.PrivateKey, endpoint, sub string, now time.Time) (string, error) {
 	u, err := url.Parse(endpoint)
-	if err != nil || u.Scheme == "" || u.Host == "" {
+	hasOrigin := err == nil && u.Scheme != "" && u.Host != ""
+	if !hasOrigin {
 		return "", errors.New("invalid endpoint")
 	}
 	aud := u.Scheme + "://" + u.Host

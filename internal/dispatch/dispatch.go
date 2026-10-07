@@ -689,25 +689,16 @@ func (d *Dispatcher) NotifyDrain() {
 // error already recorded. It returns whether this call was the first to
 // set stop, though no caller in this package currently needs that signal.
 //
-// setStop never calls notifyStop itself, unlike setStopAndNotify below: every
-// caller that always passes nil (NotifyDrain, a drain, or a context
-// cancellation) calls this one instead, so that call graph never statically
-// reaches notifyStop's own detached context.Background(). Without that
-// separation, golangci-lint's contextcheck would flag every caller of
-// NotifyDrain -- including a future HTTP handler with its own ctx in scope
-// -- for not threading that ctx through a push send that must, by design,
-// outlive it (notifyStop's own doc comment).
+// setStop calls notifyStop on the first non-nil error any caller reports
+// (design section "shape" rules): a fail-closed or error stop sends its
+// push exactly once, from whichever call first records it. A caller that
+// always passes nil (NotifyDrain, a drain, or a context cancellation) never
+// records a non-nil stopErr, so it never reaches notifyStop's own detached
+// context.Background() -- which is why golangci-lint's contextcheck does
+// not flag NotifyDrain's own callers for not threading their ctx through a
+// push send that must, by design, outlive it (notifyStop's own doc
+// comment).
 func (d *Dispatcher) setStop(err error) bool {
-	first, _, _ := d.recordStop(err)
-	return first
-}
-
-// setStopAndNotify is setStop plus notifyStop (design section "shape"
-// rules): every caller that might pass a non-nil error -- Tick's own fill
-// error, park's worker or flags-read error -- calls this one, so a
-// fail-closed or error stop still sends its push exactly once, from
-// whichever call first records it.
-func (d *Dispatcher) setStopAndNotify(err error) bool {
 	first, recorded, payload := d.recordStop(err)
 	if recorded {
 		d.notifyStop(payload, err)
@@ -715,12 +706,12 @@ func (d *Dispatcher) setStopAndNotify(err error) bool {
 	return first
 }
 
-// recordStop is setStop's and setStopAndNotify's shared, mutex-guarded
-// core: it records err as described above and reports whether this call
-// was the first to set stop and whether it was also the first to record a
-// non-nil stopErr, together with that error's stop-push payload (built
-// while still holding d.mu, so a concurrent StopStatus or notifyStop call
-// can never observe stoppedAt before the payload it describes exists).
+// recordStop is setStop's shared, mutex-guarded core: it records err as
+// described above and reports whether this call was the first to set stop
+// and whether it was also the first to record a non-nil stopErr, together
+// with that error's stop-push payload (built while still holding d.mu, so a
+// concurrent StopStatus or notifyStop call can never observe stoppedAt
+// before the payload it describes exists).
 func (d *Dispatcher) recordStop(err error) (first, recorded bool, payload []byte) {
 	d.mu.Lock()
 	first = !d.stop
@@ -797,7 +788,7 @@ func (d *Dispatcher) Tick(ctx context.Context) error {
 	results := make(chan runResult, d.CurrentTuning().MaxParallel)
 	launched, fillErr := d.fill(ctx, results)
 	if fillErr != nil {
-		d.setStopAndNotify(fillErr) //nolint:contextcheck // notifyStop's own send deliberately runs on a bounded context.Background(), detached from this ctx, so a push outlives the Tick call that triggered it (notifyStop's own doc comment)
+		d.setStop(fillErr) //nolint:contextcheck // notifyStop's own send deliberately runs on a bounded context.Background(), detached from this ctx, so a push outlives the Tick call that triggered it (notifyStop's own doc comment)
 	}
 
 	errs := make([]error, 0, launched+1)
@@ -844,7 +835,7 @@ func (d *Dispatcher) Run(ctx context.Context) error {
 	for {
 		select {
 		case <-ctx.Done():
-			d.setStop(nil)
+			d.setStop(nil) //nolint:contextcheck // this always passes nil, so notifyStop's own detached context.Background() is never reached (setStop's own doc comment)
 			return d.finish(ctx.Err(), results)
 
 		case <-d.drainCh:
@@ -856,7 +847,7 @@ func (d *Dispatcher) Run(ctx context.Context) error {
 				continue
 			}
 			if draining {
-				d.setStop(nil)
+				d.setStop(nil) //nolint:contextcheck // this always passes nil, so notifyStop's own detached context.Background() is never reached (setStop's own doc comment)
 				return d.finish(nil, results)
 			}
 
@@ -870,7 +861,7 @@ func (d *Dispatcher) Run(ctx context.Context) error {
 		case r := <-results:
 			settled := d.resultConsumed()
 			if r.Err != nil {
-				d.park(r.Err) //nolint:contextcheck // park's own setStopAndNotify feeds notifyStop, whose send deliberately runs on a bounded context.Background(), detached from this ctx, so a push outlives the Run pass that triggered it (notifyStop's own doc comment)
+				d.park(r.Err) //nolint:contextcheck // park's own setStop feeds notifyStop, whose send deliberately runs on a bounded context.Background(), detached from this ctx, so a push outlives the Run pass that triggered it (notifyStop's own doc comment)
 			}
 			d.bus.Publish() // the banner's in-flight count just dropped, owner stop or not
 			if settled {
@@ -886,7 +877,7 @@ func (d *Dispatcher) Run(ctx context.Context) error {
 				continue
 			}
 			if draining {
-				d.setStop(nil)
+				d.setStop(nil) //nolint:contextcheck // this always passes nil, so notifyStop's own detached context.Background() is never reached (setStop's own doc comment)
 				return d.finish(nil, results)
 			}
 			if d.isStopped() {
@@ -916,13 +907,13 @@ func (d *Dispatcher) Run(ctx context.Context) error {
 // parks and Run keeps looping.
 func (d *Dispatcher) passFailed(ctx context.Context, err error, results <-chan runResult) (done bool, ret error) {
 	if ctx.Err() != nil {
-		d.setStop(nil)
+		d.setStop(nil) //nolint:contextcheck // this always passes nil, so notifyStop's own detached context.Background() is never reached (setStop's own doc comment)
 		return true, d.finish(ctx.Err(), results)
 	}
 	if d.hasStopErr() {
 		return false, nil
 	}
-	d.park(err) //nolint:contextcheck // park's own setStopAndNotify feeds notifyStop, whose send deliberately runs on a bounded context.Background(), detached from this ctx, so a push outlives the pass that triggered it (notifyStop's own doc comment)
+	d.park(err) //nolint:contextcheck // park's own setStop feeds notifyStop, whose send deliberately runs on a bounded context.Background(), detached from this ctx, so a push outlives the pass that triggered it (notifyStop's own doc comment)
 	d.mu.Lock()
 	settled := d.pending == 0
 	d.mu.Unlock()
@@ -936,7 +927,7 @@ func (d *Dispatcher) passFailed(ctx context.Context, err error, results <-chan r
 // once (design section 4.6), and wakes the console's own re-render so the
 // stop banner shows up without waiting for the next /stream frame.
 func (d *Dispatcher) park(err error) {
-	d.setStopAndNotify(err)
+	d.setStop(err)
 	d.reportFirstError()
 	d.bus.Publish()
 }
@@ -1486,7 +1477,7 @@ func (d *Dispatcher) worker(ctx context.Context, ticket store.Ticket, timeout ti
 	err := d.runAndCommit(ctx, ticket, timeout, expires)
 	if err != nil {
 		err = &runError{TicketID: ticket.ID, Err: err}
-		d.setStopAndNotify(err) //nolint:contextcheck // notifyStop's own send deliberately runs on a bounded context.Background(), detached from this ctx, so a push outlives the worker that triggered it (notifyStop's own doc comment)
+		d.setStop(err) //nolint:contextcheck // notifyStop's own send deliberately runs on a bounded context.Background(), detached from this ctx, so a push outlives the worker that triggered it (notifyStop's own doc comment)
 	}
 
 	// Send before leaving inflight: a finished worker whose result the

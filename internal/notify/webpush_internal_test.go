@@ -39,7 +39,6 @@ func decryptForTest(message []byte, uaPriv *ecdh.PrivateKey, authSecret []byte) 
 		return nil, fmt.Errorf("message too short: %d bytes", len(message))
 	}
 	salt := message[0:16]
-	_ = binary.BigEndian.Uint32(message[16:20]) // record size, unused here
 	keyIDLen := int(message[20])
 	if len(message) < 21+keyIDLen {
 		return nil, errors.New("message too short for key id")
@@ -502,6 +501,17 @@ func TestSend_RejectsOversizePayload(t *testing.T) {
 	s := newWebPushTestStore(t)
 	w := New(s)
 
+	rec := &pushRecorder{}
+	srv := httptest.NewServer(rec.handler(http.StatusCreated))
+	defer srv.Close()
+
+	priv, auth := newPushSubscriberKeys(t)
+	if err := s.UpsertPushSubscription(t.Context(), store.PushSubscription{
+		Endpoint: srv.URL, KeysJSON: pushSubscriptionKeysJSON(t, priv.PublicKey().Bytes(), auth),
+	}); err != nil {
+		t.Fatalf("UpsertPushSubscription: %v", err)
+	}
+
 	payload := bytes.Repeat([]byte("a"), maxPayloadBytes+1)
 	err := w.Send(t.Context(), payload)
 	if err == nil {
@@ -509,6 +519,9 @@ func TestSend_RejectsOversizePayload(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "3993") {
 		t.Errorf("Send error = %q, want it to mention 3993", err.Error())
+	}
+	if got := rec.count(); got != 0 {
+		t.Errorf("push service received %d requests, want 0 (Send must reject before listing subscriptions)", got)
 	}
 }
 

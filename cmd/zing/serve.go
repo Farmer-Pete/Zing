@@ -996,7 +996,7 @@ func shutdown(
 				// on the next ticker fire, which can race a short drain
 				// deadline (design section 6.10; dispatch.Dispatcher's own
 				// NotifyDrain doc comment).
-				d.NotifyDrain()
+				d.NotifyDrain() //nolint:contextcheck // NotifyDrain's own setStop(nil) call never reaches notifyStop's detached context.Background(), since that only fires for a non-nil error (setStop's own doc comment)
 			}
 			return setErr
 		},
