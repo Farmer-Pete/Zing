@@ -86,7 +86,7 @@ func compilePhrase(f response.Finding) (string, bool) {
 
 // compilerOutputPattern matches one go build or go vet diagnostic, such as
 // "internal/job/x_test.go:12:5: unknown field Foo in struct literal".
-var compilerOutputPattern = regexp.MustCompile(`[\w./-]+\.go:[1-9]\d*(:[1-9]\d*)?: \S`)
+var compilerOutputPattern = regexp.MustCompile(`[\w./-]+\.go:[1-9][0-9]*(:[1-9][0-9]*)?: \S`) //nolint:gocritic // written exactly as the plan's design shows, so a search for the pattern text finds both copies
 
 // hasCompilerOutput reports whether f's text or fix quotes a Go diagnostic.
 func hasCompilerOutput(f response.Finding) bool {
