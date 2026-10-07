@@ -48,6 +48,9 @@
       <tasks>
         <task n="1" test="TestHealthz" demo="true">Add the /healthz handler and register it in newMux so the demo command above returns 200.</task>
       </tasks>
+      <owner_smoke>
+        <item>Open /healthz in a browser and see the word ok.</item>
+      </owner_smoke>
     </delivery>
     <review>
       <trust_root>none</trust_root>
