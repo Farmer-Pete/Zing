@@ -2036,22 +2036,19 @@ func TestPollCIFailedRequestsFix(t *testing.T) {
 	}
 }
 
-// shipContainsString reports whether ss contains s.
-func shipContainsString(ss []string, s string) bool {
-	return slices.Contains(ss, s)
-}
-
 // TestPollCIPreExistingAsksOwner proves the ticket's own acceptance
 // criterion: a required check that fails on TestFlaky, when main's own
 // newest run of the same check also fails on TestFlaky, writes no fix
 // request. It writes "pre-existing on BASESHA: TestFlaky" and asks the
 // owner with one shipping escalation naming the test and the base sha,
 // instead of spending a fix run on a failure the ticket did not cause.
+//
+// Not parallel: it calls slog.SetDefault below to capture a log line,
+// which swaps the process-wide default logger.
 func TestPollCIPreExistingAsksOwner(t *testing.T) {
 	if testing.Short() {
 		t.Skip("slow end-to-end flow; runs in the full suite")
 	}
-	t.Parallel()
 	s, ticket, gh, tr := shipPublished(t)
 	local := shipHeadSHA(t, s, ticket)
 	gh.required = shipCIRequired()
@@ -2070,6 +2067,11 @@ func TestPollCIPreExistingAsksOwner(t *testing.T) {
 	}
 	seedSpentFlakyCheckRerun(t, s, ticket.ID, local)
 	baseSHA := mergeBaseRefSHA(t, s, ticket)
+
+	var logBuf bytes.Buffer
+	prevDefault := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logBuf, &slog.HandlerOptions{Level: slog.LevelInfo})))
+	t.Cleanup(func() { slog.SetDefault(prevDefault) })
 
 	commit, err := shipPollRun(t, s, ticket, gh, tr)
 	if err != nil {
@@ -2099,8 +2101,15 @@ func TestPollCIPreExistingAsksOwner(t *testing.T) {
 	if !commit.ClearPoll {
 		t.Error("ClearPoll = false, want true")
 	}
-	if !shipContainsString(gh.runsSHAs, baseSHA) {
+	if !slices.Contains(gh.runsSHAs, baseSHA) {
 		t.Errorf("runsSHAs = %+v, want it to contain %s", gh.runsSHAs, baseSHA)
+	}
+	logLines := strings.Count(logBuf.String(), `msg="ci pre-existing check"`)
+	if logLines != 1 {
+		t.Errorf("logged %d \"ci pre-existing check\" lines, want 1; log:\n%s", logLines, logBuf.String())
+	}
+	if !strings.Contains(logBuf.String(), "pre=true") || !strings.Contains(logBuf.String(), "tests=[TestFlaky]") {
+		t.Errorf("log missing pre=true and tests naming TestFlaky; got:\n%s", logBuf.String())
 	}
 }
 
@@ -2197,12 +2206,15 @@ func TestPollCIMainNewerPassSendsFix(t *testing.T) {
 
 // TestPollCIBaseReadErrorSendsFix proves the warn-and-continue error path:
 // when reading main's own checks fails, Zing sends the normal fix request
-// exactly as if the pre-existing step did not run at all.
+// exactly as if the pre-existing step did not run at all, after actually
+// attempting the base read (gh.runsSHAs) and logging why it gave up.
+//
+// Not parallel: it calls slog.SetDefault below to capture a log line,
+// which swaps the process-wide default logger.
 func TestPollCIBaseReadErrorSendsFix(t *testing.T) {
 	if testing.Short() {
 		t.Skip("slow end-to-end flow; runs in the full suite")
 	}
-	t.Parallel()
 	s, ticket, gh, tr := shipPublished(t)
 	local := shipHeadSHA(t, s, ticket)
 	gh.required = shipCIRequired()
@@ -2223,6 +2235,77 @@ func TestPollCIBaseReadErrorSendsFix(t *testing.T) {
 		return "", nil
 	}
 	seedSpentFlakyCheckRerun(t, s, ticket.ID, local)
+	baseSHA := mergeBaseRefSHA(t, s, ticket)
+
+	var logBuf bytes.Buffer
+	prevDefault := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logBuf, &slog.HandlerOptions{Level: slog.LevelWarn})))
+	t.Cleanup(func() { slog.SetDefault(prevDefault) })
+
+	commit, err := shipPollRun(t, s, ticket, gh, tr)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if commit.Escalation != nil {
+		t.Fatalf("got an escalation, want a fix request: %+v", commit.Escalation.Payload)
+	}
+	if !shipHasFixMarker(commit) {
+		t.Errorf("commit.Messages = %+v, want a fix marker", commit.Messages)
+	}
+	if !slices.Contains(gh.runsSHAs, baseSHA) {
+		t.Errorf("runsSHAs = %+v, want it to contain %s", gh.runsSHAs, baseSHA)
+	}
+	if !strings.Contains(logBuf.String(), "ci pre-existing check skipped") {
+		t.Errorf("log missing \"ci pre-existing check skipped\"; got:\n%s", logBuf.String())
+	}
+	for _, m := range commit.Messages {
+		if strings.HasPrefix(m.Body, preExistingPrefix) {
+			t.Errorf("commit.Messages = %+v, want no %q message", commit.Messages, preExistingPrefix)
+		}
+	}
+}
+
+// TestPollCIBaseLogUnreadableSendsFix proves the other warn-and-continue
+// path inside readBaseChecks: main's newest run of the check failed, but
+// its own log cannot be read. That leaves main's failing test names
+// unknown, so the check cannot be matched (decidePreExisting's rule 3)
+// and is not treated as having no run either (readBaseChecks still found
+// a completed, failed run; it just couldn't read it): Zing sends the
+// normal fix request, with no escalation and no no-run note, after
+// logging "ci base check log unreadable" naming the job.
+//
+// Not parallel: it calls slog.SetDefault below to capture a log line,
+// which swaps the process-wide default logger.
+func TestPollCIBaseLogUnreadableSendsFix(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow end-to-end flow; runs in the full suite")
+	}
+	s, ticket, gh, tr := shipPublished(t)
+	local := shipHeadSHA(t, s, ticket)
+	gh.required = shipCIRequired()
+	gh.prState = orchestrator.PRState{Draft: true, HeadSHA: local, BaseRef: pbFixtureDefaultBranch}
+	gh.runsFor = func(sha string) []orchestrator.CheckRun {
+		if sha == local {
+			return []orchestrator.CheckRun{shipCIRun(1, 1, 2, "failure")}
+		}
+		return []orchestrator.CheckRun{shipCIRun(50, 60, 70, "failure")}
+	}
+	logErr := errors.New("signed url expired")
+	gh.logTail = func(_ context.Context, _, _ string, jobID int64, _ int) (string, error) {
+		switch jobID {
+		case 2:
+			return shipFlakyLogText, nil
+		case 70:
+			return "", logErr
+		}
+		return "", nil
+	}
+	seedSpentFlakyCheckRerun(t, s, ticket.ID, local)
+
+	var logBuf bytes.Buffer
+	prevDefault := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logBuf, &slog.HandlerOptions{Level: slog.LevelWarn})))
+	t.Cleanup(func() { slog.SetDefault(prevDefault) })
 
 	commit, err := shipPollRun(t, s, ticket, gh, tr)
 	if err != nil {
@@ -2235,9 +2318,12 @@ func TestPollCIBaseReadErrorSendsFix(t *testing.T) {
 		t.Errorf("commit.Messages = %+v, want a fix marker", commit.Messages)
 	}
 	for _, m := range commit.Messages {
-		if strings.HasPrefix(m.Body, preExistingPrefix) {
-			t.Errorf("commit.Messages = %+v, want no %q message", commit.Messages, preExistingPrefix)
+		if strings.HasPrefix(m.Body, preExistingPrefix) || strings.Contains(m.Body, "no finished run of") {
+			t.Errorf("commit.Messages = %+v, want no pre-existing or no-run message", commit.Messages)
 		}
+	}
+	if !strings.Contains(logBuf.String(), `msg="ci base check log unreadable"`) || !strings.Contains(logBuf.String(), "job_id=70") || !strings.Contains(logBuf.String(), "workflow_run_id=60") {
+		t.Errorf("log missing \"ci base check log unreadable\" with workflow_run_id=60 and job_id=70; got:\n%s", logBuf.String())
 	}
 }
 
@@ -2350,6 +2436,52 @@ func TestPollCIMainHasNoRunNotes(t *testing.T) {
 			return []orchestrator.CheckRun{shipCIRun(1, 1, 2, "failure")}
 		}
 		return nil
+	}
+	gh.logTail = func(_ context.Context, _, _ string, jobID int64, _ int) (string, error) {
+		if jobID == 2 {
+			return shipFlakyLogText, nil
+		}
+		return "", nil
+	}
+	seedSpentFlakyCheckRerun(t, s, ticket.ID, local)
+	baseSHA := mergeBaseRefSHA(t, s, ticket)
+
+	commit, err := shipPollRun(t, s, ticket, gh, tr)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if commit.Escalation != nil {
+		t.Fatalf("got an escalation, want a fix request: %+v", commit.Escalation.Payload)
+	}
+	if !shipHasFixMarker(commit) {
+		t.Errorf("commit.Messages = %+v, want a fix marker", commit.Messages)
+	}
+	want := fmt.Sprintf("%s at %s has no finished run of ci, so Zing could not tell whether the failure is pre-existing", pbFixtureDefaultBranch, shortSHA(baseSHA))
+	if !shipHasMessage(commit, want) {
+		t.Errorf("commit.Messages = %+v, want %q", commit.Messages, want)
+	}
+}
+
+// TestPollCIMainRunInProgressCountsAsNoRun proves owner decision Q4's own
+// edge: main's newest run of the check exists but has not finished
+// (Status in_progress, no Conclusion yet). That counts as no run at all,
+// not as a run to compare test names against, so Zing sends the normal
+// fix request and the same no-run note TestPollCIMainHasNoRunNotes checks
+// for a missing run.
+func TestPollCIMainRunInProgressCountsAsNoRun(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow end-to-end flow; runs in the full suite")
+	}
+	t.Parallel()
+	s, ticket, gh, tr := shipPublished(t)
+	local := shipHeadSHA(t, s, ticket)
+	gh.required = shipCIRequired()
+	gh.prState = orchestrator.PRState{Draft: true, HeadSHA: local, BaseRef: pbFixtureDefaultBranch}
+	gh.runsFor = func(sha string) []orchestrator.CheckRun {
+		if sha == local {
+			return []orchestrator.CheckRun{shipCIRun(1, 1, 2, "failure")}
+		}
+		return []orchestrator.CheckRun{{ID: 50, Name: "ci", Status: "in_progress", AppSlug: ghGitHubActions}}
 	}
 	gh.logTail = func(_ context.Context, _, _ string, jobID int64, _ int) (string, error) {
 		if jobID == 2 {

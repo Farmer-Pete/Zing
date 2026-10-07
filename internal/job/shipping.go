@@ -943,7 +943,7 @@ func (h shipHandler) ciRerunDecision(ctx context.Context, t store.Ticket, d Deps
 func readBaseChecks(ctx context.Context, checks Checks, ticketID int64, owner, repo, baseSHA string, failed []failedCheck) (map[checkKey][]string, error) {
 	runs, err := checks.ListCheckRuns(ctx, owner, repo, baseSHA)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("job: shipping: base check runs at %s: %w", baseSHA, err)
 	}
 	byKey := make(map[checkKey]orchestrator.CheckRun, len(runs))
 	for _, r := range newestRunPerNameApp(runs) {
@@ -961,7 +961,7 @@ func readBaseChecks(ctx context.Context, checks Checks, ticketID int64, owner, r
 		if failedConclusions[r.Conclusion] && len(failedTestNames(failed[i].Log)) != 0 {
 			read := readFailedChecks(ctx, checks, owner, repo, []orchestrator.CheckRun{r})
 			if read[0].LogErr != nil {
-				slog.Warn("ci base check log unreadable", "ticket_id", ticketID, "check", r.Name, "base_sha", baseSHA, "job_id", read[0].JobID, "error", read[0].LogErr)
+				slog.Warn("ci base check log unreadable", "ticket_id", ticketID, "check", r.Name, "base_sha", baseSHA, "workflow_run_id", read[0].RunID, "job_id", read[0].JobID, "error", read[0].LogErr)
 			}
 			tests = failedTestNames(read[0].Log)
 		}
@@ -1353,6 +1353,53 @@ func (h shipHandler) pollHeadMismatch(ctx context.Context, t store.Ticket, d Dep
 	return c, nil
 }
 
+// ciPreExisting runs the pre-existing step pollCIFailed places between
+// baseSync and the shared fix gate (design shape, "Data flow"): it reads
+// main's own CI runs for rd.Failed's checks at the base sha and compares
+// failing test names through decidePreExisting. When every failing PR test
+// also failed on main, it returns the pre-existing escalation commit and
+// pollCIFailed returns early with it. Otherwise it returns rd.Text, with
+// the also-on-main line appended when some (but not all) tests matched,
+// and one note message per check with no finished run on main to compare
+// against. A FetchBase or readBaseChecks error is logged at warn and
+// treated as "no base data": text and notes come back unchanged, so
+// pollCIFailed proceeds exactly as it would if this step did not exist.
+func (h shipHandler) ciPreExisting(ctx context.Context, t store.Ticket, d Deps, proj Project, wt orchestrator.Worktree, rd rerunDecision) (esc *store.HandlerCommit, text string, notes []store.Message) {
+	text = rd.Text
+	baseSHA, baseErr := proj.Orch.FetchBase(ctx, wt)
+	if baseErr != nil {
+		slog.Warn("ci pre-existing check skipped", "ticket_id", t.ID, "error", fmt.Errorf("job: shipping: fetch base: %w", baseErr))
+		return nil, text, nil
+	}
+	base, baseErr := readBaseChecks(ctx, proj.Checks, t.ID, proj.Owner, proj.Repo, baseSHA, rd.Failed)
+	if baseErr != nil {
+		slog.Warn("ci pre-existing check skipped", "ticket_id", t.ID, "base_sha", baseSHA, "error", baseErr)
+		return nil, text, nil
+	}
+
+	branch := proj.Orch.DefaultBranch()
+	pe := decidePreExisting(rd.Failed, rd.FailedStatuses, base)
+	slog.Info("ci pre-existing check", "ticket_id", t.ID, "base_sha", baseSHA, "pre", pe.Pre, "tests", pe.Tests, "no_run", pe.NoRun)
+	if pe.Pre {
+		tests := strings.Join(pe.Tests, ", ")
+		why := fmt.Sprintf("%s failed on this pull request and on %s at %s too, so a fix run on this ticket cannot fix them", tests, branch, shortSHA(baseSHA))
+		c := shipEscalation(t, d, preExistingWhat, why, preExistingTried)
+		c.Messages = append(c.Messages, store.Message{TicketID: t.ID, Type: msgTypeUpdate, Author: authorSystem, Body: preExistingPrefix + baseSHA + ": " + tests})
+		c.ClearPoll = true
+		return &c, text, nil
+	}
+	if len(pe.Tests) != 0 {
+		text += fmt.Sprintf("\n\nThese tests also fail on %s at %s, so this ticket did not cause them; leave them alone: %s", branch, shortSHA(baseSHA), strings.Join(pe.Tests, ", "))
+	}
+	for _, name := range pe.NoRun {
+		notes = append(notes, store.Message{
+			TicketID: t.ID, Type: msgTypeUpdate, Author: authorSystem,
+			Body: fmt.Sprintf("%s at %s has no finished run of %s, so Zing could not tell whether the failure is pre-existing", branch, shortSHA(baseSHA), name),
+		})
+	}
+	return nil, text, notes
+}
+
 // pollCIFailed is design section 8.5 row 4: the CI point first (overview
 // design, owner's Q1 note) -- CI tests the pull request merged with the
 // base, so a base that moved since this branch last merged it is merged in
@@ -1371,36 +1418,9 @@ func (h shipHandler) pollCIFailed(ctx context.Context, t store.Ticket, d Deps, p
 		return c, err
 	}
 
-	text := rd.Text
-	var notes []store.Message
-	baseSHA, baseErr := proj.Orch.FetchBase(ctx, wt)
-	var base map[checkKey][]string
-	if baseErr == nil {
-		base, baseErr = readBaseChecks(ctx, proj.Checks, t.ID, proj.Owner, proj.Repo, baseSHA, rd.Failed)
-	}
-	if baseErr != nil {
-		slog.Warn("ci pre-existing check skipped", "ticket_id", t.ID, "error", baseErr)
-	} else {
-		branch := proj.Orch.DefaultBranch()
-		pe := decidePreExisting(rd.Failed, rd.FailedStatuses, base)
-		slog.Info("ci pre-existing check", "ticket_id", t.ID, "base_sha", baseSHA, "pre", pe.Pre, "tests", pe.Tests, "no_run", pe.NoRun)
-		if pe.Pre {
-			tests := strings.Join(pe.Tests, ", ")
-			why := fmt.Sprintf("%s failed on this pull request and on %s at %s too, so a fix run on this ticket cannot fix them", tests, branch, shortSHA(baseSHA))
-			c := shipEscalation(t, d, preExistingWhat, why, preExistingTried)
-			c.Messages = append(c.Messages, store.Message{TicketID: t.ID, Type: msgTypeUpdate, Author: authorSystem, Body: preExistingPrefix + baseSHA + ": " + tests})
-			c.ClearPoll = true
-			return c, nil
-		}
-		if len(pe.Tests) != 0 {
-			text += fmt.Sprintf("\n\nThese tests also fail on %s at %s, so this ticket did not cause them; leave them alone: %s", branch, shortSHA(baseSHA), strings.Join(pe.Tests, ", "))
-		}
-		for _, name := range pe.NoRun {
-			notes = append(notes, store.Message{
-				TicketID: t.ID, Type: msgTypeUpdate, Author: authorSystem,
-				Body: fmt.Sprintf("%s at %s has no finished run of %s, so Zing could not tell whether the failure is pre-existing", branch, shortSHA(baseSHA), name),
-			})
-		}
+	esc, text, notes := h.ciPreExisting(ctx, t, d, proj, wt, rd)
+	if esc != nil {
+		return *esc, nil
 	}
 
 	ciReqs, err := d.Store.MarkersWithPrefix(ctx, t.ID, fixRequestedCILogPrefix)
