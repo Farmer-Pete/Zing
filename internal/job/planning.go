@@ -1068,7 +1068,9 @@ func checkReady(t store.Ticket, resp *response.ReadyResponse, fsys fs.FS) ([]*re
 // every kind, since Codex refuses them (#94). It also refuses a check that
 // reads the root CLAUDE.md or AGENTS.md from the working copy, in every
 // kind, since the judge's checkout holds the default branch's copies of
-// both (#225).
+// both (#225). It also refuses, in every kind, a check that pipes tee into
+// another command and then reads the tee'd file, since a reader that exits
+// early cuts the file short.
 func checkScenarioShape(scenarios []response.Scenario) []*response.PathError {
 	var errs []*response.PathError
 	if n := len(scenarios); n < minReadyScenarios || n > maxReadyScenarios {
@@ -1204,6 +1206,15 @@ func checkScenarioRules(i int, sc response.Scenario) []*response.PathError {
 			Msg:  governanceFileCheckMsg,
 		})
 	}
+	// A reader after tee that exits early stops tee writing its file, so
+	// a later read of that file sees a cut-off log and fails a passing
+	// build (#248 s6, s14). Every kind, host included.
+	if teeFileReadAfterPipe(sc.Check) {
+		errs = append(errs, &response.PathError{
+			Path: "scenarios/" + indexedScenario(i) + "/check",
+			Msg:  teeReadCheckMsg,
+		})
+	}
 	return errs
 }
 
@@ -1248,6 +1259,48 @@ func proseGrepWithoutJoin(check string) bool {
 }
 
 const proseGrepCheckMsg = `check greps a phrase of more than one word in hard-wrapped prose, so the phrase can span a line break; join the lines first, such as tr -s '[:space:]' ' ' < FILE | grep -qF 'two words'`
+
+// teeToPipe matches tee as a command word, then its operands (group 1),
+// then a pipe; the match ends just past that pipe.
+var teeToPipe = regexp.MustCompile(`(?:^|[\s;&|(])tee((?:\s+(?:"[^"]*"|'[^']*'|[^\s|;&()'"]+))+)\s*\|`)
+
+// teeOperand splits teeToPipe's group 1 into tee's operands.
+var teeOperand = regexp.MustCompile(`"[^"]*"|'[^']*'|[^\s|;&()'"]+`)
+
+// pipelineEnd matches the first list operator or newline, where the
+// pipeline holding tee ends and a later command starts.
+var pipelineEnd = regexp.MustCompile(`;|&&|\|\||\n`)
+
+// teeFileReadAfterPipe is true when check pipes tee's output into another
+// command and a command after that pipeline names a file tee wrote. The
+// reader after tee can exit early (grep -q on its first match, head),
+// tee then gets SIGPIPE and stops writing, and the later read sees a
+// cut-off log (#248 s6, s14).
+func teeFileReadAfterPipe(check string) bool {
+	for _, m := range teeToPipe.FindAllStringSubmatchIndex(check, -1) {
+		after := check[m[1]:]
+		if strings.HasPrefix(after, "|") {
+			continue // tee FILE || ... is an or-list, not a pipe
+		}
+		end := pipelineEnd.FindStringIndex(after)
+		if end == nil {
+			continue
+		}
+		later := after[end[0]:]
+		for _, op := range teeOperand.FindAllString(check[m[2]:m[3]], -1) {
+			file := strings.Trim(op, `"'`)
+			if file == "" || strings.HasPrefix(file, "-") || strings.ContainsAny(file, "<>") {
+				continue
+			}
+			if strings.Contains(later, file) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+const teeReadCheckMsg = "check pipes tee into another command and then reads the tee'd file, but a reader that exits early, such as grep -q or head, stops tee and cuts the file short; write the log first, then grep it, such as CMD > FILE 2>&1; grep -q A FILE && grep -q B FILE"
 
 // unquotedGlob scans check rune by rune, tracking single-quote,
 // double-quote, and backslash-escape state, and returns the
