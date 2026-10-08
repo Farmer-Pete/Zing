@@ -1,7 +1,7 @@
 # Single source of truth for checks. The git hooks (lefthook.yml) and CI
 # (.github/workflows/ci.yml) both call these targets, so they cannot drift.
 .PHONY: fmt fmt-staged fmt-check lint build vet test test-short test-race tidy-check vuln secrets-staged \
-	hooks-install pre-commit pre-push ci templ-generate templ-check test-js
+	hooks-install pre-commit pre-push ci templ-generate templ-check test-js run
 
 # Regenerates every *_templ.go from its .templ source, mutating files in
 # place. A local convenience so build, fmt, and lint always run against
@@ -33,6 +33,12 @@ build: templ-generate
 
 vet:
 	go vet ./...
+
+# Starts the server from the working tree against the real ~/.zing config and
+# database. ARGS passes serve flags: make run ARGS=--seed-demo. Self-upgrade
+# refuses under this target, because serve is not running ~/.zing/bin/zing.
+run: templ-generate
+	go run ./cmd/zing serve $(ARGS)
 
 # internal/job's tests queue on one process's fork lock (scripts/test-race.sh),
 # so letting go test run more than a few of them in parallel only makes them
