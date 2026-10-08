@@ -29,7 +29,7 @@ The Makefile is the single source of truth. The git hooks and CI call these same
 | `make pre-commit` | What the pre-commit hook's lint and build steps check, plus a whole-tree `fmt-check`; excludes the staged secret scan and the hook's own staged-only format rewrite |
 | `make pre-push` | What the pre-push hook checks: test-race, tidy-check, vuln |
 | `make ci` | What the CI checks job runs: pre-commit, vet, pre-push |
-| `go run ./cmd/zing` | Start the server on `:8080` (override with `ZING_ADDR`) |
+| `make run` | Start the server from the working tree, on the `[console]` port in `~/.zing/zing.toml` (default 7420) |
 
 ## Git hooks
 
